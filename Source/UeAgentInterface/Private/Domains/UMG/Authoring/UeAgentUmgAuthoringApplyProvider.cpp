@@ -4,10 +4,11 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Blueprint/UserWidget.h"
-#include "Commands/UMG/UeAgentHttpServer_UMGOps.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
 #include "Domains/UMG/Authoring/UeAgentUmgAuthoringDescriptors.h"
 #include "Domains/UMG/Authoring/UeAgentUmgAuthoringState.h"
+#include "Domains/UMG/Authoring/UeAgentUmgAuthoringUtilities.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -17,10 +18,15 @@
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringAssetRemovalStage.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringObjectApplyProvider.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringAssetIdentity.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentApplyWorkspaceContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceApply.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceInput.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceDependencyGraph.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceLoader.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceRouter.h"
 #include "WidgetBlueprint.h"
 
 namespace UeAgentUmgAuthoring
@@ -30,20 +36,82 @@ namespace UeAgentUmgAuthoring
 		using namespace UeAgentApplyInputContract;
 		using namespace UeAgentAuthoringOperationApply;
 
-		void SetFailure(
-			FOperationFailure& OutFailure,
-			const FString& Code,
-			const FString& Detail = FString())
-		{
-			OutFailure = FOperationFailure();
-			OutFailure.ErrorCode = Code;
-			OutFailure.ErrorDetail = Detail.IsEmpty() ? Code : Detail;
-		}
+		void SetFailure(FOperationFailure& OutFailure, const FString& Code,
+    const FString& Reason, const FString& TargetPath = FString()) {
+  OutFailure.Diagnostic = UeAgentAuthoringDiagnostics::FDiagnostic::Failure(Code, Reason, TEXT("umg_apply"));
+  OutFailure.Diagnostic.TargetPath = TargetPath;
+}
+
+void SetFailure(FOperationFailure& OutFailure, const UE::UAI::Contract::FDiagnostic& Diagnostic) {
+  OutFailure.Diagnostic = Diagnostic;
+}
+
+
+void SetFailure(FOperationFailure& OutFailure, const FString& FallbackCode,
+    const FString& FallbackReason, UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic) {
+  OutFailure.Diagnostic = Diagnostic.IsEmpty()
+      ? UeAgentAuthoringDiagnostics::FDiagnostic::Failure(FallbackCode, FallbackReason, TEXT("umg_apply"))
+      : MoveTemp(Diagnostic);
+}
 
 		UWidgetBlueprint* LoadWidgetBlueprint(const FString& InPath)
 		{
 			return Cast<UWidgetBlueprint>(
 				UeAgentBlueprintAssetLifecycle::LoadBlueprint(InPath));
+		}
+
+		void SetMutationFailure(FOperationFailure& OutFailure,
+    UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic) {
+  OutFailure.Diagnostic = MoveTemp(Diagnostic);
+}
+
+		void LocateMemberNameFailure(FOperationFailure& Failure, const FPrepareRequest& Request)
+		{
+			if (!Request.Unit || !Request.Input || Request.Unit->SourceLocations.IsEmpty()) return;
+			auto& Diagnostic = Failure.Diagnostic;
+			if (!Diagnostic.Source.SourceFile.IsEmpty()) return;
+			const bool bAnimation = Diagnostic.Code == TEXT("umg_animation_name_invalid");
+			if ((!bAnimation && Diagnostic.Code != TEXT("umg_widget_name_invalid"))
+				|| Diagnostic.CandidateName.IsEmpty()) return;
+			const auto Extension = Request.Input->ProviderExtension;
+			if (!Extension) return;
+			const TSharedPtr<FJsonObject>* Collection = nullptr;
+			FString Prefix = TEXT("/provider_extension/");
+			if (bAnimation)
+			{
+				if (!Extension->TryGetObjectField(TEXT("animations"), Collection)) return;
+				Prefix += TEXT("animations/");
+			}
+			else
+			{
+				const TSharedPtr<FJsonObject>* Tree = nullptr;
+				if (!Extension->TryGetObjectField(TEXT("widget_tree"), Tree)
+					|| !(*Tree)->TryGetObjectField(TEXT("widgets"), Collection)) return;
+				Prefix += TEXT("widget_tree/widgets/");
+			}
+			for (const auto& Row : (*Collection)->Values)
+			{
+				if (!Row.Value || Row.Value->Type != EJson::Object) continue;
+				FString Name;
+				const bool bExplicitName = Row.Value->AsObject()->TryGetStringField(TEXT("name"), Name)
+					&& !Name.IsEmpty();
+				if (!bExplicitName) Name = Row.Key;
+				if (Name != Diagnostic.CandidateName) continue;
+				FString Pointer = Prefix + Row.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+				if (bExplicitName) Pointer += TEXT("/name");
+				const auto* Source = Request.Unit->FindSourceLocation(Pointer);
+				if (!Source && bExplicitName)
+				{
+					Pointer.RemoveFromEnd(TEXT("/name"));
+					Source = Request.Unit->FindSourceLocation(Pointer);
+				}
+				if (!Source || Source->FilePath.StartsWith(TEXT("inline://"))) return;
+				Diagnostic.Source.SourceFile = Source->FilePath;
+				Diagnostic.Source.JsonPath = Pointer;
+				Diagnostic.Source.Line = Source->Line;
+				Diagnostic.Source.Column = Source->Column;
+				return;
+			}
 		}
 
 		bool ReadBool(
@@ -157,19 +225,20 @@ namespace UeAgentUmgAuthoring
 						TEXT("/Temp/UAI/UMG/Rollback_%s"),
 						*FGuid::NewGuid().ToString(EGuidFormats::Digits)));
 					Backup.Reset(Cast<UWidgetBlueprint>(
-						UeAgentBlueprintAssetLifecycle::DuplicateBlueprint(Existing.Get(), Package)));
+						UeAgentBlueprintAssetLifecycle::DuplicateBlueprint(Existing.Get(), Package, NAME_None, true, &OutFailure.Diagnostic)));
 					if (!Backup.IsValid())
 					{
-						SetFailure(OutFailure, TEXT("umg_rollback_capture_failed"));
+						if (OutFailure.Diagnostic.IsEmpty())
+							SetFailure(OutFailure, TEXT("umg_rollback_capture_failed"), TEXT("The existing widget Blueprint could not be duplicated for rollback."), PackagePath);
 						return false;
 					}
 					return true;
 				}
 				if (Operation != EOperation::Remove || !Existing.IsValid()) return true;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!RemovalStage.Capture(Existing.Get(), Error))
 				{
-					SetFailure(OutFailure, TEXT("umg_remove_capture_failed"), Error);
+					SetFailure(OutFailure, TEXT("umg_remove_capture_failed"), TEXT("The widget Blueprint removal state could not be captured."), Error);
 					return false;
 				}
 				return true;
@@ -179,12 +248,13 @@ namespace UeAgentUmgAuthoring
 			{
 				OutFailure = FOperationFailure();
 				if (Operation != EOperation::Update || !Mutation.IsValid()) return true;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!Mutation->ApplyTo(*Existing, ActualCounters, Error))
 				{
-					SetFailure(OutFailure, TEXT("umg_mutation_apply_failed"), Error);
+					SetMutationFailure(OutFailure, Error);
 					return false;
 				}
+				bMutationApplied = true;
 				return true;
 			}
 
@@ -193,10 +263,10 @@ namespace UeAgentUmgAuthoring
 				OutFailure = FOperationFailure();
 				if (Operation == EOperation::Remove)
 				{
-					FString Error;
+					UE::UAI::Contract::FDiagnostic Error;
 					if (!RemovalStage.Stage(Error))
 					{
-						SetFailure(OutFailure, TEXT("umg_remove_stage_failed"), Error);
+						SetFailure(OutFailure, TEXT("umg_remove_stage_failed"), TEXT("The widget Blueprint could not be staged for removal."), Error);
 						return false;
 					}
 					Actual = nullptr;
@@ -209,19 +279,20 @@ namespace UeAgentUmgAuthoring
 				}
 				if (!Proposed.IsValid())
 				{
-					SetFailure(OutFailure, TEXT("umg_proposed_asset_missing"));
+					SetFailure(OutFailure, TEXT("umg_proposed_asset_missing"), TEXT("The prepared widget Blueprint is no longer available for publishing."), PackagePath);
 					return false;
 				}
 				UPackage* TargetPackage = CreatePackage(*PackagePath);
 				Actual = Cast<UWidgetBlueprint>(UeAgentBlueprintAssetLifecycle::PublishBlueprint(
-					Proposed.Get(), TargetPackage, FPackageName::GetLongPackageAssetName(PackagePath)));
+					Proposed.Get(), TargetPackage, FPackageName::GetLongPackageAssetName(PackagePath), OutFailure.Diagnostic));
 				if (!Actual)
 				{
-					SetFailure(OutFailure, TEXT("umg_asset_publish_failed"));
 					return false;
 				}
 				FAssetRegistryModule::AssetCreated(Actual);
+				bCreated = Operation == EOperation::Create;
 				Actual->MarkPackageDirty();
+				bMutationApplied = true;
 				return true;
 			}
 
@@ -230,13 +301,13 @@ namespace UeAgentUmgAuthoring
 				OutFailure = FOperationFailure();
 				if (Operation == EOperation::Remove) return true;
 				UWidgetBlueprint* Target = Actual ? Actual : Existing.Get();
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if ((bCompile || (Mutation.IsValid() && Mutation->RequiresCompile())))
 				{
-					UeAgentUmgOps::SyncWidgetVariableGuidMap(Target);
+					UeAgentUmgAuthoringUtilities::SyncWidgetVariableGuidMap(Target);
 					if (!UeAgentBlueprintAssetLifecycle::CompileBlueprint(Target, Error))
 					{
-						SetFailure(OutFailure, TEXT("umg_compile_failed_after_apply"), Error);
+						SetFailure(OutFailure, TEXT("umg_compile_failed_after_apply"), TEXT("The widget Blueprint failed to compile after applying the mutation."), Error);
 						return false;
 					}
 				}
@@ -246,32 +317,36 @@ namespace UeAgentUmgAuthoring
 					bool bSecondCompile = false;
 					if (!Mutation->FinalizeAfterCompile(*Target, Deferred, bSecondCompile, Error))
 					{
-						SetFailure(OutFailure, TEXT("umg_finalize_failed"), Error);
+						SetFailure(OutFailure, TEXT("umg_finalize_failed"), TEXT("The widget Blueprint mutation could not be finalized after compilation."), Error);
 						return false;
 					}
 					ActualCounters.Add(Deferred);
 					if (bSecondCompile)
 					{
-						UeAgentUmgOps::SyncWidgetVariableGuidMap(Target);
+						UeAgentUmgAuthoringUtilities::SyncWidgetVariableGuidMap(Target);
 						if (!UeAgentBlueprintAssetLifecycle::CompileBlueprint(Target, Error))
 						{
-							SetFailure(OutFailure, TEXT("umg_binding_compile_failed"), Error);
+							SetFailure(OutFailure, TEXT("umg_binding_compile_failed"), TEXT("The widget Blueprint failed to compile after applying bindings."), Error);
 							return false;
 						}
 					}
+					if (!Mutation->VerifyIntent(*Target, Error))
+					{
+						UeAgentAuthoringDiagnostics::ReportConsistencyWarning(TEXT("umg_authored_intent_failed"), Error, TEXT("umg_intent_observation"));
+					}
 				}
-				return true;
+				return UeAgentBlueprintAssetLifecycle::ValidateBlueprintPersistence(*Target, OutFailure.Diagnostic);
 			}
 
 			virtual bool Save(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
 				if (!bSave || Operation == EOperation::Remove) return true;
-				FString Error;
-				if (!UeAgentUmgOps::SaveWidgetBlueprintPackage(
+				UE::UAI::Contract::FDiagnostic Error;
+				if (!UeAgentUmgAuthoringUtilities::SaveWidgetBlueprintPackage(
 					Actual ? Actual : Existing.Get(), Error))
 				{
-					SetFailure(OutFailure, TEXT("umg_save_failed_after_apply"), Error);
+					SetFailure(OutFailure, TEXT("umg_save_failed_after_apply"), TEXT("The updated widget Blueprint package could not be saved."), Error);
 					return false;
 				}
 				return true;
@@ -285,11 +360,22 @@ namespace UeAgentUmgAuthoring
 					PackagePath,
 					PackagePath,
 					Operation == EOperation::Remove ? Existing.Get()
-						: (Existing.IsValid() ? Existing.Get() : Proposed.Get()),
+						: (Operation == EOperation::Create ? Actual : (Existing.IsValid() ? Existing.Get() : Proposed.Get())),
 					Operation == EOperation::Remove ? EPackageDurableIntent::Delete
 						: EPackageDurableIntent::Save,
 					OutPlans,
-					OutFailure);
+					OutFailure, true, Operation == EOperation::Create ? EPackageBeforePresence::Absent : EPackageBeforePresence::Present,
+					Proposed.IsValid() ? Proposed->GetClass() : nullptr);
+			}
+
+			virtual bool BuildDomainBeforeReadRequests(
+				TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+				FOperationFailure& OutFailure) const override
+			{
+				return Operation == EOperation::Create && bSave
+					? BuildReadRequests(nullptr, true, OutRequests, OutFailure)
+					: BuildReadRequests(Operation == EOperation::Remove ? nullptr : (Actual ? Actual : Existing.Get()),
+						Operation == EOperation::Remove, OutRequests, OutFailure);
 			}
 
 			virtual bool BuildDomainExpectedReadRequests(
@@ -302,7 +388,7 @@ namespace UeAgentUmgAuthoring
 						: Proposed.Get(),
 					Operation == EOperation::Remove,
 					OutRequests,
-					OutFailure);
+					OutFailure, true);
 			}
 
 			virtual bool BuildDomainActualReadRequests(
@@ -311,9 +397,9 @@ namespace UeAgentUmgAuthoring
 			{
 				return BuildReadRequests(
 					Operation == EOperation::Remove ? nullptr : (Actual ? Actual : Existing.Get()),
-					Operation == EOperation::Remove,
+					Operation == EOperation::Remove || (Operation == EOperation::Create && bSave && !Actual && !Existing.IsValid()),
 					OutRequests,
-					OutFailure);
+					OutFailure, bMutationApplied);
 			}
 
 			virtual TSharedPtr<FJsonObject> BuildResultMetadata() const override
@@ -321,16 +407,79 @@ namespace UeAgentUmgAuthoring
 				return BuildMutationResultMetadata(ActualCounters);
 			}
 
+			virtual bool SupportsPersistentReadback() const override
+			{
+				return (Operation == EOperation::Update || Operation == EOperation::Create) && bSave;
+			}
+
+			virtual bool RequiresCheckpointRollback() const override
+			{
+				return Operation == EOperation::Create && bSave;
+			}
+
+			virtual bool ReleaseForPersistentReadback(FOperationFailure& OutFailure) override
+			{
+				OutFailure = FOperationFailure();
+				// The shared transaction owns the before-package checkpoint after unload.
+				// Keep frozen request values/identities, which rebind to the loaded owner.
+				// The mutation holds no strong native graph or property-storage pointers.
+				Existing.Reset();
+				Proposed.Reset();
+				Backup.Reset();
+				Actual = nullptr;
+				return true;
+			}
+
+			virtual bool RebindAfterPersistentReadback(FOperationFailure& OutFailure) override
+			{
+				OutFailure = FOperationFailure();
+				Existing.Reset(LoadWidgetBlueprint(PackagePath));
+				Actual = Existing.Get();
+				if (!Actual)
+				{
+					SetFailure(OutFailure, TEXT("umg_persistent_rebind_failed"), TEXT("The published widget Blueprint could not be loaded from its target package."), PackagePath);
+					return false;
+				}
+				return true;
+			}
+
+			virtual bool PrepareCheckpointRestore(FOperationFailure& OutFailure) override
+			{
+				bMutationApplied = false;
+				if (Operation != EOperation::Create) return ReleaseForPersistentReadback(OutFailure);
+				UWidgetBlueprint* Created = Actual ? Actual : LoadWidgetBlueprint(PackagePath);
+				ReleaseForPersistentReadback(OutFailure);
+				if (bCreated && Created && ObjectTools::DeleteObjects({Created}, false) != 1)
+				{
+					SetFailure(OutFailure, TEXT("umg_created_restore_delete_failed"), TEXT("The newly created widget Blueprint could not be removed during rollback."), PackagePath);
+					return false;
+				}
+				bCreated = false;
+				return true;
+			}
+
+			virtual bool RebindAfterCheckpointRestore(FOperationFailure& OutFailure) override
+			{
+				if (Operation != EOperation::Create) return RebindAfterPersistentReadback(OutFailure);
+				bool bPresent = false;
+				if (!UE::UAI::HjsonWorkspace::DomainAuthoring::TryInspectObjectTargetPresence(PackagePath, bPresent) || bPresent)
+				{
+					SetFailure(OutFailure, TEXT("umg_absent_restore_unconfirmed"), TEXT("Rollback could not confirm that the target widget Blueprint is absent."), PackagePath);
+					return false;
+				}
+				return true;
+			}
+
 			virtual bool Commit(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
 				if (Operation == EOperation::Remove && RemovalStage.IsStaged())
 				{
-					FString Error;
+					UE::UAI::Contract::FDiagnostic Error;
 					if (!UeAgentBlueprintAssetLifecycle::DeleteBlueprint(
-						Cast<UWidgetBlueprint>(RemovalStage.GetAsset()), Error))
+						Cast<UWidgetBlueprint>(RemovalStage.GetAsset()), PackagePath, Error))
 					{
-						SetFailure(OutFailure, TEXT("umg_remove_commit_failed"), Error);
+						SetFailure(OutFailure, TEXT("umg_remove_commit_failed"), TEXT("The staged widget Blueprint removal could not be committed."), Error);
 						return false;
 					}
 					RemovalStage.Reset();
@@ -342,12 +491,13 @@ namespace UeAgentUmgAuthoring
 			virtual bool Rollback(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
-				FString Error;
+				bMutationApplied = false;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (Operation == EOperation::Update && Backup.IsValid())
 				{
 					if (!FPreparedUmgMutation::RestoreFromBackup(*Backup, *Existing, Error))
 					{
-						SetFailure(OutFailure, TEXT("umg_update_rollback_failed"), Error);
+						SetFailure(OutFailure, TEXT("umg_update_rollback_failed"), TEXT("The previous widget Blueprint state could not be restored."), Error);
 						return false;
 					}
 					Actual = Existing.Get();
@@ -355,12 +505,12 @@ namespace UeAgentUmgAuthoring
 				}
 				if (Operation == EOperation::Create || Operation == EOperation::Clone)
 				{
-					if (Actual && !UeAgentBlueprintAssetLifecycle::DeleteBlueprint(Actual, Error))
+					if (Actual && !UeAgentBlueprintAssetLifecycle::DeleteBlueprint(Actual, PackagePath, Error))
 					{
 						TArray<UObject*> Objects = { Actual };
 						if (ObjectTools::DeleteObjectsUnchecked(Objects) <= 0)
 						{
-							SetFailure(OutFailure, TEXT("umg_create_rollback_failed"), Error);
+							SetFailure(OutFailure, TEXT("umg_create_rollback_failed"), TEXT("The created widget Blueprint could not be rolled back."), Error);
 							return false;
 						}
 					}
@@ -371,7 +521,7 @@ namespace UeAgentUmgAuthoring
 				{
 					if (!RemovalStage.Rollback(Error))
 					{
-						SetFailure(OutFailure, TEXT("umg_remove_rollback_failed"), Error);
+						SetFailure(OutFailure, TEXT("umg_remove_rollback_failed"), TEXT("The removed widget Blueprint could not be restored."), Error);
 						return false;
 					}
 					Actual = Existing.Get();
@@ -384,14 +534,17 @@ namespace UeAgentUmgAuthoring
 				UWidgetBlueprint* Root,
 				const bool bExpectedAbsent,
 				TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-				FOperationFailure& OutFailure) const
+				FOperationFailure& OutFailure, bool bVerifyIntent = false) const
 			{
 				OutFailure = FOperationFailure();
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
+				if (bVerifyIntent && Root && !bExpectedAbsent && Mutation
+					&& !Mutation->VerifyIntent(*Root, Error))
+				{ UeAgentAuthoringDiagnostics::ReportConsistencyWarning(TEXT("umg_authored_intent_failed"), Error, TEXT("umg_intent_observation")); Error.Reset(); }
 				if (!BuildAssetSnapshotReadRequests(
 					Root, PackagePath, bExpectedAbsent, OutRequests, Error))
 				{
-					SetFailure(OutFailure, TEXT("umg_snapshot_request_failed"), Error);
+					SetFailure(OutFailure, TEXT("umg_snapshot_request_failed"), TEXT("The widget Blueprint snapshot read request could not be constructed."), Error);
 					return false;
 				}
 				return true;
@@ -408,6 +561,8 @@ namespace UeAgentUmgAuthoring
 			FMutationCounters ActualCounters;
 			bool bCompile = true;
 			bool bSave = false;
+			bool bCreated = false;
+			bool bMutationApplied = false;
 		};
 
 		class FAssetLifecycle final : public IReflectionOperationLifecycle
@@ -422,18 +577,21 @@ namespace UeAgentUmgAuthoring
 				OutFailure = FOperationFailure();
 				if (!Request.IsValid() || !Request.Input->Target.IsValid())
 				{
-					SetFailure(OutFailure, TEXT("umg_apply_request_invalid"));
+					SetFailure(OutFailure, TEXT("umg_apply_request_invalid"), TEXT("The widget Blueprint apply request requires valid operation input and a target object."));
 					return false;
 				}
 
 				FString PackagePath;
 				Request.Input->Target->TryGetStringField(TEXT("asset_path"), PackagePath);
-				PackagePath = UeAgentBlueprintAssetLifecycle::NormalizePackagePath(PackagePath);
+				PackagePath = UeAgentAuthoringAssetIdentity::NormalizePackagePath(PackagePath);
 				if (!FPackageName::IsValidLongPackageName(PackagePath)
 					|| FPackageName::GetLongPackageAssetName(PackagePath).IsEmpty()
 					|| (!PackagePath.Equals(TEXT("/Game")) && !PackagePath.StartsWith(TEXT("/Game/"))))
 				{
-					SetFailure(OutFailure, TEXT("invalid_asset_path"), PackagePath);
+					SetFailure(OutFailure, TEXT("invalid_asset_path"), TEXT("The widget Blueprint target must be a valid long package path under /Game."), PackagePath);
+					OutFailure.Diagnostic.ActualValue = Request.Input->Target->TryGetField(TEXT("asset_path"));
+					OutFailure.Diagnostic.ActualValuePresent = Request.Input->Target->HasField(TEXT("asset_path"));
+					UeAgentAuthoringDiagnostics::LocateFailure(OutFailure.Diagnostic, *Request.Input->Target, TEXT("umg_prepare"), PackagePath, TEXT("asset_path"));
 					return false;
 				}
 
@@ -445,12 +603,18 @@ namespace UeAgentUmgAuthoring
 				}
 				if ((Operation == EOperation::Create || Operation == EOperation::Clone) && Existing)
 				{
-					SetFailure(OutFailure, TEXT("asset_already_exists"), PackagePath);
+					SetFailure(OutFailure, TEXT("asset_already_exists"), TEXT("The target widget Blueprint already exists; create and clone require an absent target."), PackagePath);
+					OutFailure.Diagnostic.ActualValue = Request.Input->Target->TryGetField(TEXT("asset_path"));
+					OutFailure.Diagnostic.ActualValuePresent = Request.Input->Target->HasField(TEXT("asset_path"));
+					UeAgentAuthoringDiagnostics::LocateFailure(OutFailure.Diagnostic, *Request.Input->Target, TEXT("umg_prepare"), PackagePath, TEXT("asset_path"));
 					return false;
 				}
 				if ((Operation == EOperation::Update || Operation == EOperation::Remove) && !Existing)
 				{
-					SetFailure(OutFailure, TEXT("asset_not_found"), PackagePath);
+					SetFailure(OutFailure, TEXT("asset_not_found"), TEXT("The target widget Blueprint could not be loaded for update or removal."), PackagePath);
+					OutFailure.Diagnostic.ActualValue = Request.Input->Target->TryGetField(TEXT("asset_path"));
+					OutFailure.Diagnostic.ActualValuePresent = Request.Input->Target->HasField(TEXT("asset_path"));
+					UeAgentAuthoringDiagnostics::LocateFailure(OutFailure.Diagnostic, *Request.Input->Target, TEXT("umg_prepare"), PackagePath, TEXT("asset_path"));
 					return false;
 				}
 
@@ -461,7 +625,10 @@ namespace UeAgentUmgAuthoring
 				if (AssetKind.IsEmpty()) AssetKind = TEXT("widget_blueprint");
 				if (AssetKind != TEXT("widget_blueprint"))
 				{
-					SetFailure(OutFailure, TEXT("umg_asset_kind_conflict"), AssetKind);
+					SetFailure(OutFailure, TEXT("umg_asset_kind_conflict"), TEXT("The UMG authoring provider only accepts widget_blueprint assets."), PackagePath);
+					OutFailure.Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("widget_blueprint"));
+					OutFailure.Diagnostic.ActualValue = MakeShared<FJsonValueString>(AssetKind);
+					UeAgentAuthoringDiagnostics::LocateFailure(OutFailure.Diagnostic, *Request.Input->Target, TEXT("umg_prepare"), PackagePath, TEXT("asset_kind"));
 					return false;
 				}
 
@@ -473,7 +640,9 @@ namespace UeAgentUmgAuthoring
 					Source = LoadWidgetBlueprint(SourcePath);
 					if (!Source)
 					{
-						SetFailure(OutFailure, TEXT("source_asset_not_found"), SourcePath);
+						SetFailure(OutFailure, TEXT("source_asset_not_found"), TEXT("The source widget Blueprint could not be loaded for cloning."), PackagePath);
+						OutFailure.Diagnostic.ActualValue = MakeShared<FJsonValueString>(SourcePath);
+						UeAgentAuthoringDiagnostics::LocateFailure(OutFailure.Diagnostic, *Request.Input->Target, TEXT("umg_prepare"), PackagePath, TEXT("source_asset_path"));
 						return false;
 					}
 				}
@@ -488,14 +657,17 @@ namespace UeAgentUmgAuthoring
 					if (!ParentClass || !ParentClass->IsChildOf(UUserWidget::StaticClass())
 						|| !FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass))
 					{
-						SetFailure(OutFailure, TEXT("umg_parent_class_invalid"), ParentClassPath);
+						SetFailure(OutFailure, TEXT("umg_parent_class_invalid"), TEXT("The parent class must resolve to a UserWidget class that allows Blueprint creation."), PackagePath);
+						OutFailure.Diagnostic.ActualValue = MakeShared<FJsonValueString>(ParentClassPath);
+						OutFailure.Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(UUserWidget::StaticClass()->GetPathName());
+						UeAgentAuthoringDiagnostics::LocateFailure(OutFailure.Diagnostic, *Request.Input->ProviderExtension, TEXT("umg_prepare"), PackagePath, TEXT("parent_class"));
 						return false;
 					}
 				}
 
 				UWidgetBlueprint* Proposed = Existing;
 				UWidgetBlueprint* ValidationTarget = nullptr;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (Operation != EOperation::Remove)
 				{
 					UPackage* ScratchPackage = CreatePackage(*FString::Printf(
@@ -510,24 +682,26 @@ namespace UeAgentUmgAuthoring
 					else if (Operation == EOperation::Clone)
 					{
 						ValidationTarget = Cast<UWidgetBlueprint>(
-							UeAgentBlueprintAssetLifecycle::DuplicateBlueprint(Source, ScratchPackage));
+							UeAgentBlueprintAssetLifecycle::DuplicateBlueprint(Source, ScratchPackage, NAME_None, false, &Error));
 						Proposed = ValidationTarget;
 					}
 					else
 					{
 						ValidationTarget = Cast<UWidgetBlueprint>(
-							UeAgentBlueprintAssetLifecycle::DuplicateBlueprint(Existing, ScratchPackage));
+							UeAgentBlueprintAssetLifecycle::DuplicateBlueprint(Existing, ScratchPackage, NAME_None, true, &Error));
 						Proposed = ValidationTarget;
 					}
 					if (!ValidationTarget)
 					{
 						SetFailure(
 							OutFailure,
-							Error.IsEmpty() ? TEXT("umg_proposed_asset_create_failed") : Error);
+							Error.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_proposed_asset_create_failed"), TEXT("A temporary widget Blueprint could not be created for validation."), TEXT("umg_prepare")) : Error);
 						return false;
 					}
 				}
 
+				if (ValidationTarget)
+					UeAgentBlueprintAssetLifecycle::SetAuthoringContext(*ValidationTarget, PackagePath, Existing);
 				TUniquePtr<FPreparedUmgMutation> Mutation;
 				FMutationCounters ExpectedCounters;
 				if (Operation != EOperation::Remove
@@ -536,9 +710,10 @@ namespace UeAgentUmgAuthoring
 						Request.Input->ProviderExtension,
 						Mutation,
 						ExpectedCounters,
-						Error))
+						Error, PackagePath))
 				{
-					SetFailure(OutFailure, TEXT("umg_mutation_preflight_failed"), Error);
+					SetMutationFailure(OutFailure, Error);
+					LocateMemberNameFailure(OutFailure, Request);
 					return false;
 				}
 
@@ -619,12 +794,11 @@ namespace UeAgentUmgAuthoring
 			Result.ReflectionBaseline.ExternalReferencePolicy = TEXT("replace_reference_only");
 			Result.ReflectionBaseline.OwnedObjectPolicy =
 				TEXT("create_or_locate_with_real_outer_then_recurse");
-			Result.ReflectionBaseline.RuntimeLimitsSource = TEXT("shared_runtime_limits");
 			Result.PropertyPayload.Mode = TEXT("reflection");
 			Result.PropertyPayload.PropertyPathField = TEXT("property_path");
 			Result.PropertyPayload.ValueField = TEXT("value");
 			Result.PropertyPayload.OptionalAssertionFields = {
-				TEXT("value_kind"), TEXT("struct_path"), TEXT("enum_path"), TEXT("element_type"),
+				TEXT("kind"), TEXT("struct_path"), TEXT("enum_path"), TEXT("element_type"),
 				TEXT("key_type"), TEXT("mapped_type"), TEXT("inner_type"), TEXT("fixed_length"),
 				TEXT("allowed_class")
 			};
@@ -735,145 +909,64 @@ namespace UeAgentUmgAuthoring
 			const UeAgentAuthoringWorkspaceLoader::FSourceRequest& Source,
 			const FString& ExpectedAssetPath,
 			FAssetApplyResult& OutResult,
-			const FString& RequestId)
+			const FString& RequestId,
+			const TFunction<bool(FOperationFailure&)>& FinalReadback = {})
 		{
 			OutResult = FAssetApplyResult();
 			OutResult.Status = TEXT("failed");
-			UeAgentApplyWorkspaceContract::FContract WorkspaceContract;
-			if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(
-				AssetWorkspaceContractId, WorkspaceContract))
+			UeAgentAuthoringAssetWorkspaceInput::FRequest ResolveRequest;
+			ResolveRequest.WorkspaceContractId = AssetWorkspaceContractId;
+			ResolveRequest.Source = Source;
+			ResolveRequest.ExpectedAssetPath = ExpectedAssetPath;
+			ResolveRequest.ExpectedAssetKind = TEXT("widget_blueprint");
+			ResolveRequest.Errors.ContractMissing = TEXT("umg_workspace_contract_missing");
+			ResolveRequest.Errors.EntryInvalid = TEXT("umg_workspace_entry_invalid");
+			ResolveRequest.Errors.AssetKindConflict =
+				TEXT("umg_workspace_asset_kind_conflict");
+			ResolveRequest.Errors.AssetPathConflict =
+				TEXT("umg_workspace_asset_path_conflict");
+			UeAgentAuthoringAssetWorkspaceInput::FResult Resolved;
+			if (!UeAgentAuthoringAssetWorkspaceInput::Resolve(ResolveRequest, Resolved))
 			{
-				OutResult.Phase = TEXT("registration");
-				OutResult.ErrorCode = TEXT("umg_workspace_contract_missing");
+				OutResult.Phase = Resolved.Phase;
+				OutResult.Diagnostic = Resolved.Diagnostic;
 				return false;
 			}
 
-			UeAgentAuthoringWorkspaceLoader::FLoadResult LoadResult;
-			if (!UeAgentAuthoringWorkspaceLoader::LoadWorkspace(
-				WorkspaceContract, Source, LoadResult))
-			{
-				OutResult.Phase = TEXT("load");
-				OutResult.ErrorCode = LoadResult.ErrorCode;
-				OutResult.ErrorDetail = LoadResult.ErrorDetail;
-				return false;
-			}
-
-			const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit* AssetUnit =
-				LoadResult.Workspace.FindSingleUnit(TEXT("asset"));
-			const TSharedPtr<const FJsonObject> Document = AssetUnit ? AssetUnit->Document : nullptr;
-			const TSharedPtr<FJsonObject>* Target = nullptr;
-			FString OperationText;
 			FAssetApplyRequest Request;
-			if (!Document.IsValid()
-				|| !Document->TryGetStringField(TEXT("operation"), OperationText)
-				|| !ParseOperation(OperationText, Request.Operation)
-				|| !Document->TryGetObjectField(TEXT("target"), Target)
-				|| !Target || !Target->IsValid())
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = TEXT("umg_workspace_entry_invalid");
-				OutResult.ErrorDetail = OutResult.ErrorCode;
-				return false;
-			}
-
-			(*Target)->TryGetStringField(TEXT("asset_path"), Request.AssetPath);
-			Request.AssetPath = UeAgentBlueprintAssetLifecycle::NormalizePackagePath(Request.AssetPath);
-			(*Target)->TryGetStringField(TEXT("source_asset_path"), Request.SourceAssetPath);
-			FString AssetKind;
-			(*Target)->TryGetStringField(TEXT("asset_kind"), AssetKind);
-			AssetKind.TrimStartAndEndInline();
-			AssetKind.ToLowerInline();
-			if (!AssetKind.IsEmpty() && AssetKind != TEXT("widget_blueprint"))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = TEXT("umg_workspace_asset_kind_conflict");
-				OutResult.ErrorDetail = AssetKind;
-				return false;
-			}
-			const FString NormalizedExpectedPath =
-				UeAgentBlueprintAssetLifecycle::NormalizePackagePath(ExpectedAssetPath);
-			if (!NormalizedExpectedPath.IsEmpty()
-				&& !Request.AssetPath.Equals(NormalizedExpectedPath, ESearchCase::IgnoreCase))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = TEXT("umg_workspace_asset_path_conflict");
-				OutResult.ErrorDetail = Request.AssetPath + TEXT(" != ") + NormalizedExpectedPath;
-				return false;
-			}
-
-			const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
-			if (Document->TryGetArrayField(TEXT("properties"), Properties) && Properties)
-			{
-				Request.Properties = *Properties;
-			}
-			const TSharedPtr<FJsonObject>* ProviderExtension = nullptr;
-			if (Document->TryGetObjectField(TEXT("provider_extension"), ProviderExtension)
-				&& ProviderExtension && ProviderExtension->IsValid())
-			{
-				Request.ProviderExtension = *ProviderExtension;
-			}
-
-			UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph Graph;
-			UeAgentAuthoringWorkspaceDependencyGraph::FGraphFailure GraphFailure;
-			if (!UeAgentAuthoringWorkspaceDependencyGraph::BuildDependencyGraph(
-				WorkspaceContract,
-				LoadResult.Workspace,
-				UeAgentAuthoringWorkspaceDependencyGraph::FDependencyInputs(),
-				Graph,
-				GraphFailure))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = GraphFailure.ErrorCode;
-				OutResult.ErrorDetail = GraphFailure.ErrorDetail;
-				return false;
-			}
+			Request.Operation = Resolved.Input.RequestedOperation;
+			Request.AssetPath = Resolved.AssetPath;
+			Request.SourceAssetPath = Resolved.SourceAssetPath;
+			const UeAgentApplyWorkspaceContract::FContract& WorkspaceContract =
+				Resolved.WorkspaceContract;
+			const UeAgentAuthoringWorkspaceLoader::FLoadResult& LoadResult = Resolved.Load;
+			const UeAgentApplyInputContract::FOperationInput& Input = Resolved.Input;
 
 			const bool bExisted = LoadWidgetBlueprint(Request.AssetPath) != nullptr;
 			FBackendOptions BackendOptions;
+			BackendOptions.FinalReadback = FinalReadback;
 			BackendOptions.bUseEditorTransaction = Request.Operation != EOperation::Remove;
 			BackendOptions.TransactionDescription = NSLOCTEXT(
 				"UeAgentInterface", "UmgAssetWorkspaceApply", "Apply UMG asset workspace");
-			UeAgentAuthoringWorkspaceTransaction::FExecutionOptions ExecutionOptions;
-			FOperationFailure RequestFailure;
-			if (!BuildApplyEntryExecutionOptions(RequestId, ExecutionOptions, RequestFailure))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = RequestFailure.ErrorCode;
-				OutResult.ErrorDetail = RequestFailure.ErrorDetail;
-				return false;
-			}
-			ExecutionOptions.bSaveWhenCallerControlled =
-				ReadBool(Request.ProviderExtension, TEXT("save"), false);
 			FApplyWorkspaceResult ApplyResult;
-			const bool bApplied = ApplyWorkspace(
+			UeAgentAuthoringAssetWorkspaceApply::FFailure ApplyFailure;
+			const bool bApplied = UeAgentAuthoringAssetWorkspaceApply::Execute(
 				WorkspaceContract,
 				LoadResult.Workspace,
-				Graph,
-				UeAgentApplyInputContract::FRegistry::Get(),
 				FProviderRegistry::Get(),
-				ExecutionOptions,
+				RequestId,
+				ReadBool(Input.ProviderExtension, TEXT("save"), false),
 				BackendOptions,
-				ApplyResult);
+				ApplyResult,
+				ApplyFailure);
 			OutResult.UnitsChecked = ApplyResult.Preflight.UnitsChecked;
 			OutResult.MutationsApplied = ApplyResult.Execution.MutationsApplied;
 			OutResult.bRollbackAttempted = ApplyResult.Execution.bRollbackAttempted;
 			OutResult.bRollbackSucceeded = ApplyResult.Execution.bRollbackSucceeded;
 			if (!bApplied)
 			{
-				const bool bPreflight = !ApplyResult.Preflight.IsReady();
-				OutResult.Phase = bPreflight ? TEXT("preflight") : ApplyResult.Execution.Phase;
-				OutResult.ErrorCode = bPreflight
-					? ApplyResult.Preflight.CauseCode
-					: ApplyResult.Execution.CauseCode;
-				if (OutResult.ErrorCode.IsEmpty())
-				{
-					OutResult.ErrorCode = bPreflight
-						? ApplyResult.Preflight.ErrorCode
-						: ApplyResult.Execution.ErrorCode;
-				}
-				OutResult.ErrorDetail = bPreflight
-					? ApplyResult.Preflight.ErrorDetail
-					: ApplyResult.Execution.ErrorDetail;
+				OutResult.Phase = ApplyFailure.Phase;
+				OutResult.Diagnostic = ApplyFailure.Diagnostic;
 				return false;
 			}
 
@@ -889,9 +982,9 @@ namespace UeAgentUmgAuthoring
 				: LoadWidgetBlueprint(Request.AssetPath);
 			OutResult.ObjectPath = OutResult.Asset
 				? OutResult.Asset->GetPathName()
-				: UeAgentBlueprintAssetLifecycle::ToObjectPath(Request.AssetPath);
+				: UeAgentAuthoringAssetIdentity::ToObjectPath(Request.AssetPath);
 			const TSharedPtr<FJsonObject>* ResultMetadata =
-				ApplyResult.UnitResultMetadata.Find(AssetUnit->CanonicalUnitKey);
+				ApplyResult.UnitResultMetadata.Find(Resolved.CanonicalUnitKey);
 			ReadMutationResultMetadata(
 				ResultMetadata ? *ResultMetadata : nullptr,
 				OutResult.Domain);
@@ -899,7 +992,7 @@ namespace UeAgentUmgAuthoring
 		}
 	}
 
-	bool RegisterApplyContracts(FString& OutError)
+	bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentApplyInputContract::ERegistrationResult InputResult;
 		if (!UeAgentApplyInputContract::FRegistry::Get().RegisterContract(
@@ -927,7 +1020,8 @@ namespace UeAgentUmgAuthoring
 				MakeApplyDocument(Request), TEXT("inline://umg-asset-apply")),
 			Request.AssetPath,
 			OutResult,
-			RequestId);
+			RequestId,
+			Request.FinalReadback);
 	}
 
 	bool ApplyAssetWorkspace(

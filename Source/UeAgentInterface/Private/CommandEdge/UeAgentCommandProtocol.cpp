@@ -20,7 +20,7 @@ namespace UE::UAI::CommandEdge
 			const FString& Code,
 			const FString& Message)
 		{
-			return {Code, Message};
+			return FDiagnostic::Failure(Code, Message, TEXT("command_protocol"));
 		}
 
 		bool Fail(
@@ -32,20 +32,53 @@ namespace UE::UAI::CommandEdge
 			return false;
 		}
 
-		bool HasExactFields(
-			const TSharedPtr<FJsonObject>& Object,
-			const TSet<FString>& Required)
+		bool Fail(FUeAgentCommandProtocolDiagnostic& OutDiagnostic, const FString& Code, const FDiagnostic& Cause)
 		{
-			if (!Object.IsValid()
-				|| Object->Values.Num() != Required.Num())
-			{
-				return false;
-			}
+			OutDiagnostic = FDiagnostic::WrapFailure(Code, Cause, TEXT("command_protocol"));
+			return false;
+		}
+
+		enum class EValueAudience { Public, Internal };
+
+		FString FieldPath(const FString& Name, const TCHAR* Parent = TEXT(""))
+		{
+			return FString(Parent) + TEXT("/") + Name.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		}
+
+		bool FailValue(FUeAgentCommandProtocolDiagnostic& OutDiagnostic, const FString& Code,
+			const FString& Message, const FString& Path, TSharedPtr<FJsonValue> Expected,
+			TSharedPtr<FJsonValue> Actual, EValueAudience Audience)
+		{
+			OutDiagnostic = Diagnostic(Code, Message);
+			OutDiagnostic.Source.JsonPath = Path;
+			OutDiagnostic.ExpectedValue = MoveTemp(Expected);
+			OutDiagnostic.ActualValuePresent = Actual.IsValid();
+			if (Audience == EValueAudience::Public) OutDiagnostic.ActualValue = MoveTemp(Actual);
+			else OutDiagnostic.ActualEvidence = MoveTemp(Actual);
+			return false;
+		}
+
+		bool TryValidateEnvelopeFields(
+			const TSharedPtr<FJsonObject>& Object,
+			const TArray<FString>& Required,
+			FUeAgentCommandProtocolDiagnostic& OutDiagnostic)
+		{
 			for (const FString& Name : Required)
 			{
 				if (!Object->HasField(Name))
 				{
-					return false;
+					return FailValue(OutDiagnostic, TEXT("command_request_envelope_invalid"),
+						FString::Printf(TEXT("Required command envelope field '%s' is missing."), *Name),
+						FieldPath(Name), MakeShared<FJsonValueString>(TEXT("required field")), nullptr, EValueAudience::Internal);
+				}
+			}
+			for (const auto& Field : Object->Values)
+			{
+				if (!Required.Contains(Field.Key))
+				{
+					return FailValue(OutDiagnostic, TEXT("command_request_envelope_invalid"),
+						FString::Printf(TEXT("Unknown command envelope field '%s'."), *Field.Key),
+						FieldPath(Field.Key), nullptr, Field.Value, EValueAudience::Internal);
 				}
 			}
 			return true;
@@ -86,7 +119,7 @@ namespace UE::UAI::CommandEdge
 			FString& OutText,
 			FUeAgentCommandProtocolDiagnostic& OutDiagnostic)
 		{
-			FString Error;
+			FDiagnostic Error;
 			if (!Json::TryCanonicalize(Object, OutText, Error))
 			{
 				return Fail(
@@ -102,7 +135,7 @@ namespace UE::UAI::CommandEdge
 			TSharedPtr<FJsonObject>& OutObject,
 			FUeAgentCommandProtocolDiagnostic& OutDiagnostic)
 		{
-			FString Error;
+			FDiagnostic Error;
 			if (!Json::TryParseObject(Text, OutObject, Error))
 			{
 				return Fail(
@@ -151,6 +184,22 @@ namespace UE::UAI::CommandEdge
 			}
 		}
 
+		FString ExpectedParameterType(const FUeAgentCommandParameter& Parameter)
+		{
+			const TCHAR* Type = TEXT("any");
+			switch (Parameter.GetWireType())
+			{
+			case EUeAgentCommandWireType::Boolean: Type = TEXT("boolean"); break;
+			case EUeAgentCommandWireType::Integer: Type = TEXT("integer"); break;
+			case EUeAgentCommandWireType::Number: Type = TEXT("number"); break;
+			case EUeAgentCommandWireType::String: Type = TEXT("string"); break;
+			case EUeAgentCommandWireType::Object: Type = TEXT("object"); break;
+			case EUeAgentCommandWireType::Array: Type = TEXT("array"); break;
+			default: break;
+			}
+			return FString(Type) + (Parameter.IsNullable() ? TEXT(" or null") : TEXT(""));
+		}
+
 		bool TryValidateParams(
 			const FUeAgentCommandContract& Contract,
 			const TSharedPtr<FJsonObject>& Params,
@@ -158,10 +207,8 @@ namespace UE::UAI::CommandEdge
 		{
 			if (!Params.IsValid())
 			{
-				return Fail(
-					OutDiagnostic,
-					TEXT("command_params_invalid"),
-					TEXT("params must be an object"));
+				return FailValue(OutDiagnostic, TEXT("command_params_invalid"), TEXT("Command params must be an object."),
+					TEXT("/params"), MakeShared<FJsonValueString>(TEXT("object")), nullptr, EValueAudience::Public);
 			}
 
 			TMap<FString, const FUeAgentCommandParameter*> ByName;
@@ -175,19 +222,25 @@ namespace UE::UAI::CommandEdge
 				{
 					if (Parameter.IsRequired())
 					{
-						return Fail(
+						return FailValue(
 							OutDiagnostic,
 							TEXT("command_param_required"),
-							Parameter.GetName());
+							FString::Printf(TEXT("Required parameter '%s' is missing; expected %s."),
+								*Parameter.GetName(), *ExpectedParameterType(Parameter)),
+							FieldPath(Parameter.GetName(), TEXT("/params")),
+							MakeShared<FJsonValueString>(ExpectedParameterType(Parameter)), nullptr, EValueAudience::Public);
 					}
 					continue;
 				}
 				if (!TryValidateParameterValue(Parameter, Value))
 				{
-					return Fail(
+					return FailValue(
 						OutDiagnostic,
 						TEXT("command_param_type_invalid"),
-						Parameter.GetName());
+						FString::Printf(TEXT("Parameter '%s' must be %s."),
+							*Parameter.GetName(), *ExpectedParameterType(Parameter)),
+						FieldPath(Parameter.GetName(), TEXT("/params")),
+						MakeShared<FJsonValueString>(ExpectedParameterType(Parameter)), Value, EValueAudience::Public);
 				}
 			}
 
@@ -197,24 +250,16 @@ namespace UE::UAI::CommandEdge
 			{
 				if (!ByName.Contains(Field.Key))
 				{
-					return Fail(
+					return FailValue(
 						OutDiagnostic,
 						TEXT("command_param_unknown"),
-						Field.Key);
+						FString::Printf(TEXT("Unknown parameter '%s'; use query.command.usage for required parameter names."), *Field.Key),
+						FieldPath(Field.Key, TEXT("/params")), nullptr, Field.Value, EValueAudience::Public);
 				}
 			}
 			return true;
 		}
 
-		TSharedPtr<FJsonObject> ErrorObject(
-			const FString& Code,
-			const FString& Message)
-		{
-			TSharedPtr<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("message"), Message);
-			return Error;
-		}
 	}
 
 	FUeAgentCommandRequest::FUeAgentCommandRequest(
@@ -279,9 +324,25 @@ namespace UE::UAI::CommandEdge
 			&& !ParamsJson.IsEmpty();
 	}
 
+	bool FUeAgentCommandRequest::TryCreate(
+		FString InCorrelationId, FString InRequestId, FString InCommandId, FString InCommandBindingHash,
+		TSharedPtr<FJsonObject> InParams, TOptional<FUeAgentCommandRequest>& OutRequest,
+		FUeAgentCommandProtocolDiagnostic& OutDiagnostic)
+	{
+		OutRequest.Reset();
+		OutDiagnostic.Reset();
+		FString ParamsJson;
+		if (!TryCanonicalObject(InParams, ParamsJson, OutDiagnostic)) return false;
+		FUeAgentCommandRequest Request(MoveTemp(InCorrelationId), MoveTemp(InRequestId), MoveTemp(InCommandId),
+			MoveTemp(InCommandBindingHash), MoveTemp(InParams), MoveTemp(ParamsJson));
+		if (!Request.IsValid()) return Fail(OutDiagnostic, TEXT("command_request_invalid"), TEXT("Command request fields are invalid."));
+		OutRequest = MoveTemp(Request);
+		return true;
+	}
+
 	FUeAgentCommandResult FUeAgentCommandResult::Success(
 		const FUeAgentCommandRequest& Request,
-		FString PayloadJson)
+		FString PayloadJson, TArray<FDiagnostic> Diagnostics)
 	{
 		return FUeAgentCommandResult(
 			Request.GetCorrelationId(),
@@ -291,50 +352,25 @@ namespace UE::UAI::CommandEdge
 			MoveTemp(PayloadJson),
 			{},
 			true,
-			false);
+			false, FString(), EApplicationFailureKind::None, MoveTemp(Diagnostics));
 	}
 
 	FUeAgentCommandResult FUeAgentCommandResult::Failure(
-		const FUeAgentCommandRequest& Request,
-		FString PayloadJson,
-		FString ErrorJson)
+		const FUeAgentCommandRequest& Request, FString PayloadJson, FDiagnostic Diagnostic, FString EnvelopeCode, EApplicationFailureKind ApplicationFailureKind, TArray<FDiagnostic> Diagnostics)
 	{
-		return FUeAgentCommandResult(
-			Request.GetCorrelationId(),
-			Request.GetRequestId(),
-			Request.GetCommandId(),
-			Request.GetCommandBindingHash(),
-			MoveTemp(PayloadJson),
-			MoveTemp(ErrorJson),
-			false,
-			false);
+		if (Diagnostic.TargetPath.IsEmpty() && Request.GetParams().IsValid())
+			Request.GetParams()->TryGetStringField(TEXT("target"), Diagnostic.TargetPath);
+		return FUeAgentCommandResult(Request.GetCorrelationId(), Request.GetRequestId(),
+			Request.GetCommandId(), Request.GetCommandBindingHash(), MoveTemp(PayloadJson), MoveTemp(Diagnostic),
+			false, false, MoveTemp(EnvelopeCode), ApplicationFailureKind, MoveTemp(Diagnostics));
 	}
 
 	FUeAgentCommandResult FUeAgentCommandResult::ProtocolError(
-		FString InCorrelationId,
-		FString InRequestId,
-		FString InCommandId,
-		FString InCommandBindingHash,
-		FString Code,
-		FString Message)
+		FString InCorrelationId, FString InRequestId, FString InCommandId, FString InCommandBindingHash,
+		FDiagnostic Diagnostic)
 	{
-		FString ErrorJson(TEXT(
-			"{\"code\":\"command_protocol_error\","
-			"\"message\":\"failed to encode protocol error\"}"));
-		FString Error;
-		Json::TryCanonicalize(
-			ErrorObject(Code, Message),
-			ErrorJson,
-			Error);
-		return FUeAgentCommandResult(
-			MoveTemp(InCorrelationId),
-			MoveTemp(InRequestId),
-			MoveTemp(InCommandId),
-			MoveTemp(InCommandBindingHash),
-			{},
-			MoveTemp(ErrorJson),
-			false,
-			true);
+		return FUeAgentCommandResult(MoveTemp(InCorrelationId), MoveTemp(InRequestId), MoveTemp(InCommandId),
+			MoveTemp(InCommandBindingHash), {}, MoveTemp(Diagnostic), false, true);
 	}
 
 	FUeAgentCommandResult::FUeAgentCommandResult(
@@ -343,15 +379,18 @@ namespace UE::UAI::CommandEdge
 		FString InCommandId,
 		FString InCommandBindingHash,
 		FString InPayloadJson,
-		FString InErrorJson,
+		FDiagnostic InDiagnostic,
 		bool bInOk,
-		bool bInProtocolError)
+		bool bInProtocolError, FString InEnvelopeCode, EApplicationFailureKind InApplicationFailureKind, TArray<FDiagnostic> InDiagnostics)
 		: CorrelationId(MoveTemp(InCorrelationId))
 		, RequestId(MoveTemp(InRequestId))
 		, CommandId(MoveTemp(InCommandId))
 		, CommandBindingHash(MoveTemp(InCommandBindingHash))
 		, PayloadJson(MoveTemp(InPayloadJson))
-		, ErrorJson(MoveTemp(InErrorJson))
+		, Diagnostic(MoveTemp(InDiagnostic))
+		, Diagnostics(MoveTemp(InDiagnostics))
+		, EnvelopeCode(MoveTemp(InEnvelopeCode))
+		, ApplicationFailureKind(InApplicationFailureKind)
 		, bOk(bInOk)
 		, bProtocolError(bInProtocolError)
 	{
@@ -387,9 +426,39 @@ namespace UE::UAI::CommandEdge
 		return PayloadJson;
 	}
 
-	const FString& FUeAgentCommandResult::GetErrorJson() const
+	const FDiagnostic& FUeAgentCommandResult::GetDiagnostic() const
 	{
-		return ErrorJson;
+		return Diagnostic;
+	}
+
+	const TArray<FDiagnostic>& FUeAgentCommandResult::GetDiagnostics() const { return Diagnostics; }
+
+	FUeAgentCommandResult FUeAgentCommandResult::WithPayload(FString InPayloadJson) const
+	{
+		FUeAgentCommandResult Copy = *this;
+		Copy.PayloadJson = MoveTemp(InPayloadJson);
+		return Copy;
+	}
+
+	const FString& FUeAgentCommandResult::GetErrorCode() const
+	{
+		return EnvelopeCode.IsEmpty() ? Diagnostic.Code : EnvelopeCode;
+	}
+
+	TSharedRef<FJsonObject> FUeAgentCommandResult::ToPublicError() const
+	{
+		auto Object = MakeShared<FJsonObject>();
+		Object->SetStringField(TEXT("code"), GetErrorCode());
+		Object->SetObjectField(TEXT("diagnostic"), Diagnostic.ToPublicJson());
+		if (!bProtocolError)
+		{
+			if (!Diagnostic.RecoveryAction.IsEmpty()) Object->SetStringField(TEXT("recovery_action"), Diagnostic.RecoveryAction);
+			if (!Diagnostic.TerminalStatus.IsEmpty()) Object->SetStringField(TEXT("terminal_status"), Diagnostic.TerminalStatus);
+			Object->SetBoolField(TEXT("retry_safe"), Diagnostic.bRetrySafe);
+			if (Diagnostic.MutationStarted.IsSet()) Object->SetBoolField(TEXT("mutation_started"), Diagnostic.MutationStarted.GetValue());
+			if (Diagnostic.MutationMayHaveStarted.IsSet()) Object->SetBoolField(TEXT("mutation_may_have_started"), Diagnostic.MutationMayHaveStarted.GetValue());
+		}
+		return Object;
 	}
 
 	bool FUeAgentCommandResult::IsOk() const
@@ -404,26 +473,55 @@ namespace UE::UAI::CommandEdge
 
 	bool FUeAgentCommandResult::IsValid() const
 	{
-		if (CorrelationId.IsEmpty())
+		FDiagnostic ValidationError;
+		return TryValidate(ValidationError);
+	}
+
+	bool FUeAgentCommandResult::TryValidate(FDiagnostic& OutDiagnostic) const
+	{
+		OutDiagnostic.Reset();
+		const TCHAR* Field = nullptr;
+		const TCHAR* Reason = nullptr;
+		if (CorrelationId.IsEmpty()) { Field = TEXT("correlation_id"); Reason = TEXT("The result requires a non-empty correlation identifier."); }
+		else if (bProtocolError && bOk) { Field = TEXT("ok"); Reason = TEXT("A protocol error cannot report success."); }
+		else if (bProtocolError && !PayloadJson.IsEmpty()) { Field = TEXT("payload"); Reason = TEXT("A protocol error must not contain a business payload."); }
+		else if (bProtocolError && Diagnostic.IsEmpty()) { Field = TEXT("error.diagnostic"); Reason = TEXT("A protocol error requires a structured diagnostic."); }
+		else if (!bProtocolError)
 		{
-			return false;
+			if (RequestId.IsEmpty()) { Field = TEXT("request_id"); Reason = TEXT("The result requires a non-empty request identifier."); }
+			else if (CommandId.IsEmpty()) { Field = TEXT("command_id"); Reason = TEXT("The result requires a non-empty command identifier."); }
+			else if (CommandBindingHash.IsEmpty()) { Field = TEXT("command_binding_hash"); Reason = TEXT("The result requires a command binding identity."); }
+			else if (PayloadJson.IsEmpty()) { Field = TEXT("payload"); Reason = TEXT("The result requires a JSON business payload."); }
+			else if (bOk && !Diagnostic.IsEmpty()) { Field = TEXT("error.diagnostic"); Reason = TEXT("A successful result cannot contain a primary failure diagnostic."); }
+			else if (!bOk && Diagnostic.IsEmpty()) { Field = TEXT("error.diagnostic"); Reason = TEXT("A failed result requires a structured diagnostic."); }
 		}
-		if (bProtocolError)
-		{
-			return !bOk
-				&& PayloadJson.IsEmpty()
-				&& !ErrorJson.IsEmpty();
-		}
-		if (RequestId.IsEmpty()
-			|| CommandId.IsEmpty()
-			|| CommandBindingHash.IsEmpty()
-			|| PayloadJson.IsEmpty())
-		{
-			return false;
-		}
-		return bOk
-			? ErrorJson.IsEmpty()
-			: !ErrorJson.IsEmpty();
+		if (!Reason) return true;
+		OutDiagnostic = FDiagnostic::Failure(TEXT("command_result_invalid"), Reason, TEXT("command_protocol"));
+		OutDiagnostic.PropertyPath = Field;
+		if (!Diagnostic.IsEmpty()) OutDiagnostic.Diagnostics.Add(Diagnostic);
+		OutDiagnostic.Diagnostics.Append(Diagnostics);
+		return false;
+	}
+
+	bool FUeAgentCommandResult::TryValidateForRequest(const FUeAgentCommandRequest& Request, FDiagnostic& OutDiagnostic) const
+	{
+		if (!TryValidate(OutDiagnostic)) return false;
+		const TCHAR* Field = nullptr;
+		const FString* Actual = nullptr;
+		const FString* Expected = nullptr;
+		if (CorrelationId != Request.GetCorrelationId()) { Field = TEXT("correlation_id"); Actual = &CorrelationId; Expected = &Request.GetCorrelationId(); }
+		else if (RequestId != Request.GetRequestId()) { Field = TEXT("request_id"); Actual = &RequestId; Expected = &Request.GetRequestId(); }
+		else if (CommandId != Request.GetCommandId()) { Field = TEXT("command_id"); Actual = &CommandId; Expected = &Request.GetCommandId(); }
+		else if (CommandBindingHash != Request.GetCommandBindingHash()) { Field = TEXT("command_binding_hash"); Actual = &CommandBindingHash; Expected = &Request.GetCommandBindingHash(); }
+		if (!Field) return true;
+		OutDiagnostic = FDiagnostic::Failure(TEXT("command_handler_result_identity_mismatch"),
+			TEXT("The handler result identity does not match the submitted request."), TEXT("command_protocol"));
+		OutDiagnostic.PropertyPath = Field;
+		OutDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(*Actual);
+		OutDiagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(*Expected);
+		if (!Diagnostic.IsEmpty()) OutDiagnostic.Diagnostics.Add(Diagnostic);
+		OutDiagnostic.Diagnostics.Append(Diagnostics);
+		return false;
 	}
 
 	bool FUeAgentCommandResult::MatchesRequest(
@@ -479,7 +577,7 @@ namespace UE::UAI::CommandEdge
 			Request.GetCommandBindingHash());
 		Root->SetObjectField(TEXT("params"), Params);
 
-		FString Error;
+		FDiagnostic Error;
 		if (!Json::TryCanonicalUtf8(Root, OutPayload, Error))
 		{
 			return Fail(
@@ -498,7 +596,7 @@ namespace UE::UAI::CommandEdge
 		OutRequest.Reset();
 		OutDiagnostic = {};
 		TSharedPtr<FJsonObject> Root;
-		FString Error;
+		FDiagnostic Error;
 		if (!Json::TryParseObject(Payload, Root, Error))
 		{
 			return Fail(
@@ -507,7 +605,7 @@ namespace UE::UAI::CommandEdge
 				Error);
 		}
 
-		const TSet<FString> Fields{
+		const TArray<FString> Fields{
 			TEXT("schema"),
 			TEXT("version"),
 			TEXT("message_kind"),
@@ -517,13 +615,7 @@ namespace UE::UAI::CommandEdge
 			TEXT("command_binding_hash"),
 			TEXT("params"),
 		};
-		if (!HasExactFields(Root, Fields))
-		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("command_request_envelope_invalid"),
-				TEXT("command request envelope fields are invalid"));
-		}
+		if (!TryValidateEnvelopeFields(Root, Fields, OutDiagnostic)) return false;
 
 		FString Schema;
 		FString MessageKind;
@@ -533,42 +625,30 @@ namespace UE::UAI::CommandEdge
 		FString BindingHash;
 		int32 Version = 0;
 		const TSharedPtr<FJsonObject>* ParamsField = nullptr;
-		if (!TryRequiredString(Root, TEXT("schema"), Schema)
-			|| Schema != WireSchema
-			|| !TryWireVersion(Root, Version)
-			|| Version != WireVersion
-			|| !TryRequiredString(
-				Root,
-				TEXT("message_kind"),
-				MessageKind)
-			|| MessageKind != TEXT("command_request")
-			|| !TryRequiredString(
-				Root,
-				TEXT("correlation_id"),
-				CorrelationId)
-			|| !TryRequiredString(
-				Root,
-				TEXT("request_id"),
-				RequestId)
-			|| !TryRequiredString(
-				Root,
-				TEXT("command_id"),
-				CommandId)
-			|| !TryRequiredString(
-				Root,
-				TEXT("command_binding_hash"),
-				BindingHash)
-			|| !Root->TryGetObjectField(
-				TEXT("params"),
-				ParamsField)
-			|| !ParamsField
-			|| !ParamsField->IsValid())
+		const auto InvalidField = [&](const FString& Name, const FString& Expected, EValueAudience Audience)
 		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("command_request_envelope_invalid"),
-				TEXT("command request envelope values are invalid"));
-		}
+			return FailValue(OutDiagnostic, TEXT("command_request_envelope_invalid"),
+				FString::Printf(TEXT("Command envelope field '%s' must be %s."), *Name, *Expected),
+				FieldPath(Name), MakeShared<FJsonValueString>(Expected), Root->TryGetField(Name), Audience);
+		};
+		if (!TryRequiredString(Root, TEXT("schema"), Schema) || Schema != WireSchema)
+			return InvalidField(TEXT("schema"), WireSchema, EValueAudience::Public);
+		if (!TryWireVersion(Root, Version) || Version != WireVersion)
+			return InvalidField(TEXT("version"), FString::FromInt(WireVersion), EValueAudience::Public);
+		if (!TryRequiredString(Root, TEXT("message_kind"), MessageKind) || MessageKind != TEXT("command_request"))
+			return InvalidField(TEXT("message_kind"), TEXT("command_request"), EValueAudience::Public);
+		const auto ReadIdentity = [&](const FString& Name, FString& Value, EValueAudience Audience)
+		{
+			if (!TryRequiredString(Root, Name, Value) || Value.TrimStartAndEnd().IsEmpty())
+				return InvalidField(Name, TEXT("a non-empty string"), Audience);
+			return true;
+		};
+		if (!ReadIdentity(TEXT("correlation_id"), CorrelationId, EValueAudience::Internal)
+			|| !ReadIdentity(TEXT("request_id"), RequestId, EValueAudience::Internal)
+			|| !ReadIdentity(TEXT("command_id"), CommandId, EValueAudience::Public)
+			|| !ReadIdentity(TEXT("command_binding_hash"), BindingHash, EValueAudience::Internal)) return false;
+		if (!Root->TryGetObjectField(TEXT("params"), ParamsField) || !ParamsField || !ParamsField->IsValid())
+			return InvalidField(TEXT("params"), TEXT("an object"), EValueAudience::Public);
 
 		FString ParamsJson;
 		if (!TryCanonicalObject(
@@ -588,19 +668,16 @@ namespace UE::UAI::CommandEdge
 		return OutRequest->IsValid();
 	}
 
-	bool FUeAgentCommandProtocolCodec::EncodeResult(
+	bool FUeAgentCommandProtocolCodec::TryProjectResult(
 		const FUeAgentCommandResult& Result,
-		TArray<uint8>& OutPayload,
+		TSharedPtr<FJsonObject>& OutObject,
 		FUeAgentCommandProtocolDiagnostic& OutDiagnostic) const
 	{
-		OutPayload.Reset();
+		OutObject.Reset();
 		OutDiagnostic = {};
-		if (!Result.IsValid())
+		if (!Result.TryValidate(OutDiagnostic))
 		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("command_result_invalid"),
-				TEXT("command result is invalid"));
+			return false;
 		}
 
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
@@ -626,15 +703,7 @@ namespace UE::UAI::CommandEdge
 
 		if (Result.IsProtocolError())
 		{
-			TSharedPtr<FJsonObject> ErrorObjectValue;
-			if (!TryParseObjectText(
-				Result.GetErrorJson(),
-				ErrorObjectValue,
-				OutDiagnostic))
-			{
-				return false;
-			}
-			Root->SetObjectField(TEXT("error"), ErrorObjectValue);
+			Root->SetObjectField(TEXT("error"), Result.ToPublicError());
 		}
 		else
 		{
@@ -644,7 +713,21 @@ namespace UE::UAI::CommandEdge
 				PayloadObject,
 				OutDiagnostic))
 			{
+				if (!Result.GetDiagnostic().IsEmpty()) OutDiagnostic.Diagnostics.Add(Result.GetDiagnostic());
+				OutDiagnostic.Diagnostics.Append(Result.GetDiagnostics());
 				return false;
+			}
+			if (!Result.IsOk() && Result.GetApplicationFailureKind() != EApplicationFailureKind::None)
+			{
+				PayloadObject->SetObjectField(Result.GetApplicationFailureKind() == EApplicationFailureKind::Query
+					? TEXT("query_error") : TEXT("operation_error"), Result.ToPublicError());
+			}
+			if (!Result.GetDiagnostics().IsEmpty())
+			{
+				TArray<TSharedPtr<FJsonValue>> PublicDiagnostics;
+				for (const FDiagnostic& Diagnostic : Result.GetDiagnostics())
+					PublicDiagnostics.Add(MakeShared<FJsonValueObject>(Diagnostic.ToPublicJson()));
+				Root->SetArrayField(TEXT("diagnostics"), MoveTemp(PublicDiagnostics));
 			}
 			Root->SetBoolField(TEXT("ok"), Result.IsOk());
 			Root->SetObjectField(TEXT("payload"), PayloadObject);
@@ -656,220 +739,34 @@ namespace UE::UAI::CommandEdge
 			}
 			else
 			{
-				TSharedPtr<FJsonObject> ErrorObjectValue;
-				if (!TryParseObjectText(
-					Result.GetErrorJson(),
-					ErrorObjectValue,
-					OutDiagnostic))
-				{
-					return false;
-				}
-				Root->SetObjectField(
-					TEXT("error"),
-					ErrorObjectValue);
+			Root->SetObjectField(TEXT("error"), Result.ToPublicError());
 			}
 		}
-
-		FString Error;
-		if (!Json::TryCanonicalUtf8(Root, OutPayload, Error))
-		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("command_result_encode_failed"),
-				Error);
-		}
+		OutObject = MoveTemp(Root);
 		return true;
 	}
 
-	bool FUeAgentCommandProtocolCodec::DecodeResult(
-		const TArray<uint8>& Payload,
-		TOptional<FUeAgentCommandResult>& OutResult,
+	bool FUeAgentCommandProtocolCodec::EncodeResult(
+		const FUeAgentCommandResult& Result,
+		TArray<uint8>& OutPayload,
 		FUeAgentCommandProtocolDiagnostic& OutDiagnostic) const
 	{
-		OutResult.Reset();
-		OutDiagnostic = {};
+		OutPayload.Reset();
 		TSharedPtr<FJsonObject> Root;
-		FString Error;
-		if (!Json::TryParseObject(Payload, Root, Error))
+		if (!TryProjectResult(Result, Root, OutDiagnostic)) return false;
+
+		FDiagnostic Error;
+		if (!Json::TryCanonicalUtf8(Root, OutPayload, Error))
 		{
-			return Fail(
+			Fail(
 				OutDiagnostic,
-				TEXT("command_result_json_invalid"),
+				TEXT("command_result_encode_failed"),
 				Error);
-		}
-
-		FString Schema;
-		FString MessageKind;
-		FString CorrelationId;
-		int32 Version = 0;
-		if (!TryRequiredString(Root, TEXT("schema"), Schema)
-			|| Schema != WireSchema
-			|| !TryWireVersion(Root, Version)
-			|| Version != WireVersion
-			|| !TryRequiredString(
-				Root,
-				TEXT("message_kind"),
-				MessageKind)
-			|| !TryRequiredString(
-				Root,
-				TEXT("correlation_id"),
-				CorrelationId))
-		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("command_result_envelope_invalid"),
-				TEXT("command result envelope values are invalid"));
-		}
-
-		const bool bProtocol =
-			MessageKind == TEXT("protocol_error");
-		const TSet<FString> ProtocolFields{
-			TEXT("schema"),
-			TEXT("version"),
-			TEXT("message_kind"),
-			TEXT("correlation_id"),
-			TEXT("request_id"),
-			TEXT("command_id"),
-			TEXT("command_binding_hash"),
-			TEXT("error"),
-		};
-		const TSet<FString> ResultFields{
-			TEXT("schema"),
-			TEXT("version"),
-			TEXT("message_kind"),
-			TEXT("correlation_id"),
-			TEXT("request_id"),
-			TEXT("command_id"),
-			TEXT("command_binding_hash"),
-			TEXT("ok"),
-			TEXT("payload"),
-			TEXT("error"),
-		};
-		if ((!bProtocol && MessageKind != TEXT("command_result"))
-			|| !HasExactFields(
-				Root,
-				bProtocol ? ProtocolFields : ResultFields))
-		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("command_result_envelope_invalid"),
-				TEXT("command result envelope fields are invalid"));
-		}
-
-		FString RequestId;
-		FString CommandId;
-		FString BindingHash;
-		Root->TryGetStringField(TEXT("request_id"), RequestId);
-		Root->TryGetStringField(TEXT("command_id"), CommandId);
-		Root->TryGetStringField(
-			TEXT("command_binding_hash"),
-			BindingHash);
-		FString ErrorJson;
-
-		if (bProtocol)
-		{
-			const TSharedPtr<FJsonObject>* ErrorField = nullptr;
-			if (!Root->TryGetObjectField(
-				TEXT("error"),
-				ErrorField)
-				|| !ErrorField
-				|| !ErrorField->IsValid()
-				|| !TryCanonicalObject(
-					*ErrorField,
-					ErrorJson,
-					OutDiagnostic))
-			{
-				return Fail(
-					OutDiagnostic,
-					TEXT("command_result_error_invalid"),
-					TEXT(
-						"protocol error must contain an error object"));
-			}
-			OutResult = FUeAgentCommandResult(
-				MoveTemp(CorrelationId),
-				MoveTemp(RequestId),
-				MoveTemp(CommandId),
-				MoveTemp(BindingHash),
-				FString(),
-				MoveTemp(ErrorJson),
-				false,
-				true);
-			return OutResult->IsValid();
-		}
-
-		bool bOk = false;
-		if (!Root->TryGetBoolField(TEXT("ok"), bOk))
-		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("command_result_ok_invalid"),
-				TEXT("command result ok must be boolean"));
-		}
-		const TSharedPtr<FJsonObject>* PayloadField = nullptr;
-		if (!Root->TryGetObjectField(
-			TEXT("payload"),
-			PayloadField)
-			|| !PayloadField
-			|| !PayloadField->IsValid())
-		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("command_result_payload_invalid"),
-				TEXT("command result payload must be an object"));
-		}
-		FString PayloadJson;
-		if (!TryCanonicalObject(
-			*PayloadField,
-			PayloadJson,
-			OutDiagnostic))
-		{
+			if (!Result.GetDiagnostic().IsEmpty()) OutDiagnostic.Diagnostics.Add(Result.GetDiagnostic());
+			OutDiagnostic.Diagnostics.Append(Result.GetDiagnostics());
 			return false;
 		}
-		const TSharedPtr<FJsonValue> ErrorValue =
-			Root->TryGetField(TEXT("error"));
-		if (bOk
-			&& (!ErrorValue.IsValid()
-				|| ErrorValue->Type != EJson::Null))
-		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("command_result_error_invalid"),
-				TEXT("successful command result error must be null"));
-		}
-		if (bOk)
-		{
-			ErrorJson.Reset();
-		}
-		else
-		{
-			const TSharedPtr<FJsonObject>* ErrorField = nullptr;
-			if (!Root->TryGetObjectField(
-				TEXT("error"),
-				ErrorField)
-				|| !ErrorField
-				|| !ErrorField->IsValid()
-				|| !TryCanonicalObject(
-					*ErrorField,
-					ErrorJson,
-					OutDiagnostic))
-			{
-				return Fail(
-					OutDiagnostic,
-					TEXT("command_result_error_invalid"),
-					TEXT(
-						"failed command result must contain an error object"));
-			}
-		}
-		OutResult = FUeAgentCommandResult(
-			MoveTemp(CorrelationId),
-			MoveTemp(RequestId),
-			MoveTemp(CommandId),
-			MoveTemp(BindingHash),
-			MoveTemp(PayloadJson),
-			MoveTemp(ErrorJson),
-			bOk,
-			false);
-		return OutResult->IsValid();
+		return true;
 	}
 
 	FUeAgentCommandIngress::FUeAgentCommandIngress(
@@ -897,28 +794,18 @@ namespace UE::UAI::CommandEdge
 				const FString& RequestId,
 				const FString& CommandId,
 				const FString& BindingHash,
-				const FString& Code,
-				const FString& Message)
+				const UE::UAI::Contract::FDiagnostic& Diagnostic)
 			{
+					FDiagnostic LocatedDiagnostic = Diagnostic;
+					if (LocatedDiagnostic.CandidateName.IsEmpty()) LocatedDiagnostic.CandidateName = CommandId;
 				return MakeReply(
 					Ingress,
-					FUeAgentCommandResult::ProtocolError(
-						CorrelationId,
-						RequestId,
-						CommandId,
-						BindingHash,
-						Code,
-						Message));
+						FUeAgentCommandResult::ProtocolError(CorrelationId, RequestId, CommandId, BindingHash, MoveTemp(LocatedDiagnostic)));
 			};
 
 		if (Ingress.Frame.GetChannel() != WireChannel)
 		{
-			return ProtocolFailure(
-				{},
-				{},
-				{},
-				TEXT("command_channel_invalid"),
-				TEXT("transport channel is not uai.command"));
+			return ProtocolFailure({}, {}, {}, UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_channel_invalid"), TEXT("transport channel is not uai.command"), TEXT("command_protocol")));
 		}
 
 		TOptional<FUeAgentCommandRequest> Request;
@@ -928,77 +815,37 @@ namespace UE::UAI::CommandEdge
 			Request,
 			ProtocolDiagnostic))
 		{
-			return ProtocolFailure(
-				{},
-				{},
-				{},
-				ProtocolDiagnostic.Code,
-				ProtocolDiagnostic.Message);
+			return ProtocolFailure({}, {}, {}, ProtocolDiagnostic);
 		}
 		if (Request->GetCorrelationId() != CorrelationId)
 		{
-			return ProtocolFailure(
-				Request->GetRequestId(),
-				Request->GetCommandId(),
-				Request->GetCommandBindingHash(),
-				TEXT("command_correlation_mismatch"),
-				TEXT("transport and command correlation differ"));
+			return ProtocolFailure(Request->GetRequestId(), Request->GetCommandId(), Request->GetCommandBindingHash(), UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_correlation_mismatch"), TEXT("transport and command correlation differ"), TEXT("command_protocol")));
 		}
 
 		const FUeAgentCommandContract* Command =
 			Registry->FindExact(Request->GetCommandId());
 		if (!Command)
 		{
-			return ProtocolFailure(
-				Request->GetRequestId(),
-				Request->GetCommandId(),
-				Request->GetCommandBindingHash(),
-				TEXT("command_id_unknown"),
-				TEXT("command ID is not registered"));
-		}
-		if (Command->GetBindingHash()
-			!= Request->GetCommandBindingHash())
-		{
-			return ProtocolFailure(
-				Request->GetRequestId(),
-				Request->GetCommandId(),
-				Request->GetCommandBindingHash(),
-				TEXT("command_binding_hash_mismatch"),
-				TEXT("command binding hash does not match"));
+			return ProtocolFailure(Request->GetRequestId(), Request->GetCommandId(), Request->GetCommandBindingHash(), UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_id_unknown"), TEXT("command ID is not registered"), TEXT("command_protocol")));
 		}
 		if (WireVersion < Command->GetMinWireVersion()
 			|| WireVersion > Command->GetMaxWireVersion())
 		{
-			return ProtocolFailure(
-				Request->GetRequestId(),
-				Request->GetCommandId(),
-				Request->GetCommandBindingHash(),
-				TEXT("command_wire_version_unsupported"),
-				TEXT("command does not support this wire version"));
+			return ProtocolFailure(Request->GetRequestId(), Request->GetCommandId(), Request->GetCommandBindingHash(), UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_wire_version_unsupported"), TEXT("command does not support this wire version"), TEXT("command_protocol")));
 		}
 		if (!TryValidateParams(
 			*Command,
 			Request->GetParams(),
 			ProtocolDiagnostic))
 		{
-			return ProtocolFailure(
-				Request->GetRequestId(),
-				Request->GetCommandId(),
-				Request->GetCommandBindingHash(),
-				ProtocolDiagnostic.Code,
-				ProtocolDiagnostic.Message);
+			return ProtocolFailure(Request->GetRequestId(), Request->GetCommandId(), Request->GetCommandBindingHash(), ProtocolDiagnostic);
 		}
 		if (!CallerFactory || !CancellationFactory)
 		{
-			return ProtocolFailure(
-				Request->GetRequestId(),
-				Request->GetCommandId(),
-				Request->GetCommandBindingHash(),
-				TEXT("command_ingress_dependency_missing"),
-				TEXT("command ingress dependency is missing"));
+			return ProtocolFailure(Request->GetRequestId(), Request->GetCommandId(), Request->GetCommandBindingHash(), UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_ingress_dependency_missing"), TEXT("command ingress dependency is missing"), TEXT("command_protocol")));
 		}
 
-		FString CallerError;
+		UE::UAI::Contract::FDiagnostic CallerError;
 		TOptional<FUeAgentCallerContext> Caller =
 			CallerFactory(
 				Ingress.Peer,
@@ -1006,12 +853,7 @@ namespace UE::UAI::CommandEdge
 				CallerError);
 		if (!Caller.IsSet() || !Caller->IsValid())
 		{
-			return ProtocolFailure(
-				Request->GetRequestId(),
-				Request->GetCommandId(),
-				Request->GetCommandBindingHash(),
-				TEXT("command_caller_invalid"),
-				CallerError);
+			return ProtocolFailure(Request->GetRequestId(), Request->GetCommandId(), Request->GetCommandBindingHash(), CallerError.IsValid() ? CallerError : UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_caller_invalid"), TEXT("The command caller is invalid."), TEXT("command_protocol")));
 		}
 
 		const TSharedRef<IUeAgentCancellationSignal> Cancellation =
@@ -1036,13 +878,8 @@ namespace UE::UAI::CommandEdge
 			DiagnosticValue))
 		{
 			const FUeAgentCommandResult Replacement =
-				FUeAgentCommandResult::ProtocolError(
-					Ingress.Frame.GetCorrelationId(),
-					{},
-					{},
-					{},
-					DiagnosticValue.Code,
-					DiagnosticValue.Message);
+				FUeAgentCommandResult::ProtocolError(Ingress.Frame.GetCorrelationId(), Result.GetRequestId(),
+					Result.GetCommandId(), Result.GetCommandBindingHash(), DiagnosticValue);
 			Codec.EncodeResult(
 				Replacement,
 				Payload,

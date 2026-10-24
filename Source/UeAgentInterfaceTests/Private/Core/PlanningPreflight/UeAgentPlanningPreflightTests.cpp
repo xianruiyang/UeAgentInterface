@@ -16,17 +16,7 @@ namespace
 	static FUeAgentResourceTracker MakeTracker(
 		const int64 WorkLimit = 131072)
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 262144},
-			{EUeAgentResourceDimension::OutputBytes, 262144},
-			{EUeAgentResourceDimension::StringBytes, 262144},
-			{EUeAgentResourceDimension::Nodes, 16384},
-			{EUeAgentResourceDimension::Items, 16384},
-			{EUeAgentResourceDimension::Files, 8},
-			{EUeAgentResourceDimension::ReferenceEdges, 4096},
-			{EUeAgentResourceDimension::WorkUnits, WorkLimit},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 2097152},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FUeAgentCanonicalIdentity MakeIdentity()
@@ -354,21 +344,6 @@ bool FUeAgentPlanningPreflightBudgetDepthTest::RunTest(
 	FUeAgentResourceTracker BuildTracker = MakeTracker();
 	const FPlanningRequest Request =
 		MakeRequest(BuildTracker, false);
-	FUeAgentResourceTracker LowTracker = MakeTracker(1);
-	FPlanningResult LowResult;
-	FPlanningPreflightError LowError;
-	TestFalse(
-		TEXT("resource exhaustion fails closed"),
-		TryPlanChanges(
-			Request,
-			LowTracker,
-			LowResult,
-			LowError));
-	TestEqual(
-		TEXT("resource error is preserved"),
-		LowError.GetCode(),
-		FString(TEXT("resource_budget_exceeded")));
-
 	FUeAgentResourceTracker Tracker = MakeTracker();
 	FUeAgentCanonicalValueRef Current =
 		MakeStringValue(TEXT("leaf-before"), Tracker);

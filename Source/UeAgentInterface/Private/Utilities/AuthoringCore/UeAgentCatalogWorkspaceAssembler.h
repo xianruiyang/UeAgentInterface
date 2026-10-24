@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Utilities/UeAgentStructuredHjsonFormatter.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentApplyWorkspaceContract.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceDependencyGraph.h"
@@ -30,8 +31,7 @@ namespace UeAgentCatalogWorkspaceAssembler
 
 	struct UEAGENTINTERFACE_API FBuildFailure
 	{
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		TArray<FString> RequiredContext;
 	};
 

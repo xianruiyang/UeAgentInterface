@@ -22,21 +22,7 @@ namespace
 
 	FUeAgentResourceTracker MakeTracker()
 	{
-		return FUeAgentResourceTracker(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1048576},
-				{EUeAgentResourceDimension::OutputBytes, 1048576},
-				{EUeAgentResourceDimension::StringBytes, 1048576},
-				{EUeAgentResourceDimension::Nodes, 8192},
-				{EUeAgentResourceDimension::Items, 8192},
-				{EUeAgentResourceDimension::Files, 256},
-				{EUeAgentResourceDimension::ReferenceEdges, 8192},
-				{EUeAgentResourceDimension::WorkUnits, 32768},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					4194304
-				},
-			}));
+		return FUeAgentResourceTracker();
 	}
 
 	FUeAgentCanonicalIdentity MakeIdentity()

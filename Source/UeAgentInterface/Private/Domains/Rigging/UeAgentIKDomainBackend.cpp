@@ -2,6 +2,9 @@
 
 #include "Domains/Rigging/UeAgentIKDomainBackend.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
+
 #include "Utilities/UeAgentAuthoringJson.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "UeAgentInterfaceSettings.h"
@@ -18,12 +21,10 @@
 #include "ControlRig.h"
 #include "ControlRigObjectBinding.h"
 #include "AssetRegistry/AssetRegistryModule.h"
-#include "AssetToolsModule.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/SceneCapture2D.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
-#include "Developer/AssetTools/Public/IAssetTools.h"
 #include "EditorAnimUtils.h"
 #include "Editor.h"
 #include "LevelEditorViewport.h"
@@ -52,7 +53,6 @@
 #include "Sequencer/MovieSceneControlRigParameterSection.h"
 #include "Sequencer/MovieSceneControlRigParameterTrack.h"
 #include "RetargetEditor/IKRetargetBatchOperation.h"
-#include "RetargetEditor/IKRetargetFactory.h"
 #include "RetargetEditor/IKRetargeterController.h"
 #include "Retargeter/IKRetargetChainMapping.h"
 #include "Retargeter/IKRetargetDeprecated.h"
@@ -64,10 +64,334 @@
 #include "Rig/Solvers/IKRigBodyMoverSolver.h"
 #include "Rig/Solvers/IKRigFullBodyIK.h"
 #include "RigEditor/IKRigController.h"
-#include "RigEditor/IKRigDefinitionFactory.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
 
 namespace UeAgentIKAssetOps
 {
+	namespace
+	{
+		const TCHAR* IKDiagnosticSourceKind(const UE::UAI::Contract::FSourceLocation& Source)
+		{
+			return Source.SourceFile.IsEmpty() && Source.JsonPath.IsEmpty() && Source.WorkspaceSource.IsEmpty()
+				&& Source.SourceUnit.IsEmpty() && Source.InternalJsonPath.IsEmpty() ? TEXT("native_result") : TEXT("related_input");
+		}
+	}
+
+	bool ApplyRetargetRoot(UIKRigController& Controller, const FName RequestedRoot,
+		UE::UAI::Contract::FDiagnostic& OutError, const UE::UAI::Contract::FSourceLocation& Source, const FString& TargetPath)
+	{
+		if (!Controller.SetRetargetRoot(RequestedRoot))
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("ik_rig_retarget_root_apply_failed"),
+				FString::Printf(TEXT("The IK Rig controller rejected retarget root bone '%s'."), *RequestedRoot.ToString()), TEXT("native_apply"));
+			OutError.TargetPath = TargetPath;
+			OutError.PropertyPath = TEXT("retarget_root");
+			OutError.Source = Source;
+			OutError.SourceKind = IKDiagnosticSourceKind(Source);
+			OutError.ActualValue = MakeShared<FJsonValueString>(RequestedRoot.ToString());
+			return false;
+		}
+		const FName ActualRoot = Controller.GetRetargetRoot();
+		if (ActualRoot != RequestedRoot)
+		{
+			UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic;
+			Diagnostic.Code = TEXT("ik_rig_retarget_root_readback_mismatch");
+			Diagnostic.Stage = TEXT("native_apply");
+			Diagnostic.PropertyPath = TEXT("retarget_root");
+			Diagnostic.Source = Source;
+			Diagnostic.TargetPath = TargetPath;
+			Diagnostic.SourceKind = IKDiagnosticSourceKind(Source);
+			Diagnostic.PublicMessage = TEXT("The native retarget root does not match the requested bone.");
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(RequestedRoot.ToString());
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(ActualRoot.ToString());
+			UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Diagnostic);
+		}
+		return true;
+	}
+
+	bool ApplyRetargetChainGoal(UIKRigController& Controller, const FName ChainName,
+		const FName RequestedGoal, UE::UAI::Contract::FDiagnostic& OutError,
+		const UE::UAI::Contract::FSourceLocation& Source, const FString& TargetPath)
+	{
+		if (!Controller.SetRetargetChainGoal(ChainName, RequestedGoal))
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("ik_rig_chain_goal_apply_failed"),
+				FString::Printf(TEXT("The IK Rig controller rejected goal '%s' for retarget chain '%s'."),
+					*RequestedGoal.ToString(), *ChainName.ToString()), TEXT("native_apply"));
+			OutError.TargetPath = TargetPath;
+			OutError.PropertyPath = TEXT("goal");
+			OutError.Source = Source;
+			OutError.SourceKind = IKDiagnosticSourceKind(Source);
+			OutError.ActualValue = MakeShared<FJsonValueString>(RequestedGoal.ToString());
+			return false;
+		}
+		const FName ActualGoal = Controller.GetRetargetChainGoal(ChainName);
+		if (ActualGoal != RequestedGoal)
+		{
+			UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic;
+			Diagnostic.Code = TEXT("ik_rig_chain_goal_readback_mismatch");
+			Diagnostic.Stage = TEXT("native_apply");
+			Diagnostic.PropertyPath = TEXT("goal");
+			Diagnostic.Source = Source;
+			Diagnostic.TargetPath = TargetPath;
+			Diagnostic.SourceKind = IKDiagnosticSourceKind(Source);
+			Diagnostic.PublicMessage = FString::Printf(TEXT("The native goal for retarget chain '%s' does not match the requested goal."), *ChainName.ToString());
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(RequestedGoal.ToString());
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(ActualGoal.ToString());
+			UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Diagnostic);
+		}
+		return true;
+	}
+
+	bool ApplySolverBone(UIKRigController& Controller, const int32 SolverIndex,
+		const FName RequestedBone, const bool bEndBone, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		FIKRigSolverBase* Solver = Controller.GetSolverAtIndex(SolverIndex);
+		const FString Field = bEndBone ? TEXT("end_bone") : TEXT("start_bone");
+		if (!Solver)
+		{
+			auto Actual = MakeShared<FJsonObject>();
+            Actual->SetNumberField(TEXT("solver_index"), SolverIndex);
+            Actual->SetBoolField(TEXT("solver_available"), false);
+            OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("ik_rig_solver_unavailable"), Field,
+                MakeShared<FJsonValueString>(TEXT("available native solver")), MakeShared<FJsonValueObject>(Actual),
+                TEXT("native_apply"), TEXT("The native IK Rig solver is unavailable for the requested bone edit."));
+            OutError.SourceKind = TEXT("native_result");
+            OutError.Source = {};
+			return false;
+		}
+		const auto Read = [&]() { return bEndBone
+			? Controller.GetEndBone(SolverIndex) : Controller.GetStartBone(SolverIndex); };
+		if (RequestedBone.IsNone() && Read().IsNone()) return true;
+		bool bApplied = true;
+		if (RequestedBone.IsNone())
+		{
+			// Controller bone picking requires a skeleton bone. Clearing is a native
+			// solver operation and has no bone to pick; use the same virtual owner.
+			Controller.GetAsset()->Modify();
+			if (bEndBone) Solver->SetEndBone(NAME_None);
+			else Solver->SetStartBone(NAME_None);
+			Controller.BroadcastNeedsReinitialized();
+		}
+		else
+		{
+			bApplied = bEndBone ? Controller.SetEndBone(RequestedBone, SolverIndex)
+				: Controller.SetStartBone(RequestedBone, SolverIndex);
+		}
+		const FName ActualBone = Read();
+		if (!bApplied || ActualBone != RequestedBone)
+		{
+			UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic;
+			Diagnostic.Code = bApplied ? TEXT("ik_rig_solver_bone_readback_mismatch")
+				: TEXT("ik_rig_solver_bone_apply_failed");
+			Diagnostic.Stage = TEXT("native_apply");
+			Diagnostic.PropertyPath = Field;
+			Diagnostic.SourceKind = TEXT("native_result");
+            Diagnostic.PublicMessage = TEXT("The native solver bone does not match the requested bone.");
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(RequestedBone.ToString());
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(ActualBone.ToString());
+			if (!bApplied) { OutError = Diagnostic; return false; }
+			UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Diagnostic);
+		}
+		return true;
+	}
+
+	namespace
+	{
+		bool RetargetValueFailure(const TCHAR* Code, const FString& Reason, const FString& NativePath,
+			const TSharedPtr<FJsonValue>& Expected, const TSharedPtr<FJsonValue>& Actual,
+			const UE::UAI::Contract::FSourceLocation& Source, const FString& TargetPath,
+			UE::UAI::Contract::FDiagnostic& OutError)
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_apply"));
+			OutError.PropertyPath = NativePath;
+			OutError.Source = Source;
+			OutError.SourceKind = IKDiagnosticSourceKind(Source);
+			OutError.TargetPath = TargetPath;
+			OutError.ExpectedValue = Expected;
+			OutError.ActualValue = Actual;
+			return false;
+		}
+
+		FString RetargetPointerToken(FString Value)
+		{
+			Value.ReplaceInline(TEXT("~"), TEXT("~0"));
+			Value.ReplaceInline(TEXT("/"), TEXT("~1"));
+			return Value;
+		}
+
+		FString RetargetPosePath(const ERetargetSourceOrTarget Side, const FName PoseName)
+		{
+			return FString(TEXT("/poses/")) + SourceOrTargetToString(Side)
+				+ TEXT("/poses/") + RetargetPointerToken(PoseName.ToString());
+		}
+
+		template<typename T>
+		TSharedPtr<FJsonValue> EncodeRetargetValue(const T& Value)
+		{
+			return UeAgentPropertyValueCodec::EncodeStructValue(
+				TBaseStructure<T>::Get(), &Value, nullptr, UeAgentPropertyValueCodec::FOptions());
+		}
+	}
+
+	bool VerifyRetargetChainMapping(UIKRetargeterController& Controller,
+		const FName SourceChain, const FName TargetChain, const FName OpName, UE::UAI::Contract::FDiagnostic& OutError,
+		const FRetargetMappingDiagnosticSource& Source)
+	{
+		bool bFound = false;
+		for (int32 Index = 0; Index < Controller.GetNumRetargetOps(); ++Index)
+		{
+			FIKRetargetOpBase* Op = Controller.GetRetargetOpByIndex(Index);
+			if (!Op || (!OpName.IsNone() && Op->GetName() != OpName)) continue;
+			const FRetargetChainMapping* Mapping = Op->GetChainMapping();
+			if (!Mapping || !Mapping->HasChain(TargetChain, ERetargetSourceOrTarget::Target)) continue;
+			bFound = true;
+			const FName Actual = Mapping->GetChainMappedTo(TargetChain, ERetargetSourceOrTarget::Target);
+			if (Actual != SourceChain)
+				return RetargetValueFailure(TEXT("ik_retargeter_mapping_readback_mismatch"),
+					FString::Printf(TEXT("Retarget operation '%s' maps target chain '%s' to a different source chain than requested."),
+						*Op->GetName().ToString(), *TargetChain.ToString()),
+					TEXT("/mappings/") + RetargetPointerToken(Op->GetName().ToString() + TEXT(":")
+						+ TargetChain.ToString()) + TEXT("/source_chain"),
+					MakeShared<FJsonValueString>(SourceChain.ToString()),
+					MakeShared<FJsonValueString>(Actual.ToString()), Source.SourceChain, Source.TargetPath, OutError);
+		}
+		if (!bFound)
+			return RetargetValueFailure(TEXT("ik_retargeter_mapping_target_unavailable"),
+				FString::Printf(TEXT("No selected retarget operation provides target chain '%s' for mapping."), *TargetChain.ToString()),
+				TEXT("/mappings/") + RetargetPointerToken(OpName.ToString() + TEXT(":")
+					+ TargetChain.ToString()), MakeShared<FJsonValueString>(TargetChain.ToString()),
+				MakeShared<FJsonValueNull>(), Source.TargetChain, Source.TargetPath, OutError);
+		return true;
+	}
+
+	bool ApplyRetargetChainMapping(UIKRetargeterController& Controller,
+		const FName SourceChain, const FName TargetChain, const FName OpName, UE::UAI::Contract::FDiagnostic& OutError,
+		const FRetargetMappingDiagnosticSource& Source)
+	{
+		// HasChain(Source) searches existing mappings, not the rig's declared
+		// chains. A valid newly mapped source must be checked against the rig.
+		const UIKRigDefinition* SourceRig = Controller.GetIKRig(ERetargetSourceOrTarget::Source);
+		const bool bSourceExists = !SourceRig || SourceChain.IsNone()
+			|| SourceRig->GetRetargetChainNames().Contains(SourceChain);
+		for (int32 Index = 0; Index < Controller.GetNumRetargetOps(); ++Index)
+		{
+			FIKRetargetOpBase* Op = Controller.GetRetargetOpByIndex(Index);
+			if (!Op || (!OpName.IsNone() && Op->GetName() != OpName)) continue;
+			FRetargetChainMapping* Mapping = Op->GetChainMapping();
+			if (!Mapping || !Mapping->HasChain(TargetChain, ERetargetSourceOrTarget::Target)) continue;
+			// Native cleanup deliberately retains unresolved mappings until both
+			// rigs exist. Preserve that configuration lifecycle as well.
+			if (!bSourceExists && Mapping->GetIKRig(ERetargetSourceOrTarget::Target))
+				return RetargetValueFailure(TEXT("ik_retargeter_mapping_source_unavailable"),
+					FString::Printf(TEXT("Source chain '%s' is not declared by the source IK Rig for target chain '%s'."),
+						*SourceChain.ToString(), *TargetChain.ToString()),
+					TEXT("/mappings/") + RetargetPointerToken(Op->GetName().ToString() + TEXT(":")
+						+ TargetChain.ToString()) + TEXT("/source_chain"),
+					MakeShared<FJsonValueString>(SourceChain.ToString()), MakeShared<FJsonValueNull>(), Source.SourceChain, Source.TargetPath, OutError);
+		}
+		if (!Controller.SetSourceChain(SourceChain, TargetChain, OpName))
+			return RetargetValueFailure(TEXT("ik_retargeter_mapping_apply_failed"),
+				FString::Printf(TEXT("The retargeter controller rejected mapping source chain '%s' to target chain '%s'."),
+					*SourceChain.ToString(), *TargetChain.ToString()),
+				TEXT("/mappings/") + RetargetPointerToken(OpName.ToString() + TEXT(":")
+					+ TargetChain.ToString()), MakeShared<FJsonValueString>(SourceChain.ToString()),
+				MakeShared<FJsonValueNull>(), Source.Mapping, Source.TargetPath, OutError);
+		return VerifyRetargetChainMapping(Controller, SourceChain, TargetChain, OpName, OutError, Source);
+	}
+
+	bool ApplyRetargetPoseRotation(UIKRetargeterController& Controller,
+		const ERetargetSourceOrTarget Side, const FName Bone, const FQuat& Rotation, UE::UAI::Contract::FDiagnostic& OutError,
+		const FRetargetPoseDiagnosticSource& Source)
+	{
+		const FString Path = RetargetPosePath(Side, Controller.GetCurrentRetargetPoseName(Side))
+			+ TEXT("/bone_rotations/") + RetargetPointerToken(Bone.ToString());
+		const UIKRigDefinition* Rig = Controller.GetIKRig(Side);
+		// The native setter dereferences the rig; CleanPoseList removes unknown bones.
+		if (!Rig || !Rig->GetSkeleton().BoneNames.Contains(Bone))
+			return RetargetValueFailure(!Rig ? TEXT("ik_retargeter_pose_rig_unavailable")
+				: TEXT("ik_retargeter_pose_bone_unavailable"),
+				!Rig ? FString::Printf(TEXT("The %s IK Rig is unavailable while applying the pose rotation for bone '%s'."),
+					SourceOrTargetToString(Side), *Bone.ToString())
+					: FString::Printf(TEXT("Bone '%s' does not exist in the %s IK Rig skeleton."), *Bone.ToString(), SourceOrTargetToString(Side)), Path,
+				MakeShared<FJsonValueString>(Bone.ToString()), MakeShared<FJsonValueNull>(),
+				Source.BoneRotations.FindRef(Bone), Source.TargetPath, OutError);
+		Controller.SetRotationOffsetForRetargetPoseBone(Bone, Rotation, Side);
+		const FQuat Actual = Controller.GetRotationOffsetForRetargetPoseBone(Bone, Side);
+		if (!Actual.Equals(Rotation, 0.0))
+			return RetargetValueFailure(TEXT("ik_retargeter_pose_rotation_readback_mismatch"),
+				FString::Printf(TEXT("The %s pose rotation read back for bone '%s' differs from the requested rotation."),
+					SourceOrTargetToString(Side), *Bone.ToString()), Path,
+				EncodeRetargetValue(Rotation), EncodeRetargetValue(Actual), Source.BoneRotations.FindRef(Bone), Source.TargetPath, OutError);
+		return true;
+	}
+
+	bool ApplyRetargetPoseRootTranslation(UIKRetargeterController& Controller,
+		const ERetargetSourceOrTarget Side, const FVector& Translation, UE::UAI::Contract::FDiagnostic& OutError,
+		const FRetargetPoseDiagnosticSource& Source)
+	{
+		const FString Path = RetargetPosePath(Side, Controller.GetCurrentRetargetPoseName(Side))
+			+ TEXT("/root_translation");
+		if (Translation.X != 0.0 || Translation.Y != 0.0)
+			return RetargetValueFailure(TEXT("ik_retargeter_pose_horizontal_root_translation_unsupported"),
+				TEXT("Retarget pose root translation supports only the Z component; X and Y must be zero."),
+				Path, EncodeRetargetValue(FVector(0.0, 0.0, Translation.Z)), EncodeRetargetValue(Translation),
+				Source.RootTranslation, Source.TargetPath, OutError);
+		// Native SetRootOffsetInRetargetPose adds a delta; this edit supplies the total.
+		Controller.GetCurrentRetargetPose(Side).SetRootTranslationDelta(Translation);
+		const FVector Actual = Controller.GetRootOffsetInRetargetPose(Side);
+		if (Actual != Translation)
+			return RetargetValueFailure(TEXT("ik_retargeter_pose_root_readback_mismatch"),
+				FString::Printf(TEXT("The %s retarget pose root translation read back differs from the requested translation."), SourceOrTargetToString(Side)),
+				Path, EncodeRetargetValue(Translation), EncodeRetargetValue(Actual), Source.RootTranslation, Source.TargetPath, OutError);
+		return true;
+	}
+
+	bool VerifyRetargetPose(UIKRetargeterController& Controller,
+		const ERetargetSourceOrTarget Side, const FName PoseName, const FVector& RootTranslation,
+		const TMap<FName, FQuat>& BoneRotations, UE::UAI::Contract::FDiagnostic& OutError,
+		const FRetargetPoseDiagnosticSource& Source)
+	{
+		const FString Path = RetargetPosePath(Side, PoseName);
+		const FIKRetargetPose* Pose = Controller.GetRetargetPoses(Side).Find(PoseName);
+		if (!Pose)
+			return RetargetValueFailure(TEXT("ik_retargeter_pose_readback_missing"),
+				FString::Printf(TEXT("Requested %s retarget pose '%s' is missing after native cleanup."),
+					SourceOrTargetToString(Side), *PoseName.ToString()), Path,
+				MakeShared<FJsonValueString>(PoseName.ToString()), MakeShared<FJsonValueNull>(), Source.Pose, Source.TargetPath, OutError);
+		if (Pose->GetRootTranslationDelta() != RootTranslation)
+			return RetargetValueFailure(TEXT("ik_retargeter_pose_root_readback_mismatch"),
+				FString::Printf(TEXT("The root translation of %s retarget pose '%s' changed during native cleanup."),
+					SourceOrTargetToString(Side), *PoseName.ToString()),
+				Path + TEXT("/root_translation"), EncodeRetargetValue(RootTranslation),
+				EncodeRetargetValue(Pose->GetRootTranslationDelta()), Source.RootTranslation, Source.TargetPath, OutError);
+		const TMap<FName, FQuat>& ActualRotations = Pose->GetAllDeltaRotations();
+		for (const auto& Pair : BoneRotations)
+		{
+			const FQuat* Actual = ActualRotations.Find(Pair.Key);
+			if (!Actual || !Actual->Equals(Pair.Value, 0.0))
+				return RetargetValueFailure(TEXT("ik_retargeter_pose_rotation_readback_mismatch"),
+					FString::Printf(TEXT("Bone '%s' in %s retarget pose '%s' has a missing or changed rotation after native cleanup."),
+						*Pair.Key.ToString(), SourceOrTargetToString(Side), *PoseName.ToString()),
+					Path + TEXT("/bone_rotations/") + RetargetPointerToken(Pair.Key.ToString()),
+					EncodeRetargetValue(Pair.Value), Actual ? EncodeRetargetValue(*Actual)
+						: MakeShared<FJsonValueNull>(), Source.BoneRotations.FindRef(Pair.Key), Source.TargetPath, OutError);
+		}
+		if (ActualRotations.Num() != BoneRotations.Num())
+		{
+			const auto Unexpected = MakeShared<FJsonObject>();
+			for (const auto& Pair : ActualRotations)
+				if (!BoneRotations.Contains(Pair.Key)) Unexpected->SetField(Pair.Key.ToString(), EncodeRetargetValue(Pair.Value));
+			return RetargetValueFailure(TEXT("ik_retargeter_pose_rotation_count_mismatch"),
+				FString::Printf(TEXT("The %s retarget pose '%s' contains unexpected bone rotations after native cleanup (%d entries, expected %d)."),
+					SourceOrTargetToString(Side), *PoseName.ToString(), ActualRotations.Num(), BoneRotations.Num()),
+				Path + TEXT("/bone_rotations"), MakeShared<FJsonValueObject>(MakeShared<FJsonObject>()),
+				MakeShared<FJsonValueObject>(Unexpected), Source.Rotations, Source.TargetPath, OutError);
+		}
+		return true;
+	}
+
 	FString NormalizeAssetPath(const FString& InPath)
 	{
 		FString OutPath = InPath;
@@ -132,52 +456,24 @@ namespace UeAgentIKAssetOps
 		return Cast<USkeletalMesh>(LoadAssetObject(InPath));
 	}
 
-	UObject* CreateAssetWithFactory(const FString& AssetPath, UClass* AssetClass, UFactory* Factory, FString& OutError)
-	{
-		const FString NormalizedAssetPath = NormalizeAssetPath(AssetPath);
-		if (!FPackageName::IsValidLongPackageName(NormalizedAssetPath))
-		{
-			OutError = TEXT("invalid_asset_path");
-			return nullptr;
-		}
-
-		const FString AssetName = FPackageName::GetLongPackageAssetName(NormalizedAssetPath);
-		const FString PackagePath = FPackageName::GetLongPackagePath(NormalizedAssetPath);
-		if (AssetName.IsEmpty() || PackagePath.IsEmpty())
-		{
-			OutError = TEXT("invalid_asset_path");
-			return nullptr;
-		}
-
-		if (LoadAssetObject(NormalizedAssetPath))
-		{
-			OutError = TEXT("asset_already_exists");
-			return nullptr;
-		}
-
-		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-		UObject* NewAsset = AssetToolsModule.Get().CreateAsset(AssetName, PackagePath, AssetClass, Factory);
-		if (!NewAsset)
-		{
-			OutError = TEXT("create_asset_failed");
-			return nullptr;
-		}
-		return NewAsset;
-	}
-
-	bool SaveAssetPackage(UObject* Asset, FString& OutError)
+	bool SaveAssetPackage(UObject* Asset, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!Asset)
 		{
-			OutError = TEXT("asset_not_found");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_not_found"),
+				TEXT("The asset cannot be saved because its native object is unavailable."), TEXT("asset_save"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("asset_available");
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 			return false;
 		}
 
 		TArray<UPackage*> PackagesToSave;
 		PackagesToSave.Add(Asset->GetOutermost());
-		if (!UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, false))
+		if (!UE::UAI::EditorResources::SavePackages(PackagesToSave, false, OutError))
 		{
-			OutError = TEXT("save_asset_failed");
+			OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("save_asset_failed"), OutError, TEXT(""));
 			return false;
 		}
 		return true;
@@ -199,7 +495,7 @@ namespace UeAgentIKAssetOps
 			}
 		}
 		Out.TrimStartAndEndInline();
-		return Out.IsEmpty() ? TEXT("probe") : Out.Left(64);
+		return Out.IsEmpty() ? TEXT("probe") : Out;
 	}
 
 	FString MakeProbeArtifactPath(const FString& Ext, const FString& RequestId, const FString& Suffix)
@@ -274,26 +570,40 @@ namespace UeAgentIKAssetOps
 		return Values;
 	}
 
-	bool TryGetVectorObject(const TSharedPtr<FJsonObject>& Obj, const FString& Key, FVector& OutValue)
+	bool ApplyVectorField(const TSharedPtr<FJsonObject>& Obj, const FString& Key, FVector& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, Key);
 		if (!FieldValue)
 		{
-			return false;
+			return true;
 		}
 
-		return UeAgentJsonDiagnostics::TryReadVectorValue(*FieldValue, OutValue);
+		FVector Decoded = OutValue;
+		if (!UeAgentJsonDiagnostics::TryReadVectorValue(*FieldValue, Decoded, OutError))
+		{
+			UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, TEXT("/") + Key);
+			return false;
+		}
+		OutValue = Decoded;
+		return true;
 	}
 
-	bool TryGetRotatorObject(const TSharedPtr<FJsonObject>& Obj, const FString& Key, FRotator& OutValue)
+	bool ApplyRotatorField(const TSharedPtr<FJsonObject>& Obj, const FString& Key, FRotator& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, Key);
 		if (!FieldValue)
 		{
-			return false;
+			return true;
 		}
 
-		return UeAgentJsonDiagnostics::TryReadRotatorValue(*FieldValue, OutValue);
+		FRotator Decoded = OutValue;
+		if (!UeAgentJsonDiagnostics::TryReadRotatorValue(*FieldValue, Decoded, OutError))
+		{
+			UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, TEXT("/") + Key);
+			return false;
+		}
+		OutValue = Decoded;
+		return true;
 	}
 
 	const TCHAR* SourceOrTargetToString(const ERetargetSourceOrTarget Value)
@@ -812,7 +1122,7 @@ namespace UeAgentIKAssetOps
 		return Item;
 	}
 
-	bool ApplyBodyMoverSolverSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FIKRigBodyMoverSettings& Settings, FString& OutError)
+	bool ApplyBodyMoverSolverSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FIKRigBodyMoverSettings& Settings, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!SettingsObject.IsValid())
 		{
@@ -833,7 +1143,7 @@ namespace UeAgentIKAssetOps
 		return true;
 	}
 
-	bool ApplyPBIKPrePullSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FRootPrePullSettings& Settings, FString& OutError)
+	bool ApplyPBIKPrePullSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FRootPrePullSettings& Settings, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!SettingsObject.IsValid())
 		{
@@ -851,7 +1161,7 @@ namespace UeAgentIKAssetOps
 		return true;
 	}
 
-	bool ApplyFBIKSolverSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FIKRigFBIKSettings& Settings, FString& OutError)
+	bool ApplyFBIKSolverSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FIKRigFBIKSettings& Settings, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!SettingsObject.IsValid())
 		{
@@ -878,7 +1188,16 @@ namespace UeAgentIKAssetOps
 		{
 			if (!ParsePBIKRootBehavior(RootBehaviorText, Settings.RootBehavior))
 			{
-				OutError = TEXT("invalid_pbik_root_behavior");
+				TArray<TSharedPtr<FJsonValue>> Allowed;
+				for (const TCHAR* Name : {TEXT(""), TEXT("pre_pull"), TEXT("pin_to_input"), TEXT("pin"), TEXT("free")})
+					Allowed.Add(MakeShared<FJsonValueString>(Name));
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("invalid_pbik_root_behavior"),
+					TEXT("root_behavior"), MakeShared<FJsonValueArray>(MoveTemp(Allowed)),
+					MakeShared<FJsonValueString>(RootBehaviorText), TEXT("input_decode"),
+					TEXT("Root behavior does not select a supported PBIK mode after ignoring case, spaces, underscores and hyphens."));
+				OutError.SourceKind = TEXT("authored_value");
+				OutError.Source.InternalJsonPath = TEXT("/root_behavior");
+				UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *SettingsObject, TEXT("root_behavior"));
 				return false;
 			}
 		}
@@ -987,7 +1306,7 @@ namespace UeAgentIKAssetOps
 		return Item;
 	}
 
-	bool ApplyRetargetRootSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FTargetRootSettings& Settings, FString& OutError)
+	bool ApplyRetargetRootSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FTargetRootSettings& Settings, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!SettingsObject.IsValid())
 		{
@@ -997,17 +1316,17 @@ namespace UeAgentIKAssetOps
 		SettingsObject->TryGetNumberField(TEXT("rotation_alpha"), Settings.RotationAlpha);
 		SettingsObject->TryGetNumberField(TEXT("translation_alpha"), Settings.TranslationAlpha);
 		SettingsObject->TryGetNumberField(TEXT("blend_to_source"), Settings.BlendToSource);
-		TryGetVectorObject(SettingsObject, TEXT("blend_to_source_weights"), Settings.BlendToSourceWeights);
+		if (!ApplyVectorField(SettingsObject, TEXT("blend_to_source_weights"), Settings.BlendToSourceWeights, OutError)) return false;
 		SettingsObject->TryGetNumberField(TEXT("scale_horizontal"), Settings.ScaleHorizontal);
 		SettingsObject->TryGetNumberField(TEXT("scale_vertical"), Settings.ScaleVertical);
-		TryGetVectorObject(SettingsObject, TEXT("translation_offset"), Settings.TranslationOffset);
-		TryGetRotatorObject(SettingsObject, TEXT("rotation_offset"), Settings.RotationOffset);
+		if (!ApplyVectorField(SettingsObject, TEXT("translation_offset"), Settings.TranslationOffset, OutError)
+			|| !ApplyRotatorField(SettingsObject, TEXT("rotation_offset"), Settings.RotationOffset, OutError)) return false;
 		SettingsObject->TryGetNumberField(TEXT("affect_ik_horizontal"), Settings.AffectIKHorizontal);
 		SettingsObject->TryGetNumberField(TEXT("affect_ik_vertical"), Settings.AffectIKVertical);
 		return true;
 	}
 
-	bool ApplyRetargetGlobalSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FRetargetGlobalSettings& Settings, FString& OutError)
+	bool ApplyRetargetGlobalSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FRetargetGlobalSettings& Settings, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!SettingsObject.IsValid())
 		{
@@ -1034,7 +1353,12 @@ namespace UeAgentIKAssetOps
 		{
 			if (!ParseWarpingDirectionSource(DirectionSourceText, Settings.DirectionSource))
 			{
-				OutError = TEXT("invalid_warping_direction_source");
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("invalid_warping_direction_source"), TEXT("/direction_source"),
+                    MakeShared<FJsonValueString>(TEXT("goals, chain, root_bone (aliases: goal, root)")), MakeShared<FJsonValueString>(DirectionSourceText),
+                    TEXT("input_decode"), TEXT("Unsupported direction_source value."));
+                OutError.SourceKind = TEXT("authored_value");
+                OutError.Source.InternalJsonPath = TEXT("/direction_source");
+                UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *SettingsObject, TEXT("direction_source"));
 				return false;
 			}
 		}
@@ -1044,7 +1368,12 @@ namespace UeAgentIKAssetOps
 		{
 			if (!ParseBasicAxis(ForwardDirectionText, Settings.ForwardDirection))
 			{
-				OutError = TEXT("invalid_forward_direction");
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("invalid_forward_direction"), TEXT("/forward_direction"),
+                    MakeShared<FJsonValueString>(TEXT("x, y, z, -x, -y, -z (aliases: +x, +y, +z, forward, negx, negy, negz)")), MakeShared<FJsonValueString>(ForwardDirectionText),
+                    TEXT("input_decode"), TEXT("Unsupported forward_direction value."));
+                OutError.SourceKind = TEXT("authored_value");
+                OutError.Source.InternalJsonPath = TEXT("/forward_direction");
+                UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *SettingsObject, TEXT("forward_direction"));
 				return false;
 			}
 		}
@@ -1061,7 +1390,7 @@ namespace UeAgentIKAssetOps
 		return true;
 	}
 
-	bool ApplyRetargetChainFKSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FTargetChainFKSettings& Settings, FString& OutError)
+	bool ApplyRetargetChainFKSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FTargetChainFKSettings& Settings, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!SettingsObject.IsValid())
 		{
@@ -1075,7 +1404,12 @@ namespace UeAgentIKAssetOps
 		{
 			if (!ParseRetargetRotationMode(RotationModeText, Settings.RotationMode))
 			{
-				OutError = TEXT("invalid_retarget_rotation_mode");
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("invalid_retarget_rotation_mode"), TEXT("/rotation_mode"),
+                    MakeShared<FJsonValueString>(TEXT("interpolated, one_to_one, one_to_one_reversed, match_chain, match_scaled_chain, none")), MakeShared<FJsonValueString>(RotationModeText),
+                    TEXT("input_decode"), TEXT("Unsupported rotation_mode value."));
+                OutError.SourceKind = TEXT("authored_value");
+                OutError.Source.InternalJsonPath = TEXT("/rotation_mode");
+                UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *SettingsObject, TEXT("rotation_mode"));
 				return false;
 			}
 		}
@@ -1085,7 +1419,12 @@ namespace UeAgentIKAssetOps
 		{
 			if (!ParseRetargetTranslationMode(TranslationModeText, Settings.TranslationMode))
 			{
-				OutError = TEXT("invalid_retarget_translation_mode");
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("invalid_retarget_translation_mode"), TEXT("/translation_mode"),
+                    MakeShared<FJsonValueString>(TEXT("none, globally_scaled, absolute, stretch_bone_length_uniformly, stretch_bone_length_non_uniformly")), MakeShared<FJsonValueString>(TranslationModeText),
+                    TEXT("input_decode"), TEXT("Unsupported translation_mode value."));
+                OutError.SourceKind = TEXT("authored_value");
+                OutError.Source.InternalJsonPath = TEXT("/translation_mode");
+                UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *SettingsObject, TEXT("translation_mode"));
 				return false;
 			}
 		}
@@ -1098,7 +1437,7 @@ namespace UeAgentIKAssetOps
 		return true;
 	}
 
-	bool ApplyRetargetChainIKSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FTargetChainIKSettings& Settings, FString& OutError)
+	bool ApplyRetargetChainIKSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FTargetChainIKSettings& Settings, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!SettingsObject.IsValid())
 		{
@@ -1109,17 +1448,17 @@ namespace UeAgentIKAssetOps
 		SettingsObject->TryGetNumberField(TEXT("blend_to_source"), Settings.BlendToSource);
 		SettingsObject->TryGetNumberField(TEXT("blend_to_source_translation"), Settings.BlendToSourceTranslation);
 		SettingsObject->TryGetNumberField(TEXT("blend_to_source_rotation"), Settings.BlendToSourceRotation);
-		TryGetVectorObject(SettingsObject, TEXT("blend_to_source_weights"), Settings.BlendToSourceWeights);
-		TryGetVectorObject(SettingsObject, TEXT("static_offset"), Settings.StaticOffset);
-		TryGetVectorObject(SettingsObject, TEXT("static_local_offset"), Settings.StaticLocalOffset);
-		TryGetRotatorObject(SettingsObject, TEXT("static_rotation_offset"), Settings.StaticRotationOffset);
+		if (!ApplyVectorField(SettingsObject, TEXT("blend_to_source_weights"), Settings.BlendToSourceWeights, OutError)
+			|| !ApplyVectorField(SettingsObject, TEXT("static_offset"), Settings.StaticOffset, OutError)
+			|| !ApplyVectorField(SettingsObject, TEXT("static_local_offset"), Settings.StaticLocalOffset, OutError)
+			|| !ApplyRotatorField(SettingsObject, TEXT("static_rotation_offset"), Settings.StaticRotationOffset, OutError)) return false;
 		SettingsObject->TryGetNumberField(TEXT("scale_vertical"), Settings.ScaleVertical);
 		SettingsObject->TryGetNumberField(TEXT("extension"), Settings.Extension);
 		SettingsObject->TryGetBoolField(TEXT("affected_by_ik_warping"), Settings.bAffectedByIKWarping);
 		return true;
 	}
 
-	bool ApplyRetargetChainSpeedPlantSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FTargetChainSpeedPlantSettings& Settings, FString& OutError)
+	bool ApplyRetargetChainSpeedPlantSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FTargetChainSpeedPlantSettings& Settings, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!SettingsObject.IsValid())
 		{
@@ -1140,7 +1479,7 @@ namespace UeAgentIKAssetOps
 		return true;
 	}
 
-	bool ApplyRetargetChainSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FTargetChainSettings& Settings, FString& OutError)
+	bool ApplyRetargetChainSettingsPatch(const TSharedPtr<FJsonObject>& SettingsObject, FTargetChainSettings& Settings, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!SettingsObject.IsValid())
 		{

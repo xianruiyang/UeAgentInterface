@@ -1,6 +1,8 @@
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonImportInitialization.h"
 
 #include "Core/ContextResource/UeAgentContextResource.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 THIRD_PARTY_INCLUDES_START
 #include <openssl/sha.h>
@@ -79,14 +81,23 @@ namespace UE::UAI::HjsonWorkspace
 			return !LexToString(Kind).IsEmpty();
 		}
 
+		Contract::FDiagnostic InitializationFailure(const TCHAR* Code, FString Reason, FString Path)
+		{
+			auto Error = Contract::FDiagnostic::Failure(Code, MoveTemp(Reason), TEXT("import_initialization"));
+			Error.PropertyPath = MoveTemp(Path);
+			Error.SourceKind = TEXT("native_result");
+			return Error;
+		}
+
 		void SetFallbackError(
 			FWorkspaceError& Error,
 			const TCHAR* Code,
+			const TCHAR* Reason,
 			const FString& Source = FString())
 		{
 			if (Error.GetCode().IsEmpty())
 			{
-				Error.Set(Code, Source);
+				Error.SetFailure(Contract::FDiagnostic::Failure(Code, Reason, TEXT("import_initialization")), Source);
 			}
 		}
 
@@ -95,7 +106,7 @@ namespace UE::UAI::HjsonWorkspace
 			const TMap<EUeAgentResourceDimension, int64>& Amounts,
 			FWorkspaceError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded ResourceError;
+			FUeAgentResourceChargeError ResourceError;
 			if (Resources.TryChargeMany(
 				Amounts,
 				TEXT("hjson.import.initialization_plan"),
@@ -103,13 +114,17 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return true;
 			}
-			OutError.Set(
-				ResourceError.Code,
-				ResourceError.Path,
-				TEXT("/"),
-				ResourceError.Observed,
-				ResourceError.bStoppedEarly);
+			OutError.SetFailure(MoveTemp(ResourceError));
 			return false;
+		}
+
+		TSharedRef<FJsonValue> RevisionEvidence(const FUeAgentStateRevision& Revision)
+		{
+			auto Object = MakeShared<FJsonObject>();
+			Object->SetStringField(TEXT("source_id"), Revision.GetSourceId());
+			Object->SetStringField(TEXT("generation"), Revision.GetGeneration());
+			Object->SetStringField(TEXT("sequence"), FString::Printf(TEXT("%lld"), Revision.GetSequence()));
+			return MakeShared<FJsonValueObject>(Object);
 		}
 
 		FString EdgeKey(const FInitializationEdge& Edge)
@@ -327,10 +342,28 @@ namespace UE::UAI::HjsonWorkspace
 		, CandidateBindingRevision(
 			Normalize(MoveTemp(InCandidateBindingRevision)))
 	{
-		bValid = !ChangeId.IsEmpty()
-			&& IsChangeKindValid(Kind)
-			&& !TargetIdentity.IsEmpty()
-			&& CandidateName.IsEmpty() == CandidateBindingRevision.IsEmpty();
+		if (ChangeId.IsEmpty())
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_change_invalid"), TEXT("An import change requires a non-empty identifier."), TEXT("/change_id"));
+		else if (!IsChangeKindValid(Kind))
+		{
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_change_invalid"), TEXT("The import change kind is unsupported."), TEXT("/kind"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Kind));
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("create, delete, replace, clear, reorder, connect, disconnect, set_value, set_null, restore_default, remove"));
+		}
+		else if (TargetIdentity.IsEmpty())
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_change_invalid"), TEXT("An import change requires a target."), TEXT("/target"));
+		else if (CandidateName.IsEmpty() != CandidateBindingRevision.IsEmpty())
+		{
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_change_invalid"),
+				CandidateName.IsEmpty() ? TEXT("A candidate binding revision requires its candidate name.") : TEXT("A named candidate requires its binding revision."),
+				CandidateName.IsEmpty() ? TEXT("/candidate_name") : TEXT("/candidate_binding_revision"));
+			ValidationDiagnostic.CandidateName = CandidateName;
+		}
+		if (!ValidationDiagnostic.IsEmpty())
+		{
+			ValidationDiagnostic.TargetPath = TargetIdentity;
+			ValidationDiagnostic.SubjectId = ChangeId;
+		}
 	}
 
 	const FString& FImportChange::GetChangeId() const { return ChangeId; }
@@ -339,7 +372,7 @@ namespace UE::UAI::HjsonWorkspace
 	const FString& FImportChange::GetCandidateName() const { return CandidateName; }
 	const FString& FImportChange::GetCandidateBindingRevision() const { return CandidateBindingRevision; }
 	bool FImportChange::HasCandidate() const { return !CandidateName.IsEmpty(); }
-	bool FImportChange::IsValid() const { return bValid; }
+	bool FImportChange::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	FInitializationNode::FInitializationNode(
 		FString InNodeId,
@@ -352,17 +385,26 @@ namespace UE::UAI::HjsonWorkspace
 		, InitializationContractId(
 			Normalize(MoveTemp(InInitializationContractId)))
 	{
-		bValid = !NodeId.IsEmpty()
-			&& IsNodeRoleValid(Role)
-			&& !TypeIdentity.IsEmpty()
-			&& !InitializationContractId.IsEmpty();
+		if (NodeId.IsEmpty())
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_initialization_node_invalid"), TEXT("An initialization node requires a non-empty identifier."), TEXT("/node_id"));
+		else if (!IsNodeRoleValid(Role))
+		{
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_initialization_node_invalid"), TEXT("The initialization node role is unsupported."), TEXT("/role"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Role));
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("root_target, owned_object, value, container_item, existing_reference, pending_reference"));
+		}
+		else if (TypeIdentity.IsEmpty())
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_initialization_node_invalid"), TEXT("An initialization node requires a type."), TEXT("/type_identity"));
+		else if (InitializationContractId.IsEmpty())
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_initialization_node_invalid"), TEXT("An initialization node requires an initialization contract."), TEXT("/initialization_contract_id"));
+		if (!ValidationDiagnostic.IsEmpty()) ValidationDiagnostic.SubjectId = NodeId;
 	}
 
 	const FString& FInitializationNode::GetNodeId() const { return NodeId; }
 	EInitializationNodeRole FInitializationNode::GetRole() const { return Role; }
 	const FString& FInitializationNode::GetTypeIdentity() const { return TypeIdentity; }
 	const FString& FInitializationNode::GetInitializationContractId() const { return InitializationContractId; }
-	bool FInitializationNode::IsValid() const { return bValid; }
+	bool FInitializationNode::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	FInitializationEdge::FInitializationEdge(
 		FString InFromNodeId,
@@ -372,17 +414,27 @@ namespace UE::UAI::HjsonWorkspace
 		, ToNodeId(Normalize(MoveTemp(InToNodeId)))
 		, Kind(InKind)
 	{
-		bValid = !FromNodeId.IsEmpty()
-			&& !ToNodeId.IsEmpty()
-			&& IsEdgeKindValid(Kind)
-			&& (Kind == EInitializationEdgeKind::Reference
-				|| FromNodeId != ToNodeId);
+		if (FromNodeId.IsEmpty() || ToNodeId.IsEmpty())
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_initialization_edge_invalid"),
+				FromNodeId.IsEmpty() ? TEXT("An initialization dependency requires a source node.") : TEXT("An initialization dependency requires a destination node."),
+				FromNodeId.IsEmpty() ? TEXT("/from_node_id") : TEXT("/to_node_id"));
+		else if (!IsEdgeKindValid(Kind))
+		{
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_initialization_edge_invalid"), TEXT("The initialization dependency kind is unsupported."), TEXT("/kind"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Kind));
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("ownership, creation_dependency, reference"));
+		}
+		else if (Kind != EInitializationEdgeKind::Reference && FromNodeId == ToNodeId)
+		{
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_initialization_edge_invalid"), TEXT("An ownership or creation dependency cannot reference its own node."), TEXT("/to_node_id"));
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(ToNodeId);
+		}
 	}
 
 	const FString& FInitializationEdge::GetFromNodeId() const { return FromNodeId; }
 	const FString& FInitializationEdge::GetToNodeId() const { return ToNodeId; }
 	EInitializationEdgeKind FInitializationEdge::GetKind() const { return Kind; }
-	bool FInitializationEdge::IsValid() const { return bValid; }
+	bool FInitializationEdge::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	FImportInitializationPlanningRequest::FImportInitializationPlanningRequest(
 		const EImportSourceCarrier InCarrier,
@@ -413,13 +465,28 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			Scope = Normalize(MoveTemp(Scope));
 		}
-		bValid = IsCarrierValid(Carrier)
-			&& Model->IsValid()
-			&& !TargetIdentity.IsEmpty()
-			&& ExpectedTargetRevision.IsValid()
-			&& IsFingerprint(SourceBaselineFingerprint)
-			&& IsFingerprint(ManifestFingerprint)
-			&& !AuthorizationId.IsEmpty();
+		if (!IsCarrierValid(Carrier))
+		{
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_planning_request_invalid"), TEXT("The import source carrier must be directory, multi_file, single_file or inline."), TEXT("/carrier"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Carrier));
+		}
+		else if (!Model->IsValid())
+			ValidationDiagnostic = Contract::FDiagnostic::WrapFailure(TEXT("hjson_import_planning_request_invalid"), Model->GetValidationDiagnostic());
+		else if (TargetIdentity.IsEmpty())
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_planning_request_invalid"), TEXT("The import planning request requires a target."), TEXT("/target"));
+		else if (!ExpectedTargetRevision.IsValid())
+			ValidationDiagnostic = Contract::FDiagnostic::WrapFailure(TEXT("hjson_import_planning_request_invalid"), ExpectedTargetRevision.GetValidationDiagnostic());
+		else if (!IsFingerprint(SourceBaselineFingerprint) || !IsFingerprint(ManifestFingerprint))
+		{
+			const bool bBaselineInvalid = !IsFingerprint(SourceBaselineFingerprint);
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_planning_request_invalid"),
+				bBaselineInvalid ? TEXT("The import source baseline fingerprint is not a SHA-256 digest.") : TEXT("The import manifest fingerprint is not a SHA-256 digest."),
+				bBaselineInvalid ? TEXT("/source_baseline_fingerprint") : TEXT("/manifest_fingerprint"));
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(bBaselineInvalid ? SourceBaselineFingerprint : ManifestFingerprint);
+		}
+		else if (AuthorizationId.IsEmpty())
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_planning_request_invalid"), TEXT("The import planning request requires an authorization identifier."), TEXT("/authorization_id"));
+		if (!ValidationDiagnostic.IsEmpty() && ValidationDiagnostic.TargetPath.IsEmpty()) ValidationDiagnostic.TargetPath = TargetIdentity;
 	}
 
 	EImportSourceCarrier FImportInitializationPlanningRequest::GetCarrier() const { return Carrier; }
@@ -433,7 +500,7 @@ namespace UE::UAI::HjsonWorkspace
 	const TArray<FInitializationEdge>& FImportInitializationPlanningRequest::GetEdges() const { return Edges; }
 	const TArray<FString>& FImportInitializationPlanningRequest::GetImpactScopes() const { return ImpactScopes; }
 	const FString& FImportInitializationPlanningRequest::GetAuthorizationId() const { return AuthorizationId; }
-	bool FImportInitializationPlanningRequest::IsValid() const { return bValid; }
+	bool FImportInitializationPlanningRequest::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	FImportInitializationPlan::FImportInitializationPlan(
 		FString InSourceModelFingerprint,
@@ -455,10 +522,21 @@ namespace UE::UAI::HjsonWorkspace
 		, ImpactScopes(MoveTemp(InImpactScopes))
 		, PlanFingerprint(MoveTemp(InPlanFingerprint))
 	{
-		bValid = IsFingerprint(SourceModelFingerprint)
-			&& !TargetIdentity.IsEmpty()
-			&& ExpectedTargetRevision.IsValid()
-			&& IsFingerprint(PlanFingerprint);
+		if (!IsFingerprint(SourceModelFingerprint))
+		{
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_plan_invalid"), TEXT("The import plan source model fingerprint is not a SHA-256 digest."), TEXT("/source_model_fingerprint"));
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(SourceModelFingerprint);
+		}
+		else if (TargetIdentity.IsEmpty())
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_plan_invalid"), TEXT("The import plan requires a target."), TEXT("/target"));
+		else if (!ExpectedTargetRevision.IsValid())
+			ValidationDiagnostic = Contract::FDiagnostic::WrapFailure(TEXT("hjson_import_plan_invalid"), ExpectedTargetRevision.GetValidationDiagnostic());
+		else if (!IsFingerprint(PlanFingerprint))
+		{
+			ValidationDiagnostic = InitializationFailure(TEXT("hjson_import_plan_invalid"), TEXT("The import plan fingerprint is not a SHA-256 digest."), TEXT("/plan_fingerprint"));
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(PlanFingerprint);
+		}
+		if (!ValidationDiagnostic.IsEmpty() && ValidationDiagnostic.TargetPath.IsEmpty()) ValidationDiagnostic.TargetPath = TargetIdentity;
 	}
 
 	const FString& FImportInitializationPlan::GetSourceModelFingerprint() const { return SourceModelFingerprint; }
@@ -479,7 +557,7 @@ namespace UE::UAI::HjsonWorkspace
 	const TMap<FString, FString>& FImportInitializationPlan::GetResolvedCandidates() const { return ResolvedCandidates; }
 	const TArray<FString>& FImportInitializationPlan::GetImpactScopes() const { return ImpactScopes; }
 	const FString& FImportInitializationPlan::GetPlanFingerprint() const { return PlanFingerprint; }
-	bool FImportInitializationPlan::IsValid() const { return bValid; }
+	bool FImportInitializationPlan::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	bool TryPlanHjsonImportInitialization(
 		const FImportInitializationPlanningRequest& Request,
@@ -492,40 +570,59 @@ namespace UE::UAI::HjsonWorkspace
 		OutError.Reset();
 		if (!Request.IsValid())
 		{
-			OutError.Set(TEXT("hjson_import_planning_request_invalid"));
+			OutError.SetFailure(Request.GetValidationDiagnostic());
 			return false;
 		}
 
-		TSet<FString> ChangeIds;
-		for (const FImportChange& Change : Request.GetChanges())
+		auto RecordError = [&](Contract::FDiagnostic Diagnostic, const FString& Prefix = FString(), const FString& Subject = FString())
 		{
+			FWorkspaceError Item;
+			if (!Prefix.IsEmpty()) Diagnostic.PropertyPath = Prefix + (Diagnostic.PropertyPath.IsEmpty() || Diagnostic.PropertyPath.StartsWith(TEXT("/")) ? Diagnostic.PropertyPath : TEXT("/") + Diagnostic.PropertyPath);
+			if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = Request.GetTargetIdentity();
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Subject;
+			Item.SetFailure(MoveTemp(Diagnostic));
+			OutError.Append(Item);
+		};
+		TMap<FString, int32> ChangeIds;
+		for (int32 Index = 0; Index < Request.GetChanges().Num(); ++Index)
+		{
+			const FImportChange& Change = Request.GetChanges()[Index];
+			const FString Path = FString::Printf(TEXT("/changes/%d"), Index);
 			if (!Change.IsValid())
 			{
-				OutError.Set(TEXT("hjson_import_change_invalid"), Change.GetChangeId());
-				return false;
+				RecordError(Change.GetValidationDiagnostic(), Path, Change.GetChangeId());
+				continue;
 			}
-			if (ChangeIds.Contains(Change.GetChangeId()))
+			if (const int32* PreviousIndex = ChangeIds.Find(Change.GetChangeId()))
 			{
-				OutError.Set(TEXT("hjson_import_change_duplicate"), Change.GetChangeId());
-				return false;
+				auto Error = InitializationFailure(TEXT("hjson_import_change_duplicate"), FString::Printf(TEXT("The import change duplicates change %d."), *PreviousIndex), Path + TEXT("/change_id"));
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Change.GetChangeId());
+				RecordError(MoveTemp(Error), FString(), Change.GetChangeId());
+				continue;
 			}
-			ChangeIds.Add(Change.GetChangeId());
+			ChangeIds.Add(Change.GetChangeId(), Index);
 		}
 
 		TArray<FString> NodeIds;
 		TMap<FString, int32> NodeIndex;
+		TSet<FString> InvalidNodeIds;
 		for (int32 Index = 0; Index < Request.GetNodes().Num(); ++Index)
 		{
 			const FInitializationNode& Node = Request.GetNodes()[Index];
 			if (!Node.IsValid())
 			{
-				OutError.Set(TEXT("hjson_import_initialization_node_invalid"), Node.GetNodeId());
-				return false;
+				RecordError(Node.GetValidationDiagnostic(), FString::Printf(TEXT("/nodes/%d"), Index), Node.GetNodeId());
+				InvalidNodeIds.Add(Node.GetNodeId());
+				continue;
 			}
 			if (NodeIndex.Contains(Node.GetNodeId()))
 			{
-				OutError.Set(TEXT("hjson_import_initialization_node_duplicate"), Node.GetNodeId());
-				return false;
+				auto Error = InitializationFailure(TEXT("hjson_import_initialization_node_duplicate"),
+					FString::Printf(TEXT("The initialization node duplicates node %d."), NodeIndex.FindChecked(Node.GetNodeId())), FString::Printf(TEXT("/nodes/%d/node_id"), Index));
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Node.GetNodeId());
+				RecordError(MoveTemp(Error), FString(), Node.GetNodeId());
+				InvalidNodeIds.Add(Node.GetNodeId());
+				continue;
 			}
 			NodeIndex.Add(Node.GetNodeId(), Index);
 			NodeIds.Add(Node.GetNodeId());
@@ -535,28 +632,50 @@ namespace UE::UAI::HjsonWorkspace
 		TSet<FString> EdgeKeys;
 		TMap<FString, FString> OwnerByChild;
 		TArray<FInitializationEdge> ReferenceEdges;
-		for (const FInitializationEdge& Edge : Request.GetEdges())
+		for (int32 Index = 0; Index < Request.GetEdges().Num(); ++Index)
 		{
+			const FInitializationEdge& Edge = Request.GetEdges()[Index];
+			const FString Path = FString::Printf(TEXT("/edges/%d"), Index);
+			if (Edge.IsValid() && (InvalidNodeIds.Contains(Edge.GetFromNodeId())
+				|| InvalidNodeIds.Contains(Edge.GetToNodeId())))
+			{
+				OutError.MarkUnchecked(TEXT("initialization_edge"), EdgeKey(Edge), TEXT("invalid_node"));
+				continue;
+			}
 			if (!Edge.IsValid()
 				|| !NodeIndex.Contains(Edge.GetFromNodeId())
 				|| !NodeIndex.Contains(Edge.GetToNodeId()))
 			{
-				OutError.Set(TEXT("hjson_import_initialization_edge_invalid"), EdgeKey(Edge));
-				return false;
+				if (!Edge.IsValid()) RecordError(Edge.GetValidationDiagnostic(), Path, Edge.GetFromNodeId());
+				else
+				{
+					const bool bSourceMissing = !NodeIndex.Contains(Edge.GetFromNodeId());
+					auto Error = InitializationFailure(TEXT("hjson_import_initialization_edge_invalid"),
+						bSourceMissing ? TEXT("The initialization dependency source node is absent from the plan.") : TEXT("The initialization dependency destination node is absent from the plan."),
+						Path + (bSourceMissing ? TEXT("/from_node_id") : TEXT("/to_node_id")));
+					Error.ActualEvidence = MakeShared<FJsonValueString>(bSourceMissing ? Edge.GetFromNodeId() : Edge.GetToNodeId());
+					RecordError(MoveTemp(Error));
+				}
+				continue;
 			}
 			const FString Key = EdgeKey(Edge);
 			if (EdgeKeys.Contains(Key))
 			{
-				OutError.Set(TEXT("hjson_import_initialization_edge_duplicate"), Key);
-				return false;
+				auto Error = InitializationFailure(TEXT("hjson_import_initialization_edge_duplicate"), TEXT("The same initialization dependency occurs more than once."), Path);
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Key);
+				RecordError(MoveTemp(Error), FString(), Edge.GetFromNodeId());
+				continue;
 			}
 			EdgeKeys.Add(Key);
 			if (Edge.GetKind() == EInitializationEdgeKind::Ownership)
 			{
 				if (OwnerByChild.Contains(Edge.GetToNodeId()))
 				{
-					OutError.Set(TEXT("hjson_import_multiple_owners"), Edge.GetToNodeId());
-					return false;
+					auto Error = InitializationFailure(TEXT("hjson_import_multiple_owners"), TEXT("An initialization node has more than one owner."), Path + TEXT("/to_node_id"));
+					Error.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+					Error.ActualValue = MakeShared<FJsonValueNumber>(2);
+					RecordError(MoveTemp(Error), FString(), Edge.GetToNodeId());
+					continue;
 				}
 				OwnerByChild.Add(Edge.GetToNodeId(), Edge.GetFromNodeId());
 			}
@@ -567,12 +686,13 @@ namespace UE::UAI::HjsonWorkspace
 		}
 
 		TArray<FString> ImpactScopes = Request.GetImpactScopes();
-		for (const FString& Scope : ImpactScopes)
+		for (int32 Index = 0; Index < ImpactScopes.Num(); ++Index)
 		{
-			if (Scope.IsEmpty())
+			if (ImpactScopes[Index].IsEmpty())
 			{
-				OutError.Set(TEXT("hjson_import_impact_scope_invalid"));
-				return false;
+				auto Error = InitializationFailure(TEXT("hjson_import_impact_scope_invalid"), TEXT("An import impact scope is empty."), FString::Printf(TEXT("/impact_scopes/%d"), Index));
+				Error.ActualValue = MakeShared<FJsonValueString>(ImpactScopes[Index]);
+				RecordError(MoveTemp(Error));
 			}
 		}
 		ImpactScopes.Sort();
@@ -585,7 +705,13 @@ namespace UE::UAI::HjsonWorkspace
 		}
 		if (!Request.GetChanges().IsEmpty() && ImpactScopes.IsEmpty())
 		{
-			OutError.Set(TEXT("hjson_import_impact_scope_required"));
+			auto Error = InitializationFailure(TEXT("hjson_import_impact_scope_required"), TEXT("An import plan containing changes must declare their impact scopes."), TEXT("/impact_scopes"));
+			Error.ActualValue = MakeShared<FJsonValueNumber>(0);
+			RecordError(MoveTemp(Error));
+		}
+		if (OutError.HasErrors())
+		{
+			OutError.MarkUnchecked(TEXT("initialization_preflight"), FString(), TEXT("invalid_plan_structure"));
 			return false;
 		}
 
@@ -615,30 +741,41 @@ namespace UE::UAI::HjsonWorkspace
 				Current,
 				OutError))
 		{
-			SetFallbackError(OutError, TEXT("hjson_import_target_version_read_failed"));
+			SetFallbackError(OutError, TEXT("hjson_import_target_version_read_failed"),
+				TEXT("The target's current revision could not be read."), Request.GetTargetIdentity());
 			return false;
 		}
 		if (!Current.IsValid())
 		{
-			OutError.Set(TEXT("hjson_import_target_revision_invalid"));
+			auto Diagnostic = Contract::FDiagnostic::WrapFailure(TEXT("hjson_import_target_revision_invalid"), Current.GetValidationDiagnostic(), TEXT("import_initialization"));
+			Diagnostic.ActualEvidence = RevisionEvidence(Current);
+			OutError.SetFailure(MoveTemp(Diagnostic), Request.GetTargetIdentity());
 			return false;
 		}
 		if (Current != Request.GetExpectedTargetRevision())
 		{
-			OutError.Set(TEXT("hjson_import_target_version_conflict"));
+			auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_import_target_version_conflict"),
+				TEXT("The target changed after this import was prepared."), TEXT("import_initialization"));
+			Diagnostic.ExpectedEvidence = RevisionEvidence(Request.GetExpectedTargetRevision());
+			Diagnostic.ActualEvidence = RevisionEvidence(Current);
+			OutError.SetFailure(MoveTemp(Diagnostic), Request.GetTargetIdentity());
 			return false;
 		}
 
 		TMap<FString, FString> ResolvedCandidates;
 		for (const FImportChange& Change : Request.GetChanges())
 		{
-			if (!Preflight->SupportsChange(Change, OutError))
+			FWorkspaceError ItemError;
+			if (!Preflight->SupportsChange(Change, ItemError))
 			{
 				SetFallbackError(
-					OutError,
+					ItemError,
 					TEXT("hjson_import_change_unsupported"),
+					TEXT("The target does not support this import change."),
 					Change.GetChangeId());
-				return false;
+				OutError.Append(ItemError);
+				if (Change.HasCandidate()) OutError.MarkUnchecked(TEXT("candidate_resolution"), Change.GetChangeId(), TEXT("unsupported_change"));
+				continue;
 			}
 			if (!Change.HasCandidate())
 			{
@@ -649,23 +786,41 @@ namespace UE::UAI::HjsonWorkspace
 					Change.GetCandidateName(),
 					Change.GetCandidateBindingRevision(),
 					Resolved,
-					OutError))
+					ItemError))
 			{
 				SetFallbackError(
-					OutError,
+					ItemError,
 					TEXT("hjson_import_candidate_invalid"),
+					TEXT("The requested candidate could not be resolved for this import change."),
 					Change.GetCandidateName());
-				return false;
+				if (ItemError.GetDiagnostic().CandidateName.IsEmpty())
+				{
+					auto Diagnostic = ItemError.GetDiagnostic();
+					Diagnostic.CandidateName = Change.GetCandidateName();
+					ItemError.SetFailure(MoveTemp(Diagnostic));
+				}
+				OutError.Append(ItemError);
+				continue;
 			}
 			Resolved = Normalize(MoveTemp(Resolved));
 			if (Resolved != Change.GetCandidateName())
 			{
-				OutError.Set(
-					TEXT("hjson_import_candidate_identity_changed"),
-					Change.GetCandidateName());
-				return false;
+				FWorkspaceError Item;
+				auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_import_candidate_identity_changed"),
+					TEXT("Candidate resolution returned a different candidate name."), TEXT("import_initialization"));
+				Diagnostic.CandidateName = Change.GetCandidateName();
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(Change.GetCandidateName());
+				Diagnostic.ActualValue = MakeShared<FJsonValueString>(Resolved);
+				Item.SetFailure(MoveTemp(Diagnostic), Change.GetChangeId());
+				OutError.Append(Item);
+				continue;
 			}
 			ResolvedCandidates.Add(Change.GetChangeId(), MoveTemp(Resolved));
+		}
+		if (OutError.HasErrors())
+		{
+			OutError.MarkUnchecked(TEXT("initialization_order"), FString(), TEXT("preflight_failed"));
+			return false;
 		}
 
 		TArray<FString> OwnershipOrder;
@@ -677,13 +832,10 @@ namespace UE::UAI::HjsonWorkspace
 				OwnershipOrder,
 				Cycle))
 		{
-			OutError.Set(
-				TEXT("hjson_import_ownership_cycle"),
-				FString(),
-				TEXT("/"),
-				0,
-				false,
-				MoveTemp(Cycle));
+			auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_import_ownership_cycle"),
+				TEXT("Ownership dependencies contain a cycle, so the affected objects cannot be initialized in order."), TEXT("import_initialization"));
+			Diagnostic.CyclePath = MoveTemp(Cycle);
+			OutError.SetFailure(MoveTemp(Diagnostic), Request.GetTargetIdentity());
 			return false;
 		}
 
@@ -695,13 +847,10 @@ namespace UE::UAI::HjsonWorkspace
 				CreationOrder,
 				Cycle))
 		{
-			OutError.Set(
-				TEXT("hjson_import_creation_dependency_cycle"),
-				FString(),
-				TEXT("/"),
-				0,
-				false,
-				MoveTemp(Cycle));
+			auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_import_creation_dependency_cycle"),
+				TEXT("Creation dependencies contain a cycle, so the affected objects cannot be created in order."), TEXT("import_initialization"));
+			Diagnostic.CyclePath = MoveTemp(Cycle);
+			OutError.SetFailure(MoveTemp(Diagnostic), Request.GetTargetIdentity());
 			return false;
 		}
 
@@ -722,7 +871,8 @@ namespace UE::UAI::HjsonWorkspace
 				Request.GetAuthorizationId(),
 				OutError))
 		{
-			SetFallbackError(OutError, TEXT("hjson_import_unauthorized"));
+			SetFallbackError(OutError, TEXT("hjson_import_unauthorized"),
+				TEXT("The import's declared impact is not authorized."), Request.GetTargetIdentity());
 			return false;
 		}
 
@@ -739,7 +889,7 @@ namespace UE::UAI::HjsonWorkspace
 				PlanFingerprint));
 		if (!Candidate->IsValid())
 		{
-			OutError.Set(TEXT("hjson_import_plan_invalid"));
+			OutError.SetFailure(Candidate->GetValidationDiagnostic());
 			return false;
 		}
 		OutPlan = MoveTemp(Candidate);

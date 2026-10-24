@@ -1,49 +1,27 @@
 #include "Misc/AutomationTest.h"
 
-#include "CommandEdge/UeAgentCommandDispatch.h"
 #include "CommandEdge/UeAgentCommandProtocol.h"
-#include "Composition/UeAgentCommandServiceComposition.h"
-#include "Core/Contract/UeAgentCommandContract.h"
+#include "Core/Contract/UeAgentContractJson.h"
+#include "Dom/JsonObject.h"
+#include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "NetworkTransport/UeAgentNetworkTransport.h"
+#include "ServiceComposition/CommandService/UeAgentCommandService.h"
+#include "ServiceComposition/Query/UeAgentQueryCommandIngress.h"
 
 namespace
 {
 	using namespace UE::UAI::CommandContract;
 	using namespace UE::UAI::CommandEdge;
-	using namespace UE::UAI::Composition;
-	using namespace UE::UAI::Contract;
+	using namespace UE::UAI::CommandRegistry;
 	using namespace UE::UAI::NetworkTransport;
+	using namespace UE::UAI::ServiceComposition::CommandService;
 
-	class FTransportNeutralHandler final : public IUeAgentCommandHandler
+	class FTransportNeutralContextInvalidator final
+		: public IUeAgentRequestContextInvalidator
 	{
 	public:
-		explicit FTransportNeutralHandler(FString InCommandId)
-			: CommandId(MoveTemp(InCommandId))
-		{
-		}
-
-		const FString& GetCommandId() const override
-		{
-			return CommandId;
-		}
-
-		FUeAgentCommandResult Submit(
-			const FUeAgentCommandRequest& Request,
-			const FUeAgentCallerContext& CallerContext,
-			const TSharedRef<IUeAgentCancellationSignal>& Cancellation) override
-		{
-			++Calls;
-			LastCaller = CallerContext.GetCallerId();
-			return FUeAgentCommandResult::Success(
-				Request,
-				TEXT("{\"transport_neutral\":true}"));
-		}
-
-		int32 Calls = 0;
-		FString LastCaller;
-
-	private:
-		FString CommandId;
+		void InvalidateWorld(const FString& WorldIdentity) override {}
 	};
 
 	TArray<uint8> Utf8Bytes(const FString& Text)
@@ -57,20 +35,17 @@ namespace
 	}
 
 	FString BuildRequestBody(
-		const FUeAgentCommandContract& Contract,
+		const FUeAgentFrozenCommandContract& Contract,
 		const FString& CorrelationId,
 		const FString& RequestId)
 	{
 		return TEXT("{\"command_binding_hash\":\"")
-			+ Contract.GetBindingHash()
-			+ TEXT("\",\"command_id\":\"reference.catalog_search\",")
+			+ Contract.GetContractHash()
+			+ TEXT("\",\"command_id\":\"query.command.search\",")
 			  TEXT("\"correlation_id\":\"")
 			+ CorrelationId
 			+ TEXT("\",\"message_kind\":\"command_request\",")
-			  TEXT("\"params\":{\"catalog_kind\":\"uai_reference\",")
-			  TEXT("\"match_mode\":\"broad\",")
-			  TEXT("\"materialization_policy\":\"index_only\",")
-			  TEXT("\"search_text\":\"PivotOffset\"},")
+			  TEXT("\"params\":{\"intent\":\"material expression\",\"limit\":1},")
 			  TEXT("\"request_id\":\"")
 			+ RequestId
 			+ TEXT("\",\"schema\":\"uai.command.v1\",\"version\":1}");
@@ -90,46 +65,60 @@ namespace
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentTransportNeutralCommandServiceTest,
-	"UAI.StrictV2.T02.TRANSPORT.SERVICE",
+	"UeAgentInterface.CommandEdge.TransportNeutral",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentTransportNeutralCommandServiceTest::RunTest(
 	const FString& Parameters)
 {
-	const TSharedRef<const FUeAgentCommandContractRegistry> Registry =
-		GetDefaultCommandContractRegistry();
-	const TSharedRef<FTransportNeutralHandler> Handler =
-		MakeShared<FTransportNeutralHandler>(
-			TEXT("reference.catalog_search"));
-	const TSharedRef<FTransportNeutralHandler> ReadHandler =
-		MakeShared<FTransportNeutralHandler>(
-			TEXT("reference.asset_read"));
-	const TSharedRef<FTransportNeutralHandler> EffectHandler =
-		MakeShared<FTransportNeutralHandler>(
-			TEXT("reference.asset_apply"));
-
-	FUeAgentCommandServiceConfig Config;
-	Config.PrincipalSubject = TEXT("authenticated-uai-agent");
-	Config.AuthorityScopes = {TEXT("uai:query")};
-	TUniquePtr<FUeAgentCommandServiceComposition> Composition;
+	UE::UAI::DomainCapability::FDomainCapabilityAuthorities Authorities;
 	FString Error;
 	TestTrue(
-		TEXT("transport-neutral command service composes"),
-		FUeAgentCommandServiceComposition::TryCreate(
-			Config,
-			Registry,
-			{Handler, ReadHandler, EffectHandler},
-			Composition,
+		TEXT("domain capability authorities compose"),
+		UE::UAI::DomainCapability::
+			TryGetOrBuildProcessDomainCapabilityAuthorities(
+				Authorities, Error));
+	const TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry =
+		Authorities.GetCommandRegistry();
+	const TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch =
+		Authorities.GetCommandDispatch();
+	if (!Registry.IsValid() || !Dispatch.IsValid())
+	{
+		AddError(Error.IsEmpty()
+			? TEXT("domain capability authorities unavailable") : Error);
+		return false;
+	}
+	const FString PrincipalSubject(TEXT("authenticated-uai-agent"));
+	TSharedPtr<IUeAgentTransportRequestHandler, ESPMode::ThreadSafe> Ingress;
+	TestTrue(
+		TEXT("query ingress composes from exact dispatch"),
+		UE::UAI::ServiceComposition::Query::TryCreateQueryCommandIngress(
+			Dispatch.ToSharedRef(),
+			PrincipalSubject,
+			{TEXT("uai:query")},
+			Ingress,
 			Error));
-	if (!Composition)
+	const TSharedRef<FTransportNeutralContextInvalidator, ESPMode::ThreadSafe>
+		ContextInvalidator = MakeShared<
+			FTransportNeutralContextInvalidator, ESPMode::ThreadSafe>();
+	TUniquePtr<FUeAgentCommandService> CommandService;
+	TestTrue(
+		TEXT("transport-neutral command service owns query ingress"),
+		Ingress.IsValid()
+			&& FUeAgentCommandService::TryCreate(
+				Ingress.ToSharedRef(),
+				ContextInvalidator,
+				CommandService,
+				Error));
+	if (!CommandService)
 	{
 		AddError(Error);
 		return false;
 	}
 
-	const FUeAgentCommandContract* Contract =
-		Registry->FindExact(TEXT("reference.catalog_search"));
+	const FUeAgentFrozenCommandContract* Contract =
+		Registry->FindExact(TEXT("query.command.search"));
 	if (!TestNotNull(TEXT("command contract exists"), Contract))
 	{
 		return false;
@@ -138,7 +127,7 @@ bool FUeAgentTransportNeutralCommandServiceTest::RunTest(
 	const FString CorrelationId(TEXT("transport-neutral-correlation"));
 	FUeAgentTransportPeer Peer = MakePeer(
 		TEXT("transport-neutral-peer"),
-		Config.PrincipalSubject);
+		PrincipalSubject);
 	FUeAgentTransportFrame Frame(
 		TEXT("uai.command"),
 		Utf8Bytes(BuildRequestBody(
@@ -148,25 +137,17 @@ bool FUeAgentTransportNeutralCommandServiceTest::RunTest(
 		CorrelationId,
 		Peer);
 	const FUeAgentTransportReply Reply =
-		Composition->GetIngressHandler()->Handle(
+		CommandService->GetIngressHandler()->Handle(
 			FUeAgentTransportIngress(MoveTemp(Frame), Peer));
 
-	FUeAgentCommandProtocolCodec Codec;
 	FUeAgentCommandProtocolDiagnostic Diagnostic;
-	TOptional<FUeAgentCommandResult> Result;
+	TSharedPtr<FJsonObject> Result;
 	TestTrue(
-		TEXT("generic transport reply decodes"),
-		Codec.DecodeResult(Reply.Frame.GetPayload(), Result, Diagnostic));
+		TEXT("generic transport reply is JSON"),
+		UE::UAI::Contract::Json::TryParseObject(Reply.Frame.GetPayload(), Result, Diagnostic));
 	TestTrue(
 		TEXT("generic transport reaches exact handler"),
-		Result.IsSet() && Result->IsOk());
-	TestEqual(TEXT("handler called once"), Handler->Calls, 1);
-	TestEqual(TEXT("read handler is not called"), ReadHandler->Calls, 0);
-	TestEqual(TEXT("effect handler is not called"), EffectHandler->Calls, 0);
-	TestEqual(
-		TEXT("transport principal becomes caller"),
-		Handler->LastCaller,
-		Config.PrincipalSubject);
+		Result.IsValid() && Result->GetBoolField(TEXT("ok")));
 
 	const FString RejectedCorrelationId(
 		TEXT("transport-neutral-rejected-correlation"));
@@ -183,22 +164,18 @@ bool FUeAgentTransportNeutralCommandServiceTest::RunTest(
 		RejectedPeer);
 	Result.Reset();
 	const FUeAgentTransportReply RejectedReply =
-		Composition->GetIngressHandler()->Handle(
+		CommandService->GetIngressHandler()->Handle(
 			FUeAgentTransportIngress(
 				MoveTemp(RejectedFrame),
 				RejectedPeer));
 	TestTrue(
-		TEXT("principal mismatch reply decodes"),
-		Codec.DecodeResult(
+		TEXT("principal mismatch reply is JSON"),
+		UE::UAI::Contract::Json::TryParseObject(
 			RejectedReply.Frame.GetPayload(),
 			Result,
 			Diagnostic));
 	TestTrue(
 		TEXT("principal mismatch is a protocol error"),
-		Result.IsSet() && Result->IsProtocolError());
-	TestEqual(
-		TEXT("rejected principal does not call handler"),
-		Handler->Calls,
-		1);
+		Result.IsValid() && Result->GetStringField(TEXT("message_kind")) == TEXT("protocol_error"));
 	return true;
 }

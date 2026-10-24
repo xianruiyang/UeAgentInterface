@@ -216,8 +216,6 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				{TEXT("deformer.geometry.sample"), TEXT("uai.query.deformer.geometry.sample"), 1, TEXT("query"), TEXT("read_only"), TEXT("simulation_observation")},
 				{TEXT("deformer.training_inputs.validate"), TEXT("uai.query.deformer.training_inputs.validate"), 1, TEXT("query"), TEXT("read_only"), TEXT("simulation_observation")},
 				{TEXT("deformer.evaluation.sample"), TEXT("uai.query.deformer.evaluation.sample"), 1, TEXT("query"), TEXT("read_only"), TEXT("simulation_observation")},
-				{TEXT("pcg.generated_spatial_data.read"), TEXT("uai.query.pcg.generated_spatial_data.read"), 1, TEXT("query"), TEXT("read_only"), TEXT("simulation_observation")},
-				{TEXT("pcg.partition.spatial_state.read"), TEXT("uai.query.pcg.partition.spatial_state.read"), 1, TEXT("query"), TEXT("read_only"), TEXT("simulation_observation")},
 			};
 		return Contracts;
 	}

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/Contract/UeAgentContract.h"
@@ -31,7 +33,7 @@ namespace UE::UAI::CommandEdge
 				Registry,
 			TArray<TSharedRef<IUeAgentCommandHandler>> Handlers,
 			TSharedPtr<const FUeAgentCommandDispatch>& OutDispatch,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		FUeAgentCommandResult Submit(
 			const FUeAgentCommandRequest& Request,

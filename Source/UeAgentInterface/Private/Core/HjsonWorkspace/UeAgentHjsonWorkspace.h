@@ -1,15 +1,34 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Templates/SharedPointer.h"
 
+class FJsonValue;
+class FJsonObject;
+
 namespace UE::UAI::HjsonWorkspace
 {
+	class FWorkspaceError;
+	class FSourceProvenance;
 	using UE::UAI::ContextResource::FUeAgentResourceTracker;
 	using UE::UAI::StateSemantic::FUeAgentCanonicalSnapshotRef;
 	using UE::UAI::StateSemantic::FUeAgentStateRevision;
+	using FHjsonOperationCheckpoint = TFunction<bool(
+		const FString& Stage, FWorkspaceError& OutError)>;
+
+	UEAGENTINTERFACE_API FString EscapeJsonPointerSegment(FString Segment);
+
+	// Shared accounting for semantic/content-graph workspace parsing,
+	// verification, composition, and publication.
+	UEAGENTINTERFACE_API FUeAgentResourceTracker
+	MakeSemanticWorkspaceResourceTracker();
+
+	UEAGENTINTERFACE_API TSharedRef<
+		FUeAgentResourceTracker, ESPMode::ThreadSafe>
+	MakeSemanticWorkspaceResourceTrackerOwner();
 
 	enum class EHjsonNodeKind : uint8
 	{
@@ -36,6 +55,9 @@ namespace UE::UAI::HjsonWorkspace
 		Inline,
 	};
 
+	class FHjsonDocument;
+	class FHjsonNode;
+
 	class UEAGENTINTERFACE_API FWorkspaceError final
 	{
 	public:
@@ -43,25 +65,45 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& GetSourceUnit() const;
 		const FString& GetJsonPointer() const;
 		int64 GetObserved() const;
+		int32 GetLine() const;
+		int32 GetColumn() const;
 		bool IsStoppedEarly() const;
 		const TArray<FString>& GetCyclePath() const;
+		const Contract::FDiagnostic& GetDiagnostic() const { return Diagnostic; }
+		void SetFailure(Contract::FDiagnostic Failure, const FString& FallbackSource = FString(),
+			const FString& FallbackJsonPointer = TEXT("/"));
+		// Collect independent failures without replacing the first error/code.
+		void Append(const FWorkspaceError& Error);
+		void MarkUnchecked(const FString& Stage, const FString& Source = FString(),
+			const FString& Reason = TEXT("prerequisite_failed"), int32 FromLine = 0);
+		bool HasErrors() const { return !Diagnostic.IsEmpty(); }
+		void Locate(const FSourceProvenance& Source);
+		void Locate(const FHjsonDocument& Document);
+		// Resolve producer-supplied paths against an original parser subtree.
+		// Missing fields point to their existing parent as related input.
+		void Locate(const FHjsonNode& Root);
+		// At a delegation boundary, qualify paths relative to the delegated value.
+		void PrependPath(const FString& PointerPrefix);
+		// Input delegation must not rebase native facts or already-bound command input.
+		void PrependPath(const FString& PointerPrefix, bool bInputOnly);
+		void LocateUnits(const TMap<FString, FSourceProvenance>& Sources);
+		void Recode(const FString& InCode, const FString& PublicReason);
+		void SetMessage(FString InMessage) { Diagnostic.PublicMessage = MoveTemp(InMessage); }
 
 		void Reset();
-		void Set(
+		void SetSourceFailure(
 			FString InCode,
+			FString PublicReason,
 			FString InSourceUnit = FString(),
 			FString InJsonPointer = TEXT("/"),
 			int64 InObserved = 0,
 			bool bInStoppedEarly = false,
-			TArray<FString> InCyclePath = {});
+			TArray<FString> InCyclePath = {},
+			int32 InLine = 0,
+			int32 InColumn = 0);
 
 	private:
-		FString Code;
-		FString SourceUnit;
-		FString JsonPointer = TEXT("/");
-		int64 Observed = 0;
-		bool bStoppedEarly = false;
-		TArray<FString> CyclePath;
+		Contract::FDiagnostic Diagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FSourceProvenance final
@@ -118,6 +160,7 @@ namespace UE::UAI::HjsonWorkspace
 		const TArray<FHjsonNodeRef>& GetItems() const;
 		const TArray<TPair<FString, FHjsonNodeRef>>& GetEntries() const;
 		const FHjsonNode* Get(const FString& Key) const;
+		const FHjsonNode* Find(const FString& RelativeJsonPointer) const;
 
 	private:
 		EHjsonNodeKind Kind = EHjsonNodeKind::Null;
@@ -187,8 +230,7 @@ namespace UE::UAI::HjsonWorkspace
 			int32 InContractVersion,
 			FString InProfileId,
 			FString InEntryUnit,
-			TArray<FString> InReferenceFields,
-			int32 InMaxFiles);
+			TArray<FString> InReferenceFields);
 
 		const FString& GetDialectId() const;
 		const FString& GetContractId() const;
@@ -196,7 +238,6 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& GetProfileId() const;
 		const FString& GetEntryUnit() const;
 		const TArray<FString>& GetReferenceFields() const;
-		int32 GetMaxFiles() const;
 		bool IsValid() const;
 
 	private:
@@ -206,7 +247,6 @@ namespace UE::UAI::HjsonWorkspace
 		FString ProfileId;
 		FString EntryUnit;
 		TArray<FString> ReferenceFields;
-		int32 MaxFiles = 0;
 		bool bValid = false;
 	};
 
@@ -277,38 +317,6 @@ namespace UE::UAI::HjsonWorkspace
 		FString SemanticFingerprint;
 	};
 
-	class UEAGENTINTERFACE_API FExportPlanRequest final
-	{
-	public:
-		FExportPlanRequest(
-			FUeAgentCanonicalSnapshotRef InSnapshot,
-			EWorkspaceKind InWorkspaceKind,
-			FString InEntryFile,
-			FString InContractId,
-			int32 InContractVersion,
-			FString InProfileId,
-			int64 InTokenBudget);
-
-		const FUeAgentCanonicalSnapshotRef& GetSnapshot() const;
-		EWorkspaceKind GetWorkspaceKind() const;
-		const FString& GetEntryFile() const;
-		const FString& GetContractId() const;
-		int32 GetContractVersion() const;
-		const FString& GetProfileId() const;
-		int64 GetTokenBudget() const;
-		bool IsValid() const;
-
-	private:
-		FUeAgentCanonicalSnapshotRef Snapshot;
-		EWorkspaceKind WorkspaceKind = EWorkspaceKind::Directory;
-		FString EntryFile;
-		FString ContractId;
-		int32 ContractVersion = 0;
-		FString ProfileId;
-		int64 TokenBudget = 0;
-		bool bValid = false;
-	};
-
 	class UEAGENTINTERFACE_API FExportFilePlan final
 	{
 	public:
@@ -369,13 +377,21 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& SourceUnit,
 		FUeAgentResourceTracker& Resources,
 		FHjsonDocumentPtr& OutDocument,
-		FWorkspaceError& OutError);
+		FWorkspaceError& OutError,
+		const FHjsonOperationCheckpoint* Checkpoint = nullptr);
 
 	UEAGENTINTERFACE_API bool TryWriteHjsonDocument(
 		FHjsonDocumentRef Document,
 		FUeAgentResourceTracker& Resources,
 		TArray<uint8>& OutCanonicalUtf8,
 		FWorkspaceError& OutError);
+
+	UEAGENTINTERFACE_API bool TryProjectHjsonNodeToJsonValue(
+		const FHjsonNode& Node,
+		FUeAgentResourceTracker& Resources,
+		TSharedPtr<FJsonValue>& OutValue,
+		FWorkspaceError& OutError,
+		const FHjsonOperationCheckpoint* Checkpoint = nullptr);
 
 	UEAGENTINTERFACE_API bool TryLoadWorkspace(
 		const FWorkspaceSource& Source,
@@ -384,9 +400,5 @@ namespace UE::UAI::HjsonWorkspace
 		FCanonicalWorkspacePtr& OutWorkspace,
 		FWorkspaceError& OutError);
 
-	UEAGENTINTERFACE_API bool TryBuildExportPlan(
-		const FExportPlanRequest& Request,
-		FUeAgentResourceTracker& Resources,
-		FExportWorkspacePlanPtr& OutPlan,
-		FWorkspaceError& OutError);
+
 }

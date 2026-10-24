@@ -13,21 +13,13 @@ namespace UE::UAI::CommandHandlers::RigSpatialCommands
 	{
 		const FString Owner(TEXT("rig-spatial-command-owner"));
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request,
+            UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = SubjectId.IsEmpty() ? Request.GetCommandId() : SubjectId;
+            if (Diagnostic.Stage.IsEmpty()) Diagnostic.Stage = TEXT("command_submit");
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -45,22 +37,20 @@ namespace UE::UAI::CommandHandlers::RigSpatialCommands
 					? FString(TEXT("uai:query")) : FString(TEXT("uai:operate"));
 				if (!Caller.IsValid() || !Caller.GetAuthorityScopes().Contains(RequiredScope))
 				{
-					return Failure(Request, TEXT("rig_spatial_authority_required"),
-						RequiredScope + TEXT(" is required"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("rig_spatial_authority_required"), RequiredScope + TEXT(" is required"), TEXT("command_submit")));
 				}
 				if (!IsInGameThread())
 				{
-					return Failure(Request, TEXT("rig_spatial_game_thread_required"),
-						TEXT("native rig/spatial mechanics must run on the game thread"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("rig_spatial_game_thread_required"), TEXT("native rig/spatial mechanics must run on the game thread"), TEXT("command_submit")));
 				}
 				TSharedPtr<IUeAgentCommandHandler> Mechanics;
 				TArray<FString> MechanicsScopes;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!OperationOwners::RigSpatialCommands::TryResolveMechanics(
 						CommandId, Mechanics, MechanicsScopes, Error)
 					|| !Mechanics.IsValid())
 				{
-					return Failure(Request, TEXT("rig_spatial_runtime_unavailable"), Error);
+					return Failure(Request, Error);
 				}
 				TArray<FString> Scopes = Caller.GetAuthorityScopes();
 				for (const FString& Scope : MechanicsScopes) Scopes.AddUnique(Scope);
@@ -76,7 +66,7 @@ namespace UE::UAI::CommandHandlers::RigSpatialCommands
 
 	bool TryCreateHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();

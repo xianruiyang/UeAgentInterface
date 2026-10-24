@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -22,12 +24,7 @@ namespace UE::UAI::OperationOwners::BlueprintNode
 		bool bReadOnly = false;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentBlueprintNodeCommandError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FUeAgentBlueprintNodeCommandError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentBlueprintNodeCommandService
 	{
@@ -42,6 +39,6 @@ namespace UE::UAI::OperationOwners::BlueprintNode
 
 	UEAGENTINTERFACE_API bool TryCreateProductionBlueprintNodeCommandService(
 		TSharedPtr<IUeAgentBlueprintNodeCommandService>& OutService,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }
 

@@ -70,6 +70,7 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& GetTooltip() const;
 		const FString& GetValueKind() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString ContractId;
@@ -93,6 +94,7 @@ namespace UE::UAI::HjsonWorkspace
 		FString Tooltip;
 		FString ValueKind;
 		bool bValid = false;
+		TSharedPtr<const Contract::FDiagnostic> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FExportFieldRegistration final
@@ -107,6 +109,7 @@ namespace UE::UAI::HjsonWorkspace
 		EExportFieldOwnerSource GetProviderSource() const;
 		const FString& GetProviderId() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FExportFieldContract Field;
@@ -114,6 +117,7 @@ namespace UE::UAI::HjsonWorkspace
 			EExportFieldOwnerSource::Handwritten;
 		FString ProviderId;
 		bool bValid = false;
+		TSharedPtr<const Contract::FDiagnostic> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FExportFieldRegistry final
@@ -134,6 +138,7 @@ namespace UE::UAI::HjsonWorkspace
 			const FString& FieldSetId,
 			const FString& ExternalName) const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString ContractId;
@@ -141,6 +146,7 @@ namespace UE::UAI::HjsonWorkspace
 		TArray<FExportFieldRegistration> Registrations;
 		TMap<FString, int32> IndexByFieldId;
 		bool bValid = false;
+		TSharedPtr<const Contract::FDiagnostic> ValidationDiagnostic;
 	};
 
 	using FExportFieldRegistryPtr =

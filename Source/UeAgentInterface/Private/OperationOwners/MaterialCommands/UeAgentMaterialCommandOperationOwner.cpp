@@ -2,9 +2,11 @@
 
 #include "Composition/GraphCompound/UeAgentGraphCompoundBlueprintMaterialBindings.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundCommandHandlers.h"
+#include "Composition/GraphCompound/UeAgentGraphCompoundInternalExecution.h"
 #include "Core/DomainCapability/DelegatedCommandOperation/UeAgentDelegatedCommandOperation.h"
 #include "DomainAdapters/MaterialCommands/UeAgentMaterialCommandMechanicsBoundary.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
 #include "Serialization/JsonSerializer.h"
@@ -31,7 +33,7 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 			return Host;
 		}
 
-		bool TryInitializeLocked(FProcessHost& Host, FString& OutError)
+		bool TryInitializeLocked(FProcessHost& Host, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutError.Reset();
 			if (Host.Runtime.IsValid()
@@ -49,11 +51,10 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 				return false;
 			}
 			FGraphCompoundRuntimeConfig RuntimeConfig;
-			RuntimeConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 			FGraphCompoundBlueprintMaterialProductionConfig ProductionConfig;
 			ProductionConfig.DurableJournalRoot = FPaths::ProjectSavedDir()
 				/ TEXT("UeAgentInterface/GraphCompound/MaterialCommands");
-			ProductionConfig.OperationTimeoutSeconds = 120.0;
 			FGraphCompoundRuntimeError RuntimeError;
 			if (!TryCreateBlueprintMaterialGraphProductionRuntime(
 					RuntimeConfig,
@@ -63,7 +64,15 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 				|| !Host.Runtime.IsValid())
 			{
 				Host.Runtime.Reset();
-				OutError = RuntimeError.Code + TEXT(":") + RuntimeError.Detail;
+				OutError = RuntimeError;
+				if (OutError.IsEmpty()) {
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_command_mechanics_runtime_unavailable"),
+						TEXT("The material runtime factory failed or returned no executable runtime without reporting a diagnostic."), TEXT("runtime_factory"));
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.PropertyPath = TEXT("runtime_ready");
+					OutError.SourceKind = TEXT("native_result");
+				}
 				return false;
 			}
 			TArray<TSharedRef<IUeAgentCommandHandler>> Mechanics;
@@ -83,8 +92,14 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 				{
 					Host.Handlers.Reset();
 					Host.Runtime.Reset();
-					OutError =
-						TEXT("material_command_mechanics_handler_duplicate");
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_command_mechanics_handler_duplicate"),
+						TEXT("More than one mechanics handler was created for the same material command."), TEXT("handler_factory"), Handler->GetCommandId());
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(2);
+					OutError.PropertyPath = TEXT("command_handler_registration_count");
+					OutError.SourceKind = TEXT("native_result");
+					if (DomainAdapters::MaterialCommands::GetPublicCommandIds().Contains(Handler->GetCommandId()))
+						OutError.PublicMessage += TEXT(" Command: ") + Handler->GetCommandId() + TEXT(".");
 					return false;
 				}
 				Host.Handlers.Add(Handler->GetCommandId(), Handler);
@@ -92,40 +107,73 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 			if (Host.Handlers.Num()
 				!= DomainAdapters::MaterialCommands::GetCommandIds().Num())
 			{
+				const int32 HandlerCount = Host.Handlers.Num();
 				Host.Handlers.Reset();
 				Host.Runtime.Reset();
-				OutError = TEXT("material_command_mechanics_handler_count_mismatch");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_command_mechanics_handler_count_mismatch"),
+					TEXT("The material mechanics factory must provide one handler for each required command."), TEXT("internal_command"));
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(DomainAdapters::MaterialCommands::GetCommandIds().Num());
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(HandlerCount);
+				OutError.PropertyPath = TEXT("command_handler_count");
+				OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			return true;
 		}
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& Subject,
-			const FString& Detail,
-			const FString& TerminalStatus = TEXT("not_started"),
-			const bool bRetrySafe = true)
+		UE::UAI::Contract::FDiagnostic CommandFailure(FString Code, const FString& Subject, FString Reason,
+			const UE::UAI::Contract::FDiagnostic& Cause = UE::UAI::Contract::FDiagnostic())
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), Subject);
-			Error->SetStringField(TEXT("detail"), Detail);
-			Error->SetStringField(TEXT("terminal_status"), TerminalStatus);
-			Error->SetBoolField(TEXT("retry_safe"), bRetrySafe);
-			FString Text;
-			const TSharedRef<TJsonWriter<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>> Writer =
-					TJsonWriterFactory<TCHAR,
-						TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return Text;
+			auto Diagnostic = Cause.IsEmpty()
+				? UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("command"))
+				: UE::UAI::Contract::FDiagnostic::WrapFailure(MoveTemp(Code), Cause, TEXT("command"), MoveTemp(Reason));
+			Diagnostic.SubjectId = Subject;
+			if (Cause.IsEmpty()) Diagnostic.SourceKind = TEXT("native_result");
+			if (DomainAdapters::MaterialCommands::GetPublicCommandIds().Contains(Subject))
+				Diagnostic.PublicMessage += TEXT(" Command: ") + Subject + TEXT(".");
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.TerminalStatus = TEXT("not_started");
+			Diagnostic.bRetrySafe = true;
+			Diagnostic.MutationStarted = false;
+			Diagnostic.MutationMayHaveStarted = false;
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic InvocationFailure(const FString& Code, const FString& Subject, const UE::UAI::Contract::FDiagnostic& Cause)
+		{
+			auto Diagnostic = CommandFailure(Code, Subject, TEXT("The operation runtime could not be prepared."), Cause);
+			if (Cause.IsEmpty()) {
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.PropertyPath = TEXT("operation_runtime_prepared");
+			}
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic ProjectionFailure(const FString& Code, const UE::UAI::Contract::FDiagnostic& Cause,
+			const BindingGateway::Operation::FOperationLifecycleReceipt& Receipt)
+		{
+			auto Diagnostic = Cause.IsEmpty()
+				? UE::UAI::Contract::FDiagnostic::Failure(Code, TEXT("The operation completed, but its result payload could not be produced."), TEXT("result_projection"))
+				: UE::UAI::Contract::FDiagnostic::WrapFailure(Code, Cause, TEXT("result_projection"), TEXT("The operation completed, but its result payload could not be produced."));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (Cause.IsEmpty()) {
+				Diagnostic.SourceKind = TEXT("native_result");
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.PropertyPath = TEXT("result_payload_produced");
+			}
+			Diagnostic.TerminalStatus = BindingGateway::Operation::LexToString(Receipt.GetStatus());
+			Diagnostic.MutationStarted = Receipt.DidMutationStart();
+			Diagnostic.MutationMayHaveStarted = Receipt.DidMutationStart();
+			Diagnostic.bRetrySafe = Receipt.IsRetrySafe();
+			return Diagnostic;
 		}
 	}
 
 	bool TryCreateMechanicsHandlers(
 		TMap<FString, TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		FProcessHost& Host = ProcessHost();
@@ -141,7 +189,7 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 	bool TryResolveMechanicsHandler(
 		const FString& CommandId,
 		TSharedPtr<IUeAgentCommandHandler>& OutHandler,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandler.Reset();
 		FProcessHost& Host = ProcessHost();
@@ -154,8 +202,14 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 			Host.Handlers.Find(CommandId);
 		if (!Found)
 		{
-			OutError = TEXT("material_command_mechanics_handler_missing:")
-				+ CommandId;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_command_mechanics_handler_missing"),
+				TEXT("No mechanics handler is registered for the required material command."), TEXT("internal_command"), CommandId);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.PropertyPath = TEXT("command_handler_registered");
+			OutError.SourceKind = TEXT("native_result");
+			if (DomainAdapters::MaterialCommands::GetPublicCommandIds().Contains(CommandId))
+				OutError.PublicMessage += TEXT(" Command: ") + CommandId + TEXT(".");
 			return false;
 		}
 		OutHandler = *Found;
@@ -166,13 +220,40 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 		const FString& CommandId,
 		TSharedPtr<IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutAuthorityScopes = {
 			TEXT("material_niagara_graph.read"),
 			TEXT("material_niagara_graph.write"),
 		};
 		return TryResolveMechanicsHandler(CommandId, OutHandler, OutError);
+	}
+
+	bool TryExecuteInternal(
+		const FString& CommandId,
+		const FString& ParamsJson,
+		const Contract::FUeAgentCallerContext& Caller,
+		FString& OutPayloadJson,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		OutPayloadJson.Reset();
+		OutError.Reset();
+
+		TArray<FUeAgentGraphCompoundActivationProfile> Profiles;
+		if (!DomainAdapters::MaterialCommands::TryGetActivationProfiles(
+				Profiles, OutError))
+		{
+			return false;
+		}
+		TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
+		if (!TryCreateMechanicsHandlers(Mechanics, OutError))
+		{
+			return false;
+		}
+		return TryExecuteGraphCompoundInternal(
+			Profiles, Mechanics, CommandId, ParamsJson, Caller,
+			TEXT("material_command_"), OutPayloadJson,
+			OutError);
 	}
 
 	TSharedPtr<const DomainCapability::IDomainOperationInvocationFactory>
@@ -216,13 +297,15 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 				FindOperationInvocationFactory(Request.GetCommandId());
 		if (!Factory.IsValid())
 		{
+			auto Diagnostic = CommandFailure(TEXT("material_command_operation_factory_missing"), Request.GetCommandId(),
+				TEXT("The exact material operation has no lifecycle factory."));
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			Diagnostic.PropertyPath = TEXT("operation_factory_registered");
 			return FUeAgentCommandResult::Failure(
 				Request,
 				TEXT("{}"),
-				ErrorJson(
-					TEXT("material_command_operation_factory_missing"),
-					Request.GetCommandId(),
-					TEXT("the exact material operation has no lifecycle factory")));
+				MoveTemp(Diagnostic));
 		}
 		DomainCapability::FDomainOperationInvocation Invocation;
 		DomainCapability::FDomainOperationInvocationError InvocationError;
@@ -232,44 +315,22 @@ namespace UE::UAI::OperationOwners::MaterialCommands
 			return FUeAgentCommandResult::Failure(
 				Request,
 				TEXT("{}"),
-				ErrorJson(
-					TEXT("material_command_runtime_unavailable"),
-					Request.GetCommandId(),
-					InvocationError.GetCode() + TEXT(":")
-						+ InvocationError.GetDetail()));
+				InvocationFailure(TEXT("material_command_runtime_unavailable"), Request.GetCommandId(), InvocationError));
 		}
 		FOperationLifecycleReceipt Receipt;
 		if (!Invocation.GetService()->Run(
 				*Invocation.GetPlan(), *Invocation.GetAuthorization(), Receipt))
 		{
-			FString Detail = Invocation.GetContext()->GetFailureDetail();
-			if (Detail.IsEmpty())
-			{
-				Detail = TEXT("phase_history:")
-					+ FString::Join(Receipt.GetPhaseHistory(), TEXT(","));
-			}
-			return FUeAgentCommandResult::Failure(
-				Request,
-				TEXT("{}"),
-				ErrorJson(
-					Receipt.GetErrorCode(),
-					Request.GetCommandId(),
-					Detail,
-					LexToString(Receipt.GetStatus()),
-					Receipt.IsRetrySafe()));
+			auto Diagnostic = Receipt.GetDiagnostic();
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetCommandId();
+			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
 		}
 		FString Payload;
-		FString PayloadError;
+		UE::UAI::Contract::FDiagnostic PayloadError;
 		if (!Invocation.GetContext()->TryBuildSuccessPayload(
 				Receipt, Payload, PayloadError))
 		{
-			return FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(),
-				Request.GetRequestId(),
-				Request.GetCommandId(),
-				Request.GetCommandBindingHash(),
-				TEXT("material_command_operation_result_invalid"),
-				PayloadError);
+			return FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(), Request.GetCommandId(), Request.GetCommandBindingHash(), ProjectionFailure(TEXT("material_command_operation_result_invalid"), PayloadError, Receipt));
 		}
 		return FUeAgentCommandResult::Success(Request, MoveTemp(Payload));
 	}

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Domains/Niagara/Authoring/UeAgentNiagaraAuthoringStateAccessors.h"
+#include "Domains/Niagara/UeAgentNiagaraRendererBindings.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -9,6 +10,7 @@
 #include "Domains/Niagara/Authoring/UeAgentNiagaraStandaloneModuleAuthoring.h"
 #include "Domains/Niagara/Authoring/UeAgentNiagaraUserParameterAuthoring.h"
 #include "Misc/PackageName.h"
+#include "Misc/ScopeExit.h"
 #include "NiagaraDataInterface.h"
 #include "NiagaraEditorSettings.h"
 #include "NiagaraEmitter.h"
@@ -25,7 +27,9 @@
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringEncodedTypes.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
 #include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 #include "Utilities/UeAgentPropertyValueCodec.h"
 #include "Utilities/UeAgentStructuredHjsonFormatter.h"
@@ -35,18 +39,54 @@ namespace {
 
 using namespace UeAgentNiagaraStageModuleAuthoring;
 
+UE::UAI::Contract::FDiagnostic StateValueFailure(const TCHAR* Code, const FString& Reason,
+    const FString& Field, const TSharedPtr<FJsonValue>& Actual,
+    const TSharedPtr<FJsonValue>& Expected, const bool bNativeResult = false) {
+  auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("state_capture"));
+  Error.PropertyPath = Field;
+  Error.ActualValue = Actual;
+  Error.ActualValuePresent = Actual.IsValid();
+  Error.ExpectedValue = Expected;
+  Error.ExpectedValuePresent = Expected.IsValid();
+  if (bNativeResult) Error.SourceKind = TEXT("native_result");
+  return Error;
+}
+
+void SetInputPatchState(const TSharedRef<FJsonObject>& State, const TSharedRef<FJsonObject>& Inputs) {
+  // All native input consumers apply supplied entries only. Preserve that
+  // contract through aggregate capture and original-intent verification.
+  const TSharedPtr<FJsonValue> Value = MakeShared<FJsonValueObject>(Inputs);
+  UeAgentAuthoringTypeDescriptors::FDescriptor Type;
+  Type.Kind = TEXT("object");
+  const auto Definition = MakeShared<FJsonObject>();
+  Definition->SetStringField(TEXT("omitted_patch_field_policy"), TEXT("preserve_current"));
+  UeAgentAuthoringEncodedTypes::FScope::Record(Value, Type, Definition);
+  UeAgentAuthoringEncodedTypes::FScope::SetNativeField(State, TEXT("inputs"), Value,
+      UeAgentAuthoringEncodedTypes::EFieldEmission::NonEmptyObject);
+}
+
+TSharedRef<FJsonObject> BuildFunctionInputDefinition(UNiagaraNodeFunctionCall &Node, const UObject* OwningAsset) {
+  const auto InputsDefinition = MakeShared<FJsonObject>();
+  InputsDefinition->SetObjectField(TEXT("fields"), BuildModuleInputSchema(Node, OwningAsset));
+  const auto Fields = MakeShared<FJsonObject>();
+  Fields->SetObjectField(TEXT("inputs"), InputsDefinition);
+  const auto Definition = MakeShared<FJsonObject>();
+  Definition->SetObjectField(TEXT("fields"), Fields);
+  return Definition;
+}
+
 UObject *
-ResolveRequestObject(const UeAgentAuthoringState::FReadRequest &Request) {
-  FString ResolveError;
+ResolveRequestObject(const UeAgentAuthoringState::FReadRequest &Request,
+                     UE::UAI::Contract::FDiagnostic& OutError) {
   UObject *Object =
-      UeAgentAuthoringState::ResolveRequestRootObject(Request, ResolveError);
-  if (!IsValid(Object) || GetAssetKind(Object).IsEmpty())
+      UeAgentAuthoringState::ResolveRequestRootObject(Request, OutError);
+  if (!IsValid(Object))
     return nullptr;
   return Object;
 }
 
 bool BuildStageTarget(const UeAgentAuthoringState::FReadRequest &Request,
-                      FStageTarget &OutTarget, FString &OutError) {
+                      FStageTarget &OutTarget, UE::UAI::Contract::FDiagnostic& OutError) {
   OutTarget = FStageTarget();
   OutTarget.AssetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
   OutTarget.EmitterName =
@@ -55,7 +95,9 @@ bool BuildStageTarget(const UeAgentAuthoringState::FReadRequest &Request,
       Request.TargetIdentity.GetSelector(TEXT("emitter_handle_id"));
   if (!EmitterHandleIdText.IsEmpty()) {
     if (!FGuid::Parse(EmitterHandleIdText, OutTarget.EmitterHandleId)) {
-      OutError = TEXT("niagara_emitter_handle_id_invalid");
+      OutError = StateValueFailure(TEXT("niagara_emitter_handle_id_invalid"),
+          TEXT("The emitter handle selector must be a valid GUID."), TEXT("emitter_handle_id"),
+          MakeShared<FJsonValueString>(EmitterHandleIdText), MakeShared<FJsonValueString>(TEXT("GUID")));
       return false;
     }
     OutTarget.bEmitterHandleIdExplicit = true;
@@ -63,7 +105,9 @@ bool BuildStageTarget(const UeAgentAuthoringState::FReadRequest &Request,
   const FString UsageText = Request.TargetIdentity.GetSelector(TEXT("usage"));
   if (!UsageText.IsEmpty()) {
     if (!TryParseScriptUsage(UsageText, OutTarget.Usage)) {
-      OutError = TEXT("niagara_script_usage_invalid");
+      OutError = StateValueFailure(TEXT("niagara_script_usage_invalid"),
+          TEXT("The script usage selector is not a recognized ENiagaraScriptUsage name."), TEXT("usage"),
+          MakeShared<FJsonValueString>(UsageText), MakeShared<FJsonValueString>(TEXT("ENiagaraScriptUsage enum name")));
       return false;
     }
     OutTarget.bUsageExplicit = true;
@@ -72,21 +116,31 @@ bool BuildStageTarget(const UeAgentAuthoringState::FReadRequest &Request,
       Request.TargetIdentity.GetSelector(TEXT("usage_id"));
   if (!UsageIdText.IsEmpty()) {
     if (!FGuid::Parse(UsageIdText, OutTarget.UsageId)) {
-      OutError = TEXT("niagara_script_usage_id_invalid");
+      OutError = StateValueFailure(TEXT("niagara_script_usage_id_invalid"),
+          TEXT("The stage usage identifier must be a valid GUID."), TEXT("usage_id"),
+          MakeShared<FJsonValueString>(UsageIdText), MakeShared<FJsonValueString>(TEXT("GUID")));
       return false;
     }
     OutTarget.bUsageIdExplicit = true;
   }
-  return !OutTarget.AssetPath.IsEmpty();
+  if (OutTarget.AssetPath.IsEmpty()) {
+    OutError = StateValueFailure(TEXT("niagara_stage_asset_path_missing"),
+        TEXT("The Niagara stage read request requires an asset path selector."), TEXT("asset_path"),
+        MakeShared<FJsonValueString>(OutTarget.AssetPath), MakeShared<FJsonValueString>(TEXT("non-empty asset path")));
+    return false;
+  }
+  return true;
 }
 
 bool BuildModuleSelector(const UeAgentAuthoringState::FReadRequest &Request,
-                         FModuleSelector &OutSelector, FString &OutError) {
+                         FModuleSelector &OutSelector, UE::UAI::Contract::FDiagnostic& OutError) {
   OutSelector = FModuleSelector();
   const FString GuidText =
       Request.TargetIdentity.GetSelector(TEXT("module_guid"));
   if (!GuidText.IsEmpty() && !FGuid::Parse(GuidText, OutSelector.NodeGuid)) {
-    OutError = TEXT("niagara_module_guid_invalid");
+    OutError = StateValueFailure(TEXT("niagara_module_guid_invalid"),
+        TEXT("The module node selector must be a valid GUID."), TEXT("module_guid"),
+        MakeShared<FJsonValueString>(GuidText), MakeShared<FJsonValueString>(TEXT("GUID")));
     return false;
   }
   OutSelector.ScriptPath =
@@ -104,24 +158,21 @@ TSharedRef<FJsonObject> BuildStageState(const FResolvedStage &Stage) {
   TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
   if (!Stage.EmitterName.IsEmpty())
     State->SetStringField(TEXT("emitter_name"), Stage.EmitterName);
-  if (Stage.EmitterHandleId.IsValid()) {
-    State->SetStringField(
-        TEXT("emitter_handle_id"),
-        Stage.EmitterHandleId.ToString(EGuidFormats::DigitsWithHyphensLower));
-  }
-  State->SetStringField(TEXT("usage"), ScriptUsageToString(Stage.Usage));
-  State->SetStringField(
-      TEXT("usage_id"),
-      Stage.UsageId.ToString(EGuidFormats::DigitsWithHyphensLower));
+  const FString UsageName = ScriptUsageToString(Stage.Usage);
+  State->SetStringField(TEXT("name"), UsageName);
+  State->SetStringField(TEXT("usage"), UsageName);
   return State;
 }
 
 TSharedPtr<FJsonObject> BuildModuleState(const FResolvedStage &Stage,
                                          UNiagaraNodeFunctionCall &Module,
                                          const int32 ModuleIndex,
-                                         FString &OutError) {
+                                         UE::UAI::Contract::FDiagnostic& OutError) {
   TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
+  State->SetStringField(TEXT("name"), Module.GetFunctionName());
   if (Cast<UNiagaraNodeAssignment>(&Module)) {
+    State->SetStringField(
+        TEXT("display_name"), Module.GetNodeTitle(ENodeTitleType::ListView).ToString());
     State->SetStringField(TEXT("module_kind"), TEXT("assignment"));
     TSharedRef<FJsonObject> AssignmentTargets = MakeShared<FJsonObject>();
     if (!BuildAssignmentTargets(Module, AssignmentTargets, OutError))
@@ -135,16 +186,18 @@ TSharedPtr<FJsonObject> BuildModuleState(const FResolvedStage &Stage,
   TSharedRef<FJsonObject> Inputs = MakeShared<FJsonObject>();
   if (!BuildInputOverrides(Module, Inputs, OutError))
     return nullptr;
-  if (!Inputs->Values.IsEmpty())
-    State->SetObjectField(TEXT("inputs"), Inputs);
+  SetInputPatchState(State, Inputs);
   return State;
 }
 
 TSharedPtr<FJsonObject>
 BuildStandaloneAssignmentState(UNiagaraNode &AssignmentNode,
-                               const int32 ModuleIndex, FString &OutError) {
+                               const int32 ModuleIndex, UE::UAI::Contract::FDiagnostic& OutError) {
   using namespace UeAgentNiagaraStandaloneModuleAuthoring;
   TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
+  State->SetStringField(TEXT("name"), AssignmentNode.GetName());
+  State->SetStringField(
+      TEXT("display_name"), AssignmentNode.GetNodeTitle(ENodeTitleType::ListView).ToString());
   State->SetStringField(TEXT("module_kind"), TEXT("assignment"));
   State->SetNumberField(TEXT("module_index"), ModuleIndex);
 
@@ -167,61 +220,25 @@ BuildStandaloneAssignmentState(UNiagaraNode &AssignmentNode,
     if (!UeAgentNiagaraStageModuleAuthoring::BuildInputValueForPin(
             *TargetPin, ResolvedTarget.GetType(), Payload, bHasValue, OutError))
       return nullptr;
-    if (bHasValue && Payload.IsValid()) {
-      Inputs->SetObjectField(Target.GetName().ToString(), Payload);
-    }
+    if (Payload) UeAgentAuthoringEncodedTypes::FScope::SetNativeField(Inputs, Target.GetName().ToString(),
+        MakeShared<FJsonValueObject>(Payload), bHasValue
+            ? UeAgentAuthoringEncodedTypes::EFieldEmission::Always
+            : UeAgentAuthoringEncodedTypes::EFieldEmission::NativeDefault);
   }
   State->SetObjectField(TEXT("assignment_targets"), AssignmentTargets);
-  if (!Inputs->Values.IsEmpty())
-    State->SetObjectField(TEXT("inputs"), Inputs);
+  SetInputPatchState(State, Inputs);
   return State;
-}
-
-bool BuildChangedAuthoringProperties(
-    UStruct &StructType, void *StructData, const void *DefaultData,
-    UObject &Owner,
-    const UeAgentDetailsAuthoringService::FCapturePolicy &Policy,
-    TSharedPtr<FJsonObject> &OutProperties, FString &OutError) {
-  UeAgentDetailsAuthoringService::FCapturePolicy CapturePolicy = Policy;
-  UeAgentPropertyValueCodec::FOptions CodecOptions;
-  CodecOptions.MaxDepth = -1;
-  CodecOptions.MaxContainerItems = Policy.MaxContainerItems;
-  CodecOptions.MaxStringChars = Policy.MaxStringChars;
-  CodecOptions.StructFieldFilter = Policy.StructFieldFilter;
-  CapturePolicy.IncludeProperty = [DefaultData, &Owner, CodecOptions](
-                                      const FProperty *Property,
-                                      const void *ValuePtr, const UObject *) {
-    const void *DefaultValuePtr =
-        DefaultData ? Property->ContainerPtrToValuePtr<void>(DefaultData)
-                    : nullptr;
-    return !DefaultValuePtr ||
-           !UeAgentPropertyValueCodec::AreSemanticallyEquivalent(
-               const_cast<FProperty *>(Property), ValuePtr, DefaultValuePtr,
-               &Owner, CodecOptions);
-  };
-  UeAgentAuthoringState::FStateSnapshot Snapshot;
-  return UeAgentDetailsAuthoringService::CaptureStructProperties(
-      &StructType, StructData, Owner.GetPathName(), &Owner, CapturePolicy,
-      Snapshot, OutProperties, OutError);
 }
 
 bool BuildRendererAuthoringProperties(UNiagaraRendererProperties &Renderer,
                                       TSharedPtr<FJsonObject> &OutProperties,
-                                      FString &OutError) {
+                                      UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentDetailsAuthoringService::FCapturePolicy Policy;
-  Policy.StructFieldFilter = [](const UScriptStruct *Struct,
-                                const FProperty *Field) {
-    if (!Struct || !Field ||
-        Struct->GetFName() != TEXT("NiagaraVariableAttributeBinding"))
-      return true;
-    const FName FieldName = Field->GetFName();
-    return FieldName == TEXT("RootVariable") ||
-           FieldName == TEXT("BindingSourceMode");
-  };
-  if (!BuildChangedAuthoringProperties(*Renderer.GetClass(), &Renderer,
-                                       Renderer.GetClass()->GetDefaultObject(),
-                                       Renderer, Policy, OutProperties,
-                                       OutError)) {
+  Policy.StructFieldFilter = UeAgentNiagaraRendererBindings::IncludeAuthoringField;
+  Policy.AuthorizeProperty = UeAgentNiagaraRendererBindings::AuthorizeAuthoringField;
+  UeAgentAuthoringState::FStateSnapshot Snapshot;
+  if (!UeAgentDetailsAuthoringService::CaptureObjectProperties(
+          &Renderer, Policy, Snapshot, OutProperties, OutError)) {
     return false;
   }
 
@@ -230,10 +247,24 @@ bool BuildRendererAuthoringProperties(UNiagaraRendererProperties &Renderer,
       !OutProperties->TryGetArrayField(TEXT("properties"),
                                        ExistingProperties) ||
       !ExistingProperties) {
-    OutError = TEXT("niagara_renderer_properties_document_invalid");
+    OutError = StateValueFailure(TEXT("niagara_renderer_properties_document_invalid"),
+        TEXT("Renderer capture did not produce a properties array."), TEXT("properties"),
+        OutProperties.IsValid() ? OutProperties->TryGetField(TEXT("properties")) : TSharedPtr<FJsonValue>(),
+        MakeShared<FJsonValueString>(TEXT("array")), true);
+    OutError.CandidateName = Renderer.GetName();
+    OutError.InternalContext = Renderer.GetPathName();
     return false;
   }
   TArray<TSharedPtr<FJsonValue>> Properties = *ExistingProperties;
+  for (const auto& Value : Properties) {
+    const auto Descriptor = Value->AsObject();
+    const FString Path = Descriptor->GetStringField(TEXT("property_path"));
+    auto* Property = FindFProperty<FStructProperty>(Renderer.GetClass(), *Path);
+    if (Property && Property->Struct == FNiagaraVariableAttributeBinding::StaticStruct()) {
+      Descriptor->SetField(TEXT("value"), UeAgentNiagaraRendererBindings::EncodeAuthoringBinding(
+          *Property, *Property->ContainerPtrToValuePtr<FNiagaraVariableAttributeBinding>(&Renderer), Renderer));
+    }
+  }
   Properties.RemoveAll([](const TSharedPtr<FJsonValue> &Value) {
     const TSharedPtr<FJsonObject> Descriptor =
         Value.IsValid() && Value->Type == EJson::Object ? Value->AsObject()
@@ -248,7 +279,7 @@ bool BuildRendererAuthoringProperties(UNiagaraRendererProperties &Renderer,
   Literal->SetBoolField(TEXT("literal"), Renderer.GetIsEnabled());
   TSharedRef<FJsonObject> Descriptor = MakeShared<FJsonObject>();
   Descriptor->SetStringField(TEXT("property_path"), TEXT("bIsEnabled"));
-  Descriptor->SetStringField(TEXT("value_kind"), TEXT("bool"));
+  Descriptor->SetStringField(TEXT("kind"), TEXT("bool"));
   Descriptor->SetObjectField(TEXT("value"), Literal);
   Properties.Add(MakeShared<FJsonValueObject>(Descriptor));
   Properties.Sort([](const TSharedPtr<FJsonValue> &Left,
@@ -279,49 +310,25 @@ bool AppendEmitterPropertyReadRequests(
     const FResolvedEmitterOwner &Owner,
     const TMap<FString, FString> &OwnerSelectors,
     TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    FString &OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError) {
   OutError.Reset();
   if (!Owner.Emitter || !Owner.EmitterData) {
-    OutError = TEXT("niagara_emitter_owner_invalid");
-    return false;
-  }
-
-  UeAgentAuthoringNativeDefaults::FScratchScope Scratch;
-  UPackage *ScratchPackage = Scratch.CreateScratchPackage(OutError);
-  if (!ScratchPackage)
-    return false;
-  UNiagaraEmitter *FactoryDefaultEmitter = Cast<UNiagaraEmitter>(
-      CreateFactorySeed(UNiagaraEmitter::StaticClass(), ScratchPackage,
-                        TEXT("emitter"), true, true, OutError));
-  FVersionedNiagaraEmitterData *FactoryDefaultData =
-      FactoryDefaultEmitter ? FactoryDefaultEmitter->GetLatestEmitterData()
-                            : nullptr;
-  if (!FactoryDefaultData) {
-    if (OutError.IsEmpty())
-      OutError = TEXT("niagara_emitter_factory_default_missing");
+    OutError = StateValueFailure(TEXT("niagara_emitter_owner_invalid"),
+        TEXT("Emitter property capture requires an emitter instance and its version data."),
+        Owner.Emitter ? TEXT("emitter.version_data.available") : TEXT("emitter.available"),
+        MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
+    OutError.TargetPath = OwnerSelectors.FindRef(TEXT("asset_path"));
+    OutError.CandidateName = Owner.EmitterName;
     return false;
   }
 
   UeAgentDetailsAuthoringService::FCapturePolicy Policy;
   Policy.SemanticId = EmitterPropertySemanticId;
-  UeAgentPropertyValueCodec::FOptions CodecOptions;
-  CodecOptions.MaxDepth = -1;
-  CodecOptions.MaxContainerItems = Policy.MaxContainerItems;
-  CodecOptions.MaxStringChars = Policy.MaxStringChars;
-  Policy.IncludeProperty =
-      [FactoryDefaultData, Emitter = Owner.Emitter, CodecOptions](
-          const FProperty *Property, const void *ValuePtr, const UObject *) {
-        const void *DefaultValuePtr =
-            Property->ContainerPtrToValuePtr<void>(FactoryDefaultData);
-        return !UeAgentPropertyValueCodec::AreSemanticallyEquivalent(
-            const_cast<FProperty *>(Property), ValuePtr, DefaultValuePtr,
-            Emitter, CodecOptions);
-      };
   Policy.BuildSnapshotIdentity =
       [OwnerSelectors](
           const FString &PropertyPath,
           UeAgentAuthoringIdentity::FCanonicalIdentity &OutIdentity,
-          FString &IdentityError) {
+          UE::UAI::Contract::FDiagnostic& IdentityError) {
         TMap<FString, FString> Selectors = OwnerSelectors;
         Selectors.Add(TEXT("property_path"), PropertyPath);
         return UeAgentAuthoringIdentity::BuildCanonicalIdentity(
@@ -343,12 +350,15 @@ FString EscapeResourcePointerToken(FString Token) {
 
 bool BuildDynamicInputState(UNiagaraNodeFunctionCall &DynamicInput,
                             const FString &InputName,
+                            const UObject* OwningAsset,
                             TSharedRef<FJsonObject> State,
-                            FString &OutError) {
+                            TSharedRef<FJsonObject> Definition,
+                            UE::UAI::Contract::FDiagnostic& OutError) {
   struct FStateFrame {
     UNiagaraNodeFunctionCall *Node = nullptr;
     FString InputName;
     TSharedPtr<FJsonObject> State;
+    TSharedPtr<FJsonObject> Definition;
     FString Pointer;
     bool bExit = false;
   };
@@ -357,47 +367,56 @@ bool BuildDynamicInputState(UNiagaraNodeFunctionCall &DynamicInput,
   FUeAgentStructuredResourceTracker ResourceTracker;
   TSet<UNiagaraNodeFunctionCall *> ActiveNodes;
   TArray<FStateFrame> Stack;
-  Stack.Add({&DynamicInput, InputName, State,
+  Stack.Add({&DynamicInput, InputName, State, Definition,
              TEXT("/dynamic_inputs/") +
                  EscapeResourcePointerToken(InputName),
              false});
 
   while (!Stack.IsEmpty()) {
     FStateFrame Frame = Stack.Pop(EAllowShrinking::No);
-    if (!Frame.Node || !Frame.State.IsValid()) {
-      OutError = TEXT("niagara_dynamic_input_state_frame_invalid");
-      return false;
-    }
     if (Frame.bExit) {
       ActiveNodes.Remove(Frame.Node);
       continue;
     }
+    if (!Frame.Node || !Frame.State.IsValid() || !Frame.Definition.IsValid()) {
+      OutError = StateValueFailure(TEXT("niagara_dynamic_input_state_frame_invalid"),
+          TEXT("Dynamic input capture requires a function node, output state, and value definition."),
+          !Frame.Node ? TEXT("node.available") : !Frame.State.IsValid() ? TEXT("state.available") : TEXT("definition.available"),
+          MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
+      OutError.CandidateName = Frame.InputName;
+      OutError.InternalContext = Frame.Pointer;
+      return false;
+    }
     if (ActiveNodes.Contains(Frame.Node)) {
-      OutError = TEXT("niagara_dynamic_input_cycle_detected:pointer=") +
-                 Frame.Pointer;
+      OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_dynamic_input_cycle_detected"), TEXT("The Niagara dynamic inputs contain a cycle."), TEXT("state_capture"));
+      OutError.SourceKind = TEXT("native_result");
+      OutError.PropertyPath = Frame.Pointer;
+      OutError.CandidateName = Frame.Node->GetFunctionName();
+      OutError.InternalContext = Frame.Node->GetPathName();
       return false;
     }
     if (!ResourceTracker.ChargeNodes(1, Frame.Pointer, OutError) ||
         !ResourceTracker.ChargeItems(1, Frame.Pointer, OutError) ||
         !ResourceTracker.ChargeWorkUnits(1, Frame.Pointer, OutError) ||
         !ResourceTracker.ChargeEstimatedMemoryBytes(
-            sizeof(FStateFrame) + sizeof(FJsonObject), Frame.Pointer,
+            sizeof(FStateFrame) + 2 * sizeof(FJsonObject), Frame.Pointer,
             OutError)) {
       return false;
     }
 
     ActiveNodes.Add(Frame.Node);
     Stack.Add(
-        {Frame.Node, FString(), nullptr, Frame.Pointer, true});
+        {Frame.Node, FString(), nullptr, nullptr, Frame.Pointer, true});
 
     Frame.State->SetStringField(TEXT("script_asset_path"),
                                 GetModuleScriptPath(*Frame.Node));
+    Frame.State->SetStringField(TEXT("name"),
+                                Frame.Node->GetFunctionName());
     Frame.State->SetStringField(TEXT("input_name"), Frame.InputName);
     TSharedRef<FJsonObject> Inputs = MakeShared<FJsonObject>();
     if (!BuildInputOverrides(*Frame.Node, Inputs, OutError))
       return false;
-    if (!Inputs->Values.IsEmpty())
-      Frame.State->SetObjectField(TEXT("inputs"), Inputs);
+    SetInputPatchState(Frame.State.ToSharedRef(), Inputs);
 
     TArray<FResolvedModuleInput> ResolvedInputs;
     BuildResolvedModuleInputs(*Frame.Node, ResolvedInputs);
@@ -418,7 +437,7 @@ bool BuildDynamicInputState(UNiagaraNodeFunctionCall &DynamicInput,
       UNiagaraNodeInput *InputNode = nullptr;
       UNiagaraDataInterface *DataInterface = nullptr;
       FString ResolvedName;
-      FString ResolveError;
+      UE::UAI::Contract::FDiagnostic ResolveError;
       if (!ResolveDynamicInputDataInterface(
               *Frame.Node, Input.FullInputName, InputNode, DataInterface,
               ResolvedName, ResolveError)) {
@@ -426,7 +445,7 @@ bool BuildDynamicInputState(UNiagaraNodeFunctionCall &DynamicInput,
       }
       UeAgentAuthoringState::FStateSnapshot DataInterfaceSnapshot;
       TSharedPtr<FJsonObject> Properties;
-      FString CaptureError;
+      UE::UAI::Contract::FDiagnostic CaptureError;
       if (!UeAgentDetailsAuthoringService::CaptureObjectProperties(
               DataInterface,
               UeAgentDetailsAuthoringService::FCapturePolicy(),
@@ -446,25 +465,33 @@ bool BuildDynamicInputState(UNiagaraNodeFunctionCall &DynamicInput,
     }
 
     TSharedRef<FJsonObject> Children = MakeShared<FJsonObject>();
+    TSharedRef<FJsonObject> ChildDefinitions = MakeShared<FJsonObject>();
     TArray<FStateFrame> ChildFrames;
     for (const FResolvedModuleInput &Input : ResolvedInputs) {
       FString ResolvedName;
-      UNiagaraNodeFunctionCall *Child = FindDynamicInputForModuleInput(
-          *Frame.Node, Input.FullInputName, ResolvedName);
+      UNiagaraNodeFunctionCall *Child = FindDynamicInputForModuleInput(*Frame.Node, Input.FullInputName, ResolvedName, OutError);
+        if (OutError.IsValid()) return false;
       if (!Child)
         continue;
       if (ResolvedName.IsEmpty())
         ResolvedName = Input.FullInputName;
       TSharedRef<FJsonObject> ChildState = MakeShared<FJsonObject>();
+      TSharedRef<FJsonObject> ChildDefinition = BuildFunctionInputDefinition(*Child, OwningAsset);
       Children->SetObjectField(ResolvedName, ChildState);
+      ChildDefinitions->SetObjectField(ResolvedName, ChildDefinition);
       ChildFrames.Add(
-          {Child, ResolvedName, ChildState,
+          {Child, ResolvedName, ChildState, ChildDefinition,
            Frame.Pointer + TEXT("/dynamic_inputs/") +
                EscapeResourcePointerToken(ResolvedName),
            false});
     }
-    if (!Children->Values.IsEmpty())
+    if (!Children->Values.IsEmpty()) {
       Frame.State->SetObjectField(TEXT("dynamic_inputs"), Children);
+      TSharedRef<FJsonObject> ChildrenDefinition = MakeShared<FJsonObject>();
+      ChildrenDefinition->SetObjectField(TEXT("fields"), ChildDefinitions);
+      Frame.Definition->GetObjectField(TEXT("fields"))->SetObjectField(
+          TEXT("dynamic_inputs"), ChildrenDefinition);
+    }
     for (int32 Index = ChildFrames.Num() - 1; Index >= 0; --Index) {
       Stack.Add(MoveTemp(ChildFrames[Index]));
     }
@@ -486,13 +513,21 @@ BuildAssetState(const UObject &Object,
 
 UeAgentAuthoringState::EReadOutcome
 ReadState(const UeAgentAuthoringState::FReadRequest &Request,
-          UeAgentAuthoringState::FStateValue &OutValue, FString &OutError) {
+          UeAgentAuthoringState::FStateValue &OutValue, UE::UAI::Contract::FDiagnostic& OutError) {
   OutValue = UeAgentAuthoringState::FStateValue();
   OutValue.TargetIdentity = Request.TargetIdentity;
   OutValue.Type.Kind = TEXT("object");
   OutValue.bEditable = true;
   OutValue.Provenance = TEXT("niagara.state");
   OutError.Reset();
+  ON_SCOPE_EXIT {
+    if (OutError.IsValid()) {
+      if (OutError.TargetPath.IsEmpty())
+        OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+      if (OutError.CandidateName.IsEmpty())
+        OutError.CandidateName = Request.TargetIdentity.GetSelector(TEXT("emitter_name"));
+    }
+  };
 
   const FString *ExpectedAbsent = Request.Context.Find(TEXT("expected_absent"));
   if (ExpectedAbsent &&
@@ -504,8 +539,11 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
 
   if (Request.SemanticId == UserParameterSemanticId) {
     UNiagaraSystem *System =
-        Cast<UNiagaraSystem>(ResolveRequestObject(Request));
+        Cast<UNiagaraSystem>(ResolveRequestObject(Request, OutError));
     if (!System) {
+      if (OutError.IsValid() && OutError.Code != TEXT("state_request_object_not_found"))
+        return UeAgentAuthoringState::EReadOutcome::Failed;
+      OutError.Reset();
       OutValue.bAvailable = false;
       OutValue.AvailabilityReason =
           TEXT("niagara_user_parameter_system_not_found");
@@ -520,9 +558,10 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
       OutValue.AvailabilityReason = TEXT("niagara_user_parameter_not_found");
       return UeAgentAuthoringState::EReadOutcome::Unavailable;
     }
-    OutValue.Value = MakeShared<FJsonValueObject>(
-        UeAgentNiagaraUserParameterAuthoring::BuildState(*System, Variable,
-                                                         true));
+    TSharedRef<FJsonObject> State =
+        UeAgentNiagaraUserParameterAuthoring::BuildState(*System, Variable, true);
+    State->SetStringField(TEXT("name"), ParameterName);
+    OutValue.Value = MakeShared<FJsonValueObject>(State);
     OutValue.bAvailable = true;
     return UeAgentAuthoringState::EReadOutcome::Resolved;
   }
@@ -539,26 +578,43 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
         Request.TargetIdentity.GetSelector(TEXT("emitter_handle_id"));
     if (!HandleIdText.IsEmpty()) {
       if (!FGuid::Parse(HandleIdText, OwnerTarget.EmitterHandleId)) {
-        OutError = TEXT("niagara_emitter_handle_id_invalid");
+        OutError = StateValueFailure(TEXT("niagara_emitter_handle_id_invalid"),
+            TEXT("The emitter handle selector must be a valid GUID."), TEXT("emitter_handle_id"),
+            MakeShared<FJsonValueString>(HandleIdText), MakeShared<FJsonValueString>(TEXT("GUID")));
         return UeAgentAuthoringState::EReadOutcome::Failed;
       }
       OwnerTarget.bEmitterHandleIdExplicit = true;
     }
     FResolvedEmitterOwner Owner;
-    if (!ResolveEmitterOwner(OwnerTarget, Owner, OutError,
-                             ResolveRequestObject(Request))) {
+    UObject* Root = ResolveRequestObject(Request, OutError);
+    if (!Root && OutError.IsValid() && OutError.Code != TEXT("state_request_object_not_found"))
+      return UeAgentAuthoringState::EReadOutcome::Failed;
+    if (!ResolveEmitterOwner(OwnerTarget, Owner, OutError, Root)) {
       OutValue.bAvailable = false;
-      OutValue.AvailabilityReason = OutError;
+      OutValue.AvailabilityReason = OutError.Code;
+      if (OutError.Code != TEXT("niagara_emitter_owner_not_found")
+          && OutError.Code != TEXT("niagara_emitter_owner_asset_not_found"))
+        return UeAgentAuthoringState::EReadOutcome::Failed;
+      OutError.Reset();
       return UeAgentAuthoringState::EReadOutcome::Unavailable;
     }
     if (Request.SemanticId == EmitterOwnerSemanticId) {
       TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
-      if (!Owner.EmitterName.IsEmpty())
+      if (!Owner.EmitterName.IsEmpty()) {
+        State->SetStringField(TEXT("name"), Owner.EmitterName);
         State->SetStringField(TEXT("emitter_name"), Owner.EmitterName);
+      }
+      if (Owner.System && Owner.EmitterData) {
+        const FVersionedNiagaraEmitter Parent = Owner.EmitterData->GetParent();
+        if (Parent.Emitter && Parent.Emitter->GetOutermost()) {
+          State->SetStringField(TEXT("source_asset_path"),
+                               Parent.Emitter->GetOutermost()->GetName());
+          if (Parent.Version.IsValid())
+            State->SetStringField(TEXT("emitter_version"),
+                                 Parent.Version.ToString(EGuidFormats::DigitsWithHyphensLower));
+        }
+      }
       if (Owner.EmitterHandleId.IsValid()) {
-        State->SetStringField(TEXT("emitter_handle_id"),
-                              Owner.EmitterHandleId.ToString(
-                                  EGuidFormats::DigitsWithHyphensLower));
         if (Owner.System) {
           const FNiagaraEmitterHandle *Handle =
               Owner.System->GetEmitterHandles().FindByPredicate(
@@ -609,7 +665,9 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
         Request.TargetIdentity.GetSelector(TEXT("script_usage_id"));
     FGuid UsageId;
     if (!FGuid::Parse(UsageIdText, UsageId)) {
-      OutError = TEXT("niagara_event_handler_usage_id_invalid");
+      OutError = StateValueFailure(TEXT("niagara_event_handler_usage_id_invalid"),
+          TEXT("The event handler usage selector must be a valid GUID."), TEXT("script_usage_id"),
+          MakeShared<FJsonValueString>(UsageIdText), MakeShared<FJsonValueString>(TEXT("GUID")));
       return UeAgentAuthoringState::EReadOutcome::Failed;
     }
     for (int32 Index = 0;
@@ -619,7 +677,7 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
       if (!Event.Script || Event.Script->GetUsageId() != UsageId)
         continue;
       TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
-      State->SetStringField(TEXT("script_usage_id"), UsageIdText);
+      State->SetStringField(TEXT("name"), Event.SourceEventName.ToString());
       State->SetNumberField(TEXT("event_index"), Index);
       State->SetStringField(TEXT("source_event_name"),
                             Event.SourceEventName.ToString());
@@ -655,7 +713,7 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
     FResolvedStage Stage;
     if (!BuildStageTarget(Request, Target, OutError)) {
       OutValue.bAvailable = false;
-      OutValue.AvailabilityReason = OutError;
+      OutValue.AvailabilityReason = OutError.Code;
       return UeAgentAuthoringState::EReadOutcome::Failed;
     }
     bool bStageResolved = false;
@@ -675,7 +733,10 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
             (Target.bUsageIdExplicit && Candidate.UsageId != Target.UsageId))
           continue;
         if (bStageResolved) {
-          OutError = TEXT("niagara_stage_identity_ambiguous");
+          OutError = StateValueFailure(TEXT("niagara_stage_identity_ambiguous"),
+              TEXT("At least two Niagara stages match the requested stage selector."), TEXT("observed_matching_stages"),
+              MakeShared<FJsonValueNumber>(2), MakeShared<FJsonValueNumber>(1), true);
+          OutError.CandidateName = Target.EmitterName;
           return UeAgentAuthoringState::EReadOutcome::Failed;
         }
         Stage = Candidate;
@@ -686,12 +747,17 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
     }
     if (!bStageResolved) {
       if (OutError.IsEmpty())
-        OutError = TEXT("niagara_stage_not_found");
+        OutError = StateValueFailure(TEXT("niagara_stage_not_found"),
+            TEXT("No Niagara stage matches the requested stage selector."), TEXT("matching_stages"),
+            MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueNumber>(1), true);
       OutValue.bAvailable = false;
-      OutValue.AvailabilityReason = OutError;
-      return OutError.EndsWith(TEXT("not_found"))
-                 ? UeAgentAuthoringState::EReadOutcome::Unavailable
-                 : UeAgentAuthoringState::EReadOutcome::Failed;
+      OutValue.AvailabilityReason = OutError.Code;
+      if (OutError.Code != TEXT("niagara_stage_not_found")
+          && OutError.Code != TEXT("niagara_stage_asset_not_found")
+          && OutError.Code != TEXT("niagara_emitter_handle_not_found"))
+        return UeAgentAuthoringState::EReadOutcome::Failed;
+      OutError.Reset();
+      return UeAgentAuthoringState::EReadOutcome::Unavailable;
     }
     if (Request.SemanticId == StackSemanticId) {
       OutValue.Value = MakeShared<FJsonValueObject>(BuildStageState(Stage));
@@ -709,15 +775,22 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
       if (UeAgentNiagaraStandaloneModuleAuthoring::IsStandaloneModuleStage(
               Stage) &&
           ModuleSelector.NodeGuid.IsValid()) {
-        UeAgentNiagaraStandaloneModuleAuthoring::ResolveAssignmentNode(
-            *Stage.OutputNode, ModuleSelector.NodeGuid, StandaloneAssignment,
-            ModuleIndex, OutError);
+        if (!UeAgentNiagaraStandaloneModuleAuthoring::ResolveAssignmentNode(
+                *Stage.OutputNode, ModuleSelector.NodeGuid, StandaloneAssignment,
+                ModuleIndex, OutError)) {
+          if (OutError.Code != TEXT("module_selector_not_found"))
+            return UeAgentAuthoringState::EReadOutcome::Failed;
+          OutError.Reset();
+        }
       }
       if (!StandaloneAssignment &&
           !ResolveModule(*Stage.OutputNode, ModuleSelector, Module, ModuleIndex,
                          OutError)) {
         OutValue.bAvailable = false;
-        OutValue.AvailabilityReason = OutError;
+        OutValue.AvailabilityReason = OutError.Code;
+        if (OutError.Code != TEXT("module_selector_not_found"))
+          return UeAgentAuthoringState::EReadOutcome::Failed;
+        OutError.Reset();
         return UeAgentAuthoringState::EReadOutcome::Unavailable;
       }
       TSharedPtr<FJsonObject> ModuleState =
@@ -728,6 +801,10 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
       if (!ModuleState.IsValid())
         return UeAgentAuthoringState::EReadOutcome::Failed;
       OutValue.Value = MakeShared<FJsonValueObject>(ModuleState.ToSharedRef());
+      if (Module) {
+        OutValue.ValueDefinition = MakeShared<FJsonValueObject>(
+            BuildFunctionInputDefinition(*Module, Stage.Asset));
+      }
       OutValue.bAvailable = true;
       return UeAgentAuthoringState::EReadOutcome::Resolved;
     }
@@ -740,7 +817,9 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
         Request.TargetIdentity.GetSelector(TEXT("dynamic_input_guid"));
     if (!DynamicGuidText.IsEmpty() &&
         !FGuid::Parse(DynamicGuidText, DynamicSelector.NodeGuid)) {
-      OutError = TEXT("niagara_dynamic_input_guid_invalid");
+      OutError = StateValueFailure(TEXT("niagara_dynamic_input_guid_invalid"),
+          TEXT("The dynamic input node selector must be a valid GUID."), TEXT("dynamic_input_guid"),
+          MakeShared<FJsonValueString>(DynamicGuidText), MakeShared<FJsonValueString>(TEXT("GUID")));
       return UeAgentAuthoringState::EReadOutcome::Failed;
     }
     UNiagaraNodeFunctionCall *DynamicInput = nullptr;
@@ -765,37 +844,55 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
         ResolvedInputName = TargetVariable.IsValid()
                                 ? TargetVariable.GetName().ToString()
                                 : FString();
+      } else {
+        if (OutError.Code != TEXT("module_selector_not_found"))
+          return UeAgentAuthoringState::EReadOutcome::Failed;
+        OutError.Reset();
       }
     }
     if (!DynamicInput &&
         !ResolveDynamicInput(Stage, DynamicSelector, DynamicInput,
                              ResolvedInputName, OutError)) {
       OutValue.bAvailable = false;
-      OutValue.AvailabilityReason = OutError;
+      OutValue.AvailabilityReason = OutError.Code;
+      if (OutError.Code != TEXT("niagara_dynamic_input_not_found")
+          && OutError.Code != TEXT("module_selector_not_found"))
+        return UeAgentAuthoringState::EReadOutcome::Failed;
+      OutError.Reset();
       return UeAgentAuthoringState::EReadOutcome::Unavailable;
     }
     TSharedRef<FJsonObject> DynamicState = MakeShared<FJsonObject>();
+    TSharedRef<FJsonObject> DynamicDefinition =
+        BuildFunctionInputDefinition(*DynamicInput, Stage.Asset);
     if (!BuildDynamicInputState(
             *DynamicInput,
             ResolvedInputName.IsEmpty() ? DynamicSelector.InputName
                                         : ResolvedInputName,
-            DynamicState, OutError)) {
+            Stage.Asset,
+            DynamicState, DynamicDefinition, OutError)) {
       return UeAgentAuthoringState::EReadOutcome::Failed;
     }
     OutValue.Value = MakeShared<FJsonValueObject>(DynamicState);
+    OutValue.ValueDefinition = MakeShared<FJsonValueObject>(DynamicDefinition);
     OutValue.bAvailable = true;
     return UeAgentAuthoringState::EReadOutcome::Resolved;
   }
 
-  UObject *Object = ResolveRequestObject(Request);
+  UObject *Object = ResolveRequestObject(Request, OutError);
   if (!IsValid(Object)) {
+    if (OutError.IsValid() && OutError.Code != TEXT("state_request_object_not_found"))
+      return UeAgentAuthoringState::EReadOutcome::Failed;
+    OutError.Reset();
     OutValue.bAvailable = false;
     OutValue.AvailabilityReason = TEXT("target_not_found");
     return UeAgentAuthoringState::EReadOutcome::Unavailable;
   }
   const FString ActualKind = GetAssetKind(Object);
   if (ActualKind.IsEmpty()) {
-    OutError = TEXT("niagara_state_target_type_invalid");
+    OutError = StateValueFailure(TEXT("niagara_state_target_type_invalid"),
+        TEXT("Niagara state capture requires a Niagara system, emitter, or script asset."), TEXT("asset.class"),
+        MakeShared<FJsonValueString>(Object->GetClass()->GetName()),
+        MakeShared<FJsonValueString>(TEXT("NiagaraSystem | NiagaraEmitter | NiagaraScript")), true);
     return UeAgentAuthoringState::EReadOutcome::Failed;
   }
   OutValue.Value = MakeShared<FJsonValueObject>(BuildAssetState(
@@ -808,7 +905,7 @@ UeAgentAuthoringNativeDefaults::EProbeOutcome
 ProbeNativeDefault(const UeAgentAuthoringNativeDefaults::FRequest &Request,
                    UeAgentAuthoringNativeDefaults::FScratchScope &Scratch,
                    UeAgentAuthoringNativeDefaults::FProbeValue &OutValue,
-                   FString &OutError) {
+                   UE::UAI::Contract::FDiagnostic& OutError) {
   OutValue = UeAgentAuthoringNativeDefaults::FProbeValue();
   OutError.Reset();
   const FString TargetKind = Request.TargetIdentity.TargetKind;
@@ -856,9 +953,23 @@ ProbeNativeDefault(const UeAgentAuthoringNativeDefaults::FRequest &Request,
 }
 } // namespace
 
+bool BuildAssetExportSnapshotReadRequests(
+    UObject &Asset, TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
+    UE::UAI::Contract::FDiagnostic& OutError) {
+  if (!BuildAssetSnapshotReadRequests(Asset, true, OutRequests, OutError))
+    return false;
+  UeAgentAuthoringState::FEditablePropertyReadOptions Options;
+  Options.SemanticId = TEXT("core.property");
+  // UE's structural storage (System handles/scripts/user parameters and
+  // Emitter/Script VersionData) has no CPF_Edit. The common flags filter keeps
+  // those under their existing domain owners, without a duplicate field list.
+  return UeAgentAuthoringState::AppendEditableObjectPropertyReadRequests(
+      &Asset, Options, OutRequests, OutError);
+}
+
 bool BuildAssetSnapshotReadRequests(
     UObject &Asset, const bool bIncludeStack,
-    TArray<UeAgentAuthoringState::FReadRequest> &OutRequests, FString &OutError,
+    TArray<UeAgentAuthoringState::FReadRequest> &OutRequests, UE::UAI::Contract::FDiagnostic& OutError,
     const FString &CanonicalAssetPathOverride) {
   OutRequests.Reset();
   OutError.Reset();
@@ -870,7 +981,12 @@ bool BuildAssetSnapshotReadRequests(
                                 : CanonicalAssetPathOverride;
   if (AssetKind.IsEmpty() || SemanticId.IsEmpty() ||
       IdentityModelId.IsEmpty()) {
-    OutError = TEXT("niagara_snapshot_asset_type_invalid");
+    OutError = StateValueFailure(TEXT("niagara_snapshot_asset_type_invalid"),
+        TEXT("The asset class has no complete Niagara snapshot kind, semantic, and identity registration."),
+        AssetKind.IsEmpty() ? TEXT("asset_kind") : SemanticId.IsEmpty() ? TEXT("semantic_id") : TEXT("identity_model_id"),
+        MakeShared<FJsonValueString>(FString()), MakeShared<FJsonValueString>(TEXT("registered non-empty identifier")), true);
+    OutError.TargetPath = AssetPath;
+    OutError.CandidateName = Asset.GetClass()->GetName();
     return false;
   }
 
@@ -880,7 +996,9 @@ bool BuildAssetSnapshotReadRequests(
     UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
     if (!UeAgentAuthoringIdentity::BuildCanonicalIdentity(
             ModelId, TargetKind, Selectors, Identity, OutError)) {
-      OutError = TEXT("niagara_snapshot_identity_invalid:") + OutError;
+      const auto Cause = OutError;
+      OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_snapshot_identity_invalid"), TEXT("The Niagara snapshot target identity is invalid."), TEXT("state_capture"));
+      OutError.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(Cause);
       return false;
     }
     UeAgentAuthoringState::FReadRequest &Request =
@@ -895,10 +1013,6 @@ bool BuildAssetSnapshotReadRequests(
     return true;
   };
 
-  if (!AddRequest(AssetSemanticId, TEXT("niagara_asset_identity"),
-                  TEXT("niagara_asset"), {{TEXT("asset_path"), AssetPath}})) {
-    return false;
-  }
   if (!AddRequest(SemanticId, IdentityModelId,
                   FString(TEXT("niagara_")) + AssetKind,
                   {{TEXT("asset_path"), AssetPath}})) {
@@ -984,26 +1098,7 @@ bool BuildAssetSnapshotReadRequests(
   if (!EnumerateStages(Asset, Stages, OutError))
     return false;
   for (const FResolvedStage &Stage : Stages) {
-    const FString StageOwnerId =
-        Stage.Emitter ? (Stage.EmitterHandleId.IsValid()
-                             ? Stage.EmitterHandleId.ToString(
-                                   EGuidFormats::DigitsWithHyphensLower)
-                             : FString(TEXT("standalone")))
-                      : FString(TEXT("system"));
-    TMap<FString, FString> StageSelectors = {
-        {TEXT("asset_path"), AssetPath},
-        {TEXT("stage_owner_id"), StageOwnerId},
-        {TEXT("usage"), ScriptUsageToString(Stage.Usage)},
-        {TEXT("usage_id"),
-         Stage.UsageId.ToString(EGuidFormats::DigitsWithHyphensLower)},
-    };
-    if (!Stage.EmitterName.IsEmpty())
-      StageSelectors.Add(TEXT("emitter_name"), Stage.EmitterName);
-    if (Stage.EmitterHandleId.IsValid()) {
-      StageSelectors.Add(
-          TEXT("emitter_handle_id"),
-          Stage.EmitterHandleId.ToString(EGuidFormats::DigitsWithHyphensLower));
-    }
+    const TMap<FString, FString> StageSelectors = BuildStageIdentitySelectors(Stage, AssetPath);
     if (!AddRequest(StackSemanticId, TEXT("niagara_stack_entry_identity"),
                     TEXT("niagara_stack_entry"), StageSelectors))
       return false;
@@ -1011,8 +1106,8 @@ bool BuildAssetSnapshotReadRequests(
     if (UeAgentNiagaraStandaloneModuleAuthoring::IsStandaloneModuleStage(
             Stage)) {
       TArray<UNiagaraNode *> AssignmentNodes;
-      UeAgentNiagaraStandaloneModuleAuthoring::GetAssignmentNodes(
-          *Stage.OutputNode, AssignmentNodes);
+      if (!UeAgentNiagaraStandaloneModuleAuthoring::GetAssignmentNodes(
+              *Stage.OutputNode, AssignmentNodes, OutError)) return false;
       if (!AssignmentNodes.IsEmpty()) {
         for (UNiagaraNode *AssignmentNode : AssignmentNodes) {
           if (!AssignmentNode || !AssignmentNode->NodeGuid.IsValid())
@@ -1057,7 +1152,7 @@ bool BuildAssetSnapshotReadRequests(
     }
 
     TArray<UNiagaraNodeFunctionCall *> Modules;
-    GetModules(*Stage.OutputNode, Modules);
+    if (!GetModules(*Stage.OutputNode, Modules, OutError)) return false;
     for (int32 ModuleIndex = 0; ModuleIndex < Modules.Num(); ++ModuleIndex) {
       UNiagaraNodeFunctionCall *Module = Modules[ModuleIndex];
       if (!Module || !Module->NodeGuid.IsValid())
@@ -1077,8 +1172,8 @@ bool BuildAssetSnapshotReadRequests(
       BuildResolvedModuleInputs(*Module, Inputs);
       for (const FResolvedModuleInput &Input : Inputs) {
         FString ResolvedInputName;
-        UNiagaraNodeFunctionCall *DynamicInput = FindDynamicInputForModuleInput(
-            *Module, Input.FullInputName, ResolvedInputName);
+        UNiagaraNodeFunctionCall *DynamicInput = FindDynamicInputForModuleInput(*Module, Input.FullInputName, ResolvedInputName, OutError);
+        if (OutError.IsValid()) return false;
         if (!DynamicInput || !DynamicInput->NodeGuid.IsValid() ||
             ResolvedInputName.IsEmpty())
           continue;
@@ -1101,10 +1196,13 @@ UObject *CreateFactorySeed(UClass *ObjectClass, UObject *Outer,
                            const FString &AssetKind,
                            const bool bCreateDefaultSystemNodes,
                            const bool bAddDefaultEmitterModulesAndRenderers,
-                           FString &OutError, const FString &ScriptUsage) {
+                           UE::UAI::Contract::FDiagnostic& OutError, const FString &ScriptUsage) {
   OutError.Reset();
   if (!ObjectClass || !Outer) {
-    OutError = TEXT("niagara_factory_seed_invalid");
+    OutError = StateValueFailure(TEXT("niagara_factory_seed_invalid"),
+        TEXT("Creating a Niagara factory seed requires an object class and an outer."),
+        ObjectClass ? TEXT("outer.available") : TEXT("object_class.available"),
+        MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
     return nullptr;
   }
   UObject *Object = nullptr;
@@ -1112,14 +1210,18 @@ UObject *CreateFactorySeed(UClass *ObjectClass, UObject *Outer,
   if (ObjectClass->IsChildOf(UNiagaraScript::StaticClass())) {
     if (!ScriptUsage.IsEmpty() &&
         !TryParseScriptUsage(ScriptUsage, RequestedScriptUsage)) {
-      OutError = TEXT("niagara_workspace_script_usage_invalid:") + ScriptUsage;
+      OutError = StateValueFailure(TEXT("niagara_workspace_script_usage_invalid"),
+          TEXT("The requested script usage is not a recognized ENiagaraScriptUsage name."), TEXT("script_usage"),
+          MakeShared<FJsonValueString>(ScriptUsage), MakeShared<FJsonValueString>(TEXT("ENiagaraScriptUsage enum name")));
       return nullptr;
     }
     if (RequestedScriptUsage != ENiagaraScriptUsage::Module &&
         RequestedScriptUsage != ENiagaraScriptUsage::Function &&
         RequestedScriptUsage != ENiagaraScriptUsage::DynamicInput) {
-      OutError = TEXT("niagara_workspace_script_usage_unsupported:") +
-                 ScriptUsageToString(RequestedScriptUsage);
+      OutError = StateValueFailure(TEXT("niagara_workspace_script_usage_unsupported"),
+          TEXT("A standalone Niagara script asset must use Module, Function, or DynamicInput."), TEXT("script_usage"),
+          MakeShared<FJsonValueString>(ScriptUsageToString(RequestedScriptUsage)),
+          MakeShared<FJsonValueString>(TEXT("Module | Function | DynamicInput")));
       return nullptr;
     }
 
@@ -1140,8 +1242,12 @@ UObject *CreateFactorySeed(UClass *ObjectClass, UObject *Outer,
             ? Cast<UNiagaraScriptSource>(DefaultScript->GetLatestSource())
             : nullptr;
     if (!DefaultScript || !DefaultSource || !DefaultSource->NodeGraph) {
-      OutError = TEXT("niagara_factory_default_script_unavailable:") +
-                 ScriptUsageToString(RequestedScriptUsage);
+      OutError = StateValueFailure(TEXT("niagara_factory_default_script_unavailable"),
+          TEXT("The configured default Niagara script or its editable source graph is unavailable."),
+          !DefaultScript ? TEXT("default_script.available") : !DefaultSource ? TEXT("default_script.source.available") : TEXT("default_script.graph.available"),
+          MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
+      OutError.CandidateName = ScriptUsageToString(RequestedScriptUsage);
+      if (DefaultPath) OutError.TargetPath = DefaultPath->GetAssetPathString();
       return nullptr;
     }
     Object = StaticDuplicateObject(DefaultScript, Outer, NAME_None,
@@ -1151,7 +1257,11 @@ UObject *CreateFactorySeed(UClass *ObjectClass, UObject *Outer,
         NewObject<UObject>(Outer, ObjectClass, NAME_None, RF_Transactional);
   }
   if (!Object) {
-    OutError = TEXT("niagara_factory_seed_create_failed");
+    OutError = StateValueFailure(TEXT("niagara_factory_seed_create_failed"),
+        TEXT("Unreal could not create the Niagara factory seed object."), TEXT("factory_seed.available"),
+        MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
+    OutError.CandidateName = ObjectClass->GetName();
+    OutError.InternalContext = Outer->GetPathName();
     return nullptr;
   }
   if (UNiagaraSystem *System = Cast<UNiagaraSystem>(Object)) {
@@ -1163,18 +1273,23 @@ UObject *CreateFactorySeed(UClass *ObjectClass, UObject *Outer,
   } else if (UNiagaraScript *Script = Cast<UNiagaraScript>(Object)) {
     Script->SetUsage(RequestedScriptUsage);
   } else {
-    OutError = TEXT("niagara_factory_seed_class_unsupported");
+    OutError = StateValueFailure(TEXT("niagara_factory_seed_class_unsupported"),
+        TEXT("The factory seed class must be a Niagara system, emitter, or script."), TEXT("factory_seed.class"),
+        MakeShared<FJsonValueString>(Object->GetClass()->GetName()),
+        MakeShared<FJsonValueString>(TEXT("NiagaraSystem | NiagaraEmitter | NiagaraScript")), true);
     return nullptr;
   }
   if (!AssetKind.IsEmpty() &&
       !GetAssetKind(Object).Equals(AssetKind, ESearchCase::IgnoreCase)) {
-    OutError = TEXT("niagara_factory_seed_kind_mismatch");
+    OutError = StateValueFailure(TEXT("niagara_factory_seed_kind_mismatch"),
+        TEXT("The created Niagara factory seed has a different asset kind from the requested kind."), TEXT("asset_kind"),
+        MakeShared<FJsonValueString>(GetAssetKind(Object)), MakeShared<FJsonValueString>(AssetKind), true);
     return nullptr;
   }
   return Object;
 }
 
-bool RegisterStateAccessors(FString &OutError) {
+bool RegisterStateAccessors(UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentAuthoringState::FStateAccessorDescriptor Descriptor;
   Descriptor.AccessorId = StateAccessorId;
   Descriptor.TargetKinds = {
@@ -1193,7 +1308,7 @@ bool RegisterStateAccessors(FString &OutError) {
       Descriptor, ReadState, Result, OutError);
 }
 
-bool RegisterNativeDefaultProviders(FString &OutError) {
+bool RegisterNativeDefaultProviders(UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentAuthoringNativeDefaults::ERegistrationResult Result;
   UeAgentAuthoringNativeDefaults::FProviderDescriptor Factory;
   Factory.ProviderId = FactoryDefaultProviderId;

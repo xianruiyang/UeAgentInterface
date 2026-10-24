@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
 #include "Core/BindingGateway/Query/UeAgentQueryBindingError.h"
@@ -11,12 +13,7 @@
 
 namespace UE::UAI::DomainAdapters::WorldRead
 {
-	struct UEAGENTINTERFACE_API FUeAgentWorldReadError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FUeAgentWorldReadError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentWorldReadHook
 	{

@@ -1,5 +1,12 @@
 #include "Core/Verification/UeAgentVerification.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Core/StateSemantic/UeAgentStateSemanticEvidence.h"
 
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include <openssl/sha.h>
 
 namespace UE::UAI::Verification
@@ -18,6 +25,43 @@ namespace UE::UAI::Verification
 
 	namespace
 	{
+		FVerificationError VerificationFailure(const FString& Code, const FString& Reason, const FString& Path)
+		{
+			auto Error = FVerificationError::Failure(Code, Reason, TEXT("verification"));
+			Error.PropertyPath = Path;
+			return Error;
+		}
+
+		TSharedPtr<const FVerificationError> StoreValidationFailure(FVerificationError Error, const FString& Prefix = FString())
+		{
+			if (!Prefix.IsEmpty()) Error.PropertyPath = Prefix + (Error.PropertyPath.IsEmpty() ? FString()
+				: (Error.PropertyPath.StartsWith(TEXT("/")) ? Error.PropertyPath : TEXT(".") + Error.PropertyPath));
+			return MakeShared<FVerificationError>(MoveTemp(Error));
+		}
+
+		FVerificationError IdentityMismatch(const FString& Code, const FString& Reason, const FString& Path,
+			const FUeAgentCanonicalIdentity& Actual, const FUeAgentCanonicalIdentity& Expected)
+		{
+			auto Error = VerificationFailure(Code, Reason, Path);
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Actual.GetCanonicalKey());
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetCanonicalKey());
+			return Error;
+		}
+
+		FVerificationError TargetFailure(const FString& Code, const FString& Reason, const FString& Path, const FVerificationTarget& Target)
+		{
+			auto Error = VerificationFailure(Code, Reason, Path);
+			Error.TargetPath = Target.GetBinding().GetPublicRef();
+			return Error;
+		}
+
+		void AppendTargetDiagnostic(FVerificationError& Aggregate, FVerificationError Diagnostic, const FVerificationTarget& Target)
+		{
+			if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = Target.GetBinding().GetPublicRef();
+			if (Aggregate.IsEmpty()) Aggregate = MoveTemp(Diagnostic);
+			else Aggregate.Append(Diagnostic);
+		}
+
 		FString NormalizedText(FString Value)
 		{
 			Value.TrimStartAndEndInline();
@@ -127,149 +171,74 @@ namespace UE::UAI::Verification
 			const FString& VerificationId,
 			const EVerificationStatus Status,
 			const EEffectOutcome EffectOutcome,
-			const FString& DiagnosticCode,
+			FVerificationError Diagnostic,
 			TArray<FTargetVerification> Targets = {},
 			TArray<FString> EvidenceIds = {},
-			TOptional<FVerificationAcknowledgement> Acknowledgement =
-				TOptional<FVerificationAcknowledgement>(),
-			FString DiagnosticDetail = FString())
+			TOptional<FVerificationAcknowledgement> Acknowledgement = {},
+			FVerificationError Cause = {})
 		{
 			NormalizeTextArray(EvidenceIds);
-			return FVerificationOutcome(
-				VerificationId,
-				Status,
-				EffectOutcome,
-				DiagnosticCode,
-				false,
-				MoveTemp(Targets),
-				MoveTemp(EvidenceIds),
-				MoveTemp(Acknowledgement),
-				MoveTemp(DiagnosticDetail));
+			if (!Cause.IsEmpty())
+			{
+				if (Diagnostic.Code == Cause.Code) Diagnostic = MoveTemp(Cause);
+				else
+				{
+					Diagnostic.CauseCode = Cause.Code;
+					Diagnostic.PublicCause = MakeShared<FVerificationError>(MoveTemp(Cause));
+				}
+			}
+			Diagnostic.Schema = TEXT("uai.verification.diagnostic/1");
+			Diagnostic.VerificationStatus = LexToString(Status);
+			Diagnostic.EffectOutcome = LexToString(EffectOutcome);
+			if (Status == EVerificationStatus::Verified) Diagnostic.Severity = Contract::ESeverity::Info;
+			return FVerificationOutcome(VerificationId, Status, EffectOutcome, MoveTemp(Diagnostic), false,
+				MoveTemp(Targets), MoveTemp(EvidenceIds), MoveTemp(Acknowledgement));
 		}
 
-		FString OracleDiagnosticDetail(
-			const FString& Stage,
-			const FString& Code,
-			const FString& Detail = FString())
+		FVerificationError OracleDiagnostic(const FString& Stage, FVerificationError Cause)
 		{
-			FString Result = TEXT("stage=") + Stage;
-			if (!Code.IsEmpty())
+			auto Diagnostic = FVerificationError::Failure(TEXT("verification_oracle_unavailable"),
+				TEXT("Independent readback is unavailable."), Stage);
+			Diagnostic.Schema = TEXT("uai.verification.diagnostic/1");
+			if (!Cause.IsEmpty())
 			{
-				Result += TEXT("; oracle_code=") + Code;
+				Diagnostic.CauseCode = Cause.Code;
+				Diagnostic.PublicCause = MakeShared<FVerificationError>(MoveTemp(Cause));
 			}
-			if (!Detail.IsEmpty())
-			{
-				Result += TEXT("; oracle_detail=") + Detail;
-			}
-			return Result;
+			return Diagnostic;
 		}
 
-		FString CanonicalValueDiagnostic(
-			const StateSemantic::FUeAgentCanonicalValuePtr& Value)
-		{
-			if (!Value.IsValid())
-			{
-				return TEXT("<missing>");
-			}
-			switch (Value->GetKind())
-			{
-			case StateSemantic::EUeAgentValueKind::Null:
-				return TEXT("null");
-			case StateSemantic::EUeAgentValueKind::Boolean:
-				return Value->GetBoolean() ? TEXT("true") : TEXT("false");
-			case StateSemantic::EUeAgentValueKind::String:
-				return Value->GetText().Left(160);
-			case StateSemantic::EUeAgentValueKind::Integer:
-			case StateSemantic::EUeAgentValueKind::Decimal:
-				return Value->GetLexeme();
-			case StateSemantic::EUeAgentValueKind::Array:
-				return FString::Printf(
-					TEXT("array[%d]"),
-					Value->GetArrayItems().Num());
-			case StateSemantic::EUeAgentValueKind::Object:
-				return FString::Printf(
-					TEXT("object[%d]"),
-					Value->GetObjectItems().Num());
-			case StateSemantic::EUeAgentValueKind::Temporal:
-				return TEXT("temporal");
-			case StateSemantic::EUeAgentValueKind::Spatial:
-				return TEXT("spatial");
-			default:
-				return TEXT("unknown");
-			}
-		}
 
-		FString ComparisonDiagnosticDetail(
-			const FUeAgentSemanticComparison& Comparison)
+
+		FVerificationError ComparisonDiagnostic(const FUeAgentSemanticComparison& Comparison)
 		{
-			const TArray<StateSemantic::FUeAgentSemanticDifference>&
-				Differences =
-				Comparison.GetDifferences();
-			FString Result = FString::Printf(
-				TEXT("difference_count=%d"),
-				Differences.Num());
-			const int32 Limit =
-				FMath::Min<int32>(Differences.Num(), 8);
-			for (int32 Index = 0; Index < Limit; ++Index)
-			{
-				const StateSemantic::FUeAgentSemanticDifference&
-					Difference =
-					Differences[Index];
-				Result += FString::Printf(
-					TEXT("; difference[%d].path=%s; left=%s; right=%s"),
-					Index,
-					*Difference.GetPath(),
-					*CanonicalValueDiagnostic(Difference.GetLeft()),
-					*CanonicalValueDiagnostic(Difference.GetRight()));
-			}
-			return Result;
+			return StateSemantic::MakeComparisonDiagnostic(Comparison, TEXT("verification_semantic_mismatch"),
+				TEXT("Expected and observed values differ."), TEXT("verification_compare"), TEXT("uai.verification.diagnostic/1"));
 		}
 
 		bool CanContinue(
 			const FUeAgentOperationDeadline& Deadline,
 			const FUeAgentCancellationToken& Cancellation,
-			FString& OutDiagnostic)
+			FVerificationError& OutDiagnostic)
 		{
 			FUeAgentCancellationRequested CancellationError;
 			if (!Cancellation.TryCheckpoint(CancellationError))
 			{
-				OutDiagnostic = TEXT("verification_cancelled");
-				return false;
-			}
-			FUeAgentOperationDeadlineExceeded DeadlineError;
-			if (!Deadline.TryCheckpoint(
-				TEXT("C9.Verification"),
-				DeadlineError))
-			{
-				OutDiagnostic = TEXT("verification_deadline_exceeded");
+				OutDiagnostic = FVerificationError::Failure(TEXT("verification_cancelled"), TEXT("Verification was cancelled."), TEXT("verification"));
+				OutDiagnostic.PublicCause = MakeShared<FVerificationError>(CancellationError);
 				return false;
 			}
 			return true;
 		}
 	}
 
-	FVerificationError::FVerificationError(
-		FString InCode,
-		FString InDetail)
-		: Code(NormalizedText(MoveTemp(InCode)))
-		, Detail(NormalizedText(MoveTemp(InDetail)))
-	{
-	}
 
-	const FString& FVerificationError::GetCode() const
-	{
-		return Code;
-	}
 
-	const FString& FVerificationError::GetDetail() const
-	{
-		return Detail;
-	}
 
-	bool FVerificationError::IsPresent() const
-	{
-		return !Code.IsEmpty();
-	}
+
+
+
+
 
 	FString LexToString(const EVerificationOracleKind Value)
 	{
@@ -334,40 +303,76 @@ namespace UE::UAI::Verification
 	{
 		NormalizeTextArray(ArtifactIds);
 		NormalizeTextArray(ExpectedReferenceKeys);
-		bValid = Identity.IsValid()
-			&& Binding.IsValid()
-			&& Binding.GetSummary().GetIdentity() == Identity
-			&& !ArtifactIds.IsEmpty();
+		auto Reject = [this](const FString& Reason, const FString& Path)
+		{
+			ValidationDiagnostic = StoreValidationFailure(VerificationFailure(
+				TEXT("verification_target_invalid"), Reason, Path));
+		};
+		if (!Identity.IsValid())
+		{
+			ValidationDiagnostic = StoreValidationFailure(Identity.GetValidationDiagnostic(), TEXT("identity"));
+			return;
+		}
+		if (!Binding.IsValid())
+		{
+			ValidationDiagnostic = StoreValidationFailure(*Binding.GetValidationDiagnostic(), TEXT("binding"));
+			return;
+		}
+		if (!(Binding.GetSummary().GetIdentity() == Identity))
+		{
+			ValidationDiagnostic = StoreValidationFailure(IdentityMismatch(TEXT("verification_target_invalid"),
+				TEXT("The verification binding identifies a different target."), TEXT("binding.identity"),
+				Binding.GetSummary().GetIdentity(), Identity));
+			return;
+		}
+		if (ArtifactIds.IsEmpty())
+		{
+			Reject(TEXT("The verification target has no durable artifacts to observe."), TEXT("artifact_ids"));
+			return;
+		}
 		if (OracleKind == EVerificationOracleKind::Persisted)
 		{
-			bValid = bValid
-				&& ExpectedSnapshot.IsValid()
-				&& ExpectedSnapshot->GetStatePlane()
-					== EUeAgentStatePlane::Persisted
-				&& ExpectedSnapshot->GetProvenance()
-					.GetSourceKind()
-					== TEXT("operation_expected_state")
-				&& ExpectedReferenceKeys.IsEmpty();
-			bool bContainsIdentity = false;
-			if (ExpectedSnapshot.IsValid())
+			if (!ExpectedSnapshot.IsValid())
 			{
-				for (
-					const UE::UAI::StateSemantic::FUeAgentStateEntry& Entry
-					: ExpectedSnapshot->GetEntries())
-				{
-					bContainsIdentity = bContainsIdentity
-						|| Entry.GetIdentity() == Identity;
-				}
+				Reject(TEXT("Persisted verification requires an expected snapshot."), TEXT("expected_snapshot"));
+				return;
 			}
-			bValid = bValid && bContainsIdentity;
+			if (ExpectedSnapshot->GetStatePlane() != EUeAgentStatePlane::Persisted)
+			{
+				auto Error = VerificationFailure(TEXT("verification_target_invalid"),
+					TEXT("The expected verification snapshot must describe persisted state."), TEXT("expected_snapshot.state_plane"));
+				Error.ActualValue = MakeShared<FJsonValueString>(Contract::LexToString(ExpectedSnapshot->GetStatePlane()));
+				Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("persisted"));
+				ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error));
+				return;
+			}
+			if (ExpectedSnapshot->GetProvenance().GetSourceKind() != TEXT("operation_expected_state"))
+			{
+				auto Error = VerificationFailure(TEXT("verification_target_invalid"),
+					TEXT("The expected verification snapshot must originate from the operation's expected state."),
+					TEXT("expected_snapshot.provenance.source_kind"));
+				Error.ActualValue = MakeShared<FJsonValueString>(ExpectedSnapshot->GetProvenance().GetSourceKind());
+				Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("operation_expected_state"));
+				ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error));
+				return;
+			}
+			if (!ExpectedReferenceKeys.IsEmpty())
+			{
+				Reject(TEXT("Persisted verification cannot also specify expected reference keys."), TEXT("expected_reference_keys"));
+				return;
+			}
+			bool bContainsIdentity = false;
+			for (const StateSemantic::FUeAgentStateEntry& Entry : ExpectedSnapshot->GetEntries())
+			{
+				bContainsIdentity = bContainsIdentity || Entry.GetIdentity() == Identity;
+			}
+			if (!bContainsIdentity) Reject(TEXT("The expected snapshot contains no state for the verification target."), TEXT("expected_snapshot.entries"));
 		}
 		else
 		{
-			bValid = bValid && !ExpectedSnapshot.IsValid();
-			if (OracleKind == EVerificationOracleKind::Absence)
-			{
-				bValid = bValid && ExpectedReferenceKeys.IsEmpty();
-			}
+			if (ExpectedSnapshot.IsValid()) Reject(TEXT("Absence and reference verification do not accept an expected snapshot."), TEXT("expected_snapshot"));
+			else if (OracleKind == EVerificationOracleKind::Absence && !ExpectedReferenceKeys.IsEmpty())
+				Reject(TEXT("Absence verification cannot specify expected reference keys."), TEXT("expected_reference_keys"));
 		}
 	}
 
@@ -409,7 +414,12 @@ namespace UE::UAI::Verification
 
 	bool FVerificationTarget::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FVerificationError* FVerificationTarget::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic.Get();
 	}
 
 	FVerificationRequest::FVerificationRequest(
@@ -436,31 +446,79 @@ namespace UE::UAI::Verification
 				return Left.GetIdentity().GetCanonicalKey()
 					< Right.GetIdentity().GetCanonicalKey();
 			});
-		bValid = !OperationId.IsEmpty()
-			&& DescriptorIdentity.IsValid()
-			&& Inventory.IsValid()
-			&& !JournalOwnerId.IsEmpty()
-			&& FencingToken >= 0
-			&& !Targets.IsEmpty()
-			&& DurableReceipt.GetInventoryHash()
-				== Inventory.GetInventoryHash();
+		auto Reject = [this](const FString& Reason, const FString& Path)
+		{
+			ValidationDiagnostic = StoreValidationFailure(VerificationFailure(TEXT("verification_request_invalid"), Reason, Path));
+		};
+		if (OperationId.IsEmpty()) { Reject(TEXT("The verification request has no operation identifier."), TEXT("operation_id")); return; }
+		if (!DescriptorIdentity.IsValid())
+		{
+			ValidationDiagnostic = StoreValidationFailure(DescriptorIdentity.GetValidationDiagnostic(), TEXT("descriptor"));
+			return;
+		}
+		if (!Inventory.IsValid())
+		{
+			ValidationDiagnostic = StoreValidationFailure(*Inventory.GetValidationDiagnostic(), TEXT("inventory"));
+			return;
+		}
+		if (JournalOwnerId.IsEmpty()) { Reject(TEXT("The verification request has no durable journal owner."), TEXT("journal_owner_id")); return; }
+		if (FencingToken < 0)
+		{
+			auto Error = VerificationFailure(TEXT("verification_request_invalid"),
+				TEXT("The verification fencing token must be non-negative."), TEXT("fencing_token"));
+			Error.ActualEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), FencingToken));
+			ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error));
+			return;
+		}
+		if (Targets.IsEmpty()) { Reject(TEXT("The verification request has no targets."), TEXT("targets")); return; }
+		if (DurableReceipt.GetInventoryHash() != Inventory.GetInventoryHash())
+		{
+			auto Error = VerificationFailure(TEXT("verification_request_invalid"),
+				TEXT("The durable receipt belongs to a different artifact inventory."), TEXT("durable_receipt.inventory_hash"));
+			Error.ActualEvidence = MakeShared<FJsonValueString>(DurableReceipt.GetInventoryHash());
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(Inventory.GetInventoryHash());
+			ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error));
+			return;
+		}
 		TSet<FString> TargetKeys;
 		TSet<FString> InventoryArtifactIds;
 		for (const FDurableArtifact& Artifact : Inventory.GetArtifacts())
 		{
 			InventoryArtifactIds.Add(Artifact.GetArtifactId());
 		}
-		for (const FVerificationTarget& Target : Targets)
+		for (int32 TargetIndex = 0; TargetIndex < Targets.Num(); ++TargetIndex)
 		{
+			const FVerificationTarget& Target = Targets[TargetIndex];
+			const FString TargetPath = FString::Printf(TEXT("targets[%d]"), TargetIndex);
 			const FString& Key = Target.GetIdentity().GetCanonicalKey();
-			bValid = bValid
-				&& Target.IsValid()
-				&& !TargetKeys.Contains(Key);
-			TargetKeys.Add(Key);
-			for (const FString& ArtifactId : Target.GetArtifactIds())
+			if (!Target.IsValid())
 			{
-				bValid = bValid
-					&& InventoryArtifactIds.Contains(ArtifactId);
+				auto Error = *Target.GetValidationDiagnostic();
+				if (Error.TargetPath.IsEmpty()) Error.TargetPath = Target.GetBinding().GetPublicRef();
+				ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error), TargetPath);
+				return;
+			}
+			if (TargetKeys.Contains(Key))
+			{
+				auto Error = VerificationFailure(TEXT("verification_request_invalid"),
+					TEXT("The verification request contains the same target more than once."), TargetPath + TEXT(".identity"));
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Key);
+				ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error));
+				return;
+			}
+			TargetKeys.Add(Key);
+			for (int32 ArtifactIndex = 0; ArtifactIndex < Target.GetArtifactIds().Num(); ++ArtifactIndex)
+			{
+				const FString& ArtifactId = Target.GetArtifactIds()[ArtifactIndex];
+				if (!InventoryArtifactIds.Contains(ArtifactId))
+				{
+					auto Error = VerificationFailure(TEXT("verification_request_invalid"),
+						TEXT("The verification target refers to an artifact that is absent from the durable inventory."),
+						TargetPath + FString::Printf(TEXT(".artifact_ids[%d]"), ArtifactIndex));
+					Error.ActualEvidence = MakeShared<FJsonValueString>(ArtifactId);
+					ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error));
+					return;
+				}
 			}
 		}
 	}
@@ -506,17 +564,16 @@ namespace UE::UAI::Verification
 
 	bool FVerificationRequest::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FVerificationError* FVerificationRequest::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic.Get();
 	}
 
 	FAbsenceObservation::FAbsenceObservation()
-		: Identity(
-			TEXT(""),
-			TEXT(""),
-			TEXT(""),
-			TEXT(""),
-			TEXT(""),
-			TEXT(""))
+		: FAbsenceObservation(FUeAgentCanonicalIdentity(TEXT(""), TEXT(""), TEXT(""), TEXT(""), TEXT(""), TEXT("")), false, true, FString())
 	{
 	}
 
@@ -529,11 +586,18 @@ namespace UE::UAI::Verification
 		, bAbsent(bInAbsent)
 		, bUnavailable(bInUnavailable)
 		, EvidenceId(NormalizedText(MoveTemp(InEvidenceId)))
-		, bValid(
-			Identity.IsValid()
-			&& !(bAbsent && bUnavailable)
-			&& !EvidenceId.IsEmpty())
 	{
+		if (!Identity.IsValid()) ValidationDiagnostic = StoreValidationFailure(Identity.GetValidationDiagnostic(), TEXT("observation.identity"));
+		else if (bAbsent && bUnavailable)
+		{
+			auto Error = VerificationFailure(TEXT("verification_absence_observation_invalid"),
+				TEXT("An absence observation cannot report both absent and unavailable."), TEXT("observation.absent"));
+			Error.ActualValue = MakeShared<FJsonValueBoolean>(true);
+			Error.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+			ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error));
+		}
+		else if (EvidenceId.IsEmpty()) ValidationDiagnostic = StoreValidationFailure(VerificationFailure(
+			TEXT("verification_absence_observation_invalid"), TEXT("The absence observation has no evidence identifier."), TEXT("observation.evidence_id")));
 	}
 
 	const FUeAgentCanonicalIdentity&
@@ -559,17 +623,16 @@ namespace UE::UAI::Verification
 
 	bool FAbsenceObservation::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FVerificationError* FAbsenceObservation::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic.Get();
 	}
 
 	FReferenceObservation::FReferenceObservation()
-		: Identity(
-			TEXT(""),
-			TEXT(""),
-			TEXT(""),
-			TEXT(""),
-			TEXT(""),
-			TEXT(""))
+		: FReferenceObservation(FUeAgentCanonicalIdentity(TEXT(""), TEXT(""), TEXT(""), TEXT(""), TEXT(""), TEXT("")), {}, true, FString())
 	{
 	}
 
@@ -584,7 +647,9 @@ namespace UE::UAI::Verification
 		, EvidenceId(NormalizedText(MoveTemp(InEvidenceId)))
 	{
 		NormalizeTextArray(ReferenceKeys);
-		bValid = Identity.IsValid() && !EvidenceId.IsEmpty();
+		if (!Identity.IsValid()) ValidationDiagnostic = StoreValidationFailure(Identity.GetValidationDiagnostic(), TEXT("observation.identity"));
+		else if (EvidenceId.IsEmpty()) ValidationDiagnostic = StoreValidationFailure(VerificationFailure(
+			TEXT("verification_reference_observation_invalid"), TEXT("The reference observation has no evidence identifier."), TEXT("observation.evidence_id")));
 	}
 
 	const FUeAgentCanonicalIdentity&
@@ -611,7 +676,12 @@ namespace UE::UAI::Verification
 
 	bool FReferenceObservation::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FVerificationError* FReferenceObservation::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic.Get();
 	}
 
 	FTargetVerification::FTargetVerification(
@@ -687,26 +757,29 @@ namespace UE::UAI::Verification
 		FString InVerificationId,
 		const EVerificationStatus InStatus,
 		const EEffectOutcome InEffectOutcome,
-		FString InDiagnosticCode,
+		FVerificationError InDiagnostic,
 		const bool bInRetrySafe,
 		TArray<FTargetVerification> InTargets,
 		TArray<FString> InEvidenceIds,
 		TOptional<FVerificationAcknowledgement> InAcknowledgement,
-		FString InDiagnosticDetail)
+		FUeAgentCanonicalValuePtr InPublicResult)
 		: VerificationId(
 			NormalizedText(MoveTemp(InVerificationId)))
 		, Status(InStatus)
 		, EffectOutcome(InEffectOutcome)
-		, DiagnosticCode(
-			NormalizedText(MoveTemp(InDiagnosticCode)))
-		, DiagnosticDetail(
-			NormalizedText(MoveTemp(InDiagnosticDetail)))
+		, Diagnostic(MoveTemp(InDiagnostic))
 		, bRetrySafe(bInRetrySafe)
 		, Targets(MoveTemp(InTargets))
 		, EvidenceIds(MoveTemp(InEvidenceIds))
 		, Acknowledgement(MoveTemp(InAcknowledgement))
+		, PublicResult(MoveTemp(InPublicResult))
 	{
 		NormalizeTextArray(EvidenceIds);
+		if (Status != EVerificationStatus::Verified
+			|| EffectOutcome != EEffectOutcome::Complete)
+		{
+			PublicResult.Reset();
+		}
 	}
 
 	const FString& FVerificationOutcome::GetVerificationId() const
@@ -726,12 +799,12 @@ namespace UE::UAI::Verification
 
 	const FString& FVerificationOutcome::GetDiagnosticCode() const
 	{
-		return DiagnosticCode;
+		return Diagnostic.Code;
 	}
 
-	const FString& FVerificationOutcome::GetDiagnosticDetail() const
+	const FVerificationError& FVerificationOutcome::GetDiagnostic() const
 	{
-		return DiagnosticDetail;
+		return Diagnostic;
 	}
 
 	bool FVerificationOutcome::IsRetrySafe() const
@@ -757,6 +830,12 @@ namespace UE::UAI::Verification
 		return Acknowledgement.IsSet()
 			? &Acknowledgement.GetValue()
 			: nullptr;
+	}
+
+	const FUeAgentCanonicalValuePtr&
+	FVerificationOutcome::GetPublicResult() const
+	{
+		return PublicResult;
 	}
 
 	FStateReadPortPersistedStateOracle::
@@ -794,14 +873,30 @@ namespace UE::UAI::Verification
 	{
 		OutSnapshot.Reset();
 		OutError = FVerificationError();
-		if (!StateReadPort
-			|| !Target.IsValid()
-			|| Artifacts.IsEmpty()
-			|| StateReadPort->GetPortId()
-				!= Target.GetBinding().GetReadPortId())
+		if (!StateReadPort)
 		{
-			OutError = FVerificationError(
-				TEXT("persisted_state_oracle_request_invalid"));
+			OutError = TargetFailure(TEXT("persisted_state_oracle_request_invalid"),
+				TEXT("The persisted-state oracle has no state read port."), TEXT("read_port"), Target);
+			return false;
+		}
+		if (!Target.IsValid())
+		{
+			OutError = *Target.GetValidationDiagnostic();
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target.GetBinding().GetPublicRef();
+			return false;
+		}
+		if (Artifacts.IsEmpty())
+		{
+			OutError = TargetFailure(TEXT("persisted_state_oracle_request_invalid"),
+				TEXT("Persisted-state readback requires at least one durable artifact for the target."), TEXT("artifacts"), Target);
+			return false;
+		}
+		if (StateReadPort->GetPortId() != Target.GetBinding().GetReadPortId())
+		{
+			OutError = TargetFailure(TEXT("persisted_state_oracle_request_invalid"),
+				TEXT("The persisted-state oracle's read port differs from the target binding's read port."), TEXT("read_port_id"), Target);
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(StateReadPort->GetPortId());
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Target.GetBinding().GetReadPortId());
 			return false;
 		}
 		FUeAgentDiscoveryError ReadError;
@@ -815,11 +910,9 @@ namespace UE::UAI::Verification
 				OutSnapshot,
 				ReadError))
 		{
-			OutError = FVerificationError(
-				ReadError.Code.IsEmpty()
-					? TEXT("persisted_state_oracle_read_failed")
-					: ReadError.Code,
-				ReadError.Detail);
+			OutError = ReadError.IsEmpty() ? TargetFailure(TEXT("persisted_state_oracle_read_failed"),
+				TEXT("The persisted-state read port failed without reporting a diagnostic."), TEXT("observation"), Target) : ReadError;
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target.GetBinding().GetPublicRef();
 			return false;
 		}
 		return true;
@@ -843,17 +936,24 @@ namespace UE::UAI::Verification
 		const FUeAgentOperationDeadline& Deadline,
 		const FUeAgentCancellationToken& Cancellation,
 		FVerificationOutcome& OutOutcome,
-		FVerificationError& OutError) const
+		FVerificationError& OutError,
+		bool bObservationOnly) const
 	{
 		OutError = FVerificationError();
-		if (!Request.IsValid()
-			|| PersistedStateOracle == nullptr
+		if (!Request.IsValid())
+		{
+			OutError = *Request.GetValidationDiagnostic();
+			return false;
+		}
+		if (PersistedStateOracle == nullptr
 			|| AbsenceOracle == nullptr
 			|| ReferenceOracle == nullptr
 			|| Acknowledger == nullptr)
 		{
-			OutError = FVerificationError(
-				TEXT("verification_request_invalid"));
+			const FString Missing = PersistedStateOracle == nullptr ? TEXT("persisted_state_oracle")
+				: AbsenceOracle == nullptr ? TEXT("absence_oracle") : ReferenceOracle == nullptr ? TEXT("reference_oracle") : TEXT("acknowledger");
+			OutError = VerificationFailure(TEXT("verification_request_invalid"),
+				TEXT("The verification service is missing its required ") + Missing + TEXT("."), Missing);
 			return false;
 		}
 
@@ -870,52 +970,68 @@ namespace UE::UAI::Verification
 					== ERecoveryAction::VerifyPersisted);
 		if (!bVerifiable)
 		{
-			const bool bRolledBack = Receipt.GetStatus()
-				== EDurableStatus::RolledBack;
-			OutOutcome = MakeOutcome(
-				VerificationId,
+			const bool bRolledBack = Receipt.GetStatus() == EDurableStatus::RolledBack;
+			auto Diagnostic = VerificationFailure(!bObservationOnly && bRolledBack
+				? TEXT("verification_durable_rolled_back") : TEXT("verification_durable_status_not_verifiable"),
+				bRolledBack ? TEXT("The durable operation was rolled back, so its proposed persisted result cannot be verified.")
+					: TEXT("Verification requires persisted_unverified with no recovery action, or recovery_required with verify_persisted."),
+				TEXT("durable_receipt"));
+			auto State = MakeShared<FJsonObject>();
+			State->SetStringField(TEXT("status"), AssetDurable::LexToString(Receipt.GetStatus()));
+			State->SetStringField(TEXT("recovery_action"), AssetDurable::LexToString(Receipt.GetRecoveryAction()));
+			Diagnostic.ActualValue = MakeShared<FJsonValueObject>(State);
+			if (bObservationOnly) {
+				OutError = MoveTemp(Diagnostic);
+				return false;
+			}
+			OutOutcome = MakeOutcome(VerificationId,
 				EVerificationStatus::Unavailable,
 				bRolledBack
 					? EEffectOutcome::RolledBack
 					: EEffectOutcome::StateUnknown,
-				bRolledBack
-					? TEXT("verification_durable_rolled_back")
-					: TEXT(
-						"verification_durable_status_not_verifiable"));
+				MoveTemp(Diagnostic));
 			return true;
 		}
 		if (!Receipt.RequiresIndependentVerification())
 		{
-			OutOutcome = MakeOutcome(
-				VerificationId,
+			OutOutcome = MakeOutcome(VerificationId,
 				EVerificationStatus::Unavailable,
 				EEffectOutcome::StateUnknown,
-				TEXT(
-					"verification_independent_readback_not_required"));
+				VerificationFailure(TEXT("verification_independent_readback_not_required"),
+					TEXT("The durable receipt does not request independent verification."), TEXT("durable_receipt.requires_independent_verification")));
 			return true;
 		}
 
 		TArray<FTargetVerification> TargetResults;
 		TArray<FString> EvidenceIds;
-		FString UnavailableDetail;
-		FString MismatchDetail;
+		FVerificationError UnavailableDiagnostic;
+		FVerificationError MismatchDiagnostic;
 		bool bUnavailable = false;
 		bool bMismatch = false;
+		auto AppendObservedDiagnostics = [&](FVerificationError& Diagnostic)
+		{
+			if (!UnavailableDiagnostic.IsEmpty()) Diagnostic.Append(UnavailableDiagnostic);
+			if (!MismatchDiagnostic.IsEmpty()) Diagnostic.Append(MismatchDiagnostic);
+		};
 		for (const FVerificationTarget& Target : Request.GetTargets())
 		{
-			FString CheckpointDiagnostic;
+			FVerificationError CheckpointDiagnostic;
 			if (!CanContinue(
 				Deadline,
 				Cancellation,
 				CheckpointDiagnostic))
 			{
-				OutOutcome = MakeOutcome(
-					VerificationId,
-					EVerificationStatus::Unavailable,
-					EEffectOutcome::StateUnknown,
-					CheckpointDiagnostic,
-					MoveTemp(TargetResults),
-					MoveTemp(EvidenceIds));
+				AppendObservedDiagnostics(CheckpointDiagnostic);
+				if (bObservationOnly) {
+					OutError = CheckpointDiagnostic;
+					return false;
+				}
+				OutOutcome = MakeOutcome(VerificationId,
+				EVerificationStatus::Unavailable,
+				EEffectOutcome::StateUnknown,
+				CheckpointDiagnostic,
+				MoveTemp(TargetResults),
+				MoveTemp(EvidenceIds));
 				return true;
 			}
 
@@ -927,12 +1043,11 @@ namespace UE::UAI::Verification
 				if (PersistedStateOracle->GetReadPortId()
 					!= Target.GetBinding().GetReadPortId())
 				{
-					UnavailableDetail = OracleDiagnosticDetail(
-						TEXT("persisted_read_port"),
-						TEXT("verification_oracle_read_port_mismatch"),
-						PersistedStateOracle->GetReadPortId()
-							+ TEXT(" != ")
-							+ Target.GetBinding().GetReadPortId());
+					auto Error = TargetFailure(TEXT("verification_oracle_read_port_mismatch"),
+						TEXT("The persisted-state oracle's read port differs from the target binding's read port."), TEXT("read_port_id"), Target);
+					Error.ActualEvidence = MakeShared<FJsonValueString>(PersistedStateOracle->GetReadPortId());
+					Error.ExpectedEvidence = MakeShared<FJsonValueString>(Target.GetBinding().GetReadPortId());
+					AppendTargetDiagnostic(UnavailableDiagnostic, OracleDiagnostic(TEXT("persisted_read_port"), MoveTemp(Error)), Target);
 					bUnavailable = true;
 					break;
 				}
@@ -945,10 +1060,15 @@ namespace UE::UAI::Verification
 						Actual,
 						OracleError))
 				{
-					UnavailableDetail = OracleDiagnosticDetail(
-						TEXT("persisted_observe"),
-						OracleError.GetCode(),
-						OracleError.GetDetail());
+					if (OracleError.IsEmpty()) OracleError = TargetFailure(TEXT("persisted_state_oracle_read_failed"),
+						TEXT("The persisted-state oracle failed without reporting a diagnostic."), TEXT("observation"), Target);
+					if (bObservationOnly) {
+						OutError = OracleError;
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target.GetBinding().GetPublicRef();
+						AppendObservedDiagnostics(OutError);
+						return false;
+					}
+					AppendTargetDiagnostic(UnavailableDiagnostic, OracleDiagnostic(TEXT("persisted_observe"), MoveTemp(OracleError)), Target);
 					bUnavailable = true;
 					break;
 				}
@@ -956,9 +1076,16 @@ namespace UE::UAI::Verification
 					|| Actual->GetProvenance().GetSourceKind()
 						!= TEXT("independent_readback"))
 				{
-					UnavailableDetail = OracleDiagnosticDetail(
-						TEXT("persisted_snapshot"),
-						TEXT("verification_oracle_snapshot_invalid"));
+					auto Error = TargetFailure(TEXT("verification_oracle_snapshot_invalid"),
+						!Actual.IsValid() ? TEXT("The persisted-state oracle returned no snapshot.")
+							: TEXT("The observed snapshot does not identify its source as independent readback."),
+						!Actual.IsValid() ? TEXT("actual_snapshot") : TEXT("actual_snapshot.provenance.source_kind"), Target);
+					if (Actual.IsValid())
+					{
+						Error.ActualValue = MakeShared<FJsonValueString>(Actual->GetProvenance().GetSourceKind());
+						Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("independent_readback"));
+					}
+					AppendTargetDiagnostic(UnavailableDiagnostic, OracleDiagnostic(TEXT("persisted_snapshot"), MoveTemp(Error)), Target);
 					bUnavailable = true;
 					break;
 				}
@@ -970,9 +1097,19 @@ namespace UE::UAI::Verification
 					|| Actual->GetProvenance().GetEvidenceId()
 						== Expected->GetProvenance().GetEvidenceId())
 				{
-					UnavailableDetail = OracleDiagnosticDetail(
-						TEXT("persisted_independence"),
-						TEXT("verification_oracle_evidence_not_independent"));
+					const bool bSameSnapshot = Expected.IsValid() && Actual->GetSnapshotId() == Expected->GetSnapshotId();
+					auto Error = TargetFailure(TEXT("verification_oracle_evidence_not_independent"),
+						!Expected.IsValid() ? TEXT("Independent verification has no expected snapshot to compare against.")
+							: bSameSnapshot ? TEXT("Observed and expected states reuse the same snapshot identifier.")
+							: TEXT("Observed and expected states reuse the same evidence identifier."),
+						!Expected.IsValid() ? TEXT("expected_snapshot") : bSameSnapshot
+							? TEXT("actual_snapshot.snapshot_id") : TEXT("actual_snapshot.provenance.evidence_id"), Target);
+					if (Expected.IsValid())
+					{
+						Error.ActualEvidence = MakeShared<FJsonValueString>(bSameSnapshot ? Actual->GetSnapshotId() : Actual->GetProvenance().GetEvidenceId());
+						Error.ExpectedEvidence = MakeShared<FJsonValueString>(bSameSnapshot ? Expected->GetSnapshotId() : Expected->GetProvenance().GetEvidenceId());
+					}
+					AppendTargetDiagnostic(UnavailableDiagnostic, OracleDiagnostic(TEXT("persisted_independence"), MoveTemp(Error)), Target);
 					bUnavailable = true;
 					break;
 				}
@@ -985,10 +1122,7 @@ namespace UE::UAI::Verification
 					Comparison,
 					CompareError))
 				{
-					UnavailableDetail = OracleDiagnosticDetail(
-						TEXT("persisted_compare"),
-						CompareError.Code,
-						CompareError.Detail);
+					AppendTargetDiagnostic(UnavailableDiagnostic, OracleDiagnostic(TEXT("persisted_compare"), MoveTemp(CompareError)), Target);
 					bUnavailable = true;
 					break;
 				}
@@ -996,11 +1130,9 @@ namespace UE::UAI::Verification
 					Comparison.IsEquivalent()
 						? EVerificationStatus::Verified
 						: EVerificationStatus::Mismatch;
-				if (TargetStatus == EVerificationStatus::Mismatch
-					&& MismatchDetail.IsEmpty())
+				if (TargetStatus == EVerificationStatus::Mismatch)
 				{
-					MismatchDetail =
-						ComparisonDiagnosticDetail(Comparison);
+					AppendTargetDiagnostic(MismatchDiagnostic, ComparisonDiagnostic(Comparison), Target);
 				}
 				bMismatch = bMismatch
 					|| TargetStatus == EVerificationStatus::Mismatch;
@@ -1024,24 +1156,31 @@ namespace UE::UAI::Verification
 			{
 				FAbsenceObservation Observation;
 				FVerificationError OracleError;
-				if (!AbsenceOracle->TryObserve(
+				const bool bObserved = AbsenceOracle->TryObserve(
 					Target.GetIdentity(),
 					ArtifactsFor(Request, Target),
 					Resources,
 					Deadline,
 					Cancellation,
 					Observation,
-					OracleError)
-					|| !Observation.IsValid()
+					OracleError);
+				if (!bObserved && OracleError.IsEmpty()) OracleError = TargetFailure(TEXT("verification_absence_read_failed"),
+					TEXT("The absence oracle failed without reporting a diagnostic."), TEXT("observation"), Target);
+				if (!bObserved && bObservationOnly) {
+					OutError = OracleError;
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target.GetBinding().GetPublicRef();
+					AppendObservedDiagnostics(OutError);
+					return false;
+				}
+				if (!bObserved || !Observation.IsValid()
 					|| !(Observation.GetIdentity()
 						== Target.GetIdentity()))
 				{
-					UnavailableDetail = OracleDiagnosticDetail(
-						TEXT("absence_observe"),
-						OracleError.IsPresent()
-							? OracleError.GetCode()
-							: TEXT("verification_absence_observation_invalid"),
-						OracleError.GetDetail());
+					if (OracleError.IsEmpty()) OracleError = !Observation.IsValid() ? *Observation.GetValidationDiagnostic()
+						: IdentityMismatch(TEXT("verification_absence_observation_invalid"),
+							TEXT("The absence oracle returned an observation for a different target."), TEXT("observation.identity"),
+							Observation.GetIdentity(), Target.GetIdentity());
+					AppendTargetDiagnostic(UnavailableDiagnostic, OracleDiagnostic(TEXT("absence_observe"), MoveTemp(OracleError)), Target);
 					bUnavailable = true;
 					break;
 				}
@@ -1051,6 +1190,22 @@ namespace UE::UAI::Verification
 						: (Observation.IsAbsent()
 							? EVerificationStatus::Verified
 							: EVerificationStatus::Mismatch);
+				if (TargetStatus == EVerificationStatus::Unavailable)
+				{
+					auto Error = TargetFailure(TEXT("verification_absence_unavailable"),
+						TEXT("The absence oracle could not determine whether the target still exists."), TEXT("observation.unavailable"), Target);
+					Error.ActualValue = MakeShared<FJsonValueBoolean>(true);
+					Error.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+					AppendTargetDiagnostic(UnavailableDiagnostic, MoveTemp(Error), Target);
+				}
+				else if (TargetStatus == EVerificationStatus::Mismatch)
+				{
+					auto Error = TargetFailure(TEXT("verification_absence_mismatch"),
+						TEXT("The target is still present, but the operation expected it to be absent."), TEXT("observation.absent"), Target);
+					Error.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					Error.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					AppendTargetDiagnostic(MismatchDiagnostic, MoveTemp(Error), Target);
+				}
 				bUnavailable = bUnavailable
 					|| TargetStatus == EVerificationStatus::Unavailable;
 				bMismatch = bMismatch
@@ -1070,23 +1225,30 @@ namespace UE::UAI::Verification
 
 			FReferenceObservation Observation;
 			FVerificationError OracleError;
-			if (!ReferenceOracle->TryObserve(
+			const bool bObserved = ReferenceOracle->TryObserve(
 				Target.GetIdentity(),
 				Resources,
 				Deadline,
 				Cancellation,
 				Observation,
-				OracleError)
-				|| !Observation.IsValid()
+				OracleError);
+			if (!bObserved && OracleError.IsEmpty()) OracleError = TargetFailure(TEXT("verification_reference_read_failed"),
+				TEXT("The reference oracle failed without reporting a diagnostic."), TEXT("observation"), Target);
+			if (!bObserved && bObservationOnly) {
+				OutError = OracleError;
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target.GetBinding().GetPublicRef();
+				AppendObservedDiagnostics(OutError);
+				return false;
+			}
+			if (!bObserved || !Observation.IsValid()
 				|| !(Observation.GetIdentity()
 					== Target.GetIdentity()))
 			{
-				UnavailableDetail = OracleDiagnosticDetail(
-					TEXT("reference_observe"),
-					OracleError.IsPresent()
-						? OracleError.GetCode()
-						: TEXT("verification_reference_observation_invalid"),
-					OracleError.GetDetail());
+				if (OracleError.IsEmpty()) OracleError = !Observation.IsValid() ? *Observation.GetValidationDiagnostic()
+					: IdentityMismatch(TEXT("verification_reference_observation_invalid"),
+						TEXT("The reference oracle returned an observation for a different target."), TEXT("observation.identity"),
+						Observation.GetIdentity(), Target.GetIdentity());
+				AppendTargetDiagnostic(UnavailableDiagnostic, OracleDiagnostic(TEXT("reference_observe"), MoveTemp(OracleError)), Target);
 				bUnavailable = true;
 				break;
 			}
@@ -1097,6 +1259,25 @@ namespace UE::UAI::Verification
 						== Target.GetExpectedReferenceKeys()
 						? EVerificationStatus::Verified
 						: EVerificationStatus::Mismatch);
+			if (TargetStatus == EVerificationStatus::Unavailable)
+			{
+				auto Error = TargetFailure(TEXT("verification_reference_unavailable"),
+					TEXT("The reference oracle could not determine the target's reference set."), TEXT("observation.unavailable"), Target);
+				Error.ActualValue = MakeShared<FJsonValueBoolean>(true);
+				Error.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+				AppendTargetDiagnostic(UnavailableDiagnostic, MoveTemp(Error), Target);
+			}
+			else if (TargetStatus == EVerificationStatus::Mismatch)
+			{
+				auto Error = TargetFailure(TEXT("verification_reference_mismatch"),
+					TEXT("The observed reference set differs from the operation's expected reference set."), TEXT("observation.reference_keys"), Target);
+				TArray<TSharedPtr<FJsonValue>> ActualKeys, ExpectedKeys;
+				for (const FString& Key : Observation.GetReferenceKeys()) ActualKeys.Add(MakeShared<FJsonValueString>(Key));
+				for (const FString& Key : Target.GetExpectedReferenceKeys()) ExpectedKeys.Add(MakeShared<FJsonValueString>(Key));
+				Error.ActualEvidence = MakeShared<FJsonValueArray>(MoveTemp(ActualKeys));
+				Error.ExpectedEvidence = MakeShared<FJsonValueArray>(MoveTemp(ExpectedKeys));
+				AppendTargetDiagnostic(MismatchDiagnostic, MoveTemp(Error), Target);
+			}
 			bUnavailable = bUnavailable
 				|| TargetStatus == EVerificationStatus::Unavailable;
 			bMismatch = bMismatch
@@ -1113,41 +1294,44 @@ namespace UE::UAI::Verification
 				TArray<FString>{Observation.GetEvidenceId()});
 		}
 
-		if (bUnavailable)
+		if (bUnavailable && !bObservationOnly)
 		{
-			OutOutcome = MakeOutcome(
-				VerificationId,
+			if (!MismatchDiagnostic.IsEmpty()) UnavailableDiagnostic.Append(MismatchDiagnostic);
+			OutOutcome = MakeOutcome(VerificationId,
 				EVerificationStatus::Unavailable,
 				EEffectOutcome::StateUnknown,
-				TEXT("verification_oracle_unavailable"),
+				VerificationFailure(TEXT("verification_oracle_unavailable"), TEXT("Independent verification could not observe every required target."), FString()),
 				MoveTemp(TargetResults),
 				MoveTemp(EvidenceIds),
 				TOptional<FVerificationAcknowledgement>(),
-				MoveTemp(UnavailableDetail));
+				MoveTemp(UnavailableDiagnostic));
 			return true;
 		}
-		if (bMismatch)
+		if (bMismatch && !bObservationOnly)
 		{
-			OutOutcome = MakeOutcome(
-				VerificationId,
+			OutOutcome = MakeOutcome(VerificationId,
 				EVerificationStatus::Mismatch,
 				EEffectOutcome::Partial,
-				TEXT("verification_semantic_mismatch"),
+				VerificationFailure(TEXT("verification_semantic_mismatch"), TEXT("Independent readback differs from the operation's expected result."), FString()),
 				MoveTemp(TargetResults),
 				MoveTemp(EvidenceIds),
 				TOptional<FVerificationAcknowledgement>(),
-				MoveTemp(MismatchDetail));
+				MoveTemp(MismatchDiagnostic));
 			return true;
 		}
 
-		FString CheckpointDiagnostic;
+		FVerificationError CheckpointDiagnostic;
 		if (!CanContinue(
 			Deadline,
 			Cancellation,
 			CheckpointDiagnostic))
 		{
-			OutOutcome = MakeOutcome(
-				VerificationId,
+			AppendObservedDiagnostics(CheckpointDiagnostic);
+			if (bObservationOnly) {
+				OutError = CheckpointDiagnostic;
+				return false;
+			}
+			OutOutcome = MakeOutcome(VerificationId,
 				EVerificationStatus::Unavailable,
 				EEffectOutcome::StateUnknown,
 				CheckpointDiagnostic,
@@ -1161,33 +1345,45 @@ namespace UE::UAI::Verification
 			Receipt.GetInventoryHash(),
 			VerificationId,
 			Request.GetJournalOwnerId(),
-			Request.GetFencingToken());
+			Request.GetFencingToken(), !bMismatch && !bUnavailable);
 		FAssetDurableError AcknowledgeError;
-		if (!Acknowledgement.IsValid()
-			|| !Acknowledger->TryAcknowledge(
+		bool bAcknowledged = false;
+		if (!Acknowledgement.IsValid()) AcknowledgeError = *Acknowledgement.GetValidationDiagnostic();
+		else bAcknowledged = Acknowledger->TryAcknowledge(
 				Acknowledgement,
 				Resources,
-				AcknowledgeError))
+				AcknowledgeError);
+		if (!bAcknowledged)
 		{
-			OutOutcome = MakeOutcome(
-				VerificationId,
+			if (AcknowledgeError.IsEmpty()) AcknowledgeError = VerificationFailure(TEXT("verification_acknowledgement_rejected"),
+				TEXT("The durable verification acknowledgement was rejected without a diagnostic."), TEXT("acknowledgement"));
+			AppendObservedDiagnostics(AcknowledgeError);
+			if (bObservationOnly) {
+				OutError = AcknowledgeError;
+				return false;
+			}
+			OutOutcome = MakeOutcome(VerificationId,
 				EVerificationStatus::Unavailable,
 				EEffectOutcome::StateUnknown,
-				TEXT(
-					"verification_acknowledgement_rejected"),
+				VerificationFailure(TEXT("verification_acknowledgement_rejected"),
+					TEXT("The durable operation did not accept the verification acknowledgement."), TEXT("acknowledgement")),
 				MoveTemp(TargetResults),
-				MoveTemp(EvidenceIds));
+				MoveTemp(EvidenceIds), {}, AcknowledgeError);
 			return true;
 		}
-		OutOutcome = MakeOutcome(
-			VerificationId,
-			EVerificationStatus::Verified,
-			EEffectOutcome::Complete,
-			TEXT("verification_complete"),
-			MoveTemp(TargetResults),
-			MoveTemp(EvidenceIds),
-			TOptional<FVerificationAcknowledgement>(
-				Acknowledgement));
+		if (bUnavailable && !MismatchDiagnostic.IsEmpty()) UnavailableDiagnostic.Append(MismatchDiagnostic);
+		OutOutcome = MakeOutcome(VerificationId,
+				bUnavailable ? EVerificationStatus::Unavailable : bMismatch ? EVerificationStatus::Mismatch : EVerificationStatus::Verified,
+				bUnavailable ? EEffectOutcome::StateUnknown : bMismatch ? EEffectOutcome::Partial : EEffectOutcome::Complete,
+				VerificationFailure(bUnavailable ? TEXT("verification_oracle_unavailable") : bMismatch ? TEXT("verification_semantic_mismatch") : TEXT("verification_complete"),
+					bUnavailable ? TEXT("Independent verification could not observe every required target.")
+						: bMismatch ? TEXT("Independent readback differs from the operation's expected result.")
+						: TEXT("Independent readback matches the operation's expected result."), FString()),
+				MoveTemp(TargetResults),
+				MoveTemp(EvidenceIds),
+				TOptional<FVerificationAcknowledgement>(
+				Acknowledgement),
+				bUnavailable ? MoveTemp(UnavailableDiagnostic) : MoveTemp(MismatchDiagnostic));
 		return true;
 	}
 }

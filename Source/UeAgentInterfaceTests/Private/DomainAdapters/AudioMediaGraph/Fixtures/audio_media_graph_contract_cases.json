@@ -2,10 +2,6 @@
   "schema": "uai.domain_adapter.audio_media_graph.test_fixture.v1",
   "canonical_value_schema": "uai.graph_compound.canonical.v1",
   "adapter_id": "D/AudioMediaGraph",
-  "port_family_count": 5,
-  "capability_count": 15,
-  "legacy_candidate_count": 7,
-  "external_successor_capability_ids": ["texture_graph.artifact.bake"],
   "port_families": [
     {
       "family_id": "asset_lifecycle",
@@ -60,15 +56,6 @@
     {"capability_id":"texture_graph.graph.validate_evaluate_settle","descriptor_id":"uai.texture_graph.graph.validate_evaluate_settle.v1","port_family_id":"texture_graph_topology_mutation","operation_kind":"settle","effect_class":"compound_effect","version":1},
     {"capability_id":"texture_graph.artifact.capture","descriptor_id":"uai.texture_graph.artifact.capture.v1","port_family_id":"texture_graph_artifact_state","operation_kind":"query","effect_class":"compound_query","version":1}
   ],
-  "legacy_mappings": [
-    {"legacy_id":"metasound_create","source_role":"scenario_only","target_capability_ids":["audio_media.asset.create"],"prohibited_oracle":"legacy_command_success"},
-    {"legacy_id":"metasound_apply_folder","source_role":"scenario_only","target_capability_ids":["metasound.graph.interface.mutate","metasound.graph.node.mutate","metasound.graph.link.mutate","metasound.graph.default.mutate","metasound.graph.compile_settle"],"prohibited_oracle":"legacy_folder_apply_provider"},
-    {"legacy_id":"sound_cue_create","source_role":"scenario_only","target_capability_ids":["audio_media.asset.create"],"prohibited_oracle":"legacy_command_success"},
-    {"legacy_id":"sound_cue_apply_folder","source_role":"scenario_only","target_capability_ids":["sound_cue.graph.node.mutate","sound_cue.graph.relation.mutate","sound_cue.graph.root.mutate","sound_cue.graph.compile_settle"],"prohibited_oracle":"legacy_folder_apply_provider"},
-    {"legacy_id":"texture_graph_create","source_role":"scenario_only","target_capability_ids":["audio_media.asset.create"],"prohibited_oracle":"legacy_command_success"},
-    {"legacy_id":"texture_graph_apply_folder","source_role":"scenario_only","target_capability_ids":["texture_graph.graph.node.mutate","texture_graph.graph.link.mutate","texture_graph.graph.parameter.mutate","texture_graph.graph.validate_evaluate_settle"],"prohibited_oracle":"legacy_reflection_apply_provider"},
-    {"legacy_id":"texture_graph_bake_outputs","source_role":"scenario_only","target_capability_ids":["texture_graph.artifact.bake"],"prohibited_oracle":"outputs_num_nonnegative_or_created_texture_echo"}
-  ],
   "identity_cases": [
     {"case_id":"metasound_node","identity_source":"native_guid","native_key":"node_guid:11111111-1111-1111-1111-111111111111","type_key":"MetasoundFrontendNode"},
     {"case_id":"metasound_pin","identity_source":"native_composite","native_key":"node_guid:11111111-1111-1111-1111-111111111111|vertex_guid:22222222-2222-2222-2222-222222222222","type_key":"MetasoundFrontendVertex"},
@@ -78,7 +65,6 @@
     {"case_id":"texture_graph_pin","identity_source":"native_composite","native_key":"expression:/Temp/UAI/AudioMediaGraph/TG_GC010.TG_Expression_Scalar_0|ftg_pin:1.0|argument:Input","type_key":"FTG_Pin"},
     {"case_id":"texture_graph_output","identity_source":"native_composite","native_key":"owner:/Temp/UAI/AudioMediaGraph/TG_GC010|output_pin:2.1|name:Output","type_key":"FTG_OutputSettings"}
   ],
-  "deep_acyclic_case": {"item_count":512,"validation":"iterative_no_fixed_depth_limit","operation_budget":2048},
   "negative_cases": [
     {"case_id":"identity_source_missing","error_code":"audio_media_graph_identity_source_missing"},
     {"case_id":"native_key_missing","error_code":"audio_media_graph_native_identity_missing"},
@@ -105,6 +91,6 @@
     "artifact_evidence":"fixture:gc-010:artifact-state:101",
     "required_distinct_evidence":["apply_evidence","barrier_evidence","settle_evidence","readback_evidence","artifact_evidence"]
   },
-  "forbidden_owners": ["public_or_prefix_dispatch","json_or_hjson_parser","descriptor_registry","canonical_state_owner","workspace_or_file_layout","token_budget","transaction_or_save","verification_or_outcome","response_projection","network_transport","artifact_publisher"],
-  "forbidden_oracles": ["legacy_folder_or_reflection_apply_provider","legacy_command_success","request_or_export_echo","empty_nodes_edges_outputs_arrays","outputs_num_nonnegative","created_texture_echo","mutation_cache","compile_receipt_as_readback","self_generated_golden","display_name_or_bare_array_index_identity"]
+  "forbidden_owners": ["public_or_prefix_dispatch","json_or_hjson_parser","descriptor_registry","canonical_state_owner","workspace_or_file_layout","transaction_or_save","verification_or_outcome","response_projection","network_transport","artifact_publisher"],
+  "forbidden_oracles": ["legacy_folder_or_reflection_apply_provider","request_or_export_echo","empty_nodes_edges_outputs_arrays","outputs_num_nonnegative","created_texture_echo","mutation_cache","compile_receipt_as_readback","self_generated_golden","display_name_or_bare_array_index_identity"]
 }

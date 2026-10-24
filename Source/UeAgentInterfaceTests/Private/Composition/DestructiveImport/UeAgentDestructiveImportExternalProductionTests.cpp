@@ -93,7 +93,7 @@ namespace
 		const FScopedPublicCommandComposition& Harness,
 		const FString& CommandId,
 		const TSharedRef<FJsonObject>& Params,
-		TOptional<FUeAgentCommandResult>& OutResult,
+		TSharedPtr<FJsonObject>& OutResult,
 		TSharedPtr<FJsonObject>& OutPayload,
 		FString& OutError)
 	{
@@ -138,18 +138,11 @@ namespace
 				TEXT("command_http_status:%d"), Response.StatusCode);
 			return false;
 		}
-		FUeAgentCommandProtocolDiagnostic Diagnostic;
-		FUeAgentCommandProtocolCodec Codec;
-		if (!Codec.DecodeResult(Response.Body, OutResult, Diagnostic)
-			|| !OutResult.IsSet())
-		{
-			OutError = Diagnostic.Code + TEXT(":") + Diagnostic.Message;
-			return false;
-		}
-		const TSharedRef<TJsonReader<>> Reader =
-			TJsonReaderFactory<>::Create(OutResult->GetPayloadJson());
-		return FJsonSerializer::Deserialize(Reader, OutPayload)
-			&& OutPayload.IsValid();
+		if (!ReadPublicResponse(Response.Body, OutResult, OutError)) return false;
+		const TSharedPtr<FJsonObject>* Payload = nullptr;
+		if (!OutResult->TryGetObjectField(TEXT("payload"), Payload)) return false;
+		OutPayload = *Payload;
+		return OutPayload.IsValid();
 	}
 
 	class FOwnedExternalFixture final
@@ -474,26 +467,23 @@ bool FUeAgentDestructiveImportExternalProductionTest::RunTest(
 		{
 			Input->SetStringField(TEXT("destination_ref"), Destination);
 		}
-		TOptional<FUeAgentCommandResult> Result;
+		TSharedPtr<FJsonObject> Result;
 		TSharedPtr<FJsonObject> Payload;
 		const bool bInvoked = TryInvoke(
 			Harness, CommandId, Input, Result, Payload, Error);
 		TestTrue(TEXT("missing source reaches formal route: ") + CommandId,
-			bInvoked && Result.IsSet() && Payload.IsValid());
-		if (bInvoked && Result.IsSet() && Payload.IsValid())
+			bInvoked && Result.IsValid() && Payload.IsValid());
+		if (bInvoked && Result.IsValid() && Payload.IsValid())
 		{
 			TestFalse(TEXT("missing source fails closed: ") + CommandId,
-				Result->IsOk());
-			TSharedPtr<FJsonObject> ErrorObject;
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(Result->GetErrorJson());
+				Result->GetBoolField(TEXT("ok")));
+			const auto ErrorObject = Result->GetObjectField(TEXT("error"));
 			FString TerminalStatus;
 			bool bMutationStarted = true;
 			bool bRetrySafe = false;
 			TestTrue(TEXT("missing source has typed pre-mutation failure: ")
 					+ CommandId,
-				FJsonSerializer::Deserialize(Reader, ErrorObject)
-					&& ErrorObject.IsValid()
+				ErrorObject.IsValid()
 					&& ErrorObject->TryGetStringField(
 						TEXT("terminal_status"), TerminalStatus)
 					&& TerminalStatus == TEXT("rejected")
@@ -533,13 +523,13 @@ bool FUeAgentDestructiveImportExternalProductionTest::RunTest(
 		const TSharedRef<FJsonObject> Input = Params();
 		Input->SetStringField(TEXT("source_ref"), Positive.Source);
 		Input->SetStringField(TEXT("destination_ref"), Positive.PackageName);
-		TOptional<FUeAgentCommandResult> Result;
+		TSharedPtr<FJsonObject> Result;
 		TSharedPtr<FJsonObject> Payload;
 		const bool bInvoked = TryInvoke(
 			Harness, Positive.CommandId, Input, Result, Payload, Error);
 		TestTrue(TEXT("real importer reaches formal route: ") + Positive.CommandId,
-			bInvoked && Result.IsSet() && Result->IsOk() && Payload.IsValid());
-		if (bInvoked && Result.IsSet() && Payload.IsValid())
+			bInvoked && Result.IsValid() && Result->GetBoolField(TEXT("ok")) && Payload.IsValid());
+		if (bInvoked && Result.IsValid() && Payload.IsValid())
 		{
 			TestEqual(TEXT("real import commits: ") + Positive.CommandId,
 				Payload->GetStringField(TEXT("terminal_status")), TEXT("succeeded"));

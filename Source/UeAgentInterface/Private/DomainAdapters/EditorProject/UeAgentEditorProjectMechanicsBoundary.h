@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class FJsonObject;
@@ -21,7 +23,7 @@ namespace UE::UAI::DomainAdapters::EditorProject
 			const FString& Action,
 			const FEditorProjectQueryRequest& Request,
 			TSharedPtr<FJsonObject>& OutObservation,
-			FString& OutError) const = 0;
+			UE::UAI::Contract::FDiagnostic& OutError) const = 0;
 	};
 
 	UEAGENTINTERFACE_API const TArray<FString>& GetCommandIds();

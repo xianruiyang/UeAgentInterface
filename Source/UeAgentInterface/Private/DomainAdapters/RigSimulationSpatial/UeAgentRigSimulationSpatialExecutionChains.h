@@ -1,9 +1,12 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/BindingGateway/Operation/UeAgentOperationBinding.h"
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
 #include "Core/Contract/UeAgentContract.h"
+#include "Core/Contract/Command/UeAgentCommandContractModel.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialPort.h"
@@ -32,7 +35,9 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			FString InSettleBarrier,
 			FString InOracleKind,
 			bool bInRequiresNativeMutation,
-			bool bInReadsBackAfterMutation);
+			bool bInReadsBackAfterMutation,
+			TArray<UE::UAI::CommandContract::FUeAgentModelResultFieldDeclaration>
+				InModelResultFields = {});
 
 		const FString& GetCapabilityId() const;
 		const FString& GetDescriptorId() const;
@@ -54,6 +59,8 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		const FString& GetOracleKind() const;
 		bool RequiresNativeMutation() const;
 		bool ReadsBackAfterMutation() const;
+		const TArray<UE::UAI::CommandContract::FUeAgentModelResultFieldDeclaration>&
+		GetModelResultFields() const;
 
 	private:
 		FString CapabilityId;
@@ -75,19 +82,14 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FString OracleKind;
 		bool bRequiresNativeMutation = false;
 		bool bReadsBackAfterMutation = false;
+		TArray<UE::UAI::CommandContract::FUeAgentModelResultFieldDeclaration>
+			ModelResultFields;
 	};
 
 	UEAGENTINTERFACE_API const TArray<FUeAgentRigSimulationSpatialExecutionChainContract>&
 	GetRigSimulationSpatialExecutionChainContracts();
 
-	struct UEAGENTINTERFACE_API FUeAgentRigSimulationSpatialExecutionError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const { return !Code.IsEmpty(); }
-	};
+	using FUeAgentRigSimulationSpatialExecutionError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentRigSimulationSpatialTypedRequest
 	{
@@ -129,6 +131,18 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		Verification,
 	};
 
+	struct UEAGENTINTERFACE_API FUeAgentRigSimulationSpatialReadbackResult
+	{
+		FUeAgentRigSimulationSpatialReadbackResult(
+			TSharedRef<const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot> InSnapshot,
+			UE::UAI::Contract::FDiagnostic InDifference = {})
+			: Snapshot(MoveTemp(InSnapshot)), Difference(MoveTemp(InDifference)) {}
+
+		TSharedRef<const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot> Snapshot;
+		// A successful observation can differ from the requested state without being a readback failure.
+		UE::UAI::Contract::FDiagnostic Difference;
+	};
+
 	class UEAGENTINTERFACE_API IUeAgentRigSimulationSpatialReadbackPort
 	{
 	public:
@@ -139,7 +153,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			const TOptional<UE::UAI::Discovery::FUeAgentCandidateBinding>& Target,
 			EUeAgentRigSimulationSpatialReadPhase Phase,
 			const UE::UAI::ContextResource::FUeAgentOperationContext& Context,
-			TSharedPtr<const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot>& OutSnapshot,
+			TOptional<FUeAgentRigSimulationSpatialReadbackResult>& OutReadback,
 			FUeAgentRigSimulationSpatialExecutionError& OutError) = 0;
 	};
 
@@ -193,7 +207,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			const FUeAgentRigSimulationSpatialExecutionChainContract& Contract,
 			const FUeAgentRigSimulationSpatialTypedRequestRef& Request,
 			const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot& Before,
-			const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot& After,
+			const FUeAgentRigSimulationSpatialReadbackResult& After,
 			const UE::UAI::ContextResource::FUeAgentOperationContext& Context,
 			UE::UAI::Verification::FVerificationOutcome& OutOutcome,
 			FUeAgentRigSimulationSpatialExecutionError& OutError) = 0;
@@ -258,6 +272,5 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		TArray<TSharedRef<FUeAgentRigSimulationSpatialOperationChain>>& OutChains,
 		FUeAgentRigSimulationSpatialExecutionError& OutError);
 }
-
 
 

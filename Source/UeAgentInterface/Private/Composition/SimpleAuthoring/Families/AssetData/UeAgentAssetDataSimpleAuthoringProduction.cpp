@@ -1,6 +1,13 @@
 #include "Composition/SimpleAuthoring/Families/AssetData/UeAgentAssetDataSimpleAuthoringProduction.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/Contract/UeAgentContractJson.h"
+#include "Core/Contract/UeAgentExecutionContextPolicy.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+
 #include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
+#include "Core/AssetDurable/UeAgentPersistedPackage.h"
+#include "Core/AssetDurable/UeAgentPersistedWorld.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -10,6 +17,7 @@
 #include "UObject/Class.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
+#include <initializer_list>
 
 namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 {
@@ -49,6 +57,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 			TEXT("_uai_source_class");
 		constexpr const TCHAR* EvidenceSourceRevision =
 			TEXT("_uai_source_revision");
+		constexpr const TCHAR* EvidenceTargetRevision =
+			TEXT("_uai_target_revision");
 
 		using FAssetDataProfile =
 			FUeAgentAssetDataSimpleEffectProductionProfile;
@@ -63,7 +73,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 			}
 
 			TArray<FAssetDataProfile> Profiles;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 		};
 
 		const FAssetDataProfileCatalog& GetProfileCatalog()
@@ -108,6 +118,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 				&& IsSupportedProductionProfile(Profile);
 		}
 
+		bool IsGenericFactoryProfile(
+			const FAssetDataProfile& Profile)
+		{
+			return Profile.CapabilityId == TEXT("asset.object.create");
+		}
+
 		bool TryResolveCloneSource(
 			const TSharedRef<IUeAgentAssetDataSimpleEffectAssetResolver>& Resolver,
 			const FString& SourceRef,
@@ -118,53 +134,170 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 				SourceRef, OutSource, OutError);
 		}
 
-		void SetError(
-			FUeAgentAssetDataSimpleAuthoringError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		void SetError(FUeAgentAssetDataSimpleAuthoringError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic,
+            const FString& SubjectId = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SubjectId;
+        }
+
+		void SetProductionError(FUeAgentSimpleAuthoringProductionError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic,
+            const FString& SubjectId = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SubjectId;
+        }
+
+		FDiagnostic ProductionFailure(const TCHAR* Code, const FString& Reason, const FString& Path,
+			const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected,
+			const FString& SourceKind = TEXT("native_result"))
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("asset_data_production"));
+			Error.SourceKind = SourceKind;
+			Error.PropertyPath = Path;
+			Error.ActualValue = Actual;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValue = Expected;
+			if (SourceKind == TEXT("command_input"))
+			{
+				Error.SemanticPointer = Path;
+				Error.Source.JsonPath = Path;
+			}
+			return Error;
 		}
 
-		void SetProductionError(
-			FUeAgentSimpleAuthoringProductionError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		void MarkNativeFailure(FDiagnostic& Error)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			Error.SourceKind = TEXT("native_result");
+			if (Error.Source.InternalJsonPath.IsEmpty()) Error.Source.InternalJsonPath = Error.Source.JsonPath;
+			static_cast<FPublicSourceLocation&>(Error.Source) = FPublicSourceLocation();
+			Error.SemanticPointer.Reset();
+			for (FDiagnostic& Child : Error.Diagnostics) MarkNativeFailure(Child);
+			if (Error.PublicCause.IsValid())
+			{
+				auto Cause = MakeShared<FDiagnostic>(*Error.PublicCause);
+				MarkNativeFailure(*Cause);
+				Error.PublicCause = Cause;
+			}
 		}
 
-		bool TryParseJson(
-			const FString& Json,
-			TSharedPtr<FJsonObject>& OutObject)
+		struct FRequiredEvidenceString
 		{
-			OutObject.Reset();
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(Json);
-			return FJsonSerializer::Deserialize(Reader, OutObject)
-				&& OutObject.IsValid();
+			const TCHAR* Key;
+			const TCHAR* PublicField;
+			FString* Output;
+			bool bInternalValue = false;
+		};
+
+		bool TryReadEvidenceStrings(const TSharedPtr<FJsonObject>& Payload,
+			std::initializer_list<FRequiredEvidenceString> Fields, const TCHAR* Code, FDiagnostic& OutError)
+		{
+			for (const auto& Field : Fields) Field.Output->Reset();
+			if (!Payload.IsValid())
+			{
+				OutError = ProductionFailure(Code, TEXT("The captured asset evidence object is unavailable."),
+					TEXT("evidence"), nullptr, MakeShared<FJsonValueString>(TEXT("object")));
+				return false;
+			}
+			// Keep the existing type-check order before checking any empty strings.
+			for (const auto& Field : Fields)
+			{
+				if (!Payload->TryGetStringField(Field.Key, *Field.Output))
+				{
+					const auto* Value = Payload->Values.Find(Field.Key);
+					OutError = ProductionFailure(Code,
+						FString::Printf(TEXT("The captured asset evidence requires a string for %s."), Field.PublicField),
+						Field.PublicField, Field.bInternalValue ? nullptr : (Value ? *Value : nullptr),
+						MakeShared<FJsonValueString>(TEXT("string")));
+					OutError.ActualValuePresent = Value && Value->IsValid();
+					if (Field.bInternalValue && Value) OutError.ActualEvidence = *Value;
+					OutError.Source.InternalJsonPath = Field.Key;
+					return false;
+				}
+			}
+			for (const auto& Field : Fields)
+			{
+				if (Field.Output->IsEmpty())
+				{
+					OutError = ProductionFailure(Code,
+						FString::Printf(TEXT("The captured asset evidence has an empty %s."), Field.PublicField),
+						Field.PublicField, MakeShared<FJsonValueString>(FString()),
+						MakeShared<FJsonValueString>(TEXT("non-empty string")));
+					OutError.Source.InternalJsonPath = Field.Key;
+					return false;
+				}
+			}
+			return true;
 		}
 
-		bool TrySerializeJson(
-			const TSharedPtr<FJsonObject>& Object,
-			FString& OutJson)
+		FDiagnostic ObjectEvidenceMismatch(const TCHAR* Code, UObject* Object,
+			const FString& ExpectedPath, const FString& ExpectedClass,
+			const FString& ExpectedPackage, const FString& ExpectedName)
+		{
+			if (!IsValid(Object))
+				return ProductionFailure(Code, TEXT("The resolved asset object is unavailable."),
+					TEXT("object_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			const FString Actual[] = { Object->GetPathName(), Object->GetClass()->GetPathName(), Object->GetOutermost()->GetName(), Object->GetName() };
+			const FString Expected[] = { ExpectedPath, ExpectedClass, ExpectedPackage, ExpectedName };
+			const TCHAR* Fields[] = { TEXT("object_path"), TEXT("class"), TEXT("package_name"), TEXT("object_name") };
+			for (int32 Index = 0; Index < 4; ++Index)
+			{
+				if (Actual[Index] != Expected[Index])
+					return ProductionFailure(Code, FString::Printf(TEXT("The resolved asset %s differs from its captured evidence."), Fields[Index]),
+						Fields[Index], MakeShared<FJsonValueString>(Actual[Index]), MakeShared<FJsonValueString>(Expected[Index]));
+			}
+			return ProductionFailure(Code, TEXT("The asset resolver reported failure without a diagnostic."),
+				TEXT("resolution_succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		}
+
+		bool TryValidateObservation(const FUeAgentPersistedCreatedAssetObservation& Observation, FDiagnostic& OutError)
+		{
+			if (Observation.IsValid()) return true;
+			if (Observation.SourceObjectPath.IsEmpty())
+				OutError = ProductionFailure(TEXT("asset_data_persisted_observation_invalid"), TEXT("The persisted observation has no source object path."), TEXT("source_object_path"), MakeShared<FJsonValueString>(Observation.SourceObjectPath), MakeShared<FJsonValueString>(TEXT("non-empty asset path")));
+			else if (Observation.ClassPath.IsEmpty())
+				OutError = ProductionFailure(TEXT("asset_data_persisted_observation_invalid"), TEXT("The persisted observation has no asset class."), TEXT("class"), MakeShared<FJsonValueString>(Observation.ClassPath), MakeShared<FJsonValueString>(TEXT("non-empty class path")));
+			else if (Observation.SnapshotSequence < 0)
+			{
+				OutError = ProductionFailure(TEXT("asset_data_persisted_observation_invalid"), TEXT("The persisted observation has an invalid snapshot sequence."), TEXT("snapshot_sequence_valid"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.ActualEvidence = MakeShared<FJsonValueNumber>(Observation.SnapshotSequence);
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(TEXT("non-negative sequence"));
+			}
+			else
+				OutError = ProductionFailure(TEXT("asset_data_persisted_observation_invalid"), TEXT("The persisted world has no persistent level."), TEXT("persistent_level_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			OutError.TargetPath = Observation.SourceObjectPath;
+			return false;
+		}
+
+		Contract::FDiagnostic RevisionMismatch(const TCHAR* Code, const FString& Reason, const FString& Target,
+			const FString& ActualRevision, const FString& ExpectedRevision)
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("revision_check"));
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.TargetPath = Target;
+			Diagnostic.PropertyPath = TEXT("revision_matches");
+			Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(ActualRevision);
+			Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedRevision);
+			return Diagnostic;
+		}
+
+		bool TrySerializeJson(const TSharedPtr<FJsonObject>& Object, FString& OutJson, FDiagnostic& OutError)
 		{
 			OutJson.Reset();
 			if (!Object.IsValid())
 			{
+				OutError = ProductionFailure(TEXT("asset_data_request_evidence_invalid"), TEXT("The captured request evidence object is unavailable."), TEXT("evidence"), nullptr, MakeShared<FJsonValueString>(TEXT("object")));
 				return false;
 			}
-			const TSharedRef<TJsonWriter<>> Writer =
-				TJsonWriterFactory<>::Create(&OutJson);
-			return FJsonSerializer::Serialize(
-				Object.ToSharedRef(),
-				Writer);
+			const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutJson);
+			if (!FJsonSerializer::Serialize(Object.ToSharedRef(), Writer))
+			{
+				OutError = ProductionFailure(TEXT("asset_data_request_evidence_invalid"), TEXT("The captured request evidence could not be serialized."), TEXT("evidence_serialized"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				return false;
+			}
+			return true;
 		}
 
 		bool TryParseRequestEvidence(
@@ -173,15 +306,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 			FUeAgentDiscoveryError& OutError)
 		{
 			const FString& Evidence = Binding.GetBindingEvidence();
-			if (!Evidence.StartsWith(RequestEvidencePrefix)
-				|| !TryParseJson(
-					Evidence.RightChop(
-						FCString::Strlen(RequestEvidencePrefix)),
-					OutPayload))
+			if (!Evidence.StartsWith(RequestEvidencePrefix))
 			{
-				OutError.Code =
-					TEXT("asset_data_request_evidence_invalid");
+				OutError = ProductionFailure(TEXT("asset_data_request_evidence_invalid"),
+					TEXT("The captured asset request evidence has an unsupported format."),
+					TEXT("evidence_format_matches"), MakeShared<FJsonValueBoolean>(false),
+					MakeShared<FJsonValueBoolean>(true));
 				OutError.SubjectId = Binding.GetBindingId();
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Evidence.Left(FCString::Strlen(RequestEvidencePrefix)));
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(RequestEvidencePrefix);
+				return false;
+			}
+			if (!Contract::Json::TryParseObject(
+				Evidence.RightChop(FCString::Strlen(RequestEvidencePrefix)), OutPayload, OutError))
+			{
+				MarkNativeFailure(OutError);
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Binding.GetBindingId();
 				return false;
 			}
 			return true;
@@ -189,164 +329,94 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 
 		bool TryReadEvidence(
 			const TSharedPtr<FJsonObject>& Payload,
-			FString& OutTargetRef,
-			FString& OutPackageName,
-			FString& OutObjectName,
-			FString& OutObjectPath,
-			FString& OutExpectedClass)
+			FString& OutTargetRef, FString& OutPackageName, FString& OutObjectName,
+			FString& OutObjectPath, FString& OutExpectedClass, FDiagnostic& OutError)
 		{
-			OutTargetRef.Reset();
-			OutPackageName.Reset();
-			OutObjectName.Reset();
-			OutObjectPath.Reset();
-			OutExpectedClass.Reset();
-			return Payload.IsValid()
-				&& Payload->TryGetStringField(
-					TEXT("target_ref"),
-					OutTargetRef)
-				&& Payload->TryGetStringField(
-					EvidencePackageName,
-					OutPackageName)
-				&& Payload->TryGetStringField(
-					EvidenceObjectName,
-					OutObjectName)
-				&& Payload->TryGetStringField(
-					EvidenceObjectPath,
-					OutObjectPath)
-				&& Payload->TryGetStringField(
-					EvidenceExpectedClass,
-					OutExpectedClass)
-				&& !OutTargetRef.IsEmpty()
-				&& !OutPackageName.IsEmpty()
-				&& !OutObjectName.IsEmpty()
-				&& !OutObjectPath.IsEmpty()
-				&& !OutExpectedClass.IsEmpty();
+			return TryReadEvidenceStrings(Payload, {
+				{ TEXT("target_ref"), TEXT("target_ref"), &OutTargetRef },
+				{ EvidencePackageName, TEXT("package_name"), &OutPackageName },
+				{ EvidenceObjectName, TEXT("object_name"), &OutObjectName },
+				{ EvidenceObjectPath, TEXT("object_path"), &OutObjectPath },
+				{ EvidenceExpectedClass, TEXT("expected_class"), &OutExpectedClass }
+			}, TEXT("asset_data_state_evidence_invalid"), OutError);
 		}
 
 		bool TryReadCloneEvidence(
 			const TSharedPtr<FJsonObject>& Payload,
-			FString& OutSourceRef,
-			FString& OutSourceObjectPath,
-			FString& OutSourceClass,
-			FString& OutSourceRevision)
+			FString& OutSourceRef, FString& OutSourceObjectPath,
+			FString& OutSourceClass, FString& OutSourceRevision, FDiagnostic& OutError)
 		{
-			OutSourceRef.Reset();
-			OutSourceObjectPath.Reset();
-			OutSourceClass.Reset();
-			OutSourceRevision.Reset();
-			return Payload.IsValid()
-				&& Payload->TryGetStringField(
-					EvidenceSourceRef,
-					OutSourceRef)
-				&& Payload->TryGetStringField(
-					EvidenceSourceObjectPath,
-					OutSourceObjectPath)
-				&& Payload->TryGetStringField(
-					EvidenceSourceClass,
-					OutSourceClass)
-				&& Payload->TryGetStringField(
-					EvidenceSourceRevision,
-					OutSourceRevision)
-				&& !OutSourceRef.IsEmpty()
-				&& !OutSourceObjectPath.IsEmpty()
-				&& !OutSourceClass.IsEmpty()
-				&& !OutSourceRevision.IsEmpty();
+			return TryReadEvidenceStrings(Payload, {
+				{ EvidenceSourceRef, TEXT("source_ref"), &OutSourceRef },
+				{ EvidenceSourceObjectPath, TEXT("source_object_path"), &OutSourceObjectPath },
+				{ EvidenceSourceClass, TEXT("source_class"), &OutSourceClass },
+				{ EvidenceSourceRevision, TEXT("source_revision"), &OutSourceRevision, true }
+			}, TEXT("asset_data_clone_state_evidence_invalid"), OutError);
 		}
 
 		bool TryCanonicalValue(
 			const TSharedPtr<FJsonValue>& JsonValue,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FUeAgentStateSemanticError& OutError)
+			FUeAgentStateSemanticError& OutError, const FString& Path = FString())
 		{
 			OutValue.Reset();
+			const auto Result = [&](bool bSuccess)
+			{
+				if (!bSuccess)
+				{
+					MarkNativeFailure(OutError);
+					if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = Path;
+				}
+				return bSuccess;
+			};
 			if (!JsonValue.IsValid())
 			{
-				OutError.Code =
-					TEXT("asset_data_state_json_invalid");
+				OutError = ProductionFailure(TEXT("asset_data_state_json_invalid"),
+					TEXT("A generated asset state value is missing."), Path, nullptr,
+					MakeShared<FJsonValueString>(TEXT("JSON value")));
 				return false;
 			}
 			switch (JsonValue->Type)
 			{
 			case EJson::Null:
-				return FUeAgentCanonicalValue::TryNull(
-					Resources,
-					OutValue,
-					OutError);
+				return Result(FUeAgentCanonicalValue::TryNull(Resources, OutValue, OutError));
 			case EJson::Boolean:
-				return FUeAgentCanonicalValue::TryBoolean(
-					JsonValue->AsBool(),
-					Resources,
-					OutValue,
-					OutError);
+				return Result(FUeAgentCanonicalValue::TryBoolean(JsonValue->AsBool(), Resources, OutValue, OutError));
 			case EJson::String:
-				return FUeAgentCanonicalValue::TryString(
-					JsonValue->AsString(),
-					Resources,
-					OutValue,
-					OutError);
+				return Result(FUeAgentCanonicalValue::TryString(JsonValue->AsString(), Resources, OutValue, OutError));
 			case EJson::Number:
-				return FUeAgentCanonicalValue::TryDecimal(
-					FString::SanitizeFloat(
-						JsonValue->AsNumber()),
-					Resources,
-					OutValue,
-					OutError);
+				return Result(FUeAgentCanonicalValue::TryDecimal(FString::SanitizeFloat(JsonValue->AsNumber()), Resources, OutValue, OutError));
 			case EJson::Array:
 				{
 					TArray<FUeAgentCanonicalValueRef> Items;
-					for (const TSharedPtr<FJsonValue>& Item
-						: JsonValue->AsArray())
+					for (int32 Index = 0; Index < JsonValue->AsArray().Num(); ++Index)
 					{
-						FUeAgentCanonicalValuePtr CanonicalItem;
-						if (!TryCanonicalValue(
-								Item,
-								Resources,
-								CanonicalItem,
-								OutError))
-						{
+						FUeAgentCanonicalValuePtr Item;
+						if (!TryCanonicalValue(JsonValue->AsArray()[Index], Resources, Item, OutError, Path + TEXT("/") + ::LexToString(Index)))
 							return false;
-						}
-						Items.Add(CanonicalItem.ToSharedRef());
+						Items.Add(Item.ToSharedRef());
 					}
-					return FUeAgentCanonicalValue::TryArray(
-						Items,
-						Resources,
-						OutValue,
-						OutError);
+					return Result(FUeAgentCanonicalValue::TryArray(Items, Resources, OutValue, OutError));
 				}
 			case EJson::Object:
 				{
-					TArray<TPair<
-						FString,
-						FUeAgentCanonicalValueRef>> Items;
-					for (const TPair<
-						FString,
-						TSharedPtr<FJsonValue>>& Pair
-						: JsonValue->AsObject()->Values)
+					TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
+					for (const auto& Pair : JsonValue->AsObject()->Values)
 					{
-						FUeAgentCanonicalValuePtr CanonicalItem;
-						if (!TryCanonicalValue(
-								Pair.Value,
-								Resources,
-								CanonicalItem,
-								OutError))
-						{
+						FUeAgentCanonicalValuePtr Item;
+						const FString Token = Pair.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+						if (!TryCanonicalValue(Pair.Value, Resources, Item, OutError, Path + TEXT("/") + Token))
 							return false;
-						}
-						Items.Emplace(
-							Pair.Key,
-							CanonicalItem.ToSharedRef());
+						Items.Emplace(Pair.Key, Item.ToSharedRef());
 					}
-					return FUeAgentCanonicalValue::TryObject(
-						Items,
-						Resources,
-						OutValue,
-						OutError);
+					return Result(FUeAgentCanonicalValue::TryObject(Items, Resources, OutValue, OutError));
 				}
 			default:
-				OutError.Code =
-					TEXT("asset_data_state_json_kind_invalid");
+				OutError = ProductionFailure(TEXT("asset_data_state_json_kind_invalid"),
+					TEXT("The generated asset state contains an unsupported JSON kind."), Path,
+					MakeShared<FJsonValueNumber>(static_cast<int32>(JsonValue->Type)),
+					MakeShared<FJsonValueString>(TEXT("null, boolean, string, number, array or object")));
 				return false;
 			}
 		}
@@ -388,41 +458,71 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 		bool TryReadSelectedFieldIds(
 			const TSharedPtr<FJsonObject>& Payload,
 			const FAssetDataProfile& Profile,
-			TArray<FString>& OutFieldIds)
+			TArray<FString>& OutFieldIds, FDiagnostic& OutError)
 		{
 			OutFieldIds.Reset();
-			const TArray<TSharedPtr<FJsonValue>>* Changes =
-				nullptr;
-			if (!Payload.IsValid()
-				|| !Payload->TryGetArrayField(
-					TEXT("changes"),
-					Changes)
-				|| !Changes)
+			const TArray<TSharedPtr<FJsonValue>>* Changes = nullptr;
+			if (!Payload.IsValid() || !Payload->TryGetArrayField(TEXT("changes"), Changes) || !Changes)
 			{
+				const auto* Value = Payload.IsValid() ? Payload->Values.Find(TEXT("changes")) : nullptr;
+				OutError = ProductionFailure(TEXT("asset_data_selected_fields_invalid"),
+					TEXT("Asset changes must be an array."), TEXT("/changes"),
+					Value ? *Value : nullptr, MakeShared<FJsonValueString>(TEXT("non-empty array")), TEXT("command_input"));
 				return false;
 			}
-			TSet<FString> Seen;
-			for (const TSharedPtr<FJsonValue>& Value : *Changes)
+			TMap<FString, int32> Seen;
+			for (int32 Index = 0; Index < Changes->Num(); ++Index)
 			{
+				const auto& Value = (*Changes)[Index];
+				const FString Path = TEXT("/changes/") + ::LexToString(Index);
 				const TSharedPtr<FJsonObject> Change =
-					Value.IsValid()
-						? Value->AsObject()
-						: nullptr;
+					Value.IsValid() && Value->Type == EJson::Object ? Value->AsObject() : nullptr;
 				FString FieldId;
-				if (!Change.IsValid()
-					|| !Change->TryGetStringField(
-						TEXT("field_id"),
-						FieldId)
-					|| !Profile.FieldIds.Contains(FieldId)
-					|| Seen.Contains(FieldId))
+				if (!Change.IsValid())
 				{
-					OutFieldIds.Reset();
-					return false;
+					OutError = ProductionFailure(TEXT("asset_data_selected_fields_invalid"),
+						TEXT("Each asset change must be an object."), Path, Value,
+						MakeShared<FJsonValueString>(TEXT("object")), TEXT("command_input"));
 				}
-				Seen.Add(FieldId);
-				OutFieldIds.Add(MoveTemp(FieldId));
+				else if (!Change->TryGetStringField(TEXT("field_id"), FieldId))
+				{
+					const auto* Field = Change->Values.Find(TEXT("field_id"));
+					OutError = ProductionFailure(TEXT("asset_data_selected_fields_invalid"),
+						TEXT("Each asset change requires a string field_id."), Path + TEXT("/field_id"),
+						Field ? *Field : nullptr, MakeShared<FJsonValueString>(TEXT("string")), TEXT("command_input"));
+				}
+				else if (!Profile.FieldIds.Contains(FieldId))
+				{
+					TArray<TSharedPtr<FJsonValue>> Allowed;
+					for (const auto& Id : Profile.FieldIds) Allowed.Add(MakeShared<FJsonValueString>(Id));
+					OutError = ProductionFailure(TEXT("asset_data_selected_fields_invalid"),
+						TEXT("The field_id is not supported by this asset profile."), Path + TEXT("/field_id"),
+						MakeShared<FJsonValueString>(FieldId), MakeShared<FJsonValueArray>(Allowed), TEXT("command_input"));
+				}
+				else if (const int32* FirstIndex = Seen.Find(FieldId))
+				{
+					OutError = ProductionFailure(TEXT("asset_data_selected_fields_invalid"),
+						FString::Printf(TEXT("The field_id repeats the change at index %d."), *FirstIndex),
+						Path + TEXT("/field_id"), MakeShared<FJsonValueString>(FieldId),
+						MakeShared<FJsonValueString>(TEXT("unique field_id")), TEXT("command_input"));
+				}
+				else
+				{
+					Seen.Add(FieldId, Index);
+					OutFieldIds.Add(MoveTemp(FieldId));
+					continue;
+				}
+				OutFieldIds.Reset();
+				return false;
 			}
-			return !OutFieldIds.IsEmpty();
+			if (OutFieldIds.IsEmpty())
+			{
+				OutError = ProductionFailure(TEXT("asset_data_selected_fields_invalid"),
+					TEXT("At least one asset field change is required."), TEXT("/changes"),
+					MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one change")), TEXT("command_input"));
+				return false;
+			}
+			return true;
 		}
 
 		void CollectRequestedAssetRefs(
@@ -579,7 +679,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 			const FString& TargetRef,
 			const FString& ObjectPath,
 			const FString& ClassPath,
-			const FAssetDataProfile& Profile)
+			const FAssetDataProfile& Profile,
+			const UObject* Object = nullptr,
+			const bool bExpectedState = false)
 		{
 			const TSharedPtr<FJsonObject> State =
 				MakeShared<FJsonObject>();
@@ -593,6 +695,25 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 			State->SetStringField(
 				TEXT("asset_class"),
 				ClassPath);
+			if (IsGenericFactoryProfile(Profile))
+			{
+				UClass* AssetClass = FindObject<UClass>(nullptr, *ClassPath);
+				if (!AssetClass)
+				{
+					AssetClass = LoadObject<UClass>(nullptr, *ClassPath);
+				}
+				const bool bWorld = AssetClass
+					&& AssetClass->IsChildOf(UWorld::StaticClass());
+				State->SetBoolField(TEXT("is_world"), bWorld);
+				if (bWorld)
+				{
+					const UWorld* World = Cast<UWorld>(Object);
+					State->SetBoolField(
+						TEXT("has_persistent_level"),
+						bExpectedState
+							|| (World && World->PersistentLevel));
+				}
+			}
 			return State;
 		}
 
@@ -682,32 +803,26 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						CanonicalRequest.GetDescriptorIdentity());
 				TSharedPtr<FJsonObject> Payload;
 				FString TargetRef;
-				if (!Profile
-					|| !IsSupportedProductionProfile(*Profile)
-					|| !TryParseJson(
-						CanonicalRequest.GetPayload()
-							.GetJsonValue(),
-						Payload)
-					|| !Payload->TryGetStringField(
-						TEXT("target_ref"),
-						TargetRef)
-					|| TargetRef.IsEmpty())
+				if (!Profile || !IsSupportedProductionProfile(*Profile))
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"asset_data_production_profile_missing"),
-						CanonicalRequest.GetDescriptorIdentity()
-							.GetDescriptorId());
+					SetProductionError(OutError, ProductionFailure(TEXT("asset_data_production_profile_missing"), TEXT("No supported asset production profile is registered for this operation."), TEXT("profile_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), CanonicalRequest.GetDescriptorIdentity().GetDescriptorId());
 					return false;
 				}
-				if (!Deadline.CanContinue()
-					|| Cancellation.IsCancelled())
+				if (!Contract::Json::TryParseObject(CanonicalRequest.GetPayload().GetJsonValue(), Payload, OutError))
 				{
-					SetProductionError(
-						OutError,
-						TEXT("asset_data_target_resolution_cancelled"),
-						TargetRef);
+					OutError.SourceKind = TEXT("command_input");
+					return false;
+				}
+				if (!Payload->TryGetStringField(TEXT("target_ref"), TargetRef) || TargetRef.IsEmpty())
+				{
+					const auto* Value = Payload->Values.Find(TEXT("target_ref"));
+					OutError = ProductionFailure(TEXT("asset_data_production_profile_missing"), TEXT("The asset operation requires a non-empty target_ref."), TEXT("/target_ref"), Value ? *Value : nullptr, MakeShared<FJsonValueString>(TEXT("non-empty string")), TEXT("command_input"));
+					return false;
+				}
+				if (Cancellation.IsCancelled())
+				{
+					SetProductionError(OutError, ProductionFailure(TEXT("asset_data_target_resolution_cancelled"), TEXT("Asset target resolution was cancelled."), TEXT("cancelled"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false)), TargetRef);
+					OutError.TargetPath = TargetRef;
 					return false;
 				}
 				UPackage* Package = nullptr;
@@ -716,37 +831,27 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 				FExecutionMutationError ResolveError;
 				if (IsMutableProductionProfile(*Profile))
 				{
-					FString ExpectedRevision;
-					if (!Payload->TryGetStringField(
-							TEXT("expected_revision"),
-							ExpectedRevision)
-						|| ExpectedRevision.IsEmpty()
-						|| !Resolver->TryResolveExisting(
+					if (!Resolver->TryResolveExisting(
 							TargetRef,
 							ExistingTarget,
 							ResolveError)
 						|| !IsValid(ExistingTarget))
 					{
-						SetProductionError(
-							OutError,
-							ResolveError.GetCode().IsEmpty()
-								? TEXT(
-									"asset_data_existing_target_unresolved")
-								: ResolveError.GetCode(),
-							TargetRef,
-							ResolveError.GetDetail());
+						SetProductionError(OutError, ResolveError.Code.IsEmpty()
+								? ProductionFailure(TEXT("asset_data_existing_target_unresolved"), TEXT("The asset resolver did not return a valid target object."), TEXT("target_ref"), MakeShared<FJsonValueString>(TargetRef), MakeShared<FJsonValueString>(TEXT("resolvable existing asset")))
+								: ResolveError, TargetRef);
 						return false;
 					}
-					if (ReadStableAssetRevision(ExistingTarget)
-						!= ExpectedRevision)
+					FString TargetRevision;
+					Contract::FDiagnostic RevisionError;
+					if (!TryReadStableAssetRevision(ExistingTarget, TargetRevision, RevisionError))
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"asset_data_target_revision_mismatch"),
-							TargetRef);
+						SetProductionError(OutError, MoveTemp(RevisionError), TargetRef);
 						return false;
 					}
+					Payload->SetStringField(
+						EvidenceTargetRevision,
+						TargetRevision);
 					Package =
 						ExistingTarget->GetOutermost();
 					ObjectName =
@@ -760,14 +865,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						|| !Package
 						|| ObjectName.IsNone())
 				{
-					SetProductionError(
-						OutError,
-						ResolveError.GetCode().IsEmpty()
-							? TEXT(
-								"asset_data_creation_target_unresolved")
-							: ResolveError.GetCode(),
-						TargetRef,
-						ResolveError.GetDetail());
+					SetProductionError(OutError, ResolveError.Code.IsEmpty()
+							? ProductionFailure(TEXT("asset_data_creation_target_unresolved"), TEXT("The creation target did not resolve to a package and object name."), TEXT("target_ref"), MakeShared<FJsonValueString>(TargetRef), MakeShared<FJsonValueString>(TEXT("valid package and object name")))
+							: ResolveError, TargetRef);
 					return false;
 				}
 				if (!IsMutableProductionProfile(*Profile)
@@ -776,10 +876,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						Package,
 						ObjectName))
 				{
-					SetProductionError(
-						OutError,
-						TEXT("asset_data_target_already_exists"),
-						TargetRef);
+					SetProductionError(OutError, ProductionFailure(TEXT("asset_data_target_already_exists"), TEXT("An object already exists at the requested creation target."), TEXT("target_exists"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false)), TargetRef);
 					return false;
 				}
 				UObject* Source = nullptr;
@@ -787,51 +884,35 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 				FString SourceRevision;
 				if (Profile->IsClone())
 				{
-					FString ExpectedSourceRevision;
 					if (!Payload->TryGetStringField(
 							TEXT("source_ref"),
 							SourceRef)
-						|| SourceRef.IsEmpty()
-						|| !Payload->TryGetStringField(
-							TEXT(
-								"expected_source_revision"),
-							ExpectedSourceRevision)
-						|| ExpectedSourceRevision.IsEmpty())
+						|| SourceRef.IsEmpty())
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"asset_data_clone_source_missing"),
-							TargetRef);
+						const auto* Value = Payload->Values.Find(TEXT("source_ref"));
+						SetProductionError(OutError, ProductionFailure(TEXT("asset_data_clone_source_missing"), TEXT("Cloning requires a non-empty source_ref."), TEXT("/source_ref"), Value ? *Value : nullptr, MakeShared<FJsonValueString>(TEXT("non-empty string")), TEXT("command_input")), TargetRef);
 						return false;
 					}
 					if (!TryResolveCloneSource(
 							Resolver, SourceRef, Source, ResolveError)
 						|| !IsValid(Source))
 					{
-						SetProductionError(
-							OutError,
-							ResolveError.GetCode().IsEmpty()
-								? TEXT(
-									"asset_data_clone_source_unresolved")
-								: ResolveError.GetCode(),
-							SourceRef,
-							ResolveError.GetDetail());
+						SetProductionError(OutError, ResolveError.Code.IsEmpty()
+								? ProductionFailure(TEXT("asset_data_clone_source_unresolved"), TEXT("The clone source did not resolve to a valid asset."), TEXT("source_ref"), MakeShared<FJsonValueString>(SourceRef), MakeShared<FJsonValueString>(TEXT("resolvable existing asset")))
+								: ResolveError, SourceRef);
 						return false;
 					}
-					SourceRevision =
-						ReadStableAssetRevision(Source);
-					if (SourceRevision.IsEmpty()
-						|| SourceRevision
-							!= ExpectedSourceRevision)
+					SourceRef = Source->GetPathName();
+					Payload->SetStringField(TEXT("source_ref"), SourceRef);
+					Contract::FDiagnostic RevisionError;
+					if (!TryReadStableAssetRevision(Source, SourceRevision, RevisionError))
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"asset_data_source_revision_mismatch"),
-							SourceRef);
+						SetProductionError(OutError, MoveTemp(RevisionError), SourceRef);
 						return false;
 					}
+					Payload->SetStringField(
+						EvidenceSourceRevision,
+						SourceRevision);
 				}
 				UClass* ExpectedClass = nullptr;
 				if (Profile->UsesStaticCreateClass())
@@ -843,82 +924,41 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 				}
 				else if (Profile->UsesFactoryCandidate())
 				{
-					const TSharedPtr<FJsonObject>*
-						FactoryRefObject = nullptr;
-					const TSharedPtr<FJsonObject>*
-						RevisionObject = nullptr;
-					FString FactoryRef;
-					FString SourceId;
-					FString Generation;
-					double Sequence = -1.0;
-					if (!Payload->TryGetObjectField(
-							TEXT("factory_ref"),
-							FactoryRefObject)
-						|| !FactoryRefObject
-						|| !FactoryRefObject->IsValid()
-						|| !(*FactoryRefObject)
-							->TryGetStringField(
-								TEXT("candidate_ref"),
-								FactoryRef)
-						|| !(*FactoryRefObject)
-							->TryGetObjectField(
-								TEXT("catalog_revision"),
-								RevisionObject)
-						|| !RevisionObject
-						|| !RevisionObject->IsValid()
-						|| !(*RevisionObject)
-							->TryGetStringField(
-								TEXT("source_id"),
-								SourceId)
-						|| !(*RevisionObject)
-							->TryGetStringField(
-								TEXT("generation"),
-								Generation)
-						|| !(*RevisionObject)
-							->TryGetNumberField(
-								TEXT("sequence"),
-								Sequence)
-						|| Sequence < 0.0
-						|| !FMath::IsNearlyEqual(
-							Sequence,
-							FMath::FloorToDouble(Sequence)))
+					FString FactoryName;
+					TMap<FString, FString> FactorySelect;
+					UE::UAI::Contract::FDiagnostic SelectorError;
+					if (!TryParseAssetDataSimpleEffectFactorySelector(
+							*Payload,
+							IsGenericFactoryProfile(*Profile),
+							FactoryName,
+							FactorySelect,
+							SelectorError))
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"asset_data_factory_ref_invalid"),
-							Profile->ProfileId);
+						SetProductionError(OutError, SelectorError, Profile->ProfileId);
 						return false;
 					}
-					const FUeAgentCatalogRevision Revision(
-						SourceId,
-						Generation,
-						static_cast<int64>(Sequence));
 					FUeAgentAssetDataSimpleEffectFactoryBinding
 						FactoryBinding;
-					if (!Revision.IsValid()
-						|| !FactoryResolver
+					if (!FactoryResolver
 							->TryResolveForPlanning(
-								FactoryRef,
-								Revision,
+								FactoryName,
+								FactorySelect,
 								Profile->ProfileId,
 								FactoryBinding,
 								ResolveError))
 					{
-						SetProductionError(
-							OutError,
-							ResolveError.GetCode().IsEmpty()
-								? TEXT(
-									"asset_data_factory_candidate_unresolved")
-								: ResolveError.GetCode(),
-							Profile->ProfileId,
-							ResolveError.GetDetail());
+						SetProductionError(OutError, ResolveError.Code.IsEmpty()
+								? ProductionFailure(TEXT("asset_data_factory_candidate_unresolved"), TEXT("No factory candidate resolved for the requested selector."), TEXT("factory_name"), MakeShared<FJsonValueString>(FactoryName), MakeShared<FJsonValueString>(TEXT("matching factory candidate")))
+								: ResolveError, Profile->ProfileId);
 						return false;
 					}
-					FString FactoryError;
+					UE::UAI::Contract::FDiagnostic FactoryError;
 					const FUeAgentCandidateBinding*
 						Candidate =
-							FactoryBinding.GetCandidateBinding();
+						FactoryBinding.GetCandidateBinding();
+					const FUeAgentCatalogRevision Revision = Candidate
+						? Candidate->GetCatalogRevision()
+						: FUeAgentCatalogRevision(TEXT("invalid"), TEXT("invalid"), -1);
 					if (!Candidate
 						|| !TryValidateAssetDataSimpleEffectFactoryBinding(
 							Profile->NativeBindingId,
@@ -927,13 +967,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 							FactoryBinding,
 							FactoryError))
 					{
-						SetProductionError(
-							OutError,
-							FactoryError.IsEmpty()
-								? TEXT(
-									"asset_data_factory_binding_invalid")
-								: FactoryError,
-							Profile->ProfileId);
+						SetProductionError(OutError, FactoryError.IsEmpty() ? ProductionFailure(TEXT("asset_data_factory_binding_invalid"), TEXT("The resolved factory does not provide its candidate binding."), TEXT("factory_binding_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)) : FactoryError, Profile->ProfileId);
 						return false;
 					}
 					ExpectedClass =
@@ -951,11 +985,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 					|| ExpectedClass->HasAnyClassFlags(
 						CLASS_Abstract))
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"asset_data_target_class_invalid"),
-						Profile->ProfileId);
+					SetProductionError(OutError, ProductionFailure(TEXT("asset_data_target_class_invalid"), ExpectedClass ? TEXT("The resolved target class is abstract.") : TEXT("The target class could not be resolved."), TEXT("target_class"), MakeShared<FJsonValueString>(ExpectedClass ? ExpectedClass->GetPathName() : Profile->StaticCreateClassPath), MakeShared<FJsonValueString>(TEXT("available concrete class"))), Profile->ProfileId);
 					return false;
 				}
 				const FString PackageName = Package->GetName();
@@ -965,6 +995,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						: PackageName
 							+ TEXT(".")
 							+ ObjectName.ToString();
+				TargetRef = ObjectPath;
+				Payload->SetStringField(TEXT("target_ref"), TargetRef);
 				Payload->SetStringField(
 					EvidencePackageName,
 					PackageName);
@@ -993,13 +1025,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						SourceRevision);
 				}
 				FString EvidenceJson;
-				if (!TrySerializeJson(Payload, EvidenceJson))
+				if (!TrySerializeJson(Payload, EvidenceJson, OutError))
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"asset_data_request_evidence_invalid"),
-						TargetRef);
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 					return false;
 				}
 				const FUeAgentCanonicalIdentity Identity(
@@ -1040,11 +1068,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						+ EvidenceJson);
 				if (!OutTarget->IsValid())
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"asset_data_target_binding_invalid"),
-						TargetRef);
+					SetProductionError(OutError, *OutTarget->GetValidationDiagnostic(), TargetRef);
+					MarkNativeFailure(OutError);
 					OutTarget.Reset();
 					return false;
 				}
@@ -1103,15 +1128,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 					|| !IsSupportedProductionProfile(*Profile)
 					|| Request.GetStatePlane() != RequiredPlane)
 				{
-					OutError.Code =
-						TEXT("asset_data_state_request_invalid");
+					if (!Request.IsValid()) OutError = *Request.GetBinding().GetValidationDiagnostic();
+					else if (!Profile || !IsSupportedProductionProfile(*Profile))
+						OutError = ProductionFailure(TEXT("asset_data_state_request_invalid"), TEXT("No supported asset profile is registered for the state request."), TEXT("profile_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					else
+						OutError = ProductionFailure(TEXT("asset_data_state_request_invalid"), TEXT("The requested state plane does not match this read port."), TEXT("state_plane"), MakeShared<FJsonValueString>(Contract::LexToString(Request.GetStatePlane())), MakeShared<FJsonValueString>(Contract::LexToString(RequiredPlane)));
+					MarkNativeFailure(OutError);
 					return false;
 				}
-				if (!Deadline.CanContinue()
-					|| Cancellation.IsCancelled())
+				if (Cancellation.IsCancelled())
 				{
-					OutError.Code =
-						TEXT("asset_data_state_request_cancelled");
+					OutError = ProductionFailure(TEXT("asset_data_state_request_cancelled"), TEXT("The asset state read was cancelled."), TEXT("cancelled"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 					return false;
 				}
 
@@ -1138,29 +1165,18 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						PackageName,
 						ObjectNameString,
 						ExpectedObjectPath,
-						ExpectedClass))
+						ExpectedClass, OutError))
 				{
-					if (OutError.Code.IsEmpty())
-					{
-						OutError.Code =
-							TEXT(
-								"asset_data_state_evidence_invalid");
-						OutError.SubjectId =
-							Binding.GetBindingId();
-					}
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Binding.GetBindingId();
 					return false;
 				}
 				if (IsMutableProductionProfile(*Profile)
 					&& !TryReadSelectedFieldIds(
 						Payload,
 						*Profile,
-						SelectedFieldIds))
+						SelectedFieldIds, OutError))
 				{
-					OutError.Code =
-						TEXT(
-							"asset_data_selected_fields_invalid");
-					OutError.SubjectId =
-						Binding.GetBindingId();
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Binding.GetBindingId();
 					return false;
 				}
 				if (Profile->IsClone()
@@ -1169,23 +1185,19 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						SourceRef,
 						ExpectedSourceObjectPath,
 						ExpectedSourceClass,
-						ExpectedSourceRevision))
+						ExpectedSourceRevision, OutError))
 				{
-					OutError.Code =
-						TEXT(
-							"asset_data_clone_state_evidence_invalid");
-					OutError.SubjectId =
-						Binding.GetBindingId();
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Binding.GetBindingId();
 					return false;
 				}
 				if (Profile->IsClone()
 					&& (ExpectedClass != ExpectedSourceClass
 						|| ExpectedSourceObjectPath.IsEmpty()))
 				{
-					OutError.Code =
-						TEXT(
-							"asset_data_clone_expected_class_mismatch");
-					OutError.SubjectId = SourceRef;
+					OutError = ExpectedClass != ExpectedSourceClass
+						? ProductionFailure(TEXT("asset_data_clone_expected_class_mismatch"), TEXT("The clone source class differs from the expected target class."), TEXT("source_class"), MakeShared<FJsonValueString>(ExpectedSourceClass), MakeShared<FJsonValueString>(ExpectedClass))
+						: ProductionFailure(TEXT("asset_data_clone_expected_class_mismatch"), TEXT("The captured clone source path is empty."), TEXT("source_object_path"), MakeShared<FJsonValueString>(ExpectedSourceObjectPath), MakeShared<FJsonValueString>(TEXT("non-empty asset path")));
+					OutError.TargetPath = SourceRef;
 					return false;
 				}
 
@@ -1211,14 +1223,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						|| Object->GetName()
 							!= ObjectNameString)
 					{
-						OutError.Code =
-							ResolveError.GetCode().IsEmpty()
-								? TEXT(
-									"asset_data_existing_target_mismatch")
-								: ResolveError.GetCode();
-						OutError.SubjectId = TargetRef;
-						OutError.Detail =
-							ResolveError.GetDetail();
+						OutError = ResolveError.IsEmpty()
+							? ObjectEvidenceMismatch(TEXT("asset_data_existing_target_mismatch"), Object,
+								ExpectedObjectPath, ExpectedClass, PackageName, ObjectNameString)
+							: ResolveError;
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 						return false;
 					}
 					if (RequiredPlane
@@ -1226,15 +1235,20 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 					{
 						FString ExpectedRevision;
 						if (!Payload->TryGetStringField(
-								TEXT("expected_revision"),
-								ExpectedRevision)
-							|| ReadStableAssetRevision(Object)
-								!= ExpectedRevision)
+								EvidenceTargetRevision,
+								ExpectedRevision))
 						{
-							OutError.Code =
-								TEXT(
-									"asset_data_target_revision_mismatch");
-							OutError.SubjectId = TargetRef;
+							OutError = RevisionMismatch(TEXT("asset_data_target_revision_mismatch"),
+								TEXT("The captured target state does not provide its expected revision."), TargetRef, FString(), FString());
+							OutError.PropertyPath = TEXT("expected_revision_available");
+							return false;
+						}
+						FString ActualRevision;
+						if (!TryReadStableAssetRevision(Object, ActualRevision, OutError)) return false;
+						if (ActualRevision != ExpectedRevision)
+						{
+							OutError = RevisionMismatch(TEXT("asset_data_target_revision_mismatch"),
+								TEXT("The target asset revision changed after its state was captured."), TargetRef, ActualRevision, ExpectedRevision);
 							return false;
 						}
 					}
@@ -1252,14 +1266,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						|| ObjectName.ToString()
 							!= ObjectNameString)
 					{
-						OutError.Code =
-							ResolveError.GetCode().IsEmpty()
-								? TEXT(
-									"asset_data_prestate_target_unresolved")
-								: ResolveError.GetCode();
-						OutError.SubjectId = TargetRef;
-						OutError.Detail =
-							ResolveError.GetDetail();
+						OutError = ResolveError;
+						if (OutError.IsEmpty())
+						{
+							if (!Package || Package->GetName() != PackageName)
+								OutError = ProductionFailure(TEXT("asset_data_prestate_target_unresolved"), TEXT("The resolved creation package differs from the captured target."), TEXT("package_name"), Package ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Package->GetName())) : nullptr, MakeShared<FJsonValueString>(PackageName));
+							else if (ObjectName.ToString() != ObjectNameString)
+								OutError = ProductionFailure(TEXT("asset_data_prestate_target_unresolved"), TEXT("The resolved creation object name differs from the captured target."), TEXT("object_name"), MakeShared<FJsonValueString>(ObjectName.ToString()), MakeShared<FJsonValueString>(ObjectNameString));
+							else
+								OutError = ProductionFailure(TEXT("asset_data_prestate_target_unresolved"), TEXT("The creation target resolver reported failure without a diagnostic."), TEXT("resolution_succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						}
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 						return false;
 					}
 					Object = StaticFindObjectFast(
@@ -1268,10 +1285,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						ObjectName);
 					if (Object)
 					{
-						OutError.Code =
-							TEXT(
-								"asset_data_target_already_exists");
-						OutError.SubjectId = TargetRef;
+						OutError = ProductionFailure(TEXT("asset_data_target_already_exists"), TEXT("An object already exists at the creation target."), TEXT("target_exists"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+						OutError.TargetPath = TargetRef;
 						return false;
 					}
 				}
@@ -1281,13 +1296,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						ResolveError)
 					|| !IsValid(Object))
 				{
-					OutError.Code =
-						ResolveError.GetCode().IsEmpty()
-							? TEXT(
-								"asset_data_created_target_missing")
-							: ResolveError.GetCode();
-					OutError.SubjectId = TargetRef;
-					OutError.Detail = ResolveError.GetDetail();
+					OutError = ResolveError.IsEmpty()
+						? ProductionFailure(TEXT("asset_data_created_target_missing"), TEXT("The created asset could not be resolved."), TEXT("target_ref"), MakeShared<FJsonValueString>(TargetRef), MakeShared<FJsonValueString>(TEXT("resolvable existing asset"))) : ResolveError;
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 					return false;
 				}
 				if (Profile->IsClone())
@@ -1296,29 +1307,25 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 							Resolver, SourceRef, SourceObject, ResolveError)
 						|| !IsValid(SourceObject))
 					{
-						OutError.Code =
-							ResolveError.GetCode().IsEmpty()
-								? TEXT(
-									"asset_data_clone_source_unresolved")
-								: ResolveError.GetCode();
-						OutError.SubjectId = SourceRef;
-						OutError.Detail =
-							ResolveError.GetDetail();
+						OutError = ResolveError.IsEmpty()
+							? ProductionFailure(TEXT("asset_data_clone_source_unresolved"), TEXT("The clone source could not be resolved."), TEXT("source_ref"), MakeShared<FJsonValueString>(SourceRef), MakeShared<FJsonValueString>(TEXT("resolvable existing asset"))) : ResolveError;
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = SourceRef;
 						return false;
 					}
-					CurrentSourceRevision =
-						ReadStableAssetRevision(SourceObject);
+					if (!TryReadStableAssetRevision(SourceObject, CurrentSourceRevision, OutError)) return false;
 					if (SourceObject->GetPathName()
 							!= ExpectedSourceObjectPath
 						|| SourceObject->GetClass()
 								->GetPathName()
-							!= ExpectedSourceClass
-						|| CurrentSourceRevision.IsEmpty())
+								!= ExpectedSourceClass)
 					{
-						OutError.Code =
-							TEXT(
-								"asset_data_clone_source_mismatch");
-						OutError.SubjectId = SourceRef;
+						const bool bPathMismatch = SourceObject->GetPathName() != ExpectedSourceObjectPath;
+						OutError = ProductionFailure(TEXT("asset_data_clone_source_mismatch"),
+							bPathMismatch ? TEXT("The clone source path differs from its captured evidence.") : TEXT("The clone source class differs from its captured evidence."),
+							bPathMismatch ? TEXT("source_object_path") : TEXT("source_class"),
+							MakeShared<FJsonValueString>(bPathMismatch ? SourceObject->GetPathName() : SourceObject->GetClass()->GetPathName()),
+							MakeShared<FJsonValueString>(bPathMismatch ? ExpectedSourceObjectPath : ExpectedSourceClass));
+						OutError.TargetPath = SourceRef;
 						return false;
 					}
 					if (RequiredPlane
@@ -1326,10 +1333,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						&& CurrentSourceRevision
 							!= ExpectedSourceRevision)
 					{
-						OutError.Code =
-							TEXT(
-								"asset_data_source_revision_mismatch");
-						OutError.SubjectId = SourceRef;
+						OutError = RevisionMismatch(TEXT("asset_data_source_revision_mismatch"),
+							TEXT("The clone source revision changed after its state was captured."), SourceRef, CurrentSourceRevision, ExpectedSourceRevision);
 						return false;
 					}
 				}
@@ -1358,9 +1363,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 							DefaultValue,
 							StateError))
 					{
-						OutError.Code = StateError.Code;
+						OutError = StateError;
 						OutError.SubjectId = SourceRef;
-						OutError.Detail = StateError.Detail;
 						return false;
 					}
 					Sequence = SourceObject->GetUniqueID();
@@ -1403,10 +1407,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						|| Object->GetName()
 							!= ObjectNameString)
 					{
-						OutError.Code =
-							TEXT(
-								"asset_data_created_target_mismatch");
-						OutError.SubjectId = TargetRef;
+						OutError = ObjectEvidenceMismatch(TEXT("asset_data_created_target_mismatch"), Object,
+							ExpectedObjectPath, ExpectedClass, PackageName, ObjectNameString);
+						OutError.TargetPath = TargetRef;
 						return false;
 					}
 					FUeAgentCanonicalValuePtr Value;
@@ -1419,51 +1422,32 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 							ProjectionContext;
 						FExecutionMutationError ProjectionError;
 						if (!TryProjectAssetDataSimpleEffectCurrentFieldState(
-								*Resolver,
-								Profile->NativeMechanicId,
-								Object,
-								SelectedFieldIds,
-								Resources,
-								CurrentFields,
-								DefaultFields,
-								ProjectionContext,
-								ProjectionError)
-							|| !TryBuildMutableAssetState(
-								TargetRef,
-								ActualObjectPath,
-								ActualClass,
-								*Profile,
-								CurrentFields.ToSharedRef(),
-								RequiredPlane
-										== EUeAgentStatePlane::
-											AuthoringMemory
-									? ReadStableAssetRevision(Object)
-									: FString(),
-								RequiredPlane
-										== EUeAgentStatePlane::
-											AuthoringMemory
-									? DefaultFields
-									: FUeAgentCanonicalValuePtr(),
-								RequiredPlane
-										== EUeAgentStatePlane::
-											AuthoringMemory
-									? ProjectionContext
-									: FUeAgentCanonicalValuePtr(),
-								Resources,
-								Value,
-								StateError))
+								*Resolver, Profile->NativeMechanicId, Object, SelectedFieldIds,
+								Resources, CurrentFields, DefaultFields, ProjectionContext, ProjectionError))
 						{
-							OutError.Code =
-								!ProjectionError.GetCode()
-										.IsEmpty()
-									? ProjectionError.GetCode()
-									: StateError.Code;
-							OutError.SubjectId = TargetRef;
-							OutError.Detail =
-								!ProjectionError.GetDetail()
-										.IsEmpty()
-									? ProjectionError.GetDetail()
-									: StateError.Detail;
+							OutError = MoveTemp(ProjectionError);
+							if (OutError.IsEmpty())
+							{
+								OutError = Contract::FDiagnostic::Failure(TEXT("asset_data_field_projection_failed"),
+									TEXT("The current asset fields could not be projected and no diagnostic was provided."), TEXT("state_capture"));
+								OutError.SourceKind = TEXT("native_result");
+							}
+							if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+							return false;
+						}
+						FString StateRevision;
+						if (RequiredPlane == EUeAgentStatePlane::AuthoringMemory
+							&& !TryReadStableAssetRevision(Object, StateRevision, OutError)) return false;
+						if (!TryBuildMutableAssetState(
+								TargetRef, ActualObjectPath, ActualClass, *Profile, CurrentFields.ToSharedRef(),
+								StateRevision,
+								RequiredPlane == EUeAgentStatePlane::AuthoringMemory ? DefaultFields : FUeAgentCanonicalValuePtr(),
+								RequiredPlane == EUeAgentStatePlane::AuthoringMemory ? ProjectionContext : FUeAgentCanonicalValuePtr(),
+								Resources, Value, StateError))
+						{
+							OutError = MoveTemp(StateError);
+							if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TargetRef;
+							if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 							return false;
 						}
 					}
@@ -1494,7 +1478,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 								TargetRef,
 								ActualObjectPath,
 								ActualClass,
-								*Profile);
+								*Profile,
+								Object);
 						}
 						if (!TryCanonicalObject(
 								StateObject,
@@ -1502,10 +1487,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 								Value,
 								StateError))
 						{
-							OutError.Code = StateError.Code;
+						OutError = StateError;
 							OutError.SubjectId = TargetRef;
-							OutError.Detail =
-								StateError.Detail;
 							return false;
 						}
 					}
@@ -1516,9 +1499,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 							DefaultValue,
 							StateError))
 					{
-						OutError.Code = StateError.Code;
+						OutError = StateError;
 						OutError.SubjectId = TargetRef;
-						OutError.Detail = StateError.Detail;
 						return false;
 					}
 					Sequence = Object->GetUniqueID();
@@ -1560,15 +1542,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 								ResolveError)
 							|| !IsValid(Referenced))
 						{
-							OutError.Code =
-								ResolveError.GetCode().IsEmpty()
-									? TEXT(
-										"asset_data_reference_unresolved")
-									: ResolveError.GetCode();
-							OutError.SubjectId =
-								RequestedRef;
-							OutError.Detail =
-								ResolveError.GetDetail();
+							OutError = ResolveError.IsEmpty()
+								? ProductionFailure(TEXT("asset_data_reference_unresolved"), TEXT("A referenced asset could not be resolved."), TEXT("reference"), MakeShared<FJsonValueString>(RequestedRef), MakeShared<FJsonValueString>(TEXT("resolvable existing asset"))) : ResolveError;
+							if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = RequestedRef;
 							return false;
 						}
 						FUeAgentCanonicalValuePtr ReferenceValue;
@@ -1576,13 +1552,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 							ReferenceDefault;
 						FUeAgentStateSemanticError
 							ReferenceStateError;
+						FString ReferenceRevisionValue;
+						if (!TryReadStableAssetRevision(Referenced, ReferenceRevisionValue, OutError)) return false;
 						if (!TryCanonicalObject(
 								BuildCloneSourceState(
 									RequestedRef,
 									Referenced->GetClass()
 										->GetPathName(),
-									ReadStableAssetRevision(
-										Referenced)),
+								ReferenceRevisionValue),
 								Resources,
 								ReferenceValue,
 								ReferenceStateError)
@@ -1592,12 +1569,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 								ReferenceDefault,
 								ReferenceStateError))
 						{
-							OutError.Code =
-								ReferenceStateError.Code;
-							OutError.SubjectId =
-								RequestedRef;
-							OutError.Detail =
-								ReferenceStateError.Detail;
+							OutError = ReferenceStateError;
+							MarkNativeFailure(OutError);
+							if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = RequestedRef;
 							return false;
 						}
 						const FUeAgentStateRevision
@@ -1657,9 +1631,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						Snapshot,
 						StateError))
 				{
-					OutError.Code = StateError.Code;
+					OutError = StateError;
 					OutError.SubjectId = TargetRef;
-					OutError.Detail = StateError.Detail;
 					return false;
 				}
 				OutSnapshot = MoveTemp(Snapshot);
@@ -1673,6 +1646,198 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 			TSharedRef<
 				IUeAgentAssetDataSimpleEffectAssetResolver,
 				ESPMode::ThreadSafe> Resolver;
+		};
+
+		class FAssetDataPersistedStateOracle final
+			: public IPersistedStateOracle
+		{
+		public:
+			explicit FAssetDataPersistedStateOracle(
+				TSharedRef<FAssetDataStateReadPort, ESPMode::ThreadSafe>
+					InFallbackReadPort)
+				: FallbackReadPort(MoveTemp(InFallbackReadPort))
+				, FallbackOracle(FallbackReadPort)
+			{
+			}
+
+			const FString& GetReadPortId() const override
+			{
+				return FallbackReadPort->GetPortId();
+			}
+
+			bool TryObserve(
+				const FVerificationTarget& Target,
+				const TArray<FDurableArtifact>& Artifacts,
+				FUeAgentResourceTracker& Resources,
+				const FUeAgentOperationDeadline& Deadline,
+				const FUeAgentCancellationToken& Cancellation,
+				FUeAgentCanonicalSnapshotPtr& OutSnapshot,
+				FVerificationError& OutError) override
+			{
+				OutSnapshot.Reset();
+				OutError = FVerificationError();
+				const FUeAgentCandidateBinding& Binding =
+					Target.GetBinding();
+				const FAssetDataProfile* Profile =
+					Target.IsValid()
+						? FindProfile(
+							Binding.GetSummary()
+								.GetDescriptorIdentity())
+						: nullptr;
+				if (!Profile || !IsGenericFactoryProfile(*Profile))
+				{
+					return FallbackOracle.TryObserve(
+						Target,
+						Artifacts,
+						Resources,
+						Deadline,
+						Cancellation,
+						OutSnapshot,
+						OutError);
+				}
+				if (Artifacts.IsEmpty()
+					|| Cancellation.IsCancelled())
+				{
+					OutError = Artifacts.IsEmpty()
+						? ProductionFailure(TEXT("asset_data_persisted_snapshot_request_invalid"), TEXT("Persisted verification requires at least one durable artifact."), TEXT("artifact_count"), MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one artifact")))
+						: ProductionFailure(TEXT("asset_data_persisted_snapshot_request_invalid"), TEXT("Persisted asset verification was cancelled."), TEXT("cancelled"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+					return false;
+				}
+
+				TSharedPtr<FJsonObject> Payload;
+				FString TargetRef;
+				FString PackageName;
+				FString ObjectName;
+				FString ExpectedObjectPath;
+				FString ExpectedClass;
+				FUeAgentDiscoveryError EvidenceError;
+				if (!TryParseRequestEvidence(
+						Binding,
+						Payload,
+						EvidenceError)
+					|| !TryReadEvidence(
+						Payload,
+						TargetRef,
+						PackageName,
+						ObjectName,
+						ExpectedObjectPath,
+						ExpectedClass, EvidenceError))
+				{
+					OutError = EvidenceError;
+					return false;
+				}
+
+				FUeAgentPersistedCreatedAssetObservation Observation;
+				auto BuildSnapshot = [&Resources,
+					&Binding,
+					Profile,
+					&TargetRef,
+					&ExpectedObjectPath,
+					&ExpectedClass,
+					&Observation,
+					this](
+					const bool bObservedPersistentLevel,
+					FUeAgentCanonicalSnapshotPtr& Result,
+					UE::UAI::Contract::FDiagnostic& BuildError)
+				{
+					FUeAgentCanonicalValuePtr Value;
+					FUeAgentCanonicalValuePtr DefaultValue;
+					FUeAgentStateSemanticError StateError;
+					if (!TryCanonicalObject(
+							BuildCreatedAssetState(
+								TargetRef,
+								ExpectedObjectPath,
+								ExpectedClass,
+								*Profile,
+								nullptr,
+								bObservedPersistentLevel),
+							Resources,
+							Value,
+							StateError)
+						|| !FUeAgentCanonicalValue::TryObject(
+							{},
+							Resources,
+							DefaultValue,
+							StateError))
+					{
+						BuildError = StateError;
+						return false;
+					}
+					const FUeAgentStateRevision Revision(
+						GetReadPortId(),
+						Binding.GetCatalogRevision().GetGeneration(),
+						Observation.SnapshotSequence);
+					TArray<FUeAgentStateEntry> Entries;
+					Entries.Emplace(
+						Binding.GetSummary().GetIdentity(),
+						AssetDataStateType(),
+						Value.ToSharedRef(),
+						AssetDataStateDefault(DefaultValue.ToSharedRef()),
+						AssetDataStateDetails(*Profile),
+						Revision,
+						EUeAgentAuthoredPresence::Present,
+						EUeAgentOverrideState::Overridden);
+					if (!FUeAgentCanonicalSnapshot::TryCreate(
+							TEXT("snapshot:asset-data:persisted-isolated:")
+								+ Binding.GetBindingId(),
+							EUeAgentStatePlane::Persisted,
+							Revision,
+							FUeAgentTemporalPoint(
+								TEXT("asset-data-operation"),
+								TEXT("1"),
+								TEXT("1"),
+								TEXT("1"),
+								TEXT("observed")),
+							FUeAgentStateProvenance(
+								TEXT("independent_readback"),
+								GetReadPortId(),
+								TargetRef),
+							MoveTemp(Entries),
+							Resources,
+							Result,
+							StateError))
+					{
+						BuildError = StateError;
+						return false;
+					}
+					if (!Result.IsValid())
+					{
+						BuildError = ProductionFailure(TEXT("asset_data_persisted_snapshot_missing"), TEXT("The snapshot builder returned no persisted asset snapshot."), TEXT("snapshot_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						BuildError.TargetPath = TargetRef;
+						return false;
+					}
+					return true;
+				};
+
+				FUeAgentAssetDataSimpleAuthoringError ObservationError;
+				if (!TryObservePersistedCreatedAsset(
+						Artifacts,
+						PackageName,
+						ObjectName,
+						ExpectedObjectPath,
+						ExpectedClass,
+						Observation,
+						ObservationError))
+				{
+					OutError = ObservationError;
+					return false;
+				}
+				UE::UAI::Contract::FDiagnostic BuildError;
+				if (!BuildSnapshot(
+						Observation.bHasPersistentLevel,
+						OutSnapshot,
+						BuildError))
+				{
+					OutError = BuildError;
+					return false;
+				}
+				return OutSnapshot.IsValid();
+			}
+
+		private:
+			TSharedRef<FAssetDataStateReadPort, ESPMode::ThreadSafe>
+				FallbackReadPort;
+			FStateReadPortPersistedStateOracle FallbackOracle;
 		};
 
 		class FAssetDataDraftBuilder final
@@ -1706,11 +1871,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						OutDraft,
 						Error))
 				{
-					SetProductionError(
-						OutError,
-						Error.GetCode(),
-						CanonicalRequest.GetRequestId(),
-						Error.GetDetail());
+					SetProductionError(OutError, Error, CanonicalRequest.GetRequestId());
 					return false;
 				}
 				return true;
@@ -1744,11 +1905,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 				if (!Profile
 					|| !IsSupportedProductionProfile(*Profile))
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"asset_data_change_profile_missing"),
-						CanonicalRequest.GetDescriptorIdentity()
+					SetProductionError(OutError, ProductionFailure(TEXT("asset_data_change_profile_missing"), TEXT("No supported asset profile is available for projecting change targets."), TEXT("profile_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), CanonicalRequest.GetDescriptorIdentity()
 							.GetDescriptorId());
 					return false;
 				}
@@ -1786,17 +1943,18 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						ResolvedTarget.GetBindingEvidence());
 					if (!OutTargets.Last().IsValid())
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"asset_data_change_target_invalid"),
-							Change.GetIdentity()
+						SetProductionError(OutError, *OutTargets.Last().GetValidationDiagnostic(), Change.GetIdentity()
 								.GetCanonicalKey());
 						OutTargets.Reset();
 						return false;
 					}
 				}
-				return !OutTargets.IsEmpty();
+				if (OutTargets.IsEmpty())
+				{
+					OutError = ProductionFailure(TEXT("asset_data_change_target_missing"), TEXT("No asset change target was produced because the draft has no changes."), TEXT("change_count"), MakeShared<FJsonValueNumber>(Changes.Num()), MakeShared<FJsonValueString>(TEXT("at least one change")));
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -1820,11 +1978,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 					Plan->GetChangeSet().GetChanges();
 				if (Changes.Num() != Targets.Num())
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"asset_data_change_targets_missing"),
-						Plan->GetRequestId());
+					SetProductionError(OutError, ProductionFailure(TEXT("asset_data_change_targets_missing"), TEXT("The number of mutation targets differs from the planned changes."), TEXT("target_count"), MakeShared<FJsonValueNumber>(Targets.Num()), MakeShared<FJsonValueNumber>(Changes.Num())), Plan->GetRequestId());
 					return false;
 				}
 				for (int32 Index = 0;
@@ -1847,18 +2001,25 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 							!= Changes[Index].GetIdentity()
 						|| !OutBindings.Last().IsValid())
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"asset_data_mutation_binding_invalid"),
-							Changes[Index]
-								.GetIdentity()
-								.GetCanonicalKey());
+						if (Targets[Index].GetSummary().GetIdentity() != Changes[Index].GetIdentity())
+						{
+							OutError = ProductionFailure(TEXT("asset_data_mutation_binding_invalid"), TEXT("The mutation target identity differs from the planned change."), TEXT("target_identity_matches"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+							OutError.ActualEvidence = MakeShared<FJsonValueString>(Targets[Index].GetSummary().GetIdentity().GetCanonicalKey());
+							OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Changes[Index].GetIdentity().GetCanonicalKey());
+						}
+						else OutError = OutBindings.Last().GetValidationDiagnostic();
+						OutError.OperationIndex = Index;
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Changes[Index].GetIdentity().GetSelector();
 						OutBindings.Reset();
 						return false;
 					}
 				}
-				return !OutBindings.IsEmpty();
+				if (OutBindings.IsEmpty())
+				{
+					OutError = ProductionFailure(TEXT("asset_data_mutation_binding_missing"), TEXT("No mutation binding was produced because the plan has no changes."), TEXT("change_count"), MakeShared<FJsonValueNumber>(Changes.Num()), MakeShared<FJsonValueString>(TEXT("at least one change")));
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -1881,11 +2042,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 				if (Changes.IsEmpty()
 					|| Target.GetPublicRef().IsEmpty())
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"asset_data_durable_target_missing"),
-						Target.GetBindingId());
+					SetProductionError(OutError, Changes.IsEmpty()
+						? ProductionFailure(TEXT("asset_data_durable_target_missing"), TEXT("A durable target requires at least one planned change."), TEXT("change_count"), MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one change")))
+						: ProductionFailure(TEXT("asset_data_durable_target_missing"), TEXT("The durable target has no public asset reference."), TEXT("target_ref"), MakeShared<FJsonValueString>(Target.GetPublicRef()), MakeShared<FJsonValueString>(TEXT("non-empty asset reference"))), Target.GetBindingId());
 					return false;
 				}
 				TSharedPtr<FJsonObject> Payload;
@@ -1902,25 +2061,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						PackageName,
 						ObjectName,
 						ObjectPath,
-						ExpectedClassPath))
+						ExpectedClassPath, EvidenceError))
 				{
-					SetProductionError(
-						OutError,
-						EvidenceError.Code.IsEmpty()
-							? TEXT("asset_data_durable_header_kind_evidence_missing")
-							: EvidenceError.Code,
-						Target.GetBindingId(),
-						EvidenceError.Detail);
+					SetProductionError(OutError, EvidenceError, Target.GetBindingId());
 					return false;
 				}
 				UClass* const ExpectedClass =
 					LoadObject<UClass>(nullptr, *ExpectedClassPath);
 				if (!ExpectedClass)
 				{
-					SetProductionError(
-						OutError,
-						TEXT("asset_data_durable_expected_class_missing"),
-						ExpectedClassPath);
+					SetProductionError(OutError, ProductionFailure(TEXT("asset_data_durable_expected_class_missing"), TEXT("The expected persisted asset class could not be loaded."), TEXT("expected_class"), MakeShared<FJsonValueString>(ExpectedClassPath), MakeShared<FJsonValueString>(TEXT("loadable asset class"))), ExpectedClassPath);
 					return false;
 				}
 				OutTargets.Emplace(
@@ -1931,7 +2081,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						: EPackageHeaderKind::Asset,
 					EAssetDurableIntent::Save,
 					ERollbackGrade::DurableBackup);
-				return OutTargets[0].IsValid();
+				if (!OutTargets[0].IsValid())
+				{
+					OutError = OutTargets[0].GetValidationDiagnostic();
+					MarkNativeFailure(OutError);
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -1985,17 +2142,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						PackageName,
 						ObjectName,
 						ObjectPath,
-						ExpectedClass))
+						ExpectedClass, EvidenceError))
 				{
-					SetProductionError(
-						OutError,
-						EvidenceError.Code.IsEmpty()
-							? TEXT(
-								"asset_data_expected_profile_missing")
-							: EvidenceError.Code,
-						Plan->GetDescriptorIdentity()
-							.GetDescriptorId(),
-						EvidenceError.Detail);
+					SetProductionError(OutError, EvidenceError.Code.IsEmpty()
+							? ProductionFailure(TEXT("asset_data_expected_profile_missing"), TEXT("No supported asset profile is registered for expected-state projection."), TEXT("profile_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true))
+							: EvidenceError, Plan->GetDescriptorIdentity()
+							.GetDescriptorId());
 					return false;
 				}
 				if (Profile->IsClone()
@@ -2004,25 +2156,19 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						SourceRef,
 						SourceObjectPath,
 						SourceClass,
-						SourceRevision))
+						SourceRevision, EvidenceError))
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"asset_data_clone_expected_evidence_invalid"),
-						Plan->GetDescriptorIdentity()
-							.GetDescriptorId());
+					SetProductionError(OutError, EvidenceError, Plan->GetDescriptorIdentity().GetDescriptorId());
 					return false;
 				}
 				if (Profile->IsClone()
 					&& (ExpectedClass != SourceClass
 						|| SourceObjectPath.IsEmpty()))
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"asset_data_clone_expected_class_mismatch"),
-						SourceRef);
+					OutError = ExpectedClass != SourceClass
+						? ProductionFailure(TEXT("asset_data_clone_expected_class_mismatch"), TEXT("The clone source class differs from the expected target class."), TEXT("source_class"), MakeShared<FJsonValueString>(SourceClass), MakeShared<FJsonValueString>(ExpectedClass))
+						: ProductionFailure(TEXT("asset_data_clone_expected_class_mismatch"), TEXT("The expected clone source path is empty."), TEXT("source_object_path"), MakeShared<FJsonValueString>(SourceObjectPath), MakeShared<FJsonValueString>(TEXT("non-empty asset path")));
+					OutError.TargetPath = SourceRef;
 					return false;
 				}
 				FUeAgentCanonicalValuePtr ExpectedValue;
@@ -2086,18 +2232,24 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 							ExpectedValue,
 							StateError))
 					{
-						SetProductionError(
-							OutError,
-							!ProjectionError.GetCode().IsEmpty()
-								? ProjectionError.GetCode()
-								: StateError.Code.IsEmpty()
-									? TEXT(
-										"asset_data_expected_field_state_invalid")
-									: StateError.Code,
-							TargetRef,
-							!ProjectionError.GetDetail().IsEmpty()
-								? ProjectionError.GetDetail()
-								: StateError.Detail);
+						if (!ProjectionError.IsEmpty())
+						{
+							OutError = ProjectionError;
+							if (Changes.Num() == 1 && Changes[0].GetAfter().IsValid())
+								LocateAssetDataSimpleEffectInputFailure(OutError, *Changes[0].GetAfter());
+						}
+						else if (!StateError.IsEmpty()) { OutError = StateError; MarkNativeFailure(OutError); }
+						else if (Changes.Num() != 1)
+							OutError = ProductionFailure(TEXT("asset_data_expected_field_state_invalid"), TEXT("Mutable asset state projection requires exactly one planned change."), TEXT("change_count"), MakeShared<FJsonValueNumber>(Changes.Num()), MakeShared<FJsonValueNumber>(1));
+						else
+						{
+							const FString MissingField = !CurrentFields ? TEXT("field_state") : !DefaultFields ? TEXT("field_defaults")
+								: !ProjectionContext ? TEXT("field_projection_context") : TEXT("proposed_after");
+							OutError = ProductionFailure(TEXT("asset_data_expected_field_state_invalid"),
+								TEXT("A required captured value is missing from expected-state projection."), MissingField,
+								nullptr, MakeShared<FJsonValueString>(TEXT("available captured value")));
+						}
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 						return false;
 					}
 				}
@@ -2118,18 +2270,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 								TargetRef,
 								ObjectPath,
 								ExpectedClass,
-								*Profile);
+								*Profile,
+								nullptr,
+								true);
 					if (!TryCanonicalObject(
 							ExpectedState,
 							Resources,
 							ExpectedValue,
 							StateError))
 					{
-						SetProductionError(
-							OutError,
-							StateError.Code,
-							TargetRef,
-							StateError.Detail);
+						SetProductionError(OutError, StateError, TargetRef);
 						return false;
 					}
 				}
@@ -2139,11 +2289,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						DefaultValue,
 						StateError))
 				{
-					SetProductionError(
-						OutError,
-						StateError.Code,
-						TargetRef,
-						StateError.Detail);
+					SetProductionError(OutError, StateError, TargetRef);
 					return false;
 				}
 				const FUeAgentStateRevision Revision(
@@ -2171,11 +2317,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 							});
 					if (!ChangeTarget)
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"asset_data_verification_target_missing"),
-							Change.GetIdentity()
+						SetProductionError(OutError, ProductionFailure(TEXT("asset_data_verification_target_missing"), TEXT("No verification binding matches this planned asset change."), TEXT("target_binding_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), Change.GetIdentity()
 								.GetCanonicalKey());
 						return false;
 					}
@@ -2216,12 +2358,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 								Expected,
 								StateError))
 					{
-						SetProductionError(
-							OutError,
-							StateError.Code,
-							Change.GetIdentity()
-								.GetCanonicalKey(),
-							StateError.Detail);
+						SetProductionError(OutError, StateError, Change.GetIdentity()
+								.GetCanonicalKey());
 						return false;
 					}
 					OutTargets.Emplace(
@@ -2233,16 +2371,20 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						TArray<FString>());
 					if (!OutTargets.Last().IsValid())
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"asset_data_verification_target_invalid"),
-							Change.GetIdentity()
-								.GetCanonicalKey());
+						const FVerificationError* ValidationError = OutTargets.Last().GetValidationDiagnostic();
+						OutError = ValidationError ? *ValidationError
+							: ProductionFailure(TEXT("asset_data_verification_target_invalid"), TEXT("The asset verification target is invalid and returned no validation diagnostic."), TEXT("verification_target_valid"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						MarkNativeFailure(OutError);
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Change.GetIdentity().GetSelector();
 						return false;
 					}
 				}
-				return !OutTargets.IsEmpty();
+				if (OutTargets.IsEmpty())
+				{
+					OutError = ProductionFailure(TEXT("asset_data_verification_target_missing"), TEXT("No verification target was produced because the plan has no changes."), TEXT("change_count"), MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one change")));
+					return false;
+				}
+				return true;
 			}
 
 		private:
@@ -2338,45 +2480,47 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 				|| !Config.ReferenceOracle.IsValid()
 				|| !Config.Projection.IsSet()
 				|| !Config.Projection->IsValid()
-				|| Config.OwnerLeaseId.IsEmpty()
-				|| Config.MaxQueueItems < 1)
+				|| Config.OwnerLeaseId.IsEmpty())
 			{
-				SetError(
-					OutError,
-					TEXT(
-						"asset_data_simple_authoring_dependencies_missing"));
+				const FString Field = !Config.DescriptorRegistry.IsValid() ? TEXT("descriptor_registry")
+					: !Config.MutationAssetResolver.IsValid() ? TEXT("mutation_asset_resolver")
+					: !Config.PreStateAssetResolver.IsValid() ? TEXT("prestate_asset_resolver")
+					: !Config.PersistedAssetResolver.IsValid() ? TEXT("persisted_asset_resolver")
+					: Config.PreStateAssetResolver == Config.PersistedAssetResolver ? TEXT("independent_persisted_resolver")
+					: !Config.FactoryResolver.IsValid() ? TEXT("factory_resolver")
+					: !Config.DurableService.IsValid() ? TEXT("durable_service")
+					: !Config.AbsenceOracle.IsValid() ? TEXT("absence_oracle")
+					: !Config.ReferenceOracle.IsValid() ? TEXT("reference_oracle")
+					: !Config.Projection.IsSet() ? TEXT("projection_available")
+					: !Config.Projection->IsValid() ? TEXT("projection_valid") : TEXT("owner_lease_available");
+				OutError = ProductionFailure(TEXT("asset_data_simple_authoring_dependencies_missing"),
+					FString::Printf(TEXT("The asset authoring provider requires %s."), *Field),
+					Field, MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
 			const FAssetDataProfileCatalog& Catalog =
 				GetProfileCatalog();
-			if (!Catalog.Error.IsEmpty()
-				|| Catalog.Profiles.Num() != 53)
+			int32 AssetDataDescriptorCount = 0;
+			for (const FUeAgentOperationDescriptor& Descriptor
+				: Config.DescriptorRegistry->GetDescriptors())
 			{
-				SetError(
-					OutError,
-					TEXT(
-						"asset_data_simple_authoring_profile_catalog_invalid"),
-					TEXT("asset_data"),
-					Catalog.Error);
+				AssetDataDescriptorCount +=
+					Descriptor.GetDomainId() == TEXT("asset_data")
+						? 1
+						: 0;
+			}
+			if (!Catalog.Error.IsEmpty()
+				|| Catalog.Profiles.Num()
+					!= AssetDataDescriptorCount)
+			{
+				SetError(OutError, Catalog.Error.IsEmpty()
+					? ProductionFailure(TEXT("asset_data_simple_authoring_profile_catalog_invalid"), TEXT("The asset profile count differs from the registered operation count."), TEXT("profile_count"), MakeShared<FJsonValueNumber>(Catalog.Profiles.Num()), MakeShared<FJsonValueNumber>(AssetDataDescriptorCount))
+					: Catalog.Error, TEXT("asset_data"));
 				return false;
 			}
-			int32 CreateCount = 0;
-			int32 StaticCreateCount = 0;
-			int32 FactoryCreateCount = 0;
-			int32 CloneCount = 0;
 			for (const FAssetDataProfile& Profile
 				: Catalog.Profiles)
 			{
-				CreateCount += Profile.IsCreate() ? 1 : 0;
-				StaticCreateCount +=
-					Profile.UsesStaticCreateClass() ? 1 : 0;
-				FactoryCreateCount +=
-					Profile.UsesFactoryCandidate() ? 1 : 0;
-				CloneCount +=
-					Profile.NativeOperationType
-							== TEXT("asset.object.clone")
-						? 1
-						: 0;
 				const FUeAgentOperationDescriptor* Descriptor =
 					Config.DescriptorRegistry
 						->FindByDescriptorId(Profile.DescriptorId);
@@ -2391,32 +2535,175 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 						.GetDescriptorHash()
 						!= Profile.DescriptorHash)
 				{
-					SetError(
-						OutError,
-						TEXT(
-							"asset_data_simple_authoring_descriptor_missing"),
-						Profile.DescriptorId);
+					if (!Descriptor)
+						OutError = ProductionFailure(TEXT("asset_data_simple_authoring_descriptor_missing"), TEXT("An asset profile has no registered operation descriptor."), TEXT("descriptor_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					else
+					{
+						const FString Field = Descriptor->GetCapabilityId() != Profile.CapabilityId ? TEXT("capability")
+							: Descriptor->GetDomainId() != TEXT("asset_data") ? TEXT("domain")
+							: Descriptor->GetIdentity().GetVersion() != Profile.DescriptorVersion ? TEXT("version") : TEXT("hash");
+						OutError = ProductionFailure(TEXT("asset_data_simple_authoring_descriptor_missing"),
+							FString::Printf(TEXT("The registered descriptor %s differs from its asset profile."), *Field),
+							TEXT("descriptor_") + Field + TEXT("_matches"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						if (Field == TEXT("version"))
+						{
+							OutError.ActualEvidence = MakeShared<FJsonValueNumber>(Descriptor->GetIdentity().GetVersion());
+							OutError.ExpectedEvidence = MakeShared<FJsonValueNumber>(Profile.DescriptorVersion);
+						}
+						else
+						{
+							OutError.ActualEvidence = MakeShared<FJsonValueString>(Field == TEXT("capability") ? Descriptor->GetCapabilityId()
+								: Field == TEXT("domain") ? Descriptor->GetDomainId() : Descriptor->GetIdentity().GetDescriptorHash());
+							OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Field == TEXT("capability") ? Profile.CapabilityId
+								: Field == TEXT("domain") ? FString(TEXT("asset_data")) : Profile.DescriptorHash);
+						}
+					}
+					OutError.SubjectId = Profile.DescriptorId;
 					return false;
 				}
 			}
-			if (CreateCount != 23
-				|| StaticCreateCount != 19
-				|| FactoryCreateCount != 4
-				|| CloneCount != 1
-				|| Catalog.Profiles.Num()
-					- CreateCount
-					- CloneCount
-					!= 29)
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"asset_data_simple_authoring_profile_distribution_invalid"),
-					TEXT("asset_data"));
-				return false;
-			}
 			return true;
 		}
+	}
+
+	bool TryObservePersistedCreatedAsset(
+		const TArray<AssetDurable::FDurableArtifact>& Artifacts,
+		const FString& SourcePackageName,
+		const FString& SourceObjectName,
+		const FString& SourceObjectPath,
+		const FString& ExpectedClassPath,
+		FUeAgentPersistedCreatedAssetObservation& OutObservation,
+		FUeAgentAssetDataSimpleAuthoringError& OutError)
+	{
+		using namespace AssetDurable;
+		OutObservation = {};
+		OutError = {};
+		UClass* ExpectedClass =
+			FindObject<UClass>(nullptr, *ExpectedClassPath);
+		if (!ExpectedClass)
+		{
+			ExpectedClass =
+				LoadObject<UClass>(nullptr, *ExpectedClassPath);
+		}
+		if (Artifacts.IsEmpty()
+			|| !FPackageName::IsValidLongPackageName(SourcePackageName)
+			|| SourceObjectName.IsEmpty()
+			|| SourceObjectPath
+				!= SourcePackageName + TEXT(".") + SourceObjectName
+			|| !ExpectedClass)
+		{
+			if (Artifacts.IsEmpty())
+				OutError = ProductionFailure(TEXT("asset_data_persisted_snapshot_request_invalid"), TEXT("Persisted observation requires at least one durable artifact."), TEXT("artifact_count"), MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one artifact")));
+			else if (!FPackageName::IsValidLongPackageName(SourcePackageName))
+				OutError = ProductionFailure(TEXT("asset_data_persisted_snapshot_request_invalid"), TEXT("The persisted source package name is invalid."), TEXT("package_name"), MakeShared<FJsonValueString>(SourcePackageName), MakeShared<FJsonValueString>(TEXT("valid long package name")));
+			else if (SourceObjectName.IsEmpty())
+				OutError = ProductionFailure(TEXT("asset_data_persisted_snapshot_request_invalid"), TEXT("The persisted source object name is empty."), TEXT("object_name"), MakeShared<FJsonValueString>(SourceObjectName), MakeShared<FJsonValueString>(TEXT("non-empty object name")));
+			else if (SourceObjectPath != SourcePackageName + TEXT(".") + SourceObjectName)
+				OutError = ProductionFailure(TEXT("asset_data_persisted_snapshot_request_invalid"), TEXT("The persisted source path differs from its package and object name."), TEXT("object_path"), MakeShared<FJsonValueString>(SourceObjectPath), MakeShared<FJsonValueString>(SourcePackageName + TEXT(".") + SourceObjectName));
+			else
+				OutError = ProductionFailure(TEXT("asset_data_persisted_snapshot_request_invalid"), TEXT("The expected persisted asset class could not be loaded."), TEXT("expected_class"), MakeShared<FJsonValueString>(ExpectedClassPath), MakeShared<FJsonValueString>(TEXT("loadable asset class")));
+			OutError.TargetPath = SourceObjectPath;
+			return false;
+		}
+
+		const bool bWorld =
+			ExpectedClass->IsChildOf(UWorld::StaticClass());
+		if (bWorld)
+		{
+			FPersistedWorldLoadError LoadError;
+			const bool bObserved = TryObservePersistedWorld(
+				Artifacts,
+				[&](
+					UWorld& SnapshotWorld,
+					const FPersistedWorldReferenceMap& ReferenceMap,
+					FPersistedWorldLoadError& ObserverError)
+				{
+					FString SnapshotRef;
+					if (!ReferenceMap.TryMapReference(
+							SourceObjectPath,
+							SnapshotRef)
+						|| SnapshotRef != SnapshotWorld.GetPathName()
+						|| SnapshotWorld.GetClass()->GetPathName()
+							!= ExpectedClassPath
+						|| !SnapshotWorld.PersistentLevel)
+					{
+						if (SnapshotRef.IsEmpty() || SnapshotRef != SnapshotWorld.GetPathName())
+						{
+							ObserverError = ProductionFailure(TEXT("asset_data_persisted_world_identity_mismatch"), TEXT("The persisted world does not match the requested source object."), TEXT("snapshot_identity_matches"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+							ObserverError.ActualEvidence = MakeShared<FJsonValueString>(SnapshotWorld.GetPathName());
+							ObserverError.ExpectedEvidence = MakeShared<FJsonValueString>(SnapshotRef);
+						}
+						else if (SnapshotWorld.GetClass()->GetPathName() != ExpectedClassPath)
+							ObserverError = ProductionFailure(TEXT("asset_data_persisted_world_identity_mismatch"), TEXT("The persisted world class differs from the expected class."), TEXT("class"), MakeShared<FJsonValueString>(SnapshotWorld.GetClass()->GetPathName()), MakeShared<FJsonValueString>(ExpectedClassPath));
+						else
+							ObserverError = ProductionFailure(TEXT("asset_data_persisted_world_identity_mismatch"), TEXT("The persisted world has no persistent level."), TEXT("persistent_level_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						ObserverError.TargetPath = SourceObjectPath;
+						return false;
+					}
+					OutObservation.SourceObjectPath = SourceObjectPath;
+					OutObservation.ClassPath = ExpectedClassPath;
+					OutObservation.bWorld = true;
+					OutObservation.bHasPersistentLevel = true;
+					OutObservation.SnapshotSequence =
+						SnapshotWorld.GetUniqueID();
+					return TryValidateObservation(OutObservation, ObserverError);
+				},
+				LoadError);
+			if (!bObserved)
+			{
+				OutError = LoadError;
+				OutError.SubjectId = SourceObjectPath;
+			}
+			return bObserved && TryValidateObservation(OutObservation, OutError);
+		}
+
+		FPersistedPackageLoadError LoadError;
+		const bool bObserved = TryObservePersistedPackage(
+			Artifacts,
+			SourcePackageName,
+			[&](
+				UPackage& SnapshotPackage,
+				FPersistedPackageLoadError& ObserverError)
+			{
+				UObject* SnapshotObject = StaticFindObjectFast(
+					UObject::StaticClass(),
+					&SnapshotPackage,
+					FName(*SourceObjectName));
+				if (!IsValid(SnapshotObject)
+					|| SnapshotObject->GetOutermost()
+						!= &SnapshotPackage
+					|| SnapshotObject->GetClass()->GetPathName()
+						!= ExpectedClassPath)
+				{
+					if (!IsValid(SnapshotObject))
+						ObserverError = ProductionFailure(TEXT("asset_data_persisted_object_identity_mismatch"), TEXT("The persisted package does not contain the requested object."), TEXT("object_name"), MakeShared<FJsonValueString>(SourceObjectName), MakeShared<FJsonValueString>(TEXT("existing object in persisted package")));
+					else if (SnapshotObject->GetOutermost() != &SnapshotPackage)
+					{
+						ObserverError = ProductionFailure(TEXT("asset_data_persisted_object_identity_mismatch"), TEXT("The persisted object belongs to a different snapshot package."), TEXT("package_matches"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						ObserverError.ActualEvidence = MakeShared<FJsonValueString>(SnapshotObject->GetOutermost()->GetName());
+						ObserverError.ExpectedEvidence = MakeShared<FJsonValueString>(SnapshotPackage.GetName());
+					}
+					else
+						ObserverError = ProductionFailure(TEXT("asset_data_persisted_object_identity_mismatch"), TEXT("The persisted object class differs from the expected class."), TEXT("class"), MakeShared<FJsonValueString>(SnapshotObject->GetClass()->GetPathName()), MakeShared<FJsonValueString>(ExpectedClassPath));
+					ObserverError.TargetPath = SourceObjectPath;
+					return false;
+				}
+				OutObservation.SourceObjectPath = SourceObjectPath;
+				OutObservation.ClassPath = ExpectedClassPath;
+				OutObservation.bWorld = false;
+				OutObservation.bHasPersistentLevel = false;
+				OutObservation.SnapshotSequence =
+					SnapshotObject->GetUniqueID();
+				return TryValidateObservation(OutObservation, ObserverError);
+			},
+			LoadError);
+		if (!bObserved)
+		{
+			OutError = LoadError;
+			OutError.SubjectId = SourceObjectPath;
+		}
+		return bObserved && TryValidateObservation(OutObservation, OutError);
 	}
 
 	bool FUeAgentAssetDataSimpleAuthoringProviderFactory::TryCreate(
@@ -2459,13 +2746,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 					NativeError)
 			|| !NativeHook.IsValid())
 		{
-			SetError(
-				OutError,
-				NativeError.GetCode().IsEmpty()
-					? TEXT("asset_data_native_hook_missing")
-					: NativeError.GetCode(),
-				TEXT("asset_data"),
-				NativeError.GetDetail());
+			OutError = NativeError.IsValid() ? NativeError : ProductionFailure(TEXT("asset_data_native_hook_missing"), TEXT("The asset native-hook factory returned no hook."), TEXT("native_hook_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TEXT("asset_data");
 			return false;
 		}
 
@@ -2477,7 +2759,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 			EUeAgentStatePlane::AuthoringMemory;
 		ProviderConfig.AtomicityMode =
 			EAtomicityMode::CompensatedSaga;
-		ProviderConfig.MaxQueueItems = Config.MaxQueueItems;
 		ProviderConfig.Projection = Config.Projection;
 		ProviderConfig.TargetResolver =
 			MakeShared<FAssetDataTargetResolver>(
@@ -2504,13 +2785,13 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 		ProviderConfig.ExpectedStateProjector =
 			MakeShared<FAssetDataExpectedStateProjector>(
 				PreStateResolver);
-		const TSharedRef<IUeAgentStateReadPort, ESPMode::ThreadSafe>
+		const TSharedRef<FAssetDataStateReadPort, ESPMode::ThreadSafe>
 			PersistedStateReadPort = MakeShared<FAssetDataStateReadPort>(
 				PersistedStatePortId,
 				EUeAgentStatePlane::Persisted,
 				PersistedResolver);
 		ProviderConfig.PersistedStateOracle = MakeShared<
-			FStateReadPortPersistedStateOracle,
+			FAssetDataPersistedStateOracle,
 			ESPMode::ThreadSafe>(PersistedStateReadPort);
 		ProviderConfig.AbsenceOracle = Config.AbsenceOracle;
 		ProviderConfig.ReferenceOracle = Config.ReferenceOracle;
@@ -2521,13 +2802,15 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 				OutProvider,
 				Error))
 		{
-			SetError(
-				OutError,
-				Error.Code,
-				Error.SubjectId,
-				Error.Detail);
+			OutError = Error;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Error.SubjectId;
 			return false;
 		}
-		return OutProvider.IsValid();
+		if (!OutProvider.IsValid())
+		{
+			OutError = ProductionFailure(TEXT("asset_data_provider_missing"), TEXT("The asset authoring provider factory returned no provider."), TEXT("provider_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return false;
+		}
+		return true;
 	}
 }

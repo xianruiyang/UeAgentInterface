@@ -1,5 +1,8 @@
 #include "OperationOwners/BlueprintNode/UeAgentBlueprintNodeCommandService.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonValue.h"
+
 #include "QueryOwners/BlueprintNode/UeAgentBlueprintNodeQueryOwner.h"
 
 namespace UE::UAI::OperationOwners::BlueprintNode
@@ -10,17 +13,22 @@ namespace UE::UAI::OperationOwners::BlueprintNode
 	{
 		const FString CandidateCommandId = TEXT("blueprint.node.candidates");
 
-		bool Fail(
-			FUeAgentBlueprintNodeCommandError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool ForwardDiagnostic(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
 			return false;
 		}
+
+		UE::UAI::Contract::FDiagnostic CandidateDiagnostic(FString Code, FString Subject, FString PublicReason, FString InternalContext = FString())
+		{
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(PublicReason), TEXT("candidate_query"), MoveTemp(InternalContext), MoveTemp(Subject));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
+		}
+
+		
 
 		class FProductionService final
 			: public IUeAgentBlueprintNodeCommandService
@@ -35,17 +43,21 @@ namespace UE::UAI::OperationOwners::BlueprintNode
 				OutError = {};
 				if (Request.bCancellationRequested)
 				{
-					return Fail(
-						OutError,
-						TEXT("blueprint_node_cancelled"),
-						Request.CommandId);
+					auto Diagnostic = CandidateDiagnostic(TEXT("blueprint_node_cancelled"), Request.CommandId,
+						TEXT("The blueprint node candidate request was cancelled before discovery started."));
+					Diagnostic.PropertyPath = TEXT("cancellation_requested");
+					Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(true);
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Request.CommandId);
 				}
 				if (Request.CommandId != CandidateCommandId)
 				{
-					return Fail(
-						OutError,
-						TEXT("blueprint_node_command_not_supported"),
-						Request.CommandId);
+					auto Diagnostic = CandidateDiagnostic(TEXT("blueprint_node_command_not_supported"), Request.CommandId,
+						FString::Printf(TEXT("This service accepts only '%s'."), *CandidateCommandId));
+					Diagnostic.PropertyPath = TEXT("command_supported");
+					Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Request.CommandId);
 				}
 				return TryExecuteCandidateQuery(
 					Request, OutResponse, OutError);
@@ -56,7 +68,7 @@ namespace UE::UAI::OperationOwners::BlueprintNode
 
 	bool TryCreateProductionBlueprintNodeCommandService(
 		TSharedPtr<IUeAgentBlueprintNodeCommandService>& OutService,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutService = MakeShared<FProductionService>();
 		OutError.Reset();

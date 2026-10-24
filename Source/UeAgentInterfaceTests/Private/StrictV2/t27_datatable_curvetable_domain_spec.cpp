@@ -1,12 +1,7 @@
 #include "Misc/AutomationTest.h"
 
-#if __has_include("OperationOwners/DataTableCurveTable/UeAgentDataTableCurveTableDomainService.h")
-#define UAI_T27_DATATABLE_CURVETABLE_DOMAIN_AVAILABLE 1
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "OperationOwners/DataTableCurveTable/UeAgentDataTableCurveTableDomainService.h"
-#else
-#define UAI_T27_DATATABLE_CURVETABLE_DOMAIN_AVAILABLE 0
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T27DataTableCurveTableProviderTest,
@@ -16,10 +11,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T27DataTableCurveTableProviderTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T27_DATATABLE_CURVETABLE_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T27 DataTable/CurveTable domain provider is available"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	FWorkspaceError Error;
 	TSharedPtr<const FImportInitializationDomainProviderRegistry> Registry;
@@ -71,7 +62,6 @@ bool FUeAgentStrictV2T27DataTableCurveTableProviderTest::RunTest(
 		}
 	}
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -82,10 +72,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T27DataTableCurveTableRejectsUnknownTypeTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T27_DATATABLE_CURVETABLE_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T27 DataTable/CurveTable prewrite gate is available"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	FWorkspaceError Error;
 	TSharedPtr<const FImportInitializationDomainProviderRegistry> Registry;
@@ -110,5 +96,4 @@ bool FUeAgentStrictV2T27DataTableCurveTableRejectsUnknownTypeTest::RunTest(
 			Error));
 	TestFalse(TEXT("the rejected resolution stays invalid"), Resolution.IsValid());
 	return !HasAnyErrors();
-#endif
 }

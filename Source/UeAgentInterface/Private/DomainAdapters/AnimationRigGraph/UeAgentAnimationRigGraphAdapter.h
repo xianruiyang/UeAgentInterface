@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 #define UAI_ANIMATION_RIG_GRAPH_ADAPTER_V1 1
@@ -223,22 +225,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FString ReadbackEvidence;
 	};
 
-	class FAnimationRigGraphAdapterError final
-	{
-	public:
-		const FString& GetCode() const { return Code; }
-		const FString& GetDetail() const { return Detail; }
-		void Reset() { Code.Reset(); Detail.Reset(); }
-		void Set(FString InCode, FString InDetail = FString())
-		{
-			Code = MoveTemp(InCode);
-			Detail = MoveTemp(InDetail);
-		}
-
-	private:
-		FString Code;
-		FString Detail;
-	};
+	using FAnimationRigGraphAdapterError = UE::UAI::Contract::FDiagnostic;
 
 	UEAGENTINTERFACE_API bool TryValidateAnimationRigGraphTopology(
 		const FAnimationRigGraphTopology& Topology,

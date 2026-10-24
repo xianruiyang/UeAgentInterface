@@ -28,21 +28,7 @@ namespace
 
 	TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> MakeTracker()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1048576},
-				{EUeAgentResourceDimension::OutputBytes, 1048576},
-				{EUeAgentResourceDimension::StringBytes, 1048576},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 4096},
-				{EUeAgentResourceDimension::Files, 64},
-				{EUeAgentResourceDimension::ReferenceEdges, 4096},
-				{EUeAgentResourceDimension::WorkUnits, 65536},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					16777216,
-				},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 }
 
@@ -104,6 +90,45 @@ bool FUeAgentSimpleAuthoringEditorProjectCatalogRuntimeResolverTest::RunTest(
 	{
 		AddError(TEXT("editor_project_target_catalog_missing:" ) + DiscoveryError.Code);
 		return false;
+	}
+	TSharedPtr<const FUeAgentCatalogSnapshot> ResolvedTargetCatalog;
+	TArray<TSharedRef<const FUeAgentCandidateBinding>> ResolvedTargets;
+	TestTrue(
+		TEXT("default resolved search preserves existing catalog sources"),
+		Resolvers.CatalogSource->TrySearchResolved(
+			FUeAgentDiscoveryQuery(
+				TEXT("editor_project_target"),
+				TEXT("GeneralProjectSettings"),
+				EUeAgentDiscoveryMatchMode::Broad,
+				EUeAgentMaterializationPolicy::IndexOnly),
+			*Resources,
+			Deadline,
+			Cancellation.GetToken(),
+			ResolvedTargetCatalog,
+			ResolvedTargets,
+			DiscoveryError));
+	if (ResolvedTargetCatalog.IsValid())
+	{
+		TestEqual(
+			TEXT("resolved search returns one binding per summary"),
+			ResolvedTargets.Num(),
+			ResolvedTargetCatalog->GetCandidates().Num());
+		for (const TSharedRef<const FUeAgentCandidateBinding>& Binding
+			: ResolvedTargets)
+		{
+			TestEqual(
+				TEXT("resolved search binding shares snapshot revision"),
+				Binding->GetCatalogRevision(),
+				ResolvedTargetCatalog->GetRevision());
+			TestTrue(
+				TEXT("resolved search binding identity belongs to snapshot"),
+				ResolvedTargetCatalog->GetCandidates().ContainsByPredicate(
+					[&Binding](const FUeAgentCandidateSummary& Summary)
+					{
+						return Summary.GetIdentity()
+							== Binding->GetSummary().GetIdentity();
+					}));
+		}
 	}
 	const FUeAgentCandidateSummary* SettingsSummary = nullptr;
 	const FUeAgentCandidateSummary* ConfigSummary = nullptr;
@@ -628,10 +653,11 @@ bool FUeAgentSimpleAuthoringFactoryCatalogRuntimeResolverTest::RunTest(
 		FUeAgentOperationDeadline::FromTimeout(30.0, Clock);
 	FUeAgentCancellationSource Cancellation(Clock);
 	TSharedPtr<const FUeAgentCatalogSnapshot> Catalog;
+	TArray<TSharedRef<const FUeAgentCandidateBinding>> ResolvedCandidates;
 	FUeAgentDiscoveryError DiscoveryError;
 	TestTrue(
-		TEXT("data_object factory is discoverable through C2"),
-		CatalogSource->TrySearch(
+		TEXT("data_object factory is resolved with its C2 snapshot"),
+		CatalogSource->TrySearchResolved(
 			FUeAgentDiscoveryQuery(
 				TEXT("asset_data_factory"),
 				UUeAgentAssetDataSimpleEffectDataAsset::StaticClass()
@@ -642,14 +668,25 @@ bool FUeAgentSimpleAuthoringFactoryCatalogRuntimeResolverTest::RunTest(
 			Deadline,
 			Cancellation.GetToken(),
 			Catalog,
+			ResolvedCandidates,
 			DiscoveryError));
-	if (!Catalog.IsValid() || Catalog->GetCandidates().Num() != 1)
+	if (!Catalog.IsValid()
+		|| Catalog->GetCandidates().Num() != 1
+		|| ResolvedCandidates.Num() != 1)
 	{
 		AddError(
 			TEXT("factory_catalog_exact_candidate_missing:")
 			+ DiscoveryError.Code);
 		return false;
 	}
+	TestEqual(
+		TEXT("resolved factory binding shares snapshot revision"),
+		ResolvedCandidates[0]->GetCatalogRevision(),
+		Catalog->GetRevision());
+	TestEqual(
+		TEXT("resolved factory binding shares snapshot identity"),
+		ResolvedCandidates[0]->GetSummary().GetIdentity().GetCanonicalKey(),
+		Catalog->GetCandidates()[0].GetIdentity().GetCanonicalKey());
 
 	TSharedPtr<const FUeAgentCandidateBinding> Candidate;
 	TestTrue(
@@ -677,10 +714,10 @@ bool FUeAgentSimpleAuthoringFactoryCatalogRuntimeResolverTest::RunTest(
 	FUeAgentAssetDataSimpleEffectFactoryBinding PlanningBinding;
 	FExecutionMutationError ResolveError;
 	TestTrue(
-		TEXT("authoring resolver accepts the exact queried ref and revision"),
+		TEXT("authoring resolver accepts the queried factory name"),
 		Resolver->TryResolveForPlanning(
-			Candidate->GetPublicRef(),
-			Candidate->GetCatalogRevision(),
+			Candidate->GetSummary().GetDisplayName(),
+			{},
 			TEXT("data_object"),
 			PlanningBinding,
 			ResolveError));
@@ -705,20 +742,9 @@ bool FUeAgentSimpleAuthoringFactoryCatalogRuntimeResolverTest::RunTest(
 	TestFalse(
 		TEXT("wrong profile cannot reuse a valid public ref"),
 		Resolver->TryResolveForPlanning(
-			Candidate->GetPublicRef(),
-			Candidate->GetCatalogRevision(),
+			Candidate->GetSummary().GetDisplayName(),
+			{},
 			TEXT("media_source"),
-			PlanningBinding,
-			ResolveError));
-	TestFalse(
-		TEXT("stale catalog revision fails before mutation"),
-		Resolver->TryResolveForPlanning(
-			Candidate->GetPublicRef(),
-			FUeAgentCatalogRevision(
-				Candidate->GetCatalogRevision().GetSourceId(),
-				TEXT("sha256:stale"),
-				Candidate->GetCatalogRevision().GetSequence()),
-			TEXT("data_object"),
 			PlanningBinding,
 			ResolveError));
 	return true;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 #define UAI_BLUEPRINT_UMG_GRAPH_ADAPTER_V1 1
@@ -256,28 +258,7 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		int32 ErrorCount = 0;
 	};
 
-	class FBlueprintUmgGraphAdapterError final
-	{
-	public:
-		FBlueprintUmgGraphAdapterError() = default;
-		FBlueprintUmgGraphAdapterError(FString InCode, FString InDetail)
-			: Code(MoveTemp(InCode)), Detail(MoveTemp(InDetail))
-		{
-		}
-
-		const FString& GetCode() const { return Code; }
-		const FString& GetDetail() const { return Detail; }
-		void Reset() { Code.Reset(); Detail.Reset(); }
-		void Set(FString InCode, FString InDetail = FString())
-		{
-			Code = MoveTemp(InCode);
-			Detail = MoveTemp(InDetail);
-		}
-
-	private:
-		FString Code;
-		FString Detail;
-	};
+	using FBlueprintUmgGraphAdapterError = UE::UAI::Contract::FDiagnostic;
 
 	UEAGENTINTERFACE_API bool TryValidateBlueprintUmgGraphTopology(
 		const FBlueprintUmgGraphTopology& Topology,

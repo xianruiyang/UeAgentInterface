@@ -8,7 +8,7 @@ namespace UE::UAI::DomainAdapters::RigSpatialCommands
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return Composition::TimelineSpatial::TryResolveTimelineSpatialMechanics(
 			CommandId, OutHandler, OutAuthorityScopes, OutError);

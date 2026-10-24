@@ -1,7 +1,15 @@
 #include "DomainAdapters/AssetProjectRead/UeAgentAssetProjectReadNative.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "AssetRegistry/AssetData.h"
-#include "Commands/OriginResolve/UeAgentOriginResolveTypes.h"
+#include "Core/OriginResolve/UeAgentOriginResolveTypes.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Core/ContentDiscovery/UeAgentContentDiscovery.h"
+#include "Utilities/AuthoringObjectApply/UeAgentOwnedObjectCreation.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTargetLocator.h"
+#include "Utilities/UeAgentUObjectProperties.h"
 #include "DomainAdapters/EditorProject/UeAgentEditorProjectMechanicsBoundary.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -10,9 +18,11 @@
 #include "Engine/StaticMesh.h"
 #include "MeshDescription.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/ScopeExit.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "StaticMeshAttributes.h"
+#include "UObject/Class.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 
@@ -25,17 +35,60 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 
 	namespace
 	{
-		bool Fail(
-			FUeAgentAssetProjectReadError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
+            return false;
+        }
+
+
+        
+
+		FString PointerPart(const FString& Value)
 		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-			return false;
+			return Value.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		}
+
+		FString NativeField(const FString& Selector)
+		{
+			return TEXT("/fields/") + PointerPart(Selector);
+		}
+
+		TSharedPtr<FJsonValue> InputKind(const TSharedPtr<FJsonValue>& Value)
+		{
+			const TCHAR* Kind = !Value.IsValid() ? TEXT("missing")
+				: Value->Type == EJson::Null ? TEXT("null")
+				: Value->Type == EJson::String ? TEXT("string")
+				: Value->Type == EJson::Number ? TEXT("number")
+				: Value->Type == EJson::Boolean ? TEXT("boolean")
+				: Value->Type == EJson::Array ? TEXT("array")
+				: Value->Type == EJson::Object ? TEXT("object") : TEXT("none");
+			return MakeShared<FJsonValueString>(Kind);
+		}
+
+		UE::UAI::Contract::FDiagnostic ReadFailure(const FString& Code, const FString& Reason,
+			const FString& Field, const TSharedPtr<FJsonValue>& Actual,
+			const TSharedPtr<FJsonValue>& Expected, const FString& InternalOwner = FString(),
+			const FString& SourceKind = TEXT("native_result"))
+		{
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("asset_project_read"));
+			Error.SourceKind = SourceKind;
+			Error.PropertyPath = Field;
+			Error.ActualValue = Actual;
+			Error.ExpectedValue = Expected;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValuePresent = Expected.IsValid();
+			Error.SubjectId = InternalOwner;
+			return Error;
+		}
+
+		UE::UAI::Contract::FDiagnostic ReadCondition(const FString& Code, const FString& Reason,
+			const FString& Field, const FString& InternalOwner = FString(),
+			bool Actual = false, bool Expected = true, const FString& SourceKind = TEXT("native_result"))
+		{
+			return ReadFailure(Code, Reason, Field, MakeShared<FJsonValueBoolean>(Actual),
+				MakeShared<FJsonValueBoolean>(Expected), InternalOwner, SourceKind);
 		}
 
 		bool ParseInput(
@@ -49,11 +102,12 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			if (!FJsonSerializer::Deserialize(Reader, OutObject)
 				|| !OutObject.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_project_read_input_invalid"),
-					FString(),
-					TEXT("canonical input is not a JSON object"));
+				OutError = ReadFailure(TEXT("asset_project_read_input_invalid"),
+					TEXT("The canonical query input is not a valid JSON object."), TEXT("/input"),
+					MakeShared<FJsonValueString>(TEXT("invalid JSON or non-object")), MakeShared<FJsonValueString>(TEXT("object")),
+					FString(), TEXT("command_input"));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Reader->GetErrorMessage());
+				return false;
 			}
 			return true;
 		}
@@ -104,11 +158,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 		{
 			if (!Value.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_project_read_value_invalid"),
-					OwnerId,
-					Selector);
+				return Fail(OutError, ReadCondition(TEXT("asset_project_read_value_invalid"),
+					TEXT("The captured field has no canonical value."), NativeField(Selector), OwnerId));
 			}
 			const FUeAgentStateRevision StateRevision =
 				Revision(Context);
@@ -139,11 +190,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				StateRevision);
 			if (!Entry.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_project_read_entry_invalid"),
-					OwnerId,
-					Selector);
+				auto Error = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("asset_project_read_entry_invalid"), Entry.GetValidationDiagnostic());
+				if (Error.SourceKind.IsEmpty()) Error.SourceKind = TEXT("native_result");
+				if (Error.PropertyPath.IsEmpty()) Error.PropertyPath = NativeField(Selector);
+				return Fail(OutError, MoveTemp(Error), OwnerId);
 			}
 			OutEntries.Add(Entry);
 			return true;
@@ -167,11 +217,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					Value,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				SemanticId,
@@ -204,11 +250,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					Value,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				SemanticId,
@@ -241,11 +283,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					Value,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				SemanticId,
@@ -278,11 +316,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					Value,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				SemanticId,
@@ -299,6 +333,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 
 		bool AddStringArray(
 			const FString& SemanticId,
+			const FString& TargetKind,
 			const FString& OwnerId,
 			const FString& Selector,
 			const TArray<FString>& Strings,
@@ -317,11 +352,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						Item,
 						StateError))
 				{
-					return Fail(
-						OutError,
-						StateError.Code,
-						StateError.Path,
-						StateError.Detail);
+					return Fail(OutError, StateError);
 				}
 				Items.Add(Item.ToSharedRef());
 			}
@@ -333,15 +364,11 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					Value,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				SemanticId,
-				TEXT("reference_origin"),
+				TargetKind,
 				OwnerId,
 				Selector,
 				TEXT("core.string_array"),
@@ -373,7 +400,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 							Value,
 							StateError))
 					{
-						return Fail(OutError, StateError.Code, StateError.Path, StateError.Detail);
+						return Fail(OutError, StateError);
 					}
 					Fields.Add({Name, Value.ToSharedRef()});
 					return true;
@@ -388,7 +415,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 							Value,
 							StateError))
 					{
-						return Fail(OutError, StateError.Code, StateError.Path, StateError.Detail);
+						return Fail(OutError, StateError);
 					}
 					Fields.Add({Name, Value.ToSharedRef()});
 					return true;
@@ -409,7 +436,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				{
 					if (OutError.Code.IsEmpty())
 					{
-						return Fail(OutError, StateError.Code, StateError.Path, StateError.Detail);
+						return Fail(OutError, StateError);
 					}
 					return false;
 				}
@@ -423,7 +450,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					Value,
 					StateError))
 			{
-				return Fail(OutError, StateError.Code, StateError.Path, StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				TEXT("reference.origin:code_paths"),
@@ -464,11 +491,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					OutSnapshot,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return true;
 		}
@@ -493,6 +516,396 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				}
 			}
 			return Result;
+		}
+
+		const TCHAR* RelationDirectionText(
+			const EUeAgentAssetRelationDirection Direction)
+		{
+			switch (Direction)
+			{
+			case EUeAgentAssetRelationDirection::Dependencies:
+				return TEXT("dependencies");
+			case EUeAgentAssetRelationDirection::Referencers:
+				return TEXT("referencers");
+			case EUeAgentAssetRelationDirection::Both:
+				return TEXT("both");
+			default:
+				return TEXT("");
+			}
+		}
+
+		bool TryParseRelationGraphRequest(
+			const TSharedPtr<FJsonObject>& Input,
+			FUeAgentAssetRelationGraphRequest& OutRequest,
+			FUeAgentAssetProjectReadError& OutError)
+		{
+			OutRequest = {};
+			const auto InvalidChoice = [&](const TCHAR* Code, const TCHAR* Field,
+				const FString& Actual, const TArray<FString>& Allowed)
+			{
+				auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(Code,
+					TEXT("Unsupported asset relation option."), TEXT("execution"));
+				Diagnostic.PropertyPath = Field;
+				Diagnostic.ActualValue = MakeShared<FJsonValueString>(Actual);
+				TArray<TSharedPtr<FJsonValue>> Choices;
+				for (const auto& Choice : Allowed) Choices.Add(MakeShared<FJsonValueString>(Choice));
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(Choices));
+				return Fail(OutError, MoveTemp(Diagnostic));
+			};
+			FString Direction;
+			if (!Input.IsValid()
+				|| !Input->TryGetStringField(TEXT("direction"), Direction))
+			{
+				auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_project_read_relation_direction_missing"),
+					TEXT("Asset relation direction must be provided as a string."), TEXT("execution"));
+				Diagnostic.PropertyPath = TEXT("direction");
+				Diagnostic.ActualValue = Input.IsValid() ? Input->TryGetField(TEXT("direction")) : nullptr;
+				Diagnostic.ActualValuePresent = Diagnostic.ActualValue.IsValid();
+				return Fail(OutError, MoveTemp(Diagnostic));
+			}
+			if (Direction == TEXT("dependencies"))
+			{
+				OutRequest.Direction =
+					EUeAgentAssetRelationDirection::Dependencies;
+			}
+			else if (Direction == TEXT("referencers"))
+			{
+				OutRequest.Direction =
+					EUeAgentAssetRelationDirection::Referencers;
+			}
+			else if (Direction == TEXT("both"))
+			{
+				OutRequest.Direction = EUeAgentAssetRelationDirection::Both;
+			}
+			else
+			{
+				return InvalidChoice(TEXT("asset_project_read_relation_input_invalid"), TEXT("direction"), Direction,
+					{TEXT("dependencies"), TEXT("referencers"), TEXT("both")});
+			}
+
+			for (const FString& Kind : ReadStringArray(
+				Input, TEXT("relation_kinds")))
+			{
+				if (Kind == TEXT("hard"))
+				{
+					OutRequest.RelationKinds.Add(
+						EUeAgentAssetRelationKind::Hard);
+				}
+				else if (Kind == TEXT("soft"))
+				{
+					OutRequest.RelationKinds.Add(
+						EUeAgentAssetRelationKind::Soft);
+				}
+				else if (Kind == TEXT("manage"))
+				{
+					OutRequest.RelationKinds.Add(
+						EUeAgentAssetRelationKind::Manage);
+				}
+				else if (Kind == TEXT("searchable_name"))
+				{
+					OutRequest.RelationKinds.Add(
+						EUeAgentAssetRelationKind::SearchableName);
+				}
+				else
+				{
+					return InvalidChoice(TEXT("asset_project_read_relation_kind_invalid"), TEXT("relation_kinds"), Kind,
+						{TEXT("hard"), TEXT("soft"), TEXT("manage"), TEXT("searchable_name")});
+				}
+			}
+
+			FString PackageScope = TEXT("all");
+			Input->TryGetStringField(TEXT("package_scope"), PackageScope);
+			if (PackageScope == TEXT("all"))
+			{
+				OutRequest.PackageScope =
+					EUeAgentAssetRelationPackageScope::All;
+			}
+			else if (PackageScope == TEXT("game"))
+			{
+				OutRequest.PackageScope =
+					EUeAgentAssetRelationPackageScope::Game;
+			}
+			else if (PackageScope == TEXT("editor_only"))
+			{
+				OutRequest.PackageScope =
+					EUeAgentAssetRelationPackageScope::EditorOnly;
+			}
+			else if (PackageScope == TEXT("build"))
+			{
+				OutRequest.PackageScope =
+					EUeAgentAssetRelationPackageScope::Build;
+			}
+			else
+			{
+				return InvalidChoice(TEXT("asset_project_read_relation_input_invalid"), TEXT("package_scope"), PackageScope,
+					{TEXT("all"), TEXT("game"), TEXT("editor_only"), TEXT("build")});
+			}
+
+			return true;
+		}
+
+		FString RelationNodeReference(const FUeAgentAssetRelationNode& Node)
+		{
+			return !Node.ObjectPath.IsEmpty()
+				? Node.ObjectPath
+				: Node.PackageName;
+		}
+
+		TSharedPtr<FJsonObject> RelationNodeJson(
+			const FUeAgentAssetRelationNode& Node,
+			const FString& Reference)
+		{
+			const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+			Object->SetStringField(TEXT("ref"), Reference);
+			if (!Node.PackageName.IsEmpty())
+			{
+				Object->SetStringField(TEXT("package_name"), Node.PackageName);
+			}
+			if (!Node.ObjectPath.IsEmpty())
+			{
+				Object->SetStringField(TEXT("object_path"), Node.ObjectPath);
+			}
+			Object->SetBoolField(TEXT("resolved"), Node.bResolved);
+			if (Node.bRedirector)
+			{
+				Object->SetBoolField(TEXT("redirector"), true);
+				if (!Node.RedirectTarget.IsEmpty())
+				{
+					Object->SetStringField(
+						TEXT("redirect_target"), Node.RedirectTarget);
+				}
+			}
+			return Object;
+		}
+
+		bool AddCanonicalJsonEntry(
+			const FString& SemanticId,
+			const FString& OwnerId,
+			const FString& Selector,
+			const FString& TypeId,
+			const TSharedPtr<FJsonValue>& JsonValue,
+			const FUeAgentOperationContext& Context,
+			TArray<FUeAgentStateEntry>& Entries,
+			FUeAgentAssetProjectReadError& OutError)
+		{
+			FUeAgentCanonicalValuePtr Value;
+			UE::UAI::Contract::FDiagnostic ValueError;
+			if (!JsonValue.IsValid()
+				|| !CanonicalJson::TryFromJsonValue(
+					JsonValue,
+					Context.GetResourceTracker(),
+					Value,
+					ValueError))
+			{
+				auto Error = ValueError.IsValid() ? MoveTemp(ValueError) : ReadCondition(
+					TEXT("asset_project_read_canonical_object_invalid"),
+					!JsonValue.IsValid() ? TEXT("The captured field has no JSON value to convert.")
+						: TEXT("The captured JSON field could not be converted to a canonical value."),
+					NativeField(Selector), OwnerId);
+				if (Error.PropertyPath.IsEmpty()) Error.PropertyPath = NativeField(Selector);
+				return Fail(OutError, MoveTemp(Error), OwnerId);
+			}
+			return AddValueEntry(
+				SemanticId,
+				TEXT("asset"),
+				OwnerId,
+				Selector,
+				TypeId,
+				Value->GetKind(),
+				Value,
+				Context,
+				Entries,
+				OutError);
+		}
+
+		bool AddCanonicalObjectEntry(
+			const FString& SemanticId,
+			const FString& OwnerId,
+			const FString& Selector,
+			const FString& TypeId,
+			const TSharedPtr<FJsonObject>& Object,
+			const FUeAgentOperationContext& Context,
+			TArray<FUeAgentStateEntry>& Entries,
+			FUeAgentAssetProjectReadError& OutError)
+		{
+			TSharedPtr<FJsonValue> JsonValue;
+			if (Object.IsValid()) JsonValue = MakeShared<FJsonValueObject>(Object);
+			return AddCanonicalJsonEntry(SemanticId, OwnerId, Selector, TypeId,
+				JsonValue, Context, Entries, OutError);
+		}
+
+		TSharedPtr<FJsonObject> VectorJson(
+			const double X,
+			const double Y,
+			const double Z)
+		{
+			const TSharedPtr<FJsonObject> Vector = MakeShared<FJsonObject>();
+			Vector->SetNumberField(TEXT("x"), X);
+			Vector->SetNumberField(TEXT("y"), Y);
+			Vector->SetNumberField(TEXT("z"), Z);
+			return Vector;
+		}
+
+		bool AddRelationGraph(
+			FUeAgentAssetRelationGraphResult Graph,
+			const FString& OwnerId,
+			const FUeAgentOperationContext& Context,
+			TArray<FUeAgentStateEntry>& Entries,
+			FUeAgentAssetProjectReadError& OutError)
+		{
+			Graph.Edges.Sort([](
+				const FUeAgentAssetRelationEdge& Left,
+				const FUeAgentAssetRelationEdge& Right)
+			{
+				return Left.TraversalDirection != Right.TraversalDirection
+					? Left.TraversalDirection < Right.TraversalDirection
+					: Left.Depth != Right.Depth
+						? Left.Depth < Right.Depth
+						: Left.SourceIdentifier != Right.SourceIdentifier
+							? Left.SourceIdentifier < Right.SourceIdentifier
+							: Left.TargetIdentifier != Right.TargetIdentifier
+								? Left.TargetIdentifier < Right.TargetIdentifier
+								: Left.Category != Right.Category
+									? Left.Category < Right.Category
+									: Left.PropertyFlags < Right.PropertyFlags;
+			});
+
+			Graph.Nodes.Sort([](
+				const FUeAgentAssetRelationNode& Left,
+				const FUeAgentAssetRelationNode& Right)
+			{
+				const FString LeftReference = RelationNodeReference(Left);
+				const FString RightReference = RelationNodeReference(Right);
+				return LeftReference != RightReference
+					? LeftReference < RightReference
+					: Left.StableIdentifier < Right.StableIdentifier;
+			});
+
+			TMap<FString, FString> References;
+			TArray<TSharedPtr<FJsonValue>> Nodes;
+			for (const FUeAgentAssetRelationNode& Node : Graph.Nodes)
+			{
+				const FString Reference = RelationNodeReference(Node);
+				if (Node.StableIdentifier.IsEmpty() || Reference.IsEmpty())
+				{
+					auto Error = ReadCondition(TEXT("asset_project_read_relation_graph_invalid"),
+						Node.StableIdentifier.IsEmpty() ? TEXT("A relation graph node has no stable identity.")
+							: TEXT("A relation graph node has no public reference."),
+						TEXT("/relation_graph/nodes/") + FString::FromInt(Nodes.Num())
+							+ (Node.StableIdentifier.IsEmpty() ? TEXT("/identity_present") : TEXT("/reference_present")), OwnerId);
+					Error.ActualEvidence = MakeShared<FJsonValueString>(Node.StableIdentifier);
+					return Fail(OutError, MoveTemp(Error));
+				}
+				References.Add(Node.StableIdentifier, Reference);
+				Nodes.Add(MakeShared<FJsonValueObject>(
+					RelationNodeJson(Node, Reference)));
+			}
+
+			TArray<TSharedPtr<FJsonValue>> Edges;
+			for (const FUeAgentAssetRelationEdge& Edge : Graph.Edges)
+			{
+				const FString* Source = References.Find(Edge.SourceIdentifier);
+				const FString* Target = References.Find(Edge.TargetIdentifier);
+				if (!Source || !Target)
+				{
+					auto Actual = MakeShared<FJsonObject>();
+					Actual->SetBoolField(TEXT("source_present"), Source != nullptr);
+					Actual->SetBoolField(TEXT("target_present"), Target != nullptr);
+					auto Expected = MakeShared<FJsonObject>();
+					Expected->SetBoolField(TEXT("source_present"), true);
+					Expected->SetBoolField(TEXT("target_present"), true);
+					auto Error = ReadFailure(TEXT("asset_project_read_relation_graph_invalid"),
+						TEXT("A relation edge refers to a source or target node missing from the graph."),
+						TEXT("/relation_graph/edges/") + FString::FromInt(Edges.Num()),
+						MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueObject>(Expected), OwnerId);
+					auto Identity = MakeShared<FJsonObject>();
+					Identity->SetStringField(TEXT("source"), Edge.SourceIdentifier);
+					Identity->SetStringField(TEXT("target"), Edge.TargetIdentifier);
+					Error.ActualEvidence = MakeShared<FJsonValueObject>(Identity);
+					return Fail(OutError, MoveTemp(Error));
+				}
+				const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+				Object->SetStringField(TEXT("source"), *Source);
+				Object->SetStringField(TEXT("target"), *Target);
+				Object->SetStringField(
+					TEXT("direction"),
+					Edge.TraversalDirection == TEXT("dependencies")
+						? TEXT("outgoing") : TEXT("incoming"));
+				Object->SetNumberField(TEXT("depth"), Edge.Depth);
+				Object->SetStringField(TEXT("relation"), Edge.Category);
+				TArray<TSharedPtr<FJsonValue>> Properties;
+				if (Edge.Category == TEXT("package"))
+				{
+					Properties.Add(MakeShared<FJsonValueString>(
+						Edge.bHard ? TEXT("hard") : TEXT("soft")));
+					Properties.Add(MakeShared<FJsonValueString>(
+						Edge.bGame ? TEXT("game") : TEXT("editor_only")));
+					Properties.Add(MakeShared<FJsonValueString>(
+						Edge.bBuild ? TEXT("build") : TEXT("not_build")));
+				}
+				else if (Edge.Category == TEXT("manage"))
+				{
+					Properties.Add(MakeShared<FJsonValueString>(
+						Edge.bDirect ? TEXT("direct") : TEXT("indirect")));
+				}
+				Object->SetArrayField(TEXT("properties"), MoveTemp(Properties));
+				TArray<TSharedPtr<FJsonValue>> Path;
+				for (const FString& Identifier : Edge.TraversalPath)
+				{
+					const FString* Reference = References.Find(Identifier);
+					if (!Reference)
+					{
+						auto Error = ReadCondition(TEXT("asset_project_read_relation_graph_invalid"),
+							TEXT("A relation traversal path refers to a node missing from the graph."),
+							TEXT("/relation_graph/edges/") + FString::FromInt(Edges.Num())
+								+ TEXT("/path/") + FString::FromInt(Path.Num()) + TEXT("/node_present"), OwnerId);
+						Error.ActualEvidence = MakeShared<FJsonValueString>(Identifier);
+						return Fail(OutError, MoveTemp(Error));
+					}
+					Path.Add(MakeShared<FJsonValueString>(*Reference));
+				}
+				Object->SetArrayField(TEXT("path"), MoveTemp(Path));
+				if (Edge.bCycle)
+				{
+					Object->SetBoolField(TEXT("cycle"), true);
+				}
+				Edges.Add(MakeShared<FJsonValueObject>(Object));
+			}
+
+			const TSharedPtr<FJsonObject> Coverage = MakeShared<FJsonObject>();
+			Coverage->SetBoolField(TEXT("complete"), Graph.bComplete);
+			Coverage->SetBoolField(
+				TEXT("registry_loading"), Graph.bRegistryLoading);
+			Coverage->SetStringField(
+				TEXT("scope"), TEXT("on_disk_asset_registry"));
+			Coverage->SetBoolField(
+				TEXT("runtime_references_included"),
+				Graph.bRuntimeReferencesIncluded);
+
+			const TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+			const FString* RootReference =
+				References.Find(Graph.Root.StableIdentifier);
+			if (!RootReference)
+			{
+				auto Error = ReadCondition(TEXT("asset_project_read_relation_graph_invalid"),
+					TEXT("The relation graph root is missing from its node set."), TEXT("/relation_graph/root/node_present"), OwnerId);
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Graph.Root.StableIdentifier);
+				return Fail(OutError, MoveTemp(Error));
+			}
+			Root->SetStringField(TEXT("root"), *RootReference);
+			Root->SetObjectField(TEXT("coverage"), Coverage);
+			Root->SetArrayField(TEXT("nodes"), MoveTemp(Nodes));
+			Root->SetArrayField(TEXT("edges"), MoveTemp(Edges));
+
+			return AddCanonicalObjectEntry(
+				TEXT("asset.relations:graph"),
+				OwnerId,
+				TEXT("relation_graph"),
+				TEXT("asset.relation_graph"),
+				Root,
+				Context,
+				Entries,
+				OutError);
 		}
 
 		bool AddObjectIdentity(
@@ -544,6 +957,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 		bool AddRequestedProperties(
 			UObject* Object,
 			const TArray<FString>& FieldIds,
+			const FString& SemanticPrefix,
+			const FString& TargetKind,
 			const FUeAgentOperationContext& Context,
 			TArray<FUeAgentStateEntry>& Entries,
 			FUeAgentAssetProjectReadError& OutError)
@@ -558,8 +973,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					++PropertyCount;
 				}
 				return AddInteger(
-					TEXT("asset.properties:count"),
-					TEXT("asset"),
+					SemanticPrefix + TEXT(":count"),
+					TargetKind,
 					Object->GetPathName(),
 					TEXT("property_count"),
 					PropertyCount,
@@ -576,12 +991,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						*FieldId);
 				if (!Property)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_project_read_property_not_found"),
-						Object->GetPathName(),
-						FieldId);
+				return Fail(OutError, ReadCondition(TEXT("asset_project_read_property_not_found"),
+					TEXT("The selected object has no property with the requested field name."), NativeField(FieldId) + TEXT("/present"), Object->GetPathName()));
 				}
 				FString Text;
 				Property->ExportText_InContainer(
@@ -592,9 +1003,9 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					Object,
 					PPF_None);
 				if (!AddString(
-						TEXT("asset.properties:value:")
+						SemanticPrefix + TEXT(":value:")
 							+ FieldId,
-						TEXT("asset"),
+						TargetKind,
 						Object->GetPathName(),
 						FieldId,
 						Text,
@@ -617,32 +1028,27 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				&& (KeyPrefix.IsEmpty() || Key.StartsWith(KeyPrefix));
 		}
 
-		bool AddCollectionCount(
+		bool AddCollectionObject(
 			UObject* Asset,
 			const FString& CollectionKind,
-			const int64 Count,
+			TArray<TSharedPtr<FJsonValue>> Values,
 			const FUeAgentOperationContext& Context,
 			TArray<FUeAgentStateEntry>& Entries,
 			FUeAgentAssetProjectReadError& OutError)
 		{
-			return AddString(
-				TEXT("asset.collection:kind"),
-				TEXT("asset"),
+			const TSharedPtr<FJsonObject> Collection = MakeShared<FJsonObject>();
+			Collection->SetStringField(TEXT("kind"), CollectionKind);
+			Collection->SetNumberField(TEXT("count"), Values.Num());
+			Collection->SetArrayField(CollectionKind, MoveTemp(Values));
+			return AddCanonicalObjectEntry(
+				TEXT("asset.collection:result"),
 				Asset->GetPathName(),
-				TEXT("collection_kind"),
-				CollectionKind,
+				TEXT("collection"),
+				TEXT("asset.collection"),
+				Collection,
 				Context,
 				Entries,
-				OutError)
-				&& AddInteger(
-					TEXT("asset.collection:count"),
-					TEXT("asset"),
-					Asset->GetPathName(),
-					TEXT("collection_count"),
-					Count,
-					Context,
-					Entries,
-					OutError);
+				OutError);
 		}
 
 		bool TryAddDataTableRows(
@@ -655,11 +1061,12 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			const UDataTable* Table = Cast<UDataTable>(Asset);
 			if (!Table || !Table->GetRowStruct())
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_project_read_collection_kind_unsupported"),
-					Asset->GetPathName(),
-					TEXT("rows requires a DataTable with a row struct"));
+				return Fail(OutError, !Table
+					? ReadFailure(TEXT("asset_project_read_collection_kind_unsupported"),
+						TEXT("Row collection requires a DataTable asset."), TEXT("/asset/type"),
+						MakeShared<FJsonValueString>(Asset->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("DataTable")), Asset->GetPathName())
+					: ReadCondition(TEXT("asset_project_read_collection_kind_unsupported"),
+						TEXT("The DataTable has no row struct."), TEXT("/row_struct/available"), Asset->GetPathName()));
 			}
 			const TArray<FString> RequestedKeys =
 				ReadStringArray(Input, TEXT("keys"));
@@ -668,7 +1075,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			FString KeyPrefix;
 			Input->TryGetStringField(TEXT("key_prefix"), KeyPrefix);
 			TSet<FString> MatchedKeys;
-			int64 Count = 0;
+			TArray<TSharedPtr<FJsonValue>> Rows;
 			TArray<FName> RowNames = Table->GetRowNames();
 			RowNames.Sort(FNameLexicalLess());
 			for (const FName RowName : RowNames)
@@ -681,85 +1088,51 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				uint8* const* RowData = Table->GetRowMap().Find(RowName);
 				if (!RowData || !*RowData)
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_project_read_collection_row_unavailable"),
-						Asset->GetPathName(),
-						Key);
+					return Fail(OutError, ReadCondition(TEXT("asset_project_read_collection_row_unavailable"),
+						TEXT("The DataTable row has no readable native row data."),
+						TEXT("/rows/") + PointerPart(Key) + TEXT("/data_available"), Asset->GetPathName()));
 				}
 				MatchedKeys.Add(Key);
-				++Count;
 				const FString RowOwner = Asset->GetPathName()
 					+ TEXT("#row:") + Key;
-				if (!AddString(
-						TEXT("asset.collection:row:") + Key,
-						TEXT("data_table_row"),
-						RowOwner,
-						TEXT("row_key"),
-						Key,
-						Context,
-						Entries,
-						OutError))
-				{
-					return false;
-				}
+				const TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+				Row->SetStringField(TEXT("key"), Key);
+				const TSharedPtr<FJsonObject> Fields = MakeShared<FJsonObject>();
 				for (const FString& FieldId : FieldIds)
 				{
 					FProperty* Property = FindFProperty<FProperty>(
 						Table->GetRowStruct(), *FieldId);
 					if (!Property)
 					{
-						return Fail(
-							OutError,
-							TEXT("asset_project_read_collection_field_not_found"),
-							RowOwner,
-							FieldId);
+						return Fail(OutError, ReadCondition(TEXT("asset_project_read_collection_field_not_found"),
+							TEXT("The DataTable row struct has no property with the requested field name."),
+							TEXT("/rows/") + PointerPart(Key) + TEXT("/fields/") + PointerPart(FieldId) + TEXT("/present"), RowOwner));
 					}
 					FString ValueText;
 					const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(
 						*RowData);
 					Property->ExportTextItem_Direct(
 						ValueText, ValuePtr, nullptr, Asset, PPF_None);
-					const FString FieldOwner = RowOwner
-						+ TEXT("#field:") + FieldId;
-					if (!AddString(
-							TEXT("asset.collection:row_field:")
-								+ Key + TEXT(":") + FieldId,
-							TEXT("data_table_field"),
-							FieldOwner,
-							TEXT("field_id"),
-							FieldId,
-							Context,
-							Entries,
-							OutError)
-						|| !AddString(
-							TEXT("asset.collection:row_value:")
-								+ Key + TEXT(":") + FieldId,
-							TEXT("data_table_field"),
-							FieldOwner,
-							TEXT("field_value_text"),
-							ValueText,
-							Context,
-							Entries,
-							OutError))
-					{
-						return false;
-					}
+					Fields->SetStringField(FieldId, ValueText);
 				}
+				if (!FieldIds.IsEmpty())
+				{
+					Row->SetObjectField(TEXT("fields"), Fields);
+				}
+				Rows.Add(MakeShared<FJsonValueObject>(Row));
 			}
 			for (const FString& RequestedKey : RequestedKeys)
 			{
 				if (!MatchedKeys.Contains(RequestedKey))
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_project_read_collection_key_not_found"),
-						Asset->GetPathName(),
-						RequestedKey);
+					return Fail(OutError, ReadCondition(TEXT("asset_project_read_collection_key_not_found"),
+						TEXT("The requested row key did not match a row in the selected DataTable scope."),
+						TEXT("/rows/") + PointerPart(RequestedKey) + TEXT("/matched"), Asset->GetPathName()));
 				}
 			}
-			return AddCollectionCount(
-				Asset, TEXT("rows"), Count, Context, Entries, OutError);
+			return AddCollectionObject(
+				Asset, TEXT("rows"), MoveTemp(Rows),
+				Context, Entries, OutError);
 		}
 
 		bool TryAddReflectedCollection(
@@ -811,17 +1184,68 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 								&& Property->IsA<FMapProperty>()));
 					if (!bCompatible)
 					{
-						return Fail(
-							OutError,
-							TEXT("asset_project_read_collection_field_kind_mismatch"),
-							Asset->GetPathName(),
-							FieldId);
+						return Fail(OutError, ReadFailure(TEXT("asset_project_read_collection_field_kind_mismatch"),
+							TEXT("The requested field does not have the native property kind required by this collection query."),
+							NativeField(FieldId) + TEXT("/type"),
+							MakeShared<FJsonValueString>(Property ? Property->GetCPPType() : TEXT("missing")),
+							MakeShared<FJsonValueString>(CollectionKind == TEXT("items") ? TEXT("array or set") : TEXT("map")), Asset->GetPathName()));
 					}
 					Properties.Add(Property);
 				}
 			}
+			if (FieldIds.IsEmpty())
+			{
+				if (!RequestedKeys.IsEmpty() || !KeyPrefix.IsEmpty())
+				{
+					auto Selectors = MakeShared<FJsonObject>();
+					Selectors->SetNumberField(TEXT("key_count"), RequestedKeys.Num());
+					Selectors->SetStringField(TEXT("key_prefix"), KeyPrefix);
+					return Fail(OutError, ReadFailure(TEXT("asset_project_read_collection_field_required"),
+						TEXT("Key selection requires an explicit collection field."), TEXT("/field_ids"),
+						MakeShared<FJsonValueObject>(Selectors), MakeShared<FJsonValueString>(TEXT("at least one collection field")),
+						Asset->GetPathName(), TEXT("command_input")));
+				}
+				int64 TotalCount = 0;
+				TArray<TSharedPtr<FJsonValue>> Fields;
+				for (FProperty* Property : Properties)
+				{
+					void* Container =
+						Property->ContainerPtrToValuePtr<void>(Asset);
+					int32 Count = 0;
+					if (FArrayProperty* Array = CastField<FArrayProperty>(Property))
+					{
+						Count = FScriptArrayHelper(Array, Container).Num();
+					}
+					else if (FSetProperty* Set = CastField<FSetProperty>(Property))
+					{
+						Count = FScriptSetHelper(Set, Container).Num();
+					}
+					else if (FMapProperty* Map = CastField<FMapProperty>(Property))
+					{
+						Count = FScriptMapHelper(Map, Container).Num();
+					}
+					TotalCount += Count;
+					const TSharedPtr<FJsonObject> Field = MakeShared<FJsonObject>();
+					Field->SetStringField(TEXT("field"), Property->GetName());
+					Field->SetNumberField(TEXT("count"), Count);
+					Fields.Add(MakeShared<FJsonValueObject>(Field));
+				}
+				const TSharedPtr<FJsonObject> Collection = MakeShared<FJsonObject>();
+				Collection->SetStringField(TEXT("kind"), CollectionKind);
+				Collection->SetNumberField(TEXT("count"), TotalCount);
+				Collection->SetArrayField(TEXT("fields"), MoveTemp(Fields));
+				return AddCanonicalObjectEntry(
+					TEXT("asset.collection:result"),
+					Asset->GetPathName(),
+					TEXT("collection"),
+					TEXT("asset.collection"),
+					Collection,
+					Context,
+					Entries,
+					OutError);
+			}
 
-			int64 Count = 0;
+			TArray<TSharedPtr<FJsonValue>> Values;
 			for (FProperty* Property : Properties)
 			{
 				void* Container = Property->ContainerPtrToValuePtr<void>(Asset);
@@ -839,28 +1263,11 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						Array->Inner->ExportTextItem_Direct(
 							ValueText, Helper.GetRawPtr(Index), nullptr,
 							Asset, PPF_None);
-						const FString Owner = Asset->GetPathName()
-							+ TEXT("#") + Property->GetName()
-							+ TEXT("[") + Key + TEXT("]");
-						if (!AddString(
-								TEXT("asset.collection:item_field:") + Owner,
-								TEXT("collection_item"), Owner,
-								TEXT("collection_field_id"), Property->GetName(),
-								Context, Entries, OutError)
-							|| !AddInteger(
-								TEXT("asset.collection:item_index:") + Owner,
-								TEXT("collection_item"), Owner,
-								TEXT("item_index"), Index,
-								Context, Entries, OutError)
-							|| !AddString(
-								TEXT("asset.collection:item_value:") + Owner,
-								TEXT("collection_item"), Owner,
-								TEXT("item_value_text"), ValueText,
-								Context, Entries, OutError))
-						{
-							return false;
-						}
-						++Count;
+						const TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+						Item->SetStringField(TEXT("field"), Property->GetName());
+						Item->SetNumberField(TEXT("index"), Index);
+						Item->SetStringField(TEXT("value"), ValueText);
+						Values.Add(MakeShared<FJsonValueObject>(Item));
 					}
 				}
 				else if (FSetProperty* Set = CastField<FSetProperty>(Property))
@@ -883,28 +1290,11 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						{
 							continue;
 						}
-						const FString Owner = Asset->GetPathName()
-							+ TEXT("#") + Property->GetName()
-							+ TEXT("{") + Key + TEXT("}");
-						if (!AddString(
-								TEXT("asset.collection:set_field:") + Owner,
-								TEXT("collection_item"), Owner,
-								TEXT("collection_field_id"), Property->GetName(),
-								Context, Entries, OutError)
-							|| !AddInteger(
-								TEXT("asset.collection:set_index:") + Owner,
-								TEXT("collection_item"), Owner,
-								TEXT("item_index"), FCString::Atoi(*Key),
-								Context, Entries, OutError)
-							|| !AddString(
-								TEXT("asset.collection:set_value:") + Owner,
-								TEXT("collection_item"), Owner,
-								TEXT("item_value_text"), ValueText,
-								Context, Entries, OutError))
-						{
-							return false;
-						}
-						++Count;
+						const TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+						Item->SetStringField(TEXT("field"), Property->GetName());
+						Item->SetNumberField(TEXT("index"), FCString::Atoi(*Key));
+						Item->SetStringField(TEXT("value"), ValueText);
+						Values.Add(MakeShared<FJsonValueObject>(Item));
 					}
 				}
 				else if (FMapProperty* Map = CastField<FMapProperty>(Property))
@@ -928,33 +1318,44 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						Map->ValueProp->ExportTextItem_Direct(
 							ValueText, Helper.GetValuePtr(Index), nullptr,
 							Asset, PPF_None);
-						const FString Owner = Asset->GetPathName()
-							+ TEXT("#") + Property->GetName()
-							+ TEXT("{") + Key + TEXT("}");
-						if (!AddString(
-								TEXT("asset.collection:entry_field:") + Owner,
-								TEXT("collection_entry"), Owner,
-								TEXT("collection_field_id"), Property->GetName(),
-								Context, Entries, OutError)
-							|| !AddString(
-								TEXT("asset.collection:entry_key:") + Owner,
-								TEXT("collection_entry"), Owner,
-								TEXT("entry_key"), Key,
-								Context, Entries, OutError)
-							|| !AddString(
-								TEXT("asset.collection:entry_value:") + Owner,
-								TEXT("collection_entry"), Owner,
-								TEXT("entry_value_text"), ValueText,
-								Context, Entries, OutError))
-						{
-							return false;
-						}
-						++Count;
+						const TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+						Entry->SetStringField(TEXT("field"), Property->GetName());
+						Entry->SetStringField(TEXT("key"), Key);
+						Entry->SetStringField(TEXT("value"), ValueText);
+						Values.Add(MakeShared<FJsonValueObject>(Entry));
 					}
 				}
 			}
-			return AddCollectionCount(
-				Asset, CollectionKind, Count, Context, Entries, OutError);
+			Values.Sort(
+				[&CollectionKind](
+					const TSharedPtr<FJsonValue>& Left,
+					const TSharedPtr<FJsonValue>& Right)
+				{
+					const TSharedPtr<FJsonObject> LeftObject =
+						Left.IsValid() ? Left->AsObject() : nullptr;
+					const TSharedPtr<FJsonObject> RightObject =
+						Right.IsValid() ? Right->AsObject() : nullptr;
+					if (!LeftObject.IsValid() || !RightObject.IsValid())
+					{
+						return LeftObject.IsValid();
+					}
+					const FString LeftField =
+						LeftObject->GetStringField(TEXT("field"));
+					const FString RightField =
+						RightObject->GetStringField(TEXT("field"));
+					if (LeftField != RightField)
+					{
+						return LeftField < RightField;
+					}
+					return CollectionKind == TEXT("items")
+						? LeftObject->GetNumberField(TEXT("index"))
+							< RightObject->GetNumberField(TEXT("index"))
+						: LeftObject->GetStringField(TEXT("key"))
+							< RightObject->GetStringField(TEXT("key"));
+				});
+			return AddCollectionObject(
+				Asset, CollectionKind, MoveTemp(Values),
+				Context, Entries, OutError);
 		}
 
 		bool TryAddAssetSample(
@@ -967,10 +1368,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			FString SampleKind;
 			if (!Input->TryGetStringField(TEXT("sample_kind"), SampleKind))
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_project_read_sample_kind_missing"),
-					Asset->GetPathName());
+				return Fail(OutError, ReadFailure(TEXT("asset_project_read_sample_kind_missing"),
+					TEXT("Asset sampling requires a string sample_kind."), TEXT("/sample_kind"),
+					InputKind(Input->TryGetField(TEXT("sample_kind"))), MakeShared<FJsonValueString>(TEXT("string")),
+					Asset->GetPathName(), TEXT("command_input")));
 			}
 			if (SampleKind == TEXT("bounds"))
 			{
@@ -978,11 +1379,11 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					|| Input->HasField(TEXT("index"))
 					|| Input->HasField(TEXT("channel")))
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_project_read_sample_selector_unsupported"),
-						Asset->GetPathName(),
-						SampleKind);
+					const FString Field = Input->HasField(TEXT("coordinates")) ? TEXT("coordinates")
+						: Input->HasField(TEXT("index")) ? TEXT("index") : TEXT("channel");
+					return Fail(OutError, ReadCondition(TEXT("asset_project_read_sample_selector_unsupported"),
+						TEXT("Bounds sampling does not accept coordinates, index or channel selectors."),
+						TEXT("/") + Field, Asset->GetPathName(), true, false, TEXT("command_input")));
 				}
 				FBoxSphereBounds Bounds;
 				if (const UStaticMesh* StaticMesh = Cast<UStaticMesh>(Asset))
@@ -996,45 +1397,33 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				}
 				else
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_project_read_sample_target_unsupported"),
-						Asset->GetPathName(),
-						SampleKind);
+					return Fail(OutError, ReadFailure(TEXT("asset_project_read_sample_target_unsupported"),
+						TEXT("Bounds sampling requires a static mesh or skeletal mesh asset."), TEXT("/asset/type"),
+						MakeShared<FJsonValueString>(Asset->GetClass()->GetPathName()),
+						MakeShared<FJsonValueString>(TEXT("StaticMesh or SkeletalMesh")), Asset->GetPathName()));
 				}
-				const FString Owner = Asset->GetPathName();
-				return AddString(
-						TEXT("asset.sample:kind"), TEXT("asset"), Owner,
-						TEXT("sample_kind"), SampleKind,
-						Context, Entries, OutError)
-					&& AddDecimal(
-						TEXT("asset.sample:bounds_origin_x"), TEXT("asset"), Owner,
-						TEXT("bounds_origin_x_cm"), Bounds.Origin.X,
-						Context, Entries, OutError)
-					&& AddDecimal(
-						TEXT("asset.sample:bounds_origin_y"), TEXT("asset"), Owner,
-						TEXT("bounds_origin_y_cm"), Bounds.Origin.Y,
-						Context, Entries, OutError)
-					&& AddDecimal(
-						TEXT("asset.sample:bounds_origin_z"), TEXT("asset"), Owner,
-						TEXT("bounds_origin_z_cm"), Bounds.Origin.Z,
-						Context, Entries, OutError)
-					&& AddDecimal(
-						TEXT("asset.sample:bounds_extent_x"), TEXT("asset"), Owner,
-						TEXT("bounds_extent_x_cm"), Bounds.BoxExtent.X,
-						Context, Entries, OutError)
-					&& AddDecimal(
-						TEXT("asset.sample:bounds_extent_y"), TEXT("asset"), Owner,
-						TEXT("bounds_extent_y_cm"), Bounds.BoxExtent.Y,
-						Context, Entries, OutError)
-					&& AddDecimal(
-						TEXT("asset.sample:bounds_extent_z"), TEXT("asset"), Owner,
-						TEXT("bounds_extent_z_cm"), Bounds.BoxExtent.Z,
-						Context, Entries, OutError)
-					&& AddDecimal(
-						TEXT("asset.sample:bounds_radius"), TEXT("asset"), Owner,
-						TEXT("bounds_sphere_radius_cm"), Bounds.SphereRadius,
-						Context, Entries, OutError);
+				const TSharedPtr<FJsonObject> Sample = MakeShared<FJsonObject>();
+				Sample->SetStringField(TEXT("kind"), SampleKind);
+				Sample->SetObjectField(
+					TEXT("origin_cm"),
+					VectorJson(Bounds.Origin.X, Bounds.Origin.Y, Bounds.Origin.Z));
+				Sample->SetObjectField(
+					TEXT("extent_cm"),
+					VectorJson(
+						Bounds.BoxExtent.X,
+						Bounds.BoxExtent.Y,
+						Bounds.BoxExtent.Z));
+				Sample->SetNumberField(
+					TEXT("sphere_radius_cm"), Bounds.SphereRadius);
+				return AddCanonicalObjectEntry(
+					TEXT("asset.sample:result"),
+					Asset->GetPathName(),
+					TEXT("sample"),
+					TEXT("asset.sample"),
+					Sample,
+					Context,
+					Entries,
+					OutError);
 			}
 			if (SampleKind == TEXT("vertex"))
 			{
@@ -1042,65 +1431,60 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					|| Input->HasField(TEXT("coordinates"))
 					|| Input->HasField(TEXT("channel")))
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_project_read_sample_selector_unsupported"),
-						Asset->GetPathName(),
-						SampleKind);
+					const bool bIndexMissing = !Input->HasField(TEXT("index"));
+					const FString Field = bIndexMissing ? TEXT("index")
+						: Input->HasField(TEXT("coordinates")) ? TEXT("coordinates") : TEXT("channel");
+					return Fail(OutError, ReadCondition(TEXT("asset_project_read_sample_selector_unsupported"),
+						bIndexMissing ? TEXT("Vertex sampling requires an index selector.")
+							: TEXT("Vertex sampling does not accept coordinates or channel selectors."),
+						TEXT("/") + Field, Asset->GetPathName(), !bIndexMissing, bIndexMissing, TEXT("command_input")));
 				}
 				const UStaticMesh* StaticMesh = Cast<UStaticMesh>(Asset);
 				const FMeshDescription* Description = StaticMesh
 					? StaticMesh->GetMeshDescription(0) : nullptr;
 				if (!Description)
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_project_read_sample_target_unsupported"),
-						Asset->GetPathName(),
-						SampleKind);
+					return Fail(OutError, !StaticMesh
+						? ReadFailure(TEXT("asset_project_read_sample_target_unsupported"),
+							TEXT("Vertex sampling requires a static mesh asset."), TEXT("/asset/type"),
+							MakeShared<FJsonValueString>(Asset->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("StaticMesh")), Asset->GetPathName())
+						: ReadCondition(TEXT("asset_project_read_sample_target_unsupported"),
+							TEXT("The static mesh has no LOD 0 mesh description available for vertex sampling."),
+							TEXT("/mesh/lods/0/description_available"), Asset->GetPathName()));
 				}
 				const int32 Index = static_cast<int32>(
 					Input->GetIntegerField(TEXT("index")));
 				const FVertexID VertexId(Index);
 				if (!Description->IsVertexValid(VertexId))
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_project_read_sample_index_out_of_range"),
-						Asset->GetPathName(),
-						LexToString(Index));
+					return Fail(OutError, ReadFailure(TEXT("asset_project_read_sample_index_out_of_range"),
+						TEXT("The requested vertex ID is not valid in the LOD 0 mesh description."), TEXT("/index"),
+						MakeShared<FJsonValueNumber>(Index), MakeShared<FJsonValueString>(TEXT("existing LOD 0 vertex ID")), Asset->GetPathName()));
 				}
 				const FStaticMeshConstAttributes Attributes(*Description);
 				const TVertexAttributesConstRef<FVector3f> Positions =
 					Attributes.GetVertexPositions();
 				const FVector3f Position = Positions[VertexId];
-				const FString Owner = Asset->GetPathName();
-				return AddString(
-						TEXT("asset.sample:kind"), TEXT("asset"), Owner,
-						TEXT("sample_kind"), SampleKind,
-						Context, Entries, OutError)
-					&& AddInteger(
-						TEXT("asset.sample:vertex_index"), TEXT("asset"), Owner,
-						TEXT("vertex_index"), Index,
-						Context, Entries, OutError)
-					&& AddDecimal(
-						TEXT("asset.sample:vertex_x"), TEXT("asset"), Owner,
-						TEXT("vertex_x_cm"), Position.X,
-						Context, Entries, OutError)
-					&& AddDecimal(
-						TEXT("asset.sample:vertex_y"), TEXT("asset"), Owner,
-						TEXT("vertex_y_cm"), Position.Y,
-						Context, Entries, OutError)
-					&& AddDecimal(
-						TEXT("asset.sample:vertex_z"), TEXT("asset"), Owner,
-						TEXT("vertex_z_cm"), Position.Z,
-						Context, Entries, OutError);
+				const TSharedPtr<FJsonObject> Sample = MakeShared<FJsonObject>();
+				Sample->SetStringField(TEXT("kind"), SampleKind);
+				Sample->SetNumberField(TEXT("index"), Index);
+				Sample->SetObjectField(
+					TEXT("position_cm"),
+					VectorJson(Position.X, Position.Y, Position.Z));
+				return AddCanonicalObjectEntry(
+					TEXT("asset.sample:result"),
+					Asset->GetPathName(),
+					TEXT("sample"),
+					TEXT("asset.sample"),
+					Sample,
+					Context,
+					Entries,
+					OutError);
 			}
-			return Fail(
-				OutError,
-				TEXT("asset_project_read_sample_kind_unsupported"),
-				Asset->GetPathName(),
-				SampleKind);
+			return Fail(OutError, ReadFailure(TEXT("asset_project_read_sample_kind_unsupported"),
+				TEXT("The requested asset sample kind is not supported."), TEXT("/sample_kind"),
+				MakeShared<FJsonValueString>(SampleKind), MakeShared<FJsonValueString>(TEXT("bounds or vertex")),
+				Asset->GetPathName(), TEXT("command_input")));
 		}
 
 		class FHookBase : public IUeAgentAssetProjectReadHook
@@ -1124,10 +1508,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				OutAsset = nullptr;
 				if (!Target.IsSet())
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_project_read_target_required"),
-						ProviderBinding);
+					return Fail(OutError, ReadCondition(TEXT("asset_project_read_target_required"),
+						TEXT("This asset query requires a selected target."), TEXT("/target/present"), ProviderBinding, false, true, TEXT("command_input")));
 				}
 				if (!Environment->TryResolveAsset(
 						Target.GetValue(),
@@ -1138,10 +1520,13 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				}
 				return OutAsset
 					? true
-					: Fail(
-						OutError,
-						TEXT("asset_project_read_asset_unresolved"),
-						Target.GetValue().GetBindingId());
+					: [&]()
+					{
+						OutError = ReadCondition(TEXT("asset_project_read_asset_unresolved"),
+							TEXT("The native asset resolver returned no asset for the selected target."), TEXT("/asset/available"), Target.GetValue().GetBindingId());
+						OutError.TargetPath = Target.GetValue().GetPublicRef();
+						return false;
+					}();
 			}
 
 			const FString ProviderBinding;
@@ -1165,11 +1550,9 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				OutError = {};
 				if (Target.IsSet())
 				{
-					return Fail(
-						OutError,
-						TEXT("reference_origin_public_target_forbidden"),
-						ProviderBinding,
-						TEXT("reference.origin.resolve accepts only input.target"));
+					return Fail(OutError, ReadCondition(TEXT("reference_origin_public_target_forbidden"),
+						TEXT("Reference origin resolution accepts only input.target and does not accept a separate public target."),
+						TEXT("/target/present"), ProviderBinding, true, false, TEXT("command_input")));
 				}
 				TSharedPtr<FJsonObject> Input;
 				if (!ParseInput(CanonicalInput, Input, OutError))
@@ -1184,27 +1567,24 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					|| !(*TargetObject)->TryGetStringField(TEXT("source"), ExplicitSource)
 					|| ExplicitSource.TrimStartAndEnd().IsEmpty())
 				{
-					return Fail(
-						OutError,
-						TEXT("reference_origin_target_invalid"),
-						ProviderBinding,
-						TEXT("input.target.source is required"));
+					const bool bObject = TargetObject && TargetObject->IsValid();
+					const auto Value = bObject ? (*TargetObject)->TryGetField(TEXT("source")) : Input->TryGetField(TEXT("target"));
+					return Fail(OutError, ReadFailure(TEXT("reference_origin_target_invalid"),
+						TEXT("Reference origin resolution requires input.target.source to be a non-empty string."),
+						bObject ? TEXT("/target/source") : TEXT("/target"),
+						bObject && Value.IsValid() && Value->Type == EJson::String
+							? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(ExplicitSource)) : InputKind(Value),
+						MakeShared<FJsonValueString>(bObject ? TEXT("non-empty string") : TEXT("object with a non-empty source")),
+						ProviderBinding, TEXT("command_input")));
 				}
 				UeAgentOriginResolve::FResolveParams Params;
-				FString ResolveError;
+				UE::UAI::Contract::FDiagnostic ResolveError;
 				if (!UeAgentOriginResolve::ParseResolveParams(
 						Input,
 						Params,
-						ResolveError)
-					|| Params.TargetSource.IsEmpty())
+						ResolveError))
 				{
-					return Fail(
-						OutError,
-						TEXT("reference_origin_target_invalid"),
-						Params.TargetSource,
-						ResolveError.IsEmpty()
-							? FString(TEXT("target.source is required"))
-							: ResolveError);
+					return Fail(OutError, ResolveError);
 				}
 				UeAgentOriginResolve::FResolveResult Result;
 				if (!UeAgentOriginResolve::ResolveOrigin(
@@ -1212,11 +1592,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						Result,
 						ResolveError))
 				{
-					return Fail(
-						OutError,
-						TEXT("reference_origin_resolve_failed"),
-						Params.TargetSource,
-						ResolveError);
+					return Fail(OutError, ResolveError);
 				}
 
 				const FString OwnerId = TEXT("reference-origin:")
@@ -1245,9 +1621,9 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					|| !AddTargetString(TEXT("asset_path"), Params.AssetPath)
 					|| !AddTargetString(TEXT("graph_name"), Params.GraphName)
 					|| !AddTargetString(TEXT("node_guid"), Params.NodeGuid)
-					|| !AddStringArray(TEXT("reference.origin:asset_paths"), OwnerId, TEXT("origin.asset_paths"), Result.AssetPaths, Context, Entries, OutError)
-					|| !AddStringArray(TEXT("reference.origin:package_paths"), OwnerId, TEXT("origin.package_paths"), Result.PackagePaths, Context, Entries, OutError)
-					|| !AddStringArray(TEXT("reference.origin:package_files"), OwnerId, TEXT("origin.package_files"), Result.PackageFiles, Context, Entries, OutError))
+					|| !AddStringArray(TEXT("reference.origin:asset_paths"), TEXT("reference_origin"), OwnerId, TEXT("origin.asset_paths"), Result.AssetPaths, Context, Entries, OutError)
+					|| !AddStringArray(TEXT("reference.origin:package_paths"), TEXT("reference_origin"), OwnerId, TEXT("origin.package_paths"), Result.PackagePaths, Context, Entries, OutError)
+					|| !AddStringArray(TEXT("reference.origin:package_files"), TEXT("reference_origin"), OwnerId, TEXT("origin.package_files"), Result.PackageFiles, Context, Entries, OutError))
 				{
 					return false;
 				}
@@ -1258,7 +1634,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				if (!AddCodePaths(OwnerId, Result.CodePaths, Context, Entries, OutError)
 					|| !AddBoolean(TEXT("reference.origin:resolved"), TEXT("reference_origin"), OwnerId, TEXT("resolved"), Result.bResolved, Context, Entries, OutError)
 					|| !AddString(TEXT("reference.origin:status"), TEXT("reference_origin"), OwnerId, TEXT("status"), Status, Context, Entries, OutError)
-					|| !AddStringArray(TEXT("reference.origin:warnings"), OwnerId, TEXT("warnings"), Result.Warnings, Context, Entries, OutError))
+					|| !AddStringArray(TEXT("reference.origin:warnings"), TEXT("reference_origin"), OwnerId, TEXT("warnings"), Result.Warnings, Context, Entries, OutError))
 				{
 					return false;
 				}
@@ -1309,6 +1685,37 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						OutSnapshot,
 						OutError);
 				}
+				if (ProviderBinding == TEXT("asset_project.read.asset_owned_candidates"))
+				{
+					FString Path, Query; UE::UAI::Contract::FDiagnostic Error;
+					Input->TryGetStringField(TEXT("property_path"), Path);
+					Input->TryGetStringField(TEXT("query"), Query);
+					UeAgentAuthoringObjectApply::FNativeOwnedCreationContext Native;
+					TArray<UeAgentAuthoringObjectApply::FOwnedClassCandidate> Candidates;
+					if (!Native.Initialize(Asset, Path, true, Error) || !Native.Collect(Candidates, Error))
+						return Fail(OutError, Error, Path);
+					UE::UAI::ContentDiscovery::FContentDiscoveryRequest Search;
+					Search.Query = Query;
+					TArray<UE::UAI::ContentDiscovery::FNameSelectionEntry> SelectionEntries;
+					TArray<TPair<int32, int32>> Matches;
+					for (const auto& Candidate : Candidates)
+					{
+						const int32 Index = SelectionEntries.Add(Candidate.Selection);
+						int32 Score = 0; FString Reason;
+						if (UE::UAI::ContentDiscovery::TryScoreContentDiscoveryMatch(Search, Candidate.Selection.Identity,
+							Candidate.Selection.Name, {}, Score, Reason)) Matches.Emplace(Score, Index);
+					}
+					Matches.StableSort([&SelectionEntries](const auto& A, const auto& B) {
+						return A.Key == B.Key ? SelectionEntries[A.Value].Name < SelectionEntries[B.Value].Name : A.Key > B.Key;
+					});
+					TArray<int32> MatchedIndices;
+					for (const auto& Match : Matches) MatchedIndices.Add(Match.Value);
+					TArray<FString> Names;
+					if (!UE::UAI::ContentDiscovery::TryBuildCandidateDiscoveryNamesForIndices(SelectionEntries, MatchedIndices,
+						UE::UAI::ContentDiscovery::ENameComparison::CaseSensitive, Names, Error)) return Fail(OutError, Error, Path);
+					if (!AddStringArray(TEXT("owned.candidates:names"), TEXT("asset"), TEXT("asset"), TEXT("names"), Names, Context, Entries, OutError)) return false;
+					return BuildSnapshot(ProviderBinding, Context, MoveTemp(Entries), OutSnapshot, OutError);
+				}
 				if (!AddObjectIdentity(
 						Asset,
 						TEXT("asset"),
@@ -1329,6 +1736,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 							ReadStringArray(
 								Input,
 								TEXT("field_ids")),
+							TEXT("asset.properties"),
+							TEXT("asset"),
 							Context,
 							Entries,
 							OutError))
@@ -1339,15 +1748,6 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				else if (ProviderBinding
 					== TEXT("asset_project.read.asset_relations"))
 				{
-					FString Direction;
-					if (!Input->TryGetStringField(
-							TEXT("direction"), Direction))
-					{
-						return Fail(
-							OutError,
-							TEXT("asset_project_read_relation_direction_missing"),
-							Asset->GetPathName());
-					}
 					FAssetData Record;
 					if (!Target.IsSet()
 						|| !Environment->TryResolveRegistryRecord(
@@ -1355,65 +1755,34 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						|| !Record.IsValid())
 					{
 						return OutError.Code.IsEmpty()
-							? Fail(
-								OutError,
-								TEXT("asset_project_read_registry_unresolved"),
-								Asset->GetPathName())
+							? Fail(OutError, ReadCondition(TEXT("asset_project_read_registry_unresolved"),
+								TEXT("No valid asset registry record was returned for relation traversal."),
+								TEXT("/registry/record/available"), Asset->GetPathName()))
 							: false;
 					}
-					TArray<FString> Dependencies;
-					TArray<FString> Referencers;
+					FUeAgentAssetRelationGraphRequest Request;
+					FUeAgentAssetRelationGraphResult Graph;
+					if (!TryParseRelationGraphRequest(Input, Request, OutError))
+					{
+						if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Asset->GetPathName();
+						return false;
+					}
 					if (!Environment->TryResolveRegistryRelations(
 							Record,
-							Direction,
-							ReadStringArray(Input, TEXT("relation_kinds")),
-							Dependencies,
-							Referencers,
+							Request,
+							Graph,
 							OutError))
 					{
 						return false;
 					}
-					if (!AddString(
-							TEXT("asset.relations:direction"),
-							TEXT("asset"),
+					if (!AddRelationGraph(
+							MoveTemp(Graph),
 							Asset->GetPathName(),
-							TEXT("direction"),
-							Direction,
 							Context,
 							Entries,
 							OutError))
 					{
 						return false;
-					}
-					for (const FString& Dependency : Dependencies)
-					{
-						if (!AddString(
-								TEXT("asset.relations:dependency:") + Dependency,
-								TEXT("asset"),
-								Asset->GetPathName(),
-								TEXT("dependency"),
-								Dependency,
-								Context,
-								Entries,
-								OutError))
-						{
-							return false;
-						}
-					}
-					for (const FString& Referencer : Referencers)
-					{
-						if (!AddString(
-								TEXT("asset.relations:referencer:") + Referencer,
-								TEXT("asset"),
-								Asset->GetPathName(),
-								TEXT("referencer"),
-								Referencer,
-								Context,
-								Entries,
-								OutError))
-						{
-							return false;
-						}
 					}
 				}
 				else if (ProviderBinding
@@ -1456,11 +1825,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						}
 						else
 						{
-							return Fail(
-								OutError,
-								TEXT("asset_project_read_validation_rule_unsupported"),
-								Asset->GetPathName(),
-								RuleId);
+							return Fail(OutError, ReadFailure(TEXT("asset_project_read_validation_rule_unsupported"),
+								TEXT("The requested asset validation rule is not supported."), TEXT("/rule_ids"),
+								MakeShared<FJsonValueString>(RuleId), MakeShared<FJsonValueString>(TEXT("object.valid, package.present, package.not_dirty, registry_record.present")),
+								Asset->GetPathName(), TEXT("command_input")));
 						}
 						bOverallValid = bOverallValid && bPassed;
 						if (!bPassed || bIncludePassed)
@@ -1510,10 +1878,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					if (!Input->TryGetStringField(
 							TEXT("collection_kind"), CollectionKind))
 					{
-						return Fail(
-							OutError,
-							TEXT("asset_project_read_collection_kind_missing"),
-							Asset->GetPathName());
+						return Fail(OutError, ReadFailure(TEXT("asset_project_read_collection_kind_missing"),
+							TEXT("Asset collection queries require a string collection_kind."), TEXT("/collection_kind"),
+							InputKind(Input->TryGetField(TEXT("collection_kind"))), MakeShared<FJsonValueString>(TEXT("string")),
+							Asset->GetPathName(), TEXT("command_input")));
 					}
 					const bool bCaptured = CollectionKind == TEXT("rows")
 						? TryAddDataTableRows(
@@ -1523,11 +1891,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 							? TryAddReflectedCollection(
 								Asset, CollectionKind, Input,
 								Context, Entries, OutError)
-							: Fail(
-								OutError,
-								TEXT("asset_project_read_collection_kind_unsupported"),
-								Asset->GetPathName(),
-								CollectionKind);
+							: Fail(OutError, ReadFailure(TEXT("asset_project_read_collection_kind_unsupported"),
+								TEXT("The requested asset collection kind is not supported."), TEXT("/collection_kind"),
+								MakeShared<FJsonValueString>(CollectionKind), MakeShared<FJsonValueString>(TEXT("rows, items or entries")),
+								Asset->GetPathName(), TEXT("command_input")));
 					if (!bCaptured)
 					{
 						return false;
@@ -1567,10 +1934,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				OutError = {};
 				if (!Target.IsSet())
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_project_read_target_required"),
-						ProviderBinding);
+					return Fail(OutError, ReadCondition(TEXT("asset_project_read_target_required"),
+						TEXT("Registry queries require a selected target."), TEXT("/target/present"), ProviderBinding, false, true, TEXT("command_input")));
 				}
 				TSharedPtr<FJsonObject> Input;
 				if (!ParseInput(CanonicalInput, Input, OutError))
@@ -1585,11 +1950,9 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					|| !Record.IsValid())
 				{
 					return OutError.Code.IsEmpty()
-						? Fail(
-							OutError,
-							TEXT(
-								"asset_project_read_registry_unresolved"),
-							Target.GetValue().GetBindingId())
+						? Fail(OutError, ReadCondition(TEXT("asset_project_read_registry_unresolved"),
+							TEXT("The native registry resolver returned no valid record for the selected asset."),
+							TEXT("/registry/record/available"), Target.GetValue().GetBindingId()))
 						: false;
 				}
 				const FString OwnerId = Record.GetObjectPathString();
@@ -1625,27 +1988,50 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					return false;
 				}
 				if (ProviderBinding
+					== TEXT("asset_project.read.registry_record"))
+				{
+					bool bIncludeTags = false;
+					bool bIncludeChunkIds = false;
+					Input->TryGetBoolField(TEXT("include_tags"), bIncludeTags);
+					Input->TryGetBoolField(TEXT("include_chunk_ids"), bIncludeChunkIds);
+					if (bIncludeTags)
+					{
+						const TSharedPtr<FJsonObject> Tags = MakeShared<FJsonObject>();
+						for (const auto Tag : Record.TagsAndValues)
+						{
+							Tags->SetStringField(Tag.Key.ToString(), Tag.Value.AsString());
+						}
+						if (!AddCanonicalObjectEntry(TEXT("asset.registry:tags"), OwnerId,
+							TEXT("tags"), TEXT("asset.registry.tags"), Tags,
+							Context, Entries, OutError)) return false;
+					}
+					if (bIncludeChunkIds)
+					{
+						TArray<TSharedPtr<FJsonValue>> ChunkIds;
+						for (const int32 ChunkId : Record.GetChunkIDs())
+						{
+							ChunkIds.Add(MakeShared<FJsonValueNumber>(ChunkId));
+						}
+						if (!AddCanonicalJsonEntry(TEXT("asset.registry:chunk_ids"), OwnerId,
+							TEXT("chunk_ids"), TEXT("core.integer_array"),
+							MakeShared<FJsonValueArray>(ChunkIds), Context, Entries, OutError)) return false;
+					}
+				}
+				if (ProviderBinding
 					== TEXT(
 						"asset_project.read.registry_relations"))
 				{
-					FString Direction;
-					if (!Input->TryGetStringField(
-						TEXT("direction"),
-						Direction))
+					FUeAgentAssetRelationGraphRequest Request;
+					FUeAgentAssetRelationGraphResult Graph;
+					if (!TryParseRelationGraphRequest(Input, Request, OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT("asset_project_read_relation_direction_missing"),
-							OwnerId);
+						if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = OwnerId;
+						return false;
 					}
-					TArray<FString> Dependencies;
-					TArray<FString> Referencers;
 					if (!Environment->TryResolveRegistryRelations(
 							Record,
-							Direction,
-							ReadStringArray(Input, TEXT("relation_kinds")),
-							Dependencies,
-							Referencers,
+							Request,
+							Graph,
 							OutError))
 					{
 						return false;
@@ -1655,14 +2041,41 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 							TEXT("asset"),
 							OwnerId,
 							TEXT("direction"),
-							Direction,
+							RelationDirectionText(Request.Direction),
 							Context,
 							Entries,
 							OutError))
 					{
 						return false;
 					}
-					for (const FString& Dependency : Dependencies)
+					TSet<FString> Dependencies;
+					TSet<FString> Referencers;
+					for (const FUeAgentAssetRelationEdge& Edge : Graph.Edges)
+					{
+						if (Edge.Depth != 1)
+						{
+							continue;
+						}
+						if (Edge.TraversalDirection == TEXT("dependencies"))
+						{
+							Dependencies.Add(
+								Edge.TargetPackageName.IsEmpty()
+									? Edge.TargetIdentifier
+									: Edge.TargetPackageName);
+						}
+						else if (Edge.TraversalDirection == TEXT("referencers"))
+						{
+							Referencers.Add(
+								Edge.SourcePackageName.IsEmpty()
+									? Edge.SourceIdentifier
+									: Edge.SourcePackageName);
+						}
+					}
+					TArray<FString> SortedDependencies = Dependencies.Array();
+					TArray<FString> SortedReferencers = Referencers.Array();
+					SortedDependencies.Sort();
+					SortedReferencers.Sort();
+					for (const FString& Dependency : SortedDependencies)
 					{
 						if (!AddString(
 								TEXT("asset.registry:dependency:") + Dependency,
@@ -1677,7 +2090,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 							return false;
 						}
 					}
-					for (const FString& Referencer : Referencers)
+					for (const FString& Referencer : SortedReferencers)
 					{
 						if (!AddString(
 								TEXT("asset.registry:referencer:") + Referencer,
@@ -1722,11 +2135,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			if (!EditorProject::IsEditorProjectQueryRoute(
 					ProviderBinding, Action))
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_query_route_mismatch"),
-					ProviderBinding,
-					Action);
+				return Fail(OutError, ReadFailure(TEXT("editor_project_query_route_mismatch"),
+					TEXT("The requested editor/project action is not registered for this query route."), TEXT("/editor_project_capability"),
+					MakeShared<FJsonValueString>(Action), MakeShared<FJsonValueString>(TEXT("action registered for this query route")),
+					ProviderBinding, TEXT("command_input")));
 			}
 
 			TSharedPtr<FJsonObject> Parameters = MakeShared<FJsonObject>();
@@ -1743,7 +2155,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				IEditorProjectQueryMechanicsPort> Port =
 				EditorProject::CreateEditorProjectQueryMechanicsPort();
 			TSharedPtr<FJsonObject> Observation;
-			FString NativeError;
+			UE::UAI::Contract::FDiagnostic NativeError;
 			if (!Port->Execute(
 					Action,
 					{Context.GetRequestId(), Parameters},
@@ -1751,11 +2163,11 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					NativeError)
 				|| !Observation.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_query_mechanics_failed"),
-					Action,
-					NativeError);
+				auto Error = NativeError.IsValid() ? MoveTemp(NativeError) : ReadCondition(
+					TEXT("editor_project_query_observation_invalid"), TEXT("The editor/project query returned no observation."),
+					TEXT("/observation/available"), ProviderBinding);
+				if (Error.CandidateName.IsEmpty()) Error.CandidateName = Action;
+				return Fail(OutError, MoveTemp(Error));
 			}
 
 			FString ObservationJson;
@@ -1767,10 +2179,11 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			if (!FJsonSerializer::Serialize(
 					Observation.ToSharedRef(), Writer))
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_query_observation_invalid"),
-					Action);
+				auto Error = ReadCondition(TEXT("editor_project_query_observation_invalid"),
+					TEXT("The editor/project observation could not be serialized as JSON."),
+					TEXT("/observation/serialization_succeeded"), ProviderBinding);
+				Error.CandidateName = Action;
+				return Fail(OutError, MoveTemp(Error));
 			}
 			return AddString(
 				TEXT("editor_project.capability:") + Action,
@@ -1844,15 +2257,24 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				{
 					return false;
 				}
-				for (const FUeAgentEditorResourceObservation& Resource : Resources)
+				for (int32 ResourceIndex = 0; ResourceIndex < Resources.Num(); ++ResourceIndex)
 				{
+					const auto& Resource = Resources[ResourceIndex];
+					ON_SCOPE_EXIT
+					{
+						if (OutError.IsValid() && OutError.TargetPath.IsEmpty() && !Resource.ResourceId.IsEmpty())
+							OutError.TargetPath = Resource.ResourceId;
+					};
 					if (Resource.ResourceId.IsEmpty()
 						|| Resource.ResourceKind.IsEmpty())
 					{
-						return Fail(
-							OutError,
-							TEXT("asset_project_read_editor_resource_invalid"),
-							ProviderBinding);
+						auto Error = ReadCondition(TEXT("asset_project_read_editor_resource_invalid"),
+							Resource.ResourceId.IsEmpty() ? TEXT("An editor resource observation has no public resource reference.")
+								: TEXT("An editor resource observation has no resource kind."),
+							TEXT("/resources/") + FString::FromInt(ResourceIndex)
+								+ (Resource.ResourceId.IsEmpty() ? TEXT("/resource_ref/present") : TEXT("/resource_kind/present")), ProviderBinding);
+						Error.ActualEvidence = MakeShared<FJsonValueString>(Resource.ResourceId);
+						return Fail(OutError, MoveTemp(Error));
 					}
 					const FString& OwnerId = Resource.ResourceId;
 					if (!AddString(
@@ -1944,6 +2366,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			{
 				OutSnapshot.Reset();
 				OutError = {};
+				ON_SCOPE_EXIT
+				{
+					if (OutError.IsValid() && OutError.TargetPath.IsEmpty()) OutError.TargetPath = TEXT("project");
+				};
 				TSharedPtr<FJsonObject> Input;
 				if (!ParseInput(CanonicalInput, Input, OutError))
 				{
@@ -1989,10 +2415,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					{
 						if (!SupportedFields.Contains(FieldId))
 						{
-							return Fail(
-								OutError,
-								TEXT("asset_project_read_platform_field_unsupported"),
-								FieldId);
+							return Fail(OutError, ReadFailure(TEXT("asset_project_read_platform_field_unsupported"),
+								TEXT("The requested platform field is not supported."), TEXT("/field_ids"),
+								MakeShared<FJsonValueString>(FieldId), MakeShared<FJsonValueString>(FString::Join(SupportedFields, TEXT(", "))),
+								FString(), TEXT("command_input")));
 						}
 					}
 					TArray<FUeAgentProjectPlatformObservation> Platforms;
@@ -2009,22 +2435,25 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						TEXT("resolve_inheritance"), bResolveInheritance);
 					auto Includes = [&FieldIds](const TCHAR* Field)
 					{
-						return FieldIds.IsEmpty()
+						return FStringView(Field) == TEXTVIEW("platform_name")
 							|| FieldIds.Contains(Field);
 					};
-					for (const FUeAgentProjectPlatformObservation& Platform
-						: Platforms)
+					for (int32 PlatformIndex = 0; PlatformIndex < Platforms.Num(); ++PlatformIndex)
 					{
+						const auto& Platform = Platforms[PlatformIndex];
 						if (Platform.PlatformName.IsEmpty())
 						{
-							return Fail(
-								OutError,
-								TEXT("asset_project_read_platform_observation_invalid"),
-								Context.GetExecutionContext()
-									.GetProjectInstanceId());
+							return Fail(OutError, ReadCondition(TEXT("asset_project_read_platform_observation_invalid"),
+								TEXT("A native platform observation has no platform name."),
+								TEXT("/platforms/") + FString::FromInt(PlatformIndex) + TEXT("/platform_name/present"),
+								Context.GetExecutionContext().GetProjectInstanceId()));
 						}
 						const FString Owner = TEXT("platform:")
 							+ Platform.PlatformName;
+						ON_SCOPE_EXIT
+						{
+							if (OutError.IsValid() && OutError.TargetPath.IsEmpty()) OutError.TargetPath = Owner;
+						};
 						if (!AddBoolean(
 								TEXT("project.platform:resolve_inheritance:") + Owner,
 								TEXT("target_platform"), Owner,
@@ -2080,20 +2509,32 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						OutError);
 				}
 				UObject* ProjectObject = nullptr;
-				if (!Environment->TryResolveProjectObject(
+				const bool bProjectSettings = ProviderBinding == TEXT("asset_project.read.project_settings");
+				FString SettingsSectionId;
+				if (bProjectSettings) Input->TryGetStringField(TEXT("section_id"), SettingsSectionId);
+				const bool bResolved = bProjectSettings
+					? Environment->TryResolveProjectSettingsObject(
+						Context.GetExecutionContext(),
+						SettingsSectionId,
+						ProjectObject, OutError)
+					: Environment->TryResolveProjectObject(
 						Context.GetExecutionContext(),
 						TEXT("project"),
 						ProjectObject,
-						OutError)
-					|| !ProjectObject)
+						OutError);
+				if (!bResolved || !ProjectObject)
 				{
 					return OutError.Code.IsEmpty()
-						? Fail(
-							OutError,
-							TEXT(
-								"asset_project_read_project_unresolved"),
-							Context.GetExecutionContext()
-								.GetProjectInstanceId())
+						? [&]()
+						{
+							OutError = ReadCondition(TEXT("asset_project_read_project_unresolved"),
+								bProjectSettings ? TEXT("The native resolver returned no object for the selected settings section.")
+									: TEXT("The native resolver returned no general project settings object."),
+								bProjectSettings ? TEXT("/settings/object/available") : TEXT("/project/object/available"),
+								Context.GetExecutionContext().GetProjectInstanceId());
+							OutError.CandidateName = bProjectSettings ? SettingsSectionId : TEXT("project");
+							return false;
+						}()
 						: false;
 				}
 				if (!AddObjectIdentity(
@@ -2108,16 +2549,39 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				if (ProviderBinding
 					== TEXT("asset_project.read.project_settings"))
 				{
+					const TArray<FString> FieldIds = ReadStringArray(Input, TEXT("field_ids"));
 					if (!AddRequestedProperties(
 							ProjectObject,
-							ReadStringArray(
-								Input,
-								TEXT("field_ids")),
+							FieldIds,
+							TEXT("project.settings"),
+							TEXT("project"),
 							Context,
 							Entries,
 							OutError))
 					{
 						return false;
+					}
+					bool bIncludeDefaults = false;
+					Input->TryGetBoolField(TEXT("include_defaults"), bIncludeDefaults);
+					if (bIncludeDefaults && !FieldIds.IsEmpty())
+					{
+						TSharedRef<FJsonObject> Defaults = MakeShared<FJsonObject>();
+						UeAgentUObjectProperties::FExportOptions Options;
+						Options.Profile = UeAgentUObjectProperties::EExportProfile::Readback;
+						for (const FString& FieldId : FieldIds)
+						{
+							FProperty* Property = FindFProperty<FProperty>(ProjectObject->GetClass(), *FieldId);
+							const TSharedPtr<FJsonObject> Descriptor = UeAgentUObjectProperties::BuildPropertyDescriptor(ProjectObject, Property, Options);
+							FString DefaultText;
+							Defaults->SetField(FieldId, Descriptor.IsValid() && Descriptor->TryGetStringField(TEXT("default_value_text"), DefaultText)
+								? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(DefaultText))
+								: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()));
+						}
+						FString DefaultsJson;
+						const auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&DefaultsJson);
+						if (!FJsonSerializer::Serialize(Defaults, Writer)
+							|| !AddString(TEXT("project.settings:defaults"), TEXT("project"), ProjectObject->GetPathName(),
+								TEXT("defaults"), DefaultsJson, Context, Entries, OutError)) return false;
 					}
 				}
 				else if (ProviderBinding
@@ -2129,10 +2593,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					{
 						if (SectionId != TEXT("project"))
 						{
-							return Fail(
-								OutError,
-								TEXT("asset_project_read_validation_section_unsupported"),
-								SectionId);
+							return Fail(OutError, ReadFailure(TEXT("asset_project_read_validation_section_unsupported"),
+								TEXT("The requested project validation section is not supported."), TEXT("/section_ids"),
+								MakeShared<FJsonValueString>(SectionId), MakeShared<FJsonValueString>(TEXT("project")),
+								FString(), TEXT("command_input")));
 						}
 					}
 					TArray<FString> RuleIds =
@@ -2149,11 +2613,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					{
 						if (RuleId != TEXT("project_object.valid"))
 						{
-							return Fail(
-								OutError,
-								TEXT("asset_project_read_validation_rule_unsupported"),
-								ProjectObject->GetPathName(),
-								RuleId);
+							return Fail(OutError, ReadFailure(TEXT("asset_project_read_validation_rule_unsupported"),
+								TEXT("The requested project validation rule is not supported."), TEXT("/rule_ids"),
+								MakeShared<FJsonValueString>(RuleId), MakeShared<FJsonValueString>(TEXT("project_object.valid")),
+								ProjectObject->GetPathName(), TEXT("command_input")));
 						}
 						const bool bPassed = IsValid(ProjectObject);
 						bOverallValid = bOverallValid && bPassed;
@@ -2247,11 +2710,13 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						TEXT("section_id"),
 						SectionId))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_project_read_config_input_missing"),
-						ProviderBinding);
+					const auto ScopeValue = Input->TryGetField(TEXT("config_scope"));
+					const bool bScopeString = ScopeValue.IsValid() && ScopeValue->Type == EJson::String;
+					return Fail(OutError, ReadFailure(TEXT("asset_project_read_config_input_missing"),
+						TEXT("Configuration queries require string config_scope and section_id selectors."),
+						bScopeString ? TEXT("/section_id") : TEXT("/config_scope"),
+						InputKind(bScopeString ? Input->TryGetField(TEXT("section_id")) : ScopeValue),
+						MakeShared<FJsonValueString>(TEXT("string")), ProviderBinding, TEXT("command_input")));
 				}
 				const FConfigFile* Config = nullptr;
 				if (!Environment->TryResolveConfig(
@@ -2262,13 +2727,25 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					|| !Config)
 				{
 					return OutError.Code.IsEmpty()
-						? Fail(
-							OutError,
-							TEXT(
-								"asset_project_read_config_unresolved"),
-							ConfigScope)
+						? [&]()
+						{
+							OutError = ReadCondition(TEXT("asset_project_read_config_unresolved"),
+								TEXT("The native configuration resolver returned no file for the requested scope."),
+								TEXT("/config/file/available"), ProviderBinding);
+							OutError.CandidateName = ConfigScope;
+							return false;
+						}()
 						: false;
 				}
+				ON_SCOPE_EXIT
+				{
+					if (OutError.IsValid())
+					{
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TEXT("config:")
+							+ (ConfigScope == TEXT("platform") ? FString(TEXT("game")) : ConfigScope);
+						if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = SectionId;
+					}
+				};
 				const FString OwnerId =
 					Context.GetExecutionContext().GetProjectInstanceId()
 					+ TEXT(":config:")
@@ -2295,11 +2772,10 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					FString Key;
 					if (!Input->TryGetStringField(TEXT("key"), Key))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"asset_project_read_config_key_missing"),
-							SectionId);
+						return Fail(OutError, ReadFailure(TEXT("asset_project_read_config_key_missing"),
+							TEXT("A resolved configuration value query requires a string key."), TEXT("/key"),
+							InputKind(Input->TryGetField(TEXT("key"))), MakeShared<FJsonValueString>(TEXT("string")),
+							SectionId, TEXT("command_input")));
 					}
 					FString Value;
 					if (!Config->GetString(
@@ -2307,12 +2783,11 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 							*Key,
 							Value))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"asset_project_read_config_value_missing"),
-							SectionId,
-							Key);
+						auto Error = ReadCondition(TEXT("asset_project_read_config_value_missing"),
+							TEXT("The selected configuration section has no resolved string value for the requested key."),
+							TEXT("/sections/") + PointerPart(SectionId) + TEXT("/keys/") + PointerPart(Key) + TEXT("/present"), OwnerId);
+						Error.CandidateName = ConfigScope;
+						return Fail(OutError, MoveTemp(Error));
 					}
 					if (!AddString(
 							TEXT("config.value:") + Key,
@@ -2333,11 +2808,11 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						Config->FindSection(SectionId);
 					if (!Section)
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"asset_project_read_config_section_missing"),
-							SectionId);
+						auto Error = ReadCondition(TEXT("asset_project_read_config_section_missing"),
+							TEXT("The requested configuration section is absent from the resolved configuration."),
+							TEXT("/sections/") + PointerPart(SectionId) + TEXT("/present"), OwnerId);
+						Error.CandidateName = ConfigScope;
+						return Fail(OutError, MoveTemp(Error));
 					}
 					TSet<FString> RequestedKeys;
 					for (const FString& Key
@@ -2345,25 +2820,76 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 					{
 						RequestedKeys.Add(Key);
 					}
+					if (RequestedKeys.IsEmpty())
+					{
+						TSet<FString> UniqueKeys;
+						for (FConfigSection::TConstIterator It(*Section);
+							It;
+							++It)
+						{
+							UniqueKeys.Add(It.Key().ToString());
+						}
+						TArray<FString> KeyNames = UniqueKeys.Array();
+						KeyNames.Sort();
+						if (!AddStringArray(
+								TEXT("config.section:keys"),
+								TEXT("config"),
+								OwnerId,
+								TEXT("keys"),
+								KeyNames,
+								Context,
+								Entries,
+								OutError))
+						{
+							return false;
+						}
+						return BuildSnapshot(
+							ProviderBinding,
+							Context,
+							MoveTemp(Entries),
+							OutSnapshot,
+							OutError);
+					}
+					TMap<FString, TArray<FString>> ValuesByKey;
 					for (FConfigSection::TConstIterator It(*Section);
 						It;
 						++It)
 					{
 						const FString Key = It.Key().ToString();
-						if (!RequestedKeys.IsEmpty()
-							&& !RequestedKeys.Contains(Key))
+						if (!RequestedKeys.Contains(Key))
 						{
 							continue;
 						}
-						if (!AddString(
+						ValuesByKey.FindOrAdd(Key).Add(
+							It.Value().GetSavedValue());
+					}
+					TArray<FString> ValueKeys;
+					ValuesByKey.GetKeys(ValueKeys);
+					ValueKeys.Sort();
+					for (const FString& Key : ValueKeys)
+					{
+						const TArray<FString>& Values =
+							ValuesByKey.FindChecked(Key);
+						const bool bAdded = Values.Num() == 1
+							? AddString(
 								TEXT("config.value:") + Key,
 								TEXT("config"),
 								OwnerId,
 								Key,
-								It.Value().GetSavedValue(),
+								Values[0],
 								Context,
 								Entries,
-								OutError))
+								OutError)
+							: AddStringArray(
+								TEXT("config.value:") + Key,
+								TEXT("config"),
+								OwnerId,
+								Key,
+								Values,
+								Context,
+								Entries,
+								OutError);
+						if (!bAdded)
 						{
 							return false;
 						}
@@ -2415,6 +2941,7 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				ProviderBinding,
 				{
 					TEXT("asset_project.read.asset_summary"),
+					TEXT("asset_project.read.asset_owned_candidates"),
 					TEXT("asset_project.read.asset_properties"),
 					TEXT("asset_project.read.reference_asset"),
 					TEXT("asset_project.read.asset_relations"),
@@ -2476,10 +3003,9 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 		}
 		else
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_project_read_provider_unknown"),
-				ProviderBinding);
+			return Fail(OutError, ReadCondition(TEXT("asset_project_read_provider_unknown"),
+				TEXT("No native asset/project query hook is registered for the requested provider."),
+				TEXT("/provider/registered"), ProviderBinding));
 		}
 		return true;
 	}

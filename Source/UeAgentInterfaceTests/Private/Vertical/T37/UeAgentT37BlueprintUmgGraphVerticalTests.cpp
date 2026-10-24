@@ -1,11 +1,5 @@
 #include "Misc/AutomationTest.h"
 
-#include "CommandEdge/UeAgentCommandProtocol.h"
-#include "CommandEdge/UeAgentExactCommandDispatch.h"
-#include "CommandHandlers/AnimationBlueprint/UeAgentAnimationBlueprintDomainCommandHandlers.h"
-#include "CommandHandlers/Blueprint/Surfaces/UeAgentBlueprintSurfaceCommandHandlers.h"
-#include "CommandHandlers/UmgWidget/UeAgentUmgWidgetCommandHandlers.h"
-#include "Core/Contract/UeAgentContract.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "DomainAdapters/Blueprint/Component/UeAgentBlueprintComponentMechanics.h"
 #include "DomainAdapters/Blueprint/Node/UeAgentBlueprintNodeMechanics.h"
@@ -21,214 +15,6 @@
 #include "K2Node_CallFunction.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/ScopeExit.h"
-#include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
-#include "OperationOwners/AnimationBlueprint/UeAgentAnimationBlueprintDomainService.h"
-#include "OperationOwners/Blueprint/Surfaces/UeAgentBlueprintSurfaceDomainService.h"
-#include "OperationOwners/UmgWidget/UeAgentUmgWidgetDomainService.h"
-
-namespace
-{
-	using namespace UE::UAI;
-
-	class FNeverCancelled final : public Contract::IUeAgentCancellationSignal
-	{
-	public:
-		virtual bool IsCancelled() const override { return false; }
-	};
-
-	class FBlueprintService final
-		: public OperationOwners::Blueprint::Surfaces::
-			IUeAgentBlueprintSurfaceCommandService
-	{
-	public:
-		virtual bool Execute(
-			const OperationOwners::Blueprint::Surfaces::
-				FBlueprintSurfaceCommandRequest& Request,
-			OperationOwners::Blueprint::Surfaces::
-				FBlueprintSurfaceCommandResponse& OutResponse,
-			OperationOwners::Blueprint::Surfaces::
-				FBlueprintSurfaceCommandError& OutError) override
-		{
-			(void)Request;
-			(void)OutResponse;
-			(void)OutError;
-			++Calls;
-			return false;
-		}
-
-		int32 Calls = 0;
-	};
-
-	class FUmgService final
-		: public OperationOwners::UmgWidget::IUeAgentUmgWidgetCommandService
-	{
-	public:
-		virtual bool Execute(
-			const OperationOwners::UmgWidget::FUmgWidgetCommandRequest& Request,
-			OperationOwners::UmgWidget::FUmgWidgetCommandResponse& OutResponse,
-			OperationOwners::UmgWidget::FUmgWidgetCommandError& OutError) override
-		{
-			(void)Request;
-			(void)OutResponse;
-			(void)OutError;
-			++Calls;
-			return false;
-		}
-
-		int32 Calls = 0;
-	};
-
-	class FAnimationBlueprintService final
-		: public OperationOwners::AnimationBlueprint::
-			IUeAgentAnimationBlueprintCommandService
-	{
-	public:
-		virtual bool Execute(
-			const OperationOwners::AnimationBlueprint::
-				FAnimationBlueprintCommandRequest& Request,
-			OperationOwners::AnimationBlueprint::
-				FAnimationBlueprintCommandResponse& OutResponse,
-			OperationOwners::AnimationBlueprint::
-				FAnimationBlueprintCommandError& OutError) override
-		{
-			(void)Request;
-			(void)OutResponse;
-			(void)OutError;
-			++Calls;
-			return false;
-		}
-
-		int32 Calls = 0;
-	};
-
-	bool DecodeRequest(
-		const FString& CommandId,
-		TOptional<CommandEdge::FUeAgentCommandRequest>& OutRequest)
-	{
-		const FString Envelope = FString::Printf(
-			TEXT("{\"schema\":\"uai.command.v1\",\"version\":1,")
-			TEXT("\"message_kind\":\"command_request\",")
-			TEXT("\"correlation_id\":\"corr-t37\",")
-			TEXT("\"request_id\":\"req-t37\",")
-			TEXT("\"command_id\":\"%s\",")
-			TEXT("\"command_binding_hash\":\"sha256:")
-			TEXT("0000000000000000000000000000000000000000000000000000000000000000\",")
-			TEXT("\"params\":{}}"),
-			*CommandId);
-		FTCHARToUTF8 Encoded(*Envelope);
-		TArray<uint8> Bytes;
-		Bytes.Append(
-			reinterpret_cast<const uint8*>(Encoded.Get()),
-			Encoded.Length());
-		CommandEdge::FUeAgentCommandProtocolDiagnostic Diagnostic;
-		return CommandEdge::FUeAgentCommandProtocolCodec().DecodeRequest(
-			Bytes, OutRequest, Diagnostic);
-	}
-
-	template <typename ServiceType, typename FactoryType>
-	bool VerifyRetiredHandler(
-		FAutomationTestBase& Test,
-		const TSharedRef<ServiceType>& Service,
-		FactoryType Factory,
-		const FString& CommandId,
-		const FString& ErrorCode)
-	{
-		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>> Handlers;
-		FString Error;
-		if (!Test.TestTrue(
-				*FString::Printf(TEXT("%s legacy factory remains fail-closed"),
-					*CommandId),
-				Factory(Service, Handlers, Error))
-			|| !Test.TestEqual(
-				TEXT("one compatibility handler is returned"), Handlers.Num(), 1))
-		{
-			Test.AddError(Error);
-			return false;
-		}
-		TOptional<CommandEdge::FUeAgentCommandRequest> Request;
-		if (!Test.TestTrue(TEXT("retired request decodes"),
-				DecodeRequest(CommandId, Request))
-			|| !Request.IsSet())
-		{
-			return false;
-		}
-		const CommandEdge::FUeAgentCommandResult Result = Handlers[0]->Submit(
-			Request.GetValue(),
-			Contract::FUeAgentCallerContext(
-				TEXT("t37"), {TEXT("uai:operate")}, TEXT("corr-t37")),
-			MakeShared<FNeverCancelled>());
-		Test.TestFalse(TEXT("retired handler never succeeds"), Result.IsOk());
-		Test.TestTrue(TEXT("retired handler returns its typed retirement error"),
-			Result.GetErrorJson().Contains(ErrorCode));
-		return true;
-	}
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentT37LegacyHjsonIngressExitTest,
-	"UAI.Root.T37.BlueprintUmgGraph.LegacyHjsonIngressExit",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentT37LegacyHjsonIngressExitTest::RunTest(const FString& Parameters)
-{
-	(void)Parameters;
-	using namespace UE::UAI;
-	using namespace Module::CommandRegistration::Active;
-
-	TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry;
-	TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch> Dispatch;
-	FString Error;
-	if (!TestTrue(TEXT("active command composition freezes"),
-			TryComposeProcessActiveCommandComposition(Registry, Dispatch, Error))
-		|| !Registry.IsValid())
-	{
-		AddError(Error);
-		return false;
-	}
-	TestNotNull(TEXT("the unique public HJSON import remains active"),
-		Registry->FindExact(TEXT("content_graph.import_workspace")));
-	TestNull(TEXT("old Blueprint HJSON command is absent from the manifest"),
-		Registry->FindExact(TEXT("blueprint.authoring.apply")));
-	TestNull(TEXT("old UMG HJSON command is absent from the manifest"),
-		Registry->FindExact(TEXT("umg.authoring.apply")));
-	TestNull(TEXT("old Animation Blueprint HJSON command is absent"),
-		Registry->FindExact(TEXT("animation_blueprint.authoring.apply")));
-
-	const TSharedRef<FBlueprintService> BlueprintService =
-		MakeShared<FBlueprintService>();
-	VerifyRetiredHandler(
-		*this,
-		BlueprintService,
-		CommandHandlers::Blueprint::Surfaces::
-			TryCreateBlueprintSurfaceCommandHandlers,
-		TEXT("blueprint.authoring.apply"),
-		TEXT("blueprint_legacy_authoring_retired"));
-	TestEqual(TEXT("retired Blueprint handler bypasses its old service"),
-		BlueprintService->Calls, 0);
-
-	const TSharedRef<FUmgService> UmgService = MakeShared<FUmgService>();
-	VerifyRetiredHandler(
-		*this,
-		UmgService,
-		CommandHandlers::UmgWidget::TryCreateUmgWidgetCommandHandlers,
-		TEXT("umg.authoring.apply"),
-		TEXT("umg_legacy_authoring_retired"));
-	TestEqual(TEXT("retired UMG handler bypasses its old service"),
-		UmgService->Calls, 0);
-
-	const TSharedRef<FAnimationBlueprintService> AnimationService =
-		MakeShared<FAnimationBlueprintService>();
-	VerifyRetiredHandler(
-		*this,
-		AnimationService,
-		CommandHandlers::AnimationBlueprint::
-			TryCreateAnimationBlueprintCommandHandlers,
-		TEXT("animation_blueprint.authoring.apply"),
-		TEXT("animation_blueprint_legacy_authoring_retired"));
-	TestEqual(TEXT("retired Animation Blueprint handler bypasses its old service"),
-		AnimationService->Calls, 0);
-	return !HasAnyErrors();
-}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentT37BlueprintCandidateBindingNormalizationTest,
@@ -267,27 +53,27 @@ bool FUeAgentT37BlueprintCandidateBindingNormalizationTest::RunTest(
 	FKismetEditorUtilities::CompileBlueprint(Blueprint);
 	const FString Target = Blueprint->GetPathName();
 
-	FString GraphId;
-	FString QueryErrorText;
-	if (!TestTrue(TEXT("an exact editable graph identity is available"),
-		Node::TryGetFirstEditableGraphIdentity(
-			*Blueprint, GraphId, QueryErrorText)))
+	UEdGraph* CandidateGraph = Blueprint->UbergraphPages.IsEmpty()
+		? nullptr
+		: Blueprint->UbergraphPages[0];
+	if (!TestNotNull(TEXT("a readable editable graph is available"), CandidateGraph))
 	{
-		AddError(QueryErrorText);
 		return false;
 	}
 
 	Node::FUeAgentBlueprintNodeMechanicsError NodeQueryError;
 	FString NodePayloadJson;
+	Node::FUeAgentBlueprintNodeCandidateQuery NodeQuery;
+	NodeQuery.Target = Target;
+	NodeQuery.GraphName = CandidateGraph->GetName();
+	NodeQuery.Query = TEXT("FInterpTo");
 	if (!TestTrue(TEXT("the current FInterpTo candidate is queried"),
 		Node::TryQueryBlueprintNodeCandidates(
-			Target,
-			GraphId,
-			TEXT("FInterpTo"),
+			NodeQuery,
 			NodePayloadJson,
 			NodeQueryError)))
 	{
-		AddError(NodeQueryError.Code + TEXT(":") + NodeQueryError.Detail);
+		AddError(NodeQueryError.Code + TEXT(":") + NodeQueryError.PublicMessage);
 		return false;
 	}
 	Component::FUeAgentBlueprintComponentMechanicsError ComponentQueryError;
@@ -303,7 +89,7 @@ bool FUeAgentT37BlueprintCandidateBindingNormalizationTest::RunTest(
 			ComponentQueryError)))
 	{
 		AddError(ComponentQueryError.Code + TEXT(":")
-			+ ComponentQueryError.Detail);
+			+ ComponentQueryError.PublicMessage);
 		return false;
 	}
 
@@ -390,13 +176,25 @@ bool FUeAgentT37BlueprintCandidateBindingNormalizationTest::RunTest(
 		return true;
 	};
 
-	TSharedPtr<FJsonObject> NodeCandidate;
+	FString NodeCandidateName;
 	TSharedPtr<FJsonObject> ComponentCandidate;
+	TSharedPtr<FJsonObject> NodePayload;
+	FString NodeJsonError;
+	const TArray<TSharedPtr<FJsonValue>>* NodeNames = nullptr;
+	if (!CommandContract::Json::TryParseObject(
+			NodePayloadJson, NodePayload, NodeJsonError)
+		|| !NodePayload.IsValid()
+		|| NodePayload->Values.Num() != 1
+		|| !NodePayload->TryGetArrayField(TEXT("names"), NodeNames)
+		|| !NodeNames || NodeNames->IsEmpty()
+		|| !(*NodeNames)[0].IsValid()
+		|| (*NodeNames)[0]->Type != EJson::String)
+	{
+		AddError(NodeJsonError);
+		return false;
+	}
+	NodeCandidateName = (*NodeNames)[0]->AsString();
 	if (!ParseUniqueNamedCandidate(
-			NodePayloadJson,
-			TEXT("FInterp To"),
-			NodeCandidate)
-		|| !ParseUniqueNamedCandidate(
 			ComponentPayloadJson,
 			TEXT("Point Light"),
 			ComponentCandidate))
@@ -421,37 +219,8 @@ bool FUeAgentT37BlueprintCandidateBindingNormalizationTest::RunTest(
 	Components->SetObjectField(TEXT("component:T37PointLight"), ComponentSpec);
 
 	const TSharedRef<FJsonObject> NodeSpec = MakeShared<FJsonObject>();
-	FString NodeCandidateId;
-	if (!TestTrue(TEXT("the native node candidate has a compact id"),
-		NodeCandidate->TryGetStringField(TEXT("id"), NodeCandidateId)))
-	{
-		return false;
-	}
-	Node::FUeAgentBlueprintNodeCandidateQuery ExactNodeQuery;
-	ExactNodeQuery.Target = Target;
-	ExactNodeQuery.GraphId = GraphId;
-	ExactNodeQuery.CandidateId = NodeCandidateId;
-	FString ExactNodePayloadJson;
-	NodeQueryError = {};
-	if (!TestTrue(TEXT("the compact id resolves through the public query"),
-		Node::TryQueryBlueprintNodeCandidates(
-			ExactNodeQuery, ExactNodePayloadJson, NodeQueryError)))
-	{
-		AddError(NodeQueryError.Code + TEXT(":") + NodeQueryError.Detail);
-		return false;
-	}
-	TSharedPtr<FJsonObject> ExactNodeCandidate;
-	if (!ParseFirstCandidate(
-			ExactNodePayloadJson,
-			TEXT("the compact id returns one exact native action"),
-			ExactNodeCandidate))
-	{
-		return false;
-	}
-	TestEqual(TEXT("the exact query preserves the compact id"),
-		ExactNodeCandidate->GetStringField(TEXT("id")), NodeCandidateId);
 	const TSharedRef<FJsonObject> NodeSelector = MakeShared<FJsonObject>();
-	NodeSelector->SetStringField(TEXT("id"), NodeCandidateId);
+	NodeSelector->SetStringField(TEXT("name"), NodeCandidateName);
 	NodeSpec->SetObjectField(TEXT("candidate"), NodeSelector);
 	const TSharedRef<FJsonObject> Nodes = MakeShared<FJsonObject>();
 	Nodes->SetObjectField(
@@ -486,8 +255,8 @@ bool FUeAgentT37BlueprintCandidateBindingNormalizationTest::RunTest(
 		Normalized, FString(TEXT("native_action")));
 	TestFalse(TEXT("the model is not required to copy a node class"),
 		NodeSpec->HasField(TEXT("node_class")));
-	TestEqual(TEXT("the compact candidate id remains exact"),
-		NodeSelector->GetStringField(TEXT("id")), NodeCandidateId);
+	TestEqual(TEXT("the readable node candidate name remains exact"),
+		NodeSelector->GetStringField(TEXT("name")), NodeCandidateName);
 	TestEqual(TEXT("the component compact candidate id remains exact"),
 		ComponentSelector->GetStringField(TEXT("id")), ComponentCandidateId);
 
@@ -523,12 +292,8 @@ bool FUeAgentT37BlueprintCandidateBindingNormalizationTest::RunTest(
 			CreatedPointLight->ComponentClass->GetPathName(),
 			FString(TEXT("/Script/Engine.PointLightComponent")));
 	}
-	FString NodeCandidateName;
-	if (!TestTrue(TEXT("the native node candidate has a direct name selector"),
-		NodeCandidate->TryGetStringField(TEXT("name"), NodeCandidateName)))
-	{
-		return false;
-	}
+	TestTrue(TEXT("the native node candidate keeps its direct name selector"),
+		!NodeCandidateName.IsEmpty());
 	const TSharedRef<FJsonObject> NameSelector = MakeShared<FJsonObject>();
 	NameSelector->SetStringField(TEXT("name"), NodeCandidateName);
 	const TSharedRef<FJsonObject> NameNodeSpec = MakeShared<FJsonObject>();

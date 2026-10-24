@@ -361,19 +361,14 @@ bool FUeAgentTimelineAnimationExactCapabilityDescriptorsTest::RunTest(
 				Profile->GetStringField(TEXT("capability_id")), Profile);
 		}
 	}
-	TestEqual(TEXT("20 activation profiles"), ActivationByCapability.Num(), 20);
-
 	const TSharedPtr<FJsonObject> Components = Fixture->GetObjectField(TEXT("components"));
 	const TArray<TSharedPtr<FJsonValue>>& Profiles =
 		Fixture->GetArrayField(TEXT("descriptors"));
-	TestEqual(TEXT("20 exact descriptor profiles"), Profiles.Num(), 20);
 	TMap<FString, FString> ExpectedInput;
 	TMap<FString, FString> ExpectedResult;
 	TMap<FString, FString> ExpectedHash;
 	TSet<FString> DescriptorIds;
 	TSet<FString> Providers;
-	int32 QueryCount = 0;
-	int32 OperationCount = 0;
 	for (const TSharedPtr<FJsonValue>& Value : Profiles)
 	{
 		const TSharedPtr<FJsonObject> Profile = Value->AsObject();
@@ -460,19 +455,11 @@ bool FUeAgentTimelineAnimationExactCapabilityDescriptorsTest::RunTest(
 
 		if (OperationKind == TEXT("query"))
 		{
-			++QueryCount;
 			const FString Provider = Profile->GetStringField(TEXT("provider_binding"));
 			TestFalse(TEXT("provider unique: ") + Provider, Providers.Contains(Provider));
 			Providers.Add(Provider);
 		}
-		else
-		{
-			++OperationCount;
-		}
 	}
-	TestEqual(TEXT("8 exact query descriptors"), QueryCount, 8);
-	TestEqual(TEXT("12 exact operation descriptors"), OperationCount, 12);
-	TestEqual(TEXT("8 exact provider bindings"), Providers.Num(), 8);
 
 	using namespace UE::UAI::DomainAdapters::TimelineAnimation;
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
@@ -485,10 +472,14 @@ bool FUeAgentTimelineAnimationExactCapabilityDescriptorsTest::RunTest(
 		AddError(TEXT("timeline_animation_descriptor_registry_unavailable:") + RegistryError);
 		return false;
 	}
-	TestEqual(TEXT("production descriptor count"), Registry->GetDescriptors().Num(), 20);
+	TSet<FString> ProductionCapabilityIds;
 	for (const FUeAgentOperationDescriptor& Descriptor : Registry->GetDescriptors())
 	{
 		const FString CapabilityId = Descriptor.GetCapabilityId();
+		TestFalse(
+			TEXT("production descriptor capability is unique: ") + CapabilityId,
+			ProductionCapabilityIds.Contains(CapabilityId));
+		ProductionCapabilityIds.Add(CapabilityId);
 		const FString* Input = ExpectedInput.Find(CapabilityId);
 		const FString* Result = ExpectedResult.Find(CapabilityId);
 		const FString* Hash = ExpectedHash.Find(CapabilityId);
@@ -502,6 +493,12 @@ bool FUeAgentTimelineAnimationExactCapabilityDescriptorsTest::RunTest(
 		TestEqual(
 			TEXT("descriptor hash derives from exact contract"),
 			Descriptor.GetIdentity().GetDescriptorHash(), *Hash);
+	}
+	for (const TPair<FString, FString>& Expected : ExpectedInput)
+	{
+		TestTrue(
+			TEXT("fixture descriptor is exposed by production: ") + Expected.Key,
+			ProductionCapabilityIds.Contains(Expected.Key));
 	}
 	return true;
 }
@@ -539,12 +536,9 @@ bool FUeAgentTimelineAnimationExecutionChainContractTest::RunTest(
 		}
 	}
 	const TArray<TSharedPtr<FJsonValue>>& ChainValues = Fixture->GetArrayField(TEXT("chains"));
-	TestEqual(TEXT("20 execution chain rows"), ChainValues.Num(), 20);
 	TSet<FString> TypedOperations;
 	TSet<FString> TypedRequests;
 	TSet<FString> TypedResults;
-	int32 Queries = 0;
-	int32 Operations = 0;
 	for (const TSharedPtr<FJsonValue>& Value : ChainValues)
 	{
 		const TSharedPtr<FJsonObject> Chain = Value->AsObject();
@@ -575,28 +569,29 @@ bool FUeAgentTimelineAnimationExecutionChainContractTest::RunTest(
 		TypedResults.Add(TypedResult);
 		if ((*ActivationProfile)->GetStringField(TEXT("operation_kind")) == TEXT("query"))
 		{
-			++Queries;
 			TestEqual(
 				TEXT("query has no settle barrier"),
 				Chain->GetStringField(TEXT("settle_barrier")), FString(TEXT("none")));
 		}
 		else
 		{
-			++Operations;
 			TestNotEqual(
 				TEXT("operation settle policy is explicit"),
 				Chain->GetStringField(TEXT("settle_barrier")), FString(TEXT("none")));
 		}
 	}
-	TestEqual(TEXT("8 C3Q chains"), Queries, 8);
-	TestEqual(TEXT("12 C3O chains"), Operations, 12);
 
 	using namespace UE::UAI::DomainAdapters::TimelineAnimation;
 	const TArray<FUeAgentTimelineAnimationExecutionChainContract>& Contracts =
 		GetTimelineAnimationExecutionChainContracts();
-	TestEqual(TEXT("production chain count"), Contracts.Num(), 20);
+	TSet<FString> ProductionChainCapabilityIds;
 	for (const FUeAgentTimelineAnimationExecutionChainContract& Contract : Contracts)
 	{
+		TestFalse(
+			TEXT("production chain capability is unique: ")
+				+ Contract.GetCapabilityId(),
+			ProductionChainCapabilityIds.Contains(Contract.GetCapabilityId()));
+		ProductionChainCapabilityIds.Add(Contract.GetCapabilityId());
 		const TSharedPtr<FJsonValue>* Match = ChainValues.FindByPredicate(
 			[&Contract](const TSharedPtr<FJsonValue>& Candidate)
 			{
@@ -615,6 +610,14 @@ bool FUeAgentTimelineAnimationExecutionChainContractTest::RunTest(
 		TestEqual(TEXT("production family"), Contract.GetFamilyId(), FixtureChain->GetStringField(TEXT("family_id")));
 		TestEqual(TEXT("production settle barrier"), Contract.GetSettleBarrier(), FixtureChain->GetStringField(TEXT("settle_barrier")));
 		TestEqual(TEXT("C4 temporal owner"), Contract.GetTemporalContractId(), FString(TEXT("uai.temporal_contract.v1")));
+	}
+	for (const TSharedPtr<FJsonValue>& ChainValue : ChainValues)
+	{
+		const FString CapabilityId =
+			ChainValue->AsObject()->GetStringField(TEXT("capability_id"));
+		TestTrue(
+			TEXT("fixture execution chain is exposed by production: ") + CapabilityId,
+			ProductionChainCapabilityIds.Contains(CapabilityId));
 	}
 	return true;
 }

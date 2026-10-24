@@ -1,10 +1,15 @@
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectEnhancedInputMechanics.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Dom/JsonValue.h"
+#include "Dom/JsonObject.h"
 
 #include "InputAction.h"
 #include "InputCoreTypes.h"
 #include "InputMappingContext.h"
 #include "InputModifiers.h"
 #include "InputTriggers.h"
+#include "Misc/ScopeExit.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
@@ -18,16 +23,61 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	namespace
 	{
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
-		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
-			return false;
-		}
+        bool Fail(FExecutionMutationError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic)
+        {
+            OutError = MoveTemp(Diagnostic);
+            return false;
+        }
+
+        FExecutionMutationError JsonFailure(const FString& Code, const FString& Reason, const FString& Field,
+            const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected,
+            const TCHAR* SourceKind = TEXT("authored_value"))
+        {
+            auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Field, Expected, Actual, TEXT("execution"), Reason);
+            Error.SourceKind = SourceKind;
+            Error.ActualValuePresent = Actual.IsValid();
+            Error.ExpectedValuePresent = Expected.IsValid();
+            if (Error.SourceKind == TEXT("native_result"))
+            {
+                Error.Source = {};
+                Error.SemanticPointer.Reset();
+            }
+            return Error;
+        }
+
+        FExecutionMutationError ValueFailure(const FString& Code, const FString& Reason, const FString& Field,
+            const FUeAgentCanonicalValue* Actual, const FString& Expected,
+            const TCHAR* SourceKind = TEXT("authored_value"))
+        {
+            auto Error = JsonFailure(Code, Reason, Field, nullptr, MakeShared<FJsonValueString>(Expected), SourceKind);
+            Error.ActualValuePresent = Actual != nullptr;
+            Contract::FDiagnostic ProjectionError;
+            if (Actual && !CanonicalJson::TryToJsonValue(*Actual, Error.ActualValue, ProjectionError))
+            {
+                ProjectionError.SourceKind = TEXT("native_result");
+                Error.Diagnostics.Add(MoveTemp(ProjectionError));
+            }
+            return Error;
+        }
+
+        TSharedPtr<FJsonValue> ObjectClassValue(const UObject* Object)
+        {
+            return Object ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Object->GetClass()->GetPathName())) : nullptr;
+        }
+
+        bool FailDuplicateMapping(FExecutionMutationError& OutError, const FString& Action,
+            const FString& Key, const int32 Index, const TCHAR* SourceKind = TEXT("authored_value"),
+            const FString& Code = TEXT("asset_data_enhanced_input_mapping_identity_duplicate"))
+        {
+            const auto Actual = MakeShared<FJsonObject>();
+            Actual->SetStringField(TEXT("action_ref"), Action);
+            Actual->SetStringField(TEXT("key"), Key);
+            auto Error = JsonFailure(Code, TEXT("This action and key pair occurs more than once."),
+                TEXT("mappings/") + ::LexToString(Index), MakeShared<FJsonValueObject>(Actual),
+                MakeShared<FJsonValueString>(TEXT("unique action_ref and key pair")), SourceKind);
+            Error.OperationIndex = Index;
+            return Fail(OutError, MoveTemp(Error));
+        }
 
 		const FUeAgentCanonicalValue* FindObjectField(
 			const FUeAgentCanonicalValue& Object,
@@ -79,30 +129,23 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			Pins.Emplace(Object);
 		}
 
-		bool ValidateInputActionProperties()
-		{
-			const UClass* Class = UInputAction::StaticClass();
-			return FindFProperty<FProperty>(
-					Class,
-					GET_MEMBER_NAME_CHECKED(
-						UInputAction,
-						ValueType))
-				&& FindFProperty<FProperty>(
-					Class,
-					GET_MEMBER_NAME_CHECKED(
-						UInputAction,
-						bConsumeInput))
-				&& FindFProperty<FProperty>(
-					Class,
-					GET_MEMBER_NAME_CHECKED(
-						UInputAction,
-						Triggers))
-				&& FindFProperty<FProperty>(
-					Class,
-					GET_MEMBER_NAME_CHECKED(
-						UInputAction,
-						Modifiers));
-		}
+        bool ValidateInputActionProperties(const FString& Code, FExecutionMutationError& OutError)
+        {
+            const UClass* Class = UInputAction::StaticClass();
+            const FName Fields[] = {
+                GET_MEMBER_NAME_CHECKED(UInputAction, ValueType),
+                GET_MEMBER_NAME_CHECKED(UInputAction, bConsumeInput),
+                GET_MEMBER_NAME_CHECKED(UInputAction, Triggers),
+                GET_MEMBER_NAME_CHECKED(UInputAction, Modifiers)};
+            for (const FName Field : Fields)
+            {
+                if (!FindFProperty<FProperty>(Class, Field))
+                    return Fail(OutError, JsonFailure(Code,
+                        TEXT("The InputAction class is missing a required reflected property."), Field.ToString(),
+                        nullptr, MakeShared<FJsonValueString>(TEXT("reflected property on ") + Class->GetPathName()), TEXT("native_result")));
+            }
+            return true;
+        }
 
 		void NotifyInputActionProperty(
 			UInputAction& Action,
@@ -117,67 +160,56 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			Action.PostEditChangeProperty(Event);
 		}
 
-		bool TryResolveClassArray(
-			const FUeAgentCanonicalValue& Value,
-			const UClass& BaseClass,
-			const FString& ErrorPrefix,
-			TArray<UClass*>& OutClasses,
-			FExecutionMutationError& OutError)
-		{
-			if (Value.GetKind() != EUeAgentValueKind::Array)
-			{
-				return Fail(
-					OutError,
-					ErrorPrefix + TEXT("_array_invalid"));
-			}
-			OutClasses.Reset();
-			TSet<UClass*> Seen;
-			for (const FUeAgentCanonicalValueRef& Item
-				: Value.GetArrayItems())
-			{
-				if (Item->GetKind() != EUeAgentValueKind::String
-					|| Item->GetText().IsEmpty())
-				{
-					return Fail(
-						OutError,
-						ErrorPrefix + TEXT("_class_ref_invalid"));
-				}
-				const FString& ClassPath = Item->GetText();
-				UClass* Class =
-					LoadObject<UClass>(nullptr, *ClassPath);
-				if (!Class
-					|| Class->GetPathName() != ClassPath
-					|| !Class->IsChildOf(&BaseClass)
-					|| Class->HasAnyClassFlags(
-						CLASS_Abstract
-							| CLASS_Deprecated
-							| CLASS_NewerVersionExists))
-				{
-					return Fail(
-						OutError,
-						ErrorPrefix + TEXT("_class_invalid"),
-						ClassPath);
-				}
-				if (Seen.Contains(Class))
-				{
-					return Fail(
-						OutError,
-						ErrorPrefix + TEXT("_class_duplicate"),
-						ClassPath);
-				}
-				Seen.Add(Class);
-				OutClasses.Add(Class);
-			}
-			return true;
-		}
+        bool TryResolveClassArray(
+            const FUeAgentCanonicalValue& Value,
+            const UClass& BaseClass,
+            const FString& ErrorPrefix,
+            const FString& Field,
+            TArray<UClass*>& OutClasses,
+            FExecutionMutationError& OutError)
+        {
+            if (Value.GetKind() != EUeAgentValueKind::Array)
+                return Fail(OutError, ValueFailure(ErrorPrefix + TEXT("_array_invalid"),
+                    TEXT("The input class collection must be an array."), Field, &Value, TEXT("array of class references")));
+            OutClasses.Reset();
+            TSet<UClass*> Seen;
+            for (const FUeAgentCanonicalValueRef& Item : Value.GetArrayItems())
+            {
+                const FString Path = Field + TEXT("/") + ::LexToString(OutClasses.Num());
+                if (Item->GetKind() != EUeAgentValueKind::String || Item->GetText().IsEmpty())
+                    return Fail(OutError, ValueFailure(ErrorPrefix + TEXT("_class_ref_invalid"),
+                        TEXT("Each input class reference must be a non-empty string."), Path, &Item.Get(), TEXT("non-empty class reference")));
+                const FString& ClassPath = Item->GetText();
+                UClass* Class = LoadObject<UClass>(nullptr, *ClassPath);
+                if (!Class || Class->GetPathName() != ClassPath || !Class->IsChildOf(&BaseClass)
+                    || Class->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
+                    return Fail(OutError, JsonFailure(ErrorPrefix + TEXT("_class_invalid"),
+                        !Class ? TEXT("The class reference could not be loaded.")
+                            : Class->GetPathName() != ClassPath ? TEXT("The class reference resolves to a different path.")
+                            : !Class->IsChildOf(&BaseClass) ? TEXT("The class does not derive from the required base class.")
+                            : Class->HasAnyClassFlags(CLASS_Abstract) ? TEXT("The input class is abstract and cannot be instantiated.")
+                            : Class->HasAnyClassFlags(CLASS_Deprecated) ? TEXT("The input class is deprecated and cannot be instantiated.")
+                            : TEXT("The input class is superseded and cannot be instantiated."),
+                        Path, MakeShared<FJsonValueString>(Class && Class->GetPathName() != ClassPath ? Class->GetPathName() : ClassPath),
+                        MakeShared<FJsonValueString>(Class && Class->GetPathName() != ClassPath ? ClassPath : BaseClass.GetPathName())));
+                if (Seen.Contains(Class))
+                    return Fail(OutError, JsonFailure(ErrorPrefix + TEXT("_class_duplicate"),
+                        TEXT("The same class occurs more than once in the input list."), Path,
+                        MakeShared<FJsonValueString>(ClassPath), MakeShared<FJsonValueString>(TEXT("a class not already present in this list"))));
+                Seen.Add(Class);
+                OutClasses.Add(Class);
+            }
+            return true;
+        }
 
 		template <typename TObject>
 		bool CaptureExistingSubobjects(
 			const TArray<TObjectPtr<TObject>>& Existing,
 			TArray<TStrongObjectPtr<UObject>>& Pins,
 			TArray<FInputSubobjectSpec>& OutSpecs,
-			const FString& ErrorCode,
-			FExecutionMutationError& OutError)
+            const FString& ErrorCode,
+            const FString& Field,
+            FExecutionMutationError& OutError)
 		{
 			OutSpecs.Reset();
 			OutSpecs.Reserve(Existing.Num());
@@ -186,7 +218,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				TObject* Object = Item.Get();
 				if (!Object)
 				{
-					return Fail(OutError, ErrorCode);
+                    return Fail(OutError, JsonFailure(ErrorCode,
+                        TEXT("The existing input subobject is unavailable."), Field + TEXT("/") + ::LexToString(OutSpecs.Num()),
+                        nullptr, MakeShared<FJsonValueString>(TObject::StaticClass()->GetPathName()), TEXT("native_result")));
 				}
 				PinUnique(Pins, Object);
 				OutSpecs.Add(
@@ -243,9 +277,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			UObject* Outer,
 			const TArray<FInputSubobjectSpec>& Specs,
 			const UClass& BaseClass,
-			const FString& ErrorCode,
-			TArray<TObjectPtr<TObject>>& OutObjects,
-			FExecutionMutationError& OutError)
+            const FString& ErrorCode,
+            const FString& Field,
+            TArray<TObjectPtr<TObject>>& OutObjects,
+            FExecutionMutationError& OutError)
 		{
 			OutObjects.Reset();
 			OutObjects.Reserve(Specs.Num());
@@ -258,7 +293,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					if (!Spec.Class
 						|| !Spec.Class->IsChildOf(&BaseClass))
 					{
-						return Fail(OutError, ErrorCode);
+                        return Fail(OutError, JsonFailure(ErrorCode,
+                            !Spec.Class ? TEXT("The prepared input subobject has no class.")
+                                : TEXT("The prepared input subobject class does not derive from the required base."),
+                            Field + TEXT("/") + ::LexToString(OutObjects.Num()),
+                            Spec.Class ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Spec.Class->GetPathName())) : nullptr,
+                            MakeShared<FJsonValueString>(BaseClass.GetPathName()), TEXT("native_result")));
 					}
 					Object = NewObject<TObject>(
 						Outer,
@@ -268,20 +308,28 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				}
 				if (!Object)
 				{
-					return Fail(OutError, ErrorCode);
+                    auto Error = JsonFailure(ErrorCode, TEXT("Unreal failed to create the prepared input subobject."),
+                        Field + TEXT("/") + ::LexToString(OutObjects.Num()), nullptr,
+                        MakeShared<FJsonValueString>(Spec.Class->GetPathName()), TEXT("native_result"));
+                    if (Outer) Error.TargetPath = Outer->GetPathName();
+                    return Fail(OutError, MoveTemp(Error));
 				}
 				OutObjects.Add(Object);
 			}
 			return true;
 		}
 
-		bool TryParseValueType(
-			const FUeAgentCanonicalValue& Value,
-			EInputActionValueType& OutValueType)
+        bool TryParseValueType(
+            const FUeAgentCanonicalValue& Value,
+            EInputActionValueType& OutValueType,
+            const FString& Code,
+            FExecutionMutationError& OutError)
 		{
 			if (Value.GetKind() != EUeAgentValueKind::String)
 			{
-				return false;
+                return Fail(OutError, ValueFailure(Code,
+                    TEXT("InputAction value_type must be a string."), TEXT("value_type"), &Value,
+                    TEXT("boolean, axis1d, axis2d or axis3d")));
 			}
 			const FString& Name = Value.GetText();
 			if (Name == TEXT("boolean"))
@@ -304,7 +352,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				OutValueType = EInputActionValueType::Axis3D;
 				return true;
 			}
-			return false;
+            return Fail(OutError, ValueFailure(Code,
+                TEXT("InputAction value_type is not supported."), TEXT("value_type"), &Value,
+                TEXT("boolean, axis1d, axis2d or axis3d")));
 		}
 
 		bool SameMappingIdentity(
@@ -325,117 +375,80 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				&& Mapping.Key == Key;
 		}
 
-		bool TryReadMappingIdentity(
-			IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
-			const FUeAgentCanonicalValue& Value,
-			const bool bIdentityOnly,
-			UInputAction*& OutAction,
-			FKey& OutKey,
-			TArray<UClass*>& OutTriggers,
-			TArray<UClass*>& OutModifiers,
-			FExecutionMutationError& OutError)
-		{
-			const int32 ExpectedFieldCount =
-				bIdentityOnly ? 2 : 4;
-			if (Value.GetKind() != EUeAgentValueKind::Object
-				|| Value.GetObjectItems().Num()
-					!= ExpectedFieldCount)
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_input_mapping_"
-						"object_invalid"));
-			}
-			const FUeAgentCanonicalValue* ActionRef =
-				FindObjectField(Value, TEXT("action_ref"));
-			const FUeAgentCanonicalValue* Key =
-				FindObjectField(Value, TEXT("key"));
-			if (!ActionRef
-				|| !Key
-				|| ActionRef->GetKind()
-					!= EUeAgentValueKind::String
-				|| ActionRef->GetText().IsEmpty()
-				|| Key->GetKind()
-					!= EUeAgentValueKind::String
-				|| Key->GetText().IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_input_mapping_"
-						"identity_invalid"));
-			}
-			UObject* Resolved = nullptr;
-			if (!Resolver.TryResolveExisting(
-					ActionRef->GetText(),
-					Resolved,
-					OutError))
-			{
-				return false;
-			}
-			OutAction = Cast<UInputAction>(Resolved);
-			if (!OutAction)
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_input_mapping_"
-						"action_class_invalid"),
-					ActionRef->GetText());
-			}
-			OutKey = FKey(FName(*Key->GetText()));
-			if (!OutKey.IsValid()
-				|| OutKey.GetFName().ToString()
-					!= Key->GetText())
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_input_mapping_key_invalid"),
-					Key->GetText());
-			}
-			OutTriggers.Reset();
-			OutModifiers.Reset();
-			if (bIdentityOnly)
-			{
-				return true;
-			}
-			const FUeAgentCanonicalValue* Triggers =
-				FindObjectField(Value, TEXT("triggers"));
-			const FUeAgentCanonicalValue* Modifiers =
-				FindObjectField(Value, TEXT("modifiers"));
-			return Triggers
-				&& Modifiers
-				&& TryResolveClassArray(
-					*Triggers,
-					*UInputTrigger::StaticClass(),
-					TEXT(
-						"asset_data_input_mapping_trigger"),
-					OutTriggers,
-					OutError)
-				&& TryResolveClassArray(
-					*Modifiers,
-					*UInputModifier::StaticClass(),
-					TEXT(
-						"asset_data_input_mapping_modifier"),
-					OutModifiers,
-					OutError);
-		}
+        bool TryReadMappingIdentity(
+            IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
+            const FUeAgentCanonicalValue& Value,
+            const bool bIdentityOnly,
+            const FString& Field,
+            UInputAction*& OutAction,
+            FKey& OutKey,
+            TArray<UClass*>& OutTriggers,
+            TArray<UClass*>& OutModifiers,
+            FExecutionMutationError& OutError)
+        {
+            const int32 ExpectedFieldCount = bIdentityOnly ? 2 : 4;
+            if (Value.GetKind() != EUeAgentValueKind::Object || Value.GetObjectItems().Num() != ExpectedFieldCount)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_input_mapping_object_invalid"),
+                    TEXT("The mapping object has the wrong shape."), Field, &Value,
+                    bIdentityOnly ? TEXT("object containing exactly action_ref and key")
+                        : TEXT("object containing exactly action_ref, key, triggers and modifiers")));
+            const FUeAgentCanonicalValue* ActionRef = FindObjectField(Value, TEXT("action_ref"));
+            const FUeAgentCanonicalValue* Key = FindObjectField(Value, TEXT("key"));
+            if (!ActionRef || !Key || ActionRef->GetKind() != EUeAgentValueKind::String
+                || ActionRef->GetText().IsEmpty() || Key->GetKind() != EUeAgentValueKind::String || Key->GetText().IsEmpty())
+            {
+                // Missing fields precede type checks, matching the original validation order.
+                const bool bAction = !ActionRef || (Key && (ActionRef->GetKind() != EUeAgentValueKind::String || ActionRef->GetText().IsEmpty()));
+                return Fail(OutError, ValueFailure(TEXT("asset_data_input_mapping_identity_invalid"),
+                    TEXT("The mapping identity requires non-empty action_ref and key strings."),
+                    Field + (bAction ? TEXT("/action_ref") : TEXT("/key")), bAction ? ActionRef : Key, TEXT("non-empty string")));
+            }
+            UObject* Resolved = nullptr;
+            if (!Resolver.TryResolveExisting(ActionRef->GetText(), Resolved, OutError)) return false;
+            OutAction = Cast<UInputAction>(Resolved);
+            if (!OutAction)
+            {
+                auto Actual = MakeShared<FJsonObject>();
+                Actual->SetStringField(TEXT("reference"), ActionRef->GetText());
+                Actual->SetField(TEXT("class"), Resolved ? ObjectClassValue(Resolved) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_input_mapping_action_class_invalid"),
+                    TEXT("The referenced asset is not an InputAction."), Field + TEXT("/action_ref"),
+                    MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(UInputAction::StaticClass()->GetPathName())));
+            }
+            OutKey = FKey(FName(*Key->GetText()));
+            if (!OutKey.IsValid() || OutKey.GetFName().ToString() != Key->GetText())
+                return Fail(OutError, JsonFailure(TEXT("asset_data_input_mapping_key_invalid"),
+                    TEXT("The mapping key is not a registered key name with exact spelling."), Field + TEXT("/key"),
+                    MakeShared<FJsonValueString>(Key->GetText()), MakeShared<FJsonValueString>(TEXT("registered key name with exact spelling"))));
+            OutTriggers.Reset();
+            OutModifiers.Reset();
+            if (bIdentityOnly) return true;
+            const FUeAgentCanonicalValue* Triggers = FindObjectField(Value, TEXT("triggers"));
+            const FUeAgentCanonicalValue* Modifiers = FindObjectField(Value, TEXT("modifiers"));
+            if (!Triggers || !Modifiers)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_input_mapping_object_invalid"),
+                    TEXT("The mapping is missing a required class collection."), Field + (!Triggers ? TEXT("/triggers") : TEXT("/modifiers")),
+                    nullptr, TEXT("class reference array")));
+            return TryResolveClassArray(*Triggers, *UInputTrigger::StaticClass(),
+                    TEXT("asset_data_input_mapping_trigger"), Field + TEXT("/triggers"), OutTriggers, OutError)
+                && TryResolveClassArray(*Modifiers, *UInputModifier::StaticClass(),
+                    TEXT("asset_data_input_mapping_modifier"), Field + TEXT("/modifiers"), OutModifiers, OutError);
+        }
 
 		bool TryBuildMappingSpecFromExisting(
-			const FEnhancedActionKeyMapping& Existing,
-			TArray<TStrongObjectPtr<UObject>>& Pins,
+            const FEnhancedActionKeyMapping& Existing,
+            const FString& Field,
+            TArray<TStrongObjectPtr<UObject>>& Pins,
 			FInputMappingSpec& OutSpec,
 			FExecutionMutationError& OutError)
 		{
 			if (!Existing.Action || !Existing.Key.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_input_mapping_"
-						"existing_identity_invalid"));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_input_mapping_existing_identity_invalid"),
+                    !Existing.Action ? TEXT("The existing mapping has no input action.") : TEXT("The existing mapping key is invalid."),
+                    Field + (!Existing.Action ? TEXT("/action_ref") : TEXT("/key")),
+                    !Existing.Action ? nullptr : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Existing.Key.GetFName().ToString())),
+                    MakeShared<FJsonValueString>(!Existing.Action ? TEXT("InputAction asset") : TEXT("registered key")), TEXT("native_result")));
 			}
 			OutSpec.Base = Existing;
 			PinUnique(
@@ -449,7 +462,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEXT(
 						"asset_data_input_mapping_"
 						"existing_trigger_invalid"),
-					OutError)
+                    Field + TEXT("/triggers"), OutError)
 				&& CaptureExistingSubobjects(
 					Existing.Modifiers,
 					Pins,
@@ -457,7 +470,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEXT(
 						"asset_data_input_mapping_"
 						"existing_modifier_invalid"),
-				OutError);
+                    Field + TEXT("/modifiers"), OutError);
 		}
 
 		bool TryBuildProjectionString(
@@ -473,14 +486,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutValue,
 					StateError)
 				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
+				: Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(StateError.Code.IsEmpty()
 						? TEXT(
 							"asset_data_enhanced_input_"
 							"projection_string_invalid")
-						: StateError.Code,
-					StateError.Detail);
+						: StateError.Code, StateError, TEXT("execution")));
 		}
 
 		bool TryBuildProjectionBoolean(
@@ -496,14 +506,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutValue,
 					StateError)
 				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
+				: Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(StateError.Code.IsEmpty()
 						? TEXT(
 							"asset_data_enhanced_input_"
 							"projection_boolean_invalid")
-						: StateError.Code,
-					StateError.Detail);
+						: StateError.Code, StateError, TEXT("execution")));
 		}
 
 		bool TryBuildProjectionArray(
@@ -519,14 +526,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutValue,
 					StateError)
 				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
+				: Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(StateError.Code.IsEmpty()
 						? TEXT(
 							"asset_data_enhanced_input_"
 							"projection_array_invalid")
-						: StateError.Code,
-					StateError.Detail);
+						: StateError.Code, StateError, TEXT("execution")));
 		}
 
 		bool TryBuildProjectionObject(
@@ -553,14 +557,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutValue,
 					StateError)
 				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
+				: Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(StateError.Code.IsEmpty()
 						? TEXT(
 							"asset_data_enhanced_input_"
 							"projection_object_invalid")
-						: StateError.Code,
-					StateError.Detail);
+						: StateError.Code, StateError, TEXT("execution")));
 		}
 
 		bool TryReadProjectionString(
@@ -577,9 +578,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return true;
 		}
 
-		bool TryFormatValueType(
-			const EInputActionValueType ValueType,
-			FString& OutText)
+        bool TryFormatValueType(
+            const EInputActionValueType ValueType,
+            FString& OutText,
+            FExecutionMutationError& OutError)
 		{
 			switch (ValueType)
 			{
@@ -597,15 +599,19 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				return true;
 			default:
 				OutText.Reset();
-				return false;
+                return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_native_value_type_invalid"),
+                    TEXT("The native InputAction value type is not supported."), TEXT("value_type"),
+                    MakeShared<FJsonValueNumber>(static_cast<int32>(ValueType)),
+                    MakeShared<FJsonValueString>(TEXT("Boolean, Axis1D, Axis2D or Axis3D")), TEXT("native_result")));
 			}
 		}
 
 		template <typename TObject>
 		bool TryBuildClassCollectionProjection(
 			const TArray<TObjectPtr<TObject>>& Objects,
-			const UClass& BaseClass,
-			FUeAgentResourceTracker& Resources,
+            const UClass& BaseClass,
+            const FString& Field,
+            FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
@@ -617,20 +623,14 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				const UClass* Class =
 					Object ? Object->GetClass() : nullptr;
 				FUeAgentCanonicalValuePtr ClassPath;
-				if (!Class
-					|| !Class->IsChildOf(&BaseClass)
-					|| !TryBuildProjectionString(
-						Class->GetPathName(),
-						Resources,
-						ClassPath,
-						OutError))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_enhanced_input_"
-							"existing_subobject_invalid"));
-				}
+                if (!Class || !Class->IsChildOf(&BaseClass))
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_existing_subobject_invalid"),
+                        !Class ? TEXT("The existing input subobject is unavailable.")
+                            : TEXT("The existing input subobject has the wrong class."),
+                        Field + TEXT("/") + ::LexToString(Items.Num()),
+                        Class ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Class->GetPathName())) : nullptr,
+                        MakeShared<FJsonValueString>(BaseClass.GetPathName()), TEXT("native_result")));
+                if (!TryBuildProjectionString(Class->GetPathName(), Resources, ClassPath, OutError)) return false;
 				Items.Add(ClassPath.ToSharedRef());
 			}
 			return TryBuildProjectionArray(
@@ -641,8 +641,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		}
 
 		bool TryBuildClassPathProjection(
-			const TArray<UClass*>& Classes,
-			FUeAgentResourceTracker& Resources,
+            const TArray<UClass*>& Classes,
+            const FString& Field,
+            FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
@@ -651,15 +652,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			for (const UClass* Class : Classes)
 			{
 				FUeAgentCanonicalValuePtr ClassPath;
-				if (!Class
-					|| !TryBuildProjectionString(
-						Class->GetPathName(),
-						Resources,
-						ClassPath,
-						OutError))
-				{
-					return false;
-				}
+                if (!Class)
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_class_projection_invalid"),
+                        TEXT("A resolved input class is unavailable during projection."), Field + TEXT("/") + ::LexToString(Items.Num()),
+                        nullptr, MakeShared<FJsonValueString>(TEXT("resolved class")), TEXT("native_result")));
+                if (!TryBuildProjectionString(Class->GetPathName(), Resources, ClassPath, OutError)) return false;
 				Items.Add(ClassPath.ToSharedRef());
 			}
 			return TryBuildProjectionArray(
@@ -675,21 +672,27 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			TMap<FString, FUeAgentCanonicalValueRef>& OutValues,
 			FExecutionMutationError& OutError)
 		{
+            ON_SCOPE_EXIT
+            {
+                if (Action && OutError.IsValid() && OutError.TargetPath.IsEmpty())
+                    OutError.TargetPath = Action->GetPathName();
+            };
 			OutValues.Reset();
-			if (!Action || !ValidateInputActionProperties())
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_enhanced_input_"
-						"action_projection_invalid"));
-			}
+            if (!Action)
+                return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_action_projection_invalid"),
+                    TEXT("InputAction field projection requires an InputAction object."), TEXT("target"),
+                    nullptr, MakeShared<FJsonValueString>(UInputAction::StaticClass()->GetPathName()), TEXT("native_result")));
+            if (!ValidateInputActionProperties(TEXT("asset_data_enhanced_input_action_projection_invalid"), OutError))
+            {
+                OutError.TargetPath = Action->GetPathName();
+                return false;
+            }
 			FString ValueType;
 			FUeAgentCanonicalValuePtr ValueTypeValue;
 			FUeAgentCanonicalValuePtr ConsumeValue;
 			FUeAgentCanonicalValuePtr TriggersValue;
 			FUeAgentCanonicalValuePtr ModifiersValue;
-			if (!TryFormatValueType(Action->ValueType, ValueType)
+            if (!TryFormatValueType(Action->ValueType, ValueType, OutError)
 				|| !TryBuildProjectionString(
 					ValueType,
 					Resources,
@@ -702,14 +705,14 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutError)
 				|| !TryBuildClassCollectionProjection(
 					Action->Triggers,
-					*UInputTrigger::StaticClass(),
-					Resources,
+                    *UInputTrigger::StaticClass(), TEXT("triggers"),
+                    Resources,
 					TriggersValue,
 					OutError)
 				|| !TryBuildClassCollectionProjection(
 					Action->Modifiers,
-					*UInputModifier::StaticClass(),
-					Resources,
+                    *UInputModifier::StaticClass(), TEXT("modifiers"),
+                    Resources,
 					ModifiersValue,
 					OutError))
 			{
@@ -734,8 +737,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			const UInputAction* Action,
 			const FKey& Key,
 			const TArray<TObjectPtr<UInputTrigger>>& Triggers,
-			const TArray<TObjectPtr<UInputModifier>>& Modifiers,
-			FUeAgentResourceTracker& Resources,
+            const TArray<TObjectPtr<UInputModifier>>& Modifiers,
+            const FString& Field,
+            FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
@@ -743,13 +747,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr KeyValue;
 			FUeAgentCanonicalValuePtr TriggersValue;
 			FUeAgentCanonicalValuePtr ModifiersValue;
-			if (!Action
-				|| !Key.IsValid()
-				|| !TryBuildProjectionString(
-					Action->GetPathName(),
-					Resources,
-					ActionValue,
-					OutError)
+            if (!Action || !Key.IsValid())
+                return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_mapping_projection_invalid"),
+                    !Action ? TEXT("The captured mapping has no InputAction.") : TEXT("The captured mapping has an invalid key."),
+                    Field + (!Action ? TEXT("/action_ref") : TEXT("/key")),
+                    !Action ? nullptr : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Key.GetFName().ToString())),
+                    MakeShared<FJsonValueString>(!Action ? TEXT("InputAction asset") : TEXT("registered key")), TEXT("native_result")));
+            if (!TryBuildProjectionString(Action->GetPathName(), Resources, ActionValue, OutError)
 				|| !TryBuildProjectionString(
 					Key.GetFName().ToString(),
 					Resources,
@@ -757,22 +761,18 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutError)
 				|| !TryBuildClassCollectionProjection(
 					Triggers,
-					*UInputTrigger::StaticClass(),
-					Resources,
+                    *UInputTrigger::StaticClass(), Field + TEXT("/triggers"),
+                    Resources,
 					TriggersValue,
 					OutError)
 				|| !TryBuildClassCollectionProjection(
 					Modifiers,
-					*UInputModifier::StaticClass(),
-					Resources,
+                    *UInputModifier::StaticClass(), Field + TEXT("/modifiers"),
+                    Resources,
 					ModifiersValue,
 					OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_enhanced_input_"
-						"mapping_projection_invalid"));
+                return false;
 			}
 			return TryBuildProjectionObject(
 				{
@@ -804,14 +804,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			TMap<FString, FUeAgentCanonicalValueRef>& OutValues,
 			FExecutionMutationError& OutError)
 		{
+            ON_SCOPE_EXIT
+            {
+                if (Context && OutError.IsValid() && OutError.TargetPath.IsEmpty())
+                    OutError.TargetPath = Context->GetPathName();
+            };
 			OutValues.Reset();
 			if (!Context)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_enhanced_input_"
-						"mapping_context_projection_invalid"));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_mapping_context_projection_invalid"),
+                    TEXT("Mapping field projection requires an InputMappingContext object."), TEXT("target"),
+                    nullptr, MakeShared<FJsonValueString>(UInputMappingContext::StaticClass()->GetPathName()), TEXT("native_result")));
 			}
 			TSet<FString> SeenIdentities;
 			TArray<FUeAgentCanonicalValueRef> Mappings;
@@ -820,35 +823,26 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{
 				if (!Mapping.Action || !Mapping.Key.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_enhanced_input_"
-							"mapping_identity_invalid"));
+                    auto Error = JsonFailure(TEXT("asset_data_enhanced_input_mapping_identity_invalid"),
+                        !Mapping.Action ? TEXT("The existing mapping has no input action.") : TEXT("The existing mapping key is invalid."),
+                        TEXT("mappings/") + ::LexToString(Mappings.Num()) + (!Mapping.Action ? TEXT("/action_ref") : TEXT("/key")),
+                        !Mapping.Action ? nullptr : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Mapping.Key.GetFName().ToString())),
+                        MakeShared<FJsonValueString>(!Mapping.Action ? TEXT("InputAction asset") : TEXT("registered key")), TEXT("native_result"));
+                    Error.TargetPath = Context->GetPathName();
+                    return Fail(OutError, MoveTemp(Error));
 				}
 				const FString Identity =
 					Mapping.Action->GetPathName()
 					+ TEXT("\n")
 					+ Mapping.Key.GetFName().ToString();
 				FUeAgentCanonicalValuePtr Value;
-				if (SeenIdentities.Contains(Identity)
-					|| !TryBuildMappingProjectionValue(
-						Mapping.Action.Get(),
-						Mapping.Key,
-						Mapping.Triggers,
-						Mapping.Modifiers,
-						Resources,
-						Value,
-						OutError))
+				if (SeenIdentities.Contains(Identity))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_enhanced_input_"
-							"mapping_identity_duplicate"),
-						Identity);
+                    return FailDuplicateMapping(OutError, Mapping.Action->GetPathName(), Mapping.Key.GetFName().ToString(), Mappings.Num(), TEXT("native_result"));
 				}
 				SeenIdentities.Add(Identity);
+                if (!TryBuildMappingProjectionValue(Mapping.Action.Get(), Mapping.Key, Mapping.Triggers,
+                    Mapping.Modifiers, TEXT("mappings/") + ::LexToString(Mappings.Num()), Resources, Value, OutError)) return false;
 				Mappings.Add(Value.ToSharedRef());
 			}
 			FUeAgentCanonicalValuePtr MappingsValue;
@@ -918,11 +912,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		{
 			if (SelectedFieldIds.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_enhanced_input_"
-						"selected_fields_missing"));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_selected_fields_missing"),
+                    TEXT("Enhanced Input projection requires at least one selected field."), TEXT("selected_fields"),
+                    MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("one or more fields"))));
 			}
 			TSet<FString> Seen;
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>>
@@ -942,23 +934,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						NativeMechanicId,
 						FieldId);
 				FUeAgentCanonicalValuePtr ContextValue;
-				if (Seen.Contains(FieldId)
-					|| !Current
-					|| !Default
-					|| !ContextTag
-					|| !TryBuildProjectionString(
-						ContextTag,
-						Resources,
-						ContextValue,
-						OutError))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_enhanced_input_"
-							"selected_field_invalid"),
-						FieldId);
-				}
+                if (Seen.Contains(FieldId) || !Current || !Default || !ContextTag)
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_selected_field_invalid"),
+                        Seen.Contains(FieldId) ? TEXT("The field is selected more than once.")
+                            : !Current ? TEXT("The selected field has no captured current value.")
+                            : !Default ? TEXT("The selected field has no captured default value.")
+                            : TEXT("The field has no projection context for this asset type."),
+                        FieldId, MakeShared<FJsonValueString>(FieldId),
+                        MakeShared<FJsonValueString>(TEXT("unique supported field with current, default and context values"))));
+                if (!TryBuildProjectionString(ContextTag, Resources, ContextValue, OutError)) return false;
 				Seen.Add(FieldId);
 				CurrentItems.Emplace(FieldId, *Current);
 				DefaultItems.Emplace(FieldId, *Default);
@@ -1008,11 +992,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				|| TypedChanges->GetArrayItems().Num()
 					!= CurrentFields.GetObjectItems().Num())
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_enhanced_input_"
-						"expected_state_invalid"));
+                if (CurrentFields.GetKind() != EUeAgentValueKind::Object)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_expected_state_invalid"),
+                        TEXT("Captured current input fields must be an object."), TEXT("field_state"), &CurrentFields, TEXT("object"), TEXT("native_result")));
+                if (DefaultFields.GetKind() != EUeAgentValueKind::Object)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_expected_state_invalid"),
+                        TEXT("Captured default input fields must be an object."), TEXT("field_defaults"), &DefaultFields, TEXT("object"), TEXT("native_result")));
+                if (ProjectionContext.GetKind() != EUeAgentValueKind::Object)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_expected_state_invalid"),
+                        TEXT("Input field projection context must be an object."), TEXT("field_projection_context"), &ProjectionContext, TEXT("object"), TEXT("native_result")));
+                if (!TypedChanges || TypedChanges->GetKind() != EUeAgentValueKind::Array)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_expected_state_invalid"),
+                        TEXT("The proposed input state requires a typed_changes array."), TEXT("typed_changes"), TypedChanges, TEXT("array")));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_expected_state_invalid"),
+                    TEXT("The number of typed changes must match the number of selected current fields."), TEXT("typed_changes"),
+                    MakeShared<FJsonValueNumber>(TypedChanges->GetArrayItems().Num()),
+                    MakeShared<FJsonValueNumber>(CurrentFields.GetObjectItems().Num())));
 			}
 			for (const FUeAgentCanonicalValueRef& Change
 				: TypedChanges->GetArrayItems())
@@ -1026,11 +1021,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						FieldId)
 					|| OutChanges.Contains(FieldId))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_enhanced_input_"
-							"expected_change_invalid"));
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_expected_change_invalid"),
+                        OutChanges.Contains(FieldId) ? TEXT("The same field_id occurs more than once in typed_changes.")
+                            : TEXT("Each typed change requires a non-empty string field_id."),
+                        TEXT("typed_changes/") + ::LexToString(OutChanges.Num()) + TEXT("/field_id"),
+                        Field, TEXT("unique non-empty field_id")));
 				}
 				OutChanges.Add(FieldId, &Change.Get());
 			}
@@ -1066,8 +1061,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		bool TryNormalizeClassCollection(
 			const FUeAgentCanonicalValue& Requested,
 			const UClass& BaseClass,
-			const FString& ErrorPrefix,
-			FUeAgentResourceTracker& Resources,
+            const FString& ErrorPrefix,
+            const FString& Field,
+            FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
@@ -1075,18 +1071,19 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return TryResolveClassArray(
 					Requested,
 					BaseClass,
-					ErrorPrefix,
-					Classes,
+                    ErrorPrefix, Field,
+                    Classes,
 					OutError)
 				&& TryBuildClassPathProjection(
-					Classes,
-					Resources,
+                    Classes, Field,
+                    Resources,
 					OutValue,
 					OutError);
 		}
 
 		bool TryApplyClassCollectionPresence(
-			const FString& Presence,
+            const FString& Field,
+            const FString& Presence,
 			const FUeAgentCanonicalValue& Current,
 			const FUeAgentCanonicalValue* Requested,
 			const UClass& BaseClass,
@@ -1103,20 +1100,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutValue,
 					OutError);
 			}
-			FUeAgentCanonicalValuePtr Normalized;
-			if (!Requested
-				|| (Presence != TEXT("set")
-					&& Presence != TEXT("replace"))
-				|| !TryNormalizeClassCollection(
-					*Requested,
-					BaseClass,
-					ErrorPrefix,
-					Resources,
-					Normalized,
-					OutError))
-			{
-				return false;
-			}
+            FUeAgentCanonicalValuePtr Normalized;
+            if (!Requested)
+                return Fail(OutError, ValueFailure(ErrorPrefix + TEXT("_value_missing"),
+                    TEXT("Updating an input class collection requires a value."), Field, nullptr, TEXT("class reference array")));
+            if (Presence != TEXT("set") && Presence != TEXT("replace"))
+                return Fail(OutError, JsonFailure(ErrorPrefix + TEXT("_presence_invalid"),
+                    TEXT("The input class collection uses an unsupported operation."), Field + TEXT("/presence"),
+                    MakeShared<FJsonValueString>(Presence), MakeShared<FJsonValueString>(TEXT("set, replace or clear"))));
+            if (!TryNormalizeClassCollection(*Requested, BaseClass, ErrorPrefix, Field, Resources, Normalized, OutError)) return false;
 			if (Presence == TEXT("replace"))
 			{
 				OutValue = Normalized;
@@ -1124,17 +1116,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			if (Current.GetKind() != EUeAgentValueKind::Array)
 			{
-				return false;
+                return Fail(OutError, ValueFailure(ErrorPrefix + TEXT("_current_invalid"),
+                    TEXT("The captured input class collection must be an array."), Field, &Current,
+                    TEXT("class reference array"), TEXT("native_result")));
 			}
 			TArray<FUeAgentCanonicalValueRef> Items =
 				Current.GetArrayItems();
 			TSet<FString> Existing;
-			for (const FUeAgentCanonicalValueRef& Item : Items)
+            for (int32 Index = 0; Index < Items.Num(); ++Index)
 			{
-				FString Path;
+                const FUeAgentCanonicalValueRef& Item = Items[Index];
+                FString Path;
 				if (!TryReadProjectionString(Item.Get(), Path))
 				{
-					return false;
+                    return Fail(OutError, ValueFailure(ErrorPrefix + TEXT("_current_class_ref_invalid"),
+                        TEXT("The captured input class reference must be a non-empty string."),
+                        Field + TEXT("/") + ::LexToString(Index), &Item.Get(), TEXT("non-empty class reference"), TEXT("native_result")));
 				}
 				Existing.Add(Path);
 			}
@@ -1154,28 +1151,36 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				OutError);
 		}
 
-		bool TryReadProjectedMappingIdentity(
-			const FUeAgentCanonicalValue& Value,
-			FString& OutActionPath,
-			FString& OutKey)
-		{
-			const FUeAgentCanonicalValue* Action =
-				FindObjectField(Value, TEXT("action_ref"));
-			const FUeAgentCanonicalValue* Key =
-				FindObjectField(Value, TEXT("key"));
-			return Action
-				&& Key
-				&& TryReadProjectionString(
-					*Action,
-					OutActionPath)
-				&& TryReadProjectionString(*Key, OutKey);
-		}
+        bool TryReadProjectedMappingIdentity(
+            const FUeAgentCanonicalValue& Value,
+            const FString& Field,
+            FString& OutActionPath,
+            FString& OutKey,
+            FExecutionMutationError& OutError)
+        {
+            const FUeAgentCanonicalValue* Action = FindObjectField(Value, TEXT("action_ref"));
+            const FUeAgentCanonicalValue* Key = FindObjectField(Value, TEXT("key"));
+            if (!Action || !Key)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_captured_mapping_identity_invalid"),
+                    TEXT("The captured mapping is missing an identity field."),
+                    Field + (!Action ? TEXT("/action_ref") : TEXT("/key")), nullptr, TEXT("non-empty string"), TEXT("native_result")));
+            if (!TryReadProjectionString(*Action, OutActionPath))
+                return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_captured_mapping_identity_invalid"),
+                    TEXT("The captured mapping action_ref must be a non-empty string."), Field + TEXT("/action_ref"),
+                    Action, TEXT("non-empty asset reference"), TEXT("native_result")));
+            if (!TryReadProjectionString(*Key, OutKey))
+                return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_captured_mapping_identity_invalid"),
+                    TEXT("The captured mapping key must be a non-empty string."), Field + TEXT("/key"),
+                    Key, TEXT("non-empty key name"), TEXT("native_result")));
+            return true;
+        }
 
 		bool TryNormalizeRequestedMapping(
 			IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
 			const FUeAgentCanonicalValue& Requested,
-			const bool bIdentityOnly,
-			FUeAgentResourceTracker& Resources,
+            const bool bIdentityOnly,
+            const FString& Field,
+            FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FString& OutIdentity,
 			FExecutionMutationError& OutError)
@@ -1187,13 +1192,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			if (!TryReadMappingIdentity(
 					Resolver,
 					Requested,
-					bIdentityOnly,
+                    bIdentityOnly, Field,
 					Action,
 					Key,
 					TriggerClasses,
 					ModifierClasses,
-					OutError)
-				|| !Action)
+                    OutError))
 			{
 				return false;
 			}
@@ -1234,13 +1238,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr ActionValue;
 			FUeAgentCanonicalValuePtr KeyValue;
 			if (!TryBuildClassPathProjection(
-					TriggerClasses,
-					Resources,
+                    TriggerClasses, Field + TEXT("/triggers"),
+                    Resources,
 					Triggers,
 					OutError)
 				|| !TryBuildClassPathProjection(
-					ModifierClasses,
-					Resources,
+                    ModifierClasses, Field + TEXT("/modifiers"),
+                    Resources,
 					Modifiers,
 					OutError)
 				|| !TryBuildProjectionString(
@@ -1282,7 +1286,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 		bool TryApplyMappingPresence(
 			IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
-			const FString& Presence,
+            const FString& Field,
+            const FString& Presence,
 			const FUeAgentCanonicalValue& Current,
 			const FUeAgentCanonicalValue* Requested,
 			FUeAgentResourceTracker& Resources,
@@ -1305,12 +1310,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					&& Presence != TEXT("set")
 					&& Presence != TEXT("replace")))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_enhanced_input_"
-						"mapping_presence_invalid"),
-					Presence);
+                if (!Requested || Requested->GetKind() != EUeAgentValueKind::Array)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_mapping_presence_invalid"),
+                        TEXT("The mapping operation requires an array value."), Field, Requested, TEXT("mapping array")));
+                if (Current.GetKind() != EUeAgentValueKind::Array)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_mapping_presence_invalid"),
+                        TEXT("The captured mappings must be an array."), Field, &Current, TEXT("mapping array"), TEXT("native_result")));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_mapping_presence_invalid"),
+                    TEXT("The mapping change uses an unsupported operation."), Field + TEXT("/presence"),
+                    MakeShared<FJsonValueString>(Presence), MakeShared<FJsonValueString>(TEXT("set, replace, remove or clear"))));
 			}
 			TArray<FUeAgentCanonicalValueRef> Normalized;
 			TArray<FString> RequestedIdentities;
@@ -1323,19 +1331,19 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				if (!TryNormalizeRequestedMapping(
 						Resolver,
 						Item.Get(),
-						bIdentityOnly,
+                        bIdentityOnly, Field + TEXT("/") + ::LexToString(Normalized.Num()),
 						Resources,
 						Value,
 						Identity,
-						OutError)
-					|| SeenRequested.Contains(Identity))
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_enhanced_input_"
-							"mapping_identity_duplicate"),
-						Identity);
+                    // The reader already received the complete relative mapping field path.
+					return false;
+				}
+				if (SeenRequested.Contains(Identity))
+				{
+					return FailDuplicateMapping(OutError, FindObjectField(Item.Get(), TEXT("action_ref"))->GetText(),
+						FindObjectField(Item.Get(), TEXT("key"))->GetText(), Normalized.Num());
 				}
 				SeenRequested.Add(Identity);
 				RequestedIdentities.Add(Identity);
@@ -1358,9 +1366,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FString ActionPath;
 				FString Key;
 				if (!TryReadProjectedMappingIdentity(
-						Item.Get(),
-						ActionPath,
-						Key))
+                        Item.Get(), Field + TEXT("/") + ::LexToString(Result.Num()),
+                        ActionPath,
+                        Key, OutError))
 				{
 					return false;
 				}
@@ -1368,12 +1376,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					ActionPath + TEXT("\n") + Key;
 				if (ExistingIndexes.Contains(Identity))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_enhanced_input_"
-							"mapping_identity_duplicate"),
-						Identity);
+                    return FailDuplicateMapping(OutError, ActionPath, Key, Result.Num(), TEXT("native_result"));
 				}
 				ExistingIndexes.Add(Identity, Result.Num());
 				Result.Add(Item);
@@ -1384,14 +1387,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					[&SeenRequested](
 						const FUeAgentCanonicalValueRef& Item)
 					{
-						FString ActionPath;
-						FString Key;
-						return TryReadProjectedMappingIdentity(
-								Item.Get(),
-								ActionPath,
-								Key)
-							&& SeenRequested.Contains(
-								ActionPath + TEXT("\n") + Key);
+                            // Every current mapping identity was validated before this removal predicate.
+                            return SeenRequested.Contains(FindObjectField(Item.Get(), TEXT("action_ref"))->GetText()
+                                + TEXT("\n") + FindObjectField(Item.Get(), TEXT("key"))->GetText());
 					});
 			}
 			else
@@ -1461,20 +1459,27 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 	{
 		OutState.Data.Reset();
 		UInputAction* Action = Cast<UInputAction>(Target);
-		if (!Action || !ValidateInputActionProperties())
-		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_input_action_invalid"));
-		}
+        if (!Action)
+        {
+            auto Error = JsonFailure(TEXT("asset_data_input_action_invalid"),
+                TEXT("InputAction update requires an InputAction target."), TEXT("target"), ObjectClassValue(Target),
+                MakeShared<FJsonValueString>(UInputAction::StaticClass()->GetPathName()), TEXT("native_result"));
+            if (Target) Error.TargetPath = Target->GetPathName();
+            return Fail(OutError, MoveTemp(Error));
+        }
+        if (!ValidateInputActionProperties(TEXT("asset_data_input_action_invalid"), OutError))
+        {
+            OutError.TargetPath = Action->GetPathName();
+            return false;
+        }
 		if (!ValueType.bSpecified
 			&& !ConsumeInput.bSpecified
 			&& !Triggers.bSpecified
 			&& !Modifiers.bSpecified)
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_input_action_changes_missing"));
+            return Fail(OutError, JsonFailure(TEXT("asset_data_input_action_changes_missing"),
+                TEXT("InputAction update requires at least one specified field change."), TEXT("changes"),
+                MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("value_type, consume_input, triggers or modifiers"))));
 		}
 
 		const TSharedRef<
@@ -1494,7 +1499,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				TEXT(
 					"asset_data_input_action_"
 					"existing_trigger_invalid"),
-				OutError)
+                TEXT("triggers"), OutError)
 			|| !CaptureExistingSubobjects(
 				Action->Modifiers,
 				Data->Pins,
@@ -1502,7 +1507,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				TEXT(
 					"asset_data_input_action_"
 					"existing_modifier_invalid"),
-				OutError))
+                TEXT("modifiers"), OutError))
 		{
 			return false;
 		}
@@ -1510,18 +1515,16 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		if (ValueType.bSpecified)
 		{
 			Data->bChangeValueType = true;
-			if (ValueType.Presence != TEXT("set")
-				|| !ValueType.CanonicalValue
-				|| !TryParseValueType(
-					*ValueType.CanonicalValue,
-					Data->NewValueType))
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_input_action_"
-						"value_type_invalid"));
-			}
+            if (ValueType.Presence != TEXT("set"))
+                return Fail(OutError, JsonFailure(TEXT("asset_data_input_action_value_type_invalid"),
+                    TEXT("InputAction value_type only supports set."), TEXT("value_type/presence"),
+                    MakeShared<FJsonValueString>(ValueType.Presence), MakeShared<FJsonValueString>(TEXT("set"))));
+            if (!ValueType.CanonicalValue)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_input_action_value_type_invalid"),
+                    TEXT("Setting InputAction value_type requires a value."), TEXT("value_type"), nullptr,
+                    TEXT("boolean, axis1d, axis2d or axis3d")));
+            if (!TryParseValueType(*ValueType.CanonicalValue, Data->NewValueType,
+                TEXT("asset_data_input_action_value_type_invalid"), OutError)) return false;
 		}
 		if (ConsumeInput.bSpecified)
 		{
@@ -1531,11 +1534,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				|| ConsumeInput.CanonicalValue->GetKind()
 					!= EUeAgentValueKind::Boolean)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_input_action_"
-						"consume_input_invalid"));
+                if (ConsumeInput.Presence != TEXT("set"))
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_input_action_consume_input_invalid"),
+                        TEXT("InputAction consume_input only supports set."), TEXT("consume_input/presence"),
+                        MakeShared<FJsonValueString>(ConsumeInput.Presence), MakeShared<FJsonValueString>(TEXT("set"))));
+                return Fail(OutError, ValueFailure(TEXT("asset_data_input_action_consume_input_invalid"),
+                    TEXT("InputAction consume_input requires a boolean value."), TEXT("consume_input"),
+                    ConsumeInput.CanonicalValue, TEXT("boolean")));
 			}
 			Data->bNewConsumeInput =
 				ConsumeInput.CanonicalValue->GetBoolean();
@@ -1556,10 +1561,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						*UInputTrigger::StaticClass(),
 						TEXT(
 							"asset_data_input_action_trigger"),
-						Classes,
+                        TEXT("triggers"), Classes,
 						OutError))
 				{
-					return false;
+                    if (!Triggers.CanonicalValue)
+                        return Fail(OutError, ValueFailure(TEXT("asset_data_input_action_trigger_value_missing"),
+                            TEXT("Updating triggers requires a class reference array."), TEXT("triggers"), nullptr, TEXT("array")));
+                    return false;
 				}
 				if (Triggers.Presence == TEXT("replace"))
 				{
@@ -1575,11 +1583,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				}
 				else
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_input_action_"
-							"trigger_presence_invalid"));
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_input_action_trigger_presence_invalid"),
+                        TEXT("The triggers change uses an unsupported operation."), TEXT("triggers/presence"),
+                        MakeShared<FJsonValueString>(Triggers.Presence), MakeShared<FJsonValueString>(TEXT("set, replace or clear"))));
 				}
 			}
 		}
@@ -1599,10 +1605,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						*UInputModifier::StaticClass(),
 						TEXT(
 							"asset_data_input_action_modifier"),
-						Classes,
+                        TEXT("modifiers"), Classes,
 						OutError))
 				{
-					return false;
+                    if (!Modifiers.CanonicalValue)
+                        return Fail(OutError, ValueFailure(TEXT("asset_data_input_action_modifier_value_missing"),
+                            TEXT("Updating modifiers requires a class reference array."), TEXT("modifiers"), nullptr, TEXT("array")));
+                    return false;
 				}
 				if (Modifiers.Presence == TEXT("replace"))
 				{
@@ -1618,11 +1627,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				}
 				else
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_input_action_"
-							"modifier_presence_invalid"));
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_input_action_modifier_presence_invalid"),
+                        TEXT("The modifiers change uses an unsupported operation."), TEXT("modifiers/presence"),
+                        MakeShared<FJsonValueString>(Modifiers.Presence), MakeShared<FJsonValueString>(TEXT("set, replace or clear"))));
 				}
 			}
 		}
@@ -1638,9 +1645,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		UInputAction* Action = Cast<UInputAction>(Target);
 		if (!Action || !State.Data.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_input_action_state_invalid"));
+            auto Error = !Action
+                ? JsonFailure(TEXT("asset_data_input_action_state_invalid"), TEXT("The InputAction target is unavailable or has the wrong class."),
+                    TEXT("target"), ObjectClassValue(Target), MakeShared<FJsonValueString>(UInputAction::StaticClass()->GetPathName()), TEXT("native_result"))
+                : JsonFailure(TEXT("asset_data_input_action_state_invalid"), TEXT("InputAction update has no prepared state."),
+                    TEXT("prepared_state_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("native_result"));
+            if (Target) Error.TargetPath = Target->GetPathName();
+            return Fail(OutError, MoveTemp(Error));
 		}
 		const FEnhancedInputActionPreparedData& Data = *State.Data;
 		TArray<TObjectPtr<UInputTrigger>> NewTriggers;
@@ -1653,7 +1664,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				TEXT(
 					"asset_data_input_action_"
 					"trigger_create_failed"),
-				NewTriggers,
+                TEXT("triggers"), NewTriggers,
 				OutError))
 		{
 			return false;
@@ -1666,7 +1677,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				TEXT(
 					"asset_data_input_action_"
 					"modifier_create_failed"),
-				NewModifiers,
+                TEXT("modifiers"), NewModifiers,
 				OutError))
 		{
 			return false;
@@ -1726,12 +1737,21 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	bool TryRollbackEnhancedInputActionUpdate(
 		UObject* Target,
-		const FEnhancedInputActionPreparedState& State)
+		const FEnhancedInputActionPreparedState& State,
+		FExecutionMutationError& OutError)
 	{
 		UInputAction* Action = Cast<UInputAction>(Target);
 		if (!Action || !State.Data.IsValid())
 		{
-			return false;
+			OutError = !Action
+                ? JsonFailure(TEXT("asset_data_input_action_rollback_invalid"),
+                    TEXT("Input action rollback requires a live InputAction target."), TEXT("target"), ObjectClassValue(Target),
+                    MakeShared<FJsonValueString>(UInputAction::StaticClass()->GetPathName()), TEXT("native_result"))
+                : JsonFailure(TEXT("asset_data_input_action_rollback_invalid"),
+                    TEXT("Input action rollback has no captured state."), TEXT("prepared_state"), MakeShared<FJsonValueBoolean>(false),
+                    MakeShared<FJsonValueBoolean>(true), TEXT("native_result"));
+            if (Target) OutError.TargetPath = Target->GetPathName();
+            return false;
 		}
 		const FEnhancedInputActionPreparedData& Data = *State.Data;
 		Action->Modify();
@@ -1786,10 +1806,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			Cast<UInputMappingContext>(Target);
 		if (!Context || !Mappings.bSpecified)
 		{
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_input_mapping_context_invalid"));
+            auto Error = !Context
+                ? JsonFailure(TEXT("asset_data_input_mapping_context_invalid"),
+                    TEXT("Mapping update requires an InputMappingContext target."), TEXT("target"), ObjectClassValue(Target),
+                    MakeShared<FJsonValueString>(UInputMappingContext::StaticClass()->GetPathName()), TEXT("native_result"))
+                : JsonFailure(TEXT("asset_data_input_mapping_context_invalid"),
+                    TEXT("Mapping update requires a specified mappings change."), TEXT("mappings_specified"),
+                    MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+            if (Target) Error.TargetPath = Target->GetPathName();
+            return Fail(OutError, MoveTemp(Error));
 		}
 		const TSharedRef<
 			FEnhancedInputMappingContextPreparedData,
@@ -1811,16 +1836,23 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Existing.Action.Get(),
 					Existing.Key))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_input_mapping_"
-							"existing_identity_duplicate"));
+                    auto Actual = MakeShared<FJsonObject>();
+                    Actual->SetField(TEXT("action_ref"), Existing.Action
+                        ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Existing.Action->GetPathName()))
+                        : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()));
+                    Actual->SetStringField(TEXT("key"), Existing.Key.GetFName().ToString());
+                    auto Error = JsonFailure(TEXT("asset_data_input_mapping_existing_identity_duplicate"),
+                        FString::Printf(TEXT("The existing mapping repeats the action/key pair from index %d."), Prior),
+                        TEXT("mappings/") + ::LexToString(Index), MakeShared<FJsonValueObject>(Actual),
+                        MakeShared<FJsonValueString>(TEXT("unique action_ref and key pair")), TEXT("native_result"));
+                    Error.TargetPath = Context->GetPathName();
+                    Error.OperationIndex = Index;
+                    return Fail(OutError, MoveTemp(Error));
 				}
 			}
 			FInputMappingSpec Spec;
 			if (!TryBuildMappingSpecFromExisting(
-					Existing,
+                    Existing, TEXT("mappings/") + ::LexToString(Index),
 					Data->Pins,
 					Spec,
 					OutError))
@@ -1840,10 +1872,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			|| Mappings.CanonicalValue->GetKind()
 				!= EUeAgentValueKind::Array)
 		{
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_input_mapping_array_invalid"));
+            return Fail(OutError, ValueFailure(TEXT("asset_data_input_mapping_array_invalid"),
+                TEXT("The requested mappings value must be an array."), TEXT("mappings"),
+                Mappings.CanonicalValue, TEXT("mapping array")));
 		}
 		const bool bIdentityOnly =
 			Mappings.Presence == TEXT("remove");
@@ -1851,10 +1882,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			&& Mappings.Presence != TEXT("set")
 			&& Mappings.Presence != TEXT("replace"))
 		{
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_input_mapping_presence_invalid"));
+            return Fail(OutError, JsonFailure(TEXT("asset_data_input_mapping_presence_invalid"),
+                TEXT("The mappings change uses an unsupported operation."), TEXT("mappings/presence"),
+                MakeShared<FJsonValueString>(Mappings.Presence), MakeShared<FJsonValueString>(TEXT("set, replace, remove or clear"))));
 		}
 
 		TArray<FInputMappingSpec> Requested;
@@ -1868,7 +1898,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			if (!TryReadMappingIdentity(
 					Resolver,
 					Value.Get(),
-					bIdentityOnly,
+                    bIdentityOnly, TEXT("mappings/") + ::LexToString(Requested.Num()),
 					Action,
 					Key,
 					TriggerClasses,
@@ -1887,11 +1917,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Key);
 				}))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_input_mapping_"
-						"identity_duplicate"));
+                return FailDuplicateMapping(OutError, Action->GetPathName(), Key.GetFName().ToString(),
+                    Requested.Num(), TEXT("authored_value"), TEXT("asset_data_input_mapping_identity_duplicate"));
 			}
 			PinUnique(Data->Pins, Action);
 			FInputMappingSpec Spec;
@@ -1968,11 +1995,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			Cast<UInputMappingContext>(Target);
 		if (!Context || !State.Data.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_input_mapping_context_"
-					"state_invalid"));
+            auto Error = !Context
+                ? JsonFailure(TEXT("asset_data_input_mapping_context_state_invalid"),
+                    TEXT("The InputMappingContext target is unavailable or has the wrong class."), TEXT("target"), ObjectClassValue(Target),
+                    MakeShared<FJsonValueString>(UInputMappingContext::StaticClass()->GetPathName()), TEXT("native_result"))
+                : JsonFailure(TEXT("asset_data_input_mapping_context_state_invalid"),
+                    TEXT("Mapping context update has no prepared state."), TEXT("prepared_state_available"),
+                    MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("native_result"));
+            if (Target) Error.TargetPath = Target->GetPathName();
+            return Fail(OutError, MoveTemp(Error));
 		}
 		const FEnhancedInputMappingContextPreparedData& Data =
 			*State.Data;
@@ -1989,7 +2020,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEXT(
 						"asset_data_input_mapping_"
 						"trigger_create_failed"),
-					Triggers,
+                    TEXT("mappings/") + ::LexToString(Materialized.Num()) + TEXT("/triggers"), Triggers,
 					OutError)
 				|| !TryMaterializeSubobjects(
 					Context,
@@ -1998,7 +2029,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEXT(
 						"asset_data_input_mapping_"
 						"modifier_create_failed"),
-					Modifiers,
+                    TEXT("mappings/") + ::LexToString(Materialized.Num()) + TEXT("/modifiers"), Modifiers,
 					OutError))
 			{
 				return false;
@@ -2026,24 +2057,45 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	bool TryRollbackEnhancedInputMappingContextUpdate(
 		UObject* Target,
-		const FEnhancedInputMappingContextPreparedState& State)
+		const FEnhancedInputMappingContextPreparedState& State,
+		FExecutionMutationError& OutError)
 	{
 		UInputMappingContext* Context =
 			Cast<UInputMappingContext>(Target);
 		if (!Context || !State.Data.IsValid())
 		{
-			return false;
+			OutError = !Context
+                ? JsonFailure(TEXT("asset_data_input_mapping_context_rollback_invalid"),
+                    TEXT("Mapping rollback requires a live InputMappingContext target."), TEXT("target"), ObjectClassValue(Target),
+                    MakeShared<FJsonValueString>(UInputMappingContext::StaticClass()->GetPathName()), TEXT("native_result"))
+                : JsonFailure(TEXT("asset_data_input_mapping_context_rollback_invalid"),
+                    TEXT("Mapping rollback has no captured state."), TEXT("prepared_state"), MakeShared<FJsonValueBoolean>(false),
+                    MakeShared<FJsonValueBoolean>(true), TEXT("native_result"));
+            if (Target) OutError.TargetPath = Target->GetPathName();
+            return false;
 		}
 		const FEnhancedInputMappingContextPreparedData& Data =
 			*State.Data;
 		Context->Modify();
 		Context->UnmapAll();
-		for (const FEnhancedActionKeyMapping& Original
-			: Data.OriginalMappings)
+		for (int32 Index = 0; Index < Data.OriginalMappings.Num(); ++Index)
 		{
+            const FEnhancedActionKeyMapping& Original = Data.OriginalMappings[Index];
 			if (!Original.Action || !Original.Key.IsValid())
 			{
-				return false;
+                const FString Field = TEXT("mappings/") + FString::FromInt(Index)
+                    + (!Original.Action ? TEXT("/action_ref") : TEXT("/key"));
+                OutError = JsonFailure(TEXT("asset_data_input_mapping_context_rollback_mapping_invalid"),
+                    !Original.Action ? TEXT("The captured mapping action is no longer available.")
+                        : TEXT("The captured mapping key is invalid."),
+                    Field, !Original.Action ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>())
+                        : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Original.Key.GetFName().ToString())),
+                    MakeShared<FJsonValueString>(!Original.Action ? TEXT("live InputAction") : TEXT("valid input key")),
+                    TEXT("native_result"));
+                OutError.OperationIndex = Index;
+                OutError.TargetPath = Context->GetPathName();
+                OutError.MutationMayHaveStarted = true;
+                return false;
 			}
 			FEnhancedActionKeyMapping& Mapping =
 				Context->MapKey(
@@ -2086,12 +2138,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		if (!CanProjectEnhancedInputFieldState(NativeMechanicId)
 			|| !Target)
 		{
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_enhanced_input_"
-					"field_projection_unsupported"),
-				NativeMechanicId);
+            auto Error = JsonFailure(TEXT("asset_data_enhanced_input_field_projection_unsupported"),
+                !CanProjectEnhancedInputFieldState(NativeMechanicId)
+                    ? TEXT("No Enhanced Input field projector is registered for this requested mechanic.")
+                    : TEXT("Enhanced Input field projection requires an available target object."),
+                !CanProjectEnhancedInputFieldState(NativeMechanicId) ? TEXT("input_projector_available") : TEXT("target_available"),
+                MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("native_result"));
+            Error.InternalContext = NativeMechanicId;
+            if (Target) Error.TargetPath = Target->GetPathName();
+            return Fail(OutError, MoveTemp(Error));
 		}
 		TMap<FString, FUeAgentCanonicalValueRef> CurrentValues;
 		TMap<FString, FUeAgentCanonicalValueRef> DefaultValues;
@@ -2100,7 +2155,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				"uai.asset_data.mechanic:"
 				"update_input_action:v1"))
 		{
-			const UInputAction* Action = Cast<UInputAction>(Target);
+            const UInputAction* Action = Cast<UInputAction>(Target);
+            if (!Action)
+            {
+                auto Error = JsonFailure(TEXT("asset_data_enhanced_input_action_projection_invalid"),
+                    TEXT("The InputAction projector received an object of another class."), TEXT("target"),
+                    ObjectClassValue(Target), MakeShared<FJsonValueString>(UInputAction::StaticClass()->GetPathName()), TEXT("native_result"));
+                Error.TargetPath = Target->GetPathName();
+                return Fail(OutError, MoveTemp(Error));
+            }
 			const UInputAction* Default =
 				GetDefault<UInputAction>();
 			if (!TryBuildInputActionProjectionMap(
@@ -2119,8 +2182,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		}
 		else
 		{
-			const UInputMappingContext* Context =
-				Cast<UInputMappingContext>(Target);
+            const UInputMappingContext* Context = Cast<UInputMappingContext>(Target);
+            if (!Context)
+            {
+                auto Error = JsonFailure(TEXT("asset_data_enhanced_input_mapping_context_projection_invalid"),
+                    TEXT("The InputMappingContext projector received an object of another class."), TEXT("target"),
+                    ObjectClassValue(Target), MakeShared<FJsonValueString>(UInputMappingContext::StaticClass()->GetPathName()), TEXT("native_result"));
+                Error.TargetPath = Target->GetPathName();
+                return Fail(OutError, MoveTemp(Error));
+            }
 			const UInputMappingContext* Default =
 				GetDefault<UInputMappingContext>();
 			if (!TryBuildMappingContextProjectionMap(
@@ -2163,12 +2233,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		OutExpectedFields.Reset();
 		if (!CanProjectEnhancedInputFieldState(NativeMechanicId))
 		{
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_enhanced_input_"
-					"field_projection_unsupported"),
-				NativeMechanicId);
+            auto Error = JsonFailure(TEXT("asset_data_enhanced_input_field_projection_unsupported"),
+                TEXT("No Enhanced Input expected-state projector is registered for this requested mechanic."),
+                TEXT("input_projector_available"), MakeShared<FJsonValueBoolean>(false),
+                MakeShared<FJsonValueBoolean>(true), TEXT("native_result"));
+            Error.InternalContext = NativeMechanicId;
+            return Fail(OutError, MoveTemp(Error));
 		}
 		TMap<FString, const FUeAgentCanonicalValue*> Changes;
 		if (!TryReadTypedChangeMap(
@@ -2210,12 +2280,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					ContextText)
 				|| ContextText != ExpectedContext)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_enhanced_input_"
-						"expected_context_invalid"),
-					Current.Key);
+                if (!Change)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_expected_context_invalid"),
+                        TEXT("The selected input field has no matching typed change."), Current.Key, nullptr, TEXT("typed change for this field")));
+                if (!Default)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_expected_context_invalid"),
+                        TEXT("The selected input field has no captured default value."), Current.Key, nullptr, TEXT("captured default value"), TEXT("native_result")));
+                if (!Context)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_expected_context_invalid"),
+                        TEXT("The selected input field has no projection context."), Current.Key, nullptr, TEXT("field projection context"), TEXT("native_result")));
+                if (!ExpectedContext)
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_expected_context_invalid"),
+                        TEXT("This input field is not supported by the selected projector."), Current.Key,
+                        MakeShared<FJsonValueString>(Current.Key), MakeShared<FJsonValueString>(TEXT("supported Enhanced Input field"))));
+                return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_expected_context_invalid"),
+                    TEXT("The captured input field projection context has the wrong type or tag."),
+                    Current.Key, Context, ExpectedContext, TEXT("native_result")));
 			}
 			FString Presence;
 			const FUeAgentCanonicalValue* Requested = nullptr;
@@ -2224,12 +2304,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Presence,
 					Requested))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_enhanced_input_"
-						"expected_presence_invalid"),
-					Current.Key);
+                return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_expected_presence_invalid"),
+                    TEXT("The input field change must declare a non-empty string presence operation."),
+                    Current.Key + TEXT("/presence"), FindObjectField(**Change, TEXT("presence")), TEXT("non-empty operation string")));
 			}
 
 			FUeAgentCanonicalValuePtr Expected;
@@ -2240,8 +2317,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				&& Current.Key == TEXT("mappings"))
 			{
 				if (!TryApplyMappingPresence(
-						Resolver,
-						Presence,
+                        Resolver, Current.Key,
+                        Presence,
 						Current.Value.Get(),
 						Requested,
 						Resources,
@@ -2255,50 +2332,33 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{
 				EInputActionValueType ValueType;
 				FString Normalized;
-				if (Presence != TEXT("set")
-					|| !Requested
-					|| !TryParseValueType(
-						*Requested,
-						ValueType)
-					|| !TryFormatValueType(
-						ValueType,
-						Normalized)
-					|| !TryBuildProjectionString(
-						Normalized,
-						Resources,
-						Expected,
-						OutError))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_enhanced_input_"
-							"value_type_expected_invalid"));
-				}
+                if (Presence != TEXT("set"))
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_value_type_expected_invalid"),
+                        TEXT("InputAction value_type only supports set."), Current.Key + TEXT("/presence"),
+                        MakeShared<FJsonValueString>(Presence), MakeShared<FJsonValueString>(TEXT("set"))));
+                if (!Requested)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_value_type_expected_invalid"),
+                        TEXT("Setting InputAction value_type requires a value."), Current.Key, nullptr,
+                        TEXT("boolean, axis1d, axis2d or axis3d")));
+                if (!TryParseValueType(*Requested, ValueType, TEXT("asset_data_enhanced_input_value_type_expected_invalid"), OutError)
+                    || !TryFormatValueType(ValueType, Normalized, OutError)
+                    || !TryBuildProjectionString(Normalized, Resources, Expected, OutError)) return false;
 			}
 			else if (Current.Key == TEXT("consume_input"))
 			{
-				if (Presence != TEXT("set")
-					|| !Requested
-					|| Requested->GetKind()
-						!= EUeAgentValueKind::Boolean
-					|| !TryBuildProjectionBoolean(
-						Requested->GetBoolean(),
-						Resources,
-						Expected,
-						OutError))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_enhanced_input_"
-							"consume_input_expected_invalid"));
-				}
+                if (Presence != TEXT("set"))
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_consume_input_expected_invalid"),
+                        TEXT("InputAction consume_input only supports set."), Current.Key + TEXT("/presence"),
+                        MakeShared<FJsonValueString>(Presence), MakeShared<FJsonValueString>(TEXT("set"))));
+                if (!Requested || Requested->GetKind() != EUeAgentValueKind::Boolean)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_enhanced_input_consume_input_expected_invalid"),
+                        TEXT("InputAction consume_input requires a boolean value."), Current.Key, Requested, TEXT("boolean")));
+                if (!TryBuildProjectionBoolean(Requested->GetBoolean(), Resources, Expected, OutError)) return false;
 			}
 			else if (Current.Key == TEXT("triggers"))
 			{
 				if (!TryApplyClassCollectionPresence(
-						Presence,
+                        Current.Key, Presence,
 						Current.Value.Get(),
 						Requested,
 						*UInputTrigger::StaticClass(),
@@ -2314,7 +2374,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			else if (Current.Key == TEXT("modifiers"))
 			{
 				if (!TryApplyClassCollectionPresence(
-						Presence,
+                        Current.Key, Presence,
 						Current.Value.Get(),
 						Requested,
 						*UInputModifier::StaticClass(),
@@ -2329,12 +2389,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_enhanced_input_"
-						"expected_field_invalid"),
-					Current.Key);
+                return Fail(OutError, JsonFailure(TEXT("asset_data_enhanced_input_expected_field_invalid"),
+                    TEXT("This field has no Enhanced Input expected-state builder for the selected asset type."), Current.Key,
+                    MakeShared<FJsonValueString>(Current.Key), MakeShared<FJsonValueString>(TEXT("supported Enhanced Input field"))));
 			}
 			ExpectedItems.Emplace(
 				Current.Key,

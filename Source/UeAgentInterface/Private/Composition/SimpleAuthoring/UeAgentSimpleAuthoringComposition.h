@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
@@ -29,6 +31,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		Contract::FUeAgentDescriptorIdentity DescriptorIdentity;
 
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 	};
 
 	UEAGENTINTERFACE_API const TArray<
@@ -39,11 +42,11 @@ namespace UE::UAI::Composition::SimpleAuthoring
 	TryCreateSimpleAuthoringDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>&
 			OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool
 	TryCreateProductionCommandContractRegistry(
 		TSharedPtr<const CommandContract::
 			FUeAgentCommandContractRegistry>& OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

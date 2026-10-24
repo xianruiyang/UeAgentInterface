@@ -1,0 +1,18 @@
+diff --git a/Engine/Source/Developer/AssetTools/Private/AssetFixUpRedirectors.cpp b/Engine/Source/Developer/AssetTools/Private/AssetFixUpRedirectors.cpp
+--- a/Engine/Source/Developer/AssetTools/Private/AssetFixUpRedirectors.cpp
++++ b/Engine/Source/Developer/AssetTools/Private/AssetFixUpRedirectors.cpp
+@@ -912,8 +912,12 @@ void FAssetFixUpRedirectors::ExecuteFixUp(TArray<TWeakObjectPtr<UObjectRedirector>> Objects, const bool bCheckoutDialogPrompt, ERedirectFixupMode FixupMode) const
+ 		}
+ 		
+ 
+-		TSharedPtr<SFixupRedirectorsReport> Dialog = SNew(SFixupRedirectorsReport, RedirectorRefsList, bCanDelete);
+-		const bool bDoDelete = Dialog->ShowModalDialog(LOCTEXT("RedirectorUpdateReport", "Redirector Update Report"));
++		bool bDoDelete = bCanDelete;
++		if (!GIsRunningUnattendedScript)
++		{
++			TSharedPtr<SFixupRedirectorsReport> Dialog = SNew(SFixupRedirectorsReport, RedirectorRefsList, bCanDelete);
++			bDoDelete = Dialog->ShowModalDialog(LOCTEXT("RedirectorUpdateReport", "Redirector Update Report"));
++		}
+ 		if (!bDoDelete)
+ 		{
+ 			return;

@@ -1,10 +1,13 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundPcgAiBindings.h"
+#include "Misc/ScopeExit.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/PackageName.h"
 #include "PCGComponent.h"
+
 
 namespace UE::UAI::Composition::GraphCompound
 {
@@ -38,17 +41,109 @@ namespace UE::UAI::Composition::GraphCompound
 			return Profiles;
 		}
 
-		void SetError(
-			FGraphCompoundRuntimeError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		void SetError(FGraphCompoundRuntimeError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SubjectId; }
+
+		FDiagnostic BindingFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Subject,
+			const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected)
 		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, TEXT("graph_compound"), FString(), Subject);
+			Error.SourceKind = TEXT("native_result");
+			Error.TargetPath = Subject;
+			Error.PropertyPath = Field;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
+
+		FDiagnostic DescriptorMismatch(
+			const FUeAgentDescriptorIdentity& Actual,
+			const FUeAgentDescriptorIdentity& Expected)
+		{
+			FDiagnostic Error = FDiagnostic::Failure(
+				TEXT("graph_compound_binding_descriptor_mismatch"),
+				TEXT("The request descriptor does not match the graph binding."),
+				TEXT("graph_compound"), FString(), Expected.GetDescriptorId());
+			Error.SourceKind = TEXT("native_result");
+			if (Actual.GetDescriptorId() != Expected.GetDescriptorId())
+			{
+				Error.PropertyPath = TEXT("descriptor_identity.descriptor_id");
+				Error.ActualValue = MakeShared<FJsonValueString>(Actual.GetDescriptorId());
+				Error.ExpectedValue = MakeShared<FJsonValueString>(Expected.GetDescriptorId());
+			}
+			else if (Actual.GetVersion() != Expected.GetVersion())
+			{
+				Error.PropertyPath = TEXT("descriptor_identity.version");
+				Error.ActualValue = MakeShared<FJsonValueNumber>(Actual.GetVersion());
+				Error.ExpectedValue = MakeShared<FJsonValueNumber>(Expected.GetVersion());
+			}
+			else
+			{
+				Error.PropertyPath = TEXT("descriptor_identity.descriptor_hash");
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Actual.GetDescriptorHash());
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetDescriptorHash());
+			}
+			return Error;
+		}
+
+		FDiagnostic PlanningFailure(
+			const bool bPlanned, const FPlanningResult& Planning, const FString& Subject)
+		{
+			return BindingFailure(TEXT("graph_compound_planning_not_ready"),
+				!bPlanned ? TEXT("Graph change planning failed without a diagnostic.")
+					: !Planning.IsReady() ? TEXT("Graph change planning did not reach the ready state.")
+					: TEXT("Graph change planning returned ready without a plan."),
+				Subject, !bPlanned ? TEXT("planning.succeeded")
+					: !Planning.IsReady() ? TEXT("planning.ready") : TEXT("planning.plan_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		}
+
+		FDiagnostic InputFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Field,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			FDiagnostic Error = BindingFailure(Code, Reason, FString(), Field,
+				Actual, MoveTemp(Expected));
+			Error.SourceKind = TEXT("command_input");
+			Error.Source.JsonPath = FString(TEXT("/")) + Field;
+			Error.ActualValuePresent = Actual.IsValid();
+			return Error;
+		}
+
+		bool TryReadInputObject(
+			const FUeAgentContractValue& Input, TSharedPtr<FJsonObject>& OutObject,
+			FDiagnostic& OutError)
+		{
+			if (!Json::TryParseObject(Input.GetJsonValue(), OutObject, OutError))
+			{
+				BindGraphCompoundInputValueDiagnostic(OutError, TEXT("/"));
+				return false;
+			}
+			if (!OutObject.IsValid())
+			{
+				OutError = InputFailure(TEXT("graph_compound_typed_request_invalid"),
+					TEXT("The parsed graph request object is absent."), FString(),
+					nullptr, MakeShared<FJsonValueString>(TEXT("object")));
+				return false;
+			}
+			return true;
+		}
+
+		bool TryReadStringField(
+			const FJsonObject& Object, const FString& Field, FString& OutValue,
+			FDiagnostic& OutError)
+		{
+			if (Object.TryGetStringField(Field, OutValue)) return true;
+			const TSharedPtr<FJsonValue> Actual = Object.Values.FindRef(Field);
+			OutError = InputFailure(TEXT("graph_compound_typed_request_invalid"),
+				Actual.IsValid() ? TEXT("The graph request field must be a string.")
+					: TEXT("The required graph request field is missing."),
+				Field, Actual, MakeShared<FJsonValueString>(TEXT("string")));
+			return false;
+		}
+
 
 		bool IsSupportedAssetCreate(
 			const FPcgAnimationGraphRouteProfile& Profile)
@@ -168,23 +263,12 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			OutTargetRef.Reset();
 			TSharedPtr<FJsonObject> Object;
-			FString JsonError;
-			if (!Json::TryParseObject(Input.GetJsonValue(), Object, JsonError)
-				|| !Object.IsValid())
-			{
-				SetError(OutError,
-					TEXT("graph_compound_typed_request_invalid"),
-					Profile.GetCapabilityId(), JsonError);
-				return false;
-			}
+			if (!TryReadInputObject(Input, Object, OutError)) return false;
 			FString AssetName;
 			FString PackagePath;
-			if (!Object->TryGetStringField(TEXT("asset_name"), AssetName)
-				|| !Object->TryGetStringField(TEXT("package_path"), PackagePath))
+			if (!TryReadStringField(*Object, TEXT("asset_name"), AssetName, OutError)
+				|| !TryReadStringField(*Object, TEXT("package_path"), PackagePath, OutError))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_typed_request_invalid"),
-					Profile.GetCapabilityId());
 				return false;
 			}
 			AssetName.TrimStartAndEndInline();
@@ -195,9 +279,12 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			if (AssetName.IsEmpty() || PackagePath.IsEmpty())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_typed_request_invalid"),
-					Profile.GetCapabilityId());
+				const FString Field = AssetName.IsEmpty() ? TEXT("asset_name") : TEXT("package_path");
+				OutError = InputFailure(TEXT("graph_compound_typed_request_invalid"),
+					AssetName.IsEmpty() ? TEXT("The asset name is empty after trimming.")
+						: TEXT("The package path is empty after trimming and removing trailing slashes."),
+					Field, Object->Values.FindRef(Field),
+					MakeShared<FJsonValueString>(TEXT("non-empty string after normalization")));
 				return false;
 			}
 			OutTargetRef = PackagePath + TEXT("/") + AssetName;
@@ -212,26 +299,30 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			OutTargetRef.Reset();
 			TSharedPtr<FJsonObject> Object;
-			FString JsonError;
-			if (!Json::TryParseObject(Input.GetJsonValue(), Object, JsonError)
-				|| !Object.IsValid()
-				|| !Object->TryGetStringField(TEXT("target_ref"), OutTargetRef))
+			if (!TryReadInputObject(Input, Object, OutError)
+				|| !TryReadStringField(*Object, TEXT("target_ref"), OutTargetRef, OutError))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_typed_request_invalid"),
-					Profile.GetCapabilityId(), JsonError);
 				return false;
 			}
 			OutTargetRef.TrimStartAndEndInline();
 			const FString PackageName =
 				FPackageName::ObjectPathToPackageName(OutTargetRef);
-			if (OutTargetRef.IsEmpty()
-				|| !FPackageName::IsValidObjectPath(OutTargetRef)
-				|| !FPackageName::IsValidLongPackageName(PackageName))
+			FText PathReason;
+			FString Reason;
+			bool bInvalid = true;
+			if (OutTargetRef.IsEmpty())
+				Reason = TEXT("The target object path is empty after trimming.");
+			else if (!FPackageName::IsValidObjectPath(OutTargetRef, &PathReason))
+				Reason = PathReason.IsEmpty() ? TEXT("The target is not a valid UE object path.") : PathReason.ToString();
+			else if (!FPackageName::IsValidLongPackageName(PackageName, false, &PathReason))
+				Reason = PathReason.IsEmpty() ? TEXT("The target object path contains an invalid package name.") : PathReason.ToString();
+			else bInvalid = false;
+			if (bInvalid)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_target_invalid"),
-					OutTargetRef);
+				OutError = InputFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					Reason, TEXT("target_ref"), Object->Values.FindRef(TEXT("target_ref")),
+					MakeShared<FJsonValueString>(TEXT("valid UE object path, e.g. /Game/Folder/Asset.Asset")));
+				OutError.TargetPath = OutTargetRef;
 				return false;
 			}
 			return true;
@@ -245,23 +336,28 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			OutTargetRef.Reset();
 			TSharedPtr<FJsonObject> Object;
-			FString JsonError;
-			if (!Json::TryParseObject(Input.GetJsonValue(), Object, JsonError)
-				|| !Object.IsValid()
-				|| !Object->TryGetStringField(TEXT("target_ref"), OutTargetRef))
+			if (!TryReadInputObject(Input, Object, OutError)
+				|| !TryReadStringField(*Object, TEXT("target_ref"), OutTargetRef, OutError))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_typed_request_invalid"),
-					Profile.GetCapabilityId(), JsonError);
 				return false;
 			}
 			OutTargetRef.TrimStartAndEndInline();
-			if (!FPackageName::IsValidLongPackageName(OutTargetRef)
-				|| OutTargetRef.Contains(TEXT("."))
-				|| FPackageName::GetLongPackageAssetName(OutTargetRef).IsEmpty())
+			FText PathReason;
+			FString Reason;
+			bool bInvalid = true;
+			if (!FPackageName::IsValidLongPackageName(OutTargetRef, false, &PathReason))
+				Reason = PathReason.IsEmpty() ? TEXT("The destination is not a valid long package name.") : PathReason.ToString();
+			else if (OutTargetRef.Contains(TEXT(".")))
+				Reason = TEXT("The destination package path must not contain an object suffix.");
+			else if (FPackageName::GetLongPackageAssetName(OutTargetRef).IsEmpty())
+				Reason = TEXT("The destination package path has no asset name.");
+			else bInvalid = false;
+			if (bInvalid)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_target_invalid"), OutTargetRef);
+				OutError = InputFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					Reason, TEXT("target_ref"), Object->Values.FindRef(TEXT("target_ref")),
+					MakeShared<FJsonValueString>(TEXT("destination package path, e.g. /Game/Folder/Asset")));
+				OutError.TargetPath = OutTargetRef;
 				return false;
 			}
 			return true;
@@ -277,22 +373,18 @@ namespace UE::UAI::Composition::GraphCompound
 				return true;
 			}
 			TSharedPtr<FJsonObject> Object;
-			FString JsonError;
 			FString DataTypeRef;
-			if (!Json::TryParseObject(Input.GetJsonValue(), Object, JsonError)
-				|| !Object.IsValid()
-				|| !Object->TryGetStringField(TEXT("data_type_ref"), DataTypeRef))
+			if (!TryReadInputObject(Input, Object, OutError)
+				|| !TryReadStringField(*Object, TEXT("data_type_ref"), DataTypeRef, OutError))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_typed_request_invalid"),
-					Profile.GetCapabilityId(), JsonError);
 				return false;
 			}
 			if (DataTypeRef != TEXT("/Script/PCG.PCGPointData"))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_data_type_unsupported"),
-					DataTypeRef);
+				OutError = InputFailure(TEXT("graph_compound_pcg_data_type_unsupported"),
+					TEXT("The PCG data asset operation requires PCGPointData."),
+					TEXT("data_type_ref"), MakeShared<FJsonValueString>(DataTypeRef),
+					MakeShared<FJsonValueString>(TEXT("/Script/PCG.PCGPointData")));
 				return false;
 			}
 			return true;
@@ -306,17 +398,12 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			OutTargetRef.Reset();
 			TSharedPtr<FJsonObject> Object;
-			FString JsonError;
 			const TCHAR* const TargetField = Profile.GetInputKind()
 				== EPcgAnimationGraphInputKind::PcgWorldBinding
 				? TEXT("component_ref") : TEXT("target_ref");
-			if (!Json::TryParseObject(Input.GetJsonValue(), Object, JsonError)
-				|| !Object.IsValid()
-				|| !Object->TryGetStringField(TargetField, OutTargetRef))
+			if (!TryReadInputObject(Input, Object, OutError)
+				|| !TryReadStringField(*Object, TargetField, OutTargetRef, OutError))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_typed_request_invalid"),
-					Profile.GetCapabilityId(), JsonError);
 				return false;
 			}
 			OutTargetRef.TrimStartAndEndInline();
@@ -324,9 +411,13 @@ namespace UE::UAI::Composition::GraphCompound
 				? nullptr : FindObject<UPCGComponent>(nullptr, *OutTargetRef);
 			if (!Component || Component->GetPathName() != OutTargetRef)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_target_invalid"),
-					OutTargetRef);
+				OutError = InputFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					OutTargetRef.IsEmpty() ? TEXT("The PCG component reference is empty after trimming.")
+						: !Component ? TEXT("No loaded PCG component was found for the reference.")
+						: TEXT("The resolved PCG component path differs from the requested path."),
+					TargetField, Object->Values.FindRef(TargetField),
+					MakeShared<FJsonValueString>(Component ? Component->GetPathName() : TEXT("exact path of a loaded PCG component")));
+				OutError.TargetPath = OutTargetRef;
 				return false;
 			}
 			return true;
@@ -366,17 +457,21 @@ namespace UE::UAI::Composition::GraphCompound
 				OutError = {};
 				if (Request.GetDescriptorIdentity() != GetDescriptorIdentity())
 				{
-					SetError(OutError,
-						TEXT("graph_compound_binding_descriptor_mismatch"),
-						Profile.GetDescriptorId());
+					OutError = DescriptorMismatch(Request.GetDescriptorIdentity(), GetDescriptorIdentity());
 					return false;
 				}
 				const bool bAssetCreate = IsSupportedAssetCreate(Profile);
 				if (!bAssetCreate && !IsSupportedSchemaMutation(Profile))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_production_binding_unimplemented"),
-						Profile.GetCapabilityId());
+					const TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
+					Actual->SetStringField(TEXT("capability_id"), Profile.GetCapabilityId());
+					Actual->SetStringField(TEXT("target_kind"), Profile.GetTargetKind());
+					Actual->SetNumberField(TEXT("input_kind"), static_cast<int32>(Profile.GetInputKind()));
+					OutError = BindingFailure(TEXT("graph_compound_production_binding_unimplemented"),
+						TEXT("No PCG/AI production binding supports this route combination."),
+						Profile.GetDescriptorId(), TEXT("route"),
+						MakeShared<FJsonValueObject>(Actual),
+						MakeShared<FJsonValueString>(TEXT("supported PCG/AI create or schema mutation route")));
 					return false;
 				}
 
@@ -408,18 +503,21 @@ namespace UE::UAI::Composition::GraphCompound
 					TargetRef, Profile.GetTargetKind());
 				if (!TargetRequest.IsValid())
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_typed_request_invalid"),
-						Profile.GetCapabilityId());
+					OutError = TargetRequest.GetValidationDiagnostic();
 					return false;
 				}
 
 				FUeAgentCanonicalSnapshotPtr Snapshot;
-				if (!Environment->TryCaptureSnapshot(
-						Profile, TargetRequest, Resources, Cancellation,
-						Snapshot, OutError)
-					|| !Snapshot.IsValid())
+				const bool bCaptured = Environment->TryCaptureSnapshot(
+					Profile, TargetRequest, Resources, Cancellation, Snapshot, OutError);
+				if (!bCaptured || !Snapshot.IsValid())
 				{
+					if (OutError.IsEmpty())
+						OutError = BindingFailure(TEXT("graph_compound_pcg_ai_snapshot_invalid"),
+							bCaptured ? TEXT("PCG/AI capture returned without a snapshot.")
+								: TEXT("PCG/AI capture failed without a diagnostic."),
+							TargetRef, bCaptured ? TEXT("snapshot.present") : TEXT("snapshot.capture_succeeded"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return false;
 				}
 
@@ -430,46 +528,38 @@ namespace UE::UAI::Composition::GraphCompound
 						Profile, Request.GetPayload(), Snapshot.ToSharedRef(),
 						*Resources, Payload, RouteError))
 				{
-					SetError(OutError, RouteError.Code,
-						RouteError.SubjectId, RouteError.Detail);
+					SetError(OutError, RouteError, RouteError.SubjectId);
 					return false;
 				}
 				const FGraphCompoundPcgAiOperationRequest TypedRequest(
 					TargetRequest, MoveTemp(Payload));
+				ON_SCOPE_EXIT { TypedRequest.GetPayload().LocateDiagnostic(OutError); };
 
 				TOptional<FChangeSetDraft> Draft;
 				FGraphCompoundCanonicalError CanonicalError;
-				if (!TypedRequest.IsValid()
-					|| !TryBuildGraphCompoundChangeSetDraft(
+				if (!TypedRequest.IsValid())
+				{
+					OutError = TypedRequest.GetValidationDiagnostic();
+					return false;
+				}
+				if (!TryBuildGraphCompoundChangeSetDraft(
 						TypedRequest.GetPayload(), Snapshot.ToSharedRef(),
 						Request.GetDescriptorIdentity(), Request.GetRequestId(),
-						Request.GetIdempotencyKey(), *Resources,
-						Draft, CanonicalError)
-					|| !Draft.IsSet())
+						Request.GetIdempotencyKey(), *Resources, Draft, CanonicalError))
 				{
-					SetError(OutError,
-						CanonicalError.Code.IsEmpty()
-							? TEXT("graph_compound_pcg_ai_draft_invalid")
-							: CanonicalError.Code,
-						CanonicalError.IdentityKey,
-						CanonicalError.Detail);
+					OutError = CanonicalError;
 					return false;
 				}
 
 				FPlanningResult Planning;
 				FPlanningPreflightError PlanningError;
-				if (!TryPlanChanges(
-						FPlanningRequest(
-							MoveTemp(Draft.GetValue()), CallerContext, false),
-						*Resources, Planning, PlanningError)
-					|| !Planning.IsReady() || !Planning.GetPlan().IsValid())
+				const bool bPlanned = TryPlanChanges(
+					FPlanningRequest(MoveTemp(Draft.GetValue()), CallerContext, false),
+					*Resources, Planning, PlanningError);
+				if (!bPlanned || !Planning.IsReady() || !Planning.GetPlan().IsValid())
 				{
-					SetError(OutError,
-						PlanningError.GetCode().IsEmpty()
-							? TEXT("graph_compound_planning_not_ready")
-							: PlanningError.GetCode(),
-						PlanningError.GetIdentityKey(),
-						PlanningError.GetDetail());
+					OutError = PlanningError.IsEmpty()
+						? PlanningFailure(bPlanned, Planning, TargetRef) : PlanningError;
 					return false;
 				}
 				return Environment->TryExecute(
@@ -493,7 +583,15 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		TargetRef.TrimStartAndEndInline();
 		TargetKind.TrimStartAndEndInline();
-		bValid = !TargetRef.IsEmpty() && !TargetKind.IsEmpty();
+		if (TargetRef.IsEmpty() || TargetKind.IsEmpty())
+		{
+			ValidationDiagnostic = BindingFailure(TEXT("graph_compound_pcg_ai_typed_request_invalid"),
+				TargetRef.IsEmpty() ? TEXT("The PCG/AI target reference is empty after trimming.")
+					: TEXT("The PCG/AI target kind is empty after trimming."),
+				TargetRef, TargetRef.IsEmpty() ? TEXT("target_ref") : TEXT("target_kind"),
+				MakeShared<FJsonValueString>(TargetRef.IsEmpty() ? TargetRef : TargetKind),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
 	}
 
 	const FString& FGraphCompoundPcgAiTargetRequest::GetTargetRef() const
@@ -508,7 +606,12 @@ namespace UE::UAI::Composition::GraphCompound
 
 	bool FGraphCompoundPcgAiTargetRequest::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
+	}
+
+	const FDiagnostic& FGraphCompoundPcgAiTargetRequest::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic;
 	}
 
 	FGraphCompoundPcgAiOperationRequest::
@@ -518,9 +621,26 @@ namespace UE::UAI::Composition::GraphCompound
 		: Target(MoveTemp(InTarget))
 		, Payload(MoveTemp(InPayload))
 	{
-		bValid = Target.IsValid()
-			&& Payload.GetSchemaId() == GetGraphCompoundCanonicalSchemaId()
-			&& !Payload.GetEdits().IsEmpty();
+		if (!Target.IsValid())
+		{
+			ValidationDiagnostic = Target.GetValidationDiagnostic();
+		}
+		else if (Payload.GetSchemaId() != GetGraphCompoundCanonicalSchemaId())
+		{
+			ValidationDiagnostic = BindingFailure(TEXT("graph_compound_pcg_ai_typed_request_invalid"),
+				TEXT("The PCG/AI operation payload uses an incompatible canonical schema."),
+				Target.GetTargetRef(), TEXT("schema_id"),
+				MakeShared<FJsonValueString>(Payload.GetSchemaId()),
+				MakeShared<FJsonValueString>(GetGraphCompoundCanonicalSchemaId()));
+		}
+		else if (Payload.GetEdits().IsEmpty())
+		{
+			ValidationDiagnostic = BindingFailure(TEXT("graph_compound_pcg_ai_typed_request_invalid"),
+				TEXT("The PCG/AI operation payload contains no edits."),
+				Target.GetTargetRef(), TEXT("edits.count"),
+				MakeShared<FJsonValueNumber>(0),
+				MakeShared<FJsonValueString>(TEXT("at least one edit")));
+		}
 	}
 
 	const FGraphCompoundPcgAiTargetRequest&
@@ -547,18 +667,17 @@ namespace UE::UAI::Composition::GraphCompound
 
 	bool FGraphCompoundPcgAiOperationRequest::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
-	bool FGraphCompoundPcgAiProductionConfig::IsValid() const
+	const FDiagnostic& FGraphCompoundPcgAiOperationRequest::GetValidationDiagnostic() const
 	{
-		return FMath::IsFinite(OperationTimeoutSeconds)
-			&& OperationTimeoutSeconds > 0.0;
+		return ValidationDiagnostic;
 	}
 
 	bool TryCreatePcgAiGraphDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
@@ -578,13 +697,6 @@ namespace UE::UAI::Composition::GraphCompound
 				Descriptors.Add(Descriptor);
 			}
 		}
-		if (Descriptors.Num() != 18)
-		{
-			OutError = FString::Printf(
-				TEXT("Expected 17 PCG/AI descriptors, found %d."),
-				Descriptors.Num());
-			return false;
-		}
 		return FUeAgentDescriptorRegistry::TryCreate(
 			MoveTemp(Descriptors), OutRegistry, OutError);
 	}
@@ -596,8 +708,9 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		OutBindings.Reset();
 		OutError = {};
-		for (const FPcgAnimationGraphRouteProfile& Profile
-			: GetPcgAnimationGraphRouteProfiles())
+		const TArray<FPcgAnimationGraphRouteProfile>* Profiles = nullptr;
+		if (!TryGetPcgAnimationGraphRouteProfiles(Profiles, OutError)) return false;
+		for (const FPcgAnimationGraphRouteProfile& Profile : *Profiles)
 		{
 			if (Profile.GetDomainId() != PcgAiDomainId)
 			{
@@ -605,22 +718,12 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			if (!Profile.IsValid())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_binding_profile_invalid"),
-					Profile.GetCapabilityId());
+				OutError = Profile.GetValidationDiagnostic();
 				OutBindings.Reset();
 				return false;
 			}
 			OutBindings.Add(MakeShared<FPcgAiOperationBinding>(
 				Profile, Environment));
-		}
-		if (OutBindings.Num() != 18)
-		{
-			SetError(OutError,
-				TEXT("graph_compound_binding_count_invalid"),
-				PcgAiDomainId);
-			OutBindings.Reset();
-			return false;
 		}
 		return true;
 	}
@@ -640,14 +743,12 @@ namespace UE::UAI::Composition::GraphCompound
 			return false;
 		}
 		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-		FString RegistryError;
+		UE::UAI::Contract::FDiagnostic RegistryError;
 		if (!TryCreatePcgAiGraphDescriptorRegistry(
 				Registry, RegistryError)
 			|| !Registry.IsValid())
 		{
-			SetError(OutError,
-				TEXT("graph_compound_domain_registry_invalid"),
-				PcgAiDomainId, RegistryError);
+			SetError(OutError, RegistryError, PcgAiDomainId);
 			return false;
 		}
 		TArray<TSharedRef<IGraphCompoundQueryBinding>> QueryBindings;

@@ -15,8 +15,7 @@ namespace UE::UAI::Projection
 			TArray<FString> InInlineUnitIds,
 			TArray<FString> InInlineFieldIds,
 			TOptional<FUeAgentArtifactDescriptor> InArtifact,
-			FUeAgentPageInfo InPage,
-			int64 InTokenBudget);
+			FUeAgentPageInfo InPage);
 
 		const FString& GetBundleFingerprint() const;
 		const FString& GetClosureFingerprint() const;
@@ -24,7 +23,6 @@ namespace UE::UAI::Projection
 		const TArray<FString>& GetInlineFieldIds() const;
 		const TOptional<FUeAgentArtifactDescriptor>& GetArtifact() const;
 		const FUeAgentPageInfo& GetPage() const;
-		int64 GetTokenBudget() const;
 		bool IsValid() const;
 
 	private:
@@ -34,7 +32,6 @@ namespace UE::UAI::Projection
 		TArray<FString> InlineFieldIds;
 		TOptional<FUeAgentArtifactDescriptor> Artifact;
 		FUeAgentPageInfo Page;
-		int64 TokenBudget = 0;
 		bool bValid = false;
 	};
 }

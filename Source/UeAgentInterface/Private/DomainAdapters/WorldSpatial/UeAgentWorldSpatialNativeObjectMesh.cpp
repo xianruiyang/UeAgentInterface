@@ -2,13 +2,18 @@
 
 
 #include "Components/StaticMeshComponent.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "MeshDescription.h"
+#include "Misc/ScopeExit.h"
 #include "StaticMeshAttributes.h"
+#include "UObject/Class.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectIterator.h"
+#include <initializer_list>
 
 namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 {
@@ -16,6 +21,43 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 
 	namespace
 	{
+		bool MeshFailure(FUeAgentWorldSpatialExecutionError& OutError, const TCHAR* Code, const TCHAR* Reason,
+			const FString& Path, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target = FString())
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_execution"));
+			OutError.TargetPath = Target;
+			OutError.PropertyPath = Path;
+			OutError.Source.JsonPath = Path;
+			OutError.SourceKind = TEXT("native_result");
+			OutError.ActualValuePresent = Actual.IsValid();
+			OutError.ActualValue = MoveTemp(Actual);
+			OutError.ExpectedValue = MoveTemp(Expected);
+			return false;
+		}
+
+		TSharedPtr<FJsonValue> MeshObjectType(const UObject* Object)
+		{
+			return Object ? MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()) : TSharedPtr<FJsonValue>();
+		}
+
+		TSharedPtr<FJsonValue> MeshChoices(std::initializer_list<const TCHAR*> Values)
+		{
+			TArray<TSharedPtr<FJsonValue>> Items;
+			for (const TCHAR* Value : Values) Items.Add(MakeShared<FJsonValueString>(Value));
+			return MakeShared<FJsonValueArray>(MoveTemp(Items));
+		}
+
+		TSharedPtr<FJsonValue> MeshSpatialFact(const TArray<double>& Components, const FString& Frame,
+			const FString& Unit, const TCHAR* Representation = nullptr)
+		{
+			const TSharedRef<FJsonObject> Fact = MakeShared<FJsonObject>();
+			Fact->SetStringField(TEXT("frame_id"), Frame);
+			Fact->SetStringField(TEXT("unit"), Unit);
+			Fact->SetField(TEXT("components"), ComparisonComponents(Components));
+			if (Representation) Fact->SetStringField(TEXT("representation"), Representation);
+			return MakeShared<FJsonValueObject>(Fact);
+		}
+
 		FUeAgentWorldSpatialCompiledValue MakeTransformValue(
 			const FString& Subject,
 			const FTransform& Transform,
@@ -64,15 +106,22 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 		{
 			OutValue = {};
 			TArray<double> Components;
-			for (const FString& Lexeme : Value.Components)
+			for (int32 Index = 0; Index < Value.Components.Num(); ++Index)
 			{
+				const FString& Lexeme = Value.Components[Index];
 				double Parsed = 0.0;
 				if (!LexTryParseString(Parsed, *Lexeme))
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_compiled_number_invalid"),
-						Value.Subject);
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_spatial_compiled_number_invalid"),
+						TEXT("The spatial component cannot be parsed as a native number."), TEXT("native_execution"));
+					OutError.TargetPath = Value.Subject;
+					OutError.PropertyPath = FString::Printf(TEXT("/components/%d"), Index);
+					OutError.SourceKind = TEXT("world_spatial_value");
+					OutError.Source.JsonPath = OutError.PropertyPath;
+					OutError.ActualValue = MakeShared<FJsonValueString>(Lexeme);
+					OutError.ActualValuePresent = true;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("number"));
+					return false;
 				}
 				Components.Add(Parsed);
 			}
@@ -87,7 +136,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					? Value.Frame.BasisEvidenceId
 					: Value.ConversionEvidenceIds.Last(),
 			};
-			return OutValue.IsValid();
+			return OutValue.TryValidate(OutError);
 		}
 
 		bool TryResolveActor(
@@ -104,10 +153,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 			OutActor = Cast<AActor>(Object);
 			return OutActor
 				? true
-				: Fail(
-					OutError,
-					TEXT("world_spatial_actor_type_mismatch"),
-					Ref);
+				: MeshFailure(OutError, TEXT("world_spatial_actor_type_mismatch"), TEXT("The reference resolves to an object that is not an Actor."),
+					TEXT("/object_ref"), MeshObjectType(Object), MakeShared<FJsonValueString>(TEXT("AActor")), Ref);
 		}
 
 		bool TryResolveMesh(
@@ -124,10 +171,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 			OutMesh = Cast<UStaticMesh>(Object);
 			return OutMesh
 				? true
-				: Fail(
-					OutError,
-					TEXT("world_spatial_mesh_type_mismatch"),
-					Ref);
+				: MeshFailure(OutError, TEXT("world_spatial_mesh_type_mismatch"), TEXT("The reference resolves to an object that is not a static mesh."),
+					TEXT("/mesh_ref"), MeshObjectType(Object), MakeShared<FJsonValueString>(TEXT("UStaticMesh")), Ref);
 		}
 
 		ECollisionChannel TraceChannel(const FString& Id, bool& bValid)
@@ -179,10 +224,10 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				Direction.Components[0], Direction.Components[1], Direction.Components[2]);
 			if (DirectionVector.IsNearlyZero())
 			{
-				return Fail(
-					OutError,
-					TEXT("world_spatial_surface_direction_zero"),
-					Input.SurfaceQuery.Direction.Subject);
+				return MeshFailure(OutError, TEXT("world_spatial_surface_direction_zero"),
+					TEXT("The surface trace direction is zero within the engine's near-zero tolerance."), TEXT("/surface_query/direction"),
+					MeshSpatialFact(Direction.Components, Direction.FrameId, Direction.Unit),
+					MakeShared<FJsonValueString>(TEXT("non-zero direction")), Input.SurfaceQuery.Direction.Subject);
 			}
 			UWorld* World = nullptr;
 			FCollisionQueryParams Params(
@@ -211,23 +256,29 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 			bool bChannelValid = false;
 			const ECollisionChannel Channel = TraceChannel(
 				Input.SurfaceQuery.TraceChannel, bChannelValid);
-			if (!World || !bChannelValid)
-			{
-				return Fail(
-					OutError,
-					TEXT("world_spatial_surface_trace_context_invalid"),
-					Input.SurfaceQuery.TraceChannel);
-			}
+			if (!World)
+				return MeshFailure(OutError, TEXT("world_spatial_surface_trace_context_invalid"),
+					TEXT("No trace world could be resolved from the ignored Actors or subject Actors."), TEXT("/surface_query/world"),
+					nullptr, MakeShared<FJsonValueString>(TEXT("available Actor world")), Input.SurfaceQuery.Origin.Subject);
+			if (!bChannelValid)
+				return MeshFailure(OutError, TEXT("world_spatial_surface_trace_context_invalid"),
+					TEXT("The surface trace channel is not supported."), TEXT("/surface_query/trace_channel"),
+					MakeShared<FJsonValueString>(Input.SurfaceQuery.TraceChannel),
+					MeshChoices({TEXT("visibility"), TEXT("camera"), TEXT("world_static")}), Input.SurfaceQuery.Origin.Subject);
 			const FVector End = Start
 				+ DirectionVector.GetSafeNormal()
 					* Input.SurfaceQuery.MaxDistanceCm;
-			return World->LineTraceSingleByChannel(
-					OutHit, Start, End, Channel, Params)
-				? true
-				: Fail(
-					OutError,
-					TEXT("world_spatial_surface_hit_missing"),
-					Input.SurfaceQuery.Origin.Subject);
+			if (World->LineTraceSingleByChannel(OutHit, Start, End, Channel, Params)) return true;
+			const TSharedRef<FJsonObject> Trace = MakeShared<FJsonObject>();
+			Trace->SetField(TEXT("origin"), MeshSpatialFact(Origin.Components, Origin.FrameId, Origin.Unit));
+			Trace->SetField(TEXT("direction"), MeshSpatialFact(Direction.Components, Direction.FrameId, Direction.Unit));
+			Trace->SetField(TEXT("max_distance_cm"), ComparisonNumber(Input.SurfaceQuery.MaxDistanceCm));
+			Trace->SetStringField(TEXT("trace_channel"), Input.SurfaceQuery.TraceChannel);
+			Trace->SetBoolField(TEXT("trace_complex"), Input.SurfaceQuery.bTraceComplex);
+			Trace->SetNumberField(TEXT("ignored_actor_count"), Input.SurfaceQuery.IgnoreTargetRefs.Num());
+			return MeshFailure(OutError, TEXT("world_spatial_surface_hit_missing"),
+				TEXT("The surface trace found no blocking hit with the requested ray and collision settings."), TEXT("/surface_query"),
+				MakeShared<FJsonValueObject>(Trace), MakeShared<FJsonValueString>(TEXT("blocking surface hit")), Input.SurfaceQuery.Origin.Subject);
 		}
 
 		void FindMeshComponents(
@@ -255,12 +306,15 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 		bool TryAxisIndex(
 			const FString& Axis,
 			int32& OutIndex,
-			FUeAgentWorldSpatialExecutionError& OutError)
+			FUeAgentWorldSpatialExecutionError& OutError,
+			const FString& Target)
 		{
 			if (Axis == TEXT("x")) OutIndex = 0;
 			else if (Axis == TEXT("y")) OutIndex = 1;
 			else if (Axis == TEXT("z")) OutIndex = 2;
-			else return Fail(OutError, TEXT("world_spatial_alignment_axis_invalid"), Axis);
+			else return MeshFailure(OutError, TEXT("world_spatial_alignment_axis_invalid"),
+				TEXT("The alignment axis is not supported."), TEXT("/alignment/axis"), MakeShared<FJsonValueString>(Axis),
+				MeshChoices({TEXT("x"), TEXT("y"), TEXT("z")}), Target);
 			return true;
 		}
 
@@ -281,16 +335,22 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 			int32 AxisIndex,
 			const FString& Anchor,
 			double& OutValue,
-			FUeAgentWorldSpatialExecutionError& OutError)
+			FUeAgentWorldSpatialExecutionError& OutError,
+			const FString& Path,
+			const FString& Target)
 		{
 			if (!Bounds.IsValid)
 			{
-				return Fail(OutError, TEXT("world_spatial_alignment_bounds_invalid"), Anchor);
+				return MeshFailure(OutError, TEXT("world_spatial_alignment_bounds_invalid"),
+					TEXT("The Actor has no valid component bounds for alignment."), TEXT("/bounds"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target);
 			}
 			if (Anchor == TEXT("min")) OutValue = AxisValue(Bounds.Min, AxisIndex);
 			else if (Anchor == TEXT("max")) OutValue = AxisValue(Bounds.Max, AxisIndex);
 			else if (Anchor == TEXT("center")) OutValue = AxisValue(Bounds.GetCenter(), AxisIndex);
-			else return Fail(OutError, TEXT("world_spatial_alignment_anchor_invalid"), Anchor);
+			else return MeshFailure(OutError, TEXT("world_spatial_alignment_anchor_invalid"),
+				TEXT("The bounds anchor is not supported."), Path, MakeShared<FJsonValueString>(Anchor),
+				MeshChoices({TEXT("min"), TEXT("max"), TEXT("center")}), Target);
 			return true;
 		}
 
@@ -299,13 +359,15 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 			const FString& FallbackAxis,
 			int32& OutAxisIndex,
 			FString& OutAnchor,
-			FUeAgentWorldSpatialExecutionError& OutError)
+			FUeAgentWorldSpatialExecutionError& OutError,
+			const FString& Path,
+			const FString& Target)
 		{
 			const FString Normalized = Face.ToLower();
 			if (Normalized == TEXT("min") || Normalized == TEXT("center") || Normalized == TEXT("max"))
 			{
 				OutAnchor = Normalized;
-				return TryAxisIndex(FallbackAxis, OutAxisIndex, OutError);
+				return TryAxisIndex(FallbackAxis, OutAxisIndex, OutError, Target);
 			}
 			struct FFaceRow { const TCHAR* Id; int32 Axis; const TCHAR* Anchor; };
 			static const FFaceRow Rows[] = {
@@ -325,13 +387,19 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					return true;
 				}
 			}
-			return Fail(OutError, TEXT("world_spatial_alignment_face_invalid"), Face);
+			TArray<TSharedPtr<FJsonValue>> Choices = {MakeShared<FJsonValueString>(TEXT("min")),
+				MakeShared<FJsonValueString>(TEXT("center")), MakeShared<FJsonValueString>(TEXT("max"))};
+			for (const FFaceRow& Row : Rows) Choices.Add(MakeShared<FJsonValueString>(Row.Id));
+			return MeshFailure(OutError, TEXT("world_spatial_alignment_face_invalid"),
+				TEXT("The alignment face is not supported (face names are case-insensitive)."), Path,
+				MakeShared<FJsonValueString>(Face), MakeShared<FJsonValueArray>(MoveTemp(Choices)), Target);
 		}
 
 		bool TryActorWorldVertices(
 			AActor& Actor,
 			TArray<FVector>& OutVertices,
-			FUeAgentWorldSpatialExecutionError& OutError)
+			FUeAgentWorldSpatialExecutionError& OutError,
+			const FString& ActorRef)
 		{
 			OutVertices.Reset();
 			UStaticMeshComponent* Component = Actor.FindComponentByClass<UStaticMeshComponent>();
@@ -339,10 +407,14 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 			const FMeshDescription* Description = Mesh ? Mesh->GetMeshDescription(0) : nullptr;
 			if (!Component || !Description || Description->Vertices().Num() == 0)
 			{
-				return Fail(
-					OutError,
-					TEXT("world_spatial_alignment_mesh_vertices_missing"),
-					Actor.GetPathName());
+				return MeshFailure(OutError, TEXT("world_spatial_alignment_mesh_vertices_missing"),
+					!Component ? TEXT("The Actor has no static mesh component for vertex alignment.")
+						: !Mesh ? TEXT("The Actor's static mesh component has no mesh.")
+						: !Description ? TEXT("The Actor's mesh has no LOD 0 mesh description.") : TEXT("The Actor's LOD 0 mesh has no vertices."),
+					!Component ? TEXT("/mesh_component") : !Mesh ? TEXT("/mesh_component/mesh")
+						: !Description ? TEXT("/lods/0/mesh_description") : TEXT("/lods/0/vertices"),
+					Description ? MakeShared<FJsonValueNumber>(0) : TSharedPtr<FJsonValue>(),
+					MakeShared<FJsonValueString>(TEXT("static mesh component with non-empty LOD 0 vertices")), ActorRef);
 			}
 			FStaticMeshConstAttributes Attributes(*Description);
 			const TVertexAttributesConstRef<FVector3f> Positions = Attributes.GetVertexPositions();
@@ -350,7 +422,11 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 			{
 				OutVertices.Add(Component->GetComponentTransform().TransformPosition(FVector(Positions[VertexId])));
 			}
-			return !OutVertices.IsEmpty();
+			if (OutVertices.IsEmpty())
+				return MeshFailure(OutError, TEXT("world_spatial_alignment_mesh_vertices_missing"),
+					TEXT("The mesh returned no vertex elements to transform into world space."), TEXT("/lods/0/vertices"),
+					MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueNumber>(Description->Vertices().Num()), ActorRef);
+			return true;
 		}
 
 		class FObjectTransformNativeFamily final : public IWorldSpatialNativeFamily
@@ -388,7 +464,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						Context,
 						OutSnapshot,
 						OutError,
-						false);
+						true);
 				}
 				if (Request.GetPayload().IsType<FMeshPivotUpdateRequestInput>())
 				{
@@ -399,7 +475,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						Context,
 						OutSnapshot,
 						OutError,
-						false);
+						true);
 				}
 
 				TArray<FString> SubjectRefs;
@@ -409,10 +485,10 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				{
 					if (!Target.IsSet() || Target->GetPublicRef().IsEmpty())
 					{
-						return Fail(
-							OutError,
-							TEXT("world_spatial_object_query_target_missing"),
-							Contract.GetCapabilityId());
+						return MeshFailure(OutError, TEXT("world_spatial_object_query_target_missing"),
+							TEXT("Object transform readback requires a bound public target reference."), TEXT("/target"),
+							Target.IsSet() ? MakeShared<FJsonValueString>(Target->GetPublicRef()) : TSharedPtr<FJsonValue>(),
+							MakeShared<FJsonValueString>(TEXT("non-empty bound target reference")), Contract.GetCapabilityId());
 					}
 					const FObjectTransformReadRequestInput& Input = Request.GetPayload()
 						.Get<FObjectTransformReadRequestInput>();
@@ -425,14 +501,23 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					if (Cast<UStaticMesh>(TargetObject))
 					{
 						if (Input.VerifyFrame.FrameId != TEXT("mesh.geometry.local")
-							|| Input.VerifyFrame.BasisFrameId != TEXT("mesh.geometry.local")
+							|| (!Input.VerifyFrame.bAuthored && Input.VerifyFrame.BasisFrameId != TEXT("mesh.geometry.local"))
 							|| Input.VerifyFrame.Dimension != 3
 							|| Input.VerifyFrame.Unit != TEXT("centimeter"))
 						{
-							return Fail(
-								OutError,
-								TEXT("world_spatial_mesh_query_frame_invalid"),
-								Input.VerifyFrame.FrameId);
+							const auto MakeFrameFact = [](const FString& Frame, const FString& Basis, int32 Dimension, const FString& Unit)
+							{
+								const TSharedRef<FJsonObject> Fact = MakeShared<FJsonObject>();
+								Fact->SetStringField(TEXT("frame_id"), Frame);
+								Fact->SetStringField(TEXT("basis_frame_id"), Basis);
+								Fact->SetNumberField(TEXT("dimension"), Dimension);
+								Fact->SetStringField(TEXT("unit"), Unit);
+								return MakeShared<FJsonValueObject>(Fact);
+							};
+							return MeshFailure(OutError, TEXT("world_spatial_mesh_query_frame_invalid"),
+								TEXT("Static mesh readback requires a three-dimensional mesh geometry frame in centimeters."), TEXT("/verify_frame"),
+								MakeFrameFact(Input.VerifyFrame.FrameId, Input.VerifyFrame.BasisFrameId, Input.VerifyFrame.Dimension, Input.VerifyFrame.Unit),
+								MakeFrameFact(TEXT("mesh.geometry.local"), TEXT("mesh.geometry.local"), 3, TEXT("centimeter")), Target->GetPublicRef());
 						}
 						return TryReadMesh(
 							Contract,
@@ -445,18 +530,23 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					}
 					if (!Cast<AActor>(TargetObject))
 					{
-						return Fail(
-							OutError,
-							TEXT("world_spatial_object_query_target_type_unsupported"),
-							Target->GetPublicRef());
+						return MeshFailure(OutError, TEXT("world_spatial_object_query_target_type_unsupported"),
+							TEXT("Object transform readback supports Actors and static meshes."), TEXT("/target"),
+							MeshObjectType(TargetObject), MeshChoices({TEXT("AActor"), TEXT("UStaticMesh")}), Target->GetPublicRef());
 					}
 					SubjectRefs.Add(Target->GetPublicRef());
 					QueryFrame = &Input.VerifyFrame;
 				}
 				else if (Request.GetPayload().IsType<FWorldObjectAlignRequestInput>())
 				{
-					SubjectRefs = Request.GetPayload()
-						.Get<FWorldObjectAlignRequestInput>().SubjectRefs;
+					const FWorldObjectAlignRequestInput& Align = Request.GetPayload()
+						.Get<FWorldObjectAlignRequestInput>();
+					SubjectRefs = Align.SubjectRefs;
+					if (Align.AnchorRef.IsSet()
+						&& !SubjectRefs.Contains(Align.AnchorRef.GetValue()))
+					{
+						SubjectRefs.Add(Align.AnchorRef.GetValue());
+					}
 				}
 				else if (Request.GetPayload().IsType<
 					FWorldObjectTransformUpdateRequestInput>())
@@ -473,38 +563,20 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				}
 				else
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_object_read_request_mismatch"),
-						Contract.GetCapabilityId());
+					return MeshFailure(OutError, TEXT("world_spatial_object_read_request_mismatch"),
+						TEXT("Object and mesh readback received an unsupported request kind."), TEXT("/request_kind"),
+						MakeShared<FJsonValueString>(Request.GetRequestKindId()),
+						MeshChoices({TEXT("transform read"), TEXT("transform update"), TEXT("alignment"), TEXT("surface snap"), TEXT("mesh bake"), TEXT("mesh pivot")}), Contract.GetCapabilityId());
 				}
 
 				TArray<FObservedEntry> Entries;
 				FString Fingerprint;
-				TOptional<FUeAgentStateRevision> TargetRevision;
-				const bool bProjectTargetRevision =
-					Request.GetPayload().IsType<FObjectTransformReadRequestInput>()
-					|| Request.GetPayload().IsType<
-						FWorldObjectTransformUpdateRequestInput>();
 				for (const FString& SubjectRef : SubjectRefs)
 				{
 					AActor* Actor = nullptr;
 					if (!TryResolveActor(*Environment, SubjectRef, Actor, OutError))
 					{
 						return false;
-					}
-					if (bProjectTargetRevision)
-					{
-						FWorldSpatialRevision Revision;
-						if (!RevisionSource->TryReadRevision(
-								SubjectRef, Revision, OutError))
-						{
-							return false;
-						}
-						TargetRevision.Emplace(
-							Revision.SourceId,
-							Revision.Generation,
-							Revision.Sequence);
 					}
 					FUeAgentWorldSpatialCompiledValue Value = MakeTransformValue(
 						SubjectRef,
@@ -605,18 +677,20 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					Entries,
 					Context,
 					OutSnapshot,
-					OutError,
-					TargetRevision.IsSet() ? &TargetRevision.GetValue() : nullptr);
+					OutError
+				);
 			}
 
 			bool TryMutate(
 				const FUeAgentWorldSpatialExecutionChainContract& Contract,
 				const FUeAgentWorldSpatialRequest& Request,
 				const TArray<FUeAgentOperationTargetBinding>& Targets,
+				const FUeAgentWorldSpatialPreflightFence& Fence,
 				const FUeAgentOperationContext& Context,
 				FUeAgentWorldSpatialMutationResult& OutResult,
 				FUeAgentWorldSpatialExecutionError& OutError) override
 			{
+				OutResult = FUeAgentWorldSpatialMutationResult::NoMutation();
 				bool bMutated = false;
 				if (Request.GetPayload().IsType<
 					FWorldObjectTransformUpdateRequestInput>())
@@ -624,34 +698,34 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					bMutated = TryUpdateTransform(
 						Request.GetPayload().Get<
 							FWorldObjectTransformUpdateRequestInput>(),
-						OutError);
+						OutResult, OutError);
 				}
 				else if (Request.GetPayload().IsType<FWorldObjectAlignRequestInput>())
 				{
 					bMutated = TryAlign(
-						Request.GetPayload().Get<FWorldObjectAlignRequestInput>(), OutError);
+						Request.GetPayload().Get<FWorldObjectAlignRequestInput>(), OutResult, OutError);
 				}
 				else if (Request.GetPayload().IsType<FWorldObjectSnapToSurfaceRequestInput>())
 				{
 					bMutated = TrySnap(
-						Request.GetPayload().Get<FWorldObjectSnapToSurfaceRequestInput>(), OutError);
+						Request.GetPayload().Get<FWorldObjectSnapToSurfaceRequestInput>(), OutResult, OutError);
 				}
 				else if (Request.GetPayload().IsType<FMeshTransformBakeRequestInput>())
 				{
 					bMutated = TryBake(
-						Request.GetPayload().Get<FMeshTransformBakeRequestInput>(), OutError);
+						Request.GetPayload().Get<FMeshTransformBakeRequestInput>(), OutResult, OutError);
 				}
 				else if (Request.GetPayload().IsType<FMeshPivotUpdateRequestInput>())
 				{
 					bMutated = TryPivot(
-						Request.GetPayload().Get<FMeshPivotUpdateRequestInput>(), OutError);
+						Request.GetPayload().Get<FMeshPivotUpdateRequestInput>(), OutResult, OutError);
 				}
 				else
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_object_mutation_request_mismatch"),
-						Contract.GetCapabilityId());
+					return MeshFailure(OutError, TEXT("world_spatial_object_mutation_request_mismatch"),
+						TEXT("Object and mesh mutation received an unsupported request kind."), TEXT("/request_kind"),
+						MakeShared<FJsonValueString>(Request.GetRequestKindId()),
+						MeshChoices({TEXT("transform update"), TEXT("alignment"), TEXT("surface snap"), TEXT("mesh bake"), TEXT("mesh pivot")}), Contract.GetCapabilityId());
 				}
 				if (!bMutated)
 				{
@@ -660,7 +734,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				OutResult = FUeAgentWorldSpatialMutationResult(
 					TEXT("world-spatial:") + Context.GetRequestId(),
 					TEXT("native-object-mesh-write:") + Contract.GetNativeActionId());
-				return OutResult.IsValid();
+				return OutResult.TryValidate(OutError);
 			}
 
 			bool TrySettle(
@@ -669,12 +743,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				const FUeAgentOperationContext& Context,
 				FUeAgentWorldSpatialExecutionError& OutError) override
 			{
-				return Mutation.IsValid()
-					? true
-					: Fail(
-						OutError,
-						TEXT("world_spatial_object_mesh_not_settled"),
-						Contract.GetSettleBarrier());
+				return Mutation.TryValidate(OutError);
 			}
 
 			bool TryCompare(
@@ -686,53 +755,59 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				FVerificationOutcome& OutOutcome,
 				FUeAgentWorldSpatialExecutionError& OutError) override
 			{
-				bool bMatches = false;
+				TArray<UE::UAI::Contract::FDiagnostic> Differences;
+				ON_SCOPE_EXIT { if (!OutError.IsEmpty()) for (const auto& Difference : Differences) OutError.Append(Difference); };
 				if (Request.GetPayload().IsType<
 					FWorldObjectTransformUpdateRequestInput>())
 				{
-					bMatches = CompareUpdateTransform(
+					CompareUpdateTransform(
 						Request.GetPayload().Get<
 							FWorldObjectTransformUpdateRequestInput>(),
 						After,
+						Differences,
 						OutError);
 				}
 				else if (Request.GetPayload().IsType<FWorldObjectAlignRequestInput>())
 				{
-					bMatches = CompareAlign(
+					CompareAlign(
 						Request.GetPayload().Get<FWorldObjectAlignRequestInput>(),
 						Before,
 						After,
+						Differences,
 						OutError);
 				}
 				else if (Request.GetPayload().IsType<FWorldObjectSnapToSurfaceRequestInput>())
 				{
-					bMatches = CompareSnap(
+					CompareSnap(
 						Request.GetPayload().Get<FWorldObjectSnapToSurfaceRequestInput>(),
 						After,
+						Differences,
 						OutError);
 				}
 				else if (Request.GetPayload().IsType<FMeshTransformBakeRequestInput>())
 				{
-					bMatches = CompareBake(
+					CompareBake(
 						Request.GetPayload().Get<FMeshTransformBakeRequestInput>(),
 						Before,
 						After,
+						Differences,
 						OutError);
 				}
 				else if (Request.GetPayload().IsType<FMeshPivotUpdateRequestInput>())
 				{
-					bMatches = ComparePivot(
+					ComparePivot(
 						Request.GetPayload().Get<FMeshPivotUpdateRequestInput>(),
 						Before,
 						After,
+						Differences,
 						OutError);
 				}
 				else
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_object_compare_request_mismatch"),
-						Contract.GetCapabilityId());
+					return MeshFailure(OutError, TEXT("world_spatial_object_compare_request_mismatch"),
+						TEXT("Object and mesh verification requires a transform, alignment, snap, bake, or pivot request."), TEXT("/request_kind"),
+						MakeShared<FJsonValueString>(Request.GetRequestKindId()),
+						MeshChoices({TEXT("transform update"), TEXT("alignment"), TEXT("surface snap"), TEXT("mesh bake"), TEXT("mesh pivot")}), Contract.GetCapabilityId());
 				}
 				if (OutError.IsValid())
 				{
@@ -740,7 +815,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				}
 				SetComparisonOutcome(
 					Contract,
-					bMatches,
+					MoveTemp(Differences),
 					TEXT("object-mesh-independent-native-readback"),
 					OutOutcome);
 				return true;
@@ -764,10 +839,11 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				const FMeshDescription* Description = Mesh->GetMeshDescription(0);
 				if (!Description || Description->Vertices().Num() == 0)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_mesh_description_missing"),
-						MeshRef);
+					return MeshFailure(OutError, TEXT("world_spatial_mesh_description_missing"),
+						!Description ? TEXT("The static mesh has no LOD 0 mesh description.") : TEXT("The static mesh's LOD 0 description contains no vertices."),
+						!Description ? TEXT("/lods/0/mesh_description") : TEXT("/lods/0/vertices"),
+						Description ? MakeShared<FJsonValueNumber>(0) : TSharedPtr<FJsonValue>(),
+						MakeShared<FJsonValueString>(TEXT("non-empty LOD 0 mesh description")), MeshRef);
 				}
 				FStaticMeshConstAttributes Attributes(*Description);
 				const TVertexAttributesConstRef<FVector3f> Positions =
@@ -833,19 +909,6 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					});
 					Fingerprint += TEXT("|") + Component->GetComponentTransform().ToHumanReadableString();
 				}
-				TOptional<FUeAgentStateRevision> TargetRevision;
-				if (bProjectTargetRevision)
-				{
-					FWorldSpatialRevision Revision;
-					if (!RevisionSource->TryReadRevision(MeshRef, Revision, OutError))
-					{
-						return false;
-					}
-					TargetRevision.Emplace(
-						Revision.SourceId,
-						Revision.Generation,
-						Revision.Sequence);
-				}
 				return TryMakeSnapshot(
 					Contract,
 					Phase,
@@ -853,29 +916,21 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					Entries,
 					Context,
 					OutSnapshot,
-					OutError,
-					TargetRevision.IsSet() ? &TargetRevision.GetValue() : nullptr);
+					OutError
+				);
 			}
 
 			bool TryUpdateTransform(
 				const FWorldObjectTransformUpdateRequestInput& Input,
+				FUeAgentWorldSpatialMutationResult& OutResult,
 				FUeAgentWorldSpatialExecutionError& OutError)
 			{
 				const FString& ActorRef = Input.Transform.Subject;
 				if (Input.Transform.Quantity != TEXT("transform"))
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_object_transform_quantity_invalid"),
-						Input.Transform.Quantity);
-				}
-				if (!TryCheckRevision(
-						*RevisionSource,
-						ActorRef,
-						Input.ExpectedRevision,
-						OutError))
-				{
-					return false;
+					return MeshFailure(OutError, TEXT("world_spatial_object_transform_quantity_invalid"),
+						TEXT("Actor transform mutation requires a transform quantity."), TEXT("/transform/quantity"),
+						MakeShared<FJsonValueString>(Input.Transform.Quantity), MakeShared<FJsonValueString>(TEXT("transform")), ActorRef);
 				}
 				FUeAgentWorldSpatialCompiledValue Compiled;
 				if (!SpaceCompiler->TryConvertToNative(
@@ -887,14 +942,17 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				{
 					return false;
 				}
-				if (Compiled.Components.Num() != 10
-					|| Compiled.Components.ContainsByPredicate(
-						[](const double Value) { return !FMath::IsFinite(Value); }))
+				if (Compiled.Components.Num() != 10)
+					return MeshFailure(OutError, TEXT("world_spatial_object_transform_components_invalid"),
+						TEXT("Actor transforms require ten location, quaternion and scale components."), TEXT("/transform/components"),
+						MakeShared<FJsonValueNumber>(Compiled.Components.Num()), MakeShared<FJsonValueNumber>(10), ActorRef);
+				for (int32 Index = 0; Index < Compiled.Components.Num(); ++Index)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_object_transform_components_invalid"),
-						ActorRef);
+					if (!FMath::IsFinite(Compiled.Components[Index]))
+						return MeshFailure(OutError, TEXT("world_spatial_object_transform_components_invalid"),
+							TEXT("An Actor transform component is not finite."), FString::Printf(TEXT("/transform/components/%d"), Index),
+							MeshSpatialFact({Compiled.Components[Index]}, Compiled.FrameId, Index < 3 ? TEXT("centimeter") : TEXT("unitless")),
+							MakeShared<FJsonValueString>(TEXT("finite component")), ActorRef);
 				}
 				const FQuat Rotation(
 					Compiled.Components[3],
@@ -905,15 +963,19 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					Compiled.Components[7],
 					Compiled.Components[8],
 					Compiled.Components[9]);
-				if (!Rotation.IsNormalized()
-					|| FMath::IsNearlyZero(Scale.X)
-					|| FMath::IsNearlyZero(Scale.Y)
-					|| FMath::IsNearlyZero(Scale.Z))
+				if (!Rotation.IsNormalized())
+					return MeshFailure(OutError, TEXT("world_spatial_object_transform_basis_invalid"),
+						TEXT("The Actor transform rotation quaternion is not normalized."), TEXT("/transform/rotation"),
+						MeshSpatialFact({Rotation.X, Rotation.Y, Rotation.Z, Rotation.W}, Compiled.FrameId, TEXT("unitless"), TEXT("quaternion_xyzw")),
+						MakeShared<FJsonValueString>(TEXT("normalized quaternion")), ActorRef);
+				for (int32 Axis = 0; Axis < 3; ++Axis)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_object_transform_basis_invalid"),
-						ActorRef);
+					if (FMath::IsNearlyZero(Scale[Axis]))
+						return MeshFailure(OutError, TEXT("world_spatial_object_transform_basis_invalid"),
+							TEXT("An Actor transform scale component is zero within the engine's near-zero tolerance."),
+							FString::Printf(TEXT("/transform/components/%d"), Axis + 7),
+							MeshSpatialFact({Scale[Axis]}, Compiled.FrameId, TEXT("unitless")),
+							MakeShared<FJsonValueString>(TEXT("non-zero scale")), ActorRef);
 				}
 				const FTransform Desired(
 					Rotation,
@@ -959,6 +1021,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					Actor->GetOutermost(),
 					Actor->GetOutermost() && Actor->GetOutermost()->IsDirty(),
 					false};
+				OutResult = {}; // A native write may now occur; later failures are not NoMutation.
 				Actor->Modify();
 				if (!Actor->SetActorTransform(
 						Desired,
@@ -966,14 +1029,20 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						nullptr,
 						ETeleportType::TeleportPhysics))
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_object_transform_native_write_failed"),
-						ActorRef);
+					MeshFailure(OutError, TEXT("world_spatial_object_transform_native_write_failed"),
+						TEXT("Unreal rejected the Actor transform update."), TEXT("/transform"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), ActorRef);
+					const TSharedRef<FJsonObject> Proposed = MakeShared<FJsonObject>();
+					Proposed->SetField(TEXT("location"), MeshSpatialFact({Compiled.Components[0], Compiled.Components[1], Compiled.Components[2]}, Compiled.FrameId, TEXT("centimeter")));
+					Proposed->SetField(TEXT("rotation"), MeshSpatialFact({Rotation.X, Rotation.Y, Rotation.Z, Rotation.W}, Compiled.FrameId, TEXT("unitless"), TEXT("quaternion_xyzw")));
+					Proposed->SetField(TEXT("scale"), MeshSpatialFact({Scale.X, Scale.Y, Scale.Z}, Compiled.FrameId, TEXT("unitless")));
+					OutError.ProposedValue = MakeShared<FJsonValueObject>(Proposed);
+					return false;
 				}
 				Actor->PostEditMove(true);
 				if (!Environment->TryPersistObject(*Actor, OutError))
 				{
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = ActorRef;
 					return false;
 				}
 				Rollback.bCommitted = true;
@@ -982,26 +1051,17 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 
 			bool TryAlign(
 				const FWorldObjectAlignRequestInput& Input,
+				FUeAgentWorldSpatialMutationResult& OutResult,
 				FUeAgentWorldSpatialExecutionError& OutError)
 			{
-				for (const FWorldSpatialExpectedRevisionEntry& Entry : Input.ExpectedRevisions)
-				{
-					if (!TryCheckRevision(
-							*RevisionSource, Entry.TargetRef, Entry.Revision, OutError))
-					{
-						return false;
-					}
-				}
 				AActor* ReferenceActor = nullptr;
 				if (Input.Alignment.Kind != TEXT("anchors"))
 				{
-					if (!Input.AnchorRef.IsSet()
-						|| !TryResolveActor(*Environment, Input.AnchorRef.GetValue(), ReferenceActor, OutError))
-					{
-						return Input.AnchorRef.IsSet()
-							? false
-							: Fail(OutError, TEXT("world_spatial_alignment_reference_missing"), Input.Alignment.Kind);
-					}
+					if (!Input.AnchorRef.IsSet())
+						return MeshFailure(OutError, TEXT("world_spatial_alignment_reference_missing"),
+							TEXT("This alignment kind requires an anchor Actor reference."), TEXT("/anchor_ref"),
+							nullptr, MakeShared<FJsonValueString>(TEXT("explicit anchor Actor reference")));
+					if (!TryResolveActor(*Environment, Input.AnchorRef.GetValue(), ReferenceActor, OutError)) return false;
 				}
 
 				FUeAgentWorldSpatialCompiledValue ExplicitSubjectAnchor;
@@ -1009,9 +1069,12 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				FQuat ExplicitRotationDelta = FQuat::Identity;
 				if (Input.Alignment.Kind == TEXT("anchors"))
 				{
-					if (!Input.Alignment.SubjectAnchor.IsSet()
-						|| !Input.Alignment.ReferenceAnchor.IsSet()
-						|| !SpaceCompiler->TryConvertToNative(
+					if (!Input.Alignment.SubjectAnchor.IsSet() || !Input.Alignment.ReferenceAnchor.IsSet())
+						return MeshFailure(OutError, TEXT("world_spatial_alignment_anchor_missing"),
+							!Input.Alignment.SubjectAnchor.IsSet() ? TEXT("Anchor alignment requires a subject anchor.") : TEXT("Anchor alignment requires a reference anchor."),
+							!Input.Alignment.SubjectAnchor.IsSet() ? TEXT("/alignment/subject_anchor") : TEXT("/alignment/reference_anchor"),
+							nullptr, MakeShared<FJsonValueString>(TEXT("explicit anchor point")));
+					if (!SpaceCompiler->TryConvertToNative(
 							Input.Alignment.SubjectAnchor.GetValue(),
 							TEXT("unreal.world"), TEXT("centimeter"),
 							ExplicitSubjectAnchor, OutError)
@@ -1027,7 +1090,10 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						if (!Input.Alignment.SubjectNormal.IsSet()
 							|| !Input.Alignment.ReferenceNormal.IsSet())
 						{
-							return Fail(OutError, TEXT("world_spatial_alignment_normals_missing"), Input.Alignment.Kind);
+							return MeshFailure(OutError, TEXT("world_spatial_alignment_normals_missing"),
+								!Input.Alignment.SubjectNormal.IsSet() ? TEXT("Rotating anchor alignment requires a subject normal.") : TEXT("Rotating anchor alignment requires a reference normal."),
+								!Input.Alignment.SubjectNormal.IsSet() ? TEXT("/alignment/subject_normal") : TEXT("/alignment/reference_normal"),
+								nullptr, MakeShared<FJsonValueString>(TEXT("explicit normal for the rotation policy")));
 						}
 						FUeAgentWorldSpatialCompiledValue SubjectNormal;
 						FUeAgentWorldSpatialCompiledValue ReferenceNormal;
@@ -1071,22 +1137,25 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						FString ReferenceAnchor = Input.Alignment.ReferenceBoundsAnchor;
 						if (Input.Alignment.Kind == TEXT("bounds"))
 						{
-							if (!TryAxisIndex(Input.Alignment.Axis, SubjectAxis, OutError)) return false;
+							if (!TryAxisIndex(Input.Alignment.Axis, SubjectAxis, OutError, Ref)) return false;
 							ReferenceAxis = SubjectAxis;
 						}
-						else if (!TryResolveFace(Input.Alignment.SubjectFace, Input.Alignment.Axis, SubjectAxis, SubjectAnchor, OutError)
-							|| !TryResolveFace(Input.Alignment.ReferenceFace, Input.Alignment.Axis, ReferenceAxis, ReferenceAnchor, OutError))
+						else if (!TryResolveFace(Input.Alignment.SubjectFace, Input.Alignment.Axis, SubjectAxis, SubjectAnchor, OutError, TEXT("/alignment/subject_face"), Ref)
+							|| !TryResolveFace(Input.Alignment.ReferenceFace, Input.Alignment.Axis, ReferenceAxis, ReferenceAnchor, OutError, TEXT("/alignment/reference_face"), Input.AnchorRef.GetValue()))
 						{
 							return false;
 						}
 						if (SubjectAxis != ReferenceAxis)
 						{
-							return Fail(OutError, TEXT("world_spatial_alignment_face_axis_mismatch"), Input.Alignment.Kind);
+							static const TCHAR* AxisNames[] = {TEXT("x"), TEXT("y"), TEXT("z")};
+							return MeshFailure(OutError, TEXT("world_spatial_alignment_face_axis_mismatch"),
+								TEXT("The subject and reference alignment faces must use the same axis."), TEXT("/alignment/subject_face"),
+								MakeShared<FJsonValueString>(AxisNames[SubjectAxis]), MakeShared<FJsonValueString>(AxisNames[ReferenceAxis]), Ref);
 						}
 						double SubjectValue = 0.0;
 						double ReferenceValue = 0.0;
-						if (!TryBoundsAnchorValue(Actor->GetComponentsBoundingBox(true), SubjectAxis, SubjectAnchor, SubjectValue, OutError)
-							|| !TryBoundsAnchorValue(ReferenceActor->GetComponentsBoundingBox(true), ReferenceAxis, ReferenceAnchor, ReferenceValue, OutError))
+						if (!TryBoundsAnchorValue(Actor->GetComponentsBoundingBox(true), SubjectAxis, SubjectAnchor, SubjectValue, OutError, TEXT("/alignment/subject_bounds_anchor"), Ref)
+							|| !TryBoundsAnchorValue(ReferenceActor->GetComponentsBoundingBox(true), ReferenceAxis, ReferenceAnchor, ReferenceValue, OutError, TEXT("/alignment/reference_bounds_anchor"), Input.AnchorRef.GetValue()))
 						{
 							return false;
 						}
@@ -1096,8 +1165,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					{
 						TArray<FVector> SubjectVertices;
 						TArray<FVector> ReferenceVertices;
-						if (!TryActorWorldVertices(*Actor, SubjectVertices, OutError)
-							|| !TryActorWorldVertices(*ReferenceActor, ReferenceVertices, OutError))
+						if (!TryActorWorldVertices(*Actor, SubjectVertices, OutError, Ref)
+							|| !TryActorWorldVertices(*ReferenceActor, ReferenceVertices, OutError, Input.AnchorRef.GetValue()))
 						{
 							return false;
 						}
@@ -1109,14 +1178,25 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 							if (!Input.Alignment.SubjectVertexIndex.IsSet()
 								|| !Input.Alignment.ReferenceVertexIndex.IsSet())
 							{
-								return Fail(OutError, TEXT("world_spatial_alignment_vertex_pair_incomplete"), Ref);
+								return MeshFailure(OutError, TEXT("world_spatial_alignment_vertex_pair_incomplete"),
+									TEXT("Explicit vertex alignment requires both subject and reference vertex indices."),
+									!Input.Alignment.SubjectVertexIndex.IsSet() ? TEXT("/alignment/subject_vertex_index") : TEXT("/alignment/reference_vertex_index"),
+									nullptr, MakeShared<FJsonValueString>(TEXT("paired subject and reference vertex indices")), Ref);
 							}
 							SubjectIndex = Input.Alignment.SubjectVertexIndex.GetValue();
 							ReferenceIndex = Input.Alignment.ReferenceVertexIndex.GetValue();
 							if (!SubjectVertices.IsValidIndex(SubjectIndex)
 								|| !ReferenceVertices.IsValidIndex(ReferenceIndex))
 							{
-								return Fail(OutError, TEXT("world_spatial_alignment_vertex_index_invalid"), Ref);
+								const bool bSubjectInvalid = !SubjectVertices.IsValidIndex(SubjectIndex);
+								const TSharedRef<FJsonObject> Range = MakeShared<FJsonObject>();
+								Range->SetNumberField(TEXT("minimum"), 0);
+								Range->SetNumberField(TEXT("maximum_exclusive"), bSubjectInvalid ? SubjectVertices.Num() : ReferenceVertices.Num());
+								return MeshFailure(OutError, TEXT("world_spatial_alignment_vertex_index_invalid"),
+									bSubjectInvalid ? TEXT("The subject vertex index is outside the available vertex array.") : TEXT("The reference vertex index is outside the available vertex array."),
+									bSubjectInvalid ? TEXT("/alignment/subject_vertex_index") : TEXT("/alignment/reference_vertex_index"),
+									MakeShared<FJsonValueNumber>(bSubjectInvalid ? SubjectIndex : ReferenceIndex), MakeShared<FJsonValueObject>(Range),
+									bSubjectInvalid ? Ref : Input.AnchorRef.GetValue());
 							}
 						}
 						else
@@ -1140,7 +1220,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					}
 					else
 					{
-						return Fail(OutError, TEXT("world_spatial_alignment_kind_invalid"), Input.Alignment.Kind);
+						return MeshFailure(OutError, TEXT("world_spatial_alignment_kind_invalid"),
+							TEXT("The alignment kind is not supported."), TEXT("/alignment/kind"), MakeShared<FJsonValueString>(Input.Alignment.Kind),
+							MeshChoices({TEXT("anchors"), TEXT("bounds"), TEXT("face"), TEXT("vertex")}), Ref);
 					}
 					FTransform Planned = Actor->GetActorTransform();
 					Planned.SetLocation(Planned.GetLocation() + Delta);
@@ -1154,6 +1236,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 
 				for (const TPair<AActor*, FTransform>& Planned : PlannedTransforms)
 				{
+					OutResult = {};
 					Planned.Key->Modify();
 					Planned.Key->SetActorTransform(
 						Planned.Value, false, nullptr, ETeleportType::TeleportPhysics);
@@ -1163,16 +1246,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 
 			bool TrySnap(
 				const FWorldObjectSnapToSurfaceRequestInput& Input,
+				FUeAgentWorldSpatialMutationResult& OutResult,
 				FUeAgentWorldSpatialExecutionError& OutError)
 			{
-				for (const FWorldSpatialExpectedRevisionEntry& Entry : Input.ExpectedRevisions)
-				{
-					if (!TryCheckRevision(
-							*RevisionSource, Entry.TargetRef, Entry.Revision, OutError))
-					{
-						return false;
-					}
-				}
 				FHitResult Hit;
 				if (!TryTraceSurface(*Environment, *SpaceCompiler, Input, Hit, OutError))
 				{
@@ -1185,6 +1261,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					{
 						return false;
 					}
+					OutResult = {};
 					Actor->SetActorLocation(
 						Hit.ImpactPoint
 							+ Hit.ImpactNormal * Input.PlacementPolicy.ClearanceCm,
@@ -1217,24 +1294,19 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				}
 				if (!OutError.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_mesh_persistence_failed"),
-						MeshRef);
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_spatial_mesh_persistence_failed"),
+						TEXT("The native persistence provider failed without returning a diagnostic."), TEXT("native_execution"));
 				}
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = MeshRef;
 				return false;
 			}
 
 			bool TryBake(
 				const FMeshTransformBakeRequestInput& Input,
+				FUeAgentWorldSpatialMutationResult& OutResult,
 				FUeAgentWorldSpatialExecutionError& OutError)
 			{
 				const FString& MeshRef = Input.Transform.Subject;
-				if (!TryCheckRevision(
-						*RevisionSource, MeshRef, Input.ExpectedRevision, OutError))
-				{
-					return false;
-				}
 				FUeAgentWorldSpatialCompiledValue Compiled;
 				if (!SpaceCompiler->TryConvertToNative(
 						Input.Transform,
@@ -1253,10 +1325,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				FMeshDescription* Description = Mesh->GetMeshDescription(0);
 				if (!Description)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_mesh_description_missing"),
-						MeshRef);
+					return MeshFailure(OutError, TEXT("world_spatial_mesh_description_missing"),
+						TEXT("The static mesh has no LOD 0 mesh description to bake."), TEXT("/lods/0/mesh_description"),
+						nullptr, MakeShared<FJsonValueString>(TEXT("LOD 0 mesh description")), MeshRef);
 				}
 				const FTransform Transform(
 					FQuat(
@@ -1268,6 +1339,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						Compiled.Components[7], Compiled.Components[8], Compiled.Components[9]));
 				FStaticMeshAttributes Attributes(*Description);
 				TVertexAttributesRef<FVector3f> Positions = Attributes.GetVertexPositions();
+				OutResult = {};
 				Mesh->Modify();
 				for (const FVertexID VertexId : Description->Vertices().GetElementIDs())
 				{
@@ -1278,24 +1350,19 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				Mesh->PostEditChange();
 				if (Mesh->GetMeshDescription(0) == nullptr)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_mesh_post_edit_invalid"),
-						MeshRef);
+					return MeshFailure(OutError, TEXT("world_spatial_mesh_post_edit_invalid"),
+						TEXT("The mesh no longer has a LOD 0 description after the transform bake was committed."), TEXT("/lods/0/mesh_description"),
+						nullptr, MakeShared<FJsonValueString>(TEXT("LOD 0 mesh description after edit")), MeshRef);
 				}
 				return TryPersistMesh(*Mesh, MeshRef, OutError);
 			}
 
 			bool TryPivot(
 				const FMeshPivotUpdateRequestInput& Input,
+				FUeAgentWorldSpatialMutationResult& OutResult,
 				FUeAgentWorldSpatialExecutionError& OutError)
 			{
 				const FString& MeshRef = Input.Pivot.Subject;
-				if (!TryCheckRevision(
-						*RevisionSource, MeshRef, Input.ExpectedRevision, OutError))
-				{
-					return false;
-				}
 				FUeAgentWorldSpatialCompiledValue Compiled;
 				if (!SpaceCompiler->TryConvertToNative(
 						Input.Pivot,
@@ -1316,10 +1383,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				FMeshDescription* Description = Mesh->GetMeshDescription(0);
 				if (!Description)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_mesh_description_missing"),
-						MeshRef);
+					return MeshFailure(OutError, TEXT("world_spatial_mesh_description_missing"),
+						TEXT("The static mesh has no LOD 0 mesh description for a pivot update."), TEXT("/lods/0/mesh_description"),
+						nullptr, MakeShared<FJsonValueString>(TEXT("LOD 0 mesh description")), MeshRef);
 				}
 				TArray<UStaticMeshComponent*> Components;
 				if (Input.PreserveWorldGeometry.Get(false))
@@ -1328,6 +1394,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				}
 				FStaticMeshAttributes Attributes(*Description);
 				TVertexAttributesRef<FVector3f> Positions = Attributes.GetVertexPositions();
+				OutResult = {};
 				Mesh->Modify();
 				for (const FVertexID VertexId : Description->Vertices().GetElementIDs())
 				{
@@ -1337,10 +1404,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				Mesh->PostEditChange();
 				if (Mesh->GetMeshDescription(0) == nullptr)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_mesh_post_edit_invalid"),
-						MeshRef);
+					return MeshFailure(OutError, TEXT("world_spatial_mesh_post_edit_invalid"),
+						TEXT("The mesh no longer has a LOD 0 description after the pivot edit was committed."), TEXT("/lods/0/mesh_description"),
+						nullptr, MakeShared<FJsonValueString>(TEXT("LOD 0 mesh description after edit")), MeshRef);
 				}
 				if (!TryPersistMesh(*Mesh, MeshRef, OutError))
 				{
@@ -1359,6 +1425,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 			bool CompareUpdateTransform(
 				const FWorldObjectTransformUpdateRequestInput& Input,
 				const FUeAgentCanonicalSnapshot& After,
+				TArray<UE::UAI::Contract::FDiagnostic>& Differences,
 				FUeAgentWorldSpatialExecutionError& OutError)
 			{
 				FUeAgentWorldSpatialCompiledValue Expected;
@@ -1373,39 +1440,18 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						After,
 						TEXT("actor_transform:") + Input.Transform.Subject,
 						Actual,
-						OutError)
-					|| Expected.Components.Num() != 10
-					|| Actual.Components.Num() != 10)
+						OutError))
 				{
 					return false;
 				}
-				const FTransform ExpectedTransform(
-					FQuat(
-						Expected.Components[3], Expected.Components[4],
-						Expected.Components[5], Expected.Components[6]),
-					FVector(
-						Expected.Components[0], Expected.Components[1],
-						Expected.Components[2]),
-					FVector(
-						Expected.Components[7], Expected.Components[8],
-						Expected.Components[9]));
-				const FTransform ActualTransform(
-					FQuat(
-						Actual.Components[3], Actual.Components[4],
-						Actual.Components[5], Actual.Components[6]),
-					FVector(
-						Actual.Components[0], Actual.Components[1],
-						Actual.Components[2]),
-					FVector(
-						Actual.Components[7], Actual.Components[8],
-						Actual.Components[9]));
-				return ExpectedTransform.Equals(ActualTransform, 0.001);
+				return CompareTransforms(Expected, Actual, Differences, TEXT("object.transform"), Input.Transform.Subject, 0.001);
 			}
 
 			bool CompareAlign(
 				const FWorldObjectAlignRequestInput& Input,
 				const FUeAgentCanonicalSnapshot& Before,
 				const FUeAgentCanonicalSnapshot& After,
+				TArray<UE::UAI::Contract::FDiagnostic>& Differences,
 				FUeAgentWorldSpatialExecutionError& OutError)
 			{
 				if (Input.Alignment.Kind == TEXT("anchors"))
@@ -1413,6 +1459,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					if (!Input.Alignment.SubjectAnchor.IsSet()
 						|| !Input.Alignment.ReferenceAnchor.IsSet())
 					{
+						AddComparisonDifference(Differences, !Input.Alignment.SubjectAnchor.IsSet()
+							? TEXT("alignment.subject_anchor") : TEXT("alignment.reference_anchor"),
+							TEXT("Anchor alignment verification requires both spatial anchors."), MakeShared<FJsonValueString>(TEXT("spatial anchor")), nullptr);
 						return false;
 					}
 					FUeAgentWorldSpatialCompiledValue SubjectAnchor;
@@ -1447,6 +1496,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 								FVector(NewValue.Components[0], NewValue.Components[1], NewValue.Components[2]),
 								0.001))
 						{
+							AddComparisonDifference(Differences, TEXT("alignment.location"), TEXT("The subject location differs from the expected anchor displacement."),
+								ComparisonComponents({Expected.X, Expected.Y, Expected.Z}),
+								ComparisonComponents({NewValue.Components[0], NewValue.Components[1], NewValue.Components[2]}), Ref);
 							return false;
 						}
 					}
@@ -1455,6 +1507,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 
 				if (!Input.AnchorRef.IsSet())
 				{
+					AddComparisonDifference(Differences, TEXT("alignment.anchor_ref"), TEXT("Alignment verification requires a reference actor."),
+						MakeShared<FJsonValueString>(TEXT("reference actor")), nullptr);
 					return false;
 				}
 				AActor* ReferenceActor = nullptr;
@@ -1478,21 +1532,31 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						FString ReferenceAnchor = Input.Alignment.ReferenceBoundsAnchor;
 						if (Input.Alignment.Kind == TEXT("bounds"))
 						{
-							if (!TryAxisIndex(Input.Alignment.Axis, SubjectAxis, OutError)) return false;
+							if (!TryAxisIndex(Input.Alignment.Axis, SubjectAxis, OutError, Ref)) return false;
 							ReferenceAxis = SubjectAxis;
 						}
-						else if (!TryResolveFace(Input.Alignment.SubjectFace, Input.Alignment.Axis, SubjectAxis, SubjectAnchor, OutError)
-							|| !TryResolveFace(Input.Alignment.ReferenceFace, Input.Alignment.Axis, ReferenceAxis, ReferenceAnchor, OutError))
+						else if (!TryResolveFace(Input.Alignment.SubjectFace, Input.Alignment.Axis, SubjectAxis, SubjectAnchor, OutError, TEXT("/alignment/subject_face"), Ref)
+							|| !TryResolveFace(Input.Alignment.ReferenceFace, Input.Alignment.Axis, ReferenceAxis, ReferenceAnchor, OutError, TEXT("/alignment/reference_face"), Input.AnchorRef.GetValue()))
 						{
 							return false;
 						}
 						double SubjectValue = 0.0;
 						double ReferenceValue = 0.0;
-						if (SubjectAxis != ReferenceAxis
-							|| !TryBoundsAnchorValue(Actor->GetComponentsBoundingBox(true), SubjectAxis, SubjectAnchor, SubjectValue, OutError)
-							|| !TryBoundsAnchorValue(ReferenceActor->GetComponentsBoundingBox(true), ReferenceAxis, ReferenceAnchor, ReferenceValue, OutError)
-							|| !FMath::IsNearlyEqual(SubjectValue, ReferenceValue + Input.Alignment.OffsetCm, 0.01))
+						if (SubjectAxis != ReferenceAxis)
 						{
+							AddComparisonDifference(Differences, TEXT("alignment.axis"), TEXT("The subject and reference bounds use different axes."),
+								ComparisonNumber(ReferenceAxis), ComparisonNumber(SubjectAxis), Ref);
+							return false;
+						}
+						if (!TryBoundsAnchorValue(Actor->GetComponentsBoundingBox(true), SubjectAxis, SubjectAnchor, SubjectValue, OutError, TEXT("/alignment/subject_bounds_anchor"), Ref)
+							|| !TryBoundsAnchorValue(ReferenceActor->GetComponentsBoundingBox(true), ReferenceAxis, ReferenceAnchor, ReferenceValue, OutError, TEXT("/alignment/reference_bounds_anchor"), Input.AnchorRef.GetValue()))
+						{
+							return false;
+						}
+						if (!FMath::IsNearlyEqual(SubjectValue, ReferenceValue + Input.Alignment.OffsetCm, 0.01))
+						{
+							AddComparisonDifference(Differences, TEXT("alignment.bounds_anchor"), TEXT("The subject bounds anchor does not match the reference anchor and requested offset in centimeters."),
+								ComparisonNumber(ReferenceValue + Input.Alignment.OffsetCm), ComparisonNumber(SubjectValue), Ref);
 							return false;
 						}
 					}
@@ -1500,8 +1564,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 					{
 						TArray<FVector> SubjectVertices;
 						TArray<FVector> ReferenceVertices;
-						if (!TryActorWorldVertices(*Actor, SubjectVertices, OutError)
-							|| !TryActorWorldVertices(*ReferenceActor, ReferenceVertices, OutError))
+						if (!TryActorWorldVertices(*Actor, SubjectVertices, OutError, Ref)
+							|| !TryActorWorldVertices(*ReferenceActor, ReferenceVertices, OutError, Input.AnchorRef.GetValue()))
 						{
 							return false;
 						}
@@ -1517,11 +1581,16 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 						}
 						if (MinimumDistanceSquared > FMath::Square(0.01))
 						{
+							AddComparisonDifference(Differences, TEXT("alignment.minimum_vertex_distance_squared"),
+								TEXT("The minimum squared vertex distance exceeds the alignment tolerance in squared centimeters."),
+								ComparisonNumber(FMath::Square(0.01)), ComparisonNumber(MinimumDistanceSquared), Ref);
 							return false;
 						}
 					}
 					else
 					{
+						AddComparisonDifference(Differences, TEXT("alignment.kind"), TEXT("The native verifier does not support this alignment kind."),
+							MakeShared<FJsonValueString>(TEXT("anchors, bounds, face, or vertex")), MakeShared<FJsonValueString>(Input.Alignment.Kind), Ref);
 						return false;
 					}
 				}
@@ -1531,6 +1600,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 			bool CompareSnap(
 				const FWorldObjectSnapToSurfaceRequestInput& Input,
 				const FUeAgentCanonicalSnapshot& After,
+				TArray<UE::UAI::Contract::FDiagnostic>& Differences,
 				FUeAgentWorldSpatialExecutionError& OutError)
 			{
 				FUeAgentWorldSpatialCompiledValue Hit;
@@ -1561,6 +1631,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 								Actual.Components[2]),
 							0.001))
 					{
+						AddComparisonDifference(Differences, TEXT("snap.location"), TEXT("The subject location differs from the hit point plus the requested normal clearance."),
+							ComparisonComponents({Expected.X, Expected.Y, Expected.Z}),
+							ComparisonComponents({Actual.Components[0], Actual.Components[1], Actual.Components[2]}), Ref);
 						return false;
 					}
 				}
@@ -1571,6 +1644,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				const FMeshTransformBakeRequestInput& Input,
 				const FUeAgentCanonicalSnapshot& Before,
 				const FUeAgentCanonicalSnapshot& After,
+				TArray<UE::UAI::Contract::FDiagnostic>& Differences,
 				FUeAgentWorldSpatialExecutionError& OutError)
 			{
 				FUeAgentWorldSpatialCompiledValue Compiled;
@@ -1614,6 +1688,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 								NewValue.Components[2]),
 							0.001))
 					{
+						AddComparisonDifference(Differences, Role + TEXT(".position"), TEXT("The baked mesh vertex differs from the expected transformed position."),
+							ComparisonComponents({Expected.X, Expected.Y, Expected.Z}),
+							ComparisonComponents({NewValue.Components[0], NewValue.Components[1], NewValue.Components[2]}), Input.Transform.Subject);
 						return false;
 					}
 				}
@@ -1624,6 +1701,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 				const FMeshPivotUpdateRequestInput& Input,
 				const FUeAgentCanonicalSnapshot& Before,
 				const FUeAgentCanonicalSnapshot& After,
+				TArray<UE::UAI::Contract::FDiagnostic>& Differences,
 				FUeAgentWorldSpatialExecutionError& OutError)
 			{
 				FUeAgentWorldSpatialCompiledValue Compiled;
@@ -1663,6 +1741,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 								NewValue.Components[2]),
 							0.001))
 					{
+						AddComparisonDifference(Differences, Role + TEXT(".position"), TEXT("The mesh vertex differs from the expected pivot displacement."),
+							ComparisonComponents({Expected.X, Expected.Y, Expected.Z}),
+							ComparisonComponents({NewValue.Components[0], NewValue.Components[1], NewValue.Components[2]}), Input.Pivot.Subject);
 						return false;
 					}
 				}

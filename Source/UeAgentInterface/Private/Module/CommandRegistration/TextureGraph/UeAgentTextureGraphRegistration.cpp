@@ -5,6 +5,7 @@
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
 #include "DomainAdapters/TextureGraph/UeAgentTextureGraphMechanicsBoundary.h"
 #include "OperationOwners/TextureGraph/UeAgentTextureGraphDomainService.h"
 #include "OperationOwners/TextureGraph/UeAgentTextureGraphArtifactService.h"
@@ -38,14 +39,15 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 			const FString& Id,
 			const FUeAgentCommandContractRegistry& Legacy,
 			FUeAgentCommandDeclaration& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const bool bBake = Id == TEXT("texture_graph.artifact.bake");
 			const bool bProbe = Id == TEXT("texture_graph.runtime.probe");
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(Id);
-			if ((!Contract || !Contract->IsValid()) && !bBake && !bProbe)
+			if (!bBake && !bProbe && (!Contract || !Contract->TryValidate(OutError)))
 			{
-				OutError = TEXT("texture_graph_contract_missing:") + Id;
+				OutError = Contract ? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("texture_graph_contract_missing"), OutError, TEXT("registration")) : UE::UAI::Contract::FDiagnostic::Failure(TEXT("texture_graph_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			const bool bQuery = Id == TEXT("texture_graph.artifact.capture")
@@ -67,8 +69,6 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 				Result.InputFields = {
 					{TEXT("target"), TEXT("string"), true, false,
 						TEXT("Exact persisted TextureGraph package or object identity.")},
-					{TEXT("expected_revision"), TEXT("string"), true, false,
-						TEXT("Exact ContentGraphRead revision observed before planning.")},
 					{TEXT("outputs"), TEXT("array"), true, false,
 						TEXT("Unique render_output_index and destination package pairs committed by one plan.")},
 				};
@@ -93,25 +93,24 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 						Parameter.GetName(), WireType(Parameter.GetWireType()),
 						Parameter.IsRequired(), Parameter.IsNullable(),
 						TEXT("Exact TextureGraph mechanics parameter."),
+						Parameter.GetSchemaJson(),
 					});
 				}
 			}
 			if (bBake)
 			{
 				Result.ResultFields = {
-					{TEXT("command_id"), TEXT("string"), true, false,
-						TEXT("The exact texture_graph.artifact.bake identity.")},
 					{TEXT("terminal_status"), TEXT("string"), true, false,
 						TEXT("Succeeded only after persistence and independent readback.")},
 					{TEXT("target"), TEXT("string"), true, false,
 						TEXT("The unchanged TextureGraph target identity.")},
-					{TEXT("plan_fingerprint"), TEXT("string"), true, false,
-						TEXT("The canonical whole-batch plan fingerprint.")},
-					{TEXT("persistence_receipt_id"), TEXT("string"), true, false,
-						TEXT("The acknowledged multi-package durability receipt.")},
 					{TEXT("outputs"), TEXT("array"), true, false,
 						TEXT("Reloaded Texture2D identities and pixel statistics.")},
+					{TEXT("asset_refs"), TEXT("array"), true, false,
+						TEXT("Compact identities of the verified created Texture2D assets.")},
 				};
+				Result.ModelResultFields = {{
+					TEXT("asset_refs"), {TEXT("asset_refs")}}};
 			}
 			else if (bProbe)
 			{
@@ -153,14 +152,14 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 			Result.Purpose.Preconditions = {
 				TEXT("Resolve the exact target and required revision before execution."),
 			};
-			Result.Purpose.ParameterGuidance = TEXT("Use only query.command.detail fields.");
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters.");
 			Result.Purpose.ResultGuidance = TEXT("Use the native revision and independent readback evidence.");
 			Result.Purpose.FailureGuidance = TEXT("Prewrite failures leave no residue; unknown state requires reconciliation.");
 			Result.Purpose.SideEffectGuidance = bQuery
 				? TEXT("Read-only artifact capture from a settled graph.")
 				: TEXT("Mutates only the exact TextureGraph target through native mechanics.");
 			Result.Purpose.MinimumExample = Result.PythonFunction + TEXT("(client, params)");
-			Result.Purpose.RelatedFlows = {TEXT("query.command.detail"), TEXT("asset readback")};
+			Result.Purpose.RelatedFlows = {TEXT("query.command.usage"), TEXT("asset readback")};
 			Result.Purpose.Keywords = {TEXT("texture graph"), TEXT("graph"), TEXT("operation")};
 			Result.Purpose.Synonyms = {TEXT("TextureGraph authoring")};
 			Out = MoveTemp(Result);
@@ -191,7 +190,7 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::TextureGraph::TryCreateHandlers(
 					BakeFactory, Out, OutError);
@@ -205,7 +204,7 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<IUeAgentActiveCommandContribution> CommandContribution;
 			if (!TryCreateContribution(CommandContribution, OutError)
@@ -221,7 +220,7 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 					WorkspaceError)
 				|| !HjsonProvider.IsValid())
 			{
-				OutError = WorkspaceError.GetCode();
+				OutError = WorkspaceError.GetDiagnostic();
 				return false;
 			}
 
@@ -238,7 +237,7 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 			Declaration.Hjson.Routes.Add({
 				HjsonProvider->GetProviderId(),
 				TEXT("content_graph.import_workspace"),
-				TEXT("uai.texture_graph.edit/1"),
+				HjsonWorkspace::GetSemanticWorkspaceSchemaId(),
 				TEXT("ue.texture_graph.asset"),
 				TEXT("/Script/TextureGraph.TextureGraph"),
 				HjsonWorkspace::EInitializationNodeRole::RootTarget,
@@ -249,62 +248,6 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 				DomainCapability::EDomainCapabilitySupport::Supported;
 			Declaration.Initialization.ContractIds.Add(
 				TEXT("uai.init.texture_graph.root/1"));
-
-			HjsonWorkspace::FTargetCompositionContract Composition;
-			Composition.SchemaId =
-				HjsonWorkspace::GetTargetCompositionContractSchemaId();
-			Composition.TargetKind = TEXT("ue.texture_graph.asset");
-			Composition.Surfaces = {
-				{TEXT("target_settings"),
-					HjsonWorkspace::EAuthoringSurfaceKind::Properties,
-					HjsonWorkspace::ESemanticUnitKind::PropertySet},
-				{TEXT("parameter_collection"),
-					HjsonWorkspace::EAuthoringSurfaceKind::Collection,
-					HjsonWorkspace::ESemanticUnitKind::CollectionState},
-				{TEXT("graph_collection"),
-					HjsonWorkspace::EAuthoringSurfaceKind::Structure,
-					HjsonWorkspace::ESemanticUnitKind::StructureState},
-				{TEXT("node_properties"),
-					HjsonWorkspace::EAuthoringSurfaceKind::Properties,
-					HjsonWorkspace::ESemanticUnitKind::PropertySet},
-			};
-			Composition.SemanticRoutes = {
-				{HjsonWorkspace::ECompositionSemanticRouteMatch::Suffix,
-					TEXT(".container"), TEXT("graph_collection"),
-					HjsonWorkspace::ESemanticUnitKind::StructureState,
-					HjsonWorkspace::ECompositionSemanticRouteRole::Graph, 600},
-				{HjsonWorkspace::ECompositionSemanticRouteMatch::Suffix,
-					TEXT(".node"), TEXT("graph_collection"),
-					HjsonWorkspace::ESemanticUnitKind::ItemState,
-					HjsonWorkspace::ECompositionSemanticRouteRole::Item, 500},
-				{HjsonWorkspace::ECompositionSemanticRouteMatch::Suffix,
-					TEXT(".pin"), TEXT("graph_collection"),
-					HjsonWorkspace::ESemanticUnitKind::ItemState,
-					HjsonWorkspace::ECompositionSemanticRouteRole::Item, 400},
-				{HjsonWorkspace::ECompositionSemanticRouteMatch::Suffix,
-					TEXT(".node_pin"), TEXT("graph_collection"),
-					HjsonWorkspace::ESemanticUnitKind::RelationSet,
-					HjsonWorkspace::ECompositionSemanticRouteRole::Relation, 350},
-				{HjsonWorkspace::ECompositionSemanticRouteMatch::Suffix,
-					TEXT(".edge"), TEXT("graph_collection"),
-					HjsonWorkspace::ESemanticUnitKind::RelationSet,
-					HjsonWorkspace::ECompositionSemanticRouteRole::Relation, 300},
-				{HjsonWorkspace::ECompositionSemanticRouteMatch::Suffix,
-					TEXT(".parameter"), TEXT("parameter_collection"),
-					HjsonWorkspace::ESemanticUnitKind::ItemState,
-					HjsonWorkspace::ECompositionSemanticRouteRole::Item, 250},
-				{HjsonWorkspace::ECompositionSemanticRouteMatch::Suffix,
-					TEXT(".pin_value"), TEXT("node_properties"),
-					HjsonWorkspace::ESemanticUnitKind::PropertySet,
-					HjsonWorkspace::ECompositionSemanticRouteRole::Property, 200},
-				{HjsonWorkspace::ECompositionSemanticRouteMatch::Default,
-					FString(), TEXT("target_settings"),
-					HjsonWorkspace::ESemanticUnitKind::PropertySet,
-					HjsonWorkspace::ECompositionSemanticRouteRole::Property, 0},
-			};
-			Declaration.Composition.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Composition.Contracts.Add(MoveTemp(Composition));
 
 			Declaration.Operation.Support =
 				DomainCapability::EDomainCapabilitySupport::Supported;
@@ -348,10 +291,6 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 						FindTextureGraphOperationInvocationFactory(OperationId);
 				Declaration.Operation.Operations.Add(MoveTemp(GraphOperation));
 			}
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId =
-				TEXT("T40-TEXTURE-GRAPH-OPERATION");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration),
 				OutContribution,
@@ -366,7 +305,7 @@ namespace UE::UAI::Module::CommandRegistration::TextureGraph
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();

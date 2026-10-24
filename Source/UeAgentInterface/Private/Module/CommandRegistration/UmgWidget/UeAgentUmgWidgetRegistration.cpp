@@ -44,67 +44,39 @@ namespace UE::UAI::Module::CommandRegistration::UmgWidget
 			Result.StateLayers = {TEXT("asset_persisted_state")};
 			Result.InputFields = {
 				Field(TEXT("target"), TEXT("string"), true,
-					TEXT("Exact persisted WidgetBlueprint package.object identity.")),
+					TEXT("Persisted WidgetBlueprint name from content search, or its exact package.object path.")),
 				Field(TEXT("query"), TEXT("string"), false,
-					TEXT("Optional bounded text filter over the partial Widget catalog.")),
-				Field(TEXT("id"), TEXT("string"), false,
-					TEXT("Optional exact compact candidate id returned by this target.")),
-				Field(TEXT("limit"), TEXT("integer"), false,
-					TEXT("Optional page size from 1 through 64; defaults to 64.")),
-				Field(TEXT("cursor"), TEXT("integer"), false,
-					TEXT("Optional non-negative result offset; defaults to zero.")),
+					TEXT("Optional text filter over the partial Widget catalog.")),
+				Field(TEXT("describe"), TEXT("object"), false,
+					TEXT("Optional selected native widget {name, select?, fields?}; returns editable defaults in workspace property shape, excluding slot and structural fields.")),
 			};
-			Result.ResultFields = {
-				Field(TEXT("command_id"), TEXT("string"), true,
-					TEXT("The unchanged exact public command identity.")),
-				Field(TEXT("read_only"), TEXT("boolean"), true,
-					TEXT("Always true.")),
-				Field(TEXT("target"), TEXT("string"), true,
-					TEXT("The resolved exact WidgetBlueprint identity.")),
-				Field(TEXT("target_revision"), TEXT("string"), true,
-					TEXT("The current persisted target revision.")),
-				Field(TEXT("candidates"), TEXT("array"), true,
-					TEXT("Compact target-bound Widget class/template candidates.")),
-				Field(TEXT("total_matches"), TEXT("integer"), true,
-					TEXT("Total candidates matching this query.")),
-				Field(TEXT("next_cursor"), TEXT("integer"), true,
-					TEXT("Next result offset, or -1 when complete.")),
-				Field(TEXT("complete"), TEXT("boolean"), true,
-					TEXT("True only on the final pagination page.")),
-				Field(TEXT("has_more"), TEXT("boolean"), true,
-					TEXT("True only while another page remains.")),
-				Field(TEXT("coverage_scope"), TEXT("string"), true,
-					TEXT("The exact public partial catalog covered by this query.")),
-				Field(TEXT("coverage_complete"), TEXT("boolean"), true,
-					TEXT("False while the private Designer Palette catalog is unavailable headless.")),
-				Field(TEXT("creation_coverage_complete"), TEXT("boolean"), true,
-					TEXT("False while asset-backed and special templates remain search-only.")),
-			};
+			Result.ResultFields = { Field(TEXT("names"), TEXT("array"), true,
+				TEXT("Distinct readable Widget template names.")),
+				Field(TEXT("scope"), TEXT("object"), true, TEXT("Public target used for discovery; response metadata, not a selector.")),
+				Field(TEXT("description"), TEXT("object"), false, TEXT("Selected native widget defaults and referenced types; only for describe.")) };
 			Result.Errors = {
 				{TEXT("umg_widget_candidate_query_authority_required"),
 					TEXT("The uai:query authority is missing.")},
 				{TEXT("umg_widget_candidate_target_unresolved"),
 					TEXT("The exact WidgetBlueprint target could not be loaded.")},
-				{TEXT("umg_widget_candidate_page_invalid"),
-					TEXT("The requested page is outside the bounded contract.")},
 				{TEXT("umg_widget_candidate_not_found"),
-					TEXT("The name/id selector no longer resolves in this target context.")},
+					TEXT("The readable name no longer resolves in this target context.")},
 				{TEXT("umg_widget_candidate_ambiguous"),
-					TEXT("The name resolves more than one candidate; use exact id.")},
+					TEXT("The readable name resolves more than one candidate; refine the semantic context.")},
 				{TEXT("umg_widget_candidate_not_writable"),
 					TEXT("The candidate is visible but outside the current native class-template write scope.")},
 			};
 			Result.Purpose.Summary = TEXT(
-				"Search target-bound UMG class/template candidates and expose exact compact ids with truthful partial Designer Palette coverage.");
+				"Search target-bound UMG class/template candidates and expose readable names with truthful partial Designer Palette coverage.");
 			Result.Purpose.Target = TEXT("One exact persisted WidgetBlueprint.");
 			Result.Purpose.Preconditions = {
 				TEXT("Copy the target unchanged from public content search or readback."),
 				TEXT("Run in the Editor on the UE game thread with uai:query."),
 			};
 			Result.Purpose.ParameterGuidance = TEXT(
-				"Put only candidate.name or candidate.id in the widget HJSON item; keep the stable widget key, parent, slot, index and properties outside candidate.");
+				"Use a returned readable widget name; keep the stable widget key, parent, slot, index and properties outside candidate.");
 			Result.Purpose.ResultGuidance = TEXT(
-				"Continue pagination while has_more is true, inspect supported/write_support, and do not treat the partial class/asset approximation as the complete Designer Palette.");
+				"Search returns names and one scope; re-query needed names when the target changes. describe returns editable defaults. scope is response metadata, not a selector; ambiguous names require the returned semantic selection.");
 			Result.Purpose.FailureGuidance = TEXT(
 				"Unresolved targets, missing or ambiguous selectors, unsupported templates and invalid pages fail before WidgetTree mutation.");
 			Result.Purpose.SideEffectGuidance = TEXT(
@@ -113,7 +85,7 @@ namespace UE::UAI::Module::CommandRegistration::UmgWidget
 				"client.umg.widget_candidates(target, query='Button')");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
-				TEXT("query.command.detail"),
+				TEXT("query.command.usage"),
 				TEXT("content_graph.summary"),
 				TEXT("content_graph.import_workspace"),
 			};
@@ -149,7 +121,7 @@ namespace UE::UAI::Module::CommandRegistration::UmgWidget
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				(void)Registry;
 				return TryCreateUmgWidgetCandidateCommandHandlers(
@@ -163,7 +135,7 @@ namespace UE::UAI::Module::CommandRegistration::UmgWidget
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::
 				FDomainCapabilityContribution>& OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>
 				Provider;
@@ -172,7 +144,7 @@ namespace UE::UAI::Module::CommandRegistration::UmgWidget
 					Provider, WorkspaceError)
 				|| !Provider.IsValid())
 			{
-				OutError = WorkspaceError.GetCode();
+				OutError = WorkspaceError.GetDiagnostic();
 				return false;
 			}
 			DomainCapability::FDomainCapabilityDeclaration Declaration =
@@ -200,9 +172,6 @@ namespace UE::UAI::Module::CommandRegistration::UmgWidget
 				TEXT("uai.init.umg.binding/1"),
 				TEXT("uai.init.umg.animation/1"),
 			};
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId = TEXT("T15-UMG-WIDGET");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
@@ -224,7 +193,7 @@ namespace UE::UAI::Module::CommandRegistration::UmgWidget
 
 	bool TryCreateProductionUmgWidgetCandidateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TSharedPtr<IUeAgentUmgWidgetCandidateCommandService> Service;
 		if (!TryCreateProductionUmgWidgetCandidateCommandService(

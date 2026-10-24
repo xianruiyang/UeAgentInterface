@@ -20,9 +20,9 @@ namespace
 			"c358b0002058aa1ef83f427e74f8fde7"
 			"16bed4e699d82effcdd322f5ad108245");
 	const FString OperationDescriptorId =
-		TEXT("uai.reference.asset_apply");
+		TEXT("uai.fixture.asset_apply");
 	const FString OperationCapabilityId =
-		TEXT("reference.asset_apply");
+		TEXT("fixture.asset_apply");
 	const FString OperationDescriptorHash =
 		TEXT("sha256:"
 			"d5d77b007fce21ae3743d655c3bc324e"
@@ -606,5 +606,4 @@ bool FUeAgentExecutionContextPolicyContractTest::RunTest(
 		InvalidTransientPolicy.IsValid());
 	return true;
 }
-
 

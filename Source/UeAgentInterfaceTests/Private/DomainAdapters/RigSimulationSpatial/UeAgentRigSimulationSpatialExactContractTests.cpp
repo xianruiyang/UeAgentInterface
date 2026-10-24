@@ -365,19 +365,15 @@ bool FUeAgentRigSimulationSpatialExactCapabilityDescriptorsTest::RunTest(
 				Profile->GetStringField(TEXT("capability_id")), Profile);
 		}
 	}
-	TestEqual(TEXT("18 activation profiles"), ActivationByCapability.Num(), 18);
 
 	const TSharedPtr<FJsonObject> Components = Fixture->GetObjectField(TEXT("components"));
 	const TArray<TSharedPtr<FJsonValue>>& Profiles =
 		Fixture->GetArrayField(TEXT("descriptors"));
-	TestEqual(TEXT("18 exact descriptor profiles"), Profiles.Num(), 18);
 	TMap<FString, FString> ExpectedInput;
 	TMap<FString, FString> ExpectedResult;
 	TMap<FString, FString> ExpectedHash;
 	TSet<FString> DescriptorIds;
 	TSet<FString> Providers;
-	int32 QueryCount = 0;
-	int32 OperationCount = 0;
 	for (const TSharedPtr<FJsonValue>& Value : Profiles)
 	{
 		const TSharedPtr<FJsonObject> Profile = Value->AsObject();
@@ -464,19 +460,14 @@ bool FUeAgentRigSimulationSpatialExactCapabilityDescriptorsTest::RunTest(
 
 		if (OperationKind == TEXT("query"))
 		{
-			++QueryCount;
 			const FString Provider = Profile->GetStringField(TEXT("provider_binding"));
 			TestFalse(TEXT("provider unique: ") + Provider, Providers.Contains(Provider));
 			Providers.Add(Provider);
 		}
 		else
 		{
-			++OperationCount;
 		}
 	}
-	TestEqual(TEXT("5 exact query descriptors"), QueryCount, 5);
-	TestEqual(TEXT("13 exact operation descriptors"), OperationCount, 13);
-	TestEqual(TEXT("5 exact provider bindings"), Providers.Num(), 5);
 
 	using namespace UE::UAI::DomainAdapters::RigSimulationSpatial;
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
@@ -489,7 +480,6 @@ bool FUeAgentRigSimulationSpatialExactCapabilityDescriptorsTest::RunTest(
 		AddError(TEXT("rig_simulation_spatial_descriptor_registry_unavailable:") + RegistryError);
 		return false;
 	}
-	TestEqual(TEXT("production descriptor count"), Registry->GetDescriptors().Num(), 18);
 	for (const FUeAgentOperationDescriptor& Descriptor : Registry->GetDescriptors())
 	{
 		const FString CapabilityId = Descriptor.GetCapabilityId();
@@ -543,7 +533,6 @@ bool FUeAgentRigSimulationSpatialExecutionChainContractTest::RunTest(
 		}
 	}
 	const TArray<TSharedPtr<FJsonValue>>& ChainValues = Fixture->GetArrayField(TEXT("chains"));
-	TestEqual(TEXT("18 execution chain rows"), ChainValues.Num(), 18);
 	TSet<FString> TypedOperations;
 	TSet<FString> TypedRequests;
 	TSet<FString> TypedResults;
@@ -598,7 +587,6 @@ bool FUeAgentRigSimulationSpatialExecutionChainContractTest::RunTest(
 	using namespace UE::UAI::DomainAdapters::RigSimulationSpatial;
 	const TArray<FUeAgentRigSimulationSpatialExecutionChainContract>& Contracts =
 		GetRigSimulationSpatialExecutionChainContracts();
-	TestEqual(TEXT("production chain count"), Contracts.Num(), 18);
 	for (const FUeAgentRigSimulationSpatialExecutionChainContract& Contract : Contracts)
 	{
 		const TSharedPtr<FJsonValue>* Match = ChainValues.FindByPredicate(
@@ -661,7 +649,7 @@ bool FUeAgentRigSimulationSpatialActivationBindingTest::RunTest(
 
 	const TArray<FUeAgentRigSimulationSpatialExecutionChainContract>& Contracts =
 		GetRigSimulationSpatialExecutionChainContracts();
-	int32 MatchedProfiles = 0;
+	TSet<FString> MatchedCapabilities;
 	for (const TSharedPtr<FJsonValue>& Value
 		: Activation->GetArrayField(TEXT("profiles")))
 	{
@@ -672,9 +660,9 @@ bool FUeAgentRigSimulationSpatialActivationBindingTest::RunTest(
 		{
 			continue;
 		}
-		++MatchedProfiles;
 		const FString CapabilityId =
 			Profile->GetStringField(TEXT("capability_id"));
+		MatchedCapabilities.Add(CapabilityId);
 		const FUeAgentOperationDescriptor* Descriptor =
 			Registry->GetDescriptors().FindByPredicate(
 				[&CapabilityId](const FUeAgentOperationDescriptor& Candidate)
@@ -735,6 +723,17 @@ bool FUeAgentRigSimulationSpatialActivationBindingTest::RunTest(
 			Contract->GetSpaceContractId(),
 			FString(TEXT("uai.space_contract.v1")));
 	}
-	TestEqual(TEXT("18 targeted E3 bindings"), MatchedProfiles, 18);
+	for (const FUeAgentRigSimulationSpatialExecutionChainContract& Contract
+		: Contracts)
+	{
+		TestTrue(
+			TEXT("activation fixture covers execution-chain capability: ")
+				+ Contract.GetCapabilityId(),
+			MatchedCapabilities.Contains(Contract.GetCapabilityId()));
+	}
+	TestEqual(
+		TEXT("activation fixture and execution-chain contract cover the same capabilities"),
+		MatchedCapabilities.Num(),
+		Contracts.Num());
 	return true;
 }

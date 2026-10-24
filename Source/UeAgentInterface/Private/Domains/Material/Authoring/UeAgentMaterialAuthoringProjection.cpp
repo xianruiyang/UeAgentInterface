@@ -3,6 +3,7 @@
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringProjection.h"
 
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringDescriptors.h"
+#include "Dom/JsonValue.h"
 #include "Utilities/AuthoringExport/UeAgentCompoundProjectionExtension.h"
 
 namespace UeAgentMaterialAuthoring
@@ -13,13 +14,11 @@ namespace UeAgentMaterialAuthoring
 
 		FProfileDescriptor Profile(
 			const TCHAR* Id,
-			const TArray<FString>& Roles,
-			const int32 TokenBudget)
+			const TArray<FString>& Roles)
 		{
 			FProfileDescriptor Result;
 			Result.ProfileId = Id;
 			Result.IncludedRoles = Roles;
-			Result.TokenBudget = TokenBudget;
 			return Result;
 		}
 
@@ -67,10 +66,10 @@ namespace UeAgentMaterialAuthoring
 			};
 			Result.DefaultProfile = TEXT("llm_authoring");
 			Result.Profiles = {
-				Profile(TEXT("llm_authoring"), { TEXT("identity"), TEXT("authoring") }, 32768),
-				Profile(TEXT("readback"), { TEXT("identity"), TEXT("authoring"), TEXT("readback") }, 49152),
-				Profile(TEXT("debug"), { TEXT("identity"), TEXT("authoring"), TEXT("readback"), TEXT("diagnostics"), TEXT("validation") }, 131072),
-				Profile(TEXT("validation"), { TEXT("identity"), TEXT("validation") }, 32768),
+				Profile(TEXT("llm_authoring"), { TEXT("identity"), TEXT("authoring") }),
+				Profile(TEXT("readback"), { TEXT("identity"), TEXT("authoring"), TEXT("readback") }),
+				Profile(TEXT("debug"), { TEXT("identity"), TEXT("authoring"), TEXT("readback"), TEXT("diagnostics"), TEXT("validation") }),
+				Profile(TEXT("validation"), { TEXT("identity"), TEXT("validation") }),
 			};
 
 			FFileDescriptor IndexFile;
@@ -107,14 +106,7 @@ namespace UeAgentMaterialAuthoring
 					EFieldSourceKind::Semantic, ExportEdgeSemanticId, TEXT("uai.export.semantic.value"),
 					TEXT("authoring"), true, true, TEXT("emit_empty")),
 			};
-			if (bFunction)
-			{
-				Result.Fields.Add(Field(
-					TEXT("function_settings"), TEXT("index.hjson#/provider_extension/function_settings"),
-					EFieldSourceKind::Semantic, ExportFunctionSettingsSemanticId,
-					TEXT("uai.export.semantic.value"), TEXT("authoring"), true, true, TEXT("emit_empty")));
-			}
-			else
+			if (!bFunction)
 			{
 				Result.Fields.Add(Field(
 					TEXT("root_inputs"), TEXT("index.hjson#/provider_extension/graph/root_inputs/*"),
@@ -160,14 +152,24 @@ namespace UeAgentMaterialAuthoring
 		bool ProjectMaterialStructure(
 			const UeAgentCompoundProjection::FRequest& Request,
 			TArray<UeAgentCompoundProjection::FExpansionSelection>& OutSelections,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutSelections.Reset();
 			OutError.Reset();
 			if (!Request.IsValid() || Request.File->ProjectionId != MaterialProjectionId
 				|| Request.WildcardCount != 1)
 			{
-				OutError = TEXT("material_projection_request_invalid");
+				const bool bInvalidRequest = !Request.IsValid();
+				const bool bWrongProjector = !bInvalidRequest && Request.File->ProjectionId != MaterialProjectionId;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_projection_request_invalid"),
+					bInvalidRequest ? TEXT("The material projection request is incomplete.")
+					    : bWrongProjector ? TEXT("The projection request selects a different graph projector.")
+					    : TEXT("Material graph projection requires exactly one wildcard."), TEXT("export_projection"));
+				OutError.PropertyPath = bInvalidRequest ? TEXT("request_valid") : bWrongProjector ? TEXT("projector_matches") : TEXT("wildcard_count");
+				OutError.ActualValue = bInvalidRequest || bWrongProjector ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)) : MakeShared<FJsonValueNumber>(Request.WildcardCount);
+				OutError.ExpectedValue = bInvalidRequest || bWrongProjector ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)) : MakeShared<FJsonValueNumber>(1);
+				OutError.InternalContext = Request.File ? Request.File->ProjectionId : TEXT("projection_file_missing");
+				OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 
@@ -177,7 +179,13 @@ namespace UeAgentMaterialAuthoring
 				const FString Key = ProjectionKey(Request.Entries[Index]);
 				if (Key.IsEmpty())
 				{
-					OutError = TEXT("material_projection_identity_missing");
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_projection_identity_missing"),
+						FString::Printf(TEXT("Material graph export entry %d has no identity for its projection."), Index), TEXT("export_projection"));
+					OutError.PropertyPath = FString::Printf(TEXT("entries/%d"), Index);
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("expression, edge, or material property identity"));
+					OutError.SemanticId = Request.Entries[Index].SemanticId;
+					OutError.SourceKind = TEXT("native_result");
 					return false;
 				}
 				IndicesByKey.FindOrAdd(Key).Add(Index);
@@ -196,7 +204,7 @@ namespace UeAgentMaterialAuthoring
 		}
 	}
 
-	bool RegisterExportAuthoring(FString& OutError)
+	bool RegisterExportAuthoring(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentExportContract::ERegistrationResult ContractResult;
 		if (!UeAgentExportContract::FRegistry::Get().RegisterContract(
@@ -218,7 +226,7 @@ namespace UeAgentMaterialAuthoring
 	bool GetExportContract(
 		const FString& AssetKind,
 		UeAgentExportContract::FContract& OutContract,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const FString ContractId = AssetKind == TEXT("material")
 			? MaterialExportContractId
@@ -227,12 +235,21 @@ namespace UeAgentMaterialAuthoring
 				: FString();
 		if (ContractId.IsEmpty())
 		{
-			OutError = TEXT("material_export_asset_kind_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_export_asset_kind_invalid"),
+				TEXT("Graph export requires asset kind 'material' or 'material_function'."), TEXT("export_projection"));
+			OutError.PropertyPath = TEXT("asset_kind");
+			OutError.ActualValue = MakeShared<FJsonValueString>(AssetKind);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("material or material_function"));
 			return false;
 		}
 		if (!UeAgentExportContract::FRegistry::Get().FindContract(ContractId, OutContract))
 		{
-			OutError = TEXT("material_export_contract_missing");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_export_contract_missing"),
+				FString::Printf(TEXT("The graph export contract for asset kind '%s' is not registered."), *AssetKind), TEXT("export_projection"));
+			OutError.PropertyPath = TEXT("asset_kind");
+			OutError.ActualValue = MakeShared<FJsonValueString>(AssetKind);
+			OutError.InternalContext = ContractId;
+			OutError.SourceKind = TEXT("native_result");
 			return false;
 		}
 		OutError.Reset();

@@ -4,11 +4,61 @@
 
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticRegistry.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Rigs/RigHierarchyElements.h"
+#include "ControlRigObjectVersion.h"
+#include "Serialization/MemoryReader.h"
+#include "Serialization/MemoryWriter.h"
+#include "UObject/NoExportTypes.h"
 
 namespace UeAgentRiggingAuthoring
 {
 	namespace
 	{
+		constexpr const TCHAR* ControlRigComparator = TEXT("uai.compare.rigging.control_rig");
+
+		bool ProjectPersistedHierarchy(TSharedPtr<FJsonValue>& Value, UE::UAI::Contract::FDiagnostic& Error)
+		{
+			if (!Value || Value->Type != EJson::Object) return true;
+			const TSharedPtr<FJsonObject>* Hierarchy = nullptr;
+			const TSharedPtr<FJsonObject>* Elements = nullptr;
+			if (!Value->AsObject()->TryGetObjectField(TEXT("hierarchy"), Hierarchy)
+				|| !(*Hierarchy)->TryGetObjectField(TEXT("elements"), Elements)) return true;
+			for (const auto& Element : (*Elements)->Values)
+			{
+				if (!Element.Value || Element.Value->Type != EJson::Object) continue;
+				const auto Record = Element.Value->AsObject();
+				for (const TCHAR* Field : {TEXT("initial_local_transform"), TEXT("initial_offset_transform"), TEXT("initial_shape_transform")})
+				{
+					const auto Input = Record->TryGetField(Field);
+					if (!Input) continue;
+					FTransform Transform;
+					if (!UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FTransform>::Get(), Input, &Transform, Error)) return false;
+					// Package persistence uses the hierarchy's default serialization settings.
+					// Execute UE's compact codec, including its identity/uniform elision;
+					// do not approximate it with a global float tolerance or alter capture.
+					TArray<uint8> Bytes;
+					FMemoryWriter Writer(Bytes, true);
+					Writer.UsingCustomVersion(FControlRigObjectVersion::GUID);
+					const FRigHierarchySerializationSettings Settings(Writer);
+					FRigCompactTransform(Transform).Save(Writer, Settings);
+					FMemoryReader Reader(Bytes, true);
+					FRigCompactTransform(Transform).Load(Reader, Settings);
+					if (Writer.IsError() || Reader.IsError())
+					{
+						Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("control_rig_compact_transform_invalid"),
+							TEXT("The native hierarchy transform could not be projected through its package storage format."), TEXT("semantic_compare"));
+						return false;
+					}
+					Record->SetField(Field, UeAgentPropertyValueCodec::EncodeStructValue(
+						TBaseStructure<FTransform>::Get(), &Transform, nullptr, {}));
+				}
+			}
+			return true;
+		}
 		const TArray<FProfile> Profiles = {
 			{
 				EAssetKind::ControlRig,
@@ -48,7 +98,7 @@ namespace UeAgentRiggingAuthoring
 			},
 		};
 
-		bool RegisterIdentity(const FProfile& Profile, FString& OutError)
+		bool RegisterIdentity(const FProfile& Profile, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringIdentity::FModelDescriptor Model;
 			Model.ModelId = Profile.IdentityModelId;
@@ -65,7 +115,7 @@ namespace UeAgentRiggingAuthoring
 			const FString& SemanticId,
 			const UeAgentAuthoringSemanticRegistry::EWriteCapability WriteCapability,
 			const bool bFactoryDefault,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringSemanticRegistry::FSemanticDescriptor Semantic;
 			Semantic.SemanticId = SemanticId;
@@ -78,7 +128,8 @@ namespace UeAgentRiggingAuthoring
 			Semantic.WriteCapability = WriteCapability;
 			Semantic.ConstraintSource = TEXT("rigging.asset.schema");
 			Semantic.AvailabilitySource = StateAccessorId;
-			Semantic.Comparator = TEXT("uai.compare.canonical_value");
+			Semantic.Comparator = Profile.Kind == EAssetKind::ControlRig
+				? ControlRigComparator : TEXT("uai.compare.canonical_value");
 			Semantic.CapabilityTags = {
 				TEXT("rigging"), TEXT("asset"), TEXT("hierarchy"), TEXT("controller")
 			};
@@ -140,8 +191,32 @@ namespace UeAgentRiggingAuthoring
 		return false;
 	}
 
-	bool RegisterDescriptors(FString& OutError)
+	bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError)
 	{
+		auto& Comparators = UeAgentAuthoringSemanticCompare::FComparatorRegistry::Get();
+		UeAgentAuthoringSemanticCompare::FComparator Canonical;
+		if (!UeAgentAuthoringSemanticCompare::RegisterBuiltInComparators(Comparators, OutError)
+			|| !Comparators.CopyComparator(UeAgentAuthoringSemanticCompare::GraphVectorPositionComparator, Canonical)) return false;
+		UeAgentAuthoringSemanticCompare::FComparatorDescriptor Comparator;
+		Comparator.ComparatorId = ControlRigComparator;
+		Comparator.ValueKinds = {TEXT("object")};
+		Comparator.CapabilityTags = {TEXT("canonical_value"), TEXT("native_rig_compact_persistence")};
+		UeAgentAuthoringSemanticCompare::ERegistrationResult ComparatorResult;
+		if (!Comparators.RegisterComparator(Comparator,
+			[Canonical](const UeAgentAuthoringState::FStateEntry& Left, const UeAgentAuthoringState::FStateEntry& Right,
+				bool& Equivalent, UE::UAI::Contract::FDiagnostic& Error) {
+				auto Expected = Left, Actual = Right;
+				Expected.Value = UeAgentAuthoringState::CloneCanonicalValue(Left.Value);
+				Actual.Value = UeAgentAuthoringState::CloneCanonicalValue(Right.Value);
+				return ProjectPersistedHierarchy(Expected.Value, Error) && ProjectPersistedHierarchy(Actual.Value, Error)
+					&& Canonical(Expected, Actual, Equivalent, Error);
+			}, ComparatorResult, OutError,
+			[](UeAgentAuthoringState::FStateEntry& Entry, TSharedPtr<FJsonValue>& Before,
+				TSharedPtr<FJsonValue>& Desired, TSharedPtr<FJsonValue>& Actual,
+				TMap<FString, FString>& SourcePaths, UE::UAI::Contract::FDiagnostic& Error) {
+				return UeAgentAuthoringSemanticCompare::FComparatorRegistry::Get().ProjectOriginalIntent(
+					UeAgentAuthoringSemanticCompare::GraphVectorPositionComparator, Entry, Before, Desired, Actual, SourcePaths, Error);
+			})) return false;
 		for (const FProfile& Profile : Profiles)
 		{
 			if (!RegisterIdentity(Profile, OutError)) return false;

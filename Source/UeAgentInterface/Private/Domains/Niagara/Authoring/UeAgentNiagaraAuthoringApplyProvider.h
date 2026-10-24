@@ -2,8 +2,11 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
 
 class FJsonValue;
 class FJsonObject;
@@ -12,6 +15,7 @@ class UObject;
 namespace UeAgentAuthoringOperationApply
 {
 	class IApplyProvider;
+	class IDurablePackageStager;
 }
 
 namespace UeAgentNiagaraAuthoring
@@ -23,20 +27,25 @@ namespace UeAgentNiagaraAuthoring
 		FString AssetKind;
 		FString SourceAssetPath;
 		TArray<TSharedPtr<FJsonValue>> Properties;
+		TSharedPtr<FJsonObject> Stages;
+		TSharedPtr<FJsonObject> Emitters;
+		TFunction<bool(UeAgentAuthoringWorkspaceTransaction::FOperationFailure&)> FinalReadback;
+		TSharedPtr<UeAgentAuthoringOperationApply::IDurablePackageStager> PackageStager;
 		bool bCreateDefaultSystemNodes = true;
 		bool bAddDefaultEmitterModulesAndRenderers = true;
 		bool bCompile = true;
 		bool bSave = true;
+		bool bCompactValues = false;
 		bool bForceDelete = false;
 		bool bUseUncheckedDelete = false;
+		TSharedPtr<FJsonObject> UserParameters;
 	};
 
 	struct UEAGENTINTERFACE_API FAssetApplyResult
 	{
 		FString Status;
 		FString Phase;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ResolvedOperation;
 		FString AssetPath;
 		FString ObjectPath;
@@ -82,11 +91,12 @@ namespace UeAgentNiagaraAuthoring
 		}
 	};
 
-	UEAGENTINTERFACE_API bool RegisterAssetApplyContracts(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterAssetApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API FString GetApplyFailureMessage(const FAssetApplyResult& Result);
-	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeAssetApplyProvider();
-	UEAGENTINTERFACE_API bool CompileAsset(UObject* Asset, FString& OutError);
-	UEAGENTINTERFACE_API bool SaveAsset(UObject* Asset, FString& OutError);
+	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeAssetApplyProvider(bool bCompactValues = false);
+	UEAGENTINTERFACE_API bool CompileAsset(UObject* Asset, UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API bool SaveAsset(UObject* Asset, UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API bool SaveAsset(UObject* Asset, UE::UAI::Contract::FDiagnostic& OutError, FString* OutDetail);
 	UEAGENTINTERFACE_API bool ApplyAsset(
 		const FAssetApplyRequest& Request,
 		FAssetApplyResult& OutResult,
@@ -102,5 +112,8 @@ namespace UeAgentNiagaraAuthoring
 		const FString& ExpectedAssetKind,
 		const FString& ExpectedAssetPath,
 		FAssetApplyResult& OutResult,
-		const FString& RequestId = FString());
+		const FString& RequestId = FString(),
+		bool bCompactValues = false,
+		TFunction<bool(UeAgentAuthoringWorkspaceTransaction::FOperationFailure&)> FinalReadback = {},
+		const TSharedPtr<UeAgentAuthoringOperationApply::IDurablePackageStager>& PackageStager = nullptr);
 }

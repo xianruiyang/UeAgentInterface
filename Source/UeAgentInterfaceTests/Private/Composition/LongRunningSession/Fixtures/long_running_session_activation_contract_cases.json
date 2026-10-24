@@ -1,9 +1,5 @@
 {
   "schema": "uai.long_running_session.public_activation.test_fixture.v1",
-  "command_count": 13,
-  "start_command_count": 7,
-  "lifecycle_command_count": 6,
-  "family_binding_count": 13,
   "operation_ref_fields": [
     "operation_id",
     "owner_lease_id",
@@ -82,7 +78,7 @@
       ],
       "example_params": {
         "subject_ref": "runtime-session:pie-debug:0:fixture",
-        "policy_id": "policy:runtime-scenario:bounded/v1",
+        "policy_id": "policy:runtime-scenario:bounded/v2",
         "parameters": {
           "expected_pause_epoch": 1,
           "expected_workspace_revision": 1,

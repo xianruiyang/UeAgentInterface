@@ -22,19 +22,11 @@ namespace UE::UAI::CommandHandlers::TextureGraph
 
 		FUeAgentCommandResult Unauthorized(const FUeAgentCommandRequest& Request)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), TEXT("texture_graph_authority_required"));
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(
-				TEXT("detail"),
-				IsQuery(Request.GetCommandId())
-					? TEXT("uai:query is required")
-					: TEXT("uai:operate is required"));
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(
+				TEXT("texture_graph_authority_required"),
+				IsQuery(Request.GetCommandId()) ? TEXT("uai:query is required") : TEXT("uai:operate is required"),
+				TEXT("authorization"), FString(), Request.GetCommandId());
+			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Diagnostic);
 		}
 
 		TOptional<FUeAgentCommandResult> RequireOfficialPlugin(
@@ -48,18 +40,12 @@ namespace UE::UAI::CommandHandlers::TextureGraph
 			{
 				return {};
 			}
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(
-				TEXT("code"), TEXT("texture_graph_official_plugin_unavailable"));
-			Error->SetStringField(TEXT("subject_id"), TEXT("TextureGraph"));
-			Error->SetStringField(TEXT("detail"), Availability.GetReason());
-			Error->SetStringField(TEXT("terminal_status"), TEXT("not_started"));
-			Error->SetBoolField(TEXT("retry_safe"), true);
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(
+				TEXT("texture_graph_official_plugin_unavailable"), Availability.GetReason(),
+				TEXT("availability"), FString(), TEXT("TextureGraph"));
+			Diagnostic.TerminalStatus = TEXT("not_started");
+			Diagnostic.bRetrySafe = true;
+			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Diagnostic);
 		}
 
 		class FHandler final : public IUeAgentExactCommandHandler
@@ -151,19 +137,7 @@ namespace UE::UAI::CommandHandlers::TextureGraph
 						Invocation,
 						InvocationError))
 				{
-					const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-					Error->SetStringField(
-						TEXT("code"), InvocationError.GetCode());
-					Error->SetStringField(
-						TEXT("subject_id"), InvocationError.GetSubjectId());
-					Error->SetStringField(
-						TEXT("detail"), InvocationError.GetDetail());
-					FString ErrorJson;
-					const auto Writer = TJsonWriterFactory<TCHAR,
-						TCondensedJsonPrintPolicy<TCHAR>>::Create(&ErrorJson);
-					FJsonSerializer::Serialize(Error, Writer);
-					return FUeAgentCommandResult::Failure(
-						Request, TEXT("{}"), MoveTemp(ErrorJson));
+					return FUeAgentCommandResult::Failure(Request, TEXT("{}"), InvocationError);
 				}
 				BindingGateway::Operation::FOperationLifecycleReceipt Receipt;
 				if (!Invocation.GetService()->Run(
@@ -171,38 +145,18 @@ namespace UE::UAI::CommandHandlers::TextureGraph
 						*Invocation.GetAuthorization(),
 						Receipt))
 				{
-					FString FailureDetail =
-						Invocation.GetContext()->GetFailureDetail();
-					if (FailureDetail.IsEmpty())
-					{
-						FailureDetail = TEXT("phase_history:")
-							+ FString::Join(
-								Receipt.GetPhaseHistory(), TEXT(","));
-					}
-					const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-					Error->SetStringField(
-						TEXT("code"), Receipt.GetErrorCode());
-					Error->SetStringField(TEXT("subject_id"), Id);
-					Error->SetStringField(TEXT("detail"), FailureDetail);
-					FString ErrorJson;
-					const auto Writer = TJsonWriterFactory<TCHAR,
-						TCondensedJsonPrintPolicy<TCHAR>>::Create(&ErrorJson);
-					FJsonSerializer::Serialize(Error, Writer);
-					return FUeAgentCommandResult::Failure(
-						Request, TEXT("{}"), MoveTemp(ErrorJson));
+					return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Receipt.GetDiagnostic());
 				}
 				FString Payload;
-				FString PayloadError;
+				UE::UAI::Contract::FDiagnostic PayloadError;
 				if (!Invocation.GetContext()->TryBuildSuccessPayload(
 						Receipt, Payload, PayloadError))
 				{
-					return FUeAgentCommandResult::ProtocolError(
-						Request.GetCorrelationId(),
-						Request.GetRequestId(),
-						Request.GetCommandId(),
-						Request.GetCommandBindingHash(),
-						TEXT("domain_operation_result_invalid"),
-						PayloadError);
+					PayloadError.TerminalStatus = TEXT("succeeded");
+					PayloadError.MutationStarted = Receipt.DidMutationStart();
+					PayloadError.MutationMayHaveStarted = Receipt.DidMutationStart();
+					PayloadError.bRetrySafe = false;
+					return FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(), Request.GetCommandId(), Request.GetCommandBindingHash(), PayloadError);
 				}
 				return FUeAgentCommandResult::Success(
 					Request, MoveTemp(Payload));
@@ -219,7 +173,7 @@ namespace UE::UAI::CommandHandlers::TextureGraph
 		TSharedRef<const DomainCapability::IDomainOperationInvocationFactory>
 			BakeFactory,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
@@ -244,7 +198,8 @@ namespace UE::UAI::CommandHandlers::TextureGraph
 			if (!Match)
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("texture_graph_mechanics_handler_missing:") + Id;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("texture_graph_mechanics_handler_missing"), TEXT("No mechanics handler is registered for this public command."), TEXT("texture_graph"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			OutHandlers.Add(MakeShared<FHandler>(Id, *Match));

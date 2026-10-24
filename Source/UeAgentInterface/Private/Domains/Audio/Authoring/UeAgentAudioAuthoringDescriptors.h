@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UeAgentAudioAuthoring {
@@ -38,5 +40,5 @@ FindProfileByTargetKind(const FString &TargetKind);
 UEAGENTINTERFACE_API const TCHAR *AssetKindToString(EAssetKind Kind);
 UEAGENTINTERFACE_API bool ParseAssetKind(const FString &Text,
                                          EAssetKind &OutKind);
-UEAGENTINTERFACE_API bool RegisterDescriptors(FString &OutError);
+UEAGENTINTERFACE_API bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError);
 } // namespace UeAgentAudioAuthoring

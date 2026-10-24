@@ -1,10 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UeAgentInterfaceModule.h"
+#include "OperationOwners/LongRunning/UeAgentLongRunningLifecycleOwner.h"
 
-#include "CommandRegistry/UeAgentActiveCommandManifest.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentCommandContract.h"
+#include "Core/AssetPreview/UeAgentAssetPreviewState.h"
+#include "Core/AssetPreview/UeAgentAssetEditorLifetime.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "CommandRegistry/UeAgentActiveCommandManifest.h"
 #include "NetworkTransport/UeAgentHttpTransportAdapter.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "Module/UeAgentInterfaceLogger.h"
@@ -19,6 +24,7 @@
 #include "Framework/Docking/TabManager.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "HAL/PlatformApplicationMisc.h"
+#include "HAL/PlatformMisc.h"
 #include "HAL/IConsoleManager.h"
 #include "Interfaces/IMainFrameModule.h"
 #include "ModelingModeToolExtensions.h"
@@ -31,6 +37,10 @@
 #include "Widgets/Notifications/SNotificationList.h"
 #include "Editor.h"
 
+#if PLATFORM_WINDOWS
+#include "Windows/WindowsHWrapper.h"
+#endif
+
 namespace
 {
 bool IsStartMinimizedMainFrameRequested()
@@ -38,6 +48,56 @@ bool IsStartMinimizedMainFrameRequested()
 	const TCHAR* CommandLine = FCommandLine::Get();
 	return FParse::Param(CommandLine, TEXT("UeAgentInterfaceStartMinimized"))
 		|| FParse::Param(CommandLine, TEXT("UAIStartMinimized"));
+}
+
+#if PLATFORM_WINDOWS
+HHOOK StartMinimizedActivationHook = nullptr;
+bool bPreventStartupActivation = false;
+uint32 PreventedStartupActivationCount = 0;
+
+LRESULT CALLBACK PreventHiddenStartupWindowActivation(int Code, WPARAM WindowParam, LPARAM Detail)
+{
+	if (bPreventStartupActivation && (Code == HCBT_ACTIVATE || Code == HCBT_SETFOCUS))
+	{
+		const HWND Window = reinterpret_cast<HWND>(WindowParam);
+		const HWND RootWindow = ::GetAncestor(Window, GA_ROOT);
+		if (RootWindow && (!::IsWindowVisible(RootWindow) || ::IsIconic(RootWindow)))
+		{
+			++PreventedStartupActivationCount;
+			return 1;
+		}
+	}
+	return ::CallNextHookEx(nullptr, Code, WindowParam, Detail);
+}
+#endif
+
+void BeginStartMinimizedActivationScope()
+{
+#if PLATFORM_WINDOWS
+	if (StartMinimizedActivationHook) return;
+	PreventedStartupActivationCount = 0;
+	// Restrict this hook to the editor UI thread; never hook other applications.
+	StartMinimizedActivationHook = ::SetWindowsHookExW(
+		WH_CBT, PreventHiddenStartupWindowActivation, nullptr, ::GetCurrentThreadId());
+	bPreventStartupActivation = StartMinimizedActivationHook != nullptr;
+	FUeAgentInterfaceLogger::Log(TEXT("StartMinimizedMainFrame: activation scope installed=%s"),
+		bPreventStartupActivation ? TEXT("true") : TEXT("false"));
+#endif
+}
+
+void EndStartMinimizedActivationScope()
+{
+#if PLATFORM_WINDOWS
+	// Deactivate first, so even an unsuccessful unhook cannot block later user input.
+	bPreventStartupActivation = false;
+	if (StartMinimizedActivationHook)
+	{
+		const bool bRemoved = ::UnhookWindowsHookEx(StartMinimizedActivationHook) != 0;
+		StartMinimizedActivationHook = nullptr;
+		FUeAgentInterfaceLogger::Log(TEXT("StartMinimizedMainFrame: activation scope ended removed=%s prevented=%u"),
+			bRemoved ? TEXT("true") : TEXT("false"), PreventedStartupActivationCount);
+	}
+#endif
 }
 
 bool ShouldDisablePersistentLayoutsForHeadlessRun()
@@ -123,6 +183,7 @@ FUeAgentInterfaceModule::FUeAgentInterfaceModule()
 	: ConsoleCmdStart(nullptr)
 	, ConsoleCmdStop(nullptr)
 	, ConsoleCmdRestart(nullptr)
+	, ConsoleCmdExportCommandManifest(nullptr)
 	, bAppliedRootWindowMaximizeOverride(false)
 	, bHadPreviousRootWindowInitiallyMaximizedValue(false)
 {
@@ -134,6 +195,9 @@ void FUeAgentInterfaceModule::StartupModule()
 
 	DisablePersistentLayoutsForHeadlessRun();
 	InstallStartMinimizedMainFrameHookIfRequested();
+	UE::UAI::AssetPreview::StartSequencerObservation();
+	UE::UAI::OperationOwners::LongRunning::InitializeProductionLongRunningLifecycle();
+	UE::UAI::AssetPreview::StartAssetEditorTracking();
 
 	EditorMapOpenedHandle = FEditorDelegates::OnMapOpened.AddRaw(
 		this,
@@ -170,7 +234,10 @@ void FUeAgentInterfaceModule::StartupModule()
 void FUeAgentInterfaceModule::ShutdownModule()
 {
 	FUeAgentInterfaceLogger::Log(TEXT("ShutdownModule begin"));
+	UE::UAI::OperationOwners::LongRunning::ShutdownProductionLongRunningLifecycle();
+	UE::UAI::AssetPreview::ShutdownAssetEditorTracking();
 	UninstallStartMinimizedMainFrameHook();
+	UE::UAI::AssetPreview::StopSequencerObservation();
 	if (EditorMapOpenedHandle.IsValid())
 	{
 		FEditorDelegates::OnMapOpened.Remove(EditorMapOpenedHandle);
@@ -219,6 +286,7 @@ void FUeAgentInterfaceModule::InstallStartMinimizedMainFrameHookIfRequested()
 	}
 
 	ApplyTemporaryRootWindowMaximizeOverride();
+	BeginStartMinimizedActivationScope();
 
 	MainFrameModule.EnableDelayedShowMainFrame();
 	MainFrameCreationFinishedForStartMinimizedHandle = MainFrameModule.OnMainFrameCreationFinished().AddRaw(
@@ -230,6 +298,7 @@ void FUeAgentInterfaceModule::InstallStartMinimizedMainFrameHookIfRequested()
 
 void FUeAgentInterfaceModule::UninstallStartMinimizedMainFrameHook()
 {
+	EndStartMinimizedActivationScope();
 	if (MainFrameCreationFinishedForStartMinimizedHandle.IsValid())
 	{
 		if (IMainFrameModule* MainFrameModule = FModuleManager::Get().GetModulePtr<IMainFrameModule>(TEXT("MainFrame")))
@@ -269,6 +338,7 @@ void FUeAgentInterfaceModule::HandleMainFrameCreationFinishedForStartMinimized(
 		bWindowValid ? TEXT("true") : TEXT("false"));
 
 	MainFrameModule.ShowDelayedMainFrame();
+	EndStartMinimizedActivationScope();
 }
 
 void FUeAgentInterfaceModule::ApplyTemporaryRootWindowMaximizeOverride()
@@ -359,7 +429,8 @@ void FUeAgentInterfaceModule::UnregisterMenus()
 
 void FUeAgentInterfaceModule::RegisterConsoleCommands()
 {
-	if (ConsoleCmdStart || ConsoleCmdStop || ConsoleCmdRestart)
+	if (ConsoleCmdStart || ConsoleCmdStop || ConsoleCmdRestart
+		|| ConsoleCmdExportCommandManifest)
 	{
 		return;
 	}
@@ -381,6 +452,14 @@ void FUeAgentInterfaceModule::RegisterConsoleCommands()
 		TEXT("Restart UeAgentInterface local HTTP server."),
 		FConsoleCommandDelegate::CreateRaw(this, &FUeAgentInterfaceModule::ConsoleRestartServer),
 		ECVF_Default);
+
+	ConsoleCmdExportCommandManifest = IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("UeAgentInterface.ExportCommandManifest"),
+		TEXT("Export the current process command registry for SDK generation."),
+		FConsoleCommandDelegate::CreateRaw(
+			this,
+			&FUeAgentInterfaceModule::ConsoleExportCommandManifest),
+		ECVF_Default);
 }
 
 void FUeAgentInterfaceModule::UnregisterConsoleCommands()
@@ -399,6 +478,13 @@ void FUeAgentInterfaceModule::UnregisterConsoleCommands()
 	{
 		IConsoleManager::Get().UnregisterConsoleObject(ConsoleCmdRestart, /*bKeepState*/ false);
 		ConsoleCmdRestart = nullptr;
+	}
+	if (ConsoleCmdExportCommandManifest)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(
+			ConsoleCmdExportCommandManifest,
+			/*bKeepState*/ false);
+		ConsoleCmdExportCommandManifest = nullptr;
 	}
 }
 
@@ -485,7 +571,7 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 				ESPMode::ThreadSafe>();
 	UE::UAI::DomainCapability::FDomainCapabilityAuthorities
 		DomainCapabilityPreflight;
-	FString DomainCapabilityError;
+	UE::UAI::Contract::FDiagnostic DomainCapabilityError;
 	if (!UE::UAI::DomainCapability::
 		TryGetOrBuildProcessDomainCapabilityAuthorities(
 			DomainCapabilityPreflight,
@@ -493,7 +579,7 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 	{
 		FUeAgentInterfaceLogger::Log(
 			TEXT("StartServerInternal: domain capability preflight failed error=%s"),
-			*DomainCapabilityError);
+			*DomainCapabilityError.ToPublicDetail());
 		return false;
 	}
 	TSharedPtr<
@@ -503,26 +589,16 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 	TSharedPtr<
 		const UE::UAI::CommandEdge::FUeAgentExactCommandDispatch>
 		ActiveDispatch = DomainCapabilityPreflight.GetCommandDispatch();
-	FString ActiveCompositionError;
+	UE::UAI::Contract::FDiagnostic ActiveCompositionError;
 	if (!ActiveRegistry.IsValid() || !ActiveDispatch.IsValid())
 	{
 		FUeAgentInterfaceLogger::Log(
 			TEXT("StartServerInternal: domain capability activation did not publish the process command authority"));
 		return false;
 	}
-	if (!UE::UAI::CommandRegistry::FUeAgentActiveCommandManifest::
-		TryVerify(
-			ActiveRegistry.ToSharedRef(),
-			UE::UAI::CommandContract::GetUaiCommandManifestPluginVersion(),
-			UE::UAI::CommandContract::GetUaiCommandManifestBuildId(),
-			UE::UAI::CommandContract::GetDefaultCommandManifestPath(),
-			ActiveCompositionError))
-	{
-		FUeAgentInterfaceLogger::Log(
-			TEXT("StartServerInternal: active command manifest verification failed error=%s"),
-			*ActiveCompositionError);
-		return false;
-	}
+	// The process registry and dispatch above are the runtime authority. The
+	// disk manifest is an SDK projection; stale generated files must not prevent
+	// an otherwise valid service from starting.
 	TSharedPtr<
 		IUeAgentTransportRequestHandler,
 		ESPMode::ThreadSafe> QueryIngress;
@@ -540,7 +616,7 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 	{
 		FUeAgentInterfaceLogger::Log(
 			TEXT("StartServerInternal: query ingress failed error=%s"),
-			*ActiveCompositionError);
+			*ActiveCompositionError.ToPublicDetail());
 		return false;
 	}
 	for (const UE::UAI::CommandContract::FUeAgentFrozenCommandContract&
@@ -553,7 +629,7 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 			*Contract.GetPublicOwner());
 	}
 	TUniquePtr<FUeAgentCommandService> NewCommandService;
-	FString CommandServiceError;
+	UE::UAI::Contract::FDiagnostic CommandServiceError;
 	if (!FUeAgentCommandService::TryCreate(
 			QueryIngress.ToSharedRef(),
 			ContextInvalidator,
@@ -562,7 +638,7 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 	{
 		FUeAgentInterfaceLogger::Log(
 			TEXT("StartServerInternal: command service failed error=%s"),
-			*CommandServiceError);
+			*CommandServiceError.ToPublicDetail());
 		return false;
 	}
 
@@ -579,13 +655,12 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 	AdapterConfig.AuthToken = Settings->AuthToken;
 	AdapterConfig.Channel = TEXT("uai.command.v1");
 	AdapterConfig.PrincipalSubject = TEXT("uai-local-authenticated-client");
-	AdapterConfig.MaxFrameBytes = 4 * 1024 * 1024;
 
 	const TSharedRef<
-		FUeAgentEngineHttpRouteHost,
+		FUeAgentSocketHttpRouteHost,
 		ESPMode::ThreadSafe> RouteHost =
 		MakeShared<
-			FUeAgentEngineHttpRouteHost,
+			FUeAgentSocketHttpRouteHost,
 			ESPMode::ThreadSafe>(static_cast<uint32>(Settings->Port));
 	TUniquePtr<IUeAgentNetworkServerControl> ServerControl =
 		MakeUnique<FUeAgentHttpTransportAdapter>(
@@ -598,14 +673,10 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 	TransportConfig.Capabilities.bOrdered = true;
 	TransportConfig.Capabilities.bReliable = true;
 	TransportConfig.Capabilities.bPreservesMessageBoundaries = true;
-	TransportConfig.Capabilities.MaxFrameBytes =
-		AdapterConfig.MaxFrameBytes;
 	TransportConfig.Capabilities.bRequestReply = true;
 	TransportConfig.Requirements.bRequireOrdered = true;
 	TransportConfig.Requirements.bRequireReliable = true;
 	TransportConfig.Requirements.bRequireMessageBoundaries = true;
-	TransportConfig.Requirements.MaxFrameBytes =
-		AdapterConfig.MaxFrameBytes;
 	TransportConfig.Requirements.bRequireRequestReply = true;
 
 	TUniquePtr<FUeAgentTransportService> NewTransportService;
@@ -634,6 +705,45 @@ bool FUeAgentInterfaceModule::StartServerInternal()
 		*TransportService->GetIdentity().InstanceId,
 		*ActiveRegistry->GetRegistryHash());
 	return true;
+}
+
+void FUeAgentInterfaceModule::ConsoleExportCommandManifest()
+{
+	using namespace UE::UAI::CommandContract;
+	using namespace UE::UAI::CommandRegistry;
+
+	UE::UAI::DomainCapability::FDomainCapabilityAuthorities Authorities;
+	UE::UAI::Contract::FDiagnostic Error;
+	if (!UE::UAI::DomainCapability::TryGetOrBuildProcessDomainCapabilityAuthorities(
+			Authorities,
+			Error))
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("ExportCommandManifest: command authority unavailable error=%s"),
+			*Error.ToPublicDetail());
+		return;
+	}
+
+	const TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry =
+		Authorities.GetCommandRegistry();
+	if (!Registry.IsValid()
+		|| !FUeAgentActiveCommandManifest::TryWrite(
+			Registry.ToSharedRef(),
+			GetUaiCommandManifestPluginVersion(),
+			GetUaiCommandManifestBuildId(),
+			GetDefaultCommandManifestPath(),
+			Error))
+	{
+		FUeAgentInterfaceLogger::Log(
+			TEXT("ExportCommandManifest: write failed error=%s"),
+			*Error.ToPublicDetail());
+		return;
+	}
+
+	FUeAgentInterfaceLogger::Log(
+		TEXT("ExportCommandManifest: ok path=%s registry=%s"),
+		*GetDefaultCommandManifestPath(),
+		*Registry->GetRegistryHash());
 }
 
 void FUeAgentInterfaceModule::HandleEditorMapOpened(

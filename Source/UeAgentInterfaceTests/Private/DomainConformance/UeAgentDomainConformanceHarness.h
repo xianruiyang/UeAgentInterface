@@ -43,7 +43,6 @@ namespace UE::UAI::DomainConformance
 		LongRunningTerminal,
 		TransientStateRecovery,
 		GraphLayout,
-		LegacyExit,
 		PublicRoute,
 	};
 
@@ -64,7 +63,6 @@ namespace UE::UAI::DomainConformance
 		bool bIndependentReadback = false;
 		bool bPersistReload = false;
 		bool bFailureCleanup = false;
-		bool bLegacyExit = false;
 
 		bool IsValid() const;
 	};

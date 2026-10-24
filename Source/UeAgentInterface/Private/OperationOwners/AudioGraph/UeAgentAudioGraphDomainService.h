@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
 namespace UE::UAI::OperationOwners::AudioGraph
@@ -21,12 +23,7 @@ namespace UE::UAI::OperationOwners::AudioGraph
 		bool bReadOnly = false;
 	};
 
-	struct UEAGENTINTERFACE_API FAudioGraphCandidateCommandError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FAudioGraphCandidateCommandError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentAudioGraphCandidateCommandService
 	{
@@ -45,5 +42,5 @@ namespace UE::UAI::OperationOwners::AudioGraph
 
 	UEAGENTINTERFACE_API bool TryCreateProductionAudioGraphCandidateCommandService(
 		TSharedPtr<IUeAgentAudioGraphCandidateCommandService>& OutService,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

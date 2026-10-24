@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/ExecutionContext/UeAgentFrozenExecutionContext.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
@@ -7,11 +9,7 @@
 
 namespace UE::UAI::SemanticContract
 {
-	struct UEAGENTINTERFACE_API FUeAgentStateValueContextError
-	{
-		FString Code;
-		FString Detail;
-	};
+	using FUeAgentStateValueContextError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentStateValueContextPort
 	{

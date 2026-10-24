@@ -1,9 +1,9 @@
 #include "DomainAdapters/ExternalImport/Localization/UeAgentLocalizationImportProvider.h"
+#include "Dom/JsonValue.h"
 
 #include "Commandlets/CommandletHelpers.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
-#include "HAL/PlatformTime.h"
 #include "Internationalization/Internationalization.h"
 #include "Internationalization/TextLocalizationManager.h"
 #include "LocalizationConfigurationScript.h"
@@ -21,49 +21,114 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 {
 	namespace
 	{
-		constexpr int64 MaxOwnedFileBytes = 64LL * 1024LL * 1024LL;
-		constexpr double CommandletTimeoutSeconds = 300.0;
-		constexpr int32 MaxCommandletDetailCharacters = 8192;
 
-		void SetError(
-			FLocalizationImportError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		Contract::FDiagnostic NativeValueFailure(const TCHAR* Code, const FString& Reason,
+			const FString& Target, const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected, const FString& Detail = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("external_import"), Detail);
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.TargetPath = Target;
+			Diagnostic.PropertyPath = Field;
+			Diagnostic.ActualValuePresent = Actual.IsValid();
+			Diagnostic.ExpectedValuePresent = Expected.IsValid();
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			return Diagnostic;
 		}
 
-		FString HashBytes(const uint8* Data, const int64 Size)
+		Contract::FDiagnostic NativeConditionFailure(const TCHAR* Code, const FString& Reason,
+			const FString& Target, const FString& Field, const bool Actual, const bool Expected,
+			const FString& Detail = FString())
 		{
+			return NativeValueFailure(Code, Reason, Target, Field, MakeShared<FJsonValueBoolean>(Actual),
+				MakeShared<FJsonValueBoolean>(Expected), Detail);
+		}
+
+		Contract::FDiagnostic NativeFileFailure(const TCHAR* Code, const FString& Reason, const FString& Target,
+			const FString& Filename, const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected, const FString& Detail = FString())
+		{
+			auto Diagnostic = NativeValueFailure(Code, Reason, Target, Field, MoveTemp(Actual), MoveTemp(Expected), Detail);
+			FString PublicFilename = Filename;
+			FPaths::MakePathRelativeTo(PublicFilename, *FPaths::ProjectDir());
+			Diagnostic.Source.SourceFile = PublicFilename;
+			return Diagnostic;
+		}
+
+		Contract::FDiagnostic RevisionMismatch(const TCHAR* Code, const FString& Reason, const FString& Target,
+			const FString& Filename, const FString& Actual, const FString& Expected)
+		{
+			auto Diagnostic = NativeFileFailure(Code, Reason, Target, Filename, TEXT("file_revision_matches"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Actual);
+			Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(Expected);
+			return Diagnostic;
+		}
+
+		void SetError(FLocalizationImportError& OutError, Contract::FDiagnostic Diagnostic, const FString& Target)
+		{
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.Stage.IsEmpty()) OutError.Stage = TEXT("external_import");
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target;
+		}
+
+		bool TryHashBytes(const uint8* Data, const int64 Size, FString& OutHash,
+			FLocalizationImportError& OutError, const FString& Target)
+		{
+			OutHash.Reset();
 			FSHA256Signature Signature{};
 			const uint8 Empty = 0;
-			if (!SHA256(
-					Size > 0 ? Data : &Empty,
-					static_cast<size_t>(Size),
-					Signature.Signature))
+			if (!SHA256(Size > 0 ? Data : &Empty, static_cast<size_t>(Size), Signature.Signature))
 			{
-				return FString();
+				OutError = NativeConditionFailure(TEXT("localization_import_sha256_failed"),
+					TEXT("OpenSSL could not calculate the localization SHA256 value."), Target, TEXT("sha256_calculated"), false, true);
+				return false;
 			}
-			return TEXT("sha256:") + Signature.ToString().ToLower();
+			OutHash = TEXT("sha256:") + Signature.ToString().ToLower();
+			return true;
 		}
 
-		FString HashUtf8(const FString& Value)
+		bool TryHashUtf8(const FString& Value, FString& OutHash, FLocalizationImportError& OutError, const FString& Target)
 		{
 			const FTCHARToUTF8 Utf8(*Value);
-			return HashBytes(
-				reinterpret_cast<const uint8*>(Utf8.Get()),
-				Utf8.Length());
+			return TryHashBytes(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length(), OutHash, OutError, Target);
 		}
 
-		FString HashFile(const FString& Filename)
+		bool TryHashFile(const FString& Filename, FString& OutHash, FLocalizationImportError& OutError, const FString& Target)
 		{
 			TArray<uint8> Bytes;
-			return FFileHelper::LoadFileToArray(Bytes, *Filename)
-				? HashBytes(Bytes.GetData(), Bytes.Num())
-				: FString();
+			if (!FFileHelper::LoadFileToArray(Bytes, *Filename))
+			{
+				OutHash.Reset();
+				OutError = NativeFileFailure(TEXT("localization_import_file_read_failed"),
+					TEXT("The localization file could not be read for SHA256 calculation."), Target, Filename,
+					TEXT("file_read_succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Filename);
+				return false;
+			}
+			if (!TryHashBytes(Bytes.GetData(), Bytes.Num(), OutHash, OutError, Target))
+			{
+				FString PublicFilename = Filename;
+				FPaths::MakePathRelativeTo(PublicFilename, *FPaths::ProjectDir());
+				OutError.Source.SourceFile = PublicFilename;
+				OutError.InternalContext = Filename;
+				return false;
+			}
+			return true;
+		}
+
+		bool CheckFileRevision(const FString& Filename, const FString& Expected, FLocalizationImportError& OutError,
+			const FString& Target, const TCHAR* Code, const TCHAR* Reason)
+		{
+			FString Current;
+			if (!TryHashFile(Filename, Current, OutError, Target))
+			{
+				OutError = Contract::FDiagnostic::WrapFailure(Code, OutError);
+				return false;
+			}
+			if (Current == Expected) return true;
+			OutError = RevisionMismatch(Code, Reason, Target, Filename, Current, Expected);
+			return false;
 		}
 
 		bool IsSafeSegment(const FString& Value)
@@ -92,40 +157,52 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 			SourceRef.TrimStartAndEndInline();
 			if (SourceRef.IsEmpty())
 			{
-				SetError(OutError, TEXT("localization_import_source_required"));
+				OutError = NativeValueFailure(TEXT("localization_import_source_required"),
+					TEXT("A localization source file is required."), FString(), TEXT("source_ref"),
+					MakeShared<FJsonValueString>(SourceRef), MakeShared<FJsonValueString>(TEXT("nonempty PO source file path")));
+				OutError.PropertyPath = TEXT("source_ref");
+				OutError.PublicMessage = TEXT("A localization source file is required.");
 				return false;
 			}
 			OutSource = FPaths::IsRelative(SourceRef)
 				? FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), SourceRef)
 				: FPaths::ConvertRelativePathToFull(SourceRef);
 			FPaths::NormalizeFilename(OutSource);
+			FString PublicSource = OutSource;
+			FPaths::MakePathRelativeTo(PublicSource, *FPaths::ProjectDir());
 			if (!FPaths::FileExists(OutSource))
 			{
-				SetError(
-					OutError,
-					TEXT("localization_import_source_not_found"),
-					OutSource);
+				OutError = NativeConditionFailure(TEXT("localization_import_source_not_found"),
+					TEXT("The localization source file does not exist."), FString(), TEXT("source_file_exists"), false, true);
+				OutError.Source.SourceFile = PublicSource;
+				OutError.PublicMessage = TEXT("The localization source file does not exist.");
 				return false;
 			}
 			if (!FPaths::GetExtension(OutSource).Equals(
 					TEXT("po"),
 					ESearchCase::IgnoreCase))
 			{
-				SetError(
-					OutError,
-					TEXT("localization_import_source_extension_invalid"),
-					OutSource,
-					TEXT("expected .po"));
+				OutError = NativeValueFailure(TEXT("localization_import_source_extension_invalid"),
+					TEXT("Localization import requires a PO source file."), FString(), TEXT("source_extension"),
+					MakeShared<FJsonValueString>(FPaths::GetExtension(OutSource)), MakeShared<FJsonValueString>(TEXT("po")));
+				OutError.Source.SourceFile = PublicSource;
+				OutError.PropertyPath = TEXT("source_ref");
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("po"));
+				OutError.ActualValue = MakeShared<FJsonValueString>(FPaths::GetExtension(OutSource));
+				OutError.PublicMessage = TEXT("Localization import requires a PO source file.");
 				return false;
 			}
 			const int64 Size = IFileManager::Get().FileSize(*OutSource);
-			if (Size < 0 || Size > MaxOwnedFileBytes)
+			if (Size < 0 || Size > MAX_int32)
 			{
-				SetError(
-					OutError,
-					TEXT("localization_import_source_size_invalid"),
-					OutSource,
-					FString::Printf(TEXT("size=%lld"), Size));
+				OutError = NativeValueFailure(TEXT("localization_import_source_size_invalid"),
+					Size < 0 ? TEXT("The localization source file size could not be read.") : TEXT("The localization source exceeds the supported byte count."),
+					FString(), TEXT("file_size_bytes"), MakeShared<FJsonValueNumberString>(LexToString(Size)),
+					MakeShared<FJsonValueString>(TEXT("0 <= file size <= 2147483647")));
+				OutError.Source.SourceFile = PublicSource;
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("readable file no larger than 2147483647 bytes"));
+				OutError.ActualValue = MakeShared<FJsonValueNumberString>(LexToString(Size));
+				OutError.PublicMessage = Size < 0 ? TEXT("The source file size could not be read.") : TEXT("The localization source exceeds the importer's size limit.");
 				return false;
 			}
 			return true;
@@ -134,21 +211,27 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 		bool TryCultureFromPo(
 			const FString& Source,
 			FString& OutCulture,
-			FLocalizationImportError& OutError)
+			Contract::FSourceLocation& OutCultureSource, FLocalizationImportError& OutError)
 		{
+			FString PublicSource = Source;
+			FPaths::MakePathRelativeTo(PublicSource, *FPaths::ProjectDir());
+			OutCultureSource = {};
+			OutCultureSource.SourceFile = PublicSource;
 			FString Text;
 			if (!FFileHelper::LoadFileToString(Text, *Source))
 			{
-				SetError(
-					OutError,
-					TEXT("localization_import_source_read_failed"),
-					Source);
+				OutError = NativeFileFailure(TEXT("localization_import_source_read_failed"),
+					TEXT("The localization PO source could not be read."), FString(), Source,
+					TEXT("file_read_succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.Source.SourceFile = PublicSource;
 				return false;
 			}
 			TArray<FString> Lines;
 			Text.ParseIntoArrayLines(Lines, false);
-			for (FString Line : Lines)
+			int32 LanguageLine = 0;
+			for (int32 Index = 0; Index < Lines.Num(); ++Index)
 			{
+				FString Line = Lines[Index];
 				Line.TrimStartAndEndInline();
 				Line.RemoveFromStart(TEXT("\""));
 				if (!Line.StartsWith(TEXT("Language:")))
@@ -156,6 +239,8 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 					continue;
 				}
 				OutCulture = Line.Mid(9).TrimStartAndEnd();
+				LanguageLine = Index + 1;
+				OutCultureSource.Line = LanguageLine;
 				OutCulture.RemoveFromEnd(TEXT("\\n\""));
 				OutCulture.RemoveFromEnd(TEXT("\""));
 				OutCulture.TrimStartAndEndInline();
@@ -166,10 +251,17 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				}
 				break;
 			}
-			SetError(
-				OutError,
-				TEXT("localization_import_po_culture_invalid"),
-				Source);
+			OutError = NativeValueFailure(TEXT("localization_import_po_culture_invalid"),
+				LanguageLine > 0 ? TEXT("The PO Language header is not a supported culture.") : TEXT("The PO Language header is missing."),
+				FString(), TEXT("Language"), LanguageLine > 0 ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(OutCulture)) : nullptr,
+				MakeShared<FJsonValueString>(TEXT("culture recognized by Unreal Internationalization")));
+			OutError.Source.SourceFile = PublicSource;
+			OutError.Source.Line = LanguageLine;
+			OutError.PropertyPath = TEXT("Language");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("culture recognized by Unreal Internationalization"));
+			OutError.ActualValuePresent = LanguageLine > 0;
+			if (LanguageLine > 0) OutError.ActualValue = MakeShared<FJsonValueString>(OutCulture);
+			OutError.PublicMessage = LanguageLine > 0 ? TEXT("The PO Language header is not a supported culture.") : TEXT("The PO Language header is missing.");
 			return false;
 		}
 
@@ -202,7 +294,15 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				});
 		}
 
-		void AppendBoundedCommandletOutput(
+		TSharedPtr<FJsonValue> SupportedCultureNames(const ULocalizationTarget& Target)
+		{
+			TArray<TSharedPtr<FJsonValue>> Values;
+			for (const FCultureStatistics& Culture : Target.Settings.SupportedCulturesStatistics)
+				Values.Add(MakeShared<FJsonValueString>(Culture.CultureName));
+			return MakeShared<FJsonValueArray>(MoveTemp(Values));
+		}
+
+		void AppendCommandletOutput(
 			FString& InOutOutput,
 			FString Chunk)
 		{
@@ -211,11 +311,6 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				return;
 			}
 			InOutOutput += MoveTemp(Chunk);
-			if (InOutOutput.Len() > MaxCommandletDetailCharacters)
-			{
-				InOutOutput.RightChopInline(
-					InOutOutput.Len() - MaxCommandletDetailCharacters);
-			}
 		}
 
 		struct FOwnedCommandletProcess final
@@ -236,10 +331,12 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				}
 			}
 
-			bool Launch(const FString& ProcessArguments)
+			bool Launch(const FString& ProcessArguments, FLocalizationImportError& OutError)
 			{
 				if (!FPlatformProcess::CreatePipe(ReadPipe, WritePipe))
 				{
+					OutError = NativeConditionFailure(TEXT("localization_commandlet_pipe_failed"),
+						TEXT("The GatherText commandlet output pipe could not be created."), FString(), TEXT("commandlet_output_pipe_available"), false, true);
 					return false;
 				}
 				Handle = FPlatformProcess::CreateProc(
@@ -252,7 +349,10 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 					0,
 					nullptr,
 					WritePipe);
-				return Handle.IsValid();
+				if (Handle.IsValid()) return true;
+				OutError = NativeConditionFailure(TEXT("localization_commandlet_launch_failed"),
+					TEXT("The native process launcher did not create a GatherText commandlet process."), FString(), TEXT("commandlet_process_handle_valid"), false, true, ProcessArguments);
+				return false;
 			}
 
 			void* ReadPipe = nullptr;
@@ -263,9 +363,10 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 		bool RunLocalizationCommandlet(
 			const FString& ConfigPath,
 			const bool bUseProjectFile,
-			FString& OutDetail)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			OutDetail.Reset();
+			OutError.Reset();
+            FString NativeOutput;
 			const FString RelativeConfig =
 				LocalizationConfigurationScript::MakePathRelativeForCommandletProcess(
 					ConfigPath,
@@ -297,49 +398,35 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 					bUseProjectFile ? *ProjectFile : nullptr,
 					*AdditionalArguments);
 			FOwnedCommandletProcess Process;
-			if (!Process.Launch(ProcessArguments))
+			if (!Process.Launch(ProcessArguments, OutError))
 			{
-				OutDetail = TEXT("could not launch GatherText commandlet");
 				return false;
 			}
 
-			const double Deadline =
-				FPlatformTime::Seconds() + CommandletTimeoutSeconds;
 			while (FPlatformProcess::IsProcRunning(Process.Handle))
 			{
-				AppendBoundedCommandletOutput(
-					OutDetail,
+				AppendCommandletOutput(
+					NativeOutput,
 					FPlatformProcess::ReadPipe(Process.ReadPipe));
-				if (FPlatformTime::Seconds() >= Deadline)
-				{
-					FPlatformProcess::TerminateProc(Process.Handle, true);
-					AppendBoundedCommandletOutput(
-						OutDetail,
-						TEXT("\nGatherText commandlet exceeded the 300 second bound"));
-					return false;
-				}
 				FPlatformProcess::Sleep(0.01f);
 			}
-			AppendBoundedCommandletOutput(
-				OutDetail,
+			AppendCommandletOutput(
+				NativeOutput,
 				FPlatformProcess::ReadPipe(Process.ReadPipe));
 			int32 ReturnCode = INDEX_NONE;
 			if (!FPlatformProcess::GetProcReturnCode(
 					Process.Handle,
 					&ReturnCode))
 			{
-				AppendBoundedCommandletOutput(
-					OutDetail,
-					TEXT("\nGatherText commandlet return code was unavailable"));
+				OutError = NativeConditionFailure(TEXT("localization_commandlet_exit_unavailable"),
+					TEXT("The GatherText commandlet return code was unavailable."), FString(), TEXT("commandlet_exit_code_available"), false, true, NativeOutput);
 				return false;
 			}
 			if (ReturnCode != 0)
 			{
-				AppendBoundedCommandletOutput(
-					OutDetail,
-					FString::Printf(
-						TEXT("\nGatherText commandlet returned %d"),
-						ReturnCode));
+				OutError = NativeValueFailure(TEXT("localization_commandlet_failed"),
+					TEXT("The GatherText commandlet failed."), FString(), TEXT("commandlet_exit_code"),
+					MakeShared<FJsonValueNumber>(ReturnCode), MakeShared<FJsonValueNumber>(0), NativeOutput);
 				return false;
 			}
 			return true;
@@ -349,14 +436,15 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 			FLocalizationConfigurationScript Script,
 			const FString& DefaultConfigPath,
 			const bool bUseProjectFile,
-			FString& OutDetail)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			IFileManager& Files = IFileManager::Get();
 			const FString ConfigDirectory = FPaths::GetPath(DefaultConfigPath);
 			if (!Files.MakeDirectory(*ConfigDirectory, true)
 				&& !Files.DirectoryExists(*ConfigDirectory))
 			{
-				OutDetail = TEXT("could not create localization config directory");
+				OutError = NativeConditionFailure(TEXT("localization_config_directory_failed"),
+					TEXT("Could not create the localization config directory."), FString(), TEXT("config_directory_available"), false, true, ConfigDirectory);
 				return false;
 			}
 			const FString TemporaryConfig = FPaths::CreateTempFilename(
@@ -365,13 +453,14 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				*FPaths::GetExtension(DefaultConfigPath, true));
 			if (!Script.Write(TemporaryConfig))
 			{
-				OutDetail = TEXT("could not write temporary localization config");
+				OutError = NativeConditionFailure(TEXT("localization_config_write_failed"),
+					TEXT("Could not write the temporary localization config."), FString(), TEXT("temporary_config_written"), false, true, TemporaryConfig);
 				return false;
 			}
 			const bool bSucceeded = RunLocalizationCommandlet(
 				TemporaryConfig,
 				bUseProjectFile,
-				OutDetail);
+				OutError);
 			const bool bDeleted = Files.Delete(
 				*TemporaryConfig,
 				false,
@@ -379,9 +468,10 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				true);
 			if (!bDeleted && FPaths::FileExists(TemporaryConfig))
 			{
-				AppendBoundedCommandletOutput(
-					OutDetail,
-					TEXT("\ntemporary localization config cleanup failed"));
+				auto CleanupError = NativeConditionFailure(TEXT("localization_config_cleanup_failed"),
+					TEXT("The temporary localization config could not be removed."), FString(), TEXT("temporary_config_removed"), false, true, TemporaryConfig);
+				CleanupError.Stage = TEXT("cleanup");
+				OutError.Append(CleanupError);
 				return false;
 			}
 			return bSucceeded;
@@ -394,7 +484,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 			FString Revision;
 			bool bExisted = false;
 
-			bool Capture(const FString& InPath)
+			bool Capture(const FString& InPath, FLocalizationImportError& OutError, const FString& Target)
 			{
 				Path = InPath;
 				bExisted = FPaths::FileExists(Path);
@@ -405,32 +495,63 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 					return true;
 				}
 				const int64 Size = IFileManager::Get().FileSize(*Path);
-				if (Size < 0 || Size > MaxOwnedFileBytes
-					|| !FFileHelper::LoadFileToArray(Bytes, *Path))
+				if (Size < 0 || Size > MAX_int32)
 				{
+					OutError = NativeFileFailure(TEXT("localization_import_snapshot_size_invalid"),
+						Size < 0 ? TEXT("The localization backup file size could not be read.") : TEXT("The localization backup file exceeds the supported byte count."),
+						Target, Path, TEXT("file_size_bytes"), MakeShared<FJsonValueNumberString>(LexToString(Size)),
+						MakeShared<FJsonValueString>(TEXT("0 <= file size <= 2147483647")));
 					return false;
 				}
-				Revision = HashBytes(Bytes.GetData(), Bytes.Num());
-				return !Revision.IsEmpty();
+				if (!FFileHelper::LoadFileToArray(Bytes, *Path))
+				{
+					OutError = NativeFileFailure(TEXT("localization_import_snapshot_read_failed"),
+						TEXT("The localization file could not be read into its rollback snapshot."), Target, Path, TEXT("file_read_succeeded"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return false;
+				}
+				if (!TryHashBytes(Bytes.GetData(), Bytes.Num(), Revision, OutError, Target))
+				{
+					FString PublicPath = Path;
+					FPaths::MakePathRelativeTo(PublicPath, *FPaths::ProjectDir());
+					OutError.Source.SourceFile = PublicPath;
+					return false;
+				}
+				return true;
 			}
 
-			bool MatchesCurrent() const
+			bool CheckCurrent(FLocalizationImportError& OutError, const FString& Target) const
 			{
-				return bExisted
-					? HashFile(Path) == Revision
-					: !FPaths::FileExists(Path);
+				if (bExisted)
+					return CheckFileRevision(Path, Revision, OutError, Target, TEXT("localization_import_version_conflict"),
+						TEXT("A tracked localization file changed after its snapshot."));
+				if (!FPaths::FileExists(Path)) return true;
+				OutError = NativeFileFailure(TEXT("localization_import_version_conflict"),
+					TEXT("A previously absent localization file now exists."), Target, Path, TEXT("file_present"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+				return false;
 			}
 
-			bool Restore() const
+			bool Restore(FLocalizationImportError& OutError, const FString& Target) const
 			{
 				if (!bExisted)
 				{
-					return !FPaths::FileExists(Path)
-						|| IFileManager::Get().Delete(*Path, false, true, true);
+					if (!FPaths::FileExists(Path) || IFileManager::Get().Delete(*Path, false, true, true)) return true;
+					OutError = NativeFileFailure(TEXT("localization_import_rollback_delete_failed"),
+						TEXT("A localization file created by the import could not be removed during rollback."), Target, Path,
+						TEXT("file_removed"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return false;
 				}
 				IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
-				return FFileHelper::SaveArrayToFile(Bytes, *Path)
-					&& HashFile(Path) == Revision;
+				if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
+				{
+					OutError = NativeFileFailure(TEXT("localization_import_rollback_write_failed"),
+						TEXT("The localization rollback snapshot could not be written back to its original file."), Target, Path,
+						TEXT("file_write_succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return false;
+				}
+				return CheckFileRevision(Path, Revision, OutError, Target, TEXT("localization_import_rollback_revision_mismatch"),
+					TEXT("The restored localization file does not match its rollback snapshot."));
 			}
 		};
 
@@ -485,33 +606,28 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				return ExpectedRevision;
 			}
 
-			virtual bool CheckPreExecute(
-				FLocalizationImportError& OutError) override
+			virtual bool CheckPreExecute(FLocalizationImportError& OutError) override
 			{
 				Target = FindProjectTarget(Spec.TargetRef);
-				if (!Target || !SupportsCulture(*Target, Culture))
+				if (!Target)
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_version_conflict"),
-						TargetIdentity,
-						TEXT("target or culture changed before execution"));
+					OutError = NativeConditionFailure(TEXT("localization_import_version_conflict"),
+						TEXT("The localization target is unavailable before execution."), TargetIdentity, TEXT("localization_target_available"), false, true);
 					return false;
 				}
-				if (HashFile(Source) != SourceSha256
-					|| HashFile(ManifestPath) != ManifestRevision
-					|| Snapshots.ContainsByPredicate(
-						[](const FFileSnapshot& Snapshot)
-						{
-							return !Snapshot.MatchesCurrent();
-						}))
+				if (!SupportsCulture(*Target, Culture))
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_version_conflict"),
-						TargetIdentity);
+					OutError = NativeValueFailure(TEXT("localization_import_version_conflict"),
+						TEXT("The localization target no longer supports the requested culture."), TargetIdentity, TEXT("culture"),
+						MakeShared<FJsonValueString>(Culture), SupportedCultureNames(*Target));
 					return false;
 				}
+				if (!CheckFileRevision(Source, SourceSha256, OutError, TargetIdentity, TEXT("localization_import_version_conflict"),
+						TEXT("The localization source file changed before execution."))
+					|| !CheckFileRevision(ManifestPath, ManifestRevision, OutError, TargetIdentity, TEXT("localization_import_version_conflict"),
+						TEXT("The localization manifest changed before execution."))) return false;
+				for (const FFileSnapshot& Snapshot : Snapshots)
+					if (!Snapshot.CheckCurrent(OutError, TargetIdentity)) return false;
 				return true;
 			}
 
@@ -519,28 +635,20 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 			{
 				IFileManager& Files = IFileManager::Get();
 				Files.MakeDirectory(*FPaths::GetPath(PersistedPoPath), true);
-				if (Files.Copy(*StagingPath, *Source, true, true) != COPY_OK)
+				const int32 CopyResult = Files.Copy(*StagingPath, *Source, true, true);
+				if (CopyResult != COPY_OK)
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_stage_failed"),
-						Source,
-						StagingPath);
+					OutError = NativeFileFailure(TEXT("localization_import_stage_failed"),
+						TEXT("The localization source could not be copied to its staging file."), TargetIdentity, Source, TEXT("native_copy_result"),
+						MakeShared<FJsonValueNumber>(CopyResult), MakeShared<FJsonValueNumber>(COPY_OK), StagingPath);
 					return false;
 				}
-				if (!Files.Move(
-						*PersistedPoPath,
-						*StagingPath,
-						true,
-						true,
-						false,
-						true))
+				if (!Files.Move(*PersistedPoPath, *StagingPath, true, true, false, true))
 				{
+					OutError = NativeFileFailure(TEXT("localization_import_publish_failed"),
+						TEXT("The staged localization PO file could not be moved to its persisted destination."), TargetIdentity, PersistedPoPath,
+						TEXT("staged_file_published"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), StagingPath);
 					DeleteStaging();
-					SetError(
-						OutError,
-						TEXT("localization_import_publish_failed"),
-						PersistedPoPath);
 					return false;
 				}
 				bMutationStarted = true;
@@ -556,15 +664,13 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 			{
 				if (!Target)
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_target_missing"),
-						TargetIdentity);
+					OutError = NativeConditionFailure(TEXT("localization_import_target_missing"),
+						TEXT("The localization target is unavailable during settle."), TargetIdentity, TEXT("localization_target_available"), false, true);
 					return false;
 				}
 				const bool bUseProjectFile =
 					!Target->IsMemberOfEngineTargetSet();
-				FString CommandletDetail;
+				UE::UAI::Contract::FDiagnostic CommandletError;
 				if (!WriteAndRunLocalizationCommandlet(
 						LocalizationConfigurationScript::GenerateImportTextConfigFile(
 							Target,
@@ -574,17 +680,13 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 							Target,
 							TOptional<FString>(Culture)),
 						bUseProjectFile,
-						CommandletDetail))
+						CommandletError))
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_native_import_failed"),
-						TargetIdentity,
-						CommandletDetail);
+					SetError(OutError, CommandletError, TargetIdentity);
 					return false;
 				}
 				bFormalImporterCompleted = true;
-				CommandletDetail.Reset();
+				CommandletError.Reset();
 				if (!WriteAndRunLocalizationCommandlet(
 						LocalizationConfigurationScript::GenerateCompileTextConfigFile(
 							Target,
@@ -593,13 +695,9 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 							Target,
 							TOptional<FString>(Culture)),
 						bUseProjectFile,
-						CommandletDetail))
+						CommandletError))
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_compile_failed"),
-						TargetIdentity,
-						CommandletDetail);
+					SetError(OutError, CommandletError, TargetIdentity);
 					return false;
 				}
 				bFormalCompilerCompleted = true;
@@ -613,32 +711,51 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 					RefreshRevisionAfter != RefreshRevisionBefore;
 				if (!bRefreshCompleted)
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_refresh_failed"),
-						TargetIdentity);
+					OutError = NativeConditionFailure(TEXT("localization_import_refresh_failed"),
+						TEXT("The localization resource refresh did not advance the text revision."), TargetIdentity, TEXT("text_revision_advanced"), false, true);
+					OutError.ActualEvidence = MakeShared<FJsonValueNumber>(RefreshRevisionAfter);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueNumber>(RefreshRevisionBefore);
 					return false;
 				}
 				return true;
 			}
 
-			virtual bool CheckPrePersist(
-				FLocalizationImportError& OutError) override
+			virtual bool CheckPrePersist(FLocalizationImportError& OutError) override
 			{
 				Target = FindProjectTarget(Spec.TargetRef);
-				if (!Target
-					|| !SupportsCulture(*Target, Culture)
-					|| HashFile(PersistedPoPath) != SourceSha256
-					|| !FPaths::FileExists(ArchivePath)
-					|| !FPaths::FileExists(LocResPath)
-					|| !bFormalImporterCompleted
-					|| !bFormalCompilerCompleted
-					|| !bRefreshCompleted)
+				if (!Target)
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_pre_persist_fence_failed"),
-						TargetIdentity);
+					OutError = NativeConditionFailure(TEXT("localization_import_pre_persist_fence_failed"),
+						TEXT("The localization target is unavailable before persistence."), TargetIdentity, TEXT("localization_target_available"), false, true);
+					return false;
+				}
+				if (!SupportsCulture(*Target, Culture))
+				{
+					OutError = NativeValueFailure(TEXT("localization_import_pre_persist_fence_failed"),
+						TEXT("The localization target no longer supports the imported culture."), TargetIdentity, TEXT("culture"),
+						MakeShared<FJsonValueString>(Culture), SupportedCultureNames(*Target));
+					return false;
+				}
+				if (!CheckFileRevision(PersistedPoPath, SourceSha256, OutError, TargetIdentity, TEXT("localization_import_pre_persist_fence_failed"),
+					TEXT("The persisted localization PO differs from the imported source."))) return false;
+				const bool bArchiveExists = FPaths::FileExists(ArchivePath);
+				const bool bLocResExists = bArchiveExists && FPaths::FileExists(LocResPath);
+				if (!bArchiveExists || !bLocResExists)
+				{
+					const bool bArchiveMissing = !bArchiveExists;
+					OutError = NativeFileFailure(TEXT("localization_import_pre_persist_fence_failed"),
+						bArchiveMissing ? TEXT("The localization archive was not produced.") : TEXT("The compiled localization resource was not produced."),
+						TargetIdentity, bArchiveMissing ? ArchivePath : LocResPath, TEXT("file_exists"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return false;
+				}
+				if (!bFormalImporterCompleted || !bFormalCompilerCompleted || !bRefreshCompleted)
+				{
+					OutError = NativeConditionFailure(TEXT("localization_import_pre_persist_fence_failed"),
+						!bFormalImporterCompleted ? TEXT("The formal localization importer has not completed.")
+							: !bFormalCompilerCompleted ? TEXT("The formal localization compiler has not completed.") : TEXT("The localization resource refresh has not completed."),
+						TargetIdentity, !bFormalImporterCompleted ? TEXT("formal_importer_completed")
+							: !bFormalCompilerCompleted ? TEXT("formal_compiler_completed") : TEXT("resource_refresh_completed"), false, true);
 					return false;
 				}
 				return true;
@@ -648,31 +765,23 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				FString& OutPersistenceReceiptId,
 				FLocalizationImportError& OutError) override
 			{
-				PersistedPoSha256 = HashFile(PersistedPoPath);
-				ArchiveSha256 = HashFile(ArchivePath);
-				LocResSha256 = HashFile(LocResPath);
-				if (PersistedPoSha256 != SourceSha256
-					|| ArchiveSha256.IsEmpty()
-					|| LocResSha256.IsEmpty())
+				if (!TryHashFile(PersistedPoPath, PersistedPoSha256, OutError, TargetIdentity)
+					|| !TryHashFile(ArchivePath, ArchiveSha256, OutError, TargetIdentity)
+					|| !TryHashFile(LocResPath, LocResSha256, OutError, TargetIdentity))
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_persist_failed"),
-						TargetIdentity);
+					OutError = Contract::FDiagnostic::WrapFailure(TEXT("localization_import_persist_failed"), OutError);
 					return false;
 				}
-				OutPersistenceReceiptId = HashUtf8(
-					TargetIdentity + TEXT("|")
-					+ PersistedPoSha256 + TEXT("|")
-					+ ArchiveSha256 + TEXT("|")
-					+ LocResSha256 + TEXT("|")
-					+ FString::FromInt(RefreshRevisionAfter));
-				if (OutPersistenceReceiptId.IsEmpty())
+				if (PersistedPoSha256 != SourceSha256)
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_persistence_receipt_missing"),
-						TargetIdentity);
+					OutError = RevisionMismatch(TEXT("localization_import_persist_failed"),
+						TEXT("The persisted localization PO differs from the imported source."), TargetIdentity, PersistedPoPath, PersistedPoSha256, SourceSha256);
+					return false;
+				}
+				if (!TryHashUtf8(TargetIdentity + TEXT("|") + PersistedPoSha256 + TEXT("|") + ArchiveSha256
+					+ TEXT("|") + LocResSha256 + TEXT("|") + FString::FromInt(RefreshRevisionAfter), OutPersistenceReceiptId, OutError, TargetIdentity))
+				{
+					OutError = Contract::FDiagnostic::WrapFailure(TEXT("localization_import_persistence_receipt_missing"), OutError);
 					return false;
 				}
 				return true;
@@ -692,11 +801,11 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				OutReadback.SourceRef = Source;
 				OutReadback.SourceSha256 = SourceSha256;
 				OutReadback.PersistedPoPath = PersistedPoPath;
-				OutReadback.PersistedPoSha256 = HashFile(PersistedPoPath);
+				if (!TryHashFile(PersistedPoPath, OutReadback.PersistedPoSha256, OutError, TargetIdentity)) return false;
 				OutReadback.ArchivePath = ArchivePath;
-				OutReadback.ArchiveSha256 = HashFile(ArchivePath);
+				if (!TryHashFile(ArchivePath, OutReadback.ArchiveSha256, OutError, TargetIdentity)) return false;
 				OutReadback.LocResPath = LocResPath;
-				OutReadback.LocResSha256 = HashFile(LocResPath);
+				if (!TryHashFile(LocResPath, OutReadback.LocResSha256, OutError, TargetIdentity)) return false;
 				OutReadback.CollapseMode = Target
 					? StaticEnum<ELocalizedTextCollapseMode>()->GetNameStringByValue(
 						static_cast<int64>(Target->Settings.ExportSettings.CollapseMode))
@@ -725,10 +834,30 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 					&& OutReadback.bRefreshCompleted;
 				if (!bEquivalent)
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_readback_mismatch"),
-						TargetIdentity);
+					if (!OutReadback.bTargetResolved)
+					{
+						OutError = !Target ? NativeConditionFailure(TEXT("localization_import_readback_mismatch"),
+							TEXT("The localization target is unavailable during readback."), TargetIdentity, TEXT("localization_target_available"), false, true)
+							: NativeValueFailure(TEXT("localization_import_readback_mismatch"),
+								TEXT("The localization target no longer supports the imported culture."), TargetIdentity, TEXT("culture"),
+								MakeShared<FJsonValueString>(Culture), SupportedCultureNames(*Target));
+					}
+					else if (OutReadback.PersistedPoSha256 != SourceSha256)
+						OutError = RevisionMismatch(TEXT("localization_import_readback_mismatch"),
+							TEXT("The localization PO changed before readback."), TargetIdentity, PersistedPoPath, OutReadback.PersistedPoSha256, SourceSha256);
+					else if (OutReadback.ArchiveSha256 != ArchiveSha256)
+						OutError = RevisionMismatch(TEXT("localization_import_readback_mismatch"),
+							TEXT("The localization archive changed before readback."), TargetIdentity, ArchivePath, OutReadback.ArchiveSha256, ArchiveSha256);
+					else if (OutReadback.LocResSha256 != LocResSha256)
+						OutError = RevisionMismatch(TEXT("localization_import_readback_mismatch"),
+							TEXT("The compiled localization resource changed before readback."), TargetIdentity, LocResPath, OutReadback.LocResSha256, LocResSha256);
+					else
+						OutError = NativeConditionFailure(TEXT("localization_import_readback_mismatch"),
+							!OutReadback.bFormalImporterCompleted ? TEXT("Readback did not confirm completion of the formal localization importer.")
+								: !OutReadback.bFormalCompilerCompleted ? TEXT("Readback did not confirm completion of the formal localization compiler.")
+								: TEXT("Readback did not confirm advancement of the localization text revision."),
+							TargetIdentity, !OutReadback.bFormalImporterCompleted ? TEXT("formal_importer_completed")
+								: !OutReadback.bFormalCompilerCompleted ? TEXT("formal_compiler_completed") : TEXT("text_revision_advanced"), false, true);
 					return false;
 				}
 				return true;
@@ -738,36 +867,37 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				bool& bOutConfirmed,
 				FLocalizationImportError& OutError) override
 			{
+				OutError.Reset();
 				DeleteStaging();
 				bool bRestored = true;
 				for (int32 Index = Snapshots.Num() - 1; Index >= 0; --Index)
 				{
-					bRestored &= Snapshots[Index].Restore();
+					FLocalizationImportError RestoreError;
+					if (!Snapshots[Index].Restore(RestoreError, TargetIdentity))
+					{
+						bRestored = false;
+						OutError.Append(RestoreError);
+					}
 				}
 				Target = FindProjectTarget(Spec.TargetRef);
-				if (Target)
-				{
-					Target->UpdateWordCountsFromCSV();
-				}
-				FTextLocalizationManager& Manager =
-					FTextLocalizationManager::Get();
+				if (Target) Target->UpdateWordCountsFromCSV();
+				FTextLocalizationManager& Manager = FTextLocalizationManager::Get();
 				Manager.RefreshResources();
 				Manager.WaitForAsyncTasks();
-				bOutConfirmed = bRestored
-					&& Target
-					&& SupportsCulture(*Target, Culture)
-					&& Snapshots.FindByPredicate(
-						[](const FFileSnapshot& Snapshot)
-						{
-							return !Snapshot.MatchesCurrent();
-						}) == nullptr;
-				if (!bOutConfirmed)
+				bOutConfirmed = bRestored && Target && SupportsCulture(*Target, Culture);
+				if (!bOutConfirmed && OutError.IsEmpty())
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_rollback_unconfirmed"),
-						TargetIdentity);
+					OutError = !Target ? NativeConditionFailure(TEXT("localization_import_rollback_target_invalid"),
+						TEXT("The localization target is unavailable after rollback."), TargetIdentity, TEXT("localization_target_available"), false, true)
+						: NativeValueFailure(TEXT("localization_import_rollback_target_invalid"),
+							TEXT("The localization target no longer supports the restored culture."), TargetIdentity, TEXT("culture"),
+							MakeShared<FJsonValueString>(Culture), SupportedCultureNames(*Target));
 				}
+				if (bOutConfirmed)
+					for (const FFileSnapshot& Snapshot : Snapshots)
+						if (!Snapshot.CheckCurrent(OutError, TargetIdentity)) { bOutConfirmed = false; break; }
+				if (!bOutConfirmed && !OutError.IsEmpty())
+					OutError = Contract::FDiagnostic::WrapFailure(TEXT("localization_import_rollback_unconfirmed"), OutError);
 				return bOutConfirmed;
 			}
 
@@ -817,69 +947,68 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				OutError = {};
 				if (!IsInGameThread())
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_game_thread_required"));
+					OutError = NativeConditionFailure(TEXT("localization_import_game_thread_required"),
+						TEXT("Localization import preparation must run on the game thread."), InSpec.TargetRef, TEXT("game_thread"), false, true);
 					return false;
 				}
 				FLocalizationImportSpec Spec = InSpec;
 				Spec.TargetRef.TrimStartAndEndInline();
 				if (!Spec.IsValid() || !IsSafeSegment(Spec.TargetRef))
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_spec_invalid"),
-						Spec.TargetRef);
+					if (Spec.RequestId.IsEmpty())
+						OutError = NativeConditionFailure(TEXT("localization_import_spec_invalid"),
+							TEXT("The localization specification has no request identity."), Spec.TargetRef, TEXT("request_identity_present"), false, true);
+					else if (Spec.SourceRef.IsEmpty())
+						OutError = NativeValueFailure(TEXT("localization_import_spec_invalid"),
+							TEXT("The localization specification has no source file."), Spec.TargetRef, TEXT("source_ref"),
+							MakeShared<FJsonValueString>(Spec.SourceRef), MakeShared<FJsonValueString>(TEXT("nonempty PO source file path")));
+					else
+						OutError = NativeValueFailure(TEXT("localization_import_spec_invalid"),
+							TEXT("The localization target name must contain only letters, digits, underscores or hyphens."), Spec.TargetRef, TEXT("target_ref"),
+							MakeShared<FJsonValueString>(Spec.TargetRef), MakeShared<FJsonValueString>(TEXT("nonempty safe target name")));
 					return false;
 				}
 				FString Source;
 				if (!TryNormalizeSource(Spec.SourceRef, Source, OutError))
 				{
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Spec.TargetRef;
 					return false;
 				}
-				const FString SourceSha256 = HashFile(Source);
-				if (SourceSha256.IsEmpty())
+				FString SourceSha256;
+				if (!TryHashFile(Source, SourceSha256, OutError, Spec.TargetRef))
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_source_hash_failed"),
-						Source);
+					OutError = Contract::FDiagnostic::WrapFailure(TEXT("localization_import_source_hash_failed"), OutError);
 					return false;
 				}
 				FString Culture;
-				if (!TryCultureFromPo(Source, Culture, OutError))
+				Contract::FSourceLocation CultureSource;
+				if (!TryCultureFromPo(Source, Culture, CultureSource, OutError))
 				{
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Spec.TargetRef;
 					return false;
 				}
 				ULocalizationTarget* const Target =
 					FindProjectTarget(Spec.TargetRef);
 				if (!Target)
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_target_missing"),
-						Spec.TargetRef);
+					OutError = NativeConditionFailure(TEXT("localization_import_target_missing"),
+						TEXT("The requested project localization target could not be found."), Spec.TargetRef, TEXT("localization_target_available"), false, true);
 					return false;
 				}
 				if (!SupportsCulture(*Target, Culture))
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_culture_unsupported"),
-						Spec.TargetRef,
-						Culture);
+					OutError = NativeValueFailure(TEXT("localization_import_culture_unsupported"),
+						TEXT("The culture in the PO Language header is not configured on the localization target."), Spec.TargetRef, TEXT("Language"),
+						MakeShared<FJsonValueString>(Culture), SupportedCultureNames(*Target));
+					OutError.Source = CultureSource;
 					return false;
 				}
 				const FString ManifestPath =
 					LocalizationConfigurationScript::GetManifestPath(Target);
-				const FString ManifestRevision = HashFile(ManifestPath);
-				if (ManifestRevision.IsEmpty())
+				FString ManifestRevision;
+				if (!TryHashFile(ManifestPath, ManifestRevision, OutError, Spec.TargetRef))
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_manifest_missing"),
-						Spec.TargetRef,
-						ManifestPath);
+					OutError = Contract::FDiagnostic::WrapFailure(TEXT("localization_import_manifest_missing"), OutError);
 					return false;
 				}
 				const FString PersistedPoPath =
@@ -902,12 +1031,9 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 				for (const FString& Path : MutablePaths)
 				{
 					FFileSnapshot Snapshot;
-					if (!Snapshot.Capture(Path))
+					if (!Snapshot.Capture(Path, OutError, Spec.TargetRef))
 					{
-						SetError(
-							OutError,
-							TEXT("localization_import_backup_failed"),
-							Path);
+						OutError = Contract::FDiagnostic::WrapFailure(TEXT("localization_import_backup_failed"), OutError);
 						return false;
 					}
 					Snapshots.Add(MoveTemp(Snapshot));
@@ -925,13 +1051,10 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 					RevisionInput += TEXT("|") + Snapshot.Path
 						+ TEXT("=") + Snapshot.Revision;
 				}
-				const FString ExpectedRevision = HashUtf8(RevisionInput);
-				if (ExpectedRevision.IsEmpty())
+				FString ExpectedRevision;
+				if (!TryHashUtf8(RevisionInput, ExpectedRevision, OutError, Spec.TargetRef))
 				{
-					SetError(
-						OutError,
-						TEXT("localization_import_revision_failed"),
-						Spec.TargetRef);
+					OutError = Contract::FDiagnostic::WrapFailure(TEXT("localization_import_revision_failed"), OutError);
 					return false;
 				}
 				const FString TargetIdentity =
@@ -965,7 +1088,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 
 	bool TryCreateLocalizationImportProvider(
 		TSharedPtr<ILocalizationImportProvider>& OutProvider,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProvider = MakeShared<FProvider>();
 		OutError.Reset();

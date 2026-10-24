@@ -1,5 +1,7 @@
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -10,6 +12,17 @@ namespace UE::UAI::CommandRegistry
 
 	namespace
 	{
+		UE::UAI::Contract::FDiagnostic RegistrationFailure(const FString& Code, const FString& Reason,
+			const FString& Command, const FString& Property, const TSharedPtr<FJsonValue>& Actual = nullptr)
+		{
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("command_registration"));
+			Error.CandidateName = Command;
+			Error.PropertyPath = Property;
+			Error.SourceKind = TEXT("command_declaration");
+			Error.ActualValue = Actual;
+			return Error;
+		}
+
 		FString Clean(FString Value)
 		{
 			Value.TrimStartAndEndInline();
@@ -87,17 +100,22 @@ namespace UE::UAI::CommandRegistry
 			return Types.Contains(Value);
 		}
 
-		bool HasNonEmptyUniqueStrings(const TArray<FString>& Values)
+		bool ValidateStrings(const TArray<FString>& Values, const FString& Code, const FString& Command,
+			const FString& Property, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (Values.IsEmpty())
 			{
+				OutError = RegistrationFailure(Code, TEXT("The contract list must contain at least one entry."), Command, Property, MakeShared<FJsonValueNumber>(0));
 				return false;
 			}
 			TSet<FString> Seen;
-			for (const FString& Value : Values)
+			for (int32 Index = 0; Index < Values.Num(); ++Index)
 			{
+				const FString& Value = Values[Index];
 				if (Value.IsEmpty() || Seen.Contains(Value))
 				{
+					OutError = RegistrationFailure(Code, Value.IsEmpty() ? TEXT("The contract list contains an empty entry.") : TEXT("The contract list contains a duplicate entry."),
+						Command, FString::Printf(TEXT("%s[%d]"), *Property, Index), MakeShared<FJsonValueString>(Value));
 					return false;
 				}
 				Seen.Add(Value);
@@ -129,35 +147,44 @@ namespace UE::UAI::CommandRegistry
 					&& Owner.Len() > FCString::Strlen(TEXT("uai-skill:")));
 		}
 
-		bool TutorialReferencesValid(const TArray<FString>& Values)
+		bool ValidateTutorialReferences(const TArray<FString>& Values, const FString& Command, UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			if (!HasNonEmptyUniqueStrings(Values))
+			if (!ValidateStrings(Values, TEXT("command_tutorial_reference_invalid"), Command, TEXT("tutorial_references"), OutError))
 			{
 				return false;
 			}
-			for (const FString& Value : Values)
+			for (int32 Index = 0; Index < Values.Num(); ++Index)
 			{
+				const FString& Value = Values[Index];
 				if (!IsTutorialReference(Value))
 				{
+					OutError = RegistrationFailure(TEXT("command_tutorial_reference_invalid"), TEXT("A tutorial reference must be uai-docs:<owner>#<anchor> or uai-skill:<owner>#<anchor>, without whitespace."),
+						Command, FString::Printf(TEXT("tutorial_references[%d]"), Index), MakeShared<FJsonValueString>(Value));
 					return false;
 				}
 			}
 			return true;
 		}
 
-		bool PurposeComplete(
-			const FUeAgentCommandPurposeDeclaration& Purpose)
+		bool ValidatePurpose(const FUeAgentCommandPurposeDeclaration& Purpose, const FString& Code,
+			const FString& Command, const FString& Property, UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			return !Purpose.Summary.IsEmpty()
-				&& !Purpose.Target.IsEmpty()
-				&& HasNonEmptyUniqueStrings(Purpose.Preconditions)
-				&& !Purpose.ParameterGuidance.IsEmpty()
-				&& !Purpose.ResultGuidance.IsEmpty()
-				&& !Purpose.FailureGuidance.IsEmpty()
-				&& !Purpose.SideEffectGuidance.IsEmpty()
-				&& !Purpose.MinimumExample.IsEmpty()
-				&& HasNonEmptyUniqueStrings(Purpose.RelatedFlows)
-				&& HasNonEmptyUniqueStrings(Purpose.Keywords);
+			const auto Required = [&](const FString& Value, const TCHAR* Field)
+			{
+				if (!Value.IsEmpty()) return true;
+				OutError = RegistrationFailure(Code, TEXT("A required command purpose field is empty."), Command, Property + TEXT(".") + Field, MakeShared<FJsonValueString>(Value));
+				return false;
+			};
+			return Required(Purpose.Summary, TEXT("summary"))
+				&& Required(Purpose.Target, TEXT("target"))
+				&& ValidateStrings(Purpose.Preconditions, Code, Command, Property + TEXT(".preconditions"), OutError)
+				&& Required(Purpose.ParameterGuidance, TEXT("parameter_guidance"))
+				&& Required(Purpose.ResultGuidance, TEXT("result_guidance"))
+				&& Required(Purpose.FailureGuidance, TEXT("failure_guidance"))
+				&& Required(Purpose.SideEffectGuidance, TEXT("side_effect_guidance"))
+				&& Required(Purpose.MinimumExample, TEXT("minimum_example"))
+				&& ValidateStrings(Purpose.RelatedFlows, Code, Command, Property + TEXT(".related_flows"), OutError)
+				&& ValidateStrings(Purpose.Keywords, Code, Command, Property + TEXT(".keywords"), OutError);
 		}
 
 		void NormalizeStrings(TArray<FString>& Values)
@@ -176,7 +203,7 @@ namespace UE::UAI::CommandRegistry
 				return;
 			}
 			TSharedPtr<FJsonObject> Schema;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			FString Canonical;
 			if (Json::TryParseObject(SchemaJson, Schema, Error)
 				&& Schema.IsValid()
@@ -233,6 +260,12 @@ namespace UE::UAI::CommandRegistry
 				Field.Description = Clean(MoveTemp(Field.Description));
 				NormalizeSchema(Field.SchemaJson);
 			}
+			for (FUeAgentModelResultFieldDeclaration& Field :
+				Declaration.ModelResultFields)
+			{
+				Field.Name = Clean(MoveTemp(Field.Name));
+				NormalizeStrings(Field.SourcePath);
+			}
 			for (FUeAgentCommandErrorDeclaration& Error :
 				Declaration.Errors)
 			{
@@ -258,35 +291,47 @@ namespace UE::UAI::CommandRegistry
 
 		bool ValidateFields(
 			const TArray<FUeAgentCommandFieldDeclaration>& Fields,
-			FString& OutError)
+			const FString& Command, const FString& Role,
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSet<FString> Names;
-			for (const FUeAgentCommandFieldDeclaration& Field : Fields)
+			for (int32 Index = 0; Index < Fields.Num(); ++Index)
 			{
+				const auto& Field = Fields[Index];
+				const FString Path = FString::Printf(TEXT("%s[%d]"), *Role, Index);
 				if (!IsIdentifier(Field.Name)
 					|| !IsWireType(Field.WireType)
 					|| Field.Description.IsEmpty())
 				{
-					OutError = TEXT("command_contract_incomplete");
+					const bool bNameInvalid = !IsIdentifier(Field.Name);
+					const bool bTypeInvalid = !IsWireType(Field.WireType);
+					OutError = RegistrationFailure(TEXT("command_contract_incomplete"),
+						bNameInvalid ? TEXT("The command field name is not a valid identifier.") : bTypeInvalid ? TEXT("The command field wire type is not supported.") : TEXT("The command field description is empty."),
+						Command, Path + (bNameInvalid ? TEXT(".name") : bTypeInvalid ? TEXT(".wire_type") : TEXT(".description")),
+						MakeShared<FJsonValueString>(bNameInvalid ? Field.Name : bTypeInvalid ? Field.WireType : Field.Description));
 					return false;
 				}
 				if (!Field.SchemaJson.IsEmpty())
 				{
 					TSharedPtr<FJsonObject> Schema;
-					FString SchemaError;
+					UE::UAI::Contract::FDiagnostic SchemaError;
 					if (!Json::TryParseObject(
 							Field.SchemaJson,
 							Schema,
 							SchemaError)
 						|| !Schema.IsValid())
 					{
-						OutError = TEXT("command_contract_field_schema_invalid");
+						OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("command_contract_field_schema_invalid"), SchemaError,
+							TEXT("command_registration"), TEXT("The command field schema is not a valid JSON object."));
+						OutError.CandidateName = Command;
+						OutError.PropertyPath = Path + TEXT(".schema");
 						return false;
 					}
 				}
 				if (Names.Contains(Field.Name))
 				{
-					OutError = TEXT("command_contract_field_duplicate");
+					OutError = RegistrationFailure(TEXT("command_contract_field_duplicate"), TEXT("The command declares the same field name more than once."),
+						Command, Path + TEXT(".name"), MakeShared<FJsonValueString>(Field.Name));
 					return false;
 				}
 				Names.Add(Field.Name);
@@ -296,25 +341,31 @@ namespace UE::UAI::CommandRegistry
 
 		bool ValidateVariants(
 			const TArray<FUeAgentCommandVariantDeclaration>& Variants,
-			FString& OutError)
+			const FString& Command,
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSet<FString> Identities;
-			for (const FUeAgentCommandVariantDeclaration& Variant : Variants)
+			for (int32 Index = 0; Index < Variants.Num(); ++Index)
 			{
+				const auto& Variant = Variants[Index];
+				const FString Path = FString::Printf(TEXT("variants[%d]"), Index);
 				if (!IsVariantId(Variant.VariantId)
-					|| Variant.RequestSchemaJson.IsEmpty()
-					|| !PurposeComplete(Variant.Purpose))
+					|| Variant.RequestSchemaJson.IsEmpty())
 				{
-					OutError = TEXT("command_variant_contract_incomplete");
+					OutError = RegistrationFailure(TEXT("command_variant_contract_incomplete"),
+						!IsVariantId(Variant.VariantId) ? TEXT("The command variant ID is invalid.") : Variant.RequestSchemaJson.IsEmpty() ? TEXT("The command variant request schema is empty.") : TEXT("The command variant purpose is incomplete."),
+						Command, Path + (!IsVariantId(Variant.VariantId) ? TEXT(".id") : Variant.RequestSchemaJson.IsEmpty() ? TEXT(".request_schema") : TEXT(".purpose")), MakeShared<FJsonValueString>(Variant.VariantId));
 					return false;
 				}
+				if (!ValidatePurpose(Variant.Purpose, TEXT("command_variant_contract_incomplete"), Command, Path + TEXT(".purpose"), OutError)) return false;
 				if (Identities.Contains(Variant.VariantId))
 				{
-					OutError = TEXT("command_variant_contract_duplicate");
+					OutError = RegistrationFailure(TEXT("command_variant_contract_duplicate"), TEXT("The command declares the same variant ID more than once."),
+						Command, Path + TEXT(".id"), MakeShared<FJsonValueString>(Variant.VariantId));
 					return false;
 				}
 				TSharedPtr<FJsonObject> Schema;
-				FString SchemaError;
+				UE::UAI::Contract::FDiagnostic SchemaError;
 				FString SchemaType;
 				bool bAdditionalProperties = true;
 				if (!Json::TryParseObject(
@@ -328,7 +379,18 @@ namespace UE::UAI::CommandRegistry
 						TEXT("additionalProperties"), bAdditionalProperties)
 					|| bAdditionalProperties)
 				{
-					OutError = TEXT("command_variant_request_schema_invalid");
+					OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("command_variant_request_schema_invalid"), SchemaError,
+						TEXT("command_registration"), TEXT("A command variant schema must be a JSON object with type=object and additionalProperties=false."));
+					OutError.CandidateName = Command;
+					OutError.PropertyPath = Path + TEXT(".request_schema");
+					if (Schema.IsValid())
+					{
+						const bool bTypeInvalid = SchemaType != TEXT("object");
+						OutError.PropertyPath += bTypeInvalid ? TEXT(".type") : TEXT(".additionalProperties");
+						OutError.ActualValue = Schema->TryGetField(bTypeInvalid ? TEXT("type") : TEXT("additionalProperties"));
+						OutError.ActualValuePresent = OutError.ActualValue.IsValid();
+						OutError.ExpectedValue = bTypeInvalid ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("object"))) : MakeShared<FJsonValueBoolean>(false);
+					}
 					return false;
 				}
 				Identities.Add(Variant.VariantId);
@@ -338,13 +400,18 @@ namespace UE::UAI::CommandRegistry
 
 		bool Validate(
 			const FUeAgentCommandDeclaration& Declaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!IsCommandId(Declaration.CommandId)
 				|| !IsIdentifier(Declaration.PythonNamespace)
 				|| !IsIdentifier(Declaration.PythonFunction))
 			{
-				OutError = TEXT("command_contract_identity_invalid");
+				const bool bCommandInvalid = !IsCommandId(Declaration.CommandId);
+				const bool bNamespaceInvalid = !IsIdentifier(Declaration.PythonNamespace);
+				OutError = RegistrationFailure(TEXT("command_contract_identity_invalid"),
+					bCommandInvalid ? TEXT("The command name must contain at least two valid dot-separated identifiers.") : TEXT("The Python namespace and function must be valid identifiers."),
+					Declaration.CommandId, bCommandInvalid ? TEXT("command_id") : bNamespaceInvalid ? TEXT("python_namespace") : TEXT("python_function"),
+					MakeShared<FJsonValueString>(bCommandInvalid ? Declaration.CommandId : bNamespaceInvalid ? Declaration.PythonNamespace : Declaration.PythonFunction));
 				return false;
 			}
 			if (Declaration.Availability
@@ -354,7 +421,8 @@ namespace UE::UAI::CommandRegistry
 				&& Declaration.Availability
 					!= EUeAgentCommandAvailability::Disabled)
 			{
-				OutError = TEXT("command_contract_availability_invalid");
+				OutError = RegistrationFailure(TEXT("command_contract_availability_invalid"), TEXT("Command availability must be enabled, dormant or disabled."),
+					Declaration.CommandId, TEXT("availability"), MakeShared<FJsonValueNumber>(static_cast<int32>(Declaration.Availability)));
 				return false;
 			}
 			switch (Declaration.SideEffect)
@@ -366,34 +434,53 @@ namespace UE::UAI::CommandRegistry
 			case EUeAgentCommandSideEffect::ExternalState:
 				break;
 			default:
-				OutError = TEXT("command_contract_side_effect_invalid");
+				OutError = RegistrationFailure(TEXT("command_contract_side_effect_invalid"), TEXT("Command side effect must be none, editor_state, asset_state, world_state or external_state."),
+					Declaration.CommandId, TEXT("side_effect"), MakeShared<FJsonValueNumber>(static_cast<int32>(Declaration.SideEffect)));
 				return false;
 			}
 			if (Declaration.ContractVersion < 1
 				|| Declaration.PublicOwner.IsEmpty()
 				|| Declaration.ResultFields.IsEmpty()
 				|| Declaration.Errors.IsEmpty()
-				|| Declaration.StateLayers.IsEmpty()
-				|| !PurposeComplete(Declaration.Purpose))
+				|| Declaration.StateLayers.IsEmpty())
 			{
-				OutError = TEXT("command_contract_incomplete");
+				const FString Field = Declaration.ContractVersion < 1 ? TEXT("contract_version") : Declaration.PublicOwner.IsEmpty() ? TEXT("public_owner") :
+					Declaration.ResultFields.IsEmpty() ? TEXT("result_fields") : Declaration.Errors.IsEmpty() ? TEXT("errors") : Declaration.StateLayers.IsEmpty() ? TEXT("state_layers") : TEXT("purpose");
+				OutError = RegistrationFailure(TEXT("command_contract_incomplete"), TEXT("The command declaration has an invalid version or a missing required contract section."), Declaration.CommandId, Field);
 				return false;
 			}
-			if (!HasNonEmptyUniqueStrings(Declaration.StateLayers))
+			if (!ValidatePurpose(Declaration.Purpose, TEXT("command_contract_incomplete"), Declaration.CommandId, TEXT("purpose"), OutError)
+				|| !ValidateStrings(Declaration.StateLayers, TEXT("command_contract_state_layer_invalid"), Declaration.CommandId, TEXT("state_layers"), OutError)
+				|| !ValidateTutorialReferences(Declaration.TutorialReferences, Declaration.CommandId, OutError)) return false;
+			if (!ValidateFields(Declaration.InputFields, Declaration.CommandId, TEXT("input_fields"), OutError)
+				|| !ValidateFields(Declaration.ResultFields, Declaration.CommandId, TEXT("result_fields"), OutError)
+				|| !ValidateVariants(Declaration.Variants, Declaration.CommandId, OutError))
 			{
-				OutError = TEXT("command_contract_state_layer_invalid");
 				return false;
 			}
-			if (!TutorialReferencesValid(Declaration.TutorialReferences))
+			TSet<FString> ModelResultNames;
+			for (const FUeAgentModelResultFieldDeclaration& Field :
+				Declaration.ModelResultFields)
 			{
-				OutError = TEXT("command_tutorial_reference_invalid");
-				return false;
-			}
-			if (!ValidateFields(Declaration.InputFields, OutError)
-				|| !ValidateFields(Declaration.ResultFields, OutError)
-				|| !ValidateVariants(Declaration.Variants, OutError))
-			{
-				return false;
+				if (!IsIdentifier(Field.Name)
+					|| Field.SourcePath.IsEmpty()
+					|| ModelResultNames.Contains(Field.Name))
+				{
+					OutError = RegistrationFailure(TEXT("command_model_result_field_invalid"),
+						!IsIdentifier(Field.Name) ? TEXT("The model result field name is invalid.") : Field.SourcePath.IsEmpty() ? TEXT("The model result field source path is empty.") : TEXT("The model result field name is duplicated."),
+						Declaration.CommandId, TEXT("model_result_fields"), MakeShared<FJsonValueString>(Field.Name));
+					return false;
+				}
+				for (const FString& Segment : Field.SourcePath)
+				{
+					if (Segment.IsEmpty())
+					{
+						OutError = RegistrationFailure(TEXT("command_model_result_path_invalid"), TEXT("The model result source path contains an empty segment."),
+							Declaration.CommandId, TEXT("model_result_fields.") + Field.Name + TEXT(".source_path"), MakeShared<FJsonValueString>(FString::Join(Field.SourcePath, TEXT("/"))));
+						return false;
+					}
+				}
+				ModelResultNames.Add(Field.Name);
 			}
 			TSet<FString> ErrorCodes;
 			for (const FUeAgentCommandErrorDeclaration& Error :
@@ -402,12 +489,14 @@ namespace UE::UAI::CommandRegistry
 				if (!IsIdentifier(Error.Code)
 					|| Error.Description.IsEmpty())
 				{
-					OutError = TEXT("command_contract_incomplete");
+					OutError = RegistrationFailure(TEXT("command_contract_incomplete"), !IsIdentifier(Error.Code) ? TEXT("The declared error code is not a valid identifier.") : TEXT("The declared error has no description."),
+						Declaration.CommandId, TEXT("errors"), MakeShared<FJsonValueString>(Error.Code));
 					return false;
 				}
 				if (ErrorCodes.Contains(Error.Code))
 				{
-					OutError = TEXT("command_contract_error_duplicate");
+					OutError = RegistrationFailure(TEXT("command_contract_error_duplicate"), TEXT("The command declares the same error code more than once."),
+						Declaration.CommandId, TEXT("errors"), MakeShared<FJsonValueString>(Error.Code));
 					return false;
 				}
 				ErrorCodes.Add(Error.Code);
@@ -478,7 +567,7 @@ namespace UE::UAI::CommandRegistry
 			if (!Field.SchemaJson.IsEmpty())
 			{
 				TSharedPtr<FJsonObject> Schema;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (Json::TryParseObject(
 						Field.SchemaJson,
 						Schema,
@@ -500,6 +589,21 @@ namespace UE::UAI::CommandRegistry
 			{
 				Result.Add(MakeShared<FJsonValueObject>(
 					FieldObject(Field)));
+			}
+			return Result;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ModelResultFieldArray(
+			const TArray<FUeAgentModelResultFieldDeclaration>& Fields)
+		{
+			TArray<TSharedPtr<FJsonValue>> Result;
+			Result.Reserve(Fields.Num());
+			for (const FUeAgentModelResultFieldDeclaration& Field : Fields)
+			{
+				const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+				Object->SetStringField(TEXT("name"), Field.Name);
+				Object->SetArrayField(TEXT("source_path"), StringArray(Field.SourcePath));
+				Result.Add(MakeShared<FJsonValueObject>(Object));
 			}
 			return Result;
 		}
@@ -571,7 +675,7 @@ namespace UE::UAI::CommandRegistry
 					MakeShared<FJsonObject>();
 				Object->SetStringField(TEXT("variant_id"), Variant.VariantId);
 				TSharedPtr<FJsonObject> RequestSchema;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (Json::TryParseObject(
 						Variant.RequestSchemaJson,
 						RequestSchema,
@@ -634,6 +738,12 @@ namespace UE::UAI::CommandRegistry
 			Result->SetArrayField(
 				TEXT("result_fields"),
 				FieldArray(Declaration.ResultFields));
+			if (!Declaration.ModelResultFields.IsEmpty())
+			{
+				Result->SetArrayField(
+					TEXT("model_result_fields"),
+					ModelResultFieldArray(Declaration.ModelResultFields));
+			}
 			Result->SetArrayField(
 				TEXT("errors"),
 				ErrorArray(Declaration.Errors));
@@ -664,10 +774,9 @@ namespace UE::UAI::CommandRegistry
 		}
 
 		FString ContractHash(
-			const FUeAgentCommandDeclaration& Declaration)
+			const FUeAgentCommandDeclaration& Declaration, UE::UAI::Contract::FDiagnostic& Error)
 		{
 			FString Canonical;
-			FString Error;
 			if (!Json::TryCanonicalize(
 				ContractObject(Declaration, false),
 				Canonical,
@@ -700,13 +809,13 @@ namespace UE::UAI::CommandRegistry
 	bool FUeAgentImmutableCommandRegistry::TryFreeze(
 		TArray<FUeAgentCommandDeclaration> Declarations,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
 		if (Declarations.IsEmpty())
 		{
-			OutError = TEXT("command_contract_registry_empty");
+			OutError = RegistrationFailure(TEXT("command_contract_registry_empty"), TEXT("The command registry contains no declarations."), FString(), TEXT("commands"), MakeShared<FJsonValueNumber>(0));
 			return false;
 		}
 		for (FUeAgentCommandDeclaration& Declaration : Declarations)
@@ -733,7 +842,7 @@ namespace UE::UAI::CommandRegistry
 				&& Declarations[Index - 1].CommandId
 					== Declaration.CommandId)
 			{
-				OutError = TEXT("command_contract_id_duplicate");
+				OutError = RegistrationFailure(TEXT("command_contract_id_duplicate"), TEXT("The command name is registered more than once."), Declaration.CommandId, TEXT("command_id"), MakeShared<FJsonValueString>(Declaration.CommandId));
 				return false;
 			}
 			const FString PythonBinding =
@@ -742,7 +851,7 @@ namespace UE::UAI::CommandRegistry
 				+ Declaration.PythonFunction;
 			if (PythonBindings.Contains(PythonBinding))
 			{
-				OutError = TEXT("command_python_binding_duplicate");
+				OutError = RegistrationFailure(TEXT("command_python_binding_duplicate"), TEXT("The Python binding is registered by more than one command."), Declaration.CommandId, TEXT("python_binding"), MakeShared<FJsonValueString>(PythonBinding));
 				return false;
 			}
 			PythonBindings.Add(PythonBinding);
@@ -752,10 +861,16 @@ namespace UE::UAI::CommandRegistry
 		Frozen.Reserve(Declarations.Num());
 		for (FUeAgentCommandDeclaration& Declaration : Declarations)
 		{
-			const FString Hash = ContractHash(Declaration);
+			UE::UAI::Contract::FDiagnostic HashError;
+			const FString Hash = ContractHash(Declaration, HashError);
 			if (!IsSha256(Hash))
 			{
-				OutError = TEXT("command_contract_hash_failed");
+				OutError = RegistrationFailure(TEXT("command_contract_hash_failed"), TEXT("The command contract hash could not be computed."), Declaration.CommandId, TEXT("contract"));
+				if (!HashError.IsEmpty())
+				{
+					OutError.CauseCode = HashError.Code;
+					OutError.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(MoveTemp(HashError));
+				}
 				return false;
 			}
 			Frozen.Add(FUeAgentFrozenCommandContract(
@@ -778,6 +893,7 @@ namespace UE::UAI::CommandRegistry
 			Projection.StateLayers = Contract.GetStateLayers();
 			Projection.InputFields = Contract.GetInputFields();
 			Projection.ResultFields = Contract.GetResultFields();
+			Projection.ModelResultFields = Contract.GetModelResultFields();
 			Projection.Errors = Contract.GetErrors();
 			Projection.Purpose = Contract.GetPurpose();
 			Projection.Variants = Contract.GetVariants();
@@ -799,7 +915,7 @@ namespace UE::UAI::CommandRegistry
 		const FString RegistryHash = Json::Sha256Utf8(Canonical);
 		if (!IsSha256(RegistryHash))
 		{
-			OutError = TEXT("command_registry_hash_failed");
+			OutError = RegistrationFailure(TEXT("command_registry_hash_failed"), TEXT("The frozen command registry hash could not be computed."), FString(), TEXT("commands"));
 			return false;
 		}
 		OutRegistry = MakeShareable(
@@ -831,7 +947,7 @@ namespace UE::UAI::CommandRegistry
 
 	bool FUeAgentImmutableCommandRegistry::BuildProjection(
 		FString& OutProjection,
-		FString& OutError) const
+		UE::UAI::Contract::FDiagnostic& OutError) const
 	{
 		OutProjection.Reset();
 		OutError.Reset();
@@ -850,6 +966,7 @@ namespace UE::UAI::CommandRegistry
 			Declaration.StateLayers = Contract.GetStateLayers();
 			Declaration.InputFields = Contract.GetInputFields();
 			Declaration.ResultFields = Contract.GetResultFields();
+			Declaration.ModelResultFields = Contract.GetModelResultFields();
 			Declaration.Errors = Contract.GetErrors();
 			Declaration.Purpose = Contract.GetPurpose();
 			Declaration.Variants = Contract.GetVariants();

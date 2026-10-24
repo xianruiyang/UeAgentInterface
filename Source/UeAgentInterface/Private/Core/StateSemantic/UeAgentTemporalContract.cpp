@@ -1,4 +1,6 @@
 #include "Core/StateSemantic/UeAgentTemporalContract.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::StateSemantic
 {
@@ -409,7 +411,7 @@ namespace UE::UAI::StateSemantic
 			const int64 Work = FMath::Max<int64>(
 				1,
 				SaturatingMultiply(Units, Units));
-			FUeAgentResourceBudgetExceeded BudgetError;
+			FUeAgentResourceChargeError ChargeError;
 			if (Resources.TryChargeMany(
 					{{EUeAgentResourceDimension::Items, 1},
 				 {EUeAgentResourceDimension::StringBytes, Units},
@@ -417,30 +419,47 @@ namespace UE::UAI::StateSemantic
 				 {EUeAgentResourceDimension::EstimatedMemoryBytes,
 					SaturatingMultiply(Units, 8)}},
 					Path,
-					BudgetError))
+					ChargeError))
 			{
 				return true;
 			}
-			OutError.Code = BudgetError.Code;
-			OutError.Path = BudgetError.Path;
-			OutError.ResourceDimension = BudgetError.Dimension;
-			OutError.ResourceLimit = BudgetError.Limit;
-			OutError.ResourceObserved = BudgetError.Observed;
+			OutError = ChargeError;
 			return false;
 		}
 
 		bool Fail(
 			FUeAgentStateSemanticError& OutError,
 			FString Code,
-			FString Path = FString(),
-			FString Detail = FString())
+			FString Reason,
+			FString Path,
+			TSharedPtr<FJsonValue> Expected = nullptr,
+			TSharedPtr<FJsonValue> Actual = nullptr)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.Path = MoveTemp(Path);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = FUeAgentStateSemanticError::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("state_semantic"));
+			OutError.PropertyPath = Path;
+			OutError.Source.JsonPath = MoveTemp(Path);
+			OutError.ExpectedValue = MoveTemp(Expected); OutError.ActualValue = MoveTemp(Actual);
 			return false;
 		}
 
+		TSharedPtr<FJsonValue> RationalValue(const FString& Numerator, const FString& Denominator) {
+			auto Value = MakeShared<FJsonObject>();
+			Value->SetStringField(TEXT("numerator"), Numerator); Value->SetStringField(TEXT("denominator"), Denominator);
+			return MakeShared<FJsonValueObject>(Value);
+		}
+		TSharedPtr<FJsonValue> PointValue(const FUeAgentTemporalPoint& Point) {
+			auto Value = MakeShared<FJsonObject>();
+			Value->SetStringField(TEXT("tick"), Point.GetTick());
+			Value->SetField(TEXT("rate"), RationalValue(Point.GetRateNumerator(), Point.GetRateDenominator()));
+			Value->SetStringField(TEXT("state"), Point.GetState());
+			return MakeShared<FJsonValueObject>(Value);
+		}
+		bool ClockMismatch(FUeAgentStateSemanticError& Error, const TCHAR* Code, const TCHAR* Reason,
+			const TCHAR* Path, const FString& Expected, const FString& Actual) {
+			Fail(Error, Code, Reason, Path);
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected); Error.ActualEvidence = MakeShared<FJsonValueString>(Actual);
+			return false;
+		}
 		FString SignedToString(const FSignedInteger& Value)
 		{
 			return Value.bNegative && Value.Magnitude != TEXT("0")
@@ -464,10 +483,8 @@ namespace UE::UAI::StateSemantic
 			const bool bInexact = Remainder != TEXT("0");
 			if (Policy == EUeAgentTemporalRoundingPolicy::Exact && bInexact)
 			{
-				return Fail(
-					OutError,
-					TEXT("temporal_conversion_inexact"),
-					TEXT("rounding"));
+				return Fail(OutError, TEXT("temporal_conversion_inexact"), TEXT("Exact rounding cannot represent a fractional target tick as an integer."), TEXT("rounding"),
+					MakeShared<FJsonValueString>(TEXT("integer target tick")), RationalValue(SignedToString(Value.Numerator), Value.Denominator));
 			}
 
 			bool bIncrementMagnitude = false;
@@ -518,28 +535,18 @@ namespace UE::UAI::StateSemantic
 			FExactRational Scale;
 			FExactRational Offset;
 			FSignedInteger Tick;
-			if (!ParseSigned(Source.GetTick(), Tick)
-				|| !MakePositiveRational(
-					Conversion.GetSourceRate().GetNumerator(),
-					Conversion.GetSourceRate().GetDenominator(),
-					SourceRate)
-				|| !MakePositiveRational(
-					Conversion.GetTargetRate().GetNumerator(),
-					Conversion.GetTargetRate().GetDenominator(),
-					TargetRate)
-				|| !MakeSignedRational(
-					Conversion.GetScaleNumerator(),
-					Conversion.GetScaleDenominator(),
-					Scale)
-				|| !MakeSignedRational(
-					Conversion.GetOffsetTargetTicksNumerator(),
-					Conversion.GetOffsetTargetTicksDenominator(),
-					Offset))
-			{
-				return Fail(
-					OutError,
-					TEXT("temporal_conversion_invalid"));
-			}
+			if (!ParseSigned(Source.GetTick(), Tick)) return Fail(OutError, TEXT("temporal_conversion_invalid"),
+				TEXT("The source tick cannot be parsed as an exact signed integer."), TEXT("source.tick"), MakeShared<FJsonValueString>(TEXT("signed integer")), MakeShared<FJsonValueString>(Source.GetTick()));
+			auto ParseRate = [&](const FString& Numerator, const FString& Denominator, const TCHAR* Path, bool bPositive, FExactRational& Result) {
+				if (bPositive ? MakePositiveRational(Numerator, Denominator, Result) : MakeSignedRational(Numerator, Denominator, Result)) return true;
+				return Fail(OutError, TEXT("temporal_conversion_invalid"), bPositive ? TEXT("The conversion rate must be a positive exact rational.")
+					: TEXT("The conversion coefficient must be an exact rational with a valid denominator."), Path,
+					MakeShared<FJsonValueString>(bPositive ? TEXT("positive rational") : TEXT("signed rational")), RationalValue(Numerator, Denominator));
+			};
+			if (!ParseRate(Conversion.GetSourceRate().GetNumerator(), Conversion.GetSourceRate().GetDenominator(), TEXT("conversion.source_rate"), true, SourceRate)
+				|| !ParseRate(Conversion.GetTargetRate().GetNumerator(), Conversion.GetTargetRate().GetDenominator(), TEXT("conversion.target_rate"), true, TargetRate)
+				|| !ParseRate(Conversion.GetScaleNumerator(), Conversion.GetScaleDenominator(), TEXT("conversion.scale"), false, Scale)
+				|| !ParseRate(Conversion.GetOffsetTargetTicksNumerator(), Conversion.GetOffsetTargetTicksDenominator(), TEXT("conversion.offset_target_ticks"), false, Offset)) return false;
 			SourceTick = {Tick, TEXT("1")};
 			const FExactRational SourceSeconds = {
 				MultiplySigned(SourceTick.Numerator, {false, SourceRate.Denominator}),
@@ -568,8 +575,9 @@ namespace UE::UAI::StateSemantic
 				Conversion.GetTargetRate().GetNumerator(),
 				Conversion.GetTargetRate().GetDenominator(),
 				Source.GetState());
-			return OutPoint.IsValid()
-				|| Fail(OutError, TEXT("temporal_conversion_result_invalid"));
+			if (OutPoint.IsValid()) return true;
+			OutError = FUeAgentStateSemanticError::WrapFailure(TEXT("temporal_conversion_result_invalid"), OutPoint.GetValidationDiagnostic(), TEXT("state_semantic"));
+			return false;
 		}
 	}
 
@@ -579,13 +587,21 @@ namespace UE::UAI::StateSemantic
 		: Numerator(MoveTemp(InNumerator))
 		, Denominator(MoveTemp(InDenominator))
 	{
-		bValid = IsCanonicalUnsignedInteger(Numerator, false)
-			&& IsCanonicalUnsignedInteger(Denominator, false);
+		const bool bNumeratorInvalid = !IsCanonicalUnsignedInteger(Numerator, false);
+		if (bNumeratorInvalid || !IsCanonicalUnsignedInteger(Denominator, false))
+		{
+			ValidationDiagnostic = FUeAgentStateSemanticError::Failure(TEXT("temporal_rate_invalid"),
+				bNumeratorInvalid ? TEXT("The rate numerator must be a positive integer written without signs, whitespace, or leading zeros.")
+					: TEXT("The rate denominator must be a positive integer written without signs, whitespace, or leading zeros."), TEXT("temporal_validation"));
+			ValidationDiagnostic.PropertyPath = bNumeratorInvalid ? TEXT("numerator") : TEXT("denominator");
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(bNumeratorInvalid ? Numerator : Denominator);
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("canonical positive integer"));
+		}
 	}
 
 	const FString& FUeAgentTemporalRate::GetNumerator() const { return Numerator; }
 	const FString& FUeAgentTemporalRate::GetDenominator() const { return Denominator; }
-	bool FUeAgentTemporalRate::IsValid() const { return bValid; }
+	bool FUeAgentTemporalRate::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	bool FUeAgentTemporalRate::SemanticallyEquals(
 		const FUeAgentTemporalRate& Other) const
@@ -621,18 +637,44 @@ namespace UE::UAI::StateSemantic
 	{
 		FSignedInteger Scale;
 		FSignedInteger Offset;
-		bValid = IsNonEmpty(ConversionId)
-			&& IsNonEmpty(SourceClockId)
-			&& IsNonEmpty(TargetClockId)
-			&& SourceRate.IsValid()
-			&& TargetRate.IsValid()
-			&& ParseSigned(ScaleNumerator, Scale)
-			&& Scale.Magnitude != TEXT("0")
-			&& IsCanonicalUnsignedInteger(ScaleDenominator, false)
-			&& ParseSigned(OffsetTargetTicksNumerator, Offset)
-			&& IsCanonicalUnsignedInteger(
-				OffsetTargetTicksDenominator, false)
-			&& IsNonEmpty(Evidence);
+		const auto InvalidValue = [&](const TCHAR* Reason, const TCHAR* Path,
+			const FString& Actual, const TCHAR* Expected)
+		{
+			ValidationDiagnostic = FUeAgentStateSemanticError::Failure(TEXT("temporal_conversion_invalid"), Reason, TEXT("temporal_validation"));
+			ValidationDiagnostic.PropertyPath = Path;
+			ValidationDiagnostic.ActualValuePresent = true;
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(Actual);
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+		};
+		if (!IsNonEmpty(ConversionId))
+			InvalidValue(TEXT("The temporal conversion requires a conversion identifier."), TEXT("conversion_id"), ConversionId, TEXT("non-empty string"));
+		else if (!IsNonEmpty(SourceClockId))
+			InvalidValue(TEXT("The temporal conversion requires a source clock reference."), TEXT("source_clock_id"), SourceClockId, TEXT("non-empty clock reference"));
+		else if (!IsNonEmpty(TargetClockId))
+			InvalidValue(TEXT("The temporal conversion requires a target clock reference."), TEXT("target_clock_id"), TargetClockId, TEXT("non-empty clock reference"));
+		else if (!SourceRate.IsValid())
+		{
+			ValidationDiagnostic = SourceRate.GetValidationDiagnostic();
+			ValidationDiagnostic.PropertyPath = TEXT("source_rate.") + ValidationDiagnostic.PropertyPath;
+		}
+		else if (!TargetRate.IsValid())
+		{
+			ValidationDiagnostic = TargetRate.GetValidationDiagnostic();
+			ValidationDiagnostic.PropertyPath = TEXT("target_rate.") + ValidationDiagnostic.PropertyPath;
+		}
+		else if (!ParseSigned(ScaleNumerator, Scale) || Scale.Magnitude == TEXT("0"))
+			InvalidValue(TEXT("The temporal scale numerator must be a canonical non-zero signed integer."), TEXT("scale_numerator"), ScaleNumerator, TEXT("canonical non-zero signed integer"));
+		else if (!IsCanonicalUnsignedInteger(ScaleDenominator, false))
+			InvalidValue(TEXT("The temporal scale denominator must be a canonical positive integer."), TEXT("scale_denominator"), ScaleDenominator, TEXT("canonical positive integer"));
+		else if (!ParseSigned(OffsetTargetTicksNumerator, Offset))
+			InvalidValue(TEXT("The temporal offset numerator must be a canonical signed integer."), TEXT("offset_target_ticks_numerator"), OffsetTargetTicksNumerator, TEXT("canonical signed integer"));
+		else if (!IsCanonicalUnsignedInteger(OffsetTargetTicksDenominator, false))
+			InvalidValue(TEXT("The temporal offset denominator must be a canonical positive integer."), TEXT("offset_target_ticks_denominator"), OffsetTargetTicksDenominator, TEXT("canonical positive integer"));
+		else if (!IsNonEmpty(Evidence))
+		{
+			InvalidValue(TEXT("The temporal conversion requires conversion evidence."), TEXT("evidence"), Evidence, TEXT("non-empty evidence"));
+			ValidationDiagnostic.ActualEvidence = MoveTemp(ValidationDiagnostic.ActualValue);
+		}
 	}
 
 	const FString& FUeAgentTemporalConversion::GetConversionId() const { return ConversionId; }
@@ -646,7 +688,7 @@ namespace UE::UAI::StateSemantic
 	const FString& FUeAgentTemporalConversion::GetOffsetTargetTicksDenominator() const { return OffsetTargetTicksDenominator; }
 	const FString& FUeAgentTemporalConversion::GetEvidence() const { return Evidence; }
 	bool FUeAgentTemporalConversion::IsReverse() const { return ScaleNumerator.StartsWith(TEXT("-")); }
-	bool FUeAgentTemporalConversion::IsValid() const { return bValid; }
+	bool FUeAgentTemporalConversion::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	FUeAgentTemporalBound::FUeAgentTemporalBound(
 		EUeAgentTemporalBoundKind InKind,
@@ -654,6 +696,18 @@ namespace UE::UAI::StateSemantic
 		: Kind(InKind)
 		, Point(MoveTemp(InPoint))
 	{
+		if (Kind == EUeAgentTemporalBoundKind::Open) {
+			if (Point.IsSet()) {
+				Fail(ValidationDiagnostic, TEXT("temporal_bound_invalid"), TEXT("An open temporal bound must not contain a point."), TEXT("point"));
+				ValidationDiagnostic.ExpectedValuePresent = false; ValidationDiagnostic.ActualValuePresent = true;
+			}
+		} else if (!Point.IsSet()) {
+			Fail(ValidationDiagnostic, TEXT("temporal_bound_invalid"), TEXT("An inclusive or exclusive temporal bound requires a point."), TEXT("point"));
+			ValidationDiagnostic.ExpectedValuePresent = true; ValidationDiagnostic.ActualValuePresent = false;
+		} else if (!Point->IsValid()) {
+			ValidationDiagnostic = Point->GetValidationDiagnostic();
+			ValidationDiagnostic.PropertyPath = TEXT("point.") + ValidationDiagnostic.PropertyPath;
+		}
 	}
 
 	FUeAgentTemporalBound FUeAgentTemporalBound::Open()
@@ -684,9 +738,7 @@ namespace UE::UAI::StateSemantic
 
 	bool FUeAgentTemporalBound::IsValid() const
 	{
-		return Kind == EUeAgentTemporalBoundKind::Open
-			? !Point.IsSet()
-			: Point.IsSet() && Point->IsValid();
+		return ValidationDiagnostic.IsEmpty();
 	}
 
 	FUeAgentTemporalRange::FUeAgentTemporalRange(
@@ -699,30 +751,47 @@ namespace UE::UAI::StateSemantic
 		, LowerBound(MoveTemp(InLowerBound))
 		, UpperBound(MoveTemp(InUpperBound))
 	{
-		bValid = IsNonEmpty(ClockId)
-			&& IsNonEmpty(State)
-			&& LowerBound.IsValid()
-			&& UpperBound.IsValid();
-		for (const FUeAgentTemporalBound* Bound : {&LowerBound, &UpperBound})
-		{
-			if (Bound->GetKind() != EUeAgentTemporalBoundKind::Open)
-			{
-				bValid = bValid
-					&& Bound->GetPoint()->GetClockId() == ClockId
-					&& Bound->GetPoint()->GetState() == State;
+		if (!IsNonEmpty(ClockId)) {
+			Fail(ValidationDiagnostic, TEXT("temporal_range_invalid"), TEXT("The temporal range requires a clock reference."), TEXT("clock_id"), MakeShared<FJsonValueString>(TEXT("non-empty clock reference")));
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(ClockId); return;
+		}
+		if (!IsNonEmpty(State)) {
+			Fail(ValidationDiagnostic, TEXT("temporal_range_invalid"), TEXT("The temporal range requires a non-empty state."), TEXT("state"),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")), MakeShared<FJsonValueString>(State)); return;
+		}
+		if (!LowerBound.IsValid() || !UpperBound.IsValid()) {
+			const bool bLower = !LowerBound.IsValid();
+			ValidationDiagnostic = (bLower ? LowerBound : UpperBound).GetValidationDiagnostic();
+			ValidationDiagnostic.PropertyPath = FString(bLower ? TEXT("lower.") : TEXT("upper.")) + ValidationDiagnostic.PropertyPath; return;
+		}
+		for (const FUeAgentTemporalBound* Bound : {&LowerBound, &UpperBound}) {
+			if (Bound->GetKind() == EUeAgentTemporalBoundKind::Open) continue;
+			const bool bLower = Bound == &LowerBound;
+			const auto& Point = *Bound->GetPoint();
+			if (Point.GetClockId() != ClockId) {
+				ClockMismatch(ValidationDiagnostic, TEXT("temporal_range_clock_mismatch"), TEXT("The bound point clock does not match the range clock."),
+					bLower ? TEXT("lower.point.clock_id") : TEXT("upper.point.clock_id"), ClockId, Point.GetClockId()); return;
+			}
+			if (Point.GetState() != State) {
+				Fail(ValidationDiagnostic, TEXT("temporal_range_state_mismatch"), TEXT("The bound point state does not match the range state."),
+					bLower ? TEXT("lower.point.state") : TEXT("upper.point.state"), MakeShared<FJsonValueString>(State), MakeShared<FJsonValueString>(Point.GetState())); return;
 			}
 		}
-		if (bValid
-			&& LowerBound.GetPoint().IsSet()
-			&& UpperBound.GetPoint().IsSet())
+		if (LowerBound.GetPoint().IsSet() && UpperBound.GetPoint().IsSet())
 		{
 			int32 Compared = 0;
-			bValid = CompareTemporalPointsExact(
+			if (!CompareTemporalPointsExact(
 				*LowerBound.GetPoint(),
 				*UpperBound.GetPoint(),
-				Compared)
-				&& Compared <= 0;
-			bEmpty = bValid && Compared == 0
+				Compared)) {
+				Fail(ValidationDiagnostic, TEXT("temporal_range_comparison_invalid"), TEXT("The validated temporal range bounds could not be compared exactly."), TEXT("bounds"),
+					PointValue(*LowerBound.GetPoint()), PointValue(*UpperBound.GetPoint())); return;
+			}
+			if (Compared > 0) {
+				Fail(ValidationDiagnostic, TEXT("temporal_range_bounds_reversed"), TEXT("The lower bound is after the upper bound."), TEXT("bounds"),
+					PointValue(*UpperBound.GetPoint()), PointValue(*LowerBound.GetPoint())); return;
+			}
+			bEmpty = Compared == 0
 				&& (LowerBound.GetKind()
 						== EUeAgentTemporalBoundKind::Exclusive
 					|| UpperBound.GetKind()
@@ -734,8 +803,8 @@ namespace UE::UAI::StateSemantic
 	const FString& FUeAgentTemporalRange::GetState() const { return State; }
 	const FUeAgentTemporalBound& FUeAgentTemporalRange::GetLowerBound() const { return LowerBound; }
 	const FUeAgentTemporalBound& FUeAgentTemporalRange::GetUpperBound() const { return UpperBound; }
-	bool FUeAgentTemporalRange::IsValid() const { return bValid; }
-	bool FUeAgentTemporalRange::IsEmpty() const { return bValid && bEmpty; }
+	bool FUeAgentTemporalRange::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	bool FUeAgentTemporalRange::IsEmpty() const { return IsValid() && bEmpty; }
 
 	bool AreTemporalPointsEquivalent(
 		const FUeAgentTemporalPoint& Left,
@@ -757,21 +826,18 @@ namespace UE::UAI::StateSemantic
 		OutComparison = EUeAgentTemporalComparison::Equivalent;
 		if (!Left.IsValid() || !Right.IsValid())
 		{
-			return Fail(OutError, TEXT("temporal_point_invalid"));
+			OutError = !Left.IsValid() ? Left.GetValidationDiagnostic() : Right.GetValidationDiagnostic();
+			OutError.PropertyPath = (!Left.IsValid() ? TEXT("left.") : TEXT("right.")) + OutError.PropertyPath; return false;
 		}
 		if (Left.GetClockId() != Right.GetClockId())
 		{
-			return Fail(
-				OutError,
-				TEXT("temporal_comparison_clock_mismatch"),
-				TEXT("clock_id"));
+			return ClockMismatch(OutError, TEXT("temporal_comparison_clock_mismatch"), TEXT("Temporal points from different clocks cannot be compared."),
+				TEXT("clock_id"), Left.GetClockId(), Right.GetClockId());
 		}
 		if (Left.GetState() != Right.GetState())
 		{
-			return Fail(
-				OutError,
-				TEXT("temporal_comparison_state_mismatch"),
-				TEXT("state"));
+			return Fail(OutError, TEXT("temporal_comparison_state_mismatch"), TEXT("Temporal points must have the same state before comparison."), TEXT("state"),
+				MakeShared<FJsonValueString>(Left.GetState()), MakeShared<FJsonValueString>(Right.GetState()));
 		}
 		if (!ChargeTemporalWork(
 				Resources,
@@ -786,7 +852,7 @@ namespace UE::UAI::StateSemantic
 		int32 Compared = 0;
 		if (!CompareTemporalPointsExact(Left, Right, Compared))
 		{
-			return Fail(OutError, TEXT("temporal_comparison_invalid"));
+			return Fail(OutError, TEXT("temporal_comparison_invalid"), TEXT("The validated temporal points could not be compared in the exact numeric domain."), TEXT("points"), PointValue(Left), PointValue(Right));
 		}
 		OutComparison = Compared < 0
 			? EUeAgentTemporalComparison::Before
@@ -808,28 +874,25 @@ namespace UE::UAI::StateSemantic
 		OutError = FUeAgentStateSemanticError{};
 		if (!Source.IsValid())
 		{
-			return Fail(OutError, TEXT("temporal_point_invalid"));
+			OutError = Source.GetValidationDiagnostic(); OutError.PropertyPath = TEXT("source.") + OutError.PropertyPath; return false;
 		}
 		if (!Conversion.IsValid())
 		{
-			return Fail(OutError, TEXT("temporal_conversion_invalid"));
+			OutError = Conversion.GetValidationDiagnostic(); OutError.PropertyPath = TEXT("conversion.") + OutError.PropertyPath; return false;
 		}
 		if (Source.GetClockId() != Conversion.GetSourceClockId())
 		{
-			return Fail(
-				OutError,
-				TEXT("temporal_conversion_source_clock_mismatch"),
-				TEXT("source.clock_id"));
+			return ClockMismatch(OutError, TEXT("temporal_conversion_source_clock_mismatch"), TEXT("The point clock does not match the conversion source clock."),
+				TEXT("source.clock_id"), Conversion.GetSourceClockId(), Source.GetClockId());
 		}
 		const FUeAgentTemporalRate SourceRate(
 			Source.GetRateNumerator(),
 			Source.GetRateDenominator());
 		if (!SourceRate.SemanticallyEquals(Conversion.GetSourceRate()))
 		{
-			return Fail(
-				OutError,
-				TEXT("temporal_conversion_source_rate_mismatch"),
-				TEXT("source.rate"));
+			return Fail(OutError, TEXT("temporal_conversion_source_rate_mismatch"), TEXT("The point rate does not match the conversion source rate."), TEXT("source.rate"),
+				RationalValue(Conversion.GetSourceRate().GetNumerator(), Conversion.GetSourceRate().GetDenominator()),
+				RationalValue(SourceRate.GetNumerator(), SourceRate.GetDenominator()));
 		}
 		if (!ChargeTemporalWork(
 				Resources,
@@ -873,18 +936,16 @@ namespace UE::UAI::StateSemantic
 		OutError = FUeAgentStateSemanticError{};
 		if (!Source.IsValid())
 		{
-			return Fail(OutError, TEXT("temporal_range_invalid"));
+			OutError = Source.GetValidationDiagnostic(); OutError.PropertyPath = TEXT("range.") + OutError.PropertyPath; return false;
 		}
 		if (!Conversion.IsValid())
 		{
-			return Fail(OutError, TEXT("temporal_conversion_invalid"));
+			OutError = Conversion.GetValidationDiagnostic(); OutError.PropertyPath = TEXT("conversion.") + OutError.PropertyPath; return false;
 		}
 		if (Source.GetClockId() != Conversion.GetSourceClockId())
 		{
-			return Fail(
-				OutError,
-				TEXT("temporal_conversion_source_clock_mismatch"),
-				TEXT("range.clock_id"));
+			return ClockMismatch(OutError, TEXT("temporal_conversion_source_clock_mismatch"), TEXT("The range clock does not match the conversion source clock."),
+				TEXT("range.clock_id"), Conversion.GetSourceClockId(), Source.GetClockId());
 		}
 
 		auto ConvertBound = [&Conversion, &Resources, &OutError](
@@ -917,16 +978,11 @@ namespace UE::UAI::StateSemantic
 
 		FUeAgentTemporalBound ConvertedLower = FUeAgentTemporalBound::Open();
 		FUeAgentTemporalBound ConvertedUpper = FUeAgentTemporalBound::Open();
-		if (!ConvertBound(
-				Source.GetLowerBound(),
-				LowerRounding,
-				ConvertedLower)
-			|| !ConvertBound(
-				Source.GetUpperBound(),
-				UpperRounding,
-				ConvertedUpper))
-		{
-			return false;
+		if (!ConvertBound(Source.GetLowerBound(), LowerRounding, ConvertedLower)) {
+			OutError.PropertyPath = TEXT("lower.") + OutError.PropertyPath; return false;
+		}
+		if (!ConvertBound(Source.GetUpperBound(), UpperRounding, ConvertedUpper)) {
+			OutError.PropertyPath = TEXT("upper.") + OutError.PropertyPath; return false;
 		}
 		if (Conversion.IsReverse())
 		{
@@ -939,9 +995,8 @@ namespace UE::UAI::StateSemantic
 			MoveTemp(ConvertedUpper));
 		if (!ConvertedRange.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("temporal_conversion_result_range_invalid"));
+			OutError = FUeAgentStateSemanticError::WrapFailure(TEXT("temporal_conversion_result_range_invalid"), ConvertedRange.GetValidationDiagnostic(), TEXT("state_semantic"));
+			return false;
 		}
 		OutRange = MoveTemp(ConvertedRange);
 		return true;

@@ -2,6 +2,7 @@
 
 #include "AIGraphTypes.h"
 #include "EdGraphSchema_BehaviorTree.h"
+#include "EdGraphSchema_BehaviorTreeDecorator.h"
 
 #include "UeAgentBehaviorTreeHeadlessSchema.generated.h"
 
@@ -26,4 +27,21 @@ protected:
 
 private:
 	TSharedPtr<FGraphNodeClassHelper> HeadlessClassCache;
+};
+
+/** The owned decorator graph consumes the same class cache and native schema menu. */
+UCLASS()
+class UUeAgentBehaviorTreeDecoratorHeadlessSchema final : public UEdGraphSchema_BehaviorTreeDecorator
+{
+	GENERATED_BODY()
+
+public:
+	void SetClassCacheOwner(UUeAgentBehaviorTreeHeadlessSchema& Owner);
+
+protected:
+	virtual FGraphNodeClassHelper& GetClassCache() const override;
+
+private:
+	UPROPERTY()
+	TObjectPtr<UUeAgentBehaviorTreeHeadlessSchema> ClassCacheOwner;
 };

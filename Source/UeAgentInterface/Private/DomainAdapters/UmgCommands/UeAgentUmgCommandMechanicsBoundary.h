@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/GraphCompound/UeAgentGraphCompoundActivation.h"
 #include "CoreMinimal.h"
 
@@ -10,5 +12,5 @@ namespace UE::UAI::DomainAdapters::UmgCommands
 	UEAGENTINTERFACE_API bool TryGetActivationProfiles(
 		TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>&
 			OutProfiles,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

@@ -6,13 +6,15 @@ namespace UE::UAI::CommandContract::Json
 {
 	namespace
 	{
-		void TranslateError(FString& Error)
+		void TranslateError(UE::UAI::Contract::FDiagnostic& Error)
 		{
-			if (Error.StartsWith(TEXT("contract_json_")))
+			if (Error.Code.StartsWith(TEXT("contract_json_")))
 			{
-				Error =
-					TEXT("command_json_")
-					+ Error.RightChop(14);
+				auto Cause = MakeShared<UE::UAI::Contract::FDiagnostic>(Error);
+				Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_json_") + Cause->Code.RightChop(14),
+					Cause->PublicMessage, TEXT("command_json"));
+				Error.CauseCode = Cause->Code;
+				Error.PublicCause = MoveTemp(Cause);
 			}
 		}
 	}
@@ -20,7 +22,7 @@ namespace UE::UAI::CommandContract::Json
 	bool TryParseObject(
 		const FString& Text,
 		TSharedPtr<FJsonObject>& OutObject,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const bool bResult =
 			UE::UAI::Contract::Json::TryParseObject(
@@ -34,7 +36,7 @@ namespace UE::UAI::CommandContract::Json
 	bool TryParseObject(
 		const TArray<uint8>& Utf8Bytes,
 		TSharedPtr<FJsonObject>& OutObject,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const bool bResult =
 			UE::UAI::Contract::Json::TryParseObject(
@@ -48,7 +50,7 @@ namespace UE::UAI::CommandContract::Json
 	bool TryCanonicalize(
 		const TSharedPtr<FJsonValue>& Value,
 		FString& OutText,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const bool bResult =
 			UE::UAI::Contract::Json::TryCanonicalize(
@@ -62,7 +64,7 @@ namespace UE::UAI::CommandContract::Json
 	bool TryCanonicalize(
 		const TSharedPtr<FJsonObject>& Object,
 		FString& OutText,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const bool bResult =
 			UE::UAI::Contract::Json::TryCanonicalize(
@@ -76,7 +78,7 @@ namespace UE::UAI::CommandContract::Json
 	bool TryCanonicalUtf8(
 		const TSharedPtr<FJsonObject>& Object,
 		TArray<uint8>& OutBytes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const bool bResult =
 			UE::UAI::Contract::Json::TryCanonicalUtf8(

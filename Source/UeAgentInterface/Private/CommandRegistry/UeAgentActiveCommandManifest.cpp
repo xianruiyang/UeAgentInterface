@@ -1,6 +1,9 @@
 #include "CommandRegistry/UeAgentActiveCommandManifest.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
+#include "CommandRegistry/UeAgentOperationRecoveryPolicy.h"
 #include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/Contract/UeAgentContractJson.h"
@@ -42,7 +45,7 @@ namespace UE::UAI::CommandRegistry
 			if (!Field.SchemaJson.IsEmpty())
 			{
 				TSharedPtr<FJsonObject> Schema;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (Contract::Json::TryParseObject(
 						Field.SchemaJson,
 						Schema,
@@ -55,11 +58,27 @@ namespace UE::UAI::CommandRegistry
 			return Object;
 		}
 
-		TSharedPtr<FJsonObject> CommandObject(
-			const FUeAgentFrozenCommandContract& Contract)
+		TSharedPtr<FJsonObject> ModelResultFieldObject(
+			const FUeAgentModelResultFieldDeclaration& Field)
 		{
-			const TSharedPtr<FJsonObject> Object =
-				MakeShared<FJsonObject>();
+			const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+			Object->SetStringField(TEXT("name"), Field.Name);
+			TArray<TSharedPtr<FJsonValue>> SourcePath;
+			SourcePath.Reserve(Field.SourcePath.Num());
+			for (const FString& Segment : Field.SourcePath)
+			{
+				SourcePath.Add(MakeShared<FJsonValueString>(Segment));
+			}
+			Object->SetArrayField(TEXT("source_path"), MoveTemp(SourcePath));
+			return Object;
+		}
+
+		bool TryCommandObject(
+			const FUeAgentFrozenCommandContract& Contract,
+			TSharedPtr<FJsonObject>& Object,
+			UE::UAI::Contract::FDiagnostic& OutError)
+		{
+			Object = MakeShared<FJsonObject>();
 			Object->SetStringField(
 				TEXT("command_id"),
 				Contract.GetCommandId());
@@ -78,6 +97,45 @@ namespace UE::UAI::CommandRegistry
 					ParameterObject(Field)));
 			}
 			Object->SetArrayField(TEXT("parameters"), Parameters);
+			if (!Contract.GetVariants().IsEmpty())
+			{
+				TArray<TSharedPtr<FJsonValue>> Variants;
+				for (const FUeAgentCommandVariantDeclaration& Variant : Contract.GetVariants())
+				{
+					TSharedPtr<FJsonObject> RequestSchema;
+					if (!Json::TryParseObject(Variant.RequestSchemaJson, RequestSchema, OutError))
+					{
+						OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(
+							TEXT("command_manifest_variant_schema_invalid"), OutError, TEXT("command_manifest"));
+						OutError.SubjectId = Contract.GetCommandId();
+						OutError.PropertyPath = TEXT("/variants/") + Variant.VariantId + TEXT("/request_schema");
+						return false;
+					}
+					const TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+					Item->SetStringField(TEXT("variant_id"), Variant.VariantId);
+					Item->SetObjectField(TEXT("request_schema"), MoveTemp(RequestSchema));
+					Item->SetStringField(TEXT("summary"), Variant.Purpose.Summary);
+					Item->SetStringField(TEXT("parameter_guidance"), Variant.Purpose.ParameterGuidance);
+					Item->SetStringField(TEXT("result_guidance"), Variant.Purpose.ResultGuidance);
+					Item->SetStringField(TEXT("minimum_example"), Variant.Purpose.MinimumExample);
+					Variants.Add(MakeShared<FJsonValueObject>(Item));
+				}
+				Object->SetArrayField(TEXT("variants"), MoveTemp(Variants));
+			}
+			Object->SetBoolField(TEXT("supports_operation_recovery"), SupportsOperationRequestRecovery(Contract));
+			if (!Contract.GetModelResultFields().IsEmpty())
+			{
+				TArray<TSharedPtr<FJsonValue>> ModelResultFields;
+				ModelResultFields.Reserve(Contract.GetModelResultFields().Num());
+				for (const FUeAgentModelResultFieldDeclaration& Field :
+					Contract.GetModelResultFields())
+				{
+					ModelResultFields.Add(MakeShared<FJsonValueObject>(
+						ModelResultFieldObject(Field)));
+				}
+				Object->SetArrayField(
+					TEXT("model_result_fields"), MoveTemp(ModelResultFields));
+			}
 			Object->SetField(TEXT("min_wire_version"), IntegerValue(1));
 			Object->SetField(TEXT("max_wire_version"), IntegerValue(1));
 			Object->SetStringField(
@@ -99,7 +157,7 @@ namespace UE::UAI::CommandRegistry
 			Object->SetArrayField(
 				TEXT("tutorial_references"),
 				TutorialReferences);
-			return Object;
+			return true;
 		}
 
 		TArray<uint8> Utf8Bytes(const FString& Text)
@@ -118,7 +176,7 @@ namespace UE::UAI::CommandRegistry
 		const FString& PluginVersion,
 		const FString& BuildId,
 		FString& OutManifest,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutManifest.Reset();
 		OutError.Reset();
@@ -126,7 +184,13 @@ namespace UE::UAI::CommandRegistry
 		const FString CleanBuildId = Clean(BuildId);
 		if (CleanPluginVersion.IsEmpty() || CleanBuildId.IsEmpty())
 		{
-			OutError = TEXT("active_command_manifest_source_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("active_command_manifest_source_invalid"),
+				CleanPluginVersion.IsEmpty() ? TEXT("The active command manifest requires a non-empty plugin version.")
+					: TEXT("The active command manifest requires a non-empty build identifier."), TEXT("command_manifest"));
+			OutError.PropertyPath = CleanPluginVersion.IsEmpty() ? TEXT("/source/plugin_version") : TEXT("/source/build_id");
+			OutError.ActualValue = MakeShared<FJsonValueString>(CleanPluginVersion.IsEmpty() ? PluginVersion : BuildId);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty string"));
+			OutError.SourceKind = TEXT("native_result");
 			return false;
 		}
 
@@ -135,8 +199,9 @@ namespace UE::UAI::CommandRegistry
 		for (const FUeAgentFrozenCommandContract& Contract :
 			Registry->GetContracts())
 		{
-			Commands.Add(MakeShared<FJsonValueObject>(
-				CommandObject(Contract)));
+			TSharedPtr<FJsonObject> Command;
+			if (!TryCommandObject(Contract, Command, OutError)) return false;
+			Commands.Add(MakeShared<FJsonValueObject>(MoveTemp(Command)));
 		}
 
 		const TSharedPtr<FJsonObject> Source = MakeShared<FJsonObject>();
@@ -164,7 +229,7 @@ namespace UE::UAI::CommandRegistry
 		const FString& PluginVersion,
 		const FString& BuildId,
 		const FString& ManifestPath,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FString Manifest;
 		if (!TryBuild(
@@ -180,44 +245,19 @@ namespace UE::UAI::CommandRegistry
 		if (Directory.IsEmpty()
 			|| !IFileManager::Get().MakeDirectory(*Directory, true))
 		{
-			OutError = TEXT("active_command_manifest_directory_failed");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("active_command_manifest_directory_failed"),
+				Directory.IsEmpty() ? TEXT("The manifest output path must include a directory.")
+					: TEXT("The command manifest output directory could not be created."), TEXT("command_manifest"), ManifestPath);
+			OutError.SourceKind = TEXT("native_result");
+			OutError.CandidateName = FPaths::GetCleanFilename(ManifestPath);
 			return false;
 		}
 		if (!FFileHelper::SaveArrayToFile(Utf8Bytes(Manifest), *ManifestPath))
 		{
-			OutError = TEXT("active_command_manifest_write_failed");
-			return false;
-		}
-		OutError.Reset();
-		return true;
-	}
-
-	bool FUeAgentActiveCommandManifest::TryVerify(
-		TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
-		const FString& PluginVersion,
-		const FString& BuildId,
-		const FString& ManifestPath,
-		FString& OutError)
-	{
-		FString Expected;
-		if (!TryBuild(
-			Registry,
-			PluginVersion,
-			BuildId,
-			Expected,
-			OutError))
-		{
-			return false;
-		}
-		TArray<uint8> Actual;
-		if (!FFileHelper::LoadFileToArray(Actual, *ManifestPath))
-		{
-			OutError = TEXT("active_command_manifest_file_missing");
-			return false;
-		}
-		if (Actual != Utf8Bytes(Expected))
-		{
-			OutError = TEXT("active_command_manifest_projection_mismatch");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("active_command_manifest_write_failed"),
+				TEXT("The command manifest file could not be written."), TEXT("command_manifest"), ManifestPath);
+			OutError.SourceKind = TEXT("native_result");
+			OutError.CandidateName = FPaths::GetCleanFilename(ManifestPath);
 			return false;
 		}
 		OutError.Reset();

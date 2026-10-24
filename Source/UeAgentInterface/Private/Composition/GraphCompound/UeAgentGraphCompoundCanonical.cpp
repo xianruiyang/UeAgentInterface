@@ -1,6 +1,8 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundCanonical.h"
 
 #include "Core/ContextResource/UeAgentContextResource.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::Composition::GraphCompound
 {
@@ -9,6 +11,33 @@ namespace UE::UAI::Composition::GraphCompound
 		using namespace UE::UAI::ContextResource;
 		using namespace UE::UAI::PlanningPreflight;
 		using namespace UE::UAI::StateSemantic;
+
+		FGraphCompoundCanonicalError CanonicalFailure(const FString& Code, const FString& Reason,
+			const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const FString& Target = FString())
+		{
+			auto Error = Contract::FDiagnostic::Failure(Code, Reason, TEXT("graph_compound"));
+			Error.PropertyPath = Field;
+			Error.TargetPath = Target;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValuePresent = Expected.IsValid();
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			MarkGraphCompoundNativeDiagnostic(Error);
+			return Error;
+		}
+
+		FGraphCompoundCanonicalError IdentityFailureAt(const FUeAgentCanonicalIdentity& Identity, const FString& Field)
+		{
+			auto Error = Identity.GetValidationDiagnostic();
+			// Identity validation reports paths relative to its own /identity root.
+			FString Relative = Error.SemanticPointer;
+			Relative.RemoveFromStart(TEXT("/identity"));
+			Error.SemanticPointer = Field + Relative;
+			Error.PropertyPath = Error.SemanticPointer;
+			MarkGraphCompoundNativeDiagnostic(Error);
+			return Error;
+		}
 
 		TArray<FString> NormalizeStrings(TArray<FString> Values)
 		{
@@ -55,7 +84,7 @@ namespace UE::UAI::Composition::GraphCompound
 			FUeAgentResourceTracker& Resources,
 			FGraphCompoundCanonicalError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded Error;
+			FUeAgentResourceChargeError Error;
 			if (Resources.TryChargeMany(
 				{
 					{EUeAgentResourceDimension::Nodes, Items},
@@ -72,28 +101,11 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				return true;
 			}
-			OutError.Code = Error.Code.IsEmpty()
-				? TEXT("graph_compound_resource_budget_exceeded")
-				: Error.Code;
-			OutError.Detail = FString::Printf(
-				TEXT("resource %s observed %lld over limit %lld at %s"),
-				*LexToString(Error.Dimension),
-				static_cast<long long>(Error.Observed),
-				static_cast<long long>(Error.Limit),
-				*Error.Path);
+			OutError = Error;
+			MarkGraphCompoundNativeDiagnostic(OutError);
 			return false;
 		}
 
-		void SetError(
-			FGraphCompoundCanonicalError& OutError,
-			const FString& Code,
-			const FString& IdentityKey,
-			const FString& Detail)
-		{
-			OutError.Code = Code;
-			OutError.IdentityKey = IdentityKey;
-			OutError.Detail = Detail;
-		}
 	}
 
 	FString GetGraphCompoundCanonicalSchemaId()
@@ -151,23 +163,54 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				return Left.GetCanonicalKey() < Right.GetCanonicalKey();
 			});
-		bool bReferencesValid = true;
-		for (const FUeAgentCanonicalIdentity& Dependency : Dependencies)
+		if (!Identity.IsValid())
 		{
-			bReferencesValid = bReferencesValid && Dependency.IsValid();
+			ValidationDiagnostic = IdentityFailureAt(Identity, TEXT("/identity"));
+			return;
 		}
-		for (const FUeAgentCanonicalIdentity& Target : ImpactTargets)
+		auto Reject = [this](const FString& Reason, const FString& Field,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 		{
-			bReferencesValid = bReferencesValid && Target.IsValid();
+			ValidationDiagnostic = CanonicalFailure(TEXT("graph_compound_edit_invalid"), Reason,
+				Field, MoveTemp(Actual), MoveTemp(Expected), Identity.GetOwnerId());
+			ValidationDiagnostic.SubjectId = Identity.GetSemanticId();
+		};
+		if (!IsElementKindValid(ElementKind))
+		{
+			Reject(TEXT("The canonical edit element kind is not supported."), TEXT("/element_kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(ElementKind)),
+				MakeShared<FJsonValueString>(TEXT("target, structure, item, pin, relation, property, input, hierarchy, order, binding or dependency")));
+			return;
 		}
-		const bool bValueValid = Intent == EChangeIntent::Delete
-			? !ProposedAfter.IsValid()
-			: ProposedAfter.IsValid();
-		bValid = Identity.IsValid()
-			&& IsElementKindValid(ElementKind)
-			&& bValueValid
-			&& bReferencesValid
-			&& !ImpactEvidenceId.IsEmpty();
+		const bool bRequiresAfter = Intent != EChangeIntent::Delete;
+		if (ProposedAfter.IsValid() != bRequiresAfter)
+		{
+			Reject(bRequiresAfter ? TEXT("The canonical edit requires a proposed value.")
+				: TEXT("A delete edit must not contain a proposed value."), TEXT("/proposed_after.present"),
+				MakeShared<FJsonValueBoolean>(ProposedAfter.IsValid()), MakeShared<FJsonValueBoolean>(bRequiresAfter));
+			return;
+		}
+		for (int32 Index = 0; Index < Dependencies.Num(); ++Index)
+		{
+			if (!Dependencies[Index].IsValid())
+			{
+				ValidationDiagnostic = IdentityFailureAt(Dependencies[Index], FString::Printf(TEXT("/dependencies/%d"), Index));
+				ValidationDiagnostic.TargetPath = Identity.GetOwnerId();
+				return;
+			}
+		}
+		for (int32 Index = 0; Index < ImpactTargets.Num(); ++Index)
+		{
+			if (!ImpactTargets[Index].IsValid())
+			{
+				ValidationDiagnostic = IdentityFailureAt(ImpactTargets[Index], FString::Printf(TEXT("/impact_targets/%d"), Index));
+				ValidationDiagnostic.TargetPath = Identity.GetOwnerId();
+				return;
+			}
+		}
+		if (ImpactEvidenceId.IsEmpty())
+			Reject(TEXT("The canonical edit requires a non-empty impact evidence identifier."),
+				TEXT("/impact_evidence_id.present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 	}
 
 	const FUeAgentCanonicalIdentity& FGraphCompoundCanonicalEdit::GetIdentity() const
@@ -207,13 +250,16 @@ namespace UE::UAI::Composition::GraphCompound
 		return ImpactTargets;
 	}
 
-	bool FGraphCompoundCanonicalEdit::IsValid() const { return bValid; }
+	bool FGraphCompoundCanonicalEdit::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FGraphCompoundCanonicalError& FGraphCompoundCanonicalEdit::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FGraphCompoundCanonicalPayload::FGraphCompoundCanonicalPayload(
 		FString InSchemaId,
-		TArray<FGraphCompoundCanonicalEdit> InEdits)
+		TArray<FGraphCompoundCanonicalEdit> InEdits,
+		TMap<FString, FString> InInputPointers)
 		: SchemaId(MoveTemp(InSchemaId))
 		, Edits(MoveTemp(InEdits))
+		, InputPointers(MoveTemp(InInputPointers))
 	{
 		SchemaId.TrimStartAndEndInline();
 	}
@@ -228,6 +274,102 @@ namespace UE::UAI::Composition::GraphCompound
 		return Edits;
 	}
 
+	TSharedPtr<FJsonValue> CanonicalInputFact(const StateSemantic::FUeAgentCanonicalValue* Value)
+	{
+		using StateSemantic::EUeAgentValueKind;
+		if (!Value) return nullptr;
+		switch (Value->GetKind())
+		{
+		case EUeAgentValueKind::Null: return MakeShared<FJsonValueNull>();
+		case EUeAgentValueKind::Boolean: return MakeShared<FJsonValueBoolean>(Value->GetBoolean());
+		case EUeAgentValueKind::String: return MakeShared<FJsonValueString>(Value->GetText());
+		default: break;
+		}
+		const TSharedRef<FJsonObject> Fact = MakeShared<FJsonObject>();
+		switch (Value->GetKind())
+		{
+		case EUeAgentValueKind::Integer:
+		case EUeAgentValueKind::Decimal:
+			Fact->SetStringField(TEXT("kind"), Value->GetKind() == EUeAgentValueKind::Integer
+				? TEXT("integer") : TEXT("decimal"));
+			Fact->SetStringField(TEXT("value"), Value->GetLexeme());
+			break;
+		case EUeAgentValueKind::Array:
+			Fact->SetStringField(TEXT("kind"), TEXT("array"));
+			Fact->SetNumberField(TEXT("count"), Value->GetArrayItems().Num());
+			break;
+		case EUeAgentValueKind::Object:
+			Fact->SetStringField(TEXT("kind"), TEXT("object"));
+			Fact->SetNumberField(TEXT("count"), Value->GetObjectItems().Num());
+			break;
+		default:
+			Fact->SetNumberField(TEXT("canonical_kind"), static_cast<int32>(Value->GetKind()));
+			break;
+		}
+		return MakeShared<FJsonValueObject>(Fact);
+	}
+
+	void BindGraphCompoundInputValueDiagnostic(Contract::FDiagnostic& Diagnostic, const FString& InputPointer, const FString& ValueRoot)
+	{
+		if (!Diagnostic.IsValid()) return;
+		for (auto& Child : Diagnostic.Diagnostics) BindGraphCompoundInputValueDiagnostic(Child, InputPointer, ValueRoot);
+		if (Diagnostic.PublicCause)
+		{
+			auto Cause = MakeShared<Contract::FDiagnostic>(*Diagnostic.PublicCause);
+			BindGraphCompoundInputValueDiagnostic(*Cause, InputPointer, ValueRoot);
+			Diagnostic.PublicCause = MoveTemp(Cause);
+		}
+		if (Diagnostic.SourceKind == TEXT("native_result") || Diagnostic.SourceKind == TEXT("command_input")
+			|| !Diagnostic.Source.SourceFile.IsEmpty()) return;
+		auto Bind = [&](FString& Path)
+		{
+			if (ValueRoot != TEXT("/"))
+			{
+				if (Path == ValueRoot) Path.Reset();
+				else if (Path.StartsWith(ValueRoot + TEXT("/"))) Path.RightChopInline(ValueRoot.Len());
+			}
+			Path = (InputPointer == TEXT("/") ? FString() : InputPointer)
+				+ (Path == TEXT("/") ? FString() : Path);
+			if (Path.IsEmpty()) Path = TEXT("/");
+		};
+		Bind(Diagnostic.Source.JsonPath);
+		if (!Diagnostic.Source.InternalJsonPath.IsEmpty()) Bind(Diagnostic.Source.InternalJsonPath);
+		if (!Diagnostic.SemanticPointer.IsEmpty()) Bind(Diagnostic.SemanticPointer);
+		else Diagnostic.SemanticPointer = Diagnostic.Source.JsonPath;
+		Diagnostic.SourceKind = TEXT("command_input");
+	}
+
+	void MarkGraphCompoundNativeDiagnostic(Contract::FDiagnostic& Diagnostic)
+	{
+		if (!Diagnostic.IsValid()) return;
+		Diagnostic.SourceKind = TEXT("native_result");
+		for (auto& Child : Diagnostic.Diagnostics) MarkGraphCompoundNativeDiagnostic(Child);
+		if (Diagnostic.PublicCause)
+		{
+			auto Cause = MakeShared<Contract::FDiagnostic>(*Diagnostic.PublicCause);
+			MarkGraphCompoundNativeDiagnostic(*Cause);
+			Diagnostic.PublicCause = MoveTemp(Cause);
+		}
+	}
+
+	void FGraphCompoundCanonicalPayload::LocateDiagnostic(Contract::FDiagnostic& Diagnostic, const FString& SemanticId) const
+	{
+		if (!Diagnostic.IsValid()) return;
+		for (auto& Child : Diagnostic.Diagnostics) LocateDiagnostic(Child, SemanticId);
+		if (Diagnostic.PublicCause)
+		{
+			auto Cause = MakeShared<Contract::FDiagnostic>(*Diagnostic.PublicCause);
+			LocateDiagnostic(*Cause, SemanticId); Diagnostic.PublicCause = MoveTemp(Cause);
+		}
+		if (Diagnostic.SourceKind == TEXT("native_result") || Diagnostic.SourceKind == TEXT("command_input")
+			|| !Diagnostic.Source.SourceFile.IsEmpty() || !Diagnostic.SemanticPointer.IsEmpty() || !Diagnostic.Source.JsonPath.IsEmpty()) return;
+		const FString* Pointer = InputPointers.Find(SemanticId.IsEmpty() ? Diagnostic.SubjectId : SemanticId);
+		// A whole-operation failure is not evidence against an arbitrary first edit.
+		if (!Pointer) return;
+		Diagnostic.Source.JsonPath = *Pointer;
+		Diagnostic.SourceKind = TEXT("related_input");
+	}
+
 	bool TryValidateGraphCompoundCanonicalPayload(
 		const FGraphCompoundCanonicalPayload& Payload,
 		const FUeAgentCanonicalSnapshotRef& Snapshot,
@@ -237,20 +379,16 @@ namespace UE::UAI::Composition::GraphCompound
 		OutError = FGraphCompoundCanonicalError();
 		if (Payload.GetSchemaId() != GetGraphCompoundCanonicalSchemaId())
 		{
-			SetError(
-				OutError,
-				TEXT("graph_compound_schema_mismatch"),
-				TEXT(""),
-				TEXT("canonical graph payload must use uai.graph_compound.canonical.v1"));
+			OutError = CanonicalFailure(TEXT("graph_compound_schema_mismatch"),
+				TEXT("The canonical graph payload schema does not match the supported schema."), TEXT("/schema_id"),
+				MakeShared<FJsonValueString>(Payload.GetSchemaId()), MakeShared<FJsonValueString>(GetGraphCompoundCanonicalSchemaId()));
 			return false;
 		}
 		if (Payload.GetEdits().IsEmpty())
 		{
-			SetError(
-				OutError,
-				TEXT("graph_compound_edits_empty"),
-				TEXT(""),
-				TEXT("at least one explicit per-identity edit is required"));
+			OutError = CanonicalFailure(TEXT("graph_compound_edits_empty"),
+				TEXT("At least one explicit per-identity edit is required."), TEXT("/edits.count"),
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one edit")));
 			return false;
 		}
 
@@ -281,20 +419,20 @@ namespace UE::UAI::Composition::GraphCompound
 			const FString& Key = Edit.GetIdentity().GetCanonicalKey();
 			if (!Edit.IsValid())
 			{
-				SetError(
-					OutError,
-					TEXT("graph_compound_edit_invalid"),
-					Key,
-					TEXT("canonical edit identity, kind, value or impact evidence is invalid"));
+				OutError = Edit.GetValidationDiagnostic();
+				OutError.OperationIndex = Index;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Edit.GetIdentity().GetSemanticId();
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Edit.GetIdentity().GetOwnerId();
 				return false;
 			}
 			if (EditIndexByKey.Contains(Key))
 			{
-				SetError(
-					OutError,
-					TEXT("graph_compound_duplicate_identity"),
-					Key,
-					TEXT("one canonical payload may edit an identity only once"));
+				OutError = CanonicalFailure(TEXT("graph_compound_duplicate_identity"),
+					TEXT("This canonical edit repeats the identity of an earlier edit."), TEXT("/edits/duplicate_of_index"),
+					MakeShared<FJsonValueNumber>(EditIndexByKey.FindChecked(Key)), MakeShared<FJsonValueString>(TEXT("unique identity per edit")),
+					Edit.GetIdentity().GetOwnerId());
+				OutError.OperationIndex = Index;
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Key);
 				return false;
 			}
 			EditIndexByKey.Add(Key, Index);
@@ -302,20 +440,20 @@ namespace UE::UAI::Composition::GraphCompound
 			const bool bExists = SnapshotByKey.Contains(Key);
 			if (Edit.GetIntent() == EChangeIntent::Create && bExists)
 			{
-				SetError(
-					OutError,
-					TEXT("graph_compound_create_target_exists"),
-					Key,
-					TEXT("create requires the canonical identity to be absent from the C4 snapshot"));
+				OutError = CanonicalFailure(TEXT("graph_compound_create_target_exists"),
+					TEXT("The create edit's target is already present in the independent snapshot."), TEXT("/target.present"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), Edit.GetIdentity().GetOwnerId());
+				OutError.OperationIndex = Index;
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Key);
 				return false;
 			}
 			if (Edit.GetIntent() != EChangeIntent::Create && !bExists)
 			{
-				SetError(
-					OutError,
-					TEXT("graph_compound_change_target_missing"),
-					Key,
-					TEXT("update, replace and delete require an independently read current value"));
+				OutError = CanonicalFailure(TEXT("graph_compound_change_target_missing"),
+					TEXT("The edit requires a target with an independently read current value."), TEXT("/target.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Edit.GetIdentity().GetOwnerId());
+				OutError.OperationIndex = Index;
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Key);
 				return false;
 			}
 		}
@@ -327,17 +465,20 @@ namespace UE::UAI::Composition::GraphCompound
 		for (int32 Index = 0; Index < Payload.GetEdits().Num(); ++Index)
 		{
 			TSet<FString> SeenDependencies;
-			for (const FUeAgentCanonicalIdentity& Dependency
-				: Payload.GetEdits()[Index].GetDependencies())
+			const auto& Edit = Payload.GetEdits()[Index];
+			for (int32 DependencyIndexInEdit = 0; DependencyIndexInEdit < Edit.GetDependencies().Num(); ++DependencyIndexInEdit)
 			{
+				const auto& Dependency = Edit.GetDependencies()[DependencyIndexInEdit];
 				const FString& DependencyKey = Dependency.GetCanonicalKey();
 				if (SeenDependencies.Contains(DependencyKey))
 				{
-					SetError(
-						OutError,
-						TEXT("graph_compound_duplicate_dependency"),
-						Payload.GetEdits()[Index].GetIdentity().GetCanonicalKey(),
-						DependencyKey);
+					OutError = CanonicalFailure(TEXT("graph_compound_duplicate_dependency"),
+						TEXT("The canonical edit lists the same dependency more than once."),
+						FString::Printf(TEXT("/dependencies/%d"), DependencyIndexInEdit),
+						MakeShared<FJsonValueString>(Dependency.GetOwnerId()), MakeShared<FJsonValueString>(TEXT("one reference per dependency")),
+						Edit.GetIdentity().GetOwnerId());
+					OutError.OperationIndex = Index;
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(DependencyKey);
 					return false;
 				}
 				SeenDependencies.Add(DependencyKey);
@@ -349,11 +490,13 @@ namespace UE::UAI::Composition::GraphCompound
 				}
 				else if (!SnapshotByKey.Contains(DependencyKey))
 				{
-					SetError(
-						OutError,
-						TEXT("graph_compound_dependency_missing"),
-						Payload.GetEdits()[Index].GetIdentity().GetCanonicalKey(),
-						DependencyKey);
+					OutError = CanonicalFailure(TEXT("graph_compound_dependency_missing"),
+						TEXT("The referenced dependency is absent from both the payload edits and the independent snapshot."),
+						FString::Printf(TEXT("/dependencies/%d"), DependencyIndexInEdit),
+						MakeShared<FJsonValueString>(Dependency.GetOwnerId()), MakeShared<FJsonValueString>(TEXT("dependency present in edits or snapshot")),
+						Edit.GetIdentity().GetOwnerId());
+					OutError.OperationIndex = Index;
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(DependencyKey);
 					return false;
 				}
 			}
@@ -383,11 +526,13 @@ namespace UE::UAI::Composition::GraphCompound
 		}
 		if (Processed != Payload.GetEdits().Num())
 		{
-			SetError(
-				OutError,
-				TEXT("graph_compound_dependency_cycle"),
-				TEXT(""),
-				TEXT("canonical dependency graph contains a cycle"));
+			TArray<TSharedPtr<FJsonValue>> BlockedIndices;
+			for (int32 Index = 0; Index < InDegree.Num(); ++Index)
+				if (InDegree[Index] > 0) BlockedIndices.Add(MakeShared<FJsonValueNumber>(Index));
+			OutError = CanonicalFailure(TEXT("graph_compound_dependency_cycle"),
+				TEXT("A dependency cycle prevents these edits from being ordered; listed edits may also depend on the cycle."),
+				TEXT("/dependencies/blocked_edit_indices"), MakeShared<FJsonValueArray>(MoveTemp(BlockedIndices)),
+				MakeShared<FJsonValueString>(TEXT("acyclic dependency graph")));
 			return false;
 		}
 		return true;
@@ -405,15 +550,20 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		OutDraft.Reset();
 		OutError = FGraphCompoundCanonicalError();
-		if (!DescriptorIdentity.IsValid()
-			|| RequestId.TrimStartAndEnd().IsEmpty()
-			|| IdempotencyKey.TrimStartAndEnd().IsEmpty())
+		if (!DescriptorIdentity.IsValid())
 		{
-			SetError(
-				OutError,
-				TEXT("graph_compound_draft_identity_invalid"),
-				TEXT(""),
-				TEXT("descriptor, request id and idempotency key are required"));
+			OutError = DescriptorIdentity.GetValidationDiagnostic();
+			MarkGraphCompoundNativeDiagnostic(OutError);
+			return false;
+		}
+		if (RequestId.TrimStartAndEnd().IsEmpty() || IdempotencyKey.TrimStartAndEnd().IsEmpty())
+		{
+			const bool bRequestMissing = RequestId.TrimStartAndEnd().IsEmpty();
+			OutError = CanonicalFailure(TEXT("graph_compound_draft_identity_invalid"),
+				bRequestMissing ? TEXT("The graph change set requires a non-empty request identifier.")
+					: TEXT("The graph change set requires a non-empty idempotency key."),
+				bRequestMissing ? TEXT("/request_id.present") : TEXT("/idempotency_key.present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		if (!TryValidateGraphCompoundCanonicalPayload(
@@ -449,11 +599,11 @@ namespace UE::UAI::Composition::GraphCompound
 				Edit.GetImpactTargets());
 			if (!Changes.Last().IsValid())
 			{
-				SetError(
-					OutError,
-					TEXT("graph_compound_change_draft_invalid"),
-					Edit.GetIdentity().GetCanonicalKey(),
-					TEXT("per-identity canonical edit could not form a C6 change draft"));
+				OutError = Changes.Last().GetValidationDiagnostic();
+				MarkGraphCompoundNativeDiagnostic(OutError);
+				OutError.OperationIndex = Changes.Num() - 1;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Edit.GetIdentity().GetSemanticId();
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Edit.GetIdentity().GetOwnerId();
 				return false;
 			}
 		}
@@ -466,11 +616,8 @@ namespace UE::UAI::Composition::GraphCompound
 			MoveTemp(Changes));
 		if (!Draft.IsValid())
 		{
-			SetError(
-				OutError,
-				TEXT("graph_compound_change_set_invalid"),
-				TEXT(""),
-				TEXT("canonical edits could not form one valid C6 ChangeSetDraft"));
+			OutError = Draft.GetValidationDiagnostic();
+			MarkGraphCompoundNativeDiagnostic(OutError);
 			return false;
 		}
 		OutDraft.Emplace(MoveTemp(Draft));
@@ -528,26 +675,104 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			Value->TrimStartAndEndInline();
 		}
-		const bool bCommonValid = DescriptorIdentity.IsValid()
-			&& !FamilyId.IsEmpty()
-			&& !BindingId.IsEmpty()
-			&& !TypedRequestId.IsEmpty()
-			&& !TypedResultId.IsEmpty()
-			&& !ReadbackId.IsEmpty()
-			&& !OracleKind.IsEmpty();
-		const bool bQueryValid = Lane == EGraphCompoundExecutionLane::Query
-			&& !bRequiresNativeMutation
-			&& !bReadsBackAfterMutation
-			&& C6ChangeKind.IsEmpty()
-			&& NativeActionId.IsEmpty()
-			&& SettleBarrier.IsEmpty();
-		const bool bOperationValid = Lane == EGraphCompoundExecutionLane::Operation
-			&& bRequiresNativeMutation
-			&& bReadsBackAfterMutation
-			&& !C6ChangeKind.IsEmpty()
-			&& !NativeActionId.IsEmpty()
-			&& !SettleBarrier.IsEmpty();
-		bValid = bCommonValid && (bQueryValid || bOperationValid);
+		auto Reject = [this](const TCHAR* Field, const FString& Reason,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			ValidationDiagnostic = Contract::FDiagnostic::Failure(
+				TEXT("graph_compound_execution_contract_invalid"), Reason,
+				TEXT("graph_compound"), FString(), BindingId);
+			ValidationDiagnostic.SourceKind = TEXT("native_result");
+			ValidationDiagnostic.PropertyPath = Field;
+			ValidationDiagnostic.ActualValue = MoveTemp(Actual);
+			ValidationDiagnostic.ExpectedValue = MoveTemp(Expected);
+		};
+		if (!DescriptorIdentity.IsValid())
+		{
+			ValidationDiagnostic = Contract::FDiagnostic::WrapFailure(
+				TEXT("graph_compound_execution_contract_invalid"),
+				DescriptorIdentity.GetValidationDiagnostic(), TEXT("graph_compound"),
+				TEXT("The graph execution contract has an invalid descriptor identity."));
+			ValidationDiagnostic.SourceKind = TEXT("native_result");
+			ValidationDiagnostic.PropertyPath = TEXT("descriptor_identity");
+			return;
+		}
+		if (FamilyId.IsEmpty())
+		{
+			Reject(TEXT("family_id"), TEXT("The graph execution contract family_id is empty after trimming."),
+				MakeShared<FJsonValueString>(FamilyId), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+			return;
+		}
+		if (BindingId.IsEmpty())
+		{
+			Reject(TEXT("binding_id"), TEXT("The graph execution contract binding_id is empty after trimming."),
+				MakeShared<FJsonValueString>(BindingId), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+			return;
+		}
+		if (TypedRequestId.IsEmpty())
+		{
+			Reject(TEXT("typed_request_id"), TEXT("The graph execution contract typed_request_id is empty after trimming."),
+				MakeShared<FJsonValueString>(TypedRequestId), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+			return;
+		}
+		if (TypedResultId.IsEmpty())
+		{
+			Reject(TEXT("typed_result_id"), TEXT("The graph execution contract typed_result_id is empty after trimming."),
+				MakeShared<FJsonValueString>(TypedResultId), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+			return;
+		}
+		if (ReadbackId.IsEmpty())
+		{
+			Reject(TEXT("readback_id"), TEXT("The graph execution contract readback_id is empty after trimming."),
+				MakeShared<FJsonValueString>(ReadbackId), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+			return;
+		}
+		if (OracleKind.IsEmpty())
+		{
+			Reject(TEXT("oracle_kind"), TEXT("The graph execution contract oracle_kind is empty after trimming."),
+				MakeShared<FJsonValueString>(OracleKind), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+			return;
+		}
+		if (Lane != EGraphCompoundExecutionLane::Query && Lane != EGraphCompoundExecutionLane::Operation)
+		{
+			Reject(TEXT("lane"), TEXT("The graph execution contract lane is unsupported."),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Lane)),
+				MakeShared<FJsonValueString>(TEXT("Query or Operation")));
+			return;
+		}
+		const bool bOperation = Lane == EGraphCompoundExecutionLane::Operation;
+		if (bRequiresNativeMutation != bOperation)
+		{
+			Reject(TEXT("requires_native_mutation"), TEXT("requires_native_mutation must be false for Query and true for Operation."),
+				MakeShared<FJsonValueBoolean>(bRequiresNativeMutation), MakeShared<FJsonValueBoolean>(bOperation));
+			return;
+		}
+		if (bReadsBackAfterMutation != bOperation)
+		{
+			Reject(TEXT("reads_back_after_mutation"), TEXT("reads_back_after_mutation must be false for Query and true for Operation."),
+				MakeShared<FJsonValueBoolean>(bReadsBackAfterMutation), MakeShared<FJsonValueBoolean>(bOperation));
+			return;
+		}
+		if (C6ChangeKind.IsEmpty() == bOperation)
+		{
+			Reject(TEXT("c6_change_kind"), TEXT("c6_change_kind must be empty for Query and non-empty for Operation."),
+				MakeShared<FJsonValueString>(C6ChangeKind),
+				MakeShared<FJsonValueString>(bOperation ? TEXT("non-empty string") : TEXT("empty string")));
+			return;
+		}
+		if (NativeActionId.IsEmpty() == bOperation)
+		{
+			Reject(TEXT("native_action_id"), TEXT("native_action_id must be empty for Query and non-empty for Operation."),
+				MakeShared<FJsonValueString>(NativeActionId),
+				MakeShared<FJsonValueString>(bOperation ? TEXT("non-empty string") : TEXT("empty string")));
+			return;
+		}
+		if (SettleBarrier.IsEmpty() == bOperation)
+		{
+			Reject(TEXT("settle_barrier"), TEXT("settle_barrier must be empty for Query and non-empty for Operation."),
+				MakeShared<FJsonValueString>(SettleBarrier),
+				MakeShared<FJsonValueString>(bOperation ? TEXT("non-empty string") : TEXT("empty string")));
+			return;
+		}
 	}
 
 	const FUeAgentDescriptorIdentity& FGraphCompoundExecutionContract::GetDescriptorIdentity() const
@@ -571,5 +796,6 @@ namespace UE::UAI::Composition::GraphCompound
 	const FString& FGraphCompoundExecutionContract::GetOracleKind() const { return OracleKind; }
 	bool FGraphCompoundExecutionContract::RequiresNativeMutation() const { return bRequiresNativeMutation; }
 	bool FGraphCompoundExecutionContract::ReadsBackAfterMutation() const { return bReadsBackAfterMutation; }
-	bool FGraphCompoundExecutionContract::IsValid() const { return bValid; }
+	bool FGraphCompoundExecutionContract::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const Contract::FDiagnostic& FGraphCompoundExecutionContract::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 }

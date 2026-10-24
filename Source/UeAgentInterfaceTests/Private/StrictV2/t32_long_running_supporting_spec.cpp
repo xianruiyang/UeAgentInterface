@@ -17,6 +17,7 @@ namespace
 			TEXT("operation.status"), TEXT("operation.receipt"),
 			TEXT("operation.cancel"), TEXT("operation.resume"),
 			TEXT("operation.reconcile"), TEXT("operation.release"),
+			TEXT("operation.discover"), TEXT("operation.recover"), TEXT("operation.takeover"),
 		};
 		return Commands;
 	}
@@ -81,6 +82,9 @@ namespace
 
 	FString ParamsFor(const FString& CommandId)
 	{
+		if (CommandId == TEXT("operation.discover")) return TEXT("{}");
+		if (CommandId == TEXT("operation.recover")) return TEXT("{\"command_id\":\"editor.session\",\"request_id\":\"req-original\"}");
+		if (CommandId == TEXT("operation.takeover")) return TEXT("{\"operation_id\":\"operation:fixture\"}");
 		const FString OperationRef =
 			TEXT("{\"operation_id\":\"operation:fixture\",")
 			TEXT("\"owner_lease_id\":\"lease:fixture\",")
@@ -114,7 +118,7 @@ bool FUeAgentStrictV2T32ExactDispatchTest::RunTest(const FString& Parameters)
 	TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch> Dispatch;
 	FString Error;
-	TestTrue(TEXT("the six lifecycle routes compose in isolation"),
+	TestTrue(TEXT("the nine lifecycle routes compose in isolation"),
 		TryCreateLongRunningLifecycleRegistration(
 			Port, Registry, Dispatch, Error));
 	if (!Registry.IsValid() || !Dispatch.IsValid())
@@ -152,7 +156,7 @@ bool FUeAgentStrictV2T32ExactDispatchTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("canonical params are forwarded unchanged"),
 			Port->Payloads.Last(), Params);
 	}
-	TestEqual(TEXT("six requests produce exactly six owner calls"), Port->Calls, 6);
+	TestEqual(TEXT("each request produces exactly one owner call"), Port->Calls, ExpectedCommands().Num());
 
 	const FString UnknownCommand = TEXT("operation.status");
 	const auto* UnknownContract = Registry->FindExact(UnknownCommand);

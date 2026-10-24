@@ -8,6 +8,7 @@
 #include "Core/Projection/UeAgentProjection.h"
 #include "Core/Verification/UeAgentVerification.h"
 #include "DomainAdapters/GenericEffect/UeAgentGenericEffectAdapter.h"
+#include "Dom/JsonValue.h"
 #include "Templates/SharedPointer.h"
 
 #define UAI_SIMPLE_AUTHORING_PRODUCTION_PROVIDER_V1 1
@@ -16,18 +17,7 @@
 
 namespace UE::UAI::Composition::SimpleAuthoring
 {
-	struct UEAGENTINTERFACE_API
-		FUeAgentSimpleAuthoringProductionError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	using FUeAgentSimpleAuthoringProductionError = Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API
 		IUeAgentSimpleAuthoringTargetResolver
@@ -185,8 +175,14 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		{
 			OutSession.Reset();
 			OutObservedStates.Reset();
-			OutError = AssetDurable::FAssetDurableError(
-				TEXT("simple_authoring_durable_inspect_unavailable"));
+			OutError = AssetDurable::FAssetDurableError::Failure(
+				TEXT("simple_authoring_durable_inspect_unavailable"),
+				TEXT("The configured durable service does not support journal inspection."),
+				TEXT("durable_inspect"), FString(), JournalId);
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("TryInspect");
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
 			return false;
 		}
 		virtual bool TryReconcile(
@@ -199,8 +195,14 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			AssetDurable::FAssetDurableError& OutError)
 		{
 			OutReceipt = AssetDurable::FDurableReceipt();
-			OutError = AssetDurable::FAssetDurableError(
-				TEXT("simple_authoring_durable_reconcile_unavailable"));
+			OutError = AssetDurable::FAssetDurableError::Failure(
+				TEXT("simple_authoring_durable_reconcile_unavailable"),
+				TEXT("The configured durable service does not support journal reconciliation."),
+				TEXT("durable_reconcile"), FString(), JournalId);
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("TryReconcile");
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
 			return false;
 		}
 	};
@@ -214,7 +216,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			Discovery::EUeAgentStatePlane::AuthoringMemory;
 		AssetDurable::EAtomicityMode AtomicityMode =
 			AssetDurable::EAtomicityMode::CompensatedSaga;
-		int32 MaxQueueItems = 64;
 		TOptional<Projection::FUeAgentProjectionRequest> Projection;
 		TSharedPtr<
 			IUeAgentSimpleAuthoringTargetResolver,

@@ -69,8 +69,6 @@ namespace
 		Result.bReliable = Capabilities->GetBoolField(TEXT("reliable"));
 		Result.bPreservesMessageBoundaries =
 			Capabilities->GetBoolField(TEXT("preserves_message_boundaries"));
-		Result.MaxFrameBytes =
-			static_cast<int64>(Capabilities->GetNumberField(TEXT("max_frame_bytes")));
 		Result.bRequestReply = Capabilities->GetBoolField(TEXT("request_reply"));
 		Result.bDuplicateSuppression =
 			Capabilities->GetBoolField(TEXT("duplicate_suppression"));
@@ -88,8 +86,6 @@ namespace
 		Result.bRequireReliable = Requirements->GetBoolField(TEXT("require_reliable"));
 		Result.bRequireMessageBoundaries =
 			Requirements->GetBoolField(TEXT("require_message_boundaries"));
-		Result.MaxFrameBytes =
-			static_cast<int64>(Requirements->GetNumberField(TEXT("max_frame_bytes")));
 		Result.bRequireRequestReply =
 			Requirements->GetBoolField(TEXT("require_request_reply"));
 		Result.bRequireDuplicateSuppression =
@@ -120,7 +116,8 @@ namespace
 			const FString& Method,
 			const FString& RoutePath,
 			FUeAgentHttpRequestHandler InHandler,
-			FUeAgentTransportDiagnostic& OutDiagnostic) override
+			FUeAgentTransportDiagnostic& OutDiagnostic,
+			EUeAgentHttpRouteExecution Execution = EUeAgentHttpRouteExecution::GameThread) override
 		{
 			if (bBound)
 			{
@@ -189,7 +186,8 @@ namespace
 			const FString& Method,
 			const FString& RoutePath,
 			FUeAgentHttpRequestHandler InHandler,
-			FUeAgentTransportDiagnostic& OutDiagnostic) override
+			FUeAgentTransportDiagnostic& OutDiagnostic,
+			EUeAgentHttpRouteExecution Execution = EUeAgentHttpRouteExecution::GameThread) override
 		{
 			bool bRoutePathBound = false;
 			for (const TPair<FString, FRoute>& Pair : Routes)
@@ -276,7 +274,6 @@ namespace
 		Config.AuthToken = TEXT("fixture-secret");
 		Config.Channel = TEXT("rpc");
 		Config.PrincipalSubject = TEXT("fixture-agent");
-		Config.MaxFrameBytes = 64;
 		return Config;
 	}
 }

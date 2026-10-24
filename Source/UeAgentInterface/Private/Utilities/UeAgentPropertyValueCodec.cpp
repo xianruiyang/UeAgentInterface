@@ -2,6 +2,11 @@
 
 #include "Utilities/UeAgentPropertyValueCodec.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringEncodedTypes.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringReflectionDescriptors.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Core/StateSemantic/UeAgentStateSemantic.h"
 
 #include "Containers/AnsiString.h"
 #include "Containers/Utf8String.h"
@@ -9,6 +14,7 @@
 #include "Dom/JsonValue.h"
 #include "GameplayTagContainer.h"
 #include "GameplayTagsManager.h"
+#include "Metadata/PCGAttributePropertySelector.h"
 #include "Misc/PackageName.h"
 #include "StructUtils/InstancedStruct.h"
 #include "StructUtils/PropertyBag.h"
@@ -17,9 +23,16 @@
 #include "UObject/ObjectRedirector.h"
 #include "UObject/PropertyOptional.h"
 #include "UObject/SoftObjectPath.h"
+#include "UObject/StructOnScope.h"
 #include "UObject/UnrealType.h"
 #include "UObject/Utf8StrProperty.h"
 #include "Utilities/UeAgentCurveJson.h"
+#include "Utilities/UeAgentSplineValue.h"
+#include "Utilities/UeAgentEnvTraceDataValue.h"
+#include "EnvironmentQuery/EnvQueryTypes.h"
+#include "Components/SplineComponent.h"
+#include "Engine/CollisionProfile.h"
+#include "PhysicsEngine/BodyInstance.h"
 
 #include <limits>
 
@@ -29,30 +42,33 @@ static FString GetValueKindInternal(const FProperty *Property,
 
 namespace {
 double CanonicalNumber(const double Value) {
-  if (Value == 0.0)
-    return 0.0;
-  if (!FMath::IsFinite(Value))
-    return Value;
-
-  const double Magnitude = FMath::Max(1.0, FMath::Abs(Value));
-  const double NoiseTolerance =
-      8.0 * std::numeric_limits<double>::epsilon() * Magnitude;
-  double DecimalScale = 1.0;
-  for (int32 DecimalPlaces = 0; DecimalPlaces <= 12; ++DecimalPlaces) {
-    if (FMath::Abs(Value) >
-        std::numeric_limits<double>::max() / DecimalScale) {
-      break;
-    }
-    const double Candidate =
-        FMath::RoundToDouble(Value * DecimalScale) / DecimalScale;
-    if (FMath::Abs(Value - Candidate) <= NoiseTolerance)
-      return Candidate == 0.0 ? 0.0 : Candidate;
-    DecimalScale *= 10.0;
-  }
-  return Value;
+  // Capture must preserve the native value. Equality tolerances are not a
+  // license to round authored data (in particular small nonzero doubles) away.
+  return Value == 0.0 ? 0.0 : Value;
 }
 
 constexpr const TCHAR *LiteralField = TEXT("literal");
+constexpr const TCHAR *TransformVectorComparison = TEXT("native_transform_vector");
+
+FValueComparison CompareTransformVector(const FVector& Expected, const FVector& Actual,
+    const TSharedPtr<FJsonValue>& ExpectedValue, const TSharedPtr<FJsonValue>& ActualValue) {
+  // Match FTransform's native translation/scale equality. SetWorldTransform can
+  // compute target-current and current+delta even without an attachment parent.
+  // Keep the captured numbers intact; this is only an intent verification rule.
+  constexpr double Tolerance = static_cast<double>(KINDA_SMALL_NUMBER);
+  const auto& ExpectedComponents = ExpectedValue->Type == EJson::Array
+      ? ExpectedValue->AsArray() : ExpectedValue->AsObject()->GetArrayField(TEXT("components"));
+  const auto& ActualComponents = ActualValue->Type == EJson::Array
+      ? ActualValue->AsArray() : ActualValue->AsObject()->GetArrayField(TEXT("components"));
+  for (int32 Index = 0; Index < 3; ++Index) {
+    if (FMath::Abs(Expected[Index] - Actual[Index]) > Tolerance) {
+      const FString Path = (ExpectedValue->Type == EJson::Array ? FString() : FString(TEXT("/components")))
+          + TEXT("/") + LexToString(Index);
+      return FValueComparison::Different(Path, ExpectedComponents[Index], ActualComponents[Index]);
+    }
+  }
+  return FValueComparison();
+}
 
 bool IsCanonicalSoftReferencePath(const FSoftObjectPath &Path) {
   return Path.IsNull() || (Path.IsValid() && FPackageName::IsValidObjectPath(
@@ -79,9 +95,148 @@ FString BoundString(const FString &Value, const FOptions &Options) {
   return Value;
 }
 
-bool Fail(FString &OutError, const FString &Error) {
-  OutError = Error;
+bool Fail(FDiagnostic& OutError, const FString& Code, const FString& Reason) {
+  OutError = FDiagnostic::Failure(Code, Reason, TEXT("property_value_decode"));
   return false;
+}
+
+bool ValueFailure(FDiagnostic& OutError, const FString& Code, const FString& Reason,
+                  const TSharedPtr<FJsonValue>& Actual, const FString& Expected,
+                  const FString& Pointer = FString()) {
+  Fail(OutError, Code, Reason);
+  OutError.ActualValue = Actual;
+  OutError.ActualValuePresent = Actual.IsValid();
+  OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+  // This address belongs to the native value representation. The workspace
+  // source map resolves wrappers such as literal/components to authored input.
+  OutError.Source.InternalJsonPath = Pointer.IsEmpty() ? TEXT("/") : Pointer;
+  return false;
+}
+
+FString FieldPointer(const FString& Name) {
+  return TEXT("/") + Name.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+}
+
+bool PropertyFailure(FDiagnostic& OutError, const FString& Code, const FString& Reason, const FProperty* Property) {
+  ValueFailure(OutError, Code, Reason, Property ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Property->GetCPPType())) : nullptr,
+      TEXT("supported reflected property"));
+  if (Property) OutError.CandidateName = Property->GetName();
+  OutError.SourceKind = TEXT("native_result");
+  OutError.Source = {};
+  return false;
+}
+
+bool OnlyFields(const TSharedPtr<FJsonObject>& Object, const TArray<FString>& Allowed,
+                const FString& Code, FDiagnostic& OutError) {
+  for (const auto& Field : Object->Values) {
+    if (!Allowed.Contains(Field.Key))
+      return ValueFailure(OutError, Code, TEXT("The value contains an unsupported field."),
+          MakeShared<FJsonValueString>(Field.Key), FString::Join(Allowed, TEXT(", ")), FieldPointer(Field.Key));
+  }
+  return true;
+}
+
+bool RequiredArray(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field,
+    const TArray<TSharedPtr<FJsonValue>>*& Items, const FString& Code, FDiagnostic& OutError) {
+  if (Object->TryGetArrayField(Field, Items) && Items) return true;
+  return ValueFailure(OutError, Code, TEXT("The value requires an array at this field."),
+      Object->TryGetField(Field), TEXT("array"), FieldPointer(Field));
+}
+
+TSharedPtr<FJsonValue> NumberFact(double Number) {
+  // Non-finite numbers cannot be emitted as JSON numbers.
+  if (FMath::IsFinite(Number)) return MakeShared<FJsonValueNumber>(Number);
+  return MakeShared<FJsonValueString>(LexToString(Number));
+}
+
+bool Fail(FDiagnostic& OutError, FDiagnostic Diagnostic) {
+  OutError = MoveTemp(Diagnostic);
+  return false;
+}
+
+void PrefixValueFailure(FDiagnostic& Error, const FString& Pointer, const FString& Property) {
+  UeAgentAuthoringDiagnostics::PrefixInternalDocumentFailure(Error, Pointer);
+  Error.PropertyPath = Property + (Error.PropertyPath.IsEmpty() ? FString() : TEXT(".") + Error.PropertyPath);
+}
+
+void RestoreSequenceInput(FDiagnostic& Error) {
+  const auto Restore = [](FString& Pointer) {
+    if (Pointer == TEXT("/items")) Pointer.Reset();
+    else if (Pointer.StartsWith(TEXT("/items/"))) Pointer.RightChopInline(6);
+  };
+  Restore(Error.Source.InternalJsonPath);
+  for (auto& Child : Error.Diagnostics) RestoreSequenceInput(Child);
+  if (Error.PublicCause.IsValid()) {
+    auto Cause = MakeShared<FDiagnostic>(*Error.PublicCause);
+    RestoreSequenceInput(*Cause);
+    Error.PublicCause = MoveTemp(Cause);
+  }
+}
+
+// A type's native storage may be sparse while its effective state is complete.
+// Keep this beside the shared codec so nested properties and every asset consumer
+// use the same semantics. Ordinary arrays retain their ordered, exact membership.
+TOptional<FValueComparison> CompareEffectiveStruct(const UScriptStruct* Struct, const void* Left,
+    const void* Right, const FOptions& Options) {
+  if (Options.bCompareStoredValues || Struct != FCollisionResponse::StaticStruct()) return {};
+  const auto Effective = [](const void* Value) {
+    const auto& Response = *static_cast<const FCollisionResponse*>(Value);
+    // The editable array is authoritative for authoring. Template transient
+    // caches may await Serialize/FixupData; they are not an import invariant.
+    // Interpret each side independently on a temporary value, without using
+    // the opposite operand to fill defaults or mutating the observed object.
+    const auto* Array = FindFProperty<FArrayProperty>(FCollisionResponse::StaticStruct(), TEXT("ResponseArray"));
+    FCollisionResponse Decoded;
+    Decoded.SetResponsesArray(*Array->ContainerPtrToValuePtr<TArray<FResponseChannel>>(&Response));
+    return Decoded.GetResponseContainer();
+  };
+  const auto Expected = Effective(Left), Actual = Effective(Right);
+  const auto* Array = FindFProperty<FArrayProperty>(FCollisionResponse::StaticStruct(), TEXT("ResponseArray"));
+  const auto& Authored = *Array->ContainerPtrToValuePtr<TArray<FResponseChannel>>(Left);
+  for (int32 Channel = 0; Channel < 32; ++Channel) {
+    const auto ExpectedResponse = Expected.GetResponse(static_cast<ECollisionChannel>(Channel));
+    const auto ActualResponse = Actual.GetResponse(static_cast<ECollisionChannel>(Channel));
+    if (ExpectedResponse == ActualResponse) continue;
+    const FName Name = UCollisionProfile::Get()->ReturnChannelNameFromContainerIndex(Channel);
+    const auto ResponseValue = [](ECollisionResponse Response) -> TSharedPtr<FJsonValue> {
+      return MakeShared<FJsonValueString>(StaticEnum<ECollisionResponse>()->GetNameStringByValue(Response));
+    };
+    // Let the exported native setter resolve channel redirects and discard
+    // unknown names. The private profile lookup is not exported from Engine.
+    // Native application is last-write-wins, so locate the last authored match.
+    for (int32 Index = Authored.Num() - 1; Index >= 0; --Index) {
+      FCollisionResponse Resolved;
+      Resolved.SetResponsesArray({Authored[Index]});
+      const auto& Channels = *Array->ContainerPtrToValuePtr<TArray<FResponseChannel>>(&Resolved);
+      if (Channels.Num() == 1 && Channels[0].Channel == Name)
+        return FValueComparison::Different(FString::Printf(TEXT("/fields/ResponseArray/items/%d/fields/Response"), Index),
+            ResponseValue(ExpectedResponse), ResponseValue(ActualResponse));
+    }
+    // A default response has no authored array index. Keep its channel identity
+    // with the two effective values instead of inventing an input location.
+    const auto ChannelValue = [&](ECollisionResponse Response) -> TSharedPtr<FJsonValue> {
+      auto Value = MakeShared<FJsonObject>();
+      Value->SetStringField(TEXT("channel"), Name.ToString());
+      Value->SetField(TEXT("response"), ResponseValue(Response));
+      return MakeShared<FJsonValueObject>(Value);
+    };
+    return FValueComparison::Different(TEXT("/fields/ResponseArray"), ChannelValue(ExpectedResponse), ChannelValue(ActualResponse));
+  }
+  return FValueComparison();
+}
+
+TOptional<FValueComparison> CompareEffectiveMember(FProperty* Property, const void* Expected,
+    const FOptions& Options) {
+  if (Options.bCompareStoredValues || !Options.NativeMemberContainer
+      || Property->GetOwner<UScriptStruct>() != FCollisionResponse::StaticStruct()
+      || Property->GetFName() != TEXT("ResponseArray")) return {};
+  auto ExpectedResponse = *static_cast<const FCollisionResponse*>(Options.NativeMemberContainer);
+  Property->CopyCompleteValue(Property->ContainerPtrToValuePtr<void>(&ExpectedResponse), Expected);
+  auto Compared = CompareEffectiveStruct(FCollisionResponse::StaticStruct(),
+      &ExpectedResponse, Options.NativeMemberContainer, Options);
+  if (Compared.IsSet() && !Compared->bEquivalent)
+    Compared->Path.RemoveFromStart(TEXT("/fields/ResponseArray"));
+  return Compared;
 }
 
 UObject *ResolveLoadedRedirector(UObject *Object) {
@@ -97,18 +252,18 @@ UObject *ResolveLoadedRedirector(UObject *Object) {
 }
 
 bool GetObject(const TSharedPtr<FJsonValue> &Value,
-               TSharedPtr<FJsonObject> &OutObject, FString &OutError) {
+               TSharedPtr<FJsonObject> &OutObject, FDiagnostic& OutError) {
   if (!Value.IsValid() || Value->Type != EJson::Object) {
-    return Fail(OutError, TEXT("expected_object"));
+    return ValueFailure(OutError, TEXT("expected_object"), TEXT("The property value must be an object."), Value, TEXT("object"));
   }
   OutObject = Value->AsObject();
-  return OutObject.IsValid() || Fail(OutError, TEXT("invalid_object"));
+  return OutObject.IsValid() || Fail(OutError, TEXT("invalid_object"), TEXT("The JSON object has no object storage."));
 }
 
 bool GetLiteral(const TSharedPtr<FJsonValue> &Value,
-                TSharedPtr<FJsonValue> &OutLiteral, FString &OutError) {
+                TSharedPtr<FJsonValue> &OutLiteral, FDiagnostic& OutError) {
   if (!Value.IsValid())
-    return Fail(OutError, TEXT("invalid_literal"));
+    return ValueFailure(OutError, TEXT("invalid_literal"), TEXT("The literal value is missing."), Value, TEXT("literal value"));
   if (Value->Type != EJson::Object) {
     OutLiteral = Value;
     return true;
@@ -119,15 +274,49 @@ bool GetLiteral(const TSharedPtr<FJsonValue> &Value,
   }
   OutLiteral = Object->TryGetField(LiteralField);
   if (!OutLiteral.IsValid())
-    return Fail(OutError, TEXT("missing_literal"));
-  return Object->Values.Num() == 1 ||
-         Fail(OutError, TEXT("unexpected_literal_fields"));
+    return ValueFailure(OutError, TEXT("missing_literal"), TEXT("The literal envelope requires a literal field."), OutLiteral, TEXT("literal value"), TEXT("/literal"));
+  return OnlyFields(Object, {LiteralField}, TEXT("unexpected_literal_fields"), OutError);
+}
+
+bool DecodeBitmaskValue(const UEnum* Enum, const TSharedPtr<FJsonValue>& Value,
+    uint64 StorageMask, TFunctionRef<bool(int64, uint64&)> ResolveMask,
+    uint64& OutRaw, FDiagnostic& OutError) {
+  TSharedPtr<FJsonObject> Object;
+  const TArray<TSharedPtr<FJsonValue>>* Selected = nullptr;
+  if (!GetObject(Value, Object, OutError) ||
+      !RequiredArray(Object, TEXT("selected"), Selected, TEXT("missing_bitmask_selected"), OutError) ||
+      !OnlyFields(Object, {TEXT("selected"), TEXT("unmapped_bits")}, TEXT("unexpected_bitmask_fields"), OutError)) return false;
+  uint64 Raw = 0;
+  if (const auto Unmapped = Object->TryGetField(TEXT("unmapped_bits")); Unmapped.IsValid()) {
+    if (Unmapped->Type != EJson::String
+        || !UE::UAI::StateSemantic::TryParseUInt64Decimal(Unmapped->AsString(), Raw)
+        || Raw > StorageMask) return ValueFailure(OutError, TEXT("bitmask_unmapped_bits_out_of_range"),
+            TEXT("Unmapped bits must be a decimal uint64 string within the property's storage mask."),
+            Unmapped, FString::Printf(TEXT("0..%llu"), StorageMask), TEXT("/unmapped_bits"));
+  }
+  for (int32 Index = 0; Index < Selected->Num(); ++Index) {
+    const auto& Item = (*Selected)[Index];
+    const FString Pointer = FString::Printf(TEXT("/selected/%d"), Index);
+    if (!Item.IsValid() || Item->Type != EJson::String)
+      return ValueFailure(OutError, TEXT("invalid_bitmask_item"), TEXT("Each selected bitmask value must be an enum name."), Item, TEXT("string"), Pointer);
+    int64 EnumValue = 0;
+    if (!Enum || !UeAgentAuthoringTypeDescriptors::TryResolveEnumValueName(Enum, Item->AsString(), EnumValue))
+      return ValueFailure(OutError, TEXT("unknown_bitmask_value"), TEXT("The selected bitmask name is not defined by the enum."),
+          Item, Enum ? Enum->GetPathName() : TEXT("a valid bitmask enum"), Pointer);
+    uint64 Mask = 0;
+    if (!ResolveMask(EnumValue, Mask) || Mask > StorageMask)
+      return ValueFailure(OutError, TEXT("bitmask_value_out_of_range:") + Item->AsString(), TEXT("The selected enum value cannot be represented by the property's bitmask storage."),
+          Item, FString::Printf(TEXT("mask in 0..%llu"), StorageMask), Pointer);
+    Raw |= Mask;
+  }
+  OutRaw = Raw;
+  return true;
 }
 
 bool GetReferencePath(const TSharedPtr<FJsonValue> &Value,
-                      TSharedPtr<FJsonValue> &OutPath, FString &OutError) {
+                      TSharedPtr<FJsonValue> &OutPath, FDiagnostic& OutError) {
   if (!Value.IsValid())
-    return Fail(OutError, TEXT("invalid_reference_path"));
+    return ValueFailure(OutError, TEXT("invalid_reference_path"), TEXT("The object reference path is missing."), Value, TEXT("string or null"));
   if (Value->Type == EJson::String || Value->Type == EJson::Null) {
     OutPath = Value;
     return true;
@@ -137,76 +326,125 @@ bool GetReferencePath(const TSharedPtr<FJsonValue> &Value,
     return false;
   OutPath = Object->TryGetField(TEXT("path"));
   if (!OutPath.IsValid())
-    return Fail(OutError, TEXT("missing_reference_path"));
-  return Object->Values.Num() == 1 ||
-         Fail(OutError, TEXT("unexpected_reference_fields"));
+    return ValueFailure(OutError, TEXT("missing_reference_path"), TEXT("The reference envelope requires a path field."), OutPath, TEXT("string or null"), TEXT("/path"));
+  return OnlyFields(Object, {TEXT("path")}, TEXT("unexpected_reference_fields"), OutError);
 }
 
 bool GetComponents(const TSharedPtr<FJsonValue> &Value, int32 ExpectedCount,
                    const TArray<TSharedPtr<FJsonValue>> *&OutComponents,
-                   FString &OutError) {
-  TSharedPtr<FJsonObject> Object;
-  if (!GetObject(Value, Object, OutError) ||
-      !Object->TryGetArrayField(TEXT("components"), OutComponents) ||
-      !OutComponents) {
-    return Fail(OutError, TEXT("missing_components"));
+                   FDiagnostic& OutError) {
+  if (Value.IsValid() && Value->Type == EJson::Array) {
+    OutComponents = &Value->AsArray();
+  } else {
+    TSharedPtr<FJsonObject> Object;
+    if (!GetObject(Value, Object, OutError) ||
+        !RequiredArray(Object, TEXT("components"), OutComponents, TEXT("missing_components"), OutError) ||
+        !OnlyFields(Object, {TEXT("components")}, TEXT("unexpected_component_fields"), OutError)) return false;
   }
-  if (Object->Values.Num() != 1)
-    return Fail(OutError, TEXT("unexpected_component_fields"));
   return OutComponents->Num() == ExpectedCount ||
-         Fail(OutError,
-              FString::Printf(TEXT("component_count_mismatch_expected_%d"),
-                              ExpectedCount));
+         ValueFailure(OutError, FString::Printf(TEXT("component_count_mismatch_expected_%d"), ExpectedCount), TEXT("The component array has the wrong number of elements."),
+              MakeShared<FJsonValueNumber>(OutComponents->Num()), FString::FromInt(ExpectedCount),
+              Value->Type == EJson::Array ? FString() : TEXT("/components"));
 }
 
 bool JsonNumber(const TSharedPtr<FJsonValue> &Value, double &OutNumber,
-                FString &OutError) {
+                FDiagnostic& OutError) {
   if (!Value.IsValid() || Value->Type != EJson::Number) {
-    return Fail(OutError, TEXT("expected_number"));
+    return ValueFailure(OutError, TEXT("expected_number"), TEXT("The component or literal must be a number."), Value, TEXT("finite number"));
   }
-  OutNumber = Value->AsNumber();
-  return FMath::IsFinite(OutNumber) ||
-         Fail(OutError, TEXT("number_not_finite"));
+  FString Lexeme;
+  return (UE::UAI::StateSemantic::CanonicalJson::TryGetNumberLexeme(*Value, Lexeme)
+          && UE::UAI::StateSemantic::TryParseFiniteDecimal(Lexeme, OutNumber)) ||
+         ValueFailure(OutError, TEXT("number_not_finite"), TEXT("The number cannot be represented as a finite value."),
+             MakeShared<FJsonValueString>(Lexeme), TEXT("finite number"));
+}
+
+bool ValidateFloat32Value(double Number, FDiagnostic& OutError) {
+  return (FMath::IsFinite(Number) && FMath::Abs(Number) <= MAX_flt) ||
+         ValueFailure(OutError, TEXT("float_out_of_range"), TEXT("The number cannot be represented as a finite float32."),
+             NumberFact(Number), FString::Printf(TEXT("-%g..%g"), static_cast<double>(MAX_flt), static_cast<double>(MAX_flt)));
+}
+
+bool NormalizeQuaternionValue(FQuat &Quat, FDiagnostic& OutError) {
+  if (Quat.ContainsNaN())
+    return ValueFailure(OutError, TEXT("number_not_finite"), TEXT("Quaternion components must be finite."),
+        MakeShared<FJsonValueString>(Quat.ToString()), TEXT("four finite components"));
+  const double Scale = FMath::Max(
+      FMath::Max(FMath::Abs(Quat.X), FMath::Abs(Quat.Y)),
+      FMath::Max(FMath::Abs(Quat.Z), FMath::Abs(Quat.W)));
+  if (Scale == 0.0)
+    return ValueFailure(OutError, TEXT("zero_quaternion"), TEXT("A zero-length quaternion does not define an orientation."),
+        MakeShared<FJsonValueString>(Quat.ToString()), TEXT("non-zero quaternion"));
+  // Normalize orientation before narrowing to native float components. Scaling
+  // first also avoids overflow/underflow in the native squared-length calculation.
+  Quat.X /= Scale;
+  Quat.Y /= Scale;
+  Quat.Z /= Scale;
+  Quat.W /= Scale;
+  Quat.Normalize();
+  return true;
 }
 
 bool JsonInteger(const TSharedPtr<FJsonValue> &Value, int64 Min, int64 Max,
-                 int64 &OutNumber, FString &OutError) {
-  double Number = 0.0;
-  if (!JsonNumber(Value, Number, OutError) ||
-      FMath::TruncToDouble(Number) != Number ||
-      Number < static_cast<double>(Min) || Number > static_cast<double>(Max)) {
-    return Fail(OutError, TEXT("integer_out_of_range"));
+                 int64 &OutNumber, FDiagnostic& OutError) {
+  FString Lexeme;
+  int64 Number = 0;
+  if (!Value || !UE::UAI::StateSemantic::CanonicalJson::TryGetNumberLexeme(*Value, Lexeme) ||
+      !UE::UAI::StateSemantic::TryParseInt64Number(Lexeme, Number) || Number < Min || Number > Max) {
+    return ValueFailure(OutError, TEXT("integer_out_of_range"), TEXT("The value must be an integer within the property's signed storage range."),
+        Value, FString::Printf(TEXT("%lld..%lld"), Min, Max));
   }
-  OutNumber = static_cast<int64>(Number);
+  OutNumber = Number;
   return true;
 }
 
 bool JsonUnsignedInteger(const TSharedPtr<FJsonValue> &Value, uint64 Max,
-                         uint64 &OutNumber, FString &OutError) {
-  double Number = 0.0;
-  if (!JsonNumber(Value, Number, OutError) ||
-      FMath::TruncToDouble(Number) != Number || Number < 0.0 ||
-      Number > static_cast<double>(Max)) {
-    return Fail(OutError, TEXT("unsigned_integer_out_of_range"));
+                         uint64 &OutNumber, FDiagnostic& OutError) {
+  FString Lexeme;
+  uint64 Number = 0;
+  if (!Value || !UE::UAI::StateSemantic::CanonicalJson::TryGetNumberLexeme(*Value, Lexeme) ||
+      !UE::UAI::StateSemantic::TryParseUInt64Number(Lexeme, Number) || Number > Max) {
+    return ValueFailure(OutError, TEXT("unsigned_integer_out_of_range"), TEXT("The value must be an integer within the property's unsigned storage range."),
+        Value, FString::Printf(TEXT("0..%llu"), Max));
   }
-  OutNumber = static_cast<uint64>(Number);
+  OutNumber = Number;
   return true;
 }
 
+bool JsonNarrowSignedInteger(const FString& Kind, const TSharedPtr<FJsonValue>& Value,
+                            int64& Number, FDiagnostic& Error) {
+  const int64 Min = Kind == TEXT("int8") ? MIN_int8 : Kind == TEXT("int16") ? MIN_int16 : MIN_int32;
+  const int64 Max = Kind == TEXT("int8") ? MAX_int8 : Kind == TEXT("int16") ? MAX_int16 : MAX_int32;
+  return JsonInteger(Value, Min, Max, Number, Error);
+}
+
+bool JsonNarrowUnsignedInteger(const FString& Kind, const TSharedPtr<FJsonValue>& Value,
+                              uint64& Number, FDiagnostic& Error) {
+  const uint64 Max = Kind == TEXT("uint8") ? MAX_uint8 : Kind == TEXT("uint16") ? MAX_uint16 : MAX_uint32;
+  return JsonUnsignedInteger(Value, Max, Number, Error);
+}
+
 bool ValidateNumericConstraints(const FProperty *Property, double Number,
-                                FString &OutError) {
+                                FDiagnostic& OutError) {
   if (!FMath::IsFinite(Number))
-    return Fail(OutError, TEXT("number_not_finite"));
+    return ValueFailure(OutError, TEXT("number_not_finite"), TEXT("The property requires a finite number."), NumberFact(Number), TEXT("finite number"));
   auto ValidateBound = [Property, Number, &OutError](const TCHAR *Key,
                                                      bool bMinimum) {
     const FString Text = Property ? Property->GetMetaData(Key) : FString();
     if (Text.IsEmpty())
       return true;
     double Bound = 0.0;
-    if (!LexTryParseString(Bound, *Text) || !FMath::IsFinite(Bound))
-      return Fail(OutError, FString::Printf(TEXT("invalid_%s_metadata"), Key));
+    if (!LexTryParseString(Bound, *Text) || !FMath::IsFinite(Bound)) {
+      ValueFailure(OutError, FString::Printf(TEXT("invalid_%s_metadata"), Key), TEXT("The property's numeric bound metadata is not a finite number."),
+          MakeShared<FJsonValueString>(Text), TEXT("finite numeric bound"));
+      OutError.PropertyPath = Property->GetName() + TEXT(".metadata.") + Key;
+      OutError.SourceKind = TEXT("native_metadata");
+      return false;
+    }
     if ((bMinimum && Number < Bound) || (!bMinimum && Number > Bound))
-      return Fail(OutError, FString::Printf(TEXT("violates_%s"), Key));
+      return ValueFailure(OutError, FString::Printf(TEXT("violates_%s"), Key),
+          bMinimum ? TEXT("The number is below the property's minimum bound.") : TEXT("The number exceeds the property's maximum bound."),
+          NumberFact(Number), FString::Printf(TEXT("%s %s"), bMinimum ? TEXT(">=") : TEXT("<="), *Text));
     return true;
   };
   return ValidateBound(TEXT("ClampMin"), true) &&
@@ -214,17 +452,18 @@ bool ValidateNumericConstraints(const FProperty *Property, double Number,
 }
 
 bool ValidateSignedIntegerConstraints(const FProperty *Property, int64 Number,
-                                      FString &OutError) {
+                                      FDiagnostic& OutError) {
   auto ValidateBound = [Property, Number, &OutError](const TCHAR *Key,
                                                      bool bMinimum) {
     const FString Text = Property ? Property->GetMetaData(Key) : FString();
     if (Text.IsEmpty())
       return true;
     int64 Bound = 0;
-    if (LexTryParseString(Bound, *Text)) {
+    if (UE::UAI::StateSemantic::TryParseInt64Decimal(Text, Bound)) {
       return (bMinimum ? Number >= Bound : Number <= Bound) ||
-             Fail(OutError,
-                  bMinimum ? TEXT("below_clamp_min") : TEXT("above_clamp_max"));
+             ValueFailure(OutError, bMinimum ? TEXT("below_clamp_min") : TEXT("above_clamp_max"),
+                 bMinimum ? TEXT("The integer is below the property's minimum bound.") : TEXT("The integer exceeds the property's maximum bound."),
+                 MakeShared<FJsonValueString>(LexToString(Number)), FString::Printf(TEXT("%s %s"), bMinimum ? TEXT(">=") : TEXT("<="), *Text));
     }
     return ValidateNumericConstraints(Property, static_cast<double>(Number),
                                       OutError);
@@ -234,17 +473,18 @@ bool ValidateSignedIntegerConstraints(const FProperty *Property, int64 Number,
 }
 
 bool ValidateUnsignedIntegerConstraints(const FProperty *Property,
-                                        uint64 Number, FString &OutError) {
+                                        uint64 Number, FDiagnostic& OutError) {
   auto ValidateBound = [Property, Number, &OutError](const TCHAR *Key,
                                                      bool bMinimum) {
     const FString Text = Property ? Property->GetMetaData(Key) : FString();
     if (Text.IsEmpty())
       return true;
     uint64 Bound = 0;
-    if (LexTryParseString(Bound, *Text)) {
+    if (UE::UAI::StateSemantic::TryParseUInt64Decimal(Text, Bound)) {
       return (bMinimum ? Number >= Bound : Number <= Bound) ||
-             Fail(OutError,
-                  bMinimum ? TEXT("below_clamp_min") : TEXT("above_clamp_max"));
+             ValueFailure(OutError, bMinimum ? TEXT("below_clamp_min") : TEXT("above_clamp_max"),
+                 bMinimum ? TEXT("The integer is below the property's minimum bound.") : TEXT("The integer exceeds the property's maximum bound."),
+                 MakeShared<FJsonValueString>(LexToString(Number)), FString::Printf(TEXT("%s %s"), bMinimum ? TEXT(">=") : TEXT("<="), *Text));
     }
     return ValidateNumericConstraints(Property, static_cast<double>(Number),
                                       OutError);
@@ -266,13 +506,6 @@ bool IsUnsignedNumericProperty(const FNumericProperty *Property) {
 
 const UEnum *GetPropertyEnum(const FProperty *Property) {
   return UeAgentAuthoringTypeDescriptors::GetPropertyEnum(Property);
-}
-
-bool UsesEnumValuesAsMaskValues(const FProperty *Property, const UEnum *Enum) {
-  return (Property && Property->GetBoolMetaData(
-                          TEXT("UseEnumValuesAsMaskValuesInEditor"))) ||
-         (Enum &&
-          Enum->GetBoolMetaData(TEXT("UseEnumValuesAsMaskValuesInEditor")));
 }
 
 FString StructKind(const UScriptStruct *Struct) {
@@ -302,18 +535,20 @@ bool ReadStructNumber(const UScriptStruct *Struct, const void *ValuePtr,
 
 bool WriteStructNumber(const UScriptStruct *Struct, void *ValuePtr,
                        const TCHAR *FieldName, double Value,
-                       FString &OutError) {
+                       FDiagnostic& OutError) {
   FProperty *Field = FindStructField(Struct, FieldName);
   FNumericProperty *Numeric = CastField<FNumericProperty>(Field);
   if (!Numeric) {
-    return Fail(
-        OutError,
-        FString::Printf(TEXT("missing_numeric_struct_field_%s"), FieldName));
+    return ValueFailure(OutError, FString::Printf(TEXT("missing_numeric_struct_field_%s"), FieldName),
+        TEXT("The native struct does not have the required numeric member."),
+        MakeShared<FJsonValueString>(Struct ? Struct->GetPathName() : FString()), FieldName);
   }
   void *FieldPtr = Field->ContainerPtrToValuePtr<void>(ValuePtr);
-  if (Numeric->IsFloatingPoint())
+  if (Numeric->IsFloatingPoint()) {
+    if (CastField<FFloatProperty>(Numeric) && !ValidateFloat32Value(Value, OutError))
+      return false;
     Numeric->SetFloatingPointPropertyValue(FieldPtr, Value);
-  else if (IsUnsignedNumericProperty(Numeric))
+  } else if (IsUnsignedNumericProperty(Numeric))
     Numeric->SetIntPropertyValue(FieldPtr, static_cast<uint64>(Value));
   else
     Numeric->SetIntPropertyValue(FieldPtr, static_cast<int64>(Value));
@@ -339,7 +574,7 @@ TSharedPtr<FJsonValue> EncodeComponents(const FStructProperty *StructProperty,
 bool DecodeComponents(const UScriptStruct *Struct,
                       const FProperty *ConstraintsProperty,
                       const TSharedPtr<FJsonValue> &Value, void *OutValuePtr,
-                      const TArray<const TCHAR *> &Names, FString &OutError) {
+                      const TArray<const TCHAR *> &Names, FDiagnostic& OutError) {
   const TArray<TSharedPtr<FJsonValue>> *Components = nullptr;
   if (!GetComponents(Value, Names.Num(), Components, OutError))
     return false;
@@ -348,8 +583,10 @@ bool DecodeComponents(const UScriptStruct *Struct,
     if (!JsonNumber((*Components)[Index], Number, OutError) ||
         (ConstraintsProperty &&
          !ValidateNumericConstraints(ConstraintsProperty, Number, OutError)) ||
-        !WriteStructNumber(Struct, OutValuePtr, Names[Index], Number, OutError))
+        !WriteStructNumber(Struct, OutValuePtr, Names[Index], Number, OutError)) {
+      PrefixValueFailure(OutError, FString::Printf(TEXT("%s/%d"), Value->Type == EJson::Array ? TEXT("") : TEXT("/components"), Index), Names[Index]);
       return false;
+    }
   }
   return true;
 }
@@ -357,10 +594,24 @@ bool DecodeComponents(const UScriptStruct *Struct,
 bool DecodeKnownStructValue(UScriptStruct *Struct,
                             const FProperty *ConstraintsProperty,
                             const TSharedPtr<FJsonValue> &Value,
-                            void *OutValuePtr, FString &OutError,
+                            void *OutValuePtr, FDiagnostic& OutError,
                             bool &bOutHandled) {
   bOutHandled = true;
   const FString Kind = StructKind(Struct);
+  if (Kind == TEXT("pcg_selector")) {
+    TSharedPtr<FJsonValue> Literal;
+    if (!GetLiteral(Value, Literal, OutError)) return false;
+    if (Literal->Type != EJson::String)
+      return ValueFailure(OutError, TEXT("invalid_pcg_selector_text"), TEXT("A PCG selector must be a string literal."),
+          Literal, TEXT("string"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
+    auto& Selector = *static_cast<FPCGAttributePropertySelector*>(OutValuePtr);
+    // Update returns whether the value changed, not whether parsing succeeded.
+    // Match native ImportText: empty/unbound selectors remain editable too.
+    Selector.Update(Literal->AsString());
+    return true;
+  }
+  if (Kind == TEXT("spline"))
+    return UeAgentSplineValue::Decode(Value, *static_cast<FSplineCurves*>(OutValuePtr), OutError);
   if (Kind == TEXT("vector2"))
     return DecodeComponents(Struct, ConstraintsProperty, Value, OutValuePtr,
                             {TEXT("X"), TEXT("Y")}, OutError);
@@ -380,21 +631,24 @@ bool DecodeKnownStructValue(UScriptStruct *Struct,
                             {TEXT("R"), TEXT("G"), TEXT("B"), TEXT("A")},
                             OutError);
   if (Kind == TEXT("quat")) {
-    if (!DecodeComponents(Struct, ConstraintsProperty, Value, OutValuePtr,
-                          {TEXT("X"), TEXT("Y"), TEXT("Z"), TEXT("W")},
-                          OutError))
+    const TArray<TSharedPtr<FJsonValue>> *Components = nullptr;
+    if (!GetComponents(Value, 4, Components, OutError))
       return false;
-    if (Struct->GetName() == TEXT("Quat4f")) {
-      FQuat4f *Quat = static_cast<FQuat4f *>(OutValuePtr);
-      if (Quat->SizeSquared() <= UE_SMALL_NUMBER)
-        return Fail(OutError, TEXT("zero_quaternion"));
-      Quat->Normalize();
-    } else {
-      FQuat *Quat = static_cast<FQuat *>(OutValuePtr);
-      if (Quat->SizeSquared() <= UE_SMALL_NUMBER)
-        return Fail(OutError, TEXT("zero_quaternion"));
-      Quat->Normalize();
+    double Values[4];
+    for (int32 Index = 0; Index < 4; ++Index) {
+      if (!JsonNumber((*Components)[Index], Values[Index], OutError) ||
+          (ConstraintsProperty &&
+           !ValidateNumericConstraints(ConstraintsProperty, Values[Index], OutError))) {
+        PrefixValueFailure(OutError, FString::Printf(TEXT("%s/%d"), Value->Type == EJson::Array ? TEXT("") : TEXT("/components"), Index), FString::Printf(TEXT("[%d]"), Index));
+        return false;
+      }
     }
+    FQuat Quat(Values[0], Values[1], Values[2], Values[3]);
+    if (!NormalizeQuaternionValue(Quat, OutError)) return false;
+    if (Struct->GetName() == TEXT("Quat4f"))
+      *static_cast<FQuat4f *>(OutValuePtr) = FQuat4f(Quat);
+    else
+      *static_cast<FQuat *>(OutValuePtr) = Quat;
     return true;
   }
   if (Kind == TEXT("color8")) {
@@ -408,8 +662,10 @@ bool DecodeKnownStructValue(UScriptStruct *Struct,
       if (!JsonUnsignedInteger((*Components)[Index], MAX_uint8, Number,
                                OutError) ||
           !WriteStructNumber(Struct, OutValuePtr, Names[Index],
-                             static_cast<double>(Number), OutError))
+                             static_cast<double>(Number), OutError)) {
+        PrefixValueFailure(OutError, FString::Printf(TEXT("%s/%d"), Value->Type == EJson::Array ? TEXT("") : TEXT("/components"), Index), Names[Index]);
         return false;
+      }
     }
     return true;
   }
@@ -418,21 +674,25 @@ bool DecodeKnownStructValue(UScriptStruct *Struct,
     const TArray<TSharedPtr<FJsonValue>> *Translation = nullptr;
     const TArray<TSharedPtr<FJsonValue>> *Rotation = nullptr;
     const TArray<TSharedPtr<FJsonValue>> *Scale = nullptr;
-    if (!GetObject(Value, Object, OutError) || Object->Values.Num() != 3 ||
-        !Object->TryGetArrayField(TEXT("translation"), Translation) ||
-        !Translation || Translation->Num() != 3 ||
-        !Object->TryGetArrayField(TEXT("rotation"), Rotation) || !Rotation ||
-        Rotation->Num() != 3 ||
-        !Object->TryGetArrayField(TEXT("scale"), Scale) || !Scale ||
-        Scale->Num() != 3) {
-      return Fail(OutError, TEXT("invalid_transform_shape"));
-    }
+    if (!GetObject(Value, Object, OutError) ||
+        !OnlyFields(Object, {TEXT("translation"), TEXT("rotation"), TEXT("scale")}, TEXT("invalid_transform_shape"), OutError)) return false;
+    const auto ReadPart = [&](const TCHAR* Field, const TArray<TSharedPtr<FJsonValue>>*& Components) {
+      if (!RequiredArray(Object, Field, Components, TEXT("invalid_transform_shape"), OutError)) return false;
+      return Components->Num() == 3 || ValueFailure(OutError, TEXT("invalid_transform_shape"),
+          TEXT("Each transform part must have exactly three components."), MakeShared<FJsonValueNumber>(Components->Num()), TEXT("3"), FieldPointer(Field));
+    };
+    if (!ReadPart(TEXT("translation"), Translation) || !ReadPart(TEXT("rotation"), Rotation) || !ReadPart(TEXT("scale"), Scale)) return false;
     double T[3], R[3], S[3];
     for (int32 Index = 0; Index < 3; ++Index) {
-      if (!JsonNumber((*Translation)[Index], T[Index], OutError) ||
-          !JsonNumber((*Rotation)[Index], R[Index], OutError) ||
-          !JsonNumber((*Scale)[Index], S[Index], OutError))
+      const auto ReadNumber = [&](const TCHAR* Field, const TSharedPtr<FJsonValue>& Component, double& Number, const bool bFloat32) {
+        if (JsonNumber(Component, Number, OutError) && (!bFloat32 || ValidateFloat32Value(Number, OutError))) return true;
+        PrefixValueFailure(OutError, FString::Printf(TEXT("/%s/%d"), Field, Index), FString::Printf(TEXT("%s[%d]"), Field, Index));
         return false;
+      };
+      const bool bFloat32 = Struct->GetName() == TEXT("Transform3f");
+      if (!ReadNumber(TEXT("translation"), (*Translation)[Index], T[Index], bFloat32)
+          || !ReadNumber(TEXT("rotation"), (*Rotation)[Index], R[Index], false)
+          || !ReadNumber(TEXT("scale"), (*Scale)[Index], S[Index], bFloat32)) return false;
     }
     const FTransform Transform(FRotator(R[0], R[1], R[2]),
                                FVector(T[0], T[1], T[2]),
@@ -445,21 +705,22 @@ bool DecodeKnownStructValue(UScriptStruct *Struct,
   }
   if (Kind == TEXT("guid")) {
     TSharedPtr<FJsonValue> Literal;
-    return GetLiteral(Value, Literal, OutError) &&
-                   Literal->Type == EJson::String &&
+    if (!GetLiteral(Value, Literal, OutError)) return false;
+    return Literal->Type == EJson::String &&
                    FGuid::Parse(Literal->AsString(),
                                 *static_cast<FGuid *>(OutValuePtr))
                ? true
-               : Fail(OutError, TEXT("invalid_guid"));
+               : ValueFailure(OutError, TEXT("invalid_guid"), TEXT("The literal is not a valid GUID string."), Literal, TEXT("GUID string"),
+                   Value->Type == EJson::Object ? TEXT("/literal") : FString());
   }
   if (Kind == TEXT("datetime") || Kind == TEXT("timespan")) {
     TSharedPtr<FJsonObject> Object;
     FString TicksText;
     int64 Ticks = 0;
-    if (!GetObject(Value, Object, OutError) || Object->Values.Num() != 1 ||
-        !Object->TryGetStringField(TEXT("ticks"), TicksText) ||
-        !LexTryParseString(Ticks, *TicksText)) {
-      return Fail(OutError, TEXT("invalid_ticks"));
+    if (!GetObject(Value, Object, OutError) || !OnlyFields(Object, {TEXT("ticks")}, TEXT("invalid_ticks"), OutError)) return false;
+    if (!Object->TryGetStringField(TEXT("ticks"), TicksText) ||
+        !UE::UAI::StateSemantic::TryParseInt64Decimal(TicksText, Ticks)) {
+      return ValueFailure(OutError, TEXT("invalid_ticks"), TEXT("Ticks must be a decimal int64 string."), Object->TryGetField(TEXT("ticks")), TEXT("decimal int64 string"), TEXT("/ticks"));
     }
     if (Kind == TEXT("datetime"))
       *static_cast<FDateTime *>(OutValuePtr) = FDateTime(Ticks);
@@ -477,18 +738,6 @@ BuildTypeDescriptorInternal(const FProperty *Property,
                             bool bIgnoreFixedArray = false) {
   return UeAgentAuthoringTypeDescriptors::BuildJson(Property,
                                                     bIgnoreFixedArray);
-}
-
-bool ValidateDepth(const FOptions &Options, int32 Depth, FString &OutError) {
-  return (Options.MaxDepth < 0 || Depth <= Options.MaxDepth) ||
-         Fail(OutError, TEXT("max_depth_exceeded"));
-}
-
-bool ValidateContainerCount(const FOptions &Options, int32 Count,
-                            FString &OutError) {
-  return (Options.MaxContainerItems <= 0 ||
-          Count <= Options.MaxContainerItems) ||
-         Fail(OutError, TEXT("max_container_items_exceeded"));
 }
 
 bool IsTruncatedValue(const TSharedPtr<FJsonValue> &Value) {
@@ -516,73 +765,27 @@ bool IsTruncatedValue(const TSharedPtr<FJsonValue> &Value) {
 }
 
 bool RejectTruncatedObject(const TSharedPtr<FJsonObject> &Object,
-                           FString &OutError) {
+                           FDiagnostic& OutError) {
   bool bTruncated = false;
   return !(Object.IsValid() &&
            Object->TryGetBoolField(TEXT("truncated"), bTruncated) &&
            bTruncated) ||
-         Fail(OutError, TEXT("truncated_value_not_authorable"));
+         ValueFailure(OutError, TEXT("truncated_value_not_authorable"), TEXT("A truncated value cannot be used as authored input."),
+             MakeShared<FJsonValueBoolean>(true), TEXT("complete value"), TEXT("/truncated"));
 }
 
-bool JsonEquivalent(const TSharedPtr<FJsonValue> &Left,
-                    const TSharedPtr<FJsonValue> &Right) {
-  if (!Left.IsValid() || !Right.IsValid() || Left->Type != Right->Type)
-    return false;
-  switch (Left->Type) {
-  case EJson::Null:
-    return true;
-  case EJson::String:
-    return Left->AsString() == Right->AsString();
-  case EJson::Number:
-    return Left->AsNumber() == Right->AsNumber();
-  case EJson::Boolean:
-    return Left->AsBool() == Right->AsBool();
-  case EJson::Array: {
-    const TArray<TSharedPtr<FJsonValue>> &A = Left->AsArray();
-    const TArray<TSharedPtr<FJsonValue>> &B = Right->AsArray();
-    if (A.Num() != B.Num())
-      return false;
-    for (int32 Index = 0; Index < A.Num(); ++Index)
-      if (!JsonEquivalent(A[Index], B[Index]))
-        return false;
-    return true;
-  }
-  case EJson::Object: {
-    const TSharedPtr<FJsonObject> A = Left->AsObject();
-    const TSharedPtr<FJsonObject> B = Right->AsObject();
-    if (!A.IsValid() || !B.IsValid() || A->Values.Num() != B->Values.Num())
-      return false;
-    for (const TPair<FString, TSharedPtr<FJsonValue>> &Pair : A->Values) {
-      if (!JsonEquivalent(Pair.Value, B->TryGetField(Pair.Key)))
-        return false;
-    }
-    return true;
-  }
-  default:
-    return false;
-  }
-}
-
-bool IsStructMemberAuthoringEditable(const FProperty *Property) {
-  // EditCondition is value-dependent availability, not a limitation of the
-  // struct member's canonical codec or recursive authoring shape.
-  return Property && Property->HasAnyPropertyFlags(CPF_Edit) &&
-         !Property->HasAnyPropertyFlags(
-             CPF_EditConst | CPF_Transient | CPF_Deprecated |
-             CPF_DuplicateTransient | CPF_NonPIEDuplicateTransient |
-             CPF_TextExportTransient);
-}
+using UeAgentAuthoringTypeDescriptors::IsStructMemberAuthoringEditable;
 
 bool ValidateAuthoringType(const FProperty *Property, const void *ValuePtr,
                            bool bIgnoreFixedArray, bool bRequireEditFlag,
-                           FString &OutReason) {
+                           FDiagnostic& OutReason, const UScriptStruct* Scope = nullptr) {
   if (!Property) {
-    return Fail(OutReason, TEXT("invalid_property"));
+    return Fail(OutReason, TEXT("invalid_property"), TEXT("The reflected property is missing."));
   }
-  if (bRequireEditFlag && !IsStructMemberAuthoringEditable(Property)) {
+  if (bRequireEditFlag && !IsStructMemberAuthoringEditable(Property, Scope)) {
     return Fail(OutReason,
-                FString::Printf(TEXT("struct_member_not_editable_%s"),
-                                *Property->GetName()));
+                FString::Printf(TEXT("struct_member_not_editable_%s"), *Property->GetName()),
+                FString::Printf(TEXT("The struct member %s is not editable through authoring."), *Property->GetPathName()));
   }
   if (!bIgnoreFixedArray && Property->ArrayDim > 1) {
     if (!ValidateAuthoringType(Property, nullptr, true, false, OutReason))
@@ -599,7 +802,7 @@ bool ValidateAuthoringType(const FProperty *Property, const void *ValuePtr,
   }
   if (GetValueKindInternal(Property, bIgnoreFixedArray) ==
       TEXT("unavailable")) {
-    return Fail(OutReason, TEXT("unsupported_property_type"));
+    return PropertyFailure(OutReason, TEXT("unsupported_property_type"), TEXT("The reflected property type has no authoring codec."), Property);
   }
   if (const FArrayProperty *Array = CastField<FArrayProperty>(Property)) {
     if (!ValidateAuthoringType(Array->Inner, nullptr, false, false, OutReason))
@@ -633,7 +836,7 @@ bool ValidateAuthoringType(const FProperty *Property, const void *ValuePtr,
   if (const FMapProperty *Map = CastField<FMapProperty>(Property)) {
     if (!Map->KeyProp ||
         !Map->KeyProp->HasAllPropertyFlags(CPF_HasGetValueTypeHash)) {
-      return Fail(OutReason, TEXT("unstable_map_key_type"));
+      return PropertyFailure(OutReason, TEXT("unstable_map_key_type"), TEXT("The map key type does not provide a stable native value hash."), Map->KeyProp);
     }
     if (!ValidateAuthoringType(Map->KeyProp, nullptr, false, false,
                                OutReason) ||
@@ -666,7 +869,7 @@ bool ValidateAuthoringType(const FProperty *Property, const void *ValuePtr,
   }
   if (const FStructProperty *Struct = CastField<FStructProperty>(Property)) {
     if (!Struct->Struct)
-      return Fail(OutReason, TEXT("missing_struct_type"));
+      return Fail(OutReason, TEXT("missing_struct_type"), TEXT("The reflected struct property has no struct type."));
     const FString Kind = StructKind(Struct->Struct);
     if (Kind == TEXT("instanced_struct")) {
       if (!ValuePtr)
@@ -680,12 +883,12 @@ bool ValidateAuthoringType(const FProperty *Property, const void *ValuePtr,
                                         EFieldIterationFlags::IncludeSuper);
            It; ++It) {
         FProperty *Field = *It;
-        if (Field->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
+        if (!IsStructMemberAuthoringEditable(Field, DynamicStruct))
           continue;
         if (!ValidateAuthoringType(
                 Field,
                 Field->ContainerPtrToValuePtr<void>(Instanced.GetMemory()),
-                false, true, OutReason))
+                false, true, OutReason, DynamicStruct))
           return false;
       }
       return true;
@@ -696,11 +899,11 @@ bool ValidateAuthoringType(const FProperty *Property, const void *ValuePtr,
                                       EFieldIterationFlags::IncludeSuper);
          It; ++It) {
       FProperty *Field = *It;
-      if (Field->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
+      if (!IsStructMemberAuthoringEditable(Field, Struct->Struct))
         continue;
       const void *FieldValue =
           ValuePtr ? Field->ContainerPtrToValuePtr<void>(ValuePtr) : nullptr;
-      if (!ValidateAuthoringType(Field, FieldValue, false, true, OutReason))
+      if (!ValidateAuthoringType(Field, FieldValue, false, true, OutReason, Struct->Struct))
         return false;
     }
   }
@@ -718,57 +921,104 @@ FString GetValueKind(const FProperty *Property) {
   return GetValueKindInternal(Property, false);
 }
 
-bool IsSupported(const FProperty *Property, FString &OutReason) {
-  TFunction<bool(const FProperty *, bool)> Validate =
-      [&](const FProperty *Candidate, bool bIgnoreFixedArray) {
+static bool IsSupportedValue(const FProperty *Property, const void* ValuePtr, FDiagnostic& OutReason,
+                             bool* OutContainsText = nullptr, const FStructFieldFilter* FieldFilter = nullptr) {
+  TFunction<bool(const FProperty *, const void*, bool)> Validate =
+      [&](const FProperty *Candidate, const void* Value, bool bIgnoreFixedArray) {
         if (!Candidate)
-          return Fail(OutReason, TEXT("invalid_property"));
-        if (!bIgnoreFixedArray && Candidate->ArrayDim > 1)
-          return Validate(Candidate, true);
+          return Fail(OutReason, TEXT("invalid_property"), TEXT("The reflected property is missing."));
+        if (OutContainsText && CastField<FTextProperty>(Candidate)) *OutContainsText = true;
+        if (!bIgnoreFixedArray && Candidate->ArrayDim > 1) {
+          if (!Value) return Validate(Candidate, nullptr, true);
+          for (int32 Index = 0; Index < Candidate->ArrayDim; ++Index)
+            if (!Validate(Candidate, static_cast<const uint8*>(Value) + Index * Candidate->GetElementSize(), true)) return false;
+          return true;
+        }
         if (GetValueKindInternal(Candidate, bIgnoreFixedArray) ==
             TEXT("unavailable"))
-          return Fail(OutReason, TEXT("unsupported_property_type"));
-        if (const FArrayProperty *Array = CastField<FArrayProperty>(Candidate))
-          return Validate(Array->Inner, false);
-        if (const FSetProperty *Set = CastField<FSetProperty>(Candidate))
-          return Validate(Set->ElementProp, false);
+          return PropertyFailure(OutReason, TEXT("unsupported_property_type"), TEXT("The reflected property type has no authoring codec."), Candidate);
+        if (const FArrayProperty *Array = CastField<FArrayProperty>(Candidate)) {
+          if (!Value) return Validate(Array->Inner, nullptr, false);
+          FScriptArrayHelper Items(Array, Value);
+          if (Items.Num() == 0) return Validate(Array->Inner, nullptr, false);
+          for (int32 Index = 0; Index < Items.Num(); ++Index)
+            if (!Validate(Array->Inner, Items.GetRawPtr(Index), false)) return false;
+          return true;
+        }
+        if (const FSetProperty *Set = CastField<FSetProperty>(Candidate)) {
+          if (!Value) return Validate(Set->ElementProp, nullptr, false);
+          FScriptSetHelper Items(Set, Value);
+          if (Items.Num() == 0) return Validate(Set->ElementProp, nullptr, false);
+          for (int32 Index = 0; Index < Items.GetMaxIndex(); ++Index)
+            if (Items.IsValidIndex(Index) && !Validate(Set->ElementProp, Items.GetElementPtr(Index), false)) return false;
+          return true;
+        }
         if (const FMapProperty *Map = CastField<FMapProperty>(Candidate)) {
           if (!Map->KeyProp ||
               !Map->KeyProp->HasAllPropertyFlags(CPF_HasGetValueTypeHash)) {
-            return Fail(OutReason, TEXT("unstable_map_key_type"));
+            return PropertyFailure(OutReason, TEXT("unstable_map_key_type"), TEXT("The map key type does not provide a stable native value hash."), Map->KeyProp);
           }
-          return Validate(Map->KeyProp, false) &&
-                 Validate(Map->ValueProp, false);
+          if (!Value) return Validate(Map->KeyProp, nullptr, false) && Validate(Map->ValueProp, nullptr, false);
+          FScriptMapHelper Items(Map, Value);
+          if (Items.Num() == 0) return Validate(Map->KeyProp, nullptr, false) && Validate(Map->ValueProp, nullptr, false);
+          for (int32 Index = 0; Index < Items.GetMaxIndex(); ++Index)
+            if (Items.IsValidIndex(Index) && (!Validate(Map->KeyProp, Items.GetKeyPtr(Index), false)
+                || !Validate(Map->ValueProp, Items.GetValuePtr(Index), false))) return false;
+          return true;
         }
         if (const FOptionalProperty *Optional =
                 CastField<FOptionalProperty>(Candidate))
-          return Validate(Optional->GetValueProperty(), false);
+          return Validate(Optional->GetValueProperty(), Value && Optional->IsSet(Value)
+              ? Optional->GetValuePointerForRead(Value) : nullptr, false);
         if (const FStructProperty *Struct =
                 CastField<FStructProperty>(Candidate)) {
           if (!Struct->Struct)
-            return Fail(OutReason, TEXT("missing_struct_type"));
-          if (StructKind(Struct->Struct) != TEXT("struct"))
-            return true;
-          for (TFieldIterator<FProperty> It(Struct->Struct,
+            return Fail(OutReason, TEXT("missing_struct_type"), TEXT("The reflected struct property has no struct type."));
+          const UScriptStruct* Members = Struct->Struct;
+          const void* Memory = Value;
+          const FString Kind = StructKind(Members);
+          // A property bag may hold text in its dynamic schema. Do not let the
+          // native editor display-string shortcut bypass canonical comparison.
+          if (OutContainsText && Kind == TEXT("property_bag")) *OutContainsText = true;
+          if (Kind == TEXT("instanced_struct")) {
+            if (!Value) return true;
+            const auto& Dynamic = *static_cast<const FInstancedStruct*>(Value);
+            Members = Dynamic.GetScriptStruct(); Memory = Dynamic.GetMemory();
+            if (!Members || !Memory) return true;
+          } else if (Kind != TEXT("struct")) return true;
+          for (TFieldIterator<FProperty> It(Members,
                                             EFieldIterationFlags::IncludeSuper);
                It; ++It) {
             if ((*It)->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
               continue;
-            if (!Validate(*It, false))
+            if (FieldFilter && *FieldFilter && !(*FieldFilter)(Members, *It))
+              continue;
+            if (!Validate(*It, Memory ? It->ContainerPtrToValuePtr<void>(Memory) : nullptr, false))
               return false;
           }
         }
         return true;
       };
-  if (!Validate(Property, false))
+  if (!Validate(Property, ValuePtr, false))
     return false;
   OutReason.Reset();
   return true;
 }
 
+bool IsSupported(const FProperty *Property, FDiagnostic& OutReason) {
+  return IsSupportedValue(Property, nullptr, OutReason);
+}
+
+bool IsSupported(const FProperty *Property, const void* ValuePtr, FDiagnostic& OutReason) {
+  return IsSupportedValue(Property, ValuePtr, OutReason);
+}
+
 bool IsAuthoringSupported(const FProperty *Property, const void *ValuePtr,
-                          FString &OutReason) {
-  if (!IsSupported(Property, OutReason) ||
+                          FDiagnostic& OutReason) {
+  const FStructFieldFilter EditableFields = [](const UScriptStruct* Struct, const FProperty* Field) {
+    return IsStructMemberAuthoringEditable(Field, Struct);
+  };
+  if (!IsSupportedValue(Property, ValuePtr, OutReason, nullptr, &EditableFields) ||
       !ValidateAuthoringType(Property, ValuePtr, false, false, OutReason)) {
     return false;
   }
@@ -776,8 +1026,246 @@ bool IsAuthoringSupported(const FProperty *Property, const void *ValuePtr,
   return true;
 }
 
-TSharedPtr<FJsonObject> BuildTypeDescriptor(const FProperty *Property) {
-  return BuildTypeDescriptorInternal(Property);
+bool IsStructFieldAuthoringEditable(const FProperty *Property, const UScriptStruct* Scope) {
+  return IsStructMemberAuthoringEditable(Property, Scope);
+}
+
+bool ProjectAuthoringValue(const TSharedPtr<FJsonObject>& Type,
+                          const TSharedPtr<FJsonValue>& Value,
+                          const TSharedPtr<FJsonValue>& Definition,
+                          TSharedPtr<FJsonValue>& OutValue,
+                          TSharedPtr<FJsonValue>& OutDefinition) {
+  OutValue = Value;
+  OutDefinition = Definition;
+  FString Kind;
+  if (!Type || !Type->TryGetStringField(TEXT("kind"), Kind)) return true;
+  const auto Schema = Definition && Definition->Type == EJson::Object ? Definition->AsObject() : nullptr;
+  const auto Object = Value && Value->Type == EJson::Object ? Value->AsObject() : nullptr;
+  if (Kind == TEXT("struct") || Kind == TEXT("instanced_struct") || Kind == TEXT("property_bag")) {
+    const TSharedPtr<FJsonObject>* Fields = nullptr;
+    // Absence of a captured schema is not evidence of an empty editable shape.
+    if (!Schema || !Schema->TryGetObjectField(TEXT("fields"), Fields)) return true;
+    const TSharedPtr<FJsonObject>* Values = nullptr;
+    if (Object) Object->TryGetObjectField(TEXT("fields"), Values);
+    auto ProjectedFields = MakeShared<FJsonObject>();
+    auto ProjectedValues = MakeShared<FJsonObject>();
+    for (const auto& Field : (*Fields)->Values) {
+      const auto Descriptor = Field.Value && Field.Value->Type == EJson::Object ? Field.Value->AsObject() : nullptr;
+      bool bEditable = true;
+      if (Kind != TEXT("property_bag") && Descriptor
+          && Descriptor->TryGetBoolField(TEXT("editable"), bEditable) && !bEditable)
+        continue;
+      const TSharedPtr<FJsonObject>* FieldType = nullptr;
+      TSharedPtr<FJsonValue> ProjectedValue, ProjectedDefinition;
+      const auto FieldValue = Values ? (*Values)->TryGetField(Field.Key) : nullptr;
+      if (!Descriptor || !Descriptor->TryGetObjectField(TEXT("type"), FieldType)) {
+        ProjectedFields->SetField(Field.Key, Field.Value);
+        if (FieldValue) ProjectedValues->SetField(Field.Key, FieldValue);
+        continue;
+      }
+      const bool bFieldActionable = ProjectAuthoringValue(*FieldType, FieldValue,
+          Descriptor->TryGetField(TEXT("value_definition")), ProjectedValue, ProjectedDefinition);
+      // Bag schema is an explicit desired inventory. Preserve every top-level
+      // field and its projected shell even if its descendants have no operations.
+      if (!bFieldActionable && Kind != TEXT("property_bag")) continue;
+      auto ProjectedDescriptor = MakeShared<FJsonObject>();
+      ProjectedDescriptor->Values = Descriptor->Values;
+      if (ProjectedDefinition) ProjectedDescriptor->SetField(TEXT("value_definition"), ProjectedDefinition);
+      ProjectedFields->SetObjectField(Field.Key, ProjectedDescriptor);
+      if (ProjectedValue) ProjectedValues->SetField(Field.Key, ProjectedValue);
+    }
+    auto ProjectedSchema = MakeShared<FJsonObject>();
+    ProjectedSchema->Values = Schema->Values;
+    ProjectedSchema->SetObjectField(TEXT("fields"), ProjectedFields);
+    OutDefinition = MakeShared<FJsonValueObject>(ProjectedSchema);
+    if (Object && Values) {
+      auto ProjectedObject = MakeShared<FJsonObject>();
+      ProjectedObject->Values = Object->Values;
+      ProjectedObject->SetObjectField(TEXT("fields"), ProjectedValues);
+      OutValue = MakeShared<FJsonValueObject>(ProjectedObject);
+    }
+    // Dynamic type selection and bag schema remain actionable with empty fields.
+    return Kind != TEXT("struct") || !ProjectedFields->Values.IsEmpty();
+  } else if (Kind == TEXT("object_ref")) {
+    const TSharedPtr<FJsonObject> *Owned = nullptr, *Fields = nullptr, *OwnedSchema = nullptr;
+    const TSharedPtr<FJsonObject> *OwnedFields = nullptr, *PropertiesSchema = nullptr;
+    const TArray<TSharedPtr<FJsonValue>> *Properties = nullptr, *Definitions = nullptr;
+    // Only captured owned descriptors have paired property schemas. A reference
+    // remains actionable even when every property of its instance is hidden.
+    if (!Object || !Schema || !Object->TryGetObjectField(TEXT("owned_object"), Owned)
+        || !(*Owned)->TryGetArrayField(TEXT("properties"), Properties)
+        || !Schema->TryGetObjectField(TEXT("fields"), Fields)
+        || !(*Fields)->TryGetObjectField(TEXT("owned_object"), OwnedSchema)
+        || !(*OwnedSchema)->TryGetObjectField(TEXT("fields"), OwnedFields)
+        || !(*OwnedFields)->TryGetObjectField(TEXT("properties"), PropertiesSchema)
+        || !(*PropertiesSchema)->TryGetArrayField(TEXT("items"), Definitions)
+        || Properties->Num() != Definitions->Num()) return true;
+    TArray<TSharedPtr<FJsonValue>> ProjectedProperties, ProjectedDefinitions;
+    for (int32 Index = 0; Index < Properties->Num(); ++Index) {
+      const auto PropertyValue = (*Properties)[Index];
+      const auto DefinitionValue = (*Definitions)[Index];
+      const auto Property = PropertyValue && PropertyValue->Type == EJson::Object ? PropertyValue->AsObject() : nullptr;
+      const auto Descriptor = DefinitionValue && DefinitionValue->Type == EJson::Object ? DefinitionValue->AsObject() : nullptr;
+      const TSharedPtr<FJsonObject> *PropertyFields = nullptr, *ValueSchema = nullptr, *PropertyType = nullptr;
+      if (!Property || !Descriptor || !Descriptor->TryGetObjectField(TEXT("fields"), PropertyFields)
+          || !(*PropertyFields)->TryGetObjectField(TEXT("value"), ValueSchema)
+          || !(*ValueSchema)->TryGetObjectField(TEXT("type"), PropertyType)) {
+        ProjectedProperties.Add((*Properties)[Index]);
+        ProjectedDefinitions.Add((*Definitions)[Index]);
+        continue;
+      }
+      TSharedPtr<FJsonValue> ProjectedValue, ProjectedDefinition;
+      if (!ProjectAuthoringValue(*PropertyType, Property->TryGetField(TEXT("value")),
+          (*ValueSchema)->TryGetField(TEXT("value_definition")), ProjectedValue, ProjectedDefinition)) continue;
+      auto CopyWith = [](const TSharedPtr<FJsonObject>& Source, const TCHAR* Name, const TSharedPtr<FJsonValue>& Replacement) {
+        auto Copy = MakeShared<FJsonObject>(); Copy->Values = Source->Values;
+        if (Replacement) Copy->SetField(Name, Replacement);
+        return MakeShared<FJsonValueObject>(Copy);
+      };
+      ProjectedProperties.Add(CopyWith(Property, TEXT("value"), ProjectedValue));
+      const auto UpdatedValueSchema = CopyWith(*ValueSchema, TEXT("value_definition"), ProjectedDefinition);
+      const auto UpdatedFields = CopyWith(*PropertyFields, TEXT("value"), UpdatedValueSchema);
+      ProjectedDefinitions.Add(CopyWith(Descriptor, TEXT("fields"), UpdatedFields));
+    }
+    auto CopyObject = [](const TSharedPtr<FJsonObject>& Source) {
+      auto Copy = MakeShared<FJsonObject>(); Copy->Values = Source->Values; return Copy;
+    };
+    auto UpdatedPropertiesSchema = CopyObject(*PropertiesSchema);
+    UpdatedPropertiesSchema->SetArrayField(TEXT("items"), ProjectedDefinitions);
+    auto UpdatedOwnedFields = CopyObject(*OwnedFields);
+    UpdatedOwnedFields->SetObjectField(TEXT("properties"), UpdatedPropertiesSchema);
+    auto UpdatedOwnedSchema = CopyObject(*OwnedSchema);
+    UpdatedOwnedSchema->SetObjectField(TEXT("fields"), UpdatedOwnedFields);
+    auto UpdatedFields = CopyObject(*Fields);
+    UpdatedFields->SetObjectField(TEXT("owned_object"), UpdatedOwnedSchema);
+    auto UpdatedSchema = CopyObject(Schema);
+    UpdatedSchema->SetObjectField(TEXT("fields"), UpdatedFields);
+    OutDefinition = MakeShared<FJsonValueObject>(UpdatedSchema);
+    auto UpdatedOwned = CopyObject(*Owned);
+    UpdatedOwned->SetArrayField(TEXT("properties"), ProjectedProperties);
+    auto UpdatedObject = CopyObject(Object);
+    UpdatedObject->SetObjectField(TEXT("owned_object"), UpdatedOwned);
+    OutValue = MakeShared<FJsonValueObject>(UpdatedObject);
+  } else if (Kind == TEXT("map")) {
+    const TSharedPtr<FJsonObject> *KeyType = nullptr, *MappedType = nullptr, *Fields = nullptr, *EntriesSchema = nullptr;
+    const TArray<TSharedPtr<FJsonValue>> *Entries = nullptr, *Definitions = nullptr;
+    if (!Type->TryGetObjectField(TEXT("key_type"), KeyType)
+        || !Type->TryGetObjectField(TEXT("mapped_type"), MappedType) || !Object || !Schema
+        || !Object->TryGetArrayField(TEXT("entries"), Entries)
+        || !Schema->TryGetObjectField(TEXT("fields"), Fields)
+        || !(*Fields)->TryGetObjectField(TEXT("entries"), EntriesSchema)
+        || !(*EntriesSchema)->TryGetArrayField(TEXT("items"), Definitions)
+        || Entries->Num() != Definitions->Num()) return true;
+    auto CopyObject = [](const TSharedPtr<FJsonObject>& Source) {
+      auto Copy = MakeShared<FJsonObject>(); Copy->Values = Source->Values; return Copy;
+    };
+    TArray<TSharedPtr<FJsonValue>> ProjectedEntries, ProjectedDefinitions;
+    for (int32 Index = 0; Index < Entries->Num(); ++Index) {
+      const auto EntryValue = (*Entries)[Index], EntryDefinition = (*Definitions)[Index];
+      const auto Entry = EntryValue && EntryValue->Type == EJson::Object ? EntryValue->AsObject() : nullptr;
+      const auto EntrySchema = EntryDefinition && EntryDefinition->Type == EJson::Object ? EntryDefinition->AsObject() : nullptr;
+      const TSharedPtr<FJsonObject>* EntryFields = nullptr;
+      if (!Entry || !EntrySchema || !EntrySchema->TryGetObjectField(TEXT("fields"), EntryFields)) {
+        ProjectedEntries.Add(EntryValue); ProjectedDefinitions.Add(EntryDefinition);
+        continue;
+      }
+      auto UpdatedEntry = CopyObject(Entry), UpdatedEntryFields = CopyObject(*EntryFields);
+      // Keep both structural shells and the entry's complete from facts even
+      // when neither desired key nor mapped value has editable descendants.
+      for (const auto& Part : TArray<TPair<FString, TSharedPtr<FJsonObject>>>{
+          {TEXT("key"), *KeyType}, {TEXT("value"), *MappedType}}) {
+        TSharedPtr<FJsonValue> ProjectedValue, ProjectedDefinition;
+        ProjectAuthoringValue(Part.Value, Entry->TryGetField(Part.Key),
+            (*EntryFields)->TryGetField(Part.Key), ProjectedValue, ProjectedDefinition);
+        if (ProjectedValue) UpdatedEntry->SetField(Part.Key, ProjectedValue);
+        if (ProjectedDefinition) UpdatedEntryFields->SetField(Part.Key, ProjectedDefinition);
+      }
+      auto UpdatedEntrySchema = CopyObject(EntrySchema);
+      UpdatedEntrySchema->SetObjectField(TEXT("fields"), UpdatedEntryFields);
+      ProjectedEntries.Add(MakeShared<FJsonValueObject>(UpdatedEntry));
+      ProjectedDefinitions.Add(MakeShared<FJsonValueObject>(UpdatedEntrySchema));
+    }
+    auto UpdatedEntriesSchema = CopyObject(*EntriesSchema);
+    UpdatedEntriesSchema->SetArrayField(TEXT("items"), ProjectedDefinitions);
+    auto UpdatedFields = CopyObject(*Fields);
+    UpdatedFields->SetObjectField(TEXT("entries"), UpdatedEntriesSchema);
+    auto UpdatedSchema = CopyObject(Schema);
+    UpdatedSchema->SetObjectField(TEXT("fields"), UpdatedFields);
+    OutDefinition = MakeShared<FJsonValueObject>(UpdatedSchema);
+    auto UpdatedObject = CopyObject(Object);
+    UpdatedObject->SetArrayField(TEXT("entries"), ProjectedEntries);
+    OutValue = MakeShared<FJsonValueObject>(UpdatedObject);
+  } else if (Kind == TEXT("optional")) {
+    const TSharedPtr<FJsonObject> *InnerType = nullptr, *Fields = nullptr;
+    bool bIsSet = false;
+    if (!Type->TryGetObjectField(TEXT("inner_type"), InnerType) || !Object || !Schema
+        || !Object->TryGetBoolField(TEXT("is_set"), bIsSet) || !bIsSet
+        || !Schema->TryGetObjectField(TEXT("fields"), Fields)) return true;
+    TSharedPtr<FJsonValue> ProjectedValue, ProjectedDefinition;
+    ProjectAuthoringValue(*InnerType, Object->TryGetField(TEXT("value")),
+        (*Fields)->TryGetField(TEXT("value")), ProjectedValue, ProjectedDefinition);
+    auto UpdatedFields = MakeShared<FJsonObject>(); UpdatedFields->Values = (*Fields)->Values;
+    if (ProjectedDefinition) UpdatedFields->SetField(TEXT("value"), ProjectedDefinition);
+    auto UpdatedSchema = MakeShared<FJsonObject>(); UpdatedSchema->Values = Schema->Values;
+    UpdatedSchema->SetObjectField(TEXT("fields"), UpdatedFields);
+    OutDefinition = MakeShared<FJsonValueObject>(UpdatedSchema);
+    auto UpdatedObject = MakeShared<FJsonObject>(); UpdatedObject->Values = Object->Values;
+    if (ProjectedValue) UpdatedObject->SetField(TEXT("value"), ProjectedValue);
+    OutValue = MakeShared<FJsonValueObject>(UpdatedObject);
+  } else if (Kind == TEXT("array") || Kind == TEXT("fixed_array") || Kind == TEXT("set")) {
+    const TSharedPtr<FJsonObject>* ElementType = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Definitions = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
+    if (!Type->TryGetObjectField(TEXT("element_type"), ElementType) || !Schema
+        || !Schema->TryGetArrayField(TEXT("items"), Definitions)) return true;
+    if (Object) Object->TryGetArrayField(TEXT("items"), Items);
+    if (Kind != TEXT("fixed_array") && (!Items || Items->Num() != Definitions->Num())) return true;
+    // Dynamic collections retain insertion/removal operations and empty shells.
+    // Recursive field projection preserves each item's source/owned identity
+    // facts and its matching definition without projecting those facts as fields.
+    bool bActionable = Kind != TEXT("fixed_array");
+    TArray<TSharedPtr<FJsonValue>> ProjectedItems, ProjectedDefinitions;
+    for (int32 Index = 0; Index < Definitions->Num(); ++Index) {
+      TSharedPtr<FJsonValue> ProjectedValue, ProjectedDefinition;
+      bActionable |= ProjectAuthoringValue(*ElementType,
+          Items && Items->IsValidIndex(Index) ? (*Items)[Index] : nullptr, (*Definitions)[Index],
+          ProjectedValue, ProjectedDefinition);
+      ProjectedItems.Add(ProjectedValue);
+      ProjectedDefinitions.Add(ProjectedDefinition);
+    }
+    if (!bActionable) return false;
+    auto ProjectedSchema = MakeShared<FJsonObject>();
+    ProjectedSchema->Values = Schema->Values;
+    ProjectedSchema->SetArrayField(TEXT("items"), ProjectedDefinitions);
+    if (Schema->HasField(TEXT("element_definition"))) {
+      TSharedPtr<FJsonValue> ElementTemplate, ElementDefinition;
+      const auto Descriptor = Schema->GetObjectField(TEXT("element_definition"));
+      ProjectAuthoringValue(*ElementType, Schema->TryGetField(TEXT("element_template")),
+          Descriptor->TryGetField(TEXT("value_definition")), ElementTemplate, ElementDefinition);
+      auto ProjectedDescriptor = MakeShared<FJsonObject>(); ProjectedDescriptor->Values = Descriptor->Values;
+      if (ElementDefinition) ProjectedDescriptor->SetField(TEXT("value_definition"), ElementDefinition);
+      ProjectedSchema->SetObjectField(TEXT("element_definition"), ProjectedDescriptor);
+      if (ElementTemplate) ProjectedSchema->SetField(TEXT("element_template"), ElementTemplate);
+    }
+    OutDefinition = MakeShared<FJsonValueObject>(ProjectedSchema);
+    if (Object && Items && Items->Num() == Definitions->Num()) {
+      auto ProjectedObject = MakeShared<FJsonObject>();
+      ProjectedObject->Values = Object->Values;
+      ProjectedObject->SetArrayField(TEXT("items"), ProjectedItems);
+      OutValue = MakeShared<FJsonValueObject>(ProjectedObject);
+    }
+  }
+  // Dynamic containers, optional presence, owned references and semantic values
+  // remain actionable independently of their visible descendants.
+  return true;
+}
+
+bool RequiresHashSource(const FProperty *Property) {
+  return UeAgentAuthoringTypeDescriptors::RequiresHashSource(Property);
+}
+
+TSharedPtr<FJsonObject> BuildTypeDescriptor(const FProperty *Property, bool bIgnoreFixedArray) {
+  return UeAgentAuthoringTypeDescriptors::BuildJson(Property, bIgnoreFixedArray);
 }
 
 void AddTypeMetadata(const FProperty *Property,
@@ -793,9 +1281,20 @@ void AddTypeMetadata(const FProperty *Property,
 
 bool ValidateTypeMetadata(const FProperty *Property,
                           const TSharedPtr<FJsonObject> &Descriptor,
-                          FString &OutError) {
+                          FDiagnostic& OutError) {
+  return ValidateTypeMetadata(Property, Descriptor, OutError, false);
+}
+
+bool ValidateTypeMetadata(const FProperty *Property,
+                          const TSharedPtr<FJsonObject> &Descriptor,
+                          FDiagnostic& OutError, bool bSingleFixedElement) {
   return UeAgentAuthoringTypeDescriptors::ValidateMetadata(Property, Descriptor,
-                                                           OutError);
+                                                           OutError, bSingleFixedElement);
+}
+
+bool TryReadIntegerNumber(const TSharedPtr<FJsonValue>& Value, int64 Min, int64 Max,
+                          int64& OutValue, FDiagnostic& OutError) {
+  return JsonInteger(Value, Min, Max, OutValue, OutError);
 }
 
 static const FInstancedStruct *
@@ -823,8 +1322,7 @@ BuildPropertyBagSchemaEntry(const FPropertyBagPropertyDesc &Desc) {
   const TSharedPtr<FJsonObject> Type =
       BuildTypeDescriptorInternal(Desc.CachedProperty);
   for (const TPair<FString, TSharedPtr<FJsonValue>> &Pair : Type->Values) {
-    Entry->SetField(Pair.Key == TEXT("kind") ? TEXT("value_kind") : Pair.Key,
-                    Pair.Value);
+    Entry->SetField(Pair.Key, Pair.Value);
   }
   if (Desc.ValueTypeObject) {
     Entry->SetStringField(TEXT("type_path"),
@@ -837,7 +1335,7 @@ static bool ResolvePropertyBagTerminalType(const FString &Kind,
                                            const TSharedPtr<FJsonObject> &Type,
                                            EPropertyBagPropertyType &OutType,
                                            UObject *&OutTypeObject,
-                                           FString &OutError) {
+                                           FDiagnostic& OutError) {
   OutTypeObject = nullptr;
   if (Kind == TEXT("bool"))
     OutType = EPropertyBagPropertyType::Bool;
@@ -878,13 +1376,12 @@ static bool ResolvePropertyBagTerminalType(const FString &Kind,
            Kind == TEXT("transform") || Kind == TEXT("guid") ||
            Kind == TEXT("datetime") || Kind == TEXT("timespan") ||
            Kind == TEXT("gameplay_tag") || Kind == TEXT("gameplay_tags") ||
-           Kind == TEXT("curve") || Kind == TEXT("instanced_struct") ||
-           Kind == TEXT("property_bag")) {
+           Kind == TEXT("curve") || Kind == TEXT("spline") || Kind == TEXT("instanced_struct") ||
+           Kind == TEXT("property_bag") || Kind == TEXT("pcg_selector")) {
     OutType = EPropertyBagPropertyType::Struct;
   } else {
-    return Fail(
-        OutError,
-        FString::Printf(TEXT("unsupported_property_bag_value_kind_%s"), *Kind));
+    return ValueFailure(OutError, FString::Printf(TEXT("unsupported_property_bag_value_kind_%s"), *Kind),
+        TEXT("The property bag value kind is not supported."), MakeShared<FJsonValueString>(Kind), TEXT("supported property bag kind"), TEXT("/kind"));
   }
 
   FString TypePath;
@@ -897,9 +1394,11 @@ static bool ResolvePropertyBagTerminalType(const FString &Kind,
   if (!TypePath.IsEmpty()) {
     OutTypeObject = LoadObject<UObject>(nullptr, *TypePath);
     if (!OutTypeObject) {
-      return Fail(
-          OutError,
-          FString::Printf(TEXT("property_bag_type_not_found_%s"), *TypePath));
+      const TCHAR* Field = Type->HasTypedField<EJson::String>(TEXT("type_path")) ? TEXT("type_path") :
+          Type->HasTypedField<EJson::String>(TEXT("enum_path")) ? TEXT("enum_path") :
+          Type->HasTypedField<EJson::String>(TEXT("struct_path")) ? TEXT("struct_path") : TEXT("allowed_class");
+      return ValueFailure(OutError, FString::Printf(TEXT("property_bag_type_not_found_%s"), *TypePath),
+          TEXT("The property bag type could not be loaded."), MakeShared<FJsonValueString>(TypePath), TEXT("loadable type path"), FieldPointer(Field));
     }
   }
   if ((OutType == EPropertyBagPropertyType::Enum ||
@@ -909,38 +1408,45 @@ static bool ResolvePropertyBagTerminalType(const FString &Kind,
        OutType == EPropertyBagPropertyType::Class ||
        OutType == EPropertyBagPropertyType::SoftClass) &&
       !OutTypeObject) {
-    return Fail(OutError, TEXT("property_bag_type_path_required"));
+    return ValueFailure(OutError, TEXT("property_bag_type_path_required"), TEXT("The property bag enum, struct, object or class value requires a loadable type path."),
+        Type->TryGetField(TEXT("type_path")), Kind + TEXT(" type path"), TEXT("/type_path"));
   }
   return true;
 }
 
 static bool ParsePropertyBagSchemaEntry(const TSharedPtr<FJsonObject> &Entry,
                                         FPropertyBagPropertyDesc &OutDesc,
-                                        FString &OutError) {
+                                        FDiagnostic& OutError) {
   FString Name;
   FString Kind;
   if (!Entry.IsValid() || !Entry->TryGetStringField(TEXT("name"), Name) ||
-      Name.IsEmpty() || !Entry->TryGetStringField(TEXT("value_kind"), Kind) ||
+      Name.IsEmpty() || !Entry->TryGetStringField(TEXT("kind"), Kind) ||
       Kind.IsEmpty()) {
-    return Fail(OutError, TEXT("invalid_property_bag_schema_entry"));
+    const FString Field = Name.IsEmpty() ? TEXT("name") : TEXT("kind");
+    return ValueFailure(OutError, TEXT("invalid_property_bag_schema_entry"), TEXT("A property bag schema entry requires non-empty name and kind strings."),
+        Entry.IsValid() ? Entry->TryGetField(Field) : nullptr, TEXT("non-empty string"), FieldPointer(Field));
   }
 
   FPropertyBagContainerTypes Containers;
   TSharedPtr<FJsonObject> Current = Entry;
   FString CurrentKind = Kind;
+  FString TypePointer;
   while (CurrentKind == TEXT("array") || CurrentKind == TEXT("set")) {
     if (!Containers.Add(CurrentKind == TEXT("array")
                             ? EPropertyBagContainerType::Array
                             : EPropertyBagContainerType::Set)) {
-      return Fail(OutError, TEXT("property_bag_container_depth_exceeded"));
+      return ValueFailure(OutError, TEXT("property_bag_container_depth_exceeded"), TEXT("The property bag container nesting exceeds the depth supported by Unreal."),
+          MakeShared<FJsonValueString>(CurrentKind), TEXT("supported container nesting"), TypePointer + TEXT("/kind"));
     }
     const TSharedPtr<FJsonObject> *ElementType = nullptr;
     if (!Current->TryGetObjectField(TEXT("element_type"), ElementType) ||
         !ElementType || !ElementType->IsValid() ||
         !(*ElementType)->TryGetStringField(TEXT("kind"), CurrentKind)) {
-      return Fail(OutError, TEXT("property_bag_element_type_missing"));
+      return ValueFailure(OutError, TEXT("property_bag_element_type_missing"), TEXT("An array or set schema requires an element_type object with a kind field."),
+          Current->TryGetField(TEXT("element_type")), TEXT("object with kind string"), TypePointer + TEXT("/element_type"));
     }
     Current = *ElementType;
+    TypePointer += TEXT("/element_type");
   }
 
   EPropertyBagPropertyType ValueType = EPropertyBagPropertyType::None;
@@ -956,6 +1462,8 @@ static bool ParsePropertyBagSchemaEntry(const TSharedPtr<FJsonObject> &Entry,
   }
   if (!ResolvePropertyBagTerminalType(CurrentKind, TerminalType, ValueType,
                                       TypeObject, OutError)) {
+    if (TopLevelTypePath.IsEmpty() || OutError.Source.InternalJsonPath != TEXT("/type_path"))
+      UeAgentAuthoringDiagnostics::PrefixInternalDocumentFailure(OutError, TypePointer);
     return false;
   }
   OutDesc = FPropertyBagPropertyDesc(FName(*Name), Containers, ValueType,
@@ -965,21 +1473,59 @@ static bool ParsePropertyBagSchemaEntry(const TSharedPtr<FJsonObject> &Entry,
 
 static TSharedPtr<FJsonValue>
 EncodeStructValueInternal(UScriptStruct *Struct, const void *ValuePtr,
-                          UObject *Owner, const FOptions &Options, int32 Depth);
+                          UObject *Owner, const FOptions &Options, int32 Depth,
+                          TSharedPtr<FJsonObject> *OutValueDefinition = nullptr);
 
 static TSharedPtr<FJsonValue>
-EncodeInternal(FProperty *Property, const void *ValuePtr, UObject *Owner,
-               const FOptions &Options, int32 Depth, bool bIgnoreFixedArray) {
-  if (!Property || !ValuePtr ||
-      (Options.MaxDepth >= 0 && Depth > Options.MaxDepth))
+EncodeReflectedStructFields(const UScriptStruct *Struct, const void *ValuePtr,
+                          UObject *Owner, const FOptions &Options, int32 Depth,
+                          TSharedPtr<FJsonObject> *OutValueDefinition);
+
+static TSharedPtr<FJsonObject> CaptureFieldDefinition(FProperty* Field,
+    const TSharedPtr<FJsonObject>& ValueDefinition) {
+  const auto Descriptor = MakeShared<FJsonObject>();
+  Descriptor->SetObjectField(TEXT("type"), BuildTypeDescriptor(Field));
+  UeAgentAuthoringReflection::FDescriptor Reflection;
+  UeAgentAuthoringReflection::ReadConstraints(Field, Reflection.Constraints);
+  if (const auto Constraints = Reflection.MakeConstraintsJson())
+    Descriptor->SetObjectField(TEXT("constraints"), Constraints);
+  if (ValueDefinition) Descriptor->SetObjectField(TEXT("value_definition"), ValueDefinition);
+  if (const auto Candidates = UeAgentAuthoringTypeDescriptors::BuildEnumCandidates(GetPropertyEnum(Field), false, Field))
+    for (const auto& Item : Candidates->Values) Descriptor->SetField(Item.Key, Item.Value);
+  return Descriptor;
+}
+
+static TSharedPtr<FJsonValue> EncodeInternal(FProperty* Property, const void* ValuePtr, UObject* Owner,
+    const FOptions& Options, int32 Depth, bool bIgnoreFixedArray,
+    TSharedPtr<FJsonObject>* OutValueDefinition = nullptr);
+
+static TSharedPtr<FJsonValue>
+EncodeInternalValue(FProperty *Property, const void *ValuePtr, UObject *Owner,
+               const FOptions &Options, int32 Depth, bool bIgnoreFixedArray,
+               TSharedPtr<FJsonObject> *OutValueDefinition) {
+  if (OutValueDefinition) OutValueDefinition->Reset();
+  if (!Property || !ValuePtr)
     return MakeShared<FJsonValueNull>();
   if (!bIgnoreFixedArray && Property->ArrayDim > 1) {
     TArray<TSharedPtr<FJsonValue>> Items;
-    for (int32 Index = 0; Index < Property->ArrayDim; ++Index)
+    TArray<TSharedPtr<FJsonValue>> Definitions;
+    bool bHasDefinition = false;
+    for (int32 Index = 0; Index < Property->ArrayDim; ++Index) {
+      TSharedPtr<FJsonObject> Definition;
       Items.Add(EncodeInternal(Property,
                                static_cast<const uint8 *>(ValuePtr) +
                                    Index * Property->GetElementSize(),
-                               Owner, Options, Depth + 1, true));
+                               Owner, Options, Depth + 1, true,
+                               OutValueDefinition ? &Definition : nullptr));
+      if (OutValueDefinition) {
+        bHasDefinition |= Definition.IsValid();
+        Definitions.Add(Definition.IsValid() ? MakeObjectValue(Definition) : MakeShared<FJsonValueNull>());
+      }
+    }
+    if (OutValueDefinition && bHasDefinition) {
+      *OutValueDefinition = MakeShared<FJsonObject>();
+      (*OutValueDefinition)->SetArrayField(TEXT("items"), Definitions);
+    }
     TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
     Object->SetArrayField(TEXT("items"), Items);
     return MakeObjectValue(Object);
@@ -997,31 +1543,49 @@ EncodeInternal(FProperty *Property, const void *ValuePtr, UObject *Owner,
       Raw =
           CastFieldChecked<FByteProperty>(Property)->GetPropertyValue(ValuePtr);
     TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-    Object->SetStringField(TEXT("selected"), Enum->GetNameStringByValue(Raw));
+    Object->SetStringField(TEXT("selected"), EncodeEnumValueName(Enum, Raw));
     return MakeObjectValue(Object);
   }
   if (const UEnum *Enum = GetPropertyEnum(Property);
       IsBitmaskProperty(Property) && Enum) {
+    TSharedPtr<FJsonObject> Masks;
+    if (OutValueDefinition) {
+      *OutValueDefinition = MakeShared<FJsonObject>();
+      Masks = MakeShared<FJsonObject>();
+      // Use the existing value-definition contract envelope, so the same
+      // property metadata can be interned/exported as well as compared.
+      auto Contract = MakeShared<FJsonObject>();
+      Contract->SetObjectField(TEXT("bitmask_masks"), Masks);
+      Contract->SetStringField(TEXT("storage_mask"), LexToString(
+          UeAgentAuthoringTypeDescriptors::GetIntegerStorageMask(Property)));
+      (*OutValueDefinition)->SetStringField(TEXT("type"), TEXT("bitmask"));
+      (*OutValueDefinition)->SetObjectField(TEXT("contract"), Contract);
+    }
     const FNumericProperty *Numeric = CastField<FNumericProperty>(Property);
-    const uint64 Raw =
-        Numeric && IsUnsignedNumericProperty(Numeric)
+    const uint64 StorageMask = UeAgentAuthoringTypeDescriptors::GetIntegerStorageMask(Property);
+    const uint64 Raw = (Numeric && IsUnsignedNumericProperty(Numeric)
             ? Numeric->GetUnsignedIntPropertyValue(ValuePtr)
             : static_cast<uint64>(
-                  Numeric ? Numeric->GetSignedIntPropertyValue(ValuePtr) : 0);
+                  Numeric ? Numeric->GetSignedIntPropertyValue(ValuePtr) : 0)) & StorageMask;
+    uint64 Covered = 0;
     TArray<TSharedPtr<FJsonValue>> Selected;
-    for (int32 Index = 0; Index < Enum->NumEnums() - 1; ++Index) {
+    for (int32 Index = 0; Index < Enum->NumEnums(); ++Index) {
+      if (!UeAgentAuthoringTypeDescriptors::IsEnumValueEntry(Enum, Index)) continue;
       const int64 EnumValue = Enum->GetValueByIndex(Index);
-      const uint64 Mask =
-          UsesEnumValuesAsMaskValues(Property, Enum)
-              ? static_cast<uint64>(EnumValue)
-              : (EnumValue >= 0 && EnumValue < 64 ? (uint64(1) << EnumValue)
-                                                  : 0);
-      if (Mask && (Raw & Mask) == Mask)
+      uint64 Mask = 0;
+      if (Masks && UeAgentAuthoringTypeDescriptors::TryGetBitmaskMask(Property, Enum, EnumValue, Mask))
+        Masks->SetStringField(Enum->GetNameStringByIndex(Index), LexToString(Mask));
+      if (UeAgentAuthoringTypeDescriptors::TryGetBitmaskMask(Property, Enum, EnumValue, Mask)
+          && Mask && (Raw & Mask) == Mask) {
         Selected.Add(
             MakeShared<FJsonValueString>(Enum->GetNameStringByIndex(Index)));
+        Covered |= Mask;
+      }
     }
     TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
     Object->SetArrayField(TEXT("selected"), Selected);
+    if (const uint64 Unmapped = Raw & ~Covered; Unmapped)
+      Object->SetStringField(TEXT("unmapped_bits"), LexToString(Unmapped));
     return MakeObjectValue(Object);
   }
   if (const FNumericProperty *Numeric = CastField<FNumericProperty>(Property)) {
@@ -1060,6 +1624,10 @@ EncodeInternal(FProperty *Property, const void *ValuePtr, UObject *Owner,
     return MakeLiteral(MakeShared<FJsonValueString>(
         BoundString(Name->GetPropertyValue(ValuePtr).ToString(), Options)));
   if (const FTextProperty *Text = CastField<FTextProperty>(Property)) {
+    if (OutValueDefinition) {
+      *OutValueDefinition = MakeShared<FJsonObject>();
+      (*OutValueDefinition)->SetStringField(TEXT("builtin"), TEXT("text"));
+    }
     const FText TextValue = Text->GetPropertyValue(ValuePtr);
     const TOptional<FString> Namespace =
         FTextInspector::GetNamespace(TextValue);
@@ -1079,32 +1647,33 @@ EncodeInternal(FProperty *Property, const void *ValuePtr, UObject *Owner,
   }
   if (const FSoftObjectProperty *Soft =
           CastField<FSoftObjectProperty>(Property)) {
-    TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
     const FSoftObjectPath Path =
         Soft->GetPropertyValue(ValuePtr).ToSoftObjectPath();
-    if (Path.IsNull())
-      Object->SetField(TEXT("path"), MakeShared<FJsonValueNull>());
-    else
-      Object->SetStringField(TEXT("path"), Path.ToString());
-    return MakeObjectValue(Object);
+    if (Options.ScopedReferenceEncoder)
+      return Options.ScopedReferenceEncoder(Soft->GetPropertyValue(ValuePtr).Get(), Path.ToString());
+    return UeAgentPropertyValueCodec::EncodeReferencePath(Path.ToString());
   }
   if (const FObjectPropertyBase *ObjectProperty =
           CastField<FObjectPropertyBase>(Property)) {
+    if (Options.ScopedReferenceEncoder) {
+      UObject* Referenced = ObjectProperty->GetObjectPropertyValue(ValuePtr);
+      return Options.ScopedReferenceEncoder(Referenced, Referenced ? Referenced->GetPathName() : FString());
+    }
     TSharedPtr<FJsonValue> CustomValue;
     if (Options.ObjectReferenceEncoder &&
         Options.ObjectReferenceEncoder(ObjectProperty, ValuePtr, Owner, Depth,
-                                       CustomValue)) {
+                                       CustomValue, OutValueDefinition)) {
       return CustomValue.IsValid() ? CustomValue : MakeShared<FJsonValueNull>();
     }
-    TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-    if (UObject *Referenced = ObjectProperty->GetObjectPropertyValue(ValuePtr))
-      Object->SetStringField(TEXT("path"), Referenced->GetPathName());
-    else
-      Object->SetField(TEXT("path"), MakeShared<FJsonValueNull>());
-    return MakeObjectValue(Object);
+    const UObject* Referenced = ObjectProperty->GetObjectPropertyValue(ValuePtr);
+    return UeAgentPropertyValueCodec::EncodeReferencePath(Referenced ? Referenced->GetPathName() : FString());
   }
   if (const FInterfaceProperty *Interface =
           CastField<FInterfaceProperty>(Property)) {
+    if (Options.ScopedReferenceEncoder) {
+      UObject* Referenced = Interface->GetPropertyValue(ValuePtr).GetObject();
+      return Options.ScopedReferenceEncoder(Referenced, Referenced ? Referenced->GetPathName() : FString());
+    }
     TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
     if (UObject *Referenced = Interface->GetPropertyValue(ValuePtr).GetObject())
       Object->SetStringField(TEXT("path"), Referenced->GetPathName());
@@ -1114,98 +1683,65 @@ EncodeInternal(FProperty *Property, const void *ValuePtr, UObject *Owner,
   }
   if (const FStructProperty *Struct = CastField<FStructProperty>(Property)) {
     const FString Kind = StructKind(Struct->Struct);
-    if (Kind == TEXT("instanced_struct")) {
-      const FInstancedStruct &Instanced =
-          *static_cast<const FInstancedStruct *>(ValuePtr);
-      TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-      TSharedPtr<FJsonObject> Fields = MakeShared<FJsonObject>();
-      const UScriptStruct *DynamicStruct = Instanced.GetScriptStruct();
-      if (DynamicStruct && Instanced.GetMemory()) {
-        Object->SetStringField(TEXT("struct_path"),
-                               DynamicStruct->GetPathName());
-        for (TFieldIterator<FProperty> It(DynamicStruct,
-                                          EFieldIterationFlags::IncludeSuper);
-             It; ++It) {
-          FProperty *Field = *It;
-          if (Field->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
-            continue;
-          if (Options.StructFieldFilter &&
-              !Options.StructFieldFilter(DynamicStruct, Field))
-            continue;
-          Fields->SetField(Field->GetName(),
-                           EncodeInternal(Field,
-                                          Field->ContainerPtrToValuePtr<void>(
-                                              Instanced.GetMemory()),
-                                          Owner, Options, Depth + 1, false));
-        }
-      } else {
-        Object->SetField(TEXT("struct_path"), MakeShared<FJsonValueNull>());
-      }
-      Object->SetObjectField(TEXT("fields"), Fields);
-      return MakeObjectValue(Object);
-    }
-    if (Kind == TEXT("property_bag")) {
-      return EncodePropertyBag(
-          *static_cast<const FInstancedPropertyBag *>(ValuePtr), Owner, Options,
-          Depth);
-    }
-    if (Kind == TEXT("soft_object_ref")) {
-      TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-      const FSoftObjectPath &Path =
-          *static_cast<const FSoftObjectPath *>(ValuePtr);
-      if (Path.IsNull())
-        Object->SetField(TEXT("path"), MakeShared<FJsonValueNull>());
-      else
-        Object->SetStringField(TEXT("path"), Path.ToString());
-      return MakeObjectValue(Object);
-    }
-    if (Kind == TEXT("soft_class_ref")) {
-      TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-      const FSoftClassPath &Path =
-          *static_cast<const FSoftClassPath *>(ValuePtr);
-      if (Path.IsNull())
-        Object->SetField(TEXT("path"), MakeShared<FJsonValueNull>());
-      else
-        Object->SetStringField(TEXT("path"), Path.ToString());
-      return MakeObjectValue(Object);
-    }
-    if (Kind == TEXT("gameplay_tag")) {
-      const FGameplayTag &Tag = *static_cast<const FGameplayTag *>(ValuePtr);
-      return MakeLiteral(MakeShared<FJsonValueString>(
-          Tag.IsValid() ? Tag.ToString() : FString()));
-    }
-    if (Kind == TEXT("gameplay_tags")) {
-      TArray<FGameplayTag> Tags;
-      static_cast<const FGameplayTagContainer *>(ValuePtr)->GetGameplayTagArray(
-          Tags);
-      TArray<TSharedPtr<FJsonValue>> Items;
-      for (const FGameplayTag &Tag : Tags)
-        Items.Add(MakeShared<FJsonValueString>(Tag.ToString()));
-      TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-      Object->SetArrayField(TEXT("items"), Items);
-      return MakeObjectValue(Object);
-    }
     if (Kind == TEXT("curve")) {
       TSharedPtr<FJsonObject> CurveJson;
       return UeAgentCurveJson::TryBuildPropertyCurveJson(Property, ValuePtr,
-                                                         CurveJson) &&
+                                                         CurveJson, OutValueDefinition) &&
                      CurveJson.IsValid()
                  ? MakeObjectValue(CurveJson)
                  : MakeShared<FJsonValueNull>();
     }
     return EncodeStructValueInternal(Struct->Struct, ValuePtr, Owner, Options,
-                                     Depth);
+                                     Depth, OutValueDefinition);
   }
   if (const FArrayProperty *Array = CastField<FArrayProperty>(Property)) {
     FScriptArrayHelper Helper(Array, ValuePtr);
     TArray<TSharedPtr<FJsonValue>> Items;
-    const int32 Limit =
-        Options.MaxContainerItems > 0
-            ? FMath::Min(Helper.Num(), Options.MaxContainerItems)
-            : Helper.Num();
-    for (int32 Index = 0; Index < Limit; ++Index)
+    TArray<TSharedPtr<FJsonValue>> ItemDefinitions;
+    bool bHasItemDefinition = false;
+    const int32 Limit = Helper.Num();
+    for (int32 Index = 0; Index < Limit; ++Index) {
+      TSharedPtr<FJsonObject> ItemDefinition;
       Items.Add(EncodeInternal(Array->Inner, Helper.GetRawPtr(Index), Owner,
-                               Options, Depth + 1, false));
+                               Options, Depth + 1, false,
+                               OutValueDefinition ? &ItemDefinition : nullptr));
+      if (OutValueDefinition) {
+        bHasItemDefinition |= ItemDefinition.IsValid();
+        ItemDefinitions.Add(ItemDefinition.IsValid()
+            ? MakeObjectValue(ItemDefinition) : MakeShared<FJsonValueNull>());
+      }
+    }
+    const bool bOwnedElements = Options.bCaptureOwnedObjectDefinitions
+        && UeAgentAuthoringReflection::IsOwnedObjectProperty(Array->Inner);
+    const bool bStructuredOwnedElements = Options.bCaptureOwnedObjectDefinitions
+        && CastField<FStructProperty>(Array->Inner)
+        && Array->Inner->HasAnyPropertyFlags(CPF_ContainsInstancedReference);
+    TSharedPtr<FJsonObject> ElementDefinition;
+    TSharedPtr<FJsonValue> ElementTemplate;
+    if (OutValueDefinition && Options.bCaptureStructFieldDescriptors) {
+      if (const auto* Element = CastField<FStructProperty>(Array->Inner);
+          Element && Element->Struct && !Options.ElementDefinitionStack.Contains(Element->Struct)) {
+        FOptions TemplateOptions = Options;
+        TemplateOptions.ElementDefinitionStack.Add(Element->Struct);
+        // A native default Struct is metadata, never a captured owned instance.
+        TemplateOptions.ObjectReferenceEncoder = nullptr;
+        TemplateOptions.bCaptureOwnedObjectDefinitions = false;
+        FStructOnScope Default(Element->Struct);
+        ElementTemplate = EncodeInternal(Array->Inner, Default.GetStructMemory(), nullptr,
+            TemplateOptions, Depth + 1, false, &ElementDefinition);
+      }
+    }
+    if (OutValueDefinition && (bHasItemDefinition || bOwnedElements || bStructuredOwnedElements || ElementTemplate)) {
+      *OutValueDefinition = MakeShared<FJsonObject>();
+      (*OutValueDefinition)->SetArrayField(TEXT("items"), ItemDefinitions);
+      if (ElementTemplate) {
+        // The descriptor is independent of each captured item's schema/value.
+        (*OutValueDefinition)->SetObjectField(TEXT("element_definition"), CaptureFieldDefinition(Array->Inner, ElementDefinition));
+        (*OutValueDefinition)->SetField(TEXT("element_template"), ElementTemplate);
+      }
+      if (bOwnedElements) (*OutValueDefinition)->SetStringField(TEXT("element_kind"), TEXT("owned_object"));
+      else if (bStructuredOwnedElements) (*OutValueDefinition)->SetStringField(TEXT("element_kind"), TEXT("structured_owned_item"));
+    }
     TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
     Object->SetArrayField(TEXT("items"), Items);
     if (Limit < Helper.Num()) {
@@ -1216,14 +1752,34 @@ EncodeInternal(FProperty *Property, const void *ValuePtr, UObject *Owner,
   }
   if (const FSetProperty *Set = CastField<FSetProperty>(Property)) {
     FScriptSetHelper Helper(Set, ValuePtr);
+    const bool bSource = Options.StructFieldFilter && RequiresHashSource(Set->ElementProp);
     TArray<TSharedPtr<FJsonValue>> Items;
-    for (int32 Index = 0; Index < Helper.GetMaxIndex() &&
-                          (Options.MaxContainerItems <= 0 ||
-                           Items.Num() < Options.MaxContainerItems);
+    TArray<TSharedPtr<FJsonValue>> Definitions;
+    bool bHasDefinition = false;
+    for (int32 Index = 0; Index < Helper.GetMaxIndex();
          ++Index)
-      if (Helper.IsValidIndex(Index))
-        Items.Add(EncodeInternal(Set->ElementProp, Helper.GetElementPtr(Index),
-                                 Owner, Options, Depth + 1, false));
+      if (Helper.IsValidIndex(Index)) {
+        TSharedPtr<FJsonObject> Definition;
+        auto Item = EncodeInternal(Set->ElementProp, Helper.GetElementPtr(Index),
+                                 Owner, Options, Depth + 1, false,
+                                 OutValueDefinition ? &Definition : nullptr);
+        if (bSource && Item && Item->Type == EJson::Object) {
+          FOptions Complete = Options; Complete.StructFieldFilter = nullptr;
+          Item->AsObject()->SetField(TEXT("from"), EncodeInternal(Set->ElementProp,
+              Helper.GetElementPtr(Index), Owner, Complete, Depth + 1, false));
+          if (!Definition) Definition = MakeShared<FJsonObject>();
+          Definition->SetStringField(TEXT("hash_source"), TEXT("from_required_null_creates"));
+        }
+        Items.Add(Item);
+        if (OutValueDefinition) {
+          bHasDefinition |= Definition.IsValid();
+          Definitions.Add(Definition.IsValid() ? MakeObjectValue(Definition) : MakeShared<FJsonValueNull>());
+        }
+      }
+    if (OutValueDefinition && bHasDefinition) {
+      *OutValueDefinition = MakeShared<FJsonObject>();
+      (*OutValueDefinition)->SetArrayField(TEXT("items"), Definitions);
+    }
     TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
     Object->SetArrayField(TEXT("items"), Items);
     if (Items.Num() < Helper.Num()) {
@@ -1234,21 +1790,48 @@ EncodeInternal(FProperty *Property, const void *ValuePtr, UObject *Owner,
   }
   if (const FMapProperty *Map = CastField<FMapProperty>(Property)) {
     FScriptMapHelper Helper(Map, ValuePtr);
+    const bool bSource = Options.StructFieldFilter && RequiresHashSource(Map->KeyProp);
     TArray<TSharedPtr<FJsonValue>> Entries;
-    for (int32 Index = 0; Index < Helper.GetMaxIndex() &&
-                          (Options.MaxContainerItems <= 0 ||
-                           Entries.Num() < Options.MaxContainerItems);
+    TArray<TSharedPtr<FJsonValue>> EntryDefinitions;
+    bool bHasEntryDefinition = false;
+    for (int32 Index = 0; Index < Helper.GetMaxIndex();
          ++Index) {
       if (!Helper.IsValidIndex(Index))
         continue;
       TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+      TSharedPtr<FJsonObject> KeyDefinition, ValueDefinition;
       Entry->SetField(TEXT("key"),
                       EncodeInternal(Map->KeyProp, Helper.GetKeyPtr(Index),
-                                     Owner, Options, Depth + 1, false));
+                                     Owner, Options, Depth + 1, false,
+                                     OutValueDefinition ? &KeyDefinition : nullptr));
       Entry->SetField(TEXT("value"),
                       EncodeInternal(Map->ValueProp, Helper.GetValuePtr(Index),
-                                     Owner, Options, Depth + 1, false));
+                                     Owner, Options, Depth + 1, false,
+                                     OutValueDefinition ? &ValueDefinition : nullptr));
+      if (bSource) {
+        FOptions Complete = Options; Complete.StructFieldFilter = nullptr;
+        Entry->SetField(TEXT("from"), EncodeInternal(Map->KeyProp, Helper.GetKeyPtr(Index),
+            Owner, Complete, Depth + 1, false));
+      }
       Entries.Add(MakeObjectValue(Entry));
+      if (OutValueDefinition) {
+        if (KeyDefinition.IsValid() || ValueDefinition.IsValid() || bSource) {
+          bHasEntryDefinition = true;
+          auto Fields = MakeShared<FJsonObject>();
+          if (KeyDefinition.IsValid()) Fields->SetObjectField(TEXT("key"), KeyDefinition);
+          if (ValueDefinition.IsValid()) Fields->SetObjectField(TEXT("value"), ValueDefinition);
+          auto Definition = MakeShared<FJsonObject>();
+          Definition->SetObjectField(TEXT("fields"), Fields);
+          if (bSource) Definition->SetStringField(TEXT("hash_source"), TEXT("from_required_null_creates"));
+          EntryDefinitions.Add(MakeObjectValue(Definition));
+        } else EntryDefinitions.Add(MakeShared<FJsonValueNull>());
+      }
+    }
+    if (OutValueDefinition && bHasEntryDefinition) {
+      auto Items = MakeShared<FJsonObject>(); Items->SetArrayField(TEXT("items"), EntryDefinitions);
+      auto Fields = MakeShared<FJsonObject>(); Fields->SetObjectField(TEXT("entries"), Items);
+      *OutValueDefinition = MakeShared<FJsonObject>();
+      (*OutValueDefinition)->SetObjectField(TEXT("fields"), Fields);
     }
     TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
     Object->SetArrayField(TEXT("entries"), Entries);
@@ -1263,28 +1846,113 @@ EncodeInternal(FProperty *Property, const void *ValuePtr, UObject *Owner,
     TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
     const bool bSet = Optional->IsSet(ValuePtr);
     Object->SetBoolField(TEXT("is_set"), bSet);
-    if (bSet)
+    if (bSet) {
+      TSharedPtr<FJsonObject> Definition;
       Object->SetField(
           TEXT("value"),
           EncodeInternal(Optional->GetValueProperty(),
                          Optional->GetValuePointerForRead(ValuePtr), Owner,
-                         Options, Depth + 1, false));
+                         Options, Depth + 1, false,
+                         OutValueDefinition ? &Definition : nullptr));
+      if (OutValueDefinition && Definition.IsValid()) {
+        auto Fields = MakeShared<FJsonObject>(); Fields->SetObjectField(TEXT("value"), Definition);
+        *OutValueDefinition = MakeShared<FJsonObject>();
+        (*OutValueDefinition)->SetObjectField(TEXT("fields"), Fields);
+      }
+    }
     return MakeObjectValue(Object);
   }
   return MakeShared<FJsonValueNull>();
+}
+
+static TSharedPtr<FJsonValue> EncodeInternal(FProperty* Property, const void* ValuePtr, UObject* Owner,
+    const FOptions& Options, int32 Depth, bool bIgnoreFixedArray, TSharedPtr<FJsonObject>* OutValueDefinition) {
+  if (!UeAgentAuthoringEncodedTypes::FScope::IsActive())
+    return EncodeInternalValue(Property, ValuePtr, Owner, Options, Depth, bIgnoreFixedArray, OutValueDefinition);
+  TSharedPtr<FJsonObject> Definition;
+  const auto Value = EncodeInternalValue(Property, ValuePtr, Owner, Options, Depth, bIgnoreFixedArray, &Definition);
+  if (OutValueDefinition) *OutValueDefinition = Definition;
+  // Every recursive property retains its type, including when public metadata
+  // projection intentionally omits field descriptors.
+  UeAgentAuthoringEncodedTypes::FScope::Record(Value,
+      UeAgentAuthoringTypeDescriptors::Describe(Property, bIgnoreFixedArray), Definition);
+  return Value;
 }
 
 static TSharedPtr<FJsonValue> EncodeStructValueInternal(UScriptStruct *Struct,
                                                         const void *ValuePtr,
                                                         UObject *Owner,
                                                         const FOptions &Options,
-                                                        int32 Depth) {
-  if (!Struct || !ValuePtr ||
-      (Options.MaxDepth >= 0 && Depth > Options.MaxDepth)) {
+                                                        int32 Depth,
+                                                        TSharedPtr<FJsonObject> *OutValueDefinition) {
+  if (OutValueDefinition) OutValueDefinition->Reset();
+  if (!Struct || !ValuePtr) {
     return MakeShared<FJsonValueNull>();
   }
 
   const FString Kind = StructKind(Struct);
+  if (Kind == TEXT("instanced_struct")) {
+    const FInstancedStruct &Instanced =
+        *static_cast<const FInstancedStruct *>(ValuePtr);
+    TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+    const UScriptStruct *DynamicStruct = Instanced.GetScriptStruct();
+    if (DynamicStruct && Instanced.GetMemory()) {
+      Object = EncodeReflectedStructFields(DynamicStruct, Instanced.GetMemory(),
+          Owner, Options, Depth, OutValueDefinition)->AsObject();
+      Object->SetStringField(TEXT("struct_path"),
+                             DynamicStruct->GetPathName());
+    } else {
+      Object->SetField(TEXT("struct_path"), MakeShared<FJsonValueNull>());
+      Object->SetObjectField(TEXT("fields"), MakeShared<FJsonObject>());
+    }
+    return MakeObjectValue(Object);
+  }
+  if (Kind == TEXT("property_bag")) {
+    return EncodePropertyBag(
+        *static_cast<const FInstancedPropertyBag *>(ValuePtr), Owner, Options,
+        Depth, OutValueDefinition);
+  }
+  if (Kind == TEXT("soft_object_ref")) {
+    TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+    const FSoftObjectPath &Path =
+        *static_cast<const FSoftObjectPath *>(ValuePtr);
+    if (Path.IsNull())
+      Object->SetField(TEXT("path"), MakeShared<FJsonValueNull>());
+    else
+      Object->SetStringField(TEXT("path"), Path.ToString());
+    return MakeObjectValue(Object);
+  }
+  if (Kind == TEXT("soft_class_ref")) {
+    TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+    const FSoftClassPath &Path =
+        *static_cast<const FSoftClassPath *>(ValuePtr);
+    if (Path.IsNull())
+      Object->SetField(TEXT("path"), MakeShared<FJsonValueNull>());
+    else
+      Object->SetStringField(TEXT("path"), Path.ToString());
+    return MakeObjectValue(Object);
+  }
+  if (Kind == TEXT("gameplay_tag")) {
+    const FGameplayTag &Tag = *static_cast<const FGameplayTag *>(ValuePtr);
+    return MakeLiteral(MakeShared<FJsonValueString>(
+        Tag.IsValid() ? Tag.ToString() : FString()));
+  }
+  if (Kind == TEXT("gameplay_tags")) {
+    TArray<FGameplayTag> Tags;
+    static_cast<const FGameplayTagContainer *>(ValuePtr)->GetGameplayTagArray(
+        Tags);
+    TArray<TSharedPtr<FJsonValue>> Items;
+    for (const FGameplayTag &Tag : Tags)
+      Items.Add(MakeShared<FJsonValueString>(Tag.ToString()));
+    TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
+    Object->SetArrayField(TEXT("items"), Items);
+    return MakeObjectValue(Object);
+  }
+  if (Kind == TEXT("pcg_selector"))
+    return MakeLiteral(MakeShared<FJsonValueString>(
+        static_cast<const FPCGAttributePropertySelector*>(ValuePtr)->ToString()));
+  if (Kind == TEXT("spline"))
+    return MakeShared<FJsonValueObject>(UeAgentSplineValue::Encode(*static_cast<const FSplineCurves*>(ValuePtr)));
   auto EncodeNamedComponents = [Struct,
                                 ValuePtr](const TArray<const TCHAR *> &Names) {
     TArray<TSharedPtr<FJsonValue>> Components;
@@ -1347,7 +2015,21 @@ static TSharedPtr<FJsonValue> EncodeStructValueInternal(UScriptStruct *Struct,
     return MakeObjectValue(Object);
   }
 
+  return EncodeReflectedStructFields(Struct, ValuePtr, Owner, Options, Depth, OutValueDefinition);
+}
+
+static TSharedPtr<FJsonValue>
+EncodeReflectedStructFields(const UScriptStruct *Struct, const void *ValuePtr,
+                          UObject *Owner, const FOptions &Options, int32 Depth,
+                          TSharedPtr<FJsonObject> *OutValueDefinition) {
+  TOptional<FEnvTraceData> CanonicalTrace;
+  if (UeAgentEnvTraceDataValue::IsType(Struct)) {
+    CanonicalTrace = UeAgentEnvTraceDataValue::Canonical(*static_cast<const FEnvTraceData*>(ValuePtr));
+    ValuePtr = &CanonicalTrace.GetValue();
+  }
   TSharedPtr<FJsonObject> Fields = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> FieldDefinitions = Options.bCaptureStructFieldDescriptors
+      ? TSharedPtr<FJsonObject>(MakeShared<FJsonObject>()) : nullptr;
   for (TFieldIterator<FProperty> It(Struct, EFieldIterationFlags::IncludeSuper);
        It; ++It) {
     FProperty *Field = *It;
@@ -1355,10 +2037,26 @@ static TSharedPtr<FJsonValue> EncodeStructValueInternal(UScriptStruct *Struct,
       continue;
     if (Options.StructFieldFilter && !Options.StructFieldFilter(Struct, Field))
       continue;
+    TSharedPtr<FJsonObject> FieldDefinition;
     Fields->SetField(
         Field->GetName(),
         EncodeInternal(Field, Field->ContainerPtrToValuePtr<void>(ValuePtr),
-                       Owner, Options, Depth + 1, false));
+                       Owner, Options, Depth + 1, false,
+                       OutValueDefinition ? &FieldDefinition : nullptr));
+    if (OutValueDefinition && Options.bCaptureStructFieldDescriptors) {
+      FieldDefinition = CaptureFieldDefinition(Field, FieldDefinition);
+      // Complete snapshots retain native state; the authoring projection omits
+      // members that the shared struct apply path cannot edit.
+      FieldDefinition->SetBoolField(TEXT("editable"), IsStructMemberAuthoringEditable(Field, Struct));
+    }
+    if (FieldDefinition.IsValid()) {
+      if (!FieldDefinitions.IsValid()) FieldDefinitions = MakeShared<FJsonObject>();
+      FieldDefinitions->SetObjectField(Field->GetName(), FieldDefinition);
+    }
+  }
+  if (OutValueDefinition && FieldDefinitions.IsValid()) {
+    *OutValueDefinition = MakeShared<FJsonObject>();
+    (*OutValueDefinition)->SetObjectField(TEXT("fields"), FieldDefinitions);
   }
   TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
   Object->SetObjectField(TEXT("fields"), Fields);
@@ -1367,14 +2065,53 @@ static TSharedPtr<FJsonValue> EncodeStructValueInternal(UScriptStruct *Struct,
 
 TSharedPtr<FJsonValue> Encode(FProperty *Property, const void *ValuePtr,
                               UObject *Owner, const FOptions &Options,
-                              int32 Depth) {
-  return EncodeInternal(Property, ValuePtr, Owner, Options, Depth, false);
+                              int32 Depth, TSharedPtr<FJsonObject> *OutValueDefinition,
+                              bool bIgnoreFixedArray) {
+  if (!UeAgentAuthoringEncodedTypes::FScope::IsActive())
+    return EncodeInternal(Property, ValuePtr, Owner, Options, Depth, bIgnoreFixedArray, OutValueDefinition);
+  FOptions CaptureOptions = Options;
+  CaptureOptions.bCaptureStructFieldDescriptors |= OutValueDefinition == nullptr;
+  TSharedPtr<FJsonObject> Definition;
+  auto Value = EncodeInternal(Property, ValuePtr, Owner, CaptureOptions, Depth, bIgnoreFixedArray, &Definition);
+  if (OutValueDefinition) *OutValueDefinition = Definition;
+  UeAgentAuthoringEncodedTypes::FScope::Record(Value,
+      UeAgentAuthoringTypeDescriptors::Describe(Property, bIgnoreFixedArray), Definition);
+  return Value;
 }
 
 TSharedPtr<FJsonValue> EncodeStructValue(UScriptStruct *Struct,
                                          const void *ValuePtr, UObject *Owner,
-                                         const FOptions &Options, int32 Depth) {
-  return EncodeStructValueInternal(Struct, ValuePtr, Owner, Options, Depth);
+                                         const FOptions &Options, int32 Depth,
+                                         TSharedPtr<FJsonObject>* OutValueDefinition) {
+  if (!UeAgentAuthoringEncodedTypes::FScope::IsActive())
+    return EncodeStructValueInternal(Struct, ValuePtr, Owner, Options, Depth, OutValueDefinition);
+  FOptions CaptureOptions = Options;
+  CaptureOptions.bCaptureStructFieldDescriptors |= OutValueDefinition == nullptr;
+  TSharedPtr<FJsonObject> Definition;
+  auto Value = EncodeStructValueInternal(Struct, ValuePtr, Owner, CaptureOptions, Depth, &Definition);
+  if (OutValueDefinition) *OutValueDefinition = Definition;
+  const auto Type = UeAgentAuthoringTypeDescriptors::DescribeStruct(Struct);
+  UeAgentAuthoringEncodedTypes::FScope::Record(Value, Type, Definition);
+  return Value;
+}
+
+TSharedPtr<FJsonObject> ProjectNativeDefaultStructFields(
+    UScriptStruct* Struct, const void* NativeData, const void* DefaultData,
+    const TSharedPtr<FJsonObject>& Fields) {
+  if (!Struct || !NativeData || !DefaultData || !Fields) return Fields;
+  using namespace UeAgentAuthoringEncodedTypes;
+  FScope Projection;
+  const auto Complete = MakeShared<FJsonObject>();
+  Complete->Values = Fields->Values;
+  FScope::Copy(MakeShared<FJsonValueObject>(Fields), MakeShared<FJsonValueObject>(Complete));
+  for (const auto& Field : Fields->Values) {
+    const FProperty* Property = FindFProperty<FProperty>(Struct, *Field.Key);
+    if (Property)
+      FScope::SetNativeField(Complete, Field.Key, Field.Value,
+          Property->Identical_InContainer(NativeData, DefaultData, PPF_None)
+              ? EFieldEmission::NativeDefault : EFieldEmission::Always);
+  }
+  return Projection.ProjectAuthoringValue(MakeShared<FJsonValueObject>(Complete))->AsObject();
 }
 
 static bool DecodeStructValueInternal(UScriptStruct *Struct,
@@ -1382,59 +2119,83 @@ static bool DecodeStructValueInternal(UScriptStruct *Struct,
                                       const TSharedPtr<FJsonValue> &Value,
                                       void *OutValuePtr, UObject *Owner,
                                       const FOptions &Options,
-                                      FString &OutError, int32 Depth);
+                                      FDiagnostic& OutError, int32 Depth);
+
+static bool DecodeReflectedStructFields(UScriptStruct *Struct,
+                                       const TSharedPtr<FJsonObject>& Fields,
+                                       void *OutValuePtr, UObject *Owner,
+                                       const FOptions &Options,
+                                       FDiagnostic& OutError, int32 Depth,
+                                       const TCHAR* Shape);
 
 static bool DecodeInternal(FProperty *Property,
                            const TSharedPtr<FJsonValue> &Value,
                            void *OutValuePtr, UObject *Owner,
-                           const FOptions &Options, FString &OutError,
+                           const FOptions &Options, FDiagnostic& OutError,
                            int32 Depth, bool bIgnoreFixedArray) {
   if (!Property || !OutValuePtr)
-    return Fail(OutError, TEXT("invalid_property_or_value_pointer"));
-  if (!ValidateDepth(Options, Depth, OutError))
-    return false;
+    return Fail(OutError, TEXT("invalid_property_or_value_pointer"), TEXT("Property decoding requires a reflected property and writable native value storage."));
+  // Like scalar literals and vector components, ordinary sequences may omit
+  // their codec envelope. Use the reflected type, not a captured old value,
+  // so new/dynamic property-bag fields use the same native container decoder.
+  if (Value.IsValid() && Value->Type == EJson::Array) {
+    const auto* Struct = CastField<FStructProperty>(Property);
+    if ((!bIgnoreFixedArray && Property->ArrayDim > 1) ||
+        CastField<FArrayProperty>(Property) || CastField<FSetProperty>(Property) ||
+        (Struct && StructKind(Struct->Struct) == TEXT("gameplay_tags"))) {
+      const auto Object = MakeShared<FJsonObject>();
+      Object->SetArrayField(TEXT("items"), Value->AsArray());
+      const bool bDecoded = DecodeInternal(Property, MakeObjectValue(Object), OutValuePtr,
+                            Owner, Options, OutError, Depth, bIgnoreFixedArray);
+      if (!bDecoded) RestoreSequenceInput(OutError);
+      return bDecoded;
+    }
+  }
   if (!bIgnoreFixedArray && Property->ArrayDim > 1) {
     TSharedPtr<FJsonObject> Object;
     const TArray<TSharedPtr<FJsonValue>> *Items = nullptr;
     if (!GetObject(Value, Object, OutError) ||
-        !Object->TryGetArrayField(TEXT("items"), Items) || !Items ||
-        Items->Num() != Property->ArrayDim)
-      return Fail(OutError, TEXT("fixed_array_length_mismatch"));
-    if (Object->Values.Num() != 1)
-      return Fail(OutError, TEXT("unexpected_fixed_array_fields"));
+        !RequiredArray(Object, TEXT("items"), Items, TEXT("fixed_array_length_mismatch"), OutError) ||
+        !OnlyFields(Object, {TEXT("items")}, TEXT("unexpected_fixed_array_fields"), OutError)) return false;
+    if (Items->Num() != Property->ArrayDim)
+      return ValueFailure(OutError, TEXT("fixed_array_length_mismatch"), TEXT("The fixed array has the wrong number of elements."),
+          MakeShared<FJsonValueNumber>(Items->Num()), FString::FromInt(Property->ArrayDim), TEXT("/items"));
     for (int32 Index = 0; Index < Property->ArrayDim; ++Index)
       if (!DecodeInternal(Property, (*Items)[Index],
                           static_cast<uint8 *>(OutValuePtr) +
                               Index * Property->GetElementSize(),
-                          Owner, Options, OutError, Depth + 1, true))
+                          Owner, Options, OutError, Depth + 1, true)) {
+        PrefixValueFailure(OutError, FString::Printf(TEXT("/items/%d"), Index), FString::Printf(TEXT("[%d]"), Index));
         return false;
+      }
     return true;
   }
+  if (Options.ScopedValueInitializer
+      && !Options.ScopedValueInitializer(Property, Value, OutValuePtr, bIgnoreFixedArray, OutError))
+    return false;
   if (const FBoolProperty *Bool = CastField<FBoolProperty>(Property)) {
     TSharedPtr<FJsonValue> Literal;
-    if (!GetLiteral(Value, Literal, OutError) ||
-        Literal->Type != EJson::Boolean)
-      return Fail(OutError, TEXT("expected_boolean_literal"));
+    if (!GetLiteral(Value, Literal, OutError)) return false;
+    if (Literal->Type != EJson::Boolean)
+      return ValueFailure(OutError, TEXT("expected_boolean_literal"), TEXT("The boolean literal has the wrong JSON type."),
+          Literal, TEXT("boolean"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
     Bool->SetPropertyValue(OutValuePtr, Literal->AsBool());
     return true;
   }
   if (const UEnum *Enum = GetPropertyEnum(Property);
       Enum && !IsBitmaskProperty(Property)) {
-    FString Selected;
-    if (Value.IsValid() && Value->Type == EJson::String) {
-      Selected = Value->AsString();
-    } else {
-      TSharedPtr<FJsonObject> Object;
-      if (!GetObject(Value, Object, OutError) ||
-          !Object->TryGetStringField(TEXT("selected"), Selected))
-        return Fail(OutError, TEXT("missing_enum_selected"));
-      if (Object->Values.Num() != 1)
-        return Fail(OutError, TEXT("unexpected_enum_fields"));
-    }
-    const int64 Raw = Enum->GetValueByNameString(Selected);
-    if (Raw == INDEX_NONE)
-      return Fail(OutError, TEXT("unknown_enum_value"));
-    if (const FEnumProperty *EnumProperty = CastField<FEnumProperty>(Property))
+    int64 Raw = 0;
+    if (!DecodeEnumValue(Enum, Value, Raw, OutError)) return false;
+    const FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property);
+    const FNumericProperty* Underlying = EnumProperty ? EnumProperty->GetUnderlyingProperty() : CastFieldChecked<FByteProperty>(Property);
+    const int32 Bits = Underlying->GetElementSize() * 8;
+    if (IsUnsignedNumericProperty(Underlying)
+        ? Raw < 0 || static_cast<uint64>(Raw) > UeAgentAuthoringTypeDescriptors::GetIntegerStorageMask(Underlying)
+        : Bits < 64 && (Raw < -(int64(1) << (Bits - 1)) || Raw > (int64(1) << (Bits - 1)) - 1))
+      return ValueFailure(OutError, TEXT("enum_value_out_of_range"), TEXT("The resolved enum value exceeds the property's integer storage range."),
+          MakeShared<FJsonValueString>(LexToString(Raw)), FString::Printf(TEXT("%s %d-bit integer"), IsUnsignedNumericProperty(Underlying) ? TEXT("unsigned") : TEXT("signed"), Bits),
+          Value->Type == EJson::Object ? TEXT("/selected") : FString());
+    if (EnumProperty)
       EnumProperty->GetUnderlyingProperty()->SetIntPropertyValue(OutValuePtr,
                                                                  Raw);
     else
@@ -1444,25 +2205,12 @@ static bool DecodeInternal(FProperty *Property,
   }
   if (const UEnum *Enum = GetPropertyEnum(Property);
       IsBitmaskProperty(Property) && Enum) {
-    TSharedPtr<FJsonObject> Object;
-    const TArray<TSharedPtr<FJsonValue>> *Selected = nullptr;
-    if (!GetObject(Value, Object, OutError) ||
-        !Object->TryGetArrayField(TEXT("selected"), Selected) || !Selected)
-      return Fail(OutError, TEXT("missing_bitmask_selected"));
-    if (Object->Values.Num() != 1)
-      return Fail(OutError, TEXT("unexpected_bitmask_fields"));
     uint64 Raw = 0;
-    for (const TSharedPtr<FJsonValue> &Item : *Selected) {
-      if (!Item.IsValid() || Item->Type != EJson::String)
-        return Fail(OutError, TEXT("invalid_bitmask_item"));
-      const int64 EnumValue = Enum->GetValueByNameString(Item->AsString());
-      if (EnumValue == INDEX_NONE)
-        return Fail(OutError, TEXT("unknown_bitmask_value"));
-      Raw |= UsesEnumValuesAsMaskValues(Property, Enum)
-                 ? static_cast<uint64>(EnumValue)
-                 : (EnumValue >= 0 && EnumValue < 64 ? (uint64(1) << EnumValue)
-                                                     : 0);
-    }
+    const uint64 StorageMask = UeAgentAuthoringTypeDescriptors::GetIntegerStorageMask(Property);
+    if (!DecodeBitmaskValue(Enum, Value, StorageMask,
+        [Property, Enum](int64 EnumValue, uint64& Mask) {
+          return UeAgentAuthoringTypeDescriptors::TryGetBitmaskMask(Property, Enum, EnumValue, Mask);
+        }, Raw, OutError)) return false;
     FNumericProperty *Numeric = CastFieldChecked<FNumericProperty>(Property);
     Numeric->SetIntPropertyValue(OutValuePtr, Raw);
     return true;
@@ -1471,80 +2219,76 @@ static bool DecodeInternal(FProperty *Property,
     TSharedPtr<FJsonValue> Literal;
     if (!GetLiteral(Value, Literal, OutError))
       return false;
+    const auto LiteralFailure = [&]() {
+      if (Value->Type == EJson::Object)
+        UeAgentAuthoringDiagnostics::PrefixInternalDocumentFailure(OutError, TEXT("/literal"));
+      return false;
+    };
     const FString Kind = GetValueKindInternal(Property, bIgnoreFixedArray);
     if (Numeric->IsFloatingPoint()) {
       double Number = 0.0;
       if (!JsonNumber(Literal, Number, OutError) ||
           !ValidateNumericConstraints(Property, Number, OutError))
-        return false;
-      if (Kind == TEXT("float") && FMath::Abs(Number) > MAX_flt)
-        return Fail(OutError, TEXT("float_out_of_range"));
+        return LiteralFailure();
+      if (Kind == TEXT("float") && !ValidateFloat32Value(Number, OutError))
+        return LiteralFailure();
       Numeric->SetFloatingPointPropertyValue(OutValuePtr, Number);
       return true;
     }
     if (Kind == TEXT("int64")) {
       if (Literal->Type != EJson::String)
-        return Fail(OutError, TEXT("int64_literal_must_be_decimal_string"));
+        return ValueFailure(OutError, TEXT("int64_literal_must_be_decimal_string"), TEXT("A int64 literal must be a decimal string to preserve integer precision."), Literal, TEXT("decimal int64 string"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
       int64 Number = 0;
-      if (!LexTryParseString(Number, *Literal->AsString()) ||
-          !ValidateSignedIntegerConstraints(Property, Number, OutError))
-        return Fail(OutError, OutError.IsEmpty() ? TEXT("invalid_int64_literal")
-                                                 : OutError);
+      if (!UE::UAI::StateSemantic::TryParseInt64Decimal(Literal->AsString(), Number))
+        return ValueFailure(OutError, TEXT("invalid_int64_literal"), TEXT("The literal is not a decimal integer within the int64 storage range."),
+            Literal, TEXT("decimal int64 string"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
+      if (!ValidateSignedIntegerConstraints(Property, Number, OutError)) return LiteralFailure();
       Numeric->SetIntPropertyValue(OutValuePtr, Number);
       return true;
     }
     if (Kind == TEXT("uint64")) {
       if (Literal->Type != EJson::String)
-        return Fail(OutError, TEXT("uint64_literal_must_be_decimal_string"));
+        return ValueFailure(OutError, TEXT("uint64_literal_must_be_decimal_string"), TEXT("A uint64 literal must be a decimal string to preserve integer precision."), Literal, TEXT("decimal uint64 string"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
       uint64 Number = 0;
-      if (!LexTryParseString(Number, *Literal->AsString()) ||
-          !ValidateUnsignedIntegerConstraints(Property, Number, OutError))
-        return Fail(OutError, OutError.IsEmpty()
-                                  ? TEXT("invalid_uint64_literal")
-                                  : OutError);
+      if (!UE::UAI::StateSemantic::TryParseUInt64Decimal(Literal->AsString(), Number))
+        return ValueFailure(OutError, TEXT("invalid_uint64_literal"), TEXT("The literal is not a decimal integer within the uint64 storage range."),
+            Literal, TEXT("decimal uint64 string"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
+      if (!ValidateUnsignedIntegerConstraints(Property, Number, OutError)) return LiteralFailure();
       Numeric->SetIntPropertyValue(OutValuePtr, Number);
       return true;
     }
     if (IsUnsignedNumericProperty(Numeric)) {
       uint64 Number = 0;
-      const uint64 Max = Kind == TEXT("uint8")    ? MAX_uint8
-                         : Kind == TEXT("uint16") ? MAX_uint16
-                                                  : MAX_uint32;
-      if (!JsonUnsignedInteger(Literal, Max, Number, OutError) ||
+      if (!JsonNarrowUnsignedInteger(Kind, Literal, Number, OutError) ||
           !ValidateNumericConstraints(Property, static_cast<double>(Number),
                                       OutError))
-        return false;
+        return LiteralFailure();
       Numeric->SetIntPropertyValue(OutValuePtr, Number);
       return true;
     }
     int64 Number = 0;
-    const int64 Min = Kind == TEXT("int8")    ? MIN_int8
-                      : Kind == TEXT("int16") ? MIN_int16
-                                              : MIN_int32;
-    const int64 Max = Kind == TEXT("int8")    ? MAX_int8
-                      : Kind == TEXT("int16") ? MAX_int16
-                                              : MAX_int32;
-    if (!JsonInteger(Literal, Min, Max, Number, OutError) ||
+    if (!JsonNarrowSignedInteger(Kind, Literal, Number, OutError) ||
         !ValidateNumericConstraints(Property, static_cast<double>(Number),
                                     OutError))
-      return false;
+      return LiteralFailure();
     Numeric->SetIntPropertyValue(OutValuePtr, Number);
     return true;
   }
   if (FStrProperty *String = CastField<FStrProperty>(Property)) {
     TSharedPtr<FJsonValue> Literal;
-    if (!GetLiteral(Value, Literal, OutError) || Literal->Type != EJson::String)
-      return Fail(OutError, TEXT("expected_string_literal"));
-    if (Options.MaxStringChars > 0 &&
-        Literal->AsString().Len() > Options.MaxStringChars)
-      return Fail(OutError, TEXT("string_too_long"));
+    if (!GetLiteral(Value, Literal, OutError)) return false;
+    if (Literal->Type != EJson::String)
+      return ValueFailure(OutError, TEXT("expected_string_literal"), TEXT("The string literal has the wrong JSON type."),
+          Literal, TEXT("string"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
     String->SetPropertyValue(OutValuePtr, Literal->AsString());
     return true;
   }
   if (FAnsiStrProperty *String = CastField<FAnsiStrProperty>(Property)) {
     TSharedPtr<FJsonValue> Literal;
-    if (!GetLiteral(Value, Literal, OutError) || Literal->Type != EJson::String)
-      return Fail(OutError, TEXT("expected_ansi_string_literal"));
+    if (!GetLiteral(Value, Literal, OutError)) return false;
+    if (Literal->Type != EJson::String)
+      return ValueFailure(OutError, TEXT("expected_ansi_string_literal"), TEXT("The ansi string literal has the wrong JSON type."),
+          Literal, TEXT("string"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
     const auto Converted = StringCast<ANSICHAR>(*Literal->AsString());
     String->SetPropertyValue(
         OutValuePtr,
@@ -1553,8 +2297,10 @@ static bool DecodeInternal(FProperty *Property,
   }
   if (FUtf8StrProperty *String = CastField<FUtf8StrProperty>(Property)) {
     TSharedPtr<FJsonValue> Literal;
-    if (!GetLiteral(Value, Literal, OutError) || Literal->Type != EJson::String)
-      return Fail(OutError, TEXT("expected_utf8_string_literal"));
+    if (!GetLiteral(Value, Literal, OutError)) return false;
+    if (Literal->Type != EJson::String)
+      return ValueFailure(OutError, TEXT("expected_utf8_string_literal"), TEXT("The utf8 string literal has the wrong JSON type."),
+          Literal, TEXT("string"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
     const auto Converted = StringCast<UTF8CHAR>(*Literal->AsString());
     String->SetPropertyValue(
         OutValuePtr,
@@ -1563,8 +2309,10 @@ static bool DecodeInternal(FProperty *Property,
   }
   if (FNameProperty *Name = CastField<FNameProperty>(Property)) {
     TSharedPtr<FJsonValue> Literal;
-    if (!GetLiteral(Value, Literal, OutError) || Literal->Type != EJson::String)
-      return Fail(OutError, TEXT("expected_name_literal"));
+    if (!GetLiteral(Value, Literal, OutError)) return false;
+    if (Literal->Type != EJson::String)
+      return ValueFailure(OutError, TEXT("expected_name_literal"), TEXT("The name literal has the wrong JSON type."),
+          Literal, TEXT("string"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
     Name->SetPropertyValue(OutValuePtr, FName(*Literal->AsString()));
     return true;
   }
@@ -1579,8 +2327,9 @@ static bool DecodeInternal(FProperty *Property,
     const TSharedPtr<FJsonValue> Literal = Object->TryGetField(TEXT("literal"));
     const TSharedPtr<FJsonObject> *Localized = nullptr;
     if (Literal.IsValid()) {
-      if (Object->Values.Num() != 1 || Literal->Type != EJson::String)
-        return Fail(OutError, TEXT("expected_text_literal"));
+      if (!OnlyFields(Object, {TEXT("literal")}, TEXT("expected_text_literal"), OutError)) return false;
+      if (Literal->Type != EJson::String)
+        return ValueFailure(OutError, TEXT("expected_text_literal"), TEXT("A text literal must be a string."), Literal, TEXT("string"), TEXT("/literal"));
       Text->SetPropertyValue(OutValuePtr,
                              FText::FromString(Literal->AsString()));
       return true;
@@ -1588,7 +2337,8 @@ static bool DecodeInternal(FProperty *Property,
     if (!Object->TryGetObjectField(TEXT("localized"), Localized) ||
         !Localized || !Localized->IsValid() || Object->Values.Num() != 1 ||
         (*Localized)->Values.Num() != 3) {
-      return Fail(OutError, TEXT("expected_text_literal_or_localized"));
+      return ValueFailure(OutError, TEXT("expected_text_literal_or_localized"), TEXT("Text requires either a literal string or a localized object with source, namespace and key."),
+          Object->TryGetField(TEXT("localized")), TEXT("localized object with exactly source, namespace and key"), TEXT("/localized"));
     }
     FString Source;
     FString Namespace;
@@ -1596,7 +2346,11 @@ static bool DecodeInternal(FProperty *Property,
     if (!(*Localized)->TryGetStringField(TEXT("source"), Source) ||
         !(*Localized)->TryGetStringField(TEXT("namespace"), Namespace) ||
         !(*Localized)->TryGetStringField(TEXT("key"), Key)) {
-      return Fail(OutError, TEXT("invalid_localized_text"));
+      for (const TCHAR* Field : {TEXT("source"), TEXT("namespace"), TEXT("key")}) {
+        const auto Actual = (*Localized)->TryGetField(Field);
+        if (!Actual.IsValid() || Actual->Type != EJson::String)
+          return ValueFailure(OutError, TEXT("invalid_localized_text"), TEXT("Each localized text member must be a string."), Actual, TEXT("string"), TEXT("/localized") + FieldPointer(Field));
+      }
     }
     Text->SetPropertyValue(
         OutValuePtr,
@@ -1604,218 +2358,74 @@ static bool DecodeInternal(FProperty *Property,
     return true;
   }
   if (FSoftObjectProperty *Soft = CastField<FSoftObjectProperty>(Property)) {
+    TSharedPtr<FJsonValue> ReferenceValue = Value;
+    if (Options.ScopedReferenceDecoder &&
+        !Options.ScopedReferenceDecoder(Value, ReferenceValue, OutError)) return false;
     TSharedPtr<FJsonValue> PathValue;
-    if (!GetReferencePath(Value, PathValue, OutError))
+    if (!GetReferencePath(ReferenceValue, PathValue, OutError))
       return false;
     if (PathValue->Type == EJson::Null)
       Soft->SetPropertyValue(OutValuePtr, FSoftObjectPtr());
     else if (PathValue->Type == EJson::String) {
       const FSoftObjectPath Path(PathValue->AsString());
       if (!IsCanonicalSoftReferencePath(Path))
-        return Fail(OutError, TEXT("invalid_soft_reference_path"));
+        return ValueFailure(OutError, TEXT("invalid_soft_reference_path"), TEXT("The soft object reference is not a canonical asset path."), PathValue, TEXT("canonical soft object path"), ReferenceValue->Type == EJson::Object ? TEXT("/path") : FString());
       UObject *Referenced = Path.ResolveObject();
       if (Referenced && !Referenced->IsA(Soft->PropertyClass))
-        return Fail(OutError, TEXT("reference_wrong_class"));
+        return ValueFailure(OutError, TEXT("reference_wrong_class"), TEXT("The referenced object has a class that is not allowed by this property."),
+            MakeShared<FJsonValueString>(Referenced->GetClass()->GetPathName()), Soft->PropertyClass->GetPathName(), ReferenceValue->Type == EJson::Object ? TEXT("/path") : FString());
       if (const FSoftClassProperty *SoftClass =
               CastField<FSoftClassProperty>(Property)) {
         const UClass *ReferencedClass = Cast<UClass>(Referenced);
         if (Referenced && (!ReferencedClass ||
                            (SoftClass->MetaClass &&
                             !ReferencedClass->IsChildOf(SoftClass->MetaClass))))
-          return Fail(OutError,
-                      TEXT("class_reference_not_child_of_allowed_class"));
+          return ValueFailure(OutError, TEXT("class_reference_not_child_of_allowed_class"), TEXT("The referenced class does not derive from the class allowed by this property."),
+              MakeShared<FJsonValueString>(Referenced->GetPathName()), SoftClass->MetaClass ? SoftClass->MetaClass->GetPathName() : UClass::StaticClass()->GetPathName(),
+              ReferenceValue->Type == EJson::Object ? TEXT("/path") : FString());
       }
       Soft->SetPropertyValue(OutValuePtr, FSoftObjectPtr(Path));
     } else
-      return Fail(OutError, TEXT("invalid_reference_path"));
+      return ValueFailure(OutError, TEXT("invalid_reference_path"), TEXT("A reference path must be a string or null."), PathValue, TEXT("string or null"), ReferenceValue->Type == EJson::Object ? TEXT("/path") : FString());
     return true;
   }
   if (FInterfaceProperty *Interface = CastField<FInterfaceProperty>(Property)) {
-    TSharedPtr<FJsonValue> PathValue;
-    if (!GetReferencePath(Value, PathValue, OutError))
-      return false;
+    UObject* Referenced = nullptr;
+    if (!UeAgentPropertyValueCodec::DecodeObjectReference(Value, UObject::StaticClass(), nullptr,
+        Referenced, OutError, Options.ScopedReferenceDecoder)) return false;
     FScriptInterface Result;
-    if (PathValue->Type == EJson::String) {
-      UObject *Referenced = StaticLoadObject(UObject::StaticClass(), nullptr,
-                                             *PathValue->AsString());
-      if (!Referenced || !Referenced->GetClass()->ImplementsInterface(
-                             Interface->InterfaceClass))
-        return Fail(OutError, TEXT("invalid_interface_reference"));
+    if (Referenced) {
+      if (!Referenced->GetClass()->ImplementsInterface(Interface->InterfaceClass))
+        return ValueFailure(OutError, TEXT("invalid_interface_reference"), TEXT("The referenced object does not implement the required interface."),
+            MakeShared<FJsonValueString>(Referenced->GetClass()->GetPathName()), Interface->InterfaceClass->GetPathName(), Value->Type == EJson::Object ? TEXT("/path") : FString());
       Result.SetObject(Referenced);
       Result.SetInterface(
           Referenced->GetInterfaceAddress(Interface->InterfaceClass));
-    } else if (PathValue->Type != EJson::Null)
-      return Fail(OutError, TEXT("invalid_reference_path"));
+    }
     Interface->SetPropertyValue(OutValuePtr, Result);
     return true;
   }
   if (FObjectPropertyBase *ObjectProperty =
           CastField<FObjectPropertyBase>(Property)) {
-    TSharedPtr<FJsonValue> PathValue;
-    if (!GetReferencePath(Value, PathValue, OutError))
-      return false;
     UObject *Referenced = nullptr;
-    if (PathValue->Type == EJson::String) {
-      Referenced = FindObject<UObject>(nullptr, *PathValue->AsString());
-      if (!Referenced)
-        Referenced = StaticLoadObject(ObjectProperty->PropertyClass, nullptr,
-                                      *PathValue->AsString());
-      Referenced = ResolveLoadedRedirector(Referenced);
-      if (!Referenced || !Referenced->IsA(ObjectProperty->PropertyClass))
-        return Fail(OutError, TEXT("reference_not_found_or_wrong_class"));
-    } else if (PathValue->Type != EJson::Null)
-      return Fail(OutError, TEXT("invalid_reference_path"));
-    if (const FClassProperty *ClassProperty =
-            CastField<FClassProperty>(Property)) {
-      const UClass *ReferencedClass = Cast<UClass>(Referenced);
-      if (ReferencedClass && ClassProperty->MetaClass &&
-          !ReferencedClass->IsChildOf(ClassProperty->MetaClass))
-        return Fail(OutError,
-                    TEXT("class_reference_not_child_of_allowed_class"));
-    }
+    const FClassProperty* ClassProperty = CastField<FClassProperty>(Property);
+    if (!UeAgentPropertyValueCodec::DecodeObjectReference(Value, ObjectProperty->PropertyClass,
+        ClassProperty ? ClassProperty->MetaClass : nullptr, Referenced, OutError, Options.ScopedReferenceDecoder)) return false;
     ObjectProperty->SetObjectPropertyValue(OutValuePtr, Referenced);
     return true;
   }
   if (FStructProperty *Struct = CastField<FStructProperty>(Property)) {
     const FString Kind = StructKind(Struct->Struct);
-    if (Kind == TEXT("instanced_struct")) {
-      TSharedPtr<FJsonObject> Object;
-      const TSharedPtr<FJsonObject> *Fields = nullptr;
-      if (!GetObject(Value, Object, OutError) || Object->Values.Num() != 2 ||
-          !Object->TryGetObjectField(TEXT("fields"), Fields) || !Fields ||
-          !Fields->IsValid()) {
-        return Fail(OutError, TEXT("invalid_instanced_struct_shape"));
-      }
-      const TSharedPtr<FJsonValue> StructPathValue =
-          Object->TryGetField(TEXT("struct_path"));
-      if (!StructPathValue.IsValid())
-        return Fail(OutError, TEXT("missing_instanced_struct_path"));
-      FInstancedStruct &Instanced =
-          *static_cast<FInstancedStruct *>(OutValuePtr);
-      if (StructPathValue->Type == EJson::Null) {
-        if (!(*Fields)->Values.IsEmpty())
-          return Fail(OutError, TEXT("unset_instanced_struct_has_fields"));
-        Instanced.Reset();
-        return true;
-      }
-      if (StructPathValue->Type != EJson::String)
-        return Fail(OutError, TEXT("invalid_instanced_struct_path"));
-      UScriptStruct *DynamicStruct =
-          LoadObject<UScriptStruct>(nullptr, *StructPathValue->AsString());
-      if (!DynamicStruct)
-        return Fail(OutError, TEXT("instanced_struct_type_not_found"));
-      for (TFieldIterator<FProperty> It(DynamicStruct,
-                                        EFieldIterationFlags::IncludeSuper);
-           It; ++It) {
-        FProperty *Field = *It;
-        if (Field->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
-          continue;
-        if (!IsSupported(Field, OutError))
-          return false;
-      }
-      FInstancedStruct Decoded;
-      Decoded.InitializeAs(DynamicStruct);
-      TSet<FString> Expected;
-      for (TFieldIterator<FProperty> It(DynamicStruct,
-                                        EFieldIterationFlags::IncludeSuper);
-           It; ++It) {
-        FProperty *Field = *It;
-        if (Field->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
-          continue;
-        Expected.Add(Field->GetName());
-        const TSharedPtr<FJsonValue> FieldValue =
-            (*Fields)->TryGetField(Field->GetName());
-        if (!FieldValue.IsValid())
-          return Fail(OutError,
-                      FString::Printf(TEXT("missing_instanced_struct_field_%s"),
-                                      *Field->GetName()));
-        if (!DecodeInternal(
-                Field, FieldValue,
-                Field->ContainerPtrToValuePtr<void>(Decoded.GetMutableMemory()),
-                Owner, Options, OutError, Depth + 1, false)) {
-          OutError = Field->GetName() + TEXT(":") + OutError;
-          return false;
-        }
-      }
-      for (const TPair<FString, TSharedPtr<FJsonValue>> &Pair :
-           (*Fields)->Values) {
-        if (!Expected.Contains(Pair.Key))
-          return Fail(OutError,
-                      FString::Printf(TEXT("unknown_instanced_struct_field_%s"),
-                                      *Pair.Key));
-      }
-      Instanced = MoveTemp(Decoded);
-      return true;
-    }
-    if (Kind == TEXT("property_bag")) {
-      return DecodePropertyBag(
-          Value, *static_cast<FInstancedPropertyBag *>(OutValuePtr), Owner,
-          Options, OutError, Depth);
-    }
-    if (Kind == TEXT("soft_object_ref") || Kind == TEXT("soft_class_ref")) {
-      TSharedPtr<FJsonObject> Object;
-      if (!GetObject(Value, Object, OutError) || Object->Values.Num() != 1)
-        return Fail(OutError, TEXT("invalid_soft_reference_shape"));
-      const TSharedPtr<FJsonValue> PathValue =
-          Object->TryGetField(TEXT("path"));
-      if (!PathValue.IsValid())
-        return Fail(OutError, TEXT("missing_reference_path"));
-      FString Path;
-      if (PathValue->Type == EJson::String) {
-        Path = PathValue->AsString();
-        if (!IsCanonicalSoftReferencePath(FSoftObjectPath(Path)))
-          return Fail(OutError, TEXT("invalid_soft_reference_path"));
-      } else if (PathValue->Type != EJson::Null)
-        return Fail(OutError, TEXT("invalid_reference_path"));
-      if (Kind == TEXT("soft_class_ref"))
-        *static_cast<FSoftClassPath *>(OutValuePtr) = FSoftClassPath(Path);
-      else
-        *static_cast<FSoftObjectPath *>(OutValuePtr) = FSoftObjectPath(Path);
-      return true;
-    }
-    if (Kind == TEXT("gameplay_tag")) {
-      TSharedPtr<FJsonValue> Literal;
-      if (!GetLiteral(Value, Literal, OutError) ||
-          Literal->Type != EJson::String)
-        return Fail(OutError, TEXT("expected_gameplay_tag_literal"));
-      const FGameplayTag Tag = UGameplayTagsManager::Get().RequestGameplayTag(
-          FName(*Literal->AsString()), false);
-      if (!Tag.IsValid() && !Literal->AsString().IsEmpty())
-        return Fail(OutError, TEXT("unknown_gameplay_tag"));
-      *static_cast<FGameplayTag *>(OutValuePtr) = Tag;
-      return true;
-    }
-    if (Kind == TEXT("gameplay_tags")) {
-      TSharedPtr<FJsonObject> Object;
-      const TArray<TSharedPtr<FJsonValue>> *Items = nullptr;
-      if (!GetObject(Value, Object, OutError) || Object->Values.Num() != 1 ||
-          !Object->TryGetArrayField(TEXT("items"), Items) || !Items ||
-          !ValidateContainerCount(Options, Items->Num(), OutError))
-        return Fail(OutError, TEXT("invalid_gameplay_tags_shape"));
-      FGameplayTagContainer Result;
-      for (const TSharedPtr<FJsonValue> &Item : *Items) {
-        if (!Item.IsValid() || Item->Type != EJson::String)
-          return Fail(OutError, TEXT("invalid_gameplay_tag_item"));
-        const FGameplayTag Tag = UGameplayTagsManager::Get().RequestGameplayTag(
-            FName(*Item->AsString()), false);
-        if (!Tag.IsValid())
-          return Fail(OutError, TEXT("unknown_gameplay_tag"));
-        Result.AddTag(Tag);
-      }
-      if (Result.Num() != Items->Num())
-        return Fail(OutError, TEXT("duplicate_gameplay_tag"));
-      *static_cast<FGameplayTagContainer *>(OutValuePtr) = MoveTemp(Result);
-      return true;
-    }
     if (Kind == TEXT("curve")) {
       TSharedPtr<FJsonObject> Object;
       if (!GetObject(Value, Object, OutError))
         return false;
-      TArray<TSharedPtr<FJsonValue>> Issues;
+      TArray<UE::UAI::Contract::FDiagnostic> Issues;
       if (!UeAgentCurveJson::TryApplyPropertyCurveJson(
-              Property, OutValuePtr, Object, TEXT("value"), Issues) ||
+              Property, OutValuePtr, Object, FString(), Issues) ||
           UeAgentCurveJson::HasError(Issues))
-        return Fail(OutError, TEXT("invalid_curve_value"));
+        return Fail(OutError, UeAgentAuthoringDiagnostics::MakeIssuesFailure(
+            TEXT("invalid_curve_value"), Issues, TEXT("curve_decode")));
       return true;
     }
     return DecodeStructValueInternal(Struct->Struct, Struct, Value, OutValuePtr,
@@ -1826,18 +2436,16 @@ static bool DecodeInternal(FProperty *Property,
     const TArray<TSharedPtr<FJsonValue>> *Items = nullptr;
     if (!GetObject(Value, Object, OutError) ||
         !RejectTruncatedObject(Object, OutError) ||
-        !Object->TryGetArrayField(TEXT("items"), Items) || !Items ||
-        !ValidateContainerCount(Options, Items->Num(), OutError))
+        !RequiredArray(Object, TEXT("items"), Items, TEXT("missing_array_items"), OutError))
       return false;
-    if (Object->Values.Num() != 1)
-      return Fail(OutError, TEXT("unexpected_array_fields"));
+    if (!OnlyFields(Object, {TEXT("items")}, TEXT("unexpected_array_fields"), OutError)) return false;
     FScriptArrayHelper Helper(Array, OutValuePtr);
     Helper.EmptyAndAddValues(Items->Num());
     for (int32 Index = 0; Index < Items->Num(); ++Index)
       if (!DecodeInternal(Array->Inner, (*Items)[Index],
                           Helper.GetRawPtr(Index), Owner, Options, OutError,
                           Depth + 1, false)) {
-        OutError = FString::Printf(TEXT("item_%d:"), Index) + OutError;
+        PrefixValueFailure(OutError, FString::Printf(TEXT("/items/%d"), Index), FString::Printf(TEXT("[%d]"), Index));
         return false;
       }
     return true;
@@ -1847,11 +2455,9 @@ static bool DecodeInternal(FProperty *Property,
     const TArray<TSharedPtr<FJsonValue>> *Items = nullptr;
     if (!GetObject(Value, Object, OutError) ||
         !RejectTruncatedObject(Object, OutError) ||
-        !Object->TryGetArrayField(TEXT("items"), Items) || !Items ||
-        !ValidateContainerCount(Options, Items->Num(), OutError))
+        !RequiredArray(Object, TEXT("items"), Items, TEXT("missing_set_items"), OutError))
       return false;
-    if (Object->Values.Num() != 1)
-      return Fail(OutError, TEXT("unexpected_set_fields"));
+    if (!OnlyFields(Object, {TEXT("items")}, TEXT("unexpected_set_fields"), OutError)) return false;
     FScriptSetHelper Helper(Set, OutValuePtr);
     Helper.EmptyElements(Items->Num());
     for (int32 Index = 0; Index < Items->Num(); ++Index) {
@@ -1859,14 +2465,15 @@ static bool DecodeInternal(FProperty *Property,
       void *Element = Helper.GetElementPtr(Internal);
       if (!DecodeInternal(Set->ElementProp, (*Items)[Index], Element, Owner,
                           Options, OutError, Depth + 1, false)) {
-        OutError = FString::Printf(TEXT("item_%d:"), Index) + OutError;
+        PrefixValueFailure(OutError, FString::Printf(TEXT("/items/%d"), Index), FString::Printf(TEXT("[%d]"), Index));
         return false;
       }
       for (int32 Existing = 0; Existing < Internal; ++Existing) {
         if (Helper.IsValidIndex(Existing) &&
             Set->ElementProp->Identical(Helper.GetElementPtr(Existing), Element,
                                         PPF_None)) {
-          return Fail(OutError, TEXT("duplicate_set_item"));
+          return ValueFailure(OutError, TEXT("duplicate_set_item"), FString::Printf(TEXT("The set item duplicates item %d."), Existing),
+              (*Items)[Index], TEXT("unique set item"), FString::Printf(TEXT("/items/%d"), Index));
         }
       }
     }
@@ -1878,38 +2485,43 @@ static bool DecodeInternal(FProperty *Property,
     const TArray<TSharedPtr<FJsonValue>> *Entries = nullptr;
     if (!GetObject(Value, Object, OutError) ||
         !RejectTruncatedObject(Object, OutError) ||
-        !Object->TryGetArrayField(TEXT("entries"), Entries) || !Entries ||
-        !ValidateContainerCount(Options, Entries->Num(), OutError))
+        !RequiredArray(Object, TEXT("entries"), Entries, TEXT("missing_map_entries"), OutError))
       return false;
-    if (Object->Values.Num() != 1)
-      return Fail(OutError, TEXT("unexpected_map_fields"));
+    if (!OnlyFields(Object, {TEXT("entries")}, TEXT("unexpected_map_fields"), OutError)) return false;
     FScriptMapHelper Helper(Map, OutValuePtr);
     Helper.EmptyValues(Entries->Num());
     for (int32 Index = 0; Index < Entries->Num(); ++Index) {
       TSharedPtr<FJsonObject> Entry;
+      const FString EntryPointer = FString::Printf(TEXT("/entries/%d"), Index);
       if (!GetObject((*Entries)[Index], Entry, OutError) ||
-          Entry->Values.Num() != 2) {
-        return Fail(OutError, TEXT("invalid_map_entry"));
+          !OnlyFields(Entry, {TEXT("key"), TEXT("value")}, TEXT("invalid_map_entry"), OutError)) {
+        PrefixValueFailure(OutError, EntryPointer, FString::Printf(TEXT("[%d]"), Index));
+        return false;
       }
       const TSharedPtr<FJsonValue> Key = Entry->TryGetField(TEXT("key"));
       const TSharedPtr<FJsonValue> Mapped = Entry->TryGetField(TEXT("value"));
       if (!Key.IsValid() || !Mapped.IsValid()) {
-        return Fail(OutError, TEXT("invalid_map_entry"));
+        return ValueFailure(OutError, TEXT("invalid_map_entry"), TEXT("Each map entry requires both key and value."),
+            nullptr, TEXT("map key and value"), EntryPointer + (Key.IsValid() ? TEXT("/value") : TEXT("/key")));
       }
       const int32 Internal = Helper.AddDefaultValue_Invalid_NeedsRehash();
       void *KeyPtr = Helper.GetKeyPtr(Internal);
       if (!DecodeInternal(Map->KeyProp, Key, KeyPtr, Owner, Options, OutError,
-                          Depth + 1, false) ||
-          !DecodeInternal(Map->ValueProp, Mapped, Helper.GetValuePtr(Internal),
+                          Depth + 1, false)) {
+        PrefixValueFailure(OutError, EntryPointer + TEXT("/key"), FString::Printf(TEXT("[%d].key"), Index));
+        return false;
+      }
+      if (!DecodeInternal(Map->ValueProp, Mapped, Helper.GetValuePtr(Internal),
                           Owner, Options, OutError, Depth + 1, false)) {
-        OutError = FString::Printf(TEXT("entry_%d:"), Index) + OutError;
+        PrefixValueFailure(OutError, EntryPointer + TEXT("/value"), FString::Printf(TEXT("[%d].value"), Index));
         return false;
       }
       for (int32 Existing = 0; Existing < Internal; ++Existing) {
         if (Helper.IsValidIndex(Existing) &&
             Map->KeyProp->Identical(Helper.GetKeyPtr(Existing), KeyPtr,
                                     PPF_None)) {
-          return Fail(OutError, TEXT("duplicate_map_key"));
+          return ValueFailure(OutError, TEXT("duplicate_map_key"), FString::Printf(TEXT("The map key duplicates the key in entry %d."), Existing), Key,
+              TEXT("unique map key"), EntryPointer + TEXT("/key"));
         }
       }
     }
@@ -1919,26 +2531,26 @@ static bool DecodeInternal(FProperty *Property,
   if (FOptionalProperty *Optional = CastField<FOptionalProperty>(Property)) {
     TSharedPtr<FJsonObject> Object;
     bool bSet = false;
-    if (!GetObject(Value, Object, OutError) ||
-        !Object->TryGetBoolField(TEXT("is_set"), bSet))
-      return Fail(OutError, TEXT("missing_optional_is_set"));
+    if (!GetObject(Value, Object, OutError)) return false;
+    if (!Object->TryGetBoolField(TEXT("is_set"), bSet))
+      return ValueFailure(OutError, TEXT("missing_optional_is_set"), TEXT("An optional value requires a boolean is_set field."), Object->TryGetField(TEXT("is_set")), TEXT("boolean"), TEXT("/is_set"));
     if (!bSet) {
-      if (Object->Values.Num() != 1)
-        return Fail(OutError, TEXT("unexpected_optional_fields"));
+      if (!OnlyFields(Object, {TEXT("is_set")}, TEXT("unexpected_optional_fields"), OutError)) return false;
       Optional->MarkUnset(OutValuePtr);
       return true;
     }
-    if (Object->Values.Num() != 2)
-      return Fail(OutError, TEXT("unexpected_optional_fields"));
+    if (!OnlyFields(Object, {TEXT("is_set"), TEXT("value")}, TEXT("unexpected_optional_fields"), OutError)) return false;
     const TSharedPtr<FJsonValue> Inner = Object->TryGetField(TEXT("value"));
     if (!Inner.IsValid())
-      return Fail(OutError, TEXT("missing_optional_value"));
-    return DecodeInternal(
+      return ValueFailure(OutError, TEXT("missing_optional_value"), TEXT("An optional value with is_set=true requires its value field."), Inner, TEXT("property value"), TEXT("/value"));
+    const bool bDecoded = DecodeInternal(
         Optional->GetValueProperty(), Inner,
         Optional->MarkSetAndGetInitializedValuePointerToReplace(OutValuePtr),
         Owner, Options, OutError, Depth + 1, false);
+    if (!bDecoded) PrefixValueFailure(OutError, TEXT("/value"), TEXT("value"));
+    return bDecoded;
   }
-  return Fail(OutError, TEXT("unsupported_property_type"));
+  return PropertyFailure(OutError, TEXT("unsupported_property_type"), TEXT("The reflected property type has no authoring decoder."), Property);
 }
 
 static bool DecodeStructValueInternal(UScriptStruct *Struct,
@@ -1946,12 +2558,110 @@ static bool DecodeStructValueInternal(UScriptStruct *Struct,
                                       const TSharedPtr<FJsonValue> &Value,
                                       void *OutValuePtr, UObject *Owner,
                                       const FOptions &Options,
-                                      FString &OutError, int32 Depth) {
+                                      FDiagnostic& OutError, int32 Depth) {
   if (!Struct || !OutValuePtr)
-    return Fail(OutError, TEXT("invalid_struct_target"));
-  if (!ValidateDepth(Options, Depth, OutError))
-    return false;
-
+    return Fail(OutError, TEXT("invalid_struct_target"), TEXT("Struct decoding requires a reflected struct type and writable native value storage."));
+  const FString Kind = StructKind(Struct);
+  if (Kind == TEXT("instanced_struct")) {
+    TSharedPtr<FJsonObject> Object;
+    const TSharedPtr<FJsonObject> *Fields = nullptr;
+    if (!GetObject(Value, Object, OutError) || !OnlyFields(Object, {TEXT("struct_path"), TEXT("fields")}, TEXT("invalid_instanced_struct_shape"), OutError)) return false;
+    if (!Object->TryGetObjectField(TEXT("fields"), Fields) || !Fields ||
+        !Fields->IsValid()) {
+      return ValueFailure(OutError, TEXT("invalid_instanced_struct_shape"), TEXT("An instanced struct requires a fields object."), Object->TryGetField(TEXT("fields")), TEXT("object"), TEXT("/fields"));
+    }
+    const TSharedPtr<FJsonValue> StructPathValue =
+        Object->TryGetField(TEXT("struct_path"));
+    if (!StructPathValue.IsValid())
+      return ValueFailure(OutError, TEXT("missing_instanced_struct_path"), TEXT("An instanced struct requires struct_path to select its type."), StructPathValue, TEXT("struct asset path or null"), TEXT("/struct_path"));
+    FInstancedStruct &Instanced =
+        *static_cast<FInstancedStruct *>(OutValuePtr);
+    if (StructPathValue->Type == EJson::Null) {
+      if (!(*Fields)->Values.IsEmpty())
+        return ValueFailure(OutError, TEXT("unset_instanced_struct_has_fields"), TEXT("An unset instanced struct cannot contain member values."),
+            MakeShared<FJsonValueNumber>((*Fields)->Values.Num()), TEXT("0 fields"), TEXT("/fields"));
+      Instanced.Reset();
+      return true;
+    }
+    if (StructPathValue->Type != EJson::String)
+      return ValueFailure(OutError, TEXT("invalid_instanced_struct_path"), TEXT("The instanced struct type path must be a string or null."), StructPathValue, TEXT("string or null"), TEXT("/struct_path"));
+    UScriptStruct *DynamicStruct =
+        LoadObject<UScriptStruct>(nullptr, *StructPathValue->AsString());
+    if (!DynamicStruct)
+      return ValueFailure(OutError, TEXT("instanced_struct_type_not_found"), TEXT("The selected instanced struct type could not be loaded."), StructPathValue, TEXT("loadable UScriptStruct path"), TEXT("/struct_path"));
+    FInstancedStruct Decoded;
+    if (Instanced.GetScriptStruct() == DynamicStruct) Decoded = Instanced;
+    else Decoded.InitializeAs(DynamicStruct);
+    // Dynamic and ordinary structs share filtering, partial-value semantics
+    // and native finalization. Preserve uncaptured state when the type stays.
+    if (!DecodeReflectedStructFields(DynamicStruct, *Fields,
+            Decoded.GetMutableMemory(), Owner, Options, OutError, Depth,
+            TEXT("instanced_struct"))) return false;
+    Instanced = MoveTemp(Decoded);
+    return true;
+  }
+  if (Kind == TEXT("property_bag")) {
+    return DecodePropertyBag(
+        Value, *static_cast<FInstancedPropertyBag *>(OutValuePtr), Owner,
+        Options, OutError, Depth);
+  }
+  if (Kind == TEXT("soft_object_ref") || Kind == TEXT("soft_class_ref")) {
+    TSharedPtr<FJsonObject> Object;
+    if (!GetObject(Value, Object, OutError) || !OnlyFields(Object, {TEXT("path")}, TEXT("invalid_soft_reference_shape"), OutError)) return false;
+    const TSharedPtr<FJsonValue> PathValue =
+        Object->TryGetField(TEXT("path"));
+    if (!PathValue.IsValid())
+      return ValueFailure(OutError, TEXT("missing_reference_path"), TEXT("The soft reference requires a path field."), PathValue, TEXT("string or null"), TEXT("/path"));
+    FString Path;
+    if (PathValue->Type == EJson::String) {
+      Path = PathValue->AsString();
+      if (!IsCanonicalSoftReferencePath(FSoftObjectPath(Path)))
+        return ValueFailure(OutError, TEXT("invalid_soft_reference_path"), TEXT("The soft reference is not a canonical asset path."), PathValue, TEXT("canonical soft object path"), TEXT("/path"));
+    } else if (PathValue->Type != EJson::Null)
+      return ValueFailure(OutError, TEXT("invalid_reference_path"), TEXT("A reference path must be a string or null."), PathValue, TEXT("string or null"), TEXT("/path"));
+    if (Kind == TEXT("soft_class_ref"))
+      *static_cast<FSoftClassPath *>(OutValuePtr) = FSoftClassPath(Path);
+    else
+      *static_cast<FSoftObjectPath *>(OutValuePtr) = FSoftObjectPath(Path);
+    return true;
+  }
+  if (Kind == TEXT("gameplay_tag")) {
+    TSharedPtr<FJsonValue> Literal;
+    if (!GetLiteral(Value, Literal, OutError)) return false;
+    if (Literal->Type != EJson::String)
+      return ValueFailure(OutError, TEXT("expected_gameplay_tag_literal"), TEXT("The gameplay tag literal has the wrong JSON type."),
+          Literal, TEXT("string"), Value->Type == EJson::Object ? TEXT("/literal") : FString());
+    const FGameplayTag Tag = UGameplayTagsManager::Get().RequestGameplayTag(
+        FName(*Literal->AsString()), false);
+    if (!Tag.IsValid() && !Literal->AsString().IsEmpty())
+      return ValueFailure(OutError, TEXT("unknown_gameplay_tag"), TEXT("The gameplay tag is not registered."), Literal, TEXT("registered gameplay tag or empty string"),
+          Value->Type == EJson::Object ? TEXT("/literal") : FString());
+    *static_cast<FGameplayTag *>(OutValuePtr) = Tag;
+    return true;
+  }
+  if (Kind == TEXT("gameplay_tags")) {
+    TSharedPtr<FJsonObject> Object;
+    const TArray<TSharedPtr<FJsonValue>> *Items = nullptr;
+    if (!GetObject(Value, Object, OutError) ||
+        !OnlyFields(Object, {TEXT("items")}, TEXT("invalid_gameplay_tags_shape"), OutError) ||
+        !RequiredArray(Object, TEXT("items"), Items, TEXT("invalid_gameplay_tags_shape"), OutError)) return false;
+    FGameplayTagContainer Result;
+    for (int32 Index = 0; Index < Items->Num(); ++Index) {
+      const auto& Item = (*Items)[Index];
+      const FString Pointer = FString::Printf(TEXT("/items/%d"), Index);
+      if (!Item.IsValid() || Item->Type != EJson::String)
+        return ValueFailure(OutError, TEXT("invalid_gameplay_tag_item"), TEXT("Each gameplay tag must be a string."), Item, TEXT("string"), Pointer);
+      const FGameplayTag Tag = UGameplayTagsManager::Get().RequestGameplayTag(
+          FName(*Item->AsString()), false);
+      if (!Tag.IsValid())
+        return ValueFailure(OutError, TEXT("unknown_gameplay_tag"), TEXT("The gameplay tag is not registered."), Item, TEXT("registered gameplay tag"), Pointer);
+      if (Result.HasTagExact(Tag))
+        return ValueFailure(OutError, TEXT("duplicate_gameplay_tag"), TEXT("The gameplay tag duplicates an earlier item."), Item, TEXT("unique gameplay tag"), Pointer);
+      Result.AddTag(Tag);
+    }
+    *static_cast<FGameplayTagContainer *>(OutValuePtr) = MoveTemp(Result);
+    return true;
+  }
   bool bHandled = false;
   if (!DecodeKnownStructValue(Struct, ConstraintsProperty, Value, OutValuePtr,
                               OutError, bHandled))
@@ -1961,137 +2671,662 @@ static bool DecodeStructValueInternal(UScriptStruct *Struct,
 
   TSharedPtr<FJsonObject> Object;
   const TSharedPtr<FJsonObject> *Fields = nullptr;
-  if (!GetObject(Value, Object, OutError) || Object->Values.Num() != 1 ||
-      !Object->TryGetObjectField(TEXT("fields"), Fields) || !Fields ||
+  if (!GetObject(Value, Object, OutError)) return false;
+  if (!Object->TryGetObjectField(TEXT("fields"), Fields) || !Fields ||
       !Fields->IsValid()) {
-    return Fail(OutError, TEXT("missing_struct_fields"));
+    return ValueFailure(OutError, TEXT("missing_struct_fields"), TEXT("A reflected struct value requires a fields object."), Object->TryGetField(TEXT("fields")), TEXT("object"), TEXT("/fields"));
+  }
+  for (const auto& Field : Object->Values) {
+    if (Field.Key == TEXT("fields")) continue;
+    auto Error = FDiagnostic::Failure(TEXT("unexpected_struct_value_field"),
+        TEXT("A reflected struct value accepts only the fields object."), TEXT("property_value_decode"));
+    Error.ActualValue = MakeShared<FJsonValueString>(Field.Key);
+    Error.Source.InternalJsonPath = TEXT("/") + Field.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+    return Fail(OutError, MoveTemp(Error));
   }
 
+  return DecodeReflectedStructFields(Struct, *Fields, OutValuePtr, Owner, Options, OutError, Depth, TEXT("struct"));
+}
+
+static bool DecodeReflectedStructFields(UScriptStruct *Struct,
+                                       const TSharedPtr<FJsonObject>& Fields,
+                                       void *OutValuePtr, UObject *Owner,
+                                       const FOptions &Options,
+                                       FDiagnostic& OutError, int32 Depth,
+                                       const TCHAR* Shape) {
+  TOptional<FEnvTraceData> TraceBefore;
+  if (UeAgentEnvTraceDataValue::IsType(Struct)) {
+    TraceBefore = UeAgentEnvTraceDataValue::Canonical(*static_cast<const FEnvTraceData*>(OutValuePtr));
+    UeAgentEnvTraceDataValue::CopyChannels(TraceBefore.GetValue(), *static_cast<FEnvTraceData*>(OutValuePtr));
+  }
   TSet<FString> Expected;
   for (TFieldIterator<FProperty> It(Struct, EFieldIterationFlags::IncludeSuper);
        It; ++It) {
     FProperty *Field = *It;
     if (Field->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
       continue;
-    if (!IsSupported(Field, OutError)) {
-      OutError = Field->GetName() + TEXT(":") + OutError;
+    if (Options.StructFieldFilter && !Options.StructFieldFilter(Struct, Field)) {
+      if (Fields->HasField(Field->GetName()))
+        return ValueFailure(OutError, TEXT("filtered_struct_field_") + Field->GetName(), TEXT("This struct member is excluded from the current authoring surface."),
+            MakeShared<FJsonValueString>(Field->GetName()), TEXT("authorable struct member"), TEXT("/fields") + FieldPointer(Field->GetName()));
+      continue;
+    }
+    if (!IsSupportedValue(Field, Field->ContainerPtrToValuePtr<void>(OutValuePtr),
+            OutError, nullptr, &Options.StructFieldFilter)) {
+      PrefixValueFailure(OutError, TEXT("/fields/") + Field->GetName().Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")), Field->GetName());
       return false;
     }
     Expected.Add(Field->GetName());
     const TSharedPtr<FJsonValue> FieldValue =
-        (*Fields)->TryGetField(Field->GetName());
+        Fields->TryGetField(Field->GetName());
     if (!FieldValue.IsValid()) {
       if (Options.bAllowPartialStructFields)
         continue;
-      return Fail(OutError, FString::Printf(TEXT("missing_struct_field_%s"),
-                                            *Field->GetName()));
+      return ValueFailure(OutError, FString::Printf(TEXT("missing_%s_field_%s"), Shape, *Field->GetName()), TEXT("A required struct member value is missing."),
+          FieldValue, Field->GetCPPType(), TEXT("/fields") + FieldPointer(Field->GetName()));
     }
     if (!DecodeInternal(Field, FieldValue,
                         Field->ContainerPtrToValuePtr<void>(OutValuePtr), Owner,
                         Options, OutError, Depth + 1, false)) {
-      OutError = Field->GetName() + TEXT(":") + OutError;
+      PrefixValueFailure(OutError, TEXT("/fields/") + Field->GetName().Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")), Field->GetName());
       return false;
     }
   }
-  for (const TPair<FString, TSharedPtr<FJsonValue>> &Pair : (*Fields)->Values) {
+  for (const TPair<FString, TSharedPtr<FJsonValue>> &Pair : Fields->Values) {
     if (!Expected.Contains(Pair.Key))
-      return Fail(OutError,
-                  FString::Printf(TEXT("unknown_struct_field_%s"), *Pair.Key));
+      return ValueFailure(OutError, FString::Printf(TEXT("unknown_%s_field_%s"), Shape, *Pair.Key), TEXT("The field is not a supported member of this struct."),
+          MakeShared<FJsonValueString>(Pair.Key), Struct->GetPathName(), TEXT("/fields") + FieldPointer(Pair.Key));
   }
+  // Reflected field assignment must finalize native derived state just as
+  // Blueprint struct construction does (for example FKey's cached details).
+  if (Struct->StructFlags & STRUCT_PostScriptConstruct) {
+    if (auto* Ops = Struct->GetCppStructOps())
+      Ops->PostScriptConstruct(OutValuePtr);
+  }
+  if (TraceBefore.IsSet())
+    return UeAgentEnvTraceDataValue::ReconcileEdit(*static_cast<FEnvTraceData*>(OutValuePtr),
+        TraceBefore.GetValue(), Fields->HasField(TEXT("TraceChannel")),
+        Fields->HasField(TEXT("SerializedChannel")), OutError);
+  return true;
+}
+
+FString EncodeEnumValueName(const UEnum* Enum, int64 Raw) {
+  return Enum ? Enum->GetNameStringByValue(Raw) : FString();
+}
+
+TSharedPtr<FJsonValue> EncodeReferencePath(const FString& Path) {
+  const auto Object = MakeShared<FJsonObject>();
+  if (Path.IsEmpty()) Object->SetField(TEXT("path"), MakeShared<FJsonValueNull>());
+  else Object->SetStringField(TEXT("path"), Path);
+  return MakeObjectValue(Object);
+}
+
+bool DecodeReferencePath(const TSharedPtr<FJsonValue>& Value, TOptional<FString>& OutPath, FDiagnostic& OutError) {
+  TSharedPtr<FJsonValue> Path;
+  if (!GetReferencePath(Value, Path, OutError)) return false;
+  if (Path->Type == EJson::Null) OutPath.Reset();
+  else if (Path->Type == EJson::String) OutPath = Path->AsString();
+  else return ValueFailure(OutError, TEXT("invalid_reference_path"), TEXT("A reference path must be a string or null."), Path, TEXT("string or null"),
+      Value->Type == EJson::Object ? TEXT("/path") : FString());
+  return true;
+}
+
+bool DecodeObjectReference(const TSharedPtr<FJsonValue>& Value, UClass* PropertyClass,
+                          UClass* MetaClass, UObject*& OutObject, FDiagnostic& OutError,
+                          const FScopedReferenceDecoder& Resolver) {
+  if (!PropertyClass) return Fail(OutError, TEXT("reference_class_context_missing"), TEXT("Object reference decoding requires the allowed property class."));
+  UObject* Referenced = nullptr;
+  TSharedPtr<FJsonValue> ReferenceValue = Value;
+  if (Resolver && !Resolver(Value, ReferenceValue, OutError)) return false;
+  TOptional<FString> Path;
+  if (!DecodeReferencePath(ReferenceValue, Path, OutError)) return false;
+  if (Path.IsSet()) {
+    Referenced = FindObject<UObject>(nullptr, *Path.GetValue());
+    if (!Referenced) Referenced = StaticLoadObject(PropertyClass, nullptr, *Path.GetValue());
+    Referenced = ResolveLoadedRedirector(Referenced);
+    if (!Referenced) return ValueFailure(OutError, TEXT("reference_not_found_or_wrong_class"), TEXT("The reference could not be resolved to an object of the required class."),
+        MakeShared<FJsonValueString>(Path.GetValue()), PropertyClass->GetPathName(), ReferenceValue->Type == EJson::Object ? TEXT("/path") : FString());
+  }
+  if (Referenced && !Referenced->IsA(PropertyClass)) {
+    ValueFailure(OutError, TEXT("reference_not_found_or_wrong_class"), TEXT("The referenced object has a class that is not allowed by this property."),
+        MakeShared<FJsonValueString>(Referenced->GetClass()->GetPathName()), PropertyClass->GetPathName(), ReferenceValue->Type == EJson::Object ? TEXT("/path") : FString());
+    OutError.TargetPath = Referenced->GetPathName();
+    return false;
+  }
+  const UClass* ReferencedClass = Cast<UClass>(Referenced);
+  if (ReferencedClass && MetaClass && !ReferencedClass->IsChildOf(MetaClass))
+    return ValueFailure(OutError, TEXT("class_reference_not_child_of_allowed_class"), TEXT("The referenced class does not derive from the allowed class."),
+        MakeShared<FJsonValueString>(ReferencedClass->GetPathName()), MetaClass->GetPathName(), ReferenceValue->Type == EJson::Object ? TEXT("/path") : FString());
+  OutObject = Referenced;
+  return true;
+}
+
+bool DecodeEnumValue(const UEnum* Enum, const TSharedPtr<FJsonValue>& Value, int64& OutRaw, FDiagnostic& OutError) {
+  if (!Enum) return Fail(OutError, TEXT("missing_enum_context"), TEXT("Enum decoding requires a reflected enum type."));
+    FString Selected;
+    if (Value.IsValid() && Value->Type == EJson::String) {
+      Selected = Value->AsString();
+    } else {
+      TSharedPtr<FJsonObject> Object;
+      if (!GetObject(Value, Object, OutError)) return false;
+      if (!Object->TryGetStringField(TEXT("selected"), Selected))
+        return ValueFailure(OutError, TEXT("missing_enum_selected"), TEXT("The enum value requires a selected name string."), Object->TryGetField(TEXT("selected")), TEXT("enum name string"), TEXT("/selected"));
+      if (!OnlyFields(Object, {TEXT("selected")}, TEXT("unexpected_enum_fields"), OutError)) return false;
+    }
+    if (!UeAgentAuthoringTypeDescriptors::TryResolveEnumValueName(Enum, Selected, OutRaw))
+      return ValueFailure(OutError, TEXT("unknown_enum_value"), TEXT("The selected value is not a member of the enum."),
+          MakeShared<FJsonValueString>(Selected), Enum->GetPathName(), Value->Type == EJson::Object ? TEXT("/selected") : FString());
   return true;
 }
 
 bool Decode(FProperty *Property, const TSharedPtr<FJsonValue> &Value,
             void *OutValuePtr, UObject *Owner, const FOptions &Options,
-            FString &OutError, int32 Depth) {
+            FDiagnostic& OutError, int32 Depth, bool bSingleFixedElement) {
   return DecodeInternal(Property, Value, OutValuePtr, Owner, Options, OutError,
-                        Depth, false);
+                        Depth, bSingleFixedElement);
 }
 
-bool AreSemanticallyEquivalent(FProperty *Property, const void *LeftValuePtr,
-                               const void *RightValuePtr, UObject *Owner,
-                               const FOptions &Options) {
-  if (!Property || !LeftValuePtr || !RightValuePtr)
-    return false;
-  if (Property->Identical(LeftValuePtr, RightValuePtr, PPF_None))
-    return true;
-  if (Property->ArrayDim == 1) {
-    if (const FFloatProperty *Float = CastField<FFloatProperty>(Property)) {
-      return FMath::IsNearlyEqual(Float->GetPropertyValue(LeftValuePtr),
-                                  Float->GetPropertyValue(RightValuePtr));
+bool TryConvertFloat32(double Number, float& OutValue, FDiagnostic& OutError) {
+  if (!ValidateFloat32Value(Number, OutError)) return false;
+  OutValue = static_cast<float>(Number);
+  return true;
+}
+
+bool TryConvertInt32(double Number, int32& OutValue, FDiagnostic& OutError, bool bRoundToNearest) {
+  if (!FMath::IsFinite(Number)) return ValueFailure(OutError, TEXT("int32_non_finite_value"), TEXT("A non-finite number cannot be converted to int32."), NumberFact(Number), TEXT("finite number"));
+  const double NativeValue = bRoundToNearest ? FMath::FloorToDouble(Number + 0.5) : FMath::TruncToDouble(Number);
+  if (NativeValue < MIN_int32 || NativeValue > MAX_int32) {
+    return ValueFailure(OutError, TEXT("int32_value_out_of_range"), TEXT("The converted integer is outside the int32 storage range."), NumberFact(Number),
+        FString::Printf(TEXT("%d..%d after %s"), MIN_int32, MAX_int32, bRoundToNearest ? TEXT("rounding") : TEXT("truncation")));
+  }
+  OutValue = static_cast<int32>(NativeValue);
+  return true;
+}
+
+bool TryNormalizeQuaternion(FQuat& Value, FDiagnostic& OutError) {
+  return NormalizeQuaternionValue(Value, OutError);
+}
+
+bool AreRotationsEquivalent(const FQuat& Left, const FQuat& Right, FDiagnostic& Error) {
+  FQuat NormalizedLeft = Left;
+  FQuat NormalizedRight = Right;
+  if (!NormalizeQuaternionValue(NormalizedLeft, Error) ||
+      !NormalizeQuaternionValue(NormalizedRight, Error)) return false;
+  // A dot-product error of 1e-4 admits about 1.62 degrees of rotation. Compare
+  // the angle instead, retaining winding and quaternion-sign equivalence.
+  const double AngleDegrees = FMath::RadiansToDegrees(
+      NormalizedLeft.AngularDistance(NormalizedRight));
+  return AngleDegrees <= static_cast<double>(KINDA_SMALL_NUMBER);
+}
+
+TSharedRef<FJsonObject> MakeTransformVectorComparisonDefinition() {
+  const auto Definition = MakeShared<FJsonObject>();
+  Definition->SetStringField(TEXT("comparison_semantics"), TransformVectorComparison);
+  return Definition;
+}
+
+TOptional<FValueComparison> CompareCanonicalValues(const TSharedPtr<FJsonObject>& Type,
+    const TSharedPtr<FJsonObject>& Definition, const TSharedPtr<FJsonValue>& Left,
+    const TSharedPtr<FJsonValue>& Right, bool bStoredValues) {
+  FDiagnostic Error;
+  const auto Invalid = [&](const TCHAR* Reason) {
+    if (Error.IsEmpty()) {
+      Error = FDiagnostic::Failure(TEXT("canonical_comparison_input_invalid"), Reason, TEXT("semantic_compare"));
+      Error.SourceKind = TEXT("comparison_contract");
+      Error.ExpectedValue = MakeShared<FJsonValueObject>(Type);
+      const auto Inputs = MakeShared<FJsonObject>();
+      if (Left) Inputs->SetField(TEXT("expected_input"), Left);
+      if (Right) Inputs->SetField(TEXT("actual_input"), Right);
+      Error.ActualValue = MakeShared<FJsonValueObject>(Inputs);
     }
-    if (const FDoubleProperty *Double = CastField<FDoubleProperty>(Property)) {
-      return FMath::IsNearlyEqual(Double->GetPropertyValue(LeftValuePtr),
-                                  Double->GetPropertyValue(RightValuePtr));
+    return FValueComparison::Failed(Error);
+  };
+  const auto Decide = [&](bool bEqual) {
+    if (!Error.IsEmpty()) return FValueComparison::Failed(Error);
+    return bEqual ? FValueComparison() : FValueComparison::Different(FString(), Left, Right);
+  };
+  if (!Type || !Left || !Right) return {};
+  FString Kind;
+  if (!Type->TryGetStringField(TEXT("kind"), Kind)) return {};
+  FString Encoding;
+  if (Definition && Definition->TryGetStringField(TEXT("value_encoding"), Encoding) && Encoding == TEXT("lexeme")) {
+    // Some existing public carriers store a scalar as text. Decode only that
+    // declared carrier, then reuse the ordinary typed codec rules unchanged.
+    const auto DecodeLexeme = [&](const TSharedPtr<FJsonValue>& Value) -> TSharedPtr<FJsonValue> {
+      if (!Value || Value->Type != EJson::String) return Value;
+      if (Kind == TEXT("bool")) {
+        if (Value->AsString() == TEXT("true")) return MakeShared<FJsonValueBoolean>(true);
+        if (Value->AsString() == TEXT("false")) return MakeShared<FJsonValueBoolean>(false);
+        return nullptr;
+      }
+      if (Kind == TEXT("float") || Kind == TEXT("double") || Kind == TEXT("int")
+          || Kind == TEXT("int8") || Kind == TEXT("int16") || Kind == TEXT("int32")
+          || Kind == TEXT("uint8") || Kind == TEXT("uint16") || Kind == TEXT("uint32"))
+        return MakeShared<FJsonValueNumberString>(Value->AsString());
+      return Value;
+    };
+    const auto DecodedLeft = DecodeLexeme(Left), DecodedRight = DecodeLexeme(Right);
+    if (!DecodedLeft || !DecodedRight) return Invalid(TEXT("A declared boolean lexeme must be 'true' or 'false'."));
+    const auto NativeDefinition = MakeShared<FJsonObject>(); NativeDefinition->Values = Definition->Values;
+    NativeDefinition->RemoveField(TEXT("value_encoding"));
+    return CompareCanonicalValues(Type, NativeDefinition, DecodedLeft, DecodedRight, bStoredValues);
+  }
+  TSharedPtr<FJsonValue> A, B;
+  auto Literals = [&] { return GetLiteral(Left, A, Error) && GetLiteral(Right, B, Error); };
+  if (Kind == TEXT("float") || Kind == TEXT("double")) {
+    double X, Y;
+    if (!Literals() || !JsonNumber(A, X, Error) || !JsonNumber(B, Y, Error)) return Decide(false);
+    if (Kind == TEXT("double")) return Decide(X == Y);
+    float FX, FY;
+    return Decide(TryConvertFloat32(X, FX, Error) && TryConvertFloat32(Y, FY, Error) && FX == FY);
+  }
+  if (Kind == TEXT("int64") || Kind == TEXT("uint64")) {
+    if (!Literals() || A->Type != EJson::String || B->Type != EJson::String)
+      return Invalid(TEXT("A 64-bit integer comparison requires decimal string literals."));
+    if (Kind == TEXT("int64")) {
+      int64 X, Y;
+      if (!UE::UAI::StateSemantic::TryParseInt64Decimal(A->AsString(), X)
+          || !UE::UAI::StateSemantic::TryParseInt64Decimal(B->AsString(), Y))
+        return Invalid(TEXT("A comparison input is not a valid signed 64-bit decimal integer."));
+      return Decide(X == Y);
     }
-    if (const FStructProperty *Struct = CastField<FStructProperty>(Property)) {
-      const FString Name =
-          Struct->Struct ? Struct->Struct->GetName() : FString();
-      if (Name == TEXT("Vector")) {
-        return static_cast<const FVector *>(LeftValuePtr)
-            ->Equals(*static_cast<const FVector *>(RightValuePtr));
+    uint64 X, Y;
+    if (!UE::UAI::StateSemantic::TryParseUInt64Decimal(A->AsString(), X)
+        || !UE::UAI::StateSemantic::TryParseUInt64Decimal(B->AsString(), Y))
+      return Invalid(TEXT("A comparison input is not a valid unsigned 64-bit decimal integer."));
+    return Decide(X == Y);
+  }
+  if (Kind == TEXT("int8") || Kind == TEXT("int16") || Kind == TEXT("int32") || Kind == TEXT("int")) {
+    int64 X, Y;
+    return Decide(Literals() && JsonNarrowSignedInteger(Kind, A, X, Error)
+        && JsonNarrowSignedInteger(Kind, B, Y, Error) && X == Y);
+  }
+  if (Kind == TEXT("uint8") || Kind == TEXT("uint16") || Kind == TEXT("uint32")) {
+    uint64 X, Y;
+    return Decide(Literals() && JsonNarrowUnsignedInteger(Kind, A, X, Error)
+        && JsonNarrowUnsignedInteger(Kind, B, Y, Error) && X == Y);
+  }
+  if (Kind == TEXT("name") || Kind == TEXT("gameplay_tag")) {
+    if (!Literals() || A->Type != EJson::String || B->Type != EJson::String)
+      return Invalid(TEXT("A name or gameplay tag comparison requires string literals."));
+    return Decide(FName(*A->AsString()) == FName(*B->AsString()));
+  }
+  if (Kind == TEXT("bool") || Kind == TEXT("string") || Kind == TEXT("text")) {
+    // Localized text is a record: namespace, key and source all remain significant.
+    if (!Literals()) {
+      if (Kind == TEXT("text")) return {};
+      return Invalid(TEXT("The comparison input cannot be decoded as the declared literal."));
+    }
+    const auto Expected = Kind == TEXT("bool") ? EJson::Boolean : EJson::String;
+    if (A->Type != Expected || B->Type != Expected)
+      return Invalid(TEXT("A literal comparison input has the wrong JSON type for its declaration."));
+    return Decide(UE::UAI::StateSemantic::CanonicalJson::AreJsonValuesEquivalent(A, B));
+  }
+  if (Kind == TEXT("enum")) {
+    FString Path;
+    if (!Type->TryGetStringField(TEXT("enum_path"), Path)) return {};
+    const UEnum* Enum = FindObject<UEnum>(nullptr, *Path);
+    if (!Enum) return Invalid(TEXT("The declared comparison enum could not be resolved."));
+    int64 X, Y;
+    return Decide(DecodeEnumValue(Enum, Left, X, Error) && DecodeEnumValue(Enum, Right, Y, Error) && X == Y);
+  }
+  if (Kind == TEXT("bitmask")) {
+    const TSharedPtr<FJsonObject>* Masks = nullptr;
+    const TSharedPtr<FJsonObject>* Contract = nullptr;
+    if (!Definition || !Definition->TryGetObjectField(TEXT("contract"), Contract)
+        || !(*Contract)->TryGetObjectField(TEXT("bitmask_masks"), Masks)) return {};
+    FString Path;
+    Type->TryGetStringField(TEXT("enum_path"), Path);
+    const UEnum* Enum = FindObject<UEnum>(nullptr, *Path);
+    if (!Enum) return Invalid(TEXT("The declared comparison bitmask enum could not be resolved."));
+    FString StorageText;
+    uint64 StorageMask;
+    if (!(*Contract)->TryGetStringField(TEXT("storage_mask"), StorageText)
+        || !UE::UAI::StateSemantic::TryParseUInt64Decimal(StorageText, StorageMask)) return {};
+    auto ResolveMask = [&](int64 Raw, uint64& Mask) {
+      FString Bits;
+      return (*Masks)->TryGetStringField(EncodeEnumValueName(Enum, Raw), Bits)
+          && UE::UAI::StateSemantic::TryParseUInt64Decimal(Bits, Mask);
+    };
+    uint64 X, Y;
+    return Decide(DecodeBitmaskValue(Enum, Left, StorageMask, ResolveMask, X, Error)
+        && DecodeBitmaskValue(Enum, Right, StorageMask, ResolveMask, Y, Error) && X == Y);
+  }
+  if (Kind == TEXT("object_ref") || Kind == TEXT("class_ref") || Kind == TEXT("soft_object_ref")
+      || Kind == TEXT("soft_class_ref") || Kind == TEXT("weak_object_ref")
+      || Kind == TEXT("lazy_object_ref") || Kind == TEXT("interface_ref")) {
+    TOptional<FString> X, Y;
+    // Inline owned objects and scoped references retain their existing recursive/identity owner.
+    if (!DecodeReferencePath(Left, X, Error) || !DecodeReferencePath(Right, Y, Error)) return {};
+    if (X.IsSet() != Y.IsSet()) return Decide(false);
+    return Decide(!X.IsSet() || FSoftObjectPath(X.GetValue()) == FSoftObjectPath(Y.GetValue()));
+  }
+  FString StructPath;
+  if (!Type->TryGetStringField(TEXT("struct_path"), StructPath)) return {};
+  UScriptStruct* Struct = FindObject<UScriptStruct>(nullptr, *StructPath);
+  if (!bStoredValues && Struct == FCollisionResponse::StaticStruct() && Kind == TEXT("struct")) {
+    FStructOnScope X(Struct), Y(Struct);
+    if (!DecodeStructValue(Struct, Left, X.GetStructMemory(), Error)
+        || !DecodeStructValue(Struct, Right, Y.GetStructMemory(), Error)) return Decide(false);
+    return CompareEffectiveStruct(Struct, X.GetStructMemory(), Y.GetStructMemory(), {});
+  }
+  if (Kind == TEXT("struct") || Kind == TEXT("instanced_struct") || Kind == TEXT("property_bag")
+      || Kind == TEXT("curve") || Kind == TEXT("gameplay_tags")) return {};
+  if (!Struct || UeAgentAuthoringTypeDescriptors::GetStructKind(Struct) != Kind)
+    return Invalid(TEXT("The comparison struct could not be resolved with the declared value kind."));
+  if (bStoredValues && Kind == TEXT("transform")) {
+    TSharedPtr<FJsonObject> X, Y;
+    if (!GetObject(Left, X, Error) || !GetObject(Right, Y, Error)
+        || X->Values.Num() != 3 || Y->Values.Num() != 3)
+      return Invalid(TEXT("A stored transform comparison requires translation, rotation and scale."));
+    const bool bFloat = Struct == TVariantStructure<FTransform3f>::Get();
+    for (const TCHAR* Field : {TEXT("translation"), TEXT("rotation"), TEXT("scale")}) {
+      const bool bRotation = FCString::Strcmp(Field, TEXT("rotation")) == 0;
+      const auto* ComponentStruct = bRotation
+          ? (bFloat ? TVariantStructure<FRotator3f>::Get() : TBaseStructure<FRotator>::Get())
+          : (bFloat ? TVariantStructure<FVector3f>::Get() : TBaseStructure<FVector>::Get());
+      if (!X->HasField(Field) || !Y->HasField(Field))
+        return Invalid(TEXT("A stored transform comparison is missing a required component.")).WithPrefix(FString(TEXT("/")) + Field);
+      const auto Equal = CompareCanonicalValues(UeAgentAuthoringTypeDescriptors::DescribeStruct(ComponentStruct).ToJsonObject(),
+          nullptr, X->TryGetField(Field), Y->TryGetField(Field), true);
+      if (!Equal.IsSet()) return Invalid(TEXT("The declared transform component has no typed comparator.")).WithPrefix(FString(TEXT("/")) + Field);
+      if (!Equal->bEquivalent) return Equal->WithPrefix(FString(TEXT("/")) + Field);
+    }
+    return FValueComparison();
+  }
+  FStructOnScope X(Struct), Y(Struct);
+  const auto DecodeForComparison = [&](const TSharedPtr<FJsonValue>& Value, void* Memory) {
+    // Hash identities and write elision retain the stored quaternion components;
+    // orientation normalization is only appropriate for intent verification.
+    if (bStoredValues && Kind == TEXT("quat"))
+      return DecodeComponents(Struct, nullptr, Value, Memory, {TEXT("X"), TEXT("Y"), TEXT("Z"), TEXT("W")}, Error);
+    return DecodeStructValue(Struct, Value, Memory, Error);
+  };
+  if (!DecodeForComparison(Left, X.GetStructMemory()) || !DecodeForComparison(Right, Y.GetStructMemory())) return Decide(false);
+  if (!bStoredValues) {
+    FString ComparisonSemantics;
+    if (Kind == TEXT("vector3") && Definition
+        && Definition->TryGetStringField(TEXT("comparison_semantics"), ComparisonSemantics)
+        && ComparisonSemantics == TransformVectorComparison) {
+      const auto Read = [Struct](const uint8* Ptr) {
+        return Struct == TVariantStructure<FVector3f>::Get()
+            ? FVector(*reinterpret_cast<const FVector3f*>(Ptr)) : *reinterpret_cast<const FVector*>(Ptr);
+      };
+      return CompareTransformVector(Read(X.GetStructMemory()), Read(Y.GetStructMemory()), Left, Right);
+    }
+    if (Kind == TEXT("rotator")) {
+      const auto Read = [Struct](const uint8* Ptr) {
+        return Struct == TVariantStructure<FRotator3f>::Get()
+            ? FQuat(reinterpret_cast<const FRotator3f*>(Ptr)->Quaternion())
+            : reinterpret_cast<const FRotator*>(Ptr)->Quaternion();
+      };
+      return Decide(AreRotationsEquivalent(Read(X.GetStructMemory()), Read(Y.GetStructMemory()), Error));
+    }
+    if (Kind == TEXT("quat")) {
+      const auto Read = [Struct](const uint8* Ptr) {
+        return Struct == TVariantStructure<FQuat4f>::Get() ? FQuat(*reinterpret_cast<const FQuat4f*>(Ptr))
+            : *reinterpret_cast<const FQuat*>(Ptr);
+      };
+      return Decide(AreRotationsEquivalent(Read(X.GetStructMemory()), Read(Y.GetStructMemory()), Error));
+    }
+    if (Kind == TEXT("transform")) {
+      const auto Read = [Struct](const uint8* Ptr) {
+        return Struct == TVariantStructure<FTransform3f>::Get() ? FTransform(*reinterpret_cast<const FTransform3f*>(Ptr))
+            : *reinterpret_cast<const FTransform*>(Ptr);
+      };
+      const FTransform TX = Read(X.GetStructMemory()), TY = Read(Y.GetStructMemory());
+      const auto EncodedX = EncodeStructValue(Struct, X.GetStructMemory(), nullptr, {})->AsObject();
+      const auto EncodedY = EncodeStructValue(Struct, Y.GetStructMemory(), nullptr, {})->AsObject();
+      for (const TCHAR* Field : {TEXT("translation"), TEXT("scale")}) {
+        const bool bTranslation = FCString::Strcmp(Field, TEXT("translation")) == 0;
+        const auto Compared = CompareTransformVector(
+            bTranslation ? TX.GetTranslation() : TX.GetScale3D(),
+            bTranslation ? TY.GetTranslation() : TY.GetScale3D(),
+            EncodedX->TryGetField(Field), EncodedY->TryGetField(Field));
+        if (!Compared.bEquivalent) return Compared.WithPrefix(FString(TEXT("/")) + Field);
       }
-      if (Name == TEXT("Vector3f")) {
-        return static_cast<const FVector3f *>(LeftValuePtr)
-            ->Equals(*static_cast<const FVector3f *>(RightValuePtr));
+      // Orientation is one semantic value; keep its necessary components together.
+      if (!AreRotationsEquivalent(TX.GetRotation(), TY.GetRotation(), Error)) {
+        if (!Error.IsEmpty()) return FValueComparison::Failed(Error).WithPrefix(TEXT("/rotation"));
+        return FValueComparison::Different(TEXT("/rotation"),
+            EncodedX->TryGetField(TEXT("rotation")), EncodedY->TryGetField(TEXT("rotation")));
       }
-      if (Name == TEXT("Rotator")) {
-        const FQuat Left =
-            static_cast<const FRotator *>(LeftValuePtr)->Quaternion();
-        const FQuat Right =
-            static_cast<const FRotator *>(RightValuePtr)->Quaternion();
-        return FMath::Abs(Left | Right) >= 1.0 - KINDA_SMALL_NUMBER;
-      }
-      if (Name == TEXT("Rotator3f")) {
-        const FQuat4f Left =
-            static_cast<const FRotator3f *>(LeftValuePtr)->Quaternion();
-        const FQuat4f Right =
-            static_cast<const FRotator3f *>(RightValuePtr)->Quaternion();
-        return FMath::Abs(Left | Right) >= 1.0f - KINDA_SMALL_NUMBER;
-      }
-      if (Name == TEXT("Quat")) {
-        return FMath::Abs(*static_cast<const FQuat *>(LeftValuePtr) |
-                          *static_cast<const FQuat *>(RightValuePtr)) >=
-               1.0 - KINDA_SMALL_NUMBER;
-      }
-      if (Name == TEXT("Quat4f")) {
-        return FMath::Abs(*static_cast<const FQuat4f *>(LeftValuePtr) |
-                          *static_cast<const FQuat4f *>(RightValuePtr)) >=
-               1.0f - KINDA_SMALL_NUMBER;
-      }
-      if (Name == TEXT("Transform")) {
-        const FTransform &Left = *static_cast<const FTransform *>(LeftValuePtr);
-        const FTransform &Right =
-            *static_cast<const FTransform *>(RightValuePtr);
-        return Left.GetTranslation().Equals(Right.GetTranslation()) &&
-               Left.GetScale3D().Equals(Right.GetScale3D()) &&
-               FMath::Abs(Left.GetRotation() | Right.GetRotation()) >=
-                   1.0 - KINDA_SMALL_NUMBER;
-      }
-      if (Name == TEXT("Transform3f")) {
-        const FTransform3f &Left =
-            *static_cast<const FTransform3f *>(LeftValuePtr);
-        const FTransform3f &Right =
-            *static_cast<const FTransform3f *>(RightValuePtr);
-        return Left.GetTranslation().Equals(Right.GetTranslation()) &&
-               Left.GetScale3D().Equals(Right.GetScale3D()) &&
-               FMath::Abs(Left.GetRotation() | Right.GetRotation()) >=
-                   1.0f - KINDA_SMALL_NUMBER;
-      }
+      return FValueComparison();
     }
   }
-  const TSharedPtr<FJsonValue> Left =
-      Encode(Property, LeftValuePtr, Owner, Options);
-  const TSharedPtr<FJsonValue> Right =
-      Encode(Property, RightValuePtr, Owner, Options);
-  return IsReliableCanonicalValue(Property, Left) &&
-         IsReliableCanonicalValue(Property, Right) &&
-         JsonEquivalent(Left, Right);
+  // All other specialized struct shapes reuse their authoring decoder and encoder.
+  auto Compared = UE::UAI::StateSemantic::CanonicalJson::CompareJsonValues(
+      EncodeStructValue(Struct, X.GetStructMemory(), nullptr, {}),
+      EncodeStructValue(Struct, Y.GetStructMemory(), nullptr, {}));
+  // Transform components use arrays; standalone math values use a components object.
+  if (Left->Type == EJson::Array && Compared.Path.StartsWith(TEXT("/components")))
+    Compared.Path.RightChopInline(11);
+  return Compared;
+}
+
+static FValueComparison ComparePropertyValuesInternal(FProperty* Property, const void* LeftValuePtr,
+    const void* RightValuePtr, UObject* Owner, const FOptions& Options, bool bSingleElement = false) {
+  if (!Property || !LeftValuePtr || !RightValuePtr) {
+    auto Error = FDiagnostic::Failure(TEXT("property_comparison_storage_missing"),
+        TEXT("Native property comparison requires a reflected property and both value storage locations."), TEXT("semantic_compare"));
+    const auto Availability = MakeShared<FJsonObject>();
+    Availability->SetStringField(TEXT("property"), Property ? Property->GetPathName() : TEXT("absent"));
+    Availability->SetBoolField(TEXT("expected_storage_present"), LeftValuePtr != nullptr);
+    Availability->SetBoolField(TEXT("actual_storage_present"), RightValuePtr != nullptr);
+    Error.ActualValue = MakeShared<FJsonValueObject>(Availability);
+    return FValueComparison::Failed(MoveTemp(Error));
+  }
+  const auto Compare = [&](FProperty* Child, const void* Left, const void* Right) {
+    return ComparePropertyValuesInternal(Child, Left, Right, Owner, Options);
+  };
+  const auto Missing = [&](FString Path, FProperty* Child, const void* Left, const void* Right, bool bSingle = false) {
+    return FValueComparison::Different(MoveTemp(Path),
+        Left ? Encode(Child, Left, Owner, Options, 0, nullptr, bSingle) : nullptr,
+        Right ? Encode(Child, Right, Owner, Options, 0, nullptr, bSingle) : nullptr);
+  };
+  if (!bSingleElement && Property->ArrayDim > 1) {
+    for (int32 Index = 0; Index < Property->ArrayDim; ++Index) {
+      const auto Compared = ComparePropertyValuesInternal(Property,
+          static_cast<const uint8*>(LeftValuePtr) + Index * Property->ElementSize,
+          static_cast<const uint8*>(RightValuePtr) + Index * Property->ElementSize, Owner, Options, true);
+      if (!Compared.bEquivalent) return Compared.WithPrefix(FString::Printf(TEXT("/items/%d"), Index));
+    }
+    return FValueComparison();
+  }
+  if (const FArrayProperty* Array = CastField<FArrayProperty>(Property)) {
+    FScriptArrayHelper Left(Array, LeftValuePtr), Right(Array, RightValuePtr);
+    for (int32 Index = 0; Index < FMath::Min(Left.Num(), Right.Num()); ++Index) {
+      const auto Compared = Compare(Array->Inner, Left.GetRawPtr(Index), Right.GetRawPtr(Index));
+      if (!Compared.bEquivalent) return Compared.WithPrefix(FString::Printf(TEXT("/items/%d"), Index));
+    }
+    if (Left.Num() != Right.Num()) {
+      const int32 Index = FMath::Min(Left.Num(), Right.Num());
+      return Missing(FString::Printf(TEXT("/items/%d"), Index), Array->Inner,
+          Index < Left.Num() ? Left.GetRawPtr(Index) : nullptr, Index < Right.Num() ? Right.GetRawPtr(Index) : nullptr);
+    }
+    return FValueComparison();
+  }
+  if (const FSetProperty* Set = CastField<FSetProperty>(Property)) {
+    FScriptSetHelper Left(Set, LeftValuePtr), Right(Set, RightValuePtr);
+    TSet<int32> Matched;
+    int32 PublicIndex = 0;
+    for (int32 LeftIndex = 0; LeftIndex < Left.GetMaxIndex(); ++LeftIndex) {
+      if (!Left.IsValidIndex(LeftIndex)) continue;
+      int32 Match = INDEX_NONE;
+      for (int32 RightIndex = 0; RightIndex < Right.GetMaxIndex(); ++RightIndex)
+        if (Right.IsValidIndex(RightIndex) && Set->ElementProp->Identical(
+            Left.GetElementPtr(LeftIndex), Right.GetElementPtr(RightIndex), PPF_None)) {
+          Match = RightIndex; break;
+        }
+      const FString Path = FString::Printf(TEXT("/items/%d"), PublicIndex++);
+      if (Match == INDEX_NONE) return Missing(Path, Set->ElementProp, Left.GetElementPtr(LeftIndex), nullptr);
+      Matched.Add(Match);
+      const auto Compared = Compare(Set->ElementProp, Left.GetElementPtr(LeftIndex), Right.GetElementPtr(Match));
+      if (!Compared.bEquivalent) return Compared.WithPrefix(Path);
+    }
+    PublicIndex = 0;
+    for (int32 Index = 0; Index < Right.GetMaxIndex(); ++Index) {
+      if (!Right.IsValidIndex(Index)) continue;
+      if (!Matched.Contains(Index)) return Missing(FString::Printf(TEXT("/items/%d"), PublicIndex),
+          Set->ElementProp, nullptr, Right.GetElementPtr(Index));
+      ++PublicIndex;
+    }
+    return FValueComparison();
+  }
+  if (const FMapProperty* Map = CastField<FMapProperty>(Property)) {
+    FScriptMapHelper Left(Map, LeftValuePtr), Right(Map, RightValuePtr);
+    TSet<int32> Matched;
+    int32 PublicIndex = 0;
+    for (int32 LeftIndex = 0; LeftIndex < Left.GetMaxIndex(); ++LeftIndex) {
+      if (!Left.IsValidIndex(LeftIndex)) continue;
+      int32 Match = INDEX_NONE;
+      for (int32 RightIndex = 0; RightIndex < Right.GetMaxIndex(); ++RightIndex)
+        if (Right.IsValidIndex(RightIndex) && Map->KeyProp->Identical(
+            Left.GetKeyPtr(LeftIndex), Right.GetKeyPtr(RightIndex), PPF_None)) {
+          Match = RightIndex; break;
+        }
+      const FString Path = FString::Printf(TEXT("/entries/%d"), PublicIndex++);
+      if (Match == INDEX_NONE) return Missing(Path + TEXT("/key"), Map->KeyProp, Left.GetKeyPtr(LeftIndex), nullptr);
+      Matched.Add(Match);
+      const auto Key = Compare(Map->KeyProp, Left.GetKeyPtr(LeftIndex), Right.GetKeyPtr(Match));
+      if (!Key.bEquivalent) return Key.WithPrefix(Path + TEXT("/key"));
+      const auto Value = Compare(Map->ValueProp, Left.GetValuePtr(LeftIndex), Right.GetValuePtr(Match));
+      if (!Value.bEquivalent) return Value.WithPrefix(Path + TEXT("/value"));
+    }
+    PublicIndex = 0;
+    for (int32 Index = 0; Index < Right.GetMaxIndex(); ++Index) {
+      if (!Right.IsValidIndex(Index)) continue;
+      if (!Matched.Contains(Index)) return Missing(FString::Printf(TEXT("/entries/%d/key"), PublicIndex),
+          Map->KeyProp, nullptr, Right.GetKeyPtr(Index));
+      ++PublicIndex;
+    }
+    return FValueComparison();
+  }
+  if (const FOptionalProperty* Optional = CastField<FOptionalProperty>(Property)) {
+    if (Optional->IsSet(LeftValuePtr) != Optional->IsSet(RightValuePtr))
+      return FValueComparison::Different(TEXT("/is_set"), MakeShared<FJsonValueBoolean>(Optional->IsSet(LeftValuePtr)),
+          MakeShared<FJsonValueBoolean>(Optional->IsSet(RightValuePtr)));
+    if (!Optional->IsSet(LeftValuePtr)) return FValueComparison();
+    return Compare(Optional->GetValueProperty(), Optional->GetValuePointerForRead(LeftValuePtr),
+        Optional->GetValuePointerForRead(RightValuePtr)).WithPrefix(TEXT("/value"));
+  }
+  if (const FStructProperty* Struct = CastField<FStructProperty>(Property)) {
+    const FString Kind = StructKind(Struct->Struct);
+    const UScriptStruct* FieldsType = Struct->Struct;
+    const void* LeftFields = LeftValuePtr;
+    const void* RightFields = RightValuePtr;
+    if (Kind == TEXT("instanced_struct")) {
+      const auto& Left = *static_cast<const FInstancedStruct*>(LeftValuePtr);
+      const auto& Right = *static_cast<const FInstancedStruct*>(RightValuePtr);
+      if (Left.GetScriptStruct() != Right.GetScriptStruct()) {
+        const auto TypeValue = [](const UScriptStruct* Type) -> TSharedPtr<FJsonValue> {
+          if (Type) return MakeShared<FJsonValueString>(Type->GetPathName());
+          return MakeShared<FJsonValueNull>();
+        };
+        return FValueComparison::Different(TEXT("/struct_path"), TypeValue(Left.GetScriptStruct()), TypeValue(Right.GetScriptStruct()));
+      }
+      FieldsType = Left.GetScriptStruct(); LeftFields = Left.GetMemory(); RightFields = Right.GetMemory();
+      if (!FieldsType) return FValueComparison();
+    }
+    if (Kind == TEXT("struct") || Kind == TEXT("instanced_struct"))
+      return CompareReflectedStructFields(FieldsType, LeftFields, RightFields, Owner, Options);
+  }
+  TSharedPtr<FJsonObject> Definition;
+  const auto Left = Encode(Property, LeftValuePtr, Owner, Options, 0, &Definition, bSingleElement);
+  const auto Right = Encode(Property, RightValuePtr, Owner, Options, 0, nullptr, bSingleElement);
+  if (!IsReliableCanonicalValue(Property, Left) || !IsReliableCanonicalValue(Property, Right)) {
+    auto Error = FDiagnostic::Failure(TEXT("property_comparison_encoding_unavailable"),
+        FString::Printf(TEXT("Property '%s' could not be encoded reliably for semantic comparison."), *Property->GetPathName()),
+        TEXT("semantic_compare"));
+    const auto Inputs = MakeShared<FJsonObject>();
+    if (Left) Inputs->SetField(TEXT("expected_input"), Left);
+    if (Right) Inputs->SetField(TEXT("actual_input"), Right);
+    Error.ActualValue = MakeShared<FJsonValueObject>(Inputs);
+    return FValueComparison::Failed(MoveTemp(Error));
+  }
+  if (const auto Compared = CompareCanonicalValues(BuildTypeDescriptor(Property, bSingleElement),
+      Definition, Left, Right, Options.bCompareStoredValues); Compared.IsSet()) return Compared.GetValue();
+  return UE::UAI::StateSemantic::CanonicalJson::CompareJsonValues(Left, Right);
+}
+
+FValueComparison ComparePropertyValues(FProperty* Property, const void* ExpectedValuePtr,
+    const void* ActualValuePtr, UObject* Owner, const FOptions& Options) {
+  if (Property && ExpectedValuePtr && ActualValuePtr)
+    if (const auto Member = CompareEffectiveMember(Property, ExpectedValuePtr, Options); Member.IsSet())
+      return Member.GetValue();
+  return ComparePropertyValuesInternal(Property, ExpectedValuePtr, ActualValuePtr, Owner, Options);
+}
+
+bool AreSemanticallyEquivalent(FProperty* Property, const void* LeftValuePtr,
+    const void* RightValuePtr, UObject* Owner, const FOptions& Options) {
+  // Existing predicate callers supply current storage before requested storage.
+  return ComparePropertyValues(Property, RightValuePtr, LeftValuePtr, Owner, Options).bEquivalent;
+}
+
+bool VerifyValueIntent(FProperty* Property, const TSharedPtr<FJsonValue>& Intent,
+    const void* ActualValuePtr, UObject* Owner, const FOptions& Options,
+    FDiagnostic& OutError, bool bSingleFixedElement) {
+  if (!Property || !ActualValuePtr || !Intent.IsValid())
+    return Fail(OutError, TEXT("property_intent_value_missing"), TEXT("Intent verification requires the reflected property, authored value and native readback storage."));
+  void* Expected = FMemory::Malloc(Property->GetSize(), Property->GetMinAlignment());
+  Property->InitializeValue(Expected);
+  if (bSingleFixedElement) Property->CopySingleValue(Expected, ActualValuePtr);
+  else Property->CopyCompleteValue(Expected, ActualValuePtr);
+  const bool bDecoded = Decode(Property, Intent, Expected, Owner, Options, OutError, 0, bSingleFixedElement);
+  FValueComparison Compared;
+  if (bDecoded) Compared = bSingleFixedElement
+      ? ComparePropertyValuesInternal(Property, Expected, ActualValuePtr, Owner, Options, true)
+      : ComparePropertyValues(Property, Expected, ActualValuePtr, Owner, Options);
+  Property->DestroyValue(Expected);
+  FMemory::Free(Expected);
+  if (!bDecoded) return false;
+  if (!Compared.bEquivalent) {
+    Fail(OutError, TEXT("readback_mismatch"), TEXT("The native readback differs from the authored property value."));
+    Compared.ApplyTo(OutError);
+  }
+  return Compared.bEquivalent;
+}
+
+FValueComparison CompareReflectedStructFields(const UScriptStruct* Struct, const void* Left,
+    const void* Right, UObject* Owner, const FOptions& Options) {
+  if (!Struct || !Left || !Right) {
+    auto Error = FDiagnostic::Failure(TEXT("struct_comparison_storage_missing"),
+        TEXT("Reflected struct comparison requires a struct declaration and both value storage locations."), TEXT("semantic_compare"));
+    const auto Availability = MakeShared<FJsonObject>();
+    Availability->SetStringField(TEXT("struct"), Struct ? Struct->GetPathName() : TEXT("absent"));
+    Availability->SetBoolField(TEXT("expected_storage_present"), Left != nullptr);
+    Availability->SetBoolField(TEXT("actual_storage_present"), Right != nullptr);
+    Error.ActualValue = MakeShared<FJsonValueObject>(Availability);
+    return FValueComparison::Failed(MoveTemp(Error));
+  }
+  if (const auto Effective = CompareEffectiveStruct(Struct, Left, Right, Options); Effective.IsSet())
+    return Effective.GetValue();
+  TOptional<FEnvTraceData> CanonicalLeft, CanonicalRight;
+  if (UeAgentEnvTraceDataValue::IsType(Struct)) {
+    CanonicalLeft = UeAgentEnvTraceDataValue::Canonical(*static_cast<const FEnvTraceData*>(Left));
+    CanonicalRight = UeAgentEnvTraceDataValue::Canonical(*static_cast<const FEnvTraceData*>(Right));
+    Left = &CanonicalLeft.GetValue(); Right = &CanonicalRight.GetValue();
+  }
+  for (TFieldIterator<FProperty> It(Struct, EFieldIterationFlags::IncludeSuper); It; ++It) {
+    FProperty* Field = *It;
+    if (Field->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated) ||
+        (Options.StructFieldFilter && !Options.StructFieldFilter(Struct, Field))) continue;
+    const auto Compared = ComparePropertyValuesInternal(Field, Field->ContainerPtrToValuePtr<void>(Left),
+        Field->ContainerPtrToValuePtr<void>(Right), Owner, Options);
+    if (!Compared.bEquivalent) return Compared.WithPrefix(TEXT("/fields/") +
+        Field->GetName().Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")));
+  }
+  return FValueComparison();
+}
+
+bool AreReflectedStructFieldsEquivalent(const UScriptStruct* Struct, const void* Left,
+    const void* Right, UObject* Owner, const FOptions& Options) {
+  return CompareReflectedStructFields(Struct, Left, Right, Owner, Options).bEquivalent;
 }
 
 bool DecodeStructValue(UScriptStruct *Struct,
                        const TSharedPtr<FJsonValue> &Value, void *OutValuePtr,
-                       FString &OutError) {
+                       FDiagnostic& OutError) {
   return DecodeStructValueInternal(Struct, nullptr, Value, OutValuePtr, nullptr,
                                    FOptions(), OutError, 0);
 }
@@ -2099,17 +3334,20 @@ bool DecodeStructValue(UScriptStruct *Struct,
 bool DecodeStructValue(UScriptStruct *Struct,
                        const TSharedPtr<FJsonValue> &Value, void *OutValuePtr,
                        UObject *Owner, const FOptions &Options,
-                       FString &OutError, int32 Depth) {
+                       FDiagnostic& OutError, int32 Depth) {
   return DecodeStructValueInternal(Struct, nullptr, Value, OutValuePtr, Owner,
                                    Options, OutError, Depth);
 }
 
 TSharedPtr<FJsonValue> EncodePropertyBag(const FInstancedPropertyBag &Bag,
                                          UObject *Owner,
-                                         const FOptions &Options, int32 Depth) {
+                                         const FOptions &Options, int32 Depth,
+                                         TSharedPtr<FJsonObject>* OutValueDefinition) {
+  if (OutValueDefinition) OutValueDefinition->Reset();
   TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
   TArray<TSharedPtr<FJsonValue>> Schema;
   TSharedPtr<FJsonObject> Fields = MakeShared<FJsonObject>();
+  TSharedPtr<FJsonObject> FieldDefinitions;
   const FInstancedStruct *Storage = GetPropertyBagStorage(&Bag);
   if (Bag.IsValid() && Bag.GetPropertyBagStruct() && Storage &&
       Storage->GetMemory()) {
@@ -2119,84 +3357,142 @@ TSharedPtr<FJsonValue> EncodePropertyBag(const FInstancedPropertyBag &Bag,
         continue;
       Schema.Add(MakeObjectValue(BuildPropertyBagSchemaEntry(Desc)));
       FProperty *Field = const_cast<FProperty *>(Desc.CachedProperty);
+      TSharedPtr<FJsonObject> Definition;
       Fields->SetField(
           Desc.Name.ToString(),
           EncodeInternal(
               Field, Field->ContainerPtrToValuePtr<void>(Storage->GetMemory()),
-              Owner, Options, Depth + 1, false));
+              Owner, Options, Depth + 1, false,
+              OutValueDefinition ? &Definition : nullptr));
+      if (OutValueDefinition && Options.bCaptureStructFieldDescriptors)
+        Definition = CaptureFieldDefinition(Field, Definition);
+      if (Definition.IsValid()) {
+        if (!FieldDefinitions.IsValid()) FieldDefinitions = MakeShared<FJsonObject>();
+        FieldDefinitions->SetObjectField(Desc.Name.ToString(), Definition);
+      }
     }
   }
   Object->SetArrayField(TEXT("schema"), Schema);
+  if (OutValueDefinition) {
+    *OutValueDefinition = MakeShared<FJsonObject>();
+    (*OutValueDefinition)->SetStringField(TEXT("builtin"), TEXT("property_bag"));
+    if (FieldDefinitions.IsValid())
+      (*OutValueDefinition)->SetObjectField(TEXT("fields"), FieldDefinitions);
+  }
   Object->SetObjectField(TEXT("fields"), Fields);
   return MakeObjectValue(Object);
 }
 
-bool DecodePropertyBag(const TSharedPtr<FJsonValue> &Value,
-                       FInstancedPropertyBag &OutBag, UObject *Owner,
-                       const FOptions &Options, FString &OutError,
+bool PreparePropertyBagSchema(const TSharedPtr<FJsonValue> &Value,
+                       FInstancedPropertyBag &OutBag,
+                       const FOptions &Options, FDiagnostic& OutError,
                        int32 Depth) {
   TSharedPtr<FJsonObject> Object;
   const TArray<TSharedPtr<FJsonValue>> *Schema = nullptr;
   const TSharedPtr<FJsonObject> *Fields = nullptr;
-  if (!ValidateDepth(Options, Depth, OutError) ||
-      !GetObject(Value, Object, OutError) || Object->Values.Num() != 2 ||
-      !Object->TryGetArrayField(TEXT("schema"), Schema) || !Schema ||
-      !Object->TryGetObjectField(TEXT("fields"), Fields) || !Fields ||
-      !Fields->IsValid() ||
-      !ValidateContainerCount(Options, Schema->Num(), OutError)) {
-    return Fail(OutError, TEXT("invalid_property_bag_shape"));
+  if (!GetObject(Value, Object, OutError) ||
+      !OnlyFields(Object, {TEXT("schema"), TEXT("fields")}, TEXT("invalid_property_bag_shape"), OutError) ||
+      !RequiredArray(Object, TEXT("schema"), Schema, TEXT("invalid_property_bag_shape"), OutError)) return false;
+  if (!Object->TryGetObjectField(TEXT("fields"), Fields) || !Fields ||
+      !Fields->IsValid()) {
+    return ValueFailure(OutError, TEXT("invalid_property_bag_shape"), TEXT("A property bag value requires a fields object."), Object->TryGetField(TEXT("fields")), TEXT("object"), TEXT("/fields"));
   }
   TArray<FPropertyBagPropertyDesc> Descs;
   TSet<FName> Names;
-  for (const TSharedPtr<FJsonValue> &SchemaValue : *Schema) {
+  for (int32 Index = 0; Index < Schema->Num(); ++Index) {
+    const auto& SchemaValue = (*Schema)[Index];
     TSharedPtr<FJsonObject> Entry;
-    if (!GetObject(SchemaValue, Entry, OutError))
-      return false;
     FPropertyBagPropertyDesc Desc;
-    if (!ParsePropertyBagSchemaEntry(Entry, Desc, OutError))
+    if (!GetObject(SchemaValue, Entry, OutError) || !ParsePropertyBagSchemaEntry(Entry, Desc, OutError)) {
+      PrefixValueFailure(OutError, FString::Printf(TEXT("/schema/%d"), Index), FString::Printf(TEXT("schema[%d]"), Index));
       return false;
+    }
     if (Names.Contains(Desc.Name))
-      return Fail(OutError, TEXT("duplicate_property_bag_field"));
+      return ValueFailure(OutError, TEXT("duplicate_property_bag_field"), TEXT("The property bag schema declares the same field name more than once."),
+          MakeShared<FJsonValueString>(Desc.Name.ToString()), TEXT("unique field name"), FString::Printf(TEXT("/schema/%d/name"), Index));
+    // The public schema describes values/types, not native binding identity.
+    // Match the native AddProperties name-based update contract while retaining
+    // metadata that was never part of the public edit surface.
+    if (const FPropertyBagPropertyDesc* Existing = OutBag.FindPropertyDescByName(Desc.Name)) {
+      Desc.ID = Existing->ID;
+      Desc.PropertyFlags = Existing->PropertyFlags;
+#if WITH_EDITORONLY_DATA
+      Desc.MetaData = Existing->MetaData;
+      Desc.MetaClass = Existing->MetaClass;
+#endif
+    }
     Names.Add(Desc.Name);
     Descs.Add(MoveTemp(Desc));
   }
+  for (const FPropertyBagPropertyDesc& Desc : Descs)
+    if (!(*Fields)->HasField(Desc.Name.ToString()))
+      return ValueFailure(OutError, FString::Printf(TEXT("missing_property_bag_field_%s"), *Desc.Name.ToString()), TEXT("A field declared in the property bag schema has no value."),
+          nullptr, TEXT("schema field value"), TEXT("/fields") + FieldPointer(Desc.Name.ToString()));
+  for (const auto& Pair : (*Fields)->Values)
+    if (!Names.Contains(FName(*Pair.Key)))
+      return ValueFailure(OutError, FString::Printf(TEXT("unknown_property_bag_field_%s"), *Pair.Key), TEXT("The property bag field is not declared in its schema."),
+          MakeShared<FJsonValueString>(Pair.Key), TEXT("declared schema field"), TEXT("/fields") + FieldPointer(Pair.Key));
   if ((*Fields)->Values.Num() != Names.Num())
-    return Fail(OutError, TEXT("property_bag_schema_fields_mismatch"));
+    return ValueFailure(OutError, TEXT("property_bag_schema_fields_mismatch"), TEXT("The property bag field names collapse to fewer distinct native names than the supplied fields."),
+        MakeShared<FJsonValueNumber>((*Fields)->Values.Num()), FString::FromInt(Names.Num()), TEXT("/fields"));
+  // Resolve omitted native field IDs before materializing the value's schema.
+  // GetOrCreateFromDescs hashes its input before allocating missing IDs; using
+  // that provisional type directly gives it a different identity on reload.
+  // Reuse the native descriptor factory's allocated IDs (and cache semantics),
+  // then construct from the complete descriptors just as deserialization does.
+  // Existing IDs and non-public metadata above remain unchanged.
+  if (Descs.ContainsByPredicate([](const FPropertyBagPropertyDesc& Desc) { return !Desc.ID.IsValid(); })) {
+    const UPropertyBag* ResolvedSchema = UPropertyBag::GetOrCreateFromDescs(Descs);
+    if (!ResolvedSchema)
+      return Fail(OutError, TEXT("property_bag_schema_creation_failed"), TEXT("Unreal could not create the property bag schema from the supplied descriptors."));
+    Descs = ResolvedSchema->GetPropertyDescs();
+  }
   FInstancedPropertyBag Decoded;
   if (!Descs.IsEmpty() &&
       Decoded.AddProperties(Descs) != EPropertyBagAlterationResult::Success) {
-    return Fail(OutError, TEXT("property_bag_schema_creation_failed"));
+    return Fail(OutError, TEXT("property_bag_schema_creation_failed"), TEXT("Unreal could not create the property bag schema from the supplied descriptors."));
   }
+  // Seed surviving values so recursive preparation and decoding share native identities.
+  Decoded.CopyMatchingValuesByID(OutBag);
   FInstancedStruct *Storage = GetMutablePropertyBagStorage(&Decoded);
   if (!Descs.IsEmpty() && (!Decoded.GetPropertyBagStruct() || !Storage ||
                            !Storage->GetMutableMemory())) {
-    return Fail(OutError, TEXT("property_bag_storage_unavailable"));
+    return Fail(OutError, TEXT("property_bag_storage_unavailable"), TEXT("The prepared property bag has no writable native storage."));
   }
+  OutBag = MoveTemp(Decoded);
+  return true;
+}
+
+bool DecodePropertyBag(const TSharedPtr<FJsonValue> &Value,
+                       FInstancedPropertyBag &OutBag, UObject *Owner,
+                       const FOptions &Options, FDiagnostic& OutError,
+                       int32 Depth) {
+  FInstancedPropertyBag Decoded = OutBag;
+  if (!PreparePropertyBagSchema(Value, Decoded, Options, OutError, Depth)) return false;
+  const auto Fields = Value->AsObject()->GetObjectField(TEXT("fields"));
+  FInstancedStruct* Storage = GetMutablePropertyBagStorage(&Decoded);
   if (Decoded.GetPropertyBagStruct()) {
     for (const FPropertyBagPropertyDesc &Desc :
          Decoded.GetPropertyBagStruct()->GetPropertyDescs()) {
       const TSharedPtr<FJsonValue> FieldValue =
-          (*Fields)->TryGetField(Desc.Name.ToString());
+          Fields->TryGetField(Desc.Name.ToString());
       if (!FieldValue.IsValid())
-        return Fail(OutError,
-                    FString::Printf(TEXT("missing_property_bag_field_%s"),
-                                    *Desc.Name.ToString()));
+        return ValueFailure(OutError, FString::Printf(TEXT("missing_property_bag_field_%s"), *Desc.Name.ToString()), TEXT("A prepared property bag field has no authored value."),
+            FieldValue, TEXT("schema field value"), TEXT("/fields") + FieldPointer(Desc.Name.ToString()));
       FProperty *Field = const_cast<FProperty *>(Desc.CachedProperty);
-      if (!Field ||
-          !DecodeInternal(
+      if (!Field) {
+        Fail(OutError, TEXT("property_bag_storage_unavailable"), TEXT("The prepared property bag field has no reflected property."));
+        PrefixValueFailure(OutError, TEXT("/fields") + FieldPointer(Desc.Name.ToString()), Desc.Name.ToString());
+        return false;
+      }
+      if (!DecodeInternal(
               Field, FieldValue,
               Field->ContainerPtrToValuePtr<void>(Storage->GetMutableMemory()),
               Owner, Options, OutError, Depth + 1, false)) {
-        OutError = Desc.Name.ToString() + TEXT(":") + OutError;
+        PrefixValueFailure(OutError, TEXT("/fields/") + Desc.Name.ToString().Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")), Desc.Name.ToString());
         return false;
       }
     }
-  }
-  for (const TPair<FString, TSharedPtr<FJsonValue>> &Pair : (*Fields)->Values) {
-    if (!Names.Contains(FName(*Pair.Key)))
-      return Fail(
-          OutError,
-          FString::Printf(TEXT("unknown_property_bag_field_%s"), *Pair.Key));
   }
   OutBag = MoveTemp(Decoded);
   return true;
@@ -2204,15 +3500,15 @@ bool DecodePropertyBag(const TSharedPtr<FJsonValue> &Value,
 
 bool IsReliableCanonicalValue(const FProperty *Property,
                               const TSharedPtr<FJsonValue> &Value,
-                              FString *OutReason) {
-  FString Error;
+                              FDiagnostic* OutReason) {
+  FDiagnostic Error;
   if (!Property || !Value.IsValid() || Value->Type == EJson::Null ||
       GetValueKind(Property) == TEXT("unavailable"))
-    Error = TEXT("canonical_value_unavailable");
+    ValueFailure(Error, TEXT("canonical_value_unavailable"), TEXT("A reliable canonical value requires a supported property and a non-null value."), Value, TEXT("supported canonical property value"));
   else if (Value->Type != EJson::Object)
-    Error = TEXT("canonical_value_must_be_object");
+    ValueFailure(Error, TEXT("canonical_value_must_be_object"), TEXT("The canonical property value must be an object."), Value, TEXT("object"));
   else if (IsTruncatedValue(Value))
-    Error = TEXT("canonical_value_truncated_or_incomplete");
+    Fail(Error, TEXT("canonical_value_truncated_or_incomplete"), TEXT("The canonical property value contains truncated or unavailable data."));
   if (OutReason)
     *OutReason = Error;
   return Error.IsEmpty();

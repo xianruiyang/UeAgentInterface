@@ -4,6 +4,7 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
+#include "Dom/JsonValue.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
@@ -65,10 +66,12 @@ namespace UE::UAI::AssetDurable
 		void SetError(
 			FPersistedWorldLoadError& OutError,
 			FString Code,
+			FString Reason,
+			FString Target = FString(),
 			FString Detail = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("persisted_world_readback"), MoveTemp(Detail));
+			OutError.TargetPath = MoveTemp(Target); OutError.SourceKind = TEXT("native_result");
 		}
 
 		class FScopedPersistedWorldPackages final
@@ -78,7 +81,7 @@ namespace UE::UAI::AssetDurable
 			{
 				if (!bCleanupAttempted)
 				{
-					FString Ignored;
+					UE::UAI::Contract::FDiagnostic Ignored;
 					TryUnload(Ignored);
 				}
 			}
@@ -91,10 +94,10 @@ namespace UE::UAI::AssetDurable
 				}
 			}
 
-			bool TryUnload(FString& OutDetail)
+			bool TryUnload(UE::UAI::Contract::FDiagnostic& OutError)
 			{
 				bCleanupAttempted = true;
-				OutDetail.Reset();
+				OutError.Reset();
 				TArray<UPackage*> Loaded;
 				for (const TWeakObjectPtr<UPackage>& Package : Packages)
 				{
@@ -108,7 +111,9 @@ namespace UE::UAI::AssetDurable
 				FText UnloadError;
 				if (!UPackageTools::UnloadPackages(Loaded, UnloadError, true))
 				{
-					OutDetail = UnloadError.ToString();
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("persisted_world_cleanup_failed"), UnloadError.IsEmpty() ? TEXT("Unreal could not unload the isolated persisted world packages after readback.") : UnloadError.ToString(), TEXT("native_package_unload"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(Loaded.Num());
 					return false;
 				}
 				Packages.Reset();
@@ -129,7 +134,8 @@ namespace UE::UAI::AssetDurable
 		OutError = {};
 		if (Artifacts.IsEmpty())
 		{
-			SetError(OutError, TEXT("persisted_world_artifacts_missing"));
+			SetError(OutError, TEXT("persisted_world_artifacts_missing"), TEXT("Persisted world readback requires durable package artifacts."));
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one package artifact")); OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
 			return false;
 		}
 
@@ -145,6 +151,19 @@ namespace UE::UAI::AssetDurable
 			}
 			const FString PackageKey =
 				Artifact.GetDurableLocation().ToLower();
+			if (Artifact.GetIntent() == EAssetDurableIntent::Delete)
+			{
+				if (IFileManager::Get().FileExists(*Artifact.GetFinalPath()))
+				{
+					SetError(OutError, TEXT("persisted_world_deleted_package_present"),
+						TEXT("A package removed by the world mutation still exists on disk."), Artifact.GetDurableLocation());
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(true);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.InternalContext = Artifact.GetFinalPath();
+					return false;
+				}
+				continue;
+			}
 			if (SeenPackages.Contains(PackageKey)
 				|| !FPackageName::IsValidLongPackageName(
 					Artifact.GetDurableLocation())
@@ -153,7 +172,11 @@ namespace UE::UAI::AssetDurable
 				SetError(
 					OutError,
 					TEXT("persisted_world_artifact_invalid"),
+					SeenPackages.Contains(PackageKey) ? TEXT("More than one package-header artifact identifies the same package.")
+						: !FPackageName::IsValidLongPackageName(Artifact.GetDurableLocation()) ? TEXT("The package-header artifact has an invalid long package name.")
+						: TEXT("The package-header artifact file does not exist."),
 					Artifact.GetDurableLocation());
+				OutError.ActualValue = MakeShared<FJsonValueString>(Artifact.GetDurableLocation()); OutError.InternalContext = Artifact.GetFinalPath();
 				return false;
 			}
 			SeenPackages.Add(PackageKey);
@@ -163,7 +186,9 @@ namespace UE::UAI::AssetDurable
 			{
 				if (WorldHeader)
 				{
-					SetError(OutError, TEXT("persisted_world_ambiguous"));
+					SetError(OutError, TEXT("persisted_world_ambiguous"), TEXT("Persisted world readback requires exactly one map header, but two map headers were found."), Artifact.GetDurableLocation());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(WorldHeader->GetDurableLocation());
+					OutError.ActualValue = MakeShared<FJsonValueString>(Artifact.GetDurableLocation());
 					return false;
 				}
 				WorldHeader = &Artifact;
@@ -171,7 +196,8 @@ namespace UE::UAI::AssetDurable
 		}
 		if (!WorldHeader || PackageHeaders.IsEmpty())
 		{
-			SetError(OutError, TEXT("persisted_world_map_missing"));
+			SetError(OutError, TEXT("persisted_world_map_missing"), TEXT("The durable artifacts contain no .umap package header for world readback."));
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1); OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
 			return false;
 		}
 
@@ -206,6 +232,7 @@ namespace UE::UAI::AssetDurable
 			SetError(
 				OutError,
 				TEXT("persisted_world_package_create_failed"),
+				TEXT("Unreal could not create the isolated world package used for persisted readback."), SourceWorldPackage,
 				SnapshotWorldPackage);
 			return false;
 		}
@@ -231,6 +258,8 @@ namespace UE::UAI::AssetDurable
 			SetError(
 				OutError,
 				TEXT("persisted_world_load_failed"),
+				!SnapshotPackage ? TEXT("Unreal could not load the saved world package into the readback snapshot.")
+					: !SnapshotWorld ? TEXT("The loaded readback package contains no world object.") : TEXT("The loaded readback world has no persistent level."),
 				SourceWorldPackage);
 			return false;
 		}
@@ -246,7 +275,9 @@ namespace UE::UAI::AssetDurable
 			SetError(
 				OutError,
 				TEXT("persisted_world_reference_map_invalid"),
+				TEXT("The persisted world source and snapshot references do not form a valid readback reference map."),
 				SourceWorldPackage);
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(SnapshotWorld->GetPathName());
 			return false;
 		}
 
@@ -258,6 +289,7 @@ namespace UE::UAI::AssetDurable
 				SetError(
 					OutError,
 					TEXT("persisted_world_package_create_failed"),
+					TEXT("Unreal could not create an isolated external-actor package for world readback."), PackagePair.Key,
 					PackagePair.Value);
 				return false;
 			}
@@ -274,6 +306,7 @@ namespace UE::UAI::AssetDurable
 				SetError(
 					OutError,
 					TEXT("persisted_world_artifact_load_failed"),
+					TEXT("Unreal could not load an external-actor package into the world readback snapshot."),
 					PackagePair.Key);
 				return false;
 			}
@@ -297,27 +330,24 @@ namespace UE::UAI::AssetDurable
 			*SnapshotWorld,
 			ReferenceMap,
 			ObserverError);
-		FString CleanupError;
+		UE::UAI::Contract::FDiagnostic CleanupError;
 		const bool bCleaned = LoadedPackages.TryUnload(CleanupError);
 		if (!bObserved)
 		{
 			OutError = MoveTemp(ObserverError);
-			if (!OutError.IsPresent())
+			if (!OutError.IsValid())
 			{
-				SetError(OutError, TEXT("persisted_world_observer_failed"));
+				SetError(OutError, TEXT("persisted_world_observer_failed"), TEXT("The persisted-world observer rejected the loaded world and reference map without returning a diagnostic."), SourceWorldPackage);
 			}
 			if (!bCleaned && !CleanupError.IsEmpty())
 			{
-				OutError.Detail += TEXT("; cleanup=") + CleanupError;
+				OutError.Append(CleanupError);
 			}
 			return false;
 		}
 		if (!bCleaned)
 		{
-			SetError(
-				OutError,
-				TEXT("persisted_world_cleanup_failed"),
-				CleanupError);
+			OutError = MoveTemp(CleanupError);
 			return false;
 		}
 		return true;

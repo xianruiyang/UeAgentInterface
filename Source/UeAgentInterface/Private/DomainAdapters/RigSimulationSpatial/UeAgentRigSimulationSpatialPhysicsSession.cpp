@@ -1,6 +1,7 @@
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialPhysicsSession.h"
 
 #include "Components/PrimitiveComponent.h"
+#include "Dom/JsonValue.h"
 #include "Engine/World.h"
 #include "Misc/ScopeLock.h"
 #include "PreviewScene.h"
@@ -13,16 +14,58 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 
 	namespace
 	{
-		bool Fail(
-			FUeAgentRigSimulationSpatialExecutionError& OutError,
-			const FString& Code,
-			const FString& Detail = FString())
+		using Contract::FDiagnostic;
+
+		bool SessionFailure(FDiagnostic& OutError, const FString& Code, const FString& Reason,
+			const FString& Path, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target)
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = TEXT("physics_deformer.production_session");
-			OutError.Detail = Detail;
+			OutError = FDiagnostic::Failure(Code, Reason, TEXT("native_execution"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = Path;
+			OutError.Source.JsonPath = Path;
+			OutError.TargetPath = Target;
+			OutError.ActualValuePresent = Actual.IsValid();
+			OutError.ActualValue = MoveTemp(Actual);
+			OutError.ExpectedValuePresent = Expected.IsValid();
+			OutError.ExpectedValue = MoveTemp(Expected);
 			return false;
+		}
+
+		TSharedRef<FJsonValue> NumberFact(double Value)
+		{
+			if (FMath::IsFinite(Value)) return MakeShared<FJsonValueNumber>(Value);
+			return MakeShared<FJsonValueString>(FString::Printf(TEXT("%.17g"), Value));
+		}
+
+		TSharedRef<FJsonValue> VectorFact(const FVector& Value)
+		{
+			return MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+				NumberFact(Value.X), NumberFact(Value.Y), NumberFact(Value.Z)});
+		}
+
+		TSharedRef<FJsonValue> RotationFact(const FQuat& Value)
+		{
+			return MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+				NumberFact(Value.X), NumberFact(Value.Y), NumberFact(Value.Z), NumberFact(Value.W)});
+		}
+
+		bool CheckRestoredTransform(const FTransform& Actual, const FTransform& Expected,
+			const FString& Path, const FString& Target, FDiagnostic& OutError)
+		{
+			// Match FTransform::Equals, including quaternion sign equivalence and comparison order.
+			if (!Actual.TranslationEquals(Expected, 0.001))
+				return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_restoration_mismatch"),
+					TEXT("The restored translation differs from its initial value beyond tolerance 0.001."),
+					Path + TEXT("/translation"), VectorFact(Actual.GetTranslation()), VectorFact(Expected.GetTranslation()), Target);
+			if (!Actual.RotationEquals(Expected, 0.001))
+				return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_restoration_mismatch"),
+					TEXT("The restored quaternion differs from both signs of the initial quaternion beyond tolerance 0.001."),
+					Path + TEXT("/rotation"), RotationFact(Actual.GetRotation()), RotationFact(Expected.GetRotation()), Target);
+			if (!Actual.Scale3DEquals(Expected, 0.001))
+				return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_restoration_mismatch"),
+					TEXT("The restored scale differs from its initial value beyond tolerance 0.001."),
+					Path + TEXT("/scale"), VectorFact(Actual.GetScale3D()), VectorFact(Expected.GetScale3D()), Target);
+			return true;
 		}
 
 		UPrimitiveComponent* ResolveSubject(const FString& SubjectRef)
@@ -96,26 +139,32 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			{
 				OutResult = {};
 				OutError = {};
-				if (!Session.IsValid() || SubjectRefs.IsEmpty())
+				if (!Session.TryValidate(OutError))
 				{
-					return Fail(OutError,
-						TEXT("rig_simulation_spatial_physics_session_read_invalid"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = TEXT("/simulation_session") + OutError.PropertyPath;
+					OutError.Source.JsonPath = OutError.PropertyPath;
+					return false;
 				}
+				if (SubjectRefs.IsEmpty())
+					return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_session_read_invalid"),
+						TEXT("Reading a physics probe requires at least one subject reference."), TEXT("/subject_refs"),
+						MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("one or more subject references")), Session.OwnerRef);
 				{
 					FScopeLock Lock(&Mutex);
 					if (const FUeAgentRigSimulationSpatialPhysicsProbeSessionResult* Found =
 						Results.Find(Session.SessionId))
 					{
 						OutResult = *Found;
-						return OutResult.IsValid();
+						return OutResult.TryValidate(OutError);
 					}
 				}
 				UPrimitiveComponent* const Owner = ResolveSubject(SubjectRefs[0]);
 				if (!Owner)
 				{
-					return Fail(OutError,
-						TEXT("rig_simulation_spatial_physics_subject_unavailable"),
-						SubjectRefs[0]);
+					return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_subject_unavailable"),
+						TEXT("The first probe subject reference does not resolve to an available primitive component."), TEXT("/subject_refs/0"),
+						MakeShared<FJsonValueString>(SubjectRefs[0]), MakeShared<FJsonValueString>(TEXT("an available primitive component reference")), SubjectRefs[0]);
 				}
 				OutResult = FUeAgentRigSimulationSpatialPhysicsProbeSessionResult(
 					Session,
@@ -124,7 +173,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					{},
 					TEXT("physics-session-baseline:") + Session.SessionId,
 					Owner);
-				return OutResult.IsValid();
+				return OutResult.TryValidate(OutError);
 			}
 
 			bool TryRunPhysicsProbe(
@@ -135,11 +184,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			{
 				OutResult = {};
 				OutError = {};
-				if (!Request.IsValid())
-				{
-					return Fail(OutError,
-						TEXT("rig_simulation_spatial_physics_session_request_invalid"));
-				}
+				if (!Request.TryValidate(OutError)) return false;
 
 				FPreviewScene PreviewScene(
 					FPreviewScene::ConstructionValues()
@@ -151,41 +196,45 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				UWorld* const PreviewWorld = PreviewScene.GetWorld();
 				if (!PreviewWorld)
 				{
-					return Fail(OutError,
-						TEXT("rig_simulation_spatial_physics_preview_world_unavailable"));
+					return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_preview_world_unavailable"),
+						TEXT("The physics preview scene did not create a world."), TEXT("/preview_world"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Request.Session.OwnerRef);
 				}
 
 				TMap<FString, UPrimitiveComponent*> Clones;
 				TMap<FString, FTransform> InitialTransforms;
-				for (const FUeAgentRigSimulationSpatialPhysicsProbeSubject& Subject
-					: Request.Subjects)
+				for (int32 SubjectIndex = 0; SubjectIndex < Request.Subjects.Num(); ++SubjectIndex)
 				{
+					const auto& Subject = Request.Subjects[SubjectIndex];
+					const FString SubjectPath = TEXT("/subjects/") + FString::FromInt(SubjectIndex);
 					UPrimitiveComponent* const Source = Subject.Component.Get();
 					if (!Source)
 					{
-						return Fail(OutError,
-							TEXT("rig_simulation_spatial_physics_subject_unavailable"),
-							Subject.SubjectRef);
+						return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_subject_unavailable"),
+							TEXT("The physics probe subject component became unavailable."), SubjectPath + TEXT("/component"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Subject.SubjectRef);
 					}
 					UPrimitiveComponent* const Clone = NewObject<UPrimitiveComponent>(
 						GetTransientPackage(), Source->GetClass(), NAME_None,
 						RF_Transient, Source);
 					if (!Clone)
 					{
-						return Fail(OutError,
-							TEXT("rig_simulation_spatial_physics_subject_clone_failed"),
-							Subject.SubjectRef);
+						return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_subject_clone_failed"),
+							TEXT("Creating the physics preview component failed."), SubjectPath + TEXT("/preview_component"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Subject.SubjectRef);
 					}
 					Clone->SetMobility(EComponentMobility::Movable);
 					Clone->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 					PreviewScene.AddComponent(Clone, Source->GetComponentTransform());
 					Clone->SetSimulatePhysics(true);
-					if (!Clone->IsRegistered() || !Clone->IsSimulatingPhysics())
-					{
-						return Fail(OutError,
-							TEXT("rig_simulation_spatial_physics_subject_not_simulatable"),
-							Subject.SubjectRef);
-					}
+					if (!Clone->IsRegistered())
+						return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_subject_not_simulatable"),
+							TEXT("The physics preview component is not registered."), SubjectPath + TEXT("/registered"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Subject.SubjectRef);
+					if (!Clone->IsSimulatingPhysics())
+						return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_subject_not_simulatable"),
+							TEXT("The physics preview component did not start simulating."), SubjectPath + TEXT("/simulating"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Subject.SubjectRef);
 					Clones.Add(Subject.SubjectRef, Clone);
 					InitialTransforms.Add(
 						Subject.SubjectRef, Clone->GetComponentTransform());
@@ -213,15 +262,17 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				const FUeAgentTemporalPoint ObservationTime = SampleTime(Request);
 				TArray<FUeAgentRigSimulationSpatialPhysicsProbeSample> Samples;
 				bool bRestored = true;
-				for (const FUeAgentRigSimulationSpatialPhysicsProbeSubject& Subject
-					: Request.Subjects)
+				FDiagnostic RestorationError;
+				for (int32 SubjectIndex = 0; SubjectIndex < Request.Subjects.Num(); ++SubjectIndex)
 				{
+					const auto& Subject = Request.Subjects[SubjectIndex];
+					const FString SubjectPath = TEXT("/subjects/") + FString::FromInt(SubjectIndex);
 					UPrimitiveComponent* const Clone = Clones.FindRef(Subject.SubjectRef);
 					if (!Clone)
 					{
-						return Fail(OutError,
-							TEXT("rig_simulation_spatial_physics_subject_clone_missing"),
-							Subject.SubjectRef);
+						return SessionFailure(OutError, TEXT("rig_simulation_spatial_physics_subject_clone_missing"),
+							TEXT("The physics preview component is missing after simulation."), SubjectPath + TEXT("/preview_component"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Subject.SubjectRef);
 					}
 					FUeAgentRigSimulationSpatialPhysicsProbeSample Sample;
 					Sample.SubjectRef = Subject.SubjectRef;
@@ -238,10 +289,20 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					Clone->SetWorldTransform(
 						InitialTransforms.FindChecked(Subject.SubjectRef),
 						false, nullptr, ETeleportType::TeleportPhysics);
-					bRestored = bRestored
-						&& Clone->GetComponentTransform().Equals(
-							InitialTransforms.FindChecked(Subject.SubjectRef), 0.001)
-						&& Clone->GetPhysicsLinearVelocity().IsNearlyZero(0.001);
+					if (bRestored)
+					{
+						bRestored = CheckRestoredTransform(Clone->GetComponentTransform(),
+							InitialTransforms.FindChecked(Subject.SubjectRef), SubjectPath + TEXT("/restoration/transform"),
+							Subject.SubjectRef, RestorationError);
+						if (bRestored)
+						{
+							const FVector Velocity = Clone->GetPhysicsLinearVelocity();
+							if (!Velocity.IsNearlyZero(0.001))
+								bRestored = SessionFailure(RestorationError, TEXT("rig_simulation_spatial_physics_restoration_mismatch"),
+									TEXT("The restored linear velocity is not zero within tolerance 0.001."),
+									SubjectPath + TEXT("/restoration/linear_velocity"), VectorFact(Velocity), VectorFact(FVector::ZeroVector), Subject.SubjectRef);
+						}
+					}
 				}
 
 				OutResult = FUeAgentRigSimulationSpatialPhysicsProbeSessionResult(
@@ -252,31 +313,19 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					TEXT("physics-preview-restored-and-released:")
 						+ Request.Session.SessionId,
 					Request.Subjects[0].Component.Get());
-				if (!OutResult.IsValid())
-				{
-					return Fail(OutError,
-						TEXT("rig_simulation_spatial_physics_session_result_invalid"));
-				}
+				OutResult.RestorationDiagnostic = MoveTemp(RestorationError);
+				if (!OutResult.TryValidate(OutError)) return false;
 				{
 					FScopeLock Lock(&Mutex);
-					if (!Results.Contains(Request.Session.SessionId)
-						&& ResultOrder.Num() >= MaxRetainedResults)
-					{
-						Results.Remove(ResultOrder[0]);
-						ResultOrder.RemoveAt(0);
-					}
 					Results.Add(Request.Session.SessionId, OutResult);
-					ResultOrder.AddUnique(Request.Session.SessionId);
 				}
 				return true;
 			}
 
 		private:
-			static constexpr int32 MaxRetainedResults = 128;
 			FCriticalSection Mutex;
 			TMap<FString, FUeAgentRigSimulationSpatialPhysicsProbeSessionResult>
 				Results;
-			TArray<FString> ResultOrder;
 		};
 	}
 

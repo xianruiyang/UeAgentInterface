@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Dom/JsonObject.h"
@@ -14,20 +15,16 @@ namespace UE::UAI::CommandEdge
 {
 	class FUeAgentCommandDispatch;
 
-	struct FUeAgentCommandProtocolDiagnostic
-	{
-		FString Code;
-		FString Message;
-
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	using FUeAgentCommandProtocolDiagnostic = Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentCommandRequest final
 	{
 	public:
+		static bool TryCreate(
+			FString CorrelationId, FString RequestId, FString CommandId, FString CommandBindingHash,
+			TSharedPtr<FJsonObject> Params, TOptional<FUeAgentCommandRequest>& OutRequest,
+			FUeAgentCommandProtocolDiagnostic& OutDiagnostic);
+
 		const FString& GetCorrelationId() const;
 		const FString& GetRequestId() const;
 		const FString& GetCommandId() const;
@@ -55,36 +52,46 @@ namespace UE::UAI::CommandEdge
 		FString ParamsJson;
 	};
 
+	enum class EApplicationFailureKind : uint8 { None, Query, Operation };
+
 	class UEAGENTINTERFACE_API FUeAgentCommandResult final
 	{
 	public:
 		static FUeAgentCommandResult Success(
 			const FUeAgentCommandRequest& Request,
-			FString PayloadJson);
+			FString PayloadJson, TArray<Contract::FDiagnostic> Diagnostics = {});
 
 		static FUeAgentCommandResult Failure(
 			const FUeAgentCommandRequest& Request,
 			FString PayloadJson,
-			FString ErrorJson);
+			Contract::FDiagnostic Diagnostic, FString EnvelopeCode = FString(),
+			EApplicationFailureKind ApplicationFailureKind = EApplicationFailureKind::None,
+			TArray<Contract::FDiagnostic> Diagnostics = {});
 
 		static FUeAgentCommandResult ProtocolError(
 			FString CorrelationId,
 			FString RequestId,
 			FString CommandId,
 			FString CommandBindingHash,
-			FString Code,
-			FString Message);
+			Contract::FDiagnostic Diagnostic);
 
 		const FString& GetCorrelationId() const;
 		const FString& GetRequestId() const;
 		const FString& GetCommandId() const;
 		const FString& GetCommandBindingHash() const;
 		const FString& GetPayloadJson() const;
-		const FString& GetErrorJson() const;
+		const Contract::FDiagnostic& GetDiagnostic() const;
+		const TArray<Contract::FDiagnostic>& GetDiagnostics() const;
+		FUeAgentCommandResult WithPayload(FString InPayloadJson) const;
+		const FString& GetErrorCode() const;
+		TSharedRef<FJsonObject> ToPublicError() const;
+		EApplicationFailureKind GetApplicationFailureKind() const { return ApplicationFailureKind; }
 		bool IsOk() const;
 		bool IsProtocolError() const;
 		bool IsValid() const;
 		bool MatchesRequest(const FUeAgentCommandRequest& Request) const;
+		bool TryValidate(Contract::FDiagnostic& OutDiagnostic) const;
+		bool TryValidateForRequest(const FUeAgentCommandRequest& Request, Contract::FDiagnostic& OutDiagnostic) const;
 
 	private:
 		friend class FUeAgentCommandProtocolCodec;
@@ -95,16 +102,22 @@ namespace UE::UAI::CommandEdge
 			FString InCommandId,
 			FString InCommandBindingHash,
 			FString InPayloadJson,
-			FString InErrorJson,
+			Contract::FDiagnostic InDiagnostic,
 			bool bInOk,
-			bool bInProtocolError);
+			bool bInProtocolError, FString InEnvelopeCode = FString(),
+			EApplicationFailureKind InApplicationFailureKind = EApplicationFailureKind::None,
+			TArray<Contract::FDiagnostic> InDiagnostics = {});
 
 		FString CorrelationId;
 		FString RequestId;
 		FString CommandId;
 		FString CommandBindingHash;
 		FString PayloadJson;
-		FString ErrorJson;
+		Contract::FDiagnostic Diagnostic;
+		TArray<Contract::FDiagnostic> Diagnostics;
+		// An explicit envelope classification may differ from the underlying cause.
+		FString EnvelopeCode;
+		EApplicationFailureKind ApplicationFailureKind = EApplicationFailureKind::None;
 		bool bOk = false;
 		bool bProtocolError = false;
 	};
@@ -122,14 +135,15 @@ namespace UE::UAI::CommandEdge
 			TOptional<FUeAgentCommandRequest>& OutRequest,
 			FUeAgentCommandProtocolDiagnostic& OutDiagnostic) const;
 
+		// Shared one-way public projection for transport and deferred operation signals.
+		bool TryProjectResult(
+			const FUeAgentCommandResult& Result,
+			TSharedPtr<FJsonObject>& OutObject,
+			FUeAgentCommandProtocolDiagnostic& OutDiagnostic) const;
+
 		bool EncodeResult(
 			const FUeAgentCommandResult& Result,
 			TArray<uint8>& OutPayload,
-			FUeAgentCommandProtocolDiagnostic& OutDiagnostic) const;
-
-		bool DecodeResult(
-			const TArray<uint8>& Payload,
-			TOptional<FUeAgentCommandResult>& OutResult,
 			FUeAgentCommandProtocolDiagnostic& OutDiagnostic) const;
 	};
 
@@ -137,7 +151,7 @@ namespace UE::UAI::CommandEdge
 		TOptional<Contract::FUeAgentCallerContext>(
 			const NetworkTransport::FUeAgentTransportPeer& Peer,
 			const FString& CorrelationId,
-			FString& OutError)>;
+			UE::UAI::Contract::FDiagnostic& OutError)>;
 
 	using FUeAgentCommandCancellationFactory = TFunction<
 		TSharedRef<Contract::IUeAgentCancellationSignal>(

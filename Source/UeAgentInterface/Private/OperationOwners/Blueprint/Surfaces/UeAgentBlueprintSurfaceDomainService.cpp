@@ -1,22 +1,16 @@
 #include "OperationOwners/Blueprint/Surfaces/UeAgentBlueprintSurfaceDomainService.h"
 
 #include "CommandHandlers/Blueprint/Surfaces/UeAgentBlueprintSurfaceCommandHandlers.h"
-#include "Core/Contract/UeAgentCommandJson.h"
-#include "Dom/JsonObject.h"
-#include "OperationOwners/UObjectDataAsset/UeAgentUObjectDataAssetCommandService.h"
 
 namespace UE::UAI::OperationOwners::Blueprint::Surfaces
 {
-	using namespace CommandContract;
 	using namespace HjsonWorkspace;
-	using namespace OperationOwners::UObjectDataAsset;
 
 	namespace
 	{
 		const FString ProviderId = TEXT("blueprint-surface-domain-provider");
 		const FString SchemaId = TEXT("uai.blueprint.edit/1");
 		const FString BlueprintType = TEXT("/Script/Engine.Blueprint");
-		const FString PublicCommandId = TEXT("blueprint.authoring.apply");
 
 		FString InitializationContract(
 			const FString& Type,
@@ -50,12 +44,6 @@ namespace UE::UAI::OperationOwners::Blueprint::Surfaces
 				return ProviderId;
 			}
 
-			virtual bool SupportsExplicitCommand(
-				const FString& CommandId) const override
-			{
-				return CommandId == TEXT("content_graph.authoring_schema");
-			}
-
 			virtual bool Matches(
 				const FImportInitializationDomainRequest& Request) const override
 			{
@@ -64,9 +52,7 @@ namespace UE::UAI::OperationOwners::Blueprint::Surfaces
 				{
 					return false;
 				}
-				return Request.GetCommandId()
-						!= TEXT("content_graph.import_workspace")
-					|| Request.GetSchemaId() == SchemaId;
+				return MatchesDomainImportSchema(Request, SchemaId);
 			}
 
 			virtual bool TryResolveInitializationContract(
@@ -95,95 +81,19 @@ namespace UE::UAI::OperationOwners::Blueprint::Surfaces
 						!= InitializationContract(
 							Request.GetRootTypeIdentity(), Request.GetRole()))
 				{
-					OutError.Set(
-						TEXT("blueprint_surface_domain_contract_not_executable"),
-						InitializationContractId);
+					auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_surface_domain_contract_not_executable"),
+						Request.GetRole() != EInitializationNodeRole::RootTarget
+						? TEXT("This domain executor requires a root-target initialization request.")
+						: TEXT("The initialization contract does not match the requested root type."), TEXT("domain_execute"));
+					Detail.TargetPath = Request.GetTargetIdentity();
+					Detail.SourceKind = TEXT("native_result");
+					Detail.InternalContext = InitializationContractId;
+					OutError.SetFailure(MoveTemp(Detail));
 					return false;
 				}
 				return CommandHandlers::Blueprint::Surfaces::TryHandleDomainRequest(
 					Request, OutResponse, OutError);
 			}
-		};
-
-		bool Fail(
-			FBlueprintSurfaceCommandError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
-		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-			return false;
-		}
-
-		class FBlueprintSurfaceCommandService final
-			: public IUeAgentBlueprintSurfaceCommandService
-		{
-		public:
-			explicit FBlueprintSurfaceCommandService(
-				TSharedRef<IUeAgentUObjectDataAssetCommandService> InCommonService)
-				: CommonService(MoveTemp(InCommonService))
-			{
-			}
-
-			virtual bool Execute(
-				const FBlueprintSurfaceCommandRequest& Request,
-				FBlueprintSurfaceCommandResponse& OutResponse,
-				FBlueprintSurfaceCommandError& OutError) override
-			{
-				OutResponse = {};
-				OutError = {};
-				if (Request.bCancellationRequested)
-				{
-					return Fail(OutError, TEXT("blueprint_surface_cancelled"), Request.CommandId);
-				}
-				if (Request.CommandId != PublicCommandId)
-				{
-					return Fail(OutError, TEXT("blueprint_surface_command_not_supported"), Request.CommandId);
-				}
-
-				FUeAgentUObjectDataAssetCommandRequest CommonRequest;
-				CommonRequest.CommandId = TEXT("content_graph.import_workspace");
-				CommonRequest.RequestId = Request.RequestId;
-				CommonRequest.CanonicalParamsJson = Request.CanonicalParamsJson;
-				CommonRequest.CallerId = Request.CallerId;
-				CommonRequest.AuthorityScopes = Request.AuthorityScopes;
-				CommonRequest.CorrelationId = Request.CorrelationId;
-				CommonRequest.bCancellationRequested = Request.bCancellationRequested;
-				FUeAgentUObjectDataAssetCommandResponse CommonResponse;
-				FUeAgentUObjectDataAssetCommandError CommonError;
-				if (!CommonService->Execute(CommonRequest, CommonResponse, CommonError))
-				{
-					return Fail(
-						OutError,
-						CommonError.Code.IsEmpty()
-							? FString(TEXT("blueprint_surface_execution_failed"))
-							: CommonError.Code,
-						CommonError.SubjectId,
-						CommonError.Detail);
-				}
-
-				TSharedPtr<FJsonObject> Payload;
-				FString JsonError;
-				if (!Json::TryParseObject(CommonResponse.PayloadJson, Payload, JsonError)
-					|| !Payload.IsValid())
-				{
-					return Fail(OutError, TEXT("blueprint_surface_result_invalid"),
-						Request.CommandId, JsonError);
-				}
-				Payload->SetStringField(TEXT("command_id"), PublicCommandId);
-				if (!Json::TryCanonicalize(Payload, OutResponse.PayloadJson, JsonError))
-				{
-					return Fail(OutError, TEXT("blueprint_surface_result_invalid"),
-						Request.CommandId, JsonError);
-				}
-				OutResponse.bReadOnly = false;
-				return true;
-			}
-
-		private:
-			TSharedRef<IUeAgentUObjectDataAssetCommandService> CommonService;
 		};
 	}
 
@@ -192,24 +102,6 @@ namespace UE::UAI::OperationOwners::Blueprint::Surfaces
 		FWorkspaceError& OutError)
 	{
 		OutProvider = MakeShared<FBlueprintSurfaceDomainProvider>();
-		OutError.Reset();
-		return true;
-	}
-
-	bool TryCreateProductionBlueprintSurfaceCommandService(
-		TSharedPtr<IUeAgentBlueprintSurfaceCommandService>& OutService,
-		FString& OutError)
-	{
-		TSharedPtr<IUeAgentUObjectDataAssetCommandService> CommonService;
-		if (!TryCreateProductionUObjectDataAssetCommandService(
-				CommonService, OutError)
-			|| !CommonService.IsValid())
-		{
-			OutService.Reset();
-			return false;
-		}
-		OutService = MakeShared<FBlueprintSurfaceCommandService>(
-			CommonService.ToSharedRef());
 		OutError.Reset();
 		return true;
 	}

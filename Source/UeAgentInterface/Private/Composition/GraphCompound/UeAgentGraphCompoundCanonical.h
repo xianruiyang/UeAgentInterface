@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
@@ -36,14 +38,7 @@ namespace UE::UAI::Composition::GraphCompound
 
 	UEAGENTINTERFACE_API FString LexToString(EGraphCompoundElementKind Kind);
 
-	struct UEAGENTINTERFACE_API FGraphCompoundCanonicalError
-	{
-		FString Code;
-		FString IdentityKey;
-		FString Detail;
-
-		bool IsValid() const { return !Code.IsEmpty(); }
-	};
+	using FGraphCompoundCanonicalError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FGraphCompoundCanonicalEdit final
 	{
@@ -67,6 +62,7 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetImpactEvidenceId() const;
 		const TArray<FUeAgentCanonicalIdentity>& GetImpactTargets() const;
 		bool IsValid() const;
+		const FGraphCompoundCanonicalError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentCanonicalIdentity Identity;
@@ -78,22 +74,37 @@ namespace UE::UAI::Composition::GraphCompound
 		TArray<FString> RequiredAuthorityScopes;
 		FString ImpactEvidenceId;
 		TArray<FUeAgentCanonicalIdentity> ImpactTargets;
-		bool bValid = false;
+		FGraphCompoundCanonicalError ValidationDiagnostic;
 	};
+
+	// Public diagnostic facts for an authored value: scalars retain their value;
+	// containers report shape/count without copying their complete contents.
+	UEAGENTINTERFACE_API TSharedPtr<FJsonValue> CanonicalInputFact(const StateSemantic::FUeAgentCanonicalValue* Value);
+
+	// Bind a converted input value's relative paths at the boundary that owns its input location.
+	UEAGENTINTERFACE_API void BindGraphCompoundInputValueDiagnostic(
+		Contract::FDiagnostic& Diagnostic, const FString& InputPointer, const FString& ValueRoot = TEXT("/"));
+	// Only for diagnostics produced from generated/native data, never authored input.
+	UEAGENTINTERFACE_API void MarkGraphCompoundNativeDiagnostic(Contract::FDiagnostic& Diagnostic);
 
 	class UEAGENTINTERFACE_API FGraphCompoundCanonicalPayload final
 	{
 	public:
 		FGraphCompoundCanonicalPayload(
 			FString InSchemaId,
-			TArray<FGraphCompoundCanonicalEdit> InEdits);
+			TArray<FGraphCompoundCanonicalEdit> InEdits,
+			TMap<FString, FString> InInputPointers = {});
 
 		const FString& GetSchemaId() const;
 		const TArray<FGraphCompoundCanonicalEdit>& GetEdits() const;
+		// Transient input provenance; never part of canonical state or fingerprints.
+		void LocateDiagnostic(Contract::FDiagnostic& Diagnostic, const FString& SemanticId = FString()) const;
+		const FString* FindInputPointer(const FString& SemanticId) const { return InputPointers.Find(SemanticId); }
 
 	private:
 		FString SchemaId;
 		TArray<FGraphCompoundCanonicalEdit> Edits;
+		TMap<FString, FString> InputPointers;
 	};
 
 	UEAGENTINTERFACE_API bool TryValidateGraphCompoundCanonicalPayload(
@@ -152,6 +163,7 @@ namespace UE::UAI::Composition::GraphCompound
 		bool RequiresNativeMutation() const;
 		bool ReadsBackAfterMutation() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentDescriptorIdentity DescriptorIdentity;
@@ -167,6 +179,6 @@ namespace UE::UAI::Composition::GraphCompound
 		FString OracleKind;
 		bool bRequiresNativeMutation = false;
 		bool bReadsBackAfterMutation = false;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 }

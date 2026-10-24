@@ -2,16 +2,17 @@
 
 #include "Domains/Audio/Authoring/UeAgentAudioAuthoringProjection.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonValue.h"
+
 namespace UeAgentAudioAuthoring {
 namespace {
 using namespace UeAgentExportContract;
 
-FProfileDescriptor ExportProfile(const TCHAR *Id, const TArray<FString> &Roles,
-                                 const int32 Budget) {
+FProfileDescriptor ExportProfile(const TCHAR *Id, const TArray<FString> &Roles) {
   FProfileDescriptor Result;
   Result.ProfileId = Id;
   Result.IncludedRoles = Roles;
-  Result.TokenBudget = Budget;
   return Result;
 }
 
@@ -47,16 +48,13 @@ FContract MakeContract(const FProfile &Profile) {
   Result.DefaultProfile = TEXT("llm_authoring");
   Result.Profiles = {
       ExportProfile(TEXT("llm_authoring"),
-                    {TEXT("identity"), TEXT("authoring")}, 262144),
+                    {TEXT("identity"), TEXT("authoring")}),
       ExportProfile(TEXT("readback"),
-                    {TEXT("identity"), TEXT("authoring"), TEXT("readback")},
-                    327680),
+                    {TEXT("identity"), TEXT("authoring"), TEXT("readback")}),
       ExportProfile(TEXT("debug"),
                     {TEXT("identity"), TEXT("authoring"), TEXT("readback"),
-                     TEXT("diagnostics")},
-                    524288),
-      ExportProfile(TEXT("validation"), {TEXT("identity"), TEXT("validation")},
-                    32768),
+                     TEXT("diagnostics")}),
+      ExportProfile(TEXT("validation"), {TEXT("identity"), TEXT("validation")}),
   };
   FFileDescriptor Index;
   Index.FileId = TEXT("index");
@@ -106,7 +104,7 @@ FContract MakeContract(const FProfile &Profile) {
 }
 } // namespace
 
-bool RegisterExportAuthoring(FString &OutError) {
+bool RegisterExportAuthoring(UE::UAI::Contract::FDiagnostic& OutError) {
   for (const FProfile &Profile : GetProfiles()) {
     UeAgentExportContract::ERegistrationResult Result;
     if (!UeAgentExportContract::FRegistry::Get().RegisterContract(
@@ -118,10 +116,16 @@ bool RegisterExportAuthoring(FString &OutError) {
 
 bool GetExportContract(const FProfile &Profile,
                        UeAgentExportContract::FContract &OutContract,
-                       FString &OutError) {
+                       UE::UAI::Contract::FDiagnostic& OutError) {
   if (!UeAgentExportContract::FRegistry::Get().FindContract(
           Profile.ExportContractId, OutContract)) {
-    OutError = TEXT("audio_export_contract_missing:") + Profile.TypeId;
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("audio_export_contract_missing"),
+        TEXT("The selected audio profile has no registered export contract."), TEXT("export_contract_resolution"), Profile.ExportContractId);
+    OutError.SourceKind = TEXT("native_result");
+    OutError.CandidateName = Profile.TypeId;
+    OutError.PropertyPath = TEXT("export_contract_registered");
+    OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+    OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
     return false;
   }
   OutError.Reset();

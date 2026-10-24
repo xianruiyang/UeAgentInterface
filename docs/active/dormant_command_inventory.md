@@ -14,14 +14,12 @@ per-command implementation technique:
 - normal `query.command.search` excludes dormant commands;
 - `query.command.search(..., mode="compatibility")` includes active and dormant
   candidates and labels every candidate with `lifecycle_status`;
-- a dormant candidate and its detail expose `successor_command_ids`,
-  `lifecycle_reason`, and `requires_user_confirmation=true`;
+- a dormant candidate and its detail expose `successor_command_ids` and
+  `lifecycle_reason`;
 - generated named SDK methods are emitted only for active commands;
-- `Client.execute` and `Client.execute_exact` reject a known dormant command;
-- after explaining why active successors are insufficient and obtaining the
-  user's explicit agreement, development code may call
-  `Client.execute_dormant(..., user_confirmed=True)` or pass both an exact
-  contract hash and `--allow-dormant` to `uai-cli exec`;
+- `Client.execute`, `Client.execute_exact`, and `uai-cli exec` use the ordinary
+  exact path for a known dormant command; `Client.execute_dormant` remains only
+  as a compatibility alias for the same dispatch;
 - disabled commands remain undiscoverable and non-executable.
 
 The single data owner is
@@ -31,18 +29,31 @@ handlers and search code must not carry local dormant lists.
 
 ## Current dormant commands
 
-| Dormant command | Preferred active successor | Covered authoring responsibility |
-| --- | --- | --- |
-| `world.actors` | `content_graph.structure`, `content_graph.items` | Persisted World Actor discovery and selected Actor structure |
-| `world.actor_components` | `content_graph.items` | Persisted component structure for selected Actors |
-| `world.property` | `content_graph.properties` | Persisted editable reflected Actor and Component properties |
-| `world.object_transform.read` | `content_graph.structure`, `content_graph.items` | Persisted Actor and Component transform readback |
-| `world.object_transform.update` | `content_graph.import_workspace` | Persisted Actor and Component transform mutation through a revisioned World HJSON edit |
+The exact inventory is the `status="dormant"` projection in
+`Resources/UaiCommandManifest.json`; this document deliberately does not copy the
+ID list into a second hand-maintained table. The central policy currently covers
+these responsibility groups:
 
-This set does not include `world.actor.create`. HJSON is the preferred structure
-authoring owner, but the current evidence does not prove exact equivalence for
-that command's candidate contract, inputs, outputs and failure boundary. It
-therefore remains active until a separate migration decision is justified.
+- superseded World Actor discovery, structure, property, transform and creation;
+- persistent asset properties, structure and domain-specific readback now owned by
+  HJSON export and the ContentGraph query family;
+- typed asset, Animation, Rig, Physics, Timeline, PCG, Niagara and TextureGraph
+  desired-state mutation;
+- persistent World Data Layer, streaming, HLOD, GameMode and relation mutation;
+- localization-target and StringTable mutation through registered HJSON profiles;
+- the registry-only relation compatibility view superseded by `asset.relations`.
+
+Some HJSON successor profiles or semantic adapters are not yet complete. Those are
+explicit capability gaps: the old typed identity stays dormant and must not be used
+silently as the normal workflow. Procedural geometry, CubeGrid/voxel sessions,
+whitebox construction, algorithms, external import, runtime queries, validation,
+capture, compile/settle and Editor/Operation lifecycle commands remain active.
+
+`world.actor.create` remains executable only through the compatibility path. The
+active flow searches `world.actor.candidates`, writes the selected readable name
+and only necessary short semantic selection fields into Level HJSON, then imports
+the current workspace. The same provider owns label, folder, transform, attachment,
+tags, properties, components, persistence and independent readback.
 
 Historical commands already removed from the current registry are not dormant
 and must not be restored merely to populate this compatibility surface.

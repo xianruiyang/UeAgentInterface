@@ -1,5 +1,7 @@
 #include "Core/Contract/Command/UeAgentCommandContractModel.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -9,36 +11,43 @@ namespace UE::UAI::CommandContract
 	bool TryBuildCommandVariantRequestSchema(
 		const TArray<FUeAgentCommandVariantRequestFieldDeclaration>& Fields,
 		FString& OutSchemaJson,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutSchemaJson.Reset();
 		OutError.Reset();
 		if (Fields.IsEmpty())
 		{
-			OutError = TEXT("command_variant_request_fields_empty");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_variant_request_fields_empty"), TEXT("A command variant request schema requires at least one field."), TEXT("command_contract"));
+			OutError.PropertyPath = TEXT("fields");
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
 			return false;
 		}
 		const TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
 		const TSharedRef<FJsonObject> Definitions = MakeShared<FJsonObject>();
 		TArray<TSharedPtr<FJsonValue>> Required;
 		TSet<FString> Names;
-		for (const FUeAgentCommandVariantRequestFieldDeclaration& Field : Fields)
+		for (int32 Index = 0; Index < Fields.Num(); ++Index)
 		{
+			const auto& Field = Fields[Index];
 			if (Field.Name.IsEmpty() || Names.Contains(Field.Name))
 			{
-				OutError = TEXT("command_variant_request_field_invalid:")
-					+ Field.Name;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_variant_request_field_invalid"),
+					Field.Name.IsEmpty() ? TEXT("The variant request field name is empty.") : TEXT("The variant request field name is duplicated."), TEXT("command_contract"));
+				OutError.PropertyPath = FString::Printf(TEXT("fields[%d].name"), Index);
+				OutError.ActualValue = MakeShared<FJsonValueString>(Field.Name);
 				return false;
 			}
 			TSharedPtr<FJsonObject> FieldSchema;
 			if (!Json::TryParseObject(
 					Field.SchemaJson,
 					FieldSchema,
-					OutError)
-				|| !FieldSchema.IsValid())
+					OutError))
 			{
-				OutError = TEXT("command_variant_request_field_schema_invalid:")
-					+ Field.Name + TEXT(":") + OutError;
+				auto Failure = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("command_variant_request_field_schema_invalid"), OutError, TEXT("command_contract"));
+				Failure.CandidateName = Field.Name;
+				if (Failure.PropertyPath.IsEmpty()) Failure.PropertyPath = FString::Printf(TEXT("fields[%d].schema"), Index);
+				Failure.SourceKind = TEXT("native_result");
+				OutError = MoveTemp(Failure);
 				return false;
 			}
 			const TSharedPtr<FJsonObject>* FieldDefinitions = nullptr;
@@ -52,9 +61,8 @@ namespace UE::UAI::CommandContract
 				{
 					if (Definitions->HasField(Definition.Key))
 					{
-						OutError = TEXT(
-							"command_variant_request_definition_duplicate:")
-							+ Definition.Key;
+						OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_variant_request_definition_duplicate"), TEXT("A schema definition occurs more than once."), TEXT("command_contract"));
+                        OutError.PropertyPath = Definition.Key;
 						return false;
 					}
 					Definitions->SetField(Definition.Key, Definition.Value);
@@ -147,6 +155,12 @@ namespace UE::UAI::CommandContract
 	FUeAgentFrozenCommandContract::GetResultFields() const
 	{
 		return Declaration.ResultFields;
+	}
+
+	const TArray<FUeAgentModelResultFieldDeclaration>&
+	FUeAgentFrozenCommandContract::GetModelResultFields() const
+	{
+		return Declaration.ModelResultFields;
 	}
 
 	const TArray<FUeAgentCommandErrorDeclaration>&

@@ -11,5 +11,5 @@ namespace UE::UAI::Composition::LongRunningSession
 		const TArray<FUeAgentLongRunningSessionActivationProfile>& Profiles,
 		TSharedRef<Contract::IUeAgentOperationApplicationPort> OperationPort,
 		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError);
+		Contract::FDiagnostic& OutError);
 }

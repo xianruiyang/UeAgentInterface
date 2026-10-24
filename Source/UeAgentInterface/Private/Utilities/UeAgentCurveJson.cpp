@@ -1,9 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Utilities/UeAgentCurveJson.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringJsonFields.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "JsonUtils/JsonPointer.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Curves/CurveBase.h"
 #include "Curves/CurveFloat.h"
 #include "Curves/CurveLinearColor.h"
 #include "Curves/CurveVector.h"
@@ -16,10 +22,26 @@
 namespace UeAgentCurveJson
 {
 	const TCHAR* const SchemaName = TEXT("ue_agent_interface.curve.v1");
-	static constexpr float KeyTimeTolerance = 1.0e-4f;
 	static constexpr double ValueTolerance = 1.0e-4;
 
-	static TSharedPtr<FJsonObject> MakeCurveIssue(
+	static const TArray<FAssetCurveContract>& AssetCurveContracts()
+	{
+		static const TArray<FAssetCurveContract> Contracts{
+			{UCurveFloat::StaticClass(), TEXT("CurveFloat"), TEXT("float"), {TEXT("value")}},
+			{UCurveVector::StaticClass(), TEXT("CurveVector"), TEXT("vector"), {TEXT("x"), TEXT("y"), TEXT("z")}},
+			{UCurveLinearColor::StaticClass(), TEXT("CurveLinearColor"), TEXT("linear_color"), {TEXT("r"), TEXT("g"), TEXT("b"), TEXT("a")}},
+		};
+		return Contracts;
+	}
+	const FAssetCurveContract* FindAssetCurveContract(const FString& ClassPath)
+	{
+		return AssetCurveContracts().FindByPredicate([&](const auto& Contract) { return Contract.AssetClass->GetPathName() == ClassPath; });
+	}
+	const FAssetCurveContract* FindAssetCurveContract(const UObject* Asset)
+	{
+		return Asset ? AssetCurveContracts().FindByPredicate([&](const auto& Contract) { return Asset->IsA(Contract.AssetClass); }) : nullptr;
+	}
+	static UE::UAI::Contract::FDiagnostic MakeCurveIssue(
 		const FString& Severity,
 		const FString& Code,
 		const FString& Path,
@@ -27,20 +49,23 @@ namespace UeAgentCurveJson
 		const FString& Expected = FString(),
 		const FString& Actual = FString())
 	{
-		TSharedPtr<FJsonObject> IssueObj = UeAgentJsonDiagnostics::MakeIssue(Severity, Code, Path, Message);
+		auto IssueObj = UeAgentJsonDiagnostics::MakeIssue(Severity, Code, Path, Message);
+		IssueObj.PropertyPath.Reset();
+		IssueObj.SemanticPointer = Path.IsEmpty() ? TEXT("/") : Path;
+		IssueObj.Source.JsonPath = IssueObj.SemanticPointer;
 		if (!Expected.IsEmpty())
 		{
-			IssueObj->SetStringField(TEXT("expected"), Expected);
+			IssueObj.ExpectedValue = MakeShared<FJsonValueString>(Expected);
 		}
 		if (!Actual.IsEmpty())
 		{
-			IssueObj->SetStringField(TEXT("actual"), Actual);
+			IssueObj.ActualValue = MakeShared<FJsonValueString>(Actual);
 		}
 		return IssueObj;
 	}
 
 	void AddCurveIssue(
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const FString& Severity,
 		const FString& Code,
 		const FString& Path,
@@ -48,25 +73,11 @@ namespace UeAgentCurveJson
 		const FString& Expected,
 		const FString& Actual)
 	{
-		Issues.Add(MakeShared<FJsonValueObject>(MakeCurveIssue(Severity, Code, Path, Message, Expected, Actual)));
+		Issues.Add(MakeCurveIssue(Severity, Code, Path, Message, Expected, Actual));
 	}
 
-	bool HasError(const TArray<TSharedPtr<FJsonValue>>& Issues)
-	{
-		for (const TSharedPtr<FJsonValue>& IssueValue : Issues)
-		{
-			const TSharedPtr<FJsonObject>* IssueObj = nullptr;
-			if (IssueValue.IsValid()
-				&& IssueValue->TryGetObject(IssueObj)
-				&& IssueObj
-				&& IssueObj->IsValid()
-				&& (*IssueObj)->GetStringField(TEXT("severity")).Equals(TEXT("error"), ESearchCase::IgnoreCase))
-			{
-				return true;
-			}
-		}
-		return false;
-	}
+	bool HasError(const TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+    { return UeAgentJsonDiagnostics::HasErrorIssue(Issues); }
 
 	FString NormalizeAssetPath(const FString& InPath)
 	{
@@ -281,12 +292,12 @@ namespace UeAgentCurveJson
 		return false;
 	}
 
-	static TSharedPtr<FJsonObject> BuildKeyJson(const FRichCurveKey& Key, const int32 KeyIndex)
+	static TSharedPtr<FJsonObject> BuildKeyJson(const FRichCurveKey& Key, const int32 KeyIndex, bool bAuthoring = false)
 	{
 		TSharedPtr<FJsonObject> KeyObj = MakeShared<FJsonObject>();
-		KeyObj->SetNumberField(TEXT("key_index"), KeyIndex);
+		if (!bAuthoring) KeyObj->SetNumberField(TEXT("key_index"), KeyIndex);
 		KeyObj->SetNumberField(TEXT("time"), Key.Time);
-		KeyObj->SetNumberField(TEXT("time_seconds"), Key.Time);
+		if (!bAuthoring) KeyObj->SetNumberField(TEXT("time_seconds"), Key.Time);
 		KeyObj->SetNumberField(TEXT("value"), Key.Value);
 		KeyObj->SetStringField(TEXT("interp_mode"), InterpModeToString(Key.InterpMode));
 		KeyObj->SetStringField(TEXT("tangent_mode"), TangentModeToString(Key.TangentMode));
@@ -298,10 +309,24 @@ namespace UeAgentCurveJson
 		return KeyObj;
 	}
 
-	static TSharedPtr<FJsonObject> BuildChannelJson(const FRichCurve& Curve, const FString& ValueType = TEXT("double"))
+	static TSharedPtr<FJsonObject> BuildKeyJson(const FSimpleCurveKey& Key, int32 KeyIndex, bool bAuthoring)
+	{
+		const auto Result = MakeShared<FJsonObject>();
+		Result->SetNumberField(TEXT("time"), Key.Time);
+		Result->SetNumberField(TEXT("value"), Key.Value);
+		if (!bAuthoring)
+		{
+			Result->SetNumberField(TEXT("key_index"), KeyIndex);
+			Result->SetNumberField(TEXT("time_seconds"), Key.Time);
+		}
+		return Result;
+	}
+
+	template <typename CurveType>
+	static TSharedPtr<FJsonObject> BuildChannelJson(const CurveType& Curve, const FString& ValueType = TEXT("double"), bool bAuthoring = false)
 	{
 		TSharedPtr<FJsonObject> ChannelObj = MakeShared<FJsonObject>();
-		ChannelObj->SetStringField(TEXT("value_type"), ValueType);
+		ChannelObj->SetStringField(TEXT("value_type"), bAuthoring ? TEXT("float") : ValueType);
 		TSharedPtr<FJsonObject> DefaultObj = MakeShared<FJsonObject>();
 		const bool bHasDefault = Curve.GetDefaultValue() != MAX_flt;
 		DefaultObj->SetBoolField(TEXT("enabled"), bHasDefault);
@@ -312,89 +337,201 @@ namespace UeAgentCurveJson
 		ChannelObj->SetObjectField(TEXT("default_value"), DefaultObj);
 
 		TArray<TSharedPtr<FJsonValue>> KeysJson;
-		const TArray<FRichCurveKey>& Keys = Curve.GetConstRefOfKeys();
+		const auto& Keys = Curve.GetConstRefOfKeys();
 		for (int32 KeyIndex = 0; KeyIndex < Keys.Num(); ++KeyIndex)
 		{
-			KeysJson.Add(MakeShared<FJsonValueObject>(BuildKeyJson(Keys[KeyIndex], KeyIndex)));
+			KeysJson.Add(MakeShared<FJsonValueObject>(BuildKeyJson(Keys[KeyIndex], KeyIndex, bAuthoring)));
 		}
 		ChannelObj->SetArrayField(TEXT("keys"), KeysJson);
-		ChannelObj->SetNumberField(TEXT("key_count"), Keys.Num());
+		if (!bAuthoring) ChannelObj->SetNumberField(TEXT("key_count"), Keys.Num());
 		return ChannelObj;
 	}
 
-	static TSharedPtr<FJsonObject> MakeCurveRoot(const FString& CurveKind, const FString& Storage, const FString& CarrierCppType)
+	static TSharedPtr<FJsonObject> MakeCurveRoot(const FString& CurveKind, const FString& Storage, const FString& CarrierCppType, bool bAuthoring = false, const FString& TimeUnit = TEXT("seconds"))
 	{
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 		Root->SetStringField(TEXT("schema"), SchemaName);
 		Root->SetStringField(TEXT("curve_kind"), CurveKind);
-		Root->SetStringField(TEXT("storage"), Storage);
-		Root->SetStringField(TEXT("carrier_cpp_type"), CarrierCppType);
+		if (!bAuthoring)
+		{
+			Root->SetStringField(TEXT("storage"), Storage);
+			Root->SetStringField(TEXT("carrier_cpp_type"), CarrierCppType);
+		}
 		TSharedPtr<FJsonObject> TimeDomainObj = MakeShared<FJsonObject>();
-		TimeDomainObj->SetStringField(TEXT("unit"), TEXT("seconds"));
-		Root->SetObjectField(TEXT("time_domain"), TimeDomainObj);
+		TimeDomainObj->SetStringField(TEXT("unit"), TimeUnit);
+		if (!TimeUnit.IsEmpty()) Root->SetObjectField(TEXT("time_domain"), TimeDomainObj);
 		return Root;
 	}
 
-	TSharedPtr<FJsonObject> BuildFloatCurveJson(const FRichCurve& Curve, const FString& Storage, const FString& CarrierCppType)
+	TSharedPtr<FJsonObject> BuildFloatCurveJson(const FRichCurve& Curve, const FString& Storage, const FString& CarrierCppType, bool bAuthoring, const FString& TimeUnit)
 	{
-		TSharedPtr<FJsonObject> Root = MakeCurveRoot(TEXT("float"), Storage, CarrierCppType);
+		TSharedPtr<FJsonObject> Root = MakeCurveRoot(TEXT("float"), Storage, CarrierCppType, bAuthoring, TimeUnit);
 		Root->SetStringField(TEXT("pre_infinity_extrap"), ExtrapModeToString(Curve.PreInfinityExtrap));
 		Root->SetStringField(TEXT("post_infinity_extrap"), ExtrapModeToString(Curve.PostInfinityExtrap));
 		TSharedPtr<FJsonObject> ChannelsObj = MakeShared<FJsonObject>();
-		ChannelsObj->SetObjectField(TEXT("value"), BuildChannelJson(Curve));
+		ChannelsObj->SetObjectField(TEXT("value"), BuildChannelJson(Curve, TEXT("double"), bAuthoring));
 		Root->SetObjectField(TEXT("channels"), ChannelsObj);
 		return Root;
 	}
 
-	static TSharedPtr<FJsonObject> BuildVectorCurveJson(const FRichCurve* Curves, const FString& CurveKind, const FString& Storage, const FString& CarrierCppType)
+	TSharedPtr<FJsonObject> BuildSimpleCurveJson(const FSimpleCurve& Curve, const FString& Storage, const FString& CarrierCppType, bool bAuthoring, const FString& TimeUnit)
 	{
-		TSharedPtr<FJsonObject> Root = MakeCurveRoot(CurveKind, Storage, CarrierCppType);
+		const auto Root = MakeCurveRoot(TEXT("float"), Storage, CarrierCppType, bAuthoring, TimeUnit);
+		Root->SetStringField(TEXT("interp_mode"), InterpModeToString(Curve.GetKeyInterpMode()));
+		Root->SetStringField(TEXT("pre_infinity_extrap"), ExtrapModeToString(Curve.PreInfinityExtrap));
+		Root->SetStringField(TEXT("post_infinity_extrap"), ExtrapModeToString(Curve.PostInfinityExtrap));
+		const auto Channels = MakeShared<FJsonObject>();
+		Channels->SetObjectField(TEXT("value"), BuildChannelJson(Curve, TEXT("double"), bAuthoring));
+		Root->SetObjectField(TEXT("channels"), Channels);
+		return Root;
+	}
+
+	TSharedPtr<FJsonObject> BuildCurveTableRowSchema(bool bSimple)
+	{
+		const auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), bSimple ? TEXT("SimpleCurve") : TEXT("RichCurve"));
+		const auto Property = MakeShared<FJsonObject>();
+		Property->SetStringField(TEXT("type"), TEXT("curve"));
+		Property->SetObjectField(TEXT("value"), bSimple ? BuildSimpleCurveJson(FSimpleCurve(), {}, {}, true, {})
+			: BuildFloatCurveJson(FRichCurve(), {}, {}, true, {}));
+		const auto Properties = MakeShared<FJsonObject>();
+		Properties->SetObjectField(TEXT("Curve"), Property);
+		Schema->SetObjectField(TEXT("properties"), Properties);
+		const auto Definitions = BuildCurveValueDefinition(bSimple);
+		Definitions->SetArrayField(TEXT("table_curve_mode"), {MakeShared<FJsonValueString>(bSimple ? TEXT("simple") : TEXT("rich"))});
+		Schema->SetObjectField(TEXT("definitions"), Definitions);
+		return Schema;
+	}
+
+	TSharedPtr<FJsonObject> BuildCurveValueDefinition(bool bSimple)
+	{
+		TArray<TSharedPtr<FJsonValue>> Interpolation, Extrapolation;
+		for (ERichCurveInterpMode Mode : {RCIM_Linear, RCIM_Constant, RCIM_Cubic, RCIM_None})
+			if (!bSimple || Mode != RCIM_Cubic) Interpolation.Add(MakeShared<FJsonValueString>(InterpModeToString(Mode)));
+		for (ERichCurveExtrapolation Mode : {RCCE_Cycle, RCCE_CycleWithOffset, RCCE_Oscillate, RCCE_Linear, RCCE_Constant, RCCE_None})
+			Extrapolation.Add(MakeShared<FJsonValueString>(ExtrapModeToString(Mode)));
+		const auto Definitions = MakeShared<FJsonObject>();
+		Definitions->SetArrayField(TEXT("interp_mode"), Interpolation);
+		Definitions->SetArrayField(TEXT("infinity_extrap"), Extrapolation);
+		Definitions->SetObjectField(TEXT("key_defaults"), bSimple
+			? BuildKeyJson(FSimpleCurveKey(0.f, 0.f), 0, true)
+			: BuildKeyJson(FRichCurveKey(0.f, 0.f), 0, true));
+		if (!bSimple)
+		{
+			TArray<TSharedPtr<FJsonValue>> Tangents, Weights;
+			for (ERichCurveTangentMode Mode : {RCTM_Auto, RCTM_User, RCTM_Break, RCTM_None, RCTM_SmartAuto})
+				Tangents.Add(MakeShared<FJsonValueString>(TangentModeToString(Mode)));
+			for (ERichCurveTangentWeightMode Mode : {RCTWM_WeightedNone, RCTWM_WeightedArrive, RCTWM_WeightedLeave, RCTWM_WeightedBoth})
+				Weights.Add(MakeShared<FJsonValueString>(TangentWeightModeToString(Mode)));
+			Definitions->SetArrayField(TEXT("tangent_mode"), Tangents);
+			Definitions->SetArrayField(TEXT("tangent_weight_mode"), Weights);
+		}
+		return Definitions;
+	}
+
+	TSharedPtr<FJsonObject> BuildEmptyCurveTableRowSchema()
+	{
+		const auto Schema = BuildCurveTableRowSchema(false);
+		Schema->SetStringField(TEXT("type"), TEXT("UnspecifiedCurve"));
+		const auto Definitions = Schema->GetObjectField(TEXT("definitions"));
+		Definitions->SetArrayField(TEXT("table_curve_mode"), {
+			MakeShared<FJsonValueString>(TEXT("empty")), MakeShared<FJsonValueString>(TEXT("simple")), MakeShared<FJsonValueString>(TEXT("rich"))});
+		const auto Templates = MakeShared<FJsonObject>();
+		Templates->SetObjectField(TEXT("simple"), BuildCurveTableRowSchema(true));
+		Templates->SetObjectField(TEXT("rich"), BuildCurveTableRowSchema(false));
+		Definitions->SetObjectField(TEXT("mode_templates"), Templates);
+		return Schema;
+	}
+
+	static TSharedPtr<FJsonObject> BuildMultiChannelCurveJson(const FRichCurve* Curves,
+		const TArray<FString>& ChannelNames, const FString& CurveKind,
+		const FString& Storage, const FString& CarrierCppType, bool bAuthoring = false)
+	{
+		TSharedPtr<FJsonObject> Root = MakeCurveRoot(CurveKind, Storage, CarrierCppType, bAuthoring, bAuthoring ? FString() : TEXT("seconds"));
 		TSharedPtr<FJsonObject> ChannelsObj = MakeShared<FJsonObject>();
-		ChannelsObj->SetObjectField(TEXT("x"), BuildChannelJson(Curves[0]));
-		ChannelsObj->SetObjectField(TEXT("y"), BuildChannelJson(Curves[1]));
-		ChannelsObj->SetObjectField(TEXT("z"), BuildChannelJson(Curves[2]));
+		int32 Index = 0;
+		for (const FString& Name : ChannelNames)
+		{
+			const FRichCurve& Curve = Curves[Index++];
+			const auto Channel = BuildChannelJson(Curve, TEXT("double"), bAuthoring);
+			Channel->SetStringField(TEXT("pre_infinity_extrap"), ExtrapModeToString(Curve.PreInfinityExtrap));
+			Channel->SetStringField(TEXT("post_infinity_extrap"), ExtrapModeToString(Curve.PostInfinityExtrap));
+			ChannelsObj->SetObjectField(Name, Channel);
+		}
 		Root->SetObjectField(TEXT("channels"), ChannelsObj);
 		return Root;
 	}
 
-	static TSharedPtr<FJsonObject> BuildLinearColorCurveJson(const FRichCurve* Curves, const FString& Storage, const FString& CarrierCppType)
+	TSharedPtr<FJsonObject> BuildCurveAssetValueDefinition(const FAssetCurveContract& Contract)
 	{
-		TSharedPtr<FJsonObject> Root = MakeCurveRoot(TEXT("linear_color"), Storage, CarrierCppType);
-		TSharedPtr<FJsonObject> ChannelsObj = MakeShared<FJsonObject>();
-		ChannelsObj->SetObjectField(TEXT("r"), BuildChannelJson(Curves[0]));
-		ChannelsObj->SetObjectField(TEXT("g"), BuildChannelJson(Curves[1]));
-		ChannelsObj->SetObjectField(TEXT("b"), BuildChannelJson(Curves[2]));
-		ChannelsObj->SetObjectField(TEXT("a"), BuildChannelJson(Curves[3]));
-		Root->SetObjectField(TEXT("channels"), ChannelsObj);
-		return Root;
+		const auto Definition = MakeShared<FJsonObject>();
+		Definition->SetStringField(TEXT("type"), Contract.ValueType);
+		const auto ValueContract = BuildCurveValueDefinition(false);
+		const auto Templates = MakeShared<FJsonObject>();
+		TArray<FRichCurve> Channels;
+		Channels.SetNum(Contract.Channels.Num());
+		Templates->SetObjectField(TEXT("embedded"), Contract.CurveKind == TEXT("float")
+			? BuildFloatCurveJson(Channels[0], {}, {}, true, {})
+			: BuildMultiChannelCurveJson(Channels.GetData(), Contract.Channels, Contract.CurveKind, {}, {}, true));
+		ValueContract->SetObjectField(TEXT("value_templates"), Templates);
+		Definition->SetObjectField(TEXT("contract"), ValueContract);
+		return Definition;
 	}
 
-	static TSharedPtr<FJsonObject> BuildAssetReferenceJson(const UObject* Asset, const FString& PropertyCppType = FString())
+	static TSharedPtr<FJsonObject> BuildAssetReferenceJson(const UObject* Asset, const FString& PropertyCppType = FString(), bool bAuthoring = false)
 	{
-		TSharedPtr<FJsonObject> Root = MakeCurveRoot(TEXT("asset_reference"), TEXT("asset_reference"), PropertyCppType.IsEmpty() ? TEXT("UObject") : PropertyCppType);
+		TSharedPtr<FJsonObject> Root = MakeCurveRoot(TEXT("asset_reference"), TEXT("asset_reference"), PropertyCppType.IsEmpty() ? TEXT("UObject") : PropertyCppType,
+			bAuthoring, bAuthoring ? FString() : TEXT("seconds"));
 		TSharedPtr<FJsonObject> RefObj = MakeShared<FJsonObject>();
 		RefObj->SetStringField(TEXT("asset_path"), Asset ? NormalizeAssetPath(Asset->GetOutermost()->GetName()) : TEXT(""));
-		RefObj->SetStringField(TEXT("object_path"), Asset ? Asset->GetPathName() : TEXT(""));
-		RefObj->SetStringField(TEXT("asset_class"), Asset && Asset->GetClass() ? Asset->GetClass()->GetPathName() : TEXT(""));
-		RefObj->SetBoolField(TEXT("required"), Asset != nullptr);
+		if (!bAuthoring)
+		{
+			RefObj->SetStringField(TEXT("object_path"), Asset ? Asset->GetPathName() : TEXT(""));
+			RefObj->SetStringField(TEXT("asset_class"), Asset && Asset->GetClass() ? Asset->GetClass()->GetPathName() : TEXT(""));
+			RefObj->SetBoolField(TEXT("required"), Asset != nullptr);
+		}
 		Root->SetObjectField(TEXT("asset_reference"), RefObj);
 		return Root;
 	}
 
-	static TSharedPtr<FJsonObject> BuildCurveTableRowHandleJson(const FCurveTableRowHandle& Handle)
+	enum class ERuntimeCurveKind { Float, Vector, Color };
+
+	static TSharedPtr<FJsonObject> BuildRuntimeCurveValueDefinition(ERuntimeCurveKind Kind)
 	{
-		TSharedPtr<FJsonObject> Root = MakeCurveRoot(TEXT("curve_table_row"), TEXT("table_row"), TEXT("FCurveTableRowHandle"));
-		TSharedPtr<FJsonObject> TableObj = MakeShared<FJsonObject>();
-		TableObj->SetStringField(TEXT("asset_path"), Handle.CurveTable ? NormalizeAssetPath(Handle.CurveTable->GetOutermost()->GetName()) : TEXT(""));
-		TableObj->SetStringField(TEXT("object_path"), Handle.CurveTable ? Handle.CurveTable->GetPathName() : TEXT(""));
-		TableObj->SetStringField(TEXT("row_name"), Handle.RowName.ToString());
-		TableObj->SetStringField(TEXT("row_type"), TEXT("RichCurve"));
-		Root->SetObjectField(TEXT("curve_table"), TableObj);
-		if (const FRichCurve* RowCurve = Handle.GetRichCurve(TEXT("UeAgentCurveJson"), false))
+		const auto Definition = MakeShared<FJsonObject>();
+		const auto Contract = BuildCurveValueDefinition(false);
+		const auto Templates = MakeShared<FJsonObject>();
+		FRichCurve EmptyChannels[4];
+		UClass* ReferenceClass = nullptr;
+		switch (Kind)
 		{
-			Root->SetObjectField(TEXT("row_curve"), BuildFloatCurveJson(*RowCurve, TEXT("table_row_readonly"), TEXT("FRichCurve")));
+		case ERuntimeCurveKind::Float:
+			Definition->SetStringField(TEXT("type"), TEXT("RuntimeFloatCurve"));
+			Templates->SetObjectField(TEXT("embedded"), BuildFloatCurveJson(EmptyChannels[0], {}, {}, true, {}));
+			ReferenceClass = UCurveFloat::StaticClass();
+			break;
+		case ERuntimeCurveKind::Vector:
+			Definition->SetStringField(TEXT("type"), TEXT("RuntimeVectorCurve"));
+			Templates->SetObjectField(TEXT("embedded"), BuildMultiChannelCurveJson(EmptyChannels, {TEXT("x"), TEXT("y"), TEXT("z")}, TEXT("vector"), {}, {}, true));
+			ReferenceClass = UCurveVector::StaticClass();
+			break;
+		case ERuntimeCurveKind::Color:
+			Definition->SetStringField(TEXT("type"), TEXT("RuntimeColorCurve"));
+			Templates->SetObjectField(TEXT("embedded"), BuildMultiChannelCurveJson(EmptyChannels, {TEXT("r"), TEXT("g"), TEXT("b"), TEXT("a")}, TEXT("linear_color"), {}, {}, true));
+			ReferenceClass = UCurveLinearColor::StaticClass();
+			break;
 		}
-		return Root;
+		Templates->SetObjectField(TEXT("asset_reference"), BuildAssetReferenceJson(nullptr, {}, true));
+		Contract->SetObjectField(TEXT("value_templates"), Templates);
+		const auto Reference = MakeShared<FJsonObject>();
+		Reference->SetStringField(TEXT("asset_class"), ReferenceClass->GetPathName());
+		const auto Path = MakeShared<FJsonObject>();
+		Path->SetStringField(TEXT("type"), TEXT("string"));
+		Path->SetBoolField(TEXT("non_empty"), true);
+		Reference->SetObjectField(TEXT("asset_path"), Path);
+		Contract->SetObjectField(TEXT("asset_reference"), Reference);
+		Definition->SetObjectField(TEXT("contract"), Contract);
+		return Definition;
 	}
 
 	static bool TryGetObjectField(const TSharedPtr<FJsonObject>& Obj, const FString& FieldName, TSharedPtr<FJsonObject>& OutObj)
@@ -408,44 +545,18 @@ namespace UeAgentCurveJson
 		return false;
 	}
 
-	static bool TryGetNumberFieldAny(const TSharedPtr<FJsonObject>& Obj, const TArray<FString>& Fields, double& OutValue)
+	static bool ValidateKeyFields(const TSharedPtr<FJsonObject>& KeyObj,
+		std::initializer_list<UeAgentAuthoringJsonFields::FFieldType> Fields,
+		const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
-		if (!Obj.IsValid())
-		{
-			return false;
-		}
-		for (const FString& FieldName : Fields)
-		{
-			if (Obj->TryGetNumberField(FieldName, OutValue))
-			{
-				return true;
-			}
-		}
+		UE::UAI::Contract::FDiagnostic Error;
+		if (UeAgentAuthoringJsonFields::ValidateDeclaredFields(*KeyObj, Fields, Error)) return true;
+		UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, Path);
+		Issues.Add(MoveTemp(Error));
 		return false;
 	}
 
-	static void WarnUnknownKeyFields(const TSharedPtr<FJsonObject>& KeyObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
-	{
-		UeAgentJsonDiagnostics::WarnUnknownFields(
-			KeyObj,
-			Path,
-			{
-				TEXT("key_index"),
-				TEXT("time"),
-				TEXT("time_seconds"),
-				TEXT("value"),
-				TEXT("interp_mode"),
-				TEXT("tangent_mode"),
-				TEXT("tangent_weight_mode"),
-				TEXT("arrive_tangent"),
-				TEXT("leave_tangent"),
-				TEXT("arrive_tangent_weight"),
-				TEXT("leave_tangent_weight")
-			},
-			Issues);
-	}
-
-	static void WarnUnknownChannelFields(const TSharedPtr<FJsonObject>& ChannelObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static void WarnUnknownChannelFields(const TSharedPtr<FJsonObject>& ChannelObj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		UeAgentJsonDiagnostics::WarnUnknownFields(
 			ChannelObj,
@@ -454,7 +565,9 @@ namespace UeAgentCurveJson
 				TEXT("value_type"),
 				TEXT("default_value"),
 				TEXT("keys"),
-				TEXT("key_count")
+				TEXT("key_count"),
+				TEXT("pre_infinity_extrap"),
+				TEXT("post_infinity_extrap")
 			},
 			Issues);
 
@@ -463,31 +576,18 @@ namespace UeAgentCurveJson
 		{
 			UeAgentJsonDiagnostics::WarnUnknownFields(
 				DefaultObj,
-				Path + TEXT(".default_value"),
+				Path + TEXT("/default_value"),
 				{ TEXT("enabled"), TEXT("value") },
 				Issues);
 		}
 
-		const TArray<TSharedPtr<FJsonValue>>* KeyValues = nullptr;
-		if (ChannelObj.IsValid() && ChannelObj->TryGetArrayField(TEXT("keys"), KeyValues) && KeyValues)
-		{
-			for (int32 KeyIndex = 0; KeyIndex < KeyValues->Num(); ++KeyIndex)
-			{
-				const FString KeyPath = FString::Printf(TEXT("%s.keys[%d]"), *Path, KeyIndex);
-				TSharedPtr<FJsonObject> KeyObj;
-				if (UeAgentJsonDiagnostics::ReadObjectFromValue((*KeyValues)[KeyIndex], KeyPath, KeyObj, Issues))
-				{
-					WarnUnknownKeyFields(KeyObj, KeyPath, Issues);
-				}
-			}
-		}
 	}
 
-	void WarnUnknownCurveFields(const TSharedPtr<FJsonObject>& RootObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	void WarnUnknownCurveFields(const TSharedPtr<FJsonObject>& RootObj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		UeAgentJsonDiagnostics::WarnUnknownFields(
 			RootObj,
-			Path,
+			Path.IsEmpty() ? TEXT("/") : Path,
 			{
 				TEXT("schema"),
 				TEXT("format_version"),
@@ -498,6 +598,7 @@ namespace UeAgentCurveJson
 				TEXT("storage"),
 				TEXT("carrier_cpp_type"),
 				TEXT("time_domain"),
+				TEXT("interp_mode"),
 				TEXT("pre_infinity_extrap"),
 				TEXT("post_infinity_extrap"),
 				TEXT("channels"),
@@ -513,7 +614,7 @@ namespace UeAgentCurveJson
 		TSharedPtr<FJsonObject> TimeDomainObj;
 		if (TryGetObjectField(RootObj, TEXT("time_domain"), TimeDomainObj))
 		{
-			UeAgentJsonDiagnostics::WarnUnknownFields(TimeDomainObj, Path + TEXT(".time_domain"), { TEXT("unit") }, Issues);
+			UeAgentJsonDiagnostics::WarnUnknownFields(TimeDomainObj, Path + TEXT("/time_domain"), { TEXT("unit") }, Issues);
 		}
 
 		TSharedPtr<FJsonObject> ChannelsObj;
@@ -521,7 +622,7 @@ namespace UeAgentCurveJson
 		{
 			UeAgentJsonDiagnostics::WarnUnknownFields(
 				ChannelsObj,
-				Path + TEXT(".channels"),
+				Path + TEXT("/channels"),
 				{ TEXT("value"), TEXT("x"), TEXT("y"), TEXT("z"), TEXT("r"), TEXT("g"), TEXT("b"), TEXT("a") },
 				Issues);
 			const TArray<FString> ChannelNames = { TEXT("value"), TEXT("x"), TEXT("y"), TEXT("z"), TEXT("r"), TEXT("g"), TEXT("b"), TEXT("a") };
@@ -530,7 +631,7 @@ namespace UeAgentCurveJson
 				TSharedPtr<FJsonObject> ChannelObj;
 				if (TryGetObjectField(ChannelsObj, ChannelName, ChannelObj))
 				{
-					WarnUnknownChannelFields(ChannelObj, Path + TEXT(".channels.") + ChannelName, Issues);
+					WarnUnknownChannelFields(ChannelObj, Path + TEXT("/channels/") + UE::Json::FJsonPointer::EscapePart(ChannelName), Issues);
 				}
 			}
 		}
@@ -540,7 +641,7 @@ namespace UeAgentCurveJson
 		{
 			for (int32 RowIndex = 0; RowIndex < Rows->Num(); ++RowIndex)
 			{
-				const FString RowPath = FString::Printf(TEXT("%s.rows[%d]"), *Path, RowIndex);
+				const FString RowPath = FString::Printf(TEXT("%s/rows/%d"), *Path, RowIndex);
 				TSharedPtr<FJsonObject> RowObj;
 				if (UeAgentJsonDiagnostics::ReadObjectFromValue((*Rows)[RowIndex], RowPath, RowObj, Issues))
 				{
@@ -548,7 +649,7 @@ namespace UeAgentCurveJson
 					TSharedPtr<FJsonObject> RowCurveObj;
 					if (TryGetObjectField(RowObj, TEXT("curve"), RowCurveObj))
 					{
-						WarnUnknownCurveFields(RowCurveObj, RowPath + TEXT(".curve"), Issues);
+						WarnUnknownCurveFields(RowCurveObj, RowPath + TEXT("/curve"), Issues);
 					}
 				}
 			}
@@ -557,17 +658,17 @@ namespace UeAgentCurveJson
 		TSharedPtr<FJsonObject> RefObj;
 		if (TryGetObjectField(RootObj, TEXT("asset_reference"), RefObj))
 		{
-			UeAgentJsonDiagnostics::WarnUnknownFields(RefObj, Path + TEXT(".asset_reference"), { TEXT("asset_path"), TEXT("object_path"), TEXT("asset_class"), TEXT("required") }, Issues);
+			UeAgentJsonDiagnostics::WarnUnknownFields(RefObj, Path + TEXT("/asset_reference"), { TEXT("asset_path"), TEXT("object_path"), TEXT("asset_class"), TEXT("required") }, Issues);
 		}
 
 		TSharedPtr<FJsonObject> TableObj;
 		if (TryGetObjectField(RootObj, TEXT("curve_table"), TableObj))
 		{
-			UeAgentJsonDiagnostics::WarnUnknownFields(TableObj, Path + TEXT(".curve_table"), { TEXT("asset_path"), TEXT("object_path"), TEXT("row_name"), TEXT("row_type") }, Issues);
+			UeAgentJsonDiagnostics::WarnUnknownFields(TableObj, Path + TEXT("/curve_table"), { TEXT("asset_path"), TEXT("object_path"), TEXT("row_name"), TEXT("row_type") }, Issues);
 		}
 	}
 
-	static bool ReadChannelObject(const TSharedPtr<FJsonObject>& RootObj, const FString& ChannelName, const FString& Path, TSharedPtr<FJsonObject>& OutChannelObj, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static bool ReadChannelObject(const TSharedPtr<FJsonObject>& RootObj, const FString& ChannelName, const FString& Path, TSharedPtr<FJsonObject>& OutChannelObj, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		TSharedPtr<FJsonObject> ChannelsObj;
 		if (TryGetObjectField(RootObj, TEXT("channels"), ChannelsObj))
@@ -576,7 +677,7 @@ namespace UeAgentCurveJson
 			{
 				return true;
 			}
-			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_channel_missing"), Path + TEXT(".channels.") + ChannelName, FString::Printf(TEXT("Curve channel '%s' is missing."), *ChannelName));
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_channel_missing"), Path + TEXT("/channels/") + UE::Json::FJsonPointer::EscapePart(ChannelName), FString::Printf(TEXT("Curve channel '%s' is missing."), *ChannelName));
 			return false;
 		}
 
@@ -588,75 +689,122 @@ namespace UeAgentCurveJson
 			return true;
 		}
 
-		AddCurveIssue(Issues, TEXT("error"), TEXT("curve_channel_missing"), Path + TEXT(".channels"), TEXT("Curve JSON must contain a channels object."));
+		AddCurveIssue(Issues, TEXT("error"), TEXT("curve_channel_missing"), Path + TEXT("/channels"), TEXT("Curve JSON must contain a channels object."));
 		return false;
 	}
 
-	static bool ReadKeyObject(const TSharedPtr<FJsonObject>& KeyObj, const FString& Path, FRichCurveKey& OutKey, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static bool ReadKeyCoordinates(const TSharedPtr<FJsonObject>& KeyObj, const FString& Path,
+		float& OutTime, float& OutValue, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
-		double Time = 0.0;
-		if (!TryGetNumberFieldAny(KeyObj, { TEXT("time"), TEXT("time_seconds") }, Time))
+		const bool bTime = KeyObj->HasField(TEXT("time"));
+		const bool bSeconds = KeyObj->HasField(TEXT("time_seconds"));
+		if (!bTime && !bSeconds)
 		{
-			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_key_time_missing"), Path + TEXT(".time"), TEXT("Curve key must contain numeric time or time_seconds."), TEXT("number"), TEXT("missing_or_wrong_type"));
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_key_time_missing"), Path + TEXT("/time"), TEXT("Curve key must contain numeric time or time_seconds."), TEXT("number"), TEXT("missing_or_wrong_type"));
+			return false;
+		}
+		float Time = 0.f, Seconds = 0.f;
+		UE::UAI::Contract::FDiagnostic Error;
+		for (const TCHAR* Field : {TEXT("time"), TEXT("time_seconds")})
+		{
+			if (!UeAgentAuthoringJsonFields::ReadFloat32Field(*KeyObj, Field,
+				FCString::Strcmp(Field, TEXT("time")) == 0 ? Time : Seconds, Error))
+			{
+				UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, Path);
+				Issues.Add(MoveTemp(Error));
+				return false;
+			}
+		}
+		if (bTime && bSeconds && Time != Seconds)
+		{
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_key_time_conflict"), Path + TEXT("/time_seconds"),
+				TEXT("time and time_seconds describe the same native coordinate and must agree."));
 			return false;
 		}
 		double Value = 0.0;
-		if (!KeyObj.IsValid() || !KeyObj->TryGetNumberField(TEXT("value"), Value))
+		if (!KeyObj.IsValid() || !KeyObj->HasTypedField<EJson::Number>(TEXT("value")) || !KeyObj->TryGetNumberField(TEXT("value"), Value))
 		{
-			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_key_value_type_mismatch"), Path + TEXT(".value"), TEXT("Curve key must contain numeric value."), TEXT("number"), TEXT("missing_or_wrong_type"));
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_key_value_type_mismatch"), Path + TEXT("/value"), TEXT("Curve key must contain numeric value."), TEXT("number"), TEXT("missing_or_wrong_type"));
 			return false;
 		}
 
-		OutKey = FRichCurveKey(static_cast<float>(Time), static_cast<float>(Value));
-		FString InterpText;
-		if (KeyObj->TryGetStringField(TEXT("interp_mode"), InterpText))
+		OutTime = bTime ? Time : Seconds;
+		OutValue = static_cast<float>(Value);
+		if (!FMath::IsFinite(OutTime) || !FMath::IsFinite(OutValue))
 		{
-			ERichCurveInterpMode ParsedInterpMode = RCIM_Linear;
-			if (ParseInterpMode(InterpText, ParsedInterpMode))
-			{
-				OutKey.InterpMode = ParsedInterpMode;
-			}
-			else
-			{
-				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_interp_mode_invalid"), Path + TEXT(".interp_mode"), FString::Printf(TEXT("Invalid interp_mode '%s'."), *InterpText));
-			}
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_key_value_not_finite"), Path, TEXT("Curve coordinates must be finite native floats."));
+			return false;
 		}
-		FString TangentText;
-		if (KeyObj->TryGetStringField(TEXT("tangent_mode"), TangentText))
-		{
-			ERichCurveTangentMode ParsedTangentMode = RCTM_Auto;
-			if (ParseTangentMode(TangentText, ParsedTangentMode))
-			{
-				OutKey.TangentMode = ParsedTangentMode;
-			}
-			else
-			{
-				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_tangent_mode_invalid"), Path + TEXT(".tangent_mode"), FString::Printf(TEXT("Invalid tangent_mode '%s'."), *TangentText));
-			}
-		}
-		FString TangentWeightText;
-		if (KeyObj->TryGetStringField(TEXT("tangent_weight_mode"), TangentWeightText))
-		{
-			ERichCurveTangentWeightMode ParsedWeightMode = RCTWM_WeightedNone;
-			if (ParseTangentWeightMode(TangentWeightText, ParsedWeightMode))
-			{
-				OutKey.TangentWeightMode = ParsedWeightMode;
-			}
-			else
-			{
-				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_tangent_weight_mode_invalid"), Path + TEXT(".tangent_weight_mode"), FString::Printf(TEXT("Invalid tangent_weight_mode '%s'."), *TangentWeightText));
-			}
-		}
-
-		double NumberValue = 0.0;
-		if (KeyObj->TryGetNumberField(TEXT("arrive_tangent"), NumberValue)) OutKey.ArriveTangent = static_cast<float>(NumberValue);
-		if (KeyObj->TryGetNumberField(TEXT("leave_tangent"), NumberValue)) OutKey.LeaveTangent = static_cast<float>(NumberValue);
-		if (KeyObj->TryGetNumberField(TEXT("arrive_tangent_weight"), NumberValue)) OutKey.ArriveTangentWeight = static_cast<float>(NumberValue);
-		if (KeyObj->TryGetNumberField(TEXT("leave_tangent_weight"), NumberValue)) OutKey.LeaveTangentWeight = static_cast<float>(NumberValue);
-		return !HasError(Issues);
+		return true;
 	}
 
-	bool ApplyChannelJsonToRichCurve(const TSharedPtr<FJsonObject>& RootObj, const FString& ChannelName, FRichCurve& OutCurve, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static bool ReadKeyObject(const TSharedPtr<FJsonObject>& KeyObj, const FString& Path,
+		FSimpleCurveKey& OutKey, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+	{
+		if (!ValidateKeyFields(KeyObj, {{TEXT("time"), EJson::Number}, {TEXT("time_seconds"), EJson::Number},
+			{TEXT("value"), EJson::Number}, {TEXT("key_index"), EJson::Number}}, Path, Issues)) return false;
+		return ReadKeyCoordinates(KeyObj, Path, OutKey.Time, OutKey.Value, Issues);
+	}
+
+	template <typename EnumType, typename Parser>
+	static bool ReadOptionalKeyEnum(const TSharedPtr<FJsonObject>& Object, const FString& Field,
+		const FString& Path, TEnumAsByte<EnumType>& Value, Parser Parse, const FString& InvalidCode,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+	{
+		if (!Object->HasField(Field)) return true;
+		FString Text;
+		EnumType Parsed;
+		if (!Object->HasTypedField<EJson::String>(Field) || !Object->TryGetStringField(Field, Text))
+		{
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_field_type_mismatch"), Path + TEXT("/") + UE::Json::FJsonPointer::EscapePart(Field), TEXT("Curve key enum must be a string."));
+			return false;
+		}
+		if (!Parse(Text, Parsed))
+		{
+			AddCurveIssue(Issues, TEXT("error"), InvalidCode, Path + TEXT("/") + UE::Json::FJsonPointer::EscapePart(Field),
+				FString::Printf(TEXT("Curve key field '%s' has an unsupported value."), *Field), TEXT("declared ") + Field + TEXT(" value"), Text);
+			return false;
+		}
+		Value = Parsed;
+		return true;
+	}
+
+	static bool ReadOptionalKeyFloat(const TSharedPtr<FJsonObject>& Object, const FString& Field,
+		const FString& Path, float& Value, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+	{
+		if (!Object->HasField(Field)) return true;
+		double Number = 0;
+		if (!Object->HasTypedField<EJson::Number>(Field) || !Object->TryGetNumberField(Field, Number)
+			|| !FMath::IsFinite(static_cast<float>(Number)))
+		{
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_field_type_mismatch"), Path + TEXT("/") + UE::Json::FJsonPointer::EscapePart(Field), TEXT("Curve key tangent must be a finite native float."));
+			return false;
+		}
+		Value = static_cast<float>(Number);
+		return true;
+	}
+
+	static bool ReadKeyObject(const TSharedPtr<FJsonObject>& KeyObj, const FString& Path, FRichCurveKey& OutKey, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+	{
+		if (!ValidateKeyFields(KeyObj, {{TEXT("time"), EJson::Number}, {TEXT("time_seconds"), EJson::Number},
+			{TEXT("value"), EJson::Number}, {TEXT("key_index"), EJson::Number},
+			{TEXT("interp_mode"), EJson::String}, {TEXT("tangent_mode"), EJson::String},
+			{TEXT("tangent_weight_mode"), EJson::String}, {TEXT("arrive_tangent"), EJson::Number},
+			{TEXT("leave_tangent"), EJson::Number}, {TEXT("arrive_tangent_weight"), EJson::Number},
+			{TEXT("leave_tangent_weight"), EJson::Number}}, Path, Issues)) return false;
+		float Time = 0, Value = 0;
+		if (!ReadKeyCoordinates(KeyObj, Path, Time, Value, Issues)) return false;
+		OutKey = FRichCurveKey(Time, Value);
+		return ReadOptionalKeyEnum(KeyObj, TEXT("interp_mode"), Path, OutKey.InterpMode, &ParseInterpMode, TEXT("curve_interp_mode_invalid"), Issues)
+			&& ReadOptionalKeyEnum(KeyObj, TEXT("tangent_mode"), Path, OutKey.TangentMode, &ParseTangentMode, TEXT("curve_tangent_mode_invalid"), Issues)
+			&& ReadOptionalKeyEnum(KeyObj, TEXT("tangent_weight_mode"), Path, OutKey.TangentWeightMode, &ParseTangentWeightMode, TEXT("curve_tangent_weight_mode_invalid"), Issues)
+			&& ReadOptionalKeyFloat(KeyObj, TEXT("arrive_tangent"), Path, OutKey.ArriveTangent, Issues)
+			&& ReadOptionalKeyFloat(KeyObj, TEXT("leave_tangent"), Path, OutKey.LeaveTangent, Issues)
+			&& ReadOptionalKeyFloat(KeyObj, TEXT("arrive_tangent_weight"), Path, OutKey.ArriveTangentWeight, Issues)
+			&& ReadOptionalKeyFloat(KeyObj, TEXT("leave_tangent_weight"), Path, OutKey.LeaveTangentWeight, Issues);
+	}
+	template <typename CurveType, typename KeyType>
+	static bool ApplyChannelJson(const TSharedPtr<FJsonObject>& RootObj, const FString& ChannelName, CurveType& OutCurve, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		TSharedPtr<FJsonObject> ChannelObj;
 		if (!ReadChannelObject(RootObj, ChannelName, Path, ChannelObj, Issues))
@@ -664,41 +812,38 @@ namespace UeAgentCurveJson
 			return false;
 		}
 
-		TArray<FRichCurveKey> NewKeys;
+		TArray<KeyType> NewKeys;
+		const FString KeysPath = RootObj->HasTypedField<EJson::Object>(TEXT("channels"))
+			? Path + TEXT("/channels/") + UE::Json::FJsonPointer::EscapePart(ChannelName) + TEXT("/keys")
+			: Path + TEXT("/keys");
 		const TArray<TSharedPtr<FJsonValue>>* KeyValues = nullptr;
 		if (!ChannelObj->TryGetArrayField(TEXT("keys"), KeyValues) || !KeyValues)
 		{
-			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_missing_required_field"), Path + TEXT(".channels.") + ChannelName + TEXT(".keys"), TEXT("Curve channel must contain keys array."), TEXT("array"), TEXT("missing_or_wrong_type"));
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_missing_required_field"), KeysPath, TEXT("Curve channel must contain keys array."), TEXT("array"), TEXT("missing_or_wrong_type"));
 			return false;
 		}
 
 		float PreviousTime = -MAX_flt;
 		for (int32 KeyIndex = 0; KeyIndex < KeyValues->Num(); ++KeyIndex)
 		{
-			const FString KeyPath = FString::Printf(TEXT("%s.channels.%s.keys[%d]"), *Path, *ChannelName, KeyIndex);
+			const FString KeyPath = FString::Printf(TEXT("%s/%d"), *KeysPath, KeyIndex);
 			TSharedPtr<FJsonObject> KeyObj;
 			if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*KeyValues)[KeyIndex], KeyPath, KeyObj, Issues))
 			{
 				continue;
 			}
 
-			FRichCurveKey NewKey;
+			KeyType NewKey;
 			if (!ReadKeyObject(KeyObj, KeyPath, NewKey, Issues))
 			{
 				continue;
 			}
 
-			if (NewKey.Time + KeyTimeTolerance < PreviousTime)
+			if (NewKey.Time < PreviousTime)
 			{
-				AddCurveIssue(Issues, TEXT("warning"), TEXT("curve_key_time_not_monotonic"), KeyPath + TEXT(".time"), TEXT("Curve keys were not monotonic; keys will be sorted before apply."));
-			}
-			for (const FRichCurveKey& ExistingKey : NewKeys)
-			{
-				if (FMath::Abs(ExistingKey.Time - NewKey.Time) <= KeyTimeTolerance)
-				{
-					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_key_duplicate_time"), KeyPath + TEXT(".time"), FString::Printf(TEXT("Duplicate curve key time %.6f."), NewKey.Time));
-					break;
-				}
+				AddCurveIssue(Issues, TEXT("warning"), TEXT("curve_key_time_not_monotonic"),
+					KeyPath + (KeyObj->HasField(TEXT("time")) ? TEXT("/time") : TEXT("/time_seconds")),
+					TEXT("Curve keys were not monotonic; keys will be sorted before apply."));
 			}
 			PreviousTime = NewKey.Time;
 			NewKeys.Add(NewKey);
@@ -709,25 +854,43 @@ namespace UeAgentCurveJson
 			return false;
 		}
 
-		NewKeys.Sort([](const FRichCurveKey& A, const FRichCurveKey& B) { return A.Time < B.Time; });
-		FRichCurve NewCurve = OutCurve;
+		// SetKeys preserves distinct near-neighbour keys, including equal-time
+		// keys. Keep their authored order instead of imposing an import tolerance.
+		NewKeys.StableSort([](const KeyType& A, const KeyType& B) { return A.Time < B.Time; });
+		CurveType NewCurve = OutCurve;
 		NewCurve.SetKeys(NewKeys);
 
 		TSharedPtr<FJsonObject> DefaultObj;
+		if (ChannelObj->HasField(TEXT("default_value")) && !TryGetObjectField(ChannelObj, TEXT("default_value"), DefaultObj))
+		{
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_field_type_mismatch"), Path + TEXT("/channels/") + UE::Json::FJsonPointer::EscapePart(ChannelName) + TEXT("/default_value"), TEXT("Curve default value must be an object."));
+			return false;
+		}
 		if (TryGetObjectField(ChannelObj, TEXT("default_value"), DefaultObj))
 		{
 			bool bDefaultEnabled = false;
-			DefaultObj->TryGetBoolField(TEXT("enabled"), bDefaultEnabled);
+			if (!DefaultObj->HasTypedField<EJson::Boolean>(TEXT("enabled")) || !DefaultObj->TryGetBoolField(TEXT("enabled"), bDefaultEnabled))
+			{
+				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_field_type_mismatch"), Path + TEXT("/channels/") + UE::Json::FJsonPointer::EscapePart(ChannelName) + TEXT("/default_value/enabled"), TEXT("Curve default enabled must be boolean."));
+				return false;
+			}
 			if (bDefaultEnabled)
 			{
 				double DefaultValue = 0.0;
-				if (DefaultObj->TryGetNumberField(TEXT("value"), DefaultValue))
+				if (DefaultObj->HasTypedField<EJson::Number>(TEXT("value"))
+					&& DefaultObj->TryGetNumberField(TEXT("value"), DefaultValue)
+					&& FMath::IsFinite(static_cast<float>(DefaultValue)))
 				{
+					if (static_cast<float>(DefaultValue) == MAX_flt)
+					{
+						AddCurveIssue(Issues, TEXT("error"), TEXT("curve_default_value_unrepresentable"), Path + TEXT("/channels/") + UE::Json::FJsonPointer::EscapePart(ChannelName) + TEXT("/default_value/value"), TEXT("Enabled default cannot equal the native unset sentinel."));
+						return false;
+					}
 					NewCurve.SetDefaultValue(static_cast<float>(DefaultValue));
 				}
 				else
 				{
-					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_field_type_mismatch"), Path + TEXT(".channels.") + ChannelName + TEXT(".default_value.value"), TEXT("Enabled curve default value must be numeric."), TEXT("number"), TEXT("missing_or_wrong_type"));
+					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_field_type_mismatch"), Path + TEXT("/channels/") + UE::Json::FJsonPointer::EscapePart(ChannelName) + TEXT("/default_value/value"), TEXT("Enabled curve default value must be numeric."), TEXT("number"), TEXT("missing_or_wrong_type"));
 				}
 			}
 			else
@@ -736,30 +899,40 @@ namespace UeAgentCurveJson
 			}
 		}
 
-		FString ExtrapText;
-		if (RootObj->TryGetStringField(TEXT("pre_infinity_extrap"), ExtrapText))
+		for (const FString Field : {FString(TEXT("pre_infinity_extrap")), FString(TEXT("post_infinity_extrap"))})
 		{
-			ERichCurveExtrapolation Parsed = RCCE_Constant;
-			if (ParseExtrapMode(ExtrapText, Parsed))
+			const bool bRoot = RootObj->HasField(Field), bChannel = ChannelObj->HasField(Field);
+			if (!bRoot && !bChannel) continue;
+			FString RootText, ChannelText;
+			ERichCurveExtrapolation RootMode = RCCE_Constant, ChannelMode = RCCE_Constant;
+			auto ReadExtrapolation = [&](const TSharedPtr<FJsonObject>& Object, const FString& FieldPath,
+				FString& Text, ERichCurveExtrapolation& Mode)
 			{
-				NewCurve.PreInfinityExtrap = Parsed;
-			}
-			else
+				if (!Object->TryGetStringField(Field, Text))
+				{
+					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_field_type_mismatch"), FieldPath,
+						TEXT("Curve extrapolation must be a string."), TEXT("string"), UeAgentJsonDiagnostics::JsonValueTypeToString(Object->TryGetField(Field)));
+					return false;
+				}
+				if (!ParseExtrapMode(Text, Mode))
+				{
+					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_interp_mode_invalid"), FieldPath,
+						TEXT("Invalid curve extrapolation."), TEXT("curve extrapolation mode"), Text);
+					return false;
+				}
+				return true;
+			};
+			if ((bRoot && !ReadExtrapolation(RootObj, Path + TEXT("/") + UE::Json::FJsonPointer::EscapePart(Field), RootText, RootMode))
+				|| (bChannel && !ReadExtrapolation(ChannelObj, Path + TEXT("/channels/") + UE::Json::FJsonPointer::EscapePart(ChannelName)
+					+ TEXT("/") + UE::Json::FJsonPointer::EscapePart(Field), ChannelText, ChannelMode))) return false;
+			if (bRoot && bChannel && RootMode != ChannelMode)
 			{
-				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_interp_mode_invalid"), Path + TEXT(".pre_infinity_extrap"), FString::Printf(TEXT("Invalid pre_infinity_extrap '%s'."), *ExtrapText));
+				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_extrapolation_conflict"), Path + TEXT("/channels/") + UE::Json::FJsonPointer::EscapePart(ChannelName) + TEXT("/") + UE::Json::FJsonPointer::EscapePart(Field), TEXT("Root and channel extrapolation disagree."));
+				return false;
 			}
-		}
-		if (RootObj->TryGetStringField(TEXT("post_infinity_extrap"), ExtrapText))
-		{
-			ERichCurveExtrapolation Parsed = RCCE_Constant;
-			if (ParseExtrapMode(ExtrapText, Parsed))
-			{
-				NewCurve.PostInfinityExtrap = Parsed;
-			}
-			else
-			{
-				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_interp_mode_invalid"), Path + TEXT(".post_infinity_extrap"), FString::Printf(TEXT("Invalid post_infinity_extrap '%s'."), *ExtrapText));
-			}
+			const ERichCurveExtrapolation Mode = bChannel ? ChannelMode : RootMode;
+			if (Field == TEXT("pre_infinity_extrap")) NewCurve.PreInfinityExtrap = Mode;
+			else NewCurve.PostInfinityExtrap = Mode;
 		}
 
 		if (HasError(Issues))
@@ -767,25 +940,71 @@ namespace UeAgentCurveJson
 			return false;
 		}
 
-		NewCurve.AutoSetTangents();
 		OutCurve = NewCurve;
 		return true;
 	}
 
-	TSharedPtr<FJsonObject> BuildCurveAssetJson(UObject* Asset)
+	bool ApplyChannelJsonToRichCurve(const TSharedPtr<FJsonObject>& RootObj, const FString& ChannelName,
+		FRichCurve& OutCurve, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+	{
+		if (!ApplyChannelJson<FRichCurve, FRichCurveKey>(RootObj, ChannelName, OutCurve, Path, Issues)) return false;
+		OutCurve.AutoSetTangents();
+		return true;
+	}
+
+	bool ApplyChannelJsonToSimpleCurve(const TSharedPtr<FJsonObject>& RootObj, const FString& ChannelName,
+		FSimpleCurve& OutCurve, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+	{
+		FSimpleCurve Proposed = OutCurve;
+		if (RootObj.IsValid() && RootObj->HasField(TEXT("interp_mode")))
+		{
+			FString Text;
+			ERichCurveInterpMode Mode;
+			if (!RootObj->HasTypedField<EJson::String>(TEXT("interp_mode")) || !RootObj->TryGetStringField(TEXT("interp_mode"), Text) || !ParseInterpMode(Text, Mode) || Mode == RCIM_Cubic)
+			{
+				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_simple_interp_mode_invalid"), Path + TEXT("/interp_mode"), TEXT("Simple curves require a non-cubic interpolation mode."));
+				return false;
+			}
+			Proposed.SetKeyInterpMode(Mode);
+		}
+		if (!ApplyChannelJson<FSimpleCurve, FSimpleCurveKey>(RootObj, ChannelName, Proposed, Path, Issues)) return false;
+		OutCurve = MoveTemp(Proposed);
+		return true;
+	}
+	static bool PrepareAssetCurveChannels(const FAssetCurveContract& Contract,
+		const TSharedPtr<FJsonObject>& Root, TArray<FRichCurve>& Curves,
+		const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+	{
+		if (!Root.IsValid()) { AddCurveIssue(Issues, TEXT("error"), TEXT("curve_json_parse_failed"), Path, TEXT("Curve JSON object is invalid.")); return false; }
+		FString Kind;
+		if (Root->HasField(TEXT("curve_kind")) && (!Root->TryGetStringField(TEXT("curve_kind"), Kind) || Kind != Contract.CurveKind))
+		{ AddCurveIssue(Issues, TEXT("error"), TEXT("curve_kind_mismatch"), Path + TEXT("/curve_kind"), TEXT("Curve kind must match the native asset."), Contract.CurveKind, Kind); return false; }
+		if (Curves.Num() != Contract.Channels.Num()) return false;
+		bool bOk = true;
+		for (int32 Index = 0; Index < Curves.Num(); ++Index)
+			bOk &= ApplyChannelJsonToRichCurve(Root, Contract.Channels[Index], Curves[Index], Path, Issues);
+		return bOk && !HasError(Issues);
+	}
+	bool ValidateCurveAssetJson(const FAssetCurveContract& Contract, const TSharedPtr<FJsonObject>& Value,
+		const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+	{
+		TArray<FRichCurve> Curves; Curves.SetNum(Contract.Channels.Num());
+		return PrepareAssetCurveChannels(Contract, Value, Curves, Path, Issues);
+	}
+	TSharedPtr<FJsonObject> BuildCurveAssetJson(UObject* Asset, const bool bAuthoring)
 	{
 		TSharedPtr<FJsonObject> Root;
-		if (UCurveFloat* CurveFloat = Cast<UCurveFloat>(Asset))
+		if (const auto* Contract = FindAssetCurveContract(Asset))
 		{
-			Root = BuildFloatCurveJson(CurveFloat->FloatCurve, TEXT("curve_asset"), TEXT("UCurveFloat"));
-		}
-		else if (UCurveVector* CurveVector = Cast<UCurveVector>(Asset))
-		{
-			Root = BuildVectorCurveJson(CurveVector->FloatCurves, TEXT("vector"), TEXT("curve_asset"), TEXT("UCurveVector"));
-		}
-		else if (UCurveLinearColor* CurveColor = Cast<UCurveLinearColor>(Asset))
-		{
-			Root = BuildLinearColorCurveJson(CurveColor->FloatCurves, TEXT("curve_asset"), TEXT("UCurveLinearColor"));
+			const auto Native = CastChecked<UCurveBase>(Asset)->GetCurves();
+			if (Native.Num() != Contract->Channels.Num()) return nullptr;
+			TArray<FRichCurve> Curves;
+			// The registered native asset classes expose FRichCurve storage through FRealCurve pointers.
+			for (const auto& Entry : Native) { if (!Entry.CurveToEdit) return nullptr; Curves.Add(*static_cast<const FRichCurve*>(Entry.CurveToEdit)); }
+			const FString Carrier = TEXT("U") + Contract->ValueType;
+			Root = Curves.Num() == 1
+				? BuildFloatCurveJson(Curves[0], TEXT("curve_asset"), Carrier, bAuthoring, bAuthoring ? FString() : TEXT("seconds"))
+				: BuildMultiChannelCurveJson(Curves.GetData(), Contract->Channels, Contract->CurveKind, TEXT("curve_asset"), Carrier, bAuthoring);
 		}
 		else if (UCurveTable* CurveTable = Cast<UCurveTable>(Asset))
 		{
@@ -800,21 +1019,16 @@ namespace UeAgentCurveJson
 					{
 						continue;
 					}
-					FRichCurve RichCurveProxy;
-					for (const FSimpleCurveKey& Key : Pair.Value->GetConstRefOfKeys())
-					{
-						RichCurveProxy.AddKey(Key.Time, Key.Value);
-					}
 					TSharedPtr<FJsonObject> RowObj = MakeShared<FJsonObject>();
 					RowObj->SetStringField(TEXT("row_name"), Pair.Key.ToString());
 					RowObj->SetStringField(TEXT("row_type"), TEXT("SimpleCurve"));
-					RowObj->SetObjectField(TEXT("curve"), BuildFloatCurveJson(RichCurveProxy, TEXT("curve_table_row"), TEXT("FSimpleCurve")));
+					RowObj->SetObjectField(TEXT("curve"), BuildSimpleCurveJson(*Pair.Value, TEXT("curve_table_row"), TEXT("FSimpleCurve"), false, {}));
 					RowsJson.Add(MakeShared<FJsonValueObject>(RowObj));
 				}
 			}
 			else
 			{
-				Root->SetStringField(TEXT("table_curve_mode"), TEXT("rich"));
+				Root->SetStringField(TEXT("table_curve_mode"), CurveTable->GetCurveTableMode() == ECurveTableMode::Empty ? TEXT("empty") : TEXT("rich"));
 				for (const TPair<FName, FRichCurve*>& Pair : CurveTable->GetRichCurveRowMap())
 				{
 					if (!Pair.Value)
@@ -824,7 +1038,7 @@ namespace UeAgentCurveJson
 					TSharedPtr<FJsonObject> RowObj = MakeShared<FJsonObject>();
 					RowObj->SetStringField(TEXT("row_name"), Pair.Key.ToString());
 					RowObj->SetStringField(TEXT("row_type"), TEXT("RichCurve"));
-					RowObj->SetObjectField(TEXT("curve"), BuildFloatCurveJson(*Pair.Value, TEXT("curve_table_row"), TEXT("FRichCurve")));
+					RowObj->SetObjectField(TEXT("curve"), BuildFloatCurveJson(*Pair.Value, TEXT("curve_table_row"), TEXT("FRichCurve"), false, {}));
 					RowsJson.Add(MakeShared<FJsonValueObject>(RowObj));
 				}
 			}
@@ -832,7 +1046,7 @@ namespace UeAgentCurveJson
 			Root->SetNumberField(TEXT("row_count"), RowsJson.Num());
 		}
 
-		if (Root.IsValid() && Asset)
+		if (Root.IsValid() && Asset && !bAuthoring)
 		{
 			Root->SetStringField(TEXT("asset_path"), NormalizeAssetPath(Asset->GetOutermost()->GetName()));
 			Root->SetStringField(TEXT("object_path"), Asset->GetPathName());
@@ -841,7 +1055,7 @@ namespace UeAgentCurveJson
 		return Root;
 	}
 
-	bool ApplyCurveAssetJson(UObject* Asset, const TSharedPtr<FJsonObject>& RootObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	bool ApplyCurveAssetJson(UObject* Asset, const TSharedPtr<FJsonObject>& RootObj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!Asset)
 		{
@@ -855,51 +1069,36 @@ namespace UeAgentCurveJson
 		}
 		WarnUnknownCurveFields(RootObj, Path, Issues);
 
-		if (UCurveFloat* CurveFloat = Cast<UCurveFloat>(Asset))
+		if (const auto* Contract = FindAssetCurveContract(Asset))
 		{
-			return ApplyChannelJsonToRichCurve(RootObj, TEXT("value"), CurveFloat->FloatCurve, Path, Issues);
-		}
-		if (UCurveVector* CurveVector = Cast<UCurveVector>(Asset))
-		{
-			FRichCurve TempCurves[3] = {
-				CurveVector->FloatCurves[0],
-				CurveVector->FloatCurves[1],
-				CurveVector->FloatCurves[2]
-			};
-			bool bOk = true;
-			bOk &= ApplyChannelJsonToRichCurve(RootObj, TEXT("x"), TempCurves[0], Path, Issues);
-			bOk &= ApplyChannelJsonToRichCurve(RootObj, TEXT("y"), TempCurves[1], Path, Issues);
-			bOk &= ApplyChannelJsonToRichCurve(RootObj, TEXT("z"), TempCurves[2], Path, Issues);
-			if (!bOk || HasError(Issues))
+			const auto Native = CastChecked<UCurveBase>(Asset)->GetCurves();
+			if (Native.Num() != Contract->Channels.Num())
 			{
+				auto Issue = MakeCurveIssue(TEXT("error"), TEXT("curve_channel_count_mismatch"), Path,
+					TEXT("The native curve channel count differs from the asset contract."));
+				Issue.TargetPath = Asset->GetPathName();
+				Issue.ExpectedValue = MakeShared<FJsonValueNumber>(Contract->Channels.Num());
+				Issue.ActualValue = MakeShared<FJsonValueNumber>(Native.Num());
+				Issues.Add(MoveTemp(Issue));
 				return false;
 			}
-			CurveVector->FloatCurves[0] = TempCurves[0];
-			CurveVector->FloatCurves[1] = TempCurves[1];
-			CurveVector->FloatCurves[2] = TempCurves[2];
-			return true;
-		}
-		if (UCurveLinearColor* CurveColor = Cast<UCurveLinearColor>(Asset))
-		{
-			FRichCurve TempCurves[4] = {
-				CurveColor->FloatCurves[0],
-				CurveColor->FloatCurves[1],
-				CurveColor->FloatCurves[2],
-				CurveColor->FloatCurves[3]
-			};
-			bool bOk = true;
-			bOk &= ApplyChannelJsonToRichCurve(RootObj, TEXT("r"), TempCurves[0], Path, Issues);
-			bOk &= ApplyChannelJsonToRichCurve(RootObj, TEXT("g"), TempCurves[1], Path, Issues);
-			bOk &= ApplyChannelJsonToRichCurve(RootObj, TEXT("b"), TempCurves[2], Path, Issues);
-			bOk &= ApplyChannelJsonToRichCurve(RootObj, TEXT("a"), TempCurves[3], Path, Issues);
-			if (!bOk || HasError(Issues))
+			TArray<FRichCurve> Proposed;
+			for (int32 Index = 0; Index < Native.Num(); ++Index)
 			{
-				return false;
+				if (!Native[Index].CurveToEdit)
+				{
+					auto Issue = MakeCurveIssue(TEXT("error"), TEXT("curve_channel_unavailable"), Path,
+						TEXT("The native curve channel is unavailable for editing."));
+					Issue.TargetPath = Asset->GetPathName();
+					Issue.CandidateName = Contract->Channels[Index];
+					Issue.ActualValuePresent = false;
+					Issues.Add(MoveTemp(Issue));
+					return false;
+				}
+				Proposed.Add(*static_cast<const FRichCurve*>(Native[Index].CurveToEdit));
 			}
-			CurveColor->FloatCurves[0] = TempCurves[0];
-			CurveColor->FloatCurves[1] = TempCurves[1];
-			CurveColor->FloatCurves[2] = TempCurves[2];
-			CurveColor->FloatCurves[3] = TempCurves[3];
+			if (!PrepareAssetCurveChannels(*Contract, RootObj, Proposed, Path, Issues)) return false;
+			for (int32 Index = 0; Index < Native.Num(); ++Index) *static_cast<FRichCurve*>(Native[Index].CurveToEdit) = MoveTemp(Proposed[Index]);
 			return true;
 		}
 		if (UCurveTable* CurveTable = Cast<UCurveTable>(Asset))
@@ -907,7 +1106,7 @@ namespace UeAgentCurveJson
 			const TArray<TSharedPtr<FJsonValue>>* Rows = nullptr;
 			if (!RootObj->TryGetArrayField(TEXT("rows"), Rows) || !Rows)
 			{
-				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_missing_required_field"), Path + TEXT(".rows"), TEXT("Curve table JSON requires rows array."));
+				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_missing_required_field"), Path + TEXT("/rows"), TEXT("Curve table JSON requires rows array."));
 				return false;
 			}
 			struct FPendingRichCurveTableRow
@@ -918,56 +1117,66 @@ namespace UeAgentCurveJson
 			struct FPendingSimpleCurveTableRow
 			{
 				FName RowName;
-				TArray<FSimpleCurveKey> Keys;
+				FSimpleCurve Curve;
 			};
 			TArray<FPendingRichCurveTableRow> PendingRichRows;
 			TArray<FPendingSimpleCurveTableRow> PendingSimpleRows;
+			TSet<FName> RowNames;
 			for (int32 RowIndex = 0; RowIndex < Rows->Num(); ++RowIndex)
 			{
-				const FString RowPath = FString::Printf(TEXT("%s.rows[%d]"), *Path, RowIndex);
+				const FString RowPath = FString::Printf(TEXT("%s/rows/%d"), *Path, RowIndex);
 				TSharedPtr<FJsonObject> RowObj;
 				if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*Rows)[RowIndex], RowPath, RowObj, Issues))
 				{
 					continue;
 				}
 				FString RowNameText;
-				if (!UeAgentJsonDiagnostics::ReadStringField(RowObj, TEXT("row_name"), RowPath + TEXT(".row_name"), RowNameText, Issues, true) || RowNameText.TrimStartAndEnd().IsEmpty())
+				if (!UeAgentJsonDiagnostics::ReadStringField(RowObj, TEXT("row_name"), RowPath + TEXT("/row_name"), RowNameText, Issues, true) || RowNameText.TrimStartAndEnd().IsEmpty())
 				{
 					continue;
 				}
 				TSharedPtr<FJsonObject> RowCurveObj;
 				if (!TryGetObjectField(RowObj, TEXT("curve"), RowCurveObj))
 				{
-					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_missing_required_field"), RowPath + TEXT(".curve"), TEXT("Curve table row requires curve object."));
+					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_missing_required_field"), RowPath + TEXT("/curve"), TEXT("Curve table row requires curve object."));
 					continue;
 				}
 				FString RowType;
 				RowObj->TryGetStringField(TEXT("row_type"), RowType);
 				FString TableMode;
 				RootObj->TryGetStringField(TEXT("table_curve_mode"), TableMode);
+				const FName RowName(*RowNameText.TrimStartAndEnd());
+				if (RowName.IsNone() || RowNames.Contains(RowName)
+					|| (!RowType.IsEmpty() && !RowType.Equals(TEXT("SimpleCurve"), ESearchCase::IgnoreCase) && !RowType.Equals(TEXT("RichCurve"), ESearchCase::IgnoreCase))
+					|| (!TableMode.IsEmpty() && !TableMode.Equals(TEXT("simple"), ESearchCase::IgnoreCase) && !TableMode.Equals(TEXT("rich"), ESearchCase::IgnoreCase))
+					|| (!RowType.IsEmpty() && !TableMode.IsEmpty()
+						&& RowType.Equals(TEXT("SimpleCurve"), ESearchCase::IgnoreCase) != TableMode.Equals(TEXT("simple"), ESearchCase::IgnoreCase)))
+				{
+					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_table_row_mode_invalid"), RowPath, TEXT("Rows require unique names and a consistent table mode."));
+					continue;
+				}
+				RowNames.Add(RowName);
 				const bool bUseSimpleCurve = RowType.Equals(TEXT("SimpleCurve"), ESearchCase::IgnoreCase) || TableMode.Equals(TEXT("simple"), ESearchCase::IgnoreCase);
 				if (bUseSimpleCurve)
 				{
-					FRichCurve RichCurveProxy;
-					if (ApplyChannelJsonToRichCurve(RowCurveObj, TEXT("value"), RichCurveProxy, RowPath + TEXT(".curve"), Issues))
+					FSimpleCurve SimpleCurve;
+					if (ApplyChannelJsonToSimpleCurve(RowCurveObj, TEXT("value"), SimpleCurve, RowPath + TEXT("/curve"), Issues))
 					{
-						TArray<FSimpleCurveKey> SimpleKeys;
-						for (const FRichCurveKey& RichKey : RichCurveProxy.GetConstRefOfKeys())
-						{
-							SimpleKeys.Add(FSimpleCurveKey(RichKey.Time, RichKey.Value));
-						}
-						PendingSimpleRows.Add({ FName(*RowNameText.TrimStartAndEnd()), SimpleKeys });
+						PendingSimpleRows.Add({ RowName, SimpleCurve });
 					}
 				}
 				else
 				{
 					FRichCurve RichCurve;
-					if (ApplyChannelJsonToRichCurve(RowCurveObj, TEXT("value"), RichCurve, RowPath + TEXT(".curve"), Issues))
+					if (ApplyChannelJsonToRichCurve(RowCurveObj, TEXT("value"), RichCurve, RowPath + TEXT("/curve"), Issues))
 					{
 						PendingRichRows.Add({ FName(*RowNameText.TrimStartAndEnd()), RichCurve });
 					}
 				}
 			}
+			if ((!PendingSimpleRows.IsEmpty() && (!PendingRichRows.IsEmpty() || CurveTable->GetCurveTableMode() == ECurveTableMode::RichCurves))
+				|| (!PendingRichRows.IsEmpty() && CurveTable->GetCurveTableMode() == ECurveTableMode::SimpleCurves))
+				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_table_mixed_modes_unsupported"), Path, TEXT("A curve table cannot mix Simple and Rich storage."));
 			if (HasError(Issues))
 			{
 				return false;
@@ -975,7 +1184,7 @@ namespace UeAgentCurveJson
 			for (const FPendingSimpleCurveTableRow& PendingRow : PendingSimpleRows)
 			{
 				FSimpleCurve& RowCurve = CurveTable->AddSimpleCurve(PendingRow.RowName);
-				RowCurve.SetKeys(PendingRow.Keys);
+				RowCurve = PendingRow.Curve;
 			}
 			for (const FPendingRichCurveTableRow& PendingRow : PendingRichRows)
 			{
@@ -989,123 +1198,107 @@ namespace UeAgentCurveJson
 		return false;
 	}
 
-	bool TryBuildPropertyCurveJson(FProperty* Property, const void* ValuePtr, TSharedPtr<FJsonObject>& OutCurveJson)
+	bool TryBuildPropertyCurveJson(FProperty* Property, const void* ValuePtr, TSharedPtr<FJsonObject>& OutCurveJson, TSharedPtr<FJsonObject>* OutValueDefinition)
 	{
+		if (OutValueDefinition) OutValueDefinition->Reset();
 		OutCurveJson.Reset();
 		if (!Property || !ValuePtr)
 		{
 			return false;
 		}
 
-		if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
-		{
-			if (UObject* ObjectValue = ObjectProperty->GetObjectPropertyValue(ValuePtr))
-			{
-				if (ObjectValue->IsA<UCurveFloat>() || ObjectValue->IsA<UCurveVector>() || ObjectValue->IsA<UCurveLinearColor>() || ObjectValue->IsA<UCurveTable>())
-				{
-					OutCurveJson = BuildAssetReferenceJson(ObjectValue, Property->GetCPPType());
-					return true;
-				}
-			}
-			return ObjectProperty->PropertyClass && ObjectProperty->PropertyClass->IsChildOf(UCurveBase::StaticClass());
-		}
-
 		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
 		{
 			if (StructProperty->Struct == FRichCurve::StaticStruct())
 			{
-				OutCurveJson = BuildFloatCurveJson(*static_cast<const FRichCurve*>(ValuePtr), TEXT("rich_curve_property"), TEXT("FRichCurve"));
+				OutCurveJson = BuildFloatCurveJson(*static_cast<const FRichCurve*>(ValuePtr), {}, {}, true, {});
+				if (OutValueDefinition)
+				{
+					const auto Definition = MakeShared<FJsonObject>();
+					Definition->SetStringField(TEXT("type"), TEXT("RichCurve"));
+					Definition->SetObjectField(TEXT("contract"), BuildCurveValueDefinition(false));
+					*OutValueDefinition = Definition;
+				}
 				return true;
 			}
 			if (StructProperty->Struct == FSimpleCurve::StaticStruct())
 			{
 				const FSimpleCurve* SimpleCurve = static_cast<const FSimpleCurve*>(ValuePtr);
-				FRichCurve RichCurveProxy;
-				for (const FSimpleCurveKey& Key : SimpleCurve->GetConstRefOfKeys())
+				OutCurveJson = BuildSimpleCurveJson(*SimpleCurve, TEXT("simple_curve_property"), TEXT("FSimpleCurve"), true, {});
+				if (OutValueDefinition)
 				{
-					RichCurveProxy.AddKey(Key.Time, Key.Value);
+					const auto Definition = MakeShared<FJsonObject>();
+					Definition->SetStringField(TEXT("type"), TEXT("SimpleCurve"));
+					Definition->SetObjectField(TEXT("contract"), BuildCurveValueDefinition(true));
+					*OutValueDefinition = Definition;
 				}
-				OutCurveJson = BuildFloatCurveJson(RichCurveProxy, TEXT("simple_curve_property"), TEXT("FSimpleCurve"));
 				return true;
 			}
 			if (StructProperty->Struct == FRuntimeFloatCurve::StaticStruct())
 			{
 				const FRuntimeFloatCurve* RuntimeCurve = static_cast<const FRuntimeFloatCurve*>(ValuePtr);
+				if (OutValueDefinition) *OutValueDefinition = BuildRuntimeCurveValueDefinition(ERuntimeCurveKind::Float);
 				if (RuntimeCurve->ExternalCurve)
 				{
-					OutCurveJson = BuildAssetReferenceJson(RuntimeCurve->ExternalCurve, Property->GetCPPType());
+					OutCurveJson = BuildAssetReferenceJson(RuntimeCurve->ExternalCurve, Property->GetCPPType(), true);
 				}
 				else if (const FRichCurve* RichCurve = RuntimeCurve->GetRichCurveConst())
 				{
-					OutCurveJson = BuildFloatCurveJson(*RichCurve, TEXT("runtime_float_curve"), TEXT("FRuntimeFloatCurve"));
+					OutCurveJson = BuildFloatCurveJson(*RichCurve, TEXT("runtime_float_curve"), TEXT("FRuntimeFloatCurve"), true, {});
 				}
 				return OutCurveJson.IsValid();
 			}
 			if (StructProperty->Struct == FRuntimeVectorCurve::StaticStruct())
 			{
 				const FRuntimeVectorCurve* RuntimeCurve = static_cast<const FRuntimeVectorCurve*>(ValuePtr);
+				if (OutValueDefinition) *OutValueDefinition = BuildRuntimeCurveValueDefinition(ERuntimeCurveKind::Vector);
 				if (RuntimeCurve->ExternalCurve)
 				{
-					OutCurveJson = BuildAssetReferenceJson(RuntimeCurve->ExternalCurve, Property->GetCPPType());
+					OutCurveJson = BuildAssetReferenceJson(RuntimeCurve->ExternalCurve, Property->GetCPPType(), true);
 				}
 				else
 				{
-					OutCurveJson = BuildVectorCurveJson(RuntimeCurve->VectorCurves, TEXT("vector"), TEXT("runtime_vector_curve"), TEXT("FRuntimeVectorCurve"));
+					OutCurveJson = BuildMultiChannelCurveJson(RuntimeCurve->VectorCurves, {TEXT("x"), TEXT("y"), TEXT("z")}, TEXT("vector"), {}, {}, true);
 				}
 				return OutCurveJson.IsValid();
 			}
 			if (StructProperty->Struct == FRuntimeCurveLinearColor::StaticStruct())
 			{
 				const FRuntimeCurveLinearColor* RuntimeCurve = static_cast<const FRuntimeCurveLinearColor*>(ValuePtr);
+				if (OutValueDefinition) *OutValueDefinition = BuildRuntimeCurveValueDefinition(ERuntimeCurveKind::Color);
 				if (RuntimeCurve->ExternalCurve)
 				{
-					OutCurveJson = BuildAssetReferenceJson(RuntimeCurve->ExternalCurve, Property->GetCPPType());
+					OutCurveJson = BuildAssetReferenceJson(RuntimeCurve->ExternalCurve, Property->GetCPPType(), true);
 				}
 				else
 				{
-					OutCurveJson = BuildLinearColorCurveJson(RuntimeCurve->ColorCurves, TEXT("runtime_linear_color_curve"), TEXT("FRuntimeCurveLinearColor"));
+					OutCurveJson = BuildMultiChannelCurveJson(RuntimeCurve->ColorCurves, {TEXT("r"), TEXT("g"), TEXT("b"), TEXT("a")}, TEXT("linear_color"), {}, {}, true);
 				}
 				return OutCurveJson.IsValid();
-			}
-			if (StructProperty->Struct == FCurveTableRowHandle::StaticStruct())
-			{
-				OutCurveJson = BuildCurveTableRowHandleJson(*static_cast<const FCurveTableRowHandle*>(ValuePtr));
-				return true;
 			}
 		}
 
 		return false;
 	}
 
-	static bool TryApplyAssetReferenceToProperty(FProperty* Property, void* ValuePtr, const TSharedPtr<FJsonObject>& RootObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static bool TryApplyAssetReferenceToProperty(FProperty* Property, void* ValuePtr, const TSharedPtr<FJsonObject>& RootObj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		TSharedPtr<FJsonObject> RefObj;
 		if (!TryGetObjectField(RootObj, TEXT("asset_reference"), RefObj))
 		{
-			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_missing_required_field"), Path + TEXT(".asset_reference"), TEXT("Asset reference curve JSON requires asset_reference object."));
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_missing_required_field"), Path + TEXT("/asset_reference"), TEXT("Asset reference curve JSON requires asset_reference object."));
 			return false;
 		}
 		FString AssetPath;
-		if (!UeAgentJsonDiagnostics::ReadStringField(RefObj, TEXT("asset_path"), Path + TEXT(".asset_reference.asset_path"), AssetPath, Issues, true) || AssetPath.TrimStartAndEnd().IsEmpty())
+		if (!UeAgentJsonDiagnostics::ReadStringField(RefObj, TEXT("asset_path"), Path + TEXT("/asset_reference/asset_path"), AssetPath, Issues, true) || AssetPath.TrimStartAndEnd().IsEmpty())
 		{
 			return false;
 		}
 		UObject* Asset = LoadObjectByPath(AssetPath);
 		if (!Asset)
 		{
-			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_asset_not_found"), Path + TEXT(".asset_reference.asset_path"), FString::Printf(TEXT("Curve asset '%s' could not be loaded."), *AssetPath));
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_asset_not_found"), Path + TEXT("/asset_reference/asset_path"), FString::Printf(TEXT("Curve asset '%s' could not be loaded."), *AssetPath));
 			return false;
-		}
-
-		if (FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
-		{
-			if (!Asset->IsA(ObjectProperty->PropertyClass))
-			{
-				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_asset_class_mismatch"), Path + TEXT(".asset_reference.asset_path"), FString::Printf(TEXT("Asset class '%s' is not assignable to property class '%s'."), *Asset->GetClass()->GetPathName(), *ObjectProperty->PropertyClass->GetPathName()));
-				return false;
-			}
-			ObjectProperty->SetObjectPropertyValue(ValuePtr, Asset);
-			return true;
 		}
 
 		if (FStructProperty* StructProperty = CastField<FStructProperty>(Property))
@@ -1115,7 +1308,7 @@ namespace UeAgentCurveJson
 				UCurveFloat* CurveFloat = Cast<UCurveFloat>(Asset);
 				if (!CurveFloat)
 				{
-					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_asset_class_mismatch"), Path + TEXT(".asset_reference.asset_path"), TEXT("FRuntimeFloatCurve external curve requires UCurveFloat."));
+					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_asset_class_mismatch"), Path + TEXT("/asset_reference/asset_path"), TEXT("FRuntimeFloatCurve external curve requires UCurveFloat."));
 					return false;
 				}
 				FRuntimeFloatCurve* RuntimeCurve = static_cast<FRuntimeFloatCurve*>(ValuePtr);
@@ -1127,7 +1320,7 @@ namespace UeAgentCurveJson
 				UCurveVector* CurveVector = Cast<UCurveVector>(Asset);
 				if (!CurveVector)
 				{
-					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_asset_class_mismatch"), Path + TEXT(".asset_reference.asset_path"), TEXT("FRuntimeVectorCurve external curve requires UCurveVector."));
+					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_asset_class_mismatch"), Path + TEXT("/asset_reference/asset_path"), TEXT("FRuntimeVectorCurve external curve requires UCurveVector."));
 					return false;
 				}
 				FRuntimeVectorCurve* RuntimeCurve = static_cast<FRuntimeVectorCurve*>(ValuePtr);
@@ -1139,7 +1332,7 @@ namespace UeAgentCurveJson
 				UCurveLinearColor* CurveColor = Cast<UCurveLinearColor>(Asset);
 				if (!CurveColor)
 				{
-					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_asset_class_mismatch"), Path + TEXT(".asset_reference.asset_path"), TEXT("FRuntimeCurveLinearColor external curve requires UCurveLinearColor."));
+					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_asset_class_mismatch"), Path + TEXT("/asset_reference/asset_path"), TEXT("FRuntimeCurveLinearColor external curve requires UCurveLinearColor."));
 					return false;
 				}
 				FRuntimeCurveLinearColor* RuntimeCurve = static_cast<FRuntimeCurveLinearColor*>(ValuePtr);
@@ -1152,7 +1345,7 @@ namespace UeAgentCurveJson
 		return false;
 	}
 
-	bool TryApplyPropertyCurveJson(FProperty* Property, void* ValuePtr, const TSharedPtr<FJsonObject>& RootObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	bool TryApplyPropertyCurveJson(FProperty* Property, void* ValuePtr, const TSharedPtr<FJsonObject>& RootObj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!Property || !ValuePtr)
 		{
@@ -1183,18 +1376,7 @@ namespace UeAgentCurveJson
 			}
 			if (StructProperty->Struct == FSimpleCurve::StaticStruct())
 			{
-				FRichCurve RichCurveProxy;
-				const bool bOk = ApplyChannelJsonToRichCurve(RootObj, TEXT("value"), RichCurveProxy, Path, Issues);
-				if (bOk && !HasError(Issues))
-				{
-					TArray<FSimpleCurveKey> SimpleKeys;
-					for (const FRichCurveKey& RichKey : RichCurveProxy.GetConstRefOfKeys())
-					{
-						SimpleKeys.Add(FSimpleCurveKey(RichKey.Time, RichKey.Value));
-					}
-					static_cast<FSimpleCurve*>(ValuePtr)->SetKeys(SimpleKeys);
-				}
-				return bOk && !HasError(Issues);
+				return ApplyChannelJsonToSimpleCurve(RootObj, TEXT("value"), *static_cast<FSimpleCurve*>(ValuePtr), Path, Issues);
 			}
 			if (StructProperty->Struct == FRuntimeFloatCurve::StaticStruct())
 			{
@@ -1255,47 +1437,19 @@ namespace UeAgentCurveJson
 				RuntimeCurve->ColorCurves[3] = TempCurves[3];
 				return true;
 			}
-			if (StructProperty->Struct == FCurveTableRowHandle::StaticStruct())
-			{
-				TSharedPtr<FJsonObject> TableObj;
-				if (!TryGetObjectField(RootObj, TEXT("curve_table"), TableObj))
-				{
-					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_missing_required_field"), Path + TEXT(".curve_table"), TEXT("CurveTableRowHandle JSON requires curve_table object."));
-					return false;
-				}
-				FString AssetPath;
-				FString RowNameText;
-				UeAgentJsonDiagnostics::ReadStringField(TableObj, TEXT("asset_path"), Path + TEXT(".curve_table.asset_path"), AssetPath, Issues, true);
-				UeAgentJsonDiagnostics::ReadStringField(TableObj, TEXT("row_name"), Path + TEXT(".curve_table.row_name"), RowNameText, Issues, true);
-				UCurveTable* Table = Cast<UCurveTable>(LoadObjectByPath(AssetPath));
-				if (!Table)
-				{
-					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_asset_not_found"), Path + TEXT(".curve_table.asset_path"), FString::Printf(TEXT("CurveTable '%s' could not be loaded."), *AssetPath));
-					return false;
-				}
-				if (RowNameText.TrimStartAndEnd().IsEmpty() || !Table->FindCurve(FName(*RowNameText.TrimStartAndEnd()), TEXT("UeAgentCurveJson"), false))
-				{
-					AddCurveIssue(Issues, TEXT("error"), TEXT("curve_table_row_not_found"), Path + TEXT(".curve_table.row_name"), FString::Printf(TEXT("CurveTable row '%s' was not found."), *RowNameText));
-					return false;
-				}
-				FCurveTableRowHandle* Handle = static_cast<FCurveTableRowHandle*>(ValuePtr);
-				Handle->CurveTable = Table;
-				Handle->RowName = FName(*RowNameText.TrimStartAndEnd());
-				return true;
-			}
 		}
 
 		AddCurveIssue(Issues, TEXT("error"), TEXT("curve_unsupported_carrier"), Path, FString::Printf(TEXT("Property type '%s' is not a supported curve JSON carrier."), *Property->GetCPPType()));
 		return false;
 	}
 
-	static bool CompareFloatCurves(const FRichCurve& Requested, const FRichCurve& Readback, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static bool CompareFloatCurves(const FRichCurve& Requested, const FRichCurve& Readback, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		const TArray<FRichCurveKey>& A = Requested.GetConstRefOfKeys();
 		const TArray<FRichCurveKey>& B = Readback.GetConstRefOfKeys();
 		if (A.Num() != B.Num())
 		{
-			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_readback_mismatch"), Path + TEXT(".keys"), FString::Printf(TEXT("Curve key count mismatch: requested=%d readback=%d."), A.Num(), B.Num()));
+			AddCurveIssue(Issues, TEXT("error"), TEXT("curve_readback_mismatch"), Path + TEXT("/keys"), FString::Printf(TEXT("Curve key count mismatch: requested=%d readback=%d."), A.Num(), B.Num()));
 			return false;
 		}
 		bool bOk = true;
@@ -1303,19 +1457,26 @@ namespace UeAgentCurveJson
 		{
 			if (FMath::Abs(A[Index].Time - B[Index].Time) > ValueTolerance || FMath::Abs(A[Index].Value - B[Index].Value) > ValueTolerance)
 			{
-				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_readback_mismatch"), FString::Printf(TEXT("%s.keys[%d]"), *Path, Index), FString::Printf(TEXT("Curve key mismatch: requested=(%.6f,%.6f) readback=(%.6f,%.6f)."), A[Index].Time, A[Index].Value, B[Index].Time, B[Index].Value));
+				AddCurveIssue(Issues, TEXT("error"), TEXT("curve_readback_mismatch"), FString::Printf(TEXT("%s/keys/%d"), *Path, Index), FString::Printf(TEXT("Curve key mismatch: requested=(%.6f,%.6f) readback=(%.6f,%.6f)."), A[Index].Time, A[Index].Value, B[Index].Time, B[Index].Value));
 				bOk = false;
 			}
 		}
 		return bOk;
 	}
 
-	UObject* CreateCurveAsset(const FString& AssetPathInput, const FString& CurveKind, FString& OutError)
+	UObject* CreateCurveAsset(const FString& AssetPathInput, const FString& CurveKind, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const FString AssetPath = NormalizeAssetPath(AssetPathInput);
-		if (!FPackageName::IsValidLongPackageName(AssetPath))
+		FText PathReason;
+		if (!FPackageName::IsValidLongPackageName(AssetPath, false, &PathReason))
 		{
-			OutError = TEXT("invalid_curve_asset_path");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("invalid_curve_asset_path"),
+				PathReason.IsEmpty() ? TEXT("The curve asset path is not a valid writable package name.") : PathReason.ToString(),
+				TEXT("curve_asset_create"));
+			OutError.PropertyPath = TEXT("asset_path");
+			OutError.TargetPath = AssetPathInput;
+			OutError.ActualValue = MakeShared<FJsonValueString>(AssetPathInput);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("valid writable long package name"));
 			return nullptr;
 		}
 
@@ -1323,7 +1484,10 @@ namespace UeAgentCurveJson
 		UPackage* Package = CreatePackage(*AssetPath);
 		if (!Package)
 		{
-			OutError = TEXT("create_curve_package_failed");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("create_curve_package_failed"),
+				TEXT("Unreal could not create the package for the curve asset."), TEXT("curve_asset_create"));
+			OutError.TargetPath = AssetPath;
+			OutError.SourceKind = TEXT("native_result");
 			return nullptr;
 		}
 
@@ -1346,14 +1510,28 @@ namespace UeAgentCurveJson
 		}
 		if (!CurveClass)
 		{
-			OutError = TEXT("unsupported_curve_kind");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unsupported_curve_kind"),
+				TEXT("The requested curve kind does not identify a supported curve asset type."),
+				TEXT("curve_asset_create"));
+			OutError.PropertyPath = TEXT("curve_kind");
+			OutError.TargetPath = AssetPath;
+			OutError.ActualValue = MakeShared<FJsonValueString>(CurveKind);
+			TArray<TSharedPtr<FJsonValue>> SupportedKinds;
+			for (const TCHAR* Kind : {TEXT("float"), TEXT("curve_float"), TEXT("vector"), TEXT("curve_vector"),
+				TEXT("linear_color"), TEXT("color"), TEXT("curve_linear_color"), TEXT("curve_table")})
+				SupportedKinds.Add(MakeShared<FJsonValueString>(Kind));
+			OutError.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(SupportedKinds));
 			return nullptr;
 		}
 
 		UObject* Asset = NewObject<UObject>(Package, CurveClass, *AssetName, RF_Public | RF_Standalone | RF_Transactional);
 		if (!Asset)
 		{
-			OutError = TEXT("create_curve_asset_failed");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("create_curve_asset_failed"),
+				TEXT("Unreal could not create the curve asset in the requested package."), TEXT("curve_asset_create"));
+			OutError.TargetPath = AssetPath;
+			OutError.SourceKind = TEXT("native_result");
+			OutError.InternalContext = CurveClass->GetPathName();
 			return nullptr;
 		}
 		FAssetRegistryModule::AssetCreated(Asset);

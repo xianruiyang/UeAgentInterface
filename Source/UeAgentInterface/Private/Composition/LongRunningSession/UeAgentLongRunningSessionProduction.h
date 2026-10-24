@@ -21,24 +21,20 @@ namespace UE::UAI::Composition::LongRunningSession
 		FString ServerSessionId;
 		FString OwnerLeaseSecret;
 		TWeakObjectPtr<UWorld> EditorWorld;
-		double TimeoutSeconds = 0.0;
-		int64 MaxFrameBytes = 0;
-		int32 MaxActiveOperations = 0;
-		int32 MaxRetainedOperations = 0;
 
 		bool IsValid() const;
 	};
 
-	struct UEAGENTINTERFACE_API
-	FUeAgentLongRunningSessionProductionError final
-	{
-		FString Code;
-		FString Detail;
-	};
+	using FUeAgentLongRunningSessionProductionError = Contract::FDiagnostic;
+
+	/** Saves only explicitly requested resources; keeps the Editor running. */
+	UEAGENTINTERFACE_API bool TrySaveEditorResources(
+		const FString& ParamsJson, FString& OutPayload,
+		FUeAgentLongRunningSessionProductionError& OutError);
 
 	/**
 	 * Composes the immutable production policy catalogs, operation-scoped
-	 * native builders, one LongRunningSession runtime and thirteen exact public
+	 * native builders, one LongRunningSession runtime and exact public
 	 * handlers.  No transport route or second lifecycle registry is created.
 	 */
 	UEAGENTINTERFACE_API bool TryCreateLongRunningSessionProduction(

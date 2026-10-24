@@ -1,5 +1,7 @@
 #include "QueryOwners/TimelineSequenceCommands/UeAgentTimelineSequenceCommandQueryOwner.h"
 
+#include "Dom/JsonValue.h"
+
 namespace UE::UAI::QueryOwners::TimelineSequenceCommands
 {
 	const TArray<FString>& GetCommandIds()
@@ -21,19 +23,32 @@ namespace UE::UAI::QueryOwners::TimelineSequenceCommands
 
 	bool TryGetProfiles(
 		TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>& OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		OutError.Reset();
-		const auto& Canonical = Composition::TimelineSpatial::GetTimelineSpatialActivationProfiles();
+		const TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>* Canonical = nullptr;
+		if (!Composition::TimelineSpatial::TryGetTimelineSpatialActivationProfiles(Canonical, OutError)) return false;
 		for (const FString& CommandId : GetCommandIds())
 		{
-			const auto* Match = Canonical.FindByPredicate(
+			const auto* Match = Canonical->FindByPredicate(
 				[&CommandId](const auto& Profile) { return Profile.CommandId == CommandId; });
-			if (!Match || !Match->IsValid())
+			if (!Match)
 			{
 				OutProfiles.Reset();
-				OutError = TEXT("timeline_sequence_profile_missing:") + CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_sequence_profile_missing"),
+					TEXT("No Timeline/Spatial activation profile is registered for this command"), TEXT("registration"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.CandidateName = CommandId;
+				OutError.PropertyPath = TEXT("activation_profile_present");
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				return false;
+			}
+			if (!Match->TryValidate(OutError))
+			{
+				OutProfiles.Reset();
+				OutError = Contract::FDiagnostic::WrapFailure(TEXT("timeline_sequence_profile_missing"), OutError, TEXT("registration"));
 				return false;
 			}
 			OutProfiles.Add(*Match);
@@ -43,7 +58,10 @@ namespace UE::UAI::QueryOwners::TimelineSequenceCommands
 
 	bool IsQuery(const FString& CommandId)
 	{
-		const auto* Match = Composition::TimelineSpatial::GetTimelineSpatialActivationProfiles().FindByPredicate(
+		const TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>* Canonical = nullptr;
+		Contract::FDiagnostic ProfileError;
+		if (!Composition::TimelineSpatial::TryGetTimelineSpatialActivationProfiles(Canonical, ProfileError)) return false;
+		const auto* Match = Canonical->FindByPredicate(
 			[&CommandId](const auto& Profile) { return Profile.CommandId == CommandId; });
 		return Match && Match->OperationKind == TEXT("query");
 	}

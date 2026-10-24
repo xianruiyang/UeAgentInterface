@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "ReferenceSkeleton.h"
 #include "CoreMinimal.h"
 #include "Misc/FrameRate.h"
@@ -41,23 +43,6 @@ namespace UeAgentAnimationEditorOps
 		const TSharedPtr<FJsonObject>& Obj,
 		const TArray<FString>& Keys,
 		const TArray<TSharedPtr<FJsonValue>>*& OutArray);
-	bool ResolvePreviewFrameSequence(
-		UAnimSequence* Sequence,
-		const TSharedPtr<FJsonObject>& Params,
-		TArray<FPreviewFrameRequest>& OutFrames,
-		FString& OutError);
-	bool ResolveAnimFrameRate(
-		const TSharedPtr<FJsonObject>& Params,
-		const FFrameRate& Fallback,
-		FFrameRate& OutFrameRate,
-		FString& OutError);
-	bool ParseAnimSequenceBoneTrackInput(
-		const TSharedPtr<FJsonObject>& TrackObj,
-		const FReferenceSkeleton& RefSkeleton,
-		int32 RequiredKeyCount,
-		const FFrameRate& FrameRate,
-		FAnimSequenceBoneTrackInput& OutTrack,
-		FString& OutError);
 }
 
 namespace UeAgentAnimationViewportOps

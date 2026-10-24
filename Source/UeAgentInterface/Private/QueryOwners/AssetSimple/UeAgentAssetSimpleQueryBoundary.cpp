@@ -1,9 +1,14 @@
 #include "QueryOwners/AssetSimple/UeAgentAssetSimpleQueryBoundary.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/SimpleAuthoring/OperationHost/UeAgentSimpleAuthoringOperationHost.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCapabilities.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "HAL/PlatformTime.h"
 
 namespace UE::UAI::QueryOwners::AssetSimple
@@ -16,16 +21,32 @@ namespace UE::UAI::QueryOwners::AssetSimple
 	{
 		const FString FactoryCatalogKind = TEXT("asset_data_factory");
 
-		bool Fail(
-			FAssetFactoryCandidateQueryError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool ForwardDiagnostic(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
 			return false;
+		}
+
+		UE::UAI::Contract::FDiagnostic CandidateDiagnostic(FString Code, FString Subject, FString PublicReason, FString InternalContext = FString())
+		{
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(PublicReason), TEXT("candidate_query"), MoveTemp(InternalContext), MoveTemp(Subject));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
+		}
+
+		
+
+		UE::UAI::Contract::FDiagnostic CandidateCause(FString Code, const FString& Subject,
+			const UE::UAI::Contract::FDiagnostic& Cause, FString FallbackReason)
+		{
+			auto Diagnostic = Cause.IsEmpty()
+				? CandidateDiagnostic(MoveTemp(Code), Subject, MoveTemp(FallbackReason))
+				: UE::UAI::Contract::FDiagnostic::WrapFailure(MoveTemp(Code), Cause);
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Subject;
+			return Diagnostic;
 		}
 
 		bool ContainsQuery(
@@ -50,8 +71,6 @@ namespace UE::UAI::QueryOwners::AssetSimple
 	bool TryQueryAssetFactoryCandidates(
 		const FString& CreateCommandId,
 		const FString& Query,
-		const int32 Limit,
-		const int32 Cursor,
 		FAssetFactoryCandidateQueryResult& OutResult,
 		FAssetFactoryCandidateQueryError& OutError)
 	{
@@ -59,30 +78,19 @@ namespace UE::UAI::QueryOwners::AssetSimple
 		OutError = {};
 		if (!IsInGameThread())
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_factory_candidate_game_thread_required"),
-				CreateCommandId);
+			auto Diagnostic = CandidateDiagnostic(TEXT("asset_factory_candidate_game_thread_required"), CreateCommandId,
+				TEXT("Asset factory candidates must be queried on the Editor game thread."));
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("game thread"));
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(TEXT("other thread"));
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), CreateCommandId);
 		}
-		if (Limit < 1 || Limit > 20 || Cursor < 0)
-		{
-			return Fail(
-				OutError,
-				TEXT("asset_factory_candidate_page_invalid"),
-				CreateCommandId,
-				TEXT("limit must be 1..20 and cursor must be non-negative"));
-		}
-
 		TArray<FUeAgentAssetDataSimpleEffectProductionProfile> Profiles;
-		FString ProfileError;
+		UE::UAI::Contract::FDiagnostic ProfileError;
 		if (!TryGetAssetDataSimpleEffectProductionProfiles(
 				Profiles, ProfileError))
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_factory_candidate_profiles_unavailable"),
-				CreateCommandId,
-				ProfileError);
+			return ForwardDiagnostic(OutError, CandidateCause(TEXT("asset_factory_candidate_profiles_unavailable"),
+				CreateCommandId, ProfileError, TEXT("The asset factory candidate production profiles are unavailable.")), CreateCommandId);
 		}
 		const FUeAgentAssetDataSimpleEffectProductionProfile* Profile =
 			Profiles.FindByPredicate(
@@ -93,119 +101,165 @@ namespace UE::UAI::QueryOwners::AssetSimple
 				});
 		if (!Profile || !Profile->UsesFactoryCandidate())
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_factory_candidate_command_unsupported"),
-				CreateCommandId,
-				TEXT("the command does not consume a factory_ref candidate"));
+			auto Diagnostic = CandidateDiagnostic(TEXT("asset_factory_candidate_command_unsupported"), CreateCommandId,
+				FString::Printf(TEXT("Command '%s' does not consume a factory_ref candidate."), *CreateCommandId));
+			Diagnostic.SourceKind = TEXT("command_input");
+			Diagnostic.Source.JsonPath = TEXT("/create_command");
+			Diagnostic.PropertyPath = TEXT("create_command");
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(CreateCommandId);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("command that consumes factory_ref"));
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), CreateCommandId);
 		}
 
 		TSharedPtr<IUeAgentCatalogSource> Source;
-		FString SourceError;
+		UE::UAI::Contract::FDiagnostic SourceError;
 		if (!Composition::SimpleAuthoring::OperationHost::
 				TryResolveCatalogSource(
 					FactoryCatalogKind, Source, SourceError)
 			|| !Source.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_factory_candidate_catalog_unavailable"),
-				CreateCommandId,
-				SourceError);
+			return ForwardDiagnostic(OutError, CandidateCause(TEXT("asset_factory_candidate_catalog_unavailable"),
+				CreateCommandId, SourceError, TEXT("The asset factory candidate catalog source is unavailable.")), CreateCommandId);
 		}
 
-		FUeAgentResourceTracker Resources(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::Nodes, 64},
-			{EUeAgentResourceDimension::Items, 4096},
-			{EUeAgentResourceDimension::StringBytes, 4 * 1024 * 1024},
-			{EUeAgentResourceDimension::WorkUnits, 8192},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes,
-				8 * 1024 * 1024},
-		}));
+		FUeAgentResourceTracker Resources;
 		const auto Clock = []() { return FPlatformTime::Seconds(); };
-		const FUeAgentOperationDeadline Deadline =
-			FUeAgentOperationDeadline::FromTimeout(10.0, Clock);
+		const FUeAgentOperationDeadline Deadline;
 		FUeAgentCancellationSource Cancellation(Clock);
 		TSharedPtr<const FUeAgentCatalogSnapshot> Catalog;
+		TArray<TSharedRef<const FUeAgentCandidateBinding>> ResolvedBindings;
 		FUeAgentDiscoveryError DiscoveryError;
 		const FUeAgentDiscoveryQuery DiscoveryQuery(
 			FactoryCatalogKind,
 			Profile->ProfileId,
 			EUeAgentDiscoveryMatchMode::Broad,
 			EUeAgentMaterializationPolicy::IndexOnly);
-		if (!Source->TrySearch(
+		const bool bSearchSucceeded = Source->TrySearchResolved(
 				DiscoveryQuery,
 				Resources,
 				Deadline,
 				Cancellation.GetToken(),
 				Catalog,
-				DiscoveryError)
-			|| !Catalog.IsValid())
+				ResolvedBindings,
+				DiscoveryError);
+		if (!bSearchSucceeded || !Catalog.IsValid())
 		{
-			return Fail(
-				OutError,
-				DiscoveryError.Code.IsEmpty()
-					? FString(TEXT("asset_factory_candidate_query_failed"))
-					: DiscoveryError.Code,
-				DiscoveryError.SubjectId,
-				DiscoveryError.Detail);
+			if (!DiscoveryError.IsEmpty()) return ForwardDiagnostic(OutError, DiscoveryError, CreateCommandId);
+			auto Diagnostic = CandidateDiagnostic(TEXT("asset_factory_candidate_query_failed"), CreateCommandId,
+				bSearchSucceeded ? TEXT("The asset factory candidate search completed without a catalog snapshot.")
+					: TEXT("The asset factory candidate search failed without a diagnostic."));
+			Diagnostic.PropertyPath = TEXT("catalog");
+			Diagnostic.ActualValuePresent = Catalog.IsValid();
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("resolved catalog snapshot"));
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), CreateCommandId);
 		}
-
-		TArray<TSharedRef<const FUeAgentCandidateBinding>> Matches;
-		for (const FUeAgentCandidateSummary& Summary : Catalog->GetCandidates())
+		if (ResolvedBindings.Num() != Catalog->GetCandidates().Num())
 		{
-			TSharedPtr<const FUeAgentCandidateBinding> Binding;
-			DiscoveryError = {};
-			if (!Source->TryResolveExact(
-					Summary.GetIdentity().GetCanonicalKey(),
-					Catalog->GetRevision(),
-					Resources,
-					Deadline,
-					Cancellation.GetToken(),
-					Binding,
-					DiscoveryError)
-				|| !Binding.IsValid())
+			auto Diagnostic = CandidateDiagnostic(TEXT("asset_factory_candidate_binding_set_mismatch"), CreateCommandId,
+				TEXT("The resolved factory binding count differs from the catalog candidate count."));
+			Diagnostic.PropertyPath = TEXT("candidate_bindings");
+			Diagnostic.ActualValue = MakeShared<FJsonValueNumber>(ResolvedBindings.Num());
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(Catalog->GetCandidates().Num());
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), CreateCommandId);
+		}
+		TSet<FString> ExpectedIdentities;
+		for (const FUeAgentCandidateSummary& Summary
+			: Catalog->GetCandidates())
+		{
+			ExpectedIdentities.Add(
+				Summary.GetIdentity().GetCanonicalKey());
+		}
+		TSet<FString> ResolvedIdentities;
+		TArray<TSharedRef<const FUeAgentCandidateBinding>> EligibleBindings;
+		for (const TSharedRef<const FUeAgentCandidateBinding>& Binding
+			: ResolvedBindings)
+		{
+			if (Binding->GetCatalogRevision() != Catalog->GetRevision())
 			{
-				return Fail(
-					OutError,
-					DiscoveryError.Code.IsEmpty()
-						? FString(TEXT("asset_factory_candidate_binding_failed"))
-						: DiscoveryError.Code,
-					Summary.GetIdentity().GetCanonicalKey(),
-					DiscoveryError.Detail);
+				auto Diagnostic = CandidateDiagnostic(TEXT("asset_factory_candidate_revision_mismatch"),
+					Binding->GetSummary().GetIdentity().GetCanonicalKey(),
+					TEXT("A resolved factory candidate binding belongs to a different catalog revision."));
+				Diagnostic.CandidateName = Binding->GetSummary().GetDisplayName();
+				Diagnostic.PropertyPath = TEXT("catalog_revision");
+				const auto RevisionEvidence = [](const FUeAgentCatalogRevision& Revision)
+				{
+					auto Value = MakeShared<FJsonObject>();
+					Value->SetStringField(TEXT("source_id"), Revision.GetSourceId());
+					Value->SetStringField(TEXT("generation"), Revision.GetGeneration());
+					Value->SetStringField(TEXT("sequence"), FString::Printf(TEXT("%lld"), Revision.GetSequence()));
+					return MakeShared<FJsonValueObject>(Value);
+				};
+				Diagnostic.ActualEvidence = RevisionEvidence(Binding->GetCatalogRevision());
+				Diagnostic.ExpectedEvidence = RevisionEvidence(Catalog->GetRevision());
+				return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 			}
+			const FString& Identity =
+				Binding->GetSummary().GetIdentity().GetCanonicalKey();
+			if (!ExpectedIdentities.Contains(Identity)
+				|| ResolvedIdentities.Contains(Identity))
+			{
+				auto Diagnostic = CandidateDiagnostic(TEXT("asset_factory_candidate_binding_set_mismatch"), Identity,
+					!ExpectedIdentities.Contains(Identity)
+						? TEXT("A resolved factory binding is absent from the catalog candidate set.")
+						: TEXT("The resolved factory binding set contains a duplicate candidate."));
+				Diagnostic.CandidateName = Binding->GetSummary().GetDisplayName();
+				Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Identity);
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("one binding per catalog candidate"));
+				return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Identity);
+			}
+			ResolvedIdentities.Add(Identity);
 			const TArray<FString>& Category =
 				Binding->GetSummary().GetCategoryPath();
 			if (!Category.Contains(Profile->ProfileId)
-				|| !ContainsQuery(Query, *Binding))
+				|| !Binding->Supports(EUeAgentCandidateOperation::Create))
 			{
 				continue;
 			}
-			Matches.Add(Binding.ToSharedRef());
+			EligibleBindings.Add(Binding);
 		}
 
-		Matches.Sort(
+		EligibleBindings.Sort(
 			[](const TSharedRef<const FUeAgentCandidateBinding>& Left,
 				const TSharedRef<const FUeAgentCandidateBinding>& Right)
 			{
 				return Left->GetPublicRef() < Right->GetPublicRef();
 			});
+		TArray<int32> MatchedIndices;
+		MatchedIndices.Reserve(EligibleBindings.Num());
+		for (int32 Index = 0; Index < EligibleBindings.Num(); ++Index)
+		{
+			if (ContainsQuery(Query, *EligibleBindings[Index]))
+			{
+				MatchedIndices.Add(Index);
+			}
+		}
 		OutResult.CreateCommandId = CreateCommandId;
 		OutResult.ProfileId = Profile->ProfileId;
 		OutResult.CatalogSourceId = Catalog->GetRevision().GetSourceId();
 		OutResult.CatalogGeneration = Catalog->GetRevision().GetGeneration();
 		OutResult.CatalogSequence = Catalog->GetRevision().GetSequence();
-		OutResult.TotalMatches = Matches.Num();
-		const int32 Start = FMath::Min(Cursor, Matches.Num());
-		const int32 End = FMath::Min(Start + Limit, Matches.Num());
-		for (int32 Index = Start; Index < End; ++Index)
+		OutResult.TotalMatches = MatchedIndices.Num();
+		for (int32 MatchOffset = 0; MatchOffset < MatchedIndices.Num(); ++MatchOffset)
 		{
-			const FUeAgentCandidateBinding& Binding = *Matches[Index];
+			const FUeAgentCandidateBinding& Binding =
+				*EligibleBindings[MatchedIndices[MatchOffset]];
 			FAssetFactoryCandidate Candidate;
 			Candidate.DisplayName = Binding.GetSummary().GetDisplayName();
+			Candidate.Name = Candidate.DisplayName;
 			Candidate.ClassPath = Binding.GetSummary().GetSummary();
 			Candidate.ProfileId = Profile->ProfileId;
 			Candidate.CandidateRef = Binding.GetPublicRef();
+			if (Profile->CapabilityId == TEXT("asset.object.create"))
+			{
+				Candidate.Id = Binding.GetPublicRef();
+				Candidate.SupportedClassPath =
+					Binding.GetSummary().GetSummary();
+				Candidate.bGenericReady = Binding.Supports(
+					EUeAgentCandidateOperation::Create);
+				Candidate.WriteStatus = Candidate.bGenericReady
+					? TEXT("ready")
+					: TEXT("interactive_required");
+			}
 			Candidate.CatalogSourceId =
 				Binding.GetCatalogRevision().GetSourceId();
 			Candidate.CatalogGeneration =
@@ -214,10 +268,6 @@ namespace UE::UAI::QueryOwners::AssetSimple
 				Binding.GetCatalogRevision().GetSequence();
 			OutResult.Candidates.Add(MoveTemp(Candidate));
 		}
-		const int32 Consumed = Start + OutResult.Candidates.Num();
-		OutResult.bHasMore = Consumed < OutResult.TotalMatches;
-		OutResult.bComplete = !OutResult.bHasMore;
-		OutResult.NextCursor = OutResult.bHasMore ? Consumed : INDEX_NONE;
 		return true;
 	}
 }

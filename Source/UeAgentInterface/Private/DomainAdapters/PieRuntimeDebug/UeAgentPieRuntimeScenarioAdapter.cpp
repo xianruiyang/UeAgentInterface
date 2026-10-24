@@ -1,5 +1,8 @@
 #include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeScenarioAdapter.h"
 
+#include "Dom/JsonValue.h"
+#include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeDiagnostics.h"
+
 namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 {
 	using namespace ExecutionMutation;
@@ -7,12 +10,11 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 
 	namespace
 	{
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
+		bool Fail(FExecutionMutationError& OutError, FString Code, const FString& Reason,
+			const FString& Path, const TSharedPtr<FJsonValue>& Actual = nullptr,
+			const TSharedPtr<FJsonValue>& Expected = nullptr)
 		{
-			OutError = FExecutionMutationError(MoveTemp(Code), MoveTemp(Detail));
+			OutError = PieDiagnostics::Input(Code, Reason, TEXT("execution"), Path, Actual, Expected);
 			return false;
 		}
 
@@ -44,66 +46,64 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 			return Forbidden.Contains(Field);
 		}
 
-		bool TryFindForbiddenField(
-			const FUeAgentCanonicalValueRef& Root,
-			FString& OutField)
+		bool TryFindForbiddenField(const FUeAgentCanonicalValueRef& Root,
+			FString& OutField, FString& OutPath)
 		{
-			TArray<FUeAgentCanonicalValueRef> Pending{Root};
+			struct FPendingValue { FUeAgentCanonicalValueRef Value; FString Path; int32 Depth; };
+			TArray<FPendingValue> Pending;
+			Pending.Add({Root, TEXT("/parameters"), 0});
 			for (int32 Index = 0; Index < Pending.Num(); ++Index)
 			{
-				const FUeAgentCanonicalValueRef& Value = Pending[Index];
-				if (Value->GetKind() == EUeAgentValueKind::Object)
+				const auto Current = Pending[Index];
+				if (Current.Value->GetKind() == EUeAgentValueKind::Object)
 				{
-					for (const TPair<FString, FUeAgentCanonicalValueRef>& Item
-						: Value->GetObjectItems())
+					for (const auto& Item : Current.Value->GetObjectItems())
 					{
+						const FString Path = Current.Path + TEXT("/") + Item.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
 						if (IsForbiddenField(Item.Key))
 						{
 							OutField = Item.Key;
+							OutPath = Path;
 							return true;
 						}
-						Pending.Add(Item.Value);
+						Pending.Add({Item.Value, Path, Current.Depth + 1});
 					}
 				}
-				else if (Value->GetKind() == EUeAgentValueKind::Array)
+				else if (Current.Value->GetKind() == EUeAgentValueKind::Array)
 				{
-					Pending.Append(Value->GetArrayItems());
+					const auto& Items = Current.Value->GetArrayItems();
+					for (int32 ItemIndex = 0; ItemIndex < Items.Num(); ++ItemIndex)
+						Pending.Add({Items[ItemIndex], Current.Path + TEXT("/") + FString::FromInt(ItemIndex), Current.Depth + 1});
 				}
 			}
 			return false;
 		}
 
-		bool TryValidateRequest(
-			const FUeAgentPieRuntimeScenarioTypedRequest& Request,
-			FExecutionMutationError& OutError)
+		bool TryValidateRequest(const FUeAgentPieRuntimeScenarioTypedRequest& Request, FExecutionMutationError& OutError)
 		{
-			if (!IsNormalizedNonEmpty(Request.GetSessionRef())
-				|| !Request.GetSessionRef().StartsWith(
-					TEXT("runtime-session:pie-debug:")))
+			if (!IsNormalizedNonEmpty(Request.GetSessionRef()) || !Request.GetSessionRef().StartsWith(TEXT("runtime-session:pie-debug:")))
 			{
-				return Fail(
-					OutError, TEXT("pie_runtime_scenario_session_ref_invalid"));
+				Fail(OutError, TEXT("pie_runtime_scenario_session_ref_invalid"), TEXT("The PIE scenario requires a normalized PIE debug session reference."), TEXT("/subject_ref"),
+					PieDiagnostics::Facts({ { TEXT("normalized_nonempty"), MakeShared<FJsonValueBoolean>(IsNormalizedNonEmpty(Request.GetSessionRef())) },
+						{ TEXT("pie_debug_session_prefix"), MakeShared<FJsonValueBoolean>(Request.GetSessionRef().StartsWith(TEXT("runtime-session:pie-debug:"))) } }),
+					PieDiagnostics::Facts({ { TEXT("normalized_nonempty"), MakeShared<FJsonValueBoolean>(true) },
+						{ TEXT("pie_debug_session_prefix"), MakeShared<FJsonValueBoolean>(true) } }));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Request.GetSessionRef());
+				return false;
 			}
-			if (Request.GetPolicyId()
-				!= TEXT("policy:runtime-scenario:bounded/v1"))
+			if (Request.GetPolicyId() != TEXT("policy:runtime-scenario:bounded/v2"))
 			{
-				return Fail(
-					OutError, TEXT("pie_runtime_scenario_policy_invalid"));
+				Fail(OutError, TEXT("pie_runtime_scenario_policy_invalid"), TEXT("The PIE scenario requires the bounded runtime scenario policy."), TEXT("/policy_id"),
+					MakeShared<FJsonValueString>(Request.GetPolicyId()), MakeShared<FJsonValueString>(TEXT("policy:runtime-scenario:bounded/v2")));
+				return false;
 			}
-			if (Request.GetParameters()->GetKind()
-				!= EUeAgentValueKind::Object)
-			{
-				return Fail(
-					OutError, TEXT("pie_runtime_scenario_parameters_not_object"));
-			}
-			FString ForbiddenField;
-			if (TryFindForbiddenField(Request.GetParameters(), ForbiddenField))
-			{
-				return Fail(
-					OutError,
-					TEXT("pie_runtime_scenario_forbidden_field"),
-					MoveTemp(ForbiddenField));
-			}
+			if (Request.GetParameters()->GetKind() != EUeAgentValueKind::Object)
+				return Fail(OutError, TEXT("pie_runtime_scenario_parameters_not_object"), TEXT("PIE scenario parameters must be an object."), TEXT("/parameters"),
+					PieDiagnostics::CanonicalValueFact(Request.GetParameters().Get()), MakeShared<FJsonValueString>(TEXT("object")));
+			FString ForbiddenField, ForbiddenPath;
+			if (TryFindForbiddenField(Request.GetParameters(), ForbiddenField, ForbiddenPath))
+				return Fail(OutError, TEXT("pie_runtime_scenario_forbidden_field"), TEXT("This parameter is not allowed by the PIE scenario policy."), ForbiddenPath,
+					MakeShared<FJsonValueString>(ForbiddenField), MakeShared<FJsonValueString>(TEXT("field omitted")));
 			return true;
 		}
 	}
@@ -155,8 +155,8 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 		}
 		if (!OperationRequest.IsValid())
 		{
-			return Fail(
-				OutError, TEXT("pie_runtime_scenario_operation_request_invalid"));
+			OutError = OperationRequest.GetValidationDiagnostic();
+			return false;
 		}
 		TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe> Port;
 		if (!PortFactory.TryCreateOperationPort(
@@ -166,7 +166,10 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 		}
 		if (!Port.IsValid())
 		{
-			return Fail(OutError, TEXT("pie_runtime_scenario_port_missing"));
+			OutError = PieDiagnostics::Native(TEXT("pie_runtime_scenario_port_missing"),
+				TEXT("The PIE scenario factory returned no execution port."), TEXT("execution"),
+				TEXT("execution_port_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return false;
 		}
 		return Owner.Accept(
 			OperationRequest, Port.ToSharedRef(), OutSnapshot, OutError);

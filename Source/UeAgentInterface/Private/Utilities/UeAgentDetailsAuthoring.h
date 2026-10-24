@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 
@@ -115,12 +117,12 @@ namespace UeAgentDetailsAuthoring
 	UEAGENTINTERFACE_API bool ExportOwnerDetails(
 		const FOwnerDetailsExportRequest& Request,
 		TSharedPtr<FJsonObject>& OutDetailsSummary,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ApplyOwnerDetails(
 		const FOwnerDetailsApplyRequest& Request,
 		TSharedPtr<FJsonObject>& OutApplySummary,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ApplyOwnerDetailsFromEntryIfPresent(
 		UObject* Object,
@@ -131,24 +133,24 @@ namespace UeAgentDetailsAuthoring
 		bool bApply,
 		TSharedPtr<FJsonObject>& OutApplySummary,
 		int32& InOutAppliedCount,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ResolveOwnerPropertiesFromEntry(
 		const FString& EntryDirectory,
 		const TSharedPtr<FJsonObject>& EntryObject,
 		const FString& RefFieldName,
 		FOwnerPropertiesInput& OutInput,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ValidateOwnerDetails(
 		const FOwnerDetailsValidateRequest& Request,
 		TSharedPtr<FJsonObject>& OutValidateSummary,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool DiffOwnerDetails(
 		const FOwnerDetailsDiffRequest& Request,
 		TSharedPtr<FJsonObject>& OutDiffSummary,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API FString GetDiagnosticsOnlyPath(const FString& Surface);
 
@@ -159,46 +161,41 @@ namespace UeAgentDetailsAuthoring
 	UEAGENTINTERFACE_API bool BuildDiagnosticsIsolationReport(
 		const FDiagnosticsIsolationRequest& Request,
 		TSharedPtr<FJsonObject>& OutReport,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> MakeAuthoringPropertiesRejection(
-		const FString& ErrorCode,
-		const FString& Surface,
+		const UE::UAI::Contract::FDiagnostic& Diagnostic,
 		const FOwnerInfo& OwnerInfo,
-		const FString& JsonPath,
-		const FString& ResolutionHint,
 		const FString& AllowedTarget);
 
 	UEAGENTINTERFACE_API bool FindAuthoringPropertiesIssue(
 		const TSharedPtr<FJsonObject>& Object,
-		FString& OutSurface,
-		FString& OutJsonPath,
-		FString& OutErrorCode);
+		UE::UAI::Contract::FDiagnostic& OutErrorCode);
 
 	UEAGENTINTERFACE_API bool FindAuthoringPropertiesFileIssue(
 		const FString& FolderRoot,
-		FString& OutSurface,
-		FString& OutJsonPath,
-		FString& OutErrorCode);
+		UE::UAI::Contract::FDiagnostic& OutErrorCode);
 
 	UEAGENTINTERFACE_API bool BuildAuthoringPropertiesRejectionIfPresent(
 		const TSharedPtr<FJsonObject>& Object,
 		const FOwnerInfo& OwnerInfo,
 		const FString& AllowedTarget,
-		TSharedPtr<FJsonObject>& OutRejection);
+		TSharedPtr<FJsonObject>& OutRejection,
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool BuildAuthoringPropertiesFileRejectionIfPresent(
 		const FString& FolderRoot,
 		const FOwnerInfo& OwnerInfo,
 		const FString& AllowedTarget,
-		TSharedPtr<FJsonObject>& OutRejection);
+		TSharedPtr<FJsonObject>& OutRejection,
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool BuildAuthoringPropertiesFolderRejectionIfPresent(
 		const FString& FolderRoot,
 		const FOwnerInfo& OwnerInfo,
 		const FString& AllowedTarget,
 		TSharedPtr<FJsonObject>& OutRejection,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ResolveDetailsRefRoot(
 		const FString& EntryDirectory,
@@ -207,21 +204,22 @@ namespace UeAgentDetailsAuthoring
 		bool& bOutHasDetails,
 		FString& OutDetailsRoot,
 		FString& OutIndexFile,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool WriteGroupedDetails(
 		const FString& DetailsRoot,
 		const FOwnerInfo& OwnerInfo,
 		const TSharedPtr<FJsonObject>& PropertiesJson,
 		TSharedPtr<FJsonObject>& OutDetailsSummary,
-		FString& OutError,
+		UE::UAI::Contract::FDiagnostic& OutError,
 		const FString& IndexFile = FString());
 
 	UEAGENTINTERFACE_API bool LoadGroupedDetails(
 		const FString& DetailsRoot,
 		TSharedPtr<FJsonObject>& OutPropertiesJson,
-		FString& OutError,
-		const FString& IndexFile = FString());
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const FString& IndexFile = FString(),
+		TMap<FString, UE::UAI::Contract::FSourceLocation>* OutSourceLocations = nullptr);
 
 	UEAGENTINTERFACE_API bool HasGroupedDetails(const FString& DetailsRoot, const FString& IndexFile = FString());
 
@@ -229,7 +227,7 @@ namespace UeAgentDetailsAuthoring
 		const FString& EntryFilePath,
 		const TSharedPtr<FJsonObject>& EntryObject,
 		const FString& SourceCommand,
-		FString& OutError,
+		UE::UAI::Contract::FDiagnostic& OutError,
 		bool bScopeToEntryFile = false);
 
 	UEAGENTINTERFACE_API void RemoveDiagnosticAuthoringFieldsInObjectTree(
@@ -238,5 +236,5 @@ namespace UeAgentDetailsAuthoring
 	UEAGENTINTERFACE_API bool RehydrateGroupedDetailsInObjectTree(
 		const FString& EntryFilePath,
 		const TSharedPtr<FJsonObject>& EntryObject,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

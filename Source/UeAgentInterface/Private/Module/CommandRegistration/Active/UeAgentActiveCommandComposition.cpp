@@ -58,28 +58,28 @@ namespace UE::UAI::Module::CommandRegistration::Active
 
 	bool FUeAgentActiveCommandComposition::TryAdd(
 		TSharedRef<IUeAgentActiveCommandContribution> Contribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		const FString& ContributionId = Contribution->GetContributionId();
 		if (bSealed)
 		{
-			OutError = TEXT("active_command_composition_sealed:")
-				+ ContributionId;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("active_command_composition_sealed"), TEXT("Cannot add a contribution after command composition has been sealed."), TEXT("registration"), FString(), ContributionId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = ContributionId;
 			return false;
 		}
 		FString NormalizedId = ContributionId;
 		NormalizedId.TrimStartAndEndInline();
 		if (NormalizedId.IsEmpty() || NormalizedId != ContributionId)
 		{
-			OutError = TEXT("active_command_contribution_id_invalid:")
-				+ ContributionId;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("active_command_contribution_id_invalid"), TEXT("A contribution ID must be non-empty and have no surrounding whitespace."), TEXT("registration"), FString(), ContributionId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = ContributionId;
 			return false;
 		}
 		if (ContributionIds.Contains(ContributionId))
 		{
-			OutError = TEXT("active_command_contribution_duplicate:")
-				+ ContributionId;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("active_command_contribution_duplicate"), TEXT("The contribution ID is already registered."), TEXT("registration"), FString(), ContributionId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = ContributionId;
 			return false;
 		}
 		ContributionIds.Add(ContributionId);
@@ -90,20 +90,20 @@ namespace UE::UAI::Module::CommandRegistration::Active
 	bool FUeAgentActiveCommandComposition::TryCompose(
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();
 		OutError.Reset();
 		if (bSealed)
 		{
-			OutError = TEXT("active_command_composition_sealed:compose");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("active_command_composition_sealed"), TEXT("Command composition has already been sealed and cannot be composed again."), TEXT("registration"));
 			return false;
 		}
 		bSealed = true;
 		if (Contributions.IsEmpty())
 		{
-			OutError = TEXT("active_command_contribution_empty");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("active_command_contribution_empty"), TEXT("No command contributions were registered before composition."), TEXT("registration"));
 			return false;
 		}
 
@@ -148,18 +148,29 @@ namespace UE::UAI::Module::CommandRegistration::Active
 		{
 			TArray<TSharedRef<IUeAgentExactCommandHandler>>
 				ContributionHandlers;
-			FString ContributionError;
+			UE::UAI::Contract::FDiagnostic ContributionError;
 			if (!Contribution->CreateHandlers(
 				Registry.ToSharedRef(),
 				ContributionHandlers,
 				ContributionError))
 			{
-				OutError = TEXT("active_command_handler_creation_failed:")
-					+ Contribution->GetContributionId()
-					+ TEXT(":")
-					+ ContributionError;
+				OutError = ContributionError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(
+					TEXT("active_command_handler_creation_failed"), TEXT("The command contributor failed to create its handlers without returning a diagnostic."),
+					TEXT("command_composition")) : ContributionError;
+                if (ContributionError.IsEmpty()) OutError.SourceKind = TEXT("native_result");
+                if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Contribution->GetContributionId();
 				return false;
 			}
+			ContributionHandlers.RemoveAll(
+				[&Registry](
+					const TSharedRef<IUeAgentExactCommandHandler>& Handler)
+				{
+					const CommandContract::FUeAgentFrozenCommandContract* Contract =
+						Registry->FindExact(Handler->GetCommandId());
+					return Contract
+						&& !CommandLifecycle::IsExecutable(
+							Contract->GetAvailability());
+				});
 			Handlers.Append(ContributionHandlers);
 		}
 
@@ -188,7 +199,7 @@ namespace UE::UAI::Module::CommandRegistration::Active
 			ExactContributions,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();
@@ -212,7 +223,7 @@ namespace UE::UAI::Module::CommandRegistration::Active
 	bool TryComposeProcessActiveCommandComposition(
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();

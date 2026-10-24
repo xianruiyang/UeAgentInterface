@@ -5,9 +5,24 @@
 #include "Templates/SharedPointer.h"
 
 class UObject;
+class UDataTable;
+class UScriptStruct;
+class USkeletalMesh;
+class USkeletalMeshLODSettings;
+class USkeleton;
+struct FSkeletalMaterial;
 
 namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 {
+	/** Native replacement shared by ordinary authoring and the retained compatibility contract. */
+	void ReplaceSkeletalMeshSettings(USkeletalMesh& Mesh, const TArray<FSkeletalMaterial>& Materials,
+		USkeletalMeshLODSettings* LodSettings, const FBoxSphereBounds& ImportedBounds, USkeleton* Skeleton,
+		bool bApplyLodSettings = true, const TArray<int32>* CapturedMaterialIndices = nullptr);
+
+	/** Replaces rows whose field values have already passed their owning codec. */
+	bool TryReplaceDataTableRows(UDataTable& Table, UScriptStruct* RowStruct,
+		const TMap<FName, const uint8*>& Rows, ExecutionMutation::FExecutionMutationError& OutError);
+
 	struct FStructuredAssetPreparedData;
 
 	struct FStructuredAssetChangeView final
@@ -65,5 +80,6 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	bool TryRollbackStructuredAssetUpdate(
 		UObject* Target,
-		const FStructuredAssetPreparedState& State);
+		const FStructuredAssetPreparedState& State,
+		ExecutionMutation::FExecutionMutationError& OutError);
 }

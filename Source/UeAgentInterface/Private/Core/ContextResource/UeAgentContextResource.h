@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "HAL/CriticalSection.h"
 #include "Templates/Function.h"
 #include "Templates/SharedPointer.h"
@@ -25,28 +26,7 @@ namespace UE::UAI::ContextResource
 		const FString& Value,
 		EUeAgentResourceDimension& OutDimension);
 
-	struct FUeAgentResourceBudgetExceeded
-	{
-		FString Code;
-		EUeAgentResourceDimension Dimension = EUeAgentResourceDimension::WorkUnits;
-		int64 Limit = 0;
-		int64 Observed = 0;
-		FString Path;
-		bool bStoppedEarly = false;
-	};
-
-	class UEAGENTINTERFACE_API FUeAgentResourceBudget
-	{
-	public:
-		explicit FUeAgentResourceBudget(
-			const TMap<EUeAgentResourceDimension, int64>& InLimits);
-
-		TOptional<int64> LimitFor(EUeAgentResourceDimension Dimension) const;
-		const TMap<EUeAgentResourceDimension, int64>& GetLimits() const;
-
-	private:
-		TMap<EUeAgentResourceDimension, int64> Limits;
-	};
+	using FUeAgentResourceChargeError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentResourceUsage
 	{
@@ -72,10 +52,10 @@ namespace UE::UAI::ContextResource
 		bool TryCharge(
 			EUeAgentResourceDimension Dimension,
 			int64 Amount,
-			FUeAgentResourceBudgetExceeded& OutError);
+			FUeAgentResourceChargeError& OutError);
 		bool TryChargeMany(
 			const TMap<EUeAgentResourceDimension, int64>& Amounts,
-			FUeAgentResourceBudgetExceeded& OutError);
+			FUeAgentResourceChargeError& OutError);
 		const FString& GetPath() const;
 
 	private:
@@ -86,7 +66,7 @@ namespace UE::UAI::ContextResource
 	class UEAGENTINTERFACE_API FUeAgentResourceTracker
 	{
 	public:
-		explicit FUeAgentResourceTracker(FUeAgentResourceBudget InBudget);
+		FUeAgentResourceTracker();
 		FUeAgentResourceTracker(const FUeAgentResourceTracker&) = delete;
 		FUeAgentResourceTracker& operator=(const FUeAgentResourceTracker&) = delete;
 
@@ -95,16 +75,13 @@ namespace UE::UAI::ContextResource
 			EUeAgentResourceDimension Dimension,
 			int64 Amount,
 			const FString& Path,
-			FUeAgentResourceBudgetExceeded& OutError);
+			FUeAgentResourceChargeError& OutError);
 		bool TryChargeMany(
 			const TMap<EUeAgentResourceDimension, int64>& Amounts,
 			const FString& Path,
-			FUeAgentResourceBudgetExceeded& OutError);
+			FUeAgentResourceChargeError& OutError);
 		FUeAgentResourceUsage Snapshot() const;
-		const FUeAgentResourceBudget& GetBudget() const;
-
 	private:
-		FUeAgentResourceBudget Budget;
 		TMap<EUeAgentResourceDimension, int64> Values;
 		mutable FCriticalSection Mutex;
 	};
@@ -131,6 +108,7 @@ namespace UE::UAI::ContextResource
 	class UEAGENTINTERFACE_API FUeAgentOperationDeadline
 	{
 	public:
+		FUeAgentOperationDeadline();
 		static FUeAgentOperationDeadline FromTimeout(
 			double TimeoutSeconds,
 			FUeAgentMonotonicClock Clock);
@@ -160,12 +138,7 @@ namespace UE::UAI::ContextResource
 		double RequestedAt = 0.0;
 	};
 
-	struct FUeAgentCancellationRequested
-	{
-		FString Code;
-		FString Reason;
-		double RequestedAt = 0.0;
-	};
+	using FUeAgentCancellationRequested = Contract::FDiagnostic;
 
 	class FUeAgentCancellationState;
 

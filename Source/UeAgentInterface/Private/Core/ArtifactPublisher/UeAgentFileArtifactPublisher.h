@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 
@@ -8,6 +9,7 @@
 
 namespace UE::UAI::ArtifactPublisher
 {
+	using FFileArtifactPublishError = UE::UAI::Contract::FDiagnostic;
 	class UEAGENTINTERFACE_API FFileArtifactPublishRequest final
 	{
 	public:
@@ -26,6 +28,7 @@ namespace UE::UAI::ArtifactPublisher
 		const FString& GetFormat() const;
 		const FString& GetMimeType() const;
 		bool IsValid() const;
+		const FFileArtifactPublishError* GetValidationDiagnostic() const;
 
 	private:
 		FString SourcePath;
@@ -34,13 +37,13 @@ namespace UE::UAI::ArtifactPublisher
 		FString ArtifactKind;
 		FString Format;
 		FString MimeType;
-		bool bValid = false;
+		TSharedPtr<const FFileArtifactPublishError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FFileArtifactReference final
 	{
 	public:
-		FFileArtifactReference() = default;
+		FFileArtifactReference();
 		FFileArtifactReference(
 			FString InArtifactId,
 			FString InPublisherOwnerId,
@@ -60,6 +63,7 @@ namespace UE::UAI::ArtifactPublisher
 		const FString& GetContentHash() const;
 		int64 GetByteCount() const;
 		bool IsValid() const;
+		const FFileArtifactPublishError* GetValidationDiagnostic() const;
 
 	private:
 		FString ArtifactId;
@@ -70,26 +74,13 @@ namespace UE::UAI::ArtifactPublisher
 		FString Locator;
 		FString ContentHash;
 		int64 ByteCount = -1;
-		bool bValid = false;
+		TSharedPtr<const FFileArtifactPublishError> ValidationDiagnostic;
 	};
 
-	class UEAGENTINTERFACE_API FFileArtifactPublishError final
-	{
-	public:
-		const FString& GetCode() const;
-		const FString& GetPath() const;
-		const FString& GetDetail() const;
-		void Set(
-			FString InCode,
-			FString InPath = FString(),
-			FString InDetail = FString());
+	
 
-	private:
-		FString Code;
-		FString Path;
-		FString Detail;
-	};
-
+	// A failure after verified publication retains OutReference and reports artifact_published=true;
+	// callers must forward the diagnostic so cleanup failure is not mistaken for an unchanged destination.
 	UEAGENTINTERFACE_API bool TryPublishFileArtifact(
 		const FFileArtifactPublishRequest& Request,
 		ContextResource::FUeAgentResourceTracker& Resources,

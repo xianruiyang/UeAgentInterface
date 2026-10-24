@@ -2,6 +2,11 @@
 
 #include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeDebugEditorSession.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeDiagnostics.h"
+#include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationContract.h"
+#include "DomainAdapters/EditorProject/UeAgentSettingsConfig.h"
+
 #include "Async/Async.h"
 #include "Containers/Ticker.h"
 #include "Dom/JsonObject.h"
@@ -14,10 +19,12 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Misc/ScopeLock.h"
 #include "PlayInEditorDataTypes.h"
+#include "RHIGlobals.h"
 #include "Settings/LevelEditorPlaySettings.h"
 #include "Slate/SceneViewport.h"
 #include "UnrealEdGlobals.h"
 #include "UObject/UObjectGlobals.h"
+#include "UObject/StrongObjectPtr.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/SViewport.h"
 
@@ -27,21 +34,82 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 	using namespace EditorSessionOperation;
 	using namespace ExecutionMutation;
 	using namespace StateSemantic;
+	using namespace PieDiagnostics;
 
 	namespace
 	{
 		const TCHAR* DebugPolicyId =
-			TEXT("policy:runtime-session:pie-debug/v1");
+			TEXT("policy:runtime-session:pie-debug/v2");
 		const TCHAR* SubjectPrefix = TEXT("runtime-subject:pie:");
+		const FIntPoint DefaultPieViewportSize(1280, 720);
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
+		struct FPieWindowPreferences
 		{
-			OutError = FExecutionMutationError(MoveTemp(Code), MoveTemp(Detail));
-			return false;
-		}
+			FIntPoint Size;
+			FIntPoint Position;
+			FIntPoint LastSize;
+			TArray<FIntPoint> InstancePositions;
+			bool bCaptured = false;
+
+			void Capture()
+			{
+				const ULevelEditorPlaySettings* Settings = GetDefault<ULevelEditorPlaySettings>();
+				Size = FIntPoint(Settings->NewWindowWidth, Settings->NewWindowHeight);
+				Position = Settings->NewWindowPosition;
+				LastSize = Settings->LastSize;
+				InstancePositions = Settings->MultipleInstancePositions;
+				bCaptured = true;
+			}
+
+			bool Restore(UE::UAI::Contract::FDiagnostic& Error)
+			{
+				if (!bCaptured) return true;
+				ULevelEditorPlaySettings* Settings = GetMutableDefault<ULevelEditorPlaySettings>();
+				Settings->NewWindowWidth = Size.X;
+				Settings->NewWindowHeight = Size.Y;
+				Settings->NewWindowPosition = Position;
+				Settings->LastSize = LastSize;
+				Settings->MultipleInstancePositions = InstancePositions;
+				Settings->PostEditChange();
+				Settings->SaveConfig();
+				TStrongObjectPtr<ULevelEditorPlaySettings> Readback(
+					DuplicateObject<ULevelEditorPlaySettings>(Settings, GetTransientPackage()));
+				const FString Filename = EditorProject::SettingsConfigFilename(*Settings);
+				if (!EditorProject::ReadSettingsConfig(*Readback, *Settings, Filename, Error)) return false;
+				if (Readback->NewWindowWidth != Size.X || Readback->NewWindowHeight != Size.Y
+					|| Readback->NewWindowPosition != Position || Readback->MultipleInstancePositions != InstancePositions)
+				{
+					const auto PositionsFact = [](const TArray<FIntPoint>& Positions) {
+						TArray<TSharedPtr<FJsonValue>> Values;
+						for (const FIntPoint& Point : Positions)
+							Values.Add(Facts({{TEXT("x"), Number(Point.X)}, {TEXT("y"), Number(Point.Y)}}));
+						return MakeShared<FJsonValueArray>(MoveTemp(Values));
+					};
+					Error = Native(TEXT("pie_runtime_window_preferences_restore_failed"),
+						TEXT("The saved Play window preferences differ from their values before native PIE shutdown."),
+						TEXT("pie_session_cleanup"), TEXT("window_preferences"),
+						Facts({{TEXT("width"), Number(Readback->NewWindowWidth)}, {TEXT("height"), Number(Readback->NewWindowHeight)},
+							{TEXT("position_x"), Number(Readback->NewWindowPosition.X)}, {TEXT("position_y"), Number(Readback->NewWindowPosition.Y)},
+							{TEXT("instance_positions"), PositionsFact(Readback->MultipleInstancePositions)}}),
+						Facts({{TEXT("width"), Number(Size.X)}, {TEXT("height"), Number(Size.Y)},
+							{TEXT("position_x"), Number(Position.X)}, {TEXT("position_y"), Number(Position.Y)},
+							{TEXT("instance_positions"), PositionsFact(InstancePositions)}}));
+					Error.Source.SourceFile = Filename;
+					Error.TargetPath = Settings->GetPathName();
+					return false;
+				}
+				bCaptured = false;
+				return true;
+			}
+		};
+
+		bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
+            return false;
+        }
+
 
 		void DestroyHiddenSlateWindow(TSharedPtr<SWindow> Window)
 		{
@@ -55,6 +123,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 			const FUeAgentEditorSessionOperationTypedRequest& Request,
 			int32& OutPieInstance,
 			int32& OutLocalPlayerIndex,
+			FIntPoint& OutViewportSize,
 			FExecutionMutationError& OutError)
 		{
 			if (Request.GetFamily()
@@ -62,7 +131,20 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				|| Request.GetPolicyId() != DebugPolicyId
 				|| !Request.GetSubjectRef().StartsWith(SubjectPrefix))
 			{
-				return Fail(OutError, TEXT("pie_runtime_editor_session_request_invalid"));
+				if (Request.GetFamily() != EUeAgentEditorSessionOperationFamily::RuntimePreview)
+				{
+					const auto* Family = FindEditorSessionOperationFamilyContract(Request.GetFamily());
+					const TSharedPtr<FJsonValue> Actual = Family
+						? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Family->GetFamilyId()))
+						: Facts({ { TEXT("enum_value"), Number(static_cast<int32>(Request.GetFamily())) } });
+					return Fail(OutError, Input(TEXT("pie_runtime_editor_session_request_invalid"), TEXT("PIE debugging requires the runtime_preview editor session family."),
+						TEXT("execution"), TEXT("/family_id"), Actual, MakeShared<FJsonValueString>(TEXT("runtime_preview"))));
+				}
+				if (Request.GetPolicyId() != DebugPolicyId)
+					return Fail(OutError, Input(TEXT("pie_runtime_editor_session_request_invalid"), TEXT("The editor session policy does not match the PIE debug policy."),
+						TEXT("execution"), TEXT("/policy_id"), MakeShared<FJsonValueString>(Request.GetPolicyId()), MakeShared<FJsonValueString>(DebugPolicyId)));
+				return Fail(OutError, Input(TEXT("pie_runtime_editor_session_request_invalid"), TEXT("The PIE subject reference has an unsupported prefix."),
+					TEXT("execution"), TEXT("/subject_ref"), MakeShared<FJsonValueString>(Request.GetSubjectRef()), MakeShared<FJsonValueString>(TEXT("runtime-subject:pie:<nonnegative instance>"))));
 			}
 
 			const FString InstanceText = Request.GetSubjectRef().RightChop(
@@ -71,39 +153,55 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				|| !LexTryParseString(OutPieInstance, *InstanceText)
 				|| OutPieInstance < 0)
 			{
-				return Fail(OutError, TEXT("pie_runtime_instance_invalid"));
+				return Fail(OutError, Input(TEXT("pie_runtime_instance_invalid"), TEXT("The PIE subject reference must contain a nonnegative integer instance."),
+					TEXT("execution"), TEXT("/subject_ref"), MakeShared<FJsonValueString>(Request.GetSubjectRef()), MakeShared<FJsonValueString>(TEXT("runtime-subject:pie:<nonnegative int32>"))));
 			}
 
 			const FUeAgentCanonicalValue& Parameters = Request.GetParameters().Get();
 			if (Parameters.GetKind() != EUeAgentValueKind::Object)
 			{
-				return Fail(OutError, TEXT("pie_runtime_editor_parameters_invalid"));
+				return Fail(OutError, Input(TEXT("pie_runtime_editor_parameters_invalid"), TEXT("PIE editor session parameters must be an object."),
+					TEXT("execution"), TEXT("/parameters"), CanonicalValueFact(Parameters), MakeShared<FJsonValueString>(TEXT("object"))));
 			}
 			OutLocalPlayerIndex = 0;
-			bool bHasLocalPlayerIndex = false;
+			OutViewportSize = DefaultPieViewportSize;
+			TSet<FString> SeenParameters;
 			for (const TPair<FString, FUeAgentCanonicalValueRef>& Item
 				: Parameters.GetObjectItems())
 			{
-				if (Item.Key != TEXT("local_player_index")
-					|| bHasLocalPlayerIndex
-					|| Item.Value->GetKind() != EUeAgentValueKind::Integer
-					|| !LexTryParseString(
-						OutLocalPlayerIndex, *Item.Value->GetLexeme())
-					|| OutLocalPlayerIndex != 0)
-				{
-					return Fail(
-						OutError, TEXT("pie_runtime_editor_parameters_invalid"));
-				}
-				bHasLocalPlayerIndex = true;
+				const FString Token = Item.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+				const FString Pointer = TEXT("/parameters/") + Token;
+				const bool bPlayerIndex = Item.Key == TEXT("local_player_index");
+				const bool bWidth = Item.Key == TEXT("viewport_width");
+				const bool bHeight = Item.Key == TEXT("viewport_height");
+				if (!bPlayerIndex && !bWidth && !bHeight)
+					return Fail(OutError, Input(TEXT("pie_runtime_editor_parameters_invalid"), TEXT("The PIE editor session does not support this parameter."),
+						TEXT("execution"), Pointer, MakeShared<FJsonValueString>(Item.Key), MakeShared<FJsonValueString>(TEXT("local_player_index, viewport_width, viewport_height"))));
+				if (SeenParameters.Contains(Item.Key))
+					return Fail(OutError, Input(TEXT("pie_runtime_editor_parameters_invalid"), TEXT("The PIE editor session parameter is specified more than once."),
+						TEXT("execution"), Pointer, Number(2), Number(1)));
+				SeenParameters.Add(Item.Key);
+				int32 Value = 0;
+				if (Item.Value->GetKind() != EUeAgentValueKind::Integer
+					|| !LexTryParseString(Value, *Item.Value->GetLexeme())
+					|| (bPlayerIndex ? Value != 0 : Value <= 0))
+					return Fail(OutError, Input(TEXT("pie_runtime_editor_parameters_invalid"),
+						bPlayerIndex ? TEXT("The PIE debug session requires local_player_index to be the integer zero.")
+							: TEXT("A PIE viewport dimension must be a positive int32 pixel count."),
+						TEXT("execution"), Pointer, CanonicalValueFact(Item.Value.Get()),
+						bPlayerIndex ? Number(0) : Facts({{TEXT("minimum"), Number(1)}, {TEXT("maximum"), Number(MAX_int32)}})));
+				if (bPlayerIndex) OutLocalPlayerIndex = Value;
+				else if (bWidth) OutViewportSize.X = Value;
+				else OutViewportSize.Y = Value;
 			}
 			return true;
 		}
 
 		bool IsActivationPendingError(
-			const FString& Error,
+			const UE::UAI::Contract::FDiagnostic& Error,
 			int32 PieInstance)
 		{
-			if (Error == TEXT("pie_runtime_instance_not_found"))
+			if (Error.Code == TEXT("pie_runtime_instance_not_found"))
 			{
 				if (!GEngine)
 				{
@@ -118,12 +216,12 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				}
 				return true;
 			}
-			if (Error == TEXT("pie_runtime_game_instance_missing")
-				|| Error == TEXT("pie_runtime_player_controller_missing"))
+			if (Error.Code == TEXT("pie_runtime_game_instance_missing")
+				|| Error.Code == TEXT("pie_runtime_player_controller_missing"))
 			{
 				return true;
 			}
-			if (Error != TEXT("pie_runtime_requires_exactly_one_local_player"))
+			if (Error.Code != TEXT("pie_runtime_requires_exactly_one_local_player"))
 			{
 				return false;
 			}
@@ -147,6 +245,20 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 			ExitedFailure,
 		};
 
+		const TCHAR* StateName(EDebugEditorSessionState State)
+		{
+			switch (State)
+			{
+			case EDebugEditorSessionState::Scheduled: return TEXT("scheduled");
+			case EDebugEditorSessionState::Launching: return TEXT("launching");
+			case EDebugEditorSessionState::Active: return TEXT("active");
+			case EDebugEditorSessionState::Stopping: return TEXT("stopping");
+			case EDebugEditorSessionState::ExitedSuccess: return TEXT("exited_success");
+			case EDebugEditorSessionState::ExitedFailure: return TEXT("exited_failure");
+			}
+			return TEXT("unknown");
+		}
+
 		enum class EHiddenPieSurfaceOwnership : uint8
 		{
 			None,
@@ -165,16 +277,26 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 			FPieRuntimeDebugEditorSession(
 				int32 InPieInstance,
 				int32 InLocalPlayerIndex,
+				FIntPoint InViewportSize,
 				TSharedRef<FUeAgentPieRuntimeDebugRegistry, ESPMode::ThreadSafe>
 					InRegistry)
 				: PieInstance(InPieInstance)
 				, LocalPlayerIndex(InLocalPlayerIndex)
+				, ViewportSize(InViewportSize)
 				, Registry(MoveTemp(InRegistry))
 			{
 			}
 
 			~FPieRuntimeDebugEditorSession() override
 			{
+				const FDelegateHandle LocalPreEndHandle = PreEndHandle;
+				const FDelegateHandle LocalShutdownHandle = ShutdownHandle;
+				auto RemovePreferenceDelegates = [LocalPreEndHandle, LocalShutdownHandle]() {
+					FEditorDelegates::PrePIEEnded.Remove(LocalPreEndHandle);
+					FEditorDelegates::ShutdownPIE.Remove(LocalShutdownHandle);
+				};
+				if (IsInGameThread()) RemovePreferenceDelegates();
+				else AsyncTask(ENamedThreads::GameThread, MoveTemp(RemovePreferenceDelegates));
 				FTSTicker::FDelegateHandle LocalLifecycleTicker;
 				FTSTicker::FDelegateHandle LocalStopTicker;
 				TSharedPtr<SWindow> LocalHiddenPieWindow;
@@ -225,14 +347,11 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				FScopeLock Lock(&Mutex);
 				if (bStarted)
 				{
-					return Fail(
-						OutError, TEXT("pie_runtime_editor_session_already_started"));
+					return Fail(OutError, Native(TEXT("pie_runtime_editor_session_already_started"), TEXT("The PIE editor session has already started."), TEXT("execution"), TEXT("started"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false)));
 				}
 				if (Cancellation.IsCancelled())
 				{
-					return Fail(
-						OutError,
-						TEXT("pie_runtime_editor_session_cancelled_before_start"));
+					return Fail(OutError, Native(TEXT("pie_runtime_editor_session_cancelled_before_start"), TEXT("The PIE editor session was cancelled before it could start."), TEXT("execution"), TEXT("cancelled"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false)));
 				}
 				bStarted = true;
 				CancellationToken = MakeUnique<FUeAgentCancellationToken>(Cancellation);
@@ -250,24 +369,23 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				FExecutionMutationError& OutError) override
 			{
 				EDebugEditorSessionState ObservedState;
-				FString ObservedErrorCode;
+				UE::UAI::Contract::FDiagnostic ObservedDiagnostic;
 				FString ObservedSessionRef;
 				{
 					FScopeLock Lock(&Mutex);
 					if (!bStarted)
 					{
-						return Fail(
-							OutError, TEXT("pie_runtime_editor_session_not_started"));
+						return Fail(OutError, Native(TEXT("pie_runtime_editor_session_not_started"), TEXT("The PIE editor session has not started."), TEXT("execution"), TEXT("started"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 					}
 					ObservedState = State;
-					ObservedErrorCode = ErrorCode;
+					ObservedDiagnostic = StateDiagnostic;
 					ObservedSessionRef = SessionRef;
 				}
 
 				FUeAgentPieRuntimeDebugCachedSnapshot CurrentSnapshot;
 				if (ObservedState == EDebugEditorSessionState::Active)
 				{
-					FString SnapshotError;
+					UE::UAI::Contract::FDiagnostic SnapshotError;
 					if (!Registry->TryGetCachedSnapshot(
 							ObservedSessionRef, CurrentSnapshot, SnapshotError))
 					{
@@ -317,7 +435,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				OutObservation = FUeAgentEditorSessionNativeObservation(
 					WorkState,
 					MoveTemp(Phase),
-					MoveTemp(ObservedErrorCode),
+					MoveTemp(ObservedDiagnostic),
 					MoveTemp(ObservedSessionRef),
 					MoveTemp(Details));
 				return true;
@@ -331,8 +449,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 					FScopeLock Lock(&Mutex);
 					if (!bStarted)
 					{
-						return Fail(
-							OutError, TEXT("pie_runtime_editor_session_not_started"));
+						return Fail(OutError, Native(TEXT("pie_runtime_editor_session_not_started"), TEXT("The PIE editor session has not started."), TEXT("execution"), TEXT("started"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 					}
 					if (State == EDebugEditorSessionState::ExitedSuccess
 						|| State == EDebugEditorSessionState::ExitedFailure
@@ -346,7 +463,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 					Self = StaticCastSharedRef<FPieRuntimeDebugEditorSession>(AsShared());
 				AsyncTask(
 					ENamedThreads::GameThread,
-					[Self]() { Self->BeginStopOnGameThread(true, FString()); });
+					[Self]() { Self->BeginStopOnGameThread(true, UE::UAI::Contract::FDiagnostic()); });
 				return true;
 			}
 
@@ -356,8 +473,8 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				return State == EDebugEditorSessionState::ExitedSuccess
 					|| State == EDebugEditorSessionState::ExitedFailure
 					? true
-					: Fail(
-						OutError, TEXT("pie_runtime_editor_session_join_before_exit"));
+					: Fail(OutError, Native(TEXT("pie_runtime_editor_session_join_before_exit"), TEXT("The PIE editor session must reach a terminal state before joining."),
+						TEXT("execution"), TEXT("state"), MakeShared<FJsonValueString>(StateName(State)), MakeShared<FJsonValueString>(TEXT("exited_success or exited_failure"))));
 			}
 
 			bool Release(FExecutionMutationError& OutError) override
@@ -370,12 +487,23 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 		private:
 			bool TryCreateHiddenPieSurfaceOnGameThread(
 				FRequestPlaySessionParams& OutParams,
-				FString& OutError)
+				UE::UAI::Contract::FDiagnostic& OutError)
 			{
 				check(IsInGameThread());
 				if (!FSlateApplication::IsInitialized())
 				{
-					OutError = TEXT("pie_runtime_editor_slate_unavailable");
+					OutError = Native(TEXT("pie_runtime_editor_slate_unavailable"), TEXT("Slate is unavailable for creating the PIE window."), TEXT("pie_session"), TEXT("slate_initialized"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return false;
+				}
+				const uint32 MaxDimension = GetMax2DTextureDimension();
+				if (static_cast<uint32>(ViewportSize.X) > MaxDimension || static_cast<uint32>(ViewportSize.Y) > MaxDimension)
+				{
+					const bool bWidth = static_cast<uint32>(ViewportSize.X) > MaxDimension;
+					OutError = Input(TEXT("pie_runtime_viewport_dimension_unsupported"),
+						TEXT("The requested PIE viewport dimension exceeds the active renderer's maximum 2D texture dimension."),
+						TEXT("pie_session"), bWidth ? TEXT("/parameters/viewport_width") : TEXT("/parameters/viewport_height"),
+						Number(bWidth ? ViewportSize.X : ViewportSize.Y),
+						Facts({{TEXT("minimum"), Number(1)}, {TEXT("maximum"), Number(MaxDimension)}}));
 					return false;
 				}
 				ULevelEditorPlaySettings* PlaySettings = DuplicateObject<
@@ -383,7 +511,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 						GetDefault<ULevelEditorPlaySettings>(), GetTransientPackage());
 				if (!PlaySettings)
 				{
-					OutError = TEXT("pie_runtime_editor_play_settings_create_failed");
+					OutError = Native(TEXT("pie_runtime_editor_play_settings_create_failed"), TEXT("The PIE session could not create its transient play settings."), TEXT("pie_session"), TEXT("play_settings_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return false;
 				}
 				PlaySettings->GameGetsMouseControl = false;
@@ -404,7 +532,8 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				const TSharedRef<SWindow> Window = SNew(SWindow)
 					.Title(FText::FromString(TEXT("UAI Background PIE")))
 					.Tag(TEXT("UAIBackgroundPIEWindow"))
-					.ClientSize(FVector2D(1280.0, 720.0))
+					.ClientSize(FVector2D(ViewportSize))
+					.AdjustInitialSizeAndPositionForDPIScale(false)
 					.AutoCenter(EAutoCenter::None)
 					.ScreenPosition(FVector2D::ZeroVector)
 					.SizingRule(ESizingRule::FixedSize)
@@ -520,7 +649,11 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 						|| GUnrealEd->GetPlaySessionRequest().IsSet())
 					{
 						State = EDebugEditorSessionState::ExitedFailure;
-						ErrorCode = TEXT("pie_runtime_editor_launch_unavailable");
+						const bool bEditorAvailable = GUnrealEd && GEditor;
+						const TCHAR* Field = !bEditorAvailable ? TEXT("editor_available")
+							: GEditor->PlayWorld ? TEXT("play_world_active") : TEXT("play_session_pending");
+						StateDiagnostic = Native(TEXT("pie_runtime_editor_launch_unavailable"), TEXT("PIE cannot launch without an available editor and no active or pending play session."),
+							TEXT("pie_session"), Field, MakeShared<FJsonValueBoolean>(bEditorAvailable), MakeShared<FJsonValueBoolean>(!bEditorAvailable));
 						return;
 					}
 					State = EDebugEditorSessionState::Launching;
@@ -529,18 +662,40 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				FRequestPlaySessionParams Params;
 				Params.SessionDestination = EPlaySessionDestinationType::InProcess;
 				Params.WorldType = EPlaySessionWorldType::PlayInEditor;
-				FString SurfaceError;
+				UE::UAI::Contract::FDiagnostic SurfaceError;
 				if (!TryCreateHiddenPieSurfaceOnGameThread(Params, SurfaceError))
 				{
 					FScopeLock Lock(&Mutex);
 					State = EDebugEditorSessionState::ExitedFailure;
-					ErrorCode = MoveTemp(SurfaceError);
+					StateDiagnostic = MoveTemp(SurfaceError);
 					return;
 				}
-				GUnrealEd->RequestPlaySession(Params);
-
 				const TWeakPtr<FPieRuntimeDebugEditorSession, ESPMode::ThreadSafe>
 					WeakSelf = AsShared();
+				// Capture immediately before native shutdown, preserving any deliberate
+				// preference edits made while this session was running. UE saves its
+				// hidden window layout before ShutdownPIE; restore only those fields.
+				const auto PreferenceOwner = AsShared();
+				PreEndHandle = FEditorDelegates::PrePIEEnded.AddLambda([PreferenceOwner](bool) {
+					PreferenceOwner->WindowPreferences.Capture();
+				});
+				ShutdownHandle = FEditorDelegates::ShutdownPIE.AddLambda([PreferenceOwner](bool) {
+					const auto Self = PreferenceOwner;
+					{
+						UE::UAI::Contract::FDiagnostic Error;
+						if (!Self->WindowPreferences.Restore(Error))
+						{
+							FScopeLock Lock(&Self->Mutex);
+							Self->PendingDiagnostic.Append(Error);
+						}
+						FEditorDelegates::PrePIEEnded.Remove(Self->PreEndHandle);
+						FEditorDelegates::ShutdownPIE.Remove(Self->ShutdownHandle);
+						Self->PreEndHandle.Reset();
+						Self->ShutdownHandle.Reset();
+					}
+				});
+				GUnrealEd->RequestPlaySession(Params);
+
 				const FTSTicker::FDelegateHandle Handle =
 					FTSTicker::GetCoreTicker().AddTicker(
 						FTickerDelegate::CreateLambda(
@@ -559,8 +714,8 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 					{
 						FScopeLock Lock(&Mutex);
 						State = EDebugEditorSessionState::ExitedFailure;
-						ErrorCode =
-							TEXT("pie_runtime_editor_launch_poll_schedule_failed");
+						StateDiagnostic =
+							Native(TEXT("pie_runtime_editor_launch_poll_schedule_failed"), TEXT("The PIE session lifecycle ticker could not be registered."), TEXT("pie_session"), TEXT("lifecycle_ticker_registered"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					}
 					if (GEditor && GEditor->PlayWorld)
 					{
@@ -578,10 +733,18 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 					else if (GUnrealEd->GetPlaySessionRequest().IsSet())
 					{
 						GUnrealEd->CancelRequestPlaySession();
+						FEditorDelegates::PrePIEEnded.Remove(PreEndHandle);
+						FEditorDelegates::ShutdownPIE.Remove(ShutdownHandle);
+						PreEndHandle.Reset();
+						ShutdownHandle.Reset();
 						ReleaseHiddenPieSurfaceOnGameThread();
 					}
 					else
 					{
+						FEditorDelegates::PrePIEEnded.Remove(PreEndHandle);
+						FEditorDelegates::ShutdownPIE.Remove(ShutdownHandle);
+						PreEndHandle.Reset();
+						ShutdownHandle.Reset();
 						ReleaseHiddenPieSurfaceOnGameThread();
 					}
 					return;
@@ -608,7 +771,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				}
 				if (bLocalStopRequested || bCancelled)
 				{
-					BeginStopOnGameThread(true, FString());
+					BeginStopOnGameThread(true, UE::UAI::Contract::FDiagnostic());
 					return false;
 				}
 
@@ -616,15 +779,39 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				{
 					if (!ActiveWorld.IsValid())
 					{
-						BeginStopOnGameThread(
-							false, TEXT("pie_runtime_editor_world_lost"));
+						BeginStopOnGameThread(false, Native(TEXT("pie_runtime_editor_world_lost"), TEXT("The active PIE session lost its world."), TEXT("pie_session"), TEXT("world_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 						return false;
 					}
 					return true;
 				}
 
+				// Hidden windows do not receive the normal visible Slate layout pass.
+				// Initialize their native viewport before publishing the paused workspace.
+				if (GEditor)
+				{
+					if (FWorldContext* Context = GEditor->GetPIEWorldContext(PieInstance))
+					{
+						UGameViewportClient* Client = Context->World()
+							? Context->World()->GetGameViewport() : nullptr;
+						FSceneViewport* Viewport = Client ? Client->GetGameViewport() : nullptr;
+						if (Viewport && Viewport->GetSizeXY() != ViewportSize)
+						{
+							Viewport->SetViewportSize(ViewportSize.X, ViewportSize.Y);
+							if (Viewport->GetSizeXY() != ViewportSize)
+							{
+								const FIntPoint Actual = Viewport->GetSizeXY();
+								BeginStopOnGameThread(false, Native(TEXT("pie_runtime_viewport_size_mismatch"),
+									TEXT("The native PIE viewport did not accept the requested pixel dimensions."),
+									TEXT("pie_session"), TEXT("viewport_size"),
+									Facts({{TEXT("width"), Number(Actual.X)}, {TEXT("height"), Number(Actual.Y)}}),
+									Facts({{TEXT("width"), Number(ViewportSize.X)}, {TEXT("height"), Number(ViewportSize.Y)}})));
+								return false;
+							}
+						}
+					}
+				}
 				FUeAgentPieRuntimeDebugSnapshot ActivatedSnapshot;
-				FString ActivationError;
+				UE::UAI::Contract::FDiagnostic ActivationError;
 				if (Registry->TryActivate(
 						PieInstance,
 						LocalPlayerIndex,
@@ -650,7 +837,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				return false;
 			}
 
-			void BeginStopOnGameThread(bool bRequestedSuccess, FString FailureCode)
+			void BeginStopOnGameThread(bool bRequestedSuccess, UE::UAI::Contract::FDiagnostic FailureDiagnostic)
 			{
 				check(IsInGameThread());
 				RefreshHiddenPieSurfaceOwnershipOnGameThread();
@@ -665,30 +852,26 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 					}
 					State = EDebugEditorSessionState::Stopping;
 					bTerminalSuccessRequested = bRequestedSuccess;
-					PendingFailureCode = MoveTemp(FailureCode);
+					PendingDiagnostic.Append(FailureDiagnostic);
 					ActiveSessionRef = SessionRef;
 					LifecycleTicker.Reset();
 				}
 
 				if (!ActiveSessionRef.IsEmpty())
 				{
-					FString RegistryError;
+					UE::UAI::Contract::FDiagnostic RegistryError;
 					if (!Registry->TryEndSession(ActiveSessionRef, RegistryError))
 					{
 						FScopeLock Lock(&Mutex);
 						bTerminalSuccessRequested = false;
 						bRegistryCleanupPending = true;
-						if (PendingFailureCode.IsEmpty())
-						{
-							PendingFailureCode = RegistryError;
-						}
+						PendingDiagnostic.Append(RegistryError);
 					}
 				}
 
 				if (!GUnrealEd)
 				{
-					CompleteStopOnGameThread(
-						false, TEXT("pie_runtime_editor_stop_unavailable"));
+					CompleteStopOnGameThread(false, Native(TEXT("pie_runtime_editor_stop_unavailable"), TEXT("The Unreal Editor is unavailable to stop the PIE session."), TEXT("pie_session"), TEXT("editor_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 					return;
 				}
 				if (GEditor && GEditor->PlayWorld)
@@ -719,7 +902,8 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				if (!Handle.IsValid())
 				{
 					State = EDebugEditorSessionState::ExitedFailure;
-					ErrorCode = TEXT("pie_runtime_editor_stop_poll_schedule_failed");
+					StateDiagnostic = PendingDiagnostic;
+					StateDiagnostic.Append(Native(TEXT("pie_runtime_editor_stop_poll_schedule_failed"), TEXT("The PIE session stop ticker could not be registered."), TEXT("pie_session"), TEXT("stop_ticker_registered"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 				}
 				else
 				{
@@ -744,7 +928,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 				}
 				if (bRetryRegistryCleanup && !ActiveSessionRef.IsEmpty())
 				{
-					FString RegistryError;
+					UE::UAI::Contract::FDiagnostic RegistryError;
 					if (!Registry->TryEndSession(ActiveSessionRef, RegistryError))
 					{
 						CompleteStopOnGameThread(false, MoveTemp(RegistryError));
@@ -753,42 +937,56 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 					FScopeLock Lock(&Mutex);
 					bRegistryCleanupPending = false;
 				}
-				CompleteStopOnGameThread(true, FString());
+				CompleteStopOnGameThread(true, UE::UAI::Contract::FDiagnostic());
 				return false;
 			}
 
-			void CompleteStopOnGameThread(bool bCleanupSucceeded, FString CleanupError)
+			void CompleteStopOnGameThread(bool bCleanupSucceeded, UE::UAI::Contract::FDiagnostic CleanupError)
 			{
+				FEditorDelegates::PrePIEEnded.Remove(PreEndHandle);
+				FEditorDelegates::ShutdownPIE.Remove(ShutdownHandle);
+				PreEndHandle.Reset();
+				ShutdownHandle.Reset();
+				UE::UAI::Contract::FDiagnostic PreferenceError;
+				if (!WindowPreferences.Restore(PreferenceError))
+				{
+					bCleanupSucceeded = false;
+					CleanupError.Append(PreferenceError);
+				}
 				ReleaseHiddenPieSurfaceOnGameThread();
 				FScopeLock Lock(&Mutex);
 				StopTicker.Reset();
 				const bool bSuccess = bCleanupSucceeded
 					&& bTerminalSuccessRequested
-					&& PendingFailureCode.IsEmpty();
+					&& PendingDiagnostic.IsEmpty();
 				State = bSuccess
 					? EDebugEditorSessionState::ExitedSuccess
 					: EDebugEditorSessionState::ExitedFailure;
-				ErrorCode = bSuccess
-					? FString()
-					: (!PendingFailureCode.IsEmpty()
-						? PendingFailureCode
-						: MoveTemp(CleanupError));
-				if (!bSuccess && ErrorCode.IsEmpty())
+				StateDiagnostic = PendingDiagnostic;
+                StateDiagnostic.Append(CleanupError);
+				if (!bSuccess && StateDiagnostic.IsEmpty())
 				{
-					ErrorCode = TEXT("pie_runtime_editor_stop_failed");
+					StateDiagnostic = Native(TEXT("pie_runtime_editor_stop_failed"), TEXT("The PIE session stopped without satisfying its requested terminal and cleanup state."),
+						TEXT("pie_session"), TEXT("stop"),
+						Facts({ { TEXT("cleanup_succeeded"), MakeShared<FJsonValueBoolean>(bCleanupSucceeded) }, { TEXT("terminal_success_requested"), MakeShared<FJsonValueBoolean>(bTerminalSuccessRequested) } }),
+						Facts({ { TEXT("cleanup_succeeded"), MakeShared<FJsonValueBoolean>(true) }, { TEXT("terminal_success_requested"), MakeShared<FJsonValueBoolean>(true) } }));
 				}
 			}
 
 			const int32 PieInstance;
 			const int32 LocalPlayerIndex;
+			const FIntPoint ViewportSize;
+			FPieWindowPreferences WindowPreferences;
+			FDelegateHandle PreEndHandle;
+			FDelegateHandle ShutdownHandle;
 			TSharedRef<FUeAgentPieRuntimeDebugRegistry, ESPMode::ThreadSafe> Registry;
 			FCriticalSection Mutex;
 			TUniquePtr<FUeAgentCancellationToken> CancellationToken;
 			TWeakObjectPtr<UWorld> ActiveWorld;
 			FString NativeResourceId;
 			FString SessionRef;
-			FString ErrorCode;
-			FString PendingFailureCode;
+			UE::UAI::Contract::FDiagnostic StateDiagnostic;
+			UE::UAI::Contract::FDiagnostic PendingDiagnostic;
 			FTSTicker::FDelegateHandle LifecycleTicker;
 			FTSTicker::FDelegateHandle StopTicker;
 			TSharedPtr<SWindow> HiddenPieWindow;
@@ -813,13 +1011,14 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 		OutSession.Reset();
 		int32 PieInstance = INDEX_NONE;
 		int32 LocalPlayerIndex = INDEX_NONE;
+		FIntPoint ViewportSize;
 		if (!TryReadRequest(
-				Request, PieInstance, LocalPlayerIndex, OutError))
+				Request, PieInstance, LocalPlayerIndex, ViewportSize, OutError))
 		{
 			return false;
 		}
 		OutSession = MakeShared<FPieRuntimeDebugEditorSession, ESPMode::ThreadSafe>(
-			PieInstance, LocalPlayerIndex, MoveTemp(Registry));
+			PieInstance, LocalPlayerIndex, ViewportSize, MoveTemp(Registry));
 		return true;
 	}
 }

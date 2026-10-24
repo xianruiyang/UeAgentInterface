@@ -40,12 +40,15 @@ namespace UE::UAI::Module::CommandRegistration::EditorProject
 			const FString& Id,
 			const FUeAgentCommandContractRegistry& Legacy,
 			FUeAgentCommandDeclaration& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(Id);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("editor_project_contract_missing:") + Id;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("editor_project_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("editor_project_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			FUeAgentCommandDeclaration Result;
@@ -61,7 +64,7 @@ namespace UE::UAI::Module::CommandRegistration::EditorProject
 			{
 				Result.InputFields.Add({P.GetName(), WireType(P.GetWireType()),
 					P.IsRequired(), P.IsNullable(),
-					TEXT("Exact Editor project mechanics parameter.")});
+					TEXT("Exact Editor project mechanics parameter."), P.GetSchemaJson()});
 			}
 			Result.ResultFields = {
 				Field(TEXT("operation_id"), TEXT("string"), true,
@@ -77,13 +80,13 @@ namespace UE::UAI::Module::CommandRegistration::EditorProject
 			Result.Purpose.Summary = TEXT("Execute ") + Id
 				+ TEXT(" through the common OperationService and Editor project mechanics.");
 			Result.Purpose.Target = TEXT("One exact project configuration or project-owned asset target declared by the contract.");
-			Result.Purpose.Preconditions = {TEXT("Resolve the exact project setting and current revision before mutation.")};
-			Result.Purpose.ParameterGuidance = TEXT("Use only query.command.detail fields.");
+			Result.Purpose.Preconditions = {TEXT("Resolve the exact project setting before mutation; the server binds its current revision internally.")};
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters.");
 			Result.Purpose.ResultGuidance = TEXT("Success requires persisted and verified terminal projection evidence.");
 			Result.Purpose.FailureGuidance = TEXT("state_unknown is non-replayable.");
 			Result.Purpose.SideEffectGuidance = TEXT("Uses the formal native EditorProject simple effect.");
 			Result.Purpose.MinimumExample = Result.PythonFunction + TEXT("(client, params)");
-			Result.Purpose.RelatedFlows = {TEXT("query.command.detail"), TEXT("project readback")};
+			Result.Purpose.RelatedFlows = {TEXT("query.command.usage"), TEXT("project readback")};
 			Result.Purpose.Keywords = {TEXT("editor"), TEXT("project"), TEXT("config")};
 			Result.Purpose.Synonyms = {TEXT("project settings operation")};
 			Out = MoveTemp(Result);
@@ -107,7 +110,7 @@ namespace UE::UAI::Module::CommandRegistration::EditorProject
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::EditorProject::TryCreateHandlers(Out, OutError);
 			}
@@ -121,7 +124,7 @@ namespace UE::UAI::Module::CommandRegistration::EditorProject
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
@@ -140,10 +143,6 @@ namespace UE::UAI::Module::CommandRegistration::EditorProject
 				return false;
 			}
 			Declarations.Add(MoveTemp(Declaration));
-		}
-		if (Declarations.Num() != 7)
-		{
-			return false;
 		}
 		OutContribution = MakeShared<FContribution>(MoveTemp(Declarations));
 		return true;

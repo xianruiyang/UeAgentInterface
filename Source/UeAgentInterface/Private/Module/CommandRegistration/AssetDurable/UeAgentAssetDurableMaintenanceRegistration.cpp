@@ -39,7 +39,9 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 			Result.PythonFunction = PythonFunction;
 			Result.ContractVersion = 1;
 			Result.PublicOwner = Owner;
-			Result.Availability = EUeAgentCommandAvailability::Enabled;
+			// The commands remain exact-dispatchable for DurableJournalHandle,
+			// but journal/owner/fence/integrity identities are not model-facing.
+			Result.Availability = EUeAgentCommandAvailability::Dormant;
 			Result.SideEffect = SideEffect;
 			Result.StateLayers = {TEXT("asset_persisted_state")};
 			return Result;
@@ -84,11 +86,11 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 					TEXT("The active journal failed path, schema, integrity or inventory validation.")),
 				Error(TEXT("durable_artifact_readback_failed"),
 					TEXT("A bound durable artifact could not be independently read.")),
-				Error(TEXT("resource_budget_exceeded"),
-					TEXT("The bounded maintenance read exceeded its resource contract.")),
+				Error(TEXT("resource_accounting_failed"),
+					TEXT("The maintenance read received invalid internal resource accounting.")),
 			};
 			Result.Purpose.Summary = TEXT(
-				"Read one exact active AssetDurable journal and fresh artifact state without mutation.");
+				"Internal SDK inspection for one typed durable-journal handle.");
 			Result.Purpose.Target = TEXT(
 				"One active SimpleAuthoring durable journal and only its bound artifact inventory.");
 			Result.Purpose.Preconditions = {
@@ -96,7 +98,7 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 				TEXT("Use the exact journal_id from a durable failure or maintenance receipt."),
 			};
 			Result.Purpose.ParameterGuidance = TEXT(
-				"Do not guess owner or fence; read them from this result before reconcile.");
+				"SDK handle custody only; model-facing callers never read or provide journal identities.");
 			Result.Purpose.ResultGuidance = TEXT(
 				"Preserve journal_id, journal_owner_id, fencing_token, plan_fingerprint and inventory_hash unchanged as one evidence binding.");
 			Result.Purpose.FailureGuidance = TEXT(
@@ -104,10 +106,10 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 			Result.Purpose.SideEffectGuidance = TEXT(
 				"Read-only exact-journal inspection; no journal phase, asset or Editor state is changed.");
 			Result.Purpose.MinimumExample = TEXT(
-				"client.asset_durable.journal_read(journal_id)");
+				"result.durable_journals[0].inspect()");
 			Result.Purpose.RelatedFlows = {
 				TEXT("asset_durable.journal.reconcile"),
-				TEXT("query.command.detail"),
+				TEXT("query.command.usage"),
 			};
 			Result.Purpose.Keywords = {
 				TEXT("durable"), TEXT("journal"), TEXT("recovery"),
@@ -167,7 +169,7 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 					TEXT("The journal changed or failed integrity validation.")),
 			};
 			Result.Purpose.Summary = TEXT(
-				"Dispose one exact durable journal from journal-bound evidence without replaying its business operation.");
+				"Internal SDK reconciliation for one typed durable-journal handle.");
 			Result.Purpose.Target = TEXT(
 				"One active SimpleAuthoring durable journal already inspected through journal.read.");
 			Result.Purpose.Preconditions = {
@@ -176,7 +178,7 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 				TEXT("The caller has uai:operate authority."),
 			};
 			Result.Purpose.ParameterGuidance = TEXT(
-				"Use a stable verification_id for the maintenance attempt; never fabricate owner or fence values.");
+				"SDK handle custody generates and forwards journal, owner, fence and verification identities.");
 			Result.Purpose.ResultGuidance = TEXT(
 				"Only verified or rolled_back is terminal. state_unknown preserves the active journal and reports the missing evidence.");
 			Result.Purpose.FailureGuidance = TEXT(
@@ -184,10 +186,10 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 			Result.Purpose.SideEffectGuidance = TEXT(
 				"May advance and archive the exact journal; never recreates, edits or deletes its business target and never activates the Editor UI.");
 			Result.Purpose.MinimumExample = TEXT(
-				"client.asset_durable.journal_reconcile(journal_id, journal_owner_id, fencing_token, verification_id)");
+				"result.durable_journals[0].reconcile()");
 			Result.Purpose.RelatedFlows = {
 				TEXT("asset_durable.journal.read"),
-				TEXT("query.command.detail"),
+				TEXT("query.command.usage"),
 			};
 			Result.Purpose.Keywords = {
 				TEXT("durable"), TEXT("journal"), TEXT("reconcile"),
@@ -228,7 +230,7 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return TryCreateAssetDurableMaintenanceHandlers(
 					Port, OutHandlers, OutError);
@@ -247,7 +249,7 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 	bool TryCreateAssetDurableMaintenanceContribution(
 		TSharedRef<IUeAgentAssetDurableMaintenancePort> Port,
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
@@ -258,7 +260,7 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 
 	bool TryCreateProductionAssetDurableMaintenanceContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return TryCreateAssetDurableMaintenanceContribution(
 			CreateProductionAssetDurableMaintenancePort(),
@@ -270,7 +272,7 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 		TSharedRef<IUeAgentAssetDurableMaintenancePort> Port,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();

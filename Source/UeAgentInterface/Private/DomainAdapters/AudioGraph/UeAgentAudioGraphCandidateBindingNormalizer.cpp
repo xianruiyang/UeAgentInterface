@@ -1,10 +1,13 @@
 #include "DomainAdapters/AudioGraph/UeAgentAudioGraphCandidateBindingNormalizer.h"
+#include "Core/ContentDiscovery/UeAgentReadOnlyCandidateBatch.h"
 
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "MetasoundSource.h"
 #include "QueryOwners/AudioGraph/UeAgentAudioGraphCandidateQuery.h"
+#include "Sound/SoundCue.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace UE::UAI::DomainAdapters::AudioGraph
@@ -18,32 +21,20 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 		bool Fail(
 			FWorkspaceError& OutError,
 			FString Code,
+			const FString& Reason,
 			const FString& TargetIdentity,
-			FString Pointer)
+			FString Pointer,
+            const TSharedPtr<FJsonValue>& Actual = nullptr,
+            const TSharedPtr<FJsonValue>& Expected = nullptr)
 		{
-			OutError.Set(MoveTemp(Code), TargetIdentity, MoveTemp(Pointer));
+			auto Detail = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), Reason, TEXT("candidate_normalization"));
+            Detail.TargetPath = TargetIdentity;
+            Detail.Source.InternalJsonPath = MoveTemp(Pointer);
+            Detail.ActualValue = Actual;
+            Detail.ExpectedValue = Expected;
+            if (Expected.IsValid()) Detail.ActualValuePresent = Actual.IsValid();
+            OutError.SetFailure(MoveTemp(Detail));
 			return false;
-		}
-
-		bool TryRequiredString(
-			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
-			FString& OutValue,
-			const FString& TargetIdentity,
-			const FString& Pointer,
-			FWorkspaceError& OutError)
-		{
-			if (!Object.IsValid()
-				|| !Object->TryGetStringField(Field, OutValue)
-				|| OutValue.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("audio_graph_candidate_field_required"),
-					TargetIdentity,
-					Pointer + TEXT("/") + Field);
-			}
-			return true;
 		}
 
 		bool TrySetExactString(
@@ -61,45 +52,11 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			{
 				return Fail(
 					OutError,
-					TEXT("audio_graph_candidate_normalization_conflict"),
+					TEXT("audio_graph_candidate_normalization_conflict"), TEXT("The asserted candidate field differs from its resolved value."),
 					TargetIdentity,
-					Pointer + TEXT("/") + Field);
+					Pointer + TEXT("/") + Field, Object->TryGetField(Field), MakeShared<FJsonValueString>(Expected));
 			}
 			Object->SetStringField(Field, Expected);
-			return true;
-		}
-
-		bool TryReadVersion(
-			const TSharedPtr<FJsonObject>& Candidate,
-			const TCHAR* Field,
-			const bool bRequired,
-			int32& OutVersion,
-			const FString& TargetIdentity,
-			const FString& Pointer,
-			FWorkspaceError& OutError)
-		{
-			OutVersion = 0;
-			if (!Candidate->HasField(Field))
-			{
-				return !bRequired || Fail(
-					OutError,
-					TEXT("audio_graph_candidate_version_required"),
-					TargetIdentity,
-					Pointer + TEXT("/") + Field);
-			}
-			double Number = 0.0;
-			if (!Candidate->TryGetNumberField(Field, Number)
-				|| !FMath::IsNearlyEqual(Number, FMath::RoundToDouble(Number))
-				|| Number < 0.0
-				|| Number > static_cast<double>(MAX_int32))
-			{
-				return Fail(
-					OutError,
-					TEXT("audio_graph_candidate_version_invalid"),
-					TargetIdentity,
-					Pointer + TEXT("/") + Field);
-			}
-			OutVersion = static_cast<int32>(FMath::RoundToDouble(Number));
 			return true;
 		}
 
@@ -118,16 +75,16 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			{
 				return Fail(
 					OutError,
-					TEXT("audio_graph_candidate_normalization_conflict"),
+					TEXT("audio_graph_candidate_normalization_conflict"), TEXT("The asserted candidate field differs from its resolved value."),
 					TargetIdentity,
-					Pointer + TEXT("/") + Field);
+					Pointer + TEXT("/") + Field, Object->TryGetField(Field), MakeShared<FJsonValueNumber>(Expected));
 			}
 			Object->SetNumberField(Field, Expected);
 			return true;
 		}
 
 		bool HasOnlyCandidateSelectorFields(
-			const TSharedPtr<FJsonObject>& Candidate)
+			const TSharedPtr<FJsonObject>& Candidate, FString& OutUnknownField)
 		{
 			if (!Candidate.IsValid())
 			{
@@ -136,8 +93,9 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
 				: Candidate->Values)
 			{
-				if (Field.Key != TEXT("name") && Field.Key != TEXT("id"))
+				if (Field.Key != TEXT("name") && Field.Key != TEXT("select"))
 				{
+					OutUnknownField = Field.Key;
 					return false;
 				}
 			}
@@ -154,7 +112,7 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 		{
 			return Fail(
 				OutError,
-				TEXT("audio_graph_native_params_invalid"),
+				TEXT("audio_graph_native_params_invalid"), TEXT("The audio normalization request has no parameter object."),
 				TargetIdentity,
 				TEXT("/root/operation/params"));
 		}
@@ -167,9 +125,9 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 		{
 			return Fail(
 				OutError,
-				TEXT("audio_graph_candidate_nodes_invalid"),
+				TEXT("audio_graph_candidate_nodes_invalid"), TEXT("Audio nodes must be an array."),
 				TargetIdentity,
-				TEXT("/root/operation/params/nodes"));
+				TEXT("/root/operation/params/nodes"), NativeParams->TryGetField(TEXT("nodes")), MakeShared<FJsonValueString>(TEXT("array")));
 		}
 
 		UObject* const TargetObject = StaticLoadObject(
@@ -180,11 +138,12 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 		{
 			return Fail(
 				OutError,
-				TEXT("audio_graph_candidate_target_unresolved"),
+				TEXT("audio_graph_candidate_target_unresolved"), TEXT("The audio candidate target could not be loaded."),
 				TargetIdentity,
 				TEXT("/target"));
 		}
 
+		ContentDiscovery::FReadOnlyCandidateBatch CandidateBatch;
 		for (int32 Index = 0; Index < Nodes->Num(); ++Index)
 		{
 			const TSharedPtr<FJsonObject> Node = (*Nodes)[Index].IsValid()
@@ -195,9 +154,9 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			{
 				return Fail(
 					OutError,
-					TEXT("audio_graph_candidate_node_invalid"),
+					TEXT("audio_graph_candidate_node_invalid"), TEXT("Each audio node must be an object."),
 					TargetIdentity,
-					Pointer);
+					Pointer, (*Nodes)[Index], MakeShared<FJsonValueString>(TEXT("object")));
 			}
 			const TSharedPtr<FJsonObject>* CandidateField = nullptr;
 			if (!Node->HasField(TEXT("candidate")))
@@ -209,9 +168,9 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			{
 				return Fail(
 					OutError,
-					TEXT("audio_graph_candidate_invalid"),
+					TEXT("audio_graph_candidate_invalid"), TEXT("The audio candidate selector must be an object."),
 					TargetIdentity,
-					Pointer + TEXT("/candidate"));
+					Pointer + TEXT("/candidate"), Node->TryGetField(TEXT("candidate")), MakeShared<FJsonValueString>(TEXT("candidate selector object")));
 			}
 
 			FString Intent;
@@ -220,25 +179,45 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			{
 				return Fail(
 					OutError,
-					TEXT("audio_graph_candidate_operation_unsupported"),
+					TEXT("audio_graph_candidate_operation_unsupported"), TEXT("An audio candidate can be used only with the create intent."),
 					TargetIdentity,
-					Pointer + TEXT("/intent"));
+					Pointer + TEXT("/intent"), Node->TryGetField(TEXT("intent")), MakeShared<FJsonValueString>(TEXT("create")));
 			}
 			const TSharedPtr<FJsonObject> Candidate = *CandidateField;
 			const FString CandidatePointer = Pointer + TEXT("/candidate");
+			if (TargetObject->GetClass() == USoundCue::StaticClass())
+			{
+				FString UnknownField;
+				if (!HasOnlyCandidateSelectorFields(Candidate, UnknownField))
+					return Fail(OutError, TEXT("audio_graph_candidate_selector_field_unsupported"), TEXT("The candidate selector contains an unsupported field."), TargetIdentity, CandidatePointer + TEXT("/") + EscapeJsonPointerSegment(UnknownField), MakeShared<FJsonValueString>(UnknownField), MakeShared<FJsonValueString>(TEXT("name or select")));
+				FDomainHjsonCandidateSelector Selector;
+				if (!TryReadCandidateSelector(Candidate, CandidatePointer, Selector, OutError)) return false;
+				FAudioGraphCandidateQueryError QueryError;
+				FAudioGraphCandidate Selected;
+				if (!TryResolveSoundCueCandidate(*TargetObject, Selector.Name, Selected, QueryError, &CandidateBatch, Selector.Select))
+				{
+					OutError.SetFailure(QueryError, TargetIdentity, CandidatePointer);
+					return false;
+				}
+				const FString NativeClassName = Selected.NativeClassName.IsEmpty() ? Selected.Name : Selected.NativeClassName;
+				if (!TrySetExactString(Node, TEXT("native_class_ref"), NativeClassName, TargetIdentity, Pointer, OutError)) return false;
+				Node->RemoveField(TEXT("candidate"));
+				continue;
+			}
 			if (TargetObject->GetClass() == UMetaSoundSource::StaticClass())
 			{
-				if (!HasOnlyCandidateSelectorFields(Candidate))
+				FString UnknownField;
+				if (!HasOnlyCandidateSelectorFields(Candidate, UnknownField))
 				{
 					return Fail(
 						OutError,
-						TEXT("audio_graph_candidate_selector_field_unsupported"),
+						TEXT("audio_graph_candidate_selector_field_unsupported"), TEXT("The candidate selector contains an unsupported field."),
 						TargetIdentity,
-						CandidatePointer);
+						CandidatePointer + TEXT("/") + EscapeJsonPointerSegment(UnknownField), MakeShared<FJsonValueString>(UnknownField), MakeShared<FJsonValueString>(TEXT("name or select")));
 				}
 				FDomainHjsonCandidateSelector Selector;
 				if (!TryReadCandidateSelector(
-						Candidate, CandidatePointer, Selector, OutError))
+					Candidate, CandidatePointer, Selector, OutError))
 				{
 					return false;
 				}
@@ -247,32 +226,26 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 				if (!TryResolveAudioGraphCandidate(
 						*TargetObject,
 						Selector.Name,
-						Selector.Id,
 						Resolved,
-						QueryError))
+						QueryError, &CandidateBatch, Selector.Select))
 				{
-					return Fail(
-						OutError,
-						QueryError.Code.IsEmpty()
-							? FString(TEXT(
-								"audio_graph_candidate_selector_invalid"))
-							: QueryError.Code,
-						TargetIdentity,
-						CandidatePointer);
+					OutError.SetFailure(QueryError, TargetIdentity, CandidatePointer);
+					return false;
 				}
 				if (!Resolved.bSupported
 					|| !Resolved.SupportedOperations.Contains(TEXT("create")))
 				{
 					return Fail(
 						OutError,
-						TEXT("audio_graph_candidate_action_kind_unsupported"),
+						TEXT("audio_graph_candidate_action_kind_unsupported"), Resolved.SupportReason.IsEmpty()
+							? TEXT("The selected audio candidate does not support creation in this context.") : Resolved.SupportReason,
 						TargetIdentity,
-						CandidatePointer);
+						CandidatePointer, MakeShared<FJsonValueString>(Selector.Name), MakeShared<FJsonValueString>(TEXT("candidate supporting create")));
 				}
 				if (!TrySetExactString(
 						Node,
 						TEXT("class_name"),
-						Resolved.Name,
+						Resolved.NativeClassName.IsEmpty() ? Resolved.Name : Resolved.NativeClassName,
 						TargetIdentity,
 						Pointer,
 						OutError)
@@ -304,131 +277,11 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 				continue;
 			}
 
-			FDomainHjsonCandidateBinding Binding;
-			if (!TryReadCandidateBinding(
-					Candidate,
-					CandidatePointer,
-					Binding,
-					OutError))
-			{
-				return false;
-			}
-			FString CandidateTargetRef;
-			FString CandidateTargetRevision;
-			if (!TryRequiredString(
-					Candidate,
-					TEXT("target_ref"),
-					CandidateTargetRef,
-					TargetIdentity,
-					Pointer + TEXT("/candidate"),
-					OutError)
-				|| !TryRequiredString(
-					Candidate,
-					TEXT("target_revision"),
-					CandidateTargetRevision,
-					TargetIdentity,
-					Pointer + TEXT("/candidate"),
-					OutError))
-			{
-				return false;
-			}
-			const bool bMetaSound = Binding.Kind == TEXT("metasound_node");
-			int32 MajorVersion = 0;
-			int32 MinorVersion = 0;
-			if (!TryReadVersion(
-					Candidate,
-					TEXT("major_version"),
-					bMetaSound,
-					MajorVersion,
-					TargetIdentity,
-					Pointer + TEXT("/candidate"),
-					OutError)
-				|| !TryReadVersion(
-					Candidate,
-					TEXT("minor_version"),
-					bMetaSound,
-					MinorVersion,
-					TargetIdentity,
-					Pointer + TEXT("/candidate"),
-					OutError))
-			{
-				return false;
-			}
-			FAudioGraphCandidateQueryError QueryError;
-			if (!IsCurrentAudioGraphCandidateBinding(
-					*TargetObject,
-					CandidateTargetRef,
-					CandidateTargetRevision,
-					Binding.Name,
-					Binding.Kind,
-					Binding.SupportedOperations,
-					Binding.InputContract,
-					Binding.PlacementContract,
-					Binding.RequiredContext,
-					MajorVersion,
-					MinorVersion,
-					Binding.BindingRevision,
-					QueryError))
-			{
-				return Fail(
-					OutError,
-					QueryError.Code.IsEmpty()
-						? FString(TEXT("audio_graph_candidate_binding_invalid"))
-						: QueryError.Code,
-					TargetIdentity,
-					Pointer + TEXT("/candidate/binding_revision"));
-			}
-
-			FString NodeIdentity;
-			const TCHAR* IdentityField = bMetaSound
-				? TEXT("node_guid") : TEXT("object_path");
-			if (!Node->TryGetStringField(IdentityField, NodeIdentity)
-				|| NodeIdentity.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("audio_graph_candidate_context_required"),
-					TargetIdentity,
-					Pointer + TEXT("/") + IdentityField);
-			}
-			if (bMetaSound)
-			{
-				if (!TrySetExactString(
-						Node,
-						TEXT("class_name"),
-						Binding.Name,
-						TargetIdentity,
-						Pointer,
-						OutError)
-					|| !TrySetExactNumber(
-						Node,
-						TEXT("major_version"),
-						MajorVersion,
-						TargetIdentity,
-						Pointer,
-						OutError)
-					|| !TrySetExactNumber(
-						Node,
-						TEXT("minor_version"),
-						MinorVersion,
-						TargetIdentity,
-						Pointer,
-						OutError))
-				{
-					return false;
-				}
-			}
-			else if (!TrySetExactString(
-				Node,
-				TEXT("native_class_ref"),
-				Binding.Name,
+			return Fail(
+				OutError,
+				TEXT("audio_graph_candidate_target_type_unsupported"), TEXT("Candidate normalization supports SoundCue and MetaSoundSource targets."),
 				TargetIdentity,
-				Pointer,
-				OutError))
-			{
-				return false;
-			}
-			Node->RemoveField(TEXT("candidate"));
+				CandidatePointer, MakeShared<FJsonValueString>(TargetObject->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("SoundCue or MetaSoundSource")));
 		}
 		OutError.Reset();
 		return true;

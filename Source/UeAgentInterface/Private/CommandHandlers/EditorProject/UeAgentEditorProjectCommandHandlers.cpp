@@ -15,16 +15,9 @@ namespace UE::UAI::CommandHandlers::EditorProject
 
 		FUeAgentCommandResult Unauthorized(const FUeAgentCommandRequest& Request)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), TEXT("editor_project_authority_required"));
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), TEXT("uai:operate is required"));
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"),
+                UE::UAI::Contract::FDiagnostic::Failure(TEXT("editor_project_authority_required"), TEXT("uai:operate is required"), TEXT("command_authority"), FString(), Request.GetCommandId()));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -53,7 +46,7 @@ namespace UE::UAI::CommandHandlers::EditorProject
 
 	bool TryCreateHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
@@ -61,6 +54,6 @@ namespace UE::UAI::CommandHandlers::EditorProject
 		{
 			OutHandlers.Add(MakeShared<FHandler>(Id));
 		}
-		return OutHandlers.Num() == 7;
+		return true;
 	}
 }

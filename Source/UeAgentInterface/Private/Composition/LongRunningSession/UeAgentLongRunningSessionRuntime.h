@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentContract.h"
+#include "CommandEdge/UeAgentCommandProtocol.h"
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaLongJobAdapter.h"
 #include "DomainAdapters/CompileBuildJob/UeAgentCompileBuildJobAdapter.h"
 #include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationAdapter.h"
@@ -20,25 +21,14 @@ namespace UE::UAI::Composition::LongRunningSession
 		FString OwnerLeaseSecret;
 		FString EditorWorldIdentity;
 		FString EditorLevelIdentity;
-		double TimeoutSeconds = 0.0;
-		int64 MaxFrameBytes = 0;
-		int32 MaxActiveOperations = 0;
-		int32 MaxRetainedOperations = 0;
+		// Production resolves the current Editor context for each new request.
+		// Fixed identities remain useful for hosts without a live Editor.
+		TFunction<void(FString&, FString&)> ResolveEditorIdentities;
 
 		bool IsValid() const;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentLongRunningSessionRuntimeError final
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	using FUeAgentLongRunningSessionRuntimeError = Contract::FDiagnostic;
 
 	/**
 	 * Production C3O runtime for LongRunningSession.
@@ -72,6 +62,17 @@ namespace UE::UAI::Composition::LongRunningSession
 
 		const TSharedRef<Contract::IUeAgentOperationApplicationPort>&
 		GetOperationPort() const;
+		/** Schedule one shared, non-GameThread observation/cleanup pass. */
+		void Pump();
+		void RequestShutdown();
+		bool IsPolling() const;
+		int32 GetPendingCount() const;
+
+		/** Keep a deferred command's exact reply on the existing operation owner. */
+		CommandEdge::FUeAgentCommandResult AcceptDeferredCommand(
+			const CommandEdge::FUeAgentCommandRequest& Request,
+			const Contract::FUeAgentCallerContext& CallerContext,
+			TFunction<void(TFunction<bool()>, TFunction<void(CommandEdge::FUeAgentCommandResult)>)> Work);
 
 	private:
 		FUeAgentLongRunningSessionRuntime(

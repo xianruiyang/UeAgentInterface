@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Dom/JsonObject.h"
 
 namespace UeAgentBlueprintAutoLayout
@@ -190,9 +191,6 @@ namespace UeAgentBlueprintAutoLayout
 		int32 RootEquivalentGroupCount;
 		double RootContinuousOrderScore;
 		double RootContinuousOrderInversionScore;
-		int32 RootContinuousOrderPrunedStateCount;
-		int32 RootContinuousOrderMemoHitCount;
-		int32 RootContinuousOrderExactLimitExceeded;
 		double RootCompactVerticalGap;
 		double RootCompactTotalHeight;
 		int32 RootIslandTopYCount;
@@ -254,6 +252,7 @@ namespace UeAgentBlueprintAutoLayout
 
 	struct FRunResult
 	{
+		UE::UAI::Contract::FDiagnostic Error;
 		FRunResult();
 
 		FString Strategy;
@@ -304,23 +303,11 @@ namespace UeAgentBlueprintAutoLayout
 		TArray<TSharedPtr<FJsonValue>> RejectionDiagnostics;
 	};
 
-	struct FSelfTestResult
-	{
-		FSelfTestResult();
-
-		bool bAllPassed;
-		int32 CaseCount;
-		int32 PassedCount;
-		int32 FailedCount;
-		TArray<TSharedPtr<FJsonValue>> Cases;
-	};
-
 	FString RouteKindToString(ERouteKind Kind);
 	FRect MakeNodeRect(const FNode& Node, bool bUseNewPosition);
 	FString ReroutePointRoleToString(EReroutePointRole Role);
 	FVector2D GetSourcePort(const FNode& Node, const FEdge& Edge, bool bUseNewPosition);
 	FVector2D GetTargetPort(const FNode& Node, const FEdge& Edge, bool bUseNewPosition);
 	bool RunLayout(TArray<FNode>& Nodes, const TArray<FEdge>& Edges, const FOptions& Options, FRunResult& OutResult);
-	FSelfTestResult RunSelfTest();
 	TSharedPtr<FJsonObject> MetricsToJson(const FMetrics& Metrics);
 }

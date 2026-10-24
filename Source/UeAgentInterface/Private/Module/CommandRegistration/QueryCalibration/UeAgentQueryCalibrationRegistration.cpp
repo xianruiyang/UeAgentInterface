@@ -10,7 +10,6 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 	using namespace CommandHandlers::QueryCalibration;
 	using namespace CommandRegistry;
 	using namespace Discovery::Command;
-	using namespace DomainAdapters::QueryCalibration;
 	using namespace Module::CommandRegistration::Active;
 
 	namespace
@@ -60,112 +59,57 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 			FUeAgentCommandDeclaration Result = BaseDeclaration(
 				TEXT("query.command.search"), TEXT("command_search"));
 			Result.InputFields = {
-				Field(TEXT("intent"), TEXT("string"), true, TEXT("Unknown-name intent expressed in ordinary task language.")),
-				Field(TEXT("limit"), TEXT("integer"), false, TEXT("Maximum candidates from 1 through 8; defaults to 3.")),
-				Field(TEXT("cursor"), TEXT("integer"), false, TEXT("Non-negative continuation cursor; defaults to 0.")),
-				Field(TEXT("mode"), TEXT("string"), false, TEXT("active by default; compatibility also exposes dormant development commands.")),
+				Field(TEXT("intent"), TEXT("string"), true, TEXT("Space-separated positive keywords for command ID, registered keywords or registered synonyms.")),
 			};
 			Result.ResultFields = {
-				Field(TEXT("candidates"), TEXT("array"), true, TEXT("Small ranked candidates with reasons, exact command/hash identities and variant_id when one directly callable variant matched.")),
-				Field(TEXT("completeness"), TEXT("string"), true, TEXT("complete or paged for this immutable registry revision.")),
+				Field(TEXT("commands"), TEXT("array"), true, TEXT("Canonical command names only, deduplicated in result order.")),
 			};
 			Result.Errors = {
-				Error(TEXT("command_intent_missing"), TEXT("The intent contains no searchable term.")),
-				Error(TEXT("command_search_page_invalid"), TEXT("The limit or cursor is outside the public bound.")),
-				Error(TEXT("command_search_mode_invalid"), TEXT("The discovery mode is neither active nor compatibility.")),
+				Error(TEXT("command_intent_missing"), TEXT("The request contains no searchable keyword.")),
 				Error(TEXT("query_authority_required"), TEXT("The authenticated caller lacks read authority.")),
 			};
-			Result.Purpose.Summary = TEXT("Find a small set of exact UAI command candidates from an unknown-name intent.");
+			Result.Purpose.Summary = TEXT("Find exact UAI command candidates from positive keywords.");
 			Result.Purpose.Target = TEXT("The immutable current command registry and its complete purpose contracts.");
 			Result.Purpose.Preconditions = {TEXT("The caller is authenticated and has uai:query authority.")};
-			Result.Purpose.ParameterGuidance = TEXT("Describe the intended task; use active mode normally. Use compatibility mode only to inspect a dormant development command after deciding that its HJSON successor is insufficient.");
-			Result.Purpose.ResultGuidance = TEXT("Use a candidate command_id and contract_hash unchanged with query.command.detail; dormant candidates identify successors and require explicit user confirmation before execution.");
-			Result.Purpose.FailureGuidance = TEXT("Invalid intent or paging fails without fuzzy execution or fallback.");
+			Result.Purpose.ParameterGuidance = TEXT("Pass short positive action, object, domain or UE-term keywords; do not pass a task sentence.");
+			Result.Purpose.ResultGuidance = TEXT("Use a returned command name with query.command.usage.");
+			Result.Purpose.FailureGuidance = TEXT("Missing keywords fail without fuzzy execution or fallback.");
 			Result.Purpose.SideEffectGuidance = TEXT("Read-only registry lookup; no Editor, asset, world or external state changes.");
-			Result.Purpose.MinimumExample = TEXT("client.query.command_search('inspect current editor runtime', limit=3)");
-			Result.Purpose.RelatedFlows = {TEXT("query.command.detail"), TEXT("query.calibration.read")};
-			Result.Purpose.Keywords = {TEXT("discover"), TEXT("intent"), TEXT("command"), TEXT("search"), TEXT("read-only")};
-			Result.Purpose.Synonyms = {TEXT("find command"), TEXT("what command should I call")};
+			Result.Purpose.MinimumExample = TEXT("client.query.command_search('editor runtime inspect')");
+			Result.Purpose.RelatedFlows = {TEXT("query.command.usage")};
+			Result.Purpose.Keywords = {TEXT("discover"), TEXT("keyword"), TEXT("command"), TEXT("search"), TEXT("read-only")};
+			Result.Purpose.Synonyms = {TEXT("find command"), TEXT("command lookup")};
 			return Result;
 		}
 
-		FUeAgentCommandDeclaration DetailDeclaration()
+		FUeAgentCommandDeclaration UsageDeclaration()
 		{
 			FUeAgentCommandDeclaration Result = BaseDeclaration(
-				TEXT("query.command.detail"), TEXT("command_detail"));
+				TEXT("query.command.usage"), TEXT("command_usage"));
 			Result.InputFields = {
-				Field(TEXT("command_id"), TEXT("string"), true, TEXT("Exact command identity returned by command search.")),
-				Field(TEXT("contract_hash"), TEXT("string"), true, TEXT("Exact sha256 contract identity returned with that candidate.")),
-				Field(TEXT("variant_id"), TEXT("string"), false, TEXT("Optional exact executable variant identity returned by command search.")),
+				Field(TEXT("commands"), TEXT("array"), true, TEXT("One or more canonical command names returned by command search.")),
 			};
 			Result.ResultFields = {
-				Field(TEXT("variant_id"), TEXT("string"), false, TEXT("Selected executable variant identity; absent for generic command detail.")),
-				Field(TEXT("request_schema"), TEXT("object"), false, TEXT("Complete JSON Schema for the selected variant's public command params object.")),
-				Field(TEXT("purpose"), TEXT("object"), true, TEXT("Complete purpose, preconditions, guidance, example and related flows.")),
-				Field(TEXT("input_fields"), TEXT("array"), true, TEXT("Exact public input field declarations; schema-capable owners attach a machine-readable JSON Schema to each field.")),
-				Field(TEXT("result_fields"), TEXT("array"), true, TEXT("Exact public result field declarations.")),
-				Field(TEXT("tutorial_references"), TEXT("array"), true, TEXT("Stable public SDK and installed-skill tutorial references.")),
-				Field(TEXT("invocation"), TEXT("object"), true, TEXT("Named, generic, exact and CLI invocation templates for this exact identity.")),
-				Field(TEXT("lifecycle_status"), TEXT("string"), true, TEXT("active or dormant for this exact command.")),
-				Field(TEXT("successor_command_ids"), TEXT("array"), true, TEXT("Preferred active successors for a dormant command.")),
-				Field(TEXT("lifecycle_reason"), TEXT("string"), true, TEXT("Development-only reason for the current lifecycle state; empty for active commands.")),
-				Field(TEXT("requires_user_confirmation"), TEXT("boolean"), true, TEXT("True when compatibility execution requires explicit user confirmation.")),
+				Field(TEXT("usage"), TEXT("object"), true, TEXT("Command name to minimal Python named SDK usage with required top-level parameters.")),
 			};
 			Result.Errors = {
-				Error(TEXT("command_not_registered_exact"), TEXT("The complete command identity does not exist.")),
-				Error(TEXT("command_contract_version_mismatch"), TEXT("The candidate hash is stale or belongs to another contract.")),
-				Error(TEXT("command_variant_not_registered_exact"), TEXT("The supplied variant does not exist within the exact command contract.")),
+				Error(TEXT("command_usage_params_invalid"), TEXT("commands must contain non-empty command names.")),
+				Error(TEXT("command_not_registered_exact"), TEXT("A supplied command name is not registered.")),
+				Error(TEXT("command_usage_inactive"), TEXT("A supplied command is not active.")),
+				Error(TEXT("command_usage_unavailable"), TEXT("A supplied command has no generated Python named method.")),
 				Error(TEXT("query_authority_required"), TEXT("The authenticated caller lacks read authority.")),
 			};
-			Result.Purpose.Summary = TEXT("Read the complete usage detail for one exact command or executable variant contract.");
-			Result.Purpose.Target = TEXT("One immutable command_id and contract_hash pair, optionally narrowed by the exact variant_id returned by public discovery.");
-			Result.Purpose.Preconditions = {TEXT("Use command_id, contract_hash and any returned variant_id exactly as returned by query.command.search.")};
-			Result.Purpose.ParameterGuidance = TEXT("Do not rewrite, alias or infer any identity field; omit variant_id only when the candidate omitted it.");
-			Result.Purpose.ResultGuidance = TEXT("For a selected variant, construct params only from request_schema and the minimum example; otherwise use the generic input_fields contract.");
-			Result.Purpose.FailureGuidance = TEXT("Unknown and stale identities fail with distinct typed codes and never fall back.");
-			Result.Purpose.SideEffectGuidance = TEXT("Read-only registry lookup; no persistent or transient UE mutation.");
-			Result.Purpose.MinimumExample = TEXT("client.query.command_detail(command_id, contract_hash, variant_id=variant_id)");
-			Result.Purpose.RelatedFlows = {TEXT("query.command.search"), TEXT("sdk.execute_exact")};
-			Result.Purpose.Keywords = {TEXT("detail"), TEXT("purpose"), TEXT("contract"), TEXT("exact"), TEXT("usage")};
-			Result.Purpose.Synonyms = {TEXT("command help"), TEXT("show command schema")};
-			return Result;
-		}
-
-		FUeAgentCommandDeclaration CalibrationDeclaration()
-		{
-			FUeAgentCommandDeclaration Result = BaseDeclaration(
-				TEXT("query.calibration.read"), TEXT("calibration_read"));
-			Result.InputFields = {
-				Field(TEXT("category"), TEXT("string"), true, TEXT("One exact category: capability, content_search, candidate_catalog, state, reference or runtime_probe.")),
-				Field(TEXT("search_text"), TEXT("string"), false, TEXT("Optional case-insensitive filter applied by the real source.")),
-				Field(TEXT("limit"), TEXT("integer"), false, TEXT("Maximum returned items from 1 through 100; defaults to 50.")),
-				Field(TEXT("cursor"), TEXT("integer"), false, TEXT("Non-negative continuation cursor; defaults to 0.")),
-			};
-			Result.ResultFields = {
-				Field(TEXT("items"), TEXT("array"), true, TEXT("Real UE identities and current fields for the selected query class.")),
-				Field(TEXT("completeness"), TEXT("string"), true, TEXT("complete, paged, partial or degraded without silent promotion.")),
-				Field(TEXT("revision"), TEXT("string"), true, TEXT("Observed source/world revision used for this read.")),
-				Field(TEXT("read_only"), TEXT("boolean"), true, TEXT("Always true; a non-read-only provider is rejected.")),
-			};
-			Result.Errors = {
-				Error(TEXT("query_category_unknown"), TEXT("The category is not one of the six calibrated state providers.")),
-				Error(TEXT("query_params_invalid"), TEXT("The category, limit or cursor is invalid.")),
-				Error(TEXT("query_cursor_invalid"), TEXT("The cursor exceeds the current result set.")),
-				Error(TEXT("query_source_not_read_only"), TEXT("The selected source violated the read-only contract.")),
-				Error(TEXT("query_thread_invalid"), TEXT("Real UE state was requested outside the game thread.")),
-				Error(TEXT("query_authority_required"), TEXT("The authenticated caller lacks read authority.")),
-			};
-			Result.Purpose.Summary = TEXT("Read one of six representative real UE query classes with truthful paging and completeness.");
-			Result.Purpose.Target = TEXT("Current engine, asset registry, loaded world, reference graph or Editor runtime state.");
-			Result.Purpose.Preconditions = {TEXT("The Editor service is running and the caller has uai:query authority.")};
-			Result.Purpose.ParameterGuidance = TEXT("Use an exact category; page with the returned next_cursor and preserve identities unchanged.");
-			Result.Purpose.ResultGuidance = TEXT("Treat source_id, state_layer, revision and completeness as part of every bounded claim.");
-			Result.Purpose.FailureGuidance = TEXT("Unsupported categories, invalid paging and unavailable mechanics remain typed and explicit.");
-			Result.Purpose.SideEffectGuidance = TEXT("Strictly read-only; providers may inspect but never mutate Editor, asset, world or external state.");
-			Result.Purpose.MinimumExample = TEXT("client.query.calibration_read('runtime_probe', limit=2)");
-			Result.Purpose.RelatedFlows = {TEXT("query.command.search"), TEXT("query.command.detail")};
-			Result.Purpose.Keywords = {TEXT("inspect"), TEXT("editor"), TEXT("runtime"), TEXT("state"), TEXT("asset"), TEXT("reference"), TEXT("query")};
-			Result.Purpose.Synonyms = {TEXT("read current editor"), TEXT("search assets"), TEXT("runtime probe")};
+			Result.Purpose.Summary = TEXT("Get minimal Python named SDK usage for several command names.");
+			Result.Purpose.Target = TEXT("The immutable current command registry.");
+			Result.Purpose.Preconditions = {TEXT("Use active canonical command names returned by query.command.search.")};
+			Result.Purpose.ParameterGuidance = TEXT("Pass canonical command names from command search; duplicate names are collapsed while preserving first-seen order.");
+			Result.Purpose.ResultGuidance = TEXT("Use the returned Python call shape and fill only its required top-level arguments; optional behavior remains documented by the selected command contract and result.");
+			Result.Purpose.FailureGuidance = TEXT("Any invalid, inactive or unmapped name fails the whole batch without a partial result.");
+			Result.Purpose.SideEffectGuidance = TEXT("Read-only registry lookup; no Editor, asset, world or external state changes.");
+			Result.Purpose.MinimumExample = TEXT("client.query.command_usage(['editor.session', 'content_graph.items'])");
+			Result.Purpose.RelatedFlows = {TEXT("query.command.search")};
+			Result.Purpose.Keywords = {TEXT("usage"), TEXT("python"), TEXT("command"), TEXT("batch")};
+			Result.Purpose.Synonyms = {TEXT("command help"), TEXT("batch command usage")};
 			return Result;
 		}
 
@@ -173,12 +117,6 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 			: public IUeAgentActiveCommandContribution
 		{
 		public:
-			explicit FQueryCalibrationContribution(
-				TSharedRef<IUeAgentQueryCalibrationSource> InSource)
-				: Source(MoveTemp(InSource))
-			{
-			}
-
 			virtual const FString& GetContributionId() const override
 			{
 				static const FString Value = TEXT("query-calibration");
@@ -190,8 +128,7 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 					OutDeclarations) const override
 			{
 				OutDeclarations.Add(SearchDeclaration());
-				OutDeclarations.Add(DetailDeclaration());
-				OutDeclarations.Add(CalibrationDeclaration());
+				OutDeclarations.Add(UsageDeclaration());
 			}
 
 			virtual bool CreateHandlers(
@@ -199,7 +136,7 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 					Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>&
 					OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				TSharedPtr<const FCommandDiscoveryService> Discovery;
 				FCommandDiscoveryError DiscoveryError;
@@ -208,9 +145,7 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 					Discovery,
 					DiscoveryError))
 				{
-					OutError = DiscoveryError.Code
-						+ TEXT(":")
-						+ DiscoveryError.Detail;
+					OutError = DiscoveryError;
 					return false;
 				}
 
@@ -218,7 +153,6 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 					ContributionHandlers;
 				if (!TryCreateQueryCalibrationHandlers(
 					Discovery.ToSharedRef(),
-					Source,
 					ContributionHandlers,
 					OutError))
 				{
@@ -228,8 +162,6 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 				return true;
 			}
 
-		private:
-			TSharedRef<IUeAgentQueryCalibrationSource> Source;
 		};
 
 		const FUeAgentActiveCommandContributionFactoryRegistration
@@ -239,38 +171,28 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 	}
 
 	bool TryCreateQueryCalibrationContribution(
-		TSharedRef<IUeAgentQueryCalibrationSource> Source,
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
-		OutContribution = MakeShared<FQueryCalibrationContribution>(Source);
+		OutContribution = MakeShared<FQueryCalibrationContribution>();
 		return true;
 	}
 
 	bool TryCreateProductionQueryCalibrationContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
-		TSharedPtr<IUeAgentQueryCalibrationSource> Source;
-		if (!TryCreateProductionQueryCalibrationSource(Source, OutError))
-		{
-			return false;
-		}
-		return TryCreateQueryCalibrationContribution(
-			Source.ToSharedRef(),
-			OutContribution,
-			OutError);
+		return TryCreateQueryCalibrationContribution(OutContribution, OutError);
 	}
 
 	bool TryCreateQueryCalibrationRegistration(
-		TSharedRef<IUeAgentQueryCalibrationSource> Source,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();
@@ -278,7 +200,6 @@ namespace UE::UAI::Module::CommandRegistration::QueryCalibration
 		TSharedPtr<IUeAgentActiveCommandContribution> Contribution;
 		FUeAgentActiveCommandComposition Composition;
 		if (!TryCreateQueryCalibrationContribution(
-				Source,
 				Contribution,
 				OutError)
 			|| !Composition.TryAdd(

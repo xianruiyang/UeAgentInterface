@@ -12,16 +12,17 @@ namespace UE::UAI::AssetDurable
 		const FString& TargetRef,
 		const EPackageHeaderKind HeaderKind,
 		FString& OutFilename,
-		FString& OutErrorCode)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutFilename.Reset();
-		OutErrorCode.Reset();
+		OutError.Reset();
 		const FString PackageName =
 			FPackageName::ObjectPathToPackageName(TargetRef);
 		if (!FPackageName::IsValidLongPackageName(PackageName)
 			|| FPackageName::GetPackageMountPoint(PackageName).IsNone())
 		{
-			OutErrorCode = TEXT("durable_package_name_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_package_name_invalid"), TEXT("The package name is invalid or its mount point is unavailable."), TEXT("package_header"));
+            OutError.TargetPath = TargetRef;
 			return false;
 		}
 
@@ -36,7 +37,8 @@ namespace UE::UAI::AssetDurable
 				MapFilename,
 				FPackageName::GetMapPackageExtension()))
 		{
-			OutErrorCode = TEXT("durable_package_path_unavailable");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_package_path_unavailable"), TEXT("The package name could not be resolved to a file path."), TEXT("package_header"));
+            OutError.TargetPath = TargetRef;
 			return false;
 		}
 
@@ -46,7 +48,8 @@ namespace UE::UAI::AssetDurable
 			IFileManager::Get().FileExists(*MapFilename);
 		if (bAssetExists && bMapExists)
 		{
-			OutErrorCode = TEXT("durable_package_extension_ambiguous");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_package_extension_ambiguous"), TEXT("Both asset and map files exist for this package name."), TEXT("package_header"));
+            OutError.TargetPath = TargetRef;
 			return false;
 		}
 
@@ -85,7 +88,8 @@ namespace UE::UAI::AssetDurable
 		if (ExistingKind.IsSet() && LoadedKind.IsSet()
 			&& ExistingKind.GetValue() != LoadedKind.GetValue())
 		{
-			OutErrorCode = TEXT("durable_package_extension_kind_mismatch");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_package_extension_kind_mismatch"), TEXT("The package file kind does not match the loaded or requested asset kind."), TEXT("package_header"));
+            OutError.TargetPath = TargetRef;
 			return false;
 		}
 		EPackageHeaderKind ResolvedKind = HeaderKind;
@@ -101,14 +105,16 @@ namespace UE::UAI::AssetDurable
 			}
 			else
 			{
-				OutErrorCode = TEXT("durable_package_header_kind_evidence_required");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_package_header_kind_evidence_required"), TEXT("The package kind cannot be determined from a loaded asset or existing file."), TEXT("package_header"));
+            OutError.TargetPath = TargetRef;
 				return false;
 			}
 		}
 		if ((ExistingKind.IsSet() && ExistingKind.GetValue() != ResolvedKind)
 			|| (LoadedKind.IsSet() && LoadedKind.GetValue() != ResolvedKind))
 		{
-			OutErrorCode = TEXT("durable_package_extension_kind_mismatch");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_package_extension_kind_mismatch"), TEXT("The package file kind does not match the loaded or requested asset kind."), TEXT("package_header"));
+            OutError.TargetPath = TargetRef;
 			return false;
 		}
 		OutFilename = ResolvedKind == EPackageHeaderKind::Map
@@ -120,14 +126,15 @@ namespace UE::UAI::AssetDurable
 		UPackage& Package,
 		UObject*& InOutTopLevelAsset,
 		FString& OutFilename,
-		FString& OutErrorCode)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutFilename.Reset();
-		OutErrorCode.Reset();
+		OutError.Reset();
 		if (InOutTopLevelAsset
 			&& InOutTopLevelAsset->GetOutermost() != &Package)
 		{
-			OutErrorCode = TEXT("durable_package_top_level_mismatch");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_package_top_level_mismatch"), TEXT("The top-level asset belongs to a different package."), TEXT("package_header"));
+            OutError.TargetPath = Package.GetName();
 			return false;
 		}
 
@@ -141,8 +148,8 @@ namespace UE::UAI::AssetDurable
 		}
 		if (!InOutTopLevelAsset)
 		{
-			OutErrorCode =
-				TEXT("durable_package_top_level_asset_missing");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_package_top_level_asset_missing"), TEXT("The loaded package has no top-level asset to save."), TEXT("package_header"));
+            OutError.TargetPath = Package.GetName();
 			return false;
 		}
 		const bool bMapPackage = Package.ContainsMap()
@@ -156,7 +163,7 @@ namespace UE::UAI::AssetDurable
 				Package.GetName(),
 				bMapPackage ? EPackageHeaderKind::Map : EPackageHeaderKind::Asset,
 				OutFilename,
-				OutErrorCode))
+				OutError))
 		{
 			return false;
 		}
@@ -169,7 +176,8 @@ namespace UE::UAI::AssetDurable
 				ESearchCase::IgnoreCase))
 		{
 			OutFilename.Reset();
-			OutErrorCode = TEXT("durable_package_extension_kind_mismatch");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("durable_package_extension_kind_mismatch"), TEXT("The package file kind does not match the loaded or requested asset kind."), TEXT("package_header"));
+            OutError.TargetPath = Package.GetName();
 			return false;
 		}
 		return true;

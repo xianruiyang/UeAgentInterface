@@ -2,8 +2,16 @@
 
 #include "Domains/Animation/UeAgentAnimBlueprintDomainBackend.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "Engine/Blueprint.h"
+#include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
+
 #include "Domains/Animation/UeAgentAnimBlueprintDomainBackend.h"
-#include "Commands/EditorViewport/UeAgentEditorViewportLegacy.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentJsonDiagnostics.h"
 #include "Animation/AnimClassInterface.h"
@@ -39,6 +47,18 @@
 
 namespace UeAgentAnimBlueprintOps
 {
+	static UE::UAI::Contract::FDiagnostic BackendFailure(
+		const TCHAR* Code, const FString& Reason, const UObject* Context = nullptr)
+	{
+		auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(
+			Code, Reason, TEXT("animation_backend"), Context ? Context->GetPathName() : FString());
+		Diagnostic.SourceKind = TEXT("native_result");
+		const UBlueprint* Blueprint = Cast<UBlueprint>(Context);
+		if (!Blueprint && Context) Blueprint = Context->GetTypedOuter<UBlueprint>();
+		if (Blueprint) Diagnostic.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Blueprint);
+		return Diagnostic;
+	}
+
 	FString NormalizeAssetPath(const FString& InPath)
 	{
 		FString OutPath = InPath;
@@ -233,94 +253,30 @@ namespace UeAgentAnimBlueprintOps
 		}
 	}
 
-	void BuildCompilerLogJson(
-		const FCompilerResultsLog& InCompilerLog,
-		const ECompilerMessageSeverityFilter InFilter,
-		const int32 InMaxMessages,
-		TArray<TSharedPtr<FJsonValue>>& OutMessages,
-		int32& OutFilteredErrorCount,
-		int32& OutFilteredWarningCount,
-		int32& OutFilteredInfoCount)
-	{
-		OutFilteredErrorCount = 0;
-		OutFilteredWarningCount = 0;
-		OutFilteredInfoCount = 0;
-		OutMessages.Reset();
-
-		const int32 MaxMessages = FMath::Clamp(InMaxMessages, 1, 2000);
-		for (const TSharedRef<FTokenizedMessage>& Message : InCompilerLog.Messages)
-		{
-			const EMessageSeverity::Type Severity = Message->GetSeverity();
-			if (!ShouldIncludeCompilerMessage(Severity, InFilter))
-			{
-				continue;
-			}
-
-			if (Severity == EMessageSeverity::Error)
-			{
-				++OutFilteredErrorCount;
-			}
-			else if (Severity == EMessageSeverity::Warning || Severity == EMessageSeverity::PerformanceWarning)
-			{
-				++OutFilteredWarningCount;
-			}
-			else if (Severity == EMessageSeverity::Info)
-			{
-				++OutFilteredInfoCount;
-			}
-
-			if (OutMessages.Num() >= MaxMessages)
-			{
-				continue;
-			}
-
-			TSharedPtr<FJsonObject> MessageObj = MakeShared<FJsonObject>();
-			MessageObj->SetStringField(TEXT("severity"), CompilerSeverityToString(Severity));
-			MessageObj->SetStringField(TEXT("message"), Message->ToText().ToString());
-			OutMessages.Add(MakeShared<FJsonValueObject>(MessageObj));
-		}
-	}
-
-	bool SaveAnimBlueprintPackage(UAnimBlueprint* AnimBlueprint, FString& OutError)
+	bool SaveAnimBlueprintPackage(UAnimBlueprint* AnimBlueprint, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!AnimBlueprint)
 		{
-			OutError = TEXT("anim_blueprint_not_found");
+			OutError = BackendFailure(TEXT("anim_blueprint_not_found"),
+				TEXT("Saving an AnimBlueprint requires an available AnimBlueprint object."));
+			OutError.ActualValue = MakeShared<FJsonValueNull>();
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("AnimBlueprint"));
 			return false;
 		}
 
 		TArray<UPackage*> PackagesToSave;
 		PackagesToSave.Add(AnimBlueprint->GetOutermost());
-		if (!UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, false))
+		if (!UE::UAI::EditorResources::SavePackages(PackagesToSave, false, OutError))
 		{
-			OutError = TEXT("save_asset_failed");
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*AnimBlueprint);
+			if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("native_result");
+			OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("save_asset_failed"), OutError, TEXT("asset_save"),
+				OutError.IsEmpty() ? TEXT("Unreal did not save the AnimBlueprint package and returned no diagnostic.") : FString());
 			return false;
 		}
 		return true;
 	}
 
-	bool ResolveAnimBlueprintParentClass(UClass* ParentClass, const USkeleton* TargetSkeleton, const bool bIsTemplate, FString& OutError)
-	{
-		if (!ParentClass || !ParentClass->IsChildOf(UAnimInstance::StaticClass()) || !FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass))
-		{
-			OutError = TEXT("invalid_parent_class");
-			return false;
-		}
-
-		if (!bIsTemplate)
-		{
-			if (const UAnimBlueprintGeneratedClass* GeneratedParent = Cast<UAnimBlueprintGeneratedClass>(ParentClass))
-			{
-				if (GeneratedParent->GetTargetSkeleton() != nullptr && TargetSkeleton != nullptr && !TargetSkeleton->IsCompatibleForEditor(GeneratedParent->GetTargetSkeleton()))
-				{
-					OutError = TEXT("parent_class_target_skeleton_mismatch");
-					return false;
-				}
-			}
-		}
-
-		return true;
-	}
 
 	FString PreviewApplicationMethodToString(const EPreviewAnimationBlueprintApplicationMethod InMethod)
 	{
@@ -526,11 +482,14 @@ namespace UeAgentAnimBlueprintOps
 		return nullptr;
 	}
 
-	bool FinalizeAnimBlueprintStructureMutation(UAnimBlueprint* AnimBlueprint, const bool bCompile, const bool bSave, FString& OutError)
+	bool FinalizeAnimBlueprintStructureMutation(UAnimBlueprint* AnimBlueprint, const bool bCompile, const bool bSave, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!AnimBlueprint)
 		{
-			OutError = TEXT("anim_blueprint_not_found");
+			OutError = BackendFailure(TEXT("anim_blueprint_not_found"),
+				TEXT("Finalizing an animation structure mutation requires an available AnimBlueprint object."));
+			OutError.ActualValue = MakeShared<FJsonValueNull>();
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("AnimBlueprint"));
 			return false;
 		}
 
@@ -585,7 +544,6 @@ namespace UeAgentAnimBlueprintOps
 	TSharedPtr<FJsonObject> BuildStateNodeJson(const UAnimStateNodeBase* StateNode)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-		Item->SetStringField(TEXT("node_guid"), NodeGuidToString(StateNode));
 		Item->SetStringField(TEXT("node_type"), StateNodeTypeToString(StateNode));
 		Item->SetStringField(TEXT("state_name"), StateNode ? StateNode->GetStateName() : TEXT(""));
 		Item->SetStringField(TEXT("bound_graph_path"), (StateNode && StateNode->GetBoundGraph()) ? StateNode->GetBoundGraph()->GetPathName() : TEXT(""));
@@ -612,7 +570,6 @@ namespace UeAgentAnimBlueprintOps
 	TSharedPtr<FJsonObject> BuildTransitionJson(const UAnimStateTransitionNode* TransitionNode)
 	{
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-		Item->SetStringField(TEXT("node_guid"), NodeGuidToString(TransitionNode));
 		Item->SetStringField(TEXT("source_state_name"), (TransitionNode && TransitionNode->GetPreviousState()) ? TransitionNode->GetPreviousState()->GetStateName() : TEXT(""));
 		Item->SetStringField(TEXT("target_state_name"), (TransitionNode && TransitionNode->GetNextState()) ? TransitionNode->GetNextState()->GetStateName() : TEXT(""));
 		Item->SetStringField(TEXT("bound_graph_path"), (TransitionNode && TransitionNode->GetBoundGraph()) ? TransitionNode->GetBoundGraph()->GetPathName() : TEXT(""));
@@ -752,19 +709,28 @@ namespace UeAgentAnimBlueprintOps
 		return Cast<UAnimStateNodeBase>(StateMachineGraph->EntryNode->GetOutputNode());
 	}
 
-	bool ClearEntryState(UAnimationStateMachineGraph* StateMachineGraph, int32& OutBrokenLinkCount, FString& OutError)
+	bool ClearEntryState(UAnimationStateMachineGraph* StateMachineGraph, int32& OutBrokenLinkCount, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutBrokenLinkCount = 0;
 		if (!StateMachineGraph || !StateMachineGraph->EntryNode)
 		{
-			OutError = TEXT("state_machine_has_no_entry_node");
+			OutError = BackendFailure(TEXT("state_machine_has_no_entry_node"),
+				StateMachineGraph ? TEXT("The native state-machine graph has no entry node.")
+					: TEXT("The native state-machine graph is unavailable."), StateMachineGraph);
+			OutError.PropertyPath = StateMachineGraph ? TEXT("entry_node") : TEXT("state_machine_graph");
+			OutError.ActualValuePresent = false;
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(StateMachineGraph ? TEXT("state-machine entry node") : TEXT("AnimationStateMachineGraph"));
 			return false;
 		}
 
 		UEdGraphPin* EntryPin = StateMachineGraph->EntryNode->Pins.Num() > 0 ? StateMachineGraph->EntryNode->Pins[0] : nullptr;
 		if (!EntryPin)
 		{
-			OutError = TEXT("state_machine_entry_pin_not_found");
+			OutError = BackendFailure(TEXT("state_machine_entry_pin_not_found"),
+				TEXT("The native state-machine entry node has no output pin at index 0."), StateMachineGraph);
+			OutError.PropertyPath = TEXT("entry_node/pins/0");
+			OutError.ActualValuePresent = false;
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("entry output pin"));
 			return false;
 		}
 
@@ -787,16 +753,27 @@ namespace UeAgentAnimBlueprintOps
 		return true;
 	}
 
-	bool SetEntryState(UAnimationStateMachineGraph* StateMachineGraph, UAnimStateNodeBase* TargetStateNode, FString& OutError)
+	bool SetEntryState(UAnimationStateMachineGraph* StateMachineGraph, UAnimStateNodeBase* TargetStateNode, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!StateMachineGraph || !StateMachineGraph->EntryNode)
 		{
-			OutError = TEXT("state_machine_has_no_entry_node");
+			OutError = BackendFailure(TEXT("state_machine_has_no_entry_node"),
+				StateMachineGraph ? TEXT("The native state-machine graph has no entry node.")
+					: TEXT("The native state-machine graph is unavailable."), StateMachineGraph);
+			OutError.PropertyPath = StateMachineGraph ? TEXT("entry_node") : TEXT("state_machine_graph");
+			OutError.ActualValuePresent = false;
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(StateMachineGraph ? TEXT("state-machine entry node") : TEXT("AnimationStateMachineGraph"));
 			return false;
 		}
 		if (!TargetStateNode)
 		{
-			OutError = TEXT("entry_state_not_found");
+			OutError = BackendFailure(TEXT("entry_state_not_found"),
+				TEXT("The requested entry state does not resolve to a state node in this state machine."), StateMachineGraph);
+			// The caller owns the selector and its original input location.
+			OutError.SourceKind.Reset();
+			OutError.PropertyPath = TEXT("entry_state");
+			OutError.ActualValuePresent = false;
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("state node in the selected state machine"));
 			return false;
 		}
 
@@ -804,7 +781,17 @@ namespace UeAgentAnimBlueprintOps
 		UEdGraphPin* TargetInputPin = TargetStateNode->GetInputPin();
 		if (!EntryPin || !TargetInputPin)
 		{
-			OutError = TEXT("state_machine_entry_connection_failed");
+			OutError = BackendFailure(TEXT("state_machine_entry_connection_failed"),
+				TEXT("Connecting a state-machine entry requires both the entry output pin and the target state's input pin."), StateMachineGraph);
+			OutError.PropertyPath = TEXT("entry_connection");
+			auto ActualPins = MakeShared<FJsonObject>();
+			ActualPins->SetBoolField(TEXT("entry_output_pin_available"), EntryPin != nullptr);
+			ActualPins->SetBoolField(TEXT("state_input_pin_available"), TargetInputPin != nullptr);
+			OutError.ActualValue = MakeShared<FJsonValueObject>(ActualPins);
+			auto ExpectedPins = MakeShared<FJsonObject>();
+			ExpectedPins->SetBoolField(TEXT("entry_output_pin_available"), true);
+			ExpectedPins->SetBoolField(TEXT("state_input_pin_available"), true);
+			OutError.ExpectedValue = MakeShared<FJsonValueObject>(ExpectedPins);
 			return false;
 		}
 
@@ -822,15 +809,29 @@ namespace UeAgentAnimBlueprintOps
 		const UEdGraphSchema* Schema = StateMachineGraph->GetSchema();
 		if (!Schema)
 		{
-			OutError = TEXT("state_machine_schema_not_found");
+			OutError = BackendFailure(TEXT("state_machine_schema_not_found"),
+				TEXT("The native state-machine graph has no schema to connect the entry state."), StateMachineGraph);
+			OutError.PropertyPath = TEXT("schema");
+			OutError.ActualValuePresent = false;
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("state-machine graph schema"));
+			if (IgnoredBrokenLinkCount > 0) OutError.MutationStarted = true;
 			return false;
 		}
 
 		EntryPin->Modify();
 		TargetInputPin->Modify();
+		const FPinConnectionResponse ConnectionResponse = Schema->CanCreateConnection(EntryPin, TargetInputPin);
 		if (!Schema->TryCreateConnection(EntryPin, TargetInputPin))
 		{
-			OutError = TEXT("set_entry_state_failed");
+			OutError = BackendFailure(TEXT("set_entry_state_failed"),
+				ConnectionResponse.Response == CONNECT_RESPONSE_DISALLOW && !ConnectionResponse.Message.IsEmpty()
+					? FString::Printf(TEXT("The native state-machine schema rejected the entry connection: %s"), *ConnectionResponse.Message.ToString())
+					: FString(TEXT("The native state-machine schema did not create the entry-to-state connection.")), StateMachineGraph);
+			OutError.PropertyPath = TEXT("entry_connection");
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(EntryPin->LinkedTo.Contains(TargetInputPin));
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			OutError.MutationMayHaveStarted = true;
+			if (IgnoredBrokenLinkCount > 0 || EntryPin->LinkedTo.Contains(TargetInputPin)) OutError.MutationStarted = true;
 			return false;
 		}
 

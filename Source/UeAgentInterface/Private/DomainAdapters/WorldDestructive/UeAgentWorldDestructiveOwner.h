@@ -1,5 +1,9 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/AssetDurable/UeAgentAssetDurable.h"
+#include "Core/AssetDurable/UeAgentPersistedWorld.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Templates/SharedPointer.h"
@@ -8,6 +12,14 @@ class UWorld;
 
 namespace UE::UAI::DomainAdapters::WorldDestructive
 {
+	struct FWorldDestructivePackage final
+	{
+		FString PackageName;
+		AssetDurable::EPackageHeaderKind HeaderKind = AssetDurable::EPackageHeaderKind::EvidenceRequired;
+		AssetDurable::EAssetDurableIntent Intent = AssetDurable::EAssetDurableIntent::Save;
+		/** Map owning an external package; empty for the primary map. */
+		FString WorldPackageName;
+	};
 	struct UEAGENTINTERFACE_API FUeAgentWorldDestructiveRequest final
 	{
 		FString RequestId;
@@ -30,8 +42,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 		FString ResultRef;
 		FString TerminalState = TEXT("rolled_back");
 		FString PersistenceScope;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString JournalId;
 		FString VerificationId;
 		bool bChanged = false;
@@ -41,7 +52,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 		bool IsSuccess() const
 		{
 			return TerminalState == TEXT("committed")
-				&& ErrorCode.IsEmpty()
+				&& Diagnostic.IsEmpty()
 				&& bReadbackVerified;
 		}
 	};
@@ -58,14 +69,19 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 
 		/** Primary Map package required to reconstruct an isolated world. */
 		virtual const FString& GetPackageName() const = 0;
-		/** Package that actually carries the native mutation. */
-		virtual const FString& GetMutationPackageName() const = 0;
+		/** Complete native package closure, including removed external actor packages. */
+		virtual const TArray<FWorldDestructivePackage>& GetMutationPackages() const = 0;
 		virtual const FString& GetPersistenceScope() const = 0;
-		virtual bool Apply(FString& OutError) = 0;
-		virtual bool Rollback(FString& OutError) = 0;
+		virtual bool Apply(UE::UAI::Contract::FDiagnostic& OutError) = 0;
+		virtual bool Rollback(UE::UAI::Contract::FDiagnostic& OutError) = 0;
+		/** Destruction that cannot be undone uses the shared package checkpoint lifecycle. */
+		virtual bool RequiresPackageCheckpoint() const { return false; }
+		virtual bool VerifyRestored(UWorld& World, const AssetDurable::FPersistedWorldReferenceMap& References,
+			UE::UAI::Contract::FDiagnostic& OutError) const { return false; }
 		virtual bool VerifyPersisted(
 			UWorld& PersistedWorld,
-			FString& OutError) const = 0;
+			const AssetDurable::FPersistedWorldReferenceMap& References,
+			UE::UAI::Contract::FDiagnostic& OutError) const = 0;
 	};
 
 	/**
@@ -102,5 +118,5 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 		FString JournalOwnerId,
 		TSharedRef<IUeAgentWorldDestructiveDurableRunner> DurableRunner,
 		TSharedPtr<IUeAgentWorldDestructiveOwner>& OutOwner,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

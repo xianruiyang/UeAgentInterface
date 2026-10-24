@@ -52,16 +52,7 @@ namespace
 
 	FUeAgentResourceTrackerOwner MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 100000},
-				{EUeAgentResourceDimension::Items, 100000},
-				{EUeAgentResourceDimension::StringBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 100000},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	TSharedPtr<FJsonObject> RevisionJson(const FRigSimulationSpatialRevision& Revision)

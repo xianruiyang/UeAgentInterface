@@ -13,7 +13,7 @@ namespace UeAgentAudioAuthoring {
 bool ResolveDefaultWorkspaceFolder(const FProfile &Profile,
                                    const FString &AssetPath,
                                    FString &OutWorkspaceRoot,
-                                   FString &OutError) {
+                                   UE::UAI::Contract::FDiagnostic& OutError) {
   const FString DomainRoot = FPaths::ConvertRelativePathToFull(FPaths::Combine(
       FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), Profile.TypeId));
   return UeAgentAuthoringWorkspacePaths::ResolveAssetWorkspaceFolder(
@@ -23,8 +23,8 @@ bool ResolveDefaultWorkspaceFolder(const FProfile &Profile,
 bool ExportAssetWorkspace(
     const FProfile &Profile, UObject &Asset, const FString &WorkspaceRoot,
     const FString &ExportProfileId,
-    UeAgentExportWorkspaceWriter::FWorkspaceResult &OutResult,
-    FString &OutError) {
+    UeAgentExportWorkspaceWriter::FWorkspaceResult &OutResult) {
+  auto& OutError = OutResult.Diagnostic;
   OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
   OutError.Reset();
   TArray<UeAgentAuthoringState::FReadRequest> Requests;
@@ -32,12 +32,10 @@ bool ExportAssetWorkspace(
     return false;
   UeAgentAuthoringState::FCaptureResult Capture;
   if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture)) {
-    OutError = Capture.ErrorCode + TEXT(":") + Capture.ErrorDetail;
+    OutError = Capture.Diagnostic;
     return false;
   }
-  return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(
-      UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
-          Profile.TargetKind, Profile.TypeId),
-      ExportProfileId, Capture.Snapshot, WorkspaceRoot, OutResult, OutError);
+  return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
+          Profile.TargetKind, Profile.TypeId), ExportProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
 }
 } // namespace UeAgentAudioAuthoring

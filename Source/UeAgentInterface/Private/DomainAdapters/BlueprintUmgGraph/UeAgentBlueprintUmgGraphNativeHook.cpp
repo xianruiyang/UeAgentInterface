@@ -4,6 +4,8 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/PanelWidget.h"
 #include "Components/Widget.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -23,11 +25,68 @@
 #include "KismetCompiler.h"
 #include "UObject/UnrealType.h"
 #include "WidgetBlueprint.h"
+#include "Kismet2/CompilerResultsLog.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringOps.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 {
 	namespace
 	{
+
+		void SetNativeContext(FBlueprintUmgGraphAdapterError& Error, const UObject& Object)
+		{
+			const UBlueprint* Blueprint = Cast<UBlueprint>(&Object);
+			if (!Blueprint) Blueprint = Object.GetTypedOuter<UBlueprint>();
+			if (Error.TargetPath.IsEmpty() && Blueprint)
+				Error.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Blueprint);
+			if (Error.InternalContext.IsEmpty()) Error.InternalContext = Object.GetPathName();
+		}
+
+		FBlueprintUmgGraphAdapterError NativeFact(
+			const FString& Code, const FString& Reason, const UObject* Object, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Name = FString())
+		{
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("graph_adapter"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Path;
+			Error.SemanticPointer = Path;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			Error.CandidateName = Name;
+			if (Object) SetNativeContext(Error, *Object);
+			return Error;
+		}
+
+		FBlueprintUmgGraphAdapterError NativeFact(
+			const FString& Code, const FString& Reason, const UObject& Object, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Name = FString())
+		{
+			return NativeFact(Code, Reason, &Object, Path, MoveTemp(Actual), MoveTemp(Expected), Name);
+		}
+
+		TSharedPtr<FJsonValue> PinFacts(const UEdGraphPin* Pin)
+		{
+			if (!Pin) return MakeShared<FJsonValueNull>();
+			auto Facts = MakeShared<FJsonObject>();
+			const UEdGraphNode* Node = Pin->GetOwningNode();
+			const UEdGraph* Graph = Node ? Node->GetGraph() : nullptr;
+			Facts->SetStringField(TEXT("graph"), Graph ? Graph->GetName() : FString());
+			Facts->SetStringField(TEXT("node"), Node ? Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString() : FString());
+			Facts->SetStringField(TEXT("pin"), Pin->PinName.ToString());
+			Facts->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Output ? TEXT("output")
+				: Pin->Direction == EGPD_Input ? TEXT("input") : *FString::Printf(TEXT("invalid(%d)"), static_cast<int32>(Pin->Direction)));
+			return MakeShared<FJsonValueObject>(Facts);
+		}
+
+		TSharedPtr<FJsonValue> LinkFacts(const UEdGraphPin& From, const UEdGraphPin& To)
+		{
+			auto Facts = MakeShared<FJsonObject>();
+			Facts->SetField(TEXT("from"), PinFacts(&From));
+			Facts->SetField(TEXT("to"), PinFacts(&To));
+			return MakeShared<FJsonValueObject>(Facts);
+		}
 		FString NewEvidence(const TCHAR* Stage, const UObject* Subject)
 		{
 			return FString::Printf(
@@ -184,7 +243,8 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		OutError.Reset();
 		if (AssetName.IsNone())
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_asset_name_missing"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_asset_name_missing"), TEXT("A Blueprint asset name is required."), Outer,
+				TEXT("/asset_name"), MakeShared<FJsonValueString>(AssetName.ToString()), MakeShared<FJsonValueString>(TEXT("non-None asset name")));
 			return false;
 		}
 		OutBlueprint = FKismetEditorUtilities::CreateBlueprint(
@@ -197,7 +257,9 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 			NAME_None);
 		if (!OutBlueprint)
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_blueprint_create_failed"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_blueprint_create_failed"),
+				FString::Printf(TEXT("CreateBlueprint returned no asset for parent class '%s'."), *ParentClass.GetPathName()), Outer,
+				TEXT("/blueprint/created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), AssetName.ToString());
 			return false;
 		}
 		return true;
@@ -222,7 +284,14 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		OutBlueprint = Cast<UWidgetBlueprint>(Created);
 		if (!OutBlueprint || !OutBlueprint->WidgetTree)
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_widget_blueprint_create_failed"));
+			const bool bAssetMissing = OutBlueprint == nullptr;
+			OutError = NativeFact(TEXT("blueprint_umg_graph_widget_blueprint_create_failed"),
+				bAssetMissing ? TEXT("CreateBlueprint did not return a Widget Blueprint.") : TEXT("The newly created Widget Blueprint has no widget tree."), Outer,
+				bAssetMissing ? TEXT("/widget_blueprint/type") : TEXT("/widget_tree/available"),
+				bAssetMissing ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Created ? Created->GetClass()->GetPathName() : TEXT("null")))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)),
+				bAssetMissing ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(UWidgetBlueprint::StaticClass()->GetPathName()))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)), AssetName.ToString());
 			return false;
 		}
 		return true;
@@ -239,7 +308,8 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		OutError.Reset();
 		if (GraphName.IsNone())
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_graph_name_missing"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_graph_name_missing"), TEXT("An ubergraph name is required."), Blueprint,
+				TEXT("/graph_name"), MakeShared<FJsonValueString>(GraphName.ToString()), MakeShared<FJsonValueString>(TEXT("non-None graph name")));
 			return false;
 		}
 		OutGraph = FBlueprintEditorUtils::CreateNewGraph(
@@ -249,7 +319,8 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 			UEdGraphSchema_K2::StaticClass());
 		if (!OutGraph)
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_graph_create_failed"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_graph_create_failed"), TEXT("CreateNewGraph returned no K2 ubergraph."), Blueprint,
+				TEXT("/graph/created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), GraphName.ToString());
 			return false;
 		}
 		FBlueprintEditorUtils::AddUbergraphPage(&Blueprint, OutGraph);
@@ -271,14 +342,17 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		OutError.Reset();
 		if (!NodeGuid.IsValid())
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_node_guid_invalid"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_node_guid_invalid"), TEXT("The reroute node requires a valid native GUID."), Graph,
+				TEXT("/node/guid/valid"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("reroute"));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(NodeGuid.ToString());
 			return false;
 		}
 		FGraphNodeCreator<UK2Node_Knot> Creator(Graph);
 		UK2Node_Knot* Node = Creator.CreateNode();
 		if (!Node)
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_node_create_failed"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_node_create_failed"), TEXT("The graph node creator returned no reroute node."), Graph,
+				TEXT("/node/created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("reroute"));
 			return false;
 		}
 		Node->NodeGuid = NodeGuid;
@@ -305,7 +379,8 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		OutError.Reset();
 		if (FromPin.Direction != EGPD_Output || ToPin.Direction != EGPD_Input)
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_link_direction_invalid"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_link_direction_invalid"), TEXT("A graph connection requires an output source pin and an input destination pin."),
+				FromPin.GetOwningNode(), TEXT("/link/direction"), LinkFacts(FromPin, ToPin), MakeShared<FJsonValueString>(TEXT("output -> input")));
 			return false;
 		}
 		UEdGraphNode* FromNode = FromPin.GetOwningNode();
@@ -313,13 +388,28 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		UEdGraph* Graph = FromNode ? FromNode->GetGraph() : nullptr;
 		if (!Graph || !ToNode || ToNode->GetGraph() != Graph || !Graph->GetSchema())
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_link_endpoint_unresolved"));
+			const UObject* Context = FromNode ? FromNode : ToNode;
+			const bool bDifferentGraphs = Graph && ToNode && ToNode->GetGraph() != Graph;
+			OutError = NativeFact(TEXT("blueprint_umg_graph_link_endpoint_unresolved"),
+				!Graph ? TEXT("The source pin has no owning graph.")
+					: !ToNode ? TEXT("The destination pin has no owning node.")
+					: bDifferentGraphs ? TEXT("The connection's pins belong to different graphs.")
+					: TEXT("The owning graph has no connection schema."),
+				Context, TEXT("/link/endpoints"), LinkFacts(FromPin, ToPin),
+				MakeShared<FJsonValueString>(TEXT("two nodes in one graph with a connection schema")));
 			return false;
 		}
+		UE::UAI::Contract::FDiagnostic ConnectionFailure;
+		const FString RequestedLinkContext = FString::Printf(TEXT("%s: %s.%s -> %s.%s"), *Graph->GetName(),
+			*FromNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString(), *FromPin.PinName.ToString(),
+			*ToNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString(), *ToPin.PinName.ToString());
 		if (!FromPin.LinkedTo.Contains(&ToPin)
-			&& !Graph->GetSchema()->TryCreateConnection(&FromPin, &ToPin))
+			&& !UeAgentBlueprintAuthoringOps::TryCreateGraphConnection(*Graph->GetSchema(), &FromPin, &ToPin, ConnectionFailure))
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_link_connection_rejected"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_link_connection_rejected"), TEXT("The graph schema rejected creation of the requested pin connection."),
+				*Graph, TEXT("/link/connected"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true),
+				RequestedLinkContext);
+			OutError.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(MoveTemp(ConnectionFailure));
 			return false;
 		}
 		if (UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Graph))
@@ -346,14 +436,23 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 			|| VariableName.IsNone()
 			|| !VariableGuid.IsValid())
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_scs_input_invalid"));
+			const bool bScsMissing = Blueprint.SimpleConstructionScript == nullptr;
+			const bool bNameMissing = VariableName.IsNone();
+			OutError = NativeFact(TEXT("blueprint_umg_graph_scs_input_invalid"),
+				bScsMissing ? TEXT("The Blueprint has no Simple Construction Script.")
+					: bNameMissing ? TEXT("The component variable name is required.") : TEXT("The component variable requires a valid native GUID."),
+				Blueprint, bScsMissing ? TEXT("/scs/available") : bNameMissing ? TEXT("/component/variable_name/available") : TEXT("/component/guid/valid"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), VariableName.ToString());
+			if (!bScsMissing && !bNameMissing) OutError.ActualEvidence = MakeShared<FJsonValueString>(VariableGuid.ToString());
 			return false;
 		}
 		USCS_Node* Node = Blueprint.SimpleConstructionScript->CreateNode(
 			&ComponentClass, VariableName);
 		if (!Node)
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_scs_component_create_failed"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_scs_component_create_failed"),
+				FString::Printf(TEXT("Simple Construction Script returned no component node for class '%s'."), *ComponentClass.GetPathName()), Blueprint,
+				TEXT("/component/created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), VariableName.ToString());
 			return false;
 		}
 		Node->VariableGuid = VariableGuid;
@@ -387,19 +486,35 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		if (!Blueprint.WidgetTree || WidgetName.IsNone()
 			|| !WidgetGuid.IsValid() || !WidgetClass.IsChildOf(UWidget::StaticClass()))
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_widget_input_invalid"));
+			const bool bTreeMissing = Blueprint.WidgetTree == nullptr;
+			const bool bNameMissing = WidgetName.IsNone();
+			const bool bGuidInvalid = !WidgetGuid.IsValid();
+			OutError = NativeFact(TEXT("blueprint_umg_graph_widget_input_invalid"),
+				bTreeMissing ? TEXT("The Widget Blueprint has no widget tree.")
+					: bNameMissing ? TEXT("The widget name is required.")
+					: bGuidInvalid ? TEXT("The widget requires a valid native GUID.") : TEXT("The requested class does not derive from UWidget."),
+				Blueprint, bTreeMissing ? TEXT("/widget_tree/available") : bNameMissing ? TEXT("/widget/name/available")
+					: bGuidInvalid ? TEXT("/widget/guid/valid") : TEXT("/widget/class"),
+				bTreeMissing || bNameMissing || bGuidInvalid ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(WidgetClass.GetPathName())),
+				bTreeMissing || bNameMissing || bGuidInvalid ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(UWidget::StaticClass()->GetPathName())), WidgetName.ToString());
+			if (!bTreeMissing && !bNameMissing && bGuidInvalid) OutError.ActualEvidence = MakeShared<FJsonValueString>(WidgetGuid.ToString());
 			return false;
 		}
 		if (Blueprint.WidgetTree->FindWidget(WidgetName))
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_widget_identity_duplicate"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_widget_identity_duplicate"), TEXT("A widget with this name already exists in the widget tree."), Blueprint,
+				TEXT("/widget/name"), MakeShared<FJsonValueString>(WidgetName.ToString()), MakeShared<FJsonValueString>(TEXT("unique widget name")), WidgetName.ToString());
 			return false;
 		}
 		UWidget* Widget = Blueprint.WidgetTree->ConstructWidget<UWidget>(
 			&WidgetClass, WidgetName);
 		if (!Widget)
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_widget_create_failed"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_widget_create_failed"),
+				FString::Printf(TEXT("The widget tree returned no widget for class '%s'."), *WidgetClass.GetPathName()), Blueprint,
+				TEXT("/widget/created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), WidgetName.ToString());
 			return false;
 		}
 		if (Parent)
@@ -408,13 +523,23 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 			{
 				if (!Parent->InsertChildAt(InsertIndex, Widget))
 				{
-					OutError.Set(TEXT("blueprint_umg_graph_widget_attach_failed"));
+					auto Actual = MakeShared<FJsonObject>();
+					Actual->SetStringField(TEXT("parent"), Parent->GetName());
+					Actual->SetNumberField(TEXT("insert_index"), InsertIndex);
+					Actual->SetNumberField(TEXT("child_count"), Parent->GetChildrenCount());
+					Actual->SetBoolField(TEXT("attached"), false);
+					auto Expected = MakeShared<FJsonObject>();
+					Expected->SetBoolField(TEXT("attached"), true);
+					OutError = NativeFact(TEXT("blueprint_umg_graph_widget_attach_failed"), TEXT("The parent panel rejected insertion of the widget at the requested index."), Blueprint,
+						TEXT("/widget/parent/insert"), MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueObject>(Expected), WidgetName.ToString());
 					return false;
 				}
 			}
 			else if (!Parent->AddChild(Widget))
 			{
-				OutError.Set(TEXT("blueprint_umg_graph_widget_attach_failed"));
+				OutError = NativeFact(TEXT("blueprint_umg_graph_widget_attach_failed"),
+					FString::Printf(TEXT("The parent panel '%s' rejected the widget."), *Parent->GetName()), Blueprint,
+					TEXT("/widget/parent/attached"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), WidgetName.ToString());
 				return false;
 			}
 		}
@@ -422,7 +547,9 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		{
 			if (Blueprint.WidgetTree->RootWidget)
 			{
-				OutError.Set(TEXT("blueprint_umg_graph_widget_root_exists"));
+				OutError = NativeFact(TEXT("blueprint_umg_graph_widget_root_exists"), TEXT("The widget tree already has a root widget."), Blueprint,
+					TEXT("/widget_tree/root"), MakeShared<FJsonValueString>(Blueprint.WidgetTree->RootWidget->GetName()),
+					MakeShared<FJsonValueNull>(), WidgetName.ToString());
 				return false;
 			}
 			Blueprint.WidgetTree->RootWidget = Widget;
@@ -449,7 +576,13 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		FBlueprintEditorUtils::MarkBlueprintAsModified(&Blueprint);
 		Blueprint.MarkPackageDirty();
 		SetMutationReceipt(Blueprint, OutReceipt);
-		return !OutReceipt.GetEvidenceId().IsEmpty();
+		if (OutReceipt.GetEvidenceId().IsEmpty())
+		{
+			OutError = NativeFact(TEXT("blueprint_umg_graph_mutation_evidence_missing"), TEXT("The description mutation produced no native receipt evidence."), Blueprint,
+				TEXT("/mutation/evidence/available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return false;
+		}
+		return true;
 	}
 
 	bool FBlueprintUmgGraphNativeHook::TryCompileAndSettle(
@@ -473,9 +606,19 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		OutReceipt.SettleEvidenceId = NewEvidence(TEXT("settle"), &Blueprint);
 		if (!OutReceipt.bCompileComplete)
 		{
-			OutError.Set(
-				TEXT("blueprint_umg_graph_compile_incomplete"),
-				LexToString(CompilerLog.NumErrors));
+			OutError = UeAgentAuthoringDiagnostics::MakeCompileFailure(TEXT("blueprint_umg_graph_compile_incomplete"),
+				UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint), CompilerLog, &Blueprint);
+			auto Actual = MakeShared<FJsonObject>();
+			Actual->SetNumberField(TEXT("error_count"), CompilerLog.NumErrors);
+			Actual->SetBoolField(TEXT("status_is_error"), Blueprint.Status == BS_Error);
+			auto Expected = MakeShared<FJsonObject>();
+			Expected->SetNumberField(TEXT("error_count"), 0);
+			Expected->SetBoolField(TEXT("status_is_error"), false);
+			OutError.PropertyPath = TEXT("/compile");
+			OutError.SemanticPointer = TEXT("/compile");
+			OutError.SourceKind = TEXT("native_result");
+			OutError.ActualValue = MakeShared<FJsonValueObject>(Actual);
+			OutError.ExpectedValue = MakeShared<FJsonValueObject>(Expected);
 			return false;
 		}
 		return true;
@@ -496,8 +639,9 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		TArray<FBlueprintUmgGraphPinIdentity> Pins;
 		TArray<FBlueprintUmgGraphLinkIdentity> Links;
 		TMap<const UEdGraphPin*, FString> PinKeys;
-		for (UEdGraphNode* Node : Graph.Nodes)
+		for (int32 NodeIndex = 0; NodeIndex < Graph.Nodes.Num(); ++NodeIndex)
 		{
+			UEdGraphNode* Node = Graph.Nodes[NodeIndex];
 			if (!Node)
 			{
 				continue;
@@ -505,9 +649,11 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 			const FString ItemKey = NodeKey(*Node);
 			if (ItemKey.IsEmpty())
 			{
-				OutError.Set(
-					TEXT("blueprint_umg_graph_builtin_identity_missing"),
-					Node->GetClass()->GetPathName());
+				OutError = NativeFact(TEXT("blueprint_umg_graph_builtin_identity_missing"),
+					FString::Printf(TEXT("The node of class '%s' has neither a native GUID nor a supported builtin role."), *Node->GetClass()->GetPathName()), Blueprint,
+					FString::Printf(TEXT("/graph/nodes/%d/identity/available"), NodeIndex), MakeShared<FJsonValueBoolean>(false),
+					MakeShared<FJsonValueBoolean>(true), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Node->NodeGuid.ToString());
 				return false;
 			}
 			Items.Emplace(ItemKey, GuidText(Node->NodeGuid), NodeBuiltinRole(*Node));
@@ -541,7 +687,10 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 				const FString* TargetPinKey = PinKeys.Find(Linked);
 				if (!TargetPinKey)
 				{
-					OutError.Set(TEXT("blueprint_umg_graph_link_endpoint_unresolved"));
+					OutError = NativeFact(TEXT("blueprint_umg_graph_link_endpoint_unresolved"),
+						TEXT("The output pin links to a pin absent from this graph's captured topology."), Blueprint,
+						TEXT("/graph/link/target"), PinFacts(Linked), MakeShared<FJsonValueString>(TEXT("pin captured in the same graph")),
+						Pin->PinName.ToString());
 					return false;
 				}
 				Links.Emplace(
@@ -555,6 +704,10 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 			MoveTemp(Items), MoveTemp(Pins), MoveTemp(Links), {}, {});
 		if (!TryValidateBlueprintUmgGraphTopology(OutTopology, OutError))
 		{
+			SetNativeContext(OutError, Blueprint);
+			for (UEdGraphNode* Node : Graph.Nodes)
+				if (Node && NodeKey(*Node) == OutError.SubjectId && OutError.CandidateName.IsEmpty())
+					OutError.CandidateName = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
 			return false;
 		}
 		OutRevision = TopologyRevision(OutTopology);
@@ -573,7 +726,8 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		OutError.Reset();
 		if (!Blueprint.SimpleConstructionScript)
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_scs_missing"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_scs_missing"), TEXT("The Blueprint has no Simple Construction Script to capture."), Blueprint,
+				TEXT("/scs/available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		TArray<FBlueprintUmgGraphItemIdentity> Items;
@@ -603,7 +757,11 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 				const FString* ChildKey = Keys.Find(Child);
 				if (!ChildKey)
 				{
-					OutError.Set(TEXT("blueprint_umg_graph_hierarchy_endpoint_unresolved"));
+					OutError = NativeFact(TEXT("blueprint_umg_graph_hierarchy_endpoint_unresolved"),
+						FString::Printf(TEXT("Component '%s' refers to a child not captured in this Simple Construction Script."), *Node->GetVariableName().ToString()), Blueprint,
+						FString::Printf(TEXT("/scs/children/%d"), ChildIndex),
+						Child ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Child->GetVariableName().ToString())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+						MakeShared<FJsonValueString>(TEXT("component captured in the same Simple Construction Script")), Node->GetVariableName().ToString());
 					return false;
 				}
 				Hierarchy.Emplace(
@@ -618,6 +776,10 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 			MoveTemp(Items), {}, {}, MoveTemp(Hierarchy), {});
 		if (!TryValidateBlueprintUmgGraphTopology(OutTopology, OutError))
 		{
+			SetNativeContext(OutError, Blueprint);
+			for (const auto& Pair : Keys)
+				if (Pair.Value == OutError.SubjectId && OutError.CandidateName.IsEmpty())
+					OutError.CandidateName = Pair.Key->GetVariableName().ToString();
 			return false;
 		}
 		OutRevision = TopologyRevision(OutTopology);
@@ -636,7 +798,8 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		OutError.Reset();
 		if (!Blueprint.WidgetTree)
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_widget_tree_missing"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_widget_tree_missing"), TEXT("The Widget Blueprint has no widget tree to capture."), Blueprint,
+				TEXT("/widget_tree/available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		TArray<FBlueprintUmgGraphItemIdentity> Items;
@@ -670,7 +833,9 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 			const FString* ParentKey = Keys.Find(Parent);
 			if (!ParentKey)
 			{
-				OutError.Set(TEXT("blueprint_umg_graph_hierarchy_endpoint_unresolved"));
+				OutError = NativeFact(TEXT("blueprint_umg_graph_hierarchy_endpoint_unresolved"), TEXT("The widget's parent panel is absent from the captured widget tree."), Blueprint,
+					TEXT("/widget/parent"), MakeShared<FJsonValueString>(Parent->GetName()),
+					MakeShared<FJsonValueString>(TEXT("panel captured in the same widget tree")), Widget->GetName());
 				return false;
 			}
 			Hierarchy.Emplace(
@@ -687,6 +852,10 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 			MoveTemp(Items), {}, {}, MoveTemp(Hierarchy), {});
 		if (!TryValidateBlueprintUmgGraphTopology(OutTopology, OutError))
 		{
+			SetNativeContext(OutError, Blueprint);
+			for (const auto& Pair : Keys)
+				if (Pair.Value == OutError.SubjectId && OutError.CandidateName.IsEmpty())
+					OutError.CandidateName = Pair.Key->GetName();
 			return false;
 		}
 		OutRevision = TopologyRevision(OutTopology);
@@ -704,13 +873,15 @@ namespace UE::UAI::DomainAdapters::BlueprintUmgGraph
 		OutError.Reset();
 		if (OwnerItemIdentity.IsEmpty())
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_event_owner_identity_missing"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_event_owner_identity_missing"), TEXT("Event discovery requires an owner item identity."), Owner,
+				TEXT("/event_owner/identity/available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Owner.GetName());
 			return false;
 		}
 		UClass* OwnerClass = Owner.GetClass();
 		if (!OwnerClass)
 		{
-			OutError.Set(TEXT("blueprint_umg_graph_event_owner_class_missing"));
+			OutError = NativeFact(TEXT("blueprint_umg_graph_event_owner_class_missing"), TEXT("The event owner has no class from which assignable events can be discovered."), Owner,
+				TEXT("/event_owner/class/available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Owner.GetName());
 			return false;
 		}
 		for (TFieldIterator<FMulticastDelegateProperty> It(

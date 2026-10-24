@@ -5,8 +5,6 @@
 
 #include "AIGraphNode.h"
 #include "BehaviorTree/BehaviorTree.h"
-#include "BehaviorTree/Blackboard/BlackboardKeyType_Object.h"
-#include "BehaviorTree/BlackboardData.h"
 #include "BehaviorTree/Composites/BTComposite_Selector.h"
 #include "BehaviorTreeGraph.h"
 #include "BehaviorTreeGraphNode_Composite.h"
@@ -133,25 +131,6 @@ bool FUeAgentPcgAiNodeGraphNativeHookTest::RunTest(
 						== UBTComposite_Selector::StaticClass()->GetPathName();
 			}));
 
-	UBlackboardData* Blackboard = NewObject<UBlackboardData>(
-		Package, TEXT("BB_GC007_Owned"), RF_Transactional);
-	FPcgAiNodeGraphNativeMutationReceipt BlackboardApply;
-	FPcgAiNodeGraphBarrierReceipt BlackboardBarrier;
-	FPcgAiNodeGraphBlackboardEntryIdentity BlackboardIdentity;
-	FString BlackboardRevision;
-	FString BlackboardEvidence;
-	TestTrue(TEXT("Blackboard entry writes, refreshes and reads back"),
-		Hook.TryAddAndCaptureBlackboardEntry(
-			*Blackboard, TEXT("TargetActor"),
-			*UBlackboardKeyType_Object::StaticClass(),
-			BlackboardApply, BlackboardBarrier, BlackboardIdentity,
-			BlackboardRevision, BlackboardEvidence, Error));
-	TestTrue(TEXT("Blackboard typed identity validates"),
-		TryValidatePcgAiNodeGraphBlackboardEntryIdentity(
-			BlackboardIdentity, Error));
-	TestNotEqual(TEXT("Blackboard key ID is refreshed"),
-		Blackboard->GetKeyID(TEXT("TargetActor")), FBlackboard::InvalidKey);
-
 	UEnvQuery* Query = NewObject<UEnvQuery>(
 		Package, TEXT("EQS_GC007_Owned"), RF_Transactional);
 	UEnvironmentQueryGraph* QueryGraph = NewObject<UEnvironmentQueryGraph>(
@@ -236,28 +215,6 @@ bool FUeAgentPcgAiNodeGraphNativeHookTest::RunTest(
 					&& Relation.GetNativeRelationIdentity()
 						== StateTransitionGuid.ToString(
 							EGuidFormats::DigitsWithHyphensLower);
-			}));
-
-	USmartObjectDefinition* SmartObject = NewObject<USmartObjectDefinition>(
-		Package, TEXT("SO_GC007_Owned"), RF_Transactional);
-	const FGuid SlotGuid = FGuid::NewGuid();
-	FPcgAiNodeGraphNativeMutationReceipt SmartObjectApply;
-	FPcgAiNodeGraphBarrierReceipt SmartObjectBarrier;
-	FPcgAiNodeGraphTopology SmartObjectTopology;
-	FString SmartObjectRevision;
-	FString SmartObjectEvidence;
-	TestTrue(TEXT("SmartObject slot writes, validates and reads back"),
-		Hook.TryAddValidateAndCaptureSmartObjectSlot(
-			*SmartObject, SlotGuid,
-			*UGameplayInteractionSmartObjectBehaviorDefinition::StaticClass(),
-			SmartObjectApply, SmartObjectBarrier, SmartObjectTopology,
-			SmartObjectRevision, SmartObjectEvidence, Error));
-	TestTrue(TEXT("SmartObject readback preserves slot GUID"),
-		SmartObjectTopology.GetItems().ContainsByPredicate(
-			[&](const FPcgAiNodeGraphItemIdentity& Item)
-			{
-				return Item.GetNativeIdentity()
-					== SlotGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
 			}));
 
 	UPCGGraph* PcgGraph = NewObject<UPCGGraph>(
@@ -402,12 +359,8 @@ bool FUeAgentPcgAiNodeGraphNativeHookTest::RunTest(
 				!= AssetCreateBarrier.GetSettleEvidenceId()
 			&& BehaviorApply.GetEvidenceId()
 				!= BehaviorBarrier.GetSettleEvidenceId()
-			&& BlackboardApply.GetEvidenceId()
-				!= BlackboardBarrier.GetSettleEvidenceId()
 			&& QueryApply.GetEvidenceId() != QueryBarrier.GetSettleEvidenceId()
 			&& StateApply.GetEvidenceId() != StateBarrier.GetSettleEvidenceId()
-			&& SmartObjectApply.GetEvidenceId()
-				!= SmartObjectBarrier.GetSettleEvidenceId()
 			&& PcgApply.GetEvidenceId()
 				!= ParameterBarrier.GetSettleEvidenceId()
 			&& PcgApply.GetEvidenceId() != PcgBarrier.GetSettleEvidenceId()

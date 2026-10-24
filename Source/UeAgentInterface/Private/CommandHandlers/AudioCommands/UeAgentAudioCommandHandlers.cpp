@@ -4,8 +4,6 @@
 #include "Dom/JsonObject.h"
 #include "OperationOwners/AudioCommands/UeAgentAudioCommandOperationOwner.h"
 #include "QueryOwners/AudioCommands/UeAgentAudioCommandQueryOwner.h"
-#include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
 
 namespace UE::UAI::CommandHandlers::AudioCommands
 {
@@ -14,20 +12,12 @@ namespace UE::UAI::CommandHandlers::AudioCommands
 	{
 		const FString Owner = TEXT("audio-media-command-owner");
 
-		FUeAgentCommandResult Unauthorized(
-			const FUeAgentCommandRequest& Request,
-			const FString& RequiredScope)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), TEXT("audio_command_authority_required"));
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), RequiredScope + TEXT(" is required"));
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+		FUeAgentCommandResult Unauthorized(const FUeAgentCommandRequest& Request, const FString& RequiredScope)
+        {
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), UE::UAI::Contract::FDiagnostic::Failure(
+                TEXT("audio_command_authority_required"), RequiredScope + TEXT(" is required"),
+                TEXT("command_authorization"), FString(), Request.GetCommandId()));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -67,7 +57,7 @@ namespace UE::UAI::CommandHandlers::AudioCommands
 
 	bool TryCreateHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
@@ -75,17 +65,18 @@ namespace UE::UAI::CommandHandlers::AudioCommands
 		{
 			return false;
 		}
-		for (const FString& Id : DomainAdapters::AudioCommands::GetCommandIds())
+		for (const FString& Id : DomainAdapters::AudioCommands::GetPublicCommandIds())
 		{
 			const auto* Match = Mechanics.Find(Id);
 			if (!Match)
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("audio_command_mechanics_handler_missing:") + Id;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("audio_command_mechanics_handler_missing"), TEXT("No mechanics handler is registered for this public command."), TEXT("handler_factory"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			OutHandlers.Add(MakeShared<FHandler>(Id, *Match));
 		}
-		return OutHandlers.Num() == DomainAdapters::AudioCommands::GetCommandIds().Num();
+		return OutHandlers.Num() == DomainAdapters::AudioCommands::GetPublicCommandIds().Num();
 	}
 }

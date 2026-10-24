@@ -87,15 +87,9 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Factory
 				Field(TEXT("command_id"), TEXT("string"), true,
 					TEXT("The unchanged exact public command identity.")),
 				Field(TEXT("terminal_status"), TEXT("string"), true,
-					TEXT("Succeeded only after settle, save, unload/reload and independent verification.")),
-				Field(TEXT("mutation_started"), TEXT("boolean"), true,
-					TEXT("Whether the shared lifecycle entered native mutation.")),
-				Field(TEXT("persistence_receipt_id"), TEXT("string"), true,
-					TEXT("Hash receipt for the persisted primary package.")),
-				Field(TEXT("phase_history"), TEXT("array"), true,
-					TEXT("Ordered shared OperationService lifecycle phases.")),
-				Field(TEXT("independent_readback"), TEXT("object"), true,
-					TEXT("Reloaded class, source, ImportData and persisted options provenance.")),
+					TEXT("The terminal business outcome after the factory lifecycle.")),
+				Field(TEXT("readback"), TEXT("object"), true,
+					TEXT("Small readable business readback: target/source references, asset class and relevant option/state summaries.")),
 			};
 			Result.Errors = {
 				Error(TEXT("factory_import_authority_required"),
@@ -140,7 +134,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Factory
 				+ TEXT("(client, source_ref, destination_or_target_ref, options={})");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
-				TEXT("query.command.detail"),
+				TEXT("query.command.usage"),
 				TEXT("asset persisted-state query"),
 			};
 			Result.Purpose.Keywords = {
@@ -184,7 +178,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Factory
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				TArray<TSharedRef<IUeAgentExactCommandHandler>> Handlers;
 				if (!TryCreateFactoryExternalImportCommandHandlers(
@@ -211,7 +205,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Factory
 	bool TryCreateFactoryExternalImportContribution(
 		TSharedRef<IUeAgentFactoryExternalImportCommandService> Service,
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution = MakeShared<FContribution>(Service);
 		OutError.Reset();
@@ -220,7 +214,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Factory
 
 	bool TryCreateProductionFactoryExternalImportContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		TSharedPtr<IUeAgentFactoryExternalImportCommandService> Service;
@@ -240,7 +234,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Factory
 		TSharedRef<IUeAgentFactoryExternalImportCommandService> Service,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();

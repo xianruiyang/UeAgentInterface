@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
@@ -10,8 +12,10 @@
 #include "UObject/WeakObjectPtr.h"
 
 class FScopedTransaction;
+class UClass;
 class UObject;
 class UPackage;
+namespace UeAgentTemplatePropertyPropagation { class FScope; }
 
 #define UE_AGENT_AUTHORING_OPERATION_DURABLE_PACKAGE_CONTRACT_VERSION 1
 
@@ -22,7 +26,26 @@ using FOperationFailure =
 enum class EPackageDurableIntent : uint8 {
   Save,
   Delete,
+  // Included in a memory checkpoint, while a successful publication preserves
+  // the existing disk version instead of saving unrelated dirty memory.
+  Preserve,
 };
+
+inline const TCHAR* LexToString(EPackageDurableIntent Intent) {
+  switch (Intent) {
+    case EPackageDurableIntent::Save: return TEXT("save");
+    case EPackageDurableIntent::Delete: return TEXT("delete");
+    case EPackageDurableIntent::Preserve: return TEXT("preserve");
+  }
+  return TEXT("unknown");
+}
+
+enum class EPackageReadbackPolicy : uint8 {
+  UnloadAndLoad,
+  ReplaceResidentPackage,
+};
+
+enum class EPackageBeforePresence : uint8 { Present, Absent };
 
 struct UEAGENTINTERFACE_API FPackageDurablePlan {
   FString PlanId;
@@ -30,6 +53,11 @@ struct UEAGENTINTERFACE_API FPackageDurablePlan {
   TWeakObjectPtr<UPackage> Package;
   TWeakObjectPtr<UObject> TopLevelAsset;
   EPackageDurableIntent Intent = EPackageDurableIntent::Save;
+  EPackageReadbackPolicy ReadbackPolicy = EPackageReadbackPolicy::UnloadAndLoad;
+  EPackageBeforePresence BeforePresence = EPackageBeforePresence::Present;
+  // Native-owned packages may become empty tombstones during an edit. Their
+  // absence is staged in the same journal as the containing asset/map.
+  FString OwningPackageName;
 };
 
 class UEAGENTINTERFACE_API IDurablePackageStager {
@@ -74,7 +102,9 @@ UEAGENTINTERFACE_API bool BuildPackageDurablePlan(
     const FString &PlanId, const FString &PackageName, UObject *Asset,
     EPackageDurableIntent Intent, TArray<FPackageDurablePlan> &OutPlans,
     FOperationFailure &OutFailure,
-    bool bLifecycleStageable = true);
+    bool bLifecycleStageable = true,
+    EPackageBeforePresence BeforePresence = EPackageBeforePresence::Present,
+    const UClass* AssetClass = nullptr);
 
 enum class ERegistrationResult : uint8 {
   Registered,
@@ -113,6 +143,11 @@ public:
   virtual bool BuildActualReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const = 0;
+  virtual bool BuildBeforeReadRequests(
+      TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
+      FOperationFailure &OutFailure) const {
+    return BuildActualReadRequests(OutRequests, OutFailure);
+  }
   virtual TSharedPtr<FJsonObject> BuildResultMetadata() const {
     return nullptr;
   }
@@ -121,6 +156,16 @@ public:
     return true;
   }
   virtual bool Rollback(FOperationFailure &OutFailure) = 0;
+  virtual bool SupportsPersistentReadback() const { return false; }
+  virtual bool RequiresCheckpointRollback() const { return false; }
+  virtual bool ReleaseForPersistentReadback(FOperationFailure &OutFailure) { return false; }
+  virtual bool RebindAfterPersistentReadback(FOperationFailure &OutFailure) { return false; }
+  virtual bool PrepareCheckpointRestore(FOperationFailure &OutFailure) {
+    return ReleaseForPersistentReadback(OutFailure);
+  }
+  virtual bool RebindAfterCheckpointRestore(FOperationFailure &OutFailure) {
+    return RebindAfterPersistentReadback(OutFailure);
+  }
 };
 
 class UEAGENTINTERFACE_API IApplyProvider {
@@ -141,7 +186,7 @@ public:
   static FProviderRegistry &Get();
 
   bool RegisterProvider(const TSharedRef<IApplyProvider> &Provider,
-                        ERegistrationResult &OutResult, FString &OutError);
+                        ERegistrationResult &OutResult, UE::UAI::Contract::FDiagnostic& OutError);
   bool CopyProvider(const FString &ProviderId,
                     TSharedPtr<IApplyProvider> &OutProvider) const;
   TArray<FString> ListProviderIds() const;
@@ -182,11 +227,20 @@ private:
   UeAgentApplyInputContract::FOperationInput Input;
   TUniquePtr<IPreparedOperationState> State;
   UeAgentAuthoringState::FStateSnapshot ExpectedSnapshot;
+  UeAgentAuthoringState::FStateSnapshot BeforeSnapshot;
+  bool bBeforeCaptured = false;
   bool bExpectedCaptured = false;
   bool bLifecycleApplied = false;
 
   friend class FOperationTransactionBackend;
 };
+
+UEAGENTINTERFACE_API bool TryResolveWorkspaceOperationInput(
+    const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit &Unit,
+    const UeAgentApplyInputContract::FRegistry &ContractRegistry,
+    UeAgentApplyInputContract::FContract &OutContract,
+    UeAgentApplyInputContract::FOperationInput &OutInput,
+    FOperationFailure &OutFailure);
 
 class UEAGENTINTERFACE_API FWorkspaceOperationPreflightProvider final
     : public UeAgentAuthoringWorkspaceTransaction::IPreflightProvider {
@@ -215,6 +269,11 @@ struct UEAGENTINTERFACE_API FBackendOptions {
   const UeAgentAuthoringSemanticCompare::FComparatorRegistry
       *ComparatorRegistry = nullptr;
   TSharedPtr<IDurablePackageStager> PackageStager;
+  // Synchronous public-import readback, executed within the recoverable boundary.
+  TFunction<bool(FOperationFailure &)> FinalReadback;
+  // Settle shared native effects after every operation has compiled, before
+  // refreshing the durable inventory, verifying or saving the workspace.
+  TFunction<bool(FOperationFailure &)> FinalizeNativeUpdate;
 };
 
 class UEAGENTINTERFACE_API FOperationTransactionBackend final
@@ -247,17 +306,32 @@ public:
       TArray<UeAgentAuthoringWorkspaceTransaction::FDurableArtifact>
           &InOutArtifacts,
       FOperationFailure &OutFailure) override;
+  virtual bool CollectAdditionalDurableArtifacts(
+      TArray<UeAgentAuthoringWorkspaceTransaction::FDurableArtifact>& OutArtifacts,
+      FOperationFailure& OutFailure) override;
+  virtual bool StageMemoryCheckpoint(
+      TArray<UeAgentAuthoringWorkspaceTransaction::FDurableArtifact> &InOutArtifacts,
+      FOperationFailure &OutFailure) override;
   virtual bool Verify(FOperationFailure &OutFailure) override;
   virtual bool RollbackUnit(
       UeAgentAuthoringWorkspaceTransaction::IPreparedMutation &Mutation,
       FOperationFailure &OutFailure) override;
   virtual bool EndWorkspace(bool bCommit,
                             FOperationFailure &OutFailure) override;
-  virtual void FinalizeDurableCommit(bool bCommitted) override;
+		virtual bool FinalizeDurableCommit(bool bCommitted, FOperationFailure& OutFailure) override;
+  virtual bool RequiresPersistentReadback() const override;
+  virtual bool RequiresMemoryCheckpoint() const override;
+  virtual bool RequiresCheckpointRollback() const override;
+  virtual bool HasReleasedNativeState() const override;
+  virtual bool FinalizeVerification(FOperationFailure &OutFailure) override;
+  virtual bool PrepareCheckpointRestore(FOperationFailure &OutFailure) override;
+  virtual bool ReloadCheckpoint(FOperationFailure &OutFailure) override;
+  virtual bool VerifyRestoredState(FOperationFailure &OutFailure) override;
 
 private:
   struct FPackageDirtySnapshot {
     TWeakObjectPtr<UObject> Package;
+    FString PackageName;
     bool bWasDirty = false;
   };
 
@@ -273,11 +347,16 @@ private:
 
   FBackendOptions Options;
   TUniquePtr<FScopedTransaction> EditorTransaction;
+  TUniquePtr<UeAgentTemplatePropertyPropagation::FScope> TemplatePropagation;
   TArray<FPreparedOperationMutation *> AppliedMutations;
+  TArray<FPreparedOperationMutation *> CapturedMutations;
   TArray<FPackageDirtySnapshot> PackageDirtySnapshots;
   TArray<FPackageDurablePlan> DurablePackagePlans;
   bool bWorkspaceOpen = false;
   bool bAwaitingDurableFinalization = false;
+  bool bNativeStateReleased = false;
+  bool UnloadForReadback(FOperationFailure &OutFailure, bool bRestoringBefore = false);
+  bool ReloadForReadback(FOperationFailure &OutFailure, bool bRestoringBefore = false);
 };
 
 struct UEAGENTINTERFACE_API FApplyWorkspaceResult {
@@ -291,6 +370,21 @@ struct UEAGENTINTERFACE_API FApplyWorkspaceResult {
   FApplyWorkspaceResult(const FApplyWorkspaceResult &) = delete;
   FApplyWorkspaceResult &operator=(const FApplyWorkspaceResult &) = delete;
 };
+
+struct UEAGENTINTERFACE_API FApplyFailureProjection {
+  bool bPreflight = false;
+  FString Phase;
+  UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic;
+
+  bool IsSet() const { return !Diagnostic.IsEmpty(); }
+};
+
+UEAGENTINTERFACE_API FApplyFailureProjection ProjectApplyFailure(
+    const UeAgentAuthoringWorkspaceTransaction::FPreflightResult &Result);
+UEAGENTINTERFACE_API FApplyFailureProjection ProjectApplyFailure(
+    const UeAgentAuthoringWorkspaceTransaction::FExecutionResult &Result);
+UEAGENTINTERFACE_API bool TryProjectApplyFailure(
+    const FApplyWorkspaceResult &Result, FApplyFailureProjection &OutFailure);
 
 UEAGENTINTERFACE_API bool ApplyWorkspace(
     const UeAgentApplyWorkspaceContract::FContract &WorkspaceContract,

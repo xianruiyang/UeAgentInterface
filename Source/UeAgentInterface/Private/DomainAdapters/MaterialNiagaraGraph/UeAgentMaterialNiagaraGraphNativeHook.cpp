@@ -1,5 +1,10 @@
 #include "DomainAdapters/MaterialNiagaraGraph/UeAgentMaterialNiagaraGraphNativeHook.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Containers/UnrealString.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+
 #include "Domains/Material/Authoring/UeAgentMaterialGraphAuthoring.h"
 #include "Domains/Niagara/Authoring/UeAgentNiagaraStageModuleAuthoring.h"
 #include "Domains/Niagara/UeAgentNiagaraCompileValidation.h"
@@ -20,11 +25,60 @@
 #include "NiagaraScript.h"
 #include "NiagaraScriptSource.h"
 #include "NiagaraSystem.h"
+#include "UObject/Class.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/UnrealType.h"
 
 namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 {
+	namespace
+	{
+		TSharedPtr<FJsonValue> FiniteNumberFact(double Value)
+		{
+			return FMath::IsFinite(Value) ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Value))
+				: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(::LexToString(Value)));
+		}
+
+		FMaterialNiagaraGraphAdapterError NativeValueFailure(const FString& Code, const FString& Reason,
+			const FString& Field, const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected,
+			const UObject* NativeOwner = nullptr)
+		{
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_adapter"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.ActualValue = Actual;
+			Error.ExpectedValue = Expected;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValuePresent = Expected.IsValid();
+			if (NativeOwner) Error.SubjectId = NativeOwner->GetPathName();
+			return Error;
+		}
+
+		FMaterialNiagaraGraphAdapterError NativeConditionFailure(const FString& Code, const FString& Reason,
+			const FString& Field, const UObject* NativeOwner = nullptr, bool Actual = false, bool Expected = true)
+		{
+			return NativeValueFailure(Code, Reason, Field, MakeShared<FJsonValueBoolean>(Actual), MakeShared<FJsonValueBoolean>(Expected), NativeOwner);
+		}
+	}
+
+
+	namespace
+	{
+		FMaterialNiagaraGraphAdapterError ParameterReadFailure(const FMaterialNiagaraGraphParameterIdentity& Identity,
+			const FString& Type, const FString& Reason, const UObject* NativeOwner,
+			const FString& Condition = TEXT("value_read_succeeded"))
+		{
+			const FString Name = Identity.GetParameterName().Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+			auto Error = NativeConditionFailure(TEXT("material_niagara_graph_parameter_capture_failed"), Reason,
+				TEXT("/parameters/") + Type + TEXT("/") + Identity.GetParameterAssociation() + TEXT("/")
+					+ FString::FromInt(Identity.GetParameterIndex()) + TEXT("/") + Name + TEXT("/") + Condition, NativeOwner);
+			Error.CandidateName = Identity.GetParameterName();
+			return Error;
+		}
+
+
+	}
+
 	FMaterialNiagaraGraphEffectiveParameter::
 	FMaterialNiagaraGraphEffectiveParameter(
 		FMaterialNiagaraGraphParameterIdentity InIdentity,
@@ -41,9 +95,22 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		, bBooleanValue(bInBooleanValue)
 	{
 		FMaterialNiagaraGraphAdapterError ValidationError;
-		bValid = FMath::IsFinite(ScalarValue)
-			&& TryValidateMaterialNiagaraGraphParameterIdentities(
-				{Identity}, ValidationError);
+		const bool bScalarFinite = FMath::IsFinite(ScalarValue);
+		bValid = bScalarFinite && TryValidateMaterialNiagaraGraphParameterIdentities({Identity}, ValidationError);
+		if (!bScalarFinite)
+		{
+			ValidationError = NativeValueFailure(TEXT("material_niagara_graph_parameter_capture_failed"),
+				TEXT("The captured material scalar value must be finite."), TEXT("/scalar_value"),
+				FiniteNumberFact(ScalarValue), MakeShared<FJsonValueString>(TEXT("finite number")));
+			ValidationError.CandidateName = Identity.GetParameterName();
+		}
+		else if (!bValid)
+		{
+			// The identity validator received one local element, not an index in the outer capture.
+			const FString LocalIdentityRoot = TEXT("/parameters/0");
+			ValidationError.PropertyPath = TEXT("/identity") + ValidationError.PropertyPath.RightChop(LocalIdentityRoot.Len());
+		}
+		if (!bValid) ValidationDiagnostic = MakeShared<FMaterialNiagaraGraphAdapterError>(MoveTemp(ValidationError));
 	}
 
 	const FMaterialNiagaraGraphParameterIdentity&
@@ -95,50 +162,6 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 				Stage,
 				Subject ? *Subject->GetPathName() : TEXT("none"),
 				*FGuid::NewGuid().ToString(EGuidFormats::Digits));
-		}
-
-		void CaptureRootedNiagaraCompilationCopies(
-			TSet<TWeakObjectPtr<UNiagaraScriptSource>>& OutCopies)
-		{
-			OutCopies.Reset();
-			for (TObjectIterator<UNiagaraScriptSource> It; It; ++It)
-			{
-				UNiagaraScriptSource* Source = *It;
-				if (Source
-					&& Source->bIsCompilationCopy
-					&& !Source->bIsReleased
-					&& Source->IsRooted())
-				{
-					OutCopies.Add(Source);
-				}
-			}
-		}
-
-		void ReleaseNewNiagaraCompilationCopies(
-			const TSet<TWeakObjectPtr<UNiagaraScriptSource>>& PreviousCopies)
-		{
-			for (TObjectIterator<UNiagaraScriptSource> It; It; ++It)
-			{
-				UNiagaraScriptSource* Source = *It;
-				if (!Source
-					|| !Source->bIsCompilationCopy
-					|| Source->bIsReleased
-					|| !Source->IsRooted()
-					|| PreviousCopies.Contains(Source))
-				{
-					continue;
-				}
-
-				// UNiagaraScript::RequestCompile is synchronous for standalone
-				// scripts in UE 5.6, but unlike the system compilation path it
-				// does not release the rooted compilation source after consuming
-				// the result. Mirror ReleaseCompilationCopy here for copies owned
-				// by this exact request so the authored asset can be unloaded.
-				Source->bIsReleased = true;
-				Source->NodeGraph = nullptr;
-				Source->RemoveFromRoot();
-				Source->MarkAsGarbage();
-			}
 		}
 
 		FString GuidText(const FGuid& Guid)
@@ -360,12 +383,10 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			FMaterialNiagaraGraphAdapterError& OutError)
 		{
 			TArray<FResolvedStage> Stages;
-			FString NativeError;
+			UE::UAI::Contract::FDiagnostic NativeError;
 			if (!EnumerateStages(Asset, Stages, NativeError))
 			{
-				OutError.Set(
-					TEXT("material_niagara_graph_stage_capture_failed"),
-					NativeError);
+				OutError = NativeError;
 				return false;
 			}
 			TArray<FResolvedStage> Matches;
@@ -389,33 +410,47 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			}
 			if (Matches.Num() != 1)
 			{
-				OutError.Set(
-					Matches.IsEmpty()
-						? TEXT("material_niagara_graph_stage_not_found")
-						: TEXT("material_niagara_graph_stage_ambiguous"),
-					FString::Printf(
-						TEXT("asset=%s usage=%s usage_id=%s emitter=%s"),
-						*Asset.GetPathName(),
-						*ScriptUsageToString(Usage),
-						*GuidText(UsageId),
-						*GuidText(EmitterHandleId)));
+				OutError = NativeValueFailure(Matches.IsEmpty() ? TEXT("material_niagara_graph_stage_not_found")
+					: TEXT("material_niagara_graph_stage_ambiguous"),
+					Matches.IsEmpty() ? TEXT("No Niagara stage matches the requested script usage and native stage/emitter selectors.")
+						: TEXT("More than one Niagara stage matches the requested script usage and native stage/emitter selectors."),
+					TEXT("/stage_match_count"), MakeShared<FJsonValueNumber>(Matches.Num()), MakeShared<FJsonValueNumber>(1), &Asset);
+				OutError.CandidateName = ScriptUsageToString(Usage);
+				const auto Selectors = MakeShared<FJsonObject>();
+				Selectors->SetStringField(TEXT("usage_id"), GuidText(UsageId));
+				Selectors->SetStringField(TEXT("emitter_handle_id"), GuidText(EmitterHandleId));
+				OutError.ActualEvidence = MakeShared<FJsonValueObject>(Selectors);
 				return false;
 			}
 			OutStage = Matches[0];
 			return true;
 		}
 
-		int32 CountMaterialCompileErrors(UMaterialInterface& Material)
+		int32 SettleMaterialCompileErrors(UMaterialInterface& Material, TArray<FMaterialNiagaraGraphAdapterError>& OutErrors)
 		{
 			int32 ErrorCount = 0;
+			TSet<FMaterialResource*> Seen;
+			TSet<FString> ReportedMessages;
 			UMaterialInterface::IterateOverActiveFeatureLevels(
 				[&](const ERHIFeatureLevel::Type FeatureLevel)
 				{
-					const FMaterialResource* Resource =
-						Material.GetMaterialResource(FeatureLevel);
-					if (Resource)
+					FMaterialResource* Resource = Material.GetMaterialResource(FeatureLevel);
+					if (Resource && !Seen.Contains(Resource))
 					{
+						Seen.Add(Resource);
+						Resource->FinishCompilation();
 						ErrorCount += Resource->GetCompileErrors().Num();
+						for (const FString& Message : Resource->GetCompileErrors())
+						{
+							if (ReportedMessages.Contains(Message)) continue;
+							ReportedMessages.Add(Message);
+							auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_shader_compile_error"),
+								Message.IsEmpty() ? TEXT("The native material compiler returned an empty error message.") : Message, TEXT("material_compile"));
+							Error.SourceKind = TEXT("native_result");
+							Error.PropertyPath = TEXT("/compile_errors/") + FString::FromInt(OutErrors.Num());
+							Error.SubjectId = Material.GetPathName();
+							OutErrors.Add(MoveTemp(Error));
+						}
 					}
 				});
 			return ErrorCount;
@@ -437,20 +472,29 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		OutError.Reset();
 		if (!ExpressionGuid.IsValid())
 		{
-			OutError.Set(TEXT("material_niagara_graph_expression_guid_invalid"));
+			OutError = NativeConditionFailure(TEXT("material_niagara_graph_expression_guid_invalid"),
+				TEXT("The new material expression requires a valid native identity."), TEXT("/expression/native_identity_valid"), &Owner);
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(GuidText(ExpressionGuid));
 			return false;
 		}
 		if (!ExpressionClass.IsChildOf(UMaterialExpression::StaticClass())
 			|| ExpressionClass.HasAnyClassFlags(CLASS_Abstract))
 		{
-			OutError.Set(TEXT("material_niagara_graph_expression_class_invalid"));
+			OutError = NativeValueFailure(TEXT("material_niagara_graph_expression_class_invalid"),
+				!ExpressionClass.IsChildOf(UMaterialExpression::StaticClass())
+					? TEXT("The requested class is not a material expression class.") : TEXT("An abstract material expression class cannot be instantiated."),
+				TEXT("/expression/class"), MakeShared<FJsonValueString>(ExpressionClass.GetPathName()),
+				MakeShared<FJsonValueString>(TEXT("nonabstract UMaterialExpression subclass")), &Owner);
 			return false;
 		}
 		const FMaterialExpressionCollection* Collection =
 			UeAgentMaterialAuthoring::GetExpressionCollection(Owner);
 		if (!Collection)
 		{
-			OutError.Set(TEXT("material_niagara_graph_owner_type_invalid"));
+			OutError = NativeValueFailure(TEXT("material_niagara_graph_owner_type_invalid"),
+				TEXT("The native owner has no editable material expression collection."), TEXT("/owner_class"),
+				MakeShared<FJsonValueString>(Owner.GetClass()->GetPathName()),
+				MakeShared<FJsonValueString>(TEXT("material or material function graph owner")), &Owner);
 			return false;
 		}
 		for (UMaterialExpression* Existing : Collection->Expressions)
@@ -458,9 +502,11 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			if (Existing
 				&& Existing->MaterialExpressionGuid == ExpressionGuid)
 			{
-				OutError.Set(
-					TEXT("material_niagara_graph_item_identity_duplicate"),
-					GuidText(ExpressionGuid));
+				OutError = NativeConditionFailure(TEXT("material_niagara_graph_item_identity_duplicate"),
+					TEXT("The requested native expression identity is already used by an existing expression."),
+					TEXT("/expression/native_identity_unique"), &Owner);
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(GuidText(ExpressionGuid));
+				OutError.CandidateName = Existing->GetClass()->GetName();
 				return false;
 			}
 		}
@@ -470,7 +516,9 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			Owner, &ExpressionClass, PositionX, PositionY);
 		if (!OutExpression)
 		{
-			OutError.Set(TEXT("material_niagara_graph_expression_create_failed"));
+			OutError = NativeConditionFailure(TEXT("material_niagara_graph_expression_create_failed"),
+				TEXT("Unreal did not create the requested material expression."), TEXT("/expression/created"), &Owner);
+			OutError.CandidateName = ExpressionClass.GetPathName();
 			return false;
 		}
 		OutExpression->Modify();
@@ -490,19 +538,19 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 	{
 		OutReceipt.SetEvidenceId(FString());
 		OutError.Reset();
-		FString NativeError;
+		UE::UAI::Contract::FDiagnostic NativeError;
 		if (!UeAgentMaterialAuthoring::ConnectExpressionToProperty(
 				Expression, OutputName, Property, NativeError))
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_root_connection_failed"),
-				NativeError);
+			OutError = NativeError;
 			return false;
 		}
 		UObject* Owner = Expression.GetOuter();
 		if (!Owner)
 		{
-			OutError.Set(TEXT("material_niagara_graph_owner_type_invalid"));
+			OutError = NativeConditionFailure(TEXT("material_niagara_graph_owner_type_invalid"),
+				TEXT("The connected material expression has no owning object."), TEXT("/expression/owner_present"), &Expression);
+			OutError.MutationMayHaveStarted = true;
 			return false;
 		}
 		UeAgentMaterialAuthoring::RefreshGraphOwner(*Owner);
@@ -524,12 +572,28 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		FExpressionInput* const Input = Material
 			? Material->GetExpressionInputForProperty(Property)
 			: nullptr;
-		if (!Material || !Input
-			|| !Expression.GetOutputs().IsValidIndex(OutputIndex))
+		if (!Material)
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_root_connection_failed"),
-				TEXT("material root or exact output index is invalid"));
+			OutError = NativeConditionFailure(TEXT("material_niagara_graph_root_connection_failed"),
+				TEXT("The expression is not owned by a material root."), TEXT("/material_root_present"), &Expression);
+			return false;
+		}
+		if (!Input)
+		{
+			const auto Requested = MakeShared<FJsonObject>();
+			Requested->SetStringField(TEXT("type"), TEXT("EMaterialProperty"));
+			Requested->SetNumberField(TEXT("value"), static_cast<int32>(Property));
+			OutError = NativeValueFailure(TEXT("material_niagara_graph_root_connection_failed"),
+				TEXT("The material root has no input for the requested material property."), TEXT("/material_property"),
+				MakeShared<FJsonValueObject>(Requested), MakeShared<FJsonValueString>(TEXT("material property with a root input")), &Expression);
+			return false;
+		}
+		if (!Expression.GetOutputs().IsValidIndex(OutputIndex))
+		{
+			OutError = NativeValueFailure(TEXT("material_niagara_graph_root_connection_failed"),
+				TEXT("The requested material expression output index does not exist."), TEXT("/output_index"),
+				MakeShared<FJsonValueNumber>(OutputIndex),
+				MakeShared<FJsonValueString>(FString::Printf(TEXT("integer in [0, %d)"), Expression.GetOutputs().Num())), &Expression);
 			return false;
 		}
 		Material->Modify();
@@ -551,15 +615,26 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		OutReceipt.SetEvidenceId(FString());
 		OutError.Reset();
 		FExpressionInput* Input = nullptr;
-		if (FromExpression.GetOuter() != ToExpression.GetOuter()
-			|| !FromExpression.GetOutputs().IsValidIndex(FromOutputIndex)
-			|| !UeAgentMaterialAuthoring::ResolveExpressionInput(
-				ToExpression, ToInputName, Input)
-			|| !Input)
+		if (FromExpression.GetOuter() != ToExpression.GetOuter())
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_expression_connection_failed"),
-				TEXT("expression owner, output index or input is invalid"));
+			OutError = NativeConditionFailure(TEXT("material_niagara_graph_expression_connection_failed"),
+				TEXT("The source and destination expressions have different native owners."), TEXT("/expression_owners_match"), &FromExpression);
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(GetPathNameSafe(ToExpression.GetOuter()));
+			return false;
+		}
+		if (!FromExpression.GetOutputs().IsValidIndex(FromOutputIndex))
+		{
+			OutError = NativeValueFailure(TEXT("material_niagara_graph_expression_connection_failed"),
+				TEXT("The requested source expression output index does not exist."), TEXT("/source_output_index"),
+				MakeShared<FJsonValueNumber>(FromOutputIndex),
+				MakeShared<FJsonValueString>(FString::Printf(TEXT("integer in [0, %d)"), FromExpression.GetOutputs().Num())), &FromExpression);
+			return false;
+		}
+		if (!UeAgentMaterialAuthoring::ResolveExpressionInput(ToExpression, ToInputName, Input) || !Input)
+		{
+			OutError = NativeValueFailure(TEXT("material_niagara_graph_expression_connection_failed"),
+				TEXT("The destination expression input could not be resolved."), TEXT("/destination_input_name"),
+				MakeShared<FJsonValueString>(ToInputName), MakeShared<FJsonValueString>(TEXT("resolvable expression input name")), &ToExpression);
 			return false;
 		}
 		ToExpression.Modify();
@@ -567,7 +642,9 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		UObject* const Owner = FromExpression.GetOuter();
 		if (!Owner)
 		{
-			OutError.Set(TEXT("material_niagara_graph_owner_type_invalid"));
+			OutError = NativeConditionFailure(TEXT("material_niagara_graph_owner_type_invalid"),
+				TEXT("The connected expressions have no owning material object."), TEXT("/expression/owner_present"), &FromExpression);
+			OutError.MutationStarted = true;
 			return false;
 		}
 		UeAgentMaterialAuthoring::RefreshGraphOwner(*Owner);
@@ -585,14 +662,23 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 	{
 		OutReceipt.SetEvidenceId(FString());
 		OutError.Reset();
-		FStructProperty* const Property =
-			FindFProperty<FStructProperty>(Expression.GetClass(), *PropertyPath);
+		FProperty* const Found = FindFProperty<FProperty>(Expression.GetClass(), *PropertyPath);
+		FStructProperty* const Property = CastField<FStructProperty>(Found);
 		if (!Property || Property->Struct != TBaseStructure<FLinearColor>::Get()
 			|| !Property->HasAnyPropertyFlags(CPF_Edit))
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_expression_property_invalid"),
-				PropertyPath);
+			if (!Property)
+				OutError = NativeValueFailure(TEXT("material_niagara_graph_expression_property_invalid"),
+					Found ? TEXT("The material expression field is not a struct property.") : TEXT("The material expression property does not exist."),
+					PropertyPath, Found ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Found->GetCPPType())) : TSharedPtr<FJsonValue>(),
+					MakeShared<FJsonValueString>(TEXT("editable FLinearColor property")), &Expression);
+			else if (Property->Struct != TBaseStructure<FLinearColor>::Get())
+				OutError = NativeValueFailure(TEXT("material_niagara_graph_expression_property_invalid"),
+					TEXT("The material expression struct property is not FLinearColor."), PropertyPath,
+					Property->Struct ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Property->Struct->GetPathName())) : TSharedPtr<FJsonValue>(),
+					MakeShared<FJsonValueString>(TBaseStructure<FLinearColor>::Get()->GetPathName()), &Expression);
+			else OutError = NativeConditionFailure(TEXT("material_niagara_graph_expression_property_invalid"),
+				TEXT("The material expression color property is not editable."), PropertyPath + TEXT("/editable"), &Expression);
 			return false;
 		}
 		Expression.Modify();
@@ -602,7 +688,9 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		UObject* const Owner = Expression.GetOuter();
 		if (!Owner)
 		{
-			OutError.Set(TEXT("material_niagara_graph_owner_type_invalid"));
+			OutError = NativeConditionFailure(TEXT("material_niagara_graph_owner_type_invalid"),
+				TEXT("The modified material expression has no owning object."), TEXT("/expression/owner_present"), &Expression);
+			OutError.MutationStarted = true;
 			return false;
 		}
 		UeAgentMaterialAuthoring::RefreshGraphOwner(*Owner);
@@ -620,13 +708,16 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 	{
 		OutReceipt.SetEvidenceId(FString());
 		OutError.Reset();
-		FNameProperty* const Property =
-			FindFProperty<FNameProperty>(Expression.GetClass(), *PropertyPath);
+		FProperty* const Found = FindFProperty<FProperty>(Expression.GetClass(), *PropertyPath);
+		FNameProperty* const Property = CastField<FNameProperty>(Found);
 		if (!Property || !Property->HasAnyPropertyFlags(CPF_Edit))
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_expression_property_invalid"),
-				PropertyPath);
+			OutError = !Property ? NativeValueFailure(TEXT("material_niagara_graph_expression_property_invalid"),
+				Found ? TEXT("The material expression field is not an FName property.") : TEXT("The material expression property does not exist."),
+				PropertyPath, Found ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Found->GetCPPType())) : TSharedPtr<FJsonValue>(),
+				MakeShared<FJsonValueString>(TEXT("editable FName property")), &Expression)
+				: NativeConditionFailure(TEXT("material_niagara_graph_expression_property_invalid"),
+					TEXT("The material expression name property is not editable."), PropertyPath + TEXT("/editable"), &Expression);
 			return false;
 		}
 		Expression.Modify();
@@ -636,7 +727,9 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		UObject* const Owner = Expression.GetOuter();
 		if (!Owner)
 		{
-			OutError.Set(TEXT("material_niagara_graph_owner_type_invalid"));
+			OutError = NativeConditionFailure(TEXT("material_niagara_graph_owner_type_invalid"),
+				TEXT("The modified material expression has no owning object."), TEXT("/expression/owner_present"), &Expression);
+			OutError.MutationStarted = true;
 			return false;
 		}
 		UeAgentMaterialAuthoring::RefreshGraphOwner(*Owner);
@@ -660,7 +753,12 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			UeAgentMaterialAuthoring::GetExpressionCollection(Owner);
 		if (!Collection || TargetIdentity.IsEmpty())
 		{
-			OutError.Set(TEXT("material_niagara_graph_capture_target_invalid"));
+			OutError = !Collection ? NativeValueFailure(TEXT("material_niagara_graph_capture_target_invalid"),
+				TEXT("The native object has no material expression collection to capture."), TEXT("/owner_class"),
+				MakeShared<FJsonValueString>(Owner.GetClass()->GetPathName()),
+				MakeShared<FJsonValueString>(TEXT("material or material function graph owner")), &Owner)
+				: NativeConditionFailure(TEXT("material_niagara_graph_capture_target_invalid"),
+					TEXT("The material graph capture has no target identity."), TEXT("/target_identity_present"), &Owner);
 			return false;
 		}
 
@@ -673,9 +771,15 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		{
 			if (!Expression || !Expression->MaterialExpressionGuid.IsValid())
 			{
-				OutError.Set(
-					TEXT("material_niagara_graph_item_identity_missing"),
-					Expression ? Expression->GetPathName() : TEXT("null"));
+				OutError = NativeConditionFailure(TEXT("material_niagara_graph_item_identity_missing"),
+					!Expression ? TEXT("The native material expression collection contains an unavailable expression.")
+						: TEXT("A native material expression has no valid identity."),
+					TEXT("/expressions/") + FString::FromInt(Items.Num() - 1) + (!Expression ? TEXT("/object_present") : TEXT("/native_identity_valid")), &Owner);
+				if (Expression)
+				{
+					OutError.CandidateName = Expression->GetClass()->GetName();
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Expression->GetPathName());
+				}
 				return false;
 			}
 			const FString ItemKey = ExpressionItemKey(*Expression);
@@ -895,7 +999,8 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		TArray<FMaterialNiagaraGraphEffectiveParameter>& OutParameters,
 		FString& OutRevision,
 		FString& OutEvidenceId,
-		FMaterialNiagaraGraphAdapterError& OutError) const
+		FMaterialNiagaraGraphAdapterError& OutError,
+		const bool bAllowNullTextures) const
 	{
 		OutParameters.Reset();
 		OutRevision.Reset();
@@ -966,9 +1071,8 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			if (!MaterialInstance.GetScalarParameterValue(
 					FHashedMaterialParameterInfo(Info), Value))
 			{
-				OutError.Set(
-					TEXT("material_niagara_graph_parameter_capture_failed"),
-					Info.Name.ToString());
+				OutError = ParameterReadFailure(ParameterIdentity(Info, EMaterialNiagaraGraphParameterType::Scalar),
+					TEXT("scalar"), TEXT("Unreal could not read the effective material scalar parameter."), &MaterialInstance);
 				return false;
 			}
 			Add(ParameterIdentity(Info,
@@ -985,9 +1089,8 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			if (!MaterialInstance.GetVectorParameterValue(
 					FHashedMaterialParameterInfo(Info), Value))
 			{
-				OutError.Set(
-					TEXT("material_niagara_graph_parameter_capture_failed"),
-					Info.Name.ToString());
+				OutError = ParameterReadFailure(ParameterIdentity(Info, EMaterialNiagaraGraphParameterType::Vector),
+					TEXT("vector"), TEXT("Unreal could not read the effective material vector parameter."), &MaterialInstance);
 				return false;
 			}
 			Add(ParameterIdentity(Info,
@@ -1001,16 +1104,16 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		for (const FMaterialParameterInfo& Info : Infos)
 		{
 			UTexture* Value = nullptr;
-			if (!MaterialInstance.GetTextureParameterValue(
-					FHashedMaterialParameterInfo(Info), Value)
-				|| !Value)
+			const bool bReadTexture = MaterialInstance.GetTextureParameterValue(FHashedMaterialParameterInfo(Info), Value);
+			if (!bReadTexture || (!Value && !bAllowNullTextures))
 			{
-				OutError.Set(
-					TEXT("material_niagara_graph_parameter_capture_failed"),
-					Info.Name.ToString());
+				OutError = ParameterReadFailure(ParameterIdentity(Info, EMaterialNiagaraGraphParameterType::Texture), TEXT("texture"),
+					bReadTexture ? TEXT("The effective material texture is null while null textures are disabled.")
+						: TEXT("Unreal could not read the effective material texture parameter."),
+					&MaterialInstance, bReadTexture ? TEXT("texture_present") : TEXT("value_read_succeeded"));
 				return false;
 			}
-			const FString Ref = Value->GetPathName();
+			const FString Ref = Value ? Value->GetPathName() : FString();
 			Add(ParameterIdentity(Info,
 				EMaterialNiagaraGraphParameterType::Texture),
 				IsTextureOverride(Info), 0.0f, FLinearColor::Black,
@@ -1027,9 +1130,8 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 					FHashedMaterialParameterInfo(Info), bValue,
 					ExpressionGuid))
 			{
-				OutError.Set(
-					TEXT("material_niagara_graph_parameter_capture_failed"),
-					Info.Name.ToString());
+				OutError = ParameterReadFailure(ParameterIdentity(Info, EMaterialNiagaraGraphParameterType::StaticSwitch),
+					TEXT("static_switch"), TEXT("Unreal could not read the effective material static switch parameter."), &MaterialInstance);
 				return false;
 			}
 			Add(ParameterIdentity(Info,
@@ -1038,14 +1140,14 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 				FString(), bValue, bValue ? TEXT("true") : TEXT("false"));
 		}
 		TArray<FMaterialNiagaraGraphParameterIdentity> Identities;
-		for (const FMaterialNiagaraGraphEffectiveParameter& Parameter
-			: OutParameters)
+		for (int32 ParameterIndex = 0; ParameterIndex < OutParameters.Num(); ++ParameterIndex)
 		{
+			const auto& Parameter = OutParameters[ParameterIndex];
 			if (!Parameter.IsValid())
 			{
-				OutError.Set(
-					TEXT("material_niagara_graph_parameter_capture_failed"),
-					Parameter.GetIdentity().GetParameterKey());
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("material_niagara_graph_parameter_capture_failed"),
+					*Parameter.GetValidationDiagnostic());
+				OutError.PropertyPath = TEXT("/effective_parameters/") + FString::FromInt(ParameterIndex) + OutError.PropertyPath;
 				OutParameters.Reset();
 				return false;
 			}
@@ -1160,26 +1262,32 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 	{
 		OutReceipt = FMaterialNiagaraGraphCompileSettleReceipt();
 		OutError.Reset();
+		TArray<FMaterialNiagaraGraphAdapterError> CompileErrors;
 		if (UMaterial* Material = Cast<UMaterial>(&Owner))
 		{
 			UMaterialEditingLibrary::RecompileMaterial(Material);
 			OutReceipt.CompileErrorCount =
-				CountMaterialCompileErrors(*Material);
+				SettleMaterialCompileErrors(*Material, CompileErrors);
 		}
 		else if (UMaterialInstanceConstant* MaterialInstance =
 			Cast<UMaterialInstanceConstant>(&Owner))
 		{
 			UMaterialEditingLibrary::UpdateMaterialInstance(MaterialInstance);
 			OutReceipt.CompileErrorCount =
-				CountMaterialCompileErrors(*MaterialInstance);
+				SettleMaterialCompileErrors(*MaterialInstance, CompileErrors);
 		}
 		else if (UMaterialFunction* Function = Cast<UMaterialFunction>(&Owner))
 		{
+			// A function owns a definition update, not an independent shader resource.
+			// Existing preview resources are reported separately by diagnostics.
 			UMaterialEditingLibrary::UpdateMaterialFunction(Function, nullptr);
 		}
 		else
 		{
-			OutError.Set(TEXT("material_niagara_graph_compile_target_invalid"));
+			OutError = NativeValueFailure(TEXT("material_niagara_graph_compile_target_invalid"),
+				TEXT("This native object cannot be compiled as a material or material function."), TEXT("/owner_class"),
+				MakeShared<FJsonValueString>(Owner.GetClass()->GetPathName()),
+				MakeShared<FJsonValueString>(TEXT("Material, MaterialInstanceConstant or MaterialFunction")), &Owner);
 			return false;
 		}
 		OutReceipt.bCompilationComplete = true;
@@ -1187,9 +1295,10 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		OutReceipt.SettleEvidenceId = NewEvidence(TEXT("settle"), &Owner);
 		if (OutReceipt.CompileErrorCount != 0)
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_compile_incomplete"),
-				FString::FromInt(OutReceipt.CompileErrorCount));
+			OutError = NativeValueFailure(TEXT("material_niagara_graph_compile_incomplete"),
+				TEXT("The native material compiler reported errors."), TEXT("/compile_error_count"),
+				MakeShared<FJsonValueNumber>(OutReceipt.CompileErrorCount), MakeShared<FJsonValueNumber>(0), &Owner);
+			OutError.Diagnostics = MoveTemp(CompileErrors);
 			return false;
 		}
 		return true;
@@ -1220,14 +1329,12 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		Stage.ScriptSource->Modify();
 		Stage.Graph->Modify();
 		Stage.OutputNode->Modify();
-		FString NativeError;
+		UE::UAI::Contract::FDiagnostic NativeError;
 		OutModule = AddAssignmentModule(
 			*Stage.OutputNode, AssignmentTargets, TargetIndex, NativeError);
 		if (!OutModule)
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_stack_module_add_failed"),
-				NativeError);
+			OutError = NativeError;
 			return false;
 		}
 		if (!OutModule->NodeGuid.IsValid())
@@ -1264,7 +1371,7 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		Stage.ScriptSource->Modify();
 		Stage.Graph->Modify();
 		Stage.OutputNode->Modify();
-		FString NativeError;
+		UE::UAI::Contract::FDiagnostic NativeError;
 		if (!MoveModule(
 				*Stage.OutputNode,
 				Module,
@@ -1272,9 +1379,7 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 				OutNewIndex,
 				NativeError))
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_stack_module_move_failed"),
-				NativeError);
+			OutError = NativeError;
 			return false;
 		}
 		Stage.Graph->NotifyGraphChanged();
@@ -1304,7 +1409,7 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			return false;
 		}
 		TArray<UNiagaraNodeFunctionCall*> Modules;
-		GetModules(*Stage.OutputNode, Modules);
+		if (!GetModules(*Stage.OutputNode, Modules, OutError)) return false;
 		TArray<FMaterialNiagaraGraphItemIdentity> Items;
 		TArray<FMaterialNiagaraGraphOrderingIdentity> Ordering;
 		FString Predecessor;
@@ -1313,9 +1418,10 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			UNiagaraNodeFunctionCall* Module = Modules[Index];
 			if (!Module || !Module->NodeGuid.IsValid())
 			{
-				OutError.Set(
-					TEXT("material_niagara_graph_item_identity_missing"),
-					Module ? Module->GetPathName() : TEXT("null"));
+				OutError = NativeConditionFailure(TEXT("material_niagara_graph_item_identity_missing"),
+					!Module ? TEXT("The native Niagara stack contains an unavailable module.") : TEXT("A native Niagara stack module has no valid identity."),
+					TEXT("/modules/") + FString::FromInt(Index) + (!Module ? TEXT("/object_present") : TEXT("/native_identity_valid")), &Asset);
+				if (Module) OutError.ActualEvidence = MakeShared<FJsonValueString>(Module->GetPathName());
 				return false;
 			}
 			const FString ItemKey = ModuleItemKey(*Module);
@@ -1352,7 +1458,9 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		OutError.Reset();
 		if (!FMath::IsFinite(WarmupTime) || WarmupTime < 0.0f)
 		{
-			OutError.Set(TEXT("material_niagara_graph_warmup_time_invalid"));
+			OutError = NativeValueFailure(TEXT("material_niagara_graph_warmup_time_invalid"),
+				TEXT("Niagara warmup time must be finite and nonnegative."), TEXT("/warmup_time"),
+				FiniteNumberFact(WarmupTime), MakeShared<FJsonValueString>(TEXT("finite number >= 0")), &System);
 			return false;
 		}
 		System.Modify();
@@ -1374,7 +1482,8 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		FVersionedNiagaraEmitterData* Data = Emitter.GetLatestEmitterData();
 		if (!Data)
 		{
-			OutError.Set(TEXT("material_niagara_graph_emitter_data_missing"));
+			OutError = NativeConditionFailure(TEXT("material_niagara_graph_emitter_data_missing"),
+				TEXT("The Niagara emitter has no latest version data to update."), TEXT("/latest_emitter_data_present"), &Emitter);
 			return false;
 		}
 		Emitter.Modify();
@@ -1396,7 +1505,8 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		FVersionedNiagaraScriptData* Data = Script.GetLatestScriptData();
 		if (!Data)
 		{
-			OutError.Set(TEXT("material_niagara_graph_script_data_missing"));
+			OutError = NativeConditionFailure(TEXT("material_niagara_graph_script_data_missing"),
+				TEXT("The Niagara script has no latest version data to update."), TEXT("/latest_script_data_present"), &Script);
 			return false;
 		}
 		Script.Modify();
@@ -1422,7 +1532,9 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			System->PollForCompilationComplete(true);
 			if (System->HasOutstandingCompilationRequests(true))
 			{
-				OutError.Set(TEXT("material_niagara_graph_compile_incomplete"));
+				OutError = NativeConditionFailure(TEXT("material_niagara_graph_compile_incomplete"),
+					TEXT("Niagara still has outstanding compilation requests after waiting and polling."),
+					TEXT("/outstanding_compilation_requests"), &Asset, true, false);
 				return false;
 			}
 			System->CacheFromCompiledData();
@@ -1431,7 +1543,7 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		else if (UNiagaraEmitter* Emitter = Cast<UNiagaraEmitter>(&Asset))
 		{
 			UeAgentNiagaraEmitterCompileContext::FResult Result;
-			FString NativeError;
+			UE::UAI::Contract::FDiagnostic NativeError;
 			if (!UeAgentNiagaraEmitterCompileContext::Compile(
 					*Emitter,
 					Emitter->GetExposedVersion().VersionGuid,
@@ -1439,26 +1551,24 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 					Result,
 					NativeError))
 			{
-				OutError.Set(
-					TEXT("material_niagara_graph_compile_incomplete"),
-					NativeError);
+				OutError = NativeError;
 				return false;
 			}
 			Compile = Result.Validation;
 		}
 		else if (UNiagaraScript* Script = Cast<UNiagaraScript>(&Asset))
 		{
-			TSet<TWeakObjectPtr<UNiagaraScriptSource>> PreviousCopies;
-			CaptureRootedNiagaraCompilationCopies(PreviousCopies);
 			Script->RequestCompile(
 				Script->GetExposedVersion().VersionGuid,
 				true);
-			ReleaseNewNiagaraCompilationCopies(PreviousCopies);
 			Compile = UeAgentNiagaraCompileValidation::InspectAsset(Script);
 		}
 		else
 		{
-			OutError.Set(TEXT("material_niagara_graph_compile_target_invalid"));
+			OutError = NativeValueFailure(TEXT("material_niagara_graph_compile_target_invalid"),
+				TEXT("This native object cannot be compiled as a Niagara asset."), TEXT("/owner_class"),
+				MakeShared<FJsonValueString>(Asset.GetClass()->GetPathName()),
+				MakeShared<FJsonValueString>(TEXT("NiagaraSystem, NiagaraEmitter or NiagaraScript")), &Asset);
 			return false;
 		}
 
@@ -1471,24 +1581,18 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		OutReceipt.SettleEvidenceId = NewEvidence(TEXT("settle"), &Asset);
 		if (!Stack.bInspectionComplete)
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_stack_capture_failed"),
-				Stack.FirstError);
+			OutError = Stack.GetFailure();
 			return false;
 		}
 		if (!OutReceipt.bCompilationComplete
 			|| OutReceipt.CompileErrorCount != 0)
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_compile_incomplete"),
-				Compile.FirstError);
+			OutError = Compile.GetFailure(Asset.GetPathName());
 			return false;
 		}
 		if (OutReceipt.StackIssueCount != 0)
 		{
-			OutError.Set(
-				TEXT("material_niagara_graph_stack_issue"),
-				Stack.FirstError);
+			OutError = Stack.GetFailure(true);
 			return false;
 		}
 		return true;

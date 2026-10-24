@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UeAgentAuthoringDomainRegistry
@@ -58,7 +60,7 @@ namespace UeAgentAuthoringDomainRegistry
 		bool RegisterDomain(
 			const FDomainRegistration& Registration,
 			ERegistrationResult& OutResult,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool FindDomain(const FString& DomainId, FDomainRegistration& OutRegistration) const;
 		bool FindCatalogBinding(const FString& Kind, FCatalogBinding& OutBinding) const;
 		TArray<FDomainRegistration> ListDomains() const;
@@ -72,6 +74,6 @@ namespace UeAgentAuthoringDomainRegistry
 	};
 
 	// Generated declarations are consumed only from each domain's RegisterAuthoring root.
-	UEAGENTINTERFACE_API bool RegisterGeneratedDomain(const FString& DomainId, FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterGeneratedDomain(const FString& DomainId, UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API const TArray<FString>& GetGeneratedSeedFields();
 }

@@ -1,12 +1,18 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Async/Future.h"
 #include "Core/ArtifactPublisher/UeAgentFileArtifactPublisher.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/ExecutionMutation/UeAgentLongRunningOperation.h"
 
+class FJsonValue;
+
 namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 {
+	// Only for files produced and owned by the current capture, including failed adoption.
+	UEAGENTINTERFACE_API bool DiscardProducedCaptureFile(const FString& Path);
+
 	class UEAGENTINTERFACE_API FUeAgentStagedCaptureImage final
 	{
 	public:
@@ -27,6 +33,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		int32 GetHeight() const { return Height; }
 		const FString& GetPixelHash() const { return PixelHash; }
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		friend class FUeAgentCaptureImageArtifactService;
@@ -43,6 +50,8 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 	{
 	public:
 		virtual ~IUeAgentCaptureImageArtifactService() = default;
+		// Stage an opaque scene screenshot; render-target alpha is not PNG opacity.
+		// Transparent captures retain their encoded alpha through TryAdoptStagedImage.
 		virtual bool TryStagePngPixels(
 			const FString& OperationId,
 			const FString& SubjectRef,
@@ -52,6 +61,8 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			FUeAgentStagedCaptureImage& OutImage,
 			ExecutionMutation::FExecutionMutationError& OutError) const = 0;
 
+		// The caller owns NativePath until success. Failure leaves OutImage empty
+		// and does not delete the input; the caller must clean up its produced files.
 		virtual bool TryAdoptStagedImage(
 			const FString& OperationId,
 			const FString& SubjectRef,
@@ -70,7 +81,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			FString& OutEvidenceId,
 			ExecutionMutation::FExecutionMutationError& OutError) const = 0;
 
-		virtual void DiscardStaged(const FUeAgentStagedCaptureImage& Image) const = 0;
+		virtual bool DiscardStaged(const FUeAgentStagedCaptureImage& Image) const = 0;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentCaptureImageArtifactService final
@@ -92,6 +103,24 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			ArtifactPublisher::FFileArtifactReference& OutArtifact,
 			FString& OutEvidenceId,
 			ExecutionMutation::FExecutionMutationError& OutError) const override;
-		void DiscardStaged(const FUeAgentStagedCaptureImage& Image) const override;
+		bool DiscardStaged(const FUeAgentStagedCaptureImage& Image) const override;
 	};
+
+	struct FPublishedCaptureImage
+	{
+		TSharedPtr<FJsonValue> Artifact;
+		TArray<FColor> Preview;
+		FIntPoint PreviewSize = FIntPoint::ZeroValue;
+		UE::UAI::Contract::FDiagnostic Error;
+		UE::UAI::Contract::FDiagnostic CleanupError;
+		UE::UAI::Contract::FDiagnostic PreviewError;
+		double ProcessingSeconds = 0.0;
+		TMap<ContextResource::EUeAgentResourceDimension, int64> Charges;
+	};
+
+	/** Owns its pixels and accounting; no game-thread object or caller tracker is borrowed. */
+	TFuture<FPublishedCaptureImage> PublishCaptureImageAsync(
+		TSharedRef<IUeAgentCaptureImageArtifactService, ESPMode::ThreadSafe> Service,
+		FString OperationId, FString SubjectRef, FString PublisherOwnerId,
+		TArray<FColor> Pixels, FIntPoint Size, bool bPreview);
 }

@@ -3,66 +3,84 @@
 `blueprint.node.candidates` is the sole public candidate query for the current
 Blueprint node creation surface. It resolves one existing Blueprint and one
 exact graph/pin context against Unreal's native Blueprint Action Menu source.
-The public call is `client.blueprint.node_candidates(...)`. When its method or
-contract hash is not already known, use `client.query.command_search(...)` followed
-by `client.query.command_detail(...)`; `uai-cli` exposes the same exact contract.
+The public call is `client.blueprint.node_candidates(...)`. Use
+`client.query.command_search(...)` for discovery and
+`client.query.command_usage(...)` for the minimal Python form; generated SDK/formal schema is
+only for an exceptional schema or failure question.
 
-Candidate rows expose compact creation selectors:
+Results contain names plus one query `scope`; pin-context queries also return one
+`candidate_context` object using the same node/pin aliases accepted by HJSON:
 
 ```json
-{
-  "name": "Branch",
-  "id": "candidate:...",
-  "display_name": "Branch",
-  "kind": "blueprint_node"
-}
+{"names":["If Then Else"],"scope":{"target":"/Game/Blueprints/BP_Example","graph_name":"EventGraph"}}
 ```
 
-`name` is sufficient only when it is unique in the exact native context. `id`
-is the precise selector and preserves the native action identity. Other
-returned fields are diagnostics or optional assertions; callers do not need to
-copy a complete search row. Continue with `next_cursor` while `has_more=true`
-before making an exhaustive or unique-result claim; one page is bounded to 20
-rows.
+Repeated representations of the same canonical native action are merged. Same-name
+semantic differences share one display name while retaining their native identities.
+Equal public selector fields do not merge distinct native identities; insufficient
+semantic distinctions produce a diagnostic instead of choosing the first action.
+Resolution accepts `name` plus at most two returned short `select` fields.
+Class-based choices use the short native class name, while native rebinding
+retains the complete class identity internally. Ordinary graph rows carry
+`name` and `select` together; wrapping the row as a candidate preserves both.
+An actual ambiguity returns its reason and replayable choices. Each choice uses
+its own one or two semantic fields. Choices using different fields are returned
+as an array of objects; copy one complete object to `select`. If the native
+catalog cannot provide sufficient public semantic fields, resolution reports
+`candidate_discriminator_missing` rather than inventing a scoped name.
 
-Specialized rows also expose the safe semantics needed to select without a
-localized display-name inference:
+Every node candidate adds specialized function, event, variable, macro or operator
+fields to its node class and asset/class bindings; specialization never clears
+those independent facts. Ordinary functions retain their function owner and name.
+Promotable operators use `operation_name`: their registered representative function
+is not a semantic choice, because pin promotion determines the concrete function.
+A function's owner and name do not identify its node form: ordinary interface calls and interface
+messages may refer to the same function. These ambiguities offer the readable
+`select.node_class` (and class source when needed), then replay the selected
+native spawner. The internal action signature is not a public selector.
 
-- function calls: `function_name`, `function_owner_class`;
-- events: `event_name`, `event_class`;
-- variables: `variable_name`, `node_type=get|set`, `member_parent_class`;
-- generic nodes: `node_class`;
-- Unreal promotable operators: `node_class`, `operation_name`.
+Native input variants retain their binding as semantic selection fields. A unique
+reflected `FKey` contributes `input_key` using its stable key name; this also covers
+debug-key nodes and inherited scalar/vector axis event and value nodes without
+depending on their localized menu labels or private plugin classes. Legacy mapped
+Action and Axis nodes contribute `input_action` and `input_axis` from their native
+mapping names. For example, an `Input Key` ambiguity can offer `input_key: "W"`.
+Copy the returned choice; a search for `W` does not bind the subsequent creation.
+Enhanced Input asset nodes retain the existing `asset_override` binding mechanism.
+The same native input-binding capture is used for actual-node observation:
+`content_graph.items` exposes an `input_binding` object containing these
+semantic fields even when the native property is not editable. This is query
+metadata, separate from the writable workspace node spec and from Enhanced Input's
+existing asset-path `input_action` field; it does not add a second creation path.
 
-Promotable operators such as `Multiply` and `EqualEqual` are native shared
-Action Menu nodes whose concrete function is selected from connected pin types. They
-are not fixed function-call candidates. Their row therefore keeps the native UI
-name and compact `id`, exposes `operation_name` as the optional stable semantic
-assertion, and does not expose the spawner's registration-order representative
-`function_name` or `function_owner_class`.
+Reuse the names within this target, graph and optional pin context. Switching
+asset, graph or pin context requires discovering the needed names there; an
+Actor Blueprint result does not establish availability in an Animation or Widget
+Blueprint. A changed member/component catalog can require refreshing affected
+names in the same graph. `scope` is response metadata and is not copied into HJSON.
 
-`operation_name` preserves Unreal's native literal semantic name; callers must
-not derive or normalize it from the localized menu label. For example, an
-object equality row may display `Equal ( == )` while its exact assertion is
-`operation_name: EqualEqual`.
-
-`native_action_signature` and internal spawner identity are deliberately not
-public. A caller that already knows more may copy any returned semantic field
-beside `name` or `id` as an exact assertion. The assertion never replaces the
-selector; a missing, non-string or changed value fails before write with
-`blueprint_surface_node_candidate_metadata_mismatch`.
+Component-bound events retain their component binding in catalog identity before
+deduplication. Components sharing a delegate retain separate identities behind
+the name `On Component Hit`; ambiguity offers `select.component_name`, for
+example `OrbCollision`. Component names remain searchable. Read back `component_name` and delegate identity
+after creation to verify the selected binding.
 
 Resolve the graph context before querying nodes. Call
-`content_graph.structure` for the Blueprint, select the unique container whose
-`kind` is `blueprint_graph`, `value.name` is `EventGraph`, and
-`value.graph_kind` is `event_graph`, then copy that container's `id` unchanged
-into `blueprint.node.candidates.graph_id`. The public structure row deliberately
-keeps the opaque graph ID next to these selectable semantics; callers must not
-infer a graph from its nodes, cache an earlier GUID, or reconstruct the ID.
+`content_graph.structure` for the Blueprint, select the intended graph in
+`payload.entries` by `graph_kind` (for example `event_graph`), then pass its `name` to
+`blueprint.node.candidates.graph_name`. Do not cache or reconstruct a graph GUID.
+Named graph containers preserve the authored name used by HJSON; node occurrence
+aliases must not be applied to graph names. This is shared by Actor, Widget and
+Animation Blueprints.
+
+Background creation retains the selected native action's bindings, node hooks,
+autowiring and modification notifications. It does not invoke menu-only editor
+opening, selection or Goto behavior, including for ghost replacement and reuse.
+Native view/navigation actions are search-only rather than creation candidates.
+Explicit editor opening and preview actions remain separate operations.
 
 The same public structure is also the compact readback for existing Blueprint
-nodes. Each node row keeps its stable `id` and `class_path`, while `value`
-reuses the Blueprint authoring state owner for directly selectable semantics:
+nodes. Public node entries reuse the Blueprint authoring state owner for semantics:
 events expose `event_name`/`event_class`, component-bound events expose
 `component_name` and delegate identity, function calls expose
 `function_name`/`function_owner_class`, and variable nodes expose
@@ -70,44 +88,55 @@ events expose `event_name`/`event_class`, component-bound events expose
 infer identity from position, node count, edges, or the raw K2 class, and do
 not export a full workspace merely to recover information already present in
 this compact structure.
+For pin-drag candidate context, pass the exported node and pin aliases unchanged.
+They resolve through the same authoring alias projections as HJSON, not by
+stripping numeric suffixes. Legacy semantic names plus explicit occurrences remain
+accepted; without an occurrence the exact public alias takes precedence.
 
-Use only one minimal selector in the Blueprint-root `uai.blueprint.edit/1`
-document:
+Add one minimal selector to the current exported graph file's `nodes` map:
 
 ```hjson
-graphs: {
-  "event_graph:EventGraph": {
-    nodes: {
-      "node:BranchGate": {
-        operation: create
-        candidate: {
-          id: "candidate:..."
-          node_class: "/Script/BlueprintGraph.K2Node_IfThenElse"
-        }
-      }
-    }
+nodes: {
+  BranchGate: {
+    candidate: { name: "If Then Else" }
   }
 }
 ```
 
-The graph map key remains the graph context and the node map key remains the
-stable node identity. Pin-drag context, when required, is carried separately in
-`candidate_context`; it is not part of `candidate`. There is no active
+Keep the graph's existing entries. Use the returned candidate name rather than
+assuming it equals the search text or menu display label. The node map key is a
+local alias; the workspace diff derives creation, update and removal, so ordinary
+rows do not contain `operation`. Pin-drag context, when required, is carried separately in
+`candidate_context`; it is not part of `candidate`. Pin-context discovery returns
+one `candidate_context` object for all returned names. Copy that object unchanged
+onto the new node; it already resolves legacy names and occurrences to current aliases:
+
+```hjson
+SprintSpeed: {
+  candidate: { name: "Set Max Walk Speed" }
+  candidate_context: { node: "CharacterMovement", pin: "CharacterMovement" }
+}
+```
+
+Here `CharacterMovement` is an existing getter node and its exported output Pin
+alias. The candidate name alone does not retain a previous query's pin context;
+creation re-enumerates that menu. Background-menu discovery omits `candidate_context`.
+This contract is shared by ordinary Blueprint, Widget and Animation graphs.
+There is no active
 `uai.blueprint.node.edit/1` root and no node-specific public apply command.
 The process HJSON authority rejects that retired schema; only the
-Blueprint-root `uai.blueprint.edit/1` provider owns persistent node creation.
+Blueprint authoring owner performs persistent node creation. UMG ordinary
+workspaces also delegate existing-graph candidate creation to this same query,
+normalizer and native action owner; see T15 for that asset carrier.
 
-For `operation: replace`, a candidate may use a source node that is rebuilt in
-the same graph document. The mutation owner creates nodes in
-`candidate_context.node_guid` dependency order before applying edges; JSON or
-HJSON map-key order does not control creation. Refer to a rebuilt source with
-`node_guid` plus `pin_name`. A persisted `pin_guid` is suitable only while that
-exact source pin survives, because rebuilding a node does not preserve its old
-pin GUID.
+Graph dependencies use the readable node and Pin keys from the current exported
+document; JSON or HJSON map-key order does not control creation.
+Read the refreshed workspace after creation or replacement for the settled
+instance interface, including variable Pin counts.
 
 Before persistent mutation, the Blueprint Surfaces provider re-enumerates the
 same native Action Menu for the same Blueprint, graph and optional pin context,
-resolves `name` or `id` uniquely, and invokes the resolved native
+resolves the readable `name` and optional short `select` uniquely, and invokes the resolved native
 `FEdGraphSchemaAction::PerformAction`. It does not translate a display name to a
 node class or reconstruct an action in Python or the HJSON adapter. Unknown,
 ambiguous, stale, context-mismatched, or assertion-mismatched candidates fail
@@ -131,12 +160,10 @@ back the persisted graph through the shared content-graph lifecycle. Candidate
 discovery itself is read-only and does not replace the public content-graph
 revision required by `content_graph.import_workspace`.
 
-The surface first validates the public `id` exactly against the real target.
-Its mutation preflight then runs on a duplicated validation Blueprint, where
-asset-local spawner identities can acquire a different owner path. The
-normalizer freezes the exact native name plus clone-stable safe semantics from
-the already validated row; only the scratch preflight may use that frozen tuple
-to rebind uniquely. Direct public candidate execution still rejects an invalid
-`id`, and a missing or ambiguous scratch rebind remains a typed failure. That
-failure identifies the public graph node key and selector without exposing the
-internal spawner signature.
+The surface validates the readable selector against the real target and repeats
+the same resolution in duplicated preflight. Missing, stale or ambiguous
+rebinding is a typed failure that identifies the public graph node key without
+exposing the internal spawner signature.
+Missing/ambiguous action diagnostics retain the requested name, authoring target,
+current graph/menu context and corrective query guidance, along with the ordinary
+HJSON source location. They do not infer which previous query supplied the name.

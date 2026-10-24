@@ -1,4 +1,6 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaRoutes.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaIdentity.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundLifecycleResultContract.h"
 
@@ -21,6 +23,32 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
+
+		FDiagnostic RouteFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Subject,
+			const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected)
+		{
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, TEXT("graph_compound"), FString(), Subject);
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
+		FDiagnostic InputFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Subject,
+			const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected)
+		{
+			FDiagnostic Error = RouteFailure(Code, Reason, Subject, Field, MoveTemp(Actual), MoveTemp(Expected));
+			Error.SourceKind = TEXT("command_input");
+			Error.Source.JsonPath = FString(TEXT("/")) + Field;
+			return Error;
+		}
+
+
 		struct FRouteSpec final
 		{
 			const TCHAR* CapabilityId;
@@ -59,70 +87,85 @@ namespace UE::UAI::Composition::GraphCompound
 			return Values;
 		}
 
-		FString CanonicalSchema(const TCHAR* Text)
+		FString CanonicalSchema(UE::UAI::Contract::FDiagnostic& Error, const TCHAR* Text)
 		{
 			TSharedPtr<FJsonObject> Object;
-			FString Error;
 			FString Canonical;
-			return Json::TryParseObject(Text, Object, Error)
-				&& Json::TryCanonicalize(Object, Canonical, Error)
-				? Canonical : FString();
+			if (!Json::TryParseObject(Text, Object, Error)
+				|| !Json::TryCanonicalize(Object, Canonical, Error))
+			{
+				MarkGraphCompoundNativeDiagnostic(Error);
+				return FString();
+			}
+			return Canonical;
 		}
 
-		FString InputSchema(const FRouteSpec& Spec)
+		FString InputSchema(const FRouteSpec& Spec, UE::UAI::Contract::FDiagnostic& Error)
 		{
 			using I = EAudioMediaGraphInputKind;
 			switch (Spec.InputKind)
 			{
 			case I::AssetCreate:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_kind\":{\"enum\":[\"metasound_source\",\"sound_cue\",\"texture_graph\"],\"type\":\"string\"},\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_kind\",\"asset_name\",\"package_path\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_kind\":{\"enum\":[\"metasound_source\",\"sound_cue\",\"texture_graph\"],\"type\":\"string\"},\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_kind\",\"asset_name\",\"package_path\"],\"type\":\"object\"}"));
 			case I::MetaSoundInterface:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"changes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"access_type\":{\"enum\":[\"value\",\"reference\"],\"type\":\"string\"},\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"default_value\":{},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"interface_kind\":{\"enum\":[\"input\",\"output\"],\"type\":\"string\"},\"name\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"access_type\",\"data_type_ref\",\"intent\",\"interface_kind\",\"name\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"changes\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"changes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"access_type\":{\"enum\":[\"value\",\"reference\"],\"type\":\"string\"},\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"default_value\":{},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"interface_kind\":{\"enum\":[\"input\",\"output\"],\"type\":\"string\"},\"name\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"access_type\",\"data_type_ref\",\"intent\",\"interface_kind\",\"name\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"changes\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::MetaSoundNode:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"nodes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"class_name\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"major_version\":{\"minimum\":0,\"type\":\"integer\"},\"minor_version\":{\"minimum\":0,\"type\":\"integer\"},\"node_guid\":{\"minLength\":1,\"type\":\"string\"},\"position\":{\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\"],\"type\":\"object\"}},\"required\":[\"class_name\",\"intent\",\"major_version\",\"minor_version\",\"node_guid\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"nodes\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"nodes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"class_name\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"major_version\":{\"minimum\":0,\"type\":\"integer\"},\"minor_version\":{\"minimum\":0,\"type\":\"integer\"},\"node_guid\":{\"minLength\":1,\"type\":\"string\"},\"position\":{\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\"],\"type\":\"object\"}},\"required\":[\"class_name\",\"intent\",\"major_version\",\"minor_version\",\"node_guid\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"nodes\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::MetaSoundLink:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"links\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"from\":{\"additionalProperties\":false,\"properties\":{\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"direction\":{\"enum\":[\"output\"],\"type\":\"string\"},\"node_guid\":{\"minLength\":1,\"type\":\"string\"},\"vertex_guid\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"data_type_ref\",\"direction\",\"node_guid\",\"vertex_guid\"],\"type\":\"object\"},\"intent\":{\"enum\":[\"create\",\"delete\"],\"type\":\"string\"},\"to\":{\"additionalProperties\":false,\"properties\":{\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"direction\":{\"enum\":[\"input\"],\"type\":\"string\"},\"node_guid\":{\"minLength\":1,\"type\":\"string\"},\"vertex_guid\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"data_type_ref\",\"direction\",\"node_guid\",\"vertex_guid\"],\"type\":\"object\"}},\"required\":[\"from\",\"intent\",\"to\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"links\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"links\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"from\":{\"additionalProperties\":false,\"properties\":{\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"direction\":{\"enum\":[\"output\"],\"type\":\"string\"},\"node_guid\":{\"minLength\":1,\"type\":\"string\"},\"vertex_guid\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"data_type_ref\",\"direction\",\"node_guid\",\"vertex_guid\"],\"type\":\"object\"},\"intent\":{\"enum\":[\"create\",\"delete\"],\"type\":\"string\"},\"to\":{\"additionalProperties\":false,\"properties\":{\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"direction\":{\"enum\":[\"input\"],\"type\":\"string\"},\"node_guid\":{\"minLength\":1,\"type\":\"string\"},\"vertex_guid\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"data_type_ref\",\"direction\",\"node_guid\",\"vertex_guid\"],\"type\":\"object\"}},\"required\":[\"from\",\"intent\",\"to\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"links\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::MetaSoundDefault:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"update\",\"replace\"],\"type\":\"string\"},\"node_guid\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{},\"vertex_guid\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"data_type_ref\",\"intent\",\"node_guid\",\"target_ref\",\"value\",\"vertex_guid\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"update\",\"replace\"],\"type\":\"string\"},\"node_guid\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{},\"vertex_guid\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"data_type_ref\",\"intent\",\"node_guid\",\"target_ref\",\"value\",\"vertex_guid\"],\"type\":\"object\"}"));
 			case I::MetaSoundCompileSettle:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"expected_document_revision\":{\"minLength\":1,\"type\":\"string\"},\"registration_policy\":{\"enum\":[\"register_and_compile\"],\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"expected_document_revision\",\"registration_policy\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"registration_policy\":{\"enum\":[\"register_and_compile\"],\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"registration_policy\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::SoundCueNode:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"nodes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"native_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"object_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"native_class_ref\",\"object_path\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"nodes\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"nodes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"native_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"object_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"native_class_ref\",\"object_path\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"nodes\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::SoundCueRelation:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"relations\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"child_object_path\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"},\"parent_object_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"child_object_path\",\"intent\",\"order_index\",\"parent_object_path\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"relations\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"relations\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"child_object_path\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"},\"parent_object_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"child_object_path\",\"intent\",\"order_index\",\"parent_object_path\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"relations\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::SoundCueRoot:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"update\",\"replace\"],\"type\":\"string\"},\"root_node_object_path\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"root_node_object_path\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"update\",\"replace\"],\"type\":\"string\"},\"root_node_object_path\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"root_node_object_path\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::SoundCueCompileSettle:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"expected_graph_revision\":{\"minLength\":1,\"type\":\"string\"},\"sync_policy\":{\"enum\":[\"sync_and_compile\"],\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"expected_graph_revision\",\"sync_policy\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"sync_policy\":{\"enum\":[\"sync_and_compile\"],\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"sync_policy\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::TextureGraphNode:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"nodes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"element_id\":{\"minLength\":1,\"type\":\"string\"},\"expression_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"}},\"required\":[\"element_id\",\"expression_class_ref\",\"intent\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"nodes\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"nodes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"element_id\":{\"minLength\":1,\"type\":\"string\"},\"expression_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"}},\"required\":[\"element_id\",\"expression_class_ref\",\"intent\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"nodes\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::TextureGraphLink:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"links\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"from\":{\"additionalProperties\":false,\"properties\":{\"direction\":{\"enum\":[\"output\"],\"type\":\"string\"},\"element_id\":{\"minLength\":1,\"type\":\"string\"},\"pin_name\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"direction\",\"element_id\",\"pin_name\"],\"type\":\"object\"},\"intent\":{\"enum\":[\"create\",\"delete\"],\"type\":\"string\"},\"to\":{\"additionalProperties\":false,\"properties\":{\"direction\":{\"enum\":[\"input\"],\"type\":\"string\"},\"element_id\":{\"minLength\":1,\"type\":\"string\"},\"pin_name\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"direction\",\"element_id\",\"pin_name\"],\"type\":\"object\"}},\"required\":[\"from\",\"intent\",\"to\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"links\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"links\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"from\":{\"additionalProperties\":false,\"properties\":{\"direction\":{\"enum\":[\"output\"],\"type\":\"string\"},\"element_id\":{\"minLength\":1,\"type\":\"string\"},\"pin_name\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"direction\",\"element_id\",\"pin_name\"],\"type\":\"object\"},\"intent\":{\"enum\":[\"create\",\"delete\"],\"type\":\"string\"},\"to\":{\"additionalProperties\":false,\"properties\":{\"direction\":{\"enum\":[\"input\"],\"type\":\"string\"},\"element_id\":{\"minLength\":1,\"type\":\"string\"},\"pin_name\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"direction\",\"element_id\",\"pin_name\"],\"type\":\"object\"}},\"required\":[\"from\",\"intent\",\"to\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"links\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::TextureGraphParameter:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"parameters\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"alias\":{\"minLength\":1,\"type\":\"string\"},\"element_id\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"update\",\"replace\"],\"type\":\"string\"},\"pin_name\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"alias\",\"element_id\",\"intent\",\"pin_name\",\"value\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"parameters\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"parameters\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"alias\":{\"minLength\":1,\"type\":\"string\"},\"element_id\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"update\",\"replace\"],\"type\":\"string\"},\"pin_name\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"alias\",\"element_id\",\"intent\",\"pin_name\",\"value\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"parameters\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::TextureGraphValidateEvaluateSettle:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"evaluation_policy\":{\"enum\":[\"validate_and_evaluate\"],\"type\":\"string\"},\"expected_graph_revision\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"evaluation_policy\",\"expected_graph_revision\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"evaluation_policy\":{\"enum\":[\"validate_and_evaluate\"],\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"evaluation_policy\",\"target_ref\"],\"type\":\"object\"}"));
 			case I::TextureGraphArtifactCapture:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"expected_settled_revision\":{\"minLength\":1,\"type\":\"string\"},\"outputs\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"element_id\":{\"minLength\":1,\"type\":\"string\"},\"output_name\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"element_id\",\"output_name\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"expected_settled_revision\",\"outputs\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"outputs\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"element_id\":{\"minLength\":1,\"type\":\"string\"},\"output_name\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"element_id\",\"output_name\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"outputs\",\"target_ref\"],\"type\":\"object\"}"));
 			default:
+				Error = RouteFailure(TEXT("graph_compound_input_schema_kind_invalid"),
+					TEXT("The registered graph route has no input schema for its input kind."),
+					Spec.CapabilityId, TEXT("input_kind"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Spec.InputKind)),
+					MakeShared<FJsonValueString>(TEXT("a supported input schema kind")));
 				return FString();
 			}
 		}
 
-		FString ResultSchema(const FRouteSpec& Spec)
+		FString ResultSchema(const FRouteSpec& Spec, UE::UAI::Contract::FDiagnostic& Error)
 		{
 			if (Spec.RouteKind == EGraphCompoundDomainRouteKind::Query)
 			{
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"outputs\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"evaluated_value_type\":{\"type\":\"string\"},\"expression_object_path\":{\"type\":\"string\"},\"node_index\":{\"type\":\"integer\"},\"output_name\":{\"type\":\"string\"},\"pin_index\":{\"type\":\"integer\"},\"settings_fingerprint\":{\"type\":\"string\"}},\"required\":[\"evaluated_value_type\",\"expression_object_path\",\"node_index\",\"output_name\",\"pin_index\",\"settings_fingerprint\"],\"type\":\"object\"},\"type\":\"array\"},\"published\":{\"enum\":[false]},\"settled_revision\":{\"type\":\"string\"},\"target_ref\":{\"type\":\"string\"}},\"required\":[\"outputs\",\"published\",\"settled_revision\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"outputs\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"evaluated_value_type\":{\"type\":\"string\"},\"expression_object_path\":{\"type\":\"string\"},\"node_index\":{\"type\":\"integer\"},\"output_name\":{\"type\":\"string\"},\"pin_index\":{\"type\":\"integer\"}},\"required\":[\"evaluated_value_type\",\"expression_object_path\",\"node_index\",\"output_name\",\"pin_index\"],\"type\":\"object\"},\"type\":\"array\"},\"published\":{\"enum\":[false]},\"target_ref\":{\"type\":\"string\"}},\"required\":[\"outputs\",\"published\",\"target_ref\"],\"type\":\"object\"}"));
 			}
-			return LifecycleResultContract::BuildMutationLifecycleResultSchema(false);
+			const bool bRevisionIsMachineOnly =
+				(FStringView(Spec.CapabilityId).StartsWith(TEXT("metasound.graph."))
+					|| FStringView(Spec.CapabilityId).StartsWith(TEXT("sound_cue.graph.")));
+			if (bRevisionIsMachineOnly)
+			{
+				return LifecycleResultContract::BuildMutationLifecycleResultSchema(false, Error);
+			}
+			return LifecycleResultContract::BuildMutationLifecycleResultSchema(false, Error);
 		}
 
 		TSharedPtr<FJsonObject> DescriptorObject(
 			const FRouteSpec& Spec,
 			const FString& Input,
 			const FString& Result,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<FJsonObject> InputObject;
 			TSharedPtr<FJsonObject> ResultObject;
@@ -165,13 +208,17 @@ namespace UE::UAI::Composition::GraphCompound
 			return Object;
 		}
 
-		bool ValidateSpecs(FString& OutError)
+		bool ValidateSpecs(UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const TArray<FAudioMediaGraphCapabilityContract>& Contracts =
 				GetAudioMediaGraphCapabilityContracts();
 			if (Contracts.Num() != RouteSpecs().Num())
 			{
-				OutError = TEXT("audio_media_graph_contract_count_mismatch");
+				OutError = RouteFailure(TEXT("audio_media_graph_contract_count_mismatch"),
+					TEXT("The capability contract count differs from the registered audio/media route count."),
+					TEXT("audio_media_graph"), TEXT("capability_contracts.count"),
+					MakeShared<FJsonValueNumber>(Contracts.Num()), MakeShared<FJsonValueNumber>(RouteSpecs().Num()));
+				OutError.Stage = TEXT("registration");
 				return false;
 			}
 			for (const FRouteSpec& Spec : RouteSpecs())
@@ -188,8 +235,42 @@ namespace UE::UAI::Composition::GraphCompound
 					|| Match->GetVersion() != 1
 					|| (Match->GetOperationKind() == TEXT("query")) != bQuery)
 				{
-					OutError = FString(TEXT("audio_media_graph_contract_mismatch:"))
-						+ Spec.CapabilityId;
+					const TCHAR* Field = !Match ? TEXT("capability_contract.present")
+						: Match->GetDescriptorId() != Spec.DescriptorId ? TEXT("descriptor_id")
+						: Match->GetPortFamilyId() != Spec.FamilyId ? TEXT("port_family_id")
+						: Match->GetVersion() != 1 ? TEXT("version") : TEXT("operation_kind");
+					TSharedPtr<FJsonValue> Actual;
+					TSharedPtr<FJsonValue> Expected;
+					if (!Match)
+					{
+						Actual = MakeShared<FJsonValueBoolean>(false);
+						Expected = MakeShared<FJsonValueBoolean>(true);
+					}
+					else if (Match->GetDescriptorId() != Spec.DescriptorId)
+					{
+						Actual = MakeShared<FJsonValueString>(Match->GetDescriptorId());
+						Expected = MakeShared<FJsonValueString>(Spec.DescriptorId);
+					}
+					else if (Match->GetPortFamilyId() != Spec.FamilyId)
+					{
+						Actual = MakeShared<FJsonValueString>(Match->GetPortFamilyId());
+						Expected = MakeShared<FJsonValueString>(Spec.FamilyId);
+					}
+					else if (Match->GetVersion() != 1)
+					{
+						Actual = MakeShared<FJsonValueNumber>(Match->GetVersion());
+						Expected = MakeShared<FJsonValueNumber>(1);
+					}
+					else
+					{
+						Actual = MakeShared<FJsonValueString>(Match->GetOperationKind());
+						Expected = MakeShared<FJsonValueString>(bQuery ? TEXT("query") : TEXT("non-query"));
+					}
+					OutError = RouteFailure(TEXT("audio_media_graph_contract_mismatch"),
+						!Match ? TEXT("No capability contract is registered for the audio/media graph route.")
+							: TEXT("The capability contract does not match the audio/media graph route specification."),
+						Spec.CapabilityId, Field, MoveTemp(Actual), MoveTemp(Expected));
+					OutError.Stage = TEXT("registration");
 					return false;
 				}
 			}
@@ -206,7 +287,7 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			TArray<FAudioMediaGraphRouteProfile> Profiles;
 			TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 		};
 
 		FRouteBundle BuildBundle()
@@ -219,16 +300,30 @@ namespace UE::UAI::Composition::GraphCompound
 			TArray<FUeAgentOperationDescriptor> Descriptors;
 			for (const FRouteSpec& Spec : RouteSpecs())
 			{
-				const FString Input = InputSchema(Spec);
-				const FString Result = ResultSchema(Spec);
-				TSharedPtr<FJsonObject> Object =
-					DescriptorObject(Spec, Input, Result, Bundle.Error);
-				FString CanonicalDescriptor;
-				if (Input.IsEmpty() || Result.IsEmpty() || !Object.IsValid()
-					|| !Json::TryCanonicalize(
-						Object, CanonicalDescriptor, Bundle.Error))
+				auto RejectSchema = [&](const TCHAR* Field)
 				{
+					MarkGraphCompoundNativeDiagnostic(Bundle.Error);
+					if (Bundle.Error.TargetPath.IsEmpty()) Bundle.Error.TargetPath = Spec.DescriptorId;
+					if (Bundle.Error.PropertyPath.IsEmpty()) Bundle.Error.PropertyPath = Field;
 					Bundle.Profiles.Reset();
+				};
+				const FString Input = InputSchema(Spec, Bundle.Error);
+				if (Input.IsEmpty())
+				{
+					RejectSchema(TEXT("input_schema"));
+					return Bundle;
+				}
+				const FString Result = ResultSchema(Spec, Bundle.Error);
+				if (Result.IsEmpty())
+				{
+					RejectSchema(TEXT("result_schema"));
+					return Bundle;
+				}
+				TSharedPtr<FJsonObject> Object = DescriptorObject(Spec, Input, Result, Bundle.Error);
+				FString CanonicalDescriptor;
+				if (!Object.IsValid() || !Json::TryCanonicalize(Object, CanonicalDescriptor, Bundle.Error))
+				{
+					RejectSchema(TEXT("descriptor"));
 					return Bundle;
 				}
 				const bool bQuery = Spec.RouteKind
@@ -285,6 +380,7 @@ namespace UE::UAI::Composition::GraphCompound
 			if (!FUeAgentDescriptorRegistry::TryCreate(
 					MoveTemp(Descriptors), Bundle.Registry, Bundle.Error))
 			{
+				MarkGraphCompoundNativeDiagnostic(Bundle.Error);
 				Bundle.Profiles.Reset();
 			}
 			return Bundle;
@@ -311,16 +407,9 @@ namespace UE::UAI::Composition::GraphCompound
 			return nullptr;
 		}
 
-		void SetError(
-			FGraphCompoundRouteError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
-		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-		}
+		void SetError(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject; }
+
 
 		bool TryValidatedObject(
 			const FAudioMediaGraphRouteProfile& Profile,
@@ -332,11 +421,31 @@ namespace UE::UAI::Composition::GraphCompound
 			OutObject.Reset();
 			OutError = {};
 			const FRouteBundle& Bundle = RouteBundle();
-			if (!Profile.IsValid() || !Bundle.Registry.IsValid()
-				|| !FindSpec(Profile))
+			if (!Profile.IsValid())
 			{
-				SetError(OutError, TEXT("audio_media_graph_route_unavailable"),
-					Profile.GetCapabilityId(), Bundle.Error);
+				OutError = Profile.GetValidationDiagnostic();
+				return false;
+			}
+			if (!Bundle.Registry.IsValid())
+			{
+				OutError = Bundle.Error.IsValid() ? Bundle.Error : RouteFailure(
+					TEXT("graph_compound_registry_missing"),
+					TEXT("The graph route registry is unavailable."),
+					Profile.GetCapabilityId(), TEXT("registry.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				return false;
+			}
+			if (!FindSpec(Profile))
+			{
+				const TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
+				Actual->SetStringField(TEXT("capability_id"), Profile.GetCapabilityId());
+				Actual->SetStringField(TEXT("descriptor_id"), Profile.GetDescriptorId());
+				Actual->SetNumberField(TEXT("input_kind"), static_cast<int32>(Profile.GetInputKind()));
+				Actual->SetNumberField(TEXT("route_kind"), static_cast<int32>(Profile.GetRouteKind()));
+				OutError = RouteFailure(TEXT("graph_compound_route_spec_missing"),
+					TEXT("No registered graph route specification matches the profile."),
+					Profile.GetCapabilityId(), TEXT("route_spec"), MakeShared<FJsonValueObject>(Actual),
+					MakeShared<FJsonValueString>(TEXT("registered route specification")));
 				return false;
 			}
 			const FUeAgentOperationDescriptor* Descriptor =
@@ -346,8 +455,11 @@ namespace UE::UAI::Composition::GraphCompound
 					Descriptor->GetIdentity()) : nullptr;
 			if (!Descriptor || !Schema)
 			{
-				SetError(OutError, TEXT("audio_media_graph_descriptor_missing"),
-					Profile.GetDescriptorId());
+				OutError = RouteFailure(TEXT("audio_media_graph_descriptor_missing"),
+					!Descriptor ? TEXT("The graph route descriptor is missing from its registry.")
+						: TEXT("The graph route descriptor has no compiled input schema."),
+					Profile.GetDescriptorId(), !Descriptor ? TEXT("descriptor.present") : TEXT("input_schema.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
 			const FUeAgentContractSchemaCheckpoint Checkpoint =
@@ -356,39 +468,37 @@ namespace UE::UAI::Composition::GraphCompound
 					const FString& InstancePath,
 					FUeAgentContractSchemaError& Error)
 				{
-					FUeAgentResourceBudgetExceeded BudgetError;
+					FUeAgentResourceChargeError ChargeError;
 					if (!Resources.TryCharge(
 							EUeAgentResourceDimension::WorkUnits,
 							WorkUnits,
 							TEXT("graph_compound.gc017.schema"),
-							BudgetError))
+							ChargeError))
 					{
-						Error.Code = BudgetError.Code;
-						Error.InstancePath = InstancePath;
-						Error.Detail = TEXT("Schema work budget exceeded.");
+						Error = ChargeError;
+				Error.Source.JsonPath = InstancePath;
 						return false;
 					}
 					return true;
 				};
 			TOptional<FUeAgentContractValue> Canonical;
 			FUeAgentContractSchemaError SchemaError;
-			if (!Schema->TryValidateAndCanonicalize(
-					Input, Checkpoint, Canonical, SchemaError)
-				|| !Canonical.IsSet())
+			const bool bValidated = Schema->TryValidateAndCanonicalize(Input, Checkpoint, Canonical, SchemaError);
+			if (!bValidated || !Canonical.IsSet())
 			{
-				SetError(OutError,
-					SchemaError.Code.IsEmpty()
-						? TEXT("audio_media_graph_input_invalid")
-						: SchemaError.Code,
-					SchemaError.InstancePath, SchemaError.Detail);
+				OutError = SchemaError.IsValid() ? SchemaError : RouteFailure(
+					TEXT("audio_media_graph_input_invalid"),
+					bValidated ? TEXT("Graph input validation returned without a canonical value.")
+						: TEXT("Graph input validation failed without a diagnostic."),
+					Profile.GetCapabilityId(), bValidated ? TEXT("canonical_input.present") : TEXT("input_validation.succeeded"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
-			FString ParseError;
+			UE::UAI::Contract::FDiagnostic ParseError;
 			if (!Json::TryParseObject(
 					Canonical->GetJsonValue(), OutObject, ParseError))
 			{
-				SetError(OutError, TEXT("audio_media_graph_input_parse_failed"),
-					Profile.GetCapabilityId(), ParseError);
+				SetError(OutError, ParseError, Profile.GetCapabilityId());
 				return false;
 			}
 			return true;
@@ -426,13 +536,12 @@ namespace UE::UAI::Composition::GraphCompound
 			FGraphCompoundRouteError& OutError,
 			const FString& Subject)
 		{
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			if (!JsonValue.IsValid()
 				|| !CanonicalJson::TryFromJsonValue(
 					JsonValue, Resources, OutValue, Error))
 			{
-				SetError(OutError, TEXT("audio_media_graph_value_invalid"),
-					Subject, Error);
+				SetError(OutError, Error, Subject);
 				return false;
 			}
 			return true;
@@ -517,18 +626,77 @@ namespace UE::UAI::Composition::GraphCompound
 			Value->TrimStartAndEndInline();
 		}
 		const bool bQuery = RouteKind == EGraphCompoundDomainRouteKind::Query;
-		bValid = !CapabilityId.IsEmpty() && !DescriptorId.IsEmpty()
-			&& !DomainId.IsEmpty() && !FamilyId.IsEmpty()
-			&& !TargetKind.IsEmpty()
-			&& (bQuery
-				|| RouteKind == EGraphCompoundDomainRouteKind::TypedOperation)
-			&& InputKind != EAudioMediaGraphInputKind::Invalid
-			&& (!bRequiresNativeBackendAvailability
-				|| !UnavailableErrorCode.IsEmpty())
-			&& ExecutionContract.IsValid()
-			&& ExecutionContract.GetLane()
-				== (bQuery ? EGraphCompoundExecutionLane::Query
-					: EGraphCompoundExecutionLane::Operation);
+		if (CapabilityId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route capability_id is empty after trimming."),
+				CapabilityId, TEXT("capability_id"), MakeShared<FJsonValueString>(CapabilityId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (DescriptorId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route descriptor_id is empty after trimming."),
+				CapabilityId, TEXT("descriptor_id"), MakeShared<FJsonValueString>(DescriptorId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (DomainId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route domain_id is empty after trimming."),
+				CapabilityId, TEXT("domain_id"), MakeShared<FJsonValueString>(DomainId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (FamilyId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route family_id is empty after trimming."),
+				CapabilityId, TEXT("family_id"), MakeShared<FJsonValueString>(FamilyId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (TargetKind.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route target_kind is empty after trimming."),
+				CapabilityId, TEXT("target_kind"), MakeShared<FJsonValueString>(TargetKind),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (!bQuery && RouteKind != EGraphCompoundDomainRouteKind::TypedOperation)
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The audio/media route kind is unsupported."),
+				CapabilityId, TEXT("route_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(RouteKind)),
+				MakeShared<FJsonValueString>(TEXT("Query or TypedOperation")));
+		}
+		else if (InputKind == EAudioMediaGraphInputKind::Invalid)
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route has an invalid input kind."),
+				CapabilityId, TEXT("input_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(InputKind)),
+				MakeShared<FJsonValueString>(TEXT("non-Invalid input kind")));
+		}
+		else if (bRequiresNativeBackendAvailability && UnavailableErrorCode.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("A route requiring native backend availability must define its unavailable error code."),
+				CapabilityId, TEXT("unavailable_error_code"), MakeShared<FJsonValueString>(UnavailableErrorCode),
+				MakeShared<FJsonValueString>(TEXT("non-empty error code")));
+		}
+		else if (!ExecutionContract.IsValid())
+		{
+			ValidationDiagnostic = FDiagnostic::WrapFailure(
+				TEXT("graph_compound_binding_profile_invalid"),
+				ExecutionContract.GetValidationDiagnostic(), TEXT("graph_compound"),
+				TEXT("The graph route execution contract is invalid."));
+		}
+		else if (ExecutionContract.GetLane() != (bQuery ? EGraphCompoundExecutionLane::Query : EGraphCompoundExecutionLane::Operation))
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The execution lane does not match the audio/media route kind."),
+				CapabilityId, TEXT("execution_contract.lane"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(ExecutionContract.GetLane())),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(bQuery ? EGraphCompoundExecutionLane::Query : EGraphCompoundExecutionLane::Operation)));
+		}
 	}
 
 	const FString& FAudioMediaGraphRouteProfile::GetCapabilityId() const { return CapabilityId; }
@@ -541,11 +709,17 @@ namespace UE::UAI::Composition::GraphCompound
 	bool FAudioMediaGraphRouteProfile::RequiresNativeBackendAvailability() const { return bRequiresNativeBackendAvailability; }
 	const FString& FAudioMediaGraphRouteProfile::GetUnavailableErrorCode() const { return UnavailableErrorCode; }
 	const FGraphCompoundExecutionContract& FAudioMediaGraphRouteProfile::GetExecutionContract() const { return ExecutionContract; }
-	bool FAudioMediaGraphRouteProfile::IsValid() const { return bValid; }
+	bool FAudioMediaGraphRouteProfile::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FDiagnostic& FAudioMediaGraphRouteProfile::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
-	const TArray<FAudioMediaGraphRouteProfile>& GetAudioMediaGraphRouteProfiles()
+	bool TryGetAudioMediaGraphRouteProfiles(
+		const TArray<FAudioMediaGraphRouteProfile>*& OutProfiles, FDiagnostic& OutError)
 	{
-		return RouteBundle().Profiles;
+		OutProfiles = nullptr;
+		OutError = RouteBundle().Error;
+		if (!OutError.IsEmpty()) return false;
+		OutProfiles = &RouteBundle().Profiles;
+		return true;
 	}
 
 	const FAudioMediaGraphRouteProfile* FindAudioMediaGraphRouteProfile(
@@ -563,11 +737,16 @@ namespace UE::UAI::Composition::GraphCompound
 
 	bool TryCreateAudioMediaGraphRouteDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry = RouteBundle().Registry;
 		OutError = RouteBundle().Error;
 		return OutRegistry.IsValid() && OutError.IsEmpty();
+	}
+
+	FAudioMediaGraphArtifactOutputSelector::FAudioMediaGraphArtifactOutputSelector()
+		: FAudioMediaGraphArtifactOutputSelector(FString(), FString())
+	{
 	}
 
 	FAudioMediaGraphArtifactOutputSelector::
@@ -581,35 +760,64 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			Value->TrimStartAndEndInline();
 		}
-		bValid = !ElementId.IsEmpty() && !OutputName.IsEmpty();
+		if (ElementId.IsEmpty() || OutputName.IsEmpty())
+		{
+			ValidationDiagnostic = InputFailure(TEXT("audio_media_graph_artifact_selector_invalid"),
+				ElementId.IsEmpty() ? TEXT("The artifact output element_id is empty after trimming.")
+					: TEXT("The artifact output_name is empty after trimming."),
+				ElementId, ElementId.IsEmpty() ? TEXT("element_id") : TEXT("output_name"),
+				MakeShared<FJsonValueString>(ElementId.IsEmpty() ? ElementId : OutputName),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
 	}
 
 	const FString& FAudioMediaGraphArtifactOutputSelector::GetElementId() const { return ElementId; }
 	const FString& FAudioMediaGraphArtifactOutputSelector::GetOutputName() const { return OutputName; }
-	bool FAudioMediaGraphArtifactOutputSelector::IsValid() const { return bValid; }
+	bool FAudioMediaGraphArtifactOutputSelector::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FDiagnostic& FAudioMediaGraphArtifactOutputSelector::GetValidationDiagnostic() const { return ValidationDiagnostic; }
+
+	FAudioMediaGraphArtifactQueryRequest::FAudioMediaGraphArtifactQueryRequest()
+		: FAudioMediaGraphArtifactQueryRequest(FString(), {})
+	{
+	}
 
 	FAudioMediaGraphArtifactQueryRequest::FAudioMediaGraphArtifactQueryRequest(
 		FString InTargetRef,
-		FString InExpectedSettledRevision,
 		TArray<FAudioMediaGraphArtifactOutputSelector> InOutputs)
 		: TargetRef(MoveTemp(InTargetRef))
-		, ExpectedSettledRevision(MoveTemp(InExpectedSettledRevision))
 		, Outputs(MoveTemp(InOutputs))
 	{
 		TargetRef.TrimStartAndEndInline();
-		ExpectedSettledRevision.TrimStartAndEndInline();
-		bValid = !TargetRef.IsEmpty() && !ExpectedSettledRevision.IsEmpty()
-			&& !Outputs.IsEmpty();
-		for (const FAudioMediaGraphArtifactOutputSelector& Output : Outputs)
+		if (TargetRef.IsEmpty())
 		{
-			bValid = bValid && Output.IsValid();
+			ValidationDiagnostic = InputFailure(TEXT("audio_media_graph_artifact_query_invalid"),
+				TEXT("The artifact query target_ref is empty after trimming."),
+				TargetRef, TEXT("target_ref"), MakeShared<FJsonValueString>(TargetRef),
+				MakeShared<FJsonValueString>(TEXT("non-empty reference")));
+		}
+		else if (Outputs.IsEmpty())
+		{
+			ValidationDiagnostic = InputFailure(TEXT("audio_media_graph_artifact_query_invalid"),
+				TEXT("The artifact query requires at least one output selector."),
+				TargetRef, TEXT("outputs"), MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{}),
+				MakeShared<FJsonValueString>(TEXT("non-empty array")));
+		}
+		for (int32 Index = 0; Index < Outputs.Num(); ++Index)
+		{
+			if (ValidationDiagnostic.IsEmpty() && !Outputs[Index].IsValid())
+			{
+				ValidationDiagnostic = Outputs[Index].GetValidationDiagnostic();
+				ValidationDiagnostic.Source.JsonPath = FString::Printf(TEXT("/outputs/%d"), Index)
+					+ ValidationDiagnostic.Source.JsonPath;
+				ValidationDiagnostic.OperationIndex = Index;
+			}
 		}
 	}
 
 	const FString& FAudioMediaGraphArtifactQueryRequest::GetTargetRef() const { return TargetRef; }
-	const FString& FAudioMediaGraphArtifactQueryRequest::GetExpectedSettledRevision() const { return ExpectedSettledRevision; }
 	const TArray<FAudioMediaGraphArtifactOutputSelector>& FAudioMediaGraphArtifactQueryRequest::GetOutputs() const { return Outputs; }
-	bool FAudioMediaGraphArtifactQueryRequest::IsValid() const { return bValid; }
+	bool FAudioMediaGraphArtifactQueryRequest::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FDiagnostic& FAudioMediaGraphArtifactQueryRequest::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	bool TryDecodeAudioMediaGraphArtifactQueryRequest(
 		const FAudioMediaGraphRouteProfile& Profile,
@@ -624,8 +832,15 @@ namespace UE::UAI::Composition::GraphCompound
 			|| Profile.GetInputKind()
 				!= EAudioMediaGraphInputKind::TextureGraphArtifactCapture)
 		{
-			SetError(OutError, TEXT("audio_media_graph_route_kind_mismatch"),
-				Profile.GetCapabilityId(), TEXT("artifact_query"));
+			const bool bWrongRoute = Profile.GetRouteKind() != EGraphCompoundDomainRouteKind::Query;
+			OutError = RouteFailure(TEXT("audio_media_graph_route_kind_mismatch"),
+				bWrongRoute ? TEXT("Artifact query decoding requires a query route.")
+					: TEXT("Artifact query decoding requires the TextureGraphArtifactCapture input kind."),
+				Profile.GetCapabilityId(), bWrongRoute ? TEXT("route_kind") : TEXT("input_kind"),
+				MakeShared<FJsonValueNumber>(bWrongRoute ? static_cast<int32>(Profile.GetRouteKind())
+					: static_cast<int32>(Profile.GetInputKind())),
+				MakeShared<FJsonValueNumber>(bWrongRoute ? static_cast<int32>(EGraphCompoundDomainRouteKind::Query)
+					: static_cast<int32>(EAudioMediaGraphInputKind::TextureGraphArtifactCapture)));
 			return false;
 		}
 		TSharedPtr<FJsonObject> Object;
@@ -634,13 +849,19 @@ namespace UE::UAI::Composition::GraphCompound
 			return false;
 		}
 		TArray<FAudioMediaGraphArtifactOutputSelector> Outputs;
-		for (const TSharedPtr<FJsonValue>& Value
-			: Object->GetArrayField(TEXT("outputs")))
+		const TArray<TSharedPtr<FJsonValue>>& OutputValues = Object->GetArrayField(TEXT("outputs"));
+		for (int32 Index = 0; Index < OutputValues.Num(); ++Index)
 		{
-			const TSharedPtr<FJsonObject> Output = Value->AsObject();
+			const TSharedPtr<FJsonValue>& Value = OutputValues[Index];
+			const TSharedPtr<FJsonObject> Output = Value.IsValid() ? Value->AsObject() : nullptr;
 			if (!Output.IsValid())
 			{
-				SetError(OutError, TEXT("audio_media_graph_artifact_selector_invalid"));
+				OutError = InputFailure(TEXT("audio_media_graph_artifact_selector_invalid"),
+					TEXT("Each artifact output selector must be an object."),
+					Profile.GetCapabilityId(), FString::Printf(TEXT("outputs/%d"), Index),
+					Value, MakeShared<FJsonValueString>(TEXT("object")));
+				OutError.ActualValuePresent = Value.IsValid();
+				OutError.OperationIndex = Index;
 				return false;
 			}
 			Outputs.Emplace(
@@ -649,12 +870,10 @@ namespace UE::UAI::Composition::GraphCompound
 		}
 		OutRequest = FAudioMediaGraphArtifactQueryRequest(
 			Object->GetStringField(TEXT("target_ref")),
-			Object->GetStringField(TEXT("expected_settled_revision")),
 			MoveTemp(Outputs));
 		if (!OutRequest.IsValid())
 		{
-			SetError(OutError, TEXT("audio_media_graph_artifact_query_invalid"),
-				Profile.GetCapabilityId());
+			OutError = OutRequest.GetValidationDiagnostic();
 			return false;
 		}
 		return true;
@@ -674,8 +893,10 @@ namespace UE::UAI::Composition::GraphCompound
 		if (Profile.GetRouteKind()
 			!= EGraphCompoundDomainRouteKind::TypedOperation)
 		{
-			SetError(OutError, TEXT("audio_media_graph_route_kind_mismatch"),
-				Profile.GetCapabilityId(), TEXT("typed_operation"));
+			OutError = RouteFailure(TEXT("audio_media_graph_route_kind_mismatch"),
+				TEXT("This route cannot decode a typed graph operation."), Profile.GetCapabilityId(), TEXT("route_kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Profile.GetRouteKind())),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(EGraphCompoundDomainRouteKind::TypedOperation)));
 			return false;
 		}
 		TSharedPtr<FJsonObject> Object;
@@ -695,6 +916,40 @@ namespace UE::UAI::Composition::GraphCompound
 		const TArray<FString> Authority = {TEXT("audio_media_graph.write")};
 		const FString Evidence = TEXT("request:") + Profile.GetCapabilityId();
 		TArray<FGraphCompoundCanonicalEdit> Edits;
+		TMap<FString, FString> InputPointers;
+		FString InputPointer;
+
+		auto FailInput = [&](const TCHAR* Code, const TCHAR* Reason,
+			const FString& Field, const FString& Pointer,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const int32 InputIndex = INDEX_NONE)
+		{
+			OutError = RouteFailure(Code, Reason, TargetRef, Field, MoveTemp(Actual), MoveTemp(Expected));
+			OutError.SourceKind = TEXT("command_input");
+			OutError.Source.JsonPath = Pointer;
+			if (InputIndex != INDEX_NONE) OutError.OperationIndex = InputIndex;
+			OutError.TargetPath = TargetRef;
+			OutError.ActualValuePresent = OutError.ActualValue.IsValid();
+			return false;
+		};
+		auto ReadIntent = [&](const TSharedPtr<FJsonObject>& Entry,
+			const TSharedPtr<FJsonValue>& Value, const TCHAR* Code,
+			const FString& Field, const int32 InputIndex, EChangeIntent& Intent)
+		{
+			if (!Entry.IsValid())
+				return FailInput(Code, TEXT("An edit entry must be an object."),
+					Field, InputPointer, Value, MakeShared<FJsonValueString>(TEXT("object")), InputIndex);
+			const FString IntentText = Entry->GetStringField(TEXT("intent"));
+			if (!TryIntent(IntentText, Intent))
+				return FailInput(Code, TEXT("The edit intent is not supported."),
+					TEXT("intent"), InputPointer + TEXT("/intent"),
+					MakeShared<FJsonValueString>(IntentText),
+					MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+						MakeShared<FJsonValueString>(TEXT("create")), MakeShared<FJsonValueString>(TEXT("update")),
+						MakeShared<FJsonValueString>(TEXT("replace")), MakeShared<FJsonValueString>(TEXT("delete"))}), InputIndex);
+			return true;
+		};
+
 
 		auto MakeIdentity = [&] (
 			const FString& SemanticId,
@@ -713,13 +968,20 @@ namespace UE::UAI::Composition::GraphCompound
 			const EChangeIntent Intent,
 			const TSharedPtr<FJsonValue>& JsonValue,
 			TArray<FUeAgentCanonicalIdentity> Dependencies = {},
-			TMap<FString, FString> Selectors = {})
+			TMap<FString, FString> Selectors = {}, const bool bGeneratedValue = false)
 		{
+			FString ValuePointer = InputPointer;
+			if (ValuePointer.IsEmpty())
+				for (const auto& Field : Object->Values)
+					if (Field.Value == JsonValue) { ValuePointer = TEXT("/") + Field.Key; break; }
+			InputPointers.Add(SemanticId, ValuePointer.IsEmpty() ? TEXT("/") : ValuePointer);
 			FUeAgentCanonicalValuePtr Proposed;
 			if (Intent != EChangeIntent::Delete
 				&& !TryCanonical(
 					JsonValue, Resources, Proposed, OutError, SemanticId))
 			{
+				if (bGeneratedValue) MarkGraphCompoundNativeDiagnostic(OutError);
+				else BindGraphCompoundInputValueDiagnostic(OutError, ValuePointer.IsEmpty() ? TEXT("/") : ValuePointer);
 				return false;
 			}
 			const FUeAgentCanonicalIdentity EditIdentity =
@@ -745,23 +1007,21 @@ namespace UE::UAI::Composition::GraphCompound
 					TEXT("target:") + TargetRef,
 					EGraphCompoundElementKind::Target,
 					EChangeIntent::Create,
-					MakeShared<FJsonValueObject>(Definition)))
+					MakeShared<FJsonValueObject>(Definition), {}, {}, true))
 			{
 				return false;
 			}
 			break;
 		}
 		case I::MetaSoundInterface:
-			for (const TSharedPtr<FJsonValue>& Value
-				: Object->GetArrayField(TEXT("changes")))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("changes")).Num(); ++InputIndex)
 			{
+				const auto& Value = Object->GetArrayField(TEXT("changes"))[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("changes") + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Change = Value->AsObject();
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!Change.IsValid()
-					|| !TryIntent(Change->GetStringField(TEXT("intent")), Intent))
+				if (!ReadIntent(Change, Value, TEXT("audio_media_graph_interface_change_invalid"), TEXT("changes"), InputIndex, Intent))
 				{
-					SetError(OutError,
-						TEXT("audio_media_graph_interface_change_invalid"));
 					return false;
 				}
 				const FString SemanticId = FString::Printf(
@@ -781,15 +1041,14 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			break;
 		case I::MetaSoundNode:
-			for (const TSharedPtr<FJsonValue>& Value
-				: Object->GetArrayField(TEXT("nodes")))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("nodes")).Num(); ++InputIndex)
 			{
+				const auto& Value = Object->GetArrayField(TEXT("nodes"))[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("nodes") + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Node = Value->AsObject();
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!Node.IsValid()
-					|| !TryIntent(Node->GetStringField(TEXT("intent")), Intent))
+				if (!ReadIntent(Node, Value, TEXT("audio_media_graph_node_invalid"), TEXT("nodes"), InputIndex, Intent))
 				{
-					SetError(OutError, TEXT("audio_media_graph_node_invalid"));
 					return false;
 				}
 				const FString NodeGuid =
@@ -806,21 +1065,28 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			break;
 		case I::MetaSoundLink:
-			for (const TSharedPtr<FJsonValue>& Value
-				: Object->GetArrayField(TEXT("links")))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("links")).Num(); ++InputIndex)
 			{
+				const auto& Value = Object->GetArrayField(TEXT("links"))[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("links") + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Link = Value->AsObject();
 				const TSharedPtr<FJsonObject> From = Link.IsValid()
 					? Link->GetObjectField(TEXT("from")) : nullptr;
 				const TSharedPtr<FJsonObject> To = Link.IsValid()
 					? Link->GetObjectField(TEXT("to")) : nullptr;
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!From.IsValid() || !To.IsValid()
-					|| !TryIntent(Link->GetStringField(TEXT("intent")), Intent))
+				if (!From.IsValid() || !To.IsValid())
 				{
-					SetError(OutError, TEXT("audio_media_graph_link_invalid"));
-					return false;
+					const FString Field = !Link.IsValid() ? TEXT("links")
+						: !From.IsValid() ? TEXT("from") : TEXT("to");
+					return FailInput(TEXT("audio_media_graph_link_invalid"),
+						!Link.IsValid() ? TEXT("A graph link must be an object.") : TEXT("A graph link endpoint must be an object."),
+						Field, !Link.IsValid() ? InputPointer : InputPointer + TEXT("/") + Field,
+						!Link.IsValid() ? Value : Link->Values.FindRef(Field),
+						MakeShared<FJsonValueString>(TEXT("object")), InputIndex);
 				}
+				if (!ReadIntent(Link, Value, TEXT("audio_media_graph_link_invalid"), TEXT("links"), InputIndex, Intent))
+					return false;
 				const FString SemanticId = FString::Printf(
 					TEXT("relation:metasound_link:%s:%s->%s:%s:%s"),
 					*From->GetStringField(TEXT("node_guid")),
@@ -892,15 +1158,14 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			break;
 		case I::SoundCueNode:
-			for (const TSharedPtr<FJsonValue>& Value
-				: Object->GetArrayField(TEXT("nodes")))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("nodes")).Num(); ++InputIndex)
 			{
+				const auto& Value = Object->GetArrayField(TEXT("nodes"))[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("nodes") + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Node = Value->AsObject();
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!Node.IsValid()
-					|| !TryIntent(Node->GetStringField(TEXT("intent")), Intent))
+				if (!ReadIntent(Node, Value, TEXT("audio_media_graph_node_invalid"), TEXT("nodes"), InputIndex, Intent))
 				{
-					SetError(OutError, TEXT("audio_media_graph_node_invalid"));
 					return false;
 				}
 				const FString ObjectPath =
@@ -917,15 +1182,14 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			break;
 		case I::SoundCueRelation:
-			for (const TSharedPtr<FJsonValue>& Value
-				: Object->GetArrayField(TEXT("relations")))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("relations")).Num(); ++InputIndex)
 			{
+				const auto& Value = Object->GetArrayField(TEXT("relations"))[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("relations") + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Relation = Value->AsObject();
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!Relation.IsValid()
-					|| !TryIntent(Relation->GetStringField(TEXT("intent")), Intent))
+				if (!ReadIntent(Relation, Value, TEXT("audio_media_graph_relation_invalid"), TEXT("relations"), InputIndex, Intent))
 				{
-					SetError(OutError, TEXT("audio_media_graph_relation_invalid"));
 					return false;
 				}
 				const FString Parent = Relation->GetStringField(
@@ -979,15 +1243,14 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			break;
 		case I::TextureGraphNode:
-			for (const TSharedPtr<FJsonValue>& Value
-				: Object->GetArrayField(TEXT("nodes")))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("nodes")).Num(); ++InputIndex)
 			{
+				const auto& Value = Object->GetArrayField(TEXT("nodes"))[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("nodes") + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Node = Value->AsObject();
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!Node.IsValid()
-					|| !TryIntent(Node->GetStringField(TEXT("intent")), Intent))
+				if (!ReadIntent(Node, Value, TEXT("audio_media_graph_node_invalid"), TEXT("nodes"), InputIndex, Intent))
 				{
-					SetError(OutError, TEXT("audio_media_graph_node_invalid"));
 					return false;
 				}
 				const FString ElementId =
@@ -1005,21 +1268,28 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			break;
 		case I::TextureGraphLink:
-			for (const TSharedPtr<FJsonValue>& Value
-				: Object->GetArrayField(TEXT("links")))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("links")).Num(); ++InputIndex)
 			{
+				const auto& Value = Object->GetArrayField(TEXT("links"))[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("links") + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Link = Value->AsObject();
 				const TSharedPtr<FJsonObject> From = Link.IsValid()
 					? Link->GetObjectField(TEXT("from")) : nullptr;
 				const TSharedPtr<FJsonObject> To = Link.IsValid()
 					? Link->GetObjectField(TEXT("to")) : nullptr;
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!From.IsValid() || !To.IsValid()
-					|| !TryIntent(Link->GetStringField(TEXT("intent")), Intent))
+				if (!From.IsValid() || !To.IsValid())
 				{
-					SetError(OutError, TEXT("audio_media_graph_link_invalid"));
-					return false;
+					const FString Field = !Link.IsValid() ? TEXT("links")
+						: !From.IsValid() ? TEXT("from") : TEXT("to");
+					return FailInput(TEXT("audio_media_graph_link_invalid"),
+						!Link.IsValid() ? TEXT("A graph link must be an object.") : TEXT("A graph link endpoint must be an object."),
+						Field, !Link.IsValid() ? InputPointer : InputPointer + TEXT("/") + Field,
+						!Link.IsValid() ? Value : Link->Values.FindRef(Field),
+						MakeShared<FJsonValueString>(TEXT("object")), InputIndex);
 				}
+				if (!ReadIntent(Link, Value, TEXT("audio_media_graph_link_invalid"), TEXT("links"), InputIndex, Intent))
+					return false;
 				const FString FromId = TexturePinSemanticId(*From);
 				const FString ToId = TexturePinSemanticId(*To);
 				const FString FromElementId =
@@ -1053,15 +1323,14 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			break;
 		case I::TextureGraphParameter:
-			for (const TSharedPtr<FJsonValue>& Value
-				: Object->GetArrayField(TEXT("parameters")))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("parameters")).Num(); ++InputIndex)
 			{
+				const auto& Value = Object->GetArrayField(TEXT("parameters"))[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("parameters") + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Parameter = Value->AsObject();
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!Parameter.IsValid()
-					|| !TryIntent(Parameter->GetStringField(TEXT("intent")), Intent))
+				if (!ReadIntent(Parameter, Value, TEXT("audio_media_graph_parameter_invalid"), TEXT("parameters"), InputIndex, Intent))
 				{
-					SetError(OutError, TEXT("audio_media_graph_parameter_invalid"));
 					return false;
 				}
 				const FString ElementId =
@@ -1101,14 +1370,20 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			break;
 		default:
-			SetError(OutError, TEXT("audio_media_graph_input_kind_invalid"),
-				Profile.GetCapabilityId());
+			OutError = RouteFailure(TEXT("audio_media_graph_input_kind_invalid"),
+				TEXT("The audio/media typed operation input kind is not supported."), Profile.GetCapabilityId(), TEXT("input_kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Profile.GetInputKind())),
+				MakeShared<FJsonValueString>(TEXT("a supported audio/media typed operation input kind")));
 			return false;
 		}
 
 		OutPayload = FGraphCompoundCanonicalPayload(
-			GetGraphCompoundCanonicalSchemaId(), MoveTemp(Edits));
-		return !OutPayload.GetEdits().IsEmpty();
+			GetGraphCompoundCanonicalSchemaId(), MoveTemp(Edits), MoveTemp(InputPointers));
+		if (OutPayload.GetEdits().IsEmpty())
+			return FailInput(TEXT("audio_media_graph_typed_operation_empty"),
+				TEXT("The typed operation contains no edits."), TEXT("edits"), TEXT("/"),
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one edit")));
+		return true;
 	}
 
 	bool TryBuildAudioMediaGraphTypedOperationDraft(
@@ -1127,9 +1402,29 @@ namespace UE::UAI::Composition::GraphCompound
 		if (DescriptorIdentity
 			!= Profile.GetExecutionContract().GetDescriptorIdentity())
 		{
-			SetError(OutError,
-				TEXT("audio_media_graph_descriptor_identity_mismatch"),
-				Profile.GetDescriptorId());
+			const FUeAgentDescriptorIdentity& Expected = Profile.GetExecutionContract().GetDescriptorIdentity();
+			OutError = RouteFailure(TEXT("audio_media_graph_descriptor_identity_mismatch"),
+				TEXT("The operation descriptor does not match the graph route."),
+				Profile.GetDescriptorId(), TEXT("descriptor_identity"), nullptr, nullptr);
+			if (DescriptorIdentity.GetDescriptorId() != Expected.GetDescriptorId())
+			{
+				OutError.PropertyPath = TEXT("descriptor_identity.descriptor_id");
+				OutError.ActualValue = MakeShared<FJsonValueString>(DescriptorIdentity.GetDescriptorId());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected.GetDescriptorId());
+			}
+			else if (DescriptorIdentity.GetVersion() != Expected.GetVersion())
+			{
+				OutError.PropertyPath = TEXT("descriptor_identity.version");
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(DescriptorIdentity.GetVersion());
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(Expected.GetVersion());
+			}
+			else
+			{
+				OutError.PublicMessage = TEXT("The operation descriptor content does not match the graph route.");
+				OutError.PropertyPath = TEXT("descriptor_identity.descriptor_hash");
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(DescriptorIdentity.GetDescriptorHash());
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetDescriptorHash());
+			}
 			return false;
 		}
 		FGraphCompoundCanonicalPayload Payload(
@@ -1145,8 +1440,8 @@ namespace UE::UAI::Composition::GraphCompound
 				RequestId, IdempotencyKey, Resources,
 				OutDraft, CanonicalError))
 		{
-			SetError(OutError, CanonicalError.Code,
-				CanonicalError.IdentityKey, CanonicalError.Detail);
+			Payload.LocateDiagnostic(CanonicalError);
+			SetError(OutError, CanonicalError);
 			return false;
 		}
 		return OutDraft.IsSet();

@@ -14,94 +14,44 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
-		void SetError(
-			FGraphCompoundRuntimeError& OutError,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		FDiagnostic RuntimeFailure(const FString& Code, const FString& SubjectId, const FString& Reason)
 		{
-			OutError = {Code, SubjectId, Detail};
+			FDiagnostic Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("runtime"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SubjectId = SubjectId;
+			return Diagnostic;
 		}
 
-		FString ErrorJson(
-			const TCHAR* Envelope,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		void SetError(FGraphCompoundRuntimeError& OutError, const FString& Code, const FString& SubjectId, const FString& Reason)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-			Root->SetObjectField(Envelope, Error);
-			FString Json;
-			FString JsonError;
-			return Json::TryCanonicalize(Root, Json, JsonError)
-				? Json
-				: FString(TEXT("{}"));
+			OutError = RuntimeFailure(Code, SubjectId, Reason);
 		}
+
+		
 
 		FUeAgentQueryResult QueryErrorResult(
-			const FUeAgentQueryRequest& Request,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+			const FUeAgentQueryRequest& Request, FDiagnostic Diagnostic)
 		{
-			return FUeAgentQueryResult(
-				Request.GetDescriptorIdentity(),
-				Request.GetRequestId(),
-				FUeAgentContractValue(ErrorJson(
-					TEXT("query_error"), Code, SubjectId, Detail)));
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetDescriptorIdentity().GetDescriptorId();
+			return FUeAgentQueryResult(Request.GetDescriptorIdentity(), Request.GetRequestId(), MoveTemp(Diagnostic));
 		}
 
 		FUeAgentOperationResult OperationErrorResult(
-			const FUeAgentOperationRequest& Request,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+			const FUeAgentOperationRequest& Request, FDiagnostic Diagnostic)
 		{
-			return FUeAgentOperationResult(
-				Request.GetDescriptorIdentity(),
-				Request.GetRequestId(),
-				FUeAgentContractValue(ErrorJson(
-					TEXT("operation_error"), Code, SubjectId, Detail)));
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetDescriptorIdentity().GetDescriptorId();
+			return FUeAgentOperationResult(Request.GetDescriptorIdentity(), Request.GetRequestId(), MoveTemp(Diagnostic));
 		}
 
-		FUeAgentResourceBudget RuntimeBudget(const int64 MaxFrameBytes)
-		{
-			return FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, MaxFrameBytes},
-				{EUeAgentResourceDimension::OutputBytes, MaxFrameBytes},
-				{EUeAgentResourceDimension::StringBytes, MaxFrameBytes},
-				{
-					EUeAgentResourceDimension::WorkUnits,
-					FMath::Max<int64>(1024, MaxFrameBytes * 4),
-				},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					FMath::Max<int64>(4096, MaxFrameBytes * 4),
-				},
-			});
-		}
 
-		FString ResourceDetail(
-			const FUeAgentResourceBudgetExceeded& Error)
-		{
-			return FString::Printf(
-				TEXT("Resource '%s' exceeded at '%s': observed %lld, limit %lld."),
-				*LexToString(Error.Dimension),
-				*Error.Path,
-				Error.Observed,
-				Error.Limit);
-		}
+		
 
 		bool TryChargeText(
 			FUeAgentResourceTracker& Resources,
 			const EUeAgentResourceDimension Dimension,
 			const FString& Text,
 			const FString& Path,
-			FUeAgentResourceBudgetExceeded& OutError)
+			FUeAgentResourceChargeError& OutError)
 		{
 			return Resources.TryCharge(
 				Dimension,
@@ -116,7 +66,7 @@ namespace UE::UAI::Composition::GraphCompound
 			FUeAgentResourceTracker& Resources,
 			TOptional<FUeAgentContractValue>& OutCanonical,
 			FUeAgentContractSchemaError& OutSchemaError,
-			TOptional<FUeAgentResourceBudgetExceeded>& OutResourceError)
+			TOptional<FUeAgentResourceChargeError>& OutResourceError)
 		{
 			OutResourceError.Reset();
 			return Schema.TryValidateAndCanonicalize(
@@ -126,7 +76,7 @@ namespace UE::UAI::Composition::GraphCompound
 					const FString& InstancePath,
 					FUeAgentContractSchemaError& OutError)
 				{
-					FUeAgentResourceBudgetExceeded ResourceError;
+					FUeAgentResourceChargeError ResourceError;
 					if (Resources.TryCharge(
 							EUeAgentResourceDimension::WorkUnits,
 							WorkUnits,
@@ -136,23 +86,20 @@ namespace UE::UAI::Composition::GraphCompound
 						return true;
 					}
 					OutResourceError = ResourceError;
-					OutError.Code = TEXT("contract_schema_resource_exceeded");
-					OutError.InstancePath = InstancePath;
-					OutError.Detail = ResourceDetail(ResourceError);
+					OutError = ResourceError;
+					OutError.Source.JsonPath = InstancePath;
 					return false;
 				},
 				OutCanonical,
 				OutSchemaError);
 		}
 
-		FString SchemaDetail(const FUeAgentContractSchemaError& Error)
+		FDiagnostic ResultSchemaFailure(const FDiagnostic& Cause, const FString& SubjectId)
 		{
-			return FString::Printf(
-				TEXT("%s at instance '%s' and schema '%s'. %s"),
-				*Error.Code,
-				*Error.InstancePath,
-				*Error.SchemaPath,
-				*Error.Detail);
+			FDiagnostic Diagnostic = RuntimeFailure(TEXT("graph_compound_result_schema_invalid"), SubjectId,
+				TEXT("The result does not satisfy the declared output schema."));
+			if (!Cause.IsEmpty()) Diagnostic.PublicCause = MakeShared<FDiagnostic>(Cause);
+			return Diagnostic;
 		}
 	}
 
@@ -193,11 +140,7 @@ namespace UE::UAI::Composition::GraphCompound
 				Request.GetDescriptorIdentity().GetDescriptorId();
 			if (!Request.IsValid() || !CallerContext.IsValid())
 			{
-				return QueryErrorResult(
-					Request,
-					TEXT("graph_compound_query_request_invalid"),
-					SubjectId,
-					TEXT("A valid query request and caller context are required."));
+				return QueryErrorResult(Request, RuntimeFailure(TEXT("graph_compound_query_request_invalid"), SubjectId, TEXT("A valid query request and caller context are required.")));
 			}
 
 			const FUeAgentOperationDescriptor* Descriptor =
@@ -205,46 +148,29 @@ namespace UE::UAI::Composition::GraphCompound
 					Request.GetDescriptorIdentity());
 			if (!Descriptor)
 			{
-				return QueryErrorResult(
-					Request,
-					TEXT("graph_compound_descriptor_not_exact"),
-					SubjectId,
-					TEXT("The complete DescriptorIdentity is not active."));
+				return QueryErrorResult(Request, RuntimeFailure(TEXT("graph_compound_descriptor_not_exact"), SubjectId, TEXT("The complete DescriptorIdentity is not active.")));
 			}
 			if (Descriptor->GetOperationKind()
 				!= EUeAgentDescriptorOperationKind::Query)
 			{
-				return QueryErrorResult(
-					Request,
-					TEXT("graph_compound_lane_mismatch"),
-					SubjectId,
-					TEXT("The descriptor is not a query."));
+				return QueryErrorResult(Request, RuntimeFailure(TEXT("graph_compound_lane_mismatch"), SubjectId, TEXT("The descriptor is not a query.")));
 			}
 
 			TSharedRef<IGraphCompoundQueryBinding>* Binding =
 				State->QueryBindings.Find(SubjectId);
 			if (!Binding)
 			{
-				return QueryErrorResult(
-					Request,
-					TEXT("graph_compound_query_binding_missing"),
-					SubjectId,
-					TEXT("The exact query owner is unavailable."));
+				return QueryErrorResult(Request, RuntimeFailure(TEXT("graph_compound_query_binding_missing"), SubjectId, TEXT("The exact query owner is unavailable.")));
 			}
 			if (Cancellation->IsCancelled())
 			{
-				return QueryErrorResult(
-					Request,
-					TEXT("graph_compound_cancelled"),
-					SubjectId,
-					TEXT("The query was cancelled before native execution."));
+				return QueryErrorResult(Request, RuntimeFailure(TEXT("graph_compound_cancelled"), SubjectId, TEXT("The query was cancelled before native execution.")));
 			}
 
 			const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
 				Resources = MakeShared<FUeAgentResourceTracker,
-					ESPMode::ThreadSafe>(
-					RuntimeBudget(State->Config.MaxFrameBytes));
-			FUeAgentResourceBudgetExceeded ResourceError;
+					ESPMode::ThreadSafe>();
+			FUeAgentResourceChargeError ResourceError;
 			if (!TryChargeText(
 					*Resources,
 					EUeAgentResourceDimension::InputBytes,
@@ -252,11 +178,7 @@ namespace UE::UAI::Composition::GraphCompound
 					TEXT("query.input"),
 					ResourceError))
 			{
-				return QueryErrorResult(
-					Request,
-					TEXT("graph_compound_resource_exceeded"),
-					SubjectId,
-					ResourceDetail(ResourceError));
+				return QueryErrorResult(Request, ResourceError);
 			}
 
 			const FUeAgentContractSchema* InputSchema =
@@ -264,7 +186,7 @@ namespace UE::UAI::Composition::GraphCompound
 					Request.GetDescriptorIdentity());
 			TOptional<FUeAgentContractValue> CanonicalInput;
 			FUeAgentContractSchemaError SchemaError;
-			TOptional<FUeAgentResourceBudgetExceeded> SchemaResourceError;
+			TOptional<FUeAgentResourceChargeError> SchemaResourceError;
 			if (!InputSchema
 				|| !TryValidate(
 					*InputSchema,
@@ -275,17 +197,7 @@ namespace UE::UAI::Composition::GraphCompound
 					SchemaResourceError)
 				|| !CanonicalInput.IsSet())
 			{
-				return QueryErrorResult(
-					Request,
-					SchemaResourceError.IsSet()
-						? TEXT("graph_compound_resource_exceeded")
-						: (SchemaError.Code.IsEmpty()
-							? TEXT("graph_compound_input_schema_missing")
-							: SchemaError.Code),
-					SubjectId,
-					SchemaResourceError.IsSet()
-						? ResourceDetail(SchemaResourceError.GetValue())
-						: SchemaDetail(SchemaError));
+				return QueryErrorResult(Request, SchemaResourceError.IsSet() ? SchemaResourceError.GetValue() : (!SchemaError.IsEmpty() ? SchemaError : RuntimeFailure(TEXT("graph_compound_input_schema_missing"), SubjectId, TEXT("The descriptor has no usable input schema."))));
 			}
 
 			const FUeAgentQueryRequest CanonicalRequest(
@@ -302,17 +214,7 @@ namespace UE::UAI::Composition::GraphCompound
 					NativeResult,
 					BindingError))
 			{
-				return QueryErrorResult(
-					Request,
-					BindingError.IsValid()
-						? BindingError.Code
-						: TEXT("graph_compound_query_binding_failed"),
-					BindingError.SubjectId.IsEmpty()
-						? (*Binding)->GetOwnerId()
-						: BindingError.SubjectId,
-					BindingError.Detail.IsEmpty()
-						? TEXT("The exact query owner failed without an error contract.")
-						: BindingError.Detail);
+				return QueryErrorResult(Request, BindingError.IsValid() ? BindingError : RuntimeFailure(TEXT("graph_compound_query_binding_failed"), (*Binding)->GetOwnerId(), TEXT("The exact query owner failed without a diagnostic.")));
 			}
 
 			if (!TryChargeText(
@@ -322,11 +224,7 @@ namespace UE::UAI::Composition::GraphCompound
 					TEXT("query.output"),
 					ResourceError))
 			{
-				return QueryErrorResult(
-					Request,
-					TEXT("graph_compound_resource_exceeded"),
-					SubjectId,
-					ResourceDetail(ResourceError));
+				return QueryErrorResult(Request, ResourceError);
 			}
 
 			const FUeAgentContractSchema* ResultSchema =
@@ -345,15 +243,7 @@ namespace UE::UAI::Composition::GraphCompound
 					SchemaResourceError)
 				|| !CanonicalResult.IsSet())
 			{
-				return QueryErrorResult(
-					Request,
-					SchemaResourceError.IsSet()
-						? TEXT("graph_compound_resource_exceeded")
-						: TEXT("graph_compound_result_schema_invalid"),
-					SubjectId,
-					SchemaResourceError.IsSet()
-						? ResourceDetail(SchemaResourceError.GetValue())
-						: SchemaDetail(SchemaError));
+				return QueryErrorResult(Request, SchemaResourceError.IsSet() ? SchemaResourceError.GetValue() : ResultSchemaFailure(SchemaError, SubjectId));
 			}
 
 			return FUeAgentQueryResult(
@@ -373,11 +263,7 @@ namespace UE::UAI::Composition::GraphCompound
 				Request.GetDescriptorIdentity().GetDescriptorId();
 			if (!Request.IsValid() || !CallerContext.IsValid())
 			{
-				return OperationErrorResult(
-					Request,
-					TEXT("graph_compound_operation_request_invalid"),
-					SubjectId,
-					TEXT("A valid operation request and caller context are required."));
+				return OperationErrorResult(Request, RuntimeFailure(TEXT("graph_compound_operation_request_invalid"), SubjectId, TEXT("A valid operation request and caller context are required.")));
 			}
 
 			const FUeAgentOperationDescriptor* Descriptor =
@@ -385,46 +271,29 @@ namespace UE::UAI::Composition::GraphCompound
 					Request.GetDescriptorIdentity());
 			if (!Descriptor)
 			{
-				return OperationErrorResult(
-					Request,
-					TEXT("graph_compound_descriptor_not_exact"),
-					SubjectId,
-					TEXT("The complete DescriptorIdentity is not active."));
+				return OperationErrorResult(Request, RuntimeFailure(TEXT("graph_compound_descriptor_not_exact"), SubjectId, TEXT("The complete DescriptorIdentity is not active.")));
 			}
 			if (Descriptor->GetOperationKind()
 				!= EUeAgentDescriptorOperationKind::Operation)
 			{
-				return OperationErrorResult(
-					Request,
-					TEXT("graph_compound_lane_mismatch"),
-					SubjectId,
-					TEXT("The descriptor is not an operation."));
+				return OperationErrorResult(Request, RuntimeFailure(TEXT("graph_compound_lane_mismatch"), SubjectId, TEXT("The descriptor is not an operation.")));
 			}
 
 			TSharedRef<IGraphCompoundOperationBinding>* Binding =
 				State->OperationBindings.Find(SubjectId);
 			if (!Binding)
 			{
-				return OperationErrorResult(
-					Request,
-					TEXT("graph_compound_operation_binding_missing"),
-					SubjectId,
-					TEXT("The exact operation owner is unavailable."));
+				return OperationErrorResult(Request, RuntimeFailure(TEXT("graph_compound_operation_binding_missing"), SubjectId, TEXT("The exact operation owner is unavailable.")));
 			}
 			if (Cancellation->IsCancelled())
 			{
-				return OperationErrorResult(
-					Request,
-					TEXT("graph_compound_cancelled"),
-					SubjectId,
-					TEXT("The operation was cancelled before native execution."));
+				return OperationErrorResult(Request, RuntimeFailure(TEXT("graph_compound_cancelled"), SubjectId, TEXT("The operation was cancelled before native execution.")));
 			}
 
 			const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
 				Resources = MakeShared<FUeAgentResourceTracker,
-					ESPMode::ThreadSafe>(
-					RuntimeBudget(State->Config.MaxFrameBytes));
-			FUeAgentResourceBudgetExceeded ResourceError;
+					ESPMode::ThreadSafe>();
+			FUeAgentResourceChargeError ResourceError;
 			if (!TryChargeText(
 					*Resources,
 					EUeAgentResourceDimension::InputBytes,
@@ -432,11 +301,7 @@ namespace UE::UAI::Composition::GraphCompound
 					TEXT("operation.input"),
 					ResourceError))
 			{
-				return OperationErrorResult(
-					Request,
-					TEXT("graph_compound_resource_exceeded"),
-					SubjectId,
-					ResourceDetail(ResourceError));
+				return OperationErrorResult(Request, ResourceError);
 			}
 
 			const FUeAgentContractSchema* InputSchema =
@@ -444,7 +309,7 @@ namespace UE::UAI::Composition::GraphCompound
 					Request.GetDescriptorIdentity());
 			TOptional<FUeAgentContractValue> CanonicalInput;
 			FUeAgentContractSchemaError SchemaError;
-			TOptional<FUeAgentResourceBudgetExceeded> SchemaResourceError;
+			TOptional<FUeAgentResourceChargeError> SchemaResourceError;
 			if (!InputSchema
 				|| !TryValidate(
 					*InputSchema,
@@ -455,17 +320,7 @@ namespace UE::UAI::Composition::GraphCompound
 					SchemaResourceError)
 				|| !CanonicalInput.IsSet())
 			{
-				return OperationErrorResult(
-					Request,
-					SchemaResourceError.IsSet()
-						? TEXT("graph_compound_resource_exceeded")
-						: (SchemaError.Code.IsEmpty()
-							? TEXT("graph_compound_input_schema_missing")
-							: SchemaError.Code),
-					SubjectId,
-					SchemaResourceError.IsSet()
-						? ResourceDetail(SchemaResourceError.GetValue())
-						: SchemaDetail(SchemaError));
+				return OperationErrorResult(Request, SchemaResourceError.IsSet() ? SchemaResourceError.GetValue() : (!SchemaError.IsEmpty() ? SchemaError : RuntimeFailure(TEXT("graph_compound_input_schema_missing"), SubjectId, TEXT("The descriptor has no usable input schema."))));
 			}
 
 			const FUeAgentOperationRequest CanonicalRequest(
@@ -483,17 +338,7 @@ namespace UE::UAI::Composition::GraphCompound
 					NativeResult,
 					BindingError))
 			{
-				return OperationErrorResult(
-					Request,
-					BindingError.IsValid()
-						? BindingError.Code
-						: TEXT("graph_compound_operation_binding_failed"),
-					BindingError.SubjectId.IsEmpty()
-						? (*Binding)->GetOwnerId()
-						: BindingError.SubjectId,
-					BindingError.Detail.IsEmpty()
-						? TEXT("The exact operation owner failed without an error contract.")
-						: BindingError.Detail);
+				return OperationErrorResult(Request, BindingError.IsValid() ? BindingError : RuntimeFailure(TEXT("graph_compound_operation_binding_failed"), (*Binding)->GetOwnerId(), TEXT("The exact operation owner failed without a diagnostic.")));
 			}
 
 			if (!TryChargeText(
@@ -503,11 +348,7 @@ namespace UE::UAI::Composition::GraphCompound
 					TEXT("operation.output"),
 					ResourceError))
 			{
-				return OperationErrorResult(
-					Request,
-					TEXT("graph_compound_resource_exceeded"),
-					SubjectId,
-					ResourceDetail(ResourceError));
+				return OperationErrorResult(Request, ResourceError);
 			}
 
 			const FUeAgentContractSchema* ResultSchema =
@@ -526,15 +367,7 @@ namespace UE::UAI::Composition::GraphCompound
 					SchemaResourceError)
 				|| !CanonicalResult.IsSet())
 			{
-				return OperationErrorResult(
-					Request,
-					SchemaResourceError.IsSet()
-						? TEXT("graph_compound_resource_exceeded")
-						: TEXT("graph_compound_result_schema_invalid"),
-					SubjectId,
-					SchemaResourceError.IsSet()
-						? ResourceDetail(SchemaResourceError.GetValue())
-						: SchemaDetail(SchemaError));
+				return OperationErrorResult(Request, SchemaResourceError.IsSet() ? SchemaResourceError.GetValue() : ResultSchemaFailure(SchemaError, SubjectId));
 			}
 
 			return FUeAgentOperationResult(
@@ -632,11 +465,6 @@ namespace UE::UAI::Composition::GraphCompound
 		};
 	}
 
-	bool FGraphCompoundRuntimeConfig::IsValid() const
-	{
-		return MaxFrameBytes > 0;
-	}
-
 	FGraphCompoundRuntime::FGraphCompoundRuntime(
 		TSharedRef<FState, ESPMode::ThreadSafe> InState,
 		TSharedRef<IUeAgentQueryApplicationPort> InQueryPort,
@@ -657,16 +485,6 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		OutRuntime.Reset();
 		OutError = {};
-		if (!Config.IsValid())
-		{
-			SetError(
-				OutError,
-				TEXT("graph_compound_runtime_config_invalid"),
-				TEXT("graph_compound.runtime"),
-				TEXT("MaxFrameBytes must be positive."));
-			return false;
-		}
-
 		TMap<FString, TSharedRef<IGraphCompoundQueryBinding>> QueryById;
 		for (const TSharedRef<IGraphCompoundQueryBinding>& Binding
 			: QueryBindings)

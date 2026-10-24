@@ -1,5 +1,7 @@
 #include "Utilities/UeAgentStructuredJsonFormatter.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -54,11 +56,9 @@ namespace
 
 	static FString FormatJsonNumber(double Value)
 	{
-		if (FMath::IsFinite(Value) && FMath::IsNearlyEqual(Value, FMath::RoundToDouble(Value)))
-		{
-			return FString::Printf(TEXT("%.0f"), Value);
-		}
-		return FString::SanitizeFloat(Value);
+		// Compact JSON also carries selector and editable values. Formatting must
+		// round-trip the value, not apply a display tolerance or six-digit rounding.
+		return FString::Printf(TEXT("%.17g"), Value == 0.0 ? 0.0 : Value);
 	}
 
 	static bool IsScalarJsonValue(const TSharedPtr<FJsonValue>& Value)
@@ -100,14 +100,16 @@ FString FUeAgentStructuredJsonFormatter::WriteValue(
 bool FUeAgentStructuredJsonFormatter::SaveObjectToFile(
 	const FString& FilePath,
 	const TSharedPtr<FJsonObject>& Object,
-	FString* OutError,
+	UE::UAI::Contract::FDiagnostic* OutError,
 	const FUeAgentStructuredJsonFormatOptions& Options)
 {
 	if (!Object.IsValid())
 	{
 		if (OutError)
 		{
-			*OutError = TEXT("json_object_invalid");
+			*OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("json_object_invalid"), TEXT("The JSON object to save is null."), TEXT("json_write"));
+			OutError->Source.SourceFile = FilePath;
+			OutError->ActualValuePresent = false;
 		}
 		return false;
 	}
@@ -123,7 +125,8 @@ bool FUeAgentStructuredJsonFormatter::SaveObjectToFile(
 	{
 		if (OutError)
 		{
-			*OutError = FString::Printf(TEXT("write_failed:%s"), *FilePath);
+			*OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("write_failed"), TEXT("The JSON output file could not be written."), TEXT("json_write"));
+			OutError->Source.SourceFile = FilePath;
 		}
 		return false;
 	}
@@ -133,14 +136,16 @@ bool FUeAgentStructuredJsonFormatter::SaveObjectToFile(
 bool FUeAgentStructuredJsonFormatter::SaveValueToFile(
 	const FString& FilePath,
 	const TSharedPtr<FJsonValue>& Value,
-	FString* OutError,
+	UE::UAI::Contract::FDiagnostic* OutError,
 	const FUeAgentStructuredJsonFormatOptions& Options)
 {
 	if (!Value.IsValid())
 	{
 		if (OutError)
 		{
-			*OutError = TEXT("json_value_invalid");
+			*OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("json_value_invalid"), TEXT("The JSON value to save is missing."), TEXT("json_write"));
+			OutError->Source.SourceFile = FilePath;
+			OutError->ActualValuePresent = false;
 		}
 		return false;
 	}
@@ -156,7 +161,8 @@ bool FUeAgentStructuredJsonFormatter::SaveValueToFile(
 	{
 		if (OutError)
 		{
-			*OutError = FString::Printf(TEXT("write_failed:%s"), *FilePath);
+			*OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("write_failed"), TEXT("The JSON output file could not be written."), TEXT("json_write"));
+			OutError->Source.SourceFile = FilePath;
 		}
 		return false;
 	}
@@ -375,6 +381,11 @@ FString FUeAgentStructuredJsonFormatter::InlineValue(const TSharedPtr<FJsonValue
 	case EJson::String:
 		return UeAgentEscapeJsonString(Value->AsString());
 	case EJson::Number:
+		if (Value->PreferStringRepresentation())
+		{
+			FString Lexeme;
+			if (Value->TryGetString(Lexeme)) return Lexeme;
+		}
 		return FormatJsonNumber(Value->AsNumber());
 	case EJson::Boolean:
 		return Value->AsBool() ? TEXT("true") : TEXT("false");

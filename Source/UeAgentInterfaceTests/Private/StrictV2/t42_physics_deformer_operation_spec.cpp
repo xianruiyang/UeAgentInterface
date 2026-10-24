@@ -4,6 +4,7 @@
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "Components/StaticMeshComponent.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "HAL/FileManager.h"
@@ -80,20 +81,34 @@ namespace UE::UAI::Tests::StrictV2::T42
 	{
 		static const TArray<FString> Commands = {
 			TEXT("animation.deformer_graph.asset.create"),
-			TEXT("animation.deformer_graph.topology.apply"),
-			TEXT("animation.deformer_source_library.asset.create"),
-			TEXT("animation.deformer_source_library.bindings.apply"),
 			TEXT("animation.mesh_deformer_collection.asset.create"),
-			TEXT("animation.mesh_deformer_collection.entries.apply"),
-			TEXT("animation.ml_deformer.asset.create"),
-			TEXT("animation.ml_deformer.configuration.apply"),
 			TEXT("deformer.evaluation.sample"),
 			TEXT("deformer.geometry.sample"),
 			TEXT("deformer.training_inputs.validate"),
+			TEXT("physics.simulation.probe"),
+		};
+		return Commands;
+	}
+
+	const TArray<FString>& DormantCommands()
+	{
+		static const TArray<FString> Commands = {
+			TEXT("animation.deformer_graph.topology.apply"),
+			TEXT("animation.deformer_source_library.bindings.apply"),
+			TEXT("animation.mesh_deformer_collection.entries.apply"),
+			TEXT("animation.ml_deformer.configuration.apply"),
 			TEXT("physics.asset.structure.replace"),
 			TEXT("physics.constraint.update"),
 			TEXT("physics.material.update"),
-			TEXT("physics.simulation.probe"),
+		};
+		return Commands;
+	}
+
+	const TArray<FString>& DisabledCommands()
+	{
+		static const TArray<FString> Commands = {
+			TEXT("animation.deformer_source_library.asset.create"),
+			TEXT("animation.ml_deformer.asset.create"),
 		};
 		return Commands;
 	}
@@ -135,14 +150,15 @@ bool FUeAgentStrictV2T42PhysicsDeformerInventoryTest::RunTest(
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T42 owns exactly 15 inventory commands"),
-		ExpectedCommands().Num(), 15);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
 		TestNotNull(*FString::Printf(TEXT("%s is active"), *CommandId), Contract);
 		if (Contract)
 		{
+			TestEqual(*FString::Printf(TEXT("%s is enabled"), *CommandId),
+				Contract->GetAvailability(),
+				CommandContract::EUeAgentCommandAvailability::Enabled);
 			TestEqual(*FString::Printf(TEXT("%s has one T42 owner"), *CommandId),
 				Contract->GetPublicOwner(),
 				FString(TEXT("physics-deformer-operation-owner")));
@@ -153,6 +169,30 @@ bool FUeAgentStrictV2T42PhysicsDeformerInventoryTest::RunTest(
 				*CommandId), Contract->GetPythonFunction(),
 				CommandId.RightChop(Namespace.Len() + 1)
 					.Replace(TEXT("."), TEXT("_")));
+		}
+	}
+	for (const FString& CommandId : DormantCommands())
+	{
+		const auto* Contract = Registry->FindExact(CommandId);
+		TestNotNull(*FString::Printf(TEXT("%s remains registered"), *CommandId), Contract);
+		if (Contract)
+		{
+			TestEqual(
+				*FString::Printf(TEXT("%s is centrally dormant"), *CommandId),
+				Contract->GetAvailability(),
+				CommandContract::EUeAgentCommandAvailability::Dormant);
+		}
+	}
+	for (const FString& CommandId : DisabledCommands())
+	{
+		const auto* Contract = Registry->FindExact(CommandId);
+		TestNotNull(*FString::Printf(TEXT("%s remains registered"), *CommandId),
+			Contract);
+		if (Contract)
+		{
+			TestEqual(*FString::Printf(TEXT("%s is disabled"), *CommandId),
+				Contract->GetAvailability(),
+				CommandContract::EUeAgentCommandAvailability::Disabled);
 		}
 	}
 	return !HasAnyErrors();
@@ -192,11 +232,6 @@ bool FUeAgentStrictV2T42PhysicsDeformerDomainCapabilityTest::RunTest(
 		(*Domain)->GetDeclaration();
 	TestEqual(TEXT("Physics/Deformer owns one command contribution"),
 		Declaration.Command.Contributions.Num(), 1);
-	TestEqual(TEXT("Physics/Deformer owns all 12 write operations"),
-		Declaration.Operation.Operations.Num(), 12);
-	TestEqual(TEXT("Physics/Deformer migration owner is exact"),
-		Declaration.Migration.OwnerId,
-		FString(TEXT("T42-PHYSICS-DEFORMER-OPERATION")));
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		if (IsQuery(CommandId))

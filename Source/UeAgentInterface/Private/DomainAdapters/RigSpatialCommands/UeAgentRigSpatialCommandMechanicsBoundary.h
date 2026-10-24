@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 
 namespace UE::UAI::DomainAdapters::RigSpatialCommands
@@ -8,7 +10,7 @@ namespace UE::UAI::DomainAdapters::RigSpatialCommands
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API CommandEdge::FUeAgentCommandResult Submit(
 		const TSharedRef<CommandEdge::IUeAgentCommandHandler>& Mechanics,
 		const CommandEdge::FUeAgentCommandRequest& Request,

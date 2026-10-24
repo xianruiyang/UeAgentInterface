@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/BindingGateway/Operation/UeAgentOperationBinding.h"
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
@@ -13,16 +14,10 @@ namespace UE::UAI::Composition::NiagaraCompound
 			ExecutionContext;
 		FString ServerSessionId;
 		int64 RegistryEpoch = 0;
-		double TimeoutSeconds = 0.0;
-		int64 MaxFrameBytes = 0;
 		FString JournalRoot;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentNiagaraCompoundApplicationError
-	{
-		FString Code;
-		FString Detail;
-	};
+	using FUeAgentNiagaraCompoundApplicationError = Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentNiagaraCompoundApplication final
 	{

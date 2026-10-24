@@ -1,7 +1,11 @@
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCapabilities.h"
+#include "DomainAdapters/AssetDataSimpleEffect/UeAgentDataObjectEligibility.h"
 
 #include "Core/ContextResource/UeAgentOperationContext.h"
 #include "Core/Contract/UeAgentContractJson.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCoreAssetMechanics.h"
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectEnhancedInputMechanics.h"
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectMediaMechanics.h"
@@ -12,19 +16,163 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/DataAsset.h"
+#include "Factories/Factory.h"
 #include "FileMediaSource.h"
 #include "MediaSource.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include <initializer_list>
 #include "Sound/SoundEffectSource.h"
 #include "Sound/SoundEffectSubmix.h"
 #include "Sound/SoundSubmix.h"
 #include "SubmixEffects/AudioMixerSubmixEffectEQ.h"
 #include "UObject/Class.h"
 #include "UObject/UnrealType.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringAssetIdentity.h"
 
 namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 {
+    namespace
+    {
+        Contract::FDiagnostic CapabilityFailure(const FString& Code, const FString& Reason, const FString& Field,
+            const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected,
+            const TCHAR* SourceKind = TEXT("command_input"), const TCHAR* Stage = TEXT("execution"))
+        {
+            auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Field, Expected, Actual, Stage, Reason);
+            Error.SourceKind = SourceKind;
+            Error.ActualValuePresent = Actual.IsValid();
+            Error.ExpectedValuePresent = Expected.IsValid();
+            if (Error.SourceKind == TEXT("native_result"))
+            {
+                Error.Source = {};
+                Error.SemanticPointer.Reset();
+            }
+            return Error;
+        }
+
+        Contract::FDiagnostic RegistryFailure(const FString& Code, const FString& Reason, const FString& Field,
+            const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected)
+        {
+            return CapabilityFailure(Code, Reason, Field, Actual, Expected, TEXT("native_result"), TEXT("registry"));
+        }
+
+        Contract::FDiagnostic InternalRegistryFailure(const FString& Code, const FString& Reason,
+            const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected)
+        {
+            auto Error = RegistryFailure(Code, Reason, FString(), nullptr, nullptr);
+            Error.ActualEvidence = Actual;
+            Error.ExpectedEvidence = Expected;
+            return Error;
+        }
+
+        TSharedPtr<FJsonValue> Facts(std::initializer_list<TPair<FString, TSharedPtr<FJsonValue>>> Fields)
+        {
+            const auto Object = MakeShared<FJsonObject>();
+            for (const auto& Field : Fields) Object->SetField(Field.Key, Field.Value);
+            return MakeShared<FJsonValueObject>(Object);
+        }
+
+        void MarkNativeFailure(Contract::FDiagnostic& Error)
+        {
+            Error.SourceKind = TEXT("native_result");
+            if (Error.Source.InternalJsonPath.IsEmpty())
+                Error.Source.InternalJsonPath = Error.SemanticPointer.IsEmpty() ? Error.Source.JsonPath : Error.SemanticPointer;
+            static_cast<Contract::FPublicSourceLocation&>(Error.Source) = {};
+            Error.SemanticPointer.Reset();
+            for (auto& Child : Error.Diagnostics) MarkNativeFailure(Child);
+            if (Error.PublicCause)
+            {
+                auto Cause = MakeShared<Contract::FDiagnostic>(*Error.PublicCause);
+                MarkNativeFailure(*Cause);
+                Error.PublicCause = MoveTemp(Cause);
+            }
+        }
+
+        TSharedPtr<FJsonValue> CatalogRevisionFact(const Discovery::FUeAgentCatalogRevision& Revision)
+        {
+            return Facts({{TEXT("source_id"), MakeShared<FJsonValueString>(Revision.GetSourceId())},
+                {TEXT("generation"), MakeShared<FJsonValueString>(Revision.GetGeneration())},
+                {TEXT("sequence"), MakeShared<FJsonValueNumberString>(::LexToString(Revision.GetSequence()))}});
+        }
+
+        const TCHAR* CanonicalKindName(const StateSemantic::EUeAgentValueKind Kind)
+        {
+            switch (Kind)
+            {
+            case StateSemantic::EUeAgentValueKind::Null: return TEXT("null");
+            case StateSemantic::EUeAgentValueKind::Boolean: return TEXT("boolean");
+            case StateSemantic::EUeAgentValueKind::String: return TEXT("string");
+            case StateSemantic::EUeAgentValueKind::Integer: return TEXT("integer");
+            case StateSemantic::EUeAgentValueKind::Decimal: return TEXT("decimal");
+            case StateSemantic::EUeAgentValueKind::Array: return TEXT("array");
+            case StateSemantic::EUeAgentValueKind::Object: return TEXT("object");
+            case StateSemantic::EUeAgentValueKind::Temporal: return TEXT("temporal");
+            case StateSemantic::EUeAgentValueKind::Spatial: return TEXT("spatial");
+            }
+            return TEXT("unknown");
+        }
+
+        TSharedPtr<FJsonValue> ClassFact(const UClass* Class)
+        {
+            return Class ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Class->GetPathName())) : nullptr;
+        }
+    }
+
+	bool CollectRegisteredDataObjectFields(
+		const UClass* ConcreteClass, TMap<FString, FProperty*>& OutFields, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		OutFields.Reset();
+		OutError.Reset();
+		if (!ConcreteClass || !ConcreteClass->IsChildOf(UDataAsset::StaticClass())
+			|| ConcreteClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
+		{
+			OutError = RegistryFailure(TEXT("asset_data_registered_class_invalid"),
+                !ConcreteClass ? TEXT("The registered data object class is missing.")
+                    : !ConcreteClass->IsChildOf(UDataAsset::StaticClass()) ? TEXT("The registered class is not a DataAsset.")
+                    : ConcreteClass->HasAnyClassFlags(CLASS_Abstract) ? TEXT("The registered data object class is abstract.")
+                    : ConcreteClass->HasAnyClassFlags(CLASS_Deprecated) ? TEXT("The registered data object class is deprecated.")
+                    : TEXT("The registered data object class has been superseded."),
+                TEXT("class"), ClassFact(ConcreteClass), MakeShared<FJsonValueString>(TEXT("concrete current DataAsset class")));
+			return false;
+		}
+		for (TFieldIterator<FProperty> It(ConcreteClass); It; ++It)
+		{
+			FProperty* Property = *It;
+			if (!Property->HasMetaData(TEXT("UAIAssetDataField"))) continue;
+			const FString PublicId = Property->GetMetaData(TEXT("UAIAssetDataField"));
+			if (PublicId.IsEmpty() || OutFields.Contains(PublicId))
+			{
+                const FProperty* ExistingProperty = OutFields.FindRef(PublicId);
+                const FString ExistingName = ExistingProperty ? ExistingProperty->GetName() : FString();
+                OutFields.Reset();
+                OutError = RegistryFailure(TEXT("asset_data_registered_field_metadata_invalid"),
+                    PublicId.IsEmpty() ? TEXT("The registered field metadata has an empty public id.") : TEXT("Two registered properties use the same public field id."),
+                    Property->GetName() + TEXT("/UAIAssetDataField"), Facts({{TEXT("public_id"), MakeShared<FJsonValueString>(PublicId)},
+                        {TEXT("existing_property"), MakeShared<FJsonValueString>(ExistingName)}}),
+                    MakeShared<FJsonValueString>(TEXT("nonempty unique public field id")));
+                OutError.TargetPath = ConcreteClass->GetPathName();
+				return false;
+			}
+			OutFields.Add(PublicId, Property);
+		}
+		if (OutFields.IsEmpty())
+		{
+			OutError = RegistryFailure(TEXT("asset_data_registered_fields_missing"),
+                TEXT("The data object class has no registered authoring fields."), TEXT("UAIAssetDataField"),
+                MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one registered property")));
+            OutError.TargetPath = ConcreteClass->GetPathName();
+			return false;
+		}
+		return true;
+	}
+
+	bool IsEligibleDataObjectClass(const UClass* ConcreteClass)
+	{
+		TMap<FString, FProperty*> Fields;
+		UE::UAI::Contract::FDiagnostic Error;
+		return CollectRegisteredDataObjectFields(ConcreteClass, Fields, Error);
+	}
+
 	using namespace ContextResource;
 	using namespace Contract;
 	using namespace Discovery;
@@ -213,6 +361,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		};
 
 		const FDescriptorSpec DescriptorSpecs[] = {
+			{ TEXT("uai.operation.asset.object.create"), TEXT("asset.object.create"), TEXT("generic_default_create"), TEXT("asset.object.create"), TEXT(""), TEXT("") },
 			{ TEXT("uai.operation.asset.audio_effect_preset.create"), TEXT("asset.audio_effect_preset.create"), TEXT("audio_effect_preset"), TEXT("asset.object.create"), TEXT(""), TEXT("") },
 			{ TEXT("uai.operation.asset.audio_effect_preset.update"), TEXT("asset.audio_effect_preset.update"), TEXT("audio_effect_preset"), TEXT("asset.object.update"), TEXT("settings"), TEXT("set|clear") },
 			{ TEXT("uai.operation.asset.sound_attenuation.create"), TEXT("asset.sound_attenuation.create"), TEXT("sound_attenuation"), TEXT("asset.object.create"), TEXT(""), TEXT("") },
@@ -304,6 +453,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		};
 
 		const FFactoryPolicySpec FactoryPolicySpecs[] = {
+			{
+				TEXT("asset.object.create"),
+				TEXT(
+					"uai.asset_data.factory_contract:"
+					"generic_default_create:v1"),
+				TEXT(
+					"uai.asset_data.class_constraint:"
+					"registered_asset_constructor:v1"),
+			},
 			{
 				TEXT("asset.audio_effect_preset.create"),
 				TEXT(
@@ -584,6 +742,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{
 				return false;
 			}
+			if (ProfileId == TEXT("generic_default_create"))
+			{
+				return ConcreteClass->IsChildOf(UObject::StaticClass());
+			}
 			if (ProfileId == TEXT("audio_effect_preset"))
 			{
 				return ConcreteClass->IsChildOf(
@@ -596,43 +758,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			if (ProfileId == TEXT("data_object"))
 			{
-				if (!ConcreteClass->IsChildOf(
-						UDataAsset::StaticClass()))
-				{
-					return false;
-				}
-				TSet<FString> PublicIds;
-				for (TFieldIterator<FProperty> It(ConcreteClass);
-					It;
-					++It)
-				{
-					FProperty* Property = *It;
-					if (!Property->HasMetaData(
-							TEXT("UAIAssetDataField")))
-					{
-						continue;
-					}
-					const FString PublicId =
-						Property->GetMetaData(
-							TEXT("UAIAssetDataField"));
-					const bool bSupported =
-						CastField<FStrProperty>(Property)
-						|| CastField<FIntProperty>(Property)
-						|| CastField<FFloatProperty>(Property)
-						|| CastField<FBoolProperty>(Property)
-						|| (CastField<FObjectPropertyBase>(Property)
-							&& Property->GetMetaData(
-								TEXT("UAIAssetDataType"))
-								== TEXT("asset_ref"));
-					if (PublicId.IsEmpty()
-						|| !bSupported
-						|| PublicIds.Contains(PublicId))
-					{
-						return false;
-					}
-					PublicIds.Add(PublicId);
-				}
-				return !PublicIds.IsEmpty();
+				return IsEligibleDataObjectClass(ConcreteClass);
 			}
 			if (ProfileId == TEXT("media_source"))
 			{
@@ -646,6 +772,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			const FDescriptorSpec& Spec)
 		{
 			const FString NativeType(Spec.NativeOperationType);
+			if (FString(Spec.CapabilityId)
+				== TEXT("asset.object.create"))
+			{
+				return TEXT(
+					"uai.asset_data.mechanic:"
+					"create_native_factory_asset:v1");
+			}
 			if (NativeType == TEXT("asset.object.create")
 				&& !FindStaticCreateClassPath(
 					Spec.CapabilityId).IsEmpty())
@@ -675,16 +808,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return FString();
 		}
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
-		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
-			return false;
-		}
+		bool Fail(FExecutionMutationError& OutError, FExecutionMutationError Diagnostic,
+            const FString& PropertyPath = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = PropertyPath;
+            return false;
+        }
 
 		TArray<FString> SplitSpecValues(const TCHAR* Source)
 		{
@@ -696,6 +826,28 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			return Values;
 		}
+
+        TSharedPtr<FJsonValue> SpecValuesFact(const TCHAR* Source)
+        {
+            TArray<TSharedPtr<FJsonValue>> Values;
+            for (const auto& Value : SplitSpecValues(Source)) Values.Add(MakeShared<FJsonValueString>(Value));
+            return MakeShared<FJsonValueArray>(Values);
+        }
+
+        const TCHAR* FieldKindName(const EFieldValueKind Kind)
+        {
+            switch (Kind)
+            {
+            case EFieldValueKind::String: return TEXT("string");
+            case EFieldValueKind::Boolean: return TEXT("boolean");
+            case EFieldValueKind::Integer: return TEXT("integer");
+            case EFieldValueKind::Number: return TEXT("number");
+            case EFieldValueKind::Array: return TEXT("array");
+            case EFieldValueKind::Object: return TEXT("object");
+            }
+            return TEXT("registered value kind");
+        }
+
 
 		const FFieldSpec* FindFieldSpec(
 			const FString& ProfileId,
@@ -881,43 +1033,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return Schema;
 		}
 
-		TSharedPtr<FJsonObject> FactoryRefSchema()
+		TSharedPtr<FJsonObject> GenericFactorySelectorSchema()
 		{
-			const TSharedPtr<FJsonObject> RevisionProperties =
-				MakeShared<FJsonObject>();
-			RevisionProperties->SetObjectField(
-				TEXT("source_id"),
-				StringSchema());
-			RevisionProperties->SetObjectField(
-				TEXT("generation"),
-				StringSchema());
-			const TSharedPtr<FJsonObject> SequenceSchema =
-				MakeShared<FJsonObject>();
-			SequenceSchema->SetStringField(
-				TEXT("type"),
-				TEXT("integer"));
-			SequenceSchema->SetNumberField(TEXT("minimum"), 0);
-			RevisionProperties->SetObjectField(
-				TEXT("sequence"),
-				SequenceSchema);
-
-			const TSharedPtr<FJsonObject> Properties =
-				MakeShared<FJsonObject>();
-			Properties->SetObjectField(
-				TEXT("candidate_ref"),
-				StringSchema());
-			Properties->SetObjectField(
-				TEXT("catalog_revision"),
-				ObjectSchema(
-					RevisionProperties,
-					{
-						TEXT("source_id"),
-						TEXT("generation"),
-						TEXT("sequence"),
-					}));
-			return ObjectSchema(
-				Properties,
-				{TEXT("candidate_ref"), TEXT("catalog_revision")});
+			const TSharedPtr<FJsonObject> SelectProperties = MakeShared<FJsonObject>();
+			SelectProperties->SetStringField(TEXT("type"), TEXT("object"));
+			SelectProperties->SetBoolField(TEXT("additionalProperties"), true);
+			const TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+			Properties->SetObjectField(TEXT("name"), StringSchema());
+			Properties->SetObjectField(TEXT("select"), SelectProperties);
+			return ObjectSchema(Properties, {TEXT("name")});
 		}
 
 		TSharedPtr<FJsonObject> BuildInputSchema(
@@ -929,13 +1053,25 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			TArray<FString> Required{TEXT("target_ref")};
 
 			const FString NativeType(Spec.NativeOperationType);
-			if (NativeType == TEXT("asset.object.create")
+			if (FString(Spec.CapabilityId)
+				== TEXT("asset.object.create"))
+			{
+				const TSharedPtr<FJsonObject> FactorySchema = MakeShared<FJsonObject>();
+				FactorySchema->SetArrayField(TEXT("oneOf"), {
+					MakeShared<FJsonValueObject>(StringSchema()),
+					MakeShared<FJsonValueObject>(GenericFactorySelectorSchema())});
+				Properties->SetObjectField(
+					TEXT("factory"),
+					FactorySchema);
+				Required.Add(TEXT("factory"));
+			}
+			else if (NativeType == TEXT("asset.object.create")
 				&& FindFactoryPolicy(Spec.CapabilityId))
 			{
 				Properties->SetObjectField(
-					TEXT("factory_ref"),
-					FactoryRefSchema());
-				Required.Add(TEXT("factory_ref"));
+					TEXT("factory"),
+					GenericFactorySelectorSchema());
+				Required.Add(TEXT("factory"));
 			}
 			else if (NativeType == TEXT("asset.object.clone"))
 			{
@@ -943,20 +1079,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEXT("source_ref"),
 					StringSchema());
 				Properties->SetObjectField(
-					TEXT("expected_source_revision"),
-					StringSchema());
-				Properties->SetObjectField(
 					TEXT("destructive_authorization_id"),
 					StringSchema());
 				Required.Add(TEXT("source_ref"));
-				Required.Add(TEXT("expected_source_revision"));
 			}
 			else if (NativeType != TEXT("asset.object.create"))
 			{
-				Properties->SetObjectField(
-					TEXT("expected_revision"),
-					StringSchema());
-
 				const TSharedPtr<FJsonObject> Changes =
 					MakeShared<FJsonObject>();
 				Changes->SetStringField(TEXT("type"), TEXT("array"));
@@ -983,7 +1111,6 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				Changes->SetNumberField(TEXT("minItems"), 1);
 				Changes->SetBoolField(TEXT("uniqueItems"), true);
 				Properties->SetObjectField(TEXT("changes"), Changes);
-				Required.Add(TEXT("expected_revision"));
 				Required.Add(TEXT("changes"));
 			}
 			return ObjectSchema(Properties, Required);
@@ -1038,7 +1165,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		bool TryCanonicalize(
 			const TSharedPtr<FJsonObject>& Object,
 			FString& OutCanonical,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			return Object.IsValid()
 				&& Json::TryCanonicalize(
@@ -1052,7 +1179,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			const TSharedPtr<FJsonObject>& InputSchema,
 			const TSharedPtr<FJsonObject>& ResultSchema,
 			FString& OutHash,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const TSharedPtr<FJsonObject> Policy =
 				MakeShared<FJsonObject>();
@@ -1104,11 +1231,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				return false;
 			}
 			OutHash = Json::Sha256Utf8(Canonical);
-			return !OutHash.IsEmpty();
+			if (!OutHash.IsEmpty()) return true;
+            OutError = RegistryFailure(TEXT("asset_data_descriptor_hash_missing"),
+                TEXT("The canonical descriptor did not produce a hash."), TEXT("descriptor"),
+                MakeShared<FJsonValueString>(Spec.DescriptorId), MakeShared<FJsonValueString>(TEXT("nonempty descriptor hash")));
+            return false;
 		}
 
 		const FDescriptorSpec* FindSpec(
-			const FUeAgentDescriptorIdentity& Identity)
+			const FUeAgentDescriptorIdentity& Identity, FExecutionMutationError& OutError)
 		{
 			for (const FDescriptorSpec& Spec : DescriptorSpecs)
 			{
@@ -1122,18 +1253,25 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				const TSharedPtr<FJsonObject> Result =
 					BuildResultSchema();
 				FString Hash;
-				FString Error;
-				if (TryBuildDescriptorHash(
-						Spec,
-						Input,
-						Result,
-						Hash,
-						Error)
-					&& Hash == Identity.GetDescriptorHash())
-				{
-					return &Spec;
-				}
-			}
+                Contract::FDiagnostic Error;
+                if (!TryBuildDescriptorHash(Spec, Input, Result, Hash, Error))
+                {
+                    if (OutError.IsEmpty()) OutError = MoveTemp(Error);
+                    continue;
+                }
+                if (Hash == Identity.GetDescriptorHash())
+                {
+                    OutError.Reset();
+                    return &Spec;
+                }
+            }
+            if (OutError.IsEmpty())
+                OutError = InternalRegistryFailure(TEXT("asset_data_descriptor_not_exact"),
+                    TEXT("The requested descriptor identity does not exactly match a registered asset operation."),
+                    Facts({{TEXT("descriptor_id"), MakeShared<FJsonValueString>(Identity.GetDescriptorId())},
+                        {TEXT("version"), MakeShared<FJsonValueNumber>(Identity.GetVersion())},
+                        {TEXT("hash"), MakeShared<FJsonValueString>(Identity.GetDescriptorHash())}}),
+                    MakeShared<FJsonValueString>(TEXT("registered descriptor id, version, and hash")));
 			return nullptr;
 		}
 
@@ -1142,16 +1280,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			TSharedPtr<FJsonObject>& OutPayload,
 			FExecutionMutationError& OutError)
 		{
-			OutPayload.Reset();
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(
-					Request.GetPayload().GetJsonValue());
-			if (!FJsonSerializer::Deserialize(Reader, OutPayload)
-				|| !OutPayload.IsValid())
+			UE::UAI::Contract::FDiagnostic ParseError;
+			if (!Contract::Json::TryParseObject(
+				Request.GetPayload().GetJsonValue(), OutPayload, ParseError))
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_payload_parse_failed"));
+				return Fail(OutError, ParseError);
 			}
 			return true;
 		}
@@ -1172,28 +1305,35 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return nullptr;
 		}
 
-		bool TryGetObjectString(
-			const FUeAgentCanonicalValueRef& Value,
-			const FString& Field,
-			FString& OutText)
-		{
-			if (Value->GetKind() != EUeAgentValueKind::Object)
-			{
-				return false;
-			}
-			for (const TPair<FString, FUeAgentCanonicalValueRef>& Item
-				: Value->GetObjectItems())
-			{
-				if (Item.Key == Field
-					&& Item.Value->GetKind()
-						== EUeAgentValueKind::String)
-				{
-					OutText = Item.Value->GetText();
-					return true;
-				}
-			}
-			return false;
-		}
+        bool TryReadSnapshotString(const FUeAgentCanonicalValueRef& Value, const FString& Field,
+            FString& OutText, const FString& TargetRef, const FString& Code,
+            FExecutionMutationError& OutError)
+        {
+            const bool bObject = Value->GetKind() == EUeAgentValueKind::Object;
+            const FUeAgentCanonicalValue* Actual = bObject ? nullptr : &Value.Get();
+            if (bObject)
+                for (const auto& Item : Value->GetObjectItems())
+                    if (Item.Key == Field) { Actual = &Item.Value.Get(); break; }
+            if (bObject && Actual && Actual->GetKind() == EUeAgentValueKind::String)
+            {
+                OutText = Actual->GetText();
+                return true;
+            }
+            OutError = CapabilityFailure(Code,
+                !bObject ? TEXT("The captured asset snapshot is not an object.")
+                    : !Actual ? TEXT("The captured asset snapshot is missing a required string field.")
+                    : TEXT("The captured asset snapshot field is not a string."),
+                bObject ? Field : FString(), nullptr, MakeShared<FJsonValueString>(bObject ? TEXT("string") : TEXT("object")), TEXT("native_result"));
+            OutError.TargetPath = TargetRef;
+            OutError.ActualValuePresent = Actual != nullptr;
+            Contract::FDiagnostic ProjectionError;
+            if (Actual && !CanonicalJson::TryToJsonValue(*Actual, OutError.ActualValue, ProjectionError))
+            {
+                MarkNativeFailure(ProjectionError);
+                OutError.Diagnostics.Add(MoveTemp(ProjectionError));
+            }
+            return false;
+        }
 
 		bool TryCanonicalValue(
 			const TSharedPtr<FJsonValue>& JsonValue,
@@ -1201,146 +1341,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
-			OutValue.Reset();
-			FUeAgentStateSemanticError Error;
 			if (!JsonValue.IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_canonical_value_missing"));
-			}
-			switch (JsonValue->Type)
-			{
-			case EJson::Null:
-				if (FUeAgentCanonicalValue::TryNull(
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::Boolean:
-				if (FUeAgentCanonicalValue::TryBoolean(
-						JsonValue->AsBool(),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::String:
-				if (FUeAgentCanonicalValue::TryString(
-						JsonValue->AsString(),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::Number:
-				{
-					const double Number = JsonValue->AsNumber();
-					const bool bInteger =
-						FMath::IsNearlyEqual(
-							Number,
-							FMath::FloorToDouble(Number))
-						&& Number
-							>= static_cast<double>(MIN_int64)
-						&& Number
-							<= static_cast<double>(MAX_int64);
-					const bool bBuilt = bInteger
-						? FUeAgentCanonicalValue::TryInteger(
-							FString::Printf(
-								TEXT("%lld"),
-								static_cast<long long>(
-									Number)),
-							Resources,
-							OutValue,
-							Error)
-						: FUeAgentCanonicalValue::TryDecimal(
-							FString::SanitizeFloat(Number),
-							Resources,
-							OutValue,
-							Error);
-					if (bBuilt)
-					{
-						return true;
-					}
-					break;
-				}
-			case EJson::Array:
-				{
-					TArray<FUeAgentCanonicalValueRef> Items;
-					for (const TSharedPtr<FJsonValue>& Item
-						: JsonValue->AsArray())
-					{
-						FUeAgentCanonicalValuePtr CanonicalItem;
-						if (!TryCanonicalValue(
-								Item,
-								Resources,
-								CanonicalItem,
-								OutError))
-						{
-							return false;
-						}
-						Items.Add(CanonicalItem.ToSharedRef());
-					}
-					if (FUeAgentCanonicalValue::TryArray(
-							Items,
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
-					break;
-				}
-			case EJson::Object:
-				{
-					TArray<
-						TPair<
-							FString,
-							FUeAgentCanonicalValueRef>> Items;
-					for (const TPair<
-						FString,
-						TSharedPtr<FJsonValue>>& Pair
-							: JsonValue->AsObject()->Values)
-					{
-						FUeAgentCanonicalValuePtr CanonicalItem;
-						if (!TryCanonicalValue(
-								Pair.Value,
-								Resources,
-								CanonicalItem,
-								OutError))
-						{
-							return false;
-						}
-						Items.Emplace(
-							Pair.Key,
-							CanonicalItem.ToSharedRef());
-					}
-					if (FUeAgentCanonicalValue::TryObject(
-							Items,
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
-					break;
-				}
-			default:
-				break;
-			}
-			return Fail(
-				OutError,
-				Error.Code.IsEmpty()
-					? TEXT("asset_data_canonical_value_failed")
-					: Error.Code,
-				Error.Detail);
+				return Fail(OutError, CapabilityFailure(TEXT("asset_data_canonical_value_missing"), TEXT("The generated change has no canonical value."),
+                    FString(), nullptr, MakeShared<FJsonValueString>(TEXT("canonical value")), TEXT("native_result")));
+            if (CanonicalJson::TryFromJsonValue(JsonValue, Resources, OutValue, OutError)) return true;
+            MarkNativeFailure(OutError);
+            return false;
 		}
 
 		bool JsonValueMatchesFieldKind(
@@ -1358,10 +1364,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			case EFieldValueKind::Boolean:
 				return Value->Type == EJson::Boolean;
 			case EFieldValueKind::Integer:
-				return Value->Type == EJson::Number
-					&& FMath::IsNearlyEqual(
-						Value->AsNumber(),
-						FMath::FloorToDouble(Value->AsNumber()));
+				{
+					FString Lexeme;
+					return CanonicalJson::TryGetNumberLexeme(*Value, Lexeme)
+						&& IsIntegralNumberLexeme(Lexeme);
+				}
 			case EFieldValueKind::Number:
 				return Value->Type == EJson::Number;
 			case EFieldValueKind::Array:
@@ -1383,7 +1390,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			case EFieldValueKind::Boolean:
 				return CanonicalKind == EUeAgentValueKind::Boolean;
 			case EFieldValueKind::Integer:
-				return CanonicalKind == EUeAgentValueKind::Integer;
+				// Integrality is checked from the value lexeme in planning/native reads.
+				return CanonicalKind == EUeAgentValueKind::Integer
+					|| CanonicalKind == EUeAgentValueKind::Decimal;
 			case EFieldValueKind::Number:
 				return CanonicalKind == EUeAgentValueKind::Decimal
 					|| CanonicalKind == EUeAgentValueKind::Integer;
@@ -1395,56 +1404,33 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return false;
 		}
 
-		bool TryValidateSnapshotReferences(
-			const FUeAgentCanonicalSnapshotRef& Snapshot,
-			const TSharedPtr<FJsonValue>& Value,
-			FString& OutUnresolved)
-		{
-			if (!Value.IsValid())
-			{
-				return true;
-			}
-			if (Value->Type == EJson::String)
-			{
-				const FString Text = Value->AsString();
-				if (Text.StartsWith(TEXT("uai://asset/"))
-					&& !FindEntry(Snapshot, Text))
-				{
-					OutUnresolved = Text;
-					return false;
-				}
-				return true;
-			}
-			if (Value->Type == EJson::Array)
-			{
-				for (const TSharedPtr<FJsonValue>& Item
-					: Value->AsArray())
-				{
-					if (!TryValidateSnapshotReferences(
-							Snapshot,
-							Item,
-							OutUnresolved))
-					{
-						return false;
-					}
-				}
-			}
-			else if (Value->Type == EJson::Object)
-			{
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair
-					: Value->AsObject()->Values)
-				{
-					if (!TryValidateSnapshotReferences(
-							Snapshot,
-							Pair.Value,
-							OutUnresolved))
-					{
-						return false;
-					}
-				}
-			}
-			return true;
-		}
+        bool TryValidateSnapshotReferences(const FUeAgentCanonicalSnapshotRef& Snapshot,
+            const TSharedPtr<FJsonValue>& Value, const FString& Pointer, FExecutionMutationError& OutError)
+        {
+            if (!Value.IsValid()) return true;
+            if (Value->Type == EJson::String)
+            {
+                const FString Text = Value->AsString();
+                if (Text.StartsWith(TEXT("uai://asset/")) && !FindEntry(Snapshot, Text))
+                    return Fail(OutError, CapabilityFailure(TEXT("asset_data_reference_unresolved"),
+                        TEXT("The referenced asset is absent from the captured snapshot."), Pointer,
+                        MakeShared<FJsonValueString>(Text), MakeShared<FJsonValueString>(TEXT("asset reference present in the snapshot"))));
+                return true;
+            }
+            if (Value->Type == EJson::Array)
+            {
+                for (int32 Index = 0; Index < Value->AsArray().Num(); ++Index)
+                    if (!TryValidateSnapshotReferences(Snapshot, Value->AsArray()[Index],
+                        Pointer + TEXT("/") + ::LexToString(Index), OutError)) return false;
+            }
+            else if (Value->Type == EJson::Object)
+            {
+                for (const auto& Pair : Value->AsObject()->Values)
+                    if (!TryValidateSnapshotReferences(Snapshot, Pair.Value,
+                        Pointer + TEXT("/") + Pair.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")), OutError)) return false;
+            }
+            return true;
+        }
 	}
 
 	FUeAgentAssetDataSimpleEffectFactoryBinding::
@@ -1453,19 +1439,39 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FString InProfileId,
 			UClass* InConcreteClass,
 			FString InFactoryMechanicId)
+		: FUeAgentAssetDataSimpleEffectFactoryBinding(
+			MoveTemp(InCandidateBinding),
+			MoveTemp(InProfileId),
+			InConcreteClass,
+			InFactoryMechanicId,
+			nullptr,
+			InFactoryMechanicId
+				== TEXT(
+					"uai.asset_data.factory:asset_tools_create:v1"))
+	{
+	}
+
+	FUeAgentAssetDataSimpleEffectFactoryBinding::
+		FUeAgentAssetDataSimpleEffectFactoryBinding(
+			FUeAgentCandidateBinding InCandidateBinding,
+			FString InProfileId,
+			UClass* InConcreteClass,
+			FString InFactoryMechanicId,
+			UFactory* InFactory,
+			const bool bInGenericReady)
 		: CandidateBinding(
 			MakeShared<const FUeAgentCandidateBinding>(
 				MoveTemp(InCandidateBinding)))
 		, ProfileId(MoveTemp(InProfileId))
 		, ConcreteClass(InConcreteClass)
 		, FactoryMechanicId(MoveTemp(InFactoryMechanicId))
+		, Factory(InFactory)
+		, bGenericReady(bInGenericReady)
 	{
 		ProfileId.TrimStartAndEndInline();
 		FactoryMechanicId.TrimStartAndEndInline();
 		bValid = CandidateBinding.IsValid()
 			&& CandidateBinding->IsValid()
-			&& CandidateBinding->Supports(
-				EUeAgentCandidateOperation::Create)
 			&& !ProfileId.IsEmpty()
 			&& ConcreteClass.IsValid()
 			&& !FactoryMechanicId.IsEmpty();
@@ -1497,6 +1503,21 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		return FactoryMechanicId;
 	}
 
+	UFactory*
+	FUeAgentAssetDataSimpleEffectFactoryBinding::GetFactory() const
+	{
+		return Factory.Get();
+	}
+
+	bool FUeAgentAssetDataSimpleEffectFactoryBinding::
+		IsGenericReady() const
+	{
+		return bGenericReady
+			&& CandidateBinding.IsValid()
+			&& CandidateBinding->Supports(
+				EUeAgentCandidateOperation::Create);
+	}
+
 	bool FUeAgentAssetDataSimpleEffectFactoryBinding::IsValid() const
 	{
 		return bValid
@@ -1512,7 +1533,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	bool TryCreateAssetDataSimpleEffectDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
@@ -1566,11 +1587,6 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FUeAgentContractValue(MoveTemp(CanonicalInput)),
 				FUeAgentContractValue(CanonicalResult));
 		}
-		if (Descriptors.Num() != 53)
-		{
-			OutError = TEXT("asset_data_descriptor_count_invalid");
-			return false;
-		}
 		return FUeAgentDescriptorRegistry::TryCreate(
 			MoveTemp(Descriptors),
 			OutRegistry,
@@ -1580,18 +1596,19 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 	bool TryGetAssetDataSimpleEffectProductionProfiles(
 		TArray<FUeAgentAssetDataSimpleEffectProductionProfile>&
 			OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		OutError.Reset();
 		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-		if (!TryCreateAssetDataSimpleEffectDescriptorRegistry(
-				Registry,
-				OutError)
-			|| !Registry.IsValid())
-		{
-			return false;
-		}
+        if (!TryCreateAssetDataSimpleEffectDescriptorRegistry(Registry, OutError)) return false;
+        if (!Registry.IsValid())
+        {
+            OutError = RegistryFailure(TEXT("asset_data_production_registry_missing"),
+                TEXT("Descriptor registration returned no registry."), TEXT("descriptor_registry"), nullptr,
+                MakeShared<FJsonValueString>(TEXT("registered asset operations")));
+            return false;
+        }
 
 		OutProfiles.Reserve(UE_ARRAY_COUNT(DescriptorSpecs));
 		for (const FDescriptorSpec& Spec : DescriptorSpecs)
@@ -1609,10 +1626,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			if (!Descriptor)
 			{
 				OutProfiles.Reset();
-				OutError =
-					TEXT(
-						"asset_data_production_descriptor_missing:")
-					+ FString(Spec.DescriptorId);
+				OutError = InternalRegistryFailure(TEXT("asset_data_production_descriptor_missing"),
+                    TEXT("A declared asset operation has no registered descriptor."), MakeShared<FJsonValueString>(Spec.DescriptorId),
+                    MakeShared<FJsonValueString>(TEXT("descriptor present in registry")));
 				return false;
 			}
 
@@ -1638,12 +1654,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				if (!Field)
 				{
 					OutProfiles.Reset();
-					OutError =
-						TEXT(
-							"asset_data_production_field_missing:")
-						+ FString(Spec.ProfileId)
-						+ TEXT(":")
-						+ FieldId;
+					OutError = RegistryFailure(TEXT("asset_data_production_field_missing"),
+                        TEXT("The operation profile names a field without a registered field specification."), FieldId,
+                        MakeShared<FJsonValueString>(FieldId), MakeShared<FJsonValueString>(TEXT("registered field specification")));
+                    OutError.InternalContext = Spec.ProfileId;
 					return false;
 				}
 				FUeAgentAssetDataSimpleEffectProductionField
@@ -1662,12 +1676,19 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				if (!ProductionField.IsValid())
 				{
 					OutProfiles.Reset();
-					OutError =
-						TEXT(
-							"asset_data_production_field_invalid:")
-						+ FString(Spec.ProfileId)
-						+ TEXT(":")
-						+ FieldId;
+					const FString InvalidField = ProductionField.FieldId.IsEmpty() ? TEXT("field_id")
+                        : ProductionField.FieldBindingId.IsEmpty() ? TEXT("field_binding_id")
+                        : ProductionField.TypeId.IsEmpty() ? TEXT("type_id")
+                        : ProductionField.ValueKind == EUeAgentValueKind::Null ? TEXT("value_kind")
+                        : ProductionField.AllowedPresences.IsEmpty() ? TEXT("allowed_presences") : TEXT("reference_policy");
+                    OutError = RegistryFailure(TEXT("asset_data_production_field_invalid"),
+                        TEXT("The registered field specification is missing required metadata."), FieldId + TEXT("/") + InvalidField,
+                        InvalidField == TEXT("value_kind") ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("null")))
+                            : InvalidField == TEXT("allowed_presences") ? SpecValuesFact(Field->AllowedPresences)
+                            : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT(""))),
+                        MakeShared<FJsonValueString>(InvalidField == TEXT("value_kind") ? TEXT("non-null value kind")
+                            : InvalidField == TEXT("allowed_presences") ? TEXT("nonempty allowed presence list") : TEXT("nonempty metadata value")));
+                    OutError.InternalContext = Spec.ProfileId;
 					return false;
 				}
 				Profile.Fields.Add(
@@ -1685,27 +1706,49 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				|| (Profile.UsesStaticCreateClass()
 					&& !Profile.FieldIds.IsEmpty())
 				|| (Profile.UsesFactoryCandidate()
-					&& !Profile.FieldIds.IsEmpty())
-				|| Profile.FieldIds.Num()
-					!= Profile.Fields.Num())
+					&& !Profile.FieldIds.IsEmpty()))
 			{
 				OutProfiles.Reset();
-				OutError =
-					TEXT(
-						"asset_data_production_profile_invalid:")
-					+ FString(Spec.DescriptorId);
+                const FString InvalidField = Profile.DescriptorId.IsEmpty() ? TEXT("descriptor_id")
+                    : Profile.DescriptorVersion <= 0 ? TEXT("descriptor_version")
+                    : Profile.DescriptorHash.IsEmpty() ? TEXT("descriptor_hash")
+                    : Profile.CapabilityId.IsEmpty() ? TEXT("capability_id")
+                    : Profile.ProfileId.IsEmpty() ? TEXT("profile_id")
+                    : Profile.NativeOperationType.IsEmpty() ? TEXT("native_operation_type")
+                    : Profile.NativeBindingId.IsEmpty() ? TEXT("native_binding_id")
+                    : Profile.NativeMechanicId.IsEmpty() ? TEXT("native_mechanic_id") : TEXT("field_ids");
+                OutError = RegistryFailure(TEXT("asset_data_production_profile_invalid"),
+                    !Profile.IsValid() ? TEXT("The registered operation profile is missing required metadata.")
+                        : TEXT("A creation profile cannot also declare field update units."),
+                    InvalidField,
+                    InvalidField == TEXT("descriptor_version") ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Profile.DescriptorVersion))
+                        : InvalidField == TEXT("field_ids") ? SpecValuesFact(Spec.FieldIds) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT(""))),
+                    MakeShared<FJsonValueString>(InvalidField == TEXT("descriptor_version") ? TEXT("positive version")
+                        : InvalidField == TEXT("field_ids") ? TEXT("no field update units") : TEXT("nonempty metadata")));
+                OutError.InternalContext = Spec.DescriptorId;
 				return false;
 			}
 			OutProfiles.Add(MoveTemp(Profile));
 		}
-		if (OutProfiles.Num() != 53)
+		return true;
+	}
+
+	bool IsGenericAssetObjectCreateSuccessor(
+		const FUeAgentAssetDataSimpleEffectProductionProfile& Profile)
+	{
+		if (!Profile.IsCreate()
+			|| Profile.CapabilityId == TEXT("asset.object.create"))
 		{
-			OutProfiles.Reset();
-			OutError =
-				TEXT("asset_data_production_profile_count_mismatch");
 			return false;
 		}
-		return true;
+		if (Profile.UsesStaticCreateClass())
+		{
+			return true;
+		}
+		return Profile.ProfileId == TEXT("audio_effect_preset")
+			|| Profile.ProfileId == TEXT("data_object")
+			|| Profile.ProfileId == TEXT("sound_submix")
+			|| Profile.ProfileId == TEXT("media_source");
 	}
 
 	bool CanProjectAssetDataSimpleEffectFieldState(
@@ -1828,10 +1871,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				OutProjectionContext,
 				OutError);
 		}
-		return Fail(
-			OutError,
-			TEXT("asset_data_field_projection_unsupported"),
-			NativeMechanicId);
+        OutError = InternalRegistryFailure(TEXT("asset_data_field_projection_unsupported"),
+            TEXT("The asset operation does not support field projection."),
+            MakeShared<FJsonValueString>(NativeMechanicId), MakeShared<FJsonValueString>(TEXT("registered field projection mechanic")));
+        OutError.Stage = TEXT("execution");
+        return false;
 	}
 
 	bool TryProjectAssetDataSimpleEffectExpectedFieldState(
@@ -1936,10 +1980,64 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				OutExpectedFields,
 				OutError);
 		}
-		return Fail(
-			OutError,
-			TEXT("asset_data_field_projection_unsupported"),
-			NativeMechanicId);
+        OutError = InternalRegistryFailure(TEXT("asset_data_field_projection_unsupported"),
+            TEXT("The asset operation does not support field projection."),
+            MakeShared<FJsonValueString>(NativeMechanicId), MakeShared<FJsonValueString>(TEXT("registered field projection mechanic")));
+        OutError.Stage = TEXT("execution");
+        return false;
+	}
+
+	void LocateAssetDataSimpleEffectInputFailure(Contract::FDiagnostic& Error,
+		const StateSemantic::FUeAgentCanonicalValue& ProposedAfter)
+	{
+		const auto FindField = [](const StateSemantic::FUeAgentCanonicalValue& Object, const FString& Key)
+			-> const StateSemantic::FUeAgentCanonicalValue*
+		{
+			if (Object.GetKind() != StateSemantic::EUeAgentValueKind::Object) return nullptr;
+			for (const auto& Item : Object.GetObjectItems())
+				if (Item.Key == Key) return &Item.Value.Get();
+			return nullptr;
+		};
+		const auto* Changes = FindField(ProposedAfter, TEXT("typed_changes"));
+		if (!Changes || Changes->GetKind() != StateSemantic::EUeAgentValueKind::Array) return;
+		if (Error.SourceKind == TEXT("authored_value") && Error.Source.SourceFile.IsEmpty()
+			&& Error.Source.JsonPath.IsEmpty() && Error.SemanticPointer.IsEmpty())
+		{
+			int32 MatchedIndex = INDEX_NONE;
+			FString Suffix;
+			bool bHasCanonicalValue = false;
+			for (int32 Index = 0; Index < Changes->GetArrayItems().Num(); ++Index)
+			{
+				const auto& Unit = Changes->GetArrayItems()[Index].Get();
+				const auto* FieldId = FindField(Unit, TEXT("field_id"));
+				if (!FieldId || FieldId->GetKind() != StateSemantic::EUeAgentValueKind::String) continue;
+				const FString& Field = FieldId->GetText();
+				if (Error.PropertyPath != Field && !Error.PropertyPath.StartsWith(Field + TEXT("/"))) continue;
+				if (MatchedIndex != INDEX_NONE) { MatchedIndex = INDEX_NONE; break; }
+				MatchedIndex = Index;
+				Suffix = Error.PropertyPath.Mid(Field.Len());
+				const auto* Value = FindField(Unit, TEXT("value"));
+				bHasCanonicalValue = Value && FindField(*Value, TEXT("canonical_value"));
+			}
+			if (MatchedIndex != INDEX_NONE)
+			{
+				// Draft construction copies exactly one typed change per input change, in order.
+				const FString Pointer = TEXT("/changes/") + ::LexToString(MatchedIndex)
+					+ (bHasCanonicalValue ? TEXT("/value/canonical_value") + Suffix : FString(TEXT("/presence")));
+				Error.SourceKind = TEXT("command_input");
+				Error.SemanticPointer = Pointer;
+				Error.Source.JsonPath = Pointer;
+				Error.Source.bCommandInput = true;
+			}
+		}
+		for (Contract::FDiagnostic& Child : Error.Diagnostics)
+			LocateAssetDataSimpleEffectInputFailure(Child, ProposedAfter);
+		if (Error.PublicCause.IsValid())
+		{
+			auto Cause = MakeShared<Contract::FDiagnostic>(*Error.PublicCause);
+			LocateAssetDataSimpleEffectInputFailure(*Cause, ProposedAfter);
+			Error.PublicCause = Cause;
+		}
 	}
 
 	bool TryBuildAssetDataSimpleEffectChangeSetDraft(
@@ -1954,26 +2052,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 	{
 		OutDraft.Reset();
 		OutError = FExecutionMutationError();
-		if (!Request.IsValid()
-			|| Context.GetProjectInstanceId().IsEmpty()
-			|| Context.GetEditorInstanceId().IsEmpty()
-			|| Context.GetContextRevision().IsEmpty()
-			|| CurrentSnapshot->GetStatePlane()
-				!= EUeAgentStatePlane::AuthoringMemory)
-		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_draft_request_invalid"));
-		}
+        if (!Request.IsValid()) return Fail(OutError, Request.GetValidationDiagnostic());
+        const FString MissingContextField = Context.GetProjectInstanceId().IsEmpty() ? TEXT("project_instance_id")
+            : Context.GetEditorInstanceId().IsEmpty() ? TEXT("editor_instance_id")
+            : Context.GetContextRevision().IsEmpty() ? TEXT("context_revision") : FString();
+        if (!MissingContextField.IsEmpty())
+            return Fail(OutError, CapabilityFailure(TEXT("asset_data_draft_request_invalid"), TEXT("The execution context is missing a required identity or revision."), MissingContextField, MakeShared<FJsonValueString>(TEXT("")), MakeShared<FJsonValueString>(TEXT("nonempty context value")), TEXT("native_result")));
+        if (CurrentSnapshot->GetStatePlane() != EUeAgentStatePlane::AuthoringMemory)
+            return Fail(OutError, CapabilityFailure(TEXT("asset_data_draft_request_invalid"), TEXT("Asset changes require an authoring-memory snapshot."), TEXT("state_plane"), MakeShared<FJsonValueNumber>(static_cast<int32>(CurrentSnapshot->GetStatePlane())), MakeShared<FJsonValueNumber>(static_cast<int32>(EUeAgentStatePlane::AuthoringMemory)), TEXT("native_result")));
 
-		const FDescriptorSpec* Spec =
-			FindSpec(Request.GetDescriptorIdentity());
-		if (!Spec)
-		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_descriptor_not_exact"));
-		}
+        const FDescriptorSpec* Spec = FindSpec(Request.GetDescriptorIdentity(), OutError);
+        if (!Spec) return false;
 
 		TSharedPtr<FJsonObject> Payload;
 		if (!TryParsePayload(Request, Payload, OutError))
@@ -1987,10 +2076,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				TargetRef)
 			|| TargetRef.IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_target_ref_missing"));
+			return Fail(OutError, CapabilityFailure(TEXT("asset_data_target_ref_missing"), TEXT("The asset target reference must be a nonempty string."), TEXT("/target_ref"), Payload->TryGetField(TEXT("target_ref")), MakeShared<FJsonValueString>(TEXT("nonempty asset path"))));
 		}
+		// Match the resolved snapshot identity for either public path spelling.
+		TargetRef = UeAgentAuthoringAssetIdentity::ToObjectPath(TargetRef);
 
 		const FString NativeType(Spec->NativeOperationType);
 		const bool bCreate =
@@ -2012,79 +2101,57 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		{
 			if (TargetEntry)
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_target_already_exists"),
-					TargetRef);
+				return Fail(OutError, CapabilityFailure(TEXT("asset_data_target_already_exists"), TEXT("The requested creation target already exists in the captured snapshot."), TEXT("/target_ref"), MakeShared<FJsonValueString>(TargetRef), MakeShared<FJsonValueString>(TEXT("unused asset path"))));
 			}
 			if (bClone)
 			{
 				Payload->TryGetStringField(
 					TEXT("source_ref"),
 					SourceRef);
+				SourceRef = UeAgentAuthoringAssetIdentity::ToObjectPath(SourceRef);
 				SourceEntry =
 					FindEntry(CurrentSnapshot, SourceRef);
 				if (!SourceEntry)
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_source_snapshot_missing"),
-						SourceRef);
+					return Fail(OutError, CapabilityFailure(TEXT("asset_data_source_snapshot_missing"), TEXT("The clone source is absent from the captured snapshot."), TEXT("/source_ref"), Payload->TryGetField(TEXT("source_ref")), MakeShared<FJsonValueString>(TEXT("asset present in the snapshot"))));
 				}
-				FString ActualRevision;
-				if (!TryGetObjectString(
-						SourceEntry->GetValue(),
-						TEXT("asset_revision"),
-						ActualRevision)
-					|| !Payload->TryGetStringField(
-						TEXT("expected_source_revision"),
-						SourceRevision)
-					|| ActualRevision != SourceRevision)
-				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_source_revision_mismatch"),
-						SourceRef);
-				}
+                FString ActualRevision;
+                if (!TryReadSnapshotString(SourceEntry->GetValue(), TEXT("asset_revision"), ActualRevision, SourceRef,
+                    TEXT("asset_data_source_revision_mismatch"), OutError)) return false;
+                if (ActualRevision.IsEmpty())
+                {
+                    OutError = CapabilityFailure(TEXT("asset_data_source_revision_mismatch"), TEXT("The captured clone source has an empty asset revision."), TEXT("asset_revision"), MakeShared<FJsonValueString>(ActualRevision), MakeShared<FJsonValueString>(TEXT("nonempty captured revision")), TEXT("native_result"));
+                    OutError.TargetPath = SourceRef;
+                    return false;
+                }
+				SourceRevision = ActualRevision;
 			}
 		}
 		else
 		{
 			if (!TargetEntry)
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_target_snapshot_missing"),
-					TargetRef);
+				return Fail(OutError, CapabilityFailure(TEXT("asset_data_target_snapshot_missing"), TEXT("The requested target is absent from the captured snapshot."), TEXT("/target_ref"), MakeShared<FJsonValueString>(TargetRef), MakeShared<FJsonValueString>(TEXT("asset present in the snapshot"))));
 			}
-			FString ActualRevision;
-			FString ExpectedRevision;
-			if (!TryGetObjectString(
-					TargetEntry->GetValue(),
-					TEXT("asset_revision"),
-					ActualRevision)
-				|| !Payload->TryGetStringField(
-					TEXT("expected_revision"),
-					ExpectedRevision)
-				|| ActualRevision != ExpectedRevision)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_target_revision_mismatch"),
-					TargetRef);
-			}
-			FString ActualProfile;
-			if (!TryGetObjectString(
-					TargetEntry->GetValue(),
-					TEXT("profile_id"),
-					ActualProfile)
-				|| ActualProfile != Spec->ProfileId)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_profile_mismatch"),
-					TargetRef);
-			}
+            FString ActualRevision;
+            if (!TryReadSnapshotString(TargetEntry->GetValue(), TEXT("asset_revision"), ActualRevision, TargetRef,
+                TEXT("asset_data_target_revision_mismatch"), OutError)) return false;
+            if (ActualRevision.IsEmpty())
+            {
+                OutError = CapabilityFailure(TEXT("asset_data_target_revision_mismatch"), TEXT("The captured target has an empty asset revision."), TEXT("asset_revision"), MakeShared<FJsonValueString>(ActualRevision), MakeShared<FJsonValueString>(TEXT("nonempty captured revision")), TEXT("native_result"));
+                OutError.TargetPath = TargetRef;
+                return false;
+            }
+            FString ActualProfile;
+            if (!TryReadSnapshotString(TargetEntry->GetValue(), TEXT("profile_id"), ActualProfile, TargetRef,
+                TEXT("asset_data_profile_mismatch"), OutError)) return false;
+            if (ActualProfile != Spec->ProfileId)
+            {
+                OutError = InternalRegistryFailure(TEXT("asset_data_profile_mismatch"),
+                    TEXT("The captured target profile does not match the requested operation."), MakeShared<FJsonValueString>(ActualProfile), MakeShared<FJsonValueString>(Spec->ProfileId));
+                OutError.TargetPath = TargetRef;
+                return false;
+            }
 			ExpectedBefore =
 				FUeAgentCanonicalValuePtr(
 					TargetEntry->GetValue());
@@ -2094,83 +2161,48 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		TOptional<FUeAgentCatalogRevision> FactoryRevision;
 		if (FactoryPolicy)
 		{
-			const TSharedPtr<FJsonObject>* FactoryRefObject = nullptr;
-			const TSharedPtr<FJsonObject>* RevisionObject = nullptr;
-			FString FactoryRef;
-			FString CatalogSourceId;
-			FString CatalogGeneration;
-			double CatalogSequenceNumber = -1.0;
-			if (!Payload->TryGetObjectField(
-					TEXT("factory_ref"),
-					FactoryRefObject)
-				|| !FactoryRefObject
-				|| !FactoryRefObject->IsValid()
-				|| !(*FactoryRefObject)->TryGetStringField(
-					TEXT("candidate_ref"),
-					FactoryRef)
-				|| FactoryRef.IsEmpty()
-				|| !(*FactoryRefObject)->TryGetObjectField(
-					TEXT("catalog_revision"),
-					RevisionObject)
-				|| !RevisionObject
-				|| !RevisionObject->IsValid()
-				|| !(*RevisionObject)->TryGetStringField(
-					TEXT("source_id"),
-					CatalogSourceId)
-				|| !(*RevisionObject)->TryGetStringField(
-					TEXT("generation"),
-					CatalogGeneration)
-				|| !(*RevisionObject)->TryGetNumberField(
-					TEXT("sequence"),
-					CatalogSequenceNumber)
-				|| CatalogSequenceNumber < 0.0
-				|| !FMath::IsNearlyEqual(
-					CatalogSequenceNumber,
-					FMath::FloorToDouble(
-						CatalogSequenceNumber)))
+			FString FactoryName;
+			TMap<FString, FString> FactorySelect;
+			UE::UAI::Contract::FDiagnostic SelectorError;
+			const bool bGenericSelector =
+				FString(Spec->CapabilityId)
+					== TEXT("asset.object.create");
+			if (!TryParseAssetDataSimpleEffectFactorySelector(
+					*Payload,
+					bGenericSelector,
+					FactoryName,
+					FactorySelect,
+					SelectorError))
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_factory_ref_invalid"),
-					Spec->ProfileId);
-			}
-			const FUeAgentCatalogRevision ExpectedFactoryRevision(
-				CatalogSourceId,
-				CatalogGeneration,
-				static_cast<int64>(CatalogSequenceNumber));
-			if (!ExpectedFactoryRevision.IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_factory_ref_invalid"),
-					Spec->ProfileId);
+				return Fail(OutError, SelectorError, Spec->ProfileId);
 			}
 			if (!FactoryCandidates.TryResolveForPlanning(
-					FactoryRef,
-					ExpectedFactoryRevision,
+					FactoryName,
+					FactorySelect,
 					Spec->ProfileId,
 					FactoryBinding,
 					OutError))
 			{
 				return false;
 			}
-			FString FactoryError;
+			UE::UAI::Contract::FDiagnostic FactoryError;
 			if (!TryValidateAssetDataSimpleEffectFactoryBinding(
 					MakeNativeBindingId(*Spec),
 					FactoryBinding.GetCandidateBinding()
 						? FactoryBinding.GetCandidateBinding()
 							->GetBindingId()
 						: FString(),
-					ExpectedFactoryRevision,
+					FactoryBinding.GetCandidateBinding()
+						? FactoryBinding.GetCandidateBinding()->GetCatalogRevision()
+						: FUeAgentCatalogRevision(TEXT("invalid"), TEXT("invalid"), -1),
 					FactoryBinding,
 					FactoryError))
 			{
-				return Fail(
-					OutError,
-					FactoryError,
-					Spec->ProfileId);
+				return Fail(OutError, FactoryError, Spec->ProfileId);
 			}
-			FactoryRevision.Emplace(ExpectedFactoryRevision);
+			FactoryRevision.Emplace(FactoryBinding.GetCandidateBinding()
+				? FactoryBinding.GetCandidateBinding()->GetCatalogRevision()
+				: FUeAgentCatalogRevision(TEXT("invalid"), TEXT("invalid"), -1));
 		}
 
 		TArray<TSharedPtr<FJsonValue>> TypedChanges;
@@ -2182,20 +2214,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Changes)
 				|| !Changes)
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_changes_missing"));
+				return Fail(OutError, CapabilityFailure(TEXT("asset_data_changes_missing"), TEXT("The operation requires a changes array."), TEXT("/changes"), Payload->TryGetField(TEXT("changes")), MakeShared<FJsonValueString>(TEXT("array"))));
 			}
 			const TSet<FString> RegisteredFields(
 				SplitSpecValues(Spec->FieldIds));
 			TSet<FString> SeenFields;
-			for (const TSharedPtr<FJsonValue>& ChangeValue
-				: *Changes)
-			{
-				const TSharedPtr<FJsonObject> Change =
-					ChangeValue.IsValid()
-						? ChangeValue->AsObject()
-						: nullptr;
+            for (int32 ChangeIndex = 0; ChangeIndex < Changes->Num(); ++ChangeIndex)
+            {
+                const auto& ChangeValue = (*Changes)[ChangeIndex];
+                const FString ChangePointer = TEXT("/changes/") + ::LexToString(ChangeIndex);
+                const TSharedPtr<FJsonObject> Change = ChangeValue.IsValid() && ChangeValue->Type == EJson::Object
+                    ? ChangeValue->AsObject() : nullptr;
 				FString FieldId;
 				FString Presence;
 				if (!Change.IsValid()
@@ -2204,44 +2233,29 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						FieldId)
 					|| !RegisteredFields.Contains(FieldId))
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_field_not_registered"),
-						FieldId);
+					return Fail(OutError, CapabilityFailure(TEXT("asset_data_field_not_registered"), TEXT("The change must name a field registered for this operation."), Change.IsValid() ? ChangePointer + TEXT("/field_id") : ChangePointer, Change.IsValid() ? Change->TryGetField(TEXT("field_id")) : ChangeValue, SpecValuesFact(Spec->FieldIds)));
 				}
 				const FFieldSpec* Field =
 					FindFieldSpec(Spec->ProfileId, FieldId);
 				if (!Field)
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_field_binding_missing"),
-						FieldId);
+					return Fail(OutError, RegistryFailure(TEXT("asset_data_field_binding_missing"), TEXT("The registered operation field has no field binding."), FieldId, MakeShared<FJsonValueString>(FieldId), MakeShared<FJsonValueString>(TEXT("registered field binding"))));
 				}
 				if (!Change->TryGetStringField(
 						TEXT("presence"),
 						Presence))
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_explicit_presence_required"),
-						FieldId);
+					return Fail(OutError, CapabilityFailure(TEXT("asset_data_explicit_presence_required"), TEXT("Each field change requires an explicit presence string."), ChangePointer + TEXT("/presence"), Change->TryGetField(TEXT("presence")), SpecValuesFact(Field->AllowedPresences)));
 				}
 				const TSet<FString> AllowedPresences(
 					SplitSpecValues(Field->AllowedPresences));
 				if (!AllowedPresences.Contains(Presence))
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_presence_not_allowed"),
-						FieldId + TEXT(":") + Presence);
+					return Fail(OutError, CapabilityFailure(TEXT("asset_data_presence_not_allowed"), TEXT("The requested presence is not supported for this field."), ChangePointer + TEXT("/presence"), MakeShared<FJsonValueString>(Presence), SpecValuesFact(Field->AllowedPresences)));
 				}
 				if (SeenFields.Contains(FieldId))
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_duplicate_field_unit"),
-						FieldId);
+					return Fail(OutError, CapabilityFailure(TEXT("asset_data_duplicate_field_unit"), TEXT("A field may occur only once in the changes array."), ChangePointer + TEXT("/field_id"), MakeShared<FJsonValueString>(FieldId), MakeShared<FJsonValueString>(TEXT("unique field id"))));
 				}
 				SeenFields.Add(FieldId);
 
@@ -2256,10 +2270,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					&& TypedValue->IsValid();
 				if (bRequiresValue != bHasTypedValue)
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_value_presence_mismatch"),
-						FieldId + TEXT(":") + Presence);
+					return Fail(OutError, CapabilityFailure(TEXT("asset_data_value_presence_mismatch"), TEXT("The typed value presence does not match the requested field presence."), ChangePointer + TEXT("/value"), Change->TryGetField(TEXT("value")), MakeShared<FJsonValueString>(bRequiresValue ? TEXT("typed value object") : TEXT("no typed value object"))));
 				}
 
 				const TSharedPtr<FJsonObject> InternalChange =
@@ -2284,31 +2295,16 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							TypeId)
 						|| TypeId != Field->TypeId)
 					{
-						return Fail(
-							OutError,
-							TEXT("asset_data_type_id_mismatch"),
-							FieldId);
+						return Fail(OutError, CapabilityFailure(TEXT("asset_data_type_id_mismatch"), TEXT("The typed value uses a different type from the registered field."), ChangePointer + TEXT("/value/type_id"), (*TypedValue)->TryGetField(TEXT("type_id")), MakeShared<FJsonValueString>(Field->TypeId)));
 					}
 					if (!JsonValueMatchesFieldKind(
 							CanonicalValue,
 							Field->ValueKind))
 					{
-						return Fail(
-							OutError,
-							TEXT("asset_data_value_kind_mismatch"),
-							FieldId);
+						return Fail(OutError, CapabilityFailure(TEXT("asset_data_value_kind_mismatch"), TEXT("The canonical value does not have the registered field kind."), ChangePointer + TEXT("/value/canonical_value"), CanonicalValue, MakeShared<FJsonValueString>(FieldKindName(Field->ValueKind))));
 					}
-					FString Unresolved;
-					if (!TryValidateSnapshotReferences(
-							CurrentSnapshot,
-							CanonicalValue,
-							Unresolved))
-					{
-						return Fail(
-							OutError,
-							TEXT("asset_data_reference_unresolved"),
-							Unresolved);
-					}
+                    if (!TryValidateSnapshotReferences(CurrentSnapshot, CanonicalValue,
+                        ChangePointer + TEXT("/value/canonical_value"), OutError)) return false;
 					const TSharedPtr<FJsonObject> InternalValue =
 						MakeShared<FJsonObject>();
 					InternalValue->SetStringField(
@@ -2358,10 +2354,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			ProposedAfter->SetStringField(
 				TEXT("factory_catalog_generation"),
 				FactoryRevision->GetGeneration());
-			ProposedAfter->SetNumberField(
+			ProposedAfter->SetField(
 				TEXT("factory_catalog_sequence"),
-				static_cast<double>(
-					FactoryRevision->GetSequence()));
+				MakeShared<FJsonValueNumberString>(
+					::LexToString(FactoryRevision->GetSequence())));
 		}
 		if (bClone)
 		{
@@ -2404,9 +2400,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{});
 		if (!Change.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_change_draft_invalid"));
+return Fail(OutError, Change.GetValidationDiagnostic());
 		}
 
 		FChangeSetDraft Draft(
@@ -2417,9 +2411,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{MoveTemp(Change)});
 		if (!Draft.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_change_set_draft_invalid"));
+return Fail(OutError, Draft.GetValidationDiagnostic());
 		}
 		OutDraft.Emplace(MoveTemp(Draft));
 		return true;
@@ -2431,7 +2423,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		FString& OutProfileId,
 		FString& OutNativeMechanicId,
 		FString& OutStaticCreateClassPath,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutNativeOperationType.Reset();
 		OutProfileId.Reset();
@@ -2442,8 +2434,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FindSpecByNativeBindingId(NativeBindingId);
 		if (!Spec)
 		{
-			OutError =
-				TEXT("asset_data_native_binding_not_registered");
+			OutError = InternalRegistryFailure(TEXT("asset_data_native_binding_not_registered"), TEXT("The native binding does not identify a registered asset operation."), MakeShared<FJsonValueString>(NativeBindingId), MakeShared<FJsonValueString>(TEXT("registered native binding")));
 			return false;
 		}
 		OutNativeOperationType = Spec->NativeOperationType;
@@ -2458,7 +2449,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		const FString& NativeBindingId,
 		FString& OutFactoryContractId,
 		FString& OutClassConstraintId,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutFactoryContractId.Reset();
 		OutClassConstraintId.Reset();
@@ -2467,8 +2458,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FindSpecByNativeBindingId(NativeBindingId);
 		if (!Descriptor)
 		{
-			OutError =
-				TEXT("asset_data_native_binding_not_registered");
+			OutError = InternalRegistryFailure(TEXT("asset_data_native_binding_not_registered"), TEXT("The native binding does not identify a registered asset operation."), MakeShared<FJsonValueString>(NativeBindingId), MakeShared<FJsonValueString>(TEXT("registered native binding")));
 			return false;
 		}
 		if (const FFactoryPolicySpec* Policy =
@@ -2480,12 +2470,48 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		return true;
 	}
 
+	bool TryParseAssetDataSimpleEffectFactorySelector(
+		const FJsonObject& Payload,
+		const bool bGenericSelector,
+		FString& OutName,
+		TMap<FString, FString>& OutSelect,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		OutName.Reset();
+		OutSelect.Reset();
+		OutError.Reset();
+		TSharedPtr<FJsonObject> Candidate;
+		FString ShorthandName;
+		if (bGenericSelector && Payload.TryGetStringField(TEXT("factory"), ShorthandName))
+		{
+			Candidate = MakeShared<FJsonObject>();
+			Candidate->SetStringField(TEXT("name"), ShorthandName);
+		}
+		const TSharedPtr<FJsonObject>* Selector = nullptr;
+		if (!Candidate.IsValid() && Payload.TryGetObjectField(TEXT("factory"), Selector)
+			&& Selector && Selector->IsValid())
+		{
+			Candidate = *Selector;
+		}
+		HjsonWorkspace::DomainAuthoring::FDomainHjsonCandidateSelector Parsed;
+		HjsonWorkspace::FWorkspaceError ParseError;
+		if (!HjsonWorkspace::DomainAuthoring::TryReadCandidateSelector(
+			Candidate, TEXT("/factory"), Parsed, ParseError))
+		{
+			OutError = ParseError.GetDiagnostic();
+			return false;
+		}
+		OutName = MoveTemp(Parsed.Name);
+		OutSelect = MoveTemp(Parsed.Select);
+		return true;
+	}
+
 	bool TryValidateAssetDataSimpleEffectFactoryBinding(
 		const FString& NativeBindingId,
 		const FString& FactoryBindingId,
 		const FUeAgentCatalogRevision& ExpectedRevision,
 		const FUeAgentAssetDataSimpleEffectFactoryBinding& Binding,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		const FDescriptorSpec* Descriptor =
@@ -2497,54 +2523,92 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			Binding.GetCandidateBinding();
 		if (!Descriptor || !Policy)
 		{
-			OutError =
-				TEXT("asset_data_factory_contract_not_registered");
+			OutError = InternalRegistryFailure(TEXT("asset_data_factory_contract_not_registered"), TEXT("The asset operation has no registered factory contract."), MakeShared<FJsonValueString>(NativeBindingId), MakeShared<FJsonValueString>(TEXT("operation with a factory contract")));
 			return false;
 		}
+        if (Candidate && !Candidate->IsValid())
+        {
+            if (const auto* Error = Candidate->GetValidationDiagnostic())
+            {
+                OutError = *Error;
+                MarkNativeFailure(OutError);
+                return false;
+            }
+        }
 		if (!Binding.IsValid()
 			|| !Candidate
-			|| !Candidate->IsValid()
-			|| !Candidate->Supports(
-				EUeAgentCandidateOperation::Create))
+			|| !Candidate->IsValid())
 		{
-			OutError =
-				TEXT("asset_data_factory_candidate_invalid");
+			OutError = InternalRegistryFailure(TEXT("asset_data_factory_candidate_invalid"), TEXT("The captured factory binding or its candidate is invalid."), Facts({{TEXT("binding_valid"), MakeShared<FJsonValueBoolean>(Binding.IsValid())}, {TEXT("candidate_present"), MakeShared<FJsonValueBoolean>(Candidate != nullptr)}, {TEXT("candidate_valid"), MakeShared<FJsonValueBoolean>(Candidate && Candidate->IsValid())}, {TEXT("class"), Binding.GetConcreteClass() ? ClassFact(Binding.GetConcreteClass()) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>())}, {TEXT("profile"), MakeShared<FJsonValueString>(Binding.GetProfileId())}, {TEXT("mechanic"), MakeShared<FJsonValueString>(Binding.GetFactoryMechanicId())}}), MakeShared<FJsonValueString>(TEXT("valid candidate binding with a concrete class, profile, and factory mechanic")));
 			return false;
 		}
 		if (FactoryBindingId.IsEmpty()
 			|| Candidate->GetBindingId() != FactoryBindingId)
 		{
-			OutError =
-				TEXT("asset_data_factory_binding_mismatch");
+			OutError = InternalRegistryFailure(TEXT("asset_data_factory_binding_mismatch"), TEXT("The resolved factory candidate differs from the requested frozen binding."), MakeShared<FJsonValueString>(Candidate->GetBindingId()), MakeShared<FJsonValueString>(FactoryBindingId));
 			return false;
 		}
-		if (!ExpectedRevision.IsValid()
-			|| Candidate->GetCatalogRevision()
-				!= ExpectedRevision)
+        if (!ExpectedRevision.IsValid())
+        {
+            if (const auto* Error = ExpectedRevision.GetValidationDiagnostic())
+            {
+                OutError = *Error;
+                MarkNativeFailure(OutError);
+                return false;
+            }
+        }
+        if (!ExpectedRevision.IsValid() || Candidate->GetCatalogRevision() != ExpectedRevision)
 		{
-			OutError =
-				TEXT("asset_data_factory_candidate_stale");
+			OutError = InternalRegistryFailure(TEXT("asset_data_factory_candidate_stale"), TEXT("The factory candidate catalog revision no longer matches the captured revision."), CatalogRevisionFact(Candidate->GetCatalogRevision()), CatalogRevisionFact(ExpectedRevision));
 			return false;
 		}
 		if (Binding.GetProfileId() != Descriptor->ProfileId)
 		{
-			OutError =
-				TEXT("asset_data_factory_profile_mismatch");
+			OutError = InternalRegistryFailure(TEXT("asset_data_factory_profile_mismatch"), TEXT("The factory candidate belongs to a different asset operation profile."), MakeShared<FJsonValueString>(Binding.GetProfileId()), MakeShared<FJsonValueString>(Descriptor->ProfileId));
 			return false;
 		}
-		if (Binding.GetFactoryMechanicId()
-			!= TEXT("uai.asset_data.factory:new_object:v1"))
+		const bool bGeneric = FString(Descriptor->CapabilityId)
+			== TEXT("asset.object.create");
+		const bool bExpectedMechanic = bGeneric
+			? Binding.GetFactoryMechanicId()
+					== TEXT("uai.asset_data.factory:asset_tools_create:v1")
+				|| Binding.GetFactoryMechanicId()
+					== TEXT("uai.asset_data.factory:new_object:v1")
+			: Binding.GetFactoryMechanicId()
+				== TEXT("uai.asset_data.factory:new_object:v1");
+		if (!bExpectedMechanic)
 		{
-			OutError =
-				TEXT("asset_data_factory_mechanic_mismatch");
+			OutError = InternalRegistryFailure(TEXT("asset_data_factory_mechanic_mismatch"), TEXT("The factory candidate uses a mechanic unsupported by this creation operation."), MakeShared<FJsonValueString>(Binding.GetFactoryMechanicId()), SpecValuesFact(bGeneric ? TEXT("uai.asset_data.factory:asset_tools_create:v1|uai.asset_data.factory:new_object:v1") : TEXT("uai.asset_data.factory:new_object:v1")));
+			return false;
+		}
+		if (bGeneric
+			&& (!Binding.IsGenericReady()
+				|| !Candidate->Supports(
+					EUeAgentCandidateOperation::Create)))
+		{
+			OutError = RegistryFailure(TEXT("asset_data_factory_interactive_required"),
+                TEXT("The selected factory cannot create this asset without interactive setup."), TEXT("factory"),
+                Facts({{TEXT("ready"), MakeShared<FJsonValueBoolean>(Binding.IsGenericReady())},
+                    {TEXT("supports_create"), MakeShared<FJsonValueBoolean>(Candidate->Supports(EUeAgentCandidateOperation::Create))}}),
+                MakeShared<FJsonValueString>(TEXT("factory ready for noninteractive creation")));
+			return false;
+		}
+		if (!bGeneric
+			&& !Candidate->Supports(
+				EUeAgentCandidateOperation::Create))
+		{
+			OutError = RegistryFailure(TEXT("asset_data_factory_candidate_invalid"),
+                TEXT("The selected factory candidate does not support asset creation."), TEXT("factory"),
+                MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		if (!IsFactoryClassAllowed(
 				Descriptor->ProfileId,
 				Binding.GetConcreteClass()))
 		{
-			OutError =
-				TEXT("asset_data_factory_class_mismatch");
+			OutError = RegistryFailure(TEXT("asset_data_factory_class_mismatch"),
+                TEXT("The selected factory class is not allowed by the requested asset creation profile."), TEXT("class"),
+                ClassFact(Binding.GetConcreteClass()), MakeShared<FJsonValueString>(Policy->ClassConstraintId));
 			return false;
 		}
 		return true;
@@ -2558,7 +2622,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		const FString& TypeId,
 		const bool bHasValue,
 		const EUeAgentValueKind ValueKind,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		const FDescriptorSpec* Descriptor =
@@ -2568,42 +2632,48 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			: nullptr;
 		if (!Descriptor || !Field)
 		{
-			OutError =
-				TEXT("asset_data_native_field_not_registered");
+			OutError = RegistryFailure(TEXT("asset_data_native_field_not_registered"),
+                TEXT("The asset operation has no registered binding for this field."), FieldId,
+                MakeShared<FJsonValueString>(FieldId), Descriptor ? SpecValuesFact(Descriptor->FieldIds) : nullptr);
+            OutError.InternalContext = NativeBindingId;
 			return false;
 		}
 		if (FieldBindingId != Field->FieldBindingId)
 		{
-			OutError =
-				TEXT("asset_data_native_field_binding_mismatch");
+			OutError = InternalRegistryFailure(TEXT("asset_data_native_field_binding_mismatch"), TEXT("The planned field binding does not match the registered field."), MakeShared<FJsonValueString>(FieldBindingId), MakeShared<FJsonValueString>(Field->FieldBindingId));
+            OutError.PropertyPath = FieldId;
 			return false;
 		}
 		const TSet<FString> Presences(
 			SplitSpecValues(Field->AllowedPresences));
 		if (!Presences.Contains(Presence))
 		{
-			OutError =
-				TEXT("asset_data_native_presence_mismatch");
+			OutError = RegistryFailure(TEXT("asset_data_native_presence_mismatch"), TEXT("The planned presence is unsupported by the field."),
+                FieldId + TEXT("/presence"), MakeShared<FJsonValueString>(Presence), SpecValuesFact(Field->AllowedPresences));
 			return false;
 		}
 		const bool bRequiresValue =
 			PresenceRequiresValue(Presence);
 		if (bRequiresValue != bHasValue)
 		{
-			OutError =
-				TEXT("asset_data_native_value_presence_mismatch");
+			OutError = RegistryFailure(TEXT("asset_data_native_value_presence_mismatch"), TEXT("The planned value presence differs from the field presence requirement."),
+                FieldId + TEXT("/value"), MakeShared<FJsonValueBoolean>(bHasValue), MakeShared<FJsonValueBoolean>(bRequiresValue));
 			return false;
 		}
-		if (bHasValue
-			&& (TypeId != Field->TypeId
-				|| !CanonicalKindMatchesFieldKind(
-					ValueKind,
-					Field->ValueKind)))
-		{
-			OutError =
-				TEXT("asset_data_native_typed_value_mismatch");
-			return false;
-		}
+        if (bHasValue && TypeId != Field->TypeId)
+        {
+            OutError = RegistryFailure(TEXT("asset_data_native_typed_value_mismatch"),
+                TEXT("The planned value type differs from the registered field type."), FieldId + TEXT("/value/type_id"),
+                MakeShared<FJsonValueString>(TypeId), MakeShared<FJsonValueString>(Field->TypeId));
+            return false;
+        }
+        if (bHasValue && !CanonicalKindMatchesFieldKind(ValueKind, Field->ValueKind))
+        {
+            OutError = RegistryFailure(TEXT("asset_data_native_typed_value_mismatch"),
+                TEXT("The planned canonical value kind differs from the registered field kind."), FieldId + TEXT("/value/canonical_value"),
+                MakeShared<FJsonValueString>(CanonicalKindName(ValueKind)), MakeShared<FJsonValueString>(FieldKindName(Field->ValueKind)));
+            return false;
+        }
 		return true;
 	}
 }

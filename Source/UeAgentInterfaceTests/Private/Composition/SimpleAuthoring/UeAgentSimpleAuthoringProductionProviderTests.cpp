@@ -53,28 +53,10 @@ namespace
 		TArray<FString> Events;
 	};
 
-	FUeAgentResourceBudget TestBudget()
-	{
-		return FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 1048576},
-			{EUeAgentResourceDimension::OutputBytes, 1048576},
-			{EUeAgentResourceDimension::StringBytes, 1048576},
-			{EUeAgentResourceDimension::Nodes, 4096},
-			{EUeAgentResourceDimension::Items, 4096},
-			{EUeAgentResourceDimension::Files, 64},
-			{EUeAgentResourceDimension::ReferenceEdges, 4096},
-			{EUeAgentResourceDimension::WorkUnits, 65536},
-			{
-				EUeAgentResourceDimension::EstimatedMemoryBytes,
-				16777216,
-			},
-		});
-	}
-
 	FUeAgentDescriptorIdentity TestDescriptorIdentity()
 	{
 		return FUeAgentDescriptorIdentity(
-			TEXT("uai.reference.asset_apply"),
+			TEXT("uai.fixture.asset_apply"),
 			1,
 			TEXT(
 				"sha256:d5d77b007fce21ae3743d655c3bc324e"
@@ -89,7 +71,7 @@ namespace
 			{
 				FUeAgentOperationDescriptor(
 					TestDescriptorIdentity(),
-					TEXT("reference.asset_apply"),
+					TEXT("fixture.asset_apply"),
 					TEXT("reference"),
 					EUeAgentDescriptorOperationKind::Operation,
 					FUeAgentExecutionContextPolicy(
@@ -116,8 +98,8 @@ namespace
 	FUeAgentSimpleAuthoringCommandRoute TestRoute()
 	{
 		return FUeAgentSimpleAuthoringCommandRoute(
-			TEXT("reference.asset_apply"),
-			TEXT("reference.asset_apply"),
+			TEXT("fixture.asset_apply"),
+			TEXT("fixture.asset_apply"),
 			TEXT("reference"),
 			TEXT("asset_apply"),
 			TEXT("reference"),
@@ -996,8 +978,6 @@ namespace
 				false,
 				false,
 				false),
-			FUeAgentPageRequest(),
-			TOptional<int64>(),
 			TArray<FUeAgentArtifactDescriptor>(),
 			TArray<FUeAgentProjectionDiagnostic>());
 		ProviderConfig.TargetResolver = OutScenario.Resolver;
@@ -1077,8 +1057,7 @@ namespace
 		Config.ServerSessionId =
 			TEXT("session:sa-008-production");
 		Config.RegistryEpoch = 1;
-		Config.TimeoutSeconds = 30.0;
-		Config.MaxFrameBytes = 1024 * 1024;
+
 		FUeAgentSimpleAuthoringApplicationError ApplicationError;
 		if (!FUeAgentSimpleAuthoringApplication::TryCreate(
 			Config,

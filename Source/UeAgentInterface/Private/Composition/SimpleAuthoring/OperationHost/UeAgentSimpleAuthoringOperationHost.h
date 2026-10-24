@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringProduction.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
@@ -18,7 +20,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 	UEAGENTINTERFACE_API bool TryResolveHandler(
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	/**
 	 * Resolves one catalog kind from the same process-owned SimpleAuthoring
@@ -28,7 +30,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 	UEAGENTINTERFACE_API bool TryResolveCatalogSource(
 		const FString& CatalogKind,
 		TSharedPtr<Discovery::IUeAgentCatalogSource>& OutSource,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	/**
 	 * Returns the stable request-scoped OperationService adapter for one exact

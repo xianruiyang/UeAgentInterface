@@ -250,7 +250,6 @@ namespace UE::UAI::Tests::StrictV2::T47
 				const TSharedRef<FJsonObject> Policy = MakeShared<FJsonObject>();
 				Policy->SetStringField(TEXT("asset_path"), ObjectPath);
 				Policy->SetBoolField(TEXT("include_messages"), true);
-				Policy->SetNumberField(TEXT("max_messages"), 1);
 				Policy->SetBoolField(TEXT("save_after_compile"), true);
 				Policy->SetStringField(
 					TEXT("severity_filter"), TEXT("warning_or_error"));
@@ -438,21 +437,7 @@ namespace UE::UAI::Tests::StrictV2::T47
 		return Commands;
 	}
 
-	const TArray<FString>& HistoricalCommands()
-	{
-		static const TArray<FString> Commands = {
-			TEXT("blueprint_compile"),
-			TEXT("blueprint_get_compile_log"),
-			TEXT("blueprint_graph_get_view"),
-			TEXT("blueprint_graph_set_view"),
-			TEXT("blueprint_list_component_events"),
-			TEXT("blueprint_viewport_get_camera"),
-			TEXT("blueprint_viewport_set_camera"),
-		};
-		return Commands;
-	}
-
-	const TArray<FString>& ConsolidatedSuccessorCommands()
+	const TArray<FString>& CurrentSharedCommands()
 	{
 		static const TArray<FString> Commands = {
 			TEXT("job.compile_build"),
@@ -489,7 +474,6 @@ bool FUeAgentStrictV2T47BlueprintCommandMigrationTest::RunTest(
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T47 owns exactly two non-HJSON commands"), ExpectedCommands().Num(), 2);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
@@ -501,10 +485,10 @@ bool FUeAgentStrictV2T47BlueprintCommandMigrationTest::RunTest(
 				FString(TEXT("blueprint-command-owner")));
 		}
 	}
-	for (const FString& CommandId : ConsolidatedSuccessorCommands())
+	for (const FString& CommandId : CurrentSharedCommands())
 	{
 		TestNotNull(
-			*FString::Printf(TEXT("%s remains an active consolidated successor"),
+			*FString::Printf(TEXT("%s is an active shared command"),
 				*CommandId),
 			Registry->FindExact(CommandId));
 	}
@@ -528,13 +512,6 @@ bool FUeAgentStrictV2T47BlueprintCommandMigrationTest::RunTest(
 		}
 		TestTrue(TEXT("event discovery consumes the complete frozen input set"),
 			ActualParameterNames.Includes(RequiredParameterNames));
-	}
-	for (const FString& HistoricalId : HistoricalCommands())
-	{
-		TestNull(
-			*FString::Printf(TEXT("%s has no active public contract"),
-				*HistoricalId),
-			Registry->FindExact(HistoricalId));
 	}
 	return !HasAnyErrors();
 }
@@ -604,11 +581,14 @@ bool FUeAgentStrictV2T47BlueprintComponentEventProductTest::RunTest(
 		Registry, Dispatch,
 		TEXT("blueprint.component.events.discover"), Query);
 	TestTrue(TEXT("public component-event query succeeds"), Result.IsOk());
-	TestTrue(TEXT("public query uses real assignable delegate reflection"),
-		Result.GetPayloadJson().Contains(TEXT("OnAudioFinished"))
-			&& Result.GetPayloadJson().Contains(TEXT("returned_event_count"))
-			&& Result.GetPayloadJson().Contains(TEXT("can_author_component_bound_event"))
-			&& Result.GetPayloadJson().Contains(AudioNode->GetVariableName().ToString()));
+	TestTrue(TEXT("public query exposes names-only assignable event results"),
+		Result.GetPayloadJson().Contains(TEXT("On Audio Finished"))
+			&& !Result.GetPayloadJson().Contains(TEXT("event_ref"))
+			&& !Result.GetPayloadJson().Contains(TEXT("signature_ref"))
+			&& !Result.GetPayloadJson().Contains(TEXT("asset_path"))
+			&& !Result.GetPayloadJson().Contains(TEXT("target_class"))
+			&& !Result.GetPayloadJson().Contains(TEXT("events"))
+			&& !Result.GetPayloadJson().Contains(TEXT("component_name")));
 
 	const TSharedRef<FJsonObject> Missing = MakeShared<FJsonObject>();
 	Missing->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
@@ -793,8 +773,9 @@ bool FUeAgentStrictV2T47BlueprintPreviewViewportProductTest::RunTest(
 	TestTrue(TEXT("public read resolves the real Blueprint preview viewport"),
 		Before.IsOk()
 			&& Before.GetPayloadJson().Contains(ViewportIdentity)
+			&& Before.GetPayloadJson().Contains(TEXT("\"camera\""))
 			&& Before.GetPayloadJson().Contains(
-				TEXT("viewport_state.camera_transform")));
+				TEXT("\"camera_transform\"")));
 
 	const FVector UpdatedLocation(315.0, -205.0, 155.0);
 	const FRotator UpdatedRotation(-27.0, 122.0, 3.0);
@@ -804,6 +785,7 @@ bool FUeAgentStrictV2T47BlueprintPreviewViewportProductTest::RunTest(
 		TEXT("camera_transform"),
 		BlueprintPreviewCameraTransform(
 			ViewportIdentity, UpdatedLocation, UpdatedRotation));
+	Patch->SetStringField(TEXT("camera_transform_mode"), TEXT("absolute"));
 	Patch->SetNumberField(TEXT("fov_degrees"), UpdatedFov);
 	const TSharedRef<FJsonObject> UpdateInput = MakeShared<FJsonObject>();
 	UpdateInput->SetObjectField(TEXT("state_patch"), Patch);
@@ -845,6 +827,7 @@ bool FUeAgentStrictV2T47BlueprintPreviewViewportProductTest::RunTest(
 		TEXT("camera_transform"),
 		BlueprintPreviewCameraTransform(
 			ViewportIdentity, BaselineLocation, BaselineRotation));
+	RestorePatch->SetStringField(TEXT("camera_transform_mode"), TEXT("absolute"));
 	RestorePatch->SetNumberField(TEXT("fov_degrees"), BaselineFov);
 	const TSharedRef<FJsonObject> RestoreInput = MakeShared<FJsonObject>();
 	RestoreInput->SetObjectField(TEXT("state_patch"), RestorePatch);

@@ -1,5 +1,7 @@
 #include "Module/CommandRegistration/ViewportGraph/UeAgentViewportGraphRegistration.h"
 
+#include "Dom/JsonValue.h"
+
 #include "CommandHandlers/ViewportGraph/UeAgentViewportGraphCommandHandlers.h"
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialActivation.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
@@ -34,13 +36,19 @@ namespace UE::UAI::Module::CommandRegistration::ViewportGraph
 		bool TryDeclaration(
 			const FString& CommandId,
 			const FUeAgentCommandContractRegistry& Legacy,
+			const Composition::TimelineSpatial::
+				FUeAgentTimelineSpatialActivationProfile& Profile,
+			const Contract::FUeAgentOperationDescriptor& Descriptor,
 			FUeAgentCommandDeclaration& OutDeclaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(CommandId);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("viewport_graph_contract_missing:") + CommandId;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("viewport_graph_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("viewport_graph_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
 				return false;
 			}
 			const bool bQuery = QueryOwners::ViewportGraph::IsQuery(CommandId);
@@ -61,11 +69,45 @@ namespace UE::UAI::Module::CommandRegistration::ViewportGraph
 			for (const FUeAgentCommandParameter& Parameter
 				: Contract->GetParameters())
 			{
-				Result.InputFields.Add({
+				FUeAgentCommandFieldDeclaration Field{
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
 					TEXT("Exact viewport or graph mechanics parameter."),
-				});
+				};
+				if (!Composition::TimelineSpatial::
+						TryBuildTimelineSpatialPublicParameterSchema(
+							Profile,
+							Descriptor,
+							Parameter.GetName(),
+							Field.SchemaJson,
+							OutError))
+				{
+					return false;
+				}
+				Result.InputFields.Add(MoveTemp(Field));
+			}
+			if (Descriptor.GetCapabilityId() != CommandId
+				|| Descriptor.GetInputSchema().GetJsonValue().IsEmpty()
+				|| Result.InputFields.ContainsByPredicate(
+					[](const FUeAgentCommandFieldDeclaration& Field)
+					{
+						return Field.SchemaJson.IsEmpty();
+					}))
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("viewport_graph_descriptor_schema_projection_invalid"), Descriptor.GetCapabilityId() != CommandId ? TEXT("The descriptor capability differs from the command ID.") : Descriptor.GetInputSchema().GetJsonValue().IsEmpty() ? TEXT("The descriptor input schema is empty.") : TEXT("A projected command field has an empty schema."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+				OutError.PropertyPath = TEXT("input_schema");
+				if (Descriptor.GetCapabilityId() != CommandId)
+				{
+					OutError.PropertyPath = TEXT("capability_id");
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(CommandId);
+					OutError.ActualValue = MakeShared<FJsonValueString>(Descriptor.GetCapabilityId());
+				}
+				else if (const auto* InvalidField = Result.InputFields.FindByPredicate([](const auto& Field) { return Field.SchemaJson.IsEmpty(); }))
+				{
+					OutError.PropertyPath = TEXT("input_fields.") + InvalidField->Name;
+				}
+				return false;
 			}
 			Result.ResultFields = {{
 				TEXT("result"), TEXT("object"), true, false,
@@ -89,7 +131,7 @@ namespace UE::UAI::Module::CommandRegistration::ViewportGraph
 				TEXT("Resolve the exact viewport context and capture recoverable state before mutation."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Use only query.command.detail fields and explicit viewport identities.");
+				TEXT("Use only query.command.usage fields and explicit viewport identities.");
 			Result.Purpose.ResultGuidance =
 				TEXT("Use the returned state revision and a separate read command for verification.");
 			Result.Purpose.FailureGuidance =
@@ -109,6 +151,58 @@ namespace UE::UAI::Module::CommandRegistration::ViewportGraph
 			};
 			OutDeclaration = MoveTemp(Result);
 			return true;
+		}
+
+		const Contract::FUeAgentOperationDescriptor* FindUniqueDescriptor(
+			const FString& CommandId,
+			const Contract::FUeAgentDescriptorRegistry& Descriptors,
+			const Composition::TimelineSpatial::
+				FUeAgentTimelineSpatialActivationProfile*& OutProfile,
+			UE::UAI::Contract::FDiagnostic& OutError)
+		{
+			OutProfile = nullptr;
+			const Composition::TimelineSpatial::
+				FUeAgentTimelineSpatialActivationProfile* Match = nullptr;
+			const TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>* Profiles = nullptr;
+			if (!Composition::TimelineSpatial::TryGetTimelineSpatialActivationProfiles(Profiles, OutError)) return nullptr;
+			for (const Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile& Profile : *Profiles)
+			{
+				if (Profile.CommandId != CommandId)
+				{
+					continue;
+				}
+				if (Match)
+				{
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("viewport_graph_descriptor_ambiguous"), TEXT("More than one activation profile is registered for this command."), TEXT("registration"), FString(), CommandId);
+					if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+					OutError.ActualValue = MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{MakeShared<FJsonValueString>(Match->DescriptorIdentity.GetDescriptorId()), MakeShared<FJsonValueString>(Profile.DescriptorIdentity.GetDescriptorId())});
+					return nullptr;
+				}
+				Match = &Profile;
+			}
+			if (!Match)
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("viewport_graph_descriptor_profile_missing"), TEXT("No activation profile is registered for this command."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+				return nullptr;
+			}
+			const Contract::FUeAgentOperationDescriptor* Descriptor =
+				Descriptors.FindExact(Match->DescriptorIdentity);
+			if (!Descriptor || Descriptor->GetCapabilityId() != CommandId)
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("viewport_graph_descriptor_missing"), Descriptor ? TEXT("The operation descriptor capability does not match the command.") : TEXT("No operation descriptor was found for the command binding."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+				if (Descriptor)
+				{
+					OutError.PropertyPath = TEXT("capability_id");
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(CommandId);
+					OutError.ActualValue = MakeShared<FJsonValueString>(Descriptor->GetCapabilityId());
+				}
+				return nullptr;
+			}
+			OutProfile = Match;
+			return Descriptor;
 		}
 
 		class FContribution final : public IUeAgentActiveCommandContribution
@@ -131,7 +225,7 @@ namespace UE::UAI::Module::CommandRegistration::ViewportGraph
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::ViewportGraph::TryCreateHandlers(
 					OutHandlers,
@@ -144,7 +238,7 @@ namespace UE::UAI::Module::CommandRegistration::ViewportGraph
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<IUeAgentActiveCommandContribution> CommandContribution;
 			if (!TryCreateContribution(CommandContribution, OutError)
@@ -174,8 +268,8 @@ namespace UE::UAI::Module::CommandRegistration::ViewportGraph
 						FindOperationInvocationFactory(CommandId);
 				if (!Factory.IsValid())
 				{
-					OutError = TEXT("viewport_graph_operation_factory_missing:")
-						+ CommandId;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("viewport_graph_operation_factory_missing"), TEXT("No operation invocation factory is registered for this command."), TEXT("registration"), FString(), CommandId);
+					if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
 					return false;
 				}
 				DomainCapability::FDomainOperationEntry Operation;
@@ -197,10 +291,6 @@ namespace UE::UAI::Module::CommandRegistration::ViewportGraph
 				DomainCapability::EDomainCapabilitySupport::Supported;
 			Declaration.State.Planes.Add(
 				StateSemantic::EUeAgentStatePlane::AuthoringMemory);
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId =
-				TEXT("T45-VIEWPORT-GRAPH-CONTROL");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
@@ -213,24 +303,42 @@ namespace UE::UAI::Module::CommandRegistration::ViewportGraph
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
 		TSharedPtr<const FUeAgentCommandContractRegistry> Legacy;
+		TSharedPtr<const Contract::FUeAgentDescriptorRegistry> Descriptors;
 		if (!Composition::TimelineSpatial::
 				TryCreateTimelineSpatialProductionCommandContractRegistry(
 					Legacy,
 					OutError)
-			|| !Legacy.IsValid())
+			|| !Legacy.IsValid()
+			|| !Composition::TimelineSpatial::
+				TryCreateTimelineSpatialDescriptorRegistry(Descriptors, OutError)
+			|| !Descriptors.IsValid())
 		{
 			return false;
 		}
 		TArray<FUeAgentCommandDeclaration> Declarations;
 		for (const FString& CommandId : QueryOwners::ViewportGraph::GetCommandIds())
 		{
+			const Composition::TimelineSpatial::
+				FUeAgentTimelineSpatialActivationProfile* Profile = nullptr;
+			const Contract::FUeAgentOperationDescriptor* Descriptor =
+				FindUniqueDescriptor(CommandId, *Descriptors, Profile, OutError);
+			if (!Descriptor || !Profile)
+			{
+				return false;
+			}
 			FUeAgentCommandDeclaration Declaration;
-			if (!TryDeclaration(CommandId, *Legacy, Declaration, OutError))
+			if (!TryDeclaration(
+					CommandId,
+					*Legacy,
+					*Profile,
+					*Descriptor,
+					Declaration,
+					OutError))
 			{
 				return false;
 			}

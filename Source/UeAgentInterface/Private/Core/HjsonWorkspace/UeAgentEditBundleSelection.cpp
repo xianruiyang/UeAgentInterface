@@ -161,8 +161,8 @@ namespace UE::UAI::HjsonWorkspace
 			FString Detail = FString())
 		{
 			OutError.Code = Code;
-			OutError.Subject = MoveTemp(Subject);
-			OutError.Detail = MoveTemp(Detail);
+			OutError.SubjectId = MoveTemp(Subject);
+			OutError.InternalContext = MoveTemp(Detail);
 		}
 
 		void AppendValues(

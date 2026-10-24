@@ -22,6 +22,9 @@ namespace UE::UAI::Tests::StrictV2::T32
 			TEXT("operation.resume"),
 			TEXT("operation.reconcile"),
 			TEXT("operation.release"),
+			TEXT("operation.discover"),
+			TEXT("operation.recover"),
+			TEXT("operation.takeover"),
 		};
 		return Commands;
 	}
@@ -92,6 +95,9 @@ namespace UE::UAI::Tests::StrictV2::T32
 
 	FString ParamsFor(const FString& CommandId)
 	{
+		if (CommandId == TEXT("operation.discover")) return TEXT("{}");
+		if (CommandId == TEXT("operation.recover")) return TEXT("{\"command_id\":\"editor.session\",\"request_id\":\"req-original\"}");
+		if (CommandId == TEXT("operation.takeover")) return TEXT("{\"operation_id\":\"operation:fixture\"}");
 		const FString OperationRef =
 			TEXT("{\"operation_id\":\"operation:fixture\",")
 			TEXT("\"owner_lease_id\":\"lease:fixture\",")
@@ -153,7 +159,7 @@ bool FUeAgentStrictV2T32InventoryAndActivationTest::RunTest(
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> IsolatedRegistry;
 	TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch> IsolatedDispatch;
 	TestTrue(
-		TEXT("the six public lifecycle routes compose around one operation port"),
+		TEXT("the nine public lifecycle routes compose around one operation port"),
 		TryCreateLongRunningLifecycleRegistration(
 			RecordingPort,
 			IsolatedRegistry,
@@ -203,9 +209,9 @@ bool FUeAgentStrictV2T32InventoryAndActivationTest::RunTest(
 			Params);
 	}
 	TestEqual(
-		TEXT("six lifecycle requests produce exactly six owner calls"),
+		TEXT("each lifecycle request produces exactly one owner call"),
 		RecordingPort->Calls,
-		6);
+		ExpectedLifecycleCommands().Num());
 
 	const CommandContract::FUeAgentFrozenCommandContract* StatusContract =
 		IsolatedRegistry->FindExact(TEXT("operation.status"));

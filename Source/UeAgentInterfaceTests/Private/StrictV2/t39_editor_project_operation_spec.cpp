@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 
+#include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "DomainAdapters/EditorProject/UeAgentEditorProjectMechanicsBoundary.h"
 #include "Dom/JsonObject.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
@@ -11,16 +12,14 @@ namespace UE::UAI::Tests::StrictV2::T39
 		static const TArray<FString> Commands = {
 			TEXT("editor_project.config_section.update"),
 			TEXT("editor_project.device_profile.update"),
-			TEXT("editor_project.localization_target.update"),
 			TEXT("editor_project.platform_config.update"),
 			TEXT("editor_project.project_settings.update"),
 			TEXT("editor_project.scalability_group.update"),
-			TEXT("editor_project.string_table.update"),
 		};
 		return Commands;
 	}
 
-	const TArray<TPair<FString, FString>>& HistoricalQueryRoutes()
+	const TArray<TPair<FString, FString>>& CurrentQueryRoutes()
 	{
 		static const TArray<TPair<FString, FString>> Routes = {
 			{TEXT("asset_project.read.project_validation"), TEXT("device_profile.diff")},
@@ -42,32 +41,15 @@ namespace UE::UAI::Tests::StrictV2::T39
 		return Routes;
 	}
 
-	const TArray<FString>& HistoricalCommandIds()
+	const TArray<FString>& DormantCommands()
 	{
-		static const TArray<FString> Ids = {
-			TEXT("config_apply_section"),
-			TEXT("device_profile_apply_json"),
-			TEXT("device_profile_diff_json"),
-			TEXT("device_profile_export_json"),
-			TEXT("device_profile_query"),
-			TEXT("device_profile_resolve_cvars"),
-			TEXT("device_profile_validate_json"),
-			TEXT("platform_config_apply_json"),
-			TEXT("platform_config_export_json"),
-			TEXT("platform_config_validate_json"),
-			TEXT("platform_profile_validate_packaging"),
-			TEXT("project_settings_apply_page"),
-			TEXT("project_settings_diff_page"),
-			TEXT("project_settings_export_index"),
-			TEXT("project_settings_export_page"),
-			TEXT("project_settings_validate_page"),
-			TEXT("scalability_apply_json"),
-			TEXT("scalability_export_json"),
-			TEXT("scalability_validate_json"),
-			TEXT("target_platform_query"),
+		static const TArray<FString> Commands = {
+			TEXT("editor_project.localization_target.update"),
+			TEXT("editor_project.string_table.update"),
 		};
-		return Ids;
+		return Commands;
 	}
+
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -91,8 +73,6 @@ bool FUeAgentStrictV2T39EditorProjectInventoryTest::RunTest(
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T39 owns exactly 7 inventory commands"),
-		ExpectedCommands().Num(), 7);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
@@ -104,31 +84,32 @@ bool FUeAgentStrictV2T39EditorProjectInventoryTest::RunTest(
 				FString(TEXT("editor-project-operation-owner")));
 		}
 	}
-	TestEqual(TEXT("T39 freezes exactly twenty historical identities"),
-		HistoricalCommandIds().Num(), 20);
-	for (const FString& HistoricalId : HistoricalCommandIds())
+	for (const FString& CommandId : DormantCommands())
 	{
-		TestNull(
-			*FString::Printf(TEXT("%s has no active exact or alias entry"),
-				*HistoricalId),
-			Registry->FindExact(HistoricalId));
+		const auto* Contract = Registry->FindExact(CommandId);
+		TestNotNull(*FString::Printf(TEXT("%s remains registered"), *CommandId), Contract);
+		if (Contract)
+		{
+			TestEqual(
+				*FString::Printf(TEXT("%s is centrally dormant"), *CommandId),
+				Contract->GetAvailability(),
+				CommandContract::EUeAgentCommandAvailability::Dormant);
+		}
 	}
 	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentStrictV2T39HistoricalQueryRouteTest,
-	"UAI.StrictV2.T39.EDITOR.PROJECT.OPERATION.HistoricalQueryRoutes",
+	FUeAgentStrictV2T39CurrentQueryRouteTest,
+	"UAI.StrictV2.T39.EDITOR.PROJECT.OPERATION.CurrentQueryRoutes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentStrictV2T39HistoricalQueryRouteTest::RunTest(
+bool FUeAgentStrictV2T39CurrentQueryRouteTest::RunTest(
 	const FString& Parameters)
 {
 	using namespace UE::UAI::DomainAdapters::EditorProject;
 	using namespace UE::UAI::Tests::StrictV2::T39;
-	TestEqual(TEXT("T39 owns fifteen closed historical query actions"),
-		HistoricalQueryRoutes().Num(), 15);
-	for (const TPair<FString, FString>& Route : HistoricalQueryRoutes())
+	for (const TPair<FString, FString>& Route : CurrentQueryRoutes())
 	{
 		TestTrue(
 			*FString::Printf(TEXT("%s accepts %s"), *Route.Key, *Route.Value),

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "OperationOwners/AnimationRigGraph/UeAgentAnimationRigGraphDomainService.h"
@@ -14,5 +16,5 @@ namespace UE::UAI::CommandHandlers::AnimationRigGraph
 	UEAGENTINTERFACE_API bool TryCreateAnimationRigGraphCandidateCommandHandlers(
 		TSharedRef<OperationOwners::AnimationRigGraph::IUeAgentAnimationRigGraphCandidateCommandService> Service,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

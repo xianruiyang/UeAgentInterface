@@ -43,7 +43,6 @@ namespace UE::UAI::NetworkTransport
 		bool bOrdered = false;
 		bool bReliable = false;
 		bool bPreservesMessageBoundaries = false;
-		int64 MaxFrameBytes = 0;
 		bool bRequestReply = false;
 		bool bDuplicateSuppression = false;
 	};
@@ -53,7 +52,6 @@ namespace UE::UAI::NetworkTransport
 		bool bRequireOrdered = false;
 		bool bRequireReliable = false;
 		bool bRequireMessageBoundaries = false;
-		int64 MaxFrameBytes = 0;
 		bool bRequireRequestReply = false;
 		bool bRequireDuplicateSuppression = false;
 	};

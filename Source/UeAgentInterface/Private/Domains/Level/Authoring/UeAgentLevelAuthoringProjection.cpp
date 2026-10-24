@@ -2,6 +2,9 @@
 
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringProjection.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonValue.h"
+
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringDescriptors.h"
 #include "Utilities/AuthoringExport/UeAgentExportWorkspaceWriter.h"
 
@@ -15,18 +18,16 @@ namespace UeAgentLevelAuthoring
 		{
 			FString ProfileId;
 			TArray<FString> IncludedRoles;
-			int32 FragmentTokenBudget = 0;
-			int32 WorkspaceTokenBudget = 0;
 		};
 
 		const TArray<FLevelProfileSpec>& ProfileSpecs()
 		{
 			static const TArray<FLevelProfileSpec> Specs = {
-				{ TEXT("llm_authoring"), { TEXT("identity"), TEXT("authoring") }, 32768, 131072 },
-				{ TEXT("readback"), { TEXT("identity"), TEXT("authoring"), TEXT("readback") }, 49152, 196608 },
+				{ TEXT("llm_authoring"), { TEXT("identity"), TEXT("authoring") } },
+				{ TEXT("readback"), { TEXT("identity"), TEXT("authoring"), TEXT("readback") } },
 				{ TEXT("debug"), {
-					TEXT("identity"), TEXT("authoring"), TEXT("readback"), TEXT("diagnostics") }, 98304, 393216 },
-				{ TEXT("validation"), { TEXT("identity"), TEXT("authoring") }, 8192, 32768 },
+					TEXT("identity"), TEXT("authoring"), TEXT("readback"), TEXT("diagnostics") } },
+				{ TEXT("validation"), { TEXT("identity"), TEXT("authoring") } },
 			};
 			return Specs;
 		}
@@ -39,16 +40,11 @@ namespace UeAgentLevelAuthoring
 			});
 		}
 
-		FProfileDescriptor Profile(const FLevelProfileSpec& Spec, const bool bWorld)
+		FProfileDescriptor Profile(const FLevelProfileSpec& Spec)
 		{
 			FProfileDescriptor Result;
 			Result.ProfileId = Spec.ProfileId;
 			Result.IncludedRoles = Spec.IncludedRoles;
-			if (bWorld && Spec.ProfileId == TEXT("validation"))
-			{
-				Result.IncludedRoles = { TEXT("identity") };
-			}
-			Result.TokenBudget = Spec.FragmentTokenBudget;
 			return Result;
 		}
 
@@ -93,7 +89,8 @@ namespace UeAgentLevelAuthoring
 				? WorldTargetSemanticId
 				: bActor ? ActorTargetSemanticId : ComponentTargetSemanticId;
 			const TCHAR* StateSemantic = bActor ? ActorStateSemanticId : ComponentStateSemanticId;
-			const TCHAR* PropertySemantic = bActor ? ActorPropertySemanticId : ComponentPropertySemanticId;
+			const TCHAR* PropertySemantic = bWorld ? WorldPropertySemanticId
+				: bActor ? ActorPropertySemanticId : ComponentPropertySemanticId;
 
 			FContract Result;
 			Result.Schema = TEXT("uai.export_contract.v2");
@@ -101,12 +98,12 @@ namespace UeAgentLevelAuthoring
 			Result.ContractVersion = TEXT("2.0.0");
 			Result.TypeId = TypeId;
 			Result.SemanticDescriptorRefs = bWorld
-				? TArray<FString>{ WorldTargetSemanticId }
+				? TArray<FString>{ WorldTargetSemanticId, WorldPropertySemanticId }
 				: TArray<FString>{ TargetSemantic, StateSemantic, PropertySemantic };
 			Result.DefaultProfile = TEXT("llm_authoring");
 			for (const FLevelProfileSpec& Spec : ProfileSpecs())
 			{
-				Result.Profiles.Add(Profile(Spec, bWorld));
+				Result.Profiles.Add(Profile(Spec));
 			}
 
 			FFileDescriptor File;
@@ -130,13 +127,13 @@ namespace UeAgentLevelAuthoring
 				EFieldSourceKind::Semantic, TargetSemantic,
 				TEXT("uai.export.semantic.value"),
 				TEXT("identity"), false, true, TEXT("emit_null")));
-			if (!bWorld)
-			{
-				Result.Fields.Add(Field(
+			Result.Fields.Add(Field(
 					TEXT("properties"), *(Prefix + TEXT("/properties")),
 					EFieldSourceKind::Semantic, PropertySemantic,
 					TEXT("uai.export.semantic.editable_properties"),
 					TEXT("authoring"), true, false, TEXT("emit_empty")));
+			if (!bWorld)
+			{
 				Result.Fields.Add(Field(
 					TEXT("provider_extension"), *(Prefix + TEXT("/provider_extension")),
 					EFieldSourceKind::Semantic, StateSemantic,
@@ -164,7 +161,7 @@ namespace UeAgentLevelAuthoring
 		}
 	}
 
-	bool RegisterExportAuthoring(FString& OutError)
+	bool RegisterExportAuthoring(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentExportContract::ERegistrationResult Result;
 		return UeAgentExportContract::FRegistry::Get().RegisterContract(
@@ -178,7 +175,7 @@ namespace UeAgentLevelAuthoring
 	bool GetExportContract(
 		const EExportTargetKind Kind,
 		UeAgentExportContract::FContract& OutContract,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const TCHAR* ContractId = Kind == EExportTargetKind::World
 			? WorldExportContractId
@@ -187,7 +184,14 @@ namespace UeAgentLevelAuthoring
 				: ComponentExportContractId;
 		if (!UeAgentExportContract::FRegistry::Get().FindContract(ContractId, OutContract))
 		{
-			OutError = TEXT("level_export_contract_missing:") + FString(ContractId);
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("level_export_contract_missing"),
+				TEXT("The export contract for this Level target kind is not registered."), TEXT("level_export"), ContractId);
+			OutError.PropertyPath = TEXT("export_contract_registered");
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			OutError.CandidateName = Kind == EExportTargetKind::World ? TEXT("world")
+				: Kind == EExportTargetKind::Actor ? TEXT("actor") : TEXT("component");
+			OutError.SourceKind = TEXT("native_result");
 			return false;
 		}
 		OutError.Reset();
@@ -197,13 +201,19 @@ namespace UeAgentLevelAuthoring
 	bool GetWorkspaceExportPolicy(
 		const FString& ProfileId,
 		UeAgentExportWorkspaceWriter::FCompoundPlanPolicy& OutPolicy,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutPolicy = UeAgentExportWorkspaceWriter::FCompoundPlanPolicy();
 		const FLevelProfileSpec* ProfileSpec = FindProfileSpec(ProfileId);
 		if (!ProfileSpec)
 		{
-			OutError = TEXT("level_export_profile_unknown:") + ProfileId;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("level_export_profile_unknown"),
+				TEXT("The requested Level export profile is not supported."), TEXT("level_export"));
+			OutError.PropertyPath = TEXT("profile");
+			OutError.ActualValue = MakeShared<FJsonValueString>(ProfileId);
+			TArray<TSharedPtr<FJsonValue>> Choices;
+			for (const auto& Spec : ProfileSpecs()) Choices.Add(MakeShared<FJsonValueString>(Spec.ProfileId));
+			OutError.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(Choices));
 			return false;
 		}
 
@@ -211,7 +221,6 @@ namespace UeAgentLevelAuthoring
 		OutPolicy.ContractVersion = TEXT("2.0.0");
 		OutPolicy.ProfileId = ProfileSpec->ProfileId;
 		OutPolicy.EntryFile = TEXT("index.hjson");
-		OutPolicy.TokenBudget = ProfileSpec->WorkspaceTokenBudget;
 
 		UeAgentExportWorkspaceWriter::FRoleCardinality IndexRole;
 		IndexRole.Role = TEXT("index");

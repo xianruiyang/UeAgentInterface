@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceLoader.h"
+#include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 
 class FJsonObject;
 class UWorld;
@@ -19,14 +20,17 @@ namespace UeAgentLevelAuthoring
 	{
 		bool bDryRun = false;
 		bool bUseEditorTransaction = true;
+		bool bPersistentReadback = false;
+		TSharedPtr<UeAgentAuthoringOperationApply::IDurablePackageStager> PackageStager;
+		TFunction<bool(UeAgentAuthoringOperationApply::FOperationFailure&)> FinalReadback;
+		TFunction<bool(UeAgentAuthoringOperationApply::FOperationFailure&)> RestoreEditorContext;
 	};
 
 	struct UEAGENTINTERFACE_API FWorkspaceApplyResult
 	{
 		FString Status;
 		FString Phase;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		int32 UnitsChecked = 0;
 		int32 MutationsApplied = 0;
 		int32 ActorsCreated = 0;
@@ -45,7 +49,7 @@ namespace UeAgentLevelAuthoring
 		TSharedRef<FJsonObject> ToJsonObject() const;
 	};
 
-	UEAGENTINTERFACE_API bool RegisterApplyContracts(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeApplyProvider();
 	UEAGENTINTERFACE_API bool ApplyWorkspaceSource(
 		UWorld& World,
@@ -63,10 +67,4 @@ namespace UeAgentLevelAuthoring
 		UWorld& World,
 		const FString& WorkspaceRoot,
 		FWorkspaceApplyResult& OutResult);
-	UEAGENTINTERFACE_API bool DiffWorkspaceDirectories(
-		const FString& BaseRoot,
-		const FString& TargetRoot,
-		int32 MaxChanges,
-		TSharedPtr<FJsonObject>& OutSummary,
-		FString& OutError);
 }

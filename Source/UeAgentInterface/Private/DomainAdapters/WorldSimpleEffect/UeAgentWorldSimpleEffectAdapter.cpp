@@ -1,6 +1,8 @@
 #include "DomainAdapters/WorldSimpleEffect/UeAgentWorldSimpleEffectAdapter.h"
 
+#include "Dom/JsonValue.h"
 #include "Engine/World.h"
+#include "Misc/ScopeExit.h"
 
 namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 {
@@ -10,15 +12,21 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 
 	namespace
 	{
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
+		bool Fail(FExecutionMutationError& OutError, FExecutionMutationError Diagnostic)
 		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
+			OutError = MoveTemp(Diagnostic);
 			return false;
+		}
+
+		FExecutionMutationError MissingWorld()
+		{
+			auto Error = FExecutionMutationError::Failure(TEXT("world_simple_context_invalid"),
+				TEXT("World resolver succeeded without a valid world object."), TEXT("execution"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = TEXT("/world");
+			Error.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			Error.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			return Error;
 		}
 	}
 
@@ -43,14 +51,10 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 		FUeAgentGenericEffectApplyResult& OutResult,
 		FExecutionMutationError& OutError)
 	{
-		OutResult = FUeAgentGenericEffectApplyResult();
+		OutResult = FUeAgentGenericEffectApplyResult::NoMutation();
 		OutError = FExecutionMutationError();
-		if (!Request.IsValid() || !Lease.IsValid())
-		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_request_invalid"));
-		}
+		if (!Request.IsValid()) return Fail(OutError, Request.GetValidationDiagnostic());
+		if (!Lease.IsValid()) return Fail(OutError, Lease.GetValidationDiagnostic());
 
 		UWorld* World = nullptr;
 		if (!WorldResolver->TryResolveWorld(
@@ -60,13 +64,9 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 		{
 			return false;
 		}
-		if (!IsValid(World))
-		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_context_invalid"),
-				Request.GetExecutionContext().GetWorldIdentity());
-		}
+		if (!IsValid(World)) return Fail(OutError, MissingWorld());
+		ON_SCOPE_EXIT { if (!OutError.IsEmpty() && OutError.TargetPath.IsEmpty()) OutError.TargetPath = World->GetPathName(); };
+		OutResult = FUeAgentGenericEffectApplyResult();
 		return NativeHook->TryApply(
 			*World,
 			Request,
@@ -86,12 +86,8 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 	{
 		bOutConfirmed = false;
 		OutError = FExecutionMutationError();
-		if (!Request.IsValid() || !Applied.IsValid())
-		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_rollback_request_invalid"));
-		}
+		if (!Request.IsValid()) return Fail(OutError, Request.GetValidationDiagnostic());
+		if (!Applied.IsValid()) return Fail(OutError, Applied.GetValidationDiagnostic());
 
 		UWorld* World = nullptr;
 		if (!WorldResolver->TryResolveWorld(
@@ -101,13 +97,8 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 		{
 			return false;
 		}
-		if (!IsValid(World))
-		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_context_invalid"),
-				Request.GetExecutionContext().GetWorldIdentity());
-		}
+		if (!IsValid(World)) return Fail(OutError, MissingWorld());
+		ON_SCOPE_EXIT { if (!OutError.IsEmpty() && OutError.TargetPath.IsEmpty()) OutError.TargetPath = World->GetPathName(); };
 		return NativeHook->TryRollback(
 			*World,
 			Request,
@@ -133,9 +124,13 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 		OutError = FExecutionMutationError();
 		if (!Request.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_settle_request_invalid"));
+			auto Error = FExecutionMutationError::Failure(TEXT("world_simple_settle_request_invalid"),
+				TEXT("Settle request subject generation must be non-negative."), TEXT("execution"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = TEXT("/subject_generation");
+			Error.ActualValue = MakeShared<FJsonValueNumber>(Request.GetSubjectGeneration());
+			Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("integer >= 0"));
+			return Fail(OutError, MoveTemp(Error));
 		}
 		return NativeHook->TryWaitForSettle(
 			Request,
@@ -144,4 +139,3 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			OutError);
 	}
 }
-

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
@@ -12,5 +14,5 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 
 	UEAGENTINTERFACE_API bool TryCreateWorldSpatialCommandHandlers(
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

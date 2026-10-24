@@ -12,7 +12,7 @@
 
 namespace UeAgentBlueprintAuthoring
 {
-	bool RegisterAuthoring(FString& OutError)
+	bool RegisterAuthoring(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!UE::UAI::HjsonWorkspace::
 				RegisterGraphTreeTargetCompositionContracts(OutError)

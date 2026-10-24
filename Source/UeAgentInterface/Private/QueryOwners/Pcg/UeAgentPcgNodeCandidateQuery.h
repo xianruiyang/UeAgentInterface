@@ -1,6 +1,12 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
+
+namespace UE::UAI::ContentDiscovery { class FReadOnlyCandidateBatch; }
+namespace UE::UAI::CandidateProperties { struct FRequest; }
+class FJsonObject;
 
 class UObject;
 class UPCGGraph;
@@ -8,6 +14,10 @@ class UPCGNode;
 
 namespace UE::UAI::QueryOwners::Pcg
 {
+	using FPcgNodeCandidateQueryError = UE::UAI::Contract::FDiagnostic;
+	UEAGENTINTERFACE_API bool TryDescribePcgNodeCandidate(UPCGGraph& Target,
+		const CandidateProperties::FRequest& Request, TSharedPtr<FJsonObject>& OutDescription,
+		FPcgNodeCandidateQueryError& OutError);
 	struct UEAGENTINTERFACE_API FPcgNodeCandidate
 	{
 		FString Id;
@@ -17,8 +27,10 @@ namespace UE::UAI::QueryOwners::Pcg
 		FString ActionKind;
 		FString Category;
 		FString Summary;
+		TMap<FString, FString> SelectionFields;
 		FString WriteSupport;
 		FString SupportReason;
+		Contract::FDiagnostic SupportDiagnostic;
 		bool bSupported = false;
 	};
 
@@ -28,29 +40,16 @@ namespace UE::UAI::QueryOwners::Pcg
 		FString TargetRevision;
 		TArray<FPcgNodeCandidate> Candidates;
 		int32 TotalMatches = 0;
-		int32 NextCursor = INDEX_NONE;
-		bool bComplete = false;
-		bool bHasMore = false;
-		bool bCoverageComplete = false;
-		bool bCreationCoverageComplete = false;
-		int32 NativeActionCount = 0;
-		int32 ExecutableActionCount = 0;
+		UE::UAI::Contract::FDiagnostic CatalogDiagnostic;
 	};
 
-	struct UEAGENTINTERFACE_API FPcgNodeCandidateQueryError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	
 
 	UEAGENTINTERFACE_API bool TryQueryPcgNodeCandidates(
 		UObject& Target,
 		const FString& Query,
 		FPcgNodeCandidateQueryResult& OutResult,
 		FPcgNodeCandidateQueryError& OutError,
-		int32 Limit = 64,
-		int32 Cursor = 0,
 		const FString& CandidateId = FString());
 
 	/** Re-enumerate the exact native PCG graph context and resolve one selector. */
@@ -59,7 +58,9 @@ namespace UE::UAI::QueryOwners::Pcg
 		const FString& Name,
 		const FString& Id,
 		FPcgNodeCandidate& OutCandidate,
-		FPcgNodeCandidateQueryError& OutError);
+		FPcgNodeCandidateQueryError& OutError,
+		const TMap<FString, FString>& Select = {},
+		ContentDiscovery::FReadOnlyCandidateBatch* Batch = nullptr);
 
 	/** Re-enumerate and invoke the selected native PCG schema action. */
 	UEAGENTINTERFACE_API bool TryPerformPcgNodeCandidate(
@@ -69,5 +70,6 @@ namespace UE::UAI::QueryOwners::Pcg
 		const FVector2f& Location,
 		UPCGNode*& OutNode,
 		FPcgNodeCandidate& OutCandidate,
-		FPcgNodeCandidateQueryError& OutError);
+		FPcgNodeCandidateQueryError& OutError,
+		const TMap<FString, FString>& Select = {});
 }

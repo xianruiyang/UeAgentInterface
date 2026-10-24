@@ -1,5 +1,7 @@
 #include "DomainAdapters/UmgCommands/UeAgentUmgCommandMechanicsBoundary.h"
 
+#include "Dom/JsonValue.h"
+
 namespace UE::UAI::DomainAdapters::UmgCommands
 {
 	using Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile;
@@ -20,12 +22,13 @@ namespace UE::UAI::DomainAdapters::UmgCommands
 
 	bool TryGetActivationProfiles(
 		TArray<FUeAgentGraphCompoundActivationProfile>& OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		OutError.Reset();
-		const TArray<FUeAgentGraphCompoundActivationProfile>& Canonical =
-			Composition::GraphCompound::GetGraphCompoundActivationProfiles();
+		const TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>* GraphProfiles = nullptr;
+		if (!Composition::GraphCompound::TryGetGraphCompoundActivationProfiles(GraphProfiles, OutError)) return false;
+		const auto& Canonical = *GraphProfiles;
 		for (const FString& CommandId : GetCommandIds())
 		{
 			const FUeAgentGraphCompoundActivationProfile* Match =
@@ -37,7 +40,21 @@ namespace UE::UAI::DomainAdapters::UmgCommands
 			if (!Match || !Match->IsValid())
 			{
 				OutProfiles.Reset();
-				OutError = TEXT("umg_command_profile_missing:") + CommandId;
+				if (Match) {
+					OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("umg_command_profile_missing"),
+						Match->GetValidationDiagnostic(), TEXT("runtime_factory"),
+						TEXT("A required UMG activation profile failed validation."));
+				} else {
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_command_profile_missing"),
+						TEXT("No activation profile is registered for a required UMG command."), TEXT("runtime_factory"));
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.PropertyPath = TEXT("activation_profile_registered");
+				}
+				OutError.InternalContext = CommandId;
+				OutError.SourceKind = TEXT("native_result");
+				if (GetCommandIds().Contains(CommandId))
+					OutError.PublicMessage += TEXT(" Command: ") + CommandId + TEXT(".");
 				return false;
 			}
 			OutProfiles.Add(*Match);

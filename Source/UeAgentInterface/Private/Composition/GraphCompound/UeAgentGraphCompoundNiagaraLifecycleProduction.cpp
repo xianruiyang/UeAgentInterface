@@ -1,21 +1,25 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundNiagaraLifecycleProduction.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Composition/GraphCompound/UeAgentGraphCompoundCanonical.h"
+#include "Utilities/AuthoringOperationApply/UeAgentAuthoringPackageReadback.h"
+
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/Contract/UeAgentContractJson.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Core/Verification/UeAgentIndependentReadback.h"
 #include "DomainAdapters/MaterialNiagaraGraph/UeAgentMaterialNiagaraGraphNativeHook.h"
 #include "Domains/Niagara/UeAgentNiagaraCompileValidation.h"
 #include "Dom/JsonObject.h"
-#include "HAL/FileManager.h"
+#include "Dom/JsonValue.h"
 #include "Misc/DateTime.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
 #include "NiagaraEmitter.h"
 #include "NiagaraScript.h"
 #include "NiagaraSystem.h"
-#include "PackageTools.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
 
@@ -31,6 +35,64 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
+        void SetError(FGraphCompoundRuntimeError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic,
+            FString SubjectId = FString(), const UE::UAI::Contract::FDiagnostic& Recovery = UE::UAI::Contract::FDiagnostic())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = MoveTemp(SubjectId);
+            OutError.Append(Recovery);
+        }
+
+		FDiagnostic NiagaraFailure(const FString& Code, const FString& Reason,
+			const FString& Target, const FString& Field,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const FString& Stage = TEXT("graph_compound"))
+		{
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, Stage);
+			Error.TargetPath = Target;
+			Error.SubjectId = Target;
+			Error.PropertyPath = Field;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValuePresent = Expected.IsValid();
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			MarkGraphCompoundNativeDiagnostic(Error);
+			return Error;
+		}
+
+		FDiagnostic DescriptorMismatch(const FString& Code, const FString& Target,
+			const FUeAgentDescriptorIdentity& Actual, const FUeAgentDescriptorIdentity& Expected)
+		{
+			if (Actual.GetDescriptorId() != Expected.GetDescriptorId())
+				return NiagaraFailure(Code, TEXT("The Niagara plan descriptor id does not match the route descriptor."),
+					Target, TEXT("descriptor_identity.descriptor_id"),
+					MakeShared<FJsonValueString>(Actual.GetDescriptorId()), MakeShared<FJsonValueString>(Expected.GetDescriptorId()));
+			if (Actual.GetVersion() != Expected.GetVersion())
+				return NiagaraFailure(Code, TEXT("The Niagara plan descriptor version does not match the route descriptor."),
+					Target, TEXT("descriptor_identity.version"),
+					MakeShared<FJsonValueNumber>(Actual.GetVersion()), MakeShared<FJsonValueNumber>(Expected.GetVersion()));
+			FDiagnostic Error = NiagaraFailure(Code, TEXT("The Niagara plan descriptor hash does not match the route descriptor."),
+				Target, TEXT("descriptor_identity.descriptor_hash"), nullptr, nullptr);
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Actual.GetDescriptorHash());
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetDescriptorHash());
+			return Error;
+		}
+
+		FDiagnostic SettleFailure(const FString& Target, const FMaterialNiagaraGraphCompileSettleReceipt& Settle)
+		{
+			if (!Settle.IsCompilationComplete())
+				return NiagaraFailure(TEXT("graph_compound_niagara_compile_not_settled"),
+					TEXT("Niagara compilation did not complete."), Target, TEXT("compilation_complete"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("compile"));
+			if (Settle.GetCompileErrorCount() != 0)
+				return NiagaraFailure(TEXT("graph_compound_niagara_compile_not_settled"),
+					TEXT("Niagara compilation reported errors."), Target, TEXT("compile_error_count"),
+					MakeShared<FJsonValueNumber>(Settle.GetCompileErrorCount()), MakeShared<FJsonValueNumber>(0), TEXT("compile"));
+			return NiagaraFailure(TEXT("graph_compound_niagara_compile_not_settled"),
+				TEXT("Niagara stack validation reported blocking issues."), Target, TEXT("stack_issue_count"),
+				MakeShared<FJsonValueNumber>(Settle.GetStackIssueCount()), MakeShared<FJsonValueNumber>(0), TEXT("compile"));
+		}
+
 		const FString NiagaraAssetReadbackOracleId =
 			TEXT("uai.readback.graph_compound.niagara_asset_lifecycle");
 		const FString NiagaraCompileReadbackOracleId =
@@ -38,17 +100,9 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString CompileSemanticId =
 			TEXT("property:lifecycle:compile_refresh_settle");
 
-		void SetError(
-			FGraphCompoundRuntimeError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
-		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-		}
+		
+
+        
 
 		bool IsNiagaraAsset(const UObject* Asset)
 		{
@@ -82,17 +136,35 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			const FString PackageName = PackageNameFromRef(Ref);
 			const FString ObjectPath = ObjectPathFromRef(Ref);
-			UObject* const Asset = FPackageName::IsValidLongPackageName(PackageName)
-				? LoadObject<UObject>(nullptr, *ObjectPath)
-				: nullptr;
-			if (!IsNiagaraAsset(Asset)
-				|| Asset->GetOutermost()->GetName() != PackageName)
+			const bool bValidPackage = FPackageName::IsValidLongPackageName(PackageName);
+			UObject* const Asset = bValidPackage ? LoadObject<UObject>(nullptr, *ObjectPath) : nullptr;
+			const FString Code = bSource ? TEXT("graph_compound_niagara_source_invalid") : TEXT("graph_compound_niagara_target_invalid");
+			if (!bValidPackage)
 			{
-				SetError(OutError,
-					bSource
-						? TEXT("graph_compound_niagara_source_invalid")
-						: TEXT("graph_compound_niagara_target_invalid"),
-					Ref);
+				OutError = NiagaraFailure(Code, TEXT("The Niagara reference does not contain a valid long package name."),
+					Ref, TEXT("package_name"), MakeShared<FJsonValueString>(PackageName),
+					MakeShared<FJsonValueString>(TEXT("valid long package name")));
+				return nullptr;
+			}
+			if (!Asset)
+			{
+				OutError = NiagaraFailure(Code, TEXT("The referenced Niagara object could not be loaded."),
+					Ref, TEXT("object_path"), MakeShared<FJsonValueString>(ObjectPath),
+					MakeShared<FJsonValueString>(TEXT("loadable Niagara emitter, system or script")));
+				return nullptr;
+			}
+			if (!IsNiagaraAsset(Asset))
+			{
+				OutError = NiagaraFailure(Code, TEXT("The loaded object is not a Niagara emitter, system or script."),
+					Ref, TEXT("asset.class"), MakeShared<FJsonValueString>(Asset->GetClass()->GetPathName()),
+					MakeShared<FJsonValueString>(TEXT("NiagaraEmitter, NiagaraSystem or NiagaraScript")));
+				return nullptr;
+			}
+			if (Asset->GetOutermost()->GetName() != PackageName)
+			{
+				OutError = NiagaraFailure(Code, TEXT("The loaded Niagara object's package does not match the reference."),
+					Ref, TEXT("asset.package"), MakeShared<FJsonValueString>(Asset->GetOutermost()->GetName()),
+					MakeShared<FJsonValueString>(PackageName));
 				return nullptr;
 			}
 			return Asset;
@@ -104,6 +176,7 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			UObject* const Source = TryResolveNiagaraAsset(
 				Request.GetSourceRef(), OutError, true);
+			if (!Source) return nullptr;
 			const bool bExpectedClass = Source
 				&& ((Request.GetInputKind()
 						== EGraphCompoundTypedInputKind::NiagaraEmitterAssetCreate
@@ -115,24 +188,47 @@ namespace UE::UAI::Composition::GraphCompound
 						== EGraphCompoundTypedInputKind::NiagaraAssetDuplicate);
 			if (!bExpectedClass)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_niagara_source_invalid"),
-					Request.GetSourceRef());
+				const bool bEmitter = Request.GetInputKind() == EGraphCompoundTypedInputKind::NiagaraEmitterAssetCreate;
+				const bool bSystem = Request.GetInputKind() == EGraphCompoundTypedInputKind::NiagaraSystemAssetCreate;
+				OutError = bEmitter || bSystem
+					? NiagaraFailure(TEXT("graph_compound_niagara_source_invalid"),
+						TEXT("The Niagara template class does not match the asset creation kind."), Request.GetSourceRef(),
+						TEXT("source.class"), MakeShared<FJsonValueString>(Source->GetClass()->GetPathName()),
+						MakeShared<FJsonValueString>((bEmitter ? UNiagaraEmitter::StaticClass() : UNiagaraSystem::StaticClass())->GetPathName()))
+					: NiagaraFailure(TEXT("graph_compound_niagara_source_invalid"),
+						TEXT("The input kind does not support Niagara asset creation or duplication."), Request.GetSourceRef(),
+						TEXT("input_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Request.GetInputKind())),
+						MakeShared<FJsonValueString>(TEXT("NiagaraEmitterAssetCreate, NiagaraSystemAssetCreate or NiagaraAssetDuplicate")));
 				return nullptr;
 			}
 			return Source;
 		}
 
-		bool TryPackageFilename(
-			const FString& PackageName,
-			FString& OutFilename)
+		bool TryPackageFilename(const FString& PackageName, FString& OutFilename, FGraphCompoundRuntimeError& OutError)
 		{
 			OutFilename.Reset();
-			return FPackageName::IsValidLongPackageName(PackageName)
-				&& !FPackageName::GetPackageMountPoint(PackageName).IsNone()
-				&& FPackageName::TryConvertLongPackageNameToFilename(
-					PackageName, OutFilename,
-					FPackageName::GetAssetPackageExtension());
+			if (!FPackageName::IsValidLongPackageName(PackageName))
+			{
+				OutError = NiagaraFailure(TEXT("graph_compound_asset_target_invalid"),
+					TEXT("The target package name is invalid."), PackageName, TEXT("package_name"),
+					MakeShared<FJsonValueString>(PackageName), MakeShared<FJsonValueString>(TEXT("valid long package name")));
+				return false;
+			}
+			if (FPackageName::GetPackageMountPoint(PackageName).IsNone())
+			{
+				OutError = NiagaraFailure(TEXT("graph_compound_asset_target_invalid"),
+					TEXT("The target package has no registered mount point."), PackageName, TEXT("package.mount_point"),
+					MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("registered mount point")));
+				return false;
+			}
+			if (!FPackageName::TryConvertLongPackageNameToFilename(PackageName, OutFilename, FPackageName::GetAssetPackageExtension()))
+			{
+				OutError = NiagaraFailure(TEXT("graph_compound_asset_target_invalid"),
+					TEXT("The mounted target package could not be converted to an asset filename."), PackageName, TEXT("package.filename_conversion.succeeded"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				return false;
+			}
+			return true;
 		}
 
 		bool TryCheckTargetAbsent(
@@ -140,20 +236,28 @@ namespace UE::UAI::Composition::GraphCompound
 			FString& OutFilename,
 			FGraphCompoundRuntimeError& OutError)
 		{
-			if (!Request.IsValid()
-				|| !TryPackageFilename(Request.GetTargetRef(), OutFilename))
+			if (!Request.IsValid())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_asset_target_invalid"),
-					Request.GetTargetRef());
+				OutError = Request.GetValidationDiagnostic();
 				return false;
 			}
-			if (FindPackage(nullptr, *Request.GetTargetRef())
-				|| IFileManager::Get().FileExists(*OutFilename))
+			if (!TryPackageFilename(Request.GetTargetRef(), OutFilename, OutError)) return false;
+			bool bTargetPresent = false;
+			if (!HjsonWorkspace::DomainAuthoring::
+				TryInspectObjectTargetPresence(
+					Request.GetTargetRef(), bTargetPresent))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_asset_target_already_exists"),
-					Request.GetTargetRef());
+				OutError = NiagaraFailure(TEXT("graph_compound_asset_target_invalid"),
+					TEXT("The target reference cannot be resolved to a package identity for presence inspection."),
+					Request.GetTargetRef(), TEXT("target_ref"), MakeShared<FJsonValueString>(Request.GetTargetRef()),
+					MakeShared<FJsonValueString>(TEXT("valid object or package reference")));
+				return false;
+			}
+			if (bTargetPresent)
+			{
+				OutError = NiagaraFailure(TEXT("graph_compound_asset_target_already_exists"),
+					TEXT("target_ref already resolves to an existing asset."), Request.GetTargetRef(),
+					TEXT("target.present"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 				return false;
 			}
 			return true;
@@ -199,11 +303,11 @@ namespace UE::UAI::Composition::GraphCompound
 			const FString& Subject)
 		{
 			FUeAgentStateSemanticError Error;
-			if (!FUeAgentCanonicalValue::TryString(
-					Text, Resources, OutValue, Error)
-				|| !OutValue.IsValid())
+			if (!FUeAgentCanonicalValue::TryString(Text, Resources, OutValue, Error))
 			{
-				SetError(OutError, Error.Code, Subject, Error.Path);
+				MarkGraphCompoundNativeDiagnostic(Error);
+				if (Error.TargetPath.IsEmpty()) Error.TargetPath = Subject;
+				SetError(OutError, Error, Subject);
 				return false;
 			}
 			return true;
@@ -249,9 +353,9 @@ namespace UE::UAI::Composition::GraphCompound
 				EUeAgentOverrideState::Overridden);
 			if (!Entry.IsValid())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_niagara_state_entry_invalid"),
-					SemanticId);
+				SetError(OutError, Entry.GetValidationDiagnostic(), SemanticId);
+				MarkGraphCompoundNativeDiagnostic(OutError);
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = SubjectRef;
 				return false;
 			}
 			FUeAgentStateSemanticError Error;
@@ -268,10 +372,11 @@ namespace UE::UAI::Composition::GraphCompound
 						SubjectRef,
 						TEXT("niagara:") + Generation),
 					{MoveTemp(Entry)}, Resources,
-					OutSnapshot, Error)
-				|| !OutSnapshot.IsValid())
+					OutSnapshot, Error))
 			{
-				SetError(OutError, Error.Code, SubjectRef, Error.Path);
+				MarkGraphCompoundNativeDiagnostic(Error);
+				if (Error.TargetPath.IsEmpty()) Error.TargetPath = SubjectRef;
+				SetError(OutError, Error, SubjectRef);
 				return false;
 			}
 			return true;
@@ -288,40 +393,6 @@ namespace UE::UAI::Composition::GraphCompound
 					+ Request.GetSourceRef();
 		}
 
-		bool TryUnloadPackage(
-			const FString& PackageName,
-			const FString& AssetName,
-			const bool bNotifyAssetRegistry,
-			FString& OutDetail)
-		{
-			OutDetail.Reset();
-			UPackage* const Package = FindPackage(nullptr, *PackageName);
-			if (!Package)
-			{
-				return true;
-			}
-			if (bNotifyAssetRegistry)
-			{
-				if (UObject* const Asset = FindObject<UObject>(Package, *AssetName))
-				{
-					FAssetRegistryModule::AssetDeleted(Asset);
-				}
-			}
-			Package->SetDirtyFlag(false);
-			FText Error;
-			if (!UPackageTools::UnloadPackages({Package}, Error, true))
-			{
-				OutDetail = Error.ToString();
-				return false;
-			}
-			CollectGarbage(RF_NoFlags, true);
-			if (FindPackage(nullptr, *PackageName))
-			{
-				OutDetail = TEXT("package remains loaded after unload");
-				return false;
-			}
-			return true;
-		}
 
 		FAssetDurableSessionRef PersistedSession(
 			const FAssetDurableSessionRef& Prepared,
@@ -342,42 +413,41 @@ namespace UE::UAI::Composition::GraphCompound
 			FPackageAssetDurableBackend& Backend,
 			const int64 FencingToken,
 			FUeAgentResourceTracker& Resources,
-			FString& OutDetail)
+			UE::UAI::Contract::FDiagnostic& OutDetail)
 		{
-			FString UnloadDetail;
-			const bool bMemoryClean = TryUnloadPackage(
-				PackageName, AssetName, bNotifyAssetRegistry, UnloadDetail);
-			FDurableReceipt Receipt;
-			FAssetDurableError Error;
-			const bool bDurableClean = TryRollbackAssetDurability(
-				Session, Backend, FencingToken, bMemoryClean,
-				Resources, Receipt, Error);
-			OutDetail = !UnloadDetail.IsEmpty()
-				? UnloadDetail
-				: Error.GetCode() + TEXT(":") + Error.GetDetail();
-			return bMemoryClean && bDurableClean;
+			return UeAgentAuthoringOperationApply::TryRestorePackageDurability(
+				PackageName, bNotifyAssetRegistry, Session, Backend, FencingToken,
+				Resources, OutDetail);
 		}
 
 		bool TryValidateCompileReadback(
 			UObject& Asset,
-			FString& OutDiagnostic)
+			UE::UAI::Contract::FDiagnostic& OutDiagnostic)
 		{
 			const UeAgentNiagaraCompileValidation::FResult Compile =
 				UeAgentNiagaraCompileValidation::InspectAsset(&Asset);
 			if (!Compile.bCompilationComplete || Compile.bHasError
 				|| Compile.ScriptCount <= 0)
 			{
-				OutDiagnostic =
-					TEXT("graph_compound_niagara_compile_readback_failed");
+				OutDiagnostic = Compile.GetFailure(Asset.GetPathName());
+				if (OutDiagnostic.IsEmpty())
+					OutDiagnostic = NiagaraFailure(TEXT("graph_compound_niagara_compile_readback_failed"),
+						TEXT("Niagara compilation produced no scripts for independent readback."), Asset.GetPathName(),
+						TEXT("script_count"), MakeShared<FJsonValueNumber>(Compile.ScriptCount),
+						MakeShared<FJsonValueString>(TEXT("positive script count")), TEXT("native_readback"));
 				return false;
 			}
 			if (UNiagaraSystem* const System = Cast<UNiagaraSystem>(&Asset))
 			{
-				if (System->HasOutstandingCompilationRequests(true)
-					|| System->NeedsRequestCompile())
+				const bool bOutstanding = System->HasOutstandingCompilationRequests(true);
+				const bool bNeedsCompile = !bOutstanding && System->NeedsRequestCompile();
+				if (bOutstanding || bNeedsCompile)
 				{
-					OutDiagnostic =
-						TEXT("graph_compound_niagara_compile_not_settled");
+					OutDiagnostic = NiagaraFailure(TEXT("graph_compound_niagara_compile_not_settled"),
+						bOutstanding ? TEXT("The Niagara system still has outstanding compilation requests.")
+							: TEXT("The Niagara system still requires a compile request."),
+						Asset.GetPathName(), bOutstanding ? TEXT("compilation.outstanding_requests") : TEXT("compilation.needs_request"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), TEXT("native_readback"));
 					return false;
 				}
 			}
@@ -386,7 +456,7 @@ namespace UE::UAI::Composition::GraphCompound
 
 		bool TryValidateReloadedAsset(
 			const FGraphCompoundAssetCreateRequest& Request,
-			FString& OutDiagnostic)
+			UE::UAI::Contract::FDiagnostic& OutDiagnostic)
 		{
 			OutDiagnostic.Reset();
 			FGraphCompoundRuntimeError ResolveError;
@@ -395,20 +465,34 @@ namespace UE::UAI::Composition::GraphCompound
 				nullptr, *ObjectPathFromRef(Request.GetTargetRef()));
 			if (!Source || !Target)
 			{
-				OutDiagnostic = Source
-					? TEXT("graph_compound_niagara_reload_failed")
-					: ResolveError.Code;
+				OutDiagnostic = Source ? NiagaraFailure(TEXT("graph_compound_niagara_reload_failed"),
+					TEXT("The persisted Niagara asset could not be loaded."), Request.GetTargetRef(),
+					TEXT("object_path"), MakeShared<FJsonValueString>(ObjectPathFromRef(Request.GetTargetRef())),
+					MakeShared<FJsonValueString>(TEXT("loadable persisted Niagara asset")), TEXT("native_readback")) : ResolveError;
 				return false;
 			}
-			if (Target->GetClass() != Source->GetClass()
-				|| Target->GetOutermost()->GetName() != Request.GetTargetRef()
-				|| Target->GetPathName() == Source->GetPathName()
-				|| Target->GetOutermost()->IsDirty())
+			auto IdentityFailure = [&](const FString& Reason, const FString& Field,
+				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 			{
-				OutDiagnostic =
-					TEXT("graph_compound_niagara_reload_identity_mismatch");
+				OutDiagnostic = NiagaraFailure(TEXT("graph_compound_niagara_reload_identity_mismatch"),
+					Reason, Request.GetTargetRef(), Field, MoveTemp(Actual), MoveTemp(Expected), TEXT("native_readback"));
 				return false;
-			}
+			};
+			if (Target->GetClass() != Source->GetClass())
+				return IdentityFailure(TEXT("The reloaded Niagara asset class differs from the template class."),
+					TEXT("asset.class"), MakeShared<FJsonValueString>(Target->GetClass()->GetPathName()),
+					MakeShared<FJsonValueString>(Source->GetClass()->GetPathName()));
+			if (Target->GetOutermost()->GetName() != Request.GetTargetRef())
+				return IdentityFailure(TEXT("The reloaded Niagara asset belongs to a different package."),
+					TEXT("asset.package"), MakeShared<FJsonValueString>(Target->GetOutermost()->GetName()),
+					MakeShared<FJsonValueString>(Request.GetTargetRef()));
+			if (Target->GetPathName() == Source->GetPathName())
+				return IdentityFailure(TEXT("The reloaded Niagara asset resolves to the source template instead of a distinct asset."),
+					TEXT("asset.object_path"), MakeShared<FJsonValueString>(Target->GetPathName()),
+					MakeShared<FJsonValueString>(ObjectPathFromRef(Request.GetTargetRef())));
+			if (Target->GetOutermost()->IsDirty())
+				return IdentityFailure(TEXT("The reloaded Niagara package is dirty."),
+					TEXT("package.dirty"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 			if (const UNiagaraSystem* const SourceSystem =
 				Cast<UNiagaraSystem>(Source))
 			{
@@ -418,8 +502,11 @@ namespace UE::UAI::Composition::GraphCompound
 						SourceSystem->GetWarmupTime(),
 						TargetSystem->GetWarmupTime()))
 				{
-					OutDiagnostic =
-						TEXT("graph_compound_niagara_template_state_mismatch");
+					OutDiagnostic = NiagaraFailure(TEXT("graph_compound_niagara_template_state_mismatch"),
+						TEXT("The reloaded Niagara system warmup time differs from the source beyond the native comparison tolerance."),
+						Request.GetTargetRef(), TEXT("system.warmup_time"),
+						MakeShared<FJsonValueString>(::LexToString(TargetSystem->GetWarmupTime())),
+						MakeShared<FJsonValueString>(::LexToString(SourceSystem->GetWarmupTime())), TEXT("native_readback"));
 					return false;
 				}
 			}
@@ -430,11 +517,23 @@ namespace UE::UAI::Composition::GraphCompound
 					SourceEmitter->GetLatestEmitterData();
 				const FVersionedNiagaraEmitterData* const TargetData =
 					CastChecked<UNiagaraEmitter>(Target)->GetLatestEmitterData();
-				if (!SourceData || !TargetData
-					|| SourceData->bLocalSpace != TargetData->bLocalSpace)
+				if (!SourceData || !TargetData)
 				{
-					OutDiagnostic =
-						TEXT("graph_compound_niagara_template_state_mismatch");
+					OutDiagnostic = NiagaraFailure(TEXT("graph_compound_niagara_template_state_mismatch"),
+						!SourceData ? TEXT("The source Niagara emitter has no latest version data.")
+							: TEXT("The reloaded Niagara emitter has no latest version data."),
+						!SourceData ? Request.GetSourceRef() : Request.GetTargetRef(),
+						TEXT("emitter.latest_version.present"), MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true), TEXT("native_readback"));
+					return false;
+				}
+				if (SourceData->bLocalSpace != TargetData->bLocalSpace)
+				{
+					OutDiagnostic = NiagaraFailure(TEXT("graph_compound_niagara_template_state_mismatch"),
+						TEXT("The reloaded Niagara emitter local-space setting differs from its source."),
+						Request.GetTargetRef(), TEXT("emitter.local_space"),
+						MakeShared<FJsonValueBoolean>(TargetData->bLocalSpace),
+						MakeShared<FJsonValueBoolean>(SourceData->bLocalSpace), TEXT("native_readback"));
 					return false;
 				}
 			}
@@ -443,20 +542,18 @@ namespace UE::UAI::Composition::GraphCompound
 
 		bool TrySerializeResult(
 			const FString& TargetRef,
-			const FString& Revision,
 			FUeAgentContractValue& OutResult,
 			FGraphCompoundRuntimeError& OutError)
 		{
 			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-			Root->SetStringField(TEXT("revision"), Revision);
 			Root->SetStringField(TEXT("target_ref"), TargetRef);
 			FString Canonical;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			if (!Json::TryCanonicalize(Root, Canonical, Error))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_niagara_result_invalid"),
-					TargetRef, Error);
+				MarkGraphCompoundNativeDiagnostic(Error);
+				if (Error.TargetPath.IsEmpty()) Error.TargetPath = TargetRef;
+				SetError(OutError, Error, TargetRef);
 				return false;
 			}
 			OutResult = FUeAgentContractValue(MoveTemp(Canonical));
@@ -488,22 +585,29 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				OutObservation = FIndependentReadbackObservation();
 				OutError = FVerificationError();
-				FString Detail;
-				if (!TryUnloadPackage(
-						Request.GetTargetRef(), Request.GetAssetName(),
-						false, Detail))
+				UE::UAI::Contract::FDiagnostic Detail;
+				if (!UeAgentAuthoringOperationApply::TryReloadPersistedPackage(Request.GetTargetRef(), Detail))
 				{
-					OutObservation =
-						FIndependentReadbackObservation::Unavailable(
-							TEXT("graph_compound_niagara_unload_failed"), Detail);
-					return true;
+					OutError = Detail.IsEmpty() ? NiagaraFailure(TEXT("graph_compound_niagara_unload_failed"),
+						TEXT("The persisted Niagara package could not be reloaded for independent readback."),
+						Request.GetTargetRef(), TEXT("package.reload.succeeded"), MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true), TEXT("verification")) : Detail;
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+					return false;
 				}
-				FString Diagnostic;
+				if (!LoadObject<UObject>(nullptr, *ObjectPathFromRef(Request.GetTargetRef())))
+				{
+					OutError = NiagaraFailure(TEXT("graph_compound_niagara_reload_failed"),
+						TEXT("The persisted Niagara asset could not be loaded after package reload."),
+						Request.GetTargetRef(), TEXT("object_path"), MakeShared<FJsonValueString>(ObjectPathFromRef(Request.GetTargetRef())),
+						MakeShared<FJsonValueString>(TEXT("loadable persisted Niagara asset")), TEXT("verification"));
+					return false;
+				}
+				UE::UAI::Contract::FDiagnostic Diagnostic;
 				if (!TryValidateReloadedAsset(Request, Diagnostic))
 				{
 					OutObservation =
-						FIndependentReadbackObservation::Unavailable(
-							Diagnostic, TEXT("reload:")
+						FIndependentReadbackObservation::Unavailable(Diagnostic, TEXT("reload:")
 								+ Request.GetTargetRef());
 					return true;
 				}
@@ -513,7 +617,7 @@ namespace UE::UAI::Composition::GraphCompound
 						ExpectedDefinition(Profile, Request), Resources,
 						Actual, Error, Request.GetTargetRef()))
 				{
-					OutError = FVerificationError(Error.Code, Error.Detail);
+					OutError = Error;
 					return false;
 				}
 				OutObservation = FIndependentReadbackObservation::Available(
@@ -553,25 +657,34 @@ namespace UE::UAI::Composition::GraphCompound
 				OutError = FVerificationError();
 				const FString AssetName =
 					FPackageName::GetLongPackageAssetName(TargetRef);
-				FString Detail;
-				if (!TryUnloadPackage(TargetRef, AssetName, false, Detail))
+				UE::UAI::Contract::FDiagnostic Detail;
+				if (!UeAgentAuthoringOperationApply::TryReloadPersistedPackage(TargetRef, Detail))
 				{
-					OutObservation =
-						FIndependentReadbackObservation::Unavailable(
-							TEXT("graph_compound_niagara_unload_failed"), Detail);
-					return true;
+					OutError = Detail.IsEmpty() ? NiagaraFailure(TEXT("graph_compound_niagara_unload_failed"),
+						TEXT("The persisted Niagara package could not be reloaded for independent readback."),
+						TargetRef, TEXT("package.reload.succeeded"), MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true), TEXT("verification")) : Detail;
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+					return false;
 				}
 				FGraphCompoundRuntimeError ResolveError;
 				UObject* const Target = TryResolveNiagaraAsset(
 					TargetRef, ResolveError, false);
-				FString Diagnostic;
-				if (!Target || Target->GetOutermost()->IsDirty()
-					|| !TryValidateCompileReadback(*Target, Diagnostic))
+				if (!Target)
 				{
-					OutObservation =
-						FIndependentReadbackObservation::Unavailable(
-							!Target ? ResolveError.Code : Diagnostic,
-							TEXT("reload:") + TargetRef);
+					OutError = ResolveError;
+					return false;
+				}
+				UE::UAI::Contract::FDiagnostic Diagnostic;
+				const bool bDirty = Target->GetOutermost()->IsDirty();
+				if (bDirty)
+					Diagnostic = NiagaraFailure(TEXT("graph_compound_niagara_readback_dirty"),
+						TEXT("The reloaded Niagara package is dirty, so persisted state cannot be verified."),
+						TargetRef, TEXT("package.dirty"), MakeShared<FJsonValueBoolean>(true),
+						MakeShared<FJsonValueBoolean>(false), TEXT("independent_readback"));
+				if (bDirty || !TryValidateCompileReadback(*Target, Diagnostic))
+				{
+					OutObservation = FIndependentReadbackObservation::Unavailable(Diagnostic, TEXT("reload:") + TargetRef);
 					return true;
 				}
 				FUeAgentCanonicalValuePtr Actual;
@@ -580,7 +693,7 @@ namespace UE::UAI::Composition::GraphCompound
 						TEXT("requested"), Resources, Actual,
 						Error, TargetRef))
 				{
-					OutError = FVerificationError(Error.Code, Error.Detail);
+					OutError = Error;
 					return false;
 				}
 				OutObservation = FIndependentReadbackObservation::Available(
@@ -651,24 +764,42 @@ namespace UE::UAI::Composition::GraphCompound
 		OutError = {};
 		if (!IsInGameThread() || Cancellation->IsCancelled())
 		{
-			SetError(OutError,
-				Cancellation->IsCancelled()
-					? TEXT("graph_compound_niagara_asset_cancelled")
-					: TEXT("graph_compound_niagara_asset_thread_invalid"),
-				Profile.GetCapabilityId());
+			const bool bCancelled = Cancellation->IsCancelled();
+			OutError = NiagaraFailure(bCancelled ? TEXT("graph_compound_niagara_asset_cancelled") : TEXT("graph_compound_niagara_asset_thread_invalid"),
+				bCancelled ? TEXT("Niagara asset creation was cancelled before execution.") : TEXT("Niagara asset creation must run on the game thread."),
+				Request.GetTargetRef(), bCancelled ? TEXT("cancellation.requested") : TEXT("execution.game_thread"),
+				MakeShared<FJsonValueBoolean>(bCancelled), MakeShared<FJsonValueBoolean>(!bCancelled));
 			return false;
 		}
-		if (Plan->GetDescriptorIdentity()
-				!= Profile.GetExecutionContract().GetDescriptorIdentity()
-			|| Plan->GetChangeSet().GetChanges().Num() != 1
-			|| Plan->GetChangeSet().GetChanges()[0].GetIntent()
-				!= EChangeIntent::Create
-			|| Plan->GetChangeSet().GetChanges()[0]
-				.GetIdentity().GetOwnerId() != Request.GetTargetRef())
+		if (Plan->GetDescriptorIdentity() != Profile.GetExecutionContract().GetDescriptorIdentity())
 		{
-			SetError(OutError,
-				TEXT("graph_compound_niagara_asset_plan_invalid"),
-				Request.GetTargetRef());
+			OutError = DescriptorMismatch(TEXT("graph_compound_niagara_asset_plan_invalid"), Request.GetTargetRef(),
+				Plan->GetDescriptorIdentity(), Profile.GetExecutionContract().GetDescriptorIdentity());
+			return false;
+		}
+		if (Plan->GetChangeSet().GetChanges().Num() != 1)
+		{
+			OutError = NiagaraFailure(TEXT("graph_compound_niagara_asset_plan_invalid"),
+				TEXT("Niagara asset creation requires exactly one planned change."), Request.GetTargetRef(), TEXT("changes.count"),
+				MakeShared<FJsonValueNumber>(Plan->GetChangeSet().GetChanges().Num()), MakeShared<FJsonValueNumber>(1));
+			return false;
+		}
+		const auto& CreateChange = Plan->GetChangeSet().GetChanges()[0];
+		if (CreateChange.GetIntent() != EChangeIntent::Create)
+		{
+			OutError = NiagaraFailure(TEXT("graph_compound_niagara_asset_plan_invalid"),
+				TEXT("The Niagara asset plan change must have create intent."), Request.GetTargetRef(), TEXT("changes[0].intent"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(CreateChange.GetIntent())),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(EChangeIntent::Create)));
+			OutError.OperationIndex = 0;
+			return false;
+		}
+		if (CreateChange.GetIdentity().GetOwnerId() != Request.GetTargetRef())
+		{
+			OutError = NiagaraFailure(TEXT("graph_compound_niagara_asset_plan_invalid"),
+				TEXT("The Niagara asset plan change owner differs from the target."), Request.GetTargetRef(), TEXT("changes[0].owner"),
+				MakeShared<FJsonValueString>(CreateChange.GetIdentity().GetOwnerId()), MakeShared<FJsonValueString>(Request.GetTargetRef()));
+			OutError.OperationIndex = 0;
 			return false;
 		}
 
@@ -689,9 +820,8 @@ namespace UE::UAI::Composition::GraphCompound
 				Plan, Current.ToSharedRef(), CallerContext,
 				Resources, RevalidateError))
 		{
-			SetError(OutError, RevalidateError.GetCode(),
-				RevalidateError.GetIdentityKey(),
-				RevalidateError.GetDetail());
+			OutError = RevalidateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = RevalidateError.SubjectId;
 			return false;
 		}
 
@@ -710,11 +840,10 @@ namespace UE::UAI::Composition::GraphCompound
 		FAssetDurableError DurableError;
 		if (!TryPrepareAssetDurability(
 				DurableRequest, DurableBackend, JournalRoot,
-				Resources, Prepared, DurableError)
-			|| !Prepared.IsValid())
+				Resources, Prepared, DurableError))
 		{
-			SetError(OutError, DurableError.GetCode(),
-				Request.GetTargetRef(), DurableError.GetDetail());
+			OutError = DurableError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
 			return false;
 		}
 
@@ -729,9 +858,8 @@ namespace UE::UAI::Composition::GraphCompound
 		const bool bCreated = CreatedAsset
 			&& CreatedAsset->GetClass() == Source->GetClass()
 			&& CreatedAsset->GetOutermost() == Package;
-		const bool bSettled = bCreated
-			&& NativeHook.TryCompileAndSettleNiagara(
-				*CreatedAsset, Settle, NativeError)
+		const bool bCompiled = bCreated && NativeHook.TryCompileAndSettleNiagara(*CreatedAsset, Settle, NativeError);
+		const bool bSettled = bCompiled
 			&& Settle.IsCompilationComplete()
 			&& Settle.GetCompileErrorCount() == 0
 			&& Settle.GetStackIssueCount() == 0;
@@ -739,22 +867,50 @@ namespace UE::UAI::Composition::GraphCompound
 			== bSourceWasDirty;
 		if (!bCreated || !bSettled || !bSourceUnchanged)
 		{
+			if (NativeError.IsEmpty())
+			{
+				if (!Package)
+					NativeError = NiagaraFailure(TEXT("graph_compound_niagara_asset_create_failed"),
+						TEXT("The target Niagara package could not be created."), Request.GetTargetRef(),
+						TEXT("package.created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				else if (!CreatedAsset)
+					NativeError = NiagaraFailure(TEXT("graph_compound_niagara_asset_create_failed"),
+						TEXT("Duplicating the source Niagara asset into the target package failed."), Request.GetTargetRef(),
+						TEXT("source_ref"), MakeShared<FJsonValueString>(Request.GetSourceRef()),
+						MakeShared<FJsonValueString>(TEXT("source successfully duplicated into target")));
+				else if (CreatedAsset->GetClass() != Source->GetClass())
+					NativeError = NiagaraFailure(TEXT("graph_compound_niagara_asset_create_failed"),
+						TEXT("The duplicated Niagara asset class differs from its source."), Request.GetTargetRef(),
+						TEXT("asset.class"), MakeShared<FJsonValueString>(CreatedAsset->GetClass()->GetPathName()),
+						MakeShared<FJsonValueString>(Source->GetClass()->GetPathName()));
+				else if (CreatedAsset->GetOutermost() != Package)
+					NativeError = NiagaraFailure(TEXT("graph_compound_niagara_asset_create_failed"),
+						TEXT("The duplicated Niagara asset belongs to a different package."), Request.GetTargetRef(),
+						TEXT("asset.package"), MakeShared<FJsonValueString>(CreatedAsset->GetOutermost()->GetName()),
+						MakeShared<FJsonValueString>(Package->GetName()));
+				else if (!bCompiled)
+					NativeError = NiagaraFailure(TEXT("graph_compound_niagara_asset_create_failed"),
+						TEXT("Native compilation of the duplicated Niagara asset failed."), Request.GetTargetRef(),
+						TEXT("compilation.succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("compile"));
+				else if (!bSettled)
+					NativeError = SettleFailure(Request.GetTargetRef(), Settle);
+				else
+					NativeError = NiagaraFailure(TEXT("graph_compound_niagara_asset_source_changed"),
+						TEXT("Creating the Niagara asset changed the source template package's dirty state."), Request.GetSourceRef(),
+						TEXT("source.package.dirty"), MakeShared<FJsonValueBoolean>(Source->GetOutermost()->IsDirty()),
+						MakeShared<FJsonValueBoolean>(bSourceWasDirty));
+			}
+			if (Package) NativeError.MutationMayHaveStarted = true;
 			CreatedAsset = nullptr;
 			Package = nullptr;
 			Source = nullptr;
-			FString RollbackDetail;
+			UE::UAI::Contract::FDiagnostic RollbackDetail;
 			TryRollback(
 				Request.GetTargetRef(), Request.GetAssetName(), false,
 				Prepared.ToSharedRef(), DurableBackend, FencingToken,
 				Resources, RollbackDetail);
-			SetError(OutError,
-				!bSourceUnchanged
-					? TEXT("graph_compound_niagara_source_mutated")
-					: NativeError.GetCode().IsEmpty()
-						? TEXT("graph_compound_niagara_asset_create_failed")
-						: NativeError.GetCode(),
-				Request.GetTargetRef(),
-				NativeError.GetDetail() + TEXT(";") + RollbackDetail);
+			if (NativeError.TargetPath.IsEmpty()) NativeError.TargetPath = Request.GetTargetRef();
+			SetError(OutError, NativeError, Request.GetTargetRef(), RollbackDetail);
 			return false;
 		}
 
@@ -763,21 +919,20 @@ namespace UE::UAI::Composition::GraphCompound
 		CreatedAsset->GetOutermost()->MarkPackageDirty();
 		FAssetRegistryModule::AssetCreated(CreatedAsset);
 		FDurableReceipt DurableReceipt;
-		if (!TryPersistAssetDurability(
+		if (!TryPersistAssetDurabilityForVerification(
 				Prepared.ToSharedRef(), DurableBackend, FencingToken,
 				Resources, DurableReceipt, DurableError))
 		{
 			CreatedAsset = nullptr;
 			Package = nullptr;
 			Source = nullptr;
-			FString RollbackDetail;
+			UE::UAI::Contract::FDiagnostic RollbackDetail;
 			TryRollback(
 				Request.GetTargetRef(), Request.GetAssetName(), true,
 				Prepared.ToSharedRef(), DurableBackend, FencingToken,
 				Resources, RollbackDetail);
-			SetError(OutError, DurableError.GetCode(),
-				Request.GetTargetRef(),
-				DurableError.GetDetail() + TEXT(";") + RollbackDetail);
+			SetError(OutError, DurableError, Request.GetTargetRef(), RollbackDetail);
+			OutError.MutationMayHaveStarted = true;
 			return false;
 		}
 		CreatedAsset->GetOutermost()->SetDirtyFlag(false);
@@ -795,52 +950,49 @@ namespace UE::UAI::Composition::GraphCompound
 			Oracle = MakeShared<FNiagaraAssetReadbackOracle,
 				ESPMode::ThreadSafe>(Profile, Request);
 		FIndependentReadbackOutcome Outcome;
+		if (!Expected.IsValid())
+			VerifyError = NiagaraFailure(TEXT("graph_compound_niagara_asset_readback_failed"),
+				TEXT("The planned Niagara change has no expected value for independent readback."), Request.GetTargetRef(),
+				TEXT("changes[0].after.present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("verification"));
 		if (!Expected.IsValid()
 			|| !FIndependentReadbackService::TryCreate(
 				{Oracle}, Readback, VerifyError)
-			|| !Readback.IsValid()
-			|| !Readback->TryVerify(
+			|| !Readback->TryObserve(
 				FIndependentReadbackRequest(
 					TEXT("graph-compound:") + Plan->GetRequestId(),
 					NiagaraAssetReadbackOracleId,
 					Request.GetTargetRef(), Expected.ToSharedRef()),
-				Resources, Outcome, VerifyError)
-			|| Outcome.GetStatus() != EVerificationStatus::Verified)
+				Resources, Outcome, VerifyError))
 		{
-			FString RollbackDetail;
+			UE::UAI::Contract::FDiagnostic RollbackDetail;
 			TryRollback(
 				Request.GetTargetRef(), Request.GetAssetName(), true,
 				Persisted, DurableBackend, FencingToken,
 				Resources, RollbackDetail);
-			SetError(OutError,
-				VerifyError.GetCode().IsEmpty()
-					? TEXT("graph_compound_niagara_asset_readback_failed")
-					: VerifyError.GetCode(),
-				Request.GetTargetRef(),
-				Outcome.GetDiagnosticCode() + TEXT(";") + RollbackDetail);
+			SetError(OutError, Outcome.GetFailureDiagnostic(VerifyError), Request.GetTargetRef(), RollbackDetail);
+			OutError.MutationMayHaveStarted = true;
 			return false;
 		}
 
 		const FDurableVerificationAcknowledgement Acknowledgement(
 			DurableReceipt.GetJournalId(), Plan->GetFingerprint(),
 			Prepared->GetInventory().GetInventoryHash(),
-			Outcome.GetEvidenceId(), JournalOwner, FencingToken);
+			Outcome.GetEvidenceId(), JournalOwner, FencingToken, Outcome.GetStatus() == EVerificationStatus::Verified);
 		if (!TryAcknowledgeAssetDurability(
 				Persisted, Acknowledgement, FencingToken,
 				Resources, DurableError))
 		{
-			FString RollbackDetail;
+			UE::UAI::Contract::FDiagnostic RollbackDetail;
 			TryRollback(
 				Request.GetTargetRef(), Request.GetAssetName(), true,
 				Persisted, DurableBackend, FencingToken,
 				Resources, RollbackDetail);
-			SetError(OutError, DurableError.GetCode(),
-				Request.GetTargetRef(),
-				DurableError.GetDetail() + TEXT(";") + RollbackDetail);
+			SetError(OutError, DurableError, Request.GetTargetRef(), RollbackDetail);
+			OutError.MutationMayHaveStarted = true;
 			return false;
 		}
 		return TrySerializeResult(
-			Request.GetTargetRef(), Outcome.GetEvidenceId(),
+			Request.GetTargetRef(),
 			OutResult, OutError);
 	}
 
@@ -899,14 +1051,58 @@ namespace UE::UAI::Composition::GraphCompound
 				!= Profile.GetExecutionContract().GetDescriptorIdentity()
 			|| Plan->GetChangeSet().GetChanges().Num() != 1)
 		{
-			SetError(OutError,
-				Cancellation->IsCancelled()
-					? TEXT("graph_compound_niagara_compile_cancelled")
-					: !IsInGameThread()
-						? TEXT("graph_compound_niagara_compile_thread_invalid")
-						: TEXT("graph_compound_niagara_compile_plan_invalid"),
-				TargetRef);
-			return false;
+			const bool bCancelled = Cancellation->IsCancelled();
+			auto Fail = [&](const FString& Reason, const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+			{
+				OutError = NiagaraFailure(bCancelled ? TEXT("graph_compound_niagara_compile_cancelled")
+					: !IsInGameThread() ? TEXT("graph_compound_niagara_compile_thread_invalid")
+					: TEXT("graph_compound_niagara_compile_plan_invalid"), Reason, TargetRef, Field, MoveTemp(Actual), MoveTemp(Expected));
+				return false;
+			};
+			if (bCancelled)
+				return Fail(TEXT("The Niagara compile operation was cancelled before execution."), TEXT("cancellation.requested"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+			if (!IsInGameThread())
+				return Fail(TEXT("Niagara compilation must run on the game thread."), TEXT("execution.game_thread"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			if (!bPayloadValid)
+			{
+				if (Payload.GetEdits().Num() != 1)
+					return Fail(TEXT("Niagara compilation requires exactly one payload edit."), TEXT("edits.count"),
+						MakeShared<FJsonValueNumber>(Payload.GetEdits().Num()), MakeShared<FJsonValueNumber>(1));
+				const auto& Edit = Payload.GetEdits()[0];
+				if (Edit.GetIntent() != EChangeIntent::Update)
+					return Fail(TEXT("The Niagara compile edit must have update intent."), TEXT("edits[0].intent"),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetIntent())),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(EChangeIntent::Update)));
+				if (Edit.GetIdentity().GetSemanticId() != CompileSemanticId)
+				{
+					Fail(TEXT("The edit does not address the Niagara compile lifecycle operation."), TEXT("edits[0].semantic_id"), nullptr, nullptr);
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Edit.GetIdentity().GetSemanticId());
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(CompileSemanticId);
+					return false;
+				}
+				if (Edit.GetIdentity().GetOwnerId() != TargetRef)
+					return Fail(TEXT("The Niagara compile edit owner differs from the target."), TEXT("edits[0].owner"),
+						MakeShared<FJsonValueString>(Edit.GetIdentity().GetOwnerId()), MakeShared<FJsonValueString>(TargetRef));
+				if (!Edit.GetProposedAfter().IsValid())
+					return Fail(TEXT("The Niagara compile edit has no proposed value."), TEXT("edits[0].after.present"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				if (Edit.GetProposedAfter()->GetKind() != EUeAgentValueKind::String)
+					return Fail(TEXT("The Niagara compile proposed value must be a string."), TEXT("edits[0].after.kind"),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetProposedAfter()->GetKind())),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(EUeAgentValueKind::String)));
+				return Fail(TEXT("The Niagara compile proposed value must request compilation."), TEXT("edits[0].after"),
+					MakeShared<FJsonValueString>(Edit.GetProposedAfter()->GetText()), MakeShared<FJsonValueString>(TEXT("requested")));
+			}
+			if (Plan->GetDescriptorIdentity() != Profile.GetExecutionContract().GetDescriptorIdentity())
+			{
+				OutError = DescriptorMismatch(TEXT("graph_compound_niagara_compile_plan_invalid"), TargetRef,
+					Plan->GetDescriptorIdentity(), Profile.GetExecutionContract().GetDescriptorIdentity());
+				return false;
+			}
+			return Fail(TEXT("Niagara compilation requires exactly one planned change."), TEXT("changes.count"),
+				MakeShared<FJsonValueNumber>(Plan->GetChangeSet().GetChanges().Num()), MakeShared<FJsonValueNumber>(1));
 		}
 
 		UObject* Target = TryResolveNiagaraAsset(TargetRef, OutError, false);
@@ -914,6 +1110,8 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			return false;
 		}
+		const FString TargetPackageName = Target->GetOutermost()->GetName();
+		const FString TargetAssetName = Target->GetName();
 		FUeAgentCanonicalSnapshotPtr Current;
 		if (!TryCaptureCompileSnapshot(
 				Profile, TargetRef, Resources, Current, OutError))
@@ -925,9 +1123,8 @@ namespace UE::UAI::Composition::GraphCompound
 				Plan, Current.ToSharedRef(), CallerContext,
 				Resources, RevalidateError))
 		{
-			SetError(OutError, RevalidateError.GetCode(),
-				RevalidateError.GetIdentityKey(),
-				RevalidateError.GetDetail());
+			OutError = RevalidateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = RevalidateError.SubjectId;
 			return false;
 		}
 
@@ -938,7 +1135,7 @@ namespace UE::UAI::Composition::GraphCompound
 			Plan,
 			{FAssetDurableTarget(
 				Plan->GetChangeSet().GetChanges()[0].GetIdentity(),
-				TargetRef, EPackageHeaderKind::Asset,
+				TargetPackageName, EPackageHeaderKind::Asset,
 				EAssetDurableIntent::Save,
 				ERollbackGrade::DurableBackup)},
 			FencingToken, JournalOwner, EAtomicityMode::CompensatedSaga);
@@ -946,50 +1143,51 @@ namespace UE::UAI::Composition::GraphCompound
 		FAssetDurableError DurableError;
 		if (!TryPrepareAssetDurability(
 				DurableRequest, DurableBackend, JournalRoot,
-				Resources, Prepared, DurableError)
-			|| !Prepared.IsValid())
+				Resources, Prepared, DurableError))
 		{
-			SetError(OutError, DurableError.GetCode(),
-				TargetRef, DurableError.GetDetail());
+			OutError = DurableError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TargetRef;
 			return false;
 		}
 
 		FMaterialNiagaraGraphCompileSettleReceipt Settle;
 		FMaterialNiagaraGraphAdapterError NativeError;
-		if (!NativeHook.TryCompileAndSettleNiagara(
-				*Target, Settle, NativeError)
+		const bool bCompiled = NativeHook.TryCompileAndSettleNiagara(*Target, Settle, NativeError);
+		if (!bCompiled
 			|| !Settle.IsCompilationComplete()
 			|| Settle.GetCompileErrorCount() != 0
 			|| Settle.GetStackIssueCount() != 0)
 		{
+			if (NativeError.IsEmpty())
+				NativeError = bCompiled ? SettleFailure(TargetRef, Settle)
+					: NiagaraFailure(TEXT("graph_compound_niagara_compile_failed"),
+						TEXT("Native Niagara compilation failed."), TargetRef, TEXT("compilation.succeeded"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("compile"));
+			NativeError.MutationMayHaveStarted = true;
 			Target = nullptr;
-			FString RollbackDetail;
+			UE::UAI::Contract::FDiagnostic RollbackDetail;
 			TryRollback(
-				TargetRef, FPackageName::GetLongPackageAssetName(TargetRef),
+				TargetPackageName, TargetAssetName,
 				false, Prepared.ToSharedRef(), DurableBackend,
 				FencingToken, Resources, RollbackDetail);
-			SetError(OutError,
-				NativeError.GetCode().IsEmpty()
-					? TEXT("graph_compound_niagara_compile_failed")
-					: NativeError.GetCode(),
-				TargetRef,
-				NativeError.GetDetail() + TEXT(";") + RollbackDetail);
+			if (NativeError.TargetPath.IsEmpty()) NativeError.TargetPath = TargetRef;
+			SetError(OutError, NativeError, TargetRef, RollbackDetail);
 			return false;
 		}
 		Target->GetOutermost()->MarkPackageDirty();
 		FDurableReceipt DurableReceipt;
-		if (!TryPersistAssetDurability(
+		if (!TryPersistAssetDurabilityForVerification(
 				Prepared.ToSharedRef(), DurableBackend, FencingToken,
 				Resources, DurableReceipt, DurableError))
 		{
 			Target = nullptr;
-			FString RollbackDetail;
+			UE::UAI::Contract::FDiagnostic RollbackDetail;
 			TryRollback(
-				TargetRef, FPackageName::GetLongPackageAssetName(TargetRef),
+				TargetPackageName, TargetAssetName,
 				false, Prepared.ToSharedRef(), DurableBackend,
 				FencingToken, Resources, RollbackDetail);
-			SetError(OutError, DurableError.GetCode(), TargetRef,
-				DurableError.GetDetail() + TEXT(";") + RollbackDetail);
+			SetError(OutError, DurableError, TargetRef, RollbackDetail);
+			OutError.MutationMayHaveStarted = true;
 			return false;
 		}
 		Target->GetOutermost()->SetDirtyFlag(false);
@@ -1005,50 +1203,48 @@ namespace UE::UAI::Composition::GraphCompound
 			Oracle = MakeShared<FNiagaraCompileReadbackOracle,
 				ESPMode::ThreadSafe>(TargetRef);
 		FIndependentReadbackOutcome Outcome;
+		if (!Expected.IsValid())
+			VerifyError = NiagaraFailure(TEXT("graph_compound_niagara_compile_readback_failed"),
+				TEXT("The planned Niagara change has no expected value for independent readback."), TargetRef,
+				TEXT("changes[0].after.present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("verification"));
 		if (!Expected.IsValid()
 			|| !FIndependentReadbackService::TryCreate(
 				{Oracle}, Readback, VerifyError)
-			|| !Readback.IsValid()
-			|| !Readback->TryVerify(
+			|| !Readback->TryObserve(
 				FIndependentReadbackRequest(
 					TEXT("graph-compound:") + Plan->GetRequestId(),
 					NiagaraCompileReadbackOracleId,
 					TargetRef, Expected.ToSharedRef()),
-				Resources, Outcome, VerifyError)
-			|| Outcome.GetStatus() != EVerificationStatus::Verified)
+				Resources, Outcome, VerifyError))
 		{
-			FString RollbackDetail;
+			UE::UAI::Contract::FDiagnostic RollbackDetail;
 			TryRollback(
-				TargetRef, FPackageName::GetLongPackageAssetName(TargetRef),
+				TargetPackageName, TargetAssetName,
 				false, Persisted, DurableBackend, FencingToken,
 				Resources, RollbackDetail);
-			SetError(OutError,
-				VerifyError.GetCode().IsEmpty()
-					? TEXT("graph_compound_niagara_compile_readback_failed")
-					: VerifyError.GetCode(),
-				TargetRef,
-				Outcome.GetDiagnosticCode() + TEXT(";") + RollbackDetail);
+			SetError(OutError, Outcome.GetFailureDiagnostic(VerifyError), TargetRef, RollbackDetail);
+			OutError.MutationMayHaveStarted = true;
 			return false;
 		}
 
 		const FDurableVerificationAcknowledgement Acknowledgement(
 			DurableReceipt.GetJournalId(), Plan->GetFingerprint(),
 			Prepared->GetInventory().GetInventoryHash(),
-			Outcome.GetEvidenceId(), JournalOwner, FencingToken);
+			Outcome.GetEvidenceId(), JournalOwner, FencingToken, Outcome.GetStatus() == EVerificationStatus::Verified);
 		if (!TryAcknowledgeAssetDurability(
 				Persisted, Acknowledgement, FencingToken,
 				Resources, DurableError))
 		{
-			FString RollbackDetail;
+			UE::UAI::Contract::FDiagnostic RollbackDetail;
 			TryRollback(
-				TargetRef, FPackageName::GetLongPackageAssetName(TargetRef),
+				TargetPackageName, TargetAssetName,
 				false, Persisted, DurableBackend, FencingToken,
 				Resources, RollbackDetail);
-			SetError(OutError, DurableError.GetCode(), TargetRef,
-				DurableError.GetDetail() + TEXT(";") + RollbackDetail);
+			SetError(OutError, DurableError, TargetRef, RollbackDetail);
+			OutError.MutationMayHaveStarted = true;
 			return false;
 		}
 		return TrySerializeResult(
-			TargetRef, Outcome.GetEvidenceId(), OutResult, OutError);
+			TargetRef, OutResult, OutError);
 	}
 }

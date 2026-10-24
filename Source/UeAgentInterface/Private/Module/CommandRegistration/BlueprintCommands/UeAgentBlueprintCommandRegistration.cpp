@@ -33,12 +33,15 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintCommands
 			const FString& Id,
 			const FUeAgentCommandContractRegistry& Legacy,
 			FUeAgentCommandDeclaration& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(Id);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("blueprint_command_contract_missing:") + Id;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("blueprint_command_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_command_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			const bool bQuery = DomainAdapters::BlueprintCommands::IsQuery(Id);
@@ -60,12 +63,17 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintCommands
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
 					TEXT("Exact Blueprint mechanics parameter."),
+					Parameter.GetSchemaJson(),
 				});
 			}
 			Result.ResultFields = {{
 				TEXT("result"), TEXT("object"), true, false,
 				TEXT("Native Blueprint result with revision and readback evidence."),
 			}};
+			if (Id.EndsWith(TEXT(".asset.create")))
+			{
+				Result.ModelResultFields = {{TEXT("target_ref"), {TEXT("target_ref")}}};
+			}
 			Result.Errors = {
 				{TEXT("blueprint_command_authority_required"),
 					TEXT("The caller lacks the public query or operation authority.")},
@@ -82,14 +90,14 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintCommands
 			Result.Purpose.Preconditions = {
 				TEXT("Resolve the exact target and required revision before execution."),
 			};
-			Result.Purpose.ParameterGuidance = TEXT("Use only query.command.detail fields.");
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters.");
 			Result.Purpose.ResultGuidance = TEXT("Use native revision and independent Blueprint readback evidence.");
 			Result.Purpose.FailureGuidance = TEXT("Prewrite failures leave no residue; unknown state requires reconciliation.");
 			Result.Purpose.SideEffectGuidance = bQuery
 				? TEXT("Read-only component event discovery.")
 				: TEXT("Mutates only the exact Blueprint target through native mechanics.");
 			Result.Purpose.MinimumExample = Result.PythonFunction + TEXT("(client, params)");
-			Result.Purpose.RelatedFlows = {TEXT("query.command.detail"), TEXT("asset readback")};
+			Result.Purpose.RelatedFlows = {TEXT("query.command.usage"), TEXT("asset readback")};
 			Result.Purpose.Keywords = {TEXT("blueprint"), TEXT("component"), TEXT("operation")};
 			Result.Purpose.Synonyms = {TEXT("Blueprint authoring")};
 			Out = MoveTemp(Result);
@@ -116,7 +124,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintCommands
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::BlueprintCommands::TryCreateHandlers(
 					Out, OutError);
@@ -131,7 +139,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintCommands
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();

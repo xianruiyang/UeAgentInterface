@@ -13,16 +13,7 @@ namespace
 
 	FUeAgentResourceTracker MakeCanonicalJsonTracker()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 4 * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 4 * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 4 * 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 32768},
-			{EUeAgentResourceDimension::Items, 32768},
-			{EUeAgentResourceDimension::ReferenceEdges, 65536},
-			{EUeAgentResourceDimension::WorkUnits, 262144},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 16 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 }
 

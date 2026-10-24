@@ -1,6 +1,5 @@
 {
   "schema": "uai.domain_adapter.landscape_geometry_effect.test_fixture.v1",
-  "descriptor_count": 2,
   "native_operation_types": [
     "landscape.geometry.create",
     "landscape.geometry.height_delta"
@@ -9,7 +8,7 @@
     {
       "descriptor_id": "uai.operation.landscape.create",
       "version": 1,
-      "descriptor_hash": "sha256:237659fc6faffd0b1d9b475624939f0140ff45417ef2654601a8618be58fd7eb",
+      "descriptor_hash": "sha256:4f2b733573911a661cf5b974e58d168a0d3a2d5a6753f95eb95e7b8c84bc8c3a",
       "capability_id": "landscape.create",
       "native_operation_type": "landscape.geometry.create",
       "required_context_facets": ["level", "world"],
@@ -34,7 +33,7 @@
               "sections_per_component": {"type": "number", "enum": [1, 2]},
               "component_count": {
                 "type": "array",
-                "items": {"type": "number", "minimum": 1, "maximum": 64},
+                "items": {"type": "number", "minimum": 1},
                 "minItems": 2,
                 "maxItems": 2
               }

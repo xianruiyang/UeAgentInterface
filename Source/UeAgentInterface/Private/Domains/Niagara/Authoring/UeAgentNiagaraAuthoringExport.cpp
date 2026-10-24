@@ -18,28 +18,57 @@ namespace UeAgentNiagaraAuthoring
 	namespace
 	{
 		using namespace UeAgentExportContract;
-		// Editable workspaces are durable, re-importable artifacts rather than a
-		// response projection. Keep their proxy gate no stricter than the shared
-		// 64 MiB canonical-output budget (ceil(chars / 4) <= 16 Mi tokens), so
-		// token policy cannot become a semantic nesting-depth limit.
-		constexpr int32 EditableWorkspaceTokenBudget = 16 * 1024 * 1024;
-		constexpr int32 AuthoringTokenBudget = EditableWorkspaceTokenBudget;
-		constexpr int32 ReadbackTokenBudget = EditableWorkspaceTokenBudget;
-		constexpr int32 DebugTokenBudget = 32 * 1024 * 1024;
-		constexpr int32 ValidationTokenBudget = 32768;
 		constexpr const TCHAR* EmitterOwnerTargetProjectorId = TEXT("uai.export.niagara.emitter_owner.target");
 		constexpr const TCHAR* EmitterOwnerEnabledProjectorId = TEXT("uai.export.niagara.emitter_owner.enabled");
 		constexpr const TCHAR* StageSnapshotOperationProjectorId = TEXT("uai.export.niagara.stage.operation_replace");
 
+		UE::UAI::Contract::FDiagnostic ProjectionValueFailure(const TCHAR* Code,
+			const FString& Reason, const FString& Field, const TSharedPtr<FJsonValue>& Actual,
+			const TSharedPtr<FJsonValue>& Expected)
+		{
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("export_projection"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.ActualValue = Actual;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValue = Expected;
+			Error.ExpectedValuePresent = Expected.IsValid();
+			return Error;
+		}
+
+		UE::UAI::Contract::FDiagnostic ProjectorRequestFailure(const TCHAR* Code,
+			const UeAgentSnapshotProjector::FProjectorRequest& Request)
+		{
+			if (!Request.IsValid())
+				return ProjectionValueFailure(Code,
+					TEXT("Niagara field projection requires its contract, profile, and field descriptor."),
+					!Request.Contract ? TEXT("contract.available") : !Request.Profile ? TEXT("profile.available") : TEXT("field.available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return ProjectionValueFailure(Code,
+				TEXT("This Niagara field projection requires exactly one snapshot entry."),
+				TEXT("entry_count"), MakeShared<FJsonValueNumber>(Request.Entries.Num()),
+				MakeShared<FJsonValueNumber>(1));
+		}
+
+		UE::UAI::Contract::FDiagnostic ProjectionEntryFailure(const TCHAR* Code,
+			const FString& Reason, const FString& Field,
+			const UeAgentAuthoringState::FStateEntry& Entry, const int32 EntryIndex,
+			const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected)
+		{
+			auto Error = ProjectionValueFailure(Code, Reason, Field, Actual, Expected);
+			Error.TargetPath = Entry.TargetIdentity.GetSelector(TEXT("asset_path"));
+			Error.CandidateName = Entry.TargetIdentity.GetSelector(TEXT("emitter_name"));
+			Error.OperationIndex = EntryIndex;
+			return Error;
+		}
+
 		FProfileDescriptor Profile(
 			const TCHAR* Id,
-			const TArray<FString>& Roles,
-			const int32 TokenBudget)
+			const TArray<FString>& Roles)
 		{
 			FProfileDescriptor Result;
 			Result.ProfileId = Id;
 			Result.IncludedRoles = Roles;
-			Result.TokenBudget = TokenBudget;
 			return Result;
 		}
 
@@ -73,13 +102,13 @@ namespace UeAgentNiagaraAuthoring
 		bool ProjectEmitterOwnerTarget(
 			const UeAgentSnapshotProjector::FProjectorRequest& Request,
 			UeAgentSnapshotProjector::FProjectedValue& OutValue,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutValue = UeAgentSnapshotProjector::FProjectedValue();
 			OutError.Reset();
 			if (!Request.IsValid() || Request.Entries.Num() != 1)
 			{
-				OutError = TEXT("niagara_emitter_owner_target_projection_cardinality_invalid");
+				OutError = ProjectorRequestFailure(TEXT("niagara_emitter_owner_target_projection_cardinality_invalid"), Request);
 				return false;
 			}
 			const TSharedPtr<FJsonObject> State = Request.Entries[0].Value.IsValid()
@@ -88,7 +117,9 @@ namespace UeAgentNiagaraAuthoring
 				: nullptr;
 			if (!State.IsValid())
 			{
-				OutError = TEXT("niagara_emitter_owner_target_state_invalid");
+				OutError = ProjectionEntryFailure(TEXT("niagara_emitter_owner_target_state_invalid"),
+					TEXT("The emitter owner snapshot entry must contain an object state."), TEXT("state"),
+					Request.Entries[0], 0, Request.Entries[0].Value, MakeShared<FJsonValueString>(TEXT("object")));
 				return false;
 			}
 
@@ -109,13 +140,13 @@ namespace UeAgentNiagaraAuthoring
 		bool ProjectEmitterOwnerEnabled(
 			const UeAgentSnapshotProjector::FProjectorRequest& Request,
 			UeAgentSnapshotProjector::FProjectedValue& OutValue,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutValue = UeAgentSnapshotProjector::FProjectedValue();
 			OutError.Reset();
 			if (!Request.IsValid() || Request.Entries.Num() != 1)
 			{
-				OutError = TEXT("niagara_emitter_owner_enabled_projection_cardinality_invalid");
+				OutError = ProjectorRequestFailure(TEXT("niagara_emitter_owner_enabled_projection_cardinality_invalid"), Request);
 				return false;
 			}
 			const TSharedPtr<FJsonObject> State = Request.Entries[0].Value.IsValid()
@@ -135,13 +166,13 @@ namespace UeAgentNiagaraAuthoring
 		bool ProjectStageSnapshotOperation(
 			const UeAgentSnapshotProjector::FProjectorRequest& Request,
 			UeAgentSnapshotProjector::FProjectedValue& OutValue,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutValue = UeAgentSnapshotProjector::FProjectedValue();
 			OutError.Reset();
 			if (!Request.IsValid() || Request.Entries.Num() != 1)
 			{
-				OutError = TEXT("niagara_stage_snapshot_operation_projection_cardinality_invalid");
+				OutError = ProjectorRequestFailure(TEXT("niagara_stage_snapshot_operation_projection_cardinality_invalid"), Request);
 				return false;
 			}
 			OutValue.Value = MakeShared<FJsonValueString>(TEXT("replace"));
@@ -152,7 +183,7 @@ namespace UeAgentNiagaraAuthoring
 		bool RegisterEmitterOwnerProjector(
 			const FString& ProjectorId,
 			UeAgentSnapshotProjector::FProjector Projector,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentSnapshotProjector::FProjectorDescriptor Descriptor;
 			Descriptor.ProjectorId = ProjectorId;
@@ -190,10 +221,10 @@ namespace UeAgentNiagaraAuthoring
 			};
 			Result.DefaultProfile = TEXT("llm_authoring");
 			Result.Profiles = {
-				Profile(TEXT("llm_authoring"), { TEXT("identity"), TEXT("authoring") }, AuthoringTokenBudget),
-				Profile(TEXT("readback"), { TEXT("identity"), TEXT("authoring"), TEXT("readback") }, ReadbackTokenBudget),
-				Profile(TEXT("debug"), { TEXT("identity"), TEXT("authoring"), TEXT("readback"), TEXT("diagnostics"), TEXT("validation") }, DebugTokenBudget),
-				Profile(TEXT("validation"), { TEXT("identity"), TEXT("validation") }, ValidationTokenBudget),
+				Profile(TEXT("llm_authoring"), { TEXT("identity"), TEXT("authoring") }),
+				Profile(TEXT("readback"), { TEXT("identity"), TEXT("authoring"), TEXT("readback") }),
+				Profile(TEXT("debug"), { TEXT("identity"), TEXT("authoring"), TEXT("readback"), TEXT("diagnostics"), TEXT("validation") }),
+				Profile(TEXT("validation"), { TEXT("identity"), TEXT("validation") }),
 			};
 
 			FFileDescriptor IndexFile;
@@ -301,13 +332,26 @@ namespace UeAgentNiagaraAuthoring
 		bool ProjectStackStructure(
 			const UeAgentCompoundProjection::FRequest& Request,
 			TArray<UeAgentCompoundProjection::FExpansionSelection>& OutSelections,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutSelections.Reset();
 			OutError.Reset();
 			if (!Request.IsValid() || Request.File->ProjectionId != StackProjectionId)
 			{
-				OutError = TEXT("niagara_stack_projection_request_invalid");
+				if (!Request.Contract || !Request.Profile || !Request.File || !Request.Field)
+					OutError = ProjectionValueFailure(TEXT("niagara_stack_projection_request_invalid"),
+						TEXT("Niagara stack projection requires its contract, profile, file, and field descriptors."),
+						!Request.Contract ? TEXT("contract.available") : !Request.Profile ? TEXT("profile.available")
+							: !Request.File ? TEXT("file.available") : TEXT("field.available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				else if (Request.WildcardCount <= 0)
+					OutError = ProjectionValueFailure(TEXT("niagara_stack_projection_request_invalid"),
+						TEXT("Niagara stack projection requires a positive wildcard count."), TEXT("wildcard_count"),
+						MakeShared<FJsonValueNumber>(Request.WildcardCount), MakeShared<FJsonValueString>(TEXT("greater than zero")));
+				else
+					OutError = ProjectionValueFailure(TEXT("niagara_stack_projection_request_invalid"),
+						TEXT("The file descriptor does not select the Niagara stack projector."), TEXT("projection_id"),
+						MakeShared<FJsonValueString>(Request.File->ProjectionId), MakeShared<FJsonValueString>(StackProjectionId));
 				return false;
 			}
 			if (Request.Field->Source.SemanticId == EmitterPropertySemanticId)
@@ -316,11 +360,6 @@ namespace UeAgentNiagaraAuthoring
 				for (int32 EntryIndex = 0; EntryIndex < Request.Entries.Num(); ++EntryIndex)
 				{
 					const FString EmitterKey = MakeEmitterProjectionKey(Request.Entries[EntryIndex]);
-					if (EmitterKey.IsEmpty())
-					{
-						OutError = TEXT("niagara_emitter_property_projection_identity_missing");
-						return false;
-					}
 					int32* SelectionIndex = SelectionByEmitter.Find(EmitterKey);
 					if (!SelectionIndex)
 					{
@@ -348,7 +387,10 @@ namespace UeAgentNiagaraAuthoring
 					const FString ParameterName = Entry.TargetIdentity.GetSelector(TEXT("parameter_name"));
 					if (ParameterName.IsEmpty())
 					{
-						OutError = TEXT("niagara_user_parameter_projection_identity_missing");
+						OutError = ProjectionEntryFailure(TEXT("niagara_user_parameter_projection_identity_missing"),
+							TEXT("The user parameter snapshot identity is missing its parameter name."), TEXT("parameter_name"),
+							Entry, EntryIndex, MakeShared<FJsonValueString>(ParameterName),
+							MakeShared<FJsonValueString>(TEXT("non-empty parameter name")));
 						return false;
 					}
 					Selection.WildcardValues.Add(ParameterName);
@@ -372,13 +414,22 @@ namespace UeAgentNiagaraAuthoring
 						: Entry.TargetIdentity.GetSelector(TEXT("script_usage_id"));
 					if (ItemKey.IsEmpty())
 					{
-						OutError = TEXT("niagara_emitter_structure_identity_missing");
+						const bool bRenderer = Request.Field->Source.SemanticId == RendererSemanticId;
+						OutError = ProjectionEntryFailure(TEXT("niagara_emitter_structure_identity_missing"),
+							bRenderer ? TEXT("The renderer snapshot identity is missing its renderer name.")
+								: TEXT("The event handler snapshot identity is missing its script usage identifier."),
+							bRenderer ? TEXT("renderer_name") : TEXT("script_usage_id"),
+							Entry, EntryIndex, MakeShared<FJsonValueString>(ItemKey),
+							MakeShared<FJsonValueString>(TEXT("non-empty identity selector")));
 						return false;
 					}
 					Selection.WildcardValues.Add(ItemKey);
 					if (Selection.WildcardValues.Num() != Request.WildcardCount)
 					{
-						OutError = TEXT("niagara_emitter_structure_projection_wildcard_mismatch");
+						OutError = ProjectionEntryFailure(TEXT("niagara_emitter_structure_projection_wildcard_mismatch"),
+							TEXT("The renderer or event handler projection produced a different wildcard count from its field pattern."),
+							TEXT("wildcard_count"), Entry, EntryIndex,
+							MakeShared<FJsonValueNumber>(Selection.WildcardValues.Num()), MakeShared<FJsonValueNumber>(Request.WildcardCount));
 						return false;
 					}
 					Selection.EntryIndices.Add(EntryIndex);
@@ -392,7 +443,10 @@ namespace UeAgentNiagaraAuthoring
 					const FString ModuleGuid = Entry.TargetIdentity.GetSelector(TEXT("module_guid"));
 					if (ModuleGuid.IsEmpty())
 					{
-						OutError = TEXT("niagara_stack_projection_module_identity_missing");
+						OutError = ProjectionEntryFailure(TEXT("niagara_stack_projection_module_identity_missing"),
+							TEXT("The module snapshot identity is missing its module node identifier."), TEXT("module_guid"),
+							Entry, EntryIndex, MakeShared<FJsonValueString>(ModuleGuid),
+							MakeShared<FJsonValueString>(TEXT("non-empty module node identifier")));
 						return false;
 					}
 					Selection.WildcardValues.Add(ModuleGuid);
@@ -402,14 +456,20 @@ namespace UeAgentNiagaraAuthoring
 					const FString InputName = Entry.TargetIdentity.GetSelector(TEXT("input_name"));
 					if (InputName.IsEmpty())
 					{
-						OutError = TEXT("niagara_stack_projection_input_identity_missing");
+						OutError = ProjectionEntryFailure(TEXT("niagara_stack_projection_input_identity_missing"),
+							TEXT("The dynamic input snapshot identity is missing its input name."), TEXT("input_name"),
+							Entry, EntryIndex, MakeShared<FJsonValueString>(InputName),
+							MakeShared<FJsonValueString>(TEXT("non-empty input name")));
 						return false;
 					}
 					Selection.WildcardValues.Add(InputName);
 				}
 				if (Selection.WildcardValues.Num() != Request.WildcardCount)
 				{
-					OutError = TEXT("niagara_stack_projection_wildcard_mismatch");
+					OutError = ProjectionEntryFailure(TEXT("niagara_stack_projection_wildcard_mismatch"),
+						TEXT("The Niagara stage projection produced a different wildcard count from its field pattern."),
+						TEXT("wildcard_count"), Entry, EntryIndex,
+						MakeShared<FJsonValueNumber>(Selection.WildcardValues.Num()), MakeShared<FJsonValueNumber>(Request.WildcardCount));
 					return false;
 				}
 				Selection.EntryIndices.Add(EntryIndex);
@@ -426,7 +486,7 @@ namespace UeAgentNiagaraAuthoring
 		}
 	}
 
-	bool RegisterExportAuthoring(FString& OutError)
+	bool RegisterExportAuthoring(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentExportContract::ERegistrationResult ContractResult;
 		if (!UeAgentExportContract::FRegistry::Get().RegisterContract(
@@ -462,30 +522,29 @@ namespace UeAgentNiagaraAuthoring
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
-		FString& OutError)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
 	{
+  auto& OutError = OutResult.Diagnostic;
 		OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
 		OutError.Reset();
 
 		TArray<UeAgentAuthoringState::FReadRequest> Requests;
-		if (!BuildAssetSnapshotReadRequests(Asset, true, Requests, OutError)) return false;
+		if (!BuildAssetExportSnapshotReadRequests(Asset, Requests, OutError))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Niagara workspace export requests failed: %s"), *OutError.ToPublicDetail());
+			return false;
+		}
 		UeAgentAuthoringState::FCaptureResult Capture;
 		if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
 		{
-			OutError = Capture.ErrorCode + TEXT(":") + Capture.ErrorDetail;
+			OutError = Capture.Diagnostic;
+			UE_LOG(LogTemp, Warning, TEXT("Niagara workspace export capture failed: %s"), *OutError.ToPublicDetail());
 			return false;
 		}
 		const FString CompositionKind =
 			UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
 				TEXT("niagara"),
 				GetAssetKind(&Asset));
-		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(
-			CompositionKind,
-			ProfileId,
-			Capture.Snapshot,
-			WorkspaceRoot,
-			OutResult,
-			OutError);
+		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(CompositionKind, ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
 	}
 }

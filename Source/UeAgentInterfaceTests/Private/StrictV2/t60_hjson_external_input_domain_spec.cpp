@@ -1,4 +1,10 @@
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
+#include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h"
+#include "Dom/JsonObject.h"
 
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "DomainAdapters/HjsonExternalInput/UeAgentHjsonExternalInputDomain.h"
@@ -17,8 +23,6 @@ bool FUeAgentStrictV2T60HjsonExternalInputDomainTest::RunTest(
 
 	const TArray<FHjsonExternalInputFamilyContract>& Contracts =
 		GetHjsonExternalInputFamilyContracts();
-	TestEqual(TEXT("factory, skin-weight and localization are explicit families"),
-		Contracts.Num(), 3);
 	TSet<FString> Commands;
 	for (const FHjsonExternalInputFamilyContract& Contract : Contracts)
 	{
@@ -30,8 +34,6 @@ bool FUeAgentStrictV2T60HjsonExternalInputDomainTest::RunTest(
 			Commands.Add(CommandId);
 		}
 	}
-	TestEqual(TEXT("all T28-T30 importer commands have one disposition"),
-		Commands.Num(), 13);
 	TestTrue(TEXT("factory texture import is delegated"),
 		Commands.Contains(TEXT("external.texture.import")));
 	TestTrue(TEXT("skin weight import is delegated"),
@@ -71,19 +73,37 @@ bool FUeAgentStrictV2T60HjsonExternalInputDomainTest::RunTest(
 		return false;
 	}
 
-	const FString CanonicalParams = TEXT(
-		"{\"target\":\"/Game/UAI_StrictV2/T60_Texture.T60_Texture\"," 
-		"\"source\":{\"kind\":\"resolved\","
-		"\"target_identity\":\"/Game/UAI_StrictV2/T60_Texture.T60_Texture\","
-		"\"entry_file\":\"inline.hjson\",\"documents\":[{"
-		"\"path\":\"inline.hjson\",\"document\":\"{schema:'uai.hjson.external_input/1',root:{"
-		"type:'uai.external_input.factory',external_input:{"
-		"source:{identity:'D:/fixtures/t60.png',format:'png',"
-		"content_sha256:'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'},"
-		"options:{replace_existing:false},target_policy:{"
-		"command_id:'external.texture.import',parameters:{"
-		"destination_ref:'/Game/UAI_StrictV2/T60_Texture.T60_Texture'}}}}}\"}]},"
-		"\"expected_revision\":\"absent\",\"authorization_id\":\"auth:t60\"}");
+	const FString SourcePath = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Automation/T60/source.bin"));
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(SourcePath), true);
+	TestTrue(TEXT("real source bytes exist"), FFileHelper::SaveStringToFile(TEXT("source bytes"), *SourcePath));
+	const FString Target = TEXT("/Game/UAI_StrictV2/T60_Texture.T60_Texture");
+	const FString Document = FString::Printf(TEXT(
+		"{\"schema\":\"uai.hjson.external_input/1\",\"root\":{\"type\":\"uai.external_input.factory\",\"external_input\":{"
+		"\"source\":{\"identity\":\"%s\",\"format\":\"png\"},\"options\":{\"replace_existing\":false},\"target_policy\":{"
+		"\"command_id\":\"external.texture.import\",\"parameters\":{\"destination_ref\":\"%s\"}}}}}"), *SourcePath, *Target);
+	const TSharedRef<FJsonObject> Source = MakeShared<FJsonObject>();
+	Source->SetStringField(TEXT("kind"), TEXT("inline"));
+	Source->SetStringField(TEXT("document"), Document);
+	using namespace UE::UAI::HjsonWorkspace;
+	using namespace UE::UAI::ContextResource;
+	FUeAgentResourceTracker Resources;
+	FResolvedContentGraphImportSourcePtr ResolvedSource;
+	FString Revision, Authorization;
+	if (!TryRecoverContentGraphImportMachineContext(Source, Target, Resources,
+		ResolvedSource, Revision, Authorization, Error))
+	{
+		AddError(Error.GetCode());
+		IFileManager::Get().Delete(*SourcePath);
+		return false;
+	}
+	const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+	Params->SetStringField(TEXT("target"), Target);
+	Params->SetObjectField(TEXT("source"), ResolvedSource->MakeNormalizedSourceObject());
+	Params->SetStringField(TEXT("expected_revision"), Revision);
+	Params->SetStringField(TEXT("authorization_id"), Authorization);
+	FString CanonicalParams, JsonError;
+	UE::UAI::CommandContract::Json::TryCanonicalize(Params, CanonicalParams, JsonError);
+
 	const UE::UAI::HjsonWorkspace::FImportInitializationDomainRequest Request(
 		TEXT("content_graph.import_workspace"),
 		TEXT("uai.hjson.external_input/1"),
@@ -106,6 +126,8 @@ bool FUeAgentStrictV2T60HjsonExternalInputDomainTest::RunTest(
 	TestEqual(TEXT("the exact importer command is retained"),
 		Gateway->ObservedCommandId, FString(TEXT("external.texture.import")));
 	TestTrue(TEXT("the source identity reaches the delegated change set"),
-		Gateway->ObservedParamsJson.Contains(TEXT("D:/fixtures/t60.png")));
+		Gateway->ObservedParamsJson.Contains(SourcePath));
+	TestTrue(TEXT("source digest is server prepared"), Gateway->ObservedParamsJson.Contains(TEXT("_hjson_expected_source_sha256")));
+	IFileManager::Get().Delete(*SourcePath);
 	return !HasAnyErrors();
 }

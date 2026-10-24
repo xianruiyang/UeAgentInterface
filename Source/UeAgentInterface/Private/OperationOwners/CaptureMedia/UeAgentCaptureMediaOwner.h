@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionActivation.h"
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Core/Contract/UeAgentContract.h"
@@ -15,13 +17,16 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 		bool IsValid() const;
 	};
 
-	UEAGENTINTERFACE_API const TArray<FUeAgentCaptureMediaRoute>& GetRoutes();
+	UEAGENTINTERFACE_API bool TryGetRoutes(
+		const TArray<FUeAgentCaptureMediaRoute>*& OutRoutes,
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool TryGetProductionOperationPort(
 		TSharedPtr<Contract::IUeAgentOperationApplicationPort>& OutPort,
-		FString& OutError);
-	UEAGENTINTERFACE_API TSharedRef<const DomainCapability::
-		IDomainOperationInvocationFactory> FindOperationInvocationFactory(
-			const FString& CommandId);
+		UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API bool TryFindOperationInvocationFactory(
+		const FString& CommandId,
+		TSharedPtr<const DomainCapability::IDomainOperationInvocationFactory>& OutFactory,
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API CommandEdge::FUeAgentCommandResult Submit(
 		const CommandEdge::FUeAgentCommandRequest& Request,
 		const Contract::FUeAgentCallerContext& Caller,

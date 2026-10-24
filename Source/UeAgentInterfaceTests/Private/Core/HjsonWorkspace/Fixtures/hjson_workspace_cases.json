@@ -1,0 +1,26 @@
+{
+  "schema": "uai.c5.hjson_workspace.test_fixture.v1",
+  "source_document": {
+    "text": "{\"contract_id\":\"fixture.contract\",\"contract_version\":1,\"profile_id\":\"fixture.profile\",\"precise\":9007199254740993}",
+    "precise_lexeme": "9007199254740993",
+    "precise_provenance": {
+      "json_pointer": "/precise",
+      "byte_start": 96
+    }
+  },
+  "workspace_policy": {
+    "dialect_id": "hjson",
+    "contract_id": "fixture.contract",
+    "contract_version": 1,
+    "profile_id": "fixture.profile",
+    "entry_unit": "index.hjson",
+    "reference_fields": ["unit_ref"]
+  },
+  "references": {
+    "shared_entry_text": "{\"contract_id\":\"fixture.contract\",\"contract_version\":1,\"profile_id\":\"fixture.profile\",\"left\":{\"unit_ref\":\"units/child.hjson\"},\"right\":{\"unit_ref\":\"units/child.hjson\"}}",
+    "child_text": "{\"contract_id\":\"fixture.contract\",\"contract_version\":1,\"profile_id\":\"fixture.profile\",\"value\":\"child\"}",
+    "cycle_a_text": "{\"contract_id\":\"fixture.contract\",\"contract_version\":1,\"profile_id\":\"fixture.profile\",\"unit_ref\":\"b.hjson\"}",
+    "cycle_b_text": "{\"contract_id\":\"fixture.contract\",\"contract_version\":1,\"profile_id\":\"fixture.profile\",\"unit_ref\":\"index.hjson\"}",
+    "entry_text": "{\"contract_id\":\"fixture.contract\",\"contract_version\":1,\"profile_id\":\"fixture.profile\",\"unit_ref\":\"units/child.hjson\"}"
+  }
+}

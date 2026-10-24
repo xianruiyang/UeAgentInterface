@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialNative.h"
 #include "Templates/SharedPointer.h"
 #include "UObject/WeakObjectPtr.h"
@@ -20,6 +21,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		TMap<FString, FName> ChainBindings;
 
 		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 	};
 
 	struct UEAGENTINTERFACE_API FUeAgentRigSimulationSpatialRetargeterBinding
@@ -32,6 +34,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FString TargetNativePoseFrameId;
 
 		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 	};
 
 	struct UEAGENTINTERFACE_API
@@ -43,6 +46,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FString DestinationRoot;
 		TArray<FRigSimulationSpatialAssetRequest> AssetRequests;
 
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -52,6 +56,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		TArray<TWeakObjectPtr<UObject>> GeneratedAssets;
 		TArray<FString> GeneratedAssetRefs;
 
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 		bool IsValid() const;
 	};
 

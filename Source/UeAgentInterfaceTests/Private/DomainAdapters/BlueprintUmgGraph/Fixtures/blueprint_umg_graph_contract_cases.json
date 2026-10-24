@@ -2,9 +2,6 @@
   "schema": "uai.domain_adapter.blueprint_umg_graph.test_fixture.v1",
   "canonical_value_schema": "uai.graph_compound.canonical.v1",
   "adapter_id": "D/BlueprintUmgGraph",
-  "port_family_count": 6,
-  "capability_count": 6,
-  "legacy_candidate_count": 6,
   "port_families": [
     {
       "family_id": "asset_lifecycle",
@@ -48,16 +45,7 @@
     {"capability_id":"blueprint.authoring.apply","descriptor_id":"uai.operation.blueprint.authoring.apply","version":1,"operation_kind":"operation","effect_class":"write","port_family_id":"graph_mutation"},
     {"capability_id":"blueprint.component.events.discover","descriptor_id":"uai.query.blueprint.component.events.discover","version":1,"operation_kind":"query","effect_class":"read_only","port_family_id":"event_discovery"},
     {"capability_id":"umg.asset.create","descriptor_id":"uai.operation.umg.asset.create","version":1,"operation_kind":"operation","effect_class":"write","port_family_id":"asset_lifecycle"},
-    {"capability_id":"umg.authoring.apply","descriptor_id":"uai.operation.umg.authoring.apply","version":1,"operation_kind":"operation","effect_class":"write","port_family_id":"hierarchy_mutation"},
     {"capability_id":"umg.widget.events.discover","descriptor_id":"uai.query.umg.widget.events.discover","version":1,"operation_kind":"query","effect_class":"read_only","port_family_id":"event_discovery"}
-  ],
-  "legacy_mappings": [
-    {"legacy_id":"blueprint_apply_folder","disposition":"compose","target_capability_ids":["blueprint.authoring.apply"]},
-    {"legacy_id":"blueprint_create","disposition":"adapt","target_capability_ids":["blueprint.asset.create"]},
-    {"legacy_id":"blueprint_list_component_events","disposition":"adapt","target_capability_ids":["blueprint.component.events.discover"]},
-    {"legacy_id":"umg_apply_folder","disposition":"compose","target_capability_ids":["umg.authoring.apply"]},
-    {"legacy_id":"umg_create_widget_blueprint","disposition":"adapt","target_capability_ids":["umg.asset.create"]},
-    {"legacy_id":"umg_list_widget_events","disposition":"adapt","target_capability_ids":["umg.widget.events.discover"]}
   ],
   "identity_cases": [
     {
@@ -121,8 +109,6 @@
     "response_projection"
   ],
   "forbidden_oracles": [
-    "legacy_folder_apply_provider",
-    "legacy_command_success",
     "request_or_export_echo",
     "apply_receipt_as_readback",
     "compile_receipt_as_readback",

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/Contract/UeAgentExecutionContextPolicy.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 
@@ -76,16 +77,7 @@ namespace UE::UAI::StateSemantic
 		MissingRight,
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentStateSemanticError
-	{
-		FString Code;
-		FString Path;
-		FString Detail;
-		EUeAgentResourceDimension ResourceDimension =
-			EUeAgentResourceDimension::WorkUnits;
-		int64 ResourceLimit = 0;
-		int64 ResourceObserved = 0;
-	};
+	using FUeAgentStateSemanticError = UE::UAI::Contract::FDiagnostic;
 
 	class FUeAgentCanonicalValue;
 	class FUeAgentSpatialValue;
@@ -97,6 +89,12 @@ namespace UE::UAI::StateSemantic
 	using FUeAgentSpatialValueRef = TSharedRef<const FUeAgentSpatialValue>;
 	using FUeAgentCanonicalSnapshotPtr = TSharedPtr<const FUeAgentCanonicalSnapshot>;
 	using FUeAgentCanonicalSnapshotRef = TSharedRef<const FUeAgentCanonicalSnapshot>;
+
+	/** Exact decimal identity without a floating-point conversion; does not alter stored values. */
+	UEAGENTINTERFACE_API bool TryNormalizeNumberLexeme(const FString& Lexeme, FString& OutNormalized);
+	/** Numeric ordering/integrality in the same exact decimal domain, without a native integer width. */
+	UEAGENTINTERFACE_API bool IsIntegralNumberLexeme(const FString& Lexeme);
+	UEAGENTINTERFACE_API bool TryCompareNumberLexemes(const FString& Left, const FString& Right, int32& OutComparison);
 
 	class UEAGENTINTERFACE_API FUeAgentTemporalPoint final
 	{
@@ -114,6 +112,7 @@ namespace UE::UAI::StateSemantic
 		const FString& GetRateDenominator() const;
 		const FString& GetState() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const;
 		bool operator==(const FUeAgentTemporalPoint& Other) const;
 
 	private:
@@ -122,7 +121,7 @@ namespace UE::UAI::StateSemantic
 		FString RateNumerator;
 		FString RateDenominator;
 		FString State;
-		bool bValid = false;
+		FUeAgentStateSemanticError ValidationDiagnostic;
 	};
 
 	UEAGENTINTERFACE_API bool AreTemporalPointsEquivalent(
@@ -151,6 +150,7 @@ namespace UE::UAI::StateSemantic
 		const FString& GetBasisEvidence() const;
 		const FUeAgentTemporalPoint& GetObservedAt() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 		bool SemanticallyEquals(const FUeAgentSpatialFrame& Other) const;
 
 	private:
@@ -162,7 +162,7 @@ namespace UE::UAI::StateSemantic
 		FString Unit;
 		FString BasisEvidence;
 		FUeAgentTemporalPoint ObservedAt;
-		bool bValid = false;
+		FUeAgentStateSemanticError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentSpatialConversion final
@@ -189,6 +189,7 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentTemporalPoint& GetValidAt() const;
 		const FString& GetEvidence() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString ConversionId;
@@ -200,7 +201,7 @@ namespace UE::UAI::StateSemantic
 		TArray<FString> Translation;
 		FUeAgentTemporalPoint ValidAt;
 		FString Evidence;
-		bool bValid = false;
+		FUeAgentStateSemanticError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentSpatialValue final
@@ -221,6 +222,7 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentTemporalPoint& GetObservedAt() const;
 		const TArray<FString>& GetConversionEvidence() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 		bool SemanticallyEquals(const FUeAgentSpatialValue& Other) const;
 
 	private:
@@ -231,7 +233,7 @@ namespace UE::UAI::StateSemantic
 		TArray<FString> Components;
 		FUeAgentTemporalPoint ObservedAt;
 		TArray<FString> ConversionEvidence;
-		bool bValid = false;
+		FUeAgentStateSemanticError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentCanonicalValue final
@@ -331,6 +333,7 @@ namespace UE::UAI::StateSemantic
 		const FString& GetGeneration() const;
 		const FString& GetCanonicalKey() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const;
 		bool operator==(const FUeAgentCanonicalIdentity& Other) const;
 
 	private:
@@ -343,6 +346,7 @@ namespace UE::UAI::StateSemantic
 		FString Generation;
 		FString CanonicalKey;
 		bool bValid = false;
+		TSharedPtr<const FUeAgentStateSemanticError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentCanonicalType final
@@ -359,6 +363,7 @@ namespace UE::UAI::StateSemantic
 		bool IsNullable() const;
 		const FString& GetContainerKind() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const;
 		bool operator==(const FUeAgentCanonicalType& Other) const;
 
 	private:
@@ -367,6 +372,7 @@ namespace UE::UAI::StateSemantic
 		bool bNullable = false;
 		FString ContainerKind;
 		bool bValid = false;
+		TSharedPtr<const FUeAgentStateSemanticError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentDefaultValue final
@@ -383,6 +389,7 @@ namespace UE::UAI::StateSemantic
 		const FString& GetProvenance() const;
 		const FUeAgentCanonicalValueRef& GetValue() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const;
 
 	private:
 		EUeAgentDefaultSourceKind SourceKind =
@@ -391,6 +398,7 @@ namespace UE::UAI::StateSemantic
 		FString Provenance;
 		FUeAgentCanonicalValueRef Value;
 		bool bValid = false;
+		TSharedPtr<const FUeAgentStateSemanticError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentStateDetails final
@@ -411,6 +419,7 @@ namespace UE::UAI::StateSemantic
 		const FString& GetAvailability() const;
 		const TMap<FString, FString>& GetConstraints() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const;
 		bool operator==(const FUeAgentStateDetails& Other) const;
 
 	private:
@@ -421,6 +430,7 @@ namespace UE::UAI::StateSemantic
 		FString Availability;
 		TMap<FString, FString> Constraints;
 		bool bValid = false;
+		TSharedPtr<const FUeAgentStateSemanticError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentStateProvenance final
@@ -435,13 +445,14 @@ namespace UE::UAI::StateSemantic
 		const FString& GetSourceId() const;
 		const FString& GetEvidenceId() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const;
 		bool operator==(const FUeAgentStateProvenance& Other) const;
 
 	private:
 		FString SourceKind;
 		FString SourceId;
 		FString EvidenceId;
-		bool bValid = false;
+		FUeAgentStateSemanticError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentStateRevision final
@@ -456,6 +467,7 @@ namespace UE::UAI::StateSemantic
 		const FString& GetGeneration() const;
 		int64 GetSequence() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const;
 		bool operator==(const FUeAgentStateRevision& Other) const;
 		bool operator!=(const FUeAgentStateRevision& Other) const;
 
@@ -463,7 +475,7 @@ namespace UE::UAI::StateSemantic
 		FString SourceId;
 		FString Generation;
 		int64 Sequence = -1;
-		bool bValid = false;
+		FUeAgentStateSemanticError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentStateEntry final
@@ -479,8 +491,10 @@ namespace UE::UAI::StateSemantic
 			EUeAgentAuthoredPresence InAuthoredPresence =
 				EUeAgentAuthoredPresence::Absent,
 			EUeAgentOverrideState InOverrideState =
-				EUeAgentOverrideState::None);
+				EUeAgentOverrideState::None,
+			FUeAgentCanonicalValuePtr InAuthoringDescriptor = nullptr);
 
+		const FUeAgentCanonicalValuePtr& GetAuthoringDescriptor() const;
 		const FUeAgentCanonicalIdentity& GetIdentity() const;
 		const FUeAgentCanonicalType& GetType() const;
 		const FUeAgentCanonicalValueRef& GetValue() const;
@@ -490,6 +504,7 @@ namespace UE::UAI::StateSemantic
 		EUeAgentAuthoredPresence GetAuthoredPresence() const;
 		EUeAgentOverrideState GetOverrideState() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const;
 		FUeAgentStateEntry WithObservedRevision(
 			FUeAgentStateRevision Revision) const;
 
@@ -499,12 +514,15 @@ namespace UE::UAI::StateSemantic
 		FUeAgentCanonicalValueRef Value;
 		FUeAgentDefaultValue Default;
 		FUeAgentStateDetails Details;
+		// Optional immutable type/candidates/value_definition from the authoring descriptor owner.
+		FUeAgentCanonicalValuePtr AuthoringDescriptor;
 		FUeAgentStateRevision ObservedRevision;
 		EUeAgentAuthoredPresence AuthoredPresence =
 			EUeAgentAuthoredPresence::Absent;
 		EUeAgentOverrideState OverrideState =
 			EUeAgentOverrideState::None;
 		bool bValid = false;
+		TSharedPtr<const FUeAgentStateSemanticError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentCanonicalSnapshot final
@@ -577,6 +595,15 @@ namespace UE::UAI::StateSemantic
 			FUeAgentCanonicalValuePtr InLeft,
 			FUeAgentCanonicalValuePtr InRight);
 
+		FUeAgentSemanticDifference(EUeAgentDifferenceKind InKind, FString InPath,
+			FUeAgentCanonicalValuePtr InLeft, FUeAgentCanonicalValuePtr InRight,
+			FUeAgentCanonicalValuePtr InPublicLeft, FUeAgentCanonicalValuePtr InPublicRight);
+		const FUeAgentCanonicalValuePtr& GetPublicLeft() const { return PublicLeft; }
+		const FUeAgentCanonicalValuePtr& GetPublicRight() const { return PublicRight; }
+		const FString& GetPublicPath() const { return PublicPath; }
+		const TCHAR* GetPublicReason() const;
+		void SetPublicPath(FString InPath) { PublicPath = MoveTemp(InPath); }
+
 		EUeAgentDifferenceKind GetKind() const;
 		const FString& GetPath() const;
 		const FUeAgentCanonicalValuePtr& GetLeft() const;
@@ -587,6 +614,9 @@ namespace UE::UAI::StateSemantic
 		FString Path;
 		FUeAgentCanonicalValuePtr Left;
 		FUeAgentCanonicalValuePtr Right;
+		FString PublicPath;
+		FUeAgentCanonicalValuePtr PublicLeft;
+		FUeAgentCanonicalValuePtr PublicRight;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentSemanticComparison final
@@ -601,6 +631,18 @@ namespace UE::UAI::StateSemantic
 	private:
 		TArray<FUeAgentSemanticDifference> Differences;
 	};
+
+	/** Exact numeric equality, including equivalent decimal/exponent spellings. Invalid literals differ. */
+	UEAGENTINTERFACE_API bool AreNumericLexemesEquivalent(const FString& Left, const FString& Right);
+	/** Decimal digits with an optional sign; rejects overflow and trailing input.
+	 * Output remains unchanged on failure. Unsigned values do not accept '-'. */
+	UEAGENTINTERFACE_API bool TryParseInt64Decimal(const FString& Text, int64& OutValue);
+	UEAGENTINTERFACE_API bool TryParseUInt64Decimal(const FString& Text, uint64& OutValue);
+	/** Exact integral canonical number, including decimal/exponent spelling; rejects fractions and overflow. */
+	UEAGENTINTERFACE_API bool TryParseInt64Number(const FString& Text, int64& OutValue);
+	UEAGENTINTERFACE_API bool TryParseUInt64Number(const FString& Text, uint64& OutValue);
+	/** Complete canonical decimal/exponent syntax to a finite native double; no prefix parsing. */
+	UEAGENTINTERFACE_API bool TryParseFiniteDecimal(const FString& Text, double& OutValue);
 
 	UEAGENTINTERFACE_API FUeAgentSemanticComparison CompareValues(
 		const FUeAgentCanonicalValueRef& Left,

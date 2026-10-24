@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Templates/Function.h"
 
@@ -7,13 +9,7 @@ class UWorld;
 
 namespace UE::UAI::AssetDurable
 {
-	struct UEAGENTINTERFACE_API FPersistedWorldLoadError final
-	{
-		FString Code;
-		FString Detail;
-
-		bool IsPresent() const { return !Code.IsEmpty(); }
-	};
+	using FPersistedWorldLoadError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FPersistedWorldReferenceMap final
 	{

@@ -1,7 +1,11 @@
 #include "DomainAdapters/AssetProjectRead/UeAgentAssetProjectReadProductionEnvironment.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringAssetIdentity.h"
+#include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
+#include "DomainAdapters/EditorProject/UeAgentSettingsDiscovery.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "Dom/JsonValue.h"
 #include "Editor.h"
 #include "Engine/Level.h"
 #include "Engine/MapBuildDataRegistry.h"
@@ -21,17 +25,26 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 {
 	namespace
 	{
-		bool Fail(
-			FUeAgentAssetProjectReadError& OutError,
-			FString Code,
-			FString SubjectId,
-			FString Detail = FString())
+		UE::UAI::Contract::FDiagnostic LookupFailure(const FString& Code, const FString& Reason,
+			const FString& Field, const TSharedPtr<FJsonValue>& Actual,
+			const TSharedPtr<FJsonValue>& Expected, const FString& PublicTarget = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-			return false;
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("asset_project_read"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.TargetPath = PublicTarget;
+			Error.ActualValue = Actual;
+			Error.ExpectedValue = Expected;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValuePresent = Expected.IsValid();
+			return Error;
 		}
+
+        bool Fail(UE::UAI::Contract::FDiagnostic& OutError, const UE::UAI::Contract::FDiagnostic& Diagnostic)
+        {
+            OutError = Diagnostic;
+            return false;
+        }
 
 		UObject* ResolveObject(const FString& PublicRef)
 		{
@@ -41,6 +54,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			{
 				return nullptr;
 			}
+			if (!ObjectPath.Contains(TEXT(".")))
+				ObjectPath = UeAgentAuthoringAssetIdentity::ToObjectPath(ObjectPath);
 			if (UObject* Existing = StaticFindObject(
 				UObject::StaticClass(),
 				nullptr,
@@ -104,6 +119,77 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 						: Left.ResourceId < Right.ResourceId;
 				});
 		}
+
+		FUeAgentAssetRelationNode ResolveRelationNode(
+			IAssetRegistry& Registry,
+			const FAssetIdentifier& Identifier)
+		{
+			FUeAgentAssetRelationNode Node;
+			Node.StableIdentifier = Identifier.ToString();
+			Node.PackageName = Identifier.PackageName.ToString();
+			TArray<FAssetData> Assets;
+			if (!Identifier.PackageName.IsNone())
+			{
+				Registry.GetAssetsByPackageName(
+					Identifier.PackageName,
+					Assets,
+					true);
+			}
+			const FAssetData* ResolvedAsset = nullptr;
+			if (!Identifier.ObjectName.IsNone())
+			{
+				ResolvedAsset = Assets.FindByPredicate(
+					[&Identifier](const FAssetData& Asset)
+					{
+						return Asset.AssetName == Identifier.ObjectName;
+					});
+			}
+			else if (Assets.Num() == 1)
+			{
+				ResolvedAsset = &Assets[0];
+			}
+			Node.bResolved = Identifier.ObjectName.IsNone()
+				? !Assets.IsEmpty()
+				: ResolvedAsset != nullptr;
+			if (ResolvedAsset)
+			{
+				Node.ObjectPath = ResolvedAsset->GetSoftObjectPath().ToString();
+				Node.bRedirector = ResolvedAsset->AssetClassPath.ToString().EndsWith(
+					TEXT("ObjectRedirector"));
+				if (Node.bRedirector)
+				{
+					ResolvedAsset->GetTagValue(
+						FName(TEXT("DestinationObject")),
+						Node.RedirectTarget);
+				}
+			}
+			return Node;
+		}
+
+		UE::AssetRegistry::FDependencyQuery MakePackageQuery(
+			const EUeAgentAssetRelationKind Kind,
+			const EUeAgentAssetRelationPackageScope Scope)
+		{
+			using UE::AssetRegistry::EDependencyQuery;
+			EDependencyQuery Flags = Kind == EUeAgentAssetRelationKind::Hard
+				? EDependencyQuery::Hard
+				: EDependencyQuery::NotHard;
+			switch (Scope)
+			{
+			case EUeAgentAssetRelationPackageScope::Game:
+				Flags |= EDependencyQuery::Game;
+				break;
+			case EUeAgentAssetRelationPackageScope::EditorOnly:
+				Flags |= EDependencyQuery::NotGame;
+				break;
+			case EUeAgentAssetRelationPackageScope::Build:
+				Flags |= EDependencyQuery::Build;
+				break;
+			default:
+				break;
+			}
+			return UE::AssetRegistry::FDependencyQuery(Flags);
+		}
 	}
 
 	bool FUeAgentAssetProjectReadProductionEnvironment::
@@ -116,10 +202,9 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 		OutAsset = ResolveObject(Target.GetPublicRef());
 		return IsValid(OutAsset)
 			? true
-			: Fail(
-				OutError,
-				TEXT("asset_project_read_asset_unresolved"),
-				Target.GetPublicRef());
+			: Fail(OutError, LookupFailure(TEXT("asset_project_read_asset_unresolved"),
+				TEXT("The selected asset could not be resolved to a live object."), TEXT("/asset/resolved"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target.GetPublicRef()));
 	}
 
 	bool FUeAgentAssetProjectReadProductionEnvironment::
@@ -136,118 +221,229 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			FSoftObjectPath(Target.GetPublicRef()));
 		return OutRecord.IsValid()
 			? true
-			: Fail(
-				OutError,
-				TEXT("asset_project_read_registry_unresolved"),
-				Target.GetPublicRef());
+			: Fail(OutError, LookupFailure(TEXT("asset_project_read_registry_unresolved"),
+				TEXT("The asset registry has no valid record for the selected asset."), TEXT("/registry/record/available"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target.GetPublicRef()));
 	}
 
 	bool FUeAgentAssetProjectReadProductionEnvironment::
 		TryResolveRegistryRelations(
 			const FAssetData& Record,
-			const FString& Direction,
-			const TArray<FString>& RelationKinds,
-			TArray<FString>& OutDependencies,
-			TArray<FString>& OutReferencers,
+			const FUeAgentAssetRelationGraphRequest& Request,
+			FUeAgentAssetRelationGraphResult& OutGraph,
 			FUeAgentAssetProjectReadError& OutError)
 	{
-		OutDependencies.Reset();
-		OutReferencers.Reset();
+		OutGraph = {};
 		OutError = {};
-		if (!Record.IsValid()
-			|| (Direction != TEXT("dependencies")
-				&& Direction != TEXT("referencers")
-				&& Direction != TEXT("both")))
+		const bool bDirectionValid =
+			Request.Direction == EUeAgentAssetRelationDirection::Dependencies
+			|| Request.Direction == EUeAgentAssetRelationDirection::Referencers
+			|| Request.Direction == EUeAgentAssetRelationDirection::Both;
+		const bool bPackageScopeValid =
+			Request.PackageScope == EUeAgentAssetRelationPackageScope::All
+			|| Request.PackageScope == EUeAgentAssetRelationPackageScope::Game
+			|| Request.PackageScope == EUeAgentAssetRelationPackageScope::EditorOnly
+			|| Request.PackageScope == EUeAgentAssetRelationPackageScope::Build;
+		if (!Record.IsValid() || !bDirectionValid || !bPackageScopeValid)
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_project_read_relation_input_invalid"),
-				Record.GetObjectPathString(),
-				Direction);
+			const bool bRecord = Record.IsValid();
+			OutError = LookupFailure(TEXT("asset_project_read_relation_input_invalid"),
+				!bRecord ? TEXT("Registry relation traversal requires a valid root asset record.")
+					: !bDirectionValid ? TEXT("The registry relation direction is not supported.")
+					: TEXT("The registry relation package scope is not supported."),
+				!bRecord ? TEXT("/registry/record/valid") : !bDirectionValid ? TEXT("/direction") : TEXT("/package_scope"),
+				!bRecord ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(!bDirectionValid
+						? static_cast<int32>(Request.Direction) : static_cast<int32>(Request.PackageScope))),
+				!bRecord ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(!bDirectionValid
+						? TEXT("dependencies, referencers or both") : TEXT("all, game, editor_only or build"))),
+				Record.GetObjectPathString());
+			return false;
 		}
 
 		FAssetRegistryModule& Module =
 			FModuleManager::LoadModuleChecked<FAssetRegistryModule>(
 				TEXT("AssetRegistry"));
 		IAssetRegistry& Registry = Module.Get();
-		TSet<FName> Dependencies;
-		TSet<FName> Referencers;
-		auto Append = [&Record, &Direction, &Registry, &Dependencies, &Referencers](
-			const UE::AssetRegistry::EDependencyCategory Category,
-			const UE::AssetRegistry::FDependencyQuery& Query)
+		OutGraph.bRegistryLoading = Registry.IsLoadingAssets();
+		OutGraph.bComplete = !OutGraph.bRegistryLoading;
+		const FAssetIdentifier RootIdentifier(Record.PackageName);
+		OutGraph.Root = ResolveRelationNode(Registry, RootIdentifier);
+		OutGraph.Root.bResolved = true;
+		OutGraph.Root.ObjectPath = Record.GetSoftObjectPath().ToString();
+		OutGraph.Root.bRedirector = Record.AssetClassPath.ToString().EndsWith(
+			TEXT("ObjectRedirector"));
+		if (OutGraph.Root.bRedirector)
 		{
-			TArray<FName> Values;
-			if (Direction == TEXT("dependencies") || Direction == TEXT("both"))
+			Record.GetTagValue(
+				FName(TEXT("DestinationObject")),
+				OutGraph.Root.RedirectTarget);
+		}
+		OutGraph.Nodes.Add(OutGraph.Root);
+
+		const TArray<EUeAgentAssetRelationKind> Kinds =
+			Request.RelationKinds.IsEmpty()
+			? TArray<EUeAgentAssetRelationKind>{
+				EUeAgentAssetRelationKind::Hard,
+				EUeAgentAssetRelationKind::Soft,
+				EUeAgentAssetRelationKind::Manage,
+				EUeAgentAssetRelationKind::SearchableName}
+			: Request.RelationKinds;
+		for (const EUeAgentAssetRelationKind Kind : Kinds)
+		{
+			if (Kind != EUeAgentAssetRelationKind::Hard
+				&& Kind != EUeAgentAssetRelationKind::Soft
+				&& Kind != EUeAgentAssetRelationKind::Manage
+				&& Kind != EUeAgentAssetRelationKind::SearchableName)
 			{
-				Registry.GetDependencies(
-					Record.PackageName,
-					Values,
-					Category,
-					Query);
-				Dependencies.Append(Values);
+				return Fail(OutError, LookupFailure(TEXT("asset_project_read_relation_kind_invalid"),
+					TEXT("The requested native asset relation kind is not supported."), TEXT("/relation_kinds"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Kind)),
+					MakeShared<FJsonValueString>(TEXT("hard, soft, manage or searchable name")), Record.GetObjectPathString()));
 			}
-			Values.Reset();
-			if (Direction == TEXT("referencers") || Direction == TEXT("both"))
+		}
+		struct FTraversalItem
+		{
+			FAssetIdentifier Identifier;
+			int32 Depth = 0;
+			TArray<FString> Path;
+		};
+		TSet<FString> EdgeKeys;
+		TSet<FString> NodeKeys{OutGraph.Root.StableIdentifier};
+		auto Traverse = [&](const bool bDependencies)
+		{
+			TArray<FTraversalItem> Queue;
+			Queue.Add({RootIdentifier, 0, {RootIdentifier.ToString()}});
+			TSet<FString> Expanded;
+			for (int32 QueueIndex = 0; QueueIndex < Queue.Num(); ++QueueIndex)
 			{
-				Registry.GetReferencers(
-					Record.PackageName,
-					Values,
-					Category,
-					Query);
-				Referencers.Append(Values);
+				const FTraversalItem Current = Queue[QueueIndex];
+				if (Expanded.Contains(Current.Identifier.ToString()))
+				{
+					continue;
+				}
+				Expanded.Add(Current.Identifier.ToString());
+				for (const EUeAgentAssetRelationKind Kind : Kinds)
+				{
+					using UE::AssetRegistry::EDependencyCategory;
+					const EDependencyCategory Category =
+						(Kind == EUeAgentAssetRelationKind::Hard
+							|| Kind == EUeAgentAssetRelationKind::Soft)
+						? EDependencyCategory::Package
+						: Kind == EUeAgentAssetRelationKind::Manage
+							? EDependencyCategory::Manage
+							: EDependencyCategory::SearchableName;
+					const UE::AssetRegistry::FDependencyQuery Query =
+						Category == EDependencyCategory::Package
+						? MakePackageQuery(Kind, Request.PackageScope)
+						: UE::AssetRegistry::FDependencyQuery();
+					TArray<FAssetDependency> Relations;
+					if (bDependencies)
+					{
+						Registry.GetDependencies(
+							Current.Identifier, Relations, Category, Query);
+					}
+					else
+					{
+						Registry.GetReferencers(
+							Current.Identifier, Relations, Category, Query);
+					}
+					for (const FAssetDependency& Relation : Relations)
+					{
+						const FAssetIdentifier Source = bDependencies
+							? Current.Identifier : Relation.AssetId;
+						const FAssetIdentifier Target = bDependencies
+							? Relation.AssetId : Current.Identifier;
+						const FAssetIdentifier Next = Relation.AssetId;
+						const FString TraversalDirection = bDependencies
+							? TEXT("dependencies") : TEXT("referencers");
+						const FString EdgeKey = Source.ToString() + TEXT("\n")
+							+ Target.ToString() + TEXT("\n")
+							+ FString::FromInt(static_cast<int32>(Relation.Category))
+							+ TEXT("\n")
+							+ FString::FromInt(static_cast<int32>(Relation.Properties))
+							+ TEXT("\n") + TraversalDirection;
+						TArray<FString> NextPath = Current.Path;
+						const bool bCycle = NextPath.Contains(Next.ToString());
+						NextPath.Add(Next.ToString());
+						const FUeAgentAssetRelationNode SourceNode =
+							ResolveRelationNode(Registry, Source);
+						const FUeAgentAssetRelationNode TargetNode =
+							ResolveRelationNode(Registry, Target);
+						if (!NodeKeys.Contains(SourceNode.StableIdentifier))
+						{
+							NodeKeys.Add(SourceNode.StableIdentifier);
+							OutGraph.Nodes.Add(SourceNode);
+						}
+						if (!NodeKeys.Contains(TargetNode.StableIdentifier))
+						{
+							NodeKeys.Add(TargetNode.StableIdentifier);
+							OutGraph.Nodes.Add(TargetNode);
+						}
+						if (!EdgeKeys.Contains(EdgeKey))
+						{
+							EdgeKeys.Add(EdgeKey);
+							FUeAgentAssetRelationEdge Edge;
+							Edge.SourceIdentifier = SourceNode.StableIdentifier;
+							Edge.SourcePackageName = SourceNode.PackageName;
+							Edge.SourceObjectPath = SourceNode.ObjectPath;
+							Edge.TargetIdentifier = TargetNode.StableIdentifier;
+							Edge.TargetPackageName = TargetNode.PackageName;
+							Edge.TargetObjectPath = TargetNode.ObjectPath;
+							Edge.TraversalDirection = TraversalDirection;
+							Edge.Depth = Current.Depth + 1;
+							Edge.TraversalPath = NextPath;
+							Edge.bCycle = bCycle;
+							Edge.Category = Relation.Category == EDependencyCategory::Package
+								? TEXT("package")
+								: Relation.Category == EDependencyCategory::Manage
+									? TEXT("manage") : TEXT("searchable_name");
+							Edge.CategoryFlags = static_cast<int32>(Relation.Category);
+							Edge.PropertyFlags = static_cast<int32>(Relation.Properties);
+							Edge.bHard = EnumHasAnyFlags(
+								Relation.Properties,
+								UE::AssetRegistry::EDependencyProperty::Hard);
+							Edge.bGame = EnumHasAnyFlags(
+								Relation.Properties,
+								UE::AssetRegistry::EDependencyProperty::Game);
+							Edge.bBuild = EnumHasAnyFlags(
+								Relation.Properties,
+								UE::AssetRegistry::EDependencyProperty::Build);
+							Edge.bDirect = EnumHasAnyFlags(
+								Relation.Properties,
+								UE::AssetRegistry::EDependencyProperty::Direct);
+							Edge.bSourceResolved = SourceNode.bResolved;
+							Edge.bTargetResolved = TargetNode.bResolved;
+							Edge.bSourceRedirector = SourceNode.bRedirector;
+							Edge.bTargetRedirector = TargetNode.bRedirector;
+							Edge.SourceRedirectTarget = SourceNode.RedirectTarget;
+							Edge.TargetRedirectTarget = TargetNode.RedirectTarget;
+							OutGraph.Edges.Add(MoveTemp(Edge));
+						}
+						const FUeAgentAssetRelationNode NextNode =
+							bDependencies ? TargetNode : SourceNode;
+						if (!bCycle && NextNode.bResolved)
+						{
+							Queue.Add({Next, Current.Depth + 1, MoveTemp(NextPath)});
+						}
+					}
+				}
 			}
 		};
-
-		const TArray<FString> Kinds = RelationKinds.IsEmpty()
-			? TArray<FString>{TEXT("hard"), TEXT("soft"), TEXT("manage"), TEXT("searchable_name")}
-			: RelationKinds;
-		for (const FString& Kind : Kinds)
+		if (Request.Direction != EUeAgentAssetRelationDirection::Referencers)
 		{
-			if (Kind == TEXT("hard"))
-			{
-				Append(
-					UE::AssetRegistry::EDependencyCategory::Package,
-					UE::AssetRegistry::FDependencyQuery(
-						UE::AssetRegistry::EDependencyQuery::Hard));
-			}
-			else if (Kind == TEXT("soft"))
-			{
-				Append(
-					UE::AssetRegistry::EDependencyCategory::Package,
-					UE::AssetRegistry::FDependencyQuery(
-						UE::AssetRegistry::EDependencyQuery::NotHard));
-			}
-			else if (Kind == TEXT("manage"))
-			{
-				Append(
-					UE::AssetRegistry::EDependencyCategory::Manage,
-					UE::AssetRegistry::FDependencyQuery());
-			}
-			else if (Kind == TEXT("searchable_name"))
-			{
-				Append(
-					UE::AssetRegistry::EDependencyCategory::SearchableName,
-					UE::AssetRegistry::FDependencyQuery());
-			}
-			else
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_project_read_relation_kind_invalid"),
-					Record.GetObjectPathString(),
-					Kind);
-			}
+			Traverse(true);
 		}
-		for (const FName Name : Dependencies)
+		if (Request.Direction != EUeAgentAssetRelationDirection::Dependencies)
 		{
-			OutDependencies.Add(Name.ToString());
+			Traverse(false);
 		}
-		for (const FName Name : Referencers)
+		OutGraph.Nodes.Sort([](const FUeAgentAssetRelationNode& Left,
+			const FUeAgentAssetRelationNode& Right)
 		{
-			OutReferencers.Add(Name.ToString());
-		}
-		OutDependencies.Sort();
-		OutReferencers.Sort();
+			return Left.StableIdentifier < Right.StableIdentifier;
+		});
 		return true;
 	}
 
@@ -306,128 +502,23 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			if (Kind != TEXT("asset") && Kind != TEXT("map")
 				&& Kind != TEXT("config"))
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_project_read_resource_kind_unsupported"),
-					Kind);
+				return Fail(OutError, LookupFailure(TEXT("asset_project_read_resource_kind_unsupported"),
+					TEXT("The requested dirty resource kind is not supported."), TEXT("/resource_kinds"),
+					MakeShared<FJsonValueString>(Kind), MakeShared<FJsonValueString>(TEXT("asset, map or config"))));
 			}
 		}
-		TSet<FString> SeenResourceIds;
-		auto AppendDirtyPackage = [
-			&OutResources,
-			&SeenResourceIds](
-			UPackage* Package,
-			const FString& Kind,
-			bool bAllowTransientPackage)
+		TArray<EditorResources::FDirtyResource> Resources;
+		EditorResources::CollectDirtyResources(Resources);
+		for (const auto& Resource : Resources)
 		{
-			if (!IsValid(Package)
-				|| !Package->IsDirty()
-				|| (!bAllowTransientPackage
-					&& Package->HasAnyFlags(RF_Transient))
-				|| Package->HasAnyPackageFlags(
-					PKG_CompiledIn | PKG_PlayInEditor))
-			{
-				return;
-			}
-			const FString PackageName = Package->GetName();
-			if (!PackageName.StartsWith(TEXT("/Game/"))
-				|| SeenResourceIds.Contains(PackageName))
-			{
-				return;
-			}
-			SeenResourceIds.Add(PackageName);
+			if (!IncludesResourceKind(RequestedKinds, Resource.ResourceKind)) continue;
 			FUeAgentEditorResourceObservation Observation;
-			Observation.ResourceId = PackageName;
-			Observation.ResourceKind = Kind;
-			Observation.PackageName = PackageName;
+			Observation.ResourceId = Resource.ResourceRef;
+			Observation.ResourceKind = Resource.ResourceKind;
+			Observation.PackageName = Resource.Package ? Resource.ResourceRef : FString();
+			Observation.ObjectPath = Resource.ObjectPath;
 			Observation.bDirty = true;
 			OutResources.Add(MoveTemp(Observation));
-		};
-
-		if (IncludesResourceKind(RequestedKinds, TEXT("map")))
-		{
-			for (TObjectIterator<UWorld> It; It; ++It)
-			{
-				UWorld* World = *It;
-				if (!IsValid(World))
-				{
-					continue;
-				}
-				AppendDirtyPackage(
-					World->GetOutermost(),
-					TEXT("map"),
-					false);
-				ULevel* Level = World->PersistentLevel;
-				if (!Level)
-				{
-					continue;
-				}
-				if (Level->MapBuildData)
-				{
-					AppendDirtyPackage(
-						Level->MapBuildData->GetOutermost(),
-						TEXT("map"),
-						false);
-				}
-				for (UPackage* ExternalPackage
-					: Level->GetLoadedExternalObjectPackages())
-				{
-					AppendDirtyPackage(
-						ExternalPackage,
-						TEXT("map"),
-						true);
-				}
-			}
-		}
-
-		if (IncludesResourceKind(RequestedKinds, TEXT("asset")))
-		{
-			for (TObjectIterator<UPackage> It; It; ++It)
-			{
-				UPackage* Package = *It;
-				if (SeenResourceIds.Contains(Package->GetName())
-					|| Package->HasAnyPackageFlags(PKG_ContainsMap))
-				{
-					continue;
-				}
-				AppendDirtyPackage(
-					Package,
-					TEXT("asset"),
-					false);
-			}
-		}
-
-		if (IncludesResourceKind(RequestedKinds, TEXT("config")) && GConfig)
-		{
-			struct FConfigCandidate
-			{
-				const TCHAR* Scope;
-				const FString* Filename;
-			};
-			const FConfigCandidate Candidates[] = {
-				{TEXT("engine"), &GEngineIni},
-				{TEXT("game"), &GGameIni},
-				{TEXT("editor"), &GEditorIni},
-				{TEXT("input"), &GInputIni},
-				{TEXT("device_profiles"), &GDeviceProfilesIni},
-				{TEXT("scalability"), &GScalabilityIni},
-			};
-			for (const FConfigCandidate& Candidate : Candidates)
-			{
-				const FConfigFile* Config = GConfig->FindConfigFile(
-					*Candidate.Filename);
-				if (!Config || !Config->Dirty)
-				{
-					continue;
-				}
-				FUeAgentEditorResourceObservation Observation;
-				Observation.ResourceId = FString(TEXT("config:"))
-					+ Candidate.Scope;
-				Observation.ResourceKind = TEXT("config");
-				Observation.ObjectPath = *Candidate.Filename;
-				Observation.bDirty = true;
-				OutResources.Add(MoveTemp(Observation));
-			}
 		}
 		SortEditorResources(OutResources);
 		return true;
@@ -486,11 +577,12 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 		{
 			if (!MatchedIds.Contains(RequestedId))
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_project_read_platform_unresolved"),
-					RequestedId,
-					Context.GetProjectInstanceId());
+				OutError = LookupFailure(TEXT("asset_project_read_platform_unresolved"),
+					TEXT("The requested target platform is unavailable."), TEXT("/platform/available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.Stage = TEXT("platform_lookup");
+				OutError.CandidateName = RequestedId;
+				return false;
 			}
 		}
 		OutPlatforms.Sort(
@@ -515,11 +607,48 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			UGeneralProjectSettings>();
 		return IsValid(OutObject)
 			? true
-			: Fail(
-				OutError,
-				TEXT("asset_project_read_project_unresolved"),
-				Context.GetProjectInstanceId(),
-				SourceId);
+			: [&]()
+			{
+				OutError = LookupFailure(TEXT("asset_project_read_project_unresolved"),
+					TEXT("The general project settings object is unavailable."), TEXT("/project/object/available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.CandidateName = SourceId;
+				OutError.TargetPath = TEXT("project");
+				OutError.SubjectId = Context.GetProjectInstanceId();
+				return false;
+			}();
+	}
+
+	bool FUeAgentAssetProjectReadProductionEnvironment::TryResolveProjectSettingsObject(
+		const UE::UAI::ContextResource::FUeAgentExecutionContextRef& Context,
+		const FString& SectionId,
+		UObject*& OutObject,
+		FUeAgentAssetProjectReadError& OutError)
+	{
+		OutError = {};
+		OutObject = nullptr;
+		EditorProject::FSettingsPage Page;
+		UE::UAI::Contract::FDiagnostic Error;
+		if (!EditorProject::FindSettingsPageBySectionId(SectionId, Page, Error))
+		{
+			OutError = Error;
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SectionId;
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = SectionId;
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TEXT("project");
+			return false;
+		}
+		OutObject = Page.SettingsObject;
+		return IsValid(OutObject)
+			? true
+			: [&]()
+			{
+				OutError = LookupFailure(TEXT("settings_section_object_unavailable"),
+					TEXT("The selected settings section has no live settings object."), TEXT("/settings/object/available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.CandidateName = SectionId;
+				OutError.TargetPath = TEXT("project");
+				return false;
+			}();
 	}
 
 	bool FUeAgentAssetProjectReadProductionEnvironment::
@@ -540,10 +669,21 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 		}
 		return OutConfig
 			? true
-			: Fail(
-				OutError,
-				TEXT("asset_project_read_config_unresolved"),
-				ConfigScope,
-				Context.GetProjectInstanceId());
+			: [&]()
+			{
+				OutError = LookupFailure(TEXT("asset_project_read_config_unresolved"),
+					!GConfig ? TEXT("The configuration cache is unavailable.")
+						: !Filename ? TEXT("The requested configuration scope has no configured filename.")
+						: TEXT("The configuration cache has no file for the requested scope."),
+					!GConfig ? TEXT("/config/cache/available") : !Filename ? TEXT("/config/filename/available") : TEXT("/config/file/available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.CandidateName = ConfigScope;
+				if (Filename)
+				{
+					OutError.Source.SourceFile = *Filename;
+					OutError.TargetPath = TEXT("config:") + (ConfigScope == TEXT("platform") ? FString(TEXT("game")) : ConfigScope);
+				}
+				return false;
+			}();
 	}
 }

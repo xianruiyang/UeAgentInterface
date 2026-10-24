@@ -2,7 +2,10 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringProfileState.h"
 
 class FJsonValue;
 class UObject;
@@ -17,16 +20,21 @@ namespace UeAgentReflectionAuthoring
 		UEAGENTINTERFACE_API bool Validate(
 			const FProfile& Profile,
 			const TSharedPtr<FJsonValue>& Value,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		UEAGENTINTERFACE_API bool Read(
 			const FProfile& Profile,
 			UObject& Asset,
 			TSharedPtr<FJsonValue>& OutValue,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		UEAGENTINTERFACE_API bool Apply(
 			const FProfile& Profile,
 			UObject& Asset,
 			const TSharedPtr<FJsonValue>& Value,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
+		UEAGENTINTERFACE_API bool Apply(
+			const FProfile& Profile,
+			UObject& Asset,
+			const TSharedPtr<FJsonValue>& Value,
+			UE::UAI::Contract::FDiagnostic& OutError, ProfileState::FIntentVerifier* OutIntent);
 	}
 }

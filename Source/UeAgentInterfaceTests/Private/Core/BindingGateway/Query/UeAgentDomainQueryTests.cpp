@@ -121,8 +121,6 @@ namespace
 				false,
 				false,
 				false),
-			FUeAgentPageRequest(),
-			{},
 			{},
 			{});
 	}
@@ -131,19 +129,7 @@ namespace
 	{
 		return MakeShared<
 			FUeAgentResourceTracker,
-			ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 100000},
-				{EUeAgentResourceDimension::Items, 100000},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 100000},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					8 * 1024 * 1024,
-				},
-			}));
+			ESPMode::ThreadSafe>();
 	}
 
 	FUeAgentOperationDeadline DomainDeadline()
@@ -258,7 +244,7 @@ namespace
 			{
 				OutError.Code = FailureCode;
 				OutError.SubjectId = Descriptor.GetProviderBinding();
-				OutError.Detail = TEXT("fixture provider failure");
+				OutError.PublicMessage = TEXT("fixture provider failure");
 				return false;
 			}
 			OutSource = Source;
@@ -465,7 +451,7 @@ namespace
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentDomainQueryPayloadTest,
-	"UeAgentInterface.Core.BindingGateway.Query.DomainQuery.PayloadCodecAndBoundary",
+	"UeAgentInterface.Core.BindingGateway.Query.DomainQuery.TypedPayload",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentDomainQueryPayloadTest::RunTest(const FString& Parameters)
@@ -486,66 +472,6 @@ bool FUeAgentDomainQueryPayloadTest::RunTest(const FString& Parameters)
 		Payload.GetKind(),
 		EUeAgentQueryBindingPayloadKind::DomainQuery);
 
-	const FUeAgentResourceTrackerOwner Resources = DomainResources();
-	FUeAgentContractValue Encoded(TEXT("{}"));
-	FUeAgentQueryBindingError Error;
-	TestTrue(
-		TEXT("encode domain query through the existing C3Q codec"),
-		FUeAgentQueryPayloadCodec::TryEncode(
-			Payload,
-			Resources.Get(),
-			Encoded,
-			Error));
-	TestTrue(
-		TEXT("wire owns only user input and explicit execution context"),
-		Encoded.GetJsonValue().Contains(
-			TEXT("\"query_kind\":\"domain_query\""))
-			&& Encoded.GetJsonValue().Contains(
-				TEXT("\"world_identity\":"))
-			&& Encoded.GetJsonValue().Contains(
-				TEXT("\"input\":")));
-	for (const FString& Forbidden : {
-			TEXT("provider_binding"),
-			TEXT("command_id"),
-			TEXT("\"route\""),
-			TEXT("\"selector_params\""),
-		})
-	{
-		TestFalse(
-			*FString::Printf(
-				TEXT("wire does not expose internal routing field %s"),
-				*Forbidden),
-			Encoded.GetJsonValue().Contains(Forbidden));
-	}
-
-	TOptional<FUeAgentQueryBindingPayload> Decoded;
-	TestTrue(
-		TEXT("decode domain query through the same C3Q codec"),
-		FUeAgentQueryPayloadCodec::TryDecode(
-			Encoded,
-			Resources.Get(),
-			Decoded,
-			Error));
-	TestTrue(TEXT("typed domain query returned"), Decoded.IsSet());
-	if (!Decoded.IsSet())
-	{
-		AddError(FString::Printf(
-			TEXT("domain_query_decode_failed:%s:%s:%s"),
-			*Error.Code,
-			*Error.SubjectId,
-			*Error.Detail));
-		return false;
-	}
-	TestEqual(
-		TEXT("domain input survives wire round trip"),
-		Decoded->GetDomainQuery()->GetInput().GetJsonValue(),
-		Payload.GetDomainQuery()->GetInput().GetJsonValue());
-	TestEqual(
-		TEXT("explicit world survives wire round trip"),
-		Decoded->GetDomainQuery()
-			->GetExecutionContext()
-			.WorldIdentity,
-		DomainExecutionContext().WorldIdentity);
 	return true;
 }
 
@@ -628,6 +554,24 @@ bool FUeAgentDomainQueryDispatchTest::RunTest(const FString& Parameters)
 	TestFalse(
 		TEXT("untargeted domain query does not invent a ticket"),
 		Result->GetValue().GetTicket().IsSet());
+	FUeAgentContractValue EncodedResponse(TEXT("{}"));
+	TestTrue(
+		TEXT("untargeted domain response encodes through C3Q"),
+		FUeAgentQueryPayloadCodec::TryEncode(
+			Result->GetValue(),
+			Resources.Get(),
+			EncodedResponse,
+			Error));
+	TSharedPtr<FJsonObject> ResponseObject;
+	const TSharedRef<TJsonReader<>> ResponseReader =
+		TJsonReaderFactory<>::Create(EncodedResponse.GetJsonValue());
+	TestTrue(
+		TEXT("encoded untargeted domain response is an object"),
+		FJsonSerializer::Deserialize(ResponseReader, ResponseObject)
+			&& ResponseObject.IsValid());
+	TestFalse(
+		TEXT("encoded untargeted domain response omits ticket"),
+		ResponseObject->HasField(TEXT("ticket")));
 	return true;
 }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentContract.h"
 
@@ -12,5 +14,5 @@ namespace UE::UAI::Contract
 		const FUeAgentContractSchema& Schema,
 		FUeAgentContractValue& OutCanonicalInstance,
 		FString& OutPythonLiteral,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

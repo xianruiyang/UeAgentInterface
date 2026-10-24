@@ -2,7 +2,7 @@
 
 #include "CommandHandlers/AiBehavior/UeAgentAiBehaviorDomainCommandHandlers.h"
 #include "Core/Contract/UeAgentCommandContract.h"
-#include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "OperationOwners/AiBehavior/UeAgentAiBehaviorDomainService.h"
 
 namespace UE::UAI::Module::CommandRegistration::AiBehavior
@@ -16,13 +16,10 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 
 	namespace
 	{
+		const FString DomainId = TEXT("ai-behavior-domain-candidates");
 		const FString ProviderRegistrationId = TEXT("ai-behavior-domain-provider");
 		const FString CandidateCommandId = TEXT("ai.behavior.candidates");
 		const FString CandidateOwner = TEXT("ai-behavior-domain-owner");
-		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration ProviderRegistration(
-			TEXT("ai-behavior-domain-candidates"),
-			TEXT("ai-behavior-domain-provider"),
-			&OperationOwners::AiBehavior::TryCreateAiBehaviorDomainProvider);
 
 		FUeAgentCommandFieldDeclaration Field(
 			const TCHAR* Name,
@@ -45,51 +42,40 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 			Result.SideEffect = EUeAgentCommandSideEffect::None;
 			Result.StateLayers = {TEXT("asset_persisted_state")};
 			Result.InputFields = {
-				Field(TEXT("target"), TEXT("string"), true, TEXT("Exact persisted BehaviorTree, BlackboardData, EnvQuery, StateTree, or SmartObjectDefinition package.object identity.")),
-				Field(TEXT("query"), TEXT("string"), false, TEXT("Optional bounded search over the exact target creation surface.")),
-				Field(TEXT("id"), TEXT("string"), false, TEXT("Optional exact compact candidate id returned for a native creation context.")),
-				Field(TEXT("limit"), TEXT("integer"), false, TEXT("Optional page size from 1 through 64; defaults to 64.")),
-				Field(TEXT("cursor"), TEXT("integer"), false, TEXT("Optional non-negative result offset; defaults to zero.")),
+				Field(TEXT("target"), TEXT("string"), true, TEXT("Persisted BehaviorTree, BlackboardData, EnvQuery, StateTree, or SmartObjectDefinition name from content search, or its exact package.object path.")),
+				Field(TEXT("query"), TEXT("string"), false, TEXT("Optional search over the exact target creation surface.")),
+				Field(TEXT("parent"), TEXT("string"), false, TEXT("BehaviorTree parent node alias from the exported graph; required together with attachment_kind.")),
+				Field(TEXT("attachment_kind"), TEXT("string"), false, TEXT("BehaviorTree native parent menu: service or decorator; requires parent.")),
+				Field(TEXT("graph_owner"), TEXT("string"), false, TEXT("Copy the owner reference from an exported CompositeDecorator graph to search its native inner-node menu; exclusive with parent and attachment_kind.")),
+				Field(TEXT("describe"), TEXT("object"), false, TEXT("Optional {name, select?, fields?} in the same target and attachment/graph context. Returns creation.supported/reason; editable fields require a created item.")),
 			};
 			Result.ResultFields = {
-				Field(TEXT("command_id"), TEXT("string"), true, TEXT("The unchanged exact public command identity.")),
-				Field(TEXT("read_only"), TEXT("boolean"), true, TEXT("Always true.")),
-				Field(TEXT("target"), TEXT("string"), true, TEXT("The unchanged exact target identity.")),
-				Field(TEXT("target_revision"), TEXT("string"), true, TEXT("The current persisted target revision.")),
-				Field(TEXT("candidates"), TEXT("array"), true, TEXT("Native compact BehaviorTree blank-menu actions, or explicitly marked legacy class identities for AI contexts not yet migrated.")),
-				Field(TEXT("total_matches"), TEXT("integer"), true, TEXT("Total candidates matching this query.")),
-				Field(TEXT("next_cursor"), TEXT("integer"), true, TEXT("Next result offset, or -1 when complete.")),
-				Field(TEXT("complete"), TEXT("boolean"), true, TEXT("True only on the final page.")),
-				Field(TEXT("has_more"), TEXT("boolean"), true, TEXT("True only while another page remains.")),
-				Field(TEXT("coverage_scope"), TEXT("string"), true, TEXT("The exact native context or legacy compatibility surface represented by this result.")),
-				Field(TEXT("coverage_complete"), TEXT("boolean"), true, TEXT("True only when the complete native creation menu was projected.")),
-				Field(TEXT("creation_coverage_complete"), TEXT("boolean"), true, TEXT("True only when every projected native menu action has an HJSON execution contract.")),
-				Field(TEXT("native_action_count"), TEXT("integer"), true, TEXT("Complete native action count before query filtering, or zero for a legacy compatibility surface.")),
-				Field(TEXT("executable_action_count"), TEXT("integer"), true, TEXT("Native actions currently executable through the matching HJSON authoring path.")),
-				Field(TEXT("graph_name"), TEXT("string"), false, TEXT("The target editor graph name when the native context already exists, or the transient schema-context graph name used for read-only enumeration.")),
+				Field(TEXT("scope"), TEXT("object"), true, TEXT("Public target and supplied parent/attachment_kind or graph_owner context; response metadata, not a selector.")),
+				Field(TEXT("names"), TEXT("array"), true, TEXT("Ordered, readable AI behavior names.")),
+				Field(TEXT("description"), TEXT("object"), false, TEXT("Selected action's current HJSON creation support, only when describe is requested.")),
 			};
 			Result.Errors = {
 				{TEXT("ai_behavior_candidate_query_authority_required"), TEXT("The uai:query authority is missing.")},
 				{TEXT("ai_behavior_candidate_target_unresolved"), TEXT("The exact target could not be loaded.")},
 				{TEXT("ai_behavior_candidate_target_type_unsupported"), TEXT("The target is not an exact supported AI behavior root.")},
-				{TEXT("ai_behavior_candidate_page_invalid"), TEXT("The requested page is outside the bounded contract.")},
+				{TEXT("ai_behavior_candidate_machine_selector_not_supported"), TEXT("Machine identity selectors are not accepted; use the returned readable name.")},
 				{TEXT("ai_behavior_candidate_native_menu_shape_mismatch"), TEXT("The UE 5.6 native BehaviorTree menu no longer matches the fail-closed class/action mapping contract.")},
-				{TEXT("ai_behavior_candidate_identity_ambiguous"), TEXT("The complete native action set did not yield unique compact ids.")},
+				{TEXT("ai_behavior_candidate_identity_ambiguous"), TEXT("The complete native action set did not yield unique readable semantic names.")},
 			};
-			Result.Purpose.Summary = TEXT("Search the same UE BehaviorTree blank-background menu used by the Editor and expose truthful legacy compatibility results for AI contexts not yet migrated.");
+			Result.Purpose.Summary = TEXT("Search the UE BehaviorTree blank-background or parent attachment menu; other AI contexts retain their documented compatibility boundary.");
 			Result.Purpose.Target = TEXT("One exact persisted BehaviorTree, BlackboardData, EnvQuery, StateTree, or SmartObjectDefinition.");
 			Result.Purpose.Preconditions = {
 				TEXT("Copy the target unchanged from public content search or readback."),
 				TEXT("Run in the Editor on the UE game thread with uai:query."),
 			};
-			Result.Purpose.ParameterGuidance = TEXT("For a BehaviorTree blank graph, search like the Editor right-click menu or pass id for one exact action. Put only candidate.name or candidate.id in HJSON; graph, semantic node identity, placement and optional assertions stay outside candidate. Other AI target types still return legacy bindings until their native contexts are migrated.");
-			Result.Purpose.ResultGuidance = TEXT("Copy one unique BehaviorTree name or exact compact id. Continue paging while has_more is true. coverage_complete describes native search coverage; creation_coverage_complete separately describes executable menu actions. Do not treat legacy compatibility results as native-menu equivalence.");
-			Result.Purpose.FailureGuidance = TEXT("Unresolved targets, unavailable native contexts, menu-shape drift, identity collisions and invalid pages fail without graph mutation.");
+			Result.Purpose.ParameterGuidance = TEXT("Omit context for the blank graph menu. For attachments, pass the exported parent alias and service or decorator. For an inner graph, copy its owner field unchanged into graph_owner. Copy the returned name into HJSON candidate.name; context belongs outside candidate.");
+			Result.Purpose.ResultGuidance = TEXT("Default discovery contains matching names and one scope, including search-only actions. For an unfamiliar action request describe={name: returned_name} in the same context for creation.supported/reason. Editable fields resolve after creation. scope is response metadata, not a selector; re-query when target or context changes.");
+			Result.Purpose.FailureGuidance = TEXT("Unresolved targets, unavailable native contexts, menu-shape drift and readable-name collisions fail without graph mutation.");
 			Result.Purpose.SideEffectGuidance = TEXT("Content read-only: it may create a transient schema context and load native action metadata, but creates no persisted node, package, file, asset editor or external state.");
 			Result.Purpose.MinimumExample = TEXT("client.ai.behavior_candidates(target, query='Wait')");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
-				TEXT("query.command.detail"),
+				TEXT("query.command.usage"),
 				TEXT("content_graph.summary"),
 				TEXT("content_graph.import_workspace"),
 				TEXT("content_graph.items"),
@@ -122,7 +108,7 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				(void)Registry;
 				return TryCreateAiBehaviorCandidateCommandHandlers(Service, OutHandlers, OutError);
@@ -131,6 +117,76 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 		private:
 			TSharedRef<IUeAgentAiBehaviorCandidateCommandService> Service;
 		};
+
+		bool TryCreateDomainCapability(
+			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
+				OutContribution,
+			UE::UAI::Contract::FDiagnostic& OutError)
+		{
+			TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>
+				Provider;
+			HjsonWorkspace::FWorkspaceError WorkspaceError;
+			if (!OperationOwners::AiBehavior::TryCreateAiBehaviorDomainProvider(
+					Provider, WorkspaceError)
+				|| !Provider.IsValid())
+			{
+				OutError = WorkspaceError.GetDiagnostic();
+				return false;
+			}
+			DomainCapability::FDomainCapabilityDeclaration Declaration =
+				DomainCapability::MakeExplicitlyUnsupportedDomainCapabilityDeclaration(
+					DomainId);
+			Declaration.Hjson.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.Hjson.Providers.Add(Provider.ToSharedRef());
+			Declaration.Hjson.Routes = {
+				{ProviderRegistrationId, TEXT("content_graph.import_workspace"),
+					TEXT("uai.ai_behavior.edit/1"), TEXT("ai_behavior"),
+					TEXT("/Script/AIModule.BehaviorTree"),
+					HjsonWorkspace::EInitializationNodeRole::RootTarget,
+					TEXT("uai.init.ai.behavior_tree.root/1"), true},
+				{ProviderRegistrationId, TEXT("content_graph.import_workspace"),
+					TEXT("uai.ai_behavior.edit/1"), TEXT("ai_behavior"),
+					TEXT("/Script/AIModule.BlackboardData"),
+					HjsonWorkspace::EInitializationNodeRole::RootTarget,
+					TEXT("uai.init.ai.blackboard.root/1"), true},
+				{ProviderRegistrationId, TEXT("content_graph.import_workspace"),
+					TEXT("uai.ai_behavior.edit/1"), TEXT("ai_behavior"),
+					TEXT("/Script/AIModule.EnvQuery"),
+					HjsonWorkspace::EInitializationNodeRole::RootTarget,
+					TEXT("uai.init.ai.eqs.root/1"), true},
+				{ProviderRegistrationId, TEXT("content_graph.import_workspace"),
+					TEXT("uai.ai_behavior.edit/1"), TEXT("ai_behavior"),
+					TEXT("/Script/SmartObjectsModule.SmartObjectDefinition"),
+					HjsonWorkspace::EInitializationNodeRole::RootTarget,
+					TEXT("uai.init.ai.smart_object_definition.root/1"), true},
+				{ProviderRegistrationId, TEXT("content_graph.import_workspace"),
+					TEXT("uai.ai_behavior.edit/1"), TEXT("ai_behavior"),
+					TEXT("/Script/StateTreeModule.StateTree"),
+					HjsonWorkspace::EInitializationNodeRole::RootTarget,
+					TEXT("uai.init.ai.state_tree.root/1"), true},
+			};
+			Declaration.Initialization.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.Initialization.ContractIds = {
+				TEXT("uai.init.ai.behavior_tree.root/1"),
+				TEXT("uai.init.ai.blackboard.root/1"),
+				TEXT("uai.init.ai.eqs.root/1"),
+				TEXT("uai.init.ai.smart_object_definition.root/1"),
+				TEXT("uai.init.ai.state_tree.root/1"),
+				TEXT("uai.init.ai.behavior_node/1"),
+				TEXT("uai.init.ai.behavior_service/1"),
+				TEXT("uai.init.ai.behavior_decorator/1"),
+				TEXT("uai.init.ai.state_tree_node/1"),
+				TEXT("uai.init.ai.blackboard_entry/1"),
+				TEXT("uai.init.ai.connection/1"),
+			};
+			return DomainCapability::FDomainCapabilityContribution::TryCreate(
+				MoveTemp(Declaration), OutContribution, OutError);
+		}
+
+		const DomainCapability::FDomainCapabilityContributionFactoryRegistration
+			DomainCapabilityRegistration(*DomainId, &TryCreateDomainCapability);
 
 		const FUeAgentActiveCommandContributionFactoryRegistration CandidateRegistration(
 			TEXT("ai-behavior-domain-candidates"),
@@ -144,7 +200,7 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 
 	bool TryCreateProductionAiBehaviorCandidateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TSharedPtr<IUeAgentAiBehaviorCandidateCommandService> Service;
 		if (!TryCreateProductionAiBehaviorCandidateCommandService(Service, OutError)

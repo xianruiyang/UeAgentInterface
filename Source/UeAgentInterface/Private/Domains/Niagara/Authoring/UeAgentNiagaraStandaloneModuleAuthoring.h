@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "NiagaraTypes.h"
 
@@ -20,41 +22,49 @@ namespace UeAgentNiagaraStandaloneModuleAuthoring
 	UEAGENTINTERFACE_API bool IsStandaloneModuleStage(
 		const UeAgentNiagaraStageModuleAuthoring::FResolvedStage& Stage);
 
-	UEAGENTINTERFACE_API void GetAssignmentNodes(
+	UEAGENTINTERFACE_API bool GetAssignmentNodes(
 		UNiagaraNodeOutput& OutputNode,
-		TArray<UNiagaraNode*>& OutNodes);
+		TArray<UNiagaraNode*>& OutNodes,
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ResolveAssignmentNode(
 		UNiagaraNodeOutput& OutputNode,
 		const FGuid& NodeGuid,
 		UNiagaraNode*& OutNode,
 		int32& OutIndex,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ResolveLegacyAssignmentNodeByTargets(
 		UNiagaraNodeOutput& OutputNode,
 		const TArray<FNiagaraVariable>& RequestedTargets,
 		UNiagaraNodeAssignment*& OutNode,
 		int32& OutIndex,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API UNiagaraNode* AddAssignmentNode(
 		UNiagaraNodeOutput& OutputNode,
 		const TArray<FNiagaraVariable>& AssignmentTargets,
 		int32 TargetIndex,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool MoveAssignmentNode(
 		UNiagaraNodeOutput& OutputNode,
 		UNiagaraNode& Node,
 		int32 TargetIndex,
 		int32& OutNewIndex,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool RemoveAssignmentNode(
 		UNiagaraNodeOutput& OutputNode,
 		UNiagaraNode& Node,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
+
+	UEAGENTINTERFACE_API UNiagaraNode* ReplaceAssignmentNode(
+		UNiagaraNodeOutput& OutputNode,
+		UNiagaraNode& Node,
+		const TArray<FNiagaraVariable>& AssignmentTargets,
+		int32 TargetIndex,
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API void GetAssignmentTargets(
 		const UNiagaraNode& Node,
@@ -62,7 +72,7 @@ namespace UeAgentNiagaraStandaloneModuleAuthoring
 
 	UEAGENTINTERFACE_API bool EnsureAssignmentTargetsRegistered(
 		UNiagaraNode& Node,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool AssignmentTargetsMatch(
 		const UNiagaraNode& Node,

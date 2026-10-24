@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "OperationOwners/AudioGraph/UeAgentAudioGraphDomainService.h"
@@ -14,5 +16,5 @@ namespace UE::UAI::CommandHandlers::AudioGraph
 	UEAGENTINTERFACE_API bool TryCreateAudioGraphCandidateCommandHandlers(
 		TSharedRef<OperationOwners::AudioGraph::IUeAgentAudioGraphCandidateCommandService> Service,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

@@ -2,6 +2,7 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaBindings.h"
+#include "DomainAdapters/AudioCommands/UeAgentAudioCommandMechanicsBoundary.h"
 #include "Core/Contract/UeAgentContractJson.h"
 #include "HAL/FileManager.h"
 #include "MetasoundBuilderBase.h"
@@ -199,15 +200,12 @@ namespace
 		const TSharedRef<TJsonReader<>> Reader =
 			TJsonReaderFactory<>::Create(Result.GetValue().GetJsonValue());
 		FString TerminalStatus;
-		FString PersistenceReceiptId;
 		bool bMutationApplied = false;
 		bool bCompileSettled = false;
 		bool bSaved = false;
 		bool bReloaded = false;
-		const bool bExact = Result.IsValid()
+		bool bExact = Result.IsValid()
 			&& FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid()
-			&& Root->TryGetStringField(TEXT("revision"), OutRevision)
-			&& !OutRevision.IsEmpty()
 			&& Root->TryGetStringField(
 				TEXT("terminal_status"), TerminalStatus)
 			&& TerminalStatus == TEXT("succeeded")
@@ -221,11 +219,10 @@ namespace
 			&& bSaved
 			&& Root->TryGetBoolField(TEXT("reloaded"), bReloaded)
 			&& bReloaded
-			&& Root->TryGetStringField(
-				TEXT("persistence_receipt_id"), PersistenceReceiptId)
-			&& !PersistenceReceiptId.IsEmpty();
+			&& !Root->HasField(TEXT("revision"))
+			&& !Root->HasField(TEXT("persistence_receipt_id"));
 		return Test.TestTrue(*FString::Printf(
-			TEXT("%s returns real revision and lifecycle receipt"),
+			TEXT("%s returns business lifecycle projection without machine custody"),
 			*CapabilityId), bExact);
 	}
 
@@ -261,9 +258,8 @@ namespace
 	TSharedPtr<FGraphCompoundRuntime> MakeRuntime(FAutomationTestBase& Test)
 	{
 		FGraphCompoundRuntimeConfig RuntimeConfig;
-		RuntimeConfig.MaxFrameBytes = 1024 * 1024;
+
 		FGraphCompoundAudioMediaProductionConfig ProductionConfig;
-		ProductionConfig.OperationTimeoutSeconds = 30.0;
 		TSharedPtr<FGraphCompoundRuntime> Runtime;
 		FGraphCompoundRuntimeError Error;
 		if (!Test.TestTrue(TEXT("Audio/Media production runtime builds"),
@@ -291,6 +287,47 @@ namespace
 	{
 		return Guid.ToString(EGuidFormats::DigitsWithHyphensLower);
 	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentGraphCompoundAudioMediaInternalMechanicsContractTest,
+	"UeAgentInterface.Composition.GraphCompound.AudioMedia.InternalMechanicsContract",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentGraphCompoundAudioMediaInternalMechanicsContractTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	TArray<FUeAgentGraphCompoundActivationProfile> Profiles;
+	FString Error;
+	if (!TestTrue(TEXT("Audio mechanics profiles resolve"),
+			UE::UAI::DomainAdapters::AudioCommands::TryGetActivationProfiles(
+				Profiles, Error)))
+	{
+		AddError(Error);
+		return false;
+	}
+	TSharedPtr<const UE::UAI::CommandContract::FUeAgentCommandContractRegistry>
+		Contracts;
+	if (!TestTrue(TEXT("Audio internal production contract registry resolves"),
+			TryCreateGraphCompoundProductionCommandContractRegistry(
+				Profiles, Contracts, Error))
+		|| !TestNotNull(TEXT("Audio internal production contract registry exists"),
+			Contracts.Get()))
+	{
+		AddError(Error);
+		return false;
+	}
+	const FString InternalMutation = TEXT("metasound.graph.node.mutate");
+	TestNotNull(TEXT("Internal MetaSound mutation contract is resolvable"),
+		Contracts->FindExact(InternalMutation));
+	for (const FString& PublicId :
+		UE::UAI::DomainAdapters::AudioCommands::GetPublicCommandIds())
+	{
+		TestFalse(TEXT("Public Audio command set excludes internal mutation"),
+			PublicId == InternalMutation);
+	}
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -402,9 +439,8 @@ bool FUeAgentGraphCompoundAudioMediaMetaSoundProductionTest::RunTest(
 				*GuidText(FrequencyOutput.VertexID), *GuidText(OscillatorId),
 				*InputVertexId, *PackageName), TEXT("ms-link"), Revision)
 		|| !Submit(*this, *Runtime, TEXT("metasound.graph.compile_settle"),
-			FString::Printf(TEXT("{\"expected_document_revision\":\"%s\","
-				"\"registration_policy\":\"register_and_compile\","
-				"\"target_ref\":\"%s\"}"), *Revision, *PackageName),
+			FString::Printf(TEXT("{\"registration_policy\":\"register_and_compile\","
+				"\"target_ref\":\"%s\"}"), *PackageName),
 			TEXT("ms-settle"), Revision))
 	{
 		return false;
@@ -519,9 +555,9 @@ bool FUeAgentGraphCompoundAudioMediaSoundCueProductionTest::RunTest(
 				"\"root_node_object_path\":\"%s\",\"target_ref\":\"%s\"}"),
 				*RootPath, *PackageName), TEXT("sc-root"), Revision)
 		|| !Submit(*this, *Runtime, TEXT("sound_cue.graph.compile_settle"),
-			FString::Printf(TEXT("{\"expected_graph_revision\":\"%s\","
-				"\"sync_policy\":\"sync_and_compile\",\"target_ref\":\"%s\"}"),
-				*Revision, *PackageName), TEXT("sc-settle"), Revision))
+			FString::Printf(TEXT("{\"sync_policy\":\"sync_and_compile\","
+				"\"target_ref\":\"%s\"}"), *PackageName),
+			TEXT("sc-settle"), Revision))
 	{
 		return false;
 	}
@@ -613,8 +649,8 @@ bool FUeAgentGraphCompoundAudioMediaTextureGraphProductionTest::RunTest(
 		|| !Submit(*this, *Runtime,
 			TEXT("texture_graph.graph.validate_evaluate_settle"),
 			FString::Printf(TEXT("{\"evaluation_policy\":\"validate_and_evaluate\","
-				"\"expected_graph_revision\":\"%s\",\"target_ref\":\"%s\"}"),
-				*Revision, *PackageName), TEXT("tg-settle"), Revision))
+				"\"target_ref\":\"%s\"}"),
+				*PackageName), TEXT("tg-settle"), Revision))
 	{
 		return false;
 	}
@@ -626,9 +662,9 @@ bool FUeAgentGraphCompoundAudioMediaTextureGraphProductionTest::RunTest(
 		return false;
 	}
 	const FString QueryPayload = FString::Printf(
-		TEXT("{\"expected_settled_revision\":\"%s\",\"outputs\":[{"
+		TEXT("{\"outputs\":[{"
 			"\"element_id\":\"builtin_output\",\"output_name\":\"Output\"}],"
-			"\"target_ref\":\"%s\"}"), *Revision, *PackageName);
+			"\"target_ref\":\"%s\"}"), *PackageName);
 	const FUeAgentQueryResult QueryResult = Runtime->GetQueryPort()->Submit(
 		FUeAgentQueryRequest(
 			QueryProfile->GetExecutionContract().GetDescriptorIdentity(),
@@ -658,7 +694,6 @@ bool FUeAgentGraphCompoundAudioMediaTextureGraphProductionTest::RunTest(
 	FString CapturedExpressionPath;
 	FString CapturedOutputName;
 	FString CapturedValueType;
-	FString CapturedSettingsFingerprint;
 	int32 CapturedNodeIndex = INDEX_NONE;
 	int32 CapturedPinIndex = INDEX_NONE;
 	bool bQueryExact = QueryResult.IsValid()
@@ -679,8 +714,6 @@ bool FUeAgentGraphCompoundAudioMediaTextureGraphProductionTest::RunTest(
 				TEXT("output_name"), CapturedOutputName)
 			&& OutputState->TryGetStringField(
 				TEXT("evaluated_value_type"), CapturedValueType)
-			&& OutputState->TryGetStringField(
-				TEXT("settings_fingerprint"), CapturedSettingsFingerprint)
 			&& OutputState->TryGetNumberField(
 				TEXT("node_index"), CapturedNodeIndex)
 			&& OutputState->TryGetNumberField(
@@ -688,7 +721,7 @@ bool FUeAgentGraphCompoundAudioMediaTextureGraphProductionTest::RunTest(
 			&& !CapturedExpressionPath.IsEmpty()
 			&& CapturedOutputName == TEXT("Output")
 			&& !CapturedValueType.IsEmpty()
-			&& !CapturedSettingsFingerprint.IsEmpty();
+			&& !OutputState->HasField(TEXT("settings_fingerprint"));
 	}
 	TestTrue(TEXT("TextureGraph artifact capture is read-only native state"),
 		bQueryExact);

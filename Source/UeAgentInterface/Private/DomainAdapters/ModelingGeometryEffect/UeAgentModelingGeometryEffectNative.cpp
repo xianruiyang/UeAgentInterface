@@ -1,5 +1,8 @@
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectBoundarySemantics.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 #include "Components/DynamicMeshComponent.h"
 #include "CleaningOps/HoleFillOp.h"
@@ -64,7 +67,6 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 	namespace
 	{
-		constexpr int32 MaximumVoxelBooleanResolutionPerMajorAxis = 256;
 
 		enum class ECarrierKind : uint8
 		{
@@ -94,18 +96,80 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			FKAggregateGeom OriginalCollision;
 			bool bHadCollision = false;
 			bool bPackageWasDirty = false;
+			bool bMutationStarted = false;
 			FTransform Placement = FTransform::Identity;
 		};
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
+		TSharedPtr<FJsonValue> NativeNumberFact(const double Value)
 		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
+			return FMath::IsFinite(Value) ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Value))
+				: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(FString::Printf(TEXT("%.17g"), Value)));
+		}
+
+		TSharedPtr<FJsonValue> NativeNumberArrayFact(const TArray<double>& Values)
+		{
+			TArray<TSharedPtr<FJsonValue>> Items;
+			for (const double Value : Values) Items.Add(NativeNumberFact(Value));
+			return MakeShared<FJsonValueArray>(MoveTemp(Items));
+		}
+
+		TSharedPtr<FJsonValue> NativeValueFact(const FUeAgentCanonicalValuePtr& Value, const bool bIncludeScalar = true)
+		{
+			if (!Value.IsValid()) return MakeShared<FJsonValueNull>();
+			const TSharedRef<FJsonObject> Shape = MakeShared<FJsonObject>();
+			const TCHAR* Kind = TEXT("unknown");
+			switch (Value->GetKind())
+			{
+			case EUeAgentValueKind::Null: Kind = TEXT("null"); break;
+			case EUeAgentValueKind::Boolean:
+				if (bIncludeScalar) return MakeShared<FJsonValueBoolean>(Value->GetBoolean());
+				Kind = TEXT("boolean"); break;
+			case EUeAgentValueKind::String:
+				if (bIncludeScalar) return MakeShared<FJsonValueString>(Value->GetText());
+				Kind = TEXT("string"); break;
+			case EUeAgentValueKind::Integer: Kind = TEXT("integer"); if (bIncludeScalar) Shape->SetStringField(TEXT("value"), Value->GetLexeme()); break;
+			case EUeAgentValueKind::Decimal: Kind = TEXT("decimal"); if (bIncludeScalar) Shape->SetStringField(TEXT("value"), Value->GetLexeme()); break;
+			case EUeAgentValueKind::Array: Kind = TEXT("array"); Shape->SetNumberField(TEXT("count"), Value->GetArrayItems().Num()); break;
+			case EUeAgentValueKind::Object: Kind = TEXT("object"); Shape->SetNumberField(TEXT("count"), Value->GetObjectItems().Num()); break;
+			case EUeAgentValueKind::Temporal: Kind = TEXT("temporal"); break;
+			case EUeAgentValueKind::Spatial: Kind = TEXT("spatial"); break;
+			}
+			Shape->SetStringField(TEXT("kind"), Kind);
+			return MakeShared<FJsonValueObject>(Shape);
+		}
+
+		FExecutionMutationError NativeFact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target = FString())
+		{
+			FExecutionMutationError Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Path,
+				MoveTemp(Expected), MoveTemp(Actual), TEXT("execution"), Reason);
+			Error.SourceKind = TEXT("native_result"); Error.Source.JsonPath.Reset(); Error.SemanticPointer.Reset(); Error.TargetPath = Target;
+			return Error;
+		}
+
+		bool ReadFailure(FExecutionMutationError& OutError, const FString& Code, const FString& Reason,
+			const FString& Path, const FUeAgentCanonicalValuePtr& Value, const FString& Expected, const bool bPrivateValue = false)
+		{
+			OutError = NativeFact(Code, Reason, Path, NativeValueFact(Value, !bPrivateValue), MakeShared<FJsonValueString>(Expected));
+			if (bPrivateValue) OutError.ActualEvidence = NativeValueFact(Value);
 			return false;
+		}
+
+		FString NativeFieldPath(const FString& Parent, const FString& Field)
+		{
+			return Parent + TEXT("/") + Field.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		}
+
+		void SupplementNativeTarget(FExecutionMutationError& Error, const FString& Target)
+		{
+			if (Error.TargetPath.IsEmpty()) Error.TargetPath = Target;
+			for (FExecutionMutationError& Child : Error.Diagnostics) SupplementNativeTarget(Child, Target);
+			if (Error.PublicCause.IsValid())
+			{
+				FExecutionMutationError Cause = *Error.PublicCause;
+				SupplementNativeTarget(Cause, Target);
+				Error.PublicCause = MakeShared<FExecutionMutationError>(MoveTemp(Cause));
+			}
 		}
 
 		FUeAgentCanonicalValuePtr FindField(
@@ -130,138 +194,134 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			return nullptr;
 		}
 
+		bool TryReadField(const FUeAgentCanonicalValuePtr& Object, const FString& Field, const FString& ParentPath,
+			FExecutionMutationError* OutError, FUeAgentCanonicalValuePtr& OutValue)
+		{
+			if (!Object.IsValid() || Object->GetKind() != EUeAgentValueKind::Object)
+			{
+				if (OutError)
+				{
+					*OutError = NativeFact(TEXT("modeling_geometry_parameter_container_invalid"),
+						TEXT("The canonical modeling parameter container must be an object."), ParentPath,
+						NativeValueFact(Object, false), MakeShared<FJsonValueString>(TEXT("object")));
+					OutError->ActualEvidence = NativeValueFact(Object);
+				}
+				return false;
+			}
+			OutValue = FindField(Object, Field); return true;
+		}
+
 		bool ReadString(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			FString& OutValue,
-			FExecutionMutationError& OutError)
+			const FUeAgentCanonicalValuePtr& Object, const FString& Field, FString& OutValue,
+			FExecutionMutationError& OutError, const FString& ParentPath = TEXT("/after/typed_parameters"), const bool bPrivateValue = false)
 		{
 			OutValue.Reset();
-			const FUeAgentCanonicalValuePtr Value =
-				FindField(Object, Field);
-			if (!Value.IsValid()
-				|| Value->GetKind() != EUeAgentValueKind::String)
-			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_internal_field_type"),
-					Field);
-			}
+			FUeAgentCanonicalValuePtr Value;
+			if (!TryReadField(Object, Field, ParentPath, &OutError, Value)) return false;
+			if (!Value.IsValid() || Value->GetKind() != EUeAgentValueKind::String)
+				return ReadFailure(OutError, TEXT("modeling_geometry_internal_field_type"),
+					FString::Printf(TEXT("The canonical modeling field '%s' must be a string."), *Field),
+					NativeFieldPath(ParentPath, Field), Value, TEXT("non-empty string"), bPrivateValue);
 			OutValue = Value->GetText();
-			return !OutValue.IsEmpty()
-				|| Fail(
-					OutError,
-					TEXT("modeling_geometry_internal_field_empty"),
-					Field);
+			return !OutValue.IsEmpty() || ReadFailure(OutError, TEXT("modeling_geometry_internal_field_empty"),
+				FString::Printf(TEXT("The canonical modeling field '%s' must not be empty."), *Field),
+				NativeFieldPath(ParentPath, Field), Value, TEXT("non-empty string"), bPrivateValue);
 		}
 
-		bool ReadNumber(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			double& OutValue)
+		bool ReadNumberValue(const FUeAgentCanonicalValuePtr& Object, const FString& Field, double& OutValue,
+			FExecutionMutationError* OutError, const FString& ParentPath)
 		{
 			OutValue = 0.0;
-			const FUeAgentCanonicalValuePtr Value =
-				FindField(Object, Field);
-			if (!Value.IsValid()
-				|| (Value->GetKind() != EUeAgentValueKind::Decimal
-					&& Value->GetKind()
-						!= EUeAgentValueKind::Integer))
-			{
-				return false;
-			}
+			FUeAgentCanonicalValuePtr Value;
+			if (!TryReadField(Object, Field, ParentPath, OutError, Value)) return false;
+			if (!Value.IsValid() || (Value->GetKind() != EUeAgentValueKind::Decimal && Value->GetKind() != EUeAgentValueKind::Integer))
+				return OutError && ReadFailure(*OutError, TEXT("modeling_geometry_internal_field_type"),
+					FString::Printf(TEXT("The canonical modeling field '%s' must be numeric."), *Field),
+					NativeFieldPath(ParentPath, Field), Value, TEXT("finite integer or decimal"));
 			OutValue = FCString::Atod(*Value->GetLexeme());
-			return FMath::IsFinite(OutValue);
-		}
-
-		bool ReadInteger(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			int32& OutValue)
-		{
-			double Number = 0.0;
-			if (!ReadNumber(Object, Field, Number)
-				|| Number < static_cast<double>(MIN_int32)
-				|| Number > static_cast<double>(MAX_int32))
-			{
-				return false;
-			}
-			OutValue = FMath::RoundToInt(Number);
-			return FMath::IsNearlyEqual(
-				Number,
-				static_cast<double>(OutValue),
-				UE_DOUBLE_SMALL_NUMBER);
-		}
-
-		bool ReadElementId(
-			const FUeAgentCanonicalValueRef& Value,
-			int32& OutValue)
-		{
-			if (Value->GetKind() != EUeAgentValueKind::Integer
-				&& Value->GetKind() != EUeAgentValueKind::Decimal)
-			{
-				return false;
-			}
-			const double Number =
-				FCString::Atod(*Value->GetLexeme());
-			if (!FMath::IsFinite(Number)
-				|| Number < 0.0
-				|| Number > static_cast<double>(MAX_int32))
-			{
-				return false;
-			}
-			OutValue = FMath::RoundToInt(Number);
-			return FMath::IsNearlyEqual(
-				Number,
-				static_cast<double>(OutValue),
-				UE_DOUBLE_SMALL_NUMBER);
-		}
-
-		bool ReadBoolean(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			bool& OutValue)
-		{
-			const FUeAgentCanonicalValuePtr Value =
-				FindField(Object, Field);
-			if (!Value.IsValid()
-				|| Value->GetKind() != EUeAgentValueKind::Boolean)
-			{
-				return false;
-			}
-			OutValue = Value->GetBoolean();
+			if (!FMath::IsFinite(OutValue))
+				return OutError && ReadFailure(*OutError, TEXT("modeling_geometry_number_non_finite"),
+					TEXT("The modeling parameter is not a finite number."), NativeFieldPath(ParentPath, Field), Value, TEXT("finite number"));
 			return true;
 		}
 
-		bool ReadNumberArray(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			const int32 Count,
-			TArray<double>& OutValues)
+		bool ReadNumber(const FUeAgentCanonicalValuePtr& Object, const FString& Field, double& OutValue,
+			FExecutionMutationError& OutError, const FString& ParentPath = TEXT("/after/typed_parameters"))
+		{
+			return ReadNumberValue(Object, Field, OutValue, &OutError, ParentPath);
+		}
+
+		bool ReadNumberProbe(const FUeAgentCanonicalValuePtr& Object, const FString& Field, double& OutValue)
+		{
+			return ReadNumberValue(Object, Field, OutValue, nullptr, FString());
+		}
+
+		bool ReadInteger(const FUeAgentCanonicalValuePtr& Object, const FString& Field, int32& OutValue,
+			FExecutionMutationError& OutError, const FString& ParentPath = TEXT("/after/typed_parameters"))
+		{
+			double Number = 0.0;
+			if (!ReadNumber(Object, Field, Number, OutError, ParentPath)) return false;
+			if (Number < static_cast<double>(MIN_int32) || Number > static_cast<double>(MAX_int32))
+				return ReadFailure(OutError, TEXT("modeling_geometry_integer_out_of_range"), TEXT("The modeling integer parameter is outside the int32 range."),
+					NativeFieldPath(ParentPath, Field), FindField(Object, Field), TEXT("integer between -2147483648 and 2147483647"));
+			OutValue = FMath::RoundToInt(Number);
+			return FMath::IsNearlyEqual(Number, static_cast<double>(OutValue), UE_DOUBLE_SMALL_NUMBER)
+				|| ReadFailure(OutError, TEXT("modeling_geometry_integer_fractional"), TEXT("The modeling parameter must be an integer within the numeric tolerance."),
+					NativeFieldPath(ParentPath, Field), FindField(Object, Field),
+					FString::Printf(TEXT("integer within %.17g"), static_cast<double>(UE_DOUBLE_SMALL_NUMBER)));
+		}
+
+		bool ReadElementId(const FUeAgentCanonicalValueRef& Value, int32& OutValue,
+			FExecutionMutationError& OutError, const FString& Path)
+		{
+			if (Value->GetKind() != EUeAgentValueKind::Integer && Value->GetKind() != EUeAgentValueKind::Decimal)
+				return ReadFailure(OutError, TEXT("modeling_geometry_element_id_invalid"), TEXT("The element identifier must be numeric."),
+					Path, FUeAgentCanonicalValuePtr(Value), TEXT("integer between 0 and 2147483647"));
+			const double Number = FCString::Atod(*Value->GetLexeme());
+			if (!FMath::IsFinite(Number) || Number < 0.0 || Number > static_cast<double>(MAX_int32))
+				return ReadFailure(OutError, TEXT("modeling_geometry_element_id_invalid"), TEXT("The element identifier is not a finite non-negative int32 value."),
+					Path, FUeAgentCanonicalValuePtr(Value), TEXT("integer between 0 and 2147483647"));
+			OutValue = FMath::RoundToInt(Number);
+			return FMath::IsNearlyEqual(Number, static_cast<double>(OutValue), UE_DOUBLE_SMALL_NUMBER)
+				|| ReadFailure(OutError, TEXT("modeling_geometry_element_id_invalid"), TEXT("The element identifier must be integral within the numeric tolerance."),
+					Path, FUeAgentCanonicalValuePtr(Value), FString::Printf(TEXT("integer within %.17g"), static_cast<double>(UE_DOUBLE_SMALL_NUMBER)));
+		}
+
+		bool ReadBoolean(const FUeAgentCanonicalValuePtr& Object, const FString& Field, bool& OutValue,
+			FExecutionMutationError& OutError, const FString& ParentPath = TEXT("/after/typed_parameters"))
+		{
+			FUeAgentCanonicalValuePtr Value;
+			if (!TryReadField(Object, Field, ParentPath, &OutError, Value)) return false;
+			if (!Value.IsValid() || Value->GetKind() != EUeAgentValueKind::Boolean)
+				return ReadFailure(OutError, TEXT("modeling_geometry_internal_field_type"),
+					FString::Printf(TEXT("The modeling field '%s' must be boolean."), *Field),
+					NativeFieldPath(ParentPath, Field), Value, TEXT("boolean"));
+			OutValue = Value->GetBoolean(); return true;
+		}
+
+		bool ReadNumberArray(const FUeAgentCanonicalValuePtr& Object, const FString& Field, const int32 Count,
+			TArray<double>& OutValues, FExecutionMutationError& OutError, const FString& ParentPath = TEXT("/after/typed_parameters"))
 		{
 			OutValues.Reset();
-			const FUeAgentCanonicalValuePtr Value =
-				FindField(Object, Field);
-			if (!Value.IsValid()
-				|| Value->GetKind() != EUeAgentValueKind::Array
-				|| Value->GetArrayItems().Num() != Count)
+			FUeAgentCanonicalValuePtr Value;
+			if (!TryReadField(Object, Field, ParentPath, &OutError, Value)) return false;
+			const FString Path = NativeFieldPath(ParentPath, Field);
+			if (!Value.IsValid() || Value->GetKind() != EUeAgentValueKind::Array || Value->GetArrayItems().Num() != Count)
+				return ReadFailure(OutError, TEXT("modeling_geometry_number_array_invalid"),
+					FString::Printf(TEXT("The modeling field '%s' must contain exactly %d finite numbers."), *Field, Count),
+					Path, Value, FString::Printf(TEXT("array of %d finite numbers"), Count));
+			const TArray<FUeAgentCanonicalValueRef>& Items = Value->GetArrayItems();
+			for (int32 Index = 0; Index < Items.Num(); ++Index)
 			{
-				return false;
-			}
-			for (const FUeAgentCanonicalValueRef& Item
-				: Value->GetArrayItems())
-			{
-				if (Item->GetKind() != EUeAgentValueKind::Integer
-					&& Item->GetKind() != EUeAgentValueKind::Decimal)
-				{
-					return false;
-				}
-				const double Number =
-					FCString::Atod(*Item->GetLexeme());
+				const FUeAgentCanonicalValueRef& Item = Items[Index];
+				const FString ItemPath = Path + FString::Printf(TEXT("/%d"), Index);
+				if (Item->GetKind() != EUeAgentValueKind::Integer && Item->GetKind() != EUeAgentValueKind::Decimal)
+					return ReadFailure(OutError, TEXT("modeling_geometry_number_array_invalid"), TEXT("This modeling array component must be numeric."),
+						ItemPath, FUeAgentCanonicalValuePtr(Item), TEXT("finite integer or decimal"));
+				const double Number = FCString::Atod(*Item->GetLexeme());
 				if (!FMath::IsFinite(Number))
-				{
-					return false;
-				}
+					return ReadFailure(OutError, TEXT("modeling_geometry_number_array_invalid"), TEXT("This modeling array component must be finite."),
+						ItemPath, FUeAgentCanonicalValuePtr(Item), TEXT("finite number"));
 				OutValues.Add(Number);
 			}
 			return true;
@@ -286,62 +346,54 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				Checksum);
 		}
 
-		bool ReadIntegerArray(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			const int32 Count,
-			TArray<int32>& OutValues)
+		bool ReadIntegerArray(const FUeAgentCanonicalValuePtr& Object, const FString& Field, const int32 Count,
+			TArray<int32>& OutValues, FExecutionMutationError& OutError, const FString& ParentPath = TEXT("/after/typed_parameters"))
 		{
 			TArray<double> Numbers;
-			if (!ReadNumberArray(Object, Field, Count, Numbers))
-			{
-				return false;
-			}
+			if (!ReadNumberArray(Object, Field, Count, Numbers, OutError, ParentPath)) return false;
 			OutValues.Reset(Count);
-			for (const double Number : Numbers)
+			const FUeAgentCanonicalValuePtr Array = FindField(Object, Field);
+			for (int32 Index = 0; Index < Numbers.Num(); ++Index)
 			{
+				const double Number = Numbers[Index];
+				const FString Path = NativeFieldPath(ParentPath, Field) + FString::Printf(TEXT("/%d"), Index);
+				if (Number < static_cast<double>(MIN_int32) || Number > static_cast<double>(MAX_int32))
+					return ReadFailure(OutError, TEXT("modeling_geometry_integer_array_invalid"), TEXT("This modeling array integer is outside the int32 range."),
+						Path, FUeAgentCanonicalValuePtr(Array->GetArrayItems()[Index]), TEXT("integer between -2147483648 and 2147483647"));
 				const int32 Value = FMath::RoundToInt(Number);
-				if (!FMath::IsNearlyEqual(
-						Number,
-						static_cast<double>(Value),
-						UE_DOUBLE_SMALL_NUMBER))
-				{
-					return false;
-				}
+				if (!FMath::IsNearlyEqual(Number, static_cast<double>(Value), UE_DOUBLE_SMALL_NUMBER))
+					return ReadFailure(OutError, TEXT("modeling_geometry_integer_array_invalid"), TEXT("This modeling array component must be integral within the numeric tolerance."),
+						Path, FUeAgentCanonicalValuePtr(Array->GetArrayItems()[Index]),
+						FString::Printf(TEXT("integer within %.17g"), static_cast<double>(UE_DOUBLE_SMALL_NUMBER)));
 				OutValues.Add(Value);
 			}
 			return true;
 		}
 
-		bool ReadElementIds(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			TArray<int32>& OutValues)
+		bool ReadElementIds(const FUeAgentCanonicalValuePtr& Object, const FString& Field, TArray<int32>& OutValues,
+			FExecutionMutationError& OutError, const FString& ParentPath = TEXT("/after/typed_parameters"))
 		{
 			OutValues.Reset();
-			const FUeAgentCanonicalValuePtr Value =
-				FindField(Object, Field);
-			if (!Value.IsValid()
-				|| Value->GetKind() != EUeAgentValueKind::Array
-				|| Value->GetArrayItems().IsEmpty())
-			{
-				return false;
-			}
-			for (const FUeAgentCanonicalValueRef& Item
-				: Value->GetArrayItems())
+			FUeAgentCanonicalValuePtr Value;
+			if (!TryReadField(Object, Field, ParentPath, &OutError, Value)) return false;
+			const FString Path = NativeFieldPath(ParentPath, Field);
+			if (!Value.IsValid() || Value->GetKind() != EUeAgentValueKind::Array || Value->GetArrayItems().IsEmpty())
+				return ReadFailure(OutError, TEXT("modeling_geometry_element_ids_invalid"),
+					TEXT("The modeling element identifiers must be a non-empty array."), Path, Value, TEXT("non-empty array of non-negative integer identifiers"));
+			const TArray<FUeAgentCanonicalValueRef>& Items = Value->GetArrayItems();
+			for (int32 Index = 0; Index < Items.Num(); ++Index)
 			{
 				int32 Parsed = INDEX_NONE;
-				if (!ReadElementId(Item, Parsed))
-				{
-					return false;
-				}
+				if (!ReadElementId(Items[Index], Parsed, OutError, Path + FString::Printf(TEXT("/%d"), Index))) return false;
 				OutValues.Add(Parsed);
 			}
 			return true;
 		}
 
 		TStrongObjectPtr<UDynamicMesh> MakeTransientMesh(
-			const FDynamicMesh3& Mesh)
+			const FDynamicMesh3& Mesh,
+			const FString& OperationKey,
+			FExecutionMutationError& OutError)
 		{
 			TStrongObjectPtr<UDynamicMesh> Result(
 				NewObject<UDynamicMesh>(
@@ -352,6 +404,12 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			{
 				Result->SetMesh(Mesh);
 			}
+			else
+			{
+				OutError = NativeFact(TEXT("modeling_geometry_transient_mesh_failed"),
+					FString::Printf(TEXT("Native dynamic mesh allocation failed for modeling operation '%s'."), *OperationKey),
+					TEXT("/transient_mesh/available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			}
 			return Result;
 		}
 
@@ -361,6 +419,14 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			{
 				UE::Geometry::FMeshNormals::QuickComputeVertexNormals(Mesh);
 			}
+		}
+
+		TSharedPtr<FJsonValue> NativeMeshCountsFact(const FDynamicMesh3& Mesh)
+		{
+			const TSharedRef<FJsonObject> Counts = MakeShared<FJsonObject>();
+			Counts->SetNumberField(TEXT("vertices"), Mesh.VertexCount());
+			Counts->SetNumberField(TEXT("triangles"), Mesh.TriangleCount());
+			return MakeShared<FJsonValueObject>(Counts);
 		}
 
 		bool CopyTransientMesh(
@@ -375,12 +441,21 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					OutMesh = Mesh;
 					bCopied = true;
 				});
-			return (bCopied
-					&& OutMesh.TriangleCount() > 0
-					&& OutMesh.VertexCount() > 0)
-				|| Fail(
-					OutError,
-					TEXT("modeling_geometry_kernel_result_invalid"));
+			if (!bCopied)
+			{
+				OutError = NativeFact(TEXT("modeling_geometry_kernel_result_invalid"),
+					TEXT("The native mesh result could not be read because its mesh callback was not invoked."),
+					TEXT("/mesh_result/read_callback_invoked"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				return false;
+			}
+			if (OutMesh.TriangleCount() <= 0 || OutMesh.VertexCount() <= 0)
+			{
+				OutError = NativeFact(TEXT("modeling_geometry_kernel_result_invalid"),
+					TEXT("The native mesh result is empty."), TEXT("/mesh_result/counts"),
+					NativeMeshCountsFact(OutMesh), MakeShared<FJsonValueString>(TEXT("positive vertex and triangle counts")));
+				return false;
+			}
+			return true;
 		}
 
 		bool CutMeshHalf(
@@ -388,213 +463,157 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			const FVector3d& Origin,
 			const FVector3d& Normal,
 			const bool bKeepPositiveSide,
-			const bool bFill)
+			const bool bFill,
+			FExecutionMutationError& OutError)
 		{
+			const auto SetCutFailure = [&](const bool bHoleFill)
+			{
+				const TSharedRef<FJsonObject> Inputs = MakeShared<FJsonObject>();
+				Inputs->SetStringField(TEXT("keep_side"), bKeepPositiveSide ? TEXT("positive") : TEXT("negative"));
+				Inputs->SetBoolField(TEXT("fill_hole"), bFill);
+				Inputs->SetField(TEXT("origin_cm"), NativeNumberArrayFact({Origin.X, Origin.Y, Origin.Z}));
+				Inputs->SetField(TEXT("normal"), NativeNumberArrayFact({Normal.X, Normal.Y, Normal.Z}));
+				OutError = NativeFact(TEXT("modeling_geometry_plane_cut_failed"),
+					bHoleFill ? TEXT("The native plane cut succeeded, but filling its cut boundary failed.")
+						: TEXT("The native plane cut failed on the requested side."),
+					bHoleFill ? TEXT("/plane_cut/hole_fill") : TEXT("/plane_cut/cut"),
+					MakeShared<FJsonValueObject>(Inputs), MakeShared<FJsonValueString>(TEXT("operation succeeds on the requested side")));
+			};
 			UE::Geometry::FMeshPlaneCut Cut(
 				&Mesh,
 				Origin,
 				bKeepPositiveSide ? -Normal : Normal);
 			if (!Cut.Cut())
 			{
+				SetCutFailure(false);
 				return false;
 			}
-			return !bFill || Cut.MinimalHoleFill();
+			if (bFill && !Cut.MinimalHoleFill())
+			{
+				SetCutFailure(true);
+				return false;
+			}
+			return true;
 		}
 
 		bool ReadTransform(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& TranslationField,
-			const FString& RotationField,
-			const FString& ScaleField,
-			FTransform& OutTransform)
+			const FUeAgentCanonicalValuePtr& Object, const FString& TranslationField, const FString& RotationField,
+			const FString& ScaleField, FTransform& OutTransform, FExecutionMutationError& OutError,
+			const FString& ParentPath = TEXT("/after/typed_parameters"))
 		{
 			TArray<double> Translation;
 			TArray<double> Rotation;
 			TArray<double> Scale;
-			if (!ReadNumberArray(
-					Object,
-					TranslationField,
-					3,
-					Translation)
-				|| !ReadNumberArray(
-					Object,
-					RotationField,
-					4,
-					Rotation)
-				|| !ReadNumberArray(
-					Object,
-					ScaleField,
-					3,
-					Scale))
-			{
-				return false;
-			}
+			if (!ReadNumberArray(Object, TranslationField, 3, Translation, OutError, ParentPath)
+				|| !ReadNumberArray(Object, RotationField, 4, Rotation, OutError, ParentPath)
+				|| !ReadNumberArray(Object, ScaleField, 3, Scale, OutError, ParentPath)) return false;
 			double UnitScale = 1.0;
-			const FUeAgentCanonicalValuePtr Unit =
-				FindField(Object, TEXT("unit"));
-			if (Unit.IsValid()
-				&& Unit->GetKind() == EUeAgentValueKind::String)
+			const FUeAgentCanonicalValuePtr Unit = FindField(Object, TEXT("unit"));
+			if (Unit.IsValid() && Unit->GetKind() == EUeAgentValueKind::String)
 			{
-				if (Unit->GetText() == TEXT("meter"))
-				{
-					UnitScale = 100.0;
-				}
+				if (Unit->GetText() == TEXT("meter")) UnitScale = 100.0;
 				else if (Unit->GetText() != TEXT("centimeter"))
-				{
-					return false;
-				}
+					return ReadFailure(OutError, TEXT("modeling_geometry_transform_unit_invalid"),
+						TEXT("The modeling transform unit is not supported."), NativeFieldPath(ParentPath, TEXT("unit")),
+						Unit, TEXT("meter or centimeter"));
 			}
-			FQuat Quaternion(
-				Rotation[0],
-				Rotation[1],
-				Rotation[2],
-				Rotation[3]);
+			FQuat Quaternion(Rotation[0], Rotation[1], Rotation[2], Rotation[3]);
 			if (Quaternion.SizeSquared() <= UE_DOUBLE_SMALL_NUMBER)
 			{
+				OutError = NativeFact(TEXT("modeling_geometry_transform_rotation_invalid"),
+					TEXT("The modeling transform quaternion has a near-zero norm."), NativeFieldPath(ParentPath, RotationField),
+					NativeNumberArrayFact(Rotation), MakeShared<FJsonValueString>(FString::Printf(TEXT("quaternion norm squared greater than %.17g"), static_cast<double>(UE_DOUBLE_SMALL_NUMBER))));
 				return false;
 			}
 			Quaternion.Normalize();
-			OutTransform = FTransform(
-				Quaternion,
-				FVector(
-					Translation[0] * UnitScale,
-					Translation[1] * UnitScale,
-					Translation[2] * UnitScale),
+			OutTransform = FTransform(Quaternion, FVector(Translation[0] * UnitScale, Translation[1] * UnitScale, Translation[2] * UnitScale),
 				FVector(Scale[0], Scale[1], Scale[2]));
 			return true;
 		}
 
-		bool ReadPlane(
-			const FUeAgentCanonicalValuePtr& Parameters,
-			FVector3d& OutOrigin,
-			FVector3d& OutNormal)
+		bool ReadPlane(const FUeAgentCanonicalValuePtr& Parameters, FVector3d& OutOrigin, FVector3d& OutNormal,
+			FExecutionMutationError& OutError, const FString& ParentPath = TEXT("/after/typed_parameters"))
 		{
-			const FUeAgentCanonicalValuePtr Plane =
-				FindField(Parameters, TEXT("plane"));
+			const FString Path = NativeFieldPath(ParentPath, TEXT("plane"));
+			const FUeAgentCanonicalValuePtr Plane = FindField(Parameters, TEXT("plane"));
 			TArray<double> Origin;
 			TArray<double> Normal;
-			if (!Plane.IsValid()
-				|| !ReadNumberArray(
-					Plane,
-					TEXT("origin"),
-					3,
-					Origin)
-				|| !ReadNumberArray(
-					Plane,
-					TEXT("normal"),
-					3,
-					Normal))
-			{
-				return false;
-			}
+			if (!ReadNumberArray(Plane, TEXT("origin"), 3, Origin, OutError, Path)
+				|| !ReadNumberArray(Plane, TEXT("normal"), 3, Normal, OutError, Path)) return false;
 			double UnitScale = 1.0;
-			const FUeAgentCanonicalValuePtr Unit =
-				FindField(Plane, TEXT("unit"));
-			if (Unit.IsValid()
-				&& Unit->GetKind() == EUeAgentValueKind::String
-				&& Unit->GetText() == TEXT("meter"))
+			const FUeAgentCanonicalValuePtr Unit = FindField(Plane, TEXT("unit"));
+			if (Unit.IsValid() && Unit->GetKind() == EUeAgentValueKind::String && Unit->GetText() == TEXT("meter")) UnitScale = 100.0;
+			OutOrigin = FVector3d(Origin[0] * UnitScale, Origin[1] * UnitScale, Origin[2] * UnitScale);
+			OutNormal = FVector3d(Normal[0], Normal[1], Normal[2]);
+			if (!OutNormal.Normalize())
 			{
-				UnitScale = 100.0;
-			}
-			OutOrigin = FVector3d(
-				Origin[0] * UnitScale,
-				Origin[1] * UnitScale,
-				Origin[2] * UnitScale);
-			OutNormal =
-				FVector3d(Normal[0], Normal[1], Normal[2]);
-			return OutNormal.Normalize();
-		}
-
-		bool ReadDirection(
-			const FUeAgentCanonicalValuePtr& Parameters,
-			FVector3d& OutDirection)
-		{
-			const FUeAgentCanonicalValuePtr Direction =
-				FindField(Parameters, TEXT("direction"));
-			TArray<double> Vector;
-			if (!Direction.IsValid()
-				|| !ReadNumberArray(
-					Direction,
-					TEXT("vector"),
-					3,
-					Vector))
-			{
+				OutError = NativeFact(TEXT("modeling_geometry_plane_normal_invalid"), TEXT("The modeling plane normal cannot be normalized."),
+					NativeFieldPath(Path, TEXT("normal")), NativeNumberArrayFact(Normal), MakeShared<FJsonValueString>(TEXT("non-zero normal under the geometry normalization tolerance")));
 				return false;
 			}
-			OutDirection =
-				FVector3d(Vector[0], Vector[1], Vector[2]);
-			return OutDirection.Normalize();
+			return true;
 		}
 
-		bool BuildSelection(
-			UDynamicMesh& DynamicMesh,
-			const FUeAgentCanonicalValuePtr& Parameters,
-			FGeometryScriptMeshSelection& OutSelection,
-			FExecutionMutationError& OutError)
+		bool ReadDirection(const FUeAgentCanonicalValuePtr& Parameters, FVector3d& OutDirection,
+			FExecutionMutationError& OutError, const FString& ParentPath = TEXT("/after/typed_parameters"))
 		{
-			const FUeAgentCanonicalValuePtr Selection =
-				FindField(Parameters, TEXT("selection"));
+			const FString Path = NativeFieldPath(ParentPath, TEXT("direction"));
+			const FUeAgentCanonicalValuePtr Direction = FindField(Parameters, TEXT("direction"));
+			TArray<double> Vector;
+			if (!ReadNumberArray(Direction, TEXT("vector"), 3, Vector, OutError, Path)) return false;
+			OutDirection = FVector3d(Vector[0], Vector[1], Vector[2]);
+			if (!OutDirection.Normalize())
+			{
+				OutError = NativeFact(TEXT("modeling_geometry_direction_invalid"), TEXT("The modeling direction vector cannot be normalized."),
+					NativeFieldPath(Path, TEXT("vector")), NativeNumberArrayFact(Vector), MakeShared<FJsonValueString>(TEXT("non-zero vector under the geometry normalization tolerance")));
+				return false;
+			}
+			return true;
+		}
+
+		bool BuildSelection(UDynamicMesh& DynamicMesh, const FUeAgentCanonicalValuePtr& Parameters,
+			FGeometryScriptMeshSelection& OutSelection, FExecutionMutationError& OutError)
+		{
+			const FString Path = TEXT("/after/typed_parameters/selection");
+			const FUeAgentCanonicalValuePtr Selection = FindField(Parameters, TEXT("selection"));
 			FString Kind;
 			TArray<int32> ElementIds;
-			if (!ReadString(
-					Selection,
-					TEXT("element_kind"),
-					Kind,
-					OutError)
-				|| !ReadElementIds(
-					Selection,
-					TEXT("element_ids"),
-					ElementIds))
-			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_selection_invalid"));
-			}
-			const EGeometryScriptMeshSelectionType SelectionType =
-				Kind == TEXT("triangle")
-					? EGeometryScriptMeshSelectionType::Triangles
-					: Kind == TEXT("vertex")
-						? EGeometryScriptMeshSelectionType::Vertices
-						: EGeometryScriptMeshSelectionType::Edges;
+			if (!ReadString(Selection, TEXT("element_kind"), Kind, OutError, Path)
+				|| !ReadElementIds(Selection, TEXT("element_ids"), ElementIds, OutError, Path)) return false;
+			const EGeometryScriptMeshSelectionType SelectionType = Kind == TEXT("triangle") ? EGeometryScriptMeshSelectionType::Triangles
+				: Kind == TEXT("vertex") ? EGeometryScriptMeshSelectionType::Vertices : EGeometryScriptMeshSelectionType::Edges;
 			bool bValid = true;
-			DynamicMesh.ProcessMesh(
-				[&](const FDynamicMesh3& Mesh)
+			int32 InvalidIndex = INDEX_NONE;
+			DynamicMesh.ProcessMesh([&](const FDynamicMesh3& Mesh)
+			{
+				for (int32 Index = 0; Index < ElementIds.Num(); ++Index)
 				{
-					for (const int32 ElementId : ElementIds)
-					{
-						bValid = bValid
-							&& (SelectionType
-									== EGeometryScriptMeshSelectionType::
-										Triangles
-								? Mesh.IsTriangle(ElementId)
-								: SelectionType
-										== EGeometryScriptMeshSelectionType::
-											Vertices
-									? Mesh.IsVertex(ElementId)
-									: Mesh.IsEdge(ElementId));
-						if (Kind == TEXT("boundary_edge"))
-						{
-							bValid = bValid
-								&& Mesh.IsBoundaryEdge(ElementId);
-						}
-					}
-				});
+					const int32 ElementId = ElementIds[Index];
+					const bool bWasValid = bValid;
+					bValid = bValid && (SelectionType == EGeometryScriptMeshSelectionType::Triangles ? Mesh.IsTriangle(ElementId)
+						: SelectionType == EGeometryScriptMeshSelectionType::Vertices ? Mesh.IsVertex(ElementId) : Mesh.IsEdge(ElementId));
+					if (Kind == TEXT("boundary_edge")) bValid = bValid && Mesh.IsBoundaryEdge(ElementId);
+					if (bWasValid && !bValid) InvalidIndex = Index;
+				}
+			});
 			if (!bValid)
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_selection_stale"));
+				OutError = NativeFact(TEXT("modeling_geometry_selection_stale"),
+					FString::Printf(TEXT("The selected %s identifier is not valid in the current mesh."), *Kind),
+					Path + FString::Printf(TEXT("/element_ids/%d"), InvalidIndex), MakeShared<FJsonValueNumber>(ElementIds[InvalidIndex]),
+					MakeShared<FJsonValueString>(Kind == TEXT("boundary_edge") ? TEXT("existing boundary edge") : TEXT("existing element of the selected kind")));
+				return false;
 			}
-			UGeometryScriptLibrary_MeshSelectionFunctions::
-				ConvertIndexArrayToMeshSelection(
-					&DynamicMesh,
-					ElementIds,
-					SelectionType,
-					OutSelection);
-			return !OutSelection.IsEmpty()
-				|| Fail(
-					OutError,
-					TEXT("modeling_geometry_selection_empty"));
+			UGeometryScriptLibrary_MeshSelectionFunctions::ConvertIndexArrayToMeshSelection(&DynamicMesh, ElementIds, SelectionType, OutSelection);
+			if (OutSelection.IsEmpty())
+			{
+				const TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
+				Actual->SetNumberField(TEXT("input_identifier_count"), ElementIds.Num()); Actual->SetBoolField(TEXT("selection_empty"), true);
+				OutError = NativeFact(TEXT("modeling_geometry_selection_empty"), TEXT("Unreal produced an empty geometry selection from these identifiers."),
+					Path, MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(TEXT("non-empty geometry selection")));
+				return false;
+			}
+			return true;
 		}
 
 		void AppendBox(
@@ -749,11 +768,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						Parameters,
 						TEXT("size_cm"),
 						3,
-						SizeValues))
+						SizeValues,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_primitive_parameters_invalid"));
+					return false;
 				}
 				const FVector3d Size(
 					SizeValues[0],
@@ -811,19 +829,23 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (!ReadInteger(
 						Parameters,
 						TEXT("step_count"),
-						StepCount)
+						StepCount,
+						OutError)
 					|| !ReadNumber(
 						Parameters,
 						TEXT("step_width_cm"),
-						Width)
+						Width,
+						OutError)
 					|| !ReadNumber(
 						Parameters,
 						TEXT("step_depth_cm"),
-						Depth)
+						Depth,
+						OutError)
 					|| !ReadNumber(
 						Parameters,
 						TEXT("step_height_cm"),
-						Height)
+						Height,
+						OutError)
 					|| !ReadString(
 						Parameters,
 						TEXT("rise_axis"),
@@ -835,9 +857,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						RiseDirection,
 						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_primitive_parameters_invalid"));
+					return false;
 				}
 				const double Sign =
 					RiseDirection == TEXT("positive") ? 1.0 : -1.0;
@@ -873,13 +893,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			}
 
 			TStrongObjectPtr<UDynamicMesh> DynamicMesh =
-				MakeTransientMesh(Mesh);
-			if (!DynamicMesh.IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_transient_mesh_failed"));
-			}
+				MakeTransientMesh(Mesh, OperationKey, OutError);
+			if (!DynamicMesh.IsValid()) return false;
 			if (OperationKey == TEXT("box"))
 			{
 				TArray<double> Size;
@@ -889,21 +904,21 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						Parameters,
 						TEXT("size_cm"),
 						3,
-						Size)
+						Size,
+						OutError)
 					|| !ReadIntegerArray(
 						Parameters,
 						TEXT("subdivisions"),
 						3,
-						Subdivisions)
+						Subdivisions,
+						OutError)
 					|| !ReadString(
 						Parameters,
 						TEXT("anchor"),
 						Anchor,
 						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_primitive_parameters_invalid"));
+					return false;
 				}
 				UGeometryScriptLibrary_MeshPrimitiveFunctions::AppendBox(
 					DynamicMesh.Get(),
@@ -930,32 +945,35 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (!ReadNumber(
 						Parameters,
 						TEXT("radius_cm"),
-						Radius)
+						Radius,
+						OutError)
 					|| !ReadNumber(
 						Parameters,
 						TEXT("height_cm"),
-						Height)
+						Height,
+						OutError)
 					|| !ReadInteger(
 						Parameters,
 						TEXT("radial_segments"),
-						RadialSegments)
+						RadialSegments,
+						OutError)
 					|| !ReadInteger(
 						Parameters,
 						TEXT("height_segments"),
-						HeightSegments)
+						HeightSegments,
+						OutError)
 					|| !ReadBoolean(
 						Parameters,
 						TEXT("cap_ends"),
-						bCapped)
+						bCapped,
+						OutError)
 					|| !ReadString(
 						Parameters,
 						TEXT("anchor"),
 						Anchor,
 						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_primitive_parameters_invalid"));
+					return false;
 				}
 				UGeometryScriptLibrary_MeshPrimitiveFunctions::
 					AppendCylinder(
@@ -980,20 +998,21 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						Parameters,
 						TEXT("size_cm"),
 						2,
-						Size)
+						Size,
+						OutError)
 					|| !ReadIntegerArray(
 						Parameters,
 						TEXT("subdivisions"),
 						2,
-						Subdivisions)
+						Subdivisions,
+						OutError)
 					|| !ReadBoolean(
 						Parameters,
 						TEXT("double_sided"),
-						bDoubleSided))
+						bDoubleSided,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_primitive_parameters_invalid"));
+					return false;
 				}
 				UGeometryScriptLibrary_MeshPrimitiveFunctions::
 					AppendRectangleXY(
@@ -1026,19 +1045,20 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (!ReadNumber(
 						Parameters,
 						TEXT("radius_cm"),
-						Radius)
+						Radius,
+						OutError)
 					|| !ReadInteger(
 						Parameters,
 						TEXT("longitude_segments"),
-						LongitudeSegments)
+						LongitudeSegments,
+						OutError)
 					|| !ReadInteger(
 						Parameters,
 						TEXT("latitude_segments"),
-						LatitudeSegments))
+						LatitudeSegments,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_primitive_parameters_invalid"));
+					return false;
 				}
 				UGeometryScriptLibrary_MeshPrimitiveFunctions::
 					AppendSphereLatLong(
@@ -1053,11 +1073,13 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			}
 			else
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_primitive_operation_unsupported"),
-					OperationKey);
+				TArray<TSharedPtr<FJsonValue>> SupportedKeys;
+				for (const TCHAR* Supported : {TEXT("ramp"), TEXT("ramp_corner"), TEXT("stairs"), TEXT("box"), TEXT("cylinder"), TEXT("plane"), TEXT("sphere")})
+					SupportedKeys.Add(MakeShared<FJsonValueString>(Supported));
+				OutError = NativeFact(TEXT("modeling_geometry_primitive_operation_unsupported"),
+					TEXT("The modeling primitive operation is not supported."), TEXT("/operation_key"),
+					MakeShared<FJsonValueString>(OperationKey), MakeShared<FJsonValueArray>(MoveTemp(SupportedKeys)));
+				return false;
 			}
 			return CopyTransientMesh(
 				*DynamicMesh,
@@ -1135,7 +1157,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			const double TargetEdgeLength,
 			const int32 Iterations,
 			const bool bPreserveBoundaries,
-			const bool bPreserveSharpEdges)
+			const bool bPreserveSharpEdges,
+			FExecutionMutationError& OutError)
 		{
 			TSharedPtr<FDynamicMesh3, ESPMode::ThreadSafe> SourceMesh =
 				MakeShared<FDynamicMesh3, ESPMode::ThreadSafe>(MoveTemp(Mesh));
@@ -1187,6 +1210,18 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			TUniquePtr<FDynamicMesh3> Result = Remesh.ExtractResult();
 			if (!Result.IsValid() || Result->TriangleCount() == 0)
 			{
+				const TSharedRef<FJsonObject> Facts = MakeShared<FJsonObject>();
+				Facts->SetField(TEXT("target_edge_length_cm"), NativeNumberFact(TargetEdgeLength));
+				Facts->SetNumberField(TEXT("iterations"), Iterations);
+				Facts->SetBoolField(TEXT("preserve_boundaries"), bPreserveBoundaries);
+				Facts->SetBoolField(TEXT("preserve_sharp_edges"), bPreserveSharpEdges);
+				Facts->SetBoolField(TEXT("result_available"), Result.IsValid());
+				if (Result.IsValid()) Facts->SetField(TEXT("counts"), NativeMeshCountsFact(*Result));
+				OutError = NativeFact(TEXT("modeling_geometry_remesh_failed"),
+					Result.IsValid() ? TEXT("The native remesher returned a mesh with no triangles.")
+						: TEXT("The native remesher did not return a mesh result."),
+					TEXT("/remesh/result"), MakeShared<FJsonValueObject>(Facts),
+					MakeShared<FJsonValueString>(TEXT("mesh result with at least one triangle")));
 				Mesh = MoveTemp(*SourceMesh);
 				return false;
 			}
@@ -1195,6 +1230,59 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			return true;
 		}
 
+
+		FExecutionMutationError BoundaryDifferenceFailure(
+			const FBoundarySemanticObservation& Before,
+			const FBoundarySemanticObservation& After,
+			const FString& Target)
+		{
+			FString Reason = TEXT("Native simplification changed the boundary geometry.");
+			FString Path = TEXT("/boundary/geometry_preserved");
+			TSharedPtr<FJsonValue> Actual = MakeShared<FJsonValueBoolean>(false);
+			TSharedPtr<FJsonValue> Expected = MakeShared<FJsonValueBoolean>(true);
+			if (Before.EdgeCount != After.EdgeCount)
+			{
+				Reason = TEXT("Native simplification changed the boundary edge count.");
+				Path = TEXT("/boundary/edge_count");
+				Actual = MakeShared<FJsonValueNumber>(After.EdgeCount);
+				Expected = MakeShared<FJsonValueNumber>(Before.EdgeCount);
+			}
+			else if (Before.VertexCount != After.VertexCount)
+			{
+				Reason = TEXT("Native simplification changed the boundary vertex count.");
+				Path = TEXT("/boundary/vertex_count");
+				Actual = MakeShared<FJsonValueNumber>(After.VertexCount);
+				Expected = MakeShared<FJsonValueNumber>(Before.VertexCount);
+			}
+			else
+			{
+				const TCHAR* Axes[] = {TEXT("x"), TEXT("y"), TEXT("z")};
+				bool bFound = false;
+				for (int32 EndpointIndex = 0; EndpointIndex < FMath::Min(Before.OrderedEndpoints.Num(), After.OrderedEndpoints.Num()) && !bFound; ++EndpointIndex)
+				{
+					for (int32 AxisIndex = 0; AxisIndex < 3; ++AxisIndex)
+					{
+						const double BeforeValue = Before.OrderedEndpoints[EndpointIndex][AxisIndex];
+						const double AfterValue = After.OrderedEndpoints[EndpointIndex][AxisIndex];
+						if (BeforeValue == AfterValue) continue;
+						Reason = TEXT("Native simplification moved a boundary segment endpoint (coordinates in centimeters).");
+						Path = FString::Printf(TEXT("/boundary/segments/%d/%s/%s"), EndpointIndex / 2,
+							EndpointIndex % 2 == 0 ? TEXT("a") : TEXT("b"), Axes[AxisIndex]);
+						Actual = NativeNumberFact(AfterValue);
+						Expected = NativeNumberFact(BeforeValue);
+						bFound = true;
+						break;
+					}
+				}
+			}
+			FExecutionMutationError Error = NativeFact(TEXT("modeling_geometry_simplify_boundary_not_preserved"),
+				Reason, Path, MoveTemp(Actual), MoveTemp(Expected), Target);
+			Error.ActualEvidence = MakeShared<FJsonValueString>(After.Fingerprint);
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(Before.Fingerprint);
+			return Error;
+		}
+
+
 		bool ApplyTopologyOperation(
 			FModelingGeometryAction& Action,
 			FExecutionMutationError& OutError)
@@ -1202,9 +1290,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			const FString& Key = Action.OperationKey;
 			if (Action.WorkingMesh.TriangleCount() == 0)
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_mesh_empty"));
+				OutError = NativeFact(TEXT("modeling_geometry_mesh_empty"),
+					TEXT("The topology operation requires a mesh with triangles."), TEXT("/mesh/triangle_count"),
+					MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("greater than zero")), Action.TargetRef);
+				return false;
 			}
 
 			if (Key == TEXT("fill_holes"))
@@ -1216,16 +1305,16 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (!ReadElementIds(
 						Selection,
 						TEXT("element_ids"),
-						SelectedEdges)
+						SelectedEdges,
+						OutError,
+						TEXT("/after/typed_parameters/selection"))
 					|| !ReadString(
 						Action.Parameters,
 						TEXT("fill_mode"),
 						FillMode,
 						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_fill_parameters_invalid"));
+					return false;
 				}
 				TSharedPtr<FDynamicMesh3> Original =
 					MakeShared<FDynamicMesh3>(Action.WorkingMesh);
@@ -1234,29 +1323,34 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					true);
 				if (BoundaryLoops.bAborted)
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_boundary_loops_invalid"));
+					OutError = NativeFact(TEXT("modeling_geometry_boundary_loops_invalid"),
+						TEXT("Native boundary-loop detection aborted before hole filling."), TEXT("/boundary_loops/aborted"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), Action.TargetRef);
+					return false;
 				}
 				TSet<int32> LoopIndices;
-				for (const int32 EdgeId : SelectedEdges)
+				for (int32 SelectionIndex = 0; SelectionIndex < SelectedEdges.Num(); ++SelectionIndex)
 				{
+					const int32 EdgeId = SelectedEdges[SelectionIndex];
 					if (!Original->IsEdge(EdgeId)
 						|| !Original->IsBoundaryEdge(EdgeId))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_boundary_selection_stale"));
+						OutError = NativeFact(TEXT("modeling_geometry_boundary_selection_stale"),
+							Original->IsEdge(EdgeId) ? TEXT("The selected edge is not a boundary edge.")
+								: TEXT("The selected boundary edge does not exist in the current mesh."),
+							FString::Printf(TEXT("/after/typed_parameters/selection/element_ids/%d"), SelectionIndex),
+							MakeShared<FJsonValueNumber>(EdgeId), MakeShared<FJsonValueString>(TEXT("existing boundary edge ID")), Action.TargetRef);
+						return false;
 					}
 					const int32 LoopIndex =
 						BoundaryLoops.FindLoopContainingEdge(EdgeId);
 					if (LoopIndex == INDEX_NONE)
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_boundary_loop_missing"));
+						OutError = NativeFact(TEXT("modeling_geometry_boundary_loop_missing"),
+							TEXT("No detected boundary loop contains the selected edge."),
+							FString::Printf(TEXT("/after/typed_parameters/selection/element_ids/%d"), SelectionIndex),
+							MakeShared<FJsonValueNumber>(EdgeId), MakeShared<FJsonValueString>(TEXT("edge belonging to a detected boundary loop")), Action.TargetRef);
+						return false;
 					}
 					LoopIndices.Add(LoopIndex);
 				}
@@ -1280,9 +1374,17 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (!Result.IsValid()
 					|| HoleFiller.NumFailedLoops > 0)
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_hole_fill_failed"));
+					const TSharedRef<FJsonObject> Facts = MakeShared<FJsonObject>();
+					Facts->SetBoolField(TEXT("result_available"), Result.IsValid());
+					Facts->SetNumberField(TEXT("failed_loops"), HoleFiller.NumFailedLoops);
+					Facts->SetNumberField(TEXT("selected_loops"), LoopIndices.Num());
+					Facts->SetStringField(TEXT("fill_mode"), FillMode);
+					OutError = NativeFact(TEXT("modeling_geometry_hole_fill_failed"),
+						Result.IsValid() ? TEXT("The native hole filler could not fill all selected boundary loops.")
+							: TEXT("The native hole filler did not return a mesh result."),
+						TEXT("/hole_fill/result"), MakeShared<FJsonValueObject>(Facts),
+						MakeShared<FJsonValueString>(TEXT("mesh result with zero failed loops")), Action.TargetRef);
+					return false;
 				}
 				Action.WorkingMesh = MoveTemp(*Result);
 				return true;
@@ -1296,26 +1398,26 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (!ReadNumber(
 						Action.Parameters,
 						TEXT("tolerance_cm"),
-						Tolerance)
-					|| !Pairs.IsValid()
-					|| Pairs->GetKind() != EUeAgentValueKind::Array
-					|| Pairs->GetArrayItems().IsEmpty())
+						Tolerance,
+						OutError)) return false;
+				if (!Pairs.IsValid() || Pairs->GetKind() != EUeAgentValueKind::Array || Pairs->GetArrayItems().IsEmpty())
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_weld_parameters_invalid"));
+					return ReadFailure(OutError, TEXT("modeling_geometry_weld_parameters_invalid"),
+						TEXT("Welding requires a non-empty array of edge pairs."), TEXT("/after/typed_parameters/edge_pairs"),
+						Pairs, TEXT("non-empty array of edge pairs"));
 				}
-				for (const FUeAgentCanonicalValueRef& PairValue
-					: Pairs->GetArrayItems())
+				const TArray<FUeAgentCanonicalValueRef>& PairValues = Pairs->GetArrayItems();
+				for (int32 PairIndex = 0; PairIndex < PairValues.Num(); ++PairIndex)
 				{
+					const FUeAgentCanonicalValueRef& PairValue = PairValues[PairIndex];
 					if (PairValue->GetKind()
 							!= EUeAgentValueKind::Array
 						|| PairValue->GetArrayItems().Num() != 2)
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_weld_pair_invalid"));
+						return ReadFailure(OutError, TEXT("modeling_geometry_weld_pair_invalid"),
+							TEXT("A weld pair must contain exactly two edge IDs."),
+							FString::Printf(TEXT("/after/typed_parameters/edge_pairs/%d"), PairIndex),
+							FUeAgentCanonicalValuePtr(PairValue), TEXT("array containing exactly two edge IDs"));
 					}
 					const FUeAgentCanonicalValueRef& AValue =
 						PairValue->GetArrayItems()[0];
@@ -1323,23 +1425,25 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						PairValue->GetArrayItems()[1];
 					int32 EdgeA = INDEX_NONE;
 					int32 EdgeB = INDEX_NONE;
-					if (!ReadElementId(AValue, EdgeA)
-						|| !ReadElementId(BValue, EdgeB))
+					if (!ReadElementId(AValue, EdgeA, OutError, FString::Printf(TEXT("/after/typed_parameters/edge_pairs/%d/0"), PairIndex))
+						|| !ReadElementId(BValue, EdgeB, OutError, FString::Printf(TEXT("/after/typed_parameters/edge_pairs/%d/1"), PairIndex)))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_weld_pair_invalid"));
+						return false;
 					}
 					if (!Action.WorkingMesh.IsEdge(EdgeA)
 						|| !Action.WorkingMesh.IsEdge(EdgeB)
 						|| !Action.WorkingMesh.IsBoundaryEdge(EdgeA)
 						|| !Action.WorkingMesh.IsBoundaryEdge(EdgeB))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_weld_pair_stale"));
+						const int32 PairElement = !Action.WorkingMesh.IsEdge(EdgeA)
+							|| (Action.WorkingMesh.IsEdge(EdgeB) && !Action.WorkingMesh.IsBoundaryEdge(EdgeA)) ? 0 : 1;
+						const int32 InvalidEdge = PairElement == 0 ? EdgeA : EdgeB;
+						OutError = NativeFact(TEXT("modeling_geometry_weld_pair_stale"),
+							Action.WorkingMesh.IsEdge(InvalidEdge) ? TEXT("The weld pair contains an edge that is not a boundary edge.")
+								: TEXT("The weld pair contains an edge that no longer exists."),
+							FString::Printf(TEXT("/after/typed_parameters/edge_pairs/%d/%d"), PairIndex, PairElement),
+							MakeShared<FJsonValueNumber>(InvalidEdge), MakeShared<FJsonValueString>(TEXT("existing boundary edge ID")), Action.TargetRef);
+						return false;
 					}
 					const FIndex2i VerticesA =
 						Action.WorkingMesh.GetEdgeV(EdgeA);
@@ -1362,35 +1466,33 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					if (FMath::Min(DirectDistance, ReverseDistance)
 						> Tolerance)
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_weld_tolerance_exceeded"));
+						OutError = NativeFact(TEXT("modeling_geometry_weld_tolerance_exceeded"),
+							FString::Printf(TEXT("Edges %d and %d exceed the weld tolerance for both endpoint pairings."), EdgeA, EdgeB),
+							FString::Printf(TEXT("/weld/edge_pairs/%d/endpoint_distance_cm"), PairIndex),
+							NativeNumberFact(FMath::Min(DirectDistance, ReverseDistance)), NativeNumberFact(Tolerance), Action.TargetRef);
+						return false;
 					}
 					FDynamicMesh3::FMergeEdgesInfo MergeInfo;
-					if (Action.WorkingMesh.MergeEdges(
-							EdgeA,
-							EdgeB,
-							0.5,
-							MergeInfo,
-							true)
-						!= UE::Geometry::EMeshResult::Ok)
+					const UE::Geometry::EMeshResult MergeResult = Action.WorkingMesh.MergeEdges(
+						EdgeA, EdgeB, 0.5, MergeInfo, true);
+					if (MergeResult != UE::Geometry::EMeshResult::Ok)
 					{
-						return Fail(
-							OutError,
-							TEXT("modeling_geometry_weld_failed"));
+						OutError = NativeFact(TEXT("modeling_geometry_weld_failed"),
+							FString::Printf(TEXT("Native boundary-edge welding failed for edges %d and %d (EMeshResult)."), EdgeA, EdgeB),
+							FString::Printf(TEXT("/weld/edge_pairs/%d/merge_result"), PairIndex),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(MergeResult)),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(UE::Geometry::EMeshResult::Ok)), Action.TargetRef);
+						return false;
 					}
 				}
 				return true;
 			}
 
 			TStrongObjectPtr<UDynamicMesh> TargetMesh =
-				MakeTransientMesh(Action.WorkingMesh);
+				MakeTransientMesh(Action.WorkingMesh, Action.OperationKey, OutError);
 			if (!TargetMesh.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_transient_mesh_failed"));
+				return false;
 			}
 
 			if (Key == TEXT("boolean")
@@ -1402,26 +1504,22 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						Action.Parameters,
 						TEXT("operand_to_target"));
 				FTransform OperandTransform;
-				if (!OperandTransformValue.IsValid()
-					|| !ReadTransform(
+				if (!ReadTransform(
 						OperandTransformValue,
 						TEXT("translation"),
 						TEXT("rotation_quaternion_xyzw"),
 						TEXT("scale"),
-						OperandTransform))
-				{
-					return Fail(
+						OperandTransform,
 						OutError,
-						TEXT(
-							"modeling_geometry_operand_transform_invalid"));
+						TEXT("/after/typed_parameters/operand_to_target")))
+				{
+					return false;
 				}
 				TStrongObjectPtr<UDynamicMesh> OperandMesh =
-					MakeTransientMesh(Action.OperandMesh);
+					MakeTransientMesh(Action.OperandMesh, Action.OperationKey, OutError);
 				if (!OperandMesh.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_operand_mesh_invalid"));
+					return false;
 				}
 				FGeometryScriptMeshBooleanOptions Options;
 				Options.OutputTransformSpace =
@@ -1440,12 +1538,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						|| !ReadBoolean(
 							Action.Parameters,
 							TEXT("simplify_output"),
-							Options.bSimplifyOutput))
+							Options.bSimplifyOutput,
+							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_boolean_parameters_invalid"));
+						return false;
 					}
 					Operation =
 						RequestedOperation == TEXT("intersection")
@@ -1465,12 +1561,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						|| !ReadBoolean(
 							Action.Parameters,
 							TEXT("fill_cut"),
-							Options.bFillHoles))
+							Options.bFillHoles,
+							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_mesh_cut_parameters_invalid"));
+						return false;
 					}
 					Operation =
 						KeepSides == TEXT("target_inside")
@@ -1491,12 +1585,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						|| !ReadBoolean(
 							Action.Parameters,
 							TEXT("fill_hole"),
-							Options.bFillHoles))
+							Options.bFillHoles,
+							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_trim_parameters_invalid"));
+						return false;
 					}
 					Operation =
 						KeepRegion == TEXT("inside")
@@ -1530,23 +1622,23 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					|| !ReadNumber(
 						Action.Parameters,
 						TEXT("voxel_size_cm"),
-						VoxelSize)
+						VoxelSize,
+						OutError)
 					|| !ReadNumber(
 						Action.Parameters,
 						TEXT("adaptivity"),
-						Adaptivity)
-					|| !OperandTransformValue.IsValid()
+						Adaptivity,
+						OutError)
 					|| !ReadTransform(
 						OperandTransformValue,
 						TEXT("translation"),
 						TEXT("rotation_quaternion_xyzw"),
 						TEXT("scale"),
-						OperandTransform))
-				{
-					return Fail(
+						OperandTransform,
 						OutError,
-						TEXT(
-							"modeling_geometry_voxel_boolean_parameters_invalid"));
+						TEXT("/after/typed_parameters/operand_to_target")))
+				{
+					return false;
 				}
 				UE::Geometry::FVoxelBooleanMeshesOp VoxelBoolean;
 				VoxelBoolean.Meshes.Add(
@@ -1587,17 +1679,21 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					MajorAxisSize / VoxelSize;
 				if (!FMath::IsFinite(RequestedVoxelCount)
 					|| RequestedVoxelCount
-						> MaximumVoxelBooleanResolutionPerMajorAxis)
+						> static_cast<double>(MAX_int32))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_voxel_resolution_limit_exceeded"));
+					const TSharedRef<FJsonObject> Facts = MakeShared<FJsonObject>();
+					Facts->SetField(TEXT("voxel_count"), NativeNumberFact(RequestedVoxelCount));
+					Facts->SetField(TEXT("major_axis_cm"), NativeNumberFact(MajorAxisSize));
+					Facts->SetField(TEXT("voxel_size_cm"), NativeNumberFact(VoxelSize));
+					OutError = NativeFact(TEXT("modeling_geometry_voxel_resolution_invalid"),
+						TEXT("The native voxel resolution is not representable as a finite 32-bit voxel count."),
+						TEXT("/voxel_boolean/voxel_count"), MakeShared<FJsonValueObject>(Facts),
+						MakeShared<FJsonValueString>(TEXT("finite voxel count no greater than 2147483647")), Action.TargetRef);
+					return false;
 				}
-				VoxelBoolean.VoxelCount = FMath::Clamp(
+				VoxelBoolean.VoxelCount = FMath::Max(
 					FMath::CeilToInt(RequestedVoxelCount),
-					16,
-					MaximumVoxelBooleanResolutionPerMajorAxis);
+					1);
 				VoxelBoolean.AdaptivityD = Adaptivity;
 				VoxelBoolean.Operation =
 					RequestedOperation == TEXT("intersection")
@@ -1616,9 +1712,18 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (!Result.IsValid()
 					|| Result->TriangleCount() == 0)
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_voxel_boolean_failed"));
+					const TSharedRef<FJsonObject> Facts = MakeShared<FJsonObject>();
+					Facts->SetBoolField(TEXT("result_available"), Result.IsValid());
+					if (Result.IsValid()) Facts->SetField(TEXT("counts"), NativeMeshCountsFact(*Result));
+					Facts->SetStringField(TEXT("operation"), RequestedOperation);
+					Facts->SetField(TEXT("voxel_size_cm"), NativeNumberFact(VoxelSize));
+					Facts->SetField(TEXT("adaptivity"), NativeNumberFact(Adaptivity));
+					OutError = NativeFact(TEXT("modeling_geometry_voxel_boolean_failed"),
+						Result.IsValid() ? TEXT("The native voxel boolean returned a mesh with no triangles.")
+							: TEXT("The native voxel boolean did not return a mesh result."),
+						TEXT("/voxel_boolean/result"), MakeShared<FJsonValueObject>(Facts),
+						MakeShared<FJsonValueString>(TEXT("mesh result with at least one triangle")), Action.TargetRef);
+					return false;
 				}
 				MeshTransforms::ApplyTransform(
 					*Result,
@@ -1633,19 +1738,19 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				FVector3d Normal;
 				bool bKeepOriginal = false;
 				bool bWeldSeam = false;
-				if (!ReadPlane(Action.Parameters, Origin, Normal)
+				if (!ReadPlane(Action.Parameters, Origin, Normal, OutError)
 					|| !ReadBoolean(
 						Action.Parameters,
 						TEXT("keep_original"),
-						bKeepOriginal)
+						bKeepOriginal,
+						OutError)
 					|| !ReadBoolean(
 						Action.Parameters,
 						TEXT("weld_seam"),
-						bWeldSeam))
+						bWeldSeam,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_mirror_parameters_invalid"));
+					return false;
 				}
 				FDynamicMesh3 Mirrored = Action.WorkingMesh;
 				for (const int32 VertexId
@@ -1666,7 +1771,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (bKeepOriginal)
 				{
 					TStrongObjectPtr<UDynamicMesh> MirroredMesh =
-						MakeTransientMesh(Mirrored);
+						MakeTransientMesh(Mirrored, Action.OperationKey, OutError);
+					if (!MirroredMesh.IsValid()) return false;
 					UGeometryScriptLibrary_MeshBasicEditFunctions::
 						AppendMesh(
 							TargetMesh.Get(),
@@ -1693,7 +1799,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				FVector3d Normal;
 				FString KeepSide;
 				bool bFill = false;
-				if (!ReadPlane(Action.Parameters, Origin, Normal)
+				if (!ReadPlane(Action.Parameters, Origin, Normal, OutError)
 					|| !ReadString(
 						Action.Parameters,
 						TEXT("keep_side"),
@@ -1702,11 +1808,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					|| !ReadBoolean(
 						Action.Parameters,
 						TEXT("fill_hole"),
-						bFill))
+						bFill,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_plane_cut_parameters_invalid"));
+					return false;
 				}
 				if (KeepSide == TEXT("both"))
 				{
@@ -1719,28 +1824,24 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 							Origin,
 							Normal,
 							false,
-							bFill)
+							bFill,
+							OutError)
 						|| !CutMeshHalf(
 							PositiveHalf,
 							Origin,
 							Normal,
 							true,
-							bFill))
+							bFill,
+							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_plane_cut_failed"));
+						return false;
 					}
 					TargetMesh->SetMesh(MoveTemp(NegativeHalf));
 					TStrongObjectPtr<UDynamicMesh> PositiveMesh =
-						MakeTransientMesh(PositiveHalf);
+						MakeTransientMesh(PositiveHalf, Action.OperationKey, OutError);
 					if (!PositiveMesh.IsValid())
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_transient_mesh_failed"));
+						return false;
 					}
 					UGeometryScriptLibrary_MeshBasicEditFunctions::
 						AppendMesh(
@@ -1756,12 +1857,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 							Origin,
 							Normal,
 							KeepSide == TEXT("positive"),
-							bFill))
+							bFill,
+							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_plane_cut_failed"));
+						return false;
 					}
 					TargetMesh->SetMesh(MoveTemp(Half));
 				}
@@ -1775,43 +1874,52 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (!ReadNumber(
 						Action.Parameters,
 						TEXT("target_edge_length_cm"),
-						TargetEdgeLength)
+						TargetEdgeLength,
+						OutError)
 					|| !ReadInteger(
 						Action.Parameters,
 						TEXT("iterations"),
-						Iterations)
+						Iterations,
+						OutError)
 					|| !ReadBoolean(
 						Action.Parameters,
 						TEXT("preserve_boundaries"),
-						bPreserveBoundaries)
+						bPreserveBoundaries,
+						OutError)
 					|| !ReadBoolean(
 						Action.Parameters,
 						TEXT("preserve_sharp_edges"),
-						bPreserveSharpEdges))
+						bPreserveSharpEdges,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_remesh_parameters_invalid"));
+					return false;
 				}
 				bool bRemeshSucceeded = false;
+				bool bRemeshVisited = false;
 				TargetMesh->EditMesh(
 					[&](FDynamicMesh3& EditMesh)
 					{
+						bRemeshVisited = true;
 						bRemeshSucceeded = ApplyUniformRemeshWithPolicy(
 							EditMesh,
 							TargetEdgeLength,
 							Iterations,
 							bPreserveBoundaries,
-							bPreserveSharpEdges);
+							bPreserveSharpEdges,
+							OutError);
 					},
 					EDynamicMeshChangeType::GeneralEdit,
 					EDynamicMeshAttributeChangeFlags::Unknown,
 					false);
 				if (!bRemeshSucceeded)
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_remesh_failed"));
+					if (!bRemeshVisited)
+					{
+						OutError = NativeFact(TEXT("modeling_geometry_remesh_failed"),
+							TEXT("The native remesher could not edit the mesh because its callback was not invoked."),
+							TEXT("/remesh/edit_callback_invoked"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					}
+					return false;
 				}
 			}
 			else if (Key == TEXT("simplify"))
@@ -1827,15 +1935,15 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					|| !ReadNumber(
 						Action.Parameters,
 						TEXT("target_value"),
-						TargetValue)
+						TargetValue,
+						OutError)
 					|| !ReadBoolean(
 						Action.Parameters,
 						TEXT("preserve_boundaries"),
-						bPreserveBoundaries))
+						bPreserveBoundaries,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_simplify_parameters_invalid"));
+					return false;
 				}
 				const bool bUseTolerance =
 					TargetMode == TEXT("tolerance_cm");
@@ -1843,10 +1951,13 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					&& TargetMode != TEXT("triangle_count")
 					&& TargetMode != TEXT("triangle_ratio"))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_simplify_target_mode_invalid"),
-						TargetMode);
+					TArray<TSharedPtr<FJsonValue>> SupportedModes;
+					for (const TCHAR* Supported : {TEXT("tolerance_cm"), TEXT("triangle_count"), TEXT("triangle_ratio")})
+						SupportedModes.Add(MakeShared<FJsonValueString>(Supported));
+					OutError = NativeFact(TEXT("modeling_geometry_simplify_target_mode_invalid"),
+						TEXT("The simplification target mode is not supported."), TEXT("/after/typed_parameters/target_mode"),
+						MakeShared<FJsonValueString>(TargetMode), MakeShared<FJsonValueArray>(MoveTemp(SupportedModes)), Action.TargetRef);
+					return false;
 				}
 				const int32 TriangleTarget = bUseTolerance
 					? 1
@@ -1885,40 +1996,34 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (SimplifiedMesh.TriangleCount()
 					>= Action.WorkingMesh.TriangleCount())
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_simplify_no_effect"),
-						FString::Printf(
-							TEXT("before=%d; after=%d; mode=%s"),
-							Action.WorkingMesh.TriangleCount(),
-							SimplifiedMesh.TriangleCount(),
-							*TargetMode));
+					OutError = NativeFact(TEXT("modeling_geometry_simplify_no_effect"),
+						TEXT("Native simplification did not reduce the triangle count."), TEXT("/simplify/triangle_count"),
+						MakeShared<FJsonValueNumber>(SimplifiedMesh.TriangleCount()),
+						MakeShared<FJsonValueNumber>(Action.WorkingMesh.TriangleCount()), Action.TargetRef);
+					return false;
 				}
 				if (!bUseTolerance
 					&& SimplifiedMesh.TriangleCount()
 						> TriangleTarget + 1)
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_simplify_target_unreachable"),
-						FString::Printf(
-							TEXT(
-								"target=%d; actual=%d; preserve_boundaries=%s"),
-							TriangleTarget,
-							SimplifiedMesh.TriangleCount(),
-							bPreserveBoundaries
-								? TEXT("true")
-								: TEXT("false")));
+					const TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
+					Actual->SetNumberField(TEXT("triangle_count"), SimplifiedMesh.TriangleCount());
+					Actual->SetBoolField(TEXT("preserve_boundaries"), bPreserveBoundaries);
+					const TSharedRef<FJsonObject> Expected = MakeShared<FJsonObject>();
+					Expected->SetNumberField(TEXT("target_triangle_count"), TriangleTarget);
+					Expected->SetNumberField(TEXT("maximum_triangle_count"), TriangleTarget + 1);
+					OutError = NativeFact(TEXT("modeling_geometry_simplify_target_unreachable"),
+						TEXT("Native simplification could not reach the requested triangle target within its one-triangle tolerance."),
+						TEXT("/simplify/triangle_count"), MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueObject>(Expected), Action.TargetRef);
+					return false;
 				}
 				const FBoundarySemanticObservation AfterBoundary =
 					ObserveBoundarySemantics(SimplifiedMesh);
 				if (bPreserveBoundaries
 					&& AfterBoundary != BeforeBoundary)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_simplify_boundary_not_preserved"));
+					OutError = BoundaryDifferenceFailure(BeforeBoundary, AfterBoundary, Action.TargetRef);
+					return false;
 				}
 				Action.WorkingMesh = MoveTemp(SimplifiedMesh);
 				return true;
@@ -1935,12 +2040,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					|| !ReadInteger(
 						Action.Parameters,
 						TEXT("levels"),
-						Levels))
+						Levels,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_subdivide_parameters_invalid"));
+					return false;
 				}
 				if (Scheme == TEXT("pn_triangles"))
 				{
@@ -1977,20 +2080,20 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					if (!ReadNumber(
 							Action.Parameters,
 							TEXT("distance_cm"),
-							Distance)
+							Distance,
+							OutError)
 						|| !ReadNumber(
 							Action.Parameters,
 							TEXT("roundness"),
-							Roundness)
+							Roundness,
+							OutError)
 						|| !ReadInteger(
 							Action.Parameters,
 							TEXT("segments"),
-							Segments))
+							Segments,
+							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_bevel_parameters_invalid"));
+						return false;
 					}
 					FGeometryScriptMeshBevelSelectionOptions Options;
 					Options.BevelDistance = Distance;
@@ -2009,12 +2112,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 							Action.Parameters,
 							TEXT("translation_cm"),
 							3,
-							Translation))
+							Translation,
+							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_duplicate_parameters_invalid"));
+						return false;
 					}
 					FGeometryScriptMeshSelection NewTriangles;
 					UGeometryScriptLibrary_MeshModelingFunctions::
@@ -2039,25 +2140,25 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					if (!ReadNumber(
 							Action.Parameters,
 							TEXT("distance_cm"),
-							Distance)
+							Distance,
+							OutError)
 						|| !ReadString(
 							Action.Parameters,
 							TEXT("direction_mode"),
 							DirectionMode,
 							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_extrude_parameters_invalid"));
+						return false;
 					}
 					if (Key == TEXT("extrude_faces")
 						&& DirectionMode == TEXT("vertex_normals"))
 					{
 						bool bExtruded = false;
+						bool bExtrudeVisited = false;
 						TargetMesh->EditMesh(
 							[&](FDynamicMesh3& EditMesh)
 							{
+								bExtrudeVisited = true;
 								EnsureTopologyVertexNormals(EditMesh);
 								TArray<int32> Triangles;
 								Selection.ConvertToMeshIndexArray(
@@ -2073,15 +2174,30 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 								Extruder.DefaultOffsetDistance = Distance;
 								Extruder.bIsPositiveOffset = Distance > 0.0;
 								bExtruded = Extruder.Apply();
+								if (!bExtruded)
+								{
+									const TSharedRef<FJsonObject> Facts = MakeShared<FJsonObject>();
+									Facts->SetNumberField(TEXT("selected_triangles"), Extruder.Triangles.Num());
+									Facts->SetField(TEXT("distance_cm"), NativeNumberFact(Distance));
+									Facts->SetStringField(TEXT("direction_mode"), DirectionMode);
+									OutError = NativeFact(TEXT("modeling_geometry_extrude_failed"),
+										TEXT("Native vertex-normal extrusion could not apply to the selected region."), TEXT("/extrude/result"),
+										MakeShared<FJsonValueObject>(Facts), MakeShared<FJsonValueString>(TEXT("successful region extrusion")), Action.TargetRef);
+								}
 							},
 							EDynamicMeshChangeType::GeneralEdit,
 							EDynamicMeshAttributeChangeFlags::Unknown,
 							false);
 						if (!bExtruded)
 						{
-							return Fail(
-								OutError,
-								TEXT("modeling_geometry_extrude_failed"));
+							if (!bExtrudeVisited)
+							{
+								OutError = NativeFact(TEXT("modeling_geometry_extrude_failed"),
+									TEXT("Native extrusion could not edit the mesh because its callback was not invoked."),
+									TEXT("/extrude/edit_callback_invoked"), MakeShared<FJsonValueBoolean>(false),
+									MakeShared<FJsonValueBoolean>(true), Action.TargetRef);
+							}
+							return false;
 						}
 					}
 					else
@@ -2099,12 +2215,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 							FVector3d Direction;
 							if (!ReadDirection(
 									Action.Parameters,
-									Direction))
+									Direction,
+									OutError))
 							{
-								return Fail(
-									OutError,
-									TEXT(
-										"modeling_geometry_direction_invalid"));
+								return false;
 							}
 							Options.Direction = FVector(Direction);
 						}
@@ -2122,17 +2236,15 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					if (!ReadNumber(
 							Action.Parameters,
 							TEXT("distance_cm"),
-							Distance)
+							Distance,
+							OutError)
 						|| !ReadString(
 							Action.Parameters,
 							TEXT("boundary_mode"),
 							BoundaryMode,
 							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_inset_parameters_invalid"));
+						return false;
 					}
 					FGeometryScriptMeshInsetOutsetFacesOptions Options;
 					Options.Distance = Distance;
@@ -2151,17 +2263,15 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					if (!ReadNumber(
 							Action.Parameters,
 							TEXT("distance_cm"),
-							Distance)
+							Distance,
+							OutError)
 						|| !ReadString(
 							Action.Parameters,
 							TEXT("offset_mode"),
 							OffsetMode,
 							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_offset_parameters_invalid"));
+						return false;
 					}
 					FGeometryScriptMeshOffsetFacesOptions Options;
 					Options.Distance = Distance;
@@ -2188,11 +2298,15 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				}
 				else
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_topology_operation_unsupported"),
-						Key);
+					TArray<TSharedPtr<FJsonValue>> SupportedKeys;
+					for (const TCHAR* Supported : {TEXT("fill_holes"), TEXT("weld_edges"), TEXT("boolean"), TEXT("mesh_cut"), TEXT("trim"),
+						TEXT("voxel_boolean"), TEXT("mirror"), TEXT("plane_cut"), TEXT("remesh"), TEXT("simplify"), TEXT("subdivide"),
+						TEXT("bevel_edges"), TEXT("duplicate_faces"), TEXT("extrude_faces"), TEXT("push_pull_faces"), TEXT("inset_faces"), TEXT("offset_faces")})
+						SupportedKeys.Add(MakeShared<FJsonValueString>(Supported));
+					OutError = NativeFact(TEXT("modeling_geometry_topology_operation_unsupported"),
+						TEXT("The modeling topology operation is not supported."), TEXT("/operation_key"),
+						MakeShared<FJsonValueString>(Key), MakeShared<FJsonValueArray>(MoveTemp(SupportedKeys)), Action.TargetRef);
+					return false;
 				}
 			}
 
@@ -2204,18 +2318,35 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 		bool NormalizeUvLayer(
 			FDynamicMesh3& Mesh,
-			const int32 Channel)
+			const int32 Channel,
+			FExecutionMutationError& OutError)
 		{
-			if (!Mesh.HasAttributes()
-				|| Channel < 0
-				|| Channel >= Mesh.Attributes()->NumUVLayers())
+			if (!Mesh.HasAttributes())
 			{
+				OutError = NativeFact(TEXT("modeling_geometry_uv_generation_failed"),
+					TEXT("The mesh has no attribute set containing UV layers."), TEXT("/mesh/attributes_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				return false;
+			}
+			if (Channel < 0 || Channel >= Mesh.Attributes()->NumUVLayers())
+			{
+				OutError = NativeFact(TEXT("modeling_geometry_uv_generation_failed"),
+					TEXT("The requested UV layer index is outside the mesh's available UV layers."), TEXT("/mesh/uv_layer_index"),
+					MakeShared<FJsonValueNumber>(Channel),
+					MakeShared<FJsonValueString>(FString::Printf(TEXT("0 <= index < %d"), Mesh.Attributes()->NumUVLayers())));
 				return false;
 			}
 			FDynamicMeshUVOverlay* Overlay =
 				Mesh.Attributes()->GetUVLayer(Channel);
 			if (!Overlay || Overlay->ElementCount() == 0)
 			{
+				OutError = NativeFact(TEXT("modeling_geometry_uv_generation_failed"),
+					Overlay ? TEXT("The generated UV layer has no elements.") : TEXT("The requested UV layer has no overlay."),
+					FString::Printf(TEXT("/uv_layers/%d/%s"), Channel, Overlay ? TEXT("element_count") : TEXT("overlay_available")),
+					Overlay ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(0))
+						: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)),
+					Overlay ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("greater than zero")))
+						: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)));
 				return false;
 			}
 			FVector2f Minimum(
@@ -2246,6 +2377,14 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				Maximum.Y - Minimum.Y);
 			if (Range <= UE_SMALL_NUMBER)
 			{
+				const TSharedRef<FJsonObject> Facts = MakeShared<FJsonObject>();
+				Facts->SetField(TEXT("minimum"), NativeNumberArrayFact({Minimum.X, Minimum.Y}));
+				Facts->SetField(TEXT("maximum"), NativeNumberArrayFact({Maximum.X, Maximum.Y}));
+				Facts->SetField(TEXT("range"), NativeNumberFact(Range));
+				OutError = NativeFact(TEXT("modeling_geometry_uv_generation_failed"),
+					TEXT("The UV coordinates are outside the unit square, but their range is too small to normalize."),
+					FString::Printf(TEXT("/uv_layers/%d/range"), Channel), MakeShared<FJsonValueObject>(Facts),
+					MakeShared<FJsonValueString>(FString::Printf(TEXT("range > %.9g"), static_cast<double>(UE_SMALL_NUMBER))));
 				return false;
 			}
 			for (const int32 ElementId
@@ -2261,12 +2400,17 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 		bool ConvertStaticMesh(
 			UStaticMesh& StaticMesh,
-			FDynamicMesh3& OutMesh)
+			FDynamicMesh3& OutMesh,
+			FExecutionMutationError& OutError)
 		{
 			const FMeshDescription* Description =
 				StaticMesh.GetMeshDescription(0);
 			if (!Description)
 			{
+				OutError = NativeFact(TEXT("modeling_geometry_static_carrier_invalid"),
+					TEXT("The static mesh has no LOD 0 mesh description to convert."),
+					TEXT("/lods/0/mesh_description_available"), MakeShared<FJsonValueBoolean>(false),
+					MakeShared<FJsonValueBoolean>(true), StaticMesh.GetPathName());
 				return false;
 			}
 			FMeshDescriptionToDynamicMesh Converter;
@@ -2277,41 +2421,66 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		bool TryCopyResolvedCarrierMesh(
 			UObject& Object,
 			UWorld& World,
-			FDynamicMesh3& OutMesh)
+			FDynamicMesh3& OutMesh,
+			FExecutionMutationError& OutError)
 		{
 			if (ADynamicMeshActor* Actor = Cast<ADynamicMeshActor>(&Object))
 			{
-				UDynamicMesh* DynamicMesh =
-					Actor->GetDynamicMeshComponent()
-						? Actor->GetDynamicMeshComponent()->GetDynamicMesh()
-						: nullptr;
-				if (Actor->GetWorld() != &World || !DynamicMesh)
+				UDynamicMeshComponent* Component = Actor->GetDynamicMeshComponent();
+				UDynamicMesh* DynamicMesh = Component ? Component->GetDynamicMesh() : nullptr;
+				if (Actor->GetWorld() != &World)
 				{
+					OutError = NativeFact(TEXT("modeling_geometry_operand_carrier_invalid"),
+						TEXT("The dynamic mesh operand belongs to a different world."),
+						TEXT("/carrier/world"), Actor->GetWorld()
+							? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Actor->GetWorld()->GetPathName()))
+							: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+						MakeShared<FJsonValueString>(World.GetPathName()), Actor->GetPathName());
 					return false;
 				}
-				bool bCopied = false;
-				DynamicMesh->ProcessMesh(
-					[&OutMesh, &bCopied](const FDynamicMesh3& Mesh)
-					{
-						OutMesh = Mesh;
-						bCopied = true;
-					});
-				return bCopied
-					&& OutMesh.VertexCount() > 0
-					&& OutMesh.TriangleCount() > 0;
+				if (!DynamicMesh)
+				{
+					OutError = NativeFact(TEXT("modeling_geometry_operand_carrier_invalid"),
+						Component ? TEXT("The dynamic mesh operand component has no mesh.")
+							: TEXT("The dynamic mesh operand has no dynamic mesh component."),
+						Component ? TEXT("/carrier/dynamic_mesh_available") : TEXT("/carrier/component_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Actor->GetPathName());
+					return false;
+				}
+				if (!CopyTransientMesh(*DynamicMesh, OutMesh, OutError))
+				{
+					SupplementNativeTarget(OutError, Actor->GetPathName());
+					return false;
+				}
+				return true;
 			}
 			if (UStaticMesh* StaticMesh = Cast<UStaticMesh>(&Object))
 			{
-				return ConvertStaticMesh(*StaticMesh, OutMesh)
-					&& OutMesh.VertexCount() > 0
-					&& OutMesh.TriangleCount() > 0;
+				if (!ConvertStaticMesh(*StaticMesh, OutMesh, OutError)) return false;
+				if (OutMesh.VertexCount() <= 0 || OutMesh.TriangleCount() <= 0)
+				{
+					OutError = NativeFact(TEXT("modeling_geometry_operand_carrier_invalid"),
+						TEXT("The converted static mesh operand is empty."), TEXT("/carrier/mesh_counts"),
+						NativeMeshCountsFact(OutMesh), MakeShared<FJsonValueString>(TEXT("positive vertex and triangle counts")),
+						StaticMesh->GetPathName());
+					return false;
+				}
+				return true;
 			}
+			TArray<TSharedPtr<FJsonValue>> SupportedClasses;
+			SupportedClasses.Add(MakeShared<FJsonValueString>(ADynamicMeshActor::StaticClass()->GetPathName()));
+			SupportedClasses.Add(MakeShared<FJsonValueString>(UStaticMesh::StaticClass()->GetPathName()));
+			OutError = NativeFact(TEXT("modeling_geometry_operand_carrier_invalid"),
+				TEXT("The resolved operand is not a supported modeling mesh carrier."), TEXT("/carrier/class"),
+				MakeShared<FJsonValueString>(Object.GetClass()->GetPathName()), MakeShared<FJsonValueArray>(MoveTemp(SupportedClasses)));
+			OutError.InternalContext = Object.GetPathName();
 			return false;
 		}
 
 		bool CommitStaticMesh(
 			UStaticMesh& StaticMesh,
-			const FDynamicMesh3& Mesh)
+			const FDynamicMesh3& Mesh,
+			FExecutionMutationError& OutError)
 		{
 			FMeshDescription Description;
 			FStaticMeshAttributes Attributes(Description);
@@ -2321,7 +2490,14 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			StaticMesh.CreateMeshDescription(0, Description);
 			StaticMesh.CommitMeshDescription(0);
 			StaticMesh.PostEditChange();
-			return StaticMesh.GetMeshDescription(0) != nullptr;
+			if (!StaticMesh.GetMeshDescription(0))
+			{
+				OutError = NativeFact(TEXT("modeling_geometry_static_commit_failed"),
+					TEXT("The committed static mesh has no LOD 0 mesh description."), TEXT("/lods/0/mesh_description_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), StaticMesh.GetPathName());
+				return false;
+			}
+			return true;
 		}
 
 		bool CheckoutExistingCarrier(
@@ -2335,27 +2511,39 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				Change.GetAfter();
 			FString CarrierKind;
 			FString ExpectedFingerprint;
-			if (Change.GetIntent() != EChangeIntent::Update
-				|| !ReadString(
+			if (Change.GetIntent() != EChangeIntent::Update)
+			{
+				OutError = NativeFact(TEXT("modeling_geometry_change_intent_invalid"),
+					TEXT("An existing mesh carrier edit requires EChangeIntent::Update."), TEXT("/change/intent"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Change.GetIntent())),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(EChangeIntent::Update)));
+				return false;
+			}
+			if (!ReadString(
 					After,
 					TEXT("operation_key"),
 					OutAction.OperationKey,
-					OutError)
+					OutError,
+					TEXT("/after"))
 				|| !ReadString(
 					After,
 					TEXT("target_ref"),
 					OutAction.TargetRef,
-					OutError)
+					OutError,
+					TEXT("/after"))
 				|| !ReadString(
 					After,
 					TEXT("carrier_kind"),
 					CarrierKind,
-					OutError)
+					OutError,
+					TEXT("/after"))
 				|| !ReadString(
 					After,
 					TEXT("expected_before_fingerprint"),
 					ExpectedFingerprint,
-					OutError))
+					OutError,
+					TEXT("/after"),
+					true))
 			{
 				return false;
 			}
@@ -2363,18 +2551,21 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				FindField(After, TEXT("typed_parameters"));
 			if (!OutAction.Parameters.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_parameters_missing"));
+				return ReadFailure(OutError, TEXT("modeling_geometry_parameters_missing"),
+					TEXT("The planned mesh edit has no typed parameters."), TEXT("/after/typed_parameters"),
+					OutAction.Parameters, TEXT("typed modeling parameters"));
 			}
 			UObject* Object = nullptr;
 			if (!Resolver.TryResolveReference(
 					World,
 					OutAction.TargetRef,
 					Object,
-					OutError)
-				|| !Object)
+					OutError)) return false;
+			if (!Object)
 			{
+				OutError = NativeFact(TEXT("modeling_geometry_carrier_unavailable"),
+					TEXT("The target reference resolved without a mesh carrier object."), TEXT("/carrier/object_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), OutAction.TargetRef);
 				return false;
 			}
 			if (CarrierKind == TEXT("dynamic_mesh_actor"))
@@ -2394,10 +2585,29 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					|| !Component
 					|| !DynamicMesh)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_dynamic_carrier_invalid"));
+					if (!Actor)
+					{
+						OutError = NativeFact(TEXT("modeling_geometry_dynamic_carrier_invalid"),
+							TEXT("The resolved dynamic mesh carrier is not an ADynamicMeshActor."), TEXT("/carrier/class"),
+							MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()),
+							MakeShared<FJsonValueString>(ADynamicMeshActor::StaticClass()->GetPathName()), OutAction.TargetRef);
+					}
+					else if (Actor->GetWorld() != &World)
+					{
+						OutError = NativeFact(TEXT("modeling_geometry_dynamic_carrier_invalid"),
+							TEXT("The dynamic mesh carrier belongs to a different world."), TEXT("/carrier/world"),
+							Actor->GetWorld() ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Actor->GetWorld()->GetPathName()))
+								: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+							MakeShared<FJsonValueString>(World.GetPathName()), OutAction.TargetRef);
+					}
+					else
+					{
+						OutError = NativeFact(TEXT("modeling_geometry_dynamic_carrier_invalid"),
+							Component ? TEXT("The dynamic mesh carrier component has no mesh.") : TEXT("The dynamic mesh carrier has no mesh component."),
+							Component ? TEXT("/carrier/dynamic_mesh_available") : TEXT("/carrier/component_available"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), OutAction.TargetRef);
+					}
+					return false;
 				}
 				DynamicMesh->ProcessMesh(
 					[&OutAction](const FDynamicMesh3& Mesh)
@@ -2423,16 +2633,16 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			else if (CarrierKind == TEXT("static_mesh_asset"))
 			{
 				UStaticMesh* StaticMesh = Cast<UStaticMesh>(Object);
-				if (!StaticMesh
-					|| !ConvertStaticMesh(
-						*StaticMesh,
-						OutAction.OriginalMesh))
+				if (!StaticMesh)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_static_carrier_invalid"));
+					OutError = NativeFact(TEXT("modeling_geometry_static_carrier_invalid"),
+						TEXT("The resolved static mesh carrier is not a UStaticMesh."), TEXT("/carrier/class"),
+						Object ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()))
+							: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+						MakeShared<FJsonValueString>(UStaticMesh::StaticClass()->GetPathName()), OutAction.TargetRef);
+					return false;
 				}
+				if (!ConvertStaticMesh(*StaticMesh, OutAction.OriginalMesh, OutError)) return false;
 				OutAction.WorkingMesh = OutAction.OriginalMesh;
 				OutAction.Carrier = ECarrierKind::StaticMeshAsset;
 				OutAction.StaticMesh = StaticMesh;
@@ -2449,17 +2659,23 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			}
 			else
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_carrier_unsupported"));
+				TArray<TSharedPtr<FJsonValue>> SupportedKinds;
+				SupportedKinds.Add(MakeShared<FJsonValueString>(TEXT("dynamic_mesh_actor")));
+				SupportedKinds.Add(MakeShared<FJsonValueString>(TEXT("static_mesh_asset")));
+				OutError = NativeFact(TEXT("modeling_geometry_carrier_unsupported"),
+					TEXT("The modeling mesh carrier kind is not supported."), TEXT("/after/carrier_kind"),
+					MakeShared<FJsonValueString>(CarrierKind), MakeShared<FJsonValueArray>(MoveTemp(SupportedKinds)), OutAction.TargetRef);
+				return false;
 			}
-			if (MeshFingerprint(OutAction.OriginalMesh)
-				!= ExpectedFingerprint)
+			const FString ActualFingerprint = MeshFingerprint(OutAction.OriginalMesh);
+			if (ActualFingerprint != ExpectedFingerprint)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_checkout_fingerprint_mismatch"));
+				OutError = NativeFact(TEXT("modeling_geometry_checkout_fingerprint_mismatch"),
+					TEXT("The carrier mesh changed after the planned input was captured."), TEXT("/carrier/matches_planned_mesh"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), OutAction.TargetRef);
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(ActualFingerprint);
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedFingerprint);
+				return false;
 			}
 			OutAction.bPackageWasDirty =
 				OutAction.Package.IsValid()
@@ -2482,30 +2698,31 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				{
 					return false;
 				}
-				if (!OperandObject
-					|| !TryCopyResolvedCarrierMesh(
-						*OperandObject,
-						World,
-						OutAction.OperandMesh))
+				if (!OperandObject)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_operand_carrier_invalid"));
+					OutError = NativeFact(TEXT("modeling_geometry_operand_carrier_invalid"),
+						TEXT("The operand reference resolved without a mesh carrier object."), TEXT("/operand/object_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), OutAction.OperandRef);
+					return false;
 				}
+				if (!TryCopyResolvedCarrierMesh(*OperandObject, World, OutAction.OperandMesh, OutError)) return false;
 				FString ExpectedOperandFingerprint;
 				if (!ReadString(
 						After,
 						TEXT("operand_before_fingerprint"),
 						ExpectedOperandFingerprint,
-						OutError)
-					|| MeshFingerprint(OutAction.OperandMesh)
-						!= ExpectedOperandFingerprint)
-				{
-					return Fail(
 						OutError,
-						TEXT(
-							"modeling_geometry_operand_fingerprint_mismatch"));
+						TEXT("/after"),
+						true)) return false;
+				const FString ActualOperandFingerprint = MeshFingerprint(OutAction.OperandMesh);
+				if (ActualOperandFingerprint != ExpectedOperandFingerprint)
+				{
+					OutError = NativeFact(TEXT("modeling_geometry_operand_fingerprint_mismatch"),
+						TEXT("The operand mesh changed after the planned input was captured."), TEXT("/operand/matches_planned_mesh"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), OutAction.OperandRef);
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(ActualOperandFingerprint);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedOperandFingerprint);
+					return false;
 				}
 			}
 			return true;
@@ -2518,17 +2735,26 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		{
 			const FUeAgentCanonicalValuePtr& After =
 				Change.GetAfter();
-			if (Change.GetIntent() != EChangeIntent::Create
-				|| !ReadString(
+			if (Change.GetIntent() != EChangeIntent::Create)
+			{
+				OutError = NativeFact(TEXT("modeling_geometry_change_intent_invalid"),
+					TEXT("A primitive output requires EChangeIntent::Create."), TEXT("/change/intent"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Change.GetIntent())),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(EChangeIntent::Create)));
+				return false;
+			}
+			if (!ReadString(
 					After,
 					TEXT("operation_key"),
 					OutAction.OperationKey,
-					OutError)
+					OutError,
+					TEXT("/after"))
 				|| !ReadString(
 					After,
 					TEXT("target_ref"),
 					OutAction.TargetRef,
-					OutError))
+					OutError,
+					TEXT("/after")))
 			{
 				return false;
 			}
@@ -2540,31 +2766,35 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			TArray<double> Rotation;
 			TArray<double> Scale;
 			FString Unit;
-			if (!Placement.IsValid()
-				|| !ReadString(
+			if (!ReadString(
 					Placement,
 					TEXT("unit"),
 					Unit,
-					OutError)
+					OutError,
+					TEXT("/after/typed_parameters/placement"))
 				|| !ReadNumberArray(
 					Placement,
 					TEXT("translation"),
 					3,
-					Translation)
+					Translation,
+					OutError,
+					TEXT("/after/typed_parameters/placement"))
 				|| !ReadNumberArray(
 					Placement,
 					TEXT("rotation_quaternion_xyzw"),
 					4,
-					Rotation)
+					Rotation,
+					OutError,
+					TEXT("/after/typed_parameters/placement"))
 				|| !ReadNumberArray(
 					Placement,
 					TEXT("scale"),
 					3,
-					Scale))
-			{
-				return Fail(
+					Scale,
 					OutError,
-					TEXT("modeling_geometry_placement_invalid"));
+					TEXT("/after/typed_parameters/placement")))
+			{
+				return false;
 			}
 			const double UnitScale =
 				Unit == TEXT("meter") ? 100.0 : 1.0;
@@ -2575,9 +2805,11 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				Rotation[3]);
 			if (Quaternion.SizeSquared() <= UE_DOUBLE_SMALL_NUMBER)
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_placement_invalid"));
+				OutError = NativeFact(TEXT("modeling_geometry_placement_invalid"),
+					TEXT("The primitive placement quaternion is too small to define a rotation."),
+					TEXT("/after/typed_parameters/placement/rotation_quaternion_xyzw"), NativeNumberArrayFact(Rotation),
+					MakeShared<FJsonValueString>(FString::Printf(TEXT("quaternion squared length > %.17g"), UE_DOUBLE_SMALL_NUMBER)), OutAction.TargetRef);
+				return false;
 			}
 			Quaternion.Normalize();
 			OutAction.Placement = FTransform(
@@ -2590,7 +2822,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			OutAction.Carrier = ECarrierKind::PrimitiveOutput;
 			OutAction.CanonicalKey =
 				Change.GetIdentity().GetCanonicalKey();
-			return OutAction.Parameters.IsValid();
+			return true;
 		}
 
 		bool ApplyAttributeOperation(
@@ -2606,19 +2838,16 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (!ReadInteger(
 						Action.Parameters,
 						TEXT("uv_channel"),
-						Channel))
+						Channel,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_uv_channel_invalid"));
+					return false;
 				}
 				TStrongObjectPtr<UDynamicMesh> DynamicMesh =
-					MakeTransientMesh(Action.WorkingMesh);
+					MakeTransientMesh(Action.WorkingMesh, Action.OperationKey, OutError);
 				if (!DynamicMesh.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_transient_mesh_failed"));
+					return false;
 				}
 				int32 ExistingUvLayers = 0;
 				DynamicMesh->ProcessMesh(
@@ -2654,16 +2883,15 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						|| !ReadBoolean(
 							Action.Parameters,
 							TEXT("pack"),
-							bPack)
+							bPack,
+							OutError)
 						|| !ReadInteger(
 							Action.Parameters,
 							TEXT("texture_resolution"),
-							TextureResolution))
+							TextureResolution,
+							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_auto_uv_parameters_invalid"));
+						return false;
 					}
 					if (Method == TEXT("xatlas"))
 					{
@@ -2719,33 +2947,38 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 							Action.Parameters,
 							TEXT("dimensions_cm"),
 							3,
-							Dimensions)
-						|| !Frame.IsValid()
+							Dimensions,
+							OutError)
 						|| !ReadNumberArray(
 							Frame,
 							TEXT("origin"),
 							3,
-							Origin)
+							Origin,
+							OutError,
+							TEXT("/after/typed_parameters/projection_frame"))
 						|| !ReadNumberArray(
 							Frame,
 							TEXT("axis_u"),
 							3,
-							AxisU)
+							AxisU,
+							OutError,
+							TEXT("/after/typed_parameters/projection_frame"))
 						|| !ReadNumberArray(
 							Frame,
 							TEXT("axis_v"),
 							3,
-							AxisV)
+							AxisV,
+							OutError,
+							TEXT("/after/typed_parameters/projection_frame"))
 						|| !ReadNumberArray(
 							Frame,
 							TEXT("axis_w"),
 							3,
-							AxisW))
-					{
-						return Fail(
+							AxisW,
 							OutError,
-							TEXT(
-								"modeling_geometry_project_uv_parameters_invalid"));
+							TEXT("/after/typed_parameters/projection_frame")))
+					{
+						return false;
 					}
 					const FVector U(
 						AxisU[0],
@@ -2762,17 +2995,33 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					if (!U.IsNormalized()
 						|| !V.IsNormalized()
 						|| !W.IsNormalized()
-						|| FMath::Abs(FVector::DotProduct(U, V))
-							> 0.001f
-						|| FVector::DotProduct(
-							FVector::CrossProduct(U, V),
-							W)
-							< 0.999f)
+						|| FMath::Abs(FVector::DotProduct(U, V)) > 0.001f
+						|| FVector::DotProduct(FVector::CrossProduct(U, V), W) < 0.999f)
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_projection_basis_invalid"));
+						if (!U.IsNormalized() || !V.IsNormalized() || !W.IsNormalized())
+						{
+							const TCHAR* AxisName = !U.IsNormalized() ? TEXT("axis_u") : !V.IsNormalized() ? TEXT("axis_v") : TEXT("axis_w");
+							const TArray<double>& Axis = !U.IsNormalized() ? AxisU : !V.IsNormalized() ? AxisV : AxisW;
+							OutError = NativeFact(TEXT("modeling_geometry_projection_basis_invalid"),
+								TEXT("A projection frame axis must have unit length."),
+								NativeFieldPath(TEXT("/after/typed_parameters/projection_frame"), AxisName),
+								NativeNumberArrayFact(Axis), MakeShared<FJsonValueString>(TEXT("normalized direction vector")), Action.TargetRef);
+						}
+						else if (FMath::Abs(FVector::DotProduct(U, V)) > 0.001f)
+						{
+							OutError = NativeFact(TEXT("modeling_geometry_projection_basis_invalid"),
+								TEXT("Projection frame axes U and V are not perpendicular within the allowed absolute dot product."),
+								TEXT("/projection_frame/uv_absolute_dot_product"), NativeNumberFact(FMath::Abs(FVector::DotProduct(U, V))),
+								NativeNumberFact(0.001f), Action.TargetRef);
+						}
+						else
+						{
+							OutError = NativeFact(TEXT("modeling_geometry_projection_basis_invalid"),
+								TEXT("Projection frame axis W does not align with the right-handed U/V frame within the allowed dot product."),
+								TEXT("/projection_frame/w_alignment"), NativeNumberFact(FVector::DotProduct(FVector::CrossProduct(U, V), W)),
+								NativeNumberFact(0.999f), Action.TargetRef);
+						}
+						return false;
 					}
 					const FTransform ProjectionTransform(
 						FRotationMatrix::MakeFromXY(U, V).ToQuat(),
@@ -2816,11 +3065,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						OutError)
 					|| !NormalizeUvLayer(
 						Action.WorkingMesh,
-						Channel))
+						Channel,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_uv_generation_failed"));
+					return false;
 				}
 				return true;
 			}
@@ -2836,20 +3084,16 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					|| !ReadBoolean(
 						Action.Parameters,
 						TEXT("preserve_existing_hard_edges"),
-						bPreserveHardEdges))
+						bPreserveHardEdges,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_normals_parameters_invalid"));
+					return false;
 				}
 				TStrongObjectPtr<UDynamicMesh> DynamicMesh =
-					MakeTransientMesh(Action.WorkingMesh);
+					MakeTransientMesh(Action.WorkingMesh, Action.OperationKey, OutError);
 				if (!DynamicMesh.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_transient_mesh_failed"));
+					return false;
 				}
 				if (Mode == TEXT("face"))
 				{
@@ -2859,7 +3103,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				else if (Mode == TEXT("angle_threshold"))
 				{
 					double Angle = 30.0;
-					ReadNumber(
+					ReadNumberProbe(
 						Action.Parameters,
 						TEXT("angle_degrees"),
 						Angle);
@@ -2897,16 +3141,16 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (!ReadInteger(
 						Action.Parameters,
 						TEXT("slot_index"),
-						SlotIndex)
+						SlotIndex,
+						OutError)
 					|| !ReadElementIds(
 						Selection,
 						TEXT("element_ids"),
-						TriangleIds))
-				{
-					return Fail(
+						TriangleIds,
 						OutError,
-						TEXT(
-							"modeling_geometry_material_assignment_invalid"));
+						TEXT("/after/typed_parameters/selection")))
+				{
+					return false;
 				}
 				Action.WorkingMesh.EnableAttributes();
 				FDynamicMeshAttributeSet* Attributes =
@@ -2914,14 +3158,16 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				Attributes->EnableMaterialID();
 				FDynamicMeshMaterialAttribute* MaterialIds =
 					Attributes->GetMaterialID();
-				for (const int32 TriangleId : TriangleIds)
+				for (int32 SelectionIndex = 0; SelectionIndex < TriangleIds.Num(); ++SelectionIndex)
 				{
+					const int32 TriangleId = TriangleIds[SelectionIndex];
 					if (!Action.WorkingMesh.IsTriangle(TriangleId))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_material_selection_stale"));
+						OutError = NativeFact(TEXT("modeling_geometry_material_selection_stale"),
+							TEXT("The material selection contains a triangle that no longer exists."),
+							FString::Printf(TEXT("/after/typed_parameters/selection/element_ids/%d"), SelectionIndex),
+							MakeShared<FJsonValueNumber>(TriangleId), MakeShared<FJsonValueString>(TEXT("existing triangle ID")), Action.TargetRef);
+						return false;
 					}
 					MaterialIds->SetValue(TriangleId, SlotIndex);
 				}
@@ -2957,19 +3203,23 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					Cast<UMaterialInterface>(MaterialObject);
 				if (!Material)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_material_reference_invalid"));
+					OutError = NativeFact(TEXT("modeling_geometry_material_reference_invalid"),
+						TEXT("The resolved material reference is not a material interface."), TEXT("/after/typed_parameters/material_ref"),
+						MaterialObject ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(MaterialObject->GetClass()->GetPathName()))
+							: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+						MakeShared<FJsonValueString>(UMaterialInterface::StaticClass()->GetPathName()), MaterialRef);
+					return false;
 				}
 				if (Action.Carrier
 					!= ECarrierKind::StaticMeshAsset)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_named_slot_carrier_unsupported"));
+					OutError = NativeFact(TEXT("modeling_geometry_named_slot_carrier_unsupported"),
+						TEXT("Named material slots require a static mesh asset carrier."), TEXT("/carrier/kind"),
+						MakeShared<FJsonValueString>(Action.Carrier == ECarrierKind::PrimitiveOutput ? TEXT("primitive_output") : TEXT("dynamic_mesh_actor")),
+						MakeShared<FJsonValueString>(TEXT("static_mesh_asset")), Action.TargetRef);
+					return false;
 				}
+				Action.bMutationStarted = true;
 				Action.StaticMesh->GetStaticMaterials().Add(
 					FStaticMaterial(
 						Material,
@@ -2977,11 +3227,13 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						FName(*SlotName)));
 				return true;
 			}
-			return Fail(
-				OutError,
-				TEXT(
-					"modeling_geometry_attribute_operation_unsupported"),
-				Action.OperationKey);
+			TArray<TSharedPtr<FJsonValue>> SupportedKeys;
+			for (const TCHAR* Supported : {TEXT("auto_uv"), TEXT("project_uv"), TEXT("recompute_normals"), TEXT("assign_material_slot"), TEXT("add_material_slot")})
+				SupportedKeys.Add(MakeShared<FJsonValueString>(Supported));
+			OutError = NativeFact(TEXT("modeling_geometry_attribute_operation_unsupported"),
+				TEXT("The modeling attribute operation is not supported."), TEXT("/operation_key"),
+				MakeShared<FJsonValueString>(Action.OperationKey), MakeShared<FJsonValueArray>(MoveTemp(SupportedKeys)), Action.TargetRef);
+			return false;
 		}
 
 		bool ApplyCollisionOperation(
@@ -2992,20 +3244,16 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			if (!ReadBoolean(
 					Action.Parameters,
 					TEXT("replace_existing"),
-					bReplace))
+					bReplace,
+					OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_collision_parameters_invalid"));
+				return false;
 			}
 			TStrongObjectPtr<UDynamicMesh> SourceMesh =
-				MakeTransientMesh(Action.WorkingMesh);
+				MakeTransientMesh(Action.WorkingMesh, Action.OperationKey, OutError);
 			if (!SourceMesh.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_transient_mesh_failed"));
+				return false;
 			}
 			FGeometryScriptCollisionFromMeshOptions Options;
 			Options.bEmitTransaction = false;
@@ -3023,16 +3271,15 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					|| !ReadInteger(
 						Action.Parameters,
 						TEXT("max_hulls"),
-						MaxHulls)
+						MaxHulls,
+						OutError)
 					|| !ReadInteger(
 						Action.Parameters,
 						TEXT("max_vertices_per_hull"),
-						MaxVertices))
+						MaxVertices,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_convex_collision_parameters_invalid"));
+					return false;
 				}
 				Options.Method =
 					EGeometryScriptCollisionGenerationMethod::
@@ -3061,12 +3308,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					|| !ReadInteger(
 						Action.Parameters,
 						TEXT("max_shapes"),
-						MaxShapes))
+						MaxShapes,
+						OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_simple_collision_parameters_invalid"));
+					return false;
 				}
 				Options.Method =
 					Method == TEXT("capsules")
@@ -3089,11 +3334,13 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			}
 			else
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_collision_operation_unsupported"),
-					Action.OperationKey);
+				TArray<TSharedPtr<FJsonValue>> SupportedKeys;
+				SupportedKeys.Add(MakeShared<FJsonValueString>(TEXT("generate_convex_collision")));
+				SupportedKeys.Add(MakeShared<FJsonValueString>(TEXT("generate_simple_collision")));
+				OutError = NativeFact(TEXT("modeling_geometry_collision_operation_unsupported"),
+					TEXT("The modeling collision operation is not supported."), TEXT("/operation_key"),
+					MakeShared<FJsonValueString>(Action.OperationKey), MakeShared<FJsonValueArray>(MoveTemp(SupportedKeys)), Action.TargetRef);
+				return false;
 			}
 			FGeometryScriptSimpleCollision Generated =
 				UGeometryScriptLibrary_CollisionFunctions::
@@ -3102,9 +3349,17 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						Options);
 			if (Generated.AggGeom.GetElementCount() == 0)
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_collision_generation_failed"));
+				const TSharedRef<FJsonObject> Facts = MakeShared<FJsonObject>();
+				Facts->SetNumberField(TEXT("generated_shape_count"), 0);
+				Facts->SetStringField(TEXT("operation"), Action.OperationKey);
+				Facts->SetStringField(TEXT("method_type"), TEXT("EGeometryScriptCollisionGenerationMethod"));
+				Facts->SetNumberField(TEXT("method_value"), static_cast<int32>(Options.Method));
+				Facts->SetNumberField(TEXT("maximum_shape_count"), Options.MaxShapeCount);
+				Facts->SetField(TEXT("mesh_counts"), NativeMeshCountsFact(Action.WorkingMesh));
+				OutError = NativeFact(TEXT("modeling_geometry_collision_generation_failed"),
+					TEXT("Native collision generation produced no collision shapes."), TEXT("/collision/generated_shapes"),
+					MakeShared<FJsonValueObject>(Facts), MakeShared<FJsonValueString>(TEXT("at least one collision shape")), Action.TargetRef);
+				return false;
 			}
 			FGeometryScriptSimpleCollision FinalCollision;
 			if (!bReplace)
@@ -3119,6 +3374,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			{
 				FinalCollision = MoveTemp(Generated);
 			}
+			Action.bMutationStarted = true;
 			if (Action.Carrier == ECarrierKind::DynamicMeshActor)
 			{
 				UDynamicMeshComponent* Component =
@@ -3175,11 +3431,13 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						SpawnParameters);
 				if (!Actor)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_primitive_spawn_failed"));
+					OutError = NativeFact(TEXT("modeling_geometry_primitive_spawn_failed"),
+						TEXT("The editor could not spawn the requested dynamic mesh primitive actor."), TEXT("/primitive/actor_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Action.TargetRef);
+					return false;
 				}
+				Action.CreatedActor = Actor;
+				Action.bMutationStarted = true;
 				Actor->SetActorScale3D(
 					Action.Placement.GetScale3D());
 				Actor->SetActorLabel(Action.TargetRef);
@@ -3194,18 +3452,18 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					Component ? Component->GetDynamicMesh() : nullptr;
 				if (!DynamicMesh)
 				{
-					World.DestroyActor(Actor);
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_primitive_mesh_missing"));
+					OutError = NativeFact(TEXT("modeling_geometry_primitive_mesh_missing"),
+						Component ? TEXT("The spawned primitive component has no dynamic mesh.")
+							: TEXT("The spawned primitive actor has no dynamic mesh component."),
+						Component ? TEXT("/primitive/dynamic_mesh_available") : TEXT("/primitive/component_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Action.TargetRef);
+					return false;
 				}
 				DynamicMesh->EditMesh(
 					[&Action](FDynamicMesh3& Mesh)
 					{
 						Mesh = Action.WorkingMesh;
 					});
-				Action.CreatedActor = Actor;
 				return true;
 			}
 
@@ -3256,6 +3514,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				{
 					UDynamicMeshComponent* Component =
 						Action.DynamicActor->GetDynamicMeshComponent();
+					Action.bMutationStarted = true;
 					Component->Modify();
 					Component->GetDynamicMesh()->EditMesh(
 						[&Action](FDynamicMesh3& Mesh)
@@ -3264,14 +3523,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						});
 					Component->NotifyMeshUpdated();
 				}
-				else if (!CommitStaticMesh(
-					*Action.StaticMesh,
-					Action.WorkingMesh))
+				else
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_static_commit_failed"));
+					Action.bMutationStarted = true;
+					if (!CommitStaticMesh(*Action.StaticMesh, Action.WorkingMesh, OutError)) return false;
 				}
 			}
 			if (Action.Package.IsValid())
@@ -3283,20 +3538,38 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 		bool RollbackAction(
 			UWorld& World,
-			FModelingGeometryAction& Action)
+			FModelingGeometryAction& Action,
+			FExecutionMutationError& OutError)
 		{
+			const auto FailRollback = [&OutError]()
+			{
+				OutError.Stage = TEXT("rollback");
+				OutError.RollbackAttempted = true;
+				OutError.RollbackSucceeded = false;
+				return false;
+			};
 			if (Action.Carrier == ECarrierKind::PrimitiveOutput)
 			{
 				ADynamicMeshActor* Actor = Action.CreatedActor.Get();
 				const bool bDestroyed = !Actor
 					|| (Actor->GetWorld() == &World
 						&& World.DestroyActor(Actor));
+				if (!bDestroyed)
+				{
+					const bool bWrongWorld = Actor->GetWorld() != &World;
+					OutError = NativeFact(TEXT("modeling_geometry_primitive_rollback_failed"),
+						bWrongWorld ? TEXT("The created primitive actor belongs to another world and could not be removed during rollback.")
+							: TEXT("The editor could not destroy the created primitive actor during rollback."),
+						bWrongWorld ? TEXT("/rollback/primitive/world_matches") : TEXT("/rollback/primitive/destroyed"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Action.TargetRef);
+					return FailRollback();
+				}
 				if (Action.Package.IsValid())
 				{
 					Action.Package->SetDirtyFlag(
 						Action.bPackageWasDirty);
 				}
-				return bDestroyed;
+				return true;
 			}
 			if (Action.Carrier == ECarrierKind::DynamicMeshActor)
 			{
@@ -3311,7 +3584,16 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					|| !Component
 					|| !Component->GetDynamicMesh())
 				{
-					return false;
+					const TCHAR* Field = !Actor ? TEXT("/rollback/carrier/actor_available")
+						: Actor->GetWorld() != &World ? TEXT("/rollback/carrier/world_matches")
+						: !Component ? TEXT("/rollback/carrier/component_available") : TEXT("/rollback/carrier/dynamic_mesh_available");
+					const TCHAR* Reason = !Actor ? TEXT("The dynamic mesh actor is unavailable during rollback.")
+						: Actor->GetWorld() != &World ? TEXT("The dynamic mesh actor belongs to another world during rollback.")
+						: !Component ? TEXT("The dynamic mesh component is unavailable during rollback.")
+						: TEXT("The dynamic mesh component has no mesh to restore during rollback.");
+					OutError = NativeFact(TEXT("modeling_geometry_dynamic_rollback_failed"), Reason, Field,
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Action.TargetRef);
+					return FailRollback();
 				}
 				Component->GetDynamicMesh()->EditMesh(
 					[&Action](FDynamicMesh3& Mesh)
@@ -3335,13 +3617,14 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			else
 			{
 				UStaticMesh* StaticMesh = Action.StaticMesh.Get();
-				if (!StaticMesh
-					|| !CommitStaticMesh(
-						*StaticMesh,
-						Action.OriginalMesh))
+				if (!StaticMesh)
 				{
-					return false;
+					OutError = NativeFact(TEXT("modeling_geometry_static_rollback_failed"),
+						TEXT("The static mesh asset is unavailable during rollback."), TEXT("/rollback/carrier/static_mesh_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Action.TargetRef);
+					return FailRollback();
 				}
+				if (!CommitStaticMesh(*StaticMesh, Action.OriginalMesh, OutError)) return FailRollback();
 				StaticMesh->GetStaticMaterials() =
 					Action.OriginalStaticMaterials;
 				if (Action.bHadCollision)
@@ -3369,16 +3652,30 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 		bool RollbackAll(
 			UWorld& World,
-			TArray<FModelingGeometryAction>& Actions)
+			TArray<FModelingGeometryAction>& Actions,
+			FExecutionMutationError& OutError)
 		{
+			OutError = FExecutionMutationError();
 			bool bConfirmed = true;
 			for (int32 Index = Actions.Num() - 1;
 				Index >= 0;
 				--Index)
 			{
-				bConfirmed =
-					RollbackAction(World, Actions[Index])
-					&& bConfirmed;
+				FExecutionMutationError ActionError;
+				if (!RollbackAction(World, Actions[Index], ActionError))
+				{
+					if (bConfirmed)
+					{
+						OutError = NativeFact(TEXT("modeling_geometry_rollback_unconfirmed"),
+							TEXT("One or more modeling changes could not be restored."), TEXT("/rollback/confirmed"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						OutError.Stage = TEXT("rollback");
+						OutError.RollbackAttempted = true;
+						OutError.RollbackSucceeded = false;
+					}
+					OutError.Diagnostics.Add(MoveTemp(ActionError));
+					bConfirmed = false;
+				}
 			}
 			return bConfirmed;
 		}
@@ -3404,25 +3701,34 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				FUeAgentGenericEffectApplyResult& OutResult,
 				FExecutionMutationError& OutError) override
 			{
-				OutResult = FUeAgentGenericEffectApplyResult();
+				OutResult = FUeAgentGenericEffectApplyResult::NoMutation();
 				OutError = FExecutionMutationError();
 				if (!IsInGameThread())
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_game_thread_required"));
+					OutError = NativeFact(TEXT("modeling_geometry_game_thread_required"),
+						TEXT("Modeling geometry mutations must execute on the game thread."), TEXT("/execution/on_game_thread"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return false;
 				}
-				if (!Request.IsValid()
-					|| !Lease.IsValid()
-					|| Request.GetExecutionContext()
-							.GetWorldIdentity()
-						!= World.GetPathName())
+				if (!Request.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_exact_world_context_mismatch"));
+					OutError = FExecutionMutationError::WrapFailure(TEXT("modeling_geometry_execution_request_invalid"),
+						Request.GetValidationDiagnostic(), TEXT("execution"), TEXT("The modeling execution request is invalid."));
+					return false;
+				}
+				if (!Lease.IsValid())
+				{
+					OutError = FExecutionMutationError::WrapFailure(TEXT("modeling_geometry_execution_lease_invalid"),
+						Lease.GetValidationDiagnostic(), TEXT("execution"), TEXT("The modeling execution lease is invalid."));
+					return false;
+				}
+				if (Request.GetExecutionContext().GetWorldIdentity() != World.GetPathName())
+				{
+					OutError = NativeFact(TEXT("modeling_geometry_exact_world_context_mismatch"),
+						TEXT("The modeling execution world differs from the requested world."), TEXT("/execution/world"),
+						MakeShared<FJsonValueString>(World.GetPathName()),
+						MakeShared<FJsonValueString>(Request.GetExecutionContext().GetWorldIdentity()));
+					return false;
 				}
 				const TArray<FPlannedChange>& Changes =
 					Request.GetPlan()
@@ -3431,10 +3737,15 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				if (Changes.IsEmpty()
 					|| Bindings.Num() != Changes.Num())
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_change_binding_mismatch"));
+					const TSharedRef<FJsonObject> Counts = MakeShared<FJsonObject>();
+					Counts->SetNumberField(TEXT("changes"), Changes.Num());
+					Counts->SetNumberField(TEXT("bindings"), Bindings.Num());
+					OutError = NativeFact(TEXT("modeling_geometry_change_binding_mismatch"),
+						Changes.IsEmpty() ? TEXT("The modeling execution plan contains no changes.")
+							: TEXT("The modeling binding count does not match the planned change count."),
+						TEXT("/execution/change_bindings"), MakeShared<FJsonValueObject>(Counts),
+						MakeShared<FJsonValueString>(TEXT("non-empty changes with exactly one binding per change")));
+					return false;
 				}
 
 				TArray<FModelingGeometryAction> Actions;
@@ -3444,32 +3755,29 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					FModelingGeometryAction Action;
 					const FString& TargetKind =
 						Change.GetIdentity().GetTargetKind();
-					const bool bPrepared =
-						TargetKind
-							== TEXT("geometry.primitive.create")
-						? PreparePrimitive(
-							Change,
-							Action,
-							OutError)
-						: (TargetKind
-								== TEXT("geometry.topology.edit")
-							|| TargetKind
-								== TEXT("geometry.attribute.edit")
-							|| TargetKind
-								== TEXT("geometry.collision.edit"))
-							? CheckoutExistingCarrier(
-								World,
-								*Resolver,
-								Change,
-								Action,
-								OutError)
-							: Fail(
-								OutError,
-								TEXT(
-									"modeling_geometry_target_kind_unsupported"),
-								TargetKind);
+					bool bPrepared = false;
+					if (TargetKind == TEXT("geometry.primitive.create"))
+					{
+						bPrepared = PreparePrimitive(Change, Action, OutError);
+					}
+					else if (TargetKind == TEXT("geometry.topology.edit") || TargetKind == TEXT("geometry.attribute.edit")
+						|| TargetKind == TEXT("geometry.collision.edit"))
+					{
+						bPrepared = CheckoutExistingCarrier(World, *Resolver, Change, Action, OutError);
+					}
+					else
+					{
+						TArray<TSharedPtr<FJsonValue>> SupportedKinds;
+						for (const TCHAR* Supported : {TEXT("geometry.primitive.create"), TEXT("geometry.topology.edit"),
+							TEXT("geometry.attribute.edit"), TEXT("geometry.collision.edit")})
+							SupportedKinds.Add(MakeShared<FJsonValueString>(Supported));
+						OutError = NativeFact(TEXT("modeling_geometry_target_kind_unsupported"),
+							TEXT("The planned modeling geometry target kind is not supported."), TEXT("/change/target_kind"),
+							MakeShared<FJsonValueString>(TargetKind), MakeShared<FJsonValueArray>(MoveTemp(SupportedKinds)));
+					}
 					if (!bPrepared)
 					{
+						SupplementNativeTarget(OutError, Action.TargetRef);
 						return false;
 					}
 					Actions.Add(MoveTemp(Action));
@@ -3478,6 +3786,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				TArray<FModelingGeometryAction> AppliedActions;
 				AppliedActions.Reserve(Actions.Num());
 				TArray<FString> MutatedKeys;
+				bool bAllApplied = true;
 				for (FModelingGeometryAction& Action : Actions)
 				{
 					if (!CommitAction(
@@ -3486,13 +3795,21 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 							World,
 							OutError))
 					{
-						RollbackAll(World, AppliedActions);
-						return false;
+						SupplementNativeTarget(OutError, Action.TargetRef);
+						bAllApplied = false;
+						if (Action.bMutationStarted)
+						{
+							MutatedKeys.Add(Action.CanonicalKey);
+							AppliedActions.Add(MoveTemp(Action));
+						}
+						break;
 					}
 					MutatedKeys.Add(Action.CanonicalKey);
 					AppliedActions.Add(MoveTemp(Action));
 				}
 
+				// The shared execution owner performs rollback, including partial failures.
+				if (!bAllApplied && AppliedActions.IsEmpty()) return false;
 				const FString Token = FString::Printf(
 					TEXT("modeling-geometry:%s:%lld"),
 					*Request.GetOperationId(),
@@ -3511,11 +3828,13 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					true,
 					Token,
 					true);
-				return OutResult.IsValid()
-					|| Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_apply_result_invalid"));
+				if (!OutResult.IsValid())
+				{
+					OutError.Append(FExecutionMutationError::WrapFailure(TEXT("modeling_geometry_apply_result_invalid"),
+						OutResult.GetValidationDiagnostic(), TEXT("execution"), TEXT("The modeling apply result is invalid.")));
+					return false;
+				}
+				return bAllApplied;
 			}
 
 			bool TryRollback(
@@ -3528,16 +3847,29 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			{
 				bOutConfirmed = false;
 				OutError = FExecutionMutationError();
-				if (!IsInGameThread()
-					|| !Applied.IsValid()
-					|| Request.GetExecutionContext()
-							.GetWorldIdentity()
-						!= World.GetPathName())
+				if (!IsInGameThread())
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_rollback_request_invalid"));
+					OutError = NativeFact(TEXT("modeling_geometry_rollback_request_invalid"),
+						TEXT("Modeling geometry rollback must execute on the game thread."), TEXT("/rollback/on_game_thread"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					OutError.Stage = TEXT("rollback");
+					return false;
+				}
+				if (!Applied.IsValid())
+				{
+					OutError = FExecutionMutationError::WrapFailure(TEXT("modeling_geometry_rollback_request_invalid"),
+						Applied.GetValidationDiagnostic(), TEXT("rollback"), TEXT("The modeling rollback result record is invalid."));
+					OutError.Stage = TEXT("rollback");
+					return false;
+				}
+				if (Request.GetExecutionContext().GetWorldIdentity() != World.GetPathName())
+				{
+					OutError = NativeFact(TEXT("modeling_geometry_rollback_request_invalid"),
+						TEXT("The modeling rollback world differs from the requested world."), TEXT("/rollback/world"),
+						MakeShared<FJsonValueString>(World.GetPathName()),
+						MakeShared<FJsonValueString>(Request.GetExecutionContext().GetWorldIdentity()));
+					OutError.Stage = TEXT("rollback");
+					return false;
 				}
 				TArray<FModelingGeometryAction> Actions;
 				{
@@ -3547,21 +3879,17 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 							Applied.GetRollbackToken());
 					if (!Found)
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"modeling_geometry_rollback_token_unknown"));
+						OutError = NativeFact(TEXT("modeling_geometry_rollback_token_unknown"),
+							TEXT("The modeling rollback record is unavailable."), TEXT("/rollback/record_available"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						OutError.Stage = TEXT("rollback");
+						OutError.SubjectId = Applied.GetRollbackToken();
+						return false;
 					}
 					Actions = *Found;
 				}
-				bOutConfirmed = RollbackAll(World, Actions);
-				if (!bOutConfirmed)
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_rollback_unconfirmed"));
-				}
+				bOutConfirmed = RollbackAll(World, Actions, OutError);
+				if (!bOutConfirmed) return false;
 				{
 					FScopeLock Lock(&StateMutex);
 					RollbackByToken.Remove(
@@ -3593,10 +3921,11 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				OutError = FExecutionMutationError();
 				if (!Request.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_barrier_request_invalid"));
+					OutError = NativeFact(TEXT("modeling_geometry_barrier_request_invalid"),
+						TEXT("The barrier request has a negative internal subject generation."), TEXT("/barrier/subject_generation_valid"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), Request.GetSubjectGeneration()));
+					return false;
 				}
 				OutResult = FBarrierResult(
 					Request.GetSubjectGeneration(),
@@ -3605,11 +3934,13 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 						TEXT("modeling-geometry:%lld"),
 						Request.GetSubjectGeneration()),
 					true);
-				return OutResult.IsValid()
-					|| Fail(
-						OutError,
-						TEXT(
-							"modeling_geometry_barrier_result_invalid"));
+				if (!OutResult.IsValid())
+				{
+					OutError = FExecutionMutationError::WrapFailure(TEXT("modeling_geometry_barrier_result_invalid"),
+						OutResult.GetValidationDiagnostic(), TEXT("execution"), TEXT("The modeling settle result is invalid."));
+					return false;
+				}
+				return true;
 			}
 
 		private:
@@ -3634,6 +3965,6 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		OutHook = MakeShared<FModelingGeometryEffectNativeHook>(
 			MoveTemp(Resolver));
 		OutError = FExecutionMutationError();
-		return OutHook.IsValid();
+		return true;
 	}
 }

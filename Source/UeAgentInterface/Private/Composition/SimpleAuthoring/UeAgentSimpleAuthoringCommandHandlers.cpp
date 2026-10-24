@@ -1,9 +1,7 @@
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringCommandHandlers.h"
+#include "CommandEdge/UeAgentApplicationResultProjection.h"
 
-#include "Dom/JsonObject.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::Composition::SimpleAuthoring
 {
@@ -12,54 +10,9 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		using namespace CommandEdge;
 		using namespace Contract;
 
-		FString JsonText(const TSharedRef<FJsonObject>& Object)
-		{
-			FString Text;
-			const TSharedRef<
-				TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>>
-				Writer =
-				TJsonWriterFactory<
-					TCHAR,
-					TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Object, Writer);
-			return Text;
-		}
+		
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error =
-				MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			return JsonText(Error);
-		}
 
-		bool TryReadOperationError(
-			const FString& PayloadJson,
-			FString& OutErrorJson)
-		{
-			OutErrorJson.Reset();
-			TSharedPtr<FJsonObject> Root;
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(PayloadJson);
-			if (!FJsonSerializer::Deserialize(Reader, Root)
-				|| !Root.IsValid())
-			{
-				return false;
-			}
-			const TSharedPtr<FJsonObject>* Error = nullptr;
-			if (Root->TryGetObjectField(TEXT("operation_error"), Error)
-				&& Error
-				&& Error->IsValid())
-			{
-				OutErrorJson = JsonText(Error->ToSharedRef());
-			}
-			return true;
-		}
 
 		class FSimpleAuthoringCommandHandler final
 			: public IUeAgentCommandHandler
@@ -95,47 +48,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						OperationRequest,
 						CallerContext,
 						Cancellation);
-				if (!Result.IsValid()
-					|| !(Result.GetDescriptorIdentity()
-						== Route.DescriptorIdentity)
-					|| Result.GetRequestId() != Request.GetRequestId())
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT(
-								"command_operation_result_invalid"),
-							Request.GetRequestId(),
-							TEXT(
-								"C3O returned an invalid or mismatched result.")));
-				}
-
-				const FString& PayloadJson =
-					Result.GetValue().GetJsonValue();
-				FString OperationError;
-				if (!TryReadOperationError(PayloadJson, OperationError))
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT(
-								"command_operation_payload_invalid"),
-							Request.GetRequestId(),
-							TEXT(
-								"C3O returned a non-object JSON payload.")));
-				}
-				if (!OperationError.IsEmpty())
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						PayloadJson,
-						OperationError);
-				}
-				return FUeAgentCommandResult::Success(
-					Request,
-					PayloadJson);
+				return ProjectOperationResult(Request, Route.DescriptorIdentity, Result);
 			}
 
 		private:
@@ -150,13 +63,18 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			OperationPort,
 		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>&
 			OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
 		if (Routes.IsEmpty())
 		{
-			OutError = TEXT("simple_authoring_command_routes_missing");
+			OutError = Contract::FDiagnostic::Failure(TEXT("simple_authoring_command_routes_missing"),
+				TEXT("At least one command route is required to register authoring handlers."), TEXT("registration"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("routes");
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(Routes.Num());
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one route"));
 			return false;
 		}
 
@@ -167,23 +85,31 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		{
 			const FString DescriptorId =
 				Route.DescriptorIdentity.GetDescriptorId();
-			if (!Route.IsValid())
+			if (!Route.TryValidate(OutError))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("simple_authoring_command_route_invalid");
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Route.CommandId;
 				return false;
 			}
 			if (CommandIds.Contains(Route.CommandId))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("simple_authoring_command_handler_duplicate");
+				OutError = Contract::FDiagnostic::Failure(TEXT("simple_authoring_command_handler_duplicate"),
+					TEXT("More than one authoring route uses the same command ID."), TEXT("registration"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = TEXT("command_id");
+				OutError.ActualValue = MakeShared<FJsonValueString>(Route.CommandId);
 				return false;
 			}
 			if (DescriptorIds.Contains(DescriptorId))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT(
-					"simple_authoring_descriptor_handler_duplicate");
+				OutError = Contract::FDiagnostic::Failure(TEXT("simple_authoring_descriptor_handler_duplicate"),
+					TEXT("More than one authoring command route uses the same descriptor ID."), TEXT("registration"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.CandidateName = Route.CommandId;
+				OutError.PropertyPath = TEXT("descriptor_id");
+				OutError.ActualValue = MakeShared<FJsonValueString>(DescriptorId);
 				return false;
 			}
 			CommandIds.Add(Route.CommandId);

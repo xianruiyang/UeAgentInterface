@@ -7,6 +7,7 @@
 #include "Utilities/UeAgentAuthoringFieldPolicy.h"
 #include "Utilities/UeAgentDetailsAuthoring.h"
 #include "Utilities/UeAgentStructuredAuthoringIO.h"
+#include "Utilities/UeAgentStructuredHjsonFormatter.h"
 
 namespace
 {
@@ -14,7 +15,7 @@ namespace
 		const FString& FilePathInput,
 		const FString& WorkspaceRootInput,
 		FString& OutResolvedPath,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FString WorkspaceRoot = WorkspaceRootInput;
 		WorkspaceRoot.TrimStartAndEndInline();
@@ -51,7 +52,7 @@ namespace UeAgentAuthoringFileIO
 		const TSharedPtr<FJsonObject>& Object,
 		const FSaveOptions& Options,
 		FString& OutResolvedPath,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutResolvedPath.Reset();
 		OutError.Reset();
@@ -60,13 +61,19 @@ namespace UeAgentAuthoringFileIO
 		TrimmedFilePath.TrimStartAndEndInline();
 		if (TrimmedFilePath.IsEmpty())
 		{
-			OutError = TEXT("missing_output_file");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("missing_output_file"),
+				TEXT("Saving the authoring document requires a non-empty output file path."), TEXT("authoring_io"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(FilePathInput);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty HJSON file path"));
 			return false;
 		}
 
 		if (!Object.IsValid() && Options.bRequireObject)
 		{
-			OutError = TEXT("hjson_object_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_object_invalid"),
+				TEXT("The authoring document to save is missing its required object."), TEXT("authoring_io"));
+			OutError.TargetPath = FilePathInput;
+			OutError.SourceKind = TEXT("native_result");
 			return false;
 		}
 
@@ -81,7 +88,10 @@ namespace UeAgentAuthoringFileIO
 
 		if (!ObjectToSave.IsValid())
 		{
-			OutError = TEXT("hjson_object_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_object_invalid"),
+				TEXT("The authoring document could not be copied for serialization."), TEXT("authoring_io"));
+			OutError.TargetPath = FilePathInput;
+			OutError.SourceKind = TEXT("native_result");
 			return false;
 		}
 
@@ -125,10 +135,10 @@ namespace UeAgentAuthoringFileIO
 		const FString& FilePathInput,
 		const TSharedPtr<FJsonObject>& Object,
 		const FSaveOptions& Options,
-		FString* OutError)
+		UE::UAI::Contract::FDiagnostic* OutError)
 	{
 		FString ResolvedPath;
-		FString Error;
+		UE::UAI::Contract::FDiagnostic Error;
 		const bool bResult = SaveObject(FilePathInput, Object, Options, ResolvedPath, Error);
 		if (OutError)
 		{
@@ -137,14 +147,14 @@ namespace UeAgentAuthoringFileIO
 		return bResult;
 	}
 
-	bool LoadObject(
+	static bool LoadParsedDocument(
 		const FString& FilePathInput,
-		TSharedPtr<FJsonObject>& OutObject,
+		FUeAgentStructuredHjsonDocument& OutDocument,
 		const FLoadOptions& Options,
 		FString& OutResolvedPath,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
-		OutObject.Reset();
+		OutDocument = FUeAgentStructuredHjsonDocument();
 		OutResolvedPath.Reset();
 		OutError.Reset();
 
@@ -152,7 +162,10 @@ namespace UeAgentAuthoringFileIO
 		TrimmedFilePath.TrimStartAndEndInline();
 		if (TrimmedFilePath.IsEmpty())
 		{
-			OutError = TEXT("missing_input_file");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("missing_input_file"),
+				TEXT("Loading an authoring document requires a non-empty input file path."), TEXT("authoring_io"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(FilePathInput);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty HJSON file path"));
 			return false;
 		}
 
@@ -167,19 +180,37 @@ namespace UeAgentAuthoringFileIO
 			return true;
 		}
 
-		if (!UeAgentStructuredAuthoringIO::LoadObject(ResolvedPath, OutObject, OutError))
+		if (!UeAgentStructuredAuthoringIO::LoadDocument(ResolvedPath, OutDocument, OutError))
 		{
+			OutDocument.Root.Reset();
 			return false;
 		}
 
-		if (Options.bRehydrateGroupedDetails)
-		{
-			if (!UeAgentDetailsAuthoring::RehydrateGroupedDetailsInObjectTree(ResolvedPath, OutObject, OutError))
-			{
-				return false;
-			}
-		}
+		OutResolvedPath = ResolvedPath;
+		return true;
+	}
 
+	bool LoadDocument(
+		const FString& FilePathInput, FUeAgentStructuredHjsonDocument& OutDocument,
+		FString& OutResolvedPath, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return LoadParsedDocument(FilePathInput, OutDocument, FLoadOptions(), OutResolvedPath, OutError);
+	}
+
+	bool LoadObject(
+		const FString& FilePathInput, TSharedPtr<FJsonObject>& OutObject,
+		const FLoadOptions& Options, FString& OutResolvedPath,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		OutObject.Reset();
+		OutResolvedPath.Reset();
+		FUeAgentStructuredHjsonDocument Document;
+		FString ResolvedPath;
+		if (!LoadParsedDocument(FilePathInput, Document, Options, ResolvedPath, OutError)) return false;
+		OutObject = Document.Root;
+		if (OutObject.IsValid() && Options.bRehydrateGroupedDetails
+			&& !UeAgentDetailsAuthoring::RehydrateGroupedDetailsInObjectTree(ResolvedPath, OutObject, OutError))
+			return false;
 		OutResolvedPath = ResolvedPath;
 		return true;
 	}
@@ -188,7 +219,7 @@ namespace UeAgentAuthoringFileIO
 		const FString& FilePathInput,
 		TSharedPtr<FJsonObject>& OutObject,
 		const FLoadOptions& Options,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FString ResolvedPath;
 		return LoadObject(FilePathInput, OutObject, Options, ResolvedPath, OutError);

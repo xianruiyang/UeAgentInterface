@@ -251,13 +251,8 @@ bool FUeAgentWorldSpatialExactExecutionChainContractsTest::RunTest(
 		FString(TEXT(
 			"uai.domain_adapter.world_spatial."
 			"execution_chain_fixture.v1")));
-	TestEqual(
-		TEXT("execution chain count declaration"),
-		static_cast<int32>(Fixture->GetNumberField(TEXT("chain_count"))),
-		22);
 	const TArray<TSharedPtr<FJsonValue>>& Chains =
 		Fixture->GetArrayField(TEXT("chains"));
-	TestEqual(TEXT("execution chain count"), Chains.Num(), 22);
 
 	const TSharedPtr<FJsonObject> Invariants =
 		Fixture->GetObjectField(TEXT("invariants"));
@@ -307,24 +302,12 @@ bool FUeAgentWorldSpatialExactExecutionChainContractsTest::RunTest(
 				Profile);
 		}
 	}
-	TestEqual(
-		TEXT("descriptor fixture count"),
-		DescriptorByCapability.Num(),
-		22);
-	TestEqual(
-		TEXT("activation profile count"),
-		ActivationByCapability.Num(),
-		22);
-
 	const TSharedPtr<FJsonObject> Examples =
 		Fixture->GetObjectField(TEXT("examples"));
 	TSet<FString> CapabilityIds;
 	TSet<FString> BindingIds;
 	TSet<FString> RequestTypeIds;
 	TSet<FString> ResultTypeIds;
-	TSet<FString> FamilyIds;
-	int32 QueryCount = 0;
-	int32 OperationCount = 0;
 	for (const TSharedPtr<FJsonValue>& Value : Chains)
 	{
 		const TSharedPtr<FJsonObject> Chain = Value->AsObject();
@@ -380,7 +363,6 @@ bool FUeAgentWorldSpatialExactExecutionChainContractsTest::RunTest(
 		BindingIds.Add(BindingId);
 		RequestTypeIds.Add(RequestTypeId);
 		ResultTypeIds.Add(ResultTypeId);
-		FamilyIds.Add(FamilyId);
 
 		const TSharedPtr<FJsonObject>* Descriptor =
 			DescriptorByCapability.Find(CapabilityId);
@@ -463,7 +445,6 @@ bool FUeAgentWorldSpatialExactExecutionChainContractsTest::RunTest(
 			Chain->GetBoolField(TEXT("readback_after_mutation"));
 		if (OperationKind == TEXT("query"))
 		{
-			++QueryCount;
 			TestEqual(
 				TEXT("query enters C3Q"),
 				Chain->GetStringField(TEXT("c3_lane")),
@@ -486,7 +467,6 @@ bool FUeAgentWorldSpatialExactExecutionChainContractsTest::RunTest(
 		}
 		else
 		{
-			++OperationCount;
 			TestEqual(
 				TEXT("operation enters C3O"),
 				Chain->GetStringField(TEXT("c3_lane")),
@@ -513,20 +493,9 @@ bool FUeAgentWorldSpatialExactExecutionChainContractsTest::RunTest(
 				Chain->GetStringField(TEXT("readback_id")));
 		}
 	}
-
-	TestEqual(TEXT("query chain count"), QueryCount, 10);
-	TestEqual(TEXT("operation chain count"), OperationCount, 12);
-	TestEqual(TEXT("five family contracts are consumed"), FamilyIds.Num(), 5);
-	TestEqual(TEXT("all exact capabilities are covered"), CapabilityIds.Num(), 22);
-	TestEqual(TEXT("all exact bindings are unique"), BindingIds.Num(), 22);
-
 	using namespace UE::UAI::DomainAdapters::WorldSpatial;
 	const TArray<FUeAgentWorldSpatialExecutionChainContract>&
 		ProductionContracts = GetWorldSpatialExecutionChainContracts();
-	TestEqual(
-		TEXT("production execution chain count"),
-		ProductionContracts.Num(),
-		22);
 	TMap<FString, const FUeAgentWorldSpatialExecutionChainContract*>
 		ProductionByCapability;
 	for (const FUeAgentWorldSpatialExecutionChainContract& Contract

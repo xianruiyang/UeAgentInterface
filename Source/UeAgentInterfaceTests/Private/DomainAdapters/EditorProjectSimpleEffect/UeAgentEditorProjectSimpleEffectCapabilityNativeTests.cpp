@@ -505,6 +505,21 @@ namespace
 			return OutProperty != nullptr;
 		}
 
+		bool TryReadSettingsFields(
+			UObject& SettingsObject,
+			TArray<FUeAgentEditorProjectSettingsFieldObservation>& OutFields,
+			FExecutionMutationError& OutError) override
+		{
+			OutFields.Reset();
+			OutError = FExecutionMutationError();
+			OutFields.Add({
+				TEXT("uai://editor-project-field/test-enabled"),
+				TEXT("field:r1"),
+				TEXT("uai.value.boolean.v1"),
+				TEXT("true")});
+			return true;
+		}
+
 		FOwnedEditorProjectState& Owner;
 		int32 ResolveCalls = 0;
 	};
@@ -514,22 +529,7 @@ namespace
 	{
 		return MakeShared<
 			FUeAgentResourceTracker,
-			ESPMode::ThreadSafe>(
-				FUeAgentResourceBudget({
-					{EUeAgentResourceDimension::InputBytes, 1048576},
-					{EUeAgentResourceDimension::OutputBytes, 1048576},
-					{EUeAgentResourceDimension::StringBytes, 1048576},
-					{EUeAgentResourceDimension::Nodes, 32768},
-					{EUeAgentResourceDimension::Items, 32768},
-					{EUeAgentResourceDimension::Files, 64},
-					{EUeAgentResourceDimension::ReferenceEdges, 32768},
-					{EUeAgentResourceDimension::WorkUnits, 1048576},
-					{
-						EUeAgentResourceDimension::
-							EstimatedMemoryBytes,
-						134217728,
-					},
-				}));
+			ESPMode::ThreadSafe>();
 	}
 
 	bool TryCanonicalValue(

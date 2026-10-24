@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Dom/JsonObject.h"
 #include "Misc/AutomationTest.h"
+#include "UObject/Object.h"
 
 #include "DomainAdapters/WorldSpatial/UeAgentWorldSpatialNative.h"
 

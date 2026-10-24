@@ -9,7 +9,7 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	/**
 	 * Adapts one existing exact mechanics handler into the common request-scoped

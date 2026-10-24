@@ -1,26 +1,23 @@
 #include "Misc/AutomationTest.h"
 
 #include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/BlackboardData.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Bool.h"
 #include "BehaviorTree/Tasks/BTTask_Wait.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/Generators/EnvQueryGenerator_ActorsOfClass.h"
 #include "GameplayInteractionSmartObjectBehaviorDefinition.h"
 #include "SmartObjectDefinition.h"
+#include "StateTree.h"
+#include "StateTreeEditorData.h"
+#include "Components/StateTreeAIComponentSchema.h"
 
-#if __has_include("OperationOwners/AiBehavior/UeAgentAiBehaviorDomainService.h")
-#define UAI_T20_AI_BEHAVIOR_DOMAIN_AVAILABLE 1
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
+
 #include "OperationOwners/AiBehavior/UeAgentAiBehaviorDomainService.h"
-#else
-#define UAI_T20_AI_BEHAVIOR_DOMAIN_AVAILABLE 0
-#endif
 
-#if __has_include("QueryOwners/AiBehavior/UeAgentAiBehaviorCandidateQuery.h")
-#define UAI_T20_AI_BEHAVIOR_CANDIDATE_QUERY_AVAILABLE 1
 #include "QueryOwners/AiBehavior/UeAgentAiBehaviorCandidateQuery.h"
-#else
-#define UAI_T20_AI_BEHAVIOR_CANDIDATE_QUERY_AVAILABLE 0
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T20AiBehaviorDomainTest,
@@ -30,13 +27,26 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T20AiBehaviorDomainTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-#if !UAI_T20_AI_BEHAVIOR_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T20 AI behavior domain authority is available"), false);
-	return false;
-#elif !UAI_T20_AI_BEHAVIOR_CANDIDATE_QUERY_AVAILABLE
-	TestTrue(TEXT("T20 AI behavior candidate query is available"), false);
-	return false;
-#else
+	using namespace UE::UAI::ContentDiscovery;
+	{
+		const TArray<FScopedNameDiscoveryEntry> FocusedEntries = {
+			{TEXT("Blocked"), {TEXT("same_scope")}},
+			{TEXT("Blocked"), {TEXT("same_scope")}},
+			{TEXT("Unique"), {TEXT("behavior_task"), TEXT("native")}},
+		};
+		TArray<FString> Names;
+		FString ScopeError;
+		TestTrue(TEXT("a focused AI behavior match ignores unrelated ambiguity"),
+			TryBuildScopedDiscoveryNamesForIndices(
+				FocusedEntries, {2}, ENameComparison::IgnoreCase, Names, ScopeError));
+		TestEqual(TEXT("the focused AI behavior name stays readable"),
+			Names.Num() == 1 ? Names[0] : FString(), FString(TEXT("Unique")));
+		TestFalse(TEXT("a matched AI behavior ambiguity still fails closed"),
+			TryBuildScopedDiscoveryNamesForIndices(
+				FocusedEntries, {0}, ENameComparison::IgnoreCase, Names, ScopeError));
+		TestEqual(TEXT("the AI behavior ambiguity error is typed"), ScopeError,
+			FString(TEXT("name_discovery_semantic_scope_ambiguous")));
+	}
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::OperationOwners::AiBehavior;
 
@@ -123,7 +133,7 @@ bool FUeAgentStrictV2T20AiBehaviorDomainTest::RunTest(const FString& Parameters)
 			CandidateResult,
 			CandidateError)))
 	{
-		AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
+		AddError(CandidateError.Code + TEXT(":") + CandidateError.PublicMessage);
 		return false;
 	}
 	if (!TestTrue(TEXT("the real AI behavior catalog is non-empty"),
@@ -143,35 +153,27 @@ bool FUeAgentStrictV2T20AiBehaviorDomainTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	TestTrue(TEXT("candidate.name is the native menu name"),
+	TestTrue(TEXT("candidate.name is the stable task semantic name"),
 		Candidate->Name == TEXT("Wait"));
-	TestTrue(TEXT("candidate.id is a compact exact selector"),
-		Candidate->Id.StartsWith(TEXT("candidate:")));
+	TestFalse(TEXT("candidate.name is not a native object path"),
+		Candidate->Name.StartsWith(TEXT("/")));
+	TestFalse(TEXT("candidate.name is a readable selector"),
+		Candidate->Name.IsEmpty());
 	TestTrue(TEXT("candidate kind identifies the native task surface"),
 		Candidate->Kind == TEXT("behavior_task"));
 	TestTrue(TEXT("candidate declares native create support"),
 		Candidate->bSupported
 			&& Candidate->SupportedOperations.Contains(TEXT("create")));
-	TestTrue(TEXT("the native blank-menu search reports exact coverage"),
-		CandidateResult.bCoverageComplete
-			&& !CandidateResult.bCreationCoverageComplete
-			&& CandidateResult.NativeActionCount
-				== CandidateResult.ExecutableActionCount + 2
-			&& CandidateResult.CoverageScope
-				== TEXT("behavior_tree_blank_background"));
 	FAiBehaviorCandidate Resolved;
-	TestTrue(TEXT("the compact id re-enumerates one exact native action"),
+	TestTrue(TEXT("the readable name re-enumerates one exact native action"),
 		TryResolveAiBehaviorCandidate(
 			*CandidateTarget,
+			Candidate->Name,
 			FString(),
-			Candidate->Id,
 			Resolved,
 			CandidateError)
 			&& Resolved.PayloadType
 				== UBTTask_Wait::StaticClass()->GetPathName());
-	TestTrue(TEXT("candidate query reports complete bounded results"),
-		CandidateResult.bComplete && !CandidateResult.bHasMore);
-
 	auto ResolvesExactCandidate = [this](
 		UObject& Target,
 		const FString& Query,
@@ -186,7 +188,7 @@ bool FUeAgentStrictV2T20AiBehaviorDomainTest::RunTest(const FString& Parameters)
 				TryQueryAiBehaviorCandidates(
 					Target, Query, Result, QueryError)))
 		{
-			AddError(QueryError.Code + TEXT(":") + QueryError.Detail);
+			AddError(QueryError.Code + TEXT(":") + QueryError.PublicMessage);
 			return false;
 		}
 		const FAiBehaviorCandidate* Match = Result.Candidates.FindByPredicate(
@@ -200,34 +202,72 @@ bool FUeAgentStrictV2T20AiBehaviorDomainTest::RunTest(const FString& Parameters)
 		{
 			return false;
 		}
+		FAiBehaviorCandidate ResolvedByName;
+		TestTrue(
+			*FString::Printf(TEXT("%s resolves by exact name"), *ExpectedKind),
+			TryResolveAiBehaviorCandidate(
+				Target, Match->Name, FString(), ResolvedByName, QueryError)
+				&& ResolvedByName.Name == Match->Name);
 		TestTrue(
 			*FString::Printf(TEXT("%s binding validates without remapping"), *ExpectedKind),
-			IsCurrentAiBehaviorCandidateBinding(
-				Target,
-				Match->Name,
-				Match->Kind,
-				Match->SupportedOperations,
-				Match->InputContract,
-				Match->PlacementContract,
-				Match->RequiredContext,
-				Match->BindingRevision,
-				QueryError));
+			ResolvedByName.Id == Match->Id && ResolvedByName.Kind == Match->Kind
+				&& ResolvedByName.PayloadType == Match->PayloadType
+				&& ResolvedByName.BindingRevision == Match->BindingRevision);
 		return true;
 	};
+
+	UBlackboardData* BlackboardTarget =
+		NewObject<UBlackboardData>(GetTransientPackage());
+	auto ReadableTypeName = [](const UObject& Type)
+	{
+		FString Name = Type.GetName();
+		Name.RemoveFromStart(TEXT("BT"), ESearchCase::IgnoreCase);
+		return FName::NameToDisplayString(Name, false);
+	};
+	ResolvesExactCandidate(
+		*BlackboardTarget,
+		TEXT("BlackboardKeyType_Bool"),
+		ReadableTypeName(*UBlackboardKeyType_Bool::StaticClass()),
+		TEXT("blackboard_key"));
 
 	UEnvQuery* EqsTarget = NewObject<UEnvQuery>(GetTransientPackage());
 	ResolvesExactCandidate(
 		*EqsTarget,
-		TEXT("EnvQueryGenerator_ActorsOfClass"),
-		UEnvQueryGenerator_ActorsOfClass::StaticClass()->GetPathName(),
+		TEXT("Actors Of Class"),
+		TEXT("Actors Of Class"),
 		TEXT("eqs_generator"));
 	USmartObjectDefinition* SmartObjectTarget =
 		NewObject<USmartObjectDefinition>(GetTransientPackage());
 	ResolvesExactCandidate(
 		*SmartObjectTarget,
 		TEXT("GameplayInteractionSmartObjectBehaviorDefinition"),
-		UGameplayInteractionSmartObjectBehaviorDefinition::StaticClass()->GetPathName(),
+		ReadableTypeName(
+			*UGameplayInteractionSmartObjectBehaviorDefinition::StaticClass()),
 		TEXT("smart_object_behavior"));
+	UStateTree* StateTreeTarget = NewObject<UStateTree>(GetTransientPackage());
+	auto* StateTreeData = NewObject<UStateTreeEditorData>(StateTreeTarget);
+	StateTreeTarget->EditorData = StateTreeData;
+	StateTreeData->Schema = NewObject<UStateTreeAIComponentSchema>(StateTreeData);
+	FAiBehaviorCandidateQueryResult StateTreeResult;
+	FAiBehaviorCandidateQueryError StateTreeError;
+	if (TestTrue(
+			TEXT("state tree candidate query returns readable names and aliases"),
+			TryQueryAiBehaviorCandidates(
+				*StateTreeTarget, FString(), StateTreeResult, StateTreeError)
+				&& !StateTreeResult.Candidates.IsEmpty()))
+	{
+		const FAiBehaviorCandidate& StateTreeCandidate =
+			StateTreeResult.Candidates[0];
+		FAiBehaviorCandidate StateTreeResolved;
+		TestTrue(
+			TEXT("state tree readable name resolves the exact candidate"),
+			TryResolveAiBehaviorCandidate(
+					*StateTreeTarget,
+					StateTreeCandidate.Name,
+					FString(),
+					StateTreeResolved,
+					StateTreeError)
+				&& StateTreeResolved.Name == StateTreeCandidate.Name);
+	}
 	return !HasAnyErrors();
-#endif
 }

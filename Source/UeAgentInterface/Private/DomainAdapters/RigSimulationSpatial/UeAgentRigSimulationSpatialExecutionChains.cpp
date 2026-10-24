@@ -5,6 +5,8 @@
 #include "Core/ExecutionMutation/UeAgentExecutionMutation.h"
 #include "Core/Projection/UeAgentProjection.h"
 #include "Core/Verification/UeAgentVerification.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/ScopeLock.h"
 
 namespace UE::UAI::DomainAdapters::RigSimulationSpatial
@@ -22,49 +24,157 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 
 	namespace
 	{
-		void SetExecutionError(
-			FUeAgentRigSimulationSpatialExecutionError& OutError,
-			const FString& Code,
-			const FString& SubjectId = FString(),
-			const FString& Detail = FString())
+		
+
+		FDiagnostic NativeFact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Subject = FString())
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("native_execution"), FString(), Subject);
+			Error.Schema = TEXT("uai.runtime.diagnostic/1");
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Path;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValuePresent = Expected.IsValid();
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
 
-		void CopyError(
-			const FUeAgentRigSimulationSpatialExecutionError& Error,
-			FUeAgentQueryBindingError& OutError)
+		FDiagnostic InternalDifference(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Subject = FString())
 		{
-			OutError = {};
-			OutError.Code = Error.Code;
-			OutError.SubjectId = Error.SubjectId;
-			OutError.Detail = Error.Detail;
+			auto Error = NativeFact(Code, Reason, Path, MakeShared<FJsonValueBoolean>(false),
+				MakeShared<FJsonValueBoolean>(true), Subject);
+			Error.ActualEvidence = MoveTemp(Actual);
+			Error.ExpectedEvidence = MoveTemp(Expected);
+			return Error;
 		}
 
-		void CopyError(
-			const FUeAgentRigSimulationSpatialExecutionError& Error,
-			FUeAgentOperationBindingError& OutError)
+		FDiagnostic DescriptorDifference(const FUeAgentDescriptorIdentity& Expected,
+			const FUeAgentDescriptorIdentity& Actual, const FString& Code, const FString& Path, const FString& Subject)
 		{
-			OutError = {};
-			OutError.Code = Error.Code;
-			OutError.SubjectId = Error.SubjectId;
-			OutError.Detail = Error.Detail;
+			if (Actual.GetDescriptorId() != Expected.GetDescriptorId())
+				return NativeFact(Code, TEXT("The descriptor identifier differs from the required descriptor."),
+					Path + TEXT("/descriptor_id"), MakeShared<FJsonValueString>(Actual.GetDescriptorId()),
+					MakeShared<FJsonValueString>(Expected.GetDescriptorId()), Subject);
+			if (Actual.GetVersion() != Expected.GetVersion())
+				return NativeFact(Code, TEXT("The descriptor version differs from the required descriptor."),
+					Path + TEXT("/version"), MakeShared<FJsonValueNumber>(Actual.GetVersion()),
+					MakeShared<FJsonValueNumber>(Expected.GetVersion()), Subject);
+			return InternalDifference(Code, TEXT("The descriptor fingerprint does not match the required descriptor."),
+				Path + TEXT("/descriptor_hash_matches"), MakeShared<FJsonValueString>(Actual.GetDescriptorHash()),
+				MakeShared<FJsonValueString>(Expected.GetDescriptorHash()), Subject);
 		}
 
-		void SetBindingError(
-			FUeAgentOperationBindingError& OutError,
-			const FString& Code,
-			const FString& SubjectId = FString(),
-			const FString& Detail = FString())
+		FDiagnostic StringArrayDifference(const TArray<FString>& Expected, const TArray<FString>& Actual,
+			const FString& Code, const FString& Path)
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
+			if (Actual.Num() != Expected.Num())
+				return NativeFact(Code, TEXT("The target binding list length differs from its prepared value."),
+					Path, MakeShared<FJsonValueNumber>(Actual.Num()), MakeShared<FJsonValueNumber>(Expected.Num()));
+			for (int32 Index = 0; Index < Actual.Num(); ++Index)
+				if (Actual[Index] != Expected[Index])
+					return NativeFact(Code, TEXT("A target binding list entry differs from its prepared value."),
+						Path + TEXT("/") + FString::FromInt(Index),
+						MakeShared<FJsonValueString>(Actual[Index]), MakeShared<FJsonValueString>(Expected[Index]));
+			return {};
 		}
+
+		FDiagnostic BindingDifference(const FUeAgentCandidateBinding& Expected, const FUeAgentCandidateBinding& Actual,
+			const FString& Code, const FString& Path)
+		{
+			if (Actual.GetBindingId() != Expected.GetBindingId())
+				return InternalDifference(Code, TEXT("The target binding identity does not match its prepared identity."),
+					Path + TEXT("/binding_id_matches"), MakeShared<FJsonValueString>(Actual.GetBindingId()),
+					MakeShared<FJsonValueString>(Expected.GetBindingId()));
+			const auto& A = Actual.GetSummary();
+			const auto& E = Expected.GetSummary();
+			if (A != E)
+			{
+				const FString SummaryPath = Path + TEXT("/summary");
+				if (A.GetIdentity() != E.GetIdentity())
+					return InternalDifference(Code, TEXT("The candidate canonical identity differs from its prepared identity."),
+						SummaryPath + TEXT("/identity_matches"), MakeShared<FJsonValueString>(A.GetIdentity().GetCanonicalKey()),
+						MakeShared<FJsonValueString>(E.GetIdentity().GetCanonicalKey()));
+				if (A.GetDescriptorIdentity() != E.GetDescriptorIdentity())
+					return DescriptorDifference(E.GetDescriptorIdentity(), A.GetDescriptorIdentity(), Code,
+						SummaryPath + TEXT("/descriptor"), FString());
+				if (A.GetCatalogKind() != E.GetCatalogKind())
+					return NativeFact(Code, TEXT("The candidate catalog kind differs from its prepared value."),
+						SummaryPath + TEXT("/catalog_kind"), MakeShared<FJsonValueString>(A.GetCatalogKind()), MakeShared<FJsonValueString>(E.GetCatalogKind()));
+				if (A.GetDisplayName() != E.GetDisplayName())
+					return NativeFact(Code, TEXT("The candidate display name differs from its prepared value."),
+						SummaryPath + TEXT("/display_name"), MakeShared<FJsonValueString>(A.GetDisplayName()), MakeShared<FJsonValueString>(E.GetDisplayName()));
+				if (A.GetSummary() != E.GetSummary())
+					return NativeFact(Code, TEXT("The candidate summary differs from its prepared value."),
+						SummaryPath + TEXT("/summary"), MakeShared<FJsonValueString>(A.GetSummary()), MakeShared<FJsonValueString>(E.GetSummary()));
+				if (A.GetCategoryPath() != E.GetCategoryPath())
+					return StringArrayDifference(E.GetCategoryPath(), A.GetCategoryPath(), Code, SummaryPath + TEXT("/category_path"));
+				return StringArrayDifference(E.GetDiscoveryScopes(), A.GetDiscoveryScopes(), Code, SummaryPath + TEXT("/discovery_scopes"));
+			}
+			const auto& AR = Actual.GetCatalogRevision();
+			const auto& ER = Expected.GetCatalogRevision();
+			if (AR != ER)
+			{
+				const FString Field = AR.GetSourceId() != ER.GetSourceId() ? TEXT("source_id")
+					: AR.GetGeneration() != ER.GetGeneration() ? TEXT("generation") : TEXT("sequence");
+				const FString AV = Field == TEXT("source_id") ? AR.GetSourceId()
+					: Field == TEXT("generation") ? AR.GetGeneration() : ::LexToString(AR.GetSequence());
+				const FString EV = Field == TEXT("source_id") ? ER.GetSourceId()
+					: Field == TEXT("generation") ? ER.GetGeneration() : ::LexToString(ER.GetSequence());
+				return InternalDifference(Code, TEXT("The target catalog revision differs from its prepared revision."),
+					Path + TEXT("/catalog_revision/") + Field + TEXT("_matches"),
+					MakeShared<FJsonValueString>(AV), MakeShared<FJsonValueString>(EV));
+			}
+			if (Actual.GetPublicRef() != Expected.GetPublicRef())
+				return NativeFact(Code, TEXT("The target reference differs from its prepared reference."),
+					Path + TEXT("/public_ref"), MakeShared<FJsonValueString>(Actual.GetPublicRef()), MakeShared<FJsonValueString>(Expected.GetPublicRef()));
+			if (Actual.GetReadPortId() != Expected.GetReadPortId())
+				return InternalDifference(Code, TEXT("The target read port differs from its prepared read port."),
+					Path + TEXT("/read_port_matches"), MakeShared<FJsonValueString>(Actual.GetReadPortId()), MakeShared<FJsonValueString>(Expected.GetReadPortId()));
+			const auto& AO = Actual.GetSupportedOperations();
+			const auto& EO = Expected.GetSupportedOperations();
+			if (AO != EO)
+			{
+				if (AO.Num() != EO.Num())
+					return NativeFact(Code, TEXT("The supported operation count differs from the prepared binding."),
+						Path + TEXT("/supported_operations"), MakeShared<FJsonValueNumber>(AO.Num()), MakeShared<FJsonValueNumber>(EO.Num()));
+				for (int32 Index = 0; Index < AO.Num(); ++Index)
+					if (AO[Index] != EO[Index])
+						return NativeFact(Code, TEXT("A supported candidate operation differs from the prepared binding."),
+							Path + TEXT("/supported_operations/") + FString::FromInt(Index),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(AO[Index])), MakeShared<FJsonValueNumber>(static_cast<int32>(EO[Index])));
+			}
+			return InternalDifference(Code, TEXT("The target binding evidence differs from its prepared evidence."),
+				Path + TEXT("/binding_evidence_matches"), MakeShared<FJsonValueString>(Actual.GetBindingEvidence()),
+				MakeShared<FJsonValueString>(Expected.GetBindingEvidence()));
+		}
+
+
+		FDiagnostic ReadbackFailure(const FString& Code, const FString& ReadbackId, bool bSucceeded, bool bSnapshotPresent)
+		{
+			const auto Actual = MakeShared<FJsonObject>();
+			Actual->SetBoolField(TEXT("reported_success"), bSucceeded);
+			Actual->SetBoolField(TEXT("snapshot_present"), bSnapshotPresent);
+			const auto Expected = MakeShared<FJsonObject>();
+			Expected->SetBoolField(TEXT("reported_success"), true);
+			Expected->SetBoolField(TEXT("snapshot_present"), true);
+			return NativeFact(Code, bSucceeded ? TEXT("Native readback reported success without a snapshot.")
+				: TEXT("Native readback failed without reporting a diagnostic."), TEXT("/readback"),
+				MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueObject>(Expected), ReadbackId);
+		}
+
+		FDiagnostic NativeValidation(FDiagnostic Error)
+		{
+			Error.SourceKind = TEXT("native_result");
+			for (auto& Child : Error.Diagnostics) Child = NativeValidation(MoveTemp(Child));
+			if (Error.PublicCause) Error.PublicCause = MakeShared<FDiagnostic>(NativeValidation(*Error.PublicCause));
+			return Error;
+		}
+
+		
+
+		
 
 		bool TryPortFamily(
 			const FString& FamilyId,
@@ -106,26 +216,42 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			const FUeAgentRigSimulationSpatialTypedRequestPtr& Request,
 			FUeAgentRigSimulationSpatialExecutionError& OutError)
 		{
-			if (!Request.IsValid()
-				|| Request->GetTypeId() != Contract.GetTypedRequestId()
-				|| Request->GetFamilyId() != Contract.GetFamilyId())
+			const FString Code = TEXT("rig_simulation_spatial_typed_request_mismatch");
+			if (!Request.IsValid())
 			{
-				SetExecutionError(
-					OutError,
-					TEXT("rig_simulation_spatial_typed_request_mismatch"),
-					Contract.GetCapabilityId());
+				OutError = NativeFact(Code, TEXT("The decoder did not provide a typed request."), TEXT("/typed_request"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetCapabilityId());
 				return false;
 			}
-			EUeAgentRigSimulationSpatialPortFamily ExpectedFamily =
-				EUeAgentRigSimulationSpatialPortFamily::SimulationObservation;
-			if (!TryPortFamily(Contract.GetFamilyId(), ExpectedFamily)
-				|| Request->GetFormalPortRequest().GetFamily()
-					!= ExpectedFamily)
+			if (Request->GetTypeId() != Contract.GetTypedRequestId())
 			{
-				SetExecutionError(
-					OutError,
-					TEXT("rig_simulation_spatial_formal_port_family_mismatch"),
-					Contract.GetCapabilityId());
+				OutError = NativeFact(Code, TEXT("The decoded request type differs from the execution chain contract."),
+					TEXT("/type_id"), MakeShared<FJsonValueString>(Request->GetTypeId()),
+					MakeShared<FJsonValueString>(Contract.GetTypedRequestId()), Contract.GetCapabilityId());
+				return false;
+			}
+			if (Request->GetFamilyId() != Contract.GetFamilyId())
+			{
+				OutError = NativeFact(Code, TEXT("The decoded request family differs from the execution chain contract."),
+					TEXT("/family_id"), MakeShared<FJsonValueString>(Request->GetFamilyId()),
+					MakeShared<FJsonValueString>(Contract.GetFamilyId()), Contract.GetCapabilityId());
+				return false;
+			}
+			EUeAgentRigSimulationSpatialPortFamily ExpectedFamily = EUeAgentRigSimulationSpatialPortFamily::SimulationObservation;
+			if (!TryPortFamily(Contract.GetFamilyId(), ExpectedFamily))
+			{
+				OutError = NativeFact(TEXT("rig_simulation_spatial_formal_port_family_mismatch"),
+					TEXT("The execution chain contract names an unsupported native port family."), TEXT("/family_id"),
+					MakeShared<FJsonValueString>(Contract.GetFamilyId()),
+					MakeShared<FJsonValueString>(TEXT("skeletal_attachment, rig_bake, ik_retarget, simulation_definition or simulation_observation")));
+				return false;
+			}
+			if (Request->GetFormalPortRequest().GetFamily() != ExpectedFamily)
+			{
+				OutError = NativeFact(TEXT("rig_simulation_spatial_formal_port_family_mismatch"),
+					TEXT("The formal request port family differs from the execution chain family."),
+					TEXT("/formal_request/family"), MakeShared<FJsonValueNumber>(static_cast<int32>(Request->GetFormalPortRequest().GetFamily())),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(ExpectedFamily)), Contract.GetCapabilityId());
 				return false;
 			}
 			return true;
@@ -141,50 +267,57 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			return Targets[0].GetBinding();
 		}
 
-		bool TargetsEqual(
-			const TArray<FUeAgentOperationTargetBinding>& Left,
-			const TArray<FUeAgentOperationTargetBinding>& Right)
+		bool TryMatchTargets(const TArray<FUeAgentOperationTargetBinding>& Left,
+			const TArray<FUeAgentOperationTargetBinding>& Right, const FString& Code, FDiagnostic& OutError)
 		{
-			const auto IsPreparedByC3O = [](
-				const FUeAgentOperationTargetBinding& Target)
+			const auto IsPreparedByC3O = [](const FUeAgentOperationTargetBinding& Target)
 			{
-				return Target.GetBinding().GetBindingEvidence()
-					.EndsWith(TEXT(":c3o-prepared"))
-					|| Target.GetBinding().GetBindingEvidence()
-						== TEXT("c3o-operation-preparation");
+				return Target.GetBinding().GetBindingEvidence().EndsWith(TEXT(":c3o-prepared"))
+					|| Target.GetBinding().GetBindingEvidence() == TEXT("c3o-operation-preparation");
+			};
+			auto Mismatch = [&OutError](FDiagnostic Error, const FString& Target)
+			{
+				Error.TargetPath = Target;
+				OutError = MoveTemp(Error);
+				return false;
 			};
 			if (Left.IsEmpty())
 			{
-				if (Right.IsEmpty()) return true;
-				for (const FUeAgentOperationTargetBinding& Target : Right)
-				{
-					if (!IsPreparedByC3O(Target)) return false;
-				}
+				for (int32 Index = 0; Index < Right.Num(); ++Index)
+					if (!IsPreparedByC3O(Right[Index]))
+						return Mismatch(InternalDifference(Code,
+							TEXT("An execution target was not prepared by the operation gateway."),
+							TEXT("/targets/") + FString::FromInt(Index) + TEXT("/gateway_prepared"),
+							MakeShared<FJsonValueString>(Right[Index].GetBinding().GetBindingEvidence()),
+							MakeShared<FJsonValueString>(TEXT("c3o-prepared binding evidence"))), Right[Index].GetBinding().GetPublicRef());
 				return true;
 			}
 			if (Left.Num() != Right.Num())
-			{
-				return false;
-			}
+				return Mismatch(NativeFact(Code, TEXT("The execution target count differs from the prepared target count."),
+					TEXT("/targets"), MakeShared<FJsonValueNumber>(Right.Num()), MakeShared<FJsonValueNumber>(Left.Num())), FString());
 			for (int32 Index = 0; Index < Left.Num(); ++Index)
 			{
+				const FString Path = TEXT("/targets/") + FString::FromInt(Index);
+				const auto& Expected = Left[Index].GetBinding();
+				const auto& Actual = Right[Index].GetBinding();
 				if (IsPreparedByC3O(Right[Index]))
 				{
-					if (Left[Index].GetBinding().GetPublicRef()
-							!= Right[Index].GetBinding().GetPublicRef()
-						|| Left[Index].GetBinding().GetSummary()
-							.GetDescriptorIdentity()
-							!= Right[Index].GetBinding().GetSummary()
-								.GetDescriptorIdentity())
-					{
-						return false;
-					}
+					if (Expected.GetPublicRef() != Actual.GetPublicRef())
+						return Mismatch(NativeFact(Code, TEXT("The execution target reference differs from its prepared reference."),
+							Path + TEXT("/public_ref"), MakeShared<FJsonValueString>(Actual.GetPublicRef()),
+							MakeShared<FJsonValueString>(Expected.GetPublicRef())), Actual.GetPublicRef());
+					if (Expected.GetSummary().GetDescriptorIdentity() != Actual.GetSummary().GetDescriptorIdentity())
+						return Mismatch(DescriptorDifference(Expected.GetSummary().GetDescriptorIdentity(),
+							Actual.GetSummary().GetDescriptorIdentity(), Code, Path + TEXT("/descriptor"), FString()), Actual.GetPublicRef());
 				}
-				else if (Left[Index].GetTicket().GetTicketId()
-						!= Right[Index].GetTicket().GetTicketId()
-					|| Left[Index].GetBinding() != Right[Index].GetBinding())
+				else
 				{
-					return false;
+					if (Left[Index].GetTicket().GetTicketId() != Right[Index].GetTicket().GetTicketId())
+						return Mismatch(InternalDifference(Code, TEXT("The execution ticket differs from the prepared target ticket."),
+							Path + TEXT("/ticket_matches"), MakeShared<FJsonValueString>(Right[Index].GetTicket().GetTicketId()),
+							MakeShared<FJsonValueString>(Left[Index].GetTicket().GetTicketId())), Actual.GetPublicRef());
+					if (Expected != Actual)
+						return Mismatch(BindingDifference(Expected, Actual, Code, Path + TEXT("/binding")), Actual.GetPublicRef());
 				}
 			}
 			return true;
@@ -208,7 +341,9 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FString InSettleBarrier,
 		FString InOracleKind,
 		const bool bInRequiresNativeMutation,
-		const bool bInReadsBackAfterMutation)
+		const bool bInReadsBackAfterMutation,
+		TArray<CommandContract::FUeAgentModelResultFieldDeclaration>
+			InModelResultFields)
 		: CapabilityId(MoveTemp(InCapabilityId))
 		, DescriptorId(MoveTemp(InDescriptorId))
 		, OperationKind(MoveTemp(InOperationKind))
@@ -225,6 +360,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		, OracleKind(MoveTemp(InOracleKind))
 		, bRequiresNativeMutation(bInRequiresNativeMutation)
 		, bReadsBackAfterMutation(bInReadsBackAfterMutation)
+		, ModelResultFields(MoveTemp(InModelResultFields))
 	{
 	}
 
@@ -248,6 +384,11 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 	const FString& FUeAgentRigSimulationSpatialExecutionChainContract::GetOracleKind() const { return OracleKind; }
 	bool FUeAgentRigSimulationSpatialExecutionChainContract::RequiresNativeMutation() const { return bRequiresNativeMutation; }
 	bool FUeAgentRigSimulationSpatialExecutionChainContract::ReadsBackAfterMutation() const { return bReadsBackAfterMutation; }
+	const TArray<CommandContract::FUeAgentModelResultFieldDeclaration>&
+	FUeAgentRigSimulationSpatialExecutionChainContract::GetModelResultFields() const
+	{
+		return ModelResultFields;
+	}
 
 	const TArray<FUeAgentRigSimulationSpatialExecutionChainContract>&
 	GetRigSimulationSpatialExecutionChainContracts()
@@ -261,7 +402,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			{TEXT("rig.retarget.definition.update"), TEXT("uai.operation.rig.retarget.definition.update"), TEXT("operation"), TEXT("c3o"), TEXT("ik_retarget"), TEXT("rig_simulation_spatial.retarget.update_definition"), TEXT("rig_simulation_spatial.retarget.update_definition.request.v1"), TEXT("rig_simulation_spatial.retarget.update_definition.result.v1"), TEXT("rig_simulation_spatial.retarget.update_definition"), TEXT("rig_simulation_spatial.retarget.update_definition.mutate"), TEXT("rig_simulation_spatial.retarget.update_definition.readback"), TEXT("independent_post_mutation_rig_simulation_spatial_reader"), TEXT("ik_retarget_compile_and_asset_settle"), TEXT("independent_source_target_definition_pose_and_asset_readback"), true, true},
 			{TEXT("rig.retarget.pose.update"), TEXT("uai.operation.rig.retarget.pose.update"), TEXT("operation"), TEXT("c3o"), TEXT("ik_retarget"), TEXT("rig_simulation_spatial.retarget.update_pose"), TEXT("rig_simulation_spatial.retarget.update_pose.request.v1"), TEXT("rig_simulation_spatial.retarget.update_pose.result.v1"), TEXT("rig_simulation_spatial.retarget.update_pose"), TEXT("rig_simulation_spatial.retarget.update_pose.mutate"), TEXT("rig_simulation_spatial.retarget.update_pose.readback"), TEXT("independent_post_mutation_rig_simulation_spatial_reader"), TEXT("ik_retarget_compile_and_asset_settle"), TEXT("independent_source_target_definition_pose_and_asset_readback"), true, true},
 			{TEXT("rig.retarget.pose.auto_align"), TEXT("uai.operation.rig.retarget.pose.auto_align"), TEXT("operation"), TEXT("c3o"), TEXT("ik_retarget"), TEXT("rig_simulation_spatial.retarget.auto_align_pose"), TEXT("rig_simulation_spatial.retarget.auto_align_pose.request.v1"), TEXT("rig_simulation_spatial.retarget.auto_align_pose.result.v1"), TEXT("rig_simulation_spatial.retarget.auto_align_pose"), TEXT("rig_simulation_spatial.retarget.auto_align_pose.mutate"), TEXT("rig_simulation_spatial.retarget.auto_align_pose.readback"), TEXT("independent_post_mutation_rig_simulation_spatial_reader"), TEXT("ik_retarget_compile_and_asset_settle"), TEXT("independent_source_target_definition_pose_and_asset_readback"), true, true},
-			{TEXT("rig.retarget.assets.generate"), TEXT("uai.operation.rig.retarget.assets.generate"), TEXT("operation"), TEXT("c3o"), TEXT("ik_retarget"), TEXT("rig_simulation_spatial.retarget.generate_assets"), TEXT("rig_simulation_spatial.retarget.generate_assets.request.v1"), TEXT("rig_simulation_spatial.retarget.generate_assets.result.v1"), TEXT("rig_simulation_spatial.retarget.generate_assets"), TEXT("rig_simulation_spatial.retarget.generate_assets.mutate"), TEXT("rig_simulation_spatial.retarget.generate_assets.readback"), TEXT("independent_post_mutation_rig_simulation_spatial_reader"), TEXT("ik_retarget_compile_and_asset_settle"), TEXT("independent_source_target_definition_pose_and_asset_readback"), true, true},
+			{TEXT("rig.retarget.assets.generate"), TEXT("uai.operation.rig.retarget.assets.generate"), TEXT("operation"), TEXT("c3o"), TEXT("ik_retarget"), TEXT("rig_simulation_spatial.retarget.generate_assets"), TEXT("rig_simulation_spatial.retarget.generate_assets.request.v1"), TEXT("rig_simulation_spatial.retarget.generate_assets.result.v1"), TEXT("rig_simulation_spatial.retarget.generate_assets"), TEXT("rig_simulation_spatial.retarget.generate_assets.mutate"), TEXT("rig_simulation_spatial.retarget.generate_assets.readback"), TEXT("independent_post_mutation_rig_simulation_spatial_reader"), TEXT("ik_retarget_compile_and_asset_settle"), TEXT("independent_source_target_definition_pose_and_asset_readback"), true, true, {{TEXT("generated_asset_refs"), {TEXT("projection"), TEXT("payload"), TEXT("result"), TEXT("generated_asset_refs")}}}},
 			{TEXT("physics.material.update"), TEXT("uai.operation.physics.material.update"), TEXT("operation"), TEXT("c3o"), TEXT("simulation_definition"), TEXT("rig_simulation_spatial.physics.update_material"), TEXT("rig_simulation_spatial.physics.update_material.request.v1"), TEXT("rig_simulation_spatial.physics.update_material.result.v1"), TEXT("rig_simulation_spatial.physics.update_material"), TEXT("rig_simulation_spatial.physics.update_material.mutate"), TEXT("rig_simulation_spatial.physics.update_material.readback"), TEXT("independent_post_mutation_rig_simulation_spatial_reader"), TEXT("physics_asset_rebuild_and_constraint_settle"), TEXT("independent_physics_asset_or_constraint_definition_readback"), true, true},
 			{TEXT("physics.asset.structure.replace"), TEXT("uai.operation.physics.asset.structure.replace"), TEXT("operation"), TEXT("c3o"), TEXT("simulation_definition"), TEXT("rig_simulation_spatial.physics.replace_asset_structure"), TEXT("rig_simulation_spatial.physics.replace_asset_structure.request.v1"), TEXT("rig_simulation_spatial.physics.replace_asset_structure.result.v1"), TEXT("rig_simulation_spatial.physics.replace_asset_structure"), TEXT("rig_simulation_spatial.physics.replace_asset_structure.mutate"), TEXT("rig_simulation_spatial.physics.replace_asset_structure.readback"), TEXT("independent_post_mutation_rig_simulation_spatial_reader"), TEXT("physics_asset_rebuild_and_constraint_settle"), TEXT("independent_physics_asset_or_constraint_definition_readback"), true, true},
 			{TEXT("physics.constraint.update"), TEXT("uai.operation.physics.constraint.update"), TEXT("operation"), TEXT("c3o"), TEXT("simulation_definition"), TEXT("rig_simulation_spatial.physics.update_constraint"), TEXT("rig_simulation_spatial.physics.update_constraint.request.v1"), TEXT("rig_simulation_spatial.physics.update_constraint.result.v1"), TEXT("rig_simulation_spatial.physics.update_constraint"), TEXT("rig_simulation_spatial.physics.update_constraint.mutate"), TEXT("rig_simulation_spatial.physics.update_constraint.readback"), TEXT("independent_post_mutation_rig_simulation_spatial_reader"), TEXT("physics_asset_rebuild_and_constraint_settle"), TEXT("independent_physics_asset_or_constraint_definition_readback"), true, true},
@@ -269,8 +410,6 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			{TEXT("deformer.geometry.sample"), TEXT("uai.query.deformer.geometry.sample"), TEXT("query"), TEXT("c3q"), TEXT("simulation_observation"), TEXT("rig_simulation_spatial.deformer.sample_geometry"), TEXT("rig_simulation_spatial.deformer.sample_geometry.request.v1"), TEXT("rig_simulation_spatial.deformer.sample_geometry.result.v1"), TEXT(""), TEXT("rig_simulation_spatial.deformer.sample_geometry.observe"), TEXT("rig_simulation_spatial.deformer.sample_geometry.readback"), TEXT("independent_rig_simulation_spatial_reader"), TEXT("none"), TEXT("independent_component_asset_or_generated_data_readback"), false, false},
 			{TEXT("deformer.training_inputs.validate"), TEXT("uai.query.deformer.training_inputs.validate"), TEXT("query"), TEXT("c3q"), TEXT("simulation_observation"), TEXT("rig_simulation_spatial.deformer.validate_training_inputs"), TEXT("rig_simulation_spatial.deformer.validate_training_inputs.request.v1"), TEXT("rig_simulation_spatial.deformer.validate_training_inputs.result.v1"), TEXT(""), TEXT("rig_simulation_spatial.deformer.validate_training_inputs.observe"), TEXT("rig_simulation_spatial.deformer.validate_training_inputs.readback"), TEXT("independent_rig_simulation_spatial_reader"), TEXT("none"), TEXT("independent_component_asset_or_generated_data_readback"), false, false},
 			{TEXT("deformer.evaluation.sample"), TEXT("uai.query.deformer.evaluation.sample"), TEXT("query"), TEXT("c3q"), TEXT("simulation_observation"), TEXT("rig_simulation_spatial.deformer.sample_evaluation"), TEXT("rig_simulation_spatial.deformer.sample_evaluation.request.v1"), TEXT("rig_simulation_spatial.deformer.sample_evaluation.result.v1"), TEXT(""), TEXT("rig_simulation_spatial.deformer.sample_evaluation.observe"), TEXT("rig_simulation_spatial.deformer.sample_evaluation.readback"), TEXT("independent_rig_simulation_spatial_reader"), TEXT("none"), TEXT("independent_component_asset_or_generated_data_readback"), false, false},
-			{TEXT("pcg.generated_spatial_data.read"), TEXT("uai.query.pcg.generated_spatial_data.read"), TEXT("query"), TEXT("c3q"), TEXT("simulation_observation"), TEXT("rig_simulation_spatial.pcg.read_generated_data"), TEXT("rig_simulation_spatial.pcg.read_generated_data.request.v1"), TEXT("rig_simulation_spatial.pcg.read_generated_data.result.v1"), TEXT(""), TEXT("rig_simulation_spatial.pcg.read_generated_data.observe"), TEXT("rig_simulation_spatial.pcg.read_generated_data.readback"), TEXT("independent_rig_simulation_spatial_reader"), TEXT("none"), TEXT("independent_component_asset_or_generated_data_readback"), false, false},
-			{TEXT("pcg.partition.spatial_state.read"), TEXT("uai.query.pcg.partition.spatial_state.read"), TEXT("query"), TEXT("c3q"), TEXT("simulation_observation"), TEXT("rig_simulation_spatial.pcg.read_partition_state"), TEXT("rig_simulation_spatial.pcg.read_partition_state.request.v1"), TEXT("rig_simulation_spatial.pcg.read_partition_state.result.v1"), TEXT(""), TEXT("rig_simulation_spatial.pcg.read_partition_state.observe"), TEXT("rig_simulation_spatial.pcg.read_partition_state.readback"), TEXT("independent_rig_simulation_spatial_reader"), TEXT("none"), TEXT("independent_component_asset_or_generated_data_readback"), false, false},
 		};
 		return Contracts;
 	}
@@ -313,19 +452,32 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		{
 			OutSource.Reset();
 			OutError = {};
-			if (Descriptor.GetCapabilityId() != Contract.GetCapabilityId()
-				|| Descriptor.GetIdentity().GetDescriptorId() != Contract.GetDescriptorId()
-				|| Descriptor.GetProviderBinding() != Contract.GetBindingId())
+			const FString BindingField = Descriptor.GetCapabilityId() != Contract.GetCapabilityId() ? TEXT("capability_id")
+				: Descriptor.GetIdentity().GetDescriptorId() != Contract.GetDescriptorId() ? TEXT("descriptor_id")
+				: Descriptor.GetProviderBinding() != Contract.GetBindingId() ? TEXT("provider_binding") : FString();
+			if (!BindingField.IsEmpty())
 			{
-				OutError.Code = TEXT("rig_simulation_spatial_query_binding_mismatch");
-				OutError.SubjectId = Contract.GetBindingId();
+				const FString Actual = BindingField == TEXT("capability_id") ? Descriptor.GetCapabilityId()
+					: BindingField == TEXT("descriptor_id") ? Descriptor.GetIdentity().GetDescriptorId() : Descriptor.GetProviderBinding();
+				const FString Expected = BindingField == TEXT("capability_id") ? Contract.GetCapabilityId()
+					: BindingField == TEXT("descriptor_id") ? Contract.GetDescriptorId() : Contract.GetBindingId();
+				OutError = NativeFact(TEXT("rig_simulation_spatial_query_binding_mismatch"),
+					TEXT("The query descriptor does not match the registered execution chain."),
+					TEXT("/") + BindingField, MakeShared<FJsonValueString>(Actual), MakeShared<FJsonValueString>(Expected), Contract.GetBindingId());
 				return false;
 			}
-			if (Context.GetRequestKind() != EUeAgentRequestKind::Query
-				|| Context.GetDescriptorIdentity() != Descriptor.GetIdentity())
+			if (Context.GetRequestKind() != EUeAgentRequestKind::Query)
 			{
-				OutError.Code = TEXT("rig_simulation_spatial_context_descriptor_mismatch");
-				OutError.SubjectId = Contract.GetDescriptorId();
+				OutError = NativeFact(TEXT("rig_simulation_spatial_context_descriptor_mismatch"),
+					TEXT("The query provider requires a query operation context."), TEXT("/request_kind"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Context.GetRequestKind())),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(EUeAgentRequestKind::Query)), Contract.GetDescriptorId());
+				return false;
+			}
+			if (Context.GetDescriptorIdentity() != Descriptor.GetIdentity())
+			{
+				OutError = DescriptorDifference(Descriptor.GetIdentity(), Context.GetDescriptorIdentity(),
+					TEXT("rig_simulation_spatial_context_descriptor_mismatch"), TEXT("/descriptor"), Contract.GetDescriptorId());
 				return false;
 			}
 
@@ -339,33 +491,30 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					Error)
 				|| !IsTypedRequestExact(Contract, Request, Error))
 			{
-				CopyError(Error, OutError);
+				OutError = Error;
 				return false;
 			}
 
-			TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
-			if (!Readback->TryRead(
+			TOptional<FUeAgentRigSimulationSpatialReadbackResult> ReadbackResult;
+			const bool bReadbackSucceeded = Readback->TryRead(
 					Contract,
 					Request.ToSharedRef(),
 					Target,
 					EUeAgentRigSimulationSpatialReadPhase::Query,
 					Context,
-					Snapshot,
-					Error)
-				|| !Snapshot.IsValid())
+					ReadbackResult,
+					Error);
+			if (!bReadbackSucceeded || !ReadbackResult.IsSet())
 			{
 				if (!Error.IsValid())
 				{
-					SetExecutionError(
-						Error,
-						TEXT("rig_simulation_spatial_query_readback_missing"),
-						Contract.GetReadbackId());
+					Error = ReadbackFailure(TEXT("rig_simulation_spatial_query_readback_missing"), Contract.GetReadbackId(), bReadbackSucceeded, ReadbackResult.IsSet());
 				}
-				CopyError(Error, OutError);
+				OutError = Error;
 				return false;
 			}
 			OutSource = MakeShared<FUeAgentProjectionSourceValue>(
-				Snapshot.ToSharedRef());
+				ReadbackResult->Snapshot);
 			return true;
 		}
 
@@ -417,16 +566,23 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			{
 				OutResult = {};
 				OutError = {};
-				if (!Request.IsValid()
-					|| Request.GetDraft().GetDescriptorIdentity()
-						!= Context.GetDescriptorIdentity()
-					|| Context.GetDescriptorIdentity().GetDescriptorId()
-						!= Contract.GetDescriptorId())
+				if (!Request.IsValid())
 				{
-					SetBindingError(
-						OutError,
-						TEXT("rig_simulation_spatial_planning_context_mismatch"),
-						Contract.GetDescriptorId());
+					OutError = NativeValidation(Request.GetValidationDiagnostic());
+					return false;
+				}
+				if (Request.GetDraft().GetDescriptorIdentity() != Context.GetDescriptorIdentity())
+				{
+					OutError = DescriptorDifference(Context.GetDescriptorIdentity(), Request.GetDraft().GetDescriptorIdentity(),
+						TEXT("rig_simulation_spatial_planning_context_mismatch"), TEXT("/draft/descriptor"), Contract.GetDescriptorId());
+					return false;
+				}
+				if (Context.GetDescriptorIdentity().GetDescriptorId() != Contract.GetDescriptorId())
+				{
+					OutError = NativeFact(TEXT("rig_simulation_spatial_planning_context_mismatch"),
+						TEXT("The planning context descriptor differs from the execution chain descriptor."), TEXT("/descriptor_id"),
+						MakeShared<FJsonValueString>(Context.GetDescriptorIdentity().GetDescriptorId()),
+						MakeShared<FJsonValueString>(Contract.GetDescriptorId()), Contract.GetDescriptorId());
 					return false;
 				}
 				{
@@ -435,10 +591,11 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 						Request.GetDraft().GetRequestId());
 					if (!Prepared || Prepared->Context != &Context)
 					{
-						SetBindingError(
-							OutError,
-							TEXT("rig_simulation_spatial_planning_request_not_prepared"),
-							Request.GetDraft().GetRequestId());
+						OutError = NativeFact(TEXT("rig_simulation_spatial_planning_request_not_prepared"),
+							Prepared ? TEXT("The prepared planning request belongs to a different operation context.")
+							: TEXT("No prepared request exists for this planning request."),
+							Prepared ? TEXT("/prepared_request/context_matches") : TEXT("/prepared_request"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Request.GetDraft().GetRequestId());
 						return false;
 					}
 				}
@@ -449,11 +606,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 						OutResult,
 						Error))
 				{
-					SetBindingError(
-						OutError,
-						Error.GetCode(),
-						Error.GetIdentityKey(),
-						Error.GetDetail());
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -486,13 +639,24 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			{
 				OutReceipt = {};
 				OutError = {};
-				if (!Planning.IsReady() || !Planning.IsMutationPermitted()
-					|| !Planning.GetPlan().IsValid())
+				if (!Planning.IsReady())
 				{
-					SetBindingError(
-						OutError,
-						TEXT("rig_simulation_spatial_execution_plan_not_ready"),
-						Contract.GetCapabilityId());
+					OutError = Planning.GetPlan().IsValid()
+						? NativeFact(TEXT("rig_simulation_spatial_execution_plan_not_ready"),
+							TEXT("The planning result status does not permit execution."), TEXT("/planning/status"),
+							MakeShared<FJsonValueString>(Planning.GetStatus()), MakeShared<FJsonValueString>(TEXT("ready or no_change")), Contract.GetCapabilityId())
+						: NativeFact(TEXT("rig_simulation_spatial_execution_plan_not_ready"),
+							TEXT("The planning result has no execution plan."), TEXT("/planning/plan"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetCapabilityId());
+					return false;
+				}
+				if (!Planning.IsMutationPermitted())
+				{
+					OutError = NativeFact(TEXT("rig_simulation_spatial_execution_plan_not_ready"),
+						Planning.IsDryRun() ? TEXT("A dry-run plan does not permit mutation.")
+						: TEXT("The planning result does not permit mutation."),
+						TEXT("/planning/mutation_permitted"), MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true), Contract.GetCapabilityId());
 					return false;
 				}
 				const FString RequestId = Planning.GetPlan()->GetRequestId();
@@ -500,38 +664,40 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				{
 					FScopeLock Lock(&State->Mutex);
 					auto* Found = State->PreparedByRequest.Find(RequestId);
-					if (!Found || Found->Context != &Context
-						|| !TargetsEqual(Found->Targets, Targets))
+					if (!Found || Found->Context != &Context)
 					{
-						SetBindingError(
-							OutError,
-							TEXT("rig_simulation_spatial_execution_request_mismatch"),
-							RequestId);
+						OutError = NativeFact(TEXT("rig_simulation_spatial_execution_request_mismatch"),
+							Found ? TEXT("The prepared request belongs to a different execution context.")
+							: TEXT("The execution plan has no prepared request."),
+							Found ? TEXT("/prepared_request/context_matches") : TEXT("/prepared_request"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), RequestId);
 						return false;
 					}
+					if (!TryMatchTargets(Found->Targets, Targets, TEXT("rig_simulation_spatial_execution_request_mismatch"), OutError)) return false;
 					Prepared = MoveTemp(*Found);
 					State->PreparedByRequest.Remove(RequestId);
 				}
 
 				FUeAgentRigSimulationSpatialMutationResult MutationResult;
 				FUeAgentRigSimulationSpatialExecutionError Error;
-				if (!Mutation->TryMutate(
-						Contract,
-						Prepared.Request.ToSharedRef(),
-						Targets,
-						Context,
-						MutationResult,
-						Error)
-					|| !MutationResult.IsValid())
+				const bool bMutationSucceeded = Mutation->TryMutate(Contract, Prepared.Request.ToSharedRef(),
+					Targets, Context, MutationResult, Error);
+				if (!bMutationSucceeded || !MutationResult.IsValid())
 				{
 					if (!Error.IsValid())
 					{
-						SetExecutionError(
-							Error,
-							TEXT("rig_simulation_spatial_mutation_result_invalid"),
-							Contract.GetNativeActionId());
+						if (!bMutationSucceeded)
+							Error = NativeFact(TEXT("rig_simulation_spatial_mutation_result_invalid"),
+								TEXT("The mutation port failed without reporting a diagnostic."), TEXT("/mutation/reported_success"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetNativeActionId());
+						else
+							Error = NativeFact(TEXT("rig_simulation_spatial_mutation_result_invalid"),
+								MutationResult.GetOperationId().IsEmpty() ? TEXT("The mutation result has no operation identifier.")
+								: TEXT("The mutation result has no mutation evidence identifier."),
+								MutationResult.GetOperationId().IsEmpty() ? TEXT("/mutation/operation_id_present") : TEXT("/mutation/evidence_present"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetNativeActionId());
 					}
-					CopyError(Error, OutError);
+					OutError = Error;
 					return false;
 				}
 
@@ -540,28 +706,31 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					if (State->ExecutedByOperation.Contains(
 							MutationResult.GetOperationId()))
 					{
-						SetBindingError(
-							OutError,
-							TEXT("rig_simulation_spatial_operation_id_duplicate"),
-							MutationResult.GetOperationId());
+						OutError = NativeFact(TEXT("rig_simulation_spatial_operation_id_duplicate"),
+							TEXT("The mutation operation identifier is already registered as executed."), TEXT("/operation_id_already_executed"),
+							MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), MutationResult.GetOperationId());
 						return false;
 					}
 					State->ExecutedByOperation.Add(
 						MutationResult.GetOperationId(),
 						{MoveTemp(Prepared), MutationResult});
 				}
-				OutReceipt = FExecutionReceipt(
-					MutationResult.GetOperationId(),
-					EExecutionPhase::Terminal,
-					EExecutionStatus::AppliedInMemory,
-					FString(),
-					EExecutionCancellationMode::NotRequested,
-					true,
-					{},
-					false,
-					{},
-					{TEXT("executing"), TEXT("terminal")});
-				return OutReceipt.IsValid();
+				OutReceipt = FExecutionReceipt(MutationResult.GetOperationId(),
+			EExecutionPhase::Terminal,
+			EExecutionStatus::AppliedInMemory,
+			FExecutionMutationError(),
+			EExecutionCancellationMode::NotRequested,
+			true,
+			{},
+			false,
+			{},
+			{TEXT("executing"), TEXT("terminal")});
+				if (!OutReceipt.IsValid())
+				{
+					OutError = NativeValidation(OutReceipt.GetValidationDiagnostic());
+					return false;
+				}
+				return true;
 			}
 
 		private:
@@ -596,13 +765,17 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			{
 				OutOutcome = {};
 				OutError = {};
-				if (!Receipt.IsValid()
-					|| Receipt.GetStatus() != EExecutionStatus::AppliedInMemory)
+				if (!Receipt.IsValid())
 				{
-					SetBindingError(
-						OutError,
-						TEXT("rig_simulation_spatial_verification_receipt_invalid"),
-						Receipt.GetOperationId());
+					OutError = NativeValidation(Receipt.GetValidationDiagnostic());
+					return false;
+				}
+				if (Receipt.GetStatus() != EExecutionStatus::AppliedInMemory)
+				{
+					OutError = NativeFact(TEXT("rig_simulation_spatial_verification_receipt_invalid"),
+						TEXT("Verification requires an execution receipt with AppliedInMemory status."), TEXT("/receipt/status"),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Receipt.GetStatus())),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(EExecutionStatus::AppliedInMemory)), Receipt.GetOperationId());
 					return false;
 				}
 
@@ -611,15 +784,16 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					FScopeLock Lock(&State->Mutex);
 					auto* Found = State->ExecutedByOperation.Find(
 						Receipt.GetOperationId());
-					if (!Found || Found->Prepared.Context != &Context
-						|| !TargetsEqual(Found->Prepared.Targets, Targets))
+					if (!Found || Found->Prepared.Context != &Context)
 					{
-						SetBindingError(
-							OutError,
-							TEXT("rig_simulation_spatial_verification_request_mismatch"),
-							Receipt.GetOperationId());
+						OutError = NativeFact(TEXT("rig_simulation_spatial_verification_request_mismatch"),
+							Found ? TEXT("The executed operation belongs to a different verification context.")
+							: TEXT("No executed operation exists for the verification receipt."),
+							Found ? TEXT("/executed_operation/context_matches") : TEXT("/executed_operation"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Receipt.GetOperationId());
 						return false;
 					}
+					if (!TryMatchTargets(Found->Prepared.Targets, Targets, TEXT("rig_simulation_spatial_verification_request_mismatch"), OutError)) return false;
 					Executed = MoveTemp(*Found);
 					State->ExecutedByOperation.Remove(Receipt.GetOperationId());
 				}
@@ -628,40 +802,37 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				if (!Settle->TrySettle(
 						Contract, Executed.Mutation, Context, Error))
 				{
-					CopyError(Error, OutError);
+					OutError = Error;
 					return false;
 				}
-				TSharedPtr<const FUeAgentCanonicalSnapshot> After;
-				if (!Readback->TryRead(
+				TOptional<FUeAgentRigSimulationSpatialReadbackResult> After;
+				const bool bReadbackSucceeded = Readback->TryRead(
 						Contract,
 						Executed.Prepared.Request.ToSharedRef(),
 						FirstReadTarget(Targets),
 						EUeAgentRigSimulationSpatialReadPhase::Verification,
 						Context,
 						After,
-						Error)
-					|| !After.IsValid())
+						Error);
+				if (!bReadbackSucceeded || !After.IsSet())
 				{
 					if (!Error.IsValid())
 					{
-						SetExecutionError(
-							Error,
-							TEXT("rig_simulation_spatial_verification_readback_missing"),
-							Contract.GetReadbackId());
+						Error = ReadbackFailure(TEXT("rig_simulation_spatial_verification_readback_missing"), Contract.GetReadbackId(), bReadbackSucceeded, After.IsSet());
 					}
-					CopyError(Error, OutError);
+					OutError = Error;
 					return false;
 				}
 				if (!Comparator->TryCompare(
 						Contract,
 						Executed.Prepared.Request.ToSharedRef(),
 						*Executed.Prepared.Before,
-						*After,
+						After.GetValue(),
 						Context,
 						OutOutcome,
 						Error))
 				{
-					CopyError(Error, OutError);
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -709,14 +880,20 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 	{
 		OutRequest.Reset();
 		OutError = {};
-		if (Context.GetRequestKind() != EUeAgentRequestKind::Operation
-			|| Context.GetDescriptorIdentity().GetDescriptorId()
-				!= Contract.GetDescriptorId())
+		if (Context.GetRequestKind() != EUeAgentRequestKind::Operation)
 		{
-			SetBindingError(
-				OutError,
-				TEXT("rig_simulation_spatial_context_descriptor_mismatch"),
-				Contract.GetDescriptorId());
+			OutError = NativeFact(TEXT("rig_simulation_spatial_context_descriptor_mismatch"),
+				TEXT("Planning requires an operation request context."), TEXT("/request_kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Context.GetRequestKind())),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(EUeAgentRequestKind::Operation)), Contract.GetDescriptorId());
+			return false;
+		}
+		if (Context.GetDescriptorIdentity().GetDescriptorId() != Contract.GetDescriptorId())
+		{
+			OutError = NativeFact(TEXT("rig_simulation_spatial_context_descriptor_mismatch"),
+				TEXT("The request context descriptor differs from the execution chain descriptor."), TEXT("/descriptor_id"),
+				MakeShared<FJsonValueString>(Context.GetDescriptorIdentity().GetDescriptorId()),
+				MakeShared<FJsonValueString>(Contract.GetDescriptorId()), Contract.GetDescriptorId());
 			return false;
 		}
 
@@ -730,45 +907,47 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				Error)
 			|| !IsTypedRequestExact(Contract, TypedRequest, Error))
 		{
-			CopyError(Error, OutError);
+			OutError = Error;
 			return false;
 		}
 
-		TSharedPtr<const FUeAgentCanonicalSnapshot> Before;
-		if (!Readback->TryRead(
+		TOptional<FUeAgentRigSimulationSpatialReadbackResult> ReadbackResult;
+		const bool bReadbackSucceeded = Readback->TryRead(
 				Contract,
 				TypedRequest.ToSharedRef(),
 				FirstReadTarget(Targets),
 				EUeAgentRigSimulationSpatialReadPhase::Preflight,
 				Context,
-				Before,
-				Error)
-			|| !Before.IsValid())
+				ReadbackResult,
+				Error);
+		if (!bReadbackSucceeded || !ReadbackResult.IsSet())
 		{
 			if (!Error.IsValid())
 			{
-				SetExecutionError(
-					Error,
-					TEXT("rig_simulation_spatial_preflight_readback_missing"),
-					Contract.GetReadbackId());
+				Error = ReadbackFailure(TEXT("rig_simulation_spatial_preflight_readback_missing"), Contract.GetReadbackId(), bReadbackSucceeded, ReadbackResult.IsSet());
 			}
-			CopyError(Error, OutError);
+			OutError = Error;
 			return false;
 		}
 
+		const auto& Before = ReadbackResult->Snapshot;
 		TOptional<FChangeDraft> Change;
-		if (!TypedRequest->TryBuildChangeDraft(
-				*Before, Context, Change, Error)
-			|| !Change.IsSet() || !Change->IsValid())
+		const bool bDraftBuilt = TypedRequest->TryBuildChangeDraft(*Before, Context, Change, Error);
+		if (!bDraftBuilt || !Change.IsSet() || !Change->IsValid())
 		{
 			if (!Error.IsValid())
 			{
-				SetExecutionError(
-					Error,
-					TEXT("rig_simulation_spatial_change_draft_invalid"),
-					Contract.GetC6ChangeKind());
+				if (!bDraftBuilt)
+					Error = NativeFact(TEXT("rig_simulation_spatial_change_draft_invalid"),
+						TEXT("The request failed to build a change draft without reporting a diagnostic."), TEXT("/change_draft/reported_success"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetC6ChangeKind());
+				else if (!Change.IsSet())
+					Error = NativeFact(TEXT("rig_simulation_spatial_change_draft_invalid"),
+						TEXT("The request reported success without a change draft."), TEXT("/change_draft"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetC6ChangeKind());
+				else Error = NativeValidation(Change->GetValidationDiagnostic());
 			}
-			CopyError(Error, OutError);
+			OutError = Error;
 			return false;
 		}
 
@@ -776,16 +955,14 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			Context.GetDescriptorIdentity(),
 			Context.GetRequestId(),
 			Context.GetIdempotencyKey(),
-			Before.ToSharedRef(),
+			Before,
 			{MoveTemp(Change.GetValue())});
 		OutRequest.Emplace(Draft, Context.GetCallerContext(), false);
 		if (!OutRequest->IsValid())
 		{
+			const auto ValidationError = NativeValidation(OutRequest->GetValidationDiagnostic());
 			OutRequest.Reset();
-			SetBindingError(
-				OutError,
-				TEXT("rig_simulation_spatial_planning_request_invalid"),
-				Contract.GetCapabilityId());
+			OutError = ValidationError;
 			return false;
 		}
 
@@ -794,10 +971,9 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			if (State->PreparedByRequest.Contains(Context.GetRequestId()))
 			{
 				OutRequest.Reset();
-				SetBindingError(
-					OutError,
-					TEXT("rig_simulation_spatial_request_already_prepared"),
-					Context.GetRequestId());
+				OutError = NativeFact(TEXT("rig_simulation_spatial_request_already_prepared"),
+					TEXT("This request already has a prepared operation entry."), TEXT("/request_already_prepared"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), Context.GetRequestId());
 				return false;
 			}
 			State->PreparedByRequest.Add(
@@ -832,19 +1008,11 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				MakeShared<FRigSimulationSpatialQueryProvider>(
 					Contract, Decoder, Readback));
 		}
-		if (Registrations.Num() != 5)
-		{
-			SetExecutionError(
-				OutError,
-				TEXT("rig_simulation_spatial_query_contract_count_invalid"));
-			return false;
-		}
 		FUeAgentQueryBindingError Error;
 		if (!FUeAgentDomainQueryProviderRegistry::TryCreate(
 				MoveTemp(Registrations), OutRegistry, Error))
 		{
-			SetExecutionError(
-				OutError, Error.Code, Error.SubjectId, Error.Detail);
+			OutError = Error;
 			return false;
 		}
 		return true;
@@ -886,14 +1054,6 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					Planner,
 					Executor,
 					Verifier)));
-		}
-		if (OutChains.Num() != 13)
-		{
-			OutChains.Reset();
-			SetExecutionError(
-				OutError,
-				TEXT("rig_simulation_spatial_operation_contract_count_invalid"));
-			return false;
 		}
 		return true;
 	}

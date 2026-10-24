@@ -4,6 +4,10 @@
 
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
+#include "Templates/Function.h"
+
+namespace UeAgentAuthoringWorkspaceTransaction { struct FOperationFailure; }
+namespace UE::UAI::HjsonWorkspace { struct FGraphAuthoringConnectionContext; }
 
 class FJsonObject;
 class FJsonValue;
@@ -26,14 +30,16 @@ namespace UeAgentPCGAuthoring
 		bool bReplaceNodes = true;
 		bool bCompile = true;
 		bool bSave = false;
+		TFunction<bool(UeAgentAuthoringWorkspaceTransaction::FOperationFailure&)> FinalReadback;
+		bool bPreserveExistingNodes = false;
+		TSharedPtr<const UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext> Connections;
 	};
 
 	struct UEAGENTINTERFACE_API FAssetApplyResult
 	{
 		FString Status;
 		FString Phase;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ResolvedOperation;
 		FString AssetPath;
 		FString ObjectPath;
@@ -52,8 +58,7 @@ namespace UeAgentPCGAuthoring
 	struct UEAGENTINTERFACE_API FWorkspaceInspectResult
 	{
 		FString Status;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString AssetPath;
 		FString RequestedOperation;
 		int32 UnitsChecked = 0;
@@ -67,8 +72,9 @@ namespace UeAgentPCGAuthoring
 		bool IsReady() const { return Status == TEXT("ready"); }
 	};
 
-	UEAGENTINTERFACE_API bool RegisterApplyContracts(FString& OutError);
-	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeApplyProvider();
+	UEAGENTINTERFACE_API bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeApplyProvider(
+		TSharedPtr<const UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext> Connections = nullptr);
 	UEAGENTINTERFACE_API bool ApplyAsset(const FAssetApplyRequest& Request, FAssetApplyResult& OutResult, const FString& RequestId = FString());
 	UEAGENTINTERFACE_API bool ApplyAssetWorkspace(
 		const FString& WorkspaceRoot,

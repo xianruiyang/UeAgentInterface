@@ -3,6 +3,7 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundAnimationBindings.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundCommandHandlers.h"
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialMechanicsHost.h"
+#include "Dom/JsonValue.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
 #include "QueryOwners/AnimationCurveCommands/UeAgentAnimationCurveCommandQueryOwner.h"
@@ -27,7 +28,7 @@ namespace UE::UAI::DomainAdapters::AnimationCurveCommands
 
 		bool TryCreateGraphMechanics(
 			TMap<FString, TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutHandlers.Reset();
 			TArray<FUeAgentGraphCompoundActivationProfile> Profiles;
@@ -36,18 +37,16 @@ namespace UE::UAI::DomainAdapters::AnimationCurveCommands
 				return false;
 			}
 			FGraphCompoundRuntimeConfig RuntimeConfig;
-			RuntimeConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 			FGraphCompoundAnimationProductionConfig ProductionConfig;
 			ProductionConfig.DurableJournalRoot = FPaths::ProjectSavedDir()
 				/ TEXT("UeAgentInterface/GraphCompound/AnimationCurveCommands");
-			ProductionConfig.OperationTimeoutSeconds = 120.0;
 			TSharedPtr<FGraphCompoundRuntime> Runtime;
 			FGraphCompoundRuntimeError RuntimeError;
 			if (!TryCreateAnimationGraphProductionRuntime(
-					RuntimeConfig, ProductionConfig, Runtime, RuntimeError)
-				|| !Runtime.IsValid())
+				RuntimeConfig, ProductionConfig, Runtime, RuntimeError))
 			{
-				OutError = RuntimeError.Code + TEXT(":") + RuntimeError.Detail;
+				OutError = MoveTemp(RuntimeError);
 				return false;
 			}
 			TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>> Mechanics;
@@ -62,13 +61,26 @@ namespace UE::UAI::DomainAdapters::AnimationCurveCommands
 				if (OutHandlers.Contains(Handler->GetCommandId()))
 				{
 					OutHandlers.Reset();
-					OutError = TEXT("animation_curve_graph_mechanics_duplicate:")
-						+ Handler->GetCommandId();
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_curve_graph_mechanics_duplicate"),
+						TEXT("More than one graph mechanics handler was created for command ") + Handler->GetCommandId() + TEXT("."), TEXT("runtime_factory"));
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(2);
+					OutError.PropertyPath = TEXT("command_handler_registration_count");
+					OutError.SourceKind = TEXT("native_result");
 					return false;
 				}
 				OutHandlers.Add(Handler->GetCommandId(), Handler);
 			}
-			return OutHandlers.Num() == Profiles.Num();
+			if (OutHandlers.Num() != Profiles.Num()) {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_curve_graph_mechanics_count_mismatch"),
+					TEXT("The graph mechanics factory must provide one command handler for each animation activation profile."), TEXT("runtime_factory"));
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(Profiles.Num());
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(OutHandlers.Num());
+				OutError.PropertyPath = TEXT("command_handler_count");
+				OutError.SourceKind = TEXT("native_result");
+				return false;
+			}
+			return true;
 		}
 	}
 
@@ -76,7 +88,7 @@ namespace UE::UAI::DomainAdapters::AnimationCurveCommands
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (CommandId == TEXT("animation.blend_space.asset.create")
 			|| CommandId == TEXT("animation.blend_space.definition.apply"))
@@ -94,7 +106,12 @@ namespace UE::UAI::DomainAdapters::AnimationCurveCommands
 			const TSharedRef<CommandEdge::IUeAgentCommandHandler>* Found = Host.Handlers.Find(CommandId);
 			if (!Found)
 			{
-				OutError = TEXT("animation_curve_graph_mechanics_missing:") + CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_curve_graph_mechanics_missing"),
+					TEXT("No graph mechanics handler is registered for the requested animation command."), TEXT("runtime_factory"));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("command with a registered graph mechanics handler"));
+				OutError.ActualValue = MakeShared<FJsonValueString>(CommandId);
+				OutError.PropertyPath = TEXT("command_id");
+				OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			OutHandler = *Found;

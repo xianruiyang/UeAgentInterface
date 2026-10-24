@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 
@@ -9,5 +11,5 @@ namespace UE::UAI::CommandHandlers::TextureGraph
 		TSharedRef<const DomainCapability::IDomainOperationInvocationFactory>
 			BakeFactory,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

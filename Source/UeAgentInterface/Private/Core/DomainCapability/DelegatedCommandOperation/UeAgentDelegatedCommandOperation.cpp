@@ -4,6 +4,7 @@
 #include "Misc/SecureHash.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 THIRD_PARTY_INCLUDES_START
 #include <openssl/sha.h>
@@ -35,50 +36,26 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 		{
 			OutObject.Reset();
 			return FJsonSerializer::Deserialize(
-				TJsonReaderFactory<>::Create(Json), OutObject)
+				TJsonReaderFactory<>::Create(Json), OutObject,
+				FJsonSerializer::EFlags::StoreNumbersAsStrings)
 				&& OutObject.IsValid();
 		}
 
-		void ReadFailure(
-			const FUeAgentCommandResult& Result,
-			FString& OutCode,
-			FString& OutDetail,
-			bool& bOutMutationMayHaveStarted,
-			bool& bOutRollbackConfirmed)
+		void ReadFailure(const FUeAgentCommandResult& Result,
+			UE::UAI::Contract::FDiagnostic& OutDiagnostic, bool& bOutMutationMayHaveStarted, bool& bOutRollbackConfirmed)
 		{
-			OutCode = TEXT("delegated_command_failed");
-			OutDetail = Result.GetErrorJson();
-			bOutMutationMayHaveStarted = false;
-			bOutRollbackConfirmed = false;
-			TSharedPtr<FJsonObject> Error;
-			if (TryReadObject(Result.GetErrorJson(), Error))
-			{
-				Error->TryGetStringField(TEXT("code"), OutCode);
-				Error->TryGetStringField(TEXT("detail"), OutDetail);
-				bool ExplicitMutation = false;
-				if (Error->TryGetBoolField(TEXT("mutation_started"), ExplicitMutation))
-				{
-					bOutMutationMayHaveStarted = ExplicitMutation;
-				}
-				FString Terminal;
-				if (Error->TryGetStringField(TEXT("terminal_status"), Terminal))
-				{
-					bOutRollbackConfirmed = Terminal == TEXT("rolled_back");
-					bOutMutationMayHaveStarted = bOutMutationMayHaveStarted
-						|| Terminal == TEXT("rolled_back")
-						|| Terminal == TEXT("state_unknown");
-				}
-			}
-			const FString Combined = (OutCode + TEXT(" ") + OutDetail).ToLower();
-			bOutRollbackConfirmed = bOutRollbackConfirmed
-				|| Combined.Contains(TEXT("rolled_back"));
-			bOutMutationMayHaveStarted = bOutMutationMayHaveStarted
-				|| bOutRollbackConfirmed
-				|| Combined.Contains(TEXT("persist"))
-				|| Combined.Contains(TEXT("readback"))
-				|| Combined.Contains(TEXT("verification"))
-				|| Combined.Contains(TEXT("settle"))
-				|| Combined.Contains(TEXT("state_unknown"));
+			OutDiagnostic = Result.GetDiagnostic();
+			if (OutDiagnostic.IsEmpty())
+				OutDiagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("delegated_command_failed"), TEXT("The delegated command failed without a diagnostic."), TEXT("delegated_execute"));
+			bOutRollbackConfirmed = OutDiagnostic.RollbackSucceeded.Get(false)
+				|| OutDiagnostic.TerminalStatus == TEXT("rolled_back")
+				|| OutDiagnostic.ExecutionStatus == TEXT("rolled_back")
+				|| OutDiagnostic.TransactionStatus == TEXT("rolled_back");
+			bOutMutationMayHaveStarted = OutDiagnostic.MutationMayHaveStarted.Get(false)
+				|| OutDiagnostic.MutationStarted.Get(false) || bOutRollbackConfirmed
+				|| OutDiagnostic.TerminalStatus == TEXT("state_unknown")
+				|| OutDiagnostic.ExecutionStatus == TEXT("state_unknown")
+				|| OutDiagnostic.TransactionStatus == TEXT("state_unknown");
 		}
 
 		class FInvocationState final
@@ -114,8 +91,7 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 				OutError = {};
 				if (Cancellation->IsCancelled())
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("operation_cancelled"), Request.GetCommandId());
+					OutError = FOperationLifecycleError::Failure(TEXT("operation_cancelled"), FString(), TEXT("operation_lifecycle"), Request.GetCommandId(), FString());
 					return false;
 				}
 				const FString Scope = Plan.GetImpactScope().IsEmpty()
@@ -123,8 +99,7 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 				const FString* Expected = Plan.GetExpectedRevisions().Find(Scope);
 				if (!Expected || *Expected != Request.GetCommandBindingHash())
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("operation_version_conflict"), Request.GetCommandId());
+					OutError = FOperationLifecycleError::Failure(TEXT("operation_version_conflict"), FString(), TEXT("operation_lifecycle"), Request.GetCommandId(), FString());
 					return false;
 				}
 				bOutCurrent = true;
@@ -140,7 +115,7 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 				Result = Handler->Submit(Request, Caller, Cancellation);
 				if (!Result->IsOk())
 				{
-					ReadFailure(Result.GetValue(), FailureCode, FailureDetail,
+					ReadFailure(Result.GetValue(), FailureDiagnostic,
 						bMutationMayHaveStarted, bRollbackConfirmed);
 					if (bMutationMayHaveStarted)
 					{
@@ -148,15 +123,13 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 							TEXT("delegated-failure:") + Plan.GetPlanId(),
 							Plan.GetImpactScope(), true);
 					}
-					OutError = FOperationLifecycleError(FailureCode, FailureDetail);
+					OutError = FailureDiagnostic;
 					return false;
 				}
 				TSharedPtr<FJsonObject> Payload;
 				if (!TryReadObject(Result->GetPayloadJson(), Payload))
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("delegated_command_result_invalid"),
-						Request.GetCommandId());
+					OutError = FOperationLifecycleError::Failure(TEXT("delegated_command_result_invalid"), FString(), TEXT("operation_lifecycle"), Request.GetCommandId(), FString());
 					return false;
 				}
 				Payload->TryGetStringField(TEXT("operation_id"), OperationId);
@@ -175,11 +148,7 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 			{
 				bOutConfirmed = bRollbackConfirmed;
 				OutError = bOutConfirmed ? FOperationLifecycleError()
-					: FOperationLifecycleError(
-						FailureCode.IsEmpty()
-							? FString(TEXT("delegated_rollback_unconfirmed"))
-							: FailureCode,
-						FailureDetail);
+					: (!FailureDiagnostic.IsEmpty() ? FailureDiagnostic : UE::UAI::Contract::FDiagnostic::Failure(TEXT("delegated_rollback_unconfirmed"), TEXT("The operation rollback could not be confirmed."), TEXT("rollback")));
 				return bOutConfirmed;
 			}
 
@@ -216,9 +185,7 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 					|| PersistenceReceiptId.IsEmpty()
 					|| !TryReadObject(Result->GetPayloadJson(), Payload))
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("delegated_independent_readback_invalid"),
-						Request.GetCommandId());
+					OutError = FOperationLifecycleError::Failure(TEXT("delegated_independent_readback_invalid"), FString(), TEXT("operation_lifecycle"), Request.GetCommandId(), FString());
 					return false;
 				}
 				// The delegate contract guarantees success is emitted only after its
@@ -227,29 +194,27 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 				bOutEquivalent = bIndependentReadback;
 				if (!bOutEquivalent)
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("delegated_independent_readback_not_declared"),
-						Request.GetCommandId());
+					OutError = FOperationLifecycleError::Failure(TEXT("delegated_independent_readback_not_declared"), FString(), TEXT("operation_lifecycle"), Request.GetCommandId(), FString());
 				}
 				return bOutEquivalent;
 			}
 
 			bool TryBuildSuccessPayload(const FOperationLifecycleReceipt& Receipt,
-				FString& OutPayloadJson, FString& OutError) const override
+				FString& OutPayloadJson, UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				OutPayloadJson.Reset();
 				OutError.Reset();
 				if (!Result.IsSet() || !Result->IsOk()
 					|| Receipt.GetStatus() != EOperationLifecycleStatus::Succeeded)
 				{
-					OutError = TEXT("delegated_command_result_missing");
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("delegated_command_result_missing"), TEXT("The operation has no successful result payload."), TEXT("result_projection"));
 					return false;
 				}
 				OutPayloadJson = Result->GetPayloadJson();
 				return !OutPayloadJson.IsEmpty();
 			}
 
-			FString GetFailureDetail() const override { return FailureDetail; }
+			
 
 		private:
 			TSharedRef<IUeAgentCommandHandler> Handler;
@@ -260,8 +225,7 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 			bool bIndependentReadback = false;
 			TOptional<FUeAgentCommandResult> Result;
 			FString OperationId;
-			FString FailureCode;
-			FString FailureDetail;
+			UE::UAI::Contract::FDiagnostic FailureDiagnostic;
 			bool bMutationMayHaveStarted = false;
 			bool bRollbackConfirmed = false;
 		};
@@ -291,20 +255,16 @@ namespace UE::UAI::DomainCapability::DelegatedCommandOperation
 				if (Request.GetCommandId() != OperationId || !Resolver
 					|| !bIndependentReadback)
 				{
-					OutError = FDomainOperationInvocationError(
-						TEXT("delegated_operation_contract_invalid"),
-						Request.GetCommandId(), OperationId);
+					OutError = FDomainOperationInvocationError::Failure(TEXT("delegated_operation_contract_invalid"), FString(), TEXT("operation_lifecycle"), OperationId, Request.GetCommandId());
 					return false;
 				}
 				TSharedPtr<IUeAgentCommandHandler> Handler;
 				TArray<FString> MechanicsScopes;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!Resolver(OperationId, Handler, MechanicsScopes, Error)
 					|| !Handler.IsValid())
 				{
-					OutError = FDomainOperationInvocationError(
-						TEXT("delegated_operation_runtime_unavailable"),
-						OperationId, Error);
+					OutError = Error.IsValid() ? Error : UE::UAI::Contract::FDiagnostic::Failure(TEXT("delegated_operation_runtime_unavailable"), TEXT("The delegated operation handler is unavailable."), TEXT("operation_lifecycle"), FString(), OperationId);
 					return false;
 				}
 				TArray<FString> Scopes = Caller.GetAuthorityScopes();

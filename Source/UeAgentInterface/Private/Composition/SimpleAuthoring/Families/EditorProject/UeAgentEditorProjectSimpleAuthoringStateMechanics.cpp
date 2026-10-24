@@ -1,5 +1,7 @@
 #include "Composition/SimpleAuthoring/Families/EditorProject/UeAgentEditorProjectSimpleAuthoringStateMechanics.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
@@ -8,6 +10,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Paths.h"
 #include "UObject/UnrealType.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 
 namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 {
@@ -19,16 +22,48 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 		using namespace UE::UAI::ExecutionMutation;
 		using namespace UE::UAI::StateSemantic;
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
+		using UE::UAI::Contract::FDiagnostic;
+
+		FDiagnostic StateFailure(const FString& Code, const FString& Reason, const FString& Field)
 		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
-			return false;
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("execution"));
+			Error.Schema = TEXT("uai.runtime.diagnostic/1");
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			return Error;
 		}
+
+		FDiagnostic JsonValueFailure(const FString& Path, const TSharedPtr<FJsonValue>& Actual, const FString& Expected, const bool bInternal = false)
+		{
+			auto Error = StateFailure(TEXT("editor_project_state_field_invalid"),
+				TEXT("The EditorProject state field does not satisfy the required value."), Path);
+			Error.ActualValuePresent = Actual.IsValid();
+			if (bInternal) Error.ActualEvidence = Actual;
+			else if (Actual.IsValid() && (Actual->Type == EJson::Array || Actual->Type == EJson::Object))
+			{
+				auto Summary = MakeShared<FJsonObject>();
+				Summary->SetStringField(TEXT("kind"), Actual->Type == EJson::Array ? TEXT("array") : TEXT("object"));
+				if (Actual->Type == EJson::Array) Summary->SetNumberField(TEXT("count"), Actual->AsArray().Num());
+				else if (Actual->AsObject().IsValid()) Summary->SetNumberField(TEXT("count"), Actual->AsObject()->Values.Num());
+				Error.ActualValue = MakeShared<FJsonValueObject>(Summary);
+			}
+			else Error.ActualValue = Actual;
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			return Error;
+		}
+
+		FDiagnostic JsonFieldFailure(const TSharedPtr<FJsonObject>& Object, const FString& Field,
+			const FString& Expected, const FString& Path = FString(), const bool bInternal = false)
+		{
+			return JsonValueFailure(Path.IsEmpty() ? Field : Path,
+				Object.IsValid() ? Object->Values.FindRef(Field) : nullptr, Expected, bInternal);
+		}
+
+		FString PathKey(const FString& Value)
+		{
+			return Value.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		}
+
 
 		TSharedPtr<FJsonValue> CloneJsonValue(
 			const TSharedPtr<FJsonValue>& Value)
@@ -37,248 +72,34 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 			{
 				return MakeShared<FJsonValueNull>();
 			}
-			switch (Value->Type)
-			{
-			case EJson::Null:
-				return MakeShared<FJsonValueNull>();
-			case EJson::Boolean:
-				return MakeShared<FJsonValueBoolean>(Value->AsBool());
-			case EJson::String:
-				return MakeShared<FJsonValueString>(Value->AsString());
-			case EJson::Number:
-				return MakeShared<FJsonValueNumber>(Value->AsNumber());
-			case EJson::Array:
-				{
-					TArray<TSharedPtr<FJsonValue>> Items;
-					for (const TSharedPtr<FJsonValue>& Item
-						: Value->AsArray())
-					{
-						Items.Add(CloneJsonValue(Item));
-					}
-					return MakeShared<FJsonValueArray>(MoveTemp(Items));
-				}
-			case EJson::Object:
-				{
-					const TSharedPtr<FJsonObject> Object =
-						MakeShared<FJsonObject>();
-					for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair
-						: Value->AsObject()->Values)
-					{
-						Object->SetField(
-							Pair.Key,
-							CloneJsonValue(Pair.Value));
-					}
-					return MakeShared<FJsonValueObject>(Object);
-				}
-			default:
-				return MakeShared<FJsonValueNull>();
-			}
+			return UeAgentAuthoringState::CloneCanonicalValue(Value);
 		}
 
-		bool TryCanonicalValue(
-			const TSharedPtr<FJsonValue>& JsonValue,
-			FUeAgentResourceTracker& Resources,
-			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+		bool TryCanonicalValue(const TSharedPtr<FJsonValue>& JsonValue,
+			FUeAgentResourceTracker& Resources, FUeAgentCanonicalValuePtr& OutValue, FExecutionMutationError& OutError)
 		{
 			OutValue.Reset();
-			FUeAgentStateSemanticError Error;
 			if (!JsonValue.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_state_value_missing"));
+				OutError = JsonValueFailure(TEXT("state"), JsonValue, TEXT("JSON value"));
+				return false;
 			}
-			switch (JsonValue->Type)
+			if (!CanonicalJson::TryFromJsonValue(JsonValue, Resources, OutValue, OutError))
 			{
-			case EJson::Null:
-				if (FUeAgentCanonicalValue::TryNull(
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::Boolean:
-				if (FUeAgentCanonicalValue::TryBoolean(
-						JsonValue->AsBool(),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::String:
-				if (FUeAgentCanonicalValue::TryString(
-						JsonValue->AsString(),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::Number:
-				{
-					const double Number = JsonValue->AsNumber();
-					const bool bInteger =
-						FMath::IsNearlyEqual(
-							Number,
-							FMath::FloorToDouble(Number))
-						&& Number >= static_cast<double>(MIN_int64)
-						&& Number <= static_cast<double>(MAX_int64);
-					const bool bBuilt = bInteger
-						? FUeAgentCanonicalValue::TryInteger(
-							FString::Printf(
-								TEXT("%lld"),
-								static_cast<long long>(Number)),
-							Resources,
-							OutValue,
-							Error)
-						: FUeAgentCanonicalValue::TryDecimal(
-							FString::SanitizeFloat(Number),
-							Resources,
-							OutValue,
-							Error);
-					if (bBuilt)
-					{
-						return true;
-					}
-					break;
-				}
-			case EJson::Array:
-				{
-					TArray<FUeAgentCanonicalValueRef> Items;
-					for (const TSharedPtr<FJsonValue>& Item
-						: JsonValue->AsArray())
-					{
-						FUeAgentCanonicalValuePtr Canonical;
-						if (!TryCanonicalValue(
-								Item,
-								Resources,
-								Canonical,
-								OutError))
-						{
-							return false;
-						}
-						Items.Add(Canonical.ToSharedRef());
-					}
-					if (FUeAgentCanonicalValue::TryArray(
-							Items,
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
-					break;
-				}
-			case EJson::Object:
-				{
-					TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
-					for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair
-						: JsonValue->AsObject()->Values)
-					{
-						FUeAgentCanonicalValuePtr Canonical;
-						if (!TryCanonicalValue(
-								Pair.Value,
-								Resources,
-								Canonical,
-								OutError))
-						{
-							return false;
-						}
-						Items.Emplace(
-							Pair.Key,
-							Canonical.ToSharedRef());
-					}
-					if (FUeAgentCanonicalValue::TryObject(
-							Items,
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
-					break;
-				}
-			default:
-				break;
+				if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("native_result");
+				return false;
 			}
-			return Fail(
-				OutError,
-				Error.Code.IsEmpty()
-					? TEXT("editor_project_state_value_invalid")
-					: Error.Code,
-				Error.Detail);
+			return true;
 		}
 
-		TSharedPtr<FJsonValue> CanonicalToJson(
-			const FUeAgentCanonicalValue& Value)
+		bool TryCanonicalToJson(const FUeAgentCanonicalValue& Value, TSharedPtr<FJsonValue>& OutValue,
+			FDiagnostic& OutError, const FString& Path)
 		{
-			switch (Value.GetKind())
-			{
-			case EUeAgentValueKind::Null:
-				return MakeShared<FJsonValueNull>();
-			case EUeAgentValueKind::Boolean:
-				return MakeShared<FJsonValueBoolean>(Value.GetBoolean());
-			case EUeAgentValueKind::String:
-				return MakeShared<FJsonValueString>(Value.GetText());
-			case EUeAgentValueKind::Integer:
-				{
-					int64 Parsed = 0;
-					if (!LexTryParseString(Parsed, *Value.GetLexeme()))
-					{
-						return nullptr;
-					}
-					return MakeShared<FJsonValueNumber>(
-						static_cast<double>(Parsed));
-				}
-			case EUeAgentValueKind::Decimal:
-				{
-					double Parsed = 0.0;
-					if (!LexTryParseString(Parsed, *Value.GetLexeme()))
-					{
-						return nullptr;
-					}
-					return MakeShared<FJsonValueNumber>(Parsed);
-				}
-			case EUeAgentValueKind::Array:
-				{
-					TArray<TSharedPtr<FJsonValue>> Items;
-					for (const FUeAgentCanonicalValueRef& Item
-						: Value.GetArrayItems())
-					{
-						TSharedPtr<FJsonValue> Json = CanonicalToJson(*Item);
-						if (!Json.IsValid())
-						{
-							return nullptr;
-						}
-						Items.Add(MoveTemp(Json));
-					}
-					return MakeShared<FJsonValueArray>(MoveTemp(Items));
-				}
-			case EUeAgentValueKind::Object:
-				{
-					const TSharedPtr<FJsonObject> Object =
-						MakeShared<FJsonObject>();
-					for (const TPair<FString, FUeAgentCanonicalValueRef>& Pair
-						: Value.GetObjectItems())
-					{
-						TSharedPtr<FJsonValue> Json = CanonicalToJson(*Pair.Value);
-						if (!Json.IsValid())
-						{
-							return nullptr;
-						}
-						Object->SetField(Pair.Key, MoveTemp(Json));
-					}
-					return MakeShared<FJsonValueObject>(Object);
-				}
-			default:
-				return nullptr;
-			}
+			if (CanonicalJson::TryToJsonValue(Value, OutValue, OutError)) return true;
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = OutError.PropertyPath.IsEmpty() ? Path
+				: Path + (OutError.PropertyPath.StartsWith(TEXT("/")) ? OutError.PropertyPath : TEXT("/") + OutError.PropertyPath);
+			return false;
 		}
 
 		TSharedPtr<FJsonObject> ReadConfigMap(
@@ -383,10 +204,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 				return MakeShared<FJsonValueNumber>(
 					static_cast<double>(Integer->GetPropertyValue(Address)));
 			}
-			Fail(
-				OutError,
-				TEXT("editor_project_settings_property_type_unsupported"),
-				Property.GetName());
+			OutError = StateFailure(TEXT("editor_project_settings_property_type_unsupported"),
+				TEXT("The EditorProject settings reader does not support this property type."), Property.GetName());
+			OutError.ActualValue = MakeShared<FJsonValueString>(Property.GetCPPType());
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("bool, string, int32 or int64"));
 			return nullptr;
 		}
 
@@ -421,98 +242,140 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 			OutDefaults = MakeShared<FJsonObject>();
 			UObject* Settings = Target.GetSettingsObject();
 			const TArray<TSharedPtr<FJsonValue>>* Changes = nullptr;
-			if (!Settings
-				|| !RequestPayload.IsValid()
-				|| !RequestPayload->TryGetArrayField(TEXT("changes"), Changes)
-				|| !Changes)
+			if (!Settings)
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_settings_state_request_invalid"),
-					Target.GetCanonicalRef());
+				OutError = StateFailure(TEXT("editor_project_settings_state_request_invalid"),
+					TEXT("The EditorProject target has no settings object to read."), TEXT("settings_object"));
+				OutError.TargetPath = Target.GetCanonicalRef();
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
+				return false;
+			}
+			if (!RequestPayload.IsValid() || !RequestPayload->TryGetArrayField(TEXT("changes"), Changes) || !Changes)
+			{
+				OutError = !RequestPayload.IsValid() ? JsonValueFailure(TEXT("request"), nullptr, TEXT("object"))
+					: JsonFieldFailure(RequestPayload, TEXT("changes"), TEXT("array"));
+				OutError.TargetPath = Target.GetCanonicalRef();
+				return false;
+			}
+			TArray<FUeAgentEditorProjectSettingsFieldObservation> Observations;
+			FExecutionMutationError ObservationError;
+			if (!Resolver.TryReadSettingsFields(
+					*Settings,
+					Observations,
+					ObservationError))
+			{
+				if ((!ObservationError.IsEmpty()))
+				{
+					OutError = MoveTemp(ObservationError);
+					return false;
+				}
+				OutError = StateFailure(TEXT("editor_project_settings_fields_unavailable"),
+					TEXT("The settings resolver could not enumerate fields and returned no diagnostic."), TEXT("settings_fields"));
+				OutError.TargetPath = Target.GetCanonicalRef();
+				return false;
 			}
 			const TArray<TSharedPtr<FJsonValue>>* Nested = nullptr;
-			for (const TSharedPtr<FJsonValue>& ChangeValue : *Changes)
+			FDiagnostic NestedError;
+			FString NestedPath;
+			for (int32 ChangeIndex = 0; ChangeIndex < Changes->Num(); ++ChangeIndex)
 			{
-				const TSharedPtr<FJsonObject> Change =
-					ChangeValue.IsValid() ? ChangeValue->AsObject() : nullptr;
+				const auto& ChangeValue = (*Changes)[ChangeIndex];
+				const auto Change = ChangeValue.IsValid() ? ChangeValue->AsObject() : nullptr;
 				FString FieldId;
 				const TSharedPtr<FJsonObject>* Typed = nullptr;
-				if (Change.IsValid()
-					&& Change->TryGetStringField(TEXT("field_id"), FieldId)
-					&& FieldId == TEXT("properties")
-					&& Change->TryGetObjectField(TEXT("value"), Typed)
-					&& Typed && Typed->IsValid())
+				if (!Change.IsValid() || !Change->TryGetStringField(TEXT("field_id"), FieldId) || FieldId != TEXT("properties")) continue;
+				const FString ChangePath = TEXT("changes/") + FString::FromInt(ChangeIndex);
+				if (!Change->TryGetObjectField(TEXT("value"), Typed) || !Typed || !Typed->IsValid())
 				{
-					const TSharedPtr<FJsonValue> Canonical =
-						(*Typed)->TryGetField(TEXT("canonical_value"));
-					if (Canonical.IsValid()
-						&& Canonical->Type == EJson::Array)
-					{
-						Nested = &Canonical->AsArray();
-					}
-					break;
+					if (NestedError.IsEmpty()) NestedError = JsonFieldFailure(Change, TEXT("value"), TEXT("object"), ChangePath + TEXT("/value"));
+					continue;
 				}
+				const auto Canonical = (*Typed)->TryGetField(TEXT("canonical_value"));
+				NestedPath = ChangePath + TEXT("/value/canonical_value");
+				if (Canonical.IsValid() && Canonical->Type == EJson::Array) Nested = &Canonical->AsArray();
+				else NestedError = JsonValueFailure(NestedPath, Canonical, TEXT("array of property changes"));
+				break;
 			}
 			if (!Nested)
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_settings_changes_missing"));
+				OutError = NestedError;
+				if (OutError.IsEmpty())
+				{
+					OutError = StateFailure(TEXT("editor_project_settings_changes_missing"),
+						TEXT("The settings request contains no properties change with an array of canonical values."), TEXT("changes"));
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(Changes->Num());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a properties change whose value.canonical_value is an array"));
+				}
+				OutError.TargetPath = Target.GetCanonicalRef();
+				return false;
 			}
-			for (const TSharedPtr<FJsonValue>& UnitValue : *Nested)
+			for (int32 UnitIndex = 0; UnitIndex < Nested->Num(); ++UnitIndex)
 			{
+				const auto& UnitValue = (*Nested)[UnitIndex];
+				const FString UnitPath = NestedPath + TEXT("/") + FString::FromInt(UnitIndex);
 				const TSharedPtr<FJsonObject> Unit =
 					UnitValue.IsValid() ? UnitValue->AsObject() : nullptr;
 				FString FieldRef;
-				FString ExpectedRevision;
 				FString TypeId;
 				FProperty* Property = nullptr;
 				FString CurrentRevision;
-				if (!Unit.IsValid()
-					|| !Unit->TryGetStringField(TEXT("field_ref"), FieldRef)
-					|| !Unit->TryGetStringField(
-						TEXT("expected_revision"),
-						ExpectedRevision)
-					|| !Unit->TryGetStringField(TEXT("type_id"), TypeId)
-					|| !Resolver.TryResolveSettingsField(
-						*Settings,
-						FieldRef,
-						ExpectedRevision,
-						Property,
-						CurrentRevision,
-						OutError)
-					|| !Property
-					|| CurrentRevision != ExpectedRevision)
+				const FUeAgentEditorProjectSettingsFieldObservation* Observation = nullptr;
+				if (!Unit.IsValid())
 				{
-					return OutError.IsPresent()
-						? false
-						: Fail(
-							OutError,
-							TEXT("editor_project_settings_field_unresolved"),
-							FieldRef);
+					OutError = JsonValueFailure(UnitPath, UnitValue, TEXT("object"));
+					return false;
+				}
+				if (!Unit->TryGetStringField(TEXT("field_ref"), FieldRef))
+				{
+					OutError = JsonFieldFailure(Unit, TEXT("field_ref"), TEXT("string"), UnitPath + TEXT("/field_ref"));
+					return false;
+				}
+				if (!Unit->TryGetStringField(TEXT("type_id"), TypeId))
+				{
+					OutError = JsonFieldFailure(Unit, TEXT("type_id"), TEXT("string"), UnitPath + TEXT("/type_id"));
+					OutError.TargetPath = FieldRef;
+					return false;
+				}
+				Observation = Observations.FindByPredicate(
+						[&FieldRef](const FUeAgentEditorProjectSettingsFieldObservation& Candidate)
+						{
+							return Candidate.FieldRef == FieldRef;
+						});
+				if (!Observation)
+				{
+					OutError = StateFailure(TEXT("editor_project_settings_field_unresolved"),
+						TEXT("The requested settings field was not found in the resolver observations."), UnitPath + TEXT("/field_ref"));
+					OutError.TargetPath = FieldRef;
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(FieldRef);
+					return false;
+				}
+				const bool bResolved = Resolver.TryResolveSettingsField(*Settings, FieldRef, Observation->FieldRevision,
+					Property, CurrentRevision, OutError);
+				if (!bResolved)
+				{
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = FieldRef;
+					if (OutError.Source.JsonPath.IsEmpty()) OutError.Source.JsonPath = TEXT("/") + UnitPath + TEXT("/field_ref");
+					return false;
 				}
 				TSharedPtr<FJsonValue> Current =
 					ReadPropertyValue(*Settings, *Property, OutError);
 				TSharedPtr<FJsonValue> Default =
 					DefaultPropertyValue(*Property);
-				if (!Current.IsValid() || !Default.IsValid())
+				if (!Current.IsValid())
 				{
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = FieldRef;
+					if (OutError.Source.JsonPath.IsEmpty()) OutError.Source.JsonPath = TEXT("/") + UnitPath + TEXT("/field_ref");
 					return false;
 				}
 				const TSharedPtr<FJsonObject> CurrentRecord =
 					MakeShared<FJsonObject>();
-				CurrentRecord->SetStringField(
-					TEXT("target_revision"),
-					CurrentRevision);
 				CurrentRecord->SetStringField(TEXT("type_id"), TypeId);
 				CurrentRecord->SetField(TEXT("value"), Current);
 				OutProperties->SetObjectField(FieldRef, CurrentRecord);
 				const TSharedPtr<FJsonObject> DefaultRecord =
 					MakeShared<FJsonObject>();
-				DefaultRecord->SetStringField(
-					TEXT("target_revision"),
-					CurrentRevision);
 				DefaultRecord->SetStringField(TEXT("type_id"), TypeId);
 				DefaultRecord->SetField(TEXT("value"), Default);
 				OutDefaults->SetObjectField(FieldRef, DefaultRecord);
@@ -582,20 +445,29 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 				: nullptr;
 		}
 
-		TSharedPtr<FJsonValue> GetCanonicalChangeValue(
-			const TSharedPtr<FJsonObject>& Change)
+		TSharedPtr<FJsonValue> GetCanonicalChangeValue(const TSharedPtr<FJsonObject>& Change,
+			FDiagnostic& OutError, const FString& Path)
 		{
-			const TSharedPtr<FJsonObject>* Value =
-				GetObjectField(Change, TEXT("value"));
-			return Value ? (*Value)->TryGetField(TEXT("canonical_value"))
-				: nullptr;
+			const TSharedPtr<FJsonObject>* Value = GetObjectField(Change, TEXT("value"));
+			if (!Value)
+			{
+				OutError = JsonFieldFailure(Change, TEXT("value"), TEXT("object"), Path + TEXT("/value"));
+				return nullptr;
+			}
+			const auto Canonical = (*Value)->TryGetField(TEXT("canonical_value"));
+			if (!Canonical.IsValid())
+				OutError = JsonFieldFailure(*Value, TEXT("canonical_value"), TEXT("JSON value"), Path + TEXT("/value/canonical_value"));
+			return Canonical;
 		}
 
 		bool ApplyMapChange(
 			FJsonObject& FieldState,
 			const FString& FieldId,
 			const FString& Presence,
-			const TSharedPtr<FJsonValue>& Value)
+			const TSharedPtr<FJsonValue>& Value,
+			FDiagnostic& OutError,
+			const FString& Path,
+			const FDiagnostic& ValueError)
 		{
 			TSharedPtr<FJsonObject> Current = MakeShared<FJsonObject>();
 			const TSharedPtr<FJsonObject>* Existing = nullptr;
@@ -615,6 +487,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 					Value.IsValid() ? Value->AsObject() : nullptr;
 				if (!Values.IsValid())
 				{
+					OutError = !Value.IsValid() ? ValueError : JsonValueFailure(Path, Value, TEXT("object"));
 					return false;
 				}
 				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair
@@ -640,7 +513,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 			FJsonObject& FieldState,
 			const FString& FieldId,
 			const FString& Presence,
-			const TSharedPtr<FJsonValue>& Value)
+			const TSharedPtr<FJsonValue>& Value,
+			FDiagnostic& OutError,
+			const FString& Path,
+			const FDiagnostic& ValueError)
 		{
 			TSet<FString> Current;
 			if (Presence == TEXT("set") || Presence == TEXT("remove"))
@@ -661,12 +537,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 			{
 				if (!Value.IsValid() || Value->Type != EJson::Array)
 				{
+					OutError = !Value.IsValid() ? ValueError : JsonValueFailure(Path, Value, TEXT("array of strings"));
 					return false;
 				}
-				for (const TSharedPtr<FJsonValue>& Item : Value->AsArray())
+				const auto& Values = Value->AsArray();
+				for (int32 Index = 0; Index < Values.Num(); ++Index)
 				{
+					const auto& Item = Values[Index];
 					if (!Item.IsValid() || Item->Type != EJson::String)
 					{
+						OutError = JsonValueFailure(Path + TEXT("/") + FString::FromInt(Index), Item, TEXT("string"));
 						return false;
 					}
 					if (Presence == TEXT("remove"))
@@ -693,7 +573,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 		bool ApplyStringTableRowsChange(
 			FJsonObject& FieldState,
 			const FString& Presence,
-			const TSharedPtr<FJsonValue>& Value)
+			const TSharedPtr<FJsonValue>& Value,
+			FDiagnostic& OutError,
+			const FString& Path,
+			const FDiagnostic& ValueError)
 		{
 			TMap<FString, TSharedPtr<FJsonObject>> Rows;
 			if (Presence == TEXT("set") || Presence == TEXT("remove"))
@@ -719,16 +602,24 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 			{
 				if (!Value.IsValid() || Value->Type != EJson::Array)
 				{
+					OutError = !Value.IsValid() ? ValueError : JsonValueFailure(Path, Value, TEXT("array of row objects"));
 					return false;
 				}
-				for (const TSharedPtr<FJsonValue>& Item : Value->AsArray())
+				const auto& Values = Value->AsArray();
+				for (int32 Index = 0; Index < Values.Num(); ++Index)
 				{
+					const auto& Item = Values[Index];
 					const TSharedPtr<FJsonObject> Row =
 						Item.IsValid() ? Item->AsObject() : nullptr;
 					FString Key;
-					if (!Row.IsValid()
-						|| !Row->TryGetStringField(TEXT("key"), Key))
+					if (!Row.IsValid())
 					{
+						OutError = JsonValueFailure(Path + TEXT("/") + FString::FromInt(Index), Item, TEXT("object"));
+						return false;
+					}
+					if (!Row->TryGetStringField(TEXT("key"), Key))
+					{
+						OutError = JsonFieldFailure(Row, TEXT("key"), TEXT("string"), Path + TEXT("/") + FString::FromInt(Index) + TEXT("/key"));
 						return false;
 					}
 					if (Presence == TEXT("remove"))
@@ -757,46 +648,68 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 		bool ApplySettingsChange(
 			FJsonObject& FieldState,
 			const FJsonObject& Defaults,
-			const TSharedPtr<FJsonValue>& Value)
+			const TSharedPtr<FJsonValue>& Value,
+			FDiagnostic& OutError,
+			const FString& Path,
+			const FDiagnostic& ValueError)
 		{
 			const TSharedPtr<FJsonObject>* CurrentProperties = nullptr;
 			const TSharedPtr<FJsonObject>* DefaultProperties = nullptr;
-			if (!FieldState.TryGetObjectField(
-					TEXT("properties"),
-					CurrentProperties)
-				|| !CurrentProperties || !CurrentProperties->IsValid()
-				|| !Defaults.TryGetObjectField(
-					TEXT("properties"),
-					DefaultProperties)
-				|| !DefaultProperties || !DefaultProperties->IsValid()
-				|| !Value.IsValid() || Value->Type != EJson::Array)
+			if (!FieldState.TryGetObjectField(TEXT("properties"), CurrentProperties) || !CurrentProperties || !CurrentProperties->IsValid())
 			{
+				OutError = JsonValueFailure(TEXT("before/field_state/properties"), FieldState.Values.FindRef(TEXT("properties")), TEXT("object"));
+				return false;
+			}
+			if (!Defaults.TryGetObjectField(TEXT("properties"), DefaultProperties) || !DefaultProperties || !DefaultProperties->IsValid())
+			{
+				OutError = JsonValueFailure(TEXT("before/field_defaults/properties"), Defaults.Values.FindRef(TEXT("properties")), TEXT("object"));
+				return false;
+			}
+			if (!Value.IsValid() || Value->Type != EJson::Array)
+			{
+				OutError = !Value.IsValid() ? ValueError : JsonValueFailure(Path, Value, TEXT("array of property changes"));
 				return false;
 			}
 			const TSharedPtr<FJsonObject> Properties =
 				CloneJsonValue(
 					MakeShared<FJsonValueObject>(*CurrentProperties))
 						->AsObject();
-			for (const TSharedPtr<FJsonValue>& Item : Value->AsArray())
+			const auto& Values = Value->AsArray();
+			for (int32 Index = 0; Index < Values.Num(); ++Index)
 			{
+				const auto& Item = Values[Index];
+				const FString ItemPath = Path + TEXT("/") + FString::FromInt(Index);
 				const TSharedPtr<FJsonObject> Change =
 					Item.IsValid() ? Item->AsObject() : nullptr;
 				FString FieldRef;
 				FString Presence;
 				const TSharedPtr<FJsonObject>* CurrentRecord = nullptr;
 				const TSharedPtr<FJsonObject>* DefaultRecord = nullptr;
-				if (!Change.IsValid()
-					|| !Change->TryGetStringField(TEXT("field_ref"), FieldRef)
-					|| !Change->TryGetStringField(TEXT("presence"), Presence)
-					|| !Properties->TryGetObjectField(
-						FieldRef,
-						CurrentRecord)
-					|| !CurrentRecord || !CurrentRecord->IsValid()
-					|| !(*DefaultProperties)->TryGetObjectField(
-						FieldRef,
-						DefaultRecord)
-					|| !DefaultRecord || !DefaultRecord->IsValid())
+				if (!Change.IsValid())
 				{
+					OutError = JsonValueFailure(ItemPath, Item, TEXT("object"));
+					return false;
+				}
+				if (!Change->TryGetStringField(TEXT("field_ref"), FieldRef))
+				{
+					OutError = JsonFieldFailure(Change, TEXT("field_ref"), TEXT("string"), ItemPath + TEXT("/field_ref"));
+					return false;
+				}
+				if (!Change->TryGetStringField(TEXT("presence"), Presence))
+				{
+					OutError = JsonFieldFailure(Change, TEXT("presence"), TEXT("string"), ItemPath + TEXT("/presence"));
+					return false;
+				}
+				if (!Properties->TryGetObjectField(FieldRef, CurrentRecord) || !CurrentRecord || !CurrentRecord->IsValid())
+				{
+					OutError = JsonFieldFailure(Properties, FieldRef, TEXT("property record object"), TEXT("before/field_state/properties/") + PathKey(FieldRef));
+					OutError.TargetPath = FieldRef;
+					return false;
+				}
+				if (!(*DefaultProperties)->TryGetObjectField(FieldRef, DefaultRecord) || !DefaultRecord || !DefaultRecord->IsValid())
+				{
+					OutError = JsonFieldFailure(*DefaultProperties, FieldRef, TEXT("default property record object"), TEXT("before/field_defaults/properties/") + PathKey(FieldRef));
+					OutError.TargetPath = FieldRef;
 					return false;
 				}
 				const TSharedPtr<FJsonObject> ResultRecord =
@@ -809,6 +722,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 						Change->TryGetField(TEXT("value"));
 					if (!NewValue.IsValid())
 					{
+						OutError = JsonFieldFailure(Change, TEXT("value"), TEXT("JSON value"), ItemPath + TEXT("/value"));
+						OutError.TargetPath = FieldRef;
 						return false;
 					}
 					ResultRecord->SetField(
@@ -822,6 +737,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 						(*DefaultRecord)->TryGetField(TEXT("value"));
 					if (!DefaultValue.IsValid())
 					{
+						OutError = JsonFieldFailure(*DefaultRecord, TEXT("value"), TEXT("JSON value"),
+							TEXT("before/field_defaults/properties/") + PathKey(FieldRef) + TEXT("/value"));
+						OutError.TargetPath = FieldRef;
 						return false;
 					}
 					ResultRecord->SetField(
@@ -830,6 +748,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 				}
 				else
 				{
+					OutError = JsonFieldFailure(Change, TEXT("presence"), TEXT("set, clear or null"), ItemPath + TEXT("/presence"));
+					OutError.TargetPath = FieldRef;
 					return false;
 				}
 				Properties->SetObjectField(FieldRef, ResultRecord);
@@ -853,14 +773,25 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 		OutState.Reset();
 		OutDependencies.Reset();
 		OutError = FExecutionMutationError();
-		if (!Target.IsValid()
-			|| Target.GetProfileId() != ProfileId
-			|| !RequestPayload.IsValid())
+		if (!Target.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_state_target_invalid"),
-				Target.GetCanonicalRef());
+			OutError = Target.GetValidationDiagnostic();
+			return false;
+		}
+		if (Target.GetProfileId() != ProfileId)
+		{
+			OutError = StateFailure(TEXT("editor_project_state_target_invalid"),
+				TEXT("The EditorProject target profile differs from the requested state profile."), TEXT("profile_id"));
+			OutError.TargetPath = Target.GetCanonicalRef();
+			OutError.ActualValue = MakeShared<FJsonValueString>(Target.GetProfileId());
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(ProfileId);
+			return false;
+		}
+		if (!RequestPayload.IsValid())
+		{
+			OutError = JsonValueFailure(TEXT("request"), nullptr, TEXT("object"));
+			OutError.TargetPath = Target.GetCanonicalRef();
+			return false;
 		}
 		const TSharedPtr<FJsonObject> Fields = MakeShared<FJsonObject>();
 		const TSharedPtr<FJsonObject> Defaults = MakeShared<FJsonObject>();
@@ -889,10 +820,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 			UStringTable* Object = Target.GetStringTable();
 			if (!Object)
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_string_table_target_invalid"),
-					Target.GetCanonicalRef());
+				OutError = StateFailure(TEXT("editor_project_string_table_target_invalid"),
+					TEXT("The EditorProject target has no StringTable object."), TEXT("string_table"));
+				OutError.TargetPath = Target.GetCanonicalRef();
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
+				return false;
 			}
 			Fields->SetStringField(
 				TEXT("namespace"),
@@ -909,10 +842,21 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 			const FString& Section = Target.GetConfigSection();
 			if (!Config || Section.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_config_target_invalid"),
-					Target.GetCanonicalRef());
+				OutError = StateFailure(TEXT("editor_project_config_target_invalid"),
+					!Config ? TEXT("The EditorProject target has no configuration document.") : TEXT("The EditorProject target has an empty configuration section."),
+					!Config ? TEXT("config_document") : TEXT("config_section"));
+				OutError.TargetPath = Target.GetCanonicalRef();
+				if (!Config)
+				{
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
+				}
+				else
+				{
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Section);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty section name"));
+				}
+				return false;
 			}
 			if (ProfileId == TEXT("device_profile"))
 			{
@@ -950,16 +894,18 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 							Changes)
 						&& Changes)
 					{
-						for (const TSharedPtr<FJsonValue>& ChangeValue : *Changes)
+						for (int32 ChangeIndex = 0; ChangeIndex < Changes->Num(); ++ChangeIndex)
 						{
+							const auto& ChangeValue = (*Changes)[ChangeIndex];
+							const FString ChangePath = TEXT("changes/") + FString::FromInt(ChangeIndex);
 							const TSharedPtr<FJsonObject> Change =
 								ChangeValue.IsValid()
 									? ChangeValue->AsObject()
 									: nullptr;
 							FString FieldId;
 							FString Presence;
-							TSharedPtr<FJsonValue> Value =
-								GetCanonicalChangeValue(Change);
+							FDiagnostic ProbeError;
+							TSharedPtr<FJsonValue> Value = GetCanonicalChangeValue(Change, ProbeError, ChangePath);
 							if (!Change.IsValid()
 								|| !Change->TryGetStringField(
 									TEXT("field_id"),
@@ -975,14 +921,25 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 								continue;
 							}
 							FUeAgentEditorProjectSimpleEffectResolvedTarget BaseTarget;
-							if (!Resolver.TryResolveTarget(
-									Value->AsString(),
-									BaseTarget,
-									OutError)
-								|| !BaseTarget.IsValid()
-								|| BaseTarget.GetProfileId()
-									!= TEXT("device_profile"))
+							const bool bResolved = Resolver.TryResolveTarget(Value->AsString(), BaseTarget, OutError);
+							if (!bResolved || !BaseTarget.IsValid() || BaseTarget.GetProfileId() != TEXT("device_profile"))
 							{
+								if (OutError.IsEmpty())
+								{
+									if (bResolved && !BaseTarget.IsValid()) OutError = BaseTarget.GetValidationDiagnostic();
+									else
+									{
+										OutError = StateFailure(TEXT("editor_project_base_profile_unresolved"),
+											!bResolved ? TEXT("The base-profile resolver failed without returning a diagnostic.")
+												: TEXT("The resolved base target is not a device profile."), ChangePath + TEXT("/value/canonical_value"));
+										if (bResolved)
+										{
+											OutError.ActualValue = MakeShared<FJsonValueString>(BaseTarget.GetProfileId());
+											OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("device_profile"));
+										}
+									}
+								}
+								if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Value->AsString();
 								return false;
 							}
 							OutDependencies.Add({
@@ -1055,8 +1012,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 	{
 		OutState.Reset();
 		OutError = FExecutionMutationError();
-		TSharedPtr<FJsonValue> BeforeValue = CanonicalToJson(Before);
-		TSharedPtr<FJsonValue> AfterValue = CanonicalToJson(ProposedAfter);
+		TSharedPtr<FJsonValue> BeforeValue;
+		TSharedPtr<FJsonValue> AfterValue;
+		FDiagnostic BeforeError;
+		FDiagnostic AfterError;
+		const bool bBeforeConverted = TryCanonicalToJson(Before, BeforeValue, BeforeError, TEXT("before"));
+		const bool bAfterConverted = TryCanonicalToJson(ProposedAfter, AfterValue, AfterError, TEXT("proposed_after"));
+		if (!bBeforeConverted || !bAfterConverted)
+		{
+			OutError = !bBeforeConverted ? MoveTemp(BeforeError) : MoveTemp(AfterError);
+			return false;
+		}
 		const TSharedPtr<FJsonObject> State =
 			BeforeValue.IsValid() ? BeforeValue->AsObject() : nullptr;
 		const TSharedPtr<FJsonObject> After =
@@ -1065,73 +1031,86 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 		const TSharedPtr<FJsonObject>* DefaultsPtr = nullptr;
 		const TArray<TSharedPtr<FJsonValue>>* Changes = nullptr;
 		FString ProfileId;
-		if (!State.IsValid() || !After.IsValid()
-			|| !After->TryGetStringField(TEXT("profile_id"), ProfileId)
-			|| !State->TryGetObjectField(TEXT("field_state"), FieldsPtr)
-			|| !FieldsPtr || !FieldsPtr->IsValid()
-			|| !State->TryGetObjectField(TEXT("field_defaults"), DefaultsPtr)
-			|| !DefaultsPtr || !DefaultsPtr->IsValid()
-			|| !After->TryGetArrayField(TEXT("typed_changes"), Changes)
-			|| !Changes)
+		if (!State.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_expected_state_invalid"));
+			OutError = JsonValueFailure(TEXT("before"), BeforeValue, TEXT("object"));
+			return false;
+		}
+		if (!After.IsValid())
+		{
+			OutError = JsonValueFailure(TEXT("proposed_after"), AfterValue, TEXT("object"));
+			return false;
+		}
+		if (!After->TryGetStringField(TEXT("profile_id"), ProfileId))
+		{
+			OutError = JsonFieldFailure(After, TEXT("profile_id"), TEXT("string"), TEXT("proposed_after/profile_id"));
+			return false;
+		}
+		if (!State->TryGetObjectField(TEXT("field_state"), FieldsPtr) || !FieldsPtr || !FieldsPtr->IsValid())
+		{
+			OutError = JsonFieldFailure(State, TEXT("field_state"), TEXT("object"), TEXT("before/field_state"));
+			return false;
+		}
+		if (!State->TryGetObjectField(TEXT("field_defaults"), DefaultsPtr) || !DefaultsPtr || !DefaultsPtr->IsValid())
+		{
+			OutError = JsonFieldFailure(State, TEXT("field_defaults"), TEXT("object"), TEXT("before/field_defaults"));
+			return false;
+		}
+		if (!After->TryGetArrayField(TEXT("typed_changes"), Changes) || !Changes)
+		{
+			OutError = JsonFieldFailure(After, TEXT("typed_changes"), TEXT("array"), TEXT("proposed_after/typed_changes"));
+			return false;
 		}
 		const TSharedPtr<FJsonObject> Fields =
 			CloneJsonValue(MakeShared<FJsonValueObject>(*FieldsPtr))
 				->AsObject();
-		for (const TSharedPtr<FJsonValue>& ChangeValue : *Changes)
+		for (int32 ChangeIndex = 0; ChangeIndex < Changes->Num(); ++ChangeIndex)
 		{
+			const auto& ChangeValue = (*Changes)[ChangeIndex];
+			const FString ChangePath = TEXT("proposed_after/typed_changes/") + FString::FromInt(ChangeIndex);
 			const TSharedPtr<FJsonObject> Change =
 				ChangeValue.IsValid() ? ChangeValue->AsObject() : nullptr;
 			FString FieldId;
 			FString Presence;
-			if (!Change.IsValid()
-				|| !Change->TryGetStringField(TEXT("field_id"), FieldId)
-				|| !Change->TryGetStringField(TEXT("presence"), Presence))
+			if (!Change.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_expected_change_invalid"));
+				OutError = JsonValueFailure(ChangePath, ChangeValue, TEXT("object"));
+				return false;
 			}
-			const TSharedPtr<FJsonValue> Value =
-				GetCanonicalChangeValue(Change);
+			if (!Change->TryGetStringField(TEXT("field_id"), FieldId))
+			{
+				OutError = JsonFieldFailure(Change, TEXT("field_id"), TEXT("string"), ChangePath + TEXT("/field_id"));
+				return false;
+			}
+			if (!Change->TryGetStringField(TEXT("presence"), Presence))
+			{
+				OutError = JsonFieldFailure(Change, TEXT("presence"), TEXT("string"), ChangePath + TEXT("/presence"));
+				return false;
+			}
+			FDiagnostic ValueError;
+			const auto Value = GetCanonicalChangeValue(Change, ValueError, ChangePath);
+			const FString ValuePath = ChangePath + TEXT("/value/canonical_value");
 			bool bApplied = false;
 			if ((FieldId == TEXT("entries")
 					&& ProfileId != TEXT("string_table"))
 				|| FieldId == TEXT("cvars"))
 			{
-				bApplied = ApplyMapChange(
-					*Fields,
-					FieldId,
-					Presence,
-					Value);
+				bApplied = ApplyMapChange(*Fields, FieldId, Presence, Value, OutError, ValuePath, ValueError);
 			}
 			else if (ProfileId == TEXT("project_settings")
 				&& FieldId == TEXT("properties"))
 			{
-				bApplied = ApplySettingsChange(
-					*Fields,
-					**DefaultsPtr,
-					Value);
+				bApplied = ApplySettingsChange(*Fields, **DefaultsPtr, Value, OutError, ValuePath, ValueError);
 			}
 			else if (ProfileId == TEXT("localization_target")
 				&& FieldId == TEXT("cultures"))
 			{
-				bApplied = ApplyStringSetChange(
-					*Fields,
-					FieldId,
-					Presence,
-					Value);
+				bApplied = ApplyStringSetChange(*Fields, FieldId, Presence, Value, OutError, ValuePath, ValueError);
 			}
 			else if (ProfileId == TEXT("string_table")
 				&& FieldId == TEXT("entries"))
 			{
-				bApplied = ApplyStringTableRowsChange(
-					*Fields,
-					Presence,
-					Value);
+				bApplied = ApplyStringTableRowsChange(*Fields, Presence, Value, OutError, ValuePath, ValueError);
 			}
 			else if (Presence == TEXT("set"))
 			{
@@ -1140,6 +1119,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 				{
 					Fields->SetField(FieldId, CloneJsonValue(Value));
 				}
+				else OutError = MoveTemp(ValueError);
 			}
 			else if (Presence == TEXT("clear")
 				|| Presence == TEXT("null"))
@@ -1151,14 +1131,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 				{
 					Fields->SetField(FieldId, CloneJsonValue(Default));
 				}
+				else OutError = JsonFieldFailure(*DefaultsPtr, FieldId, TEXT("default JSON value"),
+					TEXT("before/field_defaults/") + PathKey(FieldId));
 			}
-			if (!bApplied)
+			else
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_expected_change_unsupported"),
-					ProfileId + TEXT(":") + FieldId);
+				OutError = JsonFieldFailure(Change, TEXT("presence"), TEXT("set, clear or null"), ChangePath + TEXT("/presence"));
 			}
+			if (!bApplied) return false;
 		}
 		State->SetObjectField(TEXT("field_state"), Fields);
 		State->RemoveField(TEXT("target_revision"));
@@ -1177,25 +1157,42 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 		OutError = FExecutionMutationError();
 		const FString FullPath =
 			FPaths::ConvertRelativePathToFull(StagedPath);
-		if (!Target.IsValid() || FullPath.IsEmpty()
-			|| !IFileManager::Get().MakeDirectory(
-				*FPaths::GetPath(FullPath),
-				true))
+		if (!Target.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_config_stage_path_invalid"),
-				FullPath);
+			OutError = Target.GetValidationDiagnostic();
+			return false;
+		}
+		if (FullPath.IsEmpty())
+		{
+			OutError = StateFailure(TEXT("editor_project_config_stage_path_invalid"),
+				TEXT("The configuration stage path resolves to an empty path."), TEXT("staged_path"));
+			OutError.TargetPath = Target.GetCanonicalRef();
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(StagedPath);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty file path"));
+			return false;
+		}
+		if (!IFileManager::Get().MakeDirectory(*FPaths::GetPath(FullPath), true))
+		{
+			OutError = StateFailure(TEXT("editor_project_config_stage_path_invalid"),
+				TEXT("The configuration stage directory could not be created."), TEXT("staged_directory"));
+			OutError.TargetPath = Target.GetCanonicalRef();
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(FPaths::GetPath(FullPath));
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			return false;
 		}
 		IFileManager::Get().Delete(*FullPath, false, true);
 		if (FConfigFile* Config = Target.GetConfigDocument())
 		{
 			if (!Config->Write(FullPath))
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_config_stage_write_failed"),
-					Target.GetCanonicalRef());
+				OutError = StateFailure(TEXT("editor_project_config_stage_write_failed"),
+					TEXT("The configuration document writer reported failure for the staged file."), TEXT("staged_file/write_succeeded"));
+				OutError.TargetPath = Target.GetCanonicalRef();
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(FullPath);
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				return false;
 			}
 			return true;
 		}
@@ -1204,16 +1201,21 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject::Private
 			Settings->SaveConfig(CPF_Config, *FullPath);
 			if (!IFileManager::Get().FileExists(*FullPath))
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_config_stage_write_failed"),
-					Target.GetCanonicalRef());
+				OutError = StateFailure(TEXT("editor_project_config_stage_write_failed"),
+					TEXT("The settings save returned without producing the staged configuration file."), TEXT("staged_file"));
+				OutError.TargetPath = Target.GetCanonicalRef();
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(FullPath);
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
+				return false;
 			}
 			return true;
 		}
-		return Fail(
-			OutError,
-			TEXT("editor_project_config_stage_target_invalid"),
-			Target.GetCanonicalRef());
+		OutError = StateFailure(TEXT("editor_project_config_stage_target_invalid"),
+			TEXT("The EditorProject target provides neither a configuration document nor a settings object for staging."), TEXT("target"));
+		OutError.TargetPath = Target.GetCanonicalRef();
+		OutError.ActualValue = MakeShared<FJsonValueString>(Target.GetProfileId());
+		OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("configuration document or settings object"));
+		return false;
 	}
 }

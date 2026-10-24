@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 
@@ -10,7 +11,7 @@ namespace UE::UAI::ArtifactPublisher
 	using UE::UAI::HjsonWorkspace::EWorkspaceKind;
 	using UE::UAI::HjsonWorkspace::FExportWorkspacePlanRef;
 
-	class FArtifactPublishError;
+	using FArtifactPublishError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IArtifactPublishVerification
 	{
@@ -39,7 +40,8 @@ namespace UE::UAI::ArtifactPublisher
 		FArtifactPublishRequest(
 			FExportWorkspacePlanRef InPlan,
 			FString InFinalPath,
-			FString InPublisherOwnerId);
+			FString InPublisherOwnerId,
+			TMap<FString, TArray<uint8>> InPreservedFiles = {});
 		FArtifactPublishRequest(
 			FExportWorkspacePlanRef InPlan,
 			FString InFinalPath,
@@ -49,16 +51,19 @@ namespace UE::UAI::ArtifactPublisher
 		const FExportWorkspacePlanRef& GetPlan() const;
 		const FString& GetFinalPath() const;
 		const FString& GetPublisherOwnerId() const;
+		const TMap<FString, TArray<uint8>>& GetPreservedFiles() const;
 		const TSharedPtr<IArtifactPublishVerification>& GetVerification() const;
 		bool RequiresVerification() const;
 		bool IsValid() const;
+		const FArtifactPublishError& GetValidationDiagnostic() const;
 
 	private:
 		FExportWorkspacePlanRef Plan;
 		FString FinalPath;
 		FString PublisherOwnerId;
+		TMap<FString, TArray<uint8>> PreservedFiles;
 		TSharedPtr<IArtifactPublishVerification> Verification;
-		bool bValid = false;
+		FArtifactPublishError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FArtifactPublishReceipt final
@@ -82,6 +87,8 @@ namespace UE::UAI::ArtifactPublisher
 		bool WasSemanticWorkspaceVerified() const;
 		bool WasTargetVersionRechecked() const;
 		const TMap<FString, FString>& GetSemanticVerificationFields() const;
+		const TArray<FArtifactPublishError>& GetCleanupWarnings() const { return CleanupWarnings; }
+		FArtifactPublishError MakeResultEncodingFailure(const FArtifactPublishError& Cause) const;
 
 	private:
 		void SetPublished(
@@ -110,6 +117,7 @@ namespace UE::UAI::ArtifactPublisher
 		bool bSemanticWorkspaceVerified = false;
 		bool bTargetVersionRechecked = false;
 		TMap<FString, FString> SemanticVerificationFields;
+		TArray<FArtifactPublishError> CleanupWarnings;
 
 		friend UEAGENTINTERFACE_API bool TryPublishExportPlan(
 			const FArtifactPublishRequest&,
@@ -118,37 +126,20 @@ namespace UE::UAI::ArtifactPublisher
 			FArtifactPublishError&);
 	};
 
-	class UEAGENTINTERFACE_API FArtifactPublishError final
-	{
-	public:
-		const FString& GetCode() const;
-		const FString& GetPath() const;
-		const FString& GetDetail() const;
-		int64 GetResourceLimit() const;
-		int64 GetResourceObserved() const;
-		void Set(
-			FString InCode,
-			FString InPath = FString(),
-			FString InDetail = FString(),
-			int64 InResourceLimit = 0,
-			int64 InResourceObserved = 0);
-
-	private:
-		FString Code;
-		FString Path;
-		FString Detail;
-		int64 ResourceLimit = 0;
-		int64 ResourceObserved = 0;
-
-		friend UEAGENTINTERFACE_API bool TryPublishExportPlan(
-			const FArtifactPublishRequest&,
-			FUeAgentResourceTracker&,
-			FArtifactPublishReceipt&,
-			FArtifactPublishError&);
-	};
+	
 
 	UEAGENTINTERFACE_API bool TryPublishExportPlan(
 		const FArtifactPublishRequest& Request,
+		FUeAgentResourceTracker& Resources,
+		FArtifactPublishReceipt& OutReceipt,
+		FArtifactPublishError& OutError);
+
+	/** Republish a fresh canonical export into its original workspace, retaining
+	 * files outside the explicitly consumed/previously managed source set. */
+	UEAGENTINTERFACE_API bool TryRefreshPublishedWorkspace(
+		const FString& CanonicalWorkspace,
+		const FString& SourceWorkspace,
+		const TArray<FString>& ManagedSourcePaths,
 		FUeAgentResourceTracker& Resources,
 		FArtifactPublishReceipt& OutReceipt,
 		FArtifactPublishError& OutError);

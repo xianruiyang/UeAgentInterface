@@ -15,7 +15,18 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
-		constexpr int32 ExpectedGraphCompoundProfileCount = 78;
+		FDiagnostic RegistryFailure(const FString& Code, const FString& Reason,
+			const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("registry"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			Error.ActualValuePresent = Error.ActualValue.IsValid();
+			Error.ExpectedValuePresent = true;
+			return Error;
+		}
 
 		void PublicRoute(
 			const FString& CommandId,
@@ -57,7 +68,7 @@ namespace UE::UAI::Composition::GraphCompound
 		bool TryPublicParameters(
 			const FUeAgentOperationDescriptor& Descriptor,
 			TArray<FUeAgentCommandParameter>& OutParameters,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutParameters.Reset();
 			TSharedPtr<FJsonObject> Schema;
@@ -74,8 +85,11 @@ namespace UE::UAI::Composition::GraphCompound
 				|| !Properties
 				|| !Properties->IsValid())
 			{
-				OutError = TEXT("graph_compound_input_schema_properties_missing:")
-					+ Descriptor.GetCapabilityId();
+				OutError = RegistryFailure(TEXT("graph_compound_input_schema_properties_missing"),
+					TEXT("The operation input schema requires an object-valued properties field"), TEXT("input_schema.properties"),
+					Schema->TryGetField(TEXT("properties")), MakeShared<FJsonValueString>(TEXT("object")));
+				OutError.CandidateName = Descriptor.GetCapabilityId();
+				OutError.ActualValuePresent = Schema->HasField(TEXT("properties"));
 				return false;
 			}
 			TSet<FString> Required;
@@ -102,15 +116,23 @@ namespace UE::UAI::Composition::GraphCompound
 					|| !Property
 					|| !Property->IsValid())
 				{
-					OutError = TEXT("graph_compound_input_property_invalid:")
-						+ Descriptor.GetCapabilityId() + TEXT(":") + Name;
+					OutError = RegistryFailure(TEXT("graph_compound_input_property_invalid"),
+						TEXT("An input parameter schema must be a JSON object"), TEXT("input_schema.properties.") + Name,
+						(*Properties)->TryGetField(Name), MakeShared<FJsonValueString>(TEXT("object")));
+					OutError.CandidateName = Descriptor.GetCapabilityId();
+					return false;
+				}
+				FString PropertySchema;
+				if (!Json::TryCanonicalize(*Property, PropertySchema, OutError))
+				{
 					return false;
 				}
 				OutParameters.Emplace(
 					Name,
 					WireType(*Property),
 					Required.Contains(Name),
-					false);
+					false,
+					MoveTemp(PropertySchema));
 			}
 			return true;
 		}
@@ -119,44 +141,43 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			TArray<FUeAgentGraphCompoundActivationProfile> Profiles;
 			TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 		};
 
 		FActivationBundle BuildBundle()
 		{
 			FActivationBundle Bundle;
 			TArray<FUeAgentOperationDescriptor> Descriptors;
-			auto AppendRegistry = [&Descriptors, &Bundle](
-				const TSharedPtr<const FUeAgentDescriptorRegistry>& Registry)
+			auto AppendRegistry = [&Descriptors, &Bundle](const TCHAR* Family, auto&& Factory)
 			{
-				if (!Registry.IsValid())
+				TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+				const bool bCreated = Factory(Registry, Bundle.Error);
+				if (!bCreated || !Registry.IsValid())
 				{
+					if (Bundle.Error.IsEmpty()) Bundle.Error = RegistryFailure(TEXT("graph_compound_domain_registry_missing"),
+						bCreated ? TEXT("The domain descriptor factory returned no registry")
+							: TEXT("The domain descriptor factory failed without a diagnostic"),
+						bCreated ? TEXT("descriptor_registry_present") : TEXT("descriptor_factory_succeeded"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					if (Bundle.Error.SubjectId.IsEmpty()) Bundle.Error.SubjectId = Family;
 					return false;
 				}
 				Descriptors.Append(Registry->GetDescriptors());
 				return true;
 			};
-
-			TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-			if (!TryCreateBlueprintMaterialGraphDescriptorRegistry(
-					Registry, Bundle.Error)
-				|| !AppendRegistry(Registry)
-				|| !TryCreatePcgAnimationGraphDescriptorRegistry(
-					Registry, Bundle.Error)
-				|| !AppendRegistry(Registry)
-				|| !TryCreateAudioMediaGraphRouteDescriptorRegistry(
-					Registry, Bundle.Error)
-				|| !AppendRegistry(Registry))
+			if (!AppendRegistry(TEXT("blueprint_material"), TryCreateBlueprintMaterialGraphDescriptorRegistry)
+				|| !AppendRegistry(TEXT("pcg_animation"), TryCreatePcgAnimationGraphDescriptorRegistry)
+				|| !AppendRegistry(TEXT("audio_media"), TryCreateAudioMediaGraphRouteDescriptorRegistry))
 			{
-				Bundle.Error = Bundle.Error.IsEmpty()
-					? TEXT("graph_compound_domain_registry_missing")
-					: Bundle.Error;
 				return Bundle;
 			}
 			if (!FUeAgentDescriptorRegistry::TryCreate(
 					MoveTemp(Descriptors), Bundle.Registry, Bundle.Error)
 				|| !Bundle.Registry.IsValid())
 			{
+				if (Bundle.Error.IsEmpty()) Bundle.Error = RegistryFailure(TEXT("graph_compound_descriptor_registry_missing"),
+					TEXT("The combined descriptor factory returned no usable registry"), TEXT("descriptor_registry_present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return Bundle;
 			}
 
@@ -175,51 +196,56 @@ namespace UE::UAI::Composition::GraphCompound
 					Identity,
 					Lane == EGraphCompoundExecutionLane::Query
 						? TEXT("query") : TEXT("operation"));
-				return Bundle.Profiles.Last().IsValid();
+				Bundle.Error = Bundle.Profiles.Last().GetValidationDiagnostic();
+				return Bundle.Error.IsEmpty();
 			};
-			for (const FGraphCompoundDomainRouteProfile& Profile
-				: GetBlueprintMaterialGraphRouteProfiles())
-			{
-				if (!AddProfile(Profile.GetCapabilityId(),
-						Profile.GetExecutionContract().GetDescriptorIdentity(),
-						Profile.GetExecutionContract().GetLane()))
-				{
-					Bundle.Profiles.Reset();
-					Bundle.Error = TEXT("graph_compound_activation_profile_invalid:")
-						+ Profile.GetCapabilityId();
-					return Bundle;
-				}
-			}
-			for (const FPcgAnimationGraphRouteProfile& Profile
-				: GetPcgAnimationGraphRouteProfiles())
-			{
-				if (!AddProfile(Profile.GetCapabilityId(),
-						Profile.GetExecutionContract().GetDescriptorIdentity(),
-						Profile.GetExecutionContract().GetLane()))
-				{
-					Bundle.Profiles.Reset();
-					Bundle.Error = TEXT("graph_compound_activation_profile_invalid:")
-						+ Profile.GetCapabilityId();
-					return Bundle;
-				}
-			}
-			for (const FAudioMediaGraphRouteProfile& Profile
-				: GetAudioMediaGraphRouteProfiles())
-			{
-				if (!AddProfile(Profile.GetCapabilityId(),
-						Profile.GetExecutionContract().GetDescriptorIdentity(),
-						Profile.GetExecutionContract().GetLane()))
-				{
-					Bundle.Profiles.Reset();
-					Bundle.Error = TEXT("graph_compound_activation_profile_invalid:")
-						+ Profile.GetCapabilityId();
-					return Bundle;
-				}
-			}
-			if (Bundle.Profiles.Num() != ExpectedGraphCompoundProfileCount)
+			const TArray<FGraphCompoundDomainRouteProfile>* BlueprintMaterialProfiles = nullptr;
+			if (!TryGetBlueprintMaterialGraphRouteProfiles(BlueprintMaterialProfiles, Bundle.Error))
 			{
 				Bundle.Profiles.Reset();
-				Bundle.Error = TEXT("graph_compound_activation_profile_count_invalid");
+				return Bundle;
+			}
+			for (const FGraphCompoundDomainRouteProfile& Profile : *BlueprintMaterialProfiles)
+			{
+				if (!AddProfile(Profile.GetCapabilityId(),
+						Profile.GetExecutionContract().GetDescriptorIdentity(),
+						Profile.GetExecutionContract().GetLane()))
+				{
+					Bundle.Profiles.Reset();
+					return Bundle;
+				}
+			}
+			const TArray<FPcgAnimationGraphRouteProfile>* PcgAnimationProfiles = nullptr;
+			if (!TryGetPcgAnimationGraphRouteProfiles(PcgAnimationProfiles, Bundle.Error))
+			{
+				Bundle.Profiles.Reset();
+				return Bundle;
+			}
+			for (const FPcgAnimationGraphRouteProfile& Profile : *PcgAnimationProfiles)
+			{
+				if (!AddProfile(Profile.GetCapabilityId(),
+						Profile.GetExecutionContract().GetDescriptorIdentity(),
+						Profile.GetExecutionContract().GetLane()))
+				{
+					Bundle.Profiles.Reset();
+					return Bundle;
+				}
+			}
+			const TArray<FAudioMediaGraphRouteProfile>* AudioMediaProfiles = nullptr;
+			if (!TryGetAudioMediaGraphRouteProfiles(AudioMediaProfiles, Bundle.Error))
+			{
+				Bundle.Profiles.Reset();
+				return Bundle;
+			}
+			for (const FAudioMediaGraphRouteProfile& Profile : *AudioMediaProfiles)
+			{
+				if (!AddProfile(Profile.GetCapabilityId(),
+						Profile.GetExecutionContract().GetDescriptorIdentity(),
+						Profile.GetExecutionContract().GetLane()))
+				{
+					Bundle.Profiles.Reset();
+					return Bundle;
+				}
 			}
 			return Bundle;
 		}
@@ -244,12 +270,46 @@ namespace UE::UAI::Composition::GraphCompound
 		, DescriptorIdentity(MoveTemp(InDescriptorIdentity))
 		, OperationKind(MoveTemp(InOperationKind))
 	{
-		bValid = !CapabilityId.IsEmpty()
-			&& !Namespace.IsEmpty()
-			&& !Method.IsEmpty()
-			&& DescriptorIdentity.IsValid()
-			&& (OperationKind == TEXT("query")
-				|| OperationKind == TEXT("operation"));
+		auto FailField = [this](const TCHAR* Field, const TCHAR* Reason,
+			const FString& Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			ValidationDiagnostic = FDiagnostic::Failure(
+				TEXT("graph_compound_activation_profile_invalid"),
+				FString(TEXT("The Graph activation profile ")) + Reason, TEXT("registry"), FString(), CapabilityId);
+			ValidationDiagnostic.SourceKind = TEXT("native_result");
+			ValidationDiagnostic.PropertyPath = Field;
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(Actual);
+			ValidationDiagnostic.ActualValuePresent = true;
+			ValidationDiagnostic.ExpectedValue = MoveTemp(Expected);
+		};
+		if (CapabilityId.IsEmpty())
+			FailField(TEXT("/capability_id"), TEXT("requires a non-empty capability identifier."),
+				CapabilityId, MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		else if (Namespace.IsEmpty())
+			FailField(TEXT("/namespace"), TEXT("requires a non-empty namespace."),
+				Namespace, MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		else if (Method.IsEmpty())
+			FailField(TEXT("/method"), TEXT("requires a non-empty method."),
+				Method, MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		else if (!DescriptorIdentity.IsValid())
+		{
+			ValidationDiagnostic = FDiagnostic::WrapFailure(
+				TEXT("graph_compound_activation_profile_invalid"),
+				DescriptorIdentity.GetValidationDiagnostic(), TEXT("registry"),
+				TEXT("The Graph activation profile has an invalid descriptor identity."));
+			ValidationDiagnostic.SubjectId = CapabilityId;
+			ValidationDiagnostic.SourceKind = TEXT("native_result");
+			ValidationDiagnostic.PropertyPath = TEXT("/descriptor_identity")
+				+ ValidationDiagnostic.PropertyPath;
+		}
+		else if (OperationKind != TEXT("query") && OperationKind != TEXT("operation"))
+		{
+			TArray<TSharedPtr<FJsonValue>> Allowed = {
+				MakeShared<FJsonValueString>(TEXT("query")),
+				MakeShared<FJsonValueString>(TEXT("operation")) };
+			FailField(TEXT("/operation_kind"), TEXT("has an unsupported operation kind."),
+				OperationKind, MakeShared<FJsonValueArray>(MoveTemp(Allowed)));
+		}
 	}
 
 	const FString& FUeAgentGraphCompoundActivationProfile::GetCapabilityId() const
@@ -286,18 +346,74 @@ namespace UE::UAI::Composition::GraphCompound
 
 	bool FUeAgentGraphCompoundActivationProfile::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
-	const TArray<FUeAgentGraphCompoundActivationProfile>&
-	GetGraphCompoundActivationProfiles()
+	const FDiagnostic& FUeAgentGraphCompoundActivationProfile::GetValidationDiagnostic() const
 	{
-		return ActivationBundle().Profiles;
+		return ValidationDiagnostic;
+	}
+
+	bool FUeAgentGraphCompoundActivationProfile::TryMatchDefinition(
+		const FUeAgentGraphCompoundActivationProfile& Expected, FDiagnostic& OutError, const FString& Stage) const
+	{
+		OutError.Reset();
+		auto MatchString = [this, &OutError, &Stage](const TCHAR* Field, const FString& Actual, const FString& Wanted)
+		{
+			if (Actual == Wanted) return true;
+			OutError = FDiagnostic::Failure(TEXT("graph_compound_activation_profile_not_canonical"),
+				TEXT("The activation profile field differs from its registered definition"), Stage);
+			OutError.SourceKind = TEXT("native_result");
+			OutError.CandidateName = GetCommandId();
+			OutError.PropertyPath = Field;
+			OutError.ActualValue = MakeShared<FJsonValueString>(Actual);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(Wanted);
+			OutError.ActualValuePresent = true;
+			OutError.ExpectedValuePresent = true;
+			return false;
+		};
+		if (!MatchString(TEXT("capability_id"), CapabilityId, Expected.CapabilityId)
+			|| !MatchString(TEXT("namespace"), Namespace, Expected.Namespace)
+			|| !MatchString(TEXT("method"), Method, Expected.Method)
+			|| !MatchString(TEXT("descriptor_identity.descriptor_id"), DescriptorIdentity.GetDescriptorId(), Expected.DescriptorIdentity.GetDescriptorId()))
+			return false;
+		if (DescriptorIdentity.GetVersion() != Expected.DescriptorIdentity.GetVersion())
+		{
+			OutError = RegistryFailure(TEXT("graph_compound_activation_profile_not_canonical"),
+				TEXT("The activation profile descriptor version differs from its registered definition"), TEXT("descriptor_identity.version"),
+				MakeShared<FJsonValueNumber>(DescriptorIdentity.GetVersion()), MakeShared<FJsonValueNumber>(Expected.DescriptorIdentity.GetVersion()));
+			OutError.Stage = Stage;
+			OutError.CandidateName = GetCommandId();
+			return false;
+		}
+		if (DescriptorIdentity.GetDescriptorHash() != Expected.DescriptorIdentity.GetDescriptorHash())
+		{
+			OutError = FDiagnostic::Failure(TEXT("graph_compound_activation_profile_not_canonical"),
+				TEXT("The activation profile descriptor hash differs from its registered definition"), Stage);
+			OutError.SourceKind = TEXT("native_result");
+			OutError.CandidateName = GetCommandId();
+			OutError.PropertyPath = TEXT("descriptor_identity.descriptor_hash");
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(DescriptorIdentity.GetDescriptorHash());
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.DescriptorIdentity.GetDescriptorHash());
+			return false;
+		}
+		return MatchString(TEXT("operation_kind"), OperationKind, Expected.OperationKind);
+	}
+
+	bool TryGetGraphCompoundActivationProfiles(
+		const TArray<FUeAgentGraphCompoundActivationProfile>*& OutProfiles, FDiagnostic& OutError)
+	{
+		OutProfiles = nullptr;
+		const auto& Bundle = ActivationBundle();
+		OutError = Bundle.Error;
+		if (!OutError.IsEmpty()) return false;
+		OutProfiles = &Bundle.Profiles;
+		return true;
 	}
 
 	bool TryCreateGraphCompoundDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry = ActivationBundle().Registry;
 		OutError = ActivationBundle().Error;
@@ -306,16 +422,21 @@ namespace UE::UAI::Composition::GraphCompound
 
 	bool TryCreateGraphCompoundProductionCommandContractRegistry(
 		TSharedPtr<const FUeAgentCommandContractRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
-		return TryCreateGraphCompoundProductionCommandContractRegistry(
-			GetGraphCompoundActivationProfiles(), OutRegistry, OutError);
+		const TArray<FUeAgentGraphCompoundActivationProfile>* Profiles = nullptr;
+		if (!TryGetGraphCompoundActivationProfiles(Profiles, OutError))
+		{
+			OutRegistry.Reset();
+			return false;
+		}
+		return TryCreateGraphCompoundProductionCommandContractRegistry(*Profiles, OutRegistry, OutError);
 	}
 
 	bool TryCreateGraphCompoundProductionCommandContractRegistry(
 		const TArray<FUeAgentGraphCompoundActivationProfile>& Profiles,
 		TSharedPtr<const FUeAgentCommandContractRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
@@ -325,16 +446,24 @@ namespace UE::UAI::Composition::GraphCompound
 					Base, OutError)
 			|| !Base.IsValid())
 		{
+			if (OutError.IsEmpty()) OutError = RegistryFailure(TEXT("graph_compound_base_contract_registry_missing"),
+				TEXT("The base command contract factory returned no usable registry"), TEXT("base_registry_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		const FActivationBundle& Bundle = ActivationBundle();
-		if (!Bundle.Registry.IsValid()
-			|| Bundle.Profiles.Num() != ExpectedGraphCompoundProfileCount
-			|| Profiles.IsEmpty())
+		if (!Bundle.Error.IsEmpty())
 		{
-			OutError = Bundle.Error.IsEmpty()
-				? TEXT("graph_compound_activation_bundle_invalid")
-				: Bundle.Error;
+			OutError = Bundle.Error;
+			return false;
+		}
+		if (!Bundle.Registry.IsValid() || Profiles.IsEmpty())
+		{
+			OutError = RegistryFailure(TEXT("graph_compound_activation_bundle_invalid"),
+				!Bundle.Registry.IsValid() ? TEXT("The activation bundle has no descriptor registry")
+					: TEXT("At least one activation profile is required to build command contracts"),
+				!Bundle.Registry.IsValid() ? TEXT("descriptor_registry_present") : TEXT("activation_profiles_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		TArray<FUeAgentCommandContract> Contracts = Base->GetContracts();
@@ -352,17 +481,21 @@ namespace UE::UAI::Composition::GraphCompound
 					break;
 				}
 			}
-			if (!Canonical
-				|| Canonical->GetCapabilityId() != Profile.GetCapabilityId()
-				|| Canonical->GetNamespace() != Profile.GetNamespace()
-				|| Canonical->GetMethod() != Profile.GetMethod()
-				|| !(Canonical->GetDescriptorIdentity()
-					== Profile.GetDescriptorIdentity())
-				|| Canonical->GetOperationKind() != Profile.GetOperationKind()
-				|| CommandIds.Contains(Profile.GetCommandId()))
+			if (!Canonical)
 			{
-				OutError = TEXT("graph_compound_activation_profile_not_canonical:")
-					+ Profile.GetCommandId();
+				OutError = RegistryFailure(TEXT("graph_compound_activation_profile_not_canonical"),
+					TEXT("No registered activation profile exists for this command"), TEXT("canonical_profile_present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.CandidateName = Profile.GetCommandId();
+				return false;
+			}
+			if (!Profile.TryMatchDefinition(*Canonical, OutError, TEXT("registry"))) return false;
+			if (CommandIds.Contains(Profile.GetCommandId()))
+			{
+				OutError = RegistryFailure(TEXT("graph_compound_activation_profile_not_canonical"),
+					TEXT("The activation subset repeats a command"), TEXT("command_id_unique"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.CandidateName = Profile.GetCommandId();
 				return false;
 			}
 			CommandIds.Add(Profile.GetCommandId());
@@ -372,10 +505,12 @@ namespace UE::UAI::Composition::GraphCompound
 			if (!Descriptor
 				|| !TryPublicParameters(*Descriptor, Parameters, OutError))
 			{
-				OutError = OutError.IsEmpty()
-					? TEXT("graph_compound_command_descriptor_missing:")
-						+ Profile.GetCommandId()
-					: OutError;
+				if (OutError.IsEmpty()) OutError = RegistryFailure(TEXT("graph_compound_command_descriptor_missing"),
+					!Descriptor ? TEXT("No operation descriptor matches the activation profile")
+						: TEXT("The public parameter schema builder failed without a diagnostic"),
+					!Descriptor ? TEXT("descriptor_present") : TEXT("parameter_schema_created"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Profile.GetCommandId();
 				return false;
 			}
 			Contracts.Emplace(

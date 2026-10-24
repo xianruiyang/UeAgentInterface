@@ -1,8 +1,11 @@
 #include "QueryOwners/BlueprintNode/UeAgentBlueprintNodeQueryOwner.h"
+#include "DomainAdapters/ContentDiscovery/UeAgentEditorContentDiscovery.h"
 
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "DomainAdapters/Blueprint/Node/UeAgentBlueprintNodeMechanics.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Utilities/UeAgentJsonDiagnostics.h"
 
 namespace UE::UAI::QueryOwners::BlueprintNode
 {
@@ -18,36 +21,52 @@ namespace UE::UAI::QueryOwners::BlueprintNode
 		OutResponse = {};
 		OutError = {};
 		TSharedPtr<FJsonObject> Params;
-		FString JsonError;
+		UE::UAI::Contract::FDiagnostic JsonError;
 		if (!Json::TryParseObject(Request.CanonicalParamsJson, Params, JsonError))
 		{
-			OutError.Code = TEXT("blueprint_node_params_invalid");
-			OutError.SubjectId = Request.CommandId;
-			OutError.Detail = MoveTemp(JsonError);
+			OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("blueprint_node_params_invalid"), JsonError, TEXT("candidate_query"));
+			OutError.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.CommandId;
+			OutError.SourceKind = TEXT("command_input");
 			return false;
 		}
 		FUeAgentBlueprintNodeCandidateQuery Query;
-		if (!Params->TryGetStringField(TEXT("target"), Query.Target)
-			|| !Params->TryGetStringField(TEXT("graph_id"), Query.GraphId))
+		for (const auto& Field : {TPair<FString, FString*>(TEXT("target"), &Query.Target),
+			TPair<FString, FString*>(TEXT("graph_name"), &Query.GraphName)})
 		{
-			OutError.Code = TEXT("blueprint_node_candidate_identity_required");
-			OutError.SubjectId = Request.CommandId;
-			return false;
+			if (!Params->TryGetStringField(Field.Key, *Field.Value))
+			{
+				const auto Value = Params->TryGetField(Field.Key);
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_node_candidate_identity_required"),
+					FString::Printf(TEXT("Candidate query field '%s' %s."), *Field.Key,
+						Value.IsValid() ? TEXT("must be a string") : TEXT("is required")), TEXT("candidate_query"));
+				OutError.Schema = TEXT("uai.runtime.diagnostic/1");
+				OutError.SubjectId = Request.CommandId;
+				OutError.SourceKind = TEXT("command_input");
+				OutError.PropertyPath = TEXT("/") + Field.Key;
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("string"));
+				OutError.ActualValuePresent = Value.IsValid();
+				if (Value.IsValid()) OutError.ActualValue = MakeShared<FJsonValueString>(UeAgentJsonDiagnostics::JsonValueTypeToString(Value));
+				return false;
+			}
 		}
 		Params->TryGetStringField(TEXT("query"), Query.Query);
-		Params->TryGetStringField(TEXT("id"), Query.CandidateId);
-		Params->TryGetStringField(TEXT("node_guid"), Query.NodeGuid);
-		Params->TryGetStringField(TEXT("pin_guid"), Query.PinGuid);
-		Params->TryGetStringField(TEXT("pin_name"), Query.PinName);
-		double Limit = Query.Limit;
-		double Cursor = Query.Cursor;
-		if (Params->TryGetNumberField(TEXT("limit"), Limit))
+		UE::UAI::ContentDiscovery::FContentDiscoveryError TargetError;
+		if (!UE::UAI::DomainAdapters::ContentDiscovery::TryResolveEditorContentReference(Query.Target, TEXT("asset"), TargetError))
 		{
-			Query.Limit = FMath::RoundToInt(Limit);
+			OutError = MoveTemp(TargetError);
+			return false;
 		}
-		if (Params->TryGetNumberField(TEXT("cursor"), Cursor))
+		Params->TryGetStringField(TEXT("node_name"), Query.NodeName);
+		Params->TryGetStringField(TEXT("pin_name"), Query.PinName);
+		double Occurrence = 0.0;
+		if (Params->TryGetNumberField(TEXT("node_occurrence"), Occurrence))
 		{
-			Query.Cursor = FMath::RoundToInt(Cursor);
+			Query.NodeOccurrence = FMath::RoundToInt(Occurrence);
+		}
+		if (Params->TryGetNumberField(TEXT("pin_occurrence"), Occurrence))
+		{
+			Query.PinOccurrence = FMath::RoundToInt(Occurrence);
 		}
 		FUeAgentBlueprintNodeMechanicsError MechanicsError;
 		if (!TryQueryBlueprintNodeCandidates(
@@ -55,11 +74,17 @@ namespace UE::UAI::QueryOwners::BlueprintNode
 				OutResponse.PayloadJson,
 				MechanicsError))
 		{
-			OutError.Code = MechanicsError.Code.IsEmpty()
-				? FString(TEXT("blueprint_node_candidate_query_failed"))
-				: MechanicsError.Code;
-			OutError.SubjectId = MoveTemp(MechanicsError.SubjectId);
-			OutError.Detail = MoveTemp(MechanicsError.Detail);
+			OutError = MoveTemp(MechanicsError);
+			if (OutError.IsEmpty())
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_node_candidate_query_failed"),
+					TEXT("The candidate query failed without a diagnostic."), TEXT("candidate_query"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = TEXT("query_succeeded");
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			}
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Query.Target;
 			return false;
 		}
 		OutResponse.bReadOnly = true;

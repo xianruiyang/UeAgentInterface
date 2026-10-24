@@ -1,9 +1,15 @@
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaLongJobProduction.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaDiagnostics.h"
 
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/ScopeLock.h"
 
 namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 {
+	using namespace CaptureDiagnostics;
 	namespace
 	{
 		using namespace ArtifactPublisher;
@@ -12,15 +18,13 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		using namespace ExecutionMutation;
 		using namespace StateSemantic;
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
-		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code), MoveTemp(Detail));
-			return false;
-		}
+		bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
+            return false;
+        }
+
 
 		bool IsNormalizedNonEmpty(const FString& Value)
 		{
@@ -63,28 +67,18 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			}
 		}
 
-		bool AllowedWorldTypesAreValid(
-			const TArray<EUeAgentExecutionWorldType>& WorldTypes)
+		FString WorldTypeName(EUeAgentExecutionWorldType Value)
 		{
-			if (WorldTypes.IsEmpty())
+			switch (Value)
 			{
-				return false;
+			case EUeAgentExecutionWorldType::Invalid: return TEXT("Invalid");
+			case EUeAgentExecutionWorldType::Editor: return TEXT("Editor");
+			case EUeAgentExecutionWorldType::Pie: return TEXT("Pie");
+			case EUeAgentExecutionWorldType::SimulateInEditor: return TEXT("SimulateInEditor");
+			case EUeAgentExecutionWorldType::Game: return TEXT("Game");
+			case EUeAgentExecutionWorldType::Preview: return TEXT("Preview");
+			default: return TEXT("Unknown(") + ::LexToString(static_cast<int32>(Value)) + TEXT(")");
 			}
-			for (int32 Index = 0; Index < WorldTypes.Num(); ++Index)
-			{
-				if (WorldTypes[Index] == EUeAgentExecutionWorldType::Invalid)
-				{
-					return false;
-				}
-				for (int32 Other = 0; Other < Index; ++Other)
-				{
-					if (WorldTypes[Other] == WorldTypes[Index])
-					{
-						return false;
-					}
-				}
-			}
-			return true;
 		}
 
 		bool MatchesPolicy(
@@ -110,23 +104,23 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		{
 			if (!Request.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("capture_media_long_job_operation_request_invalid"));
+				return Fail(OutError, Request.GetValidationDiagnostic());
 			}
 			const FUeAgentExecutionContextRef& Context =
 				Request.GetExecutionContext();
 			if (Context.GetStatePlane() != Policy.GetRequiredStatePlane())
 			{
-				return Fail(
-					OutError,
-					TEXT("capture_media_long_job_context_state_plane_mismatch"));
+				return Fail(OutError, Native(TEXT("capture_media_long_job_context_state_plane_mismatch"),
+					TEXT("The execution context state plane does not match the capture policy."), TEXT("execution"), TEXT("state_plane"),
+					MakeShared<FJsonValueString>(LexToString(Context.GetStatePlane())), MakeShared<FJsonValueString>(LexToString(Policy.GetRequiredStatePlane()))));
 			}
 			if (!Policy.GetAllowedWorldTypes().Contains(Context.GetWorldType()))
 			{
-				return Fail(
-					OutError,
-					TEXT("capture_media_long_job_context_world_type_mismatch"));
+				TArray<TSharedPtr<FJsonValue>> Allowed;
+				for (const auto WorldType : Policy.GetAllowedWorldTypes()) Allowed.Add(MakeShared<FJsonValueString>(WorldTypeName(WorldType)));
+				return Fail(OutError, Native(TEXT("capture_media_long_job_context_world_type_mismatch"),
+					TEXT("The execution context world type is not allowed by the capture policy."), TEXT("execution"), TEXT("world_type"),
+					MakeShared<FJsonValueString>(WorldTypeName(Context.GetWorldType())), MakeShared<FJsonValueArray>(MoveTemp(Allowed))));
 			}
 			return true;
 		}
@@ -140,13 +134,21 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		{
 			if (ExpectedOperationId != OperationId)
 			{
-				return Fail(
-					OutError, TEXT("capture_media_long_job_operation_id_mismatch"));
+				OutError = Native(TEXT("capture_media_long_job_operation_id_mismatch"),
+					TEXT("The lifecycle call belongs to a different operation."), TEXT("execution"), TEXT("operation_identity_matches"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(OperationId);
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedOperationId);
+				return false;
 			}
 			if (!(ExpectedIdentity == Identity))
 			{
-				return Fail(
-					OutError, TEXT("capture_media_long_job_work_identity_mismatch"));
+				OutError = Native(TEXT("capture_media_long_job_work_identity_mismatch"),
+					TEXT("The lifecycle call does not match the active native work identity and generation."), TEXT("execution"), TEXT("work_identity_matches"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.ActualEvidence = Facts({ { TEXT("resource_id"), MakeShared<FJsonValueString>(Identity.GetResourceId()) }, { TEXT("generation"), Number(Identity.GetGeneration()) } });
+				OutError.ExpectedEvidence = Facts({ { TEXT("resource_id"), MakeShared<FJsonValueString>(ExpectedIdentity.GetResourceId()) }, { TEXT("generation"), Number(ExpectedIdentity.GetGeneration()) } });
+				return false;
 			}
 			return true;
 		}
@@ -164,8 +166,9 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				FindCaptureMediaLongJobFamilyContract(Request.GetFamily());
 			if (Contract == nullptr)
 			{
-				return Fail(
-					OutError, TEXT("capture_media_long_job_family_invalid"));
+				return Fail(OutError, Native(TEXT("capture_media_long_job_family_invalid"),
+					TEXT("No capture/media family contract exists for the native observation."), TEXT("execution"), TEXT("family"),
+					Number(static_cast<int32>(Request.GetFamily())), MakeShared<FJsonValueString>(TEXT("image capture, media recording, or render resource"))));
 			}
 			FUeAgentStateSemanticError StateError;
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
@@ -187,10 +190,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					TEXT("readback_oracle_id"),
 					Policy.GetReadbackOracleId()))
 			{
-				return Fail(
-					OutError,
-					TEXT("capture_media_long_job_signal_value_failed"),
-					StateError.Code);
+				return Fail(OutError, StateError);
 			}
 			if (Observation.GetArtifact().IsSet())
 			{
@@ -202,21 +202,63 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					ArtifactValue,
 					ArtifactError))
 				{
-					return Fail(
-						OutError,
-						TEXT("capture_media_long_job_artifact_ref_invalid"),
-						ArtifactError.GetCode());
+					return Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("capture_media_long_job_artifact_ref_invalid"), ArtifactError, TEXT("execution")));
 				}
 				Items.Emplace(TEXT("artifact_ref"), ArtifactValue.ToSharedRef());
+			}
+			if (!Observation.GetAdditionalArtifacts().IsEmpty())
+			{
+				TArray<FUeAgentCanonicalValueRef> ArtifactValues;
+				ArtifactValues.Reserve(
+					Observation.GetAdditionalArtifacts().Num());
+				for (const FFileArtifactReference& Artifact
+					: Observation.GetAdditionalArtifacts())
+				{
+					FUeAgentCanonicalValuePtr ArtifactValue;
+					FFileArtifactPublishError ArtifactError;
+					if (!TryProjectFileArtifactReference(
+							Artifact,
+							Resources,
+							ArtifactValue,
+							ArtifactError))
+					{
+						return Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("capture_media_long_job_additional_artifact_ref_invalid"), ArtifactError, TEXT("execution")));
+					}
+					ArtifactValues.Add(ArtifactValue.ToSharedRef());
+				}
+				FUeAgentCanonicalValuePtr AdditionalArtifacts;
+				if (!FUeAgentCanonicalValue::TryArray(
+						ArtifactValues,
+						Resources,
+						AdditionalArtifacts,
+						StateError))
+				{
+					return Fail(OutError, StateError);
+				}
+				Items.Emplace(
+					TEXT("additional_artifact_refs"),
+					AdditionalArtifacts.ToSharedRef());
+			}
+			if (Observation.GetCaptureReceipt().IsValid())
+			{
+				FUeAgentCanonicalValuePtr Receipt;
+				UE::UAI::Contract::FDiagnostic ReceiptError;
+				if (!CanonicalJson::TryFromJsonValue(
+						MakeShared<FJsonValueObject>(
+							Observation.GetCaptureReceipt()),
+						Resources,
+						Receipt,
+						ReceiptError))
+				{
+					return Fail(OutError, MoveTemp(ReceiptError));
+				}
+				Items.Emplace(TEXT("capture_receipt"), Receipt.ToSharedRef());
 			}
 			FUeAgentCanonicalValuePtr Payload;
 			if (!FUeAgentCanonicalValue::TryObject(
 				Items, Resources, Payload, StateError))
 			{
-				return Fail(
-					OutError,
-					TEXT("capture_media_long_job_signal_payload_failed"),
-					StateError.Code);
+				return Fail(OutError, StateError);
 			}
 			OutSignal.Emplace(
 				Contract->GetSignalTypeId(), Revision, Payload.ToSharedRef());
@@ -248,9 +290,9 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				FScopeLock Lock(&Mutex);
 				if (bStarted)
 				{
-					return Fail(
-						OutError,
-						TEXT("capture_media_long_job_already_started"));
+					return Fail(OutError, Native(TEXT("capture_media_long_job_already_started"),
+						TEXT("The capture/media native operation has already started."), TEXT("execution"), TEXT("started"),
+						MakeShared<FJsonValueBoolean>(bStarted), MakeShared<FJsonValueBoolean>(false)));
 				}
 				if (!ValidateOperationContext(
 					OperationRequest, Policy, OutError))
@@ -268,9 +310,12 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				}
 				if (!IsNormalizedNonEmpty(NativeResourceId))
 				{
-					return Fail(
-						OutError,
-						TEXT("capture_media_native_resource_id_invalid"));
+					OutError = Native(TEXT("capture_media_native_resource_id_invalid"),
+						TEXT("The native session returned an empty resource ID or one with surrounding whitespace."), TEXT("execution"), TEXT("resource_id_valid"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(NativeResourceId);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(TEXT("nonempty string without surrounding whitespace"));
+					return false;
 				}
 				OperationId = OperationRequest.GetOperationId();
 				Identity = FLongRunningWorkIdentity(
@@ -300,17 +345,17 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				{
 					return false;
 				}
-				if (!NativeObservation.IsValid())
-				{
-					return Fail(
-						OutError,
-						TEXT("capture_media_native_observation_invalid"));
-				}
+				if (!NativeObservation.TryValidate(OutError)) return false;
 				FString SignalKey = NativeObservation.GetPhase();
 				if (NativeObservation.GetArtifact().IsSet())
 				{
 					SignalKey += TEXT("\n")
 						+ NativeObservation.GetArtifact()->GetArtifactId();
+				}
+				for (const FFileArtifactReference& Artifact
+					: NativeObservation.GetAdditionalArtifacts())
+				{
+					SignalKey += TEXT("\n") + Artifact.GetArtifactId();
 				}
 				TOptional<FLongRunningOperationSignal> Signal;
 				if (SignalKey != LastSignalKey)
@@ -325,17 +370,17 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 						Signal,
 						OutError))
 					{
+						OutError.Append(NativeObservation.GetDiagnostic());
 						return false;
 					}
 					LastSignalKey = SignalKey;
 					SignalRevision = NextRevision;
 				}
 				LastObservedState = NativeObservation.GetState();
-				OutObservation = FLongRunningWorkObservation(
-					Identity.GetGeneration(),
-					NativeObservation.GetState(),
-					NativeObservation.GetErrorCode(),
-					MoveTemp(Signal));
+				OutObservation = FLongRunningWorkObservation(Identity.GetGeneration(),
+			NativeObservation.GetState(),
+			NativeObservation.GetDiagnostic(),
+			MoveTemp(Signal));
 				return true;
 			}
 
@@ -353,9 +398,9 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				}
 				if (!IsNormalizedNonEmpty(Reason))
 				{
-					return Fail(
-						OutError,
-						TEXT("capture_media_stop_reason_invalid"));
+					return Fail(OutError, Native(TEXT("capture_media_stop_reason_invalid"),
+						TEXT("The native stop reason must be nonempty and have no surrounding whitespace."), TEXT("execution"), TEXT("stop_reason"),
+						MakeShared<FJsonValueString>(Reason), MakeShared<FJsonValueString>(TEXT("nonempty string without surrounding whitespace"))));
 				}
 				if (bStopRequested)
 				{
@@ -383,9 +428,10 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				if (LastObservedState != ELongRunningWorkState::ExitedSuccess
 					&& LastObservedState != ELongRunningWorkState::ExitedFailure)
 				{
-					return Fail(
-						OutError,
-						TEXT("capture_media_join_before_native_exit"));
+					return Fail(OutError, Native(TEXT("capture_media_join_before_native_exit"),
+						TEXT("The native capture/media operation cannot be joined before it exits."), TEXT("execution"), TEXT("work_state"),
+						MakeShared<FJsonValueString>(LexToString(LastObservedState)),
+						MakeShared<FJsonValueString>(TEXT("exited_success or exited_failure"))));
 				}
 				if (bJoined)
 				{
@@ -412,14 +458,15 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				}
 				if (!bJoined)
 				{
-					return Fail(
-						OutError,
-						TEXT("capture_media_release_before_join"));
+					return Fail(OutError, Native(TEXT("capture_media_release_before_join"),
+						TEXT("The native capture/media operation must be joined before release."), TEXT("execution"), TEXT("joined"),
+						MakeShared<FJsonValueBoolean>(bJoined), MakeShared<FJsonValueBoolean>(true)));
 				}
 				if (bReleased)
 				{
-					return Fail(
-						OutError, TEXT("capture_media_already_released"));
+					return Fail(OutError, Native(TEXT("capture_media_already_released"),
+						TEXT("The native capture/media operation has already been released."), TEXT("execution"), TEXT("released"),
+						MakeShared<FJsonValueBoolean>(bReleased), MakeShared<FJsonValueBoolean>(false)));
 				}
 				if (!NativeSession->Release(OutError))
 				{
@@ -442,9 +489,9 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 						InOperationId,
 						InIdentity,
 						OutError)
-					: Fail(
-						OutError,
-						TEXT("capture_media_long_job_not_started"));
+					: Fail(OutError, Native(TEXT("capture_media_long_job_not_started"),
+						TEXT("The capture/media native operation has not started."), TEXT("execution"), TEXT("started"),
+						MakeShared<FJsonValueBoolean>(bStarted), MakeShared<FJsonValueBoolean>(true)));
 			}
 
 			FUeAgentCaptureMediaLongJobTypedRequest Request;
@@ -520,14 +567,65 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 
 	bool FUeAgentCaptureMediaLongJobPolicyDescriptor::IsValid() const
 	{
-		return FindCaptureMediaLongJobFamilyContract(Family) != nullptr
-			&& IsNormalizedNonEmpty(PolicyId)
-			&& MatchesPolicyKind(Family, PolicyId)
-			&& MechanismMatchesFamily(Family, NativeMechanismId)
-			&& IsNormalizedNonEmpty(ReadbackOracleId)
-			&& ReadbackOracleId.StartsWith(TEXT("uai.readback."))
-			&& RequiredStatePlane != EUeAgentStatePlane::Invalid
-			&& AllowedWorldTypesAreValid(AllowedWorldTypes);
+		UE::UAI::Contract::FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FUeAgentCaptureMediaLongJobPolicyDescriptor::TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		const auto Invalid = [&](const FString& Reason, const FString& Field, const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected)
+		{
+			OutError = Native(TEXT("capture_media_long_job_policy_invalid"), Reason, TEXT("execution"), Field, Actual, Expected);
+			OutError.CandidateName = PolicyId;
+			return false;
+		};
+		if (!FindCaptureMediaLongJobFamilyContract(Family))
+			return Invalid(TEXT("The capture/media policy family is unsupported."), TEXT("family"), Number(static_cast<int32>(Family)),
+				MakeShared<FJsonValueString>(TEXT("image capture, media recording, or render resource")));
+		if (!IsNormalizedNonEmpty(PolicyId))
+			return Invalid(TEXT("The capture/media policy ID must be nonempty and have no surrounding whitespace."), TEXT("policy_id"),
+				MakeShared<FJsonValueString>(PolicyId), MakeShared<FJsonValueString>(TEXT("nonempty string without surrounding whitespace")));
+		if (!MatchesPolicyKind(Family, PolicyId))
+			return Invalid(TEXT("The capture/media policy ID prefix does not match its family."), TEXT("policy_id"),
+				MakeShared<FJsonValueString>(PolicyId), MakeShared<FJsonValueString>(Family == EUeAgentCaptureMediaLongJobFamily::ImageCapture ? TEXT("policy:image-capture:")
+					: Family == EUeAgentCaptureMediaLongJobFamily::MediaRecording ? TEXT("policy:media-recording:") : TEXT("policy:render-operation:")));
+		if (!MechanismMatchesFamily(Family, NativeMechanismId))
+		{
+			Invalid(TEXT("The native capture mechanism does not match the policy family."), TEXT("native_mechanism_matches_family"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(NativeMechanismId);
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Family == EUeAgentCaptureMediaLongJobFamily::ImageCapture ? TEXT("image_capture_resource")
+				: Family == EUeAgentCaptureMediaLongJobFamily::MediaRecording ? TEXT("media_recording_resource") : TEXT("gpu_render_resource"));
+			return false;
+		}
+		if (!IsNormalizedNonEmpty(ReadbackOracleId) || !ReadbackOracleId.StartsWith(TEXT("uai.readback.")))
+		{
+			Invalid(TEXT("The capture policy requires a normalized readback oracle ID with the registered prefix."), TEXT("readback_oracle_id_valid"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(ReadbackOracleId);
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(TEXT("uai.readback.<name>, without surrounding whitespace"));
+			return false;
+		}
+		if (RequiredStatePlane == EUeAgentStatePlane::Invalid)
+			return Invalid(TEXT("The capture policy requires a valid execution state plane."), TEXT("state_plane"),
+				MakeShared<FJsonValueString>(LexToString(RequiredStatePlane)), MakeShared<FJsonValueString>(TEXT("non-invalid state plane")));
+		if (AllowedWorldTypes.IsEmpty())
+			return Invalid(TEXT("The capture policy must allow at least one world type."), TEXT("allowed_world_types/count"), Number(0),
+				MakeShared<FJsonValueString>(TEXT("greater than zero")));
+		for (int32 Index = 0; Index < AllowedWorldTypes.Num(); ++Index)
+		{
+			const FString Field = TEXT("allowed_world_types/") + ::LexToString(Index);
+			if (AllowedWorldTypes[Index] == EUeAgentExecutionWorldType::Invalid)
+				return Invalid(TEXT("The capture policy contains an invalid allowed world type."), Field,
+					MakeShared<FJsonValueString>(WorldTypeName(AllowedWorldTypes[Index])), MakeShared<FJsonValueString>(TEXT("non-invalid world type")));
+			for (int32 Other = 0; Other < Index; ++Other)
+				if (AllowedWorldTypes[Other] == AllowedWorldTypes[Index])
+					return Invalid(TEXT("The capture policy repeats an allowed world type."), Field,
+						MakeShared<FJsonValueString>(WorldTypeName(AllowedWorldTypes[Index])),
+						MakeShared<FJsonValueString>(FString::Printf(TEXT("distinct from allowed_world_types/%d"), Other)));
+		}
+		return true;
 	}
 
 	FUeAgentCaptureMediaLongJobPolicyRegistration::
@@ -574,21 +672,15 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		OutFactory.Reset();
 		if (InRegistrations.IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("capture_media_long_job_policy_catalog_empty"));
+			return Fail(OutError, Native(TEXT("capture_media_long_job_policy_catalog_empty"),
+				TEXT("The capture/media production factory requires at least one policy registration."), TEXT("execution"), TEXT("policy_count"),
+				Number(InRegistrations.Num()), MakeShared<FJsonValueString>(TEXT("greater than zero"))));
 		}
 		for (int32 Index = 0; Index < InRegistrations.Num(); ++Index)
 		{
 			const FUeAgentCaptureMediaLongJobPolicyDescriptor& Descriptor =
 				InRegistrations[Index].GetDescriptor();
-			if (!Descriptor.IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("capture_media_long_job_policy_invalid"),
-					Descriptor.GetPolicyId());
-			}
+			if (!Descriptor.TryValidate(OutError)) return false;
 			for (int32 Other = 0; Other < Index; ++Other)
 			{
 				const FUeAgentCaptureMediaLongJobPolicyDescriptor& Existing =
@@ -596,10 +688,12 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				if (Existing.GetFamily() == Descriptor.GetFamily()
 					&& Existing.GetPolicyId() == Descriptor.GetPolicyId())
 				{
-					return Fail(
-						OutError,
-						TEXT("capture_media_long_job_policy_duplicate"),
-						Descriptor.GetPolicyId());
+					return Fail(OutError, Native(TEXT("capture_media_long_job_policy_duplicate"),
+						TEXT("The policy catalog repeats the same family and policy ID."), TEXT("execution"),
+						TEXT("registrations/") + ::LexToString(Index),
+						Facts({ { TEXT("family"), Number(static_cast<int32>(Descriptor.GetFamily())) },
+							{ TEXT("policy_id"), MakeShared<FJsonValueString>(Descriptor.GetPolicyId()) } }),
+						MakeShared<FJsonValueString>(FString::Printf(TEXT("distinct from registrations/%d"), Other))));
 				}
 			}
 		}
@@ -632,16 +726,13 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				});
 		if (Registration == nullptr)
 		{
-			return Fail(
-				OutError,
-				TEXT("capture_media_long_job_policy_not_registered"),
-				Request.GetPolicyId());
+			return Fail(OutError, Native(TEXT("capture_media_long_job_policy_not_registered"),
+				TEXT("No registered capture/media policy matches this family and policy ID."), TEXT("execution"), TEXT("policy"),
+				Facts({ { TEXT("family"), Number(static_cast<int32>(Request.GetFamily())) },
+					{ TEXT("policy_id"), MakeShared<FJsonValueString>(Request.GetPolicyId()) } }),
+				MakeShared<FJsonValueString>(TEXT("registered family and policy ID pair"))));
 		}
-		if (!Request.IsValid())
-		{
-			return Fail(
-				OutError, TEXT("capture_media_long_job_request_invalid"));
-		}
+		if (!Request.TryValidate(OutError)) return false;
 		if (!Registration->GetBuilder().TryCreatePort(
 			Request,
 			Registration->GetDescriptor(),
@@ -652,20 +743,25 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		}
 		return OutPort.IsValid()
 			? true
-			: Fail(
-				OutError, TEXT("capture_media_long_job_operation_port_missing"));
+			: Fail(OutError, Native(TEXT("capture_media_long_job_operation_port_missing"),
+				TEXT("The registered capture/media builder returned no execution port."), TEXT("execution"), TEXT("execution_port_available"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 	}
 
 	FUeAgentCaptureMediaNativeObservation::
 	FUeAgentCaptureMediaNativeObservation(
 		const ELongRunningWorkState InState,
 		FString InPhase,
-		FString InErrorCode,
-		TOptional<FFileArtifactReference> InArtifact)
+		UE::UAI::Contract::FDiagnostic InDiagnostic,
+		TOptional<FFileArtifactReference> InArtifact,
+		TArray<FFileArtifactReference> InAdditionalArtifacts,
+		TSharedPtr<FJsonObject> InCaptureReceipt)
 		: State(InState)
 		, Phase(MoveTemp(InPhase))
-		, ErrorCode(MoveTemp(InErrorCode))
+		, Diagnostic(MoveTemp(InDiagnostic))
 		, Artifact(MoveTemp(InArtifact))
+		, AdditionalArtifacts(MoveTemp(InAdditionalArtifacts))
+		, CaptureReceipt(MoveTemp(InCaptureReceipt))
 	{
 	}
 
@@ -680,9 +776,9 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		return Phase;
 	}
 
-	const FString& FUeAgentCaptureMediaNativeObservation::GetErrorCode() const
+	const UE::UAI::Contract::FDiagnostic& FUeAgentCaptureMediaNativeObservation::GetDiagnostic() const
 	{
-		return ErrorCode;
+		return Diagnostic;
 	}
 
 	const TOptional<FFileArtifactReference>&
@@ -691,20 +787,68 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		return Artifact;
 	}
 
+	const TArray<FFileArtifactReference>&
+	FUeAgentCaptureMediaNativeObservation::GetAdditionalArtifacts() const
+	{
+		return AdditionalArtifacts;
+	}
+
+	const TSharedPtr<FJsonObject>&
+	FUeAgentCaptureMediaNativeObservation::GetCaptureReceipt() const
+	{
+		return CaptureReceipt;
+	}
+
 	bool FUeAgentCaptureMediaNativeObservation::IsValid() const
 	{
-		if (State == ELongRunningWorkState::Invalid
-			|| !IsNormalizedNonEmpty(Phase)
-			|| (Artifact.IsSet() && !Artifact->IsValid()))
+		UE::UAI::Contract::FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FUeAgentCaptureMediaNativeObservation::TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		const auto Reject = [this, &OutError](UE::UAI::Contract::FDiagnostic Error)
 		{
+			Error.Append(Diagnostic);
+			OutError = MoveTemp(Error);
 			return false;
-		}
-		if (State == ELongRunningWorkState::ExitedFailure
-			|| State == ELongRunningWorkState::StateUnknown)
+		};
+		if (State == ELongRunningWorkState::Invalid)
+			return Reject(Native(TEXT("capture_media_native_observation_invalid"), TEXT("The native capture observation has an invalid work state."),
+				TEXT("execution"), TEXT("work_state"), MakeShared<FJsonValueString>(LexToString(State)),
+				MakeShared<FJsonValueString>(TEXT("non-invalid work state"))));
+		if (!IsNormalizedNonEmpty(Phase))
+			return Reject(Native(TEXT("capture_media_native_observation_invalid"), TEXT("The native capture phase must be nonempty and have no surrounding whitespace."),
+				TEXT("execution"), TEXT("phase"), MakeShared<FJsonValueString>(Phase), MakeShared<FJsonValueString>(TEXT("nonempty string without surrounding whitespace"))));
+		if (Artifact.IsSet() && !Artifact->IsValid())
 		{
-			return IsNormalizedNonEmpty(ErrorCode);
+			auto Error = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("capture_media_native_observation_invalid"),
+				*Artifact->GetValidationDiagnostic(), TEXT("execution"), TEXT("The native capture observation contains an invalid primary artifact."));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = TEXT("artifact");
+			return Reject(MoveTemp(Error));
 		}
-		return ErrorCode.IsEmpty();
+		for (int32 Index = 0; Index < AdditionalArtifacts.Num(); ++Index)
+			if (!AdditionalArtifacts[Index].IsValid())
+			{
+				auto Error = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("capture_media_native_observation_invalid"),
+					*AdditionalArtifacts[Index].GetValidationDiagnostic(), TEXT("execution"), TEXT("The native capture observation contains an invalid additional artifact."));
+				Error.SourceKind = TEXT("native_result");
+				Error.PropertyPath = TEXT("additional_artifacts/") + ::LexToString(Index);
+				return Reject(MoveTemp(Error));
+			}
+		const bool bFailureState = State == ELongRunningWorkState::ExitedFailure || State == ELongRunningWorkState::StateUnknown;
+		if (bFailureState ? !IsNormalizedNonEmpty(Diagnostic.Code) : !Diagnostic.IsEmpty())
+		{
+			auto Error = Native(TEXT("capture_media_native_observation_invalid"),
+				bFailureState ? TEXT("A failed or unknown native capture state requires a diagnostic with a normalized nonempty code.")
+					: TEXT("A native capture state that is not failed or unknown must not contain a failure diagnostic."),
+				TEXT("execution"), TEXT("diagnostic/code"), MakeShared<FJsonValueString>(Diagnostic.Code),
+				MakeShared<FJsonValueString>(bFailureState ? TEXT("nonempty code without surrounding whitespace") : TEXT("empty")));
+			return Reject(MoveTemp(Error));
+		}
+		return true;
 	}
 
 	bool TryCreateCaptureMediaNativeResourcePort(
@@ -716,16 +860,16 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		FExecutionMutationError& OutError)
 	{
 		OutPort.Reset();
-		if (!Request.IsValid() || !Policy.IsValid()
-			|| !MatchesPolicy(Request, Policy))
-		{
-			return Fail(
-				OutError,
-				TEXT("capture_media_native_resource_contract_invalid"));
-		}
+		if (!Request.TryValidate(OutError) || !Policy.TryValidate(OutError)) return false;
+		if (!MatchesPolicy(Request, Policy))
+			return Fail(OutError, Native(TEXT("capture_media_native_resource_contract_invalid"),
+				TEXT("The native capture request family and policy ID do not match the selected policy."), TEXT("execution"), TEXT("policy_binding"),
+				Facts({ { TEXT("family"), Number(static_cast<int32>(Request.GetFamily())) },
+					{ TEXT("policy_id"), MakeShared<FJsonValueString>(Request.GetPolicyId()) } }),
+				Facts({ { TEXT("family"), Number(static_cast<int32>(Policy.GetFamily())) },
+					{ TEXT("policy_id"), MakeShared<FJsonValueString>(Policy.GetPolicyId()) } })));
 		OutPort = MakeShared<FCaptureMediaNativeResourcePort,
 			ESPMode::ThreadSafe>(Request, Policy, MoveTemp(NativeSession));
 		return true;
 	}
 }
-

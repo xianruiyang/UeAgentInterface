@@ -1,4 +1,25 @@
-static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& EffectorObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+static UE::UAI::Contract::FDiagnostic MissingIKBoneIssue(const FJsonObject& Object, const FString& Path, const TCHAR* Reason)
+{
+    auto Error = UeAgentJsonDiagnostics::MakeIssue(TEXT("error"), TEXT("control_rig_ik_node_missing_bone"), Path, Reason);
+    auto Provided = MakeShared<FJsonObject>();
+    FString SourceField;
+    for (const TCHAR* Field : {TEXT("bone"), TEXT("bone_name"), TEXT("name")}) {
+        const auto Value = Object.TryGetField(Field);
+        if (Value.IsValid()) Provided->SetField(Field, Value);
+        if (SourceField.IsEmpty() && Value.IsValid() && Value->Type == EJson::String) SourceField = Field;
+    }
+    if (SourceField.IsEmpty()) for (const TCHAR* Field : {TEXT("bone"), TEXT("bone_name"), TEXT("name")})
+        if (Object.HasField(Field)) { SourceField = Field; break; }
+    Error.ActualValue = MakeShared<FJsonValueObject>(Provided);
+    Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a nonempty string in bone, bone_name or name"));
+    Error.ActualValuePresent = true;
+    Error.ExpectedValuePresent = true;
+    Error.SourceKind = TEXT("authored_value");
+    UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, Object, SourceField);
+    return Error;
+}
+
+static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& EffectorObj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		UeAgentJsonDiagnostics::WarnUnknownFields(
 			EffectorObj,
@@ -10,7 +31,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		TryGetStringFieldAny(EffectorObj, { TEXT("bone"), TEXT("bone_name"), TEXT("name") }, BoneName);
 		if (BoneName.IsEmpty())
 		{
-			UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("control_rig_ik_node_missing_bone"), Path, TEXT("PBIK effector requires bone/bone_name/name."));
+			Issues.Add(MissingIKBoneIssue(*EffectorObj, Path, TEXT("PBIK effector requires bone/bone_name/name.")));
 		}
 
 		FTransform Transform = FTransform::Identity;
@@ -41,7 +62,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 			*NumberDefaultText(PinRotation));
 	}
 
-	static FString BuildPBIKBoneSettingDefaultText(const TSharedPtr<FJsonObject>& BoneObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static FString BuildPBIKBoneSettingDefaultText(const TSharedPtr<FJsonObject>& BoneObj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		UeAgentJsonDiagnostics::WarnUnknownFields(
 			BoneObj,
@@ -57,7 +78,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		TryGetStringFieldAny(BoneObj, { TEXT("bone"), TEXT("bone_name"), TEXT("name") }, BoneName);
 		if (BoneName.IsEmpty())
 		{
-			UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("control_rig_ik_node_missing_bone"), Path, TEXT("PBIK bone setting requires bone/bone_name/name."));
+			Issues.Add(MissingIKBoneIssue(*BoneObj, Path, TEXT("PBIK bone setting requires bone/bone_name/name.")));
 		}
 
 		double RotationStiffness = 0.0;
@@ -131,7 +152,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 			*VectorDefaultText(PreferredAngles));
 	}
 
-	static FString BuildPBIKSolverSettingsDefaultText(const TSharedPtr<FJsonObject>& SettingsObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static FString BuildPBIKSolverSettingsDefaultText(const TSharedPtr<FJsonObject>& SettingsObj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (SettingsObj.IsValid())
 		{
@@ -241,13 +262,13 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		return FString::Printf(TEXT("(DrawScale=%s,bDrawDebug=%s)"), *NumberDefaultText(DrawScale), *BoolDefaultText(bDrawDebug));
 	}
 
-	static FString BuildLegacyFBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& EffectorObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static FString BuildLegacyFBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& EffectorObj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		FString BoneName;
 		TryGetStringFieldAny(EffectorObj, { TEXT("bone"), TEXT("bone_name"), TEXT("name") }, BoneName);
 		if (BoneName.IsEmpty())
 		{
-			UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("control_rig_ik_node_missing_bone"), Path, TEXT("FullbodyIK effector requires bone/bone_name/name."));
+			Issues.Add(MissingIKBoneIssue(*EffectorObj, Path, TEXT("FullbodyIK effector requires bone/bone_name/name.")));
 		}
 		FTransform Transform = FTransform::Identity;
 		ReadTransformField(EffectorObj, TEXT("transform"), Path + TEXT(".transform"), Transform, Issues, false);
@@ -276,7 +297,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 			*NumberDefaultText(Pull));
 	}
 
-	static FString BuildLegacyFBIKConstraintDefaultText(const TSharedPtr<FJsonObject>& ConstraintObj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	static FString BuildLegacyFBIKConstraintDefaultText(const TSharedPtr<FJsonObject>& ConstraintObj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		UeAgentJsonDiagnostics::WarnUnknownFields(
 			ConstraintObj,
@@ -291,7 +312,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		TryGetStringFieldAny(ConstraintObj, { TEXT("bone"), TEXT("bone_name"), TEXT("name") }, BoneName);
 		if (BoneName.IsEmpty())
 		{
-			UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("control_rig_ik_node_missing_bone"), Path, TEXT("FullbodyIK constraint requires bone/bone_name/name."));
+			Issues.Add(MissingIKBoneIssue(*ConstraintObj, Path, TEXT("FullbodyIK constraint requires bone/bone_name/name.")));
 		}
 
 		bool bEnabled = true;
@@ -373,29 +394,31 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		}
 
 		FString Text = InText.TrimStartAndEnd();
-		int64 Value = Enum->GetValueByNameString(Text);
-		if (Value == INDEX_NONE)
+		int64 Value = 0;
+		bool bResolved = UeAgentAuthoringTypeDescriptors::TryResolveEnumValueName(Enum, Text, Value);
+		if (!bResolved)
 		{
 			const FString EnumName = Enum->GetName();
 			if (!Text.StartsWith(EnumName + TEXT("::")))
 			{
-				Value = Enum->GetValueByNameString(EnumName + TEXT("::") + Text);
+				bResolved = UeAgentAuthoringTypeDescriptors::TryResolveEnumValueName(Enum, EnumName + TEXT("::") + Text, Value);
 			}
 		}
 
-		if (Value == INDEX_NONE)
+		if (!bResolved)
 		{
 			for (int32 Index = 0; Index < Enum->NumEnums() - 1; ++Index)
 			{
 				if (Enum->GetNameStringByIndex(Index).Equals(Text, ESearchCase::IgnoreCase))
 				{
 					Value = Enum->GetValueByIndex(Index);
+					bResolved = true;
 					break;
 				}
 			}
 		}
 
-		if (Value == INDEX_NONE)
+		if (!bResolved)
 		{
 			return false;
 		}
@@ -518,15 +541,20 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		const TSharedPtr<FJsonObject>& Obj,
 		const FString& Path,
 		FControlRigShapeDefinition& InOutShape,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!Obj.IsValid())
 		{
-			UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("warning"), TEXT("json_field_type_mismatch"), Path, TEXT("Expected shape definition object."));
+			auto Error = UeAgentJsonDiagnostics::MakeIssue(TEXT("warning"), TEXT("json_field_type_mismatch"), Path, TEXT("The shape definition object is unavailable."));
+            Error.ActualValuePresent = false;
+            Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("shape definition object"));
+            Error.ExpectedValuePresent = true;
+            Error.SourceKind = TEXT("related_input");
+            Issues.Add(MoveTemp(Error));
 			return false;
 		}
 
-		UeAgentJsonDiagnostics::WarnUnknownFields(Obj, Path, { TEXT("name"), TEXT("shape_name"), TEXT("static_mesh"), TEXT("transform"), TEXT("selector"), TEXT("display_name"), TEXT("category_path"), TEXT("value_kind"), TEXT("availability"), TEXT("operations") }, Issues);
+		UeAgentJsonDiagnostics::WarnUnknownFields(Obj, Path, { TEXT("name"), TEXT("shape_name"), TEXT("static_mesh"), TEXT("transform"), TEXT("selector"), TEXT("display_name"), TEXT("category_path"), TEXT("kind"), TEXT("availability"), TEXT("operations") }, Issues);
 
 		FString ShapeName;
 		if (Obj->TryGetStringField(TEXT("shape_name"), ShapeName) || Obj->TryGetStringField(TEXT("name"), ShapeName))
@@ -594,17 +622,34 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		return Out;
 	}
 
-	UControlRigShapeLibrary* CreateShapeLibraryAsset(const FString& AssetPath, FString& OutError)
+    static UE::UAI::Contract::FDiagnostic AssetCreationFailure(const TCHAR* Code, const FString& Reason,
+        const FString& TargetPath, const TCHAR* Field, const TSharedPtr<FJsonValue>& Actual,
+        const TSharedPtr<FJsonValue>& Expected, const bool bNativeResult)
+    {
+        auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Field, Expected, Actual, TEXT("asset_create"), Reason);
+        Error.TargetPath = TargetPath;
+        Error.SourceKind = bNativeResult ? TEXT("native_result") : TEXT("related_input");
+        if (bNativeResult) Error.Source = {};
+        Error.ActualValuePresent = Actual.IsValid();
+        Error.ExpectedValuePresent = Expected.IsValid();
+        return Error;
+    }
+
+	UControlRigShapeLibrary* CreateShapeLibraryAsset(const FString& AssetPath, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const FString NormalizedAssetPath = NormalizeAssetPath(AssetPath);
 		if (!FPackageName::IsValidLongPackageName(NormalizedAssetPath))
 		{
-			OutError = TEXT("invalid_asset_path");
+			OutError = AssetCreationFailure(TEXT("invalid_asset_path"), TEXT("Asset creation requires a valid long package path."),
+                FString(), TEXT("/asset_path"), MakeShared<FJsonValueString>(AssetPath),
+                MakeShared<FJsonValueString>(TEXT("valid long package path")), false);
 			return nullptr;
 		}
 		if (LoadAssetObject(NormalizedAssetPath))
 		{
-			OutError = TEXT("asset_already_exists");
+			OutError = AssetCreationFailure(TEXT("asset_already_exists"), TEXT("An asset already exists at the requested creation path."),
+                NormalizedAssetPath, TEXT("/asset_path"), MakeShared<FJsonValueString>(AssetPath),
+                MakeShared<FJsonValueString>(TEXT("unused asset path")), false);
 			return nullptr;
 		}
 
@@ -612,14 +657,16 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		UPackage* Package = CreatePackage(*NormalizedAssetPath);
 		if (!Package)
 		{
-			OutError = TEXT("create_package_failed");
+			OutError = AssetCreationFailure(TEXT("create_package_failed"), TEXT("The native package creation operation returned no package."),
+                NormalizedAssetPath, TEXT("package_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
 			return nullptr;
 		}
 
 		UControlRigShapeLibrary* Library = NewObject<UControlRigShapeLibrary>(Package, FName(*AssetName), RF_Public | RF_Standalone | RF_Transactional);
 		if (!Library)
 		{
-			OutError = TEXT("create_asset_failed");
+			OutError = AssetCreationFailure(TEXT("create_asset_failed"), TEXT("Native allocation returned no Control Rig shape library."),
+                NormalizedAssetPath, TEXT("asset_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
 			return nullptr;
 		}
 
@@ -633,24 +680,30 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		const bool bModularRig,
 		const FString& PreviewSkeletalMeshPath,
 		const bool bImportHierarchyFromPreview,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const FString NormalizedAssetPath = NormalizeAssetPath(AssetPath);
 		if (!FPackageName::IsValidLongPackageName(NormalizedAssetPath))
 		{
-			OutError = TEXT("invalid_asset_path");
+			OutError = AssetCreationFailure(TEXT("invalid_asset_path"), TEXT("Asset creation requires a valid long package path."),
+                FString(), TEXT("/asset_path"), MakeShared<FJsonValueString>(AssetPath),
+                MakeShared<FJsonValueString>(TEXT("valid long package path")), false);
 			return nullptr;
 		}
 		if (LoadAssetObject(NormalizedAssetPath))
 		{
-			OutError = TEXT("asset_already_exists");
+			OutError = AssetCreationFailure(TEXT("asset_already_exists"), TEXT("An asset already exists at the requested creation path."),
+                NormalizedAssetPath, TEXT("/asset_path"), MakeShared<FJsonValueString>(AssetPath),
+                MakeShared<FJsonValueString>(TEXT("unused asset path")), false);
 			return nullptr;
 		}
 
 		UControlRigBlueprint* Blueprint = UControlRigBlueprintFactory::CreateNewControlRigAsset(NormalizedAssetPath, bModularRig);
 		if (!Blueprint)
 		{
-			OutError = TEXT("create_control_rig_failed");
+			OutError = AssetCreationFailure(TEXT("create_control_rig_failed"),
+                bModularRig ? TEXT("The native factory returned no modular Control Rig asset.") : TEXT("The native factory returned no Control Rig asset."),
+                NormalizedAssetPath, TEXT("asset_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
 			return nullptr;
 		}
 
@@ -659,7 +712,9 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 			USkeletalMesh* PreviewMesh = LoadAsset<USkeletalMesh>(PreviewSkeletalMeshPath);
 			if (!PreviewMesh)
 			{
-				OutError = TEXT("preview_skeletal_mesh_not_found");
+				OutError = AssetCreationFailure(TEXT("preview_skeletal_mesh_not_found"), TEXT("The requested preview skeletal mesh could not be loaded."),
+                    NormalizedAssetPath, TEXT("/preview_skeletal_mesh"), MakeShared<FJsonValueString>(PreviewSkeletalMeshPath),
+                    MakeShared<FJsonValueString>(TEXT("loadable USkeletalMesh asset")), false);
 				return nullptr;
 			}
 			Blueprint->SetPreviewMesh(PreviewMesh, true);
@@ -729,7 +784,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		const TSharedPtr<FJsonObject>& Obj,
 		const FString& Path,
 		FRigControlSettings& InOutSettings,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!Obj.IsValid())
 		{
@@ -744,7 +799,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 				TEXT("shape_visible"), TEXT("shape_visibility"), TEXT("shape_name"), TEXT("shape_color"),
 				TEXT("transient_control"), TEXT("group_with_parent_control"), TEXT("restrict_space_switching"),
 				TEXT("use_preferred_rotation_order"),
-				TEXT("selector"), TEXT("display_name"), TEXT("category_path"), TEXT("control_type"), TEXT("value_kind"), TEXT("availability"), TEXT("operations")
+				TEXT("selector"), TEXT("display_name"), TEXT("category_path"), TEXT("control_type"), TEXT("kind"), TEXT("availability"), TEXT("operations")
 			},
 			Issues);
 
@@ -887,33 +942,13 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 			NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle());
 			NodeObj->SetObjectField(TEXT("position"), MakeVector2DJson(Node->GetPosition()));
 
-			if (const URigVMUnitNode* UnitNode = Cast<URigVMUnitNode>(Node))
-			{
-				NodeObj->SetStringField(TEXT("node_type"), TEXT("unit"));
-				NodeObj->SetStringField(TEXT("script_struct"), UnitNode->GetScriptStruct() ? UnitNode->GetScriptStruct()->GetPathName() : FString());
-				NodeObj->SetStringField(TEXT("method"), UnitNode->GetMethodName().ToString());
-			}
-			else if (const URigVMVariableNode* VariableNode = Cast<URigVMVariableNode>(Node))
-			{
-				NodeObj->SetStringField(TEXT("node_type"), TEXT("variable"));
-				NodeObj->SetStringField(TEXT("variable_name"), VariableNode->GetVariableName().ToString());
-				NodeObj->SetStringField(TEXT("cpp_type"), VariableNode->GetCPPType());
-				NodeObj->SetStringField(TEXT("default_value"), VariableNode->GetDefaultValue());
-			}
-			else if (const URigVMTemplateNode* TemplateNode = Cast<URigVMTemplateNode>(Node))
-			{
-				NodeObj->SetStringField(TEXT("node_type"), TEXT("template"));
-				NodeObj->SetStringField(TEXT("notation"), TemplateNode->GetNotation().ToString());
-			}
-			else
-			{
-				NodeObj->SetStringField(TEXT("node_type"), Node->GetClass()->GetName());
-			}
+			if (const auto* Blueprint = Node->GetTypedOuter<UControlRigBlueprint>())
+				UeAgentRigVMNodeAuthoring::CaptureDefinition(*Blueprint, *Node, *NodeObj);
 
 			TSharedPtr<FJsonObject> PinDefaults = MakeShared<FJsonObject>();
-			for (URigVMPin* Pin : Node->GetAllPinsRecursively())
+			for (URigVMPin* Pin : Node->GetPins())
 			{
-				if (Pin && !Pin->GetDefaultValue().IsEmpty())
+				if (Pin && UeAgentRigVMNodeAuthoring::IsAuthorableDefaultPin(*Pin))
 				{
 					PinDefaults->SetStringField(Pin->GetPinPath(false), Pin->GetDefaultValue());
 				}
@@ -1042,7 +1077,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		TSharedPtr<FJsonObject> NodeObj,
 		const TSharedPtr<FJsonObject>& SpecObj,
 		const FString& SpecPath,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		FString RootBone;
 		TryReadBoneNameField(SpecObj, TEXT("root"), RootBone);
@@ -1078,7 +1113,13 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 					}
 					else
 					{
-						UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("json_field_type_mismatch"), EffectorPath, TEXT("Expected PBIK effector object or bone name string."));
+						auto Error = UeAgentJsonDiagnostics::MakeIssue(TEXT("error"), TEXT("json_field_type_mismatch"), EffectorPath, TEXT("Expected PBIK effector object or bone name string."));
+						Error.ActualValue = (*EffectorValues)[Index];
+						Error.ActualValuePresent = Error.ActualValue.IsValid();
+						Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("PBIK effector object or bone name string"));
+						Error.ExpectedValuePresent = true;
+						Error.SourceKind = TEXT("authored_value");
+						Issues.Add(MoveTemp(Error));
 					}
 				}
 			}
@@ -1099,7 +1140,13 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 				}
 				else
 				{
-					UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("json_field_type_mismatch"), BoneSettingPath, TEXT("Expected PBIK bone setting object."));
+					auto Error = UeAgentJsonDiagnostics::MakeIssue(TEXT("error"), TEXT("json_field_type_mismatch"), BoneSettingPath, TEXT("Expected PBIK bone setting object."));
+					Error.ActualValue = (*BoneSettingValues)[Index];
+					Error.ActualValuePresent = Error.ActualValue.IsValid();
+					Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("PBIK bone setting object"));
+					Error.ExpectedValuePresent = true;
+					Error.SourceKind = TEXT("authored_value");
+					Issues.Add(MoveTemp(Error));
 				}
 			}
 			SetStructuredPinDefault(NodeObj, TEXT("BoneSettings"), ArrayDefaultText(BoneSettingTexts));
@@ -1146,7 +1193,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		TSharedPtr<FJsonObject> NodeObj,
 		const TSharedPtr<FJsonObject>& SpecObj,
 		const FString& SpecPath,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		FString RootBone;
 		TryReadBoneNameField(SpecObj, TEXT("root"), RootBone);
@@ -1182,7 +1229,13 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 					}
 					else
 					{
-						UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("json_field_type_mismatch"), EffectorPath, TEXT("Expected FullbodyIK effector object or bone name string."));
+						auto Error = UeAgentJsonDiagnostics::MakeIssue(TEXT("error"), TEXT("json_field_type_mismatch"), EffectorPath, TEXT("Expected FullbodyIK effector object or bone name string."));
+						Error.ActualValue = (*EffectorValues)[Index];
+						Error.ActualValuePresent = Error.ActualValue.IsValid();
+						Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("FullbodyIK effector object or bone name string"));
+						Error.ExpectedValuePresent = true;
+						Error.SourceKind = TEXT("authored_value");
+						Issues.Add(MoveTemp(Error));
 					}
 				}
 			}
@@ -1203,7 +1256,13 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 				}
 				else
 				{
-					UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("json_field_type_mismatch"), ConstraintPath, TEXT("Expected FullbodyIK constraint object."));
+					auto Error = UeAgentJsonDiagnostics::MakeIssue(TEXT("error"), TEXT("json_field_type_mismatch"), ConstraintPath, TEXT("Expected FullbodyIK constraint object."));
+					Error.ActualValue = (*ConstraintValues)[Index];
+					Error.ActualValuePresent = Error.ActualValue.IsValid();
+					Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("FullbodyIK constraint object"));
+					Error.ExpectedValuePresent = true;
+					Error.SourceKind = TEXT("authored_value");
+					Issues.Add(MoveTemp(Error));
 				}
 			}
 			SetStructuredPinDefault(NodeObj, TEXT("Constraints"), ArrayDefaultText(ConstraintTexts));
@@ -1230,7 +1289,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		TSharedPtr<FJsonObject> GraphsJson,
 		const TSharedPtr<FJsonObject>& IkNodesJson,
 		const FString& Path,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!GraphsJson.IsValid() || !IkNodesJson.IsValid())
 		{
@@ -1352,7 +1411,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		const bool bAnimationEditingReady = bSupportsForwardSolve && bSupportsBackwardSolve;
 		const bool bBakeToControlRigReady = bIsFKControlRig || bSupportsInverseEvent;
 
-		TArray<TSharedPtr<FJsonValue>> Issues;
+		TArray<UE::UAI::Contract::FDiagnostic> Issues;
 		if (!bSupportsForwardSolve)
 		{
 			UeAgentJsonDiagnostics::AddIssue(
@@ -1381,7 +1440,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		Obj->SetBoolField(TEXT("supports_inverse_event"), bSupportsInverseEvent);
 		Obj->SetBoolField(TEXT("animation_editing_ready"), bAnimationEditingReady);
 		Obj->SetBoolField(TEXT("bake_to_control_rig_ready"), bBakeToControlRigReady);
-		Obj->SetArrayField(TEXT("issues"), Issues);
+		Obj->SetArrayField(TEXT("issues"), UE::UAI::Contract::ToPublicDiagnostics(Issues));
 		Obj->SetNumberField(TEXT("issue_count"), Issues.Num());
 		return Obj;
 	}
@@ -1488,7 +1547,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		return Out;
 	}
 
-	bool ApplyPreviewJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	bool ApplyPreviewJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!Blueprint || !Obj.IsValid())
 		{
@@ -1520,7 +1579,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		return !HasBlockingIssue(Issues);
 	}
 
-	bool ApplyShapeLibrariesJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	bool ApplyShapeLibrariesJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!Blueprint || !Obj.IsValid())
 		{
@@ -1555,7 +1614,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		return !HasBlockingIssue(Issues);
 	}
 
-	void ApplyBonesJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	void ApplyBonesJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!Blueprint || !Obj.IsValid())
 		{
@@ -1631,7 +1690,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		}
 	}
 
-	void ApplyNullsJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	void ApplyNullsJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!Blueprint || !Obj.IsValid())
 		{
@@ -1688,7 +1747,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		}
 	}
 
-	void ApplyControlsJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	void ApplyControlsJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!Blueprint || !Obj.IsValid())
 		{
@@ -1712,7 +1771,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 			{
 				continue;
 			}
-			UeAgentJsonDiagnostics::WarnUnknownFields(ControlObj, ControlPath, { TEXT("name"), TEXT("type"), TEXT("parent"), TEXT("parent_name"), TEXT("parent_type"), TEXT("initial_local_transform"), TEXT("current_local_transform"), TEXT("settings"), TEXT("value_transform"), TEXT("offset_transform"), TEXT("shape_transform"), TEXT("remove"), TEXT("selector"), TEXT("display_name"), TEXT("category_path"), TEXT("control_type"), TEXT("value_kind"), TEXT("availability"), TEXT("operations") }, Issues);
+			UeAgentJsonDiagnostics::WarnUnknownFields(ControlObj, ControlPath, { TEXT("name"), TEXT("type"), TEXT("parent"), TEXT("parent_name"), TEXT("parent_type"), TEXT("initial_local_transform"), TEXT("current_local_transform"), TEXT("settings"), TEXT("value_transform"), TEXT("offset_transform"), TEXT("shape_transform"), TEXT("remove"), TEXT("selector"), TEXT("display_name"), TEXT("category_path"), TEXT("control_type"), TEXT("kind"), TEXT("availability"), TEXT("operations") }, Issues);
 
 			FString Name;
 			if (!UeAgentJsonDiagnostics::ReadStringField(ControlObj, TEXT("name"), ControlPath + TEXT(".name"), Name, Issues, true) || Name.TrimStartAndEnd().IsEmpty())
@@ -1775,7 +1834,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		}
 	}
 
-	void ApplyCurvesJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	void ApplyCurvesJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (!Blueprint || !Obj.IsValid())
 		{
@@ -1831,27 +1890,53 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 		}
 	}
 
-	bool ApplyGraphsJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues)
+	bool ApplyGraphsJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, TArray<UE::UAI::Contract::FDiagnostic>& Issues,
+		const TSet<const URigVMNode*>* AddedNodes)
 	{
 		if (!Blueprint || !Obj.IsValid())
 		{
 			return true;
 		}
-		UeAgentJsonDiagnostics::WarnUnknownFields(Obj, Path, { TEXT("replace_nodes"), TEXT("graphs") }, Issues);
+		const int32 FirstIssue = Issues.Num();
+		const auto NativeIssue = [&](const TCHAR* Code, const TCHAR* Reason, const FString& Pointer,
+			const FString& Property, const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected,
+			UE::UAI::Contract::ESeverity Severity = UE::UAI::Contract::ESeverity::Error) {
+			auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Property, Expected, Actual, TEXT("graph_apply"), Reason);
+			Error.SourceKind = TEXT("native_result");
+			Error.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Blueprint);
+			Error.SemanticPointer = Pointer;
+			Error.Severity = Severity;
+			Issues.Add(MoveTemp(Error));
+		};
+		const auto AddNodeFailure = [&](UE::UAI::Contract::FDiagnostic Error, const FJsonObject& Node, const FString& Pointer) {
+			UeAgentAuthoringDiagnostics::LocateFailure(Error, Node, TEXT("graph_apply"), UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Blueprint));
+			if (Error.SourceKind == TEXT("native_result")) {
+				if (Error.SemanticPointer.IsEmpty()) Error.SemanticPointer = Pointer;
+			} else if (Error.SourceKind != TEXT("command_input")) {
+				UeAgentAuthoringDiagnostics::PrefixInternalDocumentFailure(Error, Pointer);
+			}
+			Issues.Add(MoveTemp(Error));
+		};
+		const auto LocateIssues = [&]() {
+			for (int32 Index = FirstIssue; Index < Issues.Num(); ++Index)
+				UeAgentAuthoringDiagnostics::LocateFailure(Issues[Index], *Obj, TEXT("graph_apply"), UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Blueprint));
+		};
+		UeAgentJsonDiagnostics::WarnUnknownFields(Obj, TEXT("/"), { TEXT("replace_nodes"), TEXT("graphs") }, Issues);
 
 		const TArray<TSharedPtr<FJsonValue>>* Graphs = nullptr;
-		if (!UeAgentJsonDiagnostics::ReadArrayField(Obj, TEXT("graphs"), Path + TEXT(".graphs"), Graphs, Issues, false) || !Graphs)
+		if (!UeAgentJsonDiagnostics::ReadArrayField(Obj, TEXT("graphs"), TEXT("/graphs"), Graphs, Issues, false) || !Graphs)
 		{
+			LocateIssues();
 			return !HasBlockingIssue(Issues);
 		}
 
 		bool bReplaceNodes = false;
-		UeAgentJsonDiagnostics::ReadBoolField(Obj, TEXT("replace_nodes"), Path + TEXT(".replace_nodes"), bReplaceNodes, Issues, false);
+		UeAgentJsonDiagnostics::ReadBoolField(Obj, TEXT("replace_nodes"), TEXT("/replace_nodes"), bReplaceNodes, Issues, false);
 
 		for (int32 GraphIndex = 0; GraphIndex < Graphs->Num(); ++GraphIndex)
 		{
 			TSharedPtr<FJsonObject> GraphObj;
-			const FString GraphPath = FString::Printf(TEXT("%s.graphs[%d]"), *Path, GraphIndex);
+			const FString GraphPath = FString::Printf(TEXT("/graphs/%d"), GraphIndex);
 			if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*Graphs)[GraphIndex], GraphPath, GraphObj, Issues))
 			{
 				continue;
@@ -1868,7 +1953,10 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 			URigVMController* Controller = Blueprint->GetController(Graph);
 			if (!Graph || !Controller)
 			{
-				UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("control_rig_graph_controller_missing"), GraphPath, TEXT("RigVM graph/controller is missing."));
+				NativeIssue(TEXT("control_rig_graph_controller_missing"),
+					Graph ? TEXT("The native RigVM graph has no editing controller.") : TEXT("The Blueprint could not provide or create the native RigVM graph."),
+					GraphPath, Graph ? TEXT("controller_available") : TEXT("graph_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				continue;
 			}
 
@@ -1879,24 +1967,24 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 			}
 
 			const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
-			if (UeAgentJsonDiagnostics::ReadArrayField(GraphObj, TEXT("nodes"), GraphPath + TEXT(".nodes"), Nodes, Issues, false) && Nodes)
+			if (UeAgentJsonDiagnostics::ReadArrayField(GraphObj, TEXT("nodes"), GraphPath + TEXT("/nodes"), Nodes, Issues, false) && Nodes)
 			{
 				for (int32 NodeIndex = 0; NodeIndex < Nodes->Num(); ++NodeIndex)
 				{
 					TSharedPtr<FJsonObject> NodeObj;
-					const FString NodePath = FString::Printf(TEXT("%s.nodes[%d]"), *GraphPath, NodeIndex);
+					const FString NodePath = FString::Printf(TEXT("%s/nodes/%d"), *GraphPath, NodeIndex);
 					if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*Nodes)[NodeIndex], NodePath, NodeObj, Issues))
 					{
 						continue;
 					}
-					UeAgentJsonDiagnostics::WarnUnknownFields(NodeObj, NodePath, { TEXT("node_type"), TEXT("name"), TEXT("title"), TEXT("position"), TEXT("script_struct"), TEXT("method"), TEXT("notation"), TEXT("variable_name"), TEXT("cpp_type"), TEXT("cpp_type_object_path"), TEXT("is_getter"), TEXT("default_value"), TEXT("pin_defaults"), TEXT("selector"), TEXT("display_name"), TEXT("category_path"), TEXT("control_type"), TEXT("value_kind"), TEXT("availability"), TEXT("operations") }, Issues);
+					UeAgentJsonDiagnostics::WarnUnknownFields(NodeObj, NodePath, { TEXT("node_type"), TEXT("name"), TEXT("title"), TEXT("position"), TEXT("script_struct"), TEXT("method"), TEXT("notation"), TEXT("variable_name"), TEXT("cpp_type"), TEXT("cpp_type_object_path"), TEXT("is_getter"), TEXT("default_value"), TEXT("enum_path"), TEXT("function_host"), TEXT("function_name"), TEXT("variable_map"), TEXT("entry_name"), TEXT("resolved_types"), TEXT("pin_defaults"), TEXT("selector"), TEXT("display_name"), TEXT("category_path"), TEXT("control_type"), TEXT("kind"), TEXT("availability"), TEXT("operations") }, Issues);
 
 					FString NodeType;
 					FString NodeName;
 					NodeObj->TryGetStringField(TEXT("node_type"), NodeType);
 					NodeObj->TryGetStringField(TEXT("name"), NodeName);
 					FVector2D Position = FVector2D::ZeroVector;
-					ReadVector2DField(NodeObj, TEXT("position"), NodePath + TEXT(".position"), Position, Issues, false);
+					ReadVector2DField(NodeObj, TEXT("position"), NodePath + TEXT("/position"), Position, Issues, false);
 
 					URigVMNode* NewNode = nullptr;
 					if (!bReplaceNodes && !NodeName.TrimStartAndEnd().IsEmpty())
@@ -1911,142 +1999,43 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 						}
 					}
 
-					if (NodeType.Equals(TEXT("unit"), ESearchCase::IgnoreCase))
+					UE::UAI::Contract::FDiagnostic DefinitionError;
+					const bool bNewNode = !NewNode || (AddedNodes && AddedNodes->Contains(NewNode));
+					if (!NewNode)
+						NewNode = UeAgentRigVMNodeAuthoring::CreateNode(*Blueprint, *Controller, *NodeObj, NodeName, Position, DefinitionError);
+					else if (!UeAgentRigVMNodeAuthoring::ValidateExistingDefinition(*Blueprint, *NewNode, *NodeObj, DefinitionError))
 					{
-						FString ScriptStructPath;
-						if (UeAgentJsonDiagnostics::ReadStringField(NodeObj, TEXT("script_struct"), NodePath + TEXT(".script_struct"), ScriptStructPath, Issues, true))
-						{
-							if (NewNode)
-							{
-								if (const URigVMUnitNode* ExistingUnitNode = Cast<URigVMUnitNode>(NewNode))
-								{
-									const FString ExistingStructPath = ExistingUnitNode->GetScriptStruct() ? ExistingUnitNode->GetScriptStruct()->GetPathName() : FString();
-									if (!ExistingStructPath.Equals(ScriptStructPath, ESearchCase::IgnoreCase))
-									{
-										UeAgentJsonDiagnostics::AddIssue(
-											Issues,
-											TEXT("warning"),
-											TEXT("rigvm_existing_unit_struct_mismatch"),
-											NodePath + TEXT(".script_struct"),
-											FString::Printf(TEXT("Existing node '%s' uses struct '%s', requested '%s'. Pin defaults will still be applied when pins exist."), *NodeName, *ExistingStructPath, *ScriptStructPath));
-									}
-								}
-								else
-								{
-									UeAgentJsonDiagnostics::AddIssue(
-										Issues,
-										TEXT("warning"),
-										TEXT("rigvm_existing_node_type_mismatch"),
-										NodePath,
-										FString::Printf(TEXT("Existing node '%s' is not a unit node. Pin defaults will still be applied when pins exist."), *NodeName));
-								}
-							}
-							else
-							{
-								FString MethodText = TEXT("Execute");
-								NodeObj->TryGetStringField(TEXT("method"), MethodText);
-								NewNode = Controller->AddUnitNodeFromStructPath(ScriptStructPath, FName(*MethodText), Position, NodeName, true, false);
-								if (!NewNode)
-								{
-									UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("warning"), TEXT("rigvm_add_unit_node_failed"), NodePath, FString::Printf(TEXT("Failed to add unit node for struct '%s'."), *ScriptStructPath));
-								}
-							}
-						}
+						AddNodeFailure(MoveTemp(DefinitionError), *NodeObj, NodePath);
+						continue;
 					}
-					else if (NodeType.Equals(TEXT("template"), ESearchCase::IgnoreCase))
+					if (!NewNode || !UeAgentRigVMNodeAuthoring::ApplyFunctionVariableMap(*Controller, *NewNode, *NodeObj, DefinitionError))
 					{
-						FString Notation;
-						if (UeAgentJsonDiagnostics::ReadStringField(NodeObj, TEXT("notation"), NodePath + TEXT(".notation"), Notation, Issues, true))
-						{
-							if (!NewNode)
-							{
-								NewNode = Controller->AddTemplateNode(FName(*Notation), Position, NodeName, true, false);
-								if (!NewNode)
-								{
-									UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("warning"), TEXT("rigvm_add_template_node_failed"), NodePath, FString::Printf(TEXT("Failed to add template node '%s'."), *Notation));
-								}
-							}
-						}
+						AddNodeFailure(MoveTemp(DefinitionError), *NodeObj, NodePath);
+						continue;
 					}
-					else if (NodeType.Equals(TEXT("variable"), ESearchCase::IgnoreCase))
-					{
-						FString VariableName;
-						FString CppType;
-						FString CppTypeObjectPath;
-						FString DefaultValue;
-						bool bIsGetter = true;
-						UeAgentJsonDiagnostics::ReadStringField(NodeObj, TEXT("variable_name"), NodePath + TEXT(".variable_name"), VariableName, Issues, true);
-						UeAgentJsonDiagnostics::ReadStringField(NodeObj, TEXT("cpp_type"), NodePath + TEXT(".cpp_type"), CppType, Issues, true);
-						NodeObj->TryGetStringField(TEXT("cpp_type_object_path"), CppTypeObjectPath);
-						NodeObj->TryGetStringField(TEXT("default_value"), DefaultValue);
-						UeAgentJsonDiagnostics::ReadBoolField(NodeObj, TEXT("is_getter"), NodePath + TEXT(".is_getter"), bIsGetter, Issues, false);
-						if (!VariableName.IsEmpty() && !CppType.IsEmpty())
-						{
-							if (!NewNode)
-							{
-								NewNode = Controller->AddVariableNodeFromObjectPath(FName(*VariableName), CppType, CppTypeObjectPath, bIsGetter, DefaultValue, Position, NodeName, true, false);
-								if (!NewNode)
-								{
-									UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("warning"), TEXT("rigvm_add_variable_node_failed"), NodePath, FString::Printf(TEXT("Failed to add variable node '%s'."), *VariableName));
-								}
-							}
-						}
-					}
+					UeAgentRigVMNodeAuthoring::ApplyPinDefaults(*Controller, *NewNode, *NodeObj, bNewNode, NodePath, Issues);
 
 					if (NewNode && !NewNode->GetPosition().Equals(Position, 0.01)
 						&& !Controller->SetNodePosition(NewNode, Position, false, false, false))
 					{
-						UeAgentJsonDiagnostics::AddIssue(
-							Issues,
-							TEXT("warning"),
-							TEXT("rigvm_set_node_position_failed"),
-							NodePath + TEXT(".position"),
-							FString::Printf(TEXT("Failed to set node position for '%s'."), *NewNode->GetName()));
+						const FVector2D ActualPosition = NewNode->GetPosition();
+						TArray<TSharedPtr<FJsonValue>> Actual{MakeShared<FJsonValueNumber>(ActualPosition.X), MakeShared<FJsonValueNumber>(ActualPosition.Y)};
+						TArray<TSharedPtr<FJsonValue>> Expected{MakeShared<FJsonValueNumber>(Position.X), MakeShared<FJsonValueNumber>(Position.Y)};
+						NativeIssue(TEXT("rigvm_set_node_position_failed"), TEXT("The native controller rejected the node position."),
+							NodePath + TEXT("/position"), TEXT("position"), MakeShared<FJsonValueArray>(MoveTemp(Actual)),
+							MakeShared<FJsonValueArray>(MoveTemp(Expected)), UE::UAI::Contract::ESeverity::Warning);
 					}
 
-					const TSharedPtr<FJsonObject>* PinDefaultsObj = nullptr;
-					if (NewNode && NodeObj->TryGetObjectField(TEXT("pin_defaults"), PinDefaultsObj) && PinDefaultsObj && PinDefaultsObj->IsValid())
-					{
-						for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*PinDefaultsObj)->Values)
-						{
-							FString ValueText;
-							if (!Pair.Value.IsValid() || !Pair.Value->TryGetString(ValueText))
-							{
-								UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("warning"), TEXT("json_field_type_mismatch"), NodePath + TEXT(".pin_defaults.") + Pair.Key, TEXT("Pin default values must be strings."));
-								continue;
-							}
-							const FString FullPinPath = Pair.Key.StartsWith(NewNode->GetName() + TEXT(".")) ? Pair.Key : NewNode->GetName() + TEXT(".") + Pair.Key;
-							FString LeafPinName = FullPinPath;
-							int32 LastDotIndex = INDEX_NONE;
-							if (FullPinPath.FindLastChar(TEXT('.'), LastDotIndex))
-							{
-								LeafPinName = FullPinPath.Mid(LastDotIndex + 1);
-							}
-							if (LeafPinName.Equals(TEXT("WorkData"), ESearchCase::IgnoreCase))
-							{
-								continue;
-							}
-							if (const URigVMPin* ExistingPin = Graph->FindPin(FullPinPath);
-								ExistingPin && ExistingPin->GetDefaultValue() == ValueText)
-							{
-								continue;
-							}
-							if (!Controller->SetPinDefaultValue(FullPinPath, ValueText, true, true, false, false, true))
-							{
-								UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("warning"), TEXT("rigvm_set_pin_default_failed"), NodePath + TEXT(".pin_defaults.") + Pair.Key, FString::Printf(TEXT("Failed to set pin default '%s'."), *FullPinPath));
-							}
-						}
-					}
 				}
 			}
 
 			const TArray<TSharedPtr<FJsonValue>>* Links = nullptr;
-			if (UeAgentJsonDiagnostics::ReadArrayField(GraphObj, TEXT("links"), GraphPath + TEXT(".links"), Links, Issues, false) && Links)
+			if (UeAgentJsonDiagnostics::ReadArrayField(GraphObj, TEXT("links"), GraphPath + TEXT("/links"), Links, Issues, false) && Links)
 			{
 				for (int32 LinkIndex = 0; LinkIndex < Links->Num(); ++LinkIndex)
 				{
 					TSharedPtr<FJsonObject> LinkObj;
-					const FString LinkPath = FString::Printf(TEXT("%s.links[%d]"), *GraphPath, LinkIndex);
+					const FString LinkPath = FString::Printf(TEXT("%s/links/%d"), *GraphPath, LinkIndex);
 					if (!UeAgentJsonDiagnostics::ReadObjectFromValue((*Links)[LinkIndex], LinkPath, LinkObj, Issues))
 					{
 						continue;
@@ -2055,8 +2044,8 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 
 					FString Source;
 					FString Target;
-					UeAgentJsonDiagnostics::ReadStringField(LinkObj, TEXT("source"), LinkPath + TEXT(".source"), Source, Issues, true);
-					UeAgentJsonDiagnostics::ReadStringField(LinkObj, TEXT("target"), LinkPath + TEXT(".target"), Target, Issues, true);
+					UeAgentJsonDiagnostics::ReadStringField(LinkObj, TEXT("source"), LinkPath + TEXT("/source"), Source, Issues, true);
+					UeAgentJsonDiagnostics::ReadStringField(LinkObj, TEXT("target"), LinkPath + TEXT("/target"), Target, Issues, true);
 					bool bLinkAlreadyExists = false;
 					if (!Source.IsEmpty() && !Target.IsEmpty())
 					{
@@ -2073,11 +2062,38 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 					}
 					if (!Source.IsEmpty() && !Target.IsEmpty() && !bLinkAlreadyExists && !Controller->AddLink(Source, Target, true, false))
 					{
-						UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("warning"), TEXT("rigvm_add_link_failed"), LinkPath, FString::Printf(TEXT("Failed to link '%s' -> '%s'."), *Source, *Target));
+						NativeIssue(TEXT("rigvm_add_link_failed"), TEXT("The native controller refused to create the requested connection."),
+							LinkPath, TEXT("connection_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					}
+				}
+				// AddLink can replace both an input link and an execution output.
+				// Resolve the original requests after the whole batch, including
+				// native injected-pin redirection through GetPinForLink.
+				for (int32 LinkIndex = 0; LinkIndex < Links->Num(); ++LinkIndex)
+				{
+					const auto& Value = (*Links)[LinkIndex];
+					const TSharedPtr<FJsonObject> Link = Value.IsValid() && Value->Type == EJson::Object ? Value->AsObject() : nullptr;
+					FString Source, Target;
+					if (!Link.IsValid() || !Link->TryGetStringField(TEXT("source"), Source)
+						|| !Link->TryGetStringField(TEXT("target"), Target)) continue;
+					URigVMPin* From = Graph->FindPin(Source);
+					URigVMPin* To = Graph->FindPin(Target);
+					if (From) From = From->GetPinForLink();
+					if (To) To = To->GetPinForLink();
+					const bool bRetained = From && To && Graph->GetLinks().ContainsByPredicate([&](const URigVMLink* NativeLink)
+					{
+						return NativeLink && NativeLink->GetSourcePin() == From && NativeLink->GetTargetPin() == To;
+					});
+					if (!bRetained) {
+						NativeIssue(TEXT("graph_connection_intent_not_retained"), TEXT("The requested connection is absent after applying the graph."),
+							FString::Printf(TEXT("%s/links/%d"), *GraphPath, LinkIndex), TEXT("connection_present"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), UE::UAI::Contract::ESeverity::Warning);
+						Issues.Last().Stage = TEXT("rigging_connection_observation");
 					}
 				}
 			}
 		}
+		LocateIssues();
 		return !HasBlockingIssue(Issues);
 	}
 
@@ -2185,6 +2201,7 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 				}
 				MessageObj->SetStringField(TEXT("severity"), Severity);
 				MessageObj->SetStringField(TEXT("message"), Message->ToText().ToString());
+				UeAgentAuthoringDiagnostics::AppendCompilerMessageSources(*Message, Blueprint, *MessageObj);
 				MessageObj->SetStringField(TEXT("identifier"), Message->GetIdentifier().ToString());
 				Messages.Add(MakeShared<FJsonValueObject>(MessageObj));
 			}
@@ -2312,69 +2329,4 @@ static FString BuildPBIKEffectorDefaultText(const TSharedPtr<FJsonObject>& Effec
 			return true;
 		}
 		return false;
-	}
-
-	void AddUnsupportedApplyIssueIfNeeded(
-		const TSharedPtr<FJsonObject>& Obj,
-		const FString& FilePath,
-		const FString& Profile,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
-	{
-		if (!HasUnsupportedWriteContent(Obj))
-		{
-			return;
-		}
-		UeAgentJsonDiagnostics::AddIssue(
-			Issues,
-			TEXT("error"),
-			TEXT("unsupported_apply_profile"),
-			FilePath,
-			FString::Printf(TEXT("%s contains requested writes, but this profile is not applied by control_rig_apply_folder. Move supported state into the documented hierarchy/graphs/settings files or use the explicit action workflow."), *Profile));
-	}
-
-	TSharedPtr<FJsonObject> MakeCoverageJson()
-	{
-		TSharedPtr<FJsonObject> Coverage = MakeShared<FJsonObject>();
-		Coverage->SetStringField(TEXT("status"), TEXT("complete_folder_profile"));
-		Coverage->SetStringField(TEXT("implementation_status"), TEXT("complete_folder_profile"));
-		Coverage->SetStringField(TEXT("schema"), TEXT("ue_agent_interface.control_rig.folder.v1"));
-		Coverage->SetBoolField(TEXT("is_complete_target_schema"), true);
-		Coverage->SetArrayField(TEXT("covered_profiles"), MakeStringArray({
-			TEXT("asset"),
-			TEXT("settings_preview"),
-			TEXT("shape_library_reference"),
-			TEXT("hierarchy_bones"),
-			TEXT("hierarchy_nulls"),
-			TEXT("hierarchy_controls"),
-			TEXT("hierarchy_curves"),
-			TEXT("variables"),
-			TEXT("rigvm_graphs"),
-			TEXT("compile_report"),
-			TEXT("runtime_probe"),
-			TEXT("editor_view"),
-			TEXT("shape_library_asset")
-		}));
-		Coverage->SetArrayField(TEXT("readonly_profiles"), MakeStringArray({
-			TEXT("generated_class"),
-			TEXT("compiled_vm_bytecode"),
-			TEXT("editor_session_only_view_state")
-		}));
-		Coverage->SetArrayField(TEXT("unsupported_apply"), MakeStringArray({
-			TEXT("graphs/construction_event.hjson writes"),
-			TEXT("graphs/forward_solve.hjson writes"),
-			TEXT("graphs/backward_solve.hjson writes"),
-			TEXT("variables/exposed_properties.hjson writes"),
-			TEXT("functions/functions.hjson writes"),
-			TEXT("modular/modules.hjson writes"),
-			TEXT("modular/connections.hjson writes"),
-			TEXT("modular/connectors.hjson writes"),
-			TEXT("presets/foot_ground_fbik.hjson writes"),
-			TEXT("raw_properties.hjson fallback writes"),
-			TEXT("readonly_properties.hjson writes")
-		}));
-		Coverage->SetNumberField(TEXT("unsupported_apply_count"), 11);
-		Coverage->SetArrayField(TEXT("blocking_gaps"), {});
-		Coverage->SetStringField(TEXT("covered"), TEXT("asset settings, preview mesh, shape library references, hierarchy bones/nulls/controls/curves, RigVM graph nodes/links/pin defaults, compile report, runtime probe, editor view commands"));
-		Coverage->SetStringField(TEXT("notes"), TEXT("Control Rig asset authoring is folder JSON first. Cross-asset AnimBlueprint/Sequencer integration stays in those asset workflows or explicit action commands."));
-		return Coverage;
 	}

@@ -13,9 +13,9 @@ namespace UeAgentUmgAuthoring
 		UWidgetBlueprint& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
-		FString& OutError)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
 	{
+  auto& OutError = OutResult.Diagnostic;
 		OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
 		OutError.Reset();
 
@@ -25,16 +25,10 @@ namespace UeAgentUmgAuthoring
 		UeAgentAuthoringState::FCaptureResult Capture;
 		if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
 		{
-			OutError = Capture.ErrorCode + TEXT(":") + Capture.ErrorDetail;
+			OutError = Capture.Diagnostic;
 			return false;
 		}
 
-		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(
-			TEXT("ue.widget_blueprint.asset"),
-			ProfileId,
-			Capture.Snapshot,
-			WorkspaceRoot,
-			OutResult,
-			OutError);
+		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(TEXT("ue.widget_blueprint.asset"), ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
 	}
 }

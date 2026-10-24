@@ -13,7 +13,7 @@ namespace UE::UAI::Module::CommandRegistration::DataTableCurveTable
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::
 				FDomainCapabilityContribution>& OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<HjsonWorkspace::
 				IImportInitializationDomainProvider> Provider;
@@ -23,7 +23,7 @@ namespace UE::UAI::Module::CommandRegistration::DataTableCurveTable
 					Provider,
 					WorkspaceError))
 			{
-				OutError = WorkspaceError.GetCode();
+				OutError = WorkspaceError.GetDiagnostic();
 				return false;
 			}
 			DomainCapability::FDomainCapabilityDeclaration Declaration =
@@ -61,9 +61,6 @@ namespace UE::UAI::Module::CommandRegistration::DataTableCurveTable
 				TEXT("uai.init.datatable_curvetable.data_table.root/1"),
 				TEXT("uai.init.datatable_curvetable.curve_table.root/1"),
 			};
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId = TEXT("T27-TABLE-DOMAIN");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration),
 				OutContribution,

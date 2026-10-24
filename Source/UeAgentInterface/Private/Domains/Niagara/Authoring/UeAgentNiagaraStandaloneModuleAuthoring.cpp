@@ -2,6 +2,10 @@
 
 #include "Domains/Niagara/Authoring/UeAgentNiagaraStandaloneModuleAuthoring.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+
 #include "Domains/Niagara/Authoring/UeAgentNiagaraStageModuleAuthoring.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -32,6 +36,66 @@ namespace
 	const FName ParameterPinSubCategory(TEXT("ParameterPin"));
 	const FName DynamicAddPinSubCategory(TEXT("DynamicAddPin"));
 	const FString StandaloneAssignmentMarker(TEXT("UAI:StandaloneAssignment"));
+
+	UE::UAI::Contract::FDiagnostic AssignmentFailure(
+		const TCHAR* Code, const FString& Reason, const UNiagaraNode& Node,
+		const FString& Field, const TSharedPtr<FJsonValue>& Actual,
+		const TSharedPtr<FJsonValue>& Expected)
+	{
+		auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("niagara_authoring"));
+		Error.SourceKind = TEXT("native_result");
+		Error.CandidateName = Node.GetName();
+		Error.InternalContext = Node.GetPathName();
+		Error.PropertyPath = Field;
+		Error.ActualValue = Actual;
+		Error.ActualValuePresent = Actual.IsValid();
+		Error.ExpectedValue = Expected;
+		Error.ExpectedValuePresent = Expected.IsValid();
+		return Error;
+	}
+
+	UE::UAI::Contract::FDiagnostic AssignmentLinksFailure(
+		const UNiagaraNode& Node, const UEdGraphPin* Input, const UEdGraphPin* Output)
+	{
+		const bool bInputFailure = !Input || Input->LinkedTo.Num() != 1;
+		const UEdGraphPin* Pin = bInputFailure ? Input : Output;
+		return AssignmentFailure(TEXT("niagara_standalone_assignment_links_invalid"),
+			Pin ? TEXT("Assignment parameter-map pin must have exactly one connection.")
+				: TEXT("Assignment parameter-map pin is missing."),
+			Node, bInputFailure
+				? (Pin ? TEXT("input.link_count") : TEXT("input.available"))
+				: (Pin ? TEXT("output.link_count") : TEXT("output.available")),
+			Pin ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Pin->LinkedTo.Num()))
+				: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)),
+			Pin ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(1))
+				: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)));
+	}
+
+	TSharedPtr<FJsonValue> AssignmentTargetValue(const FNiagaraVariable& Target)
+	{
+		auto Value = MakeShared<FJsonObject>();
+		Value->SetStringField(TEXT("name"), Target.GetName().ToString());
+		Value->SetStringField(TEXT("type"), Target.GetType().GetName());
+		return MakeShared<FJsonValueObject>(Value);
+	}
+
+	UE::UAI::Contract::FDiagnostic AssignmentTargetSelectionFailure(
+		const TCHAR* Code, const FString& Reason, const UNiagaraNode& OutputNode,
+		const TArray<FNiagaraVariable>& Targets, const int32 MatchCount)
+	{
+		TArray<TSharedPtr<FJsonValue>> RequestedValues;
+		for (const FNiagaraVariable& Target : Targets)
+		{
+			RequestedValues.Add(AssignmentTargetValue(Target));
+		}
+		auto Expected = MakeShared<FJsonObject>();
+		Expected->SetNumberField(TEXT("match_count"), 1);
+		Expected->SetArrayField(TEXT("assignment_targets"), RequestedValues);
+		auto Actual = MakeShared<FJsonObject>();
+		Actual->SetNumberField(TEXT("match_count"), MatchCount);
+		return AssignmentFailure(Code, Reason, OutputNode, TEXT("assignment_selection"),
+			MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueObject>(Expected));
+	}
 	UEdGraphPin* FindParameterMapPin(UEdGraphNode& Node, EEdGraphPinDirection Direction);
 
 	bool IsParameterMapPin(const UEdGraphPin* Pin)
@@ -83,13 +147,10 @@ namespace
 		return OutputPin.LinkedTo.Contains(&InputPin) && InputPin.LinkedTo.Contains(&OutputPin);
 	}
 
-	bool GetMainChain(UNiagaraNodeOutput& OutputNode, TArray<UNiagaraNode*>& OutNodes, FString* OutError = nullptr)
+	bool GetMainChain(UNiagaraNodeOutput& OutputNode, TArray<UNiagaraNode*>& OutNodes, UE::UAI::Contract::FDiagnostic& OutError)
 	{
-		FString ChainError;
-		const bool bSuccess = UeAgentNiagaraStageModuleAuthoring::GetParameterMapChainNodes(
-			OutputNode, OutNodes, ChainError);
-		if (!bSuccess && OutError) *OutError = ChainError;
-		return bSuccess;
+		return UeAgentNiagaraStageModuleAuthoring::GetParameterMapChainNodes(
+			OutputNode, OutNodes, OutError);
 	}
 
 	bool AssignmentVariablesMatch(
@@ -117,22 +178,26 @@ namespace
 		UNiagaraNodeOutput& OutputNode,
 		UNiagaraNode& Node,
 		const int32 TargetIndex,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UNiagaraGraph* Graph = OutputNode.GetNiagaraGraph();
 		UEdGraphPin* NodeInput = FindParameterMapPin(Node, EGPD_Input);
 		UEdGraphPin* NodeOutput = FindParameterMapPin(Node, EGPD_Output);
 		if (!Graph || !NodeInput || !NodeOutput)
 		{
-			OutError = TEXT("niagara_standalone_assignment_node_invalid");
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_node_invalid"),
+				!Graph ? TEXT("Assignment insertion requires an available Niagara graph.")
+					: TEXT("Assignment insertion requires both parameter-map input and output pins."),
+				Node, !Graph ? TEXT("graph.available") : !NodeInput ? TEXT("input.available") : TEXT("output.available"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 
 		TArray<UNiagaraNode*> Chain;
-		if (!GetMainChain(OutputNode, Chain, &OutError)) return false;
+		if (!GetMainChain(OutputNode, Chain, OutError)) return false;
 		Chain.Remove(&Node);
 		TArray<UNiagaraNode*> AssignmentNodes;
-		GetAssignmentNodes(OutputNode, AssignmentNodes);
+		if (!GetAssignmentNodes(OutputNode, AssignmentNodes, OutError)) return false;
 		AssignmentNodes.Remove(&Node);
 		const int32 InsertIndex = FMath::Clamp(TargetIndex, 0, AssignmentNodes.Num());
 		UEdGraphNode* NextNode = &OutputNode;
@@ -141,7 +206,10 @@ namespace
 			const int32 NextAssignmentChainIndex = Chain.IndexOfByKey(AssignmentNodes[InsertIndex]);
 			if (NextAssignmentChainIndex == INDEX_NONE)
 			{
-				OutError = TEXT("niagara_standalone_assignment_insert_target_missing");
+				OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_insert_target_missing"),
+					TEXT("The assignment selected as the insertion target is absent from the parameter-map chain."),
+					*AssignmentNodes[InsertIndex], TEXT("chain_index"), MakeShared<FJsonValueNumber>(NextAssignmentChainIndex),
+					MakeShared<FJsonValueString>(TEXT("a node index in the parameter-map chain")));
 				return false;
 			}
 			int32 NextGroupStartIndex = NextAssignmentChainIndex;
@@ -155,23 +223,43 @@ namespace
 		UEdGraphPin* NextInput = FindParameterMapPin(*NextNode, EGPD_Input);
 		if (!NextInput || NextInput->LinkedTo.Num() != 1)
 		{
-			OutError = TEXT("niagara_standalone_assignment_insert_point_invalid");
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_insert_point_invalid"),
+				NextInput ? TEXT("The insertion target parameter-map input must have exactly one connection.")
+					: TEXT("The insertion target has no parameter-map input."),
+				Node, NextInput ? TEXT("insertion_target.input.link_count") : TEXT("insertion_target.input.available"),
+				NextInput ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(NextInput->LinkedTo.Num()))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)),
+				NextInput ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(1))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)));
+			OutError.CandidateName = NextNode->GetName();
 			return false;
 		}
 		UEdGraphPin* PreviousOutput = NextInput->LinkedTo[0];
 		if (!PreviousOutput || !IsParameterMapPin(PreviousOutput))
 		{
-			OutError = TEXT("niagara_standalone_assignment_previous_output_invalid");
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_previous_output_invalid"),
+				PreviousOutput ? TEXT("The insertion target is connected to a pin that is not a parameter map.")
+					: TEXT("The insertion target connection has no upstream output pin."),
+				Node, TEXT("insertion_target.upstream_pin_type"),
+				PreviousOutput ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(UEdGraphSchema_Niagara::PinToTypeDefinition(PreviousOutput).GetName()))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+				MakeShared<FJsonValueString>(FNiagaraTypeDefinition::GetParameterMapDef().GetName()));
+			OutError.CandidateName = NextNode->GetName();
 			return false;
 		}
 
 		NodeInput->BreakAllPinLinks(true);
 		NodeOutput->BreakAllPinLinks(true);
 		NextInput->BreakAllPinLinks(true);
-		if (!TryConnect(*Graph, *PreviousOutput, *NodeInput)
-			|| !TryConnect(*Graph, *NodeOutput, *NextInput))
+		const bool bPreviousConnected = TryConnect(*Graph, *PreviousOutput, *NodeInput);
+		const bool bNextConnected = bPreviousConnected && TryConnect(*Graph, *NodeOutput, *NextInput);
+		if (!bPreviousConnected || !bNextConnected)
 		{
-			OutError = TEXT("niagara_standalone_assignment_link_failed");
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_link_failed"),
+				!bPreviousConnected ? TEXT("Failed to connect the previous parameter-map output to the assignment input.")
+					: TEXT("Failed to connect the assignment output to the next parameter-map input."),
+				Node, !bPreviousConnected ? TEXT("input.connected") : TEXT("output.connected"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		Node.NodePosX = (PreviousOutput->GetOwningNode()->NodePosX + NextNode->NodePosX) / 2;
@@ -180,21 +268,32 @@ namespace
 		return true;
 	}
 
-	bool AddTargetPin(UNiagaraNode& Node, const FNiagaraVariable& Target, FString& OutError)
+	bool AddTargetPin(UNiagaraNode& Node, const FNiagaraVariable& Target, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UNiagaraGraph* Graph = Node.GetNiagaraGraph();
 		const UEdGraphSchema_Niagara* Schema = GetDefault<UEdGraphSchema_Niagara>();
 		if (!Graph || !Schema || !Target.IsValid())
 		{
-			OutError = TEXT("niagara_standalone_assignment_target_invalid");
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_target_invalid"),
+				!Graph ? TEXT("Assignment target pin creation requires a Niagara graph.")
+					: !Schema ? TEXT("The Niagara graph schema is unavailable.")
+					: TEXT("The assignment target must have a valid name and Niagara type."),
+				Node, !Graph ? TEXT("graph.available") : !Schema ? TEXT("schema.available") : TEXT("target"),
+				!Graph || !Schema ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)) : AssignmentTargetValue(Target),
+				!Graph || !Schema ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("a nonempty parameter name and valid Niagara type"))));
+			OutError.CandidateName = Target.GetName().ToString();
 			return false;
 		}
 
 		UNiagaraScriptVariable* ExistingScriptVariable = Graph->GetScriptVariable(Target.GetName());
 		if (ExistingScriptVariable && ExistingScriptVariable->Variable.GetType() != Target.GetType())
 		{
-			OutError = TEXT("niagara_standalone_assignment_target_type_conflict:")
-				+ Target.GetName().ToString();
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_target_type_conflict"),
+				TEXT("The requested assignment type differs from the type registered for this parameter."),
+				Node, TEXT("target.type"), MakeShared<FJsonValueString>(Target.GetType().GetName()),
+				MakeShared<FJsonValueString>(ExistingScriptVariable->Variable.GetType().GetName()));
+			OutError.CandidateName = Target.GetName().ToString();
 			return false;
 		}
 		if (!ExistingScriptVariable)
@@ -208,8 +307,14 @@ namespace
 				reinterpret_cast<UNiagaraNodeParameterMapSet*>(&Node));
 			if (!Pin || Pin->PinName != Target.GetName())
 			{
-				OutError = TEXT("niagara_standalone_assignment_target_pin_create_failed:")
-					+ Target.GetName().ToString();
+				OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_target_pin_create_failed"),
+					Pin ? TEXT("Native assignment pin creation returned a different parameter name.")
+						: TEXT("Native assignment pin creation returned no pin."),
+					Node, TEXT("target.pin_name"),
+					Pin ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Pin->PinName.ToString()))
+						: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+					MakeShared<FJsonValueString>(Target.GetName().ToString()));
+				OutError.CandidateName = Target.GetName().ToString();
 				return false;
 			}
 			const FString DefaultValue = FNiagaraConstants::GetAttributeDefaultValue(Target);
@@ -237,7 +342,10 @@ namespace
 			InsertIndex);
 		if (!Pin)
 		{
-			OutError = TEXT("niagara_standalone_assignment_target_pin_create_failed:") + Target.GetName().ToString();
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_target_pin_create_failed"),
+				TEXT("The graph node could not create the assignment input pin."),
+				Node, TEXT("target.pin_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			OutError.CandidateName = Target.GetName().ToString();
 			return false;
 		}
 		Pin->PinType.PinSubCategory = ParameterPinSubCategory;
@@ -249,19 +357,29 @@ namespace
 		return true;
 	}
 
-	bool EnsureTargetRegistered(UNiagaraNode& Node, const FNiagaraVariable& Target, FString& OutError)
+	bool EnsureTargetRegistered(UNiagaraNode& Node, const FNiagaraVariable& Target, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UNiagaraGraph* Graph = Node.GetNiagaraGraph();
 		if (!Graph || !Target.IsValid())
 		{
-			OutError = TEXT("niagara_standalone_assignment_target_invalid");
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_target_invalid"),
+				!Graph ? TEXT("Assignment target registration requires a Niagara graph.")
+					: TEXT("The assignment target must have a valid name and Niagara type."),
+				Node, !Graph ? TEXT("graph.available") : TEXT("target"),
+				!Graph ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)) : AssignmentTargetValue(Target),
+				!Graph ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("a nonempty parameter name and valid Niagara type"))));
+			OutError.CandidateName = Target.GetName().ToString();
 			return false;
 		}
 		if (UNiagaraScriptVariable* Existing = Graph->GetScriptVariable(Target.GetName()))
 		{
 			if (Existing->Variable.GetType() == Target.GetType()) return true;
-			OutError = TEXT("niagara_standalone_assignment_target_type_conflict:")
-				+ Target.GetName().ToString();
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_target_type_conflict"),
+				TEXT("The requested assignment type differs from the type registered for this parameter."),
+				Node, TEXT("target.type"), MakeShared<FJsonValueString>(Target.GetType().GetName()),
+				MakeShared<FJsonValueString>(Existing->Variable.GetType().GetName()));
+			OutError.CandidateName = Target.GetName().ToString();
 			return false;
 		}
 
@@ -300,10 +418,15 @@ namespace
 			reinterpret_cast<UNiagaraNodeParameterMapSet*>(&Node));
 		if (!RegistrationPin || RegistrationPin->PinName != Target.GetName())
 		{
+			const TSharedPtr<FJsonValue> ActualName = RegistrationPin
+				? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(RegistrationPin->PinName.ToString()))
+				: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>());
 			if (RegistrationPin) Node.RemovePin(RegistrationPin);
 			RestoreDetachedPins();
-			OutError = TEXT("niagara_standalone_assignment_target_registration_failed:")
-				+ Target.GetName().ToString();
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_target_registration_failed"),
+				TEXT("Native assignment registration did not create a pin with the requested parameter name."),
+				Node, TEXT("target.pin_name"), ActualName, MakeShared<FJsonValueString>(Target.GetName().ToString()));
+			OutError.CandidateName = Target.GetName().ToString();
 			return false;
 		}
 		Node.RemovePin(RegistrationPin);
@@ -311,8 +434,14 @@ namespace
 		UNiagaraScriptVariable* Registered = Graph->GetScriptVariable(Target.GetName());
 		if (!Registered || Registered->Variable.GetType() != Target.GetType())
 		{
-			OutError = TEXT("niagara_standalone_assignment_target_registration_failed:")
-				+ Target.GetName().ToString();
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_target_registration_failed"),
+				Registered ? TEXT("The registered assignment parameter has a different type.")
+					: TEXT("Native pin creation did not register the assignment parameter in the graph."),
+				Node, TEXT("target.registered_type"),
+				Registered ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Registered->Variable.GetType().GetName()))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+				MakeShared<FJsonValueString>(Target.GetType().GetName()));
+			OutError.CandidateName = Target.GetName().ToString();
 			return false;
 		}
 		return true;
@@ -327,14 +456,13 @@ namespace
 			&& Stage.Usage == ENiagaraScriptUsage::Module;
 	}
 
-	void GetAssignmentNodes(UNiagaraNodeOutput& OutputNode, TArray<UNiagaraNode*>& OutNodes)
+	bool GetAssignmentNodes(UNiagaraNodeOutput& OutputNode, TArray<UNiagaraNode*>& OutNodes, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TArray<UNiagaraNode*> Chain;
-		FString IgnoredError;
-		if (!GetMainChain(OutputNode, Chain, &IgnoredError))
+		if (!GetMainChain(OutputNode, Chain, OutError))
 		{
 			OutNodes.Reset();
-			return;
+			return false;
 		}
 		TSet<const UNiagaraNode*> LegacyHelperNodes;
 		bool bHasDownstreamLegacyFunction = false;
@@ -361,6 +489,7 @@ namespace
 			return !Targets.IsEmpty()
 				&& (Node->NodeComment == StandaloneAssignmentMarker || !LegacyHelperNodes.Contains(Node));
 		});
+		return true;
 	}
 
 	bool ResolveAssignmentNode(
@@ -368,12 +497,12 @@ namespace
 		const FGuid& NodeGuid,
 		UNiagaraNode*& OutNode,
 		int32& OutIndex,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutNode = nullptr;
 		OutIndex = INDEX_NONE;
 		TArray<UNiagaraNode*> Nodes;
-		GetAssignmentNodes(OutputNode, Nodes);
+		if (!GetAssignmentNodes(OutputNode, Nodes, OutError)) return false;
 		for (int32 Index = 0; Index < Nodes.Num(); ++Index)
 		{
 			if (Nodes[Index] && Nodes[Index]->NodeGuid == NodeGuid)
@@ -383,7 +512,10 @@ namespace
 				return true;
 			}
 		}
-		OutError = TEXT("module_selector_not_found");
+		OutError = AssignmentFailure(TEXT("module_selector_not_found"),
+			TEXT("No standalone assignment in this stage matches the requested node selector."),
+			OutputNode, TEXT("selector.match_count"), MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueNumber>(1));
+		OutError.SubjectId = NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
 		return false;
 	}
 
@@ -392,13 +524,13 @@ namespace
 		const TArray<FNiagaraVariable>& RequestedTargets,
 		UNiagaraNodeAssignment*& OutNode,
 		int32& OutIndex,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutNode = nullptr;
 		OutIndex = INDEX_NONE;
 		OutError.Reset();
 		TArray<UNiagaraNodeFunctionCall*> Modules;
-		UeAgentNiagaraStageModuleAuthoring::GetModules(OutputNode, Modules);
+		if (!UeAgentNiagaraStageModuleAuthoring::GetModules(OutputNode, Modules, OutError)) return false;
 		TArray<int32> Matches;
 		for (int32 Index = 0; Index < Modules.Num(); ++Index)
 		{
@@ -411,12 +543,16 @@ namespace
 		}
 		if (Matches.IsEmpty())
 		{
-			OutError = TEXT("module_selector_not_found");
+			OutError = AssignmentTargetSelectionFailure(TEXT("module_selector_not_found"),
+				TEXT("No legacy assignment matches the requested parameter names and types."),
+				OutputNode, RequestedTargets, 0);
 			return false;
 		}
 		if (Matches.Num() != 1)
 		{
-			OutError = TEXT("niagara_standalone_legacy_assignment_targets_ambiguous");
+			OutError = AssignmentTargetSelectionFailure(TEXT("niagara_standalone_legacy_assignment_targets_ambiguous"),
+				TEXT("More than one legacy assignment matches the requested parameter names and types."),
+				OutputNode, RequestedTargets, Matches.Num());
 			return false;
 		}
 		OutIndex = Matches[0];
@@ -428,17 +564,24 @@ namespace
 		UNiagaraNodeOutput& OutputNode,
 		const TArray<FNiagaraVariable>& AssignmentTargets,
 		const int32 TargetIndex,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		UNiagaraGraph* Graph = OutputNode.GetNiagaraGraph();
 		if (!Graph || AssignmentTargets.IsEmpty())
 		{
-			OutError = TEXT("niagara_standalone_assignment_targets_missing");
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_targets_missing"),
+				!Graph ? TEXT("Assignment creation requires an available Niagara graph.")
+					: TEXT("Assignment creation requires at least one target parameter."),
+				OutputNode, !Graph ? TEXT("graph.available") : TEXT("assignment_targets.count"),
+				!Graph ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(AssignmentTargets.Num())),
+				!Graph ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("at least one target"))));
 			return nullptr;
 		}
 		TArray<UNiagaraNode*> Chain;
-		if (!GetMainChain(OutputNode, Chain, &OutError)) return nullptr;
+		if (!GetMainChain(OutputNode, Chain, OutError)) return nullptr;
 		UNiagaraNode* Node = nullptr;
 		for (UNiagaraNode* Candidate : Chain)
 		{
@@ -452,9 +595,10 @@ namespace
 			}
 		}
 		const bool bReusingSeedNode = Node != nullptr;
+		UClass* SetNodeClass = nullptr;
 		if (!Node)
 		{
-			UClass* SetNodeClass = StaticLoadClass(
+			SetNodeClass = StaticLoadClass(
 				UNiagaraNode::StaticClass(),
 				nullptr,
 				TEXT("/Script/NiagaraEditor.NiagaraNodeParameterMapSet"));
@@ -464,7 +608,11 @@ namespace
 		}
 		if (!Node)
 		{
-			OutError = TEXT("niagara_standalone_assignment_node_create_failed");
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_node_create_failed"),
+				SetNodeClass ? TEXT("Could not allocate the standalone parameter-map assignment node.")
+					: TEXT("The Niagara parameter-map assignment node class could not be loaded."),
+				OutputNode, SetNodeClass ? TEXT("assignment_node.created") : TEXT("assignment_node.class_available"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return nullptr;
 		}
 		if (!bReusingSeedNode)
@@ -498,15 +646,18 @@ namespace
 		UNiagaraNode& Node,
 		const int32 TargetIndex,
 		int32& OutNewIndex,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutNewIndex = INDEX_NONE;
 		TArray<UNiagaraNode*> Nodes;
-		GetAssignmentNodes(OutputNode, Nodes);
+		if (!GetAssignmentNodes(OutputNode, Nodes, OutError)) return false;
 		const int32 CurrentIndex = Nodes.IndexOfByKey(&Node);
 		if (CurrentIndex == INDEX_NONE)
 		{
-			OutError = TEXT("stage_module_not_found");
+			OutError = AssignmentFailure(TEXT("stage_module_not_found"),
+				TEXT("The assignment to move is absent from this stage's assignment list."),
+				Node, TEXT("assignment_index"), MakeShared<FJsonValueNumber>(CurrentIndex),
+				MakeShared<FJsonValueString>(TEXT("an existing assignment index")));
 			return false;
 		}
 		const int32 ClampedIndex = FMath::Clamp(TargetIndex, 0, FMath::Max(0, Nodes.Num() - 1));
@@ -520,7 +671,7 @@ namespace
 		UEdGraphPin* Output = FindParameterMapPin(Node, EGPD_Output);
 		if (!Input || Input->LinkedTo.Num() != 1 || !Output || Output->LinkedTo.Num() != 1)
 		{
-			OutError = TEXT("niagara_standalone_assignment_links_invalid");
+			OutError = AssignmentLinksFailure(Node, Input, Output);
 			return false;
 		}
 		UEdGraphPin* PreviousOutput = Input->LinkedTo[0];
@@ -528,22 +679,70 @@ namespace
 		UNiagaraGraph* Graph = OutputNode.GetNiagaraGraph();
 		if (!Graph)
 		{
-			OutError = TEXT("niagara_standalone_assignment_graph_missing");
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_graph_missing"),
+				TEXT("Assignment movement requires an available Niagara graph."),
+				Node, TEXT("graph.available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		Input->BreakAllPinLinks(true);
 		Output->BreakAllPinLinks(true);
-		if (!TryConnect(*Graph, *PreviousOutput, *NextInput)
-			|| !InsertNodeAtIndex(OutputNode, Node, ClampedIndex, OutError))
+		if (!TryConnect(*Graph, *PreviousOutput, *NextInput))
 		{
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_move_relink_failed"),
+				TEXT("Could not reconnect the parameter-map chain after detaching the assignment for movement."),
+				Node, TEXT("chain.connected"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
-		GetAssignmentNodes(OutputNode, Nodes);
+		if (!InsertNodeAtIndex(OutputNode, Node, ClampedIndex, OutError)) return false;
+		if (!GetAssignmentNodes(OutputNode, Nodes, OutError)) return false;
 		OutNewIndex = Nodes.IndexOfByKey(&Node);
-		return OutNewIndex != INDEX_NONE;
+		if (OutNewIndex == INDEX_NONE)
+		{
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_move_readback_failed"),
+				TEXT("The moved assignment is absent from the resulting stage assignment list."),
+				Node, TEXT("assignment_index"), MakeShared<FJsonValueNumber>(OutNewIndex),
+				MakeShared<FJsonValueNumber>(ClampedIndex));
+			return false;
+		}
+		return true;
 	}
 
-	bool RemoveAssignmentNode(UNiagaraNodeOutput& OutputNode, UNiagaraNode& Node, FString& OutError)
+	UNiagaraNode* ReplaceAssignmentNode(
+		UNiagaraNodeOutput& OutputNode,
+		UNiagaraNode& Node,
+		const TArray<FNiagaraVariable>& AssignmentTargets,
+		const int32 TargetIndex,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		UNiagaraGraph* Graph = OutputNode.GetNiagaraGraph();
+		const FGuid NodeGuid = Node.NodeGuid;
+		if (!Graph)
+		{
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_graph_missing"),
+				TEXT("Assignment replacement requires an available Niagara graph."),
+				Node, TEXT("graph.available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return nullptr;
+		}
+		if (!RemoveAssignmentNode(OutputNode, Node, OutError)) return nullptr;
+
+		// Clear this assignment's owned value nodes before changing parameter types.
+		// UE owns graph-wide parameter identity, reference pins and metadata. Rebuilding
+		// the whole stage would discard unrelated assignments and require a full input.
+		for (const FNiagaraVariable& Target : AssignmentTargets)
+		{
+			const UNiagaraScriptVariable* Existing = Graph->GetScriptVariable(Target.GetName());
+			if (Existing && Existing->Variable.GetType() != Target.GetType())
+			{
+				const TArray<FNiagaraVariable> VariablesToChange{Existing->Variable};
+				Graph->ChangeParameterType(VariablesToChange, Target.GetType(), false);
+			}
+		}
+		UNiagaraNode* Replacement = AddAssignmentNode(OutputNode, AssignmentTargets, TargetIndex, OutError);
+		if (Replacement) Replacement->NodeGuid = NodeGuid;
+		return Replacement;
+	}
+
+	bool RemoveAssignmentNode(UNiagaraNodeOutput& OutputNode, UNiagaraNode& Node, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		UNiagaraGraph* Graph = OutputNode.GetNiagaraGraph();
@@ -551,7 +750,11 @@ namespace
 		UEdGraphPin* Output = FindParameterMapPin(Node, EGPD_Output);
 		if (!Graph || !Input || Input->LinkedTo.Num() != 1 || !Output || Output->LinkedTo.Num() != 1)
 		{
-			OutError = TEXT("niagara_standalone_assignment_links_invalid");
+			OutError = !Graph
+				? AssignmentFailure(TEXT("niagara_standalone_assignment_links_invalid"),
+					TEXT("Assignment removal requires an available Niagara graph."),
+					Node, TEXT("graph.available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true))
+				: AssignmentLinksFailure(Node, Input, Output);
 			return false;
 		}
 		UEdGraphPin* PreviousOutput = Input->LinkedTo[0];
@@ -560,7 +763,7 @@ namespace
 		{
 			if (!Pin || Pin->Direction != EGPD_Input || IsParameterMapPin(Pin)
 				|| Pin->PinType.PinSubCategory == DynamicAddPinSubCategory) continue;
-			FString ClearError;
+			UE::UAI::Contract::FDiagnostic ClearError;
 			if (!UeAgentNiagaraStageModuleAuthoring::ClearInputValueNodesForPin(*Pin, ClearError))
 			{
 				OutError = ClearError;
@@ -571,7 +774,9 @@ namespace
 		Output->BreakAllPinLinks(true);
 		if (!TryConnect(*Graph, *PreviousOutput, *NextInput))
 		{
-			OutError = TEXT("niagara_standalone_assignment_remove_relink_failed");
+			OutError = AssignmentFailure(TEXT("niagara_standalone_assignment_remove_relink_failed"),
+				TEXT("Could not reconnect the parameter-map chain after removing the assignment links."),
+				Node, TEXT("chain.connected"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		Graph->RemoveNode(&Node);
@@ -591,7 +796,7 @@ namespace
 		}
 	}
 
-	bool EnsureAssignmentTargetsRegistered(UNiagaraNode& Node, FString& OutError)
+	bool EnsureAssignmentTargetsRegistered(UNiagaraNode& Node, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TArray<FNiagaraVariable> Targets;
 		GetAssignmentTargets(Node, Targets);

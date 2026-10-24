@@ -3,20 +3,16 @@
 Current default methods:
 
 ```python
-client.material.asset_create(...)
-client.material.function_graph_apply(...)
-client.material.graph_apply(...)
 client.material_instance.asset_create(...)
-client.material_instance.parameters_apply(...)
 ```
 
-They are found by command_search and command_detail and mirrored by uai-cli
-exact execution. The Material command owner delegates creation, graph
-mutation, compile/settle, parameter application, persistence, and readback to
-the common operation service and native UE material mechanics. It does not
-duplicate graph or parameter business in the SDK.
+For unknown command names or parameter shapes, follow [public command discovery](../../../../UeAgentInterfaceCMD/docs/PYTHON_SDK_AND_CLI.md#command-discovery). Material creation uses `asset.factory.candidates` followed by
+`asset.object.create`. Material and material-instance authoring use
+`content_graph.export_workspace` / `content_graph.import_workspace`; the old
+typed material-create and instance-parameter apply identities remain internal
+operation kinds only. Material-instance creation stays public until the common
+factory path covers its native initialization.
 
 Success requires the terminal native projection and independent persisted
 readback. Prewrite failures leave no residue; unknown state is reconciled.
 Cleanup is bounded to owned fixtures and independently verified.
-

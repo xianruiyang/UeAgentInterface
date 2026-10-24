@@ -61,9 +61,10 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			URigHierarchy* Hierarchy = Blueprint->GetHierarchy();
 			if (!Hierarchy)
 			{
-				OutError.Set(
-					TEXT("animation_rig_graph_structure_hierarchy_unavailable"),
-					Target.GetPathName());
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_rig_graph_structure_hierarchy_unavailable"),
+					TEXT("The Control Rig hierarchy is unavailable for structure capture."), TEXT("native_graph"));
+				OutError.TargetPath = Target.GetPathName();
+				OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			for (int32 Index = 0; Index < Hierarchy->Num(); ++Index)
@@ -155,9 +156,10 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			UIKRigController* Controller = UIKRigController::GetController(Rig);
 			if (!Controller)
 			{
-				OutError.Set(
-					TEXT("animation_rig_graph_structure_ik_rig_unavailable"),
-					Target.GetPathName());
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_rig_graph_structure_ik_rig_unavailable"),
+					TEXT("The IK Rig controller is unavailable for structure capture."), TEXT("native_graph"));
+				OutError.TargetPath = Target.GetPathName();
+				OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			const TSharedRef<FJsonObject> Mesh = MakeShared<FJsonObject>();
@@ -241,9 +243,12 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			: nullptr;
 		if (!Controller)
 		{
-			OutError.Set(
-				TEXT("animation_rig_graph_structure_target_unsupported"),
-				Target.GetClass()->GetPathName());
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_rig_graph_structure_target_unsupported"),
+				Retargeter ? TEXT("The IK Retargeter controller is unavailable for structure capture.")
+					: TEXT("The target class is unsupported by animation rig structure capture."), TEXT("native_graph"));
+			OutError.TargetPath = Target.GetPathName();
+			OutError.SourceKind = TEXT("native_result");
+			OutError.ActualValue = MakeShared<FJsonValueString>(Target.GetClass()->GetPathName());
 			return false;
 		}
 

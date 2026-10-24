@@ -1,6 +1,5 @@
 {
   "schema": "uai.domain_adapter.editor_project_simple_effect.test_fixture.v1",
-  "descriptor_count": 7,
   "native_operation_types": [
     "editor_project.typed_update"
   ],
@@ -11,8 +10,7 @@
       "profile_id": "config_section",
       "native_operation_type": "editor_project.typed_update",
       "native_mechanic_id": "uai.editor_project.mechanic:update_config_section:v1",
-      "field_ids": ["entries"],
-      "source_commands": ["config_apply_section"]
+      "field_ids": ["entries"]
     },
     {
       "descriptor_id": "uai.operation.editor_project.project_settings.update",
@@ -20,8 +18,7 @@
       "profile_id": "project_settings",
       "native_operation_type": "editor_project.typed_update",
       "native_mechanic_id": "uai.editor_project.mechanic:update_project_settings:v1",
-      "field_ids": ["properties"],
-      "source_commands": ["project_settings_apply_page"]
+      "field_ids": ["properties"]
     },
     {
       "descriptor_id": "uai.operation.editor_project.device_profile.update",
@@ -29,8 +26,7 @@
       "profile_id": "device_profile",
       "native_operation_type": "editor_project.typed_update",
       "native_mechanic_id": "uai.editor_project.mechanic:update_device_profile:v1",
-      "field_ids": ["device_type", "base_profile_ref", "cvars"],
-      "source_commands": ["device_profile_apply_json"]
+      "field_ids": ["device_type", "base_profile_ref", "cvars"]
     },
     {
       "descriptor_id": "uai.operation.editor_project.localization_target.update",
@@ -38,8 +34,7 @@
       "profile_id": "localization_target",
       "native_operation_type": "editor_project.typed_update",
       "native_mechanic_id": "uai.editor_project.mechanic:update_localization_target:v1",
-      "field_ids": ["native_culture", "cultures"],
-      "source_commands": ["localization_apply_json"]
+      "field_ids": ["native_culture", "cultures"]
     },
     {
       "descriptor_id": "uai.operation.editor_project.platform_config.update",
@@ -47,8 +42,7 @@
       "profile_id": "platform_config",
       "native_operation_type": "editor_project.typed_update",
       "native_mechanic_id": "uai.editor_project.mechanic:update_platform_config:v1",
-      "field_ids": ["entries"],
-      "source_commands": ["platform_config_apply_json"]
+      "field_ids": ["entries"]
     },
     {
       "descriptor_id": "uai.operation.editor_project.scalability_group.update",
@@ -56,8 +50,7 @@
       "profile_id": "scalability_group",
       "native_operation_type": "editor_project.typed_update",
       "native_mechanic_id": "uai.editor_project.mechanic:update_scalability_group:v1",
-      "field_ids": ["entries"],
-      "source_commands": ["scalability_apply_json"]
+      "field_ids": ["entries"]
     },
     {
       "descriptor_id": "uai.operation.editor_project.string_table.update",
@@ -65,18 +58,16 @@
       "profile_id": "string_table",
       "native_operation_type": "editor_project.typed_update",
       "native_mechanic_id": "uai.editor_project.mechanic:update_string_table:v1",
-      "field_ids": ["namespace", "entries"],
-      "source_commands": ["string_table_apply_json"]
+      "field_ids": ["namespace", "entries"]
     }
   ],
-  "field_contract_count": 11,
   "field_contracts": [
     {
       "profile_id": "config_section",
       "field_id": "entries",
       "field_binding_id": "editor_project.field.config_section.entries:v1",
       "type_id": "uai.editor_project.config_entry_map.v1",
-      "value_kind": "object",
+      "kind": "object",
       "allowed_presences": ["set", "remove", "replace", "clear"],
       "example_value": {"UAI.TestValue": "after"}
     },
@@ -85,12 +76,11 @@
       "field_id": "properties",
       "field_binding_id": "editor_project.field.project_settings.properties:v1",
       "type_id": "uai.editor_project.settings_property_changes.v1",
-      "value_kind": "array",
+      "kind": "array",
       "allowed_presences": ["set"],
       "example_value": [
         {
           "field_ref": "uai://editor-project-field/test-enabled",
-          "expected_revision": "field:r1",
           "presence": "set",
           "type_id": "uai.value.boolean.v1",
           "value": true
@@ -102,7 +92,7 @@
       "field_id": "device_type",
       "field_binding_id": "editor_project.field.device_profile.device_type:v1",
       "type_id": "uai.value.string.v1",
-      "value_kind": "string",
+      "kind": "string",
       "allowed_presences": ["set", "clear"],
       "example_value": "Windows"
     },
@@ -111,7 +101,7 @@
       "field_id": "base_profile_ref",
       "field_binding_id": "editor_project.field.device_profile.base_profile_ref:v1",
       "type_id": "uai.value.canonical_ref.v1",
-      "value_kind": "string",
+      "kind": "string",
       "allowed_presences": ["set", "null", "clear"],
       "example_value": "uai://editor-project/device-profile/base"
     },
@@ -120,7 +110,7 @@
       "field_id": "cvars",
       "field_binding_id": "editor_project.field.device_profile.cvars:v1",
       "type_id": "uai.editor_project.config_entry_map.v1",
-      "value_kind": "object",
+      "kind": "object",
       "allowed_presences": ["set", "remove", "replace", "clear"],
       "example_value": {"r.UAI.Test": "1"}
     },
@@ -129,7 +119,7 @@
       "field_id": "native_culture",
       "field_binding_id": "editor_project.field.localization_target.native_culture:v1",
       "type_id": "uai.value.culture_name.v1",
-      "value_kind": "string",
+      "kind": "string",
       "allowed_presences": ["set"],
       "example_value": "en"
     },
@@ -138,7 +128,7 @@
       "field_id": "cultures",
       "field_binding_id": "editor_project.field.localization_target.cultures:v1",
       "type_id": "uai.value.culture_name_set.v1",
-      "value_kind": "array",
+      "kind": "array",
       "allowed_presences": ["set", "remove", "replace", "clear"],
       "example_value": ["en", "zh-Hans"]
     },
@@ -147,7 +137,7 @@
       "field_id": "entries",
       "field_binding_id": "editor_project.field.platform_config.entries:v1",
       "type_id": "uai.editor_project.config_entry_map.v1",
-      "value_kind": "object",
+      "kind": "object",
       "allowed_presences": ["set", "remove", "replace", "clear"],
       "example_value": {"r.UAI.Platform": "1"}
     },
@@ -156,7 +146,7 @@
       "field_id": "entries",
       "field_binding_id": "editor_project.field.scalability_group.entries:v1",
       "type_id": "uai.editor_project.config_entry_map.v1",
-      "value_kind": "object",
+      "kind": "object",
       "allowed_presences": ["set", "remove", "replace", "clear"],
       "example_value": {"r.UAI.Quality": "2"}
     },
@@ -165,7 +155,7 @@
       "field_id": "namespace",
       "field_binding_id": "editor_project.field.string_table.namespace:v1",
       "type_id": "uai.value.string.v1",
-      "value_kind": "string",
+      "kind": "string",
       "allowed_presences": ["set", "clear"],
       "example_value": "UAI.Test"
     },
@@ -174,7 +164,7 @@
       "field_id": "entries",
       "field_binding_id": "editor_project.field.string_table.entries:v1",
       "type_id": "uai.editor_project.string_table_entries.v1",
-      "value_kind": "array",
+      "kind": "array",
       "allowed_presences": ["set", "remove", "replace", "clear"],
       "example_value": [
         {
@@ -189,6 +179,7 @@
     "backup",
     "command",
     "dry_run",
+    "expected_revision",
     "hjson",
     "http",
     "json",
@@ -204,12 +195,6 @@
     "verify"
   ],
   "e1_negative_cases": [
-    {
-      "case_id": "stale_target_revision",
-      "descriptor_id": "uai.operation.editor_project.config_section.update",
-      "expected_error": "editor_project_target_revision_stale",
-      "mutation_count": 0
-    },
     {
       "case_id": "target_profile_mismatch",
       "descriptor_id": "uai.operation.editor_project.device_profile.update",
@@ -244,12 +229,6 @@
       "case_id": "unbound_settings_field",
       "descriptor_id": "uai.operation.editor_project.project_settings.update",
       "expected_error": "editor_project_settings_field_unresolved",
-      "mutation_count": 0
-    },
-    {
-      "case_id": "stale_settings_field_revision",
-      "descriptor_id": "uai.operation.editor_project.project_settings.update",
-      "expected_error": "editor_project_settings_field_revision_stale",
       "mutation_count": 0
     },
     {
@@ -328,14 +307,5 @@
       "rollback_oracle": "original namespace, entries, metadata and package dirty state restored",
       "negative_oracle": "duplicate key performs zero mutation"
     }
-  ],
-  "legacy_sources": [
-    {"command": "config_apply_section", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
-    {"command": "project_settings_apply_page", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
-    {"command": "device_profile_apply_json", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
-    {"command": "localization_apply_json", "terminal": "ADAPT_SPLIT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
-    {"command": "platform_config_apply_json", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
-    {"command": "scalability_apply_json", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"},
-    {"command": "string_table_apply_json", "terminal": "ADAPT", "legacy_test": "REWRITE_BEFORE_IMPLEMENTATION"}
   ]
 }

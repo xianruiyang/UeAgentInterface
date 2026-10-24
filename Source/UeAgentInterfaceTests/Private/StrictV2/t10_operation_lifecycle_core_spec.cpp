@@ -1,13 +1,7 @@
 #include "Misc/AutomationTest.h"
 
-#if __has_include("Core/BindingGateway/Operation/UeAgentOperationLifecycleService.h")
-#define UAI_T10_OPERATION_LIFECYCLE_AVAILABLE 1
 #include "Core/BindingGateway/Operation/UeAgentOperationLifecycleService.h"
-#else
-#define UAI_T10_OPERATION_LIFECYCLE_AVAILABLE 0
-#endif
 
-#if UAI_T10_OPERATION_LIFECYCLE_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::BindingGateway::Operation;
@@ -172,7 +166,6 @@ namespace
 			StaticCastSharedRef<IOperationIndependentVerificationPort>(Ports));
 	}
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T10SuccessOrderTest,
@@ -182,10 +175,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T10SuccessOrderTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T10_OPERATION_LIFECYCLE_AVAILABLE
-	TestTrue(TEXT("T10 operation lifecycle service is implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::BindingGateway::Operation;
 	const TSharedRef<FScriptedLifecyclePorts> Ports =
 		MakeShared<FScriptedLifecyclePorts>();
@@ -212,7 +201,6 @@ bool FUeAgentStrictV2T10SuccessOrderTest::RunTest(
 	TestTrue(TEXT("successful receipt records mutation"), Receipt.DidMutationStart());
 	TestFalse(TEXT("successful operation is not automatically replayable"), Receipt.IsRetrySafe());
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -223,10 +211,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T10PrewriteFenceTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T10_OPERATION_LIFECYCLE_AVAILABLE
-	TestTrue(TEXT("T10 operation lifecycle service is implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::BindingGateway::Operation;
 	TSharedRef<FScriptedLifecyclePorts> Ports =
 		MakeShared<FScriptedLifecyclePorts>();
@@ -257,7 +241,6 @@ bool FUeAgentStrictV2T10PrewriteFenceTest::RunTest(
 		TArray<FString>{TEXT("fence:pre_execute")});
 	TestFalse(TEXT("no mutation started"), Receipt.DidMutationStart());
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -268,10 +251,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T10RollbackTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T10_OPERATION_LIFECYCLE_AVAILABLE
-	TestTrue(TEXT("T10 operation lifecycle service is implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::BindingGateway::Operation;
 	const TSharedRef<FScriptedLifecyclePorts> Ports =
 		MakeShared<FScriptedLifecyclePorts>();
@@ -296,7 +275,6 @@ bool FUeAgentStrictV2T10RollbackTest::RunTest(
 		});
 	TestTrue(TEXT("confirmed rollback permits an explicit retry"), Receipt.IsRetrySafe());
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -307,10 +285,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T10StateUnknownTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T10_OPERATION_LIFECYCLE_AVAILABLE
-	TestTrue(TEXT("T10 operation lifecycle service is implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::BindingGateway::Operation;
 	const TSharedRef<FScriptedLifecyclePorts> Ports =
 		MakeShared<FScriptedLifecyclePorts>();
@@ -329,5 +303,4 @@ bool FUeAgentStrictV2T10StateUnknownTest::RunTest(
 	TestFalse(TEXT("state_unknown is never replay safe"), Receipt.IsRetrySafe());
 	TestTrue(TEXT("receipt preserves the failing stage"), Receipt.GetPhaseHistory().Contains(TEXT("rollback")));
 	return true;
-#endif
 }

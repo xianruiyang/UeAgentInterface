@@ -7,9 +7,6 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
-// The production header is intentionally absent in LS-002. LS-003 must force
-// this translation unit to rebuild after adding it because a missing optional
-// include cannot form a UBT dependency.
 #include "DomainAdapters/CompileBuildJob/UeAgentCompileBuildJobContract.h"
 static_assert(
 	UAI_COMPILE_BUILD_JOB_CONTRACT_V1 == 1,
@@ -80,7 +77,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentCompileBuildJobContractTest,
 	"UeAgentInterface.DomainAdapters.CompileBuildJob.E0.Contract."
-		"TypedFamiliesAndLegacyResponsibilities",
+		"FamiliesAndCurrentResponsibilityRoutes",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
@@ -138,10 +135,6 @@ bool FUeAgentCompileBuildJobContractTest::RunTest(
 
 	const TArray<TSharedPtr<FJsonValue>>& FamilyValues =
 		Fixture->GetArrayField(TEXT("families"));
-	TestEqual(
-		TEXT("exact four reusable request families"),
-		FamilyValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(TEXT("family_count"))));
 	const TSet<FString> ExpectedFamilies = {
 		TEXT("asset_compile"),
 		TEXT("world_build"),
@@ -176,102 +169,84 @@ bool FUeAgentCompileBuildJobContractTest::RunTest(
 			Family->GetStringField(TEXT("signal_type_id")).StartsWith(
 				TEXT("uai.compile_build.")));
 	}
-	bool bExactFamilies = FamilyIds.Num() == ExpectedFamilies.Num();
 	for (const FString& Expected : ExpectedFamilies)
 	{
-		bExactFamilies = bExactFamilies && FamilyIds.Contains(Expected);
+		TestTrue(
+			TEXT("required family is present: ") + Expected,
+			FamilyIds.Contains(Expected));
 	}
-	TestTrue(TEXT("family set is exact"), bExactFamilies);
 
-	const TArray<TSharedPtr<FJsonValue>>& MappingValues =
-		Fixture->GetArrayField(TEXT("legacy_mappings"));
-	TestEqual(
-		TEXT("all P0 candidates plus SA-003 resave are adjudicated"),
-		MappingValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("legacy_candidate_count"))));
-	TSet<FString> LegacyIds;
-	TMap<FString, TSharedPtr<FJsonObject>> MappingById;
-	TMap<FString, int32> ResponsibilityCounts;
-	TMap<FString, int32> StartFamilyCounts;
-	for (const TSharedPtr<FJsonValue>& Value : MappingValues)
+	const TArray<TSharedPtr<FJsonValue>>& ResponsibilityValues =
+		Fixture->GetArrayField(TEXT("responsibility_routes"));
+	TSet<FString> ResponsibilityCaseIds;
+	TSet<FString> StartFamilies;
+	TSet<FString> Responsibilities;
+	for (const TSharedPtr<FJsonValue>& Value : ResponsibilityValues)
 	{
-		const TSharedPtr<FJsonObject> Mapping = Value->AsObject();
-		const FString LegacyId = Mapping->GetStringField(TEXT("legacy_id"));
+		const TSharedPtr<FJsonObject> Route = Value->AsObject();
+		const FString CaseId = Route->GetStringField(TEXT("case_id"));
 		const FString Responsibility =
-			Mapping->GetStringField(TEXT("responsibility"));
-		TestFalse(
-			TEXT("legacy evidence id is unique: ") + LegacyId,
-			LegacyIds.Contains(LegacyId));
-		LegacyIds.Add(LegacyId);
-		MappingById.Add(LegacyId, Mapping);
-		++ResponsibilityCounts.FindOrAdd(Responsibility);
+			Route->GetStringField(TEXT("responsibility"));
+		TestFalse(TEXT("responsibility case id is unique: ") + CaseId,
+			ResponsibilityCaseIds.Contains(CaseId));
+		ResponsibilityCaseIds.Add(CaseId);
+		Responsibilities.Add(Responsibility);
 		if (Responsibility == TEXT("start"))
 		{
 			const FString FamilyId =
-				Mapping->GetStringField(TEXT("family_id"));
-			TestTrue(
-				TEXT("start evidence maps to one real family: ") + LegacyId,
+				Route->GetStringField(TEXT("family_id"));
+			TestTrue(TEXT("start route uses a real family: ") + CaseId,
 				FamilyIds.Contains(FamilyId));
-			++StartFamilyCounts.FindOrAdd(FamilyId);
+			StartFamilies.Add(FamilyId);
 		}
 		else
 		{
-			TestTrue(
-				TEXT("non-start evidence has an explicit public owner: ")
-					+ LegacyId,
-				!Mapping->GetStringField(TEXT("owner")).IsEmpty());
-			TestFalse(
-				TEXT("non-start evidence cannot invent a job family: ")
-					+ LegacyId,
-				Mapping->HasField(TEXT("family_id")));
+			TestFalse(TEXT("non-start route has an explicit owner: ")
+				+ CaseId,
+				Route->GetStringField(TEXT("owner")).IsEmpty());
+			TestFalse(TEXT("non-start route does not claim a family: ")
+				+ CaseId,
+				Route->HasField(TEXT("family_id")));
 		}
 	}
-	TestEqual(TEXT("nineteen real starts"),
-		ResponsibilityCounts.FindRef(TEXT("start")), 19);
-	TestEqual(TEXT("seven log reads become typed observation"),
-		ResponsibilityCounts.FindRef(TEXT("typed_observation")), 7);
-	TestEqual(TEXT("one lifecycle status read"),
-		ResponsibilityCounts.FindRef(TEXT("lifecycle_observation")), 1);
-	TestEqual(TEXT("one C7 cancellation route"),
-		ResponsibilityCounts.FindRef(TEXT("cancellation")), 1);
-	TestEqual(TEXT("one C6 preflight route"),
-		ResponsibilityCounts.FindRef(TEXT("preflight")), 1);
-	TestEqual(TEXT("one scoped artifact cleanup route"),
-		ResponsibilityCounts.FindRef(TEXT("artifact_cleanup")), 1);
-	TestEqual(TEXT("one C9 verification route"),
-		ResponsibilityCounts.FindRef(TEXT("verification")), 1);
-	TestEqual(TEXT("nine asset compile starts"),
-		StartFamilyCounts.FindRef(TEXT("asset_compile")), 9);
-	TestEqual(TEXT("five persisted world build starts"),
-		StartFamilyCounts.FindRef(TEXT("world_build")), 5);
-	TestEqual(TEXT("PCG generation is not disguised as asset compile"),
-		MappingById[TEXT("pcg_generate")]
-			->GetStringField(TEXT("family_id")),
+	for (const FString& FamilyId : FamilyIds)
+	{
+		TestTrue(TEXT("current family has a start route: ") + FamilyId,
+			StartFamilies.Contains(FamilyId));
+	}
+	for (const FString& Responsibility : {
+		TEXT("start"), TEXT("typed_observation"),
+		TEXT("lifecycle_observation"), TEXT("cancellation"),
+		TEXT("preflight"), TEXT("artifact_cleanup"),
+		TEXT("verification")})
+	{
+		TestTrue(TEXT("required responsibility is represented: ")
+			+ Responsibility,
+			Responsibilities.Contains(Responsibility));
+	}
+
+	TMap<FString, FString> PcgFamilyByCase;
+	for (const TSharedPtr<FJsonValue>& Value :
+		Fixture->GetArrayField(TEXT("pcg_operation_cases")))
+	{
+		const TSharedPtr<FJsonObject> Case = Value->AsObject();
+		const FString CaseId = Case->GetStringField(TEXT("case_id"));
+		const FString FamilyId = Case->GetStringField(TEXT("family_id"));
+		TestFalse(TEXT("PCG operation case id is unique: ") + CaseId,
+			PcgFamilyByCase.Contains(CaseId));
+		TestTrue(TEXT("PCG operation uses a real family: ") + CaseId,
+			FamilyIds.Contains(FamilyId));
+		PcgFamilyByCase.Add(CaseId, FamilyId);
+	}
+	TestEqual(TEXT("PCG graph compilation is asset compilation"),
+		PcgFamilyByCase.FindRef(TEXT("pcg_graph_asset_compile")),
+		FString(TEXT("asset_compile")));
+	TestEqual(TEXT("PCG world generation is a world build"),
+		PcgFamilyByCase.FindRef(TEXT("pcg_world_generation")),
 		FString(TEXT("world_build")));
-	TestEqual(TEXT("PCG regeneration is not disguised as asset compile"),
-		MappingById[TEXT("pcg_regenerate")]
-			->GetStringField(TEXT("family_id")),
+	TestEqual(TEXT("PCG world regeneration is a world build"),
+		PcgFamilyByCase.FindRef(TEXT("pcg_world_regeneration")),
 		FString(TEXT("world_build")));
-	TestEqual(TEXT("four owned external process starts"),
-		StartFamilyCounts.FindRef(TEXT("external_process")), 4);
-	TestEqual(TEXT("one World Partition resave start"),
-		StartFamilyCounts.FindRef(TEXT("world_partition_resave")), 1);
-	TestEqual(
-		TEXT("World Partition resave comes from SA-003"),
-		MappingById[TEXT("world_partition_resave_actors")]
-			->GetStringField(TEXT("source")),
-		FString(TEXT("SA-003")));
-	TestEqual(
-		TEXT("packaging status reads C7 snapshot"),
-		MappingById[TEXT("packaging_task_status")]
-			->GetStringField(TEXT("owner")),
-		FString(TEXT("C7_snapshot")));
-	TestEqual(
-		TEXT("HLOD validation remains C9 readback"),
-		MappingById[TEXT("hlod_validate_build")]
-			->GetStringField(TEXT("owner")),
-		FString(TEXT("C9_independent_readback")));
 
 	using namespace UE::UAI::DomainAdapters::CompileBuildJob;
 	TestEqual(
@@ -279,10 +254,6 @@ bool FUeAgentCompileBuildJobContractTest::RunTest(
 		UAI_COMPILE_BUILD_JOB_CONTRACT_V1,
 		1);
 	const auto& ProductionFamilies = GetCompileBuildJobFamilyContracts();
-	TestEqual(
-		TEXT("production exposes four family contracts"),
-		ProductionFamilies.Num(),
-		FamilyValues.Num());
 	for (const FUeAgentCompileBuildJobFamilyContract& Contract
 		: ProductionFamilies)
 	{

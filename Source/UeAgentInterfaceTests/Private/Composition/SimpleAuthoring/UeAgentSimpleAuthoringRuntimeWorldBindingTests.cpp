@@ -499,57 +499,49 @@ namespace
 		{
 			return false;
 		}
-		const TSharedPtr<FJsonObject>* QueryResult = nullptr;
-		const TSharedPtr<FJsonObject>* Projection = nullptr;
-		const TSharedPtr<FJsonObject>* Payload = nullptr;
-		const TSharedPtr<FJsonObject>* Snapshot = nullptr;
-		const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
-		if (!Root->TryGetObjectField(TEXT("query_result"), QueryResult)
-			|| !QueryResult || !QueryResult->IsValid()
-			|| !(*QueryResult)->TryGetObjectField(
-				TEXT("projection"), Projection)
-			|| !Projection || !Projection->IsValid()
-			|| !(*Projection)->TryGetObjectField(TEXT("payload"), Payload)
-			|| !Payload || !Payload->IsValid()
-			|| !(*Payload)->TryGetObjectField(TEXT("snapshot"), Snapshot)
-			|| !Snapshot || !Snapshot->IsValid()
-			|| !(*Snapshot)->TryGetArrayField(TEXT("entries"), Entries)
-			|| !Entries)
+		const TArray<TSharedPtr<FJsonValue>>* Resources = nullptr;
+		if (!Root->TryGetArrayField(TEXT("resources"), Resources)
+			|| !Resources)
 		{
 			return false;
 		}
-		bool bFoundRef = false;
-		bool bFoundKind = false;
-		for (const TSharedPtr<FJsonValue>& EntryValue : *Entries)
+		// The public projection is deliberately a direct business result.  Its
+		// root may only contain the result and optional paging metadata; the old
+		// typed Query envelope must never reach this consumer.
+		for (const FString& InternalField : {
+			TEXT("command_id"), TEXT("mechanics_command_id"),
+			TEXT("read_only"), TEXT("query_result"), TEXT("projection"),
+			TEXT("snapshot_id"), TEXT("revision")})
 		{
-			if (!EntryValue.IsValid() || EntryValue->Type != EJson::Object)
+			if (Root->HasField(InternalField))
 			{
-				continue;
+				return false;
 			}
-			const TSharedPtr<FJsonObject> Entry = EntryValue->AsObject();
-			const TSharedPtr<FJsonObject>* Identity = nullptr;
-			const TSharedPtr<FJsonObject>* Value = nullptr;
-			FString OwnerId;
-			FString Selector;
-			FString Text;
-			if (!Entry.IsValid()
-				|| !Entry->TryGetObjectField(TEXT("identity"), Identity)
-				|| !Identity || !Identity->IsValid()
-				|| !(*Identity)->TryGetStringField(TEXT("owner_id"), OwnerId)
-				|| OwnerId != ResourceRef
-				|| !(*Identity)->TryGetStringField(TEXT("selector"), Selector)
-				|| !Entry->TryGetObjectField(TEXT("value"), Value)
-				|| !Value || !Value->IsValid()
-				|| !(*Value)->TryGetStringField(TEXT("text"), Text))
-			{
-				continue;
-			}
-			bFoundRef |= Selector == TEXT("resource_ref")
-				&& Text == ResourceRef;
-			bFoundKind |= Selector == TEXT("resource_kind")
-				&& Text == ResourceKind;
 		}
-		return bFoundRef && bFoundKind;
+		for (const TSharedPtr<FJsonValue>& ResourceValue : *Resources)
+		{
+			if (!ResourceValue.IsValid()
+				|| ResourceValue->Type != EJson::Object)
+			{
+				continue;
+			}
+			const TSharedPtr<FJsonObject> Resource =
+				ResourceValue->AsObject();
+			FString OwnerId;
+			FString Kind;
+			if (!Resource.IsValid()
+				|| Resource->Values.Num() != 2
+				|| !Resource->TryGetStringField(TEXT("resource_ref"), OwnerId)
+				|| !Resource->TryGetStringField(TEXT("resource_kind"), Kind))
+			{
+				continue;
+			}
+			if (OwnerId == ResourceRef && Kind == ResourceKind)
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	AStaticMeshActor* FindActorWithLabel(

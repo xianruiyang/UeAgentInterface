@@ -12,7 +12,7 @@ namespace UeAgentMaterialAuthoring
 {
 	namespace
 	{
-		bool RegisterAssetIdentity(const TCHAR* ModelId, const TCHAR* TargetKind, FString& OutError)
+		bool RegisterAssetIdentity(const TCHAR* ModelId, const TCHAR* TargetKind, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringIdentity::FModelDescriptor Model;
 			Model.ModelId = ModelId;
@@ -34,7 +34,7 @@ namespace UeAgentMaterialAuthoring
 			const TCHAR* TargetKind,
 			const TArray<UeAgentAuthoringIdentity::FSelectorDescriptor>& Selectors,
 			const TArray<FString>& KeySelectors,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringIdentity::FModelDescriptor Model;
 			Model.ModelId = ModelId;
@@ -53,7 +53,8 @@ namespace UeAgentMaterialAuthoring
 			const TCHAR* SemanticId,
 			const TCHAR* TargetKind,
 			const TCHAR* IdentityModelId,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError,
+			const TCHAR* Comparator = TEXT("uai.compare.canonical_value"))
 		{
 			UeAgentAuthoringSemanticRegistry::FSemanticDescriptor Semantic;
 			Semantic.SemanticId = SemanticId;
@@ -68,7 +69,7 @@ namespace UeAgentMaterialAuthoring
 			Semantic.AvailabilitySource = StateAccessorId;
 			Semantic.DefaultSourceKind = UeAgentAuthoringSemanticRegistry::EDefaultSourceKind::Factory;
 			Semantic.DefaultAccessor = FactoryDefaultProviderId;
-			Semantic.Comparator = TEXT("uai.compare.canonical_value");
+			Semantic.Comparator = Comparator;
 			Semantic.CapabilityTags = { TEXT("asset"), TEXT("graph"), TEXT("expression"), TEXT("editable") };
 			UeAgentAuthoringSemanticRegistry::ERegistrationResult Result;
 			return UeAgentAuthoringSemanticRegistry::FRegistry::Get().RegisterSemantic(
@@ -82,7 +83,7 @@ namespace UeAgentMaterialAuthoring
 			const TCHAR* AccessorId,
 			const TCHAR* ValueType,
 			const UeAgentAuthoringSemanticRegistry::EWriteCapability WriteCapability,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringSemanticRegistry::FSemanticDescriptor Semantic;
 			Semantic.SemanticId = SemanticId;
@@ -102,12 +103,17 @@ namespace UeAgentMaterialAuthoring
 		}
 	}
 
-	bool RegisterDescriptors(FString& OutError)
+	bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		using UeAgentAuthoringIdentity::FSelectorDescriptor;
 		if (!RegisterAssetIdentity(MaterialIdentityModelId, TEXT("material_asset"), OutError)
 			|| !RegisterAssetIdentity(MaterialFunctionIdentityModelId, TEXT("material_function"), OutError)
 			|| !RegisterAssetIdentity(MaterialInstanceIdentityModelId, TEXT("material_instance"), OutError)
+			|| !RegisterScopedIdentity(MaterialInstanceLayersIdentityModelId, TEXT("material_instance_layers"),
+				{{TEXT("asset_path"), 100, false}, {TEXT("selector"), 110, false}},
+				{TEXT("asset_path"), TEXT("selector")}, OutError)
+			|| !RegisterAssetIdentity(MaterialGraphIdentityModelId, TEXT("material_graph"), OutError)
+			|| !RegisterAssetIdentity(MaterialRootNodeIdentityModelId, TEXT("material_root_node"), OutError)
 			|| !RegisterScopedIdentity(
 				MaterialInstanceParameterIdentityModelId,
 				TEXT("material_instance_parameter"),
@@ -157,6 +163,9 @@ namespace UeAgentMaterialAuthoring
 		Domain.MutationProviderId = ApplyProviderId;
 		Domain.TargetKinds = {
 			TEXT("material_asset"), TEXT("material_function"), TEXT("material_instance"),
+			TEXT("material_graph"),
+			TEXT("material_instance_layers"),
+			TEXT("material_root_node"),
 			TEXT("material_instance_parameter"), TEXT("material_expression"),
 			TEXT("material_expression_property"), TEXT("material_edge"), TEXT("material_root_input")
 		};
@@ -172,17 +181,27 @@ namespace UeAgentMaterialAuthoring
 		}
 
 		return RegisterSemantic(
-			MaterialSemanticId, TEXT("material_asset"), MaterialIdentityModelId, OutError)
+			MaterialSemanticId, TEXT("material_asset"), MaterialIdentityModelId, OutError, TEXT("uai.compare.graph_int32_position"))
 			&& RegisterSemantic(
 				MaterialFunctionSemanticId,
 				TEXT("material_function"),
 				MaterialFunctionIdentityModelId,
-				OutError)
+				OutError, TEXT("uai.compare.graph_int32_position"))
 			&& RegisterSemantic(
 				MaterialInstanceSemanticId,
 				TEXT("material_instance"),
 				MaterialInstanceIdentityModelId,
 				OutError)
+			&& RegisterSemantic(
+				ExportGraphSemanticId,
+				TEXT("material_graph"),
+				MaterialGraphIdentityModelId,
+				OutError, TEXT("uai.compare.graph_int32_position"))
+			&& RegisterSemantic(
+				ExportRootNodeSemanticId,
+				TEXT("material_root_node"),
+				MaterialRootNodeIdentityModelId,
+				OutError, TEXT("uai.compare.graph_int32_position"))
 			&& RegisterExportSemantic(
 				ExportTargetSemanticId, TEXT("material_asset"), MaterialIdentityModelId,
 				StateAccessorId, TEXT("object"),
@@ -198,7 +217,11 @@ namespace UeAgentMaterialAuthoring
 			&& RegisterExportSemantic(
 				ExportInstanceParameterSemanticId, TEXT("material_instance_parameter"),
 				MaterialInstanceParameterIdentityModelId, StateAccessorId, TEXT("object"),
-				UeAgentAuthoringSemanticRegistry::EWriteCapability::ReadOnly, OutError)
+				UeAgentAuthoringSemanticRegistry::EWriteCapability::DomainMutation, OutError)
+			&& RegisterExportSemantic(
+				ExportInstanceLayersSemanticId, TEXT("material_instance_layers"),
+				MaterialInstanceLayersIdentityModelId, StateAccessorId, TEXT("object"),
+				UeAgentAuthoringSemanticRegistry::EWriteCapability::DomainMutation, OutError)
 			&& RegisterExportSemantic(
 				ExportExpressionSemanticId, TEXT("material_expression"), MaterialExpressionIdentityModelId,
 				StateAccessorId, TEXT("object"),

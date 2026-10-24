@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/UeAgentContract.h"
@@ -27,7 +29,7 @@ namespace UE::UAI::CommandEdge
 			TSharedRef<
 				const CommandRegistry::FUeAgentImmutableCommandRegistry>
 				Registry,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutError.Reset();
 			return true;
@@ -43,7 +45,7 @@ namespace UE::UAI::CommandEdge
 				Registry,
 			TArray<TSharedRef<IUeAgentExactCommandHandler>> Handlers,
 			TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		FUeAgentCommandResult Submit(
 			const FUeAgentCommandRequest& Request,

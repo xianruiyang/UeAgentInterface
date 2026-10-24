@@ -215,12 +215,10 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshAttributes
 	}
 
 	TSharedRef<FJsonObject> AutoUvParams(
-		const FString& TargetRef,
-		const TSharedRef<FJsonObject>& Revision)
+		const FString& TargetRef)
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetNumberField(TEXT("uv_channel"), RequestedUvChannel);
 		Params->SetStringField(TEXT("method"), TEXT("patch_builder"));
 		Params->SetStringField(TEXT("island_source"), TEXT("polygroups"));
@@ -258,7 +256,6 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshAttributes
 
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetObjectField(
 			TEXT("space_contract"),
 			BuildTargetLocalSpaceContract());
@@ -279,7 +276,6 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshAttributes
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetStringField(TEXT("slot_name"), SlotName);
 		Params->SetStringField(TEXT("material_ref"), MaterialRef);
 		return Params;
@@ -303,7 +299,6 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshAttributes
 
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetObjectField(TEXT("selection"), Selection);
 		Params->SetNumberField(TEXT("slot_index"), SlotIndex);
 		return Params;
@@ -315,7 +310,6 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshAttributes
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetStringField(TEXT("method"), TEXT("aligned_boxes"));
 		Params->SetNumberField(TEXT("max_shapes"), 4);
 		Params->SetBoolField(TEXT("replace_existing"), true);
@@ -328,111 +322,11 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshAttributes
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetStringField(TEXT("mode"), TEXT("single_hull"));
 		Params->SetNumberField(TEXT("max_hulls"), 4);
 		Params->SetNumberField(TEXT("max_vertices_per_hull"), 64);
 		Params->SetBoolField(TEXT("replace_existing"), true);
 		return Params;
-	}
-
-	bool RunRejectedRevisionCase(
-		FAutomationTestBase& Test,
-		const TSharedPtr<const FUeAgentImmutableCommandRegistry>& Registry,
-		const TSharedPtr<const FUeAgentExactCommandDispatch>& Dispatch,
-		const bool bStaleAfterCapture,
-		const FString& Scope)
-	{
-		FScopedPublicStaticMesh Owned(Scope);
-		UStaticMesh* StaticMesh = Owned.Create();
-		if (!Test.TestNotNull(*(Scope + TEXT(" creates an owned asset")), StaticMesh))
-		{
-			return false;
-		}
-		const TSharedPtr<FJsonObject> Revision = ReadRevisionJson(
-			Owned.ObjectPath,
-			*StaticMesh);
-		if (!Test.TestNotNull(*(Scope + TEXT(" reads the current revision")), Revision.Get()))
-		{
-			return false;
-		}
-		const TSharedRef<FJsonObject> Params = AutoUvParams(
-			Owned.ObjectPath,
-			Revision.ToSharedRef());
-		if (bStaleAfterCapture)
-		{
-			StaticMesh->GetStaticMaterials().Add(FStaticMaterial(
-				UMaterial::GetDefaultMaterial(MD_Surface),
-				FName(TEXT("T50StaleProbe")),
-				FName(TEXT("T50StaleProbe"))));
-			StaticMesh->MarkPackageDirty();
-		}
-		else
-		{
-			Revision->SetStringField(
-				TEXT("generation"),
-				TEXT("modeling-carrier-v1:forged:public-auto-uv"));
-		}
-		TOptional<FUeAgentStateRevision> BeforeRevision;
-		ExecutionMutation::FExecutionMutationError RevisionError;
-		FUvChannelObservation BeforeUv;
-		const FString BeforeFileHash = Owned.FileHash();
-		const bool bDirtyBefore = StaticMesh->GetOutermost()->IsDirty();
-		if (!Test.TestTrue(
-				*(Scope + TEXT(" reads the exact pre-submit state")),
-				TryReadModelingGeometryCarrierRevision(
-					Owned.ObjectPath,
-					*StaticMesh,
-					BeforeRevision,
-					RevisionError)
-				&& BeforeRevision.IsSet()
-				&& ReadUvChannel(*StaticMesh, RequestedUvChannel, BeforeUv)))
-		{
-			return false;
-		}
-
-		const FUeAgentCommandResult Result =
-			UE::UAI::Tests::PublicCommand::SubmitActiveCommand(
-			Registry,
-			Dispatch,
-			TEXT("mesh.attribute.uv.auto"),
-			Params,
-			Scope);
-		Test.TestFalse(*(Scope + TEXT(" is rejected before mutation")), Result.IsOk());
-		Test.TestEqual(
-			*(Scope + TEXT(" reports the stable stale-revision error")),
-			ReadCommandErrorCode(Result),
-			FString(TEXT("modeling_geometry_target_revision_stale")));
-
-		TOptional<FUeAgentStateRevision> AfterRevision;
-		FUvChannelObservation AfterUv;
-		RevisionError = {};
-		Test.TestTrue(
-			*(Scope + TEXT(" rereads the exact rejected state")),
-			TryReadModelingGeometryCarrierRevision(
-				Owned.ObjectPath,
-				*StaticMesh,
-				AfterRevision,
-				RevisionError)
-			&& AfterRevision.IsSet()
-			&& ReadUvChannel(*StaticMesh, RequestedUvChannel, AfterUv));
-		Test.TestTrue(
-			*(Scope + TEXT(" preserves the carrier revision")),
-			BeforeRevision.IsSet()
-				&& AfterRevision.IsSet()
-				&& BeforeRevision.GetValue() == AfterRevision.GetValue());
-		Test.TestTrue(
-			*(Scope + TEXT(" preserves the requested UV channel")),
-			AfterUv == BeforeUv);
-		Test.TestEqual(
-			*(Scope + TEXT(" does not publish a package change")),
-			Owned.FileHash(),
-			BeforeFileHash);
-		Test.TestEqual(
-			*(Scope + TEXT(" preserves the pre-submit dirty state")),
-			StaticMesh->GetOutermost()->IsDirty(),
-			bDirtyBefore);
-		return !Test.HasAnyErrors();
 	}
 
 	bool RunCurrentUvProductCase(
@@ -827,19 +721,6 @@ bool FUeAgentModelingGeometryPublicStaticMeshAutoUvTest::RunTest(
 			SetAutomationWorldOverride(nullptr, true);
 	};
 
-	RunRejectedRevisionCase(
-		*this,
-		Registry,
-		Dispatch,
-		false,
-		TEXT("T50PublicAutoUvForged"));
-	RunRejectedRevisionCase(
-		*this,
-		Registry,
-		Dispatch,
-		true,
-		TEXT("T50PublicAutoUvStale"));
-
 	RunCurrentUvProductCase(
 		*this,
 		Registry,
@@ -851,7 +732,7 @@ bool FUeAgentModelingGeometryPublicStaticMeshAutoUvTest::RunTest(
 		[](const FString& TargetRef,
 			const TSharedRef<FJsonObject>& Revision)
 		{
-			return AutoUvParams(TargetRef, Revision);
+			return AutoUvParams(TargetRef);
 		});
 	return !HasAnyErrors();
 }

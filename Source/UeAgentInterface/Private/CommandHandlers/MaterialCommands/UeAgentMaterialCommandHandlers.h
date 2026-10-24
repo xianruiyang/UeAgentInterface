@@ -1,12 +1,14 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 
 namespace UE::UAI::CommandHandlers::MaterialCommands
 {
 	UEAGENTINTERFACE_API bool TryCreateHandlers(
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }
 
 

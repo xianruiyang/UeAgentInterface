@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "DomainAdapters/WorldSpatial/UeAgentWorldSpatialNative.h"
 
@@ -14,6 +16,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FEditorViewportClient* Client = nullptr;
 		FViewport* Viewport = nullptr;
 
+		bool TryValidateForWorld(const UWorld& ExplicitWorld, FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValidForWorld(const UWorld& ExplicitWorld) const;
 	};
 
@@ -23,6 +26,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		UGeometrySelectionManager* Manager = nullptr;
 		TArray<FUeAgentWorldSpatialMeshSelectionTarget> Targets;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -45,7 +49,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FEditorViewportClient& Client,
 		FViewport& Viewport,
 		FString& OutViewportIdentity,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API void UnregisterBlueprintComponentsViewport(
 		const FString& ViewportIdentity,

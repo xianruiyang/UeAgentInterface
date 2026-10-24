@@ -42,6 +42,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 			const FUeAgentWorldSpatialExecutionChainContract& Contract,
 			const FUeAgentWorldSpatialRequest& Request,
 			const TArray<FUeAgentOperationTargetBinding>& Targets,
+			const FUeAgentWorldSpatialPreflightFence& Fence,
 			const FUeAgentOperationContext& Context,
 			FUeAgentWorldSpatialMutationResult& OutResult,
 			FUeAgentWorldSpatialExecutionError& OutError) = 0;
@@ -76,11 +77,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 	FWorldSpatialNativeFamilyRef MakeViewportSessionStateNativeFamily(
 		const FUeAgentWorldSpatialNativeDependencies& Dependencies);
 
-	bool Fail(
-		FUeAgentWorldSpatialExecutionError& OutError,
-		FString Code,
-		FString SubjectId = FString(),
-		FString Detail = FString());
+	bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString());
 
 	const FUeAgentWorldSpatialRequest* GetProductionRequest(
 		const FUeAgentWorldSpatialTypedRequestRef& Request,
@@ -117,8 +114,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 		const TArray<FObservedEntry>& Observations,
 		const FUeAgentOperationContext& Context,
 		TSharedPtr<const FUeAgentCanonicalSnapshot>& OutSnapshot,
-		FUeAgentWorldSpatialExecutionError& OutError,
-		const FUeAgentStateRevision* RevisionOverride = nullptr);
+		FUeAgentWorldSpatialExecutionError& OutError);
+
+	TSharedPtr<FJsonValue> CanonicalFieldFact(const UE::UAI::StateSemantic::FUeAgentCanonicalValueRef& Value);
 
 	const UE::UAI::StateSemantic::FUeAgentStateEntry* FindEntryByRole(
 		const FUeAgentCanonicalSnapshot& Snapshot,
@@ -138,12 +136,30 @@ namespace UE::UAI::DomainAdapters::WorldSpatial::Private
 
 	void SetComparisonOutcome(
 		const FUeAgentWorldSpatialExecutionChainContract& Contract,
-		bool bMatches,
+		TArray<UE::UAI::Contract::FDiagnostic> Differences,
 		const FString& EvidenceId,
 		FVerificationOutcome& OutOutcome);
 
-	bool NearlyEqualComponents(
+	UE::UAI::Contract::FDiagnostic& AddComparisonDifference(
+		TArray<UE::UAI::Contract::FDiagnostic>& Differences,
+		const FString& Path, const FString& Reason,
+		TSharedPtr<FJsonValue> Expected, TSharedPtr<FJsonValue> Actual,
+		const FString& Target = FString());
+
+	TSharedPtr<FJsonValue> ComparisonNumber(double Value);
+	TSharedPtr<FJsonValue> ComparisonComponents(const TArray<double>& Values);
+
+	bool CompareComponents(
 		const TArray<double>& Left,
 		const TArray<double>& Right,
+		TArray<UE::UAI::Contract::FDiagnostic>& Differences,
+		const FString& Path, const FString& Target = FString(),
+		double Tolerance = 0.001);
+
+	bool CompareTransforms(
+		const FUeAgentWorldSpatialCompiledValue& LeftValue,
+		const FUeAgentWorldSpatialCompiledValue& RightValue,
+		TArray<UE::UAI::Contract::FDiagnostic>& Differences,
+		const FString& Path, const FString& Target = FString(),
 		double Tolerance = 0.001);
 }

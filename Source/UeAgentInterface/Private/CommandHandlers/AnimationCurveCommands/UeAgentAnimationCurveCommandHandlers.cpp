@@ -14,21 +14,11 @@ namespace UE::UAI::CommandHandlers::AnimationCurveCommands
 	{
 		const FString Owner(TEXT("animation-curve-command-owner"));
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request, UE::UAI::Contract::FDiagnostic Diagnostic)
+        {
+            if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetCommandId();
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -46,22 +36,19 @@ namespace UE::UAI::CommandHandlers::AnimationCurveCommands
 					? FString(TEXT("uai:query")) : FString(TEXT("uai:operate"));
 				if (!Caller.IsValid() || !Caller.GetAuthorityScopes().Contains(RequiredScope))
 				{
-					return Failure(Request, TEXT("animation_curve_authority_required"),
-						RequiredScope + TEXT(" is required"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_curve_authority_required"), RequiredScope + TEXT(" is required"), TEXT("command")));
 				}
 				if (!IsInGameThread())
 				{
-					return Failure(Request, TEXT("animation_curve_game_thread_required"),
-						TEXT("native animation mechanics must run on the game thread"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_curve_game_thread_required"), TEXT("native animation mechanics must run on the game thread"), TEXT("command")));
 				}
 				TSharedPtr<IUeAgentCommandHandler> Mechanics;
 				TArray<FString> MechanicsScopes;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!OperationOwners::AnimationCurveCommands::TryResolveMechanics(
-						CommandId, Mechanics, MechanicsScopes, Error)
-					|| !Mechanics.IsValid())
+						CommandId, Mechanics, MechanicsScopes, Error))
 				{
-					return Failure(Request, TEXT("animation_curve_runtime_unavailable"), Error);
+					return Failure(Request, Error);
 				}
 				TArray<FString> Scopes = Caller.GetAuthorityScopes();
 				for (const FString& Scope : MechanicsScopes) Scopes.AddUnique(Scope);
@@ -77,7 +64,7 @@ namespace UE::UAI::CommandHandlers::AnimationCurveCommands
 
 	bool TryCreateHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();

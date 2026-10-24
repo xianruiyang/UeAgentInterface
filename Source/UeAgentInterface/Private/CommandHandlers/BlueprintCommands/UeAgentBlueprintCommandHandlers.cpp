@@ -14,20 +14,12 @@ namespace UE::UAI::CommandHandlers::BlueprintCommands
 	{
 		const FString Owner = TEXT("blueprint-command-owner");
 
-		FUeAgentCommandResult Unauthorized(
-			const FUeAgentCommandRequest& Request,
-			const FString& RequiredScope)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), TEXT("blueprint_command_authority_required"));
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), RequiredScope + TEXT(" is required"));
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+		FUeAgentCommandResult Unauthorized(const FUeAgentCommandRequest& Request, const FString& RequiredScope)
+        {
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), UE::UAI::Contract::FDiagnostic::Failure(
+                TEXT("blueprint_command_authority_required"), RequiredScope + TEXT(" is required"),
+                TEXT("command_authorization"), FString(), Request.GetCommandId()));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -77,7 +69,7 @@ namespace UE::UAI::CommandHandlers::BlueprintCommands
 
 	bool TryCreateHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
@@ -93,7 +85,8 @@ namespace UE::UAI::CommandHandlers::BlueprintCommands
 			if (!Match)
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("blueprint_command_mechanics_handler_missing:") + Id;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_command_mechanics_handler_missing"), TEXT("No mechanics handler is registered for this public command."), TEXT("handler_factory"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			OutHandlers.Add(MakeShared<FHandler>(Id, *Match));

@@ -1,45 +1,84 @@
 #include "DomainAdapters/TimelineAnimation/UeAgentTimelineAnimationProductionRuntime.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
 #include "DomainAdapters/TimelineAnimation/UeAgentTimelineAnimationDescriptors.h"
 #include "DomainAdapters/TimelineAnimation/UeAgentTimelineAnimationRequests.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::DomainAdapters::TimelineAnimation
 {
 	namespace
 	{
-		bool Fail(FUeAgentTimelineAnimationExecutionError& OutError,
-			const FString& Code, const FString& Detail = FString())
+		bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = TEXT("timeline_animation.production_runtime"))
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject; return false; }
+
+		bool ValidateConfig(const FUeAgentTimelineAnimationProductionRuntimeConfig& Config,
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = TEXT("timeline_animation.production_runtime");
-			OutError.Detail = Detail;
-			return false;
+			OutError.Reset();
+			const auto RequireIdentity = [&](const FString& Value, const TCHAR* Field)
+			{
+				if (!Value.IsEmpty()) return true;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_animation_runtime_config_invalid"),
+					TEXT("The runtime configuration requires a non-empty identity."), TEXT("native_execution"));
+				OutError.PropertyPath = Field;
+				OutError.ActualValuePresent = true;
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Value);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty string"));
+				return false;
+			};
+			if (!RequireIdentity(Config.ProjectInstanceId, TEXT("project_instance_id"))
+				|| !RequireIdentity(Config.EditorInstanceId, TEXT("editor_instance_id"))
+				|| !RequireIdentity(Config.ServerSessionId, TEXT("server_session_id"))) return false;
+			if (Config.RegistryEpoch < 0)
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_animation_runtime_config_invalid"),
+					TEXT("The runtime registry epoch must not be negative."), TEXT("native_execution"));
+				OutError.PropertyPath = TEXT("registry_epoch");
+				OutError.ActualValuePresent = true;
+				OutError.ActualEvidence = MakeShared<FJsonValueNumber>(Config.RegistryEpoch);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-negative integer"));
+				return false;
+			}
+			TSet<FString> Identities;
+			const auto ValidateBindings = [&](const auto& Bindings, const TCHAR* Collection)
+			{
+				for (int32 Index = 0; Index < Bindings.Num(); ++Index)
+				{
+					const auto& Binding = Bindings[Index];
+					const FString Path = FString::Printf(TEXT("%s[%d]"), Collection, Index);
+					if (!Binding.TryValidate(OutError))
+					{
+						OutError.PropertyPath = OutError.PropertyPath.IsEmpty() ? Path : Path + TEXT(".") + OutError.PropertyPath;
+						return false;
+					}
+					if (Identities.Contains(Binding.Identity))
+					{
+						OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_animation_explicit_binding_duplicate"),
+							TEXT("An explicit subject or rig candidate reference is registered more than once."), TEXT("native_execution"));
+						OutError.PropertyPath = Path + TEXT(".identity");
+						OutError.TargetPath = Binding.Identity;
+						OutError.ActualValuePresent = true;
+						OutError.ActualValue = MakeShared<FJsonValueString>(Binding.Identity);
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("unique reference across subject and rig candidate bindings"));
+						return false;
+					}
+					Identities.Add(Binding.Identity);
+				}
+				return true;
+			};
+			return ValidateBindings(Config.SubjectBindings, TEXT("subject_bindings"))
+				&& ValidateBindings(Config.RigCandidateBindings, TEXT("rig_candidate_bindings"));
 		}
 	}
 
 	bool FUeAgentTimelineAnimationProductionRuntimeConfig::IsValid() const
 	{
-		if (ProjectInstanceId.IsEmpty() || EditorInstanceId.IsEmpty()
-			|| ServerSessionId.IsEmpty() || RegistryEpoch < 0)
-		{
-			return false;
-		}
-		TSet<FString> Identities;
-		for (const FUeAgentTimelineAnimationSubjectBinding& Binding : SubjectBindings)
-		{
-			if (!Binding.IsValid() || Identities.Contains(Binding.Identity)) return false;
-			Identities.Add(Binding.Identity);
-		}
-		for (const FUeAgentTimelineAnimationRigCandidateBinding& Binding
-			: RigCandidateBindings)
-		{
-			if (!Binding.IsValid() || Identities.Contains(Binding.Identity)) return false;
-			Identities.Add(Binding.Identity);
-		}
-		return true;
+		UE::UAI::Contract::FDiagnostic Error;
+		return ValidateConfig(*this, Error);
 	}
 
 	FUeAgentTimelineAnimationProductionRuntime::
@@ -63,21 +102,29 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 	{
 		OutRuntime.Reset();
 		OutError = {};
-		if (!Config.IsValid()) return Fail(OutError,
-			TEXT("timeline_animation_runtime_config_invalid"));
+		if (!ValidateConfig(Config, OutError))
+		{
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TEXT("timeline_animation.production_runtime");
+			return false;
+		}
 
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry> DescriptorRegistry;
-		FString DescriptorError;
+		UE::UAI::Contract::FDiagnostic DescriptorError;
 		if (!TryCreateTimelineAnimationDescriptorRegistry(
 				DescriptorRegistry, DescriptorError) || !DescriptorRegistry.IsValid())
 		{
-			return Fail(OutError,
-				TEXT("timeline_animation_descriptor_registry_unavailable"),
-				DescriptorError);
+			if (DescriptorError.IsEmpty()) DescriptorError = UE::UAI::Contract::FDiagnostic::Failure(
+				TEXT("timeline_animation_descriptor_registry_missing"), TEXT("The descriptor factory did not return a registry."), TEXT("native_execution"));
+			return Fail(OutError, DescriptorError);
 		}
 		TSharedPtr<IUeAgentTimelineAnimationRequestDecoder> Decoder;
 		if (!TryCreateTimelineAnimationRequestDecoder(Decoder, OutError)
-			|| !Decoder.IsValid()) return false;
+			|| !Decoder.IsValid())
+		{
+			if (OutError.IsEmpty()) OutError = UE::UAI::Contract::FDiagnostic::Failure(
+				TEXT("timeline_animation_decoder_missing"), TEXT("The request decoder factory did not return a decoder."), TEXT("native_execution"));
+			return false;
+		}
 
 		const FString Generation = FString::Printf(TEXT("%s:%s:%s:%lld"),
 			*Config.ProjectInstanceId, *Config.EditorInstanceId,
@@ -88,13 +135,18 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				Config.RigCandidateBindings, NativeDependencies, OutError)) return false;
 		FUeAgentTimelineAnimationNativePorts Ports;
 		if (!TryCreateTimelineAnimationNativePorts(
-				NativeDependencies, Ports, OutError) || !Ports.IsValid()) return false;
+				NativeDependencies, Ports, OutError)) return false;
 
 		TSharedPtr<const BindingGateway::Query::FUeAgentDomainQueryProviderRegistry>
 			QueryRegistry;
 		if (!TryCreateTimelineAnimationQueryProviderRegistry(
 				Decoder.ToSharedRef(), Ports.Readback.ToSharedRef(), QueryRegistry,
-				OutError) || !QueryRegistry.IsValid()) return false;
+				OutError) || !QueryRegistry.IsValid())
+		{
+			if (OutError.IsEmpty()) OutError = UE::UAI::Contract::FDiagnostic::Failure(
+				TEXT("timeline_animation_query_registry_missing"), TEXT("The query provider factory did not return a registry."), TEXT("native_execution"));
+			return false;
+		}
 		TArray<TSharedRef<FUeAgentTimelineAnimationOperationChain>> OperationChains;
 		if (!TryCreateTimelineAnimationOperationChains(
 				Decoder.ToSharedRef(), Ports.Readback.ToSharedRef(),
@@ -104,7 +156,9 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		OutRuntime = MakeShareable(new FUeAgentTimelineAnimationProductionRuntime(
 			MoveTemp(DescriptorRegistry), MoveTemp(QueryRegistry),
 			MoveTemp(OperationChains), MoveTemp(NativeDependencies)));
-		return OutRuntime.IsValid();
+		if (!OutRuntime.IsValid()) return Fail(OutError, UE::UAI::Contract::FDiagnostic::Failure(
+			TEXT("timeline_animation_runtime_missing"), TEXT("The factory did not produce a timeline animation runtime."), TEXT("native_execution")));
+		return true;
 	}
 
 	const TSharedPtr<const Contract::FUeAgentDescriptorRegistry>&
@@ -132,8 +186,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		if (!Dependencies.RevisionSource.IsValid())
 		{
 			OutRevision = {};
-			return Fail(OutError,
-				TEXT("timeline_animation_revision_source_unavailable"), ExplicitRef);
+			return Fail(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_animation_revision_source_unavailable"), ExplicitRef, TEXT("native_execution")));
 		}
 		return Dependencies.RevisionSource->TryReadRevision(
 			ExplicitRef, OutRevision, OutError);

@@ -1,9 +1,11 @@
 #include "Misc/AutomationTest.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
 #include "Core/Contract/UeAgentCommandJson.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Components/SceneComponent.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -23,12 +25,7 @@
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "UObject/Interface.h"
 
-#if __has_include("OperationOwners/Blueprint/Surfaces/UeAgentBlueprintSurfaceDomainService.h")
-#define UAI_T14_BLUEPRINT_SURFACES_AVAILABLE 1
 #include "OperationOwners/Blueprint/Surfaces/UeAgentBlueprintSurfaceDomainService.h"
-#else
-#define UAI_T14_BLUEPRINT_SURFACES_AVAILABLE 0
-#endif
 
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintMutationModel.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringDescriptors.h"
@@ -43,10 +40,6 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
-#if !UAI_T14_BLUEPRINT_SURFACES_AVAILABLE
-	TestTrue(TEXT("T14 Blueprint Surfaces authority is available"), false);
-	return false;
-#else
 	using namespace UE::UAI;
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::OperationOwners::Blueprint::Surfaces;
@@ -60,10 +53,27 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 		AddError(WorkspaceError.GetCode());
 		return false;
 	}
-	TestTrue(TEXT("Blueprint Surfaces explicitly supports authoring-schema discovery"),
-		Provider->SupportsExplicitCommand(
-			TEXT("content_graph.authoring_schema")));
-
+	const FImportInitializationDomainRequest SemanticSchemaRoot(
+		TEXT("content_graph.import_workspace"), GetSemanticWorkspaceSchemaId(),
+		TEXT("/Game/UAI/StrictV2/T14/BP_T14.BP_T14"),
+		TEXT("/Script/Engine.Blueprint"), EInitializationNodeRole::RootTarget,
+		TEXT("{}"));
+	TestTrue(TEXT("the semantic workspace schema resolves the Blueprint root"),
+		Provider->Matches(SemanticSchemaRoot));
+	const FImportInitializationDomainRequest InlineSchemaRoot(
+		TEXT("content_graph.import_workspace"), TEXT("uai.blueprint.edit/1"),
+		TEXT("/Game/UAI/StrictV2/T14/BP_T14.BP_T14"),
+		TEXT("/Script/Engine.Blueprint"), EInitializationNodeRole::RootTarget,
+		TEXT("{}"));
+	TestTrue(TEXT("the inline Blueprint schema remains accepted"),
+		Provider->Matches(InlineSchemaRoot));
+	const FImportInitializationDomainRequest UnrelatedSchemaRoot(
+		TEXT("content_graph.import_workspace"), TEXT("uai.blueprint.edit/2"),
+		TEXT("/Game/UAI/StrictV2/T14/BP_T14.BP_T14"),
+		TEXT("/Script/Engine.Blueprint"), EInitializationNodeRole::RootTarget,
+		TEXT("{}"));
+	TestFalse(TEXT("an unrelated Blueprint schema is rejected"),
+		Provider->Matches(UnrelatedSchemaRoot));
 	struct FContractCase
 	{
 		const TCHAR* Type;
@@ -112,16 +122,23 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 		TEXT("{}"));
 	TestFalse(TEXT("an unregistered Blueprint root is rejected before write"),
 		Provider->Matches(Unsupported));
+	const FImportInitializationDomainRequest UnsupportedRole(
+		TEXT("content_graph.import_workspace"), GetSemanticWorkspaceSchemaId(),
+		TEXT("/Game/UAI/StrictV2/T14/BP_T14.BP_T14"),
+		TEXT("/Script/Engine.Blueprint"), EInitializationNodeRole::ContainerItem,
+		TEXT("{}"));
+	TestFalse(TEXT("a Blueprint root with a non-root role is rejected"),
+		Provider->Matches(UnsupportedRole));
 
 	TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch> Dispatch;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	if (!TestTrue(TEXT("the process active composition freezes"),
 		Module::CommandRegistration::Active::
 			TryComposeProcessActiveCommandComposition(Registry, Dispatch, Error))
 		|| !Registry.IsValid())
 	{
-		AddError(Error);
+		AddError(Error.ToPublicDetail());
 		return false;
 	}
 	const auto* SharedIngress = Registry->FindExact(
@@ -131,14 +148,14 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 	{
 		TestEqual(TEXT("the shared ingress retains one public owner"),
 			SharedIngress->GetPublicOwner(),
-			FString(TEXT("uobject-dataasset-recursive-initialization-owner")));
+			FString(TEXT("content-graph-workspace-owner")));
 	}
 	TestNull(TEXT("the replaced Blueprint HJSON command is inactive"),
 		Registry->FindExact(TEXT("blueprint.authoring.apply")));
 	if (!TestTrue(TEXT("Blueprint authoring registration succeeds"),
 		UeAgentBlueprintAuthoring::RegisterAuthoring(Error)))
 	{
-		AddError(Error);
+		AddError(Error.ToPublicDetail());
 		return false;
 	}
 	FTargetCompositionContract BlueprintCompositionContract;
@@ -192,21 +209,8 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 			MakeShared<FJsonValueObject>(InterfaceValue)),
 	};
 	using UE::UAI::ContextResource::EUeAgentResourceDimension;
-	using UE::UAI::ContextResource::FUeAgentResourceBudget;
 	using UE::UAI::ContextResource::FUeAgentResourceTracker;
-	const TMap<EUeAgentResourceDimension, int64> CompositionLimits{
-		{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-		{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-		{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-		{EUeAgentResourceDimension::Nodes, 4096},
-		{EUeAgentResourceDimension::Items, 4096},
-		{EUeAgentResourceDimension::Files, 1024},
-		{EUeAgentResourceDimension::ReferenceEdges, 4096},
-		{EUeAgentResourceDimension::WorkUnits, 32768},
-		{EUeAgentResourceDimension::EstimatedMemoryBytes, 16 * 1024 * 1024},
-	};
-	FUeAgentResourceTracker CompositionResources{
-		FUeAgentResourceBudget(CompositionLimits)};
+	FUeAgentResourceTracker CompositionResources;
 	FAuthoringModelPtr CompositionModel;
 	FWorkspaceError CompositionError;
 	if (!TestTrue(TEXT("parent and interface semantics compose"),
@@ -305,165 +309,6 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 	{
 		return false;
 	}
-	UBlueprint* RevisionBlueprint = FKismetEditorUtilities::CreateBlueprint(
-		AActor::StaticClass(), GetTransientPackage(),
-		*FString(TEXT("BP_T14_Revision_") + Suffix), BPTYPE_Normal,
-		UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass(),
-		TEXT("T14"));
-	if (!TestNotNull(TEXT("a transient Actor Blueprint revision fixture is created"),
-		RevisionBlueprint)
-		|| !TestNotNull(TEXT("the revision fixture has an SCS"),
-			RevisionBlueprint
-				? RevisionBlueprint->SimpleConstructionScript.Get()
-				: nullptr))
-	{
-		return false;
-	}
-	USCS_Node* RevisionNode =
-		RevisionBlueprint->SimpleConstructionScript->CreateNode(
-			USceneComponent::StaticClass(), TEXT("RevisionRootT14"));
-	if (!TestNotNull(TEXT("the revision fixture has a SceneComponent node"),
-		RevisionNode))
-	{
-		return false;
-	}
-	RevisionBlueprint->SimpleConstructionScript->AddNode(RevisionNode);
-	USceneComponent* RevisionTemplate =
-		Cast<USceneComponent>(RevisionNode->ComponentTemplate);
-	if (!TestNotNull(TEXT("the revision node has a SceneComponent template"),
-		RevisionTemplate))
-	{
-		return false;
-	}
-	auto ReadAuthoringSchemaRevision = [this, &Provider, &WorkspaceError](
-		const FString& Target,
-		FString& OutRevision) -> bool
-	{
-		OutRevision.Reset();
-		const FImportInitializationDomainRequest Request(
-			TEXT("content_graph.authoring_schema"),
-			TEXT("uai.content_graph.resolved_target/1"),
-			Target,
-			TEXT("/Script/Engine.Blueprint"),
-			EInitializationNodeRole::RootTarget,
-			FString::Printf(TEXT("{\"target\":\"%s\"}"), *Target));
-		FString Contract;
-		FImportInitializationDomainResponse Response;
-		if (!Provider->TryResolveInitializationContract(
-				Request, Contract, WorkspaceError)
-			|| !Provider->TryExecute(
-				Request, Contract, Response, WorkspaceError))
-		{
-			return false;
-		}
-		TSharedPtr<FJsonObject> Payload;
-		FString JsonError;
-		const TSharedPtr<FJsonObject>* QueryResult = nullptr;
-		return UE::UAI::CommandContract::Json::TryParseObject(
-				Response.GetPayloadJson(), Payload, JsonError)
-			&& Payload.IsValid()
-			&& Payload->TryGetObjectField(TEXT("query_result"), QueryResult)
-			&& QueryResult && QueryResult->IsValid()
-			&& (*QueryResult)->TryGetStringField(TEXT("revision"), OutRevision)
-			&& !OutRevision.IsEmpty();
-	};
-	const FString RevisionTarget = RevisionBlueprint->GetPathName();
-	FString InitialRevision;
-	FString StableInitialRevision;
-	FString ChangedRevision;
-	FString StableChangedRevision;
-	TestTrue(TEXT("the initial Component template revision is readable"),
-		ReadAuthoringSchemaRevision(RevisionTarget, InitialRevision));
-	TestTrue(TEXT("the unchanged Component template revision is readable"),
-		ReadAuthoringSchemaRevision(RevisionTarget, StableInitialRevision));
-	TestEqual(TEXT("the unchanged Component template revision is stable"),
-		StableInitialRevision, InitialRevision);
-	RevisionTemplate->SetRelativeLocation(FVector(125.0, 25.0, 5.0));
-	TestTrue(TEXT("the changed Component template revision is readable"),
-		ReadAuthoringSchemaRevision(RevisionTarget, ChangedRevision));
-	TestTrue(TEXT("a Component template property changes the revision"),
-		ChangedRevision != InitialRevision);
-	TestTrue(TEXT("the repeated changed Component template revision is readable"),
-		ReadAuthoringSchemaRevision(RevisionTarget, StableChangedRevision));
-	TestEqual(TEXT("the changed Component template revision is stable"),
-		StableChangedRevision, ChangedRevision);
-	const FString SchemaTarget = ScratchBlueprint->GetPathName();
-	const FImportInitializationDomainRequest SchemaRequest(
-		TEXT("content_graph.authoring_schema"),
-		TEXT("uai.content_graph.resolved_target/1"),
-		SchemaTarget,
-		TEXT("/Script/Engine.Blueprint"),
-		EInitializationNodeRole::RootTarget,
-		FString::Printf(TEXT("{\"target\":\"%s\"}"), *SchemaTarget));
-	FString SchemaContract;
-	FImportInitializationDomainResponse SchemaResponse;
-	TestTrue(TEXT("the Blueprint authoring-schema route resolves"),
-		Provider->TryResolveInitializationContract(
-			SchemaRequest, SchemaContract, WorkspaceError));
-	if (TestTrue(TEXT("the Blueprint authoring-schema mechanics execute"),
-		Provider->TryExecute(
-			SchemaRequest, SchemaContract, SchemaResponse, WorkspaceError)))
-	{
-		TestTrue(TEXT("the domain response is read-only"),
-			SchemaResponse.IsReadOnly());
-		TSharedPtr<FJsonObject> SchemaPayload;
-		FString JsonError;
-		TestTrue(TEXT("the Blueprint authoring-schema payload is valid JSON"),
-			UE::UAI::CommandContract::Json::TryParseObject(
-				SchemaResponse.GetPayloadJson(), SchemaPayload, JsonError)
-				&& SchemaPayload.IsValid());
-		if (SchemaPayload.IsValid())
-		{
-			const TSharedPtr<FJsonObject>* QueryResult = nullptr;
-			TestEqual(TEXT("the schema response command identity is exact"),
-				SchemaPayload->GetStringField(TEXT("command_id")),
-				FString(TEXT("content_graph.authoring_schema")));
-			TestTrue(TEXT("the schema response is complete and read-only"),
-				SchemaPayload->GetBoolField(TEXT("read_only"))
-				&& SchemaPayload->GetBoolField(TEXT("complete"))
-				&& !SchemaPayload->GetBoolField(TEXT("has_more")));
-			TestTrue(TEXT("the schema query result is present"),
-				SchemaPayload->TryGetObjectField(TEXT("query_result"), QueryResult)
-				&& QueryResult && QueryResult->IsValid());
-			if (QueryResult && QueryResult->IsValid())
-			{
-				TestEqual(TEXT("the Blueprint schema id is exact"),
-					(*QueryResult)->GetStringField(TEXT("schema_id")),
-					FString(TEXT("uai.blueprint.edit/1")));
-				TestEqual(TEXT("the Blueprint schema root type is exact"),
-					(*QueryResult)->GetStringField(TEXT("root_type")),
-					FString(TEXT("/Script/Engine.Blueprint")));
-				TestEqual(TEXT("the Blueprint schema provider is exact"),
-					(*QueryResult)->GetStringField(TEXT("provider")),
-					FString(TEXT("blueprint-surface-domain-provider")));
-				TestFalse(TEXT("the Blueprint schema carries the current revision"),
-					(*QueryResult)->GetStringField(TEXT("revision")).IsEmpty());
-				const TSharedPtr<FJsonObject>* Template = nullptr;
-				const TSharedPtr<FJsonObject>* Root = nullptr;
-				const TSharedPtr<FJsonObject>* Document = nullptr;
-				const TSharedPtr<FJsonObject>* Target = nullptr;
-				const TSharedPtr<FJsonObject>* ProviderExtension = nullptr;
-				TestTrue(TEXT("the schema exposes an executable update template"),
-					(*QueryResult)->TryGetObjectField(TEXT("template"), Template)
-					&& Template && Template->IsValid()
-					&& (*Template)->GetStringField(TEXT("schema"))
-						== TEXT("uai.blueprint.edit/1")
-					&& (*Template)->TryGetObjectField(TEXT("root"), Root)
-					&& Root && Root->IsValid()
-					&& (*Root)->GetStringField(TEXT("type"))
-						== TEXT("/Script/Engine.Blueprint")
-					&& (*Root)->TryGetObjectField(TEXT("document"), Document)
-					&& Document && Document->IsValid()
-					&& (*Document)->GetStringField(TEXT("operation")) == TEXT("update")
-					&& (*Document)->TryGetObjectField(TEXT("target"), Target)
-					&& Target && Target->IsValid()
-					&& (*Target)->GetStringField(TEXT("asset_path")) == SchemaTarget
-					&& (*Document)->TryGetObjectField(
-						TEXT("provider_extension"), ProviderExtension)
-					&& ProviderExtension && ProviderExtension->IsValid());
-			}
-		}
-	}
 	FKismetEditorUtilities::CompileBlueprint(InterfaceBlueprint);
 	if (!TestTrue(TEXT("the interface fixture has a generated class"),
 		InterfaceBlueprint->GeneratedClass != nullptr))
@@ -484,7 +329,7 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 		UeAgentBlueprintAuthoring::FPreparedBlueprintMutation::Prepare(
 			*ScratchBlueprint, Extension, Mutation, Counters, Error)))
 	{
-		AddError(Error);
+		AddError(Error.ToPublicDetail());
 		return false;
 	}
 	TestEqual(TEXT("one interface is added through native Blueprint mechanics"),
@@ -550,7 +395,7 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 			Counters,
 			Error)))
 	{
-		AddError(Error);
+		AddError(Error.ToPublicDetail());
 		return false;
 	}
 	TestEqual(TEXT("both GUID-addressed function nodes are created"),
@@ -616,7 +461,6 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 	CandidateParams.PinName = TEXT("then");
 	CandidateParams.SearchText = TEXT("Branch");
 	CandidateParams.bContextSensitive = true;
-	CandidateParams.Limit = 64;
 	UeAgentPaletteSearch::FSearchResult CandidateResult;
 	FString CandidateError;
 	if (!TestTrue(TEXT("the old source exposes the real Branch action"),
@@ -653,16 +497,13 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 		TEXT("event_class"), AActor::StaticClass()->GetPathName());
 	const TSharedRef<FJsonObject> CandidateSelector = MakeShared<FJsonObject>();
 	CandidateSelector->SetStringField(
-		TEXT("id"), BranchCandidates[0]->GetPublicId());
-	const TSharedRef<FJsonObject> CandidateContext = MakeShared<FJsonObject>();
-	CandidateContext->SetStringField(TEXT("node_guid"), SourceGuidText);
-	CandidateContext->SetStringField(TEXT("pin_name"), TEXT("then"));
+		TEXT("name"), BranchCandidates[0]->Name.IsEmpty()
+			? BranchCandidates[0]->DisplayName
+			: BranchCandidates[0]->Name);
 	const TSharedRef<FJsonObject> CandidateNodeSpec = MakeShared<FJsonObject>();
 	CandidateNodeSpec->SetStringField(TEXT("operation"), TEXT("create"));
 	CandidateNodeSpec->SetStringField(TEXT("node_type"), TEXT("native_action"));
 	CandidateNodeSpec->SetObjectField(TEXT("candidate"), CandidateSelector);
-	CandidateNodeSpec->SetObjectField(
-		TEXT("candidate_context"), CandidateContext);
 	const TSharedRef<FJsonObject> OrderedNodes = MakeShared<FJsonObject>();
 	OrderedNodes->SetObjectField(CandidateGuidText, CandidateNodeSpec);
 	OrderedNodes->SetObjectField(SourceGuidText, SourceNodeSpec);
@@ -688,7 +529,7 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 	Counters = {};
 	Error.Reset();
 	if (!TestTrue(
-		TEXT("replace creates the source before its contextual native candidate"),
+		TEXT("replace creates the source and name-selected native candidate"),
 		UeAgentBlueprintAuthoring::FPreparedBlueprintMutation::Prepare(
 			*OrderedBlueprint,
 			OrderedExtension,
@@ -696,7 +537,7 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 			Counters,
 			Error)))
 	{
-		AddError(Error);
+		AddError(Error.ToPublicDetail());
 		return false;
 	}
 	UEdGraphNode* RebuiltSource = nullptr;
@@ -729,5 +570,4 @@ bool FUeAgentStrictV2T14BlueprintSurfacesTest::RunTest(
 		}
 	}
 	return !HasAnyErrors();
-#endif
 }

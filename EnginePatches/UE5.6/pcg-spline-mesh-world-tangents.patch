@@ -1,0 +1,21 @@
+diff --git a/Engine/Plugins/PCG/Source/PCG/Private/Elements/PCGSpawnSplineMesh.cpp b/Engine/Plugins/PCG/Source/PCG/Private/Elements/PCGSpawnSplineMesh.cpp
+--- a/Engine/Plugins/PCG/Source/PCG/Private/Elements/PCGSpawnSplineMesh.cpp
++++ b/Engine/Plugins/PCG/Source/PCG/Private/Elements/PCGSpawnSplineMesh.cpp
+@@ -227,11 +227,14 @@
+ 			SplineData->GetTangentsAtSegmentStart(IterState.ElementIndex, Dummy, LeaveTangent);
+ 			SplineData->GetTangentsAtSegmentStart(NextIndex, ArriveTangent, Dummy);
+ 
+-			// Set Position
++			// Tangent getters return spline-local vectors. Match the world-space
++			// endpoints above, including the spline component's rotation and scale.
++			const FTransform SplineTransform = SplineData->GetTransform();
++			// Set Position
+ 			IterState.SMCBuilderParams.SplineMeshParams.StartPosition = Transform.GetLocation();
+-			IterState.SMCBuilderParams.SplineMeshParams.StartTangent = LeaveTangent;
++			IterState.SMCBuilderParams.SplineMeshParams.StartTangent = SplineTransform.TransformVector(LeaveTangent);
+ 			IterState.SMCBuilderParams.SplineMeshParams.EndPosition = NextTransform.GetLocation();
+-			IterState.SMCBuilderParams.SplineMeshParams.EndTangent = ArriveTangent;
++			IterState.SMCBuilderParams.SplineMeshParams.EndTangent = SplineTransform.TransformVector(ArriveTangent);
+ 
+ 			// Set Roll (Rotation)
+ 			if (!bStartRollOverridden || !bEndRollOverridden)

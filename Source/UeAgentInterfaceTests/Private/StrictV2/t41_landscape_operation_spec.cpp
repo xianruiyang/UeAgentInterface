@@ -49,8 +49,12 @@ namespace UE::UAI::Tests::StrictV2::T41
 			return FUeAgentCommandResult::Failure(
 				Request,
 				TEXT("{}"),
-				TEXT("{\"code\":\"verification_oracle_unavailable\","
-					"\"detail\":\"persisted_unverified\"}"));
+				// No prose keyword hints: the delegated owner must consume facts.
+				TEXT("{\"code\":\"native_state_mismatch\",\"detail\":\""
+					"{\\\"schema\\\":\\\"uai.operation.failure/1\\\","
+					"\\\"code\\\":\\\"native_state_mismatch\\\","
+					"\\\"mutation_started\\\":true,\\\"mutation_may_have_started\\\":true,"
+					"\\\"retry_safe\\\":false}\"}"));
 		}
 	};
 
@@ -163,8 +167,6 @@ bool FUeAgentStrictV2T41LandscapeInventoryTest::RunTest(
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T41 owns exactly 2 inventory commands"),
-		ExpectedCommands().Num(), 2);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
@@ -180,6 +182,23 @@ bool FUeAgentStrictV2T41LandscapeInventoryTest::RunTest(
 				Contract->GetPythonFunction(),
 				CommandId.RightChop(FString(TEXT("landscape.")).Len())
 					.Replace(TEXT("."), TEXT("_")));
+			if (CommandId == TEXT("landscape.create"))
+			{
+				const auto& Fields = Contract->GetModelResultFields();
+				TestEqual(TEXT("landscape create has two model fields"),
+					Fields.Num(), 2);
+				if (Fields.Num() == 2)
+				{
+					TestEqual(TEXT("landscape create status source"),
+						Fields[0].SourcePath,
+						TArray<FString>{TEXT("projection"), TEXT("payload"),
+							TEXT("status")});
+					TestEqual(TEXT("landscape create outcome source"),
+						Fields[1].SourcePath,
+						TArray<FString>{TEXT("projection"), TEXT("payload"),
+							TEXT("effect_outcome")});
+				}
+			}
 		}
 	}
 	return !HasAnyErrors();
@@ -220,9 +239,6 @@ bool FUeAgentStrictV2T41LandscapeDomainCapabilityTest::RunTest(
 		Declaration.Command.Contributions.Num(), 1);
 	TestEqual(TEXT("Landscape owns both write operations"),
 		Declaration.Operation.Operations.Num(), 2);
-	TestEqual(TEXT("Landscape migration owner is exact"),
-		Declaration.Migration.OwnerId,
-		FString(TEXT("T41-LANDSCAPE-OPERATION")));
 	for (const FString& CommandId :
 		UE::UAI::Tests::StrictV2::T41::ExpectedCommands())
 	{
@@ -390,7 +406,7 @@ bool FUeAgentStrictV2T41LandscapePublicProductTest::RunTest(
 		TEXT("landscape.create"), CreateParams);
 	Composition::SimpleAuthoring::OperationHost::
 		SetAutomationHandlerOverride(TEXT("landscape.create"), nullptr);
-	TestFalse(TEXT("a post-persist verification failure is not success"),
+	TestFalse(TEXT("a structured post-mutation failure is not success"),
 		UnverifiableResult.IsOk());
 	TestTrue(
 		TEXT("a delegated post-mutation failure remains state_unknown and unsafe to replay"),

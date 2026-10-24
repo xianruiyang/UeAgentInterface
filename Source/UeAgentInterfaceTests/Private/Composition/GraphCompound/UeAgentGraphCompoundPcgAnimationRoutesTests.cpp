@@ -5,6 +5,7 @@
 #include "Core/Contract/UeAgentContractSchema.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "DomainAdapters/PcgAiNodeGraph/UeAgentPcgAiNodeGraphContract.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -18,17 +19,7 @@ namespace
 
 	FUeAgentResourceTracker MakeTracker()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 131072},
-			{EUeAgentResourceDimension::Items, 131072},
-			{EUeAgentResourceDimension::Files, 128},
-			{EUeAgentResourceDimension::ReferenceEdges, 262144},
-			{EUeAgentResourceDimension::WorkUnits, 1048576},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 64 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	FUeAgentCanonicalValuePtr MakeString(
@@ -127,57 +118,6 @@ namespace
 		return Snapshot.ToSharedRef();
 	}
 
-	const TArray<FString>& ExpectedCapabilities()
-	{
-		static const TArray<FString> Values = {
-			TEXT("ai.behavior_tree.asset.create"),
-			TEXT("ai.behavior_tree.graph.apply"),
-			TEXT("ai.blackboard.asset.create"),
-			TEXT("ai.blackboard.schema.apply"),
-			TEXT("ai.eqs.asset.create"),
-			TEXT("ai.eqs.graph.apply"),
-			TEXT("ai.smart_object_definition.asset.create"),
-			TEXT("ai.smart_object_definition.apply"),
-			TEXT("ai.state_tree.asset.create"),
-			TEXT("ai.state_tree.hierarchy.apply"),
-			TEXT("pcg.graph.asset.create"),
-			TEXT("pcg.graph.apply"),
-			TEXT("pcg.graph_instance.apply"),
-			TEXT("pcg.graph_parameters.apply"),
-			TEXT("pcg.component.apply"),
-			TEXT("pcg.data_asset.apply"),
-			TEXT("pcg.data_asset.create_from_level"),
-			TEXT("pcg.component.world_binding.apply"),
-			TEXT("animation.anim_blueprint.graph.apply"),
-			TEXT("animation.anim_blueprint.asset.create"),
-			TEXT("animation.anim_blueprint.layer_interface.asset.create"),
-			TEXT("animation.blend_space.definition.apply"),
-			TEXT("animation.blend_space.asset.create"),
-			TEXT("animation.skeleton.definition.apply"),
-			TEXT("animation.skeleton.compatibility.apply"),
-			TEXT("animation.skeleton.virtual_bone.apply"),
-			TEXT("animation.control_rig.hierarchy_graph.apply"),
-			TEXT("animation.control_rig.asset.create"),
-			TEXT("animation.control_rig.shape_library.apply"),
-			TEXT("animation.control_rig.shape_library.asset.create"),
-			TEXT("animation.deformer_graph.topology.apply"),
-			TEXT("animation.deformer_graph.asset.create"),
-			TEXT("animation.deformer_source_library.bindings.apply"),
-			TEXT("animation.deformer_source_library.asset.create"),
-			TEXT("animation.mesh_deformer_collection.entries.apply"),
-			TEXT("animation.mesh_deformer_collection.asset.create"),
-			TEXT("animation.ml_deformer.configuration.apply"),
-			TEXT("animation.ml_deformer.asset.create"),
-			TEXT("animation.ik_retargeter.definition.apply"),
-			TEXT("animation.ik_retargeter.asset.create"),
-			TEXT("animation.ik_retargeter.settings.apply"),
-			TEXT("animation.ik_rig.definition.auto_generate"),
-			TEXT("animation.ik_rig.definition.apply"),
-			TEXT("animation.ik_rig.asset.create"),
-		};
-		return Values;
-	}
-
 	const TMap<FString, FString>& RouteExamples()
 	{
 		static const TMap<FString, FString> Values = {
@@ -188,7 +128,7 @@ namespace
 			{TEXT("ai.eqs.asset.create"), TEXT("{\"asset_name\":\"EQS_GC016\",\"package_path\":\"/Game/UAI\"}")},
 			{TEXT("ai.eqs.graph.apply"), TEXT("{\"edits\":[{\"depends_on\":[],\"element_kind\":\"item\",\"identity\":\"eqs_option:root\",\"intent\":\"create\",\"value\":{\"generator_type_ref\":\"/Script/AIModule.EnvQueryGenerator_ActorsOfClass\"}}],\"target_ref\":\"/Game/UAI/EQS_GC016\"}")},
 			{TEXT("ai.smart_object_definition.asset.create"), TEXT("{\"asset_name\":\"SO_GC016\",\"package_path\":\"/Game/UAI\"}")},
-			{TEXT("ai.smart_object_definition.apply"), TEXT("{\"slots\":[{\"behavior_type_ref\":\"/Script/SmartObjectsModule.SmartObjectBehaviorDefinition\",\"data_type_ref\":\"/Script/SmartObjectsModule.SmartObjectSlotDefinitionData\",\"intent\":\"create\",\"slot_guid\":\"11111111-2222-3333-4444-555555555555\"}],\"target_ref\":\"/Game/UAI/SO_GC016\"}")},
+			{TEXT("ai.smart_object_definition.apply"), TEXT("{\"slots\":[{\"behavior_type_ref\":\"/Script/GameplayInteractionsModule.GameplayInteractionSmartObjectBehaviorDefinition\",\"data_type_ref\":\"/Script/SmartObjectsModule.SmartObjectSlotDefinition\",\"intent\":\"create\",\"slot_guid\":\"11111111-2222-3333-4444-555555555555\"}],\"target_ref\":\"/Game/UAI/SO_GC016\"}")},
 			{TEXT("ai.state_tree.asset.create"), TEXT("{\"asset_name\":\"ST_GC016\",\"package_path\":\"/Game/UAI\"}")},
 			{TEXT("ai.state_tree.hierarchy.apply"), TEXT("{\"edits\":[{\"depends_on\":[],\"element_kind\":\"hierarchy\",\"identity\":\"state:root\",\"intent\":\"create\",\"value\":{\"native_guid\":\"22222222-3333-4444-5555-666666666666\",\"payload_type_ref\":\"/Script/StateTreeModule.StateTreeState\"}}],\"target_ref\":\"/Game/UAI/ST_GC016\"}")},
 			{TEXT("pcg.graph.asset.create"), TEXT("{\"asset_name\":\"PCG_GC016\",\"package_path\":\"/Game/UAI\"}")},
@@ -196,7 +136,7 @@ namespace
 			{TEXT("pcg.graph_instance.apply"), TEXT("{\"graph_ref\":\"/Game/UAI/PCG_Source\",\"overrides\":[{\"property_guid\":\"33333333-4444-5555-6666-777777777777\",\"property_name\":\"Density\",\"property_type_ref\":\"double\",\"value\":0.5}],\"target_ref\":\"/Game/UAI/PCGI_GC016\"}")},
 			{TEXT("pcg.graph_parameters.apply"), TEXT("{\"parameters\":[{\"property_guid\":\"44444444-5555-6666-7777-888888888888\",\"property_name\":\"Seed\",\"property_type_ref\":\"int32\",\"value\":42}],\"target_ref\":\"/Game/UAI/PCG_GC016\"}")},
 			{TEXT("pcg.component.apply"), TEXT("{\"generation_policy\":\"on_demand\",\"graph_ref\":\"/Game/UAI/PCG_GC016\",\"target_ref\":\"component:/Game/UAI/Map.Actor:PCG\"}")},
-			{TEXT("pcg.data_asset.apply"), TEXT("{\"content_revision\":\"revision:16\",\"data_type_ref\":\"/Script/PCG.PCGPointData\",\"source_ref\":\"source:points\",\"target_ref\":\"/Game/UAI/PCGD_GC016\",\"value\":{\"point_count\":8}}")} ,
+			{TEXT("pcg.data_asset.apply"), TEXT("{\"data_type_ref\":\"/Script/PCG.PCGPointData\",\"source_ref\":\"source:points\",\"target_ref\":\"/Game/UAI/PCGD_GC016\",\"value\":{\"point_count\":8}}")} ,
 			{TEXT("pcg.data_asset.create_from_level"), TEXT("{\"data_type_ref\":\"/Script/PCG.PCGPointData\",\"source_level_ref\":\"/Game/Maps/WB_WhiteBox01\",\"target_ref\":\"/Game/UAI/PCGD_FromLevel\"}")},
 			{TEXT("pcg.component.world_binding.apply"), TEXT("{\"actor_ref\":\"/Game/Maps/WB_WhiteBox01.Actor_GC016\",\"component_ref\":\"/Game/Maps/WB_WhiteBox01.Actor_GC016:PCG\",\"generation_policy\":\"on_demand\",\"graph_ref\":\"/Game/UAI/PCG_GC016\"}")},
 			{TEXT("animation.anim_blueprint.graph.apply"), TEXT("{\"edits\":[{\"depends_on\":[],\"element_kind\":\"item\",\"identity\":\"anim_node:root\",\"intent\":\"create\",\"value\":{\"carrier_type_ref\":\"/Script/AnimGraph.AnimGraphNode_Root\",\"runtime_type_ref\":\"/Script/Engine.AnimNode_Root\"}}],\"target_ref\":\"/Game/UAI/ABP_GC016\"}")},
@@ -273,19 +213,20 @@ bool FUeAgentGraphCompoundPcgAnimationExactContractTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
-	const TArray<FPcgAnimationGraphRouteProfile>& Profiles =
-		GetPcgAnimationGraphRouteProfiles();
-	TestEqual(TEXT("exactly 44 routes are owned"), Profiles.Num(), 44);
+	const TArray<FPcgAnimationGraphRouteProfile>* ProfileArray = nullptr;
+	UE::UAI::Contract::FDiagnostic ProfileError;
+	if (!TryGetPcgAnimationGraphRouteProfiles(ProfileArray, ProfileError))
+	{
+		AddError(ProfileError.PublicMessage);
+		return false;
+	}
+	const TArray<FPcgAnimationGraphRouteProfile>& Profiles = *ProfileArray;
 	TSet<FString> Capabilities;
 	TSet<FString> DescriptorIds;
-	int32 PcgAiCount = 0;
-	int32 AnimationCount = 0;
 	for (const FPcgAnimationGraphRouteProfile& Profile : Profiles)
 	{
 		Capabilities.Add(Profile.GetCapabilityId());
 		DescriptorIds.Add(Profile.GetDescriptorId());
-		PcgAiCount += Profile.GetDomainId() == TEXT("pcg_ai_node_graph") ? 1 : 0;
-		AnimationCount += Profile.GetDomainId() == TEXT("animation_rig_graph") ? 1 : 0;
 		TestTrue(*FString::Printf(TEXT("%s profile is valid"),
 			*Profile.GetCapabilityId()), Profile.IsValid());
 		TestEqual(TEXT("every route enters C3O"),
@@ -294,24 +235,71 @@ bool FUeAgentGraphCompoundPcgAnimationExactContractTest::RunTest(
 		TestTrue(TEXT("every route requires a native mutation"),
 			Profile.GetExecutionContract().RequiresNativeMutation());
 	}
-	TestEqual(TEXT("PCG/AI count"), PcgAiCount, 18);
-	TestEqual(TEXT("Animation/Rig count"), AnimationCount, 26);
-	TestEqual(TEXT("capabilities are unique"), Capabilities.Num(), 44);
-	TestEqual(TEXT("descriptor ids are unique"), DescriptorIds.Num(), 44);
-	for (const FString& Capability : ExpectedCapabilities())
+	TestEqual(TEXT("capabilities are unique"),
+		Capabilities.Num(), Profiles.Num());
+	TestEqual(TEXT("descriptor ids are unique"),
+		DescriptorIds.Num(), Profiles.Num());
+	const auto& PcgAiContracts =
+		UE::UAI::DomainAdapters::PcgAiNodeGraph::
+			GetPcgAiNodeGraphCapabilityContracts();
+	for (const auto& Contract : PcgAiContracts)
 	{
-		TestTrue(*FString::Printf(TEXT("%s is present"), *Capability),
-			Capabilities.Contains(Capability));
+		const FPcgAnimationGraphRouteProfile* Profile =
+			FindPcgAnimationGraphRouteProfile(Contract.GetCapabilityId());
+		TestNotNull(TEXT("every PCG/AI contract has one production route"),
+			Profile);
+		if (Profile)
+		{
+			TestEqual(TEXT("domain contract and route share descriptor identity"),
+				Profile->GetDescriptorId(), Contract.GetDescriptorId());
+			TestEqual(TEXT("domain contract and route share port family"),
+				Profile->GetFamilyId(), Contract.GetPortFamilyId());
+		}
 	}
 
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	TestTrue(TEXT("exact registry compiles"),
 		TryCreatePcgAnimationGraphDescriptorRegistry(Registry, Error));
 	if (Registry.IsValid())
 	{
-		TestEqual(TEXT("registry owns 44 descriptors"),
-			Registry->GetDescriptors().Num(), 44);
+		const auto* PcgCreateContract = PcgAiContracts.FindByPredicate(
+			[](const auto& Contract)
+			{
+				return Contract.GetCapabilityId()
+					== TEXT("pcg.graph.asset.create");
+			});
+		const FPcgAnimationGraphRouteProfile* PcgCreateProfile =
+			FindPcgAnimationGraphRouteProfile(TEXT("pcg.graph.asset.create"));
+		const FUeAgentOperationDescriptor* PcgCreateDescriptor =
+			PcgCreateProfile
+				? Registry->FindByDescriptorId(PcgCreateProfile->GetDescriptorId())
+				: nullptr;
+		TestNotNull(TEXT("PCG graph create has a domain contract"),
+			PcgCreateContract);
+		TestNotNull(TEXT("PCG graph create has a production route"),
+			PcgCreateProfile);
+		TestNotNull(TEXT("PCG graph create has a production descriptor"),
+			PcgCreateDescriptor);
+		if (PcgCreateContract && PcgCreateProfile && PcgCreateDescriptor)
+		{
+			TestEqual(TEXT("PCG graph create uses asset lifecycle"),
+				PcgCreateContract->GetPortFamilyId(),
+				FString(TEXT("asset_lifecycle")));
+			TestEqual(TEXT("PCG graph create is an operation"),
+				PcgCreateContract->GetOperationKind(),
+				FString(TEXT("operation")));
+			TestEqual(TEXT("PCG graph create is write-effecting"),
+				PcgCreateContract->GetEffectClass(), FString(TEXT("write")));
+			TestEqual(TEXT("PCG graph create contract is v1"),
+				PcgCreateContract->GetVersion(), 1);
+			TestEqual(TEXT("PCG graph create descriptor id matches its route"),
+				PcgCreateDescriptor->GetIdentity().GetDescriptorId(),
+				PcgCreateProfile->GetDescriptorId());
+			TestEqual(TEXT("PCG graph create descriptor version matches contract"),
+				PcgCreateDescriptor->GetIdentity().GetVersion(),
+				PcgCreateContract->GetVersion());
+		}
 		TSet<FString> Hashes;
 		for (const FUeAgentOperationDescriptor& Descriptor
 			: Registry->GetDescriptors())
@@ -351,19 +339,16 @@ bool FUeAgentGraphCompoundPcgAnimationExactContractTest::RunTest(
 				const FString ResultJson = bAnimation
 					? FString(TEXT(
 						"{\"compile_settled\":true,"
-						"\"independent_readback_evidence_id\":\"readback:1\","
 						"\"mutation_applied\":true,"
-						"\"persistence_receipt_id\":\"receipt:1\","
-						"\"reloaded\":true,\"revision\":\"sha256:1\","
+						"\"reloaded\":true,"
 						"\"saved\":true,\"target_ref\":\"/Game/T.T\","
 						"\"terminal_status\":\"succeeded\"}"))
 					: FString(TEXT(
-						"{\"revision\":\"sha256:1\","
-						"\"target_ref\":\"/Game/T.T\"}"));
+						"{\"target_ref\":\"/Game/T.T\"}"));
 				TestTrue(
 					bAnimation
-						? TEXT("Animation/Rig result requires lifecycle and readback evidence")
-						: TEXT("PCG/AI result keeps its existing contract"),
+						? TEXT("Animation/Rig result keeps short business lifecycle state")
+						: TEXT("PCG/AI result keeps only the business target"),
 					ResultSchema->TryValidateAndCanonicalize(
 						FUeAgentContractValue(ResultJson),
 						[](int64, const FString&, FUeAgentContractSchemaError&)
@@ -375,7 +360,7 @@ bool FUeAgentGraphCompoundPcgAnimationExactContractTest::RunTest(
 			}
 		}
 		TestEqual(TEXT("descriptor hashes are exact and unique"),
-			Hashes.Num(), 44);
+			Hashes.Num(), Registry->GetDescriptors().Num());
 
 		const FPcgAnimationGraphRouteProfile* RetargetProfile =
 			FindPcgAnimationGraphRouteProfile(
@@ -511,10 +496,20 @@ bool FUeAgentGraphCompoundPcgAnimationAllRoutesTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
-	TestEqual(TEXT("all 44 routes have an owned typed example"),
-		RouteExamples().Num(), 44);
+	const TArray<FPcgAnimationGraphRouteProfile>* ProfileArray = nullptr;
+	UE::UAI::Contract::FDiagnostic ProfileError;
+	if (!TryGetPcgAnimationGraphRouteProfiles(ProfileArray, ProfileError))
+	{
+		AddError(ProfileError.PublicMessage);
+		return false;
+	}
+	for (const FPcgAnimationGraphRouteProfile& Profile : *ProfileArray)
+	{
+		TestTrue(TEXT("every route has an owned typed example"),
+			RouteExamples().Contains(Profile.GetCapabilityId()));
+	}
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-	FString RegistryError;
+	UE::UAI::Contract::FDiagnostic RegistryError;
 	TestTrue(TEXT("registry builds"),
 		TryCreatePcgAnimationGraphDescriptorRegistry(Registry, RegistryError));
 	if (!Registry.IsValid())
@@ -640,7 +635,7 @@ bool FUeAgentGraphCompoundPcgAnimationUnboundedHierarchyTest::RunTest(
 		Payload.GetEdits().Num(), 512);
 
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-	FString RegistryError;
+	UE::UAI::Contract::FDiagnostic RegistryError;
 	TestTrue(TEXT("registry builds"),
 		TryCreatePcgAnimationGraphDescriptorRegistry(Registry, RegistryError));
 	const FUeAgentOperationDescriptor* Descriptor = Registry.IsValid()

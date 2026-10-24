@@ -28,6 +28,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TArray<FUeAgentWorldSpatialViewportBinding> ViewportBindings;
 		TArray<FUeAgentWorldSpatialMeshSelectionBinding> MeshSelectionBindings;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 

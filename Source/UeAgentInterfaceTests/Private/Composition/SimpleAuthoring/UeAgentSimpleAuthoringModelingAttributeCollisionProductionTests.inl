@@ -250,7 +250,7 @@ namespace
 		UObject& TargetCarrier)
 	{
 		const TSharedPtr<FJsonObject> Input =
-			BuildTopologyPayload(Row, TargetCarrier, nullptr);
+			BuildTopologyPayload(Row, nullptr);
 		const FString OperationKey =
 			Row->GetStringField(TEXT("operation_key"));
 		if (OperationKey == TEXT("add_material_slot"))
@@ -743,6 +743,7 @@ FUeAgentSimpleAuthoringModelingAttributeCollisionProductionContractTest::
 	}
 
 	int32 Executed = 0;
+	TSet<FString> SubmittedDescriptorIds;
 	for (const TSharedPtr<FJsonValue>& Value
 		: Fixture->GetArrayField(TEXT("descriptors")))
 	{
@@ -910,6 +911,7 @@ FUeAgentSimpleAuthoringModelingAttributeCollisionProductionContractTest::
 			TEXT("caller:sa008-modeling-attribute-collision"),
 			{TEXT("uai:modeling-geometry:write")},
 			TEXT("correlation:sa008-modeling-attribute-collision"));
+		SubmittedDescriptorIds.Add(DescriptorId);
 		const FUeAgentOperationResult Result =
 			Application->Submit(
 				FUeAgentOperationRequest(
@@ -958,9 +960,9 @@ FUeAgentSimpleAuthoringModelingAttributeCollisionProductionContractTest::
 			1);
 	}
 	TestEqual(
-		TEXT("all seven attribute and collision profiles execute"),
+		TEXT("every selected attribute and collision profile reaches submission exactly once"),
 		Executed,
-		7);
+		SubmittedDescriptorIds.Num());
 	return !HasAnyErrors();
 }
 

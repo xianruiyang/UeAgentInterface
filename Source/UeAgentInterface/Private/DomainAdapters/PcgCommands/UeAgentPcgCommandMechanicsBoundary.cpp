@@ -1,5 +1,7 @@
 #include "DomainAdapters/PcgCommands/UeAgentPcgCommandMechanicsBoundary.h"
 
+#include "Dom/JsonValue.h"
+
 namespace UE::UAI::DomainAdapters::PcgCommands
 {
 	const TArray<FString>& GetCommandIds()
@@ -9,13 +11,23 @@ namespace UE::UAI::DomainAdapters::PcgCommands
 			TEXT("pcg.component.world_binding.apply"),
 			TEXT("pcg.data_asset.apply"),
 			TEXT("pcg.data_asset.create_from_level"),
-			TEXT("pcg.generated_spatial_data.read"),
 			TEXT("pcg.graph.asset.create"),
 			TEXT("pcg.graph.apply"),
 			TEXT("pcg.graph_instance.apply"),
 			TEXT("pcg.graph_parameters.apply"),
-			TEXT("pcg.partition.spatial_state.read"),
 		};
+		return Ids;
+	}
+
+	const TArray<FString>& GetPublicCommandIds()
+	{
+		static const TArray<FString> Ids = []
+		{
+			TArray<FString> Result = GetCommandIds();
+			Result.Remove(TEXT("pcg.graph.apply"));
+			Result.Remove(TEXT("pcg.graph_parameters.apply"));
+			return Result;
+		}();
 		return Ids;
 	}
 
@@ -24,27 +36,18 @@ namespace UE::UAI::DomainAdapters::PcgCommands
 		return GetCommandIds().Contains(CommandId);
 	}
 
-	bool IsQuery(const FString& CommandId)
-	{
-		return CommandId == TEXT("pcg.generated_spatial_data.read")
-			|| CommandId == TEXT("pcg.partition.spatial_state.read");
-	}
-
 	bool TryGetGraphProfiles(
 		TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>&
 			OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		OutError.Reset();
-		const auto& Canonical =
-			Composition::GraphCompound::GetGraphCompoundActivationProfiles();
+		const TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>* GraphProfiles = nullptr;
+		if (!Composition::GraphCompound::TryGetGraphCompoundActivationProfiles(GraphProfiles, OutError)) return false;
+		const auto& Canonical = *GraphProfiles;
 		for (const FString& CommandId : GetCommandIds())
 		{
-			if (IsQuery(CommandId))
-			{
-				continue;
-			}
 			const auto* Match = Canonical.FindByPredicate(
 				[&CommandId](const auto& Profile)
 				{
@@ -53,42 +56,27 @@ namespace UE::UAI::DomainAdapters::PcgCommands
 			if (!Match || !Match->IsValid())
 			{
 				OutProfiles.Reset();
-				OutError = TEXT("pcg_command_graph_profile_missing:") + CommandId;
+				if (Match) {
+					OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("pcg_command_graph_profile_missing"),
+						Match->GetValidationDiagnostic(), TEXT("runtime_factory"),
+						TEXT("A required PCG activation profile failed validation."));
+				} else {
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_command_graph_profile_missing"),
+						TEXT("No activation profile is registered for a required PCG command."), TEXT("runtime_factory"));
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.PropertyPath = TEXT("activation_profile_registered");
+				}
+				OutError.InternalContext = CommandId;
+				OutError.SourceKind = TEXT("native_result");
+				if (GetPublicCommandIds().Contains(CommandId))
+					OutError.PublicMessage += TEXT(" Command: ") + CommandId + TEXT(".");
 				return false;
 			}
 			OutProfiles.Add(*Match);
 		}
-		return OutProfiles.Num() == 8;
+		return true;
 	}
 
-	bool TryGetTimelineProfiles(
-		TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>&
-			OutProfiles,
-		FString& OutError)
-	{
-		OutProfiles.Reset();
-		OutError.Reset();
-		const auto& Canonical =
-			Composition::TimelineSpatial::GetTimelineSpatialActivationProfiles();
-		for (const FString& CommandId : GetCommandIds())
-		{
-			if (!IsQuery(CommandId))
-			{
-				continue;
-			}
-			const auto* Match = Canonical.FindByPredicate(
-				[&CommandId](const auto& Profile)
-				{
-					return Profile.CommandId == CommandId;
-				});
-			if (!Match || !Match->IsValid())
-			{
-				OutProfiles.Reset();
-				OutError = TEXT("pcg_command_timeline_profile_missing:") + CommandId;
-				return false;
-			}
-			OutProfiles.Add(*Match);
-		}
-		return OutProfiles.Num() == 2;
-	}
+
 }

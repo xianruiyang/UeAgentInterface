@@ -4,6 +4,9 @@
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationContract.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 namespace UE::UAI::Composition::LongRunningSession
 {
@@ -65,6 +68,15 @@ namespace UE::UAI::Composition::LongRunningSession
 				{TEXT("operation.release"), TEXT("operation"), TEXT("release"),
 					TEXT("uai.long_running.operation.release/v1"),
 					TEXT("long-running-session.operation.release.v1"), TEXT("lifecycle")},
+				{TEXT("operation.discover"), TEXT("operation"), TEXT("discover"),
+					TEXT("uai.long_running.operation.discover/v1"),
+					TEXT("long-running-session.operation.discover.v1"), TEXT("lifecycle")},
+				{TEXT("operation.recover"), TEXT("operation"), TEXT("recover"),
+					TEXT("uai.long_running.operation.recover/v1"),
+					TEXT("long-running-session.operation.recover.v1"), TEXT("lifecycle")},
+				{TEXT("operation.takeover"), TEXT("operation"), TEXT("takeover"),
+					TEXT("uai.long_running.operation.takeover/v1"),
+					TEXT("long-running-session.operation.takeover.v1"), TEXT("lifecycle")},
 			};
 			return Specs;
 		}
@@ -110,15 +122,22 @@ namespace UE::UAI::Composition::LongRunningSession
 			}
 			if (FString(Spec.CommandId) == TEXT("editor.session"))
 			{
-				return TEXT(
+				TArray<TSharedPtr<FJsonValue>> Families;
+				for (const auto& Family : DomainAdapters::EditorSessionOperation::GetEditorSessionOperationFamilyContracts())
+				{
+					if (DomainAdapters::EditorSessionOperation::IsEditorSessionCommandFamily(Family.GetFamily()))
+						Families.Add(MakeShared<FJsonValueString>(Family.GetFamilyId()));
+				}
+				FString FamilyJson;
+				FJsonSerializer::Serialize(Families, TJsonWriterFactory<>::Create(&FamilyJson));
+				return FString::Printf(TEXT(
 					"{\"additionalProperties\":false,\"properties\":{"
-					"\"family_id\":{\"enum\":[\"asset_editor\",\"runtime_preview\"," 
-					"\"world_context\",\"modeling_tool\",\"voxel_grid\"],\"type\":\"string\"},"
+					"\"family_id\":{\"enum\":%s,\"type\":\"string\"},"
 					"\"parameters\":{\"type\":\"object\"},"
 					"\"policy_id\":{\"minLength\":1,\"type\":\"string\"},"
 					"\"subject_ref\":{\"minLength\":1,\"type\":\"string\"}},"
 					"\"required\":[\"family_id\",\"subject_ref\",\"policy_id\"," 
-					"\"parameters\"],\"type\":\"object\"}");
+					"\"parameters\"],\"type\":\"object\"}"), *FamilyJson);
 			}
 			if (FString(Spec.CommandId) == TEXT("editor.safe_exit"))
 			{
@@ -141,95 +160,8 @@ namespace UE::UAI::Composition::LongRunningSession
 			}
 			if (FString(Spec.CommandId) == TEXT("runtime.scenario.execute"))
 			{
-				return TEXT(
-					"{\"additionalProperties\":false,\"properties\":{"
-					"\"parameters\":{\"additionalProperties\":false,\"properties\":{"
-					"\"expected_pause_epoch\":{\"minimum\":1,\"type\":\"integer\"},"
-					"\"expected_workspace_revision\":{\"minimum\":1,\"type\":\"integer\"},"
-					"\"limits\":{\"additionalProperties\":false,\"properties\":{"
-					"\"frame_count\":{\"maximum\":3600,\"minimum\":1,\"type\":\"integer\"},"
-					"\"game_seconds\":{\"exclusiveMinimum\":0,\"maximum\":60,\"type\":\"number\"},"
-					"\"wall_seconds\":{\"exclusiveMinimum\":0,\"maximum\":60,\"type\":\"number\"}},"
-					"\"required\":[\"wall_seconds\",\"game_seconds\",\"frame_count\"],\"type\":\"object\"},"
-					"\"observation_fields\":{\"items\":{\"additionalProperties\":false,"
-					"\"properties\":{\"object_ref\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"property\":{\"enum\":[\"actor.transform\",\"actor.location\","
-					"\"actor.rotation\",\"actor.scale\",\"actor.hidden\","
-					"\"component.active\",\"component.visible\"],\"type\":\"string\"}},"
-					"\"required\":[\"object_ref\",\"property\"],\"type\":\"object\"},"
-					"\"maxItems\":64,\"type\":\"array\"},"
-					"\"steps\":{\"items\":{\"oneOf\":["
-					"{\"additionalProperties\":false,\"properties\":{"
-					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
-					"\"type\":{\"const\":\"wait\",\"type\":\"string\"}},"
-					"\"required\":[\"type\",\"at_seconds\"],\"type\":\"object\"},"
-					"{\"additionalProperties\":false,\"properties\":{"
-					"\"amount\":{\"type\":\"number\"},"
-					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
-					"\"event\":{\"enum\":[\"pressed\",\"released\",\"repeat\",\"axis\"],\"type\":\"string\"},"
-					"\"key\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"type\":{\"const\":\"input_key\",\"type\":\"string\"}},"
-					"\"required\":[\"type\",\"at_seconds\",\"key\",\"event\"],\"type\":\"object\"},"
-					"{\"additionalProperties\":false,\"properties\":{"
-					"\"action_ref\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
-					"\"type\":{\"const\":\"input_action\",\"type\":\"string\"},"
-					"\"value\":{\"oneOf\":[{\"type\":\"boolean\"},{\"type\":\"number\"},"
-					"{\"items\":{\"type\":\"number\"},\"maxItems\":2,\"minItems\":2,\"type\":\"array\"},"
-					"{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"}]}},"
-					"\"required\":[\"type\",\"at_seconds\",\"action_ref\",\"value\"],\"type\":\"object\"},"
-					"{\"additionalProperties\":false,\"properties\":{"
-					"\"actor_ref\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
-					"\"transform\":{\"additionalProperties\":false,\"properties\":{"
-					"\"dimension\":{\"const\":3,\"type\":\"integer\"},"
-					"\"frame\":{\"const\":\"ue_world\",\"type\":\"string\"},"
-					"\"location\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"},"
-					"\"rotation\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"},"
-					"\"rotation_format\":{\"const\":\"pitch_yaw_roll_degrees\",\"type\":\"string\"},"
-					"\"scale\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"},"
-					"\"unit\":{\"const\":\"centimeter\",\"type\":\"string\"}},"
-					"\"required\":[\"frame\",\"dimension\",\"unit\",\"rotation_format\"],\"type\":\"object\"},"
-					"\"type\":{\"const\":\"actor_transform\",\"type\":\"string\"}},"
-					"\"required\":[\"type\",\"at_seconds\",\"actor_ref\",\"transform\"],\"type\":\"object\"},"
-					"{\"additionalProperties\":false,\"properties\":{"
-					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
-					"\"format\":{\"const\":\"png\",\"type\":\"string\"},"
-					"\"source\":{\"const\":\"pie_output_surface\",\"type\":\"string\"},"
-					"\"type\":{\"const\":\"capture\",\"type\":\"string\"}},"
-					"\"required\":[\"type\",\"at_seconds\",\"source\",\"format\"],\"type\":\"object\"},"
-					"{\"additionalProperties\":false,\"properties\":{"
-					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
-					"\"format\":{\"const\":\"png\",\"type\":\"string\"},"
-					"\"source\":{\"const\":\"pie_player_camera\",\"type\":\"string\"},"
-					"\"type\":{\"const\":\"capture\",\"type\":\"string\"}},"
-					"\"required\":[\"type\",\"at_seconds\",\"source\",\"format\"],\"type\":\"object\"},"
-					"{\"additionalProperties\":false,\"oneOf\":["
-					"{\"required\":[\"camera_ref\"]},{\"not\":{\"required\":[\"camera_ref\"]},"
-					"\"properties\":{\"view_transform\":{\"required\":[\"frame\",\"dimension\",\"unit\","
-					"\"rotation_format\",\"location\",\"rotation\"]}},"
-					"\"required\":[\"view_transform\",\"fov_degrees\"]}],\"properties\":{"
-					"\"at_seconds\":{\"minimum\":0,\"type\":\"number\"},"
-					"\"camera_ref\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"format\":{\"const\":\"png\",\"type\":\"string\"},"
-					"\"fov_degrees\":{\"maximum\":179,\"minimum\":1,\"type\":\"number\"},"
-					"\"source\":{\"const\":\"scene_camera\",\"type\":\"string\"},"
-					"\"type\":{\"const\":\"capture\",\"type\":\"string\"},"
-					"\"view_transform\":{\"additionalProperties\":false,\"anyOf\":["
-					"{\"required\":[\"location\"]},{\"required\":[\"rotation\"]}],\"properties\":{"
-					"\"dimension\":{\"const\":3,\"type\":\"integer\"},"
-					"\"frame\":{\"const\":\"ue_world\",\"type\":\"string\"},"
-					"\"location\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"},"
-					"\"rotation\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":3,\"type\":\"array\"},"
-					"\"rotation_format\":{\"const\":\"pitch_yaw_roll_degrees\",\"type\":\"string\"},"
-					"\"unit\":{\"const\":\"centimeter\",\"type\":\"string\"}},"
-					"\"required\":[\"frame\",\"dimension\",\"unit\",\"rotation_format\"],\"type\":\"object\"}},"
-					"\"required\":[\"type\",\"at_seconds\",\"source\",\"format\"],\"type\":\"object\"}]},"
-					"\"maxItems\":128,\"type\":\"array\"}},"
-					"\"required\":[\"expected_pause_epoch\",\"expected_workspace_revision\",\"limits\",\"steps\"],\"type\":\"object\"},"
-					"\"policy_id\":{\"const\":\"policy:runtime-scenario:bounded/v1\"},"
-					"\"subject_ref\":{\"minLength\":1,\"type\":\"string\"}},"
-					"\"required\":[\"subject_ref\",\"policy_id\",\"parameters\"],\"type\":\"object\"}");
+				// The domain parser owns per-operation semantics; this schema exposes transport shapes.
+				return TEXT(R"json({"additionalProperties":false,"properties":{"parameters":{"additionalProperties":false,"properties":{"expected_pause_epoch":{"minimum":1,"type":"integer"},"expected_workspace_revision":{"minimum":1,"type":"integer"},"limits":{"additionalProperties":false,"properties":{"frame_count":{"minimum":0,"type":"integer"},"game_seconds":{"minimum":0,"type":"number"},"wall_seconds":{"minimum":0,"type":"number"}},"type":"object"},"observation_fields":{"items":{"type":"object"},"type":"array"},"steps":{"items":{"additionalProperties":false,"properties":{"action_ref":{"type":"string"},"alias":{"type":"string"},"amount":{"type":"number"},"at_seconds":{"minimum":0,"type":"number"},"camera":{"type":"string"},"delta":{},"duration":{"minimum":0,"type":"number"},"duration_ms":{"minimum":0,"type":"number"},"event":{"type":"string"},"format":{"type":"string"},"fov_degrees":{"type":"number"},"interval":{"minimum":0,"type":"number"},"key":{"type":"string"},"name":{"type":"string"},"position":{"items":{"type":"number"},"maxItems":2,"minItems":2,"type":"array"},"property":{"type":"string"},"ref":{"type":"object"},"source":{"type":"string"},"text":{"type":"string"},"transform":{"type":"object"},"type":{"enum":["wait","input_key","input_pointer","input_scroll","input_text","input_action","actor_transform","property_write","property_get","property_set","capture","capture_start","capture_stop"],"type":"string"},"value":{},"view_transform":{"type":"object"}},"required":["type"],"type":"object"},"type":"array"},"unwatch_refs":{"items":{"type":"object"},"type":"array"},"watch_refs":{"items":{"type":"object"},"type":"array"}},"required":["expected_pause_epoch","expected_workspace_revision","steps"],"type":"object"},"policy_id":{"const":"policy:runtime-scenario:bounded/v2"},"subject_ref":{"minLength":1,"type":"string"}},"required":["subject_ref","policy_id","parameters"],"type":"object"})json");
 			}
 			return TEXT(
 				"{\"additionalProperties\":false,\"properties\":{"
@@ -243,6 +175,12 @@ namespace UE::UAI::Composition::LongRunningSession
 		FString LifecycleSchema(const FProfileSpec& Spec)
 		{
 			const FString CommandId(Spec.CommandId);
+			if (CommandId == TEXT("operation.discover"))
+				return TEXT("{\"additionalProperties\":false,\"properties\":{},\"type\":\"object\"}");
+			if (CommandId == TEXT("operation.recover"))
+				return TEXT("{\"additionalProperties\":false,\"properties\":{\"request_id\":{\"minLength\":1,\"type\":\"string\"},\"command_id\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"request_id\",\"command_id\"],\"type\":\"object\"}");
+			if (CommandId == TEXT("operation.takeover"))
+				return TEXT("{\"additionalProperties\":false,\"properties\":{\"operation_id\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"operation_id\"],\"type\":\"object\"}");
 			FString Properties = TEXT("\"operation_ref\":") + OperationRefSchema();
 			FString Required = TEXT("\"operation_ref\"");
 			if (CommandId == TEXT("operation.resume")
@@ -277,6 +215,8 @@ namespace UE::UAI::Composition::LongRunningSession
 				"\"lifecycle_status\":{\"type\":\"string\"},"
 				"\"operation_ref\":{\"type\":\"object\"},"
 				"\"phase\":{\"type\":\"string\"},"
+				"\"cleanup_complete\":{\"type\":\"boolean\"},"
+				"\"progress_diagnostic\":{\"type\":\"object\"},"
 				"\"retry_safe\":{\"type\":\"boolean\"},"
 				"\"schema\":{\"const\":\"uai.long_running.snapshot.v1\"},"
 				"\"stop_requested\":{\"type\":\"boolean\"},"
@@ -290,6 +230,7 @@ namespace UE::UAI::Composition::LongRunningSession
 		{
 			return TEXT(
 				"{\"properties\":{\"error_code\":{\"type\":\"string\"},"
+				"\"cleanup_complete\":{\"type\":\"boolean\"},"
 				"\"generation\":{\"type\":\"integer\"},"
 				"\"lifecycle_status\":{\"type\":\"string\"},"
 				"\"operation_ref\":{\"type\":\"object\"},"
@@ -309,6 +250,8 @@ namespace UE::UAI::Composition::LongRunningSession
 
 		FString ResultSchema(const FProfileSpec& Spec)
 		{
+			if (FString(Spec.CommandId) == TEXT("operation.discover"))
+				return TEXT("{\"properties\":{\"schema\":{\"const\":\"uai.long_running.discovery.v1\"},\"operations\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}}},\"required\":[\"schema\",\"operations\"],\"type\":\"object\"}");
 			return FString(Spec.CommandId) == TEXT("operation.receipt")
 				|| FString(Spec.CommandId) == TEXT("operation.release")
 				? ReceiptResultSchema()
@@ -317,15 +260,21 @@ namespace UE::UAI::Composition::LongRunningSession
 
 		bool TryDescriptorHash(
 			const FProfileSpec& Spec,
-			const FString& Input,
-			const FString& Result,
+			FString& Input,
+			FString& Result,
 			FString& OutHash,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<FJsonObject> InputObject;
 			TSharedPtr<FJsonObject> ResultObject;
 			if (!Json::TryParseObject(Input, InputObject, OutError)
 				|| !Json::TryParseObject(Result, ResultObject, OutError))
+			{
+				return false;
+			}
+			// Registry schema values and descriptor hashing must use the same canonical JSON.
+			if (!Json::TryCanonicalize(InputObject, Input, OutError)
+				|| !Json::TryCanonicalize(ResultObject, Result, OutError))
 			{
 				return false;
 			}
@@ -419,13 +368,47 @@ namespace UE::UAI::Composition::LongRunningSession
 
 	bool FUeAgentLongRunningSessionActivationProfile::IsValid() const
 	{
-		return !CommandId.IsEmpty()
-			&& !Namespace.IsEmpty()
-			&& !Method.IsEmpty()
-			&& DescriptorIdentity.IsValid()
-			&& !HandlerBinding.IsEmpty()
-			&& (CommandKind == TEXT("start")
-				|| CommandKind == TEXT("lifecycle"));
+		FDiagnostic Diagnostic;
+		return TryValidate(Diagnostic);
+	}
+
+	bool FUeAgentLongRunningSessionActivationProfile::TryValidate(FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		auto MissingField = [&](const TCHAR* Field, const TCHAR* Reason)
+		{
+			OutError = FDiagnostic::Failure(TEXT("long_running_session_activation_profile_invalid"), Reason,
+				TEXT("profile_activation"), FString(), CommandId);
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = Field;
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			return false;
+		};
+		if (CommandId.IsEmpty()) return MissingField(TEXT("command_id_present"), TEXT("The long-running command profile requires a command id."));
+		if (Namespace.IsEmpty()) return MissingField(TEXT("namespace_present"), TEXT("The long-running command profile requires a command namespace."));
+		if (Method.IsEmpty()) return MissingField(TEXT("method_present"), TEXT("The long-running command profile requires an execution method."));
+		if (!DescriptorIdentity.IsValid())
+		{
+			OutError = FDiagnostic::WrapFailure(TEXT("long_running_session_activation_profile_invalid"),
+				DescriptorIdentity.GetValidationDiagnostic(), TEXT("profile_activation"));
+			OutError.SourceKind = TEXT("native_result");
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = CommandId;
+			return false;
+		}
+		if (HandlerBinding.IsEmpty()) return MissingField(TEXT("handler_binding_present"), TEXT("The long-running command profile requires a handler binding."));
+		if (CommandKind != TEXT("start") && CommandKind != TEXT("lifecycle"))
+		{
+			OutError = FDiagnostic::Failure(TEXT("long_running_session_activation_profile_invalid"),
+				TEXT("The long-running command profile kind must be start or lifecycle."),
+				TEXT("profile_activation"), FString(), CommandId);
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("command_kind");
+			OutError.ActualValue = MakeShared<FJsonValueString>(CommandKind);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("start or lifecycle"));
+			return false;
+		}
+		return true;
 	}
 
 	bool FUeAgentLongRunningSessionActivationProfile::IsStartCommand() const
@@ -440,7 +423,7 @@ namespace UE::UAI::Composition::LongRunningSession
 
 	bool TryCreateLongRunningSessionDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
@@ -448,8 +431,8 @@ namespace UE::UAI::Composition::LongRunningSession
 		Descriptors.Reserve(ProfileSpecs().Num());
 		for (const FProfileSpec& Spec : ProfileSpecs())
 		{
-			const FString Input = InputSchema(Spec);
-			const FString Result = ResultSchema(Spec);
+			FString Input = InputSchema(Spec);
+			FString Result = ResultSchema(Spec);
 			FString Hash;
 			if (!TryDescriptorHash(Spec, Input, Result, Hash, OutError))
 			{
@@ -468,17 +451,31 @@ namespace UE::UAI::Composition::LongRunningSession
 			MoveTemp(Descriptors), OutRegistry, OutError);
 	}
 
-	const TArray<FUeAgentLongRunningSessionActivationProfile>&
-	GetLongRunningSessionActivationProfiles()
+	bool TryGetLongRunningSessionActivationProfiles(
+		const TArray<FUeAgentLongRunningSessionActivationProfile>*& OutProfiles,
+		FDiagnostic& OutError)
 	{
-		static const TArray<FUeAgentLongRunningSessionActivationProfile> Profiles = []()
+		struct FProfileCache
 		{
-			TArray<FUeAgentLongRunningSessionActivationProfile> Result;
+			TArray<FUeAgentLongRunningSessionActivationProfile> Profiles;
+			FDiagnostic Diagnostic;
+		};
+		static const FProfileCache Cache = []()
+		{
+			FProfileCache Result;
 			TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-			FString Error;
-			if (!TryCreateLongRunningSessionDescriptorRegistry(Registry, Error)
+			if (!TryCreateLongRunningSessionDescriptorRegistry(Registry, Result.Diagnostic)
 				|| !Registry.IsValid())
 			{
+				if (Result.Diagnostic.IsEmpty())
+				{
+					Result.Diagnostic = FDiagnostic::Failure(TEXT("long_running_session_descriptor_registry_invalid"),
+						TEXT("The command profiles require an available operation descriptor registry."), TEXT("profile_activation"));
+					Result.Diagnostic.SourceKind = TEXT("native_result");
+					Result.Diagnostic.PropertyPath = TEXT("descriptor_registry_ready");
+					Result.Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					Result.Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				}
 				return Result;
 			}
 			for (const FProfileSpec& Spec : ProfileSpecs())
@@ -487,7 +484,13 @@ namespace UE::UAI::Composition::LongRunningSession
 					Registry->FindByDescriptorId(Spec.DescriptorId);
 				if (!Descriptor)
 				{
-					Result.Reset();
+					Result.Diagnostic = FDiagnostic::Failure(TEXT("long_running_session_profile_descriptor_missing"),
+						FString::Printf(TEXT("No operation descriptor is registered for command '%s'."), Spec.CommandId),
+						TEXT("profile_activation"), Spec.DescriptorId);
+					Result.Diagnostic.SourceKind = TEXT("native_result");
+					Result.Diagnostic.PropertyPath = TEXT("descriptor_registered");
+					Result.Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					Result.Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 					return Result;
 				}
 				FUeAgentLongRunningSessionActivationProfile Profile(
@@ -497,21 +500,26 @@ namespace UE::UAI::Composition::LongRunningSession
 				Profile.Method = Spec.Method;
 				Profile.HandlerBinding = Spec.HandlerBinding;
 				Profile.CommandKind = Spec.CommandKind;
-				if (!Profile.IsValid())
+				if (!Profile.TryValidate(Result.Diagnostic))
 				{
-					Result.Reset();
+					if (!Profile.CommandId.IsEmpty()) Result.Diagnostic.PublicMessage += FString::Printf(
+						TEXT(" Command: '%s'."), *Profile.CommandId);
 					return Result;
 				}
-				Result.Add(MoveTemp(Profile));
+				Result.Profiles.Add(MoveTemp(Profile));
 			}
 			return Result;
 		}();
-		return Profiles;
+		OutProfiles = nullptr;
+		OutError = Cache.Diagnostic;
+		if (!OutError.IsEmpty()) return false;
+		OutProfiles = &Cache.Profiles;
+		return true;
 	}
 
 	bool TryCreateLongRunningSessionProductionCommandContractRegistry(
 		TSharedPtr<const FUeAgentCommandContractRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
@@ -523,15 +531,10 @@ namespace UE::UAI::Composition::LongRunningSession
 		{
 			return false;
 		}
-		const TArray<FUeAgentLongRunningSessionActivationProfile>& Profiles =
-			GetLongRunningSessionActivationProfiles();
-		if (Profiles.Num() != ProfileSpecs().Num())
-		{
-			OutError = TEXT("long_running_session_activation_profiles_invalid");
-			return false;
-		}
+		const TArray<FUeAgentLongRunningSessionActivationProfile>* Profiles = nullptr;
+		if (!TryGetLongRunningSessionActivationProfiles(Profiles, OutError)) return false;
 		TArray<FUeAgentCommandContract> Contracts = Base->GetContracts();
-		for (const FUeAgentLongRunningSessionActivationProfile& Profile : Profiles)
+		for (const FUeAgentLongRunningSessionActivationProfile& Profile : *Profiles)
 		{
 			Contracts.Emplace(
 				Profile.CommandId,

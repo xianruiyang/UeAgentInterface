@@ -1,7 +1,5 @@
 #include "LifecycleHost/UeAgentLifecycleHost.h"
 
-#include "Math/UnrealMathUtility.h"
-
 namespace UE::UAI::LifecycleHost
 {
 	namespace
@@ -11,13 +9,7 @@ namespace UE::UAI::LifecycleHost
 			const TCHAR* Code,
 			FString Message = FString())
 		{
-			OutDiagnostic.Code = Code;
-			OutDiagnostic.Message = MoveTemp(Message);
-		}
-
-		static bool IsFiniteNonNegative(double Value)
-		{
-			return FMath::IsFinite(Value) && Value >= 0.0;
+			OutDiagnostic = FUeAgentLifecycleDiagnostic::Failure(Code, MoveTemp(Message), TEXT("lifecycle_host"));
 		}
 	}
 
@@ -73,85 +65,6 @@ namespace UE::UAI::LifecycleHost
 			&& !HostId.TrimStartAndEnd().IsEmpty();
 	}
 
-	bool RequireOwnedAutomationTarget(
-		const FUeAgentHostIdentity& Host,
-		FUeAgentLifecycleDiagnostic& OutDiagnostic)
-	{
-		OutDiagnostic = {};
-		if (!Host.IsValid())
-		{
-			SetDiagnostic(
-				OutDiagnostic,
-				TEXT("automation_host_identity_invalid"));
-			return false;
-		}
-		if (Host.Kind != EUeAgentHostKind::OwnedWorker)
-		{
-			SetDiagnostic(
-				OutDiagnostic,
-				TEXT("automation_requires_owned_worker"));
-			return false;
-		}
-		return true;
-	}
-
-	bool EvaluateFpsGate(
-		const FUeAgentHostIdentity& Host,
-		EUeAgentRenderMode RenderMode,
-		const FUeAgentAutomationRequirement& Requirement,
-		const TOptional<FUeAgentFpsObservation>& Observation,
-		FUeAgentFpsGateDecision& OutDecision,
-		FUeAgentLifecycleDiagnostic& OutDiagnostic)
-	{
-		OutDecision = {};
-		OutDiagnostic = {};
-		if (!RequireOwnedAutomationTarget(Host, OutDiagnostic))
-		{
-			return false;
-		}
-		if (!IsFiniteNonNegative(Requirement.MinimumFps))
-		{
-			SetDiagnostic(
-				OutDiagnostic,
-				TEXT("minimum_fps_invalid"));
-			return false;
-		}
-
-		OutDecision.HostId = Host.HostId;
-		if (RenderMode == EUeAgentRenderMode::NullRhi
-			|| Requirement.MinimumFps <= 0.0)
-		{
-			OutDecision.State = EUeAgentFpsGateState::NotApplicable;
-			return true;
-		}
-		if (!Observation.IsSet()
-			|| !IsFiniteNonNegative(Observation->RequiredFps)
-			|| !IsFiniteNonNegative(Observation->CurrentFps))
-		{
-			SetDiagnostic(
-				OutDiagnostic,
-				TEXT("fps_observation_missing"));
-			return false;
-		}
-
-		const double RequiredFps = FMath::Max(
-			Requirement.MinimumFps,
-			Observation->RequiredFps);
-		OutDecision.RequiredFps = RequiredFps;
-		OutDecision.CurrentFps = Observation->CurrentFps;
-		if (Observation->CurrentFps < RequiredFps)
-		{
-			OutDecision.State = EUeAgentFpsGateState::Blocked;
-			OutDecision.FailureCode =
-				TEXT("automation_fps_gate_mismatch");
-		}
-		else
-		{
-			OutDecision.State = EUeAgentFpsGateState::Ready;
-		}
-		return true;
-	}
-
 	FUeAgentLifecycleHost::FUeAgentLifecycleHost(
 		FString InOwnerId,
 		const ContextResource::FUeAgentOperationDeadline& InDeadline,
@@ -173,22 +86,11 @@ namespace UE::UAI::LifecycleHost
 		ContextResource::FUeAgentCancellationRequested CancellationError;
 		if (!Cancellation.TryCheckpoint(CancellationError))
 		{
-			SetDiagnostic(
-				OutDiagnostic,
-				TEXT("cancellation_requested"),
-				CancellationError.Reason);
+			OutDiagnostic = CancellationError;
+			if (OutDiagnostic.Stage.IsEmpty()) OutDiagnostic.Stage = Stage;
 			return false;
 		}
 
-		ContextResource::FUeAgentOperationDeadlineExceeded DeadlineError;
-		if (!Deadline.TryCheckpoint(Stage, DeadlineError))
-		{
-			SetDiagnostic(
-				OutDiagnostic,
-				TEXT("operation_deadline_exceeded"),
-				Stage);
-			return false;
-		}
 		return true;
 	}
 
@@ -274,6 +176,7 @@ namespace UE::UAI::LifecycleHost
 					? TEXT("transport_server_start_failed")
 					: *TransportDiagnostic.Code,
 				TransportDiagnostic.Message);
+			OutDiagnostic.Append(CleanupDiagnostic);
 			return false;
 		}
 		if (StartedServer.OwnerId != Owner

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -15,20 +17,13 @@ namespace UE::UAI::CommandRegistry
 			const FString& PluginVersion,
 			const FString& BuildId,
 			FString& OutManifest,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		static bool TryWrite(
 			TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 			const FString& PluginVersion,
 			const FString& BuildId,
 			const FString& ManifestPath,
-			FString& OutError);
-
-		static bool TryVerify(
-			TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
-			const FString& PluginVersion,
-			const FString& BuildId,
-			const FString& ManifestPath,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 	};
 }

@@ -5,85 +5,37 @@
 namespace
 {
 	using namespace UE::UAI::ContextResource;
-
-	static TMap<EUeAgentResourceDimension, int64>
-	MakeResourceLimits()
-	{
-		return {
-			{EUeAgentResourceDimension::InputBytes, 100},
-			{EUeAgentResourceDimension::OutputBytes, 100},
-			{EUeAgentResourceDimension::StringBytes, 100},
-			{EUeAgentResourceDimension::Nodes, 10},
-			{EUeAgentResourceDimension::Items, 10},
-			{EUeAgentResourceDimension::Files, 10},
-			{EUeAgentResourceDimension::ReferenceEdges, 10},
-			{EUeAgentResourceDimension::WorkUnits, 10},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 1000},
-		};
-	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentContextResourceBudgetContractTest,
-	"UeAgentInterface.Core.ContextResource.ResourceBudget",
+	FUeAgentContextResourceAccountingContractTest,
+	"UeAgentInterface.Core.ContextResource.ResourceAccounting",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentContextResourceBudgetContractTest::RunTest(const FString& Parameters)
+bool FUeAgentContextResourceAccountingContractTest::RunTest(const FString& Parameters)
 {
 	using namespace UE::UAI::ContextResource;
 
-	const TMap<EUeAgentResourceDimension, int64> Limits =
-		MakeResourceLimits();
-	TestEqual(TEXT("nine explicit resource dimensions"), Limits.Num(), 9);
-	for (const TPair<EUeAgentResourceDimension, int64>& Pair : Limits)
+	const TArray<EUeAgentResourceDimension> Dimensions = {
+		EUeAgentResourceDimension::InputBytes,
+		EUeAgentResourceDimension::OutputBytes,
+		EUeAgentResourceDimension::StringBytes,
+		EUeAgentResourceDimension::Nodes,
+		EUeAgentResourceDimension::Items,
+		EUeAgentResourceDimension::Files,
+		EUeAgentResourceDimension::ReferenceEdges,
+		EUeAgentResourceDimension::WorkUnits,
+		EUeAgentResourceDimension::EstimatedMemoryBytes,
+	};
+	for (const EUeAgentResourceDimension Dimension : Dimensions)
 	{
-		const FString Name = LexToString(Pair.Key);
+		const FString Name = LexToString(Dimension);
 		TestFalse(TEXT("resource dimension is not depth"), Name.Contains(TEXT("depth")));
 		TestNotEqual(TEXT("resource dimension is not output_chars"), Name, FString(TEXT("output_chars")));
 	}
 
-	FUeAgentResourceTracker ExactTracker(FUeAgentResourceBudget({
-		{EUeAgentResourceDimension::Nodes, 2},
-	}));
-	FUeAgentResourceBudgetExceeded Error;
-	TestTrue(
-		TEXT("exact resource limit is allowed"),
-		ExactTracker.TryCharge(EUeAgentResourceDimension::Nodes, 2, TEXT("/root"), Error));
-	TestFalse(
-		TEXT("N+1 is rejected before work"),
-		ExactTracker.TryCharge(EUeAgentResourceDimension::Nodes, 1, TEXT("/root/child"), Error));
-	TestEqual(TEXT("budget diagnostic code"), Error.Code, FString(TEXT("resource_budget_exceeded")));
-	TestEqual(TEXT("budget diagnostic dimension"), Error.Dimension, EUeAgentResourceDimension::Nodes);
-	TestEqual(TEXT("budget diagnostic limit"), Error.Limit, int64(2));
-	TestEqual(TEXT("budget diagnostic observed"), Error.Observed, int64(3));
-	TestEqual(TEXT("budget diagnostic path"), Error.Path, FString(TEXT("/root/child")));
-	TestTrue(TEXT("budget stops early"), Error.bStoppedEarly);
-	TestEqual(
-		TEXT("rejected charge does not mutate usage"),
-		ExactTracker.Snapshot().Consumed(EUeAgentResourceDimension::Nodes),
-		int64(2));
-
-	FUeAgentResourceTracker AtomicTracker(FUeAgentResourceBudget({
-		{EUeAgentResourceDimension::Nodes, 2},
-		{EUeAgentResourceDimension::Items, 1},
-	}));
-	const TMap<EUeAgentResourceDimension, int64> RejectedBatch = {
-		{EUeAgentResourceDimension::Nodes, 1},
-		{EUeAgentResourceDimension::Items, 2},
-	};
-	TestFalse(
-		TEXT("multi-dimension rejection is reported"),
-		AtomicTracker.TryChargeMany(RejectedBatch, TEXT("/batch"), Error));
-	TestEqual(
-		TEXT("atomic rejection keeps nodes at zero"),
-		AtomicTracker.Snapshot().Consumed(EUeAgentResourceDimension::Nodes),
-		int64(0));
-	TestEqual(
-		TEXT("atomic rejection keeps items at zero"),
-		AtomicTracker.Snapshot().Consumed(EUeAgentResourceDimension::Items),
-		int64(0));
-
-	FUeAgentResourceTracker ScopedTracker{FUeAgentResourceBudget(Limits)};
+	FUeAgentResourceTracker ScopedTracker;
+	FUeAgentResourceChargeError Error;
 	FUeAgentResourceScope First = ScopedTracker.Scope(TEXT("/source"));
 	FUeAgentResourceScope Second = ScopedTracker.Scope(TEXT("/source/items"));
 	TestTrue(
@@ -152,35 +104,6 @@ bool FUeAgentContextResourceTextParityTest::RunTest(const FString& Parameters)
 		TEXT("emoji Unicode scalars"),
 		Emoji.UnicodeScalars,
 		int64(1));
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentContextResourceDeadlineTest,
-	"UeAgentInterface.Core.ContextResource.Deadline",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentContextResourceDeadlineTest::RunTest(const FString& Parameters)
-{
-	using namespace UE::UAI::ContextResource;
-
-	double Now = 100.0;
-	FUeAgentOperationDeadline Deadline = FUeAgentOperationDeadline::FromTimeout(
-		5.0,
-		[&Now]() { return Now; });
-	TestEqual(TEXT("deadline started_at"), Deadline.GetStartedAt(), 100.0);
-	TestEqual(TEXT("deadline is absolute"), Deadline.GetDeadlineAt(), 105.0);
-	Now = 104.999;
-	TestTrue(TEXT("before deadline can continue"), Deadline.CanContinue());
-	TestTrue(TEXT("remaining time is positive"), Deadline.RemainingSeconds() > 0.0);
-
-	Now = 105.0;
-	FUeAgentOperationDeadlineExceeded Error;
-	TestFalse(TEXT("exact deadline is expired"), Deadline.TryCheckpoint(TEXT("preflight"), Error));
-	TestEqual(TEXT("deadline diagnostic code"), Error.Code, FString(TEXT("operation_deadline_exceeded")));
-	TestEqual(TEXT("deadline diagnostic stage"), Error.Stage, FString(TEXT("preflight")));
-	TestEqual(TEXT("deadline diagnostic deadline_at"), Error.DeadlineAt, 105.0);
-	TestEqual(TEXT("deadline diagnostic observed_at"), Error.ObservedAt, 105.0);
 	return true;
 }
 

@@ -3,9 +3,6 @@
   "domain_id": "timeline_animation",
   "temporal_contract_id": "uai.temporal_contract.v1",
   "space_contract_id": "uai.space_contract.v1",
-  "descriptor_count": 20,
-  "query_count": 8,
-  "operation_count": 12,
   "components": {
     "target_ref": {"type":"string","minLength":1},
     "ref_array": {"type":"array","items":{"component":"target_ref"},"uniqueItems":true},

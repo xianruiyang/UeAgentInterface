@@ -19,19 +19,7 @@ namespace
 
 	TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 8192},
-				{EUeAgentResourceDimension::Items, 8192},
-				{EUeAgentResourceDimension::Files, 256},
-				{EUeAgentResourceDimension::ReferenceEdges, 8192},
-				{EUeAgentResourceDimension::WorkUnits, 65536},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	FUeAgentCanonicalValueRef MakeParameters(
@@ -389,10 +377,6 @@ bool FUeAgentEditorSessionOperationAdapterBehaviorTest::RunTest(
 		 TEXT("modeling-session:fixture-tool"),
 		 TEXT("policy:modeling-tool:invoke-action/v1"),
 		 TEXT("uai.editor_session.modeling_tool.state/v1")},
-		{EUeAgentEditorSessionOperationFamily::VoxelGrid,
-		 TEXT("voxel-session:fixture-grid"),
-		 TEXT("policy:voxel-session:add-bounds/v1"),
-		 TEXT("uai.editor_session.voxel_grid.state/v1")},
 		{EUeAgentEditorSessionOperationFamily::HostLifecycle,
 		 TEXT("editor-instance:fixture-editor"),
 		 TEXT("policy:host-lifecycle:prepare-safe-exit/v1"),

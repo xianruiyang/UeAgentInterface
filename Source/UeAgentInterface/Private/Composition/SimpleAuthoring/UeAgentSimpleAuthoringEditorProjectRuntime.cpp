@@ -1,8 +1,13 @@
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringRuntimeResolvers.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringRuntimeIdentity.h"
 #include "AssetRegistry/AssetData.h"
+#include "DomainAdapters/EditorProject/UeAgentSettingsDiscovery.h"
+#include "DomainAdapters/EditorProject/UeAgentSettingsConfig.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "ISettingsCategory.h"
 #include "ISettingsContainer.h"
@@ -93,27 +98,13 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			}
 		};
 
-		void SetRuntimeError(
-			FUeAgentSimpleAuthoringRuntimeResolverError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
-		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-		}
+		void SetRuntimeError(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;  }
 
-		bool FailMutation(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
-		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
-			return false;
-		}
+
+		bool FailMutation(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject; return false; }
+
 
 		FString NormalizeFullPath(const FString& Path)
 		{
@@ -164,12 +155,22 @@ namespace UE::UAI::Composition::SimpleAuthoring
 
 		bool TryLoadConfigFile(
 			const FString& Path,
-			FConfigFile& OutConfig)
+			FConfigFile& OutConfig,
+			FDiagnostic& OutError,
+			const FString& FailureCode = TEXT("editor_project_config_file_not_found"))
 		{
+			OutError.Reset();
 			OutConfig.Empty();
 			const FString FullPath = NormalizeFullPath(Path);
 			if (!IFileManager::Get().FileExists(*FullPath))
 			{
+				OutError = FDiagnostic::Failure(FailureCode,
+					TEXT("The required project configuration file does not exist."), TEXT("simple_authoring"), FullPath);
+				OutError.SourceKind = TEXT("native_result");
+				OutError.TargetPath = FPaths::GetCleanFilename(FullPath);
+				OutError.PropertyPath = TEXT("/file_exists");
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 				return false;
 			}
 			OutConfig.Read(FullPath);
@@ -276,8 +277,11 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		bool TryApplyPersistedSettingsText(
 			FProperty& Property,
 			UObject& SettingsObject,
-			const FString& Text)
+			const FString& Text,
+			FDiagnostic& OutError,
+			const FString& FailureCode)
 		{
+			OutError.Reset();
 			void* Address =
 				Property.ContainerPtrToValuePtr<void>(&SettingsObject);
 			if (const FStrProperty* StringProperty =
@@ -286,11 +290,18 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				StringProperty->SetPropertyValue(Address, Text);
 				return true;
 			}
-			return Property.ImportText_Direct(
-				*Text,
-				Address,
-				&SettingsObject,
-				PPF_None) != nullptr;
+			if (Property.ImportText_Direct(*Text, Address, &SettingsObject, PPF_None) != nullptr)
+			{
+				return true;
+			}
+			OutError = FDiagnostic::Failure(FailureCode,
+				TEXT("The stored setting cannot be imported as the property's type."), TEXT("simple_authoring"),
+				SettingsObject.GetPathName());
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = Property.GetName();
+			OutError.ActualValue = MakeShared<FJsonValueString>(Text);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(Property.GetCPPType());
+			return false;
 		}
 
 		bool TryReloadSettingsFromDisk(
@@ -300,14 +311,11 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			FExecutionMutationError& OutError)
 		{
 			FConfigFile PersistedConfig;
-			if (!TryLoadConfigFile(
-					Record.DurableLocation,
-					PersistedConfig))
+			if (!TryLoadConfigFile(Record.DurableLocation, PersistedConfig, OutError,
+				TEXT("editor_project_settings_reload_failed")))
 			{
-				return FailMutation(
-					OutError,
-					TEXT("editor_project_settings_reload_failed"),
-					Record.DurableLocation);
+				OutError.TargetPath = Record.Ref;
+				return false;
 			}
 
 			const FString Section = Snapshot.GetClass()->GetPathName();
@@ -325,31 +333,34 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				}
 				const FString* BaselineText =
 					BaselineValues.Find(Property->GetName());
-				if (!BaselineText
-					|| !TryApplyPersistedSettingsText(
-						*Property,
-						Snapshot,
-						*BaselineText))
+				if (!BaselineText)
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_settings_baseline_invalid"),
-						Property->GetName());
+					OutError = FDiagnostic::Failure(TEXT("editor_project_settings_baseline_invalid"),
+						TEXT("The baseline has no stored value for this setting."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Record.Ref;
+					OutError.PropertyPath = Property->GetName();
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Property->GetCPPType());
+					return false;
+				}
+				if (!TryApplyPersistedSettingsText(*Property, Snapshot, *BaselineText, OutError,
+					TEXT("editor_project_settings_baseline_invalid")))
+				{
+					OutError.TargetPath = Record.Ref;
+					return false;
 				}
 				FString PersistedText;
 				if (PersistedConfig.GetString(
 						*Section,
-						*Property->GetName(),
+						*DomainAdapters::EditorProject::SettingsConfigKey(*Property),
 						PersistedText)
-					&& !TryApplyPersistedSettingsText(
-						*Property,
-						Snapshot,
-						PersistedText))
+					&& !TryApplyPersistedSettingsText(*Property, Snapshot, PersistedText, OutError,
+						TEXT("editor_project_settings_value_reload_failed")))
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_settings_value_reload_failed"),
-						Property->GetName());
+					OutError.TargetPath = Record.Ref;
+					OutError.InternalContext = Record.DurableLocation;
+					return false;
 				}
 			}
 			return true;
@@ -372,7 +383,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		bool TryGetProfiles(
 			TMap<FString, FUeAgentEditorProjectSimpleEffectProductionProfile>&
 				OutProfiles,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutProfiles.Reset();
 			TArray<FUeAgentEditorProjectSimpleEffectProductionProfile> Profiles;
@@ -385,17 +396,16 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			for (const FUeAgentEditorProjectSimpleEffectProductionProfile& Profile
 				: Profiles)
 			{
-				if (!Profile.IsValid() || OutProfiles.Contains(Profile.ProfileId))
+				if (OutProfiles.Contains(Profile.ProfileId))
 				{
-					OutError = TEXT("editor_project_runtime_profile_invalid");
+					OutError = FDiagnostic::Failure(TEXT("editor_project_runtime_profile_invalid"),
+						TEXT("More than one editor-project production profile uses this profile ID."), TEXT("catalog"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = TEXT("profile_id");
+					OutError.ActualValue = MakeShared<FJsonValueString>(Profile.ProfileId);
 					return false;
 				}
 				OutProfiles.Add(Profile.ProfileId, Profile);
-			}
-			if (OutProfiles.Num() != 7)
-			{
-				OutError = TEXT("editor_project_runtime_profile_count_invalid");
-				return false;
 			}
 			return true;
 		}
@@ -449,7 +459,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					FPaths::ProjectConfigDir(),
 					Source.Value);
 				FConfigFile Config;
-				if (!TryLoadConfigFile(Path, Config))
+				FDiagnostic MissingOptionalConfig;
+				if (!TryLoadConfigFile(Path, Config, MissingOptionalConfig))
 				{
 					continue;
 				}
@@ -474,107 +485,38 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		}
 
 		void AddProjectSettings(
-			const TMap<FString,
-				FUeAgentEditorProjectSimpleEffectProductionProfile>& Profiles,
+			const TMap<FString, FUeAgentEditorProjectSimpleEffectProductionProfile>& Profiles,
 			TArray<FTargetRecord>& OutRecords)
 		{
-			const FUeAgentEditorProjectSimpleEffectProductionProfile* Profile =
-				Profiles.Find(TEXT("project_settings"));
-			ISettingsModule* SettingsModule =
-				FModuleManager::LoadModulePtr<ISettingsModule>(TEXT("Settings"));
-			if (!Profile || !SettingsModule)
+			const auto* Profile = Profiles.Find(TEXT("project_settings"));
+			TArray<DomainAdapters::EditorProject::FSettingsPage> Pages;
+			UE::UAI::Contract::FDiagnostic Error;
+			if (!Profile || !DomainAdapters::EditorProject::CollectSettingsPages(Pages, Error)) return;
+			for (const auto& Page : Pages)
 			{
-				return;
-			}
-			TArray<FName> ContainerNames;
-			SettingsModule->GetContainerNames(ContainerNames);
-			for (const FName& ContainerName : ContainerNames)
-			{
-				if (ContainerName != FName(TEXT("Project")))
+				UObject* SettingsObject = Page.SettingsObject;
+				if (Page.ContainerName != FName(TEXT("Project")) || !IsValid(SettingsObject)) continue;
+				UClass* SettingsClass = SettingsObject->GetClass();
+				if (SettingsClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists)
+					|| (SettingsClass->ClassWithin && !GetTransientPackage()->IsA(SettingsClass->ClassWithin))) continue;
+				bool bSupported = false;
+				for (TFieldIterator<FProperty> It(SettingsClass); It; ++It)
 				{
-					continue;
+					FString TypeId;
+					if (TrySettingsType(**It, TypeId)) { bSupported = true; break; }
 				}
-				const TSharedPtr<ISettingsContainer> Container =
-					SettingsModule->GetContainer(ContainerName);
-				if (!Container.IsValid())
-				{
-					continue;
-				}
-				TArray<TSharedPtr<ISettingsCategory>> Categories;
-				Container->GetCategories(Categories);
-				for (const TSharedPtr<ISettingsCategory>& Category : Categories)
-				{
-					if (!Category.IsValid())
-					{
-						continue;
-					}
-					TArray<TSharedPtr<ISettingsSection>> Sections;
-					Category->GetSections(Sections, true);
-					for (const TSharedPtr<ISettingsSection>& Section : Sections)
-					{
-						UObject* SettingsObject = Section.IsValid()
-							? Section->GetSettingsObject().Get()
-							: nullptr;
-						if (!IsValid(SettingsObject))
-						{
-							continue;
-						}
-						UClass* SettingsClass = SettingsObject->GetClass();
-						if (!SettingsClass
-							|| SettingsClass->HasAnyClassFlags(
-								CLASS_Abstract | CLASS_Deprecated
-								| CLASS_NewerVersionExists)
-							|| (SettingsClass->ClassWithin
-								&& !GetTransientPackage()->IsA(
-									SettingsClass->ClassWithin)))
-						{
-							continue;
-						}
-						bool bHasSupportedField = false;
-						for (TFieldIterator<FProperty> It(
-							SettingsObject->GetClass(),
-							EFieldIteratorFlags::IncludeSuper);
-							It;
-							++It)
-						{
-							FString TypeId;
-							if (*It && TrySettingsType(**It, TypeId))
-							{
-								bHasSupportedField = true;
-								break;
-							}
-						}
-						const FString Durable = NormalizeFullPath(
-							SettingsObject->GetDefaultConfigFilename());
-						if (!bHasSupportedField
-							|| !IsUnderRoot(Durable, FPaths::ProjectConfigDir()))
-						{
-							continue;
-						}
-						const FString ContainerText = ContainerName.ToString();
-						const FString CategoryText = Category->GetName().ToString();
-						const FString SectionText = Section->GetName().ToString();
-						FTargetRecord Record;
-						Record.Profile = *Profile;
-						Record.Ref = TargetRef(
-							TEXT("project-settings"),
-							{ContainerText, CategoryText, SectionText});
-						Record.DurableLocation = Durable;
-						Record.DisplayName = ContainerText + TEXT(" / ")
-							+ CategoryText + TEXT(" / ") + SectionText;
-						Record.SearchText = Record.Ref + TEXT(" ")
-							+ Record.DisplayName + TEXT(" ")
-							+ SettingsObject->GetClass()->GetPathName();
-						Record.SettingsObject = SettingsObject;
-						Record.Revision = TargetRevision(
-							Record,
-							SettingsStateRevisionInput(*SettingsObject));
-						if (Record.IsValid())
-						{
-							OutRecords.Add(MoveTemp(Record));
-						}
-					}
-				}
+				const FString Durable = NormalizeFullPath(SettingsObject->GetDefaultConfigFilename());
+				if (!bSupported || !IsUnderRoot(Durable, FPaths::ProjectConfigDir())) continue;
+				FTargetRecord Record;
+				Record.Profile = *Profile;
+				Record.Ref = TargetRef(TEXT("project-settings"),
+					{Page.ContainerName.ToString(), Page.CategoryName.ToString(), Page.SectionName.ToString()});
+				Record.DurableLocation = Durable;
+				Record.DisplayName = Page.SectionId;
+				Record.SearchText = Record.Ref + TEXT(" ") + Record.DisplayName + TEXT(" ") + SettingsClass->GetPathName();
+				Record.SettingsObject = SettingsObject;
+				Record.Revision = TargetRevision(Record, SettingsStateRevisionInput(*SettingsObject));
+				if (Record.IsValid()) OutRecords.Add(MoveTemp(Record));
 			}
 		}
 
@@ -589,7 +531,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				FPaths::ProjectConfigDir(),
 				TEXT("DefaultDeviceProfiles.ini"));
 			FConfigFile Config;
-			if (!Profile || !TryLoadConfigFile(Path, Config))
+			FDiagnostic MissingOptionalConfig;
+			if (!Profile || !TryLoadConfigFile(Path, Config, MissingOptionalConfig))
 			{
 				return;
 			}
@@ -640,7 +583,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			{
 				const FString Path = FPaths::Combine(Root, File);
 				FConfigFile Config;
-				if (!TryLoadConfigFile(Path, Config)
+				FDiagnostic MissingOptionalConfig;
+				if (!TryLoadConfigFile(Path, Config, MissingOptionalConfig)
 					|| !Config.FindSection(TEXT("CommonSettings")))
 				{
 					continue;
@@ -700,7 +644,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						Platform,
 						ConfigName + TEXT(".ini"));
 					FConfigFile Config;
-					if (!TryLoadConfigFile(Path, Config))
+					FDiagnostic MissingOptionalConfig;
+					if (!TryLoadConfigFile(Path, Config, MissingOptionalConfig))
 					{
 						continue;
 					}
@@ -737,7 +682,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				FPaths::ProjectConfigDir(),
 				TEXT("DefaultScalability.ini"));
 			FConfigFile Config;
-			if (!Profile || !TryLoadConfigFile(Path, Config))
+			FDiagnostic MissingOptionalConfig;
+			if (!Profile || !TryLoadConfigFile(Path, Config, MissingOptionalConfig))
 			{
 				return;
 			}
@@ -820,7 +766,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 
 		bool TryBuildTargetRecords(
 			TArray<FTargetRecord>& OutRecords,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutRecords.Reset();
 			TMap<FString, FUeAgentEditorProjectSimpleEffectProductionProfile>
@@ -845,7 +791,11 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			{
 				if (OutRecords[Index - 1].Ref == OutRecords[Index].Ref)
 				{
-					OutError = TEXT("editor_project_runtime_target_duplicate");
+					OutError = FDiagnostic::Failure(TEXT("editor_project_runtime_target_duplicate"),
+						TEXT("More than one editor-project catalog target uses this reference."), TEXT("catalog"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = FString::Printf(TEXT("targets/%d/ref"), Index);
+					OutError.ActualValue = MakeShared<FJsonValueString>(OutRecords[Index].Ref);
 					return false;
 				}
 			}
@@ -892,7 +842,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 
 		bool TryBuildFieldRecords(
 			TArray<FFieldRecord>& OutFields,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutFields.Reset();
 			TArray<FTargetRecord> Targets;
@@ -1038,16 +988,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			FUeAgentCancellationRequested Cancelled;
 			if (!Cancellation.TryCheckpoint(Cancelled))
 			{
-				OutError.Code = Cancelled.Code;
-				OutError.SubjectId = Cancelled.Reason;
-				OutError.Detail = Stage;
-				return false;
-			}
-			FUeAgentOperationDeadlineExceeded Expired;
-			if (!Deadline.TryCheckpoint(Stage, Expired))
-			{
-				OutError.Code = Expired.Code;
-				OutError.SubjectId = Stage;
+				OutError = Cancelled;
 				return false;
 			}
 			return true;
@@ -1146,15 +1087,13 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				}
 				const FString Search = Query.GetSearchText().TrimStartAndEnd();
 				TArray<FUeAgentCandidateSummary> Candidates;
-				FString BuildError;
+				UE::UAI::Contract::FDiagnostic BuildError;
 				if (Query.GetCatalogKind() == TargetCatalogKind)
 				{
 					TArray<FTargetRecord> Records;
 					if (!TryBuildTargetRecords(Records, BuildError))
 					{
-						OutError.Code =
-							TEXT("editor_project_target_catalog_unavailable");
-						OutError.Detail = BuildError;
+						OutError = BuildError;
 						return false;
 					}
 					for (const FTargetRecord& Record : Records)
@@ -1191,9 +1130,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				TArray<FFieldRecord> Fields;
 				if (!TryBuildFieldRecords(Fields, BuildError))
 				{
-					OutError.Code =
-						TEXT("editor_project_field_catalog_unavailable");
-					OutError.Detail = BuildError;
+					OutError = BuildError;
 					return false;
 				}
 				for (const FFieldRecord& Field : Fields)
@@ -1249,7 +1186,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				{
 					return false;
 				}
-				FString BuildError;
+				UE::UAI::Contract::FDiagnostic BuildError;
 				TOptional<FUeAgentCandidateBinding> Binding;
 				TArray<FTargetRecord> Records;
 				const bool bTargetsBuilt =
@@ -1277,17 +1214,13 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					TArray<FFieldRecord> Fields;
 					if (!TryBuildFieldRecords(Fields, BuildError))
 					{
-						OutError.Code =
-							TEXT("editor_project_field_catalog_unavailable");
-						OutError.SubjectId = CandidateId;
-						OutError.Detail = BuildError;
+						OutError = MoveTemp(BuildError);
+						if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = CandidateId;
 						return false;
 					}
 					if (ExpectedRevision != FieldCatalogRevision(Fields))
 					{
-						OutError.Code = TEXT("catalog_revision_stale");
-						OutError.SubjectId = CandidateId;
-						OutError.Detail = BuildError;
+						OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("catalog_revision_stale"), TEXT("The field catalog changed after the candidate was selected."), TEXT("binding"), FString(), CandidateId);
 						return false;
 					}
 					for (const FFieldRecord& Field : Fields)
@@ -1307,15 +1240,14 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					OutError.SubjectId = CandidateId;
 					return false;
 				}
-				FUeAgentResourceBudgetExceeded BudgetError;
+				FUeAgentResourceChargeError ChargeError;
 				if (!Resources.TryCharge(
 						EUeAgentResourceDimension::Items,
 						1,
 						TEXT("editor_project.catalog_resolve"),
-						BudgetError))
+						ChargeError))
 				{
-					OutError.Code = BudgetError.Code;
-					OutError.SubjectId = BudgetError.Path;
+					OutError = ChargeError;
 					return false;
 				}
 				OutBinding = MakeShared<FUeAgentCandidateBinding>(
@@ -1331,13 +1263,10 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				OutTarget = FUeAgentEditorProjectSimpleEffectResolvedTarget();
 				OutError = FExecutionMutationError();
 				TArray<FTargetRecord> Records;
-				FString BuildError;
+				UE::UAI::Contract::FDiagnostic BuildError;
 				if (!TryBuildTargetRecords(Records, BuildError))
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_target_catalog_unavailable"),
-						BuildError);
+					return FailMutation(OutError, BuildError);
 				}
 				const FTargetRecord* Record = Records.FindByPredicate(
 					[&CanonicalRef](const FTargetRecord& Candidate)
@@ -1346,10 +1275,14 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					});
 				if (!Record)
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_target_unresolved"),
-						CanonicalRef);
+					OutError = FDiagnostic::Failure(TEXT("editor_project_target_unresolved"),
+						TEXT("The requested target is not present in the current editor project catalog."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = CanonicalRef;
+					OutError.PropertyPath = TEXT("/target_exists");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return false;
 				}
 
 				FConfigFile* Config = nullptr;
@@ -1384,15 +1317,39 @@ namespace UE::UAI::Composition::SimpleAuthoring
 							LOAD_NoWarn);
 					}
 					StringTable = Cast<UStringTable>(Object);
-					if (!StringTable
-						|| StringTable->GetPathName()
-							!= Record->StringTableObjectPath
-						|| StringTable->GetOutermost()->IsDirty())
+					if (!StringTable)
 					{
-						return FailMutation(
-							OutError,
-							TEXT("editor_project_string_table_unavailable"),
-							CanonicalRef);
+						OutError = FDiagnostic::Failure(TEXT("editor_project_string_table_unavailable"),
+							TEXT("The target did not resolve to a String Table asset."), TEXT("simple_authoring"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = CanonicalRef;
+						OutError.PropertyPath = TEXT("/asset_class");
+						OutError.ActualValuePresent = Object != nullptr;
+						if (Object) OutError.ActualValue = MakeShared<FJsonValueString>(Object->GetClass()->GetPathName());
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(UStringTable::StaticClass()->GetPathName());
+						return false;
+					}
+					if (StringTable->GetPathName() != Record->StringTableObjectPath)
+					{
+						OutError = FDiagnostic::Failure(TEXT("editor_project_string_table_unavailable"),
+							TEXT("The loaded String Table does not match the catalog's asset path."), TEXT("simple_authoring"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = CanonicalRef;
+						OutError.PropertyPath = TEXT("/asset_path");
+						OutError.ActualValue = MakeShared<FJsonValueString>(StringTable->GetPathName());
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(Record->StringTableObjectPath);
+						return false;
+					}
+					if (StringTable->GetOutermost()->IsDirty())
+					{
+						OutError = FDiagnostic::Failure(TEXT("editor_project_string_table_unavailable"),
+							TEXT("The String Table package has unsaved changes."), TEXT("simple_authoring"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = CanonicalRef;
+						OutError.PropertyPath = TEXT("/package_dirty");
+						OutError.ActualValue = MakeShared<FJsonValueBoolean>(true);
+						OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+						return false;
 					}
 				}
 				else
@@ -1441,10 +1398,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					StringTable,
 					LocalizationDirectories);
 				return OutTarget.IsValid()
-					|| FailMutation(
-						OutError,
-						TEXT("editor_project_target_invalid"),
-						CanonicalRef);
+					|| FailMutation(OutError, OutTarget.GetValidationDiagnostic());
 			}
 
 			bool TryResolveSettingsField(
@@ -1468,13 +1422,10 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					}
 				}
 				TArray<FTargetRecord> Targets;
-				FString BuildError;
+				UE::UAI::Contract::FDiagnostic BuildError;
 				if (!TryBuildTargetRecords(Targets, BuildError))
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_field_catalog_unavailable"),
-						BuildError);
+					return FailMutation(OutError, BuildError);
 				}
 				const FTargetRecord* Target = nullptr;
 				for (const FTargetRecord& Candidate : Targets)
@@ -1491,10 +1442,16 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				if (!Target
 					|| Target->Profile.ProfileId != TEXT("project_settings"))
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_settings_target_unresolved"),
-						PublicFieldRef);
+					OutError = FDiagnostic::Failure(TEXT("editor_project_settings_target_unresolved"),
+						Target ? TEXT("The resolved target is not a project settings target.")
+							: TEXT("The settings object is not registered as a project settings target."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = SettingsTargetRef.IsEmpty() ? SettingsObject.GetClass()->GetPathName() : SettingsTargetRef;
+					OutError.PropertyPath = TEXT("/profile_id");
+					OutError.ActualValuePresent = Target != nullptr;
+					if (Target) OutError.ActualValue = MakeShared<FJsonValueString>(Target->Profile.ProfileId);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("project_settings"));
+					return false;
 				}
 				TArray<FFieldRecord> Fields;
 				BuildFieldRecordsForTarget(*Target, SettingsObject, Fields);
@@ -1505,27 +1462,44 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					});
 				if (!Field)
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_settings_field_unresolved"),
-						PublicFieldRef);
+					OutError = FDiagnostic::Failure(TEXT("editor_project_settings_field_unresolved"),
+						TEXT("The requested field is not registered for this settings target."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Target->Ref;
+					OutError.PropertyPath = PublicFieldRef;
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("registered settings field"));
+					return false;
 				}
 				OutCurrentRevision = Field->Revision;
 				if (ExpectedRevision != OutCurrentRevision)
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_settings_field_revision_stale"),
-						PublicFieldRef);
+					OutError = FDiagnostic::Failure(TEXT("editor_project_settings_field_revision_stale"),
+						TEXT("The settings field changed after the supplied revision was observed."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = PublicFieldRef;
+					OutError.PropertyPath = TEXT("/revision_matches");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedRevision);
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(OutCurrentRevision);
+					return false;
 				}
 				OutProperty = FindFProperty<FProperty>(
 					SettingsObject.GetClass(),
 					FName(*Field->PropertyName));
-				return OutProperty
-					|| FailMutation(
-						OutError,
-						TEXT("editor_project_settings_field_unresolved"),
-						PublicFieldRef);
+				if (!OutProperty)
+				{
+					OutError = FDiagnostic::Failure(TEXT("editor_project_settings_field_unresolved"),
+						TEXT("The registered settings field no longer has a native property."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Target->Ref;
+					OutError.PropertyPath = Field->PropertyName;
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Field->TypeId);
+					return false;
+				}
+				return true;
 			}
 
 			bool TryReadSettingsFields(
@@ -1537,13 +1511,10 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				OutFields.Reset();
 				OutError = FExecutionMutationError();
 				TArray<FTargetRecord> Targets;
-				FString BuildError;
+				UE::UAI::Contract::FDiagnostic BuildError;
 				if (!TryBuildTargetRecords(Targets, BuildError))
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_field_catalog_unavailable"),
-						BuildError);
+					return FailMutation(OutError, BuildError);
 				}
 
 				const FTargetRecord* Target = Targets.FindByPredicate(
@@ -1555,10 +1526,15 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					});
 				if (!Target)
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_settings_target_unresolved"),
+					OutError = FDiagnostic::Failure(TEXT("editor_project_settings_target_unresolved"),
+						TEXT("The settings object is not registered as a project settings target."), TEXT("simple_authoring"),
 						SettingsObject.GetPathName());
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = SettingsObject.GetClass()->GetPathName();
+					OutError.PropertyPath = TEXT("/target_exists");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return false;
 				}
 
 				TArray<FFieldRecord> Records;
@@ -1570,10 +1546,14 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						FName(*Record.PropertyName));
 					if (!Property)
 					{
-						return FailMutation(
-							OutError,
-							TEXT("editor_project_settings_field_unresolved"),
-							Record.FieldRef);
+						OutError = FDiagnostic::Failure(TEXT("editor_project_settings_field_unresolved"),
+							TEXT("The registered settings field no longer has a native property."), TEXT("simple_authoring"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = Target->Ref;
+						OutError.PropertyPath = Record.PropertyName;
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(Record.TypeId);
+						return false;
 					}
 					const void* Address =
 						Property->ContainerPtrToValuePtr<void>(&SettingsObject);
@@ -1606,14 +1586,26 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				OutBinding = FUeAgentEditorProjectSimpleAuthoringDurableBinding();
 				OutError = FExecutionMutationError();
 				TArray<FTargetRecord> Records;
-				FString BuildError;
-				if (!Target.IsValid()
-					|| !TryBuildTargetRecords(Records, BuildError))
+				UE::UAI::Contract::FDiagnostic BuildError;
+				if (!Target.IsValid())
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_durable_target_unresolved"),
-						BuildError);
+					const FDiagnostic& Validation = Target.GetValidationDiagnostic();
+					if (Validation.IsValid())
+					{
+						return FailMutation(OutError, Validation);
+					}
+					// A default, unresolved target has no constructor failure to propagate.
+					OutError = FDiagnostic::Failure(TEXT("editor_project_target_invalid"),
+						TEXT("Durable binding requires a resolved project target."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = TEXT("/target_resolved");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return false;
+				}
+				if (!TryBuildTargetRecords(Records, BuildError))
+				{
+					return FailMutation(OutError, BuildError);
 				}
 				const FTargetRecord* Record = Records.FindByPredicate(
 					[&Target](const FTargetRecord& Candidate)
@@ -1624,10 +1616,14 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					});
 				if (!Record)
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_durable_target_unresolved"),
-						Target.GetCanonicalRef());
+					OutError = FDiagnostic::Failure(TEXT("editor_project_durable_target_unresolved"),
+						TEXT("The target and profile do not match a registered durable project target."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Target.GetCanonicalRef();
+					OutError.PropertyPath = TEXT("/profile_id");
+					OutError.ActualValue = MakeShared<FJsonValueString>(Target.GetProfileId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("registered target/profile pair"));
+					return false;
 				}
 				const EDurableArtifactKind Kind =
 					Record->Profile.ProfileId == TEXT("string_table")
@@ -1638,15 +1634,20 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						Record->DurableLocation,
 						FPaths::ProjectConfigDir()))
 				{
-					return FailMutation(
-						OutError,
-						TEXT("editor_project_durable_location_forbidden"),
+					OutError = FDiagnostic::Failure(TEXT("editor_project_durable_location_forbidden"),
+						TEXT("The configuration target is outside the project's Config directory."), TEXT("simple_authoring"),
 						Record->DurableLocation);
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Record->Ref;
+					OutError.PropertyPath = TEXT("/inside_project_config");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return false;
 				}
 				OutBinding = FUeAgentEditorProjectSimpleAuthoringDurableBinding(
 					Kind,
 					Record->DurableLocation);
-				return OutBinding.IsValid();
+				return true;
 			}
 
 		private:
@@ -1664,15 +1665,22 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				if (!bRetainMutation)
 				{
 					TUniquePtr<FConfigFile> Loaded = MakeUnique<FConfigFile>();
-					if (!TryLoadConfigFile(
-							Record.DurableLocation,
-							*Loaded)
-						|| !Loaded->FindSection(Record.ConfigSection))
+					if (!TryLoadConfigFile(Record.DurableLocation, *Loaded, OutError,
+						TEXT("editor_project_config_target_unavailable")))
 					{
-						FailMutation(
-							OutError,
-							TEXT("editor_project_config_target_unavailable"),
-							Record.Ref);
+						OutError.TargetPath = Record.Ref;
+						return nullptr;
+					}
+					if (!Loaded->FindSection(Record.ConfigSection))
+					{
+						OutError = FDiagnostic::Failure(TEXT("editor_project_config_target_unavailable"),
+							TEXT("The configuration file no longer contains the requested section."),
+							TEXT("simple_authoring"), Record.DurableLocation);
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = Record.Ref;
+						OutError.PropertyPath = Record.ConfigSection;
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("configuration section"));
 						return nullptr;
 					}
 					Stored = MoveTemp(Loaded);
@@ -1687,10 +1695,13 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				UObject* Settings = Record.SettingsObject.Get();
 				if (!IsValid(Settings))
 				{
-					FailMutation(
-						OutError,
-						TEXT("editor_project_settings_target_unavailable"),
-						Record.Ref);
+					OutError = FDiagnostic::Failure(TEXT("editor_project_settings_target_unavailable"),
+						TEXT("The registered settings object is no longer valid."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Record.Ref;
+					OutError.PropertyPath = TEXT("/settings_object_valid");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 					return nullptr;
 				}
 				FScopeLock Lock(&Mutex);
@@ -1705,10 +1716,24 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						RF_Transient);
 					if (!Snapshot || !Baseline || Baseline->IsEmpty())
 					{
-						FailMutation(
-							OutError,
-							TEXT("editor_project_settings_reload_failed"),
-							Record.Ref);
+						OutError = FDiagnostic::Failure(TEXT("editor_project_settings_reload_failed"),
+							!Snapshot ? TEXT("A transient settings snapshot could not be created.")
+								: !Baseline ? TEXT("The settings target has no captured baseline.")
+								: TEXT("The captured settings baseline has no values."), TEXT("simple_authoring"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = Record.Ref;
+						if (!Snapshot || !Baseline)
+						{
+							OutError.PropertyPath = !Snapshot ? TEXT("/snapshot_exists") : TEXT("/baseline_exists");
+							OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+							OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+						}
+						else
+						{
+							OutError.PropertyPath = TEXT("/baseline_value_count");
+							OutError.ActualValue = MakeShared<FJsonValueNumber>(Baseline->Num());
+							OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("greater than zero"));
+						}
 						return nullptr;
 					}
 					if (!TryReloadSettingsFromDisk(
@@ -1759,14 +1784,10 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		OutResolvers = FUeAgentEditorProjectSimpleAuthoringRuntimeResolvers();
 		OutError = {};
 		TArray<FTargetRecord> Targets;
-		FString BuildError;
+		UE::UAI::Contract::FDiagnostic BuildError;
 		if (!TryBuildTargetRecords(Targets, BuildError))
 		{
-			SetRuntimeError(
-				OutError,
-				TEXT("editor_project_runtime_catalog_unavailable"),
-				EditorProjectCatalogSourceId,
-				BuildError);
+			SetRuntimeError(OutError, BuildError, EditorProjectCatalogSourceId);
 			return false;
 		}
 		const TSharedRef<FEditorProjectRuntimeOwner, ESPMode::ThreadSafe>
@@ -1794,15 +1815,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		OutResolvers.DurableBindingResolver = StaticCastSharedRef<
 			IUeAgentEditorProjectSimpleAuthoringDurableBindingResolver>(
 				PreOwner);
-		if (!OutResolvers.IsValid())
-		{
-			SetRuntimeError(
-				OutError,
-				TEXT("editor_project_runtime_resolver_create_failed"));
-			OutResolvers =
-				FUeAgentEditorProjectSimpleAuthoringRuntimeResolvers();
-			return false;
-		}
 		return true;
 	}
 }

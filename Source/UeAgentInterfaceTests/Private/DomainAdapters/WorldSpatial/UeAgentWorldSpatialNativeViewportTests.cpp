@@ -123,13 +123,27 @@ namespace
 		{
 			const FUeAgentStateEntry* Modes = FindEntry(
 				Snapshot, TEXT("viewport_modes.catalog"));
+			const FUeAgentCanonicalValueRef* FirstMode = Modes
+				&& Modes->GetValue()->GetKind() == EUeAgentValueKind::Array
+				&& !Modes->GetValue()->GetArrayItems().IsEmpty()
+					? &Modes->GetValue()->GetArrayItems()[0]
+					: nullptr;
+			const FUeAgentCanonicalValueRef* FirstId = FirstMode
+				? FindField(*FirstMode, TEXT("mode_id")) : nullptr;
+			const FUeAgentCanonicalValueRef* FirstLabel = FirstMode
+				? FindField(*FirstMode, TEXT("label")) : nullptr;
 			Test.TestTrue(
 				TEXT("view-mode source preserves mode ids and labels"),
-				Modes && Modes->GetValue()->GetKind() == EUeAgentValueKind::Array
-					&& !Modes->GetValue()->GetArrayItems().IsEmpty()
+				FirstMode
 					&& HasObjectFields(
-						Modes->GetValue()->GetArrayItems()[0],
-						{TEXT("mode_id"), TEXT("label")}));
+						*FirstMode, {TEXT("mode_id"), TEXT("label")}));
+			Test.TestTrue(
+				TEXT("view-mode query uses the shared keyword matcher"),
+				FirstId && FirstLabel
+					&& FirstId->Get().GetText().Contains(
+						TEXT("shader"), ESearchCase::IgnoreCase)
+					&& FirstLabel->Get().GetText().Contains(
+						TEXT("complexity"), ESearchCase::IgnoreCase));
 		}
 		else if (CapabilityId == TEXT("viewport.instance.list"))
 		{
@@ -151,6 +165,13 @@ namespace
 						{TEXT("viewport_ref"), TEXT("viewport_type"),
 							TEXT("camera")})
 					&& Camera && IsCameraObject(*Camera));
+			if (Instances)
+			{
+				Test.TestEqual(
+					TEXT("viewport-instance source exposes the stable public selector"),
+					Instances->GetIdentity().GetSelector(TEXT("selector")),
+					FString(TEXT("explicit_viewports")));
+			}
 		}
 	}
 
@@ -665,6 +686,67 @@ namespace
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentWorldSpatialViewportFrameSelectorContractTest,
+	"UeAgentInterface.DomainAdapters.WorldSpatial.Native.Viewport."
+		"FrameSelectorContract",
+	EAutomationTestFlags::EditorContext
+		| EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentWorldSpatialViewportFrameSelectorContractTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::DomainAdapters::WorldSpatial;
+	FWorldSpatialValue Point;
+	Point.Subject = TEXT("frame-target");
+	Point.Quantity = TEXT("point");
+	Point.Frame.FrameId = TEXT("unreal.world");
+	Point.Frame.BasisFrameId = TEXT("unreal.world");
+	Point.Frame.Dimension = 3;
+	Point.Frame.Unit = TEXT("centimeter");
+	Point.Frame.BasisEvidenceId = TEXT("native-test");
+	Point.Frame.ObservedAt = {
+		TEXT("native-test"), TEXT("0"), TEXT("1"), TEXT("1"), TEXT("captured")};
+	Point.Components = {TEXT("0"), TEXT("0"), TEXT("0")};
+	Point.ConversionEvidenceIds = {TEXT("identity")};
+
+	FViewportCameraFrameRequestInput Input;
+	Input.WorldPoint = Point;
+	TestTrue(TEXT("world point is one selector"), Input.HasExactlyOneSelector());
+	Input.SubjectRefs.Add(TEXT("actor:/Game/Test.Target"));
+	TestFalse(TEXT("world point plus subject is ambiguous"),
+		Input.HasExactlyOneSelector());
+	Input.SubjectRefs.Reset();
+	Input.WorldPoint.Reset();
+	Input.WorldBoundsMin = Point;
+	Input.WorldBoundsMax = Point;
+	TestTrue(TEXT("complete world bounds is one selector"),
+		Input.HasExactlyOneSelector());
+	Input.WorldBoundsMax.Reset();
+	TestFalse(TEXT("partial world bounds is rejected"),
+		Input.HasExactlyOneSelector());
+
+	FWorldSpatialValue Transform = Point;
+	Transform.Quantity = TEXT("transform");
+	Transform.Components = {
+		TEXT("0"), TEXT("0"), TEXT("0"),
+		TEXT("0"), TEXT("0"), TEXT("0"), TEXT("1"),
+		TEXT("1"), TEXT("1"), TEXT("1")};
+	FWorldSpatialViewportStatePatch Patch;
+	Patch.CameraTransform = Transform;
+	TestFalse(TEXT("camera transform requires an explicit mode"), Patch.IsValid());
+	Patch.CameraTransformMode = TEXT("absolute");
+	TestTrue(TEXT("absolute is a valid explicit camera transform mode"),
+		Patch.IsValid());
+	Patch.CameraTransformMode = TEXT("delta");
+	TestTrue(TEXT("delta is a valid explicit camera transform mode"),
+		Patch.IsValid());
+	Patch.CameraTransformMode = TEXT("relative");
+	TestFalse(TEXT("unknown camera transform mode is rejected"),
+		Patch.IsValid());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentWorldSpatialProductionViewportProjectionC3Test,
 	"UeAgentInterface.DomainAdapters.WorldSpatial.E2.Production.Viewport."
 		"ProjectionC3",
@@ -718,6 +800,10 @@ bool FUeAgentWorldSpatialProductionViewportProjectionC3Test::RunTest(
 		[&](FAutomationTestBase& Test, const FString& CapabilityId,
 			const TSharedPtr<FJsonObject>& RawInput)
 		{
+			if (CapabilityId == TEXT("viewport.view_mode.list"))
+			{
+				RawInput->SetStringField(TEXT("query"), TEXT("shader complexity"));
+			}
 			return PrepareProductionCapabilityInput(
 				Test, CapabilityId, RawInput, *Runtime, Bindings);
 		},

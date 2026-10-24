@@ -47,13 +47,16 @@ namespace UE::UAI::Module::CommandRegistration::Landscape
 			const FUeAgentSimpleAuthoringCommandRoute& Route,
 			const FUeAgentCommandContractRegistry& LegacyRegistry,
 			FUeAgentCommandDeclaration& OutDeclaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Legacy =
 				LegacyRegistry.FindExact(Route.CommandId);
-			if (!Legacy || !Legacy->IsValid())
+			if (!Legacy || !Legacy->TryValidate(OutError))
 			{
-				OutError = TEXT("landscape_contract_missing:") + Route.CommandId;
+				OutError = Legacy
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("landscape_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("landscape_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Route.CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Route.CommandId;
 				return false;
 			}
 
@@ -78,6 +81,7 @@ namespace UE::UAI::Module::CommandRegistration::Landscape
 					Parameter.IsRequired(),
 					Parameter.IsNullable(),
 					TEXT("Exact Landscape mechanics parameter."),
+					Parameter.GetSchemaJson(),
 				});
 			}
 			Result.ResultFields = {
@@ -86,6 +90,16 @@ namespace UE::UAI::Module::CommandRegistration::Landscape
 				Field(TEXT("projection"), TEXT("object"), true,
 					TEXT("Verified native outcome and persisted readback evidence.")),
 			};
+			if (Route.CommandId == TEXT("landscape.create"))
+			{
+				Result.ModelResultFields = {
+					{TEXT("status"), {
+						TEXT("projection"), TEXT("payload"), TEXT("status")}},
+					{TEXT("effect_outcome"), {
+						TEXT("projection"), TEXT("payload"),
+						TEXT("effect_outcome")}},
+				};
+			}
 			Result.Errors = {
 				{TEXT("landscape_authority_required"),
 					TEXT("The caller lacks uai:operate authority.")},
@@ -105,7 +119,7 @@ namespace UE::UAI::Module::CommandRegistration::Landscape
 				TEXT("Declare the local sample-grid frame, scale, and conversion evidence."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Use only query.command.detail fields and explicit Landscape coordinate contracts.");
+				TEXT("Use only query.command.usage fields and explicit Landscape coordinate contracts.");
 			Result.Purpose.ResultGuidance =
 				TEXT("Use the terminal operation projection and an independent persisted-state query.");
 			Result.Purpose.FailureGuidance =
@@ -152,7 +166,7 @@ namespace UE::UAI::Module::CommandRegistration::Landscape
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::Landscape::TryCreateHandlers(
 					Routes, OutHandlers, OutError);
@@ -166,7 +180,7 @@ namespace UE::UAI::Module::CommandRegistration::Landscape
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<IUeAgentActiveCommandContribution> CommandContribution;
 			if (!TryCreateContribution(CommandContribution, OutError)
@@ -218,9 +232,6 @@ namespace UE::UAI::Module::CommandRegistration::Landscape
 						FindOperationInvocationFactory(OperationId);
 				Declaration.Operation.Operations.Add(MoveTemp(Operation));
 			}
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId = TEXT("T41-LANDSCAPE-OPERATION");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
@@ -232,17 +243,12 @@ namespace UE::UAI::Module::CommandRegistration::Landscape
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
 		const TArray<FUeAgentSimpleAuthoringCommandRoute>& Routes =
 			OperationOwners::Landscape::GetRoutes();
-		if (Routes.Num() != 2)
-		{
-			OutError = TEXT("landscape_route_count_mismatch");
-			return false;
-		}
 		TSharedPtr<const FUeAgentCommandContractRegistry> LegacyRegistry;
 		if (!TryCreateProductionCommandContractRegistry(LegacyRegistry, OutError)
 			|| !LegacyRegistry.IsValid())

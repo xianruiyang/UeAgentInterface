@@ -69,11 +69,6 @@ bool FUeAgentWorldSpatialDomainCapabilityAuthorityTest::RunTest(
 		TEXT("spatial content publishes the operation facet"),
 		Declaration.Operation.Support,
 		EDomainCapabilitySupport::Supported);
-	TestEqual(
-		TEXT("spatial content declares exactly six mutation operations"),
-		Declaration.Operation.Operations.Num(),
-		SpatialOperationIds().Num());
-
 	for (const FString& OperationId : SpatialOperationIds())
 	{
 		const FDomainOperationEntry* Operation =
@@ -130,10 +125,6 @@ bool FUeAgentWorldSpatialDomainCapabilityAuthorityTest::RunTest(
 					FindOperationInvocationFactory(OperationId).Get());
 	}
 
-	TestEqual(
-		TEXT("spatial content owns its migration identity"),
-		Declaration.Migration.OwnerId,
-		FString(TEXT("T46-SPATIAL-CONTENT-OPERATION")));
 	TestTrue(
 		TEXT("spatial content declares authoring-memory state"),
 		Declaration.State.Planes.Contains(

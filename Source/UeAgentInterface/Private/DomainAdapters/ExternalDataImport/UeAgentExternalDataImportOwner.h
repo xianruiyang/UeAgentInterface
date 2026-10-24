@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Templates/SharedPointer.h"
@@ -28,8 +30,7 @@ namespace UE::UAI::DomainAdapters::ExternalDataImport
 		FString ClassPath;
 		FString TerminalState = TEXT("rolled_back");
 		FString PersistenceScope;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString JournalId;
 		FString VerificationId;
 		bool bChanged = false;
@@ -39,7 +40,7 @@ namespace UE::UAI::DomainAdapters::ExternalDataImport
 		bool IsSuccess() const
 		{
 			return TerminalState == TEXT("committed")
-				&& ErrorCode.IsEmpty()
+				&& Diagnostic.IsEmpty()
 				&& bPersisted
 				&& bReadbackVerified;
 		}
@@ -60,5 +61,5 @@ namespace UE::UAI::DomainAdapters::ExternalDataImport
 		FString JournalRoot,
 		FString JournalOwnerId,
 		TSharedPtr<IUeAgentExternalDataImportOwner>& OutOwner,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

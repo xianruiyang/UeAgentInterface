@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/GraphCompound/UeAgentGraphCompoundActivation.h"
 #include "CoreMinimal.h"
 
@@ -12,16 +14,18 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 	UEAGENTINTERFACE_API bool TryGetActivationProfiles(
 		TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>&
 			OutProfiles,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	struct UEAGENTINTERFACE_API FBlueprintComponentEventDiscoveryRequest final
 	{
 		FString ComponentName;
+		UE::UAI::Contract::FSourceLocation ComponentNameSource;
+		FString ComponentNameSourceKind = TEXT("native_result");
 		FString Query;
-		int32 Limit = 200;
 		bool bOnlyUnbound = false;
 		bool bIncludeHidden = false;
 		bool bCompileBeforeQuery = true;
+		bool bIncludeQueryContext = false;
 
 		bool IsValid() const;
 	};
@@ -35,6 +39,7 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 		FString Category;
 		bool bHidden = false;
 		bool bAlreadyBound = false;
+		bool bQueryMatched = true;
 	};
 
 	struct UEAGENTINTERFACE_API FBlueprintComponentEventDiscoveryResult final
@@ -47,7 +52,6 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 		bool bCanAuthorComponentBoundEvent = false;
 		int32 TotalEventCount = 0;
 		int32 MatchedEventCount = 0;
-		bool bTruncated = false;
 		TArray<FBlueprintComponentEventRecord> Events;
 	};
 
@@ -55,5 +59,11 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 		UBlueprint& Blueprint,
 		const FBlueprintComponentEventDiscoveryRequest& Request,
 		FBlueprintComponentEventDiscoveryResult& OutResult,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
+
+	/** Enumerate readable component selectors for the shared component-event owner. */
+	UEAGENTINTERFACE_API bool TryGetBlueprintComponentNames(
+		UBlueprint& Blueprint,
+		TArray<FString>& OutComponentNames,
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

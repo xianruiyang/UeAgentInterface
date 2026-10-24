@@ -1,12 +1,12 @@
 #include "Core/GraphLayout/UeAgentUnifiedGraphLayoutService.h"
+#include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
 
 #include "Animation/AnimBlueprint.h"
-#include "Commands/Blueprint/UeAgentBlueprintGraphLayoutOps.h"
+#include "Core/GraphLayout/BlueprintAutoLayout/UeAgentBlueprintGraphLayoutOps.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/GraphLayout/BlueprintAutoLayout/UeAgentBlueprintAutoLayoutAlgorithm.h"
-#include "DomainAdapters/AnimationBlueprint/UeAgentAnimationBlueprintDomainMechanics.h"
-#include "DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintSurfaceMechanics.h"
-#include "DomainAdapters/UmgWidget/UeAgentUmgWidgetMechanics.h"
+#include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
@@ -14,6 +14,7 @@
 #include "Engine/Blueprint.h"
 #include "FileHelpers.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "PackageTools.h"
 #include "ScopedTransaction.h"
@@ -36,7 +37,9 @@ namespace UE::UAI::Core::GraphLayout
 		struct FTarget final
 		{
 			FString Identity;
-			FString ExpectedRevision;
+			// Frozen by the service after target resolution; never supplied by or
+			// projected to the model.
+			FString FrozenRevision;
 			FString ProviderId;
 			UEdGraph* Graph = nullptr;
 			UBlueprint* Blueprint = nullptr;
@@ -47,32 +50,18 @@ namespace UE::UAI::Core::GraphLayout
 			int32 AppliedMoveCount = 0;
 			TMap<FString, FIntPoint> BeforePositions;
 			TMap<FString, FIntPoint> ExpectedAfterPositions;
+			TMap<FString, FString> ExpectedNodeNames;
 		};
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& Subject,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), Subject);
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request,
+            UE::UAI::Contract::FDiagnostic Diagnostic, const FString& EnvelopeCode = FString(), const FString& Subject = FString())
+        {
+            if (Diagnostic.Stage.IsEmpty()) Diagnostic.Stage = TEXT("graph_layout");
+            if (Diagnostic.TargetPath.IsEmpty() && Subject.StartsWith(TEXT("/"))) Diagnostic.TargetPath = Subject;
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Diagnostic, EnvelopeCode);
+        }
 
-		bool Canonical(
-			const TSharedPtr<FJsonObject>& Object,
-			FString& OutText)
-		{
-			FString Error;
-			return CommandContract::Json::TryCanonicalize(Object, OutText, Error);
-		}
+		
 
 		FString NodeKey(const UEdGraphNode& Node)
 		{
@@ -122,83 +111,58 @@ namespace UE::UAI::Core::GraphLayout
 			return !OutProviderId.IsEmpty();
 		}
 
-		bool TryReadPublicRevision(
+		bool TryReadOwnerRevision(
 			UBlueprint& Blueprint,
-			const FString& ProviderId,
 			FString& OutRevision,
-			FString& OutDetail)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutRevision.Reset();
-			OutDetail.Reset();
-			const FString Target = Blueprint.GetPathName();
-			const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
-			Params->SetStringField(TEXT("target"), Target);
-			FString ParamsJson;
-			if (!Canonical(Params, ParamsJson))
+			OutError.Reset();
+			DomainAdapters::ContentGraphRead::FUeAgentContentGraphReadError CaptureError;
+			if (!DomainAdapters::ContentGraphRead::FUeAgentContentGraphReadProductionEnvironment::
+				TryCaptureBlueprintRevision(Blueprint, OutRevision, CaptureError))
 			{
-				OutDetail = TEXT("could not canonicalize public read params");
+				auto Diagnostic = CaptureError;
+				if (Diagnostic.TargetPath.IsEmpty())
+				{
+					Diagnostic.TargetPath = CaptureError.SubjectId.StartsWith(TEXT("/"))
+						? CaptureError.SubjectId : Blueprint.GetPathName();
+				}
+				OutError = Diagnostic;
 				return false;
 			}
-
-			FString PayloadJson;
-			bool bReadOnly = false;
-			HjsonWorkspace::FWorkspaceError WorkspaceError;
-			bool bRead = false;
-			if (ProviderId == TEXT("animation-blueprint-graph-layout-provider"))
+			if (OutRevision.IsEmpty())
 			{
-				bRead = DomainAdapters::AnimationBlueprint::TryExecuteContentGraph(
-					TEXT("content_graph.summary"), Target, ParamsJson,
-					PayloadJson, bReadOnly, WorkspaceError);
-			}
-			else if (ProviderId == TEXT("umg-blueprint-graph-layout-provider"))
-			{
-				bRead = DomainAdapters::UmgWidget::TryExecuteContentGraph(
-					TEXT("content_graph.summary"), Target, ParamsJson,
-					PayloadJson, bReadOnly, WorkspaceError);
-			}
-			else if (ProviderId == TEXT("blueprint-graph-layout-provider"))
-			{
-				bRead = DomainAdapters::Blueprint::Surfaces::TryExecuteContentGraph(
-					TEXT("content_graph.summary"), Target, ParamsJson,
-					PayloadJson, bReadOnly, WorkspaceError);
-			}
-			if (!bRead || !bReadOnly)
-			{
-				OutDetail = WorkspaceError.GetCode().IsEmpty()
-					? FString(TEXT("public content graph read failed"))
-					: WorkspaceError.GetCode();
-				return false;
-			}
-
-			TSharedPtr<FJsonObject> Payload;
-			FString JsonError;
-			if (!CommandContract::Json::TryParseObject(
-					PayloadJson, Payload, JsonError)
-				|| !Payload.IsValid()
-				|| !Payload->TryGetStringField(TEXT("revision"), OutRevision)
-				|| OutRevision.IsEmpty())
-			{
-				OutDetail = JsonError.IsEmpty()
-					? FString(TEXT("public content graph revision missing"))
-					: JsonError;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("content_graph_revision_missing"), TEXT("The graph owner did not provide a state revision."), TEXT("revision_capture"));
+				OutError.TargetPath = Blueprint.GetPathName(); OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			return true;
 		}
 
+		UE::UAI::Contract::FDiagnostic ParameterFailure(const FString& Code, const FString& Field,
+			const FString& Message)
+		{
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(Code, Message, TEXT("parameters"));
+			Diagnostic.PropertyPath = Field;
+			Diagnostic.SourceKind = TEXT("command_input");
+			return Diagnostic;
+		}
+
 		bool ParseOptions(
 			const TSharedPtr<FJsonObject>& Params,
 			UeAgentBlueprintAutoLayout::FOptions& OutOptions,
-			FString& OutCode,
-			FString& OutDetail)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const TSharedPtr<FJsonObject>* Parameters = nullptr;
 			if (!Params.IsValid()
 				|| !Params->TryGetObjectField(TEXT("parameters"), Parameters)
 				|| !Parameters || !Parameters->IsValid())
 			{
-				OutCode = TEXT("unified_graph_layout_contract_invalid");
-				OutDetail = TEXT("parameters must be an object");
+				OutError = ParameterFailure(TEXT("unified_graph_layout_contract_invalid"), TEXT("parameters"),
+					TEXT("parameters must be an object."));
+				OutError.Source.JsonPath = TEXT("/parameters"); OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object"));
+				OutError.ActualValue = Params ? Params->TryGetField(TEXT("parameters")) : nullptr; OutError.ActualValuePresent = Params && Params->HasField(TEXT("parameters"));
 				return false;
 			}
 			const TSet<FString> Supported = {
@@ -209,38 +173,50 @@ namespace UE::UAI::Core::GraphLayout
 			{
 				if (!Supported.Contains(Pair.Key))
 				{
-					OutCode = TEXT("unified_graph_layout_parameter_unsupported");
-					OutDetail = Pair.Key;
+					OutError = ParameterFailure(TEXT("unified_graph_layout_parameter_unsupported"), TEXT("parameters.") + Pair.Key,
+						TEXT("Unknown layout parameter. Use horizontal_spacing, vertical_spacing, node_padding, origin_x or origin_y."));
+					OutError.ActualValue = Pair.Value;
 					return false;
 				}
 			}
-			(*Parameters)->TryGetNumberField(
-				TEXT("horizontal_spacing"), OutOptions.HorizontalSpacing);
-			(*Parameters)->TryGetNumberField(
-				TEXT("vertical_spacing"), OutOptions.VerticalSpacing);
-			(*Parameters)->TryGetNumberField(
-				TEXT("node_padding"), OutOptions.NodePadding);
-			(*Parameters)->TryGetNumberField(TEXT("origin_x"), OutOptions.OriginX);
-			(*Parameters)->TryGetNumberField(TEXT("origin_y"), OutOptions.OriginY);
-			if (!FMath::IsFinite(OutOptions.HorizontalSpacing)
-				|| !FMath::IsFinite(OutOptions.VerticalSpacing)
-				|| !FMath::IsFinite(OutOptions.NodePadding)
-				|| !FMath::IsFinite(OutOptions.OriginX)
-				|| !FMath::IsFinite(OutOptions.OriginY)
-				|| OutOptions.HorizontalSpacing <= 0.0
-				|| OutOptions.VerticalSpacing <= 0.0
-				|| OutOptions.NodePadding < 0.0)
+			const auto ReadNumber = [&](const TCHAR* Field, double& Value) -> bool
 			{
-				OutCode = TEXT("unified_graph_layout_spacing_invalid");
-				OutDetail = TEXT("spacing must be finite and positive; padding must be non-negative");
+				if (!(*Parameters)->HasField(Field)) return true;
+				if (!(*Parameters)->TryGetNumberField(Field, Value))
+				{
+					OutError = ParameterFailure(TEXT("unified_graph_layout_parameter_invalid"), FString(TEXT("parameters.")) + Field,
+						TEXT("The supplied layout parameter must be a number."));
+					OutError.Source.JsonPath = FString(TEXT("/parameters/")) + Field; OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("number")); OutError.ActualValue = (*Parameters)->TryGetField(Field);
+					return false;
+				}
+				const bool bSpacing = FCString::Strcmp(Field, TEXT("horizontal_spacing")) == 0
+					|| FCString::Strcmp(Field, TEXT("vertical_spacing")) == 0;
+				const bool bPadding = FCString::Strcmp(Field, TEXT("node_padding")) == 0;
+				if (!FMath::IsFinite(Value) || (bSpacing && Value <= 0.0)
+					|| (bPadding && Value < 0.0))
+				{
+					OutError = ParameterFailure(TEXT("unified_graph_layout_spacing_invalid"), FString(TEXT("parameters.")) + Field,
+						!FMath::IsFinite(Value) ? TEXT("The layout parameter must be finite.") : bSpacing ? TEXT("Layout spacing must be positive.") : TEXT("Layout node padding must be non-negative."));
+					OutError.Source.JsonPath = FString(TEXT("/parameters/")) + Field;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(bSpacing ? TEXT("finite number > 0") : bPadding ? TEXT("finite number >= 0") : TEXT("finite number"));
+					OutError.ActualValue = FMath::IsFinite(Value) ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Value)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(FString::Printf(TEXT("%.17g"), Value)));
+					return false;
+				}
+				return true;
+			};
+			if (!ReadNumber(TEXT("horizontal_spacing"), OutOptions.HorizontalSpacing)
+				|| !ReadNumber(TEXT("vertical_spacing"), OutOptions.VerticalSpacing)
+				|| !ReadNumber(TEXT("node_padding"), OutOptions.NodePadding)
+				|| !ReadNumber(TEXT("origin_x"), OutOptions.OriginX)
+				|| !ReadNumber(TEXT("origin_y"), OutOptions.OriginY))
+			{
 				return false;
 			}
 			double AccessOffsetX = 0.0;
 			if (!UeAgentBlueprintOps::TryComputeGraphEditorAccessOffsetX(
 					AccessOffsetX))
 			{
-				OutCode = TEXT("unified_graph_layout_geometry_unavailable");
-				OutDetail = TEXT("graph editor access offset is unavailable");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_geometry_unavailable"), TEXT("The graph editor settings could not produce a usable spline access offset for layout."), TEXT("parameters")); OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			OutOptions.OutputAccessOffsetX = AccessOffsetX;
@@ -255,9 +231,7 @@ namespace UE::UAI::Core::GraphLayout
 			TArray<FTarget>& OutTargets,
 			UBlueprint*& OutBlueprint,
 			UPackage*& OutPackage,
-			FString& OutCode,
-			FString& OutSubject,
-			FString& OutDetail)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutTargets.Reset();
 			OutBlueprint = nullptr;
@@ -267,7 +241,9 @@ namespace UE::UAI::Core::GraphLayout
 				|| !Params->TryGetArrayField(TEXT("targets"), Values)
 				|| !Values || Values->IsEmpty())
 			{
-				OutCode = TEXT("unified_graph_layout_targets_required");
+				OutError = ParameterFailure(TEXT("unified_graph_layout_targets_required"), TEXT("targets"),
+					TEXT("targets must be a non-empty array of graph selections."));
+				OutError.Source.JsonPath = TEXT("/targets"); OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty array")); OutError.ActualValue = Params ? Params->TryGetField(TEXT("targets")) : nullptr; OutError.ActualValuePresent = Params && Params->HasField(TEXT("targets"));
 				return false;
 			}
 			TSet<FString> Identities;
@@ -280,41 +256,45 @@ namespace UE::UAI::Core::GraphLayout
 					|| !Object->TryGetStringField(
 						TEXT("graph_identity"), Target.Identity)
 					|| Target.Identity.IsEmpty()
-					|| !Object->TryGetStringField(
-						TEXT("expected_revision"), Target.ExpectedRevision)
-					|| Target.ExpectedRevision.IsEmpty())
+					)
 				{
-					OutCode = TEXT("unified_graph_layout_target_invalid");
+					OutError = ParameterFailure(TEXT("unified_graph_layout_target_invalid"),
+						FString::Printf(TEXT("targets[%d].graph_identity"), OutTargets.Num()),
+						TEXT("Each target must contain a non-empty graph_identity string."));
+					OutError.Source.JsonPath = Object ? FString::Printf(TEXT("/targets/%d/graph_identity"), OutTargets.Num()) : FString::Printf(TEXT("/targets/%d"), OutTargets.Num());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Object ? TEXT("non-empty graph identity") : TEXT("graph selection object"));
+					OutError.ActualEvidence = Object ? Object->TryGetField(TEXT("graph_identity")) : Value; OutError.ActualValuePresent = Object ? Object->HasField(TEXT("graph_identity")) : Value.IsValid();
 					return false;
 				}
 				Target.Graph = Cast<UEdGraph>(StaticLoadObject(
 					UEdGraph::StaticClass(), nullptr, *Target.Identity));
 				if (!Target.Graph)
 				{
-					OutCode = TEXT("unified_graph_layout_target_unsupported");
-					OutSubject = Target.Identity;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_target_unsupported"), TEXT("The requested layout target could not be loaded as an Unreal graph."), TEXT("parameters"));
+					OutError.Source.JsonPath = FString::Printf(TEXT("/targets/%d/graph_identity"), OutTargets.Num()); OutError.PropertyPath = TEXT("graph_identity");
+					OutError.TargetPath = Target.Identity;
 					return false;
 				}
 				Target.Identity = Target.Graph->GetPathName();
 				if (Identities.Contains(Target.Identity))
 				{
-					OutCode = TEXT("unified_graph_layout_target_duplicate");
-					OutSubject = Target.Identity;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_target_duplicate"), TEXT("The layout request selects the same graph more than once."), TEXT("parameters")); OutError.Source.JsonPath = FString::Printf(TEXT("/targets/%d/graph_identity"), OutTargets.Num());
+					OutError.TargetPath = Target.Identity;
 					return false;
 				}
 				Identities.Add(Target.Identity);
 				if (!TryResolveProvider(
 						*Target.Graph, Target.Blueprint, Target.ProviderId))
 				{
-					OutCode = TEXT("unified_graph_layout_provider_unsupported");
-					OutSubject = Target.Identity;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_provider_unsupported"), TEXT("No supported Blueprint layout provider owns the selected graph."), TEXT("parameters")); OutError.Source.JsonPath = FString::Printf(TEXT("/targets/%d/graph_identity"), OutTargets.Num()); OutError.ActualValue = MakeShared<FJsonValueString>(Target.Graph->GetClass()->GetName());
+					OutError.TargetPath = Target.Identity;
 					return false;
 				}
 				Target.Package = Target.Blueprint->GetOutermost();
 				if (!Target.Package)
 				{
-					OutCode = TEXT("unified_graph_layout_package_missing");
-					OutSubject = Target.Identity;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_package_missing"), TEXT("The selected graph's owning Blueprint has no package for the layout transaction."), TEXT("parameters")); OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Target.Identity;
 					return false;
 				}
 				if (!OutBlueprint)
@@ -325,11 +305,10 @@ namespace UE::UAI::Core::GraphLayout
 				else if (Target.Blueprint != OutBlueprint
 					|| Target.Package != OutPackage)
 				{
-					OutCode = TEXT(
-						"unified_graph_layout_cross_package_atomicity_unsupported");
-					OutSubject = Target.Identity;
-					OutDetail = TEXT(
-						"all targets must belong to the same owning Blueprint asset and package");
+					OutError = ParameterFailure(TEXT("unified_graph_layout_cross_package_atomicity_unsupported"), TEXT("targets"),
+						TEXT("All targets must belong to the same owning Blueprint asset and package."));
+					OutError.TargetPath = Target.Identity;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(OutBlueprint->GetPathName()); OutError.ActualValue = MakeShared<FJsonValueString>(Target.Blueprint->GetPathName());
 					return false;
 				}
 				OutTargets.Add(MoveTemp(Target));
@@ -369,16 +348,10 @@ namespace UE::UAI::Core::GraphLayout
 
 		TSharedPtr<FJsonObject> CaptureReadback(
 			const FTarget& Target,
-			const FString& Revision,
-			FString& OutMismatch)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			OutMismatch.Reset();
+			OutError.Reset();
 			const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(TEXT("graph_identity"), Target.Identity);
-			Object->SetStringField(TEXT("owner_identity"),
-				Target.Blueprint ? Target.Blueprint->GetPathName() : FString());
-			Object->SetStringField(TEXT("provider_id"), Target.ProviderId);
-			Object->SetStringField(TEXT("revision"), Revision);
 			Object->SetNumberField(TEXT("moved_node_count"),
 				Target.Run.MovedNodeCount);
 			Object->SetNumberField(TEXT("applied_move_count"),
@@ -391,10 +364,6 @@ namespace UE::UAI::Core::GraphLayout
 				Target.Geometry.GeometrySource);
 			Object->SetBoolField(TEXT("geometry_used_offscreen_graph_editor"),
 				Target.Geometry.bUsedOffscreenGraphEditor);
-			Object->SetObjectField(TEXT("metrics_before"),
-				UeAgentBlueprintAutoLayout::MetricsToJson(Target.Run.MetricsBefore));
-			Object->SetObjectField(TEXT("metrics_after"),
-				UeAgentBlueprintAutoLayout::MetricsToJson(Target.Run.MetricsAfter));
 
 			TArray<UEdGraphNode*> SortedNodes;
 			if (Target.Graph)
@@ -411,101 +380,105 @@ namespace UE::UAI::Core::GraphLayout
 			{
 				return NodeKey(Left) < NodeKey(Right);
 			});
-			TArray<TSharedPtr<FJsonValue>> Nodes;
+			TSet<FString> ObservedKeys;
 			for (const UEdGraphNode* Node : SortedNodes)
 			{
 				const FString Key = NodeKey(*Node);
+				ObservedKeys.Add(Key);
 				const FIntPoint* Expected = Target.ExpectedAfterPositions.Find(Key);
 				if (!Expected
 					|| Expected->X != Node->NodePosX
 					|| Expected->Y != Node->NodePosY)
 				{
-					OutMismatch = Key;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_independent_readback_failed"), Expected ? TEXT("The persisted node position differs from the applied layout.") : TEXT("The persisted graph contains a node absent from the applied layout."), TEXT("graph_layout"), Key);
+					OutError.SourceKind = TEXT("native_result"); OutError.TargetPath = Target.Identity; OutError.CandidateName = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
+					OutError.PropertyPath = TEXT("node_position"); OutError.ExpectedValuePresent = Expected != nullptr;
+					if (Expected) OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected->ToString());
+					OutError.ActualValue = MakeShared<FJsonValueString>(FIntPoint(Node->NodePosX, Node->NodePosY).ToString());
 					return nullptr;
 				}
-				const TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-				Item->SetStringField(TEXT("node_identity"), Node->GetPathName());
-				Item->SetStringField(TEXT("node_guid"), Key);
-				Item->SetNumberField(TEXT("x"), Node->NodePosX);
-				Item->SetNumberField(TEXT("y"), Node->NodePosY);
-				Nodes.Add(MakeShared<FJsonValueObject>(Item));
 			}
-			Object->SetNumberField(TEXT("node_count"), Nodes.Num());
-			Object->SetArrayField(TEXT("nodes"), MoveTemp(Nodes));
+			for (const TPair<FString, FIntPoint>& Expected : Target.ExpectedAfterPositions)
+			{
+				if (!ObservedKeys.Contains(Expected.Key))
+				{
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_independent_readback_failed"), TEXT("A node from the applied layout is missing after package reload."), TEXT("graph_layout"), Expected.Key);
+					OutError.SourceKind = TEXT("native_result"); OutError.TargetPath = Target.Identity; OutError.PropertyPath = TEXT("node_position");
+					OutError.CandidateName = Target.ExpectedNodeNames.FindRef(Expected.Key);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected.Value.ToString()); OutError.ActualValuePresent = false;
+					return nullptr;
+				}
+			}
+			Object->SetNumberField(TEXT("node_count"), SortedNodes.Num());
 			return Object;
 		}
 	}
 
 	FUeAgentCommandResult Execute(const FUeAgentCommandRequest& Request)
 	{
+        bool bMutationStarted = false;
+        bool bPersisted = false;
+        bool bRollbackAttempted = false;
+        auto Fail = [&](const FUeAgentCommandRequest& CommandRequest, UE::UAI::Contract::FDiagnostic Diagnostic,
+            const FString& EnvelopeCode = FString(), const FString& Subject = FString())
+        {
+            Diagnostic.MutationStarted = bMutationStarted;
+            if (bMutationStarted) Diagnostic.bRetrySafe = false;
+            if (bPersisted) Diagnostic.TransactionStatus = TEXT("committed");
+            if (bRollbackAttempted) Diagnostic.RollbackAttempted = true;
+            return Failure(CommandRequest, MoveTemp(Diagnostic), EnvelopeCode, Subject);
+        };
+
 		if (!IsInGameThread())
 		{
-			return Failure(Request,
-				TEXT("unified_graph_layout_game_thread_required"),
-				CommandId, TEXT(""));
+			return Fail(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_game_thread_required"), TEXT("Graph layout must run on the editor game thread."), TEXT("graph_layout")), TEXT("unified_graph_layout_game_thread_required"), CommandId);
 		}
 		const TSharedPtr<FJsonObject>& Params = Request.GetParams();
 		FString Strategy;
-		FString Authorization;
 		if (!Params.IsValid()
 			|| !Params->TryGetStringField(TEXT("strategy"), Strategy)
-			|| Strategy != StrategyId
-			|| !Params->TryGetStringField(
-				TEXT("authorization_id"), Authorization)
-			|| Authorization.IsEmpty())
+			|| Strategy != StrategyId)
 		{
-			return Failure(Request,
-				TEXT("unified_graph_layout_contract_invalid"),
-				CommandId, Strategy);
+			auto Error = ParameterFailure(TEXT("unified_graph_layout_contract_invalid"), TEXT("strategy"), TEXT("strategy must be hierarchical_left_to_right."));
+			Error.Source.JsonPath = TEXT("/strategy"); Error.ExpectedValue = MakeShared<FJsonValueString>(StrategyId); Error.ActualValue = Params ? Params->TryGetField(TEXT("strategy")) : nullptr; Error.ActualValuePresent = Params && Params->HasField(TEXT("strategy"));
+			return Fail(Request, MoveTemp(Error), TEXT("unified_graph_layout_contract_invalid"), CommandId);
 		}
 
 		UeAgentBlueprintAutoLayout::FOptions Options;
-		FString Code;
-		FString Subject;
-		FString Detail;
-		if (!ParseOptions(Params, Options, Code, Detail))
+		UE::UAI::Contract::FDiagnostic Detail;
+		if (!ParseOptions(Params, Options, Detail))
 		{
-			return Failure(Request, Code, CommandId, Detail);
+			return Fail(Request, Detail, FString(), CommandId);
 		}
 
 		TArray<FTarget> Targets;
 		UBlueprint* Blueprint = nullptr;
 		UPackage* Package = nullptr;
 		if (!ParseTargets(Params, Targets, Blueprint, Package,
-				Code, Subject, Detail))
+				Detail))
 		{
-			return Failure(Request, Code, Subject, Detail);
+			return Fail(Request, Detail);
 		}
 
 		FString CurrentRevision;
-		if (!TryReadPublicRevision(
-				*Blueprint, Targets[0].ProviderId, CurrentRevision, Detail))
+		if (!TryReadOwnerRevision(*Blueprint, CurrentRevision, Detail))
 		{
-			return Failure(Request,
-				TEXT("unified_graph_layout_public_revision_unavailable"),
-				Blueprint->GetPathName(), Detail);
+			return Fail(Request, Detail, TEXT("unified_graph_layout_public_revision_unavailable"), Blueprint->GetPathName());
 		}
-		for (const FTarget& Target : Targets)
+		for (FTarget& Target : Targets)
 		{
-			if (Target.ExpectedRevision != CurrentRevision)
-			{
-				return Failure(Request,
-					TEXT("unified_graph_layout_stale_revision"),
-					Target.Identity, CurrentRevision);
-			}
+			Target.FrozenRevision = CurrentRevision;
 		}
 
 		for (FTarget& Target : Targets)
 		{
 			Target.Model = UeAgentBlueprintOps::CollectGraphLayoutModel(Target.Graph);
-			FString GeometryError;
+			UE::UAI::Contract::FDiagnostic GeometryError;
 			if (!UeAgentBlueprintOps::CaptureGraphLayoutRealGeometry(
 					Blueprint, Target.Graph, Target.Model, Target.Geometry,
 					false, false, GeometryError))
 			{
-				return Failure(Request,
-					TEXT("unified_graph_layout_geometry_unavailable"),
-					Target.Identity, GeometryError);
+				return Fail(Request, GeometryError, TEXT("unified_graph_layout_geometry_unavailable"), Target.Identity);
 			}
 			UeAgentBlueprintAutoLayout::FOptions TargetOptions = Options;
 			TargetOptions.bUseRealGeometry = Target.Geometry.bUsedRealGeometry;
@@ -519,26 +492,38 @@ namespace UE::UAI::Core::GraphLayout
 					TargetOptions,
 					Target.Run))
 			{
-				return Failure(Request,
-					TEXT("unified_graph_layout_algorithm_failed"),
-					Target.Identity,
-					TEXT("real-geometry topology layout rejected the graph"));
+				return Fail(Request, UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("unified_graph_layout_algorithm_failed"), Target.Run.Error), TEXT("unified_graph_layout_algorithm_failed"), Target.Identity);
 			}
 			if (Target.Run.DesignDiagnostics.IslandLocalMembershipMutationCount > 0
 				|| Target.Run.DesignDiagnostics.IslandLocalMutationCount > 0)
 			{
-				return Failure(Request,
-					TEXT("unified_graph_layout_algorithm_invariant_failed"),
-					Target.Identity,
-					TEXT("island-local membership changed during layout"));
+				auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_algorithm_invariant_failed"), FString::Printf(TEXT("Layout computation changed graph island membership %d times and island state %d times; both counts must be zero."), Target.Run.DesignDiagnostics.IslandLocalMembershipMutationCount, Target.Run.DesignDiagnostics.IslandLocalMutationCount), TEXT("graph_layout"));
+				Error.SourceKind = TEXT("native_result");
+				return Fail(Request, MoveTemp(Error), TEXT("unified_graph_layout_algorithm_invariant_failed"), Target.Identity);
 			}
 			CapturePositions(*Target.Graph, Target.BeforePositions);
+		}
+
+		// Freeze the target revision during resolution and re-read it at the
+		// last safe point before any graph mutation.
+		FString PreWriteRevision;
+		if (!TryReadOwnerRevision(*Blueprint, PreWriteRevision, Detail))
+		{
+			return Fail(Request, Detail, TEXT("unified_graph_layout_public_revision_unavailable"), Blueprint->GetPathName());
+		}
+		for (const FTarget& Target : Targets)
+		{
+			if (Target.FrozenRevision != PreWriteRevision)
+			{
+				return Fail(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_stale_revision"), TEXT("Target state changed before the first write; no layout changes were applied."), TEXT("graph_layout"), TEXT("")), TEXT("unified_graph_layout_stale_revision"), Target.Identity);
+			}
 		}
 
 		TUniquePtr<FScopedTransaction> Transaction = MakeUnique<FScopedTransaction>(
 			NSLOCTEXT("UeAgentInterface", "UnifiedGraphLayoutTransaction",
 				"UeAgentInterface Unified Graph Layout"));
-		Blueprint->Modify();
+		bMutationStarted = true;
+        Blueprint->Modify();
 		for (FTarget& Target : Targets)
 		{
 			Target.Graph->Modify();
@@ -553,28 +538,38 @@ namespace UE::UAI::Core::GraphLayout
 				UeAgentBlueprintOps::ApplyNodePositions(Target.Model);
 			Target.Graph->NotifyGraphChanged();
 			CapturePositions(*Target.Graph, Target.ExpectedAfterPositions);
+			for (const UEdGraphNode* Node : Target.Graph->Nodes)
+			{
+				if (Node) Target.ExpectedNodeNames.Add(NodeKey(*Node), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+			}
 		}
 		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-		FKismetEditorUtilities::CompileBlueprint(Blueprint);
-		if (Blueprint->Status == BS_Error)
+		FCompilerResultsLog CompilerLog;
+		CompilerLog.bLogInfoOnly = false;
+		FKismetEditorUtilities::CompileBlueprint(
+			Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		if (CompilerLog.NumErrors > 0 || Blueprint->Status == BS_Error)
 		{
+			auto CompileDetail = UeAgentAuthoringDiagnostics::MakeCompileFailure(
+				TEXT("unified_graph_layout_compile_failed"), Blueprint->GetPathName(),
+				CompilerLog, Blueprint);
 			Rollback(Targets, Blueprint);
+            bRollbackAttempted = true;
 			Transaction->Cancel();
-			return Failure(Request,
-				TEXT("unified_graph_layout_compile_failed"),
-				Blueprint->GetPathName(), TEXT("Blueprint compile status is Error"));
+			return Fail(Request, CompileDetail, TEXT("unified_graph_layout_compile_failed"), Blueprint->GetPathName());
 		}
 		Package->MarkPackageDirty();
 		const TArray<UPackage*> Packages = {Package};
-		if (!UEditorLoadingAndSavingUtils::SavePackages(Packages, true))
+		UE::UAI::Contract::FDiagnostic SaveError;
+		if (!UE::UAI::EditorResources::SavePackages(Packages, true, SaveError))
 		{
 			Rollback(Targets, Blueprint);
+            bRollbackAttempted = true;
 			Transaction->Cancel();
-			return Failure(Request,
-				TEXT("unified_graph_layout_save_failed"),
-				Package->GetName(), TEXT("package save returned false"));
+			return Fail(Request, UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("unified_graph_layout_save_failed"), SaveError, TEXT("graph_layout"), TEXT("The native package save failed; node positions were restored in memory.")), TEXT("unified_graph_layout_save_failed"), Package->GetName());
 		}
-		Transaction.Reset();
+		bPersisted = true;
+        Transaction.Reset();
 
 		const FString BlueprintIdentity = Blueprint->GetPathName();
 		const FString PackageIdentity = Package->GetName();
@@ -591,9 +586,9 @@ namespace UE::UAI::Core::GraphLayout
 				Packages, ReloadError,
 				EReloadPackagesInteractionMode::AssumeNegative))
 		{
-			return Failure(Request,
-				TEXT("unified_graph_layout_reload_failed_state_unknown"),
-				PackageIdentity, ReloadError.ToString());
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_reload_failed_state_unknown"), TEXT("The package was saved but could not be reloaded; inspect the target before retrying."), TEXT("graph_layout"), ReloadError.ToString());
+			Error.SourceKind = TEXT("native_result");
+			return Fail(Request, MoveTemp(Error), TEXT("unified_graph_layout_reload_failed_state_unknown"), PackageIdentity);
 		}
 
 		UBlueprint* ReloadedBlueprint = nullptr;
@@ -609,10 +604,20 @@ namespace UE::UAI::Core::GraphLayout
 				|| Target.Blueprint->GetPathName() != BlueprintIdentity
 				|| ReadbackProvider != Target.ProviderId)
 			{
-				return Failure(Request,
-					TEXT("unified_graph_layout_independent_readback_failed"),
-					Target.Identity,
-					TEXT("graph owner/provider missing after package reload"));
+				const FString Reason = !Target.Graph ? TEXT("The saved graph could not be loaded after package reload.")
+					: !Target.Blueprint ? TEXT("The reloaded graph has no supported Blueprint owner.")
+					: Target.Blueprint->GetPathName() != BlueprintIdentity ? TEXT("The reloaded graph belongs to a different Blueprint.") : TEXT("The reloaded graph uses a different layout provider.");
+				auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_independent_readback_failed"), Reason, TEXT("graph_layout"));
+				Error.SourceKind = TEXT("native_result");
+				if (Target.Blueprint && Target.Blueprint->GetPathName() != BlueprintIdentity)
+				{
+					Error.PropertyPath = TEXT("graph_owner"); Error.ExpectedValue = MakeShared<FJsonValueString>(BlueprintIdentity); Error.ActualValue = MakeShared<FJsonValueString>(Target.Blueprint->GetPathName());
+				}
+				else if (Target.Blueprint)
+				{
+					Error.PropertyPath = TEXT("layout_provider"); Error.ExpectedValue = MakeShared<FJsonValueString>(Target.ProviderId); Error.ActualValue = MakeShared<FJsonValueString>(ReadbackProvider);
+				}
+				return Fail(Request, MoveTemp(Error), TEXT("unified_graph_layout_independent_readback_failed"), Target.Identity);
 			}
 			if (!ReloadedBlueprint)
 			{
@@ -621,54 +626,29 @@ namespace UE::UAI::Core::GraphLayout
 		}
 		if (!ReloadedBlueprint || ReloadedBlueprint->Status == BS_Error)
 		{
-			return Failure(Request,
-				TEXT("unified_graph_layout_independent_readback_failed"),
-				BlueprintIdentity,
-				TEXT("reloaded Blueprint compile status is Error"));
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("unified_graph_layout_independent_readback_failed"), !ReloadedBlueprint ? TEXT("No Blueprint was recovered after package reload.") : TEXT("The reloaded Blueprint reports a compile error."), TEXT("graph_layout"));
+			Error.SourceKind = TEXT("native_result");
+			return Fail(Request, MoveTemp(Error), TEXT("unified_graph_layout_independent_readback_failed"), BlueprintIdentity);
 		}
 
 		FString ReadbackRevision;
-		if (!TryReadPublicRevision(*ReloadedBlueprint,
-				Targets[0].ProviderId, ReadbackRevision, Detail))
+		if (!TryReadOwnerRevision(*ReloadedBlueprint, ReadbackRevision, Detail))
 		{
-			return Failure(Request,
-				TEXT("unified_graph_layout_independent_readback_failed"),
-				BlueprintIdentity, Detail);
+			return Fail(Request, Detail, TEXT("unified_graph_layout_independent_readback_failed"), BlueprintIdentity);
 		}
 
 		TArray<TSharedPtr<FJsonValue>> Results;
-		TArray<TSharedPtr<FJsonValue>> ImpactTargets;
 		for (const FTarget& Target : Targets)
 		{
-			FString Mismatch;
+			UE::UAI::Contract::FDiagnostic ReadbackError;
 			const TSharedPtr<FJsonObject> Captured =
-				CaptureReadback(Target, ReadbackRevision, Mismatch);
+				CaptureReadback(Target, ReadbackError);
 			if (!Captured.IsValid())
 			{
-				return Failure(Request,
-					TEXT("unified_graph_layout_independent_readback_failed"),
-					Target.Identity, Mismatch);
+				return Fail(Request, MoveTemp(ReadbackError), TEXT("unified_graph_layout_independent_readback_failed"), Target.Identity);
 			}
 			Results.Add(MakeShared<FJsonValueObject>(Captured));
-			ImpactTargets.Add(MakeShared<FJsonValueString>(Target.Identity));
 		}
-
-		const TSharedPtr<FJsonObject> Impact = MakeShared<FJsonObject>();
-		Impact->SetArrayField(TEXT("targets"), MoveTemp(ImpactTargets));
-		Impact->SetStringField(TEXT("owner_identity"), BlueprintIdentity);
-		Impact->SetStringField(TEXT("package_identity"), PackageIdentity);
-		Impact->SetStringField(TEXT("authorization_id"), Authorization);
-		Impact->SetStringField(TEXT("atomicity"),
-			TEXT("single_package_preflight_with_pre_save_rollback"));
-		Impact->SetBoolField(TEXT("cross_package_supported"), false);
-
-		const TSharedPtr<FJsonObject> Persistence = MakeShared<FJsonObject>();
-		Persistence->SetStringField(TEXT("receipt_id"),
-			TEXT("reload:") + BlueprintIdentity + TEXT(":") + ReadbackRevision);
-		Persistence->SetStringField(TEXT("package_identity"), PackageIdentity);
-		Persistence->SetStringField(TEXT("revision"), ReadbackRevision);
-		Persistence->SetBoolField(TEXT("saved"), true);
-		Persistence->SetBoolField(TEXT("reloaded"), true);
 
 		const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 		Payload->SetStringField(TEXT("command_id"), CommandId);
@@ -680,15 +660,11 @@ namespace UE::UAI::Core::GraphLayout
 		Payload->SetBoolField(TEXT("reloaded"), true);
 		Payload->SetBoolField(TEXT("compile_settled"), true);
 		Payload->SetBoolField(TEXT("settled"), true);
-		Payload->SetObjectField(TEXT("persistence_receipt"), Persistence);
-		Payload->SetObjectField(TEXT("impact_plan"), Impact);
-		Payload->SetArrayField(TEXT("independent_readback"), MoveTemp(Results));
+		Payload->SetArrayField(TEXT("layout_summary"), MoveTemp(Results));
 		FString PayloadJson;
-		if (!Canonical(Payload, PayloadJson))
+		if (!CommandContract::Json::TryCanonicalize(Payload, PayloadJson, Detail))
 		{
-			return Failure(Request,
-				TEXT("unified_graph_layout_result_invalid"),
-				CommandId, TEXT("could not canonicalize result"));
+			return Fail(Request, Detail, TEXT("unified_graph_layout_result_invalid"), CommandId);
 		}
 		return FUeAgentCommandResult::Success(Request, MoveTemp(PayloadJson));
 	}

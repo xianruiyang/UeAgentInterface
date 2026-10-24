@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UeAgentUmgAuthoring
@@ -33,5 +35,5 @@ namespace UeAgentUmgAuthoring
 	inline constexpr const TCHAR* WidgetPropertyIdentityModelId = TEXT("umg_widget_property_identity");
 	inline constexpr const TCHAR* SlotPropertyIdentityModelId = TEXT("umg_slot_property_identity");
 
-	UEAGENTINTERFACE_API bool RegisterDescriptors(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError);
 }

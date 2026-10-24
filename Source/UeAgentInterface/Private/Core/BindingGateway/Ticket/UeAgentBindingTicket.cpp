@@ -1,5 +1,7 @@
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 
+#include "Dom/JsonValue.h"
+
 #define UI OpenSslUi
 #include <openssl/sha.h>
 #undef UI
@@ -10,16 +12,22 @@ namespace UE::UAI::BindingGateway::Ticket
 	{
 		using UE::UAI::Discovery::EUeAgentCandidateOperation;
 
-		void SetError(
+		FUeAgentOperationTicketError InvalidTicketField(
+			const TCHAR* Code, const TCHAR* Reason, const TCHAR* Path, const FString& InternalValue)
+		{
+			auto Error = FUeAgentOperationTicketError::Failure(Code, Reason, TEXT("binding_ticket"));
+			Error.PropertyPath = Path;
+			Error.ActualEvidence = MakeShared<FJsonValueString>(InternalValue);
+			return Error;
+		}
+
+		void SetFailure(
 			FUeAgentOperationTicketError& OutError,
 			const FString& Code,
 			const FString& SubjectId,
 			const FString& Detail)
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
+			OutError = FUeAgentOperationTicketError::Failure(Code, Detail, TEXT("binding_ticket"), FString(), SubjectId);
 		}
 
 		void AppendField(FString& Out, const FString& Value)
@@ -186,9 +194,12 @@ namespace UE::UAI::BindingGateway::Ticket
 	{
 		ServerSessionId.TrimStartAndEndInline();
 		RegistryHash.TrimStartAndEndInline();
-		bValid = !ServerSessionId.IsEmpty()
-			&& RegistryEpoch >= 0
-			&& RegistryHash.StartsWith(TEXT("sha256:"));
+		if (ServerSessionId.IsEmpty())
+			ValidationDiagnostic = InvalidTicketField(TEXT("operation_session_invalid"), TEXT("The operation session has no server session identifier."), TEXT("server_session_id"), ServerSessionId);
+		else if (RegistryEpoch < 0)
+			ValidationDiagnostic = InvalidTicketField(TEXT("operation_session_invalid"), TEXT("The operation session registry epoch must be non-negative."), TEXT("registry_epoch"), FString::Printf(TEXT("%lld"), RegistryEpoch));
+		else if (!RegistryHash.StartsWith(TEXT("sha256:")))
+			ValidationDiagnostic = InvalidTicketField(TEXT("operation_session_invalid"), TEXT("The operation session registry hash must start with 'sha256:'."), TEXT("registry_hash"), RegistryHash);
 	}
 
 	const FString&
@@ -210,7 +221,12 @@ namespace UE::UAI::BindingGateway::Ticket
 
 	bool FUeAgentOperationSessionIdentity::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
+	}
+
+	const FUeAgentOperationTicketError& FUeAgentOperationSessionIdentity::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic;
 	}
 
 	bool FUeAgentOperationSessionIdentity::operator==(
@@ -252,21 +268,28 @@ namespace UE::UAI::BindingGateway::Ticket
 		, ExpiresAt(InExpiresAt)
 		, TargetRevision(MoveTemp(InTargetRevision))
 	{
-		bValid = !TicketId.IsEmpty()
-			&& DescriptorIdentity.IsValid()
-			&& CandidateIdentity.IsValid()
-			&& !CandidateBindingId.IsEmpty()
-			&& CandidateFingerprint.StartsWith(TEXT("sha256:"))
-			&& CatalogRevision.IsValid()
-			&& !ServerSessionId.IsEmpty()
-			&& RegistryEpoch >= 0
-			&& RegistryHash.StartsWith(TEXT("sha256:"))
-			&& ContextFingerprint.StartsWith(TEXT("sha256:"))
-			&& Signature.StartsWith(TEXT("sha256:"))
-			&& IssuedAt >= 0.0
-			&& ExpiresAt > IssuedAt
-			&& (!TargetRevision.IsSet()
-				|| TargetRevision->IsValid());
+		auto Reject = [this](const TCHAR* Reason, const TCHAR* Path, const FString& Actual)
+		{
+			ValidationDiagnostic = InvalidTicketField(TEXT("operation_ticket_invalid"), Reason, Path, Actual);
+		};
+		if (TicketId.IsEmpty()) Reject(TEXT("The operation ticket has no identifier."), TEXT("ticket_id"), TicketId);
+		else if (!DescriptorIdentity.IsValid()) ValidationDiagnostic = DescriptorIdentity.GetValidationDiagnostic();
+		else if (!CandidateIdentity.IsValid()) ValidationDiagnostic = CandidateIdentity.GetValidationDiagnostic();
+		else if (CandidateBindingId.IsEmpty()) Reject(TEXT("The operation ticket has no candidate binding identifier."), TEXT("candidate_binding_id"), CandidateBindingId);
+		else if (!CandidateFingerprint.StartsWith(TEXT("sha256:"))) Reject(TEXT("The ticket candidate fingerprint must start with 'sha256:'."), TEXT("candidate_fingerprint"), CandidateFingerprint);
+		else if (!CatalogRevision.IsValid()) ValidationDiagnostic = *CatalogRevision.GetValidationDiagnostic();
+		else if (ServerSessionId.IsEmpty()) Reject(TEXT("The operation ticket has no server session identifier."), TEXT("server_session_id"), ServerSessionId);
+		else if (RegistryEpoch < 0) Reject(TEXT("The ticket registry epoch must be non-negative."), TEXT("registry_epoch"), FString::Printf(TEXT("%lld"), RegistryEpoch));
+		else if (!RegistryHash.StartsWith(TEXT("sha256:"))) Reject(TEXT("The ticket registry hash must start with 'sha256:'."), TEXT("registry_hash"), RegistryHash);
+		else if (!ContextFingerprint.StartsWith(TEXT("sha256:"))) Reject(TEXT("The ticket context fingerprint must start with 'sha256:'."), TEXT("context_fingerprint"), ContextFingerprint);
+		else if (!Signature.StartsWith(TEXT("sha256:"))) Reject(TEXT("The ticket signature must start with 'sha256:'."), TEXT("signature"), Signature);
+		else if (!(IssuedAt >= 0.0)) Reject(TEXT("The ticket issue time must be non-negative."), TEXT("issued_at"), FString::Printf(TEXT("%.17g"), IssuedAt));
+		else if (!(ExpiresAt > IssuedAt))
+		{
+			Reject(TEXT("The ticket expiry time must be later than its issue time."), TEXT("expires_at"), FString::Printf(TEXT("%.17g"), ExpiresAt));
+			ValidationDiagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("greater than %.17g"), IssuedAt));
+		}
+		else if (TargetRevision.IsSet() && !TargetRevision->IsValid()) ValidationDiagnostic = TargetRevision->GetValidationDiagnostic();
 	}
 
 	const FString&
@@ -352,7 +375,12 @@ namespace UE::UAI::BindingGateway::Ticket
 
 	bool FUeAgentOperationTicket::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
+	}
+
+	const FUeAgentOperationTicketError& FUeAgentOperationTicket::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic;
 	}
 
 	FUeAgentOperationTicketService::
@@ -378,20 +406,19 @@ namespace UE::UAI::BindingGateway::Ticket
 	{
 		OutService.Reset();
 		OutError = {};
-		if (IntegrityKey.TrimStartAndEnd().IsEmpty()
-			|| TtlSeconds <= 0.0
-			|| !Clock
-			|| !TicketIdFactory)
+		if (IntegrityKey.TrimStartAndEnd().IsEmpty())
+			OutError = InvalidTicketField(TEXT("ticket_service_invalid"), TEXT("Ticket signing requires a non-empty integrity key."), TEXT("integrity_key"), FString());
+		else if (TtlSeconds <= 0.0)
 		{
-			SetError(
-				OutError,
-				TEXT("ticket_service_invalid"),
-				TEXT("ticket_service"),
-				TEXT(
-					"Integrity key, positive TTL, clock, and "
-					"ticket-id factory are required."));
-			return false;
+			OutError = FUeAgentOperationTicketError::Failure(TEXT("ticket_service_invalid"), TEXT("Ticket lifetime must be positive."), TEXT("binding_ticket"));
+			OutError.PropertyPath = TEXT("ttl_seconds");
+			OutError.ActualValue = MakeShared<FJsonValueString>(FString::Printf(TEXT("%.17g"), TtlSeconds));
 		}
+		else if (!Clock)
+			OutError = InvalidTicketField(TEXT("ticket_service_invalid"), TEXT("The ticket service requires a host clock."), TEXT("clock"), TEXT("missing"));
+		else if (!TicketIdFactory)
+			OutError = InvalidTicketField(TEXT("ticket_service_invalid"), TEXT("The ticket service requires an identifier factory."), TEXT("ticket_id_factory"), TEXT("missing"));
+		if (!OutError.IsEmpty()) return false;
 		OutService = MakeShareable(
 			new FUeAgentOperationTicketService(
 				IntegrityKey,
@@ -529,33 +556,26 @@ namespace UE::UAI::BindingGateway::Ticket
 	{
 		OutTicket.Reset();
 		OutError = {};
-		if (!Binding.IsValid()
-			|| !DescriptorIdentity.IsValid()
-			|| !Session.IsValid()
-			|| !CallerContext.IsValid()
-			|| (TargetRevision.IsSet()
-				&& !TargetRevision->IsValid()))
+		if (!Binding.IsValid())
 		{
-			SetError(
-				OutError,
-				TEXT("ticket_claim_invalid"),
-				Binding.GetBindingId(),
-				TEXT("A ticket claim is invalid."));
+			OutError = *Binding.GetValidationDiagnostic();
 			return false;
 		}
+		if (!DescriptorIdentity.IsValid()) OutError = DescriptorIdentity.GetValidationDiagnostic();
+		else if (!Session.IsValid()) OutError = Session.GetValidationDiagnostic();
+		else if (!CallerContext.IsValid()) OutError = CallerContext.GetValidationDiagnostic();
+		else if (TargetRevision.IsSet() && !TargetRevision->IsValid()) OutError = TargetRevision->GetValidationDiagnostic();
+		if (!OutError.IsEmpty()) return false;
 		const FString NewTicketId = TicketIdFactory();
 		const double Now = Clock();
-		if (NewTicketId.TrimStartAndEnd().IsEmpty()
-			|| !FMath::IsFinite(Now)
-			|| Now < 0.0)
+		if (NewTicketId.TrimStartAndEnd().IsEmpty())
 		{
-			SetError(
-				OutError,
-				TEXT("ticket_host_invalid"),
-				Binding.GetBindingId(),
-				TEXT(
-					"The host clock or ticket-id factory "
-					"returned an invalid value."));
+			OutError = InvalidTicketField(TEXT("ticket_host_invalid"), TEXT("The ticket-id factory returned an empty identifier."), TEXT("ticket_id"), NewTicketId);
+			return false;
+		}
+		if (!FMath::IsFinite(Now) || Now < 0.0)
+		{
+			OutError = InvalidTicketField(TEXT("ticket_host_invalid"), TEXT("The host clock must return a finite, non-negative time."), TEXT("issued_at"), FString::Printf(TEXT("%.17g"), Now));
 			return false;
 		}
 		FUeAgentOperationTicket Unsigned(
@@ -592,13 +612,7 @@ namespace UE::UAI::BindingGateway::Ticket
 			Unsigned.TargetRevision);
 		if (!Signed.IsValid())
 		{
-			SetError(
-				OutError,
-				TEXT("ticket_creation_failed"),
-				Binding.GetBindingId(),
-				TEXT(
-					"The signed ticket did not satisfy its "
-					"immutable contract."));
+			OutError = Signed.GetValidationDiagnostic();
 			return false;
 		}
 		OutTicket.Emplace(MoveTemp(Signed));
@@ -614,127 +628,136 @@ namespace UE::UAI::BindingGateway::Ticket
 		FUeAgentOperationTicketError& OutError) const
 	{
 		OutError = {};
-		if (!Ticket.IsValid()
-			|| !Binding.IsValid()
-			|| !DescriptorIdentity.IsValid()
-			|| !Session.IsValid()
-			|| !CallerContext.IsValid())
+		if (!Ticket.IsValid()) OutError = Ticket.GetValidationDiagnostic();
+		else if (!Binding.IsValid()) OutError = *Binding.GetValidationDiagnostic();
+		else if (!DescriptorIdentity.IsValid()) OutError = DescriptorIdentity.GetValidationDiagnostic();
+		else if (!Session.IsValid()) OutError = Session.GetValidationDiagnostic();
+		else if (!CallerContext.IsValid()) OutError = CallerContext.GetValidationDiagnostic();
+		if (!OutError.IsEmpty()) return false;
+		auto Mismatch = [&](const TCHAR* Path, const FString& Actual, const FString& Expected)
 		{
-			SetError(
-				OutError,
-				TEXT("ticket_claim_invalid"),
-				Ticket.GetTicketId(),
-				TEXT(
-					"Ticket validation received invalid "
-					"typed input."));
-			return false;
-		}
+			OutError.PropertyPath = Path;
+			OutError.TargetPath = Binding.GetPublicRef();
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(Actual);
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Expected);
+		};
 		if (!(Ticket.GetDescriptorIdentity()
 			== DescriptorIdentity))
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("descriptor_hash_mismatch"),
 				DescriptorIdentity.GetDescriptorId(),
 				TEXT(
 					"Ticket descriptor identity differs from "
 					"the active descriptor."));
+			Mismatch(TEXT("descriptor"), Ticket.GetDescriptorIdentity().GetDescriptorId() + TEXT(":") + FString::FromInt(Ticket.GetDescriptorIdentity().GetVersion()) + TEXT(":") + Ticket.GetDescriptorIdentity().GetDescriptorHash(), DescriptorIdentity.GetDescriptorId() + TEXT(":") + FString::FromInt(DescriptorIdentity.GetVersion()) + TEXT(":") + DescriptorIdentity.GetDescriptorHash());
 			return false;
 		}
 		if (Ticket.GetServerSessionId()
 			!= Session.GetServerSessionId())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("server_session_stale"),
 				Ticket.GetTicketId(),
 				TEXT(
 					"Ticket belongs to another server "
 					"session."));
+			Mismatch(TEXT("server_session_id"), Ticket.GetServerSessionId(), Session.GetServerSessionId());
 			return false;
 		}
 		if (Ticket.GetRegistryEpoch()
 			!= Session.GetRegistryEpoch())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("registry_epoch_stale"),
 				Ticket.GetTicketId(),
 				TEXT("Ticket registry epoch is stale."));
+			Mismatch(TEXT("registry_epoch"), FString::Printf(TEXT("%lld"), Ticket.GetRegistryEpoch()), FString::Printf(TEXT("%lld"), Session.GetRegistryEpoch()));
 			return false;
 		}
 		if (Ticket.GetRegistryHash()
 			!= Session.GetRegistryHash())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("registry_hash_mismatch"),
 				Ticket.GetTicketId(),
 				TEXT(
 					"Ticket registry hash differs from the "
 					"active registry."));
+			Mismatch(TEXT("registry_hash"), Ticket.GetRegistryHash(), Session.GetRegistryHash());
 			return false;
 		}
 		if (Ticket.GetCatalogRevision()
 			!= Binding.GetCatalogRevision())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("catalog_revision_stale"),
 				Ticket.GetTicketId(),
 				TEXT("Ticket catalog revision is stale."));
+			Mismatch(TEXT("catalog_revision"), Ticket.GetCatalogRevision().GetSourceId() + TEXT(":") + Ticket.GetCatalogRevision().GetGeneration() + TEXT(":") + FString::Printf(TEXT("%lld"), Ticket.GetCatalogRevision().GetSequence()), Binding.GetCatalogRevision().GetSourceId() + TEXT(":") + Binding.GetCatalogRevision().GetGeneration() + TEXT(":") + FString::Printf(TEXT("%lld"), Binding.GetCatalogRevision().GetSequence()));
 			return false;
 		}
-		if (Ticket.GetCandidateBindingId()
-				!= Binding.GetBindingId()
-			|| !(Ticket.GetCandidateIdentity()
-				== Binding.GetSummary().GetIdentity())
-			|| Ticket.GetCandidateFingerprint()
-				!= CandidateFingerprint(
-					Binding,
-					DescriptorIdentity))
+		if (Ticket.GetCandidateBindingId() != Binding.GetBindingId())
 		{
-			SetError(
-				OutError,
-				TEXT("candidate_fingerprint_mismatch"),
-				Ticket.GetTicketId(),
-				TEXT(
-					"Ticket no longer binds the supplied "
-					"candidate."));
+			SetFailure(OutError, TEXT("candidate_fingerprint_mismatch"), Ticket.GetTicketId(), TEXT("The ticket refers to a different candidate binding."));
+			Mismatch(TEXT("candidate_binding_id"), Ticket.GetCandidateBindingId(), Binding.GetBindingId());
+			return false;
+		}
+		if (!(Ticket.GetCandidateIdentity() == Binding.GetSummary().GetIdentity()))
+		{
+			SetFailure(OutError, TEXT("candidate_fingerprint_mismatch"), Ticket.GetTicketId(), TEXT("The ticket candidate identity no longer matches the resolved candidate."));
+			Mismatch(TEXT("candidate_identity"), Ticket.GetCandidateIdentity().GetCanonicalKey(), Binding.GetSummary().GetIdentity().GetCanonicalKey());
+			return false;
+		}
+		const FString ExpectedCandidateFingerprint = CandidateFingerprint(Binding, DescriptorIdentity);
+		if (Ticket.GetCandidateFingerprint() != ExpectedCandidateFingerprint)
+		{
+			SetFailure(OutError, TEXT("candidate_fingerprint_mismatch"), Ticket.GetTicketId(), TEXT("The candidate has changed since the ticket was issued."));
+			Mismatch(TEXT("candidate_fingerprint"), Ticket.GetCandidateFingerprint(), ExpectedCandidateFingerprint);
 			return false;
 		}
 		if (Ticket.GetContextFingerprint()
 			!= ContextFingerprint(CallerContext))
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("ticket_context_mismatch"),
 				Ticket.GetTicketId(),
 				TEXT(
 					"Ticket caller or authority scopes "
 					"differ."));
+			Mismatch(TEXT("context_fingerprint"), Ticket.GetContextFingerprint(), ContextFingerprint(CallerContext));
 			return false;
 		}
 		const double Now = Clock();
-		if (!FMath::IsFinite(Now)
-			|| Now >= Ticket.GetExpiresAt())
+		if (!FMath::IsFinite(Now))
 		{
-			SetError(
-				OutError,
-				TEXT("ticket_expired"),
-				Ticket.GetTicketId(),
-				TEXT("Ticket has expired."));
+			OutError = InvalidTicketField(TEXT("ticket_host_invalid"), TEXT("The host clock returned a non-finite time during ticket validation."), TEXT("clock"), FString::Printf(TEXT("%.17g"), Now));
+			return false;
+		}
+		if (Now >= Ticket.GetExpiresAt())
+		{
+			SetFailure(OutError, TEXT("ticket_expired"), Ticket.GetTicketId(), TEXT("The ticket has expired; resolve the candidate again before submitting."));
+			OutError.PropertyPath = TEXT("expires_at");
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(Now);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(FString::Printf(TEXT("time before %.17g"), Ticket.GetExpiresAt()));
 			return false;
 		}
 		if (!ConstantTimeEquals(
 				Ticket.GetSignature(),
 				Sign(Ticket)))
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("ticket_integrity_mismatch"),
 				Ticket.GetTicketId(),
 				TEXT("Ticket signature is invalid."));
+			Mismatch(TEXT("signature"), Ticket.GetSignature(), Sign(Ticket));
 			return false;
 		}
 		return true;

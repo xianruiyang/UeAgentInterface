@@ -23,16 +23,33 @@ UEAGENTINTERFACE_API bool PreflightWorkspace(
     const IPreflightProvider &Provider, FPreflightResult &OutResult);
 
 struct UEAGENTINTERFACE_API FOperationFailure {
-  FString ErrorCode;
-  FString ErrorDetail;
   UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic;
 };
+
+// Evidence of this operation's completed stages, not a source asset's stored
+// compiler freshness. Only ExecuteAtomic publishes it during synchronous final
+// readback; nested operations restore the enclosing scope on return.
+struct UEAGENTINTERFACE_API FFinalReadbackEvidence {
+  bool bMutationPhaseCompleted = false;
+  bool bNativeUpdateRequested = false;
+  bool bNativeUpdateCompleted = false;
+  bool bSaveCompleted = false;
+
+  TSharedRef<FJsonObject> ToJsonObject() const;
+  static bool TryFromJsonObject(const FJsonObject& Object, FFinalReadbackEvidence& OutEvidence,
+      UE::UAI::Contract::FDiagnostic& OutError);
+};
+
+UEAGENTINTERFACE_API bool TryGetFinalReadbackEvidence(FFinalReadbackEvidence& OutEvidence);
+
+enum class EDurableArtifactKind : uint8 { File, DirectoryTree };
 
 struct UEAGENTINTERFACE_API FDurableArtifact {
   FString ArtifactId;
   FString FinalPath;
   FString StagingPath;
   bool bStagedExists = false;
+  EDurableArtifactKind Kind = EDurableArtifactKind::File;
 };
 
 struct UEAGENTINTERFACE_API FDurabilityResult {
@@ -41,6 +58,7 @@ struct UEAGENTINTERFACE_API FDurabilityResult {
   FString JournalPath;
   FString RecoveryStatus;
   TArray<FString> PhaseHistory;
+  TArray<UeAgentAuthoringDiagnostics::FDiagnostic> Warnings;
   int32 ArtifactCount = 0;
   bool bReplayed = false;
   bool bRestoreAttempted = false;
@@ -99,7 +117,25 @@ public:
   virtual bool StageDurableArtifacts(
       TArray<FDurableArtifact> &InOutArtifacts,
       FOperationFailure &OutFailure);
-  virtual void FinalizeDurableCommit(bool bCommitted);
+  // Native creation can allocate owned packages after preparation. They have
+  // no captured dirty memory before this edit; their disk before-images still
+  // enter this same journal before any publication.
+  virtual bool CollectAdditionalDurableArtifacts(TArray<FDurableArtifact>& OutArtifacts,
+      FOperationFailure& OutFailure) { OutArtifacts.Reset(); return true; }
+  virtual bool StageMemoryCheckpoint(TArray<FDurableArtifact> &InOutArtifacts,
+      FOperationFailure &OutFailure) {
+    return StageDurableArtifacts(InOutArtifacts, OutFailure);
+  }
+		virtual bool FinalizeDurableCommit(bool bCommitted, FOperationFailure& OutFailure);
+  // Persistent readback is part of this transaction, before either commit.
+  virtual bool RequiresPersistentReadback() const { return false; }
+  virtual bool RequiresMemoryCheckpoint() const { return RequiresPersistentReadback(); }
+  virtual bool RequiresCheckpointRollback() const { return false; }
+  virtual bool HasReleasedNativeState() const { return false; }
+  virtual bool FinalizeVerification(FOperationFailure &OutFailure) { return true; }
+  virtual bool PrepareCheckpointRestore(FOperationFailure &OutFailure) { return true; }
+  virtual bool ReloadCheckpoint(FOperationFailure &OutFailure) { return true; }
+  virtual bool VerifyRestoredState(FOperationFailure &OutFailure) { return true; }
 };
 
 struct UEAGENTINTERFACE_API FPreparedUnit {
@@ -115,9 +151,6 @@ struct UEAGENTINTERFACE_API FPreparedUnit {
 
 struct UEAGENTINTERFACE_API FPreflightResult {
   FString Status;
-  FString ErrorCode;
-  FString ErrorDetail;
-  FString CauseCode;
   FString ContractId;
   FString ContractVersion;
   UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic;
@@ -132,6 +165,7 @@ struct UEAGENTINTERFACE_API FPreflightResult {
   FPreflightResult &operator=(const FPreflightResult &) = delete;
 
   bool IsReady() const;
+  bool IsReady(UeAgentAuthoringDiagnostics::FDiagnostic* OutError) const;
 
 private:
   bool bValidated = false;
@@ -152,9 +186,6 @@ struct UEAGENTINTERFACE_API FExecutionOptions {
 struct UEAGENTINTERFACE_API FExecutionResult {
   FString Status;
   FString Phase;
-  FString ErrorCode;
-  FString ErrorDetail;
-  FString CauseCode;
   UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic;
   TArray<FString> AttemptedUnitKeys;
   TArray<FString> RolledBackUnitKeys;

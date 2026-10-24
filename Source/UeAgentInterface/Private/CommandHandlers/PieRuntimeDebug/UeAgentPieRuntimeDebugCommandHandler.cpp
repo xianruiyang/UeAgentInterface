@@ -1,7 +1,10 @@
 #include "CommandHandlers/PieRuntimeDebug/UeAgentPieRuntimeDebugCommandHandler.h"
 
-#include "Core/Contract/UeAgentContractJson.h"
-#include "Dom/JsonObject.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
+
+#include "CommandEdge/UeAgentApplicationResultProjection.h"
+
+#include "Dom/JsonValue.h"
 #include "OperationOwners/PieRuntimeDebug/UeAgentPieRuntimeDebugOwner.h"
 
 namespace UE::UAI::CommandHandlers::PieRuntimeDebug
@@ -14,49 +17,24 @@ namespace UE::UAI::CommandHandlers::PieRuntimeDebug
 	{
 		const FString Owner(TEXT("pie-runtime-debug-command-owner"));
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		FDiagnostic CommandFailure(const FString& Code, const FString& SubjectId, const FString& Reason)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString Text;
-			FString CanonicalError;
-			return Json::TryCanonicalize(Error, Text, CanonicalError)
-				? Text : FString(TEXT("{}"));
+			FDiagnostic Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("command"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.SubjectId = SubjectId;
+			return Diagnostic;
 		}
 
-		bool TryReadOperationError(
-			const FString& PayloadJson,
-			FString& OutErrorJson)
-		{
-			OutErrorJson.Reset();
-			TSharedPtr<FJsonObject> Root;
-			FString ParseError;
-			if (!Json::TryParseObject(PayloadJson, Root, ParseError)
-				|| !Root.IsValid())
-			{
-				return false;
-			}
-			const TSharedPtr<FJsonObject>* Error = nullptr;
-			if (Root->TryGetObjectField(TEXT("operation_error"), Error)
-				&& Error && Error->IsValid())
-			{
-				return Json::TryCanonicalize(
-					Error->ToSharedRef(), OutErrorJson, ParseError);
-			}
-			return true;
-		}
+		
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
 		public:
 			explicit FHandler(
-				TSharedRef<IUeAgentOperationApplicationPort> InOperationPort)
-				: Route(GetRoute())
+				TSharedRef<IUeAgentOperationApplicationPort> InOperationPort,
+				const FUeAgentPieRuntimeDebugRoute& InRoute)
+				: Route(InRoute)
 				, OperationPort(MoveTemp(InOperationPort))
 			{
 			}
@@ -79,13 +57,13 @@ namespace UE::UAI::CommandHandlers::PieRuntimeDebug
 				if (!Caller.IsValid()
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:operate")))
 				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT("pie_runtime_debug_authority_required"),
-							Request.GetCommandId(),
-							TEXT("runtime.scenario.execute requires uai:operate")));
+					auto Diagnostic = CommandFailure(TEXT("pie_runtime_debug_authority_required"),
+						Request.GetCommandId(), !Caller.IsValid() ? TEXT("The caller context is invalid.")
+							: TEXT("runtime.scenario.execute requires uai:operate"));
+					Diagnostic.PropertyPath = !Caller.IsValid() ? TEXT("caller_valid") : TEXT("authority_scope_present");
+					Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
 				}
 				TArray<FString> Scopes = Caller.GetAuthorityScopes();
 				Scopes.AddUnique(TEXT("uai:operation"));
@@ -102,34 +80,11 @@ namespace UE::UAI::CommandHandlers::PieRuntimeDebug
 						FUeAgentContractValue(Request.GetParamsJson())),
 					EffectiveCaller,
 					Cancellation);
-				if (!Result.IsValid()
-					|| !(Result.GetDescriptorIdentity() == Route.DescriptorIdentity)
-					|| Result.GetRequestId() != Request.GetRequestId())
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT("pie_runtime_debug_result_invalid"),
-							Request.GetRequestId(),
-							TEXT("OperationService returned a mismatched result.")));
-				}
-				const FString& PayloadJson = Result.GetValue().GetJsonValue();
-				FString OperationError;
-				if (!TryReadOperationError(PayloadJson, OperationError))
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT("pie_runtime_debug_payload_invalid"),
-							Request.GetRequestId(),
-							TEXT("OperationService returned a non-object payload.")));
-				}
-				return OperationError.IsEmpty()
-					? FUeAgentCommandResult::Success(Request, PayloadJson)
-					: FUeAgentCommandResult::Failure(
-						Request, PayloadJson, OperationError);
+				FApplicationResultProjectionPolicy Policy;
+				Policy.InvalidResultCode = TEXT("pie_runtime_debug_result_invalid");
+				Policy.InvalidPayloadCode = TEXT("pie_runtime_debug_payload_invalid");
+				Policy.BoundaryFailureKind = EApplicationFailureKind::None;
+				return ProjectOperationResult(Request, Route.DescriptorIdentity, Result, Policy);
 			}
 
 		private:
@@ -141,16 +96,17 @@ namespace UE::UAI::CommandHandlers::PieRuntimeDebug
 	bool TryCreateHandler(
 		TSharedRef<IUeAgentOperationApplicationPort> OperationPort,
 		TSharedPtr<IUeAgentExactCommandHandler>& OutHandler,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandler.Reset();
 		OutError.Reset();
-		if (!GetRoute().IsValid())
+		const FUeAgentPieRuntimeDebugRoute* Route = nullptr;
+		if (!TryGetRoute(Route, OutError))
 		{
-			OutError = TEXT("pie_runtime_debug_route_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("pie_runtime_debug_route_invalid"), OutError, TEXT("handler_factory"));
 			return false;
 		}
-		OutHandler = MakeShared<FHandler>(MoveTemp(OperationPort));
+		OutHandler = MakeShared<FHandler>(MoveTemp(OperationPort), *Route);
 		return true;
 	}
 }

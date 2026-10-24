@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Domains/Material/Authoring/UeAgentMaterialGraphAuthoring.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
@@ -50,8 +52,7 @@ namespace UeAgentMaterialAuthoring
 	{
 		FString Status;
 		FString Phase;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ResolvedOperation;
 		FString AssetPath;
 		FString ExpressionGuid;
@@ -64,7 +65,7 @@ namespace UeAgentMaterialAuthoring
 		bool IsApplied() const { return Status == TEXT("applied"); }
 	};
 
-	UEAGENTINTERFACE_API bool RegisterGraphMutationApplyContracts(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterGraphMutationApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeGraphMutationApplyProvider();
 	UEAGENTINTERFACE_API bool ApplyGraphMutation(
 		const FGraphMutationRequest& Request,

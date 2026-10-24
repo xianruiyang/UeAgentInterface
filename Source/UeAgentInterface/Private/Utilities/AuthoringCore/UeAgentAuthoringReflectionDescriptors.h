@@ -3,15 +3,18 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
 
 class FJsonObject;
 class FJsonValue;
 class FProperty;
 class UObject;
+class UStruct;
 
 namespace UeAgentAuthoringReflection
 {
+using UE::UAI::Contract::FDiagnostic;
 	struct UEAGENTINTERFACE_API FDescriptor
 	{
 		FString PropertyName;
@@ -38,21 +41,33 @@ namespace UeAgentAuthoringReflection
 		TArray<TSharedPtr<FJsonValue>> MakePropertyFlagsJson() const;
 	};
 
-	UEAGENTINTERFACE_API bool IsEditableByFlags(const FProperty* Property, const UObject* Owner = nullptr);
+	/** Field declarations shared by top-level and nested value definitions. */
+	UEAGENTINTERFACE_API void ReadConstraints(const FProperty* Property, TMap<FString, FString>& OutConstraints);
+	/** Persistent native edit declarations, including boolean controls exposed by Details toggles. */
+	UEAGENTINTERFACE_API bool IsEditableDeclaration(const FProperty* Property, const UStruct* Scope = nullptr);
+
+	// Native Details views may show EditDefaultsOnly fields on non-template asset subobjects.
+	UEAGENTINTERFACE_API bool IsEditableByFlags(const FProperty* Property, const UObject* Owner = nullptr,
+		bool bShowDefaultsOnly = false, bool bUseInstanceEditability = false, const UStruct* Scope = nullptr);
 	UEAGENTINTERFACE_API bool IsOwnedObjectProperty(const FProperty* Property);
-	UEAGENTINTERFACE_API bool EvaluateEditCondition(
-		UObject* Owner,
+	/** An existing object may expose editable descendants through native EditInline
+	 * metadata even when its pointer is read-only and its class cannot be created. */
+	UEAGENTINTERFACE_API bool IsExistingInlineObjectProperty(
 		const FProperty* Property,
-		bool& bOutSatisfied,
-		FString& OutReason);
+		const void* ValuePtr,
+		const UObject* Owner);
 	UEAGENTINTERFACE_API bool IsEditableProperty(
 		const FProperty* Property,
 		UObject* Owner = nullptr,
-		FString* OutReason = nullptr);
+		FString* OutReason = nullptr,
+		bool bShowDefaultsOnly = false, bool bUseInstanceEditability = false, const UStruct* Scope = nullptr);
+	// Native toggle controls are editable declarations even without CPF_Edit.
+	// The current EditCondition value controls the Details UI, not write permission.
 	UEAGENTINTERFACE_API bool Build(
 		const FProperty* Property,
 		UObject* Owner,
 		const void* ValuePtr,
 		FDescriptor& OutDescriptor,
-		FString& OutError);
+		FDiagnostic& OutError,
+		bool bShowDefaultsOnly = false, bool bUseInstanceEditability = false, const UStruct* Scope = nullptr);
 }

@@ -1,10 +1,18 @@
 #include "DomainAdapters/WorldSpatial/UeAgentWorldSpatialProductionDependencies.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "DomainAdapters/ContentDiscovery/UeAgentEditorContentDiscovery.h"
+#include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+
 #include "BlueprintEditor.h"
 #include "BlueprintEditorTabs.h"
 #include "Components/ActorComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Core/AssetDurable/UeAgentPackageHeader.h"
+#include "Core/EditorViewport/UeAgentViewportRealtimeState.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "Editor.h"
@@ -27,6 +35,7 @@
 #include "SEditorViewport.h"
 #include "StaticMeshAttributes.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "UObject/Class.h"
 #include "UObject/SoftObjectPath.h"
 #include "Widgets/Docking/SDockTab.h"
 
@@ -34,6 +43,20 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 {
 	namespace
 	{
+		bool BindingFailure(FUeAgentWorldSpatialExecutionError& OutError, const TCHAR* Code, const TCHAR* Reason,
+			const FString& Path, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, bool bPublicValue = true)
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_execution"));
+			OutError.PropertyPath = Path;
+			OutError.SourceKind = TEXT("native_configuration");
+			OutError.Source.JsonPath = Path;
+			OutError.ActualValuePresent = Actual.IsValid();
+			if (bPublicValue) OutError.ActualValue = MoveTemp(Actual);
+			else OutError.ActualEvidence = MoveTemp(Actual);
+			OutError.ExpectedValue = MoveTemp(Expected);
+			return false;
+		}
+
 		struct FBlueprintComponentsViewportSession
 		{
 			TWeakObjectPtr<UBlueprint> Blueprint;
@@ -235,15 +258,29 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			}
 		}
 
-		bool Fail(
-			FUeAgentWorldSpatialExecutionError& OutError,
-			FString Code,
-			FString SubjectId,
-			FString Detail = FString())
+		bool EnvironmentFailure(FUeAgentWorldSpatialExecutionError& OutError,
+			const TCHAR* Code, const TCHAR* Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_execution"));
+			OutError.TargetPath = Target;
+			OutError.PropertyPath = Path;
+			OutError.Source.JsonPath = Path;
+			OutError.SourceKind = TEXT("native_result");
+			OutError.ActualValuePresent = Actual.IsValid();
+			OutError.ActualValue = MoveTemp(Actual);
+			OutError.ExpectedValue = MoveTemp(Expected);
+			return false;
+		}
+
+		bool EnvironmentWorldMismatch(FUeAgentWorldSpatialExecutionError& OutError,
+			const TCHAR* Code, const TCHAR* Reason, const FString& Target,
+			const UWorld* ActualWorld, const UWorld* ExpectedWorld)
+		{
+			EnvironmentFailure(OutError, Code, Reason, TEXT("/world"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("the configured world")), Target);
+			if (::IsValid(ActualWorld)) OutError.ActualEvidence = MakeShared<FJsonValueString>(ActualWorld->GetPathName());
+			if (::IsValid(ExpectedWorld)) OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedWorld->GetPathName());
 			return false;
 		}
 
@@ -280,19 +317,17 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				OutError = {};
 				if (ExplicitRef.IsEmpty())
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_explicit_object_ref_missing"),
-						ExplicitRef);
+					return EnvironmentFailure(OutError, TEXT("world_spatial_explicit_object_ref_missing"),
+						TEXT("Object resolution requires an explicit object reference."), TEXT("/explicit_ref"),
+						MakeShared<FJsonValueString>(ExplicitRef), MakeShared<FJsonValueString>(TEXT("non-empty object reference")));
 				}
 
 				UWorld* ScopedWorld = World.Get();
 				if (!ScopedWorld)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_explicit_world_expired"),
-						ExplicitRef);
+					return EnvironmentFailure(OutError, TEXT("world_spatial_explicit_world_expired"),
+						TEXT("The configured world is no longer available for object resolution."), TEXT("/world"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("available configured world")), ExplicitRef);
 				}
 				if (ExplicitRef == ScopedWorld->GetPathName())
 				{
@@ -300,24 +335,34 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					return true;
 				}
 
+				FString ObjectPath = ExplicitRef;
+				UE::UAI::ContentDiscovery::FContentDiscoveryError ResolveError;
+				if (!ContentDiscovery::TryResolveEditorContentReference(ObjectPath, FString(), ResolveError))
+				{
+					OutError = MoveTemp(ResolveError);
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = ExplicitRef;
+					return false;
+				}
 				OutObject = StaticFindObject(
-					UObject::StaticClass(), nullptr, *ExplicitRef, true);
+					UObject::StaticClass(), nullptr, *ObjectPath, true);
 				if (!OutObject)
 				{
-					const FSoftObjectPath SoftPath(ExplicitRef);
+					const FSoftObjectPath SoftPath(ObjectPath);
 					if (SoftPath.IsValid())
 					{
 						OutObject = SoftPath.TryLoad();
 					}
 				}
 				if (!IsValid(OutObject)
-					|| OutObject->GetPathName() != ExplicitRef)
+					|| OutObject->GetPathName() != ObjectPath)
 				{
+					EnvironmentFailure(OutError, TEXT("world_spatial_explicit_object_unresolved"),
+						!IsValid(OutObject) ? TEXT("No valid object could be resolved for the requested reference.")
+							: TEXT("The resolved object does not match the requested exact reference."), TEXT("/explicit_ref"),
+						MakeShared<FJsonValueString>(ExplicitRef), MakeShared<FJsonValueString>(TEXT("an exact reference to a valid object")), ExplicitRef);
+					if (IsValid(OutObject)) OutError.ActualEvidence = MakeShared<FJsonValueString>(OutObject->GetPathName());
 					OutObject = nullptr;
-					return Fail(
-						OutError,
-						TEXT("world_spatial_explicit_object_unresolved"),
-						ExplicitRef);
+					return false;
 				}
 
 				const UWorld* ObjectWorld = nullptr;
@@ -327,23 +372,18 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					if (ObjectWorld && ObjectWorld != ScopedWorld)
 					{
 						OutObject = nullptr;
-						return Fail(
-							OutError,
-							TEXT("world_spatial_object_world_mismatch"),
-							ExplicitRef,
-							ScopedWorld->GetPathName());
+						return EnvironmentWorldMismatch(OutError, TEXT("world_spatial_object_world_mismatch"),
+							TEXT("The referenced actor belongs to a different world."), ExplicitRef, ObjectWorld, ScopedWorld);
 					}
-					if (Actor->IsActorBeingDestroyed()
+					const bool bBeingDestroyed = Actor->IsActorBeingDestroyed();
+					if (bBeingDestroyed
 						|| !ScopedWorld->ContainsActor(Actor))
 					{
 						OutObject = nullptr;
-						return Fail(
-							OutError,
-							TEXT(
-								"world_spatial_explicit_object_unresolved"),
-							ExplicitRef,
-							TEXT(
-								"actor is no longer part of the scoped world"));
+						return EnvironmentFailure(OutError, TEXT("world_spatial_explicit_object_unresolved"),
+							bBeingDestroyed ? TEXT("The referenced actor is being destroyed.") : TEXT("The referenced actor is no longer in the configured world."),
+							TEXT("/object"), MakeShared<FJsonValueString>(bBeingDestroyed ? TEXT("being_destroyed") : TEXT("outside_configured_world")),
+							MakeShared<FJsonValueString>(TEXT("live actor in the configured world")), ExplicitRef);
 					}
 				}
 				else if (UActorComponent* Component =
@@ -353,25 +393,20 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					if (ObjectWorld && ObjectWorld != ScopedWorld)
 					{
 						OutObject = nullptr;
-						return Fail(
-							OutError,
-							TEXT("world_spatial_object_world_mismatch"),
-							ExplicitRef,
-							ScopedWorld->GetPathName());
+						return EnvironmentWorldMismatch(OutError, TEXT("world_spatial_object_world_mismatch"),
+							TEXT("The referenced component belongs to a different world."), ExplicitRef, ObjectWorld, ScopedWorld);
 					}
 					AActor* Owner = Component->GetOwner();
+					const bool bOwnerBeingDestroyed = Owner && Owner->IsActorBeingDestroyed();
 					if (Owner
-						&& (Owner->IsActorBeingDestroyed()
+						&& (bOwnerBeingDestroyed
 							|| !ScopedWorld->ContainsActor(Owner)))
 					{
 						OutObject = nullptr;
-						return Fail(
-							OutError,
-							TEXT(
-								"world_spatial_explicit_object_unresolved"),
-							ExplicitRef,
-							TEXT(
-								"component owner is no longer part of the scoped world"));
+						return EnvironmentFailure(OutError, TEXT("world_spatial_explicit_object_unresolved"),
+							bOwnerBeingDestroyed ? TEXT("The component's owner is being destroyed.") : TEXT("The component's owner is no longer in the configured world."),
+							TEXT("/object/owner"), MakeShared<FJsonValueString>(bOwnerBeingDestroyed ? TEXT("being_destroyed") : TEXT("outside_configured_world")),
+							MakeShared<FJsonValueString>(TEXT("live owner in the configured world")), ExplicitRef);
 					}
 				}
 				return true;
@@ -385,13 +420,16 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				UPackage* const Package = Object.GetOutermost();
 				if (!Package || Object.HasAnyFlags(RF_Transient))
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_persistence_target_invalid"),
-						Object.GetPathName());
+					EnvironmentFailure(OutError, TEXT("world_spatial_persistence_target_invalid"),
+						!Package ? TEXT("The object has no package to save.") : TEXT("The object is transient and cannot be persisted."),
+						!Package ? TEXT("/package") : TEXT("/object/transient"),
+						!Package ? TSharedPtr<FJsonValue>() : MakeShared<FJsonValueBoolean>(true),
+						MakeShared<FJsonValueString>(TEXT("persistent object with a saveable package")));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Object.GetPathName());
+					return false;
 				}
 				FString PackageHeaderFilename;
-				FString PackageHeaderErrorCode;
+				UE::UAI::Contract::FDiagnostic PackageHeaderError;
 				UObject* PackageTopLevelAsset =
 					Package->FindAssetInPackage();
 				if (!UE::UAI::AssetDurable::
@@ -399,48 +437,49 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						*Package,
 						PackageTopLevelAsset,
 						PackageHeaderFilename,
-						PackageHeaderErrorCode))
+						PackageHeaderError))
 				{
-					return Fail(
-						OutError,
-						PackageHeaderErrorCode.IsEmpty()
-							? TEXT(
-								"world_spatial_package_header_unavailable")
-							: PackageHeaderErrorCode,
-						Object.GetPathName());
+					return (OutError = PackageHeaderError, false);
 				}
 				Object.MarkPackageDirty();
-				if (!UEditorLoadingAndSavingUtils::SavePackages(
-						{Package}, false))
+				if (!UE::UAI::EditorResources::SavePackages(
+						{Package}, false, OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_object_persistence_failed"),
-						Object.GetPathName());
+					return false;
 				}
 				FString ObservedHeaderFilename;
-				PackageHeaderErrorCode.Reset();
+				PackageHeaderError.Reset();
 				if (!UE::UAI::AssetDurable::
 						TryResolvePackageHeaderFilename(
 							Package->GetName(),
 							UE::UAI::AssetDurable::EPackageHeaderKind::EvidenceRequired,
 							ObservedHeaderFilename,
-							PackageHeaderErrorCode)
-					|| !ObservedHeaderFilename.Equals(
-						PackageHeaderFilename,
-						ESearchCase::IgnoreCase)
-					|| !IFileManager::Get().FileExists(
-						*ObservedHeaderFilename)
-					|| Package->IsDirty())
+							PackageHeaderError))
 				{
-					return Fail(
-						OutError,
-						PackageHeaderErrorCode.IsEmpty()
-							? TEXT(
-								"world_spatial_object_persistence_readback_failed")
-							: PackageHeaderErrorCode,
-						Object.GetPathName(),
-						ObservedHeaderFilename);
+					return (OutError = PackageHeaderError, false);
+				}
+				if (!ObservedHeaderFilename.Equals(PackageHeaderFilename, ESearchCase::IgnoreCase))
+				{
+					EnvironmentFailure(OutError, TEXT("world_spatial_object_persistence_failed"),
+						TEXT("The saved package resolves to a different header file than the prepared save target."), TEXT("/package/header"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("the prepared package header")));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(ObservedHeaderFilename);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(PackageHeaderFilename);
+					return false;
+				}
+				if (!IFileManager::Get().FileExists(*ObservedHeaderFilename))
+				{
+					EnvironmentFailure(OutError, TEXT("world_spatial_object_persistence_failed"),
+						TEXT("The package header file is missing after saving."), TEXT("/package/header/exists"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(ObservedHeaderFilename);
+					return false;
+				}
+				if (Package->IsDirty())
+				{
+					return EnvironmentFailure(OutError, TEXT("world_spatial_object_persistence_failed"),
+						TEXT("The package still has unsaved changes after saving."), TEXT("/package/dirty"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 				}
 				return true;
 			}
@@ -459,19 +498,17 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				UEdGraph* Graph = Cast<UEdGraph>(Object);
 				if (!Graph)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_graph_identity_type_invalid"),
-						AssetEditorIdentity,
-						TEXT("asset_editor_identity must be an exact UEdGraph path"));
+					return EnvironmentFailure(OutError, TEXT("world_spatial_graph_identity_type_invalid"),
+						TEXT("The asset editor reference resolves to an object that is not a graph."), TEXT("/asset_editor_identity"),
+						MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()),
+						MakeShared<FJsonValueString>(TEXT("UEdGraph")), AssetEditorIdentity);
 				}
 				OutGraphEditor = SGraphEditor::FindGraphEditorForGraph(Graph);
 				return OutGraphEditor.IsValid()
 					? true
-					: Fail(
-						OutError,
-						TEXT("world_spatial_graph_editor_not_open"),
-						AssetEditorIdentity);
+					: EnvironmentFailure(OutError, TEXT("world_spatial_graph_editor_not_open"),
+						TEXT("The graph has no open graph editor."), TEXT("/asset_editor_identity"),
+						MakeShared<FJsonValueString>(AssetEditorIdentity), MakeShared<FJsonValueString>(TEXT("graph with an open editor")), AssetEditorIdentity);
 			}
 
 			bool TryResolveViewport(
@@ -505,10 +542,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						OutClient,
 						OutViewport))
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_explicit_viewport_unresolved"),
-						ViewportIdentity);
+					return EnvironmentFailure(OutError, TEXT("world_spatial_explicit_viewport_unresolved"),
+						TEXT("No available viewport matches the requested reference in the configured world."), TEXT("/viewport_identity"),
+						MakeShared<FJsonValueString>(ViewportIdentity), MakeShared<FJsonValueString>(TEXT("available viewport reference")), ViewportIdentity);
 				}
 				return true;
 			}
@@ -522,10 +558,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				OutError = {};
 				if (!::IsValid(Object))
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_reverse_object_invalid"),
-						TEXT("null"));
+					return EnvironmentFailure(OutError, TEXT("world_spatial_reverse_object_invalid"),
+						TEXT("An explicit reference cannot be produced for an invalid object."), TEXT("/object"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("valid object")));
 				}
 				const UWorld* ObjectWorld = nullptr;
 				if (const AActor* Actor = Cast<AActor>(Object))
@@ -539,13 +574,16 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				}
 				if (ObjectWorld && ObjectWorld != World.Get())
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_reverse_object_world_mismatch"),
-						Object->GetPathName());
+					return EnvironmentWorldMismatch(OutError, TEXT("world_spatial_reverse_object_world_mismatch"),
+						TEXT("An explicit reference cannot be produced because the object belongs to a different world."),
+						FString(), ObjectWorld, World.Get());
 				}
 				OutExplicitRef = Object->GetPathName();
-				return !OutExplicitRef.IsEmpty();
+				if (OutExplicitRef.IsEmpty())
+					return EnvironmentFailure(OutError, TEXT("world_spatial_reverse_object_invalid"),
+						TEXT("The object has no path that can be returned as an explicit reference."), TEXT("/explicit_ref"),
+						MakeShared<FJsonValueString>(OutExplicitRef), MakeShared<FJsonValueString>(TEXT("non-empty object reference")));
+				return true;
 			}
 
 			bool TryResolveMeshSelectionSession(
@@ -569,10 +607,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				}
 				if (SelectionIdentities.IsEmpty())
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_mesh_selection_identities_missing"),
-						ViewportIdentity);
+					return EnvironmentFailure(OutError, TEXT("world_spatial_mesh_selection_identities_missing"),
+						TEXT("Mesh selection requires at least one component reference."), TEXT("/selection_identities"),
+						MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one component reference")), ViewportIdentity);
 				}
 
 				const FUeAgentWorldSpatialMeshSelectionBinding* Session =
@@ -583,10 +620,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					OutManager = Session->Manager;
 					if (!OutManager)
 					{
-						return Fail(
-							OutError,
-							TEXT("world_spatial_explicit_mesh_selection_unavailable"),
-							ViewportIdentity);
+						return EnvironmentFailure(OutError, TEXT("world_spatial_explicit_mesh_selection_unavailable"),
+							TEXT("The registered mesh selection session has no selection manager."), TEXT("/selection_manager"),
+							nullptr, MakeShared<FJsonValueString>(TEXT("available selection manager")), ViewportIdentity);
 					}
 				}
 				else
@@ -601,10 +637,11 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				}
 				if (!OutManager)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_active_mesh_selection_unavailable"),
-						ViewportIdentity);
+					return EnvironmentFailure(OutError, TEXT("world_spatial_active_mesh_selection_unavailable"),
+						!LiveModelingMode ? TEXT("Modeling mode is not active, so no live mesh selection session is available.")
+							: TEXT("The active modeling mode has no selection manager."),
+						!LiveModelingMode ? TEXT("/modeling_mode") : TEXT("/selection_manager"), nullptr,
+						MakeShared<FJsonValueString>(TEXT("active modeling mode with a selection manager")), ViewportIdentity);
 				}
 				UE::Geometry::EGeometryTopologyType TopologyType =
 					UE::Geometry::EGeometryTopologyType::Triangle;
@@ -617,25 +654,29 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					ElementType,
 					ActiveTargetCount,
 					bSelectionIsEmpty);
-				if (!OutManager->HasActiveTargets()
-					|| OutManager->GetAnyCurrentTargetsLocked()
-					|| ActiveTargetCount < SelectionIdentities.Num())
-				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_mesh_selection_targets_inactive"),
-						ViewportIdentity);
-				}
+				if (!OutManager->HasActiveTargets())
+					return EnvironmentFailure(OutError, TEXT("world_spatial_mesh_selection_targets_inactive"),
+						TEXT("The mesh selection manager has no active targets."), TEXT("/active_targets"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), ViewportIdentity);
+				if (OutManager->GetAnyCurrentTargetsLocked())
+					return EnvironmentFailure(OutError, TEXT("world_spatial_mesh_selection_targets_inactive"),
+						TEXT("One or more current mesh selection targets are locked."), TEXT("/targets_locked"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), ViewportIdentity);
+				if (ActiveTargetCount < SelectionIdentities.Num())
+					return EnvironmentFailure(OutError, TEXT("world_spatial_mesh_selection_targets_inactive"),
+						TEXT("There are fewer active mesh targets than requested component references."), TEXT("/active_target_count"),
+						MakeShared<FJsonValueNumber>(ActiveTargetCount), MakeShared<FJsonValueNumber>(SelectionIdentities.Num()), ViewportIdentity);
 
 				TSet<FString> Seen;
-				for (const FString& Identity : SelectionIdentities)
+				for (int32 Index = 0; Index < SelectionIdentities.Num(); ++Index)
 				{
+					const FString& Identity = SelectionIdentities[Index];
+					const FString Path = FString::Printf(TEXT("/selection_identities/%d"), Index);
 					if (Seen.Contains(Identity))
 					{
-						return Fail(
-							OutError,
-							TEXT("world_spatial_mesh_selection_identity_duplicate"),
-							Identity);
+						return EnvironmentFailure(OutError, TEXT("world_spatial_mesh_selection_identity_duplicate"),
+							TEXT("The mesh selection request repeats a component reference."), Path,
+							MakeShared<FJsonValueString>(Identity), MakeShared<FJsonValueString>(TEXT("unique component reference")), Identity);
 					}
 					Seen.Add(Identity);
 					if (Session)
@@ -647,12 +688,17 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 								{
 									return Item.ExplicitRef == Identity;
 								});
-						if (!Target || !Target->IsValid())
+						if (!Target)
 						{
-							return Fail(
-								OutError,
-								TEXT("world_spatial_mesh_selection_identity_unresolved"),
-								Identity);
+							return EnvironmentFailure(OutError, TEXT("world_spatial_mesh_selection_identity_unresolved"),
+								TEXT("The mesh selection session has no target for the requested component reference."), Path,
+								MakeShared<FJsonValueString>(Identity), MakeShared<FJsonValueString>(TEXT("registered selection target")), Identity);
+						}
+						if (!Target->TryValidate(OutError))
+						{
+							const int32 TargetIndex = static_cast<int32>(Target - Session->Targets.GetData());
+							UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, FString::Printf(TEXT("/selection_targets/%d"), TargetIndex));
+							return false;
 						}
 						OutTargets.Add(*Target);
 						continue;
@@ -667,11 +713,10 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						Cast<UPrimitiveComponent>(ResolvedObject);
 					if (!Component)
 					{
-						return Fail(
-							OutError,
-							TEXT("world_spatial_mesh_selection_identity_type_invalid"),
-							Identity,
-							TEXT("selection identity must be an exact primitive-component path"));
+						return EnvironmentFailure(OutError, TEXT("world_spatial_mesh_selection_identity_type_invalid"),
+							TEXT("The mesh selection reference resolves to an object that is not a primitive component."), Path,
+							MakeShared<FJsonValueString>(ResolvedObject->GetClass()->GetPathName()),
+							MakeShared<FJsonValueString>(TEXT("UPrimitiveComponent")), Identity);
 					}
 					bool bComponentIsActive = false;
 					if (bSelectionIsEmpty)
@@ -696,14 +741,13 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					}
 					if (!bComponentIsActive)
 					{
-						return Fail(
-							OutError,
-							TEXT("world_spatial_mesh_selection_identity_not_active"),
-							Identity);
+						return EnvironmentFailure(OutError, TEXT("world_spatial_mesh_selection_identity_not_active"),
+							TEXT("The requested component is not an active target in the mesh selection session."), Path,
+							MakeShared<FJsonValueString>(Identity), MakeShared<FJsonValueString>(TEXT("active selection target")), Identity);
 					}
 					OutTargets.Add({Identity, Component});
 				}
-				return !OutTargets.IsEmpty();
+				return true;
 			}
 
 			void GetExplicitViewportIdentities(
@@ -733,6 +777,29 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				MeshSelectionByViewport;
 		};
 
+		bool SpaceConversionFailure(FUeAgentWorldSpatialExecutionError& OutError, const TCHAR* Code,
+			const TCHAR* Reason, const FString& Subject, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const TCHAR* SourceKind)
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_execution"));
+			OutError.TargetPath = Subject;
+			OutError.PropertyPath = Path;
+			OutError.SourceKind = SourceKind;
+			OutError.Source.JsonPath = Path;
+			OutError.ActualValue = MoveTemp(Actual);
+			OutError.ActualValuePresent = OutError.ActualValue.IsValid();
+			OutError.ExpectedValue = MoveTemp(Expected);
+			return false;
+		}
+
+		TSharedPtr<FJsonValue> FrameUnitFact(const FString& Frame, const FString& Unit)
+		{
+			const TSharedRef<FJsonObject> Fact = MakeShared<FJsonObject>();
+			Fact->SetStringField(TEXT("frame_id"), Frame);
+			Fact->SetStringField(TEXT("unit"), Unit);
+			return MakeShared<FJsonValueObject>(Fact);
+		}
+
 		class FProductionSpaceCompiler final
 			: public IUeAgentWorldSpatialSpaceCompiler
 		{
@@ -746,39 +813,37 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			{
 				OutValue = {};
 				OutError = {};
-				if (!Value.IsValid() || NativeFrameId.IsEmpty()
+				if (!Value.TryValidate(OutError)) return false;
+				if (NativeFrameId.IsEmpty()
 					|| NativeUnit.IsEmpty())
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_conversion_contract_invalid"),
-						Value.Subject);
+					return SpaceConversionFailure(OutError, TEXT("world_spatial_conversion_contract_invalid"),
+						TEXT("The native conversion destination requires a frame and unit."), Value.Subject,
+						NativeFrameId.IsEmpty() ? TEXT("/native_frame_id") : TEXT("/native_unit"),
+						MakeShared<FJsonValueString>(FString()), MakeShared<FJsonValueString>(TEXT("non-empty string")), TEXT("native_contract"));
 				}
 				if (Value.Frame.FrameId != NativeFrameId
 					|| Value.Frame.Unit != NativeUnit)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_conversion_path_unavailable"),
-						Value.Subject,
-						Value.Frame.FrameId + TEXT("/") + Value.Frame.Unit
-							+ TEXT(" -> ") + NativeFrameId + TEXT("/")
-							+ NativeUnit);
+					return SpaceConversionFailure(OutError, TEXT("world_spatial_conversion_path_unavailable"),
+						TEXT("The spatial compiler supports identity conversion only; the source frame or unit differs from the native destination."),
+						Value.Subject, TEXT("/frame"), FrameUnitFact(Value.Frame.FrameId, Value.Frame.Unit),
+						FrameUnitFact(NativeFrameId, NativeUnit), TEXT("world_spatial_value"));
 				}
 
 				TArray<double> Components;
 				Components.Reserve(Value.Components.Num());
-				for (const FString& Lexeme : Value.Components)
+				for (int32 Index = 0; Index < Value.Components.Num(); ++Index)
 				{
+					const FString& Lexeme = Value.Components[Index];
 					double Parsed = 0.0;
 					if (!LexTryParseString(Parsed, *Lexeme)
 						|| !FMath::IsFinite(Parsed))
 					{
-						return Fail(
-							OutError,
-							TEXT("world_spatial_numeric_component_invalid"),
-							Value.Subject,
-							Lexeme);
+						return SpaceConversionFailure(OutError, TEXT("world_spatial_numeric_component_invalid"),
+							TEXT("The spatial component cannot be converted to a finite native number."), Value.Subject,
+							FString::Printf(TEXT("/components/%d"), Index), MakeShared<FJsonValueString>(Lexeme),
+							MakeShared<FJsonValueString>(TEXT("finite number")), TEXT("world_spatial_value"));
 					}
 					Components.Add(Parsed);
 				}
@@ -792,7 +857,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					TEXT("world-spatial-native-identity:")
 						+ NativeFrameId + TEXT(":") + NativeUnit,
 				};
-				return OutValue.IsValid();
+				return OutValue.TryValidate(OutError);
 			}
 
 			bool TryConvertFromNative(
@@ -803,42 +868,38 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			{
 				OutValue = {};
 				OutError = {};
-				if (!Value.IsValid() || !SemanticFrame.IsValid()
-					|| Value.Dimension != SemanticFrame.Dimension)
+				if (!Value.TryValidate(OutError)) return false;
+				if (!SemanticFrame.TryValidate(OutError)) return false;
+				if (Value.Dimension != SemanticFrame.Dimension)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_readback_conversion_invalid"),
-						Value.Subject);
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_spatial_readback_conversion_invalid"),
+						TEXT("The native value and semantic frame have different dimensions."), TEXT("native_execution"));
+					OutError.SubjectId = Value.Subject;
+					OutError.PropertyPath = TEXT("dimension");
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(Value.Dimension);
+					OutError.ActualValuePresent = true;
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(SemanticFrame.Dimension);
+					return false;
 				}
 				if (Value.FrameId != SemanticFrame.FrameId
 					|| Value.Unit != SemanticFrame.Unit)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_readback_conversion_path_unavailable"),
-						Value.Subject,
-						Value.FrameId + TEXT("/") + Value.Unit + TEXT(" -> ")
-							+ SemanticFrame.FrameId + TEXT("/")
-							+ SemanticFrame.Unit);
+					return SpaceConversionFailure(OutError, TEXT("world_spatial_readback_conversion_path_unavailable"),
+						TEXT("The spatial compiler supports identity conversion only; the native frame or unit differs from the semantic destination."),
+						Value.Subject, TEXT("/"), FrameUnitFact(Value.FrameId, Value.Unit),
+						FrameUnitFact(SemanticFrame.FrameId, SemanticFrame.Unit), TEXT("native_result"));
 				}
 
 				OutValue.Subject = Value.Subject;
 				OutValue.Quantity = Value.Quantity;
 				OutValue.Frame = SemanticFrame;
+				OutValue.ConversionEvidenceIds.Add(Value.EvidenceId);
 				for (const double Component : Value.Components)
 				{
-					if (!FMath::IsFinite(Component))
-					{
-						return Fail(
-							OutError,
-							TEXT("world_spatial_readback_component_invalid"),
-							Value.Subject);
-					}
 					OutValue.Components.Add(
 						FString::SanitizeFloat(Component, 9));
 				}
-				return OutValue.IsValid();
+				return OutValue.TryValidate(OutError);
 			}
 		};
 
@@ -863,10 +924,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				OutError = {};
 				if (ExplicitRef.IsEmpty())
 				{
-					return Fail(
-						OutError,
-						TEXT("world_spatial_revision_ref_missing"),
-						ExplicitRef);
+					return EnvironmentFailure(OutError, TEXT("world_spatial_revision_ref_missing"),
+						TEXT("Revision readback requires an explicit object or viewport reference."), TEXT("/explicit_ref"),
+						MakeShared<FJsonValueString>(ExplicitRef), MakeShared<FJsonValueString>(TEXT("non-empty object or viewport reference")));
 				}
 
 				uint32 Hash = 0;
@@ -876,13 +936,16 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				if (Environment->TryResolveViewport(
 						ExplicitRef, Client, Viewport, ViewportError))
 				{
+					const auto Realtime = EditorViewport::ReadRealtimeState(*Client);
 					const FString State = FString::Printf(
-						TEXT("%s|%s|%.17g|%d|%d|%d|%d|%d"),
+						TEXT("%s|%s|%.17g|%d|%d|%d|%s|%d|%d|%d"),
 						*Client->GetViewLocation().ToString(),
 						*Client->GetViewRotation().ToString(),
 						Client->ViewFOV,
 						static_cast<int32>(Client->GetViewMode()),
-						Client->IsRealtime() ? 1 : 0,
+						Realtime.bEffective ? 1 : 0,
+						Realtime.bConfigured ? 1 : 0,
+						*Realtime.OverrideReason,
 						Client->IsInGameView() ? 1 : 0,
 						Viewport->GetSizeXY().X,
 						Viewport->GetSizeXY().Y);
@@ -894,6 +957,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					if (!Environment->TryResolveObject(
 							ExplicitRef, Object, OutError))
 					{
+						if (ViewportError.IsValid()) OutError.Diagnostics.Add(MoveTemp(ViewportError));
 						return false;
 					}
 					if (UE::UAI::DomainAdapters::ModelingGeometryEffect::
@@ -910,11 +974,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 									CarrierRevision,
 									CarrierError))
 						{
-							return Fail(
-								OutError,
-								CarrierError.GetCode(),
-								ExplicitRef,
-								CarrierError.GetDetail());
+							OutError = MoveTemp(CarrierError);
+							if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = ExplicitRef;
+							return false;
 						}
 						OutRevision.SourceId =
 							CarrierRevision->GetSourceId();
@@ -922,7 +984,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							CarrierRevision->GetGeneration();
 						OutRevision.Sequence =
 							CarrierRevision->GetSequence();
-						return OutRevision.IsValid();
+						return OutRevision.TryValidate(OutError);
 					}
 					Hash = HashObjectSpatialState(*Object);
 				}
@@ -930,7 +992,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				OutRevision.SourceId = ExplicitRef;
 				OutRevision.Generation = Generation;
 				OutRevision.Sequence = static_cast<int64>(Hash);
-				return OutRevision.IsValid();
+				return OutRevision.TryValidate(OutError);
 			}
 
 		private:
@@ -1008,24 +1070,54 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FEditorViewportClient& Client,
 		FViewport& Viewport,
 		FString& OutViewportIdentity,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutViewportIdentity.Reset();
 		OutError.Reset();
-		if (!IsInGameThread() || !::IsValid(&Blueprint)
-			|| !Client.GetWorld() || !Client.GetWorld()->Scene
-			|| Client.Viewport != &Viewport
-			|| Viewport.GetSizeXY().X <= 0 || Viewport.GetSizeXY().Y <= 0)
+		FString PublicTarget;
+		auto Reject = [&](const TCHAR* Code, const TCHAR* Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 		{
-			OutError = TEXT("world_spatial_blueprint_preview_session_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_execution"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = Path;
+			OutError.TargetPath = PublicTarget;
+			OutError.ActualValue = MoveTemp(Actual);
+			OutError.ExpectedValue = MoveTemp(Expected);
 			return false;
-		}
+		};
+		if (!IsInGameThread()) return Reject(TEXT("world_spatial_blueprint_preview_session_invalid"),
+			TEXT("Blueprint components viewport registration must run on the game thread."), TEXT("/game_thread"),
+			MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		if (!::IsValid(&Blueprint)) return Reject(TEXT("world_spatial_blueprint_preview_session_invalid"),
+			TEXT("Blueprint components viewport requires a valid Blueprint."), TEXT("/blueprint"),
+			MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		PublicTarget = Blueprint.GetPathName();
+		UWorld* World = Client.GetWorld();
+		if (!World) return Reject(TEXT("world_spatial_blueprint_preview_session_invalid"),
+			TEXT("Blueprint components viewport has no world."), TEXT("/viewport/world"),
+			MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		if (!World->Scene) return Reject(TEXT("world_spatial_blueprint_preview_session_invalid"),
+			TEXT("Blueprint components viewport world has no rendering scene."), TEXT("/viewport/scene"),
+			MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		if (Client.Viewport != &Viewport) return Reject(TEXT("world_spatial_blueprint_preview_session_invalid"),
+			TEXT("Viewport client is bound to a different viewport."), TEXT("/viewport/client_binding"),
+			MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		const FIntPoint Size = Viewport.GetSizeXY();
+		if (Size.X <= 0) return Reject(TEXT("world_spatial_blueprint_preview_session_invalid"),
+			TEXT("Blueprint components viewport width must be positive."), TEXT("/viewport/size/x"),
+			MakeShared<FJsonValueNumber>(Size.X), MakeShared<FJsonValueString>(TEXT("width > 0")));
+		if (Size.Y <= 0) return Reject(TEXT("world_spatial_blueprint_preview_session_invalid"),
+			TEXT("Blueprint components viewport height must be positive."), TEXT("/viewport/size/y"),
+			MakeShared<FJsonValueNumber>(Size.Y), MakeShared<FJsonValueString>(TEXT("height > 0")));
 		OutViewportIdentity = MakeBlueprintComponentsViewportIdentity(Blueprint);
-		TMap<FString, FBlueprintComponentsViewportSession>& Sessions =
-			BlueprintComponentsViewportSessions();
+		TMap<FString, FBlueprintComponentsViewportSession>& Sessions = BlueprintComponentsViewportSessions();
 		if (Sessions.Contains(OutViewportIdentity))
 		{
-			OutError = TEXT("world_spatial_blueprint_preview_session_duplicate");
+			Reject(TEXT("world_spatial_blueprint_preview_session_duplicate"),
+				TEXT("Blueprint already has a registered components preview viewport."), TEXT("/viewport/session_registered"),
+				MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+			OutError.SubjectId = OutViewportIdentity;
 			OutViewportIdentity.Reset();
 			return false;
 		}
@@ -1053,31 +1145,79 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		}
 	}
 
-	bool FUeAgentWorldSpatialViewportBinding::IsValidForWorld(
-		const UWorld& ExplicitWorld) const
+	bool FUeAgentWorldSpatialViewportBinding::TryValidateForWorld(
+		const UWorld& ExplicitWorld, FUeAgentWorldSpatialExecutionError& OutError) const
 	{
-		return !Identity.IsEmpty() && Client && Viewport
-			&& Client->Viewport == Viewport
-			&& Client->GetWorld() == &ExplicitWorld;
+		OutError = {};
+		if (Identity.IsEmpty())
+			return BindingFailure(OutError, TEXT("world_spatial_explicit_viewport_binding_invalid"),
+				TEXT("The viewport binding requires a readable viewport identity."), TEXT("/identity"),
+				MakeShared<FJsonValueString>(Identity), MakeShared<FJsonValueString>(TEXT("non-empty viewport identity")));
+		if (!Client || !Viewport)
+			return BindingFailure(OutError, TEXT("world_spatial_explicit_viewport_binding_invalid"),
+				TEXT("The viewport binding is missing its client or viewport."), !Client ? TEXT("/client") : TEXT("/viewport"),
+				nullptr, MakeShared<FJsonValueString>(TEXT("bound viewport resource")));
+		if (Client->Viewport != Viewport)
+			return BindingFailure(OutError, TEXT("world_spatial_explicit_viewport_binding_invalid"),
+				TEXT("The viewport client is attached to a different viewport."), TEXT("/client/viewport"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		if (Client->GetWorld() != &ExplicitWorld)
+		{
+			const UWorld* ActualWorld = Client->GetWorld();
+			BindingFailure(OutError, TEXT("world_spatial_explicit_viewport_binding_invalid"),
+				TEXT("The viewport client belongs to a different world."), TEXT("/client/world"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("the configured world")));
+			OutError.TargetPath = Identity;
+			if (::IsValid(ActualWorld)) OutError.ActualEvidence = MakeShared<FJsonValueString>(ActualWorld->GetPathName());
+			if (::IsValid(&ExplicitWorld)) OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExplicitWorld.GetPathName());
+			return false;
+		}
+		return true;
+	}
+
+	bool FUeAgentWorldSpatialViewportBinding::IsValidForWorld(const UWorld& ExplicitWorld) const
+	{
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidateForWorld(ExplicitWorld, Error);
+	}
+
+	bool FUeAgentWorldSpatialMeshSelectionBinding::TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const
+	{
+		OutError = {};
+		if (ViewportIdentity.IsEmpty())
+			return BindingFailure(OutError, TEXT("world_spatial_mesh_selection_binding_invalid"),
+				TEXT("The mesh selection binding requires a readable viewport identity."), TEXT("/viewport_identity"),
+				MakeShared<FJsonValueString>(ViewportIdentity), MakeShared<FJsonValueString>(TEXT("non-empty viewport identity")));
+		if (!::IsValid(Manager))
+			return BindingFailure(OutError, TEXT("world_spatial_mesh_selection_binding_invalid"),
+				TEXT("The mesh selection manager is missing or no longer valid."), TEXT("/manager"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		if (Targets.IsEmpty())
+			return BindingFailure(OutError, TEXT("world_spatial_mesh_selection_binding_invalid"),
+				TEXT("The mesh selection binding has no targets."), TEXT("/targets"),
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one target")));
+		TSet<FString> Identities;
+		for (int32 Index = 0; Index < Targets.Num(); ++Index)
+		{
+			const auto& Target = Targets[Index];
+			if (!Target.TryValidate(OutError))
+			{
+				UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, FString::Printf(TEXT("/targets/%d"), Index));
+				return false;
+			}
+			if (Identities.Contains(Target.ExplicitRef))
+				return BindingFailure(OutError, TEXT("world_spatial_mesh_selection_binding_invalid"),
+					TEXT("The mesh selection binding repeats a target reference."), FString::Printf(TEXT("/targets/%d/explicit_ref"), Index),
+					MakeShared<FJsonValueString>(Target.ExplicitRef), MakeShared<FJsonValueString>(TEXT("unique target reference")));
+			Identities.Add(Target.ExplicitRef);
+		}
+		return true;
 	}
 
 	bool FUeAgentWorldSpatialMeshSelectionBinding::IsValid() const
 	{
-		if (ViewportIdentity.IsEmpty() || !::IsValid(Manager)
-			|| Targets.IsEmpty())
-		{
-			return false;
-		}
-		TSet<FString> Identities;
-		for (const FUeAgentWorldSpatialMeshSelectionTarget& Target : Targets)
-		{
-			if (!Target.IsValid() || Identities.Contains(Target.ExplicitRef))
-			{
-				return false;
-			}
-			Identities.Add(Target.ExplicitRef);
-		}
-		return true;
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool TryCreateWorldSpatialProductionDependencies(
@@ -1092,47 +1232,66 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	{
 		OutDependencies = {};
 		OutError = {};
-		if (!::IsValid(&ExplicitWorld) || ExplicitWorld.IsUnreachable()
-			|| RuntimeGeneration.IsEmpty() || ServerSessionId.IsEmpty())
+		if (!::IsValid(&ExplicitWorld) || ExplicitWorld.IsUnreachable())
 		{
-			return Fail(
-				OutError,
-				TEXT("world_spatial_production_dependencies_invalid"),
-				ExplicitWorld.GetPathName());
+			return BindingFailure(OutError, TEXT("world_spatial_production_dependencies_invalid"),
+				TEXT("The explicit world is invalid or unreachable."), TEXT("/world"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("valid reachable world")));
+		}
+		if (RuntimeGeneration.IsEmpty() || ServerSessionId.IsEmpty())
+		{
+			return BindingFailure(OutError, TEXT("world_spatial_production_dependencies_invalid"),
+				TEXT("The native dependency factory is missing a runtime generation or server session binding."),
+				RuntimeGeneration.IsEmpty() ? TEXT("/runtime_generation") : TEXT("/server_session_id"),
+				MakeShared<FJsonValueString>(FString()), MakeShared<FJsonValueString>(TEXT("non-empty binding")), false);
 		}
 		TSet<FString> ViewportIds;
-		for (const FUeAgentWorldSpatialViewportBinding& Binding : ViewportBindings)
+		for (int32 Index = 0; Index < ViewportBindings.Num(); ++Index)
 		{
-			if (!Binding.IsValidForWorld(ExplicitWorld)
-				|| ViewportIds.Contains(Binding.Identity))
+			const auto& Binding = ViewportBindings[Index];
+			const FString Path = FString::Printf(TEXT("/viewport_bindings/%d"), Index);
+			if (!Binding.TryValidateForWorld(ExplicitWorld, OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT("world_spatial_explicit_viewport_binding_invalid"),
-					Binding.Identity);
+				UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, Path);
+				return false;
 			}
+			if (ViewportIds.Contains(Binding.Identity))
+				return BindingFailure(OutError, TEXT("world_spatial_explicit_viewport_binding_invalid"),
+					TEXT("The native configuration repeats a viewport identity."), Path + TEXT("/identity"),
+					MakeShared<FJsonValueString>(Binding.Identity), MakeShared<FJsonValueString>(TEXT("unique viewport identity")));
 			ViewportIds.Add(Binding.Identity);
 		}
 		TSet<FString> SelectionViewportIds;
-		for (const FUeAgentWorldSpatialMeshSelectionBinding& Binding
-			: MeshSelectionBindings)
+		for (int32 Index = 0; Index < MeshSelectionBindings.Num(); ++Index)
 		{
-			const bool bTargetsMatchWorld = Binding.Targets.ContainsByPredicate(
-				[&ExplicitWorld](
-					const FUeAgentWorldSpatialMeshSelectionTarget& Target)
-				{
-					return !Target.Component
-						|| Target.Component->GetWorld() != &ExplicitWorld;
-				}) == false;
-			if (!Binding.IsValid() || !bTargetsMatchWorld
-				|| !ViewportIds.Contains(Binding.ViewportIdentity)
-				|| SelectionViewportIds.Contains(Binding.ViewportIdentity))
+			const auto& Binding = MeshSelectionBindings[Index];
+			const FString Path = FString::Printf(TEXT("/mesh_selection_bindings/%d"), Index);
+			if (!Binding.TryValidate(OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT("world_spatial_mesh_selection_binding_invalid"),
-					Binding.ViewportIdentity);
+				UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, Path);
+				return false;
 			}
+			for (int32 TargetIndex = 0; TargetIndex < Binding.Targets.Num(); ++TargetIndex)
+			{
+				const auto& Target = Binding.Targets[TargetIndex];
+				const UWorld* TargetWorld = Target.Component->GetWorld();
+				if (TargetWorld != &ExplicitWorld)
+				{
+					BindingFailure(OutError, TEXT("world_spatial_mesh_selection_binding_invalid"),
+						TEXT("The mesh selection target belongs to a different world."),
+						Path + FString::Printf(TEXT("/targets/%d/component/world"), TargetIndex),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("the configured world")));
+					OutError.TargetPath = Target.ExplicitRef;
+					if (::IsValid(TargetWorld)) OutError.ActualEvidence = MakeShared<FJsonValueString>(TargetWorld->GetPathName());
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExplicitWorld.GetPathName());
+					return false;
+				}
+			}
+			if (!ViewportIds.Contains(Binding.ViewportIdentity) || SelectionViewportIds.Contains(Binding.ViewportIdentity))
+				return BindingFailure(OutError, TEXT("world_spatial_mesh_selection_binding_invalid"),
+					!ViewportIds.Contains(Binding.ViewportIdentity) ? TEXT("The mesh selection binding references an unregistered viewport.")
+						: TEXT("The native configuration repeats a mesh selection viewport binding."), Path + TEXT("/viewport_identity"),
+					MakeShared<FJsonValueString>(Binding.ViewportIdentity), MakeShared<FJsonValueString>(TEXT("unique registered viewport identity")));
 			SelectionViewportIds.Add(Binding.ViewportIdentity);
 		}
 
@@ -1143,6 +1302,6 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		OutDependencies.SpaceCompiler = MakeShared<FProductionSpaceCompiler>();
 		OutDependencies.RevisionSource =
 			MakeShared<FProductionRevisionSource>(Environment, RuntimeGeneration);
-		return OutDependencies.IsValid();
+		return OutDependencies.TryValidate(OutError);
 	}
 }

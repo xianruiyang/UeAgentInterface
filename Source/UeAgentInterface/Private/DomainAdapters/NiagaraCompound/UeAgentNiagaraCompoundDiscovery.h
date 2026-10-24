@@ -33,7 +33,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 	UEAGENTINTERFACE_API bool TryParseNiagaraCompoundSelector(
 		const FString& Text,
 		FUeAgentNiagaraCompoundSelector& OutSelector,
-		FString& OutErrorCode);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	class UEAGENTINTERFACE_API FUeAgentNiagaraCompoundCatalogSource final
 		: public Discovery::IUeAgentCatalogSource
@@ -83,6 +83,5 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 		const Discovery::FUeAgentCandidateBinding& Binding,
 		const FString& ExpectedGeneration,
 		FUeAgentResolvedNiagaraCompoundInput& OutResolved,
-		FString& OutErrorCode,
-		FString& OutDetail);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

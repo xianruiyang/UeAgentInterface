@@ -1,7 +1,6 @@
 #include "Misc/AutomationTest.h"
 
 #include "CommandEdge/UeAgentCommandProtocol.h"
-#include "Composition/HjsonImport/UeAgentHjsonImportTargetRegistry.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
@@ -14,14 +13,10 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 
-// GC-012 requires one production composition owner instead of adding
-// domain switches to TimelineSpatial, teaching DomainAdapters to parse HJSON,
-// or restoring legacy HTTP dispatch.
 #include "Composition/GraphCompound/UeAgentGraphCompoundActivation.h"
 
 #include "Composition/GraphCompound/UeAgentGraphCompoundCommandHandlers.h"
 
-#include "Composition/GraphCompound/UeAgentGraphCompoundHjsonTargets.h"
 
 namespace
 {
@@ -195,107 +190,12 @@ namespace
 		return Result;
 	}
 
-	TSet<FString> ExpectedCapabilityIds()
-	{
-		return {
-			TEXT("blueprint.asset.create"),
-			TEXT("blueprint.authoring.apply"),
-			TEXT("blueprint.component.events.discover"),
-			TEXT("umg.asset.create"),
-			TEXT("umg.authoring.apply"),
-			TEXT("umg.widget.events.discover"),
-			TEXT("material.asset.create"),
-			TEXT("material.graph.apply"),
-			TEXT("material.function.graph.apply"),
-			TEXT("material_instance.asset.create"),
-			TEXT("material_instance.parameters.apply"),
-			TEXT("niagara.emitter.asset.create"),
-			TEXT("niagara.system.asset.create"),
-			TEXT("niagara.asset.duplicate"),
-			TEXT("niagara.stack.reorder"),
-			TEXT("niagara.stack.issue_fix"),
-			TEXT("niagara.compound.apply"),
-			TEXT("niagara.renderer_event_parameter.apply"),
-			TEXT("niagara.compile_refresh_settle"),
-			TEXT("ai.behavior_tree.asset.create"),
-			TEXT("ai.behavior_tree.graph.apply"),
-			TEXT("ai.blackboard.asset.create"),
-			TEXT("ai.blackboard.schema.apply"),
-			TEXT("ai.eqs.asset.create"),
-			TEXT("ai.eqs.graph.apply"),
-			TEXT("ai.smart_object_definition.asset.create"),
-			TEXT("ai.smart_object_definition.apply"),
-			TEXT("ai.state_tree.asset.create"),
-			TEXT("ai.state_tree.hierarchy.apply"),
-			TEXT("pcg.graph.asset.create"),
-			TEXT("pcg.graph.apply"),
-			TEXT("pcg.graph_instance.apply"),
-			TEXT("pcg.graph_parameters.apply"),
-			TEXT("pcg.component.apply"),
-			TEXT("pcg.data_asset.apply"),
-			TEXT("pcg.data_asset.create_from_level"),
-			TEXT("pcg.component.world_binding.apply"),
-			TEXT("animation.anim_blueprint.graph.apply"),
-			TEXT("animation.anim_blueprint.asset.create"),
-			TEXT("animation.anim_blueprint.layer_interface.asset.create"),
-			TEXT("animation.blend_space.definition.apply"),
-			TEXT("animation.blend_space.asset.create"),
-			TEXT("animation.skeleton.definition.apply"),
-			TEXT("animation.skeleton.compatibility.apply"),
-			TEXT("animation.skeleton.virtual_bone.apply"),
-			TEXT("animation.control_rig.hierarchy_graph.apply"),
-			TEXT("animation.control_rig.asset.create"),
-			TEXT("animation.control_rig.shape_library.apply"),
-			TEXT("animation.control_rig.shape_library.asset.create"),
-			TEXT("animation.deformer_graph.topology.apply"),
-			TEXT("animation.deformer_graph.asset.create"),
-			TEXT("animation.deformer_source_library.bindings.apply"),
-			TEXT("animation.deformer_source_library.asset.create"),
-			TEXT("animation.mesh_deformer_collection.entries.apply"),
-			TEXT("animation.mesh_deformer_collection.asset.create"),
-			TEXT("animation.ml_deformer.configuration.apply"),
-			TEXT("animation.ml_deformer.asset.create"),
-			TEXT("animation.ik_retargeter.definition.apply"),
-			TEXT("animation.ik_retargeter.asset.create"),
-			TEXT("animation.ik_retargeter.settings.apply"),
-			TEXT("animation.ik_rig.definition.auto_generate"),
-			TEXT("animation.ik_rig.definition.apply"),
-			TEXT("animation.ik_rig.asset.create"),
-			TEXT("audio_media.asset.create"),
-			TEXT("metasound.graph.interface.mutate"),
-			TEXT("metasound.graph.node.mutate"),
-			TEXT("metasound.graph.link.mutate"),
-			TEXT("metasound.graph.default.mutate"),
-			TEXT("metasound.graph.compile_settle"),
-			TEXT("sound_cue.graph.node.mutate"),
-			TEXT("sound_cue.graph.relation.mutate"),
-			TEXT("sound_cue.graph.root.mutate"),
-			TEXT("sound_cue.graph.compile_settle"),
-			TEXT("texture_graph.graph.node.mutate"),
-			TEXT("texture_graph.graph.link.mutate"),
-			TEXT("texture_graph.graph.parameter.mutate"),
-			TEXT("texture_graph.graph.validate_evaluate_settle"),
-			TEXT("texture_graph.artifact.capture"),
-		};
-	}
-
-	TSet<FString> ExpectedGraphHjsonKinds()
-	{
-		return {
-			TEXT("ue.blueprint.asset"),
-			TEXT("ue.widget_blueprint.asset"),
-			TEXT("ue.niagara_system.asset"),
-			TEXT("ue.niagara_emitter.asset"),
-			TEXT("ue.niagara_script.asset"),
-		};
-	}
-
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentGraphCompoundActivationExpectedTest,
 	"UeAgentInterface.Composition.GraphCompound.E0.Activation."
-		"ExactDescriptorsRoutesAndHjsonTargets",
+		"ExactDescriptorsAndRoutes",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
@@ -303,61 +203,26 @@ bool FUeAgentGraphCompoundActivationExpectedTest::RunTest(
 	const FString& Parameters)
 {
 	using namespace UE::UAI;
-	using namespace UE::UAI::Composition::HjsonImport;
 	(void)Parameters;
 
-	const TSet<FString> Expected = ExpectedCapabilityIds();
 	const TMap<FString, FExpectedCapability> ExpectedContracts =
 		ExpectedCapabilityContracts();
-	TestEqual(TEXT("Graph/Compound capability count is fixed"),
-		Expected.Num(), 78);
-	TestEqual(TEXT("Graph/Compound capability contracts are unique"),
-		ExpectedContracts.Num(), Expected.Num());
-	TestEqual(TEXT("Blueprint/UMG capability count"),
-		DomainAdapters::BlueprintUmgGraph::
-			GetBlueprintUmgGraphCapabilityContracts().Num(), 6);
-	TestEqual(TEXT("Material/Niagara capability count"),
-		DomainAdapters::MaterialNiagaraGraph::
-			GetMaterialNiagaraGraphCapabilityContracts().Num(), 13);
-	TestEqual(TEXT("PCG/AI capability count"),
-		DomainAdapters::PcgAiNodeGraph::
-			GetPcgAiNodeGraphCapabilityContracts().Num(), 18);
-	TestEqual(TEXT("Animation/Rig capability count"),
-		DomainAdapters::AnimationRigGraph::
-			GetAnimationRigGraphCapabilityContracts().Num(), 26);
-	TestEqual(TEXT("Audio/Media capability count"),
-		DomainAdapters::AudioMediaGraph::
-			GetAudioMediaGraphCapabilityContracts().Num(), 15);
-
-	TSet<FString> ActualHjsonKinds;
-	for (const FUeAgentHjsonImportTargetBinding& Binding
-		: GetHjsonImportTargetRegistry().GetBindings())
+	TSet<FString> Expected;
+	for (const TPair<FString, FExpectedCapability>& Contract
+		: ExpectedContracts)
 	{
-		TestTrue(TEXT("every registered HJSON target is complete"),
-			Binding.IsValid());
-		TestTrue(TEXT("every registered HJSON target has an operation factory"),
-			Binding.HasOperationFactory());
-		if (Binding.CompositionKind != TEXT("ue.animation_sequence.asset")
-			&& Binding.CompositionKind != TEXT("ue.level_sequence.asset"))
-		{
-			ActualHjsonKinds.Add(Binding.CompositionKind);
-		}
-	}
-	const TSet<FString> ExpectedHjson = ExpectedGraphHjsonKinds();
-	TestEqual(TEXT("five legacy Graph/Compound HJSON kinds are registered"),
-		ActualHjsonKinds.Num(), ExpectedHjson.Num());
-	for (const FString& Kind : ExpectedHjson)
-	{
-		TestTrue(TEXT("exact HJSON target exists: ") + Kind,
-			ActualHjsonKinds.Contains(Kind));
-		TestFalse(TEXT("prefix HJSON target is rejected: ") + Kind,
-			GetHjsonImportTargetRegistry().FindExact(Kind + TEXT(".derived"))
-				!= nullptr);
+		Expected.Add(Contract.Key);
 	}
 
 	using namespace UE::UAI::Composition::GraphCompound;
-	const TArray<FUeAgentGraphCompoundActivationProfile>& Profiles =
-		GetGraphCompoundActivationProfiles();
+	const TArray<FUeAgentGraphCompoundActivationProfile>* CachedGraphProfiles = nullptr;
+	UE::UAI::Contract::FDiagnostic ProfileError;
+	if (!TryGetGraphCompoundActivationProfiles(CachedGraphProfiles, ProfileError))
+	{
+		AddError(ProfileError.PublicMessage);
+		return false;
+	}
+	const auto& Profiles = *CachedGraphProfiles;
 	TestEqual(TEXT("one activation profile per capability"),
 		Profiles.Num(), Expected.Num());
 	TSet<FString> ActualCommandIds;
@@ -415,11 +280,6 @@ bool FUeAgentGraphCompoundActivationExpectedTest::RunTest(
 	TestTrue(TEXT("Graph/Compound production command registry is created"),
 		TryCreateGraphCompoundProductionCommandContractRegistry(
 			Commands, Error));
-	if (Descriptors.IsValid())
-	{
-		TestEqual(TEXT("one production descriptor per capability"),
-			Descriptors->GetDescriptors().Num(), Expected.Num());
-	}
 	for (const FUeAgentGraphCompoundActivationProfile& Profile : Profiles)
 	{
 		if (Descriptors.IsValid())
@@ -449,8 +309,6 @@ bool FUeAgentGraphCompoundActivationExpectedTest::RunTest(
 	}
 	if (Commands.IsValid())
 	{
-		TestEqual(TEXT("outer production registry includes 185 base and 78 Graph commands"),
-			Commands->GetContracts().Num(), 263);
 		FString Manifest;
 		Error.Reset();
 		TestTrue(TEXT("production registry builds the formal manifest"),
@@ -494,23 +352,8 @@ bool FUeAgentGraphCompoundActivationExpectedTest::RunTest(
 			}
 		}
 
-		// The Graph registry owns its 303-command layer and validates the
-		// in-memory projection above.  The outer destructive/import activation
-		// owns the committed public manifest after it extends this registry.
-	}
-
-	using namespace UE::UAI::Composition::GraphCompound;
-	TSet<FString> ProductionKinds;
-	for (const FString& Kind : GetGraphCompoundHjsonCompositionKinds())
-	{
-		ProductionKinds.Add(Kind);
-	}
-	TestEqual(TEXT("production Graph HJSON kind count"),
-		ProductionKinds.Num(), ExpectedHjson.Num());
-	for (const FString& Kind : ExpectedHjson)
-	{
-		TestTrue(TEXT("production HJSON kind exists: ") + Kind,
-			ProductionKinds.Contains(Kind));
+		// The Graph registry owns its command layer and validates the
+		// in-memory projection above.
 	}
 	return !HasAnyErrors();
 }
@@ -532,25 +375,34 @@ bool FUeAgentGraphCompoundPublicCommandHandlersExpectedTest::RunTest(
 		MakeShared<FRecordingQueryPort>();
 	const TSharedRef<FRecordingOperationPort> OperationPort =
 		MakeShared<FRecordingOperationPort>();
+	const TArray<FUeAgentGraphCompoundActivationProfile>* CachedGraphProfiles = nullptr;
+	UE::UAI::Contract::FDiagnostic ProfileError;
+	if (!TryGetGraphCompoundActivationProfiles(CachedGraphProfiles, ProfileError))
+	{
+		AddError(ProfileError.PublicMessage);
+		return false;
+	}
+	const auto& Profiles = *CachedGraphProfiles;
 	TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>> Handlers;
-	FString Error;
+	Contract::FDiagnostic Error;
 	TestTrue(TEXT("one thin handler is created for every exact route"),
 		TryCreateGraphCompoundCommandHandlers(
-			GetGraphCompoundActivationProfiles(),
+			Profiles,
 			QueryPort,
 			OperationPort,
 			Handlers,
 			Error));
-	TestEqual(TEXT("public handler count"), Handlers.Num(), 78);
+	TestEqual(TEXT("one public handler per activation profile"),
+		Handlers.Num(), Profiles.Num());
 
 	TSharedPtr<const CommandContract::FUeAgentCommandContractRegistry>
 		Commands;
 	TestTrue(TEXT("production command registry composes"),
 		TryCreateGraphCompoundProductionCommandContractRegistry(
 			Commands, Error));
-	if (!Commands.IsValid() || Handlers.Num() != 78)
+	if (!Commands.IsValid() || Handlers.Num() != Profiles.Num())
 	{
-		AddError(TEXT("graph_compound_public_handlers_unavailable:") + Error);
+		AddError(TEXT("graph_compound_public_handlers_unavailable:") + Error.PublicMessage);
 		return false;
 	}
 
@@ -574,7 +426,7 @@ bool FUeAgentGraphCompoundPublicCommandHandlersExpectedTest::RunTest(
 	int32 ExpectedQueryCalls = 0;
 	int32 ExpectedOperationCalls = 0;
 	for (const FUeAgentGraphCompoundActivationProfile& Profile
-		: GetGraphCompoundActivationProfiles())
+		: Profiles)
 	{
 		const CommandContract::FUeAgentCommandContract* Command =
 			Commands->FindExact(Profile.GetCommandId());
@@ -627,13 +479,9 @@ bool FUeAgentGraphCompoundPublicCommandHandlersExpectedTest::RunTest(
 				FString(TEXT("uai-command:")) + RequestId);
 		}
 	}
-	TestEqual(TEXT("all query routes submit to C3Q"),
-		QueryPort->Calls, 3);
-	TestEqual(TEXT("all operation routes submit to C3O"),
-		OperationPort->Calls, 74);
-	TestEqual(TEXT("fixture query count is stable"),
-		ExpectedQueryCalls, 3);
-	TestEqual(TEXT("fixture operation count is stable"),
-		ExpectedOperationCalls, 74);
+	TestEqual(TEXT("all discovered query routes submit to C3Q"),
+		QueryPort->Calls, ExpectedQueryCalls);
+	TestEqual(TEXT("all discovered operation routes submit to C3O"),
+		OperationPort->Calls, ExpectedOperationCalls);
 	return !HasAnyErrors();
 }

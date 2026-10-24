@@ -2,7 +2,7 @@
 
 #include "CommandHandlers/WorldSpatial/UeAgentLevelWorldCommandHandlers.h"
 #include "Core/Contract/UeAgentCommandContract.h"
-#include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "OperationOwners/WorldSpatial/UeAgentLevelWorldDomainService.h"
 
@@ -16,12 +16,8 @@ namespace UE::UAI::Module::CommandRegistration::WorldSpatial
 
 	namespace
 	{
+		const FString DomainId = TEXT("level-world-domain");
 		const FString ProviderRegistrationId = TEXT("level-world-domain-provider");
-		const HjsonWorkspace::FImportInitializationDomainProviderFactoryRegistration
-			ProviderRegistration(
-				TEXT("spatial-content-operation"),
-				TEXT("level-world-domain-provider"),
-				&OperationOwners::WorldSpatial::TryCreateLevelWorldDomainProvider);
 
 		const FString CandidateCommandId = TEXT("world.actor.candidates");
 		const FString CandidateOwner = TEXT("level-world-domain-owner");
@@ -49,49 +45,22 @@ namespace UE::UAI::Module::CommandRegistration::WorldSpatial
 				TEXT("asset_persisted_state")};
 			Result.InputFields = {
 				Field(TEXT("target"), TEXT("string"), true,
-					TEXT("Exact persisted World package.object identity that will own the Actor.")),
+					TEXT("Persisted World name from content search, or its exact package.object path, that will own the Actor.")),
 				Field(TEXT("category"), TEXT("string"), false,
 					TEXT("Optional exact native Place Actors category handle or display name.")),
 				Field(TEXT("query"), TEXT("string"), false,
 					TEXT("Optional native Place Actors text-filter expression; active text search uses AllClasses like the editor UI.")),
-				Field(TEXT("id"), TEXT("string"), false,
-					TEXT("Optional exact compact candidate id returned by an earlier page.")),
-				Field(TEXT("limit"), TEXT("integer"), false,
-					TEXT("Optional page size from 1 through 20; defaults to 20.")),
-				Field(TEXT("cursor"), TEXT("integer"), false,
-					TEXT("Optional non-negative result offset; defaults to zero.")),
 			};
 			Result.ResultFields = {
-				Field(TEXT("command_id"), TEXT("string"), true,
-					TEXT("The unchanged exact public command identity.")),
-				Field(TEXT("read_only"), TEXT("boolean"), true,
-					TEXT("Always true.")),
-				Field(TEXT("target"), TEXT("string"), true,
-					TEXT("The unchanged target World identity.")),
-				Field(TEXT("context"), TEXT("object"), true,
-					TEXT("World path, native placement category and exact registry surface used.")),
-				Field(TEXT("catalog_revision"), TEXT("string"), true,
-					TEXT("Opaque fingerprint of the matching native candidate set.")),
-				Field(TEXT("candidates"), TEXT("array"), true,
-					TEXT("Native FPlaceableItem entries; name or id is directly consumable by Actor HJSON candidate.")),
-				Field(TEXT("total_matching"), TEXT("integer"), true,
-					TEXT("Total native candidates matching this context and query.")),
-				Field(TEXT("next_cursor"), TEXT("integer"), true,
-					TEXT("Next result offset, or -1 when complete.")),
-				Field(TEXT("complete"), TEXT("boolean"), true,
-					TEXT("True only when this is the final page.")),
-				Field(TEXT("has_more"), TEXT("boolean"), true,
-					TEXT("True only while another page remains.")),
-				Field(TEXT("warnings"), TEXT("array"), true,
-					TEXT("Typed native categories that cannot yet execute headlessly.")),
+				Field(TEXT("scope"), TEXT("object"), true, TEXT("Public target and supplied placement category; response metadata, not a selector.")),
+				Field(TEXT("names"), TEXT("array"), true,
+					TEXT("Names of actors available in the requested native placement context.")),
 			};
 			Result.Errors = {
 				{TEXT("world_actor_candidate_query_authority_required"),
 					TEXT("The uai:query authority is missing.")},
 				{TEXT("world_actor_candidate_target_unresolved"),
 					TEXT("The exact persisted World identity does not exist.")},
-				{TEXT("world_actor_candidate_page_invalid"),
-					TEXT("The requested limit or cursor is outside the bounded contract.")},
 				{TEXT("world_actor_candidate_query_failed"),
 					TEXT("The native Place Actors registry could not be enumerated.")},
 			};
@@ -104,15 +73,15 @@ namespace UE::UAI::Module::CommandRegistration::WorldSpatial
 				TEXT("Use category only when reproducing an explicit Place Actors tab context."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Search and page the native registry, then copy only candidate.name or candidate.id into actors[].candidate; copy context.placement_category to actors[].placement_context.category when it is not AllClasses.");
+				TEXT("Search the native registry and use a returned name as the Actor creation selector.");
 			Result.Purpose.ResultGuidance =
-				TEXT("name is sufficient when unique in the returned native context; id preserves category, factory, asset and Actor class. Richer fields are optional assertions, not required creation fields.");
+				TEXT("The response contains names and one scope; re-query needed names when the target or placement category changes. scope is response metadata, not a selector; ambiguous names require a short semantic selection.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Unknown, ambiguous, stale, unsupported custom-drag or assertion-mismatched candidates fail before persistent mutation; no class-only fallback is used for candidate HJSON.");
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Read-only; it opens no editor window, selects nothing and creates no Actor.");
 			Result.Purpose.MinimumExample =
-				TEXT("client.world.actor_candidates(target=world, query='Cube', limit=10)");
+				TEXT("client.world.actor_candidates(target='/Game/Maps/MyMap.MyMap', query='Cube')");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.content.search"),
 				TEXT("content_graph.import_workspace"),
@@ -147,12 +116,58 @@ namespace UE::UAI::Module::CommandRegistration::WorldSpatial
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry>,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return TryCreateWorldSpatialCommandHandlers(
 					OutHandlers, OutError);
 			}
 		};
+
+		bool TryCreateDomainCapability(
+			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
+				OutContribution,
+			UE::UAI::Contract::FDiagnostic& OutError)
+		{
+			TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>
+				Provider;
+			HjsonWorkspace::FWorkspaceError WorkspaceError;
+			if (!OperationOwners::WorldSpatial::TryCreateLevelWorldDomainProvider(
+					Provider, WorkspaceError)
+				|| !Provider.IsValid())
+			{
+				OutError = WorkspaceError.GetDiagnostic();
+				return false;
+			}
+			DomainCapability::FDomainCapabilityDeclaration Declaration =
+				DomainCapability::MakeExplicitlyUnsupportedDomainCapabilityDeclaration(
+					DomainId);
+			Declaration.Hjson.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.Hjson.Providers.Add(Provider.ToSharedRef());
+			Declaration.Hjson.Routes = {{
+				ProviderRegistrationId,
+				TEXT("content_graph.import_workspace"),
+				TEXT("uai.world.edit/1"),
+				TEXT("level_world"),
+				TEXT("/Script/Engine.World"),
+				HjsonWorkspace::EInitializationNodeRole::RootTarget,
+				TEXT("uai.init.world.world/1"),
+				true,
+			}};
+			Declaration.Initialization.Support =
+				DomainCapability::EDomainCapabilitySupport::Supported;
+			Declaration.Initialization.ContractIds = {
+				TEXT("uai.init.world.world/1"),
+				TEXT("uai.init.world.actor/1"),
+				TEXT("uai.init.world.component/1"),
+				TEXT("uai.init.world.data_layer/1"),
+			};
+			return DomainCapability::FDomainCapabilityContribution::TryCreate(
+				MoveTemp(Declaration), OutContribution, OutError);
+		}
+
+		const DomainCapability::FDomainCapabilityContributionFactoryRegistration
+			DomainCapabilityRegistration(*DomainId, &TryCreateDomainCapability);
 
 		const FUeAgentActiveCommandContributionFactoryRegistration
 			CandidateRegistration(
@@ -167,7 +182,7 @@ namespace UE::UAI::Module::CommandRegistration::WorldSpatial
 
 	bool TryCreateLevelWorldCandidateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution = MakeShared<FCandidateContribution>();
 		OutError.Reset();

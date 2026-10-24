@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringComposition.h"
 
@@ -10,5 +12,5 @@ namespace UE::UAI::CommandHandlers::AssetSimple
 			FUeAgentSimpleAuthoringCommandRoute>& Routes,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>&
 			OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

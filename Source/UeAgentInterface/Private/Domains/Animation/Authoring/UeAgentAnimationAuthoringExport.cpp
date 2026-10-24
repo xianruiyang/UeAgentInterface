@@ -7,16 +7,18 @@
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDocuments.h"
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringState.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
+#include "Dom/JsonValue.h"
 #include "Misc/Paths.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringWorkspacePaths.h"
 #include "UObject/Package.h"
+#include "UObject/Class.h"
 
 namespace UeAgentAnimationAuthoring {
 bool ResolveDefaultWorkspaceFolder(const FProfile &Profile,
                                    const FString &AssetPath,
                                    FString &OutWorkspaceRoot,
-                                   FString &OutError) {
+                                   UE::UAI::Contract::FDiagnostic& OutError) {
   const FString DomainRoot = FPaths::ConvertRelativePathToFull(FPaths::Combine(
       FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), Profile.TypeId));
   return UeAgentAuthoringWorkspacePaths::ResolveAssetWorkspaceFolder(
@@ -26,8 +28,8 @@ bool ResolveDefaultWorkspaceFolder(const FProfile &Profile,
 bool ExportAssetWorkspace(
     const FProfile &Profile, UObject &Asset, const FString &WorkspaceRoot,
     const FString &ExportProfileId,
-    UeAgentExportWorkspaceWriter::FWorkspaceResult &OutResult,
-    FString &OutError) {
+    UeAgentExportWorkspaceWriter::FWorkspaceResult &OutResult) {
+  auto& OutError = OutResult.Diagnostic;
   OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
   OutError.Reset();
   TArray<UeAgentAuthoringState::FReadRequest> Requests;
@@ -38,13 +40,14 @@ bool ExportAssetWorkspace(
   if (bAnimBlueprint) {
     UAnimBlueprint *AnimBlueprint = Cast<UAnimBlueprint>(&Asset);
     if (!AnimBlueprint) {
-      OutError = TEXT("animation_anim_blueprint_export_type_invalid");
+      OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_anim_blueprint_export_type_invalid"),
+          TEXT("Animation Blueprint export requires an AnimBlueprint asset."), TEXT("export_capture"));
+      OutError.SourceKind = TEXT("native_result");
+      OutError.InternalContext = Asset.GetPathName();
+      OutError.ActualValue = MakeShared<FJsonValueString>(Asset.GetClass()->GetPathName());
+      OutError.ExpectedValue = MakeShared<FJsonValueString>(UAnimBlueprint::StaticClass()->GetPathName());
       return false;
     }
-    Requests.RemoveAll([&Profile](
-                           const UeAgentAuthoringState::FReadRequest &Request) {
-      return Request.SemanticId == Profile.DocumentSemanticId;
-    });
     if (!UeAgentBlueprintAuthoring::
             AppendReusableBlueprintExportSnapshotReadRequests(
                 *AnimBlueprint, Requests, OutError,
@@ -54,17 +57,13 @@ bool ExportAssetWorkspace(
   }
   UeAgentAuthoringState::FCaptureResult Capture;
   if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture)) {
-    OutError = Capture.ErrorCode + TEXT(":") + Capture.ErrorDetail;
+    OutError = Capture.Diagnostic;
     return false;
   }
   if (bAnimBlueprint) {
-    return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(
-        TEXT("ue.anim_blueprint.asset"), ExportProfileId, Capture.Snapshot,
-        WorkspaceRoot, OutResult, OutError);
+    return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(TEXT("ue.anim_blueprint.asset"), ExportProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
   }
-  return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(
-      UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
-          Profile.TargetKind, Profile.TypeId),
-      ExportProfileId, Capture.Snapshot, WorkspaceRoot, OutResult, OutError);
+  return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
+          Profile.TargetKind, Profile.TypeId), ExportProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
 }
 } // namespace UeAgentAnimationAuthoring

@@ -46,6 +46,12 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		UE::UAI::StateSemantic::FUeAgentCanonicalValuePtr State;
 	};
 
+	struct UEAGENTINTERFACE_API FUeAgentContentGraphEndpoint
+	{
+		FString Identity;
+		FString PublicName;
+	};
+
 	struct UEAGENTINTERFACE_API FUeAgentContentGraphRelation
 	{
 		FString RelationId;
@@ -54,10 +60,15 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		FString TargetItemId;
 		FUeAgentContentGraphSemanticIdentity SemanticIdentity;
 		UE::UAI::StateSemantic::FUeAgentCanonicalValuePtr State;
+		// Optional precise endpoints; item identities continue to own graph closure.
+		FUeAgentContentGraphEndpoint SourceEndpoint;
+		FUeAgentContentGraphEndpoint TargetEndpoint;
 	};
 
 	struct UEAGENTINTERFACE_API FUeAgentContentGraphFieldState
 	{
+		UE::UAI::StateSemantic::FUeAgentCanonicalValuePtr AuthoringDescriptor;
+		TOptional<UE::UAI::StateSemantic::FUeAgentStateDetails> AuthoringDetails;
 		TOptional<
 			UE::UAI::StateSemantic::FUeAgentCanonicalType>
 			Type;
@@ -114,6 +125,7 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		TArray<FUeAgentContentGraphProperty> Properties;
 		TArray<FUeAgentContentGraphParameter> Parameters;
 		TArray<FUeAgentContentGraphDiagnostic> Diagnostics;
+		UE::UAI::StateSemantic::FUeAgentCanonicalValuePtr DiagnosticCoverage;
 	};
 
 	class UEAGENTINTERFACE_API
@@ -129,6 +141,14 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				FUeAgentExecutionContextRef& Context,
 			FUeAgentContentGraphCapture& OutCapture,
 			FUeAgentContentGraphReadError& OutError) = 0;
+
+		// Requested separately so ordinary authoring reads do not run native diagnostics.
+		virtual bool TryCaptureDiagnostics(
+			FUeAgentContentGraphCapture& Capture,
+			FUeAgentContentGraphReadError& OutError)
+		{
+			return true;
+		}
 	};
 
 	class UEAGENTINTERFACE_API
@@ -146,6 +166,20 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 	UEAGENTINTERFACE_API bool TryBuildContentGraphCompoundSnapshot(
 		const FUeAgentContentGraphCapture& Capture,
 		const UE::UAI::ContextResource::FUeAgentOperationContext& Context,
+		TSharedPtr<const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot>&
+			OutSnapshot,
+		FUeAgentContentGraphReadError& OutError);
+
+	UEAGENTINTERFACE_API bool TryBuildContentGraphAuthoringSnapshot(
+		const FUeAgentContentGraphCapture& Capture,
+		const UE::UAI::ContextResource::FUeAgentOperationContext& Context,
+		TSharedPtr<const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot>&
+			OutSnapshot,
+		FUeAgentContentGraphReadError& OutError);
+
+	UEAGENTINTERFACE_API bool TryBuildContentGraphAuthoringSnapshot(
+		const FUeAgentContentGraphCapture& Capture,
+		const UE::UAI::ContextResource::FUeAgentResourceTrackerOwner& Resources,
 		TSharedPtr<const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot>&
 			OutSnapshot,
 		FUeAgentContentGraphReadError& OutError);

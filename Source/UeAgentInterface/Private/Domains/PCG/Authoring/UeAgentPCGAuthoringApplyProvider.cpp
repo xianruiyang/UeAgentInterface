@@ -9,6 +9,7 @@
 #include "Domains/PCG/Authoring/UeAgentPCGAuthoringState.h"
 #include "Domains/PCG/Authoring/UeAgentPCGGraphAuthoring.h"
 #include "Domains/PCG/UeAgentPCGDomainBackend.h"
+#include "Domains/PCG/UeAgentPcgGraphCompilation.h"
 #include "Engine/Engine.h"
 #include "Misc/PackageName.h"
 #include "ObjectTools.h"
@@ -16,11 +17,16 @@
 #include "PCGNode.h"
 #include "PCGSettings.h"
 #include "UObject/StrongObjectPtr.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringAssetIdentity.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringJsonFields.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringAssetRemovalStage.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringObjectApplyProvider.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentApplyWorkspaceContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceApply.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceInput.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceDependencyGraph.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceLoader.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
@@ -30,28 +36,46 @@ namespace {
 using namespace UeAgentApplyInputContract;
 using namespace UeAgentAuthoringOperationApply;
 
-void SetFailure(FOperationFailure &OutFailure, const FString &Code,
-                const FString &Detail = FString()) {
-  OutFailure = FOperationFailure();
-  OutFailure.ErrorCode = Code;
-  OutFailure.ErrorDetail = Detail.IsEmpty() ? Code : Detail;
+void SetFailure(FOperationFailure& OutFailure, UE::UAI::Contract::FDiagnostic Diagnostic,
+    const FString& Subject = FString()) {
+  OutFailure.Diagnostic = MoveTemp(Diagnostic);
+  if (OutFailure.Diagnostic.SubjectId.IsEmpty()) OutFailure.Diagnostic.SubjectId = Subject;
+  if (OutFailure.Diagnostic.TargetPath.IsEmpty()) OutFailure.Diagnostic.TargetPath = Subject;
 }
 
-FString NormalizePackagePath(const FString &InPath) {
-  FString Path = InPath.TrimStartAndEnd();
-  if (Path.Contains(TEXT(".")))
-    Path = FPackageName::ObjectPathToPackageName(Path);
-  return Path;
+UE::UAI::Contract::FDiagnostic NativeFailure(const TCHAR* Code, const TCHAR* Reason,
+    const TCHAR* Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected) {
+  auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("authoring_apply"));
+  Error.SourceKind = TEXT("native_result");
+  Error.PropertyPath = Field;
+  Error.ActualValue = MoveTemp(Actual);
+  Error.ExpectedValue = MoveTemp(Expected);
+  Error.ActualValuePresent = Error.ActualValue.IsValid();
+  Error.ExpectedValuePresent = Error.ExpectedValue.IsValid();
+  return Error;
 }
 
-FString ToObjectPath(const FString &PackagePath) {
-  const FString Name = FPackageName::GetLongPackageAssetName(PackagePath);
-  return Name.IsEmpty() ? PackagePath
-                        : FString::Printf(TEXT("%s.%s"), *PackagePath, *Name);
+UE::UAI::Contract::FDiagnostic InputFailure(const TCHAR* Code, const TCHAR* Reason,
+    const FJsonObject& Input, const FString& Field, const TCHAR* Expected) {
+  auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("authoring_apply"));
+  Error.PropertyPath = Field;
+  Error.ActualValue = Input.TryGetField(Field);
+  Error.ActualValuePresent = Error.ActualValue.IsValid();
+  Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+  Error.ExpectedValuePresent = true;
+  UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, Input, Field);
+  return Error;
 }
+
+
+
+
+
+
 
 UPCGGraph *LoadGraph(const FString &InPath) {
-  return UeAgentPCG::LoadAsset<UPCGGraph>(NormalizePackagePath(InPath));
+  return UeAgentPCG::LoadAsset<UPCGGraph>(
+      UeAgentAuthoringAssetIdentity::NormalizePackagePath(InPath));
 }
 
 UPCGGraph *DuplicatePublishedGraph(UPCGGraph *Source, UPackage *Package,
@@ -67,29 +91,38 @@ UPCGGraph *DuplicatePublishedGraph(UPCGGraph *Source, UPackage *Package,
   return Published;
 }
 
-bool DeleteGraph(UPCGGraph *Graph, FString &OutError) {
+bool DeleteGraph(UPCGGraph* Graph, const FString& Target, UE::UAI::Contract::FDiagnostic& OutError)
+{
   OutError.Reset();
   if (!Graph) {
-    OutError = TEXT("pcg_delete_target_missing");
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_delete_target_missing"),
+      TEXT("No PCGGraph object was supplied for deletion."), TEXT("authoring_apply"));
+    OutError.SourceKind = TEXT("native_result"); OutError.TargetPath = Target; OutError.PropertyPath = TEXT("asset");
+    OutError.ActualValuePresent = true; OutError.ActualValue = MakeShared<FJsonValueNull>();
+    OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("PCGGraph object"));
     return false;
   }
   TGuardValue<bool> UnattendedGuard(GIsRunningUnattendedScript, true);
   if (!ObjectTools::DeleteSingleObject(Graph, true)) {
-    OutError = TEXT("pcg_delete_blocked_by_references");
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_delete_rejected"),
+      TEXT("The editor rejected deletion of the PCGGraph object."), TEXT("authoring_apply"),
+      TEXT("DeleteSingleObject returned false with reference checking enabled; its bool API does not distinguish deletion-policy and reference-check rejection."));
+    OutError.SourceKind = TEXT("native_result"); OutError.TargetPath = Target; OutError.PropertyPath = TEXT("deletion_succeeded");
+    OutError.ActualValuePresent = true; OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+    OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
     return false;
   }
   return true;
 }
 
-bool CompileGraph(UPCGGraph *Graph, FString &OutError) {
+bool CompileGraph(UPCGGraph *Graph, UE::UAI::Contract::FDiagnostic& OutError) {
   OutError.Reset();
   if (!Graph) {
-    OutError = TEXT("pcg_compile_target_missing");
+    OutError = NativeFailure(TEXT("pcg_compile_target_missing"), TEXT("No PCG graph is available for compilation."),
+        TEXT("graph_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
     return false;
   }
-  Graph->Recompile();
-  Graph->PrimeGraphCompilationCache();
-  return true;
+  return UE::UAI::PcgCompilation::Compile(*Graph, OutError);
 }
 
 bool ReadBool(const TSharedPtr<const FJsonObject> &Object, const TCHAR *Field,
@@ -101,19 +134,27 @@ bool ReadBool(const TSharedPtr<const FJsonObject> &Object, const TCHAR *Field,
 }
 
 bool ValidateExtensionFields(const TSharedPtr<const FJsonObject> &Extension,
-                             FString &OutError) {
+                             UE::UAI::Contract::FDiagnostic& OutError) {
   OutError.Reset();
   if (!Extension.IsValid())
     return true;
   for (const TPair<FString, TSharedPtr<FJsonValue>> &Field :
        Extension->Values) {
     if (Field.Key != TEXT("graph") && Field.Key != TEXT("replace_nodes") &&
-        Field.Key != TEXT("compile") && Field.Key != TEXT("save")) {
-      OutError = TEXT("pcg_provider_extension_unknown_field:") + Field.Key;
+        Field.Key != TEXT("compile") && Field.Key != TEXT("save") &&
+        Field.Key != TEXT("preserve_existing_nodes")) {
+      OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_provider_extension_unknown_field"),
+          TEXT("The PCG provider extension contains an unsupported field."), TEXT("authoring_apply"));
+      OutError.PropertyPath = Field.Key;
+      OutError.ActualValue = MakeShared<FJsonValueString>(Field.Key);
+      OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("graph, replace_nodes, preserve_existing_nodes, compile or save"));
+      UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *Extension, Field.Key);
       return false;
     }
   }
-  return true;
+  return UeAgentAuthoringJsonFields::ValidateOptionalFields(*Extension,
+      {{TEXT("graph"), EJson::Object}, {TEXT("replace_nodes"), EJson::Boolean},
+       {TEXT("preserve_existing_nodes"), EJson::Boolean}, {TEXT("compile"), EJson::Boolean}, {TEXT("save"), EJson::Boolean}}, OutError);
 }
 
 bool GraphDocumentHasNodeProperties(
@@ -136,12 +177,12 @@ bool GraphDocumentHasNodeProperties(
 }
 
 bool RestoreGraph(UPCGGraph &Target, UPCGGraph &RollbackSource,
-                  FString &OutError) {
+                  UE::UAI::Contract::FDiagnostic& OutError) {
   TSharedPtr<FJsonObject> Document;
-  if (!BuildGraphDocument(RollbackSource, Document, OutError))
+  if (!BuildGraphDocument(RollbackSource, Document, OutError, Target.GetPathName()))
     return false;
   FGraphApplyResult ApplyResult;
-  if (!ApplyGraphDocument(Target, Document, true, ApplyResult, OutError))
+  if (!ApplyGraphDocument(Target, Document, true, ApplyResult, OutError, false, nullptr, Target.GetPathName()))
     return false;
   const TMap<FString, UPCGNode *> SourceNodes =
       UeAgentPCG::BuildExportNodeMapById(&RollbackSource);
@@ -170,12 +211,17 @@ public:
                        UPCGGraph *InExisting, UPCGGraph *InProposed,
                        TSharedPtr<const FJsonObject> InGraphDocument,
                        FGraphApplyResult InGraphResult, bool bInReplaceNodes,
-                       bool bInCompile, bool bInSave, bool bInGraphNoOp)
+                       bool bInCompile, bool bInSave, bool bInGraphNoOp,
+                       bool bInPreserveExistingNodes,
+                       TSharedPtr<const UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext> InConnections)
       : PackagePath(MoveTemp(InPackagePath)), Operation(InOperation),
         Existing(InExisting), Proposed(InProposed),
         GraphDocument(MoveTemp(InGraphDocument)), GraphResult(InGraphResult),
-        bReplaceNodes(bInReplaceNodes), bCompile(bInCompile), bSave(bInSave),
-        bGraphNoOp(bInGraphNoOp) {}
+        bReplaceNodes(bInReplaceNodes), bPreserveExistingNodes(bInPreserveExistingNodes),
+        bCompile(bInCompile), bSave(bInSave), bGraphNoOp(bInGraphNoOp),
+        Connections(MoveTemp(InConnections)) {
+    if (GraphDocument) GraphSources = UeAgentAuthoringDiagnostics::FScopedSourceLocations::CaptureProjection(*GraphDocument);
+  }
 
   virtual FString GetTargetKey() const override { return PackagePath; }
   virtual EOperation GetResolvedOperation() const override { return Operation; }
@@ -198,13 +244,14 @@ public:
       RollbackCopy.Reset(Cast<UPCGGraph>(StaticDuplicateObject(
           Existing, GetTransientPackage(), NAME_None, RF_Transient)));
       if (!RollbackCopy.IsValid()) {
-        SetFailure(OutFailure, TEXT("pcg_rollback_capture_failed"));
+        SetFailure(OutFailure, NativeFailure(TEXT("pcg_rollback_capture_failed"), TEXT("Unreal could not duplicate the graph to capture rollback state."),
+            TEXT("rollback_copy_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), PackagePath);
         return false;
       }
       return true;
     }
     if (Operation == EOperation::Remove && Existing) {
-      FString Error;
+      UE::UAI::Contract::FDiagnostic Error;
       if (!RemovalStage.Capture(Existing, Error)) {
         SetFailure(OutFailure, Error);
         return false;
@@ -221,7 +268,7 @@ public:
   virtual bool ApplyLifecycle(FOperationFailure &OutFailure) override {
     OutFailure = FOperationFailure();
     if (Operation == EOperation::Remove) {
-      FString Error;
+      UE::UAI::Contract::FDiagnostic Error;
       if (!RemovalStage.Stage(Error)) {
         SetFailure(OutFailure, Error);
         return false;
@@ -231,11 +278,12 @@ public:
     }
     if (Operation == EOperation::Update) {
       if (GraphDocument.IsValid()) {
-        FGraphApplyResult Applied;
-        FString Error;
+        UeAgentAuthoringDiagnostics::FScopedSourceLocations SourceScope(GraphDocument.Get(),
+            [this](const FString& Pointer) { return UeAgentAuthoringDiagnostics::FScopedSourceLocations::ResolveProjection(GraphSources, Pointer); });
+        UE::UAI::Contract::FDiagnostic Error;
         if (!ApplyGraphDocument(*Existing, GraphDocument, bReplaceNodes,
-                                Applied, Error)) {
-          SetFailure(OutFailure, TEXT("pcg_graph_apply_failed"), Error);
+                                ActualGraphResult, Error, bPreserveExistingNodes, Connections.Get(), PackagePath)) {
+          SetFailure(OutFailure, MoveTemp(Error));
           return false;
         }
       }
@@ -243,7 +291,8 @@ public:
       return true;
     }
     if (!Proposed.IsValid()) {
-      SetFailure(OutFailure, TEXT("pcg_proposed_asset_missing"));
+      SetFailure(OutFailure, NativeFailure(TEXT("pcg_proposed_asset_missing"), TEXT("The prepared PCG graph is no longer available for publication."),
+          TEXT("proposed_graph_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), PackagePath);
       return false;
     }
     UPackage *TargetPackage = CreatePackage(*PackagePath);
@@ -251,7 +300,10 @@ public:
         Proposed.Get(), TargetPackage,
         FPackageName::GetLongPackageAssetName(PackagePath));
     if (!Actual) {
-      SetFailure(OutFailure, TEXT("pcg_asset_publish_failed"));
+      SetFailure(OutFailure, NativeFailure(TEXT("pcg_asset_publish_failed"), !TargetPackage
+          ? TEXT("Unreal could not create the target package for the PCG graph.") : TEXT("Unreal could not duplicate the prepared graph into its target package."),
+          !TargetPackage ? TEXT("package_available") : TEXT("published_graph_available"),
+          MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), PackagePath);
       return false;
     }
     FAssetRegistryModule::AssetCreated(Actual);
@@ -263,7 +315,7 @@ public:
     OutFailure = FOperationFailure();
     if (!bCompile || Operation == EOperation::Remove)
       return true;
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!CompileGraph(Actual ? Actual : Existing, Error)) {
       SetFailure(OutFailure, Error);
       return false;
@@ -275,7 +327,7 @@ public:
     OutFailure = FOperationFailure();
     if (!bSave || Operation == EOperation::Remove)
       return true;
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!UeAgentPCG::SavePackagesForObjects({Actual ? Actual : Existing},
                                             Error)) {
       SetFailure(OutFailure, Error);
@@ -300,14 +352,51 @@ public:
   virtual bool BuildDomainExpectedReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const override {
+    UE::UAI::Contract::FDiagnostic Error;
+    if (Operation != EOperation::Remove && Proposed.IsValid() &&
+        !VerifyGraphPropertyIntent(*Proposed, GraphResult, Error)) {
+      SetFailure(OutFailure, Error);
+      return false;
+    }
     return BuildReadRequests(
         Operation == EOperation::Remove ? nullptr : Proposed.Get(),
         Operation == EOperation::Remove, OutRequests, OutFailure);
   }
 
+  virtual bool SupportsPersistentReadback() const override {
+    return Operation == EOperation::Update && bSave;
+  }
+  virtual bool ReleaseForPersistentReadback(FOperationFailure &OutFailure) override {
+    OutFailure = FOperationFailure();
+    Existing = nullptr;
+    Actual = nullptr;
+    Proposed.Reset();
+    RollbackCopy.Reset();
+    return true;
+  }
+  virtual bool RebindAfterPersistentReadback(FOperationFailure &OutFailure) override {
+    OutFailure = FOperationFailure();
+    Existing = LoadGraph(PackagePath);
+    Actual = Existing;
+    if (!Actual) {
+      SetFailure(OutFailure, NativeFailure(TEXT("pcg_persistent_rebind_failed"), TEXT("The saved PCG graph could not be reloaded for persistent readback."),
+          TEXT("graph_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), PackagePath);
+      return false;
+    }
+    return true;
+  }
+
   virtual bool BuildDomainActualReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const override {
+    UPCGGraph* Current = Actual ? Actual : Existing;
+    UE::UAI::Contract::FDiagnostic Error;
+    if (Operation != EOperation::Remove && Current &&
+        !VerifyGraphPropertyIntent(*Current,
+            Operation == EOperation::Update ? ActualGraphResult : GraphResult, Error)) {
+      SetFailure(OutFailure, Error);
+      return false;
+    }
     return BuildReadRequests(
         Operation == EOperation::Remove ? nullptr
                                         : (Actual ? Actual : Existing),
@@ -326,8 +415,8 @@ public:
   virtual bool Commit(FOperationFailure &OutFailure) override {
     OutFailure = FOperationFailure();
     if (Operation == EOperation::Remove && RemovalStage.IsStaged()) {
-      FString Error;
-      if (!DeleteGraph(Cast<UPCGGraph>(RemovalStage.GetAsset()), Error)) {
+      UE::UAI::Contract::FDiagnostic Error;
+      if (!DeleteGraph(Cast<UPCGGraph>(RemovalStage.GetAsset()), PackagePath, Error)) {
         SetFailure(OutFailure, Error);
         return false;
       }
@@ -339,10 +428,10 @@ public:
 
   virtual bool Rollback(FOperationFailure &OutFailure) override {
     OutFailure = FOperationFailure();
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (Operation == EOperation::Update && Existing && RollbackCopy.IsValid()) {
       if (!RestoreGraph(*Existing, *RollbackCopy, Error)) {
-        SetFailure(OutFailure, TEXT("pcg_rollback_restore_failed"), Error);
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
       Actual = Existing;
@@ -350,7 +439,7 @@ public:
     }
     if ((Operation == EOperation::Create || Operation == EOperation::Clone) &&
         Actual) {
-      if (!DeleteGraph(Actual, Error)) {
+      if (!DeleteGraph(Actual, PackagePath, Error)) {
         TArray<UObject *> Objects = {Actual};
         if (ObjectTools::DeleteObjectsUnchecked(Objects) <= 0) {
           SetFailure(OutFailure, Error);
@@ -371,15 +460,20 @@ public:
   }
 
 private:
+  void SetFailure(FOperationFailure& OutFailure, UE::UAI::Contract::FDiagnostic Error,
+      const FString& Target = FString()) const {
+    UeAgentPCGAuthoring::SetFailure(OutFailure, MoveTemp(Error), Target.IsEmpty() ? PackagePath : Target);
+  }
+
   bool
   BuildReadRequests(UPCGGraph *Graph, const bool bExpectedAbsent,
                     TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
                     FOperationFailure &OutFailure) const {
     OutFailure = FOperationFailure();
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!BuildAssetSnapshotReadRequests(Graph, PackagePath, bExpectedAbsent,
                                         OutRequests, Error)) {
-      SetFailure(OutFailure, TEXT("pcg_snapshot_request_failed"), Error);
+      SetFailure(OutFailure, MoveTemp(Error), PackagePath);
       return false;
     }
     return true;
@@ -393,15 +487,21 @@ private:
   FAssetRemovalStage RemovalStage;
   UPCGGraph *Actual = nullptr;
   TSharedPtr<const FJsonObject> GraphDocument;
+  TMap<FString, UE::UAI::Contract::FSourceLocation> GraphSources;
   FGraphApplyResult GraphResult;
+  FGraphApplyResult ActualGraphResult;
   bool bReplaceNodes = true;
+  bool bPreserveExistingNodes = false;
   bool bCompile = true;
   bool bSave = false;
   bool bGraphNoOp = false;
+  TSharedPtr<const UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext> Connections;
 };
 
 class FAssetLifecycle final : public IReflectionOperationLifecycle {
 public:
+  explicit FAssetLifecycle(TSharedPtr<const UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext> InConnections)
+      : Connections(MoveTemp(InConnections)) {}
   virtual bool
   PrepareLifecycle(const FPrepareRequest &Request,
                    TUniquePtr<IReflectionOperationLifecycleState> &OutState,
@@ -409,18 +509,24 @@ public:
     OutState.Reset();
     OutFailure = FOperationFailure();
     if (!Request.IsValid() || !Request.Input->Target.IsValid()) {
-      SetFailure(OutFailure, TEXT("pcg_apply_request_invalid"));
+      const TCHAR* Field = !Request.Contract ? TEXT("contract") : !Request.Unit ? TEXT("unit")
+          : !Request.Input ? TEXT("input") : TEXT("target");
+      SetFailure(OutFailure, NativeFailure(TEXT("pcg_apply_request_invalid"),
+          *FString::Printf(TEXT("The PCG prepare request is missing its required %s object."), Field),
+          Field, nullptr, MakeShared<FJsonValueString>(TEXT("a valid preparation object"))));
       return false;
     }
 
     FString PackagePath;
     Request.Input->Target->TryGetStringField(TEXT("asset_path"), PackagePath);
-    PackagePath = NormalizePackagePath(PackagePath);
+    PackagePath =
+        UeAgentAuthoringAssetIdentity::NormalizePackagePath(PackagePath);
     if (!FPackageName::IsValidLongPackageName(PackagePath) ||
         FPackageName::GetLongPackageAssetName(PackagePath).IsEmpty() ||
         (!PackagePath.Equals(TEXT("/Game")) &&
          !PackagePath.StartsWith(TEXT("/Game/")))) {
-      SetFailure(OutFailure, TEXT("invalid_asset_path"), PackagePath);
+      SetFailure(OutFailure, InputFailure(TEXT("invalid_asset_path"), TEXT("The PCG asset path must identify a valid named package under /Game."),
+          *Request.Input->Target, TEXT("asset_path"), TEXT("a valid /Game package path with an asset name")), PackagePath);
       return false;
     }
 
@@ -430,18 +536,20 @@ public:
       Operation = Existing ? EOperation::Update : EOperation::Create;
     if ((Operation == EOperation::Create || Operation == EOperation::Clone) &&
         Existing) {
-      SetFailure(OutFailure, TEXT("asset_already_exists"), PackagePath);
+      SetFailure(OutFailure, InputFailure(TEXT("asset_already_exists"), TEXT("Create or clone requires a target path without an existing PCG graph."),
+          *Request.Input->Target, TEXT("asset_path"), TEXT("an unused PCG graph asset path")), PackagePath);
       return false;
     }
     if ((Operation == EOperation::Update || Operation == EOperation::Remove) &&
         !Existing) {
-      SetFailure(OutFailure, TEXT("asset_not_found"), PackagePath);
+      SetFailure(OutFailure, InputFailure(TEXT("asset_not_found"), TEXT("Update or remove requires an existing PCG graph at the target path."),
+          *Request.Input->Target, TEXT("asset_path"), TEXT("an existing PCG graph asset path")), PackagePath);
       return false;
     }
 
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!ValidateExtensionFields(Request.Input->ProviderExtension, Error)) {
-      SetFailure(OutFailure, Error);
+      SetFailure(OutFailure, MoveTemp(Error), PackagePath);
       return false;
     }
     UPCGGraph *Source = nullptr;
@@ -451,7 +559,8 @@ public:
                                                SourcePath);
       Source = LoadGraph(SourcePath);
       if (!Source) {
-        SetFailure(OutFailure, TEXT("source_asset_not_found"), SourcePath);
+        SetFailure(OutFailure, InputFailure(TEXT("source_asset_not_found"), TEXT("The clone source path did not resolve to a PCG graph."),
+            *Request.Input->Target, TEXT("source_asset_path"), TEXT("an existing PCG graph asset path")), PackagePath);
         return false;
       }
     }
@@ -461,6 +570,8 @@ public:
     FGraphApplyResult GraphResult;
     const bool bReplaceNodes =
         ReadBool(Request.Input->ProviderExtension, TEXT("replace_nodes"), true);
+    const bool bPreserveExistingNodes =
+        ReadBool(Request.Input->ProviderExtension, TEXT("preserve_existing_nodes"), false);
     if (Operation != EOperation::Remove) {
       UPackage *Scratch = CreatePackage(
           *FString::Printf(TEXT("/Temp/UAI/PCG/Proposed_%s"),
@@ -475,12 +586,13 @@ public:
         if (Proposed) {
           Proposed->ClearFlags(RF_Transient | RF_Standalone);
           Proposed->SetFlags(RF_Public | RF_Transactional);
+        } else {
+          Error = NativeFailure(TEXT("pcg_proposed_asset_create_failed"), TEXT("Unreal could not duplicate the source PCG graph into the preparation package."),
+              TEXT("proposed_graph_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
         }
       }
       if (!Proposed) {
-        SetFailure(OutFailure, Error.IsEmpty()
-                                   ? TEXT("pcg_proposed_asset_create_failed")
-                                   : Error);
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
       const TSharedPtr<FJsonObject> *GraphObject = nullptr;
@@ -488,13 +600,14 @@ public:
           Request.Input->ProviderExtension->TryGetObjectField(TEXT("graph"),
                                                               GraphObject)) {
         if (!GraphObject || !GraphObject->IsValid()) {
-          SetFailure(OutFailure, TEXT("pcg_graph_extension_invalid"));
+          SetFailure(OutFailure, InputFailure(TEXT("pcg_graph_extension_invalid"), TEXT("The graph extension must contain a graph document object."),
+              *Request.Input->ProviderExtension, TEXT("graph"), TEXT("a PCG graph document object")), PackagePath);
           return false;
         }
         GraphDocument = *GraphObject;
         if (!ApplyGraphDocument(*Proposed, GraphDocument, bReplaceNodes,
-                                GraphResult, Error)) {
-          SetFailure(OutFailure, TEXT("pcg_graph_preflight_failed"), Error);
+                                GraphResult, Error, bPreserveExistingNodes, Connections.Get(), PackagePath)) {
+          SetFailure(OutFailure, MoveTemp(Error), PackagePath);
           return false;
         }
       }
@@ -505,12 +618,16 @@ public:
         !GraphDocumentHasNodeProperties(GraphDocument)) {
       TSharedPtr<FJsonObject> Current;
       TSharedPtr<FJsonObject> ProposedDocument;
-      if (BuildGraphDocument(*Existing, Current, Error) &&
-          BuildGraphDocument(*Proposed, ProposedDocument, Error)) {
+      if (BuildGraphDocument(*Existing, Current, Error, PackagePath) &&
+          BuildGraphDocument(*Proposed, ProposedDocument, Error, PackagePath)) {
         bGraphNoOp = UeAgentAuthoringState::MakeStableCanonicalValueKey(
                          MakeShared<FJsonValueObject>(Current)) ==
                      UeAgentAuthoringState::MakeStableCanonicalValueKey(
                          MakeShared<FJsonValueObject>(ProposedDocument));
+      } else {
+        // Failure to prove a no-op retains the existing apply path.
+        if (Error.TargetPath.IsEmpty()) Error.TargetPath = PackagePath;
+        UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Error);
       }
     }
 
@@ -519,9 +636,11 @@ public:
         bReplaceNodes,
         ReadBool(Request.Input->ProviderExtension, TEXT("compile"), true),
         ReadBool(Request.Input->ProviderExtension, TEXT("save"), false),
-        bGraphNoOp);
+        bGraphNoOp, bPreserveExistingNodes, Connections);
     return true;
   }
+private:
+  TSharedPtr<const UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext> Connections;
 };
 
 FInputFieldDescriptor Field(const TCHAR *Name, const TCHAR *Role,
@@ -581,12 +700,11 @@ FContract MakeInputContract() {
       TEXT("replace_reference_only");
   Result.ReflectionBaseline.OwnedObjectPolicy =
       TEXT("create_or_locate_with_real_outer_then_recurse");
-  Result.ReflectionBaseline.RuntimeLimitsSource = TEXT("shared_runtime_limits");
   Result.PropertyPayload.Mode = TEXT("reflection");
   Result.PropertyPayload.PropertyPathField = TEXT("property_path");
   Result.PropertyPayload.ValueField = TEXT("value");
   Result.PropertyPayload.OptionalAssertionFields = {
-      TEXT("value_kind"),   TEXT("struct_path"),  TEXT("enum_path"),
+      TEXT("kind"),         TEXT("struct_path"),  TEXT("enum_path"),
       TEXT("element_type"), TEXT("key_type"),     TEXT("mapped_type"),
       TEXT("inner_type"),   TEXT("fixed_length"), TEXT("allowed_class")};
   Result.PropertyPayload.OmittedPatchFieldPolicy = TEXT("preserve_current");
@@ -604,6 +722,7 @@ FContract MakeInputContract() {
             TEXT("property_descriptor_list")),
       Field(TEXT("graph"), TEXT("provider_extension"), TEXT("pcg_graph")),
       Field(TEXT("replace_nodes"), TEXT("provider_extension"), TEXT("bool")),
+      Field(TEXT("preserve_existing_nodes"), TEXT("provider_extension"), TEXT("bool")),
       Field(TEXT("compile"), TEXT("provider_extension"), TEXT("bool")),
       Field(TEXT("save"), TEXT("provider_extension"), TEXT("bool")),
   };
@@ -674,6 +793,7 @@ TSharedRef<FJsonObject> MakeApplyDocument(const FAssetApplyRequest &Request) {
     Target->SetStringField(TEXT("source_asset_path"), Request.SourceAssetPath);
   TSharedRef<FJsonObject> Extension = MakeShared<FJsonObject>();
   Extension->SetBoolField(TEXT("replace_nodes"), Request.bReplaceNodes);
+  Extension->SetBoolField(TEXT("preserve_existing_nodes"), Request.bPreserveExistingNodes);
   Extension->SetBoolField(TEXT("compile"), Request.bCompile);
   Extension->SetBoolField(TEXT("save"), Request.bSave);
   if (Request.Graph.IsValid())
@@ -696,45 +816,37 @@ bool InspectWorkspaceSource(
   UeAgentApplyWorkspaceContract::FContract WorkspaceContract;
   if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(
           AssetWorkspaceContractId, WorkspaceContract)) {
-    OutResult.ErrorCode = TEXT("pcg_workspace_contract_missing");
+    OutResult.Diagnostic = NativeFailure(TEXT("pcg_workspace_contract_missing"), TEXT("The PCG workspace contract is not registered."),
+        TEXT("contract_id"), MakeShared<FJsonValueString>(AssetWorkspaceContractId), MakeShared<FJsonValueString>(TEXT("a registered workspace contract")));
+    OutResult.Diagnostic.Stage = TEXT("workspace_inspect");
     return false;
   }
   UeAgentAuthoringWorkspaceLoader::FLoadResult LoadResult;
   if (!UeAgentAuthoringWorkspaceLoader::LoadWorkspace(WorkspaceContract, Source,
                                                       LoadResult)) {
-    OutResult.ErrorCode = LoadResult.ErrorCode;
-    OutResult.ErrorDetail = LoadResult.ErrorDetail;
+    OutResult.Diagnostic = LoadResult.Diagnostic;
     return false;
   }
-  const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit *Unit =
-      LoadResult.Workspace.FindSingleUnit(TEXT("asset"));
-  const TSharedPtr<const FJsonObject> Document =
-      Unit ? Unit->Document : nullptr;
-  const TSharedPtr<FJsonObject> *Target = nullptr;
-  FString OperationText;
-  EOperation Operation;
-  if (!Document.IsValid() ||
-      !Document->TryGetStringField(TEXT("operation"), OperationText) ||
-      !ParseOperation(OperationText, Operation) ||
-      !Document->TryGetObjectField(TEXT("target"), Target) || !Target ||
-      !Target->IsValid() ||
-      !(*Target)->TryGetStringField(TEXT("asset_path"), OutResult.AssetPath)) {
-    OutResult.ErrorCode = TEXT("pcg_workspace_entry_invalid");
+  UeAgentAuthoringAssetWorkspaceInput::FTargetRequest TargetRequest;
+  TargetRequest.ExpectedAssetPath = ExpectedAssetPath;
+  TargetRequest.Errors.EntryInvalid = TEXT("pcg_workspace_entry_invalid");
+  TargetRequest.Errors.AssetPathConflict =
+      TEXT("pcg_workspace_asset_path_conflict");
+  UeAgentAuthoringAssetWorkspaceInput::FTargetResult Target;
+  if (!UeAgentAuthoringAssetWorkspaceInput::ResolveTarget(
+          LoadResult.Workspace, TargetRequest, Target)) {
+    OutResult.Diagnostic = Target.Diagnostic;
     return false;
   }
-  OutResult.AssetPath = NormalizePackagePath(OutResult.AssetPath);
-  OutResult.RequestedOperation = OperationToString(Operation);
-  const FString Expected = NormalizePackagePath(ExpectedAssetPath);
-  if (!Expected.IsEmpty() &&
-      !OutResult.AssetPath.Equals(Expected, ESearchCase::IgnoreCase)) {
-    OutResult.ErrorCode = TEXT("pcg_workspace_asset_path_conflict");
-    OutResult.ErrorDetail = OutResult.AssetPath + TEXT(" != ") + Expected;
-    return false;
-  }
+  const UeAgentApplyInputContract::FOperationInput &OperationInput = Target.Input;
+  OutResult.AssetPath = Target.AssetPath;
+  OutResult.RequestedOperation =
+      OperationToString(OperationInput.RequestedOperation);
   OutResult.bAssetExists = LoadGraph(OutResult.AssetPath) != nullptr;
   OutResult.bWouldCreate =
-      Operation == EOperation::Create ||
-      (Operation == EOperation::Upsert && !OutResult.bAssetExists);
+      OperationInput.RequestedOperation == EOperation::Create ||
+      (OperationInput.RequestedOperation == EOperation::Upsert &&
+       !OutResult.bAssetExists);
 
   UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph DependencyGraph;
   UeAgentAuthoringWorkspaceDependencyGraph::FGraphFailure GraphFailure;
@@ -742,8 +854,7 @@ bool InspectWorkspaceSource(
           WorkspaceContract, LoadResult.Workspace,
           UeAgentAuthoringWorkspaceDependencyGraph::FDependencyInputs(),
           DependencyGraph, GraphFailure)) {
-    OutResult.ErrorCode = GraphFailure.ErrorCode;
-    OutResult.ErrorDetail = GraphFailure.ErrorDetail;
+    OutResult.Diagnostic = GraphFailure.Diagnostic;
     return false;
   }
   FWorkspaceOperationPreflightProvider Provider(
@@ -752,10 +863,9 @@ bool InspectWorkspaceSource(
   if (!UeAgentAuthoringWorkspaceTransaction::PreflightWorkspace(
           WorkspaceContract, LoadResult.Workspace, DependencyGraph, Provider,
           Preflight)) {
+    const FApplyFailureProjection Failure = ProjectApplyFailure(Preflight);
     OutResult.UnitsChecked = Preflight.UnitsChecked;
-    OutResult.ErrorCode = Preflight.CauseCode.IsEmpty() ? Preflight.ErrorCode
-                                                        : Preflight.CauseCode;
-    OutResult.ErrorDetail = Preflight.ErrorDetail;
+    OutResult.Diagnostic = Failure.Diagnostic;
     return false;
   }
   OutResult.UnitsChecked = Preflight.UnitsChecked;
@@ -777,114 +887,74 @@ bool InspectWorkspaceSource(
 bool ExecuteWorkspaceSource(
     const UeAgentAuthoringWorkspaceLoader::FSourceRequest &Source,
     const FString &ExpectedAssetPath, FAssetApplyResult &OutResult,
-    const FString &RequestId) {
+    const FString &RequestId,
+    const TFunction<bool(FOperationFailure&)>& FinalReadback = {},
+    TSharedPtr<const UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext> Connections = nullptr) {
   OutResult = FAssetApplyResult();
   OutResult.Status = TEXT("failed");
-  UeAgentApplyWorkspaceContract::FContract WorkspaceContract;
-  if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(
-          AssetWorkspaceContractId, WorkspaceContract)) {
-    OutResult.Phase = TEXT("registration");
-    OutResult.ErrorCode = TEXT("pcg_workspace_contract_missing");
+  UeAgentAuthoringAssetWorkspaceInput::FRequest ResolveRequest;
+  ResolveRequest.WorkspaceContractId = AssetWorkspaceContractId;
+  ResolveRequest.Source = Source;
+  ResolveRequest.ExpectedAssetPath = ExpectedAssetPath;
+  ResolveRequest.Errors.ContractMissing = TEXT("pcg_workspace_contract_missing");
+  ResolveRequest.Errors.EntryInvalid = TEXT("pcg_workspace_entry_invalid");
+  ResolveRequest.Errors.AssetPathConflict =
+      TEXT("pcg_workspace_asset_path_conflict");
+  UeAgentAuthoringAssetWorkspaceInput::FResult ResolvedInput;
+  if (!UeAgentAuthoringAssetWorkspaceInput::Resolve(
+          ResolveRequest, ResolvedInput)) {
+    OutResult.Phase = ResolvedInput.Phase;
+    OutResult.Diagnostic = ResolvedInput.Diagnostic;
     return false;
   }
-  UeAgentAuthoringWorkspaceLoader::FLoadResult LoadResult;
-  if (!UeAgentAuthoringWorkspaceLoader::LoadWorkspace(WorkspaceContract, Source,
-                                                      LoadResult)) {
-    OutResult.Phase = TEXT("load");
-    OutResult.ErrorCode = LoadResult.ErrorCode;
-    OutResult.ErrorDetail = LoadResult.ErrorDetail;
-    return false;
-  }
-
-  const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit *Unit =
-      LoadResult.Workspace.FindSingleUnit(TEXT("asset"));
-  const TSharedPtr<const FJsonObject> Document =
-      Unit ? Unit->Document : nullptr;
-  const TSharedPtr<FJsonObject> *Target = nullptr;
-  FString OperationText;
-  EOperation RequestedOperation;
-  FString AssetPath;
-  if (!Document.IsValid() ||
-      !Document->TryGetStringField(TEXT("operation"), OperationText) ||
-      !ParseOperation(OperationText, RequestedOperation) ||
-      !Document->TryGetObjectField(TEXT("target"), Target) || !Target ||
-      !Target->IsValid() ||
-      !(*Target)->TryGetStringField(TEXT("asset_path"), AssetPath)) {
-    OutResult.Phase = TEXT("load");
-    OutResult.ErrorCode = TEXT("pcg_workspace_entry_invalid");
-    return false;
-  }
-  AssetPath = NormalizePackagePath(AssetPath);
-  const FString Expected = NormalizePackagePath(ExpectedAssetPath);
-  if (!Expected.IsEmpty() &&
-      !AssetPath.Equals(Expected, ESearchCase::IgnoreCase)) {
-    OutResult.Phase = TEXT("preflight");
-    OutResult.ErrorCode = TEXT("pcg_workspace_asset_path_conflict");
-    OutResult.ErrorDetail = AssetPath + TEXT(" != ") + Expected;
-    return false;
-  }
-
-  UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph DependencyGraph;
-  UeAgentAuthoringWorkspaceDependencyGraph::FGraphFailure GraphFailure;
-  if (!UeAgentAuthoringWorkspaceDependencyGraph::BuildDependencyGraph(
-          WorkspaceContract, LoadResult.Workspace,
-          UeAgentAuthoringWorkspaceDependencyGraph::FDependencyInputs(),
-          DependencyGraph, GraphFailure)) {
-    OutResult.Phase = TEXT("preflight");
-    OutResult.ErrorCode = GraphFailure.ErrorCode;
-    OutResult.ErrorDetail = GraphFailure.ErrorDetail;
-    return false;
-  }
+  const UeAgentApplyWorkspaceContract::FContract &WorkspaceContract =
+      ResolvedInput.WorkspaceContract;
+  const UeAgentAuthoringWorkspaceLoader::FLoadResult &LoadResult =
+      ResolvedInput.Load;
+  const UeAgentApplyInputContract::FOperationInput &OperationInput =
+      ResolvedInput.Input;
+  const FString &AssetPath = ResolvedInput.AssetPath;
 
   const bool bExisted = LoadGraph(AssetPath) != nullptr;
   bool bSave = false;
-  const TSharedPtr<FJsonObject> *Extension = nullptr;
-  if (Document->TryGetObjectField(TEXT("provider_extension"), Extension) &&
-      Extension && Extension->IsValid())
-    (*Extension)->TryGetBoolField(TEXT("save"), bSave);
+  if (OperationInput.ProviderExtension.IsValid())
+    OperationInput.ProviderExtension->TryGetBoolField(TEXT("save"), bSave);
   FBackendOptions BackendOptions;
+  BackendOptions.FinalReadback = FinalReadback;
   BackendOptions.bUseEditorTransaction =
-      RequestedOperation != EOperation::Remove;
+      OperationInput.RequestedOperation != EOperation::Remove;
   BackendOptions.TransactionDescription =
       NSLOCTEXT("UeAgentInterface", "PCGGraphWorkspaceApply",
                 "Apply PCG graph workspace");
-  UeAgentAuthoringWorkspaceTransaction::FExecutionOptions ExecutionOptions;
-  FOperationFailure RequestFailure;
-  if (!BuildApplyEntryExecutionOptions(RequestId, ExecutionOptions,
-                                       RequestFailure)) {
-    OutResult.Phase = TEXT("preflight");
-    OutResult.ErrorCode = RequestFailure.ErrorCode;
-    OutResult.ErrorDetail = RequestFailure.ErrorDetail;
-    return false;
-  }
-  ExecutionOptions.bSaveWhenCallerControlled = bSave;
   FApplyWorkspaceResult ApplyResult;
-  const bool bApplied = ApplyWorkspace(
-      WorkspaceContract, LoadResult.Workspace, DependencyGraph,
-      UeAgentApplyInputContract::FRegistry::Get(), FProviderRegistry::Get(),
-      ExecutionOptions, BackendOptions, ApplyResult);
+  UeAgentAuthoringAssetWorkspaceApply::FFailure ApplyFailure;
+  FProviderRegistry LocalProviders;
+  const FProviderRegistry* Providers = &FProviderRegistry::Get();
+  if (Connections)
+  {
+    UeAgentAuthoringOperationApply::ERegistrationResult Registered;
+    UE::UAI::Contract::FDiagnostic RegistrationError;
+    if (!LocalProviders.RegisterProvider(MakeApplyProvider(Connections), Registered, RegistrationError))
+    { OutResult.Phase = TEXT("preflight"); OutResult.Diagnostic = RegistrationError; if (OutResult.Diagnostic.Stage.IsEmpty()) OutResult.Diagnostic.Stage = OutResult.Phase; return false; }
+    Providers = &LocalProviders;
+  }
+  const bool bApplied = UeAgentAuthoringAssetWorkspaceApply::Execute(
+      WorkspaceContract, LoadResult.Workspace, *Providers,
+      RequestId, bSave, BackendOptions, ApplyResult, ApplyFailure);
   OutResult.UnitsChecked = ApplyResult.Preflight.UnitsChecked;
   OutResult.MutationsApplied = ApplyResult.Execution.MutationsApplied;
   OutResult.bRollbackAttempted = ApplyResult.Execution.bRollbackAttempted;
   OutResult.bRollbackSucceeded = ApplyResult.Execution.bRollbackSucceeded;
   if (!bApplied) {
-    const bool bPreflight = !ApplyResult.Preflight.IsReady();
-    OutResult.Phase =
-        bPreflight ? TEXT("preflight") : ApplyResult.Execution.Phase;
-    OutResult.ErrorCode = bPreflight ? ApplyResult.Preflight.CauseCode
-                                     : ApplyResult.Execution.CauseCode;
-    if (OutResult.ErrorCode.IsEmpty())
-      OutResult.ErrorCode = bPreflight ? ApplyResult.Preflight.ErrorCode
-                                       : ApplyResult.Execution.ErrorCode;
-    OutResult.ErrorDetail = bPreflight ? ApplyResult.Preflight.ErrorDetail
-                                       : ApplyResult.Execution.ErrorDetail;
+    OutResult.Phase = ApplyFailure.Phase;
+    OutResult.Diagnostic = ApplyFailure.Diagnostic;
     return false;
   }
 
   const EOperation Resolved =
-      RequestedOperation == EOperation::Upsert
+      OperationInput.RequestedOperation == EOperation::Upsert
           ? (bExisted ? EOperation::Update : EOperation::Create)
-          : RequestedOperation;
+          : OperationInput.RequestedOperation;
   OutResult.Status = TEXT("applied");
   OutResult.Phase = TEXT("complete");
   OutResult.ResolvedOperation = OperationToString(Resolved);
@@ -892,7 +962,8 @@ bool ExecuteWorkspaceSource(
   OutResult.Asset =
       Resolved == EOperation::Remove ? nullptr : LoadGraph(AssetPath);
   OutResult.ObjectPath = OutResult.Asset ? OutResult.Asset->GetPathName()
-                                         : ToObjectPath(AssetPath);
+                                         : UeAgentAuthoringAssetIdentity::ToObjectPath(
+                                               AssetPath);
   if (const TSharedPtr<FJsonObject> *Metadata =
           ApplyResult.UnitResultMetadata.Find(TEXT("asset"));
       Metadata && Metadata->IsValid()) {
@@ -907,7 +978,7 @@ bool ExecuteWorkspaceSource(
 }
 } // namespace
 
-bool RegisterApplyContracts(FString &OutError) {
+bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentApplyInputContract::ERegistrationResult InputResult;
   if (!UeAgentApplyInputContract::FRegistry::Get().RegisterContract(
           MakeInputContract(), InputResult, OutError))
@@ -917,11 +988,13 @@ bool RegisterApplyContracts(FString &OutError) {
       MakeWorkspaceContract(), WorkspaceResult, OutError);
 }
 
-TSharedRef<IApplyProvider> MakeApplyProvider() {
-  static const TSharedRef<IReflectionOperationLifecycle> Lifecycle =
-      MakeShared<FAssetLifecycle>();
+TSharedRef<IApplyProvider> MakeApplyProvider(
+    TSharedPtr<const UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext> Connections) {
+  const TSharedRef<IReflectionOperationLifecycle> Lifecycle =
+      MakeShared<FAssetLifecycle>(MoveTemp(Connections));
   UeAgentAuthoringObjectApply::FOptions Options;
   Options.bAllowDomainAuthorizedOwners = true;
+  Options.bCompactValues = true;
   return MakeShared<FReflectionApplyProvider>(ApplyProviderId, Lifecycle,
                                               Options);
 }
@@ -931,7 +1004,7 @@ bool ApplyAsset(const FAssetApplyRequest &Request, FAssetApplyResult &OutResult,
   return ExecuteWorkspaceSource(
       UeAgentAuthoringWorkspaceLoader::FSourceRequest::MakeInlineObject(
           MakeApplyDocument(Request), TEXT("inline://pcg-graph-apply")),
-      Request.AssetPath, OutResult, RequestId);
+      Request.AssetPath, OutResult, RequestId, Request.FinalReadback, Request.Connections);
 }
 
 bool ApplyAssetWorkspace(const FString &WorkspaceRoot,

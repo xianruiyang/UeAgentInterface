@@ -1,8 +1,11 @@
 #include "CommandHandlers/WorldSpatial/UeAgentLevelWorldCommandHandlers.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "DomainAdapters/WorldSpatial/UeAgentLevelWorldDomainMechanics.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "QueryOwners/WorldSpatial/UeAgentLevelWorldQueryOwner.h"
 
 namespace UE::UAI::CommandHandlers::WorldSpatial
@@ -17,25 +20,13 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 		const FString ActorCandidateCommandId = TEXT("world.actor.candidates");
 		const FString ActorCandidateOwner = TEXT("level-world-domain-owner");
 
-		FUeAgentCommandResult CandidateFailure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
-		{
-			TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString ErrorJson;
-			FString JsonError;
-			if (!Json::TryCanonicalize(Error, ErrorJson, JsonError))
-			{
-				ErrorJson = TEXT("{\"code\":\"world_actor_candidate_error_serialization_failed\"}");
-			}
-			return FUeAgentCommandResult::Failure(
-				Request, TEXT("{}"), MoveTemp(ErrorJson));
-		}
+		FUeAgentCommandResult CandidateFailure(const FUeAgentCommandRequest& Request,
+            UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = SubjectId.IsEmpty() ? Request.GetCommandId() : SubjectId;
+            if (Diagnostic.Stage.IsEmpty()) Diagnostic.Stage = TEXT("command_submit");
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
+        }
 
 		class FActorCandidateHandler final : public IUeAgentExactCommandHandler
 		{
@@ -58,27 +49,15 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 				if (!Caller.IsValid()
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:query")))
 				{
-					return CandidateFailure(
-						Request,
-						TEXT("world_actor_candidate_query_authority_required"),
-						Request.GetCommandId(),
-						TEXT("the uai:query authority is required"));
+					return CandidateFailure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_actor_candidate_query_authority_required"), TEXT("the uai:query authority is required"), TEXT("command_submit")), Request.GetCommandId());
 				}
 				if (!IsInGameThread())
 				{
-					return CandidateFailure(
-						Request,
-						TEXT("world_actor_candidate_game_thread_required"),
-						Request.GetCommandId(),
-						TEXT("Place Actors discovery runs on the UE game thread"));
+					return CandidateFailure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_actor_candidate_game_thread_required"), TEXT("Place Actors discovery runs on the UE game thread"), TEXT("command_submit")), Request.GetCommandId());
 				}
 				if (Cancellation->IsCancelled())
 				{
-					return CandidateFailure(
-						Request,
-						TEXT("world_actor_candidate_cancelled"),
-						Request.GetCommandId(),
-						TEXT("the request was cancelled before enumeration"));
+					return CandidateFailure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_actor_candidate_cancelled"), TEXT("the request was cancelled before enumeration"), TEXT("command_submit")), Request.GetCommandId());
 				}
 
 				FString PayloadJson;
@@ -86,23 +65,20 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 				if (!QueryOwners::WorldSpatial::TryExecuteActorCandidateQuery(
 						Request.GetParamsJson(), PayloadJson, Error))
 				{
-					return CandidateFailure(
-						Request,
-						Error.GetCode().IsEmpty()
-							? FString(TEXT("world_actor_candidate_query_failed"))
-							: Error.GetCode(),
-						Error.GetSourceUnit(),
-						Error.GetJsonPointer());
+					auto Diagnostic = Error.GetDiagnostic();
+					if (Error.GetCode().IsEmpty())
+					{
+						Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_actor_candidate_query_failed"), TEXT("The actor candidate query failed without a diagnostic."), TEXT("command_submit"));
+						Diagnostic.CandidateName = Request.GetCommandId();
+					}
+					return CandidateFailure(Request, Diagnostic, Error.GetSourceUnit());
 				}
 				TSharedPtr<FJsonObject> Payload;
-				FString JsonError;
+				UE::UAI::Contract::FDiagnostic JsonError;
 				if (!Json::TryParseObject(PayloadJson, Payload, JsonError)
 					|| !Payload.IsValid())
 				{
-					return CandidateFailure(
-						Request,
-						TEXT("world_actor_candidate_result_invalid"),
-						Request.GetCommandId(), JsonError);
+					return CandidateFailure(Request, JsonError, Request.GetCommandId());
 				}
 				return FUeAgentCommandResult::Success(
 					Request, MoveTemp(PayloadJson));
@@ -119,15 +95,22 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 		bool bReadOnly = false;
 		if (!DomainAdapters::WorldSpatial::TryExecuteContentGraph(
 				Request.GetCommandId(), Request.GetTargetIdentity(),
-				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError))
+				Request.GetCanonicalParamsJson(), Payload, bReadOnly, OutError,
+				Request.GetRequestId()))
 		{
 			return false;
 		}
 		if (QueryOwners::WorldSpatial::IsReadOnlyContentGraphCommand(
 				Request.GetCommandId()) != bReadOnly)
 		{
-			OutError.Set(TEXT("level_world_domain_read_only_contract_mismatch"),
-				Request.GetCommandId());
+			auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("level_world_domain_read_only_contract_mismatch"),
+				TEXT("The domain result disagrees with the command's declared read-only behavior."), TEXT("domain_execute"));
+			Detail.CandidateName = Request.GetCommandId();
+			Detail.TargetPath = Request.GetTargetIdentity();
+			Detail.ActualValue = MakeShared<FJsonValueBoolean>(bReadOnly);
+			Detail.ExpectedValue = MakeShared<FJsonValueBoolean>(QueryOwners::WorldSpatial::IsReadOnlyContentGraphCommand(Request.GetCommandId()));
+			Detail.SourceKind = TEXT("native_result");
+			OutError.SetFailure(MoveTemp(Detail));
 			return false;
 		}
 		OutResponse = HjsonWorkspace::FImportInitializationDomainResponse(
@@ -137,7 +120,7 @@ namespace UE::UAI::CommandHandlers::WorldSpatial
 
 	bool TryCreateWorldSpatialCommandHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();

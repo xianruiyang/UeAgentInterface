@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringExport/UeAgentExportContract.h"
 #include "Utilities/AuthoringExport/UeAgentSnapshotProjector.h"
@@ -21,6 +23,9 @@ namespace UeAgentExportWorkspaceWriter
 		void Add(const FTextMetrics& Other);
 		TSharedRef<FJsonObject> ToJsonObject() const;
 	};
+
+	UEAGENTINTERFACE_API FTextMetrics MeasureUtf8Text(
+		TConstArrayView<uint8> Utf8Text);
 
 	struct UEAGENTINTERFACE_API FPlannedFile
 	{
@@ -58,24 +63,23 @@ namespace UeAgentExportWorkspaceWriter
 		FString ContractVersion;
 		FString ProfileId;
 		FString EntryFile;
-		int32 TokenBudget = 0;
 		TArray<FRoleCardinality> RoleCardinalities;
 	};
 
 	struct UEAGENTINTERFACE_API FWorkspaceResult
 	{
 		FString Status;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ContractId;
 		FString ContractVersion;
 		FString ProfileId;
+		FString ExpectedRevision;
 		FString WorkspaceRoot;
 		FString EntryFile;
 		FString FileId;
 		FString FieldId;
-		int32 TokenBudget = 0;
 		FTextMetrics Metrics;
+		FTextMetrics ModelMetrics;
 		TArray<FPlannedFile> Files;
 		TArray<FString> WrittenFiles;
 		TArray<FString> WrittenRelativeFiles;
@@ -83,8 +87,14 @@ namespace UeAgentExportWorkspaceWriter
 
 		bool IsPlanned() const;
 		bool IsWritten() const;
+		TSharedRef<FJsonObject> ToPublicJsonObject() const;
 		TSharedRef<FJsonObject> ToJsonObject() const;
 	};
+
+	UEAGENTINTERFACE_API TSharedRef<FJsonObject>
+	MakePublicWorkspaceSuccessResult(TConstArrayView<UE::UAI::Contract::FDiagnostic> Warnings = {});
+	UEAGENTINTERFACE_API TSharedRef<FJsonObject>
+	MakePublicWorkspaceSuccessResult(const TSharedPtr<FJsonObject>& PublisherReceipt);
 
 	UEAGENTINTERFACE_API bool BuildWorkspacePlan(
 		const UeAgentExportContract::FContract& Contract,

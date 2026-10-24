@@ -19,21 +19,7 @@ namespace
 	{
 		return MakeShared<
 			FUeAgentResourceTracker,
-			ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1048576},
-				{EUeAgentResourceDimension::OutputBytes, 1048576},
-				{EUeAgentResourceDimension::StringBytes, 1048576},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 4096},
-				{EUeAgentResourceDimension::Files, 256},
-				{EUeAgentResourceDimension::ReferenceEdges, 4096},
-				{EUeAgentResourceDimension::WorkUnits, WorkUnits},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					16777216
-				},
-			}));
+			ESPMode::ThreadSafe>();
 	}
 
 	static FUeAgentCanonicalIdentity MakeIdentity(
@@ -218,6 +204,13 @@ namespace
 			{
 				OnExecute();
 			}
+			if (bFailBeforeMutation)
+			{
+				OutFacts = bConfirmNoMutation
+					? FMutationFacts::NoMutation() : FMutationFacts();
+				OutError = FExecutionMutationError(TEXT("fixture_prepare_failed"));
+				return false;
+			}
 			OutFacts = FMutationFacts(
 				12,
 				Lease.GetLockKeys(),
@@ -244,6 +237,8 @@ namespace
 
 		int32 ExecuteCalls = 0;
 		int32 RollbackCalls = 0;
+		bool bFailBeforeMutation = false;
+		bool bConfirmNoMutation = false;
 		TArray<int64> ObservedTokens;
 		TArray<FAssetDurableTarget> DurableTargets;
 		TFunction<void()> OnExecute;
@@ -326,7 +321,7 @@ namespace
 		{
 			++RollbackCalls;
 			OutReceipt = MakeReceipt(
-				bMemoryRollbackConfirmed
+				bMemoryRollbackConfirmed && !bFailRollback
 					? EDurableStatus::RolledBack
 					: EDurableStatus::StateUnknown);
 			return true;
@@ -361,6 +356,7 @@ namespace
 		int32 PrepareCalls = 0;
 		int32 PersistCalls = 0;
 		int32 RollbackCalls = 0;
+		bool bFailRollback = false;
 		EDurableStatus Status =
 			EDurableStatus::PersistedUnverified;
 		TArray<int64> ObservedTokens;
@@ -407,7 +403,7 @@ namespace
 
 	struct FCoordinatorFixture
 	{
-		explicit FCoordinatorFixture(const int32 MaxQueueItems = 1)
+		FCoordinatorFixture()
 			: Scheduler(MakeShared<
 				FFakeScheduler,
 				ESPMode::ThreadSafe>())
@@ -426,8 +422,7 @@ namespace
 				Scheduler,
 				Locks,
 				Barrier,
-				Durable,
-				MaxQueueItems))
+				Durable))
 		{
 		}
 
@@ -496,24 +491,20 @@ bool FUeAgentExecutionMutationQueueFenceTest::RunTest(
 	FString FirstId;
 	FExecutionMutationError Error;
 	TestTrue(
-		TEXT("first operation enters bounded queue"),
+		TEXT("first operation enters queue"),
 		Ports.Coordinator->Submit(
 			Fixture.MakeRequest(TEXT("operation:p4-006:001")),
 			FirstHook,
 			FirstId,
 			Error));
 	FString SecondId;
-	TestFalse(
-		TEXT("second operation is rejected before mutation"),
+	TestTrue(
+		TEXT("second operation enters queue beyond legacy capacity"),
 		Ports.Coordinator->Submit(
 			Fixture.MakeRequest(TEXT("operation:p4-006:002")),
 			MakeShared<FFakeMutationHook, ESPMode::ThreadSafe>(),
 			SecondId,
 			Error));
-	TestEqual(
-		TEXT("bounded queue failure code"),
-		Error.GetCode(),
-		TEXT("operation_queue_saturated"));
 	TestEqual(
 		TEXT("one operation scheduled"),
 		Ports.Coordinator->DispatchReady(),
@@ -543,6 +534,11 @@ bool FUeAgentExecutionMutationQueueFenceTest::RunTest(
 		TEXT("lock keys use canonical sorted order"),
 		Ports.Locks->AcquiredKeys[0][0]
 			< Ports.Locks->AcquiredKeys[0][1]);
+	TestEqual(TEXT("queued operation proceeds after conflicting work completes"),
+		Ports.Coordinator->DispatchReady(), 1);
+	Ports.Scheduler->RunNext();
+	TestTrue(TEXT("second operation has a terminal receipt"),
+		Ports.Coordinator->GetReceipt(SecondId, Receipt, Error));
 	return true;
 }
 
@@ -588,6 +584,43 @@ bool FUeAgentExecutionMutationLateMutationTest::RunTest(
 	TestFalse(TEXT("mutation never started"), Receipt.DidMutationStart());
 	TestEqual(TEXT("hook not called"), Hook->ExecuteCalls, 0);
 	TestEqual(TEXT("durable prepare not called"), Ports.Durable->PrepareCalls, 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentExecutionMutationNoMutationEvidenceTest,
+	"UeAgentInterface.Core.ExecutionMutation.NoMutationEvidence",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentExecutionMutationNoMutationEvidenceTest::RunTest(const FString& Parameters)
+{
+	for (const bool bConfirmed : {false, true})
+	for (const bool bCleanupFails : {false, true})
+	{
+		FFixture Fixture;
+		FCoordinatorFixture Ports;
+		Ports.Durable->bFailRollback = bCleanupFails;
+		const auto Hook = MakeShared<FFakeMutationHook, ESPMode::ThreadSafe>();
+		Hook->bFailBeforeMutation = true;
+		Hook->bConfirmNoMutation = bConfirmed;
+		FString OperationId;
+		FExecutionMutationError Error;
+		TestTrue(TEXT("submit"), Ports.Coordinator->Submit(
+			Fixture.MakeRequest(TEXT("operation:no-mutation")), Hook, OperationId, Error));
+		Ports.Coordinator->DispatchReady();
+		Ports.Scheduler->RunNext();
+		FExecutionReceipt Receipt;
+		TestTrue(TEXT("terminal receipt"), Ports.Coordinator->GetReceipt(OperationId, Receipt, Error));
+		TestEqual(TEXT("only explicit no-mutation evidence is safe"), Receipt.GetStatus(),
+			bConfirmed && !bCleanupFails ? EExecutionStatus::Failed : EExecutionStatus::StateUnknown);
+		TestEqual(TEXT("mutation flag"), Receipt.DidMutationStart(), !bConfirmed);
+		TestEqual(TEXT("retry flag"), Receipt.IsRetrySafe(), bConfirmed && !bCleanupFails);
+		TestEqual(TEXT("original failure preserved"), Receipt.GetErrorCode(), TEXT("fixture_prepare_failed"));
+		TestEqual(TEXT("no persistence"), Ports.Durable->PersistCalls, 0);
+		TestEqual(TEXT("no speculative rollback"), Hook->RollbackCalls, 0);
+		TestEqual(TEXT("prepared durability is closed only with evidence"), Ports.Durable->RollbackCalls, bConfirmed ? 1 : 0);
+		TestEqual(TEXT("lock released"), Ports.Locks->ReleasedTokens.Num(), 1);
+	}
 	return true;
 }
 

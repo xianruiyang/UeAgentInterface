@@ -1,4 +1,5 @@
 #include "Utilities/UeAgentAuthoringJson.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -43,15 +44,11 @@ namespace UeAgentAuthoringJson
 		}
 		for (int32 Index = 0; Index < Enum->NumEnums(); ++Index)
 		{
-			if (Enum->HasMetaData(TEXT("Hidden"), Index))
+			if (!UeAgentAuthoringTypeDescriptors::IsEnumValueEntry(Enum, Index) || Enum->HasMetaData(TEXT("Hidden"), Index))
 			{
 				continue;
 			}
 			const FString Name = Enum->GetNameStringByIndex(Index);
-			if (Name.EndsWith(TEXT("_MAX")))
-			{
-				continue;
-			}
 			TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
 			Candidate->SetStringField(TEXT("name"), Name);
 			Candidate->SetNumberField(TEXT("value"), static_cast<double>(Enum->GetValueByIndex(Index)));
@@ -93,7 +90,7 @@ namespace UeAgentAuthoringJson
 		{
 			Obj->SetStringField(TEXT("category_path"), CategoryPath);
 		}
-		Obj->SetStringField(TEXT("value_kind"), ValueKind);
+		Obj->SetStringField(TEXT("kind"), ValueKind);
 		Obj->SetObjectField(TEXT("availability"), MakeAvailability(bEditable));
 	}
 

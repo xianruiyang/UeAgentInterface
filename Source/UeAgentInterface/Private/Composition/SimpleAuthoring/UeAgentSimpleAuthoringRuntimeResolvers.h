@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Discovery/UeAgentDiscovery.h"
 #include "Composition/SimpleAuthoring/Families/EditorProject/UeAgentEditorProjectSimpleAuthoringProduction.h"
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCapabilities.h"
@@ -13,18 +15,14 @@
 
 namespace UE::UAI::Composition::SimpleAuthoring
 {
-	struct UEAGENTINTERFACE_API
-		FUeAgentSimpleAuthoringRuntimeResolverError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	UEAGENTINTERFACE_API bool TryResolveGenericAssetFactory(
+		const FString& Name, const TMap<FString, FString>& Select,
+		DomainAdapters::AssetDataSimpleEffect::FUeAgentAssetDataSimpleEffectFactoryBinding& OutBinding,
+		ExecutionMutation::FExecutionMutationError& OutError);
+	UEAGENTINTERFACE_API bool TryValidateGenericAssetFactoryBinding(
+		const DomainAdapters::AssetDataSimpleEffect::FUeAgentAssetDataSimpleEffectFactoryBinding& Binding,
+		ExecutionMutation::FExecutionMutationError& OutError);
+	using FUeAgentSimpleAuthoringRuntimeResolverError = UE::UAI::Contract::FDiagnostic;
 
 	UEAGENTINTERFACE_API bool
 	TryCreateWorldSimpleAuthoringReferenceResolver(

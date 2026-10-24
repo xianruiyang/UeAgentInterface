@@ -1,8 +1,8 @@
 #include "DomainAdapters/ModelingGeometry/UeAgentModelingGeometryMechanicsBoundary.h"
 
 #include "DomainAdapters/ModelingGeometry/UeAgentModelingVoxelGrid.h"
-
-#include "LegacyMechanics/UeAgentLegacyMechanics.h"
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingMechanics.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::DomainAdapters::ModelingGeometry
 {
@@ -16,36 +16,16 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry
 				const FString& Action,
 				const FModelingSessionNativeRequest& Request,
 				TSharedPtr<FJsonObject>& OutObservation,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
-				FUeAgentRequestContext Context;
-				Context.RequestId = Request.RequestId;
-				Context.Command = Request.CommandId;
-				Context.Params = Request.Params;
+				if (IsModelingSessionAction(Action))
+				{
+					return FModelingSession::ExecuteAction(Action, Request, OutObservation, OutError);
+				}
 
-				if (Action == TEXT("activate")) return Mechanics.CmdModelingActivateMode(Context, OutObservation, OutError);
-				if (Action == TEXT("observe_tool")) return Mechanics.CmdModelingGetActiveTool(Context, OutObservation, OutError);
-				if (Action == TEXT("start_tool")) return Mechanics.CmdModelingStartTool(Context, OutObservation, OutError);
-				if (Action == TEXT("set_tool_property")) return Mechanics.CmdModelingSetActiveToolProperty(Context, OutObservation, OutError);
-				if (Action == TEXT("invoke_tool_action")) return Mechanics.CmdModelingInvokeActiveToolAction(Context, OutObservation, OutError);
-				if (Action == TEXT("accept_tool")) return Mechanics.CmdModelingAcceptTool(Context, OutObservation, OutError);
-				if (Action == TEXT("cancel_tool")) return Mechanics.CmdModelingCancelTool(Context, OutObservation, OutError);
-				if (Action == TEXT("observe_selection")) return Mechanics.CmdModelingGetSelection(Context, OutObservation, OutError);
-				if (Action == TEXT("set_actor_selection")) return Mechanics.CmdModelingSetSelection(Context, OutObservation, OutError);
-				if (Action == TEXT("set_selection_mode")) return Mechanics.CmdModelingSetMeshSelectionMode(Context, OutObservation, OutError);
-				if (Action == TEXT("clear_mesh_selection")) return Mechanics.CmdModelingClearMeshSelection(Context, OutObservation, OutError);
-				if (Action == TEXT("select_via_screen")) return Mechanics.CmdModelingSelectMeshElementsViaScreen(Context, OutObservation, OutError);
-				if (Action == TEXT("select_via_world_ray")) return Mechanics.CmdModelingSelectMeshElementsViaWorldRay(Context, OutObservation, OutError);
-				if (Action == TEXT("replace_actor_mesh")) return Mechanics.CmdModelingReplaceActorMesh(Context, OutObservation, OutError);
-				if (Action == TEXT("save_mesh_asset")) return Mechanics.CmdModelingSaveMeshAsset(Context, OutObservation, OutError);
-				if (Action == TEXT("snap_to_surface")) return Mechanics.CmdModelingSnapToGround(Context, OutObservation, OutError);
-
-				OutError = TEXT("modeling_session_native_action_unknown");
+				OutError = UeAgentModelingOps::ModelingFact(TEXT("modeling_session_native_action_unknown"), TEXT("The native modeling port does not support this session action."), TEXT("/action"), MakeShared<FJsonValueString>(Action), MakeShared<FJsonValueString>(TEXT("supported modeling session action")));
 				return false;
 			}
-
-		private:
-			FUeAgentLegacyMechanics Mechanics;
 		};
 	}
 
@@ -53,6 +33,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry
 	{
 		static const TArray<FString> Ids = {
 			TEXT("mesh.modeling_session"),
+			VoxelGrid::GetBeginCommandId(),
 			VoxelGrid::GetSessionCommandId(),
 			VoxelGrid::GetApplyCommandId(),
 			TEXT("mesh.attribute.material_slot.add"), TEXT("mesh.attribute.material_slot.assign"),
@@ -89,11 +70,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry
 			TEXT("activate"), TEXT("observe_tool"), TEXT("start_tool"),
 			TEXT("set_tool_property"), TEXT("invoke_tool_action"),
 			TEXT("accept_tool"), TEXT("cancel_tool"),
-			TEXT("observe_selection"), TEXT("set_actor_selection"),
+			TEXT("set_actor_selection"),
 			TEXT("set_selection_mode"), TEXT("clear_mesh_selection"),
-			TEXT("select_via_screen"), TEXT("select_via_world_ray"),
-			TEXT("replace_actor_mesh"), TEXT("save_mesh_asset"),
-			TEXT("snap_to_surface"),
+			TEXT("select_via_screen"), TEXT("save_mesh_asset"),
 		};
 		return Actions.Contains(Action);
 	}

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -29,13 +31,16 @@ namespace UE::UAI::CommandContract
 			FString InName,
 			EUeAgentCommandWireType InWireType,
 			bool bInRequired,
-			bool bInNullable);
+			bool bInNullable,
+			FString InSchemaJson = {});
 
 		const FString& GetName() const;
 		EUeAgentCommandWireType GetWireType() const;
 		bool IsRequired() const;
 		bool IsNullable() const;
+		const FString& GetSchemaJson() const;
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		FString Name;
@@ -43,6 +48,7 @@ namespace UE::UAI::CommandContract
 			EUeAgentCommandWireType::Any;
 		bool bRequired = false;
 		bool bNullable = false;
+		FString SchemaJson;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentCommandContract final
@@ -68,6 +74,7 @@ namespace UE::UAI::CommandContract
 		const FString& GetDeprecation() const;
 		const FString& GetBindingHash() const;
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		FString CommandId;
@@ -90,7 +97,7 @@ namespace UE::UAI::CommandContract
 			TArray<FUeAgentCommandContract> Contracts,
 			TSharedPtr<const FUeAgentCommandContractRegistry>&
 				OutRegistry,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		const TArray<FUeAgentCommandContract>& GetContracts() const;
 		const FUeAgentCommandContract* FindExact(
@@ -101,7 +108,7 @@ namespace UE::UAI::CommandContract
 			const FString& PluginVersion,
 			const FString& BuildId,
 			FString& OutManifest,
-			FString& OutError) const;
+			UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		FUeAgentCommandContractRegistry(
@@ -111,25 +118,6 @@ namespace UE::UAI::CommandContract
 		TArray<FUeAgentCommandContract> Contracts;
 		TMap<FString, int32> IndexByCommandId;
 		FString RegistryHash;
-	};
-
-	class UEAGENTINTERFACE_API
-		FUeAgentCommandManifestExporter final
-	{
-	public:
-		static bool TryWrite(
-			const FUeAgentCommandContractRegistry& Registry,
-			const FString& PluginVersion,
-			const FString& BuildId,
-			const FString& ManifestPath,
-			FString& OutError);
-
-		static bool TryVerify(
-			const FUeAgentCommandContractRegistry& Registry,
-			const FString& PluginVersion,
-			const FString& BuildId,
-			const FString& ManifestPath,
-			FString& OutError);
 	};
 
 	struct UEAGENTINTERFACE_API

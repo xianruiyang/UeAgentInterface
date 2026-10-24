@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 #define UAI_MATERIAL_NIAGARA_GRAPH_ADAPTER_V1 1
@@ -281,30 +283,7 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		bool bCompoundCaptureComplete = false;
 	};
 
-	class FMaterialNiagaraGraphAdapterError final
-	{
-	public:
-		FMaterialNiagaraGraphAdapterError() = default;
-		FMaterialNiagaraGraphAdapterError(
-			FString InCode,
-			FString InDetail)
-			: Code(MoveTemp(InCode)), Detail(MoveTemp(InDetail))
-		{
-		}
-
-		const FString& GetCode() const { return Code; }
-		const FString& GetDetail() const { return Detail; }
-		void Reset() { Code.Reset(); Detail.Reset(); }
-		void Set(FString InCode, FString InDetail = FString())
-		{
-			Code = MoveTemp(InCode);
-			Detail = MoveTemp(InDetail);
-		}
-
-	private:
-		FString Code;
-		FString Detail;
-	};
+	using FMaterialNiagaraGraphAdapterError = UE::UAI::Contract::FDiagnostic;
 
 	UEAGENTINTERFACE_API bool TryValidateMaterialNiagaraGraphTopology(
 		const FMaterialNiagaraGraphTopology& Topology,
@@ -320,10 +299,4 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		const FMaterialNiagaraGraphLifecycleEvidence& Evidence,
 		FMaterialNiagaraGraphAdapterError& OutError);
 
-	UEAGENTINTERFACE_API bool
-	TryValidateMaterialNiagaraGraphCompoundCapture(
-		bool bCaptureSucceeded,
-		const FString& DelegatedErrorCode,
-		const FString& DelegatedErrorDetail,
-		FMaterialNiagaraGraphAdapterError& OutError);
 }

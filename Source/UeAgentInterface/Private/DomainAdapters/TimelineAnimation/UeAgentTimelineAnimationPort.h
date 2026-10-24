@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
@@ -80,12 +82,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		TArray<FString> ReadbackEvidence;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentTimelineAnimationPortError
-	{
-		FString Code;
-		FString Path;
-		FString Detail;
-	};
+	using FUeAgentTimelineAnimationPortError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentTimelineAnimationNativePort
 	{

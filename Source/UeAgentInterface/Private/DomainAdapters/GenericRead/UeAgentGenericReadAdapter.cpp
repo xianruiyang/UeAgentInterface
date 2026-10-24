@@ -1,5 +1,8 @@
 #include "DomainAdapters/GenericRead/UeAgentGenericReadAdapter.h"
 
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+
 namespace UE::UAI::DomainAdapters::GenericRead
 {
 	namespace
@@ -15,15 +18,85 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			return !Value.TrimStartAndEnd().IsEmpty();
 		}
 
-		bool Fail(
-			FUeAgentDiscoveryError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		FUeAgentGenericReadError NativeValueFailure(
+			FString Code, FString Reason, FString Field,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			auto Error = FUeAgentGenericReadError::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("generic_read"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = MoveTemp(Field);
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			Error.ActualValuePresent = Error.ActualValue.IsValid();
+			Error.ExpectedValuePresent = Error.ExpectedValue.IsValid();
+			return Error;
+		}
+
+		FUeAgentGenericReadError NativeConditionFailure(
+			FString Code, FString Reason, FString Field, bool bActual, bool bExpected)
+		{
+			return NativeValueFailure(MoveTemp(Code), MoveTemp(Reason), MoveTemp(Field),
+				MakeShared<FJsonValueBoolean>(bActual), MakeShared<FJsonValueBoolean>(bExpected));
+		}
+
+		FUeAgentGenericReadError WrapValidation(FString Code, FUeAgentGenericReadError Cause)
+		{
+			if (Cause.SourceKind.IsEmpty()) Cause.SourceKind = TEXT("native_result");
+			if (Cause.PropertyPath.IsEmpty()) Cause.PropertyPath = Cause.SemanticPointer;
+			return FUeAgentGenericReadError::WrapFailure(MoveTemp(Code), Cause, TEXT("generic_read"));
+		}
+
+		const FUeAgentGenericReadError& ValidationOrEmpty(
+			const TSharedPtr<const FUeAgentGenericReadError>& Diagnostic)
+		{
+			static const FUeAgentGenericReadError Empty;
+			return Diagnostic ? *Diagnostic : Empty;
+		}
+
+		FUeAgentGenericReadError AtBinding(FUeAgentGenericReadError Error,
+			const Discovery::FUeAgentCandidateBinding& Binding)
+		{
+			if (Error.TargetPath.IsEmpty()) Error.TargetPath = Binding.GetPublicRef();
+			if (Error.SubjectId.IsEmpty()) Error.SubjectId = Binding.GetBindingId();
+			return Error;
+		}
+
+		FUeAgentGenericReadError AtCapture(FUeAgentGenericReadError Error,
+			const FUeAgentUeReadCapture& Capture, const Discovery::FUeAgentCandidateBinding& Binding)
+		{
+			Error.Append(Capture.GetValidationDiagnostic());
+			return AtBinding(MoveTemp(Error), Binding);
+		}
+
+		FString ValueKindName(StateSemantic::EUeAgentValueKind Kind)
+		{
+			switch (Kind)
+			{
+			case StateSemantic::EUeAgentValueKind::Null: return TEXT("null");
+			case StateSemantic::EUeAgentValueKind::Boolean: return TEXT("boolean");
+			case StateSemantic::EUeAgentValueKind::String: return TEXT("string");
+			case StateSemantic::EUeAgentValueKind::Integer: return TEXT("integer");
+			case StateSemantic::EUeAgentValueKind::Decimal: return TEXT("decimal");
+			case StateSemantic::EUeAgentValueKind::Array: return TEXT("array");
+			case StateSemantic::EUeAgentValueKind::Object: return TEXT("object");
+			case StateSemantic::EUeAgentValueKind::Temporal: return TEXT("temporal");
+			case StateSemantic::EUeAgentValueKind::Spatial: return TEXT("spatial");
+			default: return FString::FromInt(static_cast<int32>(Kind));
+			}
+		}
+
+		TSharedPtr<FJsonValue> RevisionEvidence(const FUeAgentStateRevision& Revision)
+		{
+			auto Value = MakeShared<FJsonObject>();
+			Value->SetStringField(TEXT("source_id"), Revision.GetSourceId());
+			Value->SetStringField(TEXT("generation"), Revision.GetGeneration());
+			Value->SetStringField(TEXT("sequence"), LexToString(Revision.GetSequence()));
+			return MakeShared<FJsonValueObject>(Value);
+		}
+
+		bool Fail(FUeAgentDiscoveryError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic)
+		{
+			OutError = MoveTemp(Diagnostic);
 			return false;
 		}
 
@@ -36,22 +109,9 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			FUeAgentCancellationRequested Cancelled;
 			if (!Cancellation.TryCheckpoint(Cancelled))
 			{
-				return Fail(
-					OutError,
-					Cancelled.Code,
-					Stage,
-					Cancelled.Reason);
+				return Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(Cancelled.Code, Cancelled, Stage));
 			}
 
-			FUeAgentOperationDeadlineExceeded Expired;
-			if (!Deadline.TryCheckpoint(Stage, Expired))
-			{
-				return Fail(
-					OutError,
-					Expired.Code,
-					Stage,
-					Expired.Stage);
-			}
 			return true;
 		}
 
@@ -59,13 +119,10 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			const FUeAgentStateSemanticError& Source,
 			FUeAgentDiscoveryError& OutError)
 		{
-			OutError.Code = Source.Code;
-			OutError.SubjectId = Source.Path;
-			OutError.Detail = Source.Detail;
-			OutError.ResourceDimension = Source.ResourceDimension;
-			OutError.ResourceLimit = Source.ResourceLimit;
-			OutError.ResourceObserved = Source.ResourceObserved;
+			OutError = Source;
+			if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("native_result");
 		}
+
 	}
 
 	FUeAgentUeTypeBinding::FUeAgentUeTypeBinding(
@@ -79,6 +136,19 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		bValid = IsNonEmpty(SourceTypeId)
 			&& CanonicalType.IsValid()
 			&& IsNonEmpty(BindingEvidence);
+		if (!bValid)
+		{
+			FUeAgentGenericReadError Error;
+			if (!IsNonEmpty(SourceTypeId))
+				Error = NativeValueFailure(TEXT("ue_type_binding_invalid"), TEXT("The native source type is empty."),
+					TEXT("/type_binding/source_type_id"), MakeShared<FJsonValueString>(SourceTypeId), MakeShared<FJsonValueString>(TEXT("non-empty type")));
+			else if (!CanonicalType.IsValid())
+				Error = WrapValidation(TEXT("ue_type_binding_invalid"), CanonicalType.GetValidationDiagnostic());
+			else
+				Error = NativeConditionFailure(TEXT("ue_type_binding_invalid"), TEXT("The native-to-canonical type binding has no evidence."),
+					TEXT("/type_binding/binding_evidence_present"), false, true);
+			ValidationDiagnostic = MakeShared<const FUeAgentGenericReadError>(MoveTemp(Error));
+		}
 	}
 
 	const FString& FUeAgentUeTypeBinding::GetSourceTypeId() const
@@ -99,6 +169,11 @@ namespace UE::UAI::DomainAdapters::GenericRead
 	bool FUeAgentUeTypeBinding::IsValid() const
 	{
 		return bValid;
+	}
+
+	const FUeAgentGenericReadError& FUeAgentUeTypeBinding::GetValidationDiagnostic() const
+	{
+		return ValidationOrEmpty(ValidationDiagnostic);
 	}
 
 	FUeAgentUeReadEntry::FUeAgentUeReadEntry(
@@ -131,6 +206,29 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			&& ObservedRevision.IsValid()
 			&& MatchesType(Value)
 			&& MatchesType(Default.GetValue());
+		if (!bValid)
+		{
+			FUeAgentGenericReadError Error;
+			if (!Identity.IsValid()) Error = WrapValidation(TEXT("ue_read_entry_invalid"), Identity.GetValidationDiagnostic());
+			else if (!TypeBinding.IsValid()) Error = WrapValidation(TEXT("ue_read_entry_invalid"), TypeBinding.GetValidationDiagnostic());
+			else if (!Default.IsValid()) Error = WrapValidation(TEXT("ue_read_entry_invalid"), Default.GetValidationDiagnostic());
+			else if (!Details.IsValid()) Error = WrapValidation(TEXT("ue_read_entry_invalid"), Details.GetValidationDiagnostic());
+			else if (!ObservedRevision.IsValid()) Error = WrapValidation(TEXT("ue_read_entry_invalid"), ObservedRevision.GetValidationDiagnostic());
+			else
+			{
+				const bool bValueMismatch = !MatchesType(Value);
+				FString Expected = ValueKindName(Type.GetValueKind());
+				if (Type.IsNullable()) Expected += TEXT(" or null");
+				Error = NativeValueFailure(TEXT("ue_read_entry_invalid"),
+					bValueMismatch ? TEXT("The observed value kind does not match its canonical type.")
+						: TEXT("The default value kind does not match its canonical type."),
+					bValueMismatch ? TEXT("/value/kind") : TEXT("/default/kind"),
+					MakeShared<FJsonValueString>(ValueKindName((bValueMismatch ? Value : Default.GetValue())->GetKind())),
+					MakeShared<FJsonValueString>(Expected));
+			}
+			if (Error.SubjectId.IsEmpty()) Error.SubjectId = Identity.GetCanonicalKey();
+			ValidationDiagnostic = MakeShared<const FUeAgentGenericReadError>(MoveTemp(Error));
+		}
 	}
 
 	const FUeAgentCanonicalIdentity& FUeAgentUeReadEntry::GetIdentity() const
@@ -168,6 +266,11 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		return bValid;
 	}
 
+	const FUeAgentGenericReadError& FUeAgentUeReadEntry::GetValidationDiagnostic() const
+	{
+		return ValidationOrEmpty(ValidationDiagnostic);
+	}
+
 	FUeAgentUeReadCapture::FUeAgentUeReadCapture(
 		FString InSnapshotId,
 		EUeAgentStatePlane InStatePlane,
@@ -188,15 +291,38 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			&& Revision.IsValid()
 			&& CapturedAt.IsValid()
 			&& IsNonEmpty(EvidenceId);
-		for (const FUeAgentUeReadEntry& Entry : Entries)
+		FUeAgentGenericReadError Error;
+		if (!IsNonEmpty(SnapshotId))
+			Error = NativeConditionFailure(TEXT("ue_read_capture_invalid"), TEXT("The native read capture has no snapshot identity."),
+				TEXT("/snapshot_id_present"), false, true);
+		else if (!Revision.IsValid()) Error = WrapValidation(TEXT("ue_read_capture_invalid"), Revision.GetValidationDiagnostic());
+		else if (!CapturedAt.IsValid()) Error = WrapValidation(TEXT("ue_read_capture_invalid"), CapturedAt.GetValidationDiagnostic());
+		else if (!IsNonEmpty(EvidenceId))
+			Error = NativeConditionFailure(TEXT("ue_read_capture_invalid"), TEXT("The native read capture has no observation evidence."),
+				TEXT("/evidence_id_present"), false, true);
+		for (int32 Index = 0; Index < Entries.Num(); ++Index)
 		{
+			const FUeAgentUeReadEntry& Entry = Entries[Index];
 			if (!Entry.IsValid()
 				|| Entry.GetObservedRevision() != Revision)
 			{
 				bValid = false;
+				if (Error.IsEmpty())
+				{
+					if (!Entry.IsValid()) Error = WrapValidation(TEXT("ue_read_capture_invalid"), Entry.GetValidationDiagnostic());
+					else
+					{
+						Error = NativeConditionFailure(TEXT("ue_read_capture_invalid"), TEXT("The entry revision differs from its capture revision."),
+							TEXT("/observed_revision_matches_capture"), false, true);
+						Error.ActualEvidence = RevisionEvidence(Entry.GetObservedRevision());
+						Error.ExpectedEvidence = RevisionEvidence(Revision);
+					}
+					Error.PropertyPath = FString::Printf(TEXT("/entries/%d"), Index) + Error.PropertyPath;
+				}
 				break;
 			}
 		}
+		if (!Error.IsEmpty()) ValidationDiagnostic = MakeShared<const FUeAgentGenericReadError>(MoveTemp(Error));
 	}
 
 	const FString& FUeAgentUeReadCapture::GetSnapshotId() const
@@ -239,6 +365,11 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		return bValid;
 	}
 
+	const FUeAgentGenericReadError& FUeAgentUeReadCapture::GetValidationDiagnostic() const
+	{
+		return ValidationOrEmpty(ValidationDiagnostic);
+	}
+
 	FUeAgentGenericReadAdapter::FUeAgentGenericReadAdapter(
 		FString InPortId,
 		TSharedRef<IUeAgentUeReadHook> InHook)
@@ -265,22 +396,27 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		OutError = {};
 		if (!Request.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("ue_read_request_invalid"),
-				Request.GetBinding().GetBindingId());
+			const auto& Validation = Request.GetBinding().GetValidationDiagnostic();
+			auto Error = Validation
+				? WrapValidation(TEXT("ue_read_request_invalid"), *Validation)
+				: NativeConditionFailure(TEXT("ue_read_request_invalid"),
+					TEXT("The read binding is invalid but supplied no validation diagnostic."), TEXT("/binding_valid"), false, true);
+			return Fail(OutError, AtBinding(MoveTemp(Error), Request.GetBinding()));
 		}
 		if (!IsNonEmpty(PortId)
 			|| Request.GetBinding().GetReadPortId() != PortId)
 		{
-			return Fail(
-				OutError,
-				TEXT("ue_read_port_mismatch"),
-				Request.GetBinding().GetReadPortId(),
-				PortId);
+			auto Error = NativeConditionFailure(TEXT("ue_read_port_mismatch"),
+				!IsNonEmpty(PortId) ? TEXT("The native read adapter has no configured read port.")
+					: TEXT("The binding requests a different native read port."),
+				TEXT("/read_port_matches_binding"), false, true);
+			Error.ActualEvidence = MakeShared<FJsonValueString>(PortId);
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(Request.GetBinding().GetReadPortId());
+			return Fail(OutError, AtBinding(MoveTemp(Error), Request.GetBinding()));
 		}
 		if (!Checkpoint(Deadline, Cancellation, OutError))
 		{
+			OutError = AtBinding(MoveTemp(OutError), Request.GetBinding());
 			return false;
 		}
 
@@ -294,54 +430,42 @@ namespace UE::UAI::DomainAdapters::GenericRead
 				Capture,
 				CaptureError))
 		{
-			if (CaptureError.Code.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("ue_capture_failed"),
-					Request.GetBinding().GetBindingId());
-			}
-			return Fail(
-				OutError,
-				CaptureError.Code,
-				CaptureError.SubjectId,
-				CaptureError.Detail);
+			OutError = CaptureError.IsEmpty()
+				? NativeConditionFailure(TEXT("ue_capture_failed"), TEXT("The native capture hook failed without supplying a diagnostic."),
+					TEXT("/native_capture_succeeded"), false, true)
+				: FUeAgentDiscoveryError::WrapFailure(CaptureError.Code, CaptureError, TEXT("generic_read"));
+			OutError = AtBinding(MoveTemp(OutError), Request.GetBinding());
+			return false;
 		}
 		if (!Capture.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("ue_read_capture_invalid"),
-				Request.GetBinding().GetBindingId());
+			return Fail(OutError, AtBinding(NativeConditionFailure(TEXT("ue_read_capture_invalid"),
+				TEXT("The native capture hook returned no read capture."), TEXT("/capture_present"), false, true), Request.GetBinding()));
 		}
 		if (!Capture->IsSettled())
 		{
-			return Fail(
-				OutError,
-				TEXT("ue_read_not_settled"),
-				Request.GetBinding().GetBindingId());
+			return Fail(OutError, AtCapture(NativeConditionFailure(TEXT("ue_read_not_settled"),
+				TEXT("The native read capture has not settled."), TEXT("/settled"), false, true), *Capture, Request.GetBinding()));
 		}
 		if (Capture->GetStatePlane() != Request.GetStatePlane())
 		{
-			return Fail(
-				OutError,
-				TEXT("ue_read_state_plane_mismatch"),
-				Request.GetBinding().GetBindingId());
+			return Fail(OutError, AtCapture(NativeValueFailure(TEXT("ue_read_state_plane_mismatch"),
+				TEXT("The native capture state plane differs from the requested state plane."), TEXT("/state_plane"),
+				MakeShared<FJsonValueString>(UE::UAI::Contract::LexToString(Capture->GetStatePlane())),
+				MakeShared<FJsonValueString>(UE::UAI::Contract::LexToString(Request.GetStatePlane()))), *Capture, Request.GetBinding()));
 		}
 		if (Capture->GetRevision().GetSourceId() != PortId)
 		{
-			return Fail(
-				OutError,
-				TEXT("ue_read_revision_source_mismatch"),
-				Capture->GetRevision().GetSourceId(),
-				PortId);
+			auto Error = NativeConditionFailure(TEXT("ue_read_revision_source_mismatch"),
+				TEXT("The capture revision was produced by a different native read source."), TEXT("/revision/source_matches_port"), false, true);
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Capture->GetRevision().GetSourceId());
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(PortId);
+			return Fail(OutError, AtCapture(MoveTemp(Error), *Capture, Request.GetBinding()));
 		}
 		if (!Capture->IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("ue_read_capture_invalid"),
-				Request.GetBinding().GetBindingId());
+			return Fail(OutError, AtBinding(WrapValidation(TEXT("ue_read_capture_invalid"),
+				Capture->GetValidationDiagnostic()), Request.GetBinding()));
 		}
 
 		TArray<FUeAgentStateEntry> Entries;
@@ -373,6 +497,7 @@ namespace UE::UAI::DomainAdapters::GenericRead
 				StateError))
 		{
 			MapStateError(StateError, OutError);
+			OutError = AtBinding(MoveTemp(OutError), Request.GetBinding());
 			return false;
 		}
 		return true;

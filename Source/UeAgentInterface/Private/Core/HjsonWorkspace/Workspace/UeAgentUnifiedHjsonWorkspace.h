@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/HjsonWorkspace/SemanticModel/UeAgentUnifiedHjsonSemanticModel.h"
 #include "Templates/SharedPointer.h"
 
@@ -31,6 +32,7 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& GetSemanticFingerprint() const;
 		const FUnifiedHjsonWorkspaceIndex& GetIndex() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FUnifiedHjsonWorkspace(
@@ -42,7 +44,7 @@ namespace UE::UAI::HjsonWorkspace
 		TSharedRef<const FWorkspaceLayoutPlan> Layout;
 		FString SemanticFingerprint;
 		FUnifiedHjsonWorkspaceIndex Index;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 
 		friend UEAGENTINTERFACE_API bool TryCreateUnifiedHjsonWorkspace(
 			FUnifiedHjsonSemanticModelRef,

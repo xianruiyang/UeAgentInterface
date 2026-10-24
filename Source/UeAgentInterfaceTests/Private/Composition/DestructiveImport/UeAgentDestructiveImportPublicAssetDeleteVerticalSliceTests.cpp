@@ -266,57 +266,57 @@ namespace
 
 	FString DeleteParams(
 		const FString& TargetRef,
-		const FString& AuthorizationId = FString())
+		const bool bConfirm = false)
 	{
-		return TEXT("{\"target_ref\":\"") + TargetRef
-			+ (AuthorizationId.IsEmpty()
-				? TEXT("\"}")
-				: TEXT("\",\"destructive_authorization_id\":\"")
-					+ AuthorizationId + TEXT("\"}"));
+		return TEXT("{\"targets\":[\"") + TargetRef
+			+ (bConfirm
+				? TEXT("\"],\"recursive\":false,\"confirm\":true}")
+				: TEXT("\"],\"recursive\":false}"));
 	}
 
 	bool TryParsePayload(
-		const FUeAgentCommandResult& Result,
+		const FJsonObject& Result,
 		TSharedPtr<FJsonObject>& OutPayload)
 	{
-		const TSharedRef<TJsonReader<>> Reader =
-			TJsonReaderFactory<>::Create(Result.GetPayloadJson());
-		return FJsonSerializer::Deserialize(Reader, OutPayload)
-			&& OutPayload.IsValid();
+		const TSharedPtr<FJsonObject>* Payload = nullptr;
+		if (!Result.TryGetObjectField(TEXT("payload"), Payload)) return false;
+		OutPayload = *Payload;
+		return OutPayload.IsValid();
 	}
 
 	bool TryPlanAndInvokeDelete(
 		const FScopedPublicCommandComposition& Harness,
 		const FString& TargetRef,
-		TOptional<FUeAgentCommandResult>& OutResult,
+		TSharedPtr<FJsonObject>& OutResult,
 		FString& OutError)
 	{
 		if (!TryInvokeCommand(
 				Harness.GetRouteHost(), Harness.GetConfig(), TEXT("asset.delete"),
 				DeleteParams(TargetRef), OutResult, OutError)
-			|| !OutResult.IsSet()
-			|| !OutResult->IsOk())
+			|| !OutResult.IsValid()
+			|| !OutResult->GetBoolField(TEXT("ok")))
 		{
 			return false;
 		}
 		TSharedPtr<FJsonObject> PlanPayload;
 		FString TerminalStatus;
-		FString AuthorizationId;
-		if (!TryParsePayload(OutResult.GetValue(), PlanPayload)
+		if (!TryParsePayload(*OutResult, PlanPayload)
 			|| !PlanPayload->TryGetStringField(
-				TEXT("terminal_status"), TerminalStatus)
+				TEXT("status"), TerminalStatus)
 			|| TerminalStatus != TEXT("planned")
-			|| !PlanPayload->TryGetStringField(
-				TEXT("destructive_authorization_id"), AuthorizationId)
-			|| AuthorizationId.IsEmpty())
+			|| PlanPayload->HasField(TEXT("operation_id"))
+			|| PlanPayload->HasField(TEXT("plan_fingerprint"))
+			|| PlanPayload->HasField(TEXT("destructive_authorization_id"))
+			|| PlanPayload->HasField(TEXT("revision_snapshot"))
+			|| !PlanPayload->HasTypedField<EJson::Array>(TEXT("impact_scope")))
 		{
 			OutError = TEXT("asset_delete_plan_contract_invalid");
 			return false;
 		}
 		return TryInvokeCommand(
 			Harness.GetRouteHost(), Harness.GetConfig(), TEXT("asset.delete"),
-			DeleteParams(TargetRef, AuthorizationId), OutResult, OutError)
-			&& OutResult.IsSet();
+			DeleteParams(TargetRef, true), OutResult, OutError)
+			&& OutResult.IsValid();
 	}
 }
 
@@ -355,47 +355,47 @@ bool FUeAgentDestructiveImportPublicAssetDeleteVerticalSliceTest::RunTest(
 	TestNull(TEXT("retired asset-delete command is absent from formal registry"),
 		Harness.GetCommandRegistry()->FindExact(TEXT("asset_delete")));
 
-	TOptional<FUeAgentCommandResult> MissingResult;
+	TSharedPtr<FJsonObject> MissingResult;
 	const FString MissingTarget = Fixture.GetPackageName() + TEXT("_Missing");
-	if (!TestTrue(TEXT("missing target reaches the formal asset-delete handler"),
-			TryPlanAndInvokeDelete(
-				Harness, MissingTarget, MissingResult, Error))
-		|| !MissingResult.IsSet())
+	if (!TestTrue(TEXT("missing target reaches formal asset-delete planning"),
+			TryInvokeCommand(
+				Harness.GetRouteHost(), Harness.GetConfig(), TEXT("asset.delete"),
+				DeleteParams(MissingTarget), MissingResult, Error))
+		|| !MissingResult.IsValid())
 	{
 		AddError(Error);
 		return false;
 	}
-	TSharedPtr<FJsonObject> MissingPayload;
-	TestFalse(TEXT("missing target fails through the public command envelope"),
-		MissingResult->IsOk());
-	TestTrue(TEXT("missing target reports rolled_back terminal state"),
-		TryParsePayload(MissingResult.GetValue(), MissingPayload)
-			&& MissingPayload->GetStringField(TEXT("terminal_status"))
-				== TEXT("rolled_back")
-			&& MissingResult->GetErrorJson().Contains(
-				TEXT("asset_delete_target_missing")));
+	TestFalse(TEXT("missing target is rejected before authorization"),
+		MissingResult->GetBoolField(TEXT("ok")));
+	TestTrue(TEXT("missing target reports selection planning failure"),
+		PublicErrorText(MissingResult).Contains(TEXT("destructive_plan_rejected"))
+			&& PublicErrorText(MissingResult).Contains(
+				TEXT("asset_delete_selection_folder_empty_or_missing")));
 	TestTrue(TEXT("failed delete leaves the owned fixture durably unchanged"),
 		Fixture.Unload() && Fixture.IsDurablyPresent());
 
-	TOptional<FUeAgentCommandResult> DeleteResult;
+	TSharedPtr<FJsonObject> DeleteResult;
 	if (!TestTrue(TEXT("public asset-delete enters the formal command service"),
 			TryPlanAndInvokeDelete(
 				Harness, Fixture.GetPackageName(), DeleteResult, Error))
-		|| !DeleteResult.IsSet())
+		|| !DeleteResult.IsValid())
 	{
 		AddError(Error);
 		return false;
 	}
 	TSharedPtr<FJsonObject> DeletePayload;
 	if (!TestTrue(TEXT("public asset-delete commits exactly one owned target"),
-			DeleteResult->IsOk()
-				&& TryParsePayload(DeleteResult.GetValue(), DeletePayload)
-				&& DeletePayload->GetStringField(TEXT("terminal_status"))
+			DeleteResult->GetBoolField(TEXT("ok"))
+				&& TryParsePayload(*DeleteResult, DeletePayload)
+				&& DeletePayload->GetStringField(TEXT("status"))
 					== TEXT("committed")
-				&& !DeletePayload->GetStringField(
-					TEXT("plan_fingerprint")).IsEmpty()))
+				&& !DeletePayload->HasField(TEXT("operation_id"))
+				&& !DeletePayload->HasField(TEXT("plan_fingerprint"))
+				&& !DeletePayload->HasField(TEXT("destructive_authorization_id"))
+				&& !DeletePayload->HasField(TEXT("revision_snapshot"))))
 	{
-		AddError(DeleteResult->GetErrorJson());
+		AddError(PublicErrorText(DeleteResult));
 		return false;
 	}
 	TestTrue(TEXT("asset-delete independent readback proves durable absence"),
@@ -408,18 +408,18 @@ bool FUeAgentDestructiveImportPublicAssetDeleteVerticalSliceTest::RunTest(
 	{
 		return false;
 	}
-	TOptional<FUeAgentCommandResult> BlueprintDeleteResult;
+	TSharedPtr<FJsonObject> BlueprintDeleteResult;
 	if (!TestTrue(TEXT("public asset-delete accepts its complete owned delete set"),
 			TryPlanAndInvokeDelete(
 				Harness, BlueprintFixture.GetPackageName(),
 				BlueprintDeleteResult, Error))
-		|| !BlueprintDeleteResult.IsSet())
+		|| !BlueprintDeleteResult.IsValid())
 	{
 		AddError(Error);
 		return false;
 	}
 	TestTrue(TEXT("same-package Blueprint generated objects do not block delete"),
-		BlueprintDeleteResult->IsOk()
+		BlueprintDeleteResult->GetBoolField(TEXT("ok"))
 			&& BlueprintFixture.Unload()
 			&& BlueprintFixture.IsDurablyAbsent());
 	TestTrue(TEXT("asset-delete fixture and public composition clean up"),
@@ -459,17 +459,17 @@ bool FUeAgentDestructiveImportPublicPackageTargetResolutionTest::RunTest(
 	{
 		return false;
 	}
-	TOptional<FUeAgentCommandResult> UniqueResult;
+	TSharedPtr<FJsonObject> UniqueResult;
 	if (!TestTrue(TEXT("package target resolves its unique registry asset"),
 			TryPlanAndInvokeDelete(
 				Harness, UniqueFixture.GetPackageName(), UniqueResult, Error))
-		|| !UniqueResult.IsSet())
+		|| !UniqueResult.IsValid())
 	{
 		AddError(Error);
 		return false;
 	}
 	TestTrue(TEXT("resolved non-leaf asset is deleted and verified"),
-		UniqueResult->IsOk()
+		UniqueResult->GetBoolField(TEXT("ok"))
 			&& UniqueFixture.Unload()
 			&& UniqueFixture.IsDurablyAbsent());
 
@@ -480,19 +480,19 @@ bool FUeAgentDestructiveImportPublicPackageTargetResolutionTest::RunTest(
 	{
 		return false;
 	}
-	TOptional<FUeAgentCommandResult> AmbiguousResult;
+	TSharedPtr<FJsonObject> AmbiguousResult;
 	if (!TestTrue(TEXT("ambiguous package target reaches commit owner"),
 			TryPlanAndInvokeDelete(
 				Harness, AmbiguousFixture.GetPackageName(), AmbiguousResult, Error))
-		|| !AmbiguousResult.IsSet())
+		|| !AmbiguousResult.IsValid())
 	{
 		AddError(Error);
 		return false;
 	}
 	TestFalse(TEXT("ambiguous package target fails closed"),
-		AmbiguousResult->IsOk());
+		AmbiguousResult->GetBoolField(TEXT("ok")));
 	TestTrue(TEXT("ambiguity has a typed error and preserves the package"),
-		AmbiguousResult->GetErrorJson().Contains(
+		PublicErrorText(AmbiguousResult).Contains(
 			TEXT("asset_delete_target_ambiguous"))
 			&& AmbiguousFixture.Unload()
 			&& AmbiguousFixture.IsDurablyPresent());
@@ -547,16 +547,16 @@ bool FUeAgentDestructiveImportPackageOnlyDeleteDoesNotLoadTargetTest::RunTest(
 
 	FString Error;
 	TSharedPtr<IUeAgentAssetDeleteOwner> Owner;
+	UE::UAI::Contract::FDiagnostic DeleteOwnerError;
 	if (!TestTrue(TEXT("formal asset-delete owner composes"),
 			TryCreateAssetDeleteOwner(
 				FPaths::ProjectSavedDir()
 					/ TEXT("UAI/Tests/T91/PackageOnlyDeleteJournal"),
 				TEXT("t91-package-only-delete"),
-				Owner,
-				Error))
+				Owner, DeleteOwnerError))
 		|| !Owner.IsValid())
 	{
-		AddError(Error);
+		AddError(DeleteOwnerError.ToPublicDetail());
 		return false;
 	}
 
@@ -580,22 +580,26 @@ bool FUeAgentDestructiveImportPackageOnlyDeleteDoesNotLoadTargetTest::RunTest(
 	const FUeAgentAssetDeleteResult DeleteResult = Owner->Delete(
 		FUeAgentAssetDeleteRequest{
 			TEXT("t91-package-only-delete-request"),
-			Fixture.GetPackageName(),
+			{Fixture.GetPackageName()},
+			false,
 			TEXT("t91-package-only-delete-test")},
 		MakeShared<FNeverCancelled>());
 	if (!TestTrue(TEXT("unloaded package-only delete commits"),
 			DeleteResult.IsSuccess()))
 	{
-		AddError(DeleteResult.ErrorCode + TEXT(":")
-			+ DeleteResult.ErrorDetail);
+		AddError(DeleteResult.Targets.IsEmpty()
+			? TEXT("asset_delete_result_empty")
+			: DeleteResult.Targets[0].Diagnostic.Code + TEXT(":")
+				+ DeleteResult.Targets[0].Diagnostic.PublicMessage);
 	}
 	TestEqual(TEXT("package-only delete never loads the target asset"),
 		TargetLoadCount, 0);
 	TestTrue(TEXT("package-only delete refreshes durable absence"),
-		DeleteResult.bFileAbsent
-			&& DeleteResult.bPackageAbsent
-			&& DeleteResult.bRegistryAbsent
-			&& DeleteResult.bObjectAbsent
+		DeleteResult.Targets.Num() == 1
+			&& DeleteResult.Targets[0].bFileAbsent
+			&& (DeleteResult.Targets[0].bPackageAbsent || DeleteResult.Targets[0].bPackageEmpty)
+			&& DeleteResult.Targets[0].bRegistryAbsent
+			&& DeleteResult.Targets[0].bObjectAbsent
 			&& Fixture.IsDurablyAbsent());
 	TestTrue(TEXT("package-only fixture cleanup is idempotent"),
 		Fixture.Cleanup());
@@ -619,28 +623,32 @@ bool FUeAgentDestructiveImportPublicStringTableDeleteTest::RunTest(
 	}
 	FString Error;
 	TSharedPtr<IUeAgentAssetDeleteOwner> Owner;
+	UE::UAI::Contract::FDiagnostic DeleteOwnerError;
 	if (!TestTrue(TEXT("formal asset-delete owner composes"),
 			TryCreateAssetDeleteOwner(
 				FPaths::ProjectSavedDir()
 					/ TEXT("UAI/Tests/T30/StringTableDeleteJournal"),
 				TEXT("t30-string-table-delete"),
-				Owner,
-				Error))
+				Owner, DeleteOwnerError))
 		|| !Owner.IsValid())
 	{
-		AddError(Error);
+		AddError(DeleteOwnerError.ToPublicDetail());
 		return false;
 	}
 	const FUeAgentAssetDeleteResult DeleteResult = Owner->Delete(
 		FUeAgentAssetDeleteRequest{
 			TEXT("t30-string-table-delete-request"),
-			Fixture.GetPackageName(),
+			{Fixture.GetPackageName()},
+			false,
 			TEXT("t30-string-table-delete-test")},
 		MakeShared<FNeverCancelled>());
 	if (!TestTrue(TEXT("StringTable registry references are released for delete"),
 			DeleteResult.IsSuccess()))
 	{
-		AddError(DeleteResult.ErrorCode + TEXT(":") + DeleteResult.ErrorDetail);
+		AddError(DeleteResult.Targets.IsEmpty()
+			? TEXT("asset_delete_result_empty")
+			: DeleteResult.Targets[0].Diagnostic.Code + TEXT(":")
+				+ DeleteResult.Targets[0].Diagnostic.PublicMessage);
 	}
 	TestTrue(TEXT("StringTable delete has durable independent absence"),
 		Fixture.IsDurablyAbsent());

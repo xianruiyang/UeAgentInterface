@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/GraphCompound/UeAgentGraphCompoundBlueprintMaterialRoutes.h"
 
 #define UAI_GRAPH_COMPOUND_PCG_ANIMATION_ROUTES_V1 1
@@ -65,6 +67,7 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetTargetKind() const;
 		const FGraphCompoundExecutionContract& GetExecutionContract() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString CapabilityId;
@@ -75,18 +78,18 @@ namespace UE::UAI::Composition::GraphCompound
 			EPcgAnimationGraphInputKind::Invalid;
 		FString TargetKind;
 		FGraphCompoundExecutionContract ExecutionContract;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
-	UEAGENTINTERFACE_API const TArray<FPcgAnimationGraphRouteProfile>&
-	GetPcgAnimationGraphRouteProfiles();
+	UEAGENTINTERFACE_API bool TryGetPcgAnimationGraphRouteProfiles(
+		const TArray<FPcgAnimationGraphRouteProfile>*& OutProfiles, Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API const FPcgAnimationGraphRouteProfile*
 	FindPcgAnimationGraphRouteProfile(const FString& CapabilityId);
 
 	UEAGENTINTERFACE_API bool TryCreatePcgAnimationGraphDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryDecodePcgAnimationGraphTypedOperation(
 		const FPcgAnimationGraphRouteProfile& Profile,

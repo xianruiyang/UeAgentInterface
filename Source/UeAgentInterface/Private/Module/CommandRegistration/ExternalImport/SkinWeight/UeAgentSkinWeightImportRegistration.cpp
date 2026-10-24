@@ -58,14 +58,20 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::SkinWeight
 					TEXT("The unchanged exact public command identity.")),
 				Field(TEXT("terminal_status"), TEXT("string"), true,
 					TEXT("Succeeded only after settle, save, unload/reload and profile verification.")),
-				Field(TEXT("mutation_started"), TEXT("boolean"), true,
-					TEXT("Whether the lifecycle entered the native importer.")),
-				Field(TEXT("persistence_receipt_id"), TEXT("string"), true,
-					TEXT("SHA-256 receipt for the persisted SkeletalMesh package.")),
-				Field(TEXT("phase_history"), TEXT("array"), true,
-					TEXT("Ordered shared OperationService lifecycle phases.")),
-				Field(TEXT("independent_readback"), TEXT("object"), true,
-					TEXT("Reloaded profile, source, LOD and package identity.")),
+				Field(TEXT("target_ref"), TEXT("string"), true,
+					TEXT("Resolved existing SkeletalMesh target reference.")),
+				Field(TEXT("asset_class"), TEXT("string"), true,
+					TEXT("Resolved target asset class.")),
+				Field(TEXT("profile_name"), TEXT("string"), true,
+					TEXT("Registered Skin Weight Profile name.")),
+				Field(TEXT("source_ref"), TEXT("string"), true,
+					TEXT("Imported external FBX source reference.")),
+				Field(TEXT("lod_index"), TEXT("integer"), true,
+					TEXT("Target LOD receiving the alternate weights.")),
+				Field(TEXT("profile_count"), TEXT("integer"), true,
+					TEXT("Number of profiles after import.")),
+				Field(TEXT("reloaded"), TEXT("boolean"), true,
+					TEXT("Whether the target was independently reloaded and verified.")),
 			};
 			Result.Errors = {
 				Error(TEXT("skin_weight_import_authority_required"),
@@ -96,7 +102,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::SkinWeight
 			Result.Purpose.ParameterGuidance =
 				TEXT("Pass source, target, profile and LOD unchanged; do not map them in the SDK.");
 			Result.Purpose.ResultGuidance =
-				TEXT("Trust success only with the persistence receipt and independent profile/source readback.");
+				TEXT("Trust success only with the terminal status and returned profile/source business results.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Prewrite failures do not mutate; post-mutation failures restore the package or report state_unknown.");
 			Result.Purpose.SideEffectGuidance =
@@ -105,7 +111,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::SkinWeight
 				TEXT("skin_weight_profile_import(client, source_ref, target_ref, profile_name, lod_index)");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
-				TEXT("query.command.detail"),
+				TEXT("query.command.usage"),
 				TEXT("asset persisted-state query"),
 			};
 			Result.Purpose.Keywords = {
@@ -148,7 +154,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::SkinWeight
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				TArray<TSharedRef<IUeAgentExactCommandHandler>> Handlers;
 				if (!TryCreateSkinWeightImportCommandHandlers(
@@ -175,7 +181,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::SkinWeight
 	bool TryCreateSkinWeightImportContribution(
 		TSharedRef<IUeAgentSkinWeightImportCommandService> Service,
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution = MakeShared<FContribution>(Service);
 		OutError.Reset();
@@ -184,7 +190,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::SkinWeight
 
 	bool TryCreateProductionSkinWeightImportContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		TSharedPtr<IUeAgentSkinWeightImportCommandService> Service;
@@ -202,7 +208,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::SkinWeight
 		TSharedRef<IUeAgentSkinWeightImportCommandService> Service,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();

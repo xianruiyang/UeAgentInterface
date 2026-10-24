@@ -1,6 +1,8 @@
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringDurableService.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/PackageName.h"
 #include "Misc/ScopeLock.h"
 #include "UObject/Package.h"
@@ -12,13 +14,22 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		using namespace AssetDurable;
 		using namespace ContextResource;
 
-		void SetError(
-			FUeAgentSimpleAuthoringProductionError& OutError,
-			FString Code,
-			FString Detail = FString())
+		Contract::FDiagnostic DurableFailure(const FString& Code, const FString& Reason)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.Detail = MoveTemp(Detail);
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("asset_durable"));
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
+		}
+
+		bool TryCheckCurrentFence(const int64 Token, FAssetDurableError& OutError)
+		{
+			if (Token >= 0) return true;
+			OutError = DurableFailure(TEXT("simple_authoring_operation_fence_invalid"),
+				TEXT("The current operation fencing token must not be negative."));
+			OutError.PropertyPath = TEXT("current_fencing_token");
+			OutError.ActualValue = MakeShared<FJsonValueString>(::LexToString(Token));
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT(">= 0"));
+			return false;
 		}
 
 		class FSimpleAuthoringReconciliationOracle final
@@ -34,10 +45,14 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			{
 				OutError = FAssetDurableError();
 				if (ProposedStatus != EDurableStatus::RolledBack
-					&& ProposedStatus != EDurableStatus::Verified)
+					&& ProposedStatus != EDurableStatus::Verified
+					&& ProposedStatus != EDurableStatus::Committed)
 				{
-					OutError = FAssetDurableError(
-						TEXT("durable_reconcile_status_invalid"));
+					OutError = DurableFailure(TEXT("durable_reconcile_status_invalid"),
+						TEXT("Package reconciliation requires a rolled-back, verified or committed durable status."));
+					OutError.PropertyPath = TEXT("proposed_status");
+					OutError.ActualValue = MakeShared<FJsonValueString>(LexToString(ProposedStatus));
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("rolled_back, verified or committed"));
 					return false;
 				}
 				TSet<FString> CheckedPackages;
@@ -79,9 +94,20 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						: nullptr;
 					if (!HeaderState || !HeaderState->IsKnown())
 					{
-						OutError = FAssetDurableError(
-							TEXT("durable_reconcile_readback_unconfirmed"),
-							PackageName + TEXT(":header_state"));
+						OutError = DurableFailure(TEXT("durable_reconcile_readback_unconfirmed"),
+							!HeaderArtifact ? TEXT("The package inventory contains no header artifact.")
+								: !HeaderState ? TEXT("No observed state was returned for the package header artifact.")
+									: TEXT("The observed package header state is unknown."));
+						OutError.TargetPath = PackageName;
+						OutError.PropertyPath = !HeaderArtifact ? TEXT("header_artifact")
+							: !HeaderState ? TEXT("header_state") : TEXT("header_state/known");
+						OutError.ActualValuePresent = HeaderState != nullptr;
+						OutError.ExpectedValuePresent = true;
+						if (HeaderState)
+						{
+							OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+							OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+						}
 						return false;
 					}
 
@@ -112,17 +138,28 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						|| !bRegistryConsistent
 						|| !bLoadedConsistent)
 					{
-						OutError = FAssetDurableError(
-							TEXT("durable_reconcile_readback_unconfirmed"),
-							FString::Printf(
-								TEXT("%s:file=%d,registry=%d,loaded=%d,dirty=%d"),
-								*PackageName,
-								bFileExists ? 1 : 0,
-								Assets.IsEmpty() ? 0 : 1,
-								LoadedPackage ? 1 : 0,
-								LoadedPackage && LoadedPackage->IsDirty()
-									? 1
-									: 0));
+						const auto AddMismatch = [&](const FString& Field, const FString& Reason,
+							TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+						{
+							auto Diagnostic = DurableFailure(TEXT("durable_reconcile_readback_unconfirmed"), Reason);
+							Diagnostic.TargetPath = PackageName;
+							Diagnostic.PropertyPath = Field;
+							Diagnostic.ActualValue = MoveTemp(Actual);
+							Diagnostic.ExpectedValue = MoveTemp(Expected);
+							OutError.Append(Diagnostic);
+						};
+						if (bFileExists != bExpectedPresent)
+							AddMismatch(TEXT("file/present"), TEXT("Package file presence differs from the observed header state."),
+								MakeShared<FJsonValueBoolean>(bFileExists), MakeShared<FJsonValueBoolean>(bExpectedPresent));
+						if (!bRegistryConsistent)
+							AddMismatch(TEXT("asset_registry/asset_count"), TEXT("Asset registry entries differ from the observed package header presence."),
+								MakeShared<FJsonValueNumber>(Assets.Num()),
+								MakeShared<FJsonValueString>(bExpectedPresent ? TEXT("at least one asset") : TEXT("zero assets")));
+						if (!bLoadedConsistent)
+							AddMismatch(bExpectedPresent ? TEXT("loaded_package/dirty") : TEXT("loaded_package/present"),
+								bExpectedPresent ? TEXT("The loaded package remains dirty after durable reconciliation.")
+									: TEXT("The package remains loaded although the observed header is absent."),
+								MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 						return false;
 					}
 				}
@@ -195,13 +232,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						Session->GetRequest(),
 						Backend,
 						OutError)
-					|| CurrentFencingToken < 0)
+					|| !TryCheckCurrentFence(CurrentFencingToken, OutError))
 				{
-					if (!OutError.IsPresent())
-					{
-						OutError = FAssetDurableError(
-							TEXT("simple_authoring_operation_fence_invalid"));
-					}
 					return false;
 				}
 				return TryEnlistAssetDurableTargets(
@@ -226,8 +258,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						Session->GetRequest(),
 						Backend,
 						OutError)
-					|| CurrentFencingToken < 0
-					|| !TryPersistAssetDurability(
+					|| !TryCheckCurrentFence(CurrentFencingToken, OutError)
+					|| !TryPersistAssetDurabilityForVerification(
 						Session,
 						*Backend,
 						Session->GetRequest().GetFencingToken(),
@@ -237,19 +269,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				{
 					return false;
 				}
-				if (OutReceipt.GetStatus()
-						!= EDurableStatus::PersistedUnverified
-					|| !OutReceipt
-						.RequiresIndependentVerification())
-				{
-					OutError = FAssetDurableError(
-						TEXT(
-							"simple_authoring_durable_"
-							"persist_not_persisted"),
-						LexToString(OutReceipt.GetStatus()));
-					return false;
-				}
-
 				const FAssetDurableSessionRef Persisted =
 					MakeShared<const FAssetDurableSession>(
 						Session->GetRequest(),
@@ -280,6 +299,9 @@ namespace UE::UAI::Composition::SimpleAuthoring
 								nullptr,
 								*Target.GetPackageName()))
 						{
+							// Autosave staging preserves this flag; publication has now
+							// completed the first real save of the resident package.
+							Package->ClearPackageFlags(PKG_NewlyCreated);
 							Package->SetDirtyFlag(false);
 						}
 					}
@@ -300,7 +322,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						Session->GetRequest(),
 						Backend,
 						OutError)
-					|| CurrentFencingToken < 0
+					|| !TryCheckCurrentFence(CurrentFencingToken, OutError)
 					|| !TryRollbackAssetDurability(
 						Session,
 						*Backend,
@@ -315,11 +337,16 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				if (OutReceipt.GetStatus()
 					!= EDurableStatus::RolledBack)
 				{
-					OutError = FAssetDurableError(
-						TEXT(
-							"simple_authoring_durable_"
-							"rollback_unconfirmed"),
-						LexToString(OutReceipt.GetStatus()));
+					OutError = OutReceipt.GetFailureDiagnostic();
+					if (OutError.IsEmpty())
+					{
+						OutError = DurableFailure(TEXT("simple_authoring_durable_rollback_unconfirmed"),
+							TEXT("The durable rollback returned a receipt whose status does not confirm rollback."));
+						OutError.PropertyPath = TEXT("receipt/status");
+						OutError.ActualValue = MakeShared<FJsonValueString>(LexToString(OutReceipt.GetStatus()));
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("rolled_back"));
+					}
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Session->GetJournalId();
 					return false;
 				}
 				FScopeLock Lock(&Mutex);
@@ -383,11 +410,12 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				}
 				if (!Persisted.IsValid())
 				{
-					OutError = FAssetDurableError(
-						TEXT(
-							"simple_authoring_durable_"
-							"persisted_session_missing"),
-						Session->GetJournalId());
+					OutError = DurableFailure(TEXT("simple_authoring_durable_persisted_session_missing"),
+						TEXT("No persisted session is available for this journal's verification acknowledgement."));
+					OutError.SubjectId = Session->GetJournalId();
+					OutError.PropertyPath = TEXT("persisted_session");
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
 					return false;
 				}
 				if (!TryAcknowledgeAssetDurability(
@@ -433,27 +461,24 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			{
 				OutBackend = nullptr;
 				OutError = FAssetDurableError();
-				if (!Request.IsValid()
-					|| Request.GetTargets().IsEmpty())
+				if (!Request.IsValid())
 				{
-					OutError = FAssetDurableError(
-						TEXT(
-							"simple_authoring_durable_"
-							"request_invalid"));
+					OutError = Request.GetValidationDiagnostic();
 					return false;
 				}
 				const EDurableArtifactKind ArtifactKind =
 					Request.GetTargets()[0].GetArtifactKind();
-				for (const FAssetDurableTarget& Target :
-					Request.GetTargets())
+				for (int32 TargetIndex = 0; TargetIndex < Request.GetTargets().Num(); ++TargetIndex)
 				{
+					const FAssetDurableTarget& Target = Request.GetTargets()[TargetIndex];
 					if (Target.GetArtifactKind()
 						!= ArtifactKind)
 					{
-						OutError = FAssetDurableError(
-							TEXT(
-								"simple_authoring_durable_"
-								"artifact_kinds_mixed"));
+						OutError = DurableFailure(TEXT("simple_authoring_durable_artifact_kinds_mixed"),
+							TEXT("All targets in one authoring durable request must use the same artifact kind."));
+						OutError.PropertyPath = FString::Printf(TEXT("targets/%d/artifact_kind"), TargetIndex);
+						OutError.ActualValue = MakeShared<FJsonValueString>(LexToString(Target.GetArtifactKind()));
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(LexToString(ArtifactKind));
 						return false;
 					}
 				}
@@ -466,11 +491,12 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						: Config.ProjectConfigBackend;
 				if (!Selected.IsValid())
 				{
-					OutError = FAssetDurableError(
-						TEXT(
-							"simple_authoring_durable_"
-							"backend_missing"),
-						LexToString(ArtifactKind));
+					OutError = DurableFailure(TEXT("simple_authoring_durable_backend_missing"),
+						FString::Printf(TEXT("No durable backend is configured for artifact kind '%s'."), *LexToString(ArtifactKind)));
+					OutError.PropertyPath = ArtifactKind == EDurableArtifactKind::Package
+						? TEXT("package_backend") : TEXT("project_config_backend");
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
 					return false;
 				}
 				OutBackend = Selected.Get();
@@ -495,35 +521,38 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		OutError = FUeAgentSimpleAuthoringProductionError();
 		if (Config.JournalRoot.TrimStartAndEnd().IsEmpty())
 		{
-			SetError(
-				OutError,
-				TEXT(
-					"simple_authoring_durable_"
-					"journal_root_missing"));
+			OutError = DurableFailure(TEXT("simple_authoring_durable_journal_root_missing"),
+				TEXT("The durable journal root must not be empty or whitespace."));
+			OutError.PropertyPath = TEXT("journal_root");
+			OutError.ActualValue = MakeShared<FJsonValueString>(Config.JournalRoot);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-whitespace journal root"));
 			return false;
 		}
 		if (Config.StableJournalOwnerId.TrimStartAndEnd().IsEmpty())
 		{
-			SetError(
-				OutError,
-				TEXT(
-					"simple_authoring_durable_"
-					"stable_owner_missing"));
+			OutError = DurableFailure(TEXT("simple_authoring_durable_stable_owner_missing"),
+				TEXT("The durable journal owner ID must not be empty or whitespace."));
+			OutError.PropertyPath = TEXT("stable_journal_owner_id");
+			OutError.ActualValue = MakeShared<FJsonValueString>(Config.StableJournalOwnerId);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-whitespace owner ID"));
 			return false;
 		}
 		if (!Config.PackageBackend.IsValid()
 			&& !Config.ProjectConfigBackend.IsValid())
 		{
-			SetError(
-				OutError,
-				TEXT(
-					"simple_authoring_durable_"
-					"backend_missing"));
+			OutError = DurableFailure(TEXT("simple_authoring_durable_backend_missing"),
+				TEXT("At least one package or project-config durable backend must be configured."));
+			OutError.PropertyPath = TEXT("backends");
+			auto Actual = MakeShared<FJsonObject>();
+			Actual->SetBoolField(TEXT("package"), false);
+			Actual->SetBoolField(TEXT("project_config"), false);
+			OutError.ActualValue = MakeShared<FJsonValueObject>(Actual);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one configured backend"));
 			return false;
 		}
 		OutService = MakeShared<
 			FSimpleAuthoringDurableService,
 			ESPMode::ThreadSafe>(Config);
-		return OutService.IsValid();
+		return true;
 	}
 }

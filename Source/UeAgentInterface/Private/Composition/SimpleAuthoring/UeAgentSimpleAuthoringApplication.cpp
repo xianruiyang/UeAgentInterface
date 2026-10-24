@@ -3,14 +3,13 @@
 #include "Async/Async.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContractSchema.h"
+#include "Core/Contract/UeAgentContractJson.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/Event.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
-#include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
 
 namespace UE::UAI::Composition::SimpleAuthoring
 {
@@ -25,29 +24,15 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		using namespace Projection;
 		using namespace StateSemantic;
 
-		void SetError(
-			FUeAgentSimpleAuthoringApplicationError& OutError,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		FDiagnostic ApplicationFailure(const FString& Code, const FString& SubjectId, const FString& Reason)
 		{
-			OutError = {Code, SubjectId, Detail};
+			FDiagnostic Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("application"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SubjectId = SubjectId;
+			return Diagnostic;
 		}
 
-		FString JsonText(const TSharedRef<FJsonObject>& Object)
-		{
-			FString Text;
-			const TSharedRef<
-				TJsonWriter<
-					TCHAR,
-					TCondensedJsonPrintPolicy<TCHAR>>> Writer =
-				TJsonWriterFactory<
-					TCHAR,
-					TCondensedJsonPrintPolicy<TCHAR>>::Create(
-						&Text);
-			FJsonSerializer::Serialize(Object, Writer);
-			return Text;
-		}
+		
 
 		TSharedPtr<FJsonValue> CanonicalValueToJson(
 			const FUeAgentCanonicalValue& Value)
@@ -125,32 +110,29 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			}
 		}
 
-		FUeAgentOperationResult ErrorResult(
-			const FUeAgentOperationRequest& Request,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		FUeAgentOperationResult ErrorResult(const FUeAgentOperationRequest& Request, FDiagnostic Diagnostic)
 		{
-			TSharedRef<FJsonObject> Error =
-				MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(
-				TEXT("subject_id"),
-				SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			TSharedRef<FJsonObject> Root =
-				MakeShared<FJsonObject>();
-			Root->SetObjectField(TEXT("operation_error"), Error);
-			return FUeAgentOperationResult(
-				Request.GetDescriptorIdentity(),
-				Request.GetRequestId(),
-				FUeAgentContractValue(JsonText(Root)));
+			if (Diagnostic.IsEmpty())
+			{
+				Diagnostic.Code = TEXT("simple_authoring_operation_failed");
+				Diagnostic.PublicMessage = TEXT("The operation application received a failure without a primary diagnostic.");
+				Diagnostic.Stage = TEXT("application");
+			}
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetDescriptorIdentity().GetDescriptorId();
+			return FUeAgentOperationResult(Request.GetDescriptorIdentity(), Request.GetRequestId(), MoveTemp(Diagnostic));
 		}
 
 		FUeAgentOperationResult SuccessResult(
 			const FUeAgentOperationRequest& Request,
 			const FUeAgentOperationBindingResult& Result)
 		{
+			TArray<FDiagnostic> Diagnostics = Result.GetValue().GetDiagnostics();
+			if (!Result.GetValue().IsValid())
+			{
+				FDiagnostic Error = Result.GetValue().GetValidationDiagnostic();
+				Error.Diagnostics.Append(Diagnostics);
+				return ErrorResult(Request, MoveTemp(Error));
+			}
 			const TSharedPtr<const FUeAgentProjectedResponse>&
 				Projection =
 					Result.GetValue().GetProjection();
@@ -159,14 +141,13 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					.GetValue()
 					.IsValid())
 			{
-				return ErrorResult(
-					Request,
-					TEXT(
-						"simple_authoring_projection_missing"),
-					Request.GetRequestId(),
-					TEXT(
+				FDiagnostic Error = ApplicationFailure(TEXT(
+						"simple_authoring_projection_missing"), Request.GetRequestId(), TEXT(
 						"C3O returned no canonical C9 "
 						"outcome."));
+				Error.PropertyPath = TEXT("projection.payload");
+				Error.Diagnostics.Append(Diagnostics);
+				return ErrorResult(Request, MoveTemp(Error));
 			}
 			TSharedRef<FJsonObject> ProjectionJson =
 				MakeShared<FJsonObject>();
@@ -186,37 +167,19 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			Root->SetObjectField(
 				TEXT("projection"),
 				ProjectionJson);
+			FString Text;
+			FDiagnostic JsonError;
+			if (!Json::TryCanonicalize(Root, Text, JsonError))
+			{
+				JsonError.Diagnostics.Append(Diagnostics);
+				return ErrorResult(Request, MoveTemp(JsonError));
+			}
 			return FUeAgentOperationResult(
 				Request.GetDescriptorIdentity(),
 				Request.GetRequestId(),
-				FUeAgentContractValue(JsonText(Root)));
+				FUeAgentContractValue(MoveTemp(Text)), MoveTemp(Diagnostics));
 		}
 
-		FUeAgentResourceBudget OperationBudget(
-			const int64 MaxFrameBytes)
-		{
-			const int64 ByteLimit = FMath::Max<int64>(
-				MaxFrameBytes * 8,
-				8 * 1024 * 1024);
-			return FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, ByteLimit},
-				{EUeAgentResourceDimension::OutputBytes, ByteLimit},
-				{EUeAgentResourceDimension::StringBytes, ByteLimit},
-				{EUeAgentResourceDimension::Nodes, 32768},
-				{EUeAgentResourceDimension::Items, 32768},
-				{EUeAgentResourceDimension::Files, 256},
-				{
-					EUeAgentResourceDimension::ReferenceEdges,
-					32768,
-				},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{
-					EUeAgentResourceDimension::
-						EstimatedMemoryBytes,
-					ByteLimit * 8,
-				},
-			});
-		}
 
 		class FSimpleAuthoringSessionSource final
 			: public IUeAgentOperationSessionSource
@@ -274,26 +237,50 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		, Planning(MoveTemp(InPlanning))
 		, Projection(MoveTemp(InProjection))
 	{
-		bValid = Targets.Num() > 0
-			&& Planning.IsValid()
-			&& Projection.IsValid();
-		if (bValid)
+		if (Targets.IsEmpty())
 		{
-			TSet<FString> IdentityKeys;
-			for (const FUeAgentCandidateBinding& Target : Targets)
+			ValidationDiagnostic = FDiagnostic::Failure(TEXT("simple_authoring_prepared_operation_invalid"),
+				TEXT("A prepared authoring operation must contain at least one target."), TEXT("prepare"));
+			ValidationDiagnostic.SourceKind = TEXT("native_result");
+			ValidationDiagnostic.PropertyPath = TEXT("targets");
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(0);
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one target"));
+			return;
+		}
+		if (!Planning.IsValid())
+		{
+			ValidationDiagnostic = Planning.GetValidationDiagnostic();
+			return;
+		}
+		if (!Projection.IsValid())
+		{
+			ValidationDiagnostic = Projection.GetValidationDiagnostic();
+			return;
+		}
+		TSet<FString> IdentityKeys;
+		for (int32 Index = 0; Index < Targets.Num(); ++Index)
+		{
+			const FUeAgentCandidateBinding& Target = Targets[Index];
+			const FString IdentityKey = Target.GetSummary().GetIdentity().GetCanonicalKey();
+			if (!Target.IsValid())
 			{
-				const FString IdentityKey =
-					Target.GetSummary()
-						.GetIdentity()
-						.GetCanonicalKey();
-				if (!Target.IsValid()
-					|| IdentityKeys.Contains(IdentityKey))
-				{
-					bValid = false;
-					break;
-				}
-				IdentityKeys.Add(IdentityKey);
+				ValidationDiagnostic = *Target.GetValidationDiagnostic();
+				if (ValidationDiagnostic.TargetPath.IsEmpty()) ValidationDiagnostic.TargetPath = Target.GetPublicRef();
+				return;
 			}
+			if (IdentityKeys.Contains(IdentityKey))
+			{
+				ValidationDiagnostic = FDiagnostic::Failure(TEXT("simple_authoring_prepared_operation_invalid"),
+					TEXT("The prepared operation contains more than one binding for the same target."), TEXT("prepare"));
+				ValidationDiagnostic.SourceKind = TEXT("native_result");
+				ValidationDiagnostic.PropertyPath = FString::Printf(TEXT("targets/%d/identity"), Index);
+				ValidationDiagnostic.TargetPath = Target.GetPublicRef();
+				ValidationDiagnostic.SubjectId = IdentityKey;
+				ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(2);
+				ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+				return;
+			}
+			IdentityKeys.Add(IdentityKey);
 		}
 	}
 
@@ -320,7 +307,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 
 	bool FUeAgentSimpleAuthoringPreparedOperation::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
 	class FUeAgentSimpleAuthoringApplication::FState final
@@ -400,18 +387,12 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		if (!Config.DescriptorRegistry.IsValid()
 			|| Config.ServerSessionId.IsEmpty()
 			|| Config.RegistryEpoch < 1
-			|| Config.TimeoutSeconds <= 0.0
-			|| Config.MaxFrameBytes <= 0
 			|| Routes.Num() < 1
 			|| Providers.Num() < 1)
 		{
-			SetError(
-				OutError,
-				TEXT(
-					"simple_authoring_application_config_invalid"),
-				TEXT("simple_authoring"),
-				TEXT(
-					"Descriptor registry, session, limits, "
+			OutError = ApplicationFailure(TEXT(
+					"simple_authoring_application_config_invalid"), TEXT("simple_authoring"), TEXT(
+					"Descriptor registry, session, "
 					"routes and providers are required."));
 			return false;
 		}
@@ -427,12 +408,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			if (FamilyId.IsEmpty()
 				|| ProviderByFamily.Contains(FamilyId))
 			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_provider_duplicate"),
-					FamilyId,
-					TEXT(
+				OutError = ApplicationFailure(TEXT(
+						"simple_authoring_provider_duplicate"), FamilyId, TEXT(
 						"Each family must have exactly one "
 						"production provider."));
 				return false;
@@ -446,12 +423,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			Config.DescriptorRegistry->GetRegistryHash());
 		if (!Session.IsValid())
 		{
-			SetError(
-				OutError,
-				TEXT(
-					"simple_authoring_session_invalid"),
-				Config.ServerSessionId,
-				TEXT(
+			OutError = ApplicationFailure(TEXT(
+					"simple_authoring_session_invalid"), Config.ServerSessionId, TEXT(
 					"Server session identity is invalid."));
 			return false;
 		}
@@ -474,8 +447,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				IUeAgentSimpleAuthoringCapabilityProvider>*
 				Provider =
 					ProviderByFamily.Find(Route.FamilyId);
-			if (!Route.IsValid()
-				|| !Descriptor
+			if (!Route.TryValidate(OutError)) return false;
+			if (!Descriptor
 				|| Descriptor->GetOperationKind()
 					!= EUeAgentDescriptorOperationKind::
 						Operation
@@ -488,12 +461,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						Route.DescriptorIdentity)
 				|| !Provider)
 			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_route_invalid"),
-					Route.CommandId,
-					TEXT(
+				OutError = ApplicationFailure(TEXT(
+						"simple_authoring_route_invalid"), Route.CommandId, TEXT(
 						"Route, exact descriptor, compiled "
 						"schema or family provider is "
 						"missing."));
@@ -504,12 +473,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Route.DescriptorIdentity
 						.GetDescriptorId()))
 			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_route_duplicate"),
-					Route.CommandId,
-					TEXT(
+				OutError = ApplicationFailure(TEXT(
+						"simple_authoring_route_duplicate"), Route.CommandId, TEXT(
 						"Command and exact descriptor must "
 						"each have one application binding."));
 				return false;
@@ -526,16 +491,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					ContextError)
 				|| !ExpectedContext.IsValid())
 			{
-				SetError(
-					OutError,
-					ContextError.Code.IsEmpty()
-						? TEXT(
-							"simple_authoring_context_invalid")
-						: ContextError.Code,
-					Route.CommandId,
-					TEXT(
-						"Explicit execution context does "
-						"not satisfy the exact descriptor."));
+				OutError = !ContextError.IsEmpty() ? ContextError : ApplicationFailure(TEXT("simple_authoring_context_invalid"), Route.CommandId, TEXT("The explicit execution context does not satisfy the descriptor."));
 				return false;
 			}
 			const TSharedRef<
@@ -561,14 +517,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					BindingError)
 				|| !OperationBinding.IsValid())
 			{
-				SetError(
-					OutError,
-					BindingError.Code.IsEmpty()
-						? TEXT(
-							"simple_authoring_binding_invalid")
-						: BindingError.Code,
-					Route.CommandId,
-					BindingError.Detail);
+				OutError = !BindingError.IsEmpty() ? BindingError : ApplicationFailure(TEXT("simple_authoring_binding_invalid"), Route.CommandId, TEXT("The operation binding did not return a valid result."));
 				return false;
 			}
 
@@ -584,12 +533,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		}
 		if (UsedFamilies.Num() != ProviderByFamily.Num())
 		{
-			SetError(
-				OutError,
-				TEXT(
-					"simple_authoring_provider_unbound"),
-				TEXT("simple_authoring"),
-				TEXT(
+			OutError = ApplicationFailure(TEXT(
+					"simple_authoring_provider_unbound"), TEXT("simple_authoring"), TEXT(
 					"Every injected provider must own at "
 					"least one exact route."));
 			return false;
@@ -664,28 +609,20 @@ namespace UE::UAI::Composition::SimpleAuthoring
 	{
 		if (!Request.IsValid() || !CallerContext.IsValid())
 		{
-			return ErrorResult(
-				Request,
-				TEXT(
-					"simple_authoring_request_invalid"),
-				Request.GetRequestId(),
-				TEXT(
+			return ErrorResult(Request, ApplicationFailure(TEXT(
+					"simple_authoring_request_invalid"), Request.GetRequestId(), TEXT(
 					"Operation request or caller context is "
-					"invalid."));
+					"invalid.")));
 		}
 		const FApplicationEntry* Entry =
 			State->FindExact(Request.GetDescriptorIdentity());
 		if (!Entry)
 		{
-			return ErrorResult(
-				Request,
-				TEXT(
-					"simple_authoring_descriptor_not_bound"),
-				Request.GetDescriptorIdentity()
-					.GetDescriptorId(),
-				TEXT(
+			return ErrorResult(Request, ApplicationFailure(TEXT(
+					"simple_authoring_descriptor_not_bound"), Request.GetDescriptorIdentity()
+					.GetDescriptorId(), TEXT(
 					"Exact descriptor has no active Simple "
-					"Authoring binding."));
+					"Authoring binding.")));
 		}
 
 		const TSharedRef<
@@ -693,9 +630,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			ESPMode::ThreadSafe> Resources =
 			MakeShared<
 				FUeAgentResourceTracker,
-				ESPMode::ThreadSafe>(
-				OperationBudget(
-					State->Config.MaxFrameBytes));
+				ESPMode::ThreadSafe>();
 		const auto Clock = []()
 		{
 			return FPlatformTime::Seconds();
@@ -708,12 +643,9 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		}
 		const FUeAgentCancellationToken CancellationToken =
 			CancellationSource.GetToken();
-		const FUeAgentOperationDeadline Deadline =
-			FUeAgentOperationDeadline::FromTimeout(
-				State->Config.TimeoutSeconds,
-				Clock);
+		const FUeAgentOperationDeadline Deadline;
 
-		FUeAgentResourceBudgetExceeded InputBudgetError;
+		FUeAgentResourceChargeError InputChargeError;
 		const FUeAgentTextUnits InputUnits =
 			MeasureText(
 				Request.GetPayload().GetJsonValue());
@@ -721,15 +653,9 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				EUeAgentResourceDimension::InputBytes,
 				InputUnits.Utf8Bytes,
 				TEXT("simple_authoring.c0.input"),
-				InputBudgetError))
+				InputChargeError))
 		{
-			return ErrorResult(
-				Request,
-				InputBudgetError.Code,
-				Request.GetRequestId(),
-				TEXT(
-					"Simple Authoring input byte budget "
-					"was exceeded."));
+			return ErrorResult(Request, InputChargeError);
 		}
 
 		const FUeAgentContractSchema* Schema =
@@ -738,15 +664,11 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Request.GetDescriptorIdentity());
 		if (!Schema)
 		{
-			return ErrorResult(
-				Request,
-				TEXT(
-					"simple_authoring_schema_unavailable"),
-				Request.GetDescriptorIdentity()
-					.GetDescriptorId(),
-				TEXT(
+			return ErrorResult(Request, ApplicationFailure(TEXT(
+					"simple_authoring_schema_unavailable"), Request.GetDescriptorIdentity()
+					.GetDescriptorId(), TEXT(
 					"Exact compiled input schema is "
-					"unavailable."));
+					"unavailable.")));
 		}
 		TOptional<FUeAgentContractValue> CanonicalPayload;
 		FUeAgentContractSchemaError SchemaError;
@@ -763,37 +685,21 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				FUeAgentCancellationRequested Cancelled;
 				if (!CancellationToken.TryCheckpoint(Cancelled))
 				{
-					Error.Code =
-						TEXT("operation_cancelled");
-					Error.InstancePath = InstancePath;
-					Error.Detail = Cancelled.Reason;
+					Error = Cancelled;
+					Error.Code = TEXT("operation_cancelled");
+					Error.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(Cancelled);
+					Error.Source.JsonPath = InstancePath;
 					return false;
 				}
-				FUeAgentOperationDeadlineExceeded Expired;
-				if (!Deadline.TryCheckpoint(
-						TEXT("simple_authoring.c0.schema"),
-						Expired))
-				{
-					Error.Code =
-						TEXT(
-							"operation_deadline_exceeded");
-					Error.InstancePath = InstancePath;
-					Error.Detail = Expired.Stage;
-					return false;
-				}
-				FUeAgentResourceBudgetExceeded BudgetError;
+				FUeAgentResourceChargeError ChargeError;
 				if (!Resources->TryCharge(
 						EUeAgentResourceDimension::WorkUnits,
 						WorkUnits,
 						TEXT("simple_authoring.c0.schema"),
-						BudgetError))
+						ChargeError))
 				{
-					Error.Code = BudgetError.Code;
-					Error.InstancePath = InstancePath;
-					Error.Detail =
-						TEXT(
-							"Contract schema work budget "
-							"was exceeded.");
+					Error = ChargeError;
+					Error.Source.JsonPath = InstancePath;
 					return false;
 				}
 				return true;
@@ -805,14 +711,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				SchemaError)
 			|| !CanonicalPayload.IsSet())
 		{
-			return ErrorResult(
-				Request,
-				SchemaError.Code.IsEmpty()
-					? TEXT(
-						"simple_authoring_input_invalid")
-					: SchemaError.Code,
-				SchemaError.InstancePath,
-				SchemaError.Detail);
+			return ErrorResult(Request, !SchemaError.IsEmpty() ? SchemaError : ApplicationFailure(TEXT("simple_authoring_input_invalid"), SchemaError.Source.JsonPath, TEXT("The input does not satisfy the declared schema.")));
 		}
 		const FUeAgentOperationRequest CanonicalRequest(
 			Request.GetDescriptorIdentity(),
@@ -823,26 +722,31 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		TOptional<FUeAgentSimpleAuthoringPreparedOperation>
 			Prepared;
 		FUeAgentSimpleAuthoringApplicationError PrepareError;
-		if (!Entry->Provider->TryPrepare(
-				CanonicalRequest,
-				*Entry->Context,
-				CallerContext,
-				*Resources,
-				Deadline,
-				CancellationToken,
-				Prepared,
-				PrepareError)
-			|| !Prepared.IsSet()
-			|| !Prepared->IsValid())
+		const bool bPrepared = Entry->Provider->TryPrepare(
+			CanonicalRequest,
+			*Entry->Context,
+			CallerContext,
+			*Resources,
+			Deadline,
+			CancellationToken,
+			Prepared,
+			PrepareError);
+		if (!bPrepared || !Prepared.IsSet() || !Prepared->IsValid())
 		{
-			return ErrorResult(
-				Request,
-				PrepareError.Code.IsEmpty()
-					? TEXT(
-						"simple_authoring_prepare_failed")
-					: PrepareError.Code,
-				PrepareError.SubjectId,
-				PrepareError.Detail);
+			if (PrepareError.IsEmpty() && Prepared.IsSet() && !Prepared->IsValid())
+				PrepareError = Prepared->GetValidationDiagnostic();
+			if (PrepareError.IsEmpty())
+			{
+				PrepareError = ApplicationFailure(TEXT("simple_authoring_prepare_failed"), Request.GetRequestId(),
+					bPrepared ? TEXT("The provider reported successful preparation without returning a prepared operation.")
+						: TEXT("The authoring provider failed to prepare the operation without reporting a diagnostic."));
+				PrepareError.SourceKind = TEXT("native_result");
+				PrepareError.CandidateName = Request.GetDescriptorIdentity().GetDescriptorId();
+				PrepareError.PropertyPath = TEXT("prepared_operation");
+				PrepareError.ActualValuePresent = Prepared.IsSet();
+				PrepareError.ExpectedValuePresent = true;
+			}
+			return ErrorResult(Request, PrepareError);
 		}
 
 		const FPlanningRequest& Planning =
@@ -857,14 +761,10 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			|| Draft.GetIdempotencyKey()
 				!= CanonicalRequest.GetIdempotencyKey())
 		{
-			return ErrorResult(
-				Request,
-				TEXT(
-					"simple_authoring_preparation_identity_mismatch"),
-				Request.GetRequestId(),
-				TEXT(
+			return ErrorResult(Request, ApplicationFailure(TEXT(
+					"simple_authoring_preparation_identity_mismatch"), Request.GetRequestId(), TEXT(
 					"Prepared planning request differs from "
-					"the canonical operation request."));
+					"the canonical operation request.")));
 		}
 
 		TArray<FUeAgentOperationTargetBinding>
@@ -887,14 +787,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					TicketError)
 				|| !Ticket.IsSet())
 			{
-				return ErrorResult(
-					Request,
-					TicketError.Code.IsEmpty()
-						? TEXT(
-							"simple_authoring_ticket_issue_failed")
-						: TicketError.Code,
-					TicketError.SubjectId,
-					TicketError.Detail);
+				return ErrorResult(Request, !TicketError.IsEmpty() ? TicketError : ApplicationFailure(TEXT("simple_authoring_ticket_issue_failed"), TicketError.SubjectId, TEXT("The operation ticket could not be issued.")));
 			}
 			TargetBindings.Emplace(
 				Ticket.GetValue(),
@@ -925,14 +818,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				BindingError)
 			|| !BindingResult.IsValid())
 		{
-			return ErrorResult(
-				Request,
-				BindingError.Code.IsEmpty()
-					? TEXT(
-						"simple_authoring_operation_failed")
-					: BindingError.Code,
-				BindingError.SubjectId,
-				BindingError.Detail);
+			if (BindingResult.IsValid()) BindingError.Diagnostics.Append(BindingResult->GetValue().GetDiagnostics());
+			return ErrorResult(Request, MoveTemp(BindingError));
 		}
 		return SuccessResult(
 			Request,
@@ -945,4 +832,3 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		return State->Entries.Num();
 	}
 }
-

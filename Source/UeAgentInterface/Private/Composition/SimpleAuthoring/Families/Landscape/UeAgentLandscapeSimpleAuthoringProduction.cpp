@@ -1,4 +1,5 @@
 #include "Composition/SimpleAuthoring/Families/Landscape/UeAgentLandscapeSimpleAuthoringProduction.h"
+#include "Core/Contract/UeAgentContractJson.h"
 
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "DomainAdapters/Landscape/UeAgentLandscapeHeightState.h"
@@ -86,39 +87,64 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			return nullptr;
 		}
 
-		void SetError(
-			FUeAgentLandscapeSimpleAuthoringError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		void SetProductionError(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SubjectId;
+        }
+
+		FDiagnostic LandscapeFailure(const FString& Code, const FString& Reason, const FString& Field)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("simple_authoring"));
+			Error.Schema = TEXT("uai.runtime.diagnostic/1");
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			return Error;
 		}
 
-		void SetProductionError(
-			FUeAgentSimpleAuthoringProductionError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		FDiagnostic JsonValueFailure(const FString& Path, const TSharedPtr<FJsonValue>& Actual, const FString& Expected)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			auto Error = LandscapeFailure(TEXT("landscape_geometry_state_field_invalid"),
+				TEXT("The Landscape state field does not satisfy the required value."), Path);
+			Error.ActualValuePresent = Actual.IsValid();
+			if (Actual.IsValid() && (Actual->Type == EJson::Array || Actual->Type == EJson::Object))
+			{
+				auto Summary = MakeShared<FJsonObject>();
+				Summary->SetStringField(TEXT("kind"), Actual->Type == EJson::Array ? TEXT("array") : TEXT("object"));
+				if (Actual->Type == EJson::Array) Summary->SetNumberField(TEXT("count"), Actual->AsArray().Num());
+				else if (Actual->AsObject().IsValid()) Summary->SetNumberField(TEXT("count"), Actual->AsObject()->Values.Num());
+				Error.ActualValue = MakeShared<FJsonValueObject>(Summary);
+			}
+			else Error.ActualValue = Actual;
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			return Error;
 		}
 
-		bool TryParseJson(
-			const FString& Json,
-			TSharedPtr<FJsonObject>& OutObject)
+		FDiagnostic JsonFieldFailure(const TSharedPtr<FJsonObject>& Object, const FString& Field,
+			const FString& Expected, const FString& Path = FString())
 		{
-			OutObject.Reset();
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(Json);
-			return FJsonSerializer::Deserialize(
-					Reader,
-					OutObject)
-				&& OutObject.IsValid();
+			return JsonValueFailure(Path.IsEmpty() ? Field : Path,
+				Object.IsValid() ? Object->Values.FindRef(Field) : nullptr, Expected);
+		}
+
+		FDiagnostic MissingProfile(const FUeAgentDescriptorIdentity& Identity)
+		{
+			auto Error = LandscapeFailure(TEXT("landscape_geometry_profile_missing"),
+				TEXT("No Landscape authoring profile is registered for the requested descriptor."), TEXT("descriptor_id"));
+			Error.ActualValue = MakeShared<FJsonValueString>(Identity.GetDescriptorId());
+			TArray<TSharedPtr<FJsonValue>> Supported;
+			for (const FLandscapeProfileSpec& Profile : LandscapeProfiles)
+				Supported.Add(MakeShared<FJsonValueString>(Profile.DescriptorId));
+			Error.ExpectedValue = MakeShared<FJsonValueArray>(Supported);
+			return Error;
+		}
+
+		FDiagnostic CountFailure(const FString& Code, const FString& Reason, const FString& Field, const int32 Actual, const int32 Expected)
+		{
+			auto Error = LandscapeFailure(Code, Reason, Field);
+			Error.ActualValue = MakeShared<FJsonValueNumber>(Actual);
+			Error.ExpectedValue = MakeShared<FJsonValueNumber>(Expected);
+			return Error;
 		}
 
 		bool TryParseRequestEvidence(
@@ -126,58 +152,67 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			TSharedPtr<FJsonObject>& OutPayload,
 			FUeAgentDiscoveryError& OutError)
 		{
-			const FString& Evidence =
-				Binding.GetBindingEvidence();
-			if (!Evidence.StartsWith(RequestEvidencePrefix)
-				|| !TryParseJson(
-					Evidence.RightChop(
-						FCString::Strlen(
-							RequestEvidencePrefix)),
-					OutPayload))
+			const FString& Evidence = Binding.GetBindingEvidence();
+			if (!Evidence.StartsWith(RequestEvidencePrefix))
 			{
-				OutError.Code =
-					TEXT(
-						"landscape_geometry_request_evidence_invalid");
+				OutError = LandscapeFailure(TEXT("landscape_geometry_request_evidence_invalid"),
+					TEXT("The Landscape binding evidence has an unsupported format prefix."), TEXT("binding_evidence/prefix"));
+				OutError.SubjectId = Binding.GetBindingId();
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Evidence.Left(FCString::Strlen(RequestEvidencePrefix)));
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(RequestEvidencePrefix);
+				return false;
+			}
+			if (!Contract::Json::TryParseObject(Evidence.RightChop(FCString::Strlen(RequestEvidencePrefix)), OutPayload, OutError))
+			{
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = TEXT("binding_evidence");
 				OutError.SubjectId = Binding.GetBindingId();
 				return false;
 			}
 			return true;
 		}
 
-		bool TryGetTargetRef(
-			const TSharedPtr<FJsonObject>& Payload,
-			FString& OutTargetRef)
+		bool TryGetTargetRef(const TSharedPtr<FJsonObject>& Payload, FString& OutTargetRef, FDiagnostic& OutError,
+			const FString& SourceKind = TEXT("native_result"))
 		{
 			OutTargetRef.Reset();
-			return Payload.IsValid()
-				&& Payload->TryGetStringField(
-					TEXT("target_ref"),
-					OutTargetRef)
-				&& !OutTargetRef.IsEmpty();
+			if (Payload.IsValid() && Payload->TryGetStringField(TEXT("target_ref"), OutTargetRef) && !OutTargetRef.IsEmpty())
+				return true;
+			OutError = JsonFieldFailure(Payload, TEXT("target_ref"), TEXT("nonempty string"));
+			OutError.SourceKind = SourceKind;
+			if (SourceKind == TEXT("command_input")) OutError.Source.JsonPath = TEXT("/target_ref");
+			return false;
 		}
 
 		bool TryReadNumberArray(
 			const TSharedPtr<FJsonObject>& Object,
 			const FString& Field,
 			const int32 ExpectedCount,
-			TArray<double>& OutValues)
+			TArray<double>& OutValues,
+			FDiagnostic& OutError,
+			const FString& ParentPath = FString())
 		{
 			OutValues.Reset();
+			const FString Path = ParentPath.IsEmpty() ? Field : ParentPath + TEXT("/") + Field;
 			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-			if (!Object.IsValid()
-				|| !Object->TryGetArrayField(Field, Values)
-				|| !Values
-				|| Values->Num() != ExpectedCount)
+			if (!Object.IsValid() || !Object->TryGetArrayField(Field, Values) || !Values)
 			{
+				OutError = JsonFieldFailure(Object, Field, TEXT("number array"), Path);
 				return false;
 			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			if (Values->Num() != ExpectedCount)
 			{
+				OutError = CountFailure(TEXT("landscape_geometry_state_array_size_invalid"),
+					TEXT("The Landscape state array has the wrong number of elements."), Path, Values->Num(), ExpectedCount);
+				return false;
+			}
+			for (int32 Index = 0; Index < Values->Num(); ++Index)
+			{
+				const TSharedPtr<FJsonValue>& Value = (*Values)[Index];
 				double Number = 0.0;
-				if (!Value.IsValid()
-					|| !Value->TryGetNumber(Number)
-					|| !FMath::IsFinite(Number))
+				if (!Value.IsValid() || !Value->TryGetNumber(Number) || !FMath::IsFinite(Number))
 				{
+					OutError = JsonValueFailure(Path + TEXT("/") + FString::FromInt(Index), Value, TEXT("finite number"));
 					return false;
 				}
 				OutValues.Add(Number);
@@ -189,26 +224,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			const TSharedPtr<FJsonObject>& Object,
 			const FString& Field,
 			const int32 ExpectedCount,
-			TArray<int32>& OutValues)
+			TArray<int32>& OutValues,
+			FDiagnostic& OutError,
+			const FString& ParentPath)
 		{
 			TArray<double> Numbers;
-			if (!TryReadNumberArray(
-					Object,
-					Field,
-					ExpectedCount,
-					Numbers))
-			{
+			if (!TryReadNumberArray(Object, Field, ExpectedCount, Numbers, OutError, ParentPath))
 				return false;
-			}
 			OutValues.Reset();
-			for (const double Number : Numbers)
+			for (int32 Index = 0; Index < Numbers.Num(); ++Index)
 			{
+				const double Number = Numbers[Index];
 				const int32 Integer = FMath::RoundToInt(Number);
-				if (!FMath::IsNearlyEqual(
-						Number,
-						static_cast<double>(Integer),
-						UE_DOUBLE_SMALL_NUMBER))
+				if (!FMath::IsNearlyEqual(Number, static_cast<double>(Integer), UE_DOUBLE_SMALL_NUMBER))
 				{
+					OutError = JsonValueFailure(ParentPath + TEXT("/") + Field + TEXT("/") + FString::FromInt(Index),
+						MakeShared<FJsonValueNumber>(Number), TEXT("integer within int32 range"));
 					return false;
 				}
 				OutValues.Add(Integer);
@@ -244,64 +275,77 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			const TSharedPtr<FJsonValue>& JsonValue,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FUeAgentStateSemanticError& OutError)
+			FUeAgentStateSemanticError& OutError,
+			const FString& Path = TEXT("state"))
 		{
 			OutValue.Reset();
 			if (!JsonValue.IsValid())
 			{
-				OutError.Code =
-					TEXT(
-						"landscape_geometry_state_json_invalid");
+				OutError = LandscapeFailure(TEXT("landscape_geometry_state_json_invalid"),
+					TEXT("The generated Landscape state contains a missing JSON value."), Path);
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
 				return false;
 			}
+			const auto Complete = [&](const bool bSucceeded)
+			{
+				if (!bSucceeded)
+				{
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = OutError.PropertyPath.IsEmpty()
+						? Path : Path + (OutError.PropertyPath.StartsWith(TEXT("/")) ? OutError.PropertyPath : TEXT("/") + OutError.PropertyPath);
+				}
+				return bSucceeded;
+			};
 			switch (JsonValue->Type)
 			{
 			case EJson::Null:
-				return FUeAgentCanonicalValue::TryNull(
+				return Complete(FUeAgentCanonicalValue::TryNull(
 					Resources,
 					OutValue,
-					OutError);
+					OutError));
 			case EJson::Boolean:
-				return FUeAgentCanonicalValue::TryBoolean(
+				return Complete(FUeAgentCanonicalValue::TryBoolean(
 					JsonValue->AsBool(),
 					Resources,
 					OutValue,
-					OutError);
+					OutError));
 			case EJson::String:
-				return FUeAgentCanonicalValue::TryString(
+				return Complete(FUeAgentCanonicalValue::TryString(
 					JsonValue->AsString(),
 					Resources,
 					OutValue,
-					OutError);
+					OutError));
 			case EJson::Number:
-				return FUeAgentCanonicalValue::TryDecimal(
+				return Complete(FUeAgentCanonicalValue::TryDecimal(
 					FString::SanitizeFloat(
 						JsonValue->AsNumber()),
 					Resources,
 					OutValue,
-					OutError);
+					OutError));
 			case EJson::Array:
 				{
 					TArray<FUeAgentCanonicalValueRef> Items;
-					for (const TSharedPtr<FJsonValue>& Item
-						: JsonValue->AsArray())
+					const auto& Values = JsonValue->AsArray();
+					for (int32 Index = 0; Index < Values.Num(); ++Index)
 					{
 						FUeAgentCanonicalValuePtr CanonicalItem;
 						if (!TryCanonicalValue(
-								Item,
+								Values[Index],
 								Resources,
 								CanonicalItem,
-								OutError))
+								OutError,
+								Path + TEXT("/") + FString::FromInt(Index)))
 						{
 							return false;
 						}
 						Items.Add(CanonicalItem.ToSharedRef());
 					}
-					return FUeAgentCanonicalValue::TryArray(
+					return Complete(FUeAgentCanonicalValue::TryArray(
 						Items,
 						Resources,
 						OutValue,
-						OutError);
+						OutError));
 				}
 			case EJson::Object:
 				{
@@ -319,7 +363,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 								Pair.Value,
 								Resources,
 								CanonicalItem,
-								OutError))
+								OutError,
+								Path + TEXT("/") + Pair.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"))))
 						{
 							return false;
 						}
@@ -327,16 +372,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 							Pair.Key,
 							CanonicalItem.ToSharedRef());
 					}
-					return FUeAgentCanonicalValue::TryObject(
+					return Complete(FUeAgentCanonicalValue::TryObject(
 						Items,
 						Resources,
 						OutValue,
-						OutError);
+						OutError));
 				}
 			default:
-				OutError.Code =
-					TEXT(
-						"landscape_geometry_state_json_kind_invalid");
+				OutError = LandscapeFailure(TEXT("landscape_geometry_state_json_kind_invalid"),
+					TEXT("The generated Landscape state contains an unsupported JSON kind."), Path);
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(JsonValue->Type));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("null, boolean, string, number, array or object"));
 				return false;
 			}
 		}
@@ -376,32 +422,75 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			return nullptr;
 		}
 
-		bool ReadCanonicalNumbers(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			TArray<double>& OutValues)
+		FDiagnostic CanonicalValueFailure(const FUeAgentCanonicalValuePtr& Value, const FString& Path, const FString& Expected)
+		{
+			auto Error = LandscapeFailure(TEXT("landscape_geometry_canonical_field_invalid"),
+				TEXT("The Landscape canonical state field does not satisfy the required value."), Path);
+			Error.ActualValuePresent = Value.IsValid();
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			if (!Value.IsValid()) return Error;
+			auto Actual = MakeShared<FJsonObject>();
+			switch (Value->GetKind())
+			{
+			case EUeAgentValueKind::Null: Actual->SetStringField(TEXT("kind"), TEXT("null")); break;
+			case EUeAgentValueKind::Boolean:
+				Actual->SetStringField(TEXT("kind"), TEXT("boolean"));
+				Actual->SetBoolField(TEXT("value"), Value->GetBoolean()); break;
+			case EUeAgentValueKind::String:
+				Actual->SetStringField(TEXT("kind"), TEXT("string"));
+				Actual->SetStringField(TEXT("value"), Value->GetText()); break;
+			case EUeAgentValueKind::Integer:
+			case EUeAgentValueKind::Decimal:
+				Actual->SetStringField(TEXT("kind"), Value->GetKind() == EUeAgentValueKind::Integer ? TEXT("integer") : TEXT("decimal"));
+				Actual->SetStringField(TEXT("value"), Value->GetLexeme()); break;
+			case EUeAgentValueKind::Array:
+				Actual->SetStringField(TEXT("kind"), TEXT("array"));
+				Actual->SetNumberField(TEXT("count"), Value->GetArrayItems().Num()); break;
+			case EUeAgentValueKind::Object:
+				Actual->SetStringField(TEXT("kind"), TEXT("object"));
+				Actual->SetNumberField(TEXT("count"), Value->GetObjectItems().Num()); break;
+			case EUeAgentValueKind::Temporal: Actual->SetStringField(TEXT("kind"), TEXT("temporal")); break;
+			case EUeAgentValueKind::Spatial: Actual->SetStringField(TEXT("kind"), TEXT("spatial")); break;
+			default: Actual->SetNumberField(TEXT("kind"), static_cast<int32>(Value->GetKind())); break;
+			}
+			Error.ActualValue = MakeShared<FJsonValueObject>(Actual);
+			return Error;
+		}
+
+		FDiagnostic CanonicalFieldFailure(const FUeAgentCanonicalValuePtr& Object, const FString& Field,
+			const FString& Path, const FString& Expected)
+		{
+			if (!Object.IsValid() || Object->GetKind() != EUeAgentValueKind::Object)
+			{
+				const FString ParentPath = Path == Field ? TEXT("state") : Path.LeftChop(Field.Len() + 1);
+				return CanonicalValueFailure(Object, ParentPath, TEXT("object"));
+			}
+			return CanonicalValueFailure(FindField(Object, Field), Path, Expected);
+		}
+
+		bool ReadCanonicalNumbers(const FUeAgentCanonicalValuePtr& Object, const FString& Field,
+			TArray<double>& OutValues, FDiagnostic& OutError, const FString& ParentPath = FString())
 		{
 			OutValues.Reset();
-			const FUeAgentCanonicalValuePtr Array =
-				FindField(Object, Field);
-			if (!Array.IsValid()
-				|| Array->GetKind() != EUeAgentValueKind::Array)
+			const FString Path = ParentPath.IsEmpty() ? Field : ParentPath + TEXT("/") + Field;
+			const FUeAgentCanonicalValuePtr Array = FindField(Object, Field);
+			if (!Array.IsValid() || Array->GetKind() != EUeAgentValueKind::Array)
 			{
+				OutError = CanonicalFieldFailure(Object, Field, Path, TEXT("number array"));
 				return false;
 			}
-			for (const FUeAgentCanonicalValueRef& Item
-				: Array->GetArrayItems())
+			for (int32 Index = 0; Index < Array->GetArrayItems().Num(); ++Index)
 			{
-				if (Item->GetKind() != EUeAgentValueKind::Decimal
-					&& Item->GetKind()
-						!= EUeAgentValueKind::Integer)
+				const FUeAgentCanonicalValueRef& Item = Array->GetArrayItems()[Index];
+				if (Item->GetKind() != EUeAgentValueKind::Decimal && Item->GetKind() != EUeAgentValueKind::Integer)
 				{
+					OutError = CanonicalValueFailure(Item, Path + TEXT("/") + FString::FromInt(Index), TEXT("finite number"));
 					return false;
 				}
-				const double Value =
-					FCString::Atod(*Item->GetLexeme());
+				const double Value = FCString::Atod(*Item->GetLexeme());
 				if (!FMath::IsFinite(Value))
 				{
+					OutError = CanonicalValueFailure(Item, Path + TEXT("/") + FString::FromInt(Index), TEXT("finite number"));
 					return false;
 				}
 				OutValues.Add(Value);
@@ -409,47 +498,49 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			return true;
 		}
 
-		bool ReadCanonicalIntegers(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			TArray<int32>& OutValues)
+		bool ReadCanonicalIntegers(const FUeAgentCanonicalValuePtr& Object, const FString& Field,
+			TArray<int32>& OutValues, FDiagnostic& OutError, const FString& ParentPath = FString())
 		{
-			TArray<double> Numbers;
-			if (!ReadCanonicalNumbers(Object, Field, Numbers))
+			const FString Path = ParentPath.IsEmpty() ? Field : ParentPath + TEXT("/") + Field;
+			const FUeAgentCanonicalValuePtr Array = FindField(Object, Field);
+			if (!Array.IsValid() || Array->GetKind() != EUeAgentValueKind::Array)
 			{
+				OutError = CanonicalFieldFailure(Object, Field, Path, TEXT("integer array"));
 				return false;
 			}
 			OutValues.Reset();
-			for (const double Number : Numbers)
+			for (int32 Index = 0; Index < Array->GetArrayItems().Num(); ++Index)
 			{
-				const int32 Integer = FMath::RoundToInt(Number);
-				if (!FMath::IsNearlyEqual(
-						Number,
-						static_cast<double>(Integer),
-						UE_DOUBLE_SMALL_NUMBER))
+				const FUeAgentCanonicalValueRef& Item = Array->GetArrayItems()[Index];
+				int64 Integer = 0;
+				if ((Item->GetKind() != EUeAgentValueKind::Integer && Item->GetKind() != EUeAgentValueKind::Decimal)
+					|| !TryParseInt64Number(Item->GetLexeme(), Integer) || Integer < MIN_int32 || Integer > MAX_int32)
 				{
+					OutError = CanonicalValueFailure(Item, Path + TEXT("/") + FString::FromInt(Index), TEXT("integer within int32 range"));
 					return false;
 				}
-				OutValues.Add(Integer);
+				OutValues.Add(static_cast<int32>(Integer));
 			}
 			return true;
 		}
 
-		bool ReadCanonicalString(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			FString& OutValue)
+		bool ReadCanonicalString(const FUeAgentCanonicalValuePtr& Object, const FString& Field,
+			FString& OutValue, FDiagnostic& OutError)
 		{
 			OutValue.Reset();
-			const FUeAgentCanonicalValuePtr Value =
-				FindField(Object, Field);
-			if (!Value.IsValid()
-				|| Value->GetKind() != EUeAgentValueKind::String)
+			const FUeAgentCanonicalValuePtr Value = FindField(Object, Field);
+			if (!Value.IsValid() || Value->GetKind() != EUeAgentValueKind::String)
 			{
+				OutError = CanonicalFieldFailure(Object, Field, Field, TEXT("nonempty string"));
 				return false;
 			}
 			OutValue = Value->GetText();
-			return !OutValue.IsEmpty();
+			if (OutValue.IsEmpty())
+			{
+				OutError = CanonicalValueFailure(Value, Field, TEXT("nonempty string"));
+				return false;
+			}
+			return true;
 		}
 
 		FUeAgentCanonicalType LandscapeStateType()
@@ -555,11 +646,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			FExecutionMutationError Error;
 			if (!Catalog.TryEnumerate(Candidates, Error))
 			{
-				OutError.Code = Error.GetCode().IsEmpty()
-					? TEXT(
-						"landscape_geometry_state_catalog_unavailable")
-					: Error.GetCode();
-				OutError.Detail = Error.GetDetail();
+				OutError = Error;
+				if (OutError.IsEmpty())
+					OutError = LandscapeFailure(TEXT("landscape_geometry_state_catalog_unavailable"),
+						TEXT("The Landscape world catalog failed to enumerate worlds without a diagnostic."), TEXT("world_catalog"));
 				return false;
 			}
 			for (const FUeAgentWorldSimpleEffectWorldCandidate&
@@ -574,11 +664,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				}
 				if (OutWorld)
 				{
-					OutError.Code =
-						TEXT(
-							"landscape_geometry_state_world_ambiguous");
-					OutError.SubjectId =
-						Binding.GetBindingId();
+					OutError = CountFailure(TEXT("landscape_geometry_state_world_ambiguous"),
+						TEXT("More than one loaded world matches the Landscape binding."), TEXT("world"), 2, 1);
+					OutError.TargetPath = Binding.GetPublicRef();
+					OutError.SubjectId = Binding.GetBindingId();
+					OutError.StoppedEarly = true;
 					OutWorld = nullptr;
 					return false;
 				}
@@ -586,9 +676,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			}
 			if (!OutWorld)
 			{
-				OutError.Code =
-					TEXT(
-						"landscape_geometry_state_world_unresolved");
+				OutError = CountFailure(TEXT("landscape_geometry_state_world_unresolved"),
+					TEXT("No loaded world matches the Landscape binding."), TEXT("world"), 0, 1);
+				OutError.TargetPath = Binding.GetPublicRef();
 				OutError.SubjectId = Binding.GetBindingId();
 				return false;
 			}
@@ -625,35 +715,19 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					== ELandscapeProfileMechanic::Create
 				? TEXT("sample_region")
 				: TEXT("region");
-			if (!TryGetTargetRef(Payload, TargetRef)
-				|| !Payload->TryGetObjectField(
-					RegionField,
-					Region)
-				|| !Region)
+			if (!TryGetTargetRef(Payload, TargetRef, OutError)) return false;
+			if (!Payload->TryGetObjectField(RegionField, Region) || !Region)
 			{
-				OutError.Code =
-					TEXT(
-						"landscape_geometry_state_scope_invalid");
-				OutError.SubjectId = TargetRef;
+				OutError = JsonFieldFailure(Payload, RegionField, TEXT("object"));
+				OutError.TargetPath = TargetRef;
 				return false;
 			}
 			TArray<int32> RegionMin;
 			TArray<int32> RegionMax;
-			if (!TryReadIntegerArray(
-					*Region,
-					TEXT("min_inclusive"),
-					2,
-					RegionMin)
-				|| !TryReadIntegerArray(
-					*Region,
-					TEXT("max_inclusive"),
-					2,
-					RegionMax))
+			if (!TryReadIntegerArray(*Region, TEXT("min_inclusive"), 2, RegionMin, OutError, RegionField)
+				|| !TryReadIntegerArray(*Region, TEXT("max_inclusive"), 2, RegionMax, OutError, RegionField))
 			{
-				OutError.Code =
-					TEXT(
-						"landscape_geometry_state_read_failed");
-				OutError.SubjectId = TargetRef;
+				OutError.TargetPath = TargetRef;
 				return false;
 			}
 
@@ -666,14 +740,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					Landscape,
 					FIntPoint(RegionMin[0], RegionMin[1]),
 					FIntPoint(RegionMax[0], RegionMax[1]),
-					MAX_int32,
 					HeightState,
 					HeightError))
 			{
-				OutError.Code = TEXT("landscape_geometry_state_read_failed");
-				OutError.SubjectId = TargetRef;
-				OutError.Detail = HeightError.Code + TEXT(":")
-					+ HeightError.Detail;
+				OutError = HeightError;
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 				return false;
 			}
 
@@ -730,6 +801,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				TArray<double> ExpectedScale;
 				FString Unit;
 				bool bPlacementMatches = false;
+				FDiagnostic PlacementDiagnostic;
 				if (Payload->TryGetObjectField(
 						TEXT("placement"),
 						Placement)
@@ -741,18 +813,18 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 						*Placement,
 						TEXT("translation"),
 						3,
-						Translation)
+						Translation, PlacementDiagnostic)
 					&& TryReadNumberArray(
 						*Placement,
 						TEXT(
 							"rotation_quaternion_xyzw"),
 						4,
-						Rotation)
+						Rotation, PlacementDiagnostic)
 					&& TryReadNumberArray(
 						*Placement,
 						TEXT("scale"),
 						3,
-						ExpectedScale))
+						ExpectedScale, PlacementDiagnostic))
 				{
 					const double UnitScale =
 						Unit == TEXT("meter") ? 100.0 : 1.0;
@@ -791,8 +863,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					OutValue,
 					StateError))
 			{
-				OutError.Code = StateError.Code;
-				OutError.Detail = StateError.Detail;
+				OutError = StateError;
 				return false;
 			}
 			return true;
@@ -830,33 +901,20 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				FindField(
 					After,
 					TEXT("initial_local_height"));
-			if (!ReadCanonicalString(
-					After,
-					TEXT("target_ref"),
-					TargetRef)
-				|| !ReadCanonicalIntegers(
-					After,
-					TEXT("sample_min_inclusive"),
-					RegionMin)
-				|| !ReadCanonicalIntegers(
-					After,
-					TEXT("sample_max_inclusive"),
-					RegionMax)
-				|| !ReadCanonicalNumbers(
-					After,
-					TEXT("scale"),
-					Scale)
-				|| !Initial.IsValid()
-				|| (Initial->GetKind()
-						!= EUeAgentValueKind::Decimal
-					&& Initial->GetKind()
-						!= EUeAgentValueKind::Integer))
+			if (!ReadCanonicalString(After, TEXT("target_ref"), TargetRef, OutError)
+				|| !ReadCanonicalIntegers(After, TEXT("sample_min_inclusive"), RegionMin, OutError)
+				|| !ReadCanonicalIntegers(After, TEXT("sample_max_inclusive"), RegionMax, OutError)
+				|| !ReadCanonicalNumbers(After, TEXT("scale"), Scale, OutError))
 			{
-				SetProductionError(
-					OutError,
-					TEXT(
-						"landscape_geometry_expected_create_invalid"),
-					Change.GetIdentity().GetCanonicalKey());
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+				OutError.SubjectId = Change.GetIdentity().GetCanonicalKey();
+				return false;
+			}
+			if (!Initial.IsValid() || (Initial->GetKind() != EUeAgentValueKind::Decimal && Initial->GetKind() != EUeAgentValueKind::Integer))
+			{
+				OutError = CanonicalValueFailure(Initial, TEXT("initial_local_height"), TEXT("number"));
+				OutError.TargetPath = TargetRef;
+				OutError.SubjectId = Change.GetIdentity().GetCanonicalKey();
 				return false;
 			}
 			InitialHeight =
@@ -912,11 +970,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					OutValue,
 					StateError))
 			{
-				SetProductionError(
-					OutError,
-					StateError.Code,
-					Change.GetIdentity().GetCanonicalKey(),
-					StateError.Detail);
+				SetProductionError(OutError, StateError, Change.GetIdentity().GetCanonicalKey());
 				return false;
 			}
 			return true;
@@ -935,11 +989,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					Change.GetIdentity());
 			if (!Before)
 			{
-				SetProductionError(
-					OutError,
-					TEXT(
-						"landscape_geometry_expected_prestate_missing"),
-					Change.GetIdentity().GetCanonicalKey());
+				OutError = LandscapeFailure(TEXT("landscape_geometry_expected_prestate_missing"),
+					TEXT("No pre-state entry matches the Landscape height change."), TEXT("pre_state"));
+				OutError.SubjectId = Change.GetIdentity().GetCanonicalKey();
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
 				return false;
 			}
 			const FUeAgentCanonicalValuePtr BeforeValue(
@@ -956,45 +1010,26 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				FindField(BeforeValue, TEXT("extent"));
 			const FUeAgentCanonicalValuePtr Region =
 				FindField(BeforeValue, TEXT("region"));
-			if (!ReadCanonicalString(
-					BeforeValue,
-					TEXT("target_ref"),
-					TargetRef)
-				|| !ReadCanonicalNumbers(
-					BeforeValue,
-					TEXT("scale"),
-					Scale)
-				|| !ReadCanonicalNumbers(
-					BeforeValue,
-					TEXT("heights"),
-					Heights)
-				|| !ReadCanonicalIntegers(
-					Extent,
-					TEXT("min_inclusive"),
-					ExtentMin)
-				|| !ReadCanonicalIntegers(
-					Extent,
-					TEXT("max_inclusive"),
-					ExtentMax)
-				|| !ReadCanonicalIntegers(
-					Region,
-					TEXT("min_inclusive"),
-					RegionMin)
-				|| !ReadCanonicalIntegers(
-					Region,
-					TEXT("max_inclusive"),
-					RegionMax)
-				|| !ReadCanonicalNumbers(
-					Change.GetAfter(),
-					TEXT("delta_local_heights"),
-					Delta)
-				|| Heights.Num() != Delta.Num())
+			if (!ReadCanonicalString(BeforeValue, TEXT("target_ref"), TargetRef, OutError)
+				|| !ReadCanonicalNumbers(BeforeValue, TEXT("scale"), Scale, OutError)
+				|| !ReadCanonicalNumbers(BeforeValue, TEXT("heights"), Heights, OutError)
+				|| !ReadCanonicalIntegers(Extent, TEXT("min_inclusive"), ExtentMin, OutError, TEXT("extent"))
+				|| !ReadCanonicalIntegers(Extent, TEXT("max_inclusive"), ExtentMax, OutError, TEXT("extent"))
+				|| !ReadCanonicalIntegers(Region, TEXT("min_inclusive"), RegionMin, OutError, TEXT("region"))
+				|| !ReadCanonicalIntegers(Region, TEXT("max_inclusive"), RegionMax, OutError, TEXT("region"))
+				|| !ReadCanonicalNumbers(Change.GetAfter(), TEXT("delta_local_heights"), Delta, OutError))
 			{
-				SetProductionError(
-					OutError,
-					TEXT(
-						"landscape_geometry_expected_delta_invalid"),
-					Change.GetIdentity().GetCanonicalKey());
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+				OutError.SubjectId = Change.GetIdentity().GetCanonicalKey();
+				return false;
+			}
+			if (Heights.Num() != Delta.Num())
+			{
+				OutError = CountFailure(TEXT("landscape_geometry_expected_delta_invalid"),
+					TEXT("The Landscape height delta count differs from the pre-state height count."),
+					TEXT("delta_local_heights"), Delta.Num(), Heights.Num());
+				OutError.TargetPath = TargetRef;
+				OutError.SubjectId = Change.GetIdentity().GetCanonicalKey();
 				return false;
 			}
 			for (int32 Index = 0; Index < Heights.Num(); ++Index)
@@ -1037,11 +1072,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					OutValue,
 					StateError))
 			{
-				SetProductionError(
-					OutError,
-					StateError.Code,
-					Change.GetIdentity().GetCanonicalKey(),
-					StateError.Detail);
+				SetProductionError(OutError, StateError, Change.GetIdentity().GetCanonicalKey());
 				return false;
 			}
 			return true;
@@ -1076,44 +1107,42 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 							.GetDescriptorIdentity());
 				TSharedPtr<FJsonObject> Payload;
 				FString TargetRef;
-				if (!Profile
-					|| !TryParseJson(
-						CanonicalRequest
-							.GetPayload()
-							.GetJsonValue(),
-						Payload)
-					|| !TryGetTargetRef(
-						Payload,
-						TargetRef))
+				if (!Profile)
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"landscape_geometry_profile_missing"),
-						CanonicalRequest
-							.GetDescriptorIdentity()
-							.GetDescriptorId());
+					OutError = MissingProfile(CanonicalRequest.GetDescriptorIdentity());
 					return false;
 				}
+				if (!Contract::Json::TryParseObject(CanonicalRequest.GetPayload().GetJsonValue(), Payload, OutError))
+				{
+					if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("command_input");
+					return false;
+				}
+				if (!TryGetTargetRef(Payload, TargetRef, OutError, TEXT("command_input"))) return false;
 				UWorld* World = nullptr;
 				FExecutionMutationError Error;
-				if (!Deadline.CanContinue()
-					|| Cancellation.IsCancelled()
-					|| !WorldResolver->TryResolveWorld(
-						Context,
-						World,
-						Error)
-					|| !World
-					|| !World->PersistentLevel)
+				if (Cancellation.IsCancelled())
 				{
-					SetProductionError(
-						OutError,
-						Error.GetCode().IsEmpty()
-							? TEXT(
-								"landscape_geometry_target_unresolved")
-							: Error.GetCode(),
-						Context.GetWorldIdentity(),
-						Error.GetDetail());
+					OutError = LandscapeFailure(TEXT("landscape_geometry_target_unresolved"),
+						TEXT("Landscape target resolution was cancelled before resolving the world."), TEXT("cancellation"));
+					OutError.TargetPath = TargetRef;
+					return false;
+				}
+				const bool bResolved = WorldResolver->TryResolveWorld(Context, World, Error);
+				if (!bResolved || !World || !World->PersistentLevel)
+				{
+					OutError = Error;
+					if (OutError.IsEmpty())
+					{
+						OutError = LandscapeFailure(TEXT("landscape_geometry_target_unresolved"),
+							!bResolved ? TEXT("The Landscape world resolver failed without a diagnostic.")
+								: !World ? TEXT("The Landscape world resolver returned no world.")
+								: TEXT("The resolved Landscape world has no persistent level."),
+							World ? TEXT("world/persistent_level") : TEXT("world"));
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValuePresent = true;
+						OutError.SubjectId = Context.GetWorldIdentity();
+					}
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 					return false;
 				}
 				const FUeAgentCanonicalIdentity Identity(
@@ -1155,11 +1184,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 							.GetJsonValue());
 				if (!OutTarget->IsValid())
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"landscape_geometry_target_binding_invalid"),
-						CanonicalRequest.GetRequestId());
+					OutError = *OutTarget->GetValidationDiagnostic();
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 					OutTarget.Reset();
 					return false;
 				}
@@ -1219,20 +1245,28 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 							.GetSummary()
 							.GetDescriptorIdentity())
 					: nullptr;
-				if (!Profile
-					|| Request.GetStatePlane() != RequiredPlane)
+				if (!Profile)
 				{
-					OutError.Code =
-						TEXT(
-							"landscape_geometry_state_request_invalid");
+					OutError = !Request.IsValid() ? *Request.GetBinding().GetValidationDiagnostic()
+						: MissingProfile(Request.GetBinding().GetSummary().GetDescriptorIdentity());
 					return false;
 				}
-				if (!Deadline.CanContinue()
-					|| Cancellation.IsCancelled())
+				if (Request.GetStatePlane() != RequiredPlane)
 				{
-					OutError.Code =
-						TEXT(
-							"landscape_geometry_state_request_cancelled");
+					OutError = LandscapeFailure(TEXT("landscape_geometry_state_request_invalid"),
+						TEXT("The Landscape read port does not serve the requested state plane."), TEXT("state_plane"));
+					FString Actual = Contract::LexToString(Request.GetStatePlane());
+					if (Actual.IsEmpty()) Actual = FString::FromInt(static_cast<int32>(Request.GetStatePlane()));
+					OutError.ActualValue = MakeShared<FJsonValueString>(Actual);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Contract::LexToString(RequiredPlane));
+					OutError.TargetPath = Request.GetBinding().GetPublicRef();
+					return false;
+				}
+				if (Cancellation.IsCancelled())
+				{
+					OutError = LandscapeFailure(TEXT("landscape_geometry_state_request_cancelled"),
+						TEXT("The Landscape state read was cancelled before resolving its target."), TEXT("cancellation"));
+					OutError.TargetPath = Request.GetBinding().GetPublicRef();
 					return false;
 				}
 				const FUeAgentCandidateBinding& Binding =
@@ -1243,9 +1277,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 						Binding,
 						Payload,
 						OutError)
-					|| !TryGetTargetRef(
-						Payload,
-						TargetRef))
+					|| !TryGetTargetRef(Payload, TargetRef, OutError))
 				{
 					return false;
 				}
@@ -1279,39 +1311,36 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					{
 						if (bTargetResolved)
 						{
-							OutError.Code =
-								TEXT(
-									"landscape_geometry_create_conflict");
-							OutError.SubjectId = TargetRef;
+							OutError = LandscapeFailure(TEXT("landscape_geometry_create_conflict"),
+								TEXT("A Landscape already exists at the requested create target."), TEXT("target_ref"));
+							OutError.TargetPath = TargetRef;
+							OutError.ActualValuePresent = true;
+							OutError.ExpectedValuePresent = false;
 							return false;
 						}
 						if (TargetError.Code
 							!= TEXT("landscape_height_target_not_found"))
 						{
-							OutError.Code = TargetError.Code;
+							OutError = TargetError;
 							OutError.SubjectId = TargetRef;
-							OutError.Detail = TargetError.Detail;
 							return false;
 						}
 						Landscape = nullptr;
 					}
 					else if (!bTargetResolved)
 					{
-						OutError.Code = TargetError.Code
-							== TEXT("landscape_height_target_not_found")
-							? FString(TEXT(
-								"landscape_geometry_created_target_missing"))
-							: TargetError.Code;
-						OutError.SubjectId = TargetRef;
-						OutError.Detail = TargetError.Detail;
+						OutError = TargetError.Code == TEXT("landscape_height_target_not_found")
+							? FDiagnostic::WrapFailure(TEXT("landscape_geometry_created_target_missing"), TargetError,
+								TEXT("simple_authoring"), TEXT("The created Landscape could not be found during persisted-state readback."))
+							: TargetError;
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 						return false;
 					}
 				}
 				else if (!bTargetResolved)
 				{
-					OutError.Code = TargetError.Code;
+					OutError = TargetError;
 					OutError.SubjectId = TargetRef;
-					OutError.Detail = TargetError.Detail;
 					return false;
 				}
 
@@ -1323,8 +1352,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 						DefaultValue,
 						StateError))
 				{
-					OutError.Code = StateError.Code;
-					OutError.Detail = StateError.Detail;
+					OutError = StateError;
 					return false;
 				}
 				const FUeAgentStateRevision Revision(
@@ -1398,13 +1426,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 						Snapshot,
 						StateError))
 				{
-					OutError.Code = StateError.Code;
+					OutError = StateError;
 					OutError.SubjectId = TargetRef;
-					OutError.Detail = StateError.Detail;
 					return false;
 				}
 				OutSnapshot = MoveTemp(Snapshot);
-				return OutSnapshot.IsValid();
+				return true;
 			}
 
 		private:
@@ -1442,11 +1469,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 						OutDraft,
 						Error))
 				{
-					SetProductionError(
-						OutError,
-						Error.GetCode(),
-						CanonicalRequest.GetRequestId(),
-						Error.GetDetail());
+					SetProductionError(OutError, Error, CanonicalRequest.GetRequestId());
 					return false;
 				}
 				return true;
@@ -1500,17 +1523,19 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 						ResolvedTarget.GetBindingEvidence());
 					if (!OutTargets.Last().IsValid())
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"landscape_geometry_change_target_invalid"),
-							Change.GetIdentity()
-								.GetCanonicalKey());
+						OutError = *OutTargets.Last().GetValidationDiagnostic();
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = OutTargets.Last().GetPublicRef();
 						OutTargets.Reset();
 						return false;
 					}
 				}
-				return !OutTargets.IsEmpty();
+				if (OutTargets.IsEmpty())
+				{
+					OutError = CountFailure(TEXT("landscape_geometry_change_target_invalid"),
+						TEXT("At least one Landscape change target is required."), TEXT("change_targets"), 0, 1);
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -1534,11 +1559,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					Plan->GetChangeSet().GetChanges();
 				if (Changes.Num() != Targets.Num())
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"landscape_geometry_change_targets_missing"),
-						Plan->GetRequestId());
+					OutError = CountFailure(TEXT("landscape_geometry_change_targets_missing"),
+						TEXT("The Landscape target count differs from the planned change count."), TEXT("targets"), Targets.Num(), Changes.Num());
+					OutError.SubjectId = Plan->GetRequestId();
 					return false;
 				}
 				for (int32 Index = 0; Index < Changes.Num(); ++Index)
@@ -1555,23 +1578,32 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 							TEXT("object")),
 						TEXT(
 							"landscape-geometry:typed-native-binding"));
-					if (Targets[Index].GetSummary()
-							.GetIdentity()
-						!= Changes[Index].GetIdentity()
-						|| !OutBindings.Last().IsValid())
+					if (Targets[Index].GetSummary().GetIdentity() != Changes[Index].GetIdentity())
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"landscape_geometry_mutation_binding_invalid"),
-							Changes[Index]
-								.GetIdentity()
-								.GetCanonicalKey());
+						OutError = LandscapeFailure(TEXT("landscape_geometry_mutation_binding_invalid"),
+							TEXT("The Landscape mutation target identity differs from its planned change."),
+							FString::Printf(TEXT("targets/%d/identity"), Index));
+						OutError.TargetPath = Targets[Index].GetPublicRef();
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(Targets[Index].GetSummary().GetIdentity().GetCanonicalKey());
+						OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Changes[Index].GetIdentity().GetCanonicalKey());
+						OutBindings.Reset();
+						return false;
+					}
+					if (!OutBindings.Last().IsValid())
+					{
+						OutError = OutBindings.Last().GetValidationDiagnostic();
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Targets[Index].GetPublicRef();
 						OutBindings.Reset();
 						return false;
 					}
 				}
-				return !OutBindings.IsEmpty();
+				if (OutBindings.IsEmpty())
+				{
+					OutError = CountFailure(TEXT("landscape_geometry_mutation_binding_invalid"),
+						TEXT("At least one Landscape mutation binding is required."), TEXT("mutation_bindings"), 0, 1);
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -1591,14 +1623,20 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				OutTargets.Reset();
 				const TArray<FPlannedChange>& Changes =
 					Plan->GetChangeSet().GetChanges();
-				if (Changes.IsEmpty()
-					|| Target.GetPublicRef().IsEmpty())
+				if (Changes.IsEmpty())
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"landscape_geometry_durable_target_missing"),
-						Target.GetBindingId());
+					OutError = CountFailure(TEXT("landscape_geometry_durable_target_missing"),
+						TEXT("A Landscape durable target requires at least one planned change."), TEXT("changes"), 0, 1);
+					OutError.SubjectId = Target.GetBindingId();
+					return false;
+				}
+				if (Target.GetPublicRef().IsEmpty())
+				{
+					OutError = LandscapeFailure(TEXT("landscape_geometry_durable_target_missing"),
+						TEXT("The Landscape durable target has an empty public reference."), TEXT("target_ref"));
+					OutError.ActualValue = MakeShared<FJsonValueString>(Target.GetPublicRef());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty package reference"));
+					OutError.SubjectId = Target.GetBindingId();
 					return false;
 				}
 				OutTargets.Emplace(
@@ -1607,7 +1645,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					EPackageHeaderKind::Map,
 					EAssetDurableIntent::Save,
 					ERollbackGrade::DurableBackup);
-				return OutTargets[0].IsValid();
+				if (!OutTargets[0].IsValid())
+				{
+					OutError = OutTargets[0].GetValidationDiagnostic();
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -1633,12 +1676,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 						Plan->GetDescriptorIdentity());
 				if (!Profile)
 				{
-					SetProductionError(
-						OutError,
-						TEXT(
-							"landscape_geometry_expected_profile_missing"),
-						Plan->GetDescriptorIdentity()
-							.GetDescriptorId());
+					OutError = MissingProfile(Plan->GetDescriptorIdentity());
 					return false;
 				}
 				FUeAgentCanonicalValuePtr DefaultValue;
@@ -1649,11 +1687,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 						DefaultValue,
 						StateError))
 				{
-					SetProductionError(
-						OutError,
-						StateError.Code,
-						Plan->GetRequestId(),
-						StateError.Detail);
+					SetProductionError(OutError, StateError, Plan->GetRequestId());
 					return false;
 				}
 				const FUeAgentStateRevision Revision(
@@ -1682,12 +1716,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 							});
 					if (!ChangeTarget)
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"landscape_geometry_verification_target_missing"),
-							Change.GetIdentity()
-								.GetCanonicalKey());
+						OutError = LandscapeFailure(TEXT("landscape_geometry_verification_target_missing"),
+							TEXT("No Landscape candidate binding matches the planned change for verification."), TEXT("change_targets"));
+						OutError.SubjectId = Change.GetIdentity().GetCanonicalKey();
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValuePresent = true;
 						return false;
 					}
 					FUeAgentCanonicalValuePtr ExpectedValue;
@@ -1749,12 +1782,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 								Expected,
 								StateError))
 					{
-						SetProductionError(
-							OutError,
-							StateError.Code,
-							Change.GetIdentity()
-								.GetCanonicalKey(),
-							StateError.Detail);
+						SetProductionError(OutError, StateError, Change.GetIdentity()
+								.GetCanonicalKey());
 						return false;
 					}
 					OutTargets.Emplace(
@@ -1766,16 +1795,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 						TArray<FString>());
 					if (!OutTargets.Last().IsValid())
 					{
-						SetProductionError(
-							OutError,
-							TEXT(
-								"landscape_geometry_verification_target_invalid"),
-							Change.GetIdentity()
-								.GetCanonicalKey());
+						OutError = *OutTargets.Last().GetValidationDiagnostic();
 						return false;
 					}
 				}
-				return !OutTargets.IsEmpty();
+				if (OutTargets.IsEmpty())
+				{
+					OutError = CountFailure(TEXT("landscape_geometry_verification_target_missing"),
+						TEXT("At least one Landscape verification target is required."), TEXT("verification_targets"), 0, 1);
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -1881,21 +1911,32 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				Config,
 			FUeAgentLandscapeSimpleAuthoringError& OutError)
 		{
-			if (!Config.DescriptorRegistry.IsValid()
-				|| !Config.WorldCatalog.IsValid()
-				|| !Config.ReferenceResolver.IsValid()
-				|| !Config.DurableService.IsValid()
-				|| !Config.AbsenceOracle.IsValid()
-				|| !Config.ReferenceOracle.IsValid()
-				|| !Config.Projection.IsSet()
-				|| !Config.Projection->IsValid()
-				|| Config.OwnerLeaseId.IsEmpty()
-				|| Config.MaxQueueItems < 1)
+			const TCHAR* Missing = !Config.DescriptorRegistry.IsValid() ? TEXT("descriptor_registry")
+				: !Config.WorldCatalog.IsValid() ? TEXT("world_catalog")
+				: !Config.ReferenceResolver.IsValid() ? TEXT("reference_resolver")
+				: !Config.DurableService.IsValid() ? TEXT("durable_service")
+				: !Config.AbsenceOracle.IsValid() ? TEXT("absence_oracle")
+				: !Config.ReferenceOracle.IsValid() ? TEXT("reference_oracle")
+				: !Config.Projection.IsSet() ? TEXT("projection") : nullptr;
+			if (Missing)
 			{
-				SetError(
-					OutError,
-					TEXT(
-						"landscape_simple_authoring_dependencies_missing"));
+				OutError = LandscapeFailure(TEXT("landscape_simple_authoring_dependencies_missing"),
+					FString::Printf(TEXT("The Landscape authoring provider has no '%s'."), Missing), Missing);
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
+				return false;
+			}
+			if (!Config.Projection->IsValid())
+			{
+				OutError = Config.Projection->GetValidationDiagnostic();
+				return false;
+			}
+			if (Config.OwnerLeaseId.IsEmpty())
+			{
+				OutError = LandscapeFailure(TEXT("landscape_simple_authoring_dependencies_missing"),
+					TEXT("The Landscape authoring provider has an empty owner lease identifier."), TEXT("owner_lease_id"));
+				OutError.ActualValue = MakeShared<FJsonValueString>(TEXT(""));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty identifier"));
 				return false;
 			}
 			for (const FLandscapeProfileSpec& Profile
@@ -1905,17 +1946,24 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 					Config.DescriptorRegistry
 						->FindByDescriptorId(
 							Profile.DescriptorId);
-				if (!Descriptor
-					|| Descriptor->GetCapabilityId()
-						!= Profile.CapabilityId
-					|| Descriptor->GetDomainId()
-						!= TEXT("landscape"))
+				if (!Descriptor)
 				{
-					SetError(
-						OutError,
-						TEXT(
-							"landscape_simple_authoring_descriptor_missing"),
-						Profile.DescriptorId);
+					OutError = LandscapeFailure(TEXT("landscape_simple_authoring_descriptor_missing"),
+						TEXT("The required Landscape operation descriptor is not registered."), TEXT("descriptor_id"));
+					OutError.CandidateName = Profile.DescriptorId;
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Profile.DescriptorId);
+					return false;
+				}
+				if (Descriptor->GetCapabilityId() != Profile.CapabilityId || Descriptor->GetDomainId() != TEXT("landscape"))
+				{
+					const bool bCapabilityMismatch = Descriptor->GetCapabilityId() != Profile.CapabilityId;
+					OutError = LandscapeFailure(TEXT("landscape_simple_authoring_descriptor_missing"),
+						TEXT("The registered Landscape descriptor does not match its profile."),
+						bCapabilityMismatch ? TEXT("capability_id") : TEXT("domain_id"));
+					OutError.CandidateName = Profile.DescriptorId;
+					OutError.ActualValue = MakeShared<FJsonValueString>(bCapabilityMismatch ? Descriptor->GetCapabilityId() : Descriptor->GetDomainId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(bCapabilityMismatch ? Profile.CapabilityId : TEXT("landscape"));
 					return false;
 				}
 			}
@@ -1966,17 +2014,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				TryCreate(
 					Config.ReferenceResolver.ToSharedRef(),
 					NativeHook,
-					NativeError)
-			|| !NativeHook.IsValid())
+				NativeError))
 		{
-			SetError(
-				OutError,
-				NativeError.GetCode().IsEmpty()
-					? TEXT(
-						"landscape_geometry_native_hook_missing")
-					: NativeError.GetCode(),
-				TEXT("landscape"),
-				NativeError.GetDetail());
+			OutError = NativeError;
 			return false;
 		}
 
@@ -1988,7 +2028,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 			EUeAgentStatePlane::AuthoringMemory;
 		ProviderConfig.AtomicityMode =
 			EAtomicityMode::CompensatedSaga;
-		ProviderConfig.MaxQueueItems = Config.MaxQueueItems;
 		ProviderConfig.Projection = Config.Projection;
 		ProviderConfig.TargetResolver =
 			MakeShared<FLandscapeTargetResolver>(
@@ -2034,13 +2073,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Landscape
 				OutProvider,
 				Error))
 		{
-			SetError(
-				OutError,
-				Error.Code,
-				Error.SubjectId,
-				Error.Detail);
+			OutError = Error;
 			return false;
 		}
-		return OutProvider.IsValid();
+		return true;
 	}
 }

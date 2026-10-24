@@ -4,6 +4,8 @@
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringJsonFields.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 namespace UE::UAI::OperationOwners::ExternalImport::Localization
 {
@@ -13,23 +15,29 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 
 	namespace
 	{
-		bool Fail(
-			FUeAgentLocalizationImportCommandError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString(),
-			FString TerminalStatus = TEXT("rejected"),
-			const bool bMutationStarted = false,
-			const bool bRetrySafe = true)
+		Contract::FDiagnostic CommandGuardFailure(
+			FString Code, FString PublicReason, const FString& PrivateSubject,
+			const TCHAR* Condition, const bool bActual, const bool bExpected)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-			OutError.TerminalStatus = MoveTemp(TerminalStatus);
-			OutError.bMutationStarted = bMutationStarted;
-			OutError.bRetrySafe = bRetrySafe;
-			return false;
+			auto Diagnostic = Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(PublicReason),
+				TEXT("command_execute"), FString(), PrivateSubject);
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.PropertyPath = Condition;
+			Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(bActual);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(bExpected);
+			Diagnostic.MutationMayHaveStarted = false;
+			return Diagnostic;
 		}
+        bool Fail(FUeAgentLocalizationImportCommandError& OutError, const UE::UAI::Contract::FDiagnostic& Diagnostic,
+            FString TerminalStatus = TEXT("rejected"), bool bMutationStarted = false, bool bRetrySafe = true)
+        {
+            OutError = Diagnostic;
+            OutError.TerminalStatus = MoveTemp(TerminalStatus);
+            OutError.MutationStarted = bMutationStarted;
+            OutError.bRetrySafe = bRetrySafe;
+            return false;
+        }
+
 
 		bool TryBuildSpec(
 			const FUeAgentLocalizationImportCommandRequest& Request,
@@ -37,31 +45,52 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 			FLocalizationImportError& OutError)
 		{
 			TSharedPtr<FJsonObject> Params;
-			FString JsonError;
+			UE::UAI::Contract::FDiagnostic JsonError;
 			if (!Json::TryParseObject(
 					Request.CanonicalParamsJson,
 					Params,
 					JsonError)
 				|| !Params.IsValid())
 			{
-				OutError.Code = TEXT("localization_import_params_invalid");
-				OutError.Detail = MoveTemp(JsonError);
+				OutError = MoveTemp(JsonError);
 				return false;
 			}
 			OutSpec.RequestId = Request.RequestId;
-			if (!Params->TryGetStringField(TEXT("source_ref"), OutSpec.SourceRef))
+			if (!UeAgentAuthoringJsonFields::ValidateOptionalFields(*Params,
+				{{TEXT("source_ref"), EJson::String}, {TEXT("target_ref"), EJson::String},
+				 {TEXT("options"), EJson::Object}}, OutError))
 			{
-				OutError.Code = TEXT("localization_import_source_required");
+				
 				return false;
 			}
-			if (!Params->TryGetStringField(TEXT("target_ref"), OutSpec.TargetRef))
+			const TSharedPtr<FJsonObject>* Options = nullptr;
+			if (Params->TryGetObjectField(TEXT("options"), Options) && Options &&
+				!UeAgentAuthoringJsonFields::ValidateDeclaredFields(**Options, {}, OutError, TEXT("/options")))
 			{
-				OutError.Code = TEXT("localization_import_target_required");
+				
 				return false;
 			}
-			if (!OutSpec.IsValid())
+			if (!Params->TryGetStringField(TEXT("source_ref"), OutSpec.SourceRef) || OutSpec.SourceRef.IsEmpty())
 			{
-				OutError.Code = TEXT("localization_import_spec_invalid");
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("localization_import_source_required"), TEXT("/source_ref"),
+					MakeShared<FJsonValueString>(TEXT("non-empty source path")), Params->TryGetField(TEXT("source_ref")));
+				return false;
+			}
+			if (!Params->TryGetStringField(TEXT("target_ref"), OutSpec.TargetRef) || OutSpec.TargetRef.IsEmpty())
+			{
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("localization_import_target_required"), TEXT("/target_ref"),
+					MakeShared<FJsonValueString>(TEXT("non-empty localization target")), Params->TryGetField(TEXT("target_ref")));
+				return false;
+			}
+			if (OutSpec.RequestId.IsEmpty())
+			{
+				OutError = Contract::FDiagnostic::Failure(TEXT("request_id_missing"),
+					TEXT("The request requires a non-empty request identifier."), TEXT("input_decode"));
+				OutError.SourceKind = TEXT("native_request");
+				OutError.Source.JsonPath = TEXT("/request_id");
+				OutError.PropertyPath = TEXT("/request_id");
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(OutSpec.RequestId);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty string"));
 				return false;
 			}
 			return true;
@@ -80,17 +109,23 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 			FLocalizationImportReadback Readback;
 		};
 
-		void ConvertError(
+		void SetStageFailure(
 			const FLocalizationImportError& DomainError,
+			const EOperationLifecycleStage Stage, const FString& Target,
 			FOperationLifecycleError& OutError)
 		{
-			OutError = FOperationLifecycleError(
-				DomainError.Code.IsEmpty()
-					? FString(TEXT("localization_import_operation_failed"))
-					: DomainError.Code,
-				DomainError.Detail.IsEmpty()
-					? DomainError.SubjectId
-					: DomainError.Detail);
+			OutError = DomainError;
+			if (OutError.IsEmpty())
+			{
+				OutError = Contract::FDiagnostic::Failure(TEXT("localization_import_operation_failed"),
+					FString(TEXT("Localization import failed during ")) + LexToString(Stage) + TEXT(" without providing a diagnostic."),
+					LexToString(Stage));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = TEXT("stage_requirement_satisfied");
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			}
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target;
 		}
 
 		class FVersionFence final : public IOperationVersionFencePort
@@ -113,7 +148,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 					: Context->Session->CheckPrePersist(Context->LastError);
 				if (!bOutCurrent)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, Stage, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return true;
 			}
@@ -147,7 +182,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 				}
 				if (!bSucceeded)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, EOperationLifecycleStage::DomainExecute, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return bSucceeded;
 			}
@@ -164,7 +199,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 					Context->LastError);
 				if (!bSucceeded || !bOutConfirmed)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, EOperationLifecycleStage::Rollback, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return bSucceeded;
 			}
@@ -191,7 +226,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 					Context->Session->Settle(Context->LastError);
 				if (!bSucceeded)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, EOperationLifecycleStage::Settle, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return bSucceeded;
 			}
@@ -220,7 +255,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 					Context->LastError);
 				if (!bSucceeded)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, EOperationLifecycleStage::Persist, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return bSucceeded;
 			}
@@ -252,7 +287,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 					Context->LastError);
 				if (!bOutEquivalent)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, EOperationLifecycleStage::IndependentVerify, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return true;
 			}
@@ -266,20 +301,10 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 		{
 			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 			Result->SetStringField(TEXT("target_ref"), Readback.TargetRef);
-			Result->SetStringField(TEXT("target_identity"), Readback.TargetIdentity);
 			Result->SetStringField(TEXT("culture"), Readback.Culture);
 			Result->SetStringField(TEXT("source_ref"), Readback.SourceRef);
-			Result->SetStringField(TEXT("source_sha256"), Readback.SourceSha256);
-			Result->SetStringField(TEXT("persisted_po_path"), Readback.PersistedPoPath);
-			Result->SetStringField(TEXT("persisted_po_sha256"), Readback.PersistedPoSha256);
-			Result->SetStringField(TEXT("archive_path"), Readback.ArchivePath);
-			Result->SetStringField(TEXT("archive_sha256"), Readback.ArchiveSha256);
-			Result->SetStringField(TEXT("locres_path"), Readback.LocResPath);
-			Result->SetStringField(TEXT("locres_sha256"), Readback.LocResSha256);
 			Result->SetStringField(TEXT("collapse_mode"), Readback.CollapseMode);
 			Result->SetStringField(TEXT("po_format"), Readback.PoFormat);
-			Result->SetNumberField(TEXT("refresh_revision_before"), Readback.RefreshRevisionBefore);
-			Result->SetNumberField(TEXT("refresh_revision_after"), Readback.RefreshRevisionAfter);
 			Result->SetBoolField(TEXT("target_resolved"), Readback.bTargetResolved);
 			Result->SetBoolField(TEXT("formal_importer_completed"), Readback.bFormalImporterCompleted);
 			Result->SetBoolField(TEXT("formal_compiler_completed"), Readback.bFormalCompilerCompleted);
@@ -304,56 +329,44 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 				OutError = {};
 				if (!IsInGameThread())
 				{
-					return Fail(
-						OutError,
-						TEXT("localization_import_game_thread_required"),
-						Request.CommandId);
+					return Fail(OutError, CommandGuardFailure(TEXT("localization_import_game_thread_required"),
+						TEXT("Localization import must execute on the game thread."), Request.CommandId, TEXT("game_thread"), false, true));
 				}
 				if (!Request.AuthorityScopes.Contains(TEXT("uai:operate")))
 				{
-					return Fail(
-						OutError,
-						TEXT("localization_import_authority_required"),
-						Request.CommandId);
+					return Fail(OutError, CommandGuardFailure(TEXT("localization_import_authority_required"),
+						TEXT("Localization import requires the uai:operate authority scope."), Request.CommandId, TEXT("operate_authority"), false, true));
 				}
 				if (Request.bCancellationRequested)
 				{
-					return Fail(
-						OutError,
-						TEXT("localization_import_cancelled"),
-						Request.RequestId);
+					return Fail(OutError, CommandGuardFailure(TEXT("localization_import_cancelled"),
+						TEXT("Localization import was cancelled before preparation."), Request.RequestId, TEXT("cancellation_requested"), true, false));
 				}
 				if (Request.CommandId != TEXT("external.localization.po.import"))
 				{
-					return Fail(
-						OutError,
-						TEXT("localization_import_command_not_supported"),
-						Request.CommandId);
+					return Fail(OutError, CommandGuardFailure(TEXT("localization_import_command_not_supported"),
+						TEXT("This service accepts only external.localization.po.import."), Request.CommandId, TEXT("command_supported"), false, true));
 				}
 
 				FLocalizationImportSpec Spec;
 				FLocalizationImportError DomainError;
 				if (!TryBuildSpec(Request, Spec, DomainError))
 				{
-					return Fail(
-						OutError,
-						DomainError.Code.IsEmpty()
-							? FString(TEXT("localization_import_params_invalid"))
-							: DomainError.Code,
-						DomainError.SubjectId,
-						DomainError.Detail);
+					return Fail(OutError, DomainError);
 				}
 				TSharedPtr<ILocalizationImportSession> Session;
 				if (!Provider->Prepare(Spec, Session, DomainError)
 					|| !Session.IsValid())
 				{
-					return Fail(
-						OutError,
-						DomainError.Code.IsEmpty()
-							? FString(TEXT("localization_import_prepare_failed"))
-							: DomainError.Code,
-						DomainError.SubjectId,
-						DomainError.Detail);
+					if (DomainError.IsEmpty())
+					{
+						DomainError = CommandGuardFailure(TEXT("localization_import_session_unavailable"),
+							TEXT("Localization import preparation did not produce a session or a diagnostic."),
+							Request.RequestId, TEXT("session_ready"), false, true);
+						DomainError.Stage = TEXT("prepare");
+						DomainError.TargetPath = Spec.TargetRef;
+					}
+					return Fail(OutError, DomainError);
 				}
 
 				const TSharedRef<FExecutionContext> Context =
@@ -383,16 +396,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 				FOperationLifecycleReceipt Receipt;
 				if (!Lifecycle.Run(Plan, Authorization, Receipt))
 				{
-					return Fail(
-						OutError,
-						Receipt.GetErrorCode().IsEmpty()
-							? FString(TEXT("localization_import_operation_failed"))
-							: Receipt.GetErrorCode(),
-						Target,
-						Context->LastError.Detail,
-						LexToString(Receipt.GetStatus()),
-						Receipt.DidMutationStart(),
-						Receipt.IsRetrySafe());
+					return Fail(OutError, Receipt.GetDiagnostic(), LexToString(Receipt.GetStatus()), Receipt.DidMutationStart(), Receipt.IsRetrySafe());
 				}
 
 				const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
@@ -400,39 +404,19 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 				Payload->SetStringField(
 					TEXT("terminal_status"),
 					LexToString(Receipt.GetStatus()));
-				Payload->SetBoolField(
-					TEXT("mutation_started"),
-					Receipt.DidMutationStart());
-				Payload->SetStringField(
-					TEXT("persistence_receipt_id"),
-					Receipt.GetPersistenceReceiptId());
-				Payload->SetStringField(
-					TEXT("plan_fingerprint"),
-					Plan.GetPlanFingerprint());
-				TArray<TSharedPtr<FJsonValue>> Phases;
-				for (const FString& Phase : Receipt.GetPhaseHistory())
+				const TSharedPtr<FJsonObject> Readback = ReadbackJson(Context->Readback);
+				for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Readback->Values)
 				{
-					Phases.Add(MakeShared<FJsonValueString>(Phase));
+					Payload->SetField(Field.Key, Field.Value);
 				}
-				Payload->SetArrayField(TEXT("phase_history"), MoveTemp(Phases));
-				Payload->SetObjectField(
-					TEXT("independent_readback"),
-					ReadbackJson(Context->Readback));
 				FString CanonicalPayload;
-				FString JsonError;
+				UE::UAI::Contract::FDiagnostic JsonError;
 				if (!Json::TryCanonicalize(
 						Payload,
 						CanonicalPayload,
 						JsonError))
 				{
-					return Fail(
-						OutError,
-						TEXT("localization_import_result_invalid"),
-						Target,
-						JsonError,
-						TEXT("state_unknown"),
-						true,
-						false);
+					return Fail(OutError, JsonError, TEXT("state_unknown"), true, false);
 				}
 				OutResponse.PayloadJson = MoveTemp(CanonicalPayload);
 				return true;
@@ -445,8 +429,34 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 
 	bool FUeAgentLocalizationImportCommandRoute::IsValid() const
 	{
-		return CommandId == TEXT("external.localization.po.import")
-			&& PythonFunction == TEXT("localization_po_import");
+		UE::UAI::Contract::FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FUeAgentLocalizationImportCommandRoute::TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		if (CommandId != TEXT("external.localization.po.import"))
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("external_import_route_invalid"),
+				TEXT("The route field does not match the required command binding."), TEXT("route_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("command_id");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("external.localization.po.import"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(CommandId);
+			return false;
+		}
+		if (PythonFunction != TEXT("localization_po_import"))
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("external_import_route_invalid"),
+				TEXT("The route field does not match the required command binding."), TEXT("route_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("python_function");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("localization_po_import"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(PythonFunction);
+			return false;
+		}
+		return true;
 	}
 
 	const TArray<FUeAgentLocalizationImportCommandRoute>&
@@ -461,7 +471,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 
 	bool TryCreateProductionLocalizationImportCommandService(
 		TSharedPtr<IUeAgentLocalizationImportCommandService>& OutService,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutService.Reset();
 		TSharedPtr<ILocalizationImportProvider> Provider;

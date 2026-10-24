@@ -1,8 +1,12 @@
 #include "OperationOwners/HjsonExternalInput/UeAgentHjsonExternalInputProvider.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "DomainAdapters/HjsonExternalInput/UeAgentHjsonExternalInputDomain.h"
+#include "DomainAdapters/HjsonExternalInput/UeAgentHjsonExternalInputWorkspace.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/SecureHash.h"
@@ -11,7 +15,6 @@
 #include "OperationOwners/ExternalImport/SkinWeight/UeAgentSkinWeightImportCommandService.h"
 #include "QueryOwners/HjsonExternalInput/UeAgentHjsonExternalInputReadback.h"
 
-#include <openssl/sha.h>
 
 namespace UE::UAI::OperationOwners::HjsonExternalInput
 {
@@ -23,23 +26,6 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 	{
 		const FString ProviderId = TEXT("hjson-external-input-domain-provider");
 		const FString SchemaId = TEXT("uai.hjson.external_input/1");
-
-		FString HashFileSha256(const FString& Filename)
-		{
-			TArray<uint8> Bytes;
-			if (!FFileHelper::LoadFileToArray(Bytes, *Filename))
-			{
-				return FString();
-			}
-			FSHA256Signature Signature{};
-			const uint8 Empty = 0;
-			const uint8* Data = Bytes.IsEmpty() ? &Empty : Bytes.GetData();
-			if (!SHA256(Data, static_cast<size_t>(Bytes.Num()), Signature.Signature))
-			{
-				return FString();
-			}
-			return TEXT("sha256:") + Signature.ToString().ToLower();
-		}
 
 		class FProductionImporterGateway final
 			: public IHjsonExternalInputImporterGateway
@@ -57,13 +43,13 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 					IUeAgentSkinWeightImportCommandService> SkinWeight;
 				TSharedPtr<ExternalImport::Localization::
 					IUeAgentLocalizationImportCommandService> Localization;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!ExternalImport::Factory::
 					TryCreateProductionFactoryExternalImportCommandService(
 						Factory, Error)
 					|| !Factory.IsValid())
 				{
-					OutError.Set(TEXT("hjson_external_input_factory_gateway_unavailable"), Error);
+					OutError.SetFailure(Error);
 					return false;
 				}
 				if (!ExternalImport::SkinWeight::
@@ -71,7 +57,7 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 						SkinWeight, Error)
 					|| !SkinWeight.IsValid())
 				{
-					OutError.Set(TEXT("hjson_external_input_skin_weight_gateway_unavailable"), Error);
+					OutError.SetFailure(Error);
 					return false;
 				}
 				if (!ExternalImport::Localization::
@@ -79,7 +65,7 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 						Localization, Error)
 					|| !Localization.IsValid())
 				{
-					OutError.Set(TEXT("hjson_external_input_localization_gateway_unavailable"), Error);
+					OutError.SetFailure(Error);
 					return false;
 				}
 				OutGateway = MakeShared<FProductionImporterGateway>(
@@ -110,12 +96,23 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 			{
 				OutPayloadJson.Reset();
 				OutError.Reset();
+				auto AcceptPayload = [&](FString&& Payload)
+				{
+					if (Payload.IsEmpty())
+					{
+						OutError.SetFailure(UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_importer_result_missing"),
+							FString::Printf(TEXT("Importer '%s' reported success without a result payload."), *CommandId), TEXT("external_import")));
+						return false;
+					}
+					OutPayloadJson = MoveTemp(Payload);
+					return true;
+				};
 				TSharedPtr<FJsonObject> Params;
-				FString JsonError;
+				UE::UAI::Contract::FDiagnostic JsonError;
 				if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError)
 					|| !Params.IsValid())
 				{
-					OutError.Set(TEXT("hjson_external_input_delegation_invalid"), JsonError);
+					OutError.SetFailure(JsonError, FString());
 					return false;
 				}
 				FString ExpectedSha256;
@@ -125,27 +122,28 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 				Params->TryGetStringField(TEXT("source_ref"), SourceRef);
 				Params->RemoveField(TEXT("_hjson_expected_source_sha256"));
 				Params->RemoveField(TEXT("_hjson_source_format"));
-				const FString ActualSha256 = HashFileSha256(SourceRef);
-				if (ActualSha256.IsEmpty())
+				FString ActualPath, ActualSha256;
+				if (!TryReadExternalInputSource(SourceRef, ActualPath, ActualSha256, OutError))
 				{
-					OutError.Set(
-						TEXT("hjson_external_input_source_unavailable"),
-						SourceRef,
-						TEXT("/root/external_input/source/identity"));
+					auto Failure = OutError.GetDiagnostic();
+					Failure.SemanticPointer = TEXT("/root/external_input/source/identity");
+					Failure.SourceKind = TEXT("related_input");
+					OutError.SetFailure(MoveTemp(Failure));
 					return false;
 				}
 				if (ActualSha256 != ExpectedSha256.ToLower())
 				{
-					OutError.Set(
-						TEXT("hjson_external_input_source_digest_mismatch"),
-						SourceRef,
-						TEXT("/root/external_input/source/content_sha256"));
+					auto Failure = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_source_digest_mismatch"),
+						FString::Printf(TEXT("External source '%s' changed between preparation and importer execution."), *SourceRef), TEXT("external_import"));
+					Failure.SemanticPointer = TEXT("/root/external_input/source/identity");
+					Failure.SourceKind = TEXT("related_input");
+					OutError.SetFailure(MoveTemp(Failure));
 					return false;
 				}
 				FString DelegatedParams;
 				if (!Json::TryCanonicalize(Params, DelegatedParams, JsonError))
 				{
-					OutError.Set(TEXT("hjson_external_input_delegation_invalid"), JsonError);
+					OutError.SetFailure(JsonError, FString());
 					return false;
 				}
 				const FString RequestId = Json::Sha256Utf8(
@@ -168,11 +166,10 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 					ExternalImport::Factory::FUeAgentFactoryExternalImportCommandError Error;
 					if (!Factory->Execute(Request, Response, Error))
 					{
-						OutError.Set(Error.Code, Error.SubjectId, Error.Detail);
+						OutError.SetFailure(Error, Error.SubjectId);
 						return false;
 					}
-					OutPayloadJson = MoveTemp(Response.PayloadJson);
-					return !OutPayloadJson.IsEmpty();
+					return AcceptPayload(MoveTemp(Response.PayloadJson));
 				}
 				if (CommandId == TEXT("external.skin_weight_profile.import"))
 				{
@@ -187,11 +184,10 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 					ExternalImport::SkinWeight::FUeAgentSkinWeightImportCommandError Error;
 					if (!SkinWeight->Execute(Request, Response, Error))
 					{
-						OutError.Set(Error.Code, Error.SubjectId, Error.Detail);
+						OutError.SetFailure(Error, Error.SubjectId);
 						return false;
 					}
-					OutPayloadJson = MoveTemp(Response.PayloadJson);
-					return !OutPayloadJson.IsEmpty();
+					return AcceptPayload(MoveTemp(Response.PayloadJson));
 				}
 				if (CommandId == TEXT("external.localization.po.import"))
 				{
@@ -206,13 +202,17 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 					ExternalImport::Localization::FUeAgentLocalizationImportCommandError Error;
 					if (!Localization->Execute(Request, Response, Error))
 					{
-						OutError.Set(Error.Code, Error.SubjectId, Error.Detail);
+						OutError.SetFailure(Error, Error.SubjectId);
 						return false;
 					}
-					OutPayloadJson = MoveTemp(Response.PayloadJson);
-					return !OutPayloadJson.IsEmpty();
+					return AcceptPayload(MoveTemp(Response.PayloadJson));
 				}
-				OutError.Set(TEXT("hjson_external_input_importer_unregistered"), CommandId);
+				auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_importer_unregistered"),
+					TEXT("No external-input importer is registered for this command."), TEXT("external_import"));
+				Detail.CandidateName = CommandId;
+				Detail.ActualValue = MakeShared<FJsonValueString>(CommandId);
+				Detail.Source.InternalJsonPath = TEXT("/root/external_input/target_policy/command_id");
+				OutError.SetFailure(MoveTemp(Detail));
 				return false;
 			}
 
@@ -240,18 +240,24 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 				return ProviderId;
 			}
 
+			virtual bool SupportsWorkspaceModelContract(const FString& ContractId) const override
+			{ return ContractId == GetExternalInputWorkspaceContract(); }
+			virtual bool SupportsWorkspacePreparation() const override { return true; }
+			virtual bool SupportsExplicitCommand(const FString& CommandId) const override
+			{ return CommandId == TEXT("content_graph.export_workspace"); }
+
 			virtual bool Matches(
 				const FImportInitializationDomainRequest& Request) const override
 			{
 				if (Request.GetCommandId() == TEXT("content_graph.import_workspace"))
 				{
-					return Request.GetSchemaId() == SchemaId
+					return MatchesDomainImportSchema(Request, SchemaId)
 						&& FindHjsonExternalInputFamilyContract(
 							Request.GetRootTypeIdentity()) != nullptr;
 				}
 				return Request.GetCommandId() == TEXT("content_graph.export_workspace")
-					&& QueryOwners::HjsonExternalInput::
-						HasHjsonExternalInputProvenance(Request.GetTargetIdentity());
+					&& Request.GetSchemaId() == SchemaId
+					&& FindHjsonExternalInputFamilyContract(Request.GetRootTypeIdentity());
 			}
 
 			virtual bool TryResolveInitializationContract(
@@ -295,9 +301,12 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 					if (InitializationContractId
 						!= TEXT("uai.export.hjson_external_input.factory/1"))
 					{
-						OutError.Set(
-							TEXT("hjson_external_input_contract_not_executable"),
-							InitializationContractId);
+						auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_contract_not_executable"),
+							TEXT("The initialization contract does not support external-input workspace export."), TEXT("domain_execute"));
+						Detail.TargetPath = Request.GetTargetIdentity();
+						Detail.InternalContext = InitializationContractId;
+						Detail.SourceKind = TEXT("native_result");
+						OutError.SetFailure(MoveTemp(Detail));
 						return false;
 					}
 					FString PayloadJson;
@@ -318,9 +327,14 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 					FindHjsonExternalInputFamilyContract(Request.GetRootTypeIdentity());
 				if (!Contract || Contract->InitializationContractId != InitializationContractId)
 				{
-					OutError.Set(
-						TEXT("hjson_external_input_contract_not_executable"),
-						InitializationContractId);
+					auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_contract_not_executable"),
+						!Contract ? TEXT("No external-input import contract supports the requested root type.")
+							: TEXT("The initialization contract does not match the external-input root type."), TEXT("domain_execute"));
+					Detail.TargetPath = Request.GetTargetIdentity();
+					Detail.ActualValue = MakeShared<FJsonValueString>(Request.GetRootTypeIdentity());
+					Detail.InternalContext = InitializationContractId;
+					Detail.SourceKind = TEXT("native_result");
+					OutError.SetFailure(MoveTemp(Detail));
 					return false;
 				}
 				FHjsonExternalInputDelegation Delegation;
@@ -339,6 +353,7 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 						PayloadJson,
 						OutError))
 				{
+					Delegation.LocateFailure(OutError);
 					return false;
 				}
 				OutResponse = FImportInitializationDomainResponse(
@@ -350,19 +365,6 @@ namespace UE::UAI::OperationOwners::HjsonExternalInput
 			TSharedRef<IHjsonExternalInputImporterGateway> Gateway;
 		};
 
-		bool TryCreateRegisteredProvider(
-			TSharedPtr<IImportInitializationDomainProvider>& OutProvider,
-			FWorkspaceError& OutError)
-		{
-			return TryCreateProductionHjsonExternalInputDomainProvider(
-				OutProvider, OutError);
-		}
-
-		const FImportInitializationDomainProviderFactoryRegistration
-			HjsonExternalInputDomainProviderRegistration(
-				TEXT("hjson-external-input-domain-provider"),
-				TEXT("hjson-external-input-domain-provider"),
-				&TryCreateRegisteredProvider);
 	}
 
 	bool TryCreateHjsonExternalInputDomainProvider(

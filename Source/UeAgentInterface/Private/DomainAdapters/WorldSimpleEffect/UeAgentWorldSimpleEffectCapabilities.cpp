@@ -1,4 +1,5 @@
 #include "DomainAdapters/WorldSimpleEffect/UeAgentWorldSimpleEffectCapabilities.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Dom/JsonObject.h"
@@ -108,21 +109,39 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			},
 		};
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
+		bool Fail(FExecutionMutationError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic)
 		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
+			OutError = MoveTemp(Diagnostic);
 			return false;
+		}
+
+		TSharedPtr<FJsonValue> PublicInputValue(const TSharedPtr<FJsonValue>& Value)
+		{
+			if (!Value) return MakeShared<FJsonValueString>(TEXT("<missing>"));
+			if (Value->Type == EJson::Array) return MakeShared<FJsonValueString>(TEXT("array"));
+			if (Value->Type == EJson::Object) return MakeShared<FJsonValueString>(TEXT("object"));
+			double Number = 0.0;
+			if (Value->Type == EJson::Number && Value->TryGetNumber(Number) && !FMath::IsFinite(Number))
+				return MakeShared<FJsonValueString>(FString::SanitizeFloat(Number));
+			return Value;
+		}
+
+		FExecutionMutationError Fact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const bool bInput = false)
+		{
+			auto Error = FExecutionMutationError::Failure(Code, Reason, TEXT("execution"));
+			Error.SourceKind = bInput ? TEXT("command_input") : TEXT("native_result");
+			Error.PropertyPath = Path;
+			if (bInput) Error.Source.JsonPath = Path;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
 
 		bool TryCanonicalizeSchema(
 			const TCHAR* Source,
 			FString& OutCanonical,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<FJsonObject> Object;
 			const TSharedRef<TJsonReader<>> Reader =
@@ -130,7 +149,12 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			if (!FJsonSerializer::Deserialize(Reader, Object)
 				|| !Object.IsValid())
 			{
-				OutError = TEXT("world_simple_schema_parse_failed");
+				OutError = FExecutionMutationError::Failure(TEXT("world_simple_schema_parse_failed"),
+					TEXT("World-simple descriptor schema must be object JSON. ") + Reader->GetErrorMessage(), TEXT("registration"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = TEXT("/schema");
+				OutError.ActualValue = MakeShared<FJsonValueString>(TEXT("invalid object JSON"));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object JSON"));
 				return false;
 			}
 			return Json::TryCanonicalize(
@@ -143,15 +167,15 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			const TSharedPtr<FJsonValue>& JsonValue,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError,
+			const FString& Path = TEXT("/after"))
 		{
 			OutValue.Reset();
 			FUeAgentStateSemanticError Error;
 			if (!JsonValue.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("world_simple_internal_value_missing"));
+				return Fail(OutError, Fact(TEXT("world_simple_internal_value_missing"),
+					TEXT("Generated change value is missing."), Path, MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 			}
 			switch (JsonValue->Type)
 			{
@@ -185,9 +209,14 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				}
 				break;
 			case EJson::Number:
+			{
+				FString Lexeme;
+				if (!CanonicalJson::TryGetNumberLexeme(*JsonValue, Lexeme))
+					return Fail(OutError, Fact(TEXT("canonical_json_number_lexeme_invalid"),
+						TEXT("Generated numeric change value has no readable number lexeme."), Path,
+						MakeShared<FJsonValueString>(TEXT("number without readable lexeme")), MakeShared<FJsonValueString>(TEXT("readable number lexeme"))));
 				if (FUeAgentCanonicalValue::TryDecimal(
-						FString::SanitizeFloat(
-							JsonValue->AsNumber()),
+						Lexeme,
 						Resources,
 						OutValue,
 						Error))
@@ -195,6 +224,7 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 					return true;
 				}
 				break;
+			}
 			case EJson::Array:
 				{
 					TArray<FUeAgentCanonicalValueRef> Items;
@@ -206,7 +236,7 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 								Item,
 								Resources,
 								CanonicalItem,
-								OutError))
+								OutError, Path + TEXT("/") + FString::FromInt(Items.Num())))
 						{
 							return false;
 						}
@@ -232,12 +262,15 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 						TSharedPtr<FJsonValue>>& Pair
 						: JsonValue->AsObject()->Values)
 					{
+						FString EscapedKey = Pair.Key;
+						EscapedKey.ReplaceInline(TEXT("~"), TEXT("~0"));
+						EscapedKey.ReplaceInline(TEXT("/"), TEXT("~1"));
 						FUeAgentCanonicalValuePtr CanonicalItem;
 						if (!TryCanonicalValue(
 								Pair.Value,
 								Resources,
 								CanonicalItem,
-								OutError))
+								OutError, Path + TEXT("/") + EscapedKey))
 						{
 							return false;
 						}
@@ -256,16 +289,14 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 					break;
 				}
 			default:
-				return Fail(
-					OutError,
-					TEXT("world_simple_internal_value_kind_invalid"));
+				return Fail(OutError, Fact(TEXT("world_simple_internal_value_kind_invalid"),
+					TEXT("Generated change value has an unsupported JSON kind."), Path,
+					MakeShared<FJsonValueNumber>(static_cast<int32>(JsonValue->Type)), MakeShared<FJsonValueString>(TEXT("supported JSON value kind"))));
 			}
-			return Fail(
-				OutError,
-				Error.Code.IsEmpty()
-					? TEXT("world_simple_internal_value_failed")
-					: Error.Code,
-				Error.Detail);
+			if (Error.PropertyPath.IsEmpty()) Error.PropertyPath = Path;
+			else if (!Path.IsEmpty()) Error.PropertyPath = Path + (Error.PropertyPath.StartsWith(TEXT("/")) ? TEXT("") : TEXT("/")) + Error.PropertyPath;
+			if (Error.SourceKind.IsEmpty()) Error.SourceKind = TEXT("native_result");
+			return Fail(OutError, MoveTemp(Error));
 		}
 
 		TSharedPtr<FJsonValue> CloneField(
@@ -284,16 +315,11 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			TSharedPtr<FJsonObject>& OutPayload,
 			FExecutionMutationError& OutError)
 		{
-			OutPayload.Reset();
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(
-					Request.GetPayload().GetJsonValue());
-			if (!FJsonSerializer::Deserialize(Reader, OutPayload)
-				|| !OutPayload.IsValid())
+			UE::UAI::Contract::FDiagnostic ParseError;
+			if (!UE::UAI::Contract::Json::TryParseObject(
+				Request.GetPayload().GetJsonValue(), OutPayload, ParseError))
 			{
-				return Fail(
-					OutError,
-					TEXT("world_simple_payload_parse_failed"));
+				return Fail(OutError, MoveTemp(ParseError));
 			}
 			return true;
 		}
@@ -309,30 +335,28 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			return MakeShared<FJsonValueArray>(MoveTemp(Items));
 		}
 
-		bool ReadVector(
-			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
-			const int32 Count,
-			TArray<double>& OutValues)
+		bool ReadVector(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field, const int32 Count,
+			TArray<double>& OutValues, const FString& ParentPath, FExecutionMutationError& OutError)
 		{
 			OutValues.Reset();
+			const FString Path = ParentPath + TEXT("/") + FString(Field);
 			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-			if (!Object.IsValid()
-				|| !Object->TryGetArrayField(Field, Values)
-				|| !Values
-				|| Values->Num() != Count)
+			if (!Object.IsValid() || !Object->TryGetArrayField(Field, Values) || !Values)
+				return Fail(OutError, Fact(TEXT("world_simple_wall_spatial_value_invalid"),
+					TEXT("Wall spatial field must be an array."), Path,
+					PublicInputValue(Object.IsValid() ? Object->TryGetField(Field) : nullptr), MakeShared<FJsonValueString>(TEXT("numeric array")), true));
+			if (Values->Num() != Count)
+				return Fail(OutError, Fact(TEXT("world_simple_wall_spatial_value_invalid"),
+					TEXT("Wall spatial field has the wrong component count."), Path,
+					MakeShared<FJsonValueNumber>(Values->Num()), MakeShared<FJsonValueNumber>(Count), true));
+			for (int32 Index = 0; Index < Values->Num(); ++Index)
 			{
-				return false;
-			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
-			{
+				const auto& Value = (*Values)[Index];
 				double Number = 0.0;
-				if (!Value.IsValid()
-					|| !Value->TryGetNumber(Number)
-					|| !FMath::IsFinite(Number))
-				{
-					return false;
-				}
+				if (!Value.IsValid() || !Value->TryGetNumber(Number) || !FMath::IsFinite(Number))
+					return Fail(OutError, Fact(TEXT("world_simple_wall_spatial_value_invalid"),
+						TEXT("Wall spatial component must be a finite number."), Path + TEXT("/") + FString::FromInt(Index),
+						PublicInputValue(Value), MakeShared<FJsonValueString>(TEXT("finite number")), true));
 				OutValues.Add(Number);
 			}
 			return true;
@@ -382,11 +406,7 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				GetWorldSimpleEffectAuthorityScopes(),
 				TEXT("world-simple:canonical-draft"),
 				TArray<FUeAgentCanonicalIdentity>{});
-			return OutChanges.Last().IsValid()
-				|| Fail(
-					OutError,
-					TEXT("world_simple_change_draft_invalid"),
-					Selector);
+			return OutChanges.Last().IsValid() || Fail(OutError, OutChanges.Last().GetValidationDiagnostic());
 		}
 
 		const FUeAgentStateEntry* FindCurrentEntry(
@@ -429,44 +449,35 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			const TSharedPtr<FJsonObject>* Wall = nullptr;
 			const TSharedPtr<FJsonObject>* Opening = nullptr;
 			const TSharedPtr<FJsonObject>* Segment = nullptr;
-			if (!Payload->TryGetObjectField(TEXT("plane"), Plane)
-				|| !Payload->TryGetObjectField(TEXT("wall"), Wall)
-				|| !Payload->TryGetObjectField(TEXT("opening"), Opening)
-				|| !Payload->TryGetObjectField(
-					TEXT("segment_template"),
-					Segment)
-				|| !Plane
-				|| !Wall
-				|| !Opening
-				|| !Segment)
-			{
-				return Fail(
-					OutError,
-					TEXT("world_simple_wall_payload_invalid"));
-			}
+			if (!Payload->TryGetObjectField(TEXT("plane"), Plane) || !Plane)
+				return Fail(OutError, Fact(TEXT("world_simple_wall_payload_invalid"),
+					TEXT("Wall creation requires plane as an object."), TEXT("/plane"),
+					PublicInputValue(Payload->TryGetField(TEXT("plane"))), MakeShared<FJsonValueString>(TEXT("object")), true));
+			if (!Payload->TryGetObjectField(TEXT("wall"), Wall) || !Wall)
+				return Fail(OutError, Fact(TEXT("world_simple_wall_payload_invalid"),
+					TEXT("Wall creation requires wall as an object."), TEXT("/wall"),
+					PublicInputValue(Payload->TryGetField(TEXT("wall"))), MakeShared<FJsonValueString>(TEXT("object")), true));
+			if (!Payload->TryGetObjectField(TEXT("opening"), Opening) || !Opening)
+				return Fail(OutError, Fact(TEXT("world_simple_wall_payload_invalid"),
+					TEXT("Wall creation requires opening as an object."), TEXT("/opening"),
+					PublicInputValue(Payload->TryGetField(TEXT("opening"))), MakeShared<FJsonValueString>(TEXT("object")), true));
+			if (!Payload->TryGetObjectField(TEXT("segment_template"), Segment) || !Segment)
+				return Fail(OutError, Fact(TEXT("world_simple_wall_payload_invalid"),
+					TEXT("Wall creation requires segment_template as an object."), TEXT("/segment_template"),
+					PublicInputValue(Payload->TryGetField(TEXT("segment_template"))), MakeShared<FJsonValueString>(TEXT("object")), true));
 
 			TArray<double> Center;
 			TArray<double> Normal;
 			TArray<double> Up;
 			TArray<double> OpeningCenter;
 			TArray<double> OpeningSize;
-			if (!ReadVector(*Plane, TEXT("center"), 3, Center)
-				|| !ReadVector(*Plane, TEXT("normal"), 3, Normal)
-				|| !ReadVector(*Plane, TEXT("up"), 3, Up)
-				|| !ReadVector(
-					*Opening,
-					TEXT("center"),
-					2,
-					OpeningCenter)
-				|| !ReadVector(
-					*Opening,
-					TEXT("size"),
-					2,
-					OpeningSize))
+			if (!ReadVector(*Plane, TEXT("center"), 3, Center, TEXT("/plane"), OutError)
+				|| !ReadVector(*Plane, TEXT("normal"), 3, Normal, TEXT("/plane"), OutError)
+				|| !ReadVector(*Plane, TEXT("up"), 3, Up, TEXT("/plane"), OutError)
+				|| !ReadVector(*Opening, TEXT("center"), 2, OpeningCenter, TEXT("/opening"), OutError)
+				|| !ReadVector(*Opening, TEXT("size"), 2, OpeningSize, TEXT("/opening"), OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT("world_simple_wall_spatial_value_invalid"));
+				return false;
 			}
 
 			FString Unit;
@@ -493,9 +504,13 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				|| U.IsNearlyZero()
 				|| R.IsNearlyZero())
 			{
-				return Fail(
-					OutError,
-					TEXT("world_simple_wall_basis_invalid"));
+				const auto Actual = MakeShared<FJsonObject>();
+				Actual->SetField(TEXT("normal"), NumberArray(Normal));
+				Actual->SetField(TEXT("up"), NumberArray(Up));
+				return Fail(OutError, Fact(TEXT("world_simple_wall_basis_invalid"),
+					TEXT("Wall normal and up vectors produce a degenerate basis; both must be non-zero and independent."),
+					N.IsNearlyZero() ? TEXT("/plane/normal") : U.IsNearlyZero() ? TEXT("/plane/up") : TEXT("/plane"),
+					MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(TEXT("non-degenerate normal/up basis")), true));
 			}
 
 			const double Width =
@@ -518,9 +533,15 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				|| FMath::Abs(OpeningZ) + OpeningHeight * 0.5
 					> Height * 0.5)
 			{
-				return Fail(
-					OutError,
-					TEXT("world_simple_wall_opening_out_of_bounds"));
+				const auto Actual = MakeShared<FJsonObject>();
+				Actual->SetField(TEXT("center_cm"), NumberArray({OpeningX, OpeningZ}));
+				Actual->SetField(TEXT("size_cm"), NumberArray({OpeningWidth, OpeningHeight}));
+				const auto Expected = MakeShared<FJsonObject>();
+				Expected->SetField(TEXT("wall_size_cm"), NumberArray({Width, Height}));
+				Expected->SetStringField(TEXT("constraint"), TEXT("opening must lie entirely inside the centered wall"));
+				return Fail(OutError, Fact(TEXT("world_simple_wall_opening_out_of_bounds"),
+					TEXT("Opening extends outside the wall bounds."), TEXT("/opening"),
+					MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueObject>(Expected), true));
 			}
 
 			struct FPart
@@ -578,9 +599,9 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				if (Part.PartWidth <= 0.0
 					|| Part.PartHeight <= 0.0)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_simple_wall_segment_degenerate"));
+					return Fail(OutError, Fact(TEXT("world_simple_wall_segment_degenerate"),
+						TEXT("Computed wall segment must have positive width and height."), TEXT("/segments/") + FString::FromInt(Index) + TEXT("/size_cm"),
+						NumberArray({Part.PartWidth, Part.PartHeight}), MakeShared<FJsonValueString>(TEXT("both dimensions > 0 cm"))));
 				}
 				const FVector Location =
 					PlaneCenter
@@ -684,7 +705,9 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				if (!Payload->TryGetObjectField(TEXT("placement"), Placement)
 					|| !Placement || !Placement->IsValid())
 				{
-					return Fail(OutError, TEXT("world_simple_actor_placement_missing"));
+					return Fail(OutError, Fact(TEXT("world_simple_actor_placement_missing"),
+						TEXT("Actor creation requires a placement object."), TEXT("/placement"),
+						PublicInputValue(Payload->TryGetField(TEXT("placement"))), MakeShared<FJsonValueString>(TEXT("placement object")), true));
 				}
 				for (const TCHAR* Field : {
 					TEXT("translation"),
@@ -865,11 +888,11 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 						Subjects[Index]);
 				if (!Current)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"world_simple_current_target_missing"),
-						Subjects[Index]);
+					auto Error = Fact(TEXT("world_simple_current_target_missing"),
+						TEXT("Current snapshot has no unique state entry for the requested membership subject."), TEXT("/subject_refs/") + FString::FromInt(Index),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
+					Error.TargetPath = Subjects[Index];
+					return Fail(OutError, MoveTemp(Error));
 				}
 				const TSharedPtr<FJsonObject> After =
 					MakeShared<FJsonObject>();
@@ -936,10 +959,9 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 					return false;
 				}
 			}
-			return !OutChanges.IsEmpty()
-				|| Fail(
-					OutError,
-					TEXT("world_simple_membership_subject_missing"));
+			return !OutChanges.IsEmpty() || Fail(OutError, Fact(TEXT("world_simple_membership_subject_missing"),
+				TEXT("Membership update requires at least one subject."), TEXT("/subject_refs"),
+				MakeShared<FJsonValueNumber>(Subjects.Num()), MakeShared<FJsonValueString>(TEXT("at least one subject")), true));
 		}
 
 		bool BuildState(
@@ -1012,11 +1034,16 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 						Targets[Index]);
 				if (!Current)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"world_simple_current_target_missing"),
-						Targets[Index]);
+					const bool bInputTarget = StateKind != TEXT("world_partition_streaming") && StateKind != TEXT("level_game_mode");
+					const FString Path = bInputTarget
+						? (StateKind == TEXT("streaming_relation") ? FString(TEXT("/target_ref")) : TEXT("/target_refs/") + FString::FromInt(Index))
+						: FString(TEXT("/world_state"));
+					auto Error = Fact(TEXT("world_simple_current_target_missing"),
+						TEXT("Current snapshot has no unique state entry for the requested state target."), Path,
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), bInputTarget);
+					if (bInputTarget) Error.TargetPath = Targets[Index];
+					else Error.SubjectId = Targets[Index];
+					return Fail(OutError, MoveTemp(Error));
 				}
 				const TSharedPtr<FJsonObject> After =
 					MakeShared<FJsonObject>();
@@ -1145,10 +1172,9 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 					return false;
 				}
 			}
-			return !OutChanges.IsEmpty()
-				|| Fail(
-					OutError,
-					TEXT("world_simple_state_target_missing"));
+			return !OutChanges.IsEmpty() || Fail(OutError, Fact(TEXT("world_simple_state_target_missing"),
+				TEXT("State update requires at least one target."), StateKind == TEXT("streaming_relation") ? TEXT("/target_ref") : TEXT("/target_refs"),
+				MakeShared<FJsonValueNumber>(Targets.Num()), MakeShared<FJsonValueString>(TEXT("at least one target")), true));
 		}
 	}
 
@@ -1159,7 +1185,7 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 
 	bool TryCreateWorldSimpleEffectDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
@@ -1204,12 +1230,6 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 				FUeAgentContractValue(MoveTemp(CanonicalInput)),
 				FUeAgentContractValue(CanonicalResult));
 		}
-		if (Descriptors.Num() != 11)
-		{
-			OutError =
-				TEXT("world_simple_descriptor_count_invalid");
-			return false;
-		}
 		return FUeAgentDescriptorRegistry::TryCreate(
 			MoveTemp(Descriptors),
 			OutRegistry,
@@ -1226,17 +1246,21 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 	{
 		OutDraft.Reset();
 		OutError = FExecutionMutationError();
-		if (!Request.IsValid()
-			|| Context.GetWorldIdentity().IsEmpty()
-			|| Context.GetLevelIdentity().IsEmpty()
-			|| Context.GetContextRevision().IsEmpty()
-			|| CurrentSnapshot->GetStatePlane()
-				!= EUeAgentStatePlane::AuthoringMemory)
-		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_draft_request_invalid"));
-		}
+		if (!Request.IsValid()) return Fail(OutError, Request.GetValidationDiagnostic());
+		if (Context.GetWorldIdentity().IsEmpty()) return Fail(OutError, Fact(TEXT("world_simple_draft_request_invalid"),
+			TEXT("World binding is required to build world changes."), TEXT("/execution_context/world"),
+			MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+		if (Context.GetLevelIdentity().IsEmpty()) return Fail(OutError, Fact(TEXT("world_simple_draft_request_invalid"),
+			TEXT("Level binding is required to build world changes."), TEXT("/execution_context/level"),
+			MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+		if (Context.GetContextRevision().IsEmpty()) return Fail(OutError, Fact(TEXT("world_simple_draft_request_invalid"),
+			TEXT("Revision binding is required to build world changes."), TEXT("/execution_context/revision"),
+			MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+		if (CurrentSnapshot->GetStatePlane() != EUeAgentStatePlane::AuthoringMemory)
+			return Fail(OutError, Fact(TEXT("world_simple_draft_request_invalid"),
+				TEXT("World changes require a current snapshot from AuthoringMemory."), TEXT("/current_snapshot/state_plane"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(CurrentSnapshot->GetStatePlane())),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(EUeAgentStatePlane::AuthoringMemory))));
 
 		const FDescriptorSpec* Spec = nullptr;
 		for (const FDescriptorSpec& Candidate : DescriptorSpecs)
@@ -1254,9 +1278,14 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 		}
 		if (!Spec)
 		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_descriptor_not_exact"));
+			const auto Actual = MakeShared<FJsonObject>();
+			Actual->SetStringField(TEXT("descriptor_id"), Request.GetDescriptorIdentity().GetDescriptorId());
+			Actual->SetNumberField(TEXT("version"), Request.GetDescriptorIdentity().GetVersion());
+			auto Error = Fact(TEXT("world_simple_descriptor_not_exact"),
+				TEXT("Descriptor identity does not match a registered world-simple descriptor version and binding."), TEXT("/descriptor"),
+				MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(TEXT("registered world-simple descriptor with version 1 and matching binding")));
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Request.GetDescriptorIdentity().GetDescriptorHash());
+			return Fail(OutError, MoveTemp(Error));
 		}
 
 		TSharedPtr<FJsonObject> Payload;
@@ -1294,9 +1323,9 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 		{
 			if (CurrentSnapshot->GetEntries().IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("world_simple_current_state_missing"));
+				return Fail(OutError, Fact(TEXT("world_simple_current_state_missing"),
+					TEXT("World update requires captured current-state entries."), TEXT("/current_snapshot/entries"),
+					MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one current-state entry"))));
 			}
 			bBuilt = BuildMembership(
 				Payload,
@@ -1311,9 +1340,9 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 		{
 			if (CurrentSnapshot->GetEntries().IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("world_simple_current_state_missing"));
+				return Fail(OutError, Fact(TEXT("world_simple_current_state_missing"),
+					TEXT("World update requires captured current-state entries."), TEXT("/current_snapshot/entries"),
+					MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one current-state entry"))));
 			}
 			bBuilt = BuildState(
 				Payload,
@@ -1336,9 +1365,7 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			MoveTemp(Changes));
 		if (!Draft.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_change_set_draft_invalid"));
+			return Fail(OutError, Draft.GetValidationDiagnostic());
 		}
 		OutDraft.Emplace(MoveTemp(Draft));
 		return true;

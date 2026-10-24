@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectNormalObservation.h"
 #include "Dom/JsonObject.h"
@@ -59,6 +60,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		FBox Bounds = FBox(EForceInit::ForceInit);
 
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 	};
 
 	bool TryReadCarrier(
@@ -67,8 +69,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			IUeAgentModelingGeometryEffectReferenceResolver& Resolver,
 		const FString& TargetRef,
 		FCarrierState& OutState,
-		FString& OutErrorCode,
-		FString& OutErrorDetail);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	TSharedPtr<FJsonObject> BuildDraftState(
 		const FCarrierState& State);
@@ -80,20 +81,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		const FString& OperationKey,
 		const FCarrierState& State,
 		const TSharedPtr<FJsonObject>& Payload,
-		FString& OutErrorCode,
-		FString& OutErrorDetail);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	bool TryReadBaseline(
 		const TSharedPtr<FJsonObject>& Payload,
-		FCarrierState& OutState);
+		FCarrierState& OutState,
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	bool TryReadDurablePackageNameEvidence(
 		const TSharedPtr<FJsonObject>& Payload,
-		FString& OutPackageName);
+		FString& OutPackageName,
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	TSharedPtr<FJsonObject> BuildExpectedVerificationState(
 		const FString& OperationKey,
-		const FCarrierState& Baseline);
+		const FCarrierState& Baseline,
+		const TSharedPtr<FJsonObject>& Payload);
 
 	TSharedPtr<FJsonObject> BuildActualVerificationState(
 		const FString& OperationKey,

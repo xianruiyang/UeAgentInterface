@@ -6,7 +6,9 @@
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/Projection/UeAgentProjection.h"
+#include "CoreGlobals.h"
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCapabilities.h"
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectFactoryCandidateTestSupport.h"
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectTestSupport.h"
@@ -16,6 +18,7 @@
 #include "Curves/CurveLinearColor.h"
 #include "Curves/CurveVector.h"
 #include "Dom/JsonObject.h"
+#include "Logging/LogMacros.h"
 #include "Engine/DataTable.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/SkeletalMeshLODSettings.h"
@@ -179,6 +182,14 @@ namespace
 		{
 		}
 
+		void SetBeforeResolveCallback(
+			const int32 InCallsBeforeInvoke,
+			TFunction<void(UObject&)> InCallback)
+		{
+			CallsBeforeInvoke = FMath::Max(0, InCallsBeforeInvoke);
+			BeforeResolveCallback = MoveTemp(InCallback);
+		}
+
 		bool TryResolveExisting(
 			const FString& CanonicalRef,
 			UObject*& OutObject,
@@ -191,6 +202,19 @@ namespace
 					TEXT("asset_data_reference_unresolved"),
 					CanonicalRef);
 				return false;
+			}
+			if (BeforeResolveCallback)
+			{
+				if (CallsBeforeInvoke <= 0)
+				{
+					TFunction<void(UObject&)> Callback =
+						MoveTemp(BeforeResolveCallback);
+					Callback(*OutObject);
+				}
+				else
+				{
+					--CallsBeforeInvoke;
+				}
 			}
 			OutError = FExecutionMutationError();
 			return true;
@@ -219,6 +243,8 @@ namespace
 
 	private:
 		FOwnedAssetDataCreatePackage& Owner;
+		int32 CallsBeforeInvoke = 0;
+		TFunction<void(UObject&)> BeforeResolveCallback;
 	};
 
 	const TSharedPtr<FJsonObject> FindFactoryContract(
@@ -269,51 +295,34 @@ namespace
 		}
 		OutExpectedClass =
 			Contract->GetStringField(TEXT("asset_class_path"));
-		const TSharedPtr<FJsonObject> Revision =
+		const TSharedPtr<FJsonObject> Factory =
 			MakeShared<FJsonObject>();
-		Revision->SetStringField(
-			TEXT("source_id"),
-			Contract->GetStringField(
-				TEXT("catalog_source_id")));
-		Revision->SetStringField(
-			TEXT("generation"),
-			Contract->GetStringField(
-				TEXT("catalog_generation")));
-		Revision->SetNumberField(
-			TEXT("sequence"),
-			Contract->GetNumberField(
-				TEXT("catalog_sequence")));
-		const TSharedPtr<FJsonObject> FactoryRef =
-			MakeShared<FJsonObject>();
-		FactoryRef->SetStringField(
-			TEXT("candidate_ref"),
+		Factory->SetStringField(
+			TEXT("name"),
 			Contract->GetStringField(TEXT("candidate_ref")));
-		FactoryRef->SetObjectField(
-			TEXT("catalog_revision"),
-			Revision);
 		Payload->SetObjectField(
-			TEXT("factory_ref"),
-			FactoryRef);
+			TEXT("factory"),
+			Factory);
 		return Payload;
 	}
 
 	FString BuildAssetRevision(UObject* Object)
 	{
-		return ReadStableAssetRevision(Object);
+		FString Revision;
+		UE::UAI::Contract::FDiagnostic RevisionError;
+		if (!TryReadStableAssetRevision(Object, Revision, RevisionError))
+			UE_LOG(LogTemp, Error, TEXT("Asset revision fixture failed [%s]: %s"), *RevisionError.Code, *RevisionError.PublicMessage);
+		return Revision;
 	}
 
 	TSharedPtr<FJsonObject> BuildClonePayload(
 		const FString& TargetRef,
-		const FString& SourceRef,
-		const FString& SourceRevision)
+		const FString& SourceRef)
 	{
 		const TSharedPtr<FJsonObject> Payload =
 			MakeShared<FJsonObject>();
 		Payload->SetStringField(TEXT("target_ref"), TargetRef);
 		Payload->SetStringField(TEXT("source_ref"), SourceRef);
-		Payload->SetStringField(
-			TEXT("expected_source_revision"),
-			SourceRevision);
 		return Payload;
 	}
 
@@ -342,15 +351,12 @@ namespace
 
 	TSharedPtr<FJsonObject> BuildUpdatePayload(
 		const FString& TargetRef,
-		const FString& TargetRevision,
+		const FString&,
 		const TArray<TSharedPtr<FJsonObject>>& Changes)
 	{
 		const TSharedPtr<FJsonObject> Payload =
 			MakeShared<FJsonObject>();
 		Payload->SetStringField(TEXT("target_ref"), TargetRef);
-		Payload->SetStringField(
-			TEXT("expected_revision"),
-			TargetRevision);
 		TArray<TSharedPtr<FJsonValue>> ChangeValues;
 		ChangeValues.Reserve(Changes.Num());
 		for (const TSharedPtr<FJsonObject>& Change : Changes)
@@ -708,8 +714,6 @@ namespace
 				false,
 				false,
 				false),
-			FUeAgentPageRequest(),
-			TOptional<int64>(),
 			TArray<FUeAgentArtifactDescriptor>(),
 			TArray<FUeAgentProjectionDiagnostic>());
 
@@ -785,8 +789,7 @@ namespace
 		ApplicationConfig.ServerSessionId =
 			TEXT("session:") + Scope;
 		ApplicationConfig.RegistryEpoch = 1;
-		ApplicationConfig.TimeoutSeconds = 60.0;
-		ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
+
 
 		FUeAgentSimpleAuthoringApplicationError ApplicationError;
 		if (!Test.TestTrue(
@@ -1556,55 +1559,48 @@ FUeAgentSimpleAuthoringAssetDataCreateProductionContractTest::
 			+ ProfileError);
 		return false;
 	}
-	TestEqual(
-		TEXT("all 53 AssetData profiles are projected"),
-		Profiles.Num(),
-		53);
-	int32 CreateCount = 0;
-	int32 StaticCreateCount = 0;
-	int32 FactoryCreateCount = 0;
-	int32 CloneCount = 0;
 	TArray<const FUeAgentAssetDataSimpleEffectProductionProfile*>
 		StaticCreates;
 	TArray<const FUeAgentAssetDataSimpleEffectProductionProfile*>
 		CreateProfiles;
+	const FUeAgentAssetDataSimpleEffectProductionProfile*
+		GenericCreateProfile = nullptr;
 	for (const FUeAgentAssetDataSimpleEffectProductionProfile&
 		Profile : Profiles)
 	{
-		CreateCount += Profile.IsCreate() ? 1 : 0;
-		StaticCreateCount +=
-			Profile.UsesStaticCreateClass() ? 1 : 0;
-		FactoryCreateCount +=
-			Profile.UsesFactoryCandidate() ? 1 : 0;
-		CloneCount +=
-			Profile.NativeOperationType
-					== TEXT("asset.object.clone")
-				? 1
-				: 0;
 		if (Profile.UsesStaticCreateClass())
 		{
 			StaticCreates.Add(&Profile);
 		}
 		if (Profile.IsCreate())
 		{
-			CreateProfiles.Add(&Profile);
+			if (Profile.CapabilityId
+				== TEXT("asset.object.create"))
+			{
+				GenericCreateProfile = &Profile;
+			}
+			else
+			{
+				CreateProfiles.Add(&Profile);
+			}
 		}
 	}
-	TestEqual(TEXT("create profile count"), CreateCount, 23);
-	TestEqual(
-		TEXT("static create profile count"),
-		StaticCreateCount,
-		19);
-	TestEqual(
-		TEXT("factory create profile count"),
-		FactoryCreateCount,
-		4);
-	TestEqual(TEXT("clone profile count"), CloneCount, 1);
-	TestEqual(
-		TEXT("mutable profile count"),
-		Profiles.Num() - CreateCount - CloneCount,
-		29);
-
+	TestNotNull(
+		TEXT("generic default-create profile is projected once"),
+		GenericCreateProfile);
+	if (GenericCreateProfile)
+	{
+		TestTrue(
+			TEXT("generic default-create uses the shared factory seam"),
+			GenericCreateProfile->UsesFactoryCandidate());
+		TestEqual(
+			TEXT("generic default-create native operation identity"),
+			GenericCreateProfile->NativeOperationType,
+			FString(TEXT("asset.object.create")));
+		TestNotNull(
+			TEXT("generic default-create has one exact route"),
+			FindRoute(GenericCreateProfile->CapabilityId));
+	}
 	FOwnedAssetDataCreatePackage Owner;
 	if (!TestTrue(
 			TEXT("owned AssetData package is valid"),
@@ -1672,11 +1668,9 @@ FUeAgentSimpleAuthoringAssetDataCreateProductionContractTest::
 			TEXT("compact"),
 			false,
 			false,
-			false),
-		FUeAgentPageRequest(),
-		TOptional<int64>(),
-		TArray<FUeAgentArtifactDescriptor>(),
-		TArray<FUeAgentProjectionDiagnostic>());
+				false),
+			TArray<FUeAgentArtifactDescriptor>(),
+			TArray<FUeAgentProjectionDiagnostic>());
 
 	TSharedPtr<IUeAgentSimpleAuthoringCapabilityProvider> Provider;
 	FUeAgentAssetDataSimpleAuthoringError ProviderError;
@@ -1762,8 +1756,7 @@ FUeAgentSimpleAuthoringAssetDataCreateProductionContractTest::
 	ApplicationConfig.ServerSessionId =
 		TEXT("session:sa008-asset-data-create");
 	ApplicationConfig.RegistryEpoch = 1;
-	ApplicationConfig.TimeoutSeconds = 60.0;
-	ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
+
 
 	TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
 	FUeAgentSimpleAuthoringApplicationError ApplicationError;
@@ -1871,18 +1864,17 @@ FUeAgentSimpleAuthoringAssetDataCreateProductionContractTest::
 	}
 
 	TestEqual(
-		TEXT("23 create operations prepare exactly once"),
+		TEXT("each typed create prepares exactly once"),
 		Durable->PrepareCount,
-		23);
+		CreateProfiles.Num());
 	TestEqual(
-		TEXT("23 create operations persist exactly once"),
+		TEXT("each typed create persists exactly once"),
 		Durable->PersistCount,
-		23);
+		CreateProfiles.Num());
 	TestEqual(
-		TEXT(
-			"23 create operations acknowledge only after C9"),
+		TEXT("each typed create acknowledges only after C9"),
 		Durable->AcknowledgeCount,
-		23);
+		CreateProfiles.Num());
 	TestEqual(
 		TEXT("all durable targets use the owned package"),
 		Durable->SeenPackageNames.Num(),
@@ -1892,7 +1884,8 @@ FUeAgentSimpleAuthoringAssetDataCreateProductionContractTest::
 		Durable->SeenPackageNames.Contains(
 			Owner.Package->GetName()));
 
-	if (CreatedTargets.Num() == 23)
+	if (CreatedTargets.Num() == CreateProfiles.Num()
+		&& !CreateProfiles.IsEmpty())
 	{
 		const
 			FUeAgentAssetDataSimpleEffectProductionProfile&
@@ -1927,7 +1920,7 @@ FUeAgentSimpleAuthoringAssetDataCreateProductionContractTest::
 			TEXT(
 				"duplicate exact asset does not prepare durable work"),
 			Durable->PrepareCount,
-			23);
+			CreateProfiles.Num());
 	}
 	return !HasAnyErrors();
 }
@@ -2029,15 +2022,6 @@ FUeAgentSimpleAuthoringAssetDataCloneProductionContractTest::
 	Source->RelatedAsset = Related;
 	const FString SourceFingerprint =
 		ReadCloneDataFingerprint(*Source);
-	const FString SourceRevision =
-		BuildAssetRevision(Source);
-	if (!TestFalse(
-			TEXT("source revision is independently derived"),
-			SourceRevision.IsEmpty()))
-	{
-		return false;
-	}
-
 	const TSharedRef<FOwnedAssetResolver, ESPMode::ThreadSafe>
 		MutationResolver =
 			MakeShared<FOwnedAssetResolver, ESPMode::ThreadSafe>(
@@ -2094,11 +2078,9 @@ FUeAgentSimpleAuthoringAssetDataCloneProductionContractTest::
 			TEXT("compact"),
 			false,
 			false,
-			false),
-		FUeAgentPageRequest(),
-		TOptional<int64>(),
-		TArray<FUeAgentArtifactDescriptor>(),
-		TArray<FUeAgentProjectionDiagnostic>());
+				false),
+			TArray<FUeAgentArtifactDescriptor>(),
+			TArray<FUeAgentProjectionDiagnostic>());
 
 	TSharedPtr<IUeAgentSimpleAuthoringCapabilityProvider> Provider;
 	FUeAgentAssetDataSimpleAuthoringError ProviderError;
@@ -2169,8 +2151,7 @@ FUeAgentSimpleAuthoringAssetDataCloneProductionContractTest::
 	ApplicationConfig.ServerSessionId =
 		TEXT("session:sa008-asset-data-clone");
 	ApplicationConfig.RegistryEpoch = 1;
-	ApplicationConfig.TimeoutSeconds = 60.0;
-	ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
+
 
 	TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
 	FUeAgentSimpleAuthoringApplicationError ApplicationError;
@@ -2206,8 +2187,7 @@ FUeAgentSimpleAuthoringAssetDataCloneProductionContractTest::
 		Serialize(
 			BuildClonePayload(
 				TargetRef,
-				SourceRef,
-				SourceRevision),
+				SourceRef),
 			PayloadJson));
 	const FUeAgentOperationResult Result =
 		Application->Submit(
@@ -2272,11 +2252,19 @@ FUeAgentSimpleAuthoringAssetDataCloneProductionContractTest::
 		1);
 
 	FString StalePayloadJson;
+	PreStateResolver->SetBeforeResolveCallback(
+		1,
+		[Source](UObject& Resolved)
+		{
+			if (&Resolved == Source)
+			{
+				Source->Label = TEXT("ExternallyChangedBeforeClone");
+			}
+		});
 	Serialize(
 		BuildClonePayload(
 			StaleTargetRef,
-			SourceRef,
-			TEXT("asset-crc32:00000000")),
+			SourceRef),
 		StalePayloadJson);
 	const FUeAgentOperationResult StaleResult =
 		Application->Submit(
@@ -2288,13 +2276,13 @@ FUeAgentSimpleAuthoringAssetDataCloneProductionContractTest::
 			Caller,
 			Cancellation);
 	TestFalse(
-		TEXT("stale source revision fails before mutation"),
+		TEXT("source changed inside the operation fails before mutation"),
 		IsComplete(StaleResult));
 	TestNull(
-		TEXT("stale source revision creates no target"),
+		TEXT("changed source creates no target"),
 		Owner.FindTarget(StaleTargetRef));
 	TestEqual(
-		TEXT("stale source revision prepares no durable work"),
+		TEXT("changed source prepares no durable work"),
 		Durable->PrepareCount,
 		1);
 	return !HasAnyErrors();
@@ -2423,15 +2411,6 @@ FUeAgentSimpleAuthoringAssetDataRegisteredFieldsProductionContractTest::
 	Target->Weight = 9.25f;
 	Target->bEnabled = false;
 	Target->RelatedAsset = nullptr;
-	const FString InitialRevision =
-		BuildAssetRevision(Target);
-	if (!TestFalse(
-			TEXT("target revision is independently derived"),
-			InitialRevision.IsEmpty()))
-	{
-		return false;
-	}
-
 	const TSharedRef<
 		FRecordingDurableService,
 		ESPMode::ThreadSafe> Durable =
@@ -2481,9 +2460,6 @@ FUeAgentSimpleAuthoringAssetDataRegisteredFieldsProductionContractTest::
 	const TSharedPtr<FJsonObject> Payload =
 		MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("target_ref"), TargetRef);
-	Payload->SetStringField(
-		TEXT("expected_revision"),
-		InitialRevision);
 	Payload->SetArrayField(
 		TEXT("changes"),
 		{MakeShared<FJsonValueObject>(Change)});
@@ -2556,37 +2532,6 @@ FUeAgentSimpleAuthoringAssetDataRegisteredFieldsProductionContractTest::
 		Durable->AcknowledgeCount,
 		1);
 
-	const FString VerifiedFingerprint =
-		ReadCloneDataFingerprint(*Target);
-	Payload->SetStringField(
-		TEXT("expected_revision"),
-		TEXT("asset-crc32:00000000"));
-	RegisteredFields->SetStringField(
-		TEXT("label"),
-		TEXT("MustNotApply"));
-	Serialize(Payload, PayloadJson);
-	const FUeAgentOperationResult StaleResult =
-		Application->Submit(
-			FUeAgentOperationRequest(
-				Route->DescriptorIdentity,
-				TEXT(
-					"request:sa008-asset-data-registered-fields-stale"),
-				TEXT(
-					"idempotency:sa008-asset-data-registered-fields-stale"),
-				FUeAgentContractValue(PayloadJson)),
-			Caller,
-			Cancellation);
-	TestFalse(
-		TEXT("stale target revision fails before mutation"),
-		IsComplete(StaleResult));
-	TestEqual(
-		TEXT("stale target revision causes zero mutation"),
-		ReadCloneDataFingerprint(*Target),
-		VerifiedFingerprint);
-	TestEqual(
-		TEXT("stale target revision prepares no durable work"),
-		Durable->PrepareCount,
-		1);
 	return !HasAnyErrors();
 }
 
@@ -3042,52 +2987,6 @@ FUeAgentSimpleAuthoringAssetDataCoreConfigurationProductionContractTest::
 		Durable->AcknowledgeCount,
 		5);
 
-	const FString VerifiedSparseFingerprint =
-		ReadSparseVolumeTextureFingerprint(*Sparse);
-	SparsePayload->SetStringField(
-		TEXT("expected_revision"),
-		TEXT("asset-crc32:00000000"));
-	const FUeAgentSimpleAuthoringCommandRoute* SparseRoute =
-		FindRoute(SparseProfile->CapabilityId);
-	TSharedPtr<FUeAgentSimpleAuthoringApplication>
-		SparseApplication;
-	if (!SparseRoute
-		|| !TryCreateAssetDataApplication(
-			*this,
-			Fixture,
-			Owner,
-			Durable,
-			*SparseRoute,
-			TEXT("sa008-asset-data-sparse-stale"),
-			SparseApplication))
-	{
-		return false;
-	}
-	FString SparsePayloadJson;
-	Serialize(SparsePayload, SparsePayloadJson);
-	const FUeAgentOperationResult StaleResult =
-		SparseApplication->Submit(
-			FUeAgentOperationRequest(
-				SparseRoute->DescriptorIdentity,
-				TEXT("request:sa008-asset-data-sparse-stale"),
-				TEXT("idempotency:sa008-asset-data-sparse-stale"),
-				FUeAgentContractValue(SparsePayloadJson)),
-			FUeAgentCallerContext(
-				TEXT("caller:sa008-asset-data-sparse-stale"),
-				{TEXT("uai:asset-data:write")},
-				TEXT("correlation:sa008-asset-data-sparse-stale")),
-			Cancellation);
-	TestFalse(
-		TEXT("stale core configuration revision fails"),
-		IsComplete(StaleResult));
-	TestEqual(
-		TEXT("stale core configuration causes zero mutation"),
-		ReadSparseVolumeTextureFingerprint(*Sparse),
-		VerifiedSparseFingerprint);
-	TestEqual(
-		TEXT("stale core configuration prepares no durable work"),
-		Durable->PrepareCount,
-		5);
 	return !HasAnyErrors();
 }
 
@@ -7914,8 +7813,6 @@ bool FUeAgentSimpleAuthoringAssetDataOwnedPackageTest::RunTest(
 				false,
 				false,
 				false),
-			FUeAgentPageRequest(),
-			TOptional<int64>(),
 			TArray<FUeAgentArtifactDescriptor>(),
 			TArray<FUeAgentProjectionDiagnostic>());
 		TSharedPtr<IUeAgentSimpleAuthoringCapabilityProvider> Provider;
@@ -7967,8 +7864,7 @@ bool FUeAgentSimpleAuthoringAssetDataOwnedPackageTest::RunTest(
 		ApplicationConfig.ServerSessionId =
 			TEXT("session:sa008-asset-data-e4");
 		ApplicationConfig.RegistryEpoch = 1;
-		ApplicationConfig.TimeoutSeconds = 60.0;
-		ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
+
 		TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
 		FUeAgentSimpleAuthoringApplicationError ApplicationError;
 		if (!TestTrue(

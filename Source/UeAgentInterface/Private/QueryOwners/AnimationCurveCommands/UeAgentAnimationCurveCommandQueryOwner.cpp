@@ -1,4 +1,5 @@
 #include "QueryOwners/AnimationCurveCommands/UeAgentAnimationCurveCommandQueryOwner.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::QueryOwners::AnimationCurveCommands
 {
@@ -26,7 +27,7 @@ namespace UE::UAI::QueryOwners::AnimationCurveCommands
 
 	bool TryGetGraphProfiles(
 		TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>& OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		OutError.Reset();
@@ -34,15 +35,29 @@ namespace UE::UAI::QueryOwners::AnimationCurveCommands
 			TEXT("animation.blend_space.asset.create"),
 			TEXT("animation.blend_space.definition.apply"),
 		};
-		const auto& Canonical = Composition::GraphCompound::GetGraphCompoundActivationProfiles();
+		const TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>* GraphProfiles = nullptr;
+		if (!Composition::GraphCompound::TryGetGraphCompoundActivationProfiles(GraphProfiles, OutError)) return false;
+		const auto& Canonical = *GraphProfiles;
 		for (const FString& CommandId : GraphCommandIds)
 		{
 			const auto* Match = Canonical.FindByPredicate(
 				[&CommandId](const auto& Profile) { return Profile.GetCommandId() == CommandId; });
-			if (!Match || !Match->IsValid())
+			if (!Match)
 			{
 				OutProfiles.Reset();
-				OutError = TEXT("animation_curve_graph_profile_missing:") + CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_curve_graph_profile_missing"),
+					FString::Printf(TEXT("Command '%s' has no registered Graph activation profile."), *CommandId),
+					TEXT("registration"), FString(), CommandId);
+				OutError.SourceKind = TEXT("native_result");
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("registered Graph activation profile"));
+				return false;
+			}
+			if (!Match->IsValid())
+			{
+				OutProfiles.Reset();
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("animation_curve_graph_profile_missing"),
+					Match->GetValidationDiagnostic(), TEXT("registration"));
 				return false;
 			}
 			OutProfiles.Add(*Match);
@@ -52,11 +67,12 @@ namespace UE::UAI::QueryOwners::AnimationCurveCommands
 
 	bool TryGetTimelineProfiles(
 		TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>& OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		OutError.Reset();
-		const auto& Canonical = Composition::TimelineSpatial::GetTimelineSpatialActivationProfiles();
+		const TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>* Canonical = nullptr;
+		if (!Composition::TimelineSpatial::TryGetTimelineSpatialActivationProfiles(Canonical, OutError)) return false;
 		for (const FString& CommandId : GetCommandIds())
 		{
 			if (CommandId == TEXT("animation.blend_space.asset.create")
@@ -64,12 +80,24 @@ namespace UE::UAI::QueryOwners::AnimationCurveCommands
 			{
 				continue;
 			}
-			const auto* Match = Canonical.FindByPredicate(
+			const auto* Match = Canonical->FindByPredicate(
 				[&CommandId](const auto& Profile) { return Profile.CommandId == CommandId; });
-			if (!Match || !Match->IsValid())
+			if (!Match)
 			{
 				OutProfiles.Reset();
-				OutError = TEXT("animation_curve_profile_missing:") + CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_curve_profile_missing"),
+					FString::Printf(TEXT("Command '%s' has no registered Timeline/Spatial activation profile."), *CommandId),
+					TEXT("registration"), FString(), CommandId);
+				OutError.SourceKind = TEXT("native_result");
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("registered Timeline/Spatial activation profile"));
+				return false;
+			}
+			if (!Match->TryValidate(OutError))
+			{
+				OutProfiles.Reset();
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(
+					TEXT("animation_curve_profile_missing"), OutError, TEXT("registration"));
 				return false;
 			}
 			OutProfiles.Add(*Match);
@@ -79,13 +107,19 @@ namespace UE::UAI::QueryOwners::AnimationCurveCommands
 
 	bool IsQuery(const FString& CommandId)
 	{
-		const auto* GraphMatch = Composition::GraphCompound::GetGraphCompoundActivationProfiles().FindByPredicate(
-			[&CommandId](const auto& Profile) { return Profile.GetCommandId() == CommandId; });
+		const TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>* GraphProfiles = nullptr;
+		Contract::FDiagnostic GraphProfileError;
+		const auto* GraphMatch = Composition::GraphCompound::TryGetGraphCompoundActivationProfiles(GraphProfiles, GraphProfileError)
+			? GraphProfiles->FindByPredicate(
+				[&CommandId](const auto& Profile) { return Profile.GetCommandId() == CommandId; }) : nullptr;
 		if (GraphMatch)
 		{
 			return GraphMatch->GetOperationKind() == TEXT("query");
 		}
-		const auto* Match = Composition::TimelineSpatial::GetTimelineSpatialActivationProfiles().FindByPredicate(
+		const TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>* Canonical = nullptr;
+		Contract::FDiagnostic ProfileError;
+		if (!Composition::TimelineSpatial::TryGetTimelineSpatialActivationProfiles(Canonical, ProfileError)) return false;
+		const auto* Match = Canonical->FindByPredicate(
 			[&CommandId](const auto& Profile) { return Profile.CommandId == CommandId; });
 		return Match && Match->OperationKind == TEXT("query");
 	}

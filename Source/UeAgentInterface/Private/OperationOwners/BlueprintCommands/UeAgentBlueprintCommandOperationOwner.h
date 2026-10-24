@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "CoreMinimal.h"
 
@@ -7,7 +9,7 @@ namespace UE::UAI::OperationOwners::BlueprintCommands
 {
 	UEAGENTINTERFACE_API bool TryCreateMechanicsHandlers(
 		TMap<FString, TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API CommandEdge::FUeAgentCommandResult Submit(
 		const TSharedRef<CommandEdge::IUeAgentCommandHandler>& Mechanics,

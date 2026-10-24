@@ -1,10 +1,13 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "HAL/PlatformTime.h"
 
 class FJsonObject;
 class FJsonValue;
+namespace UE::UAI::StateSemantic { class FUeAgentCanonicalValue; }
 
 struct UEAGENTINTERFACE_API FUeAgentHjsonSourceLocation
 {
@@ -12,24 +15,6 @@ struct UEAGENTINTERFACE_API FUeAgentHjsonSourceLocation
 	int32 Line = 0;
 	int32 Column = 0;
 };
-
-struct UEAGENTINTERFACE_API FUeAgentHjsonDiagnostic
-{
-	FString DialectId = TEXT("uai-hjson-authoring/1");
-	FString Phase;
-	FString Code;
-	FString SourceFile;
-	FString JsonPointer = TEXT("/");
-	int32 Line = 0;
-	int32 Column = 0;
-	FString Field;
-	FString Message;
-
-	FString ToString() const;
-};
-
-// Compatibility name retained for callers that model parse failures explicitly.
-using FUeAgentHjsonParseError = FString;
 
 struct UEAGENTINTERFACE_API FUeAgentStructuredHjsonDocument
 {
@@ -39,17 +24,6 @@ struct UEAGENTINTERFACE_API FUeAgentStructuredHjsonDocument
 	TMap<FString, FUeAgentHjsonSourceLocation> SourceLocations;
 
 	const FUeAgentHjsonSourceLocation* FindSourceLocation(const FString& JsonPointer) const;
-};
-
-struct UEAGENTINTERFACE_API FUeAgentStructuredResourceBudget
-{
-	int64 MaxInputBytes = 128ll * 1024ll * 1024ll;
-	int64 MaxNodes = 1000000ll;
-	int64 MaxItems = 2000000ll;
-	int64 MaxWorkUnits = 64ll * 1024ll * 1024ll;
-	int64 MaxOutputChars = 64ll * 1024ll * 1024ll;
-	double MaxElapsedSeconds = 30.0;
-	int64 MaxEstimatedMemoryBytes = 512ll * 1024ll * 1024ll;
 };
 
 struct UEAGENTINTERFACE_API FUeAgentStructuredResourceUsage
@@ -68,12 +42,8 @@ class UEAGENTINTERFACE_API FUeAgentStructuredResourceTracker
 public:
 	using FClock = TFunction<double()>;
 
-	explicit FUeAgentStructuredResourceTracker(
-		const FUeAgentStructuredResourceBudget& InBudget =
-			FUeAgentStructuredResourceBudget(),
-		FClock InClock = FClock())
-		: Budget(InBudget)
-		, Clock(MoveTemp(InClock))
+	explicit FUeAgentStructuredResourceTracker(FClock InClock = FClock())
+		: Clock(MoveTemp(InClock))
 	{
 		if (!Clock)
 		{
@@ -85,12 +55,11 @@ public:
 	bool ChargeInputBytes(
 		const int64 Amount,
 		const FString& JsonPointer,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return ChargeInteger(
 			TEXT("input_bytes"),
 			Amount,
-			Budget.MaxInputBytes,
 			Usage.InputBytes,
 			JsonPointer,
 			OutError);
@@ -99,12 +68,11 @@ public:
 	bool ChargeNodes(
 		const int64 Amount,
 		const FString& JsonPointer,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return ChargeInteger(
 			TEXT("nodes"),
 			Amount,
-			Budget.MaxNodes,
 			Usage.Nodes,
 			JsonPointer,
 			OutError);
@@ -113,12 +81,11 @@ public:
 	bool ChargeItems(
 		const int64 Amount,
 		const FString& JsonPointer,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return ChargeInteger(
 			TEXT("items"),
 			Amount,
-			Budget.MaxItems,
 			Usage.Items,
 			JsonPointer,
 			OutError);
@@ -127,13 +94,12 @@ public:
 	bool ChargeWorkUnits(
 		const int64 Amount,
 		const FString& JsonPointer,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const int64 PreviousWorkUnits = Usage.WorkUnits;
 		if (!ChargeInteger(
 				TEXT("work_units"),
 				Amount,
-				Budget.MaxWorkUnits,
 				Usage.WorkUnits,
 				JsonPointer,
 				OutError))
@@ -147,12 +113,11 @@ public:
 	bool ChargeOutputChars(
 		const int64 Amount,
 		const FString& JsonPointer,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return ChargeInteger(
 			TEXT("output_chars"),
 			Amount,
-			Budget.MaxOutputChars,
 			Usage.OutputChars,
 			JsonPointer,
 			OutError);
@@ -161,45 +126,25 @@ public:
 	bool ChargeEstimatedMemoryBytes(
 		const int64 Amount,
 		const FString& JsonPointer,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return ChargeInteger(
 			TEXT("estimated_memory_bytes"),
 			Amount,
-			Budget.MaxEstimatedMemoryBytes,
 			Usage.EstimatedMemoryBytes,
 			JsonPointer,
 			OutError);
 	}
 
-	bool Checkpoint(const FString& JsonPointer, FString& OutError)
+	bool Checkpoint(const FString& JsonPointer, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!OutError.IsEmpty())
 		{
 			return false;
 		}
 		Usage.ElapsedSeconds = FMath::Max(0.0, Clock() - StartSeconds);
-		if (Budget.MaxElapsedSeconds >= 0.0
-			&& Usage.ElapsedSeconds > Budget.MaxElapsedSeconds)
-		{
-			const FString Pointer = NormalizePointer(JsonPointer);
-			OutError = FString::Printf(
-				TEXT("resource_budget_exceeded:code=resource_budget_exceeded ")
-				TEXT("kind=elapsed_seconds resource=elapsed_seconds ")
-				TEXT("limit=%.17g consumed=%.17g path=%s pointer=%s"),
-				Budget.MaxElapsedSeconds,
-				Usage.ElapsedSeconds,
-				*Pointer,
-				*Pointer);
-			return false;
-		}
 		OutError.Reset();
 		return true;
-	}
-
-	const FUeAgentStructuredResourceBudget& GetBudget() const
-	{
-		return Budget;
 	}
 
 	const FUeAgentStructuredResourceUsage& GetUsage() const
@@ -222,10 +167,9 @@ private:
 	static bool ChargeInteger(
 		const TCHAR* Resource,
 		const int64 Amount,
-		const int64 Limit,
 		int64& InOutConsumed,
 		const FString& JsonPointer,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!OutError.IsEmpty())
 		{
@@ -234,16 +178,11 @@ private:
 		if (Amount < 0)
 		{
 			const FString Pointer = NormalizePointer(JsonPointer);
-			OutError = FString::Printf(
-				TEXT("resource_budget_invalid_charge:code=resource_budget_invalid_charge ")
-					TEXT("kind=%s resource=%s limit=%lld consumed=%lld ")
-					TEXT("path=%s pointer=%s"),
-				Resource,
-				Resource,
-				static_cast<long long>(Limit),
-				static_cast<long long>(Amount),
-				*Pointer,
-				*Pointer);
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("resource_charge_invalid_amount"),
+				TEXT("Resource accounting received a negative charge."), TEXT("resource_accounting"));
+			OutError.ResourceDimension = Resource;
+			OutError.ResourceObserved = Amount;
+			OutError.Source.JsonPath = Pointer;
 			return false;
 		}
 		if (Amount > MAX_int64 - InOutConsumed)
@@ -254,26 +193,10 @@ private:
 		{
 			InOutConsumed += Amount;
 		}
-		if (Limit >= 0 && InOutConsumed > Limit)
-		{
-			const FString Pointer = NormalizePointer(JsonPointer);
-			OutError = FString::Printf(
-				TEXT("resource_budget_exceeded:code=resource_budget_exceeded ")
-					TEXT("kind=%s resource=%s limit=%lld consumed=%lld ")
-					TEXT("path=%s pointer=%s"),
-				Resource,
-				Resource,
-				static_cast<long long>(Limit),
-				static_cast<long long>(InOutConsumed),
-				*Pointer,
-				*Pointer);
-			return false;
-		}
 		OutError.Reset();
 		return true;
 	}
 
-	FUeAgentStructuredResourceBudget Budget;
 	FUeAgentStructuredResourceUsage Usage;
 	FClock Clock;
 	double StartSeconds = 0.0;
@@ -282,13 +205,35 @@ private:
 struct UEAGENTINTERFACE_API FUeAgentStructuredHjsonWriteOptions
 {
 	TMap<FString, TArray<FString>> PreferredKeyOrderByJsonPointer;
-	FUeAgentStructuredResourceBudget ResourceBudget;
+	/** Optional semantic leaf representation; unset means literal HJSON kinds. */
+	TFunction<bool(const UE::UAI::StateSemantic::FUeAgentCanonicalValue&,
+		TFunctionRef<bool(int64)>, TSharedPtr<FJsonValue>&, UE::UAI::Contract::FDiagnostic&)> CanonicalLeafProjection;
 };
 
 class UEAGENTINTERFACE_API FUeAgentStructuredHjsonFormatter
 {
 public:
 	static const TCHAR* DialectId();
+	static bool TryWriteValue(
+		const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Value,
+		FString& OutText,
+		UE::UAI::Contract::FDiagnostic& OutError);
+	static bool TryWriteValue(
+		const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Value,
+		const FUeAgentStructuredHjsonWriteOptions& Options,
+		FString& OutText,
+		UE::UAI::Contract::FDiagnostic& OutError);
+
+	static bool TryWriteObject(
+		const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Object,
+		FString& OutText,
+		UE::UAI::Contract::FDiagnostic& OutError);
+	static bool TryWriteObject(
+		const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Object,
+		const FUeAgentStructuredHjsonWriteOptions& Options,
+		FUeAgentStructuredResourceTracker& ResourceTracker,
+		FString& OutText,
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	static FString WriteObject(const TSharedRef<FJsonObject>& Object);
 	static FString WriteObject(
@@ -303,38 +248,38 @@ public:
 	static bool TryWriteObject(
 		const TSharedRef<FJsonObject>& Object,
 		FString& OutText,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	static bool TryWriteObject(
 		const TSharedRef<FJsonObject>& Object,
 		const FUeAgentStructuredHjsonWriteOptions& Options,
 		FString& OutText,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	static bool TryWriteObject(
 		const TSharedRef<FJsonObject>& Object,
 		const FUeAgentStructuredHjsonWriteOptions& Options,
 		FUeAgentStructuredResourceTracker& ResourceTracker,
 		FString& OutText,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	static bool TryWriteValue(
 		const TSharedRef<FJsonValue>& Value,
 		FString& OutText,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	static bool TryWriteValue(
 		const TSharedRef<FJsonValue>& Value,
 		const FUeAgentStructuredHjsonWriteOptions& Options,
 		FString& OutText,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	static bool TryWriteValue(
 		const TSharedRef<FJsonValue>& Value,
 		const FUeAgentStructuredHjsonWriteOptions& Options,
 		FUeAgentStructuredResourceTracker& ResourceTracker,
 		FString& OutText,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	static bool IsBareKey(const FString& Key);
 
@@ -350,14 +295,7 @@ public:
 		const FString& Text,
 		const FString& FilePath,
 		FUeAgentStructuredHjsonDocument& OutDocument,
-		FString& OutError);
-
-	static bool ParseDocument(
-		const FString& Text,
-		const FString& FilePath,
-		const FUeAgentStructuredResourceBudget& ResourceBudget,
-		FUeAgentStructuredHjsonDocument& OutDocument,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	static bool ParseDocument(
 		const FString& Text,
@@ -365,18 +303,12 @@ public:
 		FUeAgentStructuredResourceTracker& ResourceTracker,
 		bool bInputPrecharged,
 		FUeAgentStructuredHjsonDocument& OutDocument,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	static bool ParseObject(
 		const FString& Text,
 		const FString& FilePath,
 		TSharedPtr<FJsonObject>& OutObject,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
-	static bool ParseObject(
-		const FString& Text,
-		const FString& FilePath,
-		const FUeAgentStructuredResourceBudget& ResourceBudget,
-		TSharedPtr<FJsonObject>& OutObject,
-		FString& OutError);
 };

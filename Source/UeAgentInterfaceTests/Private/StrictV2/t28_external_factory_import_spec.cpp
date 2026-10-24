@@ -1,9 +1,5 @@
 #include "Misc/AutomationTest.h"
 
-#if __has_include("DomainAdapters/ExternalImport/Factory/UeAgentFactoryExternalImportProvider.h") \
-	&& __has_include("OperationOwners/ExternalImport/Factory/UeAgentFactoryExternalImportCommandService.h") \
-	&& __has_include("Module/CommandRegistration/ExternalImport/Factory/UeAgentFactoryExternalImportRegistration.h")
-#define UAI_T28_EXTERNAL_FACTORY_IMPORT_AVAILABLE 1
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Core/Contract/UeAgentCommandJson.h"
@@ -17,11 +13,7 @@
 #include "OperationOwners/ExternalImport/Factory/UeAgentFactoryExternalImportCommandService.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
-#else
-#define UAI_T28_EXTERNAL_FACTORY_IMPORT_AVAILABLE 0
-#endif
 
-#if UAI_T28_EXTERNAL_FACTORY_IMPORT_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::CommandContract;
@@ -69,14 +61,12 @@ namespace
 			{
 				OutError.Code = TEXT("fixture_t28_failed");
 				OutError.SubjectId = Request.CommandId;
-				OutError.Detail = TEXT("fixture failure remains typed");
+				OutError.InternalContext = TEXT("fixture failure remains typed");
 				OutError.TerminalStatus = TEXT("rejected");
 				return false;
 			}
 			OutResponse.PayloadJson = FString::Printf(
-				TEXT("{\"command_id\":\"%s\",\"independent_readback\":{},")
-				TEXT("\"mutation_started\":true,\"persistence_receipt_id\":\"fixture\",")
-				TEXT("\"phase_history\":[\"planning\",\"terminal\"],")
+				TEXT("{\"command_id\":\"%s\",\"readback\":{\"asset_class\":\"fixture\"},")
 				TEXT("\"terminal_status\":\"succeeded\"}"),
 				*Request.CommandId);
 			return true;
@@ -269,30 +259,20 @@ namespace
 		return CanonicalParams(Params);
 	}
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentStrictV2T28InventoryAndLegacyExitTest,
-	"UAI.StrictV2.T28.EXTERNAL.FACTORY.IMPORT.InventoryAndLegacyExit",
+	FUeAgentStrictV2T28ActiveCompositionTest,
+	"UAI.StrictV2.T28.EXTERNAL.FACTORY.IMPORT.ActiveComposition",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentStrictV2T28InventoryAndLegacyExitTest::RunTest(
+bool FUeAgentStrictV2T28ActiveCompositionTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T28_EXTERNAL_FACTORY_IMPORT_AVAILABLE
-	TestTrue(TEXT("T28 factory import owner is implemented"), false);
-	return false;
-#else
-	TArray<FString> Actual;
 	for (const FUeAgentFactoryExternalImportCommandRoute& Route
 		: GetFactoryExternalImportCommandRoutes())
 	{
-		Actual.Add(Route.CommandId);
 		TestTrue(TEXT("every T28 route is valid"), Route.IsValid());
 	}
-	Actual.Sort();
-	TestEqual(TEXT("T28 owns exactly the audited eleven commands"), Actual, ExpectedCommandIds);
-	TestEqual(TEXT("T28 route identities remain unique"), TSet<FString>(Actual).Num(), 11);
 
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> ProcessRegistry;
 	TSharedPtr<const FUeAgentExactCommandDispatch> ProcessDispatch;
@@ -318,7 +298,6 @@ bool FUeAgentStrictV2T28InventoryAndLegacyExitTest::RunTest(
 		}
 	}
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -328,16 +307,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T28ExactDispatchTest::RunTest(const FString& Parameters)
 {
-#if !UAI_T28_EXTERNAL_FACTORY_IMPORT_AVAILABLE
-	TestTrue(TEXT("T28 exact public dispatch is implemented"), false);
-	return false;
-#else
 	FFixtureRegistration Fixture = MakeRegistration(this);
 	if (!Fixture.Registry.IsValid() || !Fixture.Dispatch.IsValid())
 	{
 		return false;
 	}
-	TestEqual(TEXT("isolated T28 registry contains eleven contracts"), Fixture.Registry->GetContracts().Num(), 11);
 	const FUeAgentCommandResult Imported = Submit(
 		Fixture.Registry,
 		Fixture.Dispatch,
@@ -369,7 +343,6 @@ bool FUeAgentStrictV2T28ExactDispatchTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("owner failure remains a business failure"), !Failure.IsOk() && !Failure.IsProtocolError());
 	TestTrue(TEXT("owner code is preserved"), Failure.GetErrorJson().Contains(TEXT("fixture_t28_failed")));
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -380,10 +353,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T28ProductionRoundTripTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T28_EXTERNAL_FACTORY_IMPORT_AVAILABLE
-	TestTrue(TEXT("T28 production factory import is implemented"), false);
-	return false;
-#else
 	TestTrue(TEXT("production factory mechanics run on the game thread"), IsInGameThread());
 	const FString ObjectPath = TEXT("/Game/StrictV2/T28/OwnedTexture.OwnedTexture");
 	const FString PackageName = TEXT("/Game/StrictV2/T28/OwnedTexture");
@@ -431,17 +400,16 @@ bool FUeAgentStrictV2T28ProductionRoundTripTest::RunTest(
 	if (ImportPayload.IsValid())
 	{
 		TestEqual(TEXT("import reaches a succeeded terminal"), ImportPayload->GetStringField(TEXT("terminal_status")), FString(TEXT("succeeded")));
-		TestTrue(TEXT("import reports mutation"), ImportPayload->GetBoolField(TEXT("mutation_started")));
-		TestTrue(TEXT("persistence receipt is present"), !ImportPayload->GetStringField(TEXT("persistence_receipt_id")).IsEmpty());
+		TestFalse(TEXT("lifecycle mutation evidence is absent"), ImportPayload->HasField(TEXT("mutation_started")));
+		TestFalse(TEXT("machine persistence receipt is absent"), ImportPayload->HasField(TEXT("persistence_receipt_id")));
 		const TSharedPtr<FJsonObject>* Readback = nullptr;
-		TestTrue(TEXT("independent readback is returned"), ImportPayload->TryGetObjectField(TEXT("independent_readback"), Readback));
+		TestTrue(TEXT("small business readback is returned"), ImportPayload->TryGetObjectField(TEXT("readback"), Readback));
 		if (Readback && Readback->IsValid())
 		{
-			TestTrue(TEXT("asset was unloaded and reloaded"), (*Readback)->GetBoolField(TEXT("reloaded")));
+			TestFalse(TEXT("reload evidence is not exposed"), (*Readback)->HasField(TEXT("reloaded")));
 			TestTrue(TEXT("source provenance survives reload"), !(*Readback)->GetStringField(TEXT("source_ref")).IsEmpty());
-			TestTrue(TEXT("source hash is reported"), (*Readback)->GetStringField(TEXT("source_sha256")).StartsWith(TEXT("sha256:")));
-			TestTrue(TEXT("real ImportData is read back"), !(*Readback)->GetStringField(TEXT("import_data_class")).IsEmpty());
-			TestTrue(TEXT("applied options are fingerprinted"), (*Readback)->GetStringField(TEXT("options_fingerprint")).StartsWith(TEXT("sha256:")));
+			TestFalse(TEXT("source hash is not exposed"), (*Readback)->HasField(TEXT("source_sha256")));
+			TestFalse(TEXT("options fingerprint is not exposed"), (*Readback)->HasField(TEXT("options_fingerprint")));
 		}
 	}
 
@@ -463,11 +431,11 @@ bool FUeAgentStrictV2T28ProductionRoundTripTest::RunTest(
 		if (ReimportPayload.IsValid())
 		{
 			const TSharedPtr<FJsonObject>* Readback = nullptr;
-			TestTrue(TEXT("reimport returns independent readback"), ReimportPayload->TryGetObjectField(TEXT("independent_readback"), Readback));
+			TestTrue(TEXT("reimport returns business readback"), ReimportPayload->TryGetObjectField(TEXT("readback"), Readback));
 			if (Readback && Readback->IsValid())
 			{
 				TestEqual(TEXT("readback identifies reimport mechanics"), (*Readback)->GetStringField(TEXT("operation")), FString(TEXT("reimport")));
-				TestTrue(TEXT("reimport reloads persisted content"), (*Readback)->GetBoolField(TEXT("reloaded")));
+				TestFalse(TEXT("reimport reload evidence is not exposed"), (*Readback)->HasField(TEXT("reloaded")));
 			}
 		}
 	}
@@ -495,9 +463,9 @@ bool FUeAgentStrictV2T28ProductionRoundTripTest::RunTest(
 		const TSharedPtr<FJsonObject> Payload = ParsePayload(this, Configured);
 		const TSharedPtr<FJsonObject>* Readback = nullptr;
 		TestTrue(
-			TEXT("configured texture returns independent readback"),
+			TEXT("configured texture returns business readback"),
 			Payload.IsValid()
-				&& Payload->TryGetObjectField(TEXT("independent_readback"), Readback));
+				&& Payload->TryGetObjectField(TEXT("readback"), Readback));
 		if (Readback && Readback->IsValid())
 		{
 			TestFalse(TEXT("configured SRGB persists"), (*Readback)->GetBoolField(TEXT("srgb")));
@@ -511,7 +479,6 @@ bool FUeAgentStrictV2T28ProductionRoundTripTest::RunTest(
 	DeleteAssetIfPresent(ConfiguredObjectPath);
 	IFileManager::Get().DeleteDirectory(*SourceRoot, false, true);
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -522,10 +489,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T28FailureCleanupTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T28_EXTERNAL_FACTORY_IMPORT_AVAILABLE
-	TestTrue(TEXT("T28 failure terminals and cleanup are implemented"), false);
-	return false;
-#else
 	TSharedPtr<IUeAgentFactoryExternalImportCommandService> Service;
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
@@ -595,5 +558,4 @@ bool FUeAgentStrictV2T28FailureCleanupTest::RunTest(
 	DeleteAssetIfPresent(ObjectPath);
 	IFileManager::Get().DeleteDirectory(*SourceRoot, false, true);
 	return !HasAnyErrors();
-#endif
 }

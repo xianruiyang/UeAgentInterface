@@ -1,4 +1,5 @@
 #include "Core/HjsonWorkspace/Workspace/UeAgentUnifiedHjsonWorkspace.h"
+#include "Dom/JsonValue.h"
 
 #include "Core/ContextResource/UeAgentContextResource.h"
 
@@ -10,14 +11,9 @@ namespace UE::UAI::HjsonWorkspace
 	{
 		bool FailResource(
 			FWorkspaceError& OutError,
-			const FUeAgentResourceBudgetExceeded& Error)
+			const FUeAgentResourceChargeError& Error)
 		{
-			OutError.Set(
-				Error.Code,
-				Error.Path,
-				TEXT("/"),
-				Error.Observed,
-				Error.bStoppedEarly);
+			OutError.SetFailure(Error);
 			return false;
 		}
 	}
@@ -30,12 +26,18 @@ namespace UE::UAI::HjsonWorkspace
 		, Layout(MoveTemp(InLayout))
 		, SemanticFingerprint(Model->GetCoreModel()->GetSemanticFingerprint())
 		, Index(MoveTemp(InIndex))
-		, bValid(
-			Model->IsValid()
-			&& Layout->GetSemanticFingerprint() == SemanticFingerprint
-			&& Index.UnitIds.Num()
-				== Model->GetCoreModel()->GetUnits().Num())
 	{
+		if (!Model->IsValid()) ValidationDiagnostic = Model->GetValidationDiagnostic();
+		else if (Layout->GetSemanticFingerprint() != SemanticFingerprint) {
+			ValidationDiagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_workspace_model_mismatch"), TEXT("The layout was built for a different semantic model."), TEXT("workspace_layout"));
+			ValidationDiagnostic.PropertyPath = TEXT("layout.model");
+		} else if (Index.UnitIds.Num() != Model->GetCoreModel()->GetUnits().Num()) {
+			ValidationDiagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_unified_workspace_invalid"), TEXT("The workspace unit index does not cover every semantic unit."), TEXT("workspace_layout"));
+			ValidationDiagnostic.PropertyPath = TEXT("unit_index");
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(Model->GetCoreModel()->GetUnits().Num());
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(Index.UnitIds.Num());
+		}
+
 	}
 
 	const FUnifiedHjsonSemanticModelRef&
@@ -69,7 +71,7 @@ namespace UE::UAI::HjsonWorkspace
 
 	bool FUnifiedHjsonWorkspace::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
 	bool TryCreateUnifiedHjsonWorkspace(
@@ -83,7 +85,7 @@ namespace UE::UAI::HjsonWorkspace
 		OutError.Reset();
 		if (!Model->IsValid())
 		{
-			OutError.Set(TEXT("hjson_unified_model_invalid"));
+			OutError.SetFailure(Model->GetValidationDiagnostic());
 			return false;
 		}
 		if (Layout->GetSemanticFingerprint()
@@ -91,7 +93,7 @@ namespace UE::UAI::HjsonWorkspace
 			|| Layout->GetModel()->GetSemanticFingerprint()
 				!= Model->GetCoreModel()->GetSemanticFingerprint())
 		{
-			OutError.Set(TEXT("hjson_workspace_model_mismatch"));
+			OutError.SetSourceFailure(TEXT("hjson_workspace_model_mismatch"), TEXT("The layout was built for a different semantic model."));
 			return false;
 		}
 
@@ -111,8 +113,7 @@ namespace UE::UAI::HjsonWorkspace
 				if (Index.FieldOwnerByFieldSetId.Contains(
 					Unit.GetFieldSetRef()))
 				{
-					OutError.Set(
-						TEXT("hjson_workspace_field_owner_conflict"),
+					OutError.SetSourceFailure(TEXT("hjson_workspace_field_owner_conflict"), TEXT("A field set is owned by more than one semantic unit."),
 						Unit.GetFieldSetRef());
 					return false;
 				}
@@ -130,7 +131,7 @@ namespace UE::UAI::HjsonWorkspace
 		}
 		Index.UnitIds.Sort();
 
-		FUeAgentResourceBudgetExceeded ResourceError;
+		FUeAgentResourceChargeError ResourceError;
 		if (!Resources.TryChargeMany(
 			{
 				{EUeAgentResourceDimension::Nodes, Index.UnitIds.Num()},
@@ -153,7 +154,7 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(Index)));
 		if (!Candidate->IsValid())
 		{
-			OutError.Set(TEXT("hjson_unified_workspace_invalid"));
+			OutError.SetFailure(Candidate->GetValidationDiagnostic());
 			return false;
 		}
 		OutWorkspace = MoveTemp(Candidate);

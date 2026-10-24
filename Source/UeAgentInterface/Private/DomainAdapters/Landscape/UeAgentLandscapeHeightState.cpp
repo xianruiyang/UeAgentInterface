@@ -1,5 +1,8 @@
 #include "DomainAdapters/Landscape/UeAgentLandscapeHeightState.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "DomainAdapters/ContentDiscovery/UeAgentEditorContentDiscovery.h"
+
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "DomainAdapters/LandscapeGeometryEffect/UeAgentLandscapeGeometryEffectCapabilities.h"
@@ -20,17 +23,47 @@ namespace UE::UAI::DomainAdapters::Landscape
 
 	namespace
 	{
-		bool Fail(
-			FLandscapeHeightStateError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Target = TEXT(""))
 		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target;
 			return false;
+		}
+
+		FLandscapeHeightStateError HeightFailure(FString Code, FString Reason, FString Target, FString Field,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			auto Error = FLandscapeHeightStateError::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("landscape_state"));
+			Error.SourceKind = TEXT("native_result");
+			Error.TargetPath = MoveTemp(Target);
+			Error.PropertyPath = MoveTemp(Field);
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			Error.ActualValuePresent = Error.ActualValue.IsValid();
+			Error.ExpectedValuePresent = Error.ExpectedValue.IsValid();
+			return Error;
+		}
+
+		FLandscapeHeightStateError HeightConditionFailure(FString Code, FString Reason, FString Target, FString Field)
+		{
+			return HeightFailure(MoveTemp(Code), MoveTemp(Reason), MoveTemp(Target), MoveTemp(Field),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		}
+
+		FLandscapeHeightStateError LandscapeTypeFailure(UObject* Object, const UWorld& World, const FString& Target)
+		{
+			if (!IsValid(Object))
+				return HeightConditionFailure(TEXT("landscape_height_target_type_invalid"),
+					TEXT("The resolved Landscape object is missing or no longer valid."), Target, TEXT("/resolved_object_valid"));
+			if (!Cast<ALandscape>(Object))
+				return HeightFailure(TEXT("landscape_height_target_type_invalid"),
+					TEXT("The resolved target is not a Landscape actor."), Target, TEXT("/native_class"),
+					MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()), MakeShared<FJsonValueString>(ALandscape::StaticClass()->GetPathName()));
+			auto Error = HeightConditionFailure(TEXT("landscape_height_target_type_invalid"),
+				TEXT("The resolved Landscape actor belongs to a different world."), Target, TEXT("/world_matches_requested"));
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Object->GetWorld() ? Object->GetWorld()->GetPathName() : FString());
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(World.GetPathName());
+			return Error;
 		}
 
 		TArray<TSharedPtr<FJsonValue>> IntegerPoint(
@@ -71,11 +104,16 @@ namespace UE::UAI::DomainAdapters::Landscape
 				IntegerPoint(MaxInclusive));
 			return Result;
 		}
-	}
 
-	int64 FLandscapeHeightState::GetSampleCount() const
-	{
-		return Heights.Num();
+		TSharedRef<FJsonObject> ScaleObject(const FVector& Scale)
+		{
+			const TSharedRef<FJsonObject> Result =
+				MakeShared<FJsonObject>();
+			Result->SetNumberField(TEXT("x"), Scale.X);
+			Result->SetNumberField(TEXT("y"), Scale.Y);
+			Result->SetNumberField(TEXT("z"), Scale.Z);
+			return Result;
+		}
 	}
 
 	bool TryResolveLandscapeHeightTarget(
@@ -91,14 +129,14 @@ namespace UE::UAI::DomainAdapters::Landscape
 		const FString Target = ExactTarget.TrimStartAndEnd();
 		if (Target.IsEmpty() || Target != ExactTarget)
 		{
-			return Fail(
-				OutError,
-				TEXT("landscape_height_target_invalid"),
-				ExactTarget);
+			return Fail(OutError, HeightFailure(TEXT("landscape_height_target_invalid"),
+				Target.IsEmpty() ? TEXT("The exact Landscape target is empty.") : TEXT("The exact Landscape target contains leading or trailing whitespace."),
+				ExactTarget, TEXT("/target"), MakeShared<FJsonValueString>(ExactTarget),
+				MakeShared<FJsonValueString>(Target.IsEmpty() ? FString(TEXT("non-empty exact target")) : Target)));
 		}
 
 		AActor* ManagedActor = nullptr;
-		FString ManagedError;
+		UE::UAI::Contract::FDiagnostic ManagedError;
 		const FString ManagedFolder =
 			UeAgentLevelAuthoring::MakeManagedActorFolderPath(
 				TEXT("landscape"));
@@ -113,82 +151,73 @@ namespace UE::UAI::DomainAdapters::Landscape
 			if (!OutLandscape || OutLandscape->GetWorld() != &World)
 			{
 				OutLandscape = nullptr;
-				return Fail(
-					OutError,
-					TEXT("landscape_height_target_type_invalid"),
-					Target,
-					ManagedActor
-						? ManagedActor->GetClass()->GetPathName()
-						: FString());
+				return Fail(OutError, LandscapeTypeFailure(ManagedActor, World, Target));
 			}
 			return true;
 		}
-		if (!ManagedError.StartsWith(
-				TEXT("level_managed_actor_not_found:"),
-				ESearchCase::CaseSensitive))
+		if (ManagedError.Code != TEXT("level_managed_actor_not_found"))
 		{
-			return Fail(
-				OutError,
-				TEXT("landscape_height_managed_identity_invalid"),
-				Target,
-				ManagedError);
+			return Fail(OutError, ManagedError, Target);
 		}
 
 		UObject* Object = nullptr;
+		FExecutionMutationError ReferenceError;
 		if (OperationReferenceResolver)
 		{
-			FExecutionMutationError ResolverError;
 			if (OperationReferenceResolver->TryResolveReference(
 					World,
 					Target,
 					Object,
-					ResolverError))
+					ReferenceError))
 			{
 				OutLandscape = Cast<ALandscape>(Object);
 				if (!OutLandscape || OutLandscape->GetWorld() != &World)
 				{
 					OutLandscape = nullptr;
-					return Fail(
-						OutError,
-						TEXT("landscape_height_target_type_invalid"),
-						Target,
-						IsValid(Object)
-							? Object->GetClass()->GetPathName()
-							: FString());
+					return Fail(OutError, LandscapeTypeFailure(Object, World, Target));
 				}
 				return true;
 			}
 		}
 
+		FString ObjectPath = Target;
+		UE::UAI::ContentDiscovery::FContentDiscoveryError ResolveError;
+		if (!ContentDiscovery::TryResolveEditorContentReference(ObjectPath, FString(), ResolveError))
+		{
+			ResolveError.Append(ReferenceError);
+			return Fail(OutError, MoveTemp(ResolveError), Target);
+		}
 		Object = StaticFindObject(
 			UObject::StaticClass(),
 			nullptr,
-			*Target);
+			*ObjectPath);
 		if (!Object)
 		{
 			Object = StaticLoadObject(
 				UObject::StaticClass(),
 				nullptr,
-				*Target,
+				*ObjectPath,
 				nullptr,
 				LOAD_NoWarn);
 		}
-		if (!IsValid(Object) || Object->GetPathName() != Target)
+		if (!IsValid(Object) || Object->GetPathName() != ObjectPath)
 		{
-			return Fail(
-				OutError,
-				TEXT("landscape_height_target_not_found"),
-				Target);
+			auto Error = HeightConditionFailure(TEXT("landscape_height_target_not_found"),
+				!IsValid(Object) ? TEXT("No valid native object was found for the exact Landscape target.")
+					: TEXT("The resolved native object does not match the exact Landscape reference."), Target,
+				!IsValid(Object) ? TEXT("/resolved_object_valid") : TEXT("/resolved_object_matches_reference"));
+			if (IsValid(Object)) Error.ActualEvidence = MakeShared<FJsonValueString>(Object->GetPathName());
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(ObjectPath);
+			Error.Append(ReferenceError);
+			return Fail(OutError, MoveTemp(Error));
 		}
 		OutLandscape = Cast<ALandscape>(Object);
 		if (!OutLandscape || OutLandscape->GetWorld() != &World)
 		{
 			OutLandscape = nullptr;
-			return Fail(
-				OutError,
-				TEXT("landscape_height_target_type_invalid"),
-				Target,
-				Object->GetClass()->GetPathName());
+			auto Error = LandscapeTypeFailure(Object, World, Target);
+			Error.Append(ReferenceError);
+			return Fail(OutError, MoveTemp(Error));
 		}
 		return true;
 	}
@@ -197,7 +226,6 @@ namespace UE::UAI::DomainAdapters::Landscape
 		ALandscape& Landscape,
 		const FIntPoint& RegionMinInclusive,
 		const FIntPoint& RegionMaxInclusive,
-		const int64 MaxSamples,
 		FLandscapeHeightState& OutState,
 		FLandscapeHeightStateError& OutError)
 	{
@@ -205,10 +233,8 @@ namespace UE::UAI::DomainAdapters::Landscape
 		OutError = {};
 		if (!IsInGameThread())
 		{
-			return Fail(
-				OutError,
-				TEXT("landscape_height_thread_invalid"),
-				Landscape.GetPathName());
+			return Fail(OutError, HeightConditionFailure(TEXT("landscape_height_thread_invalid"),
+				TEXT("Landscape height reads must run on GameThread."), Landscape.GetPathName(), TEXT("/game_thread")));
 		}
 		ULandscapeInfo* Info = Landscape.GetLandscapeInfo();
 		int32 MinX = 0;
@@ -222,10 +248,9 @@ namespace UE::UAI::DomainAdapters::Landscape
 				MaxX,
 				MaxY))
 		{
-			return Fail(
-				OutError,
-				TEXT("landscape_height_extent_unavailable"),
-				Landscape.GetPathName());
+			return Fail(OutError, HeightConditionFailure(TEXT("landscape_height_extent_unavailable"),
+				!Info ? TEXT("The Landscape has no native LandscapeInfo.") : TEXT("The native Landscape extent could not be read."),
+				Landscape.GetPathName(), !Info ? TEXT("/landscape_info_present") : TEXT("/extent_available")));
 		}
 
 		const int64 Width =
@@ -241,26 +266,25 @@ namespace UE::UAI::DomainAdapters::Landscape
 			|| RegionMaxInclusive.X > MaxX
 			|| RegionMaxInclusive.Y > MaxY)
 		{
-			return Fail(
-				OutError,
-				TEXT("landscape_height_region_out_of_bounds"),
-				Landscape.GetPathName());
+			return Fail(OutError, HeightFailure(TEXT("landscape_height_region_out_of_bounds"),
+				Width <= 0 || Height <= 0 ? TEXT("The region minimum must not exceed its inclusive maximum.")
+					: TEXT("The requested height region extends outside the native Landscape extent."),
+				Landscape.GetPathName(), TEXT("/region"),
+				MakeShared<FJsonValueObject>(RegionObject(RegionMinInclusive, RegionMaxInclusive)),
+				MakeShared<FJsonValueObject>(RegionObject(FIntPoint(MinX, MinY), FIntPoint(MaxX, MaxY)))));
 		}
-		if (MaxSamples <= 0
-			|| Width > MAX_int32
+		if (Width > MAX_int32
 			|| Height > MAX_int32
-			|| Width > MaxSamples / Height
 			|| Width * Height > MAX_int32)
 		{
-			return Fail(
-				OutError,
-				TEXT("landscape_height_sample_limit_exceeded"),
-				Landscape.GetPathName(),
-				FString::Printf(
-					TEXT("width=%lld,height=%lld,max_samples=%lld"),
-					Width,
-					Height,
-					MaxSamples));
+			auto Actual = MakeShared<FJsonObject>();
+			Actual->SetNumberField(TEXT("width"), Width);
+			Actual->SetNumberField(TEXT("height"), Height);
+			if (Width <= MAX_int32 && Height <= MAX_int32)
+				Actual->SetStringField(TEXT("sample_count"), LexToString(Width * Height));
+			return Fail(OutError, HeightFailure(TEXT("landscape_height_sample_limit_exceeded"),
+				TEXT("The region width, height and total sample count must each fit the native 32-bit sample limit."),
+				Landscape.GetPathName(), TEXT("/region/sample_limit"), MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueNumber>(MAX_int32)));
 		}
 
 		const int32 SampleCount = static_cast<int32>(Width * Height);
@@ -324,10 +348,8 @@ namespace UE::UAI::DomainAdapters::Landscape
 				true);
 			if (!ComponentData.GetRawHeightData())
 			{
-				return Fail(
-					OutError,
-					TEXT("landscape_height_data_unavailable"),
-					Component->GetPathName());
+				return Fail(OutError, HeightConditionFailure(TEXT("landscape_height_data_unavailable"),
+					TEXT("The native Landscape component has no readable raw height data."), Component->GetPathName(), TEXT("/raw_height_data_present")));
 			}
 			for (int32 Y = ReadMin.Y; Y <= ReadMax.Y; ++Y)
 			{
@@ -348,29 +370,17 @@ namespace UE::UAI::DomainAdapters::Landscape
 				}
 			}
 		}
-		if (SamplePresent.CountSetBits() != SampleCount)
+		const int32 AvailableSamples = SamplePresent.CountSetBits();
+		if (AvailableSamples != SampleCount)
 		{
-			return Fail(
-				OutError,
-				TEXT("landscape_height_region_unavailable"),
-				Landscape.GetPathName(),
-				FString::Printf(
-					TEXT("available_samples=%d,required_samples=%d"),
-					SamplePresent.CountSetBits(),
-					SampleCount));
+			return Fail(OutError, HeightFailure(TEXT("landscape_height_region_unavailable"),
+				TEXT("The Landscape components did not provide every height sample in the requested region."),
+				Landscape.GetPathName(), TEXT("/region/available_samples"), MakeShared<FJsonValueNumber>(AvailableSamples), MakeShared<FJsonValueNumber>(SampleCount)));
 		}
 
 		OutState.ActorPath = Landscape.GetPathName();
-		OutState.ManagedId =
-			UeAgentLevelAuthoring::GetManagedActorId(Landscape);
-		OutState.ManagedFolder =
-			UeAgentLevelAuthoring::GetActorFolderPathText(Landscape);
-		OutState.bManagedTagPresent = Landscape.ActorHasTag(
-			UeAgentLevelAuthoring::GetManagedActorMarkerTag());
 		OutState.ExtentMinInclusive = FIntPoint(MinX, MinY);
 		OutState.ExtentMaxInclusive = FIntPoint(MaxX, MaxY);
-		OutState.RegionMinInclusive = RegionMinInclusive;
-		OutState.RegionMaxInclusive = RegionMaxInclusive;
 		OutState.Scale = Landscape.GetActorScale3D();
 		OutState.Heights.Reserve(Encoded.Num());
 		for (const uint16 Value : Encoded)
@@ -381,47 +391,25 @@ namespace UE::UAI::DomainAdapters::Landscape
 		return true;
 	}
 
-	TSharedRef<FJsonObject> BuildLandscapeHeightStateObject(
-		const FString& ExactTarget,
+	TSharedRef<FJsonObject> BuildLandscapeHeightQueryObject(
 		const FLandscapeHeightState& State)
 	{
 		const TSharedRef<FJsonObject> Result =
 			MakeShared<FJsonObject>();
-		Result->SetStringField(TEXT("target_ref"), ExactTarget);
-		Result->SetStringField(TEXT("actor_path"), State.ActorPath);
-		Result->SetStringField(TEXT("managed_id"), State.ManagedId);
-		Result->SetStringField(
-			TEXT("managed_folder"),
-			State.ManagedFolder);
-		Result->SetBoolField(
-			TEXT("managed_tag_present"),
-			State.bManagedTagPresent);
 		Result->SetObjectField(
 			TEXT("extent"),
 			RegionObject(
 				State.ExtentMinInclusive,
 				State.ExtentMaxInclusive));
 		Result->SetObjectField(
-			TEXT("region"),
-			RegionObject(
-				State.RegionMinInclusive,
-				State.RegionMaxInclusive));
-		Result->SetArrayField(
-			TEXT("scale"),
-			NumberArray({
-				State.Scale.X,
-				State.Scale.Y,
-				State.Scale.Z,
-			}));
+			TEXT("scale_cm_per_local_unit"),
+			ScaleObject(State.Scale));
 		Result->SetStringField(
 			TEXT("height_encoding"),
 			TEXT("landscape_local_height"));
 		Result->SetStringField(
 			TEXT("height_order"),
 			TEXT("row_major_x_fastest"));
-		Result->SetNumberField(
-			TEXT("sample_count"),
-			State.GetSampleCount());
 		Result->SetArrayField(
 			TEXT("heights"),
 			NumberArray(State.Heights));

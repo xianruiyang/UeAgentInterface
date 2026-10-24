@@ -13,25 +13,35 @@ namespace UE::UAI::OperationOwners::Landscape
 
 	namespace
 	{
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail,
-			const FString& TerminalStatus = TEXT("not_started"),
-			const bool bRetrySafe = true)
+		UE::UAI::Contract::FDiagnostic CommandFailure(FString Code, const FString& Subject, FString Reason = FString(), FString InternalContext = FString())
 		{
-			const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(TEXT("code"), Code);
-			Object->SetStringField(TEXT("subject_id"), SubjectId);
-			Object->SetStringField(TEXT("detail"), Detail);
-			Object->SetStringField(TEXT("terminal_status"), TerminalStatus);
-			Object->SetBoolField(TEXT("retry_safe"), bRetrySafe);
-			FString Text;
-			const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>>
-				Writer = TJsonWriterFactory<TCHAR,
-					TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Object, Writer);
-			return Text;
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("command"), MoveTemp(InternalContext), Subject);
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.TerminalStatus = TEXT("not_started");
+			Diagnostic.bRetrySafe = true;
+			Diagnostic.MutationStarted = false;
+			Diagnostic.MutationMayHaveStarted = false;
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic InvocationFailure(const FString& Code, const FString& Subject, const UE::UAI::Contract::FDiagnostic& Cause)
+		{
+			auto Diagnostic = CommandFailure(Code, Subject, TEXT("The operation runtime could not be prepared."));
+			if (!Cause.IsEmpty()) Diagnostic.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(Cause);
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic ProjectionFailure(const FString& Code, const UE::UAI::Contract::FDiagnostic& Cause,
+			const BindingGateway::Operation::FOperationLifecycleReceipt& Receipt)
+		{
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(Code, TEXT("The operation completed, but its result payload could not be produced."), TEXT("result_projection"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (!Cause.IsEmpty()) Diagnostic.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(Cause);
+			Diagnostic.TerminalStatus = BindingGateway::Operation::LexToString(Receipt.GetStatus());
+			Diagnostic.MutationStarted = Receipt.DidMutationStart();
+			Diagnostic.MutationMayHaveStarted = Receipt.DidMutationStart();
+			Diagnostic.bRetrySafe = Receipt.IsRetrySafe();
+			return Diagnostic;
 		}
 	}
 
@@ -79,14 +89,9 @@ namespace UE::UAI::OperationOwners::Landscape
 			return FUeAgentCommandResult::Failure(
 				Request,
 				TEXT("{}"),
-				ErrorJson(
-					InvocationError.GetDetail().StartsWith(
-						TEXT("simple_authoring_handler_missing:"))
+				InvocationFailure(InvocationError.Code == TEXT("simple_authoring_handler_missing")
 						? FString(TEXT("landscape_command_not_bound"))
-						: FString(TEXT("landscape_runtime_unavailable")),
-					Request.GetCommandId(),
-					InvocationError.GetCode() + TEXT(":")
-						+ InvocationError.GetDetail()));
+						: FString(TEXT("landscape_runtime_unavailable")), Request.GetCommandId(), InvocationError));
 		}
 		BindingGateway::Operation::FOperationLifecycleReceipt Receipt;
 		if (!Invocation.GetService()->Run(
@@ -94,35 +99,16 @@ namespace UE::UAI::OperationOwners::Landscape
 				*Invocation.GetAuthorization(),
 				Receipt))
 		{
-			FString Detail = Invocation.GetContext()->GetFailureDetail();
-			if (Detail.IsEmpty())
-			{
-				Detail = TEXT("phase_history:")
-					+ FString::Join(Receipt.GetPhaseHistory(), TEXT(","));
-			}
-			return FUeAgentCommandResult::Failure(
-				Request,
-				TEXT("{}"),
-				ErrorJson(
-					Receipt.GetErrorCode(),
-					Request.GetCommandId(),
-					Detail,
-					BindingGateway::Operation::LexToString(
-						Receipt.GetStatus()),
-					Receipt.IsRetrySafe()));
+			auto Diagnostic = Receipt.GetDiagnostic();
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetCommandId();
+			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
 		}
 		FString Payload;
-		FString PayloadError;
+		UE::UAI::Contract::FDiagnostic PayloadError;
 		if (!Invocation.GetContext()->TryBuildSuccessPayload(
 				Receipt, Payload, PayloadError))
 		{
-			return FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(),
-				Request.GetRequestId(),
-				Request.GetCommandId(),
-				Request.GetCommandBindingHash(),
-				TEXT("domain_operation_result_invalid"),
-				PayloadError);
+			return FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(), Request.GetCommandId(), Request.GetCommandBindingHash(), ProjectionFailure(TEXT("domain_operation_result_invalid"), PayloadError, Receipt));
 		}
 		return FUeAgentCommandResult::Success(Request, MoveTemp(Payload));
 	}

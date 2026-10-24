@@ -1,9 +1,16 @@
 #include "QueryOwners/UmgWidget/UeAgentUmgWidgetQueryOwner.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Core/ContentDiscovery/UeAgentReadOnlyCandidateBatch.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
 
 #include "Algo/Sort.h"
 #include "Blueprint/UserWidget.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/UeAgentContentDiscovery.h"
 #include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
+#include "Dom/JsonValue.h"
+#include "UObject/SoftObjectPath.h"
 #include "WidgetBlueprint.h"
 
 namespace UE::UAI::QueryOwners::UmgWidget
@@ -12,32 +19,31 @@ namespace UE::UAI::QueryOwners::UmgWidget
 
 	namespace
 	{
-		const FString CoverageScope =
-			TEXT("umg_loaded_widget_class_and_blueprint_asset_approximation");
 
-		bool Fail(
-			FUmgWidgetCandidateQueryError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool ForwardDiagnostic(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
 			return false;
 		}
 
-		FString Normalize(const FString& Value)
+		UE::UAI::Contract::FDiagnostic CandidateDiagnostic(FString Code, FString Subject, FString PublicReason, FString InternalContext = FString())
 		{
-			FString Result;
-			for (const TCHAR Character : Value.ToLower())
-			{
-				if (FChar::IsAlnum(Character))
-				{
-					Result.AppendChar(Character);
-				}
-			}
-			return Result;
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(PublicReason), TEXT("candidate_query"), MoveTemp(InternalContext), MoveTemp(Subject));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic CandidateCause(FString Code, const FString& Subject,
+			const UE::UAI::Contract::FDiagnostic& Cause, FString FallbackReason)
+		{
+			auto Diagnostic = Cause.IsEmpty()
+				? CandidateDiagnostic(MoveTemp(Code), Subject, MoveTemp(FallbackReason))
+				: UE::UAI::Contract::FDiagnostic::WrapFailure(MoveTemp(Code), Cause);
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Subject;
+			return Diagnostic;
 		}
 
 		bool ReadTargetRevision(
@@ -52,17 +58,26 @@ namespace UE::UAI::QueryOwners::UmgWidget
 			}
 			FUeAgentContentGraphCapture Capture;
 			FUeAgentContentGraphReadError ReadError;
-			if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-					Target, Capture, ReadError)
-				|| Capture.Revision.IsEmpty())
+			const bool bCaptured = FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
+				Target, Capture, ReadError);
+			if (!bCaptured || Capture.Revision.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					ReadError.Code.IsEmpty()
-						? FString(TEXT("umg_widget_candidate_target_readback_failed"))
-						: ReadError.Code,
-					ReadError.SubjectId,
-					ReadError.Detail);
+				if (!ReadError.IsEmpty())
+				{
+					if (ReadError.TargetPath.IsEmpty()) ReadError.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Target);
+					return ForwardDiagnostic(OutError, MoveTemp(ReadError));
+				}
+				auto Diagnostic = CandidateDiagnostic(TEXT("umg_widget_candidate_target_readback_failed"), Target.GetPathName(),
+					bCaptured ? TEXT("The Widget Blueprint readback did not provide a target revision.")
+						: TEXT("The Widget Blueprint readback failed without a diagnostic."));
+				Diagnostic.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Target);
+				if (bCaptured)
+				{
+					Diagnostic.PropertyPath = TEXT("revision");
+					Diagnostic.ActualValuePresent = false;
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("target revision"));
+				}
+				return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 			}
 			OutRevision = Capture.Revision;
 			return true;
@@ -78,15 +93,14 @@ namespace UE::UAI::QueryOwners::UmgWidget
 			Params.AssetPath = Target.GetPathName();
 			TArray<UeAgentPaletteSearch::FCandidate> RawCandidates;
 			TArray<FString> Warnings;
-			FString SearchError;
+			UE::UAI::Contract::FDiagnostic SearchError;
 			if (!UeAgentPaletteSearch::CollectComponentWidgetCandidates(
 					Params, RawCandidates, Warnings, SearchError))
 			{
-				return Fail(
-					OutError,
-					TEXT("umg_widget_candidate_catalog_failed"),
-					Target.GetPathName(),
-					SearchError);
+				auto Diagnostic = CandidateCause(TEXT("umg_widget_candidate_catalog_failed"), Target.GetPathName(),
+					SearchError, TEXT("The Widget class/template catalog could not be collected."));
+				if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Target);
+				return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 			}
 
 			OutCandidates.Reset();
@@ -113,21 +127,18 @@ namespace UE::UAI::QueryOwners::UmgWidget
 				Candidate.Summary = Raw.Tooltip;
 				Candidate.ClassPath = Raw.FullName;
 				Candidate.SourceOrigin = Raw.SourceOrigin;
-				Candidate.bSupported = WidgetClass
-					&& WidgetClass->IsChildOf(UWidget::StaticClass())
-					&& !WidgetClass->IsChildOf(UUserWidget::StaticClass())
-					&& !WidgetClass->HasAnyClassFlags(
-						CLASS_Abstract | CLASS_Deprecated
-						| CLASS_NewerVersionExists | CLASS_CompiledFromBlueprint);
-				Candidate.ActionKind = Candidate.bSupported
-					? FString(TEXT("widget_template_class"))
-					: FString(TEXT("widget_template_asset_search_only"));
-				Candidate.WriteSupport = Candidate.bSupported
-					? FString(TEXT("widget_template_class_create"))
-					: FString(TEXT("search_only"));
-				Candidate.SupportReason = Candidate.bSupported
-					? FString(TEXT("public_widget_template_class"))
-					: FString(TEXT("asset_or_user_widget_template_not_yet_supported"));
+				Candidate.SelectionFields.Add(TEXT("form"),
+					WidgetClass && !WidgetClass->HasAnyClassFlags(CLASS_CompiledFromBlueprint)
+						? TEXT("native widget") : TEXT("widget blueprint"));
+				Candidate.SelectionFields.Add(TEXT("class"), FSoftClassPath(Candidate.ClassPath).GetAssetName());
+				const FString Source = ContentDiscovery::MakeReadableDiscoveryPath(Candidate.ClassPath);
+				if (!Source.IsEmpty()) Candidate.SelectionFields.Add(TEXT("class_source"), Source);
+				// The native palette policy accepts both loaded classes and asset-backed templates.
+				// Class loading belongs to selection/creation, not catalog eligibility.
+				Candidate.bSupported = true;
+				Candidate.ActionKind = TEXT("widget_template_class");
+				Candidate.WriteSupport = TEXT("widget_template_class_create");
+				Candidate.SupportReason = TEXT("native_widget_template");
 
 				Raw.Kind = TEXT("umg_widget_target_context");
 				Raw.Name = Candidate.Name;
@@ -135,7 +146,7 @@ namespace UE::UAI::QueryOwners::UmgWidget
 				Raw.FullName = Candidate.ClassPath;
 				Raw.CategoryPath = Candidate.Category;
 				Raw.Tooltip = Candidate.Summary;
-				FString IdentityError;
+				UE::UAI::Contract::FDiagnostic IdentityError;
 				if (!UeAgentPaletteSearch::SetCandidateIdentity(
 						TEXT("umg_widget_target_context"),
 						Target.GetPathName() + TEXT("|") + Candidate.ClassPath,
@@ -143,12 +154,13 @@ namespace UE::UAI::QueryOwners::UmgWidget
 						Raw,
 						IdentityError))
 				{
-					return Fail(
-						OutError,
-						TEXT("umg_widget_candidate_identity_failed"),
-						Candidate.ClassPath,
-						IdentityError);
+					auto Diagnostic = CandidateCause(TEXT("umg_widget_candidate_identity_failed"), Candidate.ClassPath,
+						IdentityError, TEXT("The Widget candidate could not be assigned an identity."));
+					if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Target);
+					if (Diagnostic.CandidateName.IsEmpty()) Diagnostic.CandidateName = Candidate.Name;
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 				}
+				Candidate.Identity = Raw.Identity;
 				Candidate.Id = Raw.GetPublicId();
 				OutCandidates.Add(MoveTemp(Candidate));
 			}
@@ -166,14 +178,29 @@ namespace UE::UAI::QueryOwners::UmgWidget
 
 		bool MatchesQuery(
 			const FUmgWidgetCandidate& Candidate,
-			const FString& Query)
+			const FString& Query,
+			int32& MatchScore)
 		{
-			const FString Needle = Normalize(Query);
-			return Needle.IsEmpty()
-				|| Normalize(Candidate.Name + TEXT("|")
-					+ Candidate.Label + TEXT("|")
-					+ Candidate.Category + TEXT("|")
-					+ Candidate.ClassPath).Contains(Needle);
+			ContentDiscovery::FContentDiscoveryRequest Request;
+			Request.Query = Query;
+			Request.MatchMode =
+				ContentDiscovery::EContentDiscoveryMatchMode::Text;
+			const TArray<FString> ExtraTerms{
+				Candidate.Name,
+				Candidate.Category,
+				Candidate.ClassPath,
+				Candidate.Summary,
+				Candidate.ActionKind,
+				Candidate.Kind,
+			};
+			FString MatchReason;
+			return ContentDiscovery::TryScoreContentDiscoveryMatch(
+				Request,
+				Candidate.Id,
+				Candidate.Label,
+				ExtraTerms,
+				MatchScore,
+				MatchReason);
 		}
 	}
 
@@ -181,31 +208,20 @@ namespace UE::UAI::QueryOwners::UmgWidget
 		UWidgetBlueprint& Target,
 		const FString& Query,
 		FUmgWidgetCandidateQueryResult& OutResult,
-		FUmgWidgetCandidateQueryError& OutError,
-		const int32 Limit,
-		const int32 Cursor,
-		const FString& CandidateId)
+		FUmgWidgetCandidateQueryError& OutError)
 	{
 		OutResult = {};
 		OutError = {};
 		if (!IsInGameThread())
 		{
-			return Fail(
-				OutError,
-				TEXT("umg_widget_candidate_game_thread_required"),
-				Target.GetPathName());
+			auto Diagnostic = CandidateDiagnostic(TEXT("umg_widget_candidate_game_thread_required"), Target.GetPathName(),
+				TEXT("Widget candidates must be queried on the Editor game thread."));
+			Diagnostic.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Target);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("game thread"));
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(TEXT("other thread"));
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 		}
-		if (Limit < 1 || Limit > 64 || Cursor < 0)
-		{
-			return Fail(
-				OutError,
-				TEXT("umg_widget_candidate_page_invalid"),
-				Target.GetPathName(),
-				TEXT("limit must be 1..64 and cursor must be non-negative"));
-		}
-
-		OutResult.Target = Target.GetPathName();
-		OutResult.CoverageScope = CoverageScope;
+		OutResult.Target = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Target);
 		if (!ReadTargetRevision(Target, OutResult.TargetRevision, OutError))
 		{
 			return false;
@@ -215,97 +231,88 @@ namespace UE::UAI::QueryOwners::UmgWidget
 		{
 			return false;
 		}
-		const FString CleanId = CandidateId.TrimStartAndEnd();
-		TArray<FUmgWidgetCandidate> Matches;
-		for (FUmgWidgetCandidate& Candidate : Catalog)
+		TArray<int32> MatchedIndices;
+		TMap<int32, int32> Scores;
+		for (int32 CatalogIndex = 0; CatalogIndex < Catalog.Num(); ++CatalogIndex)
 		{
-			if ((!CleanId.IsEmpty()
-					&& !Candidate.Id.Equals(CleanId, ESearchCase::IgnoreCase))
-				|| !MatchesQuery(Candidate, Query))
+			int32 Score = 0;
+			if (MatchesQuery(Catalog[CatalogIndex], Query, Score))
 			{
-				continue;
+				if (!ContentDiscovery::IsReadableDiscoveryName(Catalog[CatalogIndex].Name)) continue;
+				MatchedIndices.Add(CatalogIndex);
+				Scores.Add(CatalogIndex, Score);
 			}
-			Matches.Add(MoveTemp(Candidate));
 		}
-		if (!CleanId.IsEmpty() && Matches.IsEmpty())
+		MatchedIndices.Sort([&Scores](int32 A, int32 B)
 		{
-			return Fail(
-				OutError,
-				TEXT("umg_widget_candidate_not_found"),
-				CleanId);
-		}
-
-		OutResult.TotalMatches = Matches.Num();
-		const int32 End = FMath::Min(Cursor + Limit, Matches.Num());
-		for (int32 Index = Cursor; Index < End; ++Index)
+			return Scores[A] != Scores[B] ? Scores[A] > Scores[B] : A < B;
+		});
+		OutResult.TotalMatches = MatchedIndices.Num();
+		for (const int32 MatchedIndex : MatchedIndices)
 		{
-			OutResult.Candidates.Add(MoveTemp(Matches[Index]));
+			OutResult.Candidates.Add(MoveTemp(Catalog[MatchedIndex]));
 		}
-		OutResult.bHasMore = End < Matches.Num();
-		OutResult.NextCursor = OutResult.bHasMore ? End : INDEX_NONE;
-		OutResult.bComplete = !OutResult.bHasMore;
-		OutResult.bCoverageComplete = false;
-		OutResult.bCreationCoverageComplete = false;
 		return true;
 	}
 
-	bool TryResolveUmgWidgetCandidate(
+	bool TrySelectUmgWidgetCandidate(
 		UWidgetBlueprint& Target,
 		const FString& Name,
-		const FString& Id,
 		FUmgWidgetCandidate& OutCandidate,
-		FUmgWidgetCandidateQueryError& OutError)
+		FUmgWidgetCandidateQueryError& OutError,
+		const TMap<FString, FString>& Select,
+		ContentDiscovery::FReadOnlyCandidateBatch* Batch)
 	{
 		OutCandidate = {};
 		OutError = {};
 		const FString CleanName = Name.TrimStartAndEnd();
-		const FString CleanId = Id.TrimStartAndEnd();
-		if (CleanName.IsEmpty() && CleanId.IsEmpty())
+		if (CleanName.IsEmpty())
 		{
-			return Fail(OutError, TEXT("umg_widget_candidate_selector_required"));
+			auto Diagnostic = CandidateDiagnostic(TEXT("umg_widget_candidate_selector_required"), Name,
+				TEXT("A widget candidate requires a non-empty name."));
+			Diagnostic.SourceKind.Reset();
+			Diagnostic.PropertyPath = TEXT("name");
+			Diagnostic.Source.JsonPath = TEXT("/name");
+			Diagnostic.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Target);
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(Name);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty candidate name"));
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 		}
-		TArray<FUmgWidgetCandidate> Catalog;
-		if (!BuildCatalog(Target, Catalog, OutError))
+		struct FPreparedCatalog
 		{
-			return false;
-		}
-		TArray<const FUmgWidgetCandidate*> Matches;
-		for (const FUmgWidgetCandidate& Candidate : Catalog)
+			TArray<FUmgWidgetCandidate> Catalog;
+			TArray<ContentDiscovery::FNameSelectionEntry> Entries;
+		};
+		const auto Prepared = ContentDiscovery::FReadOnlyCandidateBatch::Prepare<FPreparedCatalog>(
+			Batch, &Target, FString(), [&](FPreparedCatalog& Value) {
+				if (!BuildCatalog(Target, Value.Catalog, OutError)) return false;
+				for (const FUmgWidgetCandidate& Candidate : Value.Catalog)
+					Value.Entries.Add({Candidate.Name, Candidate.Id, Candidate.SelectionFields});
+				return true;
+			});
+		if (!Prepared) return false;
+		int32 ResolvedIndex = INDEX_NONE;
+		UE::UAI::Contract::FDiagnostic ResolveError;
+		if (!ContentDiscovery::TryResolveNameSelection(Prepared->Entries, CleanName, Select, ResolvedIndex, ResolveError))
 		{
-			if ((!CleanId.IsEmpty()
-					&& !Candidate.Id.Equals(CleanId, ESearchCase::IgnoreCase))
-				|| (!CleanName.IsEmpty()
-					&& !Candidate.Name.Equals(
-						CleanName, ESearchCase::CaseSensitive)))
-			{
-				continue;
-			}
-			Matches.Add(&Candidate);
+			return ForwardDiagnostic(OutError, UeAgentAuthoringDiagnostics::CandidateFailure(ResolveError.Code, CleanName, UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Target), TEXT("widget palette"), TEXT("umg.widget.candidates"), ResolveError), CleanName);
 		}
-		if (Matches.IsEmpty())
+		OutCandidate = Prepared->Catalog[ResolvedIndex];
+		return true;
+	}
+
+	bool TryResolveUmgWidgetCandidate(UWidgetBlueprint& Target, const FString& Name,
+		FUmgWidgetCandidate& OutCandidate, FUmgWidgetCandidateQueryError& OutError,
+		const TMap<FString, FString>& Select, ContentDiscovery::FReadOnlyCandidateBatch* Batch)
+	{
+		FUmgWidgetCandidate Selected;
+		OutCandidate = {};
+		if (!TrySelectUmgWidgetCandidate(Target, Name, Selected, OutError, Select, Batch)) return false;
+		if (!Selected.bSupported)
 		{
-			return Fail(
-				OutError,
-				TEXT("umg_widget_candidate_not_found"),
-				CleanId.IsEmpty() ? CleanName : CleanId);
+			return ForwardDiagnostic(OutError, Selected.SupportDiagnostic, Selected.Name);
 		}
-		if (Matches.Num() != 1)
-		{
-			return Fail(
-				OutError,
-				TEXT("umg_widget_candidate_ambiguous"),
-				CleanName,
-				TEXT("use exact candidate id"));
-		}
-		if (!Matches[0]->bSupported)
-		{
-			return Fail(
-				OutError,
-				TEXT("umg_widget_candidate_not_writable"),
-				Matches[0]->Id,
-				Matches[0]->SupportReason);
-		}
-		OutCandidate = *Matches[0];
+		OutCandidate = Selected;
 		return true;
 	}
 

@@ -1,13 +1,79 @@
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonDiagnostic.h"
+#include "Core/StateSemantic/UeAgentExactStringKeys.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/PackageName.h"
+#include "Misc/ScopeExit.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 namespace UE::UAI::HjsonWorkspace
 {
 	using namespace UE::UAI::ContextResource;
 	using namespace UE::UAI::StateSemantic;
+
+	namespace
+	{
+		struct FHjsonJsonProjectionTask
+		{
+			const FHjsonNode* Node = nullptr;
+			bool bExit = false;
+		};
+
+		bool ChargeJsonProjectionNode(
+			const FHjsonNode& Node,
+			FUeAgentResourceTracker& Resources,
+			FWorkspaceError& OutError)
+		{
+			const int64 ChildCount = Node.GetKind() == EHjsonNodeKind::Array
+				? Node.GetItems().Num()
+				: Node.GetKind() == EHjsonNodeKind::Object
+					? Node.GetEntries().Num()
+					: 0;
+			const int64 TextChars = Node.GetKind() == EHjsonNodeKind::String
+				? Node.GetText().Len()
+				: Node.GetLexeme().Len();
+			int64 KeyChars = 0;
+			if (Node.GetKind() == EHjsonNodeKind::Object)
+			{
+				for (const TPair<FString, FHjsonNodeRef>& Entry : Node.GetEntries())
+				{
+					KeyChars += Entry.Key.Len();
+				}
+			}
+			const int64 ContainerBytes = Node.GetKind() == EHjsonNodeKind::Object
+				? ChildCount * static_cast<int64>(
+					sizeof(TPair<FString, TSharedPtr<FJsonValue>>))
+					+ KeyChars * static_cast<int64>(sizeof(TCHAR))
+				: ChildCount * static_cast<int64>(
+					sizeof(TSharedPtr<FJsonValue>));
+			FUeAgentResourceChargeError ResourceError;
+			if (Resources.TryChargeMany(
+				{
+					{EUeAgentResourceDimension::WorkUnits, 1 + ChildCount},
+					{EUeAgentResourceDimension::EstimatedMemoryBytes,
+						128 + TextChars * static_cast<int64>(sizeof(TCHAR))
+							+ ChildCount * static_cast<int64>(
+								sizeof(FHjsonJsonProjectionTask))
+							+ ContainerBytes},
+				},
+				Node.GetProvenance().GetJsonPointer(),
+				ResourceError))
+			{
+				return true;
+			}
+			OutError.SetFailure(MoveTemp(ResourceError), Node.GetProvenance().GetSourceUnit(),
+				Node.GetProvenance().GetJsonPointer());
+			OutError.Locate(Node.GetProvenance());
+			return false;
+		}
+	}
 
 	namespace
 	{
@@ -37,6 +103,42 @@ namespace UE::UAI::HjsonWorkspace
 			bool bNewlineBefore = false;
 		};
 
+		void SetSyntaxFailure(FWorkspaceError& Error, const FString& Code, const FString& Reason,
+			const FString& SourceUnit, const FString& Pointer, int32 Line, int32 Column,
+			const FString& Actual, const FString& Expected)
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("hjson_syntax"));
+			Diagnostic.Source.Line = Line;
+			Diagnostic.Source.Column = Column;
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(Actual);
+			if (!Expected.IsEmpty()) Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			Error.SetFailure(MoveTemp(Diagnostic), SourceUnit, Pointer);
+		}
+
+		Contract::FDiagnostic WorkspaceValueFailure(const FString& Code, const FString& Reason,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected = nullptr)
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("workspace_resolve"));
+			Diagnostic.ActualValuePresent = Actual.IsValid();
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			return Diagnostic;
+		}
+
+		FString NodeKindName(EHjsonNodeKind Kind)
+		{
+			switch (Kind) {
+			case EHjsonNodeKind::Null: return TEXT("null");
+			case EHjsonNodeKind::Boolean: return TEXT("boolean");
+			case EHjsonNodeKind::String: return TEXT("string");
+			case EHjsonNodeKind::Integer: return TEXT("integer");
+			case EHjsonNodeKind::Decimal: return TEXT("decimal");
+			case EHjsonNodeKind::Array: return TEXT("array");
+			case EHjsonNodeKind::Object: return TEXT("object");
+			default: return FString::Printf(TEXT("unknown node kind %d"), static_cast<int32>(Kind));
+			}
+		}
+
 		enum class EFrameState : uint8
 		{
 			KeyOrEnd,
@@ -55,7 +157,7 @@ namespace UE::UAI::HjsonWorkspace
 			EFrameState State = EFrameState::ValueOrEnd;
 			TArray<TPair<FString, FHjsonNodeRef>> Entries;
 			TArray<FHjsonNodeRef> Items;
-			TSet<FString> Keys;
+			TSet<FString, FExactStringKeyFuncs> Keys;
 			FString PendingKey;
 		};
 
@@ -92,17 +194,12 @@ namespace UE::UAI::HjsonWorkspace
 			const FString& Path,
 			FWorkspaceError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded BudgetError;
-			if (Resources.TryChargeMany(Amounts, Path, BudgetError))
+			FUeAgentResourceChargeError ChargeError;
+			if (Resources.TryChargeMany(Amounts, Path, ChargeError))
 			{
 				return true;
 			}
-			OutError.Set(
-				BudgetError.Code,
-				BudgetError.Path,
-				TEXT("/"),
-				BudgetError.Observed,
-				BudgetError.bStoppedEarly);
+			OutError.SetFailure(MoveTemp(ChargeError));
 			return false;
 		}
 
@@ -127,14 +224,19 @@ namespace UE::UAI::HjsonWorkspace
 				OutError);
 		}
 
-		TArray<int64> BuildUtf8Offsets(const FString& Text)
+		bool ScanUtf8Text(const FString& Text, TArray<int64>* Offsets, int64& Bytes,
+			FWorkspaceError& OutError, const FHjsonOperationCheckpoint* Checkpoint)
 		{
-			TArray<int64> Offsets;
-			Offsets.SetNumZeroed(Text.Len() + 1);
-			int64 Bytes = 0;
+			Bytes = 0;
+			int32 NextCheckpoint = 0;
 			for (int32 Index = 0; Index < Text.Len(); ++Index)
 			{
-				Offsets[Index] = Bytes;
+				if (Index >= NextCheckpoint)
+				{
+					if (Checkpoint && !(*Checkpoint)(Offsets ? TEXT("hjson_utf8_offsets") : TEXT("hjson_utf8_measure"), OutError)) return false;
+					NextCheckpoint = Index > MAX_int32 - 1024 ? MAX_int32 : Index + 1024;
+				}
+				if (Offsets) (*Offsets)[Index] = Bytes;
 				const uint32 Character = static_cast<uint32>(Text[Index]);
 				if (Character >= 0xD800 && Character <= 0xDBFF
 					&& Index + 1 < Text.Len())
@@ -143,7 +245,8 @@ namespace UE::UAI::HjsonWorkspace
 					if (Low >= 0xDC00 && Low <= 0xDFFF)
 					{
 						Bytes += 4;
-						Offsets[++Index] = Bytes;
+						++Index;
+						if (Offsets) (*Offsets)[Index] = Bytes;
 						continue;
 					}
 				}
@@ -153,8 +256,8 @@ namespace UE::UAI::HjsonWorkspace
 						? 2
 						: 3;
 			}
-			Offsets[Text.Len()] = Bytes;
-			return Offsets;
+			if (Offsets) (*Offsets)[Text.Len()] = Bytes;
+			return !Checkpoint || (*Checkpoint)(Offsets ? TEXT("hjson_utf8_offsets_complete") : TEXT("hjson_utf8_measure_complete"), OutError);
 		}
 
 		bool IsPunctuation(TCHAR Character)
@@ -180,251 +283,353 @@ namespace UE::UAI::HjsonWorkspace
 			}
 		}
 
+		bool IsIntegerLexeme(const FString& Value);
+		bool IsDecimalLexeme(const FString& Value);
+
 		bool ScanTokens(
 			const FString& Text,
 			const FString& SourceUnit,
 			FUeAgentResourceTracker& Resources,
 			TArray<FToken>& OutTokens,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			FWorkspaceError& Diagnostics,
+			const FHjsonOperationCheckpoint* Checkpoint)
 		{
 			OutTokens.Reset();
-			const TArray<int64> Utf8Offsets = BuildUtf8Offsets(Text);
-			int32 Index = 0;
-			int32 Line = 1;
-			int32 Column = 1;
-			bool bNewlineBefore = false;
-			auto Advance = [&]() -> TCHAR
+			TArray<int64> Utf8Offsets;
+			int32 TokenCount = 0;
+			// The first pass validates ranges and charges their maximum storage without
+			// constructing token strings or per-line multiline buffers. The second pass
+			// materializes only after all scanner storage has been admitted.
+			auto Scan = [&](bool bMaterialize) -> bool
 			{
-				const TCHAR Character = Text[Index++];
-				if (Character == TEXT('\r'))
+				int32 Index = 0, Line = 1, Column = 1;
+				int32 NextCheckpoint = 0;
+				bool bNewlineBefore = false;
+				struct FScanFrame
 				{
-					if (Index < Text.Len() && Text[Index] == TEXT('\n'))
+					bool bObject;
+					EFrameState State;
+				};
+				TArray<FScanFrame> Frames;
+				auto Check = [&](int32 Position) -> bool
+				{
+					if (Position < NextCheckpoint) return true;
+					NextCheckpoint = Position > MAX_int32 - 1024 ? MAX_int32 : Position + 1024;
+					return !Checkpoint || (*Checkpoint)(TEXT("hjson_scan"), OutError);
+				};
+				auto Fail = [&](const TCHAR* Code, const TCHAR* Reason, int32 ErrorLine, int32 ErrorColumn,
+					const FString& Actual, const FString& Expected) -> bool
+				{
+					SetSyntaxFailure(OutError, Code, Reason, SourceUnit, TEXT("/"), ErrorLine, ErrorColumn, Actual, Expected);
+					return false;
+				};
+				auto Advance = [&]() -> TCHAR
+				{
+					TCHAR Ch = Text[Index++];
+					if (Ch == TEXT('\r'))
 					{
-						++Index;
+						if (Index < Text.Len() && Text[Index] == TEXT('\n')) ++Index;
+						Ch = TEXT('\n');
 					}
-					++Line;
-					Column = 1;
-					bNewlineBefore = true;
-					return TEXT('\n');
-				}
-				if (Character == TEXT('\n'))
-				{
-					++Line;
-					Column = 1;
-					bNewlineBefore = true;
-				}
-				else
-				{
-					++Column;
-				}
-				return Character;
-			};
-
-			while (Index < Text.Len())
-			{
-				const TCHAR Character = Text[Index];
-				if (FChar::IsWhitespace(Character))
-				{
-					Advance();
-					continue;
-				}
-				if (Character == TEXT('#')
-					|| (Character == TEXT('/')
-						&& Index + 1 < Text.Len()
-						&& Text[Index + 1] == TEXT('/')))
-				{
-					while (Index < Text.Len()
-						&& Text[Index] != TEXT('\r')
-						&& Text[Index] != TEXT('\n'))
-					{
-						Advance();
-					}
-					continue;
-				}
-				if (Character == TEXT('/')
-					&& Index + 1 < Text.Len()
-					&& Text[Index + 1] == TEXT('*'))
-				{
-					Advance();
-					Advance();
-					bool bClosed = false;
-					while (Index < Text.Len())
-					{
-						if (Text[Index] == TEXT('*')
-							&& Index + 1 < Text.Len()
-							&& Text[Index + 1] == TEXT('/'))
-						{
-							Advance();
-							Advance();
-							bClosed = true;
-							break;
-						}
-						Advance();
-					}
-					if (!bClosed)
-					{
-						OutError.Set(TEXT("hjson_comment_unclosed"), SourceUnit);
-						return false;
-					}
-					continue;
-				}
-
-				const int32 Start = Index;
-				const int32 TokenLine = Line;
-				const int32 TokenColumn = Column;
-				const bool bTokenNewline = bNewlineBefore;
-				bNewlineBefore = false;
-				if (IsPunctuation(Character))
-				{
-					Advance();
-					OutTokens.Add({
-						PunctuationKind(Character),
-						FString::Chr(Character),
-						FString::Chr(Character),
-						Start,
-						Index,
-						Utf8Offsets[Start],
-						Utf8Offsets[Index],
-						TokenLine,
-						TokenColumn,
-						bTokenNewline,
-					});
-					continue;
-				}
-				if (Character == TEXT('"') || Character == TEXT('\''))
-				{
-					const TCHAR Quote = Character;
-					Advance();
-					FString Value;
-					bool bClosed = false;
-					while (Index < Text.Len())
-					{
-						const TCHAR Current = Advance();
-						if (Current == Quote)
-						{
-							bClosed = true;
-							break;
-						}
-						if (Current != TEXT('\\'))
-						{
-							Value.AppendChar(Current);
-							continue;
-						}
-						if (Index >= Text.Len())
-						{
-							break;
-						}
-						const TCHAR Escaped = Advance();
-						switch (Escaped)
-						{
-						case TEXT('"'): Value.AppendChar(TEXT('"')); break;
-						case TEXT('\''): Value.AppendChar(TEXT('\'')); break;
-						case TEXT('\\'): Value.AppendChar(TEXT('\\')); break;
-						case TEXT('/'): Value.AppendChar(TEXT('/')); break;
-						case TEXT('b'): Value.AppendChar(TEXT('\b')); break;
-						case TEXT('f'): Value.AppendChar(TEXT('\f')); break;
-						case TEXT('n'): Value.AppendChar(TEXT('\n')); break;
-						case TEXT('r'): Value.AppendChar(TEXT('\r')); break;
-						case TEXT('t'): Value.AppendChar(TEXT('\t')); break;
-						case TEXT('u'):
-						{
-							if (Index + 4 > Text.Len())
-							{
-								OutError.Set(
-									TEXT("hjson_unicode_escape_invalid"),
-									SourceUnit);
-								return false;
-							}
-							uint32 Code = 0;
-							for (int32 DigitIndex = 0; DigitIndex < 4; ++DigitIndex)
-							{
-								const TCHAR Digit = Advance();
-								if (!FChar::IsHexDigit(Digit))
-								{
-									OutError.Set(
-										TEXT("hjson_unicode_escape_invalid"),
-										SourceUnit);
-									return false;
-								}
-								Code = Code * 16
-									+ (FChar::IsDigit(Digit)
-										? Digit - TEXT('0')
-										: FChar::ToUpper(Digit) - TEXT('A') + 10);
-							}
-							Value.AppendChar(static_cast<TCHAR>(Code));
-							break;
-						}
-						default:
-							OutError.Set(TEXT("hjson_escape_invalid"), SourceUnit);
-							return false;
-						}
-					}
-					if (!bClosed)
-					{
-						OutError.Set(TEXT("hjson_string_unclosed"), SourceUnit);
-						return false;
-					}
-					OutTokens.Add({
-						ETokenKind::String,
-						Text.Mid(Start, Index - Start),
-						MoveTemp(Value),
-						Start,
-						Index,
-						Utf8Offsets[Start],
-						Utf8Offsets[Index],
-						TokenLine,
-						TokenColumn,
-						bTokenNewline,
-					});
-					continue;
-				}
-
+					if (Ch == TEXT('\n')) { ++Line; Column = 1; bNewlineBefore = true; }
+					else ++Column;
+					return Ch;
+				};
+				auto IsIndent = [](TCHAR Ch) { return Ch == TEXT(' ') || Ch == TEXT('\t'); };
 				while (Index < Text.Len())
 				{
-					const TCHAR Current = Text[Index];
-					if (FChar::IsWhitespace(Current) || IsPunctuation(Current))
+					if (!Check(Index)) return false;
+					const TCHAR Ch = Text[Index];
+					if (FChar::IsWhitespace(Ch)) { Advance(); continue; }
+					if (Ch == TEXT('#') || (Ch == TEXT('/') && Index + 1 < Text.Len() && Text[Index + 1] == TEXT('/')))
 					{
-						break;
+						while (Index < Text.Len() && Text[Index] != TEXT('\r') && Text[Index] != TEXT('\n'))
+						{
+							Advance();
+							if (!Check(Index)) return false;
+						}
+						continue;
 					}
-					if (Current == TEXT('#')
-						|| (Current == TEXT('/')
-							&& Index + 1 < Text.Len()
-							&& (Text[Index + 1] == TEXT('/')
-								|| Text[Index + 1] == TEXT('*'))))
+					if (Ch == TEXT('/') && Index + 1 < Text.Len() && Text[Index + 1] == TEXT('*'))
+						return Fail(TEXT("hjson_unsupported_feature"), TEXT("Block comments are not supported; use a line comment."), Line, Column, TEXT("/*"), TEXT("# or //"));
+
+					const int32 Start = Index, TokenLine = Line, TokenColumn = Column;
+					const bool bTokenNewline = bNewlineBefore;
+					bNewlineBefore = false;
+					// The implicit object root has the same lexical key/value states
+					// as a braced object; quoted and bare values share one scanner.
+					if (Frames.IsEmpty() && Ch != TEXT('{') && Ch != TEXT('[')
+						&& (bMaterialize ? OutTokens.IsEmpty() : TokenCount == 0))
 					{
-						break;
+						Frames.Add({true, EFrameState::KeyOrEnd});
 					}
-					Advance();
+					if (!Frames.IsEmpty() && bTokenNewline && Frames.Last().State == EFrameState::AfterValue)
+					{
+						Frames.Last().State = Frames.Last().bObject ? EFrameState::KeyOrEnd : EFrameState::ValueOrEnd;
+					}
+					const bool bKey = !Frames.IsEmpty() && Frames.Last().bObject
+						&& Frames.Last().State == EFrameState::KeyOrEnd;
+					ETokenKind Kind = ETokenKind::Bare;
+					int32 ContentStart = Start, ContentEnd = Start, ClosingIndent = 0;
+					bool bMultiline = false;
+					if (IsPunctuation(Ch))
+					{
+						Kind = PunctuationKind(Ch);
+						Advance();
+					}
+					else if (Ch == TEXT('\''))
+					{
+						if (Index + 2 >= Text.Len() || Text[Index + 1] != TEXT('\'') || Text[Index + 2] != TEXT('\''))
+							return Fail(TEXT("hjson_unsupported_feature"), TEXT("Single-quoted strings are not supported; use double quotes or a triple-quote multiline string."), Line, Column, FString::Chr(Ch), TEXT("double quote or triple single quote"));
+						Kind = ETokenKind::String;
+						bMultiline = true;
+						Advance(); Advance(); Advance();
+						while (Index < Text.Len() && IsIndent(Text[Index]))
+						{
+							Advance();
+							if (!Check(Index)) return false;
+						}
+						if (Index == Text.Len()) return Fail(TEXT("hjson_unterminated_multiline"), TEXT("The multiline string has no closing triple-quote delimiter."), TokenLine, TokenColumn, TEXT("end of input"), TEXT("closing triple quote"));
+						if (Text[Index] != TEXT('\r') && Text[Index] != TEXT('\n'))
+							return Fail(TEXT("hjson_multiline_trailing_token"), TEXT("A multiline opening delimiter must be followed by a newline."), Line, Column, FString::Chr(Text[Index]), TEXT("newline"));
+						Advance();
+						ContentStart = Index;
+						bool bClosed = false;
+						while (Index < Text.Len())
+						{
+							const int32 LineStart = Index;
+							while (Index < Text.Len() && IsIndent(Text[Index]))
+							{
+								Advance();
+								if (!Check(Index)) return false;
+							}
+							const int32 Indent = Index - LineStart;
+							if (Index + 2 < Text.Len() && Text[Index] == TEXT('\'') && Text[Index + 1] == TEXT('\'') && Text[Index + 2] == TEXT('\''))
+							{
+								ContentEnd = LineStart;
+								ClosingIndent = Indent;
+								Advance(); Advance(); Advance();
+								while (Index < Text.Len() && IsIndent(Text[Index]))
+								{
+									Advance();
+									if (!Check(Index)) return false;
+								}
+							if (Index < Text.Len() && Text[Index] != TEXT('\r') && Text[Index] != TEXT('\n'))
+							{
+								if (!bMaterialize)
+								{
+									FWorkspaceError Error;
+									SetSyntaxFailure(Error, TEXT("hjson_multiline_trailing_token"), TEXT("A multiline closing delimiter must be followed by a newline or end of input."),
+				SourceUnit, TEXT("/"), Line, Column, FString::Chr(Text[Index]), TEXT("newline or end of input"));
+									Error.MarkUnchecked(TEXT("syntax"), SourceUnit, TEXT("invalid_multiline_closing_line"), Line);
+									Diagnostics.Append(Error);
+								}
+								// The closing delimiter is known. Resume at the next line, without
+								// interpreting the malformed suffix as object/array punctuation.
+								while (Index < Text.Len() && Text[Index] != TEXT('\r') && Text[Index] != TEXT('\n'))
+								{
+									Advance();
+									if (!Check(Index)) return false;
+								}
+							}
+								bClosed = true;
+								break;
+							}
+							while (Index < Text.Len() && Text[Index] != TEXT('\r') && Text[Index] != TEXT('\n'))
+							{
+								Advance();
+								if (!Check(Index)) return false;
+							}
+							if (Index < Text.Len()) Advance();
+						}
+						if (!bClosed) return Fail(TEXT("hjson_unterminated_multiline"), TEXT("The multiline string has no closing triple-quote delimiter."), TokenLine, TokenColumn, TEXT("end of input"), TEXT("closing triple quote"));
+					}
+					else if (Ch == TEXT('"'))
+					{
+						Kind = ETokenKind::String;
+						Advance();
+						ContentStart = Index;
+						bool bClosed = false;
+						while (Index < Text.Len())
+						{
+							if (!Check(Index)) return false;
+							if (Text[Index] == TEXT('"')) { ContentEnd = Index; Advance(); bClosed = true; break; }
+							if (Text[Index] < 0x20)
+								return Fail(TEXT("hjson_unescaped_control"), TEXT("A quoted string contains an unescaped control character."), Line, Column, FString::Printf(TEXT("U+%04X"), static_cast<uint32>(Text[Index])), TEXT("escaped control character"));
+							if (Advance() != TEXT('\\')) continue;
+							if (Index == Text.Len()) break;
+							const int32 EscapeLine = Line, EscapeColumn = Column;
+							const TCHAR Escaped = Advance();
+							switch (Escaped)
+							{
+							case TEXT('"'): case TEXT('\\'): case TEXT('/'): case TEXT('b'):
+							case TEXT('f'): case TEXT('n'): case TEXT('r'): case TEXT('t'): break;
+							case TEXT('u'):
+								for (int32 Digit = 0; Digit < 4; ++Digit)
+								{
+									if (Index == Text.Len() || !FChar::IsHexDigit(Text[Index]))
+										return Fail(TEXT("hjson_unicode_escape_invalid"), TEXT("A Unicode escape requires exactly four hexadecimal digits."), Line, Column, Index < Text.Len() ? FString::Chr(Text[Index]) : TEXT("end of input"), TEXT("hexadecimal digit"));
+									Advance();
+								}
+								break;
+							default: return Fail(TEXT("hjson_escape_invalid"), TEXT("The quoted string contains an unsupported escape sequence."), EscapeLine, EscapeColumn, FString::Chr(Escaped), TEXT("quote, backslash, slash, b, f, n, r, t or u"));
+							}
+						}
+						if (!bClosed) return Fail(TEXT("hjson_string_unclosed"), TEXT("The quoted string has no closing double quote."), Line, Column, TEXT("end of input"), TEXT("closing double quote"));
+					}
+					else
+					{
+						bool bPossibleLiteral = true;
+						while (Index < Text.Len())
+						{
+							const TCHAR Current = Text[Index];
+							const bool bComment = Current == TEXT('#') || (Current == TEXT('/') && Index + 1 < Text.Len()
+								&& (Text[Index + 1] == TEXT('/') || Text[Index + 1] == TEXT('*')));
+							if (FChar::IsWhitespace(Current) && !IsIndent(Current)) break;
+							if (bKey && (IsPunctuation(Current) || bComment)) break;
+							if (!bKey && bPossibleLiteral && (Current == TEXT(',') || Current == TEXT('}') || Current == TEXT(']') || bComment))
+							{
+								const FString Candidate = Text.Mid(Start, Index - Start).TrimEnd();
+								const FString Folded = Candidate.ToLower();
+								if (Folded == TEXT("true") || Folded == TEXT("false") || Folded == TEXT("null")
+									|| Folded == TEXT("nan") || Folded == TEXT("+nan") || Folded == TEXT("-nan")
+									|| Folded == TEXT("inf") || Folded == TEXT("+inf") || Folded == TEXT("-inf")
+									|| Folded == TEXT("infinity") || Folded == TEXT("+infinity") || Folded == TEXT("-infinity")
+									|| IsIntegerLexeme(Candidate) || IsDecimalLexeme(Candidate)) break;
+								bPossibleLiteral = false;
+							}
+							Advance();
+							if (!Check(Index)) return false;
+						}
+						if (Index == Start) return Fail(TEXT("hjson_token_invalid"), TEXT("The character cannot begin a token at this input position."), Line, Column, FString::Chr(Text[Index]), TEXT("key, value or delimiter"));
+					}
+
+					if (Kind == ETokenKind::OpenObject || Kind == ETokenKind::OpenArray)
+					{
+						if (!Frames.IsEmpty()) Frames.Last().State = EFrameState::AfterValue;
+						Frames.Add({Kind == ETokenKind::OpenObject,
+							Kind == ETokenKind::OpenObject ? EFrameState::KeyOrEnd : EFrameState::ValueOrEnd});
+					}
+					else if (Kind == ETokenKind::CloseObject || Kind == ETokenKind::CloseArray)
+					{
+						if (!Frames.IsEmpty()) Frames.Pop(EAllowShrinking::No);
+					}
+					else if (!Frames.IsEmpty())
+					{
+						if (Kind == ETokenKind::Colon) Frames.Last().State = EFrameState::ValueOrEnd;
+						else if (Kind == ETokenKind::Comma) Frames.Last().State = Frames.Last().bObject ? EFrameState::KeyOrEnd : EFrameState::ValueOrEnd;
+						else Frames.Last().State = bKey ? EFrameState::Colon : EFrameState::AfterValue;
+					}
+
+					// Revisit source ranges, not allocated line strings. This checks actual
+					// leading indentation even when the rest of a short line is long enough.
+					FString Value;
+					int32 TokenEnd = Index;
+					if (Kind == ETokenKind::Bare)
+					{
+						// Spaces belong to an unquoted name/value; only trailing indentation
+						// is outside its lexeme and provenance range.
+						while (TokenEnd > Start && IsIndent(Text[TokenEnd - 1])) --TokenEnd;
+					}
+					const int32 RawLength = TokenEnd - Start;
+					if (bMaterialize) Value.Reserve(RawLength + 1);
+					if (bMultiline)
+					{
+						int32 Cursor = ContentStart, ContentLine = TokenLine + 1;
+						while (Cursor < ContentEnd)
+						{
+							const int32 LineStart = Cursor;
+							while (Cursor < ContentEnd && IsIndent(Text[Cursor]))
+							{
+								++Cursor;
+								if (Checkpoint && (Cursor - LineStart) % 1024 == 0 && !(*Checkpoint)(TEXT("hjson_multiline_indent"), OutError)) return false;
+							}
+							const int32 Indent = Cursor - LineStart;
+							if (Cursor < ContentEnd && Text[Cursor] != TEXT('\r') && Text[Cursor] != TEXT('\n') && Indent < ClosingIndent)
+								return Fail(TEXT("hjson_multiline_indentation"), TEXT("The multiline content is indented less than its closing delimiter."), ContentLine, Indent + 1, FString::FromInt(Indent), FString::Printf(TEXT("at least %d indentation characters"), ClosingIndent));
+							Cursor = LineStart + FMath::Min(Indent, ClosingIndent);
+							if (bMaterialize && LineStart != ContentStart) Value.AppendChar(TEXT('\n'));
+							while (Cursor < ContentEnd && Text[Cursor] != TEXT('\r') && Text[Cursor] != TEXT('\n'))
+							{
+								if (bMaterialize) Value.AppendChar(Text[Cursor]);
+								++Cursor;
+								if (Checkpoint && (Cursor - LineStart) % 1024 == 0 && !(*Checkpoint)(TEXT("hjson_multiline_content"), OutError)) return false;
+							}
+							if (Cursor < ContentEnd && Text[Cursor++] == TEXT('\r') && Cursor < ContentEnd && Text[Cursor] == TEXT('\n')) ++Cursor;
+							++ContentLine;
+							if (Checkpoint && !(*Checkpoint)(TEXT("hjson_multiline_line"), OutError)) return false;
+						}
+					}
+					else if (bMaterialize && Kind == ETokenKind::String)
+					{
+						int32 NextDecodeCheckpoint = ContentStart;
+						for (int32 Cursor = ContentStart; Cursor < ContentEnd; ++Cursor)
+						{
+							if (Cursor >= NextDecodeCheckpoint)
+							{
+								if (Checkpoint && !(*Checkpoint)(TEXT("hjson_string_decode"), OutError)) return false;
+								NextDecodeCheckpoint = Cursor > MAX_int32 - 1024 ? MAX_int32 : Cursor + 1024;
+							}
+							TCHAR Decoded = Text[Cursor];
+							if (Decoded == TEXT('\\'))
+							{
+								Decoded = Text[++Cursor];
+								switch (Decoded)
+								{
+								case TEXT('b'): Decoded = TEXT('\b'); break;
+								case TEXT('f'): Decoded = TEXT('\f'); break;
+								case TEXT('n'): Decoded = TEXT('\n'); break;
+								case TEXT('r'): Decoded = TEXT('\r'); break;
+								case TEXT('t'): Decoded = TEXT('\t'); break;
+								case TEXT('u'):
+								{
+									uint32 Code = 0;
+									for (int32 Digit = 0; Digit < 4; ++Digit)
+									{
+										const TCHAR Hex = Text[++Cursor];
+										Code = Code * 16 + (FChar::IsDigit(Hex) ? Hex - TEXT('0') : FChar::ToUpper(Hex) - TEXT('A') + 10);
+									}
+									Decoded = static_cast<TCHAR>(Code);
+									break;
+								}
+								default: break;
+								}
+							}
+							Value.AppendChar(Decoded);
+						}
+					}
+					if (!bMaterialize)
+					{
+						if (!Charge(Resources, {
+							{EUeAgentResourceDimension::WorkUnits, 1},
+							{EUeAgentResourceDimension::EstimatedMemoryBytes,
+								2ll * (static_cast<int64>(RawLength) + 1) * static_cast<int64>(sizeof(TCHAR))}},
+							TEXT("hjson-tokenize:") + SourceUnit, OutError)) return false;
+						++TokenCount;
+					}
+					else
+					{
+						if (Checkpoint && !(*Checkpoint)(TEXT("hjson_token_materialize"), OutError)) return false;
+						FString Lexeme = Text.Mid(Start, RawLength);
+						if (Kind != ETokenKind::String) Value.Append(Lexeme);
+						OutTokens.Add({Kind, MoveTemp(Lexeme), MoveTemp(Value), Start, TokenEnd,
+							Utf8Offsets[Start], Utf8Offsets[TokenEnd], TokenLine, TokenColumn, bTokenNewline});
+					}
 				}
-				if (Index == Start)
-				{
-					OutError.Set(TEXT("hjson_token_invalid"), SourceUnit);
-					return false;
-				}
-				const FString Lexeme = Text.Mid(Start, Index - Start);
-				OutTokens.Add({
-					ETokenKind::Bare,
-					Lexeme,
-					Lexeme,
-					Start,
-					Index,
-					Utf8Offsets[Start],
-					Utf8Offsets[Index],
-					TokenLine,
-					TokenColumn,
-					bTokenNewline,
-				});
-			}
-			return Charge(
-				Resources,
-				{
-					{EUeAgentResourceDimension::Items, OutTokens.Num()},
-					{EUeAgentResourceDimension::WorkUnits, OutTokens.Num()},
-					{EUeAgentResourceDimension::EstimatedMemoryBytes,
-						OutTokens.Num() * 64ll},
-				},
-				TEXT("hjson-tokenize:") + SourceUnit,
-				OutError);
+				return !Checkpoint || (*Checkpoint)(TEXT("hjson_scan_complete"), OutError);
+			};
+			if (!Scan(false)) return false;
+			if (!Charge(Resources, {
+				{EUeAgentResourceDimension::EstimatedMemoryBytes,
+					(static_cast<int64>(TokenCount) + 2) * static_cast<int64>(sizeof(FToken))
+					+ (static_cast<int64>(Text.Len()) + 1) * static_cast<int64>(sizeof(int64))}},
+				TEXT("hjson-scanner-storage:") + SourceUnit, OutError)) return false;
+			OutTokens.Reserve(TokenCount + 2);
+			Utf8Offsets.SetNumZeroed(Text.Len() + 1);
+			int64 SourceBytes = 0;
+			if (!ScanUtf8Text(Text, &Utf8Offsets, SourceBytes, OutError, Checkpoint)) return false;
+			return Scan(true);
 		}
 
 		bool IsIntegerLexeme(const FString& Value)
@@ -536,23 +741,33 @@ namespace UE::UAI::HjsonWorkspace
 			if (Token.Kind != ETokenKind::Bare
 				&& Token.Kind != ETokenKind::String)
 			{
-				OutError.Set(TEXT("hjson_value_expected"), SourceUnit, Pointer);
+				SetSyntaxFailure(OutError, TEXT("hjson_value_expected"), TEXT("Expected a scalar HJSON value at this position."),
+				SourceUnit, Pointer, Token.Line, Token.Column, Token.Lexeme, TEXT("string, number, boolean or null"));
 				return false;
 			}
 			EHjsonNodeKind Kind = EHjsonNodeKind::String;
 			FString Text = Token.Value;
 			bool bBoolean = false;
 			const FString Folded = Token.Value.ToLower();
-			if (Token.Kind == ETokenKind::Bare && Folded == TEXT("null"))
+			if (Token.Kind == ETokenKind::Bare
+				&& (Folded == TEXT("true") || Folded == TEXT("false")
+					|| Folded == TEXT("null"))
+				&& Token.Value != Folded)
+			{
+				SetSyntaxFailure(OutError, TEXT("hjson_ambiguous_literal"), TEXT("Boolean and null literals must use lowercase; quote this token to use it as text."),
+				SourceUnit, Pointer, Token.Line, Token.Column, Token.Value, Folded);
+				return false;
+			}
+			if (Token.Kind == ETokenKind::Bare && Token.Value == TEXT("null"))
 			{
 				Kind = EHjsonNodeKind::Null;
 				Text.Reset();
 			}
 			else if (Token.Kind == ETokenKind::Bare
-				&& (Folded == TEXT("true") || Folded == TEXT("false")))
+				&& (Token.Value == TEXT("true") || Token.Value == TEXT("false")))
 			{
 				Kind = EHjsonNodeKind::Boolean;
-				bBoolean = Folded == TEXT("true");
+				bBoolean = Token.Value == TEXT("true");
 				Text.Reset();
 			}
 			else if (Token.Kind == ETokenKind::Bare
@@ -561,12 +776,13 @@ namespace UE::UAI::HjsonWorkspace
 					|| Folded == TEXT("-nan")
 					|| Folded == TEXT("infinity")
 					|| Folded == TEXT("+infinity")
-					|| Folded == TEXT("-infinity")))
+					|| Folded == TEXT("-infinity")
+					|| Folded == TEXT("inf")
+					|| Folded == TEXT("+inf")
+					|| Folded == TEXT("-inf")))
 			{
-				OutError.Set(
-					TEXT("hjson_nonfinite_number"),
-					SourceUnit,
-					Pointer);
+				SetSyntaxFailure(OutError, TEXT("hjson_nonfinite_number"), TEXT("HJSON numbers must be finite."),
+				SourceUnit, Pointer, Token.Line, Token.Column, Token.Value, TEXT("finite number"));
 				return false;
 			}
 			else if (Token.Kind == ETokenKind::Bare
@@ -578,6 +794,9 @@ namespace UE::UAI::HjsonWorkspace
 			else if (Token.Kind == ETokenKind::Bare
 				&& IsDecimalLexeme(Token.Value))
 			{
+				// A decimal token is exact authoring data, not yet a native double.
+				// Its destination codec owns the native range check. NaN/Inf
+				// literals are rejected separately above.
 				Kind = EHjsonNodeKind::Decimal;
 				Text.Reset();
 			}
@@ -846,39 +1065,402 @@ namespace UE::UAI::HjsonWorkspace
 		}
 	}
 
-	const FString& FWorkspaceError::GetCode() const { return Code; }
-	const FString& FWorkspaceError::GetSourceUnit() const { return SourceUnit; }
-	const FString& FWorkspaceError::GetJsonPointer() const { return JsonPointer; }
-	int64 FWorkspaceError::GetObserved() const { return Observed; }
-	bool FWorkspaceError::IsStoppedEarly() const { return bStoppedEarly; }
-	const TArray<FString>& FWorkspaceError::GetCyclePath() const { return CyclePath; }
+	FString EscapeJsonPointerSegment(FString Segment)
+	{
+		return EscapePointerSegment(Segment);
+	}
+
+	FUeAgentResourceTracker MakeSemanticWorkspaceResourceTracker()
+	{
+		return FUeAgentResourceTracker();
+	}
+
+	TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
+	MakeSemanticWorkspaceResourceTrackerOwner()
+	{
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
+	}
+
+	namespace
+	{
+		bool IsPublicWorkspaceSource(const FString& Source)
+		{
+			return Source.EndsWith(TEXT(".hjson")) && !Source.Contains(TEXT(".uai/")) && !Source.Contains(TEXT(".uai\\"));
+		}
+	}
+
+	TSharedPtr<FJsonValue> HjsonDiagnosticValue(const FHjsonNode* Node)
+	{
+		if (!Node) return nullptr;
+		switch (Node->GetKind())
+		{
+		case EHjsonNodeKind::Null: return MakeShared<FJsonValueNull>();
+		case EHjsonNodeKind::Boolean: return MakeShared<FJsonValueBoolean>(Node->GetBoolean());
+		case EHjsonNodeKind::String: return MakeShared<FJsonValueString>(Node->GetText());
+		case EHjsonNodeKind::Integer:
+		case EHjsonNodeKind::Decimal: return MakeShared<FJsonValueNumberString>(Node->GetLexeme());
+		case EHjsonNodeKind::Array:
+		case EHjsonNodeKind::Object:
+		{
+			const auto Summary = MakeShared<FJsonObject>();
+			const bool bArray = Node->GetKind() == EHjsonNodeKind::Array;
+			Summary->SetStringField(TEXT("type"), bArray ? TEXT("array") : TEXT("object"));
+			Summary->SetNumberField(TEXT("count"), bArray ? Node->GetItems().Num() : Node->GetEntries().Num());
+			return MakeShared<FJsonValueObject>(Summary);
+		}
+		default: return nullptr;
+		}
+	}
+
+	Contract::FDiagnostic HjsonNodeFailure(const FString& Code, const FString& Reason,
+		const FString& Stage, const FHjsonNode& Node, TSharedPtr<FJsonValue> Expected, bool bPublicActual)
+	{
+		auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, Stage);
+		Diagnostic.ExpectedValue = MoveTemp(Expected);
+		Diagnostic.ActualValuePresent = true;
+		if (bPublicActual) Diagnostic.ActualValue = HjsonDiagnosticValue(&Node);
+		else
+		{
+			Diagnostic.ActualEvidence = HjsonDiagnosticValue(&Node);
+			const TCHAR* Kind = TEXT("unknown");
+			switch (Node.GetKind())
+			{
+			case EHjsonNodeKind::Null: Kind = TEXT("null"); break;
+			case EHjsonNodeKind::Boolean: Kind = TEXT("boolean"); break;
+			case EHjsonNodeKind::String: Kind = TEXT("string"); break;
+			case EHjsonNodeKind::Integer: Kind = TEXT("integer"); break;
+			case EHjsonNodeKind::Decimal: Kind = TEXT("decimal"); break;
+			case EHjsonNodeKind::Array: Kind = TEXT("array"); break;
+			case EHjsonNodeKind::Object: Kind = TEXT("object"); break;
+			}
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(Kind);
+		}
+		const auto& Source = Node.GetProvenance();
+		Diagnostic.Source.SourceUnit = Source.GetSourceUnit();
+		Diagnostic.Source.InternalJsonPath = Source.GetJsonPointer();
+		if (IsPublicWorkspaceSource(Source.GetSourceUnit()))
+		{
+			Diagnostic.Source.SourceFile = Source.GetSourceUnit();
+			Diagnostic.Source.JsonPath = Source.GetJsonPointer();
+			Diagnostic.Source.Line = Source.GetLine();
+			Diagnostic.Source.Column = Source.GetColumn();
+			Diagnostic.PropertyPath = Source.GetJsonPointer();
+			Diagnostic.SourceKind = TEXT("authored_value");
+		}
+		return Diagnostic;
+	}
+
+	Contract::FDiagnostic HjsonFieldFailure(const FString& Code, const FString& Reason,
+		const FString& Stage, const FHjsonNode& Object, const FString& Field,
+		TSharedPtr<FJsonValue> Expected, bool bPublicActual)
+	{
+		if (const auto* Node = Object.Get(Field))
+			return HjsonNodeFailure(Code, Reason, Stage, *Node, MoveTemp(Expected), bPublicActual);
+		auto Diagnostic = HjsonNodeFailure(Code, Reason, Stage, Object, MoveTemp(Expected), bPublicActual);
+		Diagnostic.ActualValue.Reset();
+		Diagnostic.ActualEvidence.Reset();
+		Diagnostic.ActualValuePresent = false;
+		Diagnostic.ExpectedValuePresent = true;
+		const FString& Parent = Object.GetProvenance().GetJsonPointer();
+		const FString Pointer = (Parent == TEXT("/") ? FString() : Parent) + TEXT("/") + EscapeJsonPointerSegment(Field);
+		Diagnostic.Source.InternalJsonPath = Pointer;
+		if (!Diagnostic.Source.SourceFile.IsEmpty())
+		{
+			Diagnostic.Source.JsonPath = Pointer;
+			Diagnostic.PropertyPath = Pointer;
+			Diagnostic.SemanticPointer = Pointer;
+			Diagnostic.SourceKind = TEXT("related_input");
+		}
+		return Diagnostic;
+	}
+
+	void FWorkspaceError::SetFailure(Contract::FDiagnostic Failure, const FString& FallbackSource,
+		const FString& FallbackJsonPointer)
+	{
+		Reset();
+		Diagnostic = MoveTemp(Failure);
+		const bool bNativeResult = Diagnostic.SourceKind == TEXT("native_result");
+		if (Diagnostic.TargetPath.IsEmpty() && (FPackageName::IsValidObjectPath(FallbackSource)
+			|| FPackageName::IsValidLongPackageName(FallbackSource)))
+		{
+			Diagnostic.TargetPath = FallbackSource;
+			if (!bNativeResult && Diagnostic.PropertyPath.IsEmpty() && FallbackJsonPointer != TEXT("/"))
+				Diagnostic.PropertyPath = FallbackJsonPointer;
+		}
+		if (bNativeResult) return;
+		const bool bHasPointer = !Diagnostic.Source.JsonPath.IsEmpty()
+			|| !Diagnostic.SemanticPointer.IsEmpty() || !Diagnostic.Source.InternalJsonPath.IsEmpty();
+		if (Diagnostic.Source.SourceUnit.IsEmpty())
+			Diagnostic.Source.SourceUnit = Diagnostic.Source.SourceFile.IsEmpty() ? FallbackSource : Diagnostic.Source.SourceFile;
+		if (Diagnostic.Source.SourceFile.IsEmpty() && IsPublicWorkspaceSource(FallbackSource))
+			Diagnostic.Source.SourceFile = FallbackSource;
+		if (Diagnostic.Source.InternalJsonPath.IsEmpty())
+			Diagnostic.Source.InternalJsonPath = !Diagnostic.Source.JsonPath.IsEmpty() ? Diagnostic.Source.JsonPath
+				: !Diagnostic.SemanticPointer.IsEmpty() ? Diagnostic.SemanticPointer : FallbackJsonPointer;
+		if (!bHasPointer)
+		{
+			if (!Diagnostic.Source.SourceFile.IsEmpty()) Diagnostic.Source.JsonPath = FallbackJsonPointer;
+			else Diagnostic.SemanticPointer = FallbackJsonPointer;
+		}
+	}
+
+	void FWorkspaceError::Append(const FWorkspaceError& Error)
+	{
+		if (!Error.HasErrors()) return;
+		if (!HasErrors())
+		{
+			auto PriorUnchecked = MoveTemp(Diagnostic.Unchecked);
+			*this = Error;
+			Diagnostic.Unchecked.Append(PriorUnchecked);
+			return;
+		}
+		Diagnostic.Append(Error.Diagnostic);
+	}
+
+	void FWorkspaceError::Locate(const FSourceProvenance& Source)
+	{
+		TMap<FString, FSourceProvenance> Sources;
+		Sources.Add(Diagnostic.Source.SourceUnit, Source);
+		LocateUnits(Sources);
+	}
+
+	void FWorkspaceError::Locate(const FHjsonDocument& Document)
+	{
+		if (!IsPublicWorkspaceSource(Document.GetSourceUnit())) return;
+		TFunction<void(Contract::FDiagnostic&)> LocateItem = [&](Contract::FDiagnostic& Item)
+		{
+			if (Item.SourceKind != TEXT("native_result") && Item.SourceKind != TEXT("command_input")
+				&& Item.Source.Line == 0 && !Item.Source.JsonPath.IsEmpty()
+				&& (Item.Source.SourceFile == Document.GetSourceUnit()
+					|| (Item.Source.SourceFile.IsEmpty() && (Item.Source.SourceUnit.IsEmpty() || Item.Source.SourceUnit == Document.GetSourceUnit()))))
+			{
+				if (const auto* Node = Document.Find(Item.Source.JsonPath))
+				{
+					Item.Source.SourceFile = Document.GetSourceUnit();
+					Item.Source.Line = Node->GetProvenance().GetLine();
+					Item.Source.Column = Node->GetProvenance().GetColumn();
+				}
+			}
+			for (auto& Child : Item.Diagnostics) LocateItem(Child);
+			if (Item.PublicCause)
+			{
+				auto Cause = MakeShared<Contract::FDiagnostic>(*Item.PublicCause);
+				LocateItem(*Cause);
+				Item.PublicCause = MoveTemp(Cause);
+			}
+		};
+		LocateItem(Diagnostic);
+	}
+
+	void FWorkspaceError::PrependPath(const FString& PointerPrefix)
+	{
+		PrependPath(PointerPrefix, false);
+	}
+
+	void FWorkspaceError::PrependPath(const FString& PointerPrefix, bool bInputOnly)
+	{
+		if (PointerPrefix.IsEmpty() || PointerPrefix == TEXT("/")) return;
+		const auto Qualify = [&](FString& Path)
+		{
+			if (Path.StartsWith(TEXT("/"))) Path = PointerPrefix + (Path == TEXT("/") ? FString() : Path);
+		};
+		TFunction<void(Contract::FDiagnostic&)> QualifyItem = [&](Contract::FDiagnostic& Item)
+		{
+			if (Item.Source.Line <= 0 && (!bInputOnly
+				|| (Item.SourceKind != TEXT("native_result") && Item.SourceKind != TEXT("command_input"))))
+			{
+				Qualify(Item.Source.JsonPath);
+				Qualify(Item.Source.InternalJsonPath);
+				Qualify(Item.SemanticPointer);
+				Qualify(Item.PropertyPath);
+			}
+			for (auto& Child : Item.Diagnostics) QualifyItem(Child);
+			if (Item.PublicCause)
+			{
+				auto Cause = MakeShared<Contract::FDiagnostic>(*Item.PublicCause);
+				QualifyItem(*Cause);
+				Item.PublicCause = MoveTemp(Cause);
+			}
+		};
+		QualifyItem(Diagnostic);
+	}
+
+	void FWorkspaceError::Locate(const FHjsonNode& Root)
+	{
+		const auto& RootSource = Root.GetProvenance();
+		if (!IsPublicWorkspaceSource(RootSource.GetSourceUnit())) return;
+		TFunction<void(Contract::FDiagnostic&)> LocateItem = [&](Contract::FDiagnostic& Item)
+		{
+			for (auto& Child : Item.Diagnostics) LocateItem(Child);
+			if (Item.PublicCause)
+			{
+				auto Cause = MakeShared<Contract::FDiagnostic>(*Item.PublicCause);
+				LocateItem(*Cause);
+				Item.PublicCause = MoveTemp(Cause);
+			}
+			if (Item.Source.Line > 0 || Item.SourceKind == TEXT("native_result")
+				|| Item.SourceKind == TEXT("command_input")) return;
+			if (!Item.Source.SourceFile.IsEmpty() && Item.Source.SourceFile != RootSource.GetSourceUnit()) return;
+			FString Pointer = !Item.Source.InternalJsonPath.IsEmpty() ? Item.Source.InternalJsonPath
+				: !Item.SemanticPointer.IsEmpty() ? Item.SemanticPointer : Item.Source.JsonPath;
+			const FString& Base = RootSource.GetJsonPointer();
+			if (!Base.IsEmpty() && Base != TEXT("/")
+				&& (Pointer == Base || Pointer.StartsWith(Base + TEXT("/")))) Pointer.RightChopInline(Base.Len());
+			const bool bHasPointer = !Pointer.IsEmpty() && Pointer != TEXT("/");
+			const FString Requested = Pointer;
+			const FHjsonNode* Node = Root.Find(Pointer);
+			const bool bExact = Node && bHasPointer;
+			while (!Node)
+			{
+				int32 Slash = INDEX_NONE;
+				if (!Pointer.FindLastChar(TEXT('/'), Slash) || Slash == 0) break;
+				Pointer.LeftInline(Slash);
+				Node = Root.Find(Pointer);
+			}
+			if (!Node) Node = &Root;
+			const auto& Source = Node->GetProvenance();
+			Item.Source.SourceFile = Source.GetSourceUnit();
+			if (Item.Source.SourceUnit.IsEmpty()) Item.Source.SourceUnit = Source.GetSourceUnit();
+			Item.Source.JsonPath = Source.GetJsonPointer();
+			Item.Source.Line = Source.GetLine();
+			Item.Source.Column = Source.GetColumn();
+			// Keep the requested field even when only its parent exists in the input.
+			Item.Source.InternalJsonPath = (Base == TEXT("/") ? FString() : Base)
+				+ (bHasPointer ? Requested : FString());
+			Item.SourceKind = bExact && Item.SourceKind != TEXT("related_input")
+				? TEXT("authored_value") : TEXT("related_input");
+		};
+		LocateItem(Diagnostic);
+	}
+
+	void FWorkspaceError::MarkUnchecked(const FString& Stage, const FString& Source,
+		const FString& Reason, int32 FromLine)
+	{
+		const FString SourceFile = IsPublicWorkspaceSource(Source) ? Source : FString();
+		for (const auto& Value : Diagnostic.Unchecked)
+		{
+			if (!Value || Value->Type != EJson::Object) continue;
+			const auto& Existing = Value->AsObject();
+			FString ExistingStage, ExistingReason, ExistingSource;
+			double ExistingLine = 0;
+			Existing->TryGetStringField(TEXT("stage"), ExistingStage);
+			Existing->TryGetStringField(TEXT("reason"), ExistingReason);
+			Existing->TryGetStringField(TEXT("source_file"), ExistingSource);
+			Existing->TryGetNumberField(TEXT("from_line"), ExistingLine);
+			if (ExistingStage == Stage && ExistingReason == Reason
+				&& ExistingSource == SourceFile && ExistingLine == FMath::Max(0, FromLine)) return;
+		}
+		const auto Item = MakeShared<FJsonObject>();
+		Item->SetStringField(TEXT("stage"), Stage);
+		Item->SetStringField(TEXT("reason"), Reason);
+		if (!SourceFile.IsEmpty()) Item->SetStringField(TEXT("source_file"), SourceFile);
+		if (FromLine > 0) Item->SetNumberField(TEXT("from_line"), FromLine);
+		Diagnostic.Unchecked.Add(MakeShared<FJsonValueObject>(Item));
+	}
+
+	void FWorkspaceError::LocateUnits(const TMap<FString, FSourceProvenance>& Sources)
+	{
+		TArray<TPair<Contract::FDiagnostic*, const FSourceProvenance*>> Pending;
+		Pending.Emplace(&Diagnostic, nullptr);
+		while (!Pending.IsEmpty())
+		{
+			const auto Visit = Pending.Pop(EAllowShrinking::No);
+			auto& Item = *Visit.Key;
+			const auto* Source = Sources.Find(Item.Source.SourceUnit);
+			const bool bMappedUnit = Source && !Item.Source.SourceUnit.IsEmpty()
+				&& Item.Source.SourceUnit != Source->GetSourceUnit();
+			if (!Source && Item.Source.SourceUnit.IsEmpty() && Item.Source.SourceFile.IsEmpty()) Source = Visit.Value;
+			if (Source && IsPublicWorkspaceSource(Source->GetSourceUnit())
+				&& Item.SourceKind != TEXT("native_result") && Item.SourceKind != TEXT("command_input"))
+			{
+				if (!IsPublicWorkspaceSource(Item.Source.SourceFile))
+				{
+					if (Item.Source.SourceUnit.IsEmpty()) Item.Source.SourceUnit = Source->GetSourceUnit();
+					Item.Source.SourceFile = Source->GetSourceUnit();
+					if (bMappedUnit)
+					{
+						// An explicit logical-unit mapping provides its physical node location.
+						Item.Source.JsonPath = Source->GetJsonPointer();
+						Item.Source.Line = Source->GetLine();
+						Item.Source.Column = Source->GetColumn();
+					}
+				}
+				if (Item.Source.SourceFile == Source->GetSourceUnit())
+				{
+					if (Item.Source.JsonPath.IsEmpty() || Item.Source.JsonPath == TEXT("/"))
+					{
+						Item.Source.JsonPath = Source->GetJsonPointer();
+					}
+					// A parent's position is not the exact position of a different child pointer.
+					if (Item.Source.JsonPath == Source->GetJsonPointer())
+					{
+						if (Item.Source.Line <= 0) Item.Source.Line = Source->GetLine();
+						if (Item.Source.Column <= 0) Item.Source.Column = Source->GetColumn();
+					}
+				}
+			}
+			for (auto& Child : Item.Diagnostics) Pending.Emplace(&Child, Source);
+			if (Item.PublicCause)
+			{
+				// The shared cause is immutable; enrich a complete copy, without rebuilding its facts.
+				auto Cause = MakeShared<Contract::FDiagnostic>(*Item.PublicCause);
+				Item.PublicCause = Cause;
+				Pending.Emplace(&Cause.Get(), Source);
+			}
+		}
+	}
+
+	const FString& FWorkspaceError::GetCode() const { return Diagnostic.Code; }
+	const FString& FWorkspaceError::GetSourceUnit() const { return Diagnostic.Source.SourceUnit; }
+	const FString& FWorkspaceError::GetJsonPointer() const
+	{ return Diagnostic.Source.InternalJsonPath; }
+	int64 FWorkspaceError::GetObserved() const { return Diagnostic.ResourceObserved.Get(0); }
+	int32 FWorkspaceError::GetLine() const { return Diagnostic.Source.Line; }
+	int32 FWorkspaceError::GetColumn() const { return Diagnostic.Source.Column; }
+	bool FWorkspaceError::IsStoppedEarly() const { return Diagnostic.StoppedEarly.Get(false); }
+	const TArray<FString>& FWorkspaceError::GetCyclePath() const { return Diagnostic.CyclePath; }
+
+	void FWorkspaceError::Recode(const FString& InCode, const FString& PublicReason)
+	{
+		if (Diagnostic.Code == InCode) return;
+		Diagnostic.PublicCause = MakeShared<Contract::FDiagnostic>(Diagnostic);
+		Diagnostic.CauseCode = Diagnostic.Code;
+		Diagnostic.Code = InCode;
+		Diagnostic.PublicMessage = PublicReason;
+	}
 
 	void FWorkspaceError::Reset()
 	{
-		Code.Reset();
-		SourceUnit.Reset();
-		JsonPointer = TEXT("/");
-		Observed = 0;
-		bStoppedEarly = false;
-		CyclePath.Reset();
+		Diagnostic.Reset();
+		Diagnostic.Source.InternalJsonPath = TEXT("/");
 	}
 
-	void FWorkspaceError::Set(
-		FString InCode,
-		FString InSourceUnit,
-		FString InJsonPointer,
-		int64 InObserved,
-		bool bInStoppedEarly,
-		TArray<FString> InCyclePath)
+	void FWorkspaceError::SetSourceFailure(FString InCode, FString PublicReason, FString InSourceUnit, FString InJsonPointer,
+		int64 InObserved, bool bInStoppedEarly, TArray<FString> InCyclePath, int32 InLine, int32 InColumn)
 	{
-		Code = MoveTemp(InCode);
-		SourceUnit = MoveTemp(InSourceUnit);
-		JsonPointer = InJsonPointer.IsEmpty()
-			? TEXT("/")
-			: MoveTemp(InJsonPointer);
-		Observed = InObserved;
-		bStoppedEarly = bInStoppedEarly;
-		CyclePath = MoveTemp(InCyclePath);
+		Reset();
+		Diagnostic = Contract::FDiagnostic::Failure(MoveTemp(InCode), MoveTemp(PublicReason), TEXT("workspace_resolve"));
+		Diagnostic.Source.SourceUnit = MoveTemp(InSourceUnit);
+		const FString Pointer = InJsonPointer.IsEmpty() ? TEXT("/") : MoveTemp(InJsonPointer);
+		Diagnostic.Source.InternalJsonPath = Pointer;
+		if (IsPublicWorkspaceSource(Diagnostic.Source.SourceUnit))
+		{
+			Diagnostic.Source.SourceFile = Diagnostic.Source.SourceUnit;
+			Diagnostic.Source.JsonPath = Pointer;
+		}
+		else if (!Diagnostic.Source.SourceUnit.Contains(TEXT(".uai/")) && !Diagnostic.Source.SourceUnit.Contains(TEXT(".uai\\")))
+			Diagnostic.SemanticPointer = Pointer;
+		if (FPackageName::IsValidObjectPath(Diagnostic.Source.SourceUnit)
+			|| FPackageName::IsValidLongPackageName(Diagnostic.Source.SourceUnit))
+		{
+			Diagnostic.TargetPath = Diagnostic.Source.SourceUnit;
+			if (Pointer != TEXT("/")) Diagnostic.PropertyPath = Pointer;
+		}
+		if (InObserved != 0 || bInStoppedEarly) Diagnostic.ResourceObserved = InObserved;
+		if (bInStoppedEarly) Diagnostic.StoppedEarly = true;
+		Diagnostic.CyclePath = MoveTemp(InCyclePath);
+		Diagnostic.Source.Line = InLine;
+		Diagnostic.Source.Column = InColumn;
 	}
 
 	FSourceProvenance::FSourceProvenance(
@@ -940,7 +1522,7 @@ namespace UE::UAI::HjsonWorkspace
 	{
 		for (const TPair<FString, FHjsonNodeRef>& Entry : Entries)
 		{
-			if (Entry.Key == Key)
+			if (Entry.Key.Equals(Key, ESearchCase::CaseSensitive))
 			{
 				return &Entry.Value.Get();
 			}
@@ -961,9 +1543,14 @@ namespace UE::UAI::HjsonWorkspace
 
 	const FHjsonNode* FHjsonDocument::Find(const FString& JsonPointer) const
 	{
+		return Root->Find(JsonPointer);
+	}
+
+	const FHjsonNode* FHjsonNode::Find(const FString& JsonPointer) const
+	{
 		if (JsonPointer.IsEmpty() || JsonPointer == TEXT("/"))
 		{
-			return &Root.Get();
+			return this;
 		}
 		if (!JsonPointer.StartsWith(TEXT("/")))
 		{
@@ -971,7 +1558,7 @@ namespace UE::UAI::HjsonWorkspace
 		}
 		TArray<FString> Segments;
 		JsonPointer.Mid(1).ParseIntoArray(Segments, TEXT("/"), false);
-		const FHjsonNode* Current = &Root.Get();
+		const FHjsonNode* Current = this;
 		for (FString Segment : Segments)
 		{
 			Segment = UnescapePointerSegment(MoveTemp(Segment));
@@ -1060,15 +1647,13 @@ namespace UE::UAI::HjsonWorkspace
 		int32 InContractVersion,
 		FString InProfileId,
 		FString InEntryUnit,
-		TArray<FString> InReferenceFields,
-		int32 InMaxFiles)
+		TArray<FString> InReferenceFields)
 		: DialectId(NormalizeRequired(MoveTemp(InDialectId)))
 		, ContractId(NormalizeRequired(MoveTemp(InContractId)))
 		, ContractVersion(InContractVersion)
 		, ProfileId(NormalizeRequired(MoveTemp(InProfileId)))
 		, EntryUnit(MoveTemp(InEntryUnit))
 		, ReferenceFields(MoveTemp(InReferenceFields))
-		, MaxFiles(InMaxFiles)
 	{
 		FPaths::NormalizeFilename(EntryUnit);
 		FPaths::RemoveDuplicateSlashes(EntryUnit);
@@ -1076,8 +1661,7 @@ namespace UE::UAI::HjsonWorkspace
 			&& !ContractId.IsEmpty()
 			&& ContractVersion > 0
 			&& !ProfileId.IsEmpty()
-			&& !EntryUnit.IsEmpty()
-			&& MaxFiles > 0;
+			&& !EntryUnit.IsEmpty();
 	}
 
 	const FString& FWorkspacePolicy::GetDialectId() const { return DialectId; }
@@ -1089,7 +1673,6 @@ namespace UE::UAI::HjsonWorkspace
 	{
 		return ReferenceFields;
 	}
-	int32 FWorkspacePolicy::GetMaxFiles() const { return MaxFiles; }
 	bool FWorkspacePolicy::IsValid() const { return bValid; }
 
 	FWorkspaceUnit::FWorkspaceUnit(
@@ -1158,43 +1741,6 @@ namespace UE::UAI::HjsonWorkspace
 		return SemanticFingerprint;
 	}
 
-	FExportPlanRequest::FExportPlanRequest(
-		FUeAgentCanonicalSnapshotRef InSnapshot,
-		EWorkspaceKind InWorkspaceKind,
-		FString InEntryFile,
-		FString InContractId,
-		int32 InContractVersion,
-		FString InProfileId,
-		int64 InTokenBudget)
-		: Snapshot(MoveTemp(InSnapshot))
-		, WorkspaceKind(InWorkspaceKind)
-		, EntryFile(MoveTemp(InEntryFile))
-		, ContractId(NormalizeRequired(MoveTemp(InContractId)))
-		, ContractVersion(InContractVersion)
-		, ProfileId(NormalizeRequired(MoveTemp(InProfileId)))
-		, TokenBudget(InTokenBudget)
-	{
-		FPaths::NormalizeFilename(EntryFile);
-		FPaths::RemoveDuplicateSlashes(EntryFile);
-		bValid = !EntryFile.IsEmpty()
-			&& !ContractId.IsEmpty()
-			&& ContractVersion > 0
-			&& !ProfileId.IsEmpty()
-			&& TokenBudget >= 0;
-	}
-
-	const FUeAgentCanonicalSnapshotRef& FExportPlanRequest::GetSnapshot() const
-	{
-		return Snapshot;
-	}
-	EWorkspaceKind FExportPlanRequest::GetWorkspaceKind() const { return WorkspaceKind; }
-	const FString& FExportPlanRequest::GetEntryFile() const { return EntryFile; }
-	const FString& FExportPlanRequest::GetContractId() const { return ContractId; }
-	int32 FExportPlanRequest::GetContractVersion() const { return ContractVersion; }
-	const FString& FExportPlanRequest::GetProfileId() const { return ProfileId; }
-	int64 FExportPlanRequest::GetTokenBudget() const { return TokenBudget; }
-	bool FExportPlanRequest::IsValid() const { return bValid; }
-
 	FExportFilePlan::FExportFilePlan(
 		FString InRelativePath,
 		TArray<uint8> InCanonicalUtf8,
@@ -1261,22 +1807,41 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& SourceUnit,
 		FUeAgentResourceTracker& Resources,
 		FHjsonDocumentPtr& OutDocument,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		const FHjsonOperationCheckpoint* Checkpoint)
 	{
 		OutDocument.Reset();
 		OutError.Reset();
+		FWorkspaceError Diagnostics;
+		bool bReachedEnd = false;
+		ON_SCOPE_EXIT
+		{
+			if (OutError.HasErrors())
+			{
+				if (!bReachedEnd) OutError.MarkUnchecked(TEXT("syntax"), SourceUnit,
+					TEXT("cannot_reliably_resume_after_error"), OutError.GetLine());
+				Diagnostics.Append(OutError);
+			}
+			if (Diagnostics.HasErrors())
+			{
+				Diagnostics.MarkUnchecked(TEXT("structure_and_semantics"), SourceUnit, TEXT("syntax_errors"));
+				OutError = MoveTemp(Diagnostics);
+				OutDocument.Reset();
+			}
+		};
 		if (SourceUnit.IsEmpty())
 		{
-			OutError.Set(TEXT("hjson_source_unit_missing"));
+			OutError.SetSourceFailure(TEXT("hjson_source_unit_missing"), TEXT("Parsing HJSON requires a nonempty source unit."));
 			return false;
 		}
-		const FTCHARToUTF8 SourceUtf8(*Text);
+		int64 SourceUtf8Length = 0;
+		if (!ScanUtf8Text(Text, nullptr, SourceUtf8Length, OutError, Checkpoint)) return false;
 		if (!Charge(
 			Resources,
 			{
-				{EUeAgentResourceDimension::InputBytes, SourceUtf8.Length()},
+				{EUeAgentResourceDimension::InputBytes, SourceUtf8Length},
 				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					SourceUtf8.Length() * 2ll},
+					SourceUtf8Length * 2ll},
 				{EUeAgentResourceDimension::WorkUnits, 1},
 			},
 			TEXT("hjson:") + SourceUnit,
@@ -1285,14 +1850,59 @@ namespace UE::UAI::HjsonWorkspace
 			return false;
 		}
 		TArray<FToken> Tokens;
-		if (!ScanTokens(Text, SourceUnit, Resources, Tokens, OutError))
+		if (!ScanTokens(Text, SourceUnit, Resources, Tokens, OutError, Diagnostics, Checkpoint))
 		{
 			return false;
 		}
 		if (Tokens.IsEmpty())
 		{
-			OutError.Set(TEXT("hjson_empty_document"), SourceUnit);
+			SetSyntaxFailure(OutError, TEXT("hjson_empty_document"), TEXT("The HJSON document contains no value."),
+				SourceUnit, TEXT("/"), 1, 1, TEXT("empty document"), TEXT("one root value"));
 			return false;
+		}
+		int32 EndLine = 1;
+		int32 EndColumn = 1;
+		for (int32 Index = 0; Index < Text.Len(); ++Index)
+		{
+			if (Checkpoint && Index % 1024 < 2
+				&& !(*Checkpoint)(TEXT("hjson_end_position"), OutError)) return false;
+			if (Text[Index] == TEXT('\r'))
+			{
+				if (Index + 1 < Text.Len() && Text[Index + 1] == TEXT('\n')) ++Index;
+				++EndLine;
+				EndColumn = 1;
+			}
+			else if (Text[Index] == TEXT('\n'))
+			{
+				++EndLine;
+				EndColumn = 1;
+			}
+			else
+			{
+				++EndColumn;
+			}
+		}
+		const bool bImplicitRootObject = Tokens.Num() >= 2
+			&& (Tokens[0].Kind == ETokenKind::Bare
+				|| Tokens[0].Kind == ETokenKind::String)
+			&& Tokens[1].Kind == ETokenKind::Colon;
+		if (bImplicitRootObject)
+		{
+			if (!Charge(Resources, {
+					{EUeAgentResourceDimension::WorkUnits, 2},
+					{EUeAgentResourceDimension::EstimatedMemoryBytes,
+						2 * static_cast<int64>(sizeof(FToken))}},
+				TEXT("hjson-implicit-root:") + SourceUnit, OutError))
+			{
+				return false;
+			}
+			const FToken First = Tokens[0];
+			Tokens.Insert({ETokenKind::OpenObject, TEXT("{"), TEXT("{"),
+				0, 0, 0, 0, First.Line, First.Column, First.bNewlineBefore}, 0);
+			const int64 EndByte = SourceUtf8Length;
+			Tokens.Add({ETokenKind::CloseObject, TEXT("}"), TEXT("}"),
+				Text.Len(), Text.Len(), EndByte, EndByte,
+				EndLine, EndColumn, true});
 		}
 
 		int32 TokenIndex = 0;
@@ -1307,9 +1917,8 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				if (Root.IsValid())
 				{
-					OutError.Set(
-						TEXT("hjson_trailing_content"),
-						SourceUnit);
+					SetSyntaxFailure(OutError, TEXT("hjson_trailing_content"), TEXT("The document contains extra content after its root value."),
+				SourceUnit, TEXT("/"), Node->GetProvenance().GetLine(), Node->GetProvenance().GetColumn(), Node->GetLexeme(), TEXT("end of input"));
 					return false;
 				}
 				Root = Node;
@@ -1333,17 +1942,33 @@ namespace UE::UAI::HjsonWorkspace
 
 		while (TokenIndex < Tokens.Num() || !Frames.IsEmpty())
 		{
+			if (Checkpoint && !(*Checkpoint)(TEXT("hjson_parse"), OutError))
+			{
+				return false;
+			}
 			if (bExpectingValue)
 			{
 				if (!Tokens.IsValidIndex(TokenIndex))
 				{
-					OutError.Set(
-						TEXT("hjson_value_missing"),
-						SourceUnit,
-						ExpectedPointer);
+					SetSyntaxFailure(OutError, TEXT("hjson_value_missing"), TEXT("A value is required before the next delimiter or end of input."),
+				SourceUnit, ExpectedPointer, EndLine, EndColumn, TEXT("end of input"), TEXT("HJSON value"));
 					return false;
 				}
-				const FToken Token = Tokens[TokenIndex++];
+				FToken Token = Tokens[TokenIndex++];
+				if (!Frames.IsEmpty() && (Token.Kind == ETokenKind::Comma
+					|| (Frames.Last().bObject && Token.Kind == ETokenKind::CloseObject)
+					|| (!Frames.Last().bObject && Token.Kind == ETokenKind::CloseArray)))
+				{
+					FWorkspaceError Error;
+					SetSyntaxFailure(Error, TEXT("hjson_value_missing"), TEXT("A value is required before the next delimiter or end of input."),
+				SourceUnit, ExpectedPointer, Token.Line, Token.Column, Token.Lexeme, TEXT("HJSON value"));
+					Diagnostics.Append(Error);
+					--TokenIndex;
+					Frames.Last().PendingKey.Reset();
+					Frames.Last().State = EFrameState::AfterValue;
+					bExpectingValue = false;
+					continue;
+				}
 				if (Token.Kind == ETokenKind::OpenObject
 					|| Token.Kind == ETokenKind::OpenArray)
 				{
@@ -1389,10 +2014,8 @@ namespace UE::UAI::HjsonWorkspace
 			}
 			if (!Tokens.IsValidIndex(TokenIndex))
 			{
-				OutError.Set(
-					TEXT("hjson_container_unclosed"),
-					SourceUnit,
-					Frames.Last().Pointer);
+				SetSyntaxFailure(OutError, TEXT("hjson_container_unclosed"), TEXT("The HJSON container has no closing delimiter."),
+				SourceUnit, Frames.Last().Pointer, EndLine, EndColumn, TEXT("end of input"), Frames.Last().bObject ? TEXT("}") : TEXT("]"));
 				return false;
 			}
 			FParseFrame& Frame = Frames.Last();
@@ -1451,22 +2074,21 @@ namespace UE::UAI::HjsonWorkspace
 						}
 						continue;
 					}
-					if (Token.Kind != ETokenKind::Bare
+					if ((Token.Kind != ETokenKind::Bare
 						&& Token.Kind != ETokenKind::String)
+						|| (Token.Kind == ETokenKind::Bare
+							&& (Token.Value.Contains(TEXT(" ")) || Token.Value.Contains(TEXT("\t")))))
 					{
-						OutError.Set(
-							TEXT("hjson_object_key_expected"),
-							SourceUnit,
-							Frame.Pointer);
+						SetSyntaxFailure(OutError, TEXT("hjson_object_key_expected"), TEXT("Expected a quoted key or an unquoted key without whitespace."),
+				SourceUnit, Frame.Pointer, Token.Line, Token.Column, Token.Lexeme, TEXT("object key"));
 						return false;
 					}
 					if (Frame.Keys.Contains(Token.Value))
 					{
-						OutError.Set(
-							TEXT("hjson_duplicate_key"),
-							SourceUnit,
-							JoinPointer(Frame.Pointer, Token.Value));
-						return false;
+						SetSyntaxFailure(OutError, TEXT("hjson_duplicate_key"), TEXT("Each key must be unique within its object."),
+				SourceUnit, JoinPointer(Frame.Pointer, Token.Value), Token.Line, Token.Column, Token.Value, TEXT("unique object key"));
+						Diagnostics.Append(OutError);
+						OutError.Reset();
 					}
 					Frame.Keys.Add(Token.Value);
 					Frame.PendingKey = Token.Value;
@@ -1478,11 +2100,18 @@ namespace UE::UAI::HjsonWorkspace
 				{
 					if (Token.Kind != ETokenKind::Colon)
 					{
-						OutError.Set(
-							TEXT("hjson_colon_expected"),
-							SourceUnit,
-							JoinPointer(Frame.Pointer, Frame.PendingKey));
-						return false;
+						SetSyntaxFailure(OutError, TEXT("hjson_colon_expected"), TEXT("Expected ':' after the object key."),
+				SourceUnit, JoinPointer(Frame.Pointer, Frame.PendingKey), Token.Line, Token.Column, Token.Lexeme, TEXT(":"));
+						// Only resume where a value token is already unambiguous.
+						if (Token.Kind != ETokenKind::OpenObject && Token.Kind != ETokenKind::OpenArray
+							&& Token.Kind != ETokenKind::Bare && Token.Kind != ETokenKind::String) return false;
+						Diagnostics.Append(OutError);
+						OutError.Reset();
+						ExpectedPointer = JoinPointer(Frame.Pointer, Frame.PendingKey);
+						ExpectedKey = Frame.PendingKey;
+						Frame.State = EFrameState::AwaitingValue;
+						bExpectingValue = true;
+						continue;
 					}
 					ExpectedPointer = JoinPointer(
 						Frame.Pointer,
@@ -1507,11 +2136,15 @@ namespace UE::UAI::HjsonWorkspace
 						Frame.State = EFrameState::KeyOrEnd;
 						continue;
 					}
-					OutError.Set(
-						TEXT("hjson_object_separator_expected"),
-						SourceUnit,
-						Frame.Pointer);
-					return false;
+					SetSyntaxFailure(OutError, TEXT("hjson_object_separator_expected"), TEXT("Expected a comma, newline or closing brace after the object value."),
+				SourceUnit, Frame.Pointer, Token.Line, Token.Column, Token.Lexeme, TEXT("comma, newline or }"));
+					if ((Token.Kind != ETokenKind::Bare && Token.Kind != ETokenKind::String)
+						|| !Tokens.IsValidIndex(TokenIndex + 1)
+						|| Tokens[TokenIndex + 1].Kind != ETokenKind::Colon) return false;
+					Diagnostics.Append(OutError);
+					OutError.Reset();
+					Frame.State = EFrameState::KeyOrEnd;
+					continue;
 				}
 			}
 			else
@@ -1582,24 +2215,32 @@ namespace UE::UAI::HjsonWorkspace
 						Frame.State = EFrameState::ValueOrEnd;
 						continue;
 					}
-					OutError.Set(
-						TEXT("hjson_array_separator_expected"),
-						SourceUnit,
-						Frame.Pointer);
-					return false;
+					SetSyntaxFailure(OutError, TEXT("hjson_array_separator_expected"), TEXT("Expected a comma, newline or closing bracket after the array value."),
+				SourceUnit, Frame.Pointer, Token.Line, Token.Column, Token.Lexeme, TEXT("comma, newline or ]"));
+					if (Token.Kind != ETokenKind::Bare && Token.Kind != ETokenKind::String
+						&& Token.Kind != ETokenKind::OpenObject && Token.Kind != ETokenKind::OpenArray) return false;
+					Diagnostics.Append(OutError);
+					OutError.Reset();
+					Frame.State = EFrameState::ValueOrEnd;
+					continue;
 				}
 			}
 		}
 		if (!Root.IsValid())
 		{
-			OutError.Set(TEXT("hjson_document_missing_root"), SourceUnit);
+			SetSyntaxFailure(OutError, TEXT("hjson_document_missing_root"), TEXT("The parser did not produce a root value for the document."),
+				SourceUnit, TEXT("/"), EndLine, EndColumn, TEXT("no root value"), TEXT("one root value"));
 			return false;
 		}
 		if (TokenIndex != Tokens.Num())
 		{
-			OutError.Set(TEXT("hjson_trailing_content"), SourceUnit);
+			const FToken& Trailing = Tokens[TokenIndex];
+			SetSyntaxFailure(OutError, TEXT("hjson_trailing_content"), TEXT("The document contains extra content after its root value."),
+				SourceUnit, TEXT("/"), Trailing.Line, Trailing.Column, Trailing.Lexeme, TEXT("end of input"));
 			return false;
 		}
+		bReachedEnd = true;
+		if (Diagnostics.HasErrors()) return false;
 		OutDocument = MakeShared<FHjsonDocument>(
 			SourceUnit,
 			Root.ToSharedRef());
@@ -1635,8 +2276,7 @@ namespace UE::UAI::HjsonWorkspace
 			}
 			if (!Task.Node.IsValid())
 			{
-				OutError.Set(
-					TEXT("hjson_writer_node_missing"),
+				OutError.SetSourceFailure(TEXT("hjson_writer_node_missing"), TEXT("The HJSON writer encountered a missing document node."),
 					Document->GetSourceUnit());
 				return false;
 			}
@@ -1745,6 +2385,144 @@ namespace UE::UAI::HjsonWorkspace
 		return true;
 	}
 
+	bool TryProjectHjsonNodeToJsonValue(
+		const FHjsonNode& Node,
+		FUeAgentResourceTracker& Resources,
+		TSharedPtr<FJsonValue>& OutValue,
+		FWorkspaceError& OutError,
+		const FHjsonOperationCheckpoint* Checkpoint)
+	{
+		OutValue.Reset();
+		OutError.Reset();
+		TArray<FHjsonJsonProjectionTask> Tasks;
+		Tasks.Add({&Node, false});
+		TMap<const FHjsonNode*, TSharedPtr<FJsonValue>> Converted;
+		while (!Tasks.IsEmpty())
+		{
+			if (Checkpoint && !(*Checkpoint)(TEXT("hjson_json_projection"), OutError))
+			{
+				return false;
+			}
+			const FHjsonJsonProjectionTask Task = Tasks.Pop(EAllowShrinking::No);
+			if (!Task.Node)
+			{
+				OutError.SetSourceFailure(TEXT("hjson_json_projection_node_missing"), TEXT("The HJSON-to-JSON projection encountered a missing node."), Node.GetProvenance().GetSourceUnit());
+				return false;
+			}
+			if (!Task.bExit)
+			{
+				if (!ChargeJsonProjectionNode(*Task.Node, Resources, OutError))
+				{
+					return false;
+				}
+				switch (Task.Node->GetKind())
+				{
+				case EHjsonNodeKind::Null:
+					Converted.Add(Task.Node, MakeShared<FJsonValueNull>());
+					break;
+				case EHjsonNodeKind::Boolean:
+					Converted.Add(
+						Task.Node,
+						MakeShared<FJsonValueBoolean>(Task.Node->GetBoolean()));
+					break;
+				case EHjsonNodeKind::String:
+					Converted.Add(
+						Task.Node,
+						MakeShared<FJsonValueString>(Task.Node->GetText()));
+					break;
+				case EHjsonNodeKind::Integer:
+				case EHjsonNodeKind::Decimal:
+					Converted.Add(
+						Task.Node,
+						MakeShared<FJsonValueNumberString>(Task.Node->GetLexeme()));
+					break;
+				case EHjsonNodeKind::Array:
+				case EHjsonNodeKind::Object:
+					Tasks.Add({Task.Node, true});
+					if (Task.Node->GetKind() == EHjsonNodeKind::Array)
+					{
+						const TArray<FHjsonNodeRef>& Items = Task.Node->GetItems();
+						for (int32 Index = Items.Num() - 1; Index >= 0; --Index)
+						{
+							Tasks.Add({&Items[Index].Get(), false});
+						}
+					}
+					else
+					{
+						const TArray<TPair<FString, FHjsonNodeRef>>& Entries =
+							Task.Node->GetEntries();
+						for (int32 Index = Entries.Num() - 1; Index >= 0; --Index)
+						{
+							Tasks.Add({&Entries[Index].Value.Get(), false});
+						}
+					}
+					break;
+				default:
+					OutError.SetFailure(WorkspaceValueFailure(TEXT("hjson_json_projection_node_kind_invalid"), TEXT("The HJSON node kind has no supported JSON representation."), MakeShared<FJsonValueString>(NodeKindName(Task.Node->GetKind()))),
+						Task.Node->GetProvenance().GetSourceUnit(), Task.Node->GetProvenance().GetJsonPointer());
+					OutError.Locate(Task.Node->GetProvenance());
+					return false;
+				}
+				continue;
+			}
+
+			if (Task.Node->GetKind() == EHjsonNodeKind::Array)
+			{
+				TArray<TSharedPtr<FJsonValue>> Items;
+				Items.Reserve(Task.Node->GetItems().Num());
+				for (const FHjsonNodeRef& Item : Task.Node->GetItems())
+				{
+					const TSharedPtr<FJsonValue>* ConvertedItem = Converted.Find(&Item.Get());
+					if (!ConvertedItem || !ConvertedItem->IsValid())
+					{
+						OutError.SetFailure(WorkspaceValueFailure(TEXT("hjson_json_projection_child_missing"), TEXT("The HJSON array item has no converted JSON value."), nullptr),
+							Item->GetProvenance().GetSourceUnit(), Item->GetProvenance().GetJsonPointer());
+						OutError.Locate(Item->GetProvenance());
+						return false;
+					}
+					Items.Add(*ConvertedItem);
+				}
+				Converted.Add(
+					Task.Node,
+					MakeShared<FJsonValueArray>(MoveTemp(Items)));
+			}
+			else
+			{
+				const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+				for (const TPair<FString, FHjsonNodeRef>& Entry : Task.Node->GetEntries())
+				{
+					const TSharedPtr<FJsonValue>* ConvertedEntry =
+						Converted.Find(&Entry.Value.Get());
+					if (!ConvertedEntry || !ConvertedEntry->IsValid())
+					{
+						OutError.SetFailure(WorkspaceValueFailure(TEXT("hjson_json_projection_child_missing"), TEXT("The HJSON object field has no converted JSON value."), nullptr),
+							Entry.Value->GetProvenance().GetSourceUnit(), Entry.Value->GetProvenance().GetJsonPointer());
+						OutError.Locate(Entry.Value->GetProvenance());
+						return false;
+					}
+					if (Object->Values.Contains(Entry.Key))
+					{
+						OutError.SetFailure(WorkspaceValueFailure(TEXT("hjson_json_object_key_collision"), TEXT("Two HJSON entries map to the same JSON object key."), MakeShared<FJsonValueString>(Entry.Key)),
+							Entry.Value->GetProvenance().GetSourceUnit(), Entry.Value->GetProvenance().GetJsonPointer());
+						OutError.Locate(Entry.Value->GetProvenance());
+						return false;
+					}
+					Object->SetField(Entry.Key, *ConvertedEntry);
+				}
+				Converted.Add(Task.Node, MakeShared<FJsonValueObject>(Object));
+			}
+		}
+		OutValue = Converted.FindRef(&Node);
+		if (!OutValue.IsValid())
+		{
+			OutError.SetSourceFailure(TEXT("hjson_json_projection_failed"), TEXT("The HJSON root node has no converted JSON value."),
+				Node.GetProvenance().GetSourceUnit(),
+				Node.GetProvenance().GetJsonPointer());
+			return false;
+		}
+		return true;
+	}
+
 	namespace
 	{
 		bool IsReservedStem(const FString& Part)
@@ -1781,7 +2559,9 @@ namespace UE::UAI::HjsonWorkspace
 				|| Value.Contains(TEXT("/../"))
 				|| Value == TEXT(".."))
 			{
-				OutError.Set(TEXT("workspace_path_invalid"), Value);
+				OutError.SetFailure(WorkspaceValueFailure(TEXT("workspace_path_invalid"),
+					TEXT("The workspace unit path must be nonempty, relative and contained in the workspace."),
+					MakeShared<FJsonValueString>(Value), MakeShared<FJsonValueString>(TEXT("relative workspace unit path"))), Value);
 				return false;
 			}
 			TArray<FString> Parts;
@@ -1792,11 +2572,10 @@ namespace UE::UAI::HjsonWorkspace
 					|| Part == TEXT("..")
 					|| IsReservedStem(Part))
 				{
-					OutError.Set(
-						IsReservedStem(Part)
-							? TEXT("workspace_path_reserved_name")
-							: TEXT("workspace_path_invalid"),
-						Value);
+					OutError.SetFailure(WorkspaceValueFailure(IsReservedStem(Part)
+						? TEXT("workspace_path_reserved_name") : TEXT("workspace_path_invalid"),
+						IsReservedStem(Part) ? TEXT("A workspace path component uses a reserved file name.") : TEXT("A normalized workspace path cannot contain '.' or '..' components."),
+						MakeShared<FJsonValueString>(Part)), Value);
 					return false;
 				}
 			}
@@ -1821,9 +2600,9 @@ namespace UE::UAI::HjsonWorkspace
 				{
 					if (*Existing != UnitId)
 					{
-						OutError.Set(
-							TEXT("workspace_path_case_collision"),
-							UnitId);
+						OutError.SetFailure(WorkspaceValueFailure(TEXT("workspace_path_case_collision"),
+							TEXT("Two workspace unit paths differ only by letter case."),
+							MakeShared<FJsonValueString>(UnitId), MakeShared<FJsonValueString>(*Existing)), UnitId);
 						return false;
 					}
 				}
@@ -1873,9 +2652,7 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				if (!IFileManager::Get().FileExists(*Root))
 				{
-					OutError.Set(
-						TEXT("workspace_source_file_missing"),
-						Root);
+					OutError.SetSourceFailure(TEXT("workspace_source_file_missing"), TEXT("The workspace source file does not exist."), Root);
 					return false;
 				}
 				if (!Charge(
@@ -1889,9 +2666,7 @@ namespace UE::UAI::HjsonWorkspace
 				FString Text;
 				if (!FFileHelper::LoadFileToString(Text, *Root))
 				{
-					OutError.Set(
-						TEXT("workspace_source_read_failed"),
-						Policy.GetEntryUnit());
+					OutError.SetSourceFailure(TEXT("workspace_source_read_failed"), TEXT("The workspace source file could not be read."), Root);
 					return false;
 				}
 				OutSources.Add({Policy.GetEntryUnit(), MoveTemp(Text)});
@@ -1899,9 +2674,8 @@ namespace UE::UAI::HjsonWorkspace
 			}
 			if (!IFileManager::Get().DirectoryExists(*Root))
 			{
-				OutError.Set(
-					TEXT("workspace_source_directory_missing"),
-					Root);
+				OutError.SetFailure(WorkspaceValueFailure(TEXT("workspace_source_directory_missing"),
+					TEXT("The workspace source directory does not exist."), MakeShared<FJsonValueString>(Source.GetPath())), Root);
 				return false;
 			}
 			TArray<FString> Files;
@@ -1924,22 +2698,14 @@ namespace UE::UAI::HjsonWorkspace
 				FString UnitId = File;
 				if (!FPaths::MakePathRelativeTo(UnitId, *RelativeBase))
 				{
-					OutError.Set(TEXT("workspace_path_invalid"), File);
+					OutError.SetFailure(WorkspaceValueFailure(TEXT("workspace_path_invalid"),
+						TEXT("The source file path could not be made relative to the workspace directory."),
+						MakeShared<FJsonValueString>(File), MakeShared<FJsonValueString>(RelativeBase)), File);
 					return false;
 				}
 				FPaths::NormalizeFilename(UnitId);
 				FPaths::RemoveDuplicateSlashes(UnitId);
 				UnitIds.Add(UnitId);
-				if (UnitIds.Num() > Policy.GetMaxFiles())
-				{
-					OutError.Set(
-						TEXT("workspace_file_budget_exceeded"),
-						UnitId,
-						TEXT("/"),
-						UnitIds.Num(),
-						true);
-					return false;
-				}
 				if (!Charge(
 					Resources,
 					{{EUeAgentResourceDimension::Files, 1}},
@@ -1958,9 +2724,7 @@ namespace UE::UAI::HjsonWorkspace
 				FString Text;
 				if (!FFileHelper::LoadFileToString(Text, *Files[Index]))
 				{
-					OutError.Set(
-						TEXT("workspace_source_read_failed"),
-						UnitIds[Index]);
+					OutError.SetSourceFailure(TEXT("workspace_source_read_failed"), TEXT("The workspace source file could not be read."), Files[Index]);
 					return false;
 				}
 				OutSources.Add({UnitIds[Index], MoveTemp(Text)});
@@ -1984,9 +2748,10 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			if (Root.GetKind() != EHjsonNodeKind::Object)
 			{
-				OutError.Set(
-					TEXT("workspace_unit_root_not_object"),
-					SourceUnit);
+				OutError.SetFailure(WorkspaceValueFailure(TEXT("workspace_unit_root_not_object"),
+					TEXT("Each workspace unit must have an object root containing its policy fields."),
+					MakeShared<FJsonValueString>(NodeKindName(Root.GetKind())), MakeShared<FJsonValueString>(TEXT("object"))), SourceUnit);
+				OutError.Locate(Root.GetProvenance());
 				return false;
 			}
 			const TArray<TPair<FString, FString>> Expected = {
@@ -2000,18 +2765,19 @@ namespace UE::UAI::HjsonWorkspace
 				const FHjsonNode* Node = Root.Get(Entry.Key);
 				if (!Node)
 				{
-					OutError.Set(
-						TEXT("workspace_policy_field_missing"),
-						SourceUnit,
-						TEXT("/") + Entry.Key);
+					OutError.SetFailure(WorkspaceValueFailure(TEXT("workspace_policy_field_missing"),
+						TEXT("A required workspace policy field is missing."), nullptr, MakeShared<FJsonValueString>(Entry.Value)),
+						SourceUnit, TEXT("/") + Entry.Key);
+					OutError.Locate(Root.GetProvenance());
 					return false;
 				}
 				if (NodeScalarText(*Node) != Entry.Value)
 				{
-					OutError.Set(
-						TEXT("workspace_policy_mismatch"),
-						SourceUnit,
-						TEXT("/") + Entry.Key);
+					OutError.SetFailure(WorkspaceValueFailure(TEXT("workspace_policy_mismatch"),
+						TEXT("The workspace policy field does not match the required contract."),
+						MakeShared<FJsonValueString>(NodeScalarText(*Node)), MakeShared<FJsonValueString>(Entry.Value)),
+						SourceUnit, TEXT("/") + Entry.Key);
+					OutError.Locate(Node->GetProvenance());
 					return false;
 				}
 			}
@@ -2042,9 +2808,8 @@ namespace UE::UAI::HjsonWorkspace
 				{
 					if (Parts.IsEmpty())
 					{
-						OutError.Set(
-							TEXT("workspace_ref_escape"),
-							SourceUnit);
+						OutError.SetFailure(WorkspaceValueFailure(TEXT("workspace_ref_escape"),
+							TEXT("The workspace reference traverses above the workspace root."), MakeShared<FJsonValueString>(Reference)), SourceUnit);
 						return false;
 					}
 					Parts.Pop();
@@ -2057,9 +2822,10 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				if (OutError.GetCode() == TEXT("workspace_path_invalid"))
 				{
-					OutError.Set(
-						TEXT("workspace_ref_escape"),
-						SourceUnit);
+					auto Failure = Contract::FDiagnostic::WrapFailure(TEXT("workspace_ref_escape"), OutError.GetDiagnostic(),
+						TEXT("workspace_resolve"), TEXT("The workspace reference does not resolve to a valid relative unit path."));
+					Failure.ActualValue = MakeShared<FJsonValueString>(Reference);
+					OutError.SetFailure(MoveTemp(Failure), SourceUnit);
 				}
 				return false;
 			}
@@ -2106,15 +2872,15 @@ namespace UE::UAI::HjsonWorkspace
 									Target,
 									OutError))
 								{
+									OutError.Locate(Entry.Value->GetProvenance());
 									return false;
 								}
 								if (!UnitIds.Contains(Target))
 								{
-									OutError.Set(
-										TEXT("workspace_ref_missing"),
-										Unit.GetUnitId(),
-										Entry.Value->GetProvenance()
-											.GetJsonPointer());
+									OutError.SetFailure(WorkspaceValueFailure(TEXT("workspace_ref_missing"),
+										TEXT("The referenced workspace unit is not present in the input."), MakeShared<FJsonValueString>(Entry.Value->GetText()),
+										MakeShared<FJsonValueString>(Target)), Unit.GetUnitId(), Entry.Value->GetProvenance().GetJsonPointer());
+									OutError.Locate(Entry.Value->GetProvenance());
 									return false;
 								}
 								if (!Charge(
@@ -2210,8 +2976,8 @@ namespace UE::UAI::HjsonWorkspace
 							Cycle.Add(Path[Index]);
 						}
 						Cycle.Add(Target);
-						OutError.Set(
-							TEXT("workspace_ref_cycle"),
+						OutError.SetSourceFailure(
+							TEXT("workspace_ref_cycle"), TEXT("The workspace references contain a dependency cycle."),
 							Frame.Unit,
 							TEXT("/"),
 							0,
@@ -2244,7 +3010,15 @@ namespace UE::UAI::HjsonWorkspace
 		OutError.Reset();
 		if (!Policy.IsValid())
 		{
-			OutError.Set(TEXT("workspace_policy_invalid"));
+			const FString Field = Policy.GetDialectId().IsEmpty() ? TEXT("dialect_id")
+				: Policy.GetContractId().IsEmpty() ? TEXT("contract_id")
+				: Policy.GetContractVersion() <= 0 ? TEXT("contract_version")
+				: Policy.GetProfileId().IsEmpty() ? TEXT("profile_id") : TEXT("entry_unit");
+			auto Failure = Contract::FDiagnostic::Failure(TEXT("workspace_policy_invalid"),
+				Field == TEXT("contract_version") ? TEXT("The workspace contract version must be positive.") : TEXT("The required workspace policy field is empty."), TEXT("workspace_resolve"));
+			Failure.PropertyPath = Field;
+			Failure.ActualValue = Field == TEXT("contract_version") ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Policy.GetContractVersion())) : MakeShared<FJsonValueString>(TEXT(""));
+			OutError.SetFailure(MoveTemp(Failure));
 			return false;
 		}
 		TArray<FSourceText> SourceTexts;
@@ -2267,6 +3041,7 @@ namespace UE::UAI::HjsonWorkspace
 			return false;
 		}
 		TArray<FWorkspaceUnit> Units;
+		FWorkspaceError Diagnostics;
 		for (const FSourceText& SourceText : SourceTexts)
 		{
 			FHjsonDocumentPtr Document;
@@ -2282,7 +3057,8 @@ namespace UE::UAI::HjsonWorkspace
 					Policy,
 					OutError))
 			{
-				return false;
+				Diagnostics.Append(OutError);
+				continue;
 			}
 			TArray<uint8> CanonicalUtf8;
 			if (!TryWriteHjsonDocument(
@@ -2299,11 +3075,15 @@ namespace UE::UAI::HjsonWorkspace
 				CanonicalUtf8,
 				HashBytes(CanonicalUtf8));
 		}
+		if (Diagnostics.HasErrors())
+		{
+			Diagnostics.MarkUnchecked(TEXT("workspace_references"), FString(), TEXT("invalid_units"));
+			OutError = MoveTemp(Diagnostics);
+			return false;
+		}
 		if (!UnitIds.Contains(Policy.GetEntryUnit()))
 		{
-			OutError.Set(
-				TEXT("workspace_entry_unit_missing"),
-				Policy.GetEntryUnit());
+			OutError.SetSourceFailure(TEXT("workspace_entry_unit_missing"), TEXT("The required entry HJSON unit is not present in the workspace input."), Policy.GetEntryUnit());
 			return false;
 		}
 		TArray<FReferenceEdge> Edges;
@@ -2354,559 +3134,4 @@ namespace UE::UAI::HjsonWorkspace
 		return true;
 	}
 
-	namespace
-	{
-		FString ValueKindText(EUeAgentValueKind Kind)
-		{
-			switch (Kind)
-			{
-			case EUeAgentValueKind::Null:
-				return TEXT("null");
-			case EUeAgentValueKind::Boolean:
-				return TEXT("boolean");
-			case EUeAgentValueKind::String:
-				return TEXT("string");
-			case EUeAgentValueKind::Integer:
-				return TEXT("integer");
-			case EUeAgentValueKind::Decimal:
-				return TEXT("decimal");
-			case EUeAgentValueKind::Array:
-				return TEXT("array");
-			case EUeAgentValueKind::Object:
-				return TEXT("object");
-			case EUeAgentValueKind::Temporal:
-				return TEXT("temporal");
-			case EUeAgentValueKind::Spatial:
-				return TEXT("spatial");
-			}
-			return TEXT("unknown");
-		}
-
-		FString DefaultSourceKindText(EUeAgentDefaultSourceKind Kind)
-		{
-			switch (Kind)
-			{
-			case EUeAgentDefaultSourceKind::Factory:
-				return TEXT("factory");
-			case EUeAgentDefaultSourceKind::ClassDefaultObject:
-				return TEXT("class_default_object");
-			case EUeAgentDefaultSourceKind::Constructor:
-				return TEXT("constructor");
-			case EUeAgentDefaultSourceKind::StructInitializer:
-				return TEXT("struct_initializer");
-			case EUeAgentDefaultSourceKind::Schema:
-				return TEXT("schema");
-			case EUeAgentDefaultSourceKind::DomainNative:
-				return TEXT("domain_native");
-			case EUeAgentDefaultSourceKind::PostCreateReadback:
-				return TEXT("post_create_readback");
-			}
-			return TEXT("unknown");
-		}
-
-		FString StatePlaneText(EUeAgentStatePlane StatePlane)
-		{
-			const TCHAR* Value =
-				UE::UAI::Contract::LexToString(StatePlane);
-			return *Value ? Value : TEXT("unknown");
-		}
-
-		FString SpatialQuantityKindText(EUeAgentSpatialQuantityKind Kind)
-		{
-			switch (Kind)
-			{
-			case EUeAgentSpatialQuantityKind::Point:
-				return TEXT("point");
-			case EUeAgentSpatialQuantityKind::Direction:
-				return TEXT("direction");
-			case EUeAgentSpatialQuantityKind::Normal:
-				return TEXT("normal");
-			case EUeAgentSpatialQuantityKind::Transform:
-				return TEXT("transform");
-			}
-			return TEXT("unknown");
-		}
-
-		FString StringArrayText(const TArray<FString>& Values)
-		{
-			FString Text = TEXT("[");
-			for (int32 Index = 0; Index < Values.Num(); ++Index)
-			{
-				if (Index > 0)
-				{
-					Text += TEXT(",");
-				}
-				Text += QuoteString(Values[Index]);
-			}
-			Text += TEXT("]");
-			return Text;
-		}
-
-		FString StringMatrixText(const TArray<TArray<FString>>& Values)
-		{
-			FString Text = TEXT("[");
-			for (int32 Index = 0; Index < Values.Num(); ++Index)
-			{
-				if (Index > 0)
-				{
-					Text += TEXT(",");
-				}
-				Text += StringArrayText(Values[Index]);
-			}
-			Text += TEXT("]");
-			return Text;
-		}
-
-		FString StringMapText(const TMap<FString, FString>& Values)
-		{
-			TArray<FString> Keys;
-			Values.GetKeys(Keys);
-			Keys.Sort();
-			FString Text = TEXT("{");
-			for (int32 Index = 0; Index < Keys.Num(); ++Index)
-			{
-				if (Index > 0)
-				{
-					Text += TEXT(",");
-				}
-				Text += QuoteString(Keys[Index])
-					+ TEXT(":")
-					+ QuoteString(Values.FindChecked(Keys[Index]));
-			}
-			Text += TEXT("}");
-			return Text;
-		}
-
-		FString TemporalText(const FUeAgentTemporalPoint& Temporal)
-		{
-			return TEXT("{\"clock_id\":")
-				+ QuoteString(Temporal.GetClockId())
-				+ TEXT(",\"tick\":")
-				+ QuoteString(Temporal.GetTick())
-				+ TEXT(",\"rate_numerator\":")
-				+ QuoteString(Temporal.GetRateNumerator())
-				+ TEXT(",\"rate_denominator\":")
-				+ QuoteString(Temporal.GetRateDenominator())
-				+ TEXT(",\"state\":")
-				+ QuoteString(Temporal.GetState())
-				+ TEXT("}");
-		}
-
-		FString SpatialText(const FUeAgentSpatialValue& Spatial)
-		{
-			const FUeAgentSpatialFrame& Frame = Spatial.GetFrame();
-			return TEXT("{\"subject\":")
-				+ QuoteString(Spatial.GetSubject())
-				+ TEXT(",\"quantity_kind\":")
-				+ QuoteString(
-					SpatialQuantityKindText(Spatial.GetQuantityKind()))
-				+ TEXT(",\"frame\":{\"frame_id\":")
-				+ QuoteString(Frame.GetFrameId())
-				+ TEXT(",\"basis_frame_id\":")
-				+ QuoteString(Frame.GetBasisFrameId())
-				+ TEXT(",\"dimension\":")
-				+ ::LexToString(Frame.GetDimension())
-				+ TEXT(",\"basis\":")
-				+ StringMatrixText(Frame.GetBasis())
-				+ TEXT(",\"origin\":")
-				+ StringArrayText(Frame.GetOrigin())
-				+ TEXT(",\"unit\":")
-				+ QuoteString(Frame.GetUnit())
-				+ TEXT(",\"basis_evidence\":")
-				+ QuoteString(Frame.GetBasisEvidence())
-				+ TEXT(",\"observed_at\":")
-				+ TemporalText(Frame.GetObservedAt())
-				+ TEXT("},\"components\":")
-				+ StringArrayText(Spatial.GetComponents())
-				+ TEXT(",\"observed_at\":")
-				+ TemporalText(Spatial.GetObservedAt())
-				+ TEXT(",\"conversion_evidence\":")
-				+ StringArrayText(Spatial.GetConversionEvidence())
-				+ TEXT("}");
-		}
-
-		struct FValueWriteTask
-		{
-			explicit FValueWriteTask(FString InText)
-				: Text(MoveTemp(InText))
-			{
-			}
-
-			explicit FValueWriteTask(
-				const FUeAgentCanonicalValue* InValue)
-				: Value(InValue)
-			{
-			}
-
-			FString Text;
-			const FUeAgentCanonicalValue* Value = nullptr;
-		};
-
-		FString StateValueText(
-			const FUeAgentCanonicalValue& Root,
-			FUeAgentResourceTracker& Resources,
-			const FString& ResourceKey,
-			FWorkspaceError& OutError)
-		{
-			FString Text;
-			TArray<FValueWriteTask> Tasks;
-			Tasks.Emplace(&Root);
-			while (!Tasks.IsEmpty())
-			{
-				FValueWriteTask Task = MoveTemp(Tasks.Last());
-				Tasks.Pop(EAllowShrinking::No);
-				if (!Task.Value)
-				{
-					Text += Task.Text;
-					continue;
-				}
-				if (!Charge(
-					Resources,
-					{{EUeAgentResourceDimension::WorkUnits, 1}},
-					ResourceKey,
-					OutError))
-				{
-					return FString();
-				}
-
-				const FUeAgentCanonicalValue& Value = *Task.Value;
-				switch (Value.GetKind())
-				{
-				case EUeAgentValueKind::Null:
-					Text += TEXT("null");
-					break;
-				case EUeAgentValueKind::Boolean:
-					Text += Value.GetBoolean()
-						? TEXT("true")
-						: TEXT("false");
-					break;
-				case EUeAgentValueKind::String:
-					Text += QuoteString(Value.GetText());
-					break;
-				case EUeAgentValueKind::Integer:
-				case EUeAgentValueKind::Decimal:
-					Text += Value.GetLexeme();
-					break;
-				case EUeAgentValueKind::Array:
-				{
-					const TArray<FUeAgentCanonicalValueRef>& Items =
-						Value.GetArrayItems();
-					Text += TEXT("[");
-					Tasks.Emplace(TEXT("]"));
-					for (int32 Index = Items.Num() - 1; Index >= 0; --Index)
-					{
-						Tasks.Emplace(&Items[Index].Get());
-						if (Index > 0)
-						{
-							Tasks.Emplace(TEXT(","));
-						}
-					}
-					break;
-				}
-				case EUeAgentValueKind::Object:
-				{
-					const TArray<
-						TPair<FString, FUeAgentCanonicalValueRef>>& Items =
-						Value.GetObjectItems();
-					TArray<int32> Order;
-					Order.Reserve(Items.Num());
-					for (int32 Index = 0; Index < Items.Num(); ++Index)
-					{
-						Order.Add(Index);
-					}
-					Order.Sort(
-						[&Items](int32 Left, int32 Right)
-						{
-							return Items[Left].Key < Items[Right].Key;
-						});
-
-					Text += TEXT("{");
-					Tasks.Emplace(TEXT("}"));
-					for (
-						int32 OrderIndex = Order.Num() - 1;
-						OrderIndex >= 0;
-						--OrderIndex)
-					{
-						const int32 ItemIndex = Order[OrderIndex];
-						Tasks.Emplace(&Items[ItemIndex].Value.Get());
-						Tasks.Emplace(
-							QuoteString(Items[ItemIndex].Key)
-							+ TEXT(":"));
-						if (OrderIndex > 0)
-						{
-							Tasks.Emplace(TEXT(","));
-						}
-					}
-					break;
-				}
-				case EUeAgentValueKind::Temporal:
-					Text += Value.GetTemporal().IsValid()
-						? TemporalText(*Value.GetTemporal())
-						: TEXT("null");
-					break;
-				case EUeAgentValueKind::Spatial:
-					Text += Value.GetSpatial().IsValid()
-						? SpatialText(*Value.GetSpatial())
-						: TEXT("null");
-					break;
-				}
-			}
-			return Text;
-		}
-
-		FString RevisionText(const FUeAgentStateRevision& Revision)
-		{
-			return TEXT("{\"source_id\":")
-				+ QuoteString(Revision.GetSourceId())
-				+ TEXT(",\"generation\":")
-				+ QuoteString(Revision.GetGeneration())
-				+ TEXT(",\"sequence\":")
-				+ ::LexToString(Revision.GetSequence())
-				+ TEXT("}");
-		}
-
-		FString BuildSnapshotHjson(
-			const FExportPlanRequest& Request,
-			FUeAgentResourceTracker& Resources,
-			FWorkspaceError& OutError)
-		{
-			const FUeAgentCanonicalSnapshot& Snapshot =
-				Request.GetSnapshot().Get();
-			FString Text;
-			Text += TEXT("{\n");
-			Text += TEXT("  contract_id: ")
-				+ QuoteString(Request.GetContractId()) + TEXT("\n");
-			Text += TEXT("  contract_version: ")
-				+ ::LexToString(Request.GetContractVersion()) + TEXT("\n");
-			Text += TEXT("  profile_id: ")
-				+ QuoteString(Request.GetProfileId()) + TEXT("\n");
-			Text += TEXT("  operation: \"update\"\n");
-			Text += TEXT("  snapshot: {\n");
-			Text += TEXT("    snapshot_id: ")
-				+ QuoteString(Snapshot.GetSnapshotId()) + TEXT("\n");
-			Text += TEXT("    state_plane: ")
-				+ QuoteString(StatePlaneText(Snapshot.GetStatePlane()))
-				+ TEXT("\n");
-			Text += TEXT("    captured_at: ")
-				+ TemporalText(Snapshot.GetCapturedAt()) + TEXT("\n");
-			Text += TEXT("    revision: {\n");
-			Text += TEXT("      source_id: ")
-				+ QuoteString(Snapshot.GetRevision().GetSourceId())
-				+ TEXT("\n");
-			Text += TEXT("      generation: ")
-				+ QuoteString(Snapshot.GetRevision().GetGeneration())
-				+ TEXT("\n");
-			Text += TEXT("      sequence: ")
-				+ ::LexToString(Snapshot.GetRevision().GetSequence())
-				+ TEXT("\n");
-			Text += TEXT("    }\n");
-			Text += TEXT("    provenance: {\n");
-			Text += TEXT("      source_kind: ")
-				+ QuoteString(Snapshot.GetProvenance().GetSourceKind())
-				+ TEXT("\n");
-			Text += TEXT("      source_id: ")
-				+ QuoteString(Snapshot.GetProvenance().GetSourceId())
-				+ TEXT("\n");
-			Text += TEXT("      evidence_id: ")
-				+ QuoteString(Snapshot.GetProvenance().GetEvidenceId())
-				+ TEXT("\n");
-			Text += TEXT("    }\n");
-			Text += TEXT("    entries: [\n");
-			for (const FUeAgentStateEntry& Entry : Snapshot.GetEntries())
-			{
-				if (!Charge(
-					Resources,
-					{{EUeAgentResourceDimension::WorkUnits, 1}},
-					TEXT("export:") + Entry.GetIdentity().GetCanonicalKey(),
-					OutError))
-				{
-					return FString();
-				}
-				Text += TEXT("      {\n");
-				Text += TEXT("        identity: {\n");
-				Text += TEXT("          semantic_id: ")
-					+ QuoteString(Entry.GetIdentity().GetSemanticId())
-					+ TEXT("\n");
-				Text += TEXT("          target_kind: ")
-					+ QuoteString(Entry.GetIdentity().GetTargetKind())
-					+ TEXT("\n");
-				Text += TEXT("          owner_id: ")
-					+ QuoteString(Entry.GetIdentity().GetOwnerId())
-					+ TEXT("\n");
-				Text += TEXT("          selector: ")
-					+ QuoteString(Entry.GetIdentity().GetSelector())
-					+ TEXT("\n");
-				Text += TEXT("          object_role: ")
-					+ QuoteString(Entry.GetIdentity().GetObjectRole())
-					+ TEXT("\n");
-				Text += TEXT("          generation: ")
-					+ QuoteString(Entry.GetIdentity().GetGeneration())
-					+ TEXT("\n");
-				Text += TEXT("          canonical_key: ")
-					+ QuoteString(Entry.GetIdentity().GetCanonicalKey())
-					+ TEXT("\n");
-				Text += TEXT("        }\n");
-				Text += TEXT("        type: {\n");
-				Text += TEXT("          type_id: ")
-					+ QuoteString(Entry.GetType().GetTypeId()) + TEXT("\n");
-				Text += TEXT("          value_kind: ")
-					+ QuoteString(
-						ValueKindText(Entry.GetType().GetValueKind()))
-					+ TEXT("\n");
-				Text += TEXT("          nullable: ")
-					+ FString(
-						Entry.GetType().IsNullable()
-							? TEXT("true")
-							: TEXT("false"))
-					+ TEXT("\n");
-				Text += TEXT("          container_kind: ")
-					+ QuoteString(Entry.GetType().GetContainerKind())
-					+ TEXT("\n");
-				Text += TEXT("        }\n");
-				Text += TEXT("        value: ")
-					+ StateValueText(
-						Entry.GetValue().Get(),
-						Resources,
-						TEXT("export:value:")
-							+ Entry.GetIdentity().GetCanonicalKey(),
-						OutError)
-					+ TEXT("\n");
-				if (!OutError.GetCode().IsEmpty())
-				{
-					return FString();
-				}
-				Text += TEXT("        default: {\n");
-				Text += TEXT("          source_kind: ")
-					+ QuoteString(
-						DefaultSourceKindText(
-							Entry.GetDefault().GetSourceKind()))
-					+ TEXT("\n");
-				Text += TEXT("          source_identity: ")
-					+ QuoteString(
-						Entry.GetDefault().GetSourceIdentity())
-					+ TEXT("\n");
-				Text += TEXT("          provenance: ")
-					+ QuoteString(Entry.GetDefault().GetProvenance())
-					+ TEXT("\n");
-				Text += TEXT("          value: ")
-					+ StateValueText(
-						Entry.GetDefault().GetValue().Get(),
-						Resources,
-						TEXT("export:default:")
-							+ Entry.GetIdentity().GetCanonicalKey(),
-						OutError)
-					+ TEXT("\n");
-				if (!OutError.GetCode().IsEmpty())
-				{
-					return FString();
-				}
-				Text += TEXT("        }\n");
-				Text += TEXT("        details: {\n");
-				Text += TEXT("        display_name: ")
-					+ QuoteString(Entry.GetDetails().GetDisplayName())
-					+ TEXT("\n");
-				Text += TEXT("          tooltip: ")
-					+ QuoteString(Entry.GetDetails().GetTooltip())
-					+ TEXT("\n");
-				Text += TEXT("          category_path: ")
-					+ StringArrayText(
-						Entry.GetDetails().GetCategoryPath())
-					+ TEXT("\n");
-				Text += TEXT("          editable: ")
-					+ FString(
-						Entry.GetDetails().IsEditable()
-							? TEXT("true")
-							: TEXT("false"))
-					+ TEXT("\n");
-				Text += TEXT("          availability: ")
-					+ QuoteString(
-						Entry.GetDetails().GetAvailability())
-					+ TEXT("\n");
-				Text += TEXT("          constraints: ")
-					+ StringMapText(
-						Entry.GetDetails().GetConstraints())
-					+ TEXT("\n");
-				Text += TEXT("        }\n");
-				Text += TEXT("        observed_revision: ")
-					+ RevisionText(Entry.GetObservedRevision())
-					+ TEXT("\n");
-				Text += TEXT("      }\n");
-			}
-			Text += TEXT("    ]\n");
-			Text += TEXT("  }\n");
-			Text += TEXT("}\n");
-			return Text;
-		}
-	}
-
-	bool TryBuildExportPlan(
-		const FExportPlanRequest& Request,
-		FUeAgentResourceTracker& Resources,
-		FExportWorkspacePlanPtr& OutPlan,
-		FWorkspaceError& OutError)
-	{
-		OutPlan.Reset();
-		OutError.Reset();
-		if (!Request.IsValid())
-		{
-			OutError.Set(TEXT("export_plan_request_invalid"));
-			return false;
-		}
-		const FString Text = BuildSnapshotHjson(
-			Request,
-			Resources,
-			OutError);
-		if (!OutError.GetCode().IsEmpty())
-		{
-			return false;
-		}
-		TArray<uint8> CanonicalUtf8 = ToUtf8(Text);
-		if (!Charge(
-			Resources,
-			{
-				{EUeAgentResourceDimension::OutputBytes,
-					CanonicalUtf8.Num()},
-				{EUeAgentResourceDimension::StringBytes,
-					CanonicalUtf8.Num()},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					CanonicalUtf8.Num()},
-			},
-			TEXT("export:canonical"),
-			OutError))
-		{
-			return false;
-		}
-		const int64 ObservedTokens = (CanonicalUtf8.Num() + 3ll) / 4ll;
-		const FString ContentHash = HashBytes(CanonicalUtf8);
-		FString PlanMaterial = Request.GetEntryFile()
-			+ TEXT("\x1f")
-			+ Request.GetSnapshot()->GetSnapshotId()
-			+ TEXT("\x1f")
-			+ Request.GetSnapshot()->GetRevision().GetSourceId()
-			+ TEXT("\x1f")
-			+ Request.GetSnapshot()->GetRevision().GetGeneration()
-			+ TEXT("\x1f")
-			+ ::LexToString(
-				Request.GetSnapshot()->GetRevision().GetSequence())
-			+ TEXT("\x1f")
-			+ ContentHash;
-		const FString PlanFingerprint = HashBytes(ToUtf8(PlanMaterial));
-		CanonicalUtf8.Add(0);
-		CanonicalUtf8.Pop(EAllowShrinking::No);
-		TArray<FExportFilePlan> Files;
-		Files.Emplace(
-			Request.GetEntryFile(),
-			MoveTemp(CanonicalUtf8),
-			ContentHash);
-		OutPlan = MakeShared<FExportWorkspacePlan>(
-			Request.GetWorkspaceKind(),
-			Request.GetEntryFile(),
-			Request.GetSnapshot()->GetSnapshotId(),
-			Request.GetSnapshot()->GetRevision(),
-			Request.GetSnapshot()->GetProvenance().GetEvidenceId(),
-			MoveTemp(Files),
-			PlanFingerprint,
-			ObservedTokens);
-		return true;
-	}
 }

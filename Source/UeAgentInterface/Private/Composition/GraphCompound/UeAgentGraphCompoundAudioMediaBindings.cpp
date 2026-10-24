@@ -1,8 +1,12 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaBindings.h"
+#include "Misc/ScopeExit.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/PackageName.h"
 
 namespace UE::UAI::Composition::GraphCompound
@@ -14,17 +18,65 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
-		void SetError(
-			FGraphCompoundRuntimeError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		void SetError(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject; }
+
+		FDiagnostic BindingFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Subject,
+			const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected)
 		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, TEXT("graph_compound"), FString(), Subject);
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
+
+		FDiagnostic DescriptorMismatch(
+			const FUeAgentDescriptorIdentity& Actual,
+			const FUeAgentDescriptorIdentity& Expected)
+		{
+			FDiagnostic Error = FDiagnostic::Failure(
+				TEXT("graph_compound_binding_descriptor_mismatch"),
+				TEXT("The request descriptor does not match the graph binding."),
+				TEXT("graph_compound"), FString(), Expected.GetDescriptorId());
+			Error.SourceKind = TEXT("native_result");
+			if (Actual.GetDescriptorId() != Expected.GetDescriptorId())
+			{
+				Error.PropertyPath = TEXT("descriptor_identity.descriptor_id");
+				Error.ActualValue = MakeShared<FJsonValueString>(Actual.GetDescriptorId());
+				Error.ExpectedValue = MakeShared<FJsonValueString>(Expected.GetDescriptorId());
+			}
+			else if (Actual.GetVersion() != Expected.GetVersion())
+			{
+				Error.PropertyPath = TEXT("descriptor_identity.version");
+				Error.ActualValue = MakeShared<FJsonValueNumber>(Actual.GetVersion());
+				Error.ExpectedValue = MakeShared<FJsonValueNumber>(Expected.GetVersion());
+			}
+			else
+			{
+				Error.PropertyPath = TEXT("descriptor_identity.descriptor_hash");
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Actual.GetDescriptorHash());
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetDescriptorHash());
+			}
+			return Error;
+		}
+
+		FDiagnostic PlanningFailure(
+			const bool bPlanned, const FPlanningResult& Planning, const FString& Subject)
+		{
+			return BindingFailure(TEXT("graph_compound_planning_not_ready"),
+				!bPlanned ? TEXT("Graph change planning failed without a diagnostic.")
+					: !Planning.IsReady() ? TEXT("Graph change planning did not reach the ready state.")
+					: TEXT("Graph change planning returned ready without a plan."),
+				Subject, !bPlanned ? TEXT("planning.succeeded")
+					: !Planning.IsReady() ? TEXT("planning.ready") : TEXT("planning.plan_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		}
+
+
 
 		bool TryReadTarget(
 			const FAudioMediaGraphRouteProfile& Profile,
@@ -34,12 +86,11 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			OutTargetRef.Reset();
 			TSharedPtr<FJsonObject> Object;
-			FString JsonError;
+			UE::UAI::Contract::FDiagnostic JsonError;
 			if (!Json::TryParseObject(Input.GetJsonValue(), Object, JsonError)
 				|| !Object.IsValid())
 			{
-				SetError(OutError, TEXT("graph_compound_typed_request_invalid"),
-					Profile.GetCapabilityId(), JsonError);
+				SetError(OutError, JsonError, Profile.GetCapabilityId());
 				return false;
 			}
 			if (Profile.GetInputKind() == EAudioMediaGraphInputKind::AssetCreate)
@@ -49,9 +100,16 @@ namespace UE::UAI::Composition::GraphCompound
 				if (!Object->TryGetStringField(TEXT("asset_name"), AssetName)
 					|| !Object->TryGetStringField(TEXT("package_path"), PackagePath))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_typed_request_invalid"),
-						Profile.GetCapabilityId());
+					FString Ignored;
+					const TCHAR* Field = Object->TryGetStringField(TEXT("asset_name"), Ignored)
+						? TEXT("package_path") : TEXT("asset_name");
+					OutError = BindingFailure(TEXT("graph_compound_typed_request_invalid"),
+						TEXT("The required asset creation field is missing or is not a string."),
+						Profile.GetCapabilityId(), Field, Object->TryGetField(Field),
+						MakeShared<FJsonValueString>(TEXT("string")));
+					OutError.ActualValuePresent = Object->HasField(Field);
+					OutError.SourceKind = TEXT("command_input");
+					OutError.Source.JsonPath = FString(TEXT("/")) + Field;
 					return false;
 				}
 				AssetName.TrimStartAndEndInline();
@@ -61,29 +119,43 @@ namespace UE::UAI::Composition::GraphCompound
 					PackagePath.LeftChopInline(1);
 				}
 				OutTargetRef = PackagePath + TEXT("/") + AssetName;
+				FText PackageReason;
 				if (AssetName.IsEmpty()
-					|| !FPackageName::IsValidLongPackageName(OutTargetRef))
+					|| !FPackageName::IsValidLongPackageName(OutTargetRef, false, &PackageReason))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_audio_media_target_invalid"),
-						OutTargetRef);
+					OutError = BindingFailure(TEXT("graph_compound_audio_media_target_invalid"),
+						AssetName.IsEmpty() ? TEXT("asset_name is empty after trimming.") : PackageReason.ToString(),
+						OutTargetRef, AssetName.IsEmpty() ? TEXT("asset_name") : TEXT("asset_path"),
+						MakeShared<FJsonValueString>(AssetName.IsEmpty() ? AssetName : OutTargetRef),
+						MakeShared<FJsonValueString>(AssetName.IsEmpty() ? TEXT("non-empty asset name") : TEXT("valid long package name")));
+					OutError.SourceKind = TEXT("command_input");
+					OutError.Source.JsonPath = AssetName.IsEmpty() ? TEXT("/asset_name") : TEXT("/");
 					return false;
 				}
 				return true;
 			}
 			if (!Object->TryGetStringField(TEXT("target_ref"), OutTargetRef))
 			{
-				SetError(OutError, TEXT("graph_compound_typed_request_invalid"),
-					Profile.GetCapabilityId());
+				OutError = BindingFailure(TEXT("graph_compound_typed_request_invalid"),
+					TEXT("target_ref is missing or is not a string."),
+					Profile.GetCapabilityId(), TEXT("target_ref"), Object->TryGetField(TEXT("target_ref")),
+					MakeShared<FJsonValueString>(TEXT("asset reference string")));
+				OutError.ActualValuePresent = Object->HasField(TEXT("target_ref"));
+				OutError.SourceKind = TEXT("command_input");
+				OutError.Source.JsonPath = TEXT("/target_ref");
 				return false;
 			}
 			OutTargetRef.TrimStartAndEndInline();
+			FText PackageReason;
 			if (!FPackageName::IsValidLongPackageName(
-					FPackageName::ObjectPathToPackageName(OutTargetRef)))
+					FPackageName::ObjectPathToPackageName(OutTargetRef), false, &PackageReason))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_audio_media_target_invalid"),
-					OutTargetRef);
+				OutError = BindingFailure(TEXT("graph_compound_audio_media_target_invalid"),
+					PackageReason.ToString(), OutTargetRef, TEXT("target_ref"),
+					MakeShared<FJsonValueString>(OutTargetRef),
+					MakeShared<FJsonValueString>(TEXT("asset reference with a valid long package name")));
+				OutError.SourceKind = TEXT("command_input");
+				OutError.Source.JsonPath = TEXT("/target_ref");
 				return false;
 			}
 			return true;
@@ -104,9 +176,7 @@ namespace UE::UAI::Composition::GraphCompound
 			if (Request.GetDescriptorIdentity()
 				!= Profile.GetExecutionContract().GetDescriptorIdentity())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_binding_descriptor_mismatch"),
-					Profile.GetDescriptorId());
+				OutError = DescriptorMismatch(Request.GetDescriptorIdentity(), Profile.GetExecutionContract().GetDescriptorIdentity());
 				return false;
 			}
 			FString TargetRef;
@@ -117,12 +187,23 @@ namespace UE::UAI::Composition::GraphCompound
 			const FGraphCompoundAudioMediaTargetRequest TargetRequest(
 				TargetRef, Profile.GetTargetKind());
 			FUeAgentCanonicalSnapshotPtr Snapshot;
-			if (!TargetRequest.IsValid()
-				|| !Environment->TryCaptureSnapshot(
-					Profile, TargetRequest, Resources, Cancellation,
-					Snapshot, OutError)
-				|| !Snapshot.IsValid())
+			if (!TargetRequest.IsValid())
 			{
+				OutError = TargetRequest.GetValidationDiagnostic();
+				return false;
+			}
+			const bool bCaptured = Environment->TryCaptureSnapshot(
+				Profile, TargetRequest, Resources, Cancellation, Snapshot, OutError);
+			if (!bCaptured || !Snapshot.IsValid())
+			{
+				if (OutError.IsEmpty())
+				{
+					OutError = BindingFailure(TEXT("graph_compound_snapshot_missing"),
+						bCaptured ? TEXT("Snapshot capture returned without a graph snapshot.")
+							: TEXT("Graph snapshot capture failed without a diagnostic."),
+						TargetRef, bCaptured ? TEXT("snapshot.present") : TEXT("snapshot.capture_succeeded"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				}
 				return false;
 			}
 			FGraphCompoundCanonicalPayload Payload(
@@ -132,42 +213,41 @@ namespace UE::UAI::Composition::GraphCompound
 					Profile, Request.GetPayload(), Snapshot.ToSharedRef(),
 					*Resources, Payload, RouteError))
 			{
-				SetError(OutError, RouteError.Code,
-					RouteError.SubjectId, RouteError.Detail);
+				SetError(OutError, RouteError);
 				return false;
 			}
 			const FGraphCompoundAudioMediaOperationRequest TypedRequest(
 				TargetRequest, MoveTemp(Payload));
+			ON_SCOPE_EXIT { TypedRequest.GetPayload().LocateDiagnostic(OutError); };
 			TOptional<FChangeSetDraft> Draft;
 			FGraphCompoundCanonicalError CanonicalError;
-			if (!TypedRequest.IsValid()
-				|| !TryBuildGraphCompoundChangeSetDraft(
-					TypedRequest.GetPayload(), Snapshot.ToSharedRef(),
-					Request.GetDescriptorIdentity(), Request.GetRequestId(),
-					Request.GetIdempotencyKey(), *Resources,
-					Draft, CanonicalError)
-				|| !Draft.IsSet())
+			if (!TypedRequest.IsValid())
 			{
-				SetError(OutError,
-					CanonicalError.Code.IsEmpty()
-						? TEXT("graph_compound_audio_media_draft_invalid")
-						: CanonicalError.Code,
-					CanonicalError.IdentityKey, CanonicalError.Detail);
+				OutError = TypedRequest.GetValidationDiagnostic();
+				return false;
+			}
+			const bool bBuilt = TryBuildGraphCompoundChangeSetDraft(
+				TypedRequest.GetPayload(), Snapshot.ToSharedRef(),
+				Request.GetDescriptorIdentity(), Request.GetRequestId(),
+				Request.GetIdempotencyKey(), *Resources, Draft, CanonicalError);
+			if (!bBuilt || !Draft.IsSet())
+			{
+				OutError = CanonicalError.IsValid() ? CanonicalError : BindingFailure(
+					TEXT("graph_compound_audio_media_draft_invalid"),
+					bBuilt ? TEXT("Graph change-set construction returned without a draft.")
+						: TEXT("Graph change-set construction failed without a diagnostic."),
+					TargetRef, bBuilt ? TEXT("draft.present") : TEXT("draft.build_succeeded"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
 			FPlanningResult Planning;
 			FPlanningPreflightError PlanningError;
-			if (!TryPlanChanges(
-					FPlanningRequest(
-						MoveTemp(Draft.GetValue()), CallerContext, false),
-					*Resources, Planning, PlanningError)
-				|| !Planning.IsReady() || !Planning.GetPlan().IsValid())
+			const bool bPlanned = TryPlanChanges(
+				FPlanningRequest(MoveTemp(Draft.GetValue()), CallerContext, false),
+				*Resources, Planning, PlanningError);
+			if (!bPlanned || !Planning.IsReady() || !Planning.GetPlan().IsValid())
 			{
-				SetError(OutError,
-					PlanningError.GetCode().IsEmpty()
-						? TEXT("graph_compound_planning_not_ready")
-						: PlanningError.GetCode(),
-					PlanningError.GetIdentityKey(), PlanningError.GetDetail());
+				OutError = PlanningError.IsValid() ? PlanningError : PlanningFailure(bPlanned, Planning, TargetRef);
 				return false;
 			}
 			return Environment->TryCreateOperationLifecycleInvocation(
@@ -215,12 +295,12 @@ namespace UE::UAI::Composition::GraphCompound
 				if (!Invocation.GetService()->Run(
 						*Invocation.GetPlan(), *Invocation.GetAuthorization(), Receipt))
 				{
-					SetError(OutError,
-						Receipt.GetErrorCode().IsEmpty()
-							? TEXT("graph_compound_audio_media_operation_failed")
-							: Receipt.GetErrorCode(),
-						Profile.GetCapabilityId(),
-						BindingGateway::Operation::LexToString(Receipt.GetStatus()));
+					SetError(OutError, Receipt.GetDiagnostic().IsValid() ? Receipt.GetDiagnostic()
+						: UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_audio_media_operation_failed"),
+							TEXT("The audio operation did not complete."), TEXT("graph_compound")), Profile.GetCapabilityId());
+					OutError.TerminalStatus = BindingGateway::Operation::LexToString(Receipt.GetStatus());
+					OutError.MutationStarted = Receipt.DidMutationStart();
+					OutError.bRetrySafe = Receipt.IsRetrySafe();
 					return false;
 				}
 				return Invocation.GetContext()->TryBuildResult(
@@ -263,9 +343,13 @@ namespace UE::UAI::Composition::GraphCompound
 				OutError = {};
 				if (Request.GetDescriptorIdentity() != GetDescriptorIdentity())
 				{
-					SetError(OutError,
-						TEXT("graph_compound_binding_descriptor_mismatch"),
-						Profile.GetDescriptorId());
+					auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_binding_descriptor_mismatch"),
+						TEXT("The query descriptor does not match this audio/media binding."), TEXT("graph_compound"));
+					Diagnostic.SourceKind = TEXT("native_result");
+					Diagnostic.PropertyPath = TEXT("descriptor_matches");
+					Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					SetError(OutError, MoveTemp(Diagnostic), Profile.GetDescriptorId());
 					return false;
 				}
 				FAudioMediaGraphArtifactQueryRequest TypedRequest;
@@ -274,8 +358,7 @@ namespace UE::UAI::Composition::GraphCompound
 						Profile, Request.GetPayload(), *Resources,
 						TypedRequest, RouteError))
 				{
-					SetError(OutError, RouteError.Code,
-						RouteError.SubjectId, RouteError.Detail);
+					SetError(OutError, RouteError);
 					return false;
 				}
 				return Environment->TryExecuteQuery(
@@ -303,12 +386,14 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		OutInvocation = {};
 		OutError = {};
-		if (!InPlan->IsValid() || !InAuthorization->IsValid()
-			|| !InAuthorization->Authorizes(*InPlan))
+		if (!InPlan->IsValid())
 		{
-			SetError(OutError,
-				TEXT("graph_compound_audio_media_lifecycle_invalid"),
-				InPlan->GetPlanId());
+			SetError(OutError, InPlan->GetValidationDiagnostic(), InPlan->GetPlanId());
+			return false;
+		}
+		if (!InAuthorization->TryAuthorize(*InPlan, OutError))
+		{
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = InPlan->GetPlanId();
 			return false;
 		}
 		OutInvocation.Plan = MoveTemp(InPlan);
@@ -357,7 +442,20 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		TargetRef.TrimStartAndEndInline();
 		TargetKind.TrimStartAndEndInline();
-		bValid = !TargetRef.IsEmpty() && !TargetKind.IsEmpty();
+		if (TargetRef.IsEmpty() || TargetKind.IsEmpty())
+		{
+			ValidationDiagnostic = BindingFailure(TEXT("graph_compound_audio_media_target_invalid"),
+				TargetRef.IsEmpty() ? TEXT("The graph target reference is empty after trimming.")
+					: TEXT("The graph route target kind is empty after trimming."),
+				TargetRef, TargetRef.IsEmpty() ? TEXT("target_ref") : TEXT("target_kind"),
+				MakeShared<FJsonValueString>(TargetRef.IsEmpty() ? TargetRef : TargetKind),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+			if (TargetRef.IsEmpty())
+			{
+				ValidationDiagnostic.SourceKind = TEXT("command_input");
+				ValidationDiagnostic.Source.JsonPath = TEXT("/target_ref");
+			}
+		}
 	}
 
 	const FString& FGraphCompoundAudioMediaTargetRequest::GetTargetRef() const
@@ -370,7 +468,12 @@ namespace UE::UAI::Composition::GraphCompound
 	}
 	bool FGraphCompoundAudioMediaTargetRequest::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
+	}
+
+	const FDiagnostic& FGraphCompoundAudioMediaTargetRequest::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic;
 	}
 
 	FGraphCompoundAudioMediaOperationRequest::
@@ -380,9 +483,25 @@ namespace UE::UAI::Composition::GraphCompound
 		: Target(MoveTemp(InTarget))
 		, Payload(MoveTemp(InPayload))
 	{
-		bValid = Target.IsValid()
-			&& Payload.GetSchemaId() == GetGraphCompoundCanonicalSchemaId()
-			&& !Payload.GetEdits().IsEmpty();
+		if (!Target.IsValid())
+		{
+			ValidationDiagnostic = Target.GetValidationDiagnostic();
+		}
+		else if (Payload.GetSchemaId() != GetGraphCompoundCanonicalSchemaId())
+		{
+			ValidationDiagnostic = BindingFailure(TEXT("graph_compound_audio_media_draft_invalid"),
+				TEXT("The graph operation payload uses an unexpected canonical schema."),
+				Target.GetTargetRef(), TEXT("schema_id"),
+				MakeShared<FJsonValueString>(Payload.GetSchemaId()),
+				MakeShared<FJsonValueString>(GetGraphCompoundCanonicalSchemaId()));
+		}
+		else if (Payload.GetEdits().IsEmpty())
+		{
+			ValidationDiagnostic = BindingFailure(TEXT("graph_compound_audio_media_draft_invalid"),
+				TEXT("The graph operation contains no canonical edits."),
+				Target.GetTargetRef(), TEXT("edits.count"), MakeShared<FJsonValueNumber>(0),
+				MakeShared<FJsonValueString>(TEXT("at least one edit")));
+		}
 	}
 
 	const FGraphCompoundAudioMediaTargetRequest&
@@ -405,13 +524,18 @@ namespace UE::UAI::Composition::GraphCompound
 	}
 	bool FGraphCompoundAudioMediaOperationRequest::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
-	bool FGraphCompoundAudioMediaProductionConfig::IsValid() const
+	const FDiagnostic& FGraphCompoundAudioMediaOperationRequest::GetValidationDiagnostic() const
 	{
-		return FMath::IsFinite(OperationTimeoutSeconds)
-			&& OperationTimeoutSeconds > 0.0;
+		return ValidationDiagnostic;
+	}
+
+	bool FTextureGraphSemanticCompositeRequest::IsValid() const
+	{
+		return !TargetRef.TrimStartAndEnd().IsEmpty()
+			&& (!Nodes.IsEmpty() || !Parameters.IsEmpty() || !Links.IsEmpty() || !Settings.IsEmpty());
 	}
 
 	bool TryCreateAudioMediaGraphBindings(
@@ -423,13 +547,13 @@ namespace UE::UAI::Composition::GraphCompound
 		OutQueryBindings.Reset();
 		OutOperationBindings.Reset();
 		OutError = {};
-		for (const FAudioMediaGraphRouteProfile& Profile
-			: GetAudioMediaGraphRouteProfiles())
+		const TArray<FAudioMediaGraphRouteProfile>* Profiles = nullptr;
+		if (!TryGetAudioMediaGraphRouteProfiles(Profiles, OutError)) return false;
+		for (const FAudioMediaGraphRouteProfile& Profile : *Profiles)
 		{
 			if (!Profile.IsValid())
 			{
-				SetError(OutError, TEXT("graph_compound_binding_profile_invalid"),
-					Profile.GetCapabilityId());
+				OutError = Profile.GetValidationDiagnostic();
 				return false;
 			}
 			if (Profile.GetRouteKind() == EGraphCompoundDomainRouteKind::Query)
@@ -442,14 +566,6 @@ namespace UE::UAI::Composition::GraphCompound
 				OutOperationBindings.Add(
 					MakeShared<FAudioMediaOperationBinding>(Profile, Environment));
 			}
-		}
-		if (OutQueryBindings.Num() != 1 || OutOperationBindings.Num() != 14)
-		{
-			SetError(OutError, TEXT("graph_compound_binding_count_invalid"),
-				TEXT("audio_media_graph"));
-			OutQueryBindings.Reset();
-			OutOperationBindings.Reset();
-			return false;
 		}
 		return true;
 	}
@@ -469,14 +585,12 @@ namespace UE::UAI::Composition::GraphCompound
 			return false;
 		}
 		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-		FString RegistryError;
+		UE::UAI::Contract::FDiagnostic RegistryError;
 		if (!TryCreateAudioMediaGraphRouteDescriptorRegistry(
 				Registry, RegistryError)
 			|| !Registry.IsValid())
 		{
-			SetError(OutError,
-				TEXT("graph_compound_domain_registry_invalid"),
-				TEXT("audio_media_graph"), RegistryError);
+			SetError(OutError, RegistryError, TEXT("audio_media_graph"));
 			return false;
 		}
 		TArray<TSharedRef<IGraphCompoundQueryBinding>> QueryBindings;
@@ -502,8 +616,10 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		OutInvocation = {};
 		OutError = {};
+		const TArray<FAudioMediaGraphRouteProfile>* Profiles = nullptr;
+		if (!TryGetAudioMediaGraphRouteProfiles(Profiles, OutError)) return false;
 		const FAudioMediaGraphRouteProfile* Profile =
-			GetAudioMediaGraphRouteProfiles().FindByPredicate(
+			Profiles->FindByPredicate(
 				[&CommandId](const FAudioMediaGraphRouteProfile& Candidate)
 				{
 					return Candidate.GetCapabilityId() == CommandId;
@@ -512,9 +628,14 @@ namespace UE::UAI::Composition::GraphCompound
 			|| Profile->GetRouteKind()
 				!= EGraphCompoundDomainRouteKind::TypedOperation)
 		{
-			SetError(OutError,
-				TEXT("graph_compound_audio_media_operation_profile_missing"),
-				CommandId);
+			OutError = BindingFailure(TEXT("graph_compound_audio_media_operation_profile_missing"),
+				!Profile ? TEXT("No audio/media graph operation profile is registered for this command.")
+					: TEXT("The selected audio/media graph route is not a typed operation."),
+				CommandId, !Profile ? TEXT("profile.present") : TEXT("route_kind"),
+				!Profile ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(static_cast<int32>(Profile->GetRouteKind()))),
+				!Profile ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(static_cast<int32>(EGraphCompoundDomainRouteKind::TypedOperation))));
 			return false;
 		}
 		TSharedPtr<IGraphCompoundAudioMediaEnvironment> Environment;
@@ -524,17 +645,8 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			return false;
 		}
-		constexpr int64 MaxFrameBytes = 16 * 1024 * 1024;
 		const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> Resources =
-			MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-				FUeAgentResourceBudget({
-					{EUeAgentResourceDimension::InputBytes, MaxFrameBytes},
-					{EUeAgentResourceDimension::OutputBytes, MaxFrameBytes},
-					{EUeAgentResourceDimension::StringBytes, MaxFrameBytes},
-					{EUeAgentResourceDimension::WorkUnits, MaxFrameBytes * 4},
-					{EUeAgentResourceDimension::EstimatedMemoryBytes,
-						MaxFrameBytes * 4},
-				}));
+			MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 		return TryPrepareOperationLifecycleInvocation(
 			*Profile,
 			Environment.ToSharedRef(),

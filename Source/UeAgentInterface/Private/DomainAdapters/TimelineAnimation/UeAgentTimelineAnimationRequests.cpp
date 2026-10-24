@@ -1,6 +1,9 @@
 #include "DomainAdapters/TimelineAnimation/UeAgentTimelineAnimationRequests.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentContractJson.h"
+#include "Utilities/AuthoringCore/UeAgentTimelineValueJson.h"
 #include "Core/StateSemantic/UeAgentTemporalContract.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -14,292 +17,70 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 
 	namespace
 	{
-		bool Fail(
-			FUeAgentTimelineAnimationExecutionError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		using namespace Authoring::Timeline;
+		using namespace Authoring::Timeline::Json;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+		FDiagnostic TimelineRequestFact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-			return false;
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("native_execution"));
+			Error.Schema = TEXT("uai.runtime.diagnostic/1");
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Path;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
 
-		bool RequiredObject(
-			const TSharedPtr<FJsonObject>& Root,
-			const TCHAR* Field,
-			TSharedPtr<FJsonObject>& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			const TSharedPtr<FJsonObject>* Found = nullptr;
-			if (!Root.IsValid() || !Root->TryGetObjectField(Field, Found)
-				|| !Found || !Found->IsValid())
-			{
-				return Fail(Error, TEXT("timeline_animation_field_object_missing"), Field);
-			}
-			Out = *Found;
-			return true;
-		}
-
-		bool OptionalObject(
-			const TSharedPtr<FJsonObject>& Root,
-			const TCHAR* Field,
-			TSharedPtr<FJsonObject>& Out,
-			bool& bPresent,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out.Reset();
-			bPresent = Root.IsValid() && Root->HasField(Field);
-			return !bPresent || RequiredObject(Root, Field, Out, Error);
-		}
-
-		bool RequiredString(
-			const TSharedPtr<FJsonObject>& Root,
-			const TCHAR* Field,
-			FString& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			if (!Root.IsValid() || !Root->TryGetStringField(Field, Out))
-			{
-				return Fail(Error, TEXT("timeline_animation_field_string_missing"), Field);
-			}
-			return true;
-		}
-
-		bool OptionalString(
-			const TSharedPtr<FJsonObject>& Root,
-			const TCHAR* Field,
-			FString& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out.Reset();
-			return !Root->HasField(Field) || RequiredString(Root, Field, Out, Error);
-		}
-
-		bool OptionalBool(
-			const TSharedPtr<FJsonObject>& Root,
-			const TCHAR* Field,
-			TOptional<bool>& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out.Reset();
-			if (!Root->HasField(Field))
-			{
-				return true;
-			}
-			bool Value = false;
-			if (!Root->TryGetBoolField(Field, Value))
-			{
-				return Fail(Error, TEXT("timeline_animation_field_boolean_invalid"), Field);
-			}
-			Out = Value;
-			return true;
-		}
-
-		bool OptionalNumber(
-			const TSharedPtr<FJsonObject>& Root,
-			const TCHAR* Field,
-			TOptional<double>& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out.Reset();
-			if (!Root->HasField(Field))
-			{
-				return true;
-			}
-			double Value = 0.0;
-			if (!Root->TryGetNumberField(Field, Value) || !FMath::IsFinite(Value))
-			{
-				return Fail(Error, TEXT("timeline_animation_field_number_invalid"), Field);
-			}
-			Out = Value;
-			return true;
-		}
-
-		bool ParseStringArray(
-			const TSharedPtr<FJsonObject>& Root,
-			const TCHAR* Field,
-			TArray<FString>& Out,
-			bool bRequired,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out.Reset();
-			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-			if (!Root->TryGetArrayField(Field, Values) || !Values)
-			{
-				return !bRequired || Fail(
-					Error, TEXT("timeline_animation_field_array_missing"), Field);
-			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
-			{
-				FString Text;
-				if (!Value.IsValid() || !Value->TryGetString(Text))
-				{
-					return Fail(
-						Error, TEXT("timeline_animation_array_string_invalid"), Field);
-				}
-				Out.Add(MoveTemp(Text));
-			}
-			return true;
-		}
-
-		bool ParseRevision(
-			const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationRevision& Out,
+		bool ParseRevision(const TSharedPtr<FJsonObject>& Root, FTimelineAnimationRevision& Out,
 			FUeAgentTimelineAnimationExecutionError& Error)
 		{
 			Out = {};
 			FString SequenceLexeme;
-			return RequiredString(Root, TEXT("source_id"), Out.SourceId, Error)
-				&& RequiredString(Root, TEXT("generation"), Out.Generation, Error)
-				&& RequiredString(Root, TEXT("sequence"), SequenceLexeme, Error)
-				&& LexTryParseString(Out.Sequence, *SequenceLexeme)
-				&& FString::Printf(TEXT("%lld"), Out.Sequence) == SequenceLexeme
-				&& (Out.IsValid() || Fail(
-					Error, TEXT("timeline_animation_revision_invalid"), Out.SourceId));
-		}
-
-		bool ParseRate(
-			const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationRate& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out = {};
-			return RequiredString(Root, TEXT("numerator"), Out.Numerator, Error)
-				&& RequiredString(Root, TEXT("denominator"), Out.Denominator, Error)
-				&& (Out.IsValid() || Fail(
-					Error, TEXT("timeline_animation_rate_invalid"), Out.Numerator));
-		}
-
-		bool ParsePoint(
-			const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationPoint& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out = {};
-			TSharedPtr<FJsonObject> Rate;
-			return RequiredString(Root, TEXT("clock_id"), Out.ClockId, Error)
-				&& RequiredString(Root, TEXT("tick"), Out.Tick, Error)
-				&& RequiredObject(Root, TEXT("rate"), Rate, Error)
-				&& ParseRate(Rate, Out.Rate, Error)
-				&& RequiredString(Root, TEXT("state"), Out.State, Error)
-				&& (Out.IsValid() || Fail(
-					Error, TEXT("timeline_animation_point_invalid"), Out.ClockId));
-		}
-
-		bool ParseBound(
-			const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationBound& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out = {};
-			if (!RequiredString(Root, TEXT("kind"), Out.Kind, Error))
-			{
-				return false;
-			}
-			TSharedPtr<FJsonObject> Point;
-			bool bPoint = false;
-			if (!OptionalObject(Root, TEXT("point"), Point, bPoint, Error))
-			{
-				return false;
-			}
-			if (bPoint)
-			{
-				FTimelineAnimationPoint Parsed;
-				if (!ParsePoint(Point, Parsed, Error))
-				{
-					return false;
-				}
-				Out.Point = MoveTemp(Parsed);
-			}
-			return Out.IsValid() || Fail(
-				Error, TEXT("timeline_animation_bound_invalid"), Out.Kind);
-		}
-
-		bool ParseRange(
-			const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationRange& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out = {};
-			TSharedPtr<FJsonObject> Lower;
-			TSharedPtr<FJsonObject> Upper;
-			return RequiredString(Root, TEXT("clock_id"), Out.ClockId, Error)
-				&& RequiredString(Root, TEXT("state"), Out.State, Error)
-				&& RequiredObject(Root, TEXT("lower"), Lower, Error)
-				&& RequiredObject(Root, TEXT("upper"), Upper, Error)
-				&& ParseBound(Lower, Out.Lower, Error)
-				&& ParseBound(Upper, Out.Upper, Error)
-				&& (Out.IsValid() || Fail(
-					Error, TEXT("timeline_animation_range_invalid"), Out.ClockId));
-		}
-
-		bool ParseFrame(
-			const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationFrame3d& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out = {};
-			return RequiredString(Root, TEXT("frame_id"), Out.FrameId, Error)
-				&& RequiredString(Root, TEXT("basis_frame_id"), Out.BasisFrameId, Error)
-				&& Root->TryGetNumberField(TEXT("dimension"), Out.Dimension)
-				&& RequiredString(Root, TEXT("unit"), Out.Unit, Error)
-				&& RequiredString(
-					Root, TEXT("basis_evidence_id"), Out.BasisEvidenceId, Error)
-				&& (Out.IsValid() || Fail(
-					Error, TEXT("timeline_animation_frame_invalid"), Out.FrameId));
-		}
-
-		bool ParseTransform(
-			const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationTransform3d& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out = {};
-			TSharedPtr<FJsonObject> Frame;
-			return RequiredString(Root, TEXT("subject"), Out.Subject, Error)
-				&& RequiredString(Root, TEXT("quantity"), Out.Quantity, Error)
-				&& RequiredObject(Root, TEXT("frame"), Frame, Error)
-				&& ParseFrame(Frame, Out.Frame, Error)
-				&& ParseStringArray(Root, TEXT("components"), Out.Components, true, Error)
-				&& ParseStringArray(
-					Root, TEXT("conversion_evidence_ids"),
-					Out.ConversionEvidenceIds, true, Error)
-				&& (Out.IsValid() || Fail(
-					Error, TEXT("timeline_animation_transform_invalid"), Out.Subject));
-		}
-
-		template <typename ItemType, typename ParseItemType>
-		bool ParseObjectArray(
-			const TSharedPtr<FJsonObject>& Root,
-			const TCHAR* Field,
-			TArray<ItemType>& Out,
-			bool bRequired,
-			ParseItemType ParseItem,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			Out.Reset();
-			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-			if (!Root->TryGetArrayField(Field, Values) || !Values)
-			{
-				return !bRequired || Fail(
-					Error, TEXT("timeline_animation_field_array_missing"), Field);
-			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
-			{
-				const TSharedPtr<FJsonObject> Object =
-					Value.IsValid() ? Value->AsObject() : nullptr;
-				ItemType Item;
-				if (!Object.IsValid() || !ParseItem(Object, Item, Error))
-				{
-					return false;
-				}
-				Out.Add(MoveTemp(Item));
-			}
+			if (!RequiredString(Root, TEXT("source_id"), Out.SourceId, Error)
+				|| !RequiredString(Root, TEXT("generation"), Out.Generation, Error)
+				|| !RequiredString(Root, TEXT("sequence"), SequenceLexeme, Error)) return false;
+			if (!LexTryParseString(Out.Sequence, *SequenceLexeme)
+				|| FString::Printf(TEXT("%lld"), Out.Sequence) != SequenceLexeme)
+				return FieldFailure(Root, TEXT("sequence"), TEXT("timeline_animation_revision_invalid"),
+					TEXT("a canonical decimal int64 string"), Error);
+			if (Out.SourceId.IsEmpty())
+				return FieldFailure(Root, TEXT("source_id"), TEXT("timeline_animation_revision_invalid"), TEXT("a non-empty revision source id"), Error);
+			if (Out.Generation.IsEmpty())
+				return FieldFailure(Root, TEXT("generation"), TEXT("timeline_animation_revision_invalid"), TEXT("a non-empty revision generation"), Error);
+			if (Out.Sequence < 0)
+				return FieldFailure(Root, TEXT("sequence"), TEXT("timeline_animation_revision_invalid"), TEXT("a non-negative canonical decimal int64 string"), Error);
 			return true;
 		}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 		bool ParseBoneKey(const TSharedPtr<FJsonObject>& Root,
 			FTimelineAnimationBoneKey& Out,
@@ -307,222 +88,75 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		{
 			TSharedPtr<FJsonObject> Time;
 			TSharedPtr<FJsonObject> Transform;
-			return RequiredObject(Root, TEXT("time"), Time, Error)
-				&& RequiredObject(Root, TEXT("transform"), Transform, Error)
-				&& ParsePoint(Time, Out.Time, Error)
-				&& ParseTransform(Transform, Out.Transform, Error)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_bone_key_invalid")));
+			if (!RequiredObject(Root, TEXT("time"), Time, Error) || !RequiredObject(Root, TEXT("transform"), Transform, Error)) return false;
+			if (!ParsePoint(Time, Out.Time, Error)) return PrefixChildFailure(Root, TEXT("/time"), Error);
+			if (!ParseTransform(Transform, Out.Transform, Error)) return PrefixChildFailure(Root, TEXT("/transform"), Error);
+			return true;
 		}
 
 		bool ParseBoneTrack(const TSharedPtr<FJsonObject>& Root,
 			FTimelineAnimationBoneTrack& Out,
 			FUeAgentTimelineAnimationExecutionError& Error)
 		{
-			return RequiredString(Root, TEXT("bone_ref"), Out.BoneRef, Error)
-				&& ParseObjectArray(
-					Root, TEXT("keys"), Out.Keys, true, ParseBoneKey, Error)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_bone_track_invalid"), Out.BoneRef));
-		}
-
-		bool ParseCurveKey(const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationCurveKey& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			TSharedPtr<FJsonObject> Time;
-			return RequiredObject(Root, TEXT("time"), Time, Error)
-				&& ParsePoint(Time, Out.Time, Error)
-				&& Root->TryGetNumberField(TEXT("value"), Out.Value)
-				&& RequiredString(Root, TEXT("interpolation"), Out.Interpolation, Error)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_curve_key_invalid")));
-		}
-
-		bool ParseCurveChange(const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationCurveChange& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			return RequiredString(Root, TEXT("curve_ref"), Out.CurveRef, Error)
-				&& RequiredString(Root, TEXT("operation"), Out.Operation, Error)
-				&& ParseObjectArray(
-					Root, TEXT("keys"), Out.Keys, true, ParseCurveKey, Error)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_curve_change_invalid"), Out.CurveRef));
-		}
-
-		bool ParseMetadataChange(const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationMetadataChange& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			return RequiredString(Root, TEXT("metadata_ref"), Out.MetadataRef, Error)
-				&& RequiredString(Root, TEXT("operation"), Out.Operation, Error)
-				&& RequiredString(Root, TEXT("value_type"), Out.ValueType, Error)
-				&& RequiredString(Root, TEXT("value_lexeme"), Out.ValueLexeme, Error)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_metadata_change_invalid"), Out.MetadataRef));
-		}
-
-		bool ParseEventChange(const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationEventChange& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			if (!RequiredString(Root, TEXT("event_ref"), Out.EventRef, Error)
-				|| !RequiredString(Root, TEXT("event_kind"), Out.EventKind, Error)
-				|| !RequiredString(Root, TEXT("operation"), Out.Operation, Error)
-				|| !OptionalString(Root, TEXT("payload_class_ref"), Out.PayloadClassRef, Error)
-				|| !OptionalString(Root, TEXT("track_ref"), Out.TrackRef, Error))
-			{
-				return false;
-			}
-			TSharedPtr<FJsonObject> Object;
-			bool bPresent = false;
-			if (!OptionalObject(Root, TEXT("time"), Object, bPresent, Error))
-			{
-				return false;
-			}
-			if (bPresent)
-			{
-				FTimelineAnimationPoint Point;
-				if (!ParsePoint(Object, Point, Error)) return false;
-				Out.Time = MoveTemp(Point);
-			}
-			if (!OptionalObject(Root, TEXT("range"), Object, bPresent, Error))
-			{
-				return false;
-			}
-			if (bPresent)
-			{
-				FTimelineAnimationRange Range;
-				if (!ParseRange(Object, Range, Error)) return false;
-				Out.Range = MoveTemp(Range);
-			}
-			return Out.IsValid() || Fail(Error,
-				TEXT("timeline_animation_event_change_invalid"), Out.EventRef);
+			if (!RequiredString(Root, TEXT("bone_ref"), Out.BoneRef, Error)
+				|| !ParseObjectArray(Root, TEXT("keys"), Out.Keys, true, ParseBoneKey, Error)) return false;
+			if (Out.BoneRef.IsEmpty())
+				return FieldFailure(Root, TEXT("bone_ref"), TEXT("timeline_animation_bone_track_invalid"), TEXT("a non-empty bone reference"), Error);
+			if (Out.Keys.IsEmpty())
+				return FieldFailure(Root, TEXT("keys"), TEXT("timeline_animation_bone_track_invalid"), TEXT("at least one bone key"), Error);
+			return true;
 		}
 
 		bool ParseBlendParameter(const TSharedPtr<FJsonObject>& Root,
 			FTimelineAnimationBlendParameter& Out,
 			FUeAgentTimelineAnimationExecutionError& Error)
 		{
-			return RequiredString(Root, TEXT("axis_ref"), Out.AxisRef, Error)
-				&& Root->TryGetNumberField(TEXT("value"), Out.Value)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_blend_parameter_invalid"), Out.AxisRef));
+			if (!RequiredString(Root, TEXT("axis_ref"), Out.AxisRef, Error)) return false;
+			if (!Root->TryGetNumberField(TEXT("value"), Out.Value))
+				return FieldFailure(Root, TEXT("value"), TEXT("timeline_animation_blend_parameter_invalid"), TEXT("a number"), Error);
+			if (Out.AxisRef.IsEmpty())
+				return FieldFailure(Root, TEXT("axis_ref"), TEXT("timeline_animation_blend_parameter_invalid"), TEXT("a non-empty blend axis reference"), Error);
+			if (!FMath::IsFinite(Out.Value))
+				return FieldFailure(Root, TEXT("value"), TEXT("timeline_animation_blend_parameter_invalid"), TEXT("a finite number"), Error);
+			return true;
 		}
 
-		bool ParseTimelineKey(const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationKey& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			TSharedPtr<FJsonObject> Time;
-			if (!RequiredString(Root, TEXT("key_ref"), Out.KeyRef, Error)
-				|| !RequiredObject(Root, TEXT("time"), Time, Error)
-				|| !ParsePoint(Time, Out.Time, Error)
-				|| !RequiredString(Root, TEXT("value_type"), Out.ValueType, Error)
-				|| !OptionalString(Root, TEXT("value_lexeme"), Out.ValueLexeme, Error))
-			{
-				return false;
-			}
-			TSharedPtr<FJsonObject> Transform;
-			bool bPresent = false;
-			if (!OptionalObject(Root, TEXT("transform"), Transform, bPresent, Error))
-			{
-				return false;
-			}
-			if (bPresent)
-			{
-				FTimelineAnimationTransform3d Parsed;
-				if (!ParseTransform(Transform, Parsed, Error)) return false;
-				Out.Transform = MoveTemp(Parsed);
-			}
-			return Out.IsValid() || Fail(Error,
-				TEXT("timeline_animation_timeline_key_invalid"), Out.KeyRef);
-		}
 
-		bool ParseTimelineSection(const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationSection& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			TSharedPtr<FJsonObject> Range;
-			return RequiredString(Root, TEXT("section_ref"), Out.SectionRef, Error)
-				&& RequiredString(Root, TEXT("section_kind"), Out.SectionKind, Error)
-				&& RequiredObject(Root, TEXT("range"), Range, Error)
-				&& ParseRange(Range, Out.Range, Error)
-				&& OptionalString(Root, TEXT("source_ref"), Out.SourceRef, Error)
-				&& ParseObjectArray(
-					Root, TEXT("keys"), Out.Keys, true, ParseTimelineKey, Error)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_section_invalid"), Out.SectionRef));
-		}
 
-		bool ParseTimelineTrack(const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationTrack& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			return RequiredString(Root, TEXT("track_ref"), Out.TrackRef, Error)
-				&& RequiredString(Root, TEXT("track_kind"), Out.TrackKind, Error)
-				&& OptionalString(Root, TEXT("property_path"), Out.PropertyPath, Error)
-				&& ParseObjectArray(
-					Root, TEXT("sections"), Out.Sections, true, ParseTimelineSection, Error)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_track_invalid"), Out.TrackRef));
-		}
 
-		bool ParseTimelineBinding(const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationBinding& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			return RequiredString(Root, TEXT("binding_ref"), Out.BindingRef, Error)
-				&& RequiredString(Root, TEXT("binding_kind"), Out.BindingKind, Error)
-				&& OptionalString(Root, TEXT("object_ref"), Out.ObjectRef, Error)
-				&& ParseObjectArray(
-					Root, TEXT("tracks"), Out.Tracks, true, ParseTimelineTrack, Error)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_binding_invalid"), Out.BindingRef));
-		}
 
-		bool ParseStructure(const TSharedPtr<FJsonObject>& Root,
-			FTimelineAnimationStructure& Out,
-			FUeAgentTimelineAnimationExecutionError& Error)
-		{
-			TSharedPtr<FJsonObject> Display;
-			TSharedPtr<FJsonObject> Tick;
-			TSharedPtr<FJsonObject> Range;
-			return RequiredObject(Root, TEXT("display_rate"), Display, Error)
-				&& ParseRate(Display, Out.DisplayRate, Error)
-				&& RequiredObject(Root, TEXT("tick_resolution"), Tick, Error)
-				&& ParseRate(Tick, Out.TickResolution, Error)
-				&& RequiredObject(Root, TEXT("playback_range"), Range, Error)
-				&& ParseRange(Range, Out.PlaybackRange, Error)
-				&& ParseObjectArray(
-					Root, TEXT("bindings"), Out.Bindings, true, ParseTimelineBinding, Error)
-				&& ParseObjectArray(
-					Root, TEXT("root_tracks"), Out.RootTracks, true, ParseTimelineTrack, Error)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_structure_invalid")));
-		}
+
+
+
+
+
+
+
 
 		bool ParsePoseItem(const TSharedPtr<FJsonObject>& Root,
 			FTimelineAnimationPoseItem& Out,
 			FUeAgentTimelineAnimationExecutionError& Error)
 		{
 			TSharedPtr<FJsonObject> Transform;
-			return RequiredString(Root, TEXT("bone_ref"), Out.BoneRef, Error)
-				&& RequiredObject(Root, TEXT("transform"), Transform, Error)
-				&& ParseTransform(Transform, Out.Transform, Error)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_pose_item_invalid"), Out.BoneRef));
+			if (!RequiredString(Root, TEXT("bone_ref"), Out.BoneRef, Error) || !RequiredObject(Root, TEXT("transform"), Transform, Error)) return false;
+			if (!ParseTransform(Transform, Out.Transform, Error)) return PrefixChildFailure(Root, TEXT("/transform"), Error);
+			if (Out.BoneRef.IsEmpty())
+				return FieldFailure(Root, TEXT("bone_ref"), TEXT("timeline_animation_pose_item_invalid"), TEXT("a non-empty bone reference"), Error);
+			return true;
 		}
 
 		bool ParseMorphWeight(const TSharedPtr<FJsonObject>& Root,
 			FTimelineAnimationMorphWeight& Out,
 			FUeAgentTimelineAnimationExecutionError& Error)
 		{
-			return RequiredString(Root, TEXT("morph_ref"), Out.MorphRef, Error)
-				&& Root->TryGetNumberField(TEXT("weight"), Out.Weight)
-				&& (Out.IsValid() || Fail(Error,
-					TEXT("timeline_animation_morph_weight_invalid"), Out.MorphRef));
+			if (!RequiredString(Root, TEXT("morph_ref"), Out.MorphRef, Error)) return false;
+			if (!Root->TryGetNumberField(TEXT("weight"), Out.Weight))
+				return FieldFailure(Root, TEXT("weight"), TEXT("timeline_animation_morph_weight_invalid"), TEXT("a number"), Error);
+			if (Out.MorphRef.IsEmpty())
+				return FieldFailure(Root, TEXT("morph_ref"), TEXT("timeline_animation_morph_weight_invalid"), TEXT("a non-empty morph reference"), Error);
+			if (!FMath::IsFinite(Out.Weight))
+				return FieldFailure(Root, TEXT("weight"), TEXT("timeline_animation_morph_weight_invalid"), TEXT("a finite number"), Error);
+			return true;
 		}
 
 		bool ConvertCanonicalValue(
@@ -534,22 +168,22 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			OutValue.Reset();
 			if (!JsonValue.IsValid())
 			{
-				return Fail(Error, TEXT("timeline_animation_intent_json_invalid"));
+				return ValueFailure(nullptr, TEXT("/"), TEXT("timeline_animation_intent_json_invalid"), TEXT("a JSON value"), nullptr, Error);
 			}
 			FUeAgentStateSemanticError StateError;
 			switch (JsonValue->Type)
 			{
 			case EJson::Null:
 				return FUeAgentCanonicalValue::TryNull(Resources, OutValue, StateError)
-					|| Fail(Error, StateError.Code);
+					|| Fail(Error, StateError);
 			case EJson::Boolean:
 				return FUeAgentCanonicalValue::TryBoolean(
 					JsonValue->AsBool(), Resources, OutValue, StateError)
-					|| Fail(Error, StateError.Code);
+					|| Fail(Error, StateError);
 			case EJson::String:
 				return FUeAgentCanonicalValue::TryString(
 					JsonValue->AsString(), Resources, OutValue, StateError)
-					|| Fail(Error, StateError.Code);
+					|| Fail(Error, StateError);
 			case EJson::Number:
 			{
 				FString Lexeme;
@@ -566,23 +200,22 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 						Lexeme, Resources, OutValue, StateError)
 					: FUeAgentCanonicalValue::TryDecimal(
 						Lexeme, Resources, OutValue, StateError))
-					|| Fail(Error, StateError.Code);
+					|| Fail(Error, StateError);
 			}
 			case EJson::Array:
 			{
 				TArray<FUeAgentCanonicalValueRef> Items;
-				for (const TSharedPtr<FJsonValue>& Item : JsonValue->AsArray())
+				for (int32 Index = 0; Index < JsonValue->AsArray().Num(); ++Index)
 				{
+					const auto& Item = JsonValue->AsArray()[Index];
 					FUeAgentCanonicalValuePtr Canonical;
 					if (!ConvertCanonicalValue(Item, Resources, Canonical, Error))
-					{
-						return false;
-					}
+						return PrefixChildFailure(nullptr, TEXT("/") + FString::FromInt(Index), Error);
 					Items.Add(Canonical.ToSharedRef());
 				}
 				return FUeAgentCanonicalValue::TryArray(
 					Items, Resources, OutValue, StateError)
-					|| Fail(Error, StateError.Code);
+					|| Fail(Error, StateError);
 			}
 			case EJson::Object:
 			{
@@ -597,16 +230,17 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 							JsonValue->AsObject()->Values.FindChecked(Key),
 							Resources, Canonical, Error))
 					{
-						return false;
+						return PrefixChildFailure(nullptr, TEXT("/") + Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")), Error);
 					}
 					Items.Emplace(Key, Canonical.ToSharedRef());
 				}
 				return FUeAgentCanonicalValue::TryObject(
 					Items, Resources, OutValue, StateError)
-					|| Fail(Error, StateError.Code);
+					|| Fail(Error, StateError);
 			}
 			default:
-				return Fail(Error, TEXT("timeline_animation_intent_json_kind_invalid"));
+				return ValueFailure(nullptr, TEXT("/"), TEXT("timeline_animation_intent_json_kind_invalid"), TEXT("null, boolean, string, number, array, or object"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(JsonValue->Type)), Error);
 			}
 		}
 
@@ -622,7 +256,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			if (!OptionalObject(Root, Field, Object, bPresent, Error)) return false;
 			if (!bPresent) return true;
 			FTimelineAnimationRange Value;
-			if (!ParseRange(Object, Value, Error)) return false;
+			if (!ParseRange(Object, Value, Error)) return PrefixChildFailure(Root, TEXT("/") + FString(Field), Error);
 			Out = MoveTemp(Value);
 			return true;
 		}
@@ -639,7 +273,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			if (!OptionalObject(Root, Field, Object, bPresent, Error)) return false;
 			if (!bPresent) return true;
 			FTimelineAnimationPoint Value;
-			if (!ParsePoint(Object, Value, Error)) return false;
+			if (!ParsePoint(Object, Value, Error)) return PrefixChildFailure(Root, TEXT("/") + FString(Field), Error);
 			Out = MoveTemp(Value);
 			return true;
 		}
@@ -656,7 +290,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			if (!OptionalObject(Root, Field, Object, bPresent, Error)) return false;
 			if (!bPresent) return true;
 			FTimelineAnimationRate Value;
-			if (!ParseRate(Object, Value, Error)) return false;
+			if (!ParseRate(Object, Value, Error)) return PrefixChildFailure(Root, TEXT("/") + FString(Field), Error);
 			Out = MoveTemp(Value);
 			return true;
 		}
@@ -668,11 +302,8 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		{
 			TSharedPtr<FJsonObject> Object;
 			FTimelineAnimationRevision Value;
-			if (!RequiredObject(Root, TEXT("expected_revision"), Object, Error)
-				|| !ParseRevision(Object, Value, Error))
-			{
-				return false;
-			}
+			if (!RequiredObject(Root, TEXT("expected_revision"), Object, Error)) return false;
+			if (!ParseRevision(Object, Value, Error)) return PrefixChildFailure(Root, TEXT("/expected_revision"), Error);
 			Data.ExpectedRevision = MoveTemp(Value);
 			return true;
 		}
@@ -695,13 +326,13 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				if (!RequiredObject(Root, TEXT("temporal_range"), Object, Error)) return false;
 				{
 					FTimelineAnimationRange Value;
-					if (!ParseRange(Object, Value, Error)) return false;
+					if (!ParseRange(Object, Value, Error)) return PrefixChildFailure(Root, TEXT("/temporal_range"), Error);
 					Data.TemporalRange = MoveTemp(Value);
 				}
 				if (!RequiredObject(Root, TEXT("sample_rate"), Object, Error)) return false;
 				{
 					FTimelineAnimationRate Value;
-					if (!ParseRate(Object, Value, Error)) return false;
+					if (!ParseRate(Object, Value, Error)) return PrefixChildFailure(Root, TEXT("/sample_rate"), Error);
 					Data.SampleRate = MoveTemp(Value);
 				}
 				return OptionalString(Root, TEXT("root_bone_ref"), Data.RootBoneRef, Error);
@@ -709,7 +340,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				if (!RequiredObject(Root, TEXT("time_point"), Object, Error)) return false;
 				{
 					FTimelineAnimationPoint Value;
-					if (!ParsePoint(Object, Value, Error)) return false;
+					if (!ParsePoint(Object, Value, Error)) return PrefixChildFailure(Root, TEXT("/time_point"), Error);
 					Data.TimePoint = MoveTemp(Value);
 				}
 				if (!ParseStringArray(Root, TEXT("bone_refs"), Data.BoneRefs, false, Error)) return false;
@@ -717,7 +348,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				if (bPresent)
 				{
 					FTimelineAnimationFrame3d Frame;
-					if (!ParseFrame(Object, Frame, Error)) return false;
+					if (!ParseFrame(Object, Frame, Error)) return PrefixChildFailure(Root, TEXT("/output_frame"), Error);
 					Data.OutputFrame = MoveTemp(Frame);
 				}
 				return true;
@@ -729,7 +360,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				if (bPresent)
 				{
 					FTimelineAnimationFrame3d Frame;
-					if (!ParseFrame(Object, Frame, Error)) return false;
+					if (!ParseFrame(Object, Frame, Error)) return PrefixChildFailure(Root, TEXT("/output_frame"), Error);
 					Data.OutputFrame = MoveTemp(Frame);
 				}
 				return true;
@@ -737,13 +368,13 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				if (!RequiredObject(Root, TEXT("authored_range"), Object, Error)) return false;
 				{
 					FTimelineAnimationRange Value;
-					if (!ParseRange(Object, Value, Error)) return false;
+					if (!ParseRange(Object, Value, Error)) return PrefixChildFailure(Root, TEXT("/authored_range"), Error);
 					Data.TemporalRange = MoveTemp(Value);
 				}
 				if (!RequiredObject(Root, TEXT("sample_rate"), Object, Error)) return false;
 				{
 					FTimelineAnimationRate Value;
-					if (!ParseRate(Object, Value, Error)) return false;
+					if (!ParseRate(Object, Value, Error)) return PrefixChildFailure(Root, TEXT("/sample_rate"), Error);
 					Data.SampleRate = MoveTemp(Value);
 				}
 				return ParseObjectArray(Root, TEXT("bone_tracks"), Data.BoneTracks, true, ParseBoneTrack, Error)
@@ -766,7 +397,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 					|| !RequiredObject(Root, TEXT("initial_structure"), Object, Error)) return false;
 				{
 					FTimelineAnimationStructure Structure;
-					if (!ParseStructure(Object, Structure, Error)) return false;
+					if (!ParseStructure(Object, Structure, Error)) return PrefixChildFailure(Root, TEXT("/initial_structure"), Error);
 					Data.Structure = MoveTemp(Structure);
 				}
 				return OptionalString(Root, TEXT("source_animation_ref"), Data.SourceAnimationRef, Error);
@@ -774,7 +405,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				if (!RequiredObject(Root, TEXT("structure"), Object, Error)) return false;
 				{
 					FTimelineAnimationStructure Structure;
-					if (!ParseStructure(Object, Structure, Error)) return false;
+					if (!ParseStructure(Object, Structure, Error)) return PrefixChildFailure(Root, TEXT("/structure"), Error);
 					Data.Structure = MoveTemp(Structure);
 				}
 				return ParseRequiredRevision(Root, Data, Error);
@@ -790,7 +421,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 					|| !RequiredObject(Root, TEXT("initial_structure"), Object, Error)) return false;
 				{
 					FTimelineAnimationStructure Structure;
-					if (!ParseStructure(Object, Structure, Error)) return false;
+					if (!ParseStructure(Object, Structure, Error)) return PrefixChildFailure(Root, TEXT("/initial_structure"), Error);
 					Data.Structure = MoveTemp(Structure);
 				}
 				return ParseOptionalRate(Root, TEXT("display_rate"), Data.DisplayRate, Error)
@@ -805,7 +436,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				if (!RequiredObject(Root, TEXT("structure"), Object, Error)) return false;
 				{
 					FTimelineAnimationStructure Structure;
-					if (!ParseStructure(Object, Structure, Error)) return false;
+					if (!ParseStructure(Object, Structure, Error)) return PrefixChildFailure(Root, TEXT("/structure"), Error);
 					Data.Structure = MoveTemp(Structure);
 				}
 				return ParseRequiredRevision(Root, Data, Error);
@@ -814,38 +445,41 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 					&& OptionalBool(Root, TEXT("include_bindings"), Data.IncludeBindings, Error)
 					&& OptionalBool(Root, TEXT("include_tracks"), Data.IncludeTracks, Error);
 			case EUeAgentTimelineAnimationRequestKind::SubjectPoseUpdate:
-				if (!ParseOptionalPoint(Root, TEXT("evaluation_point"), Data.EvaluationPoint, Error)
-					|| !Data.EvaluationPoint.IsSet()
-					|| !ParseObjectArray(Root, TEXT("pose"), Data.Pose, true, ParsePoseItem, Error)
+				if (!ParseOptionalPoint(Root, TEXT("evaluation_point"), Data.EvaluationPoint, Error)) return false;
+				if (!Data.EvaluationPoint.IsSet())
+					return FieldFailure(Root, TEXT("evaluation_point"), TEXT("timeline_animation_evaluation_point_required"), TEXT("an evaluation point"), Error);
+				if (!ParseObjectArray(Root, TEXT("pose"), Data.Pose, true, ParsePoseItem, Error)
 					|| !RequiredObject(Root, TEXT("pose_frame"), Object, Error)) return false;
 				{
 					FTimelineAnimationFrame3d Frame;
-					if (!ParseFrame(Object, Frame, Error)) return false;
+					if (!ParseFrame(Object, Frame, Error)) return PrefixChildFailure(Root, TEXT("/pose_frame"), Error);
 					Data.PoseFrame = MoveTemp(Frame);
 				}
 				return OptionalNumber(Root, TEXT("weight"), Data.Weight, Error);
 			case EUeAgentTimelineAnimationRequestKind::SubjectMorphWeightsUpdate:
-				return ParseOptionalPoint(Root, TEXT("evaluation_point"), Data.EvaluationPoint, Error)
-					&& Data.EvaluationPoint.IsSet()
-					&& ParseObjectArray(Root, TEXT("morph_weights"), Data.MorphWeights, true, ParseMorphWeight, Error);
+				if (!ParseOptionalPoint(Root, TEXT("evaluation_point"), Data.EvaluationPoint, Error)) return false;
+				if (!Data.EvaluationPoint.IsSet())
+					return FieldFailure(Root, TEXT("evaluation_point"), TEXT("timeline_animation_evaluation_point_required"), TEXT("an evaluation point"), Error);
+				return ParseObjectArray(Root, TEXT("morph_weights"), Data.MorphWeights, true, ParseMorphWeight, Error);
 			case EUeAgentTimelineAnimationRequestKind::IkProbeCandidateApply:
 				if (!RequiredString(Root, TEXT("rig_ref"), Data.RigRef, Error)
 					|| !RequiredString(Root, TEXT("goal_ref"), Data.GoalRef, Error)
 					|| !RequiredObject(Root, TEXT("candidate"), Object, Error)) return false;
 				{
 					FTimelineAnimationTransform3d Transform;
-					if (!ParseTransform(Object, Transform, Error)) return false;
+					if (!ParseTransform(Object, Transform, Error)) return PrefixChildFailure(Root, TEXT("/candidate"), Error);
 					Data.Candidate = MoveTemp(Transform);
 				}
 				if (!RequiredObject(Root, TEXT("authored_time"), Object, Error)) return false;
 				{
 					FTimelineAnimationPoint Point;
-					if (!ParsePoint(Object, Point, Error)) return false;
+					if (!ParsePoint(Object, Point, Error)) return PrefixChildFailure(Root, TEXT("/authored_time"), Error);
 					Data.AuthoredTime = MoveTemp(Point);
 				}
 				return ParseRequiredRevision(Root, Data, Error);
 			default:
-				return Fail(Error, TEXT("timeline_animation_request_kind_invalid"));
+				return ValueFailure(Root, TEXT("/request_kind"), TEXT("timeline_animation_request_kind_invalid"),
+					TEXT("a registered timeline request kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Kind)), Error);
 			}
 		}
 
@@ -904,32 +538,37 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 					{
 						return Contract.GetCapabilityId() == Candidate.CapabilityId;
 					});
-				if (!Spec || Contract.GetTypedRequestId() != Spec->TypeId
-					|| Contract.GetFamilyId() != Spec->FamilyId
-					|| Contract.RequiresNativeMutation() != Spec->bOperation)
-				{
-					return Fail(
-						OutError, TEXT("timeline_animation_request_contract_mismatch"),
-						Contract.GetCapabilityId());
-				}
+				if (!Spec)
+					return Fail(OutError, TimelineRequestFact(TEXT("timeline_animation_request_contract_mismatch"),
+						TEXT("No typed timeline request specification is registered for the capability."), TEXT("/contract/capability_id"),
+						MakeShared<FJsonValueString>(Contract.GetCapabilityId()), MakeShared<FJsonValueString>(TEXT("registered timeline capability"))));
+				if (Contract.GetTypedRequestId() != Spec->TypeId)
+					return Fail(OutError, TimelineRequestFact(TEXT("timeline_animation_request_contract_mismatch"),
+						TEXT("The execution contract requests a different typed request id."), TEXT("/contract/typed_request_id"),
+						MakeShared<FJsonValueString>(Contract.GetTypedRequestId()), MakeShared<FJsonValueString>(Spec->TypeId)));
+				if (Contract.GetFamilyId() != Spec->FamilyId)
+					return Fail(OutError, TimelineRequestFact(TEXT("timeline_animation_request_contract_mismatch"),
+						TEXT("The execution contract uses a different timeline port family."), TEXT("/contract/family_id"),
+						MakeShared<FJsonValueString>(Contract.GetFamilyId()), MakeShared<FJsonValueString>(Spec->FamilyId)));
+				if (Contract.RequiresNativeMutation() != Spec->bOperation)
+					return Fail(OutError, TimelineRequestFact(TEXT("timeline_animation_request_contract_mismatch"),
+						TEXT("The execution contract mutation flag differs from the typed request specification."), TEXT("/contract/requires_native_mutation"),
+						MakeShared<FJsonValueBoolean>(Contract.RequiresNativeMutation()), MakeShared<FJsonValueBoolean>(Spec->bOperation)));
 				TSharedPtr<FJsonObject> Root;
-				FString JsonError;
-				if (!Json::TryParseObject(CanonicalInput.GetJsonValue(), Root, JsonError)
+				UE::UAI::Contract::FDiagnostic JsonError;
+				if (!UE::UAI::Contract::Json::TryParseObject(CanonicalInput.GetJsonValue(), Root, JsonError)
 					|| !Root.IsValid())
 				{
-					return Fail(
-						OutError, TEXT("timeline_animation_request_json_invalid"),
-						Contract.GetCapabilityId(), JsonError);
+					return Fail(OutError, JsonError.IsEmpty() ? TimelineRequestFact(TEXT("timeline_animation_input_object_missing"),
+						TEXT("Canonical timeline input did not yield an object."), TEXT("/input"),
+						MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("object"))) : MoveTemp(JsonError));
 				}
 				FTimelineAnimationRequestData Data;
-				if (!DecodeData(Spec->Kind, Root, Data, OutError)
-					|| !Data.IsValidFor(Spec->Kind))
+				if (!DecodeData(Spec->Kind, Root, Data, OutError) || !Data.TryValidateFor(Spec->Kind, OutError))
 				{
-					if (!OutError.IsValid())
-					{
-						Fail(OutError, TEXT("timeline_animation_request_data_invalid"),
-							Contract.GetCapabilityId());
-					}
+					if (OutError.IsEmpty()) OutError = TimelineRequestFact(TEXT("timeline_animation_request_data_invalid"),
+						TEXT("The typed timeline request parser failed without returning a diagnostic."), TEXT("/request_parser/succeeded"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return false;
 				}
 				FUeAgentCanonicalValuePtr Intent;
@@ -937,125 +576,150 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 						MakeShared<FJsonValueObject>(Root), Resources, Intent, OutError)
 					|| !Intent.IsValid())
 				{
+					if (OutError.IsEmpty()) OutError = TimelineRequestFact(TEXT("timeline_animation_intent_value_missing"),
+						TEXT("Canonical intent conversion returned no value."), TEXT("/intent_payload"),
+						MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("canonical value")));
 					return false;
 				}
 				OutRequest = MakeShared<FUeAgentTimelineAnimationRequest>(
 					Spec->TypeId, Spec->FamilyId, Spec->RequestKindId,
 					Spec->Kind, Spec->bOperation, MoveTemp(Data), Intent.ToSharedRef());
-				return OutRequest.IsValid();
+				return true;
 			}
 		};
 	}
 
-	bool FTimelineAnimationRevision::IsValid() const
+	bool FTimelineAnimationRevision::TryValidate(FUeAgentTimelineAnimationExecutionError& Error) const
 	{
-		return !SourceId.IsEmpty() && !Generation.IsEmpty() && Sequence >= 0;
+		Error = {};
+		if (SourceId.IsEmpty()) return ValueFailure(nullptr, TEXT("/source_id"), TEXT("timeline_animation_revision_invalid"), TEXT("a non-empty revision source id"),
+			MakeShared<FJsonValueString>(SourceId), Error);
+		if (Generation.IsEmpty()) return ValueFailure(nullptr, TEXT("/generation"), TEXT("timeline_animation_revision_invalid"), TEXT("a non-empty revision generation"),
+			MakeShared<FJsonValueString>(Generation), Error);
+		return Sequence >= 0 || ValueFailure(nullptr, TEXT("/sequence"), TEXT("timeline_animation_revision_invalid"), TEXT("a non-negative sequence"),
+			MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), Sequence)), Error);
 	}
 
-	bool FTimelineAnimationRate::IsValid() const
+	bool FTimelineAnimationRevision::IsValid() const { FUeAgentTimelineAnimationExecutionError Error; return TryValidate(Error); }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	bool FTimelineAnimationBoneKey::TryValidate(FUeAgentTimelineAnimationExecutionError& Error) const
 	{
-		return FUeAgentTemporalRate(Numerator, Denominator).IsValid();
+		Error = {};
+		if (!Time.TryValidate(Error)) return PrefixChildFailure(nullptr, TEXT("/time"), Error);
+		return Transform.TryValidate(Error) || PrefixChildFailure(nullptr, TEXT("/transform"), Error);
 	}
 
-	bool FTimelineAnimationPoint::IsValid() const
+	bool FTimelineAnimationBoneTrack::TryValidate(FUeAgentTimelineAnimationExecutionError& Error) const
 	{
-		return State == TEXT("authored") && Rate.IsValid()
-			&& ToTemporalPoint().IsValid();
-	}
-
-	FUeAgentTemporalPoint FTimelineAnimationPoint::ToTemporalPoint() const
-	{
-		return FUeAgentTemporalPoint(
-			ClockId, Tick, Rate.Numerator, Rate.Denominator, State);
-	}
-
-	bool FTimelineAnimationBound::IsValid() const
-	{
-		if (Kind == TEXT("open")) return !Point.IsSet();
-		return (Kind == TEXT("inclusive") || Kind == TEXT("exclusive"))
-			&& Point.IsSet() && Point->IsValid();
-	}
-
-	bool FTimelineAnimationRange::IsValid() const
-	{
-		if (ClockId.IsEmpty() || State != TEXT("authored")
-			|| !Lower.IsValid() || !Upper.IsValid()) return false;
-		auto ToBound = [](const FTimelineAnimationBound& Bound)
+		Error = {};
+		if (BoneRef.IsEmpty()) return ValueFailure(nullptr, TEXT("/bone_ref"), TEXT("timeline_animation_bone_track_invalid"),
+			TEXT("a non-empty bone reference"), MakeShared<FJsonValueString>(BoneRef), Error);
+		if (Keys.IsEmpty())
 		{
-			if (Bound.Kind == TEXT("open")) return FUeAgentTemporalBound::Open();
-			return Bound.Kind == TEXT("inclusive")
-				? FUeAgentTemporalBound::Inclusive(Bound.Point->ToTemporalPoint())
-				: FUeAgentTemporalBound::Exclusive(Bound.Point->ToTemporalPoint());
-		};
-		return FUeAgentTemporalRange(
-			ClockId, State, ToBound(Lower), ToBound(Upper)).IsValid();
-	}
-
-	bool FTimelineAnimationFrame3d::IsValid() const
-	{
-		return !FrameId.IsEmpty() && !BasisFrameId.IsEmpty()
-			&& Dimension == 3 && !Unit.IsEmpty() && !BasisEvidenceId.IsEmpty();
-	}
-
-	bool FTimelineAnimationTransform3d::IsValid() const
-	{
-		return !Subject.IsEmpty() && Quantity == TEXT("transform")
-			&& Frame.IsValid() && Components.Num() == 10
-			&& !ConversionEvidenceIds.IsEmpty();
-	}
-
-	bool FTimelineAnimationTransform3d::TryToNativeTransform(
-		const FString& NativeFrameId,
-		FTransform& OutTransform,
-		FUeAgentTimelineAnimationExecutionError& OutError) const
-	{
-		OutTransform = FTransform::Identity;
-		if (!IsValid() || Frame.FrameId != NativeFrameId
-			|| Frame.Unit != TEXT("centimeter"))
-		{
-			return Fail(OutError,
-				TEXT("timeline_animation_space_conversion_unavailable"),
-				Subject, Frame.FrameId + TEXT(" -> ") + NativeFrameId);
+			auto Shape = MakeShared<FJsonObject>();
+			Shape->SetNumberField(TEXT("count"), 0);
+			return ValueFailure(nullptr, TEXT("/keys"), TEXT("timeline_animation_bone_track_invalid"), TEXT("at least one bone key"), MakeShared<FJsonValueObject>(Shape), Error);
 		}
-		TArray<double> Values;
-		for (const FString& Component : Components)
+		for (int32 Index = 0; Index < Keys.Num(); ++Index)
+			if (!Keys[Index].TryValidate(Error)) return PrefixChildFailure(nullptr, TEXT("/keys/") + FString::FromInt(Index), Error);
+		return true;
+	}
+
+	bool FTimelineAnimationBlendParameter::TryValidate(FUeAgentTimelineAnimationExecutionError& Error) const
+	{
+		Error = {};
+		if (AxisRef.IsEmpty()) return ValueFailure(nullptr, TEXT("/axis_ref"), TEXT("timeline_animation_blend_parameter_invalid"),
+			TEXT("a non-empty blend axis reference"), MakeShared<FJsonValueString>(AxisRef), Error);
+		return FMath::IsFinite(Value) || ValueFailure(nullptr, TEXT("/value"), TEXT("timeline_animation_blend_parameter_invalid"),
+			TEXT("a finite number"), MakeShared<FJsonValueString>(FString::SanitizeFloat(Value)), Error);
+	}
+
+	bool FTimelineAnimationBoneKey::IsValid() const { FUeAgentTimelineAnimationExecutionError Error; return TryValidate(Error); }
+	bool FTimelineAnimationBoneTrack::IsValid() const { FUeAgentTimelineAnimationExecutionError Error; return TryValidate(Error); }
+	bool FTimelineAnimationBlendParameter::IsValid() const { FUeAgentTimelineAnimationExecutionError Error; return TryValidate(Error); }
+
+
+
+
+
+
+
+	bool TryParseTimelineAnimationStructure(
+		const TSharedPtr<FJsonObject>& Root,
+		FTimelineAnimationStructure& OutStructure,
+		FUeAgentTimelineAnimationExecutionError& OutError)
+	{
+		OutStructure = {};
+		OutError = {};
+		return Root.IsValid()
+			? ParseStructure(Root, OutStructure, OutError)
+			: ValueFailure(nullptr, TEXT("/structure"), TEXT("timeline_animation_structure_missing"), TEXT("a structure object"), nullptr, OutError);
+	}
+	bool FTimelineAnimationPoseItem::TryValidate(FUeAgentTimelineAnimationExecutionError& Error) const
+	{
+		Error = {};
+		if (BoneRef.IsEmpty()) return ValueFailure(nullptr, TEXT("/bone_ref"), TEXT("timeline_animation_pose_item_invalid"),
+			TEXT("a non-empty bone reference"), MakeShared<FJsonValueString>(BoneRef), Error);
+		return Transform.TryValidate(Error) || PrefixChildFailure(nullptr, TEXT("/transform"), Error);
+	}
+
+	bool FTimelineAnimationMorphWeight::TryValidate(FUeAgentTimelineAnimationExecutionError& Error) const
+	{
+		Error = {};
+		if (MorphRef.IsEmpty()) return ValueFailure(nullptr, TEXT("/morph_ref"), TEXT("timeline_animation_morph_weight_invalid"),
+			TEXT("a non-empty morph reference"), MakeShared<FJsonValueString>(MorphRef), Error);
+		return FMath::IsFinite(Weight) || ValueFailure(nullptr, TEXT("/weight"), TEXT("timeline_animation_morph_weight_invalid"),
+			TEXT("a finite number"), MakeShared<FJsonValueString>(FString::SanitizeFloat(Weight)), Error);
+	}
+
+	bool FTimelineAnimationPoseItem::IsValid() const { FUeAgentTimelineAnimationExecutionError Error; return TryValidate(Error); }
+	bool FTimelineAnimationMorphWeight::IsValid() const { FUeAgentTimelineAnimationExecutionError Error; return TryValidate(Error); }
+
+	bool FTimelineAnimationRequestData::TryValidateFor(const EUeAgentTimelineAnimationRequestKind Kind,
+		FUeAgentTimelineAnimationExecutionError& Error) const
+	{
+		Error = {};
+		const auto Required = [&](const auto& Optional, const TCHAR* Field)
 		{
-			double Value = 0.0;
-			if (!LexTryParseString(Value, *Component) || !FMath::IsFinite(Value))
+			const FString Path = TEXT("/") + FString(Field);
+			if (!Optional.IsSet()) return ValueFailure(nullptr, Path, TEXT("timeline_animation_request_field_required"), TEXT("a required value"), nullptr, Error);
+			return Optional->TryValidate(Error) || PrefixChildFailure(nullptr, Path, Error);
+		};
+		const auto Optional = [&](const auto& Value, const TCHAR* Field) { return !Value.IsSet() || Required(Value, Field); };
+		const auto Array = [&](const auto& Values, const TCHAR* Field)
+		{
+			const FString Path = TEXT("/") + FString(Field);
+			if (Values.IsEmpty())
 			{
-				return Fail(OutError,
-					TEXT("timeline_animation_transform_component_invalid"),
-					Subject, Component);
+				auto Shape = MakeShared<FJsonObject>();
+				Shape->SetNumberField(TEXT("count"), 0);
+				return ValueFailure(nullptr, Path, TEXT("timeline_animation_request_array_empty"), TEXT("at least one item"), MakeShared<FJsonValueObject>(Shape), Error);
 			}
-			Values.Add(Value);
-		}
-		FQuat Rotation(Values[3], Values[4], Values[5], Values[6]);
-		if (!Rotation.IsNormalized()) Rotation.Normalize();
-		OutTransform = FTransform(
-			Rotation,
-			FVector(Values[0], Values[1], Values[2]),
-			FVector(Values[7], Values[8], Values[9]));
-		return !OutTransform.ContainsNaN();
-	}
-
-	bool FTimelineAnimationBoneKey::IsValid() const { return Time.IsValid() && Transform.IsValid(); }
-	bool FTimelineAnimationBoneTrack::IsValid() const { return !BoneRef.IsEmpty() && !Keys.IsEmpty() && !Keys.ContainsByPredicate([](const auto& V){ return !V.IsValid(); }); }
-	bool FTimelineAnimationCurveKey::IsValid() const { return Time.IsValid() && FMath::IsFinite(Value) && (Interpolation == TEXT("constant") || Interpolation == TEXT("linear") || Interpolation == TEXT("cubic")); }
-	bool FTimelineAnimationCurveChange::IsValid() const { return !CurveRef.IsEmpty() && (Operation == TEXT("upsert") || Operation == TEXT("remove")) && !Keys.ContainsByPredicate([](const auto& V){ return !V.IsValid(); }); }
-	bool FTimelineAnimationMetadataChange::IsValid() const { return !MetadataRef.IsEmpty() && (Operation == TEXT("upsert") || Operation == TEXT("remove")) && (ValueType == TEXT("string") || ValueType == TEXT("integer") || ValueType == TEXT("decimal") || ValueType == TEXT("boolean") || ValueType == TEXT("asset_ref")); }
-	bool FTimelineAnimationEventChange::IsValid() const { return !EventRef.IsEmpty() && (Operation == TEXT("upsert") || Operation == TEXT("remove")) && (EventKind == TEXT("notify_track") || EventKind == TEXT("notify") || EventKind == TEXT("notify_state") || EventKind == TEXT("sync_marker")) && (!Time.IsSet() || Time->IsValid()) && (!Range.IsSet() || Range->IsValid()); }
-	bool FTimelineAnimationBlendParameter::IsValid() const { return !AxisRef.IsEmpty() && FMath::IsFinite(Value); }
-	bool FTimelineAnimationKey::IsValid() const { return !KeyRef.IsEmpty() && Time.IsValid() && !ValueType.IsEmpty() && (ValueType != TEXT("transform") || (Transform.IsSet() && Transform->IsValid())); }
-	bool FTimelineAnimationSection::IsValid() const { return !SectionRef.IsEmpty() && !SectionKind.IsEmpty() && Range.IsValid() && !Keys.ContainsByPredicate([](const auto& V){ return !V.IsValid(); }); }
-	bool FTimelineAnimationTrack::IsValid() const { return !TrackRef.IsEmpty() && !TrackKind.IsEmpty() && !Sections.ContainsByPredicate([](const auto& V){ return !V.IsValid(); }); }
-	bool FTimelineAnimationBinding::IsValid() const { return !BindingRef.IsEmpty() && (BindingKind == TEXT("possessable") || BindingKind == TEXT("spawnable") || BindingKind == TEXT("widget") || BindingKind == TEXT("slot")) && !Tracks.ContainsByPredicate([](const auto& V){ return !V.IsValid(); }); }
-	bool FTimelineAnimationStructure::IsValid() const { return DisplayRate.IsValid() && TickResolution.IsValid() && PlaybackRange.IsValid() && !Bindings.ContainsByPredicate([](const auto& V){ return !V.IsValid(); }) && !RootTracks.ContainsByPredicate([](const auto& V){ return !V.IsValid(); }); }
-	bool FTimelineAnimationPoseItem::IsValid() const { return !BoneRef.IsEmpty() && Transform.IsValid(); }
-	bool FTimelineAnimationMorphWeight::IsValid() const { return !MorphRef.IsEmpty() && FMath::IsFinite(Weight); }
-
-	bool FTimelineAnimationRequestData::IsValidFor(
-		const EUeAgentTimelineAnimationRequestKind Kind) const
-	{
+			for (int32 Index = 0; Index < Values.Num(); ++Index)
+				if (!Values[Index].TryValidate(Error)) return PrefixChildFailure(nullptr, Path + TEXT("/") + FString::FromInt(Index), Error);
+			return true;
+		};
+		const auto Text = [&](const FString& Value, const TCHAR* Field)
+		{
+			return !Value.IsEmpty() || ValueFailure(nullptr, TEXT("/") + FString(Field), TEXT("timeline_animation_request_field_required"),
+				TEXT("a non-empty string"), MakeShared<FJsonValueString>(Value), Error);
+		};
 		switch (Kind)
 		{
 		case EUeAgentTimelineAnimationRequestKind::SequenceRead:
@@ -1063,72 +727,63 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		case EUeAgentTimelineAnimationRequestKind::SkeletonSlotsRead:
 		case EUeAgentTimelineAnimationRequestKind::LevelSequenceRead:
 		case EUeAgentTimelineAnimationRequestKind::WidgetAnimationRead:
-			return !TemporalRange.IsSet() || TemporalRange->IsValid();
+			return Optional(TemporalRange, TEXT("temporal_range"));
 		case EUeAgentTimelineAnimationRequestKind::SequenceRootMotionAnalyze:
-			return TemporalRange.IsSet() && TemporalRange->IsValid()
-				&& SampleRate.IsSet() && SampleRate->IsValid();
+			return Required(TemporalRange, TEXT("temporal_range")) && Required(SampleRate, TEXT("sample_rate"));
 		case EUeAgentTimelineAnimationRequestKind::SequencePoseSample:
-			return TimePoint.IsSet() && TimePoint->IsValid()
-				&& (!OutputFrame.IsSet() || OutputFrame->IsValid());
+			return Required(TimePoint, TEXT("time_point")) && Optional(OutputFrame, TEXT("output_frame"));
 		case EUeAgentTimelineAnimationRequestKind::BlendSpaceSample:
-			return !BlendParameters.IsEmpty()
-				&& !BlendParameters.ContainsByPredicate([](const auto& V){ return !V.IsValid(); })
-				&& (!TimePoint.IsSet() || TimePoint->IsValid())
-				&& (!OutputFrame.IsSet() || OutputFrame->IsValid());
+			return Array(BlendParameters, TEXT("blend_parameters")) && Optional(TimePoint, TEXT("time_point")) && Optional(OutputFrame, TEXT("output_frame"));
 		case EUeAgentTimelineAnimationRequestKind::SequenceBoneTracksReplace:
-			return TemporalRange.IsSet() && TemporalRange->IsValid()
-				&& SampleRate.IsSet() && SampleRate->IsValid()
-				&& ExpectedRevision.IsSet() && ExpectedRevision->IsValid()
-				&& !BoneTracks.IsEmpty()
-				&& !BoneTracks.ContainsByPredicate([](const auto& V){ return !V.IsValid(); });
+			return Required(TemporalRange, TEXT("authored_range")) && Required(SampleRate, TEXT("sample_rate"))
+				&& Required(ExpectedRevision, TEXT("expected_revision")) && Array(BoneTracks, TEXT("bone_tracks"));
 		case EUeAgentTimelineAnimationRequestKind::SequenceCurvesUpdate:
-			return ExpectedRevision.IsSet() && ExpectedRevision->IsValid()
-				&& !CurveChanges.IsEmpty()
-				&& !CurveChanges.ContainsByPredicate([](const auto& V){ return !V.IsValid(); });
+			return Required(ExpectedRevision, TEXT("expected_revision")) && Array(CurveChanges, TEXT("curve_changes"));
 		case EUeAgentTimelineAnimationRequestKind::SequenceMetadataUpdate:
-			return ExpectedRevision.IsSet() && ExpectedRevision->IsValid()
-				&& !MetadataChanges.IsEmpty()
-				&& !MetadataChanges.ContainsByPredicate([](const auto& V){ return !V.IsValid(); });
+			return Required(ExpectedRevision, TEXT("expected_revision")) && Array(MetadataChanges, TEXT("metadata_changes"));
 		case EUeAgentTimelineAnimationRequestKind::SequenceEventsUpdate:
-			return ExpectedRevision.IsSet() && ExpectedRevision->IsValid()
-				&& !EventChanges.IsEmpty()
-				&& !EventChanges.ContainsByPredicate([](const auto& V){ return !V.IsValid(); });
+			return Required(ExpectedRevision, TEXT("expected_revision")) && Array(EventChanges, TEXT("event_changes"));
 		case EUeAgentTimelineAnimationRequestKind::MontageCreate:
-			return !DestinationRef.IsEmpty() && !SkeletonRef.IsEmpty()
-				&& Structure.IsSet() && Structure->IsValid();
+			return Text(DestinationRef, TEXT("destination_ref")) && Text(SkeletonRef, TEXT("skeleton_ref")) && Required(Structure, TEXT("initial_structure"));
 		case EUeAgentTimelineAnimationRequestKind::MontageStructureReplace:
 		case EUeAgentTimelineAnimationRequestKind::LevelSequenceStructureReplace:
-			return Structure.IsSet() && Structure->IsValid()
-				&& ExpectedRevision.IsSet() && ExpectedRevision->IsValid();
+			return Required(Structure, TEXT("structure")) && Required(ExpectedRevision, TEXT("expected_revision"));
 		case EUeAgentTimelineAnimationRequestKind::LevelSequenceCreate:
-			return !DestinationRef.IsEmpty() && Structure.IsSet()
-				&& Structure->IsValid()
-				&& (!DisplayRate.IsSet() || DisplayRate->IsValid())
-				&& (!TickResolution.IsSet() || TickResolution->IsValid());
+			return Text(DestinationRef, TEXT("destination_ref")) && Required(Structure, TEXT("initial_structure"))
+				&& Optional(DisplayRate, TEXT("display_rate")) && Optional(TickResolution, TEXT("tick_resolution"));
 		case EUeAgentTimelineAnimationRequestKind::LevelSequenceSettingsUpdate:
-			return ExpectedRevision.IsSet() && ExpectedRevision->IsValid()
-				&& (DisplayRate.IsSet() || TemporalRange.IsSet())
-				&& (!DisplayRate.IsSet() || DisplayRate->IsValid())
-				&& (!TemporalRange.IsSet() || TemporalRange->IsValid());
+			if (!Required(ExpectedRevision, TEXT("expected_revision"))) return false;
+			if (!DisplayRate.IsSet() && !TemporalRange.IsSet())
+			{
+				auto Presence = MakeShared<FJsonObject>();
+				Presence->SetBoolField(TEXT("display_rate_present"), false);
+				Presence->SetBoolField(TEXT("playback_range_present"), false);
+				return ValueFailure(nullptr, TEXT("/"), TEXT("timeline_animation_settings_update_empty"),
+					TEXT("display_rate or playback_range must be present"), MakeShared<FJsonValueObject>(Presence), Error);
+			}
+			return Optional(DisplayRate, TEXT("display_rate")) && Optional(TemporalRange, TEXT("playback_range"));
 		case EUeAgentTimelineAnimationRequestKind::SubjectPoseUpdate:
-			return EvaluationPoint.IsSet() && EvaluationPoint->IsValid()
-				&& PoseFrame.IsSet() && PoseFrame->IsValid()
-				&& !Pose.IsEmpty()
-				&& !Pose.ContainsByPredicate([](const auto& V){ return !V.IsValid(); })
-				&& (!Weight.IsSet() || (FMath::IsFinite(Weight.GetValue())
-					&& Weight.GetValue() >= 0.0 && Weight.GetValue() <= 1.0));
+			if (!Required(EvaluationPoint, TEXT("evaluation_point")) || !Required(PoseFrame, TEXT("pose_frame")) || !Array(Pose, TEXT("pose"))) return false;
+			if (Weight.IsSet() && (!FMath::IsFinite(Weight.GetValue()) || Weight.GetValue() < 0.0 || Weight.GetValue() > 1.0))
+				return ValueFailure(nullptr, TEXT("/weight"), TEXT("timeline_animation_pose_weight_invalid"), TEXT("a finite number in [0, 1]"),
+					FMath::IsFinite(Weight.GetValue()) ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Weight.GetValue()))
+						: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(FString::SanitizeFloat(Weight.GetValue()))), Error);
+			return true;
 		case EUeAgentTimelineAnimationRequestKind::SubjectMorphWeightsUpdate:
-			return EvaluationPoint.IsSet() && EvaluationPoint->IsValid()
-				&& !MorphWeights.IsEmpty()
-				&& !MorphWeights.ContainsByPredicate([](const auto& V){ return !V.IsValid(); });
+			return Required(EvaluationPoint, TEXT("evaluation_point")) && Array(MorphWeights, TEXT("morph_weights"));
 		case EUeAgentTimelineAnimationRequestKind::IkProbeCandidateApply:
-			return !RigRef.IsEmpty() && !GoalRef.IsEmpty()
-				&& Candidate.IsSet() && Candidate->IsValid()
-				&& AuthoredTime.IsSet() && AuthoredTime->IsValid()
-				&& ExpectedRevision.IsSet() && ExpectedRevision->IsValid();
+			return Text(RigRef, TEXT("rig_ref")) && Text(GoalRef, TEXT("goal_ref")) && Required(Candidate, TEXT("candidate"))
+				&& Required(AuthoredTime, TEXT("authored_time")) && Required(ExpectedRevision, TEXT("expected_revision"));
 		default:
-			return false;
+			return ValueFailure(nullptr, TEXT("/request_kind"), TEXT("timeline_animation_request_kind_invalid"), TEXT("a registered timeline request kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Kind)), Error);
 		}
+	}
+
+	bool FTimelineAnimationRequestData::IsValidFor(const EUeAgentTimelineAnimationRequestKind Kind) const
+	{
+		FUeAgentTimelineAnimationExecutionError Error;
+		return TryValidateFor(Kind, Error);
 	}
 
 	FUeAgentTimelineAnimationRequest::FUeAgentTimelineAnimationRequest(
@@ -1167,17 +822,17 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		OutError = {};
 		if (!bOperation)
 		{
-			return Fail(OutError,
-				TEXT("timeline_animation_query_has_no_change_draft"), RequestKindId);
+			return Fail(OutError, TimelineRequestFact(TEXT("timeline_animation_query_has_no_change_draft"),
+				TEXT("A query request cannot produce a mutation change draft."), TEXT("/request/is_operation"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 		}
 		const bool bCreate = Kind == EUeAgentTimelineAnimationRequestKind::MontageCreate
 			|| Kind == EUeAgentTimelineAnimationRequestKind::LevelSequenceCreate;
-		if (!Data.IsValidFor(Kind)
-			|| (!bCreate && Snapshot.GetEntries().IsEmpty()))
-		{
-			return Fail(OutError,
-				TEXT("timeline_animation_preflight_snapshot_invalid"), RequestKindId);
-		}
+		if (!Data.TryValidateFor(Kind, OutError)) return false;
+		if (!bCreate && Snapshot.GetEntries().IsEmpty())
+			return Fail(OutError, TimelineRequestFact(TEXT("timeline_animation_preflight_snapshot_invalid"),
+				TEXT("Updating an existing timeline target requires a non-empty preflight snapshot."), TEXT("/snapshot/entries"),
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one entry"))));
 		const FUeAgentCanonicalIdentity PrimaryIdentity = bCreate
 			? FUeAgentCanonicalIdentity(
 				TEXT("timeline-animation:create:") + RequestKindId,
@@ -1207,7 +862,8 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			TArray<FString>{TEXT("timeline-animation:write")},
 			TEXT("timeline-animation-typed-intent:") + RequestKindId,
 			MoveTemp(ImpactTargets));
-		return OutDraft->IsValid();
+		if (!OutDraft->IsValid()) return Fail(OutError, OutDraft->GetValidationDiagnostic());
+		return true;
 	}
 
 	bool TryCreateTimelineAnimationRequestDecoder(
@@ -1216,11 +872,6 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 	{
 		OutDecoder.Reset();
 		OutError = {};
-		if (RequestSpecs().Num() != 20)
-		{
-			return Fail(OutError,
-				TEXT("timeline_animation_request_spec_count_invalid"));
-		}
 		TSet<FString> Capabilities;
 		TSet<FString> Types;
 		for (const FRequestSpec& Spec : RequestSpecs())
@@ -1228,8 +879,11 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			if (Capabilities.Contains(Spec.CapabilityId)
 				|| Types.Contains(Spec.TypeId))
 			{
-				return Fail(OutError,
-					TEXT("timeline_animation_request_spec_duplicate"), Spec.CapabilityId);
+				const bool bCapabilityDuplicate = Capabilities.Contains(Spec.CapabilityId);
+				return Fail(OutError, TimelineRequestFact(TEXT("timeline_animation_request_spec_duplicate"),
+					bCapabilityDuplicate ? TEXT("A typed request capability is registered more than once.") : TEXT("A typed request id is registered more than once."),
+					TEXT("/request_specs/") + FString::FromInt(Capabilities.Num()) + (bCapabilityDuplicate ? TEXT("/capability_id") : TEXT("/type_id")),
+					MakeShared<FJsonValueString>(bCapabilityDuplicate ? Spec.CapabilityId : Spec.TypeId), MakeShared<FJsonValueString>(TEXT("unique registration"))));
 			}
 			Capabilities.Add(Spec.CapabilityId);
 			Types.Add(Spec.TypeId);

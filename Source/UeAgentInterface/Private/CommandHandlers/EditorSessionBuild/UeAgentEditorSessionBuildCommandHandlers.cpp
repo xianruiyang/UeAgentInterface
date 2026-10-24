@@ -1,8 +1,9 @@
 #include "CommandHandlers/EditorSessionBuild/UeAgentEditorSessionBuildCommandHandlers.h"
 
-#include "Core/Contract/UeAgentContractJson.h"
+#include "Composition/LongRunningSession/UeAgentLongRunningSessionProduction.h"
+#include "CommandEdge/UeAgentApplicationResultProjection.h"
 #include "DomainAdapters/OperationPlan/UeAgentOperationPlan.h"
-#include "Dom/JsonObject.h"
+
 #include "OperationOwners/EditorSessionBuild/UeAgentEditorSessionBuildOwner.h"
 
 namespace UE::UAI::CommandHandlers::EditorSessionBuild
@@ -16,42 +17,15 @@ namespace UE::UAI::CommandHandlers::EditorSessionBuild
 	{
 		const FString Owner = TEXT("editor-session-build-command-owner");
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		FDiagnostic CommandFailure(const FString& Code, const FString& SubjectId, const FString& Reason)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString Text;
-			FString CanonicalError;
-			return Json::TryCanonicalize(Error, Text, CanonicalError)
-				? Text : FString(TEXT("{}"));
+			FDiagnostic Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("command"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SubjectId = SubjectId;
+			return Diagnostic;
 		}
 
-		bool TryReadOperationError(
-			const FString& PayloadJson,
-			FString& OutErrorJson)
-		{
-			OutErrorJson.Reset();
-			TSharedPtr<FJsonObject> Root;
-			FString ParseError;
-			if (!Json::TryParseObject(PayloadJson, Root, ParseError)
-				|| !Root.IsValid())
-			{
-				return false;
-			}
-			const TSharedPtr<FJsonObject>* Error = nullptr;
-			if (Root->TryGetObjectField(TEXT("operation_error"), Error)
-				&& Error && Error->IsValid())
-			{
-				return Json::TryCanonicalize(
-					Error->ToSharedRef(), OutErrorJson, ParseError);
-			}
-			return true;
-		}
+		
 
 		FUeAgentCallerContext EffectiveCaller(
 			const FUeAgentCallerContext& Caller,
@@ -89,7 +63,7 @@ namespace UE::UAI::CommandHandlers::EditorSessionBuild
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:operate")))
 				{
 					return FUeAgentCommandResult::Failure(
-						Request, TEXT("{}"), ErrorJson(
+						Request, TEXT("{}"), CommandFailure(
 							TEXT("editor_session_build_authority_required"),
 							Request.GetCommandId(),
 							TEXT("the public control route requires uai:operate")));
@@ -102,34 +76,47 @@ namespace UE::UAI::CommandHandlers::EditorSessionBuild
 						FUeAgentContractValue(Request.GetParamsJson())),
 					EffectiveCaller(Caller, Route.CommandId),
 					Cancellation);
-				if (!Result.IsValid()
-					|| !(Result.GetDescriptorIdentity() == Route.DescriptorIdentity)
-					|| Result.GetRequestId() != Request.GetRequestId())
-				{
-					return FUeAgentCommandResult::Failure(
-						Request, TEXT("{}"), ErrorJson(
-							TEXT("editor_session_build_result_invalid"),
-							Request.GetRequestId(),
-							TEXT("OperationService returned an invalid or mismatched result.")));
-				}
-				const FString& PayloadJson = Result.GetValue().GetJsonValue();
-				FString OperationError;
-				if (!TryReadOperationError(PayloadJson, OperationError))
-				{
-					return FUeAgentCommandResult::Failure(
-						Request, TEXT("{}"), ErrorJson(
-							TEXT("editor_session_build_payload_invalid"),
-							Request.GetRequestId(),
-							TEXT("OperationService returned a non-object payload.")));
-				}
-				return OperationError.IsEmpty()
-					? FUeAgentCommandResult::Success(Request, PayloadJson)
-					: FUeAgentCommandResult::Failure(Request, PayloadJson, OperationError);
+				FApplicationResultProjectionPolicy Policy;
+				Policy.InvalidResultCode = TEXT("editor_session_build_result_invalid");
+				Policy.InvalidPayloadCode = TEXT("editor_session_build_payload_invalid");
+				Policy.BoundaryFailureKind = EApplicationFailureKind::None;
+				return ProjectOperationResult(Request, Route.DescriptorIdentity, Result, Policy);
 			}
 
 		private:
 			FUeAgentEditorSessionBuildRoute Route;
 			TSharedRef<IUeAgentOperationApplicationPort> OperationPort;
+		};
+
+		class FSaveResourcesHandler final : public IUeAgentExactCommandHandler
+		{
+		public:
+			const FString& GetCommandId() const override
+			{
+				static const FString Id(TEXT("editor.save_resources"));
+				return Id;
+			}
+			const FString& GetPublicOwner() const override { return Owner; }
+			FUeAgentCommandResult Submit(
+				const FUeAgentCommandRequest& Request,
+				const FUeAgentCallerContext& Caller,
+				const TSharedRef<IUeAgentCancellationSignal>& Cancellation) override
+			{
+				if (!Caller.IsValid()
+					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:operate")))
+				{
+					return FUeAgentCommandResult::Failure(Request, TEXT("{}"), CommandFailure(
+						TEXT("editor_session_build_authority_required"), GetCommandId(),
+						TEXT("the public control route requires uai:operate")));
+				}
+				FString Payload;
+				Composition::LongRunningSession::FUeAgentLongRunningSessionProductionError Error;
+				return Composition::LongRunningSession::TrySaveEditorResources(
+					Request.GetParamsJson(), Payload, Error)
+					? FUeAgentCommandResult::Success(Request, Payload)
+					: FUeAgentCommandResult::Failure(Request, Payload.IsEmpty() ? TEXT("{}") : Payload,
+						Error);
+			}
 		};
 
 		class FPlanHandler final : public IUeAgentExactCommandHandler
@@ -154,7 +141,7 @@ namespace UE::UAI::CommandHandlers::EditorSessionBuild
 				TSharedRef<
 					const CommandRegistry::FUeAgentImmutableCommandRegistry>
 					Registry,
-				FString& OutError) override
+				UE::UAI::Contract::FDiagnostic& OutError) override
 			{
 				return Plan->BindNestedExactDispatch(
 					MoveTemp(Dispatch), MoveTemp(Registry), OutError);
@@ -177,26 +164,29 @@ namespace UE::UAI::CommandHandlers::EditorSessionBuild
 		TSharedRef<IUeAgentOperationApplicationPort> OperationPort,
 		TSharedRef<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
-		const auto& Routes = GetRoutes();
-		if (Routes.Num() != 3 || !Registry->FindExact(TEXT("operation.plan.execute")))
+		TArray<FUeAgentEditorSessionBuildRoute> Routes;
+		if (!TryGetRoutes(Routes, OutError)) return false;
+		if (!Registry->FindExact(TEXT("operation.plan.execute")))
 		{
-			OutError = TEXT("editor_session_build_route_count_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("editor_session_build_plan_execute_missing"), TEXT("The operation plan execution command is not registered."), TEXT("handler_factory"), FString(), TEXT("operation.plan.execute"));
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = TEXT("operation.plan.execute");
 			return false;
 		}
 		for (const FUeAgentEditorSessionBuildRoute& Route : Routes)
 		{
-			if (!Route.IsValid())
+			if (!Route.TryValidate(OutError))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("editor_session_build_route_invalid:") + Route.CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("editor_session_build_route_invalid"), OutError, TEXT("handler_factory"));
 				return false;
 			}
 			OutHandlers.Add(MakeShared<FHandler>(Route, OperationPort));
 		}
+		OutHandlers.Add(MakeShared<FSaveResourcesHandler>());
 		OutHandlers.Add(MakeShared<FPlanHandler>(Registry));
 		return true;
 	}

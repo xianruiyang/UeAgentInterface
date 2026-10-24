@@ -1,9 +1,7 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundCommandHandlers.h"
 
-#include "Core/Contract/UeAgentContractJson.h"
-#include "Dom/JsonObject.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
+#include "CommandEdge/UeAgentApplicationResultProjection.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::Composition::GraphCompound
 {
@@ -12,47 +10,9 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
-		FString JsonText(const TSharedRef<FJsonObject>& Object)
-		{
-			FString Text;
-			FString Error;
-			return Json::TryCanonicalize(Object, Text, Error) ? Text : FString();
-		}
+		
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			return JsonText(Error);
-		}
 
-		bool TryReadApplicationError(
-			const FString& PayloadJson,
-			const TCHAR* ErrorField,
-			FString& OutErrorJson)
-		{
-			OutErrorJson.Reset();
-			TSharedPtr<FJsonObject> Root;
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(PayloadJson);
-			if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
-			{
-				return false;
-			}
-			const TSharedPtr<FJsonObject>* Error = nullptr;
-			if (Root->TryGetObjectField(ErrorField, Error)
-				&& Error
-				&& Error->IsValid())
-			{
-				OutErrorJson = JsonText(Error->ToSharedRef());
-			}
-			return true;
-		}
 
 		class FGraphCompoundCommandHandler final
 			: public IUeAgentCommandHandler
@@ -87,34 +47,7 @@ namespace UE::UAI::Composition::GraphCompound
 							FUeAgentContractValue(Request.GetParamsJson())),
 						CallerContext,
 						Cancellation);
-					if (!Result.IsValid()
-						|| !(Result.GetDescriptorIdentity()
-							== Profile.GetDescriptorIdentity())
-						|| Result.GetRequestId() != Request.GetRequestId())
-					{
-						return FUeAgentCommandResult::Failure(
-							Request,
-							TEXT("{}"),
-							ErrorJson(TEXT("command_query_result_invalid"),
-								Request.GetRequestId(),
-								TEXT("C3Q returned an invalid or mismatched result.")));
-					}
-					const FString& PayloadJson = Result.GetValue().GetJsonValue();
-					FString ApplicationError;
-					if (!TryReadApplicationError(
-							PayloadJson, TEXT("query_error"), ApplicationError))
-					{
-						return FUeAgentCommandResult::Failure(
-							Request,
-							TEXT("{}"),
-							ErrorJson(TEXT("command_query_payload_invalid"),
-								Request.GetRequestId(),
-								TEXT("C3Q returned a non-object JSON payload.")));
-					}
-					return ApplicationError.IsEmpty()
-						? FUeAgentCommandResult::Success(Request, PayloadJson)
-						: FUeAgentCommandResult::Failure(
-							Request, PayloadJson, ApplicationError);
+					return ProjectQueryResult(Request, Profile.GetDescriptorIdentity(), Result);
 				}
 
 				const FUeAgentOperationResult Result = OperationPort->Submit(
@@ -125,34 +58,7 @@ namespace UE::UAI::Composition::GraphCompound
 						FUeAgentContractValue(Request.GetParamsJson())),
 					CallerContext,
 					Cancellation);
-				if (!Result.IsValid()
-					|| !(Result.GetDescriptorIdentity()
-						== Profile.GetDescriptorIdentity())
-					|| Result.GetRequestId() != Request.GetRequestId())
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(TEXT("command_operation_result_invalid"),
-							Request.GetRequestId(),
-							TEXT("C3O returned an invalid or mismatched result.")));
-				}
-				const FString& PayloadJson = Result.GetValue().GetJsonValue();
-				FString ApplicationError;
-				if (!TryReadApplicationError(
-						PayloadJson, TEXT("operation_error"), ApplicationError))
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(TEXT("command_operation_payload_invalid"),
-							Request.GetRequestId(),
-							TEXT("C3O returned a non-object JSON payload.")));
-				}
-				return ApplicationError.IsEmpty()
-					? FUeAgentCommandResult::Success(Request, PayloadJson)
-					: FUeAgentCommandResult::Failure(
-						Request, PayloadJson, ApplicationError);
+				return ProjectOperationResult(Request, Profile.GetDescriptorIdentity(), Result);
 			}
 
 		private:
@@ -167,25 +73,31 @@ namespace UE::UAI::Composition::GraphCompound
 		TSharedRef<IUeAgentQueryApplicationPort> QueryPort,
 		TSharedRef<IUeAgentOperationApplicationPort> OperationPort,
 		TArray<TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
 		if (Profiles.IsEmpty())
 		{
-			OutError = TEXT("graph_compound_activation_profiles_empty");
+			OutError = FDiagnostic::Failure(TEXT("graph_compound_activation_profiles_empty"),
+				TEXT("At least one activation profile is required to register Graph handlers"), TEXT("registration"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("activation_profile_count");
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT(">= 1"));
 			return false;
 		}
-		const TArray<FUeAgentGraphCompoundActivationProfile>& CanonicalProfiles =
-			GetGraphCompoundActivationProfiles();
+		const TArray<FUeAgentGraphCompoundActivationProfile>* CanonicalProfiles = nullptr;
+		if (!TryGetGraphCompoundActivationProfiles(CanonicalProfiles, OutError)) return false;
 		TSet<FString> CommandIds;
 		TSet<FString> DescriptorIds;
 		OutHandlers.Reserve(Profiles.Num());
-		for (const FUeAgentGraphCompoundActivationProfile& Profile : Profiles)
+		for (int32 ProfileIndex = 0; ProfileIndex < Profiles.Num(); ++ProfileIndex)
 		{
+			const FUeAgentGraphCompoundActivationProfile& Profile = Profiles[ProfileIndex];
 			const FUeAgentGraphCompoundActivationProfile* Canonical = nullptr;
 			for (const FUeAgentGraphCompoundActivationProfile& Candidate
-				: CanonicalProfiles)
+				: *CanonicalProfiles)
 			{
 				if (Candidate.GetCommandId() == Profile.GetCommandId())
 				{
@@ -195,23 +107,48 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			const FString DescriptorId =
 				Profile.GetDescriptorIdentity().GetDescriptorId();
-			if (!Profile.IsValid() || !Canonical
-				|| Canonical->GetCapabilityId() != Profile.GetCapabilityId()
-				|| Canonical->GetNamespace() != Profile.GetNamespace()
-				|| Canonical->GetMethod() != Profile.GetMethod()
-				|| !(Canonical->GetDescriptorIdentity()
-					== Profile.GetDescriptorIdentity())
-				|| Canonical->GetOperationKind() != Profile.GetOperationKind())
+			if (!Profile.IsValid())
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("graph_compound_activation_profile_not_canonical");
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(
+					TEXT("graph_compound_activation_profile_not_canonical"),
+					Profile.GetValidationDiagnostic(), TEXT("registration"));
+				return false;
+			}
+			if (!Canonical)
+			{
+				OutHandlers.Reset();
+				OutError = FDiagnostic::Failure(TEXT("graph_compound_activation_profile_not_canonical"),
+					TEXT("No registered activation profile exists for this command"), TEXT("registration"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.CandidateName = Profile.GetCommandId();
+				OutError.PropertyPath = TEXT("canonical_profile_present");
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				OutError.OperationIndex = ProfileIndex;
+				return false;
+			}
+			if (!Profile.TryMatchDefinition(*Canonical, OutError, TEXT("registration")))
+			{
+				OutHandlers.Reset();
+				OutError.OperationIndex = ProfileIndex;
 				return false;
 			}
 			if (CommandIds.Contains(Profile.GetCommandId())
 				|| DescriptorIds.Contains(DescriptorId))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("graph_compound_command_handler_duplicate");
+				const bool bCommandDuplicate = CommandIds.Contains(Profile.GetCommandId());
+				OutError = FDiagnostic::Failure(TEXT("graph_compound_command_handler_duplicate"),
+					bCommandDuplicate ? TEXT("The activation profile repeats an already registered command")
+						: TEXT("The activation profile repeats an already registered descriptor"), TEXT("registration"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.CandidateName = Profile.GetCommandId();
+				OutError.PropertyPath = bCommandDuplicate ? TEXT("command_id_unique") : TEXT("descriptor_id_unique");
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(bCommandDuplicate ? Profile.GetCommandId() : DescriptorId);
+				OutError.OperationIndex = ProfileIndex;
 				return false;
 			}
 			CommandIds.Add(Profile.GetCommandId());

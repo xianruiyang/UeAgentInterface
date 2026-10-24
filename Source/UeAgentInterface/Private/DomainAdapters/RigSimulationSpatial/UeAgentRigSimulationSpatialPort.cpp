@@ -15,9 +15,9 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			FString Path = FString(),
 			FString Detail = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.Path = MoveTemp(Path);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(Detail), TEXT("native_execution"));
+			OutError.Schema = TEXT("uai.runtime.diagnostic/1");
+			OutError.Source.JsonPath = MoveTemp(Path);
 			return false;
 		}
 
@@ -61,22 +61,19 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			const FString& Path,
 			FUeAgentRigSimulationSpatialPortError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded BudgetError;
+			FUeAgentResourceChargeError ChargeError;
 			if (Resources.TryChargeMany(
 					{{EUeAgentResourceDimension::Items, Items},
 					 {EUeAgentResourceDimension::WorkUnits, Items + 1}},
 					Path,
-					BudgetError))
+					ChargeError))
 			{
 				return true;
 			}
-			return Fail(
-				OutError,
-				BudgetError.Code.IsEmpty()
-					? TEXT("rig_simulation_spatial_resource_budget_exceeded")
-					: BudgetError.Code,
-				BudgetError.Path,
-				LexToString(BudgetError.Dimension));
+			OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(
+				ChargeError.IsValid() ? ChargeError.Code : TEXT("rig_simulation_spatial_resource_accounting_failed"),
+				ChargeError, TEXT("native_execution"));
+			return false;
 		}
 
 		bool ValidateTemporalState(

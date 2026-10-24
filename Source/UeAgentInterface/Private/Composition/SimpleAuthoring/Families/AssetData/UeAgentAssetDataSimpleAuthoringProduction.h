@@ -1,6 +1,9 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringProduction.h"
+#include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCapabilities.h"
 #include "Templates/SharedPointer.h"
@@ -10,17 +13,33 @@
 namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 {
 	struct UEAGENTINTERFACE_API
-		FUeAgentAssetDataSimpleAuthoringError
+		FUeAgentPersistedCreatedAssetObservation final
 	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
+		FString SourceObjectPath;
+		FString ClassPath;
+		bool bWorld = false;
+		bool bHasPersistentLevel = false;
+		int64 SnapshotSequence = -1;
 
 		bool IsValid() const
 		{
-			return !Code.IsEmpty();
+			return !SourceObjectPath.IsEmpty()
+				&& !ClassPath.IsEmpty()
+				&& SnapshotSequence >= 0
+				&& (!bWorld || bHasPersistentLevel);
 		}
 	};
+
+	using FUeAgentAssetDataSimpleAuthoringError = UE::UAI::Contract::FDiagnostic;
+
+	bool UEAGENTINTERFACE_API TryObservePersistedCreatedAsset(
+		const TArray<AssetDurable::FDurableArtifact>& Artifacts,
+		const FString& SourcePackageName,
+		const FString& SourceObjectName,
+		const FString& SourceObjectPath,
+		const FString& ExpectedClassPath,
+		FUeAgentPersistedCreatedAssetObservation& OutObservation,
+		FUeAgentAssetDataSimpleAuthoringError& OutError);
 
 	struct UEAGENTINTERFACE_API
 		FUeAgentAssetDataSimpleAuthoringProviderConfig
@@ -54,7 +73,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::AssetData
 			ESPMode::ThreadSafe> ReferenceOracle;
 		TOptional<Projection::FUeAgentProjectionRequest> Projection;
 		FString OwnerLeaseId;
-		int32 MaxQueueItems = 64;
 	};
 
 	class UEAGENTINTERFACE_API

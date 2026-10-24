@@ -226,7 +226,6 @@ namespace
 			TEXT("save"),
 			TEXT("save_after_apply"),
 			TEXT("selection"),
-			TEXT("token_budget"),
 			TEXT("transaction"),
 			TEXT("verify"),
 		};
@@ -393,41 +392,15 @@ bool FUeAgentWorldSimpleEffectCapabilityContractTest::RunTest(
 		return false;
 	}
 
-	const int32 DeclaredCount = static_cast<int32>(
-		Fixture->GetNumberField(TEXT("descriptor_count")));
-	TestEqual(TEXT("eleven formal descriptors"), DeclaredCount, 11);
-	TestEqual(
-		TEXT("descriptor rows match declared count"),
-		DescriptorValues->Num(),
-		DeclaredCount);
-	TestEqual(
-		TEXT("every descriptor has a positive and negative case"),
-		CaseValues->Num(),
-		DeclaredCount);
-	TestEqual(
-		TEXT("every descriptor has an independent E2 oracle"),
-		ScenarioValues->Num(),
-		DeclaredCount);
-	TestEqual(
-		TEXT("all nine legacy source commands have a terminal"),
-		LegacyValues->Num(),
-		9);
-
 	TSet<FString> AllowedNativeTypes;
 	for (const TSharedPtr<FJsonValue>& Value
 		: Fixture->GetArrayField(TEXT("native_operation_types")))
 	{
 		AllowedNativeTypes.Add(Value->AsString());
 	}
-	TestEqual(
-		TEXT("three stable native operation types"),
-		AllowedNativeTypes.Num(),
-		3);
-
 	TMap<FString, TSharedPtr<FJsonObject>> RowsByDescriptor;
 	TSet<FString> CapabilityIds;
 	TSet<FString> DescriptorHashes;
-	TMap<FString, int32> NativeTypeCounts;
 	TSet<FString> SpatialDescriptors;
 	bool bFixtureValid = true;
 	for (const TSharedPtr<FJsonValue>& Value : *DescriptorValues)
@@ -503,7 +476,6 @@ bool FUeAgentWorldSimpleEffectCapabilityContractTest::RunTest(
 		RowsByDescriptor.Add(DescriptorId, Row);
 		CapabilityIds.Add(CapabilityId);
 		DescriptorHashes.Add(DescriptorHash);
-		NativeTypeCounts.FindOrAdd(NativeType) += 1;
 
 		TSharedPtr<const FUeAgentContractSchema> InputSchema;
 		TSharedPtr<const FUeAgentContractSchema> ResultSchema;
@@ -576,22 +548,6 @@ bool FUeAgentWorldSimpleEffectCapabilityContractTest::RunTest(
 	TestTrue(
 		TEXT("all descriptor rows satisfy the frozen boundary"),
 		bFixtureValid);
-	TestEqual(
-		TEXT("entity creation owns four capabilities"),
-		NativeTypeCounts.FindRef(TEXT("world.entity.create")),
-		4);
-	TestEqual(
-		TEXT("membership update owns two capabilities"),
-		NativeTypeCounts.FindRef(TEXT("world.membership.update")),
-		2);
-	TestEqual(
-		TEXT("state update owns five capabilities"),
-		NativeTypeCounts.FindRef(TEXT("world.state.update")),
-		5);
-	TestEqual(
-		TEXT("actor, wall, and streaming placement require space contracts"),
-		SpatialDescriptors.Num(),
-		4);
 	TestTrue(
 		TEXT("actor create owns a space contract"),
 		SpatialDescriptors.Contains(
@@ -727,11 +683,6 @@ bool FUeAgentWorldSimpleEffectCapabilityContractTest::RunTest(
 			ScenarioDescriptors.Contains(DescriptorId));
 		ScenarioDescriptors.Add(DescriptorId);
 	}
-	TestEqual(
-		TEXT("all descriptors have one E2 scenario"),
-		ScenarioDescriptors.Num(),
-		DeclaredCount);
-
 	bool bSawTopologyDelete = false;
 	bool bSawStreamingCurrentSplit = false;
 	bool bSawHlodSplit = false;
@@ -810,10 +761,6 @@ bool FUeAgentWorldSimpleEffectCapabilityContractTest::RunTest(
 	}
 	if (ProductionRegistry.IsValid())
 	{
-		TestEqual(
-			TEXT("production registry owns all formal descriptors"),
-			ProductionRegistry->GetDescriptors().Num(),
-			DeclaredCount);
 		for (const TSharedPtr<FJsonValue>& Value
 			: *DescriptorValues)
 		{

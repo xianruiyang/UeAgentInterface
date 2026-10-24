@@ -1,4 +1,5 @@
 #include "Misc/AutomationTest.h"
+#include "Dom/JsonValue.h"
 
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "Core/BindingGateway/Query/UeAgentQueryBindingError.h"
@@ -19,14 +20,14 @@ namespace
 	bool CreateDataTableProvider(
 		TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>&
 			OutProvider,
-		FString& OutError)
+		Contract::FDiagnostic& OutError)
 	{
 		HjsonWorkspace::FWorkspaceError WorkspaceError;
 		const bool bCreated = OperationOwners::DataTableCurveTable::
 			TryCreateDataTableCurveTableDomainProvider(
 				OutProvider,
 				WorkspaceError);
-		OutError = WorkspaceError.GetCode();
+		OutError = WorkspaceError.GetDiagnostic();
 		return bCreated;
 	}
 
@@ -37,7 +38,7 @@ namespace
 			MakeExplicitlyUnsupported(DomainId);
 		TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>
 			Provider;
-		FString Error;
+		Contract::FDiagnostic Error;
 		CreateDataTableProvider(Provider, Error);
 		Declaration.Hjson.Support = EDomainCapabilitySupport::Supported;
 		Declaration.Hjson.Providers.Add(Provider.ToSharedRef());
@@ -69,8 +70,6 @@ namespace
 			TEXT("uai.init.datatable_curvetable.data_table.root/1"),
 			TEXT("uai.init.datatable_curvetable.curve_table.root/1"),
 		};
-		Declaration.Migration.Support = EDomainCapabilitySupport::Supported;
-		Declaration.Migration.OwnerId = TEXT("T27-TABLE-DOMAIN");
 		return Declaration;
 	}
 
@@ -198,7 +197,7 @@ namespace
 				Registry,
 			TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>&
 				OutHandlers,
-			FString& OutError) const override
+			Contract::FDiagnostic& OutError) const override
 		{
 			return Inner->CreateHandlers(Registry, OutHandlers, OutError);
 		}
@@ -304,7 +303,7 @@ namespace
 		bool TryBuildSuccessPayload(
 			const BindingGateway::Operation::FOperationLifecycleReceipt&,
 			FString& OutPayloadJson,
-			FString& OutError) const override
+			Contract::FDiagnostic& OutError) const override
 		{
 			OutError.Reset();
 			OutPayloadJson = FString::Printf(
@@ -406,7 +405,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentDomainCapabilityContractRejectionTest::RunTest(
 	const FString& Parameters)
 {
-	FString Error;
+	Contract::FDiagnostic Error;
 	TSharedPtr<const FDomainCapabilityContribution> Contribution;
 
 	FDomainCapabilityDeclaration Surface =
@@ -422,10 +421,10 @@ bool FUeAgentDomainCapabilityContractRejectionTest::RunTest(
 		TEXT("surface without mechanics is rejected"),
 		FDomainCapabilityContribution::TryCreate(
 			MoveTemp(Surface), Contribution, Error));
-	TestEqual(
+	TestTrue(
 		TEXT("surface failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_surface_mechanics_missing:fixture.graph")));
+		Error.Code == TEXT("domain_capability_surface_mechanics_missing")
+			&& Error.PropertyPath == TEXT("surface.surfaces[0].mechanics_id") && Error.SubjectId == TEXT("fixture.graph"));
 
 	FDomainCapabilityDeclaration Create =
 		MakeDataTableContribution(TEXT("invalid-create"));
@@ -435,10 +434,10 @@ bool FUeAgentDomainCapabilityContractRejectionTest::RunTest(
 		TEXT("create route without initialization capability is rejected"),
 		FDomainCapabilityContribution::TryCreate(
 			MoveTemp(Create), Contribution, Error));
-	TestEqual(
+	TestTrue(
 		TEXT("initialization failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_create_initialization_missing:/Script/Engine.DataTable")));
+		Error.Code == TEXT("domain_capability_create_initialization_missing")
+			&& Error.PropertyPath == TEXT("hjson.routes[0].initialization_contract_id"));
 
 	FDomainCapabilityDeclaration Write =
 		MakeExplicitlyUnsupported(TEXT("invalid-write"));
@@ -451,10 +450,10 @@ bool FUeAgentDomainCapabilityContractRejectionTest::RunTest(
 		TEXT("write route without terminal policy is rejected"),
 		FDomainCapabilityContribution::TryCreate(
 			MoveTemp(Write), Contribution, Error));
-	TestEqual(
+	TestTrue(
 		TEXT("terminal failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_write_terminal_policy_missing:fixture.write")));
+		Error.Code == TEXT("domain_capability_write_terminal_policy_missing")
+			&& Error.SubjectId == TEXT("fixture.write"));
 
 	FDomainCapabilityDeclaration MissingFactory =
 		MakeExplicitlyUnsupported(TEXT("invalid-operation-factory"));
@@ -472,10 +471,10 @@ bool FUeAgentDomainCapabilityContractRejectionTest::RunTest(
 		TEXT("operation declaration without a request factory is rejected"),
 		FDomainCapabilityContribution::TryCreate(
 			MoveTemp(MissingFactory), Contribution, Error));
-	TestEqual(
+	TestTrue(
 		TEXT("missing operation factory failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_operation_factory_missing:fixture.operation")));
+		Error.Code == TEXT("domain_capability_operation_factory_missing")
+			&& Error.SubjectId == TEXT("fixture.operation"));
 
 	FDomainCapabilityDeclaration MismatchedFactory =
 		MakeExplicitlyUnsupported(TEXT("mismatched-operation-factory"));
@@ -496,11 +495,10 @@ bool FUeAgentDomainCapabilityContractRejectionTest::RunTest(
 		TEXT("operation factory identity must match the declaration"),
 		FDomainCapabilityContribution::TryCreate(
 			MoveTemp(MismatchedFactory), Contribution, Error));
-	TestEqual(
+	TestTrue(
 		TEXT("operation factory identity failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_operation_factory_identity_mismatch:"))
-			+ TEXT("fixture.operation:fixture.other"));
+		Error.Code == TEXT("domain_capability_operation_factory_identity_mismatch")
+			&& Error.ActualEvidence.IsValid() && Error.ActualEvidence->AsString() == TEXT("fixture.other") && Error.ExpectedEvidence.IsValid() && Error.ExpectedEvidence->AsString() == TEXT("fixture.operation"));
 
 	FDomainCapabilityDeclaration Candidate =
 		MakeExplicitlyUnsupported(TEXT("invalid-candidate"));
@@ -513,23 +511,10 @@ bool FUeAgentDomainCapabilityContractRejectionTest::RunTest(
 		TEXT("candidate source without direct read port is rejected"),
 		FDomainCapabilityContribution::TryCreate(
 			MoveTemp(Candidate), Contribution, Error));
-	TestEqual(
+	TestTrue(
 		TEXT("candidate routing failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_candidate_read_port_missing:missing-read-port")));
-
-	FDomainCapabilityDeclaration Migration =
-		MakeExplicitlyUnsupported(TEXT("invalid-migration"));
-	Migration.Migration.Support = EDomainCapabilitySupport::Supported;
-	Migration.Migration.OwnerId = TEXT("fixture-owner");
-	TestFalse(
-		TEXT("migration owner without active contribution is rejected"),
-		FDomainCapabilityContribution::TryCreate(
-			MoveTemp(Migration), Contribution, Error));
-	TestEqual(
-		TEXT("migration owner failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_migration_owner_without_active_contribution:fixture-owner")));
+		Error.Code == TEXT("domain_capability_candidate_read_port_missing")
+			&& Error.SubjectId == TEXT("missing-read-port"));
 
 	FDomainCapabilityDeclaration AmbiguousRoute =
 		MakeExplicitlyUnsupported(TEXT("ambiguous-composition-route"));
@@ -581,11 +566,10 @@ bool FUeAgentDomainCapabilityContractRejectionTest::RunTest(
 		TEXT("same-priority semantic routes are rejected before projection"),
 		FDomainCapabilityContribution::TryCreate(
 			MoveTemp(AmbiguousRoute), Contribution, Error));
-	TestEqual(
+	TestTrue(
 		TEXT("semantic route ambiguity failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_composition_invalid:ue.fixture.route:"))
-			+ TEXT("target_composition_semantic_route_priority_duplicate:100"));
+		Error.Code == TEXT("target_composition_semantic_route_priority_duplicate")
+			&& Error.CandidateName == TEXT("ue.fixture.route") && Error.PropertyPath == TEXT("/semantic_routes/1/priority") && Error.ActualValue.IsValid() && Error.ActualValue->AsNumber() == 100);
 
 	FDomainCapabilityDeclaration DanglingRoute =
 		MakeExplicitlyUnsupported(TEXT("dangling-composition-route"));
@@ -621,11 +605,10 @@ bool FUeAgentDomainCapabilityContractRejectionTest::RunTest(
 		TEXT("semantic routes cannot reference an undeclared surface"),
 		FDomainCapabilityContribution::TryCreate(
 			MoveTemp(DanglingRoute), Contribution, Error));
-	TestEqual(
+	TestTrue(
 		TEXT("dangling semantic route failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_composition_invalid:ue.fixture.dangling:"))
-			+ TEXT("target_composition_semantic_route_surface_missing:missing_surface"));
+		Error.Code == TEXT("target_composition_semantic_route_surface_missing")
+			&& Error.CandidateName == TEXT("ue.fixture.dangling") && Error.PropertyPath == TEXT("/semantic_routes/0/surface_id") && Error.ActualValue.IsValid() && Error.ActualValue->AsString() == TEXT("missing_surface"));
 	return true;
 }
 
@@ -636,7 +619,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentDomainCapabilityFreezeTest::RunTest(const FString& Parameters)
 {
-	FString Error;
+	Contract::FDiagnostic Error;
 	TSharedPtr<const FDomainCapabilityContribution> Left;
 	TSharedPtr<const FDomainCapabilityContribution> Right;
 	TestTrue(
@@ -655,18 +638,18 @@ bool FUeAgentDomainCapabilityFreezeTest::RunTest(const FString& Parameters)
 	TestFalse(
 		TEXT("intersecting provider identities fail before projection"),
 		Composition.TryFreeze(Frozen, Error));
-	TestEqual(
+	TestTrue(
 		TEXT("cross registry collision is exact"),
-		Error,
-		FString(TEXT("domain_capability_hjson_provider_conflict:datatable-curvetable-domain-provider")));
+		Error.Code == TEXT("domain_capability_hjson_provider_conflict")
+			&& Error.ActualEvidence.IsValid() && Error.ActualEvidence->AsString() == TEXT("datatable-curvetable-domain-provider"));
 	TestFalse(TEXT("failed freeze publishes no frozen set"), Frozen.IsValid());
 	TestFalse(
 		TEXT("a frozen composition rejects late registration"),
 		Composition.TryAdd(Left.ToSharedRef(), Error));
-	TestEqual(
+	TestTrue(
 		TEXT("late registration failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_composition_sealed:table-left")));
+		Error.Code == TEXT("domain_capability_composition_sealed")
+			&& Error.SubjectId == TEXT("table-left"));
 
 	TSharedPtr<Module::CommandRegistration::Active::
 		IUeAgentActiveCommandContribution> RealCommand;
@@ -718,11 +701,10 @@ bool FUeAgentDomainCapabilityFreezeTest::RunTest(const FString& Parameters)
 	TestFalse(
 		TEXT("different contributions cannot claim the same exact command"),
 		CommandComposition.TryFreeze(Frozen, Error));
-	TestEqual(
+	TestTrue(
 		TEXT("command identity collision is exact"),
-		Error,
-		FString(TEXT("domain_capability_command_id_conflict:"))
-			+ Commands[0].CommandId);
+		Error.Code == TEXT("domain_capability_command_id_conflict")
+			&& Error.ActualValue.IsValid() && Error.ActualValue->AsString() == Commands[0].CommandId);
 	TestFalse(TEXT("command collision publishes no frozen set"), Frozen.IsValid());
 	return true;
 }
@@ -749,7 +731,7 @@ bool FUeAgentDomainCapabilityQueryDiscoveryProjectionTest::RunTest(
 		ReadPort->GetPortId(),
 	});
 
-	FString Error;
+	Contract::FDiagnostic Error;
 	TSharedPtr<const FDomainCapabilityContribution> Contribution;
 	TestTrue(
 		TEXT("query and discovery declaration is locally valid"),
@@ -759,7 +741,7 @@ bool FUeAgentDomainCapabilityQueryDiscoveryProjectionTest::RunTest(
 			Error));
 	if (!Contribution.IsValid())
 	{
-		AddError(TEXT("projection declaration failed: ") + Error);
+		AddError(TEXT("projection declaration failed: ") + Error.ToPublicDetail());
 		return false;
 	}
 	FDomainCapabilityComposition Composition;
@@ -772,7 +754,7 @@ bool FUeAgentDomainCapabilityQueryDiscoveryProjectionTest::RunTest(
 		Composition.TryFreeze(Frozen, Error));
 	if (!Frozen.IsValid())
 	{
-		AddError(TEXT("projection freeze failed: ") + Error);
+		AddError(TEXT("projection freeze failed: ") + Error.ToPublicDetail());
 		return false;
 	}
 	FDomainCapabilityAuthorities Authorities;
@@ -803,7 +785,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentDomainCapabilityExistingAuthorityProjectionTest::RunTest(
 	const FString& Parameters)
 {
-	FString Error;
+	Contract::FDiagnostic Error;
 	TSharedPtr<const FFrozenDomainCapabilitySet> Frozen;
 	const bool bProcessFrozen = TryFreezeProcessDomainCapabilities(
 		Frozen,
@@ -813,7 +795,7 @@ bool FUeAgentDomainCapabilityExistingAuthorityProjectionTest::RunTest(
 		bProcessFrozen);
 	if (!bProcessFrozen)
 	{
-		AddError(TEXT("process domain capability freeze failed: ") + Error);
+		AddError(TEXT("process domain capability freeze failed: ") + Error.ToPublicDetail());
 	}
 	TestTrue(TEXT("representative frozen set returned"), Frozen.IsValid());
 	if (!Frozen.IsValid())
@@ -1087,7 +1069,7 @@ bool FUeAgentDomainCapabilityRequestScopedOperationFactoryTest::RunTest(
 	Entry.InvocationFactory = Factory;
 	Declaration.Operation.Operations.Add(MoveTemp(Entry));
 
-	FString Error;
+	Contract::FDiagnostic Error;
 	TSharedPtr<const FDomainCapabilityContribution> Contribution;
 	TestTrue(
 		TEXT("a stateless request-scoped operation factory is accepted"),
@@ -1191,7 +1173,7 @@ bool FUeAgentDomainCapabilityOperationDurabilityPolicyTest::RunTest(
 		return Declaration;
 	};
 
-	FString Error;
+	Contract::FDiagnostic Error;
 	TSharedPtr<const FDomainCapabilityContribution> Contribution;
 	TestTrue(
 		TEXT("a recoverable session operation is valid without durable persistence"),
@@ -1218,11 +1200,10 @@ bool FUeAgentDomainCapabilityOperationDurabilityPolicyTest::RunTest(
 				true),
 			Contribution,
 			Error));
-	TestEqual(
+	TestTrue(
 		TEXT("persistent omission has a stable diagnostic"),
-		Error,
-		FString(TEXT(
-			"domain_capability_write_persistence_missing:fixture.asset.update")));
+		Error.Code == TEXT("domain_capability_write_persistence_missing")
+			&& Error.SubjectId == TEXT("fixture.asset.update"));
 
 	Contribution.Reset();
 	Error.Reset();
@@ -1237,11 +1218,10 @@ bool FUeAgentDomainCapabilityOperationDurabilityPolicyTest::RunTest(
 				true),
 			Contribution,
 			Error));
-	TestEqual(
+	TestTrue(
 		TEXT("session persistence conflicts have a stable diagnostic"),
-		Error,
-		FString(TEXT(
-			"domain_capability_transient_persistence_conflict:fixture.session.conflict")));
+		Error.Code == TEXT("domain_capability_transient_persistence_conflict")
+			&& Error.SubjectId == TEXT("fixture.session.conflict"));
 
 	Contribution.Reset();
 	Error.Reset();
@@ -1256,10 +1236,9 @@ bool FUeAgentDomainCapabilityOperationDurabilityPolicyTest::RunTest(
 				false),
 			Contribution,
 			Error));
-	TestEqual(
+	TestTrue(
 		TEXT("missing independent observation keeps the existing diagnostic"),
-		Error,
-		FString(TEXT(
-			"domain_capability_write_readback_missing:fixture.session.unobserved")));
+		Error.Code == TEXT("domain_capability_write_readback_missing")
+			&& Error.SubjectId == TEXT("fixture.session.unobserved"));
 	return true;
 }

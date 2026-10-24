@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
@@ -11,11 +13,11 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::SkinWeight
 		TSharedRef<OperationOwners::ExternalImport::SkinWeight::
 			IUeAgentSkinWeightImportCommandService> Service,
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateProductionSkinWeightImportContribution(
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateSkinWeightImportRegistration(
 		TSharedRef<OperationOwners::ExternalImport::SkinWeight::
@@ -23,5 +25,5 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::SkinWeight
 		TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry>&
 			OutRegistry,
 		TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

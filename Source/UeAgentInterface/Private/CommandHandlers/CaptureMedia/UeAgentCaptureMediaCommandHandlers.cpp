@@ -13,17 +13,7 @@ namespace UE::UAI::CommandHandlers::CaptureMedia
 	namespace
 	{
 		const FString Owner = TEXT("capture-media-job-owner");
-		FString ErrorJson(const FString& Code, const FString& Subject, const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), Subject);
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString Text;
-			FString CanonicalError;
-			return Json::TryCanonicalize(Error, Text, CanonicalError)
-				? Text : FString(TEXT("{}"));
-		}
+		
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -41,8 +31,7 @@ namespace UE::UAI::CommandHandlers::CaptureMedia
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:operate")))
 				{
 					return FUeAgentCommandResult::Failure(Request, TEXT("{}"),
-						ErrorJson(TEXT("capture_media_authority_required"),
-							Request.GetCommandId(), TEXT("the public capture route requires uai:operate")));
+						UE::UAI::Contract::FDiagnostic::Failure(TEXT("capture_media_authority_required"), TEXT("the public capture route requires uai:operate"), TEXT("command_authority"), FString(), Request.GetCommandId()));
 				}
 				return OperationOwners::CaptureMedia::Submit(
 					Request, Caller, Cancellation);
@@ -54,16 +43,13 @@ namespace UE::UAI::CommandHandlers::CaptureMedia
 
 	bool TryCreateHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
-		if (GetRoutes().Num() != 3)
-		{
-			OutError = TEXT("capture_media_route_count_invalid");
-			return false;
-		}
-		for (const FUeAgentCaptureMediaRoute& Route : GetRoutes())
+		const TArray<FUeAgentCaptureMediaRoute>* Routes = nullptr;
+		if (!TryGetRoutes(Routes, OutError)) return false;
+		for (const FUeAgentCaptureMediaRoute& Route : *Routes)
 			OutHandlers.Add(MakeShared<FHandler>(Route));
 		return true;
 	}

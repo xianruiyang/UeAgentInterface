@@ -19,7 +19,7 @@ namespace UeAgentUmgAuthoring
 			const TCHAR* TargetKind,
 			const TArray<FSelectorDescriptor>& Selectors,
 			const TArray<FKeyPattern>& Patterns,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringIdentity::FModelDescriptor Model;
 			Model.ModelId = ModelId;
@@ -41,7 +41,7 @@ namespace UeAgentUmgAuthoring
 			const EDefaultSourceKind DefaultSource,
 			const TCHAR* DefaultAccessor,
 			const TArray<FString>& CapabilityTags,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringSemanticRegistry::FSemanticDescriptor Semantic;
 			Semantic.SemanticId = SemanticId;
@@ -56,7 +56,8 @@ namespace UeAgentUmgAuthoring
 			Semantic.AvailabilitySource = AccessorId;
 			Semantic.DefaultSourceKind = DefaultSource;
 			Semantic.DefaultAccessor = DefaultAccessor;
-			Semantic.Comparator = TEXT("uai.compare.canonical_value");
+			Semantic.Comparator = Semantic.SemanticId == AnimationSemanticId
+				? TEXT("uai.compare.movie_scene") : TEXT("uai.compare.canonical_value");
 			Semantic.CapabilityTags = CapabilityTags;
 			UeAgentAuthoringSemanticRegistry::ERegistrationResult Result;
 			return UeAgentAuthoringSemanticRegistry::FRegistry::Get().RegisterSemantic(
@@ -67,7 +68,7 @@ namespace UeAgentUmgAuthoring
 			const TCHAR* SemanticId,
 			const TCHAR* TargetKind,
 			const TCHAR* IdentityModelId,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			return RegisterSemantic(
 				SemanticId,
@@ -83,7 +84,7 @@ namespace UeAgentUmgAuthoring
 		}
 	}
 
-	bool RegisterDescriptors(FString& OutError)
+	bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const TArray<FSelectorDescriptor> AssetSelectors = {
 			{ TEXT("asset_path"), 100, false },

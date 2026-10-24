@@ -14,18 +14,7 @@ namespace
 
 	TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 4096},
-				{EUeAgentResourceDimension::Files, 256},
-				{EUeAgentResourceDimension::ReferenceEdges, 4096},
-				{EUeAgentResourceDimension::WorkUnits, 65536},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	FLongRunningOperationRequest MakeRequest(double& Now)
@@ -124,10 +113,9 @@ namespace
 			Events.Add(TEXT("join:") + Identity.ResourceId);
 			if (!bExited)
 			{
-				OutDiagnostic = {
+				OutDiagnostic = FUeAgentLifecycleDiagnostic::Failure(
 					TEXT("fixture_resource_still_running"),
-					TEXT("join must wait for an observed exit"),
-				};
+					TEXT("join must wait for an observed exit"));
 				return false;
 			}
 			return true;

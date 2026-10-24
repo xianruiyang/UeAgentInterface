@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/GraphCompound/UeAgentGraphCompoundBlueprintMaterialRoutes.h"
 
 #define UAI_GRAPH_COMPOUND_AUDIO_MEDIA_ROUTES_V1 1
@@ -57,6 +59,7 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetUnavailableErrorCode() const;
 		const FGraphCompoundExecutionContract& GetExecutionContract() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString CapabilityId;
@@ -70,23 +73,23 @@ namespace UE::UAI::Composition::GraphCompound
 		bool bRequiresNativeBackendAvailability = false;
 		FString UnavailableErrorCode;
 		FGraphCompoundExecutionContract ExecutionContract;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
-	UEAGENTINTERFACE_API const TArray<FAudioMediaGraphRouteProfile>&
-	GetAudioMediaGraphRouteProfiles();
+	UEAGENTINTERFACE_API bool TryGetAudioMediaGraphRouteProfiles(
+		const TArray<FAudioMediaGraphRouteProfile>*& OutProfiles, Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API const FAudioMediaGraphRouteProfile*
 	FindAudioMediaGraphRouteProfile(const FString& CapabilityId);
 
 	UEAGENTINTERFACE_API bool TryCreateAudioMediaGraphRouteDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	class UEAGENTINTERFACE_API FAudioMediaGraphArtifactOutputSelector final
 	{
 	public:
-		FAudioMediaGraphArtifactOutputSelector() = default;
+		FAudioMediaGraphArtifactOutputSelector();
 		FAudioMediaGraphArtifactOutputSelector(
 			FString InElementId,
 			FString InOutputName);
@@ -94,32 +97,31 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetElementId() const;
 		const FString& GetOutputName() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString ElementId;
 		FString OutputName;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FAudioMediaGraphArtifactQueryRequest final
 	{
 	public:
-		FAudioMediaGraphArtifactQueryRequest() = default;
+		FAudioMediaGraphArtifactQueryRequest();
 		FAudioMediaGraphArtifactQueryRequest(
 			FString InTargetRef,
-			FString InExpectedSettledRevision,
 			TArray<FAudioMediaGraphArtifactOutputSelector> InOutputs);
 
 		const FString& GetTargetRef() const;
-		const FString& GetExpectedSettledRevision() const;
 		const TArray<FAudioMediaGraphArtifactOutputSelector>& GetOutputs() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString TargetRef;
-		FString ExpectedSettledRevision;
 		TArray<FAudioMediaGraphArtifactOutputSelector> Outputs;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	UEAGENTINTERFACE_API bool TryDecodeAudioMediaGraphArtifactQueryRequest(

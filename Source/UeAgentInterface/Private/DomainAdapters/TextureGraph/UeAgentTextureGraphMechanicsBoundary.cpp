@@ -20,12 +20,13 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 
 	bool TryGetActivationProfiles(
 		TArray<FUeAgentGraphCompoundActivationProfile>& OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		OutError.Reset();
-		const TArray<FUeAgentGraphCompoundActivationProfile>& Canonical =
-			Composition::GraphCompound::GetGraphCompoundActivationProfiles();
+		const TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>* GraphProfiles = nullptr;
+		if (!Composition::GraphCompound::TryGetGraphCompoundActivationProfiles(GraphProfiles, OutError)) return false;
+		const auto& Canonical = *GraphProfiles;
 		for (const FString& CommandId : GetCommandIds())
 		{
 			if (CommandId == TEXT("texture_graph.artifact.bake")
@@ -39,14 +40,23 @@ namespace UE::UAI::DomainAdapters::TextureGraph
 					{
 						return Profile.GetCommandId() == CommandId;
 					});
-			if (!Match || !Match->IsValid())
+			if (!Match)
 			{
 				OutProfiles.Reset();
-				OutError = TEXT("texture_graph_profile_missing:") + CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("texture_graph_profile_missing"),
+					TEXT("No TextureGraph activation profile is registered for this command."), TEXT("runtime_factory"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.CandidateName = CommandId;
+				return false;
+			}
+			if (!Match->IsValid())
+			{
+				OutProfiles.Reset();
+				OutError = Match->GetValidationDiagnostic();
 				return false;
 			}
 			OutProfiles.Add(*Match);
 		}
-		return OutProfiles.Num() + 2 == GetCommandIds().Num();
+		return true;
 	}
 }

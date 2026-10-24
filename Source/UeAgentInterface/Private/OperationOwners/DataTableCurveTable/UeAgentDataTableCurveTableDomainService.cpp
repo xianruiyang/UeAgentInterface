@@ -34,7 +34,8 @@ namespace UE::UAI::OperationOwners::DataTableCurveTable
 					&& (Type == DataTableType || Type == CurveTableType)
 					&& (Request.GetCommandId()
 							!= TEXT("content_graph.import_workspace")
-						|| Request.GetSchemaId() == SchemaId);
+						|| Request.GetSchemaId() == SchemaId
+						|| MatchesDomainImportSchema(Request, SchemaId));
 			}
 
 			virtual bool TryResolveInitializationContract(
@@ -68,9 +69,12 @@ namespace UE::UAI::OperationOwners::DataTableCurveTable
 					&& InitializationContractId == CurveTableContract;
 				if (!bDataTable && !bCurveTable)
 				{
-					OutError.Set(
-						TEXT("datatable_curvetable_contract_not_executable"),
-						InitializationContractId);
+					auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("datatable_curvetable_contract_not_executable"),
+						TEXT("The initialization contract does not support the requested root type in this domain."), TEXT("domain_execute"));
+					Detail.TargetPath = Request.GetTargetIdentity();
+					Detail.SourceKind = TEXT("native_result");
+					Detail.InternalContext = InitializationContractId;
+					OutError.SetFailure(MoveTemp(Detail));
 					return false;
 				}
 				return CommandHandlers::DataTableCurveTable::TryHandleDomainRequest(

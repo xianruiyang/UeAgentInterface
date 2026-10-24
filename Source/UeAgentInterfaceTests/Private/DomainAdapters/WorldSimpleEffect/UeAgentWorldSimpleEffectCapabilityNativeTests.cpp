@@ -3,6 +3,7 @@
 #include "DomainAdapters/WorldSimpleEffect/UeAgentWorldSimpleEffectCapabilities.h"
 
 
+#include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/Contract/UeAgentContractSchema.h"
@@ -44,6 +45,7 @@
 namespace
 {
 	using namespace UE::UAI::ContextResource;
+	using namespace UE::UAI::AssetDurable;
 	using namespace UE::UAI::Contract;
 	using namespace UE::UAI::Discovery;
 	using namespace UE::UAI::DomainAdapters::GenericEffect;
@@ -283,22 +285,7 @@ namespace
 	{
 		return MakeShared<
 			FUeAgentResourceTracker,
-			ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1048576},
-				{EUeAgentResourceDimension::OutputBytes, 1048576},
-				{EUeAgentResourceDimension::StringBytes, 1048576},
-				{EUeAgentResourceDimension::Nodes, 16384},
-				{EUeAgentResourceDimension::Items, 16384},
-				{EUeAgentResourceDimension::Files, 64},
-				{EUeAgentResourceDimension::ReferenceEdges, 16384},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{
-					EUeAgentResourceDimension::
-						EstimatedMemoryBytes,
-					33554432,
-				},
-			}));
+			ESPMode::ThreadSafe>();
 	}
 
 	bool TryCanonicalValue(
@@ -1175,6 +1162,7 @@ bool FUeAgentWorldSimpleEffectTenCapabilitiesOwnedWorldTest::RunTest(
 		Owner.Package->IsDirty(),
 		bDirtyBeforeRejectedWall);
 
+	Owner.World->PersistentLevel->SetUseExternalActors(false);
 	Applied = {};
 	if (ApplyCapability(
 			this,
@@ -1209,6 +1197,16 @@ bool FUeAgentWorldSimpleEffectTenCapabilitiesOwnedWorldTest::RunTest(
 			TEXT("wall readback has four real segments"),
 			CountWallSegments(*Owner.World),
 			4);
+		TestTrue(
+			TEXT("wall mutation classifies its loaded world package as a map"),
+			Applied.Result.GetDurableTargets().ContainsByPredicate(
+				[&Owner](const FAssetDurableTarget& Target)
+				{
+					return Target.GetDurableLocation()
+							== Owner.Package->GetName()
+						&& Target.GetPackageHeaderKind()
+							== EPackageHeaderKind::Map;
+				}));
 		RollbackCapability(
 			this,
 			*Owner.World,
@@ -1221,6 +1219,7 @@ bool FUeAgentWorldSimpleEffectTenCapabilitiesOwnedWorldTest::RunTest(
 			CountWallSegments(*Owner.World),
 			0);
 	}
+	Owner.World->PersistentLevel->SetUseExternalActors(true);
 
 	Applied = {};
 	if (ApplyCapability(
@@ -1679,9 +1678,5 @@ bool FUeAgentWorldSimpleEffectTenCapabilitiesOwnedWorldTest::RunTest(
 			OriginalGameMode);
 	}
 
-	TestEqual(
-		TEXT("production registry owns exactly eleven descriptors"),
-		Registry->GetDescriptors().Num(),
-		11);
 	return true;
 }

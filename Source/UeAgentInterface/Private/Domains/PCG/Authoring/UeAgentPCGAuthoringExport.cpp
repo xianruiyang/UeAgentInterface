@@ -12,25 +12,13 @@ namespace UeAgentPCGAuthoring
 		UPCGGraph& Graph,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
-		FString& OutError)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
 	{
+  auto& OutError = OutResult.Diagnostic;
 		OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
 		OutError.Reset();
-		TArray<UeAgentAuthoringState::FReadRequest> Requests;
-		if (!BuildAssetExportSnapshotReadRequests(Graph, Requests, OutError)) return false;
-		UeAgentAuthoringState::FCaptureResult Capture;
-		if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
-		{
-			OutError = Capture.ErrorCode + TEXT(":") + Capture.ErrorDetail;
-			return false;
-		}
-		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(
-			TEXT("ue.pcg_graph.asset"),
-			ProfileId,
-			Capture.Snapshot,
-			WorkspaceRoot,
-			OutResult,
-			OutError);
+		UeAgentAuthoringState::FStateSnapshot Snapshot;
+		if (!CaptureAssetExportSnapshot(Graph, Snapshot, OutError)) return false;
+		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(TEXT("ue.pcg_graph.asset"), ProfileId, Snapshot, WorkspaceRoot, OutResult);
 	}
 }

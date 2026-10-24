@@ -145,7 +145,6 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshTopology
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetStringField(TEXT("scheme"), Scheme);
 		Params->SetNumberField(TEXT("levels"), 1);
 		return Params;
@@ -272,7 +271,6 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshTopology
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetStringField(TEXT("target_mode"), TargetMode);
 		Params->SetNumberField(TEXT("target_value"), TargetValue);
 		Params->SetBoolField(TEXT("preserve_boundaries"), bPreserveBoundaries);
@@ -289,7 +287,6 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshTopology
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetObjectField(
 			TEXT("space_contract"),
 			BuildTargetLocalSpaceContract());
@@ -314,7 +311,6 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshTopology
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetObjectField(
 			TEXT("space_contract"),
 			BuildTargetLocalSpaceContract());
@@ -336,7 +332,6 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshTopology
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), Revision);
 		Params->SetObjectField(
 			TEXT("space_contract"),
 			BuildTargetLocalSpaceContract());

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 
@@ -9,7 +11,7 @@ namespace UE::UAI::OperationOwners::SpatialContent
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool IsDurableMutation(const FString& CommandId);
 

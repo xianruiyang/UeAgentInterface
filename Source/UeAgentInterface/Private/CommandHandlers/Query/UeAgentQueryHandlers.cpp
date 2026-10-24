@@ -1,5 +1,7 @@
 #include "CommandHandlers/Query/UeAgentQueryHandlers.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
 
@@ -14,33 +16,13 @@ namespace UE::UAI::CommandHandlers::Query
 	{
 		const FString Owner = TEXT("query-command-owner");
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
-		{
-			const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(TEXT("code"), Code);
-			Object->SetStringField(TEXT("subject_id"), SubjectId);
-			Object->SetStringField(TEXT("detail"), Detail);
-			FString Result;
-			FString Error;
-			return Json::TryCanonicalize(Object, Result, Error)
-				? Result
-				: FString(TEXT("{\"code\":\"query_error_serialization_failed\"}"));
-		}
+		
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
-		{
-			return FUeAgentCommandResult::Failure(
-				Request,
-				TEXT("{}"),
-				ErrorJson(Code, SubjectId, Detail));
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = SubjectId;
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Diagnostic);
+        }
 
 		class FQueryHandler final : public IUeAgentExactCommandHandler
 		{
@@ -71,33 +53,21 @@ namespace UE::UAI::CommandHandlers::Query
 				if (!Caller.IsValid()
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:query")))
 				{
-					return Failure(
-						Request,
-						TEXT("query_authority_required"),
-						CommandId,
-						TEXT("uai:query is required"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_authority_required"), TEXT("uai:query is required"), TEXT("query")), CommandId);
 				}
 				if (Cancellation->IsCancelled())
 				{
-					return Failure(
-						Request,
-						TEXT("query_cancelled"),
-						CommandId,
-						TEXT("request was cancelled before QueryService execution"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_cancelled"), TEXT("request was cancelled before QueryService execution"), TEXT("query")), CommandId);
 				}
 
 				FString ParamsJson;
-				FString CanonicalError;
+				UE::UAI::Contract::FDiagnostic CanonicalError;
 				if (!Json::TryCanonicalize(
 						Request.GetParams(),
 						ParamsJson,
 						CanonicalError))
 				{
-					return Failure(
-						Request,
-						TEXT("query_params_invalid"),
-						CommandId,
-						CanonicalError);
+					return Failure(Request, CanonicalError, CommandId);
 				}
 
 				FQueryServiceRequest ServiceRequest;
@@ -114,41 +84,31 @@ namespace UE::UAI::CommandHandlers::Query
 				FQueryServiceError Error;
 				if (!Service->Execute(ServiceRequest, Response, Error))
 				{
-					return Failure(
-						Request,
-						Error.Code.IsEmpty()
-							? FString(TEXT("query_execution_failed"))
-							: Error.Code,
-						Error.SubjectId.IsEmpty()
+					return Failure(Request, (Error.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_execution_failed"), TEXT("The query service returned failure without a diagnostic."), TEXT("query")) : Error), Error.SubjectId.IsEmpty()
 							? CommandId
-							: Error.SubjectId,
-						Error.Detail);
+							: Error.SubjectId);
 				}
 				if (!Response.bReadOnly)
 				{
-					return Failure(
-						Request,
-						TEXT("query_source_not_read_only"),
-						CommandId,
-						TEXT("QueryService did not attest a read-only result"));
+					auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_source_not_read_only"),
+						TEXT("QueryService did not attest a read-only result"), TEXT("query"));
+					Diagnostic.Diagnostics.Append(Response.Diagnostics);
+					return Failure(Request, MoveTemp(Diagnostic), CommandId);
 				}
 
 				TSharedPtr<FJsonObject> Payload;
-				FString PayloadError;
+				UE::UAI::Contract::FDiagnostic PayloadError;
 				if (!Json::TryParseObject(
 						Response.PayloadJson,
 						Payload,
 						PayloadError))
 				{
-					return Failure(
-						Request,
-						TEXT("query_result_invalid"),
-						CommandId,
-						PayloadError);
+					PayloadError.Diagnostics.Append(Response.Diagnostics);
+					return Failure(Request, PayloadError, CommandId);
 				}
 				return FUeAgentCommandResult::Success(
 					Request,
-					Response.PayloadJson);
+					Response.PayloadJson, MoveTemp(Response.Diagnostics));
 			}
 
 		private:
@@ -160,16 +120,15 @@ namespace UE::UAI::CommandHandlers::Query
 	bool TryCreateQueryHandlers(
 		TSharedRef<IUeAgentQueryService> Service,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
 		for (const FQueryRoute& Route : GetNonHjsonQueryRoutes())
 		{
-			if (!Route.IsValid())
+			if (!Route.TryValidate(OutError))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("query_route_invalid");
 				return false;
 			}
 			OutHandlers.Add(

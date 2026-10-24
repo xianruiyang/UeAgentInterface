@@ -21,7 +21,7 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 		const FString Owner = TEXT("capture-media-job-owner");
 		bool TryBuildImagePolicyIdSchema(
 			FString& OutPolicyIdSchema,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			using namespace DomainAdapters::CaptureMediaLongJob;
 			OutPolicyIdSchema.Reset();
@@ -30,10 +30,9 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 			for (const FUeAgentCaptureMediaImagePolicyDescriptor& Policy
 				: GetCaptureMediaImagePolicies())
 			{
-				if (!Policy.IsValid())
+				if (!Policy.TryValidate(OutError))
 				{
-					OutError = TEXT("capture_image_policy_descriptor_invalid:")
-						+ Policy.GetPolicyId();
+					OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("capture_image_policy_descriptor_invalid"), OutError, TEXT("registration"));
 					return false;
 				}
 				PolicyIds.Add(MakeShared<FJsonValueString>(Policy.GetPolicyId()));
@@ -47,7 +46,7 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 		bool TryConstStringSchema(
 			const FString& Value,
 			FString& OutSchema,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const TSharedRef<FJsonObject> Schema = MakeShared<FJsonObject>();
 			Schema->SetStringField(TEXT("type"), TEXT("string"));
@@ -58,16 +57,12 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 
 		bool TryAppendImageDiscoveryVariants(
 			FUeAgentCommandDeclaration& Declaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			using namespace DomainAdapters::CaptureMediaLongJob;
 			for (const FUeAgentCaptureMediaImagePolicyDescriptor& Policy :
 				GetCaptureMediaImagePolicies())
 			{
-				if (!Policy.HasDiscoveryContract())
-				{
-					continue;
-				}
 				FString PolicySchema;
 				FString RequestSchema;
 				if (!TryConstStringSchema(
@@ -81,8 +76,7 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 						RequestSchema,
 						OutError))
 				{
-					OutError = TEXT("capture_image_variant_schema_invalid:")
-						+ Policy.GetPolicyId() + TEXT(":") + OutError;
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Policy.GetPolicyId();
 					return false;
 				}
 				FUeAgentCommandVariantDeclaration Variant;
@@ -99,7 +93,7 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 				Variant.Purpose.FailureGuidance = TEXT(
 					"Invalid selectors or parameters, unavailable RHI/viewport, capture failure or unproved restoration fail typed; do not fabricate an artifact or replay state_unknown.");
 				Variant.Purpose.SideEffectGuidance = TEXT(
-					"The owner may create one bounded artifact and temporary preview state only; declared restoration must complete before success.");
+					"Capture may open native editors or change viewport framing as described by the selected policy. Follow that policy's restoration contract and inspect the reported native changes.");
 				Variant.Purpose.MinimumExample = Policy.GetMinimumExample();
 				Variant.Purpose.RelatedFlows = {
 					TEXT("operation.status"),
@@ -130,12 +124,15 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 		}
 		bool TryDeclaration(const FUeAgentCaptureMediaRoute& Route,
 			const FUeAgentCommandContractRegistry& Legacy,
-			FUeAgentCommandDeclaration& Out, FString& OutError)
+			FUeAgentCommandDeclaration& Out, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(Route.CommandId);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("capture_media_contract_missing:") + Route.CommandId;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("capture_media_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("capture_media_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Route.CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Route.CommandId;
 				return false;
 			}
 			FUeAgentCommandDeclaration Result;
@@ -160,7 +157,7 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 				FUeAgentCommandFieldDeclaration Field{
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
-					TEXT("Exact capture operation parameter.")};
+					TEXT("Exact capture operation parameter."), Parameter.GetSchemaJson()};
 				if (Route.CommandId == TEXT("capture.image.execute")
 					&& Parameter.GetName() == TEXT("policy_id"))
 				{
@@ -193,7 +190,7 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 				+ TEXT(" through the unique CaptureMedia owner and common OperationService.");
 			Result.Purpose.Target = TEXT("One exact image, media, or render capture request.");
 			Result.Purpose.Preconditions = {TEXT("Resolve the exact subject, policy and bounded output before execution.")};
-			Result.Purpose.ParameterGuidance = TEXT("Forward only query.command.detail fields.");
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters.");
 			Result.Purpose.ResultGuidance = TEXT("Observe the returned operation_ref through T32 until terminal, then release.");
 			Result.Purpose.FailureGuidance = TEXT("Cancel at the owner boundary; state_unknown forbids replay.");
 			Result.Purpose.SideEffectGuidance = TEXT("Only owner-declared capture resources and output paths may be created.");
@@ -232,7 +229,7 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 				Out.Append(Declarations);
 			}
 			bool CreateHandlers(TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
-				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out, FString& OutError) const override
+				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out, UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::CaptureMedia::TryCreateHandlers(Out, OutError);
 			}
@@ -243,7 +240,7 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<IUeAgentActiveCommandContribution> CommandContribution;
 			if (!TryCreateContribution(CommandContribution, OutError)
@@ -260,7 +257,9 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 				CommandContribution.ToSharedRef());
 			Declaration.Operation.Support =
 				DomainCapability::EDomainCapabilitySupport::Supported;
-			for (const FUeAgentCaptureMediaRoute& Route : GetRoutes())
+			const TArray<FUeAgentCaptureMediaRoute>* Routes = nullptr;
+			if (!TryGetRoutes(Routes, OutError)) return false;
+			for (const FUeAgentCaptureMediaRoute& Route : *Routes)
 			{
 				DomainCapability::FDomainOperationEntry Operation;
 				Operation.OperationId = Route.CommandId;
@@ -274,18 +273,13 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 					EDomainTransientStatePolicy::RecoverableSession;
 				Operation.bPersists = false;
 				Operation.bIndependentReadback = true;
-				Operation.InvocationFactory =
-					FindOperationInvocationFactory(Route.CommandId);
+				if (!TryFindOperationInvocationFactory(Route.CommandId, Operation.InvocationFactory, OutError)) return false;
 				Declaration.Operation.Operations.Add(MoveTemp(Operation));
 			}
 			Declaration.State.Support =
 				DomainCapability::EDomainCapabilitySupport::Supported;
 			Declaration.State.Planes.Add(
 				StateSemantic::EUeAgentStatePlane::RuntimeInstance);
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId =
-				TEXT("T44-CAPTURE-MEDIA-OPERATION");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
@@ -297,7 +291,7 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 	}
 
 	bool TryCreateContribution(TSharedPtr<IUeAgentActiveCommandContribution>& Out,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		Out.Reset();
 		TSharedPtr<const FUeAgentCommandContractRegistry> Legacy;
@@ -305,13 +299,14 @@ namespace UE::UAI::Module::CommandRegistration::CaptureMedia
 				TryCreateLongRunningSessionProductionCommandContractRegistry(Legacy, OutError)
 			|| !Legacy.IsValid()) return false;
 		TArray<FUeAgentCommandDeclaration> Declarations;
-		for (const FUeAgentCaptureMediaRoute& Route : GetRoutes())
+		const TArray<FUeAgentCaptureMediaRoute>* Routes = nullptr;
+		if (!TryGetRoutes(Routes, OutError)) return false;
+		for (const FUeAgentCaptureMediaRoute& Route : *Routes)
 		{
 			FUeAgentCommandDeclaration Declaration;
 			if (!TryDeclaration(Route, *Legacy, Declaration, OutError)) return false;
 			Declarations.Add(MoveTemp(Declaration));
 		}
-		if (Declarations.Num() != 3) return false;
 		Out = MakeShared<FContribution>(MoveTemp(Declarations));
 		return true;
 	}

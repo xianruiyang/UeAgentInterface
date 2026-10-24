@@ -11,6 +11,8 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Factories/WorldFactory.h"
+#include "FileHelpers.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
 #include "MeshDescription.h"
@@ -478,8 +480,7 @@ namespace
 		const FString InputText = FString::Printf(
 			TEXT(R"json({
 				"subject_refs":["actor:subject"],
-				"alignment":{"kind":"%s","verify_frame":{"frame_id":"fixture.subject.semantic","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:world","observed_at":{"clock_id":"editor","tick":"201","rate_numerator":"60","rate_denominator":"1","state":"frozen"}}%s,"rotation_policy":"preserve"},
-				"expected_revisions":[{"target_ref":"actor:subject","revision":{"source_id":"placeholder","generation":"placeholder","sequence":0}}]%s
+				"alignment":{"kind":"%s","verify_frame":{"frame_id":"fixture.subject.semantic","basis_frame_id":"unreal.world","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:world","observed_at":{"clock_id":"editor","tick":"201","rate_numerator":"60","rate_denominator":"1","state":"frozen"}}%s,"rotation_policy":"preserve"}%s
 			})json"),
 			*Kind,
 			*KindFields,
@@ -505,7 +506,7 @@ namespace
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentWorldSpatialProductionObjectTransformC3Test,
-	"UeAgentInterface.DomainAdapters.WorldSpatial.E2.Production.ObjectMesh."
+	"UeAgentInterface.Compatibility.Dormant.WorldObjectTransform."
 		"ObjectTransformC3",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
@@ -707,7 +708,7 @@ bool FUeAgentWorldSpatialProductionMeshGeometryC3Test::RunTest(
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentWorldSpatialObjectTransformOwnedEditorWorldTest,
-	"UeAgentInterface.DomainAdapters.WorldSpatial.E2.Native."
+	"UeAgentInterface.Compatibility.Dormant.WorldObjectTransform."
 		"ObjectTransformOwnedEditorWorld",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
@@ -762,7 +763,7 @@ bool FUeAgentWorldSpatialObjectTransformOwnedEditorWorldTest::RunTest(
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentWorldSpatialObjectTransformUpdateOwnedActorTest,
-	"UeAgentInterface.DomainAdapters.WorldSpatial.E2.Native."
+	"UeAgentInterface.Compatibility.Dormant.WorldObjectTransform."
 		"ObjectTransformUpdateOwnedActor",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
@@ -810,7 +811,7 @@ bool FUeAgentWorldSpatialObjectTransformUpdateOwnedActorTest::RunTest(
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentWorldSpatialObjectTransformUpdatePersistenceTest,
-	"UeAgentInterface.DomainAdapters.WorldSpatial.E2.Production.ObjectMesh."
+	"UeAgentInterface.Compatibility.Dormant.WorldObjectTransform."
 		"ObjectTransformUpdatePersistence",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
@@ -944,175 +945,143 @@ bool FUeAgentWorldSpatialMeshGeometryOwnedAssetTest::RunTest(
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentWorldSpatialActorTransformAuthoringSchemaTest,
-	"UeAgentInterface.DomainAdapters.WorldSpatial.E1.AuthoringSchema."
-		"ActorTransformContract",
+	FUeAgentWorldSpatialLoadedTargetWorldReadbackTest,
+	"UeAgentInterface.DomainAdapters.WorldSpatial.E1.ContentGraph."
+		"LoadedTargetWorldReadback",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentWorldSpatialActorTransformAuthoringSchemaTest::RunTest(
+bool FUeAgentWorldSpatialLoadedTargetWorldReadbackTest::RunTest(
 	const FString& Parameters)
 {
 	using namespace UE::UAI::DomainAdapters::WorldSpatial;
 	using UE::UAI::HjsonWorkspace::FWorkspaceError;
 	(void)Parameters;
-	UWorld* const World = GEditor
+
+	UWorld* const OriginalWorld = GEditor
 		? GEditor->GetEditorWorldContext().World()
 		: nullptr;
-	if (!TestNotNull(TEXT("authoring-schema editor world exists"), World))
+	if (!TestNotNull(TEXT("loaded-target test has an Editor world"), OriginalWorld)
+		|| !TestFalse(TEXT("original Editor world is clean"),
+			OriginalWorld->GetOutermost()->IsDirty()))
 	{
 		return false;
 	}
-	const FString Target = World->GetPathName();
+	const FString OriginalPackageName = OriginalWorld->GetOutermost()->GetName();
+	const bool bOriginalHasPersistentPackage =
+		FPackageName::DoesPackageExist(OriginalPackageName);
+	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	const FString PackageName = FString(TEXT("/Game/UAI/Tests/WorldSpatial/"))
+		+ TEXT("L_LoadedTarget_") + Suffix;
+	const FString ObjectName = FPackageName::GetLongPackageAssetName(PackageName);
+	const FString ObjectPath = PackageName + TEXT(".") + ObjectName;
+	const FString Filename = FPackageName::LongPackageNameToFilename(
+		PackageName, FPackageName::GetMapPackageExtension());
+	UPackage* const Package = CreatePackage(*PackageName);
+	UWorldFactory* const Factory = NewObject<UWorldFactory>();
+	if (!TestNotNull(TEXT("owned target package is created"), Package)
+		|| !TestNotNull(TEXT("owned world factory is created"), Factory))
+	{
+		return false;
+	}
+	Factory->WorldType = EWorldType::Editor;
+	Factory->bInformEngineOfWorld = false;
+	Factory->bCreateWorldPartition = false;
+	Factory->bEnableWorldPartitionStreaming = false;
+	UWorld* const TargetWorld = Cast<UWorld>(Factory->FactoryCreateNew(
+		UWorld::StaticClass(), Package, FName(*ObjectName),
+		RF_Public | RF_Standalone | RF_Transactional, nullptr, GWarn));
+	if (!TestNotNull(TEXT("owned target world is created"), TargetWorld))
+	{
+		return false;
+	}
+	FAssetRegistryModule::AssetCreated(TargetWorld);
+	TargetWorld->MarkPackageDirty();
+	if (!TestTrue(TEXT("owned target world is saved"),
+		UEditorLoadingAndSavingUtils::SaveMap(TargetWorld, PackageName)))
+	{
+		return false;
+	}
+
+	auto CleanupOwnedTarget = [&]()
+	{
+		UWorld* const CurrentWorld = GEditor
+			? GEditor->GetEditorWorldContext().World()
+			: nullptr;
+		if (CurrentWorld
+			&& CurrentWorld->GetOutermost()->GetName() == PackageName)
+		{
+			if (bOriginalHasPersistentPackage)
+			{
+				UEditorLoadingAndSavingUtils::LoadMap(
+					FPackageName::LongPackageNameToFilename(
+						OriginalPackageName,
+						FPackageName::GetMapPackageExtension()));
+			}
+			else
+			{
+				UEditorLoadingAndSavingUtils::NewBlankMap(false);
+			}
+		}
+		if (UWorld* const LoadedWorld = FindObject<UWorld>(nullptr, *ObjectPath))
+		{
+			FAssetRegistryModule::AssetDeleted(LoadedWorld);
+		}
+		if (UPackage* const LoadedPackage = FindPackage(nullptr, *PackageName))
+		{
+			LoadedPackage->SetDirtyFlag(false);
+			FText UnloadError;
+			UPackageTools::UnloadPackages({LoadedPackage}, UnloadError, true);
+		}
+		CollectGarbage(RF_NoFlags, true);
+		if (IFileManager::Get().FileExists(*Filename))
+		{
+			IFileManager::Get().Delete(*Filename, false, true);
+		}
+	};
+
 	const FString Params = FString::Printf(
-		TEXT("{\"target\":\"%s\"}"), *Target);
+		TEXT("{\"target\":\"%s\"}"), *ObjectPath);
 	FString PayloadJson;
 	bool bReadOnly = false;
 	FWorkspaceError Error;
-	if (!TestTrue(
-			TEXT("world authoring schema is available through its domain owner"),
-			TryExecuteContentGraph(
-				TEXT("content_graph.authoring_schema"), Target, Params,
-				PayloadJson, bReadOnly, Error)))
-	{
-		AddError(Error.GetCode());
-		return false;
-	}
-	TestTrue(TEXT("authoring schema is read-only"), bReadOnly);
+	Package->SetDirtyFlag(true);
+	TestFalse(TEXT("dirty loaded target is rejected"),
+		TryExecuteContentGraph(TEXT("content_graph.structure"), ObjectPath,
+			Params, PayloadJson, bReadOnly, Error));
+	TestEqual(TEXT("dirty target rejection is typed"), Error.GetCode(),
+		FString(TEXT("level_world_domain_loaded_target_dirty")));
+	TestTrue(TEXT("dirty target remains loaded"),
+		FindPackage(nullptr, *PackageName) == Package);
+	TestEqual(TEXT("dirty rejection keeps the current map"),
+		GEditor->GetEditorWorldContext().World()->GetOutermost()->GetName(),
+		OriginalPackageName);
 
-	TSharedPtr<FJsonObject> Payload;
-	const TSharedRef<TJsonReader<>> Reader =
-		TJsonReaderFactory<>::Create(PayloadJson);
-	if (!TestTrue(
-			TEXT("authoring schema payload parses"),
-			FJsonSerializer::Deserialize(Reader, Payload) && Payload.IsValid()))
+	Package->SetDirtyFlag(false);
+	Error.Reset();
+	PayloadJson.Reset();
+	bReadOnly = false;
+	const bool bReadback = TryExecuteContentGraph(
+		TEXT("content_graph.structure"), ObjectPath, Params,
+		PayloadJson, bReadOnly, Error);
+	TestTrue(TEXT("clean loaded target is read through content graph"), bReadback);
+	if (!bReadback)
 	{
-		return false;
+		AddError(Error.GetCode() + TEXT(": ") + Error.GetSourceUnit());
 	}
-	const TSharedPtr<FJsonObject>* Schema = nullptr;
-	const TArray<TSharedPtr<FJsonValue>>* Fields = nullptr;
-	if (!TestTrue(
-			TEXT("schema exposes field contracts"),
-			Payload->TryGetObjectField(TEXT("query_result"), Schema)
-				&& Schema && (*Schema).IsValid()
-				&& (*Schema)->TryGetArrayField(TEXT("fields"), Fields)
-				&& Fields && Fields->Num() == 1))
+	TestTrue(TEXT("clean target readback is read-only"), bReadOnly);
+	if (bOriginalHasPersistentPackage)
 	{
-		return false;
+		TestEqual(TEXT("content graph restores the original map"),
+			GEditor->GetEditorWorldContext().World()->GetOutermost()->GetName(),
+			OriginalPackageName);
 	}
-	const TSharedPtr<FJsonObject> Transform = (*Fields)[0]->AsObject();
-	if (!TestTrue(TEXT("transform field contract is structured"), Transform.IsValid()))
+	else
 	{
-		return false;
+		TestNotEqual(TEXT("content graph restores a blank Editor map"),
+			GEditor->GetEditorWorldContext().World()->GetOutermost()->GetName(),
+			PackageName);
 	}
-	TestEqual(TEXT("transform path"), Transform->GetStringField(TEXT("path")),
-		FString(TEXT("/root/document/provider_extension/actors/*/transform")));
-	TestEqual(TEXT("transform owner"), Transform->GetStringField(TEXT("owner")),
-		FString(TEXT("level-world-domain-provider")));
-	TestEqual(TEXT("transform field set"),
-		Transform->GetStringField(TEXT("field_set")),
-		FString(TEXT("actor_upsert")));
-	TestEqual(TEXT("transform value contract"),
-		Transform->GetStringField(TEXT("value_contract")),
-		FString(TEXT("world_actor_transform.v1")));
-	TestEqual(TEXT("missing transform preserves state"),
-		Transform->GetStringField(TEXT("missing")), FString(TEXT("preserve")));
-	TestFalse(TEXT("transform is not nullable"),
-		Transform->GetBoolField(TEXT("nullable")));
-	TestFalse(TEXT("transform has no default intent"),
-		Transform->GetBoolField(TEXT("default_supported")));
-	TestEqual(TEXT("transform write status"),
-		Transform->GetStringField(TEXT("write_status")),
-		FString(TEXT("supported")));
-	TestEqual(TEXT("actor transform semantic frame"),
-		Transform->GetStringField(TEXT("semantic_frame")), FString(TEXT("ue_world")));
-	TestEqual(TEXT("actor transform unit"),
-		Transform->GetStringField(TEXT("translation_unit")),
-		FString(TEXT("centimeter")));
-	TestEqual(TEXT("transform supports preserve and set"),
-		Transform->GetArrayField(TEXT("allowed_intents")).Num(), 2);
-
-	const TSharedPtr<FJsonObject>* Canonical = nullptr;
-	const TSharedPtr<FJsonObject>* NamedAxes = nullptr;
-	const TSharedPtr<FJsonObject>* Example = nullptr;
-	const TSharedPtr<FJsonObject>* SpaceContract = nullptr;
-	TestTrue(TEXT("canonical transform contract is present"),
-		Transform->TryGetObjectField(TEXT("canonical"), Canonical)
-			&& Canonical && (*Canonical).IsValid()
-			&& (*Canonical)->HasTypedField<EJson::Object>(TEXT("translation"))
-			&& (*Canonical)->HasTypedField<EJson::Object>(TEXT("rotation"))
-			&& (*Canonical)->HasTypedField<EJson::Object>(TEXT("scale")));
-	if (Canonical && (*Canonical).IsValid())
-	{
-		for (const TCHAR* Field : {
-			TEXT("translation"), TEXT("rotation"), TEXT("scale")})
-		{
-			const TSharedPtr<FJsonObject>* ValueContract = nullptr;
-			const TSharedPtr<FJsonObject>* Components = nullptr;
-			const bool bComplete = (*Canonical)->TryGetObjectField(
-				Field, ValueContract)
-				&& ValueContract && (*ValueContract).IsValid()
-				&& (*ValueContract)->TryGetObjectField(
-					TEXT("components"), Components)
-				&& Components && (*Components).IsValid()
-				&& (*Components)->GetStringField(TEXT("item_type"))
-					== TEXT("finite_number")
-				&& (*Components)->GetNumberField(TEXT("item_count")) == 3.0;
-			TestTrue(FString(TEXT("canonical finite vector contract: ")) + Field,
-				bComplete);
-		}
-	}
-	TestTrue(TEXT("named-axis aliases are present"),
-		Transform->TryGetObjectField(TEXT("accepted_named_axes"), NamedAxes)
-			&& NamedAxes && (*NamedAxes).IsValid()
-			&& (*NamedAxes)->HasTypedField<EJson::Object>(TEXT("location"))
-			&& (*NamedAxes)->HasTypedField<EJson::Object>(TEXT("rotation"))
-			&& (*NamedAxes)->HasTypedField<EJson::Object>(TEXT("scale")));
-	TestTrue(TEXT("Actor world space contract is structured"),
-		Transform->TryGetObjectField(TEXT("space_contract"), SpaceContract)
-			&& SpaceContract && (*SpaceContract).IsValid()
-			&& (*SpaceContract)->GetStringField(TEXT("subject"))
-				== TEXT("actor.transform")
-			&& (*SpaceContract)->GetNumberField(TEXT("dimension")) == 3.0
-			&& (*SpaceContract)->GetStringField(TEXT("semantic_frame"))
-				== TEXT("ue_world")
-			&& (*SpaceContract)->GetStringField(TEXT("write_frame"))
-				== TEXT("ue_world")
-			&& (*SpaceContract)->GetStringField(TEXT("read_frame"))
-				== TEXT("ue_world")
-			&& (*SpaceContract)->GetStringField(TEXT("unit"))
-				== TEXT("centimeter")
-			&& (*SpaceContract)->GetStringField(TEXT("level_contract"))
-				== TEXT("server_injected"));
-	TestTrue(TEXT("conditional transform example is present"),
-		Transform->TryGetObjectField(TEXT("conditional_example"), Example)
-			&& Example && (*Example).IsValid()
-			&& (*Example)->HasTypedField<EJson::Object>(TEXT("transform")));
-	TestTrue(TEXT("conflict semantics are explicit"),
-		!Transform->GetStringField(TEXT("conflict_semantics")).IsEmpty());
-
-	const TSharedPtr<FJsonObject>* Template = nullptr;
-	const TSharedPtr<FJsonObject>* Root = nullptr;
-	const TSharedPtr<FJsonObject>* Document = nullptr;
-	const TSharedPtr<FJsonObject>* Extension = nullptr;
-	const TArray<TSharedPtr<FJsonValue>>* Actors = nullptr;
-	const bool bTemplateResolved = (*Schema)->TryGetObjectField(
-		TEXT("template"), Template)
-		&& Template && (*Template).IsValid()
-		&& (*Template)->TryGetObjectField(TEXT("root"), Root)
-		&& Root && (*Root).IsValid()
-		&& (*Root)->TryGetObjectField(TEXT("document"), Document)
-		&& Document && (*Document).IsValid()
-		&& (*Document)->TryGetObjectField(TEXT("provider_extension"), Extension)
-		&& Extension && (*Extension).IsValid()
-		&& (*Extension)->TryGetArrayField(TEXT("actors"), Actors)
-		&& Actors && Actors->Num() == 1;
-	if (TestTrue(TEXT("minimal world template resolves"), bTemplateResolved))
-	{
-		const TSharedPtr<FJsonObject> TemplateActor = (*Actors)[0]->AsObject();
-		TestTrue(TEXT("minimal actor template is structured"), TemplateActor.IsValid());
-		TestFalse(TEXT("minimal actor template omits transform"),
-			TemplateActor.IsValid() && TemplateActor->HasField(TEXT("transform")));
-	}
+	CleanupOwnedTarget();
 	return !HasAnyErrors();
 }

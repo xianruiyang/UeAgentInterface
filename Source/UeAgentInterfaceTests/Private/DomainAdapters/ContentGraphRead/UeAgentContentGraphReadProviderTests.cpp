@@ -20,31 +20,14 @@ namespace
 	using namespace UE::UAI::Projection;
 	using namespace UE::UAI::StateSemantic;
 
-	FUeAgentDescriptorIdentity CompoundIdentity()
+	const TCHAR* CompoundDescriptorId()
 	{
-		return FUeAgentDescriptorIdentity(
-			TEXT("uai.query.content_graph.compound"),
-			1,
-			TEXT(
-				"sha256:5115bd528cefb896dccc1a6f5861f0e"
-				"2fe99d12ce218790184c16571903a2f36"));
+		return TEXT("uai.query.content_graph.compound");
 	}
 
 	FUeAgentResourceTrackerOwner Resources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 100000},
-				{EUeAgentResourceDimension::Items, 100000},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 100000},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					8 * 1024 * 1024,
-				},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	TSharedPtr<FUeAgentOperationContext> OperationContext(
@@ -65,7 +48,7 @@ namespace
 			TEXT("freeze ContentGraphRead execution context"),
 			FUeAgentExecutionContextRef::TryCreate(
 				Input,
-				CompoundIdentity(),
+				Descriptor.GetIdentity(),
 				EUeAgentRequestKind::Query,
 				Descriptor.GetExecutionContextPolicy(),
 				ExecutionContext,
@@ -76,7 +59,7 @@ namespace
 		}
 
 		const FUeAgentQueryRequest Request(
-			CompoundIdentity(),
+			Descriptor.GetIdentity(),
 			TEXT("request-content-graph-read-provider"),
 			FUeAgentContractValue(
 				TEXT("{\"sections\":[\"items\",\"relations\"]}")));
@@ -106,7 +89,8 @@ namespace
 		return Context;
 	}
 
-	FUeAgentCandidateBinding Target()
+	FUeAgentCandidateBinding Target(
+		const FUeAgentDescriptorIdentity& DescriptorIdentity)
 	{
 		return FUeAgentCandidateBinding(
 			TEXT("content-graph-read-target"),
@@ -118,7 +102,7 @@ namespace
 					TEXT("Fixture"),
 					TEXT("target"),
 					TEXT("revision-1")),
-				CompoundIdentity(),
+				DescriptorIdentity,
 				TEXT("blueprint"),
 				TEXT("BP_Fixture"),
 				TEXT("owned ContentGraphRead Blueprint fixture"),
@@ -266,8 +250,16 @@ bool FUeAgentContentGraphReadProviderBoundaryTest::RunTest(
 			+ RegistryError);
 		return false;
 	}
+	const FUeAgentOperationDescriptor* RegisteredDescriptor =
+		Registry->FindByDescriptorId(CompoundDescriptorId());
+	if (!TestNotNull(
+			TEXT("registered compound descriptor"),
+			RegisteredDescriptor))
+	{
+		return false;
+	}
 	const TOptional<FUeAgentQueryDescriptor> Descriptor =
-		Registry->FindQueryExact(CompoundIdentity());
+		Registry->FindQueryExact(RegisteredDescriptor->GetIdentity());
 	if (!TestTrue(TEXT("typed query descriptor"), Descriptor.IsSet()))
 	{
 		return false;
@@ -294,7 +286,8 @@ bool FUeAgentContentGraphReadProviderBoundaryTest::RunTest(
 		Hook);
 	TSharedPtr<const FUeAgentProjectionSourceValue> Source;
 	FUeAgentQueryBindingError Error;
-	const FUeAgentCandidateBinding ResolvedTarget = Target();
+	const FUeAgentCandidateBinding ResolvedTarget =
+		Target(Descriptor->GetIdentity());
 	TestTrue(
 		TEXT("provider forwards to one exact hook"),
 		Provider.TryQuery(

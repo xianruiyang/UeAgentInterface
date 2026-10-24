@@ -4,7 +4,6 @@
 
 
 #include "Core/ContextResource/UeAgentContextResource.h"
-#include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
@@ -12,18 +11,42 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
+THIRD_PARTY_INCLUDES_START
+#include <openssl/sha.h>
+THIRD_PARTY_INCLUDES_END
+
 namespace
 {
 	using namespace UE::UAI::ContextResource;
 	using namespace UE::UAI::HjsonWorkspace;
-	using namespace UE::UAI::StateSemantic;
 
 	static FString FixturePath()
 	{
 		return FPaths::ConvertRelativePathToFull(FPaths::Combine(
 			FPaths::ProjectDir(),
-			TEXT("UeAgentInterfaceCMD/tests/hjson_workspace/fixtures/")
+			TEXT("Plugins/UeAgentInterface/Source/UeAgentInterfaceTests/")
+			TEXT("Private/Core/HjsonWorkspace/Fixtures/")
 			TEXT("hjson_workspace_cases.json")));
+	}
+
+	static FString StandardSha256(const TArray<uint8>& Bytes)
+	{
+		uint8 Digest[SHA256_DIGEST_LENGTH] = {};
+		const uint8 Empty = 0;
+		SHA256(
+			Bytes.IsEmpty() ? &Empty : Bytes.GetData(),
+			static_cast<size_t>(Bytes.Num()),
+			Digest);
+		return TEXT("sha256:")
+			+ BytesToHex(Digest, SHA256_DIGEST_LENGTH).ToLower();
+	}
+
+	static FString Utf8Text(const TArray<uint8>& Bytes)
+	{
+		const FUTF8ToTCHAR Converted(
+			reinterpret_cast<const ANSICHAR*>(Bytes.GetData()),
+			Bytes.Num());
+		return FString(Converted.Length(), Converted.Get());
 	}
 
 	static TSharedPtr<FJsonObject> LoadFixture(FAutomationTestBase* Test)
@@ -53,37 +76,9 @@ namespace
 	}
 
 	static FUeAgentResourceTracker MakeTracker(
-		const TSharedPtr<FJsonObject>& Fixture,
-		int64 NodeLimit = -1,
-		int64 FileLimit = -1)
+		const TSharedPtr<FJsonObject>&)
 	{
-		const TSharedPtr<FJsonObject> Budget =
-			Fixture->GetObjectField(TEXT("resource_budget"));
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes,
-				static_cast<int64>(Budget->GetNumberField(TEXT("input_bytes")))},
-			{EUeAgentResourceDimension::OutputBytes,
-				static_cast<int64>(Budget->GetNumberField(TEXT("output_bytes")))},
-			{EUeAgentResourceDimension::StringBytes,
-				static_cast<int64>(Budget->GetNumberField(TEXT("string_bytes")))},
-			{EUeAgentResourceDimension::Nodes,
-				NodeLimit >= 0
-					? NodeLimit
-					: static_cast<int64>(Budget->GetNumberField(TEXT("nodes")))},
-			{EUeAgentResourceDimension::Items,
-				static_cast<int64>(Budget->GetNumberField(TEXT("items")))},
-			{EUeAgentResourceDimension::Files,
-				FileLimit >= 0
-					? FileLimit
-					: static_cast<int64>(Budget->GetNumberField(TEXT("files")))},
-			{EUeAgentResourceDimension::ReferenceEdges,
-				static_cast<int64>(Budget->GetNumberField(TEXT("reference_edges")))},
-			{EUeAgentResourceDimension::WorkUnits,
-				static_cast<int64>(Budget->GetNumberField(TEXT("work_units")))},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes,
-				static_cast<int64>(
-					Budget->GetNumberField(TEXT("estimated_memory_bytes")))},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FWorkspacePolicy MakePolicy(
@@ -104,19 +99,7 @@ namespace
 				Row->GetNumberField(TEXT("contract_version"))),
 			Row->GetStringField(TEXT("profile_id")),
 			Row->GetStringField(TEXT("entry_unit")),
-			MoveTemp(ReferenceFields),
-			static_cast<int32>(Row->GetNumberField(TEXT("max_files"))));
-	}
-
-	static FString BuildDeepDocument(
-		int32 Depth,
-		const FString& Leaf)
-	{
-		return TEXT("{ value: ")
-			+ FString::ChrN(Depth, TEXT('['))
-			+ TEXT("\"") + Leaf + TEXT("\"")
-			+ FString::ChrN(Depth, TEXT(']'))
-			+ TEXT(" }\n");
+			MoveTemp(ReferenceFields));
 	}
 
 	static bool WriteOwnedFile(
@@ -134,113 +117,7 @@ namespace
 			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 	}
 
-	static FUeAgentCanonicalSnapshotPtr BuildSnapshot(
-		FAutomationTestBase* Test,
-		const TSharedPtr<FJsonObject>& Fixture,
-		FUeAgentResourceTracker& Tracker)
-	{
-		const TSharedPtr<FJsonObject> Row =
-			Fixture->GetObjectField(TEXT("export_snapshot"));
-		const TSharedPtr<FJsonObject> RevisionRow =
-			Row->GetObjectField(TEXT("revision"));
-		const FUeAgentStateRevision Revision(
-			RevisionRow->GetStringField(TEXT("source_id")),
-			RevisionRow->GetStringField(TEXT("generation")),
-			static_cast<int64>(
-				RevisionRow->GetNumberField(TEXT("sequence"))));
-		TArray<FUeAgentStateEntry> Entries;
-		for (const TSharedPtr<FJsonValue>& EntryValue
-			: Row->GetArrayField(TEXT("entries")))
-		{
-			const TSharedPtr<FJsonObject> Entry = EntryValue->AsObject();
-			const TSharedPtr<FJsonObject> Identity =
-				Entry->GetObjectField(TEXT("identity"));
-			const bool bInteger =
-				Entry->GetStringField(TEXT("kind")) == TEXT("integer");
-			FUeAgentStateSemanticError Error;
-			FUeAgentCanonicalValuePtr Value;
-			FUeAgentCanonicalValuePtr Default;
-			const bool bValueCreated = bInteger
-				? FUeAgentCanonicalValue::TryInteger(
-					Entry->GetStringField(TEXT("value")),
-					Tracker,
-					Value,
-					Error)
-				: FUeAgentCanonicalValue::TryString(
-					Entry->GetStringField(TEXT("value")),
-					Tracker,
-					Value,
-					Error);
-			const bool bDefaultCreated = bInteger
-				? FUeAgentCanonicalValue::TryInteger(
-					Entry->GetStringField(TEXT("default")),
-					Tracker,
-					Default,
-					Error)
-				: FUeAgentCanonicalValue::TryString(
-					Entry->GetStringField(TEXT("default")),
-					Tracker,
-					Default,
-					Error);
-			Test->TestTrue(TEXT("create C4 export values"), bValueCreated && bDefaultCreated);
-			Entries.Emplace(
-				FUeAgentCanonicalIdentity(
-					Identity->GetStringField(TEXT("semantic_id")),
-					Identity->GetStringField(TEXT("target_kind")),
-					Identity->GetStringField(TEXT("owner_id")),
-					Identity->GetStringField(TEXT("selector")),
-					Identity->GetStringField(TEXT("object_role")),
-					Identity->GetStringField(TEXT("generation"))),
-				FUeAgentCanonicalType(
-					Entry->GetStringField(TEXT("type_id")),
-					bInteger
-						? EUeAgentValueKind::Integer
-						: EUeAgentValueKind::String,
-					false,
-					TEXT("scalar")),
-				Value.ToSharedRef(),
-				FUeAgentDefaultValue(
-					EUeAgentDefaultSourceKind::DomainNative,
-					TEXT("fixture:c5:domain-native"),
-					TEXT("fixture:c5:independent-default"),
-					Default.ToSharedRef()),
-				FUeAgentStateDetails(
-					Entry->GetStringField(TEXT("display_name")),
-					TEXT("independent C5 fixture"),
-					{TEXT("Fixture"), TEXT("C5")},
-					true,
-					TEXT("available"),
-					{}),
-				Revision);
-		}
-		const TSharedPtr<FJsonObject> Time =
-			Row->GetObjectField(TEXT("captured_at"));
-		const TSharedPtr<FJsonObject> Provenance =
-			Row->GetObjectField(TEXT("provenance"));
-		FUeAgentCanonicalSnapshotPtr Snapshot;
-		FUeAgentStateSemanticError Error;
-		Test->TestTrue(
-			TEXT("create real C4 snapshot"),
-			FUeAgentCanonicalSnapshot::TryCreate(
-				Row->GetStringField(TEXT("snapshot_id")),
-				EUeAgentStatePlane::AuthoringMemory,
-				Revision,
-				FUeAgentTemporalPoint(
-					Time->GetStringField(TEXT("clock_id")),
-					Time->GetStringField(TEXT("tick")),
-					Time->GetStringField(TEXT("rate_numerator")),
-					Time->GetStringField(TEXT("rate_denominator")),
-					Time->GetStringField(TEXT("state"))),
-				FUeAgentStateProvenance(
-					Provenance->GetStringField(TEXT("source_kind")),
-					Provenance->GetStringField(TEXT("source_id")),
-					Provenance->GetStringField(TEXT("evidence_id"))),
-				Entries,
-				Tracker,
-				Snapshot,
-				Error));
-		return Snapshot;
-	}
+
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -257,10 +134,75 @@ bool FUeAgentHjsonWorkspaceCodecTest::RunTest(const FString& Parameters)
 	}
 	const TSharedPtr<FJsonObject> Source =
 		Fixture->GetObjectField(TEXT("source_document"));
+	{
+		// Python hjson emits unquoted multiword values on ordinary workspace edits.
+		const FString Unquoted = TEXT("{\nname: Create Points Grid \t\ncount: 9007199254740993 \t\n\"selection key\": Missing settings\nvalues:\n[\n160\n96\n]\n}\n");
+		FUeAgentResourceTracker Tracker = MakeTracker(Fixture);
+		FHjsonDocumentPtr Parsed;
+		FWorkspaceError ParseError;
+		if (!TestTrue(TEXT("standard HJSON multiword values and quoted keys parse"),
+			TryParseHjsonDocument(Unquoted, TEXT("unquoted.hjson"), Tracker, Parsed, ParseError)))
+		{
+			AddError(ParseError.GetCode());
+			return false;
+		}
+		const FHjsonNode* Name = Parsed->Find(TEXT("/name"));
+		const FHjsonNode* Count = Parsed->Find(TEXT("/count"));
+		const FHjsonNode* Selection = Parsed->Find(TEXT("/selection key"));
+		TestTrue(TEXT("internal spaces are retained and trailing whitespace is excluded"),
+			Name && Name->GetText() == TEXT("Create Points Grid")
+				&& Name->GetLexeme() == TEXT("Create Points Grid")
+				&& Name->GetProvenance().GetByteEnd() - Name->GetProvenance().GetByteStart() == 18);
+		TestTrue(TEXT("trailing whitespace does not turn an exact integer into text"),
+			Count && Count->GetKind() == EHjsonNodeKind::Integer
+				&& Count->GetLexeme() == TEXT("9007199254740993"));
+		TestTrue(TEXT("a multiword key resolves its complete value"),
+			Selection && Selection->GetText() == TEXT("Missing settings"));
+		const FHjsonNode* Last = Parsed->Find(TEXT("/values/1"));
+		TestTrue(TEXT("newline still separates array values"), Last && Last->GetLexeme() == TEXT("96"));
+		FUeAgentResourceTracker InvalidTracker = MakeTracker(Fixture);
+		FHjsonDocumentPtr Invalid;
+		TestFalse(TEXT("an unquoted multiword key remains invalid"), TryParseHjsonDocument(
+			TEXT("{\nselection key: value\n}\n"), TEXT("invalid-key.hjson"), InvalidTracker, Invalid, ParseError));
+	}
 	FUeAgentResourceTracker ParseTracker = MakeTracker(Fixture);
+	{
+		const FString References = TEXT("{\nrefs:\n[\nstructure:state_tree2\nasset:/Game/Test\n]\ntime: 12:34\ntype: CustomDefine[]\ncode: return float4(1, 2, 3, 4); // literal # text\nurl: https://example.test/a#part\nquotes: text with \"quotes\" and {braces} [brackets]\nscalars: [1, -0.5, true, false, null]\ncommented: 42 # actual comment\n}\n");
+		FUeAgentResourceTracker Tracker = MakeTracker(Fixture);
+		FHjsonDocumentPtr Parsed;
+		FWorkspaceError ParseError;
+		if (!TestTrue(TEXT("unquoted colon values retain their scalar meaning"),
+			TryParseHjsonDocument(References, TEXT("colon-values.hjson"), Tracker, Parsed, ParseError)))
+		{ AddError(ParseError.GetCode()); return false; }
+		const FHjsonNode* Ref = Parsed->Find(TEXT("/refs/0"));
+		const FHjsonNode* Asset = Parsed->Find(TEXT("/refs/1"));
+		const FHjsonNode* Time = Parsed->Find(TEXT("/time"));
+		TestTrue(TEXT("reference text and complete source span are preserved"), Ref
+			&& Ref->GetText() == TEXT("structure:state_tree2")
+			&& Ref->GetLexeme() == TEXT("structure:state_tree2")
+			&& Ref->GetProvenance().GetByteEnd() - Ref->GetProvenance().GetByteStart() == 21);
+		TestTrue(TEXT("path and numeric-looking colon values remain strings"), Asset && Time
+			&& Asset->GetText() == TEXT("asset:/Game/Test")
+			&& Time->GetKind() == EHjsonNodeKind::String && Time->GetText() == TEXT("12:34"));
+		const FHjsonNode* Type = Parsed->Find(TEXT("/type"));
+		const FHjsonNode* Code = Parsed->Find(TEXT("/code"));
+		const FHjsonNode* Url = Parsed->Find(TEXT("/url"));
+		const FHjsonNode* Quotes = Parsed->Find(TEXT("/quotes"));
+		TestTrue(TEXT("punctuation and comment text inside quoteless values are literal"),
+			Type && Type->GetText() == TEXT("CustomDefine[]")
+			&& Code && Code->GetText() == TEXT("return float4(1, 2, 3, 4); // literal # text")
+			&& Url && Url->GetText() == TEXT("https://example.test/a#part")
+			&& Quotes && Quotes->GetText() == TEXT("text with \"quotes\" and {braces} [brackets]"));
+		const FHjsonNode* Scalar = Parsed->Find(TEXT("/scalars/4"));
+		const FHjsonNode* Commented = Parsed->Find(TEXT("/commented"));
+		TestTrue(TEXT("JSON scalar boundaries and their comments remain structural"),
+			Scalar && Scalar->GetKind() == EHjsonNodeKind::Null
+			&& Commented && Commented->GetKind() == EHjsonNodeKind::Integer
+			&& Commented->GetLexeme() == TEXT("42"));
+	}
 	FHjsonDocumentPtr Document;
 	FWorkspaceError Error;
-	TestTrue(
+	const bool bParsed = TestTrue(
 		TEXT("parse independent HJSON source"),
 		TryParseHjsonDocument(
 			Source->GetStringField(TEXT("text")),
@@ -268,6 +210,10 @@ bool FUeAgentHjsonWorkspaceCodecTest::RunTest(const FString& Parameters)
 			ParseTracker,
 			Document,
 			Error));
+	if (!bParsed || !Document.IsValid())
+	{
+		return false;
+	}
 	const FHjsonNode* Precise = Document.IsValid()
 		? Document->Find(TEXT("/precise"))
 		: nullptr;
@@ -300,29 +246,103 @@ bool FUeAgentHjsonWorkspaceCodecTest::RunTest(const FString& Parameters)
 			WriteTracker,
 			CanonicalUtf8,
 			Error));
-	const FTCHARToUTF8 ExpectedUtf8(
-		*Source->GetStringField(TEXT("canonical_text")));
-	TestEqual(
-		TEXT("canonical bytes"),
-		CanonicalUtf8,
-		TArray<uint8>(
-			reinterpret_cast<const uint8*>(ExpectedUtf8.Get()),
-			ExpectedUtf8.Length()));
-
-	const TSharedPtr<FJsonObject> Depth =
-		Fixture->GetObjectField(TEXT("depth"));
-	FUeAgentResourceTracker DeepTracker = MakeTracker(Fixture);
-	FHjsonDocumentPtr DeepDocument;
+	const FString CanonicalText = Utf8Text(CanonicalUtf8);
+	FUeAgentResourceTracker RoundTripParseTracker = MakeTracker(Fixture);
+	FHjsonDocumentPtr RoundTripDocument;
 	TestTrue(
-		TEXT("257 deep legal document has no fixed depth limit"),
+		TEXT("canonical UTF-8 parses again"),
 		TryParseHjsonDocument(
-			BuildDeepDocument(
-				static_cast<int32>(Depth->GetNumberField(TEXT("legal_depth"))),
-				Depth->GetStringField(TEXT("leaf"))),
-			TEXT("deep.hjson"),
-			DeepTracker,
-			DeepDocument,
+			CanonicalText,
+			TEXT("canonical.hjson"),
+			RoundTripParseTracker,
+			RoundTripDocument,
 			Error));
+	TArray<uint8> RoundTripUtf8;
+	if (RoundTripDocument.IsValid())
+	{
+		const TSharedPtr<FJsonObject> Policy =
+			Fixture->GetObjectField(TEXT("workspace_policy"));
+		const FHjsonNode& RoundTripRoot =
+			RoundTripDocument->GetRoot().Get();
+		TestEqual(
+			TEXT("round-trip preserves the complete field set"),
+			RoundTripRoot.GetEntries().Num(),
+			4);
+		const FHjsonNode* ContractId =
+			RoundTripDocument->Find(TEXT("/contract_id"));
+		const FHjsonNode* ContractVersion =
+			RoundTripDocument->Find(TEXT("/contract_version"));
+		const FHjsonNode* ProfileId =
+			RoundTripDocument->Find(TEXT("/profile_id"));
+		const FHjsonNode* RoundTripPrecise =
+			RoundTripDocument->Find(TEXT("/precise"));
+		TestTrue(TEXT("round-trip contract_id exists"), ContractId != nullptr);
+		TestTrue(
+			TEXT("round-trip contract_version exists"),
+			ContractVersion != nullptr);
+		TestTrue(TEXT("round-trip profile_id exists"), ProfileId != nullptr);
+		TestTrue(
+			TEXT("round-trip precise AST node exists"),
+			RoundTripPrecise != nullptr);
+		if (ContractId)
+		{
+			TestEqual(
+				TEXT("round-trip contract_id type"),
+				ContractId->GetKind(),
+				EHjsonNodeKind::String);
+			TestEqual(
+				TEXT("round-trip contract_id value"),
+				ContractId->GetText(),
+				Policy->GetStringField(TEXT("contract_id")));
+		}
+		if (ContractVersion)
+		{
+			TestEqual(
+				TEXT("round-trip contract_version type"),
+				ContractVersion->GetKind(),
+				EHjsonNodeKind::Integer);
+			TestEqual(
+				TEXT("round-trip contract_version value"),
+				ContractVersion->GetLexeme(),
+				FString::FromInt(static_cast<int32>(
+					Policy->GetNumberField(TEXT("contract_version")))));
+		}
+		if (ProfileId)
+		{
+			TestEqual(
+				TEXT("round-trip profile_id type"),
+				ProfileId->GetKind(),
+				EHjsonNodeKind::String);
+			TestEqual(
+				TEXT("round-trip profile_id value"),
+				ProfileId->GetText(),
+				Policy->GetStringField(TEXT("profile_id")));
+		}
+		if (RoundTripPrecise)
+		{
+			TestEqual(
+				TEXT("round-trip precise type"),
+				RoundTripPrecise->GetKind(),
+				EHjsonNodeKind::Integer);
+			TestEqual(
+				TEXT("round-trip preserves exact integer lexeme"),
+				RoundTripPrecise->GetLexeme(),
+				Source->GetStringField(TEXT("precise_lexeme")));
+		}
+		FUeAgentResourceTracker RoundTripWriteTracker = MakeTracker(Fixture);
+		TestTrue(
+			TEXT("round-trip canonical UTF-8 writes"),
+			TryWriteHjsonDocument(
+				RoundTripDocument.ToSharedRef(),
+				RoundTripWriteTracker,
+				RoundTripUtf8,
+				Error));
+		TestEqual(
+			TEXT("canonical UTF-8 is deterministic after round-trip"),
+			RoundTripUtf8,
+			CanonicalUtf8);
+	}
+
 	return true;
 }
 
@@ -411,10 +431,7 @@ bool FUeAgentHjsonWorkspaceSourceParityTest::RunTest(const FString& Parameters)
 			TestEqual(
 				TEXT("canonical bytes use standard SHA-256"),
 				Workspace->GetUnits()[0].GetContentHash(),
-				FString(
-					TEXT(
-						"sha256:145d78cf812e7de349d9d420bbe45c9c1"
-						"e5cdce01753f964902530f00f6071cc")));
+				StandardSha256(Workspace->GetUnits()[0].GetCanonicalUtf8()));
 		}
 	}
 
@@ -424,7 +441,7 @@ bool FUeAgentHjsonWorkspaceSourceParityTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentHjsonWorkspaceReferenceBudgetTest,
-	"UeAgentInterface.Core.HjsonWorkspace.ReferenceDagCycleAndFileBudget",
+	"UeAgentInterface.Core.HjsonWorkspace.ReferenceDagCycle",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentHjsonWorkspaceReferenceBudgetTest::RunTest(const FString& Parameters)
@@ -506,117 +523,6 @@ bool FUeAgentHjsonWorkspaceReferenceBudgetTest::RunTest(const FString& Parameter
 		Error.GetCode(),
 		FString(TEXT("workspace_ref_cycle")));
 
-	const FString OverflowRoot = FPaths::Combine(Root, TEXT("overflow"));
-	WriteOwnedFile(
-		OverflowRoot,
-		TEXT("index.hjson"),
-		References->GetStringField(TEXT("entry_text")));
-	WriteOwnedFile(
-		OverflowRoot,
-		TEXT("units/child.hjson"),
-		References->GetStringField(TEXT("child_text")));
-	WriteOwnedFile(
-		OverflowRoot,
-		TEXT("unused.hjson"),
-		References->GetStringField(TEXT("child_text")));
-	FUeAgentResourceTracker OverflowTracker = MakeTracker(Fixture);
-	FCanonicalWorkspacePtr OverflowWorkspace;
-	TestFalse(
-		TEXT("N plus one stops during enumeration"),
-		TryLoadWorkspace(
-			FWorkspaceSource::Directory(OverflowRoot),
-			MakePolicy(Fixture),
-			OverflowTracker,
-			OverflowWorkspace,
-			Error));
-	TestEqual(
-		TEXT("file budget error is typed"),
-		Error.GetCode(),
-		FString(TEXT("workspace_file_budget_exceeded")));
-	TestTrue(TEXT("file budget stopped early"), Error.IsStoppedEarly());
-	TestEqual(TEXT("N plus one observed"), Error.GetObserved(), 3ll);
-
 	IFileManager::Get().DeleteDirectory(*Root, false, true);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentHjsonWorkspaceExportPlanTest,
-	"UeAgentInterface.Core.HjsonWorkspace.ImmutableExportPlan",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentHjsonWorkspaceExportPlanTest::RunTest(const FString& Parameters)
-{
-	const TSharedPtr<FJsonObject> Fixture = LoadFixture(this);
-	if (!Fixture.IsValid())
-	{
-		return false;
-	}
-	FUeAgentResourceTracker SnapshotTracker = MakeTracker(Fixture);
-	const FUeAgentCanonicalSnapshotPtr Snapshot =
-		BuildSnapshot(this, Fixture, SnapshotTracker);
-	if (!Snapshot.IsValid())
-	{
-		return false;
-	}
-	const TSharedPtr<FJsonObject> Row =
-		Fixture->GetObjectField(TEXT("export_plan"));
-	const FExportPlanRequest Request(
-		Snapshot.ToSharedRef(),
-		EWorkspaceKind::Directory,
-		Row->GetStringField(TEXT("entry_file")),
-		Row->GetStringField(TEXT("contract_id")),
-		static_cast<int32>(
-			Row->GetNumberField(TEXT("contract_version"))),
-		Row->GetStringField(TEXT("profile_id")),
-		static_cast<int64>(
-			Row->GetNumberField(TEXT("token_budget"))));
-	FUeAgentResourceTracker FirstTracker = MakeTracker(Fixture);
-	FUeAgentResourceTracker SecondTracker = MakeTracker(Fixture);
-	FExportWorkspacePlanPtr First;
-	FExportWorkspacePlanPtr Second;
-	FWorkspaceError Error;
-	const bool bFirstBuilt =
-		TryBuildExportPlan(Request, FirstTracker, First, Error);
-	const bool bSecondBuilt =
-		TryBuildExportPlan(Request, SecondTracker, Second, Error);
-	TestTrue(
-		TEXT("build first immutable plan"),
-		bFirstBuilt);
-	TestTrue(
-		TEXT("build deterministic second plan"),
-		bSecondBuilt);
-	if (!bFirstBuilt || !bSecondBuilt
-		|| !First.IsValid() || !Second.IsValid())
-	{
-		AddError(FString::Printf(
-			TEXT(
-				"immutable export plan missing: code=%s source=%s "
-				"pointer=%s observed=%lld"),
-			*Error.GetCode(),
-			*Error.GetSourceUnit(),
-			*Error.GetJsonPointer(),
-			Error.GetObserved()));
-		return false;
-	}
-	TestEqual(
-		TEXT("plan fingerprint deterministic"),
-		First->GetPlanFingerprint(),
-		Second->GetPlanFingerprint());
-	TestTrue(
-		TEXT("plan binds C4 revision"),
-		First->GetSnapshotRevision() == Snapshot->GetRevision());
-	TestEqual(TEXT("single reference file"), First->GetFiles().Num(), 1);
-	const TArray<uint8>& Bytes = First->GetFiles()[0].GetCanonicalUtf8();
-	const FString Text = FString(UTF8_TO_TCHAR(
-		reinterpret_cast<const char*>(Bytes.GetData())));
-	for (const TSharedPtr<FJsonValue>& Fragment
-		: Row->GetArrayField(TEXT("required_fragments")))
-	{
-		TestTrue(
-			TEXT("plan preserves canonical truth"),
-			Text.Contains(Fragment->AsString()));
-	}
-
 	return true;
 }

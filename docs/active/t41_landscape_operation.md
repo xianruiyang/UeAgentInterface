@@ -10,8 +10,7 @@ that registry lazily and does not build a private provider table.
 The default SDK surface is `client.landscape.create(...)`,
 `client.landscape.height_read(...)`, and
 `client.landscape.height_delta(...)`; the CLI surface is
-`uai-cli ... exec <command-id>`. Callers use `command_search` and
-`command_detail` to obtain current fields and contract hashes. No task-specific
+`ueagentinterfacecmd ... exec <command-id>`. For unknown command names or parameter shapes, follow [public command discovery](../../../../UeAgentInterfaceCMD/docs/PYTHON_SDK_AND_CLI.md#command-discovery). Binding hashes remain SDK-owned. No task-specific
 generated projection is a supported entry.
 
 The typed `landscape` contribution owns two request-scoped operation
@@ -44,7 +43,8 @@ not. Unreal still owns the generated UObject name and path.
 - `space_contract.frame_id = ue.landscape.local_sample_grid`,
   `unit = sample`, and non-empty `basis_evidence`.
 
-The public route accepts at most 16,384 samples per request. It resolves the
+The requested region is materialized in one native `TArray`, so each dimension and the total
+sample count must fit UE's signed 32-bit container indexing. The route resolves the
 managed identity fail-closed before considering an exact UObject path, reads
 height textures through UE's read-only component data interface, and proves
 that every requested sample is present. It does not call the Landscape edit

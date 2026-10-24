@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
 namespace UE::UAI::OperationOwners::AnimationRigGraph
@@ -21,12 +23,7 @@ namespace UE::UAI::OperationOwners::AnimationRigGraph
 		bool bReadOnly = false;
 	};
 
-	struct UEAGENTINTERFACE_API FAnimationRigGraphCandidateCommandError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FAnimationRigGraphCandidateCommandError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentAnimationRigGraphCandidateCommandService
 	{
@@ -45,5 +42,5 @@ namespace UE::UAI::OperationOwners::AnimationRigGraph
 
 	UEAGENTINTERFACE_API bool TryCreateProductionAnimationRigGraphCandidateCommandService(
 		TSharedPtr<IUeAgentAnimationRigGraphCandidateCommandService>& OutService,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

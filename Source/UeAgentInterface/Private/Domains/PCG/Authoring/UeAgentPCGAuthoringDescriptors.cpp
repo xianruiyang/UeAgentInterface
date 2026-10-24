@@ -13,7 +13,7 @@ namespace UeAgentPCGAuthoring
 			const TCHAR* ModelId,
 			const TCHAR* TargetKind,
 			const TArray<FString>& SelectorNames,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringIdentity::FModelDescriptor Model;
 			Model.ModelId = ModelId;
@@ -36,7 +36,8 @@ namespace UeAgentPCGAuthoring
 			const TCHAR* ValueType,
 			const UeAgentAuthoringSemanticRegistry::EWriteCapability WriteCapability,
 			const bool bFactoryDefault,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError,
+			const TCHAR* Comparator = TEXT("uai.compare.canonical_value"))
 		{
 			UeAgentAuthoringSemanticRegistry::FSemanticDescriptor Semantic;
 			Semantic.SemanticId = SemanticId;
@@ -49,7 +50,7 @@ namespace UeAgentPCGAuthoring
 			Semantic.WriteCapability = WriteCapability;
 			Semantic.ConstraintSource = TEXT("pcg.graph.schema");
 			Semantic.AvailabilitySource = AccessorId;
-			Semantic.Comparator = TEXT("uai.compare.canonical_value");
+			Semantic.Comparator = Comparator;
 			Semantic.CapabilityTags = { TEXT("pcg"), TEXT("graph"), TEXT("snapshot") };
 			if (bFactoryDefault)
 			{
@@ -62,7 +63,7 @@ namespace UeAgentPCGAuthoring
 		}
 	}
 
-	bool RegisterDescriptors(FString& OutError)
+	bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!RegisterIdentity(GraphIdentityModelId, TEXT("pcg_graph"), { TEXT("asset_path") }, OutError)
 			|| !RegisterIdentity(NodeIdentityModelId, TEXT("pcg_node"),
@@ -99,11 +100,11 @@ namespace UeAgentPCGAuthoring
 
 		using EWrite = UeAgentAuthoringSemanticRegistry::EWriteCapability;
 		return RegisterSemantic(GraphSemanticId, TEXT("pcg_graph"), GraphIdentityModelId,
-			StateAccessorId, TEXT("object"), EWrite::DomainMutation, true, OutError)
+			StateAccessorId, TEXT("object"), EWrite::DomainMutation, true, OutError, TEXT("uai.compare.graph_int32_position"))
 			&& RegisterSemantic(ExportTargetSemanticId, TEXT("pcg_graph"), GraphIdentityModelId,
 				StateAccessorId, TEXT("object"), EWrite::ReadOnly, false, OutError)
 			&& RegisterSemantic(ExportNodeSemanticId, TEXT("pcg_node"), NodeIdentityModelId,
-				StateAccessorId, TEXT("object"), EWrite::DomainMutation, false, OutError)
+				StateAccessorId, TEXT("object"), EWrite::DomainMutation, false, OutError, TEXT("uai.compare.graph_int32_position"))
 			&& RegisterSemantic(ExportNodePropertySemanticId, TEXT("pcg_node_property"),
 				NodePropertyIdentityModelId, TEXT("core.property"), TEXT("*"), EWrite::PropertyAssignment, false, OutError)
 			&& RegisterSemantic(ExportPinSemanticId, TEXT("pcg_pin"), PinIdentityModelId,

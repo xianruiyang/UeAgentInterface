@@ -11,7 +11,7 @@
 
 namespace UeAgentPCGAuthoring
 {
-	bool RegisterAuthoring(FString& OutError)
+	bool RegisterAuthoring(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!RegisterDescriptors(OutError)
 			|| !RegisterStateAccessor(OutError)

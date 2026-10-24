@@ -1,6 +1,9 @@
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/BindingGateway/Query/UeAgentQueryBindingError.h"
+#include "Dom/JsonValue.h"
 #include "HAL/CriticalSection.h"
 #include "Misc/ScopeLock.h"
 
@@ -18,10 +21,36 @@ namespace UE::UAI::DomainCapability
 			return !Normalized.IsEmpty() && Normalized == Value;
 		}
 
-		bool Fail(FString& OutError, const FString& Code)
+		Contract::FDiagnostic InvalidDeclaration(const FString& Code, const FString& Reason, const FString& Path)
 		{
-			OutError = Code;
+			auto Error = Contract::FDiagnostic::Failure(Code, Reason, TEXT("domain_capability"));
+			Error.PropertyPath = Path;
+			return Error;
+		}
+
+		template <typename T>
+		FString ItemField(const TArray<T>& Items, const T& Item, const FString& Collection, const FString& Field)
+		{
+			const FString Path = FString::Printf(TEXT("%s[%d]"), *Collection, static_cast<int32>(&Item - Items.GetData()));
+			return Field.IsEmpty() ? Path : Path + TEXT(".") + Field;
+		}
+
+		bool Fail(Contract::FDiagnostic& OutError, const FString& Code, const FString& Reason,
+			const FString& Path, const FString& InternalIdentity = FString())
+		{
+			OutError = InvalidDeclaration(Code, Reason, Path);
+			OutError.SubjectId = InternalIdentity;
 			return false;
+		}
+
+		Contract::FDiagnostic RegistrationFailure(const TCHAR* Code, const FString& Reason,
+			const FString& Path, const FString& DomainId, const FString& ContributionId = FString())
+		{
+			auto Error = InvalidDeclaration(Code, Reason, Path);
+			Error.Stage = TEXT("registration");
+			Error.CandidateName = DomainId;
+			Error.SubjectId = ContributionId;
+			return Error;
 		}
 
 		bool ValidateSupport(
@@ -29,30 +58,31 @@ namespace UE::UAI::DomainCapability
 			const TCHAR* Category,
 			const EDomainCapabilitySupport Support,
 			const bool bHasPayload,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (Support == EDomainCapabilitySupport::Undeclared)
 			{
 				return Fail(
 					OutError,
-					TEXT("domain_capability_support_undeclared:")
-						+ DomainId + TEXT(":") + Category);
+					TEXT("domain_capability_support_undeclared"),
+					TEXT("The domain must explicitly declare whether this capability is supported."),
+					FString(Category) + TEXT(".support"), DomainId);
 			}
 			if (Support == EDomainCapabilitySupport::Unsupported
 				&& bHasPayload)
 			{
 				return Fail(
 					OutError,
-					TEXT("domain_capability_unsupported_payload:")
-						+ DomainId + TEXT(":") + Category);
+					TEXT("domain_capability_unsupported_payload"),
+					TEXT("The domain declares this capability unsupported but supplies capability entries."), Category, DomainId);
 			}
 			if (Support == EDomainCapabilitySupport::Supported
 				&& !bHasPayload)
 			{
 				return Fail(
 					OutError,
-					TEXT("domain_capability_supported_payload_missing:")
-						+ DomainId + TEXT(":") + Category);
+					TEXT("domain_capability_supported_payload_missing"),
+					TEXT("The domain declares this capability supported but supplies no capability entries."), Category, DomainId);
 			}
 			return true;
 		}
@@ -61,22 +91,29 @@ namespace UE::UAI::DomainCapability
 			TSet<FString>& Seen,
 			const FString& Identity,
 			const TCHAR* ErrorPrefix,
-			FString& OutError)
+			Contract::FDiagnostic& OutError,
+			const FString& Path,
+			const bool bPublicIdentity)
 		{
 			if (!IsExactIdentity(Identity))
 			{
-				return Fail(
-					OutError,
-					FString(ErrorPrefix) + TEXT("_invalid:") + Identity);
+				OutError = InvalidDeclaration(FString(ErrorPrefix) + TEXT("_invalid"),
+					TEXT("The declared identifier must be non-empty and have no surrounding whitespace."), Path);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty text without surrounding whitespace"));
 			}
-			if (Seen.Contains(Identity))
+			else if (Seen.Contains(Identity))
 			{
-				return Fail(
-					OutError,
-					FString(ErrorPrefix) + TEXT("_conflict:") + Identity);
+				OutError = InvalidDeclaration(FString(ErrorPrefix) + TEXT("_conflict"),
+					TEXT("More than one capability entry declares the same identifier."), Path);
 			}
-			Seen.Add(Identity);
-			return true;
+			else
+			{
+				Seen.Add(Identity);
+				return true;
+			}
+			if (bPublicIdentity) OutError.ActualValue = MakeShared<FJsonValueString>(Identity);
+			else OutError.ActualEvidence = MakeShared<FJsonValueString>(Identity);
+			return false;
 		}
 
 		FString HjsonRouteKey(const FDomainHjsonRoute& Route)
@@ -90,15 +127,13 @@ namespace UE::UAI::DomainCapability
 
 		bool ValidateDeclaration(
 			const FDomainCapabilityDeclaration& Declaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutError.Reset();
 			if (!IsExactIdentity(Declaration.DomainId))
 			{
-				return Fail(
-					OutError,
-					TEXT("domain_capability_domain_id_invalid:")
-						+ Declaration.DomainId);
+				return Fail(OutError, TEXT("domain_capability_domain_id_invalid"),
+					TEXT("The domain identifier must be non-empty and have no surrounding whitespace."), TEXT("domain_id"), Declaration.DomainId);
 			}
 
 			if (!ValidateSupport(
@@ -166,12 +201,6 @@ namespace UE::UAI::DomainCapability
 					TEXT("surface"),
 					Declaration.Surface.Support,
 					!Declaration.Surface.Surfaces.IsEmpty(),
-					OutError)
-				|| !ValidateSupport(
-					Declaration.DomainId,
-					TEXT("migration"),
-					Declaration.Migration.Support,
-					!Declaration.Migration.OwnerId.IsEmpty(),
 					OutError))
 			{
 				return false;
@@ -186,7 +215,7 @@ namespace UE::UAI::DomainCapability
 					ContributionIds,
 					Contribution->GetContributionId(),
 					TEXT("domain_capability_command_contribution"),
-					OutError))
+					OutError, ItemField(Declaration.Command.Contributions, Contribution, TEXT("command.contributions"), TEXT("contribution_id")), false))
 				{
 					return false;
 				}
@@ -195,10 +224,8 @@ namespace UE::UAI::DomainCapability
 				Contribution->CollectDeclarations(Declarations);
 				if (Declarations.IsEmpty())
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_command_declaration_missing:")
-							+ Contribution->GetContributionId());
+					return Fail(OutError, TEXT("domain_capability_command_declaration_missing"),
+					TEXT("The command contribution supplies no command declarations."), ItemField(Declaration.Command.Contributions, Contribution, TEXT("command.contributions"), TEXT("commands")), Contribution->GetContributionId());
 				}
 				for (const CommandContract::FUeAgentCommandDeclaration& Command :
 					Declarations)
@@ -207,7 +234,7 @@ namespace UE::UAI::DomainCapability
 						CommandIds,
 						Command.CommandId,
 						TEXT("domain_capability_command_id"),
-						OutError))
+						OutError, ItemField(Declarations, Command, ItemField(Declaration.Command.Contributions, Contribution, TEXT("command.contributions"), TEXT("commands")), TEXT("command_id")), true))
 					{
 						return false;
 					}
@@ -218,18 +245,18 @@ namespace UE::UAI::DomainCapability
 			for (const Query::FUeAgentDomainQueryProviderRegistration& Provider :
 				Declaration.Query.Providers)
 			{
-				if (!Provider.IsValid()
-					|| !AddUniqueIdentity(
+				if (!Provider.IsValid())
+				{
+					OutError = Provider.GetValidationDiagnostic();
+					OutError.PropertyPath = ItemField(Declaration.Query.Providers, Provider, TEXT("query.providers"), OutError.PropertyPath);
+					return false;
+				}
+				if (!AddUniqueIdentity(
 						QueryBindings,
 						Provider.GetProviderBinding(),
 						TEXT("domain_capability_query_binding"),
-						OutError))
+						OutError, ItemField(Declaration.Query.Providers, Provider, TEXT("query.providers"), TEXT("provider_binding")), false))
 				{
-					if (OutError.IsEmpty())
-					{
-						OutError = TEXT("domain_capability_query_provider_invalid:")
-							+ Provider.GetProviderBinding();
-					}
 					return false;
 				}
 			}
@@ -242,23 +269,19 @@ namespace UE::UAI::DomainCapability
 					SurfaceIds,
 					Surface.SurfaceId,
 					TEXT("domain_capability_surface"),
-					OutError))
+					OutError, ItemField(Declaration.Surface.Surfaces, Surface, TEXT("surface.surfaces"), TEXT("surface_id")), false))
 				{
 					return false;
 				}
 				if (!IsExactIdentity(Surface.MechanicsId))
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_surface_mechanics_missing:")
-							+ Surface.SurfaceId);
+					return Fail(OutError, TEXT("domain_capability_surface_mechanics_missing"),
+					TEXT("The semantic surface requires a non-empty mechanics identifier without surrounding whitespace."), ItemField(Declaration.Surface.Surfaces, Surface, TEXT("surface.surfaces"), TEXT("mechanics_id")), Surface.SurfaceId);
 				}
 				if (!IsExactIdentity(Surface.ReadPortId))
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_surface_readback_missing:")
-							+ Surface.SurfaceId);
+					return Fail(OutError, TEXT("domain_capability_surface_readback_missing"),
+					TEXT("The semantic surface requires a non-empty read port identifier without surrounding whitespace."), ItemField(Declaration.Surface.Surfaces, Surface, TEXT("surface.surfaces"), TEXT("read_port_id")), Surface.SurfaceId);
 				}
 			}
 
@@ -270,7 +293,7 @@ namespace UE::UAI::DomainCapability
 					InitializationContracts,
 					ContractId,
 					TEXT("domain_capability_initialization_contract"),
-					OutError))
+					OutError, ItemField(Declaration.Initialization.ContractIds, ContractId, TEXT("initialization.contract_ids"), TEXT("")), false))
 				{
 					return false;
 				}
@@ -285,7 +308,7 @@ namespace UE::UAI::DomainCapability
 					HjsonProviderIds,
 					Provider->GetProviderId(),
 					TEXT("domain_capability_hjson_provider"),
-					OutError))
+					OutError, ItemField(Declaration.Hjson.Providers, Provider, TEXT("hjson.providers"), TEXT("provider_id")), false))
 				{
 					return false;
 				}
@@ -293,22 +316,29 @@ namespace UE::UAI::DomainCapability
 			TSet<FString> HjsonRoutes;
 			for (const FDomainHjsonRoute& Route : Declaration.Hjson.Routes)
 			{
-				if (!HjsonProviderIds.Contains(Route.ProviderId)
-					|| !IsExactIdentity(Route.CommandId)
-					|| !IsExactIdentity(Route.SchemaId)
-					|| !IsExactIdentity(Route.TargetKind)
-					|| !IsExactIdentity(Route.RootTypeIdentity))
+				if (!HjsonProviderIds.Contains(Route.ProviderId))
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_hjson_route_invalid:")
-							+ Route.RootTypeIdentity);
+					return Fail(OutError, TEXT("domain_capability_hjson_route_invalid"),
+						TEXT("The HJSON route refers to a provider that is not registered in this domain."), ItemField(Declaration.Hjson.Routes, Route, TEXT("hjson.routes"), TEXT("provider_id")), Route.ProviderId);
+				}
+				const TPair<const TCHAR*, const FString*> RouteFields[] = {
+					{TEXT("command_id"), &Route.CommandId}, {TEXT("schema_id"), &Route.SchemaId},
+					{TEXT("target_kind"), &Route.TargetKind}, {TEXT("root_type_identity"), &Route.RootTypeIdentity}};
+				for (const auto& Field : RouteFields)
+				{
+					if (!IsExactIdentity(*Field.Value))
+					{
+						OutError = InvalidDeclaration(TEXT("domain_capability_hjson_route_invalid"),
+							TEXT("The HJSON route field must be non-empty and have no surrounding whitespace."), ItemField(Declaration.Hjson.Routes, Route, TEXT("hjson.routes"), Field.Key));
+						OutError.ActualValue = MakeShared<FJsonValueString>(*Field.Value);
+						return false;
+					}
 				}
 				if (!AddUniqueIdentity(
 					HjsonRoutes,
 					HjsonRouteKey(Route),
 					TEXT("domain_capability_hjson_route"),
-					OutError))
+					OutError, ItemField(Declaration.Hjson.Routes, Route, TEXT("hjson.routes"), TEXT("")), false))
 				{
 					return false;
 				}
@@ -318,10 +348,8 @@ namespace UE::UAI::DomainCapability
 						|| !InitializationContracts.Contains(
 							Route.InitializationContractId)))
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_create_initialization_missing:")
-							+ Route.RootTypeIdentity);
+					return Fail(OutError, TEXT("domain_capability_create_initialization_missing"),
+					TEXT("A create route requires supported initialization and a registered initialization contract."), ItemField(Declaration.Hjson.Routes, Route, TEXT("hjson.routes"), TEXT("initialization_contract_id")), Route.InitializationContractId);
 				}
 			}
 
@@ -329,21 +357,18 @@ namespace UE::UAI::DomainCapability
 			for (const HjsonWorkspace::FTargetCompositionContract& Contract :
 				Declaration.Composition.Contracts)
 			{
-				FString ContractError;
+				UE::UAI::Contract::FDiagnostic ContractError;
 				if (!HjsonWorkspace::ValidateTargetCompositionContract(
 					Contract,
 					ContractError))
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_composition_invalid:")
-							+ Contract.TargetKind + TEXT(":") + ContractError);
+					OutError = ContractError; return false;
 				}
 				if (!AddUniqueIdentity(
 					CompositionTargets,
 					Contract.TargetKind,
 					TEXT("domain_capability_composition_target"),
-					OutError))
+					OutError, ItemField(Declaration.Composition.Contracts, Contract, TEXT("composition.contracts"), TEXT("target_kind")), true))
 				{
 					return false;
 				}
@@ -357,68 +382,59 @@ namespace UE::UAI::DomainCapability
 					OperationIds,
 					Operation.OperationId,
 					TEXT("domain_capability_operation"),
-					OutError))
+					OutError, ItemField(Declaration.Operation.Operations, Operation, TEXT("operation.operations"), TEXT("operation_id")), false))
 				{
 					return false;
 				}
 				if (Operation.TerminalPolicy
 					== EDomainOperationTerminalPolicy::Undeclared)
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_write_terminal_policy_missing:")
-							+ Operation.OperationId);
+					return Fail(OutError, TEXT("domain_capability_write_terminal_policy_missing"),
+					TEXT("The operation must declare its terminal outcome policy."), ItemField(Declaration.Operation.Operations, Operation, TEXT("operation.operations"), TEXT("terminal_policy")), Operation.OperationId);
 				}
 				if (Operation.ExecutionPolicy
 						== EDomainOperationExecutionPolicy::Undeclared
 					|| Operation.TransientStatePolicy
 						== EDomainTransientStatePolicy::Undeclared)
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_operation_state_policy_missing:")
-							+ Operation.OperationId);
+					return Fail(OutError, TEXT("domain_capability_operation_state_policy_missing"),
+						Operation.ExecutionPolicy == EDomainOperationExecutionPolicy::Undeclared
+							? TEXT("The operation must declare its execution policy.") : TEXT("The operation must declare its transient state policy."),
+						Operation.ExecutionPolicy == EDomainOperationExecutionPolicy::Undeclared
+							? ItemField(Declaration.Operation.Operations, Operation, TEXT("operation.operations"), TEXT("execution_policy")) : ItemField(Declaration.Operation.Operations, Operation, TEXT("operation.operations"), TEXT("transient_state_policy")), Operation.OperationId);
 				}
 				if (!Operation.InvocationFactory.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_operation_factory_missing:")
-							+ Operation.OperationId);
+					return Fail(OutError, TEXT("domain_capability_operation_factory_missing"),
+					TEXT("The operation has no invocation factory."), ItemField(Declaration.Operation.Operations, Operation, TEXT("operation.operations"), TEXT("invocation_factory")), Operation.OperationId);
 				}
 				if (Operation.InvocationFactory->GetOperationId()
 					!= Operation.OperationId)
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_operation_factory_identity_mismatch:")
-							+ Operation.OperationId + TEXT(":")
-							+ Operation.InvocationFactory->GetOperationId());
+					OutError = InvalidDeclaration(TEXT("domain_capability_operation_factory_identity_mismatch"),
+						TEXT("The invocation factory identifies a different operation from its declaration."), ItemField(Declaration.Operation.Operations, Operation, TEXT("operation.operations"), TEXT("invocation_factory.operation_id")));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Operation.InvocationFactory->GetOperationId());
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Operation.OperationId);
+					return false;
 				}
 				if (!Operation.bIndependentReadback)
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_write_readback_missing:")
-							+ Operation.OperationId);
+					return Fail(OutError, TEXT("domain_capability_write_readback_missing"),
+					TEXT("The operation must declare independent readback or observation."), ItemField(Declaration.Operation.Operations, Operation, TEXT("operation.operations"), TEXT("independent_readback")), Operation.OperationId);
 				}
 				if (Operation.TransientStatePolicy
 						== EDomainTransientStatePolicy::None
 					&& !Operation.bPersists)
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_write_persistence_missing:")
-							+ Operation.OperationId);
+					return Fail(OutError, TEXT("domain_capability_write_persistence_missing"),
+					TEXT("An operation without transient state must provide durable persistence."), ItemField(Declaration.Operation.Operations, Operation, TEXT("operation.operations"), TEXT("persists")), Operation.OperationId);
 				}
 				if (Operation.TransientStatePolicy
 						== EDomainTransientStatePolicy::RecoverableSession
 					&& Operation.bPersists)
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_transient_persistence_conflict:")
-							+ Operation.OperationId);
+					return Fail(OutError, TEXT("domain_capability_transient_persistence_conflict"),
+					TEXT("A recoverable session operation cannot also declare durable persistence."), ItemField(Declaration.Operation.Operations, Operation, TEXT("operation.operations"), TEXT("persists")), Operation.OperationId);
 				}
 			}
 
@@ -430,7 +446,7 @@ namespace UE::UAI::DomainCapability
 					ReadPortIds,
 					ReadPort->GetPortId(),
 					TEXT("domain_capability_read_port"),
-					OutError))
+					OutError, ItemField(Declaration.Discovery.ReadPorts, ReadPort, TEXT("discovery.read_ports"), TEXT("port_id")), false))
 				{
 					return false;
 				}
@@ -444,7 +460,7 @@ namespace UE::UAI::DomainCapability
 					SourceIds,
 					Source.Source->GetSourceId(),
 					TEXT("domain_capability_catalog_source"),
-					OutError))
+					OutError, ItemField(Declaration.Discovery.Sources, Source, TEXT("discovery.sources"), TEXT("source_id")), false))
 				{
 					return false;
 				}
@@ -454,17 +470,15 @@ namespace UE::UAI::DomainCapability
 						CatalogKinds,
 						Kind,
 						TEXT("domain_capability_catalog_kind"),
-						OutError))
+						OutError, ItemField(Source.Source->GetCatalogKinds(), Kind, ItemField(Declaration.Discovery.Sources, Source, TEXT("discovery.sources"), TEXT("catalog_kinds")), FString()), true))
 					{
 						return false;
 					}
 				}
 				if (!ReadPortIds.Contains(Source.ReadPortId))
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_candidate_read_port_missing:")
-							+ Source.ReadPortId);
+					return Fail(OutError, TEXT("domain_capability_candidate_read_port_missing"),
+					TEXT("The discovery source refers to a read port that is not registered in this domain."), ItemField(Declaration.Discovery.Sources, Source, TEXT("discovery.sources"), TEXT("read_port_id")), Source.ReadPortId);
 				}
 			}
 			TSet<FString> ContentProviderIds;
@@ -476,14 +490,13 @@ namespace UE::UAI::DomainCapability
 						ContentProviderIds,
 						Provider->GetProviderId(),
 						TEXT("domain_capability_content_discovery_provider"),
-						OutError)
+						OutError, ItemField(Declaration.Discovery.ContentProviders, Provider, TEXT("discovery.content_providers"), TEXT("provider_id")), false)
 					|| Provider->GetContentKinds().IsEmpty())
 				{
 					if (OutError.IsEmpty())
 					{
-						OutError =
-							TEXT("domain_capability_content_discovery_kind_missing:")
-							+ Provider->GetProviderId();
+						Fail(OutError, TEXT("domain_capability_content_discovery_kind_missing"),
+							TEXT("The content discovery provider must declare at least one supported content kind."), ItemField(Declaration.Discovery.ContentProviders, Provider, TEXT("discovery.content_providers"), TEXT("content_kinds")), Provider->GetProviderId());
 					}
 					return false;
 				}
@@ -494,7 +507,7 @@ namespace UE::UAI::DomainCapability
 							ProviderKinds,
 							Kind,
 							TEXT("domain_capability_content_discovery_kind"),
-							OutError))
+							OutError, ItemField(Provider->GetContentKinds(), Kind, ItemField(Declaration.Discovery.ContentProviders, Provider, TEXT("discovery.content_providers"), TEXT("content_kinds")), FString()), true))
 					{
 						return false;
 					}
@@ -510,38 +523,36 @@ namespace UE::UAI::DomainCapability
 					LayoutProviderIds,
 					Layout.ProviderId,
 					TEXT("domain_capability_layout_provider"),
-					OutError)
+					OutError, ItemField(Declaration.Layout.Layouts, Layout, TEXT("layout.layouts"), TEXT("provider_id")), false)
 					|| !AddUniqueIdentity(
 						LayoutGraphIdentities,
 						Layout.GraphIdentity,
 						TEXT("domain_capability_layout_graph"),
-						OutError))
+						OutError, ItemField(Declaration.Layout.Layouts, Layout, TEXT("layout.layouts"), TEXT("graph_identity")), false))
 				{
 					return false;
 				}
-				if (!IsExactIdentity(Layout.MechanicsId)
-					|| !IsExactIdentity(Layout.ReadPortId)
-					|| !Layout.bPersists
-					|| !Layout.bIndependentReadback)
-				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_layout_readback_missing:")
-							+ Layout.GraphIdentity);
-				}
+				if (!IsExactIdentity(Layout.MechanicsId))
+					return Fail(OutError, TEXT("domain_capability_layout_readback_missing"), TEXT("The layout requires a non-empty mechanics identifier without surrounding whitespace."), ItemField(Declaration.Layout.Layouts, Layout, TEXT("layout.layouts"), TEXT("mechanics_id")), Layout.GraphIdentity);
+				if (!IsExactIdentity(Layout.ReadPortId))
+					return Fail(OutError, TEXT("domain_capability_layout_readback_missing"), TEXT("The layout requires a non-empty read port identifier without surrounding whitespace."), ItemField(Declaration.Layout.Layouts, Layout, TEXT("layout.layouts"), TEXT("read_port_id")), Layout.GraphIdentity);
+				if (!Layout.bPersists)
+					return Fail(OutError, TEXT("domain_capability_layout_readback_missing"), TEXT("The layout must declare durable persistence."), ItemField(Declaration.Layout.Layouts, Layout, TEXT("layout.layouts"), TEXT("persists")), Layout.GraphIdentity);
+				if (!Layout.bIndependentReadback)
+					return Fail(OutError, TEXT("domain_capability_layout_readback_missing"), TEXT("The layout must declare independent readback."), ItemField(Declaration.Layout.Layouts, Layout, TEXT("layout.layouts"), TEXT("independent_readback")), Layout.GraphIdentity);
 			}
 
 			TSet<uint8> StatePlanes;
-			for (const StateSemantic::EUeAgentStatePlane Plane :
+			for (const StateSemantic::EUeAgentStatePlane& Plane :
 				Declaration.State.Planes)
 			{
 				const uint8 Value = static_cast<uint8>(Plane);
 				if (StatePlanes.Contains(Value))
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_state_plane_conflict:")
-							+ FString::FromInt(Value));
+					OutError = InvalidDeclaration(TEXT("domain_capability_state_plane_conflict"),
+						TEXT("The same state plane is declared more than once."), ItemField(Declaration.State.Planes, Plane, TEXT("state.planes"), FString()));
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(Value);
+					return false;
 				}
 				StatePlanes.Add(Value);
 			}
@@ -567,21 +578,10 @@ namespace UE::UAI::DomainCapability
 					== EDomainCapabilitySupport::Supported)
 				+ (Declaration.Surface.Support
 					== EDomainCapabilitySupport::Supported);
-			if (Declaration.Migration.Support
-					== EDomainCapabilitySupport::Supported
-				&& ActiveCapabilityCount == 0)
-			{
-				return Fail(
-					OutError,
-					TEXT("domain_capability_migration_owner_without_active_contribution:")
-						+ Declaration.Migration.OwnerId);
-			}
 			if (ActiveCapabilityCount == 0)
 			{
-				return Fail(
-					OutError,
-					TEXT("domain_capability_no_supported_capability:")
-						+ Declaration.DomainId);
+				return Fail(OutError, TEXT("domain_capability_no_supported_capability"),
+					TEXT("The domain declares no supported capability."), TEXT("support"), Declaration.DomainId);
 			}
 			return true;
 		}
@@ -595,14 +595,7 @@ namespace UE::UAI::DomainCapability
 				FString ContributionId;
 				Active::FUeAgentActiveCommandContributionFactory Factory = nullptr;
 			};
-			struct FHjsonFactoryEntry final
-			{
-				FString ProviderId;
-				HjsonWorkspace::FImportInitializationDomainProviderFactory
-					Factory = nullptr;
-			};
 			TArray<FCommandFactoryEntry> CommandFactories;
-			TArray<FHjsonFactoryEntry> HjsonFactories;
 		};
 
 		struct FProcessCatalog final
@@ -611,7 +604,7 @@ namespace UE::UAI::DomainCapability
 			bool bSealed = false;
 			bool bAuthorityBuildInProgress = false;
 			TArray<FProcessFactoryEntry> Entries;
-			TArray<FString> Errors;
+			TArray<UE::UAI::Contract::FDiagnostic> Errors;
 			TSharedPtr<const FFrozenDomainCapabilitySet> Frozen;
 			TSharedPtr<const FDomainCapabilityAuthorities> Authorities;
 		};
@@ -648,23 +641,21 @@ namespace UE::UAI::DomainCapability
 			FScopeLock Lock(&Catalog.Mutex);
 			if (Catalog.bSealed)
 			{
-				Catalog.Errors.AddUnique(
-					TEXT("domain_capability_process_catalog_sealed:")
-						+ DomainId);
+				Catalog.Errors.Add(RegistrationFailure(TEXT("domain_capability_process_catalog_sealed"), TEXT("The process capability catalog is sealed and cannot accept another factory."), TEXT("factories"), DomainId));
 				return false;
 			}
 			if (!IsExactIdentity(DomainId) || !Factory)
 			{
-				Catalog.Errors.AddUnique(
-					TEXT("domain_capability_factory_invalid:") + DomainId);
+				Catalog.Errors.Add(RegistrationFailure(TEXT("domain_capability_factory_invalid"),
+					!IsExactIdentity(DomainId) ? TEXT("The factory domain identifier must be non-empty and have no surrounding whitespace.") : TEXT("The domain factory callback is missing."),
+					!IsExactIdentity(DomainId) ? TEXT("domain_id") : TEXT("factory"), DomainId));
 				return false;
 			}
 			FProcessFactoryEntry& Entry =
 				FindOrAddProcessDomain(Catalog, DomainId);
 			if (Entry.DomainFactory)
 			{
-				Catalog.Errors.AddUnique(
-					TEXT("domain_capability_factory_duplicate:") + DomainId);
+				Catalog.Errors.Add(RegistrationFailure(TEXT("domain_capability_factory_duplicate"), TEXT("A factory is already registered for this domain."), TEXT("factory"), DomainId));
 				return false;
 			}
 			Entry.DomainFactory = Factory;
@@ -680,18 +671,18 @@ namespace UE::UAI::DomainCapability
 			FScopeLock Lock(&Catalog.Mutex);
 			if (Catalog.bSealed)
 			{
-				Catalog.Errors.AddUnique(
-					TEXT("domain_capability_process_catalog_sealed:")
-						+ DomainId);
+				Catalog.Errors.Add(RegistrationFailure(TEXT("domain_capability_process_catalog_sealed"), TEXT("The process capability catalog is sealed and cannot accept another command factory."), TEXT("command.factories"), DomainId, ContributionId));
 				return false;
 			}
 			if (!IsExactIdentity(DomainId)
 				|| !IsExactIdentity(ContributionId)
 				|| !Factory)
 			{
-				Catalog.Errors.AddUnique(
-					TEXT("domain_capability_command_factory_invalid:")
-						+ DomainId + TEXT(":") + ContributionId);
+				Catalog.Errors.Add(RegistrationFailure(TEXT("domain_capability_command_factory_invalid"),
+					!IsExactIdentity(DomainId) ? TEXT("The command factory domain identifier must be non-empty and have no surrounding whitespace.")
+					: !IsExactIdentity(ContributionId) ? TEXT("The command contribution identifier must be non-empty and have no surrounding whitespace.")
+					: TEXT("The command factory callback is missing."),
+					!IsExactIdentity(DomainId) ? TEXT("domain_id") : !IsExactIdentity(ContributionId) ? TEXT("command.factories.contribution_id") : TEXT("command.factories.callback"), DomainId, ContributionId));
 				return false;
 			}
 			for (const FProcessFactoryEntry& Entry : Catalog.Entries)
@@ -703,9 +694,7 @@ namespace UE::UAI::DomainCapability
 						return Item.ContributionId == ContributionId;
 					}))
 				{
-					Catalog.Errors.AddUnique(
-						TEXT("domain_capability_command_factory_duplicate:")
-							+ ContributionId);
+					Catalog.Errors.Add(RegistrationFailure(TEXT("domain_capability_command_factory_duplicate"), TEXT("A command factory is already registered for this contribution."), TEXT("command.factories.contribution_id"), DomainId, ContributionId));
 					return false;
 				}
 			}
@@ -717,83 +706,8 @@ namespace UE::UAI::DomainCapability
 			return true;
 		}
 
-		bool RegisterProcessHjsonFactory(
-			const FString& DomainId,
-			const FString& ProviderId,
-			const HjsonWorkspace::
-				FImportInitializationDomainProviderFactory Factory)
-		{
-			FProcessCatalog& Catalog = ProcessCatalog();
-			FScopeLock Lock(&Catalog.Mutex);
-			if (Catalog.bSealed)
-			{
-				Catalog.Errors.AddUnique(
-					TEXT("domain_capability_process_catalog_sealed:")
-						+ DomainId);
-				return false;
-			}
-			if (!IsExactIdentity(DomainId)
-				|| !IsExactIdentity(ProviderId)
-				|| !Factory)
-			{
-				Catalog.Errors.AddUnique(
-					TEXT("domain_capability_hjson_factory_invalid:")
-						+ DomainId + TEXT(":") + ProviderId);
-				return false;
-			}
-			for (const FProcessFactoryEntry& Entry : Catalog.Entries)
-			{
-				if (Entry.HjsonFactories.ContainsByPredicate(
-					[&ProviderId](
-						const FProcessFactoryEntry::FHjsonFactoryEntry& Item)
-					{
-						return Item.ProviderId == ProviderId;
-					}))
-				{
-					Catalog.Errors.AddUnique(
-						TEXT("domain_capability_hjson_factory_duplicate:")
-							+ ProviderId);
-					return false;
-				}
-			}
-			FProcessFactoryEntry::FHjsonFactoryEntry Added;
-			Added.ProviderId = ProviderId;
-			Added.Factory = Factory;
-			FindOrAddProcessDomain(Catalog, DomainId).HjsonFactories.Add(
-				MoveTemp(Added));
-			return true;
-		}
 	}
 
-	FDomainOperationInvocationError::FDomainOperationInvocationError(
-		FString InCode,
-		FString InSubjectId,
-		FString InDetail)
-		: Code(MoveTemp(InCode))
-		, SubjectId(MoveTemp(InSubjectId))
-		, Detail(MoveTemp(InDetail))
-	{
-	}
-
-	const FString& FDomainOperationInvocationError::GetCode() const
-	{
-		return Code;
-	}
-
-	const FString& FDomainOperationInvocationError::GetSubjectId() const
-	{
-		return SubjectId;
-	}
-
-	const FString& FDomainOperationInvocationError::GetDetail() const
-	{
-		return Detail;
-	}
-
-	bool FDomainOperationInvocationError::IsPresent() const
-	{
-		return !Code.IsEmpty();
-	}
 
 	bool FDomainOperationInvocation::TryCreate(
 		TSharedRef<const Operation::FOperationLifecyclePlan> InPlan,
@@ -808,17 +722,12 @@ namespace UE::UAI::DomainCapability
 		OutError = FDomainOperationInvocationError();
 		if (!InPlan->IsValid())
 		{
-			OutError = FDomainOperationInvocationError(
-				TEXT("domain_operation_invocation_plan_invalid"),
-				InPlan->GetPlanId());
+			OutError = InPlan->GetValidationDiagnostic();
 			return false;
 		}
-		if (!InAuthorization->IsValid()
-			|| !InAuthorization->Authorizes(*InPlan))
+		if (!InAuthorization->TryAuthorize(*InPlan, OutError))
 		{
-			OutError = FDomainOperationInvocationError(
-				TEXT("domain_operation_invocation_authorization_invalid"),
-				InPlan->GetPlanId());
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = InPlan->GetPlanId();
 			return false;
 		}
 		OutInvocation.Plan = MoveTemp(InPlan);
@@ -892,7 +801,6 @@ namespace UE::UAI::DomainCapability
 		Declaration.Layout.Support = EDomainCapabilitySupport::Unsupported;
 		Declaration.State.Support = EDomainCapabilitySupport::Unsupported;
 		Declaration.Surface.Support = EDomainCapabilitySupport::Unsupported;
-		Declaration.Migration.Support = EDomainCapabilitySupport::Unsupported;
 		return Declaration;
 	}
 
@@ -905,12 +813,14 @@ namespace UE::UAI::DomainCapability
 	bool FDomainCapabilityContribution::TryCreate(
 		FDomainCapabilityDeclaration Declaration,
 		TSharedPtr<const FDomainCapabilityContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
 		if (!ValidateDeclaration(Declaration, OutError))
 		{
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Declaration.DomainId;
+			if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("domain_capability_declaration");
 			return false;
 		}
 		OutContribution = TSharedPtr<const FDomainCapabilityContribution>(
@@ -1007,7 +917,7 @@ namespace UE::UAI::DomainCapability
 
 	bool FFrozenDomainCapabilitySet::TryBuildAuthorities(
 		FDomainCapabilityAuthorities& OutAuthorities,
-		FString& OutError) const
+		UE::UAI::Contract::FDiagnostic& OutError) const
 	{
 		OutAuthorities = FDomainCapabilityAuthorities();
 		OutError.Reset();
@@ -1054,10 +964,9 @@ namespace UE::UAI::DomainCapability
 					Built.QueryProviderRegistry,
 					QueryError))
 			{
-				return Fail(
-					OutError,
-					TEXT("domain_capability_query_projection_failed:")
-						+ QueryError.Code);
+				OutError = Contract::FDiagnostic::WrapFailure(TEXT("domain_capability_query_projection_failed"), QueryError,
+					TEXT("domain_capability"), TEXT("The domain query registry could not be initialized."));
+				return false;
 			}
 		}
 		if (!CatalogSources.IsEmpty() || !ReadPorts.IsEmpty())
@@ -1069,10 +978,9 @@ namespace UE::UAI::DomainCapability
 					Built.DiscoveryService,
 					DiscoveryError))
 			{
-				return Fail(
-					OutError,
-					TEXT("domain_capability_discovery_projection_failed:")
-						+ DiscoveryError.Code);
+				OutError = Contract::FDiagnostic::WrapFailure(TEXT("domain_capability_discovery_projection_failed"), DiscoveryError,
+					TEXT("domain_capability"), TEXT("The discovery service could not be initialized."));
+				return false;
 			}
 		}
 		if (!ContentProviders.IsEmpty())
@@ -1083,10 +991,10 @@ namespace UE::UAI::DomainCapability
 					Built.ContentDiscoveryService,
 					DiscoveryError))
 			{
-				return Fail(
-					OutError,
-					TEXT("domain_capability_content_discovery_projection_failed:")
-						+ DiscoveryError.Code);
+				OutError = Contract::FDiagnostic::WrapFailure(
+					TEXT("domain_capability_content_discovery_projection_failed"), DiscoveryError,
+					TEXT("domain_capability"), TEXT("The content discovery service could not be initialized."));
+				return false;
 			}
 		}
 
@@ -1099,10 +1007,8 @@ namespace UE::UAI::DomainCapability
 					Built.HjsonRegistry,
 					WorkspaceError))
 			{
-				return Fail(
-					OutError,
-					TEXT("domain_capability_hjson_projection_failed:")
-						+ WorkspaceError.GetCode());
+				OutError = WorkspaceError.GetDiagnostic();
+				return false;
 			}
 		}
 
@@ -1129,22 +1035,18 @@ namespace UE::UAI::DomainCapability
 
 	bool FDomainCapabilityComposition::TryAdd(
 		TSharedRef<const FDomainCapabilityContribution> Contribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		if (bSealed)
 		{
-			return Fail(
-				OutError,
-				TEXT("domain_capability_composition_sealed:")
-					+ Contribution->GetDomainId());
+			return Fail(OutError, TEXT("domain_capability_composition_sealed"),
+					TEXT("The capability composition is sealed and cannot accept another contribution."), TEXT("contributions"), Contribution->GetDomainId());
 		}
 		if (DomainIds.Contains(Contribution->GetDomainId()))
 		{
-			return Fail(
-				OutError,
-				TEXT("domain_capability_domain_conflict:")
-					+ Contribution->GetDomainId());
+			return Fail(OutError, TEXT("domain_capability_domain_conflict"),
+					TEXT("More than one contribution declares the same domain."), TEXT("contributions.domain_id"), Contribution->GetDomainId());
 		}
 		DomainIds.Add(Contribution->GetDomainId());
 		Contributions.Add(MoveTemp(Contribution));
@@ -1153,20 +1055,18 @@ namespace UE::UAI::DomainCapability
 
 	bool FDomainCapabilityComposition::TryFreeze(
 		TSharedPtr<const FFrozenDomainCapabilitySet>& OutFrozen,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutFrozen.Reset();
 		OutError.Reset();
 		if (bSealed)
 		{
-			return Fail(
-				OutError,
-				TEXT("domain_capability_composition_sealed:freeze"));
+			return Fail(OutError, TEXT("domain_capability_composition_sealed"), TEXT("The capability composition has already been frozen."), TEXT("composition"));
 		}
 		bSealed = true;
 		if (Contributions.IsEmpty())
 		{
-			return Fail(OutError, TEXT("domain_capability_composition_empty"));
+			return Fail(OutError, TEXT("domain_capability_composition_empty"), TEXT("The capability composition contains no domain contributions."), TEXT("contributions"));
 		}
 
 		TSet<FString> CommandContributionIds;
@@ -1190,6 +1090,7 @@ namespace UE::UAI::DomainCapability
 		{
 			const FDomainCapabilityDeclaration& Declaration =
 				Contribution->GetDeclaration();
+			const FString ContributionPath = ItemField(Contributions, Contribution, TEXT("contributions"), FString());
 			for (const TSharedRef<Active::IUeAgentActiveCommandContribution>&
 				CommandContribution : Declaration.Command.Contributions)
 			{
@@ -1197,7 +1098,7 @@ namespace UE::UAI::DomainCapability
 					CommandContributionIds,
 					CommandContribution->GetContributionId(),
 					TEXT("domain_capability_command_contribution"),
-					OutError))
+					OutError, ItemField(Declaration.Command.Contributions, CommandContribution, ContributionPath + TEXT(".command.contributions"), TEXT("contribution_id")), false))
 				{
 					return false;
 				}
@@ -1211,7 +1112,7 @@ namespace UE::UAI::DomainCapability
 						CommandIds,
 						Command.CommandId,
 						TEXT("domain_capability_command_id"),
-						OutError))
+						OutError, ItemField(Declarations, Command, ItemField(Declaration.Command.Contributions, CommandContribution, ContributionPath + TEXT(".command.contributions"), TEXT("commands")), TEXT("command_id")), true))
 					{
 						return false;
 					}
@@ -1224,7 +1125,7 @@ namespace UE::UAI::DomainCapability
 					QueryBindings,
 					Provider.GetProviderBinding(),
 					TEXT("domain_capability_query_binding"),
-					OutError))
+					OutError, ItemField(Declaration.Query.Providers, Provider, ContributionPath + TEXT(".query.providers"), TEXT("provider_binding")), false))
 				{
 					return false;
 				}
@@ -1236,7 +1137,7 @@ namespace UE::UAI::DomainCapability
 					CatalogSourceIds,
 					Source.Source->GetSourceId(),
 					TEXT("domain_capability_catalog_source"),
-					OutError))
+					OutError, ItemField(Declaration.Discovery.Sources, Source, ContributionPath + TEXT(".discovery.sources"), TEXT("source_id")), false))
 				{
 					return false;
 				}
@@ -1246,7 +1147,7 @@ namespace UE::UAI::DomainCapability
 						CatalogKinds,
 						Kind,
 						TEXT("domain_capability_catalog_kind"),
-						OutError))
+						OutError, ItemField(Source.Source->GetCatalogKinds(), Kind, ItemField(Declaration.Discovery.Sources, Source, ContributionPath + TEXT(".discovery.sources"), TEXT("catalog_kinds")), FString()), true))
 					{
 						return false;
 					}
@@ -1259,7 +1160,7 @@ namespace UE::UAI::DomainCapability
 					ReadPortIds,
 					ReadPort->GetPortId(),
 					TEXT("domain_capability_read_port"),
-					OutError))
+					OutError, ItemField(Declaration.Discovery.ReadPorts, ReadPort, ContributionPath + TEXT(".discovery.read_ports"), TEXT("port_id")), false))
 				{
 					return false;
 				}
@@ -1272,7 +1173,7 @@ namespace UE::UAI::DomainCapability
 						ContentDiscoveryProviderIds,
 						Provider->GetProviderId(),
 						TEXT("domain_capability_content_discovery_provider"),
-						OutError))
+						OutError, ItemField(Declaration.Discovery.ContentProviders, Provider, ContributionPath + TEXT(".discovery.content_providers"), TEXT("provider_id")), false))
 				{
 					return false;
 				}
@@ -1285,7 +1186,7 @@ namespace UE::UAI::DomainCapability
 					HjsonProviderIds,
 					Provider->GetProviderId(),
 					TEXT("domain_capability_hjson_provider"),
-					OutError))
+					OutError, ItemField(Declaration.Hjson.Providers, Provider, ContributionPath + TEXT(".hjson.providers"), TEXT("provider_id")), false))
 				{
 					return false;
 				}
@@ -1296,7 +1197,7 @@ namespace UE::UAI::DomainCapability
 					HjsonRouteIds,
 					HjsonRouteKey(Route),
 					TEXT("domain_capability_hjson_route"),
-					OutError))
+					OutError, ItemField(Declaration.Hjson.Routes, Route, ContributionPath + TEXT(".hjson.routes"), TEXT("")), false))
 				{
 					return false;
 				}
@@ -1308,7 +1209,7 @@ namespace UE::UAI::DomainCapability
 					CompositionTargets,
 					Contract.TargetKind,
 					TEXT("domain_capability_composition_target"),
-					OutError))
+					OutError, ItemField(Declaration.Composition.Contracts, Contract, ContributionPath + TEXT(".composition.contracts"), TEXT("target_kind")), true))
 				{
 					return false;
 				}
@@ -1320,7 +1221,7 @@ namespace UE::UAI::DomainCapability
 					InitializationContracts,
 					ContractId,
 					TEXT("domain_capability_initialization_contract"),
-					OutError))
+					OutError, ItemField(Declaration.Initialization.ContractIds, ContractId, ContributionPath + TEXT(".initialization.contract_ids"), TEXT("")), false))
 				{
 					return false;
 				}
@@ -1332,7 +1233,7 @@ namespace UE::UAI::DomainCapability
 					OperationIds,
 					Operation.OperationId,
 					TEXT("domain_capability_operation"),
-					OutError))
+					OutError, ItemField(Declaration.Operation.Operations, Operation, ContributionPath + TEXT(".operation.operations"), TEXT("operation_id")), false))
 				{
 					return false;
 				}
@@ -1343,12 +1244,12 @@ namespace UE::UAI::DomainCapability
 					LayoutProviderIds,
 					Layout.ProviderId,
 					TEXT("domain_capability_layout_provider"),
-					OutError)
+					OutError, ItemField(Declaration.Layout.Layouts, Layout, ContributionPath + TEXT(".layout.layouts"), TEXT("provider_id")), false)
 					|| !AddUniqueIdentity(
 						LayoutGraphIdentities,
 						Layout.GraphIdentity,
 						TEXT("domain_capability_layout_graph"),
-						OutError))
+						OutError, ItemField(Declaration.Layout.Layouts, Layout, ContributionPath + TEXT(".layout.layouts"), TEXT("graph_identity")), false))
 				{
 					return false;
 				}
@@ -1360,7 +1261,7 @@ namespace UE::UAI::DomainCapability
 					SurfaceIds,
 					Surface.SurfaceId,
 					TEXT("domain_capability_surface"),
-					OutError))
+					OutError, ItemField(Declaration.Surface.Surfaces, Surface, ContributionPath + TEXT(".surface.surfaces"), TEXT("surface_id")), false))
 				{
 					return false;
 				}
@@ -1406,18 +1307,9 @@ namespace UE::UAI::DomainCapability
 			Factory);
 	}
 
-	bool RegisterProcessDomainHjsonCapabilityFactory(
-		const FString& DomainId,
-		const FString& ProviderId,
-		const HjsonWorkspace::
-			FImportInitializationDomainProviderFactory Factory)
-	{
-		return RegisterProcessHjsonFactory(DomainId, ProviderId, Factory);
-	}
-
 	bool TryFreezeProcessDomainCapabilities(
 		TSharedPtr<const FFrozenDomainCapabilitySet>& OutFrozen,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutFrozen.Reset();
 		OutError.Reset();
@@ -1433,7 +1325,7 @@ namespace UE::UAI::DomainCapability
 			Catalog.bSealed = true;
 			if (!Catalog.Errors.IsEmpty())
 			{
-				OutError = Catalog.Errors[0];
+				for (const auto& Diagnostic : Catalog.Errors) OutError.Append(Diagnostic);
 				return false;
 			}
 			Entries = Catalog.Entries;
@@ -1447,28 +1339,29 @@ namespace UE::UAI::DomainCapability
 		FDomainCapabilityComposition Composition;
 		for (const FProcessFactoryEntry& Entry : Entries)
 		{
+			const FString FactoryPath = ItemField(Entries, Entry, TEXT("factories"), FString());
 			FDomainCapabilityDeclaration Declaration =
 				MakeExplicitlyUnsupportedDomainCapabilityDeclaration(
 					Entry.DomainId);
 			if (Entry.DomainFactory)
 			{
 				TSharedPtr<const FDomainCapabilityContribution> BaseContribution;
-				FString FactoryError;
-				if (!Entry.DomainFactory(BaseContribution, FactoryError)
-					|| !BaseContribution.IsValid())
+				UE::UAI::Contract::FDiagnostic FactoryError;
+				const bool bCreated = Entry.DomainFactory(BaseContribution, FactoryError);
+				if (!bCreated || !BaseContribution.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_factory_failed:")
-							+ Entry.DomainId + TEXT(":") + FactoryError);
+					OutError = FactoryError;
+					if (OutError.IsEmpty())
+						OutError = RegistrationFailure(TEXT("domain_capability_factory_failed"),
+							bCreated ? TEXT("The domain factory reported success without returning a contribution.") : TEXT("The domain factory failed without returning a diagnostic."), FactoryPath, Entry.DomainId);
+					return false;
 				}
 				if (BaseContribution->GetDomainId() != Entry.DomainId)
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_factory_identity_mismatch:")
-							+ Entry.DomainId + TEXT(":")
-							+ BaseContribution->GetDomainId());
+					OutError = InvalidDeclaration(TEXT("domain_capability_factory_identity_mismatch"), TEXT("The factory returned a contribution for a different domain."), FactoryPath + TEXT(".domain_id"));
+					OutError.ActualValue = MakeShared<FJsonValueString>(BaseContribution->GetDomainId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Entry.DomainId);
+					return false;
 				}
 				Declaration = BaseContribution->GetDeclaration();
 			}
@@ -1484,26 +1377,28 @@ namespace UE::UAI::DomainCapability
 			for (const FProcessFactoryEntry::FCommandFactoryEntry& CommandFactory :
 				CommandFactories)
 			{
+				const FString CommandFactoryPath = ItemField(CommandFactories, CommandFactory, FactoryPath + TEXT(".command_factories"), FString());
 				TSharedPtr<Active::IUeAgentActiveCommandContribution>
 					CommandContribution;
-				FString FactoryError;
-				if (!CommandFactory.Factory(CommandContribution, FactoryError)
-					|| !CommandContribution.IsValid())
+				UE::UAI::Contract::FDiagnostic FactoryError;
+				const bool bCreated = CommandFactory.Factory(CommandContribution, FactoryError);
+				if (!bCreated || !CommandContribution.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_command_factory_failed:")
-							+ CommandFactory.ContributionId + TEXT(":")
-							+ FactoryError);
+					OutError = FactoryError;
+					if (OutError.IsEmpty())
+						OutError = RegistrationFailure(TEXT("domain_capability_command_factory_failed"),
+							bCreated ? TEXT("The command factory reported success without returning a contribution.") : TEXT("The command factory failed without returning a diagnostic."),
+							CommandFactoryPath, Entry.DomainId, CommandFactory.ContributionId);
+					return false;
 				}
 				if (CommandContribution->GetContributionId()
 					!= CommandFactory.ContributionId)
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_command_factory_identity_mismatch:")
-							+ CommandFactory.ContributionId + TEXT(":")
-							+ CommandContribution->GetContributionId());
+					OutError = InvalidDeclaration(TEXT("domain_capability_command_factory_identity_mismatch"), TEXT("The command factory returned a different contribution from the one registered."), CommandFactoryPath + TEXT(".contribution_id"));
+					OutError.CandidateName = Entry.DomainId;
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(CommandContribution->GetContributionId());
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(CommandFactory.ContributionId);
+					return false;
 				}
 				if (Declaration.Command.Contributions.ContainsByPredicate(
 					[&CommandFactory](
@@ -1514,63 +1409,12 @@ namespace UE::UAI::DomainCapability
 							== CommandFactory.ContributionId;
 					}))
 				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_command_factory_duplicate:")
-							+ CommandFactory.ContributionId);
+					return Fail(OutError, TEXT("domain_capability_command_factory_duplicate"),
+						TEXT("The command factory duplicates a contribution already supplied by the domain."), CommandFactoryPath + TEXT(".contribution_id"), CommandFactory.ContributionId);
 				}
 				Declaration.Command.Support = EDomainCapabilitySupport::Supported;
 				Declaration.Command.Contributions.Add(
 					CommandContribution.ToSharedRef());
-			}
-
-			TArray<FProcessFactoryEntry::FHjsonFactoryEntry> HjsonFactories =
-				Entry.HjsonFactories;
-			HjsonFactories.Sort(
-				[](const FProcessFactoryEntry::FHjsonFactoryEntry& Left,
-				   const FProcessFactoryEntry::FHjsonFactoryEntry& Right)
-				{
-					return Left.ProviderId < Right.ProviderId;
-				});
-			for (const FProcessFactoryEntry::FHjsonFactoryEntry& HjsonFactory :
-				HjsonFactories)
-			{
-				TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>
-					Provider;
-				HjsonWorkspace::FWorkspaceError FactoryError;
-				if (!HjsonFactory.Factory(Provider, FactoryError)
-					|| !Provider.IsValid())
-				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_hjson_factory_failed:")
-							+ HjsonFactory.ProviderId + TEXT(":")
-							+ FactoryError.GetCode());
-				}
-				if (Provider->GetProviderId() != HjsonFactory.ProviderId)
-				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_hjson_factory_identity_mismatch:")
-							+ HjsonFactory.ProviderId + TEXT(":")
-							+ Provider->GetProviderId());
-				}
-				if (Declaration.Hjson.Providers.ContainsByPredicate(
-					[&HjsonFactory](
-						const TSharedRef<HjsonWorkspace::
-							IImportInitializationDomainProvider>& Existing)
-					{
-						return Existing->GetProviderId()
-							== HjsonFactory.ProviderId;
-					}))
-				{
-					return Fail(
-						OutError,
-						TEXT("domain_capability_hjson_factory_duplicate:")
-							+ HjsonFactory.ProviderId);
-				}
-				Declaration.Hjson.Support = EDomainCapabilitySupport::Supported;
-				Declaration.Hjson.Providers.Add(Provider.ToSharedRef());
 			}
 
 			TSharedPtr<const FDomainCapabilityContribution> Contribution;
@@ -1603,7 +1447,7 @@ namespace UE::UAI::DomainCapability
 
 	bool TryGetOrBuildProcessDomainCapabilityAuthorities(
 		FDomainCapabilityAuthorities& OutAuthorities,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutAuthorities = FDomainCapabilityAuthorities();
 		OutError.Reset();
@@ -1617,9 +1461,8 @@ namespace UE::UAI::DomainCapability
 			}
 			if (Catalog.bAuthorityBuildInProgress)
 			{
-				return Fail(
-					OutError,
-					TEXT("domain_capability_process_authority_reentrant"));
+				return Fail(OutError, TEXT("domain_capability_process_authority_reentrant"),
+					TEXT("Domain capability authorities are already being built by an active call."), TEXT("authorities"));
 			}
 			Catalog.bAuthorityBuildInProgress = true;
 		}

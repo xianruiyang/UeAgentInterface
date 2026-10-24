@@ -5,6 +5,7 @@
 #include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Engine/Texture2D.h"
@@ -30,20 +31,7 @@ namespace
 		const int64 WorkLimit = 262144,
 		const int64 FileLimit = 4096)
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 1048576},
-			{EUeAgentResourceDimension::OutputBytes, 1048576},
-			{EUeAgentResourceDimension::StringBytes, 1048576},
-			{EUeAgentResourceDimension::Nodes, 65536},
-			{EUeAgentResourceDimension::Items, 65536},
-			{EUeAgentResourceDimension::Files, FileLimit},
-			{EUeAgentResourceDimension::ReferenceEdges, 65536},
-			{EUeAgentResourceDimension::WorkUnits, WorkLimit},
-			{
-				EUeAgentResourceDimension::EstimatedMemoryBytes,
-				8388608
-			},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FUeAgentCanonicalIdentity MakeIdentity(
@@ -408,6 +396,11 @@ namespace
 			FAssetDurableError& OutError) override
 		{
 			Events.Add(TEXT("capture_backups"));
+			if (bFailBackup)
+			{
+				OutError = FAssetDurableError(TEXT("fixture_backup_failed"));
+				return false;
+			}
 			for (const FDurableArtifact& Artifact :
 				Session->GetInventory().GetArtifacts())
 			{
@@ -546,6 +539,7 @@ namespace
 		TArray<FString> MutationEvents;
 		TMap<FString, TOptional<FString>> Backups;
 		bool bFailPublish = false;
+		bool bFailBackup = false;
 		bool bFailPublishAfterMutation = false;
 		bool bRestoreConfirmed = true;
 		bool bEscapeArtifactPath = false;
@@ -771,15 +765,19 @@ bool FUeAgentAssetDurableStableRevisionTest::RunTest(
 		Package,
 		*FPackageName::GetLongPackageAssetName(PackageName),
 		RF_Public | RF_Standalone);
-	const FString First = ReadStableAssetRevision(Asset);
-	const FString Second = ReadStableAssetRevision(Asset);
+	FString First;
+	FString Second;
+	UE::UAI::Contract::FDiagnostic RevisionError;
+	if (!TryReadStableAssetRevision(Asset, First, RevisionError)) AddError(RevisionError.PublicMessage);
+	if (!TryReadStableAssetRevision(Asset, Second, RevisionError)) AddError(RevisionError.PublicMessage);
 	TestTrue(TEXT("file-backed object uses durable package revision"),
 		First.StartsWith(TEXT("package-md5:")));
 	TestEqual(TEXT("repeated file-backed reads are stable"), First, Second);
 
 	UTexture2D* const Transient =
 		NewObject<UTexture2D>(GetTransientPackage());
-	const FString TransientRevision = ReadStableAssetRevision(Transient);
+	FString TransientRevision;
+	if (!TryReadStableAssetRevision(Transient, TransientRevision, RevisionError)) AddError(RevisionError.PublicMessage);
 	TestTrue(TEXT("transient object retains CRC fallback"),
 		TransientRevision.StartsWith(TEXT("asset-crc32:")));
 
@@ -1027,6 +1025,22 @@ bool FUeAgentAssetDurablePrepareJournalTest::RunTest(
 		TEXT("prepare performs no durable mutation"),
 		Backend.MutationEvents.Num(),
 		0);
+	{
+		FOwnedDiskFixture FailedFixture(TEXT("prepare-failure"));
+		FRecordingAssetBackend FailedBackend(FailedFixture);
+		FailedBackend.bFailBackup = true;
+		FAssetDurableSessionPtr FailedSession;
+		TestFalse(TEXT("backup failure stops preparation"), TryPrepareAssetDurability(
+			MakeRequest(Tracker), FailedBackend, FailedFixture.JournalRoot, Tracker, FailedSession, Error));
+		TestFalse(TEXT("failed preparation transfers no session"), FailedSession.IsValid());
+		TestEqual(TEXT("original preparation error preserved"), Error.GetCode(), FString(TEXT("fixture_backup_failed")));
+		TArray<FString> ActiveTransactions;
+		IFileManager::Get().FindFiles(ActiveTransactions, *(FailedFixture.JournalRoot / TEXT("active/*")), false, true);
+		TestEqual(TEXT("failed preparation leaves no active transaction"), ActiveTransactions.Num(), 0);
+		FString Original;
+		FFileHelper::LoadFileToString(Original, *FailedFixture.SaveHeader);
+		TestEqual(TEXT("failed preparation preserves the original"), Original, FString(TEXT("old-save-header")));
+	}
 	return true;
 }
 
@@ -1378,6 +1392,31 @@ bool FUeAgentAssetDurableRollbackRecoveryTest::RunTest(
 		TEXT("confirmed restore is rolled_back"),
 		Receipt.GetStatus(),
 		EDurableStatus::RolledBack);
+	TestEqual(TEXT("rollback retains the original publish failure"),
+		Receipt.GetFailureCode(), FString(TEXT("fixture_publish_failed")));
+	const int32 MutationCountAfterRecovery = Backend.MutationEvents.Num();
+	bool bMemoryConfirmed = false;
+	FDurableReceipt ConfirmedReceipt;
+	TestTrue(TEXT("terminal rollback can confirm native memory without restoring disk again"),
+		TryRollbackAssetDurability(Session.ToSharedRef(), Backend, 41,
+			[&bMemoryConfirmed]() { bMemoryConfirmed = true; return true; },
+			Tracker, ConfirmedReceipt, Error));
+	TestTrue(TEXT("native restoration callback runs"), bMemoryConfirmed);
+	TestEqual(TEXT("completed disk recovery is not replayed"),
+		Backend.MutationEvents.Num(), MutationCountAfterRecovery);
+
+	FOwnedDiskFixture ConfirmFixture(TEXT("persist_for_verification"));
+	FRecordingAssetBackend ConfirmBackend(ConfirmFixture);
+	ConfirmBackend.bFailPublish = true;
+	FAssetDurableSessionPtr ConfirmSession;
+	if (!TestTrue(TEXT("confirmation fixture prepares"),
+		TryPrepareAssetDurability(MakeRequest(Tracker), ConfirmBackend,
+			ConfirmFixture.JournalRoot, Tracker, ConfirmSession, Error))) return false;
+	TestFalse(TEXT("rolled back persistence never permits verification or acknowledgement"),
+		TryPersistAssetDurabilityForVerification(ConfirmSession.ToSharedRef(),
+			ConfirmBackend, 41, Tracker, ConfirmedReceipt, Error));
+	TestEqual(TEXT("mutation caller receives the original failure"),
+		Error.GetCode(), FString(TEXT("fixture_publish_failed")));
 
 	FOwnedDiskFixture UnknownFixture(TEXT("unknown"));
 	FRecordingAssetBackend UnknownBackend(UnknownFixture);
@@ -2106,22 +2145,6 @@ bool FUeAgentAssetDurableFenceBudgetContainmentTest::RunTest(
 		AtomicityBackend.MutationEvents.Num(),
 		0);
 
-	FUeAgentResourceTracker LowTracker = MakeTracker(1);
-	FAssetDurableSessionPtr LowSession;
-	TestFalse(
-		TEXT("operation budget exhaustion fails closed"),
-		TryPrepareAssetDurability(
-			MakeRequest(Tracker),
-			Backend,
-			Fixture.Root / TEXT("low_journal"),
-			LowTracker,
-			LowSession,
-			Error));
-	TestEqual(
-		TEXT("resource error is preserved"),
-		Error.GetCode(),
-		FString(TEXT("resource_budget_exceeded")));
-
 	FOwnedDiskFixture OwnerFixture(TEXT("owner"));
 	FRecordingAssetBackend OwnerBackend(OwnerFixture);
 	FAssetDurableSessionPtr OwnerSession;
@@ -2162,28 +2185,6 @@ bool FUeAgentAssetDurableFenceBudgetContainmentTest::RunTest(
 		OwnerBackend.MutationEvents.Num(),
 		0);
 
-	const FString EmptyJournalRoot =
-		Fixture.Root / TEXT("empty_journal");
-	IFileManager::Get().MakeDirectory(
-		*(EmptyJournalRoot
-			/ TEXT("active/one/two/three")),
-		true);
-	FUeAgentResourceTracker EnumerationTracker = MakeTracker(1);
-	TArray<FDurableReceipt> EmptyReceipts;
-	TestFalse(
-		TEXT("empty recovery tree still consumes operation budget"),
-		TryRecoverAssetDurability(
-			EmptyJournalRoot,
-			Backend,
-			41,
-			TEXT("owned-worker:p4-009"),
-			EnumerationTracker,
-			EmptyReceipts,
-			Error));
-	TestEqual(
-		TEXT("enumeration budget error is preserved"),
-		Error.GetCode(),
-		FString(TEXT("resource_budget_exceeded")));
 	return true;
 }
 

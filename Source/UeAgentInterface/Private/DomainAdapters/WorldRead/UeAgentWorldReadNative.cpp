@@ -1,12 +1,15 @@
 #include "DomainAdapters/WorldRead/UeAgentWorldReadNative.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "Components/PrimitiveComponent.h"
+#include "Components/DynamicMeshComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "DomainAdapters/Landscape/UeAgentLandscapeHeightState.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "DynamicMesh/DynamicMesh3.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/OverlapResult.h"
@@ -22,7 +25,9 @@
 #include "PhysicsEngine/PhysicsConstraintComponent.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Misc/ScopeExit.h"
 #include "StaticMeshAttributes.h"
+#include "UDynamicMesh.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/UnrealType.h"
@@ -44,18 +49,8 @@ namespace UE::UAI::DomainAdapters::WorldRead
 
 	namespace
 	{
-		bool Fail(
-			FUeAgentWorldReadError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
-		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-			return false;
-		}
+		bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = TEXT(""))
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject; return false; }
 
 		FString Number(const double Value)
 		{
@@ -73,106 +68,145 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			if (!FJsonSerializer::Deserialize(Reader, OutObject)
 				|| !OutObject.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("world_read_input_invalid"),
-					FString(),
-					TEXT("canonical input is not a JSON object"));
+				auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_read_input_invalid"),
+					TEXT("Canonical world-read input must be object JSON. ") + Reader->GetErrorMessage(), TEXT("world_read"));
+				Diagnostic.SourceKind = TEXT("native_result");
+				Diagnostic.PropertyPath = TEXT("/canonical_input");
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object JSON"));
+				return Fail(OutError, MoveTemp(Diagnostic));
 			}
 			return true;
 		}
 
-		bool ReadVector(
-			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
-			FVector& OutVector,
-			FUeAgentWorldReadError& OutError)
+		FString WorldReadJsonKind(const TSharedPtr<FJsonValue>& Value)
 		{
-			const TSharedPtr<FJsonObject>* VectorObject = nullptr;
+			if (!Value) return TEXT("<missing>");
+			switch (Value->Type)
+			{
+			case EJson::Null: return TEXT("null");
+			case EJson::String: return TEXT("string");
+			case EJson::Number: return TEXT("number");
+			case EJson::Boolean: return TEXT("boolean");
+			case EJson::Array: return TEXT("array");
+			case EJson::Object: return TEXT("object");
+			default: return TEXT("unknown");
+			}
+		}
+
+		TSharedPtr<FJsonValue> WorldReadInputValue(const TSharedPtr<FJsonValue>& Value)
+		{
+			if (!Value) return MakeShared<FJsonValueString>(TEXT("<missing>"));
+			if (Value->Type == EJson::Array || Value->Type == EJson::Object)
+				return MakeShared<FJsonValueString>(WorldReadJsonKind(Value));
+			return Value;
+		}
+
+		TSharedPtr<FJsonValue> WorldReadVectorValue(const FVector& Value)
+		{
+			return MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+				MakeShared<FJsonValueNumber>(Value.X), MakeShared<FJsonValueNumber>(Value.Y), MakeShared<FJsonValueNumber>(Value.Z)});
+		}
+
+		FUeAgentWorldReadError WorldReadFact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const bool bInput = false)
+		{
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("world_read"));
+			Error.SourceKind = bInput ? TEXT("command_input") : TEXT("native_result");
+			Error.PropertyPath = Path;
+			if (bInput) Error.Source.JsonPath = Path;
+			Error.ActualValue = MoveTemp(Actual);
+			if (!Error.ActualValue) Error.ActualValue = MakeShared<FJsonValueString>(TEXT("<missing>"));
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
+		void SupplementWorldRead(FUeAgentWorldReadError& Error, const FString& Target, const FString& Field)
+		{
+			if (Error.IsEmpty()) return;
+			if (Error.TargetPath.IsEmpty()) Error.TargetPath = Target;
+			if (Error.PropertyPath.IsEmpty()) Error.PropertyPath = Field;
+			if (Error.SourceKind.IsEmpty() && Error.Source.SourceFile.IsEmpty()) Error.SourceKind = TEXT("native_result");
+			for (auto& Child : Error.Diagnostics) SupplementWorldRead(Child, Target, Field);
+			if (Error.PublicCause)
+			{
+				auto Cause = MakeShared<UE::UAI::Contract::FDiagnostic>(*Error.PublicCause);
+				SupplementWorldRead(*Cause, Target, Field);
+				Error.PublicCause = MoveTemp(Cause);
+			}
+		}
+
+		bool ReadComponents(const TSharedPtr<FJsonObject>& VectorObject, const FString& Path, FVector& OutVector,
+			FUeAgentWorldReadError& OutError, const FString& Code)
+		{
+			if (!VectorObject.IsValid())
+				return Fail(OutError, WorldReadFact(Code, TEXT("Spatial vector must be an object with three components."),
+					Path, MakeShared<FJsonValueString>(TEXT("missing object")), MakeShared<FJsonValueString>(TEXT("vector object")), true));
 			const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
-			if (!Object.IsValid()
-				|| !Object->TryGetObjectField(Field, VectorObject)
-				|| !VectorObject
-				|| !VectorObject->IsValid()
-				|| !(*VectorObject)->TryGetArrayField(
-					TEXT("components"),
-					Components)
-				|| !Components
-				|| Components->Num() != 3)
-			{
-				return Fail(
-					OutError,
-					TEXT("world_read_spatial_input_invalid"),
-					Field);
-			}
-			OutVector = FVector(
-				(*Components)[0]->AsNumber(),
-				(*Components)[1]->AsNumber(),
-				(*Components)[2]->AsNumber());
+			if (!VectorObject->TryGetArrayField(TEXT("components"), Components) || !Components)
+				return Fail(OutError, WorldReadFact(Code, TEXT("Spatial vector components must be an array."),
+					Path + TEXT("/components"), WorldReadInputValue(VectorObject->TryGetField(TEXT("components"))),
+					MakeShared<FJsonValueString>(TEXT("array with three components")), true));
+			if (Components->Num() != 3)
+				return Fail(OutError, WorldReadFact(Code, TEXT("Spatial vector requires exactly three components."),
+					Path + TEXT("/components"), MakeShared<FJsonValueNumber>(Components->Num()), MakeShared<FJsonValueNumber>(3), true));
+			OutVector = FVector((*Components)[0]->AsNumber(), (*Components)[1]->AsNumber(), (*Components)[2]->AsNumber());
 			return true;
 		}
 
-		bool ReadNumberArray3(
-			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
-			FVector& OutVector)
+		bool ReadVector(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field,
+			FVector& OutVector, FUeAgentWorldReadError& OutError)
 		{
+			const FString Path = TEXT("/") + FString(Field);
+			const TSharedPtr<FJsonObject>* VectorObject = nullptr;
+			if (!Object.IsValid() || !Object->TryGetObjectField(Field, VectorObject) || !VectorObject || !VectorObject->IsValid())
+				return Fail(OutError, WorldReadFact(TEXT("world_read_spatial_input_invalid"),
+					TEXT("Spatial input must be a vector object."), Path,
+					WorldReadInputValue(Object.IsValid() ? Object->TryGetField(Field) : nullptr),
+					MakeShared<FJsonValueString>(TEXT("object with three components")), true));
+			return ReadComponents(*VectorObject, Path, OutVector, OutError, TEXT("world_read_spatial_input_invalid"));
+		}
+
+		bool ReadNumberArray3(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field, FVector& OutVector,
+			FUeAgentWorldReadError& OutError, const FString& Code = TEXT("world_read_spatial_input_invalid"))
+		{
+			const FString Path = TEXT("/") + FString(Field);
 			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-			if (!Object.IsValid()
-				|| !Object->TryGetArrayField(Field, Values)
-				|| !Values
-				|| Values->Num() != 3)
-			{
-				return false;
-			}
-			OutVector = FVector(
-				(*Values)[0]->AsNumber(),
-				(*Values)[1]->AsNumber(),
-				(*Values)[2]->AsNumber());
+			if (!Object.IsValid() || !Object->TryGetArrayField(Field, Values) || !Values)
+				return Fail(OutError, WorldReadFact(Code, TEXT("Vector extent input must be an array."),
+					Path, WorldReadInputValue(Object.IsValid() ? Object->TryGetField(Field) : nullptr),
+					MakeShared<FJsonValueString>(TEXT("array with three components")), true));
+			if (Values->Num() != 3)
+				return Fail(OutError, WorldReadFact(Code, TEXT("Vector extent input requires exactly three components."),
+					Path, MakeShared<FJsonValueNumber>(Values->Num()), MakeShared<FJsonValueNumber>(3), true));
+			OutVector = FVector((*Values)[0]->AsNumber(), (*Values)[1]->AsNumber(), (*Values)[2]->AsNumber());
 			return true;
 		}
 
-		bool ReadVectorArray(
-			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
-			TArray<FVector>& OutVectors,
-			FUeAgentWorldReadError& OutError)
+		bool ReadVectorArray(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field,
+			TArray<FVector>& OutVectors, FUeAgentWorldReadError& OutError)
 		{
 			OutVectors.Reset();
+			const FString Path = TEXT("/") + FString(Field);
 			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-			if (!Object.IsValid()
-				|| !Object->TryGetArrayField(Field, Values)
-				|| !Values)
+			if (!Object.IsValid() || !Object->TryGetArrayField(Field, Values) || !Values)
+				return Fail(OutError, WorldReadFact(TEXT("world_read_spatial_input_invalid"),
+					TEXT("Spatial points must be an array of vector objects."), Path,
+					WorldReadInputValue(Object.IsValid() ? Object->TryGetField(Field) : nullptr),
+					MakeShared<FJsonValueString>(TEXT("array of vector objects")), true));
+			for (int32 Index = 0; Index < Values->Num(); ++Index)
 			{
-				return Fail(
-					OutError,
-					TEXT("world_read_spatial_input_invalid"),
-					Field);
-			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
-			{
+				const auto& Value = (*Values)[Index];
 				const TSharedPtr<FJsonObject> Point = Value->AsObject();
+				if (!Point.IsValid())
+					return Fail(OutError, WorldReadFact(TEXT("world_read_spatial_input_invalid"),
+						TEXT("Each spatial point must be a vector object."), Path + TEXT("/") + FString::FromInt(Index),
+						WorldReadInputValue(Value), MakeShared<FJsonValueString>(TEXT("vector object")), true));
 				FVector Vector;
-				if (!ReadVector(Point, TEXT("point"), Vector, OutError))
+				FUeAgentWorldReadError WrappedError;
+				if (!ReadVector(Point, TEXT("point"), Vector, WrappedError))
 				{
-					// Array elements already are vector objects; wrap their
-					// components without accepting a second representation.
-					OutError = {};
-					const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
-					if (!Point.IsValid()
-						|| !Point->TryGetArrayField(TEXT("components"), Components)
-						|| !Components
-						|| Components->Num() != 3)
-					{
-						return Fail(
-							OutError,
-							TEXT("world_read_spatial_input_invalid"),
-							Field);
-					}
-					Vector = FVector(
-						(*Components)[0]->AsNumber(),
-						(*Components)[1]->AsNumber(),
-						(*Components)[2]->AsNumber());
+					if (!ReadComponents(Point, Path + TEXT("/") + FString::FromInt(Index), Vector, OutError,
+						TEXT("world_read_spatial_input_invalid"))) return false;
 				}
 				OutVectors.Add(Vector);
 			}
@@ -264,13 +298,12 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			TArray<FUeAgentStateEntry>& OutEntries,
 			FUeAgentWorldReadError& OutError)
 		{
+			ON_SCOPE_EXIT { SupplementWorldRead(OutError, OwnerId, Selector); };
 			if (!Value.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("world_read_value_invalid"),
-					OwnerId,
-					Selector);
+				return Fail(OutError, WorldReadFact(TEXT("world_read_value_invalid"),
+					TEXT("Captured world-read field has no canonical value."), Selector,
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), OwnerId);
 			}
 			const FUeAgentStateRevision StateRevision =
 				Revision(Context);
@@ -301,14 +334,59 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				StateRevision);
 			if (!Entry.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("world_read_entry_invalid"),
-					OwnerId,
-					Selector);
+				return Fail(OutError, Entry.GetValidationDiagnostic(), OwnerId);
 			}
 			OutEntries.Add(Entry);
 			return true;
+		}
+
+		TSharedRef<FJsonObject> WorldPointJson(const FVector& Point)
+		{
+			TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+			Object->SetStringField(TEXT("frame_id"), TEXT("ue.world"));
+			Object->SetStringField(TEXT("unit"), TEXT("centimeter"));
+			Object->SetArrayField(
+				TEXT("components"),
+				{
+					MakeShared<FJsonValueNumber>(Point.X),
+					MakeShared<FJsonValueNumber>(Point.Y),
+					MakeShared<FJsonValueNumber>(Point.Z),
+				});
+			return Object;
+		}
+
+		bool AddJsonValue(
+			const FString& SemanticId,
+			const FString& TargetKind,
+			const FString& OwnerId,
+			const FString& Selector,
+			const TSharedPtr<FJsonValue>& JsonValue,
+			const FUeAgentOperationContext& Context,
+			TArray<FUeAgentStateEntry>& OutEntries,
+			FUeAgentWorldReadError& OutError)
+		{
+			ON_SCOPE_EXIT { SupplementWorldRead(OutError, OwnerId, Selector); };
+			FUeAgentCanonicalValuePtr Value;
+			UE::UAI::Contract::FDiagnostic JsonError;
+			if (!CanonicalJson::TryFromJsonValue(JsonValue, Context.GetResourceTracker(), Value, JsonError))
+				return Fail(OutError, MoveTemp(JsonError), Selector);
+			if (Value->GetKind() != EUeAgentValueKind::Array && Value->GetKind() != EUeAgentValueKind::Object)
+				return Fail(OutError, WorldReadFact(TEXT("world_read_value_invalid"),
+					TEXT("Captured structured field must be an object or array."), Selector,
+					WorldReadInputValue(JsonValue), MakeShared<FJsonValueString>(TEXT("object or array"))), OwnerId);
+			return AddValueEntry(
+				SemanticId,
+				TargetKind,
+				OwnerId,
+				Selector,
+				Value->GetKind() == EUeAgentValueKind::Array
+					? FString(TEXT("core.array"))
+					: FString(TEXT("core.object")),
+				Value->GetKind(),
+				Value,
+				Context,
+				OutEntries,
+				OutError);
 		}
 
 		bool AddString(
@@ -321,6 +399,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			TArray<FUeAgentStateEntry>& OutEntries,
 			FUeAgentWorldReadError& OutError)
 		{
+			ON_SCOPE_EXIT { SupplementWorldRead(OutError, OwnerId, Selector); };
 			FUeAgentCanonicalValuePtr Value;
 			FUeAgentStateSemanticError StateError;
 			if (!FUeAgentCanonicalValue::TryString(
@@ -329,11 +408,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					Value,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				SemanticId,
@@ -358,6 +433,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			TArray<FUeAgentStateEntry>& OutEntries,
 			FUeAgentWorldReadError& OutError)
 		{
+			ON_SCOPE_EXIT { SupplementWorldRead(OutError, OwnerId, Selector); };
 			FUeAgentCanonicalValuePtr Value;
 			FUeAgentStateSemanticError StateError;
 			if (!FUeAgentCanonicalValue::TryBoolean(
@@ -366,11 +442,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					Value,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				SemanticId,
@@ -395,6 +467,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			TArray<FUeAgentStateEntry>& OutEntries,
 			FUeAgentWorldReadError& OutError)
 		{
+			ON_SCOPE_EXIT { SupplementWorldRead(OutError, OwnerId, Selector); };
 			FUeAgentCanonicalValuePtr Value;
 			FUeAgentStateSemanticError StateError;
 			if (!FUeAgentCanonicalValue::TryInteger(
@@ -403,11 +476,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					Value,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				SemanticId,
@@ -432,6 +501,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			TArray<FUeAgentStateEntry>& OutEntries,
 			FUeAgentWorldReadError& OutError)
 		{
+			ON_SCOPE_EXIT { SupplementWorldRead(OutError, OwnerId, Selector); };
 			FUeAgentCanonicalValuePtr Value;
 			FUeAgentStateSemanticError StateError;
 			if (!FUeAgentCanonicalValue::TryDecimal(
@@ -440,11 +510,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					Value,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				SemanticId,
@@ -470,6 +536,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			TArray<FUeAgentStateEntry>& OutEntries,
 			FUeAgentWorldReadError& OutError)
 		{
+			ON_SCOPE_EXIT { SupplementWorldRead(OutError, OwnerId, Selector); };
 			const FUeAgentTemporalPoint Time = ObservedAt(Context);
 			const FUeAgentSpatialFrame Frame(
 				TEXT("ue.world"),
@@ -499,11 +566,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					Value,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return AddValueEntry(
 				SemanticId,
@@ -544,11 +607,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					OutSnapshot,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code,
-					StateError.Path,
-					StateError.Detail);
+				return Fail(OutError, StateError);
 			}
 			return true;
 		}
@@ -581,11 +640,11 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				}
 				if (!OutWorld)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_read_world_unresolved"),
-						Context.GetExecutionContext()
-							.GetWorldIdentity());
+					auto Diagnostic = WorldReadFact(TEXT("world_read_world_unresolved"),
+						TEXT("World environment succeeded without a world object."), TEXT("/world"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					Diagnostic.SubjectId = Context.GetExecutionContext().GetWorldIdentity();
+					return Fail(OutError, MoveTemp(Diagnostic));
 				}
 				return true;
 			}
@@ -598,10 +657,9 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				OutObject = nullptr;
 				if (!Target.IsSet())
 				{
-					return Fail(
-						OutError,
-						TEXT("world_read_target_required"),
-						ProviderBinding);
+					return Fail(OutError, WorldReadFact(TEXT("world_read_target_required"),
+						TEXT("This world query requires a bound target."), TEXT("/target"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true), ProviderBinding);
 				}
 				return Environment->TryResolveTarget(
 					Target.GetValue(),
@@ -633,6 +691,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Target.IsSet() ? Target->GetPublicRef() : World->GetPathName(), FString()); };
 				TSharedPtr<FJsonObject> Input;
 				if (!ParseInput(CanonicalInput, Input, OutError))
 				{
@@ -746,17 +805,16 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					{
 						return false;
 					}
+					ON_SCOPE_EXIT { SupplementWorldRead(OutError, Object->GetPathName(), FString()); };
 					if (ProviderBinding
 						== TEXT("world.read.actor_components"))
 					{
 						const AActor* Actor = Cast<AActor>(Object);
 						if (!Actor)
 						{
-							return Fail(
-								OutError,
-								TEXT("world_read_target_kind_mismatch"),
-								Object->GetPathName(),
-								TEXT("actor required"));
+							return Fail(OutError, WorldReadFact(TEXT("world_read_target_kind_mismatch"),
+								TEXT("Target must be an Actor to query its components."), TEXT("/target_class"),
+								MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("Actor"))), Object->GetPathName());
 						}
 						TInlineComponentArray<UActorComponent*>
 							Components(Actor);
@@ -788,10 +846,9 @@ namespace UE::UAI::DomainAdapters::WorldRead
 								TEXT("property_path"),
 								PropertyPath))
 						{
-							return Fail(
-								OutError,
-								TEXT("world_read_property_path_missing"),
-								Object->GetPathName());
+							return Fail(OutError, WorldReadFact(TEXT("world_read_property_path_missing"),
+								TEXT("Property query requires a string property_path."), TEXT("/property_path"),
+								WorldReadInputValue(Input->TryGetField(TEXT("property_path"))), MakeShared<FJsonValueString>(TEXT("string")), true), Object->GetPathName());
 						}
 						const FProperty* Property =
 							FindFProperty<FProperty>(
@@ -814,11 +871,9 @@ namespace UE::UAI::DomainAdapters::WorldRead
 								Cast<UPrimitiveComponent>(Object);
 							if (!Primitive)
 							{
-								return Fail(
-									OutError,
-									TEXT("world_read_property_not_found"),
-									Object->GetPathName(),
-									PropertyPath);
+								return Fail(OutError, WorldReadFact(TEXT("world_read_property_not_found"),
+									TEXT("Bounds is available only for a primitive component when it is not a reflected property."), TEXT("/Bounds"),
+									MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("PrimitiveComponent"))), Object->GetPathName());
 							}
 							const FBoxSphereBounds& Bounds = Primitive->Bounds;
 							Text = FString::Printf(
@@ -833,11 +888,10 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						}
 						else
 						{
-							return Fail(
-								OutError,
-								TEXT("world_read_property_not_found"),
-								Object->GetPathName(),
-								PropertyPath);
+							return Fail(OutError, WorldReadFact(TEXT("world_read_property_not_found"),
+								TEXT("Target class does not declare the requested property."), TEXT("/property_path"),
+								MakeShared<FJsonValueString>(PropertyPath),
+								MakeShared<FJsonValueString>(TEXT("property declared on ") + Object->GetClass()->GetPathName()), true), Object->GetPathName());
 						}
 						if (!AddString(
 								TEXT("world.property:value"),
@@ -881,6 +935,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Target.IsSet() ? Target->GetPublicRef() : World->GetPathName(), FString()); };
 				TSharedPtr<FJsonObject> Input;
 				if (!ParseInput(CanonicalInput, Input, OutError))
 				{
@@ -958,6 +1013,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Target.IsSet() ? Target->GetPublicRef() : World->GetPathName(), FString()); };
 				TSharedPtr<FJsonObject> Input;
 				if (!ParseInput(CanonicalInput, Input, OutError))
 				{
@@ -970,27 +1026,13 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					FVector Start;
 					FVector Direction;
 					double Distance = 0.0;
-					if (!ReadVector(
-							Input,
-							TEXT("start"),
-							Start,
-							OutError)
-						|| !ReadVector(
-							Input,
-							TEXT("direction"),
-							Direction,
-							OutError)
-						|| !Input->TryGetNumberField(
-							TEXT("distance_cm"),
-							Distance)
-						|| Direction.IsNearlyZero()
-						|| Distance <= 0.0)
-					{
-						return Fail(
-							OutError,
-							TEXT("world_read_ray_input_invalid"),
-							ProviderBinding);
-					}
+					if (!ReadVector(Input, TEXT("start"), Start, OutError) || !ReadVector(Input, TEXT("direction"), Direction, OutError)) return false;
+					if (!Input->TryGetNumberField(TEXT("distance_cm"), Distance))
+						return Fail(OutError, WorldReadFact(TEXT("world_read_ray_input_invalid"), TEXT("Parameter 'distance_cm' must be a number."), TEXT("/distance_cm"), WorldReadInputValue(Input->TryGetField(TEXT("distance_cm"))), MakeShared<FJsonValueString>(TEXT("number")), true));
+					if (Direction.IsNearlyZero())
+						return Fail(OutError, WorldReadFact(TEXT("world_read_ray_input_invalid"), TEXT("Ray direction must not be nearly zero."), TEXT("/direction/components"), WorldReadVectorValue(Direction), MakeShared<FJsonValueString>(TEXT("non-nearly-zero vector")), true));
+					if (Distance <= 0.0)
+						return Fail(OutError, WorldReadFact(TEXT("world_read_ray_input_invalid"), TEXT("Ray distance must be greater than zero."), TEXT("/distance_cm"), MakeShared<FJsonValueNumber>(Distance), MakeShared<FJsonValueString>(TEXT("greater than zero")), true));
 					FHitResult Hit;
 					FCollisionQueryParams Params(
 						SCENE_QUERY_STAT(UAIWorldReadRay),
@@ -1000,25 +1042,49 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						TEXT("trace_complex"),
 						bTraceComplex);
 					Params.bTraceComplex = bTraceComplex;
-					if (!World->LineTraceSingleByChannel(
+					const bool bHit = World->LineTraceSingleByChannel(
 							Hit,
 							Start,
 							Start + Direction.GetSafeNormal()
 								* Distance,
 							ReadTraceChannel(Input),
-							Params))
+							Params);
+					if (!AddBoolean(
+							TEXT("world.ray_trace:hit"),
+							TEXT("world"),
+							World->GetPathName(),
+							TEXT("hit"),
+							bHit,
+							Context,
+							Entries,
+							OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT("world_read_ray_no_hit"),
-							World->GetPathName());
+						return false;
+					}
+					if (!bHit)
+					{
+						return BuildSnapshot(
+							ProviderBinding,
+							Context,
+							MoveTemp(Entries),
+							OutSnapshot,
+							OutError);
 					}
 					const FString OwnerId = Hit.GetComponent()
 						? Hit.GetComponent()->GetPathName()
 						: World->GetPathName();
-					if (!AddSpatial(
-							TEXT("world.ray_trace:impact_point"),
+					if (!AddString(
+							TEXT("world.ray_trace:target"),
+							TEXT("world"),
+							World->GetPathName(),
+							TEXT("target_ref"),
 							OwnerId,
+							Context,
+							Entries,
+							OutError)
+						|| !AddSpatial(
+							TEXT("world.ray_trace:impact_point"),
+							World->GetPathName(),
 							TEXT("impact_point"),
 							OwnerId,
 							Hit.ImpactPoint,
@@ -1047,16 +1113,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					if (ShapeName == TEXT("box"))
 					{
 						FVector Extents;
-						if (!ReadNumberArray3(
-								Input,
-								TEXT("half_extents_cm"),
-								Extents))
-						{
-							return Fail(
-								OutError,
-								TEXT("world_read_overlap_shape_invalid"),
-								ShapeName);
-						}
+						if (!ReadNumberArray3(Input, TEXT("half_extents_cm"), Extents, OutError, TEXT("world_read_overlap_shape_invalid"))) return false;
 						Shape = FCollisionShape::MakeBox(Extents);
 					}
 					else
@@ -1065,10 +1122,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						Input->TryGetNumberField(TEXT("radius_cm"), Radius);
 						if (Radius <= 0.0)
 						{
-							return Fail(
-								OutError,
-								TEXT("world_read_overlap_shape_invalid"),
-								ShapeName);
+						return Fail(OutError, WorldReadFact(TEXT("world_read_overlap_shape_invalid"), TEXT("Overlap radius must be greater than zero."), TEXT("/radius_cm"), WorldReadInputValue(Input->TryGetField(TEXT("radius_cm"))), MakeShared<FJsonValueString>(TEXT("number greater than zero")), true));
 						}
 						if (ShapeName == TEXT("capsule"))
 						{
@@ -1096,22 +1150,37 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						ReadTraceChannel(Input),
 						Shape,
 						Params);
+					TArray<FString> Targets;
 					for (const FOverlapResult& Result : Results)
 					{
 						const UPrimitiveComponent* Component =
 							Result.Component.Get();
-						const FString OwnerId = Component
-							? Component->GetPathName()
-							: World->GetPathName();
-						if (!AddString(
-								TEXT("world.overlap:component"),
-								TEXT("primitive_component"),
-								OwnerId,
-								TEXT("overlap_component"),
-								OwnerId,
-								Context,
-								Entries,
-								OutError))
+						if (Component)
+						{
+							Targets.AddUnique(Component->GetPathName());
+						}
+					}
+					Targets.Sort();
+					bool bIncludeTargets = false;
+					Input->TryGetBoolField(TEXT("include_targets"), bIncludeTargets);
+					if (bIncludeTargets)
+					{
+						TArray<TSharedPtr<FJsonValue>> TargetValues;
+						TargetValues.Reserve(Targets.Num());
+						for (const FString& TargetRef : Targets)
+						{
+							TargetValues.Add(
+								MakeShared<FJsonValueString>(TargetRef));
+						}
+						if (!AddJsonValue(
+							TEXT("world.overlap:targets"),
+							TEXT("world"),
+							World->GetPathName(),
+							TEXT("targets"),
+							MakeShared<FJsonValueArray>(MoveTemp(TargetValues)),
+							Context,
+							Entries,
+							OutError))
 						{
 							return false;
 						}
@@ -1121,7 +1190,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 							TEXT("world"),
 							World->GetPathName(),
 							TEXT("overlap_count"),
-							Results.Num(),
+							Targets.Num(),
 							Context,
 							Entries,
 							OutError))
@@ -1136,18 +1205,15 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					FVector End;
 					double Radius = 0.0;
 					double HalfHeight = 0.0;
-					if (!ReadVector(Input, TEXT("start"), Start, OutError)
-						|| !ReadVector(Input, TEXT("end"), End, OutError)
-						|| !Input->TryGetNumberField(TEXT("radius_cm"), Radius)
-						|| !Input->TryGetNumberField(TEXT("half_height_cm"), HalfHeight)
-						|| Radius <= 0.0
-						|| HalfHeight < Radius)
-					{
-						return Fail(
-							OutError,
-							TEXT("world_read_capsule_sweep_input_invalid"),
-							ProviderBinding);
-					}
+					if (!ReadVector(Input, TEXT("start"), Start, OutError) || !ReadVector(Input, TEXT("end"), End, OutError)) return false;
+					if (!Input->TryGetNumberField(TEXT("radius_cm"), Radius))
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_sweep_input_invalid"), TEXT("Parameter 'radius_cm' must be a number."), TEXT("/radius_cm"), WorldReadInputValue(Input->TryGetField(TEXT("radius_cm"))), MakeShared<FJsonValueString>(TEXT("number")), true));
+					if (!Input->TryGetNumberField(TEXT("half_height_cm"), HalfHeight))
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_sweep_input_invalid"), TEXT("Parameter 'half_height_cm' must be a number."), TEXT("/half_height_cm"), WorldReadInputValue(Input->TryGetField(TEXT("half_height_cm"))), MakeShared<FJsonValueString>(TEXT("number")), true));
+					if (Radius <= 0.0)
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_sweep_input_invalid"), TEXT("Capsule radius must be greater than zero."), TEXT("/radius_cm"), MakeShared<FJsonValueNumber>(Radius), MakeShared<FJsonValueString>(TEXT("greater than zero")), true));
+					if (HalfHeight < Radius)
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_sweep_input_invalid"), TEXT("Capsule half-height must be at least its radius."), TEXT("/half_height_cm"), MakeShared<FJsonValueNumber>(HalfHeight), MakeShared<FJsonValueNumber>(Radius), true));
 					FCollisionQueryParams Params(
 						SCENE_QUERY_STAT(UAIWorldReadCapsuleSweep),
 						false);
@@ -1168,22 +1234,35 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						ReadTraceChannel(Input),
 						FCollisionShape::MakeCapsule(Radius, HalfHeight),
 						Params);
-					for (int32 Index = 0; Index < Hits.Num(); ++Index)
+					bool bIncludeHits = false;
+					Input->TryGetBoolField(TEXT("include_hits"), bIncludeHits);
+					if (bIncludeHits)
 					{
-						const FHitResult& Hit = Hits[Index];
-						const FString OwnerId = Hit.GetComponent()
-							? Hit.GetComponent()->GetPathName()
-							: World->GetPathName();
-						if (!AddSpatial(
-								FString::Printf(TEXT("world.capsule_sweep:impact:%d"), Index),
-								OwnerId,
+						TArray<TSharedPtr<FJsonValue>> HitValues;
+						HitValues.Reserve(Hits.Num());
+						for (int32 Index = 0; Index < Hits.Num(); ++Index)
+						{
+							const FHitResult& Hit = Hits[Index];
+							const FString OwnerId = Hit.GetComponent()
+								? Hit.GetComponent()->GetPathName()
+								: World->GetPathName();
+							TSharedRef<FJsonObject> HitObject =
+								MakeShared<FJsonObject>();
+							HitObject->SetStringField(TEXT("target_ref"), OwnerId);
+							HitObject->SetObjectField(
 								TEXT("impact_point"),
-								OwnerId,
-								Hit.ImpactPoint,
-								{},
-								Context,
-								Entries,
-								OutError))
+								WorldPointJson(Hit.ImpactPoint));
+							HitValues.Add(MakeShared<FJsonValueObject>(HitObject));
+						}
+						if (!AddJsonValue(
+							TEXT("world.capsule_sweep:hits"),
+							TEXT("world"),
+							World->GetPathName(),
+							TEXT("hits"),
+							MakeShared<FJsonValueArray>(MoveTemp(HitValues)),
+							Context,
+							Entries,
+							OutError))
 						{
 							return false;
 						}
@@ -1208,20 +1287,21 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					double Radius = 0.0;
 					double HalfHeight = 0.0;
 					double Step = 0.0;
-					if (!ReadVectorArray(Input, TEXT("points"), Points, OutError)
-						|| Points.Num() < 2
-						|| !Input->TryGetNumberField(TEXT("radius_cm"), Radius)
-						|| !Input->TryGetNumberField(TEXT("half_height_cm"), HalfHeight)
-						|| !Input->TryGetNumberField(TEXT("step_cm"), Step)
-						|| Radius <= 0.0
-						|| HalfHeight < Radius
-						|| Step <= 0.0)
-					{
-						return Fail(
-							OutError,
-							TEXT("world_read_capsule_path_input_invalid"),
-							ProviderBinding);
-					}
+					if (!ReadVectorArray(Input, TEXT("points"), Points, OutError)) return false;
+					if (Points.Num() < 2)
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_path_input_invalid"), TEXT("Capsule path requires at least two points."), TEXT("/points"), MakeShared<FJsonValueNumber>(Points.Num()), MakeShared<FJsonValueString>(TEXT("at least two points")), true));
+					if (!Input->TryGetNumberField(TEXT("radius_cm"), Radius))
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_path_input_invalid"), TEXT("Parameter 'radius_cm' must be a number."), TEXT("/radius_cm"), WorldReadInputValue(Input->TryGetField(TEXT("radius_cm"))), MakeShared<FJsonValueString>(TEXT("number")), true));
+					if (!Input->TryGetNumberField(TEXT("half_height_cm"), HalfHeight))
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_path_input_invalid"), TEXT("Parameter 'half_height_cm' must be a number."), TEXT("/half_height_cm"), WorldReadInputValue(Input->TryGetField(TEXT("half_height_cm"))), MakeShared<FJsonValueString>(TEXT("number")), true));
+					if (!Input->TryGetNumberField(TEXT("step_cm"), Step))
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_path_input_invalid"), TEXT("Parameter 'step_cm' must be a number."), TEXT("/step_cm"), WorldReadInputValue(Input->TryGetField(TEXT("step_cm"))), MakeShared<FJsonValueString>(TEXT("number")), true));
+					if (Radius <= 0.0)
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_path_input_invalid"), TEXT("Capsule radius must be greater than zero."), TEXT("/radius_cm"), MakeShared<FJsonValueNumber>(Radius), MakeShared<FJsonValueString>(TEXT("greater than zero")), true));
+					if (HalfHeight < Radius)
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_path_input_invalid"), TEXT("Capsule half-height must be at least its radius."), TEXT("/half_height_cm"), MakeShared<FJsonValueNumber>(HalfHeight), MakeShared<FJsonValueNumber>(Radius), true));
+					if (Step <= 0.0)
+						return Fail(OutError, WorldReadFact(TEXT("world_read_capsule_path_input_invalid"), TEXT("Capsule path step must be greater than zero."), TEXT("/step_cm"), MakeShared<FJsonValueNumber>(Step), MakeShared<FJsonValueString>(TEXT("greater than zero")), true));
 					int32 BlockedSegments = 0;
 					for (int32 Segment = 0; Segment + 1 < Points.Num(); ++Segment)
 					{
@@ -1275,17 +1355,14 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					}
 					FVector HalfExtents;
 					double Radius = 0.0;
-					const bool bHasExtents = ReadNumberArray3(
-						Input,
-						TEXT("half_extents_cm"),
-						HalfExtents);
+					FUeAgentWorldReadError ExtentError;
+					const bool bHasExtents = ReadNumberArray3(Input, TEXT("half_extents_cm"), HalfExtents, ExtentError);
 					Input->TryGetNumberField(TEXT("radius_cm"), Radius);
 					if (!bHasExtents && Radius <= 0.0)
 					{
-						return Fail(
-							OutError,
-							TEXT("world_read_nearby_shape_extent_missing"),
-							ProviderBinding);
+						auto Diagnostic = WorldReadFact(TEXT("world_read_nearby_shape_extent_missing"), TEXT("Nearby query requires three half-extents or a positive radius."), TEXT("/radius_cm"), WorldReadInputValue(Input->TryGetField(TEXT("radius_cm"))), MakeShared<FJsonValueString>(TEXT("positive radius or three half-extents")), true);
+						Diagnostic.Diagnostics.Add(MoveTemp(ExtentError));
+						return Fail(OutError, MoveTemp(Diagnostic));
 					}
 					FString FolderPrefix;
 					FString IgnoreFolderPrefix;
@@ -1293,16 +1370,34 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					Input->TryGetStringField(
 						TEXT("ignore_folder_path_prefix"),
 						IgnoreFolderPrefix);
-					int32 Count = 0;
+					struct FNearbyShape final
+					{
+						FString TargetRef;
+						FVector BoundsCenter;
+					};
+					bool bIncludeShapes = false;
+					Input->TryGetBoolField(TEXT("include_shapes"), bIncludeShapes);
+					int32 NearbyShapeCount = 0;
+					TArray<FNearbyShape> NearbyShapes;
 					for (TObjectIterator<UPrimitiveComponent> It; It; ++It)
 					{
 						const UPrimitiveComponent* Component = *It;
 						if (!IsValid(Component)
-							|| Component->GetWorld() != World)
+							|| Component->GetWorld() != World
+							|| Component->IsEditorOnly()
+							|| Component->IsVisualizationComponent()
+							|| Component->GetCollisionEnabled()
+								== ECollisionEnabled::NoCollision)
 						{
 							continue;
 						}
 						const AActor* Actor = Component->GetOwner();
+						if (!Actor
+							|| Actor->IsEditorOnly()
+							|| Actor->GetClass()->HasAnyClassFlags(CLASS_Transient))
+						{
+							continue;
+						}
 #if WITH_EDITOR
 						const FString Folder = Actor
 							? Actor->GetFolderPath().ToString()
@@ -1324,17 +1419,44 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						{
 							continue;
 						}
-						++Count;
-						if (!AddSpatial(
-								TEXT("world.nearby_shape:center:") + Component->GetPathName(),
-								Component->GetPathName(),
+						++NearbyShapeCount;
+						if (bIncludeShapes)
+						{
+							NearbyShapes.Add(
+								{Component->GetPathName(), Component->Bounds.Origin});
+						}
+					}
+					if (bIncludeShapes)
+					{
+						NearbyShapes.Sort(
+						[](const FNearbyShape& Left, const FNearbyShape& Right)
+						{
+							return Left.TargetRef < Right.TargetRef;
+						});
+						TArray<TSharedPtr<FJsonValue>> ShapeValues;
+						ShapeValues.Reserve(NearbyShapes.Num());
+						for (const FNearbyShape& NearbyShape : NearbyShapes)
+						{
+							TSharedRef<FJsonObject> ShapeObject =
+								MakeShared<FJsonObject>();
+							ShapeObject->SetStringField(
+								TEXT("target_ref"),
+								NearbyShape.TargetRef);
+							ShapeObject->SetObjectField(
 								TEXT("bounds_center"),
-								Component->GetPathName(),
-								Component->Bounds.Origin,
-								{},
-								Context,
-								Entries,
-								OutError))
+								WorldPointJson(NearbyShape.BoundsCenter));
+							ShapeValues.Add(
+								MakeShared<FJsonValueObject>(ShapeObject));
+						}
+						if (!AddJsonValue(
+							TEXT("world.nearby_shapes:shapes"),
+							TEXT("world"),
+							World->GetPathName(),
+							TEXT("shapes"),
+							MakeShared<FJsonValueArray>(MoveTemp(ShapeValues)),
+							Context,
+							Entries,
+							OutError))
 						{
 							return false;
 						}
@@ -1344,7 +1466,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 							TEXT("world"),
 							World->GetPathName(),
 							TEXT("nearby_shape_count"),
-							Count,
+							NearbyShapeCount,
 							Context,
 							Entries,
 							OutError))
@@ -1380,23 +1502,65 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Target.IsSet() ? Target->GetPublicRef() : World->GetPathName(), FString()); };
 				UObject* Object = nullptr;
 				if (!ResolveTarget(Target, Object, OutError))
 				{
 					return false;
 				}
-				const UStaticMeshComponent* Component =
-					Cast<UStaticMeshComponent>(Object);
-				const UStaticMesh* Mesh =
-					Component ? Component->GetStaticMesh() : nullptr;
-				const FMeshDescription* Description =
-					Mesh ? Mesh->GetMeshDescription(0) : nullptr;
-				if (!Component || !Description)
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Object->GetPathName(), FString()); };
+				UPrimitiveComponent* Component = Cast<UPrimitiveComponent>(Object);
+				TArray<FVector> Positions;
+				FString TargetKind;
+				bool bMeshAvailable = false;
+				FUeAgentWorldReadError MeshError = WorldReadFact(TEXT("world_read_mesh_unavailable"),
+					TEXT("Target must be a static or dynamic mesh component with readable vertex data."), TEXT("/target_class"),
+					MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()),
+					MakeShared<FJsonValueString>(TEXT("static or dynamic mesh component")));
+				if (const UStaticMeshComponent* StaticComponent = Cast<UStaticMeshComponent>(Component))
 				{
-					return Fail(
-						OutError,
-						TEXT("world_read_mesh_unavailable"),
-						Object ? Object->GetPathName() : FString());
+					const UStaticMesh* Mesh = StaticComponent->GetStaticMesh();
+					const FMeshDescription* Description = Mesh ? Mesh->GetMeshDescription(0) : nullptr;
+					if (!Description)
+					{
+						MeshError = WorldReadFact(TEXT("world_read_mesh_unavailable"),
+							Mesh ? TEXT("Static mesh has no readable LOD 0 mesh description.") : TEXT("Static mesh component has no assigned mesh."),
+							Mesh ? TEXT("/mesh_description/0") : TEXT("/static_mesh"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					}
+					if (Description)
+					{
+						const FStaticMeshConstAttributes Attributes(*Description);
+						const TVertexAttributesConstRef<FVector3f> Vertices = Attributes.GetVertexPositions();
+						TArray<FVertexID> VertexIds;
+						for (const FVertexID VertexId : Description->Vertices().GetElementIDs()) VertexIds.Add(VertexId);
+						VertexIds.Sort([](const FVertexID Left, const FVertexID Right) { return Left.GetValue() < Right.GetValue(); });
+						for (const FVertexID VertexId : VertexIds) Positions.Add(FVector(Vertices[VertexId]));
+						bMeshAvailable = true;
+						TargetKind = TEXT("static_mesh_component");
+					}
+				}
+				else if (UDynamicMeshComponent* DynamicComponent = Cast<UDynamicMeshComponent>(Component))
+				{
+					if (UDynamicMesh* Mesh = DynamicComponent->GetDynamicMesh())
+					{
+						Mesh->ProcessMesh([&Positions](const UE::Geometry::FDynamicMesh3& Geometry)
+						{
+							for (const int32 VertexId : Geometry.VertexIndicesItr()) Positions.Add(FVector(Geometry.GetVertex(VertexId)));
+						});
+						bMeshAvailable = true;
+						TargetKind = TEXT("dynamic_mesh_component");
+					}
+					else
+					{
+						MeshError = WorldReadFact(TEXT("world_read_mesh_unavailable"),
+							TEXT("Dynamic mesh component has no readable dynamic mesh."), TEXT("/dynamic_mesh"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					}
+				}
+				if (!bMeshAvailable)
+				{
+					return Fail(OutError, MoveTemp(MeshError), Object->GetPathName());
 				}
 
 				TSharedPtr<FJsonObject> Input;
@@ -1404,27 +1568,11 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
-				const FStaticMeshConstAttributes Attributes(
-					*Description);
-				const TVertexAttributesConstRef<FVector3f> Positions =
-					Attributes.GetVertexPositions();
-				TArray<FVertexID> VertexIds;
-				for (const FVertexID VertexId
-					: Description->Vertices().GetElementIDs())
+				if (Positions.IsEmpty())
 				{
-					VertexIds.Add(VertexId);
-				}
-				VertexIds.Sort(
-					[](const FVertexID Left, const FVertexID Right)
-					{
-						return Left.GetValue() < Right.GetValue();
-					});
-				if (VertexIds.IsEmpty())
-				{
-					return Fail(
-						OutError,
-						TEXT("world_read_mesh_has_no_vertices"),
-						Component->GetPathName());
+					return Fail(OutError, WorldReadFact(TEXT("world_read_mesh_has_no_vertices"),
+						TEXT("Mesh contains no vertices to query."), TEXT("/vertices"),
+						MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one vertex"))), Component->GetPathName());
 				}
 
 				int32 ChosenIndex = 0;
@@ -1432,17 +1580,19 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					== TEXT("world.read.mesh_vertex_position"))
 				{
 					double RequestedIndex = 0.0;
-					if (!Input->TryGetNumberField(
-							TEXT("vertex_index"),
-							RequestedIndex)
-						|| RequestedIndex < 0.0
-						|| RequestedIndex
-							>= static_cast<double>(VertexIds.Num()))
+					if (!Input->TryGetNumberField(TEXT("vertex_index"), RequestedIndex))
 					{
-						return Fail(
-							OutError,
-							TEXT("world_read_mesh_vertex_out_of_range"),
-							Component->GetPathName());
+						return Fail(OutError, WorldReadFact(TEXT("world_read_mesh_vertex_out_of_range"),
+							TEXT("Mesh vertex index must be a number."), TEXT("/vertex_index"),
+							WorldReadInputValue(Input->TryGetField(TEXT("vertex_index"))),
+							MakeShared<FJsonValueString>(TEXT("number")), true), Component->GetPathName());
+					}
+					if (RequestedIndex < 0.0 || RequestedIndex >= static_cast<double>(Positions.Num()))
+					{
+						return Fail(OutError, WorldReadFact(TEXT("world_read_mesh_vertex_out_of_range"),
+							TEXT("Mesh vertex index is outside the available vertex range."), TEXT("/vertex_index"),
+							MakeShared<FJsonValueNumber>(RequestedIndex),
+							MakeShared<FJsonValueString>(FString::Printf(TEXT("0 <= index < %d"), Positions.Num())), true), Component->GetPathName());
 					}
 					ChosenIndex = static_cast<int32>(RequestedIndex);
 				}
@@ -1460,11 +1610,10 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					double BestDistanceSquared =
 						TNumericLimits<double>::Max();
 					for (int32 Index = 0;
-						Index < VertexIds.Num();
+						Index < Positions.Num();
 						++Index)
 					{
-						const FVector Local(
-							Positions[VertexIds[Index]]);
+						const FVector& Local = Positions[Index];
 						const double DistanceSquared =
 							FVector::DistSquared(
 								Component->GetComponentTransform()
@@ -1478,7 +1627,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					}
 				}
 
-				const FVector Local(Positions[VertexIds[ChosenIndex]]);
+				const FVector& Local = Positions[ChosenIndex];
 				const FVector WorldPosition =
 					Component->GetComponentTransform()
 						.TransformPosition(Local);
@@ -1499,7 +1648,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						OutError)
 					|| !AddInteger(
 						TEXT("world.mesh:vertex_index"),
-						TEXT("static_mesh_component"),
+						TargetKind,
 						Component->GetPathName(),
 						TEXT("vertex_index"),
 						ChosenIndex,
@@ -1537,17 +1686,21 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Target.IsSet() ? Target->GetPublicRef() : World->GetPathName(), FString()); };
 				UNavigationSystemV1* Navigation =
 					FNavigationSystem::GetCurrent<UNavigationSystemV1>(
 						World);
-				if (!Navigation
-					|| !Navigation->GetDefaultNavDataInstance(
-						FNavigationSystem::DontCreate))
+				if (!Navigation)
 				{
-					return Fail(
-						OutError,
-						TEXT("world_read_navigation_unavailable"),
-						World->GetPathName());
+					return Fail(OutError, WorldReadFact(TEXT("world_read_navigation_unavailable"),
+						TEXT("World has no navigation system."), TEXT("/navigation_system"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), World->GetPathName());
+				}
+				if (!Navigation->GetDefaultNavDataInstance(FNavigationSystem::DontCreate))
+				{
+					return Fail(OutError, WorldReadFact(TEXT("world_read_navigation_unavailable"),
+						TEXT("World navigation system has no default navigation data."), TEXT("/navigation_data"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), World->GetPathName());
 				}
 
 				TSharedPtr<FJsonObject> Input;
@@ -1556,8 +1709,8 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					return false;
 				}
 				FVector QueryExtent = INVALID_NAVEXTENT;
-				const bool bHasQueryExtent = ReadNumberArray3(
-					Input, TEXT("query_extent_cm"), QueryExtent);
+				FUeAgentWorldReadError QueryExtentError;
+				const bool bHasQueryExtent = ReadNumberArray3(Input, TEXT("query_extent_cm"), QueryExtent, QueryExtentError);
 				auto TryProjectPoint = [&](const FVector& Point,
 					FVector& OutPoint)
 				{
@@ -1568,6 +1721,15 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						bHasQueryExtent ? QueryExtent : INVALID_NAVEXTENT);
 					OutPoint = bProjected ? Projected.Location : Point;
 					return bProjected;
+				};
+				auto ProjectionFailure = [&](const FVector& Point, const FString& Path)
+				{
+					const auto Actual = MakeShared<FJsonObject>();
+					Actual->SetField(TEXT("point_cm"), WorldReadVectorValue(Point));
+					if (bHasQueryExtent) Actual->SetField(TEXT("query_extent_cm"), WorldReadVectorValue(QueryExtent));
+					return WorldReadFact(TEXT("world_read_navigation_projection_failed"),
+						TEXT("Navigation system could not project the point onto navigation data within the query extent."), Path,
+						MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(TEXT("point with a navigation projection")));
 				};
 				TArray<FUeAgentStateEntry> Entries;
 				if (ProviderBinding
@@ -1581,10 +1743,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					FVector Projected;
 					if (!TryProjectPoint(Point, Projected))
 					{
-						return Fail(
-							OutError,
-							TEXT("world_read_navigation_projection_failed"),
-							World->GetPathName());
+						return Fail(OutError, ProjectionFailure(Point, TEXT("/point")), World->GetPathName());
 					}
 					if (!AddSpatial(
 							TEXT("world.navigation:projected_point"),
@@ -1620,13 +1779,12 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					}
 					else
 					{
-						if (!ReadVectorArray(Input, TEXT("points"), Points, OutError)
-							|| Points.Num() < 2)
+						if (!ReadVectorArray(Input, TEXT("points"), Points, OutError)) return false;
+						if (Points.Num() < 2)
 						{
-							return Fail(
-								OutError,
-								TEXT("world_read_navigation_points_invalid"),
-								ProviderBinding);
+							return Fail(OutError, WorldReadFact(TEXT("world_read_navigation_points_invalid"),
+								TEXT("Navigation connectivity requires at least two points."), TEXT("/points"),
+								MakeShared<FJsonValueNumber>(Points.Num()), MakeShared<FJsonValueString>(TEXT("at least two points")), true));
 						}
 						const TArray<TSharedPtr<FJsonValue>>* PairValues = nullptr;
 						if (Input->TryGetArrayField(TEXT("pairs"), PairValues)
@@ -1639,10 +1797,10 @@ namespace UE::UAI::DomainAdapters::WorldRead
 									|| !Indices
 									|| Indices->Num() != 2)
 								{
-									return Fail(
-										OutError,
-										TEXT("world_read_navigation_pairs_invalid"),
-										ProviderBinding);
+								return Fail(OutError, WorldReadFact(TEXT("world_read_navigation_pairs_invalid"),
+									TEXT("Each navigation pair must contain exactly two point indices."), TEXT("/pairs/") + FString::FromInt(Pairs.Num()),
+									Indices ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Indices->Num())) : WorldReadInputValue(PairValue),
+									MakeShared<FJsonValueString>(TEXT("array with two point indices")), true));
 								}
 								Pairs.Add({
 									static_cast<int32>((*Indices)[0]->AsNumber()),
@@ -1668,11 +1826,9 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					if (!bProjectToNav
 						&& (bHasQueryExtent || bAllowProjectionFailure))
 					{
-						return Fail(
-							OutError,
-							TEXT("world_read_navigation_projection_policy_invalid"),
-							ProviderBinding,
-							TEXT("projection selectors require project_to_nav=true"));
+						return Fail(OutError, WorldReadFact(TEXT("world_read_navigation_projection_policy_invalid"),
+							TEXT("query_extent_cm or allow_projection_failure requires project_to_nav=true."), TEXT("/project_to_nav"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true));
 					}
 					if (bProjectToNav)
 					{
@@ -1684,12 +1840,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 								Points[PointIndex], ProjectedPoint);
 							if (!bProjected && !bAllowProjectionFailure)
 							{
-								return Fail(
-									OutError,
-									TEXT("world_read_navigation_projection_failed"),
-									FString::Printf(
-										TEXT("%s:point_%d"),
-										*World->GetPathName(), PointIndex));
+								return Fail(OutError, ProjectionFailure(Points[PointIndex], TEXT("/points/") + FString::FromInt(PointIndex)), World->GetPathName());
 							}
 							Points[PointIndex] = ProjectedPoint;
 							if (!AddBoolean(
@@ -1712,23 +1863,22 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					}
 					bool bAllowPartial = false;
 					Input->TryGetBoolField(TEXT("allow_partial"), bAllowPartial);
-					bool bIncludePathPoints = bFindPath;
-					if (!bFindPath)
-					{
-						Input->TryGetBoolField(
-							TEXT("include_path_points"),
-							bIncludePathPoints);
-					}
+					bool bIncludePathPoints = false;
+					Input->TryGetBoolField(
+						TEXT("include_path_points"),
+						bIncludePathPoints);
+					TArray<TSharedPtr<FJsonValue>> PairResults;
+					PairResults.Reserve(Pairs.Num());
 					for (int32 PairIndex = 0; PairIndex < Pairs.Num(); ++PairIndex)
 					{
 						const TPair<int32, int32>& Pair = Pairs[PairIndex];
 						if (!Points.IsValidIndex(Pair.Key)
 							|| !Points.IsValidIndex(Pair.Value))
 						{
-							return Fail(
-								OutError,
-								TEXT("world_read_navigation_pair_out_of_range"),
-								LexToString(PairIndex));
+							return Fail(OutError, WorldReadFact(TEXT("world_read_navigation_pair_out_of_range"),
+								TEXT("Navigation pair references a point index outside the supplied point array."), TEXT("/pairs/") + FString::FromInt(PairIndex),
+								MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{MakeShared<FJsonValueNumber>(Pair.Key), MakeShared<FJsonValueNumber>(Pair.Value)}),
+								MakeShared<FJsonValueString>(FString::Printf(TEXT("both indices: 0 <= index < %d"), Points.Num())), true));
 						}
 						UNavigationPath* Path =
 							UNavigationSystemV1::FindPathToLocationSynchronously(
@@ -1738,42 +1888,80 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						const bool bReachable = IsValid(Path)
 							&& Path->IsValid()
 							&& (bAllowPartial || !Path->IsPartial());
-						if (!AddBoolean(
-								FString::Printf(TEXT("world.navigation:reachable:%d"), PairIndex),
-								TEXT("world"),
-								World->GetPathName(),
-								FString::Printf(TEXT("pair_%d_reachable"), PairIndex),
-								bReachable,
-								Context,
-								Entries,
-								OutError))
-						{
-							return false;
-						}
+						TArray<TSharedPtr<FJsonValue>> PathPointValues;
 						if (bIncludePathPoints && IsValid(Path))
 						{
+							PathPointValues.Reserve(Path->PathPoints.Num());
 							for (int32 PointIndex = 0;
 								PointIndex < Path->PathPoints.Num();
 								++PointIndex)
 							{
-								if (!AddSpatial(
-										FString::Printf(
-											TEXT("world.navigation:path:%d:%d"),
-											PairIndex,
-											PointIndex),
-										World->GetPathName(),
-										TEXT("path_point"),
-										ProviderBinding,
-										Path->PathPoints[PointIndex],
-										{},
-										Context,
-										Entries,
-										OutError))
-								{
-									return false;
-								}
+								PathPointValues.Add(
+									MakeShared<FJsonValueObject>(
+										WorldPointJson(Path->PathPoints[PointIndex])));
 							}
 						}
+						if (bFindPath)
+						{
+							if (!AddBoolean(
+									TEXT("world.navigation:path:reachable"),
+									TEXT("world"),
+									World->GetPathName(),
+									TEXT("reachable"),
+									bReachable,
+									Context,
+									Entries,
+									OutError)
+								|| (bIncludePathPoints
+									&& !AddJsonValue(
+										TEXT("world.navigation:path:points"),
+										TEXT("world"),
+										World->GetPathName(),
+										TEXT("path_points"),
+										MakeShared<FJsonValueArray>(
+											MoveTemp(PathPointValues)),
+										Context,
+										Entries,
+										OutError)))
+							{
+								return false;
+							}
+						}
+						else
+						{
+							TSharedRef<FJsonObject> PairObject =
+								MakeShared<FJsonObject>();
+							PairObject->SetNumberField(
+								TEXT("from_index"),
+								Pair.Key);
+							PairObject->SetNumberField(
+								TEXT("to_index"),
+								Pair.Value);
+							PairObject->SetBoolField(
+								TEXT("reachable"),
+								bReachable);
+							if (bIncludePathPoints)
+							{
+								PairObject->SetArrayField(
+									TEXT("path_points"),
+									MoveTemp(PathPointValues));
+							}
+							PairResults.Add(
+								MakeShared<FJsonValueObject>(PairObject));
+						}
+					}
+					if (!bFindPath
+						&& !AddJsonValue(
+							TEXT("world.navigation:connectivity:pairs"),
+							TEXT("world"),
+							World->GetPathName(),
+							TEXT("pairs"),
+							MakeShared<FJsonValueArray>(MoveTemp(PairResults)),
+							Context,
+							Entries,
+							OutError))
+					{
+						return false;
 					}
 				}
 				return BuildSnapshot(
@@ -1958,6 +2146,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Target.IsSet() ? Target->GetPublicRef() : World->GetPathName(), FString()); };
 				TSharedPtr<FJsonObject> Input;
 				if (!ParseInput(CanonicalInput, Input, OutError))
 				{
@@ -1985,9 +2174,11 @@ namespace UE::UAI::DomainAdapters::WorldRead
 							continue;
 						}
 						const UObject* Layer = Actor->GetHLODLayer();
-						const FString LayerPath = Layer
-							? Layer->GetPathName()
-							: FString();
+						if (!Layer)
+						{
+							continue;
+						}
+						const FString LayerPath = Layer->GetPathName();
 						if (!AddString(
 								TEXT("world.hlod:layer:") + Actor->GetPathName(),
 								TEXT("actor"),
@@ -2054,23 +2245,35 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						{
 							return false;
 						}
+						TArray<TSharedPtr<FJsonValue>> IssueValues;
+						IssueValues.Reserve(Collector.Issues.Num());
 						for (int32 Index = 0; Index < Collector.Issues.Num(); ++Index)
 						{
 							const FPartitionIssueCollector::FIssue& Issue =
 								Collector.Issues[Index];
-							if (!AddString(
-									FString::Printf(TEXT("world.partition_health:issue:%d"), Index),
-									TEXT("world_partition_issue"), Issue.Subject,
-									TEXT("code"), Issue.Code,
-									Context, Entries, OutError)
-								|| (!Issue.Detail.IsEmpty() && !AddString(
-									FString::Printf(TEXT("world.partition_health:issue_detail:%d"), Index),
-									TEXT("world_partition_issue"), Issue.Subject,
-									TEXT("detail"), Issue.Detail,
-									Context, Entries, OutError)))
+							TSharedRef<FJsonObject> IssueObject =
+								MakeShared<FJsonObject>();
+							IssueObject->SetStringField(TEXT("code"), Issue.Code);
+							if (!Issue.Subject.IsEmpty())
 							{
-								return false;
+								IssueObject->SetStringField(
+									TEXT("subject"),
+									Issue.Subject);
 							}
+							IssueValues.Add(
+								MakeShared<FJsonValueObject>(IssueObject));
+						}
+						if (!AddJsonValue(
+								TEXT("world.partition_health:issues"),
+								TEXT("world"),
+								World->GetPathName(),
+								TEXT("issues"),
+								MakeShared<FJsonValueArray>(MoveTemp(IssueValues)),
+								Context,
+								Entries,
+								OutError))
+						{
+							return false;
 						}
 						return BuildSnapshot(
 							ProviderBinding, Context, MoveTemp(Entries),
@@ -2094,6 +2297,10 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					{
 						return false;
 					}
+					bool bIncludeLoadedRegions = false;
+					Input->TryGetBoolField(
+						TEXT("include_loaded_regions"),
+						bIncludeLoadedRegions);
 					if (Partition)
 					{
 						if (!AddString(
@@ -2105,23 +2312,40 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						{
 							return false;
 						}
-						int32 RegionIndex = 0;
-						for (const FBox& Region : Partition->GetUserLoadedEditorRegions())
+					}
+					if (bIncludeLoadedRegions)
+					{
+						TArray<TSharedPtr<FJsonValue>> RegionValues;
+						if (Partition)
 						{
-							if (!AddSpatial(
-									FString::Printf(TEXT("world.partition:user_region_center:%d"), RegionIndex),
-									Partition->GetPathName(), TEXT("user_region_center"),
-									FString::Printf(TEXT("user-loaded-region:%d:center"), RegionIndex),
-									Region.GetCenter(), {}, Context, Entries, OutError)
-								|| !AddSpatial(
-									FString::Printf(TEXT("world.partition:user_region_extent:%d"), RegionIndex),
-									Partition->GetPathName(), TEXT("user_region_extent"),
-									FString::Printf(TEXT("user-loaded-region:%d:extent"), RegionIndex),
-									Region.GetExtent(), {}, Context, Entries, OutError))
+							RegionValues.Reserve(
+								Partition->GetUserLoadedEditorRegions().Num());
+							for (const FBox& Region
+								: Partition->GetUserLoadedEditorRegions())
 							{
-								return false;
+								TSharedRef<FJsonObject> RegionObject =
+									MakeShared<FJsonObject>();
+								RegionObject->SetObjectField(
+									TEXT("center"),
+									WorldPointJson(Region.GetCenter()));
+								RegionObject->SetObjectField(
+									TEXT("extent"),
+									WorldPointJson(Region.GetExtent()));
+								RegionValues.Add(
+									MakeShared<FJsonValueObject>(RegionObject));
 							}
-							++RegionIndex;
+						}
+						if (!AddJsonValue(
+								TEXT("world.partition:user_regions"),
+								TEXT("world"),
+								World->GetPathName(),
+								TEXT("loaded_regions"),
+								MakeShared<FJsonValueArray>(MoveTemp(RegionValues)),
+								Context,
+								Entries,
+								OutError))
+						{
+							return false;
 						}
 					}
 					return BuildSnapshot(
@@ -2134,10 +2358,9 @@ namespace UE::UAI::DomainAdapters::WorldRead
 					Input->TryGetStringField(TEXT("scope"), Scope);
 					if (Scope != TEXT("world") && Scope != TEXT("selection"))
 					{
-						return Fail(
-							OutError,
-							TEXT("world_read_data_layer_scope_invalid"),
-							Scope);
+						return Fail(OutError, WorldReadFact(TEXT("world_read_data_layer_scope_invalid"),
+							TEXT("Data-layer scope must be world or selection."), TEXT("/scope"), MakeShared<FJsonValueString>(Scope),
+							MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{MakeShared<FJsonValueString>(TEXT("world")), MakeShared<FJsonValueString>(TEXT("selection"))}), true));
 					}
 					TArray<AActor*> ActorsInScope;
 					const TArray<FString>& SelectionIdentities =
@@ -2275,31 +2498,27 @@ namespace UE::UAI::DomainAdapters::WorldRead
 #endif
 						if (bIncludeMembership)
 						{
-							int64 MembershipCount = 0;
+							TArray<TSharedPtr<FJsonValue>> Members;
 							for (const AActor* Actor : ActorsInScope)
 							{
 								if (!Actor->ContainsDataLayer(Layer))
 								{
 									continue;
 								}
-								++MembershipCount;
-								if (!AddString(
-										TEXT("world.data_layers:actor:")
-											+ Owner + TEXT(":")
-											+ Actor->GetPathName(),
-										TEXT("data_layer"), Owner,
-										TEXT("data_layer_actor_member"),
-										Actor->GetPathName(),
-										Context, Entries, OutError))
-								{
-									return false;
-								}
+								Members.Add(
+									MakeShared<FJsonValueString>(Actor->GetPathName()));
 							}
-							if (!AddInteger(
+							if (!AddJsonValue(
+									TEXT("world.data_layers:actors:") + Owner,
+									TEXT("data_layer"), Owner,
+									TEXT("data_layer_actor_members"),
+									MakeShared<FJsonValueArray>(Members),
+									Context, Entries, OutError)
+								|| !AddInteger(
 									TEXT("world.data_layers:membership_count:") + Owner,
 									TEXT("data_layer"), Owner,
 									TEXT("data_layer_actor_membership_count"),
-									MembershipCount,
+									Members.Num(),
 									Context, Entries, OutError))
 							{
 								return false;
@@ -2312,20 +2531,31 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				}
 				const TArray<ULevelStreaming*>& StreamingLevels =
 					World->GetStreamingLevels();
+				const TArray<FString> RequestedPackages =
+					ReadStringArray(Input, TEXT("level_packages"));
+				int32 MatchingLevelCount = 0;
 				for (const ULevelStreaming* Level : StreamingLevels)
 				{
+					const FString PackageName = Level
+						? Level->GetWorldAssetPackageName()
+						: FString();
 					if (Level
-						&& !AddString(
-							TEXT("world.topology:streaming_level"),
-							TEXT("streaming_level"),
-							Level->GetPathName(),
-							TEXT("package_name"),
-							Level->GetWorldAssetPackageName(),
-							Context,
-							Entries,
-							OutError))
+						&& (RequestedPackages.IsEmpty()
+							|| RequestedPackages.Contains(PackageName)))
 					{
-						return false;
+						++MatchingLevelCount;
+						if (!AddString(
+								TEXT("world.topology:streaming_level"),
+								TEXT("streaming_level"),
+								Level->GetPathName(),
+								TEXT("package_name"),
+								PackageName,
+								Context,
+								Entries,
+								OutError))
+						{
+							return false;
+						}
 					}
 				}
 				if (ProviderBinding
@@ -2336,7 +2566,7 @@ namespace UE::UAI::DomainAdapters::WorldRead
 							TEXT("world"),
 							World->GetPathName(),
 							TEXT("streaming_level_count"),
-							StreamingLevels.Num(),
+							MatchingLevelCount,
 							Context,
 							Entries,
 							OutError))
@@ -2372,11 +2602,13 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Target.IsSet() ? Target->GetPublicRef() : World->GetPathName(), FString()); };
 				UObject* Object = nullptr;
 				if (!ResolveTarget(Target, Object, OutError))
 				{
 					return false;
 				}
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Object->GetPathName(), FString()); };
 				TSharedPtr<FJsonObject> Input;
 				if (!ParseInput(CanonicalInput, Input, OutError))
 				{
@@ -2389,11 +2621,9 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						Cast<UPhysicsConstraintComponent>(Object);
 					if (!Constraint)
 					{
-						return Fail(
-							OutError,
-							TEXT("world_read_target_kind_mismatch"),
-							Object->GetPathName(),
-							ProviderBinding);
+						return Fail(OutError, WorldReadFact(TEXT("world_read_target_kind_mismatch"),
+							TEXT("Target must be a physics constraint component."), TEXT("/target_class"),
+							MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("PhysicsConstraintComponent"))), Object->GetPathName());
 					}
 					const FString Owner = Constraint->GetPathName();
 					if (!AddString(
@@ -2528,11 +2758,9 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						Cast<UPrimitiveComponent>(Object);
 					if (!Primitive)
 					{
-						return Fail(
-							OutError,
-							TEXT("world_read_target_kind_mismatch"),
-							Object->GetPathName(),
-							ProviderBinding);
+						return Fail(OutError, WorldReadFact(TEXT("world_read_target_kind_mismatch"),
+							TEXT("Target must be a primitive component to query physics state."), TEXT("/target_class"),
+							MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("PrimitiveComponent"))), Object->GetPathName());
 					}
 					const FString Owner = Primitive->GetPathName();
 					if (!AddString(
@@ -2557,7 +2785,8 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						TEXT("include_runtime_state"), bIncludeRuntimeState);
 					if (bIncludeCollisionResponses)
 					{
-						for (int32 Channel = 0; Channel < ECC_MAX; ++Channel)
+						const auto& Responses = Primitive->GetCollisionResponseToChannels();
+						for (int32 Channel = 0; Channel < UE_ARRAY_COUNT(Responses.EnumArray); ++Channel)
 						{
 							if (!AddString(
 									FString::Printf(
@@ -2633,12 +2862,12 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				{
 					return false;
 				}
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Target.IsSet() ? Target->GetPublicRef() : World->GetPathName(), FString()); };
 				if (!Target.IsSet())
 				{
-					return Fail(
-						OutError,
-						TEXT("landscape_height_target_required"),
-						ProviderBinding);
+					return Fail(OutError, WorldReadFact(TEXT("landscape_height_target_required"),
+						TEXT("Landscape height query requires a target."), TEXT("/target"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("landscape target")), true), ProviderBinding);
 				}
 
 				TSharedPtr<FJsonObject> Input;
@@ -2648,19 +2877,17 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				}
 				const TSharedPtr<FJsonObject>* Region = nullptr;
 				const TSharedPtr<FJsonObject>* SpaceContract = nullptr;
-				if (!Input->TryGetObjectField(TEXT("region"), Region)
-					|| !Region
-					|| !Region->IsValid()
-					|| !Input->TryGetObjectField(
-						TEXT("space_contract"),
-						SpaceContract)
-					|| !SpaceContract
-					|| !SpaceContract->IsValid())
+				if (!Input->TryGetObjectField(TEXT("region"), Region) || !Region || !Region->IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("landscape_height_space_contract_invalid"),
-						Target->GetPublicRef());
+					return Fail(OutError, WorldReadFact(TEXT("landscape_height_space_contract_invalid"),
+						TEXT("Landscape region must be an object."), TEXT("/region"), WorldReadInputValue(Input->TryGetField(TEXT("region"))),
+						MakeShared<FJsonValueString>(TEXT("object")), true), Target->GetPublicRef());
+				}
+				if (!Input->TryGetObjectField(TEXT("space_contract"), SpaceContract) || !SpaceContract || !SpaceContract->IsValid())
+				{
+					return Fail(OutError, WorldReadFact(TEXT("landscape_height_space_contract_invalid"),
+						TEXT("Landscape space contract must be an object."), TEXT("/space_contract"), WorldReadInputValue(Input->TryGetField(TEXT("space_contract"))),
+						MakeShared<FJsonValueString>(TEXT("object")), true), Target->GetPublicRef());
 				}
 				FString RegionFrame;
 				FString SpaceFrame;
@@ -2678,56 +2905,48 @@ namespace UE::UAI::DomainAdapters::WorldRead
 				(*SpaceContract)->TryGetStringField(
 					TEXT("basis_evidence"),
 					BasisEvidence);
-				if (RegionFrame
-						!= TEXT("ue.landscape.local_sample_grid")
-					|| SpaceFrame
-						!= TEXT("ue.landscape.local_sample_grid")
-					|| Unit != TEXT("sample")
-					|| BasisEvidence.TrimStartAndEnd().IsEmpty())
+				if (RegionFrame != TEXT("ue.landscape.local_sample_grid"))
 				{
-					return Fail(
-						OutError,
-						TEXT("landscape_height_space_contract_invalid"),
-						Target->GetPublicRef());
+					return Fail(OutError, WorldReadFact(TEXT("landscape_height_space_contract_invalid"),
+						TEXT("Landscape region must use the local sample-grid frame."), TEXT("/region/frame_id"), WorldReadInputValue((*Region)->TryGetField(TEXT("frame_id"))),
+						MakeShared<FJsonValueString>(TEXT("ue.landscape.local_sample_grid")), true), Target->GetPublicRef());
+				}
+				if (SpaceFrame != TEXT("ue.landscape.local_sample_grid"))
+				{
+					return Fail(OutError, WorldReadFact(TEXT("landscape_height_space_contract_invalid"),
+						TEXT("Landscape space contract must use the local sample-grid frame."), TEXT("/space_contract/frame_id"), WorldReadInputValue((*SpaceContract)->TryGetField(TEXT("frame_id"))),
+						MakeShared<FJsonValueString>(TEXT("ue.landscape.local_sample_grid")), true), Target->GetPublicRef());
+				}
+				if (Unit != TEXT("sample"))
+				{
+					return Fail(OutError, WorldReadFact(TEXT("landscape_height_space_contract_invalid"),
+						TEXT("Landscape height region coordinates must use sample units."), TEXT("/space_contract/unit"), WorldReadInputValue((*SpaceContract)->TryGetField(TEXT("unit"))),
+						MakeShared<FJsonValueString>(TEXT("sample")), true), Target->GetPublicRef());
+				}
+				if (BasisEvidence.TrimStartAndEnd().IsEmpty())
+				{
+					return Fail(OutError, WorldReadFact(TEXT("landscape_height_space_contract_invalid"),
+						TEXT("Landscape space contract requires non-empty basis evidence."), TEXT("/space_contract/basis_evidence"), WorldReadInputValue((*SpaceContract)->TryGetField(TEXT("basis_evidence"))),
+						MakeShared<FJsonValueString>(TEXT("non-empty string")), true), Target->GetPublicRef());
 				}
 
 				FIntPoint MinInclusive;
 				FIntPoint MaxInclusive;
-				if (!TryReadIntegerPoint(
-						*Region,
-						TEXT("min_inclusive"),
-						MinInclusive)
-					|| !TryReadIntegerPoint(
-						*Region,
-						TEXT("max_inclusive"),
-						MaxInclusive))
+				if (!TryReadIntegerPoint(*Region, TEXT("min_inclusive"), MinInclusive, OutError)
+					|| !TryReadIntegerPoint(*Region, TEXT("max_inclusive"), MaxInclusive, OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT("landscape_height_region_invalid"),
-						Target->GetPublicRef());
+					return false;
 				}
 
 				ALandscape* Landscape = nullptr;
 				DomainAdapters::Landscape::
 					FLandscapeHeightStateError StateError;
-				if (!DomainAdapters::Landscape::
-					TryResolveLandscapeHeightTarget(
-						*World,
-						Target->GetPublicRef(),
-						nullptr,
-						Landscape,
-						StateError)
-					|| !Landscape)
+				if (!DomainAdapters::Landscape::TryResolveLandscapeHeightTarget(
+						*World, Target->GetPublicRef(), nullptr, Landscape, StateError))
 				{
-					return Fail(
-						OutError,
-						StateError.Code.IsEmpty()
-							? FString(TEXT("landscape_height_target_unresolved"))
-							: StateError.Code,
-						StateError.SubjectId,
-						StateError.Detail);
+					return Fail(OutError, StateError);
 				}
+				ON_SCOPE_EXIT { SupplementWorldRead(OutError, Landscape->GetPathName(), FString()); };
 
 				DomainAdapters::Landscape::FLandscapeHeightState State;
 				if (!DomainAdapters::Landscape::
@@ -2735,35 +2954,24 @@ namespace UE::UAI::DomainAdapters::WorldRead
 						*Landscape,
 						MinInclusive,
 						MaxInclusive,
-						16384,
 						State,
 						StateError))
 				{
-					return Fail(
-						OutError,
-						StateError.Code,
-						StateError.SubjectId,
-						StateError.Detail);
+					return Fail(OutError, StateError);
 				}
 
 				FUeAgentCanonicalValuePtr Value;
-				FString CanonicalError;
+				UE::UAI::Contract::FDiagnostic CanonicalError;
 				if (!CanonicalJson::TryFromJsonValue(
 						MakeShared<FJsonValueObject>(
 							DomainAdapters::Landscape::
-								BuildLandscapeHeightStateObject(
-									Target->GetPublicRef(),
+								BuildLandscapeHeightQueryObject(
 									State)),
 						Context.GetResourceTracker(),
 						Value,
-						CanonicalError)
-					|| !Value.IsValid())
+						CanonicalError))
 				{
-					return Fail(
-						OutError,
-						TEXT("landscape_height_state_encoding_failed"),
-						Target->GetPublicRef(),
-						CanonicalError);
+					return Fail(OutError, CanonicalError, Target->GetPublicRef());
 				}
 				TArray<FUeAgentStateEntry> Entries;
 				if (!AddValueEntry(
@@ -2793,31 +3001,44 @@ namespace UE::UAI::DomainAdapters::WorldRead
 			static bool TryReadIntegerPoint(
 				const TSharedPtr<FJsonObject>& Object,
 				const TCHAR* Field,
-				FIntPoint& OutPoint)
+				FIntPoint& OutPoint,
+				FUeAgentWorldReadError& OutError)
 			{
+				const FString Path = TEXT("/region/") + FString(Field);
 				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-				if (!Object.IsValid()
-					|| !Object->TryGetArrayField(Field, Values)
-					|| !Values
-					|| Values->Num() != 2)
+				if (!Object.IsValid() || !Object->TryGetArrayField(Field, Values) || !Values)
 				{
-					return false;
+					return Fail(OutError, WorldReadFact(TEXT("landscape_height_region_invalid"),
+						TEXT("Landscape region corner must be an array of two integer coordinates."), Path,
+						WorldReadInputValue(Object.IsValid() ? Object->TryGetField(Field) : nullptr),
+						MakeShared<FJsonValueString>(TEXT("array with two integer coordinates")), true));
+				}
+				if (Values->Num() != 2)
+				{
+					return Fail(OutError, WorldReadFact(TEXT("landscape_height_region_invalid"),
+						TEXT("Landscape region corner requires exactly two coordinates."), Path,
+						MakeShared<FJsonValueNumber>(Values->Num()), MakeShared<FJsonValueNumber>(2), true));
 				}
 				int32 Components[2] = {};
 				for (int32 Index = 0; Index < 2; ++Index)
 				{
 					const TSharedPtr<FJsonValue>& Value = (*Values)[Index];
+					const FString ComponentPath = Path + TEXT("/") + FString::FromInt(Index);
 					if (!Value.IsValid() || Value->Type != EJson::Number)
 					{
-						return false;
+						return Fail(OutError, WorldReadFact(TEXT("landscape_height_region_invalid"),
+							TEXT("Landscape region coordinate must be numeric."), ComponentPath, WorldReadInputValue(Value),
+							MakeShared<FJsonValueString>(TEXT("32-bit integer")), true));
 					}
-					const double NumberValue = Value->AsNumber();
-					if (!FMath::IsFinite(NumberValue)
-						|| NumberValue != FMath::FloorToDouble(NumberValue)
-						|| NumberValue < MIN_int32
-						|| NumberValue > MAX_int32)
+					FString Lexeme;
+					int64 NumberValue = 0;
+					if (!StateSemantic::CanonicalJson::TryGetNumberLexeme(*Value, Lexeme)
+						|| !StateSemantic::TryParseInt64Number(Lexeme, NumberValue)
+						|| NumberValue < MIN_int32 || NumberValue > MAX_int32)
 					{
-						return false;
+						return Fail(OutError, WorldReadFact(TEXT("landscape_height_region_invalid"),
+							TEXT("Landscape region coordinate must be an exact integer in the signed 32-bit range."), ComponentPath, Value,
+							MakeShared<FJsonValueString>(TEXT("integer from -2147483648 to 2147483647")), true));
 					}
 					Components[Index] = static_cast<int32>(NumberValue);
 				}
@@ -2947,10 +3168,9 @@ namespace UE::UAI::DomainAdapters::WorldRead
 		}
 		else
 		{
-			return Fail(
-				OutError,
-				TEXT("world_read_provider_unknown"),
-				ProviderBinding);
+			return Fail(OutError, WorldReadFact(TEXT("world_read_provider_unknown"),
+				TEXT("No native world-read provider is registered for the requested binding."), TEXT("/provider_binding"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("registered world-read provider"))), ProviderBinding);
 		}
 		return true;
 	}

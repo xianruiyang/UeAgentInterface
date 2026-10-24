@@ -12,8 +12,8 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		RuntimePreview,
 		WorldContext,
 		ModelingTool,
-		VoxelGrid,
 		HostLifecycle,
+		PcgGeneration,
 	};
 
 	class UEAGENTINTERFACE_API
@@ -48,5 +48,9 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 	UEAGENTINTERFACE_API const
 	FUeAgentEditorSessionOperationFamilyContract*
 	FindEditorSessionOperationFamilyContract(
+		EUeAgentEditorSessionOperationFamily Family);
+
+	// Host lifecycle is bound by editor.safe_exit, never by editor.session.
+	UEAGENTINTERFACE_API bool IsEditorSessionCommandFamily(
 		EUeAgentEditorSessionOperationFamily Family);
 }

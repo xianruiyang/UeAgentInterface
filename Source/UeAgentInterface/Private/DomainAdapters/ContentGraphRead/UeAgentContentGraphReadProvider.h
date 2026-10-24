@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
 #include "Core/BindingGateway/Query/UeAgentQueryBindingError.h"
@@ -11,12 +13,7 @@
 
 namespace UE::UAI::DomainAdapters::ContentGraphRead
 {
-	struct UEAGENTINTERFACE_API FUeAgentContentGraphReadError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FUeAgentContentGraphReadError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentContentGraphReadHook
 	{

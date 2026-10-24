@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialNative.h"
 #include "UObject/WeakObjectPtr.h"
 
@@ -20,6 +21,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			TEXT(""), TEXT(""), 0, {}, {}, TEXT(""), TEXT(""),
 			UE::UAI::StateSemantic::FUeAgentTemporalPoint(TEXT(""), TEXT(""))};
 
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -32,6 +34,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			TEXT(""), TEXT(""), 0, {}, {}, TEXT(""), TEXT(""),
 			UE::UAI::StateSemantic::FUeAgentTemporalPoint(TEXT(""), TEXT(""))};
 
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -46,20 +49,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			TEXT(""), TEXT(""), 0, {}, {}, TEXT(""), TEXT(""),
 			UE::UAI::StateSemantic::FUeAgentTemporalPoint(TEXT(""), TEXT(""))};
 
-		bool IsValid() const;
-	};
-
-	struct UEAGENTINTERFACE_API FUeAgentRigSimulationSpatialPcgGenerationBinding
-	{
-		FRigSimulationSpatialGenerationIdentity Identity;
-		TWeakObjectPtr<UPCGComponent> SourceComponent;
-		TWeakObjectPtr<UPCGDataAsset> GeneratedData;
-		TArray<TWeakObjectPtr<APCGPartitionActor>> Partitions;
-		UE::UAI::StateSemantic::FUeAgentTemporalPoint GeneratedAt{TEXT(""), TEXT("")};
-		UE::UAI::StateSemantic::FUeAgentSpatialFrame NativeFrame{
-			TEXT(""), TEXT(""), 0, {}, {}, TEXT(""), TEXT(""),
-			UE::UAI::StateSemantic::FUeAgentTemporalPoint(TEXT(""), TEXT(""))};
-
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 		bool IsValid() const;
 	};
 

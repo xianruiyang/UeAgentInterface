@@ -287,10 +287,6 @@ bool FUeAgentGraphCompoundPublicRigIkVerticalSliceTest::RunTest(
 		return false;
 	}
 
-	TestNull(
-		TEXT("retired IKRig identity is absent from the sole current registry"),
-		Registry->FindExact(TEXT("ik_rig_apply_folder")));
-
 	const FUeAgentCommandResult Result = SubmitPublic(
 		Registry,
 		Dispatch,

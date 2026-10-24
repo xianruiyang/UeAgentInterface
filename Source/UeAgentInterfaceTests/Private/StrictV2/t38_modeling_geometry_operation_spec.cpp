@@ -1,7 +1,9 @@
 #include "Misc/AutomationTest.h"
 
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "Dom/JsonObject.h"
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingGeometryMechanicsBoundary.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
 namespace UE::UAI::Tests::StrictV2::T38
@@ -10,8 +12,6 @@ namespace UE::UAI::Tests::StrictV2::T38
 	{
 		static const TArray<FString> Commands = {
 			TEXT("mesh.modeling_session"),
-			TEXT("mesh.attribute.material_slot.add"),
-			TEXT("mesh.attribute.material_slot.assign"),
 			TEXT("mesh.attribute.normals.recompute"),
 			TEXT("mesh.attribute.uv.auto"),
 			TEXT("mesh.attribute.uv.project"),
@@ -44,6 +44,16 @@ namespace UE::UAI::Tests::StrictV2::T38
 		};
 		return Commands;
 	}
+
+	const TArray<FString>& DormantCommands()
+	{
+		static const TArray<FString> Commands = {
+			TEXT("mesh.attribute.material_slot.add"),
+			TEXT("mesh.attribute.material_slot.assign"),
+			TEXT("mesh.pivot.update"),
+		};
+		return Commands;
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -67,8 +77,6 @@ bool FUeAgentStrictV2T38ModelingGeometryInventoryTest::RunTest(
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T38 owns exactly 32 inventory commands"),
-		ExpectedCommands().Num(), 32);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
@@ -78,6 +86,35 @@ bool FUeAgentStrictV2T38ModelingGeometryInventoryTest::RunTest(
 			TestEqual(*FString::Printf(TEXT("%s has one T38 owner"), *CommandId),
 				Contract->GetPublicOwner(),
 				FString(TEXT("modeling-geometry-owner")));
+			if (CommandId.EndsWith(TEXT(".create")))
+			{
+				const auto& Fields = Contract->GetModelResultFields();
+				TestEqual(TEXT("primitive create has two model fields"),
+					Fields.Num(), 2);
+				if (Fields.Num() == 2)
+				{
+					TestEqual(TEXT("primitive create status source"),
+						Fields[0].SourcePath,
+						TArray<FString>{TEXT("projection"), TEXT("payload"),
+							TEXT("status")});
+					TestEqual(TEXT("primitive create outcome source"),
+						Fields[1].SourcePath,
+						TArray<FString>{TEXT("projection"), TEXT("payload"),
+							TEXT("effect_outcome")});
+				}
+			}
+		}
+	}
+	for (const FString& CommandId : DormantCommands())
+	{
+		const auto* Contract = Registry->FindExact(CommandId);
+		TestNotNull(*FString::Printf(TEXT("%s remains registered"), *CommandId), Contract);
+		if (Contract)
+		{
+			TestEqual(
+				*FString::Printf(TEXT("%s is centrally dormant"), *CommandId),
+				Contract->GetAvailability(),
+				CommandContract::EUeAgentCommandAvailability::Dormant);
 		}
 	}
 	const auto* Session = Registry->FindExact(TEXT("mesh.modeling_session"));
@@ -87,6 +124,24 @@ bool FUeAgentStrictV2T38ModelingGeometryInventoryTest::RunTest(
 			Session->GetInputFields().Num(), 5);
 		TestEqual(TEXT("modeling session action is required"),
 			Session->GetInputFields()[0].Name, FString(TEXT("action")));
+	}
+	TestTrue(TEXT("set_actor_selection remains session-native"),
+		DomainAdapters::ModelingGeometry::IsModelingSessionAction(
+			TEXT("set_actor_selection")));
+	const TArray<FString> ExactCommandOwnedActions = {
+		TEXT("observe_selection"),
+		TEXT("select_via_world_ray"),
+		TEXT("replace_actor_mesh"),
+		TEXT("snap_to_surface"),
+	};
+	for (const FString& ExactCommandOwnedAction : ExactCommandOwnedActions)
+	{
+		TestFalse(
+			*FString::Printf(
+				TEXT("%s is not duplicated by mesh.modeling_session"),
+				*ExactCommandOwnedAction),
+			DomainAdapters::ModelingGeometry::IsModelingSessionAction(
+				ExactCommandOwnedAction));
 	}
 	for (const FString& CommandId : ExpectedCommands())
 	{

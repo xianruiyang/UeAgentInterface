@@ -1,6 +1,10 @@
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonValue.h"
+
 #include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 namespace UE::UAI::CommandEdge
 {
@@ -8,11 +12,22 @@ namespace UE::UAI::CommandEdge
 	using namespace CommandRegistry;
 	using namespace Contract;
 
+	namespace
+	{
+		FDiagnostic ExactDispatchFailure(const TCHAR* Code, const TCHAR* Reason, const FString& CommandId)
+		{
+			auto Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("command_composition"));
+			Diagnostic.CandidateName = CommandId;
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
+		}
+	}
+
 	bool FUeAgentExactCommandDispatch::TryCreate(
 		TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>> InHandlers,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutDispatch.Reset();
 		OutError.Reset();
@@ -25,23 +40,33 @@ namespace UE::UAI::CommandEdge
 				Registry->FindExact(CommandId);
 			if (!Contract)
 			{
-				OutError = TEXT("command_handler_unknown");
+				OutError = ExactDispatchFailure(TEXT("command_handler_unknown"), CommandId.IsEmpty()
+					? TEXT("The exact command handler must declare a non-empty command identifier.")
+					: TEXT("The handler's command is absent from the exact command registry."), CommandId);
 				return false;
 			}
 			if (!CommandLifecycle::IsExecutable(
 					Contract->GetAvailability()))
 			{
-				OutError = TEXT("command_handler_disabled");
+				OutError = ExactDispatchFailure(TEXT("command_handler_disabled"),
+					TEXT("The handler's command is not executable in its current lifecycle state."), CommandId);
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				OutError.PropertyPath = TEXT("/executable");
 				return false;
 			}
 			if (Handler->GetPublicOwner() != Contract->GetPublicOwner())
 			{
-				OutError = TEXT("command_handler_owner_mismatch");
+				OutError = ExactDispatchFailure(TEXT("command_handler_owner_mismatch"),
+					TEXT("The handler owner differs from the command's registered owner."), CommandId);
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Handler->GetPublicOwner());
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Contract->GetPublicOwner());
 				return false;
 			}
 			if (ById.Contains(CommandId))
 			{
-				OutError = TEXT("command_handler_duplicate");
+				OutError = ExactDispatchFailure(TEXT("command_handler_duplicate"),
+					TEXT("More than one exact handler is registered for this command."), CommandId);
 				return false;
 			}
 			ById.Add(CommandId, Handler);
@@ -54,7 +79,8 @@ namespace UE::UAI::CommandEdge
 					Contract.GetAvailability())
 				&& !ById.Contains(Contract.GetCommandId()))
 			{
-				OutError = TEXT("command_handler_missing");
+				OutError = ExactDispatchFailure(TEXT("command_handler_missing"),
+					TEXT("The executable command has no registered exact handler."), Contract.GetCommandId());
 				return false;
 			}
 		}
@@ -68,12 +94,11 @@ namespace UE::UAI::CommandEdge
 		for (const TPair<FString, TSharedRef<IUeAgentExactCommandHandler>>&
 			Handler : MutableDispatch->Handlers)
 		{
-			FString BindError;
+			UE::UAI::Contract::FDiagnostic BindError;
 			if (!Handler.Value->BindNestedExactDispatch(
 				NestedDispatch, Registry, BindError))
 			{
-				OutError = TEXT("command_handler_nested_dispatch_bind_failed:")
-					+ Handler.Key + TEXT(":") + BindError;
+				OutError = BindError;
 				return false;
 			}
 		}
@@ -86,65 +111,43 @@ namespace UE::UAI::CommandEdge
 		const FUeAgentCallerContext& CallerContext,
 		const TSharedRef<IUeAgentCancellationSignal>& Cancellation) const
 	{
+		auto Reject = [&](const TCHAR* Code, const TCHAR* Reason)
+		{
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("command_protocol"));
+			Diagnostic.CandidateName = Request.GetCommandId();
+			Diagnostic.Source.JsonPath = TEXT("/command_id");
+			return FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(),
+				Request.GetCommandId(), Request.GetCommandBindingHash(), MoveTemp(Diagnostic));
+		};
 		const FUeAgentFrozenCommandContract* Contract =
 			Registry->FindExact(Request.GetCommandId());
 		if (!Contract)
 		{
-			return FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(),
-				Request.GetRequestId(),
-				Request.GetCommandId(),
-				Request.GetCommandBindingHash(),
-				TEXT("command_not_registered_exact"),
-				TEXT("the complete command identity is not registered"));
+			return Reject(TEXT("command_not_registered_exact"), TEXT("The requested command is not registered."));
 		}
 		if (!CommandLifecycle::IsExecutable(
 				Contract->GetAvailability()))
 		{
-			return FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(),
-				Request.GetRequestId(),
-				Request.GetCommandId(),
-				Request.GetCommandBindingHash(),
-				TEXT("command_disabled"),
-				TEXT("the exact command contract is disabled"));
+			return Reject(TEXT("command_disabled"), TEXT("The requested command is disabled."));
 		}
-		if (Request.GetCommandBindingHash() != Contract->GetContractHash())
-		{
-			return FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(),
-				Request.GetRequestId(),
-				Request.GetCommandId(),
-				Request.GetCommandBindingHash(),
-				TEXT("command_contract_version_mismatch"),
-				TEXT("the request was generated from another contract"));
-		}
-
 		const TSharedRef<IUeAgentExactCommandHandler>* Handler =
 			Handlers.Find(Request.GetCommandId());
 		if (!Handler)
 		{
-			return FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(),
-				Request.GetRequestId(),
-				Request.GetCommandId(),
-				Request.GetCommandBindingHash(),
-				TEXT("command_handler_missing"),
-				TEXT("the exact command has no composed handler"));
+			return Reject(TEXT("command_handler_missing"), TEXT("The requested command has no composed handler."));
 		}
+		UeAgentAuthoringDiagnostics::FScopedWarnings Warnings;
 		FUeAgentCommandResult Result =
 			(*Handler)->Submit(Request, CallerContext, Cancellation);
-		if (!Result.IsValid() || !Result.MatchesRequest(Request))
+		UE::UAI::Contract::FDiagnostic ResultError;
+		if (!Result.TryValidateForRequest(Request, ResultError))
 		{
-			return FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(),
-				Request.GetRequestId(),
-				Request.GetCommandId(),
-				Request.GetCommandBindingHash(),
-				TEXT("command_handler_result_identity_mismatch"),
-				TEXT("the handler returned another request identity"));
+			return FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(),
+				Request.GetCommandId(), Request.GetCommandBindingHash(), MoveTemp(ResultError));
 		}
-		return Result;
+		if (Result.IsProtocolError()) return Result;
+		const FString Payload = Warnings.AppendToPayload(Result.GetPayloadJson());
+		return Result.WithPayload(Payload);
 	}
 
 	FUeAgentExactCommandDispatch::FUeAgentExactCommandDispatch(

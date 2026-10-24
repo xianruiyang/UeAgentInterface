@@ -1,8 +1,12 @@
 #include "DomainAdapters/ContentDiscovery/UeAgentEditorContentDiscovery.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Components/ActorComponent.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Editor.h"
@@ -16,21 +20,96 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 {
 	using namespace UE::UAI::ContentDiscovery;
 
+    namespace
+    {
+        FScopedNameDiscoveryEntry MakeObjectDiscoveryEntry(const UObject& Object)
+        {
+            const AActor* Actor = Cast<AActor>(&Object);
+            const UActorComponent* Component = Cast<UActorComponent>(&Object);
+            FScopedNameDiscoveryEntry Entry;
+            Entry.Identity = Object.GetPathName();
+            Entry.Name = Actor ? Actor->GetActorLabel() : Object.GetName();
+            Entry.Scopes.Add(Actor ? TEXT("actor") : Component ? TEXT("component") : TEXT("object"));
+            const FString OwnerScope = Actor ? Actor->GetClass()->GetDisplayNameText().ToString()
+                : Component && Component->GetOwner() ? Component->GetOwner()->GetActorLabel() : FString();
+            if (IsReadableDiscoveryName(OwnerScope)) Entry.Scopes.Add(OwnerScope);
+            const UObject* ScopeOwner = Actor ? &Object
+                : Component && Component->GetOwner() ? Component->GetOwner() : Object.GetOuter();
+            AppendReadableDiscoveryPathScopes(ScopeOwner ? ScopeOwner->GetPathName() : Entry.Identity, Entry.Scopes);
+            return Entry;
+        }
+    }
+
+    bool TryResolveScopedObjectReference(TConstArrayView<UObject*> Objects,
+        const FString& Reference, UObject*& OutObject, UE::UAI::Contract::FDiagnostic& OutError)
+    {
+        OutObject = nullptr;
+        OutError.Reset();
+        TArray<UObject*> Candidates;
+        TArray<FScopedNameDiscoveryEntry> Names;
+        for (UObject* Object : Objects)
+        {
+            if (!IsValid(Object)) continue;
+            if (Object->GetPathName() == Reference) { OutObject = Object; return true; }
+            FScopedNameDiscoveryEntry Entry = MakeObjectDiscoveryEntry(*Object);
+            Names.Add(Entry);
+            Candidates.Add(Object);
+            // Object name and Actor label are alternate representations of the
+            // same native identity, resolved by the same owner as discovery.
+            if (Object->GetName() != Entry.Name)
+            {
+                Entry.Name = Object->GetName();
+                Names.Add(MoveTemp(Entry));
+                Candidates.Add(Object);
+            }
+        }
+        int32 Index = INDEX_NONE;
+        if (TryResolveScopedDiscoveryName(Names, Reference, ENameComparison::IgnoreCase, Index, OutError))
+        {
+            OutObject = Candidates[Index];
+            return true;
+        }
+        if (OutError.Code == TEXT("name_discovery_semantic_scope_ambiguous"))
+            OutError.Code = TEXT("object_reference_ambiguous");
+        OutError.TargetPath = Reference;
+        OutError.SourceKind = TEXT("command_input");
+        return false;
+    }
+
+	bool TryResolveEditorContentReference(FString& InOutReference,
+		const FString& RequiredKind, FContentDiscoveryError& OutError)
+	{
+		OutError = {};
+		InOutReference.TrimStartAndEndInline();
+		if (InOutReference.StartsWith(TEXT("/")) || InOutReference.StartsWith(TEXT("uai://"))) return true;
+		DomainCapability::FDomainCapabilityAuthorities Authorities;
+		UE::UAI::Contract::FDiagnostic AuthorityError;
+		if (!DomainCapability::TryGetOrBuildProcessDomainCapabilityAuthorities(Authorities, AuthorityError)
+			|| !Authorities.GetContentDiscoveryService())
+		{
+			OutError = AuthorityError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("content_search_authority_unavailable"), TEXT("The content search service is unavailable."), TEXT("content_search")) : AuthorityError;
+			return false;
+		}
+		FContentDiscoveryItem Item;
+		if (!Authorities.GetContentDiscoveryService()->TryResolveReadableName(InOutReference, Item, OutError)) return false;
+		if (!RequiredKind.IsEmpty() && Item.ContentKind != RequiredKind)
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("content_reference_kind_mismatch"), FString::Printf(TEXT("Expected content kind %s, but the selected content is %s."), *RequiredKind, *Item.ContentKind), TEXT("content_search"));
+			OutError.SubjectId = InOutReference;
+			OutError.CandidateName = InOutReference;
+			OutError.PropertyPath = TEXT("content_kind");
+			OutError.ActualValue = MakeShared<FJsonValueString>(Item.ContentKind);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(RequiredKind);
+			return false;
+		}
+		InOutReference = Item.Identity;
+		return true;
+	}
+
 	namespace
 	{
-		constexpr int32 MaxProviderItems = 100000;
-
-		void SetError(
-			FContentDiscoveryError& OutError,
-			const FString& Code,
-			const FString& SubjectId = FString(),
-			const FString& Detail = FString())
-		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
-		}
+		void SetError(FContentDiscoveryError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SubjectId; }
 
 		FString Sha1(const FString& Value)
 		{
@@ -39,6 +118,16 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 			FSHA1::HashBuffer(Utf8.Get(), Utf8.Length(), Digest);
 			return TEXT("sha1:")
 				+ BytesToHex(Digest, FSHA1::DigestSize).ToLower();
+		}
+
+		void AddPublicScopeIfReadable(
+			FContentDiscoveryItem& Item,
+			const FString& Scope)
+		{
+			if (IsReadableDiscoveryName(Scope))
+			{
+				Item.PublicDiscoveryScopes.AddUnique(Scope);
+			}
 		}
 
 		FString RootPathFromRequest(const FContentDiscoveryRequest& Request)
@@ -71,71 +160,6 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 			return TEXT("/Game");
 		}
 
-		bool BuildPage(
-			const FString& ProviderId,
-			const FString& Revision,
-			TArray<FContentDiscoveryItem> Items,
-			const int32 Offset,
-			const int32 Limit,
-			FContentDiscoveryProviderPage& OutPage,
-			FContentDiscoveryError& OutError)
-		{
-			OutPage = {};
-			OutError = {};
-			Items.Sort(
-				[](const FContentDiscoveryItem& Left,
-				   const FContentDiscoveryItem& Right)
-				{
-					return Left.MatchScore != Right.MatchScore
-						? Left.MatchScore > Right.MatchScore
-						: Left.Identity < Right.Identity;
-				});
-			if (Offset < 0 || Offset > Items.Num())
-			{
-				SetError(
-					OutError,
-					TEXT("content_search_cursor_invalid"),
-					ProviderId,
-					FString::FromInt(Offset));
-				return false;
-			}
-			const int32 End = FMath::Min(Offset + Limit, Items.Num());
-			OutPage.ProviderId = ProviderId;
-			OutPage.Revision = Revision;
-			OutPage.TotalMatches = Items.Num();
-			OutPage.NextOffset = End < Items.Num() ? End : -1;
-			OutPage.bComplete = OutPage.NextOffset == -1;
-			OutPage.bReadOnly = true;
-			for (int32 Index = Offset; Index < End; ++Index)
-			{
-				OutPage.Items.Add(MoveTemp(Items[Index]));
-			}
-			return true;
-		}
-
-		bool FilterAndScore(
-			const FContentDiscoveryRequest& Request,
-			FContentDiscoveryItem Item,
-			TArray<FContentDiscoveryItem>& OutItems)
-		{
-			if (!MatchesContentDiscoveryFilters(Request, Item))
-			{
-				return true;
-			}
-			if (!TryScoreContentDiscoveryMatch(
-					Request,
-					Item.Identity,
-					Item.DisplayName,
-					Item.SearchTerms,
-					Item.MatchScore,
-					Item.MatchReason))
-			{
-				return true;
-			}
-			OutItems.Add(MoveTemp(Item));
-			return true;
-		}
-
 		class FEditorAssetContentDiscoveryProvider final
 			: public IUeAgentContentDiscoveryProvider
 		{
@@ -157,8 +181,6 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 
 			bool TrySearch(
 				const FContentDiscoveryRequest& Request,
-				const int32 Offset,
-				const int32 Limit,
 				FContentDiscoveryProviderPage& OutPage,
 				FContentDiscoveryError& OutError) override
 			{
@@ -166,11 +188,7 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 				OutError = {};
 				if (!IsInGameThread())
 				{
-					SetError(
-						OutError,
-						TEXT("content_search_thread_invalid"),
-						ProviderId,
-						TEXT("Asset Registry discovery requires the UE game thread."));
+					SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("content_search_thread_invalid"), TEXT("Asset discovery must run on the Unreal game thread."), TEXT("content_search")), ProviderId);
 					return false;
 				}
 				FAssetRegistryModule& Module =
@@ -183,15 +201,6 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 					Assets,
 					true,
 					false);
-				if (Assets.Num() > MaxProviderItems)
-				{
-					SetError(
-						OutError,
-						TEXT("content_search_provider_capacity_exceeded"),
-						ProviderId,
-						FString::FromInt(Assets.Num()));
-					return false;
-				}
 				Assets.Sort(
 					[](const FAssetData& Left, const FAssetData& Right)
 					{
@@ -207,7 +216,7 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 						+ Asset.AssetClassPath.ToString();
 				}
 				const FString Revision = Sha1(RevisionMaterial);
-				TArray<FContentDiscoveryItem> Matches;
+				TArray<FContentDiscoveryItem> Items;
 				for (const FAssetData& Asset : Assets)
 				{
 					FContentDiscoveryItem Item;
@@ -217,6 +226,10 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 					Item.ContentKind = TEXT("asset");
 					Item.ClassPath = Asset.AssetClassPath.ToString();
 					Item.OwnerIdentity = Asset.PackageName.ToString();
+					AddPublicScopeIfReadable(Item, Item.ContentKind);
+					AddPublicScopeIfReadable(
+						Item, Asset.AssetClassPath.GetAssetName().ToString());
+					AppendReadableDiscoveryPathScopes(Asset.PackageName.ToString(), Item.PublicDiscoveryScopes);
 					Item.StateLayer = TEXT("asset_registry_current");
 					Item.Revision = Revision;
 					Item.DetailCommandId = TEXT("asset.summary");
@@ -228,14 +241,13 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 						Asset.PackagePath.ToString(),
 						Asset.AssetClassPath.ToString(),
 					};
-					FilterAndScore(Request, MoveTemp(Item), Matches);
+					Items.Add(MoveTemp(Item));
 				}
-				return BuildPage(
+				return TryBuildContentDiscoveryProviderPage(
 					ProviderId,
 					Revision,
-					MoveTemp(Matches),
-					Offset,
-					Limit,
+					Request,
+					MoveTemp(Items),
 					OutPage,
 					OutError);
 			}
@@ -266,8 +278,6 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 
 			bool TrySearch(
 				const FContentDiscoveryRequest& Request,
-				const int32 Offset,
-				const int32 Limit,
 				FContentDiscoveryProviderPage& OutPage,
 				FContentDiscoveryError& OutError) override
 			{
@@ -275,11 +285,7 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 				OutError = {};
 				if (!IsInGameThread())
 				{
-					SetError(
-						OutError,
-						TEXT("content_search_thread_invalid"),
-						ProviderId,
-						TEXT("Editor World discovery requires the UE game thread."));
+					SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("content_search_thread_invalid"), TEXT("Actor and component discovery must run on the Unreal game thread."), TEXT("content_search")), ProviderId);
 					return false;
 				}
 				UWorld* World = GEditor
@@ -287,10 +293,7 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 					: nullptr;
 				if (!IsValid(World))
 				{
-					SetError(
-						OutError,
-						TEXT("content_search_world_unavailable"),
-						ProviderId);
+					SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("content_search_world_unavailable"), TEXT("Actor and component discovery requires an available Editor world."), TEXT("content_search")), ProviderId);
 					return false;
 				}
 				TArray<FContentDiscoveryItem> AllItems;
@@ -302,8 +305,10 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 						continue;
 					}
 					FContentDiscoveryItem ActorItem;
-					ActorItem.Identity = Actor->GetPathName();
-					ActorItem.DisplayName = Actor->GetActorLabel();
+					const auto ActorName = MakeObjectDiscoveryEntry(*Actor);
+					ActorItem.Identity = ActorName.Identity;
+					ActorItem.DisplayName = ActorName.Name;
+					ActorItem.PublicDiscoveryScopes = ActorName.Scopes;
 					ActorItem.Domain = TEXT("editor_world");
 					ActorItem.ContentKind = TEXT("actor");
 					ActorItem.ClassPath = Actor->GetClass()->GetPathName();
@@ -331,8 +336,10 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 							continue;
 						}
 						FContentDiscoveryItem ComponentItem;
-						ComponentItem.Identity = Component->GetPathName();
-						ComponentItem.DisplayName = Component->GetName();
+						const auto ComponentName = MakeObjectDiscoveryEntry(*Component);
+						ComponentItem.Identity = ComponentName.Identity;
+						ComponentItem.DisplayName = ComponentName.Name;
+						ComponentItem.PublicDiscoveryScopes = ComponentName.Scopes;
 						ComponentItem.Domain = TEXT("editor_world");
 						ComponentItem.ContentKind = TEXT("component");
 						ComponentItem.ClassPath =
@@ -352,15 +359,6 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 						};
 						AllItems.Add(MoveTemp(ComponentItem));
 					}
-					if (AllItems.Num() > MaxProviderItems)
-					{
-						SetError(
-							OutError,
-							TEXT("content_search_provider_capacity_exceeded"),
-							ProviderId,
-							FString::FromInt(AllItems.Num()));
-						return false;
-					}
 				}
 				AllItems.Sort(
 					[](const FContentDiscoveryItem& Left,
@@ -375,18 +373,15 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 						+ TEXT("\x1f") + Item.ClassPath;
 				}
 				const FString Revision = Sha1(RevisionMaterial);
-				TArray<FContentDiscoveryItem> Matches;
 				for (FContentDiscoveryItem& Item : AllItems)
 				{
 					Item.Revision = Revision;
-					FilterAndScore(Request, MoveTemp(Item), Matches);
 				}
-				return BuildPage(
+				return TryBuildContentDiscoveryProviderPage(
 					ProviderId,
 					Revision,
-					MoveTemp(Matches),
-					Offset,
-					Limit,
+					Request,
+					MoveTemp(AllItems),
 					OutPage,
 					OutError);
 			}
@@ -399,7 +394,7 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 
 	bool TryCreateEditorAssetContentDiscoveryProvider(
 		TSharedPtr<IUeAgentContentDiscoveryProvider>& OutProvider,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProvider = MakeShared<FEditorAssetContentDiscoveryProvider>();
 		OutError.Reset();
@@ -408,7 +403,7 @@ namespace UE::UAI::DomainAdapters::ContentDiscovery
 
 	bool TryCreateEditorWorldContentDiscoveryProvider(
 		TSharedPtr<IUeAgentContentDiscoveryProvider>& OutProvider,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProvider = MakeShared<FEditorWorldContentDiscoveryProvider>();
 		OutError.Reset();

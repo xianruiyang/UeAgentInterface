@@ -77,19 +77,7 @@ namespace
 
 	FUeAgentResourceTrackerOwner WorldReadResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 100000},
-				{EUeAgentResourceDimension::Items, 100000},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 100000},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					8 * 1024 * 1024,
-				},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	FUeAgentCandidateBinding WorldTarget()

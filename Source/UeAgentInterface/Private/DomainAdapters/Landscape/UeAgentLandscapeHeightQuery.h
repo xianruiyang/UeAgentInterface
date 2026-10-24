@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
@@ -15,7 +17,7 @@ namespace UE::UAI::DomainAdapters::Landscape
 		TSharedPtr<
 			const UE::UAI::Contract::FUeAgentDescriptorRegistry>&
 				OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool
 	TryCreateLandscapeHeightReadProviderRegistrations(
@@ -23,5 +25,5 @@ namespace UE::UAI::DomainAdapters::Landscape
 			UE::UAI::BindingGateway::Query::
 				FUeAgentDomainQueryProviderRegistration>&
 					OutRegistrations,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

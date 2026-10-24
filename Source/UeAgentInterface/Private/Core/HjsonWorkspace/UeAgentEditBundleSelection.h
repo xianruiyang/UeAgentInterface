@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
 #include "Core/HjsonWorkspace/UeAgentExportFieldContract.h"
@@ -185,24 +187,7 @@ namespace UE::UAI::HjsonWorkspace
 		bool bValid = false;
 	};
 
-	struct UEAGENTINTERFACE_API FEditBundleSelectionError
-	{
-		FString Code;
-		FString Subject;
-		FString Detail;
-
-		bool IsPresent() const
-		{
-			return !Code.IsEmpty();
-		}
-
-		void Reset()
-		{
-			Code.Reset();
-			Subject.Reset();
-			Detail.Reset();
-		}
-	};
+	using FEditBundleSelectionError = UE::UAI::Contract::FDiagnostic;
 
 	UEAGENTINTERFACE_API bool TryResolveSelectionClosure(
 		const FAuthoringModelRef& Model,

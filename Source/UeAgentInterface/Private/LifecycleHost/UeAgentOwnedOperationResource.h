@@ -18,6 +18,7 @@ namespace UE::UAI::LifecycleHost
 		TArray<FString> Arguments;
 
 		bool IsValid() const;
+		bool Validate(ExecutionMutation::FExecutionMutationError& OutError) const;
 	};
 
 	struct UEAGENTINTERFACE_API FUeAgentOwnedOperationResourceIdentity
@@ -40,6 +41,7 @@ namespace UE::UAI::LifecycleHost
 		TOptional<int32> ExitCode;
 
 		bool IsValid() const;
+		bool Validate(ExecutionMutation::FExecutionMutationError& OutError) const;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentOwnedOperationResourceBackend

@@ -1,11 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringReflectionDescriptors.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "Containers/AnsiString.h"
 #include "Containers/Utf8String.h"
+#include "Components/SplineComponent.h"
+#include "Curves/CurveFloat.h"
+#include "Curves/CurveLinearColor.h"
+#include "Curves/CurveVector.h"
+#include "Curves/RichCurve.h"
+#include "Curves/SimpleCurve.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "GameplayTagContainer.h"
+#include "Metadata/PCGAttributePropertySelector.h"
 #include "StructUtils/InstancedStruct.h"
 #include "StructUtils/PropertyBag.h"
 #include "UObject/AnsiStrProperty.h"
@@ -16,6 +27,146 @@
 
 namespace UeAgentAuthoringTypeDescriptors
 {
+bool IsStructMemberAuthoringEditable(const FProperty *Property, const UScriptStruct* Scope) {
+  return UeAgentAuthoringReflection::IsEditableDeclaration(Property, Scope);
+}
+
+bool RequiresHashSource(const FProperty *Property) {
+  TSet<const UScriptStruct*> Visited;
+  TFunction<bool(const FProperty*)> Requires = [&](const FProperty* Field) {
+    if (!Field) return false;
+    if (const auto* Array = CastField<FArrayProperty>(Field)) return Requires(Array->Inner);
+    if (const auto* Set = CastField<FSetProperty>(Field)) return Requires(Set->ElementProp);
+    if (const auto* Map = CastField<FMapProperty>(Field)) return Requires(Map->KeyProp) || Requires(Map->ValueProp);
+    if (const auto* Optional = CastField<FOptionalProperty>(Field)) return Requires(Optional->GetValueProperty());
+    const auto* Struct = CastField<FStructProperty>(Field);
+    if (!Struct || !Struct->Struct) return false;
+    const FString Kind = GetStructKind(Struct->Struct);
+    if (Kind == TEXT("instanced_struct") || Kind == TEXT("property_bag")) return true;
+    if (Kind != TEXT("struct") || Visited.Contains(Struct->Struct)) return false;
+    Visited.Add(Struct->Struct);
+    for (TFieldIterator<FProperty> It(Struct->Struct, EFieldIterationFlags::IncludeSuper); It; ++It)
+      if (!IsStructMemberAuthoringEditable(*It, Struct->Struct) || Requires(*It)) return true;
+    return false;
+  };
+  return Requires(Property);
+}
+
+
+	bool TryResolveEnumValueName(const UEnum* Enum, const FString& Name, int64& OutValue, bool bCheckAuthoredName)
+	{
+		if (!Enum) return false;
+		int32 Index = bCheckAuthoredName ? Enum->GetIndexByNameString(Name, EGetByNameFlags::CheckAuthoredName) : INDEX_NONE;
+		if (Index == INDEX_NONE) Index = Enum->GetIndexByNameString(Name);
+		if (Index == INDEX_NONE) return false;
+		OutValue = Enum->GetValueByIndex(Index);
+		return true;
+	}
+
+	bool IsEnumValueEntry(const UEnum* Enum, int32 Index)
+	{
+		if (!Enum || Index < 0 || Index >= Enum->NumEnums()) return false;
+		const FString Name = Enum->GetNameStringByIndex(Index);
+		return !Name.IsEmpty() && !Name.Equals(TEXT("MAX"), ESearchCase::IgnoreCase)
+			&& !Name.EndsWith(TEXT("_MAX"), ESearchCase::IgnoreCase);
+	}
+
+	uint64 GetIntegerStorageMask(const FProperty* Property)
+	{
+		const auto* Numeric = CastField<FNumericProperty>(Property);
+		if (!Numeric || !Numeric->IsInteger()) return 0;
+		const int32 Bits = Numeric->GetElementSize() * 8;
+		return Bits == 64 ? MAX_uint64 : Bits > 0 && Bits < 64 ? (uint64(1) << Bits) - 1 : 0;
+	}
+
+	bool TryGetBitmaskMask(const FProperty* Property, const UEnum* Enum, int64 EnumValue, uint64& OutMask)
+	{
+		const uint64 StorageMask = GetIntegerStorageMask(Property);
+		if (!StorageMask || !Enum) return false;
+		const FProperty* Declaration = Property->GetOwnerProperty();
+		const bool bRawMask = Declaration->GetBoolMetaData(TEXT("UseEnumValuesAsMaskValuesInEditor"))
+			|| Enum->GetBoolMetaData(TEXT("UseEnumValuesAsMaskValuesInEditor"));
+		const int32 Bits = Property->GetElementSize() * 8;
+		if (!bRawMask)
+		{
+			if (EnumValue < 0 || EnumValue >= Bits) return false;
+			OutMask = uint64(1) << EnumValue;
+			return true;
+		}
+		// HJSON preserves declared composite masks as well as individual flags.
+		// Negative raw masks use the target width's two's-complement bits.
+		if ((EnumValue >= 0 && static_cast<uint64>(EnumValue) > StorageMask)
+			|| (EnumValue < 0 && Bits < 64 && EnumValue < -(int64(1) << (Bits - 1)))) return false;
+		OutMask = static_cast<uint64>(EnumValue) & StorageMask;
+		return true;
+	}
+
+	TSharedPtr<FJsonObject> BuildEnumCandidates(const UEnum* Enum, bool bIncludeDisplayMetadata, const FProperty* Property)
+	{
+		if (!Enum) return nullptr;
+		struct FCandidate { FString Name, DisplayName, Tooltip; };
+		TArray<FCandidate> Candidates;
+		bool bDisplay = false, bTooltip = false;
+		for (int32 Index = 0; Index < Enum->NumEnums(); ++Index)
+		{
+			if (!IsEnumValueEntry(Enum, Index) || Enum->HasMetaData(TEXT("Hidden"), Index)) continue;
+			const FString Name = Enum->GetNameStringByIndex(Index);
+			uint64 Mask = 0;
+			if (IsBitmaskProperty(Property) && !TryGetBitmaskMask(Property, Enum, Enum->GetValueByIndex(Index), Mask)) continue;
+			const FString Display = bIncludeDisplayMetadata ? Enum->GetDisplayNameTextByIndex(Index).ToString() : FString();
+			const FString Tooltip = bIncludeDisplayMetadata ? Enum->GetMetaData(TEXT("ToolTip"), Index) : FString();
+			bDisplay |= !Display.IsEmpty() && Display != Name; bTooltip |= !Tooltip.IsEmpty();
+			Candidates.Add({Name, Display, Tooltip});
+		}
+		if (Candidates.IsEmpty()) return nullptr;
+		TArray<TSharedPtr<FJsonValue>> Header{MakeShared<FJsonValueString>(TEXT("name"))}, Rows;
+		if (bDisplay) Header.Add(MakeShared<FJsonValueString>(TEXT("display_name")));
+		if (bTooltip) Header.Add(MakeShared<FJsonValueString>(TEXT("tooltip")));
+		for (const auto& Candidate : Candidates)
+		{
+			TArray<TSharedPtr<FJsonValue>> Row{MakeShared<FJsonValueString>(Candidate.Name)};
+			if (bDisplay) Row.Add(MakeShared<FJsonValueString>(Candidate.DisplayName.IsEmpty() ? Candidate.Name : Candidate.DisplayName));
+			if (bTooltip) Row.Add(MakeShared<FJsonValueString>(Candidate.Tooltip));
+			Rows.Add(MakeShared<FJsonValueArray>(MoveTemp(Row)));
+		}
+		const auto Result = MakeShared<FJsonObject>();
+		Result->SetArrayField(TEXT("candidates_header"), Header); Result->SetArrayField(TEXT("candidates"), Rows);
+		return Result;
+	}
+
+	bool IsDirectPropertyValueWrapper(const FString& FieldName)
+	{
+		static const TSet<FString> DirectWrappers{
+			TEXT("literal"), TEXT("selected"), TEXT("items"),
+			TEXT("components"), TEXT("path"), TEXT("value")};
+		return DirectWrappers.Contains(FieldName);
+	}
+
+	bool IsReadOnlyTypeMetadataField(const FString& FieldName)
+	{
+		return FieldName == TEXT("value_semantics");
+	}
+
+	FString NativeCodecValueWrapper(const FString& Kind)
+	{
+		static const TSet<FString> Literals{
+			TEXT("bool"), TEXT("int8"), TEXT("int16"), TEXT("int32"), TEXT("int64"),
+			TEXT("uint8"), TEXT("uint16"), TEXT("uint32"), TEXT("uint64"), TEXT("float"), TEXT("double"),
+			TEXT("string"), TEXT("name"), TEXT("text"), TEXT("gameplay_tag"), TEXT("pcg_selector")};
+		static const TSet<FString> References{
+			TEXT("object_ref"), TEXT("class_ref"), TEXT("soft_object_ref"), TEXT("soft_class_ref"),
+			TEXT("weak_object_ref"), TEXT("lazy_object_ref"), TEXT("interface_ref")};
+		static const TSet<FString> Components{
+			TEXT("vector2"), TEXT("vector3"), TEXT("vector4"), TEXT("quat"), TEXT("rotator"),
+			TEXT("color8"), TEXT("linear_color")};
+		if (Literals.Contains(Kind)) return TEXT("literal");
+		if (Kind == TEXT("enum") || Kind == TEXT("bitmask")) return TEXT("selected");
+		if (Kind == TEXT("array") || Kind == TEXT("fixed_array") || Kind == TEXT("set") || Kind == TEXT("gameplay_tags")) return TEXT("items");
+		if (References.Contains(Kind)) return TEXT("path");
+		if (Components.Contains(Kind)) return TEXT("components");
+		return FString();
+	}
+
 	namespace
 	{
 		bool DescriptorPtrEquals(const TSharedPtr<FDescriptor>& Left, const TSharedPtr<FDescriptor>& Right)
@@ -47,9 +198,13 @@ namespace UeAgentAuthoringTypeDescriptors
 			{
 				const TSharedPtr<FJsonObject> A = Left->AsObject();
 				const TSharedPtr<FJsonObject> B = Right->AsObject();
-				if (!A.IsValid() || !B.IsValid() || A->Values.Num() != B->Values.Num()) return false;
+				if (!A.IsValid() || !B.IsValid() || B->Values.Num() > A->Values.Num()) return false;
 				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : A->Values)
 				{
+					if (IsReadOnlyTypeMetadataField(Pair.Key) && A->HasField(TEXT("kind"))) continue;
+					FString Kind;
+					if (Pair.Key == TEXT("struct_path") && !B->HasField(Pair.Key)
+						&& A->TryGetStringField(TEXT("kind"), Kind) && Kind != TEXT("struct") && Kind != TEXT("pcg_selector")) continue;
 					if (!JsonEquals(Pair.Value, B->TryGetField(Pair.Key))) return false;
 				}
 				return true;
@@ -73,6 +228,45 @@ namespace UeAgentAuthoringTypeDescriptors
 		{
 			if (Type.IsValid()) Object->SetObjectField(FieldName, Type->ToJsonObject());
 		}
+
+		bool IsNativeRotator(const UStruct* Struct)
+		{
+			return Struct && (Struct == TBaseStructure<FRotator>::Get()
+				|| Struct == TVariantStructure<FRotator3f>::Get() || Struct == TVariantStructure<FRotator3d>::Get());
+		}
+
+		TSharedPtr<FJsonObject> DescribeStructValueSemantics(const UScriptStruct* Struct, const FString& Kind)
+		{
+			const bool bReflectedRotatorFields = Kind == TEXT("struct") && Struct
+				&& (Struct->IsChildOf(TBaseStructure<FRotator>::Get())
+					|| Struct->IsChildOf(TVariantStructure<FRotator3f>::Get()) || Struct->IsChildOf(TVariantStructure<FRotator3d>::Get()));
+			if (!bReflectedRotatorFields && !IsNativeRotator(Struct) && Kind != TEXT("transform")) return nullptr;
+			const auto Rotation = MakeShared<FJsonObject>();
+			if (bReflectedRotatorFields)
+			{
+				// Explicit Rotator3d has historically used reflected named fields.
+				// In derived structs only fields declared by the native Rotator inherit
+				// its unit; newly declared or shadowing fields retain their own contract.
+				const auto Fields = MakeShared<FJsonObject>();
+				for (const TCHAR* Name : {TEXT("Pitch"), TEXT("Yaw"), TEXT("Roll")})
+					if (const FProperty* Field = FindFProperty<FProperty>(Struct, Name);
+						Field && IsNativeRotator(Field->GetOwnerStruct()))
+						Fields->SetStringField(Name, TEXT("degrees"));
+				if (Fields->Values.IsEmpty()) return nullptr;
+				Rotation->SetObjectField(TEXT("field_units"), Fields);
+				return Rotation;
+			}
+			Rotation->SetStringField(TEXT("unit"), TEXT("degrees"));
+			TArray<TSharedPtr<FJsonValue>> Components;
+			for (const TCHAR* Name : {TEXT("pitch"), TEXT("yaw"), TEXT("roll")})
+				Components.Add(MakeShared<FJsonValueString>(Name));
+			Rotation->SetArrayField(TEXT("component_order"), Components);
+			if (Kind != TEXT("transform")) return Rotation;
+			// The codec exposes Transform::Rotator(), not its stored quaternion.
+			const auto Transform = MakeShared<FJsonObject>();
+			Transform->SetObjectField(TEXT("rotation"), Rotation);
+			return Transform;
+		}
 	}
 
 	bool FDescriptor::operator==(const FDescriptor& Other) const
@@ -82,6 +276,7 @@ namespace UeAgentAuthoringTypeDescriptors
 			&& EnumPath == Other.EnumPath
 			&& AllowedClassPath == Other.AllowedClassPath
 			&& FixedLength == Other.FixedLength
+			&& bRequiresHashSource == Other.bRequiresHashSource
 			&& DescriptorPtrEquals(ElementType, Other.ElementType)
 			&& DescriptorPtrEquals(KeyType, Other.KeyType)
 			&& DescriptorPtrEquals(MappedType, Other.MappedType)
@@ -96,6 +291,8 @@ namespace UeAgentAuthoringTypeDescriptors
 		if (!EnumPath.IsEmpty()) Object->SetStringField(TEXT("enum_path"), EnumPath);
 		if (!AllowedClassPath.IsEmpty()) Object->SetStringField(TEXT("allowed_class"), AllowedClassPath);
 		if (FixedLength != INDEX_NONE) Object->SetNumberField(TEXT("fixed_length"), FixedLength);
+		if (bRequiresHashSource) Object->SetStringField(TEXT("hash_source"), TEXT("from_required_null_creates"));
+		if (ValueSemantics) Object->SetObjectField(TEXT("value_semantics"), ValueSemantics);
 		SetNestedType(TEXT("element_type"), ElementType, Object);
 		SetNestedType(TEXT("key_type"), KeyType, Object);
 		SetNestedType(TEXT("mapped_type"), MappedType, Object);
@@ -106,41 +303,45 @@ namespace UeAgentAuthoringTypeDescriptors
 	FString GetStructKind(const UScriptStruct* Struct)
 	{
 		if (!Struct) return TEXT("struct");
-		const FString Name = Struct->GetName();
-		if (Name == TEXT("Vector2D") || Name == TEXT("Vector2f")) return TEXT("vector2");
-		if (Name == TEXT("Vector") || Name == TEXT("Vector3f")) return TEXT("vector3");
-		if (Name == TEXT("Vector4") || Name == TEXT("Vector4f")) return TEXT("vector4");
-		if (Name == TEXT("Rotator") || Name == TEXT("Rotator3f")) return TEXT("rotator");
-		if (Name == TEXT("Quat") || Name == TEXT("Quat4f")) return TEXT("quat");
-		if (Name == TEXT("Color")) return TEXT("color8");
-		if (Name == TEXT("LinearColor")) return TEXT("linear_color");
-		if (Name == TEXT("Transform") || Name == TEXT("Transform3f")) return TEXT("transform");
-		if (Name == TEXT("Guid")) return TEXT("guid");
-		if (Name == TEXT("DateTime")) return TEXT("datetime");
-		if (Name == TEXT("Timespan")) return TEXT("timespan");
-		if (Name == TEXT("SoftObjectPath")) return TEXT("soft_object_ref");
-		if (Name == TEXT("SoftClassPath")) return TEXT("soft_class_ref");
-		if (Name == TEXT("GameplayTag")) return TEXT("gameplay_tag");
-		if (Name == TEXT("GameplayTagContainer")) return TEXT("gameplay_tags");
+		if (Struct->IsChildOf(FPCGAttributePropertySelector::StaticStruct())) return TEXT("pcg_selector");
+		// Native layouts are identified by their reflected type, never a short name.
+		// An unrelated struct with the same name must retain recursive field encoding.
+		if (Struct == FSplineCurves::StaticStruct()) return TEXT("spline");
+		if (Struct == TBaseStructure<FVector2D>::Get() || Struct == TVariantStructure<FVector2f>::Get()) return TEXT("vector2");
+		if (Struct == TBaseStructure<FVector>::Get() || Struct == TVariantStructure<FVector3f>::Get()) return TEXT("vector3");
+		if (Struct == TBaseStructure<FVector4>::Get() || Struct == TVariantStructure<FVector4f>::Get()) return TEXT("vector4");
+		if (Struct == TBaseStructure<FRotator>::Get() || Struct == TVariantStructure<FRotator3f>::Get()) return TEXT("rotator");
+		if (Struct == TBaseStructure<FQuat>::Get() || Struct == TVariantStructure<FQuat4f>::Get()) return TEXT("quat");
+		if (Struct == TBaseStructure<FColor>::Get()) return TEXT("color8");
+		if (Struct == TBaseStructure<FLinearColor>::Get()) return TEXT("linear_color");
+		if (Struct == TBaseStructure<FTransform>::Get() || Struct == TVariantStructure<FTransform3f>::Get()) return TEXT("transform");
+		if (Struct == TBaseStructure<FGuid>::Get()) return TEXT("guid");
+		if (Struct == TBaseStructure<FDateTime>::Get()) return TEXT("datetime");
+		// Timespan has no TBaseStructure specialization in UE 5.6.
+		if (Struct->GetPathName().Equals(TEXT("/Script/CoreUObject.Timespan"), ESearchCase::CaseSensitive)) return TEXT("timespan");
+		if (Struct == TBaseStructure<FSoftObjectPath>::Get()) return TEXT("soft_object_ref");
+		if (Struct == TBaseStructure<FSoftClassPath>::Get()) return TEXT("soft_class_ref");
+		if (Struct == FGameplayTag::StaticStruct()) return TEXT("gameplay_tag");
+		if (Struct == FGameplayTagContainer::StaticStruct()) return TEXT("gameplay_tags");
 		if (Struct == FInstancedStruct::StaticStruct()) return TEXT("instanced_struct");
 		if (Struct == FInstancedPropertyBag::StaticStruct()) return TEXT("property_bag");
-		if (Name == TEXT("RichCurve") || Name == TEXT("SimpleCurve") || Name == TEXT("RuntimeFloatCurve")
-			|| Name == TEXT("RuntimeVectorCurve") || Name == TEXT("RuntimeLinearColorCurve")) return TEXT("curve");
+		if (Struct == FRichCurve::StaticStruct() || Struct == FSimpleCurve::StaticStruct() || Struct == FRuntimeFloatCurve::StaticStruct()
+			|| Struct == FRuntimeVectorCurve::StaticStruct() || Struct == FRuntimeCurveLinearColor::StaticStruct()) return TEXT("curve");
 		return TEXT("struct");
 	}
 
 	bool IsBitmaskProperty(const FProperty* Property)
 	{
-		return Property && Property->HasMetaData(TEXT("Bitmask"));
+		return GetIntegerStorageMask(Property) && Property->GetOwnerProperty()->HasMetaData(TEXT("Bitmask"));
 	}
 
 	const UEnum* GetPropertyEnum(const FProperty* Property)
 	{
 		if (const FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property)) return EnumProperty->GetEnum();
-		if (const FByteProperty* ByteProperty = CastField<FByteProperty>(Property)) return ByteProperty->Enum;
+		if (const FByteProperty* ByteProperty = CastField<FByteProperty>(Property); ByteProperty && ByteProperty->Enum) return ByteProperty->Enum;
 		if (IsBitmaskProperty(Property))
 		{
-			const FString EnumPath = Property->GetMetaData(TEXT("BitmaskEnum"));
+			const FString EnumPath = Property->GetOwnerProperty()->GetMetaData(TEXT("BitmaskEnum"));
 			return EnumPath.IsEmpty()
 				? nullptr
 				: UClass::TryFindTypeSlow<UEnum>(EnumPath);
@@ -196,16 +397,23 @@ namespace UeAgentAuthoringTypeDescriptors
 			return Result;
 		}
 		if (const FArrayProperty* Array = CastField<FArrayProperty>(Property)) Result.ElementType = MakeShared<FDescriptor>(Describe(Array->Inner));
-		else if (const FSetProperty* Set = CastField<FSetProperty>(Property)) Result.ElementType = MakeShared<FDescriptor>(Describe(Set->ElementProp));
+		else if (const FSetProperty* Set = CastField<FSetProperty>(Property))
+		{
+			Result.ElementType = MakeShared<FDescriptor>(Describe(Set->ElementProp));
+			Result.bRequiresHashSource = RequiresHashSource(Set->ElementProp);
+		}
 		else if (const FMapProperty* Map = CastField<FMapProperty>(Property))
 		{
 			Result.KeyType = MakeShared<FDescriptor>(Describe(Map->KeyProp));
 			Result.MappedType = MakeShared<FDescriptor>(Describe(Map->ValueProp));
+			Result.bRequiresHashSource = RequiresHashSource(Map->KeyProp);
 		}
 		else if (const FOptionalProperty* Optional = CastField<FOptionalProperty>(Property)) Result.InnerType = MakeShared<FDescriptor>(Describe(Optional->GetValueProperty()));
 		else if (const FStructProperty* Struct = CastField<FStructProperty>(Property))
 		{
-			if (GetStructKind(Struct->Struct) == TEXT("struct")) Result.StructPath = Struct->Struct ? Struct->Struct->GetPathName() : FString();
+			// Specialized shapes still have a native storage type (for example
+			// Vector and Vector3f). Keep it in the same descriptor as ordinary structs.
+			Result = DescribeStruct(Struct->Struct);
 		}
 		else if (const FSoftClassProperty* SoftClass = CastField<FSoftClassProperty>(Property)) Result.AllowedClassPath = SoftClass->MetaClass ? SoftClass->MetaClass->GetPathName() : FString();
 		else if (const FSoftObjectProperty* SoftObject = CastField<FSoftObjectProperty>(Property)) Result.AllowedClassPath = SoftObject->PropertyClass ? SoftObject->PropertyClass->GetPathName() : FString();
@@ -216,44 +424,84 @@ namespace UeAgentAuthoringTypeDescriptors
 		return Result;
 	}
 
+	FDescriptor DescribeStruct(const UScriptStruct* Struct)
+	{
+		FDescriptor Result;
+		Result.Kind = GetStructKind(Struct);
+		Result.StructPath = Struct ? Struct->GetPathName() : FString();
+		Result.ValueSemantics = DescribeStructValueSemantics(Struct, Result.Kind);
+		return Result;
+	}
+
 	TSharedPtr<FJsonObject> BuildJson(const FProperty* Property, bool bIgnoreFixedArray)
 	{
 		return Describe(Property, bIgnoreFixedArray).ToJsonObject();
 	}
 
-	bool ValidateMetadata(const FProperty* Property, const TSharedPtr<FJsonObject>& Descriptor, FString& OutError)
+	bool ValidateMetadata(const FProperty* Property, const TSharedPtr<FJsonObject>& Descriptor, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return ValidateMetadata(Property, Descriptor, OutError, false);
+	}
+
+	bool ValidateMetadata(const FProperty* Property, const TSharedPtr<FJsonObject>& Descriptor,
+		UE::UAI::Contract::FDiagnostic& OutError, bool bSingleFixedElement)
 	{
 		if (!Property || !Descriptor.IsValid())
 		{
-			OutError = TEXT("invalid_type_descriptor");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("invalid_type_descriptor"),
+				!Property ? TEXT("The native property needed to validate the type descriptor is unavailable.")
+					: TEXT("The declared property type must be an object."), TEXT("type_descriptor"));
+			if (!Property) OutError.SourceKind = TEXT("native_result");
+			else { OutError.ActualValuePresent = false; OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object")); }
 			return false;
 		}
-		const FDescriptor ExpectedDescriptor = Describe(Property);
+		const FDescriptor ExpectedDescriptor = Describe(Property, bSingleFixedElement);
 		FString DeclaredKind;
-		if (!Descriptor->TryGetStringField(TEXT("value_kind"), DeclaredKind))
+		if (!Descriptor->TryGetStringField(TEXT("kind"), DeclaredKind))
 		{
-			OutError = TEXT("missing_value_kind");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("missing_kind"),
+				TEXT("The type descriptor requires a string kind field."), TEXT("type_descriptor"));
+			OutError.PropertyPath = TEXT("kind");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(ExpectedDescriptor.Kind);
+			OutError.ActualValue = Descriptor->TryGetField(TEXT("kind"));
+			OutError.ActualValuePresent = OutError.ActualValue.IsValid();
 			return false;
 		}
 		if (DeclaredKind != ExpectedDescriptor.Kind)
 		{
-			OutError = FString::Printf(TEXT("value_kind_mismatch_expected_%s"), *ExpectedDescriptor.Kind);
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(FString::Printf(TEXT("kind_mismatch_expected_%s"), *ExpectedDescriptor.Kind), TEXT("The declared kind does not match the native property kind."), TEXT("type_descriptor"));
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(ExpectedDescriptor.Kind);
+			OutError.ActualValue = MakeShared<FJsonValueString>(DeclaredKind);
+			OutError.PropertyPath = TEXT("kind");
 			return false;
 		}
 
 		const TSharedPtr<FJsonObject> Expected = ExpectedDescriptor.ToJsonObject();
 		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Expected->Values)
 		{
-			if (Pair.Key == TEXT("kind")) continue;
+			// Explanatory output is optional on old inputs and never controls decoding.
+			if (IsReadOnlyTypeMetadataField(Pair.Key)) continue;
 			const TSharedPtr<FJsonValue> Actual = Descriptor->TryGetField(Pair.Key);
 			if (!Actual.IsValid())
 			{
-				OutError = FString::Printf(TEXT("missing_type_metadata_%s"), *Pair.Key);
+				// Existing workspaces omitted native identity for specialized shapes.
+				// Their values are decoded against the current reflected property;
+				// an explicitly supplied identity must still match below.
+				if (Pair.Key == TEXT("struct_path") && ExpectedDescriptor.Kind != TEXT("struct")
+					&& ExpectedDescriptor.Kind != TEXT("pcg_selector")) continue;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(FString::Printf(TEXT("missing_type_metadata_%s"), *Pair.Key), TEXT("Required type metadata is missing."), TEXT("type_descriptor"));
+				OutError.PropertyPath = Pair.Key;
+				OutError.ExpectedValue = Pair.Value;
+				OutError.ActualValue = Actual;
+				OutError.ActualValuePresent = false;
 				return false;
 			}
 			if (!JsonEquals(Pair.Value, Actual))
 			{
-				OutError = FString::Printf(TEXT("type_metadata_mismatch_%s"), *Pair.Key);
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(FString::Printf(TEXT("type_metadata_mismatch_%s"), *Pair.Key), TEXT("The declared type metadata does not match the native property."), TEXT("type_descriptor"));
+				OutError.PropertyPath = Pair.Key;
+				OutError.ExpectedValue = Pair.Value;
+				OutError.ActualValue = Actual;
 				return false;
 			}
 		}

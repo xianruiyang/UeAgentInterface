@@ -13,37 +13,9 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Localization
 	{
 		const FString Owner = TEXT("localization-import-owner");
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FUeAgentLocalizationImportCommandError& Error)
-		{
-			const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(
-				TEXT("code"),
-				Error.Code.IsEmpty()
-					? FString(TEXT("localization_import_execution_failed"))
-					: Error.Code);
-			Object->SetStringField(TEXT("subject_id"), Error.SubjectId);
-			Object->SetStringField(TEXT("detail"), Error.Detail);
-			Object->SetStringField(TEXT("terminal_status"), Error.TerminalStatus);
-			Object->SetBoolField(TEXT("mutation_started"), Error.bMutationStarted);
-			Object->SetBoolField(TEXT("retry_safe"), Error.bRetrySafe);
-			FString ErrorJson;
-			FString JsonError;
-			if (!CommandContract::Json::TryCanonicalize(
-					Object,
-					ErrorJson,
-					JsonError))
-			{
-				ErrorJson = TEXT(
-					"{\"code\":\"localization_import_error_serialization_failed\","
-					"\"terminal_status\":\"state_unknown\"}");
-			}
-			return FUeAgentCommandResult::Failure(
-				Request,
-				TEXT("{}"),
-				MoveTemp(ErrorJson));
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request,
+            const FUeAgentLocalizationImportCommandError& Error)
+        { return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Error); }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -78,7 +50,7 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Localization
 					FUeAgentLocalizationImportCommandError Error;
 					Error.Code = TEXT("localization_import_authority_required");
 					Error.SubjectId = Request.GetCommandId();
-					Error.Detail =
+					Error.InternalContext =
 						TEXT("the public localization import route requires uai:operate");
 					return Failure(Request, Error);
 				}
@@ -87,7 +59,7 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Localization
 					FUeAgentLocalizationImportCommandError Error;
 					Error.Code = TEXT("localization_import_game_thread_required");
 					Error.SubjectId = Request.GetCommandId();
-					Error.Detail =
+					Error.InternalContext =
 						TEXT("localization import mechanics must execute on the game thread");
 					return Failure(Request, Error);
 				}
@@ -108,7 +80,7 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Localization
 					return Failure(Request, Error);
 				}
 				TSharedPtr<FJsonObject> Payload;
-				FString JsonError;
+				UE::UAI::Contract::FDiagnostic JsonError;
 				FString CanonicalPayload;
 				if (!CommandContract::Json::TryParseObject(
 						Response.PayloadJson,
@@ -119,11 +91,10 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Localization
 						CanonicalPayload,
 						JsonError))
 				{
-					Error.Code = TEXT("localization_import_result_invalid");
+					Error = MoveTemp(JsonError);
 					Error.SubjectId = Request.GetCommandId();
-					Error.Detail = MoveTemp(JsonError);
 					Error.TerminalStatus = TEXT("state_unknown");
-					Error.bMutationStarted = true;
+					Error.MutationStarted = true;
 					Error.bRetrySafe = false;
 					return Failure(Request, Error);
 				}
@@ -141,18 +112,17 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Localization
 	bool TryCreateLocalizationImportCommandHandlers(
 		TSharedRef<IUeAgentLocalizationImportCommandService> Service,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
 		for (const FUeAgentLocalizationImportCommandRoute& Route
 			: GetLocalizationImportCommandRoutes())
 		{
-			if (!Route.IsValid())
+			if (!Route.TryValidate(OutError))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("localization_import_route_invalid:")
-					+ Route.CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("localization_import_route_invalid"), OutError, TEXT("handler_factory"));
 				return false;
 			}
 			OutHandlers.Add(MakeShared<FHandler>(Route, Service));

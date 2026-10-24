@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
@@ -87,12 +89,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		TArray<FString> ReadbackEvidence;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentRigSimulationSpatialPortError
-	{
-		FString Code;
-		FString Path;
-		FString Detail;
-	};
+	using FUeAgentRigSimulationSpatialPortError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentRigSimulationSpatialNativePort
 	{

@@ -12,8 +12,6 @@ bool FUeAgentStrictV2T51NiagaraHjsonRuntimeTest::RunTest(const FString& Paramete
 	(void)Parameters;
 	using namespace UE::UAI::DomainAdapters::NiagaraCommands;
 	const TArray<FString>& CommandIds = GetCommandIds();
-	TestEqual(TEXT("T51 exposes only eight non-HJSON commands"),
-		CommandIds.Num(), 8);
 	TestFalse(TEXT("the script HJSON route is not a T51 command"),
 		CommandIds.Contains(TEXT("niagara.script.graph.apply")));
 	TestFalse(TEXT("the stack HJSON route is not a T51 command"),

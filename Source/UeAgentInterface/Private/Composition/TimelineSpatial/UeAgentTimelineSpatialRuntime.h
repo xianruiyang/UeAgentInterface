@@ -23,8 +23,6 @@ namespace UE::UAI::Composition::TimelineSpatial
 		FString EditorInstanceId;
 		FString ServerSessionId;
 		int64 RegistryEpoch = -1;
-		double TimeoutSeconds = 0.0;
-		int64 MaxFrameBytes = 0;
 		TArray<DomainAdapters::TimelineAnimation::
 			FUeAgentTimelineAnimationSubjectBinding> TimelineSubjectBindings;
 		TArray<DomainAdapters::TimelineAnimation::
@@ -53,15 +51,10 @@ namespace UE::UAI::Composition::TimelineSpatial
 		bool IsValid() const;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentTimelineSpatialRuntimeError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FUeAgentTimelineSpatialRuntimeError = Contract::FDiagnostic;
 
 	/**
-	 * Production owner for the 60 Timeline/Spatial public capabilities.
+	 * Production owner for the registered Timeline/Spatial public capabilities.
 	 *
 	 * The runtime composes the three exact domain runtimes once, then exposes
 	 * one C3Q application port and one C3O application port to the command

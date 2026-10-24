@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -15,24 +17,6 @@ namespace UE::UAI::ContentDiscovery
 		Fuzzy,
 	};
 
-	struct UEAGENTINTERFACE_API FContentDiscoveryCursorEntry final
-	{
-		FString ProviderId;
-		FString ExpectedRevision;
-		int32 Offset = 0;
-
-		bool IsValid() const;
-	};
-
-	struct UEAGENTINTERFACE_API FContentDiscoveryCursor final
-	{
-		FString RequestFingerprint;
-		TArray<FContentDiscoveryCursorEntry> Providers;
-
-		bool IsEmpty() const;
-		bool IsValid() const;
-	};
-
 	struct UEAGENTINTERFACE_API FContentDiscoveryRequest final
 	{
 		FString Query;
@@ -43,10 +27,9 @@ namespace UE::UAI::ContentDiscovery
 		FString PathPrefix;
 		FString OwnerIdentity;
 		TArray<FString> RequiredOperations;
-		int32 LimitPerProvider = 20;
-		FContentDiscoveryCursor Cursor;
 
 		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 		FString GetRequestFingerprint() const;
 	};
 
@@ -58,6 +41,8 @@ namespace UE::UAI::ContentDiscovery
 		FString ContentKind;
 		FString ClassPath;
 		FString OwnerIdentity;
+		/** Provider-owned semantic scopes permitted on the model-facing name surface. */
+		TArray<FString> PublicDiscoveryScopes;
 		FString StateLayer;
 		FString Revision;
 		FString DetailCommandId;
@@ -69,6 +54,7 @@ namespace UE::UAI::ContentDiscovery
 		int32 MatchScore = 0;
 
 		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError, const FString& Path = FString()) const;
 	};
 
 	struct UEAGENTINTERFACE_API FContentDiscoveryProviderPage final
@@ -77,21 +63,13 @@ namespace UE::UAI::ContentDiscovery
 		FString Revision;
 		TArray<FContentDiscoveryItem> Items;
 		int32 TotalMatches = 0;
-		int32 NextOffset = -1;
-		bool bComplete = true;
 		bool bReadOnly = true;
 
-		bool IsValid(const int32 Limit) const;
+		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 	};
 
-	struct UEAGENTINTERFACE_API FContentDiscoveryError final
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsPresent() const;
-	};
+	using FContentDiscoveryError = UE::UAI::Contract::FDiagnostic;
 
 	struct UEAGENTINTERFACE_API FContentDiscoveryProviderResult final
 	{
@@ -109,8 +87,8 @@ namespace UE::UAI::ContentDiscovery
 		TArray<FContentDiscoveryProviderResult> Providers;
 
 		bool HasFailures() const;
-		bool HasMore() const;
 		bool IsComplete() const;
+		FContentDiscoveryError GetFailureDiagnostic() const;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentContentDiscoveryProvider
@@ -122,8 +100,6 @@ namespace UE::UAI::ContentDiscovery
 		virtual const TArray<FString>& GetContentKinds() const = 0;
 		virtual bool TrySearch(
 			const FContentDiscoveryRequest& Request,
-			int32 Offset,
-			int32 Limit,
 			FContentDiscoveryProviderPage& OutPage,
 			FContentDiscoveryError& OutError) = 0;
 	};
@@ -142,6 +118,12 @@ namespace UE::UAI::ContentDiscovery
 			FContentDiscoveryError& OutError) const;
 
 		const TArray<FString>& GetProviderIds() const;
+
+		/** Resolve the same readable name/scopes used by content search; identity stays internal. */
+		bool TryResolveReadableName(
+			const FString& Name,
+			FContentDiscoveryItem& OutItem,
+			FContentDiscoveryError& OutError) const;
 
 	private:
 		explicit FUeAgentContentDiscoveryService(
@@ -165,4 +147,12 @@ namespace UE::UAI::ContentDiscovery
 	UEAGENTINTERFACE_API bool MatchesContentDiscoveryFilters(
 		const FContentDiscoveryRequest& Request,
 		const FContentDiscoveryItem& Item);
+
+	UEAGENTINTERFACE_API bool TryBuildContentDiscoveryProviderPage(
+		const FString& ProviderId,
+		const FString& Revision,
+		const FContentDiscoveryRequest& Request,
+		TArray<FContentDiscoveryItem> Items,
+		FContentDiscoveryProviderPage& OutPage,
+		FContentDiscoveryError& OutError);
 }

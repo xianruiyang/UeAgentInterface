@@ -64,29 +64,6 @@ namespace UE::UAI::ContextResource
 		return false;
 	}
 
-	FUeAgentResourceBudget::FUeAgentResourceBudget(
-		const TMap<EUeAgentResourceDimension, int64>& InLimits)
-		: Limits(InLimits)
-	{
-		for (const TPair<EUeAgentResourceDimension, int64>& Pair : Limits)
-		{
-			checkf(Pair.Value >= 0, TEXT("Resource limits must be non-negative."));
-		}
-	}
-
-	TOptional<int64> FUeAgentResourceBudget::LimitFor(
-		const EUeAgentResourceDimension Dimension) const
-	{
-		const int64* Limit = Limits.Find(Dimension);
-		return Limit ? TOptional<int64>(*Limit) : TOptional<int64>();
-	}
-
-	const TMap<EUeAgentResourceDimension, int64>&
-	FUeAgentResourceBudget::GetLimits() const
-	{
-		return Limits;
-	}
-
 	FUeAgentResourceUsage::FUeAgentResourceUsage(
 		const TMap<EUeAgentResourceDimension, int64>& InValues)
 		: Values(InValues)
@@ -112,14 +89,14 @@ namespace UE::UAI::ContextResource
 	bool FUeAgentResourceScope::TryCharge(
 		const EUeAgentResourceDimension Dimension,
 		const int64 Amount,
-		FUeAgentResourceBudgetExceeded& OutError)
+		FUeAgentResourceChargeError& OutError)
 	{
 		return Tracker->TryCharge(Dimension, Amount, Path, OutError);
 	}
 
 	bool FUeAgentResourceScope::TryChargeMany(
 		const TMap<EUeAgentResourceDimension, int64>& Amounts,
-		FUeAgentResourceBudgetExceeded& OutError)
+		FUeAgentResourceChargeError& OutError)
 	{
 		return Tracker->TryChargeMany(Amounts, Path, OutError);
 	}
@@ -129,11 +106,7 @@ namespace UE::UAI::ContextResource
 		return Path;
 	}
 
-	FUeAgentResourceTracker::FUeAgentResourceTracker(
-		FUeAgentResourceBudget InBudget)
-		: Budget(MoveTemp(InBudget))
-	{
-	}
+	FUeAgentResourceTracker::FUeAgentResourceTracker() = default;
 
 	FUeAgentResourceScope FUeAgentResourceTracker::Scope(FString Path)
 	{
@@ -144,7 +117,7 @@ namespace UE::UAI::ContextResource
 		const EUeAgentResourceDimension Dimension,
 		const int64 Amount,
 		const FString& Path,
-		FUeAgentResourceBudgetExceeded& OutError)
+		FUeAgentResourceChargeError& OutError)
 	{
 		return TryChargeMany({{Dimension, Amount}}, Path, OutError);
 	}
@@ -152,7 +125,7 @@ namespace UE::UAI::ContextResource
 	bool FUeAgentResourceTracker::TryChargeMany(
 		const TMap<EUeAgentResourceDimension, int64>& Amounts,
 		const FString& Path,
-		FUeAgentResourceBudgetExceeded& OutError)
+		FUeAgentResourceChargeError& OutError)
 	{
 		FScopeLock Lock(&Mutex);
 		TMap<EUeAgentResourceDimension, int64> Candidates;
@@ -160,31 +133,16 @@ namespace UE::UAI::ContextResource
 		{
 			if (Pair.Value < 0)
 			{
-				OutError.Code = TEXT("resource_amount_invalid");
-				OutError.Dimension = Pair.Key;
-				OutError.Limit = 0;
-				OutError.Observed = Pair.Value;
-				OutError.Path = Path;
-				OutError.bStoppedEarly = true;
+				OutError = FUeAgentResourceChargeError::Failure(TEXT("resource_amount_invalid"), TEXT("Resource accounting rejected a negative amount."), TEXT("resource_accounting"));
+				OutError.ResourceDimension = LexToString(Pair.Key);
+				OutError.ResourceObserved = Pair.Value;
+				OutError.Source.JsonPath = Path;
+				OutError.StoppedEarly = true;
 				return false;
 			}
-			Candidates.Add(Pair.Key, Values.FindRef(Pair.Key) + Pair.Value);
-		}
-
-		for (const FDimensionName& Entry : DimensionNames)
-		{
-			const int64* Observed = Candidates.Find(Entry.Dimension);
-			const TOptional<int64> Limit = Budget.LimitFor(Entry.Dimension);
-			if (Observed && Limit.IsSet() && *Observed > Limit.GetValue())
-			{
-				OutError.Code = TEXT("resource_budget_exceeded");
-				OutError.Dimension = Entry.Dimension;
-				OutError.Limit = Limit.GetValue();
-				OutError.Observed = *Observed;
-				OutError.Path = Path;
-				OutError.bStoppedEarly = true;
-				return false;
-			}
+			const int64 Current = Values.FindRef(Pair.Key);
+			Candidates.Add(Pair.Key,
+				Current + FMath::Min(Pair.Value, MAX_int64 - Current));
 		}
 
 		for (const TPair<EUeAgentResourceDimension, int64>& Pair : Candidates)
@@ -198,11 +156,6 @@ namespace UE::UAI::ContextResource
 	{
 		FScopeLock Lock(&Mutex);
 		return FUeAgentResourceUsage(Values);
-	}
-
-	const FUeAgentResourceBudget& FUeAgentResourceTracker::GetBudget() const
-	{
-		return Budget;
 	}
 
 	FUeAgentTextUnits MeasureText(const FString& Text)
@@ -226,6 +179,13 @@ namespace UE::UAI::ContextResource
 		Result.Utf16CodeUnits = Text.Len();
 		Result.UnicodeScalars = ScalarCount;
 		return Result;
+	}
+
+	FUeAgentOperationDeadline::FUeAgentOperationDeadline()
+		: StartedAt(0.0)
+		, DeadlineAt(0.0)
+		, Clock([]() { return 0.0; })
+	{
 	}
 
 	FUeAgentOperationDeadline FUeAgentOperationDeadline::FromTimeout(
@@ -271,24 +231,14 @@ namespace UE::UAI::ContextResource
 
 	bool FUeAgentOperationDeadline::CanContinue() const
 	{
-		return Clock() < DeadlineAt;
+		return true;
 	}
 
 	bool FUeAgentOperationDeadline::TryCheckpoint(
 		const FString& Stage,
 		FUeAgentOperationDeadlineExceeded& OutError) const
 	{
-		checkf(!Stage.TrimStartAndEnd().IsEmpty(), TEXT("Deadline stage must be non-empty."));
-		const double ObservedAt = Clock();
-		if (ObservedAt < DeadlineAt)
-		{
-			return true;
-		}
-		OutError.Code = TEXT("operation_deadline_exceeded");
-		OutError.Stage = Stage;
-		OutError.DeadlineAt = DeadlineAt;
-		OutError.ObservedAt = ObservedAt;
-		return false;
+		return true;
 	}
 
 	class FUeAgentCancellationState
@@ -354,9 +304,10 @@ namespace UE::UAI::ContextResource
 		{
 			return true;
 		}
-		OutError.Code = TEXT("cancellation_requested");
-		OutError.Reason = Request->Reason;
-		OutError.RequestedAt = Request->RequestedAt;
+		OutError = Contract::FDiagnostic::Failure(TEXT("cancellation_requested"),
+			Request->Reason.IsEmpty() ? TEXT("Cancellation was requested.") : Request->Reason, TEXT("cancellation"));
+		OutError.Schema = TEXT("uai.runtime.diagnostic/1");
+		OutError.CancellationRequestedAt = Request->RequestedAt;
 		return false;
 	}
 

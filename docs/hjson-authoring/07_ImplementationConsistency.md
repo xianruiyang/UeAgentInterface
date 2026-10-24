@@ -8,8 +8,8 @@ owner 维护的链路，不恢复旧 `uai_core` checker、命令 pack、任务�
 
 公开能力沿以下单向链路成立：
 
-1. `Resources/UaiCommandManifest.json` 定义公开 command identity 与参数合同；
-2. `tools/uai_binding/generate_bindings.py` 只从该 manifest 生成 Python binding；
+1. C++ 冻结 command registry 定义公开 command identity 与参数合同；
+2. `UeAgentInterface.ExportCommandManifest` 把当前 registry 显式导出到 `Resources/UaiCommandManifest.json`，`tools/uai_binding/generate_bindings.py` 再从该投影生成 Python binding；
 3. named method、`Client.execute()` 与 CLI 共用同一个 Client、Protocol 和 Transport；
 4. command 经正式 ingress 进入 CommandService，再进入唯一 C++ 业务 owner；
 5. 写操作由对应 owner 完成 compile/settle、持久化和独立 readback。
@@ -19,23 +19,21 @@ owner 持有。Python/CLI、skill 文档和测试不得复制这些业务决定�
 
 ## Current Entry Points
 
-| 检查 | 正式入口 | 直接证明范围 |
-| --- | --- | --- |
-| Binding 可重建 | 在 `UeAgentInterfaceCMD` 运行 `python tools/uai_binding/generate_bindings.py --manifest ../Plugins/UeAgentInterface/Resources/UaiCommandManifest.json --output-root cli/uai --check` | committed binding 与当前正式 manifest 一致 |
-| CMD 公共合同 | 在 `UeAgentInterfaceCMD` 设置 `PYTHONPATH=cli` 后运行 `python -m pytest -q` | SDK、CLI、Protocol、Transport、binding 和分发边界的活动测试合同 |
-| Plugin 公开链路 | 使用项目正式 Automation runner 运行受影响 composition/vertical discovery set | 被选测试覆盖的 C++ ingress、owner、真实 UE mechanics 与 readback |
-| Skill 分发一致性 | 在外层项目运行 `python scripts/skills/sync_codex_skills.py --mode check --direction pak-to-installed --skills ue-agent-interface` | Pak-owned skill 与 installed 副本的完整文件集一致 |
+`scripts/ue/UpdateUaiCommandSurface.ps1` 是显式刷新命令 manifest 与 Python binding
+的开发动作：从当前 registry 导出 manifest，再由 generator 重建 binding。真实可用性由
+当前改动直接相关的 public input、UE 状态和独立 readback 证据判断。
 
-这些检查彼此不能替代。manifest、binding、handler forwarding 或 mock 只证明其所在
-结构层；真实可用性仍需要 public input 到 UE 状态与独立 readback 的纵向证据。
+`editor.session` 与 `capture.image.execute` 的策略参数、subject、用法和结果说明由对应
+C++ policy descriptor 持有，注册时完整投影到 variants；固定 `editor.safe_exit` 由自己的命令
+拥有合同。修改 descriptor 后须使用新构建刷新命令面，不能只修改生成 binding 或静默隐藏缺失合同。
+图像策略的副作用按所选策略说明判断，例如 PCG viewport 的 Actor framing 会保留相机变换。
 
 ## Command And Candidate Discovery
 
 - 已知 command 且签名已明确时，直接使用生成的 named method。
-- 不知道 command 时，先调用 `query.command.search`，再把候选返回的精确
-  `command_id` 与 `contract_hash` 原样交给 `query.command.detail`。
-- 版本锁定的动态调用使用 `Client.execute_exact(...)`；普通动态调用使用
-  `Client.execute(...)`。
+- 不知道 command 时，先调用 `query.command.search` 取得名称，再用
+  `query.command.usage` 批量取得 named 最小调用；复杂 schema、variant 或失败语义以生成 SDK、正式 schema 与领域文档为准。
+- 动态调用使用 `Client.execute(command, params)`；机器版本校验由 SDK 和 wire 内部完成。
 - factory、node、component、actor 或其他 candidate 查询返回的 identity 必须可原样
   进入对应 create/apply 输入；调用侧不得建立别名表或领域映射。
 - HJSON 文件导航只依据正式 export profile、`included_files`、`read_order`、manifest、
@@ -48,17 +46,14 @@ owner 持有。Python/CLI、skill 文档和测试不得复制这些业务决定�
 2. 在该层的唯一 owner 修复，不在 SDK、CLI、skill 或单条 route 内增加业务兜底。
 3. command 返回成功但 UE 状态或独立 readback 不符合语义时，停止依赖该成功结果，
    保存输入、Result、readback 和运行日志，并修复服务端 owner。
-4. 先运行覆盖改动机制的最小检查，再运行所有受影响消费者；只有对应证据通过后才
-   更新 Pak 和 installed skill。
+4. 只在当前完成结论需要时取得直接覆盖受影响行为的证据；不把测试、全消费者复跑或
+   Pak/installed 同步设为继续开发的前置。
 
 ## Current Boundaries
 
 - 正式能力全集与参数只由当前 manifest 定义，不在本文硬编码命令数、profile 数或
   domain 数。
-- `query.command.search/detail` 只解决公开 command 发现；领域 candidate discovery
+- `query.command.search/usage` 与按生成 SDK、正式 schema 与领域文档 只解决公开 command 发现；领域 candidate discovery
   仍由对应 C++ owner 返回可直接消费的 identity。
-- 结构化 HJSON authoring 至少保留一条不可拆分的黄金链路：公开查询取得 exact
-  identity，生成 seed/placement/scoped edit，经 validate/import/apply 写入，再完成
-  compile/settle/save 与 unload/reload 后的独立 Query readback。
-- Pak/installed 零差异只证明副本一致；还必须由公开分发测试排除已退役入口，并用
-  packaged CLI 经 Connection TOML 调用真实服务。
+- 真实可用性只由当前正式入口的实际结果与所需 readback 支撑；生成、同步、测试或
+  文档本身都不签发领域完成。

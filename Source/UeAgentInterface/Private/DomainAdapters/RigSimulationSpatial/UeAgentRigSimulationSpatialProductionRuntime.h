@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialDeformerPcgNative.h"
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialExecutionChains.h"
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialIkRetargetNative.h"
@@ -31,6 +32,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 
 		FString Identity;
 		TWeakObjectPtr<UObject> Object;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -45,6 +47,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FString ClockId;
 		FString NativeClockId;
 		FString EvidenceId;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -56,6 +59,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 
 		UE::UAI::StateSemantic::FUeAgentSpatialFrame Frame;
 		bool bNativeFrame = false;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -65,6 +69,8 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FString EditorInstanceId;
 		FString ServerSessionId;
 		FString RuntimeGeneration;
+		// Location of the canonical input within the caller's request; empty for a standalone input.
+		FString InputRootPointer;
 		int64 RegistryEpoch = -1;
 		TArray<FUeAgentRigSimulationSpatialObjectBinding> ObjectBindings;
 		TArray<FUeAgentRigSimulationSpatialClockBinding> ClockBindings;
@@ -82,8 +88,6 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			DeformerTrainingInputBindings;
 		TArray<FUeAgentRigSimulationSpatialDeformerEvaluationBinding>
 			DeformerEvaluationBindings;
-		TArray<FUeAgentRigSimulationSpatialPcgGenerationBinding>
-			PcgGenerationBindings;
 		TSharedPtr<IUeAgentRigSimulationSpatialAssetEffectPort> AssetEffectPort;
 		TSharedPtr<IUeAgentRigSimulationSpatialPhysicsSessionPort> PhysicsSessionPort;
 		TArray<UE::UAI::StateSemantic::FUeAgentSpatialConversion>
@@ -91,6 +95,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		TArray<UE::UAI::StateSemantic::FUeAgentTemporalConversion>
 			TemporalConversions;
 
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 		bool IsValid() const;
 	};
 

@@ -15,17 +15,7 @@ namespace
 
 	FUeAgentResourceTracker MakeResources()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 4 * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 4 * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 4096},
-			{EUeAgentResourceDimension::Items, 4096},
-			{EUeAgentResourceDimension::Files, 64},
-			{EUeAgentResourceDimension::ReferenceEdges, 4096},
-			{EUeAgentResourceDimension::WorkUnits, 65536},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 16 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	class FScopedArtifactRoot final
@@ -141,7 +131,7 @@ bool FUeAgentFileArtifactUnownedFinalTest::RunTest(
 			Resources,
 			Artifact,
 			Error));
-	TestEqual(TEXT("unowned final has stable failure"), Error.GetCode(),
+	TestEqual(TEXT("unowned final has stable failure"), Error.Code,
 		FString(TEXT("file_artifact_final_ownership_required")));
 	TArray<uint8> AfterBytes;
 	TestTrue(TEXT("unowned final remains readable"),

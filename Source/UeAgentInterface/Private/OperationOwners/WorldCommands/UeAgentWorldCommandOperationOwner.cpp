@@ -1,8 +1,12 @@
 #include "OperationOwners/WorldCommands/UeAgentWorldCommandOperationOwner.h"
 
 #include "Core/DomainCapability/DelegatedCommandOperation/UeAgentDelegatedCommandOperation.h"
+#include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringComposition.h"
+#include "Core/Contract/UeAgentInternalCommandExecution.h"
 #include "DomainAdapters/WorldCommands/UeAgentWorldCommandMechanicsBoundary.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "QueryOwners/WorldCommands/UeAgentWorldCommandQueryOwner.h"
 #include "Misc/ScopeLock.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
@@ -26,32 +30,55 @@ namespace UE::UAI::OperationOwners::WorldCommands
 			return Value;
 		}
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail,
-			const FString& TerminalStatus = TEXT("not_started"),
-			const bool bRetrySafe = true)
+		UE::UAI::Contract::FDiagnostic InvocationFailure(const FString& Code, const FString& Subject, const UE::UAI::Contract::FDiagnostic& Cause)
 		{
-			const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(TEXT("code"), Code);
-			Object->SetStringField(TEXT("subject_id"), SubjectId);
-			Object->SetStringField(TEXT("detail"), Detail);
-			Object->SetStringField(TEXT("terminal_status"), TerminalStatus);
-			Object->SetBoolField(TEXT("retry_safe"), bRetrySafe);
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Object, Writer);
-			return Text;
+			auto Diagnostic = Cause.IsEmpty()
+				? UE::UAI::Contract::FDiagnostic::Failure(Code, TEXT("The World operation runtime could not be prepared."), TEXT("command"))
+				: UE::UAI::Contract::FDiagnostic::WrapFailure(Code, Cause, TEXT("command"), TEXT("The World operation runtime could not be prepared."));
+			Diagnostic.SubjectId = Subject;
+			if (QueryOwners::WorldCommands::IsCommand(Subject))
+				Diagnostic.PublicMessage += TEXT(" Command: ") + Subject + TEXT(".");
+			if (Cause.IsEmpty()) {
+				Diagnostic.SourceKind = TEXT("native_result");
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.PropertyPath = TEXT("operation_runtime_prepared");
+			}
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.TerminalStatus = TEXT("not_started");
+			Diagnostic.bRetrySafe = true;
+			Diagnostic.MutationStarted = false;
+			Diagnostic.MutationMayHaveStarted = false;
+			return Diagnostic;
 		}
+
+		UE::UAI::Contract::FDiagnostic ProjectionFailure(const FString& Code, const UE::UAI::Contract::FDiagnostic& Cause,
+			const BindingGateway::Operation::FOperationLifecycleReceipt& Receipt)
+		{
+			auto Diagnostic = Cause.IsEmpty()
+				? UE::UAI::Contract::FDiagnostic::Failure(Code, TEXT("The operation completed, but its result payload could not be produced."), TEXT("result_projection"))
+				: UE::UAI::Contract::FDiagnostic::WrapFailure(Code, Cause, TEXT("result_projection"), TEXT("The operation completed, but its result payload could not be produced."));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (Cause.IsEmpty()) {
+				Diagnostic.SourceKind = TEXT("native_result");
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.PropertyPath = TEXT("result_payload_produced");
+			}
+			Diagnostic.TerminalStatus = BindingGateway::Operation::LexToString(Receipt.GetStatus());
+			Diagnostic.MutationStarted = Receipt.DidMutationStart();
+			Diagnostic.MutationMayHaveStarted = Receipt.DidMutationStart();
+			Diagnostic.bRetrySafe = Receipt.IsRetrySafe();
+			return Diagnostic;
+		}
+
 	}
 
 	bool TryResolveMechanics(
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return DomainAdapters::WorldCommands::TryResolveMechanics(
 			CommandId, OutHandler, OutAuthorityScopes, OutError);
@@ -102,39 +129,79 @@ namespace UE::UAI::OperationOwners::WorldCommands
 		{
 			return FUeAgentCommandResult::Failure(
 				Request, TEXT("{}"),
-				ErrorJson(
-					TEXT("world_command_runtime_unavailable"),
-					Request.GetCommandId(),
-					InvocationError.GetCode() + TEXT(":")
-						+ InvocationError.GetDetail()));
+				InvocationFailure(TEXT("world_command_runtime_unavailable"), Request.GetCommandId(), InvocationError));
 		}
 		BindingGateway::Operation::FOperationLifecycleReceipt Receipt;
 		if (!Invocation.GetService()->Run(
 			*Invocation.GetPlan(), *Invocation.GetAuthorization(), Receipt))
 		{
-			FString Detail = Invocation.GetContext()->GetFailureDetail();
-			if (Detail.IsEmpty())
-			{
-				Detail = TEXT("phase_history:")
-					+ FString::Join(Receipt.GetPhaseHistory(), TEXT(","));
-			}
-			return FUeAgentCommandResult::Failure(
-				Request, TEXT("{}"),
-				ErrorJson(
-					Receipt.GetErrorCode(), Request.GetCommandId(), Detail,
-					BindingGateway::Operation::LexToString(Receipt.GetStatus()),
-					Receipt.IsRetrySafe()));
+			auto Diagnostic = Receipt.GetDiagnostic();
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetCommandId();
+			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
 		}
 		FString Payload;
-		FString PayloadError;
+		UE::UAI::Contract::FDiagnostic PayloadError;
 		if (!Invocation.GetContext()->TryBuildSuccessPayload(
 			Receipt, Payload, PayloadError))
 		{
-			return FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(), Request.GetRequestId(),
-				Request.GetCommandId(), Request.GetCommandBindingHash(),
-				TEXT("domain_operation_result_invalid"), PayloadError);
+			return FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(), Request.GetCommandId(), Request.GetCommandBindingHash(), ProjectionFailure(TEXT("domain_operation_result_invalid"), PayloadError, Receipt));
 		}
 		return FUeAgentCommandResult::Success(Request, MoveTemp(Payload));
+	}
+
+	bool TryExecuteInternal(
+		const FString& CommandId,
+		const FString& ParamsJson,
+		const Contract::FUeAgentCallerContext& Caller,
+		FString& OutPayloadJson,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		OutPayloadJson.Reset();
+		OutError.Reset();
+
+		// This is intentionally the canonical production contract source.  It
+		// is not the active registry, which is model-facing and may omit private
+		// mechanics used by WorldSpatial HJSON import.
+		TSharedPtr<const CommandContract::FUeAgentCommandContractRegistry>
+			Contracts;
+		if (!Composition::SimpleAuthoring::
+			TryCreateProductionCommandContractRegistry(Contracts, OutError)
+			|| !Contracts.IsValid())
+		{
+			if (OutError.IsEmpty()) {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_command_internal_registry_unavailable"),
+					TEXT("The World command contract factory failed or returned no registry without reporting a diagnostic."), TEXT("internal_command"), CommandId);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.PropertyPath = TEXT("command_registry_ready");
+				OutError.SourceKind = TEXT("native_result");
+			}
+			return false;
+		}
+		const CommandContract::FUeAgentCommandContract* Contract =
+			Contracts->FindExact(CommandId);
+		if (!Contract)
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_command_internal_contract_missing"),
+				TEXT("No execution contract is registered for the required World operation."), TEXT("internal_command"), CommandId);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.PropertyPath = TEXT("command_contract_registered");
+			OutError.SourceKind = TEXT("native_result");
+			if (QueryOwners::WorldCommands::IsCommand(CommandId))
+				OutError.PublicMessage += TEXT(" Command: ") + CommandId + TEXT(".");
+			return false;
+		}
+
+		TSharedPtr<IUeAgentCommandHandler> Mechanics;
+		TArray<FString> AuthorityScopes;
+		if (!TryResolveMechanics(CommandId, Mechanics, AuthorityScopes, OutError))
+		{
+			return false;
+		}
+		return CommandContract::TryExecuteInternalCommand(
+			*Contract, Mechanics.ToSharedRef(), ParamsJson, Caller,
+			TEXT("world_command_"), OutPayloadJson,
+			OutError);
 	}
 }

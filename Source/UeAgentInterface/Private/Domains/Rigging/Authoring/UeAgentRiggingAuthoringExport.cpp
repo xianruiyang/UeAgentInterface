@@ -13,9 +13,9 @@ namespace UeAgentRiggingAuthoring
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ExportProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
-		FString& OutError)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
 	{
+  auto& OutError = OutResult.Diagnostic;
 		OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
 		OutError.Reset();
 		TArray<UeAgentAuthoringState::FReadRequest> Requests;
@@ -23,17 +23,11 @@ namespace UeAgentRiggingAuthoring
 		UeAgentAuthoringState::FCaptureResult Capture;
 		if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
 		{
-			OutError = Capture.ErrorCode + TEXT(":") + Capture.ErrorDetail;
+			OutError = Capture.Diagnostic;
 			return false;
 		}
-		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(
-			UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
+		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
 				Profile.TargetKind,
-				Profile.TypeId),
-			ExportProfileId,
-			Capture.Snapshot,
-			WorkspaceRoot,
-			OutResult,
-			OutError);
+				Profile.TypeId), ExportProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
 	}
 }

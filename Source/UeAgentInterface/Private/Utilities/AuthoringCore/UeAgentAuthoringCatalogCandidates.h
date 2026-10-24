@@ -5,6 +5,11 @@
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 
+namespace UeAgentAuthoringTargetLocator
+{
+	struct FResolveResult;
+}
+
 namespace UeAgentAuthoringCatalogCandidates
 {
 	enum class ESortMode : uint8
@@ -41,7 +46,7 @@ namespace UeAgentAuthoringCatalogCandidates
 	UEAGENTINTERFACE_API bool BuildIdentity(
 		const FIdentityInput& Input,
 		UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	/**
 	 * Builds the compact, model-facing candidate id from the canonical internal
@@ -49,6 +54,18 @@ namespace UeAgentAuthoringCatalogCandidates
 	 */
 	UEAGENTINTERFACE_API FString BuildPublicId(
 		const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity);
+
+	/**
+	 * Resolves one catalog candidate by the same compact id returned to callers,
+	 * a canonical identity key, or an exact model-facing name. Name and id may be
+	 * supplied together to make the selection stricter.
+	 */
+	UEAGENTINTERFACE_API bool ResolveExactCandidate(
+		const FString& Name,
+		const FString& Id,
+		const TArray<UeAgentAuthoringIdentity::FCanonicalIdentity>& Identities,
+		UeAgentAuthoringTargetLocator::FResolveResult& OutResult,
+		int32 MaxDiagnosticCandidates = -1);
 
 	UEAGENTINTERFACE_API bool Less(const FSortKey& Left, const FSortKey& Right, ESortMode Mode);
 	UEAGENTINTERFACE_API void Sort(TArray<FSortKey>& Keys, ESortMode Mode);

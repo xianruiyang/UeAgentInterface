@@ -1,12 +1,8 @@
 #include "Misc/AutomationTest.h"
 
-#if __has_include("DomainAdapters/Blueprint/Component/UeAgentBlueprintComponentMechanics.h") \
-	&& __has_include("OperationOwners/BlueprintComponent/UeAgentBlueprintComponentCommandService.h") \
-	&& __has_include("Module/CommandRegistration/BlueprintComponent/UeAgentBlueprintComponentRegistration.h")
-#define UAI_T12_BLUEPRINT_COMPONENT_AVAILABLE 1
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
@@ -15,15 +11,14 @@
 #include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Components/SceneComponent.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
 #include "GameFramework/Actor.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Module/CommandRegistration/BlueprintComponent/UeAgentBlueprintComponentRegistration.h"
 #include "OperationOwners/BlueprintComponent/UeAgentBlueprintComponentCommandService.h"
-#else
-#define UAI_T12_BLUEPRINT_COMPONENT_AVAILABLE 0
-#endif
 
-#if UAI_T12_BLUEPRINT_COMPONENT_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::CommandContract;
@@ -53,8 +48,7 @@ namespace
 			OutResponse = {};
 			OutError = {};
 			OutResponse.PayloadJson = TEXT(
-				"{\"command_id\":\"blueprint.component.candidates\"," 
-				"\"read_only\":true,\"candidates\":[]}");
+				"{\"names\":[]}");
 			OutResponse.bReadOnly = true;
 			return true;
 		}
@@ -76,7 +70,7 @@ namespace
 			TEXT("\"command_binding_hash\":\"%s\",")
 			TEXT("\"params\":{\"target\":\"/Game/T12.BP_T12\",")
 			TEXT("\"parent\":\"DefaultSceneRoot\",")
-			TEXT("\"query\":\"Point Light\",\"limit\":10}}"),
+			TEXT("\"query\":\"Point Light\",\"limit\":3}}"),
 			*ContractHash);
 		FTCHARToUTF8 Encoded(*Envelope);
 		TArray<uint8> Bytes;
@@ -88,7 +82,6 @@ namespace
 			Bytes, OutRequest, Diagnostic);
 	}
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T12BlueprintComponentTest,
@@ -98,10 +91,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T12BlueprintComponentTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T12_BLUEPRINT_COMPONENT_AVAILABLE
-	TestTrue(TEXT("T12 Blueprint Component authority is available"), false);
-	return false;
-#else
 	FWorkspaceError WorkspaceError;
 	TSharedPtr<const FImportInitializationDomainProviderRegistry>
 		ProviderRegistry;
@@ -161,24 +150,6 @@ bool FUeAgentStrictV2T12BlueprintComponentTest::RunTest(
 			FString(TEXT("uai.init.blueprint.asset/1")));
 	}
 
-	UeAgentPaletteSearch::FCandidate NativeAudioCandidate;
-	FString NativeAudioError;
-	TestTrue(
-		TEXT("the native Add Component registry independently exposes AudioComponent"),
-		UeAgentPaletteSearch::TryResolveActorComponentCandidate(
-			TEXT("/Script/Engine.AudioComponent"),
-			FString(),
-			NativeAudioCandidate,
-			NativeAudioError));
-	if (NativeAudioCandidate.Identity.IsValid())
-	{
-		TestEqual(
-			TEXT("the native AudioComponent selector keeps its exact class"),
-			NativeAudioCandidate.AuthoringSelectors.FindRef(
-				TEXT("component_class")),
-			FString(TEXT("/Script/Engine.AudioComponent")));
-	}
-
 	const FString FixtureSuffix =
 		FGuid::NewGuid().ToString(EGuidFormats::Digits);
 	UBlueprint* CandidateBlueprint = FKismetEditorUtilities::CreateBlueprint(
@@ -195,8 +166,7 @@ bool FUeAgentStrictV2T12BlueprintComponentTest::RunTest(
 	FUeAgentBlueprintComponentCandidateQuery CandidateQuery;
 	CandidateQuery.Target = CandidateTarget;
 	CandidateQuery.Parent = TEXT("DefaultSceneRoot");
-	CandidateQuery.Query = TEXT("Point Light");
-	CandidateQuery.Limit = 10;
+	CandidateQuery.Query = TEXT("AudioComponent");
 	FString CandidatePayloadJson;
 	FUeAgentBlueprintComponentMechanicsError MechanicsError;
 	if (!TestTrue(TEXT("the native Add Component registry query succeeds"),
@@ -205,7 +175,7 @@ bool FUeAgentStrictV2T12BlueprintComponentTest::RunTest(
 			CandidatePayloadJson,
 			MechanicsError)))
 	{
-		AddError(MechanicsError.Code + TEXT(":") + MechanicsError.Detail);
+		AddError(MechanicsError.Code + TEXT(":") + MechanicsError.PublicMessage);
 		return false;
 	}
 	TSharedPtr<FJsonObject> CandidatePayload;
@@ -218,42 +188,68 @@ bool FUeAgentStrictV2T12BlueprintComponentTest::RunTest(
 		AddError(JsonError);
 		return false;
 	}
-	const TArray<TSharedPtr<FJsonValue>>* Candidates = nullptr;
-	TestTrue(TEXT("the bounded query returns a native candidate page"),
-		CandidatePayload->TryGetArrayField(TEXT("candidates"), Candidates)
-		&& Candidates && Candidates->Num() >= 1);
-	bool bFoundPointLight = false;
-	if (Candidates)
+	const TArray<TSharedPtr<FJsonValue>>* Names = nullptr;
+	TestTrue(TEXT("the bounded query returns names only"),
+		CandidatePayload->TryGetArrayField(TEXT("names"), Names)
+		&& Names && Names->Num() >= 1);
+	FString CandidatePublicName;
+	if (Names)
 	{
-		for (const TSharedPtr<FJsonValue>& Value : *Candidates)
+		for (const TSharedPtr<FJsonValue>& Value : *Names)
 		{
-			const TSharedPtr<FJsonObject> Candidate =
-				Value.IsValid() && Value->Type == EJson::Object
-				? Value->AsObject()
-				: nullptr;
-			if (!Candidate.IsValid()
-				|| Candidate->GetStringField(TEXT("class_path"))
-					!= TEXT("/Script/Engine.PointLightComponent"))
+			if (!Value.IsValid() || Value->Type != EJson::String
+				|| Value->AsString().IsEmpty())
 			{
 				continue;
 			}
-			bFoundPointLight = true;
-			TestFalse(TEXT("the public candidate has a compact id"),
-				Candidate->GetStringField(TEXT("id")).IsEmpty());
-			TestFalse(TEXT("the public candidate has a direct name selector"),
-				Candidate->GetStringField(TEXT("name")).IsEmpty());
-			TestFalse(TEXT("the public candidate omits legacy binding state"),
-				Candidate->HasField(TEXT("binding_revision")));
+			if (CandidatePublicName.IsEmpty())
+			{
+				UeAgentPaletteSearch::FCandidate ResolvedAlias;
+				FString AliasError;
+				if (UeAgentPaletteSearch::TryResolveActorComponentCandidate(
+						Value->AsString(), FString(), ResolvedAlias, AliasError)
+					&& ResolvedAlias.AuthoringSelectors.FindRef(TEXT("component_class"))
+						.Equals(TEXT("/Script/Engine.AudioComponent"), ESearchCase::CaseSensitive))
+				{
+					CandidatePublicName = Value->AsString();
+				}
+			}
 		}
 	}
-	TestTrue(TEXT("Point Light is present in the real Add Component registry"),
-		bFoundPointLight);
-	const TSharedPtr<FJsonObject>* Context = nullptr;
-	TestTrue(TEXT("the query returns its exact outer parent context"),
-		CandidatePayload->TryGetObjectField(TEXT("context"), Context)
-		&& Context && Context->IsValid()
-		&& (*Context)->GetStringField(TEXT("parent"))
-			== TEXT("DefaultSceneRoot"));
+	TestTrue(TEXT("AudioComponent is present in the real Add Component registry"),
+		!CandidatePublicName.IsEmpty());
+	TestFalse(TEXT("the names-only query omits legacy context"),
+		CandidatePayload->HasField(TEXT("context")));
+
+	USCS_Node* NestedParent = CandidateBlueprint->SimpleConstructionScript->CreateNode(
+		USceneComponent::StaticClass(), TEXT("NestedParent"));
+	CandidateBlueprint->SimpleConstructionScript->AddNode(NestedParent);
+	FKismetEditorUtilities::CompileBlueprint(CandidateBlueprint);
+	USCS_Node* NestedAudio = nullptr;
+	UeAgentPaletteSearch::FCandidate AppliedAudioCandidate;
+	FString NestedAudioError;
+	TestTrue(
+		TEXT("a native component candidate can be created under one exact SCS parent"),
+		UeAgentPaletteSearch::TryPerformBlueprintComponentCandidate(
+			*CandidateBlueprint,
+			NestedParent,
+			CandidatePublicName,
+			FString(),
+			TEXT("NestedAudio"),
+			NestedAudio,
+			AppliedAudioCandidate,
+			NestedAudioError));
+	if (!NestedAudioError.IsEmpty())
+	{
+		AddError(NestedAudioError);
+	}
+	TestTrue(
+		TEXT("the native component is attached to the requested SCS parent"),
+		NestedAudio && NestedParent->GetChildNodes().Contains(NestedAudio));
+	TestEqual(
+		TEXT("the public alias resolves to the expected internal component class"),
+		AppliedAudioCandidate.AuthoringSelectors.FindRef(TEXT("component_class")),
+		FString(TEXT("/Script/Engine.AudioComponent")));
 
 	const TSharedRef<FFixtureService> Service = MakeShared<FFixtureService>();
 	TSharedPtr<const UE::UAI::CommandRegistry::FUeAgentImmutableCommandRegistry>
@@ -301,9 +297,8 @@ bool FUeAgentStrictV2T12BlueprintComponentTest::RunTest(
 		TEXT("the native component search context crosses the exact edge unchanged"),
 		Service->LastRequest.CanonicalParamsJson,
 		FString(TEXT(
-			"{\"limit\":10,\"parent\":\"DefaultSceneRoot\","
+			"{\"limit\":3,\"parent\":\"DefaultSceneRoot\","
 			"\"query\":\"Point Light\","
 			"\"target\":\"/Game/T12.BP_T12\"}")));
 	return true;
-#endif
 }

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Domains/Rigging/Authoring/UeAgentRiggingAuthoringDescriptors.h"
 #include "Utilities/AuthoringExport/UeAgentExportWorkspaceWriter.h"
@@ -15,6 +17,5 @@ namespace UeAgentRiggingAuthoring
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ExportProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
-		FString& OutError);
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult);
 }

@@ -1,4 +1,6 @@
 #include "DomainAdapters/CompileBuildJob/UeAgentBlueprintCompilePolicy.h"
+#include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -23,15 +25,58 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			WarningOrError,
 		};
 
-		bool Fail(
-			FString& OutCode,
-			FString& OutDetail,
-			FString Code,
-			FString Detail = FString())
+		bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic)
+        {
+            OutError = MoveTemp(Diagnostic);
+            return false;
+        }
+
+		FString FieldPath(FString Field)
 		{
-			OutCode = MoveTemp(Code);
-			OutDetail = MoveTemp(Detail);
-			return false;
+			Field.ReplaceInline(TEXT("~"), TEXT("~0"));
+			Field.ReplaceInline(TEXT("/"), TEXT("~1"));
+			return TEXT("/parameters/") + Field;
+		}
+
+		TSharedPtr<FJsonValue> PolicyChoices(const TArray<FString>& Values)
+		{
+			TArray<TSharedPtr<FJsonValue>> Items;
+			for (const FString& Value : Values) Items.Add(MakeShared<FJsonValueString>(Value));
+			return MakeShared<FJsonValueArray>(MoveTemp(Items));
+		}
+
+		Contract::FDiagnostic PolicyFact(const TCHAR* Code, const FString& Reason,
+			const FString& Path, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const FString& Target = FString(), const TCHAR* SourceKind = TEXT("command_input"))
+		{
+			auto Error = Contract::FDiagnostic::Failure(Code, Reason, TEXT("compile_build"));
+			Error.PropertyPath = Path;
+			Error.SemanticPointer = Path;
+			Error.Source.JsonPath = Path;
+			Error.SourceKind = SourceKind;
+			Error.TargetPath = Target;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
+		Contract::FDiagnostic PolicyInput(const TCHAR* Code, const FString& Reason,
+			const FString& Path, const TSharedPtr<FJsonValue>& Value, TSharedPtr<FJsonValue> Expected)
+		{
+			TSharedPtr<FJsonValue> Actual = Value;
+			if (Value.IsValid() && (Value->Type == EJson::Object || Value->Type == EJson::Array))
+				Actual = MakeShared<FJsonValueString>(Value->Type == EJson::Object ? TEXT("object") : TEXT("array"));
+			auto Error = PolicyFact(Code, Reason, Path, MoveTemp(Actual), MoveTemp(Expected));
+			Error.ActualValuePresent = Value.IsValid();
+			Error.ExpectedValuePresent = true;
+			if (Value.IsValid() && (Value->Type == EJson::Object || Value->Type == EJson::Array))
+				Error.ActualEvidence = Value;
+			return Error;
+		}
+
+		TSharedPtr<FJsonValue> SeverityChoices()
+		{
+			return PolicyChoices({TEXT("all"), TEXT("error"), TEXT("warning"), TEXT("info"), TEXT("warning_or_error")});
 		}
 
 		FString StatusText(const EBlueprintStatus Status)
@@ -133,19 +178,18 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 	bool TryDecodeBlueprintCompilePolicyRequest(
 		const TSharedPtr<FJsonObject>& Parameters,
 		FBlueprintCompilePolicyRequest& OutRequest,
-		FString& OutErrorCode,
-		FString& OutErrorDetail)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRequest = {};
-		OutErrorCode.Reset();
-		OutErrorDetail.Reset();
+		OutError.Reset();
 		if (!Parameters.IsValid())
 		{
-			return Fail(OutErrorCode, OutErrorDetail,
-				TEXT("blueprint_compile_parameters_invalid"));
+			return Fail(OutError, PolicyInput(TEXT("blueprint_compile_parameters_invalid"),
+				TEXT("Blueprint compile parameters must be an object."), TEXT("/parameters"), nullptr,
+				MakeShared<FJsonValueString>(TEXT("object"))));
 		}
 		static const TSet<FString> Allowed = {
-			TEXT("asset_path"), TEXT("include_messages"), TEXT("max_messages"),
+			TEXT("asset_path"), TEXT("include_messages"),
 			TEXT("save_after_compile"), TEXT("severity_filter"),
 		};
 		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
@@ -153,59 +197,53 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		{
 			if (!Allowed.Contains(Field.Key))
 			{
-				return Fail(OutErrorCode, OutErrorDetail,
-					TEXT("blueprint_compile_parameters_invalid"), Field.Key);
+				auto Error = PolicyFact(TEXT("blueprint_compile_parameters_invalid"),
+					FString::Printf(TEXT("Unknown Blueprint compile parameter '%s'."), *Field.Key), FieldPath(Field.Key),
+					MakeShared<FJsonValueString>(Field.Key),
+					PolicyChoices({TEXT("asset_path"), TEXT("include_messages"), TEXT("save_after_compile"), TEXT("severity_filter")}));
+				Error.ActualEvidence = Field.Value;
+				return Fail(OutError, MoveTemp(Error));
 			}
 		}
 		if (!Parameters->TryGetStringField(TEXT("asset_path"), OutRequest.AssetPath)
 			|| OutRequest.AssetPath.TrimStartAndEnd().IsEmpty())
 		{
-			return Fail(OutErrorCode, OutErrorDetail,
-				TEXT("blueprint_compile_asset_path_invalid"));
+			return Fail(OutError, PolicyInput(TEXT("blueprint_compile_asset_path_invalid"),
+				TEXT("Blueprint compile requires a non-whitespace asset_path string."), TEXT("/parameters/asset_path"),
+				Parameters->TryGetField(TEXT("asset_path")), MakeShared<FJsonValueString>(TEXT("non-whitespace asset path"))));
 		}
 		OutRequest.AssetPath.TrimStartAndEndInline();
 		if (Parameters->HasField(TEXT("include_messages"))
 			&& !Parameters->TryGetBoolField(
 				TEXT("include_messages"), OutRequest.bIncludeMessages))
 		{
-			return Fail(OutErrorCode, OutErrorDetail,
-				TEXT("blueprint_compile_parameters_invalid"),
-				TEXT("include_messages"));
+			return Fail(OutError, PolicyInput(TEXT("blueprint_compile_parameters_invalid"),
+				TEXT("The include_messages parameter must be boolean."), TEXT("/parameters/include_messages"),
+				Parameters->TryGetField(TEXT("include_messages")), MakeShared<FJsonValueString>(TEXT("boolean"))));
 		}
 		if (Parameters->HasField(TEXT("save_after_compile"))
 			&& !Parameters->TryGetBoolField(
 				TEXT("save_after_compile"), OutRequest.bSaveAfterCompile))
 		{
-			return Fail(OutErrorCode, OutErrorDetail,
-				TEXT("blueprint_compile_parameters_invalid"),
-				TEXT("save_after_compile"));
-		}
-		if (Parameters->HasField(TEXT("max_messages")))
-		{
-			double Value = 0.0;
-			if (!Parameters->TryGetNumberField(TEXT("max_messages"), Value)
-				|| Value < 1.0 || Value > 2000.0
-				|| !FMath::IsNearlyEqual(Value, FMath::RoundToDouble(Value)))
-			{
-				return Fail(OutErrorCode, OutErrorDetail,
-					TEXT("blueprint_compile_max_messages_invalid"));
-			}
-			OutRequest.MaxMessages = FMath::RoundToInt(Value);
+			return Fail(OutError, PolicyInput(TEXT("blueprint_compile_parameters_invalid"),
+				TEXT("The save_after_compile parameter must be boolean."), TEXT("/parameters/save_after_compile"),
+				Parameters->TryGetField(TEXT("save_after_compile")), MakeShared<FJsonValueString>(TEXT("boolean"))));
 		}
 		if (Parameters->HasField(TEXT("severity_filter"))
 			&& !Parameters->TryGetStringField(
 				TEXT("severity_filter"), OutRequest.SeverityFilter))
 		{
-			return Fail(OutErrorCode, OutErrorDetail,
-				TEXT("blueprint_compile_severity_filter_invalid"));
+			return Fail(OutError, PolicyInput(TEXT("blueprint_compile_severity_filter_invalid"),
+				TEXT("The severity_filter parameter must be a string."), TEXT("/parameters/severity_filter"),
+				Parameters->TryGetField(TEXT("severity_filter")), MakeShared<FJsonValueString>(TEXT("string"))));
 		}
 		ECompileMessageFilter Ignored;
 		FString Canonical;
 		if (!TryFilter(OutRequest.SeverityFilter, Ignored, Canonical))
 		{
-			return Fail(OutErrorCode, OutErrorDetail,
-				TEXT("blueprint_compile_severity_filter_invalid"),
-				OutRequest.SeverityFilter);
+			return Fail(OutError, PolicyFact(TEXT("blueprint_compile_severity_filter_invalid"),
+				TEXT("Unknown Blueprint compile message severity filter."), TEXT("/parameters/severity_filter"),
+				MakeShared<FJsonValueString>(OutRequest.SeverityFilter), SeverityChoices()));
 		}
 		OutRequest.SeverityFilter = MoveTemp(Canonical);
 		return true;
@@ -215,49 +253,53 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		UBlueprint& Blueprint,
 		const FBlueprintCompilePolicyRequest& Request,
 		TSharedPtr<FJsonObject>& OutReport,
-		FString& OutErrorCode,
-		FString& OutErrorDetail)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutReport.Reset();
-		OutErrorCode.Reset();
-		OutErrorDetail.Reset();
+		OutError.Reset();
 		const FString ObjectPath = Blueprint.GetPathName();
 		const FString PackageName = Blueprint.GetOutermost()->GetName();
 		if (Request.AssetPath != ObjectPath && Request.AssetPath != PackageName)
 		{
-			return Fail(OutErrorCode, OutErrorDetail,
-				TEXT("blueprint_compile_asset_path_mismatch"), Request.AssetPath);
+			return Fail(OutError, PolicyFact(TEXT("blueprint_compile_asset_path_mismatch"),
+				TEXT("The requested asset_path does not identify the Blueprint being compiled."), TEXT("/parameters/asset_path"),
+				MakeShared<FJsonValueString>(Request.AssetPath), PolicyChoices({ObjectPath, PackageName}), ObjectPath));
 		}
 		ECompileMessageFilter Filter;
 		FString CanonicalFilter;
 		if (!TryFilter(Request.SeverityFilter, Filter, CanonicalFilter))
 		{
-			return Fail(OutErrorCode, OutErrorDetail,
-				TEXT("blueprint_compile_severity_filter_invalid"));
+			return Fail(OutError, PolicyFact(TEXT("blueprint_compile_severity_filter_invalid"),
+				TEXT("Unknown Blueprint compile message severity filter."), TEXT("/parameters/severity_filter"),
+				MakeShared<FJsonValueString>(Request.SeverityFilter), SeverityChoices(), ObjectPath));
 		}
 
 		FCompilerResultsLog CompilerLog;
 		FKismetEditorUtilities::CompileBlueprint(
 			&Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
 		bool bSaved = false;
-		FString PackageFilename;
+		const FString PackageFilename = FPackageName::LongPackageNameToFilename(
+			PackageName, FPackageName::GetAssetPackageExtension());
 		if (Request.bSaveAfterCompile)
 		{
-			if (!UEditorLoadingAndSavingUtils::SavePackages(
-					{Blueprint.GetOutermost()}, false))
+			if (!UE::UAI::EditorResources::SavePackages(
+					{Blueprint.GetOutermost()}, false, OutError))
 			{
-				return Fail(OutErrorCode, OutErrorDetail,
-					TEXT("blueprint_compile_save_failed"), PackageName);
+				return Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("blueprint_compile_save_failed"), OutError, TEXT("compile_build")));
 			}
-			PackageFilename = FPackageName::LongPackageNameToFilename(
-				PackageName, FPackageName::GetAssetPackageExtension());
 			bSaved = !Blueprint.GetOutermost()->IsDirty()
 				&& IFileManager::Get().FileExists(*PackageFilename);
 			if (!bSaved)
 			{
-				return Fail(OutErrorCode, OutErrorDetail,
-					TEXT("blueprint_compile_save_readback_failed"),
-					PackageFilename);
+				const bool bPackageDirty = Blueprint.GetOutermost()->IsDirty();
+				auto Error = PolicyFact(TEXT("blueprint_compile_save_readback_failed"), bPackageDirty
+					? TEXT("Saving returned, but the Blueprint package is still dirty.")
+					: TEXT("Saving returned, but the Blueprint package file does not exist."),
+					bPackageDirty ? TEXT("package.dirty") : TEXT("package.file_exists"),
+					MakeShared<FJsonValueBoolean>(bPackageDirty), MakeShared<FJsonValueBoolean>(!bPackageDirty),
+					ObjectPath, TEXT("native_result"));
+				Error.ActualEvidence = MakeShared<FJsonValueString>(PackageFilename);
+				return Fail(OutError, MoveTemp(Error));
 			}
 		}
 
@@ -285,14 +327,14 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			{
 				++FilteredInfoCount;
 			}
-			if (!Request.bIncludeMessages
-				|| Messages.Num() >= Request.MaxMessages)
+			if (!Request.bIncludeMessages)
 			{
 				continue;
 			}
 			const TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
 			Item->SetStringField(TEXT("severity"), SeverityText(Severity));
 			Item->SetStringField(TEXT("message"), Message->ToText().ToString());
+			UeAgentAuthoringDiagnostics::AppendCompilerMessageSources(*Message, &Blueprint, *Item);
 			Item->SetStringField(
 				TEXT("identifier"), Message->GetIdentifier().ToString());
 			Messages.Add(MakeShared<FJsonValueObject>(Item));
@@ -315,7 +357,6 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			!PackageFilename.IsEmpty()
 				&& IFileManager::Get().FileExists(*PackageFilename));
 		OutReport->SetStringField(TEXT("severity_filter"), CanonicalFilter);
-		OutReport->SetNumberField(TEXT("max_messages"), Request.MaxMessages);
 		OutReport->SetBoolField(
 			TEXT("messages_included"), Request.bIncludeMessages);
 		OutReport->SetNumberField(

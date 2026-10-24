@@ -44,7 +44,7 @@ namespace
 				TEXT("uai_reference"),
 				TEXT("Reference Blueprint Display Name"),
 				TEXT("Controlled reference CRUD asset"),
-				{TEXT("UAI"), TEXT("ReferenceCrud")}),
+				{TEXT("UAI"), TEXT("FixtureBinding")}),
 			FUeAgentCatalogRevision(
 				TEXT("uai-reference-catalog"),
 				TEXT("ticket-json-session"),

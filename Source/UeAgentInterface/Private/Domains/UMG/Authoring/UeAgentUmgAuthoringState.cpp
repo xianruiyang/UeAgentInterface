@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Domains/UMG/Authoring/UeAgentUmgAuthoringState.h"
+#include "Domains/UMG/Authoring/UeAgentUmgAnimationState.h"
 
 #include "Animation/MovieScene2DTransformSection.h"
 #include "Animation/MovieScene2DTransformTrack.h"
@@ -12,6 +13,7 @@
 #include "Components/PanelSlot.h"
 #include "Components/PanelWidget.h"
 #include "Components/Widget.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
 #include "Domains/UMG/Authoring/UeAgentUmgAuthoringDescriptors.h"
 #include "Dom/JsonObject.h"
@@ -30,6 +32,7 @@
 
 namespace UeAgentUmgAuthoring
 {
+	TSet<FName> WidgetStructuralProperties() { return {TEXT("Slot"), TEXT("bIsVariable")}; }
 	namespace
 	{
 		FString GuidText(const FGuid& Guid)
@@ -44,7 +47,7 @@ namespace UeAgentUmgAuthoring
 			const FString& TargetKind,
 			const TMap<FString, FString>& Selectors,
 			UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			return UeAgentAuthoringIdentity::BuildCanonicalIdentity(
 				ModelId, TargetKind, Selectors, OutIdentity, OutError);
@@ -58,7 +61,7 @@ namespace UeAgentUmgAuthoring
 			const UObject* RootObject,
 			const TMap<FString, FString>& Context,
 			TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringState::FReadRequest Request;
 			Request.SemanticId = SemanticId;
@@ -84,17 +87,20 @@ namespace UeAgentUmgAuthoring
 			const TMap<FString, FString>& BaseSelectors,
 			const TSet<FName>& Excluded,
 			TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!Object) return true;
 			UeAgentAuthoringState::FEditablePropertyReadOptions Options;
 			Options.SemanticId = SemanticId;
+			// Designer widget/slot selection uses instance fields, even in an archetype preview tree.
+			// Root class defaults are captured separately by the Blueprint owner.
+			Options.Limits.bUseInstanceEditability = true;
 			Options.ExcludedProperties = Excluded;
 			Options.BuildSnapshotIdentity =
 				[ModelId, TargetKind, BaseSelectors](
 					const FString& PropertyPath,
 					UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
-					FString& IdentityError)
+					UE::UAI::Contract::FDiagnostic& IdentityError)
 			{
 				TMap<FString, FString> Selectors = BaseSelectors;
 				Selectors.Add(TEXT("property_path"), PropertyPath);
@@ -195,192 +201,11 @@ namespace UeAgentUmgAuthoring
 			return State;
 		}
 
-		void BuildFloatKeyMap(const FMovieSceneFloatChannel& Channel, TMap<int32, float>& OutValues)
-		{
-			const TArrayView<const FFrameNumber> Times = Channel.GetData().GetTimes();
-			const TArrayView<const FMovieSceneFloatValue> Values = Channel.GetData().GetValues();
-			for (int32 Index = 0; Index < Times.Num() && Index < Values.Num(); ++Index)
-			{
-				OutValues.Add(Times[Index].Value, Values[Index].Value);
-			}
-		}
-
-		TSharedPtr<FJsonObject> BuildAnimationTrackState(
-			const FFrameRate& TickResolution,
-			const FString& WidgetName,
-			UMovieSceneTrack* Track)
-		{
-			if (UMovieScene2DTransformTrack* TransformTrack = Cast<UMovieScene2DTransformTrack>(Track))
-			{
-				const TArray<UMovieSceneSection*>& Sections = TransformTrack->GetAllSections();
-				UMovieScene2DTransformSection* Section = Sections.Num() > 0
-					? Cast<UMovieScene2DTransformSection>(Sections[0]) : nullptr;
-				if (!Section) return nullptr;
-				TMap<int32, float> Channels[7];
-				BuildFloatKeyMap(Section->Translation[0], Channels[0]);
-				BuildFloatKeyMap(Section->Translation[1], Channels[1]);
-				BuildFloatKeyMap(Section->Scale[0], Channels[2]);
-				BuildFloatKeyMap(Section->Scale[1], Channels[3]);
-				BuildFloatKeyMap(Section->Shear[0], Channels[4]);
-				BuildFloatKeyMap(Section->Shear[1], Channels[5]);
-				BuildFloatKeyMap(Section->Rotation, Channels[6]);
-				TSet<int32> Frames;
-				for (const TMap<int32, float>& Channel : Channels)
-				{
-					for (const TPair<int32, float>& Pair : Channel) Frames.Add(Pair.Key);
-				}
-				TArray<int32> SortedFrames = Frames.Array();
-				SortedFrames.Sort();
-				static const TCHAR* Fields[] = {
-					TEXT("translation_x"), TEXT("translation_y"), TEXT("scale_x"),
-					TEXT("scale_y"), TEXT("shear_x"), TEXT("shear_y"), TEXT("angle")
-				};
-				TArray<TSharedPtr<FJsonValue>> Keys;
-				for (const int32 Frame : SortedFrames)
-				{
-					TSharedRef<FJsonObject> Key = MakeShared<FJsonObject>();
-					Key->SetNumberField(TEXT("frame"), Frame);
-					Key->SetNumberField(
-						TEXT("time_seconds"), TickResolution.AsSeconds(FFrameTime(FFrameNumber(Frame))));
-					for (int32 ChannelIndex = 0; ChannelIndex < UE_ARRAY_COUNT(Fields); ++ChannelIndex)
-					{
-						if (const float* Value = Channels[ChannelIndex].Find(Frame))
-						{
-							Key->SetNumberField(Fields[ChannelIndex], *Value);
-						}
-					}
-					Keys.Add(MakeShared<FJsonValueObject>(Key));
-				}
-				TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
-				State->SetStringField(TEXT("widget_name"), WidgetName);
-				State->SetStringField(TEXT("track_kind"), TEXT("transform"));
-				State->SetArrayField(TEXT("keys"), Keys);
-				return State;
-			}
-
-			if (UMovieSceneFloatTrack* FloatTrack = Cast<UMovieSceneFloatTrack>(Track))
-			{
-				const TArray<UMovieSceneSection*>& Sections = FloatTrack->GetAllSections();
-				UMovieSceneFloatSection* Section = Sections.Num() > 0
-					? Cast<UMovieSceneFloatSection>(Sections[0]) : nullptr;
-				if (!Section) return nullptr;
-				TMap<int32, float> Values;
-				BuildFloatKeyMap(Section->GetChannel(), Values);
-				TArray<int32> Frames;
-				Values.GetKeys(Frames);
-				Frames.Sort();
-				TArray<TSharedPtr<FJsonValue>> Keys;
-				for (const int32 Frame : Frames)
-				{
-					TSharedRef<FJsonObject> Key = MakeShared<FJsonObject>();
-					Key->SetNumberField(TEXT("frame"), Frame);
-					Key->SetNumberField(
-						TEXT("time_seconds"), TickResolution.AsSeconds(FFrameTime(FFrameNumber(Frame))));
-					Key->SetNumberField(TEXT("value"), Values.FindChecked(Frame));
-					Keys.Add(MakeShared<FJsonValueObject>(Key));
-				}
-				const FString PropertyPath = FloatTrack->GetPropertyPath().ToString();
-				TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
-				State->SetStringField(TEXT("widget_name"), WidgetName);
-				State->SetStringField(
-					TEXT("track_kind"),
-					PropertyPath.Equals(TEXT("RenderOpacity"), ESearchCase::IgnoreCase)
-						? TEXT("opacity") : TEXT("float_property"));
-				State->SetStringField(TEXT("property_name"), FloatTrack->GetPropertyName().ToString());
-				State->SetStringField(TEXT("property_path"), PropertyPath);
-				State->SetArrayField(TEXT("keys"), Keys);
-				return State;
-			}
-
-			if (UMovieSceneColorTrack* ColorTrack = Cast<UMovieSceneColorTrack>(Track))
-			{
-				const TArray<UMovieSceneSection*>& Sections = ColorTrack->GetAllSections();
-				UMovieSceneColorSection* Section = Sections.Num() > 0
-					? Cast<UMovieSceneColorSection>(Sections[0]) : nullptr;
-				if (!Section) return nullptr;
-				TMap<int32, float> Channels[4];
-				BuildFloatKeyMap(Section->GetRedChannel(), Channels[0]);
-				BuildFloatKeyMap(Section->GetGreenChannel(), Channels[1]);
-				BuildFloatKeyMap(Section->GetBlueChannel(), Channels[2]);
-				BuildFloatKeyMap(Section->GetAlphaChannel(), Channels[3]);
-				TSet<int32> Frames;
-				for (const TMap<int32, float>& Channel : Channels)
-				{
-					for (const TPair<int32, float>& Pair : Channel) Frames.Add(Pair.Key);
-				}
-				TArray<int32> SortedFrames = Frames.Array();
-				SortedFrames.Sort();
-				static const TCHAR* Fields[] = {
-					TEXT("red"), TEXT("green"), TEXT("blue"), TEXT("alpha")
-				};
-				TArray<TSharedPtr<FJsonValue>> Keys;
-				for (const int32 Frame : SortedFrames)
-				{
-					TSharedRef<FJsonObject> Key = MakeShared<FJsonObject>();
-					Key->SetNumberField(TEXT("frame"), Frame);
-					Key->SetNumberField(
-						TEXT("time_seconds"), TickResolution.AsSeconds(FFrameTime(FFrameNumber(Frame))));
-					for (int32 ChannelIndex = 0; ChannelIndex < UE_ARRAY_COUNT(Fields); ++ChannelIndex)
-					{
-						if (const float* Value = Channels[ChannelIndex].Find(Frame))
-						{
-							Key->SetNumberField(Fields[ChannelIndex], *Value);
-						}
-					}
-					Keys.Add(MakeShared<FJsonValueObject>(Key));
-				}
-				const FString PropertyPath = ColorTrack->GetPropertyPath().ToString();
-				FString Kind = TEXT("color_property");
-				if (PropertyPath.Equals(TEXT("ColorAndOpacity"), ESearchCase::IgnoreCase)) Kind = TEXT("color");
-				else if (PropertyPath.Equals(TEXT("BackgroundColor"), ESearchCase::IgnoreCase)) Kind = TEXT("background_color");
-				TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
-				State->SetStringField(TEXT("widget_name"), WidgetName);
-				State->SetStringField(TEXT("track_kind"), Kind);
-				State->SetStringField(TEXT("property_name"), ColorTrack->GetPropertyName().ToString());
-				State->SetStringField(TEXT("property_path"), PropertyPath);
-				State->SetArrayField(TEXT("keys"), Keys);
-				return State;
-			}
-			return nullptr;
-		}
-
-		TSharedRef<FJsonObject> BuildAnimationState(const UWidgetAnimation& Animation)
-		{
-			TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
-			State->SetStringField(TEXT("name"), Animation.GetName());
-#if WITH_EDITOR
-			State->SetStringField(TEXT("display_label"), Animation.GetDisplayLabel());
-#endif
-			State->SetNumberField(TEXT("start_seconds"), Animation.GetStartTime());
-			State->SetNumberField(TEXT("duration_seconds"), Animation.GetEndTime() - Animation.GetStartTime());
-			TArray<TSharedPtr<FJsonValue>> Tracks;
-			if (UMovieScene* MovieScene = Animation.GetMovieScene())
-			{
-				State->SetNumberField(TEXT("display_rate_num"), MovieScene->GetDisplayRate().Numerator);
-				State->SetNumberField(TEXT("display_rate_den"), MovieScene->GetDisplayRate().Denominator);
-				for (const FWidgetAnimationBinding& Binding : Animation.AnimationBindings)
-				{
-					if (const FMovieSceneBinding* SceneBinding = MovieScene->FindBinding(Binding.AnimationGuid))
-					{
-						for (UMovieSceneTrack* Track : SceneBinding->GetTracks())
-						{
-							if (TSharedPtr<FJsonObject> TrackState = BuildAnimationTrackState(
-								MovieScene->GetTickResolution(), Binding.WidgetName.ToString(), Track))
-							{
-								Tracks.Add(MakeShared<FJsonValueObject>(TrackState));
-							}
-						}
-					}
-				}
-			}
-			State->SetArrayField(TEXT("tracks"), Tracks);
-			return State;
-		}
-
-		TSharedRef<FJsonObject> BuildAssetVerificationState(
+		TSharedPtr<FJsonObject> BuildAssetVerificationState(
 			const UWidgetBlueprint& Blueprint,
-			const FString& CanonicalAssetPath)
+			const FString& CanonicalAssetPath, UE::UAI::Contract::FDiagnostic& OutError)
 		{
+			if (!UeAgentBlueprintAssetLifecycle::ValidateBlueprintStructure(Blueprint, OutError)) return nullptr;
 			TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
 			State->SetStringField(
 				TEXT("asset_path"),
@@ -391,10 +216,10 @@ namespace UeAgentUmgAuthoring
 
 			TMap<const UWidget*, FString> Parents;
 			TMap<const UWidget*, int32> Indices;
-			if (Blueprint.WidgetTree) BuildParentMaps(Blueprint.WidgetTree->RootWidget, FString(), Parents, Indices);
+			BuildParentMaps(Blueprint.WidgetTree->RootWidget, FString(), Parents, Indices);
 			TArray<FString> WidgetKeys;
 			TArray<UWidget*> Widgets;
-			if (Blueprint.WidgetTree) CollectWidgets(Blueprint.WidgetTree->RootWidget, Widgets);
+			CollectWidgets(Blueprint.WidgetTree->RootWidget, Widgets);
 			for (const UWidget* Widget : Widgets)
 			{
 				if (!Widget) continue;
@@ -411,29 +236,35 @@ namespace UeAgentUmgAuthoring
 			for (const FString& Key : WidgetKeys) WidgetValues.Add(MakeShared<FJsonValueString>(Key));
 			State->SetArrayField(TEXT("widgets"), WidgetValues);
 
-			TArray<FString> BindingKeys;
+			TArray<TSharedPtr<FJsonValue>> BindingValues;
 			for (const FDelegateEditorBinding& Binding : Blueprint.Bindings)
 			{
-				BindingKeys.Add(UeAgentAuthoringState::MakeStableCanonicalValueKey(
-					MakeShared<FJsonValueObject>(BuildBindingState(Binding))));
+				BindingValues.Add(MakeShared<FJsonValueObject>(BuildBindingState(Binding)));
 			}
-			BindingKeys.Sort();
-			TArray<TSharedPtr<FJsonValue>> BindingValues;
-			for (const FString& Key : BindingKeys) BindingValues.Add(MakeShared<FJsonValueString>(Key));
+			BindingValues.Sort([](const auto& A, const auto& B) {
+				const FString AWidget = A->AsObject()->GetStringField(TEXT("widget_name"));
+				const FString BWidget = B->AsObject()->GetStringField(TEXT("widget_name"));
+				return AWidget == BWidget
+					? A->AsObject()->GetStringField(TEXT("property_name")) < B->AsObject()->GetStringField(TEXT("property_name"))
+					: AWidget < BWidget;
+			});
 			State->SetArrayField(TEXT("bindings"), BindingValues);
 
-			TArray<FString> AnimationKeys;
+			TArray<TSharedPtr<FJsonValue>> AnimationValues;
 			for (const UWidgetAnimation* Animation : Blueprint.Animations)
 			{
 				if (Animation)
 				{
-					AnimationKeys.Add(UeAgentAuthoringState::MakeStableCanonicalValueKey(
-						MakeShared<FJsonValueObject>(BuildAnimationState(*Animation))));
+					TSharedPtr<FJsonObject> AnimationState;
+					if (!TryReadAnimationState(*Animation, CanonicalAssetPath, AnimationState, OutError)) return nullptr;
+					AnimationValues.Add(MakeShared<FJsonValueObject>(AnimationState));
 				}
 			}
-			AnimationKeys.Sort();
-			TArray<TSharedPtr<FJsonValue>> AnimationValues;
-			for (const FString& Key : AnimationKeys) AnimationValues.Add(MakeShared<FJsonValueString>(Key));
+			// Keep structure for the shared semantic comparator and leaf diagnostics.
+			// A canonical string here turns a section/key difference into one opaque blob.
+			AnimationValues.Sort([](const auto& A, const auto& B) {
+				return A->AsObject()->GetStringField(TEXT("name")) < B->AsObject()->GetStringField(TEXT("name"));
+			});
 			State->SetArrayField(TEXT("animations"), AnimationValues);
 			return State;
 		}
@@ -441,7 +272,7 @@ namespace UeAgentUmgAuthoring
 		UeAgentAuthoringState::EReadOutcome ReadState(
 			const UeAgentAuthoringState::FReadRequest& Request,
 			UeAgentAuthoringState::FStateValue& OutValue,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutValue = UeAgentAuthoringState::FStateValue();
 			OutValue.TargetIdentity = Request.TargetIdentity;
@@ -460,7 +291,14 @@ namespace UeAgentUmgAuthoring
 				const UWidgetBlueprint* Blueprint = Cast<UWidgetBlueprint>(Request.RootObject);
 				if (!Blueprint || !Blueprint->ParentClass)
 				{
-					OutError = TEXT("umg_parent_class_state_invalid");
+OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_parent_class_state_invalid"),
+						!Blueprint ? TEXT("Parent-class capture requires a WidgetBlueprint root object.")
+						: TEXT("The WidgetBlueprint has no parent class to capture."), TEXT("state_capture"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+					OutError.PropertyPath = !Blueprint ? TEXT("/root_object/class") : TEXT("/parent_class");
+					if (!Blueprint && Request.RootObject) OutError.ActualValue = MakeShared<FJsonValueString>(Request.RootObject->GetClass()->GetPathName());
+OutError.ExpectedValue = MakeShared<FJsonValueString>(!Blueprint ? UWidgetBlueprint::StaticClass()->GetPathName() : FString(TEXT("valid parent class")));
 					return UeAgentAuthoringState::EReadOutcome::Failed;
 				}
 				OutValue.Type.Kind = TEXT("string");
@@ -478,10 +316,11 @@ namespace UeAgentUmgAuthoring
 					OutValue.AvailabilityReason = TEXT("target_not_found");
 					return UeAgentAuthoringState::EReadOutcome::Unavailable;
 				}
-				TSharedRef<FJsonObject> State = Request.SemanticId == AssetSemanticId
+				TSharedPtr<FJsonObject> State = Request.SemanticId == AssetSemanticId
 					? BuildAssetVerificationState(
-						*Blueprint, Request.TargetIdentity.GetSelector(TEXT("asset_path")))
+						*Blueprint, Request.TargetIdentity.GetSelector(TEXT("asset_path")), OutError)
 					: MakeShared<FJsonObject>();
+				if (!State) return UeAgentAuthoringState::EReadOutcome::Failed;
 				if (Request.SemanticId == ExportTargetSemanticId)
 				{
 					State->SetStringField(
@@ -526,7 +365,14 @@ namespace UeAgentUmgAuthoring
 				const UWidgetBlueprint* Blueprint = Cast<UWidgetBlueprint>(Request.RootObject);
 				if (!Blueprint)
 				{
-					OutError = TEXT("umg_binding_state_invalid");
+OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_binding_state_invalid"),
+						FString::Printf(TEXT("Binding '%s.%s' requires a WidgetBlueprint root object."),
+							*Request.Context.FindRef(TEXT("widget_name")), *Request.Context.FindRef(TEXT("property_name"))), TEXT("state_capture"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+					OutError.PropertyPath = TEXT("/root_object/class");
+					if (Request.RootObject) OutError.ActualValue = MakeShared<FJsonValueString>(Request.RootObject->GetClass()->GetPathName());
+OutError.ExpectedValue = MakeShared<FJsonValueString>(UWidgetBlueprint::StaticClass()->GetPathName());
 					return UeAgentAuthoringState::EReadOutcome::Failed;
 				}
 				for (const FDelegateEditorBinding& Binding : Blueprint->Bindings)
@@ -552,7 +398,10 @@ namespace UeAgentUmgAuthoring
 					OutValue.AvailabilityReason = TEXT("animation_not_found");
 					return UeAgentAuthoringState::EReadOutcome::Unavailable;
 				}
-				OutValue.Value = MakeShared<FJsonValueObject>(BuildAnimationState(*Animation));
+				TSharedPtr<FJsonObject> State;
+				if (!TryReadAnimationState(*Animation, Request.TargetIdentity.GetSelector(TEXT("asset_path")), State, OutError))
+					return UeAgentAuthoringState::EReadOutcome::Failed;
+				OutValue.Value = MakeShared<FJsonValueObject>(State);
 				return UeAgentAuthoringState::EReadOutcome::Resolved;
 			}
 
@@ -571,7 +420,7 @@ namespace UeAgentUmgAuthoring
 			const UeAgentAuthoringNativeDefaults::FRequest& Request,
 			UeAgentAuthoringNativeDefaults::FScratchScope& Scratch,
 			UeAgentAuthoringNativeDefaults::FProbeValue& OutValue,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutValue = UeAgentAuthoringNativeDefaults::FProbeValue();
 			OutError.Reset();
@@ -581,10 +430,11 @@ namespace UeAgentUmgAuthoring
 			if (Request.TargetIdentity.TargetKind == TEXT("umg_asset"))
 			{
 				UWidgetBlueprint* Seed = CreateFactorySeed(
-					UUserWidget::StaticClass(), Package, NAME_None, RF_Transactional, OutError);
+					UUserWidget::StaticClass(), Package, NAME_None, RF_Transactional | RF_Transient, OutError);
 				if (!Seed) return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
-				OutValue.Value = MakeShared<FJsonValueObject>(BuildAssetVerificationState(
-					*Seed, Request.TargetIdentity.GetSelector(TEXT("asset_path"))));
+				auto State = BuildAssetVerificationState(*Seed, Request.TargetIdentity.GetSelector(TEXT("asset_path")), OutError);
+				if (!State) return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
+				OutValue.Value = MakeShared<FJsonValueObject>(State);
 			}
 			else if (Request.TargetIdentity.TargetKind == TEXT("umg_widget"))
 			{
@@ -597,7 +447,17 @@ namespace UeAgentUmgAuthoring
 					? Seed->WidgetTree->ConstructWidget<UWidget>(WidgetClass, NAME_None) : nullptr;
 				if (!Widget)
 				{
-					OutError = TEXT("umg_widget_native_default_create_failed");
+if (OutError.IsEmpty()) {
+						OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_widget_native_default_create_failed"),
+							!Seed ? TEXT("The native-default probe could not create its WidgetBlueprint seed.")
+							: !Seed->WidgetTree ? TEXT("The native-default seed has no WidgetTree.")
+							: TEXT("The WidgetTree could not construct the requested widget class."), TEXT("state_capture"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+						OutError.PropertyPath = TEXT("/widget_class");
+						OutError.ActualValue = MakeShared<FJsonValueString>(WidgetClass->GetPathName());
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("widget class constructible in a WidgetTree"));
+					}
 					return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
 				}
 				OutValue.Value = MakeShared<FJsonValueObject>(BuildWidgetState(*Widget, FString(), INDEX_NONE));
@@ -620,7 +480,24 @@ namespace UeAgentUmgAuthoring
 				UPanelSlot* Slot = Parent && Child ? Parent->AddChild(Child) : nullptr;
 				if (!Slot)
 				{
-					OutError = TEXT("umg_slot_native_default_create_failed");
+if (OutError.IsEmpty()) {
+						OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_slot_native_default_create_failed"),
+							!Seed ? TEXT("The slot probe could not create its WidgetBlueprint seed.")
+							: !Seed->WidgetTree ? TEXT("The slot probe seed has no WidgetTree.")
+							: !Parent ? TEXT("The WidgetTree could not construct the requested parent panel.")
+							: !Child ? TEXT("The WidgetTree could not construct the requested child widget.")
+							: TEXT("The parent panel did not create a slot for the child widget."), TEXT("state_capture"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+						OutError.PropertyPath = TEXT("/slot");
+						const auto Actual = MakeShared<FJsonObject>();
+						Actual->SetStringField(TEXT("parent_class"), ParentClass->GetPathName());
+						Actual->SetStringField(TEXT("widget_class"), WidgetClass->GetPathName());
+						Actual->SetBoolField(TEXT("parent_created"), Parent != nullptr);
+						Actual->SetBoolField(TEXT("child_created"), Child != nullptr);
+						OutError.ActualValue = MakeShared<FJsonValueObject>(Actual);
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("constructed parent and child with a panel slot"));
+					}
 					return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
 				}
 				OutValue.Value = MakeShared<FJsonValueObject>(BuildSlotState(*Slot));
@@ -639,13 +516,23 @@ namespace UeAgentUmgAuthoring
 		UObject* Outer,
 		FName Name,
 		const EObjectFlags Flags,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		if (!Outer || !ParentClass || !ParentClass->IsChildOf(UUserWidget::StaticClass())
 			|| !FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass))
 		{
-			OutError = TEXT("umg_factory_input_invalid");
+OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_factory_input_invalid"),
+				!Outer ? TEXT("Creating a WidgetBlueprint seed requires an outer object.")
+				: !ParentClass ? TEXT("Creating a WidgetBlueprint seed requires a parent class.")
+				: !ParentClass->IsChildOf(UUserWidget::StaticClass()) ? TEXT("The seed parent class must derive from UserWidget.")
+				: TEXT("Unreal does not allow creating a Blueprint of the requested parent class."), TEXT("state_capture"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = !Outer ? TEXT("/outer") : TEXT("/parent_class");
+if (!Outer) OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			else if (ParentClass) OutError.ActualValue = MakeShared<FJsonValueString>(ParentClass->GetPathName());
+			else OutError.ActualValuePresent = false;
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(!Outer ? TEXT("existing outer object") : TEXT("UserWidget class that permits Blueprint creation"));
 			return nullptr;
 		}
 		if (Name.IsNone())
@@ -662,7 +549,15 @@ namespace UeAgentUmgAuthoring
 			FName(TEXT("UeAgentInterface"))));
 		if (!Result || !Result->WidgetTree)
 		{
-			OutError = TEXT("umg_factory_create_failed");
+OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_factory_create_failed"),
+				!Result ? TEXT("Unreal did not create a WidgetBlueprint seed of the requested parent class.")
+				: TEXT("The created WidgetBlueprint seed has no WidgetTree."), TEXT("state_capture"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.TargetPath = ParentClass->GetPathName();
+			OutError.PropertyPath = !Result ? TEXT("/seed") : TEXT("/seed/widget_tree");
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			OutError.SubjectId = Name.ToString();
 			return nullptr;
 		}
 		Result->SetFlags(Flags);
@@ -673,9 +568,13 @@ namespace UeAgentUmgAuthoring
 		UWidgetBlueprint& Asset,
 		const FString& CanonicalAssetPath,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const bool bForVerification)
 	{
-		if (!UeAgentBlueprintAuthoring::AppendReusableBlueprintExportSnapshotReadRequests(
+		const auto AppendBlueprintRequests = bForVerification
+			? UeAgentBlueprintAuthoring::AppendReusableBlueprintVerificationReadRequests
+			: UeAgentBlueprintAuthoring::AppendReusableBlueprintExportSnapshotReadRequests;
+		if (!AppendBlueprintRequests(
 			Asset, OutRequests, OutError, CanonicalAssetPath))
 		{
 			return false;
@@ -704,7 +603,7 @@ namespace UeAgentUmgAuthoring
 					WidgetPropertyIdentityModelId,
 					TEXT("umg_widget_property"),
 					Selectors,
-					{ TEXT("Slot"), TEXT("bIsVariable") },
+					WidgetStructuralProperties(),
 					OutRequests,
 					OutError))
 			{
@@ -765,13 +664,25 @@ namespace UeAgentUmgAuthoring
 		const FString& CanonicalAssetPath,
 		const bool bExpectedAbsent,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRequests.Reset();
 		OutError.Reset();
 		if (CanonicalAssetPath.IsEmpty() || (!Asset && !bExpectedAbsent))
 		{
-			OutError = TEXT("umg_snapshot_identity_invalid");
+OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("umg_snapshot_identity_invalid"),
+				CanonicalAssetPath.IsEmpty() ? TEXT("Asset snapshot capture requires a canonical asset path.")
+				: TEXT("Snapshot capture expected an existing WidgetBlueprint but no asset was provided."), TEXT("state_capture"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.TargetPath = CanonicalAssetPath;
+			OutError.PropertyPath = CanonicalAssetPath.IsEmpty() ? TEXT("/asset_path") : TEXT("/asset_present");
+			if (CanonicalAssetPath.IsEmpty()) {
+				OutError.ActualValue = MakeShared<FJsonValueString>(CanonicalAssetPath);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty canonical asset path"));
+			} else {
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			}
 			return false;
 		}
 		UeAgentAuthoringState::FReadRequest Request;
@@ -793,13 +704,13 @@ namespace UeAgentUmgAuthoring
 		if (bExpectedAbsent) Request.Context.Add(TEXT("expected_absent"), TEXT("true"));
 		OutRequests.Add(MoveTemp(Request));
 		return !Asset || AppendAssetContentReadRequests(
-			*Asset, CanonicalAssetPath, OutRequests, OutError);
+			*Asset, CanonicalAssetPath, OutRequests, OutError, true);
 	}
 
 	bool BuildAssetExportSnapshotReadRequests(
 		UWidgetBlueprint& Asset,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRequests.Reset();
 		OutError.Reset();
@@ -815,11 +726,14 @@ namespace UeAgentUmgAuthoring
 			return false;
 		}
 
-		return AppendAssetContentReadRequests(
-			Asset, AssetPath, OutRequests, OutError);
+		// Lifecycle snapshots receive root properties from the shared reflection owner.
+		// Ordinary export captures those properties explicitly alongside UMG's own envelope.
+		return UeAgentBlueprintAuthoring::AppendBlueprintRootPropertyReadRequests(
+			Asset, OutRequests, OutError)
+			&& AppendAssetContentReadRequests(Asset, AssetPath, OutRequests, OutError, false);
 	}
 
-	bool RegisterStateAccessor(FString& OutError)
+	bool RegisterStateAccessor(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentAuthoringState::FStateAccessorDescriptor Descriptor;
 		Descriptor.AccessorId = StateAccessorId;
@@ -836,7 +750,7 @@ namespace UeAgentUmgAuthoring
 			Descriptor, ReadState, Result, OutError);
 	}
 
-	bool RegisterNativeDefaultProvider(FString& OutError)
+	bool RegisterNativeDefaultProvider(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentAuthoringNativeDefaults::FProviderDescriptor Descriptor;
 		Descriptor.ProviderId = NativeDefaultProviderId;

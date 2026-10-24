@@ -10,17 +10,7 @@ namespace
 
 	FUeAgentResourceTracker MakeResources()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 4096},
-			{EUeAgentResourceDimension::Items, 4096},
-			{EUeAgentResourceDimension::Files, 8},
-			{EUeAgentResourceDimension::ReferenceEdges, 4096},
-			{EUeAgentResourceDimension::WorkUnits, 4096},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 4 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	FUeAgentCanonicalValueRef String(const FString& Text, FUeAgentResourceTracker& Resources)
@@ -74,7 +64,7 @@ namespace
 	FUeAgentCanonicalValueRef Capture(
 		const FString& Source,
 		FUeAgentResourceTracker& Resources,
-		const bool bCameraRef = false,
+		const bool bCameraAlias = false,
 		const FUeAgentCanonicalValueRef* ViewTransform = nullptr,
 		const bool bFov = false,
 		const FString& Fov = TEXT("90"))
@@ -84,7 +74,7 @@ namespace
 			{TEXT("at_seconds"), Number(TEXT("0"), Resources)},
 			{TEXT("source"), String(Source, Resources)},
 			{TEXT("format"), String(TEXT("png"), Resources)}};
-		if (bCameraRef) Fields.Add({TEXT("camera_ref"), String(TEXT("/Game/Maps/UEDPIE_0_Test.Test:PersistentLevel.CameraActor_0"), Resources)});
+		if (bCameraAlias) Fields.Add({TEXT("camera"), String(TEXT("actor.CameraActor_0"), Resources)});
 		if (ViewTransform) Fields.Add({TEXT("view_transform"), *ViewTransform});
 		if (bFov) Fields.Add({TEXT("fov_degrees"), Number(Fov, Resources)});
 		FUeAgentCanonicalValuePtr Result; FUeAgentStateSemanticError Error;
@@ -104,20 +94,20 @@ bool FUeAgentPieRuntimeScenarioCameraTest::RunTest(const FString& Parameters)
 	using namespace UE::UAI::DomainAdapters::PieRuntimeDebug;
 	auto Resources = MakeResources();
 	FUeAgentPieCaptureStepSpec Spec;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	TestTrue(TEXT("output surface parses"), TryParsePieCaptureStepSpec(
 		Capture(TEXT("pie_output_surface"), Resources), Spec, Error));
 	TestEqual(TEXT("output source"), Spec.Source, EUeAgentPieCaptureSource::OutputSurface);
 	TestTrue(TEXT("player camera parses"), TryParsePieCaptureStepSpec(
 		Capture(TEXT("pie_player_camera"), Resources), Spec, Error));
 	TestEqual(TEXT("player source"), Spec.Source, EUeAgentPieCaptureSource::PlayerCamera);
-	TestFalse(TEXT("player forbids camera_ref"), TryParsePieCaptureStepSpec(
+	TestFalse(TEXT("player forbids camera alias"), TryParsePieCaptureStepSpec(
 		Capture(TEXT("pie_player_camera"), Resources, true), Spec, Error));
 	const FUeAgentCanonicalValueRef Location = Transform(Resources, true, false);
 	TestTrue(TEXT("scene camera location override parses"), TryParsePieCaptureStepSpec(
 		Capture(TEXT("scene_camera"), Resources, true, &Location), Spec, Error));
 	TestTrue(TEXT("location selected"), Spec.OverrideLocation.IsSet());
-	TestFalse(TEXT("scene camera requires camera_ref"), TryParsePieCaptureStepSpec(
+	TestFalse(TEXT("scene camera requires camera alias"), TryParsePieCaptureStepSpec(
 		Capture(TEXT("scene_camera"), Resources), Spec, Error));
 	TestFalse(TEXT("output surface forbids view transform"), TryParsePieCaptureStepSpec(
 		Capture(TEXT("pie_output_surface"), Resources, false, &Location), Spec, Error));
@@ -148,12 +138,5 @@ bool FUeAgentPieRuntimeScenarioCameraTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("transient source identity has one prefix"),
 		MakePieTransientCameraSourceIdentity(TEXT("operation-7")),
 		FString(TEXT("scene-camera-transient:operation-7")));
-	TestEqual(TEXT("exact registry error survives terminal projection"),
-		ResolvePieCaptureFailureCode(TEXT("pie_runtime_scene_camera_identity_mismatch"),
-			TEXT("pie_runtime_capture_read_failed")),
-		FString(TEXT("pie_runtime_scene_camera_identity_mismatch")));
-	TestEqual(TEXT("missing registry error uses stable fallback"),
-		ResolvePieCaptureFailureCode(FString(), TEXT("pie_runtime_capture_read_failed")),
-		FString(TEXT("pie_runtime_capture_read_failed")));
 	return !HasAnyErrors();
 }

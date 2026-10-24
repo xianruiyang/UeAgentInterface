@@ -1,6 +1,10 @@
 #include "CommandHandlers/QueryCalibration/UeAgentQueryCalibrationHandlers.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/Contract/Discovery/UeAgentContractExample.h"
+#include "Core/Contract/UeAgentContractSchema.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -10,63 +14,25 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 	using namespace CommandEdge;
 	using namespace Contract;
 	using namespace Discovery::Command;
-	using namespace DomainAdapters::QueryCalibration;
 
 	namespace
 	{
 		const FString Owner = TEXT("query-calibration-command-owner");
 
-		const TCHAR* CompletenessText(const EQueryCalibrationCompleteness Value)
-		{
-			switch (Value)
-			{
-			case EQueryCalibrationCompleteness::Complete:
-				return TEXT("complete");
-			case EQueryCalibrationCompleteness::Paged:
-				return TEXT("paged");
-			case EQueryCalibrationCompleteness::Partial:
-				return TEXT("partial");
-			case EQueryCalibrationCompleteness::Degraded:
-				return TEXT("degraded");
-			default:
-				return TEXT("degraded");
-			}
-		}
-
-		TArray<TSharedPtr<FJsonValue>> StringValues(const TArray<FString>& Values)
-		{
-			TArray<TSharedPtr<FJsonValue>> Result;
-			for (const FString& Value : Values)
-			{
-				Result.Add(MakeShared<FJsonValueString>(Value));
-			}
-			return Result;
-		}
-
 		bool Canonical(
 			const TSharedPtr<FJsonObject>& Object,
 			FString& OutJson,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			return Json::TryCanonicalize(Object, OutJson, OutError);
 		}
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& Detail)
-		{
-			const TSharedPtr<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString ErrorJson;
-			FString CanonicalError;
-			if (!Canonical(Error, ErrorJson, CanonicalError))
-			{
-				ErrorJson = TEXT("{\"code\":\"query_error_serialization_failed\"}");
-			}
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), ErrorJson);
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request, UE::UAI::Contract::FDiagnostic Diagnostic,
+            const FString& Subject = FString())
+        {
+            if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Subject;
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
+        }
 
 		bool HasQueryAuthority(const FUeAgentCallerContext& Caller)
 		{
@@ -74,97 +40,20 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 				&& Caller.GetAuthorityScopes().Contains(TEXT("uai:query"));
 		}
 
-		bool ReadInteger(
-			const TSharedPtr<FJsonObject>& Params,
-			const FString& Name,
-			const int32 DefaultValue,
-			int32& OutValue)
-		{
-			double Number = 0.0;
-			if (!Params.IsValid() || !Params->HasField(Name))
-			{
-				OutValue = DefaultValue;
-				return true;
-			}
-			if (!Params->TryGetNumberField(Name, Number)
-				|| !FMath::IsFinite(Number)
-				|| Number != FMath::FloorToDouble(Number)
-				|| Number < MIN_int32
-				|| Number > MAX_int32)
-			{
-				return false;
-			}
-			OutValue = static_cast<int32>(Number);
-			return true;
-		}
-
-		TSharedPtr<FJsonObject> FieldDeclarationObject(
-			const FUeAgentCommandFieldDeclaration& Field)
-		{
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("name"), Field.Name);
-			Result->SetStringField(TEXT("wire_type"), Field.WireType);
-			Result->SetBoolField(TEXT("required"), Field.bRequired);
-			Result->SetBoolField(TEXT("nullable"), Field.bNullable);
-			Result->SetStringField(TEXT("description"), Field.Description);
-			if (!Field.SchemaJson.IsEmpty())
-			{
-				TSharedPtr<FJsonObject> Schema;
-				FString Error;
-				if (Json::TryParseObject(
-						Field.SchemaJson,
-						Schema,
-						Error)
-					&& Schema.IsValid())
-				{
-					Result->SetObjectField(TEXT("schema"), Schema);
-				}
-			}
-			return Result;
-		}
-
-		TArray<TSharedPtr<FJsonValue>> FieldDeclarations(
-			const TArray<FUeAgentCommandFieldDeclaration>& Fields)
-		{
-			TArray<TSharedPtr<FJsonValue>> Result;
-			for (const FUeAgentCommandFieldDeclaration& Field : Fields)
-			{
-				Result.Add(MakeShared<FJsonValueObject>(FieldDeclarationObject(Field)));
-			}
-			return Result;
-		}
-
-		TSharedPtr<FJsonObject> PurposeObject(
-			const FUeAgentCommandPurposeDeclaration& Purpose)
-		{
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("summary"), Purpose.Summary);
-			Result->SetStringField(TEXT("target"), Purpose.Target);
-			Result->SetStringField(
-				TEXT("non_purpose"),
-				TEXT("Anything outside the declared target or side-effect guidance."));
-			Result->SetArrayField(TEXT("preconditions"), StringValues(Purpose.Preconditions));
-			Result->SetStringField(TEXT("parameter_guidance"), Purpose.ParameterGuidance);
-			Result->SetStringField(TEXT("result_guidance"), Purpose.ResultGuidance);
-			Result->SetStringField(TEXT("failure_guidance"), Purpose.FailureGuidance);
-			Result->SetStringField(TEXT("side_effect_guidance"), Purpose.SideEffectGuidance);
-			Result->SetStringField(TEXT("minimum_example"), Purpose.MinimumExample);
-			Result->SetArrayField(TEXT("related_flows"), StringValues(Purpose.RelatedFlows));
-			Result->SetArrayField(TEXT("keywords"), StringValues(Purpose.Keywords));
-			Result->SetArrayField(TEXT("synonyms"), StringValues(Purpose.Synonyms));
-			return Result;
-		}
-
 		FString PythonNamedInvocation(const FCommandDetail& Detail)
 		{
-			if (!Detail.VariantId.IsEmpty())
+			const FString& MinimumExample =
+				Detail.Purpose.MinimumExample;
+			if (MinimumExample.StartsWith(TEXT("client."))
+				|| MinimumExample.StartsWith(TEXT("result."))
+				|| MinimumExample.StartsWith(TEXT("workspace.")))
 			{
-				return Detail.Purpose.MinimumExample;
+				return MinimumExample;
 			}
 			if (Detail.PythonNamespace.IsEmpty()
 				|| Detail.PythonFunction.IsEmpty())
 			{
-				return Detail.Purpose.MinimumExample;
+				return MinimumExample;
 			}
 			TArray<FString> Arguments;
 			for (const FUeAgentCommandFieldDeclaration& Field
@@ -172,22 +61,30 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 			{
 				if (Field.bRequired)
 				{
-					Arguments.Add(Field.Name);
-				}
-			}
-			for (const FUeAgentCommandFieldDeclaration& Field
-				: Detail.InputFields)
-			{
-				if (!Field.bRequired)
+				FString Value = Field.Name;
+				if (Field.WireType == TEXT("object") && !Field.SchemaJson.IsEmpty())
 				{
-					Arguments.Add(Field.Name + TEXT("=") + Field.Name);
+					TSharedPtr<const FUeAgentContractSchema> Schema;
+					FUeAgentContractSchemaError SchemaError;
+					FUeAgentContractValue CanonicalExample{FString()};
+					FString Literal;
+					UE::UAI::Contract::FDiagnostic ExampleError;
+					if (FUeAgentContractSchema::TryCompile(
+						FUeAgentContractValue(Field.SchemaJson), Schema, SchemaError)
+						&& TryBuildMinimalContractExample(*Schema, CanonicalExample, Literal, ExampleError))
+					{
+						Value = MoveTemp(Literal);
+					}
+				}
+				Arguments.Add(Field.Name + TEXT("=") + Value);
 				}
 			}
-			return FString::Printf(
+			FString Invocation = FString::Printf(
 				TEXT("client.%s.%s(%s)"),
 				*Detail.PythonNamespace,
 				*Detail.PythonFunction,
 				*FString::Join(Arguments, TEXT(", ")));
+			return Invocation;
 		}
 
 		class FCommandSearchHandler final : public IUeAgentExactCommandHandler
@@ -217,77 +114,37 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 			{
 				if (!HasQueryAuthority(Caller))
 				{
-					return Failure(Request, TEXT("query_authority_required"), TEXT("uai:query is required"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_authority_required"), TEXT("uai:query is required"), TEXT("query")));
 				}
 				if (Cancellation->IsCancelled())
 				{
-					return Failure(Request, TEXT("query_cancelled"), TEXT("request was cancelled"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_cancelled"), TEXT("request was cancelled"), TEXT("query")));
 				}
 				FCommandSearchRequest Search;
 				const TSharedPtr<FJsonObject>& Params = Request.GetParams();
-				if (!Params.IsValid() || !Params->TryGetStringField(TEXT("intent"), Search.Intent)
-					|| !ReadInteger(Params, TEXT("limit"), 3, Search.Limit)
-					|| !ReadInteger(Params, TEXT("cursor"), 0, Search.Cursor))
+				if (!Params.IsValid() || !Params->TryGetStringField(TEXT("intent"), Search.Intent))
 				{
-					return Failure(Request, TEXT("command_search_params_invalid"), TEXT("intent, limit or cursor is invalid"));
+					return Failure(Request, MakeInputDiagnostic(TEXT("command_search_params_invalid"), TEXT("/intent"),
+							TEXT("type"), TEXT("intent must be a string describing the command to find.")));
 				}
-				FString Mode(TEXT("active"));
-				if ((Params->HasField(TEXT("mode"))
-						&& !Params->TryGetStringField(TEXT("mode"), Mode))
-					|| (Mode != TEXT("active")
-						&& Mode != TEXT("compatibility")))
-				{
-					return Failure(
-						Request,
-						TEXT("command_search_mode_invalid"),
-						TEXT("mode must be active or compatibility"));
-				}
-				Search.Mode = Mode == TEXT("compatibility")
-					? ECommandSearchMode::Compatibility
-					: ECommandSearchMode::Active;
 				FCommandSearchPage Page;
 				FCommandDiscoveryError Error;
 				if (!Discovery->Search(Search, Page, Error))
 				{
-					return Failure(Request, Error.Code, Error.Detail);
+					return Failure(Request, Error);
 				}
 				TArray<TSharedPtr<FJsonValue>> Candidates;
 				for (const FCommandCandidate& Candidate : Page.Candidates)
 				{
-					const TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-					Item->SetStringField(TEXT("command_id"), Candidate.CommandId);
-					Item->SetStringField(TEXT("contract_hash"), Candidate.ContractHash);
-					if (!Candidate.VariantId.IsEmpty())
-					{
-						Item->SetStringField(
-							TEXT("variant_id"), Candidate.VariantId);
-					}
-					Item->SetStringField(TEXT("summary"), Candidate.Summary);
-					Item->SetStringField(TEXT("target"), Candidate.Target);
-					Item->SetStringField(TEXT("match_reason"), Candidate.MatchReason);
-					Item->SetStringField(
-						TEXT("lifecycle_status"),
-						Candidate.LifecycleStatus);
-					Item->SetArrayField(
-						TEXT("successor_command_ids"),
-						StringValues(Candidate.SuccessorCommandIds));
-					Item->SetBoolField(
-						TEXT("requires_user_confirmation"),
-						Candidate.bRequiresUserConfirmation);
-					Item->SetBoolField(TEXT("read_only"), !Candidate.bHasSideEffects);
-					Candidates.Add(MakeShared<FJsonValueObject>(Item));
+					Candidates.Add(MakeShared<FJsonValueString>(Candidate.CommandId));
 				}
 				const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-				Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));
-				Payload->SetNumberField(TEXT("total_matches"), Page.TotalMatches);
-				Payload->SetNumberField(TEXT("next_cursor"), Page.NextCursor);
-				Payload->SetStringField(TEXT("completeness"), Page.bComplete ? TEXT("complete") : TEXT("paged"));
-				Payload->SetBoolField(TEXT("read_only"), true);
+				Payload->SetArrayField(TEXT("commands"), MoveTemp(Candidates));
 				FString PayloadJson;
-				FString ErrorText;
+				UE::UAI::Contract::FDiagnostic ErrorText;
 				if (!Canonical(Payload, PayloadJson, ErrorText))
 				{
-					return Failure(Request, TEXT("query_result_serialization_failed"), ErrorText);
+					return Failure(Request, ErrorText);
 				}
 				return FUeAgentCommandResult::Success(Request, MoveTemp(PayloadJson));
 			}
@@ -296,10 +153,10 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 			TSharedRef<const FCommandDiscoveryService> Discovery;
 		};
 
-		class FCommandDetailHandler final : public IUeAgentExactCommandHandler
+		class FCommandUsageHandler final : public IUeAgentExactCommandHandler
 		{
 		public:
-			explicit FCommandDetailHandler(
+			explicit FCommandUsageHandler(
 				TSharedRef<const FCommandDiscoveryService> InDiscovery)
 				: Discovery(MoveTemp(InDiscovery))
 			{
@@ -307,7 +164,7 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 
 			virtual const FString& GetCommandId() const override
 			{
-				static const FString Id = TEXT("query.command.detail");
+				static const FString Id = TEXT("query.command.usage");
 				return Id;
 			}
 
@@ -323,132 +180,83 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 			{
 				if (!HasQueryAuthority(Caller))
 				{
-					return Failure(Request, TEXT("query_authority_required"), TEXT("uai:query is required"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_authority_required"), TEXT("uai:query is required"), TEXT("query")));
 				}
 				if (Cancellation->IsCancelled())
 				{
-					return Failure(Request, TEXT("query_cancelled"), TEXT("request was cancelled"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_cancelled"), TEXT("request was cancelled"), TEXT("query")));
 				}
-				FString CommandId;
-				FString ContractHash;
-				FString VariantId;
 				const TSharedPtr<FJsonObject>& Params = Request.GetParams();
-				if (!Params.IsValid()
-					|| !Params->TryGetStringField(TEXT("command_id"), CommandId)
-					|| !Params->TryGetStringField(TEXT("contract_hash"), ContractHash)
-					|| (Params->HasField(TEXT("variant_id"))
-						&& !Params->TryGetStringField(
-							TEXT("variant_id"), VariantId)))
+				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+				if (!Params.IsValid() || !Params->TryGetArrayField(TEXT("commands"), Values)
+					|| !Values || Values->Num() < 1)
 				{
-					return Failure(Request, TEXT("command_detail_params_invalid"), TEXT("command_id and contract_hash are required; variant_id must be a string when supplied"));
+					auto Diagnostic = MakeInputDiagnostic(TEXT("command_usage_params_invalid"), TEXT("/commands"),
+						Values ? TEXT("minItems") : TEXT("type"), TEXT("commands must be a non-empty array of command names."));
+					Diagnostic.CandidateName = Request.GetCommandId();
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty array of command name strings"));
+					Diagnostic.ActualValue = Params.IsValid() ? Params->TryGetField(TEXT("commands")) : nullptr;
+					Diagnostic.ActualValuePresent = Diagnostic.ActualValue.IsValid();
+					return Failure(Request, MoveTemp(Diagnostic));
 				}
-				FCommandDetail Detail;
-				FCommandDiscoveryError Error;
-				if (!Discovery->GetDetail(
-						CommandId,
-						ContractHash,
-						VariantId,
-						Detail,
-						Error))
+				TArray<FString> Commands;
+				TMap<FString, int32> InputIndices;
+				for (int32 Index = 0; Index < Values->Num(); ++Index)
 				{
-					return Failure(Request, Error.Code, Error.Detail);
+					const TSharedPtr<FJsonValue>& Value = (*Values)[Index];
+					FString Command;
+					if (!Value.IsValid() || !Value->TryGetString(Command) || Command.IsEmpty())
+					{
+						auto Diagnostic = MakeInputDiagnostic(TEXT("command_usage_params_invalid"), FString::Printf(TEXT("/commands/%d"), Index),
+							TEXT("type"), TEXT("Each commands element must be a non-empty command name string."));
+						Diagnostic.CandidateName = Request.GetCommandId();
+						Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty command name string"));
+						Diagnostic.ActualValue = Value;
+						Diagnostic.ActualValuePresent = Value.IsValid();
+						return Failure(Request, MoveTemp(Diagnostic));
+					}
+					if (!InputIndices.Contains(Command))
+					{
+						Commands.Add(Command);
+						InputIndices.Add(Command, Index);
+					}
+				}
+				const TSharedPtr<FJsonObject> Usage = MakeShared<FJsonObject>();
+				for (const FString& Command : Commands)
+				{
+					const auto RejectCommand = [&](FDiagnostic Diagnostic)
+					{
+						if (Diagnostic.CandidateName.IsEmpty()) Diagnostic.CandidateName = Command;
+						if (Diagnostic.Source.JsonPath.IsEmpty())
+							Diagnostic.Source.JsonPath = FString::Printf(TEXT("/commands/%d"), InputIndices.FindChecked(Command));
+						return Failure(Request, MoveTemp(Diagnostic));
+					};
+					FCommandDetail Detail;
+					FCommandDiscoveryError Error;
+					if (!Discovery->GetDetail(Command, FString(), Detail, Error))
+					{
+						return RejectCommand(MoveTemp(Error));
+					}
+					if (Detail.LifecycleStatus != TEXT("active"))
+					{
+						return RejectCommand(FDiagnostic::Failure(TEXT("command_usage_inactive"),
+							TEXT("Usage is available only for active commands."), TEXT("command_usage")));
+					}
+					const FString Invocation = PythonNamedInvocation(Detail);
+					if (Invocation.IsEmpty())
+					{
+						return RejectCommand(FDiagnostic::Failure(TEXT("command_usage_unavailable"),
+							TEXT("The registered command has no generated Python invocation."), TEXT("command_usage")));
+					}
+					Usage->SetStringField(Command, Invocation);
 				}
 				const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-				Payload->SetStringField(TEXT("command_id"), Detail.CommandId);
-				Payload->SetStringField(TEXT("contract_hash"), Detail.ContractHash);
-				Payload->SetStringField(TEXT("python_namespace"), Detail.PythonNamespace);
-				Payload->SetStringField(TEXT("python_function"), Detail.PythonFunction);
-				Payload->SetStringField(TEXT("public_owner"), Detail.PublicOwner);
-				Payload->SetStringField(
-					TEXT("lifecycle_status"), Detail.LifecycleStatus);
-				Payload->SetArrayField(
-					TEXT("successor_command_ids"),
-					StringValues(Detail.SuccessorCommandIds));
-				Payload->SetStringField(
-					TEXT("lifecycle_reason"), Detail.LifecycleReason);
-				Payload->SetBoolField(
-					TEXT("requires_user_confirmation"),
-					Detail.bRequiresUserConfirmation);
-				Payload->SetBoolField(TEXT("read_only"), !Detail.bHasSideEffects);
-				if (!Detail.VariantId.IsEmpty())
-				{
-					Payload->SetStringField(TEXT("variant_id"), Detail.VariantId);
-					TSharedPtr<FJsonObject> RequestSchema;
-					FString SchemaError;
-					if (!Json::TryParseObject(
-							Detail.RequestSchemaJson,
-							RequestSchema,
-							SchemaError)
-						|| !RequestSchema.IsValid())
-					{
-						return Failure(
-							Request,
-							TEXT("command_variant_request_schema_invalid"),
-							SchemaError);
-					}
-					Payload->SetObjectField(
-						TEXT("request_schema"), RequestSchema);
-				}
-				Payload->SetObjectField(TEXT("purpose"), PurposeObject(Detail.Purpose));
-				Payload->SetArrayField(TEXT("input_fields"), FieldDeclarations(Detail.InputFields));
-				Payload->SetArrayField(TEXT("result_fields"), FieldDeclarations(Detail.ResultFields));
-				Payload->SetArrayField(
-					TEXT("tutorial_references"),
-					StringValues(Detail.TutorialReferences));
-				const TSharedPtr<FJsonObject> Invocation = MakeShared<FJsonObject>();
-				if (Detail.LifecycleStatus == TEXT("dormant"))
-				{
-					Invocation->SetStringField(
-						TEXT("python_dormant"),
-						FString::Printf(
-							TEXT("client.execute_dormant(\"%s\", params, contract_hash=\"%s\", user_confirmed=True)"),
-							*Detail.CommandId,
-							*Detail.ContractHash));
-					Invocation->SetStringField(
-						TEXT("cli_dormant"),
-						FString::Printf(
-							TEXT("uai-cli --connection connection.toml exec %s --contract-hash %s --allow-dormant --params-json <json-object>"),
-							*Detail.CommandId,
-							*Detail.ContractHash));
-				}
-				else
-				{
-					Invocation->SetStringField(
-						TEXT("python_named"),
-						PythonNamedInvocation(Detail));
-					Invocation->SetStringField(
-						TEXT("python_generic"),
-						FString::Printf(
-							TEXT("client.execute(\"%s\", params)"),
-							*Detail.CommandId));
-					Invocation->SetStringField(
-						TEXT("python_exact"),
-						FString::Printf(
-							TEXT("client.execute_exact(\"%s\", params, contract_hash=\"%s\")"),
-							*Detail.CommandId,
-							*Detail.ContractHash));
-					Invocation->SetStringField(
-						TEXT("cli_exact"),
-						FString::Printf(
-							TEXT("uai-cli --connection connection.toml exec %s --contract-hash %s --params-json <json-object>"),
-							*Detail.CommandId,
-							*Detail.ContractHash));
-				}
-				Payload->SetObjectField(TEXT("invocation"), Invocation);
-				TArray<TSharedPtr<FJsonValue>> Errors;
-				for (const FUeAgentCommandErrorDeclaration& Declared : Detail.Errors)
-				{
-					const TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-					Item->SetStringField(TEXT("code"), Declared.Code);
-					Item->SetStringField(TEXT("description"), Declared.Description);
-					Errors.Add(MakeShared<FJsonValueObject>(Item));
-				}
-				Payload->SetArrayField(TEXT("errors"), MoveTemp(Errors));
+				Payload->SetObjectField(TEXT("usage"), Usage);
 				FString PayloadJson;
-				FString ErrorText;
+				UE::UAI::Contract::FDiagnostic ErrorText;
 				if (!Canonical(Payload, PayloadJson, ErrorText))
 				{
-					return Failure(Request, TEXT("query_result_serialization_failed"), ErrorText);
+					return Failure(Request, ErrorText);
 				}
 				return FUeAgentCommandResult::Success(Request, MoveTemp(PayloadJson));
 			}
@@ -457,125 +265,18 @@ namespace UE::UAI::CommandHandlers::QueryCalibration
 			TSharedRef<const FCommandDiscoveryService> Discovery;
 		};
 
-		class FCalibrationReadHandler final : public IUeAgentExactCommandHandler
-		{
-		public:
-			explicit FCalibrationReadHandler(
-				TSharedRef<IUeAgentQueryCalibrationSource> InSource)
-				: Source(MoveTemp(InSource))
-			{
-			}
-
-			virtual const FString& GetCommandId() const override
-			{
-				static const FString Id = TEXT("query.calibration.read");
-				return Id;
-			}
-
-			virtual const FString& GetPublicOwner() const override
-			{
-				return Owner;
-			}
-
-			virtual FUeAgentCommandResult Submit(
-				const FUeAgentCommandRequest& Request,
-				const FUeAgentCallerContext& Caller,
-				const TSharedRef<IUeAgentCancellationSignal>& Cancellation) override
-			{
-				if (!HasQueryAuthority(Caller))
-				{
-					return Failure(Request, TEXT("query_authority_required"), TEXT("uai:query is required"));
-				}
-				if (Cancellation->IsCancelled())
-				{
-					return Failure(Request, TEXT("query_cancelled"), TEXT("request was cancelled"));
-				}
-				FQueryCalibrationRequest Query;
-				const TSharedPtr<FJsonObject>& Params = Request.GetParams();
-				if (!Params.IsValid()
-					|| !Params->TryGetStringField(TEXT("category"), Query.Category)
-					|| !ReadInteger(Params, TEXT("limit"), 50, Query.Limit)
-					|| !ReadInteger(Params, TEXT("cursor"), 0, Query.Cursor)
-					|| Query.Limit < 1 || Query.Limit > 100 || Query.Cursor < 0)
-				{
-					return Failure(Request, TEXT("query_params_invalid"), TEXT("category, limit or cursor is invalid"));
-				}
-				Params->TryGetStringField(TEXT("search_text"), Query.SearchText);
-
-				FQueryCalibrationPage SourcePage;
-				FQueryCalibrationError Error;
-				if (!Source->Read(Query, SourcePage, Error))
-				{
-					return Failure(Request, Error.Code, Error.Detail);
-				}
-				if (!SourcePage.bReadOnly)
-				{
-					return Failure(Request, TEXT("query_source_not_read_only"), SourcePage.SourceId);
-				}
-				if (Query.Cursor > SourcePage.Items.Num())
-				{
-					return Failure(Request, TEXT("query_cursor_invalid"), TEXT("cursor exceeds the current result set"));
-				}
-				const int32 End = FMath::Min(Query.Cursor + Query.Limit, SourcePage.Items.Num());
-				TArray<TSharedPtr<FJsonValue>> Items;
-				for (int32 Index = Query.Cursor; Index < End; ++Index)
-				{
-					const FQueryCalibrationItem& SourceItem = SourcePage.Items[Index];
-					const TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-					Item->SetStringField(TEXT("identity"), SourceItem.Identity);
-					Item->SetStringField(TEXT("display_name"), SourceItem.DisplayName);
-					Item->SetStringField(TEXT("kind"), SourceItem.Kind);
-					const TSharedPtr<FJsonObject> Fields = MakeShared<FJsonObject>();
-					for (const TPair<FString, FString>& Pair : SourceItem.Fields)
-					{
-						Fields->SetStringField(Pair.Key, Pair.Value);
-					}
-					Item->SetObjectField(TEXT("fields"), Fields);
-					Items.Add(MakeShared<FJsonValueObject>(Item));
-				}
-				EQueryCalibrationCompleteness Completeness = SourcePage.Completeness;
-				if (Completeness == EQueryCalibrationCompleteness::Complete
-					&& End < SourcePage.Items.Num())
-				{
-					Completeness = EQueryCalibrationCompleteness::Paged;
-				}
-				const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-				Payload->SetStringField(TEXT("category"), SourcePage.Category);
-				Payload->SetStringField(TEXT("source_id"), SourcePage.SourceId);
-				Payload->SetStringField(TEXT("state_layer"), SourcePage.StateLayer);
-				Payload->SetStringField(TEXT("revision"), SourcePage.Revision);
-				Payload->SetBoolField(TEXT("read_only"), true);
-				Payload->SetStringField(TEXT("completeness"), CompletenessText(Completeness));
-				Payload->SetNumberField(TEXT("total_items"), SourcePage.Items.Num());
-				Payload->SetNumberField(TEXT("next_cursor"), End < SourcePage.Items.Num() ? End : -1);
-				Payload->SetArrayField(TEXT("missing_sources"), StringValues(SourcePage.MissingSources));
-				Payload->SetArrayField(TEXT("items"), MoveTemp(Items));
-				FString PayloadJson;
-				FString ErrorText;
-				if (!Canonical(Payload, PayloadJson, ErrorText))
-				{
-					return Failure(Request, TEXT("query_result_serialization_failed"), ErrorText);
-				}
-				return FUeAgentCommandResult::Success(Request, MoveTemp(PayloadJson));
-			}
-
-		private:
-			TSharedRef<IUeAgentQueryCalibrationSource> Source;
-		};
 	}
 
 	bool TryCreateQueryCalibrationHandlers(
 		TSharedRef<const FCommandDiscoveryService> Discovery,
-		TSharedRef<IUeAgentQueryCalibrationSource> Source,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
 		OutHandlers = {
 			MakeShared<FCommandSearchHandler>(Discovery),
-			MakeShared<FCommandDetailHandler>(Discovery),
-			MakeShared<FCalibrationReadHandler>(Source),
+			MakeShared<FCommandUsageHandler>(Discovery),
 		};
 		return true;
 	}

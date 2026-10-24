@@ -2,9 +2,6 @@
   "schema": "uai.domain_adapter.animation_rig_graph.test_fixture.v1",
   "canonical_value_schema": "uai.graph_compound.canonical.v1",
   "adapter_id": "D/AnimationRigGraph",
-  "port_family_count": 12,
-  "capability_count": 26,
-  "legacy_candidate_count": 26,
   "port_families": [
     {"family_id":"asset_lifecycle","required_identity_facets":["asset_kind","asset_path","native_class"],"required_stages":["apply","refresh","independent_capture"],"barrier_kind":"refresh","oracle_kind":"reloaded_ue_asset_identity","availability_policy":"required"},
     {"family_id":"anim_blueprint_graph_mutation","required_identity_facets":["blueprint_owner","graph_guid","node_guid","carrier_and_runtime_type","pin_and_link_identity","layer_identity"],"required_stages":["preflight","apply","compile_settle","independent_capture"],"barrier_kind":"compile","oracle_kind":"native_anim_blueprint_graph_generated_class_and_compile_status","availability_policy":"required"},
@@ -46,34 +43,6 @@
     {"capability_id":"animation.ik_rig.definition.auto_generate","descriptor_id":"uai.operation.animation.ik_rig.definition.auto_generate","port_family_id":"ik_rig_definition_mutation","operation_kind":"operation","effect_class":"write","version":1},
     {"capability_id":"animation.ik_rig.definition.apply","descriptor_id":"uai.operation.animation.ik_rig.definition.apply","port_family_id":"ik_rig_definition_mutation","operation_kind":"operation","effect_class":"write","version":1},
     {"capability_id":"animation.ik_rig.asset.create","descriptor_id":"uai.operation.animation.ik_rig.asset.create","port_family_id":"asset_lifecycle","operation_kind":"operation","effect_class":"write","version":1}
-  ],
-  "legacy_mappings": [
-    {"legacy_id":"anim_blueprint_apply_folder","target_capability_ids":["animation.anim_blueprint.graph.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"anim_blueprint_create","target_capability_ids":["animation.anim_blueprint.asset.create"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"anim_blueprint_create_layer_interface","target_capability_ids":["animation.anim_blueprint.layer_interface.asset.create"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"blendspace_apply_json","target_capability_ids":["animation.blend_space.definition.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"blendspace_create","target_capability_ids":["animation.blend_space.asset.create"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"skeleton_apply_folder","target_capability_ids":["animation.skeleton.definition.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"skeleton_set_compatible_skeletons","target_capability_ids":["animation.skeleton.compatibility.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"skeleton_set_virtual_bone","target_capability_ids":["animation.skeleton.virtual_bone.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"control_rig_apply_folder","target_capability_ids":["animation.control_rig.hierarchy_graph.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"control_rig_create","target_capability_ids":["animation.control_rig.asset.create"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"control_rig_shape_library_apply_json","target_capability_ids":["animation.control_rig.shape_library.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"control_rig_shape_library_create","target_capability_ids":["animation.control_rig.shape_library.asset.create"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"deformer_graph_apply_folder","target_capability_ids":["animation.deformer_graph.topology.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"deformer_graph_create","target_capability_ids":["animation.deformer_graph.asset.create"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"deformer_source_library_apply_json","target_capability_ids":["animation.deformer_source_library.bindings.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"deformer_source_library_create","target_capability_ids":["animation.deformer_source_library.asset.create"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"mesh_deformer_collection_apply_json","target_capability_ids":["animation.mesh_deformer_collection.entries.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"mesh_deformer_collection_create","target_capability_ids":["animation.mesh_deformer_collection.asset.create"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"ml_deformer_apply_json","target_capability_ids":["animation.ml_deformer.configuration.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"ml_deformer_create","target_capability_ids":["animation.ml_deformer.asset.create"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"ik_retargeter_apply_folder","target_capability_ids":["animation.ik_retargeter.definition.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"ik_retargeter_create","target_capability_ids":["animation.ik_retargeter.asset.create"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"ik_retargeter_set_settings","target_capability_ids":["animation.ik_retargeter.settings.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"ik_rig_apply_auto_retarget_definition","target_capability_ids":["animation.ik_rig.definition.auto_generate"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"ik_rig_apply_folder","target_capability_ids":["animation.ik_rig.definition.apply"],"legacy_asset_disposition":"scenario_only"},
-    {"legacy_id":"ik_rig_create","target_capability_ids":["animation.ik_rig.asset.create"],"legacy_asset_disposition":"scenario_only"}
   ],
   "identity_cases": [
     {
@@ -143,7 +112,6 @@
       ]
     }
   ],
-  "deep_hierarchy_case":{"depth":512,"expected_result":"success","nesting_policy":"no_fixed_depth_limit_shared_resource_budget"},
   "negative_cases":[
     {"case_id":"duplicate_item_identity","error_code":"animation_rig_graph_item_identity_duplicate","must_return_false":true,"allow_empty_success":false},
     {"case_id":"identity_source_missing","error_code":"animation_rig_graph_identity_source_missing","must_return_false":true,"allow_empty_success":false},
@@ -162,6 +130,6 @@
     {"case_id":"spatial_value_without_c4_evidence","error_code":"animation_rig_graph_external_value_evidence_missing","must_return_false":true,"allow_empty_success":false}
   ],
   "lifecycle_evidence":{"before_revision":"revision:80","apply_evidence":"fixture:gc-008:apply:81","barrier_evidence":"fixture:gc-008:barrier:81","settle_evidence":"fixture:gc-008:settle:81","readback_revision":"revision:81","readback_evidence":"fixture:gc-008:independent-readback:81","required_distinct_evidence":["apply_evidence","barrier_evidence","settle_evidence","readback_evidence"]},
-  "forbidden_owners":["public_command_dispatch","prefix_dispatch","json_or_hjson_parser","hjson_workspace_or_layout","domain_descriptor_registry","domain_state_owner","resource_budget_policy","transaction_or_save","verification_or_outcome","response_projection","asset_selection_or_lifecycle","space_or_time_conversion","training_or_session_owner"],
-  "forbidden_oracles":["legacy_folder_or_json_apply_provider","legacy_command_success","request_or_export_echo","arbitrary_reflection_property_bag","synthetic_display_name_or_array_index_identity","mutation_cache","mutation_or_compile_receipt","self_generated_golden"]
+  "forbidden_owners":["public_command_dispatch","prefix_dispatch","json_or_hjson_parser","hjson_workspace_or_layout","domain_descriptor_registry","domain_state_owner","transaction_or_save","verification_or_outcome","response_projection","asset_selection_or_lifecycle","space_or_time_conversion","training_or_session_owner"],
+  "forbidden_oracles":["request_or_export_echo","arbitrary_reflection_property_bag","synthetic_display_name_or_array_index_identity","mutation_cache","mutation_or_compile_receipt","self_generated_golden"]
 }

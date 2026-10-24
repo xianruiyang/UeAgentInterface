@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "DomainAdapters/TimelineAnimation/UeAgentTimelineAnimationRequests.h"
 #include "Templates/SharedPointer.h"
@@ -7,8 +9,10 @@
 
 class UControlRig;
 class ULevelSequence;
+class FJsonObject;
 class UPoseableMeshComponent;
 class USkeletalMeshComponent;
+namespace UE::UAI::Authoring::Timeline { struct FMovieSceneCreationState; }
 
 namespace UE::UAI::DomainAdapters::TimelineAnimation
 {
@@ -23,6 +27,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		FString EvaluationRateDenominator;
 
 		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 	};
 
 	struct UEAGENTINTERFACE_API FUeAgentTimelineAnimationRigCandidateBinding
@@ -38,6 +43,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		FString AuthoredRateDenominator;
 
 		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentTimelineAnimationRevisionSource
@@ -87,5 +93,39 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 	UEAGENTINTERFACE_API bool TryCreateTimelineAnimationNativePorts(
 		const FUeAgentTimelineAnimationNativeDependencies& Dependencies,
 		FUeAgentTimelineAnimationNativePorts& OutPorts,
+		FUeAgentTimelineAnimationExecutionError& OutError);
+
+	UEAGENTINTERFACE_API bool TryApplyLevelSequenceStructure(
+		ULevelSequence& Sequence,
+		const FTimelineAnimationStructure& Structure,
+		const FString& AuthoredObjectPath,
+		FUeAgentTimelineAnimationExecutionError& OutError);
+
+	UEAGENTINTERFACE_API bool TryReadLevelSequenceStructure(
+		const ULevelSequence& Sequence,
+		const FString& AuthoredObjectPath,
+		TSharedPtr<FJsonObject>& OutStructure,
+		FUeAgentTimelineAnimationExecutionError& OutError);
+	UEAGENTINTERFACE_API bool TryUpdateLevelSequenceValues(
+		ULevelSequence& Sequence,
+		const FTimelineAnimationStructure& Structure,
+		const FString& AuthoredObjectPath,
+		FUeAgentTimelineAnimationExecutionError& OutError,
+		Authoring::Timeline::FMovieSceneCreationState* CreationState = nullptr);
+	UEAGENTINTERFACE_API bool TryQueryLevelSequenceTrackCandidates(
+		const FString& Target, const FString& Query, const FString& ObjectRef,
+		const FString& PropertyPath, FString& OutPayload, UE::UAI::Contract::FDiagnostic& OutError);
+
+	// Read-only resolver summary, independent of the editable binding kind.
+	UEAGENTINTERFACE_API TSharedRef<FJsonObject> ReadLevelSequenceBindingResolverSummary(
+		const ULevelSequence& Sequence);
+
+	// Apply-only verification of metadata outside the ordinary authoring structure.
+	UEAGENTINTERFACE_API bool TryReadLevelSequenceBindingMetadataState(
+		const ULevelSequence& Sequence, TSharedPtr<FJsonObject>& OutState,
+		FUeAgentTimelineAnimationExecutionError& OutError);
+	UEAGENTINTERFACE_API bool TryReadLevelSequencePersistentState(
+		const ULevelSequence& Sequence,
+		TSharedPtr<FJsonObject>& OutState,
 		FUeAgentTimelineAnimationExecutionError& OutError);
 }

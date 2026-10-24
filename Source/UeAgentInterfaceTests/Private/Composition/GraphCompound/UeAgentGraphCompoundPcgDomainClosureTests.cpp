@@ -352,13 +352,10 @@ bool FUeAgentGraphCompoundPcgDomainClosureTest::RunTest(
 		AddError(RegistryError);
 		return false;
 	}
-	TestEqual(TEXT("PCG/AI domain still owns exactly 17 routes"),
-		Registry->GetDescriptors().Num(), 17);
 
 	FGraphCompoundRuntimeConfig RuntimeConfig;
-	RuntimeConfig.MaxFrameBytes = 1024 * 1024;
+
 	FGraphCompoundPcgAiProductionConfig ProductionConfig;
-	ProductionConfig.OperationTimeoutSeconds = 30.0;
 	TSharedPtr<FGraphCompoundRuntime> Runtime;
 	FGraphCompoundRuntimeError RuntimeError;
 	if (!TestTrue(TEXT("production PCG/AI runtime builds"),
@@ -382,7 +379,7 @@ bool FUeAgentGraphCompoundPcgDomainClosureTest::RunTest(
 	}
 
 	const FString ApplyPayload = FString::Printf(
-		TEXT("{\"content_revision\":\"revision:w01:apply\",\"data_type_ref\":\"/Script/PCG.PCGPointData\",\"source_ref\":\"%s\",\"target_ref\":\"%s\",\"value\":{\"point_count\":3}}"),
+		TEXT("{\"data_type_ref\":\"/Script/PCG.PCGPointData\",\"source_ref\":\"%s\",\"target_ref\":\"%s\",\"value\":{\"point_count\":3}}"),
 		*SourceWorld.ObjectPath(), *ApplyAsset.ObjectPath());
 	const FString InvalidSchemaPayload = ApplyPayload.LeftChop(1)
 		+ TEXT(",\"unexpected\":true}");
@@ -395,6 +392,15 @@ bool FUeAgentGraphCompoundPcgDomainClosureTest::RunTest(
 		TryGetOperationError(InvalidSchema, Code, Detail));
 	TestEqual(TEXT("data apply unknown field fails at public schema"),
 		Code, FString(TEXT("contract_input_schema_mismatch")));
+	const FString LegacyRevisionPayload = ApplyPayload.LeftChop(1)
+		+ TEXT(",\"content_revision\":\"legacy\"}");
+	const FUeAgentOperationResult LegacyRevision = Submit(
+		*Runtime, TEXT("pcg.data_asset.apply"),
+		TEXT("apply-legacy-revision"), LegacyRevisionPayload);
+	TestTrue(TEXT("data apply legacy revision returns operation_error"),
+		TryGetOperationError(LegacyRevision, Code, Detail));
+	TestEqual(TEXT("data apply legacy revision fails at public schema"),
+		Code, FString(TEXT("contract_input_schema_mismatch")));
 
 	const FUeAgentOperationResult ApplyResult = Submit(
 		*Runtime, TEXT("pcg.data_asset.apply"),
@@ -404,7 +410,7 @@ bool FUeAgentGraphCompoundPcgDomainClosureTest::RunTest(
 		TestPointDataReadback(
 			*this, ApplyAsset, SourceWorld.ObjectPath(), 3);
 		const FString UnsupportedPayload = FString::Printf(
-			TEXT("{\"content_revision\":\"revision:w01:unsupported\",\"data_type_ref\":\"/Script/PCG.PCGParamData\",\"source_ref\":\"%s\",\"target_ref\":\"%s\",\"value\":{\"point_count\":9}}"),
+			TEXT("{\"data_type_ref\":\"/Script/PCG.PCGParamData\",\"source_ref\":\"%s\",\"target_ref\":\"%s\",\"value\":{\"point_count\":9}}"),
 			*SourceWorld.ObjectPath(), *ApplyAsset.ObjectPath());
 		const FUeAgentOperationResult Unsupported = Submit(
 			*Runtime, TEXT("pcg.data_asset.apply"),

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringExport/UeAgentExportContract.h"
 
@@ -10,8 +12,8 @@ namespace UeAgentPCGAuthoring
 	inline constexpr const TCHAR* ExportContractId = TEXT("uai.export.pcg.graph");
 	inline constexpr const TCHAR* ProjectionId = TEXT("uai.export.pcg.graph.structure");
 
-	UEAGENTINTERFACE_API bool RegisterExportAuthoring(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterExportAuthoring(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool GetExportContract(
 		UeAgentExportContract::FContract& OutContract,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

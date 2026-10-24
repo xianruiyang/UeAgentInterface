@@ -1,17 +1,26 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceIO.h"
+#include "Core/HjsonWorkspace/UeAgentGraphReferenceBinding.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Templates/SharedPointer.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
+
+class FJsonValue;
+namespace UeAgentNativeNormalizationIntent { class FScope; }
 
 namespace UE::UAI::Composition::HjsonImport
 {
 	using UE::UAI::ContextResource::FUeAgentResourceTracker;
 	using UE::UAI::Contract::FUeAgentCallerContext;
 	using UE::UAI::HjsonWorkspace::FAuthoringModelRef;
+	using UE::UAI::HjsonWorkspace::FAuthoringModelPtr;
 	using UE::UAI::HjsonWorkspace::FResolvedSemanticWorkspaceRef;
 	using UE::UAI::HjsonWorkspace::FStructuralEdit;
 	using UE::UAI::PlanningPreflight::FChangeSetDraft;
@@ -19,18 +28,46 @@ namespace UE::UAI::Composition::HjsonImport
 	using UE::UAI::PlanningPreflight::FPlanningResult;
 	using UE::UAI::StateSemantic::FUeAgentCanonicalSnapshotRef;
 
-	struct UEAGENTINTERFACE_API FSemanticWorkspaceImportError
-	{
-		FString Code;
-		FString Detail;
+	using FSemanticWorkspaceImportError = UE::UAI::Contract::FDiagnostic;
 
-		bool IsPresent() const;
-		void Reset();
-	};
+	/** Restore compact edits using the same typed overlay as native property import. */
+	UEAGENTINTERFACE_API bool TryRestoreSemanticPropertyValue(
+		const HjsonWorkspace::FSemanticUnit& Unit, const HjsonWorkspace::FAuthoringModel& Model,
+		const StateSemantic::FUeAgentCanonicalValueRef& Captured,
+		const StateSemantic::FUeAgentCanonicalValueRef& Proposed, FUeAgentResourceTracker& Resources,
+		StateSemantic::FUeAgentCanonicalValuePtr& OutValue, StateSemantic::FUeAgentStateSemanticError& OutError);
 
 	class FPreparedAuthoringImport;
 	using FPreparedAuthoringImportPtr =
 		TSharedPtr<const FPreparedAuthoringImport>;
+
+	struct UEAGENTINTERFACE_API FSemanticWorkspaceChangeProjection final
+	{
+		bool HasChanges() const;
+		int32 GetPropertyChangeCount() const;
+
+		TArray<TSharedPtr<FJsonValue>> RootObjectProperties;
+		TMap<FString, TSharedPtr<FJsonValue>> PropertyChangesByUnitId;
+		TArray<FString> ChangedUnitIds;
+		TArray<FStructuralEdit> StructuralEdits;
+		TArray<HjsonWorkspace::FDocumentValueSourceBinding> DocumentSourceBindings;
+	};
+
+	/** Carry the exact parsed property source through the generated apply descriptor. */
+	UEAGENTINTERFACE_API void AttachSemanticPropertySource(
+		const FResolvedSemanticWorkspaceRef& Workspace, const FString& TargetKey, FJsonObject& Descriptor,
+		const FString& TargetPath = FString());
+
+	/** Verify the original, pre-domain field delta against a fresh native capture.
+	 * Unedited native side effects are context, not an expected before-state replay. */
+	UEAGENTINTERFACE_API bool TryVerifySemanticWorkspaceValueIntent(
+		const FPreparedAuthoringImport& Prepared,
+		const UeAgentAuthoringState::FStateSnapshot& NativeAfter,
+		HjsonWorkspace::FWorkspaceError& OutError,
+		const TArray<HjsonWorkspace::FDocumentValueSourceBinding>& DocumentSources = {},
+		const UeAgentNativeNormalizationIntent::FScope* NativeNormalization = nullptr,
+		const TArray<UeAgentAuthoringState::FReadRequest>* CurrentReadRequests = nullptr,
+		const TArray<HjsonWorkspace::FGraphNodeReferenceBinding>& GraphReferenceBindings = {});
 
 	class UEAGENTINTERFACE_API FPreparedAuthoringImport final
 	{
@@ -39,21 +76,35 @@ namespace UE::UAI::Composition::HjsonImport
 			FResolvedSemanticWorkspaceRef InWorkspace,
 			FChangeSetDraft InChangeSetDraft,
 			FPlanningRequest InPlanningRequest,
-			FPlanningResult InPreflightResult);
+			FPlanningResult InPreflightResult,
+			FAuthoringModelPtr InInputBaseline = nullptr,
+			TMap<FString, StateSemantic::FUeAgentCanonicalValueRef> InPropertyBaselines = {});
 
 		const FResolvedSemanticWorkspaceRef& GetWorkspace() const;
 		const FChangeSetDraft& GetChangeSetDraft() const;
+		const FAuthoringModelPtr& GetInputBaseline() const { return InputBaseline; }
+		const StateSemantic::FUeAgentCanonicalValueRef* FindPropertyBaseline(const FString& Key) const { return PropertyBaselines.Find(Key); }
+		const PlanningPreflight::FChangeDraft* FindChangeForTargetIdentity(const FString& Identity) const;
 		const FPlanningRequest& GetPlanningRequest() const;
 		const FPlanningResult& GetPreflightResult() const;
 		const TArray<FStructuralEdit>& GetStructuralEdits() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
+		// Select a consumer's changes after the complete request has been validated.
+		// Workspace and preflight evidence continue to describe the complete request.
+		FPreparedAuthoringImportPtr SelectChanges(
+			TFunctionRef<bool(const PlanningPreflight::FChangeDraft&)> Include) const;
 
 	private:
 		FResolvedSemanticWorkspaceRef Workspace;
+		// Frozen input bindings identify effective edits. Final native readback never recomposes an export.
+		FAuthoringModelPtr InputBaseline;
+		TMap<FString, StateSemantic::FUeAgentCanonicalValueRef> PropertyBaselines;
 		FChangeSetDraft ChangeSetDraft;
+		TMap<FString, int32> FirstChangeByTargetIdentity;
 		FPlanningRequest PlanningRequest;
 		FPlanningResult PreflightResult;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	UEAGENTINTERFACE_API bool TryBuildSemanticChangeSetDraft(
@@ -64,6 +115,58 @@ namespace UE::UAI::Composition::HjsonImport
 		FString IdempotencyKey,
 		FUeAgentResourceTracker& Resources,
 		TOptional<FChangeSetDraft>& OutDraft,
+		FSemanticWorkspaceImportError& OutError,
+		const FAuthoringModelPtr& CurrentModel = nullptr,
+		TArray<HjsonWorkspace::FDocumentValueSourceBinding>* OutDocumentSourceBindings = nullptr);
+
+	UEAGENTINTERFACE_API bool TryProjectRootObjectPropertyChanges(
+		const FPreparedAuthoringImport& Prepared,
+		const FString& ExpectedRootOwnerPath,
+		TArray<TSharedPtr<FJsonValue>>& OutPropertyChanges,
+		FSemanticWorkspaceImportError& OutError);
+
+	/** Pure type/value projection; the caller supplies a snapshot scoped to the selected native owner. */
+	UEAGENTINTERFACE_API bool TryProjectReflectedPropertyValues(
+		const UeAgentAuthoringState::FStateSnapshot& NativeDefaults,
+		const HjsonWorkspace::FHjsonNode& Categories,
+		FUeAgentResourceTracker& Resources,
+		TArray<TSharedPtr<FJsonValue>>& OutPropertyChanges,
+		FSemanticWorkspaceImportError& OutError);
+
+	/** Explicit categories against an unpublished native default template, not an existing target before-state. */
+	UEAGENTINTERFACE_API bool TryProjectInitialRootObjectProperties(
+		const UeAgentAuthoringState::FStateSnapshot& NativeDefaults,
+		const FString& ExpectedRootOwnerPath,
+		const HjsonWorkspace::FHjsonNode& Categories,
+		FUeAgentResourceTracker& Resources,
+		TArray<TSharedPtr<FJsonValue>>& OutPropertyChanges,
+		FSemanticWorkspaceImportError& OutError);
+
+	UEAGENTINTERFACE_API bool TryPrepareRootObjectPropertyChanges(
+		const FResolvedSemanticWorkspaceRef& Workspace,
+		const FAuthoringModelRef& CurrentModel,
+		const FUeAgentCanonicalSnapshotRef& CurrentSnapshot,
+		Contract::FUeAgentDescriptorIdentity DescriptorIdentity,
+		FString RequestId,
+		FString IdempotencyKey,
+		const FUeAgentCallerContext& CallerContext,
+		const FString& ExpectedRootOwnerPath,
+		FUeAgentResourceTracker& Resources,
+		TArray<TSharedPtr<FJsonValue>>& OutPropertyChanges,
+		FSemanticWorkspaceImportError& OutError);
+
+	UEAGENTINTERFACE_API bool TryPrepareSemanticWorkspaceChanges(
+		const FResolvedSemanticWorkspaceRef& Workspace,
+		const FAuthoringModelRef& CurrentModel,
+		const FUeAgentCanonicalSnapshotRef& CurrentSnapshot,
+		Contract::FUeAgentDescriptorIdentity DescriptorIdentity,
+		FString RequestId,
+		FString IdempotencyKey,
+		const FUeAgentCallerContext& CallerContext,
+		const FString& ExpectedRootOwnerPath,
+		FUeAgentResourceTracker& Resources,
+		FSemanticWorkspaceChangeProjection& OutProjection,
+		FPreparedAuthoringImportPtr& OutPrepared,
 		FSemanticWorkspaceImportError& OutError);
 
 	UEAGENTINTERFACE_API bool TryPrepareResolvedAuthoringImport(

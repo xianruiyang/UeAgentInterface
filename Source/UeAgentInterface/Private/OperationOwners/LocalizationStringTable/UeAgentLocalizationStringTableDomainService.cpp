@@ -31,8 +31,7 @@ namespace UE::UAI::OperationOwners::LocalizationStringTable
 				{
 					return false;
 				}
-				return Request.GetCommandId() != TEXT("content_graph.import_workspace")
-					|| Request.GetSchemaId() == (bLocalization ? LocalizationSchema : StringTableSchema);
+				return MatchesDomainImportSchema(Request, bLocalization ? LocalizationSchema : StringTableSchema);
 			}
 
 			bool TryResolveInitializationContract(
@@ -63,7 +62,12 @@ namespace UE::UAI::OperationOwners::LocalizationStringTable
 						&& InitializationContractId == StringTableContract);
 				if (!bExpected)
 				{
-					OutError.Set(TEXT("localization_hjson_contract_not_executable"), InitializationContractId);
+					auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("localization_hjson_contract_not_executable"),
+						TEXT("The initialization contract does not support the requested root type in this domain."), TEXT("domain_execute"));
+					Detail.TargetPath = Request.GetTargetIdentity();
+					Detail.SourceKind = TEXT("native_result");
+					Detail.InternalContext = InitializationContractId;
+					OutError.SetFailure(MoveTemp(Detail));
 					return false;
 				}
 				return CommandHandlers::LocalizationStringTable::TryHandleDomainRequest(

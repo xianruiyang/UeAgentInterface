@@ -24,41 +24,62 @@ namespace UE::UAI::ContextResource
 
 		bool Fail(
 			const TCHAR* Code,
+			const FString& Reason,
 			FUeAgentExecutionContextError& OutError,
+			const FString& Property,
 			const EUeAgentExecutionContextFacet Facet =
 				EUeAgentExecutionContextFacet::Invalid)
 		{
-			OutError.Code = Code;
+			OutError = FDiagnostic::Failure(Code, Reason, TEXT("context"));
+			OutError.Schema = TEXT("uai.runtime.diagnostic/1");
+			OutError.PropertyPath = Property;
 			OutError.Facet = Facet;
 			return false;
 		}
 
-		bool Fail(
-			const TCHAR* Code,
-			FUeAgentOperationContextError& OutError)
-		{
-			OutError.Code = Code;
-			return false;
-		}
+		
 
 		void Normalize(FString& Value)
 		{
 			Value.TrimStartAndEndInline();
 		}
 
-		bool NormalizeIdentities(TArray<FString>& Values)
+		bool NormalizeIdentities(TArray<FString>& Values, const FString& Property,
+			FUeAgentExecutionContextError& OutError)
 		{
 			TSet<FString> Seen;
-			for (FString& Value : Values)
+			for (int32 Index = 0; Index < Values.Num(); ++Index)
 			{
+				FString& Value = Values[Index];
 				Normalize(Value);
 				if (Value.IsEmpty() || Seen.Contains(Value))
 				{
-					return false;
+					return Fail(TEXT("execution_context_identity_invalid"),
+						Value.IsEmpty() ? TEXT("The execution context contains an empty identity.")
+							: TEXT("The execution context contains a duplicate identity."),
+						OutError, FString::Printf(TEXT("%s[%d]"), *Property, Index));
 				}
 				Seen.Add(Value);
 			}
 			return true;
+		}
+
+		const TCHAR* FacetProperty(const EUeAgentExecutionContextFacet Facet)
+		{
+			switch (Facet)
+			{
+			case EUeAgentExecutionContextFacet::World: return TEXT("world");
+			case EUeAgentExecutionContextFacet::Level: return TEXT("level");
+			case EUeAgentExecutionContextFacet::DataLayer: return TEXT("data_layers");
+			case EUeAgentExecutionContextFacet::WorldPartition: return TEXT("world_partition");
+			case EUeAgentExecutionContextFacet::PieInstance: return TEXT("pie_instance_id");
+			case EUeAgentExecutionContextFacet::NetMode: return TEXT("net_mode");
+			case EUeAgentExecutionContextFacet::NetRole: return TEXT("net_role");
+			case EUeAgentExecutionContextFacet::AssetEditor: return TEXT("asset_editor");
+			case EUeAgentExecutionContextFacet::Viewport: return TEXT("viewport");
+			case EUeAgentExecutionContextFacet::Selection: return TEXT("selection");
+			default: return TEXT("required_facets");
+			}
 		}
 
 		bool HasFacet(
@@ -119,26 +140,29 @@ namespace UE::UAI::ContextResource
 			{
 				return Fail(
 					TEXT("operation_context_request_invalid"),
-					OutError);
+					TEXT("The operation context requires a valid descriptor, request kind and request ID; operations also require an idempotency key."),
+					OutError, !DescriptorIdentity.IsValid() ? TEXT("descriptor") :
+						RequestKind == EUeAgentRequestKind::Invalid ? TEXT("request_kind") :
+						RequestId.IsEmpty() ? TEXT("request_id") : TEXT("idempotency_key"));
 			}
 			if (!CallerContext.IsValid())
 			{
 				return Fail(
 					TEXT("operation_context_caller_invalid"),
-					OutError);
+					TEXT("The caller context is not valid for operation execution."), OutError, TEXT("caller"));
 			}
 			if (!(ExecutionContext->GetDescriptorIdentity()
 					== DescriptorIdentity))
 			{
 				return Fail(
 					TEXT("operation_context_descriptor_mismatch"),
-					OutError);
+					TEXT("The execution context belongs to a different descriptor than the request."), OutError, TEXT("descriptor"));
 			}
 			if (ExecutionContext->GetRequestKind() != RequestKind)
 			{
 				return Fail(
 					TEXT("operation_context_request_kind_mismatch"),
-					OutError);
+					TEXT("The execution context request kind does not match the request."), OutError, TEXT("request_kind"));
 			}
 
 			OutContext = MakeShareable(new FUeAgentOperationContext(
@@ -170,7 +194,9 @@ namespace UE::UAI::ContextResource
 		{
 			return Fail(
 				TEXT("execution_context_contract_invalid"),
-				OutError);
+				TEXT("The execution context requires a valid descriptor, request kind and context policy."), OutError,
+				!DescriptorIdentity.IsValid() ? TEXT("descriptor") :
+					RequestKind == EUeAgentRequestKind::Invalid ? TEXT("request_kind") : TEXT("context_policy"));
 		}
 
 		FUeAgentExecutionContextInput Frozen = Input;
@@ -184,12 +210,10 @@ namespace UE::UAI::ContextResource
 		Normalize(Frozen.AssetEditorIdentity);
 		Normalize(Frozen.ViewportIdentity);
 		Normalize(Frozen.ContextRevision);
-		if (!NormalizeIdentities(Frozen.DataLayerIdentities)
-			|| !NormalizeIdentities(Frozen.SelectionIdentities))
+		if (!NormalizeIdentities(Frozen.DataLayerIdentities, TEXT("data_layers"), OutError)
+			|| !NormalizeIdentities(Frozen.SelectionIdentities, TEXT("selection"), OutError))
 		{
-			return Fail(
-				TEXT("execution_context_identity_invalid"),
-				OutError);
+			return false;
 		}
 		if (Frozen.ProjectInstanceId.IsEmpty()
 			|| Frozen.EditorInstanceId.IsEmpty()
@@ -198,13 +222,16 @@ namespace UE::UAI::ContextResource
 		{
 			return Fail(
 				TEXT("execution_context_input_invalid"),
-				OutError);
+				TEXT("The execution context is missing a required identity or state plane."), OutError,
+				Frozen.ProjectInstanceId.IsEmpty() ? TEXT("project_instance_id") :
+					Frozen.EditorInstanceId.IsEmpty() ? TEXT("editor_instance_id") :
+					Frozen.ContextRevision.IsEmpty() ? TEXT("context_revision") : TEXT("state_plane"));
 		}
 		if (!Policy.GetAllowedStatePlanes().Contains(Frozen.StatePlane))
 		{
 			return Fail(
 				TEXT("execution_context_state_plane_not_allowed"),
-				OutError);
+				TEXT("The requested state plane is not allowed by the descriptor execution policy."), OutError, TEXT("state_plane"));
 		}
 		if (Policy.GetResolutionPolicy()
 				== EUeAgentContextResolutionPolicy::ExplicitOnly
@@ -213,7 +240,7 @@ namespace UE::UAI::ContextResource
 			return Fail(
 				TEXT(
 					"execution_context_resolve_current_not_allowed"),
-				OutError);
+				TEXT("The descriptor requires an explicit execution context; resolving the current context is not allowed."), OutError, TEXT("resolved_from_current"));
 		}
 		if ((Frozen.WorldType == EUeAgentExecutionWorldType::Pie
 				|| Frozen.WorldType
@@ -223,7 +250,7 @@ namespace UE::UAI::ContextResource
 		{
 			return Fail(
 				TEXT("execution_context_pie_instance_required"),
-				OutError,
+				TEXT("A PIE or simulate-in-editor context requires a non-negative PIE instance ID."), OutError, TEXT("pie_instance_id"),
 				EUeAgentExecutionContextFacet::PieInstance);
 		}
 		if (Frozen.WorldType == EUeAgentExecutionWorldType::Preview
@@ -235,7 +262,7 @@ namespace UE::UAI::ContextResource
 			return Fail(
 				TEXT(
 					"execution_context_transient_mutation_not_allowed"),
-				OutError);
+				TEXT("The descriptor does not allow mutations in a transient preview world."), OutError, TEXT("world_type"));
 		}
 		for (const EUeAgentExecutionContextFacet Facet :
 			Policy.GetRequiredFacets())
@@ -244,7 +271,7 @@ namespace UE::UAI::ContextResource
 			{
 				return Fail(
 					TEXT("execution_context_required_facet_missing"),
-					OutError,
+					TEXT("A required execution context facet is missing or invalid."), OutError, FacetProperty(Facet),
 					Facet);
 			}
 		}
@@ -383,7 +410,7 @@ namespace UE::UAI::ContextResource
 		}
 		return Fail(
 			TEXT("execution_context_revision_conflict"),
-			OutError);
+			TEXT("The execution context changed after it was captured; resolve the context again before retrying."), OutError, TEXT("context_revision"));
 	}
 
 	FUeAgentExactExecutionContextValidator::
@@ -404,41 +431,29 @@ namespace UE::UAI::ContextResource
 		{
 			return false;
 		}
-		if (!(Context.GetDescriptorIdentity()
-				== Expected->GetDescriptorIdentity())
-			|| Context.GetRequestKind()
-				!= Expected->GetRequestKind()
-			|| Context.GetProjectInstanceId()
-				!= Expected->GetProjectInstanceId()
-			|| Context.GetEditorInstanceId()
-				!= Expected->GetEditorInstanceId()
-			|| Context.GetStatePlane()
-				!= Expected->GetStatePlane()
-			|| Context.GetWorldType()
-				!= Expected->GetWorldType()
-			|| Context.GetWorldIdentity()
-				!= Expected->GetWorldIdentity()
-			|| Context.GetLevelIdentity()
-				!= Expected->GetLevelIdentity()
-			|| Context.GetDataLayerIdentities()
-				!= Expected->GetDataLayerIdentities()
-			|| Context.GetWorldPartitionIdentity()
-				!= Expected->GetWorldPartitionIdentity()
-			|| Context.GetPieInstanceId()
-				!= Expected->GetPieInstanceId()
-			|| Context.GetNetMode() != Expected->GetNetMode()
-			|| Context.GetNetRole() != Expected->GetNetRole()
-			|| Context.GetAssetEditorIdentity()
-				!= Expected->GetAssetEditorIdentity()
-			|| Context.GetViewportIdentity()
-				!= Expected->GetViewportIdentity()
-			|| Context.GetSelectionIdentities()
-				!= Expected->GetSelectionIdentities()
-			|| Context.WasResolvedFromCurrent()
-				!= Expected->WasResolvedFromCurrent())
+		const auto Matches = [&OutError](const bool bMatches, const TCHAR* Property)
 		{
-			OutError.Code =
-				TEXT("execution_context_identity_conflict");
+			return bMatches || Fail(TEXT("execution_context_identity_conflict"),
+				TEXT("The captured execution context no longer matches the expected context."), OutError, Property);
+		};
+		if (!Matches(Context.GetDescriptorIdentity() == Expected->GetDescriptorIdentity(), TEXT("descriptor"))
+			|| !Matches(Context.GetRequestKind() == Expected->GetRequestKind(), TEXT("request_kind"))
+			|| !Matches(Context.GetProjectInstanceId() == Expected->GetProjectInstanceId(), TEXT("project_instance_id"))
+			|| !Matches(Context.GetEditorInstanceId() == Expected->GetEditorInstanceId(), TEXT("editor_instance_id"))
+			|| !Matches(Context.GetStatePlane() == Expected->GetStatePlane(), TEXT("state_plane"))
+			|| !Matches(Context.GetWorldType() == Expected->GetWorldType(), TEXT("world_type"))
+			|| !Matches(Context.GetWorldIdentity() == Expected->GetWorldIdentity(), TEXT("world"))
+			|| !Matches(Context.GetLevelIdentity() == Expected->GetLevelIdentity(), TEXT("level"))
+			|| !Matches(Context.GetDataLayerIdentities() == Expected->GetDataLayerIdentities(), TEXT("data_layers"))
+			|| !Matches(Context.GetWorldPartitionIdentity() == Expected->GetWorldPartitionIdentity(), TEXT("world_partition"))
+			|| !Matches(Context.GetPieInstanceId() == Expected->GetPieInstanceId(), TEXT("pie_instance_id"))
+			|| !Matches(Context.GetNetMode() == Expected->GetNetMode(), TEXT("net_mode"))
+			|| !Matches(Context.GetNetRole() == Expected->GetNetRole(), TEXT("net_role"))
+			|| !Matches(Context.GetAssetEditorIdentity() == Expected->GetAssetEditorIdentity(), TEXT("asset_editor"))
+			|| !Matches(Context.GetViewportIdentity() == Expected->GetViewportIdentity(), TEXT("viewport"))
+			|| !Matches(Context.GetSelectionIdentities() == Expected->GetSelectionIdentities(), TEXT("selection"))
+			|| !Matches(Context.WasResolvedFromCurrent() == Expected->WasResolvedFromCurrent(), TEXT("resolved_from_current")))
+		{
 			return false;
 		}
 		return true;
@@ -459,7 +474,7 @@ namespace UE::UAI::ContextResource
 			Reset(OutContext, OutError);
 			return Fail(
 				TEXT("operation_context_request_invalid"),
-				OutError);
+				TEXT("The query request does not contain a valid descriptor, request ID and input."), OutError, TEXT("query_request"));
 		}
 		return TryCreateInternal(
 			Request.GetDescriptorIdentity(),
@@ -490,7 +505,7 @@ namespace UE::UAI::ContextResource
 			Reset(OutContext, OutError);
 			return Fail(
 				TEXT("operation_context_request_invalid"),
-				OutError);
+				TEXT("The operation request does not contain a valid descriptor, request ID, idempotency key and input."), OutError, TEXT("operation_request"));
 		}
 		return TryCreateInternal(
 			Request.GetDescriptorIdentity(),

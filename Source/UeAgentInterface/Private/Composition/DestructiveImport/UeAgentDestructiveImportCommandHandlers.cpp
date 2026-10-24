@@ -1,5 +1,7 @@
 #include "Composition/DestructiveImport/UeAgentDestructiveImportCommandHandlers.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Dom/JsonObject.h"
 
@@ -14,36 +16,98 @@ namespace UE::UAI::Composition::DestructiveImport
 		FString JsonText(const TSharedRef<FJsonObject>& Object)
 		{
 			FString Text;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			return Json::TryCanonicalize(Object, Text, Error) ? Text : TEXT("{}");
 		}
 
 		FString PayloadJson(const FUeAgentAssetDeleteResult& Result)
 		{
 			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-			Root->SetStringField(TEXT("target_ref"), Result.TargetRef);
-			Root->SetStringField(TEXT("package_name"), Result.PackageName);
 			Root->SetStringField(TEXT("terminal_state"), Result.TerminalState);
-			Root->SetBoolField(TEXT("deleted"), Result.bDeleted);
-			Root->SetStringField(TEXT("journal_id"), Result.JournalId);
-			Root->SetStringField(TEXT("verification_id"), Result.VerificationId);
-			const TSharedRef<FJsonObject> Readback = MakeShared<FJsonObject>();
-			Readback->SetBoolField(TEXT("file_absent"), Result.bFileAbsent);
-			Readback->SetBoolField(TEXT("package_absent"), Result.bPackageAbsent);
-			Readback->SetBoolField(TEXT("registry_absent"), Result.bRegistryAbsent);
-			Readback->SetBoolField(TEXT("object_absent"), Result.bObjectAbsent);
-			Root->SetObjectField(TEXT("readback"), Readback);
+			if (!Result.Diagnostic.IsEmpty())
+			{
+				Root->SetStringField(TEXT("failure_reason"), Result.Diagnostic.PublicMessage);
+			}
+			TArray<TSharedPtr<FJsonValue>> RequestedTargets;
+			RequestedTargets.Reserve(Result.RequestedTargets.Num());
+			for (const FString& TargetRef : Result.RequestedTargets)
+			{
+				RequestedTargets.Add(MakeShared<FJsonValueString>(TargetRef));
+			}
+			Root->SetArrayField(TEXT("requested_targets"), MoveTemp(RequestedTargets));
+			Root->SetBoolField(TEXT("recursive"), Result.bRecursive);
+
+			int32 DeletedCount = 0;
+			int32 BlockedCount = 0;
+			int32 RemainingCount = 0;
+			TArray<TSharedPtr<FJsonValue>> Targets;
+			Targets.Reserve(Result.Targets.Num());
+			for (const FUeAgentAssetDeleteTargetResult& Target : Result.Targets)
+			{
+				DeletedCount += Target.bDeleted ? 1 : 0;
+				BlockedCount += Target.Status == TEXT("blocked") ? 1 : 0;
+				RemainingCount += Target.bRemaining ? 1 : 0;
+				const TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+				Item->SetStringField(TEXT("target_ref"), Target.TargetRef);
+				Item->SetStringField(TEXT("package_name"), Target.PackageName);
+				Item->SetStringField(TEXT("object_path"), Target.ObjectPath);
+				Item->SetStringField(TEXT("status"), Target.Status);
+				Item->SetStringField(TEXT("terminal_state"), Target.TerminalState);
+				Item->SetBoolField(TEXT("deleted"), Target.bDeleted);
+				Item->SetBoolField(TEXT("remaining"), Target.bRemaining);
+                if (!Target.Diagnostic.IsEmpty())
+                {
+                    auto Diagnostic = Target.Diagnostic;
+                    if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = Target.TargetRef;
+                    Diagnostic.TerminalStatus = Target.TerminalState;
+                    Item->SetObjectField(TEXT("diagnostic"), Diagnostic.ToPublicJson());
+                }
+				if (!Target.JournalId.IsEmpty())
+				{
+					Item->SetStringField(TEXT("journal_id"), Target.JournalId);
+				}
+				if (!Target.VerificationId.IsEmpty())
+				{
+					Item->SetStringField(TEXT("verification_id"), Target.VerificationId);
+				}
+				const TSharedRef<FJsonObject> Readback = MakeShared<FJsonObject>();
+				Readback->SetBoolField(TEXT("file_absent"), Target.bFileAbsent);
+				Readback->SetBoolField(TEXT("package_absent"), Target.bPackageAbsent);
+				Readback->SetBoolField(TEXT("package_empty"), Target.bPackageEmpty);
+				Readback->SetBoolField(TEXT("registry_absent"), Target.bRegistryAbsent);
+			Readback->SetBoolField(TEXT("object_absent"), Target.bObjectAbsent);
+			Readback->SetBoolField(TEXT("object_retired"), Target.bObjectRetired);
+				Item->SetObjectField(TEXT("readback"), Readback);
+				Targets.Add(MakeShared<FJsonValueObject>(Item));
+			}
+			Root->SetNumberField(TEXT("deleted_count"), DeletedCount);
+			Root->SetNumberField(TEXT("blocked_count"), BlockedCount);
+			Root->SetNumberField(TEXT("remaining_count"), RemainingCount);
+			Root->SetArrayField(TEXT("targets"), MoveTemp(Targets));
 			return JsonText(Root);
 		}
 
-		FString ErrorJson(const FUeAgentAssetDeleteResult& Result)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Result.ErrorCode);
-			Error->SetStringField(TEXT("detail"), Result.ErrorDetail);
-			Error->SetStringField(TEXT("target_ref"), Result.TargetRef);
-			return JsonText(Error);
-		}
+		UE::UAI::Contract::FDiagnostic ErrorDiagnostic(const FString& Code, const FString& Reason)
+        {
+            return UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("asset_operation"));
+        }
+
+		UE::UAI::Contract::FDiagnostic ErrorDiagnostic(const FUeAgentAssetDeleteResult& Result)
+        {
+            auto Diagnostic = Result.Diagnostic;
+            for (const auto& Target : Result.Targets)
+            {
+                auto Issue = Target.Diagnostic;
+                if (Issue.IsEmpty()) continue;
+                if (Issue.TargetPath.IsEmpty()) Issue.TargetPath = Target.TargetRef;
+                Issue.TerminalStatus = Target.TerminalState;
+                Diagnostic.Append(Issue);
+            }
+            if (Diagnostic.IsEmpty()) Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(
+                TEXT("asset_delete_failed"), TEXT("Asset deletion did not complete."), TEXT("asset_delete"));
+            Diagnostic.TerminalStatus = Result.TerminalState;
+            return Diagnostic;
+        }
 
 		FString PayloadJson(const FUeAgentAssetOperationResult& Result)
 		{
@@ -59,14 +123,13 @@ namespace UE::UAI::Composition::DestructiveImport
 			return JsonText(Root);
 		}
 
-		FString ErrorJson(const FUeAgentAssetOperationResult& Result)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Result.ErrorCode);
-			Error->SetStringField(TEXT("detail"), Result.ErrorDetail);
-			Error->SetStringField(TEXT("target_ref"), Result.TargetRef);
-			return JsonText(Error);
-		}
+		UE::UAI::Contract::FDiagnostic ErrorDiagnostic(const FUeAgentAssetOperationResult& Result)
+        {
+            auto Diagnostic = Result.Diagnostic;
+            if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = Result.TargetRef;
+            Diagnostic.TerminalStatus = Result.TerminalState;
+            return Diagnostic;
+        }
 
 		class FAssetDeleteCommandHandler final : public IUeAgentCommandHandler
 		{
@@ -88,26 +151,72 @@ namespace UE::UAI::Composition::DestructiveImport
 				const FUeAgentCallerContext& CallerContext,
 				const TSharedRef<IUeAgentCancellationSignal>& Cancellation) override
 			{
-				FString TargetRef;
+				TArray<FString> TargetRefs;
+				const TArray<TSharedPtr<FJsonValue>>* Targets = nullptr;
 				if (!Request.GetParams().IsValid()
-					|| !Request.GetParams()->TryGetStringField(
-						TEXT("target_ref"), TargetRef))
+					|| !Request.GetParams()->TryGetArrayField(TEXT("targets"), Targets)
+					|| !Targets
+					|| Targets->IsEmpty())
 				{
 					FUeAgentAssetDeleteResult Invalid;
-					Invalid.ErrorCode = TEXT("asset_delete_target_required");
-					Invalid.ErrorDetail = TEXT("target_ref must be a string");
 					return FUeAgentCommandResult::Failure(
-						Request, PayloadJson(Invalid), ErrorJson(Invalid));
+						Request,
+						PayloadJson(Invalid),
+						ErrorDiagnostic(
+							TEXT("asset_delete_targets_required"),
+							TEXT("targets must be a non-empty string array")));
+				}
+				TargetRefs.Reserve(Targets->Num());
+				for (const TSharedPtr<FJsonValue>& Value : *Targets)
+				{
+					FString TargetRef;
+					if (!Value.IsValid() || !Value->TryGetString(TargetRef))
+					{
+						FUeAgentAssetDeleteResult Invalid;
+						return FUeAgentCommandResult::Failure(
+							Request,
+							PayloadJson(Invalid),
+							ErrorDiagnostic(
+								TEXT("asset_delete_targets_required"),
+								TEXT("targets must be a non-empty string array")));
+					}
+					TargetRef.TrimStartAndEndInline();
+					if (TargetRef.IsEmpty())
+					{
+						FUeAgentAssetDeleteResult Invalid;
+						return FUeAgentCommandResult::Failure(
+							Request,
+							PayloadJson(Invalid),
+							ErrorDiagnostic(
+								TEXT("asset_delete_targets_required"),
+								TEXT("targets must contain only non-empty strings")));
+					}
+					TargetRefs.Add(MoveTemp(TargetRef));
+				}
+				bool bRecursive = false;
+				if (Request.GetParams()->HasField(TEXT("recursive"))
+					&& !Request.GetParams()->TryGetBoolField(
+						TEXT("recursive"), bRecursive))
+				{
+					FUeAgentAssetDeleteResult Invalid;
+					Invalid.RequestedTargets = TargetRefs;
+					return FUeAgentCommandResult::Failure(
+						Request,
+						PayloadJson(Invalid),
+						ErrorDiagnostic(
+							TEXT("asset_delete_recursive_invalid"),
+							TEXT("recursive must be a boolean")));
 				}
 				const FUeAgentAssetDeleteResult Result = Owner->Delete(
 					FUeAgentAssetDeleteRequest{
-						Request.GetRequestId(), TargetRef, CallerContext.GetCallerId()},
+						Request.GetRequestId(), TargetRefs, bRecursive,
+						CallerContext.GetCallerId()},
 					Cancellation);
 				const FString Payload = PayloadJson(Result);
 				return Result.IsSuccess()
 					? FUeAgentCommandResult::Success(Request, Payload)
 					: FUeAgentCommandResult::Failure(
-						Request, Payload, ErrorJson(Result));
+						Request, Payload, ErrorDiagnostic(Result));
 			}
 
 		private:
@@ -147,9 +256,9 @@ namespace UE::UAI::Composition::DestructiveImport
 					FUeAgentAssetOperationResult Invalid;
 					Invalid.CommandId = CommandId;
 					Invalid.TargetRef = Target;
-					Invalid.ErrorCode = TEXT("asset_operation_params_invalid");
+					Invalid.Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_operation_params_invalid"), TEXT("Required asset operation parameters are missing or invalid."));
 					return FUeAgentCommandResult::Failure(
-						Request, PayloadJson(Invalid), ErrorJson(Invalid));
+						Request, PayloadJson(Invalid), ErrorDiagnostic(Invalid));
 				}
 				const FUeAgentAssetOperationResult Result = Owner->Execute(
 					FUeAgentAssetOperationRequest{
@@ -160,7 +269,7 @@ namespace UE::UAI::Composition::DestructiveImport
 				return Result.IsSuccess()
 					? FUeAgentCommandResult::Success(Request, Payload)
 					: FUeAgentCommandResult::Failure(
-						Request, Payload, ErrorJson(Result));
+						Request, Payload, ErrorDiagnostic(Result));
 			}
 
 		private:
@@ -175,7 +284,7 @@ namespace UE::UAI::Composition::DestructiveImport
 		TSharedRef<IUeAgentAssetDeleteOwner> AssetDeleteOwner,
 		TSharedRef<IUeAgentAssetOperationsOwner> AssetOperationsOwner,
 		TArray<TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();

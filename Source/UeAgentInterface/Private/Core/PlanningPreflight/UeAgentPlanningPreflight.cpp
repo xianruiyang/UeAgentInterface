@@ -1,6 +1,8 @@
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 
 #include "Containers/Set.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/Char.h"
 #include "Templates/SharedPointer.h"
 
@@ -9,7 +11,7 @@
 namespace UE::UAI::PlanningPreflight
 {
 	using UE::UAI::ContextResource::EUeAgentResourceDimension;
-	using UE::UAI::ContextResource::FUeAgentResourceBudgetExceeded;
+	using UE::UAI::ContextResource::FUeAgentResourceChargeError;
 	using UE::UAI::ContextResource::MeasureText;
 	using UE::UAI::StateSemantic::EUeAgentSpatialQuantityKind;
 	using UE::UAI::StateSemantic::EUeAgentValueKind;
@@ -22,6 +24,33 @@ namespace UE::UAI::PlanningPreflight
 
 	namespace
 	{
+		FPlanningPreflightError PlanningValidationFailure(const TCHAR* Code, const TCHAR* Reason, const TCHAR* Path)
+		{
+			auto Diagnostic = FPlanningPreflightError::Failure(Code, Reason, TEXT("planning"));
+			Diagnostic.PropertyPath = Path;
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
+		}
+
+		FPlanningPreflightError AtPlanningField(FPlanningPreflightError Diagnostic, const FString& Prefix)
+		{
+			TFunction<void(FPlanningPreflightError&)> Qualify = [&](FPlanningPreflightError& Item)
+			{
+				Item.PropertyPath = Prefix + (Item.PropertyPath.IsEmpty() || Item.PropertyPath == TEXT("/")
+					? FString() : (Item.PropertyPath.StartsWith(TEXT("/")) ? Item.PropertyPath : TEXT("/") + Item.PropertyPath));
+				if (Item.SourceKind.IsEmpty()) Item.SourceKind = TEXT("native_result");
+				for (auto& Child : Item.Diagnostics) Qualify(Child);
+				if (Item.PublicCause)
+				{
+					auto Cause = MakeShared<FPlanningPreflightError>(*Item.PublicCause);
+					Qualify(*Cause);
+					Item.PublicCause = MoveTemp(Cause);
+				}
+			};
+			Qualify(Diagnostic);
+			return Diagnostic;
+		}
+
 		TArray<FString> NormalizeStrings(TArray<FString> Values)
 		{
 			for (FString& Value : Values)
@@ -43,29 +72,20 @@ namespace UE::UAI::PlanningPreflight
 			return Values;
 		}
 
-		FPlanningPreflightError MakeResourceError(
-			const FUeAgentResourceBudgetExceeded& Error)
+		FPlanningPreflightError MakeResourceError(const FUeAgentResourceChargeError& Error)
 		{
-			return FPlanningPreflightError(
-				TEXT("resource_budget_exceeded"),
-				FString::Printf(
-					TEXT("%s exceeded at %s: observed=%lld limit=%lld"),
-					*UE::UAI::ContextResource::LexToString(Error.Dimension),
-					*Error.Path,
-					Error.Observed,
-					Error.Limit));
+			FPlanningPreflightError Diagnostic = Error;
+			Diagnostic.PublicCause = MakeShared<FPlanningPreflightError>(Error);
+			Diagnostic.Code = TEXT("resource_accounting_failed");
+			return Diagnostic;
 		}
 
-		FPlanningPreflightError MakeStateError(
-			const FUeAgentStateSemanticError& Error,
-			const FString& IdentityKey)
+		FPlanningPreflightError MakeStateError(const FUeAgentStateSemanticError& Error, const FString& IdentityKey)
 		{
-			return FPlanningPreflightError(
-				Error.Code.IsEmpty()
-					? TEXT("planning_state_semantic_error")
-					: Error.Code,
-				Error.Detail.IsEmpty() ? Error.Path : Error.Detail,
-				IdentityKey);
+			FPlanningPreflightError Diagnostic = Error.IsEmpty()
+				? FPlanningPreflightError::Failure(TEXT("planning_state_semantic_error"), TEXT("The planning state could not be compared."), TEXT("planning")) : Error;
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = IdentityKey;
+			return Diagnostic;
 		}
 
 		bool TryCharge(
@@ -76,7 +96,7 @@ namespace UE::UAI::PlanningPreflight
 			const int64 StringBytes,
 			FPlanningPreflightError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded Error;
+			FUeAgentResourceChargeError Error;
 			if (!Resources.TryChargeMany(
 				{
 					{EUeAgentResourceDimension::Nodes, Nodes},
@@ -186,7 +206,7 @@ namespace UE::UAI::PlanningPreflight
 				const FTCHARToUTF8 ValueUtf8(*Value);
 				const int64 ByteCount =
 					LabelUtf8.Length() + ValueUtf8.Length();
-				FUeAgentResourceBudgetExceeded Error;
+				FUeAgentResourceChargeError Error;
 				if (!Resources.TryChargeMany(
 					{
 						{
@@ -275,11 +295,19 @@ namespace UE::UAI::PlanningPreflight
 					ETaskKind Kind = ETaskKind::Visit;
 					FUeAgentCanonicalValuePtr Node;
 					FString Key;
+					FString Path;
 				};
 
 				const FString NodeLabel = Label + TEXT(".node");
 				TArray<FTask> Tasks;
-				Tasks.Add({ETaskKind::Visit, Root, FString()});
+				Tasks.Add({ETaskKind::Visit, Root, FString(), FString()});
+				auto ValueFailure = [&](const TCHAR* Code, const TCHAR* Reason, const FTask& Task)
+				{
+					auto Diagnostic = PlanningValidationFailure(Code, Reason, TEXT(""));
+					Diagnostic.InternalContext = Label;
+					Diagnostic.Source.InternalJsonPath = Task.Path.IsEmpty() ? TEXT("/") : Task.Path;
+					return Diagnostic;
+				};
 				while (!Tasks.IsEmpty())
 				{
 					FTask Task = MoveTemp(Tasks.Last());
@@ -294,8 +322,10 @@ namespace UE::UAI::PlanningPreflight
 					}
 					if (!Task.Node.IsValid())
 					{
-						OutError = FPlanningPreflightError(
-							TEXT("planning_fingerprint_value_invalid"));
+						OutError = ValueFailure(TEXT("planning_fingerprint_value_invalid"),
+							TEXT("The planning value contains a missing canonical child."), Task);
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("canonical value"));
 						return false;
 					}
 
@@ -373,7 +403,8 @@ namespace UE::UAI::PlanningPreflight
 							Tasks.Add({
 								ETaskKind::Visit,
 								Items[Index],
-								FString()
+								FString(),
+								Task.Path + TEXT("/") + FString::FromInt(Index)
 							});
 						}
 						break;
@@ -390,15 +421,19 @@ namespace UE::UAI::PlanningPreflight
 						}
 						for (int32 Index = Items.Num() - 1; Index >= 0; --Index)
 						{
+							FString Segment = Items[Index].Key.Replace(TEXT("~"), TEXT("~0"));
+							Segment.ReplaceInline(TEXT("/"), TEXT("~1"));
 							Tasks.Add({
 								ETaskKind::Visit,
 								Items[Index].Value,
-								FString()
+								FString(),
+								Task.Path + TEXT("/") + Segment
 							});
 							Tasks.Add({
 								ETaskKind::Key,
 								nullptr,
-								Items[Index].Key
+								Items[Index].Key,
+								Task.Path + TEXT("/") + Segment
 							});
 						}
 						break;
@@ -408,8 +443,10 @@ namespace UE::UAI::PlanningPreflight
 						const auto& Temporal = Task.Node->GetTemporal();
 						if (!Temporal.IsValid())
 						{
-							OutError = FPlanningPreflightError(
-								TEXT("planning_fingerprint_temporal_invalid"));
+							OutError = ValueFailure(TEXT("planning_fingerprint_temporal_invalid"),
+								TEXT("The canonical temporal value has no temporal payload."), Task);
+							OutError.ActualValuePresent = false;
+							OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("temporal payload"));
 							return false;
 						}
 						if (!WriteTemporal(
@@ -426,8 +463,10 @@ namespace UE::UAI::PlanningPreflight
 						const auto& Spatial = Task.Node->GetSpatial();
 						if (!Spatial.IsValid())
 						{
-							OutError = FPlanningPreflightError(
-								TEXT("planning_fingerprint_spatial_invalid"));
+							OutError = ValueFailure(TEXT("planning_fingerprint_spatial_invalid"),
+								TEXT("The canonical spatial value has no spatial payload."), Task);
+							OutError.ActualValuePresent = false;
+							OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("spatial payload"));
 							return false;
 						}
 						const auto& Frame = Spatial->GetFrame();
@@ -549,9 +588,11 @@ namespace UE::UAI::PlanningPreflight
 						break;
 					}
 					default:
-						OutError = FPlanningPreflightError(
-							TEXT(
-								"planning_fingerprint_value_kind_unknown"));
+						OutError = ValueFailure(TEXT("planning_fingerprint_value_kind_unknown"),
+							TEXT("The planning value has an unsupported canonical value kind."), Task);
+						OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Kind));
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(
+							TEXT("null, boolean, string, integer, decimal, array, object, temporal, or spatial"));
 						return false;
 					}
 				}
@@ -572,7 +613,7 @@ namespace UE::UAI::PlanningPreflight
 				}
 				OutFingerprint = TEXT("sha256:") + Hex;
 
-				FUeAgentResourceBudgetExceeded Error;
+				FUeAgentResourceChargeError Error;
 				if (!Resources.TryChargeMany(
 					{
 						{
@@ -652,26 +693,12 @@ namespace UE::UAI::PlanningPreflight
 		}
 	}
 
-	FPlanningPreflightError::FPlanningPreflightError(
-		FString InCode,
-		FString InDetail,
-		FString InIdentityKey)
-		: Code(MoveTemp(InCode))
-		, Detail(MoveTemp(InDetail))
-		, IdentityKey(MoveTemp(InIdentityKey))
-	{
-		Code.TrimStartAndEndInline();
-		Detail.TrimStartAndEndInline();
-		IdentityKey.TrimStartAndEndInline();
-	}
 
-	const FString& FPlanningPreflightError::GetCode() const { return Code; }
-	const FString& FPlanningPreflightError::GetDetail() const { return Detail; }
-	const FString& FPlanningPreflightError::GetIdentityKey() const
-	{
-		return IdentityKey;
-	}
-	bool FPlanningPreflightError::IsPresent() const { return !Code.IsEmpty(); }
+
+
+
+
+
 
 	FString LexToString(const EChangeIntent Intent)
 	{
@@ -709,26 +736,55 @@ namespace UE::UAI::PlanningPreflight
 			{
 				return Left.GetCanonicalKey() < Right.GetCanonicalKey();
 			});
-		const bool bValuesValid =
-			(Intent == EChangeIntent::Create
-				&& !ExpectedBefore.IsValid()
-				&& ProposedAfter.IsValid())
-			|| (Intent == EChangeIntent::Delete
-				&& ExpectedBefore.IsValid()
-				&& !ProposedAfter.IsValid())
-			|| ((Intent == EChangeIntent::Update
-					|| Intent == EChangeIntent::Replace)
-				&& ExpectedBefore.IsValid()
-				&& ProposedAfter.IsValid());
-		bool bImpactTargetsValid = true;
-		for (const FUeAgentCanonicalIdentity& Target : ImpactTargets)
+		if (!Identity.IsValid())
 		{
-			bImpactTargetsValid = bImpactTargetsValid && Target.IsValid();
+			ValidationDiagnostic = AtPlanningField(Identity.GetValidationDiagnostic(), TEXT("/identity"));
+			return;
 		}
-		bValid = Identity.IsValid()
-			&& bValuesValid
-			&& !ImpactEvidenceId.IsEmpty()
-			&& bImpactTargetsValid;
+		if (Intent != EChangeIntent::Create && Intent != EChangeIntent::Delete
+			&& Intent != EChangeIntent::Update && Intent != EChangeIntent::Replace)
+		{
+			ValidationDiagnostic = PlanningValidationFailure(TEXT("planning_change_intent_invalid"),
+				TEXT("A change intent must be create, update, replace, or delete."), TEXT("/intent"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<uint8>(Intent));
+			return;
+		}
+		const bool bRequiresBefore = Intent != EChangeIntent::Create;
+		const bool bRequiresAfter = Intent != EChangeIntent::Delete;
+		if (ExpectedBefore.IsValid() != bRequiresBefore || ProposedAfter.IsValid() != bRequiresAfter)
+		{
+			const TCHAR* Reason = Intent == EChangeIntent::Create
+				? TEXT("A create change requires a proposed value and no previous value.")
+				: Intent == EChangeIntent::Delete
+					? TEXT("A delete change requires a previous value and no proposed value.")
+					: TEXT("An update or replace change requires both previous and proposed values.");
+			ValidationDiagnostic = PlanningValidationFailure(TEXT("planning_change_values_invalid"), Reason,
+				ExpectedBefore.IsValid() != bRequiresBefore ? TEXT("/expected_before") : TEXT("/proposed_after"));
+			const auto Actual = MakeShared<FJsonObject>();
+			Actual->SetBoolField(TEXT("expected_before_present"), ExpectedBefore.IsValid());
+			Actual->SetBoolField(TEXT("proposed_after_present"), ProposedAfter.IsValid());
+			const auto Expected = MakeShared<FJsonObject>();
+			Expected->SetBoolField(TEXT("expected_before_present"), bRequiresBefore);
+			Expected->SetBoolField(TEXT("proposed_after_present"), bRequiresAfter);
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueObject>(Actual);
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueObject>(Expected);
+			return;
+		}
+		if (ImpactEvidenceId.IsEmpty())
+		{
+			ValidationDiagnostic = PlanningValidationFailure(TEXT("planning_change_impact_evidence_missing"),
+				TEXT("The change requires an impact evidence identifier."), TEXT("/impact_evidence_id"));
+			return;
+		}
+		for (int32 Index = 0; Index < ImpactTargets.Num(); ++Index)
+		{
+			if (!ImpactTargets[Index].IsValid())
+			{
+				ValidationDiagnostic = AtPlanningField(ImpactTargets[Index].GetValidationDiagnostic(),
+					FString::Printf(TEXT("/impact_targets/%d"), Index));
+				return;
+			}
+		}
 	}
 
 	const FUeAgentCanonicalIdentity& FChangeDraft::GetIdentity() const
@@ -756,7 +812,7 @@ namespace UE::UAI::PlanningPreflight
 	{
 		return ImpactTargets;
 	}
-	bool FChangeDraft::IsValid() const { return bValid; }
+	bool FChangeDraft::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	FChangeSetDraft::FChangeSetDraft(
 		FUeAgentDescriptorIdentity InDescriptorIdentity,
@@ -772,16 +828,30 @@ namespace UE::UAI::PlanningPreflight
 	{
 		RequestId.TrimStartAndEndInline();
 		IdempotencyKey.TrimStartAndEndInline();
-		bool bChangesValid = true;
-		for (const FChangeDraft& Change : Changes)
+		if (!DescriptorIdentity.IsValid())
+			ValidationDiagnostic = AtPlanningField(DescriptorIdentity.GetValidationDiagnostic(), TEXT("/descriptor"));
+		else if (RequestId.IsEmpty())
+			ValidationDiagnostic = PlanningValidationFailure(TEXT("planning_request_id_missing"),
+				TEXT("The change set requires a non-empty request identifier."), TEXT("/request_id"));
+		else if (IdempotencyKey.IsEmpty())
+			ValidationDiagnostic = PlanningValidationFailure(TEXT("planning_idempotency_key_missing"),
+				TEXT("The change set requires a non-empty idempotency key."), TEXT("/idempotency_key"));
+		else if (Changes.IsEmpty())
 		{
-			bChangesValid = bChangesValid && Change.IsValid();
+			ValidationDiagnostic = PlanningValidationFailure(TEXT("planning_changes_missing"),
+				TEXT("The change set must contain at least one change."), TEXT("/changes"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(0);
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("one or more changes"));
 		}
-		bValid = DescriptorIdentity.IsValid()
-			&& !RequestId.IsEmpty()
-			&& !IdempotencyKey.IsEmpty()
-			&& !Changes.IsEmpty()
-			&& bChangesValid;
+		else for (int32 Index = 0; Index < Changes.Num(); ++Index)
+		{
+			if (!Changes[Index].IsValid())
+			{
+				ValidationDiagnostic = AtPlanningField(Changes[Index].GetValidationDiagnostic(),
+					FString::Printf(TEXT("/changes/%d"), Index));
+				break;
+			}
+		}
 	}
 
 	const FUeAgentDescriptorIdentity& FChangeSetDraft::GetDescriptorIdentity() const
@@ -801,7 +871,7 @@ namespace UE::UAI::PlanningPreflight
 	{
 		return Changes;
 	}
-	bool FChangeSetDraft::IsValid() const { return bValid; }
+	bool FChangeSetDraft::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	FPlanningRequest::FPlanningRequest(
 		FChangeSetDraft InDraft,
@@ -811,7 +881,9 @@ namespace UE::UAI::PlanningPreflight
 		, CallerContext(MoveTemp(InCallerContext))
 		, bDryRun(bInDryRun)
 	{
-		bValid = Draft.IsValid() && CallerContext.IsValid();
+		if (!Draft.IsValid()) ValidationDiagnostic = Draft.GetValidationDiagnostic();
+		else if (!CallerContext.IsValid())
+			ValidationDiagnostic = AtPlanningField(CallerContext.GetValidationDiagnostic(), TEXT("/caller"));
 	}
 
 	const FChangeSetDraft& FPlanningRequest::GetDraft() const { return Draft; }
@@ -820,7 +892,7 @@ namespace UE::UAI::PlanningPreflight
 		return CallerContext;
 	}
 	bool FPlanningRequest::IsDryRun() const { return bDryRun; }
-	bool FPlanningRequest::IsValid() const { return bValid; }
+	bool FPlanningRequest::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	FPlannedChange::FPlannedChange(
 		FUeAgentCanonicalIdentity InIdentity,
@@ -1254,8 +1326,7 @@ namespace UE::UAI::PlanningPreflight
 		OutError = FPlanningPreflightError();
 		if (!Request.IsValid())
 		{
-			OutError = FPlanningPreflightError(
-				TEXT("planning_request_invalid"));
+			OutError = Request.GetValidationDiagnostic();
 			return false;
 		}
 
@@ -1297,11 +1368,8 @@ namespace UE::UAI::PlanningPreflight
 				Change->GetIdentity().GetCanonicalKey();
 			if (Seen.Contains(Key))
 			{
-				OutError = FPlanningPreflightError(
-					TEXT("planning_duplicate_target"),
-					TEXT(
-						"one plan cannot change the same canonical target twice"),
-					Key);
+				OutError = FPlanningPreflightError::Failure(TEXT("planning_duplicate_target"), TEXT(
+						"one plan cannot change the same canonical target twice"), TEXT("planning"), FString(), Key);
 				return false;
 			}
 			Seen.Add(Key);
@@ -1316,12 +1384,12 @@ namespace UE::UAI::PlanningPreflight
 			}
 			if (!MissingScopes.IsEmpty())
 			{
-				OutError = FPlanningPreflightError(
-					TEXT("planning_authority_denied"),
-					TEXT("missing scopes: ") + FString::Join(
-						MissingScopes,
-						TEXT(",")),
-					Key);
+				OutError = PlanningValidationFailure(TEXT("planning_authority_denied"),
+					TEXT("The caller lacks authority scopes required by the planned change."), TEXT("/required_authority_scopes"));
+				OutError.SubjectId = Key;
+				TArray<TSharedPtr<FJsonValue>> Missing;
+				for (const auto& Scope : MissingScopes) Missing.Add(MakeShared<FJsonValueString>(Scope));
+				OutError.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(Missing));
 				return false;
 			}
 		}
@@ -1341,10 +1409,7 @@ namespace UE::UAI::PlanningPreflight
 			{
 				if (Current != nullptr)
 				{
-					OutError = FPlanningPreflightError(
-						TEXT("planning_target_exists"),
-						TEXT("create requires the target to be absent"),
-						Key);
+					OutError = FPlanningPreflightError::Failure(TEXT("planning_target_exists"), TEXT("create requires the target to be absent"), TEXT("planning"), FString(), Key);
 					return false;
 				}
 				Existence = TEXT("must_be_absent");
@@ -1353,11 +1418,12 @@ namespace UE::UAI::PlanningPreflight
 			{
 				if (Current == nullptr)
 				{
-					OutError = FPlanningPreflightError(
-						TEXT("planning_target_missing"),
-						LexToString(Change->GetIntent())
-							+ TEXT(" requires the target to exist"),
-						Key);
+					OutError = FPlanningPreflightError::Failure(TEXT("planning_target_missing"),
+						LexToString(Change->GetIntent()) + TEXT(" requires the target to exist in the current snapshot."),
+						TEXT("planning"), FString(), Key);
+					OutError.SourceKind = TEXT("native_result");
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
 					return false;
 				}
 				Before = Current->GetValue();
@@ -1375,11 +1441,8 @@ namespace UE::UAI::PlanningPreflight
 				}
 				if (!bExpectedMatches)
 				{
-					OutError = FPlanningPreflightError(
-						TEXT("planning_expected_before_mismatch"),
-						TEXT(
-							"expected_before does not match C4 snapshot"),
-						Key);
+					OutError = FPlanningPreflightError::Failure(TEXT("planning_expected_before_mismatch"), TEXT(
+							"expected_before does not match C4 snapshot"), TEXT("planning"), FString(), Key);
 					return false;
 				}
 			}
@@ -1551,26 +1614,20 @@ namespace UE::UAI::PlanningPreflight
 		}
 		if (Recomputed != Plan->GetFingerprint())
 		{
-			OutError = FPlanningPreflightError(
-				TEXT("planning_fingerprint_mismatch"),
-				TEXT("plan facts no longer match fingerprint"));
+			OutError = FPlanningPreflightError::Failure(TEXT("planning_fingerprint_mismatch"), TEXT("plan facts no longer match fingerprint"), TEXT("planning"), FString());
 			return false;
 		}
 		if (CallerContext.GetCallerId() != Plan->GetCallerId()
 			|| NormalizeStrings(CallerContext.GetAuthorityScopes())
 				!= Plan->GetAuthorityScopes())
 		{
-			OutError = FPlanningPreflightError(
-				TEXT("planning_authority_context_changed"),
-				TEXT("caller identity or authority scopes changed"));
+			OutError = FPlanningPreflightError::Failure(TEXT("planning_authority_context_changed"), TEXT("caller identity or authority scopes changed"), TEXT("planning"), FString());
 			return false;
 		}
 		if (CurrentSnapshot->GetRevision() != Plan->GetObservedRevision())
 		{
-			OutError = FPlanningPreflightError(
-				TEXT("planning_revision_stale"),
-				TEXT(
-					"current snapshot revision differs from planned revision"));
+			OutError = FPlanningPreflightError::Failure(TEXT("planning_revision_stale"), TEXT(
+					"current snapshot revision differs from planned revision"), TEXT("planning"), FString());
 			return false;
 		}
 
@@ -1585,20 +1642,14 @@ namespace UE::UAI::PlanningPreflight
 			{
 				if (Current != nullptr)
 				{
-					OutError = FPlanningPreflightError(
-						TEXT("planning_target_exists"),
-						TEXT("target became present after planning"),
-						Key);
+					OutError = FPlanningPreflightError::Failure(TEXT("planning_target_exists"), TEXT("target became present after planning"), TEXT("planning"), FString(), Key);
 					return false;
 				}
 				continue;
 			}
 			if (Current == nullptr)
 			{
-				OutError = FPlanningPreflightError(
-					TEXT("planning_target_missing"),
-					TEXT("target became absent after planning"),
-					Key);
+				OutError = FPlanningPreflightError::Failure(TEXT("planning_target_missing"), TEXT("target became absent after planning"), TEXT("planning"), FString(), Key);
 				return false;
 			}
 			bool bMatches = false;
@@ -1614,11 +1665,8 @@ namespace UE::UAI::PlanningPreflight
 			}
 			if (!bMatches)
 			{
-				OutError = FPlanningPreflightError(
-					TEXT("planning_expected_before_mismatch"),
-					TEXT(
-						"current value differs from planned precondition"),
-					Key);
+				OutError = FPlanningPreflightError::Failure(TEXT("planning_expected_before_mismatch"), TEXT(
+						"current value differs from planned precondition"), TEXT("planning"), FString(), Key);
 				return false;
 			}
 		}

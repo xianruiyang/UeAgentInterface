@@ -92,20 +92,20 @@ bool FUeAgentCommandDispatchExactTest::RunTest(
 		GetDefaultCommandContractRegistry();
 	const TSharedRef<FRecordingHandler> Query =
 		MakeShared<FRecordingHandler>(
-			TEXT("reference.catalog_search"));
-	const TSharedRef<FRecordingHandler> Read =
+			TEXT("query.command.search"));
+	const TSharedRef<FRecordingHandler> Usage =
 		MakeShared<FRecordingHandler>(
-			TEXT("reference.asset_read"));
+			TEXT("query.command.usage"));
 	const TSharedRef<FRecordingHandler> Effect =
 		MakeShared<FRecordingHandler>(
-			TEXT("reference.asset_apply"));
+			TEXT("reference.origin.resolve"));
 	TSharedPtr<const FUeAgentCommandDispatch> Dispatch;
 	FString Error;
 	TestTrue(
 		TEXT("one exact handler per active command composes"),
 		FUeAgentCommandDispatch::TryCreate(
 			Registry,
-			{Query, Read, Effect},
+			{Query, Usage, Effect},
 			Dispatch,
 			Error));
 	if (!Dispatch.IsValid())
@@ -139,7 +139,7 @@ bool FUeAgentCommandDispatchExactTest::RunTest(
 		MakeShared<FNeverCancelled>());
 	TestTrue(TEXT("exact dispatch returns handler result"), Result.IsOk());
 	TestEqual(TEXT("query handler called once"), Query->Calls, 1);
-	TestEqual(TEXT("read handler not called"), Read->Calls, 0);
+	TestEqual(TEXT("usage handler not called"), Usage->Calls, 0);
 	TestEqual(TEXT("effect handler not called"), Effect->Calls, 0);
 
 	TSharedPtr<const FUeAgentCommandDispatch> Rejected;
@@ -158,7 +158,7 @@ bool FUeAgentCommandDispatchExactTest::RunTest(
 		TEXT("duplicate handler is rejected"),
 		FUeAgentCommandDispatch::TryCreate(
 			Registry,
-			{Query, Query, Read, Effect},
+			{Query, Query, Usage, Effect},
 			Rejected,
 			Error));
 	TestEqual(
@@ -167,4 +167,3 @@ bool FUeAgentCommandDispatchExactTest::RunTest(
 		FString(TEXT("command_dispatch_handler_duplicate")));
 	return true;
 }
-

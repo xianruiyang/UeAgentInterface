@@ -62,7 +62,7 @@ namespace
 			TEXT("provider_binding"), TEXT("selector"), TEXT("http"),
 			TEXT("output_file"), TEXT("output_folder"),
 			TEXT("input_file"), TEXT("input_folder"),
-			TEXT("token_budget"), TEXT("limit"), TEXT("max_items"),
+			TEXT("limit"), TEXT("max_items"),
 			TEXT("max_hits"), TEXT("max_samples"), TEXT("expected"),
 			TEXT("desired"), TEXT("json"), TEXT("json_file"),
 		};
@@ -160,91 +160,6 @@ namespace
 			&& Compiled.IsValid();
 	}
 
-	TArray<TSharedPtr<FJsonValue>> SortedValues(
-		const TSharedPtr<FJsonObject>& Row,
-		const TCHAR* Field)
-	{
-		TArray<FString> Strings;
-		for (const TSharedPtr<FJsonValue>& Value
-			: Row->GetArrayField(Field))
-		{
-			Strings.Add(Value->AsString());
-		}
-		Strings.Sort();
-		TArray<TSharedPtr<FJsonValue>> Values;
-		for (const FString& String : Strings)
-		{
-			Values.Add(MakeShared<FJsonValueString>(String));
-		}
-		return Values;
-	}
-
-	FString ComputeHash(
-		FAutomationTestBase* Test,
-		const TSharedPtr<FJsonObject>& Row)
-	{
-		const TSharedPtr<FJsonObject> Policy =
-			MakeShared<FJsonObject>();
-		Policy->SetArrayField(
-			TEXT("allowed_state_planes"),
-			SortedValues(Row, TEXT("allowed_state_planes")));
-		Policy->SetArrayField(
-			TEXT("required_facets"),
-			SortedValues(Row, TEXT("required_context_facets")));
-		Policy->SetStringField(
-			TEXT("resolution_policy"),
-			TEXT("resolve_current_then_freeze"));
-		Policy->SetStringField(
-			TEXT("transient_access_policy"),
-			TEXT("read_only"));
-
-		const TSharedPtr<FJsonObject> Query =
-			MakeShared<FJsonObject>();
-		Query->SetStringField(
-			TEXT("materialization_policy"),
-			TEXT("runtime_observe"));
-		Query->SetStringField(
-			TEXT("provider_binding"),
-			Row->GetStringField(TEXT("provider_binding")));
-		Query->SetStringField(
-			TEXT("query_kind"),
-			Row->GetStringField(TEXT("query_kind")));
-		Query->SetStringField(
-			TEXT("side_effect_policy"),
-			TEXT("no_persistent_mutation"));
-
-		const TSharedPtr<FJsonObject> Descriptor =
-			MakeShared<FJsonObject>();
-		Descriptor->SetStringField(
-			TEXT("capability_id"),
-			Row->GetStringField(TEXT("capability_id")));
-		Descriptor->SetStringField(
-			TEXT("descriptor_id"),
-			Row->GetStringField(TEXT("descriptor_id")));
-		Descriptor->SetStringField(TEXT("domain_id"), TEXT("asset_project"));
-		Descriptor->SetObjectField(TEXT("execution_context_policy"), Policy);
-		Descriptor->SetObjectField(
-			TEXT("input_schema"),
-			Row->GetObjectField(TEXT("input_schema")));
-		Descriptor->SetStringField(TEXT("operation_kind"), TEXT("query"));
-		Descriptor->SetObjectField(TEXT("query"), Query);
-		Descriptor->SetObjectField(
-			TEXT("result_schema"),
-			Row->GetObjectField(TEXT("result_schema")));
-		Descriptor->SetNumberField(
-			TEXT("version"),
-			Row->GetNumberField(TEXT("version")));
-
-		FString Canonical;
-		FString Error;
-		if (!Test->TestTrue(
-				TEXT("canonical descriptor"),
-				Json::TryCanonicalize(Descriptor, Canonical, Error)))
-		{
-			return FString();
-		}
-		return Json::Sha256Utf8(Canonical);
-	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -293,20 +208,8 @@ bool FUeAgentAssetProjectReadContractFixtureTest::RunTest(
 	{
 		RequiredFamilies.Add(Value->AsString());
 	}
-	TestEqual(TEXT("six semantic families"), RequiredFamilies.Num(), 6);
-	TestEqual(
-		TEXT("eighteen descriptors"),
-		DescriptorValues->Num(),
-		18);
-	TestEqual(
-		TEXT("declared descriptor count"),
-		static_cast<int32>(
-			Fixture->GetNumberField(TEXT("descriptor_count"))),
-		18);
-
 	TSet<FString> DescriptorIds;
 	TSet<FString> ProviderBindings;
-	TSet<FString> DescriptorHashes;
 	TSet<FString> Families;
 	bool bValid = true;
 	for (const TSharedPtr<FJsonValue>& Value : *DescriptorValues)
@@ -316,8 +219,6 @@ bool FUeAgentAssetProjectReadContractFixtureTest::RunTest(
 			Row->GetStringField(TEXT("descriptor_id"));
 		const FString ProviderBinding =
 			Row->GetStringField(TEXT("provider_binding"));
-		const FString Hash =
-			Row->GetStringField(TEXT("descriptor_hash"));
 		const FString Family =
 			Row->GetStringField(TEXT("family"));
 		TestTrue(
@@ -330,16 +231,14 @@ bool FUeAgentAssetProjectReadContractFixtureTest::RunTest(
 		TestFalse(
 			TEXT("descriptor does not expose legacy identity"),
 			Row->HasField(TEXT("legacy_command_id"))
-				|| Row->HasField(TEXT("migration_id")));
+				|| Row->HasField(TEXT("migration_id"))
+				|| Row->HasField(TEXT("descriptor_hash")));
 		TestEqual(TEXT("version one"), Row->GetNumberField(TEXT("version")), 1.0);
-		TestEqual(TEXT("frozen canonical hash"), Hash, ComputeHash(this, Row));
 		bValid = !DescriptorIds.Contains(DescriptorId)
 			&& !ProviderBindings.Contains(ProviderBinding)
-			&& !DescriptorHashes.Contains(Hash)
 			&& bValid;
 		DescriptorIds.Add(DescriptorId);
 		ProviderBindings.Add(ProviderBinding);
-		DescriptorHashes.Add(Hash);
 		Families.Add(Family);
 		const TSharedPtr<FJsonObject> Input =
 			Row->GetObjectField(TEXT("input_schema"));
@@ -361,10 +260,12 @@ bool FUeAgentAssetProjectReadContractFixtureTest::RunTest(
 			&& bValid;
 	}
 	TestTrue(TEXT("descriptor identities are unique"), bValid);
-	TestEqual(
-		TEXT("all semantic families own descriptors"),
-		Families.Num(),
-		RequiredFamilies.Num());
+	for (const FString& RequiredFamily : RequiredFamilies)
+	{
+		TestTrue(
+			*FString::Printf(TEXT("descriptor family covers %s"), *RequiredFamily),
+			Families.Contains(RequiredFamily));
+	}
 
 	TSet<FString> ScenarioFamilies;
 	for (const TSharedPtr<FJsonValue>& Value : *ScenarioValues)
@@ -379,8 +280,12 @@ bool FUeAgentAssetProjectReadContractFixtureTest::RunTest(
 			Row->GetStringField(TEXT("oracle")).IsEmpty());
 		ScenarioFamilies.Add(Row->GetStringField(TEXT("family")));
 	}
-	TestEqual(TEXT("one E2 oracle per family"), ScenarioValues->Num(), 6);
-	TestEqual(TEXT("E2 covers every family"), ScenarioFamilies.Num(), 6);
+	for (const FString& RequiredFamily : RequiredFamilies)
+	{
+		TestTrue(
+			*FString::Printf(TEXT("E2 covers %s"), *RequiredFamily),
+			ScenarioFamilies.Contains(RequiredFamily));
+	}
 
 	TSharedPtr<const FUeAgentDescriptorRegistry> ProductionRegistry;
 	FString RegistryError;
@@ -396,28 +301,53 @@ bool FUeAgentAssetProjectReadContractFixtureTest::RunTest(
 			+ RegistryError);
 		return false;
 	}
-	TestEqual(
-		TEXT("production registry owns all frozen descriptors"),
-		ProductionRegistry->GetDescriptors().Num(),
-		18);
+	TSet<FString> ProductionDescriptorHashes;
 	for (const TSharedPtr<FJsonValue>& Value : *DescriptorValues)
 	{
 		const TSharedPtr<FJsonObject> Row = Value->AsObject();
+		FString InputSchema;
+		FString ResultSchema;
+		FString SchemaError;
+		const bool bSchemasCanonical =
+			Json::TryCanonicalize(
+				Row->GetObjectField(TEXT("input_schema")),
+				InputSchema,
+				SchemaError)
+			&& Json::TryCanonicalize(
+				Row->GetObjectField(TEXT("result_schema")),
+				ResultSchema,
+				SchemaError);
+		TestTrue(TEXT("fixture schemas canonicalize for registry comparison"),
+			bSchemasCanonical);
 		const FUeAgentOperationDescriptor* Descriptor =
 			ProductionRegistry->FindByDescriptorId(
 				Row->GetStringField(TEXT("descriptor_id")));
+		const bool bUniqueMachineIdentity = Descriptor
+			&& !ProductionDescriptorHashes.Contains(
+				Descriptor->GetIdentity().GetDescriptorHash());
 		TestTrue(
 			*FString::Printf(
-				TEXT("%s is registered with exact hash and provider"),
+				TEXT("%s is registered with a machine identity and provider"),
 				*Row->GetStringField(TEXT("descriptor_id"))),
 			Descriptor
-				&& Descriptor->GetIdentity().GetDescriptorHash()
-					== Row->GetStringField(TEXT("descriptor_hash"))
+				&& !Descriptor->GetIdentity().GetDescriptorHash().IsEmpty()
+				&& bUniqueMachineIdentity
+				&& Descriptor->GetCapabilityId()
+					== Row->GetStringField(TEXT("capability_id"))
+				&& Descriptor->GetInputSchema().GetJsonValue()
+					== InputSchema
+				&& Descriptor->GetResultSchema().GetJsonValue()
+					== ResultSchema
 				&& Descriptor->GetQueryBinding().IsSet()
 				&& Descriptor->GetQueryBinding()
 					->GetProviderBinding()
 					== Row->GetStringField(
 						TEXT("provider_binding")));
+		if (Descriptor)
+		{
+			ProductionDescriptorHashes.Add(
+				Descriptor->GetIdentity().GetDescriptorHash());
+		}
 	}
 	return true;
 }

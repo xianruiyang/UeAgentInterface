@@ -9,10 +9,16 @@
 #include "AnimStateConduitNode.h"
 #include "AnimStateEntryNode.h"
 #include "AnimStateNode.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/UeAgentContentDiscovery.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDocuments.h"
 #include "Domains/Animation/UeAgentAnimBlueprintDomainBackend.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "Misc/PackageName.h"
@@ -42,29 +48,62 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 			TArray<FStateMachineActionEntry> Entries;
 		};
 
-		bool Fail(
-			FAnimationBlueprintCandidateQueryError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool ForwardDiagnostic(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
 			return false;
 		}
 
-		FString Normalize(const FString& Value)
+		UE::UAI::Contract::FDiagnostic CandidateDiagnostic(FString Code, FString Subject, FString PublicReason, FString InternalContext = FString())
 		{
-			FString Result;
-			for (const TCHAR Character : Value.ToLower())
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(PublicReason), TEXT("candidate_query"), MoveTemp(InternalContext), MoveTemp(Subject));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic CandidateCause(FString Code, const FString& Subject, const UE::UAI::Contract::FDiagnostic& Cause, const FString& FallbackReason)
+		{
+			auto Diagnostic = Cause.IsEmpty() ? CandidateDiagnostic(MoveTemp(Code), Subject, FallbackReason)
+				: Contract::FDiagnostic::WrapFailure(MoveTemp(Code), Cause);
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Subject;
+			return Diagnostic;
+		}
+
+		Contract::FDiagnostic MissingIdentity(const FString& Code, const FAnimationBlueprintCandidate& Candidate)
+		{
+			auto Diagnostic = CandidateDiagnostic(Code, Candidate.NodeClassPath,
+				TEXT("The native animation candidate has no server-side identity."));
+			Diagnostic.CandidateName = Candidate.Name;
+			Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			Diagnostic.PropertyPath = TEXT("identity_present");
+			return Diagnostic;
+		}
+
+		void BindDiagnosticTarget(Contract::FDiagnostic& Diagnostic, const FString& NativeTarget, const FString& LogicalTarget)
+		{
+			if (LogicalTarget.IsEmpty()) return;
+			TArray<Contract::FDiagnostic*> Pending{&Diagnostic};
+			while (!Pending.IsEmpty())
 			{
-				if (FChar::IsAlnum(Character))
+				auto& Issue = *Pending.Pop(EAllowShrinking::No);
+				if (Issue.TargetPath.IsEmpty()) Issue.TargetPath = LogicalTarget;
+				else if (!NativeTarget.IsEmpty() && Issue.TargetPath == NativeTarget && NativeTarget != LogicalTarget)
 				{
-					Result.AppendChar(Character);
+					if (Issue.InternalContext.IsEmpty()) Issue.InternalContext = NativeTarget;
+					Issue.TargetPath = LogicalTarget;
+				}
+				for (auto& Child : Issue.Diagnostics) Pending.Add(&Child);
+				if (Issue.PublicCause)
+				{
+					TSharedPtr<Contract::FDiagnostic> Cause = MakeShared<Contract::FDiagnostic>(*Issue.PublicCause);
+					Issue.PublicCause = Cause;
+					Pending.Add(Cause.Get());
 				}
 			}
-			return Result;
 		}
 
 		FString ObjectPath(const FString& Target)
@@ -81,12 +120,29 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 			const FAnimationBlueprintCandidate& Candidate,
 			const FString& Query)
 		{
-			const FString Needle = Normalize(Query);
-			return Needle.IsEmpty()
-				|| Normalize(Candidate.Name + TEXT("|")
-					+ Candidate.Label + TEXT("|")
-					+ Candidate.Category + TEXT("|")
-					+ Candidate.NodeClassPath).Contains(Needle);
+			ContentDiscovery::FContentDiscoveryRequest Request;
+			Request.Query = Query;
+			Request.MatchMode =
+				ContentDiscovery::EContentDiscoveryMatchMode::Text;
+			const TArray<FString> ExtraTerms{
+				Candidate.Name,
+				Candidate.Category,
+				Candidate.NodeClassPath,
+				Candidate.Summary,
+				Candidate.ActionKind,
+				Candidate.Surface,
+				Candidate.Kind,
+				Candidate.SourceOrigin,
+			};
+			int32 MatchScore = 0;
+			FString MatchReason;
+			return ContentDiscovery::TryScoreContentDiscoveryMatch(
+				Request,
+				Candidate.Id,
+				Candidate.Label,
+				ExtraTerms,
+				MatchScore,
+				MatchReason);
 		}
 
 		bool SetCandidateIdentity(
@@ -104,9 +160,17 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 			Identity.Type = Candidate.ActionKind;
 			Identity.FullName = Candidate.NodeClassPath;
 			Identity.ObjectPath = Candidate.NodeClassPath;
-			FString IdentityError;
-			if (Candidate.Name.IsEmpty()
-				|| !UeAgentPaletteSearch::SetCandidateIdentity(
+			UE::UAI::Contract::FDiagnostic IdentityError;
+			if (Candidate.Name.IsEmpty())
+			{
+				auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_identity_failed"), Signature,
+					TEXT("The native animation candidate has no readable name for its identity."));
+				Diagnostic.PropertyPath = TEXT("name");
+				Diagnostic.ActualValue = MakeShared<FJsonValueString>(Candidate.Name);
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty readable candidate name"));
+				return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
+			}
+			if (!UeAgentPaletteSearch::SetCandidateIdentity(
 					CatalogType,
 					Signature,
 					Candidate.NodeClassPath.IsEmpty()
@@ -115,12 +179,10 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 					Identity,
 					IdentityError))
 			{
-				return Fail(
-					OutError,
-					TEXT("animation_blueprint_candidate_identity_failed"),
-					Candidate.Name,
-					IdentityError);
+				return ForwardDiagnostic(OutError, CandidateCause(TEXT("animation_blueprint_candidate_identity_failed"), Candidate.Name, IdentityError,
+					TEXT("The native animation candidate could not be assigned an identity.")), Candidate.Name);
 			}
+			Candidate.Identity = Identity.Identity;
 			Candidate.Id = Identity.GetPublicId();
 			return true;
 		}
@@ -138,19 +200,15 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 			Params.bContextSensitive = true;
 			TArray<UeAgentPaletteSearch::FCandidate> RawCandidates;
 			TArray<FString> Warnings;
-			FString SearchError;
+			UE::UAI::Contract::FDiagnostic SearchError;
 			if (!UeAgentPaletteSearch::CollectBlueprintCandidates(
 					Params, RawCandidates, Warnings, SearchError))
 			{
-				return Fail(
-					OutError,
-					TEXT("animation_blueprint_candidate_catalog_failed"),
-					Graph.GetPathName(),
-					SearchError);
+				return ForwardDiagnostic(OutError, CandidateCause(TEXT("animation_blueprint_candidate_catalog_failed"), Graph.GetPathName(), SearchError,
+					TEXT("The native animation graph candidate catalog could not be collected.")), Graph.GetPathName());
 			}
 
 			OutCandidates.Reset();
-			TSet<FString> SeenIds;
 			for (const UeAgentPaletteSearch::FCandidate& Raw : RawCandidates)
 			{
 				UClass* const NodeClass = FindObject<UClass>(
@@ -163,6 +221,7 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 				}
 
 				FAnimationBlueprintCandidate Candidate;
+				Candidate.Identity = Raw.Identity;
 				Candidate.Id = Raw.GetPublicId();
 				Candidate.Name = Raw.Name;
 				Candidate.Label = Raw.DisplayName.IsEmpty()
@@ -175,6 +234,11 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 				Candidate.Summary = Raw.Tooltip;
 				Candidate.NodeClassPath = NodeClass->GetPathName();
 				Candidate.SourceOrigin = Raw.SourceOrigin;
+				Candidate.NativeSelectors = Raw.AuthoringSelectors;
+				Candidate.SelectionFields.Add(TEXT("class"), NodeClass->GetName());
+				Candidate.SelectionFields.Add(TEXT("class_source"), ContentDiscovery::MakeReadableDiscoveryPath(NodeClass->GetPathName()));
+				if (ContentDiscovery::IsReadableDiscoveryName(Raw.SourceOrigin))
+					Candidate.SelectionFields.Add(TEXT("source"), Raw.SourceOrigin);
 				Candidate.bSupported =
 					NodeClass == UAnimGraphNode_StateMachine::StaticClass();
 				Candidate.WriteSupport = Candidate.bSupported
@@ -183,15 +247,19 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 				Candidate.SupportReason = Candidate.bSupported
 					? FString(TEXT("native_blueprint_node_spawner"))
 					: FString(TEXT("state_machine_node_variant_not_yet_supported"));
-				if (Candidate.Id.IsEmpty() || SeenIds.Contains(Candidate.Id))
+				if (!Candidate.bSupported)
 				{
-					return Fail(
-						OutError,
-						TEXT("animation_blueprint_candidate_identity_ambiguous"),
-						Candidate.Id,
-						Candidate.NodeClassPath);
+					Candidate.SupportDiagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_not_writable"), Candidate.NodeClassPath,
+						TEXT("This animation graph node variant does not support state-machine creation through HJSON."));
+					Candidate.SupportDiagnostic.CandidateName = Candidate.Name;
+					Candidate.SupportDiagnostic.ActualValue = MakeShared<FJsonValueString>(NodeClass->GetName());
+					Candidate.SupportDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(UAnimGraphNode_StateMachine::StaticClass()->GetName());
+					Candidate.SupportDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(Candidate.NodeClassPath);
 				}
-				SeenIds.Add(Candidate.Id);
+				if (Candidate.Id.IsEmpty())
+				{
+					return ForwardDiagnostic(OutError, MissingIdentity(TEXT("animation_blueprint_candidate_identity_ambiguous"), Candidate));
+				}
 				OutCandidates.Add(MoveTemp(Candidate));
 			}
 			Algo::Sort(OutCandidates,
@@ -217,35 +285,39 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 				Cast<UAnimationStateMachineSchema>(Graph.GetSchema());
 			if (!Schema)
 			{
-				return Fail(
-					OutError,
-					TEXT("animation_blueprint_candidate_context_invalid"),
-					Graph.GetPathName(),
-					TEXT("the graph does not use UAnimationStateMachineSchema"));
+				auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_context_invalid"), Graph.GetPathName(),
+					TEXT("The graph does not use the animation state-machine schema."));
+				if (Graph.GetSchema()) Diagnostic.ActualValue = MakeShared<FJsonValueString>(Graph.GetSchema()->GetClass()->GetName());
+				else Diagnostic.ActualValue = MakeShared<FJsonValueNull>();
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(UAnimationStateMachineSchema::StaticClass()->GetName());
+				return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 			}
 
 			FGraphContextMenuBuilder MenuBuilder(&Graph);
 			MenuBuilder.FromPin = nullptr;
 			Schema->GetGraphContextActions(MenuBuilder);
 			OutCatalog.ActionOwner.Reset(MenuBuilder.OwnerOfTemporaries);
-			TSet<FString> SeenIds;
 			for (int32 Index = 0; Index < MenuBuilder.GetNumActions(); ++Index)
 			{
 				const TSharedPtr<FEdGraphSchemaAction> Action =
 					MenuBuilder.GetSchemaAction(Index);
 				if (!Action.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("animation_blueprint_candidate_native_action_invalid"),
-						FString::FromInt(Index));
+					auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_native_action_invalid"), Graph.GetPathName(),
+						TEXT("The state-machine menu returned an empty schema action."));
+					Diagnostic.OperationIndex = Index;
+					Diagnostic.ActualValuePresent = false;
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("native schema action"));
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 				}
 
 				FStateMachineActionEntry& Entry =
 					OutCatalog.Entries.AddDefaulted_GetRef();
 				Entry.Action = Action;
 				FAnimationBlueprintCandidate& Candidate = Entry.Candidate;
-				Candidate.Name = Action->GetMenuDescription().ToString();
+				// Menu descriptions are localized UI text.  TypeId is the stable,
+				// readable schema-action semantic name; identity remains server-side.
+				Candidate.Name = Action->GetTypeId().ToString();
 				Candidate.Label = Candidate.Name;
 				Candidate.Surface = StateMachineGraphSurface;
 				Candidate.Category = Action->GetCategory().ToString();
@@ -274,11 +346,16 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 					}
 					if (NodeTemplate && NodeTemplate != ReferencedNode)
 					{
-						return Fail(
-							OutError,
-							TEXT("animation_blueprint_candidate_native_template_ambiguous"),
-							Candidate.Name,
-							TEXT("the native action references more than one graph-node template"));
+						auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_native_template_ambiguous"), Candidate.Name,
+							TEXT("The native state-machine action references more than one graph-node template."));
+						Diagnostic.CandidateName = Candidate.Name;
+						Diagnostic.ActualValue = MakeShared<FJsonValueNumber>(2);
+						Diagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+						auto Templates = MakeShared<FJsonObject>();
+						Templates->SetStringField(TEXT("first"), NodeTemplate->GetPathName());
+						Templates->SetStringField(TEXT("second"), ReferencedNode->GetPathName());
+						Diagnostic.ActualEvidence = MakeShared<FJsonValueObject>(Templates);
+						return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 					}
 					NodeTemplate = ReferencedNode;
 				}
@@ -287,6 +364,8 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 				{
 					UClass* const NodeClass = NodeTemplate->GetClass();
 					Candidate.NodeClassPath = NodeClass->GetPathName();
+					Candidate.SelectionFields.Add(TEXT("class"), NodeClass->GetName());
+					Candidate.SelectionFields.Add(TEXT("class_source"), ContentDiscovery::MakeReadableDiscoveryPath(Candidate.NodeClassPath));
 					Signature += TEXT("|") + Candidate.NodeClassPath;
 					Candidate.ActionKind = TEXT("state_machine_schema_new_node");
 					if (NodeClass == UAnimStateNode::StaticClass())
@@ -310,11 +389,20 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 					{
 						Candidate.Kind = TEXT("animation_state_machine_node");
 					}
+					const FString KindName = Candidate.Kind == TEXT("animation_state")
+						? TEXT("State") : Candidate.Kind == TEXT("animation_state_alias")
+						? TEXT("State Alias") : Candidate.Kind == TEXT("animation_state_conduit")
+						? TEXT("State Conduit") : Candidate.Kind == TEXT("animation_state_entry")
+						? TEXT("State Entry") : TEXT("State Machine Node");
+					Candidate.Name = KindName;
+					Candidate.Label = KindName;
 				}
 				else
 				{
 					Candidate.Kind = TEXT("animation_state_machine_menu_action");
 					Candidate.ActionKind = TEXT("state_machine_schema_comment");
+					Candidate.Name = TEXT("Comment");
+					Candidate.Label = Candidate.Name;
 					Signature += TEXT("|") + Candidate.Name;
 				}
 				Candidate.WriteSupport = Candidate.bSupported
@@ -323,88 +411,100 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 				Candidate.SupportReason = Candidate.bSupported
 					? FString(TEXT("native_state_machine_schema_action"))
 					: FString(TEXT("native_action_has_no_current_hjson_create_contract"));
+				if (!Candidate.bSupported)
+				{
+					Candidate.SupportDiagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_not_writable"), Candidate.NodeClassPath,
+						TEXT("This native state-machine action has no HJSON creation contract."));
+					Candidate.SupportDiagnostic.CandidateName = Candidate.Name;
+					Candidate.SupportDiagnostic.ActualValue = MakeShared<FJsonValueString>(Candidate.Kind);
+					Candidate.SupportDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("animation_state"));
+					Candidate.SupportDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(Candidate.NodeClassPath);
+				}
 				if (!SetCandidateIdentity(
 						TEXT("animation_state_machine_graph"),
 						Signature,
 						Candidate,
-						OutError)
-					|| SeenIds.Contains(Candidate.Id))
+						OutError))
 				{
-					return Candidate.Id.IsEmpty()
-						? false
-						: Fail(
-							OutError,
-							TEXT("animation_blueprint_candidate_identity_ambiguous"),
-							Candidate.Id,
-							Candidate.Name);
+					return false;
 				}
-				SeenIds.Add(Candidate.Id);
+				if (Candidate.Id.IsEmpty())
+				{
+					return ForwardDiagnostic(OutError, MissingIdentity(TEXT("animation_blueprint_candidate_identity_missing"), Candidate));
+				}
 			}
 			return true;
 		}
 
-		bool MatchSelector(
-			const FAnimationBlueprintCandidate& Candidate,
-			const FString& Name,
-			const FString& Id)
-		{
-			const FString CleanName = Name.TrimStartAndEnd();
-			const FString CleanId = Id.TrimStartAndEnd();
-			const bool bIdMatches = CleanId.IsEmpty()
-				|| Candidate.Id.Equals(CleanId, ESearchCase::IgnoreCase);
-			const bool bNameMatches = CleanName.IsEmpty()
-				|| Candidate.Name.Equals(CleanName, ESearchCase::IgnoreCase)
-				|| Candidate.Label.Equals(CleanName, ESearchCase::IgnoreCase)
-				|| Candidate.NodeClassPath.Equals(
-					CleanName, ESearchCase::IgnoreCase);
-			return bIdMatches && bNameMatches;
-		}
-
-		template <typename EntryType>
+			template <typename EntryType>
 		bool ResolveEntry(
 			const TArray<EntryType>& Entries,
 			const FString& Name,
-			const FString& Id,
 			const EntryType*& OutEntry,
-			FAnimationBlueprintCandidateQueryError& OutError)
+			FAnimationBlueprintCandidateQueryError& OutError,
+			const TMap<FString, FString>& Select)
 		{
 			OutEntry = nullptr;
-			TArray<const EntryType*> Matches;
-			for (const EntryType& Entry : Entries)
+			const FString CleanName = Name.TrimStartAndEnd();
+			if (CleanName.IsEmpty() && Select.IsEmpty())
 			{
-				if (MatchSelector(Entry.Candidate, Name, Id)
-					&& (!Name.TrimStartAndEnd().IsEmpty()
-						|| !Id.TrimStartAndEnd().IsEmpty()
-						|| Entry.Candidate.bSupported))
+				TArray<ContentDiscovery::FNameSelectionEntry> Choices;
+				TArray<int32> SupportedIndices;
+				for (const EntryType& Entry : Entries)
 				{
-					Matches.Add(&Entry);
+					const int32 Index = Choices.Add({Entry.Candidate.Name,
+						Entry.Candidate.Identity.CanonicalKey, Entry.Candidate.SelectionFields});
+					if (Entry.Candidate.bSupported)
+					{
+						SupportedIndices.Add(Index);
+					}
 				}
+				// Internal seed selection has the same equivalence rules as public named selection.
+				TArray<ContentDiscovery::FNameSelectionGroup> SupportedGroups;
+				UE::UAI::Contract::FDiagnostic GroupError;
+				if (!ContentDiscovery::TryGroupNameSelectionEntries(Choices, SupportedIndices, SupportedGroups, GroupError))
+					return ForwardDiagnostic(OutError, GroupError);
+				if (SupportedGroups.Num() == 1)
+				{
+					OutEntry = &Entries[SupportedGroups[0].EntryIndices[0]];
+					return true;
+				}
+				auto Diagnostic = CandidateDiagnostic(SupportedGroups.IsEmpty()
+						? FString(TEXT("animation_blueprint_candidate_not_found"))
+						: FString(TEXT("animation_blueprint_candidate_ambiguous")), FString(),
+					SupportedGroups.IsEmpty() ? TEXT("The native catalog has no supported candidate for implicit selection.")
+						: TEXT("Implicit selection requires exactly one supported candidate; provide a candidate name or selection fields."));
+				Diagnostic.PropertyPath = TEXT("supported_candidate_count");
+				Diagnostic.ActualValue = MakeShared<FJsonValueNumber>(SupportedGroups.Num());
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+				if (!SupportedGroups.IsEmpty()) Diagnostic.SourceKind.Reset();
+				return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 			}
-			if (Matches.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("animation_blueprint_candidate_not_found"),
-					Id.IsEmpty() ? Name : Id);
+				TArray<ContentDiscovery::FNameSelectionEntry> Choices;
+				for (const EntryType& Entry : Entries)
+				{
+					Choices.Add({Entry.Candidate.Name, Entry.Candidate.Identity.CanonicalKey, Entry.Candidate.SelectionFields});
+				}
+				int32 ResolvedIndex = INDEX_NONE;
+				UE::UAI::Contract::FDiagnostic ResolveError;
+				if (!ContentDiscovery::TryResolveNameSelection(Choices, CleanName, Select, ResolvedIndex, ResolveError, ContentDiscovery::ENameComparison::IgnoreCase))
+					return ForwardDiagnostic(OutError, ResolveError, CleanName);
+				if (!Entries.IsValidIndex(ResolvedIndex))
+				{
+					auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_not_found"), CleanName,
+						TEXT("The native candidate resolver returned an index outside the catalog."));
+					Diagnostic.CandidateName = CleanName;
+					Diagnostic.ActualValue = MakeShared<FJsonValueNumber>(ResolvedIndex);
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(FString::Printf(TEXT("index from 0 through %d in a catalog of %d entries"), Entries.Num() - 1, Entries.Num()));
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
+				}
+				const EntryType& Selected = Entries[ResolvedIndex];
+				if (!Selected.Candidate.bSupported)
+					return ForwardDiagnostic(OutError, Selected.Candidate.SupportDiagnostic, Selected.Candidate.Name);
+				OutEntry = &Selected;
+				return true;
 			}
-			if (Matches.Num() != 1)
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_blueprint_candidate_ambiguous"),
-					Name,
-					TEXT("use exact candidate id"));
-			}
-			if (!Matches[0]->Candidate.bSupported)
-			{
-				return Fail(
-					OutError,
-					TEXT("animation_blueprint_candidate_not_writable"),
-					Matches[0]->Candidate.Id,
-					Matches[0]->Candidate.SupportReason);
-			}
-			OutEntry = Matches[0];
-			return true;
 		}
 
 		void RetireScratch(TStrongObjectPtr<UAnimBlueprint>& Scratch)
@@ -429,7 +529,10 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 				ClassSettings.IsValid()
 					? ClassSettings
 					: MakeShared<FJsonObject>());
-			FString NativeError;
+			UE::UAI::Contract::FDiagnostic NativeError;
+			UeAgentAnimationAuthoring::FFactorySeedDiagnosticSource SeedSource;
+			SeedSource.Settings.JsonPath = TEXT("/class_settings");
+			SeedSource.InputSourceKind = TEXT("command_input");
 			UObject* const Object = UeAgentAnimationAuthoring::CreateFactorySeed(
 				UeAgentAnimationAuthoring::EAssetKind::AnimBlueprint,
 				GetTransientPackage(),
@@ -437,15 +540,12 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 					+ FGuid::NewGuid().ToString(EGuidFormats::Digits)),
 				RF_Transient,
 				SeedDocument,
-				NativeError);
+				NativeError, SeedSource);
 			OutScratch.Reset(Cast<UAnimBlueprint>(Object));
 			if (!OutScratch.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("animation_blueprint_candidate_context_create_failed"),
-					TEXT("AnimBlueprint"),
-					NativeError);
+				return ForwardDiagnostic(OutError, CandidateCause(TEXT("animation_blueprint_candidate_context_create_failed"), TEXT("AnimBlueprint"), NativeError,
+					TEXT("The AnimBlueprint factory did not create a candidate-query context.")), TEXT("AnimBlueprint"));
 			}
 			return true;
 		}
@@ -453,42 +553,26 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 		void ProjectPage(
 			TArray<FAnimationBlueprintCandidate>&& Catalog,
 			const FString& Query,
-			const FString& CandidateId,
-			const int32 Limit,
-			const int32 Cursor,
 			FAnimationBlueprintCandidateQueryResult& OutResult,
 			FAnimationBlueprintCandidateQueryError& OutError)
 		{
-			const FString CleanId = CandidateId.TrimStartAndEnd();
-			TArray<FAnimationBlueprintCandidate> Matches;
-			for (FAnimationBlueprintCandidate& Candidate : Catalog)
+			TArray<int32> MatchedIndices;
+			for (int32 CatalogIndex = 0; CatalogIndex < Catalog.Num(); ++CatalogIndex)
 			{
-				if ((!CleanId.IsEmpty()
-						&& !Candidate.Id.Equals(
-							CleanId, ESearchCase::IgnoreCase))
-					|| !MatchesQuery(Candidate, Query))
+				if (MatchesQuery(Catalog[CatalogIndex], Query))
 				{
-					continue;
+					MatchedIndices.Add(CatalogIndex);
 				}
-				Matches.Add(MoveTemp(Candidate));
 			}
-			if (!CleanId.IsEmpty() && Matches.IsEmpty())
+			for (int32 MatchIndex = 0; MatchIndex < MatchedIndices.Num(); ++MatchIndex)
 			{
-				Fail(
-					OutError,
-					TEXT("animation_blueprint_candidate_not_found"),
-					CleanId);
-				return;
+				FAnimationBlueprintCandidate& Candidate =
+					Catalog[MatchedIndices[MatchIndex]];
+				OutResult.Candidates.Add(MoveTemp(Candidate));
 			}
-			OutResult.TotalMatches = Matches.Num();
-			const int32 End = FMath::Min(Cursor + Limit, Matches.Num());
-			for (int32 Index = Cursor; Index < End; ++Index)
-			{
-				OutResult.Candidates.Add(MoveTemp(Matches[Index]));
-			}
-			OutResult.bHasMore = End < Matches.Num();
-			OutResult.NextCursor = OutResult.bHasMore ? End : INDEX_NONE;
-			OutResult.bComplete = !OutResult.bHasMore;
+			OutResult.TotalMatches = MatchedIndices.Num();
+			if (!OutResult.CatalogDiagnostic.IsEmpty() && OutResult.CatalogDiagnostic.TargetPath.IsEmpty())
+				OutResult.CatalogDiagnostic.TargetPath = OutResult.Target;
 		}
 	}
 
@@ -498,69 +582,77 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 		const TSharedPtr<FJsonObject>& ClassSettings,
 		const FString& Query,
 		FAnimationBlueprintCandidateQueryResult& OutResult,
-		FAnimationBlueprintCandidateQueryError& OutError,
-		const int32 Limit,
-		const int32 Cursor,
-		const FString& CandidateId)
+		FAnimationBlueprintCandidateQueryError& OutError)
 	{
 		OutResult = {};
 		OutError = {};
+		FString NativeTarget;
+		auto FailQuery = [&](Contract::FDiagnostic Diagnostic)
+		{
+			BindDiagnosticTarget(Diagnostic, NativeTarget, Target.TrimStartAndEnd());
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
+		};
 		if (!IsInGameThread())
 		{
-			return Fail(
-				OutError,
-				TEXT("animation_blueprint_candidate_game_thread_required"),
-				Target);
+			auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_game_thread_required"), Target,
+				TEXT("Animation candidate discovery requires the game thread."));
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(TEXT("other_thread"));
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("game_thread"));
+			return FailQuery(MoveTemp(Diagnostic));
 		}
 		if (Target.TrimStartAndEnd().IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("animation_blueprint_candidate_target_required"));
-		}
-		if (Limit < 1 || Limit > 64 || Cursor < 0)
-		{
-			return Fail(
-				OutError,
-				TEXT("animation_blueprint_candidate_page_invalid"),
-				Target,
-				TEXT("limit must be 1..64 and cursor must be non-negative"));
+			auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_target_required"), FString(),
+				TEXT("Animation candidate discovery requires a non-empty target asset reference."));
+			Diagnostic.SourceKind = TEXT("command_input");
+			Diagnostic.Source.JsonPath = TEXT("/target");
+			Diagnostic.PropertyPath = TEXT("target");
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(Target);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty asset reference"));
+			return FailQuery(MoveTemp(Diagnostic));
 		}
 		const FString CleanSurface = Surface.TrimStartAndEnd().ToLower();
 		if (CleanSurface != AnimationGraphSurface
 			&& CleanSurface != StateMachineGraphSurface)
 		{
-			return Fail(
-				OutError,
-				TEXT("animation_blueprint_candidate_surface_invalid"),
-				Surface,
-				TEXT("use animation_graph or state_machine_graph"));
+			auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_surface_invalid"), Surface,
+				TEXT("The requested animation candidate surface is not supported."));
+			Diagnostic.SourceKind = TEXT("command_input");
+			Diagnostic.Source.JsonPath = TEXT("/surface");
+			Diagnostic.PropertyPath = TEXT("surface");
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(Surface);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+				MakeShared<FJsonValueString>(AnimationGraphSurface), MakeShared<FJsonValueString>(StateMachineGraphSurface)});
+			return FailQuery(MoveTemp(Diagnostic));
 		}
 		if (StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath(Target)))
 		{
-			return Fail(
-				OutError,
-				TEXT("animation_blueprint_candidate_target_already_exists"),
-				Target,
-				TEXT("T16 candidate query currently binds only a missing create target"));
+			auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_target_already_exists"), Target,
+				TEXT("Animation candidate discovery currently requires a target asset that does not yet exist."));
+			Diagnostic.PropertyPath = TEXT("target_exists");
+			Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(true);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+			return FailQuery(MoveTemp(Diagnostic));
 		}
 
 		TStrongObjectPtr<UAnimBlueprint> Scratch;
 		if (!CreateScratch(ClassSettings, Scratch, OutError))
 		{
-			return false;
+			return FailQuery(MoveTemp(OutError));
 		}
+		NativeTarget = Scratch->GetPathName();
+		UeAgentBlueprintAssetLifecycle::SetAuthoringContext(*Scratch, Target.TrimStartAndEnd(), nullptr);
 		UEdGraph* const AnimGraph =
 			UeAgentAnimBlueprintOps::ResolveAnyAnimBlueprintGraph(
 				Scratch.Get(), TEXT("AnimGraph"));
 		if (!AnimGraph)
 		{
 			RetireScratch(Scratch);
-			return Fail(
-				OutError,
-				TEXT("animation_blueprint_candidate_context_invalid"),
-				Target,
-				TEXT("the factory seed did not create AnimGraph"));
+			auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_context_invalid"), Target,
+				TEXT("The AnimBlueprint factory seed did not create its animation graph."));
+			Diagnostic.ActualValuePresent = false;
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("AnimGraph"));
+			return FailQuery(MoveTemp(Diagnostic));
 		}
 
 		TArray<FAnimationBlueprintCandidate> Catalog;
@@ -570,16 +662,8 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 					*Scratch, *AnimGraph, Catalog, OutError))
 			{
 				RetireScratch(Scratch);
-				return false;
+				return FailQuery(MoveTemp(OutError));
 			}
-			OutResult.CoverageScope = AnimationGraphCoverage;
-			OutResult.bCoverageComplete = true;
-			OutResult.bCreationCoverageComplete =
-				!Catalog.ContainsByPredicate(
-					[](const FAnimationBlueprintCandidate& Candidate)
-					{
-						return !Candidate.bSupported;
-					});
 		}
 		else
 		{
@@ -589,25 +673,28 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 					*Scratch,
 					*AnimGraph,
 					FString(),
-					FString(),
 					FVector2f::ZeroVector,
 					MachineNode,
 					MachineCandidate,
 					OutError))
 			{
 				RetireScratch(Scratch);
-				return false;
+				return FailQuery(MoveTemp(OutError));
 			}
 			UAnimGraphNode_StateMachine* const StateMachineNode =
 				Cast<UAnimGraphNode_StateMachine>(MachineNode);
 			if (!StateMachineNode || !StateMachineNode->EditorStateMachineGraph)
 			{
+				auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_context_invalid"), Target,
+					!StateMachineNode ? TEXT("The native spawner did not create an animation StateMachine node.")
+						: TEXT("The native StateMachine node has no editor state-machine graph."));
+				auto Actual = MakeShared<FJsonObject>();
+				Actual->SetBoolField(TEXT("state_machine_node_present"), StateMachineNode != nullptr);
+				Actual->SetBoolField(TEXT("state_machine_graph_present"), StateMachineNode && StateMachineNode->EditorStateMachineGraph != nullptr);
+				Diagnostic.ActualValue = MakeShared<FJsonValueObject>(Actual);
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("StateMachine node with an editor state-machine graph"));
 				RetireScratch(Scratch);
-				return Fail(
-					OutError,
-					TEXT("animation_blueprint_candidate_context_invalid"),
-					Target,
-					TEXT("the native StateMachine spawner did not create its graph"));
+				return FailQuery(MoveTemp(Diagnostic));
 			}
 			FStateMachineActionCatalog NativeCatalog;
 			if (!BuildStateMachineGraphCatalog(
@@ -616,15 +703,12 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 					OutError))
 			{
 				RetireScratch(Scratch);
-				return false;
+				return FailQuery(MoveTemp(OutError));
 			}
 			for (FStateMachineActionEntry& Entry : NativeCatalog.Entries)
 			{
 				Catalog.Add(MoveTemp(Entry.Candidate));
 			}
-			OutResult.CoverageScope = StateMachineGraphCoverage;
-			OutResult.bCoverageComplete = true;
-			OutResult.bCreationCoverageComplete = false;
 		}
 
 		OutResult.Target = Target.TrimStartAndEnd();
@@ -633,9 +717,6 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 		ProjectPage(
 			MoveTemp(Catalog),
 			Query,
-			CandidateId,
-			Limit,
-			Cursor,
 			OutResult,
 			OutError);
 		RetireScratch(Scratch);
@@ -646,20 +727,25 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 		UAnimBlueprint& Blueprint,
 		UEdGraph& Graph,
 		const FString& Name,
-		const FString& Id,
 		const FVector2f& Location,
 		UEdGraphNode*& OutNode,
 		FAnimationBlueprintCandidate& OutCandidate,
-		FAnimationBlueprintCandidateQueryError& OutError)
+		FAnimationBlueprintCandidateQueryError& OutError,
+		const TMap<FString, FString>& Select)
 	{
 		OutNode = nullptr;
 		OutCandidate = {};
 		OutError = {};
+		auto ForwardFailure = [&](Contract::FDiagnostic Diagnostic)
+		{
+			BindDiagnosticTarget(Diagnostic, Blueprint.GetPathName(), UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint));
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
+		};
 		TArray<FAnimationBlueprintCandidate> Catalog;
 		if (!BuildAnimationGraphCatalog(
 				Blueprint, Graph, Catalog, OutError))
 		{
-			return false;
+			return ForwardFailure(MoveTemp(OutError));
 		}
 		struct FProjectedEntry final
 		{
@@ -671,8 +757,9 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 			Entries.Add({MoveTemp(Candidate)});
 		}
 		const FProjectedEntry* Selected = nullptr;
-		if (!ResolveEntry(Entries, Name, Id, Selected, OutError))
+		if (!ResolveEntry(Entries, Name, Selected, OutError, Select))
 		{
+			OutError = UeAgentAuthoringDiagnostics::CandidateFailure(OutError.Code, Name, UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint), FString::Printf(TEXT("animation graph '%s'"), *Graph.GetName()), TEXT("animation.state_machine.candidates"), OutError);
 			return false;
 		}
 
@@ -681,22 +768,19 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 		Params.AssetPath = Blueprint.GetPathName();
 		Params.GraphName = Graph.GetName();
 		Params.bContextSensitive = true;
+		Params.RequiredAuthoringSelectors = Selected->Candidate.NativeSelectors;
 		UeAgentPaletteSearch::FCandidate NativeCandidate;
-		FString NativeError;
+		UE::UAI::Contract::FDiagnostic NativeError;
 		if (!UeAgentPaletteSearch::TryPerformBlueprintActionCandidate(
 				Params,
 				Selected->Candidate.Name,
-				Selected->Candidate.Id,
+				FString(),
 				Location,
 				OutNode,
 				NativeCandidate,
 				NativeError))
 		{
-			return Fail(
-				OutError,
-				TEXT("animation_blueprint_candidate_create_failed"),
-				Selected->Candidate.Id,
-				NativeError);
+			return ForwardFailure(MoveTemp(NativeError));
 		}
 		OutCandidate = Selected->Candidate;
 		return true;
@@ -705,23 +789,31 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 	bool TryPerformStateMachineGraphCandidate(
 		UAnimationStateMachineGraph& Graph,
 		const FString& Name,
-		const FString& Id,
 		const FVector2f& Location,
 		UEdGraphNode*& OutNode,
 		FAnimationBlueprintCandidate& OutCandidate,
-		FAnimationBlueprintCandidateQueryError& OutError)
+		FAnimationBlueprintCandidateQueryError& OutError,
+		const TMap<FString, FString>& Select)
 	{
 		OutNode = nullptr;
 		OutCandidate = {};
 		OutError = {};
+		const UBlueprint* Blueprint = Graph.GetTypedOuter<UBlueprint>();
+		const FString TargetPath = Blueprint ? UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Blueprint) : FString();
+		auto ForwardFailure = [&](Contract::FDiagnostic Diagnostic)
+		{
+			BindDiagnosticTarget(Diagnostic, Blueprint ? Blueprint->GetPathName() : FString(), TargetPath);
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
+		};
 		FStateMachineActionCatalog Catalog;
 		if (!BuildStateMachineGraphCatalog(Graph, Catalog, OutError))
 		{
-			return false;
+			return ForwardFailure(MoveTemp(OutError));
 		}
 		const FStateMachineActionEntry* Selected = nullptr;
-		if (!ResolveEntry(Catalog.Entries, Name, Id, Selected, OutError))
+		if (!ResolveEntry(Catalog.Entries, Name, Selected, OutError, Select))
 		{
+			OutError = UeAgentAuthoringDiagnostics::CandidateFailure(OutError.Code, Name, TargetPath, TEXT("state-machine graph"), TEXT("animation.state_machine.candidates"), OutError);
 			return false;
 		}
 		TSet<UEdGraphNode*> ExistingNodes;
@@ -734,13 +826,6 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 		}
 		OutNode = Selected->Action->PerformAction(
 			&Graph, nullptr, Location, false);
-		if (!OutNode)
-		{
-			return Fail(
-				OutError,
-				TEXT("animation_blueprint_candidate_create_failed"),
-				Selected->Candidate.Id);
-		}
 		TArray<UEdGraphNode*> CreatedNodes;
 		for (UEdGraphNode* Current : Graph.Nodes)
 		{
@@ -749,14 +834,39 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 				CreatedNodes.Add(Current);
 			}
 		}
+		if (!OutNode)
+		{
+			auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_create_failed"), Selected->Candidate.Id,
+				TEXT("The native state-machine action did not return a graph node."));
+			Diagnostic.CandidateName = Selected->Candidate.Name;
+			auto Actual = MakeShared<FJsonObject>();
+			Actual->SetBoolField(TEXT("returned_node_present"), false);
+			Actual->SetNumberField(TEXT("new_nodes"), CreatedNodes.Num());
+			Diagnostic.ActualValue = MakeShared<FJsonValueObject>(Actual);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("one returned graph node"));
+			Diagnostic.MutationMayHaveStarted = true;
+			if (!CreatedNodes.IsEmpty()) Diagnostic.MutationStarted = true;
+			return ForwardFailure(MoveTemp(Diagnostic));
+		}
 		if (CreatedNodes.Num() != 1 || CreatedNodes[0] != OutNode)
 		{
+			auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_result_shape_unsupported"), Selected->Candidate.Id,
+				CreatedNodes.Num() != 1 ? TEXT("The native state-machine action did not create exactly one graph node.")
+					: TEXT("The returned state-machine node differs from the graph's newly created node."));
+			Diagnostic.CandidateName = Selected->Candidate.Name;
+			auto Actual = MakeShared<FJsonObject>();
+			Actual->SetNumberField(TEXT("new_nodes"), CreatedNodes.Num());
+			Actual->SetBoolField(TEXT("returned_node_is_new"), CreatedNodes.Contains(OutNode));
+			auto Expected = MakeShared<FJsonObject>();
+			Expected->SetNumberField(TEXT("new_nodes"), 1);
+			Expected->SetBoolField(TEXT("returned_node_is_new"), true);
+			Diagnostic.ActualValue = MakeShared<FJsonValueObject>(Actual);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueObject>(Expected);
+			Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(OutNode->GetPathName());
+			Diagnostic.MutationMayHaveStarted = true;
+			if (!CreatedNodes.IsEmpty()) Diagnostic.MutationStarted = true;
 			OutNode = nullptr;
-			return Fail(
-				OutError,
-				TEXT("animation_blueprint_candidate_result_shape_unsupported"),
-				Selected->Candidate.Id,
-				FString::FromInt(CreatedNodes.Num()));
+			return ForwardFailure(MoveTemp(Diagnostic));
 		}
 		OutCandidate = Selected->Candidate;
 		return true;

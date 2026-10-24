@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringPropertyValues.h"
@@ -18,6 +20,7 @@ class UScriptStruct;
 
 namespace UeAgentAuthoringNativeDefaults
 {
+	using FDiagnostic = UE::UAI::Contract::FDiagnostic;
 	enum class EOperation : uint8
 	{
 		Update,
@@ -60,13 +63,13 @@ namespace UeAgentAuthoringNativeDefaults
 		FScratchScope(const FScratchScope&) = delete;
 		FScratchScope& operator=(const FScratchScope&) = delete;
 
-		UPackage* CreateScratchPackage(FString& OutError);
+		UPackage* CreateScratchPackage(FDiagnostic& OutError);
 		UObject* CreateObject(
 			UClass* ObjectClass,
 			UObject* Outer,
 			UObject* ArchetypeOrTemplate,
-			FString& OutError);
-		bool AdoptObjectFromScratchPackage(UObject* Object, FString& OutError);
+			FDiagnostic& OutError);
+		bool AdoptObjectFromScratchPackage(UObject* Object, FDiagnostic& OutError);
 		bool Contains(const UObject* Object) const;
 		int32 NumTrackedObjects() const;
 		void Cleanup();
@@ -111,7 +114,7 @@ namespace UeAgentAuthoringNativeDefaults
 		const FRequest& Request,
 		FScratchScope& Scratch,
 		FProbeValue& OutValue,
-		FString& OutError)>;
+		FDiagnostic& OutError)>;
 
 	struct UEAGENTINTERFACE_API FProviderDescriptor
 	{
@@ -138,7 +141,7 @@ namespace UeAgentAuthoringNativeDefaults
 			const FProviderDescriptor& Descriptor,
 			FProbe Probe,
 			ERegistrationResult& OutResult,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool FindProvider(const FString& ProviderId, FProviderDescriptor& OutDescriptor) const;
 		TArray<FProviderDescriptor> ListProviders() const;
 		int32 GetProviderCount() const;
@@ -160,7 +163,7 @@ namespace UeAgentAuthoringNativeDefaults
 		FString ProviderId;
 		UeAgentAuthoringSemanticRegistry::EDefaultSourceKind SourceKind = UeAgentAuthoringSemanticRegistry::EDefaultSourceKind::None;
 		FString Outcome;
-		FString ErrorCode;
+		FDiagnostic Diagnostic;
 	};
 
 	struct UEAGENTINTERFACE_API FDiagnosticCandidate
@@ -174,8 +177,7 @@ namespace UeAgentAuthoringNativeDefaults
 	struct UEAGENTINTERFACE_API FResult
 	{
 		FString Status;
-		FString ErrorCode;
-		FString ErrorDetail;
+		FDiagnostic Diagnostic;
 		EOperation Operation = EOperation::Create;
 		bool bPreserveExisting = false;
 		bool bDeferredUntilPostCreate = false;
@@ -194,7 +196,7 @@ namespace UeAgentAuthoringNativeDefaults
 		TSharedRef<FJsonObject> ToJsonObject(bool bIncludeValue = false) const;
 	};
 
-	UEAGENTINTERFACE_API bool RegisterBuiltInProviders(FProviderRegistry& Registry, FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterBuiltInProviders(FProviderRegistry& Registry, UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool BuildPropertyRequest(
 		UObject* Object,

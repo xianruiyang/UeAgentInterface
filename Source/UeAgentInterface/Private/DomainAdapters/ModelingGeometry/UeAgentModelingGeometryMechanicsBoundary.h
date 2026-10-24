@@ -1,17 +1,15 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingSession.h"
 
 class FJsonObject;
 
 namespace UE::UAI::DomainAdapters::ModelingGeometry
 {
-	struct FModelingSessionNativeRequest
-	{
-		FString RequestId;
-		FString CommandId;
-		TSharedPtr<FJsonObject> Params;
-	};
+	using FModelingSessionNativeRequest = FModelingSessionRequest;
 
 	class IUeAgentModelingSessionNativeMechanicsPort
 	{
@@ -22,7 +20,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry
 			const FString& Action,
 			const FModelingSessionNativeRequest& Request,
 			TSharedPtr<FJsonObject>& OutObservation,
-			FString& OutError) const = 0;
+			UE::UAI::Contract::FDiagnostic& OutError) const = 0;
 	};
 
 	UEAGENTINTERFACE_API const TArray<FString>& GetCommandIds();

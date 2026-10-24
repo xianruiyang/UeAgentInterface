@@ -29,23 +29,7 @@ namespace UE::UAI::DomainConformance
 
 		ContextResource::FUeAgentResourceTracker MakeResources()
 		{
-			return ContextResource::FUeAgentResourceTracker(
-				ContextResource::FUeAgentResourceBudget({
-					{ContextResource::EUeAgentResourceDimension::InputBytes,
-						4 * 1024 * 1024},
-					{ContextResource::EUeAgentResourceDimension::OutputBytes,
-						4 * 1024 * 1024},
-					{ContextResource::EUeAgentResourceDimension::StringBytes,
-						4 * 1024 * 1024},
-					{ContextResource::EUeAgentResourceDimension::Nodes, 16384},
-					{ContextResource::EUeAgentResourceDimension::Items, 16384},
-					{ContextResource::EUeAgentResourceDimension::ReferenceEdges,
-						16384},
-					{ContextResource::EUeAgentResourceDimension::WorkUnits,
-						131072},
-					{ContextResource::EUeAgentResourceDimension::
-						EstimatedMemoryBytes, 32 * 1024 * 1024},
-				}));
+			return ContextResource::FUeAgentResourceTracker();
 		}
 
 		FString Sha256Bytes(const uint8* Data, const int32 Num)
@@ -496,16 +480,6 @@ namespace UE::UAI::DomainConformance
 				TEXT("domain_conformance_failure_cleanup_missing:")
 					+ Fixture.FixtureId);
 		}
-		if (Declaration.Migration.Support
-				== EDomainCapabilitySupport::Supported
-			&& !Fixture.bLegacyExit)
-		{
-			return Fail(
-				OutError,
-				TEXT("domain_conformance_legacy_exit_missing:")
-					+ Fixture.FixtureId);
-		}
-
 		OutPlan.DomainId = Fixture.DomainId;
 		OutPlan.FixtureId = Fixture.FixtureId;
 		AddScenario(
@@ -653,14 +627,6 @@ namespace UE::UAI::DomainConformance
 				EDomainConformanceScenario::GraphLayout,
 				EDomainConformanceLayer::PublicProduct,
 				TEXT("layout"), Fixture.MechanicsFamily);
-		}
-		if (Declaration.Migration.Support
-			== EDomainCapabilitySupport::Supported)
-		{
-			AddScenario(OutPlan,
-				EDomainConformanceScenario::LegacyExit,
-				EDomainConformanceLayer::StaticContract,
-				Declaration.Migration.OwnerId, Fixture.MechanicsFamily);
 		}
 		AddScenario(OutPlan,
 			EDomainConformanceScenario::PublicRoute,

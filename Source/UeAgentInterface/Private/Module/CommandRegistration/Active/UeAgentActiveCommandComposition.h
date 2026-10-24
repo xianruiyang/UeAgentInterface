@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/Command/UeAgentCommandContractModel.h"
@@ -23,12 +25,12 @@ namespace UE::UAI::Module::CommandRegistration::Active
 				Registry,
 			TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>&
 				OutHandlers,
-			FString& OutError) const = 0;
+			UE::UAI::Contract::FDiagnostic& OutError) const = 0;
 	};
 
 	using FUeAgentActiveCommandContributionFactory = bool (*)(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	class UEAGENTINTERFACE_API
 		FUeAgentActiveCommandContributionFactoryRegistration final
@@ -48,7 +50,7 @@ namespace UE::UAI::Module::CommandRegistration::Active
 	public:
 		bool TryAdd(
 			TSharedRef<IUeAgentActiveCommandContribution> Contribution,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		bool TryCompose(
 			TSharedPtr<
@@ -56,7 +58,7 @@ namespace UE::UAI::Module::CommandRegistration::Active
 				OutRegistry,
 			TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>&
 				OutDispatch,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		bool IsSealed() const;
 
@@ -73,7 +75,7 @@ namespace UE::UAI::Module::CommandRegistration::Active
 			OutRegistry,
 		TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>&
 			OutDispatch,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryComposeActiveCommandContributions(
 		const TArray<TSharedRef<IUeAgentActiveCommandContribution>>&
@@ -83,6 +85,6 @@ namespace UE::UAI::Module::CommandRegistration::Active
 			OutRegistry,
 		TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>&
 			OutDispatch,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 }

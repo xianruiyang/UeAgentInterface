@@ -1,7 +1,12 @@
 #include "DomainAdapters/CompileBuildJob/UeAgentCompileBuildJobProduction.h"
 
 #include "Async/Async.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Core/ArtifactPublisher/UeAgentFileArtifactPublisher.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
+#include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
 
 namespace UE::UAI::DomainAdapters::CompileBuildJob
@@ -13,16 +18,65 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		using namespace ExecutionMutation;
 		using namespace StateSemantic;
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
+		FExecutionMutationError JobFact(const TCHAR* Code, const FString& Reason,
+			const FString& Path, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const FUeAgentCompileBuildJobTypedRequest* Request = nullptr,
+			const TCHAR* Stage = TEXT("native_execution"))
 		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code), MoveTemp(Detail));
-			return false;
+			auto Error = FExecutionMutationError::Failure(Code, Reason, Stage);
+			Error.PropertyPath = Path;
+			Error.SemanticPointer = Path;
+			Error.SourceKind = TEXT("native_result");
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			if (Request)
+			{
+				Error.TargetPath = Request->GetSubjectRef();
+				Error.CandidateName = Request->GetPolicyId();
+			}
+			return Error;
 		}
 
+		void SetRequestContext(FExecutionMutationError& Error, const FUeAgentCompileBuildJobTypedRequest& Request)
+		{
+			if (Error.TargetPath.IsEmpty()) Error.TargetPath = Request.GetSubjectRef();
+			if (Error.CandidateName.IsEmpty()) Error.CandidateName = Request.GetPolicyId();
+		}
+
+		TSharedPtr<FJsonValue> FamilyValue(EUeAgentCompileBuildJobFamily Family)
+		{
+			if (const auto* Contract = FindCompileBuildJobFamilyContract(Family))
+				return MakeShared<FJsonValueString>(Contract->GetFamilyId());
+			return MakeShared<FJsonValueNumber>(static_cast<int32>(Family));
+		}
+
+		TSharedPtr<FJsonValue> PolicyPair(EUeAgentCompileBuildJobFamily Family, const FString& PolicyId)
+		{
+			auto Pair = MakeShared<FJsonObject>();
+			Pair->SetField(TEXT("family"), FamilyValue(Family));
+			Pair->SetStringField(TEXT("policy_id"), PolicyId);
+			return MakeShared<FJsonValueObject>(Pair);
+		}
+
+		TSharedPtr<FJsonValue> FamilyChoices()
+		{
+			TArray<TSharedPtr<FJsonValue>> Items;
+			for (const auto& Contract : GetCompileBuildJobFamilyContracts())
+				Items.Add(MakeShared<FJsonValueString>(Contract.GetFamilyId()));
+			return MakeShared<FJsonValueArray>(MoveTemp(Items));
+		}
+
+		TSharedPtr<FJsonValue> NumberFact(double Value)
+		{
+			if (FMath::IsFinite(Value)) return MakeShared<FJsonValueNumber>(Value);
+			return MakeShared<FJsonValueString>(Value > 0.0 ? TEXT("Infinity") : Value < 0.0 ? TEXT("-Infinity") : TEXT("NaN"));
+		}
+
+		bool Fail(FExecutionMutationError& OutError, FExecutionMutationError Diagnostic)
+		{
+			OutError = MoveTemp(Diagnostic);
+			return false;
+		}
 		bool IsNormalizedNonEmpty(const FString& Value)
 		{
 			FString Normalized = Value;
@@ -30,32 +84,81 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			return !Normalized.IsEmpty() && Normalized == Value;
 		}
 
-		bool MatchesPolicyKind(
-			const EUeAgentCompileBuildJobFamily Family,
-			const FString& PolicyId)
+		FString ExpectedPolicyPrefix(EUeAgentCompileBuildJobFamily Family)
 		{
 			switch (Family)
 			{
-			case EUeAgentCompileBuildJobFamily::AssetCompile:
-				return PolicyId.StartsWith(TEXT("policy:asset-compile:"));
-			case EUeAgentCompileBuildJobFamily::WorldBuild:
-				return PolicyId.StartsWith(TEXT("policy:world-build:"));
-			case EUeAgentCompileBuildJobFamily::ExternalProcess:
-				return PolicyId.StartsWith(TEXT("policy:owned-tool:"));
-			case EUeAgentCompileBuildJobFamily::WorldPartitionResave:
-				return PolicyId.StartsWith(
-					TEXT("policy:world-partition-resave:"));
-			case EUeAgentCompileBuildJobFamily::Packaging:
-				return PolicyId.StartsWith(TEXT("policy:packaging:"));
-			default:
-				return false;
+			case EUeAgentCompileBuildJobFamily::AssetCompile: return TEXT("policy:asset-compile:");
+			case EUeAgentCompileBuildJobFamily::WorldBuild: return TEXT("policy:world-build:");
+			case EUeAgentCompileBuildJobFamily::ExternalProcess: return TEXT("policy:owned-tool:");
+			case EUeAgentCompileBuildJobFamily::WorldPartitionResave: return TEXT("policy:world-partition-resave:");
+			case EUeAgentCompileBuildJobFamily::Packaging: return TEXT("policy:packaging:");
+			default: return FString();
 			}
 		}
 
+		bool MatchesPolicyKind(EUeAgentCompileBuildJobFamily Family, const FString& PolicyId)
+		{
+			const FString Prefix = ExpectedPolicyPrefix(Family);
+			return !Prefix.IsEmpty() && PolicyId.StartsWith(Prefix);
+		}
 		bool IsSupportedMechanism(const FString& MechanismId)
 		{
 			return MechanismId == TEXT("game_thread_stage")
 				|| MechanismId == TEXT("owned_process");
+		}
+
+		bool ValidatePolicy(const FUeAgentCompileBuildJobPolicyDescriptor& Policy, FExecutionMutationError& OutError)
+		{
+			OutError.Reset();
+			const TCHAR* Code = TEXT("compile_build_job_policy_invalid");
+			if (!FindCompileBuildJobFamilyContract(Policy.GetFamily()))
+				return Fail(OutError, JobFact(Code, TEXT("The policy uses an unsupported compile/build family."),
+					TEXT("policy.family"), FamilyValue(Policy.GetFamily()), FamilyChoices(), nullptr, TEXT("runtime_factory")));
+			if (!IsNormalizedNonEmpty(Policy.GetPolicyId()) || !MatchesPolicyKind(Policy.GetFamily(), Policy.GetPolicyId()))
+				return Fail(OutError, JobFact(Code, !IsNormalizedNonEmpty(Policy.GetPolicyId())
+					? TEXT("The policy reference must be non-empty and have no surrounding whitespace.")
+					: TEXT("The policy reference does not match its compile/build family."),
+					TEXT("policy.policy_id"), MakeShared<FJsonValueString>(Policy.GetPolicyId()),
+					MakeShared<FJsonValueString>(ExpectedPolicyPrefix(Policy.GetFamily())), nullptr, TEXT("runtime_factory")));
+			if (!IsSupportedMechanism(Policy.GetNativeMechanismId()))
+			{
+				TArray<TSharedPtr<FJsonValue>> Expected;
+				Expected.Add(MakeShared<FJsonValueString>(TEXT("game_thread_stage")));
+				Expected.Add(MakeShared<FJsonValueString>(TEXT("owned_process")));
+				return Fail(OutError, JobFact(Code, TEXT("The policy uses an unsupported native execution mechanism."),
+					TEXT("policy.native_mechanism_id"), MakeShared<FJsonValueString>(Policy.GetNativeMechanismId()),
+					MakeShared<FJsonValueArray>(MoveTemp(Expected)), nullptr, TEXT("runtime_factory")));
+			}
+			if (!IsNormalizedNonEmpty(Policy.GetReadbackOracleId()) || !Policy.GetReadbackOracleId().StartsWith(TEXT("uai.readback.")))
+				return Fail(OutError, JobFact(Code, !IsNormalizedNonEmpty(Policy.GetReadbackOracleId())
+					? TEXT("The readback contract reference must be non-empty and have no surrounding whitespace.")
+					: TEXT("The readback contract reference must start with 'uai.readback.'."),
+					TEXT("policy.readback_oracle_id"), MakeShared<FJsonValueString>(Policy.GetReadbackOracleId()),
+					MakeShared<FJsonValueString>(TEXT("normalized non-empty reference starting with uai.readback.")), nullptr, TEXT("runtime_factory")));
+			return true;
+		}
+
+		bool ValidateLaunchSpec(const FUeAgentCompileBuildJobProcessLaunchSpec& Spec, FExecutionMutationError& OutError)
+		{
+			OutError.Reset();
+			const TCHAR* Code = TEXT("compile_build_job_process_contract_invalid");
+			if (!IsNormalizedNonEmpty(Spec.GetExecutable()) || !IsNormalizedNonEmpty(Spec.GetWorkingDirectory()))
+			{
+				const bool bExecutable = !IsNormalizedNonEmpty(Spec.GetExecutable());
+				const FString& Value = bExecutable ? Spec.GetExecutable() : Spec.GetWorkingDirectory();
+				auto Error = JobFact(Code, FString::Printf(TEXT("The process %s must be non-empty and have no surrounding whitespace."),
+					bExecutable ? TEXT("executable path") : TEXT("working directory")),
+					bExecutable ? TEXT("launch.executable.normalized_nonempty") : TEXT("launch.working_directory.normalized_nonempty"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), nullptr, TEXT("runtime_factory"));
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Value);
+				return Fail(OutError, MoveTemp(Error));
+			}
+			if (!FMath::IsFinite(Spec.GetTimeoutSeconds()) || Spec.GetTimeoutSeconds() < 0.0)
+				return Fail(OutError, JobFact(Code, TEXT("The process timeout must be a finite, non-negative number of seconds."),
+					TEXT("launch.timeout_seconds"), NumberFact(Spec.GetTimeoutSeconds()),
+					MakeShared<FJsonValueString>(TEXT("finite number >= 0 seconds")), nullptr, TEXT("runtime_factory")));
+			return true;
 		}
 
 		int64 NextGeneration()
@@ -74,44 +177,53 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				&& Request.GetPolicyId() == Policy.GetPolicyId();
 		}
 
-		bool ValidateOperationRequest(
-			const FLongRunningOperationRequest& Request,
-			FExecutionMutationError& OutError)
+		bool ValidateOperationRequest(const FLongRunningOperationRequest& Request,
+			const FUeAgentCompileBuildJobTypedRequest& TypedRequest, FExecutionMutationError& OutError)
 		{
 			if (!Request.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("compile_build_job_operation_request_invalid"));
+				OutError = Request.GetValidationDiagnostic();
+				SetRequestContext(OutError, TypedRequest);
+				return false;
 			}
-			if (Request.GetExecutionContext().GetStatePlane()
-				!= EUeAgentStatePlane::Persisted)
-			{
-				return Fail(
-					OutError,
-					TEXT("compile_build_job_context_not_persisted"));
-			}
+			if (Request.GetExecutionContext().GetStatePlane() != EUeAgentStatePlane::Persisted)
+				return Fail(OutError, JobFact(TEXT("compile_build_job_context_not_persisted"),
+					TEXT("Compile/build jobs require a persisted execution state plane."), TEXT("execution_context.state_plane"),
+					MakeShared<FJsonValueString>(UE::UAI::Contract::LexToString(Request.GetExecutionContext().GetStatePlane())),
+					MakeShared<FJsonValueString>(UE::UAI::Contract::LexToString(EUeAgentStatePlane::Persisted)), &TypedRequest));
 			return true;
 		}
 
-		bool ValidateCallIdentity(
-			const FString& ExpectedOperationId,
-			const FLongRunningWorkIdentity& ExpectedIdentity,
-			const FString& OperationId,
-			const FLongRunningWorkIdentity& Identity,
-			FExecutionMutationError& OutError)
+		bool ValidateCallIdentity(const FUeAgentCompileBuildJobTypedRequest& Request,
+			const FString& ExpectedOperationId, const FLongRunningWorkIdentity& ExpectedIdentity,
+			const FString& OperationId, const FLongRunningWorkIdentity& Identity, FExecutionMutationError& OutError)
 		{
 			if (ExpectedOperationId != OperationId)
 			{
-				return Fail(
-					OutError,
-					TEXT("compile_build_job_operation_id_mismatch"));
+				auto Error = JobFact(TEXT("compile_build_job_operation_id_mismatch"),
+					TEXT("The native call does not belong to this compile/build operation."), TEXT("call.operation_id_matches"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request);
+				Error.ActualEvidence = MakeShared<FJsonValueString>(OperationId);
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedOperationId);
+				return Fail(OutError, MoveTemp(Error));
 			}
 			if (!(ExpectedIdentity == Identity))
 			{
-				return Fail(
-					OutError,
-					TEXT("compile_build_job_work_identity_mismatch"));
+				auto Error = JobFact(TEXT("compile_build_job_work_identity_mismatch"),
+					ExpectedIdentity.GetResourceId() != Identity.GetResourceId()
+						? TEXT("The native work resource identity does not match this compile/build job.")
+						: TEXT("The native work generation does not match this compile/build job."),
+					TEXT("call.work_identity_matches"), MakeShared<FJsonValueBoolean>(false),
+					MakeShared<FJsonValueBoolean>(true), &Request);
+				auto Actual = MakeShared<FJsonObject>();
+				Actual->SetStringField(TEXT("resource_id"), Identity.GetResourceId());
+				Actual->SetNumberField(TEXT("generation"), Identity.GetGeneration());
+				auto Expected = MakeShared<FJsonObject>();
+				Expected->SetStringField(TEXT("resource_id"), ExpectedIdentity.GetResourceId());
+				Expected->SetNumberField(TEXT("generation"), ExpectedIdentity.GetGeneration());
+				Error.ActualEvidence = MakeShared<FJsonValueObject>(Actual);
+				Error.ExpectedEvidence = MakeShared<FJsonValueObject>(Expected);
+				return Fail(OutError, MoveTemp(Error));
 			}
 			return true;
 		}
@@ -130,9 +242,7 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				FindCompileBuildJobFamilyContract(Request.GetFamily());
 			if (Contract == nullptr)
 			{
-				return Fail(
-					OutError,
-					TEXT("compile_build_job_family_invalid"));
+				return Fail(OutError, Request.GetValidationDiagnostic());
 			}
 
 			FUeAgentStateSemanticError StateError;
@@ -143,6 +253,10 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				if (!FUeAgentCanonicalValue::TryString(
 						Value, Resources, Canonical, StateError))
 				{
+					if (StateError.PropertyPath.IsEmpty()) StateError.PropertyPath = TEXT("signal.") + Key;
+					if (StateError.SemanticPointer.IsEmpty()) StateError.SemanticPointer = TEXT("signal.") + Key;
+					if (StateError.SourceKind.IsEmpty()) StateError.SourceKind = TEXT("native_result");
+					SetRequestContext(StateError, Request);
 					return false;
 				}
 				Items.Emplace(Key, Canonical.ToSharedRef());
@@ -157,20 +271,43 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				|| (!ReportRef.IsEmpty()
 					&& !AddString(TEXT("report_ref"), ReportRef)))
 			{
-				return Fail(
-					OutError,
-					TEXT("compile_build_job_signal_value_failed"),
-					StateError.Code);
+				OutError = MoveTemp(StateError);
+				return false;
+			}
+
+			// Publish completed reports through the same typed artifact contract as
+			// capture jobs. ReportRef remains machine-owned; callers consume handles.
+			FString ReportPath = ReportRef;
+			if ((Phase == TEXT("succeeded") || Phase == TEXT("failed"))
+				&& ReportPath.RemoveFromStart(TEXT("file:"))
+				&& IFileManager::Get().FileExists(*ReportPath))
+			{
+				using namespace ArtifactPublisher;
+				// Report owners choose .json for structured reports and .log for process output.
+				// A family can produce either format (for example Localization external processes).
+				const bool bJson = FPaths::GetExtension(ReportPath).Equals(TEXT("json"), ESearchCase::IgnoreCase);
+				const FString FinalPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()
+					/ TEXT("tmp/uai-compile-build") / FPaths::GetCleanFilename(ReportPath));
+				FFileArtifactReference Artifact;
+				FFileArtifactPublishError ArtifactError;
+				FUeAgentCanonicalValuePtr ArtifactValue;
+				if (!TryPublishFileArtifact(FFileArtifactPublishRequest(
+						ReportPath, FinalPath, TEXT("uai.compile_build_job"), TEXT("report"),
+						bJson ? TEXT("json") : TEXT("text"),
+						bJson ? TEXT("application/json") : TEXT("text/plain")),
+					Resources, Artifact, ArtifactError)
+					|| !TryProjectFileArtifactReference(Artifact, Resources, ArtifactValue, ArtifactError))
+					{ OutError = MoveTemp(ArtifactError); SetRequestContext(OutError, Request); return false; }
+				Items.Emplace(TEXT("artifact_ref"), ArtifactValue.ToSharedRef());
 			}
 
 			FUeAgentCanonicalValuePtr Payload;
 			if (!FUeAgentCanonicalValue::TryObject(
 					Items, Resources, Payload, StateError))
 			{
-				return Fail(
-					OutError,
-					TEXT("compile_build_job_signal_payload_failed"),
-					StateError.Code);
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("compile_build_job_signal_payload_failed"), StateError, TEXT("execution"));
+				SetRequestContext(OutError, Request);
+				return false;
 			}
 			OutSignal.Emplace(
 				Contract->GetSignalTypeId(),
@@ -186,6 +323,18 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			ExitedSuccess,
 			ExitedFailure,
 		};
+
+		FString StageStateName(EGameThreadStageState State)
+		{
+			switch (State)
+			{
+			case EGameThreadStageState::Queued: return TEXT("queued");
+			case EGameThreadStageState::Executing: return TEXT("executing");
+			case EGameThreadStageState::ExitedSuccess: return TEXT("exited_success");
+			case EGameThreadStageState::ExitedFailure: return TEXT("exited_failure");
+			default: return FString::Printf(TEXT("unknown (%d)"), static_cast<int32>(State));
+			}
+		}
 
 		struct FGameThreadStageSharedState final
 		{
@@ -216,7 +365,7 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			FString OperationId;
 			FLongRunningWorkIdentity Identity;
 			EGameThreadStageState State = EGameThreadStageState::Queued;
-			FString ErrorCode;
+			UE::UAI::Contract::FDiagnostic Diagnostic;
 			bool bStopRequested = false;
 			bool bJoined = false;
 			bool bReleased = false;
@@ -248,11 +397,10 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			{
 				if (State.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_already_started"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_already_started"), TEXT("Cannot start a game-thread compile/build stage more than once."), TEXT("game_thread_stage.started"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), &Request));
 				}
-				if (!ValidateOperationRequest(OperationRequest, OutError))
+				if (!ValidateOperationRequest(OperationRequest, Request, OutError))
 				{
 					return false;
 				}
@@ -283,8 +431,11 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 							{
 								ScheduledState->State =
 									EGameThreadStageState::ExitedFailure;
-								ScheduledState->ErrorCode =
-									TEXT("compile_build_job_cancelled");
+								ScheduledState->Diagnostic = JobFact(TEXT("compile_build_job_cancelled"), ScheduledState->bStopRequested
+									? TEXT("Stop was requested before the game-thread compile/build stage executed.")
+									: TEXT("The game-thread compile/build stage was cancelled before execution."),
+									ScheduledState->bStopRequested ? TEXT("game_thread_stage.stop_requested") : TEXT("game_thread_stage.cancelled"),
+									MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), &ScheduledState->Request);
 								return;
 							}
 							ScheduledState->State =
@@ -297,11 +448,16 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 						ScheduledState->State = bSucceeded
 							? EGameThreadStageState::ExitedSuccess
 							: EGameThreadStageState::ExitedFailure;
-						ScheduledState->ErrorCode = bSucceeded
-							? FString()
-							: (Error.IsPresent()
-								? Error.GetCode()
-								: TEXT("compile_build_job_stage_failed"));
+						if (bSucceeded) ScheduledState->Diagnostic.Reset();
+						else if (!Error.IsEmpty())
+						{
+							ScheduledState->Diagnostic = MoveTemp(Error);
+							SetRequestContext(ScheduledState->Diagnostic, ScheduledState->Request);
+						}
+						else ScheduledState->Diagnostic = JobFact(TEXT("compile_build_job_stage_failed"),
+							TEXT("The compile/build stage failed without returning a diagnostic."),
+							TEXT("game_thread_stage.failure_diagnostic.available"), MakeShared<FJsonValueBoolean>(false),
+							MakeShared<FJsonValueBoolean>(true), &ScheduledState->Request);
 					});
 				return true;
 			}
@@ -315,12 +471,12 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			{
 				if (!State.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_not_started"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_not_started"), TEXT("Cannot observe a game-thread compile/build stage before Start."), TEXT("game_thread_stage.started"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request));
 				}
 				FScopeLock Lock(&State->Mutex);
 				if (!ValidateCallIdentity(
+						State->Request,
 						State->OperationId,
 						State->Identity,
 						OperationId,
@@ -360,6 +516,7 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 							Signal,
 							OutError))
 					{
+						if (!State->Diagnostic.IsEmpty()) OutError.Append(State->Diagnostic);
 						return false;
 					}
 					State->LastSignalPhase = Phase;
@@ -368,7 +525,7 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				OutObservation = FLongRunningWorkObservation(
 					Identity.GetGeneration(),
 					WorkState,
-					State->ErrorCode,
+					State->Diagnostic,
 					MoveTemp(Signal));
 				return true;
 			}
@@ -381,13 +538,13 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			{
 				if (!State.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_not_started"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_not_started"), TEXT("Cannot stop a game-thread compile/build stage before Start."), TEXT("game_thread_stage.started"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request));
 				}
 				{
 					FScopeLock Lock(&State->Mutex);
 					if (!ValidateCallIdentity(
+							State->Request,
 							State->OperationId,
 							State->Identity,
 							OperationId,
@@ -409,12 +566,12 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			{
 				if (!State.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_not_started"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_not_started"), TEXT("Cannot join a game-thread compile/build stage before Start."), TEXT("game_thread_stage.started"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request));
 				}
 				FScopeLock Lock(&State->Mutex);
 				if (!ValidateCallIdentity(
+						State->Request,
 						State->OperationId,
 						State->Identity,
 						OperationId,
@@ -426,9 +583,10 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				if (State->State != EGameThreadStageState::ExitedSuccess
 					&& State->State != EGameThreadStageState::ExitedFailure)
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_join_before_exit"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_join_before_exit"),
+						TEXT("Cannot join the game-thread compile/build stage before it exits."), TEXT("game_thread_stage.state"),
+						MakeShared<FJsonValueString>(StageStateName(State->State)),
+						MakeShared<FJsonValueString>(TEXT("exited_success or exited_failure")), &Request));
 				}
 				State->bJoined = true;
 				return true;
@@ -441,12 +599,12 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			{
 				if (!State.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_not_started"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_not_started"), TEXT("Cannot release a game-thread compile/build stage before Start."), TEXT("game_thread_stage.started"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request));
 				}
 				FScopeLock Lock(&State->Mutex);
 				if (!ValidateCallIdentity(
+						State->Request,
 						State->OperationId,
 						State->Identity,
 						OperationId,
@@ -457,15 +615,13 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				}
 				if (!State->bJoined)
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_release_before_join"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_release_before_join"), TEXT("Cannot release the game-thread compile/build stage before Join."), TEXT("game_thread_stage.joined"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request));
 				}
 				if (State->bReleased)
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_already_released"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_already_released"), TEXT("The game-thread compile/build stage was already released."), TEXT("game_thread_stage.released"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), &Request));
 				}
 				State->bReleased = true;
 				return true;
@@ -512,25 +668,22 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				FScopeLock Lock(&Mutex);
 				if (bStarted)
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_already_started"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_already_started"), TEXT("Cannot start the owned compile/build process more than once."), TEXT("owned_process.started"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), &Request));
 				}
-				if (!ValidateOperationRequest(OperationRequest, OutError))
+				if (!ValidateOperationRequest(OperationRequest, Request, OutError))
 				{
 					return false;
 				}
 				if (Cancellation.IsCancelled())
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_cancelled_before_start"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_cancelled_before_start"), TEXT("The owned compile/build process was cancelled before Start."), TEXT("owned_process.cancelled"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), &Request));
 				}
 				if (!FPlatformProcess::CreatePipe(ReadPipe, WritePipe))
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_process_pipe_failed"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_process_pipe_failed"), TEXT("The native platform could not create the owned process output pipe."), TEXT("owned_process.pipe_created"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request));
 				}
 				uint32 ProcessId = 0;
 				ProcessHandle = FPlatformProcess::CreateProc(
@@ -549,9 +702,14 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 					FPlatformProcess::ClosePipe(ReadPipe, WritePipe);
 					ReadPipe = nullptr;
 					WritePipe = nullptr;
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_process_launch_failed"));
+					auto Error = JobFact(TEXT("compile_build_job_process_launch_failed"),
+						TEXT("The native process launch did not return a valid process handle."), TEXT("owned_process.started"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request);
+					auto Evidence = MakeShared<FJsonObject>();
+					Evidence->SetStringField(TEXT("executable"), LaunchSpec.GetExecutable());
+					Evidence->SetStringField(TEXT("working_directory"), LaunchSpec.GetWorkingDirectory());
+					Error.ActualEvidence = MakeShared<FJsonValueObject>(Evidence);
+					return Fail(OutError, MoveTemp(Error));
 				}
 				OperationId = OperationRequest.GetOperationId();
 				Identity = FLongRunningWorkIdentity(
@@ -581,22 +739,25 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 					return false;
 				}
 				if (!bObservedExit
+					&& !bStopRequested
 					&& LaunchSpec.GetTimeoutSeconds() > 0.0
 					&& FPlatformProcess::IsProcRunning(ProcessHandle)
 					&& (FPlatformTime::Seconds() - StartedAtSeconds)
 						>= LaunchSpec.GetTimeoutSeconds())
 				{
+					const double ElapsedSeconds = FPlatformTime::Seconds() - StartedAtSeconds;
 					FPlatformProcess::TerminateProc(ProcessHandle, true);
-					bObservedExit = true;
-					bExitedSuccess = false;
 					bStopRequested = true;
-					ErrorCode = TEXT("compile_build_job_process_timeout");
+					Diagnostic = JobFact(TEXT("compile_build_job_process_timeout"),
+						TEXT("The compile/build process exceeded its time limit."), TEXT("owned_process.elapsed_seconds"),
+						NumberFact(ElapsedSeconds), NumberFact(LaunchSpec.GetTimeoutSeconds()), &Request);
 				}
 				if (!bObservedExit
 					&& !FPlatformProcess::IsProcRunning(ProcessHandle))
 				{
 					if (!DrainOutput(OutError))
 					{
+						if (!Diagnostic.IsEmpty()) OutError.Append(Diagnostic);
 						return false;
 					}
 					else
@@ -606,28 +767,44 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 								ProcessHandle, &ReturnCode))
 						{
 							bStateUnknown = true;
-							ErrorCode =
-								TEXT("compile_build_job_process_exit_unknown");
+							Diagnostic.Append(JobFact(TEXT("compile_build_job_process_exit_unknown"),
+								TEXT("The compile/build process exited, but the native return code could not be read."),
+								TEXT("owned_process.return_code.available"), MakeShared<FJsonValueBoolean>(false),
+								MakeShared<FJsonValueBoolean>(true), &Request));
 						}
 						else
 						{
+							FDiagnostic ExitDiagnostic;
+							if (ReturnCode != 0)
+							{
+								ExitDiagnostic = JobFact(TEXT("compile_build_job_process_failed"),
+									TEXT("The compile/build process exited with a nonzero return code."), TEXT("owned_process.return_code"),
+									MakeShared<FJsonValueNumber>(ReturnCode), MakeShared<FJsonValueNumber>(0), &Request);
+							}
 							if (!OutputSink->Append(
 									FString::Printf(
 										TEXT("\nUAI_PROCESS_RETURN_CODE=%d\n"),
 										ReturnCode),
 									OutError))
 							{
+								SetRequestContext(OutError, Request);
+								if (!Diagnostic.IsEmpty()) OutError.Append(Diagnostic);
+								if (!ExitDiagnostic.IsEmpty()) OutError.Append(ExitDiagnostic);
 								return false;
 							}
-							bExitedSuccess = ReturnCode == 0;
-							ErrorCode = bExitedSuccess
-								? FString()
-								: TEXT("compile_build_job_process_failed");
+							bExitedSuccess = ReturnCode == 0 && Diagnostic.IsEmpty();
+							if (!ExitDiagnostic.IsEmpty()) Diagnostic.Append(ExitDiagnostic);
 						}
 					}
 					bObservedExit = true;
 				}
 
+				if (bObservedExit && !OutputSink->FinalizeReport(OutError))
+				{
+					SetRequestContext(OutError, Request);
+					if (!Diagnostic.IsEmpty()) OutError.Append(Diagnostic);
+					return false;
+				}
 				ELongRunningWorkState WorkState =
 					ELongRunningWorkState::Running;
 				FString Phase = bStopRequested
@@ -665,6 +842,7 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 							Signal,
 							OutError))
 					{
+						if (bObservedExit && !Diagnostic.IsEmpty()) OutError.Append(Diagnostic);
 						return false;
 					}
 					LastSignalPhase = Phase;
@@ -673,7 +851,9 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				OutObservation = FLongRunningWorkObservation(
 					Identity.GetGeneration(),
 					WorkState,
-					ErrorCode,
+					// A timeout requests termination first. Retain its cause internally,
+					// but publish a failure only after the native process has exited.
+					bObservedExit ? Diagnostic : UE::UAI::Contract::FDiagnostic(),
 					MoveTemp(Signal));
 				return true;
 			}
@@ -712,9 +892,8 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				}
 				if (!bObservedExit)
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_join_before_exit"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_join_before_exit"), TEXT("Cannot join the owned compile/build process before its exit is observed."), TEXT("owned_process.exit_observed"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request));
 				}
 				bJoined = true;
 				return true;
@@ -733,18 +912,17 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				}
 				if (!bJoined)
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_release_before_join"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_release_before_join"), TEXT("Cannot release the owned compile/build process before Join."), TEXT("owned_process.joined"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request));
 				}
 				if (bReleased)
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_already_released"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_already_released"), TEXT("The owned compile/build process was already released."), TEXT("owned_process.released"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), &Request));
 				}
 				if (!OutputSink->Release(OutError))
 				{
+					SetRequestContext(OutError, Request);
 					return false;
 				}
 				bSinkReleased = true;
@@ -761,11 +939,11 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			{
 				if (!bStarted)
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_not_started"));
+					return Fail(OutError, JobFact(TEXT("compile_build_job_not_started"), TEXT("Cannot call the owned compile/build process before Start."), TEXT("owned_process.started"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Request));
 				}
 				return ValidateCallIdentity(
+					Request,
 					OperationId,
 					Identity,
 					InOperationId,
@@ -780,9 +958,13 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 					return true;
 				}
 				const FString Chunk = FPlatformProcess::ReadPipe(ReadPipe);
-				return Chunk.IsEmpty()
-					? true
-					: OutputSink->Append(Chunk, OutError);
+				if (!Chunk.IsEmpty() && !OutputSink->Append(Chunk, OutError))
+				{
+					SetRequestContext(OutError, Request);
+					if (bObservedExit && !Diagnostic.IsEmpty()) OutError.Append(Diagnostic);
+					return false;
+				}
+				return true;
 			}
 
 			void CleanupOwnedResources(const bool bTerminateIfRunning)
@@ -829,7 +1011,7 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 			bool bJoined = false;
 			bool bReleased = false;
 			bool bSinkReleased = false;
-			FString ErrorCode;
+			UE::UAI::Contract::FDiagnostic Diagnostic;
 			FString LastSignalPhase;
 			int64 SignalRevision = 0;
 			double StartedAtSeconds = 0.0;
@@ -847,6 +1029,7 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		, NativeMechanismId(MoveTemp(InNativeMechanismId))
 		, ReadbackOracleId(MoveTemp(InReadbackOracleId))
 	{
+		ValidatePolicy(*this, ValidationDiagnostic);
 	}
 
 	EUeAgentCompileBuildJobFamily
@@ -875,12 +1058,12 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 
 	bool FUeAgentCompileBuildJobPolicyDescriptor::IsValid() const
 	{
-		return FindCompileBuildJobFamilyContract(Family) != nullptr
-			&& IsNormalizedNonEmpty(PolicyId)
-			&& MatchesPolicyKind(Family, PolicyId)
-			&& IsSupportedMechanism(NativeMechanismId)
-			&& IsNormalizedNonEmpty(ReadbackOracleId)
-			&& ReadbackOracleId.StartsWith(TEXT("uai.readback."));
+		return ValidationDiagnostic.IsEmpty();
+	}
+
+	const FExecutionMutationError& FUeAgentCompileBuildJobPolicyDescriptor::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic;
 	}
 
 	FUeAgentCompileBuildJobPolicyRegistration::
@@ -927,9 +1110,10 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		OutFactory.Reset();
 		if (InRegistrations.IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("compile_build_job_policy_catalog_empty"));
+			return Fail(OutError, JobFact(TEXT("compile_build_job_policy_catalog_empty"),
+				TEXT("The compile/build policy catalog must contain at least one policy."), TEXT("policies.count"),
+				MakeShared<FJsonValueNumber>(InRegistrations.Num()), MakeShared<FJsonValueString>(TEXT("greater than zero")),
+				nullptr, TEXT("runtime_factory")));
 		}
 		for (int32 Index = 0; Index < InRegistrations.Num(); ++Index)
 		{
@@ -937,10 +1121,13 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				InRegistrations[Index].GetDescriptor();
 			if (!Descriptor.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("compile_build_job_policy_invalid"),
-					Descriptor.GetPolicyId());
+				OutError = Descriptor.GetValidationDiagnostic();
+				const FString Field = OutError.PropertyPath.StartsWith(TEXT("policy."))
+					? OutError.PropertyPath.Mid(7) : OutError.PropertyPath;
+				OutError.PropertyPath = FString::Printf(TEXT("policies/%d/"), Index) + Field;
+				OutError.SemanticPointer = OutError.PropertyPath;
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Descriptor.GetPolicyId();
+				return false;
 			}
 			for (int32 Other = 0; Other < Index; ++Other)
 			{
@@ -949,10 +1136,17 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				if (Existing.GetFamily() == Descriptor.GetFamily()
 					&& Existing.GetPolicyId() == Descriptor.GetPolicyId())
 				{
-					return Fail(
-						OutError,
-						TEXT("compile_build_job_policy_duplicate"),
-						Descriptor.GetPolicyId());
+					auto Actual = MakeShared<FJsonObject>();
+					Actual->SetField(TEXT("family"), FamilyValue(Descriptor.GetFamily()));
+					Actual->SetStringField(TEXT("policy_id"), Descriptor.GetPolicyId());
+					Actual->SetNumberField(TEXT("first_index"), Other);
+					Actual->SetNumberField(TEXT("duplicate_index"), Index);
+					auto Error = JobFact(TEXT("compile_build_job_policy_duplicate"),
+						TEXT("The policy catalog contains a duplicate family/policy pair."),
+						FString::Printf(TEXT("policies/%d"), Index), MakeShared<FJsonValueObject>(Actual),
+						MakeShared<FJsonValueString>(TEXT("unique family/policy pair")), nullptr, TEXT("runtime_factory"));
+					Error.CandidateName = Descriptor.GetPolicyId();
+					return Fail(OutError, MoveTemp(Error));
 				}
 			}
 		}
@@ -986,16 +1180,16 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				});
 		if (Registration == nullptr)
 		{
-			return Fail(
-				OutError,
-				TEXT("compile_build_job_policy_not_registered"),
-				Request.GetPolicyId());
+			return Fail(OutError, JobFact(TEXT("compile_build_job_policy_not_registered"),
+				TEXT("No compile/build policy is registered for this request's family/policy pair."),
+				TEXT("request.policy"), PolicyPair(Request.GetFamily(), Request.GetPolicyId()),
+				MakeShared<FJsonValueString>(TEXT("registered family/policy pair")), &Request, TEXT("runtime_factory")));
 		}
 		if (!Request.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("compile_build_job_request_invalid"));
+			OutError = Request.GetValidationDiagnostic();
+			SetRequestContext(OutError, Request);
+			return false;
 		}
 		if (!Registration->GetBuilder().TryCreatePort(
 				Request,
@@ -1003,13 +1197,15 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 				OutPort,
 				OutError))
 		{
+			SetRequestContext(OutError, Request);
 			return false;
 		}
-		return OutPort.IsValid()
-			? true
-			: Fail(
-				OutError,
-				TEXT("compile_build_job_operation_port_missing"));
+		if (!OutPort.IsValid())
+			return Fail(OutError, JobFact(TEXT("compile_build_job_operation_port_missing"),
+				TEXT("The registered policy builder reported success but returned no operation port."),
+				TEXT("operation_port.available"), MakeShared<FJsonValueBoolean>(false),
+				MakeShared<FJsonValueBoolean>(true), &Request, TEXT("runtime_factory")));
+		return true;
 	}
 
 	bool TryCreateCompileBuildJobGameThreadStagePort(
@@ -1021,18 +1217,29 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		FExecutionMutationError& OutError)
 	{
 		OutPort.Reset();
-		if (!Request.IsValid() || !Policy.IsValid()
-			|| !MatchesPolicy(Request, Policy))
+		if (!Request.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("compile_build_job_stage_contract_invalid"));
+			OutError = Request.GetValidationDiagnostic();
+			SetRequestContext(OutError, Request);
+			return false;
 		}
+		if (!Policy.IsValid())
+		{
+			OutError = Policy.GetValidationDiagnostic();
+			SetRequestContext(OutError, Request);
+			return false;
+		}
+		if (!MatchesPolicy(Request, Policy))
+			return Fail(OutError, JobFact(TEXT("compile_build_job_stage_contract_invalid"),
+				TEXT("The stage request's family/policy pair does not match the stage policy."), TEXT("request.policy"),
+				PolicyPair(Request.GetFamily(), Request.GetPolicyId()), PolicyPair(Policy.GetFamily(), Policy.GetPolicyId()),
+				&Request, TEXT("runtime_factory")));
 		if (Policy.GetNativeMechanismId() != TEXT("game_thread_stage"))
 		{
-			return Fail(
-				OutError,
-				TEXT("compile_build_job_native_mechanism_mismatch"));
+			return Fail(OutError, JobFact(TEXT("compile_build_job_native_mechanism_mismatch"),
+				TEXT("A game-thread stage port requires the game_thread_stage execution mechanism."),
+				TEXT("policy.native_mechanism_id"), MakeShared<FJsonValueString>(Policy.GetNativeMechanismId()),
+				MakeShared<FJsonValueString>(TEXT("game_thread_stage")), &Request, TEXT("runtime_factory")));
 		}
 		OutPort = MakeShared<FGameThreadStagePort, ESPMode::ThreadSafe>(
 			Request, Policy, MoveTemp(Stage));
@@ -1050,6 +1257,7 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		, WorkingDirectory(MoveTemp(InWorkingDirectory))
 		, TimeoutSeconds(InTimeoutSeconds)
 	{
+		ValidateLaunchSpec(*this, ValidationDiagnostic);
 	}
 
 	const FString&
@@ -1077,10 +1285,12 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 
 	bool FUeAgentCompileBuildJobProcessLaunchSpec::IsValid() const
 	{
-		return IsNormalizedNonEmpty(Executable)
-			&& IsNormalizedNonEmpty(WorkingDirectory)
-			&& FMath::IsFinite(TimeoutSeconds)
-			&& TimeoutSeconds >= 0.0;
+		return ValidationDiagnostic.IsEmpty();
+	}
+
+	const FExecutionMutationError& FUeAgentCompileBuildJobProcessLaunchSpec::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic;
 	}
 
 	bool TryCreateCompileBuildJobOwnedProcessPort(
@@ -1094,19 +1304,35 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		FExecutionMutationError& OutError)
 	{
 		OutPort.Reset();
-		if (!Request.IsValid() || !Policy.IsValid()
-			|| !MatchesPolicy(Request, Policy)
-			|| !LaunchSpec.IsValid())
+		if (!Request.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("compile_build_job_process_contract_invalid"));
+			OutError = Request.GetValidationDiagnostic();
+			SetRequestContext(OutError, Request);
+			return false;
+		}
+		if (!Policy.IsValid())
+		{
+			OutError = Policy.GetValidationDiagnostic();
+			SetRequestContext(OutError, Request);
+			return false;
+		}
+		if (!MatchesPolicy(Request, Policy))
+			return Fail(OutError, JobFact(TEXT("compile_build_job_process_contract_invalid"),
+				TEXT("The process request's family/policy pair does not match the process policy."), TEXT("request.policy"),
+				PolicyPair(Request.GetFamily(), Request.GetPolicyId()), PolicyPair(Policy.GetFamily(), Policy.GetPolicyId()),
+				&Request, TEXT("runtime_factory")));
+		if (!LaunchSpec.IsValid())
+		{
+			OutError = LaunchSpec.GetValidationDiagnostic();
+			SetRequestContext(OutError, Request);
+			return false;
 		}
 		if (Policy.GetNativeMechanismId() != TEXT("owned_process"))
 		{
-			return Fail(
-				OutError,
-				TEXT("compile_build_job_native_mechanism_mismatch"));
+			return Fail(OutError, JobFact(TEXT("compile_build_job_native_mechanism_mismatch"),
+				TEXT("An owned process port requires the owned_process execution mechanism."),
+				TEXT("policy.native_mechanism_id"), MakeShared<FJsonValueString>(Policy.GetNativeMechanismId()),
+				MakeShared<FJsonValueString>(TEXT("owned_process")), &Request, TEXT("runtime_factory")));
 		}
 		OutPort = MakeShared<FOwnedProcessPort, ESPMode::ThreadSafe>(
 			Request, Policy, LaunchSpec, MoveTemp(OutputSink));

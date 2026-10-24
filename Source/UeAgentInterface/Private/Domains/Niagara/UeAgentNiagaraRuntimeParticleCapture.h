@@ -12,7 +12,6 @@ namespace UeAgentNiagaraRuntimeParticleCapture
 	struct FOptions
 	{
 		TArray<FString> AttributeNames;
-		int32 MaxParticleSamples = 64;
 
 		bool IsEnabled() const { return !AttributeNames.IsEmpty(); }
 	};

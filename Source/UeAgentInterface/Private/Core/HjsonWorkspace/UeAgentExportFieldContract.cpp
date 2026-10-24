@@ -1,4 +1,5 @@
 #include "Core/HjsonWorkspace/UeAgentExportFieldContract.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::HjsonWorkspace
 {
@@ -56,14 +57,46 @@ namespace UE::UAI::HjsonWorkspace
 			}
 		}
 
-		bool Fail(
-			FWorkspaceError& OutError,
-			const FString& Code,
-			const FString& SourceUnit = FString(),
-			const FString& JsonPointer = TEXT("/"))
+		Contract::FDiagnostic FieldDiagnostic(const FString& Code, const FString& Reason,
+			const FString& Field = FString(), const FString& Pointer = TEXT("/"),
+			TSharedPtr<FJsonValue> Actual = nullptr, TSharedPtr<FJsonValue> Expected = nullptr)
 		{
-			OutError.Set(Code, SourceUnit, JsonPointer);
+			auto Error = Contract::FDiagnostic::Failure(Code, Reason, TEXT("export_field_contract"));
+			Error.PropertyPath = Field;
+			Error.SemanticPointer = Pointer;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
+		bool Fail(FWorkspaceError& OutError, const FString& Code, const FString& Reason,
+			const FString& Field = FString(), const FString& Pointer = TEXT("/"),
+			TSharedPtr<FJsonValue> Actual = nullptr, TSharedPtr<FJsonValue> Expected = nullptr)
+		{
+			OutError.SetFailure(FieldDiagnostic(Code, Reason, Field, Pointer, MoveTemp(Actual), MoveTemp(Expected)));
 			return false;
+		}
+
+		const Contract::FDiagnostic& ValidationOrEmpty(const TSharedPtr<const Contract::FDiagnostic>& Error)
+		{
+			static const Contract::FDiagnostic Empty;
+			return Error ? *Error : Empty;
+		}
+
+		FString DefaultSourceName(EUeAgentDefaultSourceKind Kind)
+		{
+			switch (Kind)
+			{
+			case EUeAgentDefaultSourceKind::Factory: return TEXT("factory");
+			case EUeAgentDefaultSourceKind::ClassDefaultObject: return TEXT("class_default_object");
+			case EUeAgentDefaultSourceKind::Parent: return TEXT("parent");
+			case EUeAgentDefaultSourceKind::Constructor: return TEXT("constructor");
+			case EUeAgentDefaultSourceKind::StructInitializer: return TEXT("struct_initializer");
+			case EUeAgentDefaultSourceKind::Schema: return TEXT("schema");
+			case EUeAgentDefaultSourceKind::DomainNative: return TEXT("domain_native");
+			case EUeAgentDefaultSourceKind::PostCreateReadback: return TEXT("post_create_readback");
+			default: return FString::FromInt(static_cast<int32>(Kind));
+			}
 		}
 
 		bool ShouldEmitWithoutComparison(
@@ -113,18 +146,20 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("field_default_source_mismatch"),
-					Field.GetFieldId(),
-					TEXT("/default/source_kind"));
+					TEXT("field_default_source_mismatch"), TEXT("The captured default source does not match the field contract."),
+					Field.GetFieldId(), TEXT("/default/source_kind"),
+					MakeShared<FJsonValueString>(DefaultSourceName(Entry.GetDefault().GetSourceKind())),
+					MakeShared<FJsonValueString>(DefaultSourceName(Field.GetDefaultSource())));
 			}
 			if (ValueKindName(Entry.GetType().GetValueKind())
 				!= Field.GetValueKind())
 			{
 				return Fail(
 					OutError,
-					TEXT("field_value_kind_mismatch"),
-					Field.GetFieldId(),
-					TEXT("/type/value_kind"));
+					TEXT("field_value_kind_mismatch"), TEXT("The captured value kind does not match the field contract."),
+					Field.GetFieldId(), TEXT("/type/kind"),
+					MakeShared<FJsonValueString>(ValueKindName(Entry.GetType().GetValueKind())),
+					MakeShared<FJsonValueString>(Field.GetValueKind()));
 			}
 			return true;
 		}
@@ -175,29 +210,25 @@ namespace UE::UAI::HjsonWorkspace
 			Visibility = NormalizeRequired(MoveTemp(Visibility));
 		}
 		ProfileVisibility.Sort();
-		bool bUniqueVisibility = true;
-		for (int32 Index = 1; Index < ProfileVisibility.Num(); ++Index)
+		const auto Invalid = [&](const FString& Reason, const FString& Path, TSharedPtr<FJsonValue> Actual = nullptr)
 		{
+			if (!ValidationDiagnostic) ValidationDiagnostic = MakeShared<const Contract::FDiagnostic>(
+				FieldDiagnostic(TEXT("field_contract_invalid"), Reason, FieldId, Path, MoveTemp(Actual)));
+		};
+		const TArray<TPair<FString, FString>> RequiredFields = {
+			{TEXT("contract_id"), ContractId}, {TEXT("field_id"), FieldId}, {TEXT("external_name"), ExternalName},
+			{TEXT("owner_semantic_id"), OwnerSemanticId}, {TEXT("value_contract_ref"), ValueContractRef},
+			{TEXT("semantic_role"), SemanticRole}, {TEXT("round_trip_requirement"), RoundTripRequirement},
+			{TEXT("field_set_id"), FieldSetId}, {TEXT("exposure_reason"), ExposureReason}, {TEXT("display_name"), DisplayName}};
+		for (const auto& Field : RequiredFields)
+			if (Field.Value.IsEmpty()) { Invalid(FString::Printf(TEXT("Required field contract member '%s' is empty."), *Field.Key), TEXT("/") + Field.Key); break; }
+		if (ContractVersion <= 0) Invalid(TEXT("The field contract version must be greater than zero."), TEXT("/contract_version"), MakeShared<FJsonValueNumber>(ContractVersion));
+		if (ProfileVisibility.IsEmpty()) Invalid(TEXT("The field contract must declare at least one visible profile."), TEXT("/profile_visibility"));
+		if (!IsValueKindValid(ValueKind)) Invalid(TEXT("The field contract declares an unsupported value kind."), TEXT("/value_kind"), MakeShared<FJsonValueString>(ValueKind));
+		for (int32 Index = 1; Index < ProfileVisibility.Num(); ++Index)
 			if (ProfileVisibility[Index - 1] == ProfileVisibility[Index])
-			{
-				bUniqueVisibility = false;
-				break;
-			}
-		}
-		bValid = !ContractId.IsEmpty()
-			&& ContractVersion > 0
-			&& !FieldId.IsEmpty()
-			&& !ExternalName.IsEmpty()
-			&& !OwnerSemanticId.IsEmpty()
-			&& !ValueContractRef.IsEmpty()
-			&& !SemanticRole.IsEmpty()
-			&& !RoundTripRequirement.IsEmpty()
-			&& !ProfileVisibility.IsEmpty()
-			&& !FieldSetId.IsEmpty()
-			&& !ExposureReason.IsEmpty()
-			&& !DisplayName.IsEmpty()
-			&& IsValueKindValid(ValueKind)
-			&& bUniqueVisibility;
+			{ Invalid(TEXT("The field contract repeats a visible profile."), FString::Printf(TEXT("/profile_visibility/%d"), Index), MakeShared<FJsonValueString>(ProfileVisibility[Index])); break; }
+		bValid = !ValidationDiagnostic;
 	}
 
 	const FString& FExportFieldContract::GetContractId() const { return ContractId; }
@@ -249,6 +280,7 @@ namespace UE::UAI::HjsonWorkspace
 	const FString& FExportFieldContract::GetTooltip() const { return Tooltip; }
 	const FString& FExportFieldContract::GetValueKind() const { return ValueKind; }
 	bool FExportFieldContract::IsValid() const { return bValid; }
+	const Contract::FDiagnostic& FExportFieldContract::GetValidationDiagnostic() const { return ValidationOrEmpty(ValidationDiagnostic); }
 
 	FExportFieldRegistration::FExportFieldRegistration(
 		FExportFieldContract InField,
@@ -258,7 +290,10 @@ namespace UE::UAI::HjsonWorkspace
 		, ProviderSource(InProviderSource)
 		, ProviderId(NormalizeRequired(MoveTemp(InProviderId)))
 	{
-		bValid = Field.IsValid() && !ProviderId.IsEmpty();
+		if (!Field.IsValid()) ValidationDiagnostic = MakeShared<const Contract::FDiagnostic>(Field.GetValidationDiagnostic());
+		else if (ProviderId.IsEmpty()) ValidationDiagnostic = MakeShared<const Contract::FDiagnostic>(FieldDiagnostic(
+			TEXT("field_registration_invalid"), TEXT("The field registration has no provider identifier."), Field.GetFieldId(), TEXT("/provider_id")));
+		bValid = !ValidationDiagnostic;
 	}
 
 	const FExportFieldContract& FExportFieldRegistration::GetField() const
@@ -274,6 +309,7 @@ namespace UE::UAI::HjsonWorkspace
 		return ProviderId;
 	}
 	bool FExportFieldRegistration::IsValid() const { return bValid; }
+	const Contract::FDiagnostic& FExportFieldRegistration::GetValidationDiagnostic() const { return ValidationOrEmpty(ValidationDiagnostic); }
 
 	FExportFieldRegistry::FExportFieldRegistry(
 		FString InContractId,
@@ -290,8 +326,11 @@ namespace UE::UAI::HjsonWorkspace
 				return Left.GetField().GetFieldId()
 					< Right.GetField().GetFieldId();
 			});
-		bValid = !ContractId.IsEmpty()
-			&& ContractVersion > 0;
+		bValid = !ContractId.IsEmpty() && ContractVersion > 0;
+		if (!bValid) ValidationDiagnostic = MakeShared<const Contract::FDiagnostic>(FieldDiagnostic(TEXT("field_registry_contract_invalid"),
+			ContractId.IsEmpty() ? TEXT("The export registry contract identifier is empty.") : TEXT("The export registry contract version must be greater than zero."),
+			FString(), ContractId.IsEmpty() ? TEXT("/contract_id") : TEXT("/contract_version"),
+			ContractId.IsEmpty() ? TSharedPtr<FJsonValue>() : MakeShared<FJsonValueNumber>(ContractVersion)));
 		for (int32 Index = 0; Index < Registrations.Num(); ++Index)
 		{
 			const FExportFieldRegistration& Registration =
@@ -301,6 +340,9 @@ namespace UE::UAI::HjsonWorkspace
 					Registration.GetField().GetFieldId()))
 			{
 				bValid = false;
+				if (!ValidationDiagnostic) ValidationDiagnostic = MakeShared<const Contract::FDiagnostic>(
+					!Registration.IsValid() ? Registration.GetValidationDiagnostic()
+					: FieldDiagnostic(TEXT("field_owner_conflict"), TEXT("More than one provider is registered for this field."), Registration.GetField().GetFieldId()));
 				break;
 			}
 			IndexByFieldId.Add(
@@ -353,6 +395,7 @@ namespace UE::UAI::HjsonWorkspace
 		return nullptr;
 	}
 	bool FExportFieldRegistry::IsValid() const { return bValid; }
+	const Contract::FDiagnostic& FExportFieldRegistry::GetValidationDiagnostic() const { return ValidationOrEmpty(ValidationDiagnostic); }
 
 	FExportFieldDescription::FExportFieldDescription(
 		const FExportFieldRegistration& Registration)
@@ -449,7 +492,7 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return Fail(
 				OutError,
-				TEXT("field_registry_contract_invalid"),
+				TEXT("field_registry_contract_invalid"), NormalizedContractId.IsEmpty() ? TEXT("The export registry contract identifier is empty.") : FString::Printf(TEXT("The export registry contract version must be greater than zero; received %d."), ContractVersion),
 				NormalizedContractId);
 		}
 
@@ -459,26 +502,17 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			if (!Registration.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("field_registration_invalid"),
-					Registration.GetProviderId());
+				OutError.SetFailure(Registration.GetValidationDiagnostic());
+				return false;
 			}
 			const FExportFieldContract& Field = Registration.GetField();
 			if (const FExportFieldRegistration* const* Existing =
 				ByFieldId.Find(Field.GetFieldId()))
 			{
-				const FString SourceUnit = FString::Printf(
-					TEXT("%s|%s:%s|%s:%s"),
-					*Field.GetFieldId(),
-					*OwnerSourceName((*Existing)->GetProviderSource()),
-					*(*Existing)->GetProviderId(),
-					*OwnerSourceName(Registration.GetProviderSource()),
-					*Registration.GetProviderId());
-				return Fail(
-					OutError,
-					TEXT("field_owner_conflict"),
-					SourceUnit);
+				return Fail(OutError, TEXT("field_owner_conflict"),
+					FString::Printf(TEXT("Field '%s' is registered by both %s provider '%s' and %s provider '%s'."),
+						*Field.GetFieldId(), *OwnerSourceName((*Existing)->GetProviderSource()), *(*Existing)->GetProviderId(),
+						*OwnerSourceName(Registration.GetProviderSource()), *Registration.GetProviderId()), Field.GetFieldId());
 			}
 			const FString ExternalKey = FString::Printf(
 				TEXT("%s|%s|%s"),
@@ -488,14 +522,9 @@ namespace UE::UAI::HjsonWorkspace
 			if (const FExportFieldRegistration* const* Existing =
 				ByExternalKey.Find(ExternalKey))
 			{
-				return Fail(
-					OutError,
-					TEXT("field_external_name_conflict"),
-					FString::Printf(
-						TEXT("%s|%s|%s"),
-						*ExternalKey,
-						*(*Existing)->GetField().GetFieldId(),
-						*Field.GetFieldId()));
+				return Fail(OutError, TEXT("field_external_name_conflict"),
+					FString::Printf(TEXT("Fields '%s' and '%s' both export the name '%s' in field set '%s'."),
+						*(*Existing)->GetField().GetFieldId(), *Field.GetFieldId(), *Field.GetExternalName(), *Field.GetFieldSetId()), Field.GetFieldId());
 			}
 			ByFieldId.Add(Field.GetFieldId(), &Registration);
 			ByExternalKey.Add(ExternalKey, &Registration);
@@ -508,10 +537,8 @@ namespace UE::UAI::HjsonWorkspace
 				Registrations);
 		if (!Candidate->IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("field_registry_invalid"),
-				NormalizedContractId);
+			OutError.SetFailure(Candidate->GetValidationDiagnostic());
+			return false;
 		}
 		OutRegistry = MoveTemp(Candidate);
 		return true;
@@ -555,14 +582,14 @@ namespace UE::UAI::HjsonWorkspace
 			NormalizeRequired(OwnerSemanticId);
 		const FString NormalizedFieldSet =
 			NormalizeRequired(FieldSetId);
-		if (!Registry->IsValid()
-			|| NormalizedStateOwner.IsEmpty()
+		if (!Registry->IsValid()) { OutError.SetFailure(Registry->GetValidationDiagnostic()); return false; }
+		if (NormalizedStateOwner.IsEmpty()
 			|| NormalizedOwner.IsEmpty()
 			|| NormalizedFieldSet.IsEmpty())
 		{
 			return Fail(
 				OutError,
-				TEXT("property_projection_contract_invalid"),
+				TEXT("property_projection_contract_invalid"), NormalizedStateOwner.IsEmpty() ? TEXT("Property projection requires a captured state owner.") : NormalizedOwner.IsEmpty() ? TEXT("Property projection requires a semantic owner.") : TEXT("Property projection requires a field set."),
 				NormalizedOwner);
 		}
 
@@ -595,7 +622,7 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("field_state_duplicate"),
+					TEXT("field_state_duplicate"), TEXT("More than one captured state entry resolves to this export field."),
 					FieldId);
 			}
 			SeenFieldIds.Add(FieldId);
@@ -621,12 +648,7 @@ namespace UE::UAI::HjsonWorkspace
 					Comparison,
 					StateError))
 				{
-					OutError.Set(
-						StateError.Code,
-						StateError.Path,
-						TEXT("/property_projection/default"),
-						StateError.ResourceObserved,
-						true);
+					OutError.SetFailure(StateError, FString(), TEXT("/property_projection/default"));
 					return false;
 				}
 				bEmit = !Comparison.IsEquivalent();
@@ -639,14 +661,14 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("property_map_key_conflict"),
+					TEXT("property_map_key_conflict"), TEXT("More than one field exports the same property name."),
 					Field.GetExternalName());
 			}
 			Values.Add(Field.GetExternalName(), Entry.GetValue());
 			EmittedFieldIds.Add(FieldId);
 		}
 
-		FUeAgentResourceBudgetExceeded BudgetError;
+		FUeAgentResourceChargeError ChargeError;
 		if (!Resources.TryChargeMany(
 			{
 				{EUeAgentResourceDimension::Nodes, 1},
@@ -656,14 +678,9 @@ namespace UE::UAI::HjsonWorkspace
 					64 + Values.Num() * 48},
 			},
 			TEXT("/property_projection"),
-			BudgetError))
+			ChargeError))
 		{
-			OutError.Set(
-				BudgetError.Code,
-				BudgetError.Path,
-				TEXT("/property_projection"),
-				BudgetError.Observed,
-				true);
+			OutError.SetFailure(ChargeError, FString(), TEXT("/property_projection"));
 			return false;
 		}
 
@@ -677,7 +694,7 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return Fail(
 				OutError,
-				TEXT("property_projection_invalid"),
+				TEXT("property_projection_invalid"), FString::Printf(TEXT("The projection contains %d emitted fields but %d property values."), Candidate->GetEmittedFieldIds().Num(), Candidate->GetValues().Num()),
 				NormalizedOwner);
 		}
 		OutProjection = MoveTemp(Candidate);
@@ -700,10 +717,11 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return Fail(
 				OutError,
-				TEXT("field_contract_not_found"),
+				TEXT("field_contract_not_found"), TEXT("No export contract is registered for this field."),
 				NormalizedFieldId);
 		}
+		if (!Registration->IsValid()) { OutError.SetFailure(Registration->GetValidationDiagnostic()); return false; }
 		OutDescription = FExportFieldDescription(*Registration);
-		return OutDescription.IsValid();
+		return true;
 	}
 }

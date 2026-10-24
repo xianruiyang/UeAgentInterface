@@ -1,472 +1,170 @@
 # Direct HJSON Authoring And Structured Apply Chain
 
-本页是 LLM 执行结构化 HJSON 编辑的主入口。默认策略是直接编辑 `llm_authoring` folder HJSON，只在批量生成、参数化调用、adapter 调试或重复变量过多时写 Python 辅助。Python 不能替代 HJSON 意图本身。
-
-本页只描述 UAI 结构化 HJSON 内部链路；字段语义以本地 UAI 源码、adapter/profile、正式命令文档和实测 readback 为准。
+本页描述普通 `llm_authoring` workspace 的编辑流程。实际字段以本次公开导出和所属领域合同为准；
+SDK 用法见 [PYTHON_SDK_AND_CLI.md](../../../../UeAgentInterfaceCMD/docs/PYTHON_SDK_AND_CLI.md)，
+公共字段与生命周期见 [HjsonAuthoring_Guide.md](../HjsonAuthoring_Guide.md)。
 
 ## 主链路
 
-```text
-确认资产和 profile
--> export/readback 当前 folder
--> 按 ExportProfile included_files/tutorial read_order 读取必需入口
--> 按需打开 authoring HJSON
--> 如需新增节点/模块/组件/控件/输入来源，调用对应领域 exact candidate command
--> 在原生创建上下文中选择唯一候选，只保留最小 name 或 id selector
--> 编辑普通 value/connection/layout/properties
--> validate/lint/adapter/apply
--> export/readback/compile/probe 验证
-```
+1. 选择真实资产，用公开 `client.content_graph.export_workspace(target, name="current", profile_id="llm_authoring")`
+   取得 workspace；先检查 `workspace.result.ok`。
+2. 只读取 `workspace.path` 下本次需要的普通 HJSON，保留原文件组织及导出的可读引用。
+3. 修改现有属性时只编辑属性 row 的 `value`，保留导出的 `type` 和可选 `definition`；空集合和新增结构先按需查 `examples/index.hjson` 对应条目，再查询所属领域 candidate，将返回的可读名称
+   写到该领域导出合同的位置。候选查询不替代创建、关系、布局或属性意图。
+4. 调用 `workspace.import_changes()`，检查 `Result.ok`；失败时读取公开错误，停止依赖失败结果。
+5. 成功导入且 `workspace_refresh.status=refreshed` 后，直接读取当前刷新目录或对应 Query，核对目标结果与非目标保全。
+   持久化、compile/settle、运行时或视觉证据按实际行为选择，authoring 输入不作为读回。
 
-执行规则：
+普通编辑不需要领域专属 validate/diff 命令作为前置。服务端公共 import 负责解析、身份/类型/引用检查、
+变更规划、领域应用和必要持久读回。Python 可以生成文本或调用 SDK，但不复制上述业务过程。
+生成示例的阅读与编辑边界见 [Generated Examples](09_GeneratedExamples.md)；示例不是需要导入的模板文件。
 
-1. 先导出真实资产结构，再在 `llm_authoring` 文件上改。
-2. 新增候选来自当前领域唯一 candidate command；十一个当前已接入 HJSON 的入口是 `ai.behavior.candidates`、`animation.state_machine.candidates`、`animation_rig_graph.candidates`、`audio.graph.candidates`、`blueprint.component.candidates`、`blueprint.node.candidates`、`material.expression.candidates`、`niagara.module.candidates`、`pcg.node.candidates`、`umg.widget.candidates` 与 `world.actor.candidates`。
-3. 候选返回不是通用 Apply payload。对已接入统一创建合同的领域，只把
-   `candidate: {name: ...}` 或 `candidate: {id: ...}` 写入 HJSON；明确知道更多内容时
-   可补领域公开 assertion。`candidate_id` 不是 `id` 的别名，会在写入前被拒绝；
-   `query.content.search` 只搜索既有
-   Asset/Actor/Component，不等价于原生创建菜单。
-4. operation、owner、父级、连线、layout、placement 与属性必须来自用户意图、现有上下文或 UE readback，不能由候选显示名、分类或客户端映射猜测。
-5. 不要手写完整 readback 对象；真实 id、template、slot、pin、默认属性、generated/readback/debug 字段由 apply 后的 UE/UAI 补齐。
-6. apply 成功后必须重新 export/readback；后续编辑以读回的新结构为依据继续。
+### Editor / Project Settings
 
-## Canonical Identity
+`project.settings` 的 index/page 返回设置页的 `settings_object_path`，可作为同一
+`content_graph.export_workspace` / `open_workspace(...).import_changes()` 的目标。
+已登记 Settings 容器（包括 Editor / Project）中的原生配置对象按公共 `core.property` 导出；只修改导出的 `categories` 属性值，
+不编辑 ini 或制造配置专用 HJSON。Localization 的结构化目标集合继续由原适配器负责。
 
-身份字段由目标 ApplyInputContract 定义，不能用一套全局字段名替代所有领域：
+导入复用公共属性解析、差量编辑及原子文件保存，触发 UE 原生属性和设置页修改通知。配置键取原生
+`ConsoleVariable` metadata，并沿用设置类的 Default/GlobalUser/ProjectUser/普通 Config 保存作用域。
+未改配置保留；持久读回从实际配置文件加载，并刷新当前配置缓存。
+`settings_effects` 逐项返回 `property`、`restart_required` 和 `status`；有 CVar 的属性同时返回
+`console_variable`、`configured_value`、`effective_value`。`applied_live` 是实时值已匹配；
+`native_change_notified` 只证明原生通知已完成，不推断所有子系统立即重建；`saved_restart_required`
+沿用 UE 原生重启标记；`saved_live_value_differs` 表示当前 CVar 被其他优先级覆盖或尚未应用。
+只含自定义界面、没有配置 UObject 的页面不生成虚假的属性 workspace。
 
-| 类型 | 常见 canonical 字段 | 说明 |
-| --- | --- | --- |
-| 原生创建候选 | `candidate.name` 或 `candidate.id` | `name` 仅在当前原生上下文唯一时可用；`id` 是推荐的精确紧凑身份。完整搜索行和内部 revision 不进入 HJSON。 |
-| 可选候选断言 | owning domain 明确公开的 class/path/action kind | 只校验已知更多事实，不替代 `name/id`，也不承担 graph、parent、placement 或实例身份。 |
-| 资产 workspace | `target.asset_path`、`target.asset_kind` | folder/single-file profile 的目标身份。 |
-| Level lifecycle | `world_path` + actor/component identity，创建时可带 `actor_class` / `component_class` | 类路径是 type assertion，不替代 owner identity。 |
-| candidate-bound node/Component/Actor/expression/module | `candidate.name` 或 `candidate.id` | 服务端在同一领域 context 重枚举原生创建面并调用同一 action/spawner/factory；graph、stage、parent、level、实例名和 placement 留在外层。 |
-| 其它 Blueprint/UMG 内容 | `function_owner_class + function_name`、`widget_class` 等 | exact seed 保留实际 InputContract 字段名。 |
+## 身份、属性与来源
 
-显示 label、tooltip、category 只用于选择，不是 Apply payload 身份。是否接受 `asset_path`、`class_path`、`object_path`、`name` 或领域 class 字段，以当前 InputContract 为准，不能从字段名猜语义。
+- 已有对象使用导出的可读 key/ref；同名对象按导出给出的作用域与编号区分，不自行发明编号。
+- GUID、hash、revision、unit identity 和对应映射由隐藏 workspace 管理；不读取或编辑 `.uai`，
+  不把机器身份写进 HJSON、文件名或 Python 参数。
+- UObject 普通属性在同一文件的 `categories` 内，以属性名组织 `{type,value}`，导出可附只读 `definition`。
+  约束/候选/元素模板按 `definition` 查所属定义目录，类型与引用的查找规则见 [公共属性合同](02_CommonInputValue.md#semantic-workspace-category-grouping)；不要把底层 `property_path/kind` descriptor 补进普通 row。
+- 已有字段省略表示保持。新建对象按公开字段合同的默认值和必填项初始化；null、空集合、缺省不同。
+  集合内部删除和完整期望集合的含义见 [03_OperationsAndSelectors.md](03_OperationsAndSelectors.md)。
+- 目录 workspace 使用原隐藏基线。没有该基线的 single-file/inline 只用于当前合同允许的 missing
+  初始化，不用于绕过已有对象的并发校验。`import_file`/`import_inline` 的参数使用当前公开 SDK 签名；
+  不手工搬运绝对 workspace_path 或机器 expectation。
 
-旧多文件 workspace、旧平铺 graph、旧 index/properties 布局会直接拒绝；完整边界见 `06_LegacyMigration.md`。
+## 新增结构与候选
 
-## 领域 Candidate Identity 与 HJSON Binding
+查询返回的最小可读 `name` 选择原生创建能力；只有返回同名 refine 时才附加最短 `select`。
+实例名、parent、graph、stage、position、属性和连线属于编辑意图，不混入 candidate。
+显示 tooltip/category、类名猜测或完整查询 envelope 都不能代替公开候选。
 
-候选命令按领域返回可执行身份。Blueprint node 与 Component 使用统一的最小
-`name/id` selector：
+不同领域的文件形状由各自导出决定，不能把一个领域的 `candidate` 包装推广到所有对象。
+例如 ordinary Blueprint component-tree 在 `components` map 中用 key 表达实例名，row 顶层填写名称：
 
 ```hjson
-provider_extension: {
-  components: {
-    "component:PointLight": {
-      operation: create
-      candidate: { id: "candidate:..." }
-      parent: DefaultSceneRoot
-    }
-  }
-  graphs: {
-    "event_graph:EventGraph": {
-      operation: update
-      graph: { graph_kind: event_graph }
-      nodes: {
-        "11111111-1111-1111-1111-111111111111": {
-          operation: create
-          candidate: { name: Branch }
-          pos: { x: 800, y: 600 }
-        }
-      }
-    }
+components: {
+  DoorLight: {
+    name: "Point Light"
+    parent: DefaultSceneRoot
   }
 }
 ```
 
-服务端在首写前从同一 Blueprint Action Menu 或 Add Component registry 重枚举，
-按 `name/id` 唯一解析并调用同一个原生 action。调用方不把 graph/pin、SCS parent、
-实例名或 placement 塞进 candidate，也不自行补一套 `node_type/node_class`、
-Component `name/class` 或 spawner 映射；显式提供的 `class_path/asset_path` 等丰富
-字段只作为一致性 assertion。
+此片段只在当前导出的 component-tree 位置使用；候选必须由本次查询确认。
+新建 row 可携带已知可写字段的内联 `properties`，导入后归回普通 property units；字段未知时先最小创建再读取导出。
+省略 `parent` 会挂到当前根；显式 `parent: ""` 请求把该场景组件提升为根，原生操作会替换 DefaultSceneRoot。
+不要把直接删除 DefaultSceneRoot 当成根替换。
 
-一次原生 Action Menu action 可以在同一图中创建主节点和 UE 自带的伴生节点；例如
-组件绑定函数可能同时创建 CallFunction、对应 VariableGet 及其 `self` 连线。这仍是一个
-candidate 的一次执行：HJSON 只声明该 candidate，服务端返回本次新建的主节点并保留同
-次 action 生成的伴生节点与连线，调用方不得把伴生 getter 拆成第二条手工创建规则。伴
-生节点仍是结构读回可见的真实图节点，不存在隐藏 companion 注册表或第二状态源；后续
-修改使用读回 identity，或以一次 cohesive graph replace 管理完整图状态。
-
-Blueprint `pin_defaults` 也是 stable map。最小 key 使用 `pin:<PinName>`，服务端从 key
-补出 `pin_name`；值只需给出 `default_value`。不要把裸 Pin 名重复写成 map key 和字段：
+Blueprint graph 使用本次导出中的 `nodes` map。新 key 是图内实例 alias，候选与布局位于 row：
 
 ```hjson
-pin_defaults: {
-  "pin:InterpSpeed": { default_value: "3" }
-}
-```
-
-Material 使用自己的领域形状；Graph/Pin 上下文与候选分离：
-
-```hjson
-value: {
-  candidate: { id: "candidate:..." }
-  candidate_context: {
-    graph_name: MaterialGraph
-    node_guid: "<optional-source-node-guid>"
-    pin_guid: "<optional-source-pin-guid>"
-    pin_name: "<optional-source-pin-name>"
+nodes: {
+  InterpolateDoor: {
+    candidate: { name: "Interpolate" }
+    pos: { x: 480, y: 80 }
   }
 }
 ```
 
-服务端在首写前从同一 Material Graph/Pin schema 重枚举并执行同一原生 action；
-同一个 expression class 的多个 schema action 仍由不同 `id` 区分。已知 class path
-时可按领域合同作为 assertion 提供，但不能代替 action。其它领域使用各自的 HJSON
-形状，不能把 Material context 字段推广成全局 schema。候选 identity 不含
-operation、owner、父级、默认值、layout、readback 或 completion provenance。
+示例名称必须由目标图的真实 candidate 查询取得，不保证所有上下文都有该名称。
+不填写 `id/guid/node_guid/operation`；服务器按隐藏基线与期望状态形成创建、修改或删除。
+Blueprint 已知节点可沿用真实导出的 `node_type` 与目标字段声明新实例（例如
+`call_function` 的 `function_owner_class/function_name`，本蓝图函数使用 `function_graph`）。
+不同 map key 表示不同实例，允许多次调用同一函数或访问同一变量；未知原生 action 仍先查询 candidate。
 
-Control Rig 的默认 RigVM 图也使用最小 selector；节点实例名和二维位置在候选外：
+## 图接口、默认值与连接
 
-```hjson
-edits: [{
-  intent: create
-  semantic_id: "rigvm_node:AddSpaces"
-  value: {
-    candidate: { id: "candidate:..." }
-    position: { x: 240, y: 144 }
-  }
-}]
-```
+Blueprint 图头中的 `display_name`（与原生名不同时）及 `parent_graph` 是 UE 原生显示名称和子图归属的只读导航。
+例如普通过渡图可显示 `Idle to Move (rule)` 并归于 `Locomotion`；按实际显示名定位，不按 `Transition2` 等后缀猜创建顺序。
+共享规则使用 UE 原生共享名称，不把它误读为仅属于一对状态。图编辑仍使用导出的节点、属性与连接合同。
+重名图还导出只读 `query_name`，作为 `blueprint.node_candidates` 的 graph 参数；未返回时使用 `name`。
+该值是现有原生对象路径查询，不需要模型搬运 GUID；导入仍由服务器保留捕获身份。
 
-`animation_rig_graph.candidates` 当前完整搜索 ControlRig 默认图的 blank-context
-原生菜单，但只创建已验证的 RigVM Unit spawner；其它 action 仍可搜索并通过
-`write_support/support_reason` 明确拒绝写入。服务端在 preflight 与 commit
-分别重枚举，并调用同一 `PerformAction`。已知的 `script_struct_ref` 和
-`method` 只能放在 `value` 中作 assertion，不能代替 `candidate.name/id`；
-IK Rig、IK Retargeter、Skeleton 也不能套用该 RigVM candidate 形状。
-
-Animation Blueprint 的 StateMachine 和 State 共享一个查询命令，但必须分别指定真实
-原生 surface；未来 target、factory settings 与实例字段都不进入 candidate：
+Blueprint 的普通连接使用同图 alias 和实际 Pin 名，例如：
 
 ```hjson
-provider_extension: {
-  class_settings: {
-    template: true
-    parent_class: "/Script/Engine.AnimInstance"
-  }
-  state_machines: [{
-    name: Locomotion
-    animation_graph: AnimGraph
-    candidate: { id: "candidate:<animation-graph-state-machine>" }
-    pos_x: 320
-    pos_y: 64
-    states: [{
-      name: Idle
-      candidate: { id: "candidate:<state-machine-graph-state>" }
-      pos_x: 240
-      pos_y: 0
-    }]
-    entry_state: Idle
-    transitions: []
-  }]
-}
-```
-
-先对同一 future missing target 和同一 `class_settings` 调用
-`animation.state_machine.candidates`：`surface=animation_graph` 搜索 AnimGraph 的
-StateMachine 原生 Blueprint action，`surface=state_machine_graph` 搜索其子图的原生
-schema action。服务端查询时用同一 `UAnimBlueprintFactory` 创建 transient context，
-并在 preflight 与 commit 分别重枚举、执行同一个 spawner/action。当前 parent
-StateMachine 与 plain State 可写，Alias、Conduit、Comment 等其它 action 仍可搜索但
-明确为 search-only。`name`、`animation_graph`、位置、entry 和 transition 都留在
-candidate 外；已知 `class` 只能作 assertion。Transition 是 schema connection relation，
-不是右键候选。完整边界读取 `active/t16_animation_blueprint_domain.md`。
-
-PCG Graph Node 同样把“创建什么”和“创建到哪里”分开：
-
-```hjson
-edits: [{
-  depends_on: []
-  element_kind: item
-  identity: "pcg_node:CreateGrid"
-  intent: create
-  value: {
-    candidate: { id: "candidate:..." }
-    position: [160, 96]
-  }
-}]
-```
-
-`pcg.node.candidates` 覆盖目标 Graph 的原生背景右键菜单；服务端在 preflight 与
-commit 分别重枚举同一上下文，并调用选中 action 的 `PerformAction`。当前搜索覆盖完整
-背景菜单，创建只开放已验证的 `NewNativeElement` action 等价类；其它 action 会保留
-在搜索结果中并以 `write_support/support_reason` 明确拒绝写入。semantic identity、
-`position`、连线和参数均在 candidate 外层。
-
-BehaviorTree 的空白背景创建也使用同一分离原则：
-
-```hjson
-edits: [
-  { identity: "node:root", element_kind: item, intent: create, depends_on: [],
-    value: { carrier_type_ref: "/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Root" } }
-  { identity: "node:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", element_kind: item,
-    intent: create, depends_on: [],
-    value: { candidate: { id: "candidate:<composite>" }, position: [384, 192] } }
-  { identity: "node:11111111-2222-3333-4444-555555555555", element_kind: item,
-    intent: create, depends_on: [],
-    value: { candidate: { id: "candidate:<task>" }, position: [640, 192] } }
-  { identity: "relation:node:root:out:0->node:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:in:0",
-    element_kind: relation, intent: create,
-    depends_on: ["node:root", "node:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
-    value: { from_item_ref: "node:root", from_output_index: 0,
-      to_item_ref: "node:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", to_input_index: 0 } }
-  { identity: "relation:node:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:out:0->node:11111111-2222-3333-4444-555555555555:in:0",
-    element_kind: relation, intent: create,
-    depends_on: ["node:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "node:11111111-2222-3333-4444-555555555555"],
-    value: { from_item_ref: "node:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", from_output_index: 0,
-      to_item_ref: "node:11111111-2222-3333-4444-555555555555", to_input_index: 0 } }
+connections: [
+  { from: "InterpolateDoor.ReturnValue", to: "SetDoorRotation.NewRotation" }
 ]
 ```
 
-`ai.behavior.candidates` 当前完整搜索 BehaviorTree blank-background 原生菜单，
-Composite 与 Task action 可创建；搜索结果中的其它 action 以
-`write_support/support_reason` 说明边界。服务端在 normalization 与 commit 重枚举并
-调用同一 schema action，连线交给原生 BehaviorTree schema；root 必须先连接
-Composite，不能直接连接 Task。Service/Decorator attachment、非空 pin/selection
-上下文和其它 AI root 仍按各自现有合同处理，不能套用本例。
+两端节点必须在同一图中存在或明确声明创建；只写端点不会隐式创建事件/入口节点。
+已知合法接口时可以同次提交新节点和连接。服务端按依赖建立节点、重捕获接口再解析连接；
+缺少新接口信息时才按需先应用、读取成功刷新后的 workspace 再继续，不能机械要求每个新增节点两次 import。
+Blueprint-family 的批量连接由服务端先落实可确定类型的连接，再处理依赖它们的通配符连接，
+并完成原生图编辑的连接通知与输入替换；调用者不必按手工拖线顺序排列数组或手动指定提升后的函数。
+`connections` 字段省略表示保持；显式提交完整期望数组时，要保留的既有连线也必须保留在数组中。
 
-UMG WidgetTree 的候选只负责控件类型，实例 identity、父级和 slot 顺序仍在外层：
+Pin 默认值在本次导出的节点 `items/<节点>/properties.hjson` 中编辑，使用
+`categories.General.<PinAlias>` 的 `{type,value}`，保留该属性行导出的精确类型标签。
+节点的 `properties_ref` 给出相对于当前图文档的属性文件路径；使用该导航定位属性，
+不要按节点名称猜目录。它不属于节点业务属性，导入时不产生修改。
+从只读 `interface_ref` companion 确认接口方向与同名消歧；它不能代替属性行的值编码。
+不要在图节点声明内添加旧 `pin_defaults/default_value` 或 Pin GUID 包装。
+Blueprint 的 wildcard/promotable Pin 可能在连线确定类型后才出现可编辑默认值属性行。
+若该行尚未导出，先提交确定类型的连接，再从刷新目录读取属性行并填写默认值；
+不要猜类型标签或使用内部 `pin_defaults` 补写。已经公开的接口与属性可在同次编辑中一起提交，
+不因节点类别机械拆分请求。
+可变 Pin 组与受影响默认值/连接由同一 prepared mutation 协调；不得保留指向最终已删除 Pin 的关系。
 
-```hjson
-provider_extension: {
-  widget_tree: {
-    widgets: {
-      "widget:ActionButton": {
-        operation: create
-        candidate: { id: "candidate:..." }
-        parent: RootCanvas
-        index: 0
-      }
-    }
-  }
-}
-```
+原生 action 可创建主节点、伴生节点与默认连接。模型只声明一次候选操作，不把伴生节点拆成第二套
+手工创建流程；后续编辑使用真实读回。Material/其他领域的拉线候选上下文使用各自公开的可读引用，
+不手工重建 `node_guid + pin_guid`。
 
-`umg.widget.candidates` 绑定目标 Widget Blueprint 与 revision；服务端首写前重新解析
-同一候选，并通过公开 `FWidgetTemplateClass` mechanics 创建。当前只允许返回中
-`supported: true` 的已加载普通 native Widget class 写入，两个 coverage flag 都为
-false；完整 Designer Palette、UserWidget/asset 和特殊 template 仍受
-`DCR-UAI-UMG-PALETTE-CATALOG-OWNER` 阻断。已知 `class` 只能作为 candidate 外的
-assertion，不能代替 `candidate.name/id`。
+Blueprint宏候选使用具体宏的可读名称，不使用通用`Macro Instance`代替。创建后的`macro_graph`
+保留真实绑定：同一Blueprint内的宏使用本地名，外部宏库使用导出的宏图引用。后续局部编辑保留该字段，
+不从宏名猜测所属库。旧短名只能从同一既有节点的真实外部绑定恢复，不是新建外部宏的完整身份。
 
-MetaSound Source 的当前可用紧凑链路同样只把候选身份放进 candidate：
+## 领域差异与支持边界
 
-```hjson
-root: {
-  type: "/Script/MetasoundEngine.MetaSoundSource"
-  operation: {
-    command_id: "metasound.graph.node.mutate"
-    params: {
-      nodes: [{
-        intent: create
-        candidate: { id: "candidate:..." }
-        position: { x: 384, y: 192 }
-      }]
-    }
-  }
-}
-```
+- Material expression、ControlRig RigVM、Niagara Stage/module、UMG WidgetTree、AI 图和 Audio 图
+  保留原生结构、归属、候选与编译差异；以当前导出和对应命令文档获取具体形状。
+- 普通 workspace 不嵌入旧 typed `command_id/params`、内部 `semantic_id`、operation records
+  或完整 provider_extension readback 来绕过公共模型。内部 mechanics 存在不证明该形状是模型入口。
+- 可读 candidate 可被搜索不等于当前创建支持；按公开支持说明处理，不能猜测未支持 action。
+- SoundCue/MetaSound 完整原生菜单与 UMG 完整 Palette 的受限范围不代表其他已支持编辑不可用；
+  局部成功也不证明原生菜单全集等价。当前实现/验收范围由项目正式计划与真实结果限定。
+- Playback、采样、渲染/捕获及外部格式转换是独立职责，不能通过修改媒体设置冒充播放操作。
 
-`audio.graph.candidates` 对 MetaSound 返回 frontend registry 的紧凑稳定 ID；
-服务端首写前重枚举并解析同一 class/version，`node_guid` 省略时由服务端生成。
-这条链已覆盖保存、卸载/重载和独立 frontend 读回，但不是 UE 原生 blank-menu
-等价面，因而 `coverage_complete` 与 `creation_coverage_complete` 都为 false。
-SoundCue 当前仍是 loaded-class/full-binding 兼容面，不得套用上述最小 selector。
+## 失败处理
 
-## Apply 输入源
-
-三种 source 最终都进入同一个 Workspace Loader、Router、全局 preflight、transaction 和 verification：
-
-| source | 公开入口示例 | 语义 |
-| --- | --- | --- |
-| 目录 | `material_instance_apply_folder(..., folder_path="D:/work/M_Test")` | 一次加载目录内完整 workspace，保留 unit/source provenance。 |
-| 单文件 | `material_instance_apply_folder(..., input_file="D:/work/M_Test/index.hjson")` | 包装为单 unit 虚拟 workspace。 |
-| 内联 | `asset_apply_property_json(..., properties=[...])` 或领域 adapter 的 inline object | 包装为 inline 虚拟 workspace；不新增独立 seed 应用模式。 |
-
-具体命令只接受其 CommandSpec 声明的参数；共享核心支持三种 source，不表示每个 HTTP adapter 都公开同一组参数。目录/单文件/inline 的路由、identity、类型、UE native default 和 mutation 仍由服务端权威决定。
-
-### 递归 UObject/UStruct Inline Apply
-
-属性描述符最小形状是 `property_path + value`。`value_kind`、`struct_path`、`element_type` 等是可选 assertion；只有调用方需要额外断言时才提供。
-
-```hjson
-asset_path: "/Game/Data/DA_Example"
-properties: [
-  { property_path: Tint, value: { components: [0.2, 0.5, 1, 1] } }
-  {
-    property_path: Bounds
-    value: {
-      fields: {
-        Min: { components: [-100, -100, 0] }
-        Max: { components: [100, 100, 300] }
-      }
-    }
-  }
-  {
-    property_path: OwnedSettings
-    value: {
-      owned_object: {
-        class_path: "/Script/MyModule.MySettings"
-        properties: [{ property_path: Strength, value: { literal: 2 } }]
-      }
-    }
-  }
-]
-```
-
-known struct 继续使用 canonical codec，generic/Blueprint struct 使用 `fields` 递归；array/set/fixed array 使用 `items`，map 使用 `entries[{key,value}]`，optional 使用 `is_set/value`。普通外部 object reference 只能替换引用，不能经父对象递归修改；Instanced/EditInlineNew/default subobject 才允许以真实 outer 创建或定位后递归。
-
-## 直接写入支持面
-
-| domain candidate / kind | 可直接用于 HJSON 补全 | 推荐 identity | 补全与限制 |
-| --- | --- | --- | --- |
-| `actor_component` | 是 | exact `seed.component_class` | 还需 owner actor identity、component name 和 operation。 |
-| `umg.widget.candidates` loaded native Widget | 是（部分覆盖） | `candidate.name` 或 `candidate.id` | 还需 Widget stable key、operation、parent/slot context 和 index；只写 `supported: true`，完整 Designer Palette 与 UserWidget/asset/special template 未覆盖。 |
-| `blueprint.node.candidates` | 是 | `candidate.name` 或 `candidate.id` | 还需 Blueprint graph stable map key、node stable id、operation 与 placement；graph/pin context 在候选外层。Promotable operator 以 UE 原生字面 `operation_name` 作为可选 exact assertion（例如对象等号为 `EqualEqual`），不从本地化菜单名称推导或归一化，也不使用 spawner 的代表函数身份。 |
-| `blueprint.component.candidates` | 是 | `candidate.name` 或 `candidate.id` | 还需 Component stable map key、operation 与 parent；stable key 是实例名，candidate 只选择原生组件项。 |
-| `material.expression.candidates` | 是 | `candidate.name` 或 `candidate.id` | graph/pin context、stable element identity、连线、layout 和属性另写；服务端执行同一 Graph/Pin schema action。 |
-| `animation_rig_graph.candidates` RigVM Unit | 是 | `candidate.name` 或 `candidate.id` | 当前目标只接受 ControlRigBlueprint 默认图 blank context；`semantic_id`、二维 position 与可选 struct/method assertions 在 candidate 外。非 Unit action 只搜索。 |
-| `material_function_call` | 是 | exact `seed.path` | Material Function 是资产实体；已知可靠路径时可以直接按目标 contract 写。 |
-| `niagara_dynamic_input` | 条件支持 | exact `seed.path` | 必须放入已有 module input 上下文；子 input/data interface 需 readback 后继续编辑。 |
-| `blueprint_call_function` | 条件支持 | exact contract seed | 必须有正确 graph/owner context，pin default 和连线通常还需补。 |
-| `blueprint_event` | 条件支持 | exact contract seed | 事件唯一性、绑定上下文和图类型会影响 Apply/compile。 |
-| `blueprint_variable_node` | 条件支持 | exact contract seed | 变量必须存在，并明确 get/set 与 graph context。 |
-| `niagara.module.candidates` asset module | 是 | `candidate.name` 或 `candidate.id` | 必须放入目标 stage；usage/usage-id/emitter、operation、顺序和输入在 candidate 外。当前 scratch-pad、assignment/set-specific 与 wizard action 只搜索、拒绝创建。 |
-| `pcg.node.candidates` native element | 是 | `candidate.name` 或 `candidate.id` | 目标 PCG Graph、semantic identity、position、连线和参数另写；当前完整搜索原生背景菜单，只创建已验证的 `NewNativeElement` action。 |
-| `ai.behavior.candidates` BehaviorTree composite/task | 是 | `candidate.name` 或 `candidate.id` | 当前覆盖 blank-background 原生菜单；node identity、position、关系和 root/composite 拓扑另写。Search-only action、Service/Decorator attachment 与其它 AI roots 不属于该创建等价类。 |
-| `audio.graph.candidates` MetaSound frontend class | 是（部分覆盖） | `candidate.name` 或 `candidate.id` | position、可选 class/version assertion 和实例 GUID 在 candidate 外；服务端使用 frontend registry 与 Builder，覆盖字段明确为 false，不声称原生 blank-menu 等价。 |
-| `audio.graph.candidates` SoundCue class | 旧兼容形状 | legacy full binding | 当前只是 loaded-class approximation；尚未接入最小 selector 与原生 palette/action owner。 |
-| `niagara_graph_function` | 无 standalone projection | 无 | 需要 Script graph contract；当前 folder Script profile不覆盖 graph topology。 |
-
-判断可写时，以当前 CommandSpec、InputContract、领域 candidate contract 和 readback 验证为准。候选返回中的字段只在 owning domain 明确声明时可写入目标 HJSON。
-
-Blueprint graph 使用 `operation: replace` 时，如果一个 native candidate 的
-`candidate_context` 指向同一文档内重建的 source node，服务端按
-`candidate_context.node_guid` 依赖顺序创建全部节点，再统一应用 edges；map key
-的字典序不承担依赖。重建 source 应使用 `node_guid + pin_name`，因为旧
-`pin_guid` 不会随节点重建而保留。
-
-## 写入示例
-
-### Actor Component
-
-```hjson
-{
-  "operation": "upsert",
-  "component_class": "/Script/Engine.StaticMeshComponent"
-}
-```
-
-### UMG Widget
-
-```hjson
-{
-  "operation": "upsert",
-  "widget_class": "/Script/UMG.Button",
-  "parent_widget_id": "RootCanvas"
-}
-```
-
-### Material Node
-
-```hjson
-{
-  intent: create
-  value: {
-    candidate: { id: "candidate:..." }
-    candidate_context: { graph_name: MaterialGraph }
-  }
-}
-```
-
-### Blueprint Callable Function
-
-```hjson
-{
-  "operation": "add",
-  "function_owner_class": "/Game/Blueprints/BP_FunctionOwner.BP_FunctionOwner_C",
-  "function_name": "MyCallable"
-}
-```
-
-### Niagara Dynamic Input
-
-```hjson
-{
-  "input_name": "Module.Offset",
-  "type_info": "vector3",
-  "value": {
-    "source": "dynamic_input",
-    "dynamic_input": {
-      "path": "/Niagara/Functions/Random/RandomRangeVector.RandomRangeVector",
-      "inputs": [],
-      "data_interfaces": []
-    }
-  }
-}
-```
-
-### Niagara Stage Module
-
-```hjson
-provider_extension: {
-  stages: {
-    "system|SystemUpdateScript|<usage-guid>": {
-      target: {
-        usage: SystemUpdateScript
-        usage_id: "<usage-guid>"
-      }
-      modules: {
-        native_asset_module: {
-          candidate: { id: "candidate:..." }
-        }
-      }
-    }
-  }
-}
-```
-
-## 来源解析
-
-刚搜索完候选或在 HJSON 中看到 `path`/`name` 后，如需理解来源，可调用 `reference.origin.resolve`。已知路径实体优先传 `path`：
-
-```hjson
-{
-  "target": {
-    "source": "name_reference",
-    "path": "/Script/Engine.KismetSystemLibrary",
-    "function_name": "PrintString"
-  }
-}
-```
-
-从 HJSON 文件反查：
-
-```hjson
-{
-  "target": {
-    "source": "json_reference",
-    "json_file": "<ProjectRoot>/tmp/uai_params/authoring.hjson",
-    "json_pointer": "/graphs/items/main/graph.hjson/nodes/3"
-  }
-}
-```
-
-解析失败说明身份不足或当前环境缺源码/资产，不代表 JSON 可以靠猜继续写。
-
-## 失败边界
-
-以下情况必须停止或修正 JSON：
-
-- 把 display-only `full_name` 或任意字段名当作所有领域通用身份，而没有核对目标 InputContract。
-- 仅凭显示名写入本应有路径的自定义资产、类或对象。
-- 领域 candidate 的 `name/id`、可选断言或外层原生 context 与实际目标不匹配。
-- 把一个领域的候选字段形状复制到另一个领域，或绕过 stale binding 校验。
-- Blueprint/Material 从 pin 拉线搜索时没有传真实 pin context。
-- Niagara module candidate 没有放进精确 usage/usage-id/emitter 的目标 stage，或 selector 多实例歧义时没有写 `occurrence`。
-- apply 成功但 export/readback 没有出现目标对象、目标连接或目标值。
+解析、类型、候选歧义、悬空引用、stale 基线和不支持操作都应返回可定位错误，不静默丢弃输入。
+公共 HJSON 解析与导入使用 `uai.authoring.diagnostic/1`：保留首条 `code`，并通过 `diagnostics` 汇总多个
+可靠错误；每项包含 `code/message` 及已知的 `source_file/line/column/json_pointer` 或 `target/property_path`。
+尚未绑定源文件的输入错误使用 `semantic_pointer` 指出语义字段；它不是文件内的位置，不能据此猜造
+`source_file` 或行列。候选解析、查询与领域交接保留已有精确位置；补充恢复事实时继续保持结构化诊断。
+领域诊断声明具体字段时，workspace 根据原始解析节点继续细化已有容器位置，返回实际分片文件与字段行列。
+缺失字段只定位到存在的父级并标为 `source_kind: related_input`；不把父级行号当作不存在字段的精确位置。
+`message` 简述失败原因，具体请求值、期望类型或允许值分别放在 `actual_value/expected_value`，避免重复回显输入和内部上下文。
+公共 keyed 集合的递归字段合并和文档预投影沿用原始语法节点，包括引用分片及含 `/`、`~` 的字段；
+诊断定位到实际编辑文件。预投影提前结束时标出尚未检查的文档/属性与变更规划范围。
+目录输入检查本次 inventory 与实际引用的内容，不把目录中未引用的用户文件当作导入内容。
+独立分片、语义单元、图节点/布局、初始化变更和公共领域预检查继续收集；同一文件仅在明确分隔符/容器边界处恢复，不修补或应用
+错误输入。无法可靠继续的范围在各级 `unchecked` 中以 `stage/reason` 和已知来源标明；也应查看嵌套
+`cause` 与 `diagnostics` 的未检查范围。不再返回由空列表推导的 `complete` 布尔值：没有列出未检查项
+不能证明诊断已充分或所有检查均已完成，也不表示资产可应用或运行验证通过。无效依赖不会衍生成大量“引用不存在”的假错误。
+领域 provider 内部仍可能在首个语义错误处结束该单元检查，此时明确报告 `provider_stopped_at_error`，
+其余无依赖单元继续预检查。公共 ObjectApply 的独立属性不存在、类型声明与值解码失败会汇总，并沿属性来源
+返回文件/字段定位；图节点内联 `properties` 同样保留解析时的真实文件、指针和行列，不以内部投影的
+`inline://` 替代输入来源。依赖这些值的检查标为未检查。创建、编译及运行时错误仍在实际阶段报告，静态诊断不承诺提前发现它们。
+先检查是否到达预期对象与阶段，再决定修正输入或报告产品问题；不通过删除用户要求的内容使测试变绿。
+已落盘后的失败需要同一事务恢复与独立读回，回调执行成功不等于恢复已验证；未能确认恢复时保留真实
+失败/未知终态。新的普通编辑从有效的重新导出开始，不能靠修改隐藏身份或旧文件强行重放。
+回滚自身失败时，`diagnostics` 同时保留原始失败和恢复失败各自的原因、阶段及已有来源；顶层仍以原始
+失败为主因，并以 `rollback_succeeded=false`、`transaction_status=state_unknown`、`retry_safe=false` 表明恢复未得到确认。

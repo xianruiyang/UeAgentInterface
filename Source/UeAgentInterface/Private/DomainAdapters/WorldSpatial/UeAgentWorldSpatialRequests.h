@@ -14,6 +14,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FString Generation;
 		int64 Sequence = -1;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -25,6 +26,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FString RateDenominator;
 		FString State;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -36,7 +38,11 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FString Unit;
 		FString BasisEvidenceId;
 		FWorldSpatialTemporalPoint ObservedAt;
+		// An authored coordinate frame carries no observation claim. Native
+		// conversion supplies its own evidence after resolving the real context.
+		bool bAuthored = false;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -48,6 +54,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TArray<FString> Components;
 		TArray<FString> ConversionEvidenceIds;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -56,6 +63,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FString TargetRef;
 		FWorldSpatialRevision Revision;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -63,8 +71,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	{
 		FWorldSpatialValue Location;
 		double Zoom = 0.0;
-		FWorldSpatialRevision GraphRevision;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -73,6 +81,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FString NodeRef;
 		FWorldSpatialValue Position;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -83,6 +92,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FString Relation;
 		TOptional<double> Gap;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -104,6 +114,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TOptional<int32> SubjectVertexIndex;
 		TOptional<int32> ReferenceVertexIndex;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -116,6 +127,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		bool bTraceComplex = false;
 		TArray<FString> IgnoreTargetRefs;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -125,6 +137,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		bool bAlignToSurfaceNormal = false;
 		bool bPreserveYaw = false;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -135,6 +148,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		bool bTraceComplex = false;
 		TArray<FString> IgnoreTargetRefs;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -148,6 +162,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		bool bLookAt = false;
 		bool bAutoFallback = false;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -160,6 +175,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		bool bGamePrimitives = false;
 		FString WidgetMode;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -170,6 +186,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FString ViewMode;
 		FWorldSpatialTemporalPoint ObservedAt;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -183,12 +200,14 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FWorldSpatialViewportInteractionState Interaction;
 		FWorldSpatialRevision ObservedRevision;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
 	struct UEAGENTINTERFACE_API FWorldSpatialViewportStatePatch
 	{
 		TOptional<FWorldSpatialValue> CameraTransform;
+		TOptional<FString> CameraTransformMode;
 		TOptional<double> FovDegrees;
 		TOptional<FString> ViewMode;
 		TOptional<bool> Realtime;
@@ -196,6 +215,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TOptional<TArray<FString>> ShowFlags;
 		TOptional<FWorldSpatialViewportInteractionState> Interaction;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -213,20 +233,17 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	{
 		FString GraphRef;
 		TArray<FWorldSpatialNodePlacement> NodePlacements;
-		FWorldSpatialRevision ExpectedRevision;
 		TArray<FWorldSpatialLayoutRelation> LayoutRelations;
 	};
 	struct FObjectTransformReadRequestInput { FWorldSpatialFrame VerifyFrame; };
 	struct FWorldObjectTransformUpdateRequestInput
 	{
 		FWorldSpatialValue Transform;
-		FWorldSpatialRevision ExpectedRevision;
 	};
 	struct FWorldObjectAlignRequestInput
 	{
 		TArray<FString> SubjectRefs;
 		FWorldSpatialAlignment Alignment;
-		TArray<FWorldSpatialExpectedRevisionEntry> ExpectedRevisions;
 		TOptional<FString> AnchorRef;
 	};
 	struct FWorldObjectSnapToSurfaceRequestInput
@@ -234,18 +251,15 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TArray<FString> SubjectRefs;
 		FWorldSpatialSurfaceQuery SurfaceQuery;
 		FWorldSpatialPlacementPolicy PlacementPolicy;
-		TArray<FWorldSpatialExpectedRevisionEntry> ExpectedRevisions;
 	};
 	struct FMeshTransformBakeRequestInput
 	{
 		FWorldSpatialValue Transform;
-		FWorldSpatialRevision ExpectedRevision;
 		TOptional<bool> PreservePlacement;
 	};
 	struct FMeshPivotUpdateRequestInput
 	{
 		FWorldSpatialValue Pivot;
-		FWorldSpatialRevision ExpectedRevision;
 		TOptional<bool> PreserveWorldGeometry;
 	};
 	struct FViewportRayDeprojectRequestInput { FWorldSpatialValue ScreenPoint; };
@@ -283,6 +297,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TOptional<FString> FolderPath;
 		bool bIncludeChildFolders = false;
 		bool bUseCurrentSelection = false;
+		TOptional<FWorldSpatialValue> WorldPoint;
+		TOptional<FWorldSpatialValue> WorldBoundsMin;
+		TOptional<FWorldSpatialValue> WorldBoundsMax;
 		FWorldSpatialFramePolicy FramePolicy;
 
 		bool HasExactlyOneSelector() const;
@@ -294,7 +311,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TOptional<FString> ViewportRef;
 		bool bIncludeSuppressed = false;
 	};
-	struct FViewportViewModeListRequestInput {};
+	struct FViewportViewModeListRequestInput { FString Query; };
 	struct FViewportInstanceListRequestInput {};
 	struct FViewportStateUpdateRequestInput { FWorldSpatialViewportStatePatch StatePatch; };
 

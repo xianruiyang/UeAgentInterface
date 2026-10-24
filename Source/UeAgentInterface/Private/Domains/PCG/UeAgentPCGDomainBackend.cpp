@@ -2,6 +2,13 @@
 
 #include "Domains/PCG/UeAgentPCGDomainBackend.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
+#include "Utilities/UeAgentReadableName.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
+#include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
+
 #include "Module/UeAgentInterfaceLogger.h"
 #include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 #include "Utilities/UeAgentAuthoringFileIO.h"
@@ -59,6 +66,51 @@
 
 namespace UeAgentPCG
 {
+	static UE::UAI::Contract::FDiagnostic BackendFailure(const TCHAR* Code, const FString& Reason,
+		const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const bool bNativeResult = false)
+	{
+		auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("pcg_backend"));
+		Error.PropertyPath = Field;
+		Error.ActualValue = MoveTemp(Actual);
+		Error.ExpectedValue = MoveTemp(Expected);
+		Error.ActualValuePresent = Error.ActualValue.IsValid();
+		Error.ExpectedValuePresent = Error.ExpectedValue.IsValid();
+		if (bNativeResult) Error.SourceKind = TEXT("native_result");
+		return Error;
+	}
+
+	static bool ApplyAuthoredNodePosition(UPCGNode& Node, const FJsonObject& Object, UE::UAI::Contract::FDiagnostic& Error)
+	{
+#if WITH_EDITOR
+		const TCHAR* XField = Object.HasField(TEXT("pos_x")) ? TEXT("pos_x") : TEXT("x");
+		const TCHAR* YField = Object.HasField(TEXT("pos_y")) ? TEXT("pos_y") : TEXT("y");
+		if (!Object.HasField(XField) && !Object.HasField(YField)) return true;
+		int32 NativeX, NativeY; Node.GetNodePosition(NativeX, NativeY);
+		double X = NativeX, Y = NativeY;
+		const TCHAR* InvalidField = nullptr;
+		if (Object.HasField(XField) && !Object.TryGetNumberField(XField, X)) InvalidField = XField;
+		else if (Object.HasField(YField) && !Object.TryGetNumberField(YField, Y)) InvalidField = YField;
+		if (InvalidField)
+		{
+			Error = BackendFailure(TEXT("pcg_node_position_number_required"), TEXT("A node position component must be a number."),
+				InvalidField, Object.TryGetField(InvalidField), MakeShared<FJsonValueString>(TEXT("number")));
+			UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, Object, InvalidField);
+			return false;
+		}
+		if (!UeAgentPropertyValueCodec::TryConvertInt32(X, NativeX, Error))
+		{
+			UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, Object, XField);
+			return false;
+		}
+		if (!UeAgentPropertyValueCodec::TryConvertInt32(Y, NativeY, Error))
+		{
+			UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, Object, YField);
+			return false;
+		}
+		Node.SetNodePosition(NativeX, NativeY);
+#endif
+		return true;
+	}
 
 	FString NormalizeAssetPath(const FString& InPath)
 	{
@@ -119,7 +171,7 @@ namespace UeAgentPCG
 	}
 
 
-	bool SavePackagesForObjects(const TArray<UObject*>& Objects, FString& OutError)
+	bool SavePackagesForObjects(const TArray<UObject*>& Objects, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TArray<UPackage*> PackagesToSave;
 		for (UObject* Object : Objects)
@@ -129,144 +181,46 @@ namespace UeAgentPCG
 				PackagesToSave.AddUnique(Object->GetOutermost());
 			}
 		}
-		if (PackagesToSave.Num() > 0 && !UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, false))
+		if (PackagesToSave.Num() > 0 && !UE::UAI::EditorResources::SavePackages(PackagesToSave, false, OutError))
 		{
-			OutError = TEXT("save_package_failed");
+			OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("save_package_failed"), OutError, TEXT("pcg_backend"));
 			return false;
 		}
 		return true;
 	}
 
-	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, FString& OutError)
+	bool SaveAuthoringFile(const FString& OutputPathInput, const TSharedPtr<FJsonObject>& Root, FString& OutOutputPath, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentAuthoringFileIO::FSaveOptions Options;
 		Options.SourceCommand = TEXT("pcg_json_export");
 		return UeAgentAuthoringFileIO::SaveObject(OutputPathInput, Root, Options, OutOutputPath, OutError);
 	}
 
-	bool PCGGraphHasMaterializedEditorGraph(const UPCGGraph* Graph)
+	static UE::UAI::Contract::FDiagnostic GraphFailure(const TCHAR* Code, const FString& Reason,
+		const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const bool bNativeResult = false)
 	{
-		if (!Graph)
-		{
-			return false;
-		}
-		TArray<UObject*> ChildObjects;
-		GetObjectsWithOuter(Graph, ChildObjects, true);
-		for (UObject* Child : ChildObjects)
-		{
-			if (UEdGraph* EditorGraph = Cast<UEdGraph>(Child))
-			{
-				if (EditorGraph->Nodes.Num() > 0)
-				{
-					return true;
-				}
-			}
-		}
-		return false;
+		auto Error = BackendFailure(Code, Reason, Field, MoveTemp(Actual), MoveTemp(Expected), bNativeResult);
+		Error.Stage = TEXT("graph_apply");
+		if (!bNativeResult && Field.StartsWith(TEXT("/"))) Error.Source.JsonPath = Field;
+		return Error;
 	}
 
-	static void PumpSlateForPCGEditorGraphInit(const int32 FrameCount = 4)
+	static void AppendGraphIssue(TArray<UE::UAI::Contract::FDiagnostic>& Issues,
+		UE::UAI::Contract::FDiagnostic Error, const FJsonObject* SourceObject = nullptr,
+		const FString& Field = FString(), const FString& NodeId = FString())
 	{
-		if (!FSlateApplication::IsInitialized())
-		{
-			return;
-		}
-		for (int32 FrameIndex = 0; FrameIndex < FrameCount; ++FrameIndex)
-		{
-			FSlateApplication::Get().PumpMessages();
-			FSlateApplication::Get().Tick();
-			FPlatformProcess::Sleep(0.01f);
-		}
+		if (Error.CandidateName.IsEmpty()) Error.CandidateName = NodeId;
+		if (SourceObject) UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, *SourceObject, Field);
+		Issues.Add(MoveTemp(Error));
 	}
 
-	static bool IsHeadlessPCGEditorGraphInit()
-	{
-		const TCHAR* CommandLine = FCommandLine::Get();
-		return IsRunningCommandlet()
-			|| FApp::IsUnattended()
-			|| FParse::Param(CommandLine, TEXT("NullRHI"));
-	}
-
-	void ClosePCGEditorOpenedForGraphInit(
-		UAssetEditorSubsystem* AssetEditorSubsystem,
-		UPCGGraph* Graph,
-		const bool bOpenedEditorForGraphInit)
-	{
-		if (!bOpenedEditorForGraphInit
-			|| !IsHeadlessPCGEditorGraphInit()
-			|| !AssetEditorSubsystem
-			|| !Graph)
-		{
-			return;
-		}
-
-		if (IAssetEditorInstance* EditorInstance = AssetEditorSubsystem->FindEditorForAsset(Graph, false))
-		{
-			const TSharedPtr<FTabManager> TabManager = EditorInstance->GetAssociatedTabManager();
-			if (TabManager.IsValid())
-			{
-				TabManager->CloseAllAreas();
-			}
-		}
-
-		PumpSlateForPCGEditorGraphInit(2);
-		AssetEditorSubsystem->CloseAllEditorsForAsset(Graph);
-		PumpSlateForPCGEditorGraphInit(2);
-	}
-
-	bool EnsurePCGEditorGraphMaterialized(UPCGGraph* Graph, bool& bOutOpenedEditor)
-	{
-		bOutOpenedEditor = false;
-		if (!Graph)
-		{
-			return false;
-		}
-		if (PCGGraphHasMaterializedEditorGraph(Graph))
-		{
-			return true;
-		}
-		if (IsHeadlessPCGEditorGraphInit())
-		{
-			return false;
-		}
-		if (!GEditor)
-		{
-			return false;
-		}
-
-		UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
-		if (!AssetEditorSubsystem)
-		{
-			return false;
-		}
-		IAssetEditorInstance* EditorInstance = AssetEditorSubsystem->FindEditorForAsset(Graph, false);
-		if (!EditorInstance)
-		{
-			if (!AssetEditorSubsystem->OpenEditorForAsset(Graph))
-			{
-				return false;
-			}
-			bOutOpenedEditor = true;
-			EditorInstance = AssetEditorSubsystem->FindEditorForAsset(Graph, false);
-		}
-		PumpSlateForPCGEditorGraphInit(8);
-		return PCGGraphHasMaterializedEditorGraph(Graph);
-	}
-
-	static TSharedPtr<FJsonObject> MakeIssue(const FString& Severity, const FString& Code, const FString& Path, const FString& Message)
-	{
-		return UeAgentJsonDiagnostics::MakeIssue(Severity, Code, Path, Message);
-	}
-
-	void AddIssue(TArray<TSharedPtr<FJsonValue>>& Issues, const FString& Severity, const FString& Code, const FString& Path, const FString& Message)
-	{
-		Issues.Add(MakeShared<FJsonValueObject>(MakeIssue(Severity, Code, Path, Message)));
-	}
-
-	int32 CountErrors(const TArray<TSharedPtr<FJsonValue>>& Issues)
-	{
-		return UeAgentJsonDiagnostics::CountIssuesBySeverity(Issues, TEXT("error"));
-	}
+	int32 CountErrors(const TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+    {
+        int32 Count = 0;
+        for (const auto& Issue : Issues)
+            if (Issue.Severity == UE::UAI::Contract::ESeverity::Error) ++Count;
+        return Count;
+    }
 
 	static FString EnumValueToString(const UEnum* Enum, int64 Value)
 	{
@@ -301,7 +255,7 @@ namespace UeAgentPCG
 		if (!Object) return Properties;
 		UeAgentAuthoringState::FStateSnapshot Snapshot;
 		TSharedPtr<FJsonObject> Document;
-		FString Error;
+		UE::UAI::Contract::FDiagnostic Error;
 		if (UeAgentDetailsAuthoringService::CaptureObjectProperties(
 				Object, UeAgentDetailsAuthoringService::FCapturePolicy(),
 				Snapshot, Document, Error))
@@ -309,33 +263,6 @@ namespace UeAgentPCG
 			UeAgentDetailsAuthoringService::DecodePropertiesDocument(Document, Properties, Error);
 		}
 		return Properties;
-	}
-
-	static void RefreshPCGImportedPropertySideEffects(UObject* Object, const FString& PropertyName)
-	{
-		if (UPCGBlueprintSettings* BlueprintSettings = Cast<UPCGBlueprintSettings>(Object))
-		{
-			if (PropertyName == TEXT("BlueprintElementType"))
-			{
-				const FClassProperty* ElementTypeProperty = FindFProperty<FClassProperty>(BlueprintSettings->GetClass(), TEXT("BlueprintElementType"));
-				UClass* ElementType = ElementTypeProperty
-					? Cast<UClass>(ElementTypeProperty->GetObjectPropertyValue_InContainer(BlueprintSettings))
-					: nullptr;
-				UPCGBlueprintElement* ElementInstance = nullptr;
-				BlueprintSettings->SetElementType(ElementType, ElementInstance);
-			}
-		}
-		if (UPCGStaticMeshSpawnerSettings* StaticMeshSpawnerSettings = Cast<UPCGStaticMeshSpawnerSettings>(Object))
-		{
-			if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UPCGStaticMeshSpawnerSettings, MeshSelectorType))
-			{
-				StaticMeshSpawnerSettings->SetMeshSelectorType(StaticMeshSpawnerSettings->MeshSelectorType);
-			}
-			else if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(UPCGStaticMeshSpawnerSettings, InstanceDataPackerType))
-			{
-				StaticMeshSpawnerSettings->SetInstancePackerType(StaticMeshSpawnerSettings->InstanceDataPackerType);
-			}
-		}
 	}
 
 	static FString FirstPinLabelFromNodeJson(const TSharedPtr<FJsonObject>& NodeObj, const TCHAR* PinArrayField)
@@ -375,7 +302,7 @@ namespace UeAgentPCG
 		}
 	}
 
-	int32 ApplyPropertyArray(UObject* Object, const TArray<TSharedPtr<FJsonValue>>* PropertyValues, TArray<TSharedPtr<FJsonValue>>& Issues, const FString& PathPrefix)
+	int32 ApplyPropertyArray(UObject* Object, const TArray<TSharedPtr<FJsonValue>>* PropertyValues, TArray<UE::UAI::Contract::FDiagnostic>& Issues, const FString& PathPrefix)
 	{
 		if (!Object || !PropertyValues)
 		{
@@ -386,25 +313,16 @@ namespace UeAgentPCG
 		PropertiesRoot->SetStringField(TEXT("schema"), TEXT("uai.uobject_properties.v2"));
 		PropertiesRoot->SetArrayField(TEXT("properties"), *PropertyValues);
 		UeAgentAuthoringDirectApply::FResult ApplyResult;
-		FString ApplyError;
-		if (!UeAgentDetailsAuthoringService::ApplyObjectProperties(
-				Object, PropertiesRoot, UeAgentAuthoringObjectApply::FOptions(),
-				ApplyResult, ApplyError))
+		UE::UAI::Contract::FDiagnostic ApplyError;
+		if (!UeAgentDetailsAuthoringService::ApplyObjectProperties(Object, PropertiesRoot, UeAgentAuthoringObjectApply::FOptions(), ApplyResult))
 		{
-			AddIssue(Issues, TEXT("error"), TEXT("property_apply_failed"), PathPrefix,
-				ApplyError.IsEmpty() ? FString(TEXT("property_apply_failed")) : ApplyError);
+				ApplyError = ApplyResult.Diagnostic;
+			if (ApplyError.IsEmpty()) ApplyError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("property_apply_failed"), TEXT("The PCG property update failed."), TEXT("graph_apply"));
+            if (ApplyError.PropertyPath.IsEmpty()) ApplyError.PropertyPath = PathPrefix;
+            Issues.Add(MoveTemp(ApplyError));
 			return 0;
 		}
 
-		for (const TSharedPtr<FJsonValue>& Value : *PropertyValues)
-		{
-			const TSharedPtr<FJsonObject> Descriptor = Value.IsValid() ? Value->AsObject() : nullptr;
-			FString PropertyPath;
-			if (Descriptor.IsValid() && Descriptor->TryGetStringField(TEXT("property_path"), PropertyPath))
-			{
-				RefreshPCGImportedPropertySideEffects(Object, PropertyPath);
-			}
-		}
 		return ApplyResult.PropertiesSeen;
 	}
 
@@ -519,12 +437,9 @@ namespace UeAgentPCG
 		Base.ReplaceInline(TEXT("/"), TEXT("_"));
 		Base.ReplaceInline(TEXT("\\"), TEXT("_"));
 
-		FString Candidate = Base;
-		int32 Suffix = 2;
-		while (UsedIds.Contains(Candidate))
-		{
-			Candidate = FString::Printf(TEXT("%s_%d"), *Base, Suffix++);
-		}
+		const FString Candidate = UE::UAI::AllocateReadableName(Base, [&](const FString& Name) {
+			return UsedIds.Contains(Name) || Name == InputNodeId || Name == OutputNodeId;
+		});
 		UsedIds.Add(Candidate);
 		return Candidate;
 	}
@@ -637,11 +552,48 @@ namespace UeAgentPCG
 		return EdgeObj;
 	}
 
-	static UPCGPin* ResolvePCGEdgePin(UPCGNode* Node, const FString& RequestedLabel, bool bOutputPin, FString& OutResolvedLabel)
+	static UPCGPin* ResolvePCGEdgePin(UPCGNode* Node, const FString& RequestedLabel, bool bOutputPin, FString& OutResolvedLabel, bool bPublicAlias = false)
 	{
 		OutResolvedLabel = RequestedLabel;
 		if (!Node)
 		{
+			return nullptr;
+		}
+		if (bPublicAlias)
+		{
+			using namespace UE::UAI::HjsonWorkspace;
+			TArray<FGraphAuthoringPinAliasInput> Inputs;
+			TArray<UPCGPin*> NativePins;
+			auto Append = [&](const auto& Pins, EGraphAuthoringEndpointDirection Direction)
+			{
+				TArray<UPCGPin*> Sorted;
+				for (const auto& Pin : Pins)
+					if (Pin && !Pin->Properties.Label.IsNone()) Sorted.Add(Pin.Get());
+				Sorted.Sort([](const UPCGPin& A, const UPCGPin& B) {
+					return A.Properties.Label.ToString() < B.Properties.Label.ToString();
+				});
+				for (UPCGPin* Pin : Sorted)
+				{
+					Inputs.Add({FString::FromInt(NativePins.Num()), Pin->Properties.Label.ToString(), 0, Direction});
+					NativePins.Add(Pin);
+				}
+			};
+			// Export allocates aliases across both directions. Resolve after node
+			// reconstruction using that same public owner, never by removing #N.
+			Append(Node->GetInputPins(), EGraphAuthoringEndpointDirection::Input);
+			Append(Node->GetOutputPins(), EGraphAuthoringEndpointDirection::Output);
+			FGraphAuthoringPinAliasProjection Projection;
+			FWorkspaceError AliasError;
+			if (!TryBuildGraphAuthoringPinAliasProjection(Inputs, Projection, AliasError)) return nullptr;
+			for (const auto& Alias : Projection.SourceIdByAlias)
+				if (Alias.Key.Equals(RequestedLabel, ESearchCase::IgnoreCase))
+				{
+					const int32 Index = FCString::Atoi(*Alias.Value);
+					const auto Direction = bOutputPin ? EGraphAuthoringEndpointDirection::Output : EGraphAuthoringEndpointDirection::Input;
+					if (!Inputs.IsValidIndex(Index) || Inputs[Index].Direction != Direction) return nullptr;
+					OutResolvedLabel = NativePins[Index]->Properties.Label.ToString();
+					return NativePins[Index];
+				}
 			return nullptr;
 		}
 
@@ -682,85 +634,6 @@ namespace UeAgentPCG
 
 	TSharedPtr<FJsonObject> ExportParameterBagToJson(const FInstancedPropertyBag* Bag);
 
-	TSharedPtr<FJsonObject> ExportGraphToJson(UPCGGraph* Graph)
-	{
-		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetStringField(TEXT("schema"), SchemaFolder);
-		if (!Graph)
-		{
-			return Root;
-		}
-
-		Root->SetStringField(TEXT("asset_path"), Graph->GetOutermost() ? Graph->GetOutermost()->GetName() : FString());
-		Root->SetStringField(TEXT("object_path"), Graph->GetPathName());
-		Root->SetStringField(TEXT("asset_class"), Graph->GetClass()->GetPathName());
-
-		TSharedPtr<FJsonObject> GraphSettings = MakeShared<FJsonObject>();
-		GraphSettings->SetBoolField(TEXT("landscape_uses_metadata"), Graph->bLandscapeUsesMetadata);
-		GraphSettings->SetArrayField(TEXT("properties"), ExportEditableProperties(Graph));
-		Root->SetObjectField(TEXT("graph_settings"), GraphSettings);
-		Root->SetObjectField(TEXT("parameters"), ExportParameterBagToJson(Graph->GetUserParametersStruct()));
-
-		TArray<TSharedPtr<FJsonValue>> Nodes;
-		TArray<TSharedPtr<FJsonValue>> Edges;
-		TMap<UPCGNode*, FString> NodeIds;
-		TSet<FString> UsedIds;
-		TArray<UPCGNode*> ExportNodes = GatherExportNodes(Graph);
-
-		for (UPCGNode* Node : ExportNodes)
-		{
-			const FString NodeId = MakeStableNodeId(Graph, Node, UsedIds);
-			NodeIds.Add(Node, NodeId);
-		}
-
-		for (UPCGNode* Node : ExportNodes)
-		{
-			const FString* NodeId = NodeIds.Find(Node);
-			Nodes.Add(MakeShared<FJsonValueObject>(NodeToJson(Graph, Node, NodeId ? *NodeId : FString())));
-		}
-
-		for (UPCGNode* Node : ExportNodes)
-		{
-			const FString* FromId = NodeIds.Find(Node);
-			if (!FromId)
-			{
-				continue;
-			}
-			for (const TObjectPtr<UPCGPin>& PinPtr : Node->GetOutputPins())
-			{
-				UPCGPin* Pin = PinPtr.Get();
-				if (!Pin)
-				{
-					continue;
-				}
-				for (const TObjectPtr<UPCGEdge>& EdgePtr : Pin->Edges)
-				{
-					UPCGEdge* Edge = EdgePtr.Get();
-					if (!Edge || Edge->InputPin != Pin || !Edge->OutputPin || !Edge->OutputPin->Node)
-					{
-						continue;
-					}
-					const FString* ToId = NodeIds.Find(Edge->OutputPin->Node);
-					if (!ToId)
-					{
-						continue;
-					}
-					Edges.Add(MakeShared<FJsonValueObject>(EdgeToJson(
-						*FromId,
-						Pin->Properties.Label.ToString(),
-						*ToId,
-						Edge->OutputPin->Properties.Label.ToString())));
-				}
-			}
-		}
-
-		Root->SetArrayField(TEXT("nodes"), Nodes);
-		Root->SetArrayField(TEXT("edges"), Edges);
-		Root->SetNumberField(TEXT("node_count"), Nodes.Num());
-		Root->SetNumberField(TEXT("edge_count"), Edges.Num());
-		return Root;
-	}
-
 	TSharedPtr<FJsonObject> ExportParameterBagToJson(const FInstancedPropertyBag* Bag)
 	{
 		FInstancedPropertyBag EmptyBag;
@@ -779,17 +652,22 @@ namespace UeAgentPCG
 	int32 ApplyCanonicalParameterBag(
 		FInstancedPropertyBag& Bag,
 		const TSharedPtr<FJsonObject>& BagJson,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		TArray<FName>* OutAppliedNames,
 		bool bAllowLayoutChanges)
 	{
 		UeAgentPropertyValueCodec::FOptions CodecOptions;
 		FInstancedPropertyBag Decoded;
-		FString CodecError;
-		if (!BagJson.IsValid()
-			|| !UeAgentPropertyValueCodec::DecodePropertyBag(MakeShared<FJsonValueObject>(BagJson), Decoded, nullptr, CodecOptions, CodecError))
+		UE::UAI::Contract::FDiagnostic CodecError;
+		if (!BagJson.IsValid())
 		{
-			AddIssue(Issues, TEXT("error"), TEXT("parameter_bag_invalid"), TEXT("parameters"), CodecError.IsEmpty() ? TEXT("Invalid canonical property bag.") : CodecError);
+			AppendGraphIssue(Issues, GraphFailure(TEXT("parameter_bag_invalid"), TEXT("A canonical property bag object is required."),
+				TEXT("parameters"), nullptr, MakeShared<FJsonValueString>(TEXT("a property bag object"))));
+			return 0;
+		}
+		if (!UeAgentPropertyValueCodec::DecodePropertyBag(MakeShared<FJsonValueObject>(BagJson), Decoded, nullptr, CodecOptions, CodecError))
+		{
+			AppendGraphIssue(Issues, MoveTemp(CodecError), BagJson.Get());
 			return 0;
 		}
 
@@ -815,7 +693,8 @@ namespace UeAgentPCG
 			: TConstArrayView<FPropertyBagPropertyDesc>();
 		if (ExistingDescs.Num() != DecodedDescs.Num())
 		{
-			AddIssue(Issues, TEXT("error"), TEXT("parameter_schema_mismatch"), TEXT("parameters.schema"), TEXT("Graph instance parameters must exactly match the parent graph schema."));
+			AppendGraphIssue(Issues, GraphFailure(TEXT("parameter_schema_mismatch"), TEXT("The parameter schema has a different number of entries from the parent graph schema."),
+				TEXT("/schema"), MakeShared<FJsonValueNumber>(DecodedDescs.Num()), MakeShared<FJsonValueNumber>(ExistingDescs.Num())), BagJson.Get(), TEXT("schema"));
 			return 0;
 		}
 
@@ -824,7 +703,10 @@ namespace UeAgentPCG
 		const FInstancedStruct* DecodedStorage = BagStorageProperty ? BagStorageProperty->ContainerPtrToValuePtr<FInstancedStruct>(&Decoded) : nullptr;
 		if ((ExistingDescs.Num() > 0) && (!ExistingStorage || !ExistingStorage->GetMutableMemory() || !DecodedStorage || !DecodedStorage->GetMemory()))
 		{
-			AddIssue(Issues, TEXT("error"), TEXT("parameter_bag_storage_unavailable"), TEXT("parameters"), TEXT("Property bag storage is unavailable."));
+			AppendGraphIssue(Issues, GraphFailure(TEXT("parameter_bag_storage_unavailable"), TEXT("The property bag requires readable source storage and writable destination storage."),
+				!ExistingStorage ? TEXT("destination_storage_available") : !ExistingStorage->GetMutableMemory() ? TEXT("destination_memory_available")
+				: !DecodedStorage ? TEXT("source_storage_available") : TEXT("source_memory_available"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true));
 			return 0;
 		}
 
@@ -837,7 +719,99 @@ namespace UeAgentPCG
 				|| ExistingDesc->ContainerTypes != DesiredDesc.ContainerTypes
 				|| !ExistingDesc->CachedProperty || !DesiredDesc.CachedProperty)
 			{
-				AddIssue(Issues, TEXT("error"), TEXT("parameter_schema_mismatch"), FString::Printf(TEXT("parameters.schema.%s"), *DesiredDesc.Name.ToString()), TEXT("Graph instance parameters must exactly match the parent graph schema."));
+				FString Pointer = TEXT("/schema");
+				TSharedPtr<FJsonObject> SchemaEntry;
+				const TArray<TSharedPtr<FJsonValue>>* Schema = nullptr;
+				if (BagJson->TryGetArrayField(TEXT("schema"), Schema))
+				{
+					for (int32 Index = 0; Index < Schema->Num(); ++Index)
+					{
+						const auto Entry = (*Schema)[Index].IsValid() ? (*Schema)[Index]->AsObject() : nullptr;
+						FString Name;
+						if (Entry && Entry->TryGetStringField(TEXT("name"), Name) && FName(*Name) == DesiredDesc.Name)
+						{
+							SchemaEntry = Entry;
+							Pointer += TEXT("/") + LexToString(Index);
+							break;
+						}
+					}
+				}
+				auto Error = GraphFailure(TEXT("parameter_schema_mismatch"),
+					TEXT("The parameter declaration must match the parent graph schema."), FString(), nullptr, nullptr);
+				Error.CandidateName = DesiredDesc.Name.ToString();
+				if (!ExistingDesc)
+				{
+					Error.PublicMessage = TEXT("The supplied parameter does not exist in the parent graph schema.");
+					Error.ActualValue = MakeShared<FJsonValueString>(DesiredDesc.Name.ToString());
+					Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a parameter declared by the parent graph"));
+					Pointer += TEXT("/name");
+				}
+				else if (ExistingDesc->ValueType != DesiredDesc.ValueType
+					|| ExistingDesc->ValueTypeObject.Get() != DesiredDesc.ValueTypeObject.Get())
+				{
+					while (SchemaEntry)
+					{
+						const TSharedPtr<FJsonObject>* Element = nullptr;
+						if (!SchemaEntry->TryGetObjectField(TEXT("element_type"), Element) || !Element || !Element->IsValid()) break;
+						Pointer += TEXT("/element_type");
+						SchemaEntry = *Element;
+					}
+					if (ExistingDesc->ValueType != DesiredDesc.ValueType)
+					{
+						Error.PublicMessage = TEXT("The parameter value type differs from the parent graph declaration.");
+						Error.ActualValue = MakeShared<FJsonValueString>(StaticEnum<EPropertyBagPropertyType>()->GetNameStringByValue(static_cast<int64>(DesiredDesc.ValueType)));
+						Error.ExpectedValue = MakeShared<FJsonValueString>(StaticEnum<EPropertyBagPropertyType>()->GetNameStringByValue(static_cast<int64>(ExistingDesc->ValueType)));
+						Pointer += TEXT("/kind");
+					}
+					else
+					{
+						Error.PublicMessage = TEXT("The parameter's referenced type differs from the parent graph declaration.");
+						Error.ActualValue = DesiredDesc.ValueTypeObject.Get()
+							? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(DesiredDesc.ValueTypeObject.Get()->GetPathName())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>());
+						Error.ExpectedValue = ExistingDesc->ValueTypeObject.Get()
+							? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(ExistingDesc->ValueTypeObject.Get()->GetPathName())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>());
+						Pointer += TEXT("/type_path");
+					}
+				}
+				else if (ExistingDesc->ContainerTypes != DesiredDesc.ContainerTypes)
+				{
+					Error.PublicMessage = TEXT("The parameter container type differs from the parent graph declaration.");
+					if (ExistingDesc->ContainerTypes.Num() != DesiredDesc.ContainerTypes.Num())
+					{
+						Error.PropertyPath = TEXT("container_depth");
+						Error.ActualValue = MakeShared<FJsonValueNumber>(DesiredDesc.ContainerTypes.Num());
+						Error.ExpectedValue = MakeShared<FJsonValueNumber>(ExistingDesc->ContainerTypes.Num());
+					}
+					else
+					{
+						const auto ContainerName = [](EPropertyBagContainerType Type) {
+							return Type == EPropertyBagContainerType::Array ? TEXT("array") : Type == EPropertyBagContainerType::Set ? TEXT("set") : TEXT("none");
+						};
+						for (uint32 Index = 0; Index < DesiredDesc.ContainerTypes.Num(); ++Index)
+						{
+							if (DesiredDesc.ContainerTypes[Index] != ExistingDesc->ContainerTypes[Index])
+							{
+								Error.ActualValue = MakeShared<FJsonValueString>(ContainerName(DesiredDesc.ContainerTypes[Index]));
+								Error.ExpectedValue = MakeShared<FJsonValueString>(ContainerName(ExistingDesc->ContainerTypes[Index]));
+								Pointer += TEXT("/kind");
+								break;
+							}
+							Pointer += TEXT("/element_type");
+						}
+					}
+				}
+				else
+				{
+					Error.PublicMessage = TEXT("The parameter declaration has no native property available for copying its value.");
+					Error.SourceKind = TEXT("native_result");
+					Error.PropertyPath = !ExistingDesc->CachedProperty ? TEXT("parent_property_available") : TEXT("decoded_property_available");
+					Error.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					Error.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				}
+				Error.ActualValuePresent = true;
+				Error.ExpectedValuePresent = true;
+				if (Error.SourceKind != TEXT("native_result")) Error.Source.InternalJsonPath = Pointer;
+				AppendGraphIssue(Issues, MoveTemp(Error), BagJson.Get(), TEXT("schema"));
 				return 0;
 			}
 		}
@@ -856,7 +830,7 @@ namespace UeAgentPCG
 	int32 PreflightCanonicalParameterBag(
 		const FInstancedPropertyBag* SourceBag,
 		const TSharedPtr<FJsonObject>& BagJson,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		bool bAllowLayoutChanges)
 	{
 		FInstancedPropertyBag Preview;
@@ -887,7 +861,7 @@ namespace UeAgentPCG
 		}
 	}
 
-	UPCGGraph* CreateOrLoadGraphAsset(const FString& AssetPathInput, bool bCreateIfMissing, bool& bOutCreated, FString& OutError)
+	UPCGGraph* CreateOrLoadGraphAsset(const FString& AssetPathInput, bool bCreateIfMissing, bool& bOutCreated, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		bOutCreated = false;
 		const FString AssetPath = NormalizeAssetPath(AssetPathInput);
@@ -897,12 +871,16 @@ namespace UeAgentPCG
 		}
 		if (!bCreateIfMissing)
 		{
-			OutError = TEXT("pcg_graph_asset_not_found");
+			OutError = BackendFailure(TEXT("pcg_graph_asset_not_found"), TEXT("The asset path did not resolve to an existing PCG graph and creation is disabled."),
+				TEXT("asset_path"), MakeShared<FJsonValueString>(AssetPath), MakeShared<FJsonValueString>(TEXT("an existing PCGGraph asset")));
+			OutError.TargetPath = AssetPath;
 			return nullptr;
 		}
 		if (!FPackageName::IsValidLongPackageName(AssetPath))
 		{
-			OutError = TEXT("invalid_asset_path");
+			OutError = BackendFailure(TEXT("invalid_asset_path"), TEXT("The graph asset path is not a valid long package name."),
+				TEXT("asset_path"), MakeShared<FJsonValueString>(AssetPath), MakeShared<FJsonValueString>(TEXT("a valid long package name")));
+			OutError.TargetPath = AssetPath;
 			return nullptr;
 		}
 
@@ -910,14 +888,18 @@ namespace UeAgentPCG
 		UPackage* Package = CreatePackage(*AssetPath);
 		if (!Package)
 		{
-			OutError = TEXT("create_package_failed");
+			OutError = BackendFailure(TEXT("create_package_failed"), TEXT("Unreal could not create the package for the PCG graph."),
+				TEXT("package_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
+			OutError.TargetPath = AssetPath;
 			return nullptr;
 		}
 
 		UPCGGraph* Graph = NewObject<UPCGGraph>(Package, UPCGGraph::StaticClass(), *AssetName, RF_Public | RF_Standalone | RF_Transactional);
 		if (!Graph)
 		{
-			OutError = TEXT("create_pcg_graph_failed");
+			OutError = BackendFailure(TEXT("create_pcg_graph_failed"), TEXT("Unreal could not create the PCG graph object in its package."),
+				TEXT("graph_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
+			OutError.TargetPath = AssetPath;
 			return nullptr;
 		}
 		FAssetRegistryModule::AssetCreated(Graph);
@@ -927,13 +909,15 @@ namespace UeAgentPCG
 		return Graph;
 	}
 
-	bool ApplyGraphJson(UPCGGraph* Graph, const TSharedPtr<FJsonObject>& GraphJson, bool bReplaceNodes, TArray<TSharedPtr<FJsonValue>>& Issues, int32& OutAppliedNodes, int32& OutAppliedEdges)
+	bool ApplyGraphJson(UPCGGraph* Graph, const TSharedPtr<FJsonObject>& GraphJson, bool bReplaceNodes, TArray<UE::UAI::Contract::FDiagnostic>& Issues, int32& OutAppliedNodes, int32& OutAppliedEdges, const FGraphNodeCreationOverride* NodeCreationOverride, bool bPreserveExistingNodes, TMap<FString, UPCGNode*>* OutAppliedNodeBindings, const FGraphNodePropertiesApply* ApplyNodeProperties, const UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext* Connections, const FString& LogicalTarget)
 	{
 		OutAppliedNodes = 0;
 		OutAppliedEdges = 0;
+		if (OutAppliedNodeBindings) OutAppliedNodeBindings->Reset();
 		if (!Graph || !GraphJson.IsValid())
 		{
-			AddIssue(Issues, TEXT("error"), TEXT("invalid_graph_apply_input"), TEXT("graph"), TEXT("Graph asset or graph JSON is invalid."));
+			AppendGraphIssue(Issues, GraphFailure(TEXT("invalid_graph_apply_input"), TEXT("Graph apply requires both a native graph and a graph document."),
+				!Graph ? TEXT("graph_available") : TEXT("graph_document_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true));
 			return false;
 		}
 
@@ -942,12 +926,35 @@ namespace UeAgentPCG
 		const TArray<TSharedPtr<FJsonValue>>* EdgeValues = nullptr;
 		GraphJson->TryGetArrayField(TEXT("edges"), EdgeValues);
 
+		TMap<FString, UPCGNode*> ExistingNodes;
+		const bool bHasConnectionIntent = bPreserveExistingNodes && Connections && Connections->bHasResolvedIntent;
+		TSet<UPCGNode*> RetainedNodes;
+		if (bPreserveExistingNodes)
+		{
+			ExistingNodes = BuildExportNodeMapById(Graph);
+			if (NodeValues)
+			{
+				for (const TSharedPtr<FJsonValue>& Value : *NodeValues)
+				{
+					const TSharedPtr<FJsonObject> NodeObject = Value.IsValid() ? Value->AsObject() : nullptr;
+					FString Id, ClassPath;
+					if (!NodeObject.IsValid() || !NodeObject->TryGetStringField(TEXT("id"), Id)) continue;
+					UPCGNode* Existing = ExistingNodes.FindRef(Id);
+					if (Existing && NodeObject->TryGetStringField(TEXT("settings_class"), ClassPath)
+						&& Existing->GetSettings() && Existing->GetSettings()->GetClass() == ResolvePCGSettingsClass(ClassPath))
+					{
+						RetainedNodes.Add(Existing);
+					}
+				}
+			}
+		}
 		if (bReplaceNodes)
 		{
 			TArray<UPCGNode*> NodesToRemove;
 			for (UPCGNode* Node : Graph->GetNodes())
 			{
-				if (Node && Node != Graph->GetInputNode() && Node != Graph->GetOutputNode())
+				if (Node && Node != Graph->GetInputNode() && Node != Graph->GetOutputNode()
+					&& !RetainedNodes.Contains(Node))
 				{
 					NodesToRemove.Add(Node);
 				}
@@ -961,15 +968,47 @@ namespace UeAgentPCG
 		TMap<FString, UPCGNode*> NodeById;
 		NodeById.Add(InputNodeId, Graph->GetInputNode());
 		NodeById.Add(OutputNodeId, Graph->GetOutputNode());
+		if (bPreserveExistingNodes)
+		{
+			TMap<UPCGNode*, FString> IdByNode;
+			for (const auto& Pair : ExistingNodes) IdByNode.Add(Pair.Value, Pair.Key);
+			// Remove authored deletions before native pin reconstruction. Captured
+			// connections must remain attached so UE can retain, rename or break them.
+			for (const TPair<FString, UPCGNode*>& Pair : ExistingNodes)
+			{
+				if (!RetainedNodes.Contains(Pair.Value) && Pair.Value != Graph->GetInputNode()
+					&& Pair.Value != Graph->GetOutputNode()) continue;
+				for (const UPCGPin* Pin : Pair.Value->GetOutputPins())
+				{
+					if (!Pin) continue;
+					if (!bHasConnectionIntent)
+					{
+						Graph->RemoveOutboundEdges(Pair.Value, Pin->Properties.Label);
+						continue;
+					}
+					const auto Edges = Pin->Edges;
+					for (UPCGEdge* Edge : Edges)
+					{
+						if (!Edge || Edge->InputPin != Pin || !Edge->OutputPin) continue;
+						UPCGPin* Target = Edge->OutputPin;
+						if (!Connections->IsUnchanged(Pair.Key, Pin->Properties.Label.ToString(),
+							IdByNode.FindRef(Target->Node), Target->Properties.Label.ToString()))
+							Graph->RemoveEdge(Pair.Value, Pin->Properties.Label, Target->Node, Target->Properties.Label);
+					}
+				}
+			}
+		}
 
 		if (NodeValues)
 		{
-			for (const TSharedPtr<FJsonValue>& Value : *NodeValues)
+			for (int32 NodeIndex = 0; NodeIndex < NodeValues->Num(); ++NodeIndex)
 			{
+				const TSharedPtr<FJsonValue>& Value = (*NodeValues)[NodeIndex];
 				const TSharedPtr<FJsonObject>* NodeObj = nullptr;
 				if (!Value.IsValid() || !Value->TryGetObject(NodeObj) || !NodeObj || !NodeObj->IsValid())
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("invalid_node_entry"), TEXT("nodes"), TEXT("Node entry must be a JSON object."));
+					AppendGraphIssue(Issues, GraphFailure(TEXT("invalid_node_entry"), TEXT("A graph node entry must be an object."),
+						FString::Printf(TEXT("/nodes/%d"), NodeIndex), Value, MakeShared<FJsonValueString>(TEXT("object"))), GraphJson.Get(), TEXT("nodes"));
 					continue;
 				}
 
@@ -977,7 +1016,8 @@ namespace UeAgentPCG
 				(*NodeObj)->TryGetStringField(TEXT("id"), Id);
 				if (Id.IsEmpty())
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("missing_node_id"), TEXT("nodes"), TEXT("Node entry is missing id."));
+					AppendGraphIssue(Issues, GraphFailure(TEXT("missing_node_id"), TEXT("A graph node entry requires a non-empty id."),
+						TEXT("id"), (*NodeObj)->TryGetField(TEXT("id")), MakeShared<FJsonValueString>(TEXT("a non-empty node id"))), NodeObj->Get(), TEXT("id"));
 					continue;
 				}
 				if (Id == InputNodeId || Id == OutputNodeId)
@@ -986,25 +1026,20 @@ namespace UeAgentPCG
 					UPCGSettings* Settings = Node ? Node->GetSettings() : nullptr;
 					if (!Node || !Settings)
 					{
-						AddIssue(Issues, TEXT("error"), TEXT("input_output_node_not_found"), FString::Printf(TEXT("nodes.%s"), *Id), TEXT("Graph input/output node or settings is unavailable."));
+						AppendGraphIssue(Issues, GraphFailure(TEXT("input_output_node_not_found"), TEXT("The native graph input/output node and its settings must exist."),
+							!Node ? TEXT("node_available") : TEXT("settings_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true), nullptr, FString(), Id);
 						continue;
 					}
 
 					FString AuthoredTitle;
-					if ((*NodeObj)->TryGetStringField(TEXT("authored_title"), AuthoredTitle) && !AuthoredTitle.IsEmpty() && AuthoredTitle != TEXT("None"))
+					if ((*NodeObj)->TryGetStringField(TEXT("authored_title"), AuthoredTitle))
 					{
 						Node->NodeTitle = FName(*AuthoredTitle);
 					}
 
-#if WITH_EDITOR
-					double PosX = 0.0;
-					double PosY = 0.0;
-					if ((*NodeObj)->TryGetNumberField(TEXT("pos_x"), PosX) || (*NodeObj)->TryGetNumberField(TEXT("x"), PosX))
-					{
-						(*NodeObj)->TryGetNumberField(TEXT("pos_y"), PosY);
-						Node->SetNodePosition(static_cast<int32>(PosX), static_cast<int32>(PosY));
-					}
-#endif
+					UE::UAI::Contract::FDiagnostic PositionError;
+					if (!ApplyAuthoredNodePosition(*Node, **NodeObj, PositionError))
+					{ AppendGraphIssue(Issues, PositionError, NodeObj->Get(), FString(), Id); continue; }
 					ApplyNodeJsonDerivedSettings(Settings, *NodeObj);
 
 					bool bBoolValue = false;
@@ -1026,43 +1061,89 @@ namespace UeAgentPCG
 					continue;
 				}
 
-				FString SettingsClassPath;
-				if (!(*NodeObj)->TryGetStringField(TEXT("settings_class"), SettingsClassPath) || SettingsClassPath.IsEmpty())
+				UPCGNode* Node = ExistingNodes.FindRef(Id);
+				if (!RetainedNodes.Contains(Node)) Node = nullptr;
+				const bool bRetained = Node != nullptr;
+				UPCGSettings* DefaultSettings = Node ? Node->GetSettings() : nullptr;
+				EGraphNodeCreationOverrideDisposition OverrideDisposition =
+					EGraphNodeCreationOverrideDisposition::Unhandled;
+				if (!bRetained && NodeCreationOverride)
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("missing_settings_class"), FString::Printf(TEXT("nodes.%s"), *Id), TEXT("Settings node is missing settings_class."));
-					continue;
+					const FGraphNodeCreationOverrideResult OverrideResult =
+						(*NodeCreationOverride)(*Graph, *NodeObj);
+					OverrideDisposition = OverrideResult.Disposition;
+					if (OverrideDisposition ==
+						EGraphNodeCreationOverrideDisposition::Failed)
+					{
+                        auto Diagnostic = OverrideResult.Diagnostic;
+                        if (Diagnostic.IsEmpty())
+                            Diagnostic = GraphFailure(TEXT("node_creation_override_diagnostic_missing"),
+                                TEXT("The node creation callback reported failure without a diagnostic."),
+                                TEXT("diagnostic_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true);
+                        AppendGraphIssue(Issues, MoveTemp(Diagnostic), NodeObj->Get(), FString(), Id);
+						continue;
+					}
+					if (OverrideDisposition ==
+						EGraphNodeCreationOverrideDisposition::Created)
+					{
+						Node = OverrideResult.Node;
+						DefaultSettings = Node ? Node->GetSettings() : nullptr;
+						if (!Node || !DefaultSettings)
+						{
+							AppendGraphIssue(Issues, GraphFailure(TEXT("node_creation_override_result_invalid"),
+								TEXT("The node creation callback reported Created without a node and settings."),
+								!Node ? TEXT("node_available") : TEXT("settings_available"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true), nullptr, FString(), Id);
+							continue;
+						}
+					}
 				}
-
-				UClass* SettingsClass = ResolvePCGSettingsClass(SettingsClassPath);
-				if (!SettingsClass)
+				if (!bRetained && OverrideDisposition ==
+					EGraphNodeCreationOverrideDisposition::Unhandled)
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("settings_class_not_found"), FString::Printf(TEXT("nodes.%s"), *Id), SettingsClassPath);
-					continue;
-				}
+					FString SettingsClassPath;
+					if (!(*NodeObj)->TryGetStringField(
+							TEXT("settings_class"), SettingsClassPath)
+						|| SettingsClassPath.IsEmpty())
+					{
+						AppendGraphIssue(Issues, GraphFailure(TEXT("missing_settings_class"), TEXT("A settings node requires a non-empty settings_class."),
+							TEXT("settings_class"), (*NodeObj)->TryGetField(TEXT("settings_class")), MakeShared<FJsonValueString>(TEXT("a PCGSettings class path"))), NodeObj->Get(), TEXT("settings_class"), Id);
+						continue;
+					}
 
-				UPCGSettings* DefaultSettings = nullptr;
-				UPCGNode* Node = Graph->AddNodeOfType(SettingsClass, DefaultSettings);
-				if (!Node || !DefaultSettings)
-				{
-					AddIssue(Issues, TEXT("error"), TEXT("add_node_failed"), FString::Printf(TEXT("nodes.%s"), *Id), SettingsClassPath);
-					continue;
+					UClass* SettingsClass = ResolvePCGSettingsClass(SettingsClassPath);
+					if (!SettingsClass)
+					{
+						AppendGraphIssue(Issues, GraphFailure(TEXT("settings_class_not_found"), TEXT("The settings class path did not resolve to a PCGSettings class."),
+							TEXT("settings_class"), MakeShared<FJsonValueString>(SettingsClassPath), MakeShared<FJsonValueString>(TEXT("a loadable PCGSettings class"))), NodeObj->Get(), TEXT("settings_class"), Id);
+						continue;
+					}
+
+					Node = Graph->AddNodeOfType(SettingsClass, DefaultSettings);
+					if (!Node || !DefaultSettings)
+					{
+						AppendGraphIssue(Issues, GraphFailure(TEXT("add_node_failed"),
+							FString::Printf(TEXT("Unreal did not create a node with settings of class %s."), *SettingsClassPath),
+							!Node ? TEXT("node_created") : TEXT("settings_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true), nullptr, FString(), Id);
+						continue;
+					}
 				}
 
 				FString AuthoredTitle;
-				if ((*NodeObj)->TryGetStringField(TEXT("authored_title"), AuthoredTitle) && !AuthoredTitle.IsEmpty() && AuthoredTitle != TEXT("None"))
+				if ((*NodeObj)->TryGetStringField(TEXT("authored_title"), AuthoredTitle))
 				{
 					Node->NodeTitle = FName(*AuthoredTitle);
 				}
-
-#if WITH_EDITOR
-				double PosX = 0.0;
-				double PosY = 0.0;
-				if ((*NodeObj)->TryGetNumberField(TEXT("pos_x"), PosX) || (*NodeObj)->TryGetNumberField(TEXT("x"), PosX))
+				else if (!bRetained)
 				{
-					(*NodeObj)->TryGetNumberField(TEXT("pos_y"), PosY);
-					Node->SetNodePosition(static_cast<int32>(PosX), static_cast<int32>(PosY));
+					// The existing creation policy names a new request identity.
+					// Omitted titles on retained native nodes must stay untouched.
+					Node->NodeTitle = FName(*Id);
 				}
-#endif
+
+				UE::UAI::Contract::FDiagnostic PositionError;
+				if (!ApplyAuthoredNodePosition(*Node, **NodeObj, PositionError))
+				{ AppendGraphIssue(Issues, PositionError, NodeObj->Get(), FString(), Id); continue; }
 				ApplyNodeJsonDerivedSettings(DefaultSettings, *NodeObj);
 				bool bBoolValue = false;
 				if ((*NodeObj)->TryGetBoolField(TEXT("enabled"), bBoolValue))
@@ -1085,14 +1166,29 @@ namespace UeAgentPCG
 			}
 		}
 
+		// Parameter layouts and reflected settings determine native pin shape.
+		// Finish those edits before resolving the request's edge endpoints.
+		const TSharedPtr<FJsonObject>* ParametersObj = nullptr;
+		if (GraphJson->TryGetObjectField(TEXT("parameters"), ParametersObj) && ParametersObj && ParametersObj->IsValid())
+		{
+			Graph->UpdateUserParametersStruct([&](FInstancedPropertyBag& Bag)
+			{
+				ApplyCanonicalParameterBag(Bag, *ParametersObj, Issues, nullptr, true);
+			});
+		}
+		if (CountErrors(Issues) != 0) return false;
+		if (ApplyNodeProperties && !(*ApplyNodeProperties)(NodeById)) return false;
+
 		if (EdgeValues)
 		{
-			for (const TSharedPtr<FJsonValue>& Value : *EdgeValues)
+			for (int32 EdgeIndex = 0; EdgeIndex < EdgeValues->Num(); ++EdgeIndex)
 			{
+				const TSharedPtr<FJsonValue>& Value = (*EdgeValues)[EdgeIndex];
 				const TSharedPtr<FJsonObject>* EdgeObj = nullptr;
 				if (!Value.IsValid() || !Value->TryGetObject(EdgeObj) || !EdgeObj || !EdgeObj->IsValid())
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("invalid_edge_entry"), TEXT("edges"), TEXT("Edge entry must be a JSON object."));
+					AppendGraphIssue(Issues, GraphFailure(TEXT("invalid_edge_entry"), TEXT("A graph edge entry must be an object."),
+						FString::Printf(TEXT("/edges/%d"), EdgeIndex), Value, MakeShared<FJsonValueString>(TEXT("object"))), GraphJson.Get(), TEXT("edges"));
 					continue;
 				}
 				FString FromId;
@@ -1103,52 +1199,78 @@ namespace UeAgentPCG
 				(*EdgeObj)->TryGetStringField(TEXT("to"), ToId);
 				(*EdgeObj)->TryGetStringField(TEXT("from_pin"), FromPin);
 				(*EdgeObj)->TryGetStringField(TEXT("to_pin"), ToPin);
+				if (bHasConnectionIntent && Connections->IsUnchanged(FromId, FromPin, ToId, ToPin)) continue;
 				UPCGNode** FromNode = NodeById.Find(FromId);
 				UPCGNode** ToNode = NodeById.Find(ToId);
 				if (!FromNode || !ToNode || !*FromNode || !*ToNode)
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("edge_node_not_found"), TEXT("edges"), FString::Printf(TEXT("%s -> %s"), *FromId, *ToId));
+					const bool bMissingSource = !FromNode || !*FromNode;
+					AppendGraphIssue(Issues, GraphFailure(TEXT("edge_node_not_found"), TEXT("An edge endpoint does not resolve to a graph node."),
+						bMissingSource ? TEXT("from") : TEXT("to"), MakeShared<FJsonValueString>(bMissingSource ? FromId : ToId),
+						MakeShared<FJsonValueString>(TEXT("an existing graph node id"))), EdgeObj->Get(), bMissingSource ? TEXT("from") : TEXT("to"));
 					continue;
 				}
 				FString ResolvedFromPin;
 				FString ResolvedToPin;
-				UPCGPin* SourcePin = ResolvePCGEdgePin(*FromNode, FromPin, true, ResolvedFromPin);
-				UPCGPin* TargetPin = ResolvePCGEdgePin(*ToNode, ToPin, false, ResolvedToPin);
+				UPCGPin* SourcePin = ResolvePCGEdgePin(*FromNode, FromPin, true, ResolvedFromPin, bHasConnectionIntent);
+				UPCGPin* TargetPin = ResolvePCGEdgePin(*ToNode, ToPin, false, ResolvedToPin, bHasConnectionIntent);
 				if (!SourcePin || !TargetPin)
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("edge_pin_not_found"), TEXT("edges"), FString::Printf(TEXT("%s.%s -> %s.%s"), *FromId, *FromPin, *ToId, *ToPin));
+					AppendGraphIssue(Issues, GraphFailure(TEXT("edge_pin_not_found"),
+						FString::Printf(TEXT("The %s pin does not resolve on node %s."), !SourcePin ? TEXT("output") : TEXT("input"), !SourcePin ? *FromId : *ToId),
+						!SourcePin ? TEXT("from_pin") : TEXT("to_pin"), MakeShared<FJsonValueString>(!SourcePin ? FromPin : ToPin),
+						MakeShared<FJsonValueString>(!SourcePin ? TEXT("an existing output pin") : TEXT("an existing input pin"))),
+						EdgeObj->Get(), !SourcePin ? TEXT("from_pin") : TEXT("to_pin"), !SourcePin ? FromId : ToId);
 					continue;
 				}
 				Graph->AddLabeledEdge(*FromNode, FName(*ResolvedFromPin), *ToNode, FName(*ResolvedToPin));
 				if (!HasPCGEdge(SourcePin, TargetPin))
 				{
-					AddIssue(Issues, TEXT("error"), TEXT("add_edge_failed"), TEXT("edges"), FString::Printf(TEXT("%s.%s -> %s.%s"), *FromId, *FromPin, *ToId, *ToPin));
+					AppendGraphIssue(Issues, GraphFailure(TEXT("add_edge_failed"),
+						FString::Printf(TEXT("Unreal did not retain the requested connection %s.%s -> %s.%s."), *FromId, *ResolvedFromPin, *ToId, *ResolvedToPin),
+						TEXT("connection_present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), EdgeObj->Get());
 					continue;
 				}
 				OutAppliedEdges++;
 			}
 		}
 
-		const TSharedPtr<FJsonObject>* GraphSettings = nullptr;
-		if (GraphJson->TryGetObjectField(TEXT("graph_settings"), GraphSettings) && GraphSettings && GraphSettings->IsValid())
+		// AddLabeledEdge may keep the newly added edge while evicting an
+		// earlier one. Re-resolve every original endpoint after the whole batch.
+		if (EdgeValues && CountErrors(Issues) == 0)
 		{
-		}
-
-		const TSharedPtr<FJsonObject>* ParametersObj = nullptr;
-		if (GraphJson->TryGetObjectField(TEXT("parameters"), ParametersObj) && ParametersObj && ParametersObj->IsValid())
-		{
-			Graph->UpdateUserParametersStruct([&](FInstancedPropertyBag& Bag)
+			for (const auto& Value : *EdgeValues)
 			{
-				ApplyCanonicalParameterBag(Bag, *ParametersObj, Issues, nullptr, true);
-			});
+				const auto Edge = Value->AsObject();
+				const FString FromId = Edge->GetStringField(TEXT("from"));
+				const FString ToId = Edge->GetStringField(TEXT("to"));
+				FString FromPin, ToPin, ResolvedFrom, ResolvedTo;
+				Edge->TryGetStringField(TEXT("from_pin"), FromPin);
+				Edge->TryGetStringField(TEXT("to_pin"), ToPin);
+				if (bHasConnectionIntent && Connections->IsUnchanged(FromId, FromPin, ToId, ToPin)) continue;
+				UPCGPin* Source = ResolvePCGEdgePin(NodeById.FindRef(FromId), FromPin, true, ResolvedFrom, bHasConnectionIntent);
+				UPCGPin* Target = ResolvePCGEdgePin(NodeById.FindRef(ToId), ToPin, false, ResolvedTo, bHasConnectionIntent);
+				if (!Source || !Target || !HasPCGEdge(Source, Target)) {
+					auto Warning = GraphFailure(TEXT("graph_connection_intent_not_retained"),
+						FString::Printf(TEXT("After the graph update, the requested connection %s.%s -> %s.%s is absent."), *FromId, *FromPin, *ToId, *ToPin),
+						TEXT("connection_present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					Warning.Severity = UE::UAI::Contract::ESeverity::Warning;
+					Warning.TargetPath = !LogicalTarget.IsEmpty() ? LogicalTarget : Graph->IsAsset() ? Graph->GetPathName() : FString();
+					if (Warning.TargetPath != Graph->GetPathName()) Warning.InternalContext = Graph->GetPathName();
+					AppendGraphIssue(Issues, MoveTemp(Warning), Edge.Get());
+                    UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Issues.Last());
+				}
+			}
 		}
-
-		Graph->Recompile();
 		Graph->MarkPackageDirty();
-		return CountErrors(Issues) == 0;
+		if (CountErrors(Issues) != 0) return false;
+		// Titles can change export aliases. Keep the request's native bindings
+		// for every subsequent mutation in this operation instead of re-resolving names.
+		if (OutAppliedNodeBindings) *OutAppliedNodeBindings = MoveTemp(NodeById);
+		return true;
 	}
 
-	bool PreflightApplyGraphJson(UPCGGraph* ExistingGraph, const TSharedPtr<FJsonObject>& GraphJson, bool bReplaceNodes, TArray<TSharedPtr<FJsonValue>>& Issues, int32& OutAppliedNodes, int32& OutAppliedEdges)
+	bool PreflightApplyGraphJson(UPCGGraph* ExistingGraph, const TSharedPtr<FJsonObject>& GraphJson, bool bReplaceNodes, TArray<UE::UAI::Contract::FDiagnostic>& Issues, int32& OutAppliedNodes, int32& OutAppliedEdges, const FGraphNodeCreationOverride* NodeCreationOverride)
 	{
 		UPCGGraph* PreflightGraph = ExistingGraph ? DuplicateObject<UPCGGraph>(ExistingGraph, GetTransientPackage()) : nullptr;
 		if (!PreflightGraph)
@@ -1159,12 +1281,14 @@ namespace UeAgentPCG
 		{
 			OutAppliedNodes = 0;
 			OutAppliedEdges = 0;
-			AddIssue(Issues, TEXT("error"), TEXT("preflight_graph_create_failed"), TEXT("graph"), TEXT("Failed to create a transient PCG graph for apply preflight."));
+			AppendGraphIssue(Issues, GraphFailure(TEXT("preflight_graph_create_failed"), TEXT("Unreal could not create an isolated PCG graph for apply preflight."),
+				TEXT("preflight_graph_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), true));
 			return false;
 		}
 
 		PreflightGraph->SetFlags(RF_Transient);
-		return ApplyGraphJson(PreflightGraph, GraphJson, bReplaceNodes, Issues, OutAppliedNodes, OutAppliedEdges);
+		return ApplyGraphJson(PreflightGraph, GraphJson, bReplaceNodes, Issues, OutAppliedNodes, OutAppliedEdges, NodeCreationOverride,
+			false, nullptr, nullptr, nullptr, ExistingGraph && ExistingGraph->IsAsset() ? ExistingGraph->GetPathName() : FString());
 	}
 
 	AActor* FindActorByNameOrLabelDirect(UWorld* World, const FString& NameOrLabel)
@@ -1211,20 +1335,47 @@ namespace UeAgentPCG
 		return false;
 	}
 
-	UPCGComponent* FindPCGComponent(UWorld* World, const TSharedPtr<FJsonObject>& Params, FString& OutError)
+	UPCGComponent* FindPCGComponent(UWorld* World, const TSharedPtr<FJsonObject>& Params, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FString ActorName;
 		GetStringAny(Params, { TEXT("actor"), TEXT("actor_name"), TEXT("actor_label") }, ActorName);
 		FString ComponentName;
 		GetStringAny(Params, { TEXT("component"), TEXT("component_name"), TEXT("pcg_component") }, ComponentName);
+		auto FailLookup = [&](const TCHAR* Code, const FString& Reason, const bool bActorFailure) -> UPCGComponent*
+		{
+			auto Actual = MakeShared<FJsonObject>();
+			if (!ActorName.IsEmpty()) Actual->SetStringField(TEXT("actor"), ActorName);
+			if (!ComponentName.IsEmpty() && !bActorFailure) Actual->SetStringField(TEXT("component"), ComponentName);
+			OutError = BackendFailure(Code, Reason, bActorFailure ? TEXT("actor") : TEXT("component"),
+				MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(bActorFailure
+					? TEXT("an actor matching the selector") : TEXT("a PCGComponent matching the selector")));
+			OutError.CandidateName = bActorFailure || ComponentName.IsEmpty() ? ActorName : ComponentName;
+			if (Params.IsValid())
+			{
+				const TArray<const TCHAR*> Fields = bActorFailure || ComponentName.IsEmpty()
+					? TArray<const TCHAR*>{TEXT("actor"), TEXT("actor_name"), TEXT("actor_label")}
+					: TArray<const TCHAR*>{TEXT("component"), TEXT("component_name"), TEXT("pcg_component")};
+				FString SourceField;
+				for (const TCHAR* Field : Fields)
+				{
+					FString Value;
+					if (Params->TryGetStringField(Field, Value) && !Value.TrimStartAndEnd().IsEmpty())
+					{
+						SourceField = Field;
+						break;
+					}
+				}
+				UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *Params, SourceField);
+			}
+			return nullptr;
+		};
 
 		if (!ActorName.IsEmpty())
 		{
 			AActor* Actor = FindActorByNameOrLabelDirect(World, ActorName);
 			if (!Actor)
 			{
-				OutError = TEXT("actor_not_found");
-				return nullptr;
+				return FailLookup(TEXT("actor_not_found"), TEXT("No actor matches the supplied name or label."), true);
 			}
 
 			TArray<UPCGComponent*> Components;
@@ -1241,8 +1392,7 @@ namespace UeAgentPCG
 					return Component;
 				}
 			}
-			OutError = TEXT("pcg_component_not_found");
-			return nullptr;
+			return FailLookup(TEXT("pcg_component_not_found"), TEXT("The selected actor has no PCG component matching the supplied selector."), false);
 		}
 
 		for (TActorIterator<AActor> It(World); It; ++It)
@@ -1261,8 +1411,7 @@ namespace UeAgentPCG
 				}
 			}
 		}
-		OutError = TEXT("pcg_component_not_found");
-		return nullptr;
+		return FailLookup(TEXT("pcg_component_not_found"), TEXT("The world has no PCG component matching the supplied selector."), false);
 	}
 
 	static FString ComponentGenerationTriggerToString(EPCGComponentGenerationTrigger Trigger)
@@ -1273,8 +1422,8 @@ namespace UeAgentPCG
 	bool TryParseGenerationTrigger(const FString& TriggerText, EPCGComponentGenerationTrigger& OutTrigger)
 	{
 		const UEnum* TriggerEnum = StaticEnum<EPCGComponentGenerationTrigger>();
-		const int64 Value = TriggerEnum ? TriggerEnum->GetValueByNameString(TriggerText) : INDEX_NONE;
-		if (Value != INDEX_NONE)
+		int64 Value = 0;
+		if (UeAgentAuthoringTypeDescriptors::TryResolveEnumValueName(TriggerEnum, TriggerText, Value))
 		{
 			OutTrigger = static_cast<EPCGComponentGenerationTrigger>(Value);
 			return true;
@@ -1305,6 +1454,11 @@ namespace UeAgentPCG
 
 	TSharedPtr<FJsonObject> ComponentToJson(UPCGComponent* Component)
 	{
+		return ComponentToJson(Component, true);
+	}
+
+	TSharedPtr<FJsonObject> ComponentToJson(UPCGComponent* Component, bool bIncludeProperties)
+	{
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 		Root->SetStringField(TEXT("schema"), SchemaComponent);
 		if (!Component)
@@ -1329,9 +1483,8 @@ namespace UeAgentPCG
 		Root->SetBoolField(TEXT("is_cleaning_up"), Component->IsCleaningUp());
 		Root->SetBoolField(TEXT("was_generated_this_session"), Component->WasGeneratedThisSession());
 		Root->SetBoolField(TEXT("generated"), Component->bGenerated);
-		Root->SetNumberField(TEXT("current_generation_task"), static_cast<double>(Component->GetGenerationTaskId()));
 		Root->SetNumberField(TEXT("generated_output_count"), Component->GetGeneratedGraphOutput().TaggedData.Num());
-		Root->SetArrayField(TEXT("properties"), ExportEditableProperties(Component));
+		if (bIncludeProperties) Root->SetArrayField(TEXT("properties"), ExportEditableProperties(Component));
 		return Root;
 	}
 

@@ -11,7 +11,7 @@ namespace UE::UAI::QueryOwners::Landscape
 	const TArray<FString>& GetIndependentReadbackFlows()
 	{
 		static const TArray<FString> Flows = {
-			TEXT("query.command.detail"),
+			TEXT("query.command.usage"),
 			TEXT("landscape.height.read"),
 		};
 		return Flows;

@@ -1,31 +1,18 @@
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
 
 #include "Core/BindingGateway/Query/UeAgentQueryBinding.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::BindingGateway::Query
 {
-	namespace
-	{
-		void SetError(
-			FUeAgentQueryBindingError& OutError,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
-		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
-		}
-	}
-
 	FUeAgentDomainQueryTarget::FUeAgentDomainQueryTarget(
 		FUeAgentDomainQueryTicket InTicket,
 		UE::UAI::Discovery::FUeAgentCandidateBinding InBinding)
 		: Ticket(MoveTemp(InTicket))
 		, Binding(MoveTemp(InBinding))
 	{
-		bValid = Ticket.IsValid() && Binding.IsValid();
+		if (!Ticket.IsValid()) ValidationDiagnostic = Ticket.GetValidationDiagnostic();
+		else if (!Binding.IsValid()) ValidationDiagnostic = *Binding.GetValidationDiagnostic();
 	}
 
 	const FUeAgentDomainQueryTicket&
@@ -42,8 +29,10 @@ namespace UE::UAI::BindingGateway::Query
 
 	bool FUeAgentDomainQueryTarget::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FUeAgentQueryBindingError& FUeAgentDomainQueryTarget::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentDomainQuery::FUeAgentDomainQuery(
 		FUeAgentDomainQuerySessionIdentity InSession,
@@ -58,10 +47,15 @@ namespace UE::UAI::BindingGateway::Query
 		, Target(MoveTemp(InTarget))
 		, Projection(MoveTemp(InProjection))
 	{
-		bValid = Session.IsValid()
-			&& Input.IsValid()
-			&& Projection.IsValid()
-			&& (!Target.IsSet() || Target->IsValid());
+		if (!Session.IsValid()) ValidationDiagnostic = Session.GetValidationDiagnostic();
+		else if (!Input.IsValid())
+		{
+			ValidationDiagnostic = FUeAgentQueryBindingError::Failure(TEXT("query_input_invalid"),
+				TEXT("The domain query input JSON is empty."), TEXT("query_binding"));
+			ValidationDiagnostic.PropertyPath = TEXT("input");
+		}
+		else if (!Projection.IsValid()) ValidationDiagnostic = Projection.GetValidationDiagnostic();
+		else if (Target.IsSet() && !Target->IsValid()) ValidationDiagnostic = Target->GetValidationDiagnostic();
 	}
 
 	const FUeAgentDomainQuerySessionIdentity&
@@ -96,8 +90,10 @@ namespace UE::UAI::BindingGateway::Query
 
 	bool FUeAgentDomainQuery::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FUeAgentQueryBindingError& FUeAgentDomainQuery::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentDomainQueryProviderRegistration::
 		FUeAgentDomainQueryProviderRegistration(
@@ -107,7 +103,11 @@ namespace UE::UAI::BindingGateway::Query
 		, Provider(MoveTemp(InProvider))
 	{
 		ProviderBinding.TrimStartAndEndInline();
-		bValid = !ProviderBinding.IsEmpty();
+		if (ProviderBinding.IsEmpty())
+		{
+			ValidationDiagnostic = FUeAgentQueryBindingError::Failure(TEXT("query_provider_registration_invalid"), TEXT("The provider binding must not be empty."), TEXT("query_binding"));
+			ValidationDiagnostic.PropertyPath = TEXT("provider_binding");
+		}
 	}
 
 	const FString&
@@ -124,8 +124,9 @@ namespace UE::UAI::BindingGateway::Query
 
 	bool FUeAgentDomainQueryProviderRegistration::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
+	const FUeAgentQueryBindingError& FUeAgentDomainQueryProviderRegistration::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentDomainQueryProviderRegistry::
 		FUeAgentDomainQueryProviderRegistry(
@@ -148,23 +149,15 @@ namespace UE::UAI::BindingGateway::Query
 		{
 			if (!Registration.IsValid())
 			{
-				SetError(
-					OutError,
-					TEXT("query_provider_registration_invalid"),
-					Registration.GetProviderBinding(),
-					TEXT(
-						"Provider binding and provider are required."));
+				OutError = Registration.GetValidationDiagnostic();
 				return false;
 			}
 			if (Providers.Contains(
 					Registration.GetProviderBinding()))
 			{
-				SetError(
-					OutError,
-					TEXT("query_provider_binding_duplicate"),
-					Registration.GetProviderBinding(),
-					TEXT(
-						"Provider binding is registered more than once."));
+				OutError = FUeAgentQueryBindingError::Failure(TEXT("query_provider_binding_duplicate"), TEXT("The same provider binding is registered more than once."), TEXT("query_binding"));
+				OutError.PropertyPath = TEXT("provider_binding");
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Registration.GetProviderBinding());
 				return false;
 			}
 			Providers.Add(

@@ -1,5 +1,6 @@
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringProduction.h"
 
+#include "Dom/JsonValue.h"
 #include "Misc/ScopeLock.h"
 
 namespace UE::UAI::Composition::SimpleAuthoring
@@ -18,24 +19,54 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		using namespace StateSemantic;
 		using namespace Verification;
 
-		void SetError(
-			FUeAgentSimpleAuthoringProductionError& OutError,
-			const FString& Code,
-			const FString& SubjectId = FString(),
-			const FString& Detail = FString())
+		FString CandidateOperationName(const EUeAgentCandidateOperation Operation)
 		{
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
+			switch (Operation)
+			{
+			case EUeAgentCandidateOperation::Read: return TEXT("read");
+			case EUeAgentCandidateOperation::Create: return TEXT("create");
+			case EUeAgentCandidateOperation::Update: return TEXT("update");
+			case EUeAgentCandidateOperation::Replace: return TEXT("replace");
+			case EUeAgentCandidateOperation::Delete: return TEXT("delete");
+			default: return FString::FromInt(static_cast<int32>(Operation));
+			}
 		}
 
-		void CopyError(
-			const FUeAgentSimpleAuthoringProductionError& Error,
-			FUeAgentOperationBindingError& OutError)
+		FDiagnostic ProductionFailure(const FString& Code, const FString& Reason, const FString& Field)
 		{
-			OutError.Code = Error.Code;
-			OutError.SubjectId = Error.SubjectId;
-			OutError.Detail = Error.Detail;
+			auto Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("simple_authoring"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.PropertyPath = Field;
+			return Diagnostic;
+		}
+
+		FDiagnostic DescriptorMismatch(const FString& Code,
+			const FUeAgentDescriptorIdentity& Actual, const FUeAgentDescriptorIdentity& Expected)
+		{
+			if (Actual.GetDescriptorId() != Expected.GetDescriptorId())
+			{
+				auto Error = ProductionFailure(Code, TEXT("The returned descriptor ID differs from the requested descriptor."), TEXT("descriptor/id"));
+				Error.ActualValue = MakeShared<FJsonValueString>(Actual.GetDescriptorId());
+				Error.ExpectedValue = MakeShared<FJsonValueString>(Expected.GetDescriptorId());
+				return Error;
+			}
+			if (Actual.GetVersion() != Expected.GetVersion())
+			{
+				auto Error = ProductionFailure(Code, TEXT("The returned descriptor version differs from the requested version."), TEXT("descriptor/version"));
+				Error.ActualValue = MakeShared<FJsonValueNumber>(Actual.GetVersion());
+				Error.ExpectedValue = MakeShared<FJsonValueNumber>(Expected.GetVersion());
+				return Error;
+			}
+			auto Error = ProductionFailure(Code, TEXT("The returned descriptor hash differs from the requested descriptor hash."), TEXT("descriptor/hash"));
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Actual.GetDescriptorHash());
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetDescriptorHash());
+			return Error;
+		}
+
+		void CopyError(const UE::UAI::Contract::FDiagnostic& Error, UE::UAI::Contract::FDiagnostic& OutError)
+		{
+			OutError = Error;
 		}
 
 		struct FPreparationRecord
@@ -153,16 +184,23 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			}
 		}
 
-		bool SameChangeTargets(
+		FUeAgentOperationBindingError CompareChangeTargets(
 			const TArray<FUeAgentOperationTargetBinding>& Bound,
-			const TArray<FUeAgentCandidateBinding>& Prepared)
+			const TArray<FUeAgentCandidateBinding>& Prepared,
+			const FString& Code)
 		{
 			if (Bound.Num() != Prepared.Num())
 			{
-				return false;
+				auto Error = FUeAgentOperationBindingError::Failure(Code,
+					TEXT("The bound target count differs from the prepared target count."), TEXT("simple_authoring"));
+				Error.PropertyPath = TEXT("targets");
+				Error.ActualValue = MakeShared<FJsonValueNumber>(Bound.Num());
+				Error.ExpectedValue = MakeShared<FJsonValueNumber>(Prepared.Num());
+				return Error;
 			}
-			for (const FUeAgentCandidateBinding& Candidate : Prepared)
+			for (int32 Index = 0; Index < Prepared.Num(); ++Index)
 			{
+				const FUeAgentCandidateBinding& Candidate = Prepared[Index];
 				const FUeAgentOperationTargetBinding* Match =
 					Bound.FindByPredicate(
 						[&Candidate](
@@ -182,10 +220,20 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						});
 				if (!Match)
 				{
-					return false;
+					const auto* SameBinding = Bound.FindByPredicate([&Candidate](const FUeAgentOperationTargetBinding& Target)
+						{ return Target.GetBinding().GetBindingId() == Candidate.GetBindingId(); });
+					auto Error = FUeAgentOperationBindingError::Failure(Code, SameBinding
+						? TEXT("A bound target identifies a different object from the prepared target.")
+						: TEXT("A prepared target binding is missing from the bound targets."), TEXT("simple_authoring"));
+					Error.PropertyPath = FString::Printf(TEXT("targets[%d]"), Index);
+					Error.TargetPath = Candidate.GetPublicRef();
+					Error.ExpectedEvidence = MakeShared<FJsonValueString>(Candidate.GetSummary().GetIdentity().GetCanonicalKey());
+					if (SameBinding) Error.ActualEvidence = MakeShared<FJsonValueString>(SameBinding->GetBinding().GetSummary().GetIdentity().GetCanonicalKey());
+					else Error.ActualValuePresent = false;
+					return Error;
 				}
 			}
-			return true;
+			return {};
 		}
 
 		bool ValidateChangeTargets(
@@ -197,19 +245,23 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		{
 			const TArray<FChangeDraft>& Changes =
 				Draft.GetChanges();
-			if (Changes.IsEmpty()
-				|| Targets.Num() != Changes.Num())
+			if (Changes.IsEmpty() || Targets.Num() != Changes.Num())
 			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_change_targets_missing"),
-					Draft.GetRequestId());
+				OutError = ProductionFailure(TEXT("simple_authoring_change_targets_missing"),
+					Changes.IsEmpty() ? TEXT("There are no planned changes to associate with target bindings.")
+						: TEXT("The number of target bindings differs from the number of planned changes."),
+					Changes.IsEmpty() ? TEXT("changes") : TEXT("targets"));
+				OutError.SubjectId = Draft.GetRequestId();
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(Changes.IsEmpty() ? Changes.Num() : Targets.Num());
+				OutError.ExpectedValue = Changes.IsEmpty()
+					? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("at least one planned change")))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Changes.Num()));
 				return false;
 			}
 			TSet<FString> SeenIdentities;
-			for (const FChangeDraft& Change : Changes)
+			for (int32 ChangeIndex = 0; ChangeIndex < Changes.Num(); ++ChangeIndex)
 			{
+				const FChangeDraft& Change = Changes[ChangeIndex];
 				const FString& IdentityKey =
 					Change.GetIdentity().GetCanonicalKey();
 				const FUeAgentCandidateBinding* Target =
@@ -223,28 +275,65 @@ namespace UE::UAI::Composition::SimpleAuthoring
 									.GetCanonicalKey()
 								== IdentityKey;
 						});
-				if (!Target
-					|| !Target->IsValid()
-					|| SeenIdentities.Contains(IdentityKey)
-					|| !(Target->GetSummary()
-							.GetDescriptorIdentity()
-						== DescriptorIdentity)
-					|| Target->GetReadPortId()
-						!= PersistedPortId
-					|| !Target->Supports(
-						CandidateOperation(
-							Change.GetIntent())))
+				if (!Target)
 				{
-					SetError(
-						OutError,
-						TEXT(
-							"simple_authoring_change_target_invalid"),
-						IdentityKey);
+					OutError = ProductionFailure(TEXT("simple_authoring_change_target_invalid"),
+						TEXT("The planned change has no matching target binding."),
+						FString::Printf(TEXT("changes/%d/target"), ChangeIndex));
+					OutError.SubjectId = IdentityKey;
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
+					return false;
+				}
+				if (!Target->IsValid())
+				{
+					OutError = *Target->GetValidationDiagnostic();
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target->GetPublicRef();
+					return false;
+				}
+				if (SeenIdentities.Contains(IdentityKey))
+				{
+					OutError = ProductionFailure(TEXT("simple_authoring_change_target_invalid"),
+						TEXT("More than one planned change uses the same target identity."),
+						FString::Printf(TEXT("changes/%d/target"), ChangeIndex));
+					OutError.TargetPath = Target->GetPublicRef();
+					OutError.SubjectId = IdentityKey;
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(2);
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+					return false;
+				}
+				if (!(Target->GetSummary().GetDescriptorIdentity() == DescriptorIdentity))
+				{
+					OutError = DescriptorMismatch(TEXT("simple_authoring_change_target_invalid"),
+						Target->GetSummary().GetDescriptorIdentity(), DescriptorIdentity);
+					OutError.TargetPath = Target->GetPublicRef();
+					return false;
+				}
+				if (Target->GetReadPortId() != PersistedPortId)
+				{
+					OutError = ProductionFailure(TEXT("simple_authoring_change_target_invalid"),
+						TEXT("The change target is bound to a different persisted-state read port."), TEXT("read_port_id"));
+					OutError.TargetPath = Target->GetPublicRef();
+					OutError.ActualValue = MakeShared<FJsonValueString>(Target->GetReadPortId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(PersistedPortId);
+					return false;
+				}
+				const EUeAgentCandidateOperation RequiredOperation = CandidateOperation(Change.GetIntent());
+				if (!Target->Supports(RequiredOperation))
+				{
+					OutError = ProductionFailure(TEXT("simple_authoring_change_target_invalid"),
+						TEXT("The change target does not support the required candidate operation."), TEXT("supported_operations"));
+					OutError.TargetPath = Target->GetPublicRef();
+					TArray<TSharedPtr<FJsonValue>> Supported;
+					for (const EUeAgentCandidateOperation Operation : Target->GetSupportedOperations())
+						Supported.Add(MakeShared<FJsonValueString>(CandidateOperationName(Operation)));
+					OutError.ActualValue = MakeShared<FJsonValueArray>(Supported);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(CandidateOperationName(RequiredOperation));
 					return false;
 				}
 				SeenIdentities.Add(IdentityKey);
 			}
-			return SeenIdentities.Num() == Targets.Num();
+			return true;
 		}
 
 		class FProductionPlanner final
@@ -264,9 +353,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					OutResult,
 					Error))
 				{
-					OutError.Code = Error.GetCode();
-					OutError.SubjectId = Error.GetIdentityKey();
-					OutError.Detail = Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -287,10 +374,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					|| !IsInGameThread()
 					|| !Callback)
 				{
-					OutError = FExecutionMutationError(
-						TEXT(
-							"simple_authoring_execution_thread_invalid"),
-						OperationId);
+					OutError = FExecutionMutationError::Failure(TEXT(
+							"simple_authoring_execution_thread_invalid"), FString(), TEXT("execution"), OperationId);
 					return false;
 				}
 				Callback();
@@ -354,32 +439,39 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Request.GetOperationId(),
 					Record))
 				{
-					OutError = FExecutionMutationError(
-						TEXT(
-							"simple_authoring_execution_record_missing"),
-						Request.GetOperationId());
+					OutError = FExecutionMutationError::Failure(TEXT("simple_authoring_execution_record_missing"),
+						TEXT("No prepared execution record is available for durable preparation."), TEXT("execution"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.SubjectId = Request.GetOperationId();
+					OutError.PropertyPath = TEXT("execution_record");
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
 					return false;
 				}
 
 				TArray<FAssetDurableTarget> Targets;
 				FUeAgentSimpleAuthoringProductionError ProjectionError;
-				if (!Projector->TryProjectDurableTargets(
+				const bool bProjected = Projector->TryProjectDurableTargets(
 					Request.GetPlan(),
 					*Record.ResolvedTarget,
 					Record.PreState.ToSharedRef(),
 					Resources,
 					Targets,
-					ProjectionError)
-					|| Targets.IsEmpty())
+					ProjectionError);
+				if (!bProjected || Targets.IsEmpty())
 				{
-					OutError = FExecutionMutationError(
-						ProjectionError.IsValid()
-							? ProjectionError.Code
-							: TEXT(
-								"simple_authoring_durable_targets_missing"),
-						ProjectionError.IsValid()
-							? ProjectionError.Detail
-							: Request.GetOperationId());
+					OutError = ProjectionError;
+					if (OutError.IsEmpty())
+					{
+						OutError = FExecutionMutationError::Failure(TEXT("simple_authoring_durable_targets_missing"),
+							bProjected ? TEXT("The durable target projector returned no targets.")
+								: TEXT("Durable target projection failed without reporting a diagnostic."), TEXT("simple_authoring"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.PropertyPath = TEXT("durable_targets");
+						OutError.ActualValue = MakeShared<FJsonValueNumber>(Targets.Num());
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("successful projection with at least one target"));
+						OutError.SubjectId = Request.GetOperationId();
+					}
 					return false;
 				}
 
@@ -391,22 +483,14 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					AtomicityMode);
 				FAssetDurableSessionPtr Session;
 				FAssetDurableError Error;
-				if (!DurableRequest.IsValid()
-					|| !Service->TryPrepare(
-						DurableRequest,
-						Resources,
-						Session,
-						Error)
-					|| !Session.IsValid())
+				if (!DurableRequest.IsValid())
 				{
-					OutError = FExecutionMutationError(
-						Error.IsPresent()
-							? Error.GetCode()
-							: TEXT(
-								"simple_authoring_durable_prepare_failed"),
-						Error.IsPresent()
-							? Error.GetDetail()
-							: Request.GetOperationId());
+					OutError = DurableRequest.GetValidationDiagnostic();
+					return false;
+				}
+				if (!Service->TryPrepare(DurableRequest, Resources, Session, Error))
+				{
+					OutError = Error;
 					return false;
 				}
 				OutSession = MakeShared<
@@ -434,17 +518,9 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						FencingToken,
 						Resources,
 						Enlisted,
-						Error)
-					|| !Enlisted.IsValid())
+						Error))
 				{
-					OutError = FExecutionMutationError(
-						Error.IsPresent()
-							? Error.GetCode()
-							: TEXT(
-								"simple_authoring_durable_enlist_failed"),
-						Error.IsPresent()
-							? Error.GetDetail()
-							: FString());
+					OutError = Error;
 					return false;
 				}
 				Typed->Session = Enlisted.ToSharedRef();
@@ -456,9 +532,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					OutReceipt,
 					Error))
 				{
-					OutError = FExecutionMutationError(
-						Error.GetCode(),
-						Error.GetDetail());
+					OutError = Error;
 					return false;
 				}
 				{
@@ -490,9 +564,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					OutReceipt,
 					Error))
 				{
-					OutError = FExecutionMutationError(
-						Error.GetCode(),
-						Error.GetDetail());
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -512,10 +584,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				}
 				if (!Session.IsValid())
 				{
-					OutError = FAssetDurableError(
-						TEXT(
-							"simple_authoring_durable_session_missing"),
-						Acknowledgement.GetJournalId());
+					OutError = FAssetDurableError::Failure(TEXT(
+							"simple_authoring_durable_session_missing"), FString(), TEXT("asset_durable"), Acknowledgement.GetJournalId());
 					return false;
 				}
 				if (!Service->TryAcknowledge(
@@ -575,7 +645,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			FProductionExecutor(
 				FString InFamilyId,
 				FString InOwnerLeaseId,
-				int32 InMaxQueueItems,
 				TSharedRef<
 					FProductionStore,
 					ESPMode::ThreadSafe> InStore,
@@ -610,8 +679,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Scheduler,
 					LockFence,
 					Barrier,
-					Durable,
-					InMaxQueueItems)
+					Durable)
 			{
 			}
 
@@ -622,13 +690,36 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				FExecutionReceipt& OutReceipt,
 				FUeAgentOperationBindingError& OutError) override
 			{
-				if (!IsInGameThread()
-					|| !Planning.IsReady()
-					|| !Planning.GetPlan().IsValid())
+				if (!IsInGameThread())
 				{
-					OutError.Code =
-						TEXT(
-							"simple_authoring_execution_not_ready");
+					OutError = FDiagnostic::Failure(TEXT("simple_authoring_execution_not_ready"),
+						TEXT("Authoring execution must run on the game thread."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.CandidateName = FamilyId;
+					OutError.PropertyPath = TEXT("game_thread");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return false;
+				}
+				if (!Planning.IsReady())
+				{
+					OutError = FDiagnostic::Failure(TEXT("simple_authoring_execution_not_ready"),
+						Planning.GetPlan().IsValid() ? TEXT("The planning result is not ready for authoring execution.")
+							: TEXT("The planning result contains no execution plan."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.CandidateName = FamilyId;
+					if (Planning.GetPlan().IsValid())
+					{
+						OutError.PropertyPath = TEXT("planning/status");
+						OutError.ActualValue = MakeShared<FJsonValueString>(Planning.GetStatus());
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("ready or no_change"));
+					}
+					else
+					{
+						OutError.PropertyPath = TEXT("planning/plan");
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValuePresent = true;
+					}
 					return false;
 				}
 				const FPlanningPreflightPlanRef Plan =
@@ -636,36 +727,44 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				FPreparationRecord Preparation;
 				if (!Store->GetPreparation(
 					Plan->GetRequestId(),
-					Preparation)
-					|| !SameChangeTargets(
-						Targets,
-						Preparation.ChangeTargets))
+					Preparation))
 				{
-					OutError.Code =
-						TEXT(
-							"simple_authoring_preparation_mismatch");
+					OutError = FDiagnostic::Failure(TEXT("simple_authoring_preparation_mismatch"),
+						TEXT("The prepared operation record is unavailable."), TEXT("simple_authoring"));
+					OutError.SourceKind = TEXT("native_result");
 					OutError.SubjectId = Plan->GetRequestId();
+					OutError.CandidateName = FamilyId;
+					OutError.PropertyPath = TEXT("preparation_record");
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
 					return false;
 				}
+				OutError = CompareChangeTargets(Targets, Preparation.ChangeTargets, TEXT("simple_authoring_preparation_mismatch"));
+				if (!OutError.IsEmpty()) return false;
 
 				TArray<FUeAgentGenericEffectBinding> Bindings;
 				FUeAgentSimpleAuthoringProductionError ProjectionError;
-				if (!Projector->TryProjectMutationBindings(
+				const bool bProjected = Projector->TryProjectMutationBindings(
 					Plan,
 					Preparation.ChangeTargets,
 					Preparation.PreState.ToSharedRef(),
 					Context.GetExecutionContext(),
 					Context.GetResourceTracker(),
 					Bindings,
-					ProjectionError)
-					|| Bindings.IsEmpty())
+					ProjectionError);
+				if (!bProjected || Bindings.IsEmpty())
 				{
-					CopyError(ProjectionError, OutError);
-					if (OutError.Code.IsEmpty())
+					OutError = ProjectionError;
+					if (OutError.IsEmpty())
 					{
-						OutError.Code =
-							TEXT(
-								"simple_authoring_mutation_bindings_missing");
+						OutError = FDiagnostic::Failure(TEXT("simple_authoring_mutation_bindings_missing"),
+							bProjected ? TEXT("The mutation projector returned no bindings.")
+								: TEXT("Mutation binding projection failed without reporting a diagnostic."), TEXT("simple_authoring"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.CandidateName = FamilyId;
+						OutError.PropertyPath = TEXT("mutation_bindings");
+						OutError.ActualValue = MakeShared<FJsonValueNumber>(Bindings.Num());
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("successful projection with at least one binding"));
 					}
 					return false;
 				}
@@ -712,8 +811,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Error))
 				{
 					Store->RemoveExecution(OperationId);
-					OutError.Code = Error.GetCode();
-					OutError.Detail = Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				Coordinator.DispatchReady();
@@ -723,8 +821,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Error))
 				{
 					Store->RemoveExecution(OperationId);
-					OutError.Code = Error.GetCode();
-					OutError.Detail = Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -803,18 +900,22 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				const FDurableReceipt* DurableReceipt =
 					Receipt.GetDurableReceipt();
 				FExecutionRecord Record;
-				if (!DurableReceipt
-					|| !Store->GetExecution(
-						Receipt.GetOperationId(), Record)
-					|| !SameChangeTargets(
-						Targets, Record.ChangeTargets))
+				if (!DurableReceipt)
 				{
-					OutError.Code =
-						TEXT(
-							"simple_authoring_verification_context_missing");
+					OutError = Receipt.GetDiagnostic().IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(
+						TEXT("simple_authoring_verification_context_missing"), TEXT("The execution produced no durable receipt to verify."), TEXT("simple_authoring")) : Receipt.GetDiagnostic();
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Receipt.GetOperationId();
+					return false;
+				}
+				if (!Store->GetExecution(Receipt.GetOperationId(), Record))
+				{
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("simple_authoring_verification_context_missing"),
+						TEXT("The execution record needed for independent verification is unavailable."), TEXT("simple_authoring"));
 					OutError.SubjectId = Receipt.GetOperationId();
 					return false;
 				}
+				OutError = CompareChangeTargets(Targets, Record.ChangeTargets, TEXT("simple_authoring_verification_context_missing"));
+				if (!OutError.IsEmpty()) return false;
 
 				FDurableInventory Inventory;
 				FString OwnerId;
@@ -825,9 +926,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					OwnerId,
 					FencingToken))
 				{
-					OutError.Code =
-						TEXT(
-							"simple_authoring_durable_context_missing");
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT(
+							"simple_authoring_durable_context_missing"), TEXT("The durable journal has no active artifact inventory and ownership context for verification."), TEXT("simple_authoring"));
 					OutError.SubjectId =
 						DurableReceipt->GetJournalId();
 					return false;
@@ -835,7 +935,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 
 				TArray<FVerificationTarget> VerificationTargets;
 				FUeAgentSimpleAuthoringProductionError ProjectionError;
-				if (!ExpectedStateProjector
+				const bool bProjected = ExpectedStateProjector
 					->TryProjectExpectedState(
 						Record.Plan.ToSharedRef(),
 						*Record.ResolvedTarget,
@@ -844,15 +944,16 @@ namespace UE::UAI::Composition::SimpleAuthoring
 						Inventory,
 						Context.GetResourceTracker(),
 						VerificationTargets,
-						ProjectionError)
-					|| VerificationTargets.IsEmpty())
+						ProjectionError);
+				if (!bProjected || VerificationTargets.IsEmpty())
 				{
 					CopyError(ProjectionError, OutError);
 					if (OutError.Code.IsEmpty())
 					{
-						OutError.Code =
-							TEXT(
-								"simple_authoring_expected_state_missing");
+						OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT(
+								"simple_authoring_expected_state_missing"), bProjected
+								? TEXT("The expected-state projector returned no verification targets.")
+								: TEXT("The expected-state projector failed without reporting a diagnostic."), TEXT("simple_authoring"));
 					}
 					return false;
 				}
@@ -876,14 +977,13 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Context.GetDeadline(),
 					Context.GetCancellationToken(),
 					OutOutcome,
-					Error);
+					Error, true);
 				Store->RemoveExecution(Receipt.GetOperationId());
 				UeHook->ReleaseVerifiedOperation(
 					Receipt.GetOperationId());
 				if (!bVerified)
 				{
-					OutError.Code = Error.GetCode();
-					OutError.Detail = Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -977,116 +1077,129 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				OutPrepared.Reset();
 				TOptional<FUeAgentCandidateBinding> Target;
 				FUeAgentSimpleAuthoringProductionError Error;
-				if (!Config.TargetResolver->TryResolveTarget(
-					CanonicalRequest,
-					Context,
-					Resources,
-					Deadline,
-					Cancellation,
-					Target,
-					Error)
-					|| !Target.IsSet()
-					|| !Target->IsValid())
+				const bool bResolved = Config.TargetResolver->TryResolveTarget(
+					CanonicalRequest, Context, Resources, Deadline, Cancellation, Target, Error);
+				if (!bResolved || !Target.IsSet() || !Target->IsValid())
 				{
-					OutError.Code = Error.IsValid()
-						? Error.Code
-						: TEXT(
-							"simple_authoring_target_resolution_failed");
-					OutError.SubjectId = Error.SubjectId;
-					OutError.Detail = Error.Detail;
+					OutError = Error;
+					if (OutError.IsEmpty() && Target.IsSet() && !Target->IsValid())
+						OutError = *Target->GetValidationDiagnostic();
+					if (OutError.IsEmpty())
+					{
+						OutError = ProductionFailure(TEXT("simple_authoring_target_resolution_failed"),
+							bResolved ? TEXT("The target resolver reported success without returning a binding.")
+								: TEXT("The target resolver returned failure without reporting a diagnostic."), TEXT("target_binding"));
+						OutError.ActualValuePresent = Target.IsSet();
+						OutError.ExpectedValuePresent = true;
+						OutError.CandidateName = CanonicalRequest.GetDescriptorIdentity().GetDescriptorId();
+					}
 					return false;
 				}
-				if (!(Target->GetSummary().GetDescriptorIdentity()
-						== CanonicalRequest.GetDescriptorIdentity())
-					|| Target->GetReadPortId()
-						!= Config.PersistedStateOracle
-							->GetReadPortId())
+				if (!(Target->GetSummary().GetDescriptorIdentity() == CanonicalRequest.GetDescriptorIdentity()))
 				{
-					OutError.Code =
-						TEXT(
-							"simple_authoring_target_binding_mismatch");
+					OutError = DescriptorMismatch(TEXT("simple_authoring_target_binding_mismatch"),
+						Target->GetSummary().GetDescriptorIdentity(), CanonicalRequest.GetDescriptorIdentity());
+					OutError.TargetPath = Target->GetPublicRef();
 					OutError.SubjectId = Target->GetBindingId();
+					return false;
+				}
+				if (Target->GetReadPortId() != Config.PersistedStateOracle->GetReadPortId())
+				{
+					OutError = ProductionFailure(TEXT("simple_authoring_target_binding_mismatch"),
+						TEXT("The resolved target uses a different persisted-state read port."), TEXT("read_port_id"));
+					OutError.TargetPath = Target->GetPublicRef();
+					OutError.SubjectId = Target->GetBindingId();
+					OutError.ActualValue = MakeShared<FJsonValueString>(Target->GetReadPortId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Config.PersistedStateOracle->GetReadPortId());
 					return false;
 				}
 
 				FUeAgentCanonicalSnapshotPtr PreState;
 				FUeAgentDiscoveryError ReadError;
-				if (!Config.PreStateReadPort->TryRead(
-					FUeAgentStateReadRequest(
-						*Target,
-						Config.PreStatePlane),
-					Resources,
-					Deadline,
-					Cancellation,
-					PreState,
-					ReadError)
-					|| !PreState.IsValid())
+				const bool bRead = Config.PreStateReadPort->TryRead(
+					FUeAgentStateReadRequest(*Target, Config.PreStatePlane),
+					Resources, Deadline, Cancellation, PreState, ReadError);
+				if (!bRead || !PreState.IsValid())
 				{
-					OutError.Code = !ReadError.Code.IsEmpty()
-						? ReadError.Code
-						: TEXT(
-							"simple_authoring_pre_state_unavailable");
-					OutError.SubjectId = Target->GetBindingId();
-					OutError.Detail = ReadError.Detail;
+					OutError = ReadError;
+					if (OutError.IsEmpty())
+					{
+						OutError = ProductionFailure(TEXT("simple_authoring_pre_state_unavailable"),
+							bRead ? TEXT("The pre-state read port reported success without returning a snapshot.")
+								: TEXT("The pre-state read port failed without reporting a diagnostic."), TEXT("pre_state"));
+						OutError.ActualValuePresent = PreState.IsValid();
+						OutError.ExpectedValuePresent = true;
+					}
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Target->GetBindingId();
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target->GetPublicRef();
 					return false;
 				}
 
 				TOptional<FChangeSetDraft> Draft;
-				if (!Config.DraftBuilder->TryBuildDraft(
-					CanonicalRequest,
-					Context,
-					PreState.ToSharedRef(),
-					Resources,
-					Draft,
-					Error)
-					|| !Draft.IsSet()
-					|| !Draft->IsValid()
-					|| !(Draft->GetDescriptorIdentity()
-						== CanonicalRequest.GetDescriptorIdentity())
-					|| Draft->GetRequestId()
-						!= CanonicalRequest.GetRequestId()
-					|| Draft->GetIdempotencyKey()
-						!= CanonicalRequest.GetIdempotencyKey()
-					|| Draft->GetSnapshot()->GetSnapshotId()
-						!= PreState->GetSnapshotId())
+				const bool bBuilt = Config.DraftBuilder->TryBuildDraft(
+					CanonicalRequest, Context, PreState.ToSharedRef(), Resources, Draft, Error);
+				if (!bBuilt || !Draft.IsSet() || !Draft->IsValid())
 				{
-					OutError.Code = Error.IsValid()
-						? Error.Code
-						: TEXT(
-							"simple_authoring_draft_invalid");
-					OutError.SubjectId =
-						CanonicalRequest.GetRequestId();
-					OutError.Detail = Error.Detail;
+					OutError = Error;
+					if (OutError.IsEmpty() && Draft.IsSet() && !Draft->IsValid())
+						OutError = Draft->GetValidationDiagnostic();
+					if (OutError.IsEmpty())
+					{
+						OutError = ProductionFailure(TEXT("simple_authoring_draft_invalid"),
+							bBuilt ? TEXT("The draft builder reported success without returning a change-set draft.")
+								: TEXT("The draft builder returned failure without reporting a diagnostic."), TEXT("draft"));
+						OutError.ActualValuePresent = Draft.IsSet();
+						OutError.ExpectedValuePresent = true;
+					}
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = CanonicalRequest.GetRequestId();
 					return false;
 				}
+				if (!(Draft->GetDescriptorIdentity() == CanonicalRequest.GetDescriptorIdentity()))
+				{
+					OutError = DescriptorMismatch(TEXT("simple_authoring_draft_invalid"),
+						Draft->GetDescriptorIdentity(), CanonicalRequest.GetDescriptorIdentity());
+					OutError.SubjectId = CanonicalRequest.GetRequestId();
+					return false;
+				}
+				const auto MatchesOpaque = [&](const FString& Field, const FString& Actual,
+					const FString& Expected, const FString& Reason)
+				{
+					if (Actual == Expected) return true;
+					OutError = ProductionFailure(TEXT("simple_authoring_draft_invalid"), Reason, Field);
+					OutError.SubjectId = CanonicalRequest.GetRequestId();
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Actual);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Expected);
+					return false;
+				};
+				if (!MatchesOpaque(TEXT("request_id"), Draft->GetRequestId(), CanonicalRequest.GetRequestId(),
+					TEXT("The change-set draft belongs to a different request."))
+					|| !MatchesOpaque(TEXT("idempotency_key"), Draft->GetIdempotencyKey(), CanonicalRequest.GetIdempotencyKey(),
+						TEXT("The change-set draft has a different idempotency key from the request."))
+					|| !MatchesOpaque(TEXT("snapshot_id"), Draft->GetSnapshot()->GetSnapshotId(), PreState->GetSnapshotId(),
+						TEXT("The change-set draft references a different pre-state snapshot.")))
+					return false;
 
 				TArray<FUeAgentCandidateBinding> ChangeTargets;
 				Error =
 					FUeAgentSimpleAuthoringProductionError();
-				if (!Config.ChangeTargetProjector
-						->TryProjectChangeTargets(
-							CanonicalRequest,
-							Context,
-							Draft.GetValue(),
-							*Target,
-							PreState.ToSharedRef(),
-							Resources,
-							ChangeTargets,
-							Error)
-					|| !ValidateChangeTargets(
-						Draft.GetValue(),
-						CanonicalRequest.GetDescriptorIdentity(),
-						Config.PersistedStateOracle
-							->GetReadPortId(),
-						ChangeTargets,
-						Error))
+				if (!Config.ChangeTargetProjector->TryProjectChangeTargets(
+					CanonicalRequest, Context, Draft.GetValue(), *Target, PreState.ToSharedRef(),
+					Resources, ChangeTargets, Error))
 				{
-					OutError.Code = Error.IsValid()
-						? Error.Code
-						: TEXT(
-							"simple_authoring_change_targets_missing");
-					OutError.SubjectId = Error.SubjectId;
-					OutError.Detail = Error.Detail;
+					OutError = Error;
+					if (OutError.IsEmpty())
+					{
+						OutError = ProductionFailure(TEXT("simple_authoring_change_targets_missing"),
+							TEXT("The change-target projector returned failure without reporting a diagnostic."), TEXT("change_targets"));
+						OutError.TargetPath = Target->GetPublicRef();
+						OutError.ActualValue = MakeShared<FJsonValueNumber>(ChangeTargets.Num());
+					}
+					return false;
+				}
+				if (!ValidateChangeTargets(Draft.GetValue(), CanonicalRequest.GetDescriptorIdentity(),
+					Config.PersistedStateOracle->GetReadPortId(), ChangeTargets, Error))
+				{
+					OutError = Error;
 					return false;
 				}
 
@@ -1106,9 +1219,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				{
 					Store->RemovePreparation(
 						CanonicalRequest.GetRequestId());
-					OutError.Code =
-						TEXT(
-							"simple_authoring_prepared_operation_invalid");
+					OutError = OutPrepared->GetValidationDiagnostic();
 					return false;
 				}
 				return true;
@@ -1129,128 +1240,70 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		};
 
 		bool ValidateConfig(
-			const FUeAgentSimpleAuthoringProductionProviderConfig&
-				Config,
+			const FUeAgentSimpleAuthoringProductionProviderConfig& Config,
 			FUeAgentSimpleAuthoringProductionError& OutError)
 		{
+			const auto Missing = [&](const FString& Code, const FString& Field,
+				TSharedPtr<FJsonValue> Actual = nullptr)
+			{
+				const FString Reason = Actual.IsValid()
+					? FString::Printf(TEXT("The provider configuration field '%s' must not be empty."), *Field)
+					: FString::Printf(TEXT("The authoring provider has no '%s'."), *Field);
+				OutError = ProductionFailure(Code, Reason, Field);
+				OutError.CandidateName = Config.FamilyId;
+				OutError.ActualValuePresent = Actual.IsValid();
+				OutError.ActualValue = MoveTemp(Actual);
+				OutError.ExpectedValuePresent = true;
+				return false;
+			};
 			if (Config.FamilyId.IsEmpty())
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_production_family_missing"));
-				return false;
-			}
+				return Missing(TEXT("simple_authoring_production_family_missing"), TEXT("family_id"),
+					MakeShared<FJsonValueString>(Config.FamilyId));
 			if (Config.OwnerLeaseId.IsEmpty())
+				return Missing(TEXT("simple_authoring_production_owner_missing"), TEXT("owner_lease_id"),
+					MakeShared<FJsonValueString>(Config.OwnerLeaseId));
+			if (!Config.Projection.IsSet())
+				return Missing(TEXT("simple_authoring_production_projection_missing"), TEXT("projection"));
+			if (!Config.Projection->IsValid())
 			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_production_owner_missing"),
-					Config.FamilyId);
-				return false;
-			}
-			if (!Config.Projection.IsSet()
-				|| !Config.Projection->IsValid())
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_production_projection_missing"),
-					Config.FamilyId);
+				OutError = Config.Projection->GetValidationDiagnostic();
 				return false;
 			}
 			if (!Config.TargetResolver.IsValid())
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_target_resolver_missing"),
-					Config.FamilyId);
-				return false;
-			}
+				return Missing(TEXT("simple_authoring_target_resolver_missing"), TEXT("target_resolver"));
 			if (!Config.PreStateReadPort.IsValid())
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_pre_state_port_missing"),
-					Config.FamilyId);
-				return false;
-			}
+				return Missing(TEXT("simple_authoring_pre_state_port_missing"), TEXT("pre_state_read_port"));
 			if (!Config.ChangeTargetProjector.IsValid())
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_change_target_"
-						"projector_missing"),
-					Config.FamilyId);
-				return false;
-			}
+				return Missing(TEXT("simple_authoring_change_target_projector_missing"), TEXT("change_target_projector"));
 			if (!Config.DraftBuilder.IsValid())
+				return Missing(TEXT("simple_authoring_draft_builder_missing"), TEXT("draft_builder"));
+			if (!Config.MutationBindingProjector.IsValid() || !Config.UeHook.IsValid())
+				return Missing(TEXT("simple_authoring_mutation_port_missing"),
+					!Config.MutationBindingProjector.IsValid() ? TEXT("mutation_binding_projector") : TEXT("ue_hook"));
+			if (!Config.DurableTargetProjector.IsValid() || !Config.DurableService.IsValid())
+				return Missing(TEXT("simple_authoring_durable_port_missing"),
+					!Config.DurableTargetProjector.IsValid() ? TEXT("durable_target_projector") : TEXT("durable_service"));
+			if (!Config.ExpectedStateProjector.IsValid() || !Config.PersistedStateOracle.IsValid()
+				|| !Config.AbsenceOracle.IsValid() || !Config.ReferenceOracle.IsValid())
+				return Missing(TEXT("simple_authoring_verification_port_missing"),
+					!Config.ExpectedStateProjector.IsValid() ? TEXT("expected_state_projector")
+						: !Config.PersistedStateOracle.IsValid() ? TEXT("persisted_state_oracle")
+							: !Config.AbsenceOracle.IsValid() ? TEXT("absence_oracle") : TEXT("reference_oracle"));
+			const FString& PreStatePortId = Config.PreStateReadPort->GetPortId();
+			if (PreStatePortId.IsEmpty())
+				return Missing(TEXT("simple_authoring_c9_read_port_not_independent"), TEXT("pre_state_read_port/id"),
+					MakeShared<FJsonValueString>(PreStatePortId));
+			const FString& PersistedPortId = Config.PersistedStateOracle->GetReadPortId();
+			if (PersistedPortId.IsEmpty())
+				return Missing(TEXT("simple_authoring_c9_read_port_not_independent"), TEXT("persisted_state_oracle/read_port_id"),
+					MakeShared<FJsonValueString>(PersistedPortId));
+			if (PreStatePortId == PersistedPortId)
 			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_draft_builder_missing"),
-					Config.FamilyId);
-				return false;
-			}
-			if (!Config.MutationBindingProjector.IsValid()
-				|| !Config.UeHook.IsValid())
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_mutation_port_missing"),
-					Config.FamilyId);
-				return false;
-			}
-			if (!Config.DurableTargetProjector.IsValid()
-				|| !Config.DurableService.IsValid())
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_durable_port_missing"),
-					Config.FamilyId);
-				return false;
-			}
-			if (!Config.ExpectedStateProjector.IsValid()
-				|| !Config.PersistedStateOracle.IsValid()
-				|| !Config.AbsenceOracle.IsValid()
-				|| !Config.ReferenceOracle.IsValid())
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_verification_port_missing"),
-					Config.FamilyId);
-				return false;
-			}
-			if (Config.PreStateReadPort->GetPortId().IsEmpty()
-				|| Config.PersistedStateOracle
-					->GetReadPortId()
-					.IsEmpty()
-				|| Config.PreStateReadPort->GetPortId()
-					== Config.PersistedStateOracle
-						->GetReadPortId())
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_c9_read_port_not_independent"),
-					Config.FamilyId);
-				return false;
-			}
-			if (Config.MaxQueueItems < 1)
-			{
-				SetError(
-					OutError,
-					TEXT(
-						"simple_authoring_queue_limit_invalid"),
-					Config.FamilyId);
+				OutError = ProductionFailure(TEXT("simple_authoring_c9_read_port_not_independent"),
+					TEXT("The persisted-state oracle uses the same read port as the pre-state reader."), TEXT("persisted_state_oracle/read_port_id"));
+				OutError.CandidateName = Config.FamilyId;
+				OutError.ActualValue = MakeShared<FJsonValueString>(PersistedPortId);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a read port different from the pre-state reader"));
 				return false;
 			}
 			return true;
@@ -1296,7 +1349,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					ESPMode::ThreadSafe>(
 					Config.FamilyId,
 					Config.OwnerLeaseId,
-					Config.MaxQueueItems,
 					Store,
 					Config.MutationBindingProjector
 						.ToSharedRef(),

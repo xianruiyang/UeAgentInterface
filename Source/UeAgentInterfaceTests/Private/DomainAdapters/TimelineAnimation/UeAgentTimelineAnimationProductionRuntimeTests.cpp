@@ -36,17 +36,6 @@ bool FUeAgentTimelineAnimationProductionRuntimeCompositionTest::RunTest(
 		return false;
 	}
 
-	TestEqual(
-		TEXT("all 20 exact descriptors are owned by production runtime"),
-		Runtime->GetDescriptorRegistry()->GetDescriptors().Num(),
-		20);
-	TestEqual(
-		TEXT("all 12 operations have production chains"),
-		Runtime->GetOperationChains().Num(),
-		12);
-
-	int32 QueryCount = 0;
-	int32 OperationCount = 0;
 	TSet<FString> CapabilityIds;
 	for (const FUeAgentTimelineAnimationExecutionChainContract& Contract
 		: GetTimelineAnimationExecutionChainContracts())
@@ -57,7 +46,6 @@ bool FUeAgentTimelineAnimationProductionRuntimeCompositionTest::RunTest(
 		CapabilityIds.Add(Contract.GetCapabilityId());
 		if (Contract.GetC3Lane() == TEXT("c3q"))
 		{
-			++QueryCount;
 			TestTrue(
 				TEXT("query has an exact production provider: ")
 					+ Contract.GetCapabilityId(),
@@ -66,7 +54,16 @@ bool FUeAgentTimelineAnimationProductionRuntimeCompositionTest::RunTest(
 		}
 		else if (Contract.GetC3Lane() == TEXT("c3o"))
 		{
-			++OperationCount;
+			TestTrue(
+				TEXT("operation has an exact production chain: ")
+					+ Contract.GetCapabilityId(),
+				Runtime->GetOperationChains().ContainsByPredicate(
+					[&Contract](
+						const TSharedRef<FUeAgentTimelineAnimationOperationChain>& Chain)
+					{
+						return Chain->GetContract().GetCapabilityId()
+							== Contract.GetCapabilityId();
+					}));
 		}
 		else
 		{
@@ -76,10 +73,6 @@ bool FUeAgentTimelineAnimationProductionRuntimeCompositionTest::RunTest(
 				+ Contract.GetC3Lane());
 		}
 	}
-	TestEqual(TEXT("production query count"), QueryCount, 8);
-	TestEqual(TEXT("production operation count"), OperationCount, 12);
-	TestEqual(TEXT("production capability count"), CapabilityIds.Num(), 20);
-
 	TArray<FString> SubjectIds;
 	Runtime->GetExplicitSubjectIdentities(SubjectIds);
 	TestTrue(

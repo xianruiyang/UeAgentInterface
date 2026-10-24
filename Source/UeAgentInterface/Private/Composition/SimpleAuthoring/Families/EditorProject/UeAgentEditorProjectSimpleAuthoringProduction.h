@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringProduction.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
@@ -10,18 +12,7 @@
 
 namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 {
-	struct UEAGENTINTERFACE_API
-		FUeAgentEditorProjectSimpleAuthoringError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	using FUeAgentEditorProjectSimpleAuthoringError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API
 		FUeAgentEditorProjectSimpleAuthoringDurableBinding final
@@ -88,7 +79,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 			ESPMode::ThreadSafe> ReferenceOracle;
 		TOptional<Projection::FUeAgentProjectionRequest> Projection;
 		FString OwnerLeaseId;
-		int32 MaxQueueItems = 64;
 	};
 
 	class UEAGENTINTERFACE_API

@@ -19,17 +19,7 @@ namespace
 	FUeAgentResourceTracker MakeLargeRoundTripTracker()
 	{
 		using UE::UAI::ContextResource::EUeAgentResourceDimension;
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 256ll * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 256ll * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 256ll * 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 1048576},
-			{EUeAgentResourceDimension::Items, 1048576},
-			{EUeAgentResourceDimension::Files, 262144},
-			{EUeAgentResourceDimension::ReferenceEdges, 1048576},
-			{EUeAgentResourceDimension::WorkUnits, 8388608},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 1024ll * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	UeAgentAuthoringState::FStateEntry MakeEntry(

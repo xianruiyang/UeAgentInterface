@@ -57,14 +57,24 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Localization
 					TEXT("The unchanged exact public command identity.")),
 				Field(TEXT("terminal_status"), TEXT("string"), true,
 					TEXT("Succeeded only after formal import, compile, refresh and independent file readback.")),
-				Field(TEXT("mutation_started"), TEXT("boolean"), true,
-					TEXT("Whether the target PO staging mutation began.")),
-				Field(TEXT("persistence_receipt_id"), TEXT("string"), true,
-					TEXT("SHA-256 receipt over target, PO, archive, locres and refresh revision.")),
-				Field(TEXT("phase_history"), TEXT("array"), true,
-					TEXT("Ordered shared OperationService lifecycle phases.")),
-				Field(TEXT("independent_readback"), TEXT("object"), true,
-					TEXT("Resolved target/culture/options, persisted PO, archive, locres and refresh revision.")),
+				Field(TEXT("target_ref"), TEXT("string"), true,
+					TEXT("Resolved project Localization Target name.")),
+				Field(TEXT("culture"), TEXT("string"), true,
+					TEXT("Imported culture selected from the PO Language header.")),
+				Field(TEXT("source_ref"), TEXT("string"), true,
+					TEXT("The imported external PO source reference.")),
+				Field(TEXT("collapse_mode"), TEXT("string"), true,
+					TEXT("Business import collapse mode.")),
+				Field(TEXT("po_format"), TEXT("string"), true,
+					TEXT("Business PO format detected by the importer.")),
+				Field(TEXT("target_resolved"), TEXT("boolean"), true,
+					TEXT("Whether the requested target resolved.")),
+				Field(TEXT("formal_importer_completed"), TEXT("boolean"), true,
+					TEXT("Whether formal PO import completed.")),
+				Field(TEXT("formal_compiler_completed"), TEXT("boolean"), true,
+					TEXT("Whether formal culture compilation completed.")),
+				Field(TEXT("refresh_completed"), TEXT("boolean"), true,
+					TEXT("Whether editor localization resources were refreshed.")),
 			};
 			Result.Errors = {
 				Error(TEXT("localization_import_authority_required"),
@@ -101,7 +111,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Localization
 			Result.Purpose.ParameterGuidance =
 				TEXT("Pass the source path and exact target name unchanged; culture and UE import options come from the PO and target.");
 			Result.Purpose.ResultGuidance =
-				TEXT("Trust success only with formal importer/compiler flags, file hashes and an advanced localization revision.");
+				TEXT("Trust success only with the terminal status and the returned culture/resource business results.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Prewrite failures do not mutate; post-mutation failures restore PO/archive/locres/report files or report state_unknown.");
 			Result.Purpose.SideEffectGuidance =
@@ -110,7 +120,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Localization
 				TEXT("localization_po_import(client, source_ref, target_ref)");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
-				TEXT("query.command.detail"),
+				TEXT("query.command.usage"),
 				TEXT("Localization Dashboard target configuration"),
 			};
 			Result.Purpose.Keywords = {
@@ -154,7 +164,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Localization
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				TArray<TSharedRef<IUeAgentExactCommandHandler>> Handlers;
 				if (!TryCreateLocalizationImportCommandHandlers(
@@ -181,7 +191,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Localization
 	bool TryCreateLocalizationImportContribution(
 		TSharedRef<IUeAgentLocalizationImportCommandService> Service,
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution = MakeShared<FContribution>(Service);
 		OutError.Reset();
@@ -190,7 +200,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Localization
 
 	bool TryCreateProductionLocalizationImportContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		TSharedPtr<IUeAgentLocalizationImportCommandService> Service;
@@ -210,7 +220,7 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Localization
 		TSharedRef<IUeAgentLocalizationImportCommandService> Service,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();

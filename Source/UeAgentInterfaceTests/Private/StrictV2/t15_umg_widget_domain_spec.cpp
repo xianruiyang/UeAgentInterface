@@ -1,4 +1,5 @@
 #include "Misc/AutomationTest.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
@@ -7,12 +8,7 @@
 #include "QueryOwners/UmgWidget/UeAgentUmgWidgetQueryOwner.h"
 #include "WidgetBlueprint.h"
 
-#if __has_include("OperationOwners/UmgWidget/UeAgentUmgWidgetDomainService.h")
-#define UAI_T15_UMG_WIDGET_DOMAIN_AVAILABLE 1
 #include "OperationOwners/UmgWidget/UeAgentUmgWidgetDomainService.h"
-#else
-#define UAI_T15_UMG_WIDGET_DOMAIN_AVAILABLE 0
-#endif
 
 #include "Domains/UMG/Authoring/UeAgentUmgAuthoringRegistration.h"
 
@@ -25,10 +21,6 @@ bool FUeAgentStrictV2T15UmgWidgetDomainTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
-#if !UAI_T15_UMG_WIDGET_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T15 UMG/Widget domain authority is available"), false);
-	return false;
-#else
 	using namespace UE::UAI;
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::OperationOwners::UmgWidget;
@@ -98,11 +90,9 @@ bool FUeAgentStrictV2T15UmgWidgetDomainTest::RunTest(
 			*CandidateTarget,
 			TEXT("Button"),
 			CandidateResult,
-			CandidateError,
-			64,
-			0)))
+			CandidateError)))
 	{
-		AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
+		AddError(CandidateError.Code + TEXT(":") + CandidateError.PublicMessage);
 		return false;
 	}
 	const FUmgWidgetCandidate* const ButtonCandidate =
@@ -111,50 +101,44 @@ bool FUeAgentStrictV2T15UmgWidgetDomainTest::RunTest(
 			{
 				return Candidate.ClassPath == UButton::StaticClass()->GetPathName();
 			});
-	if (!TestNotNull(TEXT("Button has one compact writable candidate"),
+	if (!TestNotNull(TEXT("Button has one writable candidate"),
 		ButtonCandidate))
 	{
 		return false;
 	}
-	TestTrue(TEXT("the Button candidate exposes a compact id"),
-		ButtonCandidate->Id.StartsWith(TEXT("candidate:")));
+	TestFalse(TEXT("the Button candidate name is non-empty"),
+		ButtonCandidate->Name.IsEmpty());
 	TestTrue(TEXT("the public class template is writable"),
 		ButtonCandidate->bSupported);
-	TestFalse(TEXT("the partial catalog is not the complete Designer Palette"),
-		CandidateResult.bCoverageComplete);
-	TestFalse(TEXT("the partial write scope is not reported complete"),
-		CandidateResult.bCreationCoverageComplete);
 	FUmgWidgetCandidate ResolvedButton;
-	TestTrue(TEXT("the exact id re-resolves in the same target context"),
+	TestTrue(TEXT("the exact name re-resolves in the same target context"),
 		TryResolveUmgWidgetCandidate(
 			*CandidateTarget,
-			FString(),
-			ButtonCandidate->Id,
+			ButtonCandidate->Name,
 			ResolvedButton,
 			CandidateError));
-	TestEqual(TEXT("the exact id retains the native Button class"),
+	TestEqual(TEXT("the exact name retains the native Button class"),
 		ResolvedButton.ClassPath,
 		UButton::StaticClass()->GetPathName());
-	TestFalse(TEXT("name and id are conjunctive"),
+	TestFalse(TEXT("a mismatched name is rejected"),
 		TryResolveUmgWidgetCandidate(
 			*CandidateTarget,
 			TEXT("DefinitelyNotButton"),
-			ButtonCandidate->Id,
 			ResolvedButton,
 			CandidateError));
 	TestEqual(TEXT("the conjunctive mismatch is typed"),
 		CandidateError.Code,
-		FString(TEXT("umg_widget_candidate_not_found")));
+		FString(TEXT("candidate_name_not_found")));
 
 	TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch> Dispatch;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	if (!TestTrue(TEXT("the process active composition freezes"),
 		Module::CommandRegistration::Active::
 			TryComposeProcessActiveCommandComposition(Registry, Dispatch, Error))
 		|| !Registry.IsValid())
 	{
-		AddError(Error);
+		AddError(Error.ToPublicDetail());
 		return false;
 	}
 	const auto* SharedIngress = Registry->FindExact(
@@ -164,10 +148,8 @@ bool FUeAgentStrictV2T15UmgWidgetDomainTest::RunTest(
 	{
 		TestEqual(TEXT("the shared ingress retains one public owner"),
 			SharedIngress->GetPublicOwner(),
-			FString(TEXT("uobject-dataasset-recursive-initialization-owner")));
+			FString(TEXT("content-graph-workspace-owner")));
 	}
-	TestNull(TEXT("the replaced UMG HJSON command is inactive"),
-		Registry->FindExact(TEXT("umg.authoring.apply")));
 	const auto* CandidateContract = Registry->FindExact(
 		TEXT("umg.widget.candidates"));
 	TestNotNull(TEXT("the compact UMG candidate command is active"),
@@ -196,7 +178,7 @@ bool FUeAgentStrictV2T15UmgWidgetDomainTest::RunTest(
 	if (!TestTrue(TEXT("UMG authoring registration succeeds"),
 		UeAgentUmgAuthoring::RegisterAuthoring(Error)))
 	{
-		AddError(Error);
+		AddError(Error.ToPublicDetail());
 		return false;
 	}
 	FTargetCompositionContract CompositionContract;
@@ -204,5 +186,4 @@ bool FUeAgentStrictV2T15UmgWidgetDomainTest::RunTest(
 		FTargetCompositionRegistry::Get().FindContract(
 			TEXT("ue.widget_blueprint.asset"), CompositionContract));
 	return !HasAnyErrors();
-#endif
 }

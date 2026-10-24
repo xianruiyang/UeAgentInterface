@@ -2,6 +2,9 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
+
 #include "CoreMinimal.h"
 
 class UClass;
@@ -14,9 +17,12 @@ namespace UeAgentMaterialAuthoring
 		FString ExpressionClassPath;
 		FString Path;
 		FString CatalogName;
+		TMap<FString, FString> CatalogSelect;
+		UE::UAI::ContentDiscovery::FNameSelectionInputContext CatalogInputContext;
 		FString MaterialFunctionPath;
 		FString ContextAssetPath;
 		FString ContextGraphName;
+		FString ContextPinName;
 	};
 
 	struct UEAGENTINTERFACE_API FExpressionResolveResult
@@ -32,5 +38,5 @@ namespace UeAgentMaterialAuthoring
 	UEAGENTINTERFACE_API bool ResolveExpression(
 		const FExpressionResolveRequest& Request,
 		FExpressionResolveResult& OutResult,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

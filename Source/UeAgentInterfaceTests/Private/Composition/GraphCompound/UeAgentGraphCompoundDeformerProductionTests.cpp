@@ -225,9 +225,8 @@ bool FUeAgentGraphCompoundDeformerProductionTest::RunTest(
 	}
 
 	FGraphCompoundRuntimeConfig RuntimeConfig;
-	RuntimeConfig.MaxFrameBytes = 1024 * 1024;
+
 	FGraphCompoundAnimationProductionConfig ProductionConfig;
-	ProductionConfig.OperationTimeoutSeconds = 30.0;
 	TSharedPtr<FGraphCompoundRuntime> Runtime;
 	FGraphCompoundRuntimeError RuntimeError;
 	if (!TestTrue(TEXT("Deformer production runtime builds"),

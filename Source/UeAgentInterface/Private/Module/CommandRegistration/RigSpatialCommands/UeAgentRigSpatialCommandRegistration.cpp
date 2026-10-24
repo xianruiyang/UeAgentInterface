@@ -30,14 +30,19 @@ namespace UE::UAI::Module::CommandRegistration::RigSpatialCommands
 
 		bool TryDeclaration(
 			const FString& CommandId,
+			const Composition::TimelineSpatial::
+				FUeAgentTimelineSpatialActivationProfile& Profile,
 			const FUeAgentCommandContractRegistry& Legacy,
 			FUeAgentCommandDeclaration& OutDeclaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(CommandId);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("rig_spatial_contract_missing:") + CommandId;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("rig_spatial_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("rig_spatial_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
 				return false;
 			}
 			const bool bQuery = QueryOwners::RigSpatialCommands::IsQuery(CommandId);
@@ -55,10 +60,11 @@ namespace UE::UAI::Module::CommandRegistration::RigSpatialCommands
 			{
 				Result.InputFields.Add({Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
-					TEXT("Exact rig/spatial mechanics parameter.")});
+					TEXT("Exact rig/spatial mechanics parameter."), Parameter.GetSchemaJson()});
 			}
 			Result.ResultFields = {{TEXT("result"), TEXT("object"), true, false,
 				TEXT("Native rig simulation, spatial, pose, retarget, socket, or bake result.")}};
+			Result.ModelResultFields = Profile.ModelResultFields;
 			Result.Errors = {
 				{TEXT("rig_spatial_authority_required"), TEXT("Query or Operation authority is missing.")},
 				{TEXT("rig_spatial_runtime_unavailable"), TEXT("Native rig/spatial mechanics are unavailable.")},
@@ -68,7 +74,7 @@ namespace UE::UAI::Module::CommandRegistration::RigSpatialCommands
 				+ TEXT(" through the common Query/Operation service and native rig/spatial mechanics.");
 			Result.Purpose.Target = TEXT("One explicit rig, skeleton, subject, pose, retargeter, control, socket, or bake target.");
 			Result.Purpose.Preconditions = {TEXT("Resolve exact asset or runtime subject dependencies and spatial contracts before mutation.")};
-			Result.Purpose.ParameterGuidance = TEXT("Use only query.command.detail fields.");
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters.");
 			Result.Purpose.ResultGuidance = TEXT("Verify with the returned native state or persisted asset readback.");
 			Result.Purpose.FailureGuidance = TEXT("Failed writes preserve lifecycle diagnostics and owned cleanup.");
 			Result.Purpose.SideEffectGuidance = bQuery
@@ -99,7 +105,7 @@ namespace UE::UAI::Module::CommandRegistration::RigSpatialCommands
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::RigSpatialCommands::TryCreateHandlers(OutHandlers, OutError);
 			}
@@ -113,7 +119,7 @@ namespace UE::UAI::Module::CommandRegistration::RigSpatialCommands
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
@@ -132,8 +138,22 @@ namespace UE::UAI::Module::CommandRegistration::RigSpatialCommands
 		TArray<FUeAgentCommandDeclaration> Declarations;
 		for (const FString& CommandId : QueryOwners::RigSpatialCommands::GetCommandIds())
 		{
+			const Composition::TimelineSpatial::
+				FUeAgentTimelineSpatialActivationProfile* Profile =
+				Profiles.FindByPredicate(
+					[&CommandId](const auto& Candidate)
+					{
+						return Candidate.CommandId == CommandId;
+					});
+			if (!Profile)
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("rig_spatial_activation_profile_missing"), TEXT("No timeline/spatial activation profile is registered for this command."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+				return false;
+			}
 			FUeAgentCommandDeclaration Declaration;
-			if (!TryDeclaration(CommandId, *Legacy, Declaration, OutError)) return false;
+			if (!TryDeclaration(
+				CommandId, *Profile, *Legacy, Declaration, OutError)) return false;
 			Declarations.Add(MoveTemp(Declaration));
 		}
 		OutContribution = MakeShared<FContribution>(MoveTemp(Declarations));

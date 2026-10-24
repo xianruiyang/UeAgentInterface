@@ -1,5 +1,8 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "DomainAdapters/ModelingGeometry/UeAgentModelingGridSolid.h"
+
 #include "Components/ActorComponent.h"
 #include "CoreMinimal.h"
 
@@ -25,6 +28,8 @@ public:
 	const FVector& GetAnchorLocal() const { return AnchorLocal; }
 	int64 GetRevision() const { return Revision; }
 	const TArray<FIntVector>& GetCells() const { return Cells; }
+	bool HasSolidGeometry() const { return bSolidGeometry; }
+	const TArray<FUeAgentGridSolidPiece>& GetSolidPieces() const { return SolidPieces; }
 	const FString& GetCollisionGeneration() const
 	{
 		return CollisionGeneration;
@@ -41,7 +46,9 @@ public:
 		TArray<FIntVector> InCells,
 		FString InCollisionGeneration,
 		FString InCollisionMode,
-		FString InMaterialRef);
+		FString InMaterialRef,
+		bool bInSolidGeometry = false,
+		TArray<FUeAgentGridSolidPiece> InSolidPieces = {});
 
 private:
 	UPROPERTY()
@@ -66,6 +73,12 @@ private:
 	TArray<FIntVector> Cells;
 
 	UPROPERTY()
+	bool bSolidGeometry = false;
+
+	UPROPERTY()
+	TArray<FUeAgentGridSolidPiece> SolidPieces;
+
+	UPROPERTY()
 	FString CollisionGeneration;
 
 	UPROPERTY()
@@ -84,6 +97,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 		FTransform GridToWorld = FTransform::Identity;
 		FVector AnchorLocal = FVector::ZeroVector;
 		TSet<FIntVector> Cells;
+		bool bSolidGeometry = false;
+		TArray<FUeAgentGridSolidPiece> SolidPieces;
 		int64 Revision = 0;
 		FString CollisionGeneration;
 		FString CollisionMode = TEXT("none");
@@ -96,22 +111,20 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 	UEAGENTINTERFACE_API bool TryFindAuthoringStateComponent(
 		const ADynamicMeshActor& Actor,
 		UUeAgentModelingVoxelGridStateComponent*& OutComponent,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateAuthoringStateComponent(
 		ADynamicMeshActor& Actor,
 		UUeAgentModelingVoxelGridStateComponent*& OutComponent,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryReadAuthoringState(
 		const UUeAgentModelingVoxelGridStateComponent& Component,
-		int64 MaxCells,
 		FVoxelGridAuthoringState& OutState,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryWriteAuthoringState(
 		UUeAgentModelingVoxelGridStateComponent& Component,
 		const FVoxelGridAuthoringState& State,
-		int64 MaxCells,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

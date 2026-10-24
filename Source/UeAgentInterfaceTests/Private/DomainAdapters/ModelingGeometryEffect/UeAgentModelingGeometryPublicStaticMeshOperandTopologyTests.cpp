@@ -112,12 +112,10 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshOperandTopology
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(TEXT("target_revision"), TargetRevision);
 		Params->SetObjectField(
 			TEXT("space_contract"),
 			BuildTargetLocalSpaceContract());
 		Params->SetStringField(TEXT("operand_ref"), OperandRef);
-		Params->SetObjectField(TEXT("operand_revision"), OperandRevision);
 		Params->SetObjectField(
 			TEXT("operand_to_target"),
 			BuildOperandToTargetTransform());
@@ -518,81 +516,7 @@ namespace UE::UAI::Tests::ModelingGeometryPublicStaticMeshOperandTopology
 			OutTargetAfter);
 	}
 
-	bool RunCurrentVoxelBooleanRejectedCase(
-		FAutomationTestBase& Test,
-		const TSharedPtr<const FUeAgentImmutableCommandRegistry>& Registry,
-		const TSharedPtr<const FUeAgentExactCommandDispatch>& Dispatch,
-		UWorld& World)
-	{
-		FOperandTopologyObservation TargetBefore;
-		FOperandTopologyObservation OperandBefore;
-		FOperandTopologyObservation TargetAfter;
-		FOperandTopologyObservation OperandAfter;
-		const FCarrierStep Prepare =
-			[](UStaticMesh&)
-			{
-				return true;
-			};
-		const FBuildOperandParams BuildParams =
-			[](
-				const FString& TargetRef,
-				const TSharedRef<FJsonObject>& TargetRevision,
-				const FString& OperandRef,
-				const TSharedRef<FJsonObject>& OperandRevision)
-			{
-				return VoxelBooleanParams(
-					TargetRef,
-					TargetRevision,
-					OperandRef,
-					OperandRevision,
-					TEXT("union"),
-					0.1,
-					0.0);
-			};
-		const FCarrierStep VerifyTargetBefore =
-			[&TargetBefore](UStaticMesh& StaticMesh)
-			{
-				return ReadOperandTopology(StaticMesh, TargetBefore)
-					&& TargetBefore.VertexCount == 8
-					&& TargetBefore.TriangleCount == 12
-					&& TargetBefore.BoundaryEdgeCount == 0;
-			};
-		const FCarrierStep VerifyOperandBefore =
-			[&OperandBefore](UStaticMesh& StaticMesh)
-			{
-				return ReadOperandTopology(StaticMesh, OperandBefore)
-					&& OperandBefore.VertexCount == 8
-					&& OperandBefore.TriangleCount == 12
-					&& OperandBefore.BoundaryEdgeCount == 0;
-			};
-		const FCarrierStep VerifyTargetUnchanged =
-			[&TargetBefore, &TargetAfter](UStaticMesh& StaticMesh)
-			{
-				return ReadOperandTopology(StaticMesh, TargetAfter)
-					&& TargetAfter == TargetBefore;
-			};
-		const FCarrierStep VerifyOperandUnchanged =
-			[&OperandBefore, &OperandAfter](UStaticMesh& StaticMesh)
-			{
-				return ReadOperandTopology(StaticMesh, OperandAfter)
-					&& OperandAfter == OperandBefore;
-			};
-		return RunCurrentStaticMeshOperandRejectedCase(
-			Test,
-			Registry,
-			Dispatch,
-			World,
-			TEXT("mesh.topology.voxel_boolean"),
-			TEXT("T50PublicTopologyVoxelResolutionRejected"),
-			TEXT("modeling_geometry_voxel_resolution_limit_exceeded"),
-			Prepare,
-			Prepare,
-			BuildParams,
-			VerifyTargetBefore,
-			VerifyOperandBefore,
-			VerifyTargetUnchanged,
-			VerifyOperandUnchanged);
-	}
+
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -707,31 +631,6 @@ bool FUeAgentModelingGeometryPublicStaticMeshVoxelBooleanModesTest::RunTest(
 					TEXT("adaptivity reduces persisted voxel topology"),
 					UnionAdaptive.TriangleCount
 						< UnionExact.TriangleCount);
-		});
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentModelingGeometryPublicStaticMeshVoxelResolutionRejectedTest,
-	"UeAgentInterface.DomainAdapters.ModelingGeometryEffect.E4.PublicProduct."
-		"StaticMeshTopologyVoxelResolutionRejected",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentModelingGeometryPublicStaticMeshVoxelResolutionRejectedTest::
-	RunTest(const FString& Parameters)
-{
-	using namespace UE::UAI::Tests::ModelingGeometryPublicStaticMesh;
-	using namespace
-		UE::UAI::Tests::ModelingGeometryPublicStaticMeshOperandTopology;
-	(void)Parameters;
-	return RunWithPublicStaticMeshEnvironment(
-		*this,
-		[this](const auto& Registry, const auto& Dispatch, UWorld& World)
-		{
-			return RunCurrentVoxelBooleanRejectedCase(
-				*this,
-				Registry,
-				Dispatch,
-				World);
 		});
 }
 

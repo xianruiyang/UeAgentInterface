@@ -28,7 +28,7 @@ namespace UE::UAI::DomainAdapters::Landscape
 				return Schema;
 			}
 			FString Canonical;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			return Json::TryCanonicalize(Object, Canonical, Error)
 				? Canonical
 				: FString(Schema);
@@ -42,32 +42,45 @@ namespace UE::UAI::DomainAdapters::Landscape
 
 	bool TryCreateLandscapeHeightReadDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const FString InputSchema = CanonicalSchema(
 			TEXT(R"json({"type":"object","properties":{"region":{"type":"object","properties":{"frame_id":{"const":"ue.landscape.local_sample_grid"},"min_inclusive":{"type":"array","items":{"type":"integer"},"minItems":2,"maxItems":2},"max_inclusive":{"type":"array","items":{"type":"integer"},"minItems":2,"maxItems":2}},"required":["frame_id","min_inclusive","max_inclusive"],"additionalProperties":false},"space_contract":{"type":"object","properties":{"frame_id":{"const":"ue.landscape.local_sample_grid"},"unit":{"const":"sample"},"basis_evidence":{"type":"string","minLength":1}},"required":["frame_id","unit","basis_evidence"],"additionalProperties":false}},"required":["region","space_contract"],"additionalProperties":false})json"));
+		auto BuildDescriptor = [&InputSchema](const FString& DescriptorHash)
+		{
+			return FUeAgentOperationDescriptor(
+				FUeAgentDescriptorIdentity(
+					TEXT("uai.query.landscape.height.read"),
+					1,
+					DescriptorHash),
+				TEXT("landscape.height.read"),
+				TEXT("landscape"),
+				EUeAgentDescriptorOperationKind::Query,
+				FUeAgentExecutionContextPolicy(
+					{EUeAgentStatePlane::AuthoringMemory},
+					{EUeAgentExecutionContextFacet::World},
+					EUeAgentContextResolutionPolicy::
+						ResolveCurrentThenFreeze,
+					EUeAgentTransientContextPolicy::ReadOnly),
+				FUeAgentContractValue(InputSchema),
+				FUeAgentContractValue(TEXT("{\"type\":\"object\"}")),
+				FUeAgentQueryBinding(
+					ProviderBinding,
+					EUeAgentQueryKind::State,
+					EUeAgentQueryMaterializationPolicy::RuntimeObserve,
+					EUeAgentQuerySideEffectPolicy::NoPersistentMutation));
+		};
+		const FUeAgentOperationDescriptor Draft = BuildDescriptor(FString());
+		FString DescriptorHash;
+		if (!TryComputeOperationDescriptorHash(
+				Draft,
+				DescriptorHash,
+				OutError))
+		{
+			return false;
+		}
 		TArray<FUeAgentOperationDescriptor> Descriptors;
-		Descriptors.Emplace(
-			FUeAgentDescriptorIdentity(
-				TEXT("uai.query.landscape.height.read"),
-				1,
-				TEXT("sha256:45eb4747f4c05945f6d067065255ed23d7795cef9407963c468ea3de86492196")),
-			TEXT("landscape.height.read"),
-			TEXT("landscape"),
-			EUeAgentDescriptorOperationKind::Query,
-			FUeAgentExecutionContextPolicy(
-				{EUeAgentStatePlane::AuthoringMemory},
-				{EUeAgentExecutionContextFacet::World},
-				EUeAgentContextResolutionPolicy::
-					ResolveCurrentThenFreeze,
-				EUeAgentTransientContextPolicy::ReadOnly),
-			FUeAgentContractValue(InputSchema),
-			FUeAgentContractValue(TEXT("{\"type\":\"object\"}")),
-			FUeAgentQueryBinding(
-				ProviderBinding,
-				EUeAgentQueryKind::State,
-				EUeAgentQueryMaterializationPolicy::RuntimeObserve,
-				EUeAgentQuerySideEffectPolicy::NoPersistentMutation));
+		Descriptors.Add(BuildDescriptor(DescriptorHash));
 		return FUeAgentDescriptorRegistry::TryCreate(
 			MoveTemp(Descriptors),
 			OutRegistry,
@@ -77,7 +90,7 @@ namespace UE::UAI::DomainAdapters::Landscape
 	bool TryCreateLandscapeHeightReadProviderRegistrations(
 		TArray<FUeAgentDomainQueryProviderRegistration>&
 			OutRegistrations,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistrations.Reset();
 		OutError.Reset();
@@ -94,7 +107,7 @@ namespace UE::UAI::DomainAdapters::Landscape
 				HookError)
 			|| !Hook.IsValid())
 		{
-			OutError = HookError.Code + TEXT(":") + HookError.Detail;
+			OutError = HookError;
 			return false;
 		}
 		OutRegistrations.Emplace(

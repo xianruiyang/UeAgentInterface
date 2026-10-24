@@ -25,12 +25,14 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		const StateSemantic::FUeAgentCanonicalValueRef&
 			GetParameters() const;
 		bool IsValid() const;
+		const ExecutionMutation::FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		EUeAgentEditorSessionOperationFamily Family;
 		FString SubjectRef;
 		FString PolicyId;
 		StateSemantic::FUeAgentCanonicalValueRef Parameters;
+		ExecutionMutation::FExecutionMutationError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API

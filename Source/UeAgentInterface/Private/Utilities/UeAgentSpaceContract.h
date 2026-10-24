@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class FJsonObject;
@@ -19,5 +21,5 @@ namespace UeAgentSpaceContract
 		const FString& ExpectedSubject,
 		const FString& ExpectedFrame,
 		const FString& ErrorPrefix,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

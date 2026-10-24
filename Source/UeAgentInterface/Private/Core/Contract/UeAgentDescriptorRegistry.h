@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/Contract/UeAgentContractSchema.h"
@@ -68,6 +70,7 @@ namespace UE::UAI::Contract
 		EUeAgentQuerySideEffectPolicy
 			GetSideEffectPolicy() const;
 		bool IsValid() const;
+		const FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString ProviderBinding;
@@ -77,6 +80,7 @@ namespace UE::UAI::Contract
 			EUeAgentQueryMaterializationPolicy::Invalid;
 		EUeAgentQuerySideEffectPolicy SideEffectPolicy =
 			EUeAgentQuerySideEffectPolicy::Invalid;
+		FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentOperationDescriptor final
@@ -117,6 +121,11 @@ namespace UE::UAI::Contract
 		FUeAgentContractValue ResultSchema;
 		TOptional<FUeAgentQueryBinding> QueryBinding;
 	};
+
+	UEAGENTINTERFACE_API bool TryComputeOperationDescriptorHash(
+		const FUeAgentOperationDescriptor& DescriptorDraft,
+		FString& OutDescriptorHash,
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	class FUeAgentDescriptorRegistry;
 
@@ -163,7 +172,7 @@ namespace UE::UAI::Contract
 			TArray<FUeAgentOperationDescriptor> Descriptors,
 			TSharedPtr<const FUeAgentDescriptorRegistry>&
 				OutRegistry,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		const TArray<FUeAgentOperationDescriptor>&
 			GetDescriptors() const;

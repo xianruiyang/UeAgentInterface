@@ -33,21 +33,5 @@ bool FUeAgentExternalDataImportBoundaryTest::RunTest(const FString& Parameters)
 		TestNotNull(TEXT("canonical external command contract: ") + CommandId,
 			Registry.IsValid() ? Registry->FindExact(CommandId) : nullptr);
 	}
-	const TArray<FString> LegacyIds{
-		TEXT("asset_import_fbx_animation"),
-		TEXT("asset_import_fbx_skeletal_mesh"),
-		TEXT("asset_import_geometry_cache"),
-		TEXT("asset_import_texture"),
-		TEXT("light_profile_import"),
-		TEXT("sparse_volume_texture_import"),
-		TEXT("sound_wave_import"),
-		TEXT("localization_import_po"),
-		TEXT("skeletal_mesh_import_skin_weight_profile"),
-	};
-	for (const FString& LegacyId : LegacyIds)
-	{
-		TestNull(TEXT("legacy external identity is absent: ") + LegacyId,
-			Registry.IsValid() ? Registry->FindExact(LegacyId) : nullptr);
-	}
 	return !HasAnyErrors();
 }

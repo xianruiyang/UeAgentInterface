@@ -25,30 +25,30 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 		}
 
 		bool TryResolveForPlanning(
-			const FString& FactoryRef,
-			const FUeAgentCatalogRevision& ExpectedRevision,
+			const FString& FactoryName,
+			const TMap<FString, FString>& Select,
 			const FString& ProfileId,
 			FUeAgentAssetDataSimpleEffectFactoryBinding& OutBinding,
 			FExecutionMutationError& OutError) override
 		{
 			const bool bInvalidDataObject =
-				FactoryRef
+				FactoryName
 					== TEXT(
 						"uai://factory/asset-data/"
 						"data-object/invalid-uobject");
 			const TSharedPtr<FJsonObject> Contract =
 				bInvalidDataObject
 					? FindByProfile(TEXT("data_object"))
-					: FindByPublicRef(FactoryRef);
+					: FindByName(FactoryName, Select);
 			return TryBuild(
 				Contract,
-				ExpectedRevision,
+				nullptr,
 				ProfileId,
 				bInvalidDataObject
 					? UObject::StaticClass()
 					: nullptr,
 				bInvalidDataObject
-					? FactoryRef
+					? FactoryName
 					: FString(),
 				bInvalidDataObject
 					? TEXT(
@@ -68,7 +68,7 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 		{
 			return TryBuild(
 				FindByBindingId(FactoryBindingId),
-				ExpectedRevision,
+				&ExpectedRevision,
 				ProfileId,
 				nullptr,
 				FString(),
@@ -78,12 +78,38 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 		}
 
 	private:
-		TSharedPtr<FJsonObject> FindByPublicRef(
-			const FString& PublicRef) const
+		TSharedPtr<FJsonObject> FindByName(
+			const FString& Name,
+			const TMap<FString, FString>& Select) const
 		{
-			return Find(
-				TEXT("candidate_ref"),
-				PublicRef);
+			if (!Fixture.IsValid())
+			{
+				return nullptr;
+			}
+			for (const TSharedPtr<FJsonValue>& Item
+				: Fixture->GetArrayField(TEXT("factory_contracts")))
+			{
+				const TSharedPtr<FJsonObject> Contract = Item->AsObject();
+				if (Contract->GetStringField(TEXT("candidate_ref")) != Name)
+				{
+					continue;
+				}
+				bool bMatches = true;
+				for (const TPair<FString, FString>& Pair : Select)
+				{
+					if (!Contract->HasField(*Pair.Key)
+						|| Contract->GetStringField(*Pair.Key) != Pair.Value)
+					{
+						bMatches = false;
+						break;
+					}
+				}
+				if (bMatches)
+				{
+					return Contract;
+				}
+			}
+			return nullptr;
 		}
 
 		TSharedPtr<FJsonObject> FindByBindingId(
@@ -123,7 +149,7 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 
 		bool TryBuild(
 			const TSharedPtr<FJsonObject>& Contract,
-			const FUeAgentCatalogRevision& ExpectedRevision,
+			const FUeAgentCatalogRevision* ExpectedRevision,
 			const FString& ProfileId,
 			UClass* OverrideClass,
 			const FString& OverridePublicRef,
@@ -150,7 +176,8 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 				static_cast<int64>(
 					Contract->GetNumberField(
 						TEXT("catalog_sequence"))));
-			if (ActualRevision != ExpectedRevision)
+			if (ExpectedRevision
+				&& ActualRevision != *ExpectedRevision)
 			{
 				OutError = FExecutionMutationError(
 					TEXT("asset_data_factory_candidate_stale"),

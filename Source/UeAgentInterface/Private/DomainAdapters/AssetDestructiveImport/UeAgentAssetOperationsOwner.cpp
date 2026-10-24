@@ -1,9 +1,13 @@
 #include "DomainAdapters/AssetDestructiveImport/UeAgentAssetOperationsOwner.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Animation/MorphTarget.h"
 #include "Animation/SkinWeightProfile.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContractJson.h"
@@ -13,16 +17,16 @@
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture.h"
+#include "Engine/World.h"
 #include "HAL/ThreadSafeCounter.h"
 #include "IAssetTools.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "Sound/SoundWave.h"
-#include "PackageTools.h"
 #include "UObject/ObjectRedirector.h"
-#include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
+#include "Utilities/AuthoringOperationApply/UeAgentAuthoringPackageReadback.h"
 
 namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 {
@@ -34,19 +38,36 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 
 	namespace
 	{
+		FDiagnostic OperationFact(const FString& Code, const FString& Reason, const FString& Target,
+			const FString& Path, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const FString& Name = FString(), const FString& Kind = TEXT("native_result"))
+		{
+			auto Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("asset_operation"));
+			Diagnostic.TargetPath = Target;
+			Diagnostic.PropertyPath = Path;
+			Diagnostic.CandidateName = Name;
+			Diagnostic.SourceKind = Kind;
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			return Diagnostic;
+		}
+
+		FDiagnostic WithOperationTarget(FDiagnostic Diagnostic, const FString& Target)
+		{
+			if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = Target;
+			return Diagnostic;
+		}
+
+		void AppendOperationRollback(FDiagnostic& Diagnostic, const bool bRestored, const FDiagnostic& RollbackError)
+		{
+			if (!Diagnostic.RollbackAttempted.IsSet()) Diagnostic.RollbackAttempted = true;
+			if (!Diagnostic.RollbackSucceeded.IsSet()) Diagnostic.RollbackSucceeded = bRestored;
+			Diagnostic.Append(RollbackError);
+		}
+
 		FUeAgentResourceTracker MakeTracker()
 		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 8192},
-				{EUeAgentResourceDimension::Items, 8192},
-				{EUeAgentResourceDimension::Files, 512},
-				{EUeAgentResourceDimension::ReferenceEdges, 8192},
-				{EUeAgentResourceDimension::WorkUnits, 131072},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 32 * 1024 * 1024},
-			}));
+			return FUeAgentResourceTracker();
 		}
 
 		bool TryPackageName(FString Ref, FString& OutPackageName)
@@ -65,19 +86,20 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				+ FPackageName::GetLongPackageAssetName(PackageName);
 		}
 
-		UObject* ReloadForIndependentReadback(const FString& PackageName)
+		UObject* ReloadForIndependentReadback(const FString& PackageName, UE::UAI::Contract::FDiagnostic& Error)
 		{
-			if (UPackage* const Package = FindPackage(nullptr, *PackageName))
+			if (!UeAgentAuthoringOperationApply::TryReloadPersistedPackage(PackageName, Error))
 			{
-				Package->SetDirtyFlag(false);
-				FText Error;
-				if (!UPackageTools::UnloadPackages({Package}, Error, true))
-				{
-					return nullptr;
-				}
+				// This owner supplies a validated authored package reference. The
+				// shared readback helper also serves private transaction packages.
+				if (Error.TargetPath.IsEmpty()) Error.TargetPath = PackageName;
+				return nullptr;
 			}
-			CollectGarbage(RF_NoFlags, true);
-			return LoadObject<UObject>(nullptr, *ObjectPath(PackageName));
+			UObject* Object = FindObject<UObject>(nullptr, *ObjectPath(PackageName));
+			if (!Object)
+				Error = OperationFact(TEXT("asset_operation_readback_object_missing"), TEXT("The persisted package reloaded but contains no asset at its expected object path."),
+					PackageName, TEXT("/readback/object/available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return Object;
 		}
 
 		FUeAgentCanonicalIdentity IdentityFor(
@@ -139,7 +161,8 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				const FString& JournalRoot,
 				const EAssetDurableIntent DurableIntent,
 				const int64 FencingToken,
-				FString& OutError)
+				UE::UAI::Contract::FDiagnostic& OutError,
+				const TArray<TPair<FString, EPackageHeaderKind>>& AdditionalPackages = {})
 			{
 				Identity = IdentityFor(PackageName, TEXT("state"));
 				Token = FencingToken;
@@ -147,33 +170,33 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 					Request, PackageName, OwnerId, Identity,
 					DurableIntent == EAssetDurableIntent::Delete
 						? EChangeIntent::Delete : EChangeIntent::Update);
+				TArray<FAssetDurableTarget> Targets;
+				Targets.Emplace(Identity, PackageName, EPackageHeaderKind::EvidenceRequired,
+					DurableIntent, ERollbackGrade::DurableBackup);
+				for (const auto& Package : AdditionalPackages)
+					Targets.Emplace(Identity, Package.Key, Package.Value, DurableIntent, ERollbackGrade::DurableBackup);
 				const FAssetDurableRequest DurableRequest(
-					Plan.ToSharedRef(),
-					{FAssetDurableTarget(
-						Identity, PackageName,
-						EPackageHeaderKind::EvidenceRequired, DurableIntent,
-						ERollbackGrade::DurableBackup)},
+					Plan.ToSharedRef(), MoveTemp(Targets),
 					Token, OwnerId, EAtomicityMode::CompensatedSaga);
 				FAssetDurableError Error;
 				if (!TryPrepareAssetDurability(
 						DurableRequest, Backend, JournalRoot,
-						Resources, Session, Error)
-					|| !Session.IsValid())
+						Resources, Session, Error))
 				{
-					OutError = Error.GetCode() + TEXT(":") + Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
 			}
 
-			bool Persist(FString& OutError)
+			bool Persist(UE::UAI::Contract::FDiagnostic& OutError)
 			{
 				FAssetDurableError Error;
-				if (!TryPersistAssetDurability(
+				if (!TryPersistAssetDurabilityForVerification(
 						Session.ToSharedRef(), Backend, Token,
 						Resources, Receipt, Error))
 				{
-					OutError = Error.GetCode() + TEXT(":") + Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -181,14 +204,15 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 
 			bool Acknowledge(
 				const FString& VerificationId,
-				FString& OutError)
+				UE::UAI::Contract::FDiagnostic& OutError)
 			{
 				const FAssetDurableSessionRef Persisted =
 					MakeShared<const FAssetDurableSession>(
 						Session->GetRequest(), Session->GetInventory(),
 						Session->GetJournalId(), Session->GetJournalPath(),
 						Session->GetJournalRoot(), Session->GetTransactionRoot(),
-						Session->GetStagingRoot(), Receipt.GetPhaseHistory());
+						Session->GetStagingRoot(), Receipt.GetPhaseHistory(),
+						Receipt.GetPreMutationStates(), Receipt.GetExpectedPersistedStates());
 				const FDurableVerificationAcknowledgement Ack(
 					Receipt.GetJournalId(), Receipt.GetPlanFingerprint(),
 					Receipt.GetInventoryHash(), VerificationId,
@@ -197,20 +221,29 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				if (!TryAcknowledgeAssetDurability(
 						Persisted, Ack, Token, Resources, Error))
 				{
-					OutError = Error.GetCode() + TEXT(":") + Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
 			}
 
-			void Rollback(const bool bMemoryConfirmed)
+			bool PersistNative(TFunctionRef<bool(FAssetDurableError&)> Operation, UE::UAI::Contract::FDiagnostic& OutError)
 			{
-				if (!Session.IsValid()) return;
-				FDurableReceipt RollbackReceipt;
 				FAssetDurableError Error;
-				TryRollbackAssetDurability(
-					Session.ToSharedRef(), Backend, Token, bMemoryConfirmed,
-					Resources, RollbackReceipt, Error);
+				if (!TryPersistNativeAssetDurabilityForVerification(Session, Backend, Token,
+					Operation, Resources, Receipt, Error))
+				{
+					OutError = Error;
+					return false;
+				}
+				return true;
+			}
+
+			bool Rollback(const bool bMemoryConfirmed, FDiagnostic& OutError)
+			{
+				FDurableReceipt RollbackReceipt;
+				return TryRollbackAssetDurability(Session.ToSharedRef(), Backend, Token, bMemoryConfirmed,
+					Resources, RollbackReceipt, OutError);
 			}
 
 			FString JournalId() const
@@ -244,20 +277,22 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				FUeAgentAssetOperationResult Result;
 				Result.CommandId = Request.CommandId;
 				Result.TargetRef = Request.TargetRef;
-				auto Fail = [&Result](const FString& Code, const FString& Detail)
+				auto Fail = [&Result, &Request](FDiagnostic Diagnostic)
 				{
-					Result.ErrorCode = Code;
-					Result.ErrorDetail = Detail;
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Diagnostic), Request.TargetRef);
 					return Result;
 				};
 				if (!IsInGameThread())
 				{
-					return Fail(TEXT("asset_operation_game_thread_required"),
-						Request.CommandId);
+					return Fail(OperationFact(TEXT("asset_operation_game_thread_required"), TEXT("Native asset operations require the game thread."),
+						Request.TargetRef, TEXT("/execution/on_game_thread"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Request.CommandId));
 				}
 				if (Cancellation->IsCancelled())
 				{
-					return Fail(TEXT("asset_operation_cancelled"), Request.RequestId);
+					auto Diagnostic = OperationFact(TEXT("asset_operation_cancelled"), TEXT("The asset operation was cancelled before execution."),
+						Request.TargetRef, TEXT("/execution/cancel_requested"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+					Diagnostic.SubjectId = Request.RequestId;
+					return Fail(MoveTemp(Diagnostic));
 				}
 				if (Request.CommandId == TEXT("asset.move"))
 				{
@@ -275,7 +310,9 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				{
 					return RemoveSkeletalItem(Request);
 				}
-				return Fail(TEXT("asset_operation_unknown"), Request.CommandId);
+				return Fail(OperationFact(TEXT("asset_operation_unknown"), TEXT("The asset operation owner does not support this command."),
+					Request.TargetRef, TEXT("/command"), MakeShared<FJsonValueString>(Request.CommandId),
+					MakeShared<FJsonValueString>(TEXT("asset.move | asset.fixup_redirectors | asset.reimport_* | skeletal_mesh.remove_*")), FString(), TEXT("command_input")));
 			}
 
 		private:
@@ -288,10 +325,13 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				Result.ResultRef = Request.Operand;
 				FString SourcePackage;
 				FString DestinationPackage;
-				if (!TryPackageName(Request.TargetRef, SourcePackage)
-					|| !TryPackageName(Request.Operand, DestinationPackage))
+				const bool bSourceValid = TryPackageName(Request.TargetRef, SourcePackage);
+				if (!bSourceValid || !TryPackageName(Request.Operand, DestinationPackage))
 				{
-					Result.ErrorCode = TEXT("asset_move_target_invalid");
+					Result.Diagnostic = OperationFact(TEXT("asset_move_target_invalid"), TEXT("Asset move requires valid source and destination package references under /Game."),
+						Request.TargetRef, bSourceValid ? TEXT("/destination") : TEXT("/target"),
+						MakeShared<FJsonValueString>(bSourceValid ? Request.Operand : Request.TargetRef),
+						MakeShared<FJsonValueString>(TEXT("valid /Game package reference")), FString(), TEXT("command_input"));
 					return Result;
 				}
 				UObject* const Asset = LoadObject<UObject>(
@@ -299,26 +339,27 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				FString Existing;
 				if (!Asset || FPackageName::DoesPackageExist(DestinationPackage, &Existing))
 				{
-					Result.ErrorCode = Asset
-						? TEXT("asset_move_destination_conflict")
-						: TEXT("asset_move_target_missing");
+					Result.Diagnostic = OperationFact(Asset ? TEXT("asset_move_destination_conflict") : TEXT("asset_move_target_missing"),
+						Asset ? TEXT("The destination package already exists.") : TEXT("The source asset could not be loaded."),
+						Request.TargetRef, Asset ? TEXT("/destination/exists") : TEXT("/target/available"),
+						MakeShared<FJsonValueBoolean>(Asset != nullptr), MakeShared<FJsonValueBoolean>(Asset == nullptr), Asset ? DestinationPackage : FString());
+					if (Asset) Result.Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Existing);
 					return Result;
 				}
 				if (Asset->GetOutermost()->IsDirty())
 				{
-					Result.ErrorCode = TEXT("asset_move_dirty_package");
-					Result.ErrorDetail =
-						TEXT("save or discard pending source changes before moving the asset");
+					Result.Diagnostic = OperationFact(TEXT("asset_move_dirty_package"), TEXT("The source asset package has unsaved changes; save or discard them before moving it."),
+						Request.TargetRef, TEXT("/source/package/dirty"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 					return Result;
 				}
 				FDurableMutation Durable;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!Durable.Prepare(
 						Request, SourcePackage, OwnerId, JournalRoot,
-						EAssetDurableIntent::Delete, Counter.Increment(), Error))
+						EAssetDurableIntent::Native, Counter.Increment(), Error,
+						{{DestinationPackage, Asset->IsA<UWorld>() ? EPackageHeaderKind::Map : EPackageHeaderKind::Asset}}))
 				{
-					Result.ErrorCode = TEXT("asset_move_prepare_failed");
-					Result.ErrorDetail = Error;
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef);
 					return Result;
 				}
 				Result.JournalId = Durable.JournalId();
@@ -326,35 +367,55 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 					Asset, FPackageName::GetLongPackagePath(DestinationPackage),
 					FPackageName::GetLongPackageAssetName(DestinationPackage));
 				TGuardValue<bool> Guard(GIsRunningUnattendedScript, true);
-				if (!FModuleManager::LoadModuleChecked<FAssetToolsModule>(
-						TEXT("AssetTools")).Get().RenameAssets({Rename}))
+				const FString ExpectedClass = Asset->GetClass()->GetPathName();
+				if (!Durable.PersistNative([&](FAssetDurableError& NativeError) {
+					if (FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get().RenameAssets({Rename})) return true;
+					NativeError = OperationFact(TEXT("asset_move_native_failed"), TEXT("AssetTools rejected the requested asset rename."),
+						Request.TargetRef, TEXT("/rename/accepted"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), DestinationPackage);
+					return false;
+				}, Error))
 				{
-					Durable.Rollback(true);
-					Result.ErrorCode = TEXT("asset_move_native_failed");
-					return Result;
-				}
-				if (!Durable.Persist(Error))
-				{
-					Durable.Rollback(false);
 					Result.TerminalState = TEXT("state_unknown");
-					Result.ErrorCode = TEXT("asset_move_persist_failed");
-					Result.ErrorDetail = Error;
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef);
 					return Result;
 				}
 				FString SourceFilename;
 				FString DestinationFilename;
-				Result.bReadbackVerified =
-					!FPackageName::DoesPackageExist(SourcePackage, &SourceFilename)
-					&& FPackageName::DoesPackageExist(
-						DestinationPackage, &DestinationFilename)
-					&& ReloadForIndependentReadback(DestinationPackage) != nullptr;
+				const bool bSourceRemains = FPackageName::DoesPackageExist(SourcePackage, &SourceFilename);
+				UObject* Destination = FPackageName::DoesPackageExist(DestinationPackage, &DestinationFilename)
+					? ReloadForIndependentReadback(DestinationPackage, Error) : nullptr;
+				Result.bReadbackVerified = Destination && Destination->GetClass()->GetPathName() == ExpectedClass;
+				if (!Result.bReadbackVerified && Error.IsEmpty())
+				{
+					Error = OperationFact(TEXT("asset_move_readback_failed"),
+						Destination ? TEXT("The persisted destination asset has a different class from the source asset.") : TEXT("The destination package does not exist after the move."),
+						Request.TargetRef, Destination ? TEXT("/destination/class") : TEXT("/destination/package/exists"),
+						Destination ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Destination->GetClass()->GetPathName())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)),
+						Destination ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(ExpectedClass)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)), DestinationPackage);
+				}
+				if (Result.bReadbackVerified && bSourceRemains)
+				{
+					// UE may preserve the source as a redirector for unresolved references
+					// or collections. It is a native result, not a residual file to delete.
+					UObject* SourceReadback = ReloadForIndependentReadback(SourcePackage, Error);
+					const auto* Redirector = Cast<UObjectRedirector>(SourceReadback);
+					Result.bReadbackVerified = Redirector && Redirector->DestinationObject == Destination;
+					if (!Result.bReadbackVerified && Error.IsEmpty())
+					{
+						Error = OperationFact(TEXT("asset_move_readback_failed"),
+							Redirector ? TEXT("The source redirector does not point to the persisted destination asset.") : TEXT("The remaining source asset is not a redirector."),
+							Request.TargetRef, Redirector ? TEXT("/source/redirector/destination") : TEXT("/source/class"),
+							Redirector ? (Redirector->DestinationObject ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Redirector->DestinationObject->GetPathName())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()))
+								: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(SourceReadback->GetClass()->GetPathName())),
+							MakeShared<FJsonValueString>(Redirector ? Destination->GetPathName() : UObjectRedirector::StaticClass()->GetPathName()), SourcePackage);
+					}
+				}
 				Result.VerificationId = TEXT("asset-move-readback:") + Request.RequestId;
 				if (!Result.bReadbackVerified
 					|| !Durable.Acknowledge(Result.VerificationId, Error))
 				{
 					Result.TerminalState = TEXT("state_unknown");
-					Result.ErrorCode = TEXT("asset_move_readback_failed");
-					Result.ErrorDetail = Error;
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef);
 					return Result;
 				}
 				Result.bChanged = true;
@@ -372,13 +433,17 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				Root.TrimStartAndEndInline();
 				if (!Root.StartsWith(TEXT("/Game/")))
 				{
-					Result.ErrorCode = TEXT("asset_fixup_root_invalid");
+					Result.Diagnostic = OperationFact(TEXT("asset_fixup_root_invalid"), TEXT("Redirector fixup requires a folder below /Game/."),
+						Request.TargetRef, TEXT("/target"), MakeShared<FJsonValueString>(Root), MakeShared<FJsonValueString>(TEXT("/Game/...")), FString(), TEXT("command_input"));
 					return Result;
 				}
 				FARFilter Filter;
 				Filter.PackagePaths.Add(FName(*Root));
 				Filter.ClassPaths.Add(UObjectRedirector::StaticClass()->GetClassPathName());
 				Filter.bRecursivePaths = true;
+				// Finish discovery before collecting targets, so native fixup cannot queue
+				// a discovery-dialog callback after this invocation's readback.
+				FAssetRegistryModule::GetRegistry().SearchAllAssets(true);
 				TArray<FAssetData> Data;
 				FAssetRegistryModule::GetRegistry().GetAssets(Filter, Data);
 				TArray<UObjectRedirector*> Redirectors;
@@ -390,18 +455,56 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 						Redirectors.Add(Redirector);
 					}
 				}
-				FModuleManager::LoadModuleChecked<FAssetToolsModule>(
-					TEXT("AssetTools")).Get().FixupReferencers(
+				if (Redirectors.IsEmpty())
+				{
+					Result.bReadbackVerified = true;
+					Result.TerminalState = TEXT("committed");
+					return Result;
+				}
+				FDurableMutation Durable;
+				UE::UAI::Contract::FDiagnostic Error;
+				TArray<TPair<FString, EPackageHeaderKind>> AdditionalPackages;
+				const FString FirstPackage = Redirectors[0]->GetOutermost()->GetName();
+				TSet<FString> Packages{FirstPackage};
+				for (const UObjectRedirector* Redirector : Redirectors)
+				{
+					const FString Package = Redirector->GetOutermost()->GetName();
+					if (Packages.Contains(Package)) continue;
+					Packages.Add(Package);
+					AdditionalPackages.Emplace(Package, EPackageHeaderKind::EvidenceRequired);
+				}
+				if (!Durable.Prepare(Request, FirstPackage, OwnerId, JournalRoot,
+					EAssetDurableIntent::Native, Counter.Increment(), Error, AdditionalPackages))
+				{
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef); return Result;
+				}
+				Result.JournalId = Durable.JournalId();
+				TGuardValue<bool> UnattendedGuard(GIsRunningUnattendedScript, true);
+				if (!Durable.PersistNative([&](FAssetDurableError&) {
+					FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get().FixupReferencers(
 						Redirectors, false, ERedirectFixupMode::DeleteFixedUpRedirectors);
+					return true;
+				}, Error))
+				{
+					Result.TerminalState = TEXT("state_unknown");
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef); return Result;
+				}
 				Data.Reset();
 				FAssetRegistryModule::GetRegistry().GetAssets(Filter, Data);
 				Result.bChanged = !Redirectors.IsEmpty();
 				Result.bReadbackVerified = Data.IsEmpty();
+				Result.VerificationId = TEXT("asset-fixup-readback:") + Request.RequestId;
+				if (Result.bReadbackVerified && !Durable.Acknowledge(Result.VerificationId, Error))
+				{
+					Result.bReadbackVerified = false; Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef);
+				}
 				Result.TerminalState = Result.bReadbackVerified
 					? TEXT("committed") : TEXT("state_unknown");
 				if (!Result.bReadbackVerified)
 				{
-					Result.ErrorCode = TEXT("asset_fixup_readback_failed");
+					if (Result.Diagnostic.IsEmpty())
+						Result.Diagnostic = OperationFact(TEXT("asset_fixup_readback_failed"), TEXT("Redirectors remain under the requested folder after native fixup."),
+							Request.TargetRef, TEXT("/readback/redirector_count"), MakeShared<FJsonValueNumber>(Data.Num()), MakeShared<FJsonValueNumber>(0));
 				}
 				return Result;
 			}
@@ -415,14 +518,16 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				FString PackageName;
 				if (!TryPackageName(Request.TargetRef, PackageName))
 				{
-					Result.ErrorCode = TEXT("asset_reimport_target_invalid");
+					Result.Diagnostic = OperationFact(TEXT("asset_reimport_target_invalid"), TEXT("Reimport requires a valid asset package reference under /Game."),
+						Request.TargetRef, TEXT("/target"), MakeShared<FJsonValueString>(Request.TargetRef), MakeShared<FJsonValueString>(TEXT("valid /Game package reference")), FString(), TEXT("command_input"));
 					return Result;
 				}
 				UObject* const Asset = LoadObject<UObject>(
 					nullptr, *ObjectPath(PackageName));
 				if (!Asset)
 				{
-					Result.ErrorCode = TEXT("asset_reimport_target_missing");
+					Result.Diagnostic = OperationFact(TEXT("asset_reimport_target_missing"), TEXT("The reimport target asset could not be loaded."),
+						Request.TargetRef, TEXT("/target/available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return Result;
 				}
 				const bool bTypeMatches =
@@ -438,47 +543,58 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 							TEXT("SparseVolumeTexture")));
 				if (!bTypeMatches || !FPaths::FileExists(Request.Operand))
 				{
-					Result.ErrorCode = !bTypeMatches
-						? TEXT("asset_reimport_type_mismatch")
-						: TEXT("asset_reimport_source_missing");
+					const FString ExpectedClass = Request.CommandId == TEXT("asset.reimport_texture") ? UTexture::StaticClass()->GetPathName()
+						: Request.CommandId == TEXT("asset.reimport_sound_wave") ? USoundWave::StaticClass()->GetPathName()
+						: Request.CommandId == TEXT("asset.reimport_static_mesh") ? UStaticMesh::StaticClass()->GetPathName()
+						: Request.CommandId == TEXT("asset.reimport_sparse_volume_texture") ? TEXT("class name containing SparseVolumeTexture") : TEXT("supported reimport command and matching asset class");
+					Result.Diagnostic = OperationFact(!bTypeMatches ? TEXT("asset_reimport_type_mismatch") : TEXT("asset_reimport_source_missing"),
+						!bTypeMatches ? TEXT("The reimport target class does not match the requested reimport command.") : TEXT("The reimport source file does not exist."),
+						Request.TargetRef, !bTypeMatches ? TEXT("/target/class") : TEXT("/source_file"),
+						MakeShared<FJsonValueString>(!bTypeMatches ? Asset->GetClass()->GetPathName() : Request.Operand),
+						MakeShared<FJsonValueString>(!bTypeMatches ? ExpectedClass : TEXT("existing source file")), Request.CommandId);
 					return Result;
 				}
 				FDurableMutation Durable;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!Durable.Prepare(
 						Request, PackageName, OwnerId, JournalRoot,
 						EAssetDurableIntent::Save, Counter.Increment(), Error))
 				{
-					Result.ErrorCode = TEXT("asset_reimport_prepare_failed");
-					Result.ErrorDetail = Error;
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef);
 					return Result;
 				}
 				Result.JournalId = Durable.JournalId();
+				TGuardValue<bool> UnattendedGuard(GIsRunningUnattendedScript, true);
 				if (!FReimportManager::Instance()->Reimport(
-						Asset, false, false, Request.Operand))
+						Asset, false, false, Request.Operand, nullptr, INDEX_NONE,
+						false, true, false))
 				{
-					Durable.Rollback(true);
-					Result.ErrorCode = TEXT("asset_reimport_native_failed");
+					Result.Diagnostic = OperationFact(TEXT("asset_reimport_native_failed"), TEXT("The native reimport manager rejected the asset reimport."),
+						Request.TargetRef, TEXT("/reimport/accepted"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Request.Operand);
+					FDiagnostic RollbackError;
+					const bool bRestored = Durable.Rollback(true, RollbackError);
+					AppendOperationRollback(Result.Diagnostic, bRestored, RollbackError);
+					if (!bRestored) Result.TerminalState = TEXT("state_unknown");
 					return Result;
 				}
 				if (!Durable.Persist(Error))
 				{
-					Durable.Rollback(false);
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef);
+					FDiagnostic RollbackError;
+					const bool bRestored = Durable.Rollback(false, RollbackError);
+					AppendOperationRollback(Result.Diagnostic, bRestored, RollbackError);
 					Result.TerminalState = TEXT("state_unknown");
-					Result.ErrorCode = TEXT("asset_reimport_persist_failed");
-					Result.ErrorDetail = Error;
 					return Result;
 				}
 				Result.bReadbackVerified =
-					ReloadForIndependentReadback(PackageName) != nullptr;
+					ReloadForIndependentReadback(PackageName, Error) != nullptr;
 				Result.VerificationId = TEXT("asset-reimport-readback:")
 					+ Request.RequestId;
 				if (!Result.bReadbackVerified
 					|| !Durable.Acknowledge(Result.VerificationId, Error))
 				{
 					Result.TerminalState = TEXT("state_unknown");
-					Result.ErrorCode = TEXT("asset_reimport_readback_failed");
-					Result.ErrorDetail = Error;
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef);
 					return Result;
 				}
 				Result.bChanged = true;
@@ -495,7 +611,8 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				FString PackageName;
 				if (!TryPackageName(Request.TargetRef, PackageName))
 				{
-					Result.ErrorCode = TEXT("skeletal_mesh_target_invalid");
+					Result.Diagnostic = OperationFact(TEXT("skeletal_mesh_target_invalid"), TEXT("Skeletal mesh removal requires a valid asset package reference under /Game."),
+						Request.TargetRef, TEXT("/target"), MakeShared<FJsonValueString>(Request.TargetRef), MakeShared<FJsonValueString>(TEXT("valid /Game package reference")), FString(), TEXT("command_input"));
 					return Result;
 				}
 				USkeletalMesh* const Mesh = LoadObject<USkeletalMesh>(
@@ -517,19 +634,20 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 						}));
 				if (!bExists)
 				{
-					Result.ErrorCode = Mesh
-						? TEXT("skeletal_mesh_item_missing")
-						: TEXT("skeletal_mesh_target_missing");
+					Result.Diagnostic = OperationFact(Mesh ? TEXT("skeletal_mesh_item_missing") : TEXT("skeletal_mesh_target_missing"),
+						Mesh ? (bMorph ? TEXT("The skeletal mesh has no morph target with this name.") : TEXT("The skeletal mesh has no skin-weight profile with this name."))
+							: TEXT("The target could not be loaded as a skeletal mesh."),
+						Request.TargetRef, Mesh ? (bMorph ? TEXT("/morph_target/exists") : TEXT("/skin_weight_profile/exists")) : TEXT("/target/available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Mesh ? Request.Operand : FString());
 					return Result;
 				}
 				FDurableMutation Durable;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!Durable.Prepare(
 						Request, PackageName, OwnerId, JournalRoot,
 						EAssetDurableIntent::Save, Counter.Increment(), Error))
 				{
-					Result.ErrorCode = TEXT("skeletal_mesh_prepare_failed");
-					Result.ErrorDetail = Error;
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef);
 					return Result;
 				}
 				Result.JournalId = Durable.JournalId();
@@ -539,18 +657,24 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 					{
 						if (!Mesh->RemoveMorphTargets({ItemName}))
 						{
-							Durable.Rollback(true);
-							Result.ErrorCode = TEXT("skeletal_mesh_remove_failed");
+							Result.Diagnostic = OperationFact(TEXT("skeletal_mesh_remove_failed"), TEXT("The native skeletal mesh rejected removal of the registered morph target."),
+								Request.TargetRef, TEXT("/morph_target/removed"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Request.Operand);
+							FDiagnostic RollbackError;
+							const bool bRestored = Durable.Rollback(true, RollbackError);
+							AppendOperationRollback(Result.Diagnostic, bRestored, RollbackError);
+							if (!bRestored) Result.TerminalState = TEXT("state_unknown");
 							return Result;
 						}
 					}
 					else
 					{
+						// This orphan has no registered morph lifecycle to release an
+						// existing root. Detach it and leave collection to its native owner.
+						Morph->ClearFlags(RF_Standalone);
 						Morph->Rename(
 							nullptr,
 							GetTransientPackage(),
 							REN_DontCreateRedirectors | REN_NonTransactional);
-						Morph->MarkAsGarbage();
 					}
 				}
 				else
@@ -564,14 +688,15 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 				Mesh->MarkPackageDirty();
 				if (!Durable.Persist(Error))
 				{
-					Durable.Rollback(false);
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef);
+					FDiagnostic RollbackError;
+					const bool bRestored = Durable.Rollback(false, RollbackError);
+					AppendOperationRollback(Result.Diagnostic, bRestored, RollbackError);
 					Result.TerminalState = TEXT("state_unknown");
-					Result.ErrorCode = TEXT("skeletal_mesh_persist_failed");
-					Result.ErrorDetail = Error;
 					return Result;
 				}
-				USkeletalMesh* const ReadbackMesh = Cast<USkeletalMesh>(
-					ReloadForIndependentReadback(PackageName));
+				UObject* const ReadbackObject = ReloadForIndependentReadback(PackageName, Error);
+				USkeletalMesh* const ReadbackMesh = Cast<USkeletalMesh>(ReadbackObject);
 				Result.bReadbackVerified = ReadbackMesh && (bMorph
 					? ReadbackMesh->FindMorphTarget(ItemName) == nullptr
 					: !ReadbackMesh->GetSkinWeightProfiles().ContainsByPredicate(
@@ -581,12 +706,19 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 						}));
 				Result.VerificationId = TEXT("skeletal-remove-readback:")
 					+ Request.RequestId;
+				if (!Result.bReadbackVerified && Error.IsEmpty())
+					Error = OperationFact(TEXT("skeletal_mesh_readback_failed"),
+						ReadbackMesh ? (bMorph ? TEXT("The persisted skeletal mesh still has the removed morph target.") : TEXT("The persisted skeletal mesh still has the removed skin-weight profile."))
+							: TEXT("The persisted asset is not a skeletal mesh."),
+						Request.TargetRef, ReadbackMesh ? (bMorph ? TEXT("/readback/morph_target/exists") : TEXT("/readback/skin_weight_profile/exists")) : TEXT("/readback/class_matches_skeletal_mesh"),
+						ReadbackMesh ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true))
+							: ReadbackObject ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(ReadbackObject->GetClass()->GetPathName())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+						ReadbackMesh ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(USkeletalMesh::StaticClass()->GetPathName())), Request.Operand);
 				if (!Result.bReadbackVerified
 					|| !Durable.Acknowledge(Result.VerificationId, Error))
 				{
 					Result.TerminalState = TEXT("state_unknown");
-					Result.ErrorCode = TEXT("skeletal_mesh_readback_failed");
-					Result.ErrorDetail = Error;
+					Result.Diagnostic = WithOperationTarget(MoveTemp(Error), Request.TargetRef);
 					return Result;
 				}
 				Result.bChanged = true;
@@ -604,7 +736,7 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 		FString JournalRoot,
 		FString JournalOwnerId,
 		TSharedPtr<IUeAgentAssetOperationsOwner>& OutOwner,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutOwner.Reset();
 		OutError.Reset();
@@ -612,7 +744,18 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 		JournalOwnerId.TrimStartAndEndInline();
 		if (JournalRoot.IsEmpty() || JournalOwnerId.IsEmpty())
 		{
-			OutError = TEXT("asset_operations_owner_config_invalid");
+			auto Actual = MakeShared<FJsonObject>();
+			Actual->SetBoolField(TEXT("journal_root_available"), !JournalRoot.IsEmpty());
+			Actual->SetBoolField(TEXT("journal_owner_available"), !JournalOwnerId.IsEmpty());
+			auto Expected = MakeShared<FJsonObject>();
+			Expected->SetBoolField(TEXT("journal_root_available"), true);
+			Expected->SetBoolField(TEXT("journal_owner_available"), true);
+			OutError = OperationFact(TEXT("asset_operations_owner_config_invalid"), TEXT("The asset operation owner requires a journal root and journal owner."),
+				FString(), TEXT("/owner/configuration"), MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueObject>(Expected));
+			auto Internal = MakeShared<FJsonObject>();
+			Internal->SetStringField(TEXT("journal_root"), JournalRoot);
+			Internal->SetStringField(TEXT("journal_owner"), JournalOwnerId);
+			OutError.ActualEvidence = MakeShared<FJsonValueObject>(Internal);
 			return false;
 		}
 		OutOwner = MakeShared<FAssetOperationsOwner>(

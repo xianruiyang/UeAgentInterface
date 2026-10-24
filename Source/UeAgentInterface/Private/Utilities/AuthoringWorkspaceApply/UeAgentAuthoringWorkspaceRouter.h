@@ -50,6 +50,7 @@ namespace UeAgentAuthoringWorkspaceRouter
 		bool bEmpty = false;
 		TSharedPtr<const FJsonObject> Document;
 		TMap<FString, FUeAgentHjsonSourceLocation> SourceLocations;
+		TFunction<UeAgentAuthoringDiagnostics::FSourceLocation(const FString&)> ResolveOriginalSource;
 		FSourceProvenance Provenance;
 	};
 
@@ -69,6 +70,8 @@ namespace UeAgentAuthoringWorkspaceRouter
 		FSourceProvenance Provenance;
 
 		const FUeAgentHjsonSourceLocation* FindSourceLocation(const FString& JsonPointer) const;
+		TFunction<UeAgentAuthoringDiagnostics::FSourceLocation(const FString&)> ResolveOriginalSource;
+		UeAgentAuthoringDiagnostics::FSourceLocation ResolveDiagnosticSource(const FString& JsonPointer = FString()) const;
 		bool HasDocument() const { return Document.IsValid(); }
 	};
 
@@ -89,9 +92,7 @@ namespace UeAgentAuthoringWorkspaceRouter
 
 	struct UEAGENTINTERFACE_API FRouteFailure
 	{
-		FString ErrorCode;
-		FString ErrorDetail;
-		FSourceProvenance Provenance;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 	};
 
 	UEAGENTINTERFACE_API FString UnitPresenceToString(EUnitPresence Presence);

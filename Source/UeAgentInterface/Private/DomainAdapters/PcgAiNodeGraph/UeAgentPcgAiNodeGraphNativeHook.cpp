@@ -2,9 +2,10 @@
 
 #include "AIGraphNode.h"
 #include "BehaviorTree/BehaviorTree.h"
-#include "BehaviorTree/Blackboard/BlackboardKeyType.h"
-#include "BehaviorTree/BlackboardData.h"
 #include "BehaviorTreeGraph.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Logging/TokenizedMessage.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -28,6 +29,7 @@
 #include "StateTreeEditorData.h"
 #include "StateTreeState.h"
 #include "StructUtils/PropertyBag.h"
+#include "UObject/Class.h"
 
 #include <openssl/sha.h>
 
@@ -35,6 +37,76 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 {
 	namespace
 	{
+		Contract::FDiagnostic NativeGraphFact(const TCHAR* Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target)
+		{
+			auto Error = Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_adapter"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Path;
+			Error.SemanticPointer = Path;
+			Error.TargetPath = Target;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValuePresent = Expected.IsValid();
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
+		FString GenerationPolicyName(const EPCGComponentGenerationTrigger Policy)
+		{
+			switch (Policy)
+			{
+			case EPCGComponentGenerationTrigger::GenerateOnDemand: return TEXT("generate_on_demand");
+			case EPCGComponentGenerationTrigger::GenerateOnLoad: return TEXT("generate_on_load");
+			case EPCGComponentGenerationTrigger::GenerateAtRuntime: return TEXT("generate_at_runtime");
+			default: return FString::Printf(TEXT("unknown (%d)"), static_cast<int32>(Policy));
+			}
+		}
+
+		TSharedPtr<FJsonValue> NativeDoubleFact(const double Value)
+		{
+			if (FMath::IsFinite(Value)) return MakeShared<FJsonValueNumber>(Value);
+			return MakeShared<FJsonValueString>(FString::Printf(TEXT("non-finite double: %.17g"), Value));
+		}
+
+		struct FDiagnosticStateTreeCompilerLog final : FStateTreeCompilerLog
+		{
+			const TArray<FStateTreeCompilerLogMessage>& GetMessages() const { return Messages; }
+		};
+
+		void AppendStateTreeCompilerDiagnostics(const FDiagnosticStateTreeCompilerLog& Log,
+			const FString& Target, Contract::FDiagnostic& OutError)
+		{
+			int32 MessageIndex = 0;
+			for (const FStateTreeCompilerLogMessage& SourceMessage : Log.GetMessages())
+			{
+				auto Diagnostic = NativeGraphFact(TEXT("pcg_ai_node_graph_state_tree_compiler_message"),
+					SourceMessage.Message.IsEmpty() ? TEXT("The StateTree compiler recorded an empty message.") : SourceMessage.Message,
+					FString::Printf(TEXT("/state_tree/compiler/messages/%d"), MessageIndex++), nullptr, nullptr, Target);
+				if (SourceMessage.Severity == EMessageSeverity::Warning
+					|| SourceMessage.Severity == EMessageSeverity::PerformanceWarning)
+					Diagnostic.Severity = Contract::ESeverity::Warning;
+				else if (SourceMessage.Severity == EMessageSeverity::Info)
+					Diagnostic.Severity = Contract::ESeverity::Info;
+				const UStateTreeState* State = SourceMessage.State.Get();
+				if (State) Diagnostic.CandidateName = State->Name.ToString();
+				const auto PrivateContext = MakeShared<FJsonObject>();
+				PrivateContext->SetNumberField(TEXT("native_severity"), SourceMessage.Severity);
+				if (State) PrivateContext->SetStringField(TEXT("state_guid"), State->ID.ToString());
+				if (SourceMessage.Item.ID.IsValid())
+				{
+					const auto Item = MakeShared<FJsonObject>();
+					Item->SetStringField(TEXT("name"), SourceMessage.Item.Name.ToString());
+					Item->SetStringField(TEXT("kind"), UEnum::GetValueAsString(SourceMessage.Item.DataSource));
+					Diagnostic.ActualValuePresent = true;
+					Diagnostic.ActualValue = MakeShared<FJsonValueObject>(Item);
+					PrivateContext->SetStringField(TEXT("item_guid"), SourceMessage.Item.ID.ToString());
+				}
+				Diagnostic.ActualEvidence = MakeShared<FJsonValueObject>(PrivateContext);
+				OutError.Append(Diagnostic);
+			}
+		}
+
 		FString ToGuidString(const FGuid& Guid)
 		{
 			return Guid.ToString(EGuidFormats::DigitsWithHyphensLower);
@@ -563,7 +635,40 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			|| Object.GetFName() != ObjectName
 			|| Object.GetClass() != &AssetClass)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_asset_create_input_invalid"));
+			if (AssetKind.IsEmpty())
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_create_input_invalid"), TEXT("Native asset creation requires a non-empty asset kind."), TEXT("/asset/kind"),
+					MakeShared<FJsonValueString>(AssetKind), MakeShared<FJsonValueString>(TEXT("non-empty string")), Object.GetPathName());
+			}
+			else if (ObjectName.IsNone())
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_create_input_invalid"), TEXT("Native asset creation requires a non-empty object name."), TEXT("/asset/name"),
+					MakeShared<FJsonValueString>(ObjectName.ToString()), MakeShared<FJsonValueString>(TEXT("non-empty object name")), Object.GetPathName());
+			}
+			else if (AssetClass.HasAnyClassFlags(CLASS_Abstract))
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_create_input_invalid"), TEXT("An abstract native asset class cannot be instantiated."), TEXT("/asset/class_abstract"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), Object.GetPathName());
+				OutError.CandidateName = AssetClass.GetPathName();
+			}
+			else 
+			{
+				if (Object.GetOuter() != &Outer)
+				{
+					OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_create_input_invalid"), TEXT("The native asset belongs to a different outer object."), TEXT("/asset/outer"),
+						MakeShared<FJsonValueString>(Object.GetOuter() ? Object.GetOuter()->GetPathName() : FString()), MakeShared<FJsonValueString>(Outer.GetPathName()), Object.GetPathName());
+				}
+				else if (Object.GetFName() != ObjectName)
+				{
+					OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_create_input_invalid"), TEXT("The native asset name differs from the requested name."), TEXT("/asset/name"),
+						MakeShared<FJsonValueString>(Object.GetFName().ToString()), MakeShared<FJsonValueString>(ObjectName.ToString()), Object.GetPathName());
+				}
+				else 
+				{
+					OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_create_input_invalid"), TEXT("The native asset class differs from the requested class."), TEXT("/asset/class"),
+						MakeShared<FJsonValueString>(Object.GetClass()->GetPathName()), MakeShared<FJsonValueString>(AssetClass.GetPathName()), Object.GetPathName());
+				}
+			}
 			return false;
 		}
 		const FString ApplyRevision = HashCanonicalText(FString::Printf(
@@ -585,7 +690,21 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			TEXT("settle"), TEXT("asset"), ApplyRevision);
 		if (!bRefreshed)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_asset_refresh_incomplete"));
+			if (Object.GetOuter() != &Outer)
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_refresh_incomplete"), TEXT("The native asset belongs to a different outer object."), TEXT("/asset/outer"),
+					MakeShared<FJsonValueString>(Object.GetOuter() ? Object.GetOuter()->GetPathName() : FString()), MakeShared<FJsonValueString>(Outer.GetPathName()), Object.GetPathName());
+			}
+			else if (Object.GetFName() != ObjectName)
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_refresh_incomplete"), TEXT("The native asset name differs from the requested name."), TEXT("/asset/name"),
+					MakeShared<FJsonValueString>(Object.GetFName().ToString()), MakeShared<FJsonValueString>(ObjectName.ToString()), Object.GetPathName());
+			}
+			else 
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_refresh_incomplete"), TEXT("The native asset class differs from the requested class."), TEXT("/asset/class"),
+					MakeShared<FJsonValueString>(Object.GetClass()->GetPathName()), MakeShared<FJsonValueString>(AssetClass.GetPathName()), Object.GetPathName());
+			}
 			return false;
 		}
 		OutRevision = HashCanonicalText(FString::Printf(
@@ -621,15 +740,32 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		if (AssetKind.IsEmpty() || ObjectName.IsNone()
 			|| AssetClass.HasAnyClassFlags(CLASS_Abstract))
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_asset_create_input_invalid"));
+			if (AssetKind.IsEmpty())
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_create_input_invalid"), TEXT("Native asset creation requires a non-empty asset kind."), TEXT("/asset/kind"),
+					MakeShared<FJsonValueString>(AssetKind), MakeShared<FJsonValueString>(TEXT("non-empty string")), Outer.GetPathName());
+			}
+			else if (ObjectName.IsNone())
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_create_input_invalid"), TEXT("Native asset creation requires a non-empty object name."), TEXT("/asset/name"),
+					MakeShared<FJsonValueString>(ObjectName.ToString()), MakeShared<FJsonValueString>(TEXT("non-empty object name")), Outer.GetPathName());
+			}
+			else 
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_create_input_invalid"), TEXT("An abstract native asset class cannot be instantiated."), TEXT("/asset/class_abstract"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), Outer.GetPathName());
+				OutError.CandidateName = AssetClass.GetPathName();
+			}
 			return false;
 		}
 		OutObject = NewObject<UObject>(
 			&Outer, &AssetClass, ObjectName, RF_Transactional);
 		if (!OutObject || OutObject->GetClass() != &AssetClass)
 		{
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_asset_create_failed"), !OutObject ? TEXT("The native asset object could not be created.") : TEXT("The created native asset has an unexpected class."), !OutObject ? TEXT("/asset/object_available") : TEXT("/asset/class"),
+				!OutObject ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(OutObject->GetClass()->GetPathName())), !OutObject ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(AssetClass.GetPathName())), OutObject ? OutObject->GetPathName() : Outer.GetPathName());
+			OutError.CandidateName = ObjectName.ToString();
 			OutObject = nullptr;
-			OutError.Set(TEXT("pcg_ai_node_graph_asset_create_failed"));
 			return false;
 		}
 		if (!TryCaptureOwnedAssetObject(
@@ -661,24 +797,22 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		UBehaviorTreeGraph* Graph = Cast<UBehaviorTreeGraph>(Tree.BTGraph);
 		if (!Graph)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_behavior_tree_graph_missing"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_behavior_tree_graph_missing"), Tree.BTGraph ? TEXT("The Behavior Tree graph has an unexpected class.") : TEXT("The Behavior Tree asset has no editor graph."), TEXT("/behavior_tree/graph_class"),
+				Tree.BTGraph ? MakeShared<FJsonValueString>(Tree.BTGraph->GetClass()->GetPathName()) : TSharedPtr<FJsonValueString>(), MakeShared<FJsonValueString>(UBehaviorTreeGraph::StaticClass()->GetPathName()), Tree.GetPathName());
 			return false;
 		}
 		const FString Before = HashCanonicalText(Tree.GetPathName() + TEXT("|before_compile"));
 		OutApplyReceipt.SetEvidenceId(MakeEvidence(TEXT("apply"), TEXT("behavior_tree"), Before));
 		Graph->UpdateAsset();
 		OutBarrierReceipt.BarrierKind = EPcgAiNodeGraphBarrierKind::Compile;
-		OutBarrierReceipt.bComplete = Tree.RootNode != nullptr;
-		OutBarrierReceipt.ErrorCount = OutBarrierReceipt.bComplete ? 0 : 1;
+		// UpdateAsset synchronously settles the editor graph, including disconnected
+		// drafts. A runtime root is required to run the tree, not to save its edits.
+		OutBarrierReceipt.bComplete = true;
+		OutBarrierReceipt.ErrorCount = 0;
 		OutBarrierReceipt.BarrierEvidenceId = MakeEvidence(
 			TEXT("barrier"), TEXT("behavior_tree"), Before);
 		OutBarrierReceipt.SettleEvidenceId = MakeEvidence(
 			TEXT("settle"), TEXT("behavior_tree"), Before);
-		if (!OutBarrierReceipt.bComplete)
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_behavior_tree_compile_incomplete"));
-			return false;
-		}
 		if (!CaptureEdGraphTopology(
 			TEXT("behavior_tree"), Tree, *Graph,
 			OutTopology, OutRevision, OutError))
@@ -686,104 +820,6 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			return false;
 		}
 		OutEvidenceId = MakeEvidence(TEXT("readback"), TEXT("behavior_tree"), OutRevision);
-		return true;
-	}
-
-	bool FPcgAiNodeGraphNativeHook::TryAddAndCaptureBlackboardEntry(
-		UBlackboardData& Blackboard,
-		const FName EntryName,
-		UClass& KeyTypeClass,
-		FPcgAiNodeGraphNativeMutationReceipt& OutApplyReceipt,
-		FPcgAiNodeGraphBarrierReceipt& OutBarrierReceipt,
-		FPcgAiNodeGraphBlackboardEntryIdentity& OutIdentity,
-		FString& OutRevision,
-		FString& OutEvidenceId,
-		FPcgAiNodeGraphAdapterError& OutError) const
-	{
-		OutError.Reset();
-		OutApplyReceipt.SetEvidenceId(FString());
-		OutBarrierReceipt = FPcgAiNodeGraphBarrierReceipt();
-		OutIdentity = FPcgAiNodeGraphBlackboardEntryIdentity();
-		OutRevision.Reset();
-		OutEvidenceId.Reset();
-		if (EntryName.IsNone()
-			|| !KeyTypeClass.IsChildOf(UBlackboardKeyType::StaticClass())
-			|| KeyTypeClass.HasAnyClassFlags(CLASS_Abstract))
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_blackboard_entry_input_invalid"));
-			return false;
-		}
-		if (Blackboard.Keys.ContainsByPredicate(
-			[EntryName](const FBlackboardEntry& Entry)
-			{
-				return Entry.EntryName == EntryName;
-			}))
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_blackboard_entry_duplicate"));
-			return false;
-		}
-		FBlackboardEntry Entry;
-		Entry.EntryName = EntryName;
-		Entry.KeyType = NewObject<UBlackboardKeyType>(
-			&Blackboard, &KeyTypeClass, NAME_None, RF_Transactional);
-		if (!Entry.KeyType)
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_blackboard_key_create_failed"));
-			return false;
-		}
-		Blackboard.Keys.Add(Entry);
-		const FString ApplyRevision = HashCanonicalText(FString::Printf(
-			TEXT("%s|%s|%s"), *Blackboard.GetPathName(),
-			*EntryName.ToString(), *KeyTypeClass.GetPathName()));
-		OutApplyReceipt.SetEvidenceId(MakeEvidence(
-			TEXT("apply"), TEXT("blackboard"), ApplyRevision));
-		Blackboard.UpdateParentKeys();
-		Blackboard.UpdateKeyIDs();
-		OutBarrierReceipt.BarrierKind = EPcgAiNodeGraphBarrierKind::Refresh;
-		OutBarrierReceipt.bComplete =
-			Blackboard.GetKeyID(EntryName) != FBlackboard::InvalidKey;
-		OutBarrierReceipt.ErrorCount = OutBarrierReceipt.bComplete ? 0 : 1;
-		OutBarrierReceipt.BarrierEvidenceId = MakeEvidence(
-			TEXT("barrier"), TEXT("blackboard"), ApplyRevision);
-		OutBarrierReceipt.SettleEvidenceId = MakeEvidence(
-			TEXT("settle"), TEXT("blackboard"), ApplyRevision);
-		if (!OutBarrierReceipt.bComplete)
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_blackboard_refresh_incomplete"));
-			return false;
-		}
-
-		TArray<FString> RevisionLines;
-		for (const FBlackboardEntry& NativeEntry : Blackboard.Keys)
-		{
-			RevisionLines.Add(FString::Printf(
-				TEXT("%s|%s"),
-				*NativeEntry.EntryName.ToString(),
-				NativeEntry.KeyType
-					? *NativeEntry.KeyType->GetClass()->GetPathName()
-					: TEXT("null")));
-		}
-		OutRevision = HashCanonicalLines(MoveTemp(RevisionLines));
-		const FBlackboardEntry* ReadbackEntry = Blackboard.Keys.FindByPredicate(
-			[EntryName](const FBlackboardEntry& Candidate)
-			{
-				return Candidate.EntryName == EntryName;
-			});
-		if (!ReadbackEntry || !ReadbackEntry->KeyType)
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_blackboard_readback_failed"));
-			return false;
-		}
-		OutIdentity = FPcgAiNodeGraphBlackboardEntryIdentity(
-			Blackboard.GetPathName(),
-			EntryName.ToString(),
-			ReadbackEntry->KeyType->GetClass()->GetPathName(),
-			EPcgAiNodeGraphEntryOwnership::Local);
-		if (!TryValidatePcgAiNodeGraphBlackboardEntryIdentity(OutIdentity, OutError))
-		{
-			return false;
-		}
-		OutEvidenceId = MakeEvidence(TEXT("readback"), TEXT("blackboard"), OutRevision);
 		return true;
 	}
 
@@ -805,32 +841,22 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		UEnvironmentQueryGraph* Graph = Cast<UEnvironmentQueryGraph>(Query.EdGraph);
 		if (!Graph)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_eqs_graph_missing"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_eqs_graph_missing"), Query.EdGraph ? TEXT("The EQS graph has an unexpected class.") : TEXT("The EQS asset has no editor graph."), TEXT("/eqs/graph_class"),
+				Query.EdGraph ? MakeShared<FJsonValueString>(Query.EdGraph->GetClass()->GetPathName()) : TSharedPtr<FJsonValueString>(), MakeShared<FJsonValueString>(UEnvironmentQueryGraph::StaticClass()->GetPathName()), Query.GetPathName());
 			return false;
 		}
 		const FString Before = HashCanonicalText(Query.GetPathName() + TEXT("|before_compile"));
 		OutApplyReceipt.SetEvidenceId(MakeEvidence(TEXT("apply"), TEXT("eqs"), Before));
 		Graph->UpdateAsset();
 		OutBarrierReceipt.BarrierKind = EPcgAiNodeGraphBarrierKind::Compile;
-		OutBarrierReceipt.bComplete = Graph->Nodes.ContainsByPredicate(
-			[](const UEdGraphNode* Node)
-			{
-				const UAIGraphNode* AiNode = Cast<UAIGraphNode>(Node);
-				const UEnvQueryOption* Option = AiNode
-					? Cast<UEnvQueryOption>(AiNode->NodeInstance.Get())
-					: nullptr;
-				return Option && Option->Generator;
-			});
-		OutBarrierReceipt.ErrorCount = OutBarrierReceipt.bComplete ? 0 : 1;
+		// Empty runtime options are a valid projection of an unfinished editor graph.
+		// UpdateAsset has completed even when the query is not ready to execute.
+		OutBarrierReceipt.bComplete = true;
+		OutBarrierReceipt.ErrorCount = 0;
 		OutBarrierReceipt.BarrierEvidenceId = MakeEvidence(
 			TEXT("barrier"), TEXT("eqs"), Before);
 		OutBarrierReceipt.SettleEvidenceId = MakeEvidence(
 			TEXT("settle"), TEXT("eqs"), Before);
-		if (!OutBarrierReceipt.bComplete)
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_eqs_compile_incomplete"));
-			return false;
-		}
 		if (!CaptureEdGraphTopology(
 			TEXT("eqs"), Query, *Graph,
 			OutTopology, OutRevision, OutError))
@@ -862,7 +888,22 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		if (RootStateName.IsNone() || ChildStateName.IsNone()
 			|| !TransitionGuid.IsValid())
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_state_tree_root_name_missing"));
+			if (RootStateName.IsNone())
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_state_tree_root_name_missing"), TEXT("The StateTree root state requires a name."), TEXT("/state_tree/root_name"),
+					MakeShared<FJsonValueString>(RootStateName.ToString()), MakeShared<FJsonValueString>(TEXT("non-empty state name")), Tree.GetPathName());
+			}
+			else if (ChildStateName.IsNone())
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_state_tree_root_name_missing"), TEXT("The StateTree child state requires a name."), TEXT("/state_tree/child_name"),
+					MakeShared<FJsonValueString>(ChildStateName.ToString()), MakeShared<FJsonValueString>(TEXT("non-empty state name")), Tree.GetPathName());
+			}
+			else 
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_state_tree_root_name_missing"), TEXT("The StateTree transition GUID is invalid."), TEXT("/state_tree/transition_guid_valid"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Tree.GetPathName());
+				OutError.InternalContext = ToGuidString(TransitionGuid);
+			}
 			return false;
 		}
 #if WITH_EDITORONLY_DATA
@@ -892,7 +933,9 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			UStateTreeState* Root = EditorData->SubTrees[0];
 			if (!Root)
 			{
-				OutError.Set(TEXT("pcg_ai_node_graph_state_tree_root_invalid"));
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_state_tree_root_invalid"), TEXT("The existing StateTree root entry has no state object."), TEXT("/state_tree/roots/0/available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Tree.GetPathName());
+				OutError.CandidateName = RootStateName.ToString();
 				return false;
 			}
 			if (!Root->ID.IsValid())
@@ -943,7 +986,8 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			Tree, OutApplyReceipt, OutBarrierReceipt, OutTopology,
 			OutRevision, OutEvidenceId, OutError);
 #else
-		OutError.Set(TEXT("pcg_ai_node_graph_state_tree_editor_data_unavailable"));
+		OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_state_tree_editor_data_unavailable"), TEXT("StateTree editor data is unavailable in this build."), TEXT("/state_tree/editor_data_supported"),
+			MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Tree.GetPathName());
 		return false;
 #endif
 	}
@@ -967,18 +1011,21 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			Cast<UStateTreeEditorData>(Tree.EditorData);
 		if (!EditorData)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_state_tree_editor_data_unavailable"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_state_tree_editor_data_unavailable"), Tree.EditorData ? TEXT("The StateTree editor data has an unexpected class.") : TEXT("The StateTree asset has no editor data."), TEXT("/state_tree/editor_data_class"),
+				Tree.EditorData ? MakeShared<FJsonValueString>(Tree.EditorData->GetClass()->GetPathName()) : TSharedPtr<FJsonValueString>(), MakeShared<FJsonValueString>(UStateTreeEditorData::StaticClass()->GetPathName()), Tree.GetPathName());
 			return false;
 		}
 		const FString ApplyRevision = HashCanonicalText(
 			Tree.GetPathName() + TEXT("|compile_current"));
 		OutApplyReceipt.SetEvidenceId(MakeEvidence(
 			TEXT("apply"), TEXT("state_tree"), ApplyRevision));
-		FStateTreeCompilerLog CompileLog;
+		FDiagnosticStateTreeCompilerLog CompileLog;
 		const bool bCompiled = UStateTreeEditingSubsystem::CompileStateTree(
 			&Tree, CompileLog);
 		OutBarrierReceipt.BarrierKind = EPcgAiNodeGraphBarrierKind::Compile;
-		OutBarrierReceipt.bComplete = bCompiled && Tree.IsReadyToRun();
+		// The native compiler result is authoritative; runtime readiness also depends
+		// on executable states and must not reject an otherwise compiled editor draft.
+		OutBarrierReceipt.bComplete = bCompiled;
 		OutBarrierReceipt.ErrorCount = OutBarrierReceipt.bComplete ? 0 : 1;
 		OutBarrierReceipt.BarrierEvidenceId = MakeEvidence(
 			TEXT("barrier"), TEXT("state_tree"), ApplyRevision);
@@ -986,7 +1033,11 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			TEXT("settle"), TEXT("state_tree"), ApplyRevision);
 		if (!OutBarrierReceipt.bComplete)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_state_tree_compile_incomplete"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_state_tree_compile_incomplete"),
+				TEXT("The StateTree compiler rejected the asset."),
+				TEXT("/state_tree/compile_succeeded"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Tree.GetPathName());
+			AppendStateTreeCompilerDiagnostics(CompileLog, Tree.GetPathName(), OutError);
 			return false;
 		}
 
@@ -1114,145 +1165,10 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		OutEvidenceId = MakeEvidence(TEXT("readback"), TEXT("state_tree"), OutRevision);
 		return true;
 #else
-		OutError.Set(TEXT("pcg_ai_node_graph_state_tree_editor_data_unavailable"));
+		OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_state_tree_editor_data_unavailable"), TEXT("StateTree editor data is unavailable in this build."), TEXT("/state_tree/editor_data_supported"),
+			MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Tree.GetPathName());
 		return false;
 #endif
-	}
-
-	bool FPcgAiNodeGraphNativeHook::TryAddValidateAndCaptureSmartObjectSlot(
-		USmartObjectDefinition& Definition,
-		const FGuid& SlotGuid,
-		UClass& BehaviorDefinitionClass,
-		FPcgAiNodeGraphNativeMutationReceipt& OutApplyReceipt,
-		FPcgAiNodeGraphBarrierReceipt& OutBarrierReceipt,
-		FPcgAiNodeGraphTopology& OutTopology,
-		FString& OutRevision,
-		FString& OutEvidenceId,
-		FPcgAiNodeGraphAdapterError& OutError) const
-	{
-		OutError.Reset();
-		OutApplyReceipt.SetEvidenceId(FString());
-		OutBarrierReceipt = FPcgAiNodeGraphBarrierReceipt();
-		OutTopology = FPcgAiNodeGraphTopology();
-		OutRevision.Reset();
-		OutEvidenceId.Reset();
-		if (!SlotGuid.IsValid()
-			|| !BehaviorDefinitionClass.IsChildOf(
-				USmartObjectBehaviorDefinition::StaticClass())
-			|| BehaviorDefinitionClass.HasAnyClassFlags(CLASS_Abstract))
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_smart_object_slot_input_invalid"));
-			return false;
-		}
-		if (Definition.FindSlotByID(SlotGuid) != INDEX_NONE)
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_smart_object_slot_duplicate"));
-			return false;
-		}
-		FSmartObjectSlotDefinition& Slot = Definition.DebugAddSlot();
-#if WITH_EDITORONLY_DATA
-		Slot.ID = SlotGuid;
-#endif
-		USmartObjectBehaviorDefinition* Behavior =
-			NewObject<USmartObjectBehaviorDefinition>(
-				&Definition, &BehaviorDefinitionClass,
-				NAME_None, RF_Transactional);
-		if (!Behavior)
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_smart_object_behavior_create_failed"));
-			return false;
-		}
-		Slot.BehaviorDefinitions.Add(Behavior);
-		const FString ApplyRevision = HashCanonicalText(FString::Printf(
-			TEXT("%s|%s|%s"), *Definition.GetPathName(),
-			*ToGuidString(SlotGuid), *BehaviorDefinitionClass.GetPathName()));
-		OutApplyReceipt.SetEvidenceId(MakeEvidence(
-			TEXT("apply"), TEXT("smart_object"), ApplyRevision));
-		TArray<TPair<EMessageSeverity::Type, FText>> ValidationMessages;
-		const bool bValidated = Definition.Validate(&ValidationMessages);
-		int32 ErrorCount = 0;
-		for (const TPair<EMessageSeverity::Type, FText>& Message
-			: ValidationMessages)
-		{
-			if (Message.Key == EMessageSeverity::Error)
-			{
-				++ErrorCount;
-			}
-		}
-		OutBarrierReceipt.BarrierKind = EPcgAiNodeGraphBarrierKind::Validate;
-		OutBarrierReceipt.bComplete = bValidated && ErrorCount == 0;
-		OutBarrierReceipt.ErrorCount = ErrorCount;
-		OutBarrierReceipt.BarrierEvidenceId = MakeEvidence(
-			TEXT("barrier"), TEXT("smart_object"), ApplyRevision);
-		OutBarrierReceipt.SettleEvidenceId = MakeEvidence(
-			TEXT("settle"), TEXT("smart_object"), ApplyRevision);
-		if (!OutBarrierReceipt.bComplete)
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_smart_object_validate_incomplete"));
-			return false;
-		}
-
-		TArray<FPcgAiNodeGraphItemIdentity> Items;
-		TArray<FPcgAiNodeGraphRelationIdentity> Relations;
-		const FString DefinitionItemKey = TEXT("smart_object.definition");
-		Items.Emplace(
-			DefinitionItemKey,
-			Definition.GetPathName(),
-			TEXT("definition"),
-			Definition.GetClass()->GetPathName(),
-			Definition.GetClass()->GetPathName());
-		const TConstArrayView<FSmartObjectSlotDefinition> Slots = Definition.GetSlots();
-		for (int32 Index = 0; Index < Slots.Num(); ++Index)
-		{
-			const FSmartObjectSlotDefinition& NativeSlot = Slots[Index];
-#if WITH_EDITORONLY_DATA
-			const FString NativeIdentity = NativeSlot.ID.IsValid()
-				? ToGuidString(NativeSlot.ID)
-				: FString::Printf(TEXT("slot_%d"), Index);
-#else
-			const FString NativeIdentity = FString::Printf(TEXT("slot_%d"), Index);
-#endif
-			const FString ItemKey = TEXT("smart_object.slot:") + NativeIdentity;
-			const USmartObjectBehaviorDefinition* NativeBehavior =
-				NativeSlot.BehaviorDefinitions.IsEmpty()
-					? nullptr : NativeSlot.BehaviorDefinitions[0].Get();
-			Items.Emplace(
-				ItemKey,
-				NativeIdentity,
-				FString(),
-				FSmartObjectSlotDefinition::StaticStruct()->GetPathName(),
-				NativeBehavior
-					? NativeBehavior->GetClass()->GetPathName()
-					: TEXT("smart_object_slot"));
-			Relations.Emplace(
-				TEXT("slot:") + NativeIdentity,
-				TEXT("ordered_attachment"),
-				NativeIdentity,
-				DefinitionItemKey,
-				ItemKey,
-				Index);
-		}
-		TArray<FString> RevisionLines;
-		for (const FPcgAiNodeGraphItemIdentity& Item : Items)
-		{
-			RevisionLines.Add(FString::Printf(TEXT("%s|%s|%s"),
-				*Item.GetItemKey(), *Item.GetNativeIdentity(),
-				*Item.GetNativeTypeIdentity()));
-		}
-		OutRevision = HashCanonicalLines(MoveTemp(RevisionLines));
-		OutTopology = FPcgAiNodeGraphTopology(
-			TEXT("smart_object_definition"),
-			Definition.GetPathName(),
-			Definition.GetPathName(),
-			MoveTemp(Items),
-			{},
-			MoveTemp(Relations));
-		if (!TryValidatePcgAiNodeGraphTopology(OutTopology, OutError))
-		{
-			return false;
-		}
-		OutEvidenceId = MakeEvidence(TEXT("readback"), TEXT("smart_object"), OutRevision);
-		return true;
 	}
 
 	bool FPcgAiNodeGraphNativeHook::TryAddPcgNode(
@@ -1268,15 +1184,19 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		if (!SettingsClass.IsChildOf(UPCGSettings::StaticClass())
 			|| SettingsClass.HasAnyClassFlags(CLASS_Abstract))
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_pcg_settings_class_invalid"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_settings_class_invalid"), !SettingsClass.IsChildOf(UPCGSettings::StaticClass()) ? TEXT("The PCG node settings class is not derived from PCGSettings.") : TEXT("An abstract PCG settings class cannot be instantiated."), !SettingsClass.IsChildOf(UPCGSettings::StaticClass()) ? TEXT("/pcg_node/settings_class") : TEXT("/pcg_node/settings_class_abstract"),
+				!SettingsClass.IsChildOf(UPCGSettings::StaticClass()) ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(SettingsClass.GetPathName())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)), !SettingsClass.IsChildOf(UPCGSettings::StaticClass()) ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("subclass of /Script/PCG.PCGSettings"))) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)), Graph.GetPathName());
+			OutError.CandidateName = SettingsClass.GetPathName();
 			return false;
 		}
 		UPCGSettings* DefaultSettings = nullptr;
 		OutNode = Graph.AddNodeOfType(&SettingsClass, DefaultSettings);
 		if (!OutNode || !DefaultSettings)
 		{
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_node_add_failed"), !OutNode ? TEXT("The PCG graph did not create the requested node.") : TEXT("The created PCG node has no default settings object."), !OutNode ? TEXT("/pcg_node/node_created") : TEXT("/pcg_node/default_settings_created"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Graph.GetPathName());
+			OutError.CandidateName = SettingsClass.GetPathName();
 			OutNode = nullptr;
-			OutError.Set(TEXT("pcg_ai_node_graph_pcg_node_add_failed"));
 			return false;
 		}
 		OutNode->UpdateAfterSettingsChangeDuringCreation();
@@ -1300,14 +1220,17 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		OutReceipt.SetEvidenceId(FString());
 		if (FromPinLabel.IsNone() || ToPinLabel.IsNone())
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_pcg_edge_pin_missing"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_edge_pin_missing"), FromPinLabel.IsNone() ? TEXT("The PCG edge requires a source output pin label.") : TEXT("The PCG edge requires a destination input pin label."), FromPinLabel.IsNone() ? TEXT("/pcg_edge/from_pin") : TEXT("/pcg_edge/to_pin"),
+				MakeShared<FJsonValueString>(FromPinLabel.IsNone() ? FromPinLabel.ToString() : ToPinLabel.ToString()), MakeShared<FJsonValueString>(TEXT("non-empty pin label")), Graph.GetPathName());
 			return false;
 		}
 		const UPCGPin* FromPin = FromNode.GetOutputPin(FromPinLabel);
 		const UPCGPin* ToPin = ToNode.GetInputPin(ToPinLabel);
 		if (!FromPin || !ToPin)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_pcg_edge_pin_unresolved"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_edge_pin_unresolved"), !FromPin ? TEXT("The PCG edge source output pin does not resolve.") : TEXT("The PCG edge destination input pin does not resolve."), !FromPin ? TEXT("/pcg_edge/from_pin") : TEXT("/pcg_edge/to_pin"),
+				MakeShared<FJsonValueString>(!FromPin ? FromPinLabel.ToString() : ToPinLabel.ToString()), MakeShared<FJsonValueString>(!FromPin ? TEXT("existing output pin") : TEXT("existing input pin")), Graph.GetPathName());
+			OutError.InternalContext = FromNode.GetPathName(&Graph) + TEXT(" -> ") + ToNode.GetPathName(&Graph);
 			return false;
 		}
 		Graph.AddLabeledEdge(&FromNode, FromPinLabel, &ToNode, ToPinLabel);
@@ -1319,7 +1242,10 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			});
 		if (!bConnected)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_pcg_edge_add_failed"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_edge_add_failed"), TEXT("The PCG edge was not present in native readback after adding it."), TEXT("/pcg_edge/connected"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Graph.GetPathName());
+			OutError.CandidateName = FromPinLabel.ToString() + TEXT(" -> ") + ToPinLabel.ToString();
+			OutError.InternalContext = FromNode.GetPathName(&Graph) + TEXT(" -> ") + ToNode.GetPathName(&Graph);
 			return false;
 		}
 		const FString Revision = HashCanonicalText(FString::Printf(
@@ -1350,97 +1276,189 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		OutEvidenceId.Reset();
 		if (!PropertyGuid.IsValid() || PropertyName.IsNone())
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_pcg_parameter_identity_invalid"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_identity_invalid"),
+				!PropertyGuid.IsValid() ? TEXT("The PCG parameter property GUID is invalid.") : TEXT("The PCG parameter requires a property name."),
+				!PropertyGuid.IsValid() ? TEXT("/pcg_parameter/property_guid_valid") : TEXT("/pcg_parameter/name_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Graph.GetPathName());
+			OutError.CandidateName = PropertyName.IsNone() ? FString() : PropertyName.ToString();
+			OutError.InternalContext = ToGuidString(PropertyGuid);
 			return false;
 		}
 		bool bIdentityAccepted = false;
 		bool bSet = false;
+		bool bBagVisited = false;
+		bool bParameterCreated = false;
 		Graph.UpdateUserParametersStruct(
 			[&](FInstancedPropertyBag& Bag)
 			{
-				const FPropertyBagPropertyDesc* const ExistingById =
-					Bag.FindPropertyDescByID(PropertyGuid);
-				const FPropertyBagPropertyDesc* const ExistingByName =
-					Bag.FindPropertyDescByName(PropertyName);
+				bBagVisited = true;
+				const FPropertyBagPropertyDesc* const ExistingById = Bag.FindPropertyDescByID(PropertyGuid);
+				const FPropertyBagPropertyDesc* const ExistingByName = Bag.FindPropertyDescByName(PropertyName);
 				if (ExistingById)
 				{
 					bIdentityAccepted = ExistingById->Name == PropertyName
-						&& ExistingById->ValueType
-							== EPropertyBagPropertyType::Double
+						&& ExistingById->ValueType == EPropertyBagPropertyType::Double
 						&& (!ExistingByName || ExistingByName->ID == PropertyGuid);
+					if (!bIdentityAccepted)
+					{
+						if (ExistingById->Name != PropertyName)
+						{
+							OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_write_failed"),
+								TEXT("The PCG property GUID resolves to a different parameter name."), TEXT("/pcg_parameter/name"),
+								MakeShared<FJsonValueString>(ExistingById->Name.ToString()),
+								MakeShared<FJsonValueString>(PropertyName.ToString()), Graph.GetPathName());
+						}
+						else if (ExistingById->ValueType != EPropertyBagPropertyType::Double)
+						{
+							OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_write_failed"),
+								TEXT("The PCG parameter has a different property type."), TEXT("/pcg_parameter/type"),
+								MakeShared<FJsonValueString>(PropertyBagTypeName(ExistingById->ValueType)),
+								MakeShared<FJsonValueString>(PropertyBagTypeName(EPropertyBagPropertyType::Double)), Graph.GetPathName());
+						}
+						else
+						{
+							OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_write_failed"),
+								TEXT("The PCG parameter name is bound to a different property GUID."), TEXT("/pcg_parameter/property_identity_matches"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Graph.GetPathName());
+							OutError.ActualEvidence = MakeShared<FJsonValueString>(ToGuidString(ExistingByName->ID));
+							OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ToGuidString(PropertyGuid));
+						}
+					}
 				}
 				else if (!ExistingByName)
 				{
-					FPropertyBagPropertyDesc Desc(
-						PropertyName, EPropertyBagPropertyType::Double);
+					FPropertyBagPropertyDesc Desc(PropertyName, EPropertyBagPropertyType::Double);
 					Desc.ID = PropertyGuid;
-					bIdentityAccepted = Bag.AddProperties({Desc})
-						== EPropertyBagAlterationResult::Success;
+					const EPropertyBagAlterationResult AddResult = Bag.AddProperties({Desc});
+					bIdentityAccepted = AddResult == EPropertyBagAlterationResult::Success;
+					bParameterCreated = bIdentityAccepted;
+					if (!bIdentityAccepted)
+					{
+						OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_write_failed"),
+							TEXT("The PCG parameter bag rejected the new double property."), TEXT("/pcg_parameter/add_result"),
+							MakeShared<FJsonValueString>(UEnum::GetValueAsString(AddResult)),
+							MakeShared<FJsonValueString>(UEnum::GetValueAsString(EPropertyBagAlterationResult::Success)), Graph.GetPathName());
+					}
 				}
-				bSet = bIdentityAccepted
-					&& Bag.SetValueDouble(PropertyName, Value)
-					== EPropertyBagResult::Success;
+				else
+				{
+					OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_write_failed"),
+						TEXT("An existing PCG parameter name is already bound to another property GUID."), TEXT("/pcg_parameter/property_identity_matches"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Graph.GetPathName());
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(ToGuidString(ExistingByName->ID));
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ToGuidString(PropertyGuid));
+				}
+				if (bIdentityAccepted)
+				{
+					const EPropertyBagResult SetResult = Bag.SetValueDouble(PropertyName, Value);
+					bSet = SetResult == EPropertyBagResult::Success;
+					if (!bSet)
+					{
+						OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_write_failed"),
+							TEXT("The PCG parameter bag rejected the double value."), TEXT("/pcg_parameter/set_result"),
+							MakeShared<FJsonValueString>(UEnum::GetValueAsString(SetResult)),
+							MakeShared<FJsonValueString>(UEnum::GetValueAsString(EPropertyBagResult::Success)), Graph.GetPathName());
+						OutError.ProposedValue = NativeDoubleFact(Value);
+					}
+				}
 			});
 		if (!bIdentityAccepted || !bSet)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_pcg_parameter_write_failed"));
+			if (OutError.IsEmpty())
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_write_failed"),
+					!bBagVisited ? TEXT("The PCG graph did not expose an editable parameter bag.") : TEXT("The PCG parameter update did not complete."),
+					!bBagVisited ? TEXT("/pcg_parameter/bag_available") : TEXT("/pcg_parameter/write_completed"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Graph.GetPathName());
+			}
+			OutError.CandidateName = PropertyName.ToString();
+			if (bParameterCreated) OutError.MutationStarted = true;
 			return false;
 		}
 		const FString ApplyRevision = HashCanonicalText(FString::Printf(
-			TEXT("%s|%s|%s|%.17g"),
-			*Graph.GetPathName(), *ToGuidString(PropertyGuid),
-			*PropertyName.ToString(), Value));
-		OutApplyReceipt.SetEvidenceId(MakeEvidence(
-			TEXT("apply"), TEXT("pcg_parameter"), ApplyRevision));
+			TEXT("%s|%s|%s|%.17g"), *Graph.GetPathName(), *ToGuidString(PropertyGuid), *PropertyName.ToString(), Value));
+		OutApplyReceipt.SetEvidenceId(MakeEvidence(TEXT("apply"), TEXT("pcg_parameter"), ApplyRevision));
 		const FInstancedPropertyBag* ReadbackBag = Graph.GetUserParametersStruct();
-		const FPropertyBagPropertyDesc* ReadbackDesc = ReadbackBag
-			? ReadbackBag->FindPropertyDescByID(PropertyGuid) : nullptr;
+		const FPropertyBagPropertyDesc* ReadbackDesc = ReadbackBag ? ReadbackBag->FindPropertyDescByID(PropertyGuid) : nullptr;
 		double ReadbackDouble = 0.0;
 		bool bValueRead = false;
+		TOptional<EPropertyBagResult> ReadbackError;
 		if (ReadbackBag)
 		{
-			const TValueOrError<double, EPropertyBagResult> ReadbackValue =
-				ReadbackBag->GetValueDouble(PropertyName);
+			const TValueOrError<double, EPropertyBagResult> ReadbackValue = ReadbackBag->GetValueDouble(PropertyName);
 			if (ReadbackValue.IsValid())
 			{
 				ReadbackDouble = ReadbackValue.GetValue();
 				bValueRead = true;
 			}
+			else if (const EPropertyBagResult* Error = ReadbackValue.TryGetError())
+			{
+				ReadbackError = *Error;
+			}
 		}
-		const bool bRefreshed = ReadbackDesc
-			&& ReadbackDesc->Name == PropertyName
+		const bool bRefreshed = ReadbackDesc && ReadbackDesc->Name == PropertyName
 			&& ReadbackDesc->ValueType == EPropertyBagPropertyType::Double
-			&& bValueRead
-			&& FMath::IsNearlyEqual(ReadbackDouble, Value);
+			&& bValueRead && FMath::IsNearlyEqual(ReadbackDouble, Value);
 		OutBarrierReceipt.BarrierKind = EPcgAiNodeGraphBarrierKind::Refresh;
 		OutBarrierReceipt.bComplete = bRefreshed;
 		OutBarrierReceipt.ErrorCount = bRefreshed ? 0 : 1;
-		OutBarrierReceipt.BarrierEvidenceId = MakeEvidence(
-			TEXT("barrier"), TEXT("pcg_parameter"), ApplyRevision);
-		OutBarrierReceipt.SettleEvidenceId = MakeEvidence(
-			TEXT("settle"), TEXT("pcg_parameter"), ApplyRevision);
+		OutBarrierReceipt.BarrierEvidenceId = MakeEvidence(TEXT("barrier"), TEXT("pcg_parameter"), ApplyRevision);
+		OutBarrierReceipt.SettleEvidenceId = MakeEvidence(TEXT("settle"), TEXT("pcg_parameter"), ApplyRevision);
 		if (!bRefreshed)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_pcg_parameter_refresh_incomplete"));
+			if (!ReadbackBag || !ReadbackDesc)
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_refresh_incomplete"),
+					!ReadbackBag ? TEXT("The PCG parameter bag is unavailable during readback.") : TEXT("The PCG property GUID does not resolve during readback."),
+					!ReadbackBag ? TEXT("/pcg_parameter/readback_bag_available") : TEXT("/pcg_parameter/property_guid_resolved"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Graph.GetPathName());
+				OutError.InternalContext = ToGuidString(PropertyGuid);
+			}
+			else if (ReadbackDesc->Name != PropertyName)
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_refresh_incomplete"),
+					TEXT("The PCG parameter readback name differs from the requested name."), TEXT("/pcg_parameter/name"),
+					MakeShared<FJsonValueString>(ReadbackDesc->Name.ToString()), MakeShared<FJsonValueString>(PropertyName.ToString()), Graph.GetPathName());
+			}
+			else if (ReadbackDesc->ValueType != EPropertyBagPropertyType::Double)
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_refresh_incomplete"),
+					TEXT("The PCG parameter readback has a different property type."), TEXT("/pcg_parameter/type"),
+					MakeShared<FJsonValueString>(PropertyBagTypeName(ReadbackDesc->ValueType)),
+					MakeShared<FJsonValueString>(PropertyBagTypeName(EPropertyBagPropertyType::Double)), Graph.GetPathName());
+			}
+			else if (!bValueRead)
+			{
+				if (ReadbackError.IsSet())
+				{
+					OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_refresh_incomplete"),
+						TEXT("The PCG parameter bag could not read the double value."), TEXT("/pcg_parameter/read_result"),
+						MakeShared<FJsonValueString>(UEnum::GetValueAsString(ReadbackError.GetValue())),
+						MakeShared<FJsonValueString>(UEnum::GetValueAsString(EPropertyBagResult::Success)), Graph.GetPathName());
+				}
+				else
+				{
+					OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_refresh_incomplete"),
+						TEXT("The PCG parameter readback returned neither a value nor an error."), TEXT("/pcg_parameter/readback_value_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Graph.GetPathName());
+				}
+			}
+			else
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_pcg_parameter_refresh_incomplete"),
+					TEXT("The PCG double parameter readback is not nearly equal to the requested value."), TEXT("/pcg_parameter/value"),
+					NativeDoubleFact(ReadbackDouble), NativeDoubleFact(Value), Graph.GetPathName());
+			}
+			OutError.CandidateName = PropertyName.ToString();
+			OutError.MutationStarted = true;
 			return false;
 		}
 		OutRevision = HashCanonicalText(FString::Printf(
-			TEXT("%s|%s|%s|%s|%.17g"),
-			*Graph.GetPathName(), *ToGuidString(ReadbackDesc->ID),
-			*ReadbackDesc->Name.ToString(),
-			*PropertyBagTypeName(ReadbackDesc->ValueType),
-			ReadbackDouble));
-		OutIdentity = FPcgAiNodeGraphParameterIdentity(
-			Graph.GetPathName(),
-			ReadbackDesc->ID,
-			ReadbackDesc->Name,
-			PropertyBagTypeName(ReadbackDesc->ValueType));
-		if (!TryValidatePcgAiNodeGraphParameterIdentity(OutIdentity, OutError))
-		{
-			return false;
-		}
-		OutEvidenceId = MakeEvidence(
-			TEXT("readback"), TEXT("pcg_parameter"), OutRevision);
+			TEXT("%s|%s|%s|%s|%.17g"), *Graph.GetPathName(), *ToGuidString(ReadbackDesc->ID),
+			*ReadbackDesc->Name.ToString(), *PropertyBagTypeName(ReadbackDesc->ValueType), ReadbackDouble));
+		OutIdentity = FPcgAiNodeGraphParameterIdentity(Graph.GetPathName(), ReadbackDesc->ID, ReadbackDesc->Name, PropertyBagTypeName(ReadbackDesc->ValueType));
+		if (!TryValidatePcgAiNodeGraphParameterIdentity(OutIdentity, OutError)) return false;
+		OutEvidenceId = MakeEvidence(TEXT("readback"), TEXT("pcg_parameter"), OutRevision);
 		return true;
 	}
 
@@ -1459,21 +1477,18 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		OutParameters.Reset();
 		OutRevision.Reset();
 		OutEvidenceId.Reset();
-		const bool bCompiled = Graph.Recompile();
+		// Recompile returns whether compiled tasks changed, not compilation success.
+		// Its synchronous completion settles this barrier; capture validates the graph below.
+		Graph.Recompile();
 		const FString BarrierRevision = HashCanonicalText(
 			Graph.GetPathName() + TEXT("|compile"));
 		OutBarrierReceipt.BarrierKind = EPcgAiNodeGraphBarrierKind::Compile;
-		OutBarrierReceipt.bComplete = bCompiled;
-		OutBarrierReceipt.ErrorCount = bCompiled ? 0 : 1;
+		OutBarrierReceipt.bComplete = true;
+		OutBarrierReceipt.ErrorCount = 0;
 		OutBarrierReceipt.BarrierEvidenceId = MakeEvidence(
 			TEXT("barrier"), TEXT("pcg_graph"), BarrierRevision);
 		OutBarrierReceipt.SettleEvidenceId = MakeEvidence(
 			TEXT("settle"), TEXT("pcg_graph"), BarrierRevision);
-		if (!bCompiled)
-		{
-			OutError.Set(TEXT("pcg_ai_node_graph_pcg_compile_incomplete"));
-			return false;
-		}
 		if (!CapturePcgGraph(
 			Graph, OutTopology, OutParameters, OutRevision, OutError))
 		{
@@ -1515,13 +1530,16 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		}
 		else
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_component_generation_policy_invalid"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_component_generation_policy_invalid"), TEXT("The PCG component generation policy is unsupported."), TEXT("/component_binding/generation_policy"),
+				MakeShared<FJsonValueString>(GenerationPolicy), MakeShared<FJsonValueString>(TEXT("generate_on_demand | generate_on_load | generate_at_runtime")), Component.GetPathName());
 			return false;
 		}
 		AActor* Owner = Component.GetOwner();
 		if (!Owner || !Graph.GetGraph())
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_component_binding_target_invalid"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_component_binding_target_invalid"), !Owner ? TEXT("The PCG component has no owning actor.") : TEXT("The selected PCG graph interface has no graph."), !Owner ? TEXT("/component_binding/owner_available") : TEXT("/component_binding/graph_available"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Component.GetPathName());
+			if (Owner) OutError.CandidateName = Graph.GetPathName();
 			return false;
 		}
 		Component.GenerationTrigger = NativePolicy;
@@ -1542,7 +1560,16 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			TEXT("settle"), TEXT("pcg_component"), ApplyRevision);
 		if (!bRefreshed)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_component_refresh_incomplete"));
+			if (Component.GetGraph() != Graph.GetGraph())
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_component_refresh_incomplete"), TEXT("The PCG component readback graph differs from the assigned graph."), TEXT("/component_binding/graph"),
+					Component.GetGraph() ? MakeShared<FJsonValueString>(Component.GetGraph()->GetPathName()) : TSharedPtr<FJsonValueString>(), MakeShared<FJsonValueString>(Graph.GetGraph()->GetPathName()), Component.GetPathName());
+			}
+			else
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_component_refresh_incomplete"), TEXT("The PCG component readback generation policy differs from the assigned policy."), TEXT("/component_binding/generation_policy"),
+					MakeShared<FJsonValueString>(GenerationPolicyName(Component.GenerationTrigger)), MakeShared<FJsonValueString>(GenerationPolicy), Component.GetPathName());
+			}
 			return false;
 		}
 		OutRevision = HashCanonicalText(FString::Printf(
@@ -1579,7 +1606,8 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		OutEvidenceId.Reset();
 		if (!SourceIdentity.IsValid())
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_data_asset_source_invalid"));
+			OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_data_asset_source_invalid"), TEXT("The PCG data asset source is not a valid soft object reference."), TEXT("/data_asset/source"),
+				MakeShared<FJsonValueString>(SourceIdentity.ToString()), MakeShared<FJsonValueString>(TEXT("valid soft object reference")), DataAsset.GetPathName());
 			return false;
 		}
 		DataAsset.Data.Reset();
@@ -1610,7 +1638,28 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			TEXT("settle"), TEXT("pcg_data_asset"), ApplyRevision);
 		if (!bValidated)
 		{
-			OutError.Set(TEXT("pcg_ai_node_graph_data_asset_validate_incomplete"));
+			if (DataAsset.Data.TaggedData.Num() != 1)
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_data_asset_validate_incomplete"), TEXT("The PCG data asset readback must contain exactly one tagged data entry."), TEXT("/data_asset/tagged_data/count"),
+					MakeShared<FJsonValueNumber>(DataAsset.Data.TaggedData.Num()), MakeShared<FJsonValueNumber>(1), DataAsset.GetPathName());
+			}
+			else if (DataAsset.Data.TaggedData[0].Data.Get() != &Data)
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_data_asset_validate_incomplete"), TEXT("The PCG data asset readback does not refer to the assigned data object."), TEXT("/data_asset/tagged_data/0/data_matches_source"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), DataAsset.GetPathName());
+				const auto PrivateObjects = MakeShared<FJsonObject>();
+				const UPCGData* Readback = DataAsset.Data.TaggedData[0].Data.Get();
+				PrivateObjects->SetStringField(TEXT("actual"), Readback ? Readback->GetPathName() : FString());
+				PrivateObjects->SetStringField(TEXT("expected"), Data.GetPathName());
+				OutError.ActualEvidence = MakeShared<FJsonValueObject>(PrivateObjects);
+			}
+			#if WITH_EDITORONLY_DATA
+			else
+			{
+				OutError = NativeGraphFact(TEXT("pcg_ai_node_graph_data_asset_validate_incomplete"), TEXT("The PCG data asset readback source reference differs from the assigned source."), TEXT("/data_asset/source"),
+					MakeShared<FJsonValueString>(DataAsset.ObjectPath.ToString()), MakeShared<FJsonValueString>(SourceIdentity.ToString()), DataAsset.GetPathName());
+			}
+			#endif
 			return false;
 		}
 		const UPCGData* ReadbackData = DataAsset.Data.TaggedData[0].Data.Get();

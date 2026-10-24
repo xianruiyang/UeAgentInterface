@@ -1,9 +1,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 namespace UeAgentAuthoringWorkspacePaths
 {
+	using FDiagnostic = UE::UAI::Contract::FDiagnostic;
 	struct UEAGENTINTERFACE_API FResolveOptions
 	{
 		bool bRequireHjson = false;
@@ -28,13 +30,13 @@ namespace UeAgentAuthoringWorkspacePaths
 		const FString& PathInput,
 		const FResolveOptions& Options,
 		FResolvedPath& OutPath,
-		FString& OutError);
+		FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ResolveProjectPath(
 		const FString& PathInput,
 		const FResolveOptions& Options,
 		FResolvedPath& OutPath,
-		FString& OutError);
+		FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ResolveReference(
 		const FString& WorkspaceRootInput,
@@ -42,21 +44,21 @@ namespace UeAgentAuthoringWorkspacePaths
 		const FString& ReferenceInput,
 		const FResolveOptions& Options,
 		FResolvedPath& OutPath,
-		FString& OutError);
+		FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool DetectCaseCollisions(
 		const FString& WorkspaceRootInput,
 		const TArray<FString>& PathInputs,
-		FString& OutError);
+		FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool MakeAssetRelativePath(
 		const FString& AssetPathInput,
 		FString& OutRelativePath,
-		FString& OutError);
+		FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ResolveAssetWorkspaceFolder(
 		const FString& WorkspaceRootInput,
 		const FString& AssetPathInput,
 		FString& OutFolderPath,
-		FString& OutError);
+		FDiagnostic& OutError);
 }

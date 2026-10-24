@@ -1,11 +1,15 @@
 #include "DomainAdapters/BlueprintCommands/UeAgentBlueprintCommandMechanicsBoundary.h"
 
+#include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Components/ActorComponent.h"
+#include "Components/Widget.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "K2Node_ComponentBoundEvent.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 
 namespace UE::UAI::DomainAdapters::BlueprintCommands
@@ -28,12 +32,13 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 
 	bool TryGetActivationProfiles(
 		TArray<FUeAgentGraphCompoundActivationProfile>& OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		OutError.Reset();
-		const TArray<FUeAgentGraphCompoundActivationProfile>& Canonical =
-			Composition::GraphCompound::GetGraphCompoundActivationProfiles();
+		const TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>* GraphProfiles = nullptr;
+		if (!Composition::GraphCompound::TryGetGraphCompoundActivationProfiles(GraphProfiles, OutError)) return false;
+		const auto& Canonical = *GraphProfiles;
 		for (const FString& CommandId : GetCommandIds())
 		{
 			const FUeAgentGraphCompoundActivationProfile* Match =
@@ -45,7 +50,19 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 			if (!Match || !Match->IsValid())
 			{
 				OutProfiles.Reset();
-				OutError = TEXT("blueprint_command_profile_missing:") + CommandId;
+				if (Match) {
+					OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("blueprint_command_profile_missing"),
+						Match->GetValidationDiagnostic(), TEXT("runtime_factory"), TEXT("A required Blueprint activation profile failed validation."));
+				} else {
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_command_profile_missing"),
+						TEXT("No activation profile is registered for a required Blueprint command."), TEXT("runtime_factory"));
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.PropertyPath = TEXT("activation_profile_registered");
+				}
+				OutError.InternalContext = CommandId;
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PublicMessage += TEXT(" Command: ") + CommandId + TEXT(".");
 				return false;
 			}
 			OutProfiles.Add(*Match);
@@ -55,8 +72,7 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 
 	bool FBlueprintComponentEventDiscoveryRequest::IsValid() const
 	{
-		return !ComponentName.TrimStartAndEnd().IsEmpty()
-			&& Limit >= 0 && Limit <= 1000;
+		return !ComponentName.TrimStartAndEnd().IsEmpty();
 	}
 
 	namespace
@@ -125,13 +141,20 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 		UBlueprint& Blueprint,
 		const FBlueprintComponentEventDiscoveryRequest& Request,
 		FBlueprintComponentEventDiscoveryResult& OutResult,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutResult = {};
 		OutError.Reset();
 		if (!Request.IsValid())
 		{
-			OutError = TEXT("blueprint_component_event_request_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_component_event_request_invalid"),
+				TEXT("component_name must contain a non-whitespace Blueprint component name."), TEXT("input_decode"));
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-whitespace component name"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(Request.ComponentName);
+			OutError.PropertyPath = TEXT("component_name");
+			OutError.Source = Request.ComponentNameSource;
+			OutError.SourceKind = Request.ComponentNameSourceKind;
+			OutError.TargetPath = Blueprint.GetOutermost()->GetName();
 			return false;
 		}
 		if (Request.bCompileBeforeQuery || !Blueprint.SkeletonGeneratedClass)
@@ -150,7 +173,14 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 			: FindScsComponentClass(Blueprint, ComponentName);
 		if (!TargetClass)
 		{
-			OutError = TEXT("blueprint_component_event_component_not_found");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_component_event_component_not_found"),
+				TEXT("No component class could be resolved from the Blueprint property or construction-script node for this component name."), TEXT("query_resolve"));
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("Blueprint component with a resolvable class"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(Request.ComponentName);
+			OutError.PropertyPath = TEXT("component_name");
+			OutError.Source = Request.ComponentNameSource;
+			OutError.SourceKind = Request.ComponentNameSourceKind;
+			OutError.TargetPath = Blueprint.GetOutermost()->GetName();
 			return false;
 		}
 
@@ -182,21 +212,17 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 		{
 			const bool bHidden = IsHidden(*Property);
 			const FString EventDisplayName = DisplayName(*Property);
+			const bool bQueryMatched = MatchesQuery(*Property, EventDisplayName, Request.Query);
 			const bool bAlreadyBound = ComponentProperty
 				&& FKismetEditorUtilities::FindBoundEventForComponent(
 					&Blueprint, Property->GetFName(), ComponentName) != nullptr;
 			if ((!Request.bIncludeHidden && bHidden)
-				|| !MatchesQuery(*Property, EventDisplayName, Request.Query)
+				|| (!Request.bIncludeQueryContext && !bQueryMatched)
 				|| (Request.bOnlyUnbound && bAlreadyBound))
 			{
 				continue;
 			}
-			++OutResult.MatchedEventCount;
-			if (Request.Limit > 0
-				&& OutResult.Events.Num() >= Request.Limit)
-			{
-				continue;
-			}
+			if (bQueryMatched) ++OutResult.MatchedEventCount;
 			FBlueprintComponentEventRecord& Event =
 				OutResult.Events.Emplace_GetRef();
 			Event.NativeFieldName = Property->GetName();
@@ -208,9 +234,57 @@ namespace UE::UAI::DomainAdapters::BlueprintCommands
 			Event.Category = Property->GetMetaData(TEXT("Category"));
 			Event.bHidden = bHidden;
 			Event.bAlreadyBound = bAlreadyBound;
+			Event.bQueryMatched = bQueryMatched;
 		}
-		OutResult.bTruncated = Request.Limit > 0
-			&& OutResult.MatchedEventCount > OutResult.Events.Num();
+		return true;
+	}
+
+	bool TryGetBlueprintComponentNames(
+		UBlueprint& Blueprint,
+		TArray<FString>& OutComponentNames,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		OutComponentNames.Reset();
+		OutError.Reset();
+		TSet<FString> SeenNames;
+		auto AddName = [&OutComponentNames, &SeenNames](const FName Name)
+		{
+			const FString Text = Name.ToString().TrimStartAndEnd();
+			if (!Text.IsEmpty() && !SeenNames.Contains(Text))
+			{
+				SeenNames.Add(Text);
+				OutComponentNames.Add(Text);
+			}
+		};
+
+		if (Blueprint.SkeletonGeneratedClass)
+		{
+			for (TFieldIterator<FObjectProperty> It(
+				Blueprint.SkeletonGeneratedClass, EFieldIteratorFlags::IncludeSuper);
+				It; ++It)
+			{
+				const FObjectProperty* Property = *It;
+				if (Property && Property->PropertyClass
+					&& ((Property->PropertyClass->IsChildOf(UActorComponent::StaticClass())
+						&& Property->HasAnyPropertyFlags(CPF_InstancedReference | CPF_ExportObject))
+						|| Property->PropertyClass->IsChildOf(UWidget::StaticClass())))
+				{
+					AddName(Property->GetFName());
+				}
+			}
+		}
+		if (Blueprint.SimpleConstructionScript)
+		{
+			for (USCS_Node* Node
+				: Blueprint.SimpleConstructionScript->GetAllNodes())
+			{
+				if (Node)
+				{
+					AddName(Node->GetVariableName());
+				}
+			}
+		}
+		OutComponentNames.Sort();
 		return true;
 	}
 }

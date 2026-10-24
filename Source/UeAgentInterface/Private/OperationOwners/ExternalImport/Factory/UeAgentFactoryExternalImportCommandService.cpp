@@ -4,6 +4,9 @@
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringJsonFields.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
 
 namespace UE::UAI::OperationOwners::ExternalImport::Factory
 {
@@ -15,23 +18,29 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 	{
 		FString GFailureStage;
 
-		bool Fail(
-			FUeAgentFactoryExternalImportCommandError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString(),
-			FString TerminalStatus = TEXT("rejected"),
-			const bool bMutationStarted = false,
-			const bool bRetrySafe = true)
+		Contract::FDiagnostic CommandGuardFailure(
+			FString Code, FString PublicReason, const FString& PrivateSubject,
+			const TCHAR* Condition, const bool bActual, const bool bExpected)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-			OutError.TerminalStatus = MoveTemp(TerminalStatus);
-			OutError.bMutationStarted = bMutationStarted;
-			OutError.bRetrySafe = bRetrySafe;
-			return false;
+			auto Diagnostic = Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(PublicReason),
+				TEXT("command_execute"), FString(), PrivateSubject);
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.PropertyPath = Condition;
+			Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(bActual);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(bExpected);
+			Diagnostic.MutationMayHaveStarted = false;
+			return Diagnostic;
 		}
+        bool Fail(FUeAgentFactoryExternalImportCommandError& OutError, const UE::UAI::Contract::FDiagnostic& Diagnostic,
+            FString TerminalStatus = TEXT("rejected"), bool bMutationStarted = false, bool bRetrySafe = true)
+        {
+            OutError = Diagnostic;
+            OutError.TerminalStatus = MoveTemp(TerminalStatus);
+            OutError.MutationStarted = bMutationStarted;
+            OutError.bRetrySafe = bRetrySafe;
+            return false;
+        }
+
 
 		const FUeAgentFactoryExternalImportCommandRoute* FindRoute(
 			const FString& CommandId)
@@ -42,6 +51,19 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 				{
 					return Route.CommandId == CommandId;
 				});
+		}
+
+		bool InvalidOption(const TSharedRef<FJsonObject>& Options, const TCHAR* Name,
+			const FString& Expected, FFactoryExternalImportError& Error, int32 Index = INDEX_NONE)
+		{
+			
+			FString Path = TEXT("/options/") + FString(Name).Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+			auto Actual = Options->TryGetField(Name);
+			if (Index != INDEX_NONE) { Path += TEXT("/") + ::LexToString(Index); Actual = Actual->AsArray()[Index]; }
+			Error = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("factory_import_option_type_invalid"), Path,
+				MakeShared<FJsonValueString>(Expected), Actual);
+			Error.SubjectId = Name;
+			return false;
 		}
 
 		bool TryReadBool(
@@ -56,9 +78,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			}
 			if (!Options->TryGetBoolField(Name, OutValue))
 			{
-				OutError.Code = TEXT("factory_import_option_type_invalid");
-				OutError.SubjectId = Name;
-				return false;
+				return InvalidOption(Options, Name, TEXT("boolean"), OutError);
 			}
 			return true;
 		}
@@ -73,11 +93,10 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			{
 				return true;
 			}
-			if (!Options->TryGetStringField(Name, OutValue))
+			const auto Value = Options->TryGetField(Name);
+			if (!Value || Value->Type != EJson::String || !Value->TryGetString(OutValue))
 			{
-				OutError.Code = TEXT("factory_import_option_type_invalid");
-				OutError.SubjectId = Name;
-				return false;
+				return InvalidOption(Options, Name, TEXT("string"), OutError);
 			}
 			OutValue.TrimStartAndEndInline();
 			return true;
@@ -96,18 +115,15 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
 			if (!Options->TryGetArrayField(Name, Values) || !Values)
 			{
-				OutError.Code = TEXT("factory_import_option_type_invalid");
-				OutError.SubjectId = Name;
-				return false;
+				return InvalidOption(Options, Name, TEXT("array of strings"), OutError);
 			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			for (int32 Index = 0; Index < Values->Num(); ++Index)
 			{
+				const auto& Value = (*Values)[Index];
 				FString Text;
-				if (!Value.IsValid() || !Value->TryGetString(Text))
+				if (!Value.IsValid() || Value->Type != EJson::String || !Value->TryGetString(Text))
 				{
-					OutError.Code = TEXT("factory_import_option_type_invalid");
-					OutError.SubjectId = Name;
-					return false;
+					return InvalidOption(Options, Name, TEXT("string"), OutError, Index);
 				}
 				Text.TrimStartAndEndInline();
 				if (!Text.IsEmpty())
@@ -126,48 +142,58 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			FFactoryExternalImportError& OutError)
 		{
 			TSharedPtr<FJsonObject> Params;
-			FString JsonError;
+			UE::UAI::Contract::FDiagnostic JsonError;
 			if (!Json::TryParseObject(
 					Request.CanonicalParamsJson,
 					Params,
 					JsonError)
 				|| !Params.IsValid())
 			{
-				OutError.Code = TEXT("factory_import_params_invalid");
-				OutError.Detail = MoveTemp(JsonError);
+				OutError = MoveTemp(JsonError);
 				return false;
 			}
 			OutSpec.RequestId = Request.RequestId;
 			OutSpec.Operation = Route.Operation;
 			OutSpec.Kind = Route.Kind;
-			if (!Params->TryGetStringField(TEXT("source_ref"), OutSpec.SourceRef))
+			if (!UeAgentAuthoringJsonFields::ValidateOptionalFields(*Params,
+				{{TEXT("source_ref"), EJson::String}, {TEXT("destination_ref"), EJson::String},
+				 {TEXT("target_ref"), EJson::String}, {TEXT("skeleton_ref"), EJson::String}}, OutError))
 			{
-				OutError.Code = TEXT("factory_import_source_required");
+				
+				return false;
+			}
+			if (!Params->TryGetStringField(TEXT("source_ref"), OutSpec.SourceRef) || OutSpec.SourceRef.IsEmpty())
+			{
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("factory_import_source_required"), TEXT("/source_ref"),
+					MakeShared<FJsonValueString>(TEXT("non-empty source path")), Params->TryGetField(TEXT("source_ref")));
 				return false;
 			}
 			if (Route.Operation == EFactoryExternalImportOperation::Import)
 			{
 				if (!Params->TryGetStringField(
 						TEXT("destination_ref"),
-						OutSpec.DestinationRef))
+						OutSpec.DestinationRef) || OutSpec.DestinationRef.IsEmpty())
 				{
-					OutError.Code = TEXT("factory_import_destination_required");
+					OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("factory_import_destination_required"), TEXT("/destination_ref"),
+						MakeShared<FJsonValueString>(TEXT("non-empty destination asset path")), Params->TryGetField(TEXT("destination_ref")));
 					return false;
 				}
 				if (Route.Kind == EFactoryExternalImportKind::FbxAnimation
-					&& !Params->TryGetStringField(
+					&& (!Params->TryGetStringField(
 						TEXT("skeleton_ref"),
-						OutSpec.SkeletonRef))
+						OutSpec.SkeletonRef) || OutSpec.SkeletonRef.IsEmpty()))
 				{
-					OutError.Code = TEXT("factory_import_skeleton_required");
+					OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("factory_import_skeleton_required"), TEXT("/skeleton_ref"),
+						MakeShared<FJsonValueString>(TEXT("non-empty skeleton asset path")), Params->TryGetField(TEXT("skeleton_ref")));
 					return false;
 				}
 			}
 			else if (!Params->TryGetStringField(
 					TEXT("target_ref"),
-					OutSpec.DestinationRef))
+					OutSpec.DestinationRef) || OutSpec.DestinationRef.IsEmpty())
 			{
-				OutError.Code = TEXT("factory_reimport_target_required");
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("factory_reimport_target_required"), TEXT("/target_ref"),
+					MakeShared<FJsonValueString>(TEXT("non-empty target asset path")), Params->TryGetField(TEXT("target_ref")));
 				return false;
 			}
 
@@ -179,38 +205,25 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 					|| !OptionsPtr
 					|| !OptionsPtr->IsValid())
 				{
-					OutError.Code = TEXT("factory_import_options_invalid");
+					OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("factory_import_options_invalid"), TEXT("/options"),
+						MakeShared<FJsonValueString>(TEXT("object")), Params->TryGetField(TEXT("options")));
 					return false;
 				}
 				Options = OptionsPtr->ToSharedRef();
 			}
-			const TSet<FString> AllowedOptionNames = {
-				TEXT("replace_existing"),
-				TEXT("import_materials"),
-				TEXT("import_textures"),
-				TEXT("create_physics_asset"),
-				TEXT("import_animations"),
-				TEXT("import_morph_targets"),
-				TEXT("update_skeleton_reference_pose"),
-				TEXT("validate_after_import"),
-				TEXT("skeleton_ref"),
-				TEXT("srgb"),
-				TEXT("compression_settings"),
-				TEXT("mip_gen_settings"),
-				TEXT("lod_group"),
-				TEXT("expected_morph_targets"),
-				TEXT("expected_material_slots"),
-				TEXT("expected_lod_count"),
-			};
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair
-				: Options->Values)
+			if (!UeAgentAuthoringJsonFields::ValidateDeclaredFields(*Options,
+				{{TEXT("replace_existing"), EJson::Boolean}, {TEXT("import_materials"), EJson::Boolean},
+				 {TEXT("import_textures"), EJson::Boolean}, {TEXT("create_physics_asset"), EJson::Boolean},
+				 {TEXT("import_animations"), EJson::Boolean}, {TEXT("import_morph_targets"), EJson::Boolean},
+				 {TEXT("update_skeleton_reference_pose"), EJson::Boolean}, {TEXT("validate_after_import"), EJson::Boolean},
+				 {TEXT("skeleton_ref"), EJson::String}, {TEXT("srgb"), EJson::Boolean},
+				 {TEXT("compression_settings"), EJson::String}, {TEXT("mip_gen_settings"), EJson::String},
+				 {TEXT("lod_group"), EJson::String}, {TEXT("expected_morph_targets"), EJson::Array},
+				 {TEXT("expected_material_slots"), EJson::Array}, {TEXT("expected_lod_count"), EJson::Number}},
+				OutError, TEXT("/options")))
 			{
-				if (!AllowedOptionNames.Contains(Pair.Key))
-				{
-					OutError.Code = TEXT("factory_import_option_unknown");
-					OutError.SubjectId = Pair.Key;
-					return false;
-				}
+				OutError.SubjectId = OutError.PropertyPath;
+				return false;
 			}
 			OutSpec.Options.bReplaceExisting =
 				Route.Operation == EFactoryExternalImportOperation::Reimport;
@@ -258,12 +271,13 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			}
 			if (Options->HasField(TEXT("expected_lod_count")))
 			{
-				double Value = 0.0;
-				if (!Options->TryGetNumberField(TEXT("expected_lod_count"), Value)
-					|| Value < 0.0 || Value != FMath::FloorToDouble(Value))
+				int64 Value = 0;
+				if (!UeAgentPropertyValueCodec::TryReadIntegerNumber(
+					Options->TryGetField(TEXT("expected_lod_count")), 0, MAX_int32, Value, OutError))
 				{
-					OutError.Code = TEXT("factory_import_option_type_invalid");
+					
 					OutError.SubjectId = TEXT("expected_lod_count");
+					UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, TEXT("/options/expected_lod_count"));
 					return false;
 				}
 				OutSpec.Options.ExpectedLodCount = static_cast<int32>(Value);
@@ -272,62 +286,60 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 				!= (Route.Operation
 					== EFactoryExternalImportOperation::Reimport))
 			{
-				OutError.Code = TEXT("factory_import_replace_mode_invalid");
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("factory_import_replace_mode_invalid"), TEXT("/options/replace_existing"),
+					MakeShared<FJsonValueBoolean>(Route.Operation == EFactoryExternalImportOperation::Reimport), Options->TryGetField(TEXT("replace_existing")),
+					TEXT("input_decode"), TEXT("replace_existing must match whether this command imports or reimports."));
 				return false;
 			}
 			const bool bFbx = Route.Kind
 					== EFactoryExternalImportKind::FbxAnimation
 				|| Route.Kind
 					== EFactoryExternalImportKind::FbxSkeletalMesh;
-			if (!bFbx
-				&& (Options->HasField(TEXT("import_materials"))
-					|| Options->HasField(TEXT("import_textures"))
-					|| Options->HasField(TEXT("create_physics_asset"))
-					|| Options->HasField(TEXT("import_animations"))
-					|| Options->HasField(TEXT("import_morph_targets"))
-					|| Options->HasField(TEXT("update_skeleton_reference_pose"))
-					|| Options->HasField(TEXT("skeleton_ref"))
-					|| Options->HasField(TEXT("expected_morph_targets"))
-					|| Options->HasField(TEXT("expected_material_slots"))
-					|| Options->HasField(TEXT("expected_lod_count"))))
+			auto RejectInapplicableOptions = [&](bool bApplicable, std::initializer_list<const TCHAR*> Fields, const TCHAR* SupportedImporter)
 			{
-				OutError.Code = TEXT("factory_import_option_not_applicable");
+				if (bApplicable) return false;
+				for (const auto* Field : Fields)
+				{
+					if (!Options->HasField(Field)) continue;
+					OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("factory_import_option_not_applicable"), TEXT("/options/") + FString(Field),
+						MakeShared<FJsonValueString>(SupportedImporter), Options->TryGetField(Field), TEXT("input_decode"),
+						FString::Printf(TEXT("Option '%s' requires %s."), Field, SupportedImporter));
+					return true;
+				}
 				return false;
-			}
+			};
+			if (RejectInapplicableOptions(bFbx,
+				{TEXT("import_materials"), TEXT("import_textures"), TEXT("create_physics_asset"), TEXT("import_animations"),
+				 TEXT("import_morph_targets"), TEXT("update_skeleton_reference_pose"), TEXT("skeleton_ref"),
+				 TEXT("expected_morph_targets"), TEXT("expected_material_slots"), TEXT("expected_lod_count")}, TEXT("an FBX importer"))) return false;
 			const bool bTexture = Route.Kind == EFactoryExternalImportKind::Texture;
-			if (!bTexture
-				&& (Options->HasField(TEXT("srgb"))
-					|| Options->HasField(TEXT("compression_settings"))
-					|| Options->HasField(TEXT("mip_gen_settings"))
-					|| Options->HasField(TEXT("lod_group"))))
-			{
-				OutError.Code = TEXT("factory_import_option_not_applicable");
-				return false;
-			}
-			if (Route.Kind != EFactoryExternalImportKind::FbxSkeletalMesh
-				&& (Options->HasField(TEXT("import_animations"))
-					|| Options->HasField(TEXT("import_morph_targets"))
-					|| Options->HasField(TEXT("update_skeleton_reference_pose"))
-					|| Options->HasField(TEXT("skeleton_ref"))
-					|| Options->HasField(TEXT("expected_morph_targets"))
-					|| Options->HasField(TEXT("expected_material_slots"))
-					|| Options->HasField(TEXT("expected_lod_count"))))
-			{
-				OutError.Code = TEXT("factory_import_option_not_applicable");
-				return false;
-			}
+			if (RejectInapplicableOptions(bTexture,
+				{TEXT("srgb"), TEXT("compression_settings"), TEXT("mip_gen_settings"), TEXT("lod_group")}, TEXT("a texture importer"))) return false;
+			if (RejectInapplicableOptions(Route.Kind == EFactoryExternalImportKind::FbxSkeletalMesh,
+				{TEXT("import_animations"), TEXT("import_morph_targets"), TEXT("update_skeleton_reference_pose"), TEXT("skeleton_ref"),
+				 TEXT("expected_morph_targets"), TEXT("expected_material_slots"), TEXT("expected_lod_count")}, TEXT("an FBX skeletal-mesh importer"))) return false;
 			FString CanonicalOptions;
 			if (!Json::TryCanonicalize(
 					Options,
 					CanonicalOptions,
 					JsonError))
 			{
-				OutError.Code = TEXT("factory_import_options_invalid");
-				OutError.Detail = MoveTemp(JsonError);
+				OutError = MoveTemp(JsonError);
 				return false;
 			}
 			OutSpec.Options.Fingerprint = Json::Sha256Utf8(CanonicalOptions);
-			return OutSpec.IsValid();
+			if (OutSpec.RequestId.IsEmpty())
+			{
+				OutError = Contract::FDiagnostic::Failure(TEXT("request_id_missing"),
+					TEXT("The request requires a non-empty request identifier."), TEXT("input_decode"));
+				OutError.SourceKind = TEXT("native_request");
+				OutError.Source.JsonPath = TEXT("/request_id");
+				OutError.PropertyPath = TEXT("/request_id");
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(OutSpec.RequestId);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty string"));
+				return false;
+			}
+			return true;
 		}
 
 		struct FExecutionContext final
@@ -343,17 +355,23 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			FFactoryExternalImportReadback Readback;
 		};
 
-		void ConvertError(
+		void SetStageFailure(
 			const FFactoryExternalImportError& DomainError,
+			const EOperationLifecycleStage Stage, const FString& Target,
 			FOperationLifecycleError& OutError)
 		{
-			OutError = FOperationLifecycleError(
-				DomainError.Code.IsEmpty()
-					? FString(TEXT("factory_import_operation_failed"))
-					: DomainError.Code,
-				DomainError.Detail.IsEmpty()
-					? DomainError.SubjectId
-					: DomainError.Detail);
+			OutError = DomainError;
+			if (OutError.IsEmpty())
+			{
+				OutError = Contract::FDiagnostic::Failure(TEXT("factory_import_operation_failed"),
+					FString(TEXT("Factory import failed during ")) + LexToString(Stage) + TEXT(" without providing a diagnostic."),
+					LexToString(Stage));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = TEXT("stage_requirement_satisfied");
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			}
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target;
 		}
 
 		class FVersionFence final : public IOperationVersionFencePort
@@ -376,7 +394,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 					: Context->Session->CheckPrePersist(Context->LastError);
 				if (!bOutCurrent)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, Stage, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return true;
 			}
@@ -410,7 +428,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 				}
 				if (!bSucceeded)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, EOperationLifecycleStage::DomainExecute, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return bSucceeded;
 			}
@@ -427,7 +445,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 					Context->LastError);
 				if (!bSucceeded || !bOutConfirmed)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, EOperationLifecycleStage::Rollback, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return bSucceeded;
 			}
@@ -454,7 +472,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 					Context->Session->Settle(Context->LastError);
 				if (!bSucceeded)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, EOperationLifecycleStage::Settle, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return bSucceeded;
 			}
@@ -479,9 +497,13 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			{
 				if (GFailureStage == TEXT("persist"))
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("factory_import_test_failure"),
-						TEXT("persist"));
+					OutError = Contract::FDiagnostic::Failure(TEXT("factory_import_test_failure"),
+						TEXT("A test-injected failure stopped factory import persistence."), LexToString(EOperationLifecycleStage::Persist));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Context->Session->GetTargetIdentity();
+					OutError.PropertyPath = TEXT("operation_succeeded");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 					return false;
 				}
 				Context->LastError = {};
@@ -490,7 +512,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 					Context->LastError);
 				if (!bSucceeded)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, EOperationLifecycleStage::Persist, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return bSucceeded;
 			}
@@ -522,7 +544,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 					Context->LastError);
 				if (!bOutEquivalent)
 				{
-					ConvertError(Context->LastError, OutError);
+					SetStageFailure(Context->LastError, EOperationLifecycleStage::IndependentVerify, Context->Session->GetTargetIdentity(), OutError);
 				}
 				return true;
 			}
@@ -542,15 +564,6 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			Result->SetStringField(TEXT("asset_class"), Readback.AssetClass);
 			Result->SetStringField(TEXT("source_ref"), Readback.SourceRef);
 			Result->SetStringField(
-				TEXT("source_sha256"),
-				Readback.SourceSha256);
-			Result->SetStringField(
-				TEXT("import_data_class"),
-				Readback.ImportDataClass);
-			Result->SetStringField(
-				TEXT("options_fingerprint"),
-				Readback.OptionsFingerprint);
-			Result->SetStringField(
 				TEXT("business_state_kind"),
 				Readback.BusinessStateKind);
 			Result->SetNumberField(
@@ -561,10 +574,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			{
 				Dependencies.Add(MakeShared<FJsonValueString>(Identity));
 			}
-			Result->SetArrayField(
-				TEXT("dependency_identities"),
-				MoveTemp(Dependencies));
-			Result->SetBoolField(TEXT("reloaded"), Readback.bReloaded);
+			Result->SetArrayField(TEXT("dependencies"), MoveTemp(Dependencies));
 			if (Readback.Srgb.IsSet())
 			{
 				Result->SetBoolField(TEXT("srgb"), Readback.Srgb.GetValue());
@@ -573,14 +583,8 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 			if (!Readback.MipGenSettings.IsEmpty()) Result->SetStringField(TEXT("mip_gen_settings"), Readback.MipGenSettings);
 			if (!Readback.LodGroup.IsEmpty()) Result->SetStringField(TEXT("lod_group"), Readback.LodGroup);
 			if (Readback.LodCount != INDEX_NONE) Result->SetNumberField(TEXT("lod_count"), Readback.LodCount);
-			auto Strings = [](const TArray<FString>& Values)
-			{
-				TArray<TSharedPtr<FJsonValue>> ResultValues;
-				for (const FString& Value : Values) ResultValues.Add(MakeShared<FJsonValueString>(Value));
-				return ResultValues;
-			};
-			Result->SetArrayField(TEXT("morph_target_names"), Strings(Readback.MorphTargetNames));
-			Result->SetArrayField(TEXT("material_slot_names"), Strings(Readback.MaterialSlotNames));
+			Result->SetNumberField(TEXT("morph_target_count"), Readback.MorphTargetNames.Num());
+			Result->SetNumberField(TEXT("material_slot_count"), Readback.MaterialSlotNames.Num());
 			return Result;
 		}
 
@@ -601,57 +605,45 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 				OutError = {};
 				if (!IsInGameThread())
 				{
-					return Fail(
-						OutError,
-						TEXT("factory_import_game_thread_required"),
-						Request.CommandId);
+					return Fail(OutError, CommandGuardFailure(TEXT("factory_import_game_thread_required"),
+						TEXT("Factory import must execute on the game thread."), Request.CommandId, TEXT("game_thread"), false, true));
 				}
 				if (!Request.AuthorityScopes.Contains(TEXT("uai:operate")))
 				{
-					return Fail(
-						OutError,
-						TEXT("factory_import_authority_required"),
-						Request.CommandId);
+					return Fail(OutError, CommandGuardFailure(TEXT("factory_import_authority_required"),
+						TEXT("Factory import requires the uai:operate authority scope."), Request.CommandId, TEXT("operate_authority"), false, true));
 				}
 				if (Request.bCancellationRequested)
 				{
-					return Fail(
-						OutError,
-						TEXT("factory_import_cancelled"),
-						Request.RequestId);
+					return Fail(OutError, CommandGuardFailure(TEXT("factory_import_cancelled"),
+						TEXT("Factory import was cancelled before preparation."), Request.RequestId, TEXT("cancellation_requested"), true, false));
 				}
 				const FUeAgentFactoryExternalImportCommandRoute* const Route =
 					FindRoute(Request.CommandId);
 				if (!Route)
 				{
-					return Fail(
-						OutError,
-						TEXT("factory_import_command_not_supported"),
-						Request.CommandId);
+					return Fail(OutError, CommandGuardFailure(TEXT("factory_import_command_not_supported"),
+						TEXT("No factory import route is registered for the requested command."), Request.CommandId, TEXT("command_supported"), false, true));
 				}
 				FFactoryExternalImportSpec Spec;
 				FFactoryExternalImportError DomainError;
 				if (!TryBuildSpec(Request, *Route, Spec, DomainError))
 				{
-					return Fail(
-						OutError,
-						DomainError.Code.IsEmpty()
-							? FString(TEXT("factory_import_params_invalid"))
-							: DomainError.Code,
-						DomainError.SubjectId,
-						DomainError.Detail);
+					return Fail(OutError, DomainError);
 				}
 				TSharedPtr<IFactoryExternalImportSession> Session;
 				if (!Provider->Prepare(Spec, Session, DomainError)
 					|| !Session.IsValid())
 				{
-					return Fail(
-						OutError,
-						DomainError.Code.IsEmpty()
-							? FString(TEXT("factory_import_prepare_failed"))
-							: DomainError.Code,
-						DomainError.SubjectId,
-						DomainError.Detail);
+					if (DomainError.IsEmpty())
+					{
+						DomainError = CommandGuardFailure(TEXT("factory_import_session_unavailable"),
+							TEXT("Factory import preparation did not produce a session or a diagnostic."),
+							Request.RequestId, TEXT("session_ready"), false, true);
+						DomainError.Stage = TEXT("prepare");
+						DomainError.TargetPath = Spec.DestinationRef;
+					}
+					return Fail(OutError, DomainError);
 				}
 				const TSharedRef<FExecutionContext> Context =
 					MakeShared<FExecutionContext>(Session.ToSharedRef());
@@ -678,55 +670,22 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 				FOperationLifecycleReceipt Receipt;
 				if (!Lifecycle.Run(Plan, Authorization, Receipt))
 				{
-					return Fail(
-						OutError,
-						Receipt.GetErrorCode().IsEmpty()
-							? FString(TEXT("factory_import_operation_failed"))
-							: Receipt.GetErrorCode(),
-						Target,
-						Context->LastError.Detail,
-						LexToString(Receipt.GetStatus()),
-						Receipt.DidMutationStart(),
-						Receipt.IsRetrySafe());
+					return Fail(OutError, Receipt.GetDiagnostic(), LexToString(Receipt.GetStatus()), Receipt.DidMutationStart(), Receipt.IsRetrySafe());
 				}
 				const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 				Payload->SetStringField(TEXT("command_id"), Request.CommandId);
 				Payload->SetStringField(
 					TEXT("terminal_status"),
 					LexToString(Receipt.GetStatus()));
-				Payload->SetBoolField(
-					TEXT("mutation_started"),
-					Receipt.DidMutationStart());
-				Payload->SetStringField(
-					TEXT("persistence_receipt_id"),
-					Receipt.GetPersistenceReceiptId());
-				Payload->SetStringField(
-					TEXT("plan_fingerprint"),
-					Plan.GetPlanFingerprint());
-				TArray<TSharedPtr<FJsonValue>> Phases;
-				for (const FString& Phase : Receipt.GetPhaseHistory())
-				{
-					Phases.Add(MakeShared<FJsonValueString>(Phase));
-				}
-				Payload->SetArrayField(TEXT("phase_history"), MoveTemp(Phases));
-				Payload->SetObjectField(
-					TEXT("independent_readback"),
-					ReadbackJson(Context->Readback));
+				Payload->SetObjectField(TEXT("readback"), ReadbackJson(Context->Readback));
 				FString CanonicalPayload;
-				FString JsonError;
+				UE::UAI::Contract::FDiagnostic JsonError;
 				if (!Json::TryCanonicalize(
 						Payload,
 						CanonicalPayload,
 						JsonError))
 				{
-					return Fail(
-						OutError,
-						TEXT("factory_import_result_invalid"),
-						Target,
-						JsonError,
-						TEXT("state_unknown"),
-						true,
-						false);
+					return Fail(OutError, JsonError, TEXT("state_unknown"), true, false);
 				}
 				OutResponse.PayloadJson = MoveTemp(CanonicalPayload);
 				return true;
@@ -739,20 +698,48 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 
 	bool FUeAgentFactoryExternalImportCommandRoute::IsValid() const
 	{
-		if (CommandId.IsEmpty() || PythonFunction.IsEmpty())
+		UE::UAI::Contract::FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FUeAgentFactoryExternalImportCommandRoute::TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		if (CommandId.IsEmpty())
 		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("factory_import_route_invalid"),
+				TEXT("The route requires a non-empty command_id."), TEXT("route_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("command_id");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty string"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(CommandId);
 			return false;
 		}
-		if (Kind == EFactoryExternalImportKind::StaticMesh)
+		if (PythonFunction.IsEmpty())
 		{
-			return Operation == EFactoryExternalImportOperation::Reimport;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("factory_import_route_invalid"),
+				TEXT("The route requires a non-empty python_function."), TEXT("route_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("python_function");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty string"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(PythonFunction);
+			return false;
 		}
-		if (Kind == EFactoryExternalImportKind::FbxAnimation
+		const bool bRequiresReimport = Kind == EFactoryExternalImportKind::StaticMesh;
+		const bool bRequiresImport = Kind == EFactoryExternalImportKind::FbxAnimation
 			|| Kind == EFactoryExternalImportKind::FbxSkeletalMesh
 			|| Kind == EFactoryExternalImportKind::GeometryCache
-			|| Kind == EFactoryExternalImportKind::LightProfile)
+			|| Kind == EFactoryExternalImportKind::LightProfile;
+		if ((bRequiresReimport && Operation != EFactoryExternalImportOperation::Reimport)
+			|| (bRequiresImport && Operation != EFactoryExternalImportOperation::Import))
 		{
-			return Operation == EFactoryExternalImportOperation::Import;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("factory_import_route_invalid"),
+				TEXT("The import operation is not supported for this factory kind."), TEXT("route_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("operation");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(bRequiresReimport ? TEXT("reimport") : TEXT("import"));
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Operation));
+			return false;
 		}
 		return true;
 	}
@@ -778,7 +765,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 
 	bool TryCreateProductionFactoryExternalImportCommandService(
 		TSharedPtr<IUeAgentFactoryExternalImportCommandService>& OutService,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutService.Reset();
 		TSharedPtr<IFactoryExternalImportProvider> Provider;

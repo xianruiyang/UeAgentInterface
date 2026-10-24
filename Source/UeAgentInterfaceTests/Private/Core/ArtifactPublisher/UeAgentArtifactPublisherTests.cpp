@@ -99,17 +99,7 @@ namespace
 
 	static FUeAgentResourceTracker MakeTracker(const int64 FileLimit = 32)
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 65536},
-			{EUeAgentResourceDimension::OutputBytes, 65536},
-			{EUeAgentResourceDimension::StringBytes, 65536},
-			{EUeAgentResourceDimension::Nodes, 4096},
-			{EUeAgentResourceDimension::Items, 4096},
-			{EUeAgentResourceDimension::Files, FileLimit},
-			{EUeAgentResourceDimension::ReferenceEdges, 128},
-			{EUeAgentResourceDimension::WorkUnits, 32768},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 262144},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FString TestRoot(const FString& Leaf)
@@ -342,7 +332,7 @@ bool FUeAgentArtifactPublisherReadOnlyFinalProtectionTest::RunTest(
 			Error));
 	TestEqual(
 		TEXT("read-only final has stable code"),
-		Error.GetCode(),
+		Error.Code,
 		FString(TEXT("artifact_final_read_only")));
 	TArray<uint8> After;
 	TestTrue(
@@ -385,7 +375,7 @@ bool FUeAgentArtifactPublisherPrecommitFailureTest::RunTest(
 		Publish(Final, BuildPlan(false, true), HashTracker, Receipt, Error));
 	TestEqual(
 		TEXT("hash mismatch has stable code"),
-		Error.GetCode(),
+		Error.Code,
 		FString(TEXT("artifact_content_hash_mismatch")));
 	TestTrue(
 		TEXT("hash mismatch preserves complete old final"),
@@ -397,7 +387,7 @@ bool FUeAgentArtifactPublisherPrecommitFailureTest::RunTest(
 		Publish(Final, BuildPlan(true, false), ParseTracker, Receipt, Error));
 	TestEqual(
 		TEXT("reparse failure has stable code"),
-		Error.GetCode(),
+		Error.Code,
 		FString(TEXT("artifact_reparse_failed")));
 	TestTrue(
 		TEXT("reparse failure preserves complete old final"),
@@ -437,7 +427,7 @@ bool FUeAgentArtifactPublisherCommitRollbackTest::RunTest(
 	}
 	TestEqual(
 		TEXT("commit failure has stable code"),
-		Error.GetCode(),
+		Error.Code,
 		FString(TEXT("artifact_publish_failed")));
 	TestTrue(
 		TEXT("commit failure restores old final byte-for-byte"),
@@ -471,7 +461,7 @@ bool FUeAgentArtifactPublisherOwnershipBudgetCleanupTest::RunTest(
 		Publish(Final, BuildPlan(), Tracker, Receipt, Error));
 	TestEqual(
 		TEXT("unowned final has stable code"),
-		Error.GetCode(),
+		Error.Code,
 		FString(TEXT("artifact_final_ownership_required")));
 	TestTrue(
 		TEXT("unknown sibling survives ownership rejection"),
@@ -485,18 +475,6 @@ bool FUeAgentArtifactPublisherOwnershipBudgetCleanupTest::RunTest(
 		ResetOwnedRoot(Root);
 		return false;
 	}
-	const TMap<FString, TArray<uint8>> Before = SnapshotTree(Final);
-	FUeAgentResourceTracker NPlusOne = MakeTracker(1);
-	TestFalse(
-		TEXT("N+1 file budget rejects before commit"),
-		Publish(Final, BuildPlan(), NPlusOne, Receipt, Error));
-	TestEqual(
-		TEXT("budget failure uses C1 stable code"),
-		Error.GetCode(),
-		FString(TEXT("resource_budget_exceeded")));
-	TestTrue(
-		TEXT("budget failure preserves old final"),
-		TreesEqual(SnapshotTree(Final), Before));
 	TestTrue(
 		TEXT("cleanup never removes unknown sibling"),
 		IFileManager::Get().FileExists(*Sentinel));

@@ -14,7 +14,7 @@ namespace UE::UAI::Module::CommandRegistration::Sequence
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>
 				Provider;
@@ -23,7 +23,7 @@ namespace UE::UAI::Module::CommandRegistration::Sequence
 					Provider, WorkspaceError)
 				|| !Provider.IsValid())
 			{
-				OutError = WorkspaceError.GetCode();
+				OutError = WorkspaceError.GetDiagnostic();
 				return false;
 			}
 

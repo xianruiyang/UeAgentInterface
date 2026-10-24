@@ -22,10 +22,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 
 		virtual bool TryResolveRegistryRelations(
 			const FAssetData& Record,
-			const FString& Direction,
-			const TArray<FString>& RelationKinds,
-			TArray<FString>& OutDependencies,
-			TArray<FString>& OutReferencers,
+			const FUeAgentAssetRelationGraphRequest& Request,
+			FUeAgentAssetRelationGraphResult& OutGraph,
 			FUeAgentAssetProjectReadError& OutError) override;
 
 		virtual bool TryResolveOpenAssets(
@@ -61,6 +59,12 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 				FUeAgentExecutionContextRef& Context,
 			const FString& ConfigScope,
 			const FConfigFile*& OutConfig,
+			FUeAgentAssetProjectReadError& OutError) override;
+
+		virtual bool TryResolveProjectSettingsObject(
+			const UE::UAI::ContextResource::FUeAgentExecutionContextRef& Context,
+			const FString& SectionId,
+			UObject*& OutObject,
 			FUeAgentAssetProjectReadError& OutError) override;
 	};
 }

@@ -1,10 +1,51 @@
 #include "Core/ContentDiscovery/UeAgentContentDiscovery.h"
 
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
+
 #include "Algo/Sort.h"
+#include "Dom/JsonValue.h"
 #include "Misc/SecureHash.h"
 
 namespace UE::UAI::ContentDiscovery
 {
+	bool FUeAgentContentDiscoveryService::TryResolveReadableName(
+		const FString& Name, FContentDiscoveryItem& OutItem, FContentDiscoveryError& OutError) const
+	{
+		OutItem = {};
+		OutError = {};
+		FContentDiscoveryRequest Request;
+		for (const auto& Provider : Providers)
+			for (const auto& Kind : Provider.Value->GetContentKinds())
+				Request.ContentKinds.AddUnique(Kind);
+		Request.RequiredOperations = {TEXT("query")};
+		FContentDiscoverySearchResult Result;
+		if (!TrySearch(Request, Result, OutError)) return false;
+		if (Result.HasFailures())
+		{
+			OutError = Result.GetFailureDiagnostic();
+			return false;
+		}
+		TArray<FContentDiscoveryItem> Items;
+		TArray<FScopedNameDiscoveryEntry> Names;
+		for (const auto& Provider : Result.Providers)
+		{
+			if (!Provider.Page.IsSet()) continue;
+			for (const auto& Item : Provider.Page->Items)
+			{
+				Items.Add(Item);
+				Names.Add({Item.DisplayName, Item.PublicDiscoveryScopes, Item.Identity});
+			}
+		}
+		int32 Index = INDEX_NONE;
+		if (!TryResolveScopedDiscoveryName(Names, Name, ENameComparison::IgnoreCase, Index, OutError))
+		{
+			OutError.SubjectId = Name;
+			return false;
+		}
+		OutItem = Items[Index];
+		return true;
+	}
+
 	namespace
 	{
 		bool IsExactText(const FString& Value)
@@ -12,16 +53,52 @@ namespace UE::UAI::ContentDiscovery
 			return !Value.IsEmpty() && Value == Value.TrimStartAndEnd();
 		}
 
-		void SetError(
-			FContentDiscoveryError& OutError,
-			const FString& Code,
-			const FString& SubjectId = FString(),
-			const FString& Detail = FString())
+		FContentDiscoveryError Invalid(const TCHAR* Code, const FString& Reason, const FString& Path)
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
+			auto Error = FContentDiscoveryError::Failure(Code, Reason, TEXT("content_search"));
+			Error.PropertyPath = Path;
+			return Error;
+		}
+
+		FString ChildPath(const FString& Path, const TCHAR* Field)
+		{
+			return Path.IsEmpty() ? FString(Field) : Path + TEXT(".") + Field;
+		}
+
+		bool ValidateText(const FString& Value, const TCHAR* Code, const TCHAR* Reason,
+			const FString& Path, FContentDiscoveryError& OutError, bool bPrivate = false)
+		{
+			if (IsExactText(Value)) return true;
+			OutError = Invalid(Code, Reason, Path);
+			if (bPrivate) OutError.ActualEvidence = MakeShared<FJsonValueString>(Value);
+			else OutError.ActualValue = MakeShared<FJsonValueString>(Value);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty text without surrounding whitespace"));
+			return false;
+		}
+
+		bool ValidateUniqueTexts(const TArray<FString>& Values, const TCHAR* Code,
+			const TCHAR* Label, const FString& Path, FContentDiscoveryError& OutError)
+		{
+			TSet<FString> Seen;
+			for (int32 Index = 0; Index < Values.Num(); ++Index)
+			{
+				const FString& Value = Values[Index];
+				const FString ItemPath = FString::Printf(TEXT("%s[%d]"), *Path, Index);
+				if (!IsExactText(Value))
+				{
+					OutError = Invalid(Code, FString::Printf(TEXT("The %s must be non-empty and have no surrounding whitespace."), Label), ItemPath);
+					OutError.ActualValue = MakeShared<FJsonValueString>(Value);
+					return false;
+				}
+				if (Seen.Contains(Value))
+				{
+					OutError = Invalid(Code, FString::Printf(TEXT("The %s duplicates the value at index %d."), Label, Values.Find(Value)), ItemPath);
+					OutError.ActualValue = MakeShared<FJsonValueString>(Value);
+					return false;
+				}
+				Seen.Add(Value);
+			}
+			return true;
 		}
 
 		FString Sha1(const FString& Value)
@@ -63,32 +140,91 @@ namespace UE::UAI::ContentDiscovery
 			return false;
 		}
 
-		int32 LevenshteinDistance(const FString& Left, const FString& Right)
+		void SplitNormalizedTokens(
+			const FString& Text,
+			TArray<FString>& OutTokens)
 		{
-			const FString A = Left.ToLower();
-			const FString B = Right.ToLower();
-			TArray<int32> Previous;
-			TArray<int32> Current;
-			Previous.SetNumUninitialized(B.Len() + 1);
-			Current.SetNumUninitialized(B.Len() + 1);
-			for (int32 Index = 0; Index <= B.Len(); ++Index)
+			OutTokens.Reset();
+			FString Current;
+			for (int32 Index = 0; Index < Text.Len(); ++Index)
 			{
-				Previous[Index] = Index;
-			}
-			for (int32 LeftIndex = 1; LeftIndex <= A.Len(); ++LeftIndex)
-			{
-				Current[0] = LeftIndex;
-				for (int32 RightIndex = 1; RightIndex <= B.Len(); ++RightIndex)
+				const TCHAR Character = Text[Index];
+				if (!FChar::IsAlnum(Character))
 				{
-					const int32 Cost = A[LeftIndex - 1] == B[RightIndex - 1] ? 0 : 1;
-					Current[RightIndex] = FMath::Min3(
-						Current[RightIndex - 1] + 1,
-						Previous[RightIndex] + 1,
-						Previous[RightIndex - 1] + Cost);
+					if (!Current.IsEmpty())
+					{
+						OutTokens.Add(Current.ToLower());
+						Current.Reset();
+					}
+					continue;
 				}
-				Swap(Previous, Current);
+
+				const bool bHasPrevious = Index > 0;
+				const bool bHasNext = Index + 1 < Text.Len();
+				const TCHAR Previous = bHasPrevious ? Text[Index - 1] : 0;
+				const TCHAR Next = bHasNext ? Text[Index + 1] : 0;
+				const bool bAlphaNumericBoundary = !Current.IsEmpty()
+					&& ((FChar::IsAlpha(Character) && FChar::IsDigit(Previous))
+						|| (FChar::IsDigit(Character) && FChar::IsAlpha(Previous)));
+				const bool bCaseBoundary = !Current.IsEmpty()
+					&& FChar::IsUpper(Character)
+					&& (FChar::IsLower(Previous)
+						|| (FChar::IsUpper(Previous)
+							&& bHasNext
+							&& FChar::IsLower(Next)));
+				if (bAlphaNumericBoundary || bCaseBoundary)
+				{
+					OutTokens.Add(Current.ToLower());
+					Current.Reset();
+				}
+				Current.AppendChar(Character);
 			}
-			return Previous[B.Len()];
+			if (!Current.IsEmpty())
+			{
+				OutTokens.Add(Current.ToLower());
+			}
+		}
+
+		int32 ScoreKeywordAgainstTokens(
+			const FString& Keyword,
+			const TArray<FString>& Tokens)
+		{
+			int32 BestScore = INDEX_NONE;
+			for (int32 TokenIndex = 0; TokenIndex < Tokens.Num(); ++TokenIndex)
+			{
+				const FString& Token = Tokens[TokenIndex];
+				if (Token == Keyword)
+				{
+					BestScore = FMath::Max(BestScore, 1000);
+					continue;
+				}
+				if (Token.StartsWith(Keyword, ESearchCase::CaseSensitive))
+				{
+					BestScore = FMath::Max(
+						BestScore,
+						800 - FMath::Min(300, Token.Len() - Keyword.Len()));
+					continue;
+				}
+
+				FString TokenSuffix;
+				for (int32 SuffixIndex = TokenIndex;
+					 SuffixIndex < Tokens.Num();
+					 ++SuffixIndex)
+				{
+					TokenSuffix += Tokens[SuffixIndex];
+					if (TokenSuffix.Len() >= Keyword.Len())
+					{
+						break;
+					}
+				}
+				if (TokenSuffix.StartsWith(Keyword, ESearchCase::CaseSensitive))
+				{
+					BestScore = FMath::Max(
+						BestScore,
+						600 - FMath::Min(300, TokenIndex));
+				}
+			}
+			return BestScore;
 		}
 
 		bool IsProviderDefinitionValid(
@@ -97,101 +233,45 @@ namespace UE::UAI::ContentDiscovery
 		{
 			if (!IsExactText(Provider->GetProviderId()))
 			{
-				SetError(
-					OutError,
-					TEXT("content_discovery_provider_id_invalid"),
-					Provider->GetProviderId());
+				ValidateText(Provider->GetProviderId(), TEXT("content_discovery_provider_id_invalid"),
+					TEXT("The content provider identifier must be non-empty and have no surrounding whitespace."), TEXT("provider_id"), OutError, true);
 				return false;
 			}
 			if (Provider->GetContentKinds().IsEmpty())
 			{
-				SetError(
-					OutError,
-					TEXT("content_discovery_provider_kind_missing"),
-					Provider->GetProviderId());
+				OutError = Invalid(TEXT("content_discovery_provider_kind_missing"), TEXT("The content provider must declare at least one supported content kind."), TEXT("content_kinds"));
+				OutError.SubjectId = Provider->GetProviderId();
 				return false;
 			}
-			TSet<FString> Seen;
-			for (const FString& Kind : Provider->GetContentKinds())
-			{
-				if (!IsExactText(Kind) || Seen.Contains(Kind))
-				{
-					SetError(
-						OutError,
-						TEXT("content_discovery_provider_kind_invalid"),
-						Provider->GetProviderId(),
-						Kind);
-					return false;
-				}
-				Seen.Add(Kind);
-			}
-			return true;
+			const bool bValid = ValidateUniqueTexts(Provider->GetContentKinds(), TEXT("content_discovery_provider_kind_invalid"),
+				TEXT("provider content kind"), TEXT("content_kinds"), OutError);
+			if (!bValid) OutError.SubjectId = Provider->GetProviderId();
+			return bValid;
 		}
-	}
-
-	bool FContentDiscoveryCursorEntry::IsValid() const
-	{
-		return IsExactText(ProviderId)
-			&& IsExactText(ExpectedRevision)
-			&& Offset >= -1;
-	}
-
-	bool FContentDiscoveryCursor::IsEmpty() const
-	{
-		return RequestFingerprint.IsEmpty() && Providers.IsEmpty();
-	}
-
-	bool FContentDiscoveryCursor::IsValid() const
-	{
-		if (IsEmpty())
-		{
-			return true;
-		}
-		if (!IsExactText(RequestFingerprint) || Providers.IsEmpty())
-		{
-			return false;
-		}
-		TSet<FString> Seen;
-		for (const FContentDiscoveryCursorEntry& Entry : Providers)
-		{
-			if (!Entry.IsValid() || Seen.Contains(Entry.ProviderId))
-			{
-				return false;
-			}
-			Seen.Add(Entry.ProviderId);
-		}
-		return true;
 	}
 
 	bool FContentDiscoveryRequest::IsValid() const
 	{
-		if (LimitPerProvider < 1 || LimitPerProvider > 64
-			|| ContentKinds.IsEmpty()
-			|| !Cursor.IsValid()
-			|| (MatchMode == EContentDiscoveryMatchMode::Exact
-				&& Query.TrimStartAndEnd().IsEmpty()))
+		FContentDiscoveryError Error;
+		return TryValidate(Error);
+	}
+
+	bool FContentDiscoveryRequest::TryValidate(Contract::FDiagnostic& OutError) const
+	{
+		OutError = {};
+		if (ContentKinds.IsEmpty())
 		{
+			OutError = Invalid(TEXT("content_search_request_invalid"), TEXT("Content search requires at least one content kind."), TEXT("content_kinds"));
 			return false;
 		}
-		TSet<FString> Kinds;
-		for (const FString& Kind : ContentKinds)
+		if (MatchMode == EContentDiscoveryMatchMode::Exact && Query.TrimStartAndEnd().IsEmpty())
 		{
-			if (!IsExactText(Kind) || Kinds.Contains(Kind))
-			{
-				return false;
-			}
-			Kinds.Add(Kind);
+			OutError = Invalid(TEXT("content_search_request_invalid"), TEXT("Exact content search requires a non-empty query."), TEXT("query"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(Query);
+			return false;
 		}
-		TSet<FString> Operations;
-		for (const FString& Operation : RequiredOperations)
-		{
-			if (!IsExactText(Operation) || Operations.Contains(Operation))
-			{
-				return false;
-			}
-			Operations.Add(Operation);
-		}
-		return true;
+		return ValidateUniqueTexts(ContentKinds, TEXT("content_search_request_invalid"), TEXT("content kind"), TEXT("content_kinds"), OutError)
+			&& ValidateUniqueTexts(RequiredOperations, TEXT("content_search_request_invalid"), TEXT("required operation"), TEXT("required_operations"), OutError);
 	}
 
 	FString FContentDiscoveryRequest::GetRequestFingerprint() const
@@ -210,50 +290,85 @@ namespace UE::UAI::ContentDiscovery
 
 	bool FContentDiscoveryItem::IsValid() const
 	{
-		return IsExactText(Identity)
-			&& IsExactText(DisplayName)
-			&& IsExactText(Domain)
-			&& IsExactText(ContentKind)
-			&& IsExactText(ClassPath)
-			&& IsExactText(StateLayer)
-			&& IsExactText(Revision)
-			&& IsExactText(DetailCommandId)
-			&& IsExactText(DetailTargetIdentity)
-			&& DetailInput.IsValid()
-			&& IsExactText(MatchReason)
-			&& !SupportedOperations.IsEmpty();
+		FContentDiscoveryError Error;
+		return TryValidate(Error);
 	}
 
-	bool FContentDiscoveryProviderPage::IsValid(const int32 Limit) const
+	bool FContentDiscoveryItem::TryValidate(Contract::FDiagnostic& OutError, const FString& Path) const
 	{
-		if (!IsExactText(ProviderId)
-			|| !IsExactText(Revision)
-			|| !bReadOnly
-			|| TotalMatches < 0
-			|| Items.Num() > Limit
-			|| NextOffset < -1
-			|| bComplete != (NextOffset == -1))
+		OutError = {};
+		const TCHAR* Code = TEXT("content_search_item_invalid");
+		if (!ValidateText(Identity, Code, TEXT("The content item requires a valid internal identity."), ChildPath(Path, TEXT("identity")), OutError, true)
+			|| !ValidateText(DisplayName, Code, TEXT("The content item requires a non-empty display name without surrounding whitespace."), ChildPath(Path, TEXT("display_name")), OutError)
+			|| !ValidateText(Domain, Code, TEXT("The content item requires a valid domain."), ChildPath(Path, TEXT("domain")), OutError)
+			|| !ValidateText(ContentKind, Code, TEXT("The content item requires a valid content kind."), ChildPath(Path, TEXT("content_kind")), OutError)
+			|| !ValidateText(ClassPath, Code, TEXT("The content item requires a valid class path."), ChildPath(Path, TEXT("class_path")), OutError)
+			|| !ValidateText(StateLayer, Code, TEXT("The content item requires a valid state layer."), ChildPath(Path, TEXT("state_layer")), OutError)
+			|| !ValidateText(Revision, Code, TEXT("The content item requires a valid revision."), ChildPath(Path, TEXT("revision")), OutError, true)
+			|| !ValidateText(DetailCommandId, Code, TEXT("The content item requires a valid detail command identifier."), ChildPath(Path, TEXT("detail_command_id")), OutError)
+			|| !ValidateText(DetailTargetIdentity, Code, TEXT("The content item requires a valid detail target identity."), ChildPath(Path, TEXT("detail_target_identity")), OutError, true)) return false;
+		if (!DetailInput.IsValid())
 		{
+			OutError = Invalid(Code, TEXT("The content item has no detail input object."), ChildPath(Path, TEXT("detail_input")));
 			return false;
 		}
-		for (const FContentDiscoveryItem& Item : Items)
+		if (!ValidateText(MatchReason, Code, TEXT("The content item requires a non-empty match reason without surrounding whitespace."), ChildPath(Path, TEXT("match_reason")), OutError)) return false;
+		if (SupportedOperations.IsEmpty())
 		{
-			if (!Item.IsValid())
+			OutError = Invalid(Code, TEXT("The content item declares no supported operations."), ChildPath(Path, TEXT("supported_operations")));
+			return false;
+		}
+		for (int32 Index = 0; Index < PublicDiscoveryScopes.Num(); ++Index)
+		{
+			const FString& Scope = PublicDiscoveryScopes[Index];
+			if (!IsExactText(Scope) || !IsReadableDiscoveryName(Scope))
 			{
+				OutError = Invalid(Code, TEXT("The content discovery scope must be a readable public name without surrounding whitespace."),
+					FString::Printf(TEXT("%s[%d]"), *ChildPath(Path, TEXT("public_discovery_scopes")), Index));
+				OutError.ActualValue = MakeShared<FJsonValueString>(Scope);
 				return false;
 			}
 		}
 		return true;
 	}
 
-	bool FContentDiscoveryError::IsPresent() const
+	bool FContentDiscoveryProviderPage::IsValid() const
 	{
-		return !Code.IsEmpty();
+		FContentDiscoveryError Error;
+		return TryValidate(Error);
 	}
+
+	bool FContentDiscoveryProviderPage::TryValidate(Contract::FDiagnostic& OutError) const
+	{
+		OutError = {};
+		const TCHAR* Code = TEXT("content_search_provider_page_invalid");
+		if (!ValidateText(ProviderId, Code, TEXT("The content page requires a valid provider identifier."), TEXT("provider_id"), OutError, true)
+			|| !ValidateText(Revision, Code, TEXT("The content page requires a valid revision."), TEXT("revision"), OutError, true)) return false;
+		if (!bReadOnly)
+		{
+			OutError = Invalid(Code, TEXT("A content search provider must return a read-only page."), TEXT("read_only"));
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(bReadOnly);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			return false;
+		}
+		if (TotalMatches < 0 || Items.Num() != TotalMatches)
+		{
+			OutError = Invalid(Code, TotalMatches < 0 ? TEXT("The content page match count cannot be negative.")
+				: TEXT("The content page match count differs from its item count."), TEXT("total_matches"));
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(TotalMatches);
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(Items.Num());
+			return false;
+		}
+		for (int32 Index = 0; Index < Items.Num(); ++Index)
+			if (!Items[Index].TryValidate(OutError, FString::Printf(TEXT("items[%d]"), Index))) return false;
+		return true;
+	}
+
+	
 
 	bool FContentDiscoveryProviderResult::Succeeded() const
 	{
-		return Page.IsSet() && !Error.IsPresent();
+		return Page.IsSet() && !Error.IsValid();
 	}
 
 	bool FContentDiscoverySearchResult::HasFailures() const
@@ -261,23 +376,35 @@ namespace UE::UAI::ContentDiscovery
 		return Providers.ContainsByPredicate(
 			[](const FContentDiscoveryProviderResult& Provider)
 			{
-				return Provider.Error.IsPresent();
-			});
-	}
-
-	bool FContentDiscoverySearchResult::HasMore() const
-	{
-		return Providers.ContainsByPredicate(
-			[](const FContentDiscoveryProviderResult& Provider)
-			{
-				return Provider.Page.IsSet()
-					&& !Provider.Page->bComplete;
+				return Provider.Error.IsValid();
 			});
 	}
 
 	bool FContentDiscoverySearchResult::IsComplete() const
 	{
-		return !HasFailures() && !HasMore();
+		return !HasFailures();
+	}
+
+	FContentDiscoveryError FContentDiscoverySearchResult::GetFailureDiagnostic() const
+	{
+		FContentDiscoveryError Error;
+		TArray<FString> FailedKinds;
+		for (const auto& Provider : Providers)
+		{
+			if (!Provider.Error.IsValid()) continue;
+			if (Error.IsEmpty()) Error = Invalid(TEXT("content_search_incomplete"), TEXT("Content search could not complete for all requested content kinds."), TEXT("content_kinds"));
+			auto Cause = Provider.Error;
+			if (Cause.SubjectId.IsEmpty()) Cause.SubjectId = Provider.ProviderId;
+			Error.Diagnostics.Add(MoveTemp(Cause));
+			for (const auto& Kind : Provider.ContentKinds) FailedKinds.AddUnique(Kind);
+		}
+		if (!Error.IsEmpty())
+		{
+			TArray<TSharedPtr<FJsonValue>> Values;
+			for (const auto& Kind : FailedKinds) Values.Add(MakeShared<FJsonValueString>(Kind));
+			Error.ActualValue = MakeShared<FJsonValueArray>(MoveTemp(Values));
+		}
+		return Error;
 	}
 
 	FUeAgentContentDiscoveryService::FUeAgentContentDiscoveryService(
@@ -298,22 +425,23 @@ namespace UE::UAI::ContentDiscovery
 		OutError = {};
 		if (InProviders.IsEmpty())
 		{
-			SetError(OutError, TEXT("content_discovery_provider_missing"));
+			OutError = Invalid(TEXT("content_discovery_provider_missing"), TEXT("Content discovery requires at least one registered provider."), TEXT("providers"));
 			return false;
 		}
 		TMap<FString, TSharedRef<IUeAgentContentDiscoveryProvider>> ById;
-		for (TSharedRef<IUeAgentContentDiscoveryProvider>& Provider : InProviders)
+		for (int32 Index = 0; Index < InProviders.Num(); ++Index)
 		{
+			TSharedRef<IUeAgentContentDiscoveryProvider>& Provider = InProviders[Index];
+			const FString ProviderPath = FString::Printf(TEXT("providers[%d]"), Index);
 			if (!IsProviderDefinitionValid(Provider, OutError))
 			{
+				OutError.PropertyPath = ProviderPath + TEXT(".") + OutError.PropertyPath;
 				return false;
 			}
 			if (ById.Contains(Provider->GetProviderId()))
 			{
-				SetError(
-					OutError,
-					TEXT("content_discovery_provider_duplicate"),
-					Provider->GetProviderId());
+				OutError = Invalid(TEXT("content_discovery_provider_duplicate"), TEXT("More than one content provider declares the same identifier."), ProviderPath + TEXT(".provider_id"));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Provider->GetProviderId());
 				return false;
 			}
 			ById.Add(Provider->GetProviderId(), MoveTemp(Provider));
@@ -333,27 +461,11 @@ namespace UE::UAI::ContentDiscovery
 	{
 		OutResult = {};
 		OutError = {};
-		if (!Request.IsValid())
+		if (!Request.TryValidate(OutError))
 		{
-			SetError(OutError, TEXT("content_search_request_invalid"));
 			return false;
 		}
 		const FString Fingerprint = Request.GetRequestFingerprint();
-		if (!Request.Cursor.IsEmpty()
-			&& Request.Cursor.RequestFingerprint != Fingerprint)
-		{
-			SetError(
-				OutError,
-				TEXT("content_search_cursor_request_mismatch"),
-				Request.Cursor.RequestFingerprint);
-			return false;
-		}
-		TMap<FString, FContentDiscoveryCursorEntry> CursorByProvider;
-		for (const FContentDiscoveryCursorEntry& Entry : Request.Cursor.Providers)
-		{
-			CursorByProvider.Add(Entry.ProviderId, Entry);
-		}
-
 		OutResult.RequestFingerprint = Fingerprint;
 		TSet<FString> Selected;
 		for (const FString& ProviderId : ProviderIds)
@@ -365,9 +477,6 @@ namespace UE::UAI::ContentDiscovery
 				continue;
 			}
 			Selected.Add(ProviderId);
-			const FContentDiscoveryCursorEntry* Cursor =
-				CursorByProvider.Find(ProviderId);
-			const int32 Offset = Cursor ? FMath::Max(Cursor->Offset, 0) : 0;
 			FContentDiscoveryProviderPage Page;
 			FContentDiscoveryError ProviderError;
 			FContentDiscoveryProviderResult Result;
@@ -375,69 +484,49 @@ namespace UE::UAI::ContentDiscovery
 			Result.ContentKinds = Provider->GetContentKinds();
 			if (!Provider->TrySearch(
 					Request,
-					Offset,
-					Request.LimitPerProvider,
 					Page,
 					ProviderError))
 			{
-				if (!ProviderError.IsPresent())
+				if (!ProviderError.IsValid())
 				{
-					SetError(
-						ProviderError,
-						TEXT("content_search_provider_failed"),
-						ProviderId);
+					ProviderError = Invalid(TEXT("content_search_provider_failed"), TEXT("The content provider failed without returning a diagnostic."), TEXT("provider"));
+					ProviderError.SubjectId = ProviderId;
 				}
 				Result.Error = MoveTemp(ProviderError);
 				OutResult.Providers.Add(MoveTemp(Result));
 				continue;
 			}
-			if (Page.ProviderId != ProviderId
-				|| !Page.IsValid(Request.LimitPerProvider))
+			if (Page.ProviderId != ProviderId)
 			{
-				SetError(
-					OutError,
-					TEXT("content_search_provider_page_invalid"),
-					ProviderId);
-				return false;
+				OutError = Invalid(TEXT("content_search_provider_page_invalid"), TEXT("The content page identifies a different provider from the one queried."), TEXT("provider_id"));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Page.ProviderId);
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ProviderId);
 			}
-			if (Cursor
-				&& Cursor->ExpectedRevision != Page.Revision)
+			else Page.TryValidate(OutError);
+			if (!OutError.IsEmpty())
 			{
-				SetError(
-					OutError,
-					TEXT("content_search_revision_stale"),
-					ProviderId,
-					Page.Revision);
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = ProviderId;
+				const auto PreviousFailure = OutResult.GetFailureDiagnostic();
+				OutError.Diagnostics.Append(PreviousFailure.Diagnostics);
 				return false;
-			}
-			if (Cursor && Cursor->Offset == -1)
-			{
-				Page.Items.Reset();
-				Page.NextOffset = -1;
-				Page.bComplete = true;
 			}
 			Result.Page = MoveTemp(Page);
 			OutResult.Providers.Add(MoveTemp(Result));
 		}
 		if (Selected.IsEmpty())
 		{
-			SetError(
-				OutError,
-				TEXT("content_search_kind_unsupported"),
-				FString::Join(Request.ContentKinds, TEXT(",")));
+			OutError = Invalid(TEXT("content_search_kind_unsupported"), TEXT("No registered content provider supports the requested content kinds."), TEXT("content_kinds"));
+			TArray<TSharedPtr<FJsonValue>> Actual;
+			for (const auto& Kind : Request.ContentKinds) Actual.Add(MakeShared<FJsonValueString>(Kind));
+			OutError.ActualValue = MakeShared<FJsonValueArray>(MoveTemp(Actual));
+			TArray<FString> SupportedKinds;
+			for (const auto& Provider : Providers)
+				for (const auto& Kind : Provider.Value->GetContentKinds()) SupportedKinds.AddUnique(Kind);
+			SupportedKinds.Sort();
+			TArray<TSharedPtr<FJsonValue>> Expected;
+			for (const auto& Kind : SupportedKinds) Expected.Add(MakeShared<FJsonValueString>(Kind));
+			OutError.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(Expected));
 			return false;
-		}
-		for (const TPair<FString, FContentDiscoveryCursorEntry>& Pair :
-			CursorByProvider)
-		{
-			if (!Selected.Contains(Pair.Key))
-			{
-				SetError(
-					OutError,
-					TEXT("content_search_cursor_provider_invalid"),
-					Pair.Key);
-				return false;
-			}
 		}
 		return true;
 	}
@@ -491,40 +580,55 @@ namespace UE::UAI::ContentDiscovery
 			}
 			return false;
 		case EContentDiscoveryMatchMode::Text:
-			for (const FString& Term : Terms)
-			{
-				const int32 Position = Term.Find(Query, ESearchCase::IgnoreCase);
-				if (Position != INDEX_NONE)
-				{
-					OutScore = 600 - FMath::Min(300, Position);
-					OutReason = TEXT("text");
-					return true;
-				}
-			}
-			return false;
 		case EContentDiscoveryMatchMode::Fuzzy:
+		{
+			TArray<FString> Keywords;
+			SplitNormalizedTokens(Query, Keywords);
+			if (Keywords.IsEmpty())
+			{
+				return false;
+			}
+			const FString CompactQuery = FString::Join(Keywords, TEXT(""));
+			int32 PhraseScore = 0;
 			for (const FString& Term : Terms)
 			{
-				const int32 Position = Term.Find(Query, ESearchCase::IgnoreCase);
-				if (Position != INDEX_NONE)
+				TArray<FString> TermTokens;
+				SplitNormalizedTokens(Term, TermTokens);
+				const FString CompactTerm = FString::Join(TermTokens, TEXT(""));
+				if (CompactTerm == CompactQuery)
 				{
-					OutScore = 600 - FMath::Min(300, Position);
-					OutReason = TEXT("text");
-					return true;
+					PhraseScore = FMath::Max(PhraseScore, 4000);
 				}
-				if (Query.Len() <= 64 && Term.Len() <= 128)
+				else if (CompactTerm.StartsWith(CompactQuery))
 				{
-					const int32 Distance = LevenshteinDistance(Query, Term);
-					const int32 Threshold = FMath::Max(2, Query.Len() / 3);
-					if (Distance <= Threshold)
-					{
-						OutScore = 400 - Distance;
-						OutReason = TEXT("fuzzy");
-						return true;
-					}
+					PhraseScore = FMath::Max(PhraseScore, 3000);
+				}
+				else if (CompactTerm.Contains(CompactQuery))
+				{
+					PhraseScore = FMath::Max(PhraseScore, 2000);
 				}
 			}
-			return false;
+			for (const FString& Keyword : Keywords)
+			{
+				int32 BestKeywordScore = INDEX_NONE;
+				for (const FString& Term : Terms)
+				{
+					TArray<FString> TermTokens;
+					SplitNormalizedTokens(Term, TermTokens);
+					BestKeywordScore = FMath::Max(
+						BestKeywordScore,
+						ScoreKeywordAgainstTokens(Keyword, TermTokens));
+				}
+				if (BestKeywordScore == INDEX_NONE)
+				{
+					return false;
+				}
+				OutScore += BestKeywordScore;
+			}
+			OutScore += PhraseScore;
+			OutReason = TEXT("text");
+			return true;
+		}
 		default:
 			return false;
 		}
@@ -562,6 +666,67 @@ namespace UE::UAI::ContentDiscovery
 				return false;
 			}
 		}
+		return true;
+	}
+
+	bool TryBuildContentDiscoveryProviderPage(
+		const FString& ProviderId,
+		const FString& Revision,
+		const FContentDiscoveryRequest& Request,
+		TArray<FContentDiscoveryItem> Items,
+		FContentDiscoveryProviderPage& OutPage,
+		FContentDiscoveryError& OutError)
+	{
+		OutPage = {};
+		OutError = {};
+		TArray<FContentDiscoveryItem> Matches;
+		TMap<FString, int32> MatchIndexByIdentity;
+		for (FContentDiscoveryItem& Item : Items)
+		{
+			if (!IsReadableDiscoveryName(Item.DisplayName)
+				|| !MatchesContentDiscoveryFilters(Request, Item)
+				|| !TryScoreContentDiscoveryMatch(
+					Request,
+					Item.Identity,
+					Item.DisplayName,
+					Item.SearchTerms,
+					Item.MatchScore,
+					Item.MatchReason))
+			{
+				continue;
+			}
+			const FString IdentityKey = Item.Identity.ToLower();
+			if (const int32* ExistingIndex = MatchIndexByIdentity.Find(IdentityKey))
+			{
+				if (Item.MatchScore > Matches[*ExistingIndex].MatchScore)
+				{
+					Matches[*ExistingIndex] = MoveTemp(Item);
+				}
+				continue;
+			}
+			MatchIndexByIdentity.Add(IdentityKey, Matches.Num());
+			Matches.Add(MoveTemp(Item));
+		}
+		Matches.Sort(
+			[](const FContentDiscoveryItem& Left,
+			   const FContentDiscoveryItem& Right)
+			{
+				if (Left.MatchScore != Right.MatchScore)
+				{
+					return Left.MatchScore > Right.MatchScore;
+				}
+				const int32 IgnoreCaseOrder = Left.Identity.Compare(
+					Right.Identity,
+					ESearchCase::IgnoreCase);
+				return IgnoreCaseOrder != 0
+					? IgnoreCaseOrder < 0
+					: Left.Identity < Right.Identity;
+			});
+		OutPage.ProviderId = ProviderId;
+		OutPage.Revision = Revision;
+		OutPage.TotalMatches = Matches.Num();
+		OutPage.bReadOnly = true;
+		OutPage.Items = MoveTemp(Matches);
 		return true;
 	}
 }

@@ -1,16 +1,22 @@
 #include "OperationOwners/AudioCommands/UeAgentAudioCommandOperationOwner.h"
 
+#include "Composition/GraphCompound/UeAgentGraphCompoundActivation.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaBindings.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundCommandHandlers.h"
+#include "Composition/GraphCompound/UeAgentGraphCompoundInternalExecution.h"
 #include "DomainAdapters/AudioCommands/UeAgentAudioCommandMechanicsBoundary.h"
+#include "Dom/JsonValue.h"
 #include "Misc/Paths.h"
 
 namespace UE::UAI::OperationOwners::AudioCommands
 {
 	using namespace Composition::GraphCompound;
+	using namespace CommandContract;
+	using namespace CommandEdge;
+
 	bool TryCreateMechanicsHandlers(
 		TMap<FString, TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
@@ -20,18 +26,25 @@ namespace UE::UAI::OperationOwners::AudioCommands
 			return false;
 		}
 		FGraphCompoundRuntimeConfig RuntimeConfig;
-		RuntimeConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 		FGraphCompoundAudioMediaProductionConfig ProductionConfig;
 		ProductionConfig.DurableJournalRoot = FPaths::ProjectSavedDir()
 			/ TEXT("UeAgentInterface/GraphCompound/AudioCommands");
-		ProductionConfig.OperationTimeoutSeconds = 120.0;
 		TSharedPtr<FGraphCompoundRuntime> Runtime;
 		FGraphCompoundRuntimeError RuntimeError;
 		if (!TryCreateAudioMediaGraphProductionRuntime(
 				RuntimeConfig, ProductionConfig, Runtime, RuntimeError)
 			|| !Runtime.IsValid())
 		{
-			OutError = RuntimeError.Code + TEXT(":") + RuntimeError.Detail;
+			OutError = RuntimeError;
+			if (OutError.IsEmpty()) {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("audio_command_mechanics_runtime_unavailable"),
+					TEXT("The audio runtime factory failed or returned no executable runtime without reporting a diagnostic."), TEXT("runtime_factory"));
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.PropertyPath = TEXT("runtime_ready");
+				OutError.SourceKind = TEXT("native_result");
+			}
 			return false;
 		}
 		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>> Mechanics;
@@ -45,12 +58,28 @@ namespace UE::UAI::OperationOwners::AudioCommands
 			if (OutHandlers.Contains(Handler->GetCommandId()))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("audio_command_mechanics_handler_duplicate");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("audio_command_mechanics_handler_duplicate"),
+					TEXT("More than one mechanics handler was created for the same audio command."), TEXT("internal_command"), Handler->GetCommandId());
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(2);
+				OutError.PropertyPath = TEXT("command_handler_registration_count");
+				OutError.SourceKind = TEXT("native_result");
+				if (DomainAdapters::AudioCommands::GetPublicCommandIds().Contains(Handler->GetCommandId()))
+					OutError.PublicMessage += TEXT(" Command: ") + Handler->GetCommandId() + TEXT(".");
 				return false;
 			}
 			OutHandlers.Add(Handler->GetCommandId(), Handler);
 		}
-		return OutHandlers.Num() == DomainAdapters::AudioCommands::GetCommandIds().Num();
+		if (OutHandlers.Num() != DomainAdapters::AudioCommands::GetCommandIds().Num()) {
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("audio_command_mechanics_handler_count_mismatch"),
+				TEXT("The audio mechanics factory must provide one handler for each required command."), TEXT("internal_command"));
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(DomainAdapters::AudioCommands::GetCommandIds().Num());
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(OutHandlers.Num());
+			OutError.PropertyPath = TEXT("command_handler_count");
+			OutError.SourceKind = TEXT("native_result");
+			return false;
+		}
+		return true;
 	}
 
 	CommandEdge::FUeAgentCommandResult Submit(
@@ -60,5 +89,28 @@ namespace UE::UAI::OperationOwners::AudioCommands
 		const TSharedRef<Contract::IUeAgentCancellationSignal>& Cancellation)
 	{
 		return Mechanics->Submit(Request, Caller, Cancellation);
+	}
+
+	bool TryExecuteInternal(
+		const FString& CommandId,
+		const FString& ParamsJson,
+		const Contract::FUeAgentCallerContext& Caller,
+		FString& OutPayloadJson,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		OutPayloadJson.Reset();
+		OutError.Reset();
+
+		TArray<FUeAgentGraphCompoundActivationProfile> Profiles;
+		if (!DomainAdapters::AudioCommands::TryGetActivationProfiles(
+				Profiles, OutError))
+		{
+			return false;
+		}
+		TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
+		if (!TryCreateMechanicsHandlers(Mechanics, OutError)) return false;
+		return TryExecuteGraphCompoundInternal(
+			Profiles, Mechanics, CommandId, ParamsJson, Caller,
+			TEXT("audio_command_"), OutPayloadJson, OutError);
 	}
 }

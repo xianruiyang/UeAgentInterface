@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class FJsonObject;
@@ -35,5 +37,5 @@ namespace UeAgentNiagaraAuthoring
 	UEAGENTINTERFACE_API bool ResolveScript(
 		const FScriptResolveRequest& Request,
 		FScriptResolveResult& OutResult,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

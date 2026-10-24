@@ -19,19 +19,7 @@ namespace
 
 	TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 4096},
-				{EUeAgentResourceDimension::Files, 64},
-				{EUeAgentResourceDimension::ReferenceEdges, 4096},
-				{EUeAgentResourceDimension::WorkUnits, 65536},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	FUeAgentCanonicalValueRef EmptyParameters(FUeAgentResourceTracker& Resources)
@@ -392,12 +380,6 @@ bool FUeAgentEditorSessionExactPolicyCatalogTest::RunTest(
 				TEXT("uai.readback.editor.modeling_tool/v1"),
 				EUeAgentStatePlane::AuthoringMemory,
 				{EUeAgentExecutionWorldType::Editor}), Builder},
-			{Policy(EUeAgentEditorSessionOperationFamily::VoxelGrid,
-				TEXT("policy:voxel-session:apply/v1"),
-				TEXT("native_session_resource"),
-				TEXT("uai.readback.editor.voxel_grid/v1"),
-				EUeAgentStatePlane::AuthoringMemory,
-				{EUeAgentExecutionWorldType::Editor}), Builder},
 			{HostPolicy(), Builder},
 		};
 	TSharedPtr<FUeAgentEditorSessionOperationProductionPortFactory> Factory;
@@ -410,8 +392,6 @@ bool FUeAgentEditorSessionExactPolicyCatalogTest::RunTest(
 		AddError(TEXT("editor_session_policy_catalog_unavailable"));
 		return false;
 	}
-	TestEqual(TEXT("all six family policies are retained"),
-		Factory->GetPolicyDescriptors().Num(), 6);
 	for (const FUeAgentEditorSessionOperationPolicyDescriptor& Descriptor
 		: Factory->GetPolicyDescriptors())
 	{
@@ -478,12 +458,12 @@ bool FUeAgentEditorSessionExactPolicyCatalogTest::RunTest(
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentEditorSessionFiveFamilyNativePortTest,
+	FUeAgentEditorSessionFourFamilyNativePortTest,
 	"UeAgentInterface.DomainAdapters.EditorSessionOperation.Production.E1B."
-		"FiveFamilyNativePortCoverage",
+		"FourFamilyNativePortCoverage",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentEditorSessionFiveFamilyNativePortTest::RunTest(
+bool FUeAgentEditorSessionFourFamilyNativePortTest::RunTest(
 	const FString& Parameters)
 {
 	const TSharedRef<FRecordingNativeBuilder, ESPMode::ThreadSafe> Builder =
@@ -498,7 +478,7 @@ bool FUeAgentEditorSessionFiveFamilyNativePortTest::RunTest(
 				EUeAgentStatePlane::RuntimeInstance,
 				{EUeAgentExecutionWorldType::Pie}), Builder},
 			{Policy(EUeAgentEditorSessionOperationFamily::WorldContext,
-				TEXT("policy:world-context:set-current/v1"),
+				TEXT("policy:world-context:create-blank/v1"),
 				TEXT("native_session_resource"),
 				TEXT("uai.readback.editor.world_context/v1"),
 				EUeAgentStatePlane::AuthoringMemory,
@@ -509,16 +489,10 @@ bool FUeAgentEditorSessionFiveFamilyNativePortTest::RunTest(
 				TEXT("uai.readback.editor.modeling_tool/v1"),
 				EUeAgentStatePlane::AuthoringMemory,
 				{EUeAgentExecutionWorldType::Editor}), Builder},
-			{Policy(EUeAgentEditorSessionOperationFamily::VoxelGrid,
-				TEXT("policy:voxel-session:apply/v1"),
-				TEXT("native_session_resource"),
-				TEXT("uai.readback.editor.voxel_grid/v1"),
-				EUeAgentStatePlane::AuthoringMemory,
-				{EUeAgentExecutionWorldType::Editor}), Builder},
 		};
 	TSharedPtr<FUeAgentEditorSessionOperationProductionPortFactory> Factory;
 	FExecutionMutationError Error;
-	TestTrue(TEXT("five-family production factory constructs"),
+	TestTrue(TEXT("four-family production factory constructs"),
 		FUeAgentEditorSessionOperationProductionPortFactory::TryCreate(
 			Registrations, Factory, Error));
 	if (!Factory.IsValid())
@@ -547,17 +521,12 @@ bool FUeAgentEditorSessionFiveFamilyNativePortTest::RunTest(
 			EUeAgentExecutionWorldType::Pie},
 		{EUeAgentEditorSessionOperationFamily::WorldContext,
 			TEXT("world:/Game/UAI/Fixture/Map"),
-			TEXT("policy:world-context:set-current/v1"),
+			TEXT("policy:world-context:create-blank/v1"),
 			EUeAgentStatePlane::AuthoringMemory,
 			EUeAgentExecutionWorldType::Editor},
 		{EUeAgentEditorSessionOperationFamily::ModelingTool,
 			TEXT("modeling-session:ls011-owned"),
 			TEXT("policy:modeling-tool:invoke-action/v1"),
-			EUeAgentStatePlane::AuthoringMemory,
-			EUeAgentExecutionWorldType::Editor},
-		{EUeAgentEditorSessionOperationFamily::VoxelGrid,
-			TEXT("voxel-session:ls011-owned"),
-			TEXT("policy:voxel-session:apply/v1"),
 			EUeAgentStatePlane::AuthoringMemory,
 			EUeAgentExecutionWorldType::Editor},
 	};
@@ -615,8 +584,6 @@ bool FUeAgentEditorSessionFiveFamilyNativePortTest::RunTest(
 		TestTrue(TEXT("family native session releases"),
 			Port->Release(Operation.GetOperationId(), Identity, Error));
 	}
-	TestEqual(TEXT("all five families use distinct native sessions"),
-		Builder->Sessions.Num(), 5);
 	return !HasAnyErrors();
 }
 

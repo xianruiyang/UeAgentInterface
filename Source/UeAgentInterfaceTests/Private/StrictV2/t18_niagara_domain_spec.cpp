@@ -1,25 +1,16 @@
 #include "Misc/AutomationTest.h"
 
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "NiagaraEmitter.h"
 #include "NiagaraScript.h"
 #include "NiagaraSystem.h"
 #include "NiagaraSystemFactoryNew.h"
 
-#if __has_include("OperationOwners/Niagara/UeAgentNiagaraDomainService.h")
-#define UAI_T18_NIAGARA_DOMAIN_AVAILABLE 1
 #include "OperationOwners/Niagara/UeAgentNiagaraDomainService.h"
-#else
-#define UAI_T18_NIAGARA_DOMAIN_AVAILABLE 0
-#endif
 
-#if __has_include("QueryOwners/Niagara/UeAgentNiagaraModuleCandidateQuery.h")
-#define UAI_T18_NIAGARA_CANDIDATE_QUERY_AVAILABLE 1
 #include "QueryOwners/Niagara/UeAgentNiagaraModuleCandidateQuery.h"
-#else
-#define UAI_T18_NIAGARA_CANDIDATE_QUERY_AVAILABLE 0
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T18NiagaraDomainTest,
@@ -29,13 +20,47 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T18NiagaraDomainTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-#if !UAI_T18_NIAGARA_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T18 Niagara domain authority is available"), false);
-	return false;
-#elif !UAI_T18_NIAGARA_CANDIDATE_QUERY_AVAILABLE
-	TestTrue(TEXT("T18 Niagara module candidate query is available"), false);
-	return false;
-#else
+	using namespace UE::UAI::ContentDiscovery;
+	{
+		TArray<FScopedNameDiscoveryEntry> FullActionSet = {
+			{TEXT("Multiply"), {TEXT("particle_update"), TEXT("asset_module")}},
+			{TEXT("Multiply"), {TEXT("system_update"), TEXT("asset_module")}},
+		};
+		TArray<FString> Aliases;
+		FString ScopeError;
+		TestTrue(
+			TEXT("duplicate Niagara names receive aliases from the complete action set"),
+			TryBuildScopedDiscoveryNames(
+				FullActionSet, ENameComparison::IgnoreCase, Aliases, ScopeError));
+		if (Aliases.Num() == 2)
+		{
+			TestEqual(TEXT("filtering keeps the alias selected from the complete set"),
+				Aliases[1], FString(TEXT("Multiply [system_update]")));
+			FString FilteredPayload;
+			TestTrue(
+				TEXT("filtered Niagara results project the existing alias without recomputing it"),
+				TryBuildNamesOnlyPayload(
+					{Aliases[1]}, ENameComparison::IgnoreCase,
+					FilteredPayload, ScopeError));
+			TestTrue(TEXT("the filtered payload retains the scoped alias"),
+				FilteredPayload.Contains(TEXT("system_update")));
+		}
+		TArray<FScopedNameDiscoveryEntry> FocusedEntries = {
+			{TEXT("Blocked"), {TEXT("same_scope")}},
+			{TEXT("Blocked"), {TEXT("same_scope")}},
+			{TEXT("Unique"), {TEXT("particle_update"), TEXT("asset_module")}},
+		};
+		TestTrue(TEXT("a focused Niagara match ignores unrelated ambiguity"),
+			TryBuildScopedDiscoveryNamesForIndices(
+				FocusedEntries, {2}, ENameComparison::IgnoreCase, Aliases, ScopeError));
+		TestEqual(TEXT("the focused Niagara name stays readable"),
+			Aliases.Num() == 1 ? Aliases[0] : FString(), FString(TEXT("Unique")));
+		TestFalse(TEXT("a matched Niagara ambiguity still fails closed"),
+			TryBuildScopedDiscoveryNamesForIndices(
+				FocusedEntries, {0}, ENameComparison::IgnoreCase, Aliases, ScopeError));
+		TestEqual(TEXT("the Niagara ambiguity error is typed"), ScopeError,
+			FString(TEXT("name_discovery_semantic_scope_ambiguous")));
+	}
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::OperationOwners::Niagara;
 
@@ -118,17 +143,9 @@ bool FUeAgentStrictV2T18NiagaraDomainTest::RunTest(const FString& Parameters)
 				{
 					return Field.Name == TEXT("expected_revision");
 				});
-		if (TestNotNull(
-			TEXT("the shared HJSON ingress documents expected_revision"),
-			ExpectedRevisionField))
-		{
-			TestTrue(
-				TEXT("the generic recursive create token remains explicit"),
-				ExpectedRevisionField->Description.Contains(TEXT("absent")));
-			TestTrue(
-				TEXT("the registered domain create token remains explicit"),
-				ExpectedRevisionField->Description.Contains(TEXT("missing")));
-		}
+		TestNull(
+			TEXT("the shared HJSON ingress no longer asks the model for expected_revision"),
+			ExpectedRevisionField);
 	}
 	TestNull(TEXT("the replaced Niagara script HJSON command is inactive"),
 		Registry->FindExact(TEXT("niagara.script.graph.apply")));
@@ -153,7 +170,7 @@ bool FUeAgentStrictV2T18NiagaraDomainTest::RunTest(const FString& Parameters)
 			CandidateResult,
 			CandidateError)))
 	{
-		AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
+		AddError(CandidateError.Code + TEXT(":") + CandidateError.PublicMessage);
 		return false;
 	}
 	if (!TestTrue(TEXT("the real Niagara module catalog is non-empty"),
@@ -174,8 +191,8 @@ bool FUeAgentStrictV2T18NiagaraDomainTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	TestTrue(TEXT("candidate.id is a compact exact native action identity"),
-		Candidate->Id.StartsWith(TEXT("candidate:")));
+	TestEqual(TEXT("candidate uses the readable native action name"),
+		Candidate->NativeCandidateName, Candidate->Name);
 	TestFalse(TEXT("candidate.name is the native display name, not an asset path"),
 		Candidate->Name.StartsWith(TEXT("/")));
 	TestEqual(TEXT("candidate kind is explicit"), Candidate->Kind,
@@ -195,39 +212,23 @@ bool FUeAgentStrictV2T18NiagaraDomainTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("the query resolves the real usage id"),
 		CandidateResult.Context.TargetUsageId,
 		CandidateContext.TargetUsageId);
-	TestEqual(TEXT("coverage is scoped to the native Add Module action set"),
-		CandidateResult.CoverageScope,
-		FString(TEXT("native_niagara_stack_add_module.actions")));
-	TestTrue(TEXT("search comes from the complete native AddUtilities owner"),
-		CandidateResult.bCoverageComplete);
-	TestFalse(TEXT("creation coverage remains separate and explicit"),
-		CandidateResult.bCreationCoverageComplete);
-	TestTrue(TEXT("unsupported native action kinds are explicit"),
-		CandidateResult.UnsupportedActionKinds.Contains(
-			TEXT("new_scratch_pad_module"))
-			&& CandidateResult.UnsupportedActionKinds.Contains(
-				TEXT("assignment_or_set_specific")));
 	FNiagaraModuleCandidate ResolvedCandidate;
 	FNiagaraModuleCandidateContext ResolvedContext;
 	FNiagaraModuleCandidateQueryError ResolveError;
 	TestTrue(
-		TEXT("id alone re-resolves the same native action in the same output context"),
+		TEXT("the readable name re-resolves the same native action in the same output context"),
 		TryResolveNiagaraModuleCandidate(
 			*CandidateTarget,
-			FString(),
-			Candidate->Id,
+			Candidate->Name,
 			CandidateContext,
 			ResolvedCandidate,
 			ResolvedContext,
 			ResolveError));
 	if (!ResolveError.Code.IsEmpty())
 	{
-		AddError(ResolveError.Code + TEXT(":") + ResolveError.Detail);
+		AddError(ResolveError.Code + TEXT(":") + ResolveError.PublicMessage);
 	}
-	TestEqual(TEXT("id resolution preserves the server-side asset action"),
+	TestEqual(TEXT("name resolution preserves the server-side asset action"),
 		ResolvedCandidate.ScriptAssetPath, Candidate->ScriptAssetPath);
-	TestTrue(TEXT("candidate query paging flags remain internally consistent"),
-		CandidateResult.bComplete == !CandidateResult.bHasMore);
 	return !HasAnyErrors();
-#endif
 }

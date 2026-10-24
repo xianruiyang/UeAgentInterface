@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
@@ -12,12 +14,12 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 			IUeAgentBlueprintNodeCommandService> Service,
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>&
 			OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateProductionBlueprintNodeContribution(
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>&
 			OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateBlueprintNodeRegistration(
 		TSharedRef<OperationOwners::BlueprintNode::
@@ -26,6 +28,6 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 			OutRegistry,
 		TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>&
 			OutDispatch,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }
 

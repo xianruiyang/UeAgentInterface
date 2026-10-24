@@ -1,30 +1,18 @@
 #include "Misc/AutomationTest.h"
 
-#if __has_include("CommandRegistry/UeAgentActiveCommandManifest.h") \
-	&& __has_include("Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h") \
-	&& __has_include("Module/CommandRegistration/QueryCalibration/UeAgentQueryCalibrationRegistration.h")
-#define UAI_T35_ACTIVE_COMMAND_COMPOSITION_AVAILABLE 1
 #include "CommandEdge/UeAgentCommandProtocol.h"
-#include "CommandRegistry/UeAgentActiveCommandManifest.h"
 #include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/Contract/UeAgentCommandContract.h"
-#include "DomainAdapters/QueryCalibration/UeAgentQueryCalibrationSource.h"
-#include "HAL/PlatformMisc.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "Module/CommandRegistration/QueryCalibration/UeAgentQueryCalibrationRegistration.h"
-#else
-#define UAI_T35_ACTIVE_COMMAND_COMPOSITION_AVAILABLE 0
-#endif
 
-#if UAI_T35_ACTIVE_COMMAND_COMPOSITION_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::CommandContract;
 	using namespace UE::UAI::CommandEdge;
 	using namespace UE::UAI::CommandRegistry;
 	using namespace UE::UAI::Contract;
-	using namespace UE::UAI::DomainAdapters::QueryCalibration;
 	using namespace UE::UAI::Module::CommandRegistration::Active;
 	using namespace UE::UAI::Module::CommandRegistration::QueryCalibration;
 
@@ -34,32 +22,6 @@ namespace
 		virtual bool IsCancelled() const override
 		{
 			return false;
-		}
-	};
-
-	class FFixtureQuerySource final : public IUeAgentQueryCalibrationSource
-	{
-	public:
-		virtual bool Read(
-			const FQueryCalibrationRequest& Request,
-			FQueryCalibrationPage& OutPage,
-			FQueryCalibrationError& OutError) const override
-		{
-			OutPage = {};
-			OutError = {};
-			if (!GetQueryCalibrationCategoryIds().Contains(Request.Category))
-			{
-				OutError.Code = TEXT("query_category_unknown");
-				OutError.Detail = Request.Category;
-				return false;
-			}
-			OutPage.Category = Request.Category;
-			OutPage.SourceId = TEXT("strict_v2_t35_fixture");
-			OutPage.StateLayer = TEXT("fixture_current_state");
-			OutPage.Revision = TEXT("fixture-r1");
-			OutPage.bReadOnly = true;
-			OutPage.Completeness = EQueryCalibrationCompleteness::Complete;
-			return true;
 		}
 	};
 
@@ -83,6 +45,10 @@ namespace
 		Result.Availability = EUeAgentCommandAvailability::Enabled;
 		Result.SideEffect = EUeAgentCommandSideEffect::None;
 		Result.StateLayers = {TEXT("fixture_current_state")};
+		Result.InputFields = {
+			Field(TEXT("confirm"), TEXT("boolean"), false,
+				TEXT("Fixture-only confirmation field.")),
+		};
 		Result.ResultFields = {
 			Field(TEXT("synthetic"), TEXT("boolean"), true, TEXT("True for the composition fixture.")),
 		};
@@ -225,7 +191,6 @@ namespace
 			MakeShared<FNeverCancelled>());
 	}
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T35TwoPhaseCompositionTest,
@@ -235,17 +200,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T35TwoPhaseCompositionTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T35_ACTIVE_COMMAND_COMPOSITION_AVAILABLE
-	TestTrue(TEXT("T35 active command composition is implemented"), false);
-	return false;
-#else
 	FUeAgentActiveCommandComposition Composition;
 	FString Error;
 	TSharedPtr<IUeAgentActiveCommandContribution> QueryContribution;
 	TestTrue(
 		TEXT("query calibration exposes a contribution instead of freezing a private registry"),
 		TryCreateQueryCalibrationContribution(
-			MakeShared<FFixtureQuerySource>(),
 			QueryContribution,
 			Error));
 	if (!QueryContribution.IsValid())
@@ -271,8 +231,6 @@ bool FUeAgentStrictV2T35TwoPhaseCompositionTest::RunTest(
 	{
 		return false;
 	}
-	TestEqual(TEXT("the final registry contains both contributions"), Registry->GetContracts().Num(), 4);
-
 	const FUeAgentFrozenCommandContract* Search =
 		Registry->FindExact(TEXT("query.command.search"));
 	TestNotNull(TEXT("query discovery remains in the aggregate registry"), Search);
@@ -283,13 +241,45 @@ bool FUeAgentStrictV2T35TwoPhaseCompositionTest::RunTest(
 	const FUeAgentCommandResult SearchResult = Submit(
 		Dispatch.ToSharedRef(),
 		*Search,
-		TEXT("{\"intent\":\"extra synthetic command\",\"limit\":3}"));
+		TEXT("{\"intent\":\"extra synthetic command\"}"));
 	TestTrue(TEXT("query discovery dispatch succeeds against the aggregate registry"), SearchResult.IsOk());
 	TestTrue(
 		TEXT("T05 discovery sees commands from later independent contributions"),
-		SearchResult.GetPayloadJson().Contains(TEXT("query.synthetic.extra")));
+		SearchResult.GetPayloadJson().Contains(TEXT("\"commands\":["))
+			&& SearchResult.GetPayloadJson().Contains(TEXT("query.synthetic.extra")));
+	TestFalse(
+		TEXT("T05 names-only discovery omits machine and ranking fields"),
+		SearchResult.GetPayloadJson().Contains(TEXT("contract_hash"))
+			|| SearchResult.GetPayloadJson().Contains(TEXT("match_reason"))
+			|| SearchResult.GetPayloadJson().Contains(TEXT("read_only")));
+	const FUeAgentFrozenCommandContract* Usage =
+		Registry->FindExact(TEXT("query.command.usage"));
+	TestNotNull(TEXT("batch usage command is composed"), Usage);
+	if (Usage)
+	{
+		const FUeAgentCommandResult UsageResult = Submit(
+			Dispatch.ToSharedRef(),
+			*Usage,
+			TEXT("{\"commands\":[\"query.command.search\",\"query.command.search\"]}"));
+		TestTrue(TEXT("batch usage dispatch succeeds"), UsageResult.IsOk());
+		TestTrue(
+			TEXT("batch usage returns a deduplicated usage map"),
+			UsageResult.GetPayloadJson().Contains(TEXT("\"usage\""))
+				&& UsageResult.GetPayloadJson().Contains(TEXT("client.query.command_search(intent)")));
+		TestFalse(
+			TEXT("batch usage omits hashes and generic exact invocation"),
+			UsageResult.GetPayloadJson().Contains(TEXT("hash"))
+				|| UsageResult.GetPayloadJson().Contains(TEXT("execute_exact")));
+		const FUeAgentCommandResult ConfirmedUsageResult = Submit(
+			Dispatch.ToSharedRef(),
+			*Usage,
+			TEXT("{\"commands\":[\"query.synthetic.extra\"]}"));
+		TestTrue(
+			TEXT("confirmation commands expose the required two-step usage"),
+			ConfirmedUsageResult.IsOk()
+				&& ConfirmedUsageResult.GetPayloadJson().Contains(TEXT("confirm=True")));
+	}
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -300,10 +290,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T35SealingFailureTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T35_ACTIVE_COMMAND_COMPOSITION_AVAILABLE
-	TestTrue(TEXT("T35 active command composition is implemented"), false);
-	return false;
-#else
 	FString Error;
 	FUeAgentActiveCommandComposition DuplicateContribution;
 	TestTrue(
@@ -349,21 +335,17 @@ bool FUeAgentStrictV2T35SealingFailureTest::RunTest(
 		TEXT("late contribution failure is typed"),
 		Error.StartsWith(TEXT("active_command_composition_sealed:")));
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentStrictV2T35FinalManifestAuthorityTest,
-	"UAI.StrictV2.T35.ACTIVE.COMMAND.COMPOSITION.FinalManifestAuthority",
+	FUeAgentStrictV2T35FinalRuntimeAuthorityTest,
+	"UAI.StrictV2.T35.ACTIVE.COMMAND.COMPOSITION.FinalRuntimeAuthority",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentStrictV2T35FinalManifestAuthorityTest::RunTest(
+bool FUeAgentStrictV2T35FinalRuntimeAuthorityTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T35_ACTIVE_COMMAND_COMPOSITION_AVAILABLE
-	TestTrue(TEXT("T35 final-registry manifest projection is implemented"), false);
-	return false;
-#else
+	(void)Parameters;
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
 	FString Error;
@@ -381,9 +363,6 @@ bool FUeAgentStrictV2T35FinalManifestAuthorityTest::RunTest(
 		return false;
 	}
 
-	TestTrue(
-		TEXT("the final registry contains the post-migration command surface"),
-		Registry->GetContracts().Num() > 329);
 	TestNull(
 		TEXT("the replaced catalog command is absent from the final authority"),
 		Registry->FindExact(TEXT("reference.catalog_search")));
@@ -391,19 +370,33 @@ bool FUeAgentStrictV2T35FinalManifestAuthorityTest::RunTest(
 		TEXT("intent discovery is in the final authority"),
 		Registry->FindExact(TEXT("query.command.search")));
 	TestNotNull(
-		TEXT("usage detail is in the final authority"),
-		Registry->FindExact(TEXT("query.command.detail")));
-	TestNotNull(
-		TEXT("calibration readback is in the final authority"),
-		Registry->FindExact(TEXT("query.calibration.read")));
+		TEXT("batch usage is in the final authority"),
+		Registry->FindExact(TEXT("query.command.usage")));
+	const FUeAgentFrozenCommandContract* UsageContract =
+		Registry->FindExact(TEXT("query.command.usage"));
+	if (TestNotNull(
+			TEXT("workspace usage is projected by the public SDK contract"),
+			UsageContract))
+	{
+		const FUeAgentCommandResult WorkspaceUsage = Submit(
+			Dispatch.ToSharedRef(),
+			*UsageContract,
+			TEXT("{\"commands\":[\"content_graph.export_workspace\","
+				"\"content_graph.import_workspace\"]}"));
+		TestTrue(
+			TEXT("workspace usage query succeeds"),
+			WorkspaceUsage.IsOk());
+		TestTrue(
+			TEXT("workspace usage uses SDK-owned paths and typed handle"),
+			WorkspaceUsage.GetPayloadJson().Contains(
+				TEXT("client.content_graph.export_workspace(target)"))
+				&& WorkspaceUsage.GetPayloadJson().Contains(
+					TEXT("workspace.import_changes()")));
+		TestFalse(
+			TEXT("workspace usage does not expose machine workspace paths"),
+			WorkspaceUsage.GetPayloadJson().Contains(TEXT("workspace_path")));
+	}
 
-	const TArray<FString> DormantCommands = {
-		TEXT("world.actors"),
-		TEXT("world.actor_components"),
-		TEXT("world.property"),
-		TEXT("world.object_transform.read"),
-		TEXT("world.object_transform.update"),
-	};
 	const FUeAgentFrozenCommandContract* SearchContract =
 		Registry->FindExact(TEXT("query.command.search"));
 	if (!TestNotNull(TEXT("lifecycle matrix uses public command search"),
@@ -411,8 +404,14 @@ bool FUeAgentStrictV2T35FinalManifestAuthorityTest::RunTest(
 	{
 		return false;
 	}
-	for (const FString& CommandId : DormantCommands)
+	for (const UE::UAI::CommandLifecycle::FCommandLifecyclePolicy& Policy
+		: UE::UAI::CommandLifecycle::GetPolicies())
 	{
+		if (Policy.Availability != EUeAgentCommandAvailability::Dormant)
+		{
+			continue;
+		}
+		const FString& CommandId = Policy.CommandId;
 		const FUeAgentFrozenCommandContract* Contract =
 			Registry->FindExact(CommandId);
 		if (!TestNotNull(
@@ -425,111 +424,21 @@ bool FUeAgentStrictV2T35FinalManifestAuthorityTest::RunTest(
 			*FString::Printf(TEXT("%s has central dormant lifecycle"), *CommandId),
 			Contract->GetAvailability(),
 			EUeAgentCommandAvailability::Dormant);
-		const FString Intent = CommandId.Replace(TEXT("."), TEXT(" "));
 		const FUeAgentCommandResult ActiveSearch = Submit(
 			Dispatch.ToSharedRef(),
 			*SearchContract,
-			FString::Printf(
-				TEXT("{\"intent\":\"%s\",\"limit\":8}"), *Intent));
+			FString::Printf(TEXT("{\"intent\":\"%s\"}"), *CommandId));
 		TestTrue(TEXT("ordinary lifecycle search succeeds"),
 			ActiveSearch.IsOk());
 		TestFalse(
 			*FString::Printf(TEXT("ordinary search hides %s"), *CommandId),
 			ActiveSearch.GetPayloadJson().Contains(CommandId));
-		const FUeAgentCommandResult CompatibilitySearch = Submit(
-			Dispatch.ToSharedRef(),
-			*SearchContract,
-			FString::Printf(
-				TEXT("{\"intent\":\"%s\",\"limit\":8,\"mode\":\"compatibility\"}"),
-				*Intent));
-		TestTrue(TEXT("compatibility lifecycle search succeeds"),
-			CompatibilitySearch.IsOk());
-		TestTrue(
-			*FString::Printf(TEXT("compatibility search exposes %s"), *CommandId),
-			CompatibilitySearch.GetPayloadJson().Contains(CommandId));
-		TestTrue(
-			TEXT("dormant candidate requires user confirmation"),
-			CompatibilitySearch.GetPayloadJson().Contains(
-				TEXT("\"requires_user_confirmation\":true")));
+		TestFalse(
+			TEXT("ordinary search exposes no machine identity fields"),
+			ActiveSearch.GetPayloadJson().Contains(TEXT("contract_hash"))
+				|| ActiveSearch.GetPayloadJson().Contains(TEXT("match_reason"))
+				|| ActiveSearch.GetPayloadJson().Contains(TEXT("summary")));
 	}
 
-	const FString ManifestPath = GetDefaultCommandManifestPath();
-	TestTrue(TEXT("the formal manifest path is available"), !ManifestPath.IsEmpty());
-	const bool bUpdateManifest =
-		FPlatformMisc::GetEnvironmentVariable(
-			TEXT("UAI_UPDATE_COMMAND_MANIFEST")) == TEXT("1");
-	if (bUpdateManifest)
-	{
-		TestTrue(
-			TEXT("the explicit development update path writes only the final-registry projection"),
-			FUeAgentActiveCommandManifest::TryWrite(
-				Registry.ToSharedRef(),
-				GetUaiCommandManifestPluginVersion(),
-				GetUaiCommandManifestBuildId(),
-				ManifestPath,
-				Error));
-	}
-	TestTrue(
-		TEXT("the committed formal manifest is an exact projection of the final registry"),
-		FUeAgentActiveCommandManifest::TryVerify(
-			Registry.ToSharedRef(),
-			GetUaiCommandManifestPluginVersion(),
-			GetUaiCommandManifestBuildId(),
-			ManifestPath,
-			Error));
-	if (!Error.IsEmpty())
-	{
-		AddError(FString::Printf(
-			TEXT("final manifest verification failed: %s"),
-			*Error));
-	}
-
-	FUeAgentActiveCommandComposition SyntheticComposition;
-	TSharedPtr<IUeAgentActiveCommandContribution> SyntheticQueryContribution;
-	TestTrue(
-		TEXT("the mismatch fixture includes the query discovery contribution"),
-		TryCreateQueryCalibrationContribution(
-			MakeShared<FFixtureQuerySource>(),
-			SyntheticQueryContribution,
-			Error));
-	if (!SyntheticQueryContribution.IsValid())
-	{
-		return false;
-	}
-	TestTrue(
-		TEXT("the mismatch fixture accepts query discovery"),
-		SyntheticComposition.TryAdd(
-			SyntheticQueryContribution.ToSharedRef(),
-			Error));
-	TestTrue(
-		TEXT("a deliberately different contribution can be composed"),
-		SyntheticComposition.TryAdd(
-			MakeShared<FSyntheticContribution>(),
-			Error));
-	TSharedPtr<const FUeAgentImmutableCommandRegistry> SyntheticRegistry;
-	TSharedPtr<const FUeAgentExactCommandDispatch> SyntheticDispatch;
-	TestTrue(
-		TEXT("the deliberately different registry freezes"),
-		SyntheticComposition.TryCompose(
-			SyntheticRegistry,
-			SyntheticDispatch,
-			Error));
-	if (!SyntheticRegistry.IsValid())
-	{
-		return false;
-	}
-	TestFalse(
-		TEXT("a registry mismatch is rejected instead of publishing a partial surface"),
-		FUeAgentActiveCommandManifest::TryVerify(
-			SyntheticRegistry.ToSharedRef(),
-			GetUaiCommandManifestPluginVersion(),
-			GetUaiCommandManifestBuildId(),
-			ManifestPath,
-			Error));
-	TestEqual(
-		TEXT("the mismatch has a stable failure code"),
-		Error,
-		FString(TEXT("active_command_manifest_projection_mismatch")));
 	return true;
-#endif
 }

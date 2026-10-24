@@ -1,14 +1,6 @@
 #include "NetworkTransport/UeAgentHttpTransportAdapter.h"
 
-#include "HttpPath.h"
-#include "HttpRequestHandler.h"
-#include "HttpRouteHandle.h"
-#include "HttpServerConstants.h"
-#include "HttpServerModule.h"
-#include "HttpServerRequest.h"
-#include "HttpServerResponse.h"
-#include "IHttpRouter.h"
-#include "IPAddress.h"
+#include "NetworkTransport/UeAgentHttpFraming.h"
 #include "Misc/Guid.h"
 
 namespace UE::UAI::NetworkTransport
@@ -19,81 +11,8 @@ namespace UE::UAI::NetworkTransport
 			TEXT("/api/uai/command"));
 		const FString UaiHttpProbeRoutePath(TEXT("/api/ping"));
 
-		static EHttpServerRequestVerbs ParseVerb(const FString& Method)
-		{
-			if (Method.Equals(TEXT("GET"), ESearchCase::IgnoreCase))
-			{
-				return EHttpServerRequestVerbs::VERB_GET;
-			}
-			if (Method.Equals(TEXT("POST"), ESearchCase::IgnoreCase))
-			{
-				return EHttpServerRequestVerbs::VERB_POST;
-			}
-			if (Method.Equals(TEXT("PUT"), ESearchCase::IgnoreCase))
-			{
-				return EHttpServerRequestVerbs::VERB_PUT;
-			}
-			if (Method.Equals(TEXT("PATCH"), ESearchCase::IgnoreCase))
-			{
-				return EHttpServerRequestVerbs::VERB_PATCH;
-			}
-			if (Method.Equals(TEXT("DELETE"), ESearchCase::IgnoreCase))
-			{
-				return EHttpServerRequestVerbs::VERB_DELETE;
-			}
-			if (Method.Equals(TEXT("OPTIONS"), ESearchCase::IgnoreCase))
-			{
-				return EHttpServerRequestVerbs::VERB_OPTIONS;
-			}
-			return EHttpServerRequestVerbs::VERB_NONE;
-		}
-
-		static FString LexVerb(EHttpServerRequestVerbs Verb)
-		{
-			switch (Verb)
-			{
-			case EHttpServerRequestVerbs::VERB_GET:
-				return TEXT("GET");
-			case EHttpServerRequestVerbs::VERB_POST:
-				return TEXT("POST");
-			case EHttpServerRequestVerbs::VERB_PUT:
-				return TEXT("PUT");
-			case EHttpServerRequestVerbs::VERB_PATCH:
-				return TEXT("PATCH");
-			case EHttpServerRequestVerbs::VERB_DELETE:
-				return TEXT("DELETE");
-			case EHttpServerRequestVerbs::VERB_OPTIONS:
-				return TEXT("OPTIONS");
-			default:
-				return TEXT("NONE");
-			}
-		}
-
-		static EHttpServerResponseCodes ToResponseCode(int32 StatusCode)
-		{
-			switch (StatusCode)
-			{
-			case 200:
-				return EHttpServerResponseCodes::Ok;
-			case 400:
-				return EHttpServerResponseCodes::BadRequest;
-			case 401:
-				return EHttpServerResponseCodes::Denied;
-			case 404:
-				return EHttpServerResponseCodes::NotFound;
-			case 405:
-				return EHttpServerResponseCodes::BadMethod;
-			case 413:
-				return EHttpServerResponseCodes::RequestTooLarge;
-			case 502:
-				return EHttpServerResponseCodes::BadGateway;
-			case 503:
-				return EHttpServerResponseCodes::ServiceUnavail;
-			default:
-				return EHttpServerResponseCodes::ServerError;
-			}
-		}
 	}
+
 
 	const FString& GetUaiHttpCommandRoutePath()
 	{
@@ -154,7 +73,7 @@ namespace UE::UAI::NetworkTransport
 			{
 				return HandleRequest(Request);
 			},
-			OutDiagnostic))
+			OutDiagnostic, EUeAgentHttpRouteExecution::GameThread))
 		{
 			return false;
 		}
@@ -170,7 +89,7 @@ namespace UE::UAI::NetworkTransport
 					{
 						return HandleProbeRequest(Request);
 					},
-					ProbeDiagnostic))
+					ProbeDiagnostic, EUeAgentHttpRouteExecution::NetworkThread))
 			{
 				FUeAgentTransportDiagnostic RollbackDiagnostic;
 				if (RouteHost->Unbind(Config.InstanceId, RollbackDiagnostic))
@@ -280,40 +199,31 @@ namespace UE::UAI::NetworkTransport
 		if (!bRunning || !bCommandRouteBound
 			|| !RouteHost->IsBound(Config.InstanceId))
 		{
-			return MakeFailure(
+			return FUeAgentHttpResponse::Failure(
 				503,
 				TEXT("transport_not_running"),
 				TEXT("owned transport instance is not running"));
 		}
 		if (!Request.Method.Equals(Config.Method, ESearchCase::IgnoreCase))
 		{
-			return MakeFailure(
+			return FUeAgentHttpResponse::Failure(
 				405,
 				TEXT("transport_method_mismatch"),
 				TEXT("request method does not match the bound route"));
 		}
 		if (Request.RoutePath != Config.RoutePath)
 		{
-			return MakeFailure(
+			return FUeAgentHttpResponse::Failure(
 				404,
 				TEXT("transport_route_mismatch"),
 				TEXT("request route does not match the bound route"));
 		}
 		if (FindHeader(Request.Headers, Config.AuthHeader) != Config.AuthToken)
 		{
-			return MakeFailure(
+			return FUeAgentHttpResponse::Failure(
 				401,
 				TEXT("transport_authentication_failed"),
 				TEXT("transport credential was rejected"));
-		}
-		if (
-			Config.MaxFrameBytes <= 0
-			|| Request.Body.Num() > Config.MaxFrameBytes)
-		{
-			return MakeFailure(
-				413,
-				TEXT("frame_too_large"),
-				TEXT("frame exceeds the configured byte capacity"));
 		}
 
 		const FString CorrelationHeader =
@@ -338,7 +248,7 @@ namespace UE::UAI::NetworkTransport
 		const FUeAgentTransportReply Reply = Handler->Handle(Ingress);
 		if (Reply.Frame.GetCorrelationId() != CorrelationId)
 		{
-			return MakeFailure(
+			return FUeAgentHttpResponse::Failure(
 				502,
 				TEXT("transport_correlation_mismatch"),
 				TEXT("reply correlation does not match the request"));
@@ -367,21 +277,21 @@ namespace UE::UAI::NetworkTransport
 		if (!bRunning || !bProbeRouteBound
 			|| !RouteHost->IsBound(ProbeBindingId()))
 		{
-			return MakeFailure(
+			return FUeAgentHttpResponse::Failure(
 				503,
 				TEXT("transport_not_running"),
 				TEXT("owned transport instance is not running"));
 		}
 		if (!Request.Method.Equals(TEXT("GET"), ESearchCase::IgnoreCase))
 		{
-			return MakeFailure(
+			return FUeAgentHttpResponse::Failure(
 				405,
 				TEXT("transport_probe_method_mismatch"),
 				TEXT("transport probe requires GET"));
 		}
 		if (Request.RoutePath != Config.ProbeRoutePath)
 		{
-			return MakeFailure(
+			return FUeAgentHttpResponse::Failure(
 				404,
 				TEXT("transport_probe_route_mismatch"),
 				TEXT("request route does not match the owned probe route"));
@@ -401,7 +311,7 @@ namespace UE::UAI::NetworkTransport
 		if (
 			Config.OwnerId.IsEmpty()
 			|| Config.InstanceId.IsEmpty()
-			|| ParseVerb(Config.Method) == EHttpServerRequestVerbs::VERB_NONE
+			|| !IsSupportedHttpMethod(Config.Method)
 			|| !Config.RoutePath.StartsWith(TEXT("/"))
 			|| (!Config.ProbeRoutePath.IsEmpty()
 				&& (!Config.ProbeRoutePath.StartsWith(TEXT("/"))
@@ -409,8 +319,7 @@ namespace UE::UAI::NetworkTransport
 			|| Config.AuthHeader.IsEmpty()
 			|| Config.AuthToken.IsEmpty()
 			|| Config.Channel.IsEmpty()
-			|| Config.PrincipalSubject.IsEmpty()
-			|| Config.MaxFrameBytes <= 0)
+			|| Config.PrincipalSubject.IsEmpty())
 		{
 			OutDiagnostic = {
 				TEXT("http_adapter_config_invalid"),
@@ -421,14 +330,15 @@ namespace UE::UAI::NetworkTransport
 		return true;
 	}
 
-	FUeAgentHttpResponse FUeAgentHttpTransportAdapter::MakeFailure(
+	FUeAgentHttpResponse FUeAgentHttpResponse::Failure(
 		int32 StatusCode,
 		const FString& Code,
-		const FString& Message) const
+		const FString& Message)
 	{
 		FUeAgentHttpResponse Response;
 		Response.StatusCode = StatusCode;
 		Response.Headers.Add(TEXT("X-Transport-Diagnostic"), Code);
+		Response.Headers.Add(TEXT("X-Transport-Diagnostic-Message"), Message.Replace(TEXT("\r"), TEXT(" ")).Replace(TEXT("\n"), TEXT(" ")));
 		FTCHARToUTF8 Converted(*Message);
 		Response.Body.Append(
 			reinterpret_cast<const uint8*>(Converted.Get()),
@@ -450,227 +360,4 @@ namespace UE::UAI::NetworkTransport
 		return FString();
 	}
 
-	struct FUeAgentEngineHttpRouteHost::FImpl
-	{
-		struct FBoundRoute
-		{
-			FHttpRouteHandle Handle;
-			FUeAgentHttpRequestHandler Handler;
-			FString RoutePath;
-		};
-
-		explicit FImpl(uint32 InPort)
-			: Port(InPort)
-		{
-		}
-
-		bool Bind(
-			const FString& InInstanceId,
-			const FString& Method,
-			const FString& RoutePath,
-			FUeAgentHttpRequestHandler InHandler,
-			FUeAgentTransportDiagnostic& OutDiagnostic)
-		{
-			if (Routes.Contains(InInstanceId))
-			{
-				OutDiagnostic = {
-					TEXT("http_route_already_bound"),
-					TEXT("this route instance is already bound"),
-				};
-				return false;
-			}
-			for (const TPair<FString, FBoundRoute>& Pair : Routes)
-			{
-				if (Pair.Value.RoutePath.Equals(
-						RoutePath,
-						ESearchCase::CaseSensitive))
-				{
-					OutDiagnostic = {
-						TEXT("http_route_already_bound"),
-						TEXT("this route path is already bound"),
-					};
-					return false;
-				}
-			}
-			const EHttpServerRequestVerbs Verb = ParseVerb(Method);
-			if (Verb == EHttpServerRequestVerbs::VERB_NONE)
-			{
-				OutDiagnostic = {
-					TEXT("http_method_unsupported"),
-					TEXT("route host cannot bind the requested method"),
-				};
-				return false;
-			}
-
-			if (!Router.IsValid())
-			{
-				Router = FHttpServerModule::Get().GetHttpRouter(
-					Port,
-					true);
-			}
-			if (!Router.IsValid())
-			{
-				OutDiagnostic = {
-					TEXT("http_router_unavailable"),
-					TEXT("route host could not acquire the configured port"),
-				};
-				return false;
-			}
-			FHttpRouteHandle RouteHandle = Router->BindRoute(
-				FHttpPath(RoutePath),
-				Verb,
-				FHttpRequestHandler::CreateLambda(
-					[this, InInstanceId](
-						const FHttpServerRequest& Request,
-						const FHttpResultCallback& OnComplete)
-					{
-						return HandleEngineRequest(
-							InInstanceId,
-							Request,
-							OnComplete);
-					}));
-			if (!RouteHandle.IsValid())
-			{
-				if (Routes.IsEmpty())
-				{
-					Router.Reset();
-				}
-				OutDiagnostic = {
-					TEXT("http_route_bind_failed"),
-					TEXT("route host could not bind the configured route"),
-				};
-				return false;
-			}
-			FBoundRoute Bound;
-			Bound.Handle = RouteHandle;
-			Bound.Handler = MoveTemp(InHandler);
-			Bound.RoutePath = RoutePath;
-			Routes.Add(InInstanceId, MoveTemp(Bound));
-
-			FHttpServerModule::Get().StartAllListeners();
-			return true;
-		}
-
-		bool Unbind(
-			const FString& InInstanceId,
-			FUeAgentTransportDiagnostic& OutDiagnostic)
-		{
-			FBoundRoute* Bound = Routes.Find(InInstanceId);
-			if (!Bound || !Bound->Handle.IsValid())
-			{
-				OutDiagnostic = {
-					TEXT("transport_server_instance_mismatch"),
-					TEXT("route host refuses to unbind a different instance"),
-				};
-				return false;
-			}
-			Router->UnbindRoute(Bound->Handle);
-			Routes.Remove(InInstanceId);
-			if (Routes.IsEmpty())
-			{
-				Router.Reset();
-			}
-			return true;
-		}
-
-		bool IsBound(const FString& InInstanceId) const
-		{
-			const FBoundRoute* Bound = Routes.Find(InInstanceId);
-			return Bound && Bound->Handle.IsValid();
-		}
-
-		bool HandleEngineRequest(
-			const FString& InInstanceId,
-			const FHttpServerRequest& Request,
-			const FHttpResultCallback& OnComplete)
-		{
-			const FBoundRoute* Bound = Routes.Find(InInstanceId);
-			if (!Bound || !Bound->Handler)
-			{
-				return false;
-			}
-			FUeAgentHttpRequest Mapped;
-			Mapped.Method = LexVerb(Request.Verb);
-			// IHttpRouter invokes this handler only after matching the
-			// registered path. Request.RelativePath is the unmatched suffix,
-			// not the canonical route identity required by N0.
-			Mapped.RoutePath = Bound->RoutePath;
-			Mapped.Body = Request.Body;
-			Mapped.PeerId = Request.PeerAddress.IsValid()
-				? Request.PeerAddress->ToString(true)
-				: TEXT("unknown-peer");
-			for (const TPair<FString, TArray<FString>>& Pair : Request.Headers)
-			{
-				if (!Pair.Value.IsEmpty())
-				{
-					Mapped.Headers.Add(Pair.Key, Pair.Value[0]);
-				}
-			}
-
-			FUeAgentHttpResponse MappedResponse =
-				Bound->Handler(Mapped);
-			TUniquePtr<FHttpServerResponse> Response =
-				FHttpServerResponse::Create(
-					MoveTemp(MappedResponse.Body),
-					TEXT("application/octet-stream"));
-			Response->Code = ToResponseCode(MappedResponse.StatusCode);
-			for (const TPair<FString, FString>& Pair : MappedResponse.Headers)
-			{
-				Response->Headers.Add(Pair.Key, {Pair.Value});
-			}
-			OnComplete(MoveTemp(Response));
-			return true;
-		}
-
-		uint32 Port;
-		TSharedPtr<IHttpRouter> Router;
-		TMap<FString, FBoundRoute> Routes;
-	};
-
-	FUeAgentEngineHttpRouteHost::FUeAgentEngineHttpRouteHost(uint32 Port)
-		: Impl(MakeUnique<FImpl>(Port))
-	{
-	}
-
-	FUeAgentEngineHttpRouteHost::~FUeAgentEngineHttpRouteHost()
-	{
-		if (Impl)
-		{
-			TArray<FString> InstanceIds;
-			Impl->Routes.GetKeys(InstanceIds);
-			for (const FString& InstanceId : InstanceIds)
-			{
-				FUeAgentTransportDiagnostic Ignored;
-				Impl->Unbind(InstanceId, Ignored);
-			}
-		}
-	}
-
-	bool FUeAgentEngineHttpRouteHost::Bind(
-		const FString& InstanceId,
-		const FString& Method,
-		const FString& RoutePath,
-		FUeAgentHttpRequestHandler Handler,
-		FUeAgentTransportDiagnostic& OutDiagnostic)
-	{
-		return Impl->Bind(
-			InstanceId,
-			Method,
-			RoutePath,
-			MoveTemp(Handler),
-			OutDiagnostic);
-	}
-
-	bool FUeAgentEngineHttpRouteHost::Unbind(
-		const FString& InstanceId,
-		FUeAgentTransportDiagnostic& OutDiagnostic)
-	{
-		return Impl->Unbind(InstanceId, OutDiagnostic);
-	}
-
-	bool FUeAgentEngineHttpRouteHost::IsBound(
-		const FString& InstanceId) const
-	{
-		return Impl->IsBound(InstanceId);
-	}
 }

@@ -7,13 +7,18 @@
 
 namespace UeAgentAuthoringOperationApply
 {
-	bool FAssetRemovalStage::Capture(UObject* InAsset, FString& OutError)
+	bool FAssetRemovalStage::Capture(UObject* InAsset, FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		Reset();
 		if (!IsValid(InAsset) || !InAsset->GetOuter())
 		{
-			OutError = TEXT("asset_removal_capture_target_invalid");
+			OutError = FDiagnostic::Failure(TEXT("asset_removal_capture_target_invalid"),
+				!InAsset ? TEXT("No asset was supplied for removal.")
+				: !IsValid(InAsset) ? TEXT("The removal asset is no longer a valid native object.")
+				: TEXT("The removal asset has no owning outer object."), TEXT("removal_capture"));
+			if (IsValid(InAsset)) OutError.TargetPath = InAsset->GetPathName();
+			OutError.ActualValuePresent = InAsset != nullptr;
 			return false;
 		}
 		Asset = InAsset;
@@ -27,12 +32,15 @@ namespace UeAgentAuthoringOperationApply
 		return true;
 	}
 
-	bool FAssetRemovalStage::Stage(FString& OutError)
+	bool FAssetRemovalStage::Stage(FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		if (!IsCaptured() || bStaged)
 		{
-			OutError = TEXT("asset_removal_stage_state_invalid");
+			OutError = FDiagnostic::Failure(TEXT("asset_removal_stage_state_invalid"),
+				!IsCaptured() ? TEXT("No asset has been captured for staged removal.")
+				: TEXT("The captured asset has already been staged for removal."), TEXT("removal_stage"));
+			OutError.TargetPath = OriginalObjectPath;
 			return false;
 		}
 		Asset->Modify();
@@ -41,7 +49,10 @@ namespace UeAgentAuthoringOperationApply
 			OriginalOuter,
 			REN_DontCreateRedirectors | REN_NonTransactional))
 		{
-			OutError = TEXT("asset_removal_stage_rename_failed");
+			OutError = FDiagnostic::Failure(TEXT("asset_removal_stage_rename_failed"),
+				TEXT("Native rename could not move the asset to its temporary removal name."), TEXT("removal_stage"));
+			OutError.TargetPath = OriginalObjectPath;
+			OutError.InternalContext = StagedName.ToString();
 			return false;
 		}
 		FAssetRegistryModule::AssetRenamed(Asset, OriginalObjectPath);
@@ -50,7 +61,7 @@ namespace UeAgentAuthoringOperationApply
 		return true;
 	}
 
-	bool FAssetRemovalStage::Rollback(FString& OutError)
+	bool FAssetRemovalStage::Rollback(FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		if (!IsCaptured() || !bStaged) return true;
@@ -60,7 +71,12 @@ namespace UeAgentAuthoringOperationApply
 			OriginalOuter,
 			REN_DontCreateRedirectors | REN_NonTransactional))
 		{
-			OutError = TEXT("asset_removal_rollback_rename_failed");
+			OutError = FDiagnostic::Failure(TEXT("asset_removal_rollback_rename_failed"),
+				TEXT("Native rename could not restore the removed asset to its original name and outer."), TEXT("removal_rollback"));
+			OutError.TargetPath = OriginalObjectPath;
+			OutError.InternalContext = StagedObjectPath;
+			OutError.RollbackAttempted = true;
+			OutError.RollbackSucceeded = false;
 			return false;
 		}
 		FAssetRegistryModule::AssetRenamed(Asset, StagedObjectPath);

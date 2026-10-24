@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
 namespace UE::UAI::OperationOwners::Niagara
@@ -21,12 +23,7 @@ namespace UE::UAI::OperationOwners::Niagara
 		bool bReadOnly = false;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentNiagaraCandidateCommandError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FUeAgentNiagaraCandidateCommandError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentNiagaraCandidateCommandService
 	{
@@ -45,5 +42,5 @@ namespace UE::UAI::OperationOwners::Niagara
 
 	UEAGENTINTERFACE_API bool TryCreateProductionNiagaraCandidateCommandService(
 		TSharedPtr<IUeAgentNiagaraCandidateCommandService>& OutService,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

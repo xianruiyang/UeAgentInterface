@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 
@@ -34,5 +36,5 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 		TSharedRef<IUeAgentAssetDurableMaintenancePort> Port,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>&
 			OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

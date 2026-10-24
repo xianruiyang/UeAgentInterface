@@ -2,18 +2,39 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class UObject;
 
 namespace UeAgentNiagaraStackValidation
 {
+	struct FFix
+	{
+		FString Id;
+		FString Description;
+	};
+
+	struct FIssue
+	{
+		FString Id;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
+		FString EntryKey;
+		FString EntryName;
+		FString EmitterHandleId;
+		FString EmitterName;
+		TArray<FFix> Fixes;
+	};
+
 	struct FResult
 	{
 		bool bInspectionComplete = false;
 		int32 ErrorCount = 0;
 		int32 WarningCount = 0;
-		FString FirstError;
+		UE::UAI::Contract::FDiagnostic InspectionDiagnostic;
+		TArray<FIssue> Issues;
+		UEAGENTINTERFACE_API UE::UAI::Contract::FDiagnostic GetFailure(bool bIncludeWarnings = false) const;
 
 		int32 GetBlockingIssueCount() const
 		{
@@ -21,5 +42,5 @@ namespace UeAgentNiagaraStackValidation
 		}
 	};
 
-	UEAGENTINTERFACE_API FResult InspectAsset(UObject* Asset);
+	UEAGENTINTERFACE_API FResult InspectAsset(UObject* Asset, bool bIncludeIssues = false);
 }

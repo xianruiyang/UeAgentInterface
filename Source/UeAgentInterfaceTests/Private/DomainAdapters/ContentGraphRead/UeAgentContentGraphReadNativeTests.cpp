@@ -358,6 +358,7 @@ namespace
 					{TEXT("exact_count"), ExactCount.ToSharedRef()},
 					{TEXT("labels"), Labels.ToSharedRef()},
 					{TEXT("optional"), CanonicalNull.ToSharedRef()},
+					{TEXT("pin_interface"), Labels.ToSharedRef()},
 					{TEXT("target"), Reference.ToSharedRef()},
 				},
 				ResourceTracker,
@@ -475,19 +476,7 @@ namespace
 
 	FUeAgentResourceTrackerOwner Resources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 100000},
-				{EUeAgentResourceDimension::Items, 100000},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 100000},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					8 * 1024 * 1024,
-				},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	TSharedPtr<FUeAgentOperationContext> Context(
@@ -657,6 +646,85 @@ namespace
 			{
 				return false;
 			}
+			// The selector contract resolves only readable names. Keep these
+			// fixture names in canonical state; machine item/container keys remain
+			// test-internal and are never sent as public query input.
+			FUeAgentCanonicalValuePtr ContainerName;
+			FUeAgentCanonicalValuePtr ContainerState;
+			FUeAgentStateSemanticError NameError;
+			if (!FUeAgentCanonicalValue::TryString(
+					TEXT("Graph"), *CanonicalResources, ContainerName, NameError)
+				|| !FUeAgentCanonicalValue::TryObject(
+					{{TEXT("name"), ContainerName.ToSharedRef()}},
+					*CanonicalResources, ContainerState, NameError))
+			{
+				OutError.Code = NameError.Code;
+				OutError.Detail = NameError.Detail;
+				return false;
+			}
+			OutCapture.Containers[0].State = ContainerState;
+			FUeAgentCanonicalValuePtr ItemName;
+			if (!FUeAgentCanonicalValue::TryString(
+					TEXT("Item"), *CanonicalResources, ItemName, NameError))
+			{
+				OutError.Code = NameError.Code;
+				OutError.Detail = NameError.Detail;
+				return false;
+			}
+			TArray<TPair<FString, FUeAgentCanonicalValueRef>> NamedConfiguration;
+			NamedConfiguration.Emplace(TEXT("name"), ItemName.ToSharedRef());
+			for (const TPair<FString, FUeAgentCanonicalValueRef>& Field
+				: Values.Configuration->GetObjectItems())
+			{
+				NamedConfiguration.Emplace(Field.Key, Field.Value);
+			}
+			if (!FUeAgentCanonicalValue::TryObject(
+					NamedConfiguration,
+					*CanonicalResources,
+					Values.Configuration,
+					NameError))
+			{
+				OutError.Code = NameError.Code;
+				OutError.Detail = NameError.Detail;
+				return false;
+			}
+			OutCapture.Items[0].State = Values.Configuration;
+			if (bPreciseEndpoints)
+			{
+				OutCapture.Relations.Reset();
+				for (int32 Index = 0; Index < 2; ++Index)
+				{
+					FUeAgentContentGraphRelation Relation;
+					Relation.RelationId = FString::Printf(TEXT("precise.%d"), Index);
+					Relation.RelationKind = TEXT("connection");
+					Relation.SourceItemId = Graph->ItemId; Relation.TargetItemId = Graph->ItemId;
+					Relation.SourceEndpoint = {FString::Printf(TEXT("pin.%d"), Index),
+						Index == 0 || bAmbiguousEndpoints ? TEXT("Item.First") : TEXT("Item.Second")};
+					Relation.TargetEndpoint = {FString::Printf(TEXT("target.%d"), Index), FString::Printf(TEXT("Item.In%d"), Index)};
+					// No displayed from/to strings: filtering must consume endpoint identity.
+					OutCapture.Relations.Add(MoveTemp(Relation));
+				}
+			}
+			if (bDuplicateNames)
+			{
+				FUeAgentContentGraphContainer DuplicateContainer{
+					TEXT("duplicate-container"),
+					TEXT("graph"),
+					Graph->Owner->GetPathName(),
+					FString(),
+					1};
+				DuplicateContainer.State = ContainerState;
+				OutCapture.Containers.Add(MoveTemp(DuplicateContainer));
+				FUeAgentContentGraphItem DuplicateItem{
+					TEXT("duplicate-item"),
+					TEXT("fixture_item"),
+					Graph->Owner->GetPathName(),
+					Graph->ItemObject->GetClass()->GetPathName(),
+					TEXT("duplicate-container"),
+					0};
+				DuplicateItem.State = Values.Configuration;
+				OutCapture.Items.Add(MoveTemp(DuplicateItem));
+			}
 			const FUeAgentCanonicalType ConfigurationType(
 				TEXT("fixture.content_graph.configuration"),
 				EUeAgentValueKind::Object,
@@ -696,6 +764,17 @@ namespace
 					EUeAgentAuthoredPresence::Present,
 					EUeAgentOverrideState::Overridden),
 			};
+			if (bSemanticItem)
+			{
+				OutCapture.Items[0].SemanticIdentity.SemanticId =
+					TEXT("content_graph.item.semantic");
+				OutCapture.Items[0].SemanticIdentity.Selectors.Add(
+					TEXT("item_id"),
+					Graph->ItemId);
+				OutCapture.Items[0].SemanticIdentity.ObjectRole =
+					TEXT("item");
+				OutCapture.Items[0].State = Values.Configuration;
+			}
 			switch (InvalidFieldState)
 			{
 			case EInvalidFieldStateCase::MissingType:
@@ -742,6 +821,10 @@ namespace
 		}
 
 		bool bFail = false;
+		bool bSemanticItem = false;
+		bool bDuplicateNames = false;
+		bool bPreciseEndpoints = false;
+		bool bAmbiguousEndpoints = false;
 		EInvalidFieldStateCase InvalidFieldState =
 			EInvalidFieldStateCase::None;
 		int32 Calls = 0;
@@ -1319,11 +1402,10 @@ namespace
 			{
 				TEXT("content_graph.read.properties"),
 				FString::Printf(
-					TEXT("{\"field_ids\":[\"configuration\"],"
+					TEXT("{\"fields\":[\"configuration\"],"
 						"\"include_defaults\":true,"
 						"\"include_presence\":true,"
-						"\"owner_ids\":[\"%s\"]}"),
-					*Graph.ItemId),
+						"\"owners\":[\"Item\"]}")),
 				{TEXT("content_graph.property:")},
 			},
 			{
@@ -1424,6 +1506,256 @@ namespace
 		}
 		return bValid;
 	}
+
+	bool VerifySemanticItemFieldProjection(
+		FAutomationTestBase* Test,
+		const FOwnedGraph& Graph,
+		const TSharedRef<FOwnedEnvironment>& Environment,
+		const FUeAgentOperationContext& OperationContext)
+	{
+		Environment->bSemanticItem = true;
+		auto CaptureValue =
+			[Test, &Graph, &Environment, &OperationContext](
+				const FString& Input,
+				TSharedPtr<const FUeAgentCanonicalSnapshot>& OutSnapshot,
+				FUeAgentContentGraphReadError& OutError)
+			{
+				return Capture(
+					Test,
+					TEXT("content_graph.read.items"),
+					Input,
+					Target(Graph),
+					Environment,
+					OperationContext,
+					OutSnapshot,
+					OutError);
+			};
+		auto ProjectedObject =
+			[](const TSharedPtr<const FUeAgentCanonicalSnapshot>& Snapshot)
+				-> const FUeAgentCanonicalValueRef*
+			{
+				const FUeAgentStateEntry* Entry = FindEntry(
+					Snapshot,
+					TEXT("content_graph.item.semantic"));
+				return Entry ? &Entry->GetValue() : nullptr;
+			};
+
+		bool bValid = true;
+		TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
+		FUeAgentContentGraphReadError Error;
+		bValid = Test->TestTrue(
+			TEXT("semantic item accepts a generic top-level field"),
+			CaptureValue(
+				TEXT("{\"fields\":[\"enabled\"]}"),
+				Snapshot,
+				Error))
+			&& bValid;
+		const FUeAgentCanonicalValueRef* Value = ProjectedObject(Snapshot);
+		bValid = Test->TestNotNull(
+			TEXT("semantic projected item exists"),
+			Value)
+			&& bValid;
+		if (Value)
+		{
+			bValid = Test->TestEqual(
+				TEXT("semantic item projection is sparse"),
+				(*Value)->GetObjectItems().Num(),
+				1)
+				&& bValid;
+			bValid = Test->TestNotNull(
+				TEXT("requested semantic field is retained"),
+				FindObjectField(*Value, TEXT("enabled")))
+				&& bValid;
+			bValid = Test->TestNull(
+				TEXT("pin interface is absent unless requested"),
+				FindObjectField(*Value, TEXT("pin_interface")))
+				&& bValid;
+		}
+
+		Snapshot.Reset();
+		Error = {};
+		bValid = Test->TestTrue(
+			TEXT("semantic item explicitly accepts pin interface"),
+			CaptureValue(
+				TEXT("{\"fields\":[\"pin_interface\"]}"),
+				Snapshot,
+				Error))
+			&& bValid;
+		Value = ProjectedObject(Snapshot);
+		if (Test->TestNotNull(
+				TEXT("pin projection item exists"),
+				Value))
+		{
+			bValid = Test->TestNotNull(
+				TEXT("explicit pin interface is retained"),
+				FindObjectField(*Value, TEXT("pin_interface")))
+				&& bValid;
+			bValid = Test->TestEqual(
+				TEXT("pin projection contains no unrequested fields"),
+				(*Value)->GetObjectItems().Num(),
+				1)
+				&& bValid;
+		}
+
+		Snapshot.Reset();
+		Error = {};
+		bValid = Test->TestTrue(
+			TEXT("semantic item default projection succeeds"),
+			CaptureValue(TEXT("{}"), Snapshot, Error))
+			&& bValid;
+		Value = ProjectedObject(Snapshot);
+		if (Test->TestNotNull(
+				TEXT("default semantic item exists"),
+				Value))
+		{
+			bValid = Test->TestNotNull(
+				TEXT("ordinary fields remain in default projection"),
+				FindObjectField(*Value, TEXT("enabled")))
+				&& bValid;
+			bValid = Test->TestNull(
+				TEXT("default projection omits pin interface"),
+				FindObjectField(*Value, TEXT("pin_interface")))
+				&& bValid;
+		}
+
+		Snapshot.Reset();
+		Error = {};
+		bValid = Test->TestFalse(
+			TEXT("unknown semantic item field is rejected"),
+			CaptureValue(
+				TEXT("{\"fields\":[\"missing_field\"]}"),
+				Snapshot,
+				Error))
+			&& bValid;
+		bValid = Test->TestEqual(
+			TEXT("unknown semantic item field has a typed error"),
+			Error.Code,
+			FString(TEXT("content_graph_read_item_field_unknown")))
+			&& bValid;
+
+		Environment->bSemanticItem = false;
+		Snapshot.Reset();
+		Error = {};
+		bValid = Test->TestFalse(
+			TEXT("non-semantic item keeps its fixed field contract"),
+			CaptureValue(
+				TEXT("{\"fields\":[\"enabled\"]}"),
+				Snapshot,
+				Error))
+			&& bValid;
+		bValid = Test->TestEqual(
+			TEXT("non-semantic unknown field keeps its typed error"),
+			Error.Code,
+			FString(TEXT("content_graph_read_item_field_unknown")))
+			&& bValid;
+		return bValid;
+	}
+
+	bool VerifyReadableSemanticSelectors(
+		FAutomationTestBase* Test,
+		const FOwnedGraph& Graph,
+		const TSharedRef<FOwnedEnvironment>& Environment,
+		const FUeAgentOperationContext& OperationContext)
+	{
+		TSharedPtr<IUeAgentContentGraphReadHook> Hook;
+		FUeAgentContentGraphReadError Error;
+		if (!Test->TestTrue(
+				TEXT("create structure hook for readable selectors"),
+				FUeAgentContentGraphReadNativeHookFactory::TryCreate(
+					TEXT("content_graph.read.structure"),
+					Environment,
+					Hook,
+					Error)))
+		{
+			return false;
+		}
+
+		TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
+		bool bValid = Test->TestTrue(
+			TEXT("short container name resolves"),
+			Hook->TryCapture(
+				FUeAgentContractValue(TEXT("{\"containers\":[\"Graph\"]}")),
+				Target(Graph),
+				OperationContext,
+				Snapshot,
+				Error));
+
+		TSharedPtr<IUeAgentContentGraphReadHook> ItemsHook;
+		Error = {};
+		bValid = Test->TestTrue(
+			TEXT("container-qualified item hook is available"),
+			FUeAgentContentGraphReadNativeHookFactory::TryCreate(
+				TEXT("content_graph.read.items"),
+				Environment,
+				ItemsHook,
+				Error))
+			&& bValid;
+		Snapshot.Reset();
+		Error = {};
+		bValid = Test->TestTrue(
+			TEXT("item name is resolved within its container"),
+			ItemsHook.IsValid()
+				&& ItemsHook->TryCapture(
+					FUeAgentContractValue(
+						TEXT("{\"containers\":[\"Graph\"],"
+							"\"items\":[\"Item\"]}")),
+					Target(Graph),
+					OperationContext,
+					Snapshot,
+					Error))
+			&& bValid;
+
+		Environment->bDuplicateNames = true;
+		Snapshot.Reset();
+		Error = {};
+		bValid = Test->TestFalse(
+			TEXT("ambiguous short container name is rejected"),
+			Hook->TryCapture(
+				FUeAgentContractValue(TEXT("{\"containers\":[\"Graph\"]}")),
+				Target(Graph),
+				OperationContext,
+				Snapshot,
+				Error))
+			&& bValid;
+		bValid = Test->TestEqual(
+			TEXT("ambiguous selector has a typed error"),
+			Error.Code,
+			FString(TEXT("content_graph_read_selector_ambiguous")))
+			&& bValid;
+
+		Environment->bDuplicateNames = false;
+		return bValid;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUeAgentContentGraphEndpointIdentityTest,
+	"UeAgentInterface.DomainAdapters.ContentGraphRead.EndpointIdentity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FUeAgentContentGraphEndpointIdentityTest::RunTest(const FString&)
+{
+	FOwnedContentGraphs Owner;
+	auto ResourceTracker = Resources(); auto OperationContext = Context(this, ResourceTracker);
+	if (!OperationContext.IsValid()) return false;
+	auto Environment = MakeShared<FOwnedEnvironment>(Owner); Environment->bPreciseEndpoints = true;
+	TSharedPtr<IUeAgentContentGraphReadHook> Hook; FUeAgentContentGraphReadError Error;
+	if (!FUeAgentContentGraphReadNativeHookFactory::TryCreate(TEXT("content_graph.read.relations"), Environment, Hook, Error)) return false;
+	auto ReadCount = [&](const TCHAR* Input, int32 Expected)
+	{
+		TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
+		if (!TestTrue(TEXT("endpoint query resolves"), Hook->TryCapture(FUeAgentContractValue(Input), Target(Owner.Graphs[0]), *OperationContext, Snapshot, Error))) return false;
+		return TestEqual(TEXT("precise endpoint retains only its relation fields"), Snapshot->GetEntries().Num(), Expected);
+	};
+	bool Valid = ReadCount(TEXT("{}"), 6)
+		&& ReadCount(TEXT("{\"endpoints\":[\"Item.First\"],\"relation_kinds\":[\"connection\"]}"), 3)
+		&& ReadCount(TEXT("{\"endpoints\":[\"Item.Second\"],\"containers\":[\"Graph\"]}"), 3)
+		&& ReadCount(TEXT("{\"endpoints\":[\"Item\"]}"), 6)
+		&& ReadCount(TEXT("{\"endpoints\":[\"asset\"]}"), 0);
+	Environment->bAmbiguousEndpoints = true;
+	TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
+	TestFalse(TEXT("different pin identities with the same readable endpoint reject"), Hook->TryCapture(
+		FUeAgentContractValue(TEXT("{\"endpoints\":[\"Item.First\"]}")), Target(Owner.Graphs[0]), *OperationContext, Snapshot, Error));
+	TestEqual(TEXT("endpoint ambiguity is explicit"), Error.Code, FString(TEXT("content_graph_read_selector_ambiguous")));
+	return Valid && !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1437,8 +1769,7 @@ bool FUeAgentContentGraphReadNativeOwnedFactsTest::RunTest(
 	const FString& Parameters)
 {
 	FOwnedContentGraphs Owner;
-	if (!TestNotNull(TEXT("owned package"), Owner.Package)
-		|| !TestEqual(TEXT("six owned domains"), Owner.Graphs.Num(), 6))
+	if (!TestNotNull(TEXT("owned package"), Owner.Package))
 	{
 		return false;
 	}
@@ -1465,6 +1796,18 @@ bool FUeAgentContentGraphReadNativeOwnedFactsTest::RunTest(
 			*OperationContext)
 			&& bValid;
 	}
+	bValid = VerifySemanticItemFieldProjection(
+		this,
+		Blueprint,
+		Environment,
+		*OperationContext)
+		&& bValid;
+	bValid = VerifyReadableSemanticSelectors(
+		this,
+		Blueprint,
+		Environment,
+		*OperationContext)
+		&& bValid;
 
 	const FProviderCase CompoundCase =
 		ProviderCases(Blueprint).Last();

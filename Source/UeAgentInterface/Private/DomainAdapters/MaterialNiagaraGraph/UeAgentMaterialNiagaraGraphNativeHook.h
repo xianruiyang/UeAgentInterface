@@ -36,6 +36,7 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		const FString& GetTextureRef() const;
 		bool GetBooleanValue() const;
 		bool IsValid() const;
+		const TSharedPtr<const FMaterialNiagaraGraphAdapterError>& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FMaterialNiagaraGraphParameterIdentity Identity;
@@ -45,6 +46,7 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 		FString TextureRef;
 		bool bBooleanValue = false;
 		bool bValid = false;
+		TSharedPtr<const FMaterialNiagaraGraphAdapterError> ValidationDiagnostic;
 	};
 
 	class FMaterialNiagaraGraphNativeMutationReceipt final
@@ -63,6 +65,8 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 	class FMaterialNiagaraGraphCompileSettleReceipt final
 	{
 	public:
+		// Operation-scoped native update/settle, including definition-only updates.
+		// It is not a claim about every context in which this source can be used.
 		bool IsCompilationComplete() const { return bCompilationComplete; }
 		int32 GetCompileErrorCount() const { return CompileErrorCount; }
 		int32 GetStackIssueCount() const { return StackIssueCount; }
@@ -174,7 +178,8 @@ namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph
 			TArray<FMaterialNiagaraGraphEffectiveParameter>& OutParameters,
 			FString& OutRevision,
 			FString& OutEvidenceId,
-			FMaterialNiagaraGraphAdapterError& OutError) const;
+			FMaterialNiagaraGraphAdapterError& OutError,
+			bool bAllowNullTextures = false) const;
 
 		bool TryCaptureMaterialInstanceParameters(
 			UMaterialInstanceConstant& MaterialInstance,

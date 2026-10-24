@@ -1,5 +1,7 @@
 #include "Composition/NiagaraCompound/UeAgentNiagaraCompoundApplication.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/ExecutionMutation/UeAgentExecutionMutation.h"
@@ -10,6 +12,7 @@
 #include "DomainAdapters/GenericEffect/UeAgentGenericEffectAdapter.h"
 #include "DomainAdapters/NiagaraCompound/UeAgentNiagaraCompoundAdapter.h"
 #include "DomainAdapters/NiagaraCompound/UeAgentNiagaraCompoundDiscovery.h"
+#include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/Guid.h"
@@ -33,12 +36,19 @@ namespace UE::UAI::Composition::NiagaraCompound
 		using namespace StateSemantic;
 		using namespace Verification;
 
-		void SetError(
-			FUeAgentNiagaraCompoundApplicationError& OutError,
-			const FString& Code,
-			const FString& Detail)
+		FDiagnostic FailureWithFacts(
+			const FString& Code, const FString& Reason,
+			const FString& Stage, const FString& Field,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 		{
-			OutError = {Code, Detail};
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, Stage);
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			Error.ActualValuePresent = true;
+			Error.ExpectedValuePresent = true;
+			return Error;
 		}
 
 		class FNiagaraSessionSource final
@@ -78,10 +88,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 						OutResult,
 						Error))
 				{
-					OutError.Code = Error.GetCode();
-					OutError.SubjectId =
-						Error.GetIdentityKey();
-					OutError.Detail = Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -98,15 +105,27 @@ namespace UE::UAI::Composition::NiagaraCompound
 				TFunction<void()> Callback,
 				FExecutionMutationError& OutError) override
 			{
-				if (Affinity
-						!= EExecutionThreadAffinity::GameThread
-					|| !IsInGameThread()
-					|| !Callback)
+				if (Affinity != EExecutionThreadAffinity::GameThread)
 				{
-					OutError = FExecutionMutationError(
-						TEXT(
-							"niagara_compound_scheduler_thread_invalid"),
-						OperationId);
+					OutError = FailureWithFacts(
+						TEXT("niagara_compound_scheduler_thread_invalid"),
+						TEXT("Niagara execution requires game-thread affinity"),
+						TEXT("execution"), TEXT("thread_affinity"),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Affinity)),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(EExecutionThreadAffinity::GameThread)));
+					OutError.InternalContext = OperationId;
+					return false;
+				}
+				if (!IsInGameThread() || !Callback)
+				{
+					const bool bOnGameThread = IsInGameThread();
+					OutError = FailureWithFacts(
+						TEXT("niagara_compound_scheduler_thread_invalid"),
+						bOnGameThread ? TEXT("Niagara execution callback is missing")
+							: TEXT("Niagara execution must run on the game thread"),
+						TEXT("execution"), bOnGameThread ? TEXT("callback_present") : TEXT("on_game_thread"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					OutError.InternalContext = OperationId;
 					return false;
 				}
 				Callback();
@@ -138,12 +157,13 @@ namespace UE::UAI::Composition::NiagaraCompound
 
 		bool TryPackageName(
 			const FString& ObjectPath,
-			FString& OutPackageName)
+			FString& OutPackageName,
+			FText& OutReason)
 		{
 			OutPackageName =
 				FPackageName::ObjectPathToPackageName(ObjectPath);
 			return FPackageName::IsValidLongPackageName(
-				OutPackageName);
+				OutPackageName, false, &OutReason);
 		}
 
 		class FNiagaraDurablePort final
@@ -175,22 +195,28 @@ namespace UE::UAI::Composition::NiagaraCompound
 						&& Change.GetIntent()
 							!= EChangeIntent::Replace)
 					{
-						OutError = FExecutionMutationError(
-							TEXT(
-								"niagara_compound_intent_unsupported"),
-							Change.GetIdentity()
-								.GetCanonicalKey());
+						OutError = FailureWithFacts(
+							TEXT("niagara_compound_intent_unsupported"),
+							TEXT("Niagara durable execution only supports update and replace"),
+							TEXT("execution"), TEXT("intent"),
+							MakeShared<FJsonValueString>(PlanningPreflight::LexToString(Change.GetIntent())),
+							MakeShared<FJsonValueString>(TEXT("update or replace")));
+						OutError.TargetPath = Change.GetIdentity().GetOwnerId();
 						return false;
 					}
 					FString PackageName;
+					FText PackageReason;
 					if (!TryPackageName(
 							Change.GetIdentity().GetOwnerId(),
-							PackageName))
+							PackageName, PackageReason))
 					{
-						OutError = FExecutionMutationError(
-							TEXT(
-								"niagara_compound_package_invalid"),
-							Change.GetIdentity().GetOwnerId());
+						OutError = FailureWithFacts(
+							TEXT("niagara_compound_package_invalid"),
+							FString::Printf(TEXT("Niagara target package path is invalid: %s"), *PackageReason.ToString()),
+							TEXT("execution"), TEXT("package_name"),
+							MakeShared<FJsonValueString>(PackageName),
+							MakeShared<FJsonValueString>(TEXT("valid long package name")));
+						OutError.TargetPath = Change.GetIdentity().GetOwnerId();
 						return false;
 					}
 					Targets.Emplace(
@@ -208,18 +234,20 @@ namespace UE::UAI::Composition::NiagaraCompound
 					EAtomicityMode::CompensatedSaga);
 				FAssetDurableSessionPtr Session;
 				FAssetDurableError Error;
-				if (!TryPrepareAssetDurability(
-						DurableRequest,
-						Backend,
-						JournalRoot,
-						Resources,
-						Session,
-						Error)
-					|| !Session.IsValid())
+				const bool bPrepared = TryPrepareAssetDurability(
+					DurableRequest, Backend, JournalRoot, Resources, Session, Error);
+				if (!bPrepared || !Session.IsValid())
 				{
-					OutError = FExecutionMutationError(
-						Error.GetCode(),
-						Error.GetDetail());
+					OutError = MoveTemp(Error);
+					if (OutError.IsEmpty())
+					{
+						OutError = FailureWithFacts(
+							TEXT("niagara_compound_durable_prepare_failed"),
+							bPrepared ? TEXT("Niagara durability preparation returned no session")
+								: TEXT("Niagara durability preparation failed without a diagnostic"),
+							TEXT("execution"), bPrepared ? TEXT("durable_session_present") : TEXT("durable_prepare_succeeded"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					}
 					return false;
 				}
 				OutSession = MakeShared<
@@ -242,7 +270,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 					StaticCastSharedRef<
 						FNiagaraDurableSession>(Session);
 				FAssetDurableError Error;
-				if (!TryPersistAssetDurability(
+				if (!TryPersistAssetDurabilityForVerification(
 						Typed->Session,
 						Backend,
 						FencingToken,
@@ -250,9 +278,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 						OutReceipt,
 						Error))
 				{
-					OutError = FExecutionMutationError(
-						Error.GetCode(),
-						Error.GetDetail());
+					OutError = Error;
 					return false;
 				}
 				const FAssetDurableSessionRef Persisted =
@@ -305,9 +331,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 						OutReceipt,
 						Error))
 				{
-					OutError = FExecutionMutationError(
-						Error.GetCode(),
-						Error.GetDetail());
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -327,10 +351,12 @@ namespace UE::UAI::Composition::NiagaraCompound
 				}
 				if (!Session.IsValid())
 				{
-					OutError = FAssetDurableError(
-						TEXT(
-							"niagara_compound_durable_session_missing"),
-						Acknowledgement.GetJournalId());
+					OutError = FailureWithFacts(
+						TEXT("niagara_compound_durable_session_missing"),
+						TEXT("No persisted Niagara durability session exists for this acknowledgement"),
+						TEXT("asset_durable"), TEXT("persisted_session_present"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					OutError.InternalContext = Acknowledgement.GetJournalId();
 					return false;
 				}
 				if (!TryAcknowledgeAssetDurability(
@@ -453,8 +479,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 					Scheduler,
 					LockFence,
 					Barrier,
-					Durable,
-					64)
+					Durable)
 			{
 			}
 
@@ -467,12 +492,22 @@ namespace UE::UAI::Composition::NiagaraCompound
 				FUeAgentOperationBindingError& OutError)
 				override
 			{
-				if (!IsInGameThread()
-					|| !Planning.GetPlan().IsValid())
+				if (!IsInGameThread())
 				{
-					OutError.Code =
-						TEXT(
-							"niagara_compound_executor_thread_invalid");
+					OutError = FailureWithFacts(
+						TEXT("niagara_compound_executor_thread_invalid"),
+						TEXT("Niagara mutation must execute on the game thread"),
+						TEXT("execution"), TEXT("on_game_thread"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return false;
+				}
+				if (!Planning.GetPlan().IsValid())
+				{
+					OutError = FailureWithFacts(
+						TEXT("niagara_compound_executor_thread_invalid"),
+						TEXT("Niagara mutation requires a prepared plan"),
+						TEXT("execution"), TEXT("plan_present"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return false;
 				}
 				const FPlanningPreflightPlanRef Plan =
@@ -526,8 +561,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 						Error))
 				{
 					Store->Remove(OperationId);
-					OutError.Code = Error.GetCode();
-					OutError.Detail = Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				Coordinator.DispatchReady();
@@ -537,8 +571,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 						Error))
 				{
 					Store->Remove(OperationId);
-					OutError.Code = Error.GetCode();
-					OutError.Detail = Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -615,12 +648,14 @@ namespace UE::UAI::Composition::NiagaraCompound
 			const FPlanningPreflightPlan& Plan,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalSnapshotPtr& OutSnapshot,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!Change.GetAfter().IsValid())
 			{
-				OutError =
-					TEXT("niagara_compound_expected_value_missing");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_compound_expected_value_missing"),
+					TEXT("The planned Niagara change has no resulting value for independent verification."), TEXT("verification"));
+				OutError.TargetPath = Target.GetBinding().GetPublicRef();
+				OutError.PropertyPath = TEXT("after");
 				return false;
 			}
 			FUeAgentNiagaraCompoundSelector Selector;
@@ -687,7 +722,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 					OutSnapshot,
 					Error))
 				{
-					OutError = Error.Code;
+					OutError = Error;
 					return false;
 				}
 			return true;
@@ -735,25 +770,17 @@ namespace UE::UAI::Composition::NiagaraCompound
 				FNiagaraExecutionRecord Record;
 				if (!DurableReceipt)
 				{
-					OutError.Code =
-						Receipt.GetErrorCode().IsEmpty()
-							? TEXT(
-								"niagara_compound_execution_not_durable")
-							: Receipt.GetErrorCode();
-					OutError.SubjectId =
-						Receipt.GetOperationId();
-					OutError.Detail =
-						TEXT(
-							"execution terminated before C8D produced a durable receipt");
+					OutError = Receipt.GetDiagnostic().IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(
+						TEXT("niagara_compound_execution_not_durable"), TEXT("The execution produced no durable receipt to verify."), TEXT("verification")) : Receipt.GetDiagnostic();
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Receipt.GetOperationId();
 					return false;
 				}
 				if (!Store->Get(
 						Receipt.GetOperationId(),
 						Record))
 				{
-					OutError.Code =
-						TEXT(
-							"niagara_compound_verification_context_missing");
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_compound_verification_context_missing"),
+						TEXT("The Niagara execution record needed for independent verification is unavailable."), TEXT("verification"));
 					OutError.SubjectId =
 						Receipt.GetOperationId();
 					return false;
@@ -767,18 +794,18 @@ namespace UE::UAI::Composition::NiagaraCompound
 						OwnerId,
 						FencingToken))
 				{
-					OutError.Code =
-						TEXT(
-							"niagara_compound_durable_context_missing");
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_compound_durable_context_missing"),
+						TEXT("The durable journal has no active artifact inventory and ownership context for verification."), TEXT("verification"));
 					OutError.SubjectId =
 						Receipt.GetOperationId();
 					return false;
 				}
 
 				TArray<FVerificationTarget> VerificationTargets;
-				for (const FPlannedChange& Change :
-					Record.Plan->GetChangeSet().GetChanges())
+				const auto& Changes = Record.Plan->GetChangeSet().GetChanges();
+				for (int32 ChangeIndex = 0; ChangeIndex < Changes.Num(); ++ChangeIndex)
 				{
+					const FPlannedChange& Change = Changes[ChangeIndex];
 					const FUeAgentOperationTargetBinding*
 						Target = Targets.FindByPredicate(
 							[&Change](
@@ -792,9 +819,10 @@ namespace UE::UAI::Composition::NiagaraCompound
 							});
 					if (!Target)
 					{
-						OutError.Code =
-							TEXT(
-								"niagara_compound_verification_target_missing");
+						OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_compound_verification_target_missing"),
+							TEXT("A planned Niagara change has no bound target for independent verification."), TEXT("verification"));
+						OutError.PropertyPath = FString::Printf(TEXT("changes[%d].target"), ChangeIndex);
+						OutError.SubjectId = Change.GetIdentity().GetCanonicalKey();
 						return false;
 					}
 					TArray<FString> ArtifactIds;
@@ -815,13 +843,9 @@ namespace UE::UAI::Composition::NiagaraCompound
 							*Record.Plan,
 							Resources,
 							Expected,
-							OutError.Detail))
+							OutError))
 					{
-						OutError.Code =
-							OutError.Detail.IsEmpty()
-								? TEXT(
-									"niagara_compound_expected_snapshot_failed")
-								: OutError.Detail;
+						if (!OutError.IsValid()) OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_compound_expected_snapshot_failed"), TEXT("The expected Niagara snapshot could not be produced."), TEXT("prepare"));
 						return false;
 					}
 					VerificationTargets.Emplace(
@@ -858,8 +882,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 				Store->Remove(Receipt.GetOperationId());
 				if (!bVerified)
 				{
-					OutError.Code = Error.GetCode();
-					OutError.Detail = Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				Effect->ReleaseVerifiedOperation(
@@ -957,22 +980,52 @@ namespace UE::UAI::Composition::NiagaraCompound
 		const FUeAgentOperationDescriptor* Descriptor =
 			OperationDescriptors->FindExact(
 				OperationDescriptor);
-		if (!Descriptor
-			|| Config.ServerSessionId.IsEmpty()
-			|| Config.RegistryEpoch < 1
-			|| Config.TimeoutSeconds <= 0.0
-			|| Config.MaxFrameBytes <= 0
-			|| Config.JournalRoot.IsEmpty()
-			|| ReadPort->GetPortId()
-				!= GetNiagaraCompoundReadPortId()
-			|| !NativeHook->IsAvailable())
+		if (!Descriptor)
 		{
-			SetError(
-				OutError,
-				TEXT(
-					"niagara_compound_application_config_invalid"),
-				TEXT(
-					"Niagara compound operation composition is incomplete"));
+			OutError = FailureWithFacts(
+				TEXT("niagara_compound_application_config_invalid"),
+				TEXT("Niagara operation descriptor is not registered"), TEXT("composition"), TEXT("operation_descriptor_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return false;
+		}
+		if (Config.ServerSessionId.IsEmpty())
+		{
+			OutError = FailureWithFacts(
+				TEXT("niagara_compound_application_config_invalid"),
+				TEXT("Niagara composition requires a server session identity"), TEXT("composition"), TEXT("server_session_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return false;
+		}
+		if (Config.RegistryEpoch < 1)
+		{
+			OutError = FailureWithFacts(
+				TEXT("niagara_compound_application_config_invalid"),
+				TEXT("Niagara composition requires a positive registry epoch"), TEXT("composition"), TEXT("registry_epoch"),
+				MakeShared<FJsonValueString>(::LexToString(Config.RegistryEpoch)), MakeShared<FJsonValueString>(TEXT(">= 1")));
+			return false;
+		}
+		if (Config.JournalRoot.IsEmpty())
+		{
+			OutError = FailureWithFacts(
+				TEXT("niagara_compound_application_config_invalid"),
+				TEXT("Niagara composition requires a durability journal root"), TEXT("composition"), TEXT("journal_root_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return false;
+		}
+		if (ReadPort->GetPortId() != GetNiagaraCompoundReadPortId())
+		{
+			OutError = FailureWithFacts(
+				TEXT("niagara_compound_application_config_invalid"),
+				TEXT("Niagara composition requires the Niagara compound read port"), TEXT("composition"), TEXT("read_port_matches"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return false;
+		}
+		if (!NativeHook->IsAvailable())
+		{
+			OutError = FailureWithFacts(
+				TEXT("niagara_compound_application_config_invalid"),
+				TEXT("Niagara native hook has no available generation"), TEXT("composition"), TEXT("native_hook_generation_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		FUeAgentExecutionContextRefPtr ExpectedContext;
@@ -985,11 +1038,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 				ExpectedContext,
 				ContextError))
 		{
-			SetError(
-				OutError,
-				ContextError.Code,
-				TEXT(
-					"Niagara compound execution context is invalid"));
+			OutError = MoveTemp(ContextError);
 			return false;
 		}
 		const TSharedRef<
@@ -1033,10 +1082,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 				Projector,
 				ProjectionError))
 		{
-			SetError(
-				OutError,
-				ProjectionError.Code,
-				ProjectionError.Detail);
+			OutError = MoveTemp(ProjectionError);
 			return false;
 		}
 		const TSharedRef<FNiagaraSessionSource> SessionSource =
@@ -1066,10 +1112,7 @@ namespace UE::UAI::Composition::NiagaraCompound
 				Binding,
 				BindingError))
 		{
-			SetError(
-				OutError,
-				BindingError.Code,
-				BindingError.Detail);
+			OutError = MoveTemp(BindingError);
 			return false;
 		}
 		OutApplication = MakeShareable(

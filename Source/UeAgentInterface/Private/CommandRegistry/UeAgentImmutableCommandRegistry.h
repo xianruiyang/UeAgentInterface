@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/Command/UeAgentCommandContractModel.h"
 #include "Templates/SharedPointer.h"
@@ -14,7 +16,7 @@ namespace UE::UAI::CommandRegistry
 				Declarations,
 			TSharedPtr<const FUeAgentImmutableCommandRegistry>&
 				OutRegistry,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		const TArray<CommandContract::FUeAgentFrozenCommandContract>&
 		GetContracts() const;
@@ -24,7 +26,7 @@ namespace UE::UAI::CommandRegistry
 
 		bool BuildProjection(
 			FString& OutProjection,
-			FString& OutError) const;
+			UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		FUeAgentImmutableCommandRegistry(

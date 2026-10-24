@@ -35,12 +35,15 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 			const FString& Id,
 			const FUeAgentCommandContractRegistry& Legacy,
 			FUeAgentCommandDeclaration& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(Id);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("material_command_contract_missing:") + Id;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("material_command_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_command_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			const bool bQuery = DomainAdapters::MaterialCommands::IsQuery(Id);
@@ -65,12 +68,17 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
 					TEXT("Exact material mechanics parameter."),
+					Parameter.GetSchemaJson(),
 				});
 			}
 			Result.ResultFields = {{
 				TEXT("result"), TEXT("object"), true, false,
 				TEXT("Native material result with revision and readback evidence."),
 			}};
+			if (Id.EndsWith(TEXT(".asset.create")))
+			{
+				Result.ModelResultFields = {{TEXT("target_ref"), {TEXT("target_ref")}}};
+			}
 			Result.Errors = {
 				{TEXT("material_command_authority_required"),
 					TEXT("The caller lacks the public query or operation authority.")},
@@ -89,12 +97,12 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 			Result.Purpose.Preconditions = {
 				TEXT("Resolve the exact target and required revision before execution."),
 			};
-			Result.Purpose.ParameterGuidance = TEXT("Use only query.command.detail fields.");
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters.");
 			Result.Purpose.ResultGuidance = TEXT("Use native revision and independent material asset readback evidence.");
 			Result.Purpose.FailureGuidance = TEXT("Prewrite failures leave no residue; unknown state requires reconciliation.");
 			Result.Purpose.SideEffectGuidance = TEXT("Mutates only the exact material target through native mechanics.");
 			Result.Purpose.MinimumExample = Result.PythonFunction + TEXT("(client, params)");
-			Result.Purpose.RelatedFlows = {TEXT("query.command.detail"), TEXT("asset readback")};
+			Result.Purpose.RelatedFlows = {TEXT("query.command.usage"), TEXT("asset readback")};
 			Result.Purpose.Keywords = {TEXT("material"), TEXT("graph"), TEXT("operation")};
 			Result.Purpose.Synonyms = {TEXT("Material authoring")};
 			Out = MoveTemp(Result);
@@ -121,7 +129,7 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::MaterialCommands::TryCreateHandlers(
 					Out, OutError);
@@ -136,7 +144,7 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			DomainCapability::FDomainCapabilityDeclaration Declaration =
 				DomainCapability::MakeExplicitlyUnsupportedDomainCapabilityDeclaration(
@@ -152,8 +160,8 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 							FindOperationInvocationFactory(OperationId);
 				if (!Factory.IsValid())
 				{
-					OutError = TEXT("material_command_operation_factory_missing:")
-						+ OperationId;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_command_operation_factory_missing"), TEXT("No operation invocation factory is registered for this operation."), TEXT("registration"), FString(), OperationId);
+					if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = OperationId;
 					return false;
 				}
 				DomainCapability::FDomainOperationEntry Operation;
@@ -179,10 +187,6 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 				StateSemantic::EUeAgentStatePlane::AuthoringMemory,
 				StateSemantic::EUeAgentStatePlane::Persisted,
 			};
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId =
-				TEXT("TROOT-UAI-38-ASSET-MATERIAL-TEXTURE-MEDIA-VERTICAL");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
@@ -194,7 +198,7 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
@@ -215,7 +219,7 @@ namespace UE::UAI::Module::CommandRegistration::MaterialCommands
 		}
 		TArray<FUeAgentCommandDeclaration> Declarations;
 		for (const FString& Id
-			: DomainAdapters::MaterialCommands::GetCommandIds())
+			: DomainAdapters::MaterialCommands::GetPublicCommandIds())
 		{
 			FUeAgentCommandDeclaration Declaration;
 			if (!TryDeclaration(Id, *Legacy, Declaration, OutError))

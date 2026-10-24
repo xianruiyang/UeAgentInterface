@@ -58,11 +58,7 @@ namespace
 	{
 		return MakeShared<
 			FUeAgentResourceTracker,
-			ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::Nodes, 3},
-				{EUeAgentResourceDimension::WorkUnits, 4},
-			}));
+			ESPMode::ThreadSafe>();
 	}
 }
 
@@ -153,7 +149,7 @@ bool FUeAgentOperationContextBindingAndOwnershipTest::RunTest(
 		TEXT("resource owner is preserved"),
 		&Context->GetResourceTracker() == &Tracker.Get());
 
-	FUeAgentResourceBudgetExceeded BudgetError;
+	FUeAgentResourceChargeError ChargeError;
 	FUeAgentResourceScope First = Context->Scope(TEXT("/first"));
 	FUeAgentResourceScope Second = Context->Scope(TEXT("/second"));
 	TestTrue(
@@ -161,24 +157,18 @@ bool FUeAgentOperationContextBindingAndOwnershipTest::RunTest(
 		First.TryCharge(
 			EUeAgentResourceDimension::WorkUnits,
 			2,
-			BudgetError));
+			ChargeError));
 	TestTrue(
 		TEXT("second scope charges same owner"),
 		Second.TryCharge(
 			EUeAgentResourceDimension::WorkUnits,
 			2,
-			BudgetError));
+			ChargeError));
 	TestEqual(
 		TEXT("cross-scope usage accumulates"),
 		Context->GetResourceTracker().Snapshot().Consumed(
 			EUeAgentResourceDimension::WorkUnits),
 		int64(4));
-	TestFalse(
-		TEXT("N+1 is rejected by same owner"),
-		First.TryCharge(
-			EUeAgentResourceDimension::WorkUnits,
-			1,
-			BudgetError));
 	TestEqual(
 		TEXT("absolute deadline remains bound"),
 		Context->GetDeadline().GetDeadlineAt(),
@@ -531,4 +521,3 @@ bool FUeAgentExecutionContextRevisionAndFreezeTest::RunTest(
 		FString(TEXT("execution_context_revision_conflict")));
 	return true;
 }
-

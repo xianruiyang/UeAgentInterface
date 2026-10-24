@@ -1,5 +1,7 @@
 #include "DomainAdapters/WorldSimpleEffect/UeAgentWorldSimpleEffectProduction.h"
 
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Engine/Engine.h"
 #include "Engine/Level.h"
 #include "Engine/World.h"
@@ -11,15 +13,22 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 
 	namespace
 	{
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
+		bool Fail(FExecutionMutationError& OutError, FExecutionMutationError Diagnostic, const FString& InternalContext = FString())
 		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.InternalContext.IsEmpty()) OutError.InternalContext = InternalContext;
 			return false;
+		}
+
+		FExecutionMutationError NativeFact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			auto Error = FExecutionMutationError::Failure(Code, Reason, TEXT("execution"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Path;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
 
 		EUeAgentExecutionWorldType ConvertWorldType(
@@ -77,21 +86,29 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 					== Context.GetPieInstanceId();
 		}
 
-		bool ContextIsValid(
-			const FUeAgentExecutionContextRef& Context)
+		bool ValidateContext(const FUeAgentExecutionContextRef& Context, FExecutionMutationError& OutError)
 		{
-			if (Context.WasResolvedFromCurrent()
-				|| Context.GetWorldIdentity().IsEmpty()
-				|| Context.GetLevelIdentity().IsEmpty()
-				|| Context.GetContextRevision().IsEmpty()
-				|| Context.GetWorldType()
-					== EUeAgentExecutionWorldType::Invalid)
-			{
-				return false;
-			}
-			return Context.GetWorldType()
-					!= EUeAgentExecutionWorldType::Pie
-				|| Context.GetPieInstanceId().IsSet();
+			if (Context.WasResolvedFromCurrent()) return Fail(OutError, NativeFact(TEXT("world_simple_context_invalid"),
+				TEXT("Execution requires an explicitly bound world context instead of a current-world resolution."), TEXT("/execution_context/resolution"),
+				MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false)));
+			if (Context.GetWorldIdentity().IsEmpty()) return Fail(OutError, NativeFact(TEXT("world_simple_context_invalid"),
+				TEXT("Execution context has no world binding."), TEXT("/execution_context/world"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+			if (Context.GetLevelIdentity().IsEmpty()) return Fail(OutError, NativeFact(TEXT("world_simple_context_invalid"),
+				TEXT("Execution context has no level binding."), TEXT("/execution_context/level"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+			if (Context.GetContextRevision().IsEmpty()) return Fail(OutError, NativeFact(TEXT("world_simple_context_invalid"),
+				TEXT("Execution context has no revision binding."), TEXT("/execution_context/revision"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+			if (Context.GetWorldType() == EUeAgentExecutionWorldType::Invalid)
+				return Fail(OutError, NativeFact(TEXT("world_simple_context_invalid"),
+					TEXT("Execution context has an invalid world type."), TEXT("/execution_context/world_type"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Context.GetWorldType())), MakeShared<FJsonValueString>(TEXT("supported world type"))));
+			if (Context.GetWorldType() == EUeAgentExecutionWorldType::Pie && !Context.GetPieInstanceId().IsSet())
+				return Fail(OutError, NativeFact(TEXT("world_simple_context_invalid"),
+					TEXT("PIE execution context requires a PIE instance."), TEXT("/execution_context/pie_instance"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+			return true;
 		}
 	}
 
@@ -169,13 +186,14 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 	{
 		OutCandidates.Reset();
 		OutError = FExecutionMutationError();
-		if (!IsInGameThread() || !GEngine)
-		{
-			return Fail(
-				OutError,
-				TEXT(
-					"world_simple_context_catalog_unavailable"));
-		}
+		if (!IsInGameThread())
+			return Fail(OutError, NativeFact(TEXT("world_simple_context_catalog_unavailable"),
+				TEXT("World contexts must be enumerated on the game thread."), TEXT("/game_thread"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+		if (!GEngine)
+			return Fail(OutError, NativeFact(TEXT("world_simple_context_catalog_unavailable"),
+				TEXT("Engine is unavailable for world-context enumeration."), TEXT("/engine"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 
 		for (const FWorldContext& WorldContext
 			: GEngine->GetWorldContexts())
@@ -219,29 +237,24 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 	{
 		OutWorld = nullptr;
 		OutError = FExecutionMutationError();
-		if (!ContextIsValid(Context))
-		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_context_invalid"),
-				Context.GetWorldIdentity());
-		}
+		if (!ValidateContext(Context, OutError)) return false;
 
 		TArray<FUeAgentWorldSimpleEffectWorldCandidate> Candidates;
 		if (!Catalog->TryEnumerate(Candidates, OutError))
 		{
-			if (OutError.GetCode().IsEmpty())
+			if (OutError.Code.IsEmpty())
 			{
-				Fail(
-					OutError,
-					TEXT(
-						"world_simple_context_catalog_unavailable"));
+				Fail(OutError, NativeFact(TEXT("world_simple_context_catalog_unavailable"),
+					TEXT("World catalog failed without returning a diagnostic."), TEXT("/world_catalog/diagnostic"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 			}
 			return false;
 		}
 
 		bool bSawInvalid = false;
 		bool bSawStale = false;
+		FExecutionMutationError InvalidCandidateError;
+		FExecutionMutationError StaleCandidateError;
 		TArray<UWorld*> ExactWorlds;
 		for (const FUeAgentWorldSimpleEffectWorldCandidate& Candidate
 			: Candidates)
@@ -253,23 +266,54 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 			if (Candidate.GetContextRevision()
 				!= Context.GetContextRevision())
 			{
-				bSawStale = true;
-				continue;
+			bSawStale = true;
+			if (StaleCandidateError.IsEmpty())
+			{
+				StaleCandidateError = NativeFact(TEXT("world_simple_context_stale"),
+					TEXT("Matching world context has changed since the request was bound."), TEXT("/execution_context/revision"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				StaleCandidateError.ActualEvidence = MakeShared<FJsonValueString>(Candidate.GetContextRevision());
+				StaleCandidateError.ExpectedEvidence = MakeShared<FJsonValueString>(Context.GetContextRevision());
+				if (UWorld* World = Candidate.GetWorld()) StaleCandidateError.TargetPath = World->GetPathName();
+			}
+			continue;
 			}
 			if (!Candidate.IsValid())
 			{
-				bSawInvalid = true;
-				continue;
+			bSawInvalid = true;
+			if (InvalidCandidateError.IsEmpty())
+			{
+				const auto Facts = MakeShared<FJsonObject>();
+				Facts->SetBoolField(TEXT("world_valid"), ::IsValid(Candidate.GetWorld()));
+				Facts->SetBoolField(TEXT("world_binding_present"), !Candidate.GetWorldIdentity().IsEmpty());
+				Facts->SetBoolField(TEXT("level_binding_present"), !Candidate.GetLevelIdentity().IsEmpty());
+				Facts->SetBoolField(TEXT("world_type_valid"), Candidate.GetWorldType() != EUeAgentExecutionWorldType::Invalid);
+				Facts->SetBoolField(TEXT("revision_present"), !Candidate.GetContextRevision().IsEmpty());
+				Facts->SetBoolField(TEXT("required_pie_instance_present"), Candidate.GetWorldType() != EUeAgentExecutionWorldType::Pie || Candidate.GetPieInstanceId().IsSet());
+				InvalidCandidateError = NativeFact(TEXT("world_simple_context_invalid"),
+					TEXT("Matching world candidate is invalid or has incomplete binding information."), TEXT("/world_candidate"),
+					MakeShared<FJsonValueObject>(Facts), MakeShared<FJsonValueString>(TEXT("valid world with complete binding information")));
+				if (UWorld* World = Candidate.GetWorld()) InvalidCandidateError.TargetPath = World->GetPathName();
+			}
+			continue;
 			}
 			ExactWorlds.Add(Candidate.GetWorld());
 		}
 
 		if (ExactWorlds.Num() > 1)
 		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_context_ambiguous"),
-				Context.GetWorldIdentity());
+			TArray<FString> WorldPaths;
+			for (const UWorld* World : ExactWorlds) WorldPaths.AddUnique(World->GetPathName());
+			TArray<TSharedPtr<FJsonValue>> Paths;
+			for (const FString& Path : WorldPaths) Paths.Add(MakeShared<FJsonValueString>(Path));
+			const auto Actual = MakeShared<FJsonObject>();
+			Actual->SetNumberField(TEXT("count"), ExactWorlds.Num());
+			Actual->SetArrayField(TEXT("world_paths"), MoveTemp(Paths));
+			const auto Expected = MakeShared<FJsonObject>();
+			Expected->SetNumberField(TEXT("count"), 1);
+			return Fail(OutError, NativeFact(TEXT("world_simple_context_ambiguous"),
+				TEXT("More than one valid world matches the bound execution context."), TEXT("/world_candidates"),
+				MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueObject>(Expected)), Context.GetWorldIdentity());
 		}
 		if (ExactWorlds.Num() == 1)
 		{
@@ -278,22 +322,15 @@ namespace UE::UAI::DomainAdapters::WorldSimpleEffect
 		}
 		if (bSawInvalid)
 		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_context_invalid"),
-				Context.GetWorldIdentity());
+			return Fail(OutError, MoveTemp(InvalidCandidateError), Context.GetWorldIdentity());
 		}
 		if (bSawStale)
 		{
-			return Fail(
-				OutError,
-				TEXT("world_simple_context_stale"),
-				Context.GetWorldIdentity());
+			return Fail(OutError, MoveTemp(StaleCandidateError), Context.GetWorldIdentity());
 		}
-		return Fail(
-			OutError,
-			TEXT("world_simple_context_unresolved"),
-			Context.GetWorldIdentity());
+		return Fail(OutError, NativeFact(TEXT("world_simple_context_unresolved"),
+			TEXT("No valid world matches the bound world, level, type and PIE instance."), TEXT("/world_candidates"),
+			MakeShared<FJsonValueNumber>(ExactWorlds.Num()), MakeShared<FJsonValueNumber>(1)), Context.GetWorldIdentity());
 	}
 
 	TSharedRef<

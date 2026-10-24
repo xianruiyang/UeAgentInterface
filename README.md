@@ -4,32 +4,37 @@
 外部模型和自动化通过配套 `UeAgentInterfaceCMD` 的公开 Python SDK 或薄 CLI 调用，不直接访问插件内部
 HTTP 端点。
 
-本 README 只承担仓库入口与生命周期导航，不定义命令全集、参数或 production-ready 状态。当前历史
-只证明本插件曾在 UE 5.6.1 环境编译；任何版本兼容性、具体 command 可用性和产品完成声明都必须以
-读取时的正式合同及直接验证证据为准。
+当前构建和实践基线是 Windows 上带配套原生补丁的 UE 5.6.1。插件直接使用 PropertyEditor、UMGEditor、
+AudioEditor 和 MetasoundEditor 的补丁接口；原版引擎不能仅复制本插件后直接编译使用。安装前先按
+[引擎补丁说明](EnginePatches/README.md) 应用补丁并重编对应模块，再构建插件。其他引擎版本尚未据此证明兼容。
+
+本 README 提供仓库入口与安装边界，命令参数由正式 manifest 和合同维护。配套版本、升级与旧版恢复
+从 [UeAgentInterfacePak](https://github.com/xianruiyang/UeAgentInterfacePak) 进入；局部编译或实践证据不代表全部能力已经验证。
 
 ## 正式调用入口
 
-Python SDK 是通常的优先入口：
+本地项目通过托管连接使用 Python SDK：
 
 ```python
 import uai
 
-with uai.connect("connection.toml") as ue:
+with uai.connect_project() as ue:
     result = ue.project.summary()
 
 if not result.ok:
     raise RuntimeError(result.error)
 ```
 
-不能使用 Python 的环境通过同一 SDK 的薄 CLI 调用一条 canonical command：
+单次查询或命令也可直接使用已安装的 CLI：
 
 ```powershell
-uai-cli --connection connection.toml connection probe
-uai-cli --connection connection.toml exec project.summary
+ueagentinterfacecmd exec project.summary
 ```
 
-一条 SDK method、`Client.execute()` 或 `uai-cli exec` 只转发一条同名真实 command。复杂资产优先通过
+默认从当前目录定位项目，其他目录用 `uai.connect_project(project)` 或 CLI `--project`。
+独立部署的显式 Connection TOML 用法见 CMD `docs/PYTHON_SDK_AND_CLI.md`。
+
+一条 SDK method、`Client.execute()` 或 `ueagentinterfacecmd exec` 只转发一条同名真实 command。复杂资产优先通过
 `content_graph.export_workspace` / `content_graph.import_workspace` 进行结构化往返；图布局使用
 `graph.layout.apply`。具体命令、参数和版本每次从正式 manifest 与生成的 CMD binding 取得，不在
 README 维护容易失效的命令清单。

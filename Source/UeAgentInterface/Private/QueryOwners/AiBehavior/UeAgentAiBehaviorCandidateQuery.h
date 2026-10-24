@@ -1,15 +1,31 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 
 class UObject;
 class UBehaviorTree;
 class UBehaviorTreeGraphNode;
+class UAIGraphNode;
+class UEdGraph;
+class UEdGraphNode;
 
 namespace UE::UAI::QueryOwners::AiBehavior
 {
+	/** Native menu context, resolved by the caller from the shared graph identity. */
+	struct FAiBehaviorCandidateContext
+	{
+		UAIGraphNode* Parent = nullptr;
+		FString AttachmentKind;
+		UEdGraph* Graph = nullptr;
+	};
+
 	struct UEAGENTINTERFACE_API FAiBehaviorCandidate
 	{
+		/** Server-side identity authority; not projected into the public result. */
+		UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
 		FString Id;
 		FString Name;
 		FString Label;
@@ -17,9 +33,15 @@ namespace UE::UAI::QueryOwners::AiBehavior
 		FString ActionKind;
 		FString Category;
 		FString Summary;
+		TArray<FString> Scopes;
+		TMap<FString, FString> SelectionFields;
 		FString WriteSupport;
 		FString SupportReason;
+		Contract::FDiagnostic SupportDiagnostic;
 		FString PayloadType;
+		FString GraphNodeType;
+		FString LogicMode;
+		int32 DefaultInputCount = 0;
 		bool bSupported = false;
 		TArray<FString> SupportedOperations;
 
@@ -38,59 +60,34 @@ namespace UE::UAI::QueryOwners::AiBehavior
 		FString TargetRevision;
 		TArray<FAiBehaviorCandidate> Candidates;
 		int32 TotalMatches = 0;
-		int32 NextCursor = INDEX_NONE;
-		bool bComplete = false;
-		bool bHasMore = false;
-		bool bCoverageComplete = false;
-		bool bCreationCoverageComplete = false;
-		int32 NativeActionCount = 0;
-		int32 ExecutableActionCount = 0;
-		FString CoverageScope;
+		UE::UAI::Contract::FDiagnostic CatalogDiagnostic;
 		FString GraphName;
 	};
 
-	struct UEAGENTINTERFACE_API FAiBehaviorCandidateQueryError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FAiBehaviorCandidateQueryError = UE::UAI::Contract::FDiagnostic;
 
 	UEAGENTINTERFACE_API bool TryQueryAiBehaviorCandidates(
 		UObject& Target,
 		const FString& Query,
 		FAiBehaviorCandidateQueryResult& OutResult,
 		FAiBehaviorCandidateQueryError& OutError,
-		int32 Limit = 64,
-		int32 Cursor = 0,
-		const FString& CandidateId = FString());
+		const FString& CandidateId = FString(),
+		const FAiBehaviorCandidateContext& Context = {});
 
-	/** Re-enumerate the native BehaviorTree blank-background menu. */
+	/** Re-enumerate the target's native AI candidate catalog. */
 	UEAGENTINTERFACE_API bool TryResolveAiBehaviorCandidate(
 		UObject& Target,
 		const FString& Name,
 		const FString& Id,
 		FAiBehaviorCandidate& OutCandidate,
-		FAiBehaviorCandidateQueryError& OutError);
+		FAiBehaviorCandidateQueryError& OutError,
+		const TMap<FString, FString>& Select = {},
+		const FAiBehaviorCandidateContext& Context = {});
 
-	/** Re-enumerate and invoke the same native BehaviorTree schema action. */
-	UEAGENTINTERFACE_API bool TryPerformBehaviorTreeCandidate(
-		UBehaviorTree& Target,
-		const FString& Name,
-		const FString& Id,
-		const FVector2f& Location,
-		UBehaviorTreeGraphNode*& OutNode,
-		FAiBehaviorCandidate& OutCandidate,
-		FAiBehaviorCandidateQueryError& OutError);
+	/** Invoke the selected native AI action for a supported graph asset. */
+	UEAGENTINTERFACE_API bool TryPerformAiGraphCandidate(
+		UObject& Target, const FString& Name, const FString& Id, const FVector2f& Location,
+		UEdGraphNode*& OutNode, FAiBehaviorCandidate& OutCandidate, FAiBehaviorCandidateQueryError& OutError,
+		const TMap<FString, FString>& Select = {}, const FAiBehaviorCandidateContext& Context = {});
 
-	UEAGENTINTERFACE_API bool IsCurrentAiBehaviorCandidateBinding(
-		UObject& Target,
-		const FString& CandidateName,
-		const FString& CandidateKind,
-		const TArray<FString>& SupportedOperations,
-		const FString& InputContract,
-		const FString& PlacementContract,
-		const FString& RequiredContext,
-		const FString& BindingRevision,
-		FAiBehaviorCandidateQueryError& OutError);
 }

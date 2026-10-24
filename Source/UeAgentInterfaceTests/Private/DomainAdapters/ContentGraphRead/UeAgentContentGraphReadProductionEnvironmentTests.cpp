@@ -2,6 +2,11 @@
 
 #include "Animation/AnimBlueprint.h"
 #include "Components/BoxComponent.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Domains/Material/Authoring/UeAgentMaterialAuthoringExport.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "DomainAdapters/BlueprintUmgGraph/UeAgentBlueprintUmgGraphNativeHook.h"
 #include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
 #include "DomainAdapters/MaterialNiagaraGraph/UeAgentMaterialNiagaraGraphNativeHook.h"
@@ -11,7 +16,12 @@
 #include "Engine/Blueprint.h"
 #include "GameFramework/Actor.h"
 #include "Materials/Material.h"
+#include "MaterialEditingLibrary.h"
+#include "Materials/MaterialExpressionMaterialFunctionCall.h"
+#include "Materials/MaterialExpressionFunctionInput.h"
+#include "Materials/MaterialFunctionInterface.h"
 #include "Misc/Guid.h"
+#include "Misc/ScopeExit.h"
 #include "NiagaraEmitter.h"
 #include "NiagaraEmitterFactoryNew.h"
 #include "NiagaraNodeFunctionCall.h"
@@ -33,6 +43,102 @@ namespace
 		FString DomainId;
 		UObject* Owner = nullptr;
 	};
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentContentGraphReadMaterialFunctionStateTest,
+	"UeAgentInterface.DomainAdapters.ContentGraphRead.E2.ProductionEnvironment.MaterialFunctionState",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentContentGraphReadMaterialFunctionStateTest::RunTest(const FString& Parameters)
+{
+	using namespace UE::UAI::HjsonWorkspace;
+	using namespace UE::UAI::StateSemantic;
+	UPackage* Package = CreatePackage(*FString::Printf(
+		TEXT("/Temp/UAI/ContentGraphRead/Material/%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+	UMaterial* Material = NewObject<UMaterial>(Package, TEXT("M_FunctionReadback"));
+	ON_SCOPE_EXIT { Package->SetDirtyFlag(false); Package->MarkAsGarbage(); };
+	UeAgentPaletteSearch::FSearchParams Search;
+	Search.CatalogType = TEXT("material_node");
+	Search.AssetPath = Material->GetPathName();
+	Search.GraphName = TEXT("MaterialGraph");
+	TArray<UeAgentPaletteSearch::FCandidate> Candidates;
+	TArray<FString> Warnings;
+	FString Error;
+	if (!UeAgentPaletteSearch::CollectMaterialCandidates(Search, Candidates, Warnings, Error))
+	{ AddError(Error); return false; }
+	const auto* Candidate = Candidates.FindByPredicate([](const auto& Value) {
+		return Value.Kind == TEXT("material_function_call") && Value.Name == TEXT("Smooth Step") && Value.bSupportedInContext;
+	});
+	if (!TestNotNull(TEXT("native Smooth Step function candidate exists"), Candidate)) return false;
+	UMaterialFunctionInterface* Function = LoadObject<UMaterialFunctionInterface>(nullptr,
+		*Candidate->AuthoringSelectors.FindRef(TEXT("function_path")));
+	if (!TestNotNull(TEXT("native candidate resolves its real function asset"), Function)) return false;
+	TArray<UMaterialExpressionMaterialFunctionCall*> Calls;
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		auto* Call = Cast<UMaterialExpressionMaterialFunctionCall>(UMaterialEditingLibrary::CreateMaterialExpression(
+			Material, UMaterialExpressionMaterialFunctionCall::StaticClass(), Index * 200, 100));
+		if (!TestNotNull(TEXT("real function call exists"), Call)
+			|| !TestTrue(TEXT("native function assignment succeeds"), Call->SetMaterialFunction(Function))) return false;
+		Calls.Add(Call);
+	}
+	Package->SetDirtyFlag(false);
+	UeAgentMaterialAuthoring::FMaterialAuthoringCapture Authoring;
+	if (!UeAgentMaterialAuthoring::TryCaptureMaterialAuthoringState(*Material, TEXT("llm_authoring"), Authoring, Error))
+	{ AddError(Error); return false; }
+	TMap<FString, FString> ExportNames;
+	for (const auto& Unit : Authoring.Model->GetUnits())
+	{
+		if (Unit.GetUnitKind() != ESemanticUnitKind::StructureState) continue;
+		const auto* Nodes = Unit.GetValues().Find(TEXT("nodes"));
+		if (!Nodes || (*Nodes)->GetKind() != EUeAgentValueKind::Object) continue;
+		for (const auto& Node : (*Nodes)->GetObjectItems())
+		{
+			TSharedPtr<FJsonValue> Json;
+			if (!CanonicalJson::TryToJsonValue(*Node.Value, Json, Error)) { AddError(Error); return false; }
+			ExportNames.Add(Json->AsObject()->GetStringField(TEXT("id")), Node.Key);
+		}
+	}
+	FUeAgentContentGraphCapture Capture;
+	FUeAgentContentGraphReadError CaptureError;
+	if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(*Material, Capture, CaptureError))
+	{ AddError(CaptureError.Code + TEXT(":") + CaptureError.Detail); return false; }
+	for (const auto& Item : Capture.Items)
+	{
+		if (!Item.SemanticIdentity.IsExplicit()) continue;
+		if (!TestTrue(TEXT("every explicit Material item has object state"), Item.State.IsValid()
+			&& Item.State->GetKind() == EUeAgentValueKind::Object)) return false;
+		TestTrue(TEXT("every explicit Material item satisfies the canonical identity contract"),
+			FUeAgentCanonicalIdentity(Item.SemanticIdentity.SemanticId, Capture.DomainId,
+				Item.OwnerId, Item.SemanticIdentity.Selectors, Item.SemanticIdentity.ObjectRole, TEXT("test")).IsValid());
+	}
+	for (auto* Call : Calls)
+	{
+		const FString Guid = Call->MaterialExpressionGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
+		const auto* Item = Capture.Items.FindByPredicate([&](const auto& Value) {
+			return Value.ItemKind == TEXT("material_expression") && Value.SemanticIdentity.Selectors.FindRef(TEXT("native_guid")) == Guid;
+		});
+		if (!TestNotNull(TEXT("native function call has captured state"), Item)) return false;
+		TSharedPtr<FJsonValue> Json;
+		if (!CanonicalJson::TryToJsonValue(*Item->State, Json, Error)) { AddError(Error); return false; }
+		const auto State = Json->AsObject();
+		TestEqual(TEXT("repeated function calls keep exact ordinary export aliases"), State->GetStringField(TEXT("name")), ExportNames.FindRef(Guid));
+		TestEqual(TEXT("captured function reference is the assigned native asset"), State->GetStringField(TEXT("material_function")), Function->GetPathName());
+		TestFalse(TEXT("readback does not expose private candidate identity"), State->HasField(TEXT("candidate_context")));
+		const auto& Pins = State->GetObjectField(TEXT("pin_interface"))->GetArrayField(TEXT("pins"));
+		TestEqual(TEXT("pin count comes from the actual function interface"), Pins.Num(), Call->FunctionInputs.Num() + Call->FunctionOutputs.Num());
+		for (const auto& Input : Call->FunctionInputs)
+		{
+			if (!TestNotNull(TEXT("native function input is resolved"), Input.ExpressionInput.Get())) return false;
+			const FString Name = Input.ExpressionInput->InputName.ToString();
+			TestTrue(TEXT("readback exposes each actual function input name"), Pins.ContainsByPredicate([&](const auto& Pin) {
+				return Pin->AsObject()->GetStringField(TEXT("direction")) == TEXT("input") && Pin->AsObject()->GetStringField(TEXT("name")) == Name;
+			}));
+		}
+	}
+	TestFalse(TEXT("read-only capture leaves the material clean"), Package->IsDirty());
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -181,9 +287,17 @@ bool FUeAgentContentGraphReadGranularBlueprintCaptureTest::RunTest(
 		Capture.Relations.FilterByPredicate(
 			[](const FUeAgentContentGraphRelation& Relation)
 			{
-				return Relation.RelationKind == TEXT("blueprint_edge");
+				return Relation.RelationKind == TEXT("connection");
 			}).Num(),
 		1);
+	TestTrue(TEXT("native Blueprint edge captures precise pin identity independently of display state"),
+		Capture.Relations.ContainsByPredicate([](const FUeAgentContentGraphRelation& Relation) {
+			return Relation.RelationKind == TEXT("connection")
+				&& !Relation.SourceEndpoint.Identity.IsEmpty() && !Relation.TargetEndpoint.Identity.IsEmpty()
+				&& !Relation.SourceEndpoint.PublicName.IsEmpty() && !Relation.TargetEndpoint.PublicName.IsEmpty()
+				&& Relation.SourceEndpoint.Identity != Relation.SourceItemId
+				&& Relation.TargetEndpoint.Identity != Relation.TargetItemId;
+		}));
 	TestEqual(
 		TEXT("every authored node exposes one compact comment property"),
 		Capture.Properties.FilterByPredicate(
@@ -326,7 +440,7 @@ bool FUeAgentContentGraphReadGranularNiagaraCaptureTest::RunTest(
 		Capture.Relations.FilterByPredicate(
 			[](const FUeAgentContentGraphRelation& Relation)
 			{
-				return Relation.RelationKind == TEXT("niagara_order");
+				return Relation.RelationKind == TEXT("order");
 			}).Num() >= 2);
 	TestTrue(
 		TEXT("every assignment module exposes compact assignment targets"),
@@ -392,7 +506,7 @@ bool FUeAgentContentGraphReadProductionEnvironmentTest::RunTest(
 		}
 		FUeAgentContentGraphCapture Capture;
 		FUeAgentContentGraphReadError Error;
-		TestTrue(
+		const bool bCaptured = TestTrue(
 			*FString::Printf(
 				TEXT("%s real owner is captured"),
 				*Case.DomainId),
@@ -401,6 +515,12 @@ bool FUeAgentContentGraphReadProductionEnvironmentTest::RunTest(
 					*Case.Owner,
 					Capture,
 					Error));
+		if (!bCaptured)
+		{
+			AddError(FString::Printf(TEXT("capture failed domain=%s code=%s source=%s detail=%s"),
+				*Case.DomainId, *Error.Code, *Error.SubjectId, *Error.Detail));
+			continue;
+		}
 		TestEqual(
 			*FString::Printf(
 				TEXT("%s domain is exact"),
@@ -450,7 +570,7 @@ bool FUeAgentContentGraphReadProductionEnvironmentTest::RunTest(
 					[](const FUeAgentContentGraphRelation& Relation)
 					{
 						return Relation.RelationKind
-							== TEXT("texture_graph_node_pin");
+							== TEXT("membership");
 					}));
 			TestTrue(
 				TEXT("TextureGraph exposes pin values and output state"),

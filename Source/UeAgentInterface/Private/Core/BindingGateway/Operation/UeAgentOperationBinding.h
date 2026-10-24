@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/ContextResource/UeAgentOperationContext.h"
@@ -46,21 +47,7 @@ namespace UE::UAI::BindingGateway::Operation
 	using UE::UAI::Projection::FUeAgentProjectionRequest;
 	using UE::UAI::Verification::FVerificationOutcome;
 
-	struct UEAGENTINTERFACE_API FUeAgentOperationBindingError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-		EUeAgentResourceDimension ResourceDimension =
-			EUeAgentResourceDimension::WorkUnits;
-		int64 ResourceLimit = 0;
-		int64 ResourceObserved = 0;
-
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	using FUeAgentOperationBindingError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentOperationTargetBinding final
 	{
@@ -72,11 +59,12 @@ namespace UE::UAI::BindingGateway::Operation
 		const FUeAgentOperationTicket& GetTicket() const;
 		const FUeAgentCandidateBinding& GetBinding() const;
 		bool IsValid() const;
+		const FUeAgentOperationBindingError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentOperationTicket Ticket;
 		FUeAgentCandidateBinding Binding;
-		bool bValid = false;
+		FUeAgentOperationBindingError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentOperationRequestPreparer
@@ -124,8 +112,10 @@ namespace UE::UAI::BindingGateway::Operation
 			GetPreparer() const;
 		const FUeAgentProjectionRequest& GetProjection() const;
 		bool IsValid() const;
+		const FUeAgentOperationBindingError& GetValidationDiagnostic() const;
 
 	private:
+		void Validate(bool bPlanningVariant);
 		FUeAgentOperationSessionIdentity Session;
 		TArray<FUeAgentOperationTargetBinding> Targets;
 		FUeAgentExecutionContextInput ExecutionContext;
@@ -133,7 +123,7 @@ namespace UE::UAI::BindingGateway::Operation
 		TOptional<FUeAgentContractValue> Input;
 		TSharedPtr<IUeAgentOperationRequestPreparer> Preparer;
 		FUeAgentProjectionRequest Projection;
-		bool bValid = false;
+		FUeAgentOperationBindingError ValidationDiagnostic;
 	};
 
 	using FUeAgentOperationBindingRequest =
@@ -153,13 +143,15 @@ namespace UE::UAI::BindingGateway::Operation
 		const FString& GetPlanFingerprint() const;
 		const TSharedPtr<const FUeAgentProjectedResponse>&
 			GetProjection() const;
+		TArray<Contract::FDiagnostic> GetDiagnostics() const;
 		bool IsValid() const;
+		const FUeAgentOperationBindingError& GetValidationDiagnostic() const;
 
 	private:
 		FString OperationId;
 		FString PlanFingerprint;
 		TSharedPtr<const FUeAgentProjectedResponse> Projection;
-		bool bValid = false;
+		FUeAgentOperationBindingError ValidationDiagnostic;
 	};
 
 	using FUeAgentOperationBindingResult =

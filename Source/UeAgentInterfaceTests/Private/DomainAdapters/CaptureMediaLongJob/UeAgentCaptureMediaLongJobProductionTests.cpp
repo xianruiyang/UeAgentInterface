@@ -4,6 +4,7 @@
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/ExecutionMutation/UeAgentLongRunningOperation.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "Dom/JsonObject.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/FileHelper.h"
@@ -23,19 +24,7 @@ namespace
 
 	TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 4096},
-				{EUeAgentResourceDimension::Files, 64},
-				{EUeAgentResourceDimension::ReferenceEdges, 4096},
-				{EUeAgentResourceDimension::WorkUnits, 65536},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	FUeAgentCanonicalValueRef EmptyParameters(FUeAgentResourceTracker& Resources)
@@ -394,8 +383,6 @@ bool FUeAgentCaptureMediaExactPolicyCatalogTest::RunTest(
 	{
 		return false;
 	}
-	TestEqual(TEXT("all three policies retained"),
-		Factory->GetPolicyDescriptors().Num(), 3);
 	for (const FUeAgentCaptureMediaLongJobPolicyDescriptor& Descriptor
 		: Factory->GetPolicyDescriptors())
 	{
@@ -498,8 +485,6 @@ bool FUeAgentCaptureMediaThreeFamilyPortTest::RunTest(
 			Port->Observe(
 				Operation.GetOperationId(), Identity, *Resources, Observation, Error));
 	}
-	TestEqual(TEXT("all families own distinct native sessions"),
-		Builder->Sessions.Num(), 3);
 	return !HasAnyErrors();
 }
 
@@ -518,11 +503,17 @@ bool FUeAgentCaptureMediaArtifactLifecycleTest::RunTest(
 		TypedRequest(ImagePolicy(), *Resources);
 	const TSharedRef<FRecordingNativeSession, ESPMode::ThreadSafe> Native =
 		MakeShared<FRecordingNativeSession, ESPMode::ThreadSafe>();
+	const TSharedRef<FJsonObject> CaptureReceipt = MakeShared<FJsonObject>();
+	CaptureReceipt->SetStringField(
+		TEXT("schema"), TEXT("uai.capture.image.receipt.v1"));
+	CaptureReceipt->SetNumberField(TEXT("frame_count"), 2);
 	Native->Observation = FUeAgentCaptureMediaNativeObservation(
 		ELongRunningWorkState::Running,
 		TEXT("artifact_ready"),
 		FString(),
-		ArtifactRef());
+		ArtifactRef(),
+		{ArtifactRef(TEXT("frame-0")), ArtifactRef(TEXT("frame-1"))},
+		CaptureReceipt);
 	TSharedPtr<ILongRunningOperationPort, ESPMode::ThreadSafe> Port;
 	FExecutionMutationError Error;
 	TestTrue(TEXT("capture native resource port constructs"),
@@ -549,6 +540,16 @@ bool FUeAgentCaptureMediaArtifactLifecycleTest::RunTest(
 			FindObjectValue(Payload, TEXT("artifact_ref"));
 		TestTrue(TEXT("signal contains a structured C8F artifact ref"),
 			Artifact && (*Artifact)->GetKind() == EUeAgentValueKind::Object);
+		const FUeAgentCanonicalValueRef* AdditionalArtifacts =
+			FindObjectValue(Payload, TEXT("additional_artifact_refs"));
+		TestTrue(TEXT("signal contains ordered additional image artifacts"),
+			AdditionalArtifacts
+			&& (*AdditionalArtifacts)->GetKind() == EUeAgentValueKind::Array
+			&& (*AdditionalArtifacts)->GetArrayItems().Num() == 2);
+		const FUeAgentCanonicalValueRef* Receipt =
+			FindObjectValue(Payload, TEXT("capture_receipt"));
+		TestTrue(TEXT("signal contains the structured capture receipt"),
+			Receipt && (*Receipt)->GetKind() == EUeAgentValueKind::Object);
 		TestTrue(TEXT("signal excludes raw image bytes"),
 			FindObjectValue(Payload, TEXT("raw_image_bytes")) == nullptr);
 		TestTrue(TEXT("signal excludes delivery status"),
@@ -566,7 +567,9 @@ bool FUeAgentCaptureMediaArtifactLifecycleTest::RunTest(
 		ELongRunningWorkState::ExitedSuccess,
 		TEXT("native_exited"),
 		FString(),
-		ArtifactRef());
+		ArtifactRef(),
+		{ArtifactRef(TEXT("frame-0")), ArtifactRef(TEXT("frame-1"))},
+		CaptureReceipt);
 	TestTrue(TEXT("physical native exit is observed"),
 		Port->Observe(
 			Operation.GetOperationId(), Identity, *Resources, Observation, Error));

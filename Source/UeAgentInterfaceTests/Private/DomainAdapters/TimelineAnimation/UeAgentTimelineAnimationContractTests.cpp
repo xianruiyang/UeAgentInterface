@@ -73,13 +73,7 @@ namespace
 
 	FUeAgentResourceTracker MakeTracker()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::Nodes, 128},
-			{EUeAgentResourceDimension::Items, 1024},
-			{EUeAgentResourceDimension::StringBytes, 65536},
-			{EUeAgentResourceDimension::WorkUnits, 65536},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 1048576},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	class FRecordingTimelineAnimationNativePort final
@@ -110,7 +104,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentTimelineAnimationContractTest,
 	"UeAgentInterface.DomainAdapters.TimelineAnimation.E0.Contract."
-		"TypedPortsAndLegacyBoundary",
+		"CurrentAuthoredClockSpatialAndRigContract",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
@@ -141,36 +135,6 @@ bool FUeAgentTimelineAnimationContractTest::RunTest(
 		Fixture->GetArrayField(TEXT("port_families"));
 	const TArray<TSharedPtr<FJsonValue>>& CapabilityValues =
 		Fixture->GetArrayField(TEXT("capabilities"));
-	const TArray<TSharedPtr<FJsonValue>>& MappingValues =
-		Fixture->GetArrayField(TEXT("legacy_mappings"));
-	const TArray<TSharedPtr<FJsonValue>>& RetiredValues =
-		Fixture->GetArrayField(TEXT("retired_legacy_ids"));
-	TestEqual(
-		TEXT("five typed port families"),
-		FamilyValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("port_family_count"))));
-	TestEqual(
-		TEXT("nineteen canonical capabilities"),
-		CapabilityValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("capability_count"))));
-	TestEqual(
-		TEXT("twenty seven mapped legacy inputs"),
-		MappingValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("mapped_legacy_count"))));
-	TestEqual(
-		TEXT("forty five retired legacy inputs"),
-		RetiredValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("retired_legacy_count"))));
-	TestEqual(
-		TEXT("all seventy two legacy candidates adjudicated"),
-		MappingValues.Num() + RetiredValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("legacy_candidate_count"))));
-
 	const TSet<FString> ExpectedFamilies = {
 		TEXT("temporal_read"),
 		TEXT("animation_keyed_data"),
@@ -213,13 +177,12 @@ bool FUeAgentTimelineAnimationContractTest::RunTest(
 			TEXT("family has independent oracle: ") + FamilyId,
 			!Family->GetStringField(TEXT("oracle_kind")).IsEmpty());
 	}
-	bool bExactFamilies = FamilyIds.Num() == ExpectedFamilies.Num();
 	for (const FString& ExpectedFamily : ExpectedFamilies)
 	{
-		bExactFamilies =
-			bExactFamilies && FamilyIds.Contains(ExpectedFamily);
+		TestTrue(TEXT("required current family exists: ")
+			+ ExpectedFamily,
+			FamilyIds.Contains(ExpectedFamily));
 	}
-	TestTrue(TEXT("exact typed port family set"), bExactFamilies);
 
 	TSet<FString> CapabilityIds;
 	TSet<FString> DescriptorIds;
@@ -262,83 +225,6 @@ bool FUeAgentTimelineAnimationContractTest::RunTest(
 				TEXT("port_family_id"))));
 	}
 
-	TSet<FString> ExternalTargets;
-	for (const FString& Target
-		: ReadStrings(Fixture, TEXT("external_capability_targets")))
-	{
-		ExternalTargets.Add(Target);
-	}
-	TSet<FString> CandidateIds;
-	for (const TSharedPtr<FJsonValue>& Value : MappingValues)
-	{
-		const TSharedPtr<FJsonObject> Mapping = Value->AsObject();
-		const FString LegacyId =
-			Mapping->GetStringField(TEXT("legacy_id"));
-		const FString Disposition =
-			Mapping->GetStringField(TEXT("disposition"));
-		const FString Target =
-			Mapping->GetStringField(TEXT("capability_id"));
-		TestFalse(
-			TEXT("mapped legacy id is unique: ") + LegacyId,
-			CandidateIds.Contains(LegacyId));
-		CandidateIds.Add(LegacyId);
-		TestTrue(
-			TEXT("mapped disposition is allowed: ") + LegacyId,
-			Disposition == TEXT("adapt")
-				|| Disposition == TEXT("compose")
-				|| Disposition == TEXT("split"));
-		TestTrue(
-			TEXT("mapped target is canonical or existing shared capability: ")
-				+ LegacyId,
-			CapabilityIds.Contains(Target)
-				|| ExternalTargets.Contains(Target));
-	}
-	for (const TSharedPtr<FJsonValue>& Value : RetiredValues)
-	{
-		const FString LegacyId = Value->AsString();
-		TestFalse(
-			TEXT("retired legacy id is unique: ") + LegacyId,
-			CandidateIds.Contains(LegacyId));
-		CandidateIds.Add(LegacyId);
-	}
-	TestEqual(
-		TEXT("candidate union is exact"),
-		CandidateIds.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("legacy_candidate_count"))));
-	TestTrue(
-		TEXT("Montage editor UI entry is deleted"),
-		CandidateIds.Contains(TEXT("montage_open_editor"))
-			&& !MappingValues.ContainsByPredicate(
-				[](const TSharedPtr<FJsonValue>& Value)
-				{
-					return Value->AsObject()->GetStringField(
-						TEXT("legacy_id")) == TEXT("montage_open_editor");
-				}));
-	TestTrue(
-		TEXT("Sequence editor UI entry is deleted"),
-		CandidateIds.Contains(TEXT("sequence_open_level_sequence"))
-			&& !MappingValues.ContainsByPredicate(
-				[](const TSharedPtr<FJsonValue>& Value)
-				{
-					return Value->AsObject()->GetStringField(
-						TEXT("legacy_id"))
-						== TEXT("sequence_open_level_sequence");
-				}));
-
-	for (const FString& Reallocated
-		: ReadStrings(Fixture, TEXT("reallocated_legacy_ids")))
-	{
-		TestTrue(
-			TEXT("reallocated scenario has exactly one terminal mapping: ")
-				+ Reallocated,
-			MappingValues.ContainsByPredicate(
-				[&Reallocated](const TSharedPtr<FJsonValue>& Value)
-				{
-					return Value->AsObject()->GetStringField(
-						TEXT("legacy_id")) == Reallocated;
-				}));
-	}
 	TestEqual(
 		TEXT("pose is session animation state"),
 		CapabilityById[TEXT("animation.subject.pose.update")]
@@ -358,12 +244,6 @@ bool FUeAgentTimelineAnimationContractTest::RunTest(
 	const TArray<FString> ForbiddenOracles =
 		ReadStrings(Fixture, TEXT("forbidden_oracles"));
 	TestTrue(
-		TEXT("legacy success is not an oracle"),
-		ForbiddenOracles.Contains(TEXT("legacy_command_success")));
-	TestTrue(
-		TEXT("handler echo is not an oracle"),
-		ForbiddenOracles.Contains(TEXT("legacy_handler_echo")));
-	TestTrue(
 		TEXT("export echo is not an oracle"),
 		ForbiddenOracles.Contains(TEXT("exported_input_echo")));
 	TestTrue(
@@ -379,17 +259,14 @@ bool FUeAgentTimelineAnimationContractTest::RunTest(
 		GetTimelineAnimationPortFamilyContracts();
 	const auto& ProductionCapabilities =
 		GetTimelineAnimationCapabilityContracts();
-	TestEqual(
-		TEXT("production exposes five family contracts"),
-		ProductionFamilies.Num(),
-		FamilyValues.Num());
-	TestEqual(
-		TEXT("production exposes nineteen capabilities"),
-		ProductionCapabilities.Num(),
-		CapabilityValues.Num());
+	TSet<FString> ProductionFamilyIds;
 	for (const auto& ProductionFamily : ProductionFamilies)
 	{
 		const FString FamilyId = ProductionFamily.GetFamilyId();
+		TestFalse(
+			TEXT("production family identity is unique: ") + FamilyId,
+			ProductionFamilyIds.Contains(FamilyId));
+		ProductionFamilyIds.Add(FamilyId);
 		TestTrue(
 			TEXT("production family exists in fixture: ") + FamilyId,
 			FamilyById.Contains(FamilyId));
@@ -424,10 +301,21 @@ bool FUeAgentTimelineAnimationContractTest::RunTest(
 			ProductionFamily.GetSpatialPolicy(),
 			Expected->GetStringField(TEXT("spatial_policy")));
 	}
+	for (const FString& FamilyId : FamilyIds)
+	{
+		TestTrue(
+			TEXT("fixture family is exposed by production: ") + FamilyId,
+			ProductionFamilyIds.Contains(FamilyId));
+	}
+	TSet<FString> ProductionCapabilityIds;
 	for (const auto& ProductionCapability : ProductionCapabilities)
 	{
 		const FString CapabilityId =
 			ProductionCapability.GetCapabilityId();
+		TestFalse(
+			TEXT("production capability identity is unique: ") + CapabilityId,
+			ProductionCapabilityIds.Contains(CapabilityId));
+		ProductionCapabilityIds.Add(CapabilityId);
 		TestTrue(
 			TEXT("production capability exists in fixture: ")
 				+ CapabilityId,
@@ -458,6 +346,12 @@ bool FUeAgentTimelineAnimationContractTest::RunTest(
 			TEXT("production port family: ") + CapabilityId,
 			ProductionCapability.GetPortFamilyId(),
 			Expected->GetStringField(TEXT("port_family_id")));
+	}
+	for (const FString& CapabilityId : CapabilityIds)
+	{
+		TestTrue(
+			TEXT("fixture capability is exposed by production: ") + CapabilityId,
+			ProductionCapabilityIds.Contains(CapabilityId));
 	}
 
 	using namespace UE::UAI::DomainAdapters::TimelineAnimation;

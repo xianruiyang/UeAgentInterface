@@ -15,7 +15,7 @@ namespace UE::UAI::Module::CommandRegistration::Blueprint::Surfaces
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::
 				FDomainCapabilityContribution>& OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>
 				Provider;
@@ -25,7 +25,7 @@ namespace UE::UAI::Module::CommandRegistration::Blueprint::Surfaces
 						Provider, WorkspaceError)
 				|| !Provider.IsValid())
 			{
-				OutError = WorkspaceError.GetCode();
+				OutError = WorkspaceError.GetDiagnostic();
 				return false;
 			}
 			DomainCapability::FDomainCapabilityDeclaration Declaration =
@@ -56,9 +56,6 @@ namespace UE::UAI::Module::CommandRegistration::Blueprint::Surfaces
 				TEXT("uai.init.blueprint.pin/1"),
 				TEXT("uai.init.blueprint.edge/1"),
 			};
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId = TEXT("T14-BLUEPRINT-SURFACES");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}

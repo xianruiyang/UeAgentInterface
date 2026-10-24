@@ -1,16 +1,30 @@
 #include "OperationOwners/AiBehavior/UeAgentAiBehaviorDomainService.h"
+#include "DomainAdapters/ContentDiscovery/UeAgentEditorContentDiscovery.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "CommandHandlers/AiBehavior/UeAgentAiBehaviorDomainCommandHandlers.h"
+#include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTreeGraphNode.h"
+#include "Domains/BehaviorTree/Authoring/UeAgentBehaviorTreeGraphDocument.h"
+#include "Domains/Eqs/Authoring/UeAgentEqsGraphDocument.h"
+#include "EnvironmentQuery/EnvQuery.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/PackageName.h"
 #include "QueryOwners/AiBehavior/UeAgentAiBehaviorCandidateQuery.h"
+#include "Utilities/AuthoringCore/UeAgentCandidatePropertyDescription.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "UObject/Class.h"
 #include "UObject/Object.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace UE::UAI::OperationOwners::AiBehavior
 {
 	using namespace CommandContract;
+	using namespace ContentDiscovery;
 	using namespace HjsonWorkspace;
 	using namespace QueryOwners::AiBehavior;
 
@@ -75,7 +89,7 @@ namespace UE::UAI::OperationOwners::AiBehavior
 					return false;
 				}
 				return Request.GetCommandId() != TEXT("content_graph.import_workspace")
-					|| Request.GetSchemaId() == SchemaId;
+					|| MatchesDomainImportSchema(Request, SchemaId);
 			}
 
 			virtual bool TryResolveInitializationContract(
@@ -102,23 +116,34 @@ namespace UE::UAI::OperationOwners::AiBehavior
 					|| InitializationContractId != InitializationContract(
 						Request.GetRootTypeIdentity(), Request.GetRole()))
 				{
-					OutError.Set(TEXT("ai_behavior_domain_contract_not_executable"), InitializationContractId);
+					auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("ai_behavior_domain_contract_not_executable"),
+						Request.GetRole() != EInitializationNodeRole::RootTarget
+						? TEXT("This domain executor requires a root-target initialization request.")
+						: TEXT("The initialization contract does not match the requested root type."), TEXT("domain_execute"));
+					Detail.TargetPath = Request.GetTargetIdentity();
+					Detail.SourceKind = TEXT("native_result");
+					Detail.InternalContext = InitializationContractId;
+					OutError.SetFailure(MoveTemp(Detail));
 					return false;
 				}
 				return CommandHandlers::AiBehavior::TryHandleDomainRequest(Request, OutResponse, OutError);
 			}
 		};
 
-		bool Fail(
-			FAiBehaviorCandidateCommandError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool ForwardDiagnostic(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
 			return false;
+		}
+
+		UE::UAI::Contract::FDiagnostic CandidateDiagnostic(const TCHAR* Code, const TCHAR* Reason,
+			const FString& Path, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target = FString())
+		{
+			auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Path, Expected, Actual, TEXT("candidate_query"), Reason);
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.TargetPath = Target;
+			return Diagnostic;
 		}
 
 		FString ObjectPath(const FString& Target)
@@ -128,15 +153,6 @@ namespace UE::UAI::OperationOwners::AiBehavior
 			return Name.IsEmpty() ? Target : Target + TEXT(".") + Name;
 		}
 
-		TArray<TSharedPtr<FJsonValue>> StringArray(const TArray<FString>& Values)
-		{
-			TArray<TSharedPtr<FJsonValue>> Result;
-			for (const FString& Value : Values)
-			{
-				Result.Add(MakeShared<FJsonValueString>(Value));
-			}
-			return Result;
-		}
 
 		class FAiBehaviorCandidateCommandService final
 			: public IUeAgentAiBehaviorCandidateCommandService
@@ -151,133 +167,170 @@ namespace UE::UAI::OperationOwners::AiBehavior
 				OutError = {};
 				if (Request.bCancellationRequested)
 				{
-					return Fail(OutError, TEXT("ai_behavior_candidate_cancelled"), Request.CommandId);
+					return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_cancelled"), TEXT("The candidate query was cancelled before execution."),
+						TEXT("/cancellation_requested"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false)), Request.CommandId);
 				}
 				if (Request.CommandId != CandidateCommandId)
 				{
-					return Fail(OutError, TEXT("ai_behavior_candidate_command_not_supported"), Request.CommandId);
+					return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_command_not_supported"), TEXT("This service does not handle the requested command."),
+						TEXT("/command_id"), MakeShared<FJsonValueString>(Request.CommandId), MakeShared<FJsonValueString>(CandidateCommandId)), Request.CommandId);
 				}
 				TSharedPtr<FJsonObject> Params;
-				FString JsonError;
+				UE::UAI::Contract::FDiagnostic JsonError;
 				if (!Json::TryParseObject(Request.CanonicalParamsJson, Params, JsonError)
 					|| !Params.IsValid())
 				{
-					return Fail(OutError, TEXT("ai_behavior_candidate_params_invalid"), Request.CommandId, JsonError);
+					return ForwardDiagnostic(OutError, JsonError.IsValid() ? MoveTemp(JsonError)
+						: CandidateDiagnostic(TEXT("ai_behavior_candidate_params_invalid"), TEXT("The candidate query decoder did not provide a parameters object."),
+							TEXT("/params"), nullptr, MakeShared<FJsonValueString>(TEXT("decoded object"))), Request.CommandId);
 				}
 				FString Target;
 				FString Query;
-				FString CandidateId;
 				if (!Params->TryGetStringField(TEXT("target"), Target)
 					|| Target.TrimStartAndEnd().IsEmpty())
 				{
-					return Fail(OutError, TEXT("ai_behavior_candidate_target_required"), Request.CommandId);
+					return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_target_required"), TEXT("Candidate queries require a nonempty target asset reference."),
+						TEXT("/target"), Params->TryGetField(TEXT("target")), MakeShared<FJsonValueString>(TEXT("nonempty asset reference"))), Request.CommandId);
 				}
 				Params->TryGetStringField(TEXT("query"), Query);
-				Params->TryGetStringField(TEXT("id"), CandidateId);
-				int32 Limit = 64;
-				int32 Cursor = 0;
-				double Number = 0.0;
-				if (Params->TryGetNumberField(TEXT("limit"), Number)) Limit = static_cast<int32>(Number);
-				if (Params->TryGetNumberField(TEXT("cursor"), Number)) Cursor = static_cast<int32>(Number);
+				UE::UAI::ContentDiscovery::FContentDiscoveryError TargetError;
+				if (!UE::UAI::DomainAdapters::ContentDiscovery::TryResolveEditorContentReference(Target, TEXT("asset"), TargetError))
+					return ForwardDiagnostic(OutError, TargetError, Target);
 				UObject* TargetObject = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath(Target));
 				if (!TargetObject)
 				{
-					return Fail(OutError, TEXT("ai_behavior_candidate_target_unresolved"), Target);
+					auto Diagnostic = CandidateDiagnostic(TEXT("ai_behavior_candidate_target_unresolved"), TEXT("The target asset could not be loaded for candidate discovery."),
+						TEXT("/target"), MakeShared<FJsonValueString>(Target), MakeShared<FJsonValueString>(TEXT("loadable asset")), Target);
+					Diagnostic.SourceKind = TEXT("native_result");
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
 				}
 				FAiBehaviorCandidateQueryResult QueryResult;
 				FAiBehaviorCandidateQueryError QueryError;
+				FAiBehaviorCandidateContext Context;
+				if (Params->HasField(TEXT("graph_owner")))
+				{
+					FString Owner;
+					UBehaviorTree* Tree = Cast<UBehaviorTree>(TargetObject);
+					if (!Tree)
+						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_graph_context_invalid"), TEXT("A graph_owner context requires a BehaviorTree asset."),
+							TEXT("/target"), MakeShared<FJsonValueString>(TargetObject->GetClass()->GetPathName()), MakeShared<FJsonValueString>(BehaviorTreeType), Target));
+					if (!Params->TryGetStringField(TEXT("graph_owner"), Owner) || Owner.IsEmpty())
+						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_graph_context_invalid"), TEXT("The graph owner reference must be a nonempty string."),
+							TEXT("/graph_owner"), Params->TryGetField(TEXT("graph_owner")), MakeShared<FJsonValueString>(TEXT("nonempty graph owner reference")), Target));
+					if (Params->HasField(TEXT("parent")) || Params->HasField(TEXT("attachment_kind")))
+						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_graph_context_invalid"), TEXT("A graph_owner context cannot be combined with attachment context fields."),
+							Params->HasField(TEXT("parent")) ? TEXT("/parent") : TEXT("/attachment_kind"), MakeShared<FJsonValueBoolean>(true),
+							MakeShared<FJsonValueString>(TEXT("attachment context absent with graph_owner")), Target));
+					FWorkspaceError ContextError;
+					if (!UeAgentBehaviorTreeAuthoring::TryResolveCapturedGraphOwnerReference(*Tree, Owner, Context.Graph, ContextError))
+						return ForwardDiagnostic(OutError, ContextError.GetDiagnostic(), Owner);
+				}
+				if (Params->HasField(TEXT("parent")) || Params->HasField(TEXT("attachment_kind")))
+				{
+					FString Parent;
+					UBehaviorTree* Tree = Cast<UBehaviorTree>(TargetObject);
+					UEnvQuery* Eqs = Cast<UEnvQuery>(TargetObject);
+					if (!Tree && !Eqs)
+						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_attachment_context_invalid"), TEXT("Attachment candidate context requires a BehaviorTree or EnvQuery asset."),
+							TEXT("/target"), MakeShared<FJsonValueString>(TargetObject->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("BehaviorTree or EnvQuery")), Target));
+					if (!Params->TryGetStringField(TEXT("parent"), Parent) || Parent.IsEmpty())
+						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_attachment_context_invalid"), TEXT("Attachment candidate context requires a nonempty parent reference."),
+							TEXT("/parent"), Params->TryGetField(TEXT("parent")), MakeShared<FJsonValueString>(TEXT("nonempty parent reference")), Target));
+					if (!Params->TryGetStringField(TEXT("attachment_kind"), Context.AttachmentKind))
+						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_attachment_context_invalid"), TEXT("Attachment candidate context requires a string attachment_kind."),
+							TEXT("/attachment_kind"), Params->TryGetField(TEXT("attachment_kind")), MakeShared<FJsonValueString>(TEXT("string")), Target));
+					if ((Tree && Context.AttachmentKind != TEXT("service") && Context.AttachmentKind != TEXT("decorator"))
+						|| (Eqs && Context.AttachmentKind != TEXT("test")))
+						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_attachment_context_invalid"), TEXT("The attachment kind is not supported for this asset type."),
+							TEXT("/attachment_kind"), MakeShared<FJsonValueString>(Context.AttachmentKind),
+							MakeShared<FJsonValueString>(Tree ? TEXT("service or decorator") : TEXT("test")), Target));
+					FWorkspaceError ContextError;
+					if (Tree)
+					{
+						UBehaviorTreeGraphNode* ParentNode = nullptr;
+						if (!UeAgentBehaviorTreeAuthoring::TryResolveCapturedNodeReference(*Tree, Parent, ParentNode, ContextError))
+							return ForwardDiagnostic(OutError, ContextError.GetDiagnostic(), Parent);
+						Context.Parent = ParentNode;
+					}
+					else if (!UeAgentEqsAuthoring::TryResolveCapturedNodeReference(*Eqs, Parent, Context.Parent, ContextError))
+						return ForwardDiagnostic(OutError, ContextError.GetDiagnostic(), Parent);
+				}
+				const auto Scope = MakeShared<FJsonObject>();
+				Scope->SetStringField(TEXT("target"), Target.TrimStartAndEnd());
+				for (const TCHAR* Key : {TEXT("parent"), TEXT("attachment_kind"), TEXT("graph_owner")})
+				{
+					FString Value;
+					if (Params->TryGetStringField(Key, Value)) Scope->SetStringField(Key, Value);
+				}
+				if (Params->HasField(TEXT("describe")))
+				{
+					const TSharedPtr<FJsonObject>* Description = nullptr;
+					CandidateProperties::FRequest DescriptionRequest;
+					if (!Params->TryGetObjectField(TEXT("describe"), Description))
+						return ForwardDiagnostic(OutError, CandidateDiagnostic(TEXT("ai_behavior_candidate_description_invalid"), TEXT("The candidate description request must be an object."),
+							TEXT("/describe"), Params->TryGetField(TEXT("describe")), MakeShared<FJsonValueString>(TEXT("object")), Target));
+					if (!CandidateProperties::ReadRequest(*Description, DescriptionRequest, JsonError))
+					{
+						UeAgentAuthoringDiagnostics::PrefixDocumentFailure(JsonError, TEXT("/describe"));
+						if (JsonError.TargetPath.IsEmpty()) JsonError.TargetPath = Target;
+						return ForwardDiagnostic(OutError, MoveTemp(JsonError));
+					}
+					FAiBehaviorCandidate Candidate;
+					if (!TryResolveAiBehaviorCandidate(*TargetObject, DescriptionRequest.Name,
+						FString(), Candidate, QueryError, DescriptionRequest.Select, Context))
+					{
+						UeAgentAuthoringDiagnostics::PrefixDocumentFailure(QueryError, TEXT("/describe"));
+						if (QueryError.SourceKind.IsEmpty()) QueryError.SourceKind = TEXT("command_input");
+						if (QueryError.TargetPath.IsEmpty()) QueryError.TargetPath = Target;
+						return ForwardDiagnostic(OutError, QueryError, QueryError.SubjectId);
+					}
+					if (!CandidateProperties::BuildCreationSupportPayload(DescriptionRequest,
+						Candidate.bSupported, Candidate.SupportDiagnostic.IsEmpty() ? Candidate.SupportReason : Candidate.SupportDiagnostic.PublicMessage, TEXT("native_ai_action"),
+						TEXT("creation_support_only; editable_fields_resolve_after_creation"),
+						OutResponse.PayloadJson, JsonError))
+					{
+						if (JsonError.TargetPath.IsEmpty()) JsonError.TargetPath = Target;
+						return ForwardDiagnostic(OutError, MoveTemp(JsonError), DescriptionRequest.Name);
+					}
+					if (!TryAddDiscoveryScope(Scope, OutResponse.PayloadJson, JsonError)) return ForwardDiagnostic(OutError, JsonError, FString());
+					OutResponse.bReadOnly = true;
+					return true;
+				}
 				if (!TryQueryAiBehaviorCandidates(
 						*TargetObject,
 						Query,
 						QueryResult,
 						QueryError,
-						Limit,
-						Cursor,
-						CandidateId))
+						FString(), Context))
 				{
-					return Fail(
-						OutError,
-						QueryError.Code.IsEmpty()
-							? FString(TEXT("ai_behavior_candidate_query_failed"))
-							: QueryError.Code,
-						QueryError.SubjectId,
-						QueryError.Detail);
+					if (QueryError.TargetPath.IsEmpty()) QueryError.TargetPath = Target;
+					return ForwardDiagnostic(OutError, !QueryError.IsEmpty() ? QueryError : CandidateDiagnostic(TEXT("ai_behavior_candidate_query_failed"),
+						TEXT("Candidate discovery failed without providing a diagnostic."), TEXT("/query"),
+						MakeShared<FJsonValueString>(Query), MakeShared<FJsonValueString>(TEXT("completed candidate query")), Target), QueryError.SubjectId);
 				}
-
-				const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-				Payload->SetStringField(TEXT("command_id"), CandidateCommandId);
-				Payload->SetBoolField(TEXT("read_only"), true);
-				Payload->SetStringField(TEXT("target"), Target);
-				Payload->SetStringField(TEXT("target_revision"), QueryResult.TargetRevision);
-				Payload->SetNumberField(TEXT("total_matches"), QueryResult.TotalMatches);
-				Payload->SetNumberField(TEXT("next_cursor"), QueryResult.NextCursor);
-				Payload->SetBoolField(TEXT("complete"), QueryResult.bComplete);
-				Payload->SetBoolField(TEXT("has_more"), QueryResult.bHasMore);
-				Payload->SetStringField(
-					TEXT("coverage_scope"), QueryResult.CoverageScope);
-				Payload->SetBoolField(
-					TEXT("coverage_complete"), QueryResult.bCoverageComplete);
-				Payload->SetBoolField(
-					TEXT("creation_coverage_complete"),
-					QueryResult.bCreationCoverageComplete);
-				Payload->SetNumberField(
-					TEXT("native_action_count"), QueryResult.NativeActionCount);
-				Payload->SetNumberField(
-					TEXT("executable_action_count"),
-					QueryResult.ExecutableActionCount);
-				if (!QueryResult.GraphName.IsEmpty())
+				if (!QueryResult.CatalogDiagnostic.IsEmpty() && QueryResult.CatalogDiagnostic.TargetPath.IsEmpty())
+					QueryResult.CatalogDiagnostic.TargetPath = Target;
+				const ContentDiscovery::FNameDiscoveryCompleteness Completeness{
+					QueryResult.TotalMatches, QueryResult.Candidates.Num(), QueryResult.CatalogDiagnostic};
+				if (!ContentDiscovery::TryValidateNameDiscoveryCompleteness(Completeness, JsonError))
 				{
-					Payload->SetStringField(TEXT("graph_name"), QueryResult.GraphName);
+					return ForwardDiagnostic(OutError, JsonError, FString());
 				}
-				TArray<TSharedPtr<FJsonValue>> Candidates;
+				TArray<ContentDiscovery::FNameSelectionEntry> Names;
 				for (const FAiBehaviorCandidate& Candidate : QueryResult.Candidates)
 				{
-					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-					if (!Candidate.Id.IsEmpty())
-					{
-						Value->SetStringField(TEXT("id"), Candidate.Id);
-					}
-					Value->SetStringField(TEXT("name"), Candidate.Name);
-					Value->SetStringField(TEXT("label"), Candidate.Label);
-					Value->SetStringField(TEXT("kind"), Candidate.Kind);
-					if (!Candidate.Id.IsEmpty())
-					{
-						Value->SetStringField(
-							TEXT("action_kind"), Candidate.ActionKind);
-						Value->SetStringField(
-							TEXT("category"), Candidate.Category);
-						Value->SetStringField(
-							TEXT("summary"), Candidate.Summary);
-						Value->SetBoolField(
-							TEXT("supported"), Candidate.bSupported);
-						Value->SetStringField(
-							TEXT("write_support"), Candidate.WriteSupport);
-						Value->SetStringField(
-							TEXT("support_reason"), Candidate.SupportReason);
-					}
-					else
-					{
-						Value->SetArrayField(
-							TEXT("supported_operations"),
-							StringArray(Candidate.SupportedOperations));
-						Value->SetStringField(
-							TEXT("input_contract"), Candidate.InputContract);
-						Value->SetStringField(
-							TEXT("placement_contract"), Candidate.PlacementContract);
-						Value->SetStringField(
-							TEXT("required_context"), Candidate.RequiredContext);
-						Value->SetStringField(
-							TEXT("binding_revision"), Candidate.BindingRevision);
-					}
-					Candidates.Add(MakeShared<FJsonValueObject>(Value));
+					Names.Add({Candidate.Name, Candidate.Identity.CanonicalKey, Candidate.SelectionFields});
 				}
-				Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));
-				if (!Json::TryCanonicalize(Payload, OutResponse.PayloadJson, JsonError))
+				if (!TryBuildCandidateNamesOnlyPayload(
+						Names, ENameComparison::IgnoreCase,
+						OutResponse.PayloadJson, JsonError, QueryResult.CatalogDiagnostic))
 				{
-					return Fail(OutError, TEXT("ai_behavior_candidate_result_invalid"), Request.CommandId, JsonError);
+					return ForwardDiagnostic(OutError, JsonError, FString());
 				}
+				if (!ContentDiscovery::TryAddDiscoveryScope(Scope, OutResponse.PayloadJson, JsonError)) return ForwardDiagnostic(OutError, JsonError, FString());
 				OutResponse.bReadOnly = true;
 				return true;
+
 			}
 		};
 	}
@@ -293,7 +346,7 @@ namespace UE::UAI::OperationOwners::AiBehavior
 
 	bool TryCreateProductionAiBehaviorCandidateCommandService(
 		TSharedPtr<IUeAgentAiBehaviorCandidateCommandService>& OutService,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutService = MakeShared<FAiBehaviorCandidateCommandService>();
 		OutError.Reset();

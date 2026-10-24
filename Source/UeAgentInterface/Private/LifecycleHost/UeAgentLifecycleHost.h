@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/ContextResource/UeAgentContextResource.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "NetworkTransport/UeAgentNetworkTransport.h"
 
 #include "CoreMinimal.h"
@@ -63,54 +64,7 @@ namespace UE::UAI::LifecycleHost
 		bool IsValid() const;
 	};
 
-	struct FUeAgentAutomationRequirement
-	{
-		bool bRequiresRhi = false;
-		bool bRequiresSlate = false;
-		bool bRequiresForeground = false;
-		double MinimumFps = 0.0;
-	};
-
-	struct FUeAgentFpsObservation
-	{
-		double RequiredFps = 0.0;
-		double CurrentFps = 0.0;
-	};
-
-	enum class EUeAgentFpsGateState : uint8
-	{
-		NotApplicable,
-		Ready,
-		Blocked,
-	};
-
-	struct FUeAgentFpsGateDecision
-	{
-		FString HostId;
-		EUeAgentFpsGateState State =
-			EUeAgentFpsGateState::NotApplicable;
-		FString FailureCode;
-		TOptional<double> RequiredFps;
-		TOptional<double> CurrentFps;
-	};
-
-	struct FUeAgentLifecycleDiagnostic
-	{
-		FString Code;
-		FString Message;
-	};
-
-	UEAGENTINTERFACE_API bool RequireOwnedAutomationTarget(
-		const FUeAgentHostIdentity& Host,
-		FUeAgentLifecycleDiagnostic& OutDiagnostic);
-
-	UEAGENTINTERFACE_API bool EvaluateFpsGate(
-		const FUeAgentHostIdentity& Host,
-		EUeAgentRenderMode RenderMode,
-		const FUeAgentAutomationRequirement& Requirement,
-		const TOptional<FUeAgentFpsObservation>& Observation,
-		FUeAgentFpsGateDecision& OutDecision,
-		FUeAgentLifecycleDiagnostic& OutDiagnostic);
+	using FUeAgentLifecycleDiagnostic = Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentProcessLifecycleBackend
 	{

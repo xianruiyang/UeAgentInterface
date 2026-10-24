@@ -39,40 +39,23 @@ namespace
 		return true;
 	}
 
-	UeAgentAuthoringDiagnostics::FSourceLocation MakeSourceLocation(
-		const FWorkspaceUnit* Unit,
-		const FString& JsonPointer)
-	{
-		UeAgentAuthoringDiagnostics::FSourceLocation Source;
-		if (!Unit) return Source;
-		Source = Unit->Provenance.ToDiagnosticSource();
-		Source.JsonPath = JsonPointer.IsEmpty() ? TEXT("/") : JsonPointer;
-		if (const FUeAgentHjsonSourceLocation* Location = Unit->FindSourceLocation(Source.JsonPath))
-		{
-			Source.SourceFile = Location->FilePath;
-			Source.Line = Location->Line;
-			Source.Column = Location->Column;
-		}
-		return Source;
-	}
+    UeAgentAuthoringDiagnostics::FSourceLocation MakeSourceLocation(const FWorkspaceUnit* Unit, const FString& JsonPointer)
+    {
+        return Unit ? Unit->ResolveDiagnosticSource(JsonPointer) : UeAgentAuthoringDiagnostics::FSourceLocation();
+    }
 
 	void SetFailure(
 		FGraphFailure& OutFailure,
-		const FString& ErrorCode,
-		const FString& ErrorDetail,
+		UE::UAI::Contract::FDiagnostic Diagnostic,
 		const FWorkspaceUnit* SourceUnit = nullptr,
 		const FString& JsonPointer = TEXT("/"))
 	{
-		OutFailure.ErrorCode = ErrorCode;
-		OutFailure.ErrorDetail = ErrorDetail;
-		OutFailure.Diagnostic = UeAgentAuthoringDiagnostics::FDiagnostic();
-		OutFailure.Diagnostic.Code = ErrorCode;
-		OutFailure.Diagnostic.Stage = TEXT("workspace_dependency");
-		OutFailure.Diagnostic.Severity = UeAgentAuthoringDiagnostics::ESeverity::Error;
+		OutFailure.Diagnostic = MoveTemp(Diagnostic);
 		OutFailure.Diagnostic.bRetrySafe = true;
-		OutFailure.Diagnostic.Message = ErrorDetail;
 		OutFailure.Diagnostic.SuggestedFix = TEXT("Fix the workspace reference or dependency declaration and retry the complete workspace.");
-		OutFailure.Diagnostic.Source = MakeSourceLocation(SourceUnit, JsonPointer);
+        if (OutFailure.Diagnostic.Source.SourceFile.IsEmpty() && !OutFailure.Diagnostic.Source.bCommandInput
+            && OutFailure.Diagnostic.SourceKind != TEXT("native_result") && OutFailure.Diagnostic.SourceKind != TEXT("command_input"))
+            OutFailure.Diagnostic.Source = MakeSourceLocation(SourceUnit, JsonPointer);
 	}
 
 	void AddAlias(TMap<FString, TArray<int32>>& Aliases, const FString& Alias, int32 UnitIndex)
@@ -149,28 +132,61 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 		return Source == EDependencySource::Reference ? TEXT("reference") : TEXT("contract");
 	}
 
-	bool FDependencyGraph::IsReadyFor(const UeAgentAuthoringWorkspaceRouter::FWorkspace& Workspace) const
-	{
-		if (ContractId != Workspace.ContractId || OrderedUnitIndices.Num() != Workspace.Units.Num()) return false;
-		TSet<int32> Seen;
-		TArray<int32> Positions;
-		Positions.Init(INDEX_NONE, Workspace.Units.Num());
-		int32 Position = 0;
-		for (int32 UnitIndex : OrderedUnitIndices)
-		{
-			if (!Workspace.Units.IsValidIndex(UnitIndex) || Seen.Contains(UnitIndex)) return false;
-			Seen.Add(UnitIndex);
-			Positions[UnitIndex] = Position++;
-		}
-		for (const FResolvedEdge& Edge : Edges)
-		{
-			if (!Workspace.Units.IsValidIndex(Edge.BeforeUnitIndex)
-				|| !Workspace.Units.IsValidIndex(Edge.AfterUnitIndex)
-				|| !Workspace.Units.IsValidIndex(Edge.DeclarationUnitIndex)
-				|| Positions[Edge.BeforeUnitIndex] >= Positions[Edge.AfterUnitIndex]) return false;
-		}
-		return CycleUnitKeys.IsEmpty();
-	}
+ bool FDependencyGraph::IsReadyFor(const FWorkspace& Workspace) const
+ {
+   return IsReadyFor(Workspace, nullptr);
+ }
+
+ bool FDependencyGraph::IsReadyFor(const FWorkspace& Workspace, UeAgentAuthoringDiagnostics::FDiagnostic* OutError) const
+ {
+   if (OutError) OutError->Reset();
+   const auto Reject = [&](const TCHAR* Reason, const FString& Path,
+                           const TSharedPtr<FJsonValue>& Expected, const TSharedPtr<FJsonValue>& Actual) {
+     if (OutError) {
+       *OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("workspace_dependency_graph_not_ready"), Path, Expected, Actual, TEXT("workspace_preflight"), Reason);
+       OutError->SourceKind = TEXT("native_result");
+     }
+     return false;
+   };
+   if (ContractId != Workspace.ContractId)
+     return Reject(TEXT("The dependency graph belongs to a different workspace contract."), TEXT("/graph/contract_id"), MakeShared<FJsonValueString>(Workspace.ContractId), MakeShared<FJsonValueString>(ContractId));
+   if (OrderedUnitIndices.Num() != Workspace.Units.Num())
+     return Reject(TEXT("The dependency order does not contain exactly one entry per workspace unit."), TEXT("/graph/ordered_unit_indices/length"), MakeShared<FJsonValueNumber>(Workspace.Units.Num()), MakeShared<FJsonValueNumber>(OrderedUnitIndices.Num()));
+   TSet<int32> Seen;
+   TArray<int32> Positions;
+   Positions.Init(INDEX_NONE, Workspace.Units.Num());
+   int32 Position = 0;
+   for (int32 UnitIndex : OrderedUnitIndices) {
+     if (!Workspace.Units.IsValidIndex(UnitIndex))
+       return Reject(TEXT("The dependency order references a nonexistent workspace unit."), TEXT("/graph/ordered_unit_indices/") + FString::FromInt(Position), MakeShared<FJsonValueString>(FString::Printf(TEXT("index in [0, %d)"), Workspace.Units.Num())), MakeShared<FJsonValueNumber>(UnitIndex));
+     if (Seen.Contains(UnitIndex))
+       return Reject(TEXT("The dependency order repeats a workspace unit."), TEXT("/graph/ordered_unit_indices/") + FString::FromInt(Position), MakeShared<FJsonValueString>(TEXT("unique unit index")), MakeShared<FJsonValueNumber>(UnitIndex));
+     Seen.Add(UnitIndex);
+     Positions[UnitIndex] = Position++;
+   }
+   for (int32 Index = 0; Index < Edges.Num(); ++Index) {
+     const auto& Edge = Edges[Index];
+     const FString Path = TEXT("/graph/edges/") + FString::FromInt(Index);
+     for (const auto& Field : {TPair<const TCHAR*, int32>(TEXT("before_unit_index"), Edge.BeforeUnitIndex),
+         {TEXT("after_unit_index"), Edge.AfterUnitIndex}, {TEXT("declaration_unit_index"), Edge.DeclarationUnitIndex}})
+       if (!Workspace.Units.IsValidIndex(Field.Value))
+         return Reject(TEXT("A dependency edge references a nonexistent workspace unit."), Path / Field.Key, MakeShared<FJsonValueString>(FString::Printf(TEXT("index in [0, %d)"), Workspace.Units.Num())), MakeShared<FJsonValueNumber>(Field.Value));
+     if (Positions[Edge.BeforeUnitIndex] >= Positions[Edge.AfterUnitIndex]) {
+       TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
+       Actual->SetNumberField(TEXT("before_unit_index"), Edge.BeforeUnitIndex);
+       Actual->SetNumberField(TEXT("after_unit_index"), Edge.AfterUnitIndex);
+       Actual->SetNumberField(TEXT("before_position"), Positions[Edge.BeforeUnitIndex]);
+       Actual->SetNumberField(TEXT("after_position"), Positions[Edge.AfterUnitIndex]);
+       return Reject(TEXT("The unit order violates a declared dependency edge."), Path, MakeShared<FJsonValueString>(TEXT("before_position < after_position")), MakeShared<FJsonValueObject>(Actual));
+     }
+   }
+   if (!CycleUnitKeys.IsEmpty()) {
+     TArray<TSharedPtr<FJsonValue>> Cycle;
+     for (const auto& Key : CycleUnitKeys) Cycle.Add(MakeShared<FJsonValueString>(Key));
+     return Reject(TEXT("The dependency graph still contains a cycle."), TEXT("/graph/cycle_unit_keys"), MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>()), MakeShared<FJsonValueArray>(Cycle));
+   }
+   return true;
+ }
 
 	TSharedRef<FJsonObject> FDependencyGraph::ToJsonObject(
 		const UeAgentAuthoringWorkspaceRouter::FWorkspace& Workspace) const
@@ -219,13 +235,22 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 	{
 		OutGraph = FDependencyGraph();
 		OutFailure = FGraphFailure();
-		if (!Contract.IsValid()
-			|| Contract.ContractId != Workspace.ContractId
-			|| Contract.ContractVersion != Workspace.ContractVersion)
-		{
-			SetFailure(OutFailure, TEXT("workspace_preflight_failed"), TEXT("workspace_contract_mismatch"));
-			return false;
-		}
+        UE::UAI::Contract::FDiagnostic ContractError;
+        if (!UeAgentApplyWorkspaceContract::ValidateContract(Contract, ContractError)) {
+            SetFailure(OutFailure, MoveTemp(ContractError));
+            return false;
+        }
+        if (Contract.ContractId != Workspace.ContractId || Contract.ContractVersion != Workspace.ContractVersion) {
+            const bool bIdMismatch = Contract.ContractId != Workspace.ContractId;
+            auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("workspace_preflight_failed"),
+                bIdMismatch ? TEXT("/workspace/contract_id") : TEXT("/workspace/contract_version"),
+                MakeShared<FJsonValueString>(bIdMismatch ? Contract.ContractId : Contract.ContractVersion),
+                MakeShared<FJsonValueString>(bIdMismatch ? Workspace.ContractId : Workspace.ContractVersion),
+                TEXT("workspace_dependency"), bIdMismatch ? TEXT("The routed workspace belongs to a different contract.") : TEXT("The routed workspace belongs to a different contract version."));
+            Diagnostic.SourceKind = TEXT("native_result");
+            SetFailure(OutFailure, MoveTemp(Diagnostic));
+            return false;
+        }
 
 		OutGraph.ContractId = Contract.ContractId;
 		TMap<FString, int32> CanonicalKeys;
@@ -236,7 +261,11 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 			const FString FoldedCanonicalKey = FoldKey(Unit.CanonicalUnitKey);
 			if (FoldedCanonicalKey.IsEmpty() || CanonicalKeys.Contains(FoldedCanonicalKey))
 			{
-				SetFailure(OutFailure, TEXT("workspace_duplicate_target"), Unit.CanonicalUnitKey, &Unit);
+                auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("workspace_duplicate_target"), TEXT("canonical_unit_key"),
+                    MakeShared<FJsonValueString>(FoldedCanonicalKey.IsEmpty() ? TEXT("nonempty unit identity") : TEXT("unique unit identity (case-insensitive)")), MakeShared<FJsonValueString>(Unit.CanonicalUnitKey),
+                    TEXT("workspace_dependency"), FoldedCanonicalKey.IsEmpty() ? TEXT("A workspace unit has an empty target identity.") : TEXT("Two workspace units have the same target identity."));
+                Diagnostic.CandidateName = Unit.UnitId;
+                SetFailure(OutFailure, MoveTemp(Diagnostic), &Unit);
 				return false;
 			}
 			CanonicalKeys.Add(FoldedCanonicalKey, UnitIndex);
@@ -249,11 +278,10 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 			}
 		}
 
-		auto ResolveTarget = [&](const FString& Reference, int32& OutUnitIndex, bool& bOutAmbiguous)
+		auto ResolveTarget = [&](const FString& Reference, int32& OutUnitIndex, TArray<int32>& Matches)
 		{
 			OutUnitIndex = INDEX_NONE;
-			bOutAmbiguous = false;
-			TArray<int32> Matches;
+            Matches.Reset();
 			if (const TArray<int32>* Direct = Aliases.Find(FoldKey(Reference))) Matches.Append(*Direct);
 			FString NormalizedPath;
 			if (NormalizeWorkspaceRelativeReference(Reference, NormalizedPath))
@@ -264,7 +292,6 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 				}
 			}
 			if (Matches.Num() == 1) OutUnitIndex = Matches[0];
-			else if (Matches.Num() > 1) bOutAmbiguous = true;
 		};
 
 		TArray<TArray<int32>> Adjacency;
@@ -281,12 +308,12 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 				if (!SourceIndexPtr)
 				{
 					if (!Declaration.bRequired) continue;
-					SetFailure(
-						OutFailure,
-						TEXT("workspace_reference_unresolved"),
-						TEXT("source:") + Declaration.SourceUnitKey,
-						nullptr,
-						Declaration.SourceJsonPointer);
+                    auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("workspace_reference_unresolved"), TEXT("A required dependency source is missing from the workspace."), TEXT("workspace_dependency"));
+                    Diagnostic.CandidateName = Declaration.SourceUnitKey;
+                    Diagnostic.PropertyPath = TEXT("source_unit_key");
+                    Diagnostic.ExpectedValuePresent = true;
+                    Diagnostic.ActualValuePresent = false;
+                    SetFailure(OutFailure, MoveTemp(Diagnostic), nullptr, Declaration.SourceJsonPointer);
 					return false;
 				}
 				const int32 SourceIndex = *SourceIndexPtr;
@@ -297,29 +324,42 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 				}
 
 				int32 TargetIndex = INDEX_NONE;
-				bool bAmbiguous = false;
-				ResolveTarget(Declaration.TargetReference, TargetIndex, bAmbiguous);
+                TArray<int32> Matches;
+                ResolveTarget(Declaration.TargetReference, TargetIndex, Matches);
 				if (TargetIndex == INDEX_NONE)
 				{
 					if (!Declaration.bRequired) continue;
-					SetFailure(
-						OutFailure,
-						bAmbiguous ? TEXT("workspace_reference_ambiguous") : TEXT("workspace_reference_unresolved"),
-						Declaration.TargetReference,
-						&SourceUnit,
-						Declaration.SourceJsonPointer);
+                    const bool bAmbiguous = Matches.Num() > 1;
+                    auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(bAmbiguous ? TEXT("workspace_reference_ambiguous") : TEXT("workspace_reference_unresolved"),
+                        bAmbiguous ? TEXT("The required workspace reference matches more than one unit.") : TEXT("The required workspace reference matches no unit."), TEXT("workspace_dependency"));
+                    Diagnostic.CandidateName = Declaration.TargetReference;
+                    Diagnostic.PropertyPath = Declaration.SourceJsonPointer;
+                    Diagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+                    Diagnostic.ActualValue = MakeShared<FJsonValueNumber>(Matches.Num());
+                    if (bAmbiguous) {
+                        TArray<TSharedPtr<FJsonValue>> Choices;
+                        for (int32 Match : Matches) {
+                            const auto& Candidate = Workspace.Units[Match];
+                            const auto Choice = MakeShared<FJsonObject>();
+                            Choice->SetStringField(TEXT("unit_key"), Candidate.CanonicalUnitKey);
+                            Choice->SetStringField(TEXT("relative_path"), Candidate.RelativePath);
+                            Choices.Add(MakeShared<FJsonValueObject>(Choice));
+                        }
+                        Diagnostic.CandidateChoices = MakeShared<FJsonValueArray>(Choices);
+                    }
+                    SetFailure(OutFailure, MoveTemp(Diagnostic), &SourceUnit, Declaration.SourceJsonPointer);
 					return false;
 				}
 				const FWorkspaceUnit& TargetUnit = Workspace.Units[TargetIndex];
 				if (TargetUnit.Presence == EUnitPresence::Absent && TargetUnit.Action == EUnitAction::NoChange)
 				{
 					if (!Declaration.bRequired) continue;
-					SetFailure(
-						OutFailure,
-						TEXT("workspace_reference_unresolved"),
-						Declaration.TargetReference + TEXT(":absent"),
-						&SourceUnit,
-						Declaration.SourceJsonPointer);
+                    auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("workspace_reference_unresolved"), TEXT("The required dependency target is declared but has no input content."), TEXT("workspace_dependency"));
+                    Diagnostic.CandidateName = Declaration.TargetReference;
+                    Diagnostic.PropertyPath = Declaration.SourceJsonPointer;
+                    Diagnostic.ExpectedValuePresent = true;
+                    Diagnostic.ActualValuePresent = false;
+                    SetFailure(OutFailure, MoveTemp(Diagnostic), &SourceUnit, Declaration.SourceJsonPointer);
 					return false;
 				}
 
@@ -394,9 +434,6 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 				if (InDegree[UnitIndex] > 0) Remaining.Add(UnitIndex);
 			}
 			FindDeterministicCycle(Workspace, Adjacency, Remaining, OutGraph.CycleUnitKeys);
-			const FString Detail = OutGraph.CycleUnitKeys.IsEmpty()
-				? TEXT("cycle")
-				: FString::Join(OutGraph.CycleUnitKeys, TEXT(" -> "));
 			const FWorkspaceUnit* SourceUnit = nullptr;
 			FString JsonPointer = TEXT("/");
 			if (OutGraph.CycleUnitKeys.Num() >= 2)
@@ -414,7 +451,12 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 					}
 				}
 			}
-			SetFailure(OutFailure, TEXT("workspace_dependency_cycle"), Detail, SourceUnit, JsonPointer);
+			SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("workspace_dependency_cycle"), TEXT("The workspace dependency declarations form a cycle."), TEXT("workspace_dependency"), FString()) ,SourceUnit, JsonPointer);
+            OutFailure.Diagnostic.CyclePath = OutGraph.CycleUnitKeys;
+            TArray<TSharedPtr<FJsonValue>> Cycle;
+            for (const auto& Key : OutGraph.CycleUnitKeys) Cycle.Add(MakeShared<FJsonValueString>(Key));
+            OutFailure.Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("acyclic dependencies"));
+            OutFailure.Diagnostic.ActualValue = MakeShared<FJsonValueArray>(Cycle);
 			OutGraph.OrderedUnitIndices.Reset();
 			return false;
 		}

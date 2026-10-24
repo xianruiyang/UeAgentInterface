@@ -38,12 +38,13 @@ namespace UE::UAI::StateSemantic
 		const FString& GetNumerator() const;
 		const FString& GetDenominator() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 		bool SemanticallyEquals(const FUeAgentTemporalRate& Other) const;
 
 	private:
 		FString Numerator;
 		FString Denominator;
-		bool bValid = false;
+		FUeAgentStateSemanticError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentTemporalConversion final
@@ -73,6 +74,7 @@ namespace UE::UAI::StateSemantic
 		const FString& GetEvidence() const;
 		bool IsReverse() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString ConversionId;
@@ -85,7 +87,7 @@ namespace UE::UAI::StateSemantic
 		FString OffsetTargetTicksNumerator;
 		FString OffsetTargetTicksDenominator;
 		FString Evidence;
-		bool bValid = false;
+		FUeAgentStateSemanticError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentTemporalBound final
@@ -98,6 +100,7 @@ namespace UE::UAI::StateSemantic
 		EUeAgentTemporalBoundKind GetKind() const;
 		const TOptional<FUeAgentTemporalPoint>& GetPoint() const;
 		bool IsValid() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FUeAgentTemporalBound(
@@ -106,6 +109,7 @@ namespace UE::UAI::StateSemantic
 
 		EUeAgentTemporalBoundKind Kind = EUeAgentTemporalBoundKind::Open;
 		TOptional<FUeAgentTemporalPoint> Point;
+		FUeAgentStateSemanticError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentTemporalRange final
@@ -123,13 +127,14 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentTemporalBound& GetUpperBound() const;
 		bool IsValid() const;
 		bool IsEmpty() const;
+		const FUeAgentStateSemanticError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString ClockId;
 		FString State;
 		FUeAgentTemporalBound LowerBound;
 		FUeAgentTemporalBound UpperBound;
-		bool bValid = false;
+		FUeAgentStateSemanticError ValidationDiagnostic;
 		bool bEmpty = false;
 	};
 

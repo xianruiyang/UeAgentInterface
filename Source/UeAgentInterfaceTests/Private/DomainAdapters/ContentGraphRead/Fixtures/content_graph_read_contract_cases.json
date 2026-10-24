@@ -1,6 +1,5 @@
 {
   "schema": "uai.domain_adapter.content_graph_read.test_fixture.v1",
-  "descriptor_count": 7,
   "required_domains": [
     "blueprint",
     "material",
@@ -43,7 +42,7 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "container_ids": {
+          "containers": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
@@ -68,7 +67,12 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "item_ids": {
+          "containers": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "items": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
@@ -78,7 +82,7 @@
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
           },
-          "field_ids": {
+          "fields": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
@@ -101,12 +105,12 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "relation_ids": {
+          "containers": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
           },
-          "endpoint_ids": {
+          "endpoints": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
@@ -137,12 +141,17 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "owner_ids": {
+          "containers": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
           },
-          "field_ids": {
+          "owners": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "fields": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
@@ -150,7 +159,7 @@
           "include_defaults": {"type": "boolean"},
           "include_presence": {"type": "boolean"}
         },
-        "required": ["owner_ids"],
+        "required": ["owners"],
         "additionalProperties": false
       },
       "result_schema": {"type": "object"}
@@ -203,7 +212,7 @@
             },
             "uniqueItems": true
           },
-          "root_ids": {
+          "roots": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
@@ -310,6 +319,24 @@
       "domain": "audio",
       "provider_binding": "content_graph.read.compound",
       "oracle": "owned audio graph nodes and links retain SoundCue or MetaSound ownership"
+    }
+  ],
+  "semantic_selector_cases": [
+    {
+      "case_id": "readable_short_name",
+      "input": {"containers": ["Graph"]},
+      "oracle": "a unique readable container name resolves without a machine identity"
+    },
+    {
+      "case_id": "container_qualified_item",
+      "input": {"containers": ["Graph"], "items": ["Item"]},
+      "oracle": "an item name is resolved within its readable container"
+    },
+    {
+      "case_id": "ambiguous_name",
+      "input": {"containers": ["Graph"]},
+      "expected_error": "content_graph_read_selector_ambiguous",
+      "oracle": "a duplicate readable name fails typed instead of selecting silently"
     }
   ]
 }

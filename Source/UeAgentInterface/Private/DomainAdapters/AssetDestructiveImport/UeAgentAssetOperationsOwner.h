@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Templates/SharedPointer.h"
@@ -21,8 +23,7 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 		FString TargetRef;
 		FString ResultRef;
 		FString TerminalState = TEXT("rolled_back");
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString JournalId;
 		FString VerificationId;
 		bool bChanged = false;
@@ -31,7 +32,7 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 		bool IsSuccess() const
 		{
 			return TerminalState == TEXT("committed")
-				&& ErrorCode.IsEmpty()
+				&& Diagnostic.IsEmpty()
 				&& bReadbackVerified;
 		}
 	};
@@ -51,5 +52,5 @@ namespace UE::UAI::DomainAdapters::AssetDestructiveImport
 		FString JournalRoot,
 		FString JournalOwnerId,
 		TSharedPtr<IUeAgentAssetOperationsOwner>& OutOwner,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

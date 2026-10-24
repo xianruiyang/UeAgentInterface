@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
 #include "Templates/SharedPointer.h"
 
@@ -56,6 +57,7 @@ namespace UE::UAI::HjsonWorkspace
 		int32 GetBoundUnitCount() const;
 		const FString& GetModelFingerprint() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FUnifiedHjsonSemanticModel(
@@ -72,7 +74,7 @@ namespace UE::UAI::HjsonWorkspace
 		TMap<EUnifiedHjsonCompositionKind, TArray<FString>> Compositions;
 		int32 BoundUnitCount = 0;
 		FString ModelFingerprint;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 
 		friend UEAGENTINTERFACE_API bool
 			TryCreateUnifiedHjsonSemanticModel(

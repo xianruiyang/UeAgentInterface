@@ -2,6 +2,7 @@
 
 #include "Core/GraphLayout/BlueprintAutoLayout/UeAgentBlueprintAutoLayoutAlgorithm.h"
 #include "Module/UeAgentInterfaceLogger.h"
+#include "Dom/JsonValue.h"
 
 namespace UeAgentBlueprintAutoLayout
 {
@@ -168,9 +169,6 @@ namespace UeAgentBlueprintAutoLayout
 		, RootEquivalentGroupCount(0)
 		, RootContinuousOrderScore(0.0)
 		, RootContinuousOrderInversionScore(0.0)
-		, RootContinuousOrderPrunedStateCount(0)
-		, RootContinuousOrderMemoHitCount(0)
-		, RootContinuousOrderExactLimitExceeded(0)
 		, RootCompactVerticalGap(0.0)
 		, RootCompactTotalHeight(0.0)
 		, RootIslandTopYCount(0)
@@ -244,14 +242,6 @@ namespace UeAgentBlueprintAutoLayout
 		, DesignFeatureCompleteCount(0)
 		, DesignFeaturePartialCount(0)
 		, DesignFeatureMissingCount(0)
-	{
-	}
-
-	FSelfTestResult::FSelfTestResult()
-		: bAllPassed(false)
-		, CaseCount(0)
-		, PassedCount(0)
-		, FailedCount(0)
 	{
 	}
 
@@ -1826,10 +1816,8 @@ namespace UeAgentBlueprintAutoLayout
 			const TArray<FReroutePlan>* Plans,
 			const bool bUseNewPosition,
 			const FString& Stage,
-			FRunResult& Result,
-			const int32 MaxDiagnostics = 32)
+			FRunResult& Result)
 		{
-			int32 Added = 0;
 			TArray<int32> RealNodes;
 			for (int32 NodeIndex = 0; NodeIndex < Nodes.Num(); ++NodeIndex)
 			{
@@ -1841,8 +1829,7 @@ namespace UeAgentBlueprintAutoLayout
 
 			for (int32 EdgeIndex = 0; EdgeIndex < Edges.Num(); ++EdgeIndex)
 			{
-				if (Added >= MaxDiagnostics
-					|| !Edges.IsValidIndex(EdgeIndex)
+				if (!Edges.IsValidIndex(EdgeIndex)
 					|| !IsValidNodeIndex(Nodes, Edges[EdgeIndex].Source)
 					|| !IsValidNodeIndex(Nodes, Edges[EdgeIndex].Target))
 				{
@@ -1886,11 +1873,6 @@ namespace UeAgentBlueprintAutoLayout
 						Obj->SetNumberField(TEXT("segment_index"), SegmentIndex);
 						Obj->SetArrayField(TEXT("polyline"), PointArrayToJson(Polyline));
 						Result.RejectionDiagnostics.Add(MakeShared<FJsonValueObject>(Obj));
-						++Added;
-						break;
-					}
-					if (Added >= MaxDiagnostics)
-					{
 						break;
 					}
 				}
@@ -6921,16 +6903,9 @@ namespace UeAgentBlueprintAutoLayout
 					}
 					CandidateYs.Add(SnappedValue);
 				};
-				auto AddCandidateYWithLanes = [&AddCandidateY](const double Value)
+				auto AddRouteCandidateY = [&AddCandidateY](const double Value)
 				{
 					AddCandidateY(Value);
-					const double LaneSpacing = GetBusAvoidanceDistance();
-					constexpr int32 MaxLocalLaneSearch = 8;
-					for (int32 Offset = 1; Offset <= MaxLocalLaneSearch; ++Offset)
-					{
-						AddCandidateY(Value - static_cast<double>(Offset) * LaneSpacing);
-						AddCandidateY(Value + static_cast<double>(Offset) * LaneSpacing);
-					}
 				};
 
 				double InterfaceYSum = 0.0;
@@ -6945,9 +6920,9 @@ namespace UeAgentBlueprintAutoLayout
 					}
 					InterfaceYSum += Candidate.Start.Y + Candidate.End.Y;
 					InterfaceYCount += 2;
-					AddCandidateYWithLanes(Candidate.Start.Y);
-					AddCandidateYWithLanes(Candidate.End.Y);
-					AddCandidateYWithLanes((Candidate.Start.Y + Candidate.End.Y) * 0.5);
+					AddRouteCandidateY(Candidate.Start.Y);
+					AddRouteCandidateY(Candidate.End.Y);
+					AddRouteCandidateY((Candidate.Start.Y + Candidate.End.Y) * 0.5);
 					RouteSpanLeft = FMath::Min(RouteSpanLeft, FMath::Min(Candidate.Start.X, Candidate.End.X));
 					RouteSpanRight = FMath::Max(RouteSpanRight, FMath::Max(Candidate.Start.X, Candidate.End.X));
 					const FEdge& Edge = Edges[Candidate.EdgeIndex];
@@ -6960,19 +6935,19 @@ namespace UeAgentBlueprintAutoLayout
 						{
 							continue;
 						}
-						AddCandidateYWithLanes(Rect.Top - GetBusAvoidanceDistance());
-						AddCandidateYWithLanes(Rect.Bottom + GetBusAvoidanceDistance());
+						AddRouteCandidateY(Rect.Top - GetBusAvoidanceDistance());
+						AddRouteCandidateY(Rect.Bottom + GetBusAvoidanceDistance());
 					}
 				}
 				if (InterfaceYCount > 0)
 				{
-					AddCandidateYWithLanes(InterfaceYSum / static_cast<double>(InterfaceYCount));
+					AddRouteCandidateY(InterfaceYSum / static_cast<double>(InterfaceYCount));
 				}
 				if (Candidates.Num() > 0 && Islands.IsValidIndex(Candidates[0].IslandIndex))
 				{
 					const FIsland& Island = Islands[Candidates[0].IslandIndex];
-					AddCandidateYWithLanes(Island.Y + Island.LocalBounds.Top - Options.NodePadding);
-					AddCandidateYWithLanes(Island.Y + Island.LocalBounds.Bottom + Options.NodePadding);
+					AddRouteCandidateY(Island.Y + Island.LocalBounds.Top - Options.NodePadding);
+					AddRouteCandidateY(Island.Y + Island.LocalBounds.Bottom + Options.NodePadding);
 				}
 
 				TArray<FRect> ExistingBusReservationRects;
@@ -7021,8 +6996,8 @@ namespace UeAgentBlueprintAutoLayout
 					{
 						continue;
 					}
-					AddCandidateYWithLanes(Rect.Top - GetBusAvoidanceDistance());
-					AddCandidateYWithLanes(Rect.Bottom + GetBusAvoidanceDistance());
+					AddRouteCandidateY(Rect.Top - GetBusAvoidanceDistance());
+					AddRouteCandidateY(Rect.Bottom + GetBusAvoidanceDistance());
 				}
 
 				bool bFoundBest = false;
@@ -7246,22 +7221,15 @@ namespace UeAgentBlueprintAutoLayout
 						}
 						CandidateYs.Add(SnappedValue);
 					};
-					auto AddCandidateYWithLanes = [&AddCandidateY](const double Value)
+					auto AddRouteCandidateY = [&AddCandidateY](const double Value)
 					{
 						AddCandidateY(Value);
-						const double LaneSpacing = GetBusAvoidanceDistance();
-						constexpr int32 MaxLocalLaneSearch = 8;
-						for (int32 Offset = 1; Offset <= MaxLocalLaneSearch; ++Offset)
-						{
-							AddCandidateY(Value - static_cast<double>(Offset) * LaneSpacing);
-							AddCandidateY(Value + static_cast<double>(Offset) * LaneSpacing);
-						}
 					};
-					AddCandidateYWithLanes(Start.Y);
-					AddCandidateYWithLanes(End.Y);
-					AddCandidateYWithLanes((Start.Y + End.Y) * 0.5);
-					AddCandidateYWithLanes(Island.Y + Island.LocalBounds.Top - Options.NodePadding);
-					AddCandidateYWithLanes(Island.Y + Island.LocalBounds.Bottom + Options.NodePadding);
+					AddRouteCandidateY(Start.Y);
+					AddRouteCandidateY(End.Y);
+					AddRouteCandidateY((Start.Y + End.Y) * 0.5);
+					AddRouteCandidateY(Island.Y + Island.LocalBounds.Top - Options.NodePadding);
+					AddRouteCandidateY(Island.Y + Island.LocalBounds.Bottom + Options.NodePadding);
 					const double RouteSpanLeft = FMath::Min(Start.X, End.X);
 					const double RouteSpanRight = FMath::Max(Start.X, End.X);
 					for (const FRect& Rect : RouteHardRects)
@@ -7270,8 +7238,8 @@ namespace UeAgentBlueprintAutoLayout
 						{
 							continue;
 						}
-						AddCandidateYWithLanes(Rect.Top - GetBusAvoidanceDistance());
-						AddCandidateYWithLanes(Rect.Bottom + GetBusAvoidanceDistance());
+						AddRouteCandidateY(Rect.Top - GetBusAvoidanceDistance());
+						AddRouteCandidateY(Rect.Bottom + GetBusAvoidanceDistance());
 					}
 					for (const FRect& Rect : ExistingBusReservationRects)
 					{
@@ -7279,8 +7247,8 @@ namespace UeAgentBlueprintAutoLayout
 						{
 							continue;
 						}
-						AddCandidateYWithLanes(Rect.Top - GetBusAvoidanceDistance());
-						AddCandidateYWithLanes(Rect.Bottom + GetBusAvoidanceDistance());
+						AddRouteCandidateY(Rect.Top - GetBusAvoidanceDistance());
+						AddRouteCandidateY(Rect.Bottom + GetBusAvoidanceDistance());
 					}
 
 					int32 BestHitCount = TNumericLimits<int32>::Max();
@@ -8676,126 +8644,64 @@ namespace UeAgentBlueprintAutoLayout
 			TArray<int32> FinalOrder;
 			for (const TArray<int32>& Component : Components)
 			{
-				TArray<int32> BestOrder = Component;
-				double BestScore = -1.0;
-				double BestInversion = TNumericLimits<double>::Max();
-				constexpr int32 ExactRootLimit = 11;
-				if (Component.Num() > ExactRootLimit)
+				TArray<int32> Remaining = Component;
+				TArray<int32> BestOrder;
+				BestOrder.Reserve(Component.Num());
+				while (!Remaining.IsEmpty())
 				{
-					++Result.DesignDiagnostics.RootContinuousOrderExactLimitExceeded;
-				}
-				else
-				{
-					TArray<int32> Prefix;
-					TArray<int32> Remaining = Component;
-					TFunction<void()> Search = [&]()
+					int32 BestIndex = 0;
+					double BestSharedWeight = -1.0;
+					double BestOutputWeight = -1.0;
+					for (int32 CandidateIndex = 0; CandidateIndex < Remaining.Num(); ++CandidateIndex)
 					{
-						const double UpperBound = ComputeRootContinuousScoreUpperBound(Prefix, Remaining, ScoringTargets, OutputsByRoot, WeightByRootTarget);
-						if (BestScore >= 0.0 && UpperBound < BestScore - 0.5)
+						const int32 Candidate = Remaining[CandidateIndex];
+						double SharedWeight = 0.0;
+						const TSet<int32>* CandidateOutputs = OutputsByRoot.Find(Candidate);
+						if (!BestOrder.IsEmpty())
 						{
-							++Result.DesignDiagnostics.RootContinuousOrderPrunedStateCount;
-							return;
-						}
-						if (BestScore >= 0.0
-							&& FMath::IsNearlyEqual(UpperBound, BestScore, 0.5)
-							&& ComputeRootOrderInversionScore(Prefix, OutputsByRoot, InterfaceOrderByRootTarget, WeightByRootTarget) > BestInversion)
-						{
-							++Result.DesignDiagnostics.RootContinuousOrderPrunedStateCount;
-							return;
-						}
-						if (Remaining.Num() == 0)
-						{
-							double Score = 0.0;
-							double Inversion = 0.0;
-							ScoreRootIslandOrder(Prefix, OutputsByRoot, InterfaceOrderByRootTarget, WeightByRootTarget, Score, Inversion);
-							if (Score > BestScore + 0.5 || (FMath::IsNearlyEqual(Score, BestScore, 0.5) && Inversion < BestInversion))
+							const TSet<int32>* TailOutputs = OutputsByRoot.Find(BestOrder.Last());
+							if (TailOutputs && CandidateOutputs)
 							{
-								BestScore = Score;
-								BestInversion = Inversion;
-								BestOrder = Prefix;
-							}
-							return;
-						}
-						TArray<int32> BranchOrder = Remaining;
-						BranchOrder.Sort([&OutputsByRoot, &WeightByRootTarget, &Prefix](const int32 A, const int32 B)
-						{
-							double SharedWithTailA = 0.0;
-							double SharedWithTailB = 0.0;
-							if (Prefix.Num() > 0)
-							{
-								const TSet<int32>* TailOutputs = OutputsByRoot.Find(Prefix.Last());
-								const TSet<int32>* OutputsA = OutputsByRoot.Find(A);
-								const TSet<int32>* OutputsB = OutputsByRoot.Find(B);
-								if (TailOutputs && OutputsA)
+								for (const int32 Target : *CandidateOutputs)
 								{
-									for (const int32 Target : *OutputsA)
+									if (TailOutputs->Contains(Target))
 									{
-										if (TailOutputs->Contains(Target))
-										{
-											SharedWithTailA += GetRootTargetWeight(WeightByRootTarget, A, Target);
-										}
-									}
-								}
-								if (TailOutputs && OutputsB)
-								{
-									for (const int32 Target : *OutputsB)
-									{
-										if (TailOutputs->Contains(Target))
-										{
-											SharedWithTailB += GetRootTargetWeight(WeightByRootTarget, B, Target);
-										}
+										SharedWeight += GetRootTargetWeight(WeightByRootTarget, Candidate, Target);
 									}
 								}
 							}
-							if (!FMath::IsNearlyEqual(SharedWithTailA, SharedWithTailB, 0.001))
-							{
-								return SharedWithTailA > SharedWithTailB;
-							}
-							const TSet<int32>* OutputsA = OutputsByRoot.Find(A);
-							const TSet<int32>* OutputsB = OutputsByRoot.Find(B);
-							double OutputCountA = 0.0;
-							double OutputCountB = 0.0;
-							if (OutputsA)
-							{
-								for (const int32 Target : *OutputsA)
-								{
-									OutputCountA += GetRootTargetWeight(WeightByRootTarget, A, Target);
-								}
-							}
-							if (OutputsB)
-							{
-								for (const int32 Target : *OutputsB)
-								{
-									OutputCountB += GetRootTargetWeight(WeightByRootTarget, B, Target);
-								}
-							}
-							if (!FMath::IsNearlyEqual(OutputCountA, OutputCountB, 0.001))
-							{
-								return OutputCountA > OutputCountB;
-							}
-							return A < B;
-						});
-						for (const int32 Root : BranchOrder)
-						{
-							const int32 Index = Remaining.IndexOfByKey(Root);
-							if (Index == INDEX_NONE)
-							{
-								continue;
-							}
-							Remaining.RemoveAt(Index, 1, EAllowShrinking::No);
-							Prefix.Add(Root);
-							Search();
-							Prefix.Pop(EAllowShrinking::No);
-							Remaining.Insert(Root, Index);
 						}
-					};
-					Search();
-					Result.DesignDiagnostics.RootContinuousOrderScore += FMath::Max(0.0, BestScore);
-					if (BestInversion < TNumericLimits<double>::Max())
-					{
-						Result.DesignDiagnostics.RootContinuousOrderInversionScore += BestInversion;
+						double OutputWeight = 0.0;
+						if (CandidateOutputs)
+						{
+							for (const int32 Target : *CandidateOutputs)
+							{
+								OutputWeight += GetRootTargetWeight(WeightByRootTarget, Candidate, Target);
+							}
+						}
+						if (SharedWeight > BestSharedWeight + 0.001
+							|| (FMath::IsNearlyEqual(SharedWeight, BestSharedWeight, 0.001)
+								&& OutputWeight > BestOutputWeight + 0.001))
+						{
+							BestIndex = CandidateIndex;
+							BestSharedWeight = SharedWeight;
+							BestOutputWeight = OutputWeight;
+						}
 					}
+					BestOrder.Add(Remaining[BestIndex]);
+					Remaining.RemoveAt(BestIndex, 1, EAllowShrinking::No);
 				}
+				double OrderScore = 0.0;
+				double InversionScore = 0.0;
+				ScoreRootIslandOrder(
+					BestOrder,
+					OutputsByRoot,
+					InterfaceOrderByRootTarget,
+					WeightByRootTarget,
+					OrderScore,
+					InversionScore);
+				Result.DesignDiagnostics.RootContinuousOrderScore += FMath::Max(0.0, OrderScore);
+				Result.DesignDiagnostics.RootContinuousOrderInversionScore += InversionScore;
 				FinalOrder.Append(BestOrder);
 			}
 			return FinalOrder;
@@ -9182,145 +9088,48 @@ namespace UeAgentBlueprintAutoLayout
 					SortUniqueInterfaceYs(Pair.Value);
 				}
 
-				const int32 ExactLimit = 11;
-				if (Column.Num() <= ExactLimit)
+				TMap<int32, double> WeightedOrderByIsland;
+				for (const int32 IslandIndex : Column)
 				{
-					TArray<int32> BestOrder = Column;
-					double BestScore = -1.0;
-					double BestInversion = TNumericLimits<double>::Max();
-					TFunction<void(TArray<int32>&, TArray<int32>&)> Search;
-					Search = [&](TArray<int32>& Prefix, TArray<int32>& Open)
+					double WeightedSum = 0.0;
+					double WeightSum = 0.0;
+					if (const TSet<int32>* Targets = OutputsByRoot.Find(IslandIndex))
 					{
-						if (BestScore >= 0.0)
+						for (const int32 Target : *Targets)
 						{
-							const double UpperBound = ComputeRootContinuousScoreUpperBound(Prefix, Open, ScoringTargets, OutputsByRoot, WeightByRootTarget);
-							if (UpperBound < BestScore - 0.5)
+							const FString Key = MakeRootTargetKey(IslandIndex, Target);
+							const TArray<double>* Values = InterfaceOrderByRootTarget.Find(Key);
+							const double Weight = GetRootTargetWeight(WeightByRootTarget, IslandIndex, Target);
+							if (Values && Values->Num() > 0)
 							{
-								return;
-							}
-						}
-						if (Open.Num() == 0)
-						{
-							double Score = 0.0;
-							double Inversion = 0.0;
-							ScoreRootIslandOrder(Prefix, OutputsByRoot, InterfaceOrderByRootTarget, WeightByRootTarget, Score, Inversion);
-							if (Score > BestScore + 0.5 || (FMath::IsNearlyEqual(Score, BestScore, 0.5) && Inversion < BestInversion))
-							{
-								BestScore = Score;
-								BestInversion = Inversion;
-								BestOrder = Prefix;
-							}
-							return;
-						}
-
-						TArray<int32> BranchOrder = Open;
-						BranchOrder.Sort([&](const int32 A, const int32 B)
-						{
-							double SharedA = 0.0;
-							double SharedB = 0.0;
-							if (Prefix.Num() > 0)
-							{
-								const int32 Last = Prefix.Last();
-								const TSet<int32>* LastTargets = OutputsByRoot.Find(Last);
-								if (LastTargets)
+								double ValueSum = 0.0;
+								for (const double Value : *Values)
 								{
-									if (const TSet<int32>* TargetsA = OutputsByRoot.Find(A))
-									{
-										for (const int32 Target : *TargetsA)
-										{
-											if (LastTargets->Contains(Target))
-											{
-												SharedA += GetRootTargetWeight(WeightByRootTarget, Last, Target)
-													+ GetRootTargetWeight(WeightByRootTarget, A, Target);
-											}
-										}
-									}
-									if (const TSet<int32>* TargetsB = OutputsByRoot.Find(B))
-									{
-										for (const int32 Target : *TargetsB)
-										{
-											if (LastTargets->Contains(Target))
-											{
-												SharedB += GetRootTargetWeight(WeightByRootTarget, Last, Target)
-													+ GetRootTargetWeight(WeightByRootTarget, B, Target);
-											}
-										}
-									}
+									ValueSum += Value;
 								}
+								WeightedSum += (ValueSum / static_cast<double>(Values->Num())) * Weight;
+								WeightSum += Weight;
 							}
-							if (!FMath::IsNearlyEqual(SharedA, SharedB, 0.5))
-							{
-								return SharedA > SharedB;
-							}
-							const int32 OrderA = OrderIndexByIsland.Contains(A) ? OrderIndexByIsland[A] : A;
-							const int32 OrderB = OrderIndexByIsland.Contains(B) ? OrderIndexByIsland[B] : B;
-							return OrderA != OrderB ? OrderA < OrderB : A < B;
-						});
-
-						for (const int32 Candidate : BranchOrder)
-						{
-							const int32 OpenIndex = Open.IndexOfByKey(Candidate);
-							if (OpenIndex == INDEX_NONE)
-							{
-								continue;
-							}
-							Prefix.Add(Candidate);
-							Open.RemoveAt(OpenIndex, 1, EAllowShrinking::No);
-							Search(Prefix, Open);
-							Open.Insert(Candidate, OpenIndex);
-							Prefix.Pop(EAllowShrinking::No);
-						}
-					};
-
-					TArray<int32> Prefix;
-					TArray<int32> Open = Column;
-					Search(Prefix, Open);
-					Column = BestOrder;
-				}
-				else
-				{
-					TMap<int32, double> WeightedOrderByIsland;
-					for (const int32 IslandIndex : Column)
-					{
-						double WeightedSum = 0.0;
-						double WeightSum = 0.0;
-						if (const TSet<int32>* Targets = OutputsByRoot.Find(IslandIndex))
-						{
-							for (const int32 Target : *Targets)
-							{
-								const FString Key = MakeRootTargetKey(IslandIndex, Target);
-								const TArray<double>* Values = InterfaceOrderByRootTarget.Find(Key);
-								const double Weight = GetRootTargetWeight(WeightByRootTarget, IslandIndex, Target);
-								if (Values && Values->Num() > 0)
-								{
-									double ValueSum = 0.0;
-									for (const double Value : *Values)
-									{
-										ValueSum += Value;
-									}
-									WeightedSum += (ValueSum / static_cast<double>(Values->Num())) * Weight;
-									WeightSum += Weight;
-								}
-							}
-						}
-						if (WeightSum > 0.0)
-						{
-							WeightedOrderByIsland.Add(IslandIndex, WeightedSum / WeightSum);
 						}
 					}
-					Column.Sort([&](const int32 A, const int32 B)
+					if (WeightSum > 0.0)
 					{
-						const double OrderA = WeightedOrderByIsland.Contains(A) ? WeightedOrderByIsland[A] : static_cast<double>(OrderIndexByIsland.Contains(A) ? OrderIndexByIsland[A] : A);
-						const double OrderB = WeightedOrderByIsland.Contains(B) ? WeightedOrderByIsland[B] : static_cast<double>(OrderIndexByIsland.Contains(B) ? OrderIndexByIsland[B] : B);
-						if (!FMath::IsNearlyEqual(OrderA, OrderB, 0.5))
-						{
-							return OrderA < OrderB;
-						}
-						const int32 StableA = OrderIndexByIsland.Contains(A) ? OrderIndexByIsland[A] : A;
-						const int32 StableB = OrderIndexByIsland.Contains(B) ? OrderIndexByIsland[B] : B;
-						return StableA != StableB ? StableA < StableB : A < B;
-					});
+						WeightedOrderByIsland.Add(IslandIndex, WeightedSum / WeightSum);
+					}
 				}
+				Column.Sort([&](const int32 A, const int32 B)
+				{
+					const double OrderA = WeightedOrderByIsland.Contains(A) ? WeightedOrderByIsland[A] : static_cast<double>(OrderIndexByIsland.Contains(A) ? OrderIndexByIsland[A] : A);
+					const double OrderB = WeightedOrderByIsland.Contains(B) ? WeightedOrderByIsland[B] : static_cast<double>(OrderIndexByIsland.Contains(B) ? OrderIndexByIsland[B] : B);
+					if (!FMath::IsNearlyEqual(OrderA, OrderB, 0.5))
+					{
+						return OrderA < OrderB;
+					}
+					const int32 StableA = OrderIndexByIsland.Contains(A) ? OrderIndexByIsland[A] : A;
+					const int32 StableB = OrderIndexByIsland.Contains(B) ? OrderIndexByIsland[B] : B;
+					return StableA != StableB ? StableA < StableB : A < B;
+				});
+
 			};
 
 			for (int32 ColumnIndex = 0; ColumnIndex < TopologyColumns.Num(); ++ColumnIndex)
@@ -14351,6 +14160,27 @@ namespace UeAgentBlueprintAutoLayout
 			|| Options.InputAccessOffsetX <= 0.0)
 		{
 			OutResult.DesignDiagnostics.RouteThroughIslandCount = 0;
+			const bool bMissingGeometry = !Options.bUseRealGeometry;
+			const bool bMissingPins = Options.MissingPinAnchorCount > 0 || MissingRequiredAnchors > 0;
+			const bool bMissingNodes = MissingMeasuredNodeGeometry > 0;
+			OutResult.Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("layout_geometry_invalid"), bMissingGeometry ? TEXT("Layout requires measured graph geometry.")
+				: bMissingPins ? TEXT("Layout cannot route edges because required pin anchors are missing.")
+				: bMissingNodes ? TEXT("Layout cannot place nodes because measured node geometry is missing.")
+				: TEXT("Layout requires a positive graph-editor access offset."), TEXT("graph_layout"));
+			OutResult.Error.SourceKind = TEXT("native_result");
+			if (bMissingGeometry)
+			{
+				OutResult.Error.PropertyPath = TEXT("use_real_geometry"); OutResult.Error.ExpectedValue = MakeShared<FJsonValueBoolean>(true); OutResult.Error.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			}
+			else
+			{
+				OutResult.Error.PropertyPath = bMissingPins ? (Options.MissingPinAnchorCount > 0 ? TEXT("missing_pin_anchor_count") : TEXT("missing_required_pin_anchors"))
+					: bMissingNodes ? TEXT("missing_measured_node_geometry") : Options.OutputAccessOffsetX <= 0.0 ? TEXT("output_access_offset_x") : TEXT("input_access_offset_x");
+				OutResult.Error.ExpectedValue = MakeShared<FJsonValueString>(bMissingPins || bMissingNodes ? TEXT("0") : TEXT("number > 0"));
+				const double Actual = bMissingPins ? (Options.MissingPinAnchorCount > 0 ? Options.MissingPinAnchorCount : MissingRequiredAnchors)
+					: bMissingNodes ? MissingMeasuredNodeGeometry : Options.OutputAccessOffsetX <= 0.0 ? Options.OutputAccessOffsetX : Options.InputAccessOffsetX;
+				OutResult.Error.ActualValue = MakeShared<FJsonValueNumber>(Actual);
+			}
 			return false;
 		}
 		OutResult.MetricsBefore = EvaluateMetrics(Nodes, Edges, nullptr, false, Options.NodePadding);
@@ -14687,6 +14517,9 @@ namespace UeAgentBlueprintAutoLayout
 			OutResult);
 		if (OutResult.DesignDiagnostics.IslandTopologicalResidualCycleEdgeCount > 0)
 		{
+			OutResult.Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("layout_island_cycle_unresolved"), TEXT("The island layout solver left cyclic edges in its topological ordering."), TEXT("graph_layout"));
+			OutResult.Error.SourceKind = TEXT("native_result"); OutResult.Error.PropertyPath = TEXT("residual_cycle_edge_count");
+			OutResult.Error.ExpectedValue = MakeShared<FJsonValueNumber>(0); OutResult.Error.ActualValue = MakeShared<FJsonValueNumber>(OutResult.DesignDiagnostics.IslandTopologicalResidualCycleEdgeCount);
 			UE_LOG(LogUeAgentInterface, Warning, TEXT("BlueprintLayoutCore failed residual island cycle count=%d"),
 				OutResult.DesignDiagnostics.IslandTopologicalResidualCycleEdgeCount);
 			return false;
@@ -14817,7 +14650,7 @@ namespace UeAgentBlueprintAutoLayout
 		CompleteIf(TEXT("island_local_layout_freeze"), OutResult.DesignDiagnostics.IslandLocalFrozenNodeCount == OutResult.NodeCount && OutResult.DesignDiagnostics.IslandLocalMembershipMutationCount == 0 && OutResult.DesignDiagnostics.IslandLocalMutationCount == 0, OutResult.DesignDiagnostics.IslandLocalFrozenNodeCount > 0 && OutResult.DesignDiagnostics.IslandLocalMutationCount == 0, FString::Printf(TEXT("frozen_nodes=%d nodes=%d membership_mutations=%d local_mutations=%d max_delta=%.3f"), OutResult.DesignDiagnostics.IslandLocalFrozenNodeCount, OutResult.NodeCount, OutResult.DesignDiagnostics.IslandLocalMembershipMutationCount, OutResult.DesignDiagnostics.IslandLocalMutationCount, OutResult.DesignDiagnostics.IslandLocalMaxMutation));
 		CompleteIf(TEXT("frozen_endpoint_candidates"), OutResult.DesignDiagnostics.IslandEdgeCount == 0 || (OutResult.DesignDiagnostics.EndpointCandidateCount >= OutResult.DesignDiagnostics.IslandEdgeCount && OutResult.DesignDiagnostics.SelectedEndpointCandidateCount == OutResult.DesignDiagnostics.IslandEdgeCount), OutResult.DesignDiagnostics.EndpointCandidateCount > 0, FString::Printf(TEXT("candidates=%d selected=%d island_edges=%d"), OutResult.DesignDiagnostics.EndpointCandidateCount, OutResult.DesignDiagnostics.SelectedEndpointCandidateCount, OutResult.DesignDiagnostics.IslandEdgeCount));
 		CompleteIf(TEXT("inter_island_topological_x"), OutResult.DesignDiagnostics.IslandEdgeCount == 0 || (OutResult.DesignDiagnostics.PlacementGraphEdgeCount + OutResult.DesignDiagnostics.RouteOnlyEdgeCount == OutResult.DesignDiagnostics.IslandEdgeCount && OutResult.DesignDiagnostics.IslandTopologicalOrderCount == OutResult.DesignDiagnostics.NodeIslandCount && OutResult.DesignDiagnostics.InvalidForwardConnectionCount == 0), OutResult.DesignDiagnostics.IslandTopologicalOrderCount > 0, FString::Printf(TEXT("topo_order=%d islands=%d placement_edges=%d route_only=%d residual_cycles=%d invalid_forward=%d"), OutResult.DesignDiagnostics.IslandTopologicalOrderCount, OutResult.DesignDiagnostics.NodeIslandCount, OutResult.DesignDiagnostics.PlacementGraphEdgeCount, OutResult.DesignDiagnostics.RouteOnlyEdgeCount, OutResult.DesignDiagnostics.IslandTopologicalResidualCycleEdgeCount, OutResult.DesignDiagnostics.InvalidForwardConnectionCount));
-		CompleteIf(TEXT("root_continuous_y_order"), OutResult.DesignDiagnostics.RootIslandCount == 0 || (OutResult.DesignDiagnostics.RootIslandTopYCount == OutResult.DesignDiagnostics.RootIslandCount && OutResult.DesignDiagnostics.RootContinuousOrderExactLimitExceeded == 0), OutResult.DesignDiagnostics.RootIslandTopYCount > 0, FString::Printf(TEXT("roots=%d placed=%d components=%d score=%.1f inversion=%.1f exact_limit=%d"), OutResult.DesignDiagnostics.RootIslandCount, OutResult.DesignDiagnostics.RootIslandTopYCount, OutResult.DesignDiagnostics.RootShareComponentCount, OutResult.DesignDiagnostics.RootContinuousOrderScore, OutResult.DesignDiagnostics.RootContinuousOrderInversionScore, OutResult.DesignDiagnostics.RootContinuousOrderExactLimitExceeded));
+		CompleteIf(TEXT("root_continuous_y_order"), OutResult.DesignDiagnostics.RootIslandCount == 0 || OutResult.DesignDiagnostics.RootIslandTopYCount == OutResult.DesignDiagnostics.RootIslandCount, OutResult.DesignDiagnostics.RootIslandTopYCount > 0, FString::Printf(TEXT("roots=%d placed=%d components=%d score=%.1f inversion=%.1f"), OutResult.DesignDiagnostics.RootIslandCount, OutResult.DesignDiagnostics.RootIslandTopYCount, OutResult.DesignDiagnostics.RootShareComponentCount, OutResult.DesignDiagnostics.RootContinuousOrderScore, OutResult.DesignDiagnostics.RootContinuousOrderInversionScore));
 		CompleteIf(TEXT("remaining_island_topological_y"), OutResult.DesignDiagnostics.NodeIslandCount == 0 || OutResult.DesignDiagnostics.RootIslandTopYCount + OutResult.DesignDiagnostics.IslandPlacementOrderCount >= OutResult.DesignDiagnostics.NodeIslandCount, OutResult.DesignDiagnostics.IslandPlacementOrderCount > 0, FString::Printf(TEXT("root_placed=%d remaining_placed=%d islands=%d"), OutResult.DesignDiagnostics.RootIslandTopYCount, OutResult.DesignDiagnostics.IslandPlacementOrderCount, OutResult.DesignDiagnostics.NodeIslandCount));
 		CompleteIf(TEXT("inter_island_direct_bus_classification"), OutResult.DesignDiagnostics.IslandEdgeCount == 0 || OutResult.DesignDiagnostics.DirectIslandConnectionCount + OutResult.DesignDiagnostics.BusIslandConnectionCount + OutResult.DesignDiagnostics.InterIslandFeedbackBusConnectionCount >= OutResult.DesignDiagnostics.SelectedEndpointCandidateCount, OutResult.DesignDiagnostics.SelectedEndpointCandidateCount > 0, FString::Printf(TEXT("selected=%d direct=%d bus=%d feedback_bus=%d"), OutResult.DesignDiagnostics.SelectedEndpointCandidateCount, OutResult.DesignDiagnostics.DirectIslandConnectionCount, OutResult.DesignDiagnostics.BusIslandConnectionCount, OutResult.DesignDiagnostics.InterIslandFeedbackBusConnectionCount));
 		CompleteIf(TEXT("source_order_fanout_route_groups"), OutResult.DesignDiagnostics.IslandEdgeCount == 0 || (OutResult.DesignDiagnostics.SourceOrderGroupCount > 0 && OutResult.DesignDiagnostics.RouteGroupCount >= 0), OutResult.DesignDiagnostics.SourceOrderGroupCount > 0, FString::Printf(TEXT("source_order_groups=%d fanout_groups=%d route_groups=%d"), OutResult.DesignDiagnostics.SourceOrderGroupCount, OutResult.DesignDiagnostics.FanoutIntentGroupCount, OutResult.DesignDiagnostics.RouteGroupCount));

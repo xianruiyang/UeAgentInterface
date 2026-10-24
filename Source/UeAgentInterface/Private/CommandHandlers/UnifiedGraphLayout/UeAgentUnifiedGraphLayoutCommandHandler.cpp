@@ -1,6 +1,7 @@
 #include "CommandHandlers/UnifiedGraphLayout/UeAgentUnifiedGraphLayoutCommandHandler.h"
 
 #include "Core/GraphLayout/UeAgentUnifiedGraphLayoutService.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
@@ -14,21 +15,14 @@ namespace UE::UAI::CommandHandlers::UnifiedGraphLayout
 		const FString CommandId(TEXT("graph.layout.apply"));
 		const FString Owner(TEXT("unified-graph-layout-owner"));
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), CommandId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request,
+            const FString& Code, const FString& PublicReason)
+        {
+            auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(Code, PublicReason, TEXT("command_dispatch"));
+            Diagnostic.MutationStarted = false;
+            Diagnostic.TerminalStatus = TEXT("rejected");
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Diagnostic);
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -51,7 +45,7 @@ namespace UE::UAI::CommandHandlers::UnifiedGraphLayout
 				if (Cancellation->IsCancelled())
 				{
 					return Failure(Request,
-						TEXT("unified_graph_layout_cancelled"), TEXT("prewrite"));
+						TEXT("unified_graph_layout_cancelled"), TEXT("The layout request was cancelled before any changes were applied."));
 				}
 				return Core::GraphLayout::Execute(Request);
 			}
@@ -60,7 +54,7 @@ namespace UE::UAI::CommandHandlers::UnifiedGraphLayout
 
 	bool TryCreateHandler(
 		TSharedPtr<IUeAgentExactCommandHandler>& OutHandler,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		OutHandler = MakeShared<FHandler>();

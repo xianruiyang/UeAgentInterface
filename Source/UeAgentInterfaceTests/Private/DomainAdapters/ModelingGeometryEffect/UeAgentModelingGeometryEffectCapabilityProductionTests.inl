@@ -198,9 +198,6 @@ TSharedPtr<FJsonObject> BuildModelingValidInput(
 	bool bValue = false;
 	if (Row->TryGetBoolField(TEXT("existing_target"), bValue) && bValue)
 	{
-		Input->SetObjectField(
-			TEXT("target_revision"),
-			ModelingRevision(TEXT("uai://mesh/fixture-target")));
 	}
 	if (Row->TryGetBoolField(TEXT("placement"), bValue) && bValue)
 	{
@@ -224,9 +221,6 @@ TSharedPtr<FJsonObject> BuildModelingValidInput(
 		Input->SetStringField(
 			TEXT("operand_ref"),
 			TEXT("uai://mesh/fixture-operand"));
-		Input->SetObjectField(
-			TEXT("operand_revision"),
-			ModelingRevision(TEXT("uai://mesh/fixture-operand")));
 		Input->SetObjectField(
 			TEXT("operand_to_target"),
 			ModelingOperandTransform());
@@ -517,21 +511,7 @@ bool SerializeModelingInput(
 TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
 MakeModelingResources()
 {
-	return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-		FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 1048576},
-			{EUeAgentResourceDimension::OutputBytes, 1048576},
-			{EUeAgentResourceDimension::StringBytes, 1048576},
-			{EUeAgentResourceDimension::Nodes, 32768},
-			{EUeAgentResourceDimension::Items, 32768},
-			{EUeAgentResourceDimension::Files, 64},
-			{EUeAgentResourceDimension::ReferenceEdges, 32768},
-			{EUeAgentResourceDimension::WorkUnits, 1048576},
-			{
-				EUeAgentResourceDimension::EstimatedMemoryBytes,
-				134217728,
-			},
-		}));
+	return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 }
 
 bool TryModelingCanonicalValue(
@@ -1227,14 +1207,6 @@ bool RunModelingProductionPlanningTests(
 		{
 			Options.bIncludeTarget = false;
 		}
-		else if (CaseId == TEXT("target-revision-stale"))
-		{
-			Input->SetObjectField(
-				TEXT("target_revision"),
-				ModelingRevision(
-					TEXT("uai://mesh/fixture-target"),
-					2));
-		}
 		else if (CaseId == TEXT("selection-element-invalid"))
 		{
 			Input->GetObjectField(TEXT("selection"))
@@ -1250,14 +1222,6 @@ bool RunModelingProductionPlanningTests(
 		else if (CaseId == TEXT("operand-unresolved"))
 		{
 			Options.bIncludeOperand = false;
-		}
-		else if (CaseId == TEXT("operand-revision-stale"))
-		{
-			Input->SetObjectField(
-				TEXT("operand_revision"),
-				ModelingRevision(
-					TEXT("uai://mesh/fixture-operand"),
-					2));
 		}
 		else if (CaseId == TEXT("operand-transform-singular"))
 		{

@@ -1,0 +1,20 @@
+--- a/Engine/Plugins/Editor/GeometryMode/Source/BspMode/Private/BspModeModule.cpp
++++ b/Engine/Plugins/Editor/GeometryMode/Source/BspMode/Private/BspModeModule.cpp
+@@ -1,6 +1,7 @@
+ // Copyright Epic Games, Inc. All Rights Reserved.
+ 
+ #include "BspModeModule.h"
++#include "AssetRegistry/AssetData.h"
+ #include "Styling/AppStyle.h"
+ #include "Builders/ConeBuilder.h"
+ #include "Builders/CubeBuilder.h"
+@@ -81,6 +82,9 @@
+ 	static int32 SortOrder = 0;
+ 	
+ 	BuilderType->PlaceableItem =  MakeShared<FPlaceableItem>( Handler, SortOrder++, BuilderType->Text, Name );
++	// Publish the native creation input without constructing a drag operation (which
++	// changes the shared preview brush). Non-interactive consumers use the same registry.
++	BuilderType->PlaceableItem->AssetData = FAssetData(InBuilderClass);
+ 	BuilderType->PlacementModeID = IPlacementModeModule::Get().RegisterPlaceableItem( CategoryName, BuilderType->PlaceableItem.ToSharedRef() );
+ }
+ 

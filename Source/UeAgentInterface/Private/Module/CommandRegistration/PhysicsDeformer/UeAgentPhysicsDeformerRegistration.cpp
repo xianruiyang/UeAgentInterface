@@ -43,12 +43,15 @@ namespace UE::UAI::Module::CommandRegistration::PhysicsDeformer
 			const FString& Id,
 			const FUeAgentCommandContractRegistry& Legacy,
 			FUeAgentCommandDeclaration& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(Id);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("physics_deformer_contract_missing:") + Id;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("physics_deformer_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("physics_deformer_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			const bool bQuery = DomainAdapters::PhysicsDeformer::IsQuery(Id);
@@ -74,12 +77,17 @@ namespace UE::UAI::Module::CommandRegistration::PhysicsDeformer
 					Parameter.IsRequired(),
 					Parameter.IsNullable(),
 					TEXT("Exact Physics/Deformer mechanics parameter."),
+					Parameter.GetSchemaJson(),
 				});
 			}
 			Result.ResultFields = {{
 				TEXT("result"), TEXT("object"), true, false,
 				TEXT("Native Physics/Deformer result with revision and readback evidence."),
 			}};
+			if (Id.EndsWith(TEXT(".asset.create")))
+			{
+				Result.ModelResultFields = {{TEXT("target_ref"), {TEXT("target_ref")}}};
+			}
 			Result.Errors = {
 				{TEXT("physics_deformer_authority_required"),
 					TEXT("The caller lacks the Query/Operation authority." )},
@@ -98,7 +106,7 @@ namespace UE::UAI::Module::CommandRegistration::PhysicsDeformer
 				TEXT("Resolve the exact target and expected revision before execution."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Use only query.command.detail fields and explicit target identities.");
+				TEXT("Use only query.command.usage fields and explicit target identities.");
 			Result.Purpose.ResultGuidance =
 				TEXT("Use native terminal state and an independent asset or simulation readback.");
 			Result.Purpose.FailureGuidance =
@@ -140,7 +148,7 @@ namespace UE::UAI::Module::CommandRegistration::PhysicsDeformer
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::PhysicsDeformer::TryCreateHandlers(
 					Out, OutError);
@@ -152,7 +160,7 @@ namespace UE::UAI::Module::CommandRegistration::PhysicsDeformer
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<IUeAgentActiveCommandContribution> CommandContribution;
 			if (!TryCreateContribution(CommandContribution, OutError)
@@ -198,10 +206,6 @@ namespace UE::UAI::Module::CommandRegistration::PhysicsDeformer
 						FindOperationInvocationFactory(CommandId);
 				Declaration.Operation.Operations.Add(MoveTemp(Operation));
 			}
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId =
-				TEXT("T42-PHYSICS-DEFORMER-OPERATION");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
@@ -213,7 +217,7 @@ namespace UE::UAI::Module::CommandRegistration::PhysicsDeformer
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();

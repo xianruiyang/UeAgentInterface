@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintMutationModel.h"
 
@@ -44,22 +46,25 @@ namespace UeAgentUmgAuthoring
 			const TSharedPtr<const FJsonObject>& ProviderExtension,
 			TUniquePtr<FPreparedUmgMutation>& OutMutation,
 			FMutationCounters& OutExpectedCounters,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError,
+			const FString& CanonicalAssetPath = FString());
 
 		bool ApplyTo(
 			UWidgetBlueprint& Blueprint,
 			FMutationCounters& OutCounters,
-			FString& OutError) const;
+			UE::UAI::Contract::FDiagnostic& OutError) const;
 		bool FinalizeAfterCompile(
 			UWidgetBlueprint& Blueprint,
 			FMutationCounters& OutCounters,
 			bool& bOutRequiresSecondCompile,
-			FString& OutError) const;
+			UE::UAI::Contract::FDiagnostic& OutError) const;
 		static bool RestoreFromBackup(
 			const UWidgetBlueprint& Backup,
 			UWidgetBlueprint& Target,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool RequiresCompile() const;
+		bool VerifyPropertyIntent(UWidgetBlueprint& Blueprint, UE::UAI::Contract::FDiagnostic& OutError) const;
+		bool VerifyIntent(UWidgetBlueprint& Blueprint, UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		struct FImpl;

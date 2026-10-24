@@ -1,5 +1,7 @@
 #include "Module/CommandRegistration/ModelingGeometry/UeAgentModelingGeometryRegistration.h"
 
+#include "Dom/JsonValue.h"
+
 #include "CommandHandlers/ModelingGeometry/UeAgentModelingGeometryCommandHandlers.h"
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringComposition.h"
 #include "Core/Contract/UeAgentCommandContract.h"
@@ -43,12 +45,15 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 			const FUeAgentCommandContractRegistry& Legacy,
 			const Contract::FUeAgentDescriptorRegistry& DescriptorRegistry,
 			FUeAgentCommandDeclaration& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* WireContract = Legacy.FindExact(Id);
-			if (!WireContract || !WireContract->IsValid())
+			if (!WireContract || !WireContract->TryValidate(OutError))
 			{
-				OutError = TEXT("modeling_geometry_contract_missing:") + Id;
+				OutError = WireContract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("modeling_geometry_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_geometry_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			const Contract::FUeAgentOperationDescriptor* Descriptor =
@@ -56,7 +61,14 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 					TEXT("uai.operation.") + Id);
 			if (!Descriptor || Descriptor->GetCapabilityId() != Id)
 			{
-				OutError = TEXT("modeling_geometry_descriptor_missing:") + Id;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_geometry_descriptor_missing"), Descriptor ? TEXT("The operation descriptor capability does not match the command.") : TEXT("No operation descriptor was found for the command binding."), TEXT("registration"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
+				if (Descriptor)
+				{
+					OutError.PropertyPath = TEXT("capability_id");
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Id);
+					OutError.ActualValue = MakeShared<FJsonValueString>(Descriptor->GetCapabilityId());
+				}
 				return false;
 			}
 			TSharedPtr<FJsonObject> InputSchema;
@@ -66,7 +78,9 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 					OutError)
 				|| !InputSchema.IsValid())
 			{
-				OutError = TEXT("modeling_geometry_input_schema_invalid:") + Id;
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("modeling_geometry_input_schema_invalid"), OutError, TEXT("registration"));
+				OutError.SubjectId = Id;
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			const TSharedPtr<FJsonObject>* Properties = nullptr;
@@ -74,8 +88,8 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 				|| !Properties
 				|| !Properties->IsValid())
 			{
-				OutError = TEXT("modeling_geometry_input_schema_properties_missing:")
-					+ Id;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_geometry_input_schema_properties_missing"), TEXT("The operation input schema requires an object-valued properties field."), TEXT("registration"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			FUeAgentCommandDeclaration Result;
@@ -96,8 +110,9 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 					|| !ParameterSchema
 					|| !ParameterSchema->IsValid())
 				{
-					OutError = TEXT("modeling_geometry_parameter_schema_missing:")
-						+ Id + TEXT(":") + P.GetName();
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_geometry_parameter_schema_missing"), TEXT("The command parameter has no object-valued schema in the operation descriptor."), TEXT("registration"), FString(), Id);
+					if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
+					OutError.PropertyPath = TEXT("properties.") + P.GetName();
 					return false;
 				}
 				FString ParameterSchemaJson;
@@ -106,8 +121,10 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 						ParameterSchemaJson,
 						OutError))
 				{
-					OutError = TEXT("modeling_geometry_parameter_schema_invalid:")
-						+ Id + TEXT(":") + P.GetName();
+					OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("modeling_geometry_parameter_schema_invalid"), OutError, TEXT("registration"));
+					OutError.SubjectId = Id;
+					if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
+					OutError.PropertyPath = TEXT("properties.") + P.GetName() + (OutError.PropertyPath.IsEmpty() ? FString() : TEXT(".") + OutError.PropertyPath);
 					return false;
 				}
 				const FString ParameterWireType = WireType(P.GetWireType());
@@ -128,6 +145,16 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 				Field(TEXT("projection"), TEXT("object"), true,
 					TEXT("Verified native geometry result and evidence identities.")),
 			};
+			if (Id.EndsWith(TEXT(".create")))
+			{
+				Result.ModelResultFields = {
+					{TEXT("status"), {
+						TEXT("projection"), TEXT("payload"), TEXT("status")}},
+					{TEXT("effect_outcome"), {
+						TEXT("projection"), TEXT("payload"),
+						TEXT("effect_outcome")}},
+				};
+			}
 			Result.Errors = {
 				{TEXT("modeling_geometry_authority_required"), TEXT("uai:operate is required.")},
 				{TEXT("simple_authoring_input_invalid"), TEXT("The exact geometry schema rejects the request before mutation.")},
@@ -137,12 +164,12 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 				+ TEXT(" through the common OperationService and modeling geometry mechanics.");
 			Result.Purpose.Target = TEXT("One exact mesh asset or geometry target declared by the command contract.");
 			Result.Purpose.Preconditions = {TEXT("Resolve every mesh identity before mutation.")};
-			Result.Purpose.ParameterGuidance = TEXT("Use only query.command.detail input_fields and apply every attached JSON Schema constraint exactly.");
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters; apply every attached JSON Schema constraint exactly.");
 			Result.Purpose.ResultGuidance = TEXT("Success requires verified terminal projection evidence.");
 			Result.Purpose.FailureGuidance = TEXT("state_unknown is non-replayable.");
 			Result.Purpose.SideEffectGuidance = TEXT("Uses the formal native modeling geometry effect.");
 			Result.Purpose.MinimumExample = Result.PythonFunction + TEXT("(client, params)");
-			Result.Purpose.RelatedFlows = {TEXT("query.command.detail"), TEXT("asset readback")};
+			Result.Purpose.RelatedFlows = {TEXT("query.command.usage"), TEXT("asset readback")};
 			Result.Purpose.Keywords = {TEXT("mesh"), TEXT("geometry"), TEXT("modeling")};
 			Result.Purpose.Synonyms = {TEXT("mesh modeling operation")};
 			Out = MoveTemp(Result);
@@ -193,12 +220,12 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 			Result.Purpose.Summary = TEXT("Execute one exact action in the real Unreal Modeling Mode session.");
 			Result.Purpose.Target = TEXT("One explicit Modeling Mode session, tool, selection, actor, or mesh asset identity.");
 			Result.Purpose.Preconditions = {TEXT("Resolve the exact target, world context, action and expected revision before mutation.")};
-			Result.Purpose.ParameterGuidance = TEXT("Use query.command.detail; fields not owned by the selected action are rejected.");
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters; fields not owned by the selected action are rejected.");
 			Result.Purpose.ResultGuidance = TEXT("Inspect terminal_status and the independent observation for the selected action.");
 			Result.Purpose.FailureGuidance = TEXT("Input failures are not_started; state_unknown is non-replayable.");
 			Result.Purpose.SideEffectGuidance = TEXT("Tool actions affect authoring memory; save_mesh_asset and declared commits require persisted readback.");
 			Result.Purpose.MinimumExample = TEXT("client.mesh.modeling_session('observe_tool', None, {}, {}, {})");
-			Result.Purpose.RelatedFlows = {TEXT("query.command.detail"), TEXT("operation.status"), TEXT("content_graph.summary")};
+			Result.Purpose.RelatedFlows = {TEXT("query.command.usage"), TEXT("operation.status"), TEXT("content_graph.summary")};
 			Result.Purpose.Keywords = {TEXT("modeling mode"), TEXT("tool"), TEXT("mesh selection")};
 			Result.Purpose.Synonyms = {TEXT("modeling session action")};
 			return Result;
@@ -213,13 +240,13 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 			Result.PythonFunction = TEXT("voxel_grid_session");
 			Result.ContractVersion = 2;
 			Result.PublicOwner = Owner;
-			Result.Availability = EUeAgentCommandAvailability::Enabled;
+			Result.Availability = EUeAgentCommandAvailability::Dormant;
 			Result.SideEffect = EUeAgentCommandSideEffect::WorldState;
 			Result.StateLayers = {
 				TEXT("authoring_memory"), TEXT("durability_journal")};
 			Result.InputFields = {
 				Field(TEXT("action"), TEXT("string"), true,
-					TEXT("begin, read, add_bounds, remove_bounds, close, or cancel.")),
+					TEXT("begin, read, add_bounds, remove_bounds, add_shape, remove_shape, close, or cancel.")),
 				Field(TEXT("session_id"), TEXT("string"), false,
 					TEXT("Opaque session identity returned by begin.")),
 				Field(TEXT("expected_revision"), TEXT("integer"), false,
@@ -242,8 +269,8 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 					TEXT("Actor anchor in grid-local centimeters.")),
 				Field(TEXT("bounds"), TEXT("object"), false,
 					TEXT("Explicit grid_local, component_local, or world AABB.")),
-				Field(TEXT("max_operation_cells"), TEXT("integer"), false,
-					TEXT("Optional per-call limit no greater than the service hard limit.")),
+				Field(TEXT("shape"), TEXT("object"), false,
+					TEXT("Exact solid: kind=box|square_pyramid|triangular_prism, explicit space=grid_local|component_local|world, center and positive size {x,y,z} in centimeters, optional rotation {pitch,yaw,roll} in degrees. Pyramid base is local -Z and apex +Z. Right triangular prism rises from -X to +X, extrudes along Y. add_shape unions volume; remove_shape cuts volume without cell rounding.")),
 				Field(TEXT("projection"), TEXT("object"), false,
 					TEXT("Bounded session readback projection.")),
 			};
@@ -268,8 +295,6 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 					TEXT("The session revision differs from expected_revision.")},
 				{TEXT("voxel_grid_session_dirty"),
 					TEXT("A dirty session must be applied or cancelled before close.")},
-				{TEXT("voxel_grid_operation_cell_limit_exceeded"),
-					TEXT("The requested conservative cover exceeds the bounded budget.")},
 				{TEXT("voxel_grid_target_package_dirty"),
 					TEXT("The exact Map or External Actor package was already dirty.")},
 				{TEXT("voxel_grid_authoring_state_conflict"),
@@ -278,28 +303,100 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 					TEXT("A prior rollback could not confirm the session state.")},
 			};
 			Result.Purpose.Summary =
-				TEXT("Manage one bounded CubeGrid-style voxel whitebox session.");
+				TEXT("Internal SDK continuation for one bounded VoxelGrid session.");
 			Result.Purpose.Target =
-				TEXT("One managed DynamicMeshActor, its UE-owned state component, and one opaque grid session.");
+				TEXT("One SDK-owned opaque VoxelGrid continuation and its managed DynamicMeshActor.");
 			Result.Purpose.Preconditions = {
+				TEXT("Only the SDK typed handle may retain and forward session identity and revision."),
 				TEXT("Use an explicit coordinate space for every bounds mutation."),
-				TEXT("Copy session_id and revision unchanged from readback."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("World AABBs are conservatively covered after eight-corner grid conversion.");
+				TEXT("SDK internal forwarding only; model-facing callers use the typed handle business methods.");
 			Result.Purpose.ResultGuidance =
-				TEXT("Use readback revision and actor_ref for the next exact action; legacy_sidecar_imported is migration evidence only.");
+				TEXT("The SDK updates its private continuation from the lossless machine result.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Do not replay stale or state_unknown mutations.");
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Begin prepares C8D before mutation; close/cancel release it, cancel removes an uncommitted actor, and no viewport or window is changed.");
 			Result.Purpose.MinimumExample =
-				TEXT("client.mesh.voxel_grid_session('begin', mode='create', cell_size=100)");
+				TEXT("SDK-internal typed-handle forwarding; no model-facing invocation.");
 			Result.Purpose.RelatedFlows = {
-				TEXT("mesh.voxel_grid.apply"), TEXT("query.command.detail")};
+				TEXT("mesh.voxel_grid.apply"), TEXT("query.command.usage")};
 			Result.Purpose.Keywords = {
 				TEXT("cubegrid"), TEXT("voxel"), TEXT("whitebox"), TEXT("blockout")};
 			Result.Purpose.Synonyms = {TEXT("grid blockout session")};
+			return Result;
+		}
+
+		FUeAgentCommandDeclaration VoxelGridBeginDeclaration()
+		{
+			FUeAgentCommandDeclaration Result;
+			Result.CommandId = DomainAdapters::ModelingGeometry::VoxelGrid::
+				GetBeginCommandId();
+			Result.PythonNamespace = TEXT("mesh");
+			Result.PythonFunction = TEXT("voxel_grid_begin");
+			Result.ContractVersion = 1;
+			Result.PublicOwner = Owner;
+			Result.Availability = EUeAgentCommandAvailability::Enabled;
+			Result.SideEffect = EUeAgentCommandSideEffect::WorldState;
+			Result.StateLayers = {TEXT("authoring_memory")};
+			Result.InputFields = {
+				Field(TEXT("mode"), TEXT("string"), false,
+					TEXT("create or edit; defaults to create.")),
+				Field(TEXT("actor_ref"), TEXT("string"), false,
+					TEXT("Existing DynamicMeshActor identity for edit.")),
+				Field(TEXT("label"), TEXT("string"), false,
+					TEXT("Optional label for a newly created actor.")),
+				Field(TEXT("cell_size"), TEXT("number"), false,
+					TEXT("Grid cell size in Unreal centimeters.")),
+				Field(TEXT("origin"), TEXT("object"), false,
+					TEXT("Grid-frame origin in world centimeters.")),
+				Field(TEXT("rotation"), TEXT("object"), false,
+					TEXT("Grid-frame UE pitch/yaw/roll in degrees.")),
+				Field(TEXT("anchor"), TEXT("object"), false,
+					TEXT("Actor anchor in grid-local centimeters.")),
+			};
+			Result.ResultFields = {
+				Field(TEXT("action"), TEXT("string"), true,
+					TEXT("The begin action.")),
+				Field(TEXT("terminal_status"), TEXT("string"), true,
+					TEXT("Observed begin status.")),
+				Field(TEXT("readback"), TEXT("object"), true,
+					TEXT("Bounded initial session observation.")),
+				Field(TEXT("errors"), TEXT("array"), true,
+					TEXT("Bounded structured errors.")),
+				Field(TEXT("warnings"), TEXT("array"), true,
+					TEXT("Bounded structured warnings.")),
+			};
+			Result.Errors = {
+				{TEXT("modeling_geometry_authority_required"),
+					TEXT("uai:operate authority is required.")},
+				{TEXT("voxel_grid_begin_mode_unsupported"),
+					TEXT("The begin mode must be create or edit.")},
+				{TEXT("voxel_grid_actor_not_found"),
+					TEXT("The edit actor could not be resolved uniquely.")},
+			};
+			Result.Purpose.Summary =
+				TEXT("Begin one bounded CubeGrid-style voxel whitebox session.");
+			Result.Purpose.Target =
+				TEXT("A new or explicitly selected DynamicMeshActor grid target.");
+			Result.Purpose.Preconditions = {
+				TEXT("Provide only business begin fields; the service owns session identity.")};
+			Result.Purpose.ParameterGuidance =
+				TEXT("Use mode=create for a new grid or mode=edit with actor_ref for an existing grid.");
+			Result.Purpose.ResultGuidance =
+				TEXT("Use the typed handle: read, add_bounds/remove_bounds for cell-aligned blocks, add_shape/remove_shape for exact square_pyramid or triangular_prism volumes, apply, close or cancel. Shapes preserve slopes and exact convex collision. Machine continuation stays private.");
+			Result.Purpose.FailureGuidance =
+				TEXT("Do not retry a state_unknown result without reconciliation.");
+			Result.Purpose.SideEffectGuidance =
+				TEXT("Prepares transient authoring state; persistence is performed by voxel_grid.apply.");
+			Result.Purpose.MinimumExample =
+				TEXT("client.mesh.voxel_grid_begin(mode='create', cell_size=100)");
+			Result.Purpose.RelatedFlows = {
+				TEXT("query.command.usage")};
+			Result.Purpose.Keywords = {
+				TEXT("cubegrid"), TEXT("voxel"), TEXT("begin"), TEXT("pyramid"), TEXT("triangular prism"), TEXT("ramp")};
+			Result.Purpose.Synonyms = {TEXT("grid blockout begin")};
 			return Result;
 		}
 
@@ -312,7 +409,7 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 			Result.PythonFunction = TEXT("voxel_grid_apply");
 			Result.ContractVersion = 2;
 			Result.PublicOwner = Owner;
-			Result.Availability = EUeAgentCommandAvailability::Enabled;
+			Result.Availability = EUeAgentCommandAvailability::Dormant;
 			Result.SideEffect = EUeAgentCommandSideEffect::WorldState;
 			Result.StateLayers = {
 				TEXT("authoring_memory"), TEXT("project_saved_state")};
@@ -324,7 +421,7 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 				Field(TEXT("mesh_build"), TEXT("string"), false,
 					TEXT("exposed_faces; other values fail closed.")),
 				Field(TEXT("collision"), TEXT("object"), false,
-					TEXT("exact_box_components or none, profile, enabled, and max_boxes.")),
+					TEXT("mode: exact_box_components for whole cells, exact_convex for precise solids, or none; omitted mode selects exact collision for the current geometry. profile_name defaults to BlockAll; enabled defaults to query_and_physics.")),
 				Field(TEXT("material_ref"), TEXT("string"), false,
 					TEXT("Optional exact MaterialInterface object path.")),
 				Field(TEXT("keep_session"), TEXT("boolean"), false,
@@ -351,8 +448,6 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 					TEXT("uai:operate authority is required.")},
 				{TEXT("voxel_grid_revision_mismatch"),
 					TEXT("The session revision differs from expected_revision.")},
-				{TEXT("voxel_grid_collision_box_limit_exceeded"),
-					TEXT("The exact cover exceeds the declared bounded box limit.")},
 				{TEXT("voxel_grid_independent_readback_mismatch"),
 					TEXT("Published Actor state and isolated persisted-package readback are not equivalent.")},
 				{TEXT("voxel_grid_target_package_dirty"),
@@ -361,15 +456,15 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 					TEXT("A prior rollback could not confirm the session state.")},
 			};
 			Result.Purpose.Summary =
-				TEXT("Apply one CubeGrid-style session as exposed-face mesh and exact-cover collision.");
+				TEXT("Internal SDK apply for one VoxelGrid typed continuation.");
 			Result.Purpose.Target =
 				TEXT("The exact DynamicMeshActor owned by session_id.");
 			Result.Purpose.Preconditions = {
-				TEXT("Read the current session revision immediately before apply."),
+				TEXT("Only the SDK typed handle may retain and forward session identity and revision."),
 				TEXT("Use a collision box limit appropriate for the target cell set."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("The command never implicitly saves a Level package containing unrelated dirty content.");
+				TEXT("SDK internal forwarding only; the command never saves unrelated dirty content.");
 			Result.Purpose.ResultGuidance =
 				TEXT("Success includes a C8D receipt and C9 isolated-package equivalence readback; the UE component is the only active grid-state owner.");
 			Result.Purpose.FailureGuidance =
@@ -377,7 +472,7 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Persists only the exact clean target Map/External Actor packages; a legacy sidecar is accepted once only when no component exists, then moved to a recoverable tombstone.");
 			Result.Purpose.MinimumExample =
-				TEXT("client.mesh.voxel_grid_apply(session_id, revision, collision={'mode':'exact_box_components'})");
+				TEXT("SDK-internal typed-handle forwarding; no model-facing invocation.");
 			Result.Purpose.RelatedFlows = {
 				TEXT("mesh.voxel_grid.session"), TEXT("spatial readback")};
 			Result.Purpose.Keywords = {
@@ -408,7 +503,7 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::ModelingGeometry::TryCreateHandlers(
 					NativeMechanicsPort, Out, OutError);
@@ -424,7 +519,7 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			DomainCapability::FDomainCapabilityDeclaration Declaration =
 				DomainCapability::MakeExplicitlyUnsupportedDomainCapabilityDeclaration(
@@ -441,8 +536,8 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 							FindOperationInvocationFactory(OperationId);
 				if (!Factory.IsValid())
 				{
-					OutError = TEXT("modeling_geometry_operation_factory_missing:")
-						+ OperationId;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_geometry_operation_factory_missing"), TEXT("No operation invocation factory is registered for this operation."), TEXT("registration"), FString(), OperationId);
+					if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = OperationId;
 					return false;
 				}
 				DomainCapability::FDomainOperationEntry Operation;
@@ -457,7 +552,10 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 					EDomainOperationExecutionPolicy::Immediate;
 				const bool bTransient = OperationId
 					== DomainAdapters::ModelingGeometry::VoxelGrid::
-						GetSessionCommandId();
+						GetBeginCommandId()
+					|| OperationId
+						== DomainAdapters::ModelingGeometry::VoxelGrid::
+							GetSessionCommandId();
 				Operation.TransientStatePolicy = bTransient
 					? DomainCapability::EDomainTransientStatePolicy::RecoverableSession
 					: DomainCapability::EDomainTransientStatePolicy::None;
@@ -472,10 +570,6 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 				StateSemantic::EUeAgentStatePlane::AuthoringMemory,
 				StateSemantic::EUeAgentStatePlane::Persisted,
 			};
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId =
-				TEXT("TROOT-UAI-41-MODELING-WHITEBOX-PHYSICS-VERTICAL");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
@@ -487,7 +581,7 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset(); OutError.Reset();
 		TSharedPtr<const FUeAgentCommandContractRegistry> Legacy;
@@ -508,6 +602,12 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 		TArray<FUeAgentCommandDeclaration> Declarations;
 		for (const FString& Id : DomainAdapters::ModelingGeometry::GetCommandIds())
 		{
+			if (Id == DomainAdapters::ModelingGeometry::VoxelGrid::
+				GetBeginCommandId())
+			{
+				Declarations.Add(VoxelGridBeginDeclaration());
+				continue;
+			}
 			if (Id == TEXT("mesh.modeling_session"))
 			{
 				Declarations.Add(ModelingSessionDeclaration());
@@ -537,7 +637,6 @@ namespace UE::UAI::Module::CommandRegistration::ModelingGeometry
 			}
 			Declarations.Add(MoveTemp(Declaration));
 		}
-		if (Declarations.Num() != 34) return false;
 		TSharedRef<const DomainAdapters::ModelingGeometry::IUeAgentModelingSessionNativeMechanicsPort>
 			NativeMechanicsPort =
 				DomainAdapters::ModelingGeometry::CreateModelingSessionNativeMechanicsPort();

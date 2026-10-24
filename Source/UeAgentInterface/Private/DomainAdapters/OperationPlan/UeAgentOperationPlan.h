@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 
 namespace UE::UAI::DomainAdapters::OperationPlan
@@ -18,7 +20,7 @@ namespace UE::UAI::DomainAdapters::OperationPlan
 			TSharedRef<
 				const CommandRegistry::FUeAgentImmutableCommandRegistry>
 				InRegistry,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		CommandEdge::FUeAgentCommandResult Execute(
 			const CommandEdge::FUeAgentCommandRequest& Request,

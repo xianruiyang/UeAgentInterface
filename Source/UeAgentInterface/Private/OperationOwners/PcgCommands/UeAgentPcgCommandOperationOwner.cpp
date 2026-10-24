@@ -2,32 +2,27 @@
 
 #include "Composition/GraphCompound/UeAgentGraphCompoundCommandHandlers.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundPcgAiBindings.h"
-#include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringRuntime.h"
-#include "Composition/TimelineSpatial/UeAgentTimelineSpatialRuntime.h"
-#include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
-#include "Core/Discovery/UeAgentDiscovery.h"
-#include "Core/Projection/UeAgentProjection.h"
+#include "Core/Contract/UeAgentContractJson.h"
+#include "Core/Contract/UeAgentInternalCommandExecution.h"
 #include "DomainAdapters/PcgCommands/UeAgentPcgCommandMechanicsBoundary.h"
-#include "Editor.h"
-#include "HAL/PlatformProcess.h"
-#include "Misc/App.h"
-#include "Misc/Guid.h"
+#include "Dom/JsonValue.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
 
 namespace UE::UAI::OperationOwners::PcgCommands
 {
-	using namespace BindingGateway::Ticket;
 	using namespace CommandEdge;
 	using namespace Composition::GraphCompound;
-	using namespace Composition::SimpleAuthoring;
-	using namespace Composition::TimelineSpatial;
 	using namespace ContextResource;
-	using namespace Discovery;
-	using namespace Projection;
 
 	namespace
 	{
+		const FString PcgGraphAssetCreateCommandId =
+			TEXT("pcg.graph.asset.create");
+		const FString PcgGraphApplyCommandId = TEXT("pcg.graph.apply");
+		const FString PcgGraphParametersApplyCommandId =
+			TEXT("pcg.graph_parameters.apply");
+
 		struct FProcessMechanicsHost final
 		{
 			FCriticalSection Mutex;
@@ -41,69 +36,10 @@ namespace UE::UAI::OperationOwners::PcgCommands
 			return Host;
 		}
 
-		class FConservativeTokenEstimator final : public IUeAgentTokenEstimator
-		{
-		public:
-			bool TryEstimate(
-				const FUeAgentProjectedPayload& Payload,
-				const TArray<FUeAgentArtifactDescriptor>& Artifacts,
-				const TArray<FUeAgentProjectionDiagnostic>& Diagnostics,
-				FUeAgentResourceTracker& Resources,
-				const FUeAgentOperationDeadline& Deadline,
-				const FUeAgentCancellationToken& Cancellation,
-				FUeAgentTokenEstimate& OutEstimate,
-				FUeAgentProjectionError& OutError) override
-			{
-				OutError = {};
-				FUeAgentCancellationRequested Cancelled;
-				if (!Cancellation.TryCheckpoint(Cancelled))
-				{
-					OutError.Code = Cancelled.Code;
-					OutError.SubjectId = Cancelled.Reason;
-					OutError.Detail = TEXT("PCG command projection cancelled");
-					return false;
-				}
-				FUeAgentOperationDeadlineExceeded Expired;
-				if (!Deadline.TryCheckpoint(TEXT("pcg_command.projection"), Expired))
-				{
-					OutError.Code = Expired.Code;
-					OutError.SubjectId = Expired.Stage;
-					OutError.Detail = TEXT("PCG command projection deadline expired");
-					return false;
-				}
-				FUeAgentResourceBudgetExceeded BudgetError;
-				if (!Resources.TryCharge(
-						EUeAgentResourceDimension::WorkUnits,
-						1,
-						TEXT("pcg_command.projection"),
-						BudgetError))
-				{
-					OutError.Code = BudgetError.Code;
-					OutError.SubjectId = BudgetError.Path;
-					OutError.Detail = TEXT("PCG command projection budget exceeded");
-					OutError.ResourceDimension = BudgetError.Dimension;
-					OutError.ResourceLimit = BudgetError.Limit;
-					OutError.ResourceObserved = BudgetError.Observed;
-					return false;
-				}
-				int64 Utf8Bytes = 512 + Artifacts.Num() * 512
-					+ Diagnostics.Num() * 256;
-				if (Payload.GetSnapshot().IsValid())
-				{
-					Utf8Bytes += Payload.GetSnapshot()->GetEntries().Num() * 2048;
-				}
-				OutEstimate = FUeAgentTokenEstimate(
-					EUeAgentTokenEstimateKind::Conservative,
-					FMath::Max<int64>(1, (Utf8Bytes + 2) / 3),
-					Utf8Bytes);
-				return true;
-			}
-		};
-
 		bool AddMechanics(
 			const TSharedRef<IUeAgentCommandHandler>& Handler,
 			TMap<FString, TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!DomainAdapters::PcgCommands::IsCommand(Handler->GetCommandId()))
 			{
@@ -111,11 +47,96 @@ namespace UE::UAI::OperationOwners::PcgCommands
 			}
 			if (OutHandlers.Contains(Handler->GetCommandId()))
 			{
-				OutError = TEXT("pcg_command_mechanics_handler_duplicate:")
-					+ Handler->GetCommandId();
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_command_mechanics_handler_duplicate"),
+					TEXT("More than one mechanics handler was created for the same PCG command."), TEXT("internal_command"), Handler->GetCommandId());
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(2);
+				OutError.PropertyPath = TEXT("command_handler_registration_count");
+				OutError.SourceKind = TEXT("native_result");
+				if (DomainAdapters::PcgCommands::GetPublicCommandIds().Contains(Handler->GetCommandId()))
+					OutError.PublicMessage += TEXT(" Command: ") + Handler->GetCommandId() + TEXT(".");
 				return false;
 			}
 			OutHandlers.Add(Handler->GetCommandId(), Handler);
+			return true;
+		}
+
+		bool TrySubmitPcgMechanic(
+			const FString& CommandId,
+			const TSharedRef<FJsonObject>& Params,
+			const FString& CorrelationId,
+			FString& OutPayload,
+			UE::UAI::Contract::FDiagnostic& OutError)
+		{
+			OutPayload.Reset();
+			OutError.Reset();
+			TSharedPtr<IUeAgentCommandHandler> Handler;
+			TArray<FString> AuthorityScopes;
+			if (!TryResolveMechanics(
+					CommandId, Handler, AuthorityScopes, OutError)
+				|| !Handler.IsValid())
+			{
+				if (OutError.IsEmpty()) {
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_command_mechanics_handler_unavailable"),
+						TEXT("The PCG mechanics resolver failed or returned no executable handler without reporting a diagnostic."), TEXT("internal_command"), CommandId);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.PropertyPath = TEXT("command_handler_ready");
+					OutError.SourceKind = TEXT("native_result");
+					if (DomainAdapters::PcgCommands::GetPublicCommandIds().Contains(CommandId))
+						OutError.PublicMessage += TEXT(" Command: ") + CommandId + TEXT(".");
+				}
+				return false;
+			}
+
+			FString ParamsJson;
+			if (!Contract::Json::TryCanonicalize(Params, ParamsJson, OutError))
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("pcg_internal_params_invalid"),
+					OutError, TEXT("internal_command"), TEXT("The PCG command parameters could not be encoded."));
+				return false;
+			}
+			TSharedPtr<const CommandContract::FUeAgentCommandContractRegistry>
+				Contracts;
+			TArray<FUeAgentGraphCompoundActivationProfile> Profiles;
+			if (!DomainAdapters::PcgCommands::TryGetGraphProfiles(
+					Profiles, OutError)
+				|| !TryCreateGraphCompoundProductionCommandContractRegistry(
+					Profiles, Contracts, OutError))
+			{
+				return false;
+			}
+			const CommandContract::FUeAgentCommandContract* ResolvedContract =
+				Contracts.IsValid() ? Contracts->FindExact(CommandId) : nullptr;
+			if (!ResolvedContract)
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_internal_contract_missing"),
+					Contracts.IsValid() ? TEXT("No command contract is registered for the required PCG operation.")
+						: TEXT("The PCG contract factory returned no command registry."), TEXT("internal_command"), CommandId);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.PropertyPath = Contracts.IsValid() ? TEXT("command_contract_registered") : TEXT("command_registry_available");
+				OutError.SourceKind = TEXT("native_result");
+				if (DomainAdapters::PcgCommands::GetPublicCommandIds().Contains(CommandId))
+					OutError.PublicMessage += TEXT(" Command: ") + CommandId + TEXT(".");
+				return false;
+			}
+			AuthorityScopes.AddUnique(TEXT("uai:query"));
+			AuthorityScopes.AddUnique(TEXT("uai:operate"));
+			AuthorityScopes.AddUnique(TEXT("uai:authoring:hjson:import"));
+			if (!CommandContract::TryExecuteInternalCommand(
+					*ResolvedContract,
+					Handler.ToSharedRef(),
+					ParamsJson,
+					Contract::FUeAgentCallerContext(
+						TEXT("pcg-domain-provider"), AuthorityScopes,
+						CorrelationId),
+					TEXT("pcg_internal_"),
+					OutPayload,
+					OutError))
+			{
+				return false;
+			}
 			return true;
 		}
 	}
@@ -123,7 +144,7 @@ namespace UE::UAI::OperationOwners::PcgCommands
 	bool TryCreateMechanicsHandlers(
 		TMap<FString, TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutAuthorityScopes.Reset();
@@ -136,18 +157,25 @@ namespace UE::UAI::OperationOwners::PcgCommands
 			return false;
 		}
 		FGraphCompoundRuntimeConfig GraphConfig;
-		GraphConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 		FGraphCompoundPcgAiProductionConfig PcgConfig;
 		PcgConfig.DurableJournalRoot = FPaths::ProjectSavedDir()
 			/ TEXT("UeAgentInterface/GraphCompound/PcgCommands");
-		PcgConfig.OperationTimeoutSeconds = 120.0;
 		TSharedPtr<FGraphCompoundRuntime> GraphRuntime;
 		FGraphCompoundRuntimeError GraphError;
 		if (!TryCreatePcgAiGraphProductionRuntime(
 				GraphConfig, PcgConfig, GraphRuntime, GraphError)
 			|| !GraphRuntime.IsValid())
 		{
-			OutError = GraphError.Code + TEXT(":") + GraphError.Detail;
+			OutError = GraphError;
+			if (OutError.IsEmpty()) {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_command_mechanics_runtime_unavailable"),
+					TEXT("The PCG runtime factory failed or returned no executable runtime without reporting a diagnostic."), TEXT("runtime_factory"));
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.PropertyPath = TEXT("runtime_ready");
+				OutError.SourceKind = TEXT("native_result");
+			}
 			return false;
 		}
 		TArray<TSharedRef<IUeAgentCommandHandler>> GraphHandlers;
@@ -170,129 +198,16 @@ namespace UE::UAI::OperationOwners::PcgCommands
 		}
 		OutAuthorityScopes.Add(TEXT("pcg_ai_node_graph.write"));
 
-		if (!IsInGameThread())
-		{
-			OutHandlers.Reset();
-			OutError = TEXT("pcg_command_game_thread_required");
-			return false;
-		}
-		UWorld* const World = GEditor
-			? GEditor->GetEditorWorldContext().World()
-			: nullptr;
-		if (!World)
-		{
-			OutHandlers.Reset();
-			OutError = TEXT("pcg_command_editor_world_unavailable");
-			return false;
-		}
-		const FString ServerSessionId = TEXT("server-session:")
-			+ FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
-		TSharedPtr<const FUeAgentOperationTicketService> TicketService;
-		FUeAgentOperationTicketError TicketError;
-		if (!FUeAgentOperationTicketService::TryCreate(
-				FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower),
-				300.0,
-				[]() { return FPlatformTime::Seconds(); },
-				[]() { return FGuid::NewGuid().ToString(EGuidFormats::Digits); },
-				TicketService,
-				TicketError))
-		{
-			OutHandlers.Reset();
-			OutError = TicketError.Code + TEXT(":") + TicketError.Detail;
-			return false;
-		}
-		TSharedPtr<const FUeAgentResponseProjector> Projector;
-		FUeAgentProjectionError ProjectionError;
-		if (!FUeAgentResponseProjector::TryCreate(
-				MakeShared<FConservativeTokenEstimator>(),
-				Projector,
-				ProjectionError))
-		{
-			OutHandlers.Reset();
-			OutError = ProjectionError.Code + TEXT(":") + ProjectionError.Detail;
-			return false;
-		}
-
-		FUeAgentSimpleAuthoringRuntimeConfig SimpleConfig;
-		SimpleConfig.ProjectInstanceId = TEXT("project:")
-			+ FString(FApp::GetProjectName());
-		SimpleConfig.EditorInstanceId = FString::Printf(
-			TEXT("editor-process:%u"), FPlatformProcess::GetCurrentProcessId());
-		SimpleConfig.ServerSessionId = ServerSessionId;
-		SimpleConfig.RegistryEpoch = 1;
-		SimpleConfig.TimeoutSeconds = 120.0;
-		SimpleConfig.MaxFrameBytes = 16 * 1024 * 1024;
-		SimpleConfig.JournalRoot = FPaths::ProjectSavedDir()
-			/ TEXT("UeAgentInterface/SimpleAuthoring/PcgCommandFoundation");
-		TSharedPtr<FUeAgentSimpleAuthoringRuntime> SimpleRuntime;
-		FUeAgentSimpleAuthoringRuntimeError SimpleError;
-		if (!FUeAgentSimpleAuthoringRuntime::TryCreate(
-				SimpleConfig,
-				*World,
-				TicketService.ToSharedRef(),
-				Projector.ToSharedRef(),
-				SimpleRuntime,
-				SimpleError)
-			|| !SimpleRuntime.IsValid())
-		{
-			OutHandlers.Reset();
-			OutError = SimpleError.Code + TEXT(":") + SimpleError.Detail;
-			return false;
-		}
-		TSharedPtr<const FUeAgentDiscoveryService> DiscoveryService;
-		FUeAgentDiscoveryError DiscoveryError;
-		if (!FUeAgentDiscoveryService::TryCreate(
-				SimpleRuntime->GetCatalogSources(),
-				{},
-				DiscoveryService,
-				DiscoveryError)
-			|| !DiscoveryService.IsValid())
-		{
-			OutHandlers.Reset();
-			OutError = DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail;
-			return false;
-		}
-
-		FUeAgentTimelineSpatialRuntimeConfig TimelineConfig;
-		TimelineConfig.ProjectInstanceId = SimpleConfig.ProjectInstanceId;
-		TimelineConfig.EditorInstanceId = SimpleConfig.EditorInstanceId;
-		TimelineConfig.ServerSessionId = ServerSessionId;
-		TimelineConfig.RegistryEpoch = 1;
-		TimelineConfig.TimeoutSeconds = 120.0;
-		TimelineConfig.MaxFrameBytes = 16 * 1024 * 1024;
-		TSharedPtr<FUeAgentTimelineSpatialRuntime> TimelineRuntime;
-		FUeAgentTimelineSpatialRuntimeError TimelineError;
-		if (!FUeAgentTimelineSpatialRuntime::TryCreate(
-				TimelineConfig,
-				*World,
-				TicketService.ToSharedRef(),
-				DiscoveryService.ToSharedRef(),
-				Projector.ToSharedRef(),
-				TimelineRuntime,
-				TimelineError)
-			|| !TimelineRuntime.IsValid())
-		{
-			OutHandlers.Reset();
-			OutError = TimelineError.Code + TEXT(":") + TimelineError.Detail;
-			return false;
-		}
-		for (const TSharedRef<IUeAgentCommandHandler>& Handler
-			: TimelineRuntime->GetCommandHandlers())
-		{
-			if (!AddMechanics(Handler, OutHandlers, OutError))
-			{
-				OutHandlers.Reset();
-				return false;
-			}
-		}
-		for (const FString& Scope : TimelineRuntime->GetAuthorityScopes())
-		{
-			OutAuthorityScopes.AddUnique(Scope);
-		}
 		if (OutHandlers.Num() != DomainAdapters::PcgCommands::GetCommandIds().Num())
 		{
+			const int32 HandlerCount = OutHandlers.Num();
 			OutHandlers.Reset();
-			OutError = TEXT("pcg_command_mechanics_handler_count_mismatch");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_command_mechanics_handler_count_mismatch"),
+				TEXT("The PCG mechanics factory must provide one handler for each required command."), TEXT("internal_command"));
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(DomainAdapters::PcgCommands::GetCommandIds().Num());
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(HandlerCount);
+			OutError.PropertyPath = TEXT("command_handler_count");
+			OutError.SourceKind = TEXT("native_result");
 			return false;
 		}
 		return true;
@@ -302,7 +217,7 @@ namespace UE::UAI::OperationOwners::PcgCommands
 		const FString& CommandId,
 		TSharedPtr<IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandler.Reset();
 		OutAuthorityScopes.Reset();
@@ -319,7 +234,14 @@ namespace UE::UAI::OperationOwners::PcgCommands
 			Host.Handlers.Find(CommandId);
 		if (!Found)
 		{
-			OutError = TEXT("pcg_command_mechanics_handler_missing:") + CommandId;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_command_mechanics_handler_missing"),
+				TEXT("No mechanics handler is registered for the required PCG command."), TEXT("internal_command"), CommandId);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.PropertyPath = TEXT("command_handler_registered");
+			OutError.SourceKind = TEXT("native_result");
+			if (DomainAdapters::PcgCommands::GetPublicCommandIds().Contains(CommandId))
+				OutError.PublicMessage += TEXT(" Command: ") + CommandId + TEXT(".");
 			return false;
 		}
 		OutHandler = *Found;
@@ -334,5 +256,47 @@ namespace UE::UAI::OperationOwners::PcgCommands
 		const TSharedRef<Contract::IUeAgentCancellationSignal>& Cancellation)
 	{
 		return Mechanics->Submit(Request, Caller, Cancellation);
+	}
+
+	bool TryCreatePcgGraphAsset(
+		const TSharedRef<FJsonObject>& Params,
+		const FString& CorrelationId,
+		FString& OutPayload,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return TrySubmitPcgMechanic(
+			PcgGraphAssetCreateCommandId,
+			Params,
+			CorrelationId,
+			OutPayload,
+			OutError);
+	}
+
+	bool TryApplyPcgGraph(
+		const TSharedRef<FJsonObject>& Params,
+		const FString& CorrelationId,
+		FString& OutPayload,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return TrySubmitPcgMechanic(
+			PcgGraphApplyCommandId,
+			Params,
+			CorrelationId,
+			OutPayload,
+			OutError);
+	}
+
+	bool TryApplyPcgGraphParameters(
+		const TSharedRef<FJsonObject>& Params,
+		const FString& CorrelationId,
+		FString& OutPayload,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return TrySubmitPcgMechanic(
+			PcgGraphParametersApplyCommandId,
+			Params,
+			CorrelationId,
+			OutPayload,
+			OutError);
 	}
 }

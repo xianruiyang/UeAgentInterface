@@ -705,6 +705,7 @@ namespace UE::UAI::Tests::Vertical::T52
 					CameraLocation,
 					CameraRotation,
 					TEXT("20")));
+			Patch->SetStringField(TEXT("camera_transform_mode"), TEXT("absolute"));
 			Patch->SetNumberField(TEXT("fov_degrees"), 50.0);
 			Patch->SetStringField(TEXT("view_mode"), TEXT("unlit"));
 			Patch->SetBoolField(TEXT("realtime"), false);

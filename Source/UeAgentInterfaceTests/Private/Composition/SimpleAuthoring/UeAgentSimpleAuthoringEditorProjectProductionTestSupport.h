@@ -470,6 +470,30 @@ namespace UE::UAI::Tests::SimpleAuthoring::EditorProject
 			return true;
 		}
 
+		bool TryReadSettingsFields(
+			UObject& SettingsObject,
+			TArray<FUeAgentEditorProjectSettingsFieldObservation>& OutFields,
+			FExecutionMutationError& OutError) override
+		{
+			OutFields.Reset();
+			OutError = FExecutionMutationError();
+			if (&SettingsObject != Owner.Settings)
+			{
+				OutError = FExecutionMutationError(
+					TEXT("editor_project_settings_object_mismatch"),
+					SettingsObject.GetPathName());
+				return false;
+			}
+			OutFields.Add({
+				TEXT("uai://editor-project-field/test-enabled"),
+				TEXT("field:r1"),
+				TEXT("uai.value.boolean.v1"),
+				Owner.Settings && Owner.Settings->bTestEnabled
+					? TEXT("true")
+					: TEXT("false")});
+			return true;
+		}
+
 		FOwnedEditorProjectProductionState& Owner;
 		FString RevisionOverride;
 		int32 ResolveCalls = 0;
@@ -855,9 +879,6 @@ namespace UE::UAI::Tests::SimpleAuthoring::EditorProject
 			Nested->SetStringField(
 				TEXT("field_ref"),
 				TEXT("uai://editor-project-field/test-enabled"));
-			Nested->SetStringField(
-				TEXT("expected_revision"),
-				TEXT("field:r1"));
 			Nested->SetStringField(TEXT("presence"), TEXT("set"));
 			Nested->SetStringField(
 				TEXT("type_id"),
@@ -945,9 +966,6 @@ namespace UE::UAI::Tests::SimpleAuthoring::EditorProject
 		Payload->SetStringField(
 			TEXT("target_ref"),
 			TargetRefForProfile(ProfileId));
-		Payload->SetStringField(
-			TEXT("expected_revision"),
-			TEXT("rev:target:1"));
 		Payload->SetArrayField(TEXT("changes"), MoveTemp(Changes));
 		return Payload;
 	}
@@ -983,17 +1001,6 @@ namespace UE::UAI::Tests::SimpleAuthoring::EditorProject
 	inline TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
 	MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1048576},
-				{EUeAgentResourceDimension::OutputBytes, 1048576},
-				{EUeAgentResourceDimension::StringBytes, 1048576},
-				{EUeAgentResourceDimension::Nodes, 32768},
-				{EUeAgentResourceDimension::Items, 32768},
-				{EUeAgentResourceDimension::Files, 64},
-				{EUeAgentResourceDimension::ReferenceEdges, 32768},
-				{EUeAgentResourceDimension::WorkUnits, 1048576},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 134217728},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 }

@@ -5,17 +5,12 @@
 
 #define UAI_GRAPH_COMPOUND_BLUEPRINT_MATERIAL_BINDINGS_V1 1
 
-namespace UE::UAI::Composition::HjsonImport
-{
-	class FUeAgentHjsonImportOperationRuntime;
-}
-
 namespace UE::UAI::Composition::GraphCompound
 {
 	/**
 	 * Native production seam used by exact bindings. Route selection is already
-	 * complete before this seam is called: query, typed operation and C5 HJSON
-	 * import are physically separate methods and cannot fall back to each other.
+	 * complete before this seam is called: query and typed operation are
+	 * physically separate methods and cannot fall back to each other.
 	 */
 	class UEAGENTINTERFACE_API
 	IGraphCompoundBlueprintMaterialEnvironment
@@ -83,34 +78,16 @@ namespace UE::UAI::Composition::GraphCompound
 			Contract::FUeAgentContractValue& OutResult,
 			FGraphCompoundRuntimeError& OutError) = 0;
 
-		virtual bool TryExecuteHjson(
-			const FGraphCompoundDomainRouteProfile& Profile,
-			const FGraphCompoundHjsonSourceRequest& Request,
-			const Contract::FUeAgentDescriptorIdentity& DescriptorIdentity,
-			const FString& RequestId,
-			const FString& IdempotencyKey,
-			const Contract::FUeAgentCallerContext& CallerContext,
-			TSharedRef<ContextResource::FUeAgentResourceTracker,
-				ESPMode::ThreadSafe> Resources,
-			const TSharedRef<Contract::IUeAgentCancellationSignal>&
-				Cancellation,
-			Contract::FUeAgentContractValue& OutResult,
-			FGraphCompoundRuntimeError& OutError) = 0;
 	};
 
 	struct UEAGENTINTERFACE_API
 	FGraphCompoundBlueprintMaterialProductionConfig
 	{
-		TSharedPtr<HjsonImport::FUeAgentHjsonImportOperationRuntime>
-			HjsonRuntime;
 		/** Empty selects Saved/UeAgentInterface/GraphCompoundDurable. */
 		FString DurableJournalRoot;
-		double OperationTimeoutSeconds = 120.0;
-
-		bool IsValid() const;
 	};
 
-	/** Creates the complete 2-query/17-operation exact owner set. */
+	/** Creates the complete exact query and operation owner set. */
 	UEAGENTINTERFACE_API bool TryCreateBlueprintMaterialGraphBindings(
 		TSharedRef<IGraphCompoundBlueprintMaterialEnvironment> Environment,
 		TArray<TSharedRef<IGraphCompoundQueryBinding>>& OutQueryBindings,

@@ -1,5 +1,8 @@
 #include "CommandHandlers/DataTableCurveTable/UeAgentDataTableCurveTableDomainCommandHandlers.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonValue.h"
+
 #include "DomainAdapters/DataTableCurveTable/UeAgentDataTableCurveTableDomainMechanics.h"
 #include "QueryOwners/DataTableCurveTable/UeAgentDataTableCurveTableDomainQueryOwner.h"
 
@@ -26,9 +29,14 @@ namespace UE::UAI::CommandHandlers::DataTableCurveTable
 		if (QueryOwners::DataTableCurveTable::IsReadOnlyContentGraphCommand(
 				Request.GetCommandId()) != bReadOnly)
 		{
-			OutError.Set(
-				TEXT("datatable_curvetable_read_only_contract_mismatch"),
-				Request.GetCommandId());
+			auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("datatable_curvetable_read_only_contract_mismatch"),
+				TEXT("The domain result disagrees with the command's declared read-only behavior."), TEXT("domain_execute"));
+			Detail.CandidateName = Request.GetCommandId();
+			Detail.TargetPath = Request.GetTargetIdentity();
+			Detail.SourceKind = TEXT("native_result");
+			Detail.ActualValue = MakeShared<FJsonValueBoolean>(bReadOnly);
+			Detail.ExpectedValue = MakeShared<FJsonValueBoolean>(QueryOwners::DataTableCurveTable::IsReadOnlyContentGraphCommand(Request.GetCommandId()));
+			OutError.SetFailure(MoveTemp(Detail));
 			return false;
 		}
 		OutResponse = HjsonWorkspace::FImportInitializationDomainResponse(

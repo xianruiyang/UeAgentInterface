@@ -2,7 +2,10 @@
 
 #include "Utilities/UeAgentJsonDiagnostics.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Utilities/AuthoringCore/UeAgentAuthoringWorkspacePaths.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/UeAgentPropertyValueCodec.h"
 
 #include "Utilities/UeAgentStructuredJsonFormatter.h"
@@ -64,60 +67,47 @@ namespace UeAgentJsonDiagnostics
 		}
 	}
 
-	TSharedPtr<FJsonObject> MakeIssue(
-		const FString& Severity,
-		const FString& Code,
-		const FString& Path,
-		const FString& Message)
-	{
-		TSharedPtr<FJsonObject> IssueObj = MakeShared<FJsonObject>();
-		IssueObj->SetStringField(TEXT("severity"), Severity);
-		IssueObj->SetStringField(TEXT("code"), Code);
-		IssueObj->SetStringField(TEXT("path"), Path);
-		IssueObj->SetStringField(TEXT("message"), Message);
-		return IssueObj;
-	}
+	UE::UAI::Contract::FDiagnostic MakeIssue(const FString& Severity, const FString& Code,
+        const FString& Path, const FString& Message)
+    {
+        auto Issue = UE::UAI::Contract::FDiagnostic::Failure(Code, Message, TEXT("input_decode"));
+        Issue.PropertyPath = Path;
+		if (Path.StartsWith(TEXT("/")))
+		{
+			Issue.PropertyPath.Reset();
+			Issue.SemanticPointer = Path;
+			Issue.Source.JsonPath = Path;
+		}
+        Issue.Severity = Severity.Equals(TEXT("info"), ESearchCase::IgnoreCase) ? UE::UAI::Contract::ESeverity::Info
+            : Severity.Equals(TEXT("warning"), ESearchCase::IgnoreCase) ? UE::UAI::Contract::ESeverity::Warning : UE::UAI::Contract::ESeverity::Error;
+        return Issue;
+    }
 
 	void AddIssue(
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const FString& Severity,
 		const FString& Code,
 		const FString& Path,
 		const FString& Message)
 	{
-		Issues.Add(MakeShared<FJsonValueObject>(MakeIssue(Severity, Code, Path, Message)));
+		Issues.Add(MakeIssue(Severity, Code, Path, Message));
 	}
 
-	int32 CountIssuesBySeverity(
-		const TArray<TSharedPtr<FJsonValue>>& Issues,
-		const FString& Severity)
-	{
-		int32 Count = 0;
-		for (const TSharedPtr<FJsonValue>& IssueValue : Issues)
-		{
-			const TSharedPtr<FJsonObject>* IssueObj = nullptr;
-			FString IssueSeverity;
-			if (IssueValue.IsValid()
-				&& IssueValue->TryGetObject(IssueObj)
-				&& IssueObj
-				&& IssueObj->IsValid()
-				&& (*IssueObj)->TryGetStringField(TEXT("severity"), IssueSeverity)
-				&& IssueSeverity.Equals(Severity, ESearchCase::IgnoreCase))
-			{
-				++Count;
-			}
-		}
-		return Count;
-	}
+	int32 CountIssuesBySeverity(const TArray<UE::UAI::Contract::FDiagnostic>& Issues, const FString& Severity)
+    {
+        const auto Match = Severity.Equals(TEXT("info"), ESearchCase::IgnoreCase) ? UE::UAI::Contract::ESeverity::Info
+            : Severity.Equals(TEXT("warning"), ESearchCase::IgnoreCase) ? UE::UAI::Contract::ESeverity::Warning : UE::UAI::Contract::ESeverity::Error;
+        return Issues.FilterByPredicate([&](const auto& Issue) { return Issue.Severity == Match; }).Num();
+    }
 
 	bool HasIssueWithSeverity(
-		const TArray<TSharedPtr<FJsonValue>>& Issues,
+		const TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const FString& Severity)
 	{
 		return CountIssuesBySeverity(Issues, Severity) > 0;
 	}
 
-	bool HasErrorIssue(const TArray<TSharedPtr<FJsonValue>>& Issues)
+	bool HasErrorIssue(const TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		return HasIssueWithSeverity(Issues, TEXT("error"));
 	}
@@ -202,7 +192,7 @@ namespace UeAgentJsonDiagnostics
 		const TSharedPtr<FJsonObject>& Obj,
 		const FString& Path,
 		const FString& ProfileName,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		if (JsonObjectHasExplicitWriteIntent(Obj))
 		{
@@ -300,7 +290,7 @@ namespace UeAgentJsonDiagnostics
 		const TSharedPtr<FJsonObject>& Obj,
 		const FString& Path,
 		const TArray<FString>& KnownFields,
-		TArray<TSharedPtr<FJsonValue>>& Warnings)
+		TArray<UE::UAI::Contract::FDiagnostic>& Warnings)
 	{
 		if (!Obj.IsValid())
 		{
@@ -324,7 +314,11 @@ namespace UeAgentJsonDiagnostics
 			const FString Message = Suggestion.IsEmpty()
 				? FString::Printf(TEXT("Unknown JSON field '%s' will be ignored."), *Pair.Key)
 				: FString::Printf(TEXT("Unknown JSON field '%s' will be ignored. Did you mean '%s'?"), *Pair.Key, *Suggestion);
-			AddIssue(Warnings, TEXT("warning"), TEXT("json_unknown_field"), Path + TEXT(".") + Pair.Key, Message);
+			const FString FieldPath = Path.StartsWith(TEXT("/"))
+				? (Path == TEXT("/") ? FString() : Path) + TEXT("/")
+					+ Pair.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"))
+				: Path + TEXT(".") + Pair.Key;
+			AddIssue(Warnings, TEXT("warning"), TEXT("json_unknown_field"), FieldPath, Message);
 		}
 	}
 
@@ -338,7 +332,7 @@ namespace UeAgentJsonDiagnostics
 		const FString& FieldName,
 		const FString& Path,
 		FString& OutValue,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const bool bRequired)
 	{
 		const TSharedPtr<FJsonValue>* FieldValue = FindFieldValue(Obj, FieldName);
@@ -370,7 +364,7 @@ namespace UeAgentJsonDiagnostics
 		const FString& FieldName,
 		const FString& Path,
 		bool& bOutValue,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const bool bRequired)
 	{
 		const TSharedPtr<FJsonValue>* FieldValue = FindFieldValue(Obj, FieldName);
@@ -435,38 +429,14 @@ namespace UeAgentJsonDiagnostics
 		return false;
 	}
 
-	bool TryReadVectorObject(const TSharedPtr<FJsonObject>& Obj, FVector& OutValue)
+	bool TryReadVectorValue(const TSharedPtr<FJsonValue>& Value, FVector& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
 	{
-		return TryReadVectorValue(MakeShared<FJsonValueObject>(Obj), OutValue);
+		return UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FVector>::Get(), Value, &OutValue, OutError);
 	}
 
-	bool TryReadRotatorObject(const TSharedPtr<FJsonObject>& Obj, FRotator& OutValue)
+	bool TryReadRotatorValue(const TSharedPtr<FJsonValue>& Value, FRotator& OutValue, UE::UAI::Contract::FDiagnostic& OutError)
 	{
-		return TryReadRotatorValue(MakeShared<FJsonValueObject>(Obj), OutValue);
-	}
-
-	bool TryReadVectorValue(const TSharedPtr<FJsonValue>& Value, FVector& OutValue)
-	{
-		FString Error;
-		return UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FVector>::Get(), Value, &OutValue, Error);
-	}
-
-	bool TryReadVector2DValue(const TSharedPtr<FJsonValue>& Value, FVector2D& OutValue)
-	{
-		FString Error;
-		return UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FVector2D>::Get(), Value, &OutValue, Error);
-	}
-
-	bool TryReadRotatorValue(const TSharedPtr<FJsonValue>& Value, FRotator& OutValue)
-	{
-		FString Error;
-		return UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FRotator>::Get(), Value, &OutValue, Error);
-	}
-
-	bool TryReadLinearColorValue(const TSharedPtr<FJsonValue>& Value, FLinearColor& OutValue)
-	{
-		FString Error;
-		return UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FLinearColor>::Get(), Value, &OutValue, Error);
+		return UeAgentPropertyValueCodec::DecodeStructValue(TBaseStructure<FRotator>::Get(), Value, &OutValue, OutError);
 	}
 
 	bool ReadVectorField(
@@ -474,7 +444,7 @@ namespace UeAgentJsonDiagnostics
 		const FString& FieldName,
 		const FString& Path,
 		FVector& OutValue,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const bool bRequired)
 	{
 		const TSharedPtr<FJsonValue>* FieldValue = FindFieldValue(Obj, FieldName);
@@ -487,17 +457,17 @@ namespace UeAgentJsonDiagnostics
 			return false;
 		}
 
-		if (TryReadVectorValue(*FieldValue, OutValue))
+		UE::UAI::Contract::FDiagnostic Error;
+		if (TryReadVectorValue(*FieldValue, OutValue, Error))
 		{
 			return true;
 		}
 
-		AddIssue(
-			Issues,
-			TEXT("warning"),
-			TEXT("json_field_type_mismatch"),
-			Path,
-			FString::Printf(TEXT("Expected canonical vector value {components:[x,y,z]} but got %s."), *JsonValueTypeToString(*FieldValue)));
+		UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, Path);
+		auto Issue = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("json_field_type_mismatch"), Error,
+			TEXT("input_decode"), TEXT("The vector field could not be decoded."));
+		Issue.Severity = UE::UAI::Contract::ESeverity::Warning;
+		Issues.Add(MoveTemp(Issue));
 		return false;
 	}
 
@@ -506,7 +476,7 @@ namespace UeAgentJsonDiagnostics
 		const FString& FieldName,
 		const FString& Path,
 		FRotator& OutValue,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const bool bRequired)
 	{
 		const TSharedPtr<FJsonValue>* FieldValue = FindFieldValue(Obj, FieldName);
@@ -519,17 +489,17 @@ namespace UeAgentJsonDiagnostics
 			return false;
 		}
 
-		if (TryReadRotatorValue(*FieldValue, OutValue))
+		UE::UAI::Contract::FDiagnostic Error;
+		if (TryReadRotatorValue(*FieldValue, OutValue, Error))
 		{
 			return true;
 		}
 
-		AddIssue(
-			Issues,
-			TEXT("warning"),
-			TEXT("json_field_type_mismatch"),
-			Path,
-			FString::Printf(TEXT("Expected canonical rotator value {components:[pitch,yaw,roll]} but got %s."), *JsonValueTypeToString(*FieldValue)));
+		UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, Path);
+		auto Issue = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("json_field_type_mismatch"), Error,
+			TEXT("input_decode"), TEXT("The rotator field could not be decoded; its components are pitch, yaw and roll in degrees."));
+		Issue.Severity = UE::UAI::Contract::ESeverity::Warning;
+		Issues.Add(MoveTemp(Issue));
 		return false;
 	}
 
@@ -538,7 +508,7 @@ namespace UeAgentJsonDiagnostics
 		const FString& FieldName,
 		const FString& Path,
 		const TArray<TSharedPtr<FJsonValue>>*& OutArray,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const bool bRequired)
 	{
 		OutArray = nullptr;
@@ -570,7 +540,7 @@ namespace UeAgentJsonDiagnostics
 		const TSharedPtr<FJsonValue>& Value,
 		const FString& Path,
 		TSharedPtr<FJsonObject>& OutObject,
-		TArray<TSharedPtr<FJsonValue>>& Issues)
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues)
 	{
 		const TSharedPtr<FJsonObject>* ObjectPtr = nullptr;
 		if (Value.IsValid() && Value->TryGetObject(ObjectPtr) && ObjectPtr && ObjectPtr->IsValid())
@@ -591,8 +561,8 @@ namespace UeAgentJsonDiagnostics
 	bool LoadJsonObjectFile(
 		const FString& FilePath,
 		TSharedPtr<FJsonObject>& OutObj,
-		TArray<TSharedPtr<FJsonValue>>* OutIssues,
-		FString& OutError,
+		TArray<UE::UAI::Contract::FDiagnostic>* OutIssues,
+		UE::UAI::Contract::FDiagnostic& OutError,
 		const bool bOptional)
 	{
 		OutObj.Reset();
@@ -605,22 +575,18 @@ namespace UeAgentJsonDiagnostics
 		FString JsonText;
 		if (!FFileHelper::LoadFileToString(JsonText, *ResolvedFilePath))
 		{
-			OutError = FString::Printf(TEXT("json_file_not_found:%s"), *ResolvedFilePath);
-			if (OutIssues)
-			{
-				AddIssue(*OutIssues, TEXT("error"), TEXT("json_file_not_found"), ResolvedFilePath, TEXT("JSON file does not exist or cannot be read."));
-			}
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("json_file_not_found"), TEXT("JSON file does not exist or cannot be read."), TEXT("input_decode"));
+            OutError.Source.SourceFile = ResolvedFilePath;
+            if (OutIssues) OutIssues->Add(OutError);
 			return false;
 		}
 
 		const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(JsonText);
 		if (!FJsonSerializer::Deserialize(Reader, OutObj) || !OutObj.IsValid())
 		{
-			OutError = FString::Printf(TEXT("json_parse_failed:%s"), *ResolvedFilePath);
-			if (OutIssues)
-			{
-				AddIssue(*OutIssues, TEXT("error"), TEXT("json_parse_failed"), ResolvedFilePath, TEXT("JSON syntax parse failed."));
-			}
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("json_parse_failed"), TEXT("JSON syntax parse failed."), TEXT("input_decode"));
+            OutError.Source.SourceFile = ResolvedFilePath;
+            if (OutIssues) OutIssues->Add(OutError);
 			return false;
 		}
 

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceRouter.h"
 
@@ -64,7 +66,6 @@ namespace UeAgentApplyInputContract
 		FString UnknownFieldPolicy;
 		FString ExternalReferencePolicy;
 		FString OwnedObjectPolicy;
-		FString RuntimeLimitsSource;
 
 		bool operator==(const FReflectionBaseline& Other) const;
 		bool operator!=(const FReflectionBaseline& Other) const { return !(*this == Other); }
@@ -131,9 +132,7 @@ namespace UeAgentApplyInputContract
 
 	struct UEAGENTINTERFACE_API FParseFailure
 	{
-		FString ErrorCode;
-		FString ErrorDetail;
-		FString FieldPath;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FRegistry
@@ -148,7 +147,7 @@ namespace UeAgentApplyInputContract
 		bool RegisterContract(
 			const FContract& Contract,
 			ERegistrationResult& OutResult,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool FindContract(const FString& ContractId, FContract& OutContract) const;
 		TArray<FContract> ListContracts() const;
 		int32 GetContractCount() const;
@@ -163,8 +162,8 @@ namespace UeAgentApplyInputContract
 	UEAGENTINTERFACE_API bool ParseContract(
 		const TSharedPtr<FJsonObject>& Object,
 		FContract& OutContract,
-		FString& OutError);
-	UEAGENTINTERFACE_API bool ValidateContract(const FContract& Contract, FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API bool ValidateContract(const FContract& Contract, UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool ParseOperationInput(
 		const FContract& Contract,
 		const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit& Unit,

@@ -13,41 +13,9 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Factory
 	{
 		const FString Owner = TEXT("factory-external-import-owner");
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FUeAgentFactoryExternalImportCommandError& Error)
-		{
-			const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(
-				TEXT("code"),
-				Error.Code.IsEmpty()
-					? FString(TEXT("factory_import_execution_failed"))
-					: Error.Code);
-			Object->SetStringField(TEXT("subject_id"), Error.SubjectId);
-			Object->SetStringField(TEXT("detail"), Error.Detail);
-			Object->SetStringField(
-				TEXT("terminal_status"),
-				Error.TerminalStatus);
-			Object->SetBoolField(
-				TEXT("mutation_started"),
-				Error.bMutationStarted);
-			Object->SetBoolField(TEXT("retry_safe"), Error.bRetrySafe);
-			FString ErrorJson;
-			FString JsonError;
-			if (!CommandContract::Json::TryCanonicalize(
-					Object,
-					ErrorJson,
-					JsonError))
-			{
-				ErrorJson = TEXT(
-					"{\"code\":\"factory_import_error_serialization_failed\"," 
-					"\"terminal_status\":\"state_unknown\"}");
-			}
-			return FUeAgentCommandResult::Failure(
-				Request,
-				TEXT("{}"),
-				MoveTemp(ErrorJson));
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request,
+            const FUeAgentFactoryExternalImportCommandError& Error)
+        { return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Error); }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -82,7 +50,7 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Factory
 					FUeAgentFactoryExternalImportCommandError Error;
 					Error.Code = TEXT("factory_import_authority_required");
 					Error.SubjectId = Request.GetCommandId();
-					Error.Detail =
+					Error.InternalContext =
 						TEXT("the public factory import route requires uai:operate");
 					return Failure(Request, Error);
 				}
@@ -91,7 +59,7 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Factory
 					FUeAgentFactoryExternalImportCommandError Error;
 					Error.Code = TEXT("factory_import_game_thread_required");
 					Error.SubjectId = Request.GetCommandId();
-					Error.Detail =
+					Error.InternalContext =
 						TEXT("the public ingress must dispatch UE import mechanics on the game thread");
 					return Failure(Request, Error);
 				}
@@ -113,17 +81,16 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Factory
 					return Failure(Request, Error);
 				}
 				TSharedPtr<FJsonObject> Payload;
-				FString JsonError;
+				UE::UAI::Contract::FDiagnostic JsonError;
 				if (!CommandContract::Json::TryParseObject(
 						Response.PayloadJson,
 						Payload,
 						JsonError))
 				{
-					Error.Code = TEXT("factory_import_result_invalid");
+					Error = MoveTemp(JsonError);
 					Error.SubjectId = Request.GetCommandId();
-					Error.Detail = MoveTemp(JsonError);
 					Error.TerminalStatus = TEXT("state_unknown");
-					Error.bMutationStarted = true;
+					Error.MutationStarted = true;
 					Error.bRetrySafe = false;
 					return Failure(Request, Error);
 				}
@@ -133,11 +100,10 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Factory
 						CanonicalPayload,
 						JsonError))
 				{
-					Error.Code = TEXT("factory_import_result_invalid");
+					Error = MoveTemp(JsonError);
 					Error.SubjectId = Request.GetCommandId();
-					Error.Detail = MoveTemp(JsonError);
 					Error.TerminalStatus = TEXT("state_unknown");
-					Error.bMutationStarted = true;
+					Error.MutationStarted = true;
 					Error.bRetrySafe = false;
 					return Failure(Request, Error);
 				}
@@ -155,18 +121,17 @@ namespace UE::UAI::CommandHandlers::ExternalImport::Factory
 	bool TryCreateFactoryExternalImportCommandHandlers(
 		TSharedRef<IUeAgentFactoryExternalImportCommandService> Service,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
 		for (const FUeAgentFactoryExternalImportCommandRoute& Route
 			: GetFactoryExternalImportCommandRoutes())
 		{
-			if (!Route.IsValid())
+			if (!Route.TryValidate(OutError))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("factory_import_route_invalid:")
-					+ Route.CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("factory_import_route_invalid"), OutError, TEXT("handler_factory"));
 				return false;
 			}
 			OutHandlers.Add(MakeShared<FHandler>(Route, Service));

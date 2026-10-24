@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 namespace UE::UAI::Contract
 {
@@ -16,6 +17,7 @@ namespace UE::UAI::Contract
 		int32 GetVersion() const;
 		const FString& GetDescriptorHash() const;
 		bool IsValid() const;
+		const FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 		bool operator==(const FUeAgentDescriptorIdentity& Other) const;
 
@@ -23,6 +25,7 @@ namespace UE::UAI::Contract
 		FString DescriptorId;
 		int32 Version = 0;
 		FString DescriptorHash;
+		FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentContractValue final
@@ -51,11 +54,13 @@ namespace UE::UAI::Contract
 		const FString& GetRequestId() const;
 		const FUeAgentContractValue& GetPayload() const;
 		bool IsValid() const;
+		const FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FUeAgentDescriptorIdentity DescriptorIdentity;
 		FString RequestId;
 		FUeAgentContractValue Payload;
+		FDiagnostic ValidationDiagnostic;
 	};
 
 	template <typename TPayload>
@@ -107,17 +112,25 @@ namespace UE::UAI::Contract
 		FUeAgentQueryResult(
 			FUeAgentDescriptorIdentity InDescriptorIdentity,
 			FString InRequestId,
-			FUeAgentContractValue InValue);
+			FUeAgentContractValue InValue, TArray<FDiagnostic> InDiagnostics = {});
+		FUeAgentQueryResult(FUeAgentDescriptorIdentity InDescriptorIdentity, FString InRequestId, FDiagnostic InDiagnostic);
 
 		const FUeAgentDescriptorIdentity& GetDescriptorIdentity() const;
 		const FString& GetRequestId() const;
 		const FUeAgentContractValue& GetValue() const;
+		const FDiagnostic& GetDiagnostic() const;
+		const TArray<FDiagnostic>& GetDiagnostics() const;
+		bool HasDiagnostic() const;
 		bool IsValid() const;
+		const FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentDescriptorIdentity DescriptorIdentity;
 		FString RequestId;
 		FUeAgentContractValue Value;
+		FDiagnostic Diagnostic;
+		TArray<FDiagnostic> Diagnostics;
+		FDiagnostic ValidationDiagnostic;
 	};
 
 	template <typename TValue>
@@ -177,12 +190,14 @@ namespace UE::UAI::Contract
 		const FString& GetIdempotencyKey() const;
 		const FUeAgentContractValue& GetPayload() const;
 		bool IsValid() const;
+		const FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FUeAgentDescriptorIdentity DescriptorIdentity;
 		FString RequestId;
 		FString IdempotencyKey;
 		FUeAgentContractValue Payload;
+		FDiagnostic ValidationDiagnostic;
 	};
 
 	template <typename TPayload>
@@ -245,17 +260,25 @@ namespace UE::UAI::Contract
 		FUeAgentOperationResult(
 			FUeAgentDescriptorIdentity InDescriptorIdentity,
 			FString InRequestId,
-			FUeAgentContractValue InValue);
+			FUeAgentContractValue InValue, TArray<FDiagnostic> InDiagnostics = {});
+		FUeAgentOperationResult(FUeAgentDescriptorIdentity InDescriptorIdentity, FString InRequestId, FDiagnostic InDiagnostic);
 
 		const FUeAgentDescriptorIdentity& GetDescriptorIdentity() const;
 		const FString& GetRequestId() const;
 		const FUeAgentContractValue& GetValue() const;
+		const FDiagnostic& GetDiagnostic() const;
+		const TArray<FDiagnostic>& GetDiagnostics() const;
+		bool HasDiagnostic() const;
 		bool IsValid() const;
+		const FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentDescriptorIdentity DescriptorIdentity;
 		FString RequestId;
 		FUeAgentContractValue Value;
+		FDiagnostic Diagnostic;
+		TArray<FDiagnostic> Diagnostics;
+		FDiagnostic ValidationDiagnostic;
 	};
 
 	template <typename TValue>
@@ -313,11 +336,13 @@ namespace UE::UAI::Contract
 		const TArray<FString>& GetAuthorityScopes() const;
 		const FString& GetCorrelationId() const;
 		bool IsValid() const;
+		const FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString CallerId;
 		TArray<FString> AuthorityScopes;
 		FString CorrelationId;
+		FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentCancellationSignal

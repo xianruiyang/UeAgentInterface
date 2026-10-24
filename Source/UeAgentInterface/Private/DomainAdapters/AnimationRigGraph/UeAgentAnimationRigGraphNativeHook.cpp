@@ -1,5 +1,9 @@
 #include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphNativeHook.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
+#include "Utilities/UeAgentSkeletonVirtualBones.h"
+
 #include "AnimGraphNode_Root.h"
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimInstance.h"
@@ -12,15 +16,19 @@
 #include "ControlRig.h"
 #include "ControlRigBlueprint.h"
 #include "ControlRigGizmoLibrary.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Materials/Material.h"
+#include "Misc/ScopeExit.h"
 #include "OptimusDeformer.h"
 #include "OptimusNode.h"
 #include "OptimusNodeGraph.h"
+#include "OptimusNodeLink.h"
 #include "QueryOwners/AnimationRigGraph/UeAgentAnimationRigGraphCandidateQuery.h"
 #include "ReferenceSkeleton.h"
 #include "Retargeter/IKRetargetChainMapping.h"
@@ -39,11 +47,57 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
 #include "UObject/UObjectGlobals.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Domains/Rigging/UeAgentIKDomainBackend.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 namespace UE::UAI::DomainAdapters::AnimationRigGraph
 {
 	namespace
 	{
+		void LocateRigInput(FAnimationRigGraphAdapterError& Error, const FString& InputPointer,
+			const FString& RelativePointer = FString())
+		{
+			if (!Error.IsValid() || InputPointer.IsEmpty() || Error.SourceKind == TEXT("native_result")
+				|| Error.SourceKind == TEXT("command_input") || !Error.Source.SourceFile.IsEmpty()
+				|| !Error.Source.JsonPath.IsEmpty() || !Error.SemanticPointer.IsEmpty()) return;
+			Error.Source.JsonPath = RelativePointer.IsEmpty() ? InputPointer
+				: InputPointer == TEXT("/") ? RelativePointer : InputPointer + RelativePointer;
+			Error.SourceKind = TEXT("related_input");
+		}
+
+		FAnimationRigGraphAdapterError RigNativeFailure(const TCHAR* Code, const FString& Reason,
+			const UObject& Target, const FString& SubjectId = FString(),
+			const TSharedPtr<FJsonValue>& Actual = nullptr, const TSharedPtr<FJsonValue>& Expected = nullptr,
+			const FString& Field = FString(), const FString& InputPointer = FString())
+		{
+			auto Error = FAnimationRigGraphAdapterError::Failure(Code, Reason, TEXT("native_graph"));
+			Error.SourceKind = InputPointer.IsEmpty() ? TEXT("native_result") : TEXT("related_input");
+			const UBlueprint* Blueprint = Cast<UBlueprint>(&Target);
+			Error.TargetPath = Blueprint ? UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Blueprint) : Target.GetPathName();
+			Error.SubjectId = SubjectId;
+			Error.ActualValue = Actual;
+			Error.ExpectedValue = Expected;
+			Error.PropertyPath = Field;
+			// Only an explicit authored mapping allows the producer's field to locate input.
+			LocateRigInput(Error, InputPointer, Field);
+			return Error;
+		}
+
+		UeAgentIKAssetOps::FRetargetMappingDiagnosticSource RetargetMappingSource(
+			const FAnimationRigGraphRetargetMappingMutation& Mutation, const UIKRetargeter& Target)
+		{
+			UeAgentIKAssetOps::FRetargetMappingDiagnosticSource Source;
+			Source.TargetPath = Target.GetPathName();
+			Source.Mapping.JsonPath = Mutation.InputPointer;
+			Source.TargetChain = Source.Mapping;
+			Source.SourceChain = Source.Mapping;
+			if (!Mutation.InputPointer.IsEmpty() && Mutation.Intent != EAnimationRigGraphMutationIntent::Delete)
+				Source.SourceChain.JsonPath = Mutation.InputPointer == TEXT("/")
+					? TEXT("/source_chain") : Mutation.InputPointer + TEXT("/source_chain");
+			return Source;
+		}
+
 		FString NewEvidence(const TCHAR* Stage, const UObject& Subject)
 		{
 			return FString::Printf(
@@ -117,7 +171,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				ClassPath(Object), ClassPath(Object), SemanticRole);
 		}
 
-		bool TryControlType(const FString& Ref, ERigControlType& OutType)
+		bool TryControlType(const FString& Ref, ERigControlType& OutType,
+			const UControlRigBlueprint& Blueprint, const FName ControlName, const FString& InputPointer,
+			FAnimationRigGraphAdapterError& OutError)
 		{
 			const TMap<FString, ERigControlType> Types = {
 				{TEXT("Bool"), ERigControlType::Bool},
@@ -134,6 +190,15 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			const ERigControlType* Found = Types.Find(Ref);
 			if (!Found)
 			{
+				TArray<FString> Names;
+				Types.GetKeys(Names);
+				Names.Sort();
+				TArray<TSharedPtr<FJsonValue>> Choices;
+				for (const FString& Name : Names) Choices.Add(MakeShared<FJsonValueString>(Name));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_control_definition_invalid"),
+					FString::Printf(TEXT("Control '%s' uses an unsupported control type."), *ControlName.ToString()), Blueprint,
+					TEXT("rig_element:control:") + ControlName.ToString(), MakeShared<FJsonValueString>(Ref),
+					MakeShared<FJsonValueArray>(MoveTemp(Choices)), TEXT("/control_type_ref"), InputPointer);
 				return false;
 			}
 			OutType = *Found;
@@ -200,6 +265,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 	{
 		if (!TryValidateAnimationRigGraphTopology(Topology, OutError))
 		{
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Subject.GetPathName();
 			return false;
 		}
 		OutRevision = ItemRevision(Topology);
@@ -225,13 +291,26 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		if (AssetKind.IsEmpty() || ObjectName.IsNone()
 			|| AssetClass.HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated))
 		{
-			OutError.Set(TEXT("animation_rig_graph_asset_create_invalid"));
+            const bool bKindMissing = AssetKind.IsEmpty();
+            const bool bNameMissing = ObjectName.IsNone();
+            OutError = RigNativeFailure(TEXT("animation_rig_graph_asset_create_invalid"),
+                bKindMissing ? TEXT("Asset creation requires a non-empty asset kind.")
+                    : bNameMissing ? TEXT("Asset creation requires an object name.")
+                    : AssetClass.HasAnyClassFlags(CLASS_Abstract) ? TEXT("The requested asset class is abstract.")
+                    : TEXT("The requested asset class is deprecated."),
+                Outer, ObjectName.ToString(),
+                MakeShared<FJsonValueString>(bKindMissing ? AssetKind : bNameMissing ? ObjectName.ToString() : AssetClass.GetPathName()),
+                MakeShared<FJsonValueString>(bKindMissing ? TEXT("non-empty asset kind")
+                    : bNameMissing ? TEXT("non-None object name") : TEXT("concrete, non-deprecated class")),
+                bKindMissing ? TEXT("asset_kind") : bNameMissing ? TEXT("object_name") : TEXT("class"));
 			return false;
 		}
 		OutObject = NewObject<UObject>(&Outer, &AssetClass, ObjectName, RF_Transactional);
 		if (!OutObject)
 		{
-			OutError.Set(TEXT("animation_rig_graph_asset_create_failed"));
+            OutError = RigNativeFailure(TEXT("animation_rig_graph_asset_create_failed"),
+                TEXT("Unreal did not create the requested owned asset object."), Outer, ObjectName.ToString(),
+                nullptr, MakeShared<FJsonValueString>(AssetClass.GetPathName()), TEXT("created_object"));
 			return false;
 		}
 		return TryCaptureOwnedAssetObject(
@@ -258,7 +337,32 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			|| Object.GetOuter() != &Outer || Object.GetFName() != ObjectName
 			|| Object.GetClass() != &AssetClass)
 		{
-			OutError.Set(TEXT("animation_rig_graph_asset_identity_mismatch"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_asset_identity_mismatch"),
+				AssetKind.IsEmpty() ? TEXT("The captured animation asset kind is empty.")
+					: ObjectName.IsNone() ? TEXT("The expected animation asset name is empty.")
+					: Object.GetOuter() != &Outer ? TEXT("The captured animation asset belongs to a different outer object than requested.")
+					: Object.GetFName() != ObjectName ? TEXT("The captured animation asset has a different name than requested.")
+					: TEXT("The captured animation asset has a different native class than requested."), Object);
+			if (AssetKind.IsEmpty() || ObjectName.IsNone())
+			{
+				OutError.PropertyPath = AssetKind.IsEmpty() ? TEXT("/asset_kind") : TEXT("/object_name");
+				OutError.ActualValue = MakeShared<FJsonValueString>(FString());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty value"));
+			}
+			else if (Object.GetOuter() != &Outer)
+			{
+				OutError.PropertyPath = TEXT("/outer");
+				OutError.ActualValuePresent = Object.GetOuter() != nullptr;
+				if (Object.GetOuter()) OutError.ActualValue = MakeShared<FJsonValueString>(Object.GetOuter()->GetPathName());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(Outer.GetPathName());
+			}
+			else
+			{
+				const bool bNameMismatch = Object.GetFName() != ObjectName;
+				OutError.PropertyPath = bNameMismatch ? TEXT("/object_name") : TEXT("/native_class");
+				OutError.ActualValue = MakeShared<FJsonValueString>(bNameMismatch ? Object.GetName() : Object.GetClass()->GetPathName());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(bNameMismatch ? ObjectName.ToString() : AssetClass.GetPathName());
+			}
 			return false;
 		}
 		Object.Modify();
@@ -285,12 +389,16 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FAnimationRigGraphTopology& OutTopology,
 		FString& OutRevision,
 		FString& OutEvidenceId,
-		FAnimationRigGraphAdapterError& OutError) const
+		FAnimationRigGraphAdapterError& OutError,
+		const FString& GraphNameInputPointer) const
 	{
 		OutError.Reset();
 		if (GraphName.IsNone())
 		{
-			OutError.Set(TEXT("animation_rig_graph_graph_name_missing"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_graph_name_missing"),
+				TEXT("The animation graph name must not resolve to None."), Blueprint, FString(),
+				MakeShared<FJsonValueString>(GraphName.ToString()), MakeShared<FJsonValueString>(TEXT("a non-None graph name")),
+				FString(), GraphNameInputPointer);
 			return false;
 		}
 		Blueprint.Modify();
@@ -314,7 +422,10 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				UAnimationGraph::StaticClass(), UAnimationGraphSchema::StaticClass());
 			if (!Graph)
 			{
-				OutError.Set(TEXT("animation_rig_graph_anim_graph_create_failed"));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_anim_graph_create_failed"),
+					FString::Printf(TEXT("Unreal could not create animation graph '%s'."), *GraphName.ToString()), Blueprint,
+					FString(), MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(UAnimationGraph::StaticClass()->GetPathName()),
+					FString(), GraphNameInputPointer);
 				return false;
 			}
 			FBlueprintEditorUtils::AddDomainSpecificGraph(&Blueprint, Graph);
@@ -328,7 +439,10 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		}
 		if (Roots.IsEmpty())
 		{
-			OutError.Set(TEXT("animation_rig_graph_anim_root_create_failed"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_anim_root_create_failed"),
+				FString::Printf(TEXT("Animation graph '%s' has no root node after default node creation."), *GraphName.ToString()),
+				Blueprint, FString(), MakeShared<FJsonValueNumber>(0),
+				MakeShared<FJsonValueString>(TEXT("at least one animation root node")), FString(), GraphNameInputPointer);
 			return false;
 		}
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(&Blueprint);
@@ -340,7 +454,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			bCompileComplete, CompilerLog.NumErrors, OutApplyReceipt, OutBarrierReceipt);
 		if (!bCompileComplete)
 		{
-			OutError.Set(TEXT("animation_rig_graph_compile_incomplete"), LexToString(CompilerLog.NumErrors));
+			OutError = UeAgentAuthoringDiagnostics::MakeCompileFailure(TEXT("animation_rig_graph_compile_incomplete"),
+				UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint), CompilerLog, &Blueprint);
+			OutError.SourceKind = TEXT("native_result");
 			return false;
 		}
 
@@ -382,12 +498,18 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		OutError.Reset();
 		if (AxisName.IsNone())
 		{
-			OutError.Set(TEXT("animation_rig_graph_blend_axis_missing"));
+            OutError = RigNativeFailure(TEXT("animation_rig_graph_blend_axis_missing"),
+                TEXT("A BlendSpace axis requires a non-None name."), BlendSpace, TEXT("blend_axis:0"),
+                MakeShared<FJsonValueString>(AxisName.ToString()), MakeShared<FJsonValueString>(TEXT("non-None name")), TEXT("axis_name"));
 			return false;
 		}
 		if (Sequence.GetSkeleton() != &Skeleton)
 		{
-			OutError.Set(TEXT("animation_rig_graph_blend_sample_skeleton_mismatch"));
+            OutError = RigNativeFailure(TEXT("animation_rig_graph_blend_sample_skeleton_mismatch"),
+                TEXT("The sample sequence uses a different skeleton than the requested BlendSpace skeleton."),
+                BlendSpace, Sequence.GetPathName(),
+                Sequence.GetSkeleton() ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Sequence.GetSkeleton()->GetPathName())) : nullptr,
+                MakeShared<FJsonValueString>(Skeleton.GetPathName()), TEXT("sample.skeleton"));
 			return false;
 		}
 		BlendSpace.Modify();
@@ -399,7 +521,10 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		const int32 SampleIndex = BlendSpace.AddSample(&Sequence, SamplePosition);
 		if (SampleIndex == INDEX_NONE)
 		{
-			OutError.Set(TEXT("animation_rig_graph_blend_sample_add_failed"));
+            OutError = RigNativeFailure(TEXT("animation_rig_graph_blend_sample_add_failed"),
+                FString::Printf(TEXT("Unreal rejected sample sequence '%s' at position (%.17g, %.17g, %.17g)."),
+                    *Sequence.GetPathName(), SamplePosition.X, SamplePosition.Y, SamplePosition.Z), BlendSpace, Sequence.GetPathName(),
+                MakeShared<FJsonValueNumber>(SampleIndex), MakeShared<FJsonValueString>(TEXT("valid sample index")), TEXT("sample_index"));
 			return false;
 		}
 		BlendSpace.ValidateSampleData();
@@ -438,7 +563,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		OutError.Reset();
 		if (Axes.IsEmpty())
 		{
-			OutError.Set(TEXT("animation_rig_graph_blend_axes_missing"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_blend_axes_missing"),
+				TEXT("The BlendSpace mutation contains no axes."), BlendSpace, FString(),
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one axis")));
 			return false;
 		}
 		BlendSpace.Modify();
@@ -446,18 +573,35 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		TSet<int32> AxisIndices;
 		for (const FAnimationRigGraphBlendAxisMutation& AxisMutation : Axes)
 		{
-			if (AxisMutation.AxisIndex < 0 || AxisMutation.AxisIndex > 1
-				|| AxisMutation.AxisName.IsNone()
-				|| !FMath::IsFinite(AxisMutation.Minimum)
-				|| !FMath::IsFinite(AxisMutation.Maximum)
-				|| AxisMutation.Maximum <= AxisMutation.Minimum
-				|| AxisMutation.GridDivisions < 1
-				|| AxisIndices.Contains(AxisMutation.AxisIndex))
+			auto InvalidAxis = [&](const TCHAR* Field, const FString& Reason,
+				const TSharedPtr<FJsonValue>& Actual, const FString& Expected)
 			{
-				OutError.Set(TEXT("animation_rig_graph_blend_axis_invalid"),
-					LexToString(AxisMutation.AxisIndex));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_blend_axis_invalid"), Reason, BlendSpace,
+					FString(), Actual, MakeShared<FJsonValueString>(Expected), Field, AxisMutation.InputPointer);
 				return false;
-			}
+			};
+			if (AxisMutation.AxisIndex < 0 || AxisMutation.AxisIndex > 1)
+				return InvalidAxis(TEXT("/axis_index"), TEXT("The BlendSpace axis index must be 0 or 1."),
+					MakeShared<FJsonValueNumber>(AxisMutation.AxisIndex), TEXT("0 or 1"));
+			if (AxisMutation.AxisName.IsNone())
+				return InvalidAxis(TEXT("/axis_name"), TEXT("The BlendSpace axis name must not resolve to None."),
+					MakeShared<FJsonValueString>(AxisMutation.AxisName.ToString()), TEXT("a non-None axis name"));
+			if (!FMath::IsFinite(AxisMutation.Minimum))
+				return InvalidAxis(TEXT("/minimum"), TEXT("The BlendSpace axis minimum must be finite."),
+					MakeShared<FJsonValueString>(LexToString(AxisMutation.Minimum)), TEXT("a finite number"));
+			if (!FMath::IsFinite(AxisMutation.Maximum))
+				return InvalidAxis(TEXT("/maximum"), TEXT("The BlendSpace axis maximum must be finite."),
+					MakeShared<FJsonValueString>(LexToString(AxisMutation.Maximum)), TEXT("a finite number"));
+			if (AxisMutation.Maximum <= AxisMutation.Minimum)
+				return InvalidAxis(TEXT("/maximum"), TEXT("The BlendSpace axis maximum must exceed its minimum."),
+					MakeShared<FJsonValueNumber>(AxisMutation.Maximum),
+					TEXT("greater than ") + LexToString(AxisMutation.Minimum));
+			if (AxisMutation.GridDivisions < 1)
+				return InvalidAxis(TEXT("/grid_divisions"), TEXT("The BlendSpace axis must have at least one grid division."),
+					MakeShared<FJsonValueNumber>(AxisMutation.GridDivisions), TEXT("an integer greater than or equal to 1"));
+			if (AxisIndices.Contains(AxisMutation.AxisIndex))
+				return InvalidAxis(TEXT("/axis_index"), TEXT("The BlendSpace mutation specifies the same axis more than once."),
+					MakeShared<FJsonValueNumber>(AxisMutation.AxisIndex), TEXT("a distinct axis index"));
 			AxisIndices.Add(AxisMutation.AxisIndex);
 			FBlendParameter& Axis = const_cast<FBlendParameter&>(
 				BlendSpace.GetBlendParameter(AxisMutation.AxisIndex));
@@ -469,13 +613,32 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 
 		for (const FAnimationRigGraphBlendSampleMutation& SampleMutation : Samples)
 		{
+			const FString AnimationRef = SampleMutation.Animation ? SampleMutation.Animation->GetPathName() : SampleMutation.AnimationRef;
 			if (!SampleMutation.Animation
 				|| SampleMutation.Animation->GetSkeleton() != &Skeleton)
 			{
-				OutError.Set(TEXT(
-					"animation_rig_graph_blend_sample_skeleton_mismatch"));
+				TSharedPtr<FJsonValue> Actual = MakeShared<FJsonValueNull>();
+				if (!SampleMutation.Animation) Actual = MakeShared<FJsonValueString>(AnimationRef);
+				else if (SampleMutation.Animation->GetSkeleton()) Actual = MakeShared<FJsonValueString>(SampleMutation.Animation->GetSkeleton()->GetPathName());
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_blend_sample_skeleton_mismatch"),
+					!SampleMutation.Animation ? FString::Printf(TEXT("BlendSpace sample animation '%s' could not be loaded as an AnimSequence."), *AnimationRef)
+						: FString::Printf(TEXT("BlendSpace sample animation '%s' uses a different skeleton."), *AnimationRef),
+					BlendSpace, FString(), Actual,
+					MakeShared<FJsonValueString>(!SampleMutation.Animation ? UAnimSequence::StaticClass()->GetPathName() : Skeleton.GetPathName()),
+					TEXT("/animation_ref"), SampleMutation.InputPointer);
 				return false;
 			}
+			auto SampleFailure = [&](const TCHAR* Code, const FString& Reason)
+			{
+				auto Actual = MakeShared<FJsonObject>();
+				Actual->SetStringField(TEXT("animation_ref"), AnimationRef);
+				TArray<TSharedPtr<FJsonValue>> Coordinates;
+				for (int32 Index = 0; Index < 3; ++Index) Coordinates.Add(MakeShared<FJsonValueNumber>(SampleMutation.Coordinates[Index]));
+				Actual->SetArrayField(TEXT("coordinates"), Coordinates);
+				OutError = RigNativeFailure(Code, Reason, BlendSpace, FString(), MakeShared<FJsonValueObject>(Actual),
+					nullptr, FString(), SampleMutation.InputPointer);
+				return false;
+			};
 			int32 ExistingIndex = INDEX_NONE;
 			const TArray<FBlendSample>& ExistingSamples = BlendSpace.GetBlendSamples();
 			for (int32 Index = 0; Index < ExistingSamples.Num(); ++Index)
@@ -496,15 +659,16 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 						SampleMutation.Animation,
 						SampleMutation.Coordinates) == INDEX_NONE)
 				{
-					OutError.Set(TEXT("animation_rig_graph_blend_sample_create_failed"));
-					return false;
+					return SampleFailure(TEXT("animation_rig_graph_blend_sample_create_failed"), ExistingIndex != INDEX_NONE
+						? TEXT("A BlendSpace sample with this animation and coordinates already exists.")
+						: TEXT("Unreal rejected adding the BlendSpace sample with this animation and coordinates."));
 				}
 				break;
 			case EAnimationRigGraphMutationIntent::Update:
 				if (ExistingIndex == INDEX_NONE)
 				{
-					OutError.Set(TEXT("animation_rig_graph_blend_sample_missing"));
-					return false;
+					return SampleFailure(TEXT("animation_rig_graph_blend_sample_missing"),
+						TEXT("No BlendSpace sample with this animation and coordinates exists to update."));
 				}
 				break;
 			case EAnimationRigGraphMutationIntent::Replace:
@@ -513,16 +677,17 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 						SampleMutation.Animation,
 						SampleMutation.Coordinates) == INDEX_NONE)
 				{
-					OutError.Set(TEXT("animation_rig_graph_blend_sample_replace_failed"));
-					return false;
+					return SampleFailure(TEXT("animation_rig_graph_blend_sample_replace_failed"),
+						TEXT("No matching BlendSpace sample exists, and Unreal rejected adding its replacement."));
 				}
 				break;
 			case EAnimationRigGraphMutationIntent::Delete:
 				if (ExistingIndex == INDEX_NONE
 					|| !BlendSpace.DeleteSample(ExistingIndex))
 				{
-					OutError.Set(TEXT("animation_rig_graph_blend_sample_delete_failed"));
-					return false;
+					return SampleFailure(TEXT("animation_rig_graph_blend_sample_delete_failed"), ExistingIndex == INDEX_NONE
+						? TEXT("No BlendSpace sample with this animation and coordinates exists to delete.")
+						: TEXT("Unreal rejected deleting the matching BlendSpace sample."));
 				}
 				break;
 			}
@@ -581,7 +746,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		OutError.Reset();
 		if (Mutations.IsEmpty())
 		{
-			OutError.Set(TEXT("animation_rig_graph_skeleton_definition_missing"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_skeleton_definition_missing"),
+				TEXT("Skeleton definition apply requires at least one bone mutation."), Skeleton, FString(),
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one bone mutation")));
 			return false;
 		}
 		Skeleton.Modify();
@@ -590,7 +757,10 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		{
 			if (Mutation.BoneName.IsNone())
 			{
-				OutError.Set(TEXT("animation_rig_graph_skeleton_bone_missing"));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_skeleton_bone_missing"),
+					TEXT("The bone name resolves to None."), Skeleton, FString(),
+					MakeShared<FJsonValueString>(Mutation.BoneName.ToString()), MakeShared<FJsonValueString>(TEXT("non-None bone name")),
+					TEXT("/bone_name"), Mutation.InputPointer);
 				return false;
 			}
 			const int32 BoneIndex = Modifier.FindBoneIndex(Mutation.BoneName);
@@ -598,8 +768,11 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				? INDEX_NONE : Modifier.FindBoneIndex(Mutation.ParentBone);
 			if (!Mutation.ParentBone.IsNone() && ParentIndex == INDEX_NONE)
 			{
-				OutError.Set(TEXT("animation_rig_graph_skeleton_parent_missing"),
-					Mutation.ParentBone.ToString());
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_skeleton_parent_missing"),
+					FString::Printf(TEXT("Parent bone '%s' for bone '%s' does not exist in the reference skeleton."),
+						*Mutation.ParentBone.ToString(), *Mutation.BoneName.ToString()), Skeleton, FString(),
+					MakeShared<FJsonValueString>(Mutation.ParentBone.ToString()), MakeShared<FJsonValueString>(TEXT("existing parent bone")),
+					Mutation.bHasParentBoneInput ? TEXT("/parent_bone") : FString(), Mutation.InputPointer);
 				return false;
 			}
 			switch (Mutation.Intent)
@@ -607,8 +780,10 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			case EAnimationRigGraphMutationIntent::Create:
 				if (BoneIndex != INDEX_NONE)
 				{
-					OutError.Set(TEXT("animation_rig_graph_skeleton_bone_exists"),
-						Mutation.BoneName.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_skeleton_bone_exists"),
+						FString::Printf(TEXT("Cannot create bone '%s' because it already exists."), *Mutation.BoneName.ToString()), Skeleton, FString(),
+						MakeShared<FJsonValueString>(Mutation.BoneName.ToString()), MakeShared<FJsonValueString>(TEXT("new bone name")),
+						TEXT("/bone_name"), Mutation.InputPointer);
 					return false;
 				}
 				Modifier.Add(FMeshBoneInfo(
@@ -618,8 +793,10 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			case EAnimationRigGraphMutationIntent::Delete:
 				if (BoneIndex == INDEX_NONE)
 				{
-					OutError.Set(TEXT("animation_rig_graph_skeleton_bone_missing"),
-						Mutation.BoneName.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_skeleton_bone_missing"),
+						FString::Printf(TEXT("Cannot delete bone '%s' because it does not exist."), *Mutation.BoneName.ToString()), Skeleton, FString(),
+						MakeShared<FJsonValueString>(Mutation.BoneName.ToString()), MakeShared<FJsonValueString>(TEXT("existing bone name")),
+						TEXT("/bone_name"), Mutation.InputPointer);
 					return false;
 				}
 				Modifier.Remove(Mutation.BoneName, false);
@@ -630,8 +807,24 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 					|| Skeleton.GetReferenceSkeleton().GetParentIndex(BoneIndex)
 						!= ParentIndex)
 				{
-					OutError.Set(TEXT("animation_rig_graph_skeleton_reparent_unsupported"),
-						Mutation.BoneName.ToString());
+					if (BoneIndex == INDEX_NONE)
+					{
+						OutError = RigNativeFailure(TEXT("animation_rig_graph_skeleton_reparent_unsupported"),
+							FString::Printf(TEXT("Cannot update bone '%s' because it does not exist."), *Mutation.BoneName.ToString()), Skeleton, FString(),
+							MakeShared<FJsonValueString>(Mutation.BoneName.ToString()), MakeShared<FJsonValueString>(TEXT("existing bone name")),
+							TEXT("/bone_name"), Mutation.InputPointer);
+					}
+					else
+					{
+						const int32 ExistingParent = Skeleton.GetReferenceSkeleton().GetParentIndex(BoneIndex);
+						const FString ExistingParentName = ExistingParent == INDEX_NONE ? FString()
+							: Skeleton.GetReferenceSkeleton().GetBoneName(ExistingParent).ToString();
+						OutError = RigNativeFailure(TEXT("animation_rig_graph_skeleton_reparent_unsupported"),
+							FString::Printf(TEXT("Changing the parent of bone '%s' is not supported; preserve its current parent."), *Mutation.BoneName.ToString()), Skeleton, FString(),
+							MakeShared<FJsonValueString>(Mutation.ParentBone.IsNone() ? FString() : Mutation.ParentBone.ToString()),
+							MakeShared<FJsonValueString>(ExistingParentName),
+							Mutation.bHasParentBoneInput ? TEXT("/parent_bone") : FString(), Mutation.InputPointer);
+					}
 					return false;
 				}
 				break;
@@ -677,7 +870,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		OutError.Reset();
 		if (Mutations.IsEmpty())
 		{
-			OutError.Set(TEXT("animation_rig_graph_compatibility_missing"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_compatibility_missing"),
+				TEXT("Skeleton compatibility apply requires at least one mutation."), Skeleton, FString(),
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one compatibility mutation")));
 			return false;
 		}
 		Skeleton.Modify();
@@ -687,7 +882,12 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			if (!Mutation.CompatibleSkeleton
 				|| Mutation.CompatibleSkeleton == &Skeleton)
 			{
-				OutError.Set(TEXT("animation_rig_graph_compatible_skeleton_invalid"));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_compatible_skeleton_invalid"),
+					!Mutation.CompatibleSkeleton ? TEXT("The compatible skeleton object is unavailable.")
+						: TEXT("A skeleton cannot list itself as a compatible skeleton."), Skeleton, FString(), nullptr,
+					MakeShared<FJsonValueString>(TEXT("a different, loaded Skeleton asset")), FString(), Mutation.InputPointer);
+				if (Mutation.CompatibleSkeleton) OutError.ActualValue = MakeShared<FJsonValueString>(Mutation.CompatibleSkeleton->GetPathName());
+				else OutError.ActualValue = MakeShared<FJsonValueNull>();
 				return false;
 			}
 			if (Mutation.Intent == EAnimationRigGraphMutationIntent::Delete)
@@ -729,7 +929,16 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		if (Mutation.Name.IsNone()
 			|| Mutation.SourceBone.IsNone() || Mutation.TargetBone.IsNone())
 		{
-			OutError.Set(TEXT("animation_rig_graph_virtual_bone_invalid"));
+			const FString Field = Mutation.Name.IsNone() ? FString()
+				: Mutation.SourceBone.IsNone() ? TEXT("/source_bone") : TEXT("/target_bone");
+			const FName InvalidName = Mutation.Name.IsNone() ? Mutation.Name
+				: Mutation.SourceBone.IsNone() ? Mutation.SourceBone : Mutation.TargetBone;
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_virtual_bone_invalid"),
+				Mutation.Name.IsNone() ? TEXT("The virtual bone name resolves to None.")
+					: Mutation.SourceBone.IsNone() ? TEXT("The virtual bone source bone resolves to None.")
+					: TEXT("The virtual bone target bone resolves to None."), Skeleton, FString(),
+				MakeShared<FJsonValueString>(InvalidName.ToString()), MakeShared<FJsonValueString>(TEXT("non-None bone name")),
+				Field, Mutation.InputPointer);
 			return false;
 		}
 		Skeleton.Modify();
@@ -742,17 +951,32 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		{
 			if (!bExists)
 			{
-				OutError.Set(TEXT("animation_rig_graph_virtual_bone_missing"));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_virtual_bone_missing"),
+					FString::Printf(TEXT("Cannot delete virtual bone '%s' because it does not exist."), *Mutation.Name.ToString()), Skeleton, FString(),
+					MakeShared<FJsonValueString>(Mutation.Name.ToString()), MakeShared<FJsonValueString>(TEXT("existing virtual bone name")),
+					FString(), Mutation.InputPointer);
 				return false;
 			}
 			Skeleton.RemoveVirtualBones({Mutation.Name});
 		}
-		else if (!bExists
-			&& !Skeleton.AddNewNamedVirtualBone(
-				Mutation.SourceBone, Mutation.TargetBone, Mutation.Name))
+		else if (!bExists)
 		{
-			OutError.Set(TEXT("animation_rig_graph_virtual_bone_add_failed"));
-			return false;
+			FName Name = Mutation.Name;
+			UE::UAI::Contract::FDiagnostic Error; FString Field;
+			UeAgentSkeletonVirtualBones::FDiagnosticSource DiagnosticSource;
+			DiagnosticSource.TargetPath = Skeleton.GetPathName();
+			DiagnosticSource.Operation.JsonPath = Mutation.InputPointer;
+			DiagnosticSource.Name = DiagnosticSource.Operation;
+			if (!Mutation.InputPointer.IsEmpty())
+			{
+				const FString Prefix = Mutation.InputPointer == TEXT("/") ? FString() : Mutation.InputPointer;
+				DiagnosticSource.TargetBone.JsonPath = Prefix + TEXT("/target_bone");
+			}
+			if (!UeAgentSkeletonVirtualBones::TryAdd(Skeleton, Mutation.SourceBone, Mutation.TargetBone, Name, Error, Field, DiagnosticSource))
+			{
+				OutError = Error;
+				return false;
+			}
 		}
 		SetReceipts(Skeleton, EAnimationRigGraphBarrierKind::Refresh,
 			true, 0, OutApplyReceipt, OutBarrierReceipt);
@@ -785,7 +1009,11 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		OutError.Reset();
 		if (SourceBone.IsNone() || TargetBone.IsNone() || VirtualBoneName.IsNone())
 		{
-			OutError.Set(TEXT("animation_rig_graph_skeleton_key_missing"));
+            const TCHAR* Field = SourceBone.IsNone() ? TEXT("source_bone")
+                : TargetBone.IsNone() ? TEXT("target_bone") : TEXT("virtual_bone_name");
+            OutError = RigNativeFailure(TEXT("animation_rig_graph_skeleton_key_missing"),
+                FString::Printf(TEXT("Skeleton configuration requires a non-None %s."), Field), Skeleton, VirtualBoneName.ToString(),
+                MakeShared<FJsonValueString>(FName().ToString()), MakeShared<FJsonValueString>(TEXT("non-None bone name")), Field);
 			return false;
 		}
 		Skeleton.Modify();
@@ -805,11 +1033,15 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		Skeleton.AddCompatibleSkeleton(&CompatibleSkeleton);
 		const bool bVirtualBoneExists = Skeleton.GetVirtualBones().ContainsByPredicate(
 			[VirtualBoneName](const FVirtualBone& Bone) { return Bone.VirtualBoneName == VirtualBoneName; });
-		if (!bVirtualBoneExists
-			&& !Skeleton.AddNewNamedVirtualBone(SourceBone, TargetBone, VirtualBoneName))
+		if (!bVirtualBoneExists)
 		{
-			OutError.Set(TEXT("animation_rig_graph_virtual_bone_add_failed"));
-			return false;
+			FName Name = VirtualBoneName;
+			UE::UAI::Contract::FDiagnostic Error; FString Field;
+			if (!UeAgentSkeletonVirtualBones::TryAdd(Skeleton, SourceBone, TargetBone, Name, Error, Field))
+			{
+				OutError = Error;
+				return false;
+			}
 		}
 		SetReceipts(Skeleton, EAnimationRigGraphBarrierKind::Refresh, true, 0,
 			OutApplyReceipt, OutBarrierReceipt);
@@ -853,7 +1085,23 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		URigHierarchyController* Controller = Blueprint.GetHierarchyController();
 		if (!Hierarchy || !Controller || ParentBoneName.IsNone() || ControlName.IsNone())
 		{
-			OutError.Set(TEXT("animation_rig_graph_control_rig_controller_unavailable"));
+            const bool bNativeMissing = !Hierarchy || !Controller;
+            const TCHAR* Field = !Hierarchy ? TEXT("hierarchy_available") : !Controller ? TEXT("controller_available")
+                : ParentBoneName.IsNone() ? TEXT("parent_bone_name") : TEXT("control_name");
+            OutError = RigNativeFailure(TEXT("animation_rig_graph_control_rig_controller_unavailable"),
+                bNativeMissing ? TEXT("The Control Rig hierarchy or controller required for compilation is unavailable.")
+                    : FString::Printf(TEXT("Control Rig setup requires a non-None %s."), Field),
+                Blueprint, ControlName.ToString(), nullptr, nullptr, Field);
+            if (bNativeMissing)
+            {
+                OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+                OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+            }
+            else
+            {
+                OutError.ActualValue = MakeShared<FJsonValueString>(FName().ToString());
+                OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-None name"));
+            }
 			return false;
 		}
 		Blueprint.Modify();
@@ -883,7 +1131,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			bCompileComplete, CompilerLog.NumErrors, OutApplyReceipt, OutBarrierReceipt);
 		if (!bCompileComplete)
 		{
-			OutError.Set(TEXT("animation_rig_graph_compile_incomplete"), LexToString(CompilerLog.NumErrors));
+			OutError = UeAgentAuthoringDiagnostics::MakeCompileFailure(TEXT("animation_rig_graph_compile_incomplete"),
+				UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint), CompilerLog, &Blueprint);
 			return false;
 		}
 		const FString BoneItemKey = TEXT("rig_element:bone:") + ParentBoneName.ToString();
@@ -919,21 +1168,27 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		if (!Hierarchy || !Controller
 			|| (Mutations.IsEmpty() && UnitMutations.IsEmpty()))
 		{
-			OutError.Set(TEXT("animation_rig_graph_control_rig_controller_unavailable"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_control_rig_controller_unavailable"),
+				!Hierarchy ? TEXT("The Control Rig hierarchy is unavailable.")
+					: !Controller ? TEXT("The Control Rig hierarchy controller is unavailable.")
+					: TEXT("No control or RigVM node mutations were supplied."), Blueprint);
 			return false;
 		}
 		Blueprint.Modify();
 		Blueprint.ParentClass = UControlRig::StaticClass();
 		for (const FAnimationRigGraphControlMutation& Mutation : Mutations)
 		{
+			ON_SCOPE_EXIT { LocateRigInput(OutError, Mutation.InputPointer); };
+			const FString Subject = TEXT("rig_element:control:") + Mutation.Name.ToString();
 			const FRigElementKey ControlKey(Mutation.Name, ERigElementType::Control);
 			const bool bExists = Hierarchy->Contains(ControlKey);
 			if (Mutation.Intent == EAnimationRigGraphMutationIntent::Delete)
 			{
 				if (!bExists || !Controller->RemoveElement(ControlKey, false, false))
 				{
-					OutError.Set(TEXT("animation_rig_graph_control_remove_failed"),
-						Mutation.Name.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_control_remove_failed"),
+						FString::Printf(TEXT("Control '%s' %s."), *Mutation.Name.ToString(), bExists
+							? TEXT("could not be removed by the hierarchy controller") : TEXT("does not exist and cannot be removed")), Blueprint, Subject);
 					return false;
 				}
 				continue;
@@ -941,20 +1196,26 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			ERigControlType ControlType = ERigControlType::Float;
 			const FRigElementKey ParentKey(Mutation.ParentBone, ERigElementType::Bone);
 			if (Mutation.Name.IsNone() || Mutation.ParentBone.IsNone()
-				|| !Hierarchy->Contains(ParentKey)
-				|| !TryControlType(Mutation.ControlTypeRef, ControlType))
+				|| !Hierarchy->Contains(ParentKey))
 			{
-				OutError.Set(TEXT("animation_rig_graph_control_definition_invalid"),
-					Mutation.Name.ToString());
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_control_definition_invalid"),
+					Mutation.Name.IsNone() ? TEXT("A control mutation has no control name.")
+						: Mutation.ParentBone.IsNone() ? FString::Printf(TEXT("Control '%s' has no parent bone name."), *Mutation.Name.ToString())
+						: FString::Printf(TEXT("Parent bone '%s' for control '%s' does not exist in the hierarchy."),
+							*Mutation.ParentBone.ToString(), *Mutation.Name.ToString()), Blueprint, Subject,
+					MakeShared<FJsonValueString>(Mutation.Name.IsNone() ? Mutation.Name.ToString() : Mutation.ParentBone.ToString()),
+					MakeShared<FJsonValueString>(Mutation.Name.IsNone() ? TEXT("non-empty control name") : TEXT("existing parent bone")),
+					Mutation.Name.IsNone() ? FString() : TEXT("/parent_native_key"), Mutation.InputPointer);
 				return false;
 			}
+			if (!TryControlType(Mutation.ControlTypeRef, ControlType, Blueprint, Mutation.Name, Mutation.InputPointer, OutError)) return false;
 			if (bExists
 				&& (Mutation.Intent == EAnimationRigGraphMutationIntent::Update
 					|| Mutation.Intent == EAnimationRigGraphMutationIntent::Replace)
 				&& !Controller->RemoveElement(ControlKey, false, false))
 			{
-				OutError.Set(TEXT("animation_rig_graph_control_replace_failed"),
-					Mutation.Name.ToString());
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_control_replace_failed"),
+					FString::Printf(TEXT("The hierarchy controller could not remove control '%s' before replacing it."), *Mutation.Name.ToString()), Blueprint, Subject);
 				return false;
 			}
 			FRigControlSettings Settings;
@@ -965,8 +1226,15 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				FTransform::Identity, FTransform::Identity, false, false);
 			if (Added != ControlKey)
 			{
-				OutError.Set(TEXT("animation_rig_graph_control_add_failed"),
-					Mutation.Name.ToString());
+				const auto ActualKey = MakeShared<FJsonObject>();
+				ActualKey->SetStringField(TEXT("name"), Added.Name.ToString());
+				ActualKey->SetNumberField(TEXT("element_type"), static_cast<int32>(Added.Type));
+				const auto ExpectedKey = MakeShared<FJsonObject>();
+				ExpectedKey->SetStringField(TEXT("name"), ControlKey.Name.ToString());
+				ExpectedKey->SetNumberField(TEXT("element_type"), static_cast<int32>(ControlKey.Type));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_control_add_failed"),
+					TEXT("The hierarchy controller returned a different element identity when adding the control."), Blueprint, Subject,
+					MakeShared<FJsonValueObject>(ActualKey), MakeShared<FJsonValueObject>(ExpectedKey));
 				return false;
 			}
 		}
@@ -976,7 +1244,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			? Blueprint.GetController(RigGraph) : nullptr;
 		if (!UnitMutations.IsEmpty() && (!RigGraph || !RigController))
 		{
-			OutError.Set(TEXT("animation_rig_graph_rigvm_controller_unavailable"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_rigvm_controller_unavailable"),
+				!RigGraph ? TEXT("The Control Rig has no default RigVM graph for the requested node mutations.")
+					: TEXT("The Control Rig default graph has no RigVM controller."), Blueprint);
 			return false;
 		}
 		auto FindRigNode = [RigGraph](const FName Name) -> URigVMNode*
@@ -993,9 +1263,13 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		};
 		for (FAnimationRigGraphUnitMutation& Mutation : UnitMutations)
 		{
+			ON_SCOPE_EXIT { LocateRigInput(OutError, Mutation.InputPointer); };
+			const FString Subject = TEXT("rigvm_node:") + Mutation.NodeName.ToString();
 			if (Mutation.NodeName.IsNone())
 			{
-				OutError.Set(TEXT("animation_rig_graph_rigvm_unit_name_invalid"));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_rigvm_unit_name_invalid"),
+					TEXT("A RigVM node mutation has no node name."), Blueprint, Subject,
+					MakeShared<FJsonValueString>(Mutation.NodeName.ToString()), MakeShared<FJsonValueString>(TEXT("non-empty node name")), TEXT("name"));
 				return false;
 			}
 			URigVMNode* Existing = FindRigNode(Mutation.NodeName);
@@ -1004,9 +1278,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				if (!Existing
 					|| !RigController->RemoveNode(Existing, true, false))
 				{
-					OutError.Set(
-						TEXT("animation_rig_graph_rigvm_unit_remove_failed"),
-						Mutation.NodeName.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_rigvm_unit_remove_failed"),
+						FString::Printf(TEXT("RigVM node '%s' %s."), *Mutation.NodeName.ToString(), Existing
+							? TEXT("could not be removed by the RigVM controller") : TEXT("does not exist and cannot be removed")), Blueprint, Subject);
 					return false;
 				}
 				continue;
@@ -1014,17 +1288,18 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			if (!FMath::IsFinite(Mutation.Position.X)
 				|| !FMath::IsFinite(Mutation.Position.Y))
 			{
-				OutError.Set(
-					TEXT("animation_rig_graph_rigvm_unit_definition_invalid"),
-					Mutation.NodeName.ToString());
+				const bool bInvalidX = !FMath::IsFinite(Mutation.Position.X);
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_rigvm_unit_definition_invalid"),
+					FString::Printf(TEXT("RigVM node '%s' has a non-finite %s position."), *Mutation.NodeName.ToString(), bInvalidX ? TEXT("x") : TEXT("y")),
+					Blueprint, Subject, MakeShared<FJsonValueString>(LexToString(bInvalidX ? Mutation.Position.X : Mutation.Position.Y)),
+					MakeShared<FJsonValueString>(TEXT("finite coordinate")), bInvalidX ? TEXT("/position/x") : TEXT("/position/y"), Mutation.InputPointer);
 				return false;
 			}
 			if (Mutation.Intent == EAnimationRigGraphMutationIntent::Create
 				&& Existing)
 			{
-				OutError.Set(
-					TEXT("animation_rig_graph_rigvm_unit_already_exists"),
-					Mutation.NodeName.ToString());
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_rigvm_unit_already_exists"),
+					FString::Printf(TEXT("RigVM node '%s' already exists and cannot be created again."), *Mutation.NodeName.ToString()), Blueprint, Subject);
 				return false;
 			}
 			if (Mutation.Intent == EAnimationRigGraphMutationIntent::Replace
@@ -1032,9 +1307,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			{
 				if (!RigController->RemoveNode(Existing, true, false))
 				{
-					OutError.Set(
-						TEXT("animation_rig_graph_rigvm_unit_replace_failed"),
-						Mutation.NodeName.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_rigvm_unit_replace_failed"),
+						FString::Printf(TEXT("The RigVM controller could not remove node '%s' before replacing it."), *Mutation.NodeName.ToString()), Blueprint, Subject);
 					return false;
 				}
 				Existing = nullptr;
@@ -1058,19 +1332,47 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 					|| !RigController->SetNodePosition(
 						Existing, Mutation.Position, true, false, false))
 				{
-					OutError.Set(
-						TEXT("animation_rig_graph_rigvm_unit_update_failed"),
-						Mutation.NodeName.ToString());
+					const FString Reason = !UnitStruct ? TEXT("the requested script struct could not be loaded")
+						: UnitStruct == FRigUnit::StaticStruct() ? TEXT("the base RigUnit struct cannot be used as a concrete unit")
+						: !UnitStruct->IsChildOf(FRigUnit::StaticStruct()) ? TEXT("the requested script struct is not a RigUnit")
+						: UnitStruct->HasMetaData(TEXT("Abstract")) ? TEXT("the requested script struct is abstract")
+						: Mutation.MethodName.IsNone() ? TEXT("the requested method name is empty")
+						: !ExistingUnit ? (Existing ? TEXT("the existing node is not a RigVM unit") : TEXT("the node does not exist"))
+						: !ExistingUnit->GetScriptStruct() ? TEXT("the existing unit has no script struct")
+						: ExistingUnit->GetScriptStruct()->GetPathName() != Mutation.ScriptStructRef ? TEXT("the existing unit uses a different script struct")
+						: ExistingUnit->GetMethodName() != Mutation.MethodName ? TEXT("the existing unit uses a different method")
+						: TEXT("the RigVM controller rejected the position update");
+					const auto Actual = MakeShared<FJsonObject>();
+					Actual->SetBoolField(TEXT("node_exists"), Existing != nullptr);
+					if (Existing) Actual->SetStringField(TEXT("node_class"), Existing->GetClass()->GetPathName());
+					if (ExistingUnit)
+					{
+						Actual->SetStringField(TEXT("script_struct_ref"), ExistingUnit->GetScriptStruct() ? ExistingUnit->GetScriptStruct()->GetPathName() : FString());
+						Actual->SetStringField(TEXT("method"), ExistingUnit->GetMethodName().ToString());
+					}
+					const auto Expected = MakeShared<FJsonObject>();
+					Expected->SetStringField(TEXT("script_struct_ref"), Mutation.ScriptStructRef);
+					Expected->SetStringField(TEXT("method"), Mutation.MethodName.ToString());
+					Expected->SetNumberField(TEXT("position_x"), Mutation.Position.X);
+					Expected->SetNumberField(TEXT("position_y"), Mutation.Position.Y);
+					const FString InputField = !UnitStruct || UnitStruct == FRigUnit::StaticStruct()
+						|| !UnitStruct->IsChildOf(FRigUnit::StaticStruct()) || UnitStruct->HasMetaData(TEXT("Abstract"))
+						? TEXT("/script_struct_ref") : Mutation.MethodName.IsNone() ? (Mutation.bHasMethodInput ? TEXT("/method") : FString())
+						: !ExistingUnit || !ExistingUnit->GetScriptStruct() ? FString()
+						: ExistingUnit->GetScriptStruct()->GetPathName() != Mutation.ScriptStructRef ? TEXT("/script_struct_ref")
+						: ExistingUnit->GetMethodName() != Mutation.MethodName ? (Mutation.bHasMethodInput ? TEXT("/method") : FString()) : TEXT("/position");
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_rigvm_unit_update_failed"),
+						FString::Printf(TEXT("RigVM node '%s' could not be updated: %s."), *Mutation.NodeName.ToString(), *Reason), Blueprint, Subject,
+						MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueObject>(Expected), InputField, Mutation.InputPointer);
 					return false;
 				}
 				continue;
 			}
-			if (Mutation.CandidateName.IsEmpty()
-				&& Mutation.CandidateId.IsEmpty())
+			if (Mutation.CandidateName.IsEmpty())
 			{
-				OutError.Set(
-					TEXT("animation_rig_graph_candidate_selector_required"),
-					Mutation.NodeName.ToString());
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_candidate_selector_required"),
+					FString::Printf(TEXT("RigVM node '%s' requires a candidate name for creation."), *Mutation.NodeName.ToString()), Blueprint, Subject,
+					MakeShared<FJsonValueString>(Mutation.CandidateName), MakeShared<FJsonValueString>(TEXT("non-empty candidate name")), TEXT("/candidate/name"), Mutation.InputPointer);
 				return false;
 			}
 
@@ -1081,34 +1383,39 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				ResolvedCandidate;
 			QueryOwners::AnimationRigGraph::
 				FAnimationRigGraphCandidateQueryError CandidateError;
-			if (!QueryOwners::AnimationRigGraph::
+			const bool bCandidateAdded = QueryOwners::AnimationRigGraph::
 					TryPerformAnimationRigGraphCandidate(
 						Blueprint,
 						Mutation.CandidateName,
-						Mutation.CandidateId,
 						FVector2f(Mutation.Position),
 						Added,
 						ResolvedCandidate,
-						CandidateError)
-				|| !Added || !Added->GetScriptStruct()
+						CandidateError, Mutation.CandidateSelect);
+			if (!bCandidateAdded || !Added || !Added->GetScriptStruct()
 				|| Added->GetMethodName().IsNone())
 			{
-				OutError.Set(
-					CandidateError.Code.IsEmpty()
-						? TEXT("animation_rig_graph_rigvm_unit_add_failed")
-						: CandidateError.Code,
-					CandidateError.Detail.IsEmpty()
-						? Mutation.NodeName.ToString()
-						: CandidateError.Detail);
+				OutError = CandidateError.IsValid() ? CandidateError
+					: RigNativeFailure(TEXT("animation_rig_graph_rigvm_unit_add_failed"),
+						!bCandidateAdded ? TEXT("The native candidate action failed to create the RigVM unit.")
+							: !Added ? TEXT("The native candidate action reported success without returning a RigVM unit.")
+							: !Added->GetScriptStruct() ? TEXT("The created RigVM unit has no script struct.")
+							: TEXT("The created RigVM unit has no method name."), Blueprint, Subject,
+						MakeShared<FJsonValueString>(Mutation.CandidateName), MakeShared<FJsonValueString>(TEXT("candidate producing a valid RigVM unit")));
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint);
+				if (!Mutation.InputPointer.IsEmpty())
+					UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError,
+						(Mutation.InputPointer == TEXT("/") ? FString() : Mutation.InputPointer)
+							+ (OutError.PropertyPath == TEXT("x") || OutError.PropertyPath == TEXT("y") ? TEXT("/position") : TEXT("/candidate")));
 				return false;
 			}
 			if (Added->GetFName() != Mutation.NodeName
 				&& !RigController->RenameNode(
 					Added, Mutation.NodeName, true, false))
 			{
-				OutError.Set(
-					TEXT("animation_rig_graph_rigvm_unit_rename_failed"),
-					Mutation.NodeName.ToString());
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_rigvm_unit_rename_failed"),
+					TEXT("The RigVM controller could not rename the created unit to the requested node name."), Blueprint, Subject,
+					MakeShared<FJsonValueString>(Added->GetName()), MakeShared<FJsonValueString>(Mutation.NodeName.ToString()), TEXT("name"));
 				return false;
 			}
 			if ((Mutation.bHasScriptStructAssertion
@@ -1117,13 +1424,16 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				|| (Mutation.bHasMethodAssertion
 					&& Added->GetMethodName() != ExpectedMethod))
 			{
-				OutError.Set(
-					TEXT("animation_rig_graph_candidate_assertion_mismatch"),
-					Mutation.NodeName.ToString());
+				const bool bStructMismatch = Mutation.bHasScriptStructAssertion && Added->GetScriptStruct()->GetPathName() != ExpectedStruct;
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_candidate_assertion_mismatch"),
+					bStructMismatch ? TEXT("The candidate created a RigVM unit with a different script struct than requested.")
+						: TEXT("The candidate created a RigVM unit with a different method than requested."), Blueprint, Subject,
+					MakeShared<FJsonValueString>(bStructMismatch ? Added->GetScriptStruct()->GetPathName() : Added->GetMethodName().ToString()),
+					MakeShared<FJsonValueString>(bStructMismatch ? ExpectedStruct : ExpectedMethod.ToString()),
+					bStructMismatch ? TEXT("/script_struct_ref") : TEXT("/method"), Mutation.InputPointer);
 				return false;
 			}
 			Mutation.CandidateName = ResolvedCandidate.Name;
-			Mutation.CandidateId = ResolvedCandidate.Id;
 			Mutation.ScriptStructRef =
 				Added->GetScriptStruct()->GetPathName();
 			Mutation.MethodName = Added->GetMethodName();
@@ -1141,8 +1451,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			bCompileComplete, CompilerLog.NumErrors, OutApplyReceipt, OutBarrierReceipt);
 		if (!bCompileComplete)
 		{
-			OutError.Set(TEXT("animation_rig_graph_compile_incomplete"),
-				LexToString(CompilerLog.NumErrors));
+			OutError = UeAgentAuthoringDiagnostics::MakeCompileFailure(TEXT("animation_rig_graph_compile_incomplete"),
+				UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint), CompilerLog, &Blueprint);
 			return false;
 		}
 		TArray<FAnimationRigGraphItemIdentity> Items;
@@ -1212,7 +1522,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		OutError.Reset();
 		if (ShapeName.IsNone())
 		{
-			OutError.Set(TEXT("animation_rig_graph_shape_name_missing"));
+            OutError = RigNativeFailure(TEXT("animation_rig_graph_shape_name_missing"),
+                TEXT("A Control Rig shape requires a non-None name."), Library, ShapeName.ToString(),
+                MakeShared<FJsonValueString>(ShapeName.ToString()), MakeShared<FJsonValueString>(TEXT("non-None shape name")), TEXT("shape_name"));
 			return false;
 		}
 		Library.Modify();
@@ -1250,7 +1562,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		OutError.Reset();
 		if (Mutations.IsEmpty())
 		{
-			OutError.Set(TEXT("animation_rig_graph_shape_mutations_empty"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_shape_mutations_empty"),
+				TEXT("At least one shape mutation is required."), Library, FString(),
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one mutation")));
 			return false;
 		}
 		UMaterial* SharedMaterial = nullptr;
@@ -1260,26 +1574,37 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			{
 				if (!Mutation.Mesh)
 				{
-					OutError.Set(TEXT("animation_rig_graph_shape_mesh_invalid"),
-						Mutation.Name.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_shape_mesh_invalid"),
+						FString::Printf(TEXT("Shape '%s' has no loaded static mesh."), *Mutation.Name.ToString()),
+						Library, TEXT("item:shape:") + Mutation.Name.ToString(), nullptr,
+						MakeShared<FJsonValueString>(UStaticMesh::StaticClass()->GetPathName()), TEXT("/mesh_ref"), Mutation.InputPointer);
+					OutError.ActualValuePresent = false;
 					return false;
 				}
 				if (!Mutation.Material)
 				{
-					OutError.Set(TEXT("animation_rig_graph_shape_material_invalid"),
-						Mutation.Name.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_shape_material_invalid"),
+						FString::Printf(TEXT("Shape '%s' has no loaded material."), *Mutation.Name.ToString()),
+						Library, TEXT("item:shape:") + Mutation.Name.ToString(), nullptr,
+						MakeShared<FJsonValueString>(UMaterial::StaticClass()->GetPathName()), TEXT("/material_ref"), Mutation.InputPointer);
+					OutError.ActualValuePresent = false;
 					return false;
 				}
 				if (Mutation.OrderIndex < 0)
 				{
-					OutError.Set(TEXT("animation_rig_graph_shape_order_invalid"),
-						Mutation.Name.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_shape_order_invalid"),
+						FString::Printf(TEXT("Shape '%s' order_index must be nonnegative."), *Mutation.Name.ToString()),
+						Library, TEXT("item:shape:") + Mutation.Name.ToString(), MakeShared<FJsonValueNumber>(Mutation.OrderIndex),
+						MakeShared<FJsonValueString>(TEXT("integer greater than or equal to zero")), TEXT("/order_index"), Mutation.InputPointer);
 					return false;
 				}
 				if (SharedMaterial && SharedMaterial != Mutation.Material)
 				{
-					OutError.Set(TEXT("animation_rig_graph_shape_material_conflict"),
-						Mutation.Name.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_shape_material_conflict"),
+						FString::Printf(TEXT("Shape '%s' uses a different material; all shapes in this library mutation must share one material."),
+							*Mutation.Name.ToString()), Library, TEXT("item:shape:") + Mutation.Name.ToString(),
+						MakeShared<FJsonValueString>(Mutation.Material->GetPathName()),
+						MakeShared<FJsonValueString>(SharedMaterial->GetPathName()), TEXT("/material_ref"), Mutation.InputPointer);
 					return false;
 				}
 				SharedMaterial = Mutation.Material;
@@ -1301,8 +1626,10 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			{
 				if (ExistingIndex == INDEX_NONE)
 				{
-					OutError.Set(TEXT("animation_rig_graph_shape_remove_failed"),
-						Mutation.Name.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_shape_remove_failed"),
+						FString::Printf(TEXT("Shape '%s' cannot be removed because it does not exist in the library."), *Mutation.Name.ToString()),
+						Library, TEXT("item:shape:") + Mutation.Name.ToString(), MakeShared<FJsonValueString>(Mutation.Name.ToString()),
+						nullptr, FString(), Mutation.InputPointer);
 					return false;
 				}
 				Library.Shapes.RemoveAt(ExistingIndex);
@@ -1341,13 +1668,22 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FAnimationRigGraphTopology& OutTopology,
 		FString& OutRevision,
 		FString& OutEvidenceId,
-		FAnimationRigGraphAdapterError& OutError) const
+		FAnimationRigGraphAdapterError& OutError,
+		const FString& CommentNodeInputPointer) const
 	{
 		OutError.Reset();
 		UOptimusNodeGraph* Graph = Deformer.GetUpdateGraph();
 		if (!Graph || CommentNodeName.IsNone())
 		{
-			OutError.Set(TEXT("animation_rig_graph_optimus_graph_unavailable"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_optimus_graph_unavailable"),
+				!Graph ? TEXT("The Deformer update graph is unavailable.")
+					: TEXT("A non-None comment node name is required to capture Deformer topology."), Deformer);
+			if (Graph)
+			{
+				OutError.ActualValue = MakeShared<FJsonValueString>(CommentNodeName.ToString());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-None node name"));
+				LocateRigInput(OutError, CommentNodeInputPointer);
+			}
 			return false;
 		}
 		Deformer.Modify();
@@ -1367,7 +1703,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		}
 		if (!Comment)
 		{
-			OutError.Set(TEXT("animation_rig_graph_optimus_comment_add_failed"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_optimus_comment_add_failed"),
+				FString::Printf(TEXT("Comment node '%s' could not be created in the Deformer update graph."), *CommentNodeName.ToString()), Deformer);
+			LocateRigInput(OutError, CommentNodeInputPointer);
 			return false;
 		}
 		const bool bCompileComplete = Deformer.Compile();
@@ -1375,7 +1713,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			bCompileComplete, bCompileComplete ? 0 : 1, OutApplyReceipt, OutBarrierReceipt);
 		if (!bCompileComplete)
 		{
-			OutError.Set(TEXT("animation_rig_graph_compile_incomplete"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_compile_incomplete"),
+				TEXT("The Deformer failed to compile after topology editing."), Deformer);
 			return false;
 		}
 		const FString GraphKey = TEXT("optimus_graph:") + Graph->GetPathName();
@@ -1383,10 +1722,75 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		TArray<FAnimationRigGraphItemIdentity> Items;
 		Items.Add(ObjectItem(GraphKey, *Graph, TEXT("graph")));
 		Items.Add(ObjectItem(NodeKey, *Comment, TEXT("node")));
+		TArray<FAnimationRigGraphPinIdentity> Pins;
+		TMap<const UOptimusNode*, FString> NodeKeys;
+		for (const UOptimusNode* Node : Graph->GetAllNodes())
+		{
+			if (!Node)
+			{
+				continue;
+			}
+			const FString StableNodeKey =
+				TEXT("optimus_node:") + Node->GetPathName();
+			NodeKeys.Add(Node, StableNodeKey);
+			if (Node != Comment)
+			{
+				Items.Add(ObjectItem(StableNodeKey, *Node, TEXT("node")));
+			}
+			for (const UOptimusNodePin* Pin : Node->GetPins())
+			{
+				if (!Pin || Pin->IsGroupingPin())
+				{
+					continue;
+				}
+				const FString PinKey = TEXT("optimus_pin:") + Pin->GetPinPath();
+				const EOptimusNodePinDirection Direction = Pin->GetDirection();
+				if (Direction != EOptimusNodePinDirection::Input
+					&& Direction != EOptimusNodePinDirection::Output)
+				{
+					continue;
+				}
+				const FOptimusDataTypeHandle DataType = Pin->GetDataType();
+				const FString TypeName = DataType.IsValid()
+					? DataType->TypeName.ToString() : FString();
+				Pins.Add(FAnimationRigGraphPinIdentity(
+					PinKey,
+					StableNodeKey,
+					Pin->GetUniqueName().ToString(),
+					Direction == EOptimusNodePinDirection::Input
+						? EAnimationRigGraphPinDirection::Input
+						: EAnimationRigGraphPinDirection::Output,
+					TypeName));
+			}
+		}
 		TArray<FAnimationRigGraphRelationIdentity> Relations;
 		Relations.Emplace(TEXT("graph_member:") + Comment->GetPathName(),
 			TEXT("graph_member"), FString(), GraphKey, NodeKey, 0);
-		OutTopology = FAnimationRigGraphTopology(MoveTemp(Items), {}, MoveTemp(Relations));
+		for (const UOptimusNodeLink* Link : Graph->GetAllLinks())
+		{
+			if (!Link || !Link->GetNodeOutputPin() || !Link->GetNodeInputPin())
+			{
+				continue;
+			}
+			const UOptimusNode* OutputNode =
+				Link->GetNodeOutputPin()->GetOwningNode();
+			const UOptimusNode* InputNode =
+				Link->GetNodeInputPin()->GetOwningNode();
+			if (!OutputNode || !InputNode
+				|| !NodeKeys.Contains(OutputNode) || !NodeKeys.Contains(InputNode))
+			{
+				continue;
+			}
+			Relations.Emplace(
+				TEXT("optimus_link:") + Link->GetNodeOutputPin()->GetPinPath()
+					+ TEXT("->") + Link->GetNodeInputPin()->GetPinPath(),
+				TEXT("connection"), FString(),
+				TEXT("optimus_pin:") + Link->GetNodeOutputPin()->GetPinPath(),
+				TEXT("optimus_pin:") + Link->GetNodeInputPin()->GetPinPath(),
+				INDEX_NONE);
+		}
+		OutTopology = FAnimationRigGraphTopology(
+			MoveTemp(Items), MoveTemp(Pins), MoveTemp(Relations));
 		return FinalizeTopologyCapture(Deformer, OutTopology, OutRevision, OutEvidenceId, OutError);
 	}
 
@@ -1447,30 +1851,62 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		if (!Controller || GoalName.IsNone() || GoalBone.IsNone()
 			|| ChainName.IsNone() || StartBone.IsNone() || EndBone.IsNone())
 		{
-			OutError.Set(TEXT("animation_rig_graph_ik_rig_controller_unavailable"));
+            const TCHAR* Field = !Controller ? TEXT("controller_available") : GoalName.IsNone() ? TEXT("goal_name")
+                : GoalBone.IsNone() ? TEXT("goal_bone") : ChainName.IsNone() ? TEXT("chain_name")
+                : StartBone.IsNone() ? TEXT("start_bone") : TEXT("end_bone");
+            OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_rig_controller_unavailable"),
+                !Controller ? TEXT("The IK Rig controller is unavailable.")
+                    : FString::Printf(TEXT("IK Rig setup requires a non-None %s."), Field), Rig, GoalName.ToString(), nullptr, nullptr, Field);
+            if (!Controller)
+            {
+                OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+                OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+            }
+            else
+            {
+                OutError.ActualValue = MakeShared<FJsonValueString>(FName().ToString());
+                OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-None name"));
+            }
 			return false;
 		}
 		Rig.Modify();
-		if (!Controller->GetGoal(GoalName)
-			&& Controller->AddNewGoal(GoalName, GoalBone) != GoalName)
-		{
-			OutError.Set(TEXT("animation_rig_graph_ik_goal_add_failed"));
-			return false;
-		}
+        if (!Controller->GetGoal(GoalName))
+        {
+            const FName AddedGoal = Controller->AddNewGoal(GoalName, GoalBone);
+            if (AddedGoal != GoalName)
+            {
+                OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_goal_add_failed"),
+                    FString::Printf(TEXT("Unreal did not create an IK goal on bone '%s' with the requested name."),
+                        *GoalBone.ToString()), Rig, GoalName.ToString(),
+                    MakeShared<FJsonValueString>(AddedGoal.ToString()), MakeShared<FJsonValueString>(GoalName.ToString()), TEXT("goal_name"));
+                return false;
+            }
+        }
 		const bool bChainExists = Controller->GetRetargetChains().ContainsByPredicate(
 			[ChainName](const FBoneChain& Chain) { return Chain.ChainName == ChainName; });
-		if (!bChainExists
-			&& Controller->AddRetargetChain(ChainName, StartBone, EndBone, GoalName) != ChainName)
-		{
-			OutError.Set(TEXT("animation_rig_graph_ik_chain_add_failed"));
-			return false;
-		}
-		if (Controller->GetNumSolvers() == 0
-			&& Controller->AddSolver(FIKRigFullBodyIKSolver::StaticStruct()) == INDEX_NONE)
-		{
-			OutError.Set(TEXT("animation_rig_graph_ik_solver_add_failed"));
-			return false;
-		}
+        if (!bChainExists)
+        {
+            const FName AddedChain = Controller->AddRetargetChain(ChainName, StartBone, EndBone, GoalName);
+            if (AddedChain != ChainName)
+            {
+                OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_chain_add_failed"),
+                    FString::Printf(TEXT("Unreal did not create a retarget chain from '%s' to '%s' with goal '%s' and the requested name."),
+                        *StartBone.ToString(), *EndBone.ToString(), *GoalName.ToString()), Rig, ChainName.ToString(),
+                    MakeShared<FJsonValueString>(AddedChain.ToString()), MakeShared<FJsonValueString>(ChainName.ToString()), TEXT("chain_name"));
+                return false;
+            }
+        }
+        if (Controller->GetNumSolvers() == 0)
+        {
+            const int32 SolverIndex = Controller->AddSolver(FIKRigFullBodyIKSolver::StaticStruct());
+            if (SolverIndex == INDEX_NONE)
+            {
+                OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_solver_add_failed"),
+                    TEXT("Unreal failed to add the Full Body IK solver."), Rig, FIKRigFullBodyIKSolver::StaticStruct()->GetPathName(),
+                    MakeShared<FJsonValueNumber>(SolverIndex), MakeShared<FJsonValueString>(TEXT("valid solver index")), TEXT("solver_index"));
+                return false;
+            }
+        }
 		Controller->BroadcastNeedsReinitialized();
 		SetReceipts(Rig, EAnimationRigGraphBarrierKind::Validate, true, 0,
 			OutApplyReceipt, OutBarrierReceipt);
@@ -1507,26 +1943,41 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FAnimationRigGraphTopology& OutTopology,
 		FString& OutRevision,
 		FString& OutEvidenceId,
-		FAnimationRigGraphAdapterError& OutError) const
+		FAnimationRigGraphAdapterError& OutError, const FString& RootInputPointer) const
 	{
 		OutError.Reset();
 		UIKRigController* Controller = UIKRigController::GetController(&Rig);
-		if (!Controller || RetargetRoot.IsNone()
-			|| !Controller->SetRetargetRoot(RetargetRoot))
+		if (!Controller || RetargetRoot.IsNone())
 		{
-			OutError.Set(TEXT("animation_rig_graph_ik_rig_controller_unavailable"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_rig_controller_unavailable"),
+				!Controller ? TEXT("The IK Rig controller is unavailable.") : TEXT("The IK Rig definition has no retarget root bone."), Rig);
+			if (Controller)
+			{
+				OutError.ActualValue = MakeShared<FJsonValueString>(RetargetRoot.ToString());
+				LocateRigInput(OutError, RootInputPointer);
+			}
+			return false;
+		}
+		UE::UAI::Contract::FDiagnostic IntentError;
+		UE::UAI::Contract::FSourceLocation RootSource;
+		RootSource.JsonPath = RootInputPointer;
+		if (!UeAgentIKAssetOps::ApplyRetargetRoot(*Controller, RetargetRoot, IntentError, RootSource, Rig.GetPathName()))
+		{
+			OutError = IntentError;
 			return false;
 		}
 		Rig.Modify();
 		for (const FAnimationRigGraphIkGoalMutation& Goal : Goals)
 		{
+			ON_SCOPE_EXIT { LocateRigInput(OutError, Goal.InputPointer); };
 			const bool bExists = Controller->GetGoal(Goal.Name) != nullptr;
 			if (Goal.Intent == EAnimationRigGraphMutationIntent::Delete)
 			{
 				if (!bExists || !Controller->RemoveGoal(Goal.Name))
 				{
-					OutError.Set(TEXT("animation_rig_graph_ik_goal_remove_failed"),
-						Goal.Name.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_goal_remove_failed"),
+						FString::Printf(TEXT("IK goal '%s' %s."), *Goal.Name.ToString(), bExists
+							? TEXT("could not be removed by the controller") : TEXT("does not exist and cannot be removed")), Rig);
 					return false;
 				}
 			}
@@ -1534,31 +1985,46 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			{
 				if (!Controller->SetGoalBone(Goal.Name, Goal.BoneName))
 				{
-					OutError.Set(TEXT("animation_rig_graph_ik_goal_update_failed"),
-						Goal.Name.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_goal_update_failed"),
+						FString::Printf(TEXT("The IK Rig controller rejected the bone assignment for goal '%s'."), *Goal.Name.ToString()),
+						Rig, FString(), MakeShared<FJsonValueString>(Goal.BoneName.ToString()), nullptr, TEXT("/bone_name"), Goal.InputPointer);
 					return false;
 				}
 			}
-			else if (Controller->AddNewGoal(Goal.Name, Goal.BoneName) != Goal.Name)
+			else
 			{
-				OutError.Set(TEXT("animation_rig_graph_ik_goal_add_failed"),
-					Goal.Name.ToString());
-				return false;
+				const FName AddedName = Controller->AddNewGoal(Goal.Name, Goal.BoneName);
+				if (AddedName != Goal.Name)
+				{
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_goal_add_failed"),
+						TEXT("The IK Rig controller returned a different goal name when adding the requested goal."), Rig, FString(),
+						MakeShared<FJsonValueString>(AddedName.ToString()), MakeShared<FJsonValueString>(Goal.Name.ToString()));
+					OutError.ProposedValue = MakeShared<FJsonValueString>(Goal.BoneName.ToString());
+					return false;
+				}
 			}
 		}
 		for (const FAnimationRigGraphIkSolverMutation& Solver : Solvers)
 		{
+			ON_SCOPE_EXIT { LocateRigInput(OutError, Solver.InputPointer); };
 			if (Solver.OrderIndex < 0)
 			{
-				OutError.Set(TEXT("animation_rig_graph_ik_solver_order_invalid"));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_solver_order_invalid"),
+					TEXT("The IK solver order index must be nonnegative."), Rig, FString(),
+					MakeShared<FJsonValueNumber>(Solver.OrderIndex), MakeShared<FJsonValueString>(TEXT("integer greater than or equal to zero")),
+					Solver.Intent == EAnimationRigGraphMutationIntent::Delete ? FString() : TEXT("/order_index"), Solver.InputPointer);
 				return false;
 			}
 			if (Solver.Intent == EAnimationRigGraphMutationIntent::Delete)
 			{
-				if (Solver.OrderIndex >= Controller->GetNumSolvers()
+				const int32 SolverCount = Controller->GetNumSolvers();
+				if (Solver.OrderIndex >= SolverCount
 					|| !Controller->RemoveSolver(Solver.OrderIndex))
 				{
-					OutError.Set(TEXT("animation_rig_graph_ik_solver_remove_failed"));
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_solver_remove_failed"),
+						Solver.OrderIndex >= SolverCount ? TEXT("The requested IK solver index is outside the current solver stack.")
+							: TEXT("The IK Rig controller could not remove the requested solver."), Rig, FString(),
+						MakeShared<FJsonValueNumber>(Solver.OrderIndex), MakeShared<FJsonValueString>(FString::Printf(TEXT("existing index below %d"), SolverCount)));
 					return false;
 				}
 				continue;
@@ -1567,8 +2033,10 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				nullptr, *Solver.SolverClassRef);
 			if (!SolverType)
 			{
-				OutError.Set(TEXT("animation_rig_graph_ik_solver_type_invalid"),
-					Solver.SolverClassRef);
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_solver_type_invalid"),
+					TEXT("The IK solver type could not be loaded as a script struct."), Rig, FString(),
+					MakeShared<FJsonValueString>(Solver.SolverClassRef), MakeShared<FJsonValueString>(UScriptStruct::StaticClass()->GetPathName()),
+					TEXT("/solver_class_ref"), Solver.InputPointer);
 				return false;
 			}
 			if (Solver.OrderIndex < Controller->GetNumSolvers()
@@ -1576,7 +2044,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 					|| Solver.Intent == EAnimationRigGraphMutationIntent::Replace)
 				&& !Controller->RemoveSolver(Solver.OrderIndex))
 			{
-				OutError.Set(TEXT("animation_rig_graph_ik_solver_replace_failed"));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_solver_replace_failed"),
+					TEXT("The IK Rig controller could not remove the existing solver before replacement."), Rig, FString(),
+					MakeShared<FJsonValueNumber>(Solver.OrderIndex), nullptr, TEXT("/order_index"), Solver.InputPointer);
 				return false;
 			}
 			const int32 AddedIndex = Controller->AddSolver(SolverType);
@@ -1585,12 +2055,23 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 				|| (AddedIndex != TargetIndex
 					&& !Controller->MoveSolverInStack(AddedIndex, TargetIndex)))
 			{
-				OutError.Set(TEXT("animation_rig_graph_ik_solver_add_failed"));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_solver_add_failed"),
+					AddedIndex == INDEX_NONE ? TEXT("The IK Rig controller could not add the requested solver type.")
+						: TEXT("The IK Rig controller added the solver but could not move it to the requested stack position."), Rig, FString(),
+					MakeShared<FJsonValueNumber>(AddedIndex), nullptr,
+					AddedIndex == INDEX_NONE ? TEXT("/solver_class_ref") : TEXT("/order_index"), Solver.InputPointer);
+				if (AddedIndex == INDEX_NONE) OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("valid solver index"));
+				else OutError.ExpectedValue = MakeShared<FJsonValueNumber>(TargetIndex);
+				const auto Proposed = MakeShared<FJsonObject>();
+				Proposed->SetStringField(TEXT("solver_class_ref"), Solver.SolverClassRef);
+				Proposed->SetNumberField(TEXT("order_index"), Solver.OrderIndex);
+				OutError.ProposedValue = MakeShared<FJsonValueObject>(Proposed);
 				return false;
 			}
 		}
 		for (const FAnimationRigGraphIkChainMutation& Chain : Chains)
 		{
+			ON_SCOPE_EXIT { LocateRigInput(OutError, Chain.InputPointer); };
 			const bool bExists = Controller->GetRetargetChains().ContainsByPredicate(
 				[&Chain](const FBoneChain& Existing)
 				{
@@ -1600,28 +2081,49 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			{
 				if (!bExists || !Controller->RemoveRetargetChain(Chain.Name))
 				{
-					OutError.Set(TEXT("animation_rig_graph_ik_chain_remove_failed"),
-						Chain.Name.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_chain_remove_failed"),
+						FString::Printf(TEXT("Retarget chain '%s' %s."), *Chain.Name.ToString(), bExists
+							? TEXT("could not be removed by the IK Rig controller") : TEXT("does not exist and cannot be removed")), Rig);
 					return false;
 				}
 				continue;
 			}
 			if (bExists)
 			{
-				if (!Controller->SetRetargetChainStartBone(Chain.Name, Chain.StartBone)
-					|| !Controller->SetRetargetChainEndBone(Chain.Name, Chain.EndBone)
-					|| !Controller->SetRetargetChainGoal(Chain.Name, Chain.GoalName))
+				const bool bStartApplied = Controller->SetRetargetChainStartBone(Chain.Name, Chain.StartBone);
+				if (!bStartApplied || !Controller->SetRetargetChainEndBone(Chain.Name, Chain.EndBone))
 				{
-					OutError.Set(TEXT("animation_rig_graph_ik_chain_update_failed"),
-						Chain.Name.ToString());
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_chain_update_failed"),
+						FString::Printf(TEXT("The IK Rig controller rejected the %s bone for retarget chain '%s'."),
+							bStartApplied ? TEXT("end") : TEXT("start"), *Chain.Name.ToString()), Rig, FString(),
+						MakeShared<FJsonValueString>((bStartApplied ? Chain.EndBone : Chain.StartBone).ToString()), nullptr,
+						bStartApplied ? TEXT("/end_bone") : TEXT("/start_bone"), Chain.InputPointer);
 					return false;
 				}
 			}
-			else if (Controller->AddRetargetChain(
-				Chain.Name, Chain.StartBone, Chain.EndBone, Chain.GoalName) != Chain.Name)
+			else
 			{
-				OutError.Set(TEXT("animation_rig_graph_ik_chain_add_failed"),
-					Chain.Name.ToString());
+				const FName AddedName = Controller->AddRetargetChain(Chain.Name, Chain.StartBone, Chain.EndBone, Chain.GoalName);
+				if (AddedName != Chain.Name)
+				{
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_chain_add_failed"),
+						TEXT("The IK Rig controller returned a different name when adding the requested retarget chain."), Rig, FString(),
+						MakeShared<FJsonValueString>(AddedName.ToString()), MakeShared<FJsonValueString>(Chain.Name.ToString()));
+					const auto Proposed = MakeShared<FJsonObject>();
+					Proposed->SetStringField(TEXT("start_bone"), Chain.StartBone.ToString());
+					Proposed->SetStringField(TEXT("end_bone"), Chain.EndBone.ToString());
+					Proposed->SetStringField(TEXT("goal_name"), Chain.GoalName.ToString());
+					OutError.ProposedValue = MakeShared<FJsonValueObject>(Proposed);
+					return false;
+				}
+			}
+			UE::UAI::Contract::FSourceLocation GoalSource;
+			if (!Chain.InputPointer.IsEmpty()) GoalSource.JsonPath = Chain.InputPointer == TEXT("/")
+				? TEXT("/goal_name") : Chain.InputPointer + TEXT("/goal_name");
+			if (!UeAgentIKAssetOps::ApplyRetargetChainGoal(*Controller, Chain.Name,
+				Chain.GoalName, IntentError, GoalSource, Rig.GetPathName()))
+			{
+				OutError = IntentError;
 				return false;
 			}
 		}
@@ -1677,7 +2179,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FAnimationRigGraphTopology& OutTopology,
 		FString& OutRevision,
 		FString& OutEvidenceId,
-		FAnimationRigGraphAdapterError& OutError) const
+		FAnimationRigGraphAdapterError& OutError, const FString& InputPointer) const
 	{
 		OutError.Reset();
 		UIKRigController* Controller = UIKRigController::GetController(&Rig);
@@ -1685,21 +2187,34 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			|| (Controller->GetSkeletalMesh() != &SkeletalMesh
 				&& !Controller->SetSkeletalMesh(&SkeletalMesh)))
 		{
-			OutError.Set(TEXT("animation_rig_graph_ik_rig_mesh_invalid"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_rig_mesh_invalid"),
+				!Controller ? TEXT("The IK Rig controller is unavailable for automatic generation.")
+					: TEXT("The IK Rig controller rejected the skeletal mesh for automatic generation."), Rig);
+			if (Controller)
+			{
+				OutError.ActualValue = MakeShared<FJsonValueString>(SkeletalMesh.GetPathName());
+				OutError.PropertyPath = TEXT("/skeletal_mesh_ref");
+				LocateRigInput(OutError, InputPointer, TEXT("/skeletal_mesh_ref"));
+			}
 			return false;
 		}
 		if (Preset == TEXT("humanoid"))
 		{
-			if (!Controller->ApplyAutoGeneratedRetargetDefinition()
-				|| !Controller->ApplyAutoFBIK())
+			const bool bRetargetApplied = Controller->ApplyAutoGeneratedRetargetDefinition();
+			if (!bRetargetApplied || !Controller->ApplyAutoFBIK())
 			{
-				OutError.Set(TEXT("animation_rig_graph_ik_auto_generate_failed"), Preset);
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_auto_generate_failed"),
+					!bRetargetApplied ? TEXT("The IK Rig controller could not generate the humanoid retarget definition.")
+						: TEXT("The IK Rig controller generated the humanoid retarget definition but could not generate the full-body IK setup."), Rig,
+					FString(), MakeShared<FJsonValueString>(Preset), nullptr, TEXT("/preset"), InputPointer);
 				return false;
 			}
 		}
 		else if (Preset != TEXT("custom"))
 		{
-			OutError.Set(TEXT("animation_rig_graph_ik_auto_preset_unsupported"), Preset);
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_ik_auto_preset_unsupported"),
+				TEXT("The requested IK automatic-generation preset is unsupported."), Rig, FString(),
+				MakeShared<FJsonValueString>(Preset), MakeShared<FJsonValueString>(TEXT("humanoid or custom")), TEXT("/preset"), InputPointer);
 			return false;
 		}
 		Controller->BroadcastNeedsReinitialized();
@@ -1729,18 +2244,36 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		UIKRetargeterController* Controller = UIKRetargeterController::GetController(&Retargeter);
 		if (!Controller || TargetChainName.IsNone())
 		{
-			OutError.Set(TEXT("animation_rig_graph_retargeter_controller_unavailable"));
+            OutError = RigNativeFailure(TEXT("animation_rig_graph_retargeter_controller_unavailable"),
+                !Controller ? TEXT("The IK Retargeter controller is unavailable.") : TEXT("Retargeting requires a non-None target chain name."),
+                Retargeter, TargetChainName.ToString(), nullptr, nullptr, !Controller ? TEXT("controller_available") : TEXT("target_chain_name"));
+            if (!Controller)
+            {
+                OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+                OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+            }
+            else
+            {
+                OutError.ActualValue = MakeShared<FJsonValueString>(TargetChainName.ToString());
+                OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-None chain name"));
+            }
 			return false;
 		}
 		Retargeter.Modify();
 		Controller->SetIKRig(ERetargetSourceOrTarget::Source, &SourceRig);
 		Controller->SetIKRig(ERetargetSourceOrTarget::Target, &TargetRig);
-		if (!Controller->GetChainMapping(NAME_None)
-			&& Controller->AddRetargetOp(FIKRetargetFKChainsOp::StaticStruct()) == INDEX_NONE)
-		{
-			OutError.Set(TEXT("animation_rig_graph_retarget_mapping_op_add_failed"));
-			return false;
-		}
+        if (!Controller->GetChainMapping(NAME_None))
+        {
+            const int32 OpIndex = Controller->AddRetargetOp(FIKRetargetFKChainsOp::StaticStruct());
+            if (OpIndex == INDEX_NONE)
+            {
+                OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_mapping_op_add_failed"),
+                    TEXT("Unreal failed to add the FK Chains retarget operation."), Retargeter,
+                    FIKRetargetFKChainsOp::StaticStruct()->GetPathName(),
+                    MakeShared<FJsonValueNumber>(OpIndex), MakeShared<FJsonValueString>(TEXT("valid operation index")), TEXT("operation_index"));
+                return false;
+            }
+        }
 		Controller->CleanAsset();
 		Controller->AutoMapChains(EAutoMapChainType::Exact, true);
 		const FRetargetChainMapping* ChainMapping = Controller->GetChainMapping(NAME_None);
@@ -1752,7 +2285,36 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			|| ChainMapping->GetChainMappedTo(
 				TargetChainName, ERetargetSourceOrTarget::Target) != TargetChainName)
 		{
-			OutError.Set(TEXT("animation_rig_graph_retarget_mapping_missing"));
+            const bool bSourceMatches = Controller->GetIKRig(ERetargetSourceOrTarget::Source) == &SourceRig;
+            const bool bTargetMatches = Controller->GetIKRig(ERetargetSourceOrTarget::Target) == &TargetRig;
+            if (!bSourceMatches || !bTargetMatches)
+            {
+                const UIKRigDefinition* ActualRig = Controller->GetIKRig(!bSourceMatches ? ERetargetSourceOrTarget::Source : ERetargetSourceOrTarget::Target);
+                OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_mapping_missing"),
+                    TEXT("The retargeter did not retain the requested IK Rig assignment."), Retargeter, TargetChainName.ToString(),
+                    ActualRig ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(ActualRig->GetPathName())) : nullptr,
+                    MakeShared<FJsonValueString>(!bSourceMatches ? SourceRig.GetPathName() : TargetRig.GetPathName()),
+                    !bSourceMatches ? TEXT("source_rig") : TEXT("target_rig"));
+            }
+            else if (!ChainMapping || !ChainMapping->IsReady()
+                || !ChainMapping->HasChain(TargetChainName, ERetargetSourceOrTarget::Target))
+            {
+                const TCHAR* Field = !ChainMapping ? TEXT("chain_mapping_available")
+                    : !ChainMapping->IsReady() ? TEXT("chain_mapping_ready") : TEXT("target_chain_available");
+                OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_mapping_missing"),
+                    !ChainMapping ? TEXT("No retarget chain mapping was created.")
+                        : !ChainMapping->IsReady() ? TEXT("The retarget chain mapping is not ready.")
+                        : FString::Printf(TEXT("Target chain '%s' is absent from the retarget mapping."), *TargetChainName.ToString()),
+                    Retargeter, TargetChainName.ToString(), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Field);
+            }
+            else
+            {
+                OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_mapping_missing"),
+                    TEXT("Exact automatic mapping did not map the target chain to the same-named source chain."),
+                    Retargeter, TargetChainName.ToString(),
+                    MakeShared<FJsonValueString>(ChainMapping->GetChainMappedTo(TargetChainName, ERetargetSourceOrTarget::Target).ToString()),
+                    MakeShared<FJsonValueString>(TargetChainName.ToString()), TEXT("source_chain"));
+            }
 			return false;
 		}
 		SetReceipts(Retargeter, EAnimationRigGraphBarrierKind::Validate, true, 0,
@@ -1790,13 +2352,14 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FAnimationRigGraphTopology& OutTopology,
 		FString& OutRevision,
 		FString& OutEvidenceId,
-		FAnimationRigGraphAdapterError& OutError) const
+		FAnimationRigGraphAdapterError& OutError, const FString& SourceRigInputPointer, const FString& TargetRigInputPointer) const
 	{
 		OutError.Reset();
 		UIKRetargeterController* Controller = UIKRetargeterController::GetController(&Retargeter);
 		if (!Controller || Mappings.IsEmpty())
 		{
-			OutError.Set(TEXT("animation_rig_graph_retargeter_controller_unavailable"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_retargeter_controller_unavailable"),
+				!Controller ? TEXT("The IK Retargeter controller is unavailable.") : TEXT("At least one retarget chain mapping mutation is required."), Retargeter);
 			return false;
 		}
 		Retargeter.Modify();
@@ -1805,36 +2368,83 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		Controller->CleanAsset();
 		for (const FAnimationRigGraphRetargetMappingMutation& Mapping : Mappings)
 		{
+			ON_SCOPE_EXIT { LocateRigInput(OutError, Mapping.InputPointer); };
 			if (Mapping.OperationRef != TEXT("/Script/IKRig.IKRetargetFKChainsOp")
 				|| Mapping.OrderIndex != 0)
 			{
-				OutError.Set(TEXT("animation_rig_graph_retarget_operation_unsupported"),
-					Mapping.OperationRef);
+				const bool bTypeInvalid = Mapping.OperationRef != TEXT("/Script/IKRig.IKRetargetFKChainsOp");
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_operation_unsupported"),
+					bTypeInvalid ? TEXT("The retarget mapping requires an FK chains operation.")
+						: TEXT("The retarget mapping supports only operation stack index zero."), Retargeter);
+				if (bTypeInvalid)
+				{
+					OutError.ActualValue = MakeShared<FJsonValueString>(Mapping.OperationRef);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("/Script/IKRig.IKRetargetFKChainsOp"));
+				}
+				else
+				{
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(Mapping.OrderIndex);
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(0);
+				}
+				if (Mapping.Intent != EAnimationRigGraphMutationIntent::Delete)
+				{
+					OutError.PropertyPath = bTypeInvalid ? TEXT("/operation_ref") : TEXT("/order_index");
+					LocateRigInput(OutError, Mapping.InputPointer, OutError.PropertyPath);
+				}
 				return false;
 			}
 			if (!Controller->GetChainMapping(NAME_None)
 				&& Controller->AddRetargetOp(FIKRetargetFKChainsOp::StaticStruct()) == INDEX_NONE)
 			{
-				OutError.Set(TEXT("animation_rig_graph_retarget_mapping_op_add_failed"));
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_mapping_op_add_failed"),
+					TEXT("The IK Retargeter controller could not add the FK chains operation required for the mapping."), Retargeter,
+					FString(), MakeShared<FJsonValueString>(Mapping.OperationRef));
 				return false;
 			}
 			const FName SourceChain =
 				Mapping.Intent == EAnimationRigGraphMutationIntent::Delete
 					? NAME_None : Mapping.SourceChain;
-			if (!Controller->SetSourceChain(SourceChain, Mapping.TargetChain, NAME_None))
+			UE::UAI::Contract::FDiagnostic MappingError;
+			if (!UeAgentIKAssetOps::ApplyRetargetChainMapping(*Controller,
+				SourceChain, Mapping.TargetChain, NAME_None, MappingError, RetargetMappingSource(Mapping, Retargeter)))
 			{
-				OutError.Set(TEXT("animation_rig_graph_retarget_mapping_update_failed"),
-					Mapping.TargetChain.ToString());
+				OutError = MappingError;
 				return false;
 			}
 		}
 		Controller->CleanAsset();
+		for (const FAnimationRigGraphRetargetMappingMutation& Mapping : Mappings)
+		{
+			const FName SourceChain = Mapping.Intent == EAnimationRigGraphMutationIntent::Delete
+				? NAME_None : Mapping.SourceChain;
+			UE::UAI::Contract::FDiagnostic MappingError;
+			if (!UeAgentIKAssetOps::VerifyRetargetChainMapping(*Controller,
+				SourceChain, Mapping.TargetChain, NAME_None, MappingError, RetargetMappingSource(Mapping, Retargeter)))
+			{
+				OutError = MappingError;
+				return false;
+			}
+		}
 		const FRetargetChainMapping* ChainMapping = Controller->GetChainMapping(NAME_None);
-		if (Controller->GetIKRig(ERetargetSourceOrTarget::Source) != &SourceRig
-			|| Controller->GetIKRig(ERetargetSourceOrTarget::Target) != &TargetRig
+		const UIKRigDefinition* ActualSource = Controller->GetIKRig(ERetargetSourceOrTarget::Source);
+		const UIKRigDefinition* ActualTarget = Controller->GetIKRig(ERetargetSourceOrTarget::Target);
+		if (ActualSource != &SourceRig || ActualTarget != &TargetRig
 			|| !ChainMapping || !ChainMapping->IsReady())
 		{
-			OutError.Set(TEXT("animation_rig_graph_retarget_mapping_missing"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_mapping_missing"),
+				ActualSource != &SourceRig ? TEXT("The retargeter did not retain the requested source IK Rig.")
+					: ActualTarget != &TargetRig ? TEXT("The retargeter did not retain the requested target IK Rig.")
+					: !ChainMapping ? TEXT("The retargeter has no chain mapping after applying the definition.")
+					: TEXT("The retargeter chain mapping is not ready after applying the definition."), Retargeter);
+			if (ActualSource != &SourceRig || ActualTarget != &TargetRig)
+			{
+				const bool bSourceMismatch = ActualSource != &SourceRig;
+				const UIKRigDefinition* ActualRig = bSourceMismatch ? ActualSource : ActualTarget;
+				OutError.ActualValuePresent = ActualRig != nullptr;
+				if (ActualRig) OutError.ActualValue = MakeShared<FJsonValueString>(ActualRig->GetPathName());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(bSourceMismatch ? SourceRig.GetPathName() : TargetRig.GetPathName());
+				LocateRigInput(OutError, bSourceMismatch ? SourceRigInputPointer : TargetRigInputPointer);
+			}
 			return false;
 		}
 		SetReceipts(Retargeter, EAnimationRigGraphBarrierKind::Validate, true, 0,
@@ -1872,17 +2482,24 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			? Cast<UIKRetargetFKChainsController>(Controller->GetOpController(0)) : nullptr;
 		if (!Controller || !OpController || Mutations.IsEmpty())
 		{
-			OutError.Set(TEXT("animation_rig_graph_retarget_settings_unavailable"));
+			OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_settings_unavailable"),
+				!Controller ? TEXT("The IK Retargeter controller is unavailable for settings changes.")
+					: !OpController ? TEXT("The first retarget operation has no FK chains controller for settings changes.")
+					: TEXT("At least one retarget setting mutation is required."), Retargeter);
 			return false;
 		}
 		Retargeter.Modify();
 		FIKRetargetFKChainsOpSettings Settings = OpController->GetSettings();
 		for (const FAnimationRigGraphRetargetSettingMutation& Mutation : Mutations)
 		{
+			ON_SCOPE_EXIT { LocateRigInput(OutError, Mutation.InputPointer); };
 			if (Mutation.Scope != TEXT("chain") || Mutation.ChainName.IsNone())
 			{
-				OutError.Set(TEXT("animation_rig_graph_retarget_setting_scope_unsupported"),
-					Mutation.Scope);
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_setting_scope_unsupported"),
+					Mutation.Scope != TEXT("chain") ? TEXT("Retarget settings support only chain scope.")
+						: TEXT("The retarget setting has no chain name."), Retargeter, FString(),
+					MakeShared<FJsonValueString>(Mutation.Scope != TEXT("chain") ? Mutation.Scope : Mutation.ChainName.ToString()),
+					MakeShared<FJsonValueString>(Mutation.Scope != TEXT("chain") ? TEXT("chain") : TEXT("nonempty chain name")));
 				return false;
 			}
 			FRetargetFKChainSettings* Chain = Settings.ChainsToRetarget.FindByPredicate(
@@ -1897,24 +2514,28 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			}
 			if (Mutation.SettingName == TEXT("RotationMode"))
 			{
-				const int64 Value = StaticEnum<EFKChainRotationMode>()->GetValueByNameString(
-					Mutation.Value);
-				if (Value == INDEX_NONE)
+				int64 Value = 0;
+				if (!UeAgentAuthoringTypeDescriptors::TryResolveEnumValueName(StaticEnum<EFKChainRotationMode>(), Mutation.Value, Value))
 				{
-					OutError.Set(TEXT("animation_rig_graph_retarget_setting_value_invalid"),
-						Mutation.Value);
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_setting_value_invalid"),
+						FString::Printf(TEXT("RotationMode for retarget chain '%s' is not a declared rotation-mode value."), *Mutation.ChainName.ToString()),
+						Retargeter, FString(), MakeShared<FJsonValueString>(Mutation.Value), MakeShared<FJsonValueString>(StaticEnum<EFKChainRotationMode>()->GetPathName()));
+					if (const auto Choices = UeAgentAuthoringTypeDescriptors::BuildEnumCandidates(StaticEnum<EFKChainRotationMode>()))
+						OutError.CandidateChoices = MakeShared<FJsonValueObject>(Choices);
 					return false;
 				}
 				Chain->RotationMode = static_cast<EFKChainRotationMode>(Value);
 			}
 			else if (Mutation.SettingName == TEXT("TranslationMode"))
 			{
-				const int64 Value = StaticEnum<EFKChainTranslationMode>()->GetValueByNameString(
-					Mutation.Value);
-				if (Value == INDEX_NONE)
+				int64 Value = 0;
+				if (!UeAgentAuthoringTypeDescriptors::TryResolveEnumValueName(StaticEnum<EFKChainTranslationMode>(), Mutation.Value, Value))
 				{
-					OutError.Set(TEXT("animation_rig_graph_retarget_setting_value_invalid"),
-						Mutation.Value);
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_setting_value_invalid"),
+						FString::Printf(TEXT("TranslationMode for retarget chain '%s' is not a declared translation-mode value."), *Mutation.ChainName.ToString()),
+						Retargeter, FString(), MakeShared<FJsonValueString>(Mutation.Value), MakeShared<FJsonValueString>(StaticEnum<EFKChainTranslationMode>()->GetPathName()));
+					if (const auto Choices = UeAgentAuthoringTypeDescriptors::BuildEnumCandidates(StaticEnum<EFKChainTranslationMode>()))
+						OutError.CandidateChoices = MakeShared<FJsonValueObject>(Choices);
 					return false;
 				}
 				Chain->TranslationMode = static_cast<EFKChainTranslationMode>(Value);
@@ -1923,7 +2544,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			{
 				if (!LexTryParseString(Chain->RotationAlpha, *Mutation.Value))
 				{
-					OutError.Set(TEXT("animation_rig_graph_retarget_setting_value_invalid"));
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_setting_value_invalid"),
+						FString::Printf(TEXT("RotationAlpha for retarget chain '%s' could not be parsed as a floating-point value."), *Mutation.ChainName.ToString()),
+						Retargeter, FString(), MakeShared<FJsonValueString>(Mutation.Value), MakeShared<FJsonValueString>(TEXT("floating-point value")));
 					return false;
 				}
 			}
@@ -1931,7 +2554,9 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			{
 				if (!LexTryParseString(Chain->TranslationAlpha, *Mutation.Value))
 				{
-					OutError.Set(TEXT("animation_rig_graph_retarget_setting_value_invalid"));
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_setting_value_invalid"),
+						FString::Printf(TEXT("TranslationAlpha for retarget chain '%s' could not be parsed as a floating-point value."), *Mutation.ChainName.ToString()),
+						Retargeter, FString(), MakeShared<FJsonValueString>(Mutation.Value), MakeShared<FJsonValueString>(TEXT("floating-point value")));
 					return false;
 				}
 			}
@@ -1939,14 +2564,18 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			{
 				if (!LexTryParseString(Chain->EnableFK, *Mutation.Value))
 				{
-					OutError.Set(TEXT("animation_rig_graph_retarget_setting_value_invalid"));
+					OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_setting_value_invalid"),
+						FString::Printf(TEXT("EnableFK for retarget chain '%s' could not be parsed as a boolean."), *Mutation.ChainName.ToString()),
+						Retargeter, FString(), MakeShared<FJsonValueString>(Mutation.Value), MakeShared<FJsonValueString>(TEXT("boolean")));
 					return false;
 				}
 			}
 			else
 			{
-				OutError.Set(TEXT("animation_rig_graph_retarget_setting_unsupported"),
-					Mutation.SettingName);
+				OutError = RigNativeFailure(TEXT("animation_rig_graph_retarget_setting_unsupported"),
+					FString::Printf(TEXT("The requested setting is unsupported for retarget chain '%s'."), *Mutation.ChainName.ToString()), Retargeter,
+					FString(), MakeShared<FJsonValueString>(Mutation.SettingName),
+					MakeShared<FJsonValueString>(TEXT("RotationMode, TranslationMode, RotationAlpha, TranslationAlpha or EnableFK")));
 				return false;
 			}
 		}
@@ -1979,12 +2608,24 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		if (FamilyId != TEXT("deformer_source_binding_mutation")
 			&& FamilyId != TEXT("ml_deformer_configuration_mutation"))
 		{
-			OutError.Set(TEXT("animation_rig_graph_concrete_type_required"), FamilyId);
+            OutError = FAnimationRigGraphAdapterError::Failure(TEXT("animation_rig_graph_concrete_type_required"),
+                TEXT("Concrete type support is only defined for the deformer source binding and ML deformer configuration mutation families."),
+                TEXT("native_graph"));
+            OutError.SourceKind = TEXT("native_result");
+            OutError.PropertyPath = TEXT("family");
+            OutError.ActualValue = MakeShared<FJsonValueString>(FamilyId);
+            OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("deformer_source_binding_mutation or ml_deformer_configuration_mutation"));
 			return false;
 		}
 		OutSupport.FamilyId = FamilyId;
 		OutSupport.NativeClassPath = NativeClassPath;
-		OutError.Set(TEXT("animation_rig_graph_concrete_type_unavailable"), NativeClassPath);
+        OutError = FAnimationRigGraphAdapterError::Failure(TEXT("animation_rig_graph_concrete_type_unavailable"),
+            TEXT("No native mutation hook is available for the requested concrete type in this family."), TEXT("native_graph"));
+        OutError.SourceKind = TEXT("native_result");
+        OutError.SubjectId = FamilyId;
+        OutError.PropertyPath = TEXT("native_class");
+        OutError.ActualValue = MakeShared<FJsonValueString>(NativeClassPath);
+        OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("concrete type with a supported native mutation hook"));
 		return false;
 	}
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "DomainAdapters/ExternalImport/Localization/UeAgentLocalizationImportProvider.h"
 #include "Templates/SharedPointer.h"
@@ -12,6 +14,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 		FString PythonFunction;
 
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 	};
 
 	UEAGENTINTERFACE_API const TArray<FUeAgentLocalizationImportCommandRoute>&
@@ -33,15 +36,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 		FString PayloadJson;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentLocalizationImportCommandError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-		FString TerminalStatus = TEXT("rejected");
-		bool bMutationStarted = false;
-		bool bRetrySafe = true;
-	};
+	using FUeAgentLocalizationImportCommandError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentLocalizationImportCommandService
 	{
@@ -56,5 +51,5 @@ namespace UE::UAI::OperationOwners::ExternalImport::Localization
 
 	UEAGENTINTERFACE_API bool TryCreateProductionLocalizationImportCommandService(
 		TSharedPtr<IUeAgentLocalizationImportCommandService>& OutService,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

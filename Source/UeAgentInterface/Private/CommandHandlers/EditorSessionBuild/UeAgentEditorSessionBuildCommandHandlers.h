@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Core/Contract/UeAgentContract.h"
 
@@ -9,5 +11,5 @@ namespace UE::UAI::CommandHandlers::EditorSessionBuild
 		TSharedRef<Contract::IUeAgentOperationApplicationPort> OperationPort,
 		TSharedRef<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

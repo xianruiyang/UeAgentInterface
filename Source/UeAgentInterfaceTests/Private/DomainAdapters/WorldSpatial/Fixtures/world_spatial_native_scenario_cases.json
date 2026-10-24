@@ -1,7 +1,5 @@
 {
   "schema": "uai.domain_adapter.world_spatial.native_scenario_fixture.v1",
-  "scenario_count": 8,
-  "capability_count": 22,
   "scenarios": [
     {
       "scenario_id": "graph_view_owned_blueprint_editor",

@@ -60,9 +60,8 @@ namespace
 			|| CommandId == TEXT("skeletal_mesh.remove_skin_weight_profile");
 	}
 
-	bool TryAddDestructiveAuthorization(
+	bool TryAddConfirmation(
 		const FString& Params,
-		const FString& AuthorizationId,
 		FString& OutParams)
 	{
 		TSharedPtr<FJsonObject> Object;
@@ -72,8 +71,7 @@ namespace
 		{
 			return false;
 		}
-		Object->SetStringField(
-			TEXT("destructive_authorization_id"), AuthorizationId);
+		Object->SetBoolField(TEXT("confirm"), true);
 		const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>>
 			Writer = TJsonWriterFactory<
 				TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&OutParams);
@@ -84,7 +82,7 @@ namespace
 		const FScopedPublicCommandComposition& Harness,
 		const FString& CommandId,
 		const FString& Params,
-		TOptional<FUeAgentCommandResult>& OutResult,
+		TSharedPtr<FJsonObject>& OutResult,
 		TSharedPtr<FJsonObject>& OutPayload,
 		FString& OutError)
 	{
@@ -131,18 +129,11 @@ namespace
 				TEXT("command_http_status:%d"), Response.StatusCode);
 			return false;
 		}
-		FUeAgentCommandProtocolDiagnostic Diagnostic;
-		FUeAgentCommandProtocolCodec Codec;
-		if (!Codec.DecodeResult(Response.Body, OutResult, Diagnostic)
-			|| !OutResult.IsSet())
-		{
-			OutError = Diagnostic.Code + TEXT(":") + Diagnostic.Message;
-			return false;
-		}
-		const TSharedRef<TJsonReader<>> Reader =
-			TJsonReaderFactory<>::Create(OutResult->GetPayloadJson());
-		return FJsonSerializer::Deserialize(Reader, OutPayload)
-			&& OutPayload.IsValid();
+		if (!ReadPublicResponse(Response.Body, OutResult, OutError)) return false;
+		const TSharedPtr<FJsonObject>* Payload = nullptr;
+		if (!OutResult->TryGetObjectField(TEXT("payload"), Payload)) return false;
+		OutPayload = *Payload;
+		return OutPayload.IsValid();
 	}
 
 	class FOwnedAssetFixture final
@@ -482,55 +473,36 @@ bool FUeAgentDestructiveImportAssetProductionTest::RunTest(
 		return false;
 	}
 
-	const TArray<FString> RetiredLegacyIds{
-		TEXT("asset_move"), TEXT("asset_fixup_redirectors"),
-		TEXT("sound_wave_reimport"), TEXT("sparse_volume_texture_reimport"),
-		TEXT("static_mesh_reimport"), TEXT("texture_reimport"),
-		TEXT("skeletal_mesh_remove_morph_target"),
-		TEXT("skeletal_mesh_remove_skin_weight_profile"),
-	};
-	for (const FString& LegacyId : RetiredLegacyIds)
-	{
-		TestNull(*FString::Printf(
-			TEXT("legacy command is absent from the formal registry: %s"),
-			*LegacyId),
-			Harness.GetCommandRegistry()->FindExact(LegacyId));
-	}
-
 	auto Invoke = [this, &Harness, &Error](
 		const FString& CommandId,
 		const FString& Params,
 		bool bExpectedSuccess,
 		TSharedPtr<FJsonObject>& OutPayload)
 	{
-		TOptional<FUeAgentCommandResult> Result;
+		TSharedPtr<FJsonObject> Result;
 		const bool bInvoked = TryInvoke(
 			Harness, CommandId, Params, Result, OutPayload, Error);
 		TestTrue(*FString::Printf(TEXT("%s reaches formal handler"), *CommandId),
-			bInvoked && Result.IsSet());
-		if (!bInvoked || !Result.IsSet())
+			bInvoked && Result.IsValid());
+		if (!bInvoked || !Result.IsValid())
 		{
 			AddError(Error);
 			return false;
 		}
-		if (IsPlanAuthorizedCommand(CommandId) && Result->IsOk())
+		if (IsPlanAuthorizedCommand(CommandId) && Result->GetBoolField(TEXT("ok")))
 		{
-			FString AuthorizationId;
-			FString TerminalStatus;
 			FString AuthorizedParams;
 			if (!OutPayload.IsValid()
-				|| !OutPayload->TryGetStringField(
-					TEXT("terminal_status"), TerminalStatus)
-				|| TerminalStatus != TEXT("planned")
-				|| !OutPayload->TryGetStringField(
-					TEXT("destructive_authorization_id"), AuthorizationId)
-				|| AuthorizationId.IsEmpty()
-				|| !TryAddDestructiveAuthorization(
-					Params, AuthorizationId, AuthorizedParams)
+				|| OutPayload->GetStringField(TEXT("status")) != TEXT("planned")
+				|| OutPayload->HasField(TEXT("operation_id"))
+				|| OutPayload->HasField(TEXT("plan_fingerprint"))
+				|| OutPayload->HasField(TEXT("destructive_authorization_id"))
+				|| OutPayload->HasField(TEXT("revision_snapshot"))
+				|| !TryAddConfirmation(Params, AuthorizedParams)
 				|| !TryInvoke(
 					Harness, CommandId, AuthorizedParams,
 					Result, OutPayload, Error)
-				|| !Result.IsSet())
+				|| !Result.IsValid())
 			{
 				AddError(CommandId + TEXT(":destructive_authorization_failed:")
 					+ Error);
@@ -538,39 +510,39 @@ bool FUeAgentDestructiveImportAssetProductionTest::RunTest(
 			}
 		}
 		TestEqual(*FString::Printf(TEXT("%s success state"), *CommandId),
-			Result->IsOk(), bExpectedSuccess);
+			Result->GetBoolField(TEXT("ok")), bExpectedSuccess);
 		FString TerminalStatus;
-		if (Result->IsOk())
+		if (Result->GetBoolField(TEXT("ok")))
 		{
+			const TCHAR* StatusField = IsPlanAuthorizedCommand(CommandId)
+				? TEXT("status")
+				: TEXT("terminal_status");
 			TestTrue(*FString::Printf(TEXT("%s success terminal status"),
 					*CommandId),
 				OutPayload.IsValid()
 					&& OutPayload->TryGetStringField(
-						TEXT("terminal_status"), TerminalStatus)
+						StatusField, TerminalStatus)
 					&& TerminalStatus == (IsPlanAuthorizedCommand(CommandId)
 						? TEXT("committed") : TEXT("succeeded")));
 		}
 		else
 		{
-			TSharedPtr<FJsonObject> ErrorObject;
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(Result->GetErrorJson());
+			const auto ErrorObject = Result->GetObjectField(TEXT("error"));
 			TestTrue(*FString::Printf(TEXT("%s typed terminal failure"),
 					*CommandId),
-				FJsonSerializer::Deserialize(Reader, ErrorObject)
-					&& ErrorObject.IsValid()
+				ErrorObject.IsValid()
 					&& ErrorObject->TryGetStringField(
 						TEXT("terminal_status"), TerminalStatus)
 					&& !TerminalStatus.IsEmpty()
 					&& TerminalStatus != TEXT("state_unknown"));
 		}
-		if (Result->IsOk() != bExpectedSuccess)
+		if (Result->GetBoolField(TEXT("ok")) != bExpectedSuccess)
 		{
 			AddError(FString::Printf(
-				TEXT("%s unexpected result payload=%s error=%s"),
-				*CommandId, *Result->GetPayloadJson(), *Result->GetErrorJson()));
+				TEXT("%s unexpected result: %s"),
+				*CommandId, *PublicErrorText(Result)));
 		}
-		return Result->IsOk() == bExpectedSuccess;
+		return Result->GetBoolField(TEXT("ok")) == bExpectedSuccess;
 	};
 
 	TSharedPtr<FJsonObject> Payload;

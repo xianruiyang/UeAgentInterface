@@ -1,5 +1,8 @@
 #include "Utilities/UeAgentStructuredHjsonFormatter.h"
 
+#include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
+#include "Core/StateSemantic/UeAgentStateSemantic.h"
+
 #include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -186,13 +189,10 @@ namespace
 		{
 			return false;
 		}
-		const double Value = FCString::Atod(*Token);
-		if (!std::isfinite(Value))
-		{
-			bOutNonFinite = true;
-			return false;
-		}
-		return TryFormatFiniteDouble(Value, true, OutCanonical);
+		// Number-string values carry the exact authoring lexeme. Converting to
+		// double here rounds edits before the native type owner can validate them.
+		OutCanonical = Token;
+		return true;
 	}
 
 	static FString Padding(const int32 Level)
@@ -277,7 +277,123 @@ namespace
 		return Result;
 	}
 
-	static bool IsScalarValue(const TSharedPtr<FJsonValue>& Value)
+	// A borrowed view keeps both supported inputs on the same writer and accounting path.
+	// It never materializes a second tree (FJsonObject cannot represent exact-case keys).
+	class FWriterNodeView
+	{
+	public:
+		using FCanonical = UE::UAI::StateSemantic::FUeAgentCanonicalValue;
+		FWriterNodeView() = default;
+		FWriterNodeView(const TSharedPtr<FJsonValue>& Value) : FWriterNodeView(Value.Get()) {}
+		FWriterNodeView(const TSharedRef<FJsonValue>& Value) : FWriterNodeView(&Value.Get()) {}
+		FWriterNodeView(const TSharedPtr<FJsonObject>& Object) : FWriterNodeView(Object.Get()) {}
+		FWriterNodeView(const TSharedRef<FJsonObject>& Object) : FWriterNodeView(&Object.Get()) {}
+		FWriterNodeView(const FJsonValue* Value) : Json(Value), Type(Value ? Value->Type : EJson::None) {}
+		FWriterNodeView(const FJsonObject* Object) : JsonObject(Object), Type(Object ? EJson::Object : EJson::None) {}
+		FWriterNodeView(const FCanonical& Value) : Canonical(&Value)
+		{
+			using UE::UAI::StateSemantic::EUeAgentValueKind;
+			switch (Value.GetKind())
+			{
+			case EUeAgentValueKind::Null: Type = EJson::Null; break;
+			case EUeAgentValueKind::Boolean: Type = EJson::Boolean; break;
+			case EUeAgentValueKind::String: Type = EJson::String; break;
+			case EUeAgentValueKind::Integer:
+			case EUeAgentValueKind::Decimal: Type = EJson::Number; break;
+			case EUeAgentValueKind::Object: Type = EJson::Object; break;
+			case EUeAgentValueKind::Array: Type = EJson::Array; break;
+			default: break;
+			}
+		}
+		const FWriterNodeView* operator->() const { return this; }
+		bool IsValid() const { return Json || JsonObject || Canonical; }
+		bool IsUnsupported() const { return Canonical && Type == EJson::None; }
+		const void* Get() const { return Canonical ? static_cast<const void*>(Canonical) : JsonObject ? static_cast<const void*>(JsonObject) : Json; }
+		FWriterNodeView AsObject() const { return Canonical || JsonObject ? *this : FWriterNodeView(Json->AsObject()); }
+		FString AsString() const { return Canonical ? Canonical->GetText() : Json->AsString(); }
+		bool AsBool() const { return Canonical ? Canonical->GetBoolean() : Json->AsBool(); }
+		double AsNumber() const { return Json ? Json->AsNumber() : 0.0; }
+		bool PreferStringRepresentation() const { return Canonical || (Json && Json->PreferStringRepresentation()); }
+		bool TryGetString(FString& Out) const { if (Canonical) { Out = Canonical->GetLexeme(); return Type == EJson::Number; } return Json && Json->TryGetString(Out); }
+		SIZE_T GetMemoryFootprint() const { return Canonical ? sizeof(FCanonical) + Canonical->GetText().GetAllocatedSize() + Canonical->GetLexeme().GetAllocatedSize() : Json->GetMemoryFootprint(); }
+		int32 NumFields() const { return Canonical ? Canonical->GetObjectItems().Num() : JsonObject->Values.Num(); }
+		void GetKeys(TArray<FString>& Out) const
+		{
+			if (Canonical) { for (const auto& Field : Canonical->GetObjectItems()) { Out.Add(Field.Key); } }
+			else { JsonObject->Values.GetKeys(Out); }
+		}
+		FWriterNodeView FindField(const FString& Key) const
+		{
+			if (Canonical)
+			{
+				const auto& Fields = Canonical->GetObjectItems();
+				int32 Begin = 0, End = Fields.Num();
+				while (Begin < End)
+				{
+					const int32 Mid = Begin + (End - Begin) / 2;
+					if (Fields[Mid].Key.Compare(Key, ESearchCase::CaseSensitive) < 0) Begin = Mid + 1;
+					else End = Mid;
+				}
+				return Begin < Fields.Num() && Fields[Begin].Key.Equals(Key, ESearchCase::CaseSensitive)
+					? FWriterNodeView(Fields[Begin].Value.Get()) : FWriterNodeView();
+			}
+			return JsonObject->Values.FindRef(Key);
+		}
+		bool HasField(const FString& Key) const { return FindField(Key).IsValid(); }
+		struct FFields;
+		struct FArray;
+		FFields Fields() const;
+		FArray AsArray() const;
+		const FJsonValue* Json = nullptr;
+		const FJsonObject* JsonObject = nullptr;
+		const FCanonical* Canonical = nullptr;
+		EJson Type = EJson::None;
+	};
+
+	struct FWriterNodeView::FFields
+	{
+		FWriterNodeView Object;
+		struct FField { const FString& Key; FWriterNodeView Value; };
+		struct FIterator
+		{
+			FWriterNodeView Object;
+			int32 Index;
+			TOptional<TMap<FString, TSharedPtr<FJsonValue>>::TConstIterator> JsonIterator;
+			FIterator(FWriterNodeView InObject, int32 InIndex) : Object(InObject), Index(InIndex)
+			{
+				if (!Object.Canonical && Index < Object.NumFields()) { JsonIterator.Emplace(Object.JsonObject->Values.CreateConstIterator()); }
+			}
+			bool operator!=(const FIterator& Other) const { return Index != Other.Index; }
+			void operator++() { ++Index; if (JsonIterator.IsSet()) { ++JsonIterator.GetValue(); } }
+			FField operator*() const
+			{
+				if (Object.Canonical) { const auto& Field = Object.Canonical->GetObjectItems()[Index]; return {Field.Key, FWriterNodeView(Field.Value.Get())}; }
+				const auto& Field = *JsonIterator.GetValue(); return {Field.Key, FWriterNodeView(Field.Value)};
+			}
+		};
+		FIterator begin() const { return {Object, 0}; }
+		FIterator end() const { return {Object, Object.NumFields()}; }
+	};
+	struct FWriterNodeView::FArray
+	{
+		FWriterNodeView Value;
+		int32 Num() const { return Value.Canonical ? Value.Canonical->GetArrayItems().Num() : Value.Json->AsArray().Num(); }
+		FWriterNodeView operator[](int32 Index) const { return Value.Canonical ? FWriterNodeView(Value.Canonical->GetArrayItems()[Index].Get()) : FWriterNodeView(Value.Json->AsArray()[Index]); }
+		struct FIterator
+		{
+			const FArray* Array;
+			int32 Index;
+			bool operator!=(const FIterator& Other) const { return Index != Other.Index; }
+			void operator++() { ++Index; }
+			FWriterNodeView operator*() const { return (*Array)[Index]; }
+		};
+		FIterator begin() const { return {this, 0}; }
+		FIterator end() const { return {this, Num()}; }
+	};
+	FWriterNodeView::FFields FWriterNodeView::Fields() const { return {*this}; }
+	FWriterNodeView::FArray FWriterNodeView::AsArray() const { return {*this}; }
+
+	static bool IsScalarValue(const FWriterNodeView& Value)
 	{
 		return !Value.IsValid()
 			|| Value->Type == EJson::None
@@ -288,6 +404,8 @@ namespace
 	}
 
 	static constexpr int32 InlineObjectFieldLimit = 6;
+	static constexpr int32 InlineContainerCharacterLimit = 120;
+	static constexpr int32 InlineContainerDepthLimit = 2;
 
 	static bool HasExactKeySet(const TArray<FString>& Keys, const TArray<FString>& ExpectedKeys)
 	{
@@ -298,7 +416,7 @@ namespace
 
 		for (const FString& ExpectedKey : ExpectedKeys)
 		{
-			if (!Keys.Contains(ExpectedKey))
+			if (!Keys.ContainsByPredicate([&](const FString& Key) { return Key.Equals(ExpectedKey, ESearchCase::CaseSensitive); }))
 			{
 				return false;
 			}
@@ -346,10 +464,7 @@ namespace
 			, OwnedResourceTracker(
 				InResourceTracker
 					? nullptr
-					: MakeUnique<FUeAgentStructuredResourceTracker>(
-						InOptions
-							? InOptions->ResourceBudget
-							: FUeAgentStructuredResourceBudget()))
+					: MakeUnique<FUeAgentStructuredResourceTracker>())
 			, ResourceTracker(
 				InResourceTracker
 					? *InResourceTracker
@@ -358,18 +473,24 @@ namespace
 		}
 
 		bool TryWriteRootObject(
-			const TSharedRef<FJsonObject>& Object,
+			const FWriterNodeView& Object,
 			FString& OutText,
-			FString& OutError) const
+			UE::UAI::Contract::FDiagnostic& OutError) const
 		{
 			Error.Reset();
+			if (Object.Type != EJson::Object)
+			{
+				OutText.Reset();
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_root_not_object"), TEXT("The HJSON root must be an object."), TEXT("hjson_write"));
+				return false;
+			}
 			if (!AnalyzeRootObject(Object))
 			{
 				OutText.Reset();
 				OutError = Error;
 				return false;
 			}
-			if (Object->Values.Num() == 0)
+			if (Object->NumFields() == 0)
 			{
 				if (!ResourceTracker.ChargeWorkUnits(
 						2,
@@ -417,9 +538,9 @@ namespace
 		}
 
 		bool TryWriteValue(
-			const TSharedRef<FJsonValue>& Value,
+			const FWriterNodeView& Value,
 			FString& OutText,
-			FString& OutError) const
+			UE::UAI::Contract::FDiagnostic& OutError) const
 		{
 			Error.Reset();
 			if (!AnalyzeRootValue(Value))
@@ -463,11 +584,12 @@ namespace
 		{
 			EWriteTaskType Type = EWriteTaskType::Text;
 			FString Text;
-			TSharedPtr<FJsonValue> Value;
-			TSharedPtr<FJsonObject> Object;
+			FWriterNodeView Value;
+			FWriterNodeView Object;
 			int32 Level = 0;
 			FString FieldName;
 			FString JsonPointer;
+			bool bInlineContext = false;
 			bool bTextResourcesPrecharged = false;
 
 			static FWriteTask TextTask(
@@ -485,10 +607,11 @@ namespace
 			}
 
 			static FWriteTask ValueTask(
-				TSharedPtr<FJsonValue> InValue,
+				FWriterNodeView InValue,
 				const int32 InLevel,
 				FString InFieldName,
-				FString InJsonPointer)
+				FString InJsonPointer,
+				const bool bInInlineContext = false)
 			{
 				FWriteTask Task;
 				Task.Type = EWriteTaskType::Value;
@@ -496,11 +619,12 @@ namespace
 				Task.Level = InLevel;
 				Task.FieldName = MoveTemp(InFieldName);
 				Task.JsonPointer = MoveTemp(InJsonPointer);
+				Task.bInlineContext = bInInlineContext;
 				return Task;
 			}
 
 			static FWriteTask ObjectBody(
-				TSharedPtr<FJsonObject> InObject,
+				FWriterNodeView InObject,
 				const int32 InLevel,
 				FString InJsonPointer)
 			{
@@ -525,12 +649,12 @@ namespace
 		struct FAnalysisTask
 		{
 			EAnalysisTaskType Type = EAnalysisTaskType::ValueEnter;
-			TSharedPtr<FJsonValue> Value;
-			TSharedPtr<FJsonObject> Object;
+			FWriterNodeView Value;
+			FWriterNodeView Object;
 			FString JsonPointer = TEXT("/");
 
 			static FAnalysisTask ValueEnter(
-				TSharedPtr<FJsonValue> InValue,
+				FWriterNodeView InValue,
 				FString InJsonPointer)
 			{
 				FAnalysisTask Task;
@@ -542,7 +666,7 @@ namespace
 
 			static FAnalysisTask ObjectTask(
 				const EAnalysisTaskType InType,
-				TSharedPtr<FJsonObject> InObject,
+				FWriterNodeView InObject,
 				FString InJsonPointer)
 			{
 				FAnalysisTask Task;
@@ -554,7 +678,7 @@ namespace
 
 			static FAnalysisTask ArrayTask(
 				const EAnalysisTaskType InType,
-				TSharedPtr<FJsonValue> InValue,
+				FWriterNodeView InValue,
 				FString InJsonPointer)
 			{
 				FAnalysisTask Task;
@@ -565,7 +689,7 @@ namespace
 			}
 		};
 
-		bool AnalyzeRootObject(const TSharedRef<FJsonObject>& Object) const
+		bool AnalyzeRootObject(const FWriterNodeView& Object) const
 		{
 			ResetAnalysis();
 			TArray<FAnalysisTask> Stack;
@@ -576,7 +700,7 @@ namespace
 			return AnalyzeTasks(Stack);
 		}
 
-		bool AnalyzeRootValue(const TSharedRef<FJsonValue>& Value) const
+		bool AnalyzeRootValue(const FWriterNodeView& Value) const
 		{
 			ResetAnalysis();
 			TArray<FAnalysisTask> Stack;
@@ -588,6 +712,10 @@ namespace
 		{
 			ObjectInlineCountCache.Reset();
 			ArrayInlineCountCache.Reset();
+			ObjectInlineLengthCache.Reset();
+			ArrayInlineLengthCache.Reset();
+			ObjectInlineDepthCache.Reset();
+			ArrayInlineDepthCache.Reset();
 			VisitingObjects.Reset();
 			VisitingArrays.Reset();
 		}
@@ -659,11 +787,19 @@ namespace
 		bool TryMakeStringValueTask(
 			FString& StringValue,
 			const FString& JsonPointer,
+			const bool bInlineContext,
 			const bool bPreflight,
 			FWriteTask& OutTask) const
 		{
 			const bool bBare =
-				FUeAgentStructuredHjsonFormatter::IsBareString(StringValue);
+				!bInlineContext && FUeAgentStructuredHjsonFormatter::IsBareString(StringValue);
+			const int64 CanonicalChars = bBare
+				? StringValue.Len()
+				: EscapedQuotedStringLength(StringValue);
+			if (bPreflight && !ChargeCanonicalTextResources(CanonicalChars, JsonPointer))
+			{
+				return false;
+			}
 			FString CanonicalText = bBare
 				? MoveTemp(StringValue)
 				: FUeAgentStructuredHjsonFormatter::EscapeQuotedString(
@@ -712,14 +848,47 @@ namespace
 				&& ResourceTracker.Checkpoint(TEXT("/"), Error);
 		}
 
+		FWriterNodeView ProjectedLeaf(const FWriterNodeView& Value) const
+		{
+			if (Value.Canonical)
+				if (const auto* Found = LeafProjections.Find(Value.Canonical)) return *Found;
+			return Value;
+		}
+
 		bool AnalyzeValue(
 			TArray<FAnalysisTask>& Stack,
-			const TSharedPtr<FJsonValue>& Value,
+			const FWriterNodeView& Input,
 			const FString& JsonPointer) const
 		{
+			if (Input.Canonical && Options && Options->CanonicalLeafProjection && !LeafProjections.Contains(Input.Canonical))
+			{
+				TSharedPtr<FJsonValue> Projected;
+				UE::UAI::Contract::FDiagnostic ProjectionError;
+				if (!Options->CanonicalLeafProjection(*Input.Canonical, [&](int64 Bytes) {
+					return ResourceTracker.ChargeEstimatedMemoryBytes(Bytes, JsonPointer, Error)
+						&& ResourceTracker.ChargeWorkUnits(1, JsonPointer, Error)
+						&& ResourceTracker.Checkpoint(JsonPointer, Error);
+				}, Projected, ProjectionError))
+				{
+					if (Error.IsEmpty())
+					{
+						Error = ProjectionError;
+						if (Error.IsEmpty()) SetWriteError(TEXT("hjson_leaf_projection_failed"), JsonPointer, TEXT("The canonical leaf projection failed without a diagnostic."));
+						if (Error.Source.JsonPath.IsEmpty()) Error.Source.JsonPath = JsonPointer;
+					}
+					return false;
+				}
+				if (Projected.IsValid()) LeafProjections.Add(Input.Canonical, Projected);
+			}
+			const FWriterNodeView Value = ProjectedLeaf(Input);
+			if (Value.IsUnsupported())
+			{
+				SetWriteError(TEXT("hjson_value_kind_unsupported"), JsonPointer, TEXT("canonical value is not an HJSON value"));
+				return false;
+			}
 			if (Value.IsValid() && Value->Type == EJson::Object)
 			{
-				const TSharedPtr<FJsonObject> Object = Value->AsObject();
+				const FWriterNodeView Object = Value->AsObject();
 				if (Object.IsValid())
 				{
 					Stack.Add(FAnalysisTask::ObjectTask(
@@ -739,7 +908,6 @@ namespace
 			}
 
 			int64 DynamicChars = 0;
-			int64 CanonicalStringChars = INDEX_NONE;
 			bool bValueMemoryPrecharged = false;
 			if (Value.IsValid() && Value->Type == EJson::String)
 			{
@@ -759,11 +927,6 @@ namespace
 				bValueMemoryPrecharged = true;
 				const FString StringValue = Value->AsString();
 				DynamicChars = StringValue.Len();
-				CanonicalStringChars =
-					FUeAgentStructuredHjsonFormatter::IsBareString(
-						StringValue)
-					? DynamicChars
-					: EscapedQuotedStringLength(StringValue);
 			}
 			else if (Value.IsValid()
 				&& Value->Type == EJson::Number
@@ -803,15 +966,12 @@ namespace
 			{
 				return false;
 			}
-			return CanonicalStringChars == INDEX_NONE
-				|| ChargeCanonicalTextResources(
-					CanonicalStringChars,
-					JsonPointer);
+			return true;
 		}
 
 		bool AnalyzeObjectEnter(
 			TArray<FAnalysisTask>& Stack,
-			const TSharedPtr<FJsonObject>& Object,
+			const FWriterNodeView& Object,
 			const FString& JsonPointer) const
 		{
 			if (!Object.IsValid())
@@ -824,7 +984,7 @@ namespace
 						Error);
 			}
 
-			const FJsonObject* Identity = Object.Get();
+			const void* Identity = Object.Get();
 			if (VisitingObjects.Contains(Identity))
 			{
 				SetWriteError(
@@ -834,15 +994,15 @@ namespace
 				return false;
 			}
 			int64 KeyChars = 0;
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+			for (const auto& Field : Object->Fields())
 			{
 				KeyChars += Field.Key.Len();
 			}
-			const int64 ItemCount = Object->Values.Num();
+			const int64 ItemCount = Object->NumFields();
 			const int64 EstimatedBytes =
 				sizeof(FJsonObject)
 				+ ItemCount
-					* (sizeof(TPair<FString, TSharedPtr<FJsonValue>>)
+					* (sizeof(TPair<FString, FWriterNodeView>)
 						+ sizeof(FAnalysisTask))
 				+ (ItemCount * 5 + 3) * sizeof(FWriteTask)
 				+ KeyChars * sizeof(TCHAR);
@@ -862,7 +1022,7 @@ namespace
 			{
 				return false;
 			}
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+			for (const auto& Field : Object->Fields())
 			{
 				const int64 CanonicalKeyChars =
 					FUeAgentStructuredHjsonFormatter::IsBareKey(Field.Key)
@@ -883,8 +1043,8 @@ namespace
 				JsonPointer));
 
 			TArray<FString> Keys;
-			Object->Values.GetKeys(Keys);
-			Keys.Sort();
+			Object->GetKeys(Keys);
+			Keys.Sort([](const FString& A, const FString& B) { return A.Compare(B, ESearchCase::CaseSensitive) < 0; });
 			for (int32 Index = Keys.Num() - 1; Index >= 0; --Index)
 			{
 				const FString& Key = Keys[Index];
@@ -899,14 +1059,14 @@ namespace
 					return false;
 				}
 				Stack.Add(FAnalysisTask::ValueEnter(
-					Object->Values.FindRef(Key),
+					Object->FindField(Key),
 					MoveTemp(ValuePointer)));
 			}
 			return true;
 		}
 
 		void AnalyzeObjectExit(
-			const TSharedPtr<FJsonObject>& Object,
+			const FWriterNodeView& Object,
 			const FString& JsonPointer) const
 		{
 			if (!Object.IsValid())
@@ -915,8 +1075,8 @@ namespace
 			}
 			if (!ObjectInlineCountCache.Contains(Object.Get()))
 			{
-				int32 Count = Object->Values.Num() == 0 ? 1 : 0;
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+				int32 Count = Object->NumFields() == 0 ? 1 : 0;
+				for (const auto& Field : Object->Fields())
 				{
 					Count = FMath::Min(
 						InlineObjectFieldLimit + 1,
@@ -928,19 +1088,48 @@ namespace
 				}
 				ObjectInlineCountCache.Add(Object.Get(), Count);
 			}
+			if (!ObjectInlineLengthCache.Contains(Object.Get()))
+			{
+				int32 Length = Object->NumFields() == 0 ? 2 : 4;
+				int32 Depth = 1;
+				for (const auto& Field : Object->Fields())
+				{
+					const int32 KeyLength = static_cast<int32>(FMath::Min<int64>(
+						InlineContainerCharacterLimit + 1,
+						FUeAgentStructuredHjsonFormatter::IsBareKey(Field.Key)
+						? Field.Key.Len()
+						: EscapedQuotedStringLength(Field.Key)));
+					Length = static_cast<int32>(FMath::Min<int64>(
+						InlineContainerCharacterLimit + 1,
+						static_cast<int64>(Length) + KeyLength + 2
+							+ InlineLengthForValue(Field.Value, JsonPointer)));
+					Depth = FMath::Max(
+						Depth,
+						1 + InlineDepthForValue(Field.Value, JsonPointer));
+				}
+				if (Object->NumFields() > 1)
+				{
+					Length = static_cast<int32>(FMath::Min<int64>(
+						InlineContainerCharacterLimit + 1,
+						static_cast<int64>(Length)
+							+ 2LL * (Object->NumFields() - 1)));
+				}
+				ObjectInlineLengthCache.Add(Object.Get(), Length);
+				ObjectInlineDepthCache.Add(Object.Get(), Depth);
+			}
 			VisitingObjects.Remove(Object.Get());
 		}
 
 		bool AnalyzeArrayEnter(
 			TArray<FAnalysisTask>& Stack,
-			const TSharedPtr<FJsonValue>& ArrayValue,
+			const FWriterNodeView& ArrayValue,
 			const FString& JsonPointer) const
 		{
 			if (!ArrayValue.IsValid() || ArrayValue->Type != EJson::Array)
 			{
 				return AnalyzeValue(Stack, ArrayValue, JsonPointer);
 			}
-			const FJsonValue* Identity = ArrayValue.Get();
+			const void* Identity = ArrayValue.Get();
 			if (VisitingArrays.Contains(Identity))
 			{
 				SetWriteError(
@@ -949,12 +1138,12 @@ namespace
 					TEXT("cyclic authoring array"));
 				return false;
 			}
-			const TArray<TSharedPtr<FJsonValue>>& Values = ArrayValue->AsArray();
+			const auto Values = ArrayValue->AsArray();
 			const int64 ItemCount = Values.Num();
 			const int64 EstimatedBytes =
 				sizeof(FJsonValue)
 				+ ItemCount
-					* (sizeof(TSharedPtr<FJsonValue>)
+					* (sizeof(FWriterNodeView)
 						+ sizeof(FAnalysisTask))
 				+ (ItemCount * 2 + 2) * sizeof(FWriteTask);
 			if (!ResourceTracker.ChargeNodes(1, JsonPointer, Error)
@@ -1000,7 +1189,7 @@ namespace
 		}
 
 		void AnalyzeArrayExit(
-			const TSharedPtr<FJsonValue>& ArrayValue,
+			const FWriterNodeView& ArrayValue,
 			const FString& JsonPointer) const
 		{
 			if (!ArrayValue.IsValid() || ArrayValue->Type != EJson::Array)
@@ -1010,7 +1199,7 @@ namespace
 			if (!ArrayInlineCountCache.Contains(ArrayValue.Get()))
 			{
 				bool bContainsObject = false;
-				for (const TSharedPtr<FJsonValue>& Value : ArrayValue->AsArray())
+				for (const FWriterNodeView& Value : ArrayValue->AsArray())
 				{
 					if (!Value.IsValid())
 					{
@@ -1044,13 +1233,140 @@ namespace
 					ArrayValue.Get(),
 					bContainsObject ? InlineObjectFieldLimit + 1 : 1);
 			}
+			if (!ArrayInlineLengthCache.Contains(ArrayValue.Get()))
+			{
+				const auto Values = ArrayValue->AsArray();
+				int32 Length = Values.Num() == 0 ? 2 : 2;
+				int32 Depth = 1;
+				for (const FWriterNodeView& Value : Values)
+				{
+					Length = static_cast<int32>(FMath::Min<int64>(
+						InlineContainerCharacterLimit + 1,
+						static_cast<int64>(Length) + InlineLengthForValue(Value, JsonPointer)));
+					Depth = FMath::Max(
+						Depth,
+						1 + InlineDepthForValue(Value, JsonPointer));
+				}
+				if (Values.Num() > 1)
+				{
+					Length = static_cast<int32>(FMath::Min<int64>(
+						InlineContainerCharacterLimit + 1,
+						static_cast<int64>(Length) + 2LL * (Values.Num() - 1)));
+				}
+				ArrayInlineLengthCache.Add(ArrayValue.Get(), Length);
+				ArrayInlineDepthCache.Add(ArrayValue.Get(), Depth);
+			}
 			VisitingArrays.Remove(ArrayValue.Get());
 		}
 
-		int32 InlineCountForValue(
-			const TSharedPtr<FJsonValue>& Value,
+		int32 InlineLengthForValue(
+			const FWriterNodeView& Input,
 			const FString& JsonPointer) const
 		{
+			const FWriterNodeView Value = ProjectedLeaf(Input);
+			if (!Value.IsValid() || Value->Type == EJson::None || Value->Type == EJson::Null)
+			{
+				return 4;
+			}
+			switch (Value->Type)
+			{
+			case EJson::String:
+			{
+				const FString Text = Value->AsString();
+				return static_cast<int32>(FMath::Min<int64>(
+					InlineContainerCharacterLimit + 1,
+					EscapedQuotedStringLength(Text)));
+			}
+			case EJson::Number:
+			{
+				FString NumberText;
+				if (Value->PreferStringRepresentation())
+				{
+					FString Token;
+					bool bNonFinite = false;
+					if (!Value->TryGetString(Token)
+						|| !TryCanonicalizeNumberToken(Token, NumberText, bNonFinite))
+					{
+						return InlineContainerCharacterLimit + 1;
+					}
+				}
+				else if (!TryFormatFiniteDouble(Value->AsNumber(), false, NumberText))
+				{
+					return InlineContainerCharacterLimit + 1;
+				}
+				return NumberText.Len();
+			}
+			case EJson::Boolean:
+				return Value->AsBool() ? 4 : 5;
+			case EJson::Array:
+				if (const int32* Length = ArrayInlineLengthCache.Find(Value.Get()))
+				{
+					return *Length;
+				}
+				break;
+			case EJson::Object:
+			{
+				const FWriterNodeView Object = Value->AsObject();
+				if (!Object.IsValid())
+				{
+					return 4;
+				}
+				if (const int32* Length = ObjectInlineLengthCache.Find(Object.Get()))
+				{
+					return *Length;
+				}
+				break;
+			}
+			default:
+				return 4;
+			}
+			SetWriteError(
+				TEXT("hjson_internal_error"),
+				JsonPointer,
+				TEXT("missing inline container length summary"));
+			return InlineContainerCharacterLimit + 1;
+		}
+
+		int32 InlineDepthForValue(
+			const FWriterNodeView& Input,
+			const FString& JsonPointer) const
+		{
+			const FWriterNodeView Value = ProjectedLeaf(Input);
+			if (IsScalarValue(Value))
+			{
+				return 0;
+			}
+			if (Value->Type == EJson::Array)
+			{
+				if (const int32* Depth = ArrayInlineDepthCache.Find(Value.Get()))
+				{
+					return *Depth;
+				}
+			}
+			else if (Value->Type == EJson::Object)
+			{
+				const FWriterNodeView Object = Value->AsObject();
+				if (!Object.IsValid())
+				{
+					return 0;
+				}
+				if (const int32* Depth = ObjectInlineDepthCache.Find(Object.Get()))
+				{
+					return *Depth;
+				}
+			}
+			SetWriteError(
+				TEXT("hjson_internal_error"),
+				JsonPointer,
+				TEXT("missing inline container depth summary"));
+			return InlineContainerDepthLimit + 1;
+		}
+
+		int32 InlineCountForValue(
+			const FWriterNodeView& Input,
+			const FString& JsonPointer) const
+		{
+			const FWriterNodeView Value = ProjectedLeaf(Input);
 			if (IsScalarValue(Value))
 			{
 				return 1;
@@ -1064,7 +1380,7 @@ namespace
 			}
 			else if (Value->Type == EJson::Object)
 			{
-				const TSharedPtr<FJsonObject> Object = Value->AsObject();
+				const FWriterNodeView Object = Value->AsObject();
 				if (!Object.IsValid())
 				{
 					return 1;
@@ -1122,6 +1438,7 @@ namespace
 						Task.Level,
 						Task.FieldName,
 						Task.JsonPointer,
+						Task.bInlineContext,
 						true);
 					break;
 				}
@@ -1173,6 +1490,7 @@ namespace
 						Task.Level,
 						Task.FieldName,
 						Task.JsonPointer,
+						Task.bInlineContext,
 						false);
 					break;
 				}
@@ -1182,12 +1500,14 @@ namespace
 
 		void PushValue(
 			TArray<FWriteTask>& Stack,
-			const TSharedPtr<FJsonValue>& Value,
+			const FWriterNodeView& Input,
 			const int32 Level,
 			const FString& FieldName,
 			const FString& JsonPointer,
+			const bool bInlineContext,
 			const bool bPreflight) const
 		{
+			const FWriterNodeView Value = ProjectedLeaf(Input);
 			if (!Value.IsValid() || Value->Type == EJson::None || Value->Type == EJson::Null)
 			{
 				Stack.Add(FWriteTask::TextTask(TEXT("null"), JsonPointer));
@@ -1202,6 +1522,7 @@ namespace
 				if (!TryMakeStringValueTask(
 						StringValue,
 						JsonPointer,
+						bInlineContext,
 						bPreflight,
 						StringTask))
 				{
@@ -1269,7 +1590,7 @@ namespace
 		}
 
 		void OrderedKeys(
-			const TSharedPtr<FJsonObject>& Object,
+			const FWriterNodeView& Object,
 			const FString& JsonPointer,
 			TArray<FString>& OutKeys) const
 		{
@@ -1278,7 +1599,7 @@ namespace
 			{
 				return;
 			}
-			Object->Values.GetKeys(OutKeys);
+			Object->GetKeys(OutKeys);
 			TArray<FString> TupleKeys;
 			if (TryGetTupleKeyOrder(OutKeys, TupleKeys))
 			{
@@ -1286,7 +1607,7 @@ namespace
 				return;
 			}
 			TArray<FString> Remaining = MoveTemp(OutKeys);
-			Remaining.Sort();
+			Remaining.Sort([](const FString& A, const FString& B) { return A.Compare(B, ESearchCase::CaseSensitive) < 0; });
 			OutKeys.Reset();
 			if (Options)
 			{
@@ -1294,10 +1615,10 @@ namespace
 				{
 					for (const FString& Key : *Preferred)
 					{
-						if (Object->HasField(Key) && !OutKeys.Contains(Key))
+						if (Remaining.ContainsByPredicate([&](const FString& Existing) { return Existing.Equals(Key, ESearchCase::CaseSensitive); }))
 						{
 							OutKeys.Add(Key);
-							Remaining.Remove(Key);
+							Remaining.RemoveAll([&](const FString& Existing) { return Existing.Equals(Key, ESearchCase::CaseSensitive); });
 						}
 					}
 				}
@@ -1307,7 +1628,7 @@ namespace
 
 		void PushObjectBody(
 			TArray<FWriteTask>& Stack,
-			const TSharedPtr<FJsonObject>& Object,
+			const FWriterNodeView& Object,
 			const int32 Level,
 			const FString& JsonPointer,
 			const bool bPreflight) const
@@ -1351,7 +1672,7 @@ namespace
 					TEXT(": "),
 					ValuePointer));
 				Forward.Add(FWriteTask::ValueTask(
-					Object->Values.FindRef(Key),
+					Object->FindField(Key),
 					Level,
 					Key,
 					ValuePointer));
@@ -1361,14 +1682,14 @@ namespace
 
 		void PushObject(
 			TArray<FWriteTask>& Stack,
-			const TSharedPtr<FJsonObject>& Object,
+			const FWriterNodeView& Object,
 			const int32 Level,
 			const FString& FieldName,
 			const FString& JsonPointer,
 			const bool bPreflight) const
 		{
 			(void)FieldName;
-			if (!Object.IsValid() || Object->Values.Num() == 0)
+			if (!Object.IsValid() || Object->NumFields() == 0)
 			{
 				Stack.Add(FWriteTask::TextTask(TEXT("{}"), JsonPointer));
 				return;
@@ -1414,10 +1735,11 @@ namespace
 						TEXT(": "),
 						ValuePointer));
 					Forward.Add(FWriteTask::ValueTask(
-						Object->Values.FindRef(Key),
+						Object->FindField(Key),
 						0,
 						Key,
-						ValuePointer));
+						ValuePointer,
+						true));
 				}
 				Forward.Add(FWriteTask::TextTask(
 					TEXT(" }"),
@@ -1438,12 +1760,12 @@ namespace
 
 		void PushArray(
 			TArray<FWriteTask>& Stack,
-			const TSharedPtr<FJsonValue>& ArrayValue,
+			const FWriterNodeView& ArrayValue,
 			const int32 Level,
 			const FString& JsonPointer,
 			const bool bPreflight) const
 		{
-			const TArray<TSharedPtr<FJsonValue>>& Values =
+			const auto Values =
 				ArrayValue->AsArray();
 			if (Values.Num() == 0)
 			{
@@ -1485,7 +1807,8 @@ namespace
 					Values[Index],
 					bInline ? 0 : Level + 1,
 					FString(),
-					ValuePointer));
+					ValuePointer,
+					bInline));
 			}
 			Forward.Add(FWriteTask::TextTask(
 				bInline ? TEXT("]") : TEXT("\n") + Padding(Level) + TEXT("]"),
@@ -1502,17 +1825,22 @@ namespace
 		}
 
 		bool CanInlineObject(
-			const TSharedPtr<FJsonObject>& Object,
+			const FWriterNodeView& Object,
 			const FString& JsonPointer) const
 		{
-			if (!Object.IsValid() || Object->Values.Num() == 0)
+			if (!Object.IsValid() || Object->NumFields() == 0)
 			{
 				return true;
 			}
 			if (const int32* Count =
 					ObjectInlineCountCache.Find(Object.Get()))
 			{
-				return *Count <= InlineObjectFieldLimit;
+				const int32* Length = ObjectInlineLengthCache.Find(Object.Get());
+				const int32* Depth = ObjectInlineDepthCache.Find(Object.Get());
+				return Length && Depth
+					&& *Count <= InlineObjectFieldLimit
+					&& *Length <= InlineContainerCharacterLimit
+					&& *Depth <= InlineContainerDepthLimit;
 			}
 			SetWriteError(
 				TEXT("hjson_internal_error"),
@@ -1522,13 +1850,18 @@ namespace
 		}
 
 		bool CanInlineArray(
-			const TSharedPtr<FJsonValue>& ArrayValue,
+			const FWriterNodeView& ArrayValue,
 			const FString& JsonPointer) const
 		{
 			if (const int32* Count =
 					ArrayInlineCountCache.Find(ArrayValue.Get()))
 			{
-				return *Count <= InlineObjectFieldLimit;
+				const int32* Length = ArrayInlineLengthCache.Find(ArrayValue.Get());
+				const int32* Depth = ArrayInlineDepthCache.Find(ArrayValue.Get());
+				return Length && Depth
+					&& *Count <= InlineObjectFieldLimit
+					&& *Length <= InlineContainerCharacterLimit
+					&& *Depth <= InlineContainerDepthLimit;
 			}
 			SetWriteError(
 				TEXT("hjson_internal_error"),
@@ -1546,1010 +1879,29 @@ namespace
 			{
 				return;
 			}
-			FUeAgentHjsonDiagnostic Diagnostic;
-			Diagnostic.Phase = TEXT("write");
-			Diagnostic.Code = Code;
-			Diagnostic.JsonPointer = JsonPointer;
-			Diagnostic.Message = Message;
-			Error = Diagnostic.ToString();
+			Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Message, TEXT("hjson_write"));
+			Error.DialectId = FUeAgentStructuredHjsonFormatter::DialectId();
+			Error.Source.JsonPath = JsonPointer;
 		}
 
 		const FUeAgentStructuredHjsonWriteOptions* Options = nullptr;
 		TUniquePtr<FUeAgentStructuredResourceTracker> OwnedResourceTracker;
 		FUeAgentStructuredResourceTracker& ResourceTracker;
-		mutable TMap<const FJsonObject*, int32> ObjectInlineCountCache;
-		mutable TMap<const FJsonValue*, int32> ArrayInlineCountCache;
-		mutable TSet<const FJsonObject*> VisitingObjects;
-		mutable TSet<const FJsonValue*> VisitingArrays;
-		mutable FString Error;
+		mutable TMap<const void*, int32> ObjectInlineCountCache;
+		mutable TMap<const void*, int32> ArrayInlineCountCache;
+		mutable TMap<const void*, int32> ObjectInlineLengthCache;
+		mutable TMap<const void*, int32> ArrayInlineLengthCache;
+		mutable TMap<const void*, int32> ObjectInlineDepthCache;
+		mutable TMap<const void*, int32> ArrayInlineDepthCache;
+		mutable TSet<const void*> VisitingObjects;
+		mutable TSet<const void*> VisitingArrays;
+		mutable UE::UAI::Contract::FDiagnostic Error;
+		mutable TMap<const FWriterNodeView::FCanonical*, TSharedPtr<FJsonValue>> LeafProjections;
 	};
-	class FHjsonParser
-	{
-	public:
-		FHjsonParser(
-			const FString& InText,
-			const FString& InFilePath,
-			TMap<FString, FUeAgentHjsonSourceLocation>& InSourceLocations,
-			FUeAgentStructuredResourceTracker& InResourceTracker,
-			const bool bInInputPrecharged)
-			: Text(InText)
-			, FilePath(InFilePath)
-			, SourceLocations(InSourceLocations)
-			, ResourceTracker(InResourceTracker)
-			, bInputPrecharged(bInInputPrecharged)
-		{
-		}
 
-		bool ParseRootObject(TSharedPtr<FJsonObject>& OutObject)
-		{
-			OutObject.Reset();
-			const int64 Utf8Length =
-				FTCHARToUTF8_Convert::ConvertedLength(*Text, Text.Len());
-			if ((!bInputPrecharged
-					&& !ResourceTracker.ChargeInputBytes(
-						Utf8Length,
-						TEXT("/"),
-						Error))
-				|| !ResourceTracker.ChargeWorkUnits(
-					Text.Len(),
-					TEXT("/"),
-					Error)
-				|| !ResourceTracker.ChargeNodes(1, TEXT("/"), Error)
-				|| !ResourceTracker.ChargeEstimatedMemoryBytes(
-					static_cast<int64>(Text.Len()) * sizeof(TCHAR) * 2
-						+ sizeof(FJsonObject)
-						+ sizeof(FParseFrame),
-					TEXT("/"),
-					Error))
-			{
-				return false;
-			}
-			OutObject = MakeShared<FJsonObject>();
-			if (!SkipWhitespaceAndComments())
-			{
-				return false;
-			}
-			if (IsAtEnd())
-			{
-				return SetError(TEXT("empty authoring document"), TEXT("hjson_empty_document"));
-			}
-			if (!RecordLocation(TEXT("/")))
-			{
-				return false;
-			}
-			const bool bBraced = Match(TEXT('{'));
-			TArray<FParseFrame> Frames;
-			Frames.Add(FParseFrame::ObjectFrame(OutObject, TEXT("/"), bBraced));
-
-			while (Frames.Num() > 0)
-			{
-				FParseFrame& Frame = Frames.Last();
-				CurrentJsonPointer = Frame.JsonPointer;
-				LastField = Frame.LastField;
-				if (!ResourceTracker.ChargeWorkUnits(
-						1,
-						CurrentJsonPointer,
-						Error))
-				{
-					return false;
-				}
-				if (Frame.State == EFrameState::WaitingForChild)
-				{
-					if (!FinishValue(Frame))
-					{
-						return false;
-					}
-					Frame.State = EFrameState::ExpectValue;
-					continue;
-				}
-				if (!SkipWhitespaceAndComments())
-				{
-					return false;
-				}
-
-				if (Frame.Kind == EContainerKind::Object)
-				{
-					if (Frame.bBraced && Match(TEXT('}')))
-					{
-						Frames.Pop(EAllowShrinking::No);
-						continue;
-					}
-					if (!Frame.bBraced && IsAtEnd())
-					{
-						Frames.Pop(EAllowShrinking::No);
-						continue;
-					}
-					if (IsAtEnd())
-					{
-						return SetError(TEXT("unterminated object"), TEXT("hjson_unterminated_object"));
-					}
-					if (!RequireSeparator(Frame, TEXT("object fields")))
-					{
-						return false;
-					}
-
-					FString Key;
-					if (!ParseKey(Key))
-					{
-						return false;
-					}
-					Frame.LastField = Key;
-					LastField = Key;
-					if (Frame.Object->HasField(Key))
-					{
-						return SetError(TEXT("duplicate key"), TEXT("hjson_duplicate_key"));
-					}
-					if (!SkipWhitespaceAndComments())
-					{
-						return false;
-					}
-					if (!Match(TEXT(':')))
-					{
-						return SetError(TEXT("expected colon after key"), TEXT("hjson_expected_colon"));
-					}
-
-					FString ValuePointer;
-					if (!TryAppendTrackedJsonPointer(
-							Frame.JsonPointer,
-							Key,
-							ValuePointer))
-					{
-						return false;
-					}
-					if (!ResourceTracker.ChargeItems(
-							1,
-							ValuePointer,
-							Error)
-						|| !ResourceTracker.ChargeEstimatedMemoryBytes(
-							static_cast<int64>(Key.Len())
-								* sizeof(TCHAR)
-								+ sizeof(TPair<FString, TSharedPtr<FJsonValue>>),
-							ValuePointer,
-							Error))
-					{
-						return false;
-					}
-					TSharedPtr<FJsonValue> Value;
-					FParseFrame Child;
-					bool bHasChild = false;
-					if (!ParseValueStart(Value, Child, bHasChild, ValuePointer))
-					{
-						return false;
-					}
-					Frame.Object->SetField(Key, Value);
-					if (bHasChild)
-					{
-						Frame.State = EFrameState::WaitingForChild;
-						Frames.Add(MoveTemp(Child));
-					}
-					else if (!FinishValue(Frame))
-					{
-						return false;
-					}
-				}
-				else
-				{
-					if (Match(TEXT(']')))
-					{
-						Frames.Pop(EAllowShrinking::No);
-						continue;
-					}
-					if (IsAtEnd())
-					{
-						return SetError(TEXT("unterminated array"), TEXT("hjson_unterminated_array"));
-					}
-					if (!RequireSeparator(Frame, TEXT("array items")))
-					{
-						return false;
-					}
-
-					const FString IndexSegment =
-						FString::FromInt(Frame.Array->Num());
-					FString ValuePointer;
-					if (!TryAppendTrackedJsonPointer(
-							Frame.JsonPointer,
-							IndexSegment,
-							ValuePointer))
-					{
-						return false;
-					}
-					if (!ResourceTracker.ChargeItems(
-							1,
-							ValuePointer,
-							Error)
-						|| !ResourceTracker.ChargeEstimatedMemoryBytes(
-							sizeof(TSharedPtr<FJsonValue>),
-							ValuePointer,
-							Error))
-					{
-						return false;
-					}
-					TSharedPtr<FJsonValue> Value;
-					FParseFrame Child;
-					bool bHasChild = false;
-					if (!ParseValueStart(Value, Child, bHasChild, ValuePointer))
-					{
-						return false;
-					}
-					Frame.Array->Add(Value);
-					if (bHasChild)
-					{
-						Frame.State = EFrameState::WaitingForChild;
-						Frames.Add(MoveTemp(Child));
-					}
-					else if (!FinishValue(Frame))
-					{
-						return false;
-					}
-				}
-			}
-
-			CurrentJsonPointer = TEXT("/");
-			LastField.Reset();
-			if (!SkipWhitespaceAndComments())
-			{
-				return false;
-			}
-			if (!IsAtEnd())
-			{
-				return SetError(TEXT("unexpected trailing token"), TEXT("hjson_trailing_token"));
-			}
-			return ResourceTracker.Checkpoint(TEXT("/"), Error);
-		}
-
-		const FString& GetError() const
-		{
-			return Error;
-		}
-
-	private:
-		enum class EContainerKind : uint8
-		{
-			Object,
-			Array,
-		};
-
-		enum class EFrameState : uint8
-		{
-			ExpectValue,
-			WaitingForChild,
-		};
-
-		struct FParseFrame
-		{
-			EContainerKind Kind = EContainerKind::Object;
-			EFrameState State = EFrameState::ExpectValue;
-			TSharedPtr<FJsonObject> Object;
-			TSharedPtr<FJsonValue> ContainerValue;
-			TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
-			FString JsonPointer = TEXT("/");
-			FString LastField;
-			bool bBraced = true;
-			bool bHasValue = false;
-			bool bHadComma = false;
-			int32 PreviousValueEndLine = -1;
-
-			static FParseFrame ObjectFrame(
-				TSharedPtr<FJsonObject> InObject,
-				FString InJsonPointer,
-				const bool bInBraced = true)
-			{
-				FParseFrame Frame;
-				Frame.Kind = EContainerKind::Object;
-				Frame.Object = MoveTemp(InObject);
-				Frame.JsonPointer = MoveTemp(InJsonPointer);
-				Frame.bBraced = bInBraced;
-				return Frame;
-			}
-
-			static FParseFrame ArrayFrame(
-				TSharedPtr<FJsonValue> InContainerValue,
-				TArray<TSharedPtr<FJsonValue>>* InArray,
-				FString InJsonPointer,
-				FString InContextField)
-			{
-				FParseFrame Frame;
-				Frame.Kind = EContainerKind::Array;
-				Frame.ContainerValue = MoveTemp(InContainerValue);
-				Frame.Array = InArray;
-				Frame.JsonPointer = MoveTemp(InJsonPointer);
-				Frame.LastField = MoveTemp(InContextField);
-				return Frame;
-			}
-		};
-
-		bool TryAppendTrackedJsonPointer(
-			const FString& Parent,
-			const FString& Segment,
-			FString& OutPointer)
-		{
-			const int64 PointerChars =
-				AppendedJsonPointerLength(Parent, Segment);
-			if (!ResourceTracker.ChargeWorkUnits(
-					PointerChars,
-					Parent,
-					Error)
-				|| !ResourceTracker.ChargeEstimatedMemoryBytes(
-					PointerChars * sizeof(TCHAR),
-					Parent,
-					Error))
-			{
-				OutPointer.Reset();
-				return false;
-			}
-			OutPointer = AppendJsonPointer(Parent, Segment);
-			return true;
-		}
-
-		bool RequireSeparator(const FParseFrame& Frame, const TCHAR* Label)
-		{
-			if (Frame.bHasValue && !Frame.bHadComma && Line == Frame.PreviousValueEndLine)
-			{
-				return SetError(
-					FString::Printf(TEXT("inline %s require comma"), Label),
-					TEXT("hjson_inline_comma_required"));
-			}
-			return true;
-		}
-
-		bool FinishValue(FParseFrame& Frame)
-		{
-			Frame.bHasValue = true;
-			Frame.PreviousValueEndLine = Line;
-			if (!SkipWhitespaceAndComments())
-			{
-				return false;
-			}
-			Frame.bHadComma = Match(TEXT(','));
-			return true;
-		}
-
-		bool ParseValueStart(
-			TSharedPtr<FJsonValue>& OutValue,
-			FParseFrame& OutChild,
-			bool& bOutHasChild,
-			const FString& CurrentPath)
-		{
-			bOutHasChild = false;
-			if (!SkipWhitespaceAndComments())
-			{
-				return false;
-			}
-			if (IsAtEnd())
-			{
-				return SetError(TEXT("missing value"), TEXT("hjson_missing_value"));
-			}
-			CurrentJsonPointer = CurrentPath;
-			const TCHAR Ch = Peek();
-			int64 EstimatedValueBytes = sizeof(FJsonValue);
-			if (Ch == TEXT('{'))
-			{
-				EstimatedValueBytes =
-					sizeof(FJsonValueObject)
-					+ sizeof(FJsonObject)
-					+ sizeof(FParseFrame)
-					+ static_cast<int64>(CurrentPath.Len()) * sizeof(TCHAR);
-			}
-			else if (Ch == TEXT('['))
-			{
-				EstimatedValueBytes =
-					sizeof(FJsonValueArray)
-					+ sizeof(TArray<TSharedPtr<FJsonValue>>)
-					+ sizeof(FParseFrame)
-					+ static_cast<int64>(CurrentPath.Len()) * sizeof(TCHAR);
-			}
-			if (!ResourceTracker.ChargeNodes(
-					1,
-					CurrentPath,
-					Error)
-				|| !ResourceTracker.ChargeEstimatedMemoryBytes(
-					EstimatedValueBytes,
-					CurrentPath,
-					Error))
-			{
-				return false;
-			}
-			if (!RecordLocation(CurrentPath))
-			{
-				return false;
-			}
-			if (Ch == TEXT('{'))
-			{
-				Advance();
-				TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-				OutValue = MakeShared<FJsonValueObject>(Object);
-				OutChild = FParseFrame::ObjectFrame(Object, CurrentPath);
-				bOutHasChild = true;
-				return true;
-			}
-			if (Ch == TEXT('['))
-			{
-				Advance();
-				TSharedPtr<FJsonValue> ArrayValue = MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>());
-				TArray<TSharedPtr<FJsonValue>>* MutableArray = nullptr;
-				if (!ArrayValue->TryGetArray(MutableArray) || !MutableArray)
-				{
-					return SetError(TEXT("failed to create array value"), TEXT("hjson_internal_error"));
-				}
-				OutValue = ArrayValue;
-				OutChild = FParseFrame::ArrayFrame(ArrayValue, MutableArray, CurrentPath, LastField);
-				bOutHasChild = true;
-				return true;
-			}
-			if (Ch == TEXT('"'))
-			{
-				FString StringValue;
-				if (!ParseQuotedString(StringValue))
-				{
-					return false;
-				}
-				OutValue = MakeShared<FJsonValueString>(MoveTemp(StringValue));
-				return true;
-			}
-			if (Ch == TEXT('\''))
-			{
-				if (Index + 2 < Text.Len()
-					&& Text[Index + 1] == TEXT('\'')
-					&& Text[Index + 2] == TEXT('\''))
-				{
-					FString StringValue;
-					if (!ParseMultilineString(StringValue))
-					{
-						return false;
-					}
-					OutValue = MakeShared<FJsonValueString>(MoveTemp(StringValue));
-					return true;
-				}
-				return SetError(TEXT("unsupported single-quoted string"), TEXT("hjson_unsupported_feature"));
-			}
-			return ParseBareValue(OutValue);
-		}
-
-		bool ParseKey(FString& OutKey)
-		{
-			if (!SkipWhitespaceAndComments())
-			{
-				return false;
-			}
-			if (IsAtEnd())
-			{
-				return SetError(TEXT("missing key"), TEXT("hjson_missing_key"));
-			}
-			if (Peek() == TEXT('"'))
-			{
-				return ParseQuotedString(OutKey);
-			}
-			FString Token;
-			while (!IsAtEnd())
-			{
-				const TCHAR Ch = Peek();
-				if (Ch == TEXT(':'))
-				{
-					break;
-				}
-				if (IsWhitespace(Ch) || Ch == TEXT('{') || Ch == TEXT('}') || Ch == TEXT('[')
-					|| Ch == TEXT(']') || Ch == TEXT(',') || Ch == TEXT('#'))
-				{
-					break;
-				}
-				Token.AppendChar(Advance());
-			}
-			if (!FUeAgentStructuredHjsonFormatter::IsBareKey(Token))
-			{
-				return SetError(TEXT("unsafe key must be quoted"), TEXT("hjson_unsafe_key"));
-			}
-			OutKey = MoveTemp(Token);
-			return true;
-		}
-
-		bool ParseBareValue(TSharedPtr<FJsonValue>& OutValue)
-		{
-			const int32 TokenLine = Line;
-			const int32 TokenColumn = Column;
-			FString Token;
-			while (!IsAtEnd())
-			{
-				const TCHAR Ch = Peek();
-				if (IsWhitespace(Ch) || Ch == TEXT(',') || Ch == TEXT('}') || Ch == TEXT(']') || Ch == TEXT('#'))
-				{
-					break;
-				}
-				Token.AppendChar(Advance());
-			}
-			if (Token.IsEmpty())
-			{
-				return SetError(TEXT("missing value"), TEXT("hjson_missing_value"));
-			}
-			if (Token.Contains(TEXT(":")))
-			{
-				return SetError(TEXT("bare string contains colon"), TEXT("hjson_unsafe_bare_string"));
-			}
-			if (Token.Contains(TEXT("//")) || Token.Contains(TEXT("/*"))
-				|| Token.Contains(TEXT("{")) || Token.Contains(TEXT("[")))
-			{
-				return SetError(TEXT("unsafe bare string must be quoted"), TEXT("hjson_unsafe_bare_string"));
-			}
-
-			const FString Lower = Token.ToLower();
-			if (Lower == TEXT("true"))
-			{
-				if (Token != TEXT("true"))
-				{
-					return SetError(TEXT("ambiguous literal must be quoted"), TEXT("hjson_ambiguous_literal"));
-				}
-				OutValue = MakeShared<FJsonValueBoolean>(true);
-				return true;
-			}
-			if (Lower == TEXT("false"))
-			{
-				if (Token != TEXT("false"))
-				{
-					return SetError(TEXT("ambiguous literal must be quoted"), TEXT("hjson_ambiguous_literal"));
-				}
-				OutValue = MakeShared<FJsonValueBoolean>(false);
-				return true;
-			}
-			if (Lower == TEXT("null"))
-			{
-				if (Token != TEXT("null"))
-				{
-					return SetError(TEXT("ambiguous literal must be quoted"), TEXT("hjson_ambiguous_literal"));
-				}
-				OutValue = MakeShared<FJsonValueNull>();
-				return true;
-			}
-			if (Lower == TEXT("nan") || Lower == TEXT("infinity") || Lower == TEXT("+infinity")
-				|| Lower == TEXT("-infinity") || Lower == TEXT("inf") || Lower == TEXT("+inf")
-				|| Lower == TEXT("-inf"))
-			{
-				return SetError(
-					TEXT("non-finite number"),
-					TEXT("hjson_non_finite_number"),
-					TokenLine,
-					TokenColumn);
-			}
-			if (IsNumberCandidate(Token))
-			{
-				FString Canonical;
-				bool bNonFinite = false;
-				if (!TryCanonicalizeNumberToken(Token, Canonical, bNonFinite))
-				{
-					return SetError(
-						bNonFinite ? TEXT("non-finite number") : TEXT("invalid number or unsafe bare string must be quoted"),
-						bNonFinite ? TEXT("hjson_non_finite_number") : TEXT("hjson_invalid_number"),
-						TokenLine,
-						TokenColumn);
-				}
-				OutValue = MakeShared<FJsonValueNumberString>(MoveTemp(Canonical));
-				return true;
-			}
-			if (!FUeAgentStructuredHjsonFormatter::IsBareString(Token))
-			{
-				return SetError(TEXT("unsafe bare string must be quoted"), TEXT("hjson_unsafe_bare_string"));
-			}
-			OutValue = MakeShared<FJsonValueString>(MoveTemp(Token));
-			return true;
-		}
-
-		bool ParseQuotedString(FString& OutValue)
-		{
-			if (!Match(TEXT('"')))
-			{
-				return SetError(TEXT("expected quoted string"), TEXT("hjson_expected_string"));
-			}
-			FString Result;
-			while (!IsAtEnd())
-			{
-				const TCHAR Ch = Peek();
-				if (Ch == TEXT('"'))
-				{
-					Advance();
-					OutValue = MoveTemp(Result);
-					return true;
-				}
-				if (Ch == TEXT('\n') || Ch == TEXT('\r'))
-				{
-					return SetError(TEXT("unterminated string"), TEXT("hjson_unterminated_string"));
-				}
-				Advance();
-				if (Ch != TEXT('\\'))
-				{
-					if (Ch < 0x20)
-					{
-						return SetError(TEXT("unescaped control character in string"), TEXT("hjson_unescaped_control"));
-					}
-					Result.AppendChar(Ch);
-					continue;
-				}
-				if (IsAtEnd())
-				{
-					return SetError(TEXT("unterminated string"), TEXT("hjson_unterminated_string"));
-				}
-				const TCHAR Escaped = Advance();
-				switch (Escaped)
-				{
-				case TEXT('"'): Result.AppendChar(TEXT('"')); break;
-				case TEXT('\\'): Result.AppendChar(TEXT('\\')); break;
-				case TEXT('/'): Result.AppendChar(TEXT('/')); break;
-				case TEXT('b'): Result.AppendChar(TEXT('\b')); break;
-				case TEXT('f'): Result.AppendChar(TEXT('\f')); break;
-				case TEXT('n'): Result.AppendChar(TEXT('\n')); break;
-				case TEXT('r'): Result.AppendChar(TEXT('\r')); break;
-				case TEXT('t'): Result.AppendChar(TEXT('\t')); break;
-				case TEXT('u'):
-				{
-					int32 Codepoint = 0;
-					for (int32 HexIndex = 0; HexIndex < 4; ++HexIndex)
-					{
-						if (IsAtEnd() || !ReadHexDigit(Codepoint))
-						{
-							return SetError(TEXT("invalid unicode escape"), TEXT("hjson_invalid_unicode_escape"));
-						}
-					}
-					Result.AppendChar(static_cast<TCHAR>(Codepoint));
-					break;
-				}
-				default:
-					return SetError(TEXT("invalid string escape"), TEXT("hjson_invalid_string_escape"));
-				}
-			}
-			return SetError(TEXT("unterminated string"), TEXT("hjson_unterminated_string"));
-		}
-
-		bool ParseMultilineString(FString& OutValue)
-		{
-			const int32 OpeningLine = Line;
-			const int32 OpeningColumn = Column;
-			Advance();
-			Advance();
-			Advance();
-			while (!IsAtEnd() && (Peek() == TEXT(' ') || Peek() == TEXT('\t')))
-			{
-				Advance();
-			}
-			if (IsAtEnd())
-			{
-				return SetError(
-					TEXT("unterminated multiline string"),
-					TEXT("hjson_unterminated_multiline"),
-					OpeningLine,
-					OpeningColumn);
-			}
-			if (Peek() != TEXT('\r') && Peek() != TEXT('\n'))
-			{
-				return SetError(
-					TEXT("multiline opening delimiter must end the line"),
-					TEXT("hjson_multiline_trailing_token"));
-			}
-			ConsumeLineBreak();
-
-			struct FMultilineLine
-			{
-				FString Text;
-				int32 Line = 0;
-				int32 Indent = 0;
-			};
-			TArray<FMultilineLine> Lines;
-			while (!IsAtEnd())
-			{
-				const int32 ContentLine = Line;
-				const int32 LineStart = Index;
-				int32 LineEnd = LineStart;
-				while (LineEnd < Text.Len() && Text[LineEnd] != TEXT('\r') && Text[LineEnd] != TEXT('\n'))
-				{
-					++LineEnd;
-				}
-				const FString LineText = Text.Mid(LineStart, LineEnd - LineStart);
-				int32 Indent = 0;
-				while (Indent < LineText.Len()
-					&& (LineText[Indent] == TEXT(' ') || LineText[Indent] == TEXT('\t')))
-				{
-					++Indent;
-				}
-				const FString Stripped = LineText.Mid(Indent);
-				if (Stripped.StartsWith(TEXT("'''"), ESearchCase::CaseSensitive))
-				{
-					const FString Trailing = Stripped.Mid(3);
-					int32 ExtraSpaces = 0;
-					while (ExtraSpaces < Trailing.Len()
-						&& (Trailing[ExtraSpaces] == TEXT(' ') || Trailing[ExtraSpaces] == TEXT('\t')))
-					{
-						++ExtraSpaces;
-					}
-					if (ExtraSpaces < Trailing.Len())
-					{
-						return SetError(
-							TEXT("trailing token after multiline delimiter"),
-							TEXT("hjson_multiline_trailing_token"),
-							ContentLine,
-							Indent + 3 + ExtraSpaces + 1);
-					}
-					for (const FMultilineLine& Content : Lines)
-					{
-						FString Trimmed = Content.Text;
-						Trimmed.TrimStartAndEndInline();
-						if (!Trimmed.IsEmpty() && Content.Indent < Indent)
-						{
-							return SetError(
-								TEXT("multiline content indentation is less than closing delimiter"),
-								TEXT("hjson_multiline_indentation"),
-								Content.Line,
-								Content.Indent + 1);
-						}
-					}
-					while (Index < LineEnd)
-					{
-						Advance();
-					}
-					OutValue.Reset();
-					for (int32 LineIndex = 0; LineIndex < Lines.Num(); ++LineIndex)
-					{
-						if (LineIndex > 0)
-						{
-							OutValue += TEXT("\n");
-						}
-						if (!Lines[LineIndex].Text.IsEmpty())
-						{
-							OutValue += Lines[LineIndex].Text.Mid(Indent);
-						}
-					}
-					return true;
-				}
-
-				FMultilineLine& Content = Lines.AddDefaulted_GetRef();
-				Content.Text = LineText;
-				Content.Line = ContentLine;
-				Content.Indent = Indent;
-				while (Index < LineEnd)
-				{
-					Advance();
-				}
-				if (!IsAtEnd())
-				{
-					ConsumeLineBreak();
-				}
-			}
-			return SetError(
-				TEXT("unterminated multiline string"),
-				TEXT("hjson_unterminated_multiline"),
-				OpeningLine,
-				OpeningColumn);
-		}
-
-		bool SkipWhitespaceAndComments()
-		{
-			while (!IsAtEnd())
-			{
-				const TCHAR Ch = Peek();
-				if (IsWhitespace(Ch))
-				{
-					Advance();
-					continue;
-				}
-				if (Ch == TEXT('#'))
-				{
-					SkipLine();
-					continue;
-				}
-				if (Ch == TEXT('/') && PeekNext() == TEXT('/'))
-				{
-					SkipLine();
-					continue;
-				}
-				if (Ch == TEXT('/') && PeekNext() == TEXT('*'))
-				{
-					return SetError(TEXT("unsupported block comment"), TEXT("hjson_unsupported_feature"));
-				}
-				break;
-			}
-			return true;
-		}
-
-		void SkipLine()
-		{
-			while (!IsAtEnd() && Peek() != TEXT('\n') && Peek() != TEXT('\r'))
-			{
-				Advance();
-			}
-		}
-
-		void ConsumeLineBreak()
-		{
-			if (Peek() == TEXT('\r'))
-			{
-				Advance();
-				if (!IsAtEnd() && Peek() == TEXT('\n'))
-				{
-					Advance();
-				}
-			}
-			else if (Peek() == TEXT('\n'))
-			{
-				Advance();
-			}
-		}
-
-		bool ReadHexDigit(int32& InOutCodepoint)
-		{
-			const TCHAR Ch = Advance();
-			int32 Value = 0;
-			if (Ch >= TEXT('0') && Ch <= TEXT('9'))
-			{
-				Value = Ch - TEXT('0');
-			}
-			else if (Ch >= TEXT('a') && Ch <= TEXT('f'))
-			{
-				Value = 10 + Ch - TEXT('a');
-			}
-			else if (Ch >= TEXT('A') && Ch <= TEXT('F'))
-			{
-				Value = 10 + Ch - TEXT('A');
-			}
-			else
-			{
-				return false;
-			}
-			InOutCodepoint = (InOutCodepoint << 4) | Value;
-			return true;
-		}
-
-		bool IsNumberCandidate(const FString& Token) const
-		{
-			if (Token.IsEmpty())
-			{
-				return false;
-			}
-			const TCHAR Ch = Token[0];
-			return IsAsciiDigit(Ch) || Ch == TEXT('-') || Ch == TEXT('.') || Ch == TEXT('+');
-		}
-
-		bool IsWhitespace(const TCHAR Ch) const
-		{
-			return Ch == TEXT(' ') || Ch == TEXT('\t') || Ch == TEXT('\r') || Ch == TEXT('\n');
-		}
-
-		bool Match(const TCHAR Expected)
-		{
-			if (IsAtEnd() || Peek() != Expected)
-			{
-				return false;
-			}
-			Advance();
-			return true;
-		}
-
-		TCHAR Peek() const
-		{
-			return IsAtEnd() ? TEXT('\0') : Text[Index];
-		}
-
-		TCHAR PeekNext() const
-		{
-			return Index + 1 < Text.Len() ? Text[Index + 1] : TEXT('\0');
-		}
-
-		TCHAR Advance()
-		{
-			const TCHAR Ch = Text[Index++];
-			if (Ch == TEXT('\r'))
-			{
-				++Line;
-				Column = 1;
-				bLastWasCr = true;
-			}
-			else if (Ch == TEXT('\n'))
-			{
-				if (!bLastWasCr)
-				{
-					++Line;
-				}
-				Column = 1;
-				bLastWasCr = false;
-			}
-			else
-			{
-				++Column;
-				bLastWasCr = false;
-			}
-			if ((Index & 1023) == 0
-				&& !ResourceTracker.Checkpoint(
-					CurrentJsonPointer,
-					Error))
-			{
-				Index = Text.Len();
-			}
-			return Ch;
-		}
-
-		bool IsAtEnd() const
-		{
-			return Index >= Text.Len();
-		}
-
-		bool RecordLocation(const FString& JsonPointer)
-		{
-			const int64 EstimatedBytes =
-				sizeof(FUeAgentHjsonSourceLocation)
-				+ sizeof(TPair<FString, FUeAgentHjsonSourceLocation>)
-				+ (static_cast<int64>(JsonPointer.Len())
-					+ FilePath.Len())
-					* sizeof(TCHAR);
-			if (!ResourceTracker.ChargeEstimatedMemoryBytes(
-					EstimatedBytes,
-					JsonPointer,
-					Error))
-			{
-				return false;
-			}
-			FUeAgentHjsonSourceLocation Location;
-			Location.FilePath = FilePath;
-			Location.Line = Line;
-			Location.Column = Column;
-			SourceLocations.Add(JsonPointer, MoveTemp(Location));
-			return true;
-		}
-
-		bool SetError(
-			const FString& Message,
-			const FString& Code = TEXT("hjson_syntax_error"),
-			const int32 OverrideLine = INDEX_NONE,
-			const int32 OverrideColumn = INDEX_NONE)
-		{
-			if (!Error.IsEmpty())
-			{
-				return false;
-			}
-			FUeAgentHjsonDiagnostic Diagnostic;
-			Diagnostic.Phase = TEXT("parse");
-			Diagnostic.Code = Code;
-			Diagnostic.SourceFile = FilePath;
-			Diagnostic.JsonPointer = CurrentJsonPointer;
-			Diagnostic.Line = OverrideLine == INDEX_NONE ? Line : OverrideLine;
-			Diagnostic.Column = OverrideColumn == INDEX_NONE ? Column : OverrideColumn;
-			Diagnostic.Field = LastField.IsEmpty() ? TEXT("<root>") : LastField;
-			Diagnostic.Message = Message;
-			Error = Diagnostic.ToString();
-			return false;
-		}
-
-		const FString& Text;
-		FString FilePath;
-		TMap<FString, FUeAgentHjsonSourceLocation>& SourceLocations;
-		int32 Index = 0;
-		int32 Line = 1;
-		int32 Column = 1;
-		FString LastField;
-		FString CurrentJsonPointer = TEXT("/");
-		bool bLastWasCr = false;
-		FUeAgentStructuredResourceTracker& ResourceTracker;
-		bool bInputPrecharged = false;
-		FString Error;
-	};
 }
 
-FString FUeAgentHjsonDiagnostic::ToString() const
-{
-	const FString LegacyPrefix = Phase == TEXT("parse")
-		? FString::Printf(
-			TEXT("hjson_parse_failed:%s:%d:%d:%s:%s "),
-			*SourceFile,
-			Line,
-			Column,
-			*Field,
-			*Message)
-		: FString();
-	return FString::Printf(
-		TEXT("%sdialect=%s phase=%s code=%s source=%s pointer=%s line=%d column=%d message=%s"),
-		*LegacyPrefix,
-		*DialectId,
-		*Phase,
-		*Code,
-		*SourceFile,
-		*JsonPointer,
-		Line,
-		Column,
-		*Message);
-}
+
 
 const TCHAR* FUeAgentStructuredHjsonFormatter::DialectId()
 {
@@ -2559,7 +1911,7 @@ const TCHAR* FUeAgentStructuredHjsonFormatter::DialectId()
 FString FUeAgentStructuredHjsonFormatter::WriteObject(const TSharedRef<FJsonObject>& Object)
 {
 	FString Text;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	TryWriteObject(Object, Text, Error);
 	return Text;
 }
@@ -2569,7 +1921,7 @@ FString FUeAgentStructuredHjsonFormatter::WriteObject(
 	const FUeAgentStructuredHjsonWriteOptions& Options)
 {
 	FString Text;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	TryWriteObject(Object, Options, Text, Error);
 	return Text;
 }
@@ -2577,7 +1929,7 @@ FString FUeAgentStructuredHjsonFormatter::WriteObject(
 FString FUeAgentStructuredHjsonFormatter::WriteValue(const TSharedRef<FJsonValue>& Value)
 {
 	FString Text;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	TryWriteValue(Value, Text, Error);
 	return Text;
 }
@@ -2587,7 +1939,7 @@ FString FUeAgentStructuredHjsonFormatter::WriteValue(
 	const FUeAgentStructuredHjsonWriteOptions& Options)
 {
 	FString Text;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	TryWriteValue(Value, Options, Text, Error);
 	return Text;
 }
@@ -2595,7 +1947,7 @@ FString FUeAgentStructuredHjsonFormatter::WriteValue(
 bool FUeAgentStructuredHjsonFormatter::TryWriteObject(
 	const TSharedRef<FJsonObject>& Object,
 	FString& OutText,
-	FString& OutError)
+	UE::UAI::Contract::FDiagnostic& OutError)
 {
 	return FHjsonWriter().TryWriteRootObject(Object, OutText, OutError);
 }
@@ -2604,7 +1956,7 @@ bool FUeAgentStructuredHjsonFormatter::TryWriteObject(
 	const TSharedRef<FJsonObject>& Object,
 	const FUeAgentStructuredHjsonWriteOptions& Options,
 	FString& OutText,
-	FString& OutError)
+	UE::UAI::Contract::FDiagnostic& OutError)
 {
 	return FHjsonWriter(&Options).TryWriteRootObject(Object, OutText, OutError);
 }
@@ -2614,7 +1966,7 @@ bool FUeAgentStructuredHjsonFormatter::TryWriteObject(
 	const FUeAgentStructuredHjsonWriteOptions& Options,
 	FUeAgentStructuredResourceTracker& ResourceTracker,
 	FString& OutText,
-	FString& OutError)
+	UE::UAI::Contract::FDiagnostic& OutError)
 {
 	return FHjsonWriter(&Options, &ResourceTracker).TryWriteRootObject(
 		Object,
@@ -2625,7 +1977,7 @@ bool FUeAgentStructuredHjsonFormatter::TryWriteObject(
 bool FUeAgentStructuredHjsonFormatter::TryWriteValue(
 	const TSharedRef<FJsonValue>& Value,
 	FString& OutText,
-	FString& OutError)
+	UE::UAI::Contract::FDiagnostic& OutError)
 {
 	return FHjsonWriter().TryWriteValue(Value, OutText, OutError);
 }
@@ -2634,7 +1986,7 @@ bool FUeAgentStructuredHjsonFormatter::TryWriteValue(
 	const TSharedRef<FJsonValue>& Value,
 	const FUeAgentStructuredHjsonWriteOptions& Options,
 	FString& OutText,
-	FString& OutError)
+	UE::UAI::Contract::FDiagnostic& OutError)
 {
 	return FHjsonWriter(&Options).TryWriteValue(Value, OutText, OutError);
 }
@@ -2644,12 +1996,47 @@ bool FUeAgentStructuredHjsonFormatter::TryWriteValue(
 	const FUeAgentStructuredHjsonWriteOptions& Options,
 	FUeAgentStructuredResourceTracker& ResourceTracker,
 	FString& OutText,
-	FString& OutError)
+	UE::UAI::Contract::FDiagnostic& OutError)
 {
 	return FHjsonWriter(&Options, &ResourceTracker).TryWriteValue(
 		Value,
 		OutText,
 		OutError);
+}
+
+bool FUeAgentStructuredHjsonFormatter::TryWriteObject(
+	const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Object,
+	FString& OutText,
+	UE::UAI::Contract::FDiagnostic& OutError)
+{
+	return FHjsonWriter().TryWriteRootObject(FWriterNodeView(Object), OutText, OutError);
+}
+
+bool FUeAgentStructuredHjsonFormatter::TryWriteObject(
+	const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Object,
+	const FUeAgentStructuredHjsonWriteOptions& Options,
+	FUeAgentStructuredResourceTracker& ResourceTracker,
+	FString& OutText,
+	UE::UAI::Contract::FDiagnostic& OutError)
+{
+	return FHjsonWriter(&Options, &ResourceTracker).TryWriteRootObject(FWriterNodeView(Object), OutText, OutError);
+}
+
+bool FUeAgentStructuredHjsonFormatter::TryWriteValue(
+	const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Value,
+	FString& OutText,
+	UE::UAI::Contract::FDiagnostic& OutError)
+{
+	return FHjsonWriter().TryWriteValue(FWriterNodeView(Value), OutText, OutError);
+}
+
+bool FUeAgentStructuredHjsonFormatter::TryWriteValue(
+	const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Value,
+	const FUeAgentStructuredHjsonWriteOptions& Options,
+	FString& OutText,
+	UE::UAI::Contract::FDiagnostic& OutError)
+{
+	return FHjsonWriter(&Options).TryWriteValue(FWriterNodeView(Value), OutText, OutError);
 }
 
 bool FUeAgentStructuredHjsonFormatter::IsBareKey(const FString& Key)
@@ -2767,24 +2154,9 @@ bool FUeAgentStructuredHjsonParser::ParseDocument(
 	const FString& Text,
 	const FString& FilePath,
 	FUeAgentStructuredHjsonDocument& OutDocument,
-	FString& OutError)
+	UE::UAI::Contract::FDiagnostic& OutError)
 {
-	return ParseDocument(
-		Text,
-		FilePath,
-		FUeAgentStructuredResourceBudget(),
-		OutDocument,
-		OutError);
-}
-
-bool FUeAgentStructuredHjsonParser::ParseDocument(
-	const FString& Text,
-	const FString& FilePath,
-	const FUeAgentStructuredResourceBudget& ResourceBudget,
-	FUeAgentStructuredHjsonDocument& OutDocument,
-	FString& OutError)
-{
-	FUeAgentStructuredResourceTracker ResourceTracker(ResourceBudget);
+	FUeAgentStructuredResourceTracker ResourceTracker;
 	return ParseDocument(
 		Text,
 		FilePath,
@@ -2800,25 +2172,151 @@ bool FUeAgentStructuredHjsonParser::ParseDocument(
 	FUeAgentStructuredResourceTracker& ResourceTracker,
 	const bool bInputPrecharged,
 	FUeAgentStructuredHjsonDocument& OutDocument,
-	FString& OutError)
+	UE::UAI::Contract::FDiagnostic& OutError)
 {
 	OutDocument = FUeAgentStructuredHjsonDocument();
-	OutDocument.SourceFile = FilePath;
 	OutError.Reset();
-
-	FHjsonParser Parser(
-		Text,
-		FilePath,
-		OutDocument.SourceLocations,
-		ResourceTracker,
-		bInputPrecharged);
-	if (!Parser.ParseRootObject(OutDocument.Root) || !OutDocument.Root.IsValid())
+	if (!ResourceTracker.Checkpoint(TEXT("/"), OutError))
 	{
-		OutError = Parser.GetError();
-		OutDocument.Root.Reset();
 		return false;
 	}
+
+	using namespace UE::UAI::ContextResource;
+	using namespace UE::UAI::HjsonWorkspace;
+	FUeAgentResourceTracker CoreResources;
+	FHjsonDocumentPtr CoreDocument;
+	FWorkspaceError CoreError;
+	UE::UAI::Contract::FDiagnostic CheckpointError;
+	const FHjsonOperationCheckpoint CoreCheckpoint =
+		[&](const FString& Stage, FWorkspaceError& Error)
+		{
+			if (ResourceTracker.Checkpoint(Stage, CheckpointError))
+			{
+				return true;
+			}
+			CheckpointError.StoppedEarly = true;
+			Error.SetFailure(CheckpointError, FilePath, Stage);
+			return false;
+		};
+	const bool bParsed = TryParseHjsonDocument(
+		Text, FilePath, CoreResources, CoreDocument, CoreError, &CoreCheckpoint);
+	TSharedPtr<FJsonValue> RootValue;
+	const bool bProjected = bParsed && CoreDocument.IsValid()
+		&& TryProjectHjsonNodeToJsonValue(
+			CoreDocument->GetRoot().Get(), CoreResources, RootValue, CoreError,
+			&CoreCheckpoint);
+
+	const FUeAgentResourceUsage CoreUsage = CoreResources.Snapshot();
+	auto ChargeMapped = [&](const EUeAgentResourceDimension Dimension,
+		const int64 Amount, UE::UAI::Contract::FDiagnostic& MappingError) -> bool
+	{
+		if (Amount <= 0 || (bInputPrecharged
+			&& Dimension == EUeAgentResourceDimension::InputBytes))
+		{
+			return true;
+		}
+		switch (Dimension)
+		{
+		case EUeAgentResourceDimension::InputBytes:
+			return ResourceTracker.ChargeInputBytes(Amount, TEXT("/"), MappingError);
+		case EUeAgentResourceDimension::Nodes:
+			return ResourceTracker.ChargeNodes(Amount, TEXT("/"), MappingError);
+		case EUeAgentResourceDimension::Items:
+			return ResourceTracker.ChargeItems(Amount, TEXT("/"), MappingError);
+		case EUeAgentResourceDimension::WorkUnits:
+			return ResourceTracker.ChargeWorkUnits(Amount, TEXT("/"), MappingError);
+		case EUeAgentResourceDimension::EstimatedMemoryBytes:
+			return ResourceTracker.ChargeEstimatedMemoryBytes(Amount, TEXT("/"), MappingError);
+		default:
+			return true;
+		}
+	};
+	UE::UAI::Contract::FDiagnostic AccountingError;
+	for (const EUeAgentResourceDimension Dimension : {
+		EUeAgentResourceDimension::InputBytes,
+		EUeAgentResourceDimension::Nodes,
+		EUeAgentResourceDimension::Items,
+		EUeAgentResourceDimension::WorkUnits,
+		EUeAgentResourceDimension::EstimatedMemoryBytes})
+	{
+		// A deadline or exceeded dimension must not hide later consumed dimensions.
+		UE::UAI::Contract::FDiagnostic MappingError;
+		if (!ChargeMapped(Dimension, CoreUsage.Consumed(Dimension), MappingError))
+			AccountingError.Append(MappingError);
+	}
+	if (!bParsed || !bProjected || !CoreDocument.IsValid() || !RootValue.IsValid())
+	{
+		OutError = CoreError.GetDiagnostic();
+		if (OutError.IsEmpty()) OutError = CheckpointError;
+		if (OutError.IsEmpty()) OutError = UE::UAI::Contract::FDiagnostic::Failure(
+			TEXT("hjson_parse_failed"), TEXT("The HJSON document could not be parsed."), TEXT("hjson_parse"));
+		OutError.DialectId = FUeAgentStructuredHjsonFormatter::DialectId();
+		OutError.Append(AccountingError);
+		return false;
+	}
+	if (!AccountingError.IsEmpty()) { OutError = MoveTemp(AccountingError); return false; }
+	TSharedPtr<FJsonObject> ProjectedRoot;
+	const TSharedPtr<FJsonObject>* ProjectedRootPtr = nullptr;
+	if (CoreDocument->GetRoot()->GetKind() != EHjsonNodeKind::Object
+		|| !RootValue->TryGetObject(ProjectedRootPtr)
+		|| ProjectedRootPtr == nullptr || !ProjectedRootPtr->IsValid())
+	{
+		OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_root_must_be_object"),
+			TEXT("The authoring document root must be an object."), TEXT("hjson_parse"));
+		OutError.DialectId = FUeAgentStructuredHjsonFormatter::DialectId();
+		OutError.Source.SourceFile = FilePath;
+		OutError.Source.JsonPath = TEXT("/");
+		OutError.Source.Line = CoreDocument->GetRoot()->GetProvenance().GetLine();
+		OutError.Source.Column = CoreDocument->GetRoot()->GetProvenance().GetColumn();
+		return false;
+	}
+	ProjectedRoot = *ProjectedRootPtr;
+	TMap<FString, FUeAgentHjsonSourceLocation> ProjectedLocations;
+	TArray<const FHjsonNode*> Pending;
+	if (!ResourceTracker.ChargeEstimatedMemoryBytes(
+			sizeof(FHjsonNode*), TEXT("/"), OutError))
+	{
+		return false;
+	}
+	Pending.Add(&CoreDocument->GetRoot().Get());
+	while (!Pending.IsEmpty())
+	{
+		if (!ResourceTracker.Checkpoint(TEXT("hjson_source_locations"), OutError))
+		{
+			return false;
+		}
+		const FHjsonNode* Node = Pending.Pop(EAllowShrinking::No);
+		const FSourceProvenance& Provenance = Node->GetProvenance();
+		const int64 EntryBytes = sizeof(TPair<FString, FUeAgentHjsonSourceLocation>)
+			+ static_cast<int64>(Provenance.GetJsonPointer().Len()
+				+ Provenance.GetSourceUnit().Len()) * sizeof(TCHAR);
+		const int64 ChildCount = Node->GetItems().Num() + Node->GetEntries().Num();
+		if (!ResourceTracker.ChargeEstimatedMemoryBytes(
+				EntryBytes + ChildCount * static_cast<int64>(sizeof(FHjsonNode*)),
+				Provenance.GetJsonPointer(), OutError)
+			|| !ResourceTracker.ChargeWorkUnits(
+				1 + ChildCount, Provenance.GetJsonPointer(), OutError))
+		{
+			return false;
+		}
+		ProjectedLocations.Add(Provenance.GetJsonPointer(), {
+			Provenance.GetSourceUnit(), Provenance.GetLine(), Provenance.GetColumn()});
+		for (const FHjsonNodeRef& Item : Node->GetItems()) Pending.Add(&Item.Get());
+		for (const TPair<FString, FHjsonNodeRef>& Entry : Node->GetEntries()) Pending.Add(&Entry.Value.Get());
+	}
+	if (!ResourceTracker.Checkpoint(TEXT("/"), OutError))
+	{
+		return false;
+	}
+	if (!ResourceTracker.ChargeEstimatedMemoryBytes(
+			static_cast<int64>(Text.Len()) * sizeof(TCHAR), TEXT("/"), OutError))
+	{
+		return false;
+	}
+	OutDocument.Root = MoveTemp(ProjectedRoot);
+	OutDocument.SourceFile = FilePath;
 	OutDocument.SourceText = Text;
+	OutDocument.SourceLocations = MoveTemp(ProjectedLocations);
 	return true;
 }
 
@@ -2826,28 +2324,12 @@ bool FUeAgentStructuredHjsonParser::ParseObject(
 	const FString& Text,
 	const FString& FilePath,
 	TSharedPtr<FJsonObject>& OutObject,
-	FString& OutError)
-{
-	return ParseObject(
-		Text,
-		FilePath,
-		FUeAgentStructuredResourceBudget(),
-		OutObject,
-		OutError);
-}
-
-bool FUeAgentStructuredHjsonParser::ParseObject(
-	const FString& Text,
-	const FString& FilePath,
-	const FUeAgentStructuredResourceBudget& ResourceBudget,
-	TSharedPtr<FJsonObject>& OutObject,
-	FString& OutError)
+	UE::UAI::Contract::FDiagnostic& OutError)
 {
 	FUeAgentStructuredHjsonDocument Document;
 	if (!ParseDocument(
 			Text,
 			FilePath,
-			ResourceBudget,
 			Document,
 			OutError))
 	{

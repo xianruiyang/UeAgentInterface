@@ -1,20 +1,21 @@
 #include "DomainAdapters/HjsonExternalInput/UeAgentHjsonExternalInputDomain.h"
 
-#include "Core/ContextResource/UeAgentContextResource.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "DomainAdapters/HjsonExternalInput/UeAgentHjsonExternalInputWorkspace.h"
+
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
-#include "Serialization/JsonSerializer.h"
+#include "Dom/JsonValue.h"
+#include "Misc/ScopeExit.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 namespace UE::UAI::DomainAdapters::HjsonExternalInput
 {
 	using namespace HjsonWorkspace;
-	using namespace ContextResource;
 	using namespace CommandContract;
 
 	namespace
 	{
-		const FString SchemaId = TEXT("uai.hjson.external_input/1");
-
 		FString Normalize(FString Value)
 		{
 			Value.TrimStartAndEndInline();
@@ -37,108 +38,50 @@ namespace UE::UAI::DomainAdapters::HjsonExternalInput
 			return true;
 		}
 
-		FUeAgentResourceTracker MakeResources()
-		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 128 * 1024 * 1024},
-			}));
-		}
-
-		TSharedPtr<FJsonValue> ToJsonValue(const FHjsonNode& Node, bool& bOutOk)
-		{
-			bOutOk = true;
-			switch (Node.GetKind())
-			{
-			case EHjsonNodeKind::Null:
-				return MakeShared<FJsonValueNull>();
-			case EHjsonNodeKind::Boolean:
-				return MakeShared<FJsonValueBoolean>(Node.GetBoolean());
-			case EHjsonNodeKind::String:
-				return MakeShared<FJsonValueString>(Node.GetText());
-			case EHjsonNodeKind::Integer:
-			case EHjsonNodeKind::Decimal:
-			{
-				double Value = 0.0;
-				bOutOk = LexTryParseString(Value, *Node.GetLexeme());
-				if (!bOutOk)
-				{
-					return nullptr;
-				}
-				return MakeShared<FJsonValueNumber>(Value);
-			}
-			case EHjsonNodeKind::Array:
-			{
-				TArray<TSharedPtr<FJsonValue>> Values;
-				for (const FHjsonNodeRef& Item : Node.GetItems())
-				{
-					bool bItemOk = false;
-					TSharedPtr<FJsonValue> Value = ToJsonValue(Item.Get(), bItemOk);
-					if (!bItemOk || !Value.IsValid())
-					{
-						bOutOk = false;
-						return nullptr;
-					}
-					Values.Add(MoveTemp(Value));
-				}
-				return MakeShared<FJsonValueArray>(MoveTemp(Values));
-			}
-			case EHjsonNodeKind::Object:
-			{
-				const TSharedPtr<FJsonObject> Object = MakeShared<FJsonObject>();
-				for (const TPair<FString, FHjsonNodeRef>& Entry : Node.GetEntries())
-				{
-					bool bValueOk = false;
-					TSharedPtr<FJsonValue> Value = ToJsonValue(Entry.Value.Get(), bValueOk);
-					if (!bValueOk || !Value.IsValid())
-					{
-						bOutOk = false;
-						return nullptr;
-					}
-					Object->SetField(Entry.Key, MoveTemp(Value));
-				}
-				return MakeShared<FJsonValueObject>(Object);
-			}
-			default:
-				bOutOk = false;
-				return nullptr;
-			}
-		}
-
 		bool StringField(
-			const FHjsonNode& Object,
+			const FJsonObject& Object,
 			const FString& Key,
 			FString& OutValue)
 		{
-			const FHjsonNode* Node = Object.Get(Key);
-			if (!Node || Node->GetKind() != EHjsonNodeKind::String)
+			if (!Object.TryGetStringField(Key, OutValue))
 			{
 				OutValue.Reset();
 				return false;
 			}
-			OutValue = Normalize(Node->GetText());
+			OutValue = Normalize(OutValue);
 			return !OutValue.IsEmpty();
 		}
 	}
 
 	bool FHjsonExternalInputFamilyContract::IsValid() const
 	{
-		if (RootTypeIdentity.IsEmpty() || InitializationContractId.IsEmpty()
-			|| ImporterCommandIds.IsEmpty())
+		UE::UAI::Contract::FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FHjsonExternalInputFamilyContract::TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		auto Reject = [&](const FString& Reason, const FString& Field)
 		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_contract_invalid"),
+				Reason, TEXT("domain_contract"));
+			OutError.PropertyPath = Field;
+			OutError.SourceKind = TEXT("native_result");
 			return false;
-		}
+		};
+		if (RootTypeIdentity.IsEmpty()) return Reject(TEXT("The external-input family contract has no root type."), TEXT("root_type"));
+		if (InitializationContractId.IsEmpty()) return Reject(TEXT("The external-input family contract has no initialization contract."), TEXT("initialization_contract"));
+		if (ImporterCommandIds.IsEmpty()) return Reject(TEXT("The external-input family contract has no importer commands."), TEXT("importer_commands"));
 		TSet<FString> Unique;
-		for (const FString& CommandId : ImporterCommandIds)
+		for (int32 Index = 0; Index < ImporterCommandIds.Num(); ++Index)
 		{
+			const FString& CommandId = ImporterCommandIds[Index];
 			if (CommandId.IsEmpty() || Unique.Contains(CommandId))
 			{
+				Reject(CommandId.IsEmpty() ? TEXT("An external-input importer command is empty.")
+					: TEXT("An external-input importer command is duplicated."), FString::Printf(TEXT("importer_commands/%d"), Index));
+				OutError.ActualValue = MakeShared<FJsonValueString>(CommandId);
 				return false;
 			}
 			Unique.Add(CommandId);
@@ -149,6 +92,11 @@ namespace UE::UAI::DomainAdapters::HjsonExternalInput
 	bool FHjsonExternalInputDelegation::IsValid() const
 	{
 		return !CommandId.IsEmpty() && !CanonicalParamsJson.IsEmpty();
+	}
+
+	void FHjsonExternalInputDelegation::LocateFailure(FWorkspaceError& Error) const
+	{
+		if (SourceDocument) SourceDocument->LocateFailure(Error, true);
 	}
 
 	const TArray<FHjsonExternalInputFamilyContract>&
@@ -201,136 +149,73 @@ namespace UE::UAI::DomainAdapters::HjsonExternalInput
 	{
 		OutDelegation = {};
 		OutError.Reset();
-		if (!Contract.IsValid())
+		UE::UAI::Contract::FDiagnostic ContractError;
+		if (!Contract.TryValidate(ContractError))
 		{
-			OutError.Set(TEXT("hjson_external_input_contract_invalid"));
-			return false;
-		}
-		TSharedPtr<FJsonObject> Params;
-		FString JsonError;
-		if (!Json::TryParseObject(CanonicalContentGraphParamsJson, Params, JsonError)
-			|| !Params.IsValid())
-		{
-			OutError.Set(TEXT("hjson_external_input_params_invalid"), JsonError);
+			OutError.SetFailure(MoveTemp(ContractError));
 			return false;
 		}
 		FString PublicTarget;
-		if (Params->HasField(TEXT("carrier"))
-			|| Params->HasField(TEXT("hjson_document")))
+		const auto Document = MakeShared<FResolvedExternalInputDocument>();
+		if (!TryResolveExternalInputDocument(CanonicalContentGraphParamsJson,
+			Contract.RootTypeIdentity, *Document, PublicTarget, OutError)) return false;
+		ON_SCOPE_EXIT { Document->LocateFailure(OutError); };
+		UE::UAI::Contract::FDiagnostic JsonError;
+		auto InvalidValue = [&](const FString& Code, const FString& Pointer,
+			const TSharedPtr<FJsonValue>& Expected, const TSharedPtr<FJsonValue>& Actual,
+			const FString& Reason)
 		{
-			OutError.Set(TEXT("hjson_external_input_legacy_source_contract_rejected"));
+			OutError.SetFailure(UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Pointer,
+				Expected, Actual, TEXT("input_decode"), Reason));
 			return false;
-		}
-		if (!Params->TryGetStringField(TEXT("target"), PublicTarget)
-			|| Normalize(PublicTarget).IsEmpty())
+		};
+		auto ReadObject = [&](const FJsonObject& Parent, const FString& Field, const FString& Pointer,
+			TSharedPtr<FJsonObject>& Object)
 		{
-			OutError.Set(TEXT("hjson_external_input_target_required"));
-			return false;
-		}
-		const TSharedPtr<FJsonObject>* ResolvedSource = nullptr;
-		FString SourceKind;
-		FString SourceTargetIdentity;
-		FString EntryFile;
-		const TArray<TSharedPtr<FJsonValue>>* Documents = nullptr;
-		if (!Params->TryGetObjectField(TEXT("source"), ResolvedSource)
-			|| !ResolvedSource || !ResolvedSource->IsValid()
-			|| !(*ResolvedSource)->TryGetStringField(TEXT("kind"), SourceKind)
-			|| SourceKind != TEXT("resolved")
-			|| !(*ResolvedSource)->TryGetStringField(
-				TEXT("target_identity"), SourceTargetIdentity)
-			|| SourceTargetIdentity != PublicTarget
-			|| !(*ResolvedSource)->TryGetStringField(TEXT("entry_file"), EntryFile)
-			|| EntryFile.IsEmpty()
-			|| !(*ResolvedSource)->TryGetArrayField(TEXT("documents"), Documents)
-			|| !Documents || Documents->IsEmpty())
+			const TSharedPtr<FJsonObject>* Found = nullptr;
+			if (Parent.TryGetObjectField(Field, Found) && Found && Found->IsValid())
+			{ Object = *Found; return true; }
+			return InvalidValue(Field == TEXT("parameters") ? TEXT("hjson_external_input_target_parameters_invalid")
+				: TEXT("hjson_external_input_document_invalid"), Pointer,
+				MakeShared<FJsonValueString>(TEXT("object")), Parent.TryGetField(Field), TEXT("This external-input field requires an object."));
+		};
+		auto ReadString = [&](const FJsonObject& Parent, const FString& Field, const FString& Pointer, FString& Value)
 		{
-			OutError.Set(TEXT("hjson_external_input_resolved_source_invalid"));
-			return false;
-		}
-		FString DocumentText;
-		int32 EntryMatches = 0;
-		for (const TSharedPtr<FJsonValue>& Value : *Documents)
-		{
-			const TSharedPtr<FJsonObject> DocumentObject = Value.IsValid()
-				? Value->AsObject()
-				: nullptr;
-			FString RelativePath;
-			FString Text;
-			if (!DocumentObject.IsValid()
-				|| !DocumentObject->TryGetStringField(TEXT("path"), RelativePath)
-				|| !DocumentObject->TryGetStringField(TEXT("document"), Text))
-			{
-				OutError.Set(TEXT("hjson_external_input_resolved_source_invalid"));
-				return false;
-			}
-			if (RelativePath == EntryFile)
-			{
-				DocumentText = MoveTemp(Text);
-				++EntryMatches;
-			}
-		}
-		if (EntryMatches != 1 || DocumentText.IsEmpty())
-		{
-			OutError.Set(
-				TEXT("hjson_external_input_resolved_source_invalid"), EntryFile);
-			return false;
-		}
-		FUeAgentResourceTracker Resources = MakeResources();
-		FHjsonDocumentPtr Document;
-		if (!TryParseHjsonDocument(
-				DocumentText,
-				TEXT("inline:hjson-external-input"),
-				Resources,
-				Document,
-				OutError)
-			|| !Document.IsValid())
-		{
-			return false;
-		}
-		const FHjsonNode& DocumentRoot = Document->GetRoot().Get();
-		const FHjsonNode* Root = DocumentRoot.Get(TEXT("root"));
-		const FHjsonNode* External = Root && Root->GetKind() == EHjsonNodeKind::Object
-			? Root->Get(TEXT("external_input")) : nullptr;
-		const FHjsonNode* Source = External && External->GetKind() == EHjsonNodeKind::Object
-			? External->Get(TEXT("source")) : nullptr;
-		const FHjsonNode* Options = External && External->GetKind() == EHjsonNodeKind::Object
-			? External->Get(TEXT("options")) : nullptr;
-		const FHjsonNode* Policy = External && External->GetKind() == EHjsonNodeKind::Object
-			? External->Get(TEXT("target_policy")) : nullptr;
-		FString Schema;
-		FString RootType;
+			if (StringField(Parent, Field, Value)) return true;
+			return InvalidValue(TEXT("hjson_external_input_document_invalid"), Pointer,
+				MakeShared<FJsonValueString>(TEXT("non-empty string")), Parent.TryGetField(Field), TEXT("This external-input field requires a non-empty string."));
+		};
+		const FString Base = TEXT("/root/external_input");
+		TSharedPtr<FJsonObject> External, Source, Options, Policy, PolicyParams;
+		if (!ReadObject(*Document->Root, TEXT("external_input"), Base, External)
+			|| !ReadObject(*External, TEXT("source"), Base + TEXT("/source"), Source)
+			|| !ReadObject(*External, TEXT("options"), Base + TEXT("/options"), Options)
+			|| !ReadObject(*External, TEXT("target_policy"), Base + TEXT("/target_policy"), Policy)) return false;
 		FString SourceIdentity;
 		FString Format;
 		FString ContentSha256;
 		FString CommandId;
-		if (!StringField(DocumentRoot, TEXT("schema"), Schema) || Schema != SchemaId
-			|| !Root || !StringField(*Root, TEXT("type"), RootType)
-			|| RootType != Contract.RootTypeIdentity
-			|| !Source || !StringField(*Source, TEXT("identity"), SourceIdentity)
-			|| !StringField(*Source, TEXT("format"), Format)
-			|| !StringField(*Source, TEXT("content_sha256"), ContentSha256)
-			|| !IsSha256(ContentSha256)
-			|| !Options || Options->GetKind() != EHjsonNodeKind::Object
-			|| !Policy || Policy->GetKind() != EHjsonNodeKind::Object
-			|| !StringField(*Policy, TEXT("command_id"), CommandId))
+		if (!ReadString(*Source, TEXT("identity"), Base + TEXT("/source/identity"), SourceIdentity)
+			|| !ReadString(*Source, TEXT("format"), Base + TEXT("/source/format"), Format)
+			|| !ReadString(*Policy, TEXT("command_id"), Base + TEXT("/target_policy/command_id"), CommandId)) return false;
+		if (!StringField(*Source, TEXT("content_sha256"), ContentSha256) || !IsSha256(ContentSha256))
 		{
-			OutError.Set(TEXT("hjson_external_input_document_invalid"));
+			auto Failure = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_source_digest_invalid"),
+				TEXT("Source preparation did not produce a valid SHA-256 digest."), TEXT("input_decode"));
+			Failure.SemanticPointer = Base + TEXT("/source/identity");
+			Failure.SourceKind = TEXT("related_input");
+			OutError.SetFailure(MoveTemp(Failure));
 			return false;
 		}
 		if (!Contract.ImporterCommandIds.Contains(CommandId))
 		{
-			OutError.Set(
-				TEXT("hjson_external_input_importer_unregistered"),
-				CommandId,
-				TEXT("/root/external_input/target_policy/command_id"));
-			return false;
+			TArray<TSharedPtr<FJsonValue>> Commands;
+			for (const auto& Allowed : Contract.ImporterCommandIds) Commands.Add(MakeShared<FJsonValueString>(Allowed));
+			return InvalidValue(TEXT("hjson_external_input_importer_unregistered"), Base + TEXT("/target_policy/command_id"),
+				MakeShared<FJsonValueArray>(MoveTemp(Commands)), Policy->TryGetField(TEXT("command_id")),
+				TEXT("The importer command is not registered for this external-input family."));
 		}
-		const FHjsonNode* PolicyParams = Policy->Get(TEXT("parameters"));
-		if (!PolicyParams || PolicyParams->GetKind() != EHjsonNodeKind::Object)
-		{
-			OutError.Set(TEXT("hjson_external_input_target_parameters_invalid"));
-			return false;
-		}
+		if (!ReadObject(*Policy, TEXT("parameters"), Base + TEXT("/target_policy/parameters"), PolicyParams)) return false;
 		const FString TargetField = CommandId.StartsWith(TEXT("external."))
 			&& CommandId != TEXT("external.skin_weight_profile.import")
 			&& CommandId != TEXT("external.localization.po.import")
@@ -340,46 +225,31 @@ namespace UE::UAI::DomainAdapters::HjsonExternalInput
 		if (!StringField(*PolicyParams, TargetField, PolicyTarget)
 			|| PolicyTarget != PublicTarget)
 		{
-			OutError.Set(
-				TEXT("hjson_external_input_target_policy_mismatch"),
-				PolicyTarget,
-				TEXT("/root/external_input/target_policy/parameters/")
-					+ TargetField);
-			return false;
+			return InvalidValue(TEXT("hjson_external_input_target_policy_mismatch"),
+				Base + TEXT("/target_policy/parameters/") + TargetField,
+				MakeShared<FJsonValueString>(PublicTarget), PolicyParams->TryGetField(TargetField),
+				TEXT("The importer target must match the workspace target."));
 		}
-		bool bParamsOk = false;
-		TSharedPtr<FJsonValue> DelegatedValue = ToJsonValue(*PolicyParams, bParamsOk);
-		const TSharedPtr<FJsonObject> DelegatedParams = bParamsOk && DelegatedValue.IsValid()
-			? DelegatedValue->AsObject() : nullptr;
-		if (!DelegatedParams.IsValid())
-		{
-			OutError.Set(TEXT("hjson_external_input_target_parameters_invalid"));
-			return false;
-		}
+		const auto DelegatedParams = MakeShared<FJsonObject>();
+		DelegatedParams->Values = PolicyParams->Values;
 		DelegatedParams->SetStringField(TEXT("source_ref"), SourceIdentity);
 		DelegatedParams->SetStringField(
 			TEXT("_hjson_expected_source_sha256"),
 			ContentSha256.ToLower());
 		DelegatedParams->SetStringField(TEXT("_hjson_source_format"), Format.ToLower());
-		if (!Options->GetEntries().IsEmpty())
+		if (!Options->Values.IsEmpty())
 		{
-			bool bOptionsOk = false;
-			TSharedPtr<FJsonValue> OptionsValue = ToJsonValue(*Options, bOptionsOk);
-			if (!bOptionsOk || !OptionsValue.IsValid())
-			{
-				OutError.Set(TEXT("hjson_external_input_options_invalid"));
-				return false;
-			}
-			DelegatedParams->SetField(TEXT("options"), MoveTemp(OptionsValue));
+			DelegatedParams->SetObjectField(TEXT("options"), Options);
 		}
 		FString Canonical;
 		if (!Json::TryCanonicalize(DelegatedParams, Canonical, JsonError))
 		{
-			OutError.Set(TEXT("hjson_external_input_delegation_invalid"), JsonError);
+			OutError.SetFailure(JsonError, FString());
 			return false;
 		}
 		OutDelegation.CommandId = MoveTemp(CommandId);
 		OutDelegation.CanonicalParamsJson = MoveTemp(Canonical);
+		OutDelegation.SourceDocument = Document;
 		return OutDelegation.IsValid();
 	}
 }

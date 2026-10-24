@@ -1,5 +1,7 @@
 #include "Module/CommandRegistration/SpatialContent/UeAgentSpatialContentRegistration.h"
 
+#include "Dom/JsonValue.h"
+
 #include "CommandHandlers/SpatialContent/UeAgentSpatialContentCommandHandlers.h"
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialActivation.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
@@ -54,12 +56,15 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 			const FUeAgentCommandContractRegistry& Legacy,
 			const Contract::FUeAgentOperationDescriptor& Descriptor,
 			FUeAgentCommandDeclaration& OutDeclaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(CommandId);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("spatial_content_contract_missing:") + CommandId;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("spatial_content_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("spatial_content_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
 				return false;
 			}
 			const bool bQuery = QueryOwners::SpatialContent::IsQuery(CommandId);
@@ -99,8 +104,14 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 				|| Descriptor.GetInputSchema().GetJsonValue().IsEmpty()
 				|| Descriptor.GetResultSchema().GetJsonValue().IsEmpty())
 			{
-				OutError = TEXT("spatial_content_descriptor_schema_projection_invalid:")
-					+ CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("spatial_content_descriptor_schema_projection_invalid"), InputSchemaAssignments != 1 ? TEXT("The command contract must contain exactly one input field for schema projection.") : Descriptor.GetInputSchema().GetJsonValue().IsEmpty() ? TEXT("The descriptor input schema is empty.") : TEXT("The descriptor result schema is empty."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+				OutError.PropertyPath = InputSchemaAssignments != 1 ? TEXT("input") : Descriptor.GetInputSchema().GetJsonValue().IsEmpty() ? TEXT("input_schema") : TEXT("result_schema");
+				if (InputSchemaAssignments != 1)
+				{
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(InputSchemaAssignments);
+				}
 				return false;
 			}
 			if (bQuery)
@@ -141,7 +152,7 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 				TEXT("Resolve explicit subject identities and semantic frames before execution."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Use only query.command.detail fields and explicit spatial identities.");
+				TEXT("Use only query.command.usage fields and explicit spatial identities.");
 			Result.Purpose.ResultGuidance =
 				TEXT("Verify mutation through a separate transform read or bounded domain readback.");
 			Result.Purpose.FailureGuidance =
@@ -179,13 +190,13 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 		const Contract::FUeAgentOperationDescriptor* FindUniqueDescriptor(
 			const FString& CommandId,
 			const Contract::FUeAgentDescriptorRegistry& Descriptors,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const Composition::TimelineSpatial::
 				FUeAgentTimelineSpatialActivationProfile* Match = nullptr;
-			for (const Composition::TimelineSpatial::
-				FUeAgentTimelineSpatialActivationProfile& Profile
-				: Composition::TimelineSpatial::GetTimelineSpatialActivationProfiles())
+			const TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>* Profiles = nullptr;
+			if (!Composition::TimelineSpatial::TryGetTimelineSpatialActivationProfiles(Profiles, OutError)) return nullptr;
+			for (const Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile& Profile : *Profiles)
 			{
 				if (Profile.CommandId != CommandId)
 				{
@@ -193,21 +204,32 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 				}
 				if (Match)
 				{
-					OutError = TEXT("spatial_content_descriptor_ambiguous:") + CommandId;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("spatial_content_descriptor_ambiguous"), TEXT("More than one activation profile is registered for this command."), TEXT("registration"), FString(), CommandId);
+					if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+					OutError.ActualValue = MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{MakeShared<FJsonValueString>(Match->DescriptorIdentity.GetDescriptorId()), MakeShared<FJsonValueString>(Profile.DescriptorIdentity.GetDescriptorId())});
 					return nullptr;
 				}
 				Match = &Profile;
 			}
 			if (!Match)
 			{
-				OutError = TEXT("spatial_content_descriptor_profile_missing:") + CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("spatial_content_descriptor_profile_missing"), TEXT("No activation profile is registered for this command."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
 				return nullptr;
 			}
 			const Contract::FUeAgentOperationDescriptor* Descriptor =
 				Descriptors.FindExact(Match->DescriptorIdentity);
 			if (!Descriptor || Descriptor->GetCapabilityId() != CommandId)
 			{
-				OutError = TEXT("spatial_content_descriptor_missing:") + CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("spatial_content_descriptor_missing"), Descriptor ? TEXT("The operation descriptor capability does not match the command.") : TEXT("No operation descriptor was found for the command binding."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+				if (Descriptor)
+				{
+					OutError.PropertyPath = TEXT("capability_id");
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(CommandId);
+					OutError.ActualValue = MakeShared<FJsonValueString>(Descriptor->GetCapabilityId());
+				}
 				return nullptr;
 			}
 			return Descriptor;
@@ -233,7 +255,7 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::SpatialContent::TryCreateHandlers(
 					OutHandlers,
@@ -246,7 +268,7 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<IUeAgentActiveCommandContribution> CommandContribution;
 			if (!TryCreateContribution(CommandContribution, OutError)
@@ -276,8 +298,8 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 						FindOperationInvocationFactory(CommandId);
 				if (!Factory.IsValid())
 				{
-					OutError = TEXT("spatial_content_operation_factory_missing:")
-						+ CommandId;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("spatial_content_operation_factory_missing"), TEXT("No operation invocation factory is registered for this command."), TEXT("registration"), FString(), CommandId);
+					if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
 					return false;
 				}
 				DomainCapability::FDomainOperationEntry Operation;
@@ -304,10 +326,6 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 				StateSemantic::EUeAgentStatePlane::AuthoringMemory);
 			Declaration.State.Planes.Add(
 				StateSemantic::EUeAgentStatePlane::Persisted);
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId =
-				TEXT("T46-SPATIAL-CONTENT-OPERATION");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
@@ -321,7 +339,7 @@ namespace UE::UAI::Module::CommandRegistration::SpatialContent
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();

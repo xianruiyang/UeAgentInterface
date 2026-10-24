@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringComposition.h"
 #include "Core/Contract/UeAgentContract.h"
@@ -15,5 +17,5 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			OperationPort,
 		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>&
 			OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

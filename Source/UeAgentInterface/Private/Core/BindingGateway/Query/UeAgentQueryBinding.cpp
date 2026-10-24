@@ -3,6 +3,7 @@
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicketJson.h"
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
+#include "Core/Discovery/UeAgentDiscovery.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
@@ -15,7 +16,7 @@ namespace UE::UAI::BindingGateway::Query
 	{
 		using UE::UAI::ContextResource::FUeAgentCancellationRequested;
 		using UE::UAI::ContextResource::FUeAgentOperationDeadlineExceeded;
-		using UE::UAI::ContextResource::FUeAgentResourceBudgetExceeded;
+		using UE::UAI::ContextResource::FUeAgentResourceChargeError;
 		using UE::UAI::Discovery::EUeAgentCandidateOperation;
 		using UE::UAI::Discovery::EUeAgentCatalogCompleteness;
 		using UE::UAI::Discovery::EUeAgentDiscoveryMatchMode;
@@ -25,41 +26,36 @@ namespace UE::UAI::BindingGateway::Query
 		using UE::UAI::Projection::FUeAgentProjectionQueryResult;
 		using UE::UAI::Projection::FUeAgentProjectionSourceValue;
 
-		void SetError(
+		void SetFailure(
 			FUeAgentQueryBindingError& OutError,
 			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+			const FString& InternalSubject,
+			const FString& PublicReason,
+			const FString& PropertyPath = FString())
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
+			OutError = FUeAgentQueryBindingError::Failure(Code, PublicReason, TEXT("query_binding"), FString(), InternalSubject);
+			OutError.PropertyPath = PropertyPath;
 		}
 
-		void CopyError(
-			const FUeAgentDiscoveryError& Source,
-			FUeAgentQueryBindingError& OutError)
+		template <typename TRequest>
+		bool ValidateRequest(const TRequest& Request, const FUeAgentCallerContext& Caller, FUeAgentQueryBindingError& OutError)
 		{
-			OutError.Code = Source.Code;
-			OutError.SubjectId = Source.SubjectId;
-			OutError.Detail = Source.Detail;
-			OutError.ResourceDimension = Source.ResourceDimension;
-			OutError.ResourceLimit = Source.ResourceLimit;
-			OutError.ResourceObserved = Source.ResourceObserved;
+			if (!Request.GetDescriptorIdentity().IsValid()) OutError = Request.GetDescriptorIdentity().GetValidationDiagnostic();
+			else if (Request.GetRequestId().IsEmpty())
+				SetFailure(OutError, TEXT("query_request_invalid"), FString(), TEXT("The query request identifier must not be empty."), TEXT("request_id"));
+			else if (!Request.GetPayload().IsValid()) OutError = Request.GetPayload().GetValidationDiagnostic();
+			else if (!Caller.IsValid()) OutError = Caller.GetValidationDiagnostic();
+			else return true;
+			return false;
 		}
 
-		void CopyError(
-			const FUeAgentProjectionError& Source,
-			FUeAgentQueryBindingError& OutError)
+		void ForwardDiagnostic(const UE::UAI::Contract::FDiagnostic& Source, FUeAgentQueryBindingError& OutError)
 		{
-			OutError.Code = Source.Code;
-			OutError.SubjectId = Source.SubjectId;
-			OutError.Detail = Source.Detail;
-			OutError.ResourceDimension = Source.ResourceDimension;
-			OutError.ResourceLimit = Source.ResourceLimit;
-			OutError.ResourceObserved = Source.ResourceObserved;
+			OutError = Source;
 		}
+
+
+
 
 	}
 
@@ -71,13 +67,16 @@ namespace UE::UAI::BindingGateway::Query
 		, Query(MoveTemp(InQuery))
 		, Projection(MoveTemp(InProjection))
 	{
-		bValid = Session.IsValid() && Query.IsValid() && Projection.IsValid();
+		if (!Session.IsValid()) ValidationDiagnostic = Session.GetValidationDiagnostic();
+		else if (!Query.IsValid()) ValidationDiagnostic = *Query.GetValidationDiagnostic();
+		else if (!Projection.IsValid()) ValidationDiagnostic = Projection.GetValidationDiagnostic();
 	}
 
 	const FUeAgentQuerySessionIdentity& FUeAgentCatalogSearchQuery::GetSession() const { return Session; }
 	const FUeAgentDiscoveryQuery& FUeAgentCatalogSearchQuery::GetQuery() const { return Query; }
 	const FUeAgentProjectionRequest& FUeAgentCatalogSearchQuery::GetProjection() const { return Projection; }
-	bool FUeAgentCatalogSearchQuery::IsValid() const { return bValid; }
+	bool FUeAgentCatalogSearchQuery::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FUeAgentQueryBindingError& FUeAgentCatalogSearchQuery::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentCatalogResolveQuery::FUeAgentCatalogResolveQuery(
 		FUeAgentQuerySessionIdentity InSession,
@@ -90,17 +89,28 @@ namespace UE::UAI::BindingGateway::Query
 		, Projection(MoveTemp(InProjection))
 	{
 		CandidateId.TrimStartAndEndInline();
-		bValid = Session.IsValid()
-			&& Catalog->IsValid()
-			&& !CandidateId.IsEmpty()
-			&& Projection.IsValid();
+		if (!Session.IsValid()) ValidationDiagnostic = Session.GetValidationDiagnostic();
+		else if (!Catalog->IsValid())
+		{
+			ValidationDiagnostic = FUeAgentQueryBindingError::Failure(TEXT("query_catalog_invalid"),
+				TEXT("Candidate resolution requires a successfully created catalog snapshot."), TEXT("query_binding"));
+			ValidationDiagnostic.PropertyPath = TEXT("catalog");
+		}
+		else if (CandidateId.IsEmpty())
+		{
+			ValidationDiagnostic = FUeAgentQueryBindingError::Failure(TEXT("query_candidate_id_missing"),
+				TEXT("Candidate resolution requires a non-empty candidate identifier."), TEXT("query_binding"));
+			ValidationDiagnostic.PropertyPath = TEXT("candidate_id");
+		}
+		else if (!Projection.IsValid()) ValidationDiagnostic = Projection.GetValidationDiagnostic();
 	}
 
 	const FUeAgentQuerySessionIdentity& FUeAgentCatalogResolveQuery::GetSession() const { return Session; }
 	const TSharedRef<const FUeAgentCatalogSnapshot>& FUeAgentCatalogResolveQuery::GetCatalog() const { return Catalog; }
 	const FString& FUeAgentCatalogResolveQuery::GetCandidateId() const { return CandidateId; }
 	const FUeAgentProjectionRequest& FUeAgentCatalogResolveQuery::GetProjection() const { return Projection; }
-	bool FUeAgentCatalogResolveQuery::IsValid() const { return bValid; }
+	bool FUeAgentCatalogResolveQuery::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FUeAgentQueryBindingError& FUeAgentCatalogResolveQuery::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentStateReadQuery::FUeAgentStateReadQuery(
 		FUeAgentQuerySessionIdentity InSession,
@@ -114,10 +124,10 @@ namespace UE::UAI::BindingGateway::Query
 		, StatePlane(InStatePlane)
 		, Projection(MoveTemp(InProjection))
 	{
-		bValid = Session.IsValid()
-			&& Ticket.IsValid()
-			&& Binding.IsValid()
-			&& Projection.IsValid();
+		if (!Session.IsValid()) ValidationDiagnostic = Session.GetValidationDiagnostic();
+		else if (!Ticket.IsValid()) ValidationDiagnostic = Ticket.GetValidationDiagnostic();
+		else if (!Binding.IsValid()) ValidationDiagnostic = *Binding.GetValidationDiagnostic();
+		else if (!Projection.IsValid()) ValidationDiagnostic = Projection.GetValidationDiagnostic();
 	}
 
 	const FUeAgentQuerySessionIdentity& FUeAgentStateReadQuery::GetSession() const { return Session; }
@@ -125,13 +135,15 @@ namespace UE::UAI::BindingGateway::Query
 	const FUeAgentCandidateBinding& FUeAgentStateReadQuery::GetBinding() const { return Binding; }
 	EUeAgentStatePlane FUeAgentStateReadQuery::GetStatePlane() const { return StatePlane; }
 	const FUeAgentProjectionRequest& FUeAgentStateReadQuery::GetProjection() const { return Projection; }
-	bool FUeAgentStateReadQuery::IsValid() const { return bValid; }
+	bool FUeAgentStateReadQuery::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FUeAgentQueryBindingError& FUeAgentStateReadQuery::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentQueryBindingPayload::FUeAgentQueryBindingPayload(
 		FUeAgentCatalogSearchQuery InQuery)
 		: Kind(EUeAgentQueryBindingPayloadKind::CatalogSearch)
 		, CatalogSearch(MakeShared<FUeAgentCatalogSearchQuery>(MoveTemp(InQuery)))
 	{
+		ValidationDiagnostic = CatalogSearch->GetValidationDiagnostic();
 	}
 
 	FUeAgentQueryBindingPayload::FUeAgentQueryBindingPayload(
@@ -139,6 +151,7 @@ namespace UE::UAI::BindingGateway::Query
 		: Kind(EUeAgentQueryBindingPayloadKind::CatalogResolve)
 		, CatalogResolve(MakeShared<FUeAgentCatalogResolveQuery>(MoveTemp(InQuery)))
 	{
+		ValidationDiagnostic = CatalogResolve->GetValidationDiagnostic();
 	}
 
 	FUeAgentQueryBindingPayload::FUeAgentQueryBindingPayload(
@@ -146,6 +159,7 @@ namespace UE::UAI::BindingGateway::Query
 		: Kind(EUeAgentQueryBindingPayloadKind::StateRead)
 		, StateRead(MakeShared<FUeAgentStateReadQuery>(MoveTemp(InQuery)))
 	{
+		ValidationDiagnostic = StateRead->GetValidationDiagnostic();
 	}
 
 	FUeAgentQueryBindingPayload::FUeAgentQueryBindingPayload(
@@ -154,6 +168,7 @@ namespace UE::UAI::BindingGateway::Query
 		, DomainQuery(
 			MakeShared<FUeAgentDomainQuery>(MoveTemp(InQuery)))
 	{
+		ValidationDiagnostic = DomainQuery->GetValidationDiagnostic();
 	}
 
 	EUeAgentQueryBindingPayloadKind FUeAgentQueryBindingPayload::GetKind() const { return Kind; }
@@ -168,27 +183,10 @@ namespace UE::UAI::BindingGateway::Query
 
 	bool FUeAgentQueryBindingPayload::IsValid() const
 	{
-		switch (Kind)
-		{
-		case EUeAgentQueryBindingPayloadKind::CatalogSearch:
-			return CatalogSearch.IsValid() && CatalogSearch->IsValid()
-				&& !CatalogResolve.IsValid() && !StateRead.IsValid();
-		case EUeAgentQueryBindingPayloadKind::CatalogResolve:
-			return CatalogResolve.IsValid() && CatalogResolve->IsValid()
-				&& !CatalogSearch.IsValid() && !StateRead.IsValid();
-		case EUeAgentQueryBindingPayloadKind::StateRead:
-			return StateRead.IsValid() && StateRead->IsValid()
-				&& !CatalogSearch.IsValid() && !CatalogResolve.IsValid()
-				&& !DomainQuery.IsValid();
-		case EUeAgentQueryBindingPayloadKind::DomainQuery:
-			return DomainQuery.IsValid() && DomainQuery->IsValid()
-				&& !CatalogSearch.IsValid()
-				&& !CatalogResolve.IsValid()
-				&& !StateRead.IsValid();
-		default:
-			return false;
-		}
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FUeAgentQueryBindingError& FUeAgentQueryBindingPayload::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentQueryBindingResponse::FUeAgentQueryBindingResponse(
 		TSharedRef<const FUeAgentProjectedResponse> InProjection,
@@ -198,17 +196,37 @@ namespace UE::UAI::BindingGateway::Query
 		, Ticket(MoveTemp(InTicket))
 		, Source(MoveTemp(InSource))
 	{
-		bValid = Projection.IsValid()
-			&& Projection->IsValid()
-			&& (!Source.IsValid() || Source->IsValid())
-			&& (!Ticket.IsSet() || Ticket->IsValid());
+		if (!Projection->IsValid()) ValidationDiagnostic = Projection->GetValidationDiagnostic();
+		else if (Source.IsValid() && !Source->IsValid())
+		{
+			ValidationDiagnostic = FUeAgentQueryBindingError::Failure(TEXT("query_response_invalid"),
+				TEXT("The query response source must contain exactly one source variant."), TEXT("query_binding"));
+			ValidationDiagnostic.PropertyPath = TEXT("source");
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(
+				static_cast<int32>(Source->GetSnapshot().IsValid()) + static_cast<int32>(Source->GetCatalog().IsValid())
+				+ static_cast<int32>(Source->GetCandidateBinding().IsValid()) + static_cast<int32>(Source->GetValue().IsValid())
+				+ static_cast<int32>(Source->GetComparison().IsValid()));
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+		}
+		else if (Ticket.IsSet() && !Ticket->IsValid()) ValidationDiagnostic = Ticket->GetValidationDiagnostic();
 	}
 
 	const TSharedPtr<const FUeAgentProjectedResponse>& FUeAgentQueryBindingResponse::GetProjection() const { return Projection; }
+	TArray<Contract::FDiagnostic> FUeAgentQueryBindingResponse::GetDiagnostics() const
+	{
+		TArray<Contract::FDiagnostic> Diagnostics;
+		if (!Projection.IsValid()) return Diagnostics;
+		for (const auto& Diagnostic : Projection->GetDiagnostics()) Diagnostics.Add(Diagnostic.GetDiagnostic());
+		const auto& Catalog = Projection->GetPayload().GetCatalog();
+		if (Catalog.IsValid())
+			for (const auto& Diagnostic : Catalog->GetDiagnostics()) Diagnostics.Add(Diagnostic.GetDiagnostic());
+		return Diagnostics;
+	}
 	const TOptional<FUeAgentQueryTicket>& FUeAgentQueryBindingResponse::GetTicket() const { return Ticket; }
 	const TSharedPtr<const FUeAgentProjectionSourceValue>&
 	FUeAgentQueryBindingResponse::GetSource() const { return Source; }
-	bool FUeAgentQueryBindingResponse::IsValid() const { return bValid; }
+	bool FUeAgentQueryBindingResponse::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FUeAgentQueryBindingError& FUeAgentQueryBindingResponse::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentQueryTicketService::FUeAgentQueryTicketService(
 		TSharedRef<
@@ -237,11 +255,7 @@ namespace UE::UAI::BindingGateway::Query
 				Shared,
 				Error))
 		{
-			SetError(
-				OutError,
-				Error.Code,
-				Error.SubjectId,
-				Error.Detail);
+			OutError = Error;
 			return false;
 		}
 		OutService = MakeShareable(
@@ -283,11 +297,7 @@ namespace UE::UAI::BindingGateway::Query
 				OutTicket,
 				Error))
 		{
-			SetError(
-				OutError,
-				Error.Code,
-				Error.SubjectId,
-				Error.Detail);
+			OutError = Error;
 			return false;
 		}
 		return true;
@@ -311,11 +321,7 @@ namespace UE::UAI::BindingGateway::Query
 				CallerContext,
 				Error))
 		{
-			SetError(
-				OutError,
-				Error.Code,
-				Error.SubjectId,
-				Error.Detail);
+			OutError = Error;
 			return false;
 		}
 		return true;
@@ -385,34 +391,6 @@ namespace UE::UAI::BindingGateway::Query
 		}
 
 		TSharedRef<FJsonObject> CatalogJson(
-			const FUeAgentCatalogSnapshot& Catalog)
-		{
-			TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(TEXT("catalog_id"), Catalog.GetCatalogId());
-			Object->SetStringField(TEXT("catalog_kind"), Catalog.GetCatalogKind());
-			Object->SetObjectField(TEXT("revision"), RevisionJson(Catalog.GetRevision()));
-			switch (Catalog.GetCompleteness())
-			{
-			case EUeAgentCatalogCompleteness::Complete:
-				Object->SetStringField(TEXT("completeness"), TEXT("complete"));
-				break;
-			case EUeAgentCatalogCompleteness::Partial:
-				Object->SetStringField(TEXT("completeness"), TEXT("partial"));
-				break;
-			default:
-				Object->SetStringField(TEXT("completeness"), TEXT("degraded"));
-				break;
-			}
-			TArray<TSharedPtr<FJsonValue>> Candidates;
-			for (const auto& Candidate : Catalog.GetCandidates())
-			{
-				Candidates.Add(MakeShared<FJsonValueObject>(SummaryJson(Candidate)));
-			}
-			Object->SetArrayField(TEXT("candidates"), Candidates);
-			return Object;
-		}
-
-		TSharedRef<FJsonObject> CatalogJson(
 			const UE::UAI::Projection::FUeAgentProjectedCatalog& Catalog)
 		{
 			TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
@@ -440,38 +418,6 @@ namespace UE::UAI::BindingGateway::Query
 			return Object;
 		}
 
-		TSharedRef<FJsonObject> ProjectionJson(
-			const FUeAgentProjectionRequest& Projection)
-		{
-			TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(TEXT("profile_id"), Projection.GetProfile().GetProfileId());
-			Object->SetBoolField(TEXT("include_defaults"), Projection.GetProfile().IncludesDefaults());
-			Object->SetBoolField(TEXT("include_details"), Projection.GetProfile().IncludesDetails());
-			Object->SetBoolField(TEXT("include_provenance"), Projection.GetProfile().IncludesProvenance());
-			if (Projection.GetPage().HasMaxItems())
-			{
-				Object->SetNumberField(
-					TEXT("max_items"),
-					Projection.GetPage().GetMaxItems());
-			}
-			else
-			{
-				Object->SetField(
-					TEXT("max_items"),
-					MakeShared<FJsonValueNull>());
-			}
-			Object->SetStringField(TEXT("continuation_token"), Projection.GetPage().GetCursor());
-			if (Projection.GetTokenBudget().IsSet())
-			{
-				Object->SetNumberField(TEXT("token_budget"), static_cast<double>(Projection.GetTokenBudget().GetValue()));
-			}
-			else
-			{
-				Object->SetField(TEXT("token_budget"), MakeShared<FJsonValueNull>());
-			}
-			return Object;
-		}
-
 		bool SerializeJson(
 			const TSharedRef<FJsonObject>& Object,
 			FString& OutText)
@@ -488,295 +434,13 @@ namespace UE::UAI::BindingGateway::Query
 			const FString& Path,
 			FUeAgentQueryBindingError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded Error;
+			FUeAgentResourceChargeError Error;
 			if (Resources.TryCharge(Dimension, Amount, Path, Error))
 			{
 				return true;
 			}
-			OutError.Code = Error.Code;
-			OutError.SubjectId = Error.Path;
-			OutError.Detail = TEXT("C3Q payload codec resource budget exceeded.");
-			OutError.ResourceDimension = Error.Dimension;
-			OutError.ResourceLimit = Error.Limit;
-			OutError.ResourceObserved = Error.Observed;
+			OutError = Error;
 			return false;
-		}
-
-		bool ParseSession(
-			const TSharedPtr<FJsonObject>& Object,
-			TOptional<FUeAgentQuerySessionIdentity>& Out,
-			FUeAgentQueryBindingError& OutError)
-		{
-			UE::UAI::BindingGateway::Ticket::
-				FUeAgentBindingTicketJsonError CodecError;
-			if (!UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::TryParseSession(
-						Object,
-						Out,
-						CodecError))
-			{
-				SetError(
-					OutError,
-					CodecError.Code.IsEmpty()
-						? TEXT("query_payload_invalid")
-						: CodecError.Code,
-					CodecError.SubjectId,
-					CodecError.Detail);
-				return false;
-			}
-			return true;
-		}
-
-		bool ParseProjection(
-			const TSharedPtr<FJsonObject>& Object,
-			TOptional<FUeAgentProjectionRequest>& Out,
-			FUeAgentQueryBindingError& OutError)
-		{
-			if (!Object.IsValid()
-				|| !Object->HasTypedField<EJson::String>(TEXT("profile_id"))
-				|| !Object->HasTypedField<EJson::Boolean>(TEXT("include_defaults"))
-				|| !Object->HasTypedField<EJson::Boolean>(TEXT("include_details"))
-				|| !Object->HasTypedField<EJson::Boolean>(TEXT("include_provenance"))
-				|| !Object->HasField(TEXT("max_items")))
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("projection"), TEXT("Projection fields are missing or have the wrong type."));
-				return false;
-			}
-			TOptional<int64> TokenBudget;
-			double TokenBudgetNumber = 0.0;
-			if (Object->TryGetNumberField(TEXT("token_budget"), TokenBudgetNumber))
-			{
-				TokenBudget = static_cast<int64>(TokenBudgetNumber);
-			}
-			FString Continuation;
-			Object->TryGetStringField(TEXT("continuation_token"), Continuation);
-			const TSharedPtr<FJsonValue>& MaxItemsValue =
-				Object->Values.FindChecked(TEXT("max_items"));
-			UE::UAI::Projection::FUeAgentPageRequest Page;
-			if (MaxItemsValue->Type == EJson::Number)
-			{
-				Page = UE::UAI::Projection::FUeAgentPageRequest(
-					static_cast<int32>(
-						MaxItemsValue->AsNumber()),
-					Continuation);
-			}
-			else if (MaxItemsValue->Type == EJson::Null)
-			{
-				Page = Continuation.IsEmpty()
-					? UE::UAI::Projection::FUeAgentPageRequest()
-					: UE::UAI::Projection::FUeAgentPageRequest(
-						Continuation);
-			}
-			else
-			{
-				SetError(
-					OutError,
-					TEXT("query_payload_invalid"),
-					TEXT("projection.max_items"),
-					TEXT("max_items must be a number or null."));
-				return false;
-			}
-			FUeAgentProjectionRequest Projection(
-				UE::UAI::Projection::FUeAgentProjectionProfile(
-					Object->GetStringField(TEXT("profile_id")),
-					Object->GetBoolField(TEXT("include_defaults")),
-					Object->GetBoolField(TEXT("include_details")),
-					Object->GetBoolField(TEXT("include_provenance"))),
-				MoveTemp(Page),
-				TokenBudget,
-				{},
-				{});
-			if (!Projection.IsValid())
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("projection"), TEXT("Projection request is invalid."));
-				return false;
-			}
-			Out.Emplace(MoveTemp(Projection));
-			return true;
-		}
-
-		bool ParseDescriptor(
-			const TSharedPtr<FJsonObject>& Object,
-			TOptional<FUeAgentDescriptorIdentity>& Out)
-		{
-			if (!Object.IsValid()
-				|| !Object->HasTypedField<EJson::String>(TEXT("descriptor_id"))
-				|| !Object->HasTypedField<EJson::Number>(TEXT("version"))
-				|| !Object->HasTypedField<EJson::String>(TEXT("descriptor_hash")))
-			{
-				return false;
-			}
-			FUeAgentDescriptorIdentity Value(
-				Object->GetStringField(TEXT("descriptor_id")),
-				static_cast<int32>(Object->GetNumberField(TEXT("version"))),
-				Object->GetStringField(TEXT("descriptor_hash")));
-			if (!Value.IsValid())
-			{
-				return false;
-			}
-			Out.Emplace(MoveTemp(Value));
-			return true;
-		}
-
-		bool ParseIdentity(
-			const TSharedPtr<FJsonObject>& Object,
-			TOptional<UE::UAI::StateSemantic::FUeAgentCanonicalIdentity>& Out)
-		{
-			if (!Object.IsValid())
-			{
-				return false;
-			}
-			for (const TCHAR* Field : {
-				TEXT("semantic_id"),
-				TEXT("target_kind"),
-				TEXT("owner_id"),
-				TEXT("selector"),
-				TEXT("object_role"),
-				TEXT("generation"),
-			})
-			{
-				if (!Object->HasTypedField<EJson::String>(Field))
-				{
-					return false;
-				}
-			}
-			UE::UAI::StateSemantic::FUeAgentCanonicalIdentity Value(
-				Object->GetStringField(TEXT("semantic_id")),
-				Object->GetStringField(TEXT("target_kind")),
-				Object->GetStringField(TEXT("owner_id")),
-				Object->GetStringField(TEXT("selector")),
-				Object->GetStringField(TEXT("object_role")),
-				Object->GetStringField(TEXT("generation")));
-			if (!Value.IsValid())
-			{
-				return false;
-			}
-			Out.Emplace(MoveTemp(Value));
-			return true;
-		}
-
-		bool ParseCatalogRevision(
-			const TSharedPtr<FJsonObject>& Object,
-			TOptional<FUeAgentCatalogRevision>& Out)
-		{
-			if (!Object.IsValid()
-				|| !Object->HasTypedField<EJson::String>(TEXT("source_id"))
-				|| !Object->HasTypedField<EJson::String>(TEXT("generation"))
-				|| !Object->HasTypedField<EJson::Number>(TEXT("sequence")))
-			{
-				return false;
-			}
-			FUeAgentCatalogRevision Value(
-				Object->GetStringField(TEXT("source_id")),
-				Object->GetStringField(TEXT("generation")),
-				static_cast<int64>(Object->GetNumberField(TEXT("sequence"))));
-			if (!Value.IsValid())
-			{
-				return false;
-			}
-			Out.Emplace(MoveTemp(Value));
-			return true;
-		}
-
-		bool ParseSummary(
-			const TSharedPtr<FJsonObject>& Object,
-			TOptional<UE::UAI::Discovery::FUeAgentCandidateSummary>& Out)
-		{
-			if (!Object.IsValid()
-				|| !Object->HasTypedField<EJson::Object>(TEXT("identity"))
-				|| !Object->HasTypedField<EJson::Object>(TEXT("descriptor"))
-				|| !Object->HasTypedField<EJson::String>(TEXT("catalog_kind"))
-				|| !Object->HasTypedField<EJson::String>(TEXT("display_name"))
-				|| !Object->HasTypedField<EJson::String>(TEXT("summary"))
-				|| !Object->HasTypedField<EJson::Array>(TEXT("category_path")))
-			{
-				return false;
-			}
-			TOptional<UE::UAI::StateSemantic::FUeAgentCanonicalIdentity> Identity;
-			TOptional<FUeAgentDescriptorIdentity> Descriptor;
-			if (!ParseIdentity(Object->GetObjectField(TEXT("identity")), Identity)
-				|| !ParseDescriptor(Object->GetObjectField(TEXT("descriptor")), Descriptor))
-			{
-				return false;
-			}
-			TArray<FString> CategoryPath;
-			for (const TSharedPtr<FJsonValue>& Item : Object->GetArrayField(TEXT("category_path")))
-			{
-				if (!Item.IsValid() || Item->Type != EJson::String)
-				{
-					return false;
-				}
-				CategoryPath.Add(Item->AsString());
-			}
-			UE::UAI::Discovery::FUeAgentCandidateSummary Value(
-				Identity.GetValue(),
-				Descriptor.GetValue(),
-				Object->GetStringField(TEXT("catalog_kind")),
-				Object->GetStringField(TEXT("display_name")),
-				Object->GetStringField(TEXT("summary")),
-				MoveTemp(CategoryPath));
-			if (!Value.IsValid())
-			{
-				return false;
-			}
-			Out.Emplace(MoveTemp(Value));
-			return true;
-		}
-
-		bool ParseCatalog(
-			const TSharedPtr<FJsonObject>& Object,
-			FUeAgentResourceTracker& Resources,
-			TSharedPtr<const FUeAgentCatalogSnapshot>& Out,
-			FUeAgentQueryBindingError& OutError)
-		{
-			if (!Object.IsValid()
-				|| !Object->HasTypedField<EJson::String>(TEXT("catalog_id"))
-				|| !Object->HasTypedField<EJson::String>(TEXT("catalog_kind"))
-				|| !Object->HasTypedField<EJson::Object>(TEXT("revision"))
-				|| !Object->HasTypedField<EJson::String>(TEXT("completeness"))
-				|| !Object->HasTypedField<EJson::Array>(TEXT("candidates")))
-			{
-				return false;
-			}
-			TOptional<FUeAgentCatalogRevision> Revision;
-			if (!ParseCatalogRevision(Object->GetObjectField(TEXT("revision")), Revision))
-			{
-				return false;
-			}
-			TArray<UE::UAI::Discovery::FUeAgentCandidateSummary> Candidates;
-			for (const TSharedPtr<FJsonValue>& Item : Object->GetArrayField(TEXT("candidates")))
-			{
-				TOptional<UE::UAI::Discovery::FUeAgentCandidateSummary> Summary;
-				if (!Item.IsValid()
-					|| Item->Type != EJson::Object
-					|| !ParseSummary(Item->AsObject(), Summary))
-				{
-					return false;
-				}
-				Candidates.Add(Summary.GetValue());
-			}
-			const FString Completeness = Object->GetStringField(TEXT("completeness"));
-			EUeAgentCatalogCompleteness TypedCompleteness;
-			if (Completeness == TEXT("complete")) TypedCompleteness = EUeAgentCatalogCompleteness::Complete;
-			else if (Completeness == TEXT("partial")) TypedCompleteness = EUeAgentCatalogCompleteness::Partial;
-			else if (Completeness == TEXT("degraded")) TypedCompleteness = EUeAgentCatalogCompleteness::Degraded;
-			else return false;
-			FUeAgentDiscoveryError DiscoveryError;
-			if (!FUeAgentCatalogSnapshot::TryCreate(
-					Object->GetStringField(TEXT("catalog_id")),
-					Object->GetStringField(TEXT("catalog_kind")),
-					Revision.GetValue(),
-					TypedCompleteness,
-					Candidates,
-					{},
-					Resources,
-					Out,
-					DiscoveryError))
-			{
-				CopyError(DiscoveryError, OutError);
-				return false;
-			}
-			return true;
 		}
 
 		FString StatePlaneName(EUeAgentStatePlane Plane)
@@ -1000,7 +664,7 @@ namespace UE::UAI::BindingGateway::Query
 			TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
 			Object->SetStringField(TEXT("type_id"), Type.GetTypeId());
 			Object->SetStringField(
-				TEXT("value_kind"),
+				TEXT("kind"),
 				ValueKindName(Type.GetValueKind()));
 			Object->SetBoolField(TEXT("nullable"), Type.IsNullable());
 			Object->SetStringField(
@@ -1053,8 +717,10 @@ namespace UE::UAI::BindingGateway::Query
 		}
 
 		TSharedRef<FJsonObject> ProjectedSnapshotJson(
-			const UE::UAI::Projection::FUeAgentProjectedSnapshot& Snapshot)
+			const UE::UAI::Projection::FUeAgentProjectedSnapshot& Snapshot,
+			const FString& ProfileId)
 		{
+			const bool bCompactProfile = ProfileId == TEXT("compact");
 			TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
 			Object->SetStringField(
 				TEXT("snapshot_id"),
@@ -1087,54 +753,51 @@ namespace UE::UAI::BindingGateway::Query
 					TEXT("provenance"),
 					ProvenanceObject);
 			}
-			else
-			{
-				Object->SetField(
-					TEXT("provenance"),
-					MakeShared<FJsonValueNull>());
-			}
-
 			TArray<TSharedPtr<FJsonValue>> Entries;
 			Entries.Reserve(Snapshot.GetEntries().Num());
 			for (const auto& Entry : Snapshot.GetEntries())
 			{
 				TSharedRef<FJsonObject> EntryObject =
 					MakeShared<FJsonObject>();
-				EntryObject->SetObjectField(
-					TEXT("identity"),
-					IdentityJson(Entry.GetIdentity()));
-				EntryObject->SetObjectField(
-					TEXT("type"),
-					TypeJson(Entry.GetType()));
+				if (bCompactProfile)
+				{
+					EntryObject->SetStringField(
+						TEXT("owner_id"),
+						Entry.GetIdentity().GetOwnerId());
+					EntryObject->SetStringField(
+						TEXT("selector"),
+						Entry.GetIdentity().GetSelector());
+				}
+				else
+				{
+					EntryObject->SetObjectField(
+						TEXT("identity"),
+						IdentityJson(Entry.GetIdentity()));
+					EntryObject->SetObjectField(
+						TEXT("type"),
+						TypeJson(Entry.GetType()));
+				}
 				EntryObject->SetObjectField(
 					TEXT("value"),
 					CanonicalValueJson(Entry.GetValue().Get()));
-				EntryObject->SetObjectField(
-					TEXT("observed_revision"),
-					RevisionJson(Entry.GetObservedRevision()));
+				if (!bCompactProfile
+					|| Entry.GetObservedRevision() != Snapshot.GetRevision())
+				{
+					EntryObject->SetObjectField(
+						TEXT("observed_revision"),
+						RevisionJson(Entry.GetObservedRevision()));
+				}
 				if (Entry.GetDefault().IsSet())
 				{
 					EntryObject->SetObjectField(
 						TEXT("default"),
 						DefaultJson(Entry.GetDefault().GetValue()));
 				}
-				else
-				{
-					EntryObject->SetField(
-						TEXT("default"),
-						MakeShared<FJsonValueNull>());
-				}
 				if (Entry.GetDetails().IsSet())
 				{
 					EntryObject->SetObjectField(
 						TEXT("details"),
 						DetailsJson(Entry.GetDetails().GetValue()));
-				}
-				else
-				{
-					EntryObject->SetField(
-						TEXT("details"),
-						MakeShared<FJsonValueNull>());
 				}
 				Entries.Add(MakeShared<FJsonValueObject>(EntryObject));
 			}
@@ -1148,10 +811,6 @@ namespace UE::UAI::BindingGateway::Query
 			PageObject->SetNumberField(
 				TEXT("total_items"),
 				Page.GetTotalItems());
-			PageObject->SetBoolField(TEXT("has_more"), Page.HasMore());
-			PageObject->SetStringField(
-				TEXT("next_cursor"),
-				Page.GetNextCursor());
 			Object->SetObjectField(TEXT("page"), PageObject);
 			Object->SetArrayField(
 				TEXT("omitted_sections"),
@@ -1159,786 +818,847 @@ namespace UE::UAI::BindingGateway::Query
 			return Object;
 		}
 
-		bool ParseStatePlane(
-			const FString& Value,
-			EUeAgentStatePlane& Out)
+		bool IsMachineOnlyContentGraphField(const FString& FieldName)
 		{
-			return UE::UAI::Contract::TryParseStatePlane(
-				Value,
-				Out);
+			const FString Lower = FieldName.ToLower();
+			return Lower == TEXT("id")
+				|| Lower == TEXT("owner_path")
+				|| Lower == TEXT("owner_id")
+				|| Lower == TEXT("container_id")
+				|| Lower == TEXT("parent_container_id")
+				|| Lower == TEXT("item_id")
+				|| Lower == TEXT("relation_id")
+				|| Lower == TEXT("source_item_id")
+				|| Lower == TEXT("target_item_id")
+				|| Lower == TEXT("endpoint_id")
+				|| Lower == TEXT("asset_path")
+				|| Lower.Contains(TEXT("guid"))
+				|| Lower.Contains(TEXT("hash"))
+				|| Lower.Contains(TEXT("digest"))
+				|| Lower.Contains(TEXT("fingerprint"))
+				|| Lower.Contains(TEXT("revision"))
+				|| Lower.Contains(TEXT("cursor"))
+				|| Lower.Contains(TEXT("ticket"))
+				|| Lower.Contains(TEXT("authorization"))
+				|| Lower.Contains(TEXT("correlation"));
 		}
 
-		FString ExecutionWorldTypeName(
-			const UE::UAI::ContextResource::
-				EUeAgentExecutionWorldType WorldType)
+		bool IsOpaqueMachineString(const FString& Text)
 		{
-			using UE::UAI::ContextResource::
-				EUeAgentExecutionWorldType;
-			switch (WorldType)
-			{
-			case EUeAgentExecutionWorldType::Editor:
-				return TEXT("editor");
-			case EUeAgentExecutionWorldType::Pie:
-				return TEXT("pie");
-			case EUeAgentExecutionWorldType::SimulateInEditor:
-				return TEXT("simulate_in_editor");
-			case EUeAgentExecutionWorldType::Game:
-				return TEXT("game");
-			case EUeAgentExecutionWorldType::Preview:
-				return TEXT("preview");
-			default:
-				return TEXT("invalid");
-			}
-		}
-
-		bool ParseExecutionWorldType(
-			const FString& Text,
-			UE::UAI::ContextResource::
-				EUeAgentExecutionWorldType& Out)
-		{
-			using UE::UAI::ContextResource::
-				EUeAgentExecutionWorldType;
-			if (Text == TEXT("editor"))
-			{
-				Out = EUeAgentExecutionWorldType::Editor;
-			}
-			else if (Text == TEXT("pie"))
-			{
-				Out = EUeAgentExecutionWorldType::Pie;
-			}
-			else if (Text == TEXT("simulate_in_editor"))
-			{
-				Out =
-					EUeAgentExecutionWorldType::SimulateInEditor;
-			}
-			else if (Text == TEXT("game"))
-			{
-				Out = EUeAgentExecutionWorldType::Game;
-			}
-			else if (Text == TEXT("preview"))
-			{
-				Out = EUeAgentExecutionWorldType::Preview;
-			}
-			else
+			FString Value = Text;
+			Value.TrimStartAndEndInline();
+			if (Value.Len() < 20)
 			{
 				return false;
 			}
-			return true;
+			int32 HexCharacters = 0;
+			int32 LongestHexRun = 0;
+			int32 CurrentHexRun = 0;
+			int32 OtherCharacters = 0;
+			for (const TCHAR Character : Value)
+			{
+				if (FChar::IsHexDigit(Character))
+				{
+					++HexCharacters;
+					LongestHexRun = FMath::Max(LongestHexRun, ++CurrentHexRun);
+				}
+				else
+				{
+					CurrentHexRun = 0;
+					if (Character != TEXT('-') && Character != TEXT('_')
+						&& Character != TEXT('{') && Character != TEXT('}'))
+					{
+						++OtherCharacters;
+					}
+				}
+			}
+			return LongestHexRun >= 20
+				|| (HexCharacters >= 24 && OtherCharacters == 0);
 		}
 
-		TSharedRef<FJsonObject> ExecutionContextJson(
-			const UE::UAI::ContextResource::
-				FUeAgentExecutionContextInput& Context)
+		bool IsIdentityBearingContentGraphField(const FString& FieldName)
 		{
-			TSharedRef<FJsonObject> Object =
-				MakeShared<FJsonObject>();
-			Object->SetStringField(
-				TEXT("project_instance_id"),
-				Context.ProjectInstanceId);
-			Object->SetStringField(
-				TEXT("editor_instance_id"),
-				Context.EditorInstanceId);
-			Object->SetStringField(
-				TEXT("state_plane"),
-				StatePlaneName(Context.StatePlane));
-			Object->SetStringField(
-				TEXT("world_type"),
-				ExecutionWorldTypeName(Context.WorldType));
-			Object->SetStringField(
-				TEXT("world_identity"),
-				Context.WorldIdentity);
-			Object->SetStringField(
-				TEXT("level_identity"),
-				Context.LevelIdentity);
-			Object->SetArrayField(
-				TEXT("data_layer_identities"),
-				StringArrayJson(Context.DataLayerIdentities));
-			Object->SetStringField(
-				TEXT("world_partition_identity"),
-				Context.WorldPartitionIdentity);
-			if (Context.PieInstanceId.IsSet())
+			const FString Lower = FieldName.ToLower();
+			return Lower == TEXT("from")
+				|| Lower == TEXT("to")
+				|| Lower == TEXT("source")
+				|| Lower == TEXT("target")
+				|| Lower == TEXT("owner")
+				|| Lower.EndsWith(TEXT("_id"))
+				|| Lower.EndsWith(TEXT("_key"));
+		}
+
+		TSharedPtr<FJsonValue> PublicCanonicalValueJson(
+			const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Value,
+			const bool bFilterMachineFields,
+			const FString& FieldName = FString())
+		{
+			using UE::UAI::StateSemantic::EUeAgentValueKind;
+			switch (Value.GetKind())
 			{
-				Object->SetNumberField(
-					TEXT("pie_instance_id"),
-					Context.PieInstanceId.GetValue());
+			case EUeAgentValueKind::Null:
+				return MakeShared<FJsonValueNull>();
+			case EUeAgentValueKind::Boolean:
+				return MakeShared<FJsonValueBoolean>(Value.GetBoolean());
+			case EUeAgentValueKind::String:
+				if (bFilterMachineFields
+					&& IsIdentityBearingContentGraphField(FieldName)
+					&& IsOpaqueMachineString(Value.GetText()))
+				{
+					return nullptr;
+				}
+				return MakeShared<FJsonValueString>(Value.GetText());
+			case EUeAgentValueKind::Integer:
+			case EUeAgentValueKind::Decimal:
+				// Preserve the canonical lexeme as a JSON number, so query values
+				// remain valid typed authoring inputs without caller-side coercion.
+				return MakeShared<FJsonValueNumberString>(Value.GetLexeme());
+			case EUeAgentValueKind::Array:
+			{
+				TArray<TSharedPtr<FJsonValue>> Items;
+				Items.Reserve(Value.GetArrayItems().Num());
+				for (const auto& Item : Value.GetArrayItems())
+				{
+					TSharedPtr<FJsonValue> Projected = PublicCanonicalValueJson(
+						Item.Get(),
+						bFilterMachineFields,
+						FieldName);
+					if (Projected.IsValid())
+					{
+						Items.Add(MoveTemp(Projected));
+					}
+				}
+				return MakeShared<FJsonValueArray>(MoveTemp(Items));
+			}
+			case EUeAgentValueKind::Object:
+			{
+				TSharedRef<FJsonObject> Fields = MakeShared<FJsonObject>();
+				for (const auto& Item : Value.GetObjectItems())
+				{
+					if (bFilterMachineFields
+						&& IsMachineOnlyContentGraphField(Item.Key))
+					{
+						continue;
+					}
+					TSharedPtr<FJsonValue> Projected = PublicCanonicalValueJson(
+							Item.Value.Get(),
+							bFilterMachineFields,
+							Item.Key);
+					if (Projected.IsValid())
+					{
+						Fields->SetField(Item.Key, MoveTemp(Projected));
+					}
+				}
+				return MakeShared<FJsonValueObject>(Fields);
+			}
+			case EUeAgentValueKind::Temporal:
+				return MakeShared<FJsonValueObject>(
+					CanonicalValueJson(Value));
+			case EUeAgentValueKind::Spatial:
+				if (Value.GetSpatial().IsValid())
+				{
+					const auto& Spatial = *Value.GetSpatial();
+					TSharedRef<FJsonObject> Point = MakeShared<FJsonObject>();
+					Point->SetStringField(
+						TEXT("frame_id"),
+						Spatial.GetFrame().GetFrameId());
+					Point->SetStringField(
+						TEXT("unit"),
+						Spatial.GetFrame().GetUnit());
+					Point->SetArrayField(
+						TEXT("components"),
+						StringArrayJson(Spatial.GetComponents()));
+					return MakeShared<FJsonValueObject>(Point);
+				}
+				return nullptr;
+			default:
+				return MakeShared<FJsonValueNull>();
+			}
+		}
+
+		FString PublicEntryKey(
+			const UE::UAI::Projection::FUeAgentProjectedEntry& Entry)
+		{
+			for (const TCHAR* Selector : {
+				TEXT("property_path"),
+				TEXT("field_name"),
+				TEXT("public_name"),
+				TEXT("name"),
+				TEXT("selector")})
+			{
+				FString Value = Entry.GetIdentity().GetSelector(Selector);
+				Value.TrimStartAndEndInline();
+				if (!Value.IsEmpty() && !IsOpaqueMachineString(Value))
+				{
+					return Value == TEXT("domain_id")
+						? FString(TEXT("domain"))
+						: Value;
+				}
+			}
+			if (Entry.GetDetails().IsSet())
+			{
+				FString Value = Entry.GetDetails()->GetDisplayName();
+				Value.TrimStartAndEndInline();
+				if (!Value.IsEmpty() && !IsOpaqueMachineString(Value))
+				{
+					return Value;
+				}
+			}
+			return FString();
+		}
+
+		TSharedPtr<FJsonValue> PublicEntryJson(
+			const UE::UAI::Projection::FUeAgentProjectedEntry& Entry,
+			const bool bFilterMachineFields)
+		{
+			TSharedPtr<FJsonValue> Value = PublicCanonicalValueJson(
+				Entry.GetValue().Get(),
+				bFilterMachineFields);
+			if (!Value.IsValid())
+			{
+				return nullptr;
+			}
+			const FString Key = PublicEntryKey(Entry);
+			if (bFilterMachineFields
+				&& IsMachineOnlyContentGraphField(Key))
+			{
+				return nullptr;
+			}
+			const bool bProperty = !Entry.GetIdentity()
+				.GetSelector(TEXT("property_path")).IsEmpty();
+			if (Value->Type != EJson::Object || bProperty)
+			{
+				if (Key.IsEmpty())
+				{
+					return Value;
+				}
+				TSharedRef<FJsonObject> Named = MakeShared<FJsonObject>();
+				Named->SetField(Key, MoveTemp(Value));
+				return MakeShared<FJsonValueObject>(Named);
+			}
+			const TSharedPtr<FJsonObject> Object = Value->AsObject();
+			const bool bRemovedAllFields = bFilterMachineFields && Object.IsValid() && Object->Values.IsEmpty()
+				&& Entry.GetValue()->GetKind() == UE::UAI::StateSemantic::EUeAgentValueKind::Object
+				&& !Entry.GetValue()->GetObjectItems().IsEmpty();
+			return bRemovedAllFields
+				? nullptr
+				: Value;
+		}
+
+		FString PublicProjectionIdentityValue(
+			const UE::UAI::Projection::FUeAgentProjectedEntry& Entry,
+			const EUeAgentQueryPublicIdentityField IdentityField)
+		{
+			return IdentityField
+				== EUeAgentQueryPublicIdentityField::ObjectRole
+					? Entry.GetIdentity().GetObjectRole()
+					: Entry.GetIdentity().GetSelector(TEXT("selector"));
+		}
+
+		TSharedRef<FJsonObject> PublicProjectedSnapshotJson(
+			const UE::UAI::Projection::FUeAgentProjectedSnapshot& Snapshot,
+			const bool bFilterMachineFields,
+			const bool bGroupBySection)
+		{
+			TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+			TArray<TSharedPtr<FJsonValue>> Entries;
+			TMap<FString, TArray<TSharedPtr<FJsonValue>>> EntriesBySection;
+			Entries.Reserve(Snapshot.GetEntries().Num());
+			for (const auto& Entry : Snapshot.GetEntries())
+			{
+				TSharedPtr<FJsonValue> Value = PublicEntryJson(
+					Entry,
+					bFilterMachineFields);
+				if (Value.IsValid())
+				{
+					if (bGroupBySection)
+					{
+						FString Section =
+							Entry.GetIdentity().GetSelector(TEXT("section"));
+						if (Section.IsEmpty() && Entry.GetDetails().IsSet()
+							&& !Entry.GetDetails()->GetCategoryPath().IsEmpty())
+						{
+							Section = Entry.GetDetails()
+								->GetCategoryPath().Last();
+						}
+						Section = Section.ToLower();
+						if (Section.IsEmpty())
+						{
+							Section = TEXT("other");
+						}
+						EntriesBySection.FindOrAdd(Section).Add(MoveTemp(Value));
+					}
+					else
+					{
+						Entries.Add(MoveTemp(Value));
+					}
+				}
+			}
+			if (bGroupBySection)
+			{
+				TSharedRef<FJsonObject> Sections = MakeShared<FJsonObject>();
+				TArray<FString> SectionNames;
+				EntriesBySection.GetKeys(SectionNames);
+				SectionNames.Sort();
+				for (const FString& Section : SectionNames)
+				{
+					Sections->SetArrayField(
+						Section,
+						MoveTemp(EntriesBySection.FindChecked(Section)));
+				}
+				Object->SetObjectField(TEXT("sections"), Sections);
 			}
 			else
 			{
-				Object->SetField(
-					TEXT("pie_instance_id"),
-					MakeShared<FJsonValueNull>());
+				Object->SetArrayField(TEXT("entries"), MoveTemp(Entries));
 			}
-			Object->SetStringField(TEXT("net_mode"), Context.NetMode);
-			Object->SetStringField(TEXT("net_role"), Context.NetRole);
-			Object->SetStringField(
-				TEXT("asset_editor_identity"),
-				Context.AssetEditorIdentity);
-			Object->SetStringField(
-				TEXT("viewport_identity"),
-				Context.ViewportIdentity);
-			Object->SetArrayField(
-				TEXT("selection_identities"),
-				StringArrayJson(Context.SelectionIdentities));
-			Object->SetStringField(
-				TEXT("context_revision"),
-				Context.ContextRevision);
-			Object->SetBoolField(
-				TEXT("resolved_from_current"),
-				Context.bResolvedFromCurrent);
+
 			return Object;
 		}
 
-		bool ParseStringArray(
-			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
-			TArray<FString>& Out)
-		{
-			Out.Reset();
-			if (!Object.IsValid()
-				|| !Object->HasTypedField<EJson::Array>(Field))
-			{
-				return false;
-			}
-			for (const TSharedPtr<FJsonValue>& Value :
-				Object->GetArrayField(Field))
-			{
-				if (!Value.IsValid()
-					|| Value->Type != EJson::String)
-				{
-					return false;
-				}
-				Out.Add(Value->AsString());
-			}
-			return true;
-		}
-
-		bool ParseExecutionContext(
-			const TSharedPtr<FJsonObject>& Object,
-			UE::UAI::ContextResource::
-				FUeAgentExecutionContextInput& Out,
-			FUeAgentQueryBindingError& OutError)
-		{
-			if (!Object.IsValid())
-			{
-				SetError(
-					OutError,
-					TEXT("query_payload_invalid"),
-					TEXT("execution_context"),
-					TEXT("Execution context object is missing."));
-				return false;
-			}
-			for (const TCHAR* Field : {
-				TEXT("project_instance_id"),
-				TEXT("editor_instance_id"),
-				TEXT("state_plane"),
-				TEXT("world_type"),
-				TEXT("world_identity"),
-				TEXT("level_identity"),
-				TEXT("world_partition_identity"),
-				TEXT("net_mode"),
-				TEXT("net_role"),
-				TEXT("asset_editor_identity"),
-				TEXT("viewport_identity"),
-				TEXT("context_revision"),
-			})
-			{
-				if (!Object->HasTypedField<EJson::String>(Field))
-				{
-					SetError(
-						OutError,
-						TEXT("query_payload_invalid"),
-						Field,
-						TEXT(
-							"Execution context string field is missing."));
-					return false;
-				}
-			}
-			if (!Object->HasTypedField<EJson::Boolean>(
-					TEXT("resolved_from_current"))
-				|| !ParseStringArray(
-					Object,
-					TEXT("data_layer_identities"),
-					Out.DataLayerIdentities)
-				|| !ParseStringArray(
-					Object,
-					TEXT("selection_identities"),
-					Out.SelectionIdentities))
-			{
-				SetError(
-					OutError,
-					TEXT("query_payload_invalid"),
-					TEXT("execution_context"),
-					TEXT(
-						"Execution context arrays or resolution flag are invalid."));
-				return false;
-			}
-			Out.ProjectInstanceId =
-				Object->GetStringField(TEXT("project_instance_id"));
-			Out.EditorInstanceId =
-				Object->GetStringField(TEXT("editor_instance_id"));
-			if (!ParseStatePlane(
-					Object->GetStringField(TEXT("state_plane")),
-					Out.StatePlane)
-				|| !ParseExecutionWorldType(
-					Object->GetStringField(TEXT("world_type")),
-					Out.WorldType))
-			{
-				SetError(
-					OutError,
-					TEXT("query_payload_invalid"),
-					TEXT("execution_context"),
-					TEXT(
-						"Execution state plane or world type is invalid."));
-				return false;
-			}
-			Out.WorldIdentity =
-				Object->GetStringField(TEXT("world_identity"));
-			Out.LevelIdentity =
-				Object->GetStringField(TEXT("level_identity"));
-			Out.WorldPartitionIdentity =
-				Object->GetStringField(
-					TEXT("world_partition_identity"));
-			Out.NetMode = Object->GetStringField(TEXT("net_mode"));
-			Out.NetRole = Object->GetStringField(TEXT("net_role"));
-			Out.AssetEditorIdentity =
-				Object->GetStringField(
-					TEXT("asset_editor_identity"));
-			Out.ViewportIdentity =
-				Object->GetStringField(TEXT("viewport_identity"));
-			Out.ContextRevision =
-				Object->GetStringField(TEXT("context_revision"));
-			Out.bResolvedFromCurrent =
-				Object->GetBoolField(TEXT("resolved_from_current"));
-			const TSharedPtr<FJsonValue>* Pie =
-				Object->Values.Find(TEXT("pie_instance_id"));
-			if (!Pie)
-			{
-				SetError(
-					OutError,
-					TEXT("query_payload_invalid"),
-					TEXT("pie_instance_id"),
-					TEXT("PIE instance field is missing."));
-				return false;
-			}
-			if ((*Pie)->Type == EJson::Number)
-			{
-				Out.PieInstanceId =
-					static_cast<int32>((*Pie)->AsNumber());
-			}
-			else if ((*Pie)->Type != EJson::Null)
-			{
-				SetError(
-					OutError,
-					TEXT("query_payload_invalid"),
-					TEXT("pie_instance_id"),
-					TEXT(
-						"PIE instance must be an integer or null."));
-				return false;
-			}
-			return true;
-		}
-
-		bool ParseContractValue(
+		bool IsEmptyOptionalPublicValue(
 			const TSharedPtr<FJsonValue>& Value,
-			FUeAgentContractValue& Out,
-			FUeAgentQueryBindingError& OutError)
+			const FQueryPublicFieldProjection& Field)
 		{
-			FString Wrapped;
-			const TSharedRef<FJsonObject> Wrapper =
-				MakeShared<FJsonObject>();
-			if (Value.IsValid())
+			// Presence belongs to the native observation. A returned empty business
+			// container is a result, distinct from an option that was not requested.
+			if (Value.IsValid() && (Field.bAuthoringValue
+				|| (!Value->IsNull() && (Field.bArray || Field.bScalarMap || Field.bStructuredValue))))
 			{
-				Wrapper->SetField(TEXT("v"), Value);
-			}
-			if (!Value.IsValid()
-				|| !SerializeJson(Wrapper, Wrapped)
-				|| !Wrapped.StartsWith(TEXT("{\"v\":"))
-				|| !Wrapped.EndsWith(TEXT("}")))
-			{
-				SetError(
-					OutError,
-					TEXT("query_payload_invalid"),
-					TEXT("input"),
-					TEXT("Domain query input is invalid JSON."));
 				return false;
 			}
-			Out = FUeAgentContractValue(
-				Wrapped.Mid(5, Wrapped.Len() - 6));
-			return true;
+			if (!Value.IsValid() || Value->IsNull())
+			{
+				return true;
+			}
+			if (Value->Type == EJson::String)
+			{
+				return Value->AsString().IsEmpty();
+			}
+			if (Value->Type == EJson::Array)
+			{
+				return Value->AsArray().IsEmpty();
+			}
+			if (Value->Type == EJson::Object)
+			{
+				const TSharedPtr<FJsonObject> Object = Value->AsObject();
+				return !Object.IsValid() || Object->Values.IsEmpty();
+			}
+			return false;
 		}
+
+		TSharedPtr<FJsonValue> ProjectNestedPublicValue(
+			const TSharedPtr<FJsonValue>& Source,
+			const FQueryPublicFieldProjection& Field,
+			FUeAgentQueryBindingError& OutError,
+			const FString& PublicPath)
+		{
+			auto Invalid = [&](const FString& Reason) -> TSharedPtr<FJsonValue>
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(
+					TEXT("query_projection_field_invalid"), Reason, TEXT("query_projection"));
+				OutError.PropertyPath = PublicPath;
+				return nullptr;
+			};
+			if (!Source.IsValid()) return Invalid(TEXT("The query result contains an invalid value."));
+			if (Field.bAuthoringValue) return Source;
+			if (Source->IsNull())
+			{
+				if (Field.bRequired) return Invalid(TEXT("A required query result field is null."));
+				return nullptr;
+			}
+			// Some native observers serialize their structured result into one
+			// canonical string. Decode only when the public schema declares a
+			// structure, then preserve a declared complete value or apply its
+			// admitted-field projection recursively.
+			if (Source->Type == EJson::String && (Field.bArray || Field.bScalarMap || Field.bStructuredValue || !Field.Children.IsEmpty()))
+			{
+				TSharedPtr<FJsonValue> Decoded;
+				const auto Reader = TJsonReaderFactory<>::Create(Source->AsString());
+				if (!FJsonSerializer::Deserialize(Reader, Decoded) || !Decoded.IsValid()
+					|| (Decoded->Type != EJson::Object && Decoded->Type != EJson::Array))
+					return Invalid(TEXT("The query result field does not contain valid structured JSON."));
+				return ProjectNestedPublicValue(Decoded, Field, OutError, PublicPath);
+			}
+			if (Field.bStructuredValue)
+				return Source->Type == EJson::Object || Source->Type == EJson::Array
+					? Source : Invalid(TEXT("Expected an object or array in the query result."));
+			if (Field.bScalarMap)
+			{
+				if (Source->Type != EJson::Object || !Source->AsObject().IsValid())
+					return Invalid(TEXT("Expected an object of scalar values in the query result."));
+				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+				for (const auto& Pair : Source->AsObject()->Values)
+				{
+					if (!Pair.Value.IsValid() || Pair.Value->Type == EJson::Object || Pair.Value->Type == EJson::Array)
+					{
+						Invalid(TEXT("Expected a scalar map value in the query result."));
+						OutError.PropertyPath = PublicPath + TEXT(".") + Pair.Key;
+						return nullptr;
+					}
+					Result->SetField(Pair.Key, Pair.Value);
+				}
+				return MakeShared<FJsonValueObject>(Result);
+			}
+			if (Field.bArray)
+			{
+				if (Source->Type != EJson::Array)
+				{
+					return Invalid(TEXT("Expected an array in the query result."));
+				}
+				TArray<TSharedPtr<FJsonValue>> ProjectedItems;
+				for (const TSharedPtr<FJsonValue>& Item : Source->AsArray())
+				{
+					const FString ItemPath = FString::Printf(TEXT("%s[%d]"), *PublicPath, ProjectedItems.Num());
+					if (!Item.IsValid())
+					{
+						Invalid(TEXT("The query result array contains an invalid value."));
+						OutError.PropertyPath = ItemPath;
+						return nullptr;
+					}
+					if (Field.Children.IsEmpty())
+					{
+						if (Item->Type != EJson::Object
+							&& Item->Type != EJson::Array)
+						{
+							ProjectedItems.Add(Item);
+						}
+						else
+						{
+							Invalid(TEXT("Expected a scalar array item in the query result."));
+							OutError.PropertyPath = ItemPath;
+							return nullptr;
+						}
+						continue;
+					}
+					if (Item->Type != EJson::Object
+						|| !Item->AsObject().IsValid())
+					{
+						Invalid(TEXT("Expected an object array item in the query result."));
+						OutError.PropertyPath = ItemPath;
+						return nullptr;
+					}
+					TSharedRef<FJsonObject> ProjectedItem =
+						MakeShared<FJsonObject>();
+					for (const FQueryPublicFieldProjection& Child : Field.Children)
+					{
+						const TSharedPtr<FJsonValue>* ChildValue =
+							Item->AsObject()->Values.Find(Child.Selector);
+						if (!ChildValue)
+						{
+							if (Child.bRequired)
+							{
+								Invalid(TEXT("A query result record is missing a required field."));
+								OutError.PropertyPath = ItemPath + TEXT(".") + Child.PublicName;
+								return nullptr;
+							}
+							continue;
+						}
+						TSharedPtr<FJsonValue> Projected =
+							ProjectNestedPublicValue(
+								*ChildValue,
+								Child, OutError, ItemPath + TEXT(".") + Child.PublicName);
+						if (!OutError.IsEmpty()) return nullptr;
+						if (Projected.IsValid()
+							&& (Child.bRequired
+								|| !IsEmptyOptionalPublicValue(Projected, Child)))
+						{
+							ProjectedItem->SetField(
+								Child.PublicName,
+								MoveTemp(Projected));
+						}
+					}
+					ProjectedItems.Add(MakeShared<FJsonValueObject>(ProjectedItem));
+				}
+				return MakeShared<FJsonValueArray>(MoveTemp(ProjectedItems));
+			}
+			if (!Field.Children.IsEmpty())
+			{
+				if (Source->Type != EJson::Object
+					|| !Source->AsObject().IsValid())
+				{
+					return Invalid(TEXT("Expected an object in the query result."));
+				}
+				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+				for (const FQueryPublicFieldProjection& Child : Field.Children)
+				{
+					const TSharedPtr<FJsonValue>* ChildValue =
+						Source->AsObject()->Values.Find(Child.Selector);
+					if (!ChildValue)
+					{
+						if (Child.bRequired)
+						{
+							Invalid(TEXT("A query result record is missing a required field."));
+							OutError.PropertyPath = PublicPath + TEXT(".") + Child.PublicName;
+							return nullptr;
+						}
+						continue;
+					}
+					TSharedPtr<FJsonValue> Projected = ProjectNestedPublicValue(
+						*ChildValue,
+						Child, OutError, PublicPath + TEXT(".") + Child.PublicName);
+					if (!OutError.IsEmpty()) return nullptr;
+					if (Projected.IsValid()
+						&& (Child.bRequired
+							|| !IsEmptyOptionalPublicValue(Projected, Child)))
+					{
+						Result->SetField(Child.PublicName, MoveTemp(Projected));
+					}
+				}
+				return TSharedPtr<FJsonValue>(
+					MakeShared<FJsonValueObject>(Result));
+			}
+			return Source->Type == EJson::Object
+				|| Source->Type == EJson::Array
+				? Invalid(TEXT("Expected a scalar value in the query result."))
+				: Source;
+		}
+
+		void SetPublicRecordField(
+			const TSharedRef<FJsonObject>& Record,
+			const FQueryPublicFieldProjection& Field,
+			TSharedPtr<FJsonValue> Value)
+		{
+			TSharedRef<FJsonObject> Container = Record;
+			for (const FString& Name : Field.PublicContainerPath)
+			{
+				const TSharedPtr<FJsonObject>* Existing = nullptr;
+				if (Container->TryGetObjectField(Name, Existing)
+					&& Existing && Existing->IsValid())
+				{
+					Container = Existing->ToSharedRef();
+				}
+				else
+				{
+					const TSharedRef<FJsonObject> Child = MakeShared<FJsonObject>();
+					Container->SetObjectField(Name, Child);
+					Container = Child;
+				}
+			}
+			Container->SetField(Field.PublicName, MoveTemp(Value));
+		}
+
+		TSharedRef<FJsonObject> PublicGroupedRecordsJson(
+			const UE::UAI::Projection::FUeAgentProjectedSnapshot& Snapshot,
+			const FQueryPublicProjectionDescriptor& Descriptor, FUeAgentQueryBindingError& OutError)
+		{
+			struct FRecordFields final
+			{
+				TMap<FString, TSharedPtr<FJsonValue>> Values;
+				TMap<FString, TSharedPtr<FJsonValue>> DynamicValues;
+			};
+
+			TMap<FString, FRecordFields> FieldsByOwner;
+			for (const auto& Entry : Snapshot.GetEntries())
+			{
+				const FString OwnerId =
+					Entry.GetIdentity().GetOwnerId();
+				const auto& Identity = Entry.GetIdentity();
+				const FQueryPublicFieldProjection* Field =
+					Descriptor.FieldProjections.FindByPredicate(
+						[&Identity](const FQueryPublicFieldProjection& Candidate)
+						{
+							return Candidate.Selector
+								== (Candidate.IdentityField
+										== EUeAgentQueryPublicIdentityField::ObjectRole
+									? Identity.GetObjectRole()
+									: Identity.GetSelector(TEXT("selector")));
+						});
+				const FString Selector = Identity.GetSelector(TEXT("selector"));
+				const bool bDynamicField =
+					!Field
+					&& Descriptor.DynamicFields.IsValid()
+					&& Identity.GetTargetKind()
+						== Descriptor.DynamicFields.TargetKind
+					&& Identity.GetSemanticId().StartsWith(
+						Descriptor.DynamicFields.SemanticIdPrefix,
+						ESearchCase::CaseSensitive)
+					&& !Selector.IsEmpty();
+				if (!Field && !bDynamicField)
+				{
+					continue;
+				}
+				if (OwnerId.IsEmpty())
+				{
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_projection_owner_missing"),
+						TEXT("A field selected for the query result has no owning record."), TEXT("query_projection"));
+					return MakeShared<FJsonObject>();
+				}
+				// Record eligibility is established by a declared field, not by unrelated snapshot entries.
+				FRecordFields& Fields = FieldsByOwner.FindOrAdd(OwnerId);
+				TSharedPtr<FJsonValue> Value = Field
+					? ProjectNestedPublicValue(
+						PublicCanonicalValueJson(Entry.GetValue().Get(), false),
+						*Field, OutError, FString::Join(Field->PublicContainerPath, TEXT("."))
+							+ (Field->PublicContainerPath.IsEmpty() ? TEXT("") : TEXT(".")) + Field->PublicName)
+					: PublicCanonicalValueJson(
+						Entry.GetValue().Get(), false, Selector);
+				if (!OutError.IsEmpty()) return MakeShared<FJsonObject>();
+				if (Field
+					&& !Field->bRequired
+					&& IsEmptyOptionalPublicValue(Value, *Field))
+				{
+					continue;
+				}
+				if (Value.IsValid())
+				{
+					if (Field)
+					{
+						Fields.Values.Add(
+							Field->Selector,
+							MoveTemp(Value));
+					}
+					else
+					{
+						Fields.DynamicValues.Add(
+							Selector,
+							MoveTemp(Value));
+					}
+				}
+			}
+
+			TArray<FString> Owners;
+			FieldsByOwner.GetKeys(Owners);
+			Owners.Sort();
+			TArray<TSharedPtr<FJsonValue>> Records;
+			Records.Reserve(Owners.Num());
+			for (const FString& Owner : Owners)
+			{
+				FRecordFields& Fields = FieldsByOwner.FindChecked(Owner);
+				const FQueryPublicFieldProjection* MissingRequired =
+					Descriptor.FieldProjections.FindByPredicate(
+						[&Fields](const FQueryPublicFieldProjection& Field)
+						{
+							return Field.bRequired
+							&& !Fields.Values.Contains(Field.Selector);
+						});
+				if (MissingRequired)
+				{
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_projection_required_field_missing"),
+						FString::Printf(TEXT("A query result record is missing required field '%s'."), *MissingRequired->PublicName),
+						TEXT("query_projection"));
+					OutError.PropertyPath = MissingRequired->PublicName;
+					OutError.InternalContext = Owner;
+					return MakeShared<FJsonObject>();
+				}
+				TSharedRef<FJsonObject> Record = MakeShared<FJsonObject>();
+				if (!Descriptor.OwnerPublicName.IsEmpty())
+				{
+					Record->SetStringField(
+						Descriptor.OwnerPublicName,
+						Owner);
+				}
+				for (const FQueryPublicFieldProjection& Field
+					: Descriptor.FieldProjections)
+				{
+					TSharedPtr<FJsonValue>* Value =
+						Fields.Values.Find(Field.Selector);
+					if (Value && Value->IsValid())
+					{
+						SetPublicRecordField(
+							Record, Field,
+							MoveTemp(*Value));
+					}
+				}
+				if (!Fields.DynamicValues.IsEmpty())
+				{
+					TArray<FString> DynamicNames;
+					Fields.DynamicValues.GetKeys(DynamicNames);
+					DynamicNames.Sort();
+					TSharedRef<FJsonObject> DynamicObject =
+						MakeShared<FJsonObject>();
+					for (const FString& DynamicName : DynamicNames)
+					{
+						TSharedPtr<FJsonValue>* Value =
+							Fields.DynamicValues.Find(DynamicName);
+						if (Value && Value->IsValid())
+						{
+							DynamicObject->SetField(
+								DynamicName,
+								MoveTemp(*Value));
+						}
+					}
+					Record->SetObjectField(
+						Descriptor.DynamicFields.PublicContainerName,
+						DynamicObject);
+				}
+				if (Descriptor.bFlattenSingleFieldRecords
+					&& Record->Values.Num() == 1)
+				{
+					auto It = Record->Values.CreateIterator();
+					Records.Add(It.Value());
+				}
+				else
+				{
+					Records.Add(MakeShared<FJsonValueObject>(Record));
+				}
+			}
+
+			TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+			Object->SetArrayField(
+				Descriptor.CollectionField,
+				MoveTemp(Records));
+			return Object;
+		}
+
+		TSharedRef<FJsonObject> PublicSingleRecordJson(
+			const UE::UAI::Projection::FUeAgentProjectedSnapshot& Snapshot,
+			const FQueryPublicProjectionDescriptor& Descriptor, FUeAgentQueryBindingError& OutError)
+		{
+			const TSharedRef<FJsonObject> Grouped =
+				PublicGroupedRecordsJson(Snapshot, Descriptor, OutError);
+			if (!OutError.IsEmpty()) return Grouped;
+			const TArray<TSharedPtr<FJsonValue>>* Records = nullptr;
+			if (Grouped->TryGetArrayField(Descriptor.CollectionField, Records)
+				&& Records
+				&& Records->Num() == 1
+				&& (*Records)[0].IsValid()
+				&& (*Records)[0]->Type == EJson::Object
+				&& (*Records)[0]->AsObject().IsValid())
+			{
+				return (*Records)[0]->AsObject().ToSharedRef();
+			}
+			const int32 Count = Records ? Records->Num() : 0;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("query_projection_single_record_invalid"),
+				FString::Printf(TEXT("Expected exactly one query result object; received %d records."), Count), TEXT("query_projection"));
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(Count);
+			return MakeShared<FJsonObject>();
+		}
+
+		TSharedRef<FJsonObject> PublicSnapshotRecordArrayJson(
+			const UE::UAI::Projection::FUeAgentProjectedSnapshot& Snapshot,
+			const FQueryPublicProjectionDescriptor& Descriptor, FUeAgentQueryBindingError& OutError)
+		{
+			auto Invalid = [&](const FString& Path, const FString& Reason) -> TSharedRef<FJsonObject>
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(
+					TEXT("query_projection_record_invalid"), Reason, TEXT("query_projection"));
+				OutError.PropertyPath = Path;
+				return MakeShared<FJsonObject>();
+			};
+			TArray<TSharedPtr<FJsonValue>> Records;
+			for (const auto& Entry : Snapshot.GetEntries())
+			{
+				if (PublicProjectionIdentityValue(
+						Entry,
+						Descriptor.SnapshotArrayIdentityField)
+					!= Descriptor.SnapshotArraySelector)
+				{
+					continue;
+				}
+				const TSharedPtr<FJsonValue> Value = PublicCanonicalValueJson(
+					Entry.GetValue().Get(), false);
+				if (!Value.IsValid() || Value->Type != EJson::Array)
+				{
+					return Invalid(Descriptor.CollectionField, TEXT("Expected an array of query result records."));
+				}
+				for (const TSharedPtr<FJsonValue>& Item : Value->AsArray())
+				{
+					const FString RecordPath = FString::Printf(TEXT("%s[%d]"), *Descriptor.CollectionField, Records.Num());
+					if (!Item.IsValid() || Item->Type != EJson::Object)
+					{
+						return Invalid(RecordPath, TEXT("Expected a query result record object."));
+					}
+					const TSharedPtr<FJsonObject> Source = Item->AsObject();
+					if (!Source.IsValid())
+					{
+						return Invalid(RecordPath, TEXT("The query result record object is invalid."));
+					}
+					TSharedRef<FJsonObject> Record = MakeShared<FJsonObject>();
+					for (const FQueryPublicFieldProjection& Field
+						: Descriptor.FieldProjections)
+					{
+						const TSharedPtr<FJsonValue>* FieldValue =
+							Source->Values.Find(Field.Selector);
+						if (!FieldValue || !FieldValue->IsValid()
+							|| (*FieldValue)->IsNull())
+						{
+							if (Field.bRequired)
+							{
+								return Invalid(RecordPath + TEXT(".") + Field.PublicName,
+									TEXT("A query result record is missing a required field."));
+							}
+							continue;
+						}
+						TSharedPtr<FJsonValue> Projected =
+							ProjectNestedPublicValue(
+								*FieldValue,
+								Field, OutError, RecordPath + TEXT(".") + Field.PublicName);
+						if (!OutError.IsEmpty()) return MakeShared<FJsonObject>();
+						if (!Projected.IsValid())
+						{
+							continue;
+						}
+						if (Field.bRequired
+							|| !IsEmptyOptionalPublicValue(Projected, Field))
+						{
+							Record->SetField(
+								Field.PublicName,
+								MoveTemp(Projected));
+						}
+					}
+					Records.Add(MakeShared<FJsonValueObject>(Record));
+				}
+			}
+			TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+			Object->SetArrayField(Descriptor.CollectionField, MoveTemp(Records));
+			return Object;
+		}
+
 	}
 
-	bool FUeAgentQueryPayloadCodec::TryDecode(
-		const FUeAgentContractValue& Value,
-		FUeAgentResourceTracker& Resources,
-		TOptional<FUeAgentQueryBindingPayload>& OutPayload,
-		FUeAgentQueryBindingError& OutError)
+	namespace
 	{
-		OutPayload.Reset();
-		OutError = {};
-		if (!Value.IsValid()
-			|| !ChargeCodec(
-				Resources,
-				EUeAgentResourceDimension::InputBytes,
-				UE::UAI::ContextResource::MeasureText(Value.GetJsonValue()).Utf8Bytes,
-				TEXT("c3q.payload.decode"),
-				OutError))
+		TSharedPtr<FJsonObject> BuildTypedResponseJson(const FUeAgentQueryBindingResponse& Response, FUeAgentQueryBindingError& OutError)
 		{
-			if (!OutError.IsValid())
+			const FUeAgentProjectedResponse& Projection = *Response.GetProjection();
+			TSharedRef<FJsonObject> ProjectionObject = MakeShared<FJsonObject>();
+			ProjectionObject->SetStringField(TEXT("profile_id"), Projection.GetProfileId());
+			TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
+			const auto& ProjectedPayload = Projection.GetPayload();
+			if (ProjectedPayload.GetCatalog().IsValid())
 			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("payload"), TEXT("Payload JSON is empty."));
+				Payload->SetStringField(TEXT("kind"), TEXT("catalog"));
+				Payload->SetObjectField(TEXT("catalog"), CatalogJson(*ProjectedPayload.GetCatalog()));
 			}
-			return false;
-		}
-		TSharedPtr<FJsonObject> Root;
-		const TSharedRef<TJsonReader<>> Reader =
-			TJsonReaderFactory<>::Create(Value.GetJsonValue());
-		if (!FJsonSerializer::Deserialize(Reader, Root)
-			|| !Root.IsValid()
-			|| !Root->HasTypedField<EJson::String>(TEXT("query_kind"))
-			|| !Root->HasTypedField<EJson::Object>(TEXT("session"))
-			|| !Root->HasTypedField<EJson::Object>(TEXT("projection")))
-		{
-			SetError(OutError, TEXT("query_payload_invalid"), TEXT("payload"), TEXT("Payload must be an object with query_kind, session, and projection."));
-			return false;
-		}
-		if (!ChargeCodec(Resources, EUeAgentResourceDimension::Nodes, 1, TEXT("c3q.payload.decode.root"), OutError))
-		{
-			return false;
-		}
-		TOptional<FUeAgentQuerySessionIdentity> Session;
-		TOptional<FUeAgentProjectionRequest> Projection;
-		if (!ParseSession(Root->GetObjectField(TEXT("session")), Session, OutError)
-			|| !ParseProjection(Root->GetObjectField(TEXT("projection")), Projection, OutError))
-		{
-			return false;
-		}
-		const FString Kind = Root->GetStringField(TEXT("query_kind"));
-		if (Kind == TEXT("catalog_search"))
-		{
-			if (!Root->HasTypedField<EJson::Object>(TEXT("query")))
+			else if (ProjectedPayload.GetCandidateBinding().IsValid())
 			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("query"), TEXT("Catalog search query object is missing."));
-				return false;
-			}
-			const TSharedPtr<FJsonObject> Query = Root->GetObjectField(TEXT("query"));
-			if (!Query->HasTypedField<EJson::String>(TEXT("catalog_kind"))
-				|| !Query->HasTypedField<EJson::String>(TEXT("search_text"))
-				|| !Query->HasTypedField<EJson::String>(TEXT("match_mode"))
-				|| !Query->HasTypedField<EJson::String>(TEXT("materialization_policy")))
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("query"), TEXT("Catalog search fields are missing."));
-				return false;
-			}
-			const FString MatchMode = Query->GetStringField(TEXT("match_mode"));
-			const FString Materialization = Query->GetStringField(TEXT("materialization_policy"));
-			if (MatchMode != TEXT("broad") && MatchMode != TEXT("exact"))
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("query.match_mode"), TEXT("Unknown discovery match mode."));
-				return false;
-			}
-			if (Materialization != TEXT("index_only") && Materialization != TEXT("allow_materialization"))
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("query.materialization_policy"), TEXT("Unknown materialization policy."));
-				return false;
-			}
-			FUeAgentCatalogSearchQuery Typed(
-				Session.GetValue(),
-				FUeAgentDiscoveryQuery(
-					Query->GetStringField(TEXT("catalog_kind")),
-					Query->GetStringField(TEXT("search_text")),
-					MatchMode == TEXT("broad")
-						? EUeAgentDiscoveryMatchMode::Broad
-						: EUeAgentDiscoveryMatchMode::Exact,
-					Materialization == TEXT("index_only")
-						? EUeAgentMaterializationPolicy::IndexOnly
-						: EUeAgentMaterializationPolicy::AllowMaterialization),
-				Projection.GetValue());
-			if (!Typed.IsValid())
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("catalog_search"), TEXT("Typed catalog search is invalid."));
-				return false;
-			}
-			OutPayload.Emplace(MoveTemp(Typed));
-			return true;
-		}
-		if (Kind == TEXT("catalog_resolve"))
-		{
-			if (!Root->HasTypedField<EJson::Object>(TEXT("catalog"))
-				|| !Root->HasTypedField<EJson::String>(TEXT("candidate_id")))
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("catalog_resolve"), TEXT("Catalog and candidate_id are required."));
-				return false;
-			}
-			TSharedPtr<const FUeAgentCatalogSnapshot> Catalog;
-			if (!ParseCatalog(
-					Root->GetObjectField(TEXT("catalog")),
-					Resources,
-					Catalog,
-					OutError))
-			{
-				if (!OutError.IsValid())
-				{
-					SetError(OutError, TEXT("query_payload_invalid"), TEXT("catalog"), TEXT("Catalog snapshot is invalid."));
-				}
-				return false;
-			}
-			FUeAgentCatalogResolveQuery Typed(
-				Session.GetValue(),
-				Catalog.ToSharedRef(),
-				Root->GetStringField(TEXT("candidate_id")),
-				Projection.GetValue());
-			if (!Typed.IsValid())
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("catalog_resolve"), TEXT("Typed exact resolve is invalid."));
-				return false;
-			}
-			OutPayload.Emplace(MoveTemp(Typed));
-			return true;
-		}
-		if (Kind == TEXT("state_read"))
-		{
-			if (!Root->HasTypedField<EJson::Object>(TEXT("ticket"))
-				|| !Root->HasTypedField<EJson::Object>(TEXT("binding"))
-				|| !Root->HasTypedField<EJson::String>(TEXT("state_plane")))
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("state_read"), TEXT("Ticket, binding, and state_plane are required."));
-				return false;
-			}
-			TOptional<FUeAgentCandidateBinding> Binding;
-			TOptional<FUeAgentQueryTicket> Ticket;
-			UE::UAI::BindingGateway::Ticket::
-				FUeAgentBindingTicketJsonError CodecError;
-			if (!UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::TryParseBinding(
-						Root->GetObjectField(TEXT("binding")),
-						Binding,
-						CodecError)
-				|| !UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::TryParseTicket(
-						Root->GetObjectField(TEXT("ticket")),
-						Ticket,
-						CodecError))
-			{
-				SetError(
-					OutError,
-					CodecError.Code.IsEmpty()
-						? TEXT("query_payload_invalid")
-						: CodecError.Code,
-					CodecError.SubjectId,
-					CodecError.Detail);
-				return false;
-			}
-			EUeAgentStatePlane StatePlane =
-				EUeAgentStatePlane::AuthoringMemory;
-			if (!Ticket.IsSet()
-				|| !ParseStatePlane(Root->GetStringField(TEXT("state_plane")), StatePlane))
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("state_read"), TEXT("Ticket or state plane is invalid."));
-				return false;
-			}
-			FUeAgentStateReadQuery Typed(
-				Session.GetValue(),
-				Ticket.GetValue(),
-				Binding.GetValue(),
-				StatePlane,
-				Projection.GetValue());
-			if (!Typed.IsValid())
-			{
-				SetError(OutError, TEXT("query_payload_invalid"), TEXT("state_read"), TEXT("Typed state read is invalid."));
-				return false;
-			}
-			OutPayload.Emplace(MoveTemp(Typed));
-			return true;
-		}
-		if (Kind == TEXT("domain_query"))
-		{
-			if (!Root->HasTypedField<EJson::Object>(
-					TEXT("execution_context")))
-			{
-				SetError(
-					OutError,
-					TEXT("query_payload_invalid"),
-					TEXT("execution_context"),
-					TEXT(
-						"Domain query execution context is required."));
-				return false;
-			}
-			const TSharedPtr<FJsonValue>* InputValue =
-				Root->Values.Find(TEXT("input"));
-			FUeAgentContractValue Input(TEXT("{}"));
-			UE::UAI::ContextResource::
-				FUeAgentExecutionContextInput ExecutionContext;
-			if (!InputValue
-				|| !ParseContractValue(
-					*InputValue,
-					Input,
-					OutError)
-				|| !ParseExecutionContext(
-					Root->GetObjectField(
-						TEXT("execution_context")),
-					ExecutionContext,
-					OutError))
-			{
-				return false;
-			}
-			TOptional<FUeAgentDomainQueryTarget> Target;
-			if (const TSharedPtr<FJsonValue>* TargetValue =
-				Root->Values.Find(TEXT("target")))
-			{
-				if ((*TargetValue)->Type == EJson::Object)
-				{
-					const TSharedPtr<FJsonObject> TargetObject =
-						(*TargetValue)->AsObject();
-					if (!TargetObject->HasTypedField<EJson::Object>(
-							TEXT("ticket"))
-						|| !TargetObject
-							->HasTypedField<EJson::Object>(
-								TEXT("binding")))
-					{
-						SetError(
-							OutError,
-							TEXT("query_payload_invalid"),
-							TEXT("target"),
-							TEXT(
-								"Domain target requires ticket and binding."));
-						return false;
-					}
-					TOptional<FUeAgentCandidateBinding> Binding;
-					TOptional<FUeAgentQueryTicket> Ticket;
+				Payload->SetStringField(TEXT("kind"), TEXT("candidate_binding"));
+				Payload->SetObjectField(
+					TEXT("candidate_binding"),
 					UE::UAI::BindingGateway::Ticket::
-						FUeAgentBindingTicketJsonError CodecError;
-					if (!UE::UAI::BindingGateway::Ticket::
-							FUeAgentBindingTicketJsonCodec::
-								TryParseBinding(
-									TargetObject
-										->GetObjectField(
-											TEXT("binding")),
-									Binding,
-									CodecError)
-						|| !UE::UAI::BindingGateway::Ticket::
-							FUeAgentBindingTicketJsonCodec::
-								TryParseTicket(
-									TargetObject
-										->GetObjectField(
-											TEXT("ticket")),
-									Ticket,
-									CodecError)
-						|| !Binding.IsSet()
-						|| !Ticket.IsSet())
-					{
-						SetError(
-							OutError,
-							CodecError.Code.IsEmpty()
-								? TEXT("query_payload_invalid")
-								: CodecError.Code,
-							CodecError.SubjectId,
-							CodecError.Detail);
-						return false;
-					}
-					Target.Emplace(
-						Ticket.GetValue(),
-						Binding.GetValue());
-				}
-				else if ((*TargetValue)->Type != EJson::Null)
-				{
-					SetError(
-						OutError,
-						TEXT("query_payload_invalid"),
-						TEXT("target"),
-						TEXT(
-							"Domain target must be an object or null."));
-					return false;
-				}
+						FUeAgentBindingTicketJsonCodec::BindingToJson(
+							*ProjectedPayload.GetCandidateBinding()));
 			}
-			FUeAgentDomainQuery Typed(
-				Session.GetValue(),
-				MoveTemp(ExecutionContext),
-				MoveTemp(Input),
-				MoveTemp(Target),
-				Projection.GetValue());
-			if (!Typed.IsValid())
+			else if (ProjectedPayload.GetSnapshot().IsValid())
 			{
-				SetError(
-					OutError,
-					TEXT("query_payload_invalid"),
-					TEXT("domain_query"),
-					TEXT("Typed domain query is invalid."));
-				return false;
+				Payload->SetStringField(TEXT("kind"), TEXT("snapshot"));
+				Payload->SetObjectField(
+					TEXT("snapshot"),
+					ProjectedSnapshotJson(
+						*ProjectedPayload.GetSnapshot(),
+						Projection.GetProfileId()));
 			}
-			OutPayload.Emplace(MoveTemp(Typed));
-			return true;
-		}
-		SetError(OutError, TEXT("query_payload_kind_unsupported"), Kind, TEXT("Unknown C3Q payload kind."));
-		return false;
-	}
-
-	bool FUeAgentQueryPayloadCodec::TryEncode(
-		const FUeAgentQueryBindingPayload& Payload,
-		FUeAgentResourceTracker& Resources,
-		FUeAgentContractValue& OutValue,
-		FUeAgentQueryBindingError& OutError)
-	{
-		OutError = {};
-		if (!Payload.IsValid())
-		{
-			SetError(OutError, TEXT("query_payload_invalid"), TEXT("payload"), TEXT("Typed C3Q payload is invalid."));
-			return false;
-		}
-		TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-		switch (Payload.GetKind())
-		{
-		case EUeAgentQueryBindingPayloadKind::CatalogSearch:
-		{
-			const FUeAgentCatalogSearchQuery& Typed = *Payload.GetCatalogSearch();
-			Root->SetStringField(TEXT("query_kind"), TEXT("catalog_search"));
-			Root->SetObjectField(
-				TEXT("session"),
-				UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::SessionToJson(
-						Typed.GetSession()));
-			TSharedRef<FJsonObject> Query = MakeShared<FJsonObject>();
-			Query->SetStringField(TEXT("catalog_kind"), Typed.GetQuery().GetCatalogKind());
-			Query->SetStringField(TEXT("search_text"), Typed.GetQuery().GetSearchText());
-			Query->SetStringField(
-				TEXT("match_mode"),
-				Typed.GetQuery().GetMatchMode() == EUeAgentDiscoveryMatchMode::Broad
-					? TEXT("broad")
-					: TEXT("exact"));
-			Query->SetStringField(
-				TEXT("materialization_policy"),
-				Typed.GetQuery().GetMaterializationPolicy() == EUeAgentMaterializationPolicy::IndexOnly
-					? TEXT("index_only")
-					: TEXT("allow_materialization"));
-			Root->SetObjectField(TEXT("query"), Query);
-			Root->SetObjectField(TEXT("projection"), ProjectionJson(Typed.GetProjection()));
-			break;
-		}
-		case EUeAgentQueryBindingPayloadKind::CatalogResolve:
-		{
-			const FUeAgentCatalogResolveQuery& Typed = *Payload.GetCatalogResolve();
-			Root->SetStringField(TEXT("query_kind"), TEXT("catalog_resolve"));
-			Root->SetObjectField(
-				TEXT("session"),
-				UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::SessionToJson(
-						Typed.GetSession()));
-			Root->SetObjectField(TEXT("catalog"), CatalogJson(Typed.GetCatalog().Get()));
-			Root->SetStringField(TEXT("candidate_id"), Typed.GetCandidateId());
-			Root->SetObjectField(TEXT("projection"), ProjectionJson(Typed.GetProjection()));
-			break;
-		}
-		case EUeAgentQueryBindingPayloadKind::StateRead:
-		{
-			const FUeAgentStateReadQuery& Typed = *Payload.GetStateRead();
-			Root->SetStringField(TEXT("query_kind"), TEXT("state_read"));
-			Root->SetObjectField(
-				TEXT("session"),
-				UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::SessionToJson(
-						Typed.GetSession()));
-			Root->SetObjectField(
-				TEXT("ticket"),
-				UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::TicketToJson(
-						Typed.GetTicket()));
-			Root->SetObjectField(
-				TEXT("binding"),
-				UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::BindingToJson(
-						Typed.GetBinding()));
-			Root->SetStringField(TEXT("state_plane"), StatePlaneName(Typed.GetStatePlane()));
-			Root->SetObjectField(TEXT("projection"), ProjectionJson(Typed.GetProjection()));
-			break;
-		}
-		case EUeAgentQueryBindingPayloadKind::DomainQuery:
-		{
-			const FUeAgentDomainQuery& Typed =
-				*Payload.GetDomainQuery();
-			Root->SetStringField(
-				TEXT("query_kind"),
-				TEXT("domain_query"));
-			Root->SetObjectField(
-				TEXT("session"),
-				UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::SessionToJson(
-						Typed.GetSession()));
-			Root->SetObjectField(
-				TEXT("execution_context"),
-				ExecutionContextJson(
-					Typed.GetExecutionContext()));
-			TSharedPtr<FJsonValue> Input;
-			const TSharedRef<TJsonReader<>> InputReader =
-				TJsonReaderFactory<>::Create(
-					Typed.GetInput().GetJsonValue());
-			if (!FJsonSerializer::Deserialize(
-					InputReader,
-					Input,
-					FJsonSerializer::EFlags::
-						StoreNumbersAsStrings)
-				|| !Input.IsValid())
+			else if (ProjectedPayload.GetValue().IsValid())
 			{
-				SetError(
-					OutError,
-					TEXT("query_payload_invalid"),
-					TEXT("input"),
-					TEXT(
-						"Domain query input must be valid JSON."));
-				return false;
+				Payload->SetStringField(TEXT("kind"), TEXT("value"));
 			}
-			Root->SetField(TEXT("input"), Input);
-			if (Typed.GetTarget().IsSet())
+			else if (ProjectedPayload.GetComparison().IsValid())
 			{
-				const FUeAgentDomainQueryTarget& Target =
-					Typed.GetTarget().GetValue();
-				TSharedRef<FJsonObject> TargetObject =
-					MakeShared<FJsonObject>();
-				TargetObject->SetObjectField(
-					TEXT("ticket"),
-					UE::UAI::BindingGateway::Ticket::
-						FUeAgentBindingTicketJsonCodec::
-							TicketToJson(Target.GetTicket()));
-				TargetObject->SetObjectField(
-					TEXT("binding"),
-					UE::UAI::BindingGateway::Ticket::
-						FUeAgentBindingTicketJsonCodec::
-							BindingToJson(Target.GetBinding()));
-				Root->SetObjectField(
-					TEXT("target"),
-					TargetObject);
+				Payload->SetStringField(TEXT("kind"), TEXT("comparison"));
 			}
 			else
 			{
-				Root->SetField(
-					TEXT("target"),
-					MakeShared<FJsonValueNull>());
+				SetFailure(OutError, TEXT("query_response_invalid"), TEXT("projection.payload"), TEXT("Projected payload has no recognized typed value."));
+				return nullptr;
 			}
-			Root->SetObjectField(
-				TEXT("projection"),
-				ProjectionJson(Typed.GetProjection()));
-			break;
+			ProjectionObject->SetObjectField(TEXT("payload"), Payload);
+
+			TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+			Root->SetObjectField(TEXT("projection"), ProjectionObject);
+			return Root;
 		}
-		default:
-			SetError(OutError, TEXT("query_payload_invalid"), TEXT("payload"), TEXT("Unknown typed payload kind."));
-			return false;
-		}
-		FString Text;
-		if (!SerializeJson(Root, Text)
-			|| !ChargeCodec(
-				Resources,
-				EUeAgentResourceDimension::OutputBytes,
-				UE::UAI::ContextResource::MeasureText(Text).Utf8Bytes,
-				TEXT("c3q.payload.encode"),
-				OutError))
-		{
-			if (!OutError.IsValid())
-			{
-				SetError(OutError, TEXT("query_payload_encode_failed"), TEXT("payload"), TEXT("Failed to serialize typed C3Q payload."));
-			}
-			return false;
-		}
-		OutValue = FUeAgentContractValue(MoveTemp(Text));
-		return true;
 	}
 
 	bool FUeAgentQueryPayloadCodec::TryEncode(
@@ -1950,88 +1670,13 @@ namespace UE::UAI::BindingGateway::Query
 		OutError = {};
 		if (!Response.IsValid())
 		{
-			SetError(OutError, TEXT("query_response_invalid"), TEXT("response"), TEXT("Typed C3Q response is invalid."));
+			OutError = Response.GetValidationDiagnostic();
 			return false;
 		}
-		const FUeAgentProjectedResponse& Projection = *Response.GetProjection();
-		TSharedRef<FJsonObject> ProjectionObject = MakeShared<FJsonObject>();
-		ProjectionObject->SetObjectField(TEXT("descriptor"), DescriptorJson(Projection.GetDescriptorIdentity()));
-		ProjectionObject->SetStringField(TEXT("request_id"), Projection.GetRequestId());
-		ProjectionObject->SetStringField(
-			TEXT("result_kind"),
-			Projection.GetResultKind() == UE::UAI::Projection::EUeAgentProjectionResultKind::Query
-				? TEXT("query")
-				: TEXT("operation"));
-		ProjectionObject->SetStringField(TEXT("profile_id"), Projection.GetProfileId());
-		ProjectionObject->SetStringField(
-			TEXT("completeness"),
-			Projection.GetCompleteness() == UE::UAI::Projection::EUeAgentProjectionCompleteness::Complete
-				? TEXT("complete")
-				: TEXT("partial_page"));
-		TSharedRef<FJsonObject> TokenEstimate = MakeShared<FJsonObject>();
-		TokenEstimate->SetStringField(
-			TEXT("kind"),
-			Projection.GetTokenEstimate().GetKind() == UE::UAI::Projection::EUeAgentTokenEstimateKind::Exact
-				? TEXT("exact")
-				: TEXT("conservative"));
-		TokenEstimate->SetNumberField(TEXT("tokens"), static_cast<double>(Projection.GetTokenEstimate().GetTokens()));
-		TokenEstimate->SetNumberField(TEXT("utf8_bytes"), static_cast<double>(Projection.GetTokenEstimate().GetUtf8Bytes()));
-		ProjectionObject->SetObjectField(TEXT("token_estimate"), TokenEstimate);
-
-		TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
-		const auto& ProjectedPayload = Projection.GetPayload();
-		if (ProjectedPayload.GetCatalog().IsValid())
-		{
-			Payload->SetStringField(TEXT("kind"), TEXT("catalog"));
-			Payload->SetObjectField(TEXT("catalog"), CatalogJson(*ProjectedPayload.GetCatalog()));
-		}
-		else if (ProjectedPayload.GetCandidateBinding().IsValid())
-		{
-			Payload->SetStringField(TEXT("kind"), TEXT("candidate_binding"));
-			Payload->SetObjectField(
-				TEXT("candidate_binding"),
-				UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::BindingToJson(
-						*ProjectedPayload.GetCandidateBinding()));
-		}
-		else if (ProjectedPayload.GetSnapshot().IsValid())
-		{
-			Payload->SetStringField(TEXT("kind"), TEXT("snapshot"));
-			Payload->SetObjectField(
-				TEXT("snapshot"),
-				ProjectedSnapshotJson(*ProjectedPayload.GetSnapshot()));
-		}
-		else if (ProjectedPayload.GetValue().IsValid())
-		{
-			Payload->SetStringField(TEXT("kind"), TEXT("value"));
-		}
-		else if (ProjectedPayload.GetComparison().IsValid())
-		{
-			Payload->SetStringField(TEXT("kind"), TEXT("comparison"));
-		}
-		else
-		{
-			SetError(OutError, TEXT("query_response_invalid"), TEXT("projection.payload"), TEXT("Projected payload has no recognized typed value."));
-			return false;
-		}
-		ProjectionObject->SetObjectField(TEXT("payload"), Payload);
-
-		TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetObjectField(TEXT("projection"), ProjectionObject);
-		if (Response.GetTicket().IsSet())
-		{
-			Root->SetObjectField(
-				TEXT("ticket"),
-				UE::UAI::BindingGateway::Ticket::
-					FUeAgentBindingTicketJsonCodec::TicketToJson(
-						Response.GetTicket().GetValue()));
-		}
-		else
-		{
-			Root->SetField(TEXT("ticket"), MakeShared<FJsonValueNull>());
-		}
+		const TSharedPtr<FJsonObject> Root = BuildTypedResponseJson(Response, OutError);
+		if (!Root.IsValid()) return false;
 		FString Text;
-		if (!SerializeJson(Root, Text)
+		if (!SerializeJson(Root.ToSharedRef(), Text)
 			|| !ChargeCodec(
 				Resources,
 				EUeAgentResourceDimension::OutputBytes,
@@ -2039,9 +1684,130 @@ namespace UE::UAI::BindingGateway::Query
 				TEXT("c3q.response.encode"),
 				OutError))
 		{
-			if (!OutError.IsValid())
+			if (OutError.IsEmpty())
 			{
-				SetError(OutError, TEXT("query_response_encode_failed"), TEXT("response"), TEXT("Failed to serialize typed C3Q response."));
+				SetFailure(OutError, TEXT("query_response_encode_failed"), TEXT("response"), TEXT("Failed to serialize typed C3Q response."));
+			}
+			return false;
+		}
+		OutValue = FUeAgentContractValue(MoveTemp(Text));
+		return true;
+	}
+
+	bool FUeAgentQueryPayloadCodec::TryEncodePublic(
+		const FQueryPublicProjectionDescriptor& PublicProjection,
+		const FString& CommandId,
+		const FString& MechanicsCommandId,
+		bool bReadOnly,
+		const FUeAgentQueryBindingResponse& Response,
+		FUeAgentResourceTracker& Resources,
+		FUeAgentContractValue& OutValue,
+		FUeAgentQueryBindingError& OutError)
+	{
+		OutError = {};
+		if (!Response.IsValid())
+		{
+			OutError = Response.GetValidationDiagnostic();
+			return false;
+		}
+		if (!PublicProjection.TryValidate(OutError, TEXT("public_projection")))
+		{
+			OutError.SubjectId = PublicProjection.Id;
+			return false;
+		}
+
+		if (PublicProjection.Strategy
+			== EUeAgentQueryPublicProjectionStrategy::LegacyTypedEnvelope)
+		{
+			const TSharedPtr<FJsonObject> TypedObject = BuildTypedResponseJson(Response, OutError);
+			if (!TypedObject.IsValid()) return false;
+			TSharedRef<FJsonObject> LegacyRoot = MakeShared<FJsonObject>();
+			LegacyRoot->SetStringField(TEXT("command_id"), CommandId);
+			LegacyRoot->SetStringField(
+				TEXT("mechanics_command_id"),
+				MechanicsCommandId);
+			LegacyRoot->SetBoolField(TEXT("read_only"), bReadOnly);
+			LegacyRoot->SetObjectField(TEXT("query_result"), TypedObject);
+			FString LegacyText;
+			if (!SerializeJson(LegacyRoot, LegacyText))
+			{
+				SetFailure(
+					OutError,
+					TEXT("query_response_encode_failed"),
+					TEXT("response"),
+					TEXT("Failed to serialize the public Query response."));
+				return false;
+			}
+			if (!ChargeCodec(Resources, EUeAgentResourceDimension::OutputBytes,
+				UE::UAI::ContextResource::MeasureText(LegacyText).Utf8Bytes,
+				TEXT("c3q.response.public.envelope.encode"), OutError))
+			{
+				return false;
+			}
+			OutValue = FUeAgentContractValue(MoveTemp(LegacyText));
+			return true;
+		}
+
+		const FUeAgentProjectedResponse& Projection =
+			*Response.GetProjection();
+		const auto& Snapshot = Projection.GetPayload().GetSnapshot();
+		if (!Snapshot.IsValid())
+		{
+			SetFailure(
+				OutError,
+				TEXT("query_response_invalid"),
+				TEXT("projection.payload"),
+				TEXT("The selected public Query projection requires a snapshot payload."));
+			return false;
+		}
+
+		TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+		switch (PublicProjection.Strategy)
+		{
+		case EUeAgentQueryPublicProjectionStrategy::SnapshotEntries:
+			Root = PublicProjectedSnapshotJson(*Snapshot, true, false);
+			break;
+		case EUeAgentQueryPublicProjectionStrategy::SnapshotSections:
+			Root = PublicProjectedSnapshotJson(*Snapshot, true, true);
+			break;
+		case EUeAgentQueryPublicProjectionStrategy::GroupedRecords:
+			Root = PublicGroupedRecordsJson(*Snapshot, PublicProjection, OutError);
+			if (!OutError.IsEmpty()) return false;
+			break;
+		case EUeAgentQueryPublicProjectionStrategy::SingleRecord:
+			Root = PublicSingleRecordJson(*Snapshot, PublicProjection, OutError);
+			if (!OutError.IsEmpty()) return false;
+			break;
+		case EUeAgentQueryPublicProjectionStrategy::SnapshotRecordArray:
+			Root = PublicSnapshotRecordArrayJson(
+				*Snapshot,
+				PublicProjection, OutError);
+			if (!OutError.IsEmpty()) return false;
+			break;
+		default:
+			SetFailure(
+				OutError,
+				TEXT("query_response_invalid"),
+				CommandId,
+				TEXT("The public Query result kind is unsupported."));
+			return false;
+		}
+		FString Text;
+		if (!SerializeJson(Root, Text)
+			|| !ChargeCodec(
+				Resources,
+				EUeAgentResourceDimension::OutputBytes,
+				UE::UAI::ContextResource::MeasureText(Text).Utf8Bytes,
+				TEXT("c3q.response.public.encode"),
+				OutError))
+		{
+			if (OutError.IsEmpty())
+			{
+				SetFailure(
+					OutError,
+					TEXT("query_response_encode_failed"),
+					TEXT("response"),
+					TEXT("Failed to serialize the public Query response."));
 			}
 			return false;
 		}
@@ -2102,14 +1868,15 @@ namespace UE::UAI::BindingGateway::Query
 		OutBinding.Reset();
 		OutError = {};
 		RegistryHash.TrimStartAndEndInline();
-		if (!DescriptorIdentity.IsValid()
-			|| !RegistryHash.StartsWith(TEXT("sha256:")))
+		if (!DescriptorIdentity.IsValid())
 		{
-			SetError(
-				OutError,
-				TEXT("query_binding_invalid"),
-				DescriptorIdentity.GetDescriptorId(),
-				TEXT("A valid descriptor identity and registry hash are required."));
+			OutError = DescriptorIdentity.GetValidationDiagnostic();
+			return false;
+		}
+		if (!RegistryHash.StartsWith(TEXT("sha256:")))
+		{
+			SetFailure(OutError, TEXT("query_binding_invalid"), DescriptorIdentity.GetDescriptorId(), TEXT("The registry hash must start with sha256:."), TEXT("registry_hash"));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(RegistryHash);
 			return false;
 		}
 		OutBinding = MakeShareable(
@@ -2140,16 +1907,16 @@ namespace UE::UAI::BindingGateway::Query
 	{
 		OutBinding.Reset();
 		OutError = {};
-		if (DescriptorRegistry->GetDescriptors().IsEmpty()
-			|| !DescriptorRegistry->GetRegistryHash().StartsWith(
-				TEXT("sha256:")))
+		if (DescriptorRegistry->GetDescriptors().IsEmpty())
 		{
-			SetError(
-				OutError,
-				TEXT("query_binding_invalid"),
-				TEXT("descriptor_registry"),
-				TEXT(
-					"A compiled descriptor registry is required."));
+			SetFailure(OutError, TEXT("query_binding_invalid"), TEXT("descriptor_registry"), TEXT("The query binding requires at least one compiled descriptor."), TEXT("descriptors"));
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
+			return false;
+		}
+		if (!DescriptorRegistry->GetRegistryHash().StartsWith(TEXT("sha256:")))
+		{
+			SetFailure(OutError, TEXT("query_binding_invalid"), TEXT("descriptor_registry"), TEXT("The compiled registry hash must start with sha256:."), TEXT("registry_hash"));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(DescriptorRegistry->GetRegistryHash());
 			return false;
 		}
 		OutBinding = MakeShareable(new FUeAgentQueryBinding(
@@ -2194,7 +1961,7 @@ namespace UE::UAI::BindingGateway::Query
 		if (!DescriptorRegistry.IsValid()
 			|| !DomainProviders.IsValid())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("query_domain_binding_unavailable"),
 				Request.GetRequestId(),
@@ -2202,37 +1969,18 @@ namespace UE::UAI::BindingGateway::Query
 					"Domain query requires descriptor and provider registries."));
 			return false;
 		}
-		if (!CallerContext.IsValid() || !Query.IsValid())
+		if (!ValidateRequest(Request, CallerContext, OutError))
 		{
-			SetError(
-				OutError,
-				TEXT("query_request_invalid"),
-				Request.GetRequestId(),
-				TEXT(
-					"Typed domain request or caller context is invalid."));
 			return false;
 		}
 
 		FUeAgentCancellationRequested CancellationError;
 		if (!Cancellation.TryCheckpoint(CancellationError))
 		{
-			SetError(
-				OutError,
-				TEXT("query_cancelled"),
-				Request.GetRequestId(),
-				CancellationError.Reason);
-			return false;
-		}
-		FUeAgentOperationDeadlineExceeded DeadlineError;
-		if (!Deadline.TryCheckpoint(
-				TEXT("c3q.domain.start"),
-				DeadlineError))
-		{
-			SetError(
-				OutError,
-				TEXT("query_deadline_exceeded"),
-				Request.GetRequestId(),
-				DeadlineError.Stage);
+			OutError = CancellationError;
+			OutError.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(CancellationError);
+			OutError.Code = TEXT("query_cancelled");
+			OutError.SubjectId = Request.GetRequestId();
 			return false;
 		}
 
@@ -2254,12 +2002,14 @@ namespace UE::UAI::BindingGateway::Query
 								VersionIncompatible
 						? TEXT("descriptor_version_mismatch")
 						: TEXT("descriptor_not_found");
-			SetError(
+			SetFailure(
 				OutError,
 				Code,
 				Request.GetDescriptorIdentity().GetDescriptorId(),
 				TEXT(
 					"Request descriptor does not exactly match the registry."));
+			OutError.PropertyPath = TEXT("descriptor");
+			OutError.ActualEvidence = MakeShared<FJsonValueObject>(Ticket::FUeAgentBindingTicketJsonCodec::DescriptorToJson(Request.GetDescriptorIdentity()));
 			return false;
 		}
 		const TOptional<UE::UAI::Contract::FUeAgentQueryDescriptor>
@@ -2268,7 +2018,7 @@ namespace UE::UAI::BindingGateway::Query
 					Request.GetDescriptorIdentity());
 		if (!Descriptor.IsSet())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("descriptor_query_required"),
 				Request.GetDescriptorIdentity().GetDescriptorId(),
@@ -2283,44 +2033,49 @@ namespace UE::UAI::BindingGateway::Query
 			Query.GetSession();
 		if (!CurrentSession.IsValid())
 		{
-			SetError(
-				OutError,
-				TEXT("query_session_unavailable"),
-				Request.GetRequestId(),
-				TEXT("Current server session is invalid."));
+			OutError = CurrentSession.GetValidationDiagnostic();
 			return false;
 		}
 		if (CurrentSession.GetRegistryHash() != RegistryHash
 			|| RequestedSession.GetRegistryHash()
 				!= CurrentSession.GetRegistryHash())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("registry_hash_mismatch"),
 				Request.GetRequestId(),
 				TEXT(
 					"Domain query registry hash is stale."));
+			OutError.PropertyPath = TEXT("session.registry_hash");
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(CurrentSession.GetRegistryHash() != RegistryHash ? CurrentSession.GetRegistryHash() : RequestedSession.GetRegistryHash());
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(CurrentSession.GetRegistryHash() != RegistryHash ? RegistryHash : CurrentSession.GetRegistryHash());
 			return false;
 		}
 		if (RequestedSession.GetServerSessionId()
 			!= CurrentSession.GetServerSessionId())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("server_session_stale"),
 				Request.GetRequestId(),
 				TEXT(
 					"Domain query belongs to another server session."));
+			OutError.PropertyPath = TEXT("session.server_session_id");
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(RequestedSession.GetServerSessionId());
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(CurrentSession.GetServerSessionId());
 			return false;
 		}
 		if (RequestedSession.GetRegistryEpoch()
 			!= CurrentSession.GetRegistryEpoch())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("registry_epoch_stale"),
 				Request.GetRequestId(),
 				TEXT("Domain query registry epoch is stale."));
+			OutError.PropertyPath = TEXT("session.registry_epoch");
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), RequestedSession.GetRegistryEpoch()));
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), CurrentSession.GetRegistryEpoch()));
 			return false;
 		}
 
@@ -2336,34 +2091,21 @@ namespace UE::UAI::BindingGateway::Query
 				FUeAgentCancellationRequested Cancelled;
 				if (!Cancellation.TryCheckpoint(Cancelled))
 				{
+					Error = Cancelled;
+					Error.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(Cancelled);
 					Error.Code = TEXT("query_cancelled");
-					Error.InstancePath = InstancePath;
-					Error.Detail = Cancelled.Reason;
+					Error.Source.JsonPath = InstancePath;
 					return false;
 				}
-				FUeAgentOperationDeadlineExceeded Expired;
-				if (!Deadline.TryCheckpoint(
-						TEXT("c3q.domain.schema"),
-						Expired))
-				{
-					Error.Code =
-						TEXT("query_deadline_exceeded");
-					Error.InstancePath = InstancePath;
-					Error.Detail = Expired.Stage;
-					return false;
-				}
-				FUeAgentResourceBudgetExceeded BudgetError;
+				FUeAgentResourceChargeError ChargeError;
 				if (!Resources->TryCharge(
 						EUeAgentResourceDimension::WorkUnits,
 						WorkUnits,
 						TEXT("c3q.domain.schema"),
-						BudgetError))
+						ChargeError))
 				{
-					Error.Code = BudgetError.Code;
-					Error.InstancePath = InstancePath;
-					Error.Detail =
-						TEXT(
-							"Contract schema work budget exceeded.");
+					Error = ChargeError;
+					Error.Source.JsonPath = InstancePath;
 					return false;
 				}
 				return true;
@@ -2375,11 +2117,8 @@ namespace UE::UAI::BindingGateway::Query
 					CanonicalInput,
 					SchemaError))
 		{
-			SetError(
-				OutError,
-				SchemaError.Code,
-				SchemaError.InstancePath,
-				SchemaError.Detail);
+			OutError = SchemaError;
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SchemaError.Source.JsonPath;
 			return false;
 		}
 
@@ -2397,12 +2136,8 @@ namespace UE::UAI::BindingGateway::Query
 					ExecutionContext,
 					ExecutionError))
 		{
-			SetError(
-				OutError,
-				ExecutionError.Code,
-				Request.GetRequestId(),
-				TEXT(
-					"Explicit execution context violates descriptor policy."));
+			OutError = ExecutionError;
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetRequestId();
 			return false;
 		}
 
@@ -2429,7 +2164,7 @@ namespace UE::UAI::BindingGateway::Query
 				Descriptor->GetProviderBinding());
 		if (!Provider.IsValid())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("query_provider_not_found"),
 				Descriptor->GetProviderBinding(),
@@ -2458,12 +2193,8 @@ namespace UE::UAI::BindingGateway::Query
 					OperationContext,
 					OperationContextError))
 		{
-			SetError(
-				OutError,
-				OperationContextError.Code,
-				Request.GetRequestId(),
-				TEXT(
-					"OperationContext composition failed."));
+			OutError = OperationContextError;
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetRequestId();
 			return false;
 		}
 
@@ -2476,16 +2207,16 @@ namespace UE::UAI::BindingGateway::Query
 				Source,
 				OutError))
 		{
+			if (OutError.IsEmpty()) SetFailure(OutError, TEXT("query_provider_failed"), Descriptor->GetProviderBinding(), TEXT("The query provider returned failure without a diagnostic."));
 			return false;
 		}
 		if (!Source.IsValid() || !Source->IsValid())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("query_provider_result_missing"),
 				Descriptor->GetProviderBinding(),
-				TEXT(
-					"Provider succeeded without a projection source."));
+				Source.IsValid() ? TEXT("The provider projection source must contain exactly one typed value.") : TEXT("The provider succeeded without returning a projection source."), TEXT("projection.source"));
 			return false;
 		}
 
@@ -2504,12 +2235,12 @@ namespace UE::UAI::BindingGateway::Query
 				Projected,
 				ProjectionError))
 		{
-			CopyError(ProjectionError, OutError);
+			ForwardDiagnostic(ProjectionError, OutError);
 			return false;
 		}
 		if (!Projected.IsValid())
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("query_projection_result_missing"),
 				Request.GetRequestId(),
@@ -2521,11 +2252,16 @@ namespace UE::UAI::BindingGateway::Query
 			Projected.ToSharedRef(),
 			{},
 			Source);
+		if (!Response.IsValid())
+		{
+			OutError = Response.GetValidationDiagnostic();
+			return false;
+		}
 		OutResult = MakeShared<FUeAgentQueryBindingResult>(
 			Descriptor->GetIdentity(),
 			Request.GetRequestId(),
 			MoveTemp(Response));
-		return OutResult->IsValid();
+		return true;
 	}
 
 	bool FUeAgentQueryBinding::TrySubmit(
@@ -2543,39 +2279,25 @@ namespace UE::UAI::BindingGateway::Query
 		FUeAgentCancellationRequested CancellationError;
 		if (!Cancellation.TryCheckpoint(CancellationError))
 		{
-			SetError(
-				OutError,
-				TEXT("query_cancelled"),
-				Request.GetRequestId(),
-				CancellationError.Reason);
+			OutError = CancellationError;
+			OutError.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(CancellationError);
+			OutError.Code = TEXT("query_cancelled");
+			OutError.SubjectId = Request.GetRequestId();
 			return false;
 		}
-		FUeAgentOperationDeadlineExceeded DeadlineError;
-		if (!Deadline.TryCheckpoint(TEXT("c3q.query_binding.start"), DeadlineError))
+		if (!ValidateRequest(Request, CallerContext, OutError))
 		{
-			SetError(
-				OutError,
-				TEXT("query_deadline_exceeded"),
-				Request.GetRequestId(),
-				DeadlineError.Stage);
-			return false;
-		}
-		if (!Request.IsValid() || !CallerContext.IsValid())
-		{
-			SetError(
-				OutError,
-				TEXT("query_request_invalid"),
-				Request.GetRequestId(),
-				TEXT("Typed request or caller context is invalid."));
 			return false;
 		}
 		if (!(Request.GetDescriptorIdentity() == DescriptorIdentity))
 		{
-			SetError(
+			SetFailure(
 				OutError,
 				TEXT("descriptor_hash_mismatch"),
 				Request.GetDescriptorIdentity().GetDescriptorId(),
 				TEXT("Request descriptor identity differs from the QueryBinding descriptor."));
+			OutError.PropertyPath = TEXT("descriptor");
+			OutError.ActualEvidence = MakeShared<FJsonValueObject>(Ticket::FUeAgentBindingTicketJsonCodec::DescriptorToJson(Request.GetDescriptorIdentity()));
 			return false;
 		}
 
@@ -2593,33 +2315,46 @@ namespace UE::UAI::BindingGateway::Query
 			RequestedSession = &Payload.GetStateRead()->GetSession();
 			break;
 		default:
-			SetError(OutError, TEXT("query_payload_invalid"), Request.GetRequestId(), TEXT("Unknown typed query kind."));
+			SetFailure(OutError, TEXT("query_payload_invalid"), Request.GetRequestId(), TEXT("This query binding requires catalog search, catalog resolve or state read; domain queries require shared request resources."), TEXT("payload.kind"));
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Payload.GetKind()));
 			return false;
 		}
 		const FUeAgentQuerySessionIdentity CurrentSession = SessionSource->GetCurrent();
 		if (!CurrentSession.IsValid())
 		{
-			SetError(OutError, TEXT("query_session_unavailable"), Request.GetRequestId(), TEXT("Current server session is invalid."));
+			OutError = CurrentSession.GetValidationDiagnostic();
 			return false;
 		}
 		if (CurrentSession.GetRegistryHash() != RegistryHash)
 		{
-			SetError(OutError, TEXT("registry_hash_mismatch"), Request.GetRequestId(), TEXT("Current registry hash differs from the QueryBinding composition hash."));
+			SetFailure(OutError, TEXT("registry_hash_mismatch"), Request.GetRequestId(), TEXT("Current registry hash differs from the QueryBinding composition hash."));
+			OutError.PropertyPath = TEXT("session.registry_hash");
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(CurrentSession.GetRegistryHash());
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(RegistryHash);
 			return false;
 		}
 		if (RequestedSession->GetServerSessionId() != CurrentSession.GetServerSessionId())
 		{
-			SetError(OutError, TEXT("server_session_stale"), Request.GetRequestId(), TEXT("Request belongs to another server session."));
+			SetFailure(OutError, TEXT("server_session_stale"), Request.GetRequestId(), TEXT("Request belongs to another server session."));
+			OutError.PropertyPath = TEXT("session.server_session_id");
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(RequestedSession->GetServerSessionId());
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(CurrentSession.GetServerSessionId());
 			return false;
 		}
 		if (RequestedSession->GetRegistryEpoch() != CurrentSession.GetRegistryEpoch())
 		{
-			SetError(OutError, TEXT("registry_epoch_stale"), Request.GetRequestId(), TEXT("Request registry epoch is stale."));
+			SetFailure(OutError, TEXT("registry_epoch_stale"), Request.GetRequestId(), TEXT("Request registry epoch is stale."));
+			OutError.PropertyPath = TEXT("session.registry_epoch");
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), RequestedSession->GetRegistryEpoch()));
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), CurrentSession.GetRegistryEpoch()));
 			return false;
 		}
 		if (RequestedSession->GetRegistryHash() != CurrentSession.GetRegistryHash())
 		{
-			SetError(OutError, TEXT("registry_hash_mismatch"), Request.GetRequestId(), TEXT("Request registry hash is stale."));
+			SetFailure(OutError, TEXT("registry_hash_mismatch"), Request.GetRequestId(), TEXT("Request registry hash is stale."));
+			OutError.PropertyPath = TEXT("session.registry_hash");
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(RequestedSession->GetRegistryHash());
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(CurrentSession.GetRegistryHash());
 			return false;
 		}
 
@@ -2642,12 +2377,12 @@ namespace UE::UAI::BindingGateway::Query
 					Catalog,
 					DiscoveryError))
 			{
-				CopyError(DiscoveryError, OutError);
+				ForwardDiagnostic(DiscoveryError, OutError);
 				return false;
 			}
 			if (!Catalog.IsValid())
 			{
-				SetError(OutError, TEXT("query_discovery_result_missing"), Request.GetRequestId(), TEXT("Discovery succeeded without a catalog."));
+				SetFailure(OutError, TEXT("query_discovery_result_missing"), Request.GetRequestId(), TEXT("Discovery succeeded without a catalog."));
 				return false;
 			}
 			const FUeAgentProjectionQueryResult ProjectionResult(
@@ -2663,7 +2398,7 @@ namespace UE::UAI::BindingGateway::Query
 					Projected,
 					ProjectionError))
 			{
-				CopyError(ProjectionError, OutError);
+				ForwardDiagnostic(ProjectionError, OutError);
 				return false;
 			}
 			break;
@@ -2681,12 +2416,12 @@ namespace UE::UAI::BindingGateway::Query
 					Binding,
 					DiscoveryError))
 			{
-				CopyError(DiscoveryError, OutError);
+				ForwardDiagnostic(DiscoveryError, OutError);
 				return false;
 			}
 			if (!Binding.IsValid())
 			{
-				SetError(OutError, TEXT("query_discovery_result_missing"), Query.GetCandidateId(), TEXT("Exact resolve succeeded without a candidate binding."));
+				SetFailure(OutError, TEXT("query_discovery_result_missing"), Query.GetCandidateId(), TEXT("Exact resolve succeeded without a candidate binding."));
 				return false;
 			}
 			if (!TicketService->TryIssue(
@@ -2714,7 +2449,7 @@ namespace UE::UAI::BindingGateway::Query
 					Projected,
 					ProjectionError))
 			{
-				CopyError(ProjectionError, OutError);
+				ForwardDiagnostic(ProjectionError, OutError);
 				return false;
 			}
 			break;
@@ -2744,12 +2479,12 @@ namespace UE::UAI::BindingGateway::Query
 					Snapshot,
 					DiscoveryError))
 			{
-				CopyError(DiscoveryError, OutError);
+				ForwardDiagnostic(DiscoveryError, OutError);
 				return false;
 			}
 			if (!Snapshot.IsValid())
 			{
-				SetError(OutError, TEXT("query_discovery_result_missing"), Query.GetBinding().GetBindingId(), TEXT("State read succeeded without a snapshot."));
+				SetFailure(OutError, TEXT("query_discovery_result_missing"), Query.GetBinding().GetBindingId(), TEXT("State read succeeded without a snapshot."));
 				return false;
 			}
 			if (!TicketService->TryIssue(
@@ -2778,26 +2513,32 @@ namespace UE::UAI::BindingGateway::Query
 					Projected,
 					ProjectionError))
 			{
-				CopyError(ProjectionError, OutError);
+				ForwardDiagnostic(ProjectionError, OutError);
 				return false;
 			}
 			break;
 		}
 		default:
-			checkNoEntry();
+			SetFailure(OutError, TEXT("query_payload_invalid"), Request.GetRequestId(), TEXT("This query binding does not support the requested payload kind."), TEXT("payload.kind"));
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Payload.GetKind()));
 			return false;
 		}
 
 		if (!Projected.IsValid())
 		{
-			SetError(OutError, TEXT("query_projection_result_missing"), Request.GetRequestId(), TEXT("Projection succeeded without a response."));
+			SetFailure(OutError, TEXT("query_projection_result_missing"), Request.GetRequestId(), TEXT("Projection succeeded without a response."));
 			return false;
 		}
 		FUeAgentQueryBindingResponse Response(Projected.ToSharedRef(), MoveTemp(Ticket));
+		if (!Response.IsValid())
+		{
+			OutError = Response.GetValidationDiagnostic();
+			return false;
+		}
 		OutResult = MakeShared<FUeAgentQueryBindingResult>(
 			DescriptorIdentity,
 			Request.GetRequestId(),
 			MoveTemp(Response));
-		return OutResult->IsValid();
+		return true;
 	}
 }

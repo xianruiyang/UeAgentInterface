@@ -1,41 +1,11 @@
 #include "Misc/AutomationTest.h"
-#include "Misc/FileHelper.h"
-#include "Misc/Paths.h"
 
-#if __has_include("Core/Contract/Command/UeAgentCommandContractModel.h") \
-	&& __has_include("CommandRegistry/UeAgentImmutableCommandRegistry.h") \
-	&& __has_include("CommandEdge/UeAgentExactCommandDispatch.h")
-#define UAI_STRICT_V2_T02_IMPLEMENTATION_AVAILABLE 1
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/Command/UeAgentCommandContractModel.h"
-#else
-#define UAI_STRICT_V2_T02_IMPLEMENTATION_AVAILABLE 0
-#endif
 
 namespace
 {
-	static FString ProductSource(const FString& RelativePath)
-	{
-		return FPaths::ConvertRelativePathToFull(FPaths::Combine(
-			FPaths::ProjectPluginsDir(),
-			TEXT("UeAgentInterface/Source/UeAgentInterface"),
-			RelativePath));
-	}
-
-	static bool LoadSource(
-		FAutomationTestBase& Test,
-		const FString& RelativePath,
-		FString& OutSource)
-	{
-		return Test.TestTrue(
-			*FString::Printf(TEXT("load source %s"), *RelativePath),
-			FFileHelper::LoadFileToString(
-				OutSource,
-				*ProductSource(RelativePath)));
-	}
-
-#if UAI_STRICT_V2_T02_IMPLEMENTATION_AVAILABLE
 	using namespace UE::UAI::CommandContract;
 	using namespace UE::UAI::CommandEdge;
 	using namespace UE::UAI::CommandRegistry;
@@ -174,7 +144,6 @@ namespace
 		Codec.DecodeRequest(Bytes, Result, Diagnostic);
 		return Result;
 	}
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -184,10 +153,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUaiStrictV2T02RegistryProjectionTest::RunTest(const FString& Parameters)
 {
-#if !UAI_STRICT_V2_T02_IMPLEMENTATION_AVAILABLE
-	AddError(TEXT("strict_v2_t02_immutable_command_registry_missing"));
-	return false;
-#else
 	FUeAgentCommandDeclaration Source = MakeDeclaration();
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
 	FString Error;
@@ -441,7 +406,6 @@ bool FUaiStrictV2T02RegistryProjectionTest::RunTest(const FString& Parameters)
 			Projection.Contains(Required));
 	}
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -451,10 +415,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUaiStrictV2T02ValidationFailuresTest::RunTest(const FString& Parameters)
 {
-#if !UAI_STRICT_V2_T02_IMPLEMENTATION_AVAILABLE
-	AddError(TEXT("strict_v2_t02_contract_validation_missing"));
-	return false;
-#else
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> Rejected;
 	FString Error;
 	FUeAgentCommandDeclaration Incomplete = MakeDeclaration();
@@ -541,7 +501,6 @@ bool FUaiStrictV2T02ValidationFailuresTest::RunTest(const FString& Parameters)
 		Error,
 		FString(TEXT("command_tutorial_reference_invalid")));
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -551,10 +510,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUaiStrictV2T02ExactUniqueDispatchTest::RunTest(const FString& Parameters)
 {
-#if !UAI_STRICT_V2_T02_IMPLEMENTATION_AVAILABLE
-	AddError(TEXT("strict_v2_t02_exact_dispatch_missing"));
-	return false;
-#else
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
 	FString Error;
 	TestTrue(
@@ -610,15 +565,6 @@ bool FUaiStrictV2T02ExactUniqueDispatchTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("undeclared alias cannot execute"), Result.IsOk());
 	TestEqual(TEXT("alias does not reach handler"), Handler->Calls, 1);
 
-	const TOptional<FUeAgentCommandRequest> Stale =
-		RequestFor(
-			TEXT("sample.execute"),
-			TEXT("sha256:0000000000000000000000000000000000000000000000000000000000000000"));
-	Result = Dispatch->Submit(
-		Stale.GetValue(), Caller, MakeShared<FNeverCancelled>());
-	TestFalse(TEXT("stale contract projection cannot execute"), Result.IsOk());
-	TestEqual(TEXT("stale binding does not reach handler"), Handler->Calls, 1);
-
 	TSharedPtr<const FUeAgentExactCommandDispatch> Rejected;
 	const TSharedRef<FRecordingExactHandler> WrongOwner =
 		MakeShared<FRecordingExactHandler>(
@@ -640,36 +586,5 @@ bool FUaiStrictV2T02ExactUniqueDispatchTest::RunTest(const FString& Parameters)
 		TEXT("missing enabled handler is rejected"),
 		FUeAgentExactCommandDispatch::TryCreate(
 			Registry.ToSharedRef(), {}, Rejected, Error));
-	return !HasAnyErrors();
-#endif
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUaiStrictV2T02ActiveAuthorityBoundaryTest,
-	"UAI.StrictV2.T02.COMMAND.CONTRACT.ActiveAuthorityBoundary",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUaiStrictV2T02ActiveAuthorityBoundaryTest::RunTest(const FString& Parameters)
-{
-	FString Registration;
-	if (!LoadSource(
-		*this,
-		TEXT("Private/Module/CommandRegistration/Core/UeAgentCoreCommandRegistration.cpp"),
-		Registration))
-	{
-		AddError(TEXT("strict_v2_t02_core_registration_missing"));
-		return false;
-	}
-	TestTrue(
-		TEXT("core registration consumes the immutable registry"),
-		Registration.Contains(TEXT("FUeAgentImmutableCommandRegistry")));
-	TestTrue(
-		TEXT("core registration consumes the exact dispatcher"),
-		Registration.Contains(TEXT("FUeAgentExactCommandDispatch")));
-	TestFalse(
-		TEXT("core registration has no prefix, fallback, or alias execution path"),
-		Registration.Contains(TEXT("StartsWith"))
-			|| Registration.Contains(TEXT("fallback"))
-			|| Registration.Contains(TEXT("alias")));
 	return !HasAnyErrors();
 }

@@ -1,5 +1,7 @@
 #include "QueryOwners/WorldSpatial/UeAgentLevelWorldQueryOwner.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "DomainAdapters/WorldSpatial/UeAgentLevelWorldDomainMechanics.h"
 #include "Dom/JsonObject.h"
@@ -24,11 +26,11 @@ namespace UE::UAI::QueryOwners::WorldSpatial
 		OutPayloadJson.Reset();
 		OutError.Reset();
 		TSharedPtr<FJsonObject> Params;
-		FString JsonError;
+		UE::UAI::Contract::FDiagnostic JsonError;
 		if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError)
 			|| !Params.IsValid())
 		{
-			OutError.Set(TEXT("world_actor_candidate_params_invalid"), JsonError);
+			OutError.SetFailure(JsonError, FString());
 			return false;
 		}
 
@@ -36,22 +38,18 @@ namespace UE::UAI::QueryOwners::WorldSpatial
 		if (!Params->TryGetStringField(TEXT("target"), Query.Target)
 			|| Query.Target.TrimStartAndEnd().IsEmpty())
 		{
-			OutError.Set(TEXT("world_actor_candidate_target_required"));
+			auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_actor_candidate_target_required"),
+				TEXT("Actor candidate queries require a non-empty target string."), TEXT("candidate_query"));
+			Detail.SourceKind = TEXT("command_input");
+			Detail.Source.JsonPath = TEXT("/target");
+			Detail.ActualValue = Params->TryGetField(TEXT("target"));
+			Detail.ActualValuePresent = Detail.ActualValue.IsValid();
+			Detail.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty target string"));
+			OutError.SetFailure(MoveTemp(Detail));
 			return false;
 		}
 		Params->TryGetStringField(TEXT("category"), Query.Category);
 		Params->TryGetStringField(TEXT("query"), Query.Query);
-		Params->TryGetStringField(TEXT("id"), Query.CandidateId);
-		double Limit = Query.Limit;
-		double Cursor = Query.Cursor;
-		if (Params->TryGetNumberField(TEXT("limit"), Limit))
-		{
-			Query.Limit = FMath::RoundToInt(Limit);
-		}
-		if (Params->TryGetNumberField(TEXT("cursor"), Cursor))
-		{
-			Query.Cursor = FMath::RoundToInt(Cursor);
-		}
 		return TryQueryWorldActorCandidates(
 			Query, OutPayloadJson, OutError);
 	}

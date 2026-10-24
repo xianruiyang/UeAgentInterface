@@ -2,6 +2,10 @@
 
 #include "Domains/Niagara/UeAgentNiagaraEmitterCompileContext.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonValue.h"
+#include "Domains/Niagara/UeAgentNiagaraRendererBindings.h"
+
 #include "NiagaraEditorUtilities.h"
 #include "NiagaraEmitterHandle.h"
 #include "NiagaraSystem.h"
@@ -14,10 +18,18 @@ namespace UeAgentNiagaraEmitterCompileContext
 		const FGuid& RequestedVersion,
 		const bool bForceCompile,
 		FResult& OutResult,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutResult = FResult();
 		OutError.Reset();
+		const auto FailNative = [&OutError, &Emitter](const TCHAR* Code, const TCHAR* Reason, const TCHAR* Field) {
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("niagara_compile"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = Field;
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			OutError.InternalContext = Emitter.GetPathName();
+		};
 
 		Emitter.UpdateEmitterAfterLoad();
 		const FGuid VersionGuid = RequestedVersion.IsValid()
@@ -25,10 +37,14 @@ namespace UeAgentNiagaraEmitterCompileContext
 			: Emitter.GetExposedVersion().VersionGuid;
 		if (!VersionGuid.IsValid() || !Emitter.GetEmitterData(VersionGuid))
 		{
-			OutError = TEXT("niagara_emitter_version_not_found");
+			FailNative(TEXT("niagara_emitter_version_not_found"),
+				RequestedVersion.IsValid() ? TEXT("The requested emitter version has no available emitter data.")
+					: TEXT("The emitter has no exposed version with available emitter data."), TEXT("emitter_version_available"));
+			OutError.InternalContext += TEXT(" version=") + VersionGuid.ToString();
 			return false;
 		}
 
+		UeAgentNiagaraRendererBindings::Refresh(FVersionedNiagaraEmitter(&Emitter, VersionGuid));
 		OutResult.TransientSystem.Reset(NewObject<UNiagaraSystem>(
 			GetTransientPackage(),
 			NAME_None,
@@ -36,7 +52,8 @@ namespace UeAgentNiagaraEmitterCompileContext
 		UNiagaraSystem* TransientSystem = OutResult.TransientSystem.Get();
 		if (!TransientSystem)
 		{
-			OutError = TEXT("niagara_emitter_compile_context_create_failed");
+			FailNative(TEXT("niagara_emitter_compile_context_create_failed"),
+				TEXT("UE could not create the temporary system required to compile this emitter."), TEXT("compile_system_created"));
 			return false;
 		}
 
@@ -57,7 +74,9 @@ namespace UeAgentNiagaraEmitterCompileContext
 			: FVersionedNiagaraEmitter();
 		if (!OutResult.CompiledEmitter.Emitter || !OutResult.CompiledEmitter.GetEmitterData())
 		{
-			OutError = TEXT("niagara_emitter_compile_context_missing_emitter");
+			FailNative(TEXT("niagara_emitter_compile_context_missing_emitter"),
+				TEXT("Adding the emitter to its temporary compilation system did not produce usable emitter data."), TEXT("compile_emitter_available"));
+			OutError.InternalContext += TEXT(" handle=") + EmitterHandleId.ToString();
 			return false;
 		}
 
@@ -70,7 +89,8 @@ namespace UeAgentNiagaraEmitterCompileContext
 
 		TArray<UNiagaraScript*> CompiledScripts;
 		GetCompiledScripts(OutResult, CompiledScripts);
-		OutResult.Validation = UeAgentNiagaraCompileValidation::InspectScripts(CompiledScripts);
+		OutResult.Validation = UeAgentNiagaraCompileValidation::InspectScripts(
+			CompiledScripts, OutResult.bCompilationComplete);
 		return true;
 	}
 

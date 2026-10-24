@@ -38,7 +38,6 @@ namespace UeAgentNiagaraRuntimeParticleCapture
 			Result->SetBoolField(TEXT("available"), false);
 			Result->SetStringField(TEXT("reason"), Reason);
 			Result->SetStringField(TEXT("sim_target"), SimTarget);
-			Result->SetNumberField(TEXT("max_particle_samples"), Options.MaxParticleSamples);
 			return Result;
 		}
 	}
@@ -102,7 +101,6 @@ namespace UeAgentNiagaraRuntimeParticleCapture
 		Result->SetBoolField(TEXT("available"), true);
 		Result->SetStringField(TEXT("reason"), TEXT(""));
 		Result->SetStringField(TEXT("sim_target"), SimTarget);
-		Result->SetNumberField(TEXT("max_particle_samples"), Options.MaxParticleSamples);
 
 		FNiagaraDataVariableIterator LayoutIterator(Data);
 		const TArray<FNiagaraVariable>& LayoutVariables = LayoutIterator.GetVariables();
@@ -113,7 +111,7 @@ namespace UeAgentNiagaraRuntimeParticleCapture
 			LayoutVariableNames.Add(Variable.GetName().ToString());
 		}
 		const int32 ParticleCount = static_cast<int32>(Data->GetNumInstances());
-		const int32 SampleCount = FMath::Min(ParticleCount, Options.MaxParticleSamples);
+		const int32 SampleCount = ParticleCount;
 		Result->SetNumberField(TEXT("particle_count"), ParticleCount);
 		Result->SetNumberField(TEXT("sampled_particle_count"), SampleCount);
 		Result->SetBoolField(TEXT("complete"), SampleCount == ParticleCount);

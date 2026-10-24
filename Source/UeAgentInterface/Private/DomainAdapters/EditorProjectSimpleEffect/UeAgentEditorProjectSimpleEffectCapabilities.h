@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
@@ -83,6 +85,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 		UStringTable* GetStringTable() const;
 		TSet<FString>* GetLocalizationDirectories() const;
 		bool IsValid() const;
+		const ExecutionMutation::FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		FString CanonicalRef;
@@ -94,6 +97,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 		TWeakObjectPtr<UStringTable> StringTable;
 		TSet<FString>* LocalizationDirectories = nullptr;
 		bool bValid = false;
+		TSharedPtr<const ExecutionMutation::FExecutionMutationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API
@@ -162,7 +166,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 	UEAGENTINTERFACE_API bool
 	TryCreateEditorProjectSimpleEffectDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API TArray<FString>
 	GetEditorProjectSimpleEffectAuthorityScopes(const FString& ProfileId);
@@ -171,7 +175,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 	TryGetEditorProjectSimpleEffectProductionProfiles(
 		TArray<FUeAgentEditorProjectSimpleEffectProductionProfile>&
 			OutProfiles,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool
 	TryBuildEditorProjectSimpleEffectChangeSetDraft(
@@ -188,7 +192,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 		FString& OutNativeOperationType,
 		FString& OutProfileId,
 		FString& OutNativeMechanicId,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool
 	TryResolveEditorProjectSimpleEffectFieldContract(
@@ -198,7 +202,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 		FString& OutTypeId,
 		StateSemantic::EUeAgentValueKind& OutValueKind,
 		TArray<FString>& OutAllowedPresences,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	class UEAGENTINTERFACE_API
 		FUeAgentEditorProjectSimpleEffectNativeHookFactory final

@@ -4,6 +4,7 @@
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/Projection/UeAgentProjection.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Editor.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/App.h"
@@ -44,85 +45,117 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			return TEXT("sha256:") + Signature.ToString().ToLower();
 		}
 
-		bool TryReadVerifiedResult(
+		Contract::FDiagnostic HostFailure(
+			const FString& Code, const FString& Reason, const FString& Stage)
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, Stage);
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
+		}
+
+		void ReadFailure(const FUeAgentCommandResult& Result, Contract::FDiagnostic& OutDiagnostic)
+		{
+			OutDiagnostic = Result.GetDiagnostic();
+			for (const Contract::FDiagnostic& Additional : Result.GetDiagnostics())
+				OutDiagnostic.Append(Additional);
+			if (OutDiagnostic.IsEmpty())
+				OutDiagnostic = HostFailure(TEXT("simple_authoring_operation_failed"),
+					TEXT("The delegated authoring handler returned failure without a diagnostic."), TEXT("delegated_execute"));
+		}
+
+		Contract::FDiagnostic MissingCompletedResult(const FString& Stage, const FString& CommandId)
+		{
+			auto Diagnostic = HostFailure(TEXT("simple_authoring_operation_result_missing"),
+				TEXT("The authoring handler has not supplied a completed result."), Stage);
+			Diagnostic.CandidateName = CommandId;
+			Diagnostic.PropertyPath = TEXT("result");
+			Diagnostic.ActualValuePresent = false;
+			Diagnostic.ExpectedValuePresent = true;
+			return Diagnostic;
+		}
+
+		bool TryReadCompletedResult(
 			const FUeAgentCommandResult& Result,
 			FString& OutOperationId,
-			FString& OutError)
+			Contract::FDiagnostic& OutError, bool* OutEquivalent = nullptr)
 		{
 			OutOperationId.Reset();
 			OutError.Reset();
+			if (OutEquivalent) *OutEquivalent = false;
+			if (!Result.IsOk())
+			{
+				ReadFailure(Result, OutError);
+				return false;
+			}
+			const auto FailField = [&](const FString& Path, const TSharedPtr<FJsonValue>& Value,
+				const FString& Expected)
+			{
+				OutOperationId.Reset();
+				OutError = HostFailure(TEXT("simple_authoring_completed_result_invalid"),
+					FString::Printf(TEXT("Completed result field '%s' must be %s."), *Path, *Expected), TEXT("result_decode"));
+				OutError.Source.JsonPath = Path;
+				OutError.PropertyPath = Path;
+				OutError.ActualValuePresent = Value.IsValid();
+				OutError.ExpectedValuePresent = true;
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+				if (Value.IsValid())
+				{
+					if (Value->Type == EJson::Object || Value->Type == EJson::Array)
+						OutError.ActualValue = MakeShared<FJsonValueString>(
+							Value->Type == EJson::Object ? TEXT("object") : TEXT("array"));
+					else OutError.ActualValue = Value;
+				}
+				for (const Contract::FDiagnostic& Additional : Result.GetDiagnostics())
+					OutError.Append(Additional);
+				return false;
+			};
 			TSharedPtr<FJsonObject> Root;
 			const TSharedRef<TJsonReader<>> Reader =
 				TJsonReaderFactory<>::Create(Result.GetPayloadJson());
-			const TSharedPtr<FJsonObject>* Projection = nullptr;
-			const TSharedPtr<FJsonObject>* Payload = nullptr;
-			FString Status;
-			FString EffectOutcome;
-			if (!Result.IsOk()
-				|| !FJsonSerializer::Deserialize(Reader, Root)
-				|| !Root.IsValid()
-				|| !Root->TryGetStringField(TEXT("operation_id"), OutOperationId)
-				|| OutOperationId.IsEmpty()
-				|| !Root->TryGetObjectField(TEXT("projection"), Projection)
-				|| !Projection || !Projection->IsValid()
-				|| !(*Projection)->TryGetObjectField(TEXT("payload"), Payload)
-				|| !Payload || !Payload->IsValid()
-				|| !(*Payload)->TryGetStringField(TEXT("status"), Status)
-				|| !(*Payload)->TryGetStringField(
-					TEXT("effect_outcome"), EffectOutcome)
-				|| Status != TEXT("verified")
-				|| EffectOutcome != TEXT("complete"))
+			if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
 			{
-				OutOperationId.Reset();
-				OutError = TEXT("simple_authoring_verified_result_invalid");
+				OutError = HostFailure(TEXT("simple_authoring_completed_result_invalid"),
+					Reader->GetErrorMessage().IsEmpty()
+						? TEXT("The completed result must contain a JSON object document.")
+						: Reader->GetErrorMessage(), TEXT("result_decode"));
+				OutError.Source.JsonPath = TEXT("/");
+				OutError.Source.Line = Reader->GetLineNumber();
+				OutError.Source.Column = Reader->GetCharacterNumber();
+				for (const Contract::FDiagnostic& Additional : Result.GetDiagnostics())
+					OutError.Append(Additional);
 				return false;
 			}
+			if (!Root->TryGetStringField(TEXT("operation_id"), OutOperationId) || OutOperationId.IsEmpty())
+				return FailField(TEXT("/operation_id"), Root->Values.FindRef(TEXT("operation_id")), TEXT("a non-empty string"));
+			const TSharedPtr<FJsonObject>* Projection = nullptr;
+			if (!Root->TryGetObjectField(TEXT("projection"), Projection) || !Projection || !Projection->IsValid())
+				return FailField(TEXT("/projection"), Root->Values.FindRef(TEXT("projection")), TEXT("an object"));
+			const TSharedPtr<FJsonObject>* Payload = nullptr;
+			if (!(*Projection)->TryGetObjectField(TEXT("payload"), Payload) || !Payload || !Payload->IsValid())
+				return FailField(TEXT("/projection/payload"), (*Projection)->Values.FindRef(TEXT("payload")), TEXT("an object"));
+			FString Status;
+			if (!(*Payload)->TryGetStringField(TEXT("status"), Status))
+				return FailField(TEXT("/projection/payload/status"), (*Payload)->Values.FindRef(TEXT("status")), TEXT("a string"));
+			FString EffectOutcome;
+			if (!(*Payload)->TryGetStringField(TEXT("effect_outcome"), EffectOutcome))
+				return FailField(TEXT("/projection/payload/effect_outcome"), (*Payload)->Values.FindRef(TEXT("effect_outcome")), TEXT("a string"));
+			if (OutEquivalent) *OutEquivalent = Status == TEXT("verified") && EffectOutcome == TEXT("complete");
 			return true;
 		}
 
-		void ReadFailure(
-			const FUeAgentCommandResult& Result,
-			FString& OutCode,
-			FString& OutDetail)
+		bool MutationMayHaveStarted(const UE::UAI::Contract::FDiagnostic& Diagnostic)
 		{
-			OutCode = TEXT("simple_authoring_operation_failed");
-			OutDetail = Result.GetErrorJson();
-			TSharedPtr<FJsonObject> ErrorObject;
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(Result.GetErrorJson());
-			if (FJsonSerializer::Deserialize(Reader, ErrorObject)
-				&& ErrorObject.IsValid())
-			{
-				FString Value;
-				if (ErrorObject->TryGetStringField(TEXT("code"), Value)
-					&& !Value.IsEmpty())
-				{
-					OutCode = MoveTemp(Value);
-				}
-				if (ErrorObject->TryGetStringField(TEXT("detail"), Value)
-					&& !Value.IsEmpty())
-				{
-					OutDetail = MoveTemp(Value);
-				}
-			}
+			return Diagnostic.MutationMayHaveStarted.Get(false)
+				|| Diagnostic.MutationStarted.Get(false)
+				|| Diagnostic.RollbackSucceeded.Get(false)
+				|| Diagnostic.TerminalStatus == TEXT("rolled_back")
+				|| Diagnostic.TerminalStatus == TEXT("state_unknown")
+				|| Diagnostic.ExecutionStatus == TEXT("rolled_back")
+				|| Diagnostic.ExecutionStatus == TEXT("state_unknown")
+				|| Diagnostic.TransactionStatus == TEXT("rolled_back")
+				|| Diagnostic.TransactionStatus == TEXT("state_unknown");
 		}
 
-		bool MutationMayHaveStarted(
-			const FString& Code,
-			const FString& Detail)
-		{
-			return Detail == TEXT("rolled_back")
-				|| Detail == TEXT("recovery_required")
-				|| Detail == TEXT("state_unknown")
-				|| Detail == TEXT("failed")
-				|| Detail == TEXT("applied_in_memory")
-				|| Detail == TEXT("persisted_unverified")
-				|| Detail.Contains(TEXT("effect_outcome="))
-				|| Code.StartsWith(TEXT("verification_"))
-				|| Code.StartsWith(TEXT("operation_verification_"))
-				|| Code.StartsWith(TEXT("operation_projection_"))
-				|| Code.StartsWith(TEXT("simple_authoring_projection_"));
-		}
 
 		class FSimpleAuthoringOperationInvocationState final
 			: public IOperationVersionFencePort
@@ -155,8 +188,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 				OutError = {};
 				if (Cancellation->IsCancelled())
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("operation_cancelled"), Request.GetCommandId());
+					OutError = HostFailure(TEXT("operation_cancelled"),
+						TEXT("The authoring command was cancelled before the lifecycle fence completed."), TEXT("operation_lifecycle"));
+					OutError.CandidateName = Request.GetCommandId();
+					OutError.PropertyPath = TEXT("cancellation");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(true);
 					return false;
 				}
 				const FString Scope = Plan.GetImpactScope().IsEmpty()
@@ -164,19 +200,28 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 				const FString* Expected = Plan.GetExpectedRevisions().Find(Scope);
 				if (!Expected || *Expected != Request.GetCommandBindingHash())
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("operation_version_conflict"), Request.GetCommandId());
+					OutError = HostFailure(TEXT("operation_version_conflict"),
+						Expected ? TEXT("The command binding differs from the revision recorded in the operation plan.")
+							: TEXT("The operation plan has no expected revision for its impact scope."), TEXT("operation_lifecycle"));
+					OutError.CandidateName = Request.GetCommandId();
+					OutError.PropertyPath = TEXT("command_binding");
+					OutError.ActualValuePresent = true;
+					OutError.ExpectedValuePresent = Expected != nullptr;
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Request.GetCommandBindingHash());
+					if (Expected) OutError.ExpectedEvidence = MakeShared<FJsonValueString>(*Expected);
+					OutError.SubjectId = Scope;
 					return false;
 				}
 				if (Stage == EOperationLifecycleStage::PrePersistFence)
 				{
-					if (!Result.IsSet()
-						|| !TryReadVerifiedResult(
-							Result.GetValue(), OperationId, FailureDetail))
+					if (!Result.IsSet())
 					{
-						OutError = FOperationLifecycleError(
-							TEXT("simple_authoring_verified_result_invalid"),
-							FailureDetail);
+						OutError = MissingCompletedResult(TEXT("pre_persist_fence"), Request.GetCommandId());
+						return false;
+					}
+					if (!TryReadCompletedResult(Result.GetValue(), OperationId, FailureDiagnostic))
+					{
+						OutError = FailureDiagnostic;
 						return false;
 					}
 				}
@@ -195,24 +240,21 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 				if (!Result->IsOk())
 				{
 					ReadFailure(
-						Result.GetValue(), FailureCode, FailureDetail);
-					if (MutationMayHaveStarted(FailureCode, FailureDetail))
+						Result.GetValue(), FailureDiagnostic);
+					if (MutationMayHaveStarted(FailureDiagnostic))
 					{
 						OutFacts = FOperationMutationFacts(
 							TEXT("delegated-failure:") + Plan.GetPlanId(),
 							Plan.GetImpactScope(),
 							true);
 					}
-					OutError = FOperationLifecycleError(
-						FailureCode, FailureDetail);
+					OutError = FailureDiagnostic;
 					return false;
 				}
-				if (!TryReadVerifiedResult(
-						Result.GetValue(), OperationId, FailureDetail))
+				if (!TryReadCompletedResult(
+						Result.GetValue(), OperationId, FailureDiagnostic))
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("simple_authoring_verified_result_invalid"),
-						FailureDetail);
+					OutError = FailureDiagnostic;
 					return false;
 				}
 				OutFacts = FOperationMutationFacts(
@@ -226,14 +268,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 				bool& bOutConfirmed,
 				FOperationLifecycleError& OutError) override
 			{
-				bOutConfirmed = FailureDetail == TEXT("rolled_back");
-				OutError = bOutConfirmed
-					? FOperationLifecycleError()
-					: FOperationLifecycleError(
-						FailureCode.IsEmpty()
-							? FString(TEXT("operation_rollback_unconfirmed"))
-							: FailureCode,
-						FailureDetail);
+				bOutConfirmed = FailureDiagnostic.RollbackSucceeded.Get(false) || FailureDiagnostic.TerminalStatus == TEXT("rolled_back") || FailureDiagnostic.ExecutionStatus == TEXT("rolled_back") || FailureDiagnostic.TransactionStatus == TEXT("rolled_back");
+				OutError = bOutConfirmed ? FOperationLifecycleError() : FailureDiagnostic;
+				if (!bOutConfirmed && OutError.IsEmpty())
+				{
+					OutError = HostFailure(TEXT("operation_rollback_unconfirmed"),
+						TEXT("The delegated operation supplied no successful rollback confirmation."), TEXT("rollback"));
+					OutError.CandidateName = Request.GetCommandId();
+					OutError.PropertyPath = TEXT("rollback_succeeded");
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				}
 				return bOutConfirmed;
 			}
 
@@ -244,12 +289,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			{
 				OutError = {};
 				FString VerifiedOperationId;
-				if (!Result.IsSet()
-					|| !TryReadVerifiedResult(
-						Result.GetValue(), VerifiedOperationId, FailureDetail))
+				if (!Result.IsSet())
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("operation_settle_failed"), FailureDetail);
+					OutError = MissingCompletedResult(TEXT("settle"), Request.GetCommandId());
+					return false;
+				}
+				if (!TryReadCompletedResult(Result.GetValue(), VerifiedOperationId, FailureDiagnostic))
+				{
+					OutError = FailureDiagnostic;
 					return false;
 				}
 				return true;
@@ -263,7 +310,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			{
 				OutError = {};
 				OutPersistenceReceiptId = OperationId;
-				return !OutPersistenceReceiptId.IsEmpty();
+				if (OutPersistenceReceiptId.IsEmpty())
+				{
+					OutError = HostFailure(TEXT("simple_authoring_operation_identity_missing"),
+						TEXT("The completed operation has no identity to use as its persistence receipt."), TEXT("persist"));
+					OutError.PropertyPath = TEXT("operation_id");
+					OutError.ActualValue = MakeShared<FJsonValueString>(OperationId);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty operation identity"));
+					return false;
+				}
+				return true;
 			}
 
 			bool Verify(
@@ -276,43 +332,83 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 				bOutEquivalent = false;
 				OutError = {};
 				FString VerifiedOperationId;
-				if (PersistenceReceiptId != OperationId
-					|| !Result.IsSet()
-					|| !TryReadVerifiedResult(
-						Result.GetValue(), VerifiedOperationId, FailureDetail)
-					|| VerifiedOperationId != OperationId)
+				if (PersistenceReceiptId != OperationId)
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("operation_readback_mismatch"), FailureDetail);
+					OutError = HostFailure(TEXT("operation_readback_mismatch"),
+						TEXT("The persistence receipt belongs to a different operation."), TEXT("verify"));
+					OutError.PropertyPath = TEXT("persistence_receipt_id");
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(PersistenceReceiptId);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(OperationId);
 					return false;
 				}
-				bOutEquivalent = true;
+				if (!Result.IsSet())
+				{
+					OutError = MissingCompletedResult(TEXT("verify"), Request.GetCommandId());
+					return false;
+				}
+				if (!TryReadCompletedResult(Result.GetValue(), VerifiedOperationId, FailureDiagnostic, &bOutEquivalent))
+				{
+					OutError = FailureDiagnostic;
+					return false;
+				}
+				if (VerifiedOperationId != OperationId)
+				{
+					OutError = HostFailure(TEXT("operation_readback_mismatch"),
+						TEXT("The read-back completed result belongs to a different operation."), TEXT("verify"));
+					OutError.PropertyPath = TEXT("operation_id");
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(VerifiedOperationId);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(OperationId);
+					return false;
+				}
 				return true;
 			}
 
 			bool TryBuildSuccessPayload(
 				const FOperationLifecycleReceipt& Receipt,
 				FString& OutPayloadJson,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				OutPayloadJson.Reset();
 				OutError.Reset();
-				if (!Result.IsSet()
-					|| !Result->IsOk()
-					|| Receipt.GetStatus()
-						!= EOperationLifecycleStatus::Succeeded)
+				if (!Result.IsSet())
 				{
-					OutError = TEXT("simple_authoring_operation_result_missing");
+					OutError = MissingCompletedResult(TEXT("result_projection"), Request.GetCommandId());
+					return false;
+				}
+				if (!Result->IsOk())
+				{
+					ReadFailure(Result.GetValue(), OutError);
+					return false;
+				}
+				if (Receipt.GetStatus() != EOperationLifecycleStatus::Succeeded)
+				{
+					OutError = Receipt.GetDiagnostic();
+					if (OutError.IsEmpty())
+					{
+						OutError = HostFailure(TEXT("simple_authoring_operation_result_missing"),
+							TEXT("A success payload cannot be projected from an unsuccessful lifecycle receipt."), TEXT("result_projection"));
+						OutError.PropertyPath = TEXT("receipt/status");
+						OutError.ActualValue = MakeShared<FJsonValueString>(LexToString(Receipt.GetStatus()));
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("succeeded"));
+					}
 					return false;
 				}
 				OutPayloadJson = Result->GetPayloadJson();
-				return !OutPayloadJson.IsEmpty();
+				if (OutPayloadJson.IsEmpty())
+				{
+					OutError = HostFailure(TEXT("simple_authoring_operation_result_missing"),
+						TEXT("The successful authoring handler returned an empty payload."), TEXT("result_projection"));
+					OutError.PropertyPath = TEXT("payload");
+					OutError.ActualValue = MakeShared<FJsonValueString>(OutPayloadJson);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty payload"));
+					for (const Contract::FDiagnostic& Additional : Result->GetDiagnostics())
+						OutError.Append(Additional);
+					return false;
+				}
+				return true;
 			}
 
-			FString GetFailureDetail() const override
-			{
-				return FailureDetail;
-			}
+			
 
 		private:
 			TSharedRef<IUeAgentCommandHandler> Handler;
@@ -321,8 +417,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			TSharedRef<Contract::IUeAgentCancellationSignal> Cancellation;
 			TOptional<FUeAgentCommandResult> Result;
 			FString OperationId;
-			FString FailureCode;
-			FString FailureDetail;
+			UE::UAI::Contract::FDiagnostic FailureDiagnostic;
 		};
 
 		class FSimpleAuthoringOperationInvocationFactory final
@@ -348,19 +443,18 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 				OutError = {};
 				if (Request.GetCommandId() != CommandId)
 				{
-					OutError = DomainCapability::FDomainOperationInvocationError(
-						TEXT("simple_authoring_operation_identity_mismatch"),
-						Request.GetCommandId(), CommandId);
+					OutError = HostFailure(TEXT("simple_authoring_operation_identity_mismatch"),
+						TEXT("The requested command does not match this operation factory."), TEXT("operation_lifecycle"));
+					OutError.PropertyPath = TEXT("command_id");
+					OutError.ActualValue = MakeShared<FJsonValueString>(Request.GetCommandId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(CommandId);
 					return false;
 				}
 				TSharedPtr<IUeAgentCommandHandler> Handler;
-				FString Error;
-				if (!TryResolveHandler(CommandId, Handler, Error)
-					|| !Handler.IsValid())
+				UE::UAI::Contract::FDiagnostic Error;
+				if (!TryResolveHandler(CommandId, Handler, Error))
 				{
-					OutError = DomainCapability::FDomainOperationInvocationError(
-						TEXT("simple_authoring_runtime_unavailable"),
-						CommandId, Error);
+					OutError = Error;
 					return false;
 				}
 				const TSharedRef<FSimpleAuthoringOperationInvocationState> State =
@@ -385,7 +479,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 						TArray<FString>{Scope},
 						TMap<FString, FString>{{Scope,
 							Request.GetCommandBindingHash()}},
-						TArray<FString>{TEXT("simple_authoring_verified")});
+						TArray<FString>{TEXT("simple_authoring_completed")});
 				const TSharedRef<const FOperationImpactAuthorization> Authorization =
 					MakeShared<const FOperationImpactAuthorization>(
 						Fingerprint, TArray<FString>{Scope});
@@ -428,32 +522,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 				FUeAgentCancellationRequested Cancelled;
 				if (!Cancellation.TryCheckpoint(Cancelled))
 				{
-					OutError.Code = Cancelled.Code;
-					OutError.SubjectId = Cancelled.Reason;
-					OutError.Detail = TEXT("SimpleAuthoring projection cancelled");
+					OutError = Cancelled;
 					return false;
 				}
-				FUeAgentOperationDeadlineExceeded Expired;
-				if (!Deadline.TryCheckpoint(TEXT("simple_authoring.projection"), Expired))
-				{
-					OutError.Code = Expired.Code;
-					OutError.SubjectId = Expired.Stage;
-					OutError.Detail = TEXT("SimpleAuthoring projection deadline expired");
-					return false;
-				}
-				FUeAgentResourceBudgetExceeded BudgetError;
+				FUeAgentResourceChargeError ChargeError;
 				if (!Resources.TryCharge(
 						EUeAgentResourceDimension::WorkUnits,
 						1,
 						TEXT("simple_authoring.projection"),
-						BudgetError))
+						ChargeError))
 				{
-					OutError.Code = BudgetError.Code;
-					OutError.SubjectId = BudgetError.Path;
-					OutError.Detail = TEXT("SimpleAuthoring projection budget exceeded");
-					OutError.ResourceDimension = BudgetError.Dimension;
-					OutError.ResourceLimit = BudgetError.Limit;
-					OutError.ResourceObserved = BudgetError.Observed;
+					OutError = ChargeError;
 					return false;
 				}
 				int64 Utf8Bytes = 512 + Artifacts.Num() * 512
@@ -518,12 +597,16 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 				: nullptr;
 		}
 
-		bool TryCreateRuntimeLocked(FProcessHost& Host, FString& OutError)
+		bool TryCreateRuntimeLocked(FProcessHost& Host, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutError.Reset();
 			if (!IsInGameThread())
 			{
-				OutError = TEXT("simple_authoring_game_thread_required");
+				OutError = HostFailure(TEXT("simple_authoring_game_thread_required"),
+					TEXT("The authoring runtime must be created on the game thread."), TEXT("runtime_factory"));
+				OutError.PropertyPath = TEXT("game_thread");
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 				return false;
 			}
 			UWorld* World = ResolveDesiredWorldLocked(Host);
@@ -536,7 +619,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			ResetRuntimeLocked(Host);
 			if (!World)
 			{
-				OutError = TEXT("simple_authoring_editor_world_unavailable");
+				OutError = HostFailure(TEXT("simple_authoring_editor_world_unavailable"),
+					TEXT("No valid authoring world override or editor world is available."), TEXT("runtime_factory"));
+				OutError.PropertyPath = TEXT("world");
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
 				return false;
 			}
 
@@ -550,7 +637,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 					TicketService,
 					TicketError))
 			{
-				OutError = TicketError.Code + TEXT(":") + TicketError.Detail;
+				OutError = TicketError;
 				return false;
 			}
 
@@ -561,7 +648,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 					Projector,
 					ProjectionError))
 			{
-				OutError = ProjectionError.Code + TEXT(":") + ProjectionError.Detail;
+				OutError = ProjectionError;
 				return false;
 			}
 
@@ -571,8 +658,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 				TEXT("editor-process:%u"), FPlatformProcess::GetCurrentProcessId());
 			Config.ServerSessionId = Host.ServerSessionId;
 			Config.RegistryEpoch = 1;
-			Config.TimeoutSeconds = 120.0;
-			Config.MaxFrameBytes = 4LL * 1024LL * 1024LL;
+
 			Config.JournalRoot = FPaths::ProjectSavedDir()
 				/ TEXT("UeAgentInterface/SimpleAuthoring");
 			FUeAgentSimpleAuthoringRuntimeError RuntimeError;
@@ -582,11 +668,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 					TicketService.ToSharedRef(),
 					Projector.ToSharedRef(),
 					Host.Runtime,
-					RuntimeError)
-				|| !Host.Runtime.IsValid())
+					RuntimeError))
 			{
 				ResetRuntimeLocked(Host);
-				OutError = RuntimeError.Code + TEXT(":") + RuntimeError.Detail;
+				OutError = RuntimeError;
 				return false;
 			}
 
@@ -595,9 +680,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			{
 				if (Host.Handlers.Contains(Handler->GetCommandId()))
 				{
+					OutError = HostFailure(TEXT("simple_authoring_handler_duplicate"),
+						TEXT("More than one authoring handler is registered for this command."), TEXT("runtime_factory"));
+					OutError.PropertyPath = TEXT("command_id");
+					OutError.ActualValue = MakeShared<FJsonValueString>(Handler->GetCommandId());
 					ResetRuntimeLocked(Host);
-					OutError = TEXT("simple_authoring_handler_duplicate:")
-						+ Handler->GetCommandId();
 					return false;
 				}
 				Host.Handlers.Add(Handler->GetCommandId(), Handler);
@@ -610,9 +697,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 					if (Kind.IsEmpty()
 						|| Host.CatalogSourcesByKind.Contains(Kind))
 					{
+						OutError = HostFailure(TEXT("simple_authoring_catalog_kind_duplicate"),
+							Kind.IsEmpty() ? TEXT("An authoring catalog source registered an empty kind.")
+								: TEXT("More than one authoring catalog source registered this kind."), TEXT("runtime_factory"));
+						OutError.PropertyPath = TEXT("catalog_kind");
+						OutError.ActualValue = MakeShared<FJsonValueString>(Kind);
 						ResetRuntimeLocked(Host);
-						OutError = TEXT("simple_authoring_catalog_kind_duplicate:")
-							+ Kind;
 						return false;
 					}
 					Host.CatalogSourcesByKind.Add(Kind, Source);
@@ -630,22 +720,13 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			OutService.Reset();
 			FProcessHost& Host = ProcessHost();
 			FScopeLock Lock(&Host.Mutex);
-			FString RuntimeError;
-			if (!TryCreateRuntimeLocked(Host, RuntimeError)
-				|| !Host.Runtime.IsValid())
+			UE::UAI::Contract::FDiagnostic RuntimeError;
+			if (!TryCreateRuntimeLocked(Host, RuntimeError))
 			{
-				OutError = AssetDurable::FAssetDurableError(
-					TEXT("simple_authoring_durable_runtime_unavailable"),
-					RuntimeError);
+				OutError = RuntimeError;
 				return false;
 			}
 			OutService = Host.Runtime->GetDurableService();
-			if (!OutService.IsValid())
-			{
-				OutError = AssetDurable::FAssetDurableError(
-					TEXT("simple_authoring_durable_service_unavailable"));
-				return false;
-			}
 			return true;
 		}
 	}
@@ -653,7 +734,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 	bool TryResolveHandler(
 		const FString& CommandId,
 		TSharedPtr<IUeAgentCommandHandler>& OutHandler,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandler.Reset();
 		OutError.Reset();
@@ -675,7 +756,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			Host.Handlers.Find(CommandId);
 		if (!Found)
 		{
-			OutError = TEXT("simple_authoring_handler_missing:") + CommandId;
+			OutError = HostFailure(TEXT("simple_authoring_handler_missing"),
+				TEXT("No authoring handler is registered for the requested command."), TEXT("runtime_factory"));
+			OutError.PropertyPath = TEXT("command_id");
+			OutError.ActualValue = MakeShared<FJsonValueString>(CommandId);
 			return false;
 		}
 		OutHandler = *Found;
@@ -685,7 +769,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 	bool TryResolveCatalogSource(
 		const FString& CatalogKind,
 		TSharedPtr<Discovery::IUeAgentCatalogSource>& OutSource,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutSource.Reset();
 		OutError.Reset();
@@ -699,8 +783,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::OperationHost
 			Host.CatalogSourcesByKind.Find(CatalogKind);
 		if (!Found)
 		{
-			OutError = TEXT("simple_authoring_catalog_kind_missing:")
-				+ CatalogKind;
+			OutError = HostFailure(TEXT("simple_authoring_catalog_kind_missing"),
+				TEXT("No authoring catalog source is registered for the requested kind."), TEXT("runtime_factory"));
+			OutError.PropertyPath = TEXT("catalog_kind");
+			OutError.ActualValue = MakeShared<FJsonValueString>(CatalogKind);
 			return false;
 		}
 		OutSource = *Found;

@@ -2,12 +2,15 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringPropertyValues.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticRegistry.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringTargetLocator.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringReflectionDescriptors.h"
 
 class FJsonObject;
 class FJsonValue;
@@ -18,6 +21,7 @@ class UStruct;
 
 namespace UeAgentAuthoringState
 {
+	using UE::UAI::Contract::FDiagnostic;
 	enum class ERegistrationResult : uint8
 	{
 		Registered,
@@ -33,9 +37,11 @@ namespace UeAgentAuthoringState
 
 	struct UEAGENTINTERFACE_API FReadLimits
 	{
-		int32 MaxContainerItems = 256;
-		int32 MaxStringChars = 4096;
 		TFunction<bool(const UScriptStruct* Struct, const FProperty* Field)> StructFieldFilter;
+		TFunction<bool(const FProperty*)> AuthorizeProperty;
+		bool bShowDefaultsOnly = false;
+		/** Native editor treats this surface as an instance even when a preview/CDO supplies values. */
+		bool bUseInstanceEditability = false;
 	};
 
 	struct UEAGENTINTERFACE_API FReadRequest
@@ -63,7 +69,7 @@ namespace UeAgentAuthoringState
 		TFunction<bool(
 			const FString& PropertyPath,
 			UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
-			FString& OutError)> BuildSnapshotIdentity;
+			FDiagnostic& OutError)> BuildSnapshotIdentity;
 	};
 
 	struct UEAGENTINTERFACE_API FStateValue
@@ -71,9 +77,13 @@ namespace UeAgentAuthoringState
 		UeAgentAuthoringIdentity::FCanonicalIdentity TargetIdentity;
 		UeAgentAuthoringTypeDescriptors::FDescriptor Type;
 		TSharedPtr<FJsonValue> Value;
+		TSharedPtr<FJsonValue> ValueDefinition;
 		TSharedPtr<UeAgentAuthoringPropertyValues::FPropertyValueStorage> NativeValue;
 		bool bAvailable = true;
-		bool bEditable = false;
+		// Unset inherits the registered semantic write capability. A native
+		// accessor can still explicitly report read-only for this instance.
+		TOptional<bool> bEditable;
+		bool bAuthoringVisible = true;
 		FString AvailabilityReason;
 		TMap<FString, FString> Constraints;
 		FString DisplayName;
@@ -89,7 +99,7 @@ namespace UeAgentAuthoringState
 	using FStateAccessor = TFunction<EReadOutcome(
 		const FReadRequest& Request,
 		FStateValue& OutValue,
-		FString& OutError)>;
+		FDiagnostic& OutError)>;
 
 	struct UEAGENTINTERFACE_API FStateAccessorDescriptor
 	{
@@ -115,7 +125,7 @@ namespace UeAgentAuthoringState
 			const FStateAccessorDescriptor& Descriptor,
 			FStateAccessor Accessor,
 			ERegistrationResult& OutResult,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool FindAccessor(const FString& AccessorId, FStateAccessorDescriptor& OutDescriptor) const;
 		bool CopyAccessor(const FString& AccessorId, FStateAccessor& OutAccessor) const;
 		TArray<FStateAccessorDescriptor> ListAccessors() const;
@@ -138,9 +148,19 @@ namespace UeAgentAuthoringState
 		UeAgentAuthoringIdentity::FCanonicalIdentity TargetIdentity;
 		UeAgentAuthoringTypeDescriptors::FDescriptor Type;
 		TSharedPtr<FJsonValue> Value;
+		TSharedPtr<FJsonValue> ValueDefinition;
+		// Native codec provenance for comparison only; not an editable schema or revision input.
+		TSharedPtr<FJsonValue> ComparisonValueDefinition;
 		TSharedPtr<const UeAgentAuthoringPropertyValues::FPropertyValueStorage> NativeValue;
+		// Preserve the reflection identity when a domain supplies a snapshot identity.
+		// Runtime provenance only, like NativeValue; never part of the public schema.
+		UeAgentAuthoringIdentity::FCanonicalIdentity NativeTargetIdentity;
+		// The scope that produced this native capture travels with it through copies.
+		// Runtime-only, like NativeValue; never serialized or inferred from visible fields.
+		TSharedPtr<const FReadLimits> NativeReadLimits;
 		bool bAvailable = true;
 		bool bEditable = false;
+		bool bAuthoringVisible = true;
 		FString AvailabilityReason;
 		TMap<FString, FString> Constraints;
 		FString DisplayName;
@@ -154,6 +174,7 @@ namespace UeAgentAuthoringState
 		FString Provenance;
 
 		bool IsValid() const;
+		FDiagnostic GetValidationDiagnostic() const;
 		TSharedRef<FJsonObject> ToJsonObject() const;
 		TSharedRef<FJsonObject> ToDiagnosticJsonObject() const;
 	};
@@ -169,6 +190,8 @@ namespace UeAgentAuthoringState
 			const FString& TargetCanonicalKey,
 			FStateEntry& OutEntry) const;
 		TArray<FStateEntry> CopyEntries() const;
+		/** Release native property storage while retaining the canonical snapshot and metadata. */
+		void ReleaseNativeValues();
 		TSharedRef<FJsonObject> ToJsonObject() const;
 
 	private:
@@ -179,8 +202,7 @@ namespace UeAgentAuthoringState
 	struct UEAGENTINTERFACE_API FCaptureResult
 	{
 		FString Status;
-		FString ErrorCode;
-		FString ErrorDetail;
+		FDiagnostic Diagnostic;
 		FString SemanticId;
 		FString AccessorId;
 		UeAgentAuthoringIdentity::FCanonicalIdentity TargetIdentity;
@@ -195,14 +217,16 @@ namespace UeAgentAuthoringState
 
 	UEAGENTINTERFACE_API bool RegisterBuiltInStateAccessors(
 		FStateAccessorRegistry& Registry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
+	// Snapshot reads can retain the logical owner while reading temporary object storage.
 	UEAGENTINTERFACE_API bool BuildPropertyReadRequest(
 		const UObject* RootObject,
 		const FString& PropertyPath,
 		const FString& SemanticId,
 		FReadRequest& OutRequest,
-		UeAgentAuthoringTargetLocator::FResolveResult& OutTargetResult);
+		UeAgentAuthoringTargetLocator::FResolveResult& OutTargetResult,
+		const FString& CanonicalRootOwnerPath = FString());
 
 	UEAGENTINTERFACE_API bool BuildStructPropertyReadRequest(
 		UStruct* RootStruct,
@@ -218,7 +242,7 @@ namespace UeAgentAuthoringState
 		const UObject* RootObject,
 		const FEditablePropertyReadOptions& Options,
 		TArray<FReadRequest>& OutRequests,
-		FString& OutError);
+		FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool AppendEditableStructPropertyReadRequests(
 		UStruct* RootStruct,
@@ -227,15 +251,19 @@ namespace UeAgentAuthoringState
 		const UObject* NotificationOwner,
 		const FEditablePropertyReadOptions& Options,
 		TArray<FReadRequest>& OutRequests,
-		FString& OutError);
+		FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API UObject* ResolveRequestRootObject(
 		const FReadRequest& Request,
-		FString& OutError);
+		FDiagnostic& OutError);
+
+	/** The accessor and typed codec are shared. Only authoring presentation may omit defaults. */
+	enum class ECaptureValueMode : uint8 { Authoring, Native };
 
 	UEAGENTINTERFACE_API bool CaptureSnapshot(
 		const TArray<FReadRequest>& Requests,
 		FCaptureResult& OutResult,
 		const UeAgentAuthoringSemanticRegistry::FRegistry* SemanticRegistry = nullptr,
-		const FStateAccessorRegistry* AccessorRegistry = nullptr);
+		const FStateAccessorRegistry* AccessorRegistry = nullptr,
+		ECaptureValueMode ValueMode = ECaptureValueMode::Authoring);
 }

@@ -15,31 +15,17 @@ namespace
 
 	FUeAgentResourceTracker MakeTracker()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 65536},
-			{EUeAgentResourceDimension::Items, 65536},
-			{EUeAgentResourceDimension::Files, 128},
-			{EUeAgentResourceDimension::ReferenceEdges, 131072},
-			{EUeAgentResourceDimension::WorkUnits, 524288},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 32 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	const TArray<FString>& ExpectedCapabilities()
 	{
 		static const TArray<FString> Values = {
 			TEXT("blueprint.asset.create"),
-			TEXT("blueprint.authoring.apply"),
 			TEXT("blueprint.component.events.discover"),
 			TEXT("umg.asset.create"),
-			TEXT("umg.authoring.apply"),
 			TEXT("umg.widget.events.discover"),
 			TEXT("material.asset.create"),
-			TEXT("material.graph.apply"),
-			TEXT("material.function.graph.apply"),
 			TEXT("material_instance.asset.create"),
 			TEXT("material_instance.parameters.apply"),
 			TEXT("niagara.emitter.asset.create"),
@@ -118,13 +104,15 @@ bool FUeAgentGraphCompoundBlueprintMaterialExactContractTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
-	const TArray<FGraphCompoundDomainRouteProfile>& Profiles =
-		GetBlueprintMaterialGraphRouteProfiles();
-	TestEqual(TEXT("exactly 19 routes are owned"), Profiles.Num(), 19);
+	const TArray<FGraphCompoundDomainRouteProfile>* ProfileArray = nullptr;
+	UE::UAI::Contract::FDiagnostic ProfileError;
+	if (!TryGetBlueprintMaterialGraphRouteProfiles(ProfileArray, ProfileError))
+	{
+		AddError(ProfileError.PublicMessage);
+		return false;
+	}
+	const TArray<FGraphCompoundDomainRouteProfile>& Profiles = *ProfileArray;
 
-	int32 QueryCount = 0;
-	int32 TypedOperationCount = 0;
-	int32 HjsonImportCount = 0;
 	TSet<FString> Capabilities;
 	TSet<FString> DescriptorIds;
 	for (const FGraphCompoundDomainRouteProfile& Profile : Profiles)
@@ -133,11 +121,9 @@ bool FUeAgentGraphCompoundBlueprintMaterialExactContractTest::RunTest(
 		DescriptorIds.Add(Profile.GetDescriptorId());
 		switch (Profile.GetRouteKind())
 		{
-		case EGraphCompoundDomainRouteKind::Query: ++QueryCount; break;
+		case EGraphCompoundDomainRouteKind::Query:
 		case EGraphCompoundDomainRouteKind::TypedOperation:
-			++TypedOperationCount; break;
-		case EGraphCompoundDomainRouteKind::HjsonImport:
-			++HjsonImportCount; break;
+			break;
 		default: AddError(TEXT("invalid route kind")); break;
 		}
 		TestTrue(
@@ -145,11 +131,10 @@ bool FUeAgentGraphCompoundBlueprintMaterialExactContractTest::RunTest(
 				*Profile.GetCapabilityId()),
 			Profile.GetExecutionContract().IsValid());
 	}
-	TestEqual(TEXT("two routes are C3Q"), QueryCount, 2);
-	TestEqual(TEXT("fifteen routes are typed C3O"), TypedOperationCount, 15);
-	TestEqual(TEXT("two routes compose the single C5 owner"), HjsonImportCount, 2);
-	TestEqual(TEXT("capabilities are unique"), Capabilities.Num(), 19);
-	TestEqual(TEXT("descriptor ids are unique"), DescriptorIds.Num(), 19);
+	TestEqual(TEXT("capabilities are unique"),
+		Capabilities.Num(), Profiles.Num());
+	TestEqual(TEXT("descriptor ids are unique"),
+		DescriptorIds.Num(), Profiles.Num());
 	for (const FString& Capability : ExpectedCapabilities())
 	{
 		TestTrue(*FString::Printf(TEXT("%s is present"), *Capability),
@@ -157,15 +142,13 @@ bool FUeAgentGraphCompoundBlueprintMaterialExactContractTest::RunTest(
 	}
 
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	TestTrue(
 		TEXT("the immutable exact descriptor registry compiles"),
 		TryCreateBlueprintMaterialGraphDescriptorRegistry(Registry, Error));
 	TestTrue(TEXT("registry is valid"), Registry.IsValid());
 	if (Registry.IsValid())
 	{
-		TestEqual(TEXT("registry owns 19 descriptors"),
-			Registry->GetDescriptors().Num(), 19);
 		TSet<FString> Hashes;
 		for (const FUeAgentOperationDescriptor& Descriptor
 			: Registry->GetDescriptors())
@@ -192,65 +175,9 @@ bool FUeAgentGraphCompoundBlueprintMaterialExactContractTest::RunTest(
 						Canonical, SchemaError));
 			}
 		}
-		TestEqual(TEXT("descriptor hashes are exact and unique"), Hashes.Num(), 19);
+		TestEqual(TEXT("descriptor hashes are exact and unique"),
+			Hashes.Num(), Registry->GetDescriptors().Num());
 	}
-	return !HasAnyErrors();
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentGraphCompoundBlueprintMaterialHjsonRouteTest,
-	"UeAgentInterface.Composition.GraphCompound.BlueprintMaterial.HjsonRoute",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentGraphCompoundBlueprintMaterialHjsonRouteTest::RunTest(
-	const FString& Parameters)
-{
-	(void)Parameters;
-	FUeAgentResourceTracker Resources = MakeTracker();
-	const FGraphCompoundDomainRouteProfile* Blueprint =
-		FindBlueprintMaterialGraphRouteProfile(TEXT("blueprint.authoring.apply"));
-	TestNotNull(TEXT("blueprint HJSON route exists"), Blueprint);
-	if (!Blueprint)
-	{
-		return false;
-	}
-
-	FGraphCompoundHjsonSourceRequest Request;
-	FGraphCompoundRouteError Error;
-	TestTrue(
-		TEXT("directory source decodes into a C5 request"),
-		TryDecodeGraphCompoundHjsonSourceRequest(
-			*Blueprint,
-			FUeAgentContractValue(TEXT(
-				"{\"composition_kind\":\"ue.blueprint.asset\","
-				"\"dry_run\":false,\"expected_revision\":\"revision:15\","
-				"\"intent\":\"update\",\"source_kind\":\"directory\","
-				"\"source_locator\":\"D:/workspace/BP\","
-				"\"target_ref\":\"/Game/UAI/BP\"}")),
-			Resources,
-			Request,
-			Error));
-	TestEqual(TEXT("source kind is retained"), Request.GetSourceKind(),
-		EGraphCompoundHjsonSourceKind::Directory);
-	TestEqual(TEXT("target is retained"), Request.GetTargetRef(),
-		FString(TEXT("/Game/UAI/BP")));
-
-	FGraphCompoundHjsonSourceRequest WrongComposition;
-	TestFalse(
-		TEXT("a Blueprint route cannot silently import a Niagara composition"),
-		TryDecodeGraphCompoundHjsonSourceRequest(
-			*Blueprint,
-			FUeAgentContractValue(TEXT(
-				"{\"composition_kind\":\"ue.niagara_system.asset\","
-				"\"dry_run\":false,\"expected_revision\":\"revision:15\","
-				"\"intent\":\"update\",\"source_kind\":\"inline\","
-				"\"inline_hjson\":\"schema: x\","
-				"\"target_ref\":\"/Game/UAI/NS\"}")),
-			Resources,
-			WrongComposition,
-			Error));
-	TestTrue(TEXT("composition mismatch fails with a stable error"),
-		Error.IsValid());
 	return !HasAnyErrors();
 }
 
@@ -264,67 +191,7 @@ bool FUeAgentGraphCompoundBlueprintMaterialTypedMappingTest::RunTest(
 {
 	(void)Parameters;
 	FUeAgentResourceTracker Resources = MakeTracker();
-	const FUeAgentCanonicalSnapshotRef Empty = MakeSnapshot(Resources, {});
-	const FGraphCompoundDomainRouteProfile* Material =
-		FindBlueprintMaterialGraphRouteProfile(TEXT("material.graph.apply"));
-	TestNotNull(TEXT("material graph route exists"), Material);
-	if (!Material)
-	{
-		return false;
-	}
-
-	FGraphCompoundCanonicalPayload Payload(TEXT("invalid"), {});
 	FGraphCompoundRouteError Error;
-	const FUeAgentContractValue Input(TEXT(
-		"{\"edits\":[{\"depends_on\":[],\"element_kind\":\"property\","
-		"\"identity\":\"property:roughness\",\"intent\":\"create\","
-		"\"value\":{\"nested\":[1,true,\"x\"]}}],"
-		"\"target_ref\":\"/Game/UAI/M_GC015\"}"));
-	TestTrue(
-		TEXT("typed graph fields decode to canonical edits"),
-		TryDecodeGraphCompoundTypedOperation(
-			*Material, Input, Empty, Resources, Payload, Error));
-	TestEqual(TEXT("one identity edit is produced"), Payload.GetEdits().Num(), 1);
-	if (Payload.GetEdits().Num() == 1)
-	{
-		TestEqual(TEXT("identity is retained"),
-			Payload.GetEdits()[0].GetIdentity().GetSemanticId(),
-			FString(TEXT("property:roughness")));
-		TestEqual(TEXT("nested value remains typed canonical data"),
-			Payload.GetEdits()[0].GetProposedAfter()->GetKind(),
-			EUeAgentValueKind::Object);
-	}
-
-	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-	FString RegistryError;
-	TestTrue(TEXT("registry builds for draft mapping"),
-		TryCreateBlueprintMaterialGraphDescriptorRegistry(Registry, RegistryError));
-	if (Registry.IsValid())
-	{
-		const FUeAgentOperationDescriptor* Descriptor =
-			Registry->FindByDescriptorId(Material->GetDescriptorId());
-		TestNotNull(TEXT("material descriptor exists"), Descriptor);
-		if (Descriptor)
-		{
-			TOptional<FChangeSetDraft> Draft;
-			TestTrue(
-				TEXT("typed route builds the shared per-identity C6 draft"),
-				TryBuildGraphCompoundTypedOperationDraft(
-					*Material, Descriptor->GetIdentity(), Input, Empty,
-					TEXT("request:gc015"), TEXT("idempotency:gc015"),
-					Resources, Draft, Error));
-			TestTrue(TEXT("draft exists"), Draft.IsSet());
-			if (Draft.IsSet())
-			{
-				TestEqual(TEXT("one edit becomes one change"),
-					Draft->GetChanges().Num(), 1);
-				TestEqual(TEXT("whole public payload is not stored as the value"),
-					Draft->GetChanges()[0].GetProposedAfter()->GetKind(),
-					EUeAgentValueKind::Object);
-			}
-		}
-	}
-
 	FGraphCompoundEventQueryRequest Query;
 	const FGraphCompoundDomainRouteProfile* QueryProfile =
 		FindBlueprintMaterialGraphRouteProfile(
@@ -339,7 +206,7 @@ bool FUeAgentGraphCompoundBlueprintMaterialTypedMappingTest::RunTest(
 					"{\"asset_path\":\"/Game/UAI/BP\"," 
 					"\"compile_before_query\":false,"
 					"\"component_name\":\"Mesh\","
-					"\"include_hidden\":true,\"limit\":25,"
+					"\"include_hidden\":true,"
 					"\"only_unbound\":true,\"query\":\"hit\"}")),
 				Resources, Query, Error));
 		TestEqual(TEXT("asset path is the exact target"),
@@ -348,7 +215,6 @@ bool FUeAgentGraphCompoundBlueprintMaterialTypedMappingTest::RunTest(
 			Query.GetOwnerItemRef(), FString(TEXT("component:Mesh")));
 		TestEqual(TEXT("query filter is preserved"),
 			Query.GetQuery(), FString(TEXT("hit")));
-		TestEqual(TEXT("limit is preserved"), Query.GetLimit(), 25);
 		TestTrue(TEXT("only-unbound filter is preserved"),
 			Query.IsOnlyUnbound());
 		TestTrue(TEXT("hidden-event filter is preserved"),
@@ -362,6 +228,104 @@ bool FUeAgentGraphCompoundBlueprintMaterialTypedMappingTest::RunTest(
 			QueryProfile->GetExecutionContract().RequiresNativeMutation());
 	}
 	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentGraphCompoundUmgEventNamesOnlySchemaTest,
+	"UeAgentInterface.Composition.GraphCompound.UMG.EventNamesOnlySchema",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentGraphCompoundUmgEventNamesOnlySchemaTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+	UE::UAI::Contract::FDiagnostic Error;
+	if (!TestTrue(
+			TEXT("the UMG event descriptor registry compiles"),
+			TryCreateBlueprintMaterialGraphDescriptorRegistry(Registry, Error))
+		|| !Registry.IsValid())
+	{
+		AddError(Error.PublicMessage);
+		return false;
+	}
+	const FGraphCompoundDomainRouteProfile* Profile =
+		FindBlueprintMaterialGraphRouteProfile(
+			TEXT("umg.widget.events.discover"));
+	TestNotNull(TEXT("the UMG event query route exists"), Profile);
+	if (!Profile)
+	{
+		return false;
+	}
+	for (const FUeAgentOperationDescriptor& Descriptor
+		: Registry->GetDescriptors())
+	{
+		if (Descriptor.GetIdentity().GetDescriptorId()
+			!= Profile->GetDescriptorId())
+		{
+			continue;
+		}
+		const FString& Schema = Descriptor.GetResultSchema().GetJsonValue();
+		TestTrue(TEXT("UMG event result is names-only"),
+			Schema.Contains(TEXT("\"names\""))
+				&& !Schema.Contains(TEXT("\"event_ref\""))
+				&& !Schema.Contains(TEXT("\"signature_ref\""))
+				&& !Schema.Contains(TEXT("\"target_ref\"")));
+		TestFalse(TEXT("UMG event result has no arbitrary name count ceiling"),
+			Schema.Contains(TEXT("\"maxItems\"")));
+		return !HasAnyErrors();
+	}
+	AddError(TEXT("UMG event descriptor was not found"));
+	return false;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentGraphCompoundBlueprintEventNamesOnlySchemaTest,
+	"UeAgentInterface.Composition.GraphCompound.Blueprint.EventNamesOnlySchema",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentGraphCompoundBlueprintEventNamesOnlySchemaTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+	UE::UAI::Contract::FDiagnostic Error;
+	if (!TestTrue(
+			TEXT("the Blueprint event descriptor registry compiles"),
+			TryCreateBlueprintMaterialGraphDescriptorRegistry(Registry, Error))
+		|| !Registry.IsValid())
+	{
+		AddError(Error.PublicMessage);
+		return false;
+	}
+	const FGraphCompoundDomainRouteProfile* Profile =
+		FindBlueprintMaterialGraphRouteProfile(
+			TEXT("blueprint.component.events.discover"));
+	TestNotNull(TEXT("the Blueprint event query route exists"), Profile);
+	if (!Profile)
+	{
+		return false;
+	}
+	for (const FUeAgentOperationDescriptor& Descriptor
+		: Registry->GetDescriptors())
+	{
+		if (Descriptor.GetIdentity().GetDescriptorId()
+			!= Profile->GetDescriptorId())
+		{
+			continue;
+		}
+		const FString& Schema = Descriptor.GetResultSchema().GetJsonValue();
+		TestTrue(TEXT("Blueprint event result is names-only"),
+			Schema.Contains(TEXT("\"names\""))
+				&& !Schema.Contains(TEXT("\"event_ref\""))
+				&& !Schema.Contains(TEXT("\"signature_ref\""))
+				&& !Schema.Contains(TEXT("\"asset_path\"")));
+		TestFalse(TEXT("Blueprint event result has no arbitrary name count ceiling"),
+			Schema.Contains(TEXT("\"maxItems\"")));
+		return !HasAnyErrors();
+	}
+	AddError(TEXT("Blueprint event descriptor was not found"));
+	return false;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -489,8 +453,6 @@ bool FUeAgentGraphCompoundBlueprintMaterialAllTypedRoutesTest::RunTest(
 		{TEXT("blueprint.asset.create"), TEXT("{\"asset_name\":\"BP_GC015\",\"package_path\":\"/Game/UAI\",\"parent_class_ref\":\"/Script/Engine.Actor\"}")},
 		{TEXT("umg.asset.create"), TEXT("{\"asset_name\":\"WBP_GC015\",\"package_path\":\"/Game/UAI\"}")},
 		{TEXT("material.asset.create"), TEXT("{\"asset_name\":\"M_GC015\",\"package_path\":\"/Game/UAI\"}")},
-		{TEXT("material.graph.apply"), TEXT("{\"edits\":[{\"depends_on\":[],\"element_kind\":\"item\",\"identity\":\"expression:new\",\"intent\":\"create\",\"value\":{\"class_ref\":\"Constant3Vector\"}}],\"target_ref\":\"/Game/UAI/M_GC015\"}")},
-		{TEXT("material.function.graph.apply"), TEXT("{\"edits\":[{\"depends_on\":[],\"element_kind\":\"item\",\"identity\":\"expression:new\",\"intent\":\"create\",\"value\":{\"class_ref\":\"FunctionInput\"}}],\"target_ref\":\"/Game/UAI/MF_GC015\"}")},
 		{TEXT("material_instance.asset.create"), TEXT("{\"asset_name\":\"MI_GC015\",\"package_path\":\"/Game/UAI\",\"parent_material_ref\":\"/Game/UAI/M_Parent\"}")},
 		{TEXT("material_instance.parameters.apply"), TEXT("{\"parameters\":[{\"association\":\"global\",\"index\":-1,\"name\":\"Tint\",\"type\":\"vector\",\"value\":[1,0.5,0,1]}],\"target_ref\":\"/Game/UAI/MI_GC015\"}")},
 		{TEXT("niagara.emitter.asset.create"), TEXT("{\"asset_name\":\"NE_GC015\",\"package_path\":\"/Game/UAI\",\"source_ref\":\"/Niagara/DefaultEmitter\"}")},
@@ -502,10 +464,25 @@ bool FUeAgentGraphCompoundBlueprintMaterialAllTypedRoutesTest::RunTest(
 		{TEXT("niagara.renderer_event_parameter.apply"), TEXT("{\"emitter_handle_id\":\"11111111-1111-1111-1111-111111111111\",\"parameter_name\":\"position\",\"renderer_ref\":\"renderer:sprite\",\"target_ref\":\"/Game/UAI/NS_GC015\",\"type_ref\":\"Position\",\"value\":\"Particles.Position\"}")},
 		{TEXT("niagara.compile_refresh_settle"), TEXT("{\"target_ref\":\"/Game/UAI/NS_GC015\"}")},
 	};
-	TestEqual(TEXT("all fifteen typed routes have owned examples"), Inputs.Num(), 15);
+	const TArray<FGraphCompoundDomainRouteProfile>* ProfileArray = nullptr;
+	UE::UAI::Contract::FDiagnostic ProfileError;
+	if (!TryGetBlueprintMaterialGraphRouteProfiles(ProfileArray, ProfileError))
+	{
+		AddError(ProfileError.PublicMessage);
+		return false;
+	}
+	for (const FGraphCompoundDomainRouteProfile& Profile : *ProfileArray)
+	{
+		if (Profile.GetRouteKind()
+			== EGraphCompoundDomainRouteKind::TypedOperation)
+		{
+			TestTrue(TEXT("every typed route has an owned example"),
+				Inputs.Contains(Profile.GetCapabilityId()));
+		}
+	}
 
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-	FString RegistryError;
+	UE::UAI::Contract::FDiagnostic RegistryError;
 	TestTrue(TEXT("registry builds"),
 		TryCreateBlueprintMaterialGraphDescriptorRegistry(Registry, RegistryError));
 	if (!Registry.IsValid())

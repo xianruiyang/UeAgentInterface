@@ -53,41 +53,14 @@ namespace UE::UAI::Module::CommandRegistration::AnimationBlueprint
 				Field(TEXT("class_settings"), TEXT("object"), false,
 					TEXT("Optional T16 class settings used by the same UAnimBlueprintFactory scratch context as creation.")),
 				Field(TEXT("query"), TEXT("string"), false,
-					TEXT("Optional bounded text filter over native menu actions.")),
-				Field(TEXT("id"), TEXT("string"), false,
-					TEXT("Optional exact compact candidate id returned by this context.")),
-				Field(TEXT("limit"), TEXT("integer"), false,
-					TEXT("Optional page size from 1 through 64; defaults to 64.")),
-				Field(TEXT("cursor"), TEXT("integer"), false,
-					TEXT("Optional non-negative result offset; defaults to zero.")),
+					TEXT("Optional text filter over native menu actions.")),
+				Field(TEXT("describe"), TEXT("object"), false,
+					TEXT("Optional {name, fields?} in the same future target, surface and class_settings. Returns creation.supported/reason; editable fields require a created graph node.")),
 			};
 			Result.ResultFields = {
-				Field(TEXT("command_id"), TEXT("string"), true,
-					TEXT("The unchanged exact public command identity.")),
-				Field(TEXT("read_only"), TEXT("boolean"), true,
-					TEXT("Always true.")),
-				Field(TEXT("target"), TEXT("string"), true,
-					TEXT("The unchanged future AnimBlueprint identity.")),
-				Field(TEXT("target_revision"), TEXT("string"), true,
-					TEXT("Always missing for this create-only T16 context.")),
-				Field(TEXT("surface"), TEXT("string"), true,
-					TEXT("The exact native surface used for discovery.")),
-				Field(TEXT("candidates"), TEXT("array"), true,
-					TEXT("Compact candidates projected from the native surface owner.")),
-				Field(TEXT("total_matches"), TEXT("integer"), true,
-					TEXT("Total candidates matching this query.")),
-				Field(TEXT("next_cursor"), TEXT("integer"), true,
-					TEXT("Next result offset, or -1 when complete.")),
-				Field(TEXT("complete"), TEXT("boolean"), true,
-					TEXT("True only on the final pagination page.")),
-				Field(TEXT("has_more"), TEXT("boolean"), true,
-					TEXT("True only while another page remains.")),
-				Field(TEXT("coverage_scope"), TEXT("string"), true,
-					TEXT("The exact native action catalog covered by this surface.")),
-				Field(TEXT("coverage_complete"), TEXT("boolean"), true,
-					TEXT("Whether search covers the complete claimed native surface.")),
-				Field(TEXT("creation_coverage_complete"), TEXT("boolean"), true,
-					TEXT("Whether every returned native action is writable by T16 HJSON.")),
+				Field(TEXT("names"), TEXT("array"), true, TEXT("Distinct readable names from the selected animation surface.")),
+				Field(TEXT("scope"), TEXT("object"), true, TEXT("Public future target, surface and supplied class_settings used for discovery; response metadata, not a selector.")),
+				Field(TEXT("description"), TEXT("object"), false, TEXT("Selected action's current HJSON creation support, only when describe is requested.")),
 			};
 			Result.Errors = {
 				{TEXT("animation_blueprint_candidate_query_authority_required"),
@@ -98,17 +71,15 @@ namespace UE::UAI::Module::CommandRegistration::AnimationBlueprint
 					TEXT("T16 is create-only and the requested target already exists.")},
 				{TEXT("animation_blueprint_candidate_surface_invalid"),
 					TEXT("The surface is not animation_graph or state_machine_graph.")},
-				{TEXT("animation_blueprint_candidate_page_invalid"),
-					TEXT("The requested page is outside the bounded contract.")},
 				{TEXT("animation_blueprint_candidate_not_found"),
-					TEXT("The name/id selector no longer resolves in the recreated context.")},
+					TEXT("The readable name no longer resolves in the recreated context.")},
 				{TEXT("animation_blueprint_candidate_ambiguous"),
-					TEXT("The name resolves more than one action; use exact id.")},
+					TEXT("The readable name resolves more than one action; refine the semantic context.")},
 				{TEXT("animation_blueprint_candidate_not_writable"),
 					TEXT("The native action is searchable but outside the current HJSON write scope.")},
 			};
 			Result.Purpose.Summary = TEXT(
-				"Search the exact native AnimGraph or StateMachine creation surface in a same-factory transient T16 context, then expose stable compact ids for HJSON creation.");
+				"Search the exact native AnimGraph or StateMachine creation surface in a same-factory transient T16 context, then expose stable readable names for HJSON creation.");
 			Result.Purpose.Target = TEXT(
 				"One future create-only AnimBlueprint target and one exact native surface.");
 			Result.Purpose.Preconditions = {
@@ -117,9 +88,9 @@ namespace UE::UAI::Module::CommandRegistration::AnimationBlueprint
 				TEXT("Run in the Editor on the UE game thread with uai:query."),
 			};
 			Result.Purpose.ParameterGuidance = TEXT(
-				"Put only candidate.name or candidate.id in the state_machine or state HJSON item; keep instance name, graph, position and relations outside candidate. If both selectors are present they must resolve the same native action.");
+				"Use a returned readable name for creation; keep surface, instance name, graph, position and relations outside candidate.");
 			Result.Purpose.ResultGuidance = TEXT(
-				"Use animation_graph for the parent StateMachine node and state_machine_graph for child State actions; inspect supported/write_support, and treat transitions as graph relations rather than menu candidates.");
+				"Default discovery contains names and one scope, including search-only actions. For an unfamiliar action request describe={name: returned_name} in the same context for creation.supported/reason. Editable fields resolve after creation. Re-query when target, surface or class_settings changes; scope is response metadata.");
 			Result.Purpose.FailureGuidance = TEXT(
 				"Changed factory context, stale ids, ambiguity, existing targets, unsupported native actions and invalid pages fail before the first persistent write.");
 			Result.Purpose.SideEffectGuidance = TEXT(
@@ -128,7 +99,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationBlueprint
 				"client.animation.state_machine_candidates(target, surface='animation_graph', query='State Machine')");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
-				TEXT("query.command.detail"),
+				TEXT("query.command.usage"),
 				TEXT("content_graph.import_workspace"),
 			};
 			Result.Purpose.Keywords = {
@@ -167,7 +138,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationBlueprint
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				(void)Registry;
 				return TryCreateAnimationBlueprintCandidateCommandHandlers(
@@ -181,7 +152,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationBlueprint
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::
 				FDomainCapabilityContribution>& OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>
 				Provider;
@@ -191,7 +162,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationBlueprint
 						Provider, WorkspaceError)
 				|| !Provider.IsValid())
 			{
-				OutError = WorkspaceError.GetCode();
+				OutError = WorkspaceError.GetDiagnostic();
 				return false;
 			}
 			DomainCapability::FDomainCapabilityDeclaration Declaration =
@@ -220,10 +191,6 @@ namespace UE::UAI::Module::CommandRegistration::AnimationBlueprint
 				TEXT("uai.init.animation_blueprint.transition/1"),
 				TEXT("uai.init.animation_blueprint.class_settings/1"),
 			};
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId =
-				TEXT("T16-ANIMATION-BLUEPRINT");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
@@ -245,7 +212,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationBlueprint
 
 	bool TryCreateProductionAnimationBlueprintCandidateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TSharedPtr<IUeAgentAnimationBlueprintCandidateCommandService> Service;
 		if (!TryCreateProductionAnimationBlueprintCandidateCommandService(

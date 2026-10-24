@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "NiagaraTypes.h"
 #include "UObject/StrongObjectPtr.h"
@@ -22,6 +24,8 @@ namespace UeAgentNiagaraUserParameterAuthoring
 		bool bTypeExplicit = false;
 		bool bHasValue = false;
 		bool bRemove = false;
+		TSharedPtr<const FJsonObject> SourceDocument;
+		TSharedPtr<const TMap<FString, UE::UAI::Contract::FSourceLocation>> SourceLocations;
 	};
 
 	struct FSnapshotEntry
@@ -41,23 +45,23 @@ namespace UeAgentNiagaraUserParameterAuthoring
 		UNiagaraSystem* System,
 		const TSharedPtr<const FJsonObject>& ProviderExtension,
 		TArray<FPatch>& OutPatches,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool ApplyPatches(
 		UNiagaraSystem& System,
 		const TArray<FPatch>& Patches,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool ApplyValuePatchesToStore(
 		const UNiagaraSystem& System,
 		FNiagaraParameterStore& Store,
 		const TArray<FPatch>& Patches,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API void CaptureSnapshot(
 		const UNiagaraSystem& System,
 		TArray<FSnapshotEntry>& OutSnapshot);
 	UEAGENTINTERFACE_API bool RestoreSnapshot(
 		UNiagaraSystem& System,
 		const TArray<FSnapshotEntry>& Snapshot,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API void Enumerate(
 		const UNiagaraSystem& System,
 		TArray<FNiagaraVariable>& OutVariables);

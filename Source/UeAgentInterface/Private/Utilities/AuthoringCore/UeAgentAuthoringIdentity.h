@@ -3,11 +3,13 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 class FJsonObject;
 
 namespace UeAgentAuthoringIdentity
 {
+	using UE::UAI::Contract::FDiagnostic;
 	enum class ERegistrationResult : uint8
 	{
 		Registered,
@@ -55,6 +57,7 @@ namespace UeAgentAuthoringIdentity
 		TMap<FString, FString> Selectors;
 
 		bool IsValid() const;
+		FDiagnostic GetValidationDiagnostic() const;
 		FString GetSelector(const FString& Name) const;
 		TSharedRef<FJsonObject> ToJsonObject() const;
 	};
@@ -71,7 +74,7 @@ namespace UeAgentAuthoringIdentity
 		bool RegisterModel(
 			const FModelDescriptor& Descriptor,
 			ERegistrationResult& OutResult,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool FindModel(const FString& ModelId, FModelDescriptor& OutDescriptor) const;
 		TArray<FModelDescriptor> ListModels() const;
 		int32 GetModelCount() const;
@@ -81,20 +84,20 @@ namespace UeAgentAuthoringIdentity
 		TMap<FString, FModelDescriptor> Models;
 	};
 
-	UEAGENTINTERFACE_API bool RegisterBuiltInModels(FRegistry& Registry, FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterBuiltInModels(FRegistry& Registry, UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool BuildCanonicalIdentity(
 		const FString& ModelId,
 		const FString& TargetKind,
 		const TMap<FString, FString>& Selectors,
 		FCanonicalIdentity& OutIdentity,
-		FString& OutError,
+		FDiagnostic& OutError,
 		const FRegistry* Registry = nullptr);
 
 	UEAGENTINTERFACE_API bool ParseCanonicalKey(
 		const FString& CanonicalKey,
 		FCanonicalIdentity& OutIdentity,
-		FString& OutError,
+		FDiagnostic& OutError,
 		const FRegistry* Registry = nullptr);
 
 	UEAGENTINTERFACE_API void WriteSelectorsFlat(

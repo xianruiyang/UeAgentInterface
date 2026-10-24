@@ -33,15 +33,17 @@ namespace UE::UAI::Module::CommandRegistration::PcgCommands
 			const FString& Id,
 			const FUeAgentCommandContractRegistry& Legacy,
 			FUeAgentCommandDeclaration& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(Id);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("pcg_command_contract_missing:") + Id;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("pcg_command_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_command_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
-			const bool bQuery = DomainAdapters::PcgCommands::IsQuery(Id);
 			FUeAgentCommandDeclaration Result;
 			Result.CommandId = Id;
 			Result.PythonNamespace = TEXT("t52_pcg_command_migration");
@@ -49,12 +51,8 @@ namespace UE::UAI::Module::CommandRegistration::PcgCommands
 			Result.ContractVersion = 1;
 			Result.PublicOwner = Owner;
 			Result.Availability = EUeAgentCommandAvailability::Enabled;
-			Result.SideEffect = bQuery
-				? EUeAgentCommandSideEffect::None
-				: EUeAgentCommandSideEffect::AssetState;
-			Result.StateLayers = bQuery
-				? TArray<FString>{TEXT("world_runtime_state")}
-				: TArray<FString>{TEXT("asset_persisted_state")};
+			Result.SideEffect = EUeAgentCommandSideEffect::AssetState;
+			Result.StateLayers = {TEXT("asset_persisted_state")};
 			for (const FUeAgentCommandParameter& Parameter
 				: Contract->GetParameters())
 			{
@@ -64,44 +62,42 @@ namespace UE::UAI::Module::CommandRegistration::PcgCommands
 					Parameter.IsRequired(),
 					Parameter.IsNullable(),
 					TEXT("Exact PCG mechanics parameter."),
+					Parameter.GetSchemaJson(),
 				});
 			}
 			Result.ResultFields = {{
 				TEXT("result"), TEXT("object"), true, false,
 				TEXT("Native PCG result with revision or spatial readback evidence."),
 			}};
+			if (Id.EndsWith(TEXT(".asset.create"))
+				|| Id == TEXT("pcg.data_asset.create_from_level"))
+			{
+				Result.ModelResultFields = {{TEXT("target_ref"), {TEXT("target_ref")}}};
+			}
 			Result.Errors = {
 				{TEXT("pcg_command_authority_required"),
-					TEXT("The caller lacks the Query/Operation authority.")},
+					TEXT("The caller lacks the Operation authority.")},
 				{TEXT("graph_compound_input_invalid"),
 					TEXT("The exact graph schema rejects the request before mutation.")},
-				{TEXT("timeline_spatial_request_invalid"),
-					TEXT("The exact PCG spatial query schema rejects the request.")},
 				{TEXT("operation_state_unknown"),
 					TEXT("A post-mutation failure requires reconciliation.")},
 			};
 			Result.Purpose.Summary = TEXT("Execute ") + Id
-				+ TEXT(" through the common Query/Operation service and exact PCG mechanics.");
-			Result.Purpose.Target = bQuery
-				? TEXT("One exact PCG generation or partition observation target.")
-				: TEXT("One exact PCG component, graph, instance, parameter, or data asset target.");
+				+ TEXT(" through the common Operation service and exact PCG mechanics.");
+			Result.Purpose.Target = TEXT("One exact PCG component, graph, instance, parameter, or data asset target.");
 			Result.Purpose.Preconditions = {
 				TEXT("Resolve the exact target and expected revision before execution."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Use only query.command.detail fields and explicit target identities.");
-			Result.Purpose.ResultGuidance = bQuery
-				? TEXT("Use the independent native spatial observation returned by the Query service.")
-				: TEXT("Use native terminal state and independent persisted PCG readback.");
+				TEXT("Use only query.command.usage fields and explicit target identities.");
+			Result.Purpose.ResultGuidance = TEXT("Use native terminal state and independent persisted PCG readback.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Prewrite failures leave no residue; unknown state requires reconciliation.");
-			Result.Purpose.SideEffectGuidance = bQuery
-				? TEXT("Reads only a bounded PCG spatial observation.")
-				: TEXT("Mutates only the exact declared PCG target through native UE mechanics.");
+			Result.Purpose.SideEffectGuidance = TEXT("Mutates only the exact declared PCG target through native UE mechanics.");
 			Result.Purpose.MinimumExample = Result.PythonFunction
 				+ TEXT("(client, params)");
 			Result.Purpose.RelatedFlows = {
-				TEXT("query.command.detail"), TEXT("PCG asset or spatial readback"),
+				TEXT("query.command.usage"), TEXT("PCG asset or spatial readback"),
 			};
 			Result.Purpose.Keywords = {
 				TEXT("pcg"), TEXT("procedural"), TEXT("graph"), TEXT("operation"),
@@ -133,7 +129,7 @@ namespace UE::UAI::Module::CommandRegistration::PcgCommands
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::PcgCommands::TryCreateHandlers(Out, OutError);
 			}
@@ -147,43 +143,37 @@ namespace UE::UAI::Module::CommandRegistration::PcgCommands
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
 		TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>
 			GraphProfiles;
-		TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>
-			TimelineProfiles;
 		if (!DomainAdapters::PcgCommands::TryGetGraphProfiles(
-				GraphProfiles, OutError)
-			|| !DomainAdapters::PcgCommands::TryGetTimelineProfiles(
-				TimelineProfiles, OutError))
+				GraphProfiles, OutError))
 		{
 			return false;
 		}
+		const TArray<FString>& PublicCommandIds =
+			DomainAdapters::PcgCommands::GetPublicCommandIds();
+		GraphProfiles.RemoveAll(
+			[&PublicCommandIds](const auto& Profile)
+			{
+				return !PublicCommandIds.Contains(Profile.GetCommandId());
+			});
 		TSharedPtr<const FUeAgentCommandContractRegistry> GraphLegacy;
-		TSharedPtr<const FUeAgentCommandContractRegistry> TimelineLegacy;
 		if (!Composition::GraphCompound::
 				TryCreateGraphCompoundProductionCommandContractRegistry(
 					GraphProfiles, GraphLegacy, OutError)
-			|| !GraphLegacy.IsValid()
-			|| !Composition::TimelineSpatial::
-				TryCreateTimelineSpatialProductionCommandContractRegistry(
-					TimelineLegacy, OutError)
-			|| !TimelineLegacy.IsValid())
+			|| !GraphLegacy.IsValid())
 		{
 			return false;
 		}
 		TArray<FUeAgentCommandDeclaration> Declarations;
-		for (const FString& Id : DomainAdapters::PcgCommands::GetCommandIds())
+		for (const FString& Id : PublicCommandIds)
 		{
 			FUeAgentCommandDeclaration Declaration;
-			const FUeAgentCommandContractRegistry& Legacy =
-				DomainAdapters::PcgCommands::IsQuery(Id)
-					? *TimelineLegacy
-					: *GraphLegacy;
-			if (!TryDeclaration(Id, Legacy, Declaration, OutError))
+			if (!TryDeclaration(Id, *GraphLegacy, Declaration, OutError))
 			{
 				return false;
 			}

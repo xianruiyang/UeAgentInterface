@@ -1,6 +1,7 @@
 #include "Core/ExecutionMutation/UeAgentExecutionMutation.h"
 
 #include "Async/Async.h"
+#include "Dom/JsonValue.h"
 #include "Misc/ScopeLock.h"
 
 namespace UE::UAI::ExecutionMutation
@@ -11,7 +12,7 @@ namespace UE::UAI::ExecutionMutation
 		using ContextResource::EUeAgentResourceDimension;
 		using ContextResource::FUeAgentCancellationRequested;
 		using ContextResource::FUeAgentOperationDeadlineExceeded;
-		using ContextResource::FUeAgentResourceBudgetExceeded;
+		using ContextResource::FUeAgentResourceChargeError;
 
 		static FString NormalizeText(FString Value)
 		{
@@ -42,13 +43,26 @@ namespace UE::UAI::ExecutionMutation
 			return Values;
 		}
 
-		static FString ErrorCodeOr(
-			const FExecutionMutationError& Error,
-			const TCHAR* Fallback)
+		static FExecutionMutationError ExecutionFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Path = FString())
 		{
-			return Error.IsPresent()
-				? Error.GetCode()
-				: FString(Fallback);
+			FExecutionMutationError Error = FExecutionMutationError::Failure(Code, Reason, TEXT("execution"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Path;
+			return Error;
+		}
+
+		static FExecutionMutationError DiagnosticOr(
+			const FExecutionMutationError& Error, const TCHAR* Fallback, const FString& Reason)
+		{
+			return Error.IsEmpty() ? ExecutionFailure(Fallback, Reason) : Error;
+		}
+
+		static const FExecutionMutationError& ValidationOrEmpty(
+			const TSharedPtr<const FExecutionMutationError>& Diagnostic)
+		{
+			static const FExecutionMutationError Empty;
+			return Diagnostic.IsValid() ? *Diagnostic : Empty;
 		}
 
 		static bool ContainsAll(
@@ -65,18 +79,18 @@ namespace UE::UAI::ExecutionMutation
 			return true;
 		}
 
-		static bool IsSubset(
+		static int32 FindFirstUnlockedTarget(
 			const TArray<FString>& Candidate,
 			const TArray<FString>& Allowed)
 		{
-			for (const FString& Value : Candidate)
+			for (int32 Index = 0; Index < Candidate.Num(); ++Index)
 			{
-				if (!Allowed.Contains(Value))
+				if (!Allowed.Contains(Candidate[Index]))
 				{
-					return false;
+					return Index;
 				}
 			}
-			return true;
+			return INDEX_NONE;
 		}
 
 		static TPair<EExecutionStatus, bool> MapDurableStatus(
@@ -109,28 +123,13 @@ namespace UE::UAI::ExecutionMutation
 		}
 	}
 
-	FExecutionMutationError::FExecutionMutationError(
-		FString InCode,
-		FString InDetail)
-		: Code(NormalizeText(MoveTemp(InCode)))
-		, Detail(NormalizeText(MoveTemp(InDetail)))
-	{
-	}
 
-	const FString& FExecutionMutationError::GetCode() const
-	{
-		return Code;
-	}
 
-	const FString& FExecutionMutationError::GetDetail() const
-	{
-		return Detail;
-	}
 
-	bool FExecutionMutationError::IsPresent() const
-	{
-		return !Code.IsEmpty();
-	}
+
+
+
+
 
 	FString LexToString(const EExecutionPhase Value)
 	{
@@ -213,6 +212,11 @@ namespace UE::UAI::ExecutionMutation
 		}
 	}
 
+	FLockFenceLease::FLockFenceLease()
+		: FLockFenceLease(FString(), {}, -1)
+	{
+	}
+
 	FLockFenceLease::FLockFenceLease(
 		FString InOwnerId,
 		TArray<FString> InLockKeys,
@@ -221,9 +225,17 @@ namespace UE::UAI::ExecutionMutation
 		, LockKeys(NormalizeStrings(MoveTemp(InLockKeys)))
 		, FencingToken(InFencingToken)
 	{
-		bValid = !OwnerId.IsEmpty()
-			&& LockKeys.Num() > 0
-			&& FencingToken >= 0;
+		FExecutionMutationError Error;
+		if (OwnerId.IsEmpty())
+			Error = ExecutionFailure(TEXT("operation_lease_invalid"), TEXT("The lock lease has no owner."), TEXT("owner_id"));
+		else if (LockKeys.IsEmpty())
+			Error = ExecutionFailure(TEXT("operation_lease_invalid"), TEXT("The lock lease has no target keys."), TEXT("lock_keys"));
+		else if (FencingToken < 0)
+		{
+			Error = ExecutionFailure(TEXT("operation_lease_invalid"), TEXT("The lock lease fencing token must be non-negative."), TEXT("fencing_token"));
+			Error.ActualEvidence = MakeShared<FJsonValueNumber>(FencingToken);
+		}
+		if (!Error.IsEmpty()) ValidationDiagnostic = MakeShared<FExecutionMutationError>(MoveTemp(Error));
 	}
 
 	const FString& FLockFenceLease::GetOwnerId() const
@@ -243,7 +255,12 @@ namespace UE::UAI::ExecutionMutation
 
 	bool FLockFenceLease::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FExecutionMutationError& FLockFenceLease::GetValidationDiagnostic() const
+	{
+		return ValidationOrEmpty(ValidationDiagnostic);
 	}
 
 	FBarrierRequest::FBarrierRequest(
@@ -271,11 +288,26 @@ namespace UE::UAI::ExecutionMutation
 		return bValid;
 	}
 
+	FBarrierResult::FBarrierResult()
+		: FBarrierResult(-1, {}, FString(), false)
+	{
+	}
+
 	FBarrierResult::FBarrierResult(
 		const int64 InSubjectGeneration,
 		TArray<FString> InObservedSignals,
 		FString InPostBarrierRevision,
 		const bool bInSettled)
+		: FBarrierResult(InSubjectGeneration, MoveTemp(InObservedSignals), MoveTemp(InPostBarrierRevision), bInSettled, {})
+	{
+	}
+
+	FBarrierResult::FBarrierResult(
+		const int64 InSubjectGeneration,
+		TArray<FString> InObservedSignals,
+		FString InPostBarrierRevision,
+		const bool bInSettled,
+		FExecutionMutationError InSettleDiagnostic)
 		: SubjectGeneration(InSubjectGeneration)
 		, ObservedSignals(NormalizeStrings(
 			MoveTemp(InObservedSignals)))
@@ -283,8 +315,16 @@ namespace UE::UAI::ExecutionMutation
 			MoveTemp(InPostBarrierRevision)))
 		, bSettled(bInSettled)
 	{
-		bValid = SubjectGeneration >= 0
-			&& !PostBarrierRevision.IsEmpty();
+		if (!InSettleDiagnostic.IsEmpty()) SettleDiagnostic = MakeShared<FExecutionMutationError>(MoveTemp(InSettleDiagnostic));
+		FExecutionMutationError Error;
+		if (SubjectGeneration < 0)
+		{
+			Error = ExecutionFailure(TEXT("operation_barrier_result_invalid"), TEXT("The barrier result subject generation must be non-negative."), TEXT("subject_generation"));
+			Error.ActualEvidence = MakeShared<FJsonValueNumber>(SubjectGeneration);
+		}
+		else if (PostBarrierRevision.IsEmpty())
+			Error = ExecutionFailure(TEXT("operation_barrier_result_invalid"), TEXT("The barrier result has no post-barrier revision."), TEXT("post_barrier_revision"));
+		if (!Error.IsEmpty()) ValidationDiagnostic = MakeShared<FExecutionMutationError>(MoveTemp(Error));
 	}
 
 	int64 FBarrierResult::GetSubjectGeneration() const
@@ -307,9 +347,36 @@ namespace UE::UAI::ExecutionMutation
 		return bSettled;
 	}
 
+	const FExecutionMutationError& FBarrierResult::GetSettleDiagnostic() const
+	{
+		return ValidationOrEmpty(SettleDiagnostic);
+	}
+
 	bool FBarrierResult::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FExecutionMutationError& FBarrierResult::GetValidationDiagnostic() const
+	{
+		return ValidationOrEmpty(ValidationDiagnostic);
+	}
+
+	FMutationFacts FMutationFacts::NoMutation()
+	{
+		FMutationFacts Facts;
+		Facts.bNoMutationConfirmed = true;
+		return Facts;
+	}
+
+	bool FMutationFacts::IsNoMutationConfirmed() const
+	{
+		return bNoMutationConfirmed;
+	}
+
+	FMutationFacts::FMutationFacts()
+		: FMutationFacts(-1, {}, {}, false)
+	{
 	}
 
 	FMutationFacts::FMutationFacts(
@@ -326,12 +393,27 @@ namespace UE::UAI::ExecutionMutation
 		, DurableTargets(MoveTemp(InDurableTargets))
 		, bRollbackSupported(bInRollbackSupported)
 	{
-		bValid = SubjectGeneration >= 0
-			&& MutatedIdentityKeys.Num() > 0;
-		for (const FAssetDurableTarget& Target : DurableTargets)
+		FExecutionMutationError Error;
+		if (SubjectGeneration < 0)
 		{
-			bValid = bValid && Target.IsValid();
+			Error = ExecutionFailure(TEXT("operation_mutation_facts_invalid"), TEXT("The mutation result subject generation must be non-negative."), TEXT("subject_generation"));
+			Error.ActualEvidence = MakeShared<FJsonValueNumber>(SubjectGeneration);
 		}
+		else if (MutatedIdentityKeys.IsEmpty())
+			Error = ExecutionFailure(TEXT("operation_mutation_facts_invalid"), TEXT("The mutation result identifies no changed targets."), TEXT("mutated_identity_keys"));
+		else
+		{
+			for (int32 Index = 0; Index < DurableTargets.Num(); ++Index)
+			{
+				if (!DurableTargets[Index].IsValid())
+				{
+					Error = ExecutionFailure(TEXT("operation_mutation_facts_invalid"), TEXT("The mutation result contains an invalid durable target."), FString::Printf(TEXT("durable_targets[%d]"), Index));
+					Error.PublicCause = MakeShared<FExecutionMutationError>(DurableTargets[Index].GetValidationDiagnostic());
+					break;
+				}
+			}
+		}
+		if (!Error.IsEmpty()) ValidationDiagnostic = MakeShared<FExecutionMutationError>(MoveTemp(Error));
 	}
 
 	int64 FMutationFacts::GetSubjectGeneration() const
@@ -363,7 +445,12 @@ namespace UE::UAI::ExecutionMutation
 
 	bool FMutationFacts::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FExecutionMutationError& FMutationFacts::GetValidationDiagnostic() const
+	{
+		return ValidationOrEmpty(ValidationDiagnostic);
 	}
 
 	FExecutionMutationRequest::FExecutionMutationRequest(
@@ -388,15 +475,26 @@ namespace UE::UAI::ExecutionMutation
 		, ThreadAffinity(InThreadAffinity)
 		, ReentrancyPolicy(InReentrancyPolicy)
 	{
-		bValid = !OperationId.IsEmpty()
-			&& !OwnerLeaseId.IsEmpty()
-			&& !Plan->GetRequestId().IsEmpty()
-			&& Plan->GetImpactSet().GetImpacts().Num() > 0
-			&& !Plan->GetFingerprint().IsEmpty()
-			&& ExecutionContext->GetRequestKind()
-				== EUeAgentRequestKind::Operation
-			&& ExecutionContext->GetDescriptorIdentity()
-				== Plan->GetDescriptorIdentity();
+		FExecutionMutationError Error;
+		if (OperationId.IsEmpty())
+			Error = ExecutionFailure(TEXT("operation_request_invalid"), TEXT("The execution request has no operation identifier."), TEXT("operation_id"));
+		else if (OwnerLeaseId.IsEmpty())
+			Error = ExecutionFailure(TEXT("operation_request_invalid"), TEXT("The execution request has no owner lease identifier."), TEXT("owner_lease_id"));
+		else if (Plan->GetRequestId().IsEmpty())
+			Error = ExecutionFailure(TEXT("operation_request_invalid"), TEXT("The execution plan has no request identifier."), TEXT("plan.request_id"));
+		else if (Plan->GetImpactSet().GetImpacts().IsEmpty())
+			Error = ExecutionFailure(TEXT("operation_request_invalid"), TEXT("The execution plan identifies no affected targets."), TEXT("plan.impact_set"));
+		else if (Plan->GetFingerprint().IsEmpty())
+			Error = ExecutionFailure(TEXT("operation_request_invalid"), TEXT("The execution plan has no fingerprint."), TEXT("plan.fingerprint"));
+		else if (ExecutionContext->GetRequestKind() != EUeAgentRequestKind::Operation)
+		{
+			Error = ExecutionFailure(TEXT("operation_request_invalid"), TEXT("Execution requires an operation context."), TEXT("execution_context.request_kind"));
+			Error.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(ExecutionContext->GetRequestKind()));
+			Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("operation"));
+		}
+		else if (!(ExecutionContext->GetDescriptorIdentity() == Plan->GetDescriptorIdentity()))
+			Error = ExecutionFailure(TEXT("operation_request_invalid"), TEXT("The execution context and plan belong to different operation descriptors."), TEXT("execution_context.descriptor"));
+		if (!Error.IsEmpty()) ValidationDiagnostic = MakeShared<FExecutionMutationError>(MoveTemp(Error));
 	}
 
 	const FString& FExecutionMutationRequest::GetOperationId() const
@@ -453,14 +551,25 @@ namespace UE::UAI::ExecutionMutation
 
 	bool FExecutionMutationRequest::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FExecutionMutationError& FExecutionMutationRequest::GetValidationDiagnostic() const
+	{
+		return ValidationOrEmpty(ValidationDiagnostic);
+	}
+
+	FExecutionReceipt::FExecutionReceipt()
+		: ValidationDiagnostic(ExecutionFailure(TEXT("execution_receipt_invalid"),
+			TEXT("No execution receipt was returned."), TEXT("receipt")))
+	{
 	}
 
 	FExecutionReceipt::FExecutionReceipt(
 		FString InOperationId,
 		const EExecutionPhase InPhase,
 		const EExecutionStatus InStatus,
-		FString InErrorCode,
+		FExecutionMutationError InDiagnostic,
 		const EExecutionCancellationMode InCancellationMode,
 		const bool bInMutationStarted,
 		TOptional<int64> InFencingToken,
@@ -470,7 +579,7 @@ namespace UE::UAI::ExecutionMutation
 		: OperationId(NormalizeText(MoveTemp(InOperationId)))
 		, Phase(InPhase)
 		, Status(InStatus)
-		, ErrorCode(NormalizeText(MoveTemp(InErrorCode)))
+		, Diagnostic(MoveTemp(InDiagnostic))
 		, CancellationMode(InCancellationMode)
 		, bMutationStarted(bInMutationStarted)
 		, FencingToken(MoveTemp(InFencingToken))
@@ -478,12 +587,37 @@ namespace UE::UAI::ExecutionMutation
 		, DurableReceipt(MoveTemp(InDurableReceipt))
 		, PhaseHistory(MoveTemp(InPhaseHistory))
 	{
-		bValid = !OperationId.IsEmpty()
-			&& Phase == EExecutionPhase::Terminal
-			&& PhaseHistory.Num() > 0
-			&& PhaseHistory.Last() == TEXT("terminal")
-			&& (!FencingToken.IsSet()
-				|| FencingToken.GetValue() >= 0);
+		if (!Diagnostic.IsEmpty())
+		{
+			Diagnostic.Schema = TEXT("uai.operation.failure/1");
+			Diagnostic.ExecutionStatus = LexToString(Status);
+			Diagnostic.TerminalStatus = LexToString(Status);
+			Diagnostic.MutationStarted = bMutationStarted;
+			Diagnostic.MutationMayHaveStarted = bMutationStarted || Status == EExecutionStatus::StateUnknown;
+			Diagnostic.bRetrySafe = bRetrySafe;
+		}
+		if (OperationId.IsEmpty())
+			ValidationDiagnostic = ExecutionFailure(TEXT("execution_receipt_invalid"), TEXT("The execution receipt has an empty operation identifier."), TEXT("operation_id"));
+		else if (Phase != EExecutionPhase::Terminal)
+		{
+			ValidationDiagnostic = ExecutionFailure(TEXT("execution_receipt_invalid"), TEXT("The execution receipt has not reached the terminal phase."), TEXT("phase"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(LexToString(Phase));
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("terminal"));
+		}
+		else if (PhaseHistory.IsEmpty())
+			ValidationDiagnostic = ExecutionFailure(TEXT("execution_receipt_invalid"), TEXT("The execution receipt has no phase history."), TEXT("phase_history"));
+		else if (PhaseHistory.Last() != TEXT("terminal"))
+		{
+			ValidationDiagnostic = ExecutionFailure(TEXT("execution_receipt_invalid"), TEXT("The last execution history entry is not terminal."), FString::Printf(TEXT("phase_history[%d]"), PhaseHistory.Num() - 1));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(PhaseHistory.Last());
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("terminal"));
+		}
+		else if (FencingToken.IsSet() && FencingToken.GetValue() < 0)
+		{
+			ValidationDiagnostic = ExecutionFailure(TEXT("execution_receipt_invalid"), TEXT("The execution receipt has a negative fencing token."), TEXT("fencing_token"));
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), FencingToken.GetValue()));
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-negative integer"));
+		}
 	}
 
 	const FString& FExecutionReceipt::GetOperationId() const
@@ -503,7 +637,12 @@ namespace UE::UAI::ExecutionMutation
 
 	const FString& FExecutionReceipt::GetErrorCode() const
 	{
-		return ErrorCode;
+		return Diagnostic.Code;
+	}
+
+	const FExecutionMutationError& FExecutionReceipt::GetDiagnostic() const
+	{
+		return Diagnostic;
 	}
 
 	EExecutionCancellationMode
@@ -544,7 +683,12 @@ namespace UE::UAI::ExecutionMutation
 
 	bool FExecutionReceipt::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
+	}
+
+	const FExecutionMutationError& FExecutionReceipt::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic;
 	}
 
 	bool FGameThreadExecutionScheduler::Schedule(
@@ -555,14 +699,16 @@ namespace UE::UAI::ExecutionMutation
 	{
 		if (Affinity != EExecutionThreadAffinity::GameThread)
 		{
-			OutError = FExecutionMutationError(
-				TEXT("operation_thread_affinity_unsupported"));
+			OutError = ExecutionFailure(TEXT("operation_thread_affinity_unsupported"), TEXT("The scheduler supports only the game thread."), TEXT("thread_affinity"));
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Affinity));
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("game_thread"));
 			return false;
 		}
 		if (OperationId.TrimStartAndEnd().IsEmpty() || !Callback)
 		{
-			OutError = FExecutionMutationError(
-				TEXT("operation_schedule_invalid"));
+			OutError = OperationId.TrimStartAndEnd().IsEmpty()
+				? ExecutionFailure(TEXT("operation_schedule_invalid"), TEXT("The scheduled operation identifier is empty."), TEXT("operation_id"))
+				: ExecutionFailure(TEXT("operation_schedule_invalid"), TEXT("The scheduled operation has no callback."), TEXT("callback"));
 			return false;
 		}
 		AsyncTask(
@@ -593,19 +739,19 @@ namespace UE::UAI::ExecutionMutation
 		const FString NormalizedOwner = NormalizeText(OwnerId);
 		if (NormalizedKeys.Num() == 0 || NormalizedOwner.IsEmpty())
 		{
-			OutError = FExecutionMutationError(
-				TEXT("operation_lock_request_invalid"));
+			OutError = NormalizedKeys.IsEmpty()
+				? ExecutionFailure(TEXT("operation_lock_request_invalid"), TEXT("The lock request has no non-empty target keys."), TEXT("lock_keys"))
+				: ExecutionFailure(TEXT("operation_lock_request_invalid"), TEXT("The lock request has no owner identifier."), TEXT("owner_id"));
 			return false;
 		}
-		FUeAgentResourceBudgetExceeded BudgetError;
+		FUeAgentResourceChargeError ChargeError;
 		if (!Resources.TryCharge(
 			EUeAgentResourceDimension::WorkUnits,
 			1,
 			TEXT("C7.ExecutionMutation.LockFence.Acquire"),
-			BudgetError))
+			ChargeError))
 		{
-			OutError = FExecutionMutationError(
-				TEXT("resource_budget_exceeded"));
+			OutError = DiagnosticOr(ChargeError, TEXT("resource_accounting_failed"), TEXT("Lock acquisition resource accounting failed without reporting a diagnostic."));
 			return false;
 		}
 		FScopeLock Lock(&Mutex);
@@ -613,9 +759,8 @@ namespace UE::UAI::ExecutionMutation
 		{
 			if (HeldLocks.Contains(Key))
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_target_locked"),
-					Key);
+				OutError = ExecutionFailure(TEXT("operation_target_locked"), TEXT("A requested target is already locked by another operation."));
+				OutError.InternalContext = Key;
 				return false;
 			}
 		}
@@ -666,9 +811,11 @@ namespace UE::UAI::ExecutionMutation
 				|| Held->OwnerId != Lease.GetOwnerId()
 				|| Held->FencingToken != Lease.GetFencingToken())
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_fence_stale"),
-					Key);
+				OutError = ExecutionFailure(TEXT("operation_fence_stale"),
+					!Held ? TEXT("The target lock no longer exists.")
+					: Held->OwnerId != Lease.GetOwnerId() ? TEXT("The target lock belongs to a different owner.")
+					: TEXT("The target lock fencing token no longer matches the lease."));
+				OutError.InternalContext = Key;
 				return false;
 			}
 		}
@@ -695,17 +842,12 @@ namespace UE::UAI::ExecutionMutation
 				ESPMode::ThreadSafe> InBarrier,
 			TSharedRef<
 				IDurableExecutionPort,
-				ESPMode::ThreadSafe> InDurable,
-			const int32 InMaxQueueItems)
+				ESPMode::ThreadSafe> InDurable)
 			: Scheduler(MoveTemp(InScheduler))
 			, LockFence(MoveTemp(InLockFence))
 			, Barrier(MoveTemp(InBarrier))
 			, Durable(MoveTemp(InDurable))
-			, MaxQueueItems(InMaxQueueItems)
 		{
-			checkf(
-				MaxQueueItems > 0,
-				TEXT("ExecutionMutation queue must be bounded and positive."));
 		}
 
 		bool Submit(
@@ -716,22 +858,20 @@ namespace UE::UAI::ExecutionMutation
 		{
 			if (!Request.IsValid())
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_request_invalid"));
+				OutError = Request.GetValidationDiagnostic();
 				return false;
 			}
 			const TArray<FString> LockKeys = BuildLockKeys(Request);
 			if (LockKeys.Num() == 0)
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_impact_set_empty"));
+				OutError = ExecutionFailure(TEXT("operation_impact_set_empty"), TEXT("The execution plan contains no usable target lock keys."), TEXT("plan.impact_set"));
 				return false;
 			}
 			FScopeLock Lock(&Mutex);
 			if (Operations.Contains(Request.GetOperationId()))
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_id_already_exists"));
+				OutError = ExecutionFailure(TEXT("operation_id_already_exists"), TEXT("An operation with this identifier has already been submitted."), TEXT("operation_id"));
+				OutError.SubjectId = Request.GetOperationId();
 				return false;
 			}
 			if (CallbackState == this
@@ -739,14 +879,8 @@ namespace UE::UAI::ExecutionMutation
 					== EExecutionReentrancyPolicy::RejectSameTarget
 				&& OverlapsActive(LockKeys))
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_reentrancy_rejected"));
-				return false;
-			}
-			if (Queue.Num() >= MaxQueueItems)
-			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_queue_saturated"));
+				OutError = ExecutionFailure(TEXT("operation_reentrancy_rejected"), TEXT("A mutation callback cannot submit another operation that overlaps its active targets."));
+				OutError.SubjectId = Request.GetOperationId();
 				return false;
 			}
 			const TSharedRef<FOperation, ESPMode::ThreadSafe> Operation =
@@ -781,18 +915,18 @@ namespace UE::UAI::ExecutionMutation
 						EExecutionPhase::WaitingForLock);
 				}
 
-				FString FailureCode;
+				FExecutionMutationError Failure;
 				EExecutionCancellationMode CancellationMode =
 					EExecutionCancellationMode::NotRequested;
 				if (!CheckBeforeMutation(
 					Operation.ToSharedRef(),
-					FailureCode,
+					Failure,
 					CancellationMode))
 				{
 					Finalize(
 						Operation.ToSharedRef(),
 						EExecutionStatus::CancelledNoChange,
-						FailureCode,
+						Failure,
 						CancellationMode,
 						true,
 						nullptr);
@@ -801,12 +935,12 @@ namespace UE::UAI::ExecutionMutation
 				if (!Charge(
 					Operation.ToSharedRef(),
 					TEXT("acquire_lock"),
-					FailureCode))
+					Failure))
 				{
 					Finalize(
 						Operation.ToSharedRef(),
 						EExecutionStatus::Failed,
-						FailureCode,
+						Failure,
 						EExecutionCancellationMode::NotRequested,
 						true,
 						nullptr);
@@ -815,23 +949,36 @@ namespace UE::UAI::ExecutionMutation
 
 				FLockFenceLease Lease;
 				FExecutionMutationError Error;
-				if (!LockFence->TryAcquire(
+				const bool bAcquired = LockFence->TryAcquire(
 					Operation->LockKeys,
 					Operation->Request.GetOwnerLeaseId(),
 					Operation->Request.GetResources(),
 					Lease,
-					Error)
-					|| !Lease.IsValid()
+					Error);
+				if (!bAcquired || !Lease.IsValid()
 					|| Lease.GetOwnerId()
 						!= Operation->Request.GetOwnerLeaseId()
 					|| Lease.GetLockKeys() != Operation->LockKeys)
 				{
+					if (Error.IsEmpty())
+					{
+						if (!bAcquired)
+							Error = ExecutionFailure(TEXT("operation_lease_invalid"), TEXT("The lock provider failed to acquire a lease without reporting a diagnostic."));
+						else if (!Lease.IsValid())
+							Error = Lease.GetValidationDiagnostic();
+						else if (Lease.GetOwnerId() != Operation->Request.GetOwnerLeaseId())
+						{
+							Error = ExecutionFailure(TEXT("operation_lease_invalid"), TEXT("The acquired lock lease belongs to a different owner."), TEXT("owner_id"));
+							Error.ActualEvidence = MakeShared<FJsonValueString>(Lease.GetOwnerId());
+							Error.ExpectedEvidence = MakeShared<FJsonValueString>(Operation->Request.GetOwnerLeaseId());
+						}
+						else
+							Error = ExecutionFailure(TEXT("operation_lease_invalid"), TEXT("The acquired lock lease covers a different target set than requested."), TEXT("lock_keys"));
+					}
 					Finalize(
 						Operation.ToSharedRef(),
 						EExecutionStatus::Failed,
-						ErrorCodeOr(
-							Error,
-							TEXT("operation_lease_invalid")),
+						Error,
 						EExecutionCancellationMode::NotRequested,
 						true,
 						nullptr);
@@ -846,13 +993,13 @@ namespace UE::UAI::ExecutionMutation
 				}
 				if (!CheckBeforeMutation(
 					Operation.ToSharedRef(),
-					FailureCode,
+					Failure,
 					CancellationMode))
 				{
 					Finalize(
 						Operation.ToSharedRef(),
 						EExecutionStatus::CancelledNoChange,
-						FailureCode,
+						Failure,
 						CancellationMode,
 						true,
 						nullptr);
@@ -878,9 +1025,9 @@ namespace UE::UAI::ExecutionMutation
 					Finalize(
 						Operation.ToSharedRef(),
 						EExecutionStatus::Failed,
-						ErrorCodeOr(
+						DiagnosticOr(
 							Error,
-							TEXT("operation_schedule_failed")),
+							TEXT("operation_schedule_failed"), TEXT("The scheduler failed without reporting a diagnostic.")),
 						EExecutionCancellationMode::NotRequested,
 						true,
 						nullptr);
@@ -901,8 +1048,9 @@ namespace UE::UAI::ExecutionMutation
 			const FString NormalizedReason = NormalizeText(Reason);
 			if (NormalizedId.IsEmpty() || NormalizedReason.IsEmpty())
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_cancellation_invalid"));
+				OutError = NormalizedId.IsEmpty()
+					? ExecutionFailure(TEXT("operation_cancellation_invalid"), TEXT("Cancellation requires an operation identifier."), TEXT("operation_id"))
+					: ExecutionFailure(TEXT("operation_cancellation_invalid"), TEXT("Cancellation requires a non-empty reason."), TEXT("reason"));
 				return false;
 			}
 			TSharedPtr<FOperation, ESPMode::ThreadSafe> QueuedFinal;
@@ -912,8 +1060,8 @@ namespace UE::UAI::ExecutionMutation
 					Found = Operations.Find(NormalizedId);
 				if (!Found)
 				{
-					OutError = FExecutionMutationError(
-						TEXT("operation_not_found"));
+					OutError = ExecutionFailure(TEXT("operation_not_found"), TEXT("The operation requested for cancellation is not registered."), TEXT("operation_id"));
+					OutError.SubjectId = OperationId;
 					return false;
 				}
 				if ((*Found)->Receipt.IsSet()
@@ -932,13 +1080,12 @@ namespace UE::UAI::ExecutionMutation
 			}
 			if (QueuedFinal.IsValid())
 			{
-				Finalize(
-					QueuedFinal.ToSharedRef(),
-					EExecutionStatus::CancelledNoChange,
-					TEXT("cancellation_requested"),
-					EExecutionCancellationMode::SafeBoundary,
-					true,
-					nullptr);
+				Finalize(QueuedFinal.ToSharedRef(),
+				EExecutionStatus::CancelledNoChange,
+				FExecutionMutationError::Failure(TEXT("cancellation_requested"), NormalizedReason, TEXT("cancellation")),
+				EExecutionCancellationMode::SafeBoundary,
+				true,
+				nullptr);
 			}
 			return true;
 		}
@@ -953,14 +1100,15 @@ namespace UE::UAI::ExecutionMutation
 				Found = Operations.Find(NormalizeText(OperationId));
 			if (!Found)
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_not_found"));
+				OutError = ExecutionFailure(TEXT("operation_not_found"), TEXT("No registered operation matches the requested receipt."), TEXT("operation_id"));
+				OutError.SubjectId = OperationId;
 				return false;
 			}
 			if (!(*Found)->Receipt.IsSet())
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_not_terminal"));
+				OutError = ExecutionFailure(TEXT("operation_not_terminal"), TEXT("The operation has not completed, so its terminal receipt is not available."));
+				OutError.ActualValue = MakeShared<FJsonValueString>(LexToString((*Found)->Phase));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("terminal"));
 				return false;
 			}
 			OutReceipt = (*Found)->Receipt.GetValue();
@@ -977,14 +1125,14 @@ namespace UE::UAI::ExecutionMutation
 				Found = Operations.Find(NormalizeText(OperationId));
 			if (!Found)
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_not_found"));
+				OutError = ExecutionFailure(TEXT("operation_not_found"), TEXT("No registered operation matches the requested lock lease."), TEXT("operation_id"));
+				OutError.SubjectId = OperationId;
 				return false;
 			}
 			if (!(*Found)->Lease.IsSet())
 			{
-				OutError = FExecutionMutationError(
-					TEXT("operation_lease_unavailable"));
+				OutError = ExecutionFailure(TEXT("operation_lease_unavailable"), TEXT("The operation has no acquired lock lease."));
+				OutError.ActualValue = MakeShared<FJsonValueString>(LexToString((*Found)->Phase));
 				return false;
 			}
 			OutLease = (*Found)->Lease.GetValue();
@@ -1070,31 +1218,31 @@ namespace UE::UAI::ExecutionMutation
 		bool Charge(
 			const TSharedRef<FOperation, ESPMode::ThreadSafe>& Operation,
 			const FString& Stage,
-			FString& OutFailureCode) const
+			FExecutionMutationError& OutFailure) const
 		{
-			FUeAgentResourceBudgetExceeded BudgetError;
+			FUeAgentResourceChargeError ChargeError;
 			if (Operation->Request.GetResources().TryCharge(
 				EUeAgentResourceDimension::WorkUnits,
 				1,
 				TEXT("C7.ExecutionMutation.") + Stage,
-				BudgetError))
+				ChargeError))
 			{
 				return true;
 			}
-			OutFailureCode = TEXT("resource_budget_exceeded");
+			OutFailure = DiagnosticOr(ChargeError, TEXT("resource_accounting_failed"), TEXT("Execution resource accounting failed without reporting a diagnostic."));
 			return false;
 		}
 
 		bool CheckBeforeMutation(
 			const TSharedRef<FOperation, ESPMode::ThreadSafe>& Operation,
-			FString& OutFailureCode,
+			FExecutionMutationError& OutFailure,
 			EExecutionCancellationMode& OutCancellationMode) const
 		{
 			{
 				FScopeLock Lock(&Mutex);
 				if (Operation->bCancellationRequested)
 				{
-					OutFailureCode = TEXT("cancellation_requested");
+					OutFailure = FExecutionMutationError::Failure(TEXT("cancellation_requested"), Operation->CancellationReason, TEXT("cancellation"));
 					OutCancellationMode =
 						EExecutionCancellationMode::SafeBoundary;
 					return false;
@@ -1104,19 +1252,9 @@ namespace UE::UAI::ExecutionMutation
 			if (!Operation->Request.GetCancellation().TryCheckpoint(
 				CancellationError))
 			{
-				OutFailureCode = TEXT("cancellation_requested");
+				OutFailure = CancellationError;
 				OutCancellationMode =
 					EExecutionCancellationMode::SafeBoundary;
-				return false;
-			}
-			FUeAgentOperationDeadlineExceeded DeadlineError;
-			if (!Operation->Request.GetDeadline().TryCheckpoint(
-				TEXT("C7.ExecutionMutation.BeforeMutation"),
-				DeadlineError))
-			{
-				OutFailureCode = TEXT("operation_deadline_exceeded");
-				OutCancellationMode =
-					EExecutionCancellationMode::NotRequested;
 				return false;
 			}
 			return true;
@@ -1124,14 +1262,14 @@ namespace UE::UAI::ExecutionMutation
 
 		bool CheckAfterMutation(
 			const TSharedRef<FOperation, ESPMode::ThreadSafe>& Operation,
-			FString& OutFailureCode,
+			FExecutionMutationError& OutFailure,
 			EExecutionCancellationMode& OutCancellationMode) const
 		{
 			{
 				FScopeLock Lock(&Mutex);
 				if (Operation->bCancellationRequested)
 				{
-					OutFailureCode = TEXT("cancellation_requested");
+					OutFailure = FExecutionMutationError::Failure(TEXT("cancellation_requested"), Operation->CancellationReason, TEXT("cancellation"));
 					OutCancellationMode =
 						EExecutionCancellationMode::RollbackRequired;
 					return false;
@@ -1141,17 +1279,7 @@ namespace UE::UAI::ExecutionMutation
 			if (!Operation->Request.GetCancellation().TryCheckpoint(
 				CancellationError))
 			{
-				OutFailureCode = TEXT("cancellation_requested");
-				OutCancellationMode =
-					EExecutionCancellationMode::RollbackRequired;
-				return false;
-			}
-			FUeAgentOperationDeadlineExceeded DeadlineError;
-			if (!Operation->Request.GetDeadline().TryCheckpoint(
-				TEXT("C7.ExecutionMutation.AfterMutation"),
-				DeadlineError))
-			{
-				OutFailureCode = TEXT("operation_deadline_exceeded");
+				OutFailure = CancellationError;
 				OutCancellationMode =
 					EExecutionCancellationMode::RollbackRequired;
 				return false;
@@ -1160,7 +1288,7 @@ namespace UE::UAI::ExecutionMutation
 				|| !LockFence->IsCurrent(
 					Operation->Lease.GetValue()))
 			{
-				OutFailureCode = TEXT("operation_fence_stale");
+				OutFailure = FExecutionMutationError::Failure(TEXT("operation_fence_stale"), TEXT("The operation lock fence is no longer current."), TEXT("execution"));
 				OutCancellationMode =
 					EExecutionCancellationMode::RollbackRequired;
 				return false;
@@ -1186,27 +1314,26 @@ namespace UE::UAI::ExecutionMutation
 			if (!Scheduler->IsCurrentThread(
 				Operation->Request.GetThreadAffinity()))
 			{
-				Finalize(
-					Operation.ToSharedRef(),
-					EExecutionStatus::CancelledNoChange,
-					TEXT("operation_thread_affinity_mismatch"),
-					EExecutionCancellationMode::NotRequested,
-					true,
-					nullptr);
+				Finalize(Operation.ToSharedRef(),
+				EExecutionStatus::CancelledNoChange,
+				ExecutionFailure(TEXT("operation_thread_affinity_mismatch"), TEXT("The scheduled callback is running on a different thread than the operation requires."), TEXT("thread_affinity")),
+				EExecutionCancellationMode::NotRequested,
+				true,
+				nullptr);
 				return;
 			}
-			FString FailureCode;
+			FExecutionMutationError Failure;
 			EExecutionCancellationMode CancellationMode =
 				EExecutionCancellationMode::NotRequested;
 			if (!CheckBeforeMutation(
 				Operation.ToSharedRef(),
-				FailureCode,
+				Failure,
 				CancellationMode))
 			{
 				Finalize(
 					Operation.ToSharedRef(),
 					EExecutionStatus::CancelledNoChange,
-					FailureCode,
+					Failure,
 					CancellationMode,
 					true,
 					nullptr);
@@ -1216,24 +1343,25 @@ namespace UE::UAI::ExecutionMutation
 				|| !LockFence->IsCurrent(
 					Operation->Lease.GetValue()))
 			{
-				Finalize(
-					Operation.ToSharedRef(),
-					EExecutionStatus::CancelledNoChange,
-					TEXT("operation_fence_stale"),
-					EExecutionCancellationMode::NotRequested,
-					true,
-					nullptr);
+				Finalize(Operation.ToSharedRef(),
+				EExecutionStatus::CancelledNoChange,
+				ExecutionFailure(TEXT("operation_fence_stale"), !Operation->Lease.IsSet()
+					? TEXT("The operation has no lock lease at execution time.")
+					: TEXT("The operation lock lease is no longer current.")),
+				EExecutionCancellationMode::NotRequested,
+				true,
+				nullptr);
 				return;
 			}
 			if (!Charge(
 				Operation.ToSharedRef(),
 				TEXT("ScheduledCallback"),
-				FailureCode))
+				Failure))
 			{
 				Finalize(
 					Operation.ToSharedRef(),
 					EExecutionStatus::Failed,
-					FailureCode,
+					Failure,
 					EExecutionCancellationMode::NotRequested,
 					true,
 					nullptr);
@@ -1247,20 +1375,22 @@ namespace UE::UAI::ExecutionMutation
 			FExecutionDurableSessionPtr Session;
 			const int64 FencingToken =
 				Operation->Lease->GetFencingToken();
-			if (!Durable->Prepare(
+			const bool bPrepared = Durable->Prepare(
 				Operation->Request,
 				FencingToken,
 				Operation->Request.GetResources(),
 				Session,
-				Error)
-				|| !Session.IsValid())
+				Error);
+			if (!bPrepared || !Session.IsValid())
 			{
 				Finalize(
 					Operation.ToSharedRef(),
 					EExecutionStatus::Failed,
-					ErrorCodeOr(
+					DiagnosticOr(
 						Error,
-						TEXT("operation_durable_prepare_failed")),
+						TEXT("operation_durable_prepare_failed"), bPrepared
+							? TEXT("Durable preparation succeeded without returning a session.")
+							: TEXT("Durable preparation failed without reporting a diagnostic.")),
 					EExecutionCancellationMode::NotRequested,
 					true,
 					nullptr);
@@ -1278,6 +1408,18 @@ namespace UE::UAI::ExecutionMutation
 				Facts,
 				Error);
 			CallbackState = nullptr;
+			if (!bExecuted && Facts.IsNoMutationConfirmed())
+			{
+				Operation->bMutationStarted = false;
+				Operation->MutationFacts = Facts;
+				// Prepare owns a durable journal even when the native hook made no
+				// change. Close it through the same recovery owner before retrying.
+				Rollback(
+					Operation.ToSharedRef(),
+					DiagnosticOr(Error, TEXT("operation_execution_failed"), TEXT("The mutation hook failed without reporting a diagnostic; no target mutation was confirmed.")),
+					EExecutionCancellationMode::NotRequested);
+				return;
+			}
 			if (!bExecuted || !Facts.IsValid())
 			{
 				if (Facts.IsValid())
@@ -1285,47 +1427,50 @@ namespace UE::UAI::ExecutionMutation
 					Operation->MutationFacts = Facts;
 					Rollback(
 						Operation.ToSharedRef(),
-						ErrorCodeOr(
+						DiagnosticOr(
 							Error,
-							TEXT("operation_execution_failed")),
+							TEXT("operation_execution_failed"), TEXT("The mutation hook failed without reporting a diagnostic.")),
 						EExecutionCancellationMode::RollbackRequired);
 				}
 				else
 				{
+					if (Error.IsEmpty()) Error = Facts.GetValidationDiagnostic();
 					Finalize(
 						Operation.ToSharedRef(),
 						EExecutionStatus::StateUnknown,
-						ErrorCodeOr(
-							Error,
-							TEXT("operation_execution_failed")),
+						Error,
 						EExecutionCancellationMode::RollbackRequired,
 						false,
 						nullptr);
 				}
 				return;
 			}
-			if (!IsSubset(
+			const int32 UnlockedTargetIndex = FindFirstUnlockedTarget(
 				Facts.GetMutatedIdentityKeys(),
-				Operation->LockKeys))
+				Operation->LockKeys);
+			if (UnlockedTargetIndex != INDEX_NONE)
 			{
-				Finalize(
-					Operation.ToSharedRef(),
-					EExecutionStatus::StateUnknown,
-					TEXT("operation_mutation_targets_unlocked"),
-					EExecutionCancellationMode::RollbackRequired,
-					false,
-					nullptr);
+				FExecutionMutationError Unlocked = ExecutionFailure(TEXT("operation_mutation_targets_unlocked"),
+					TEXT("The mutation changed a target outside the operation's locked target set."),
+					FString::Printf(TEXT("mutated_identity_keys[%d]"), UnlockedTargetIndex));
+				Unlocked.ActualEvidence = MakeShared<FJsonValueString>(Facts.GetMutatedIdentityKeys()[UnlockedTargetIndex]);
+				Finalize(Operation.ToSharedRef(),
+				EExecutionStatus::StateUnknown,
+				MoveTemp(Unlocked),
+				EExecutionCancellationMode::RollbackRequired,
+				false,
+				nullptr);
 				return;
 			}
 			Operation->MutationFacts = Facts;
 			if (!CheckAfterMutation(
 				Operation.ToSharedRef(),
-				FailureCode,
+				Failure,
 				CancellationMode))
 			{
 				Rollback(
 					Operation.ToSharedRef(),
-					FailureCode,
+					Failure,
 					CancellationMode);
 				return;
 			}
@@ -1338,12 +1483,12 @@ namespace UE::UAI::ExecutionMutation
 				Facts.GetRequiredBarrierSignals());
 			FBarrierResult BarrierResult;
 			Error = FExecutionMutationError();
-			if (!Barrier->Wait(
+			const bool bBarrierWaited = Barrier->Wait(
 				BarrierRequest,
 				Operation->Request.GetResources(),
 				BarrierResult,
-				Error)
-				|| !BarrierResult.IsValid()
+				Error);
+			if (!bBarrierWaited || !BarrierResult.IsValid()
 				|| !BarrierResult.IsSettled()
 				|| BarrierResult.GetSubjectGeneration()
 					!= BarrierRequest.GetSubjectGeneration()
@@ -1351,20 +1496,50 @@ namespace UE::UAI::ExecutionMutation
 					BarrierResult.GetObservedSignals(),
 					BarrierRequest.GetRequiredSignals()))
 			{
-				Rollback(
-					Operation.ToSharedRef(),
-					TEXT("operation_barrier_unsettled"),
-					EExecutionCancellationMode::RollbackRequired);
+				FExecutionMutationError BarrierFailure;
+				if (!bBarrierWaited)
+					BarrierFailure = !Error.IsEmpty() ? FExecutionMutationError::WrapFailure(TEXT("operation_barrier_unsettled"), Error)
+						: ExecutionFailure(TEXT("operation_barrier_unsettled"), TEXT("The barrier provider failed without providing a diagnostic."), TEXT("barrier_wait_succeeded"));
+				else if (!BarrierResult.IsValid())
+					BarrierFailure = BarrierResult.GetValidationDiagnostic();
+				else if (!BarrierResult.IsSettled())
+					BarrierFailure = !BarrierResult.GetSettleDiagnostic().IsEmpty()
+						? FExecutionMutationError::WrapFailure(TEXT("operation_barrier_unsettled"), BarrierResult.GetSettleDiagnostic())
+						: ExecutionFailure(TEXT("operation_barrier_unsettled"), TEXT("The barrier provider reports that the operation is not settled."), TEXT("settled"));
+				else if (BarrierResult.GetSubjectGeneration() != BarrierRequest.GetSubjectGeneration())
+				{
+					BarrierFailure = ExecutionFailure(TEXT("operation_barrier_unsettled"), TEXT("The barrier result belongs to a different subject generation."), TEXT("subject_generation"));
+					BarrierFailure.ActualEvidence = MakeShared<FJsonValueNumber>(BarrierResult.GetSubjectGeneration());
+					BarrierFailure.ExpectedEvidence = MakeShared<FJsonValueNumber>(BarrierRequest.GetSubjectGeneration());
+				}
+				else
+				{
+					BarrierFailure = ExecutionFailure(TEXT("operation_barrier_unsettled"), TEXT("The barrier result is missing required completion signals."), TEXT("observed_signals"));
+					TArray<TSharedPtr<FJsonValue>> Missing;
+					for (const FString& Signal : BarrierRequest.GetRequiredSignals())
+						if (!BarrierResult.GetObservedSignals().Contains(Signal)) Missing.Add(MakeShared<FJsonValueString>(Signal));
+					BarrierFailure.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(Missing));
+					TArray<TSharedPtr<FJsonValue>> Observed;
+					for (const FString& Signal : BarrierResult.GetObservedSignals()) Observed.Add(MakeShared<FJsonValueString>(Signal));
+					BarrierFailure.ActualValue = MakeShared<FJsonValueArray>(MoveTemp(Observed));
+					BarrierFailure.ExpectedValuePresent = true;
+					BarrierFailure.ActualValuePresent = true;
+				}
+				if (BarrierFailure.Stage.IsEmpty()) BarrierFailure.Stage = TEXT("settling");
+				if (bBarrierWaited && !Error.IsEmpty()) BarrierFailure.Append(Error);
+				Rollback(Operation.ToSharedRef(),
+					MoveTemp(BarrierFailure),
+				EExecutionCancellationMode::RollbackRequired);
 				return;
 			}
 			if (!CheckAfterMutation(
 				Operation.ToSharedRef(),
-				FailureCode,
+				Failure,
 				CancellationMode))
 			{
 				Rollback(
 					Operation.ToSharedRef(),
-					FailureCode,
+					Failure,
 					CancellationMode);
 				return;
 			}
@@ -1384,18 +1559,17 @@ namespace UE::UAI::ExecutionMutation
 			{
 				Rollback(
 					Operation.ToSharedRef(),
-					ErrorCodeOr(
+					DiagnosticOr(
 						Error,
-						TEXT("operation_durable_persist_failed")),
+						TEXT("operation_durable_persist_failed"), TEXT("Durable persistence failed without reporting a diagnostic.")),
 					EExecutionCancellationMode::RollbackRequired);
 				return;
 			}
 			const TPair<EExecutionStatus, bool> Mapped =
 				MapDurableStatus(DurableReceipt.GetStatus());
-			Finalize(
-				Operation.ToSharedRef(),
+			Finalize(Operation.ToSharedRef(),
 				Mapped.Key,
-				FString(),
+				FExecutionMutationError(),
 				EExecutionCancellationMode::NotRequested,
 				Mapped.Value,
 				&DurableReceipt);
@@ -1403,9 +1577,10 @@ namespace UE::UAI::ExecutionMutation
 
 		void Rollback(
 			const TSharedRef<FOperation, ESPMode::ThreadSafe>& Operation,
-			const FString& ErrorCode,
+			FExecutionMutationError Diagnostic,
 			const EExecutionCancellationMode CancellationMode)
 		{
+			Diagnostic.RollbackAttempted = false;
 			if (!Operation->Lease.IsSet()
 				|| !Operation->DurableSession.IsValid()
 				|| !Operation->MutationFacts.IsSet())
@@ -1413,13 +1588,14 @@ namespace UE::UAI::ExecutionMutation
 				Finalize(
 					Operation,
 					EExecutionStatus::StateUnknown,
-					ErrorCode,
+					Diagnostic,
 					CancellationMode,
 					false,
 					nullptr);
 				return;
 			}
-			bool bMemoryConfirmed = false;
+			Diagnostic.RollbackAttempted = true;
+			bool bMemoryConfirmed = Operation->MutationFacts->IsNoMutationConfirmed();
 			FExecutionMutationError RollbackError;
 			if (Operation->MutationFacts->IsRollbackSupported())
 			{
@@ -1431,9 +1607,11 @@ namespace UE::UAI::ExecutionMutation
 					RollbackError))
 				{
 					bMemoryConfirmed = false;
+					Diagnostic.Diagnostics.Add(DiagnosticOr(RollbackError, TEXT("operation_memory_rollback_failed"), TEXT("The mutation hook failed to roll back without reporting a diagnostic.")));
 				}
 			}
 			FDurableReceipt DurableReceipt;
+			RollbackError.Reset();
 			if (!Durable->Rollback(
 				Operation->DurableSession.ToSharedRef(),
 				Operation->Lease->GetFencingToken(),
@@ -1442,15 +1620,18 @@ namespace UE::UAI::ExecutionMutation
 				DurableReceipt,
 				RollbackError))
 			{
+				Diagnostic.Diagnostics.Add(DiagnosticOr(RollbackError, TEXT("operation_durable_rollback_failed"), TEXT("Durable rollback failed without reporting a diagnostic.")));
+				Diagnostic.RollbackSucceeded = false;
 				Finalize(
 					Operation,
 					EExecutionStatus::StateUnknown,
-					ErrorCode,
+					Diagnostic,
 					CancellationMode,
 					false,
 					nullptr);
 				return;
 			}
+			Diagnostic.RollbackSucceeded = bMemoryConfirmed && DurableReceipt.GetStatus() == EDurableStatus::RolledBack;
 			TPair<EExecutionStatus, bool> Mapped =
 				MapDurableStatus(DurableReceipt.GetStatus());
 			if (Mapped.Key == EExecutionStatus::RolledBack
@@ -1461,10 +1642,15 @@ namespace UE::UAI::ExecutionMutation
 					false
 				};
 			}
+			else if (Mapped.Key == EExecutionStatus::RolledBack
+				&& Operation->MutationFacts->IsNoMutationConfirmed())
+			{
+				Mapped = { EExecutionStatus::Failed, true };
+			}
 			Finalize(
 				Operation,
 				Mapped.Key,
-				ErrorCode,
+				Diagnostic,
 				CancellationMode,
 				Mapped.Value,
 				&DurableReceipt);
@@ -1494,7 +1680,7 @@ namespace UE::UAI::ExecutionMutation
 		void Finalize(
 			const TSharedRef<FOperation, ESPMode::ThreadSafe>& Operation,
 			EExecutionStatus Status,
-			FString ErrorCode,
+			FExecutionMutationError Diagnostic,
 			const EExecutionCancellationMode CancellationMode,
 			bool bRetrySafe,
 			const FDurableReceipt* DurableReceipt)
@@ -1516,9 +1702,9 @@ namespace UE::UAI::ExecutionMutation
 			}
 
 			bool bReleaseFailed = false;
+			FExecutionMutationError ReleaseError;
 			if (Lease.IsSet())
 			{
-				FExecutionMutationError ReleaseError;
 				bReleaseFailed = !LockFence->Release(
 					Lease.GetValue(),
 					ReleaseError);
@@ -1529,7 +1715,11 @@ namespace UE::UAI::ExecutionMutation
 				{
 					Status = EExecutionStatus::RecoveryRequired;
 				}
-				ErrorCode = TEXT("operation_lock_release_failed");
+				FExecutionMutationError ReleaseFailure = FExecutionMutationError::Failure(
+					TEXT("operation_lock_release_failed"), TEXT("The operation lock could not be released; recovery is required."), TEXT("execution"));
+				if (!Diagnostic.IsEmpty()) ReleaseFailure.PublicCause = MakeShared<FExecutionMutationError>(MoveTemp(Diagnostic));
+				if (!ReleaseError.IsEmpty()) ReleaseFailure.Diagnostics.Add(MoveTemp(ReleaseError));
+				Diagnostic = MoveTemp(ReleaseFailure);
 				bRetrySafe = false;
 			}
 
@@ -1537,6 +1727,14 @@ namespace UE::UAI::ExecutionMutation
 			if (DurableReceipt)
 			{
 				DurableValue = *DurableReceipt;
+				const auto& DurableFailure = DurableReceipt->GetFailureDiagnostic();
+				if (!DurableFailure.IsEmpty())
+				{
+					if (Diagnostic.IsEmpty()) Diagnostic = DurableFailure;
+					else Diagnostic.Diagnostics.Add(DurableFailure);
+				}
+				Diagnostic.TransactionStatus = AssetDurable::LexToString(DurableReceipt->GetStatus());
+				Diagnostic.RecoveryAction = AssetDurable::LexToString(DurableReceipt->GetRecoveryAction());
 			}
 			TOptional<int64> FencingToken;
 			if (Lease.IsSet())
@@ -1547,7 +1745,7 @@ namespace UE::UAI::ExecutionMutation
 				Operation->Request.GetOperationId(),
 				EExecutionPhase::Terminal,
 				Status,
-				MoveTemp(ErrorCode),
+				MoveTemp(Diagnostic),
 				CancellationMode,
 				Operation->bMutationStarted,
 				MoveTemp(FencingToken),
@@ -1574,7 +1772,6 @@ namespace UE::UAI::ExecutionMutation
 			Barrier;
 		TSharedRef<IDurableExecutionPort, ESPMode::ThreadSafe>
 			Durable;
-		int32 MaxQueueItems = 0;
 		mutable FCriticalSection Mutex;
 		TMap<
 			FString,
@@ -1598,14 +1795,12 @@ namespace UE::UAI::ExecutionMutation
 			ESPMode::ThreadSafe> InBarrier,
 		TSharedRef<
 			IDurableExecutionPort,
-			ESPMode::ThreadSafe> InDurable,
-		const int32 InMaxQueueItems)
+			ESPMode::ThreadSafe> InDurable)
 		: State(MakeShared<FState, ESPMode::ThreadSafe>(
 			MoveTemp(InScheduler),
 			MoveTemp(InLockFence),
 			MoveTemp(InBarrier),
-			MoveTemp(InDurable),
-			InMaxQueueItems))
+			MoveTemp(InDurable)))
 	{
 	}
 

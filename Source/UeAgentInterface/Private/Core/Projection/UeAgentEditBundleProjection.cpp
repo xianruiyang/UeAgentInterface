@@ -56,8 +56,7 @@ namespace UE::UAI::Projection
 		TArray<FString> InInlineUnitIds,
 		TArray<FString> InInlineFieldIds,
 		TOptional<FUeAgentArtifactDescriptor> InArtifact,
-		FUeAgentPageInfo InPage,
-		int64 InTokenBudget)
+		FUeAgentPageInfo InPage)
 		: BundleFingerprint(
 			Normalize(MoveTemp(InBundleFingerprint)))
 		, ClosureFingerprint(
@@ -66,14 +65,12 @@ namespace UE::UAI::Projection
 		, InlineFieldIds(MoveTemp(InInlineFieldIds))
 		, Artifact(MoveTemp(InArtifact))
 		, Page(MoveTemp(InPage))
-		, TokenBudget(InTokenBudget)
 	{
 		bValid =
 			IsSha256(BundleFingerprint)
 			&& IsSha256(ClosureFingerprint)
 			&& NormalizeSet(InlineUnitIds)
 			&& NormalizeSet(InlineFieldIds)
-			&& TokenBudget > 0
 			&& Page.IsValid()
 			&& (!Artifact.IsSet() || Artifact->IsValid());
 	}
@@ -111,11 +108,6 @@ namespace UE::UAI::Projection
 	const FUeAgentPageInfo& FEditBundleProjection::GetPage() const
 	{
 		return Page;
-	}
-
-	int64 FEditBundleProjection::GetTokenBudget() const
-	{
-		return TokenBudget;
 	}
 
 	bool FEditBundleProjection::IsValid() const

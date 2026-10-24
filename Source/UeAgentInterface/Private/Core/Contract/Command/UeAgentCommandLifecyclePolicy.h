@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/Command/UeAgentCommandContractModel.h"
 
 namespace UE::UAI::CommandLifecycle
@@ -11,7 +13,6 @@ namespace UE::UAI::CommandLifecycle
 			CommandContract::EUeAgentCommandAvailability::Enabled;
 		TArray<FString> SuccessorCommandIds;
 		FString Reason;
-		bool bRequiresUserConfirmation = false;
 	};
 
 	UEAGENTINTERFACE_API const TArray<FCommandLifecyclePolicy>& GetPolicies();
@@ -21,7 +22,7 @@ namespace UE::UAI::CommandLifecycle
 
 	UEAGENTINTERFACE_API bool TryApply(
 		TArray<CommandContract::FUeAgentCommandDeclaration>& Declarations,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API const TCHAR* LexToString(
 		CommandContract::EUeAgentCommandAvailability Availability);

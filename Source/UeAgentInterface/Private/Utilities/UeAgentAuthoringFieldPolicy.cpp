@@ -46,7 +46,7 @@ namespace UeAgentAuthoringFieldPolicy
 				&& Selector && Selector->IsValid()
 				&& Object->TryGetObjectField(TEXT("availability"), Availability)
 				&& Availability && Availability->IsValid()
-				&& Object->HasField(TEXT("value_kind"));
+				&& Object->HasField(TEXT("kind"));
 		}
 
 		void RemoveRedundantTextValue(

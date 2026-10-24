@@ -3,8 +3,6 @@
 #include "Dom/JsonObject.h"
 #include "DomainAdapters/AssetSimple/UeAgentAssetSimpleMechanicsBoundary.h"
 #include "OperationOwners/AssetSimple/UeAgentAssetSimpleOperationOwner.h"
-#include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
 
 namespace UE::UAI::CommandHandlers::AssetSimple
 {
@@ -15,24 +13,13 @@ namespace UE::UAI::CommandHandlers::AssetSimple
 	{
 		const FString Owner = TEXT("asset-simple-operation-owner");
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(TEXT("code"), Code);
-			Object->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Object->SetStringField(TEXT("detail"), Detail);
-			Object->SetStringField(TEXT("terminal_status"), TEXT("not_started"));
-			Object->SetBoolField(TEXT("retry_safe"), true);
-			FString ErrorJson;
-			const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>>
-				Writer = TJsonWriterFactory<TCHAR,
-					TCondensedJsonPrintPolicy<TCHAR>>::Create(&ErrorJson);
-			FJsonSerializer::Serialize(Object, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), ErrorJson);
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request, UE::UAI::Contract::FDiagnostic Diagnostic)
+        {
+            if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetCommandId();
+            Diagnostic.TerminalStatus = TEXT("not_started");
+            Diagnostic.bRetrySafe = true;
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -61,17 +48,11 @@ namespace UE::UAI::CommandHandlers::AssetSimple
 				if (!Caller.IsValid()
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:operate")))
 				{
-					return Failure(
-						Request,
-						TEXT("asset_simple_authority_required"),
-						TEXT("the exact AssetSimple operation requires uai:operate"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_simple_authority_required"), TEXT("the exact AssetSimple operation requires uai:operate"), TEXT("command")));
 				}
 				if (!IsInGameThread())
 				{
-					return Failure(
-						Request,
-						TEXT("asset_simple_game_thread_required"),
-						TEXT("AssetSimple UE mechanics must start on the game thread"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_simple_game_thread_required"), TEXT("AssetSimple UE mechanics must start on the game thread"), TEXT("command")));
 				}
 				TArray<FString> EffectiveScopes = Caller.GetAuthorityScopes();
 				for (const FString& Scope : DomainAdapters::AssetSimple::
@@ -96,27 +77,34 @@ namespace UE::UAI::CommandHandlers::AssetSimple
 	bool TryCreateAssetSimpleOperationCommandHandlers(
 		const TArray<FUeAgentSimpleAuthoringCommandRoute>& Routes,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
 		TSet<FString> Seen;
 		for (const FUeAgentSimpleAuthoringCommandRoute& Route : Routes)
 		{
-			if (!Route.IsValid() || Seen.Contains(Route.CommandId))
+			if (!Route.TryValidate(OutError))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("asset_simple_route_invalid_or_duplicate:")
-					+ Route.CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("asset_simple_route_invalid_or_duplicate"), OutError, TEXT("handler_factory"));
+				return false;
+			}
+			if (Seen.Contains(Route.CommandId))
+			{
+				OutHandlers.Reset();
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_simple_route_invalid_or_duplicate"), TEXT("The command route is registered more than once."), TEXT("handler_factory"), FString(), Route.CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Route.CommandId;
 				return false;
 			}
 			Seen.Add(Route.CommandId);
 			OutHandlers.Add(MakeShared<FHandler>(Route));
 		}
-		if (OutHandlers.Num() != 52)
+		if (OutHandlers.Num() != Routes.Num())
 		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_simple_route_count_mismatch"),
+				FString::Printf(TEXT("Created %d handlers; expected %d public routes."), OutHandlers.Num(), Routes.Num()), TEXT("handler_factory"));
 			OutHandlers.Reset();
-			OutError = TEXT("asset_simple_route_count_mismatch");
 			return false;
 		}
 		return true;

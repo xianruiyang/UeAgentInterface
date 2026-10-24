@@ -2,6 +2,7 @@
 
 #include "CommandHandlers/WorldSpatial/UeAgentLevelWorldCommandHandlers.h"
 #include "Components/ActorComponent.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
 #include "GameFramework/Actor.h"
 
 namespace UE::UAI::OperationOwners::WorldSpatial
@@ -38,15 +39,15 @@ namespace UE::UAI::OperationOwners::WorldSpatial
 			virtual bool SupportsExplicitCommand(
 				const FString& CommandId) const override
 			{
-				return CommandId == TEXT("content_graph.authoring_schema")
-					|| CommandId == TEXT("content_graph.export_workspace");
+				return CommandId == TEXT("content_graph.export_workspace");
 			}
 
 			virtual bool Matches(
 				const FImportInitializationDomainRequest& Request) const override
 			{
 				if (Request.GetCommandId() == TEXT("content_graph.import_workspace")
-					&& Request.GetSchemaId() != SchemaId)
+					&& Request.GetSchemaId() != SchemaId
+					&& Request.GetSchemaId() != GetSemanticWorkspaceSchemaId())
 				{
 					return false;
 				}
@@ -105,8 +106,14 @@ namespace UE::UAI::OperationOwners::WorldSpatial
 				if (Request.GetRole() != EInitializationNodeRole::RootTarget
 					|| InitializationContractId != WorldContract)
 				{
-					OutError.Set(TEXT("level_world_domain_contract_not_executable"),
-						InitializationContractId);
+					auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("level_world_domain_contract_not_executable"),
+						Request.GetRole() != EInitializationNodeRole::RootTarget
+							? TEXT("Level World execution requires a root-target initialization request.")
+							: TEXT("The initialization contract does not match the Level World execution contract."), TEXT("domain_execute"));
+					Detail.TargetPath = Request.GetTargetIdentity();
+					Detail.SourceKind = TEXT("native_result");
+					Detail.InternalContext = InitializationContractId;
+					OutError.SetFailure(MoveTemp(Detail));
 					return false;
 				}
 				return CommandHandlers::WorldSpatial::TryHandleDomainRequest(

@@ -19,34 +19,17 @@ namespace UE::UAI::CommandHandlers::PhysicsDeformer
 			const FUeAgentCommandRequest& Request,
 			const FString& RequiredScope)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(
-				TEXT("code"), TEXT("physics_deformer_authority_required"));
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(
-				TEXT("detail"), RequiredScope + TEXT(" is required"));
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"),
+                UE::UAI::Contract::FDiagnostic::Failure(TEXT("physics_deformer_authority_required"), RequiredScope + TEXT(" is required"), TEXT("command_authority"), FString(), Request.GetCommandId()));
+        }
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request,
+            UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = SubjectId.IsEmpty() ? Request.GetCommandId() : SubjectId;
+            if (Diagnostic.Stage.IsEmpty()) Diagnostic.Stage = TEXT("command_submit");
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -77,10 +60,7 @@ namespace UE::UAI::CommandHandlers::PhysicsDeformer
 				}
 				if (!IsInGameThread())
 				{
-					return Failure(
-						Request,
-						TEXT("physics_deformer_game_thread_required"),
-						TEXT("native Physics/Deformer mechanics must start on the game thread"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("physics_deformer_game_thread_required"), TEXT("native Physics/Deformer mechanics must start on the game thread"), TEXT("command_submit")));
 				}
 				if (!bQuery)
 				{
@@ -89,15 +69,12 @@ namespace UE::UAI::CommandHandlers::PhysicsDeformer
 				}
 				TSharedPtr<IUeAgentCommandHandler> Mechanics;
 				TArray<FString> MechanicsScopes;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!OperationOwners::PhysicsDeformer::TryResolveMechanics(
 						Id, Mechanics, MechanicsScopes, Error)
 					|| !Mechanics.IsValid())
 				{
-					return Failure(
-						Request,
-						TEXT("physics_deformer_runtime_unavailable"),
-						Error);
+					return Failure(Request, Error);
 				}
 				TArray<FString> Scopes = Caller.GetAuthorityScopes();
 				for (const FString& Scope : MechanicsScopes)
@@ -117,7 +94,7 @@ namespace UE::UAI::CommandHandlers::PhysicsDeformer
 
 	bool TryCreateHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();

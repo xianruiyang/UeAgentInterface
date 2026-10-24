@@ -365,8 +365,8 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 {
 	(void)Parameters;
 	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(16);
-	const FString GridId = TEXT("VG_TEST_") + Suffix;
-	const FString SessionId = TEXT("VGS_TEST_") + Suffix;
+	FString GridId = TEXT("VG_TEST_") + Suffix;
+	FString SessionId = TEXT("VGS_TEST_") + Suffix;
 	FScopedVoxelGridFixture Fixture(Suffix);
 	if (!TestTrue(TEXT("owned persisted editor world exists"), Fixture.IsValid()))
 	{
@@ -389,10 +389,7 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 	}
 
 	const TSharedRef<FJsonObject> Begin = MakeShared<FJsonObject>();
-	Begin->SetStringField(TEXT("action"), TEXT("begin"));
 	Begin->SetStringField(TEXT("mode"), TEXT("create"));
-	Begin->SetStringField(TEXT("session_id"), SessionId);
-	Begin->SetStringField(TEXT("grid_id"), GridId);
 	Begin->SetStringField(TEXT("label"), TEXT("UAI Voxel Grid Public Test"));
 	Begin->SetNumberField(TEXT("cell_size"), 100.0);
 	Begin->SetObjectField(TEXT("origin"), Vector(1200.0, -300.0, 80.0));
@@ -402,7 +399,7 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 	if (!ParsePayload(
 			*this,
 			TEXT("public begin succeeds"),
-			SubmitPublic(Registry, Dispatch, GetSessionCommandId(), Begin),
+			SubmitPublic(Registry, Dispatch, GetBeginCommandId(), Begin),
 			BeginPayload))
 	{
 		return false;
@@ -420,6 +417,8 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 	{
 		return false;
 	}
+	(*BeginReadback)->TryGetStringField(TEXT("session_id"), SessionId);
+	(*BeginReadback)->TryGetStringField(TEXT("grid_id"), GridId);
 
 	const TSharedRef<FJsonObject> Add = MakeShared<FJsonObject>();
 	Add->SetStringField(TEXT("action"), TEXT("add_bounds"));
@@ -473,7 +472,6 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 	Collision->SetStringField(TEXT("mode"), TEXT("exact_box_components"));
 	Collision->SetStringField(TEXT("profile_name"), TEXT("BlockAll"));
 	Collision->SetStringField(TEXT("enabled"), TEXT("query_and_physics"));
-	Collision->SetNumberField(TEXT("max_boxes"), 8);
 	Apply->SetObjectField(TEXT("collision"), Collision);
 	TSharedPtr<FJsonObject> ApplyPayload;
 	if (!ParsePayload(
@@ -577,13 +575,10 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 	ResetProcessSessionsForAutomation();
 	Fixture.GetPackage()->SetDirtyFlag(true);
 	const TSharedRef<FJsonObject> DirtyEdit = MakeShared<FJsonObject>();
-	DirtyEdit->SetStringField(TEXT("action"), TEXT("begin"));
 	DirtyEdit->SetStringField(TEXT("mode"), TEXT("edit"));
-	DirtyEdit->SetStringField(TEXT("session_id"), TEXT("VGS_DIRTY_") + Suffix);
-	DirtyEdit->SetStringField(TEXT("grid_id"), GridId);
 	DirtyEdit->SetStringField(TEXT("actor_ref"), ActorRef);
 	const FUeAgentCommandResult DirtyEditResult = SubmitPublic(
-		Registry, Dispatch, GetSessionCommandId(), DirtyEdit);
+		Registry, Dispatch, GetBeginCommandId(), DirtyEdit);
 	TestFalse(
 		TEXT("pre-existing dirty target package is rejected"),
 		DirtyEditResult.IsOk());
@@ -593,24 +588,25 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 			TEXT("voxel_grid_target_package_dirty")));
 	Fixture.GetPackage()->SetDirtyFlag(false);
 
-	const FString EditSessionId = TEXT("VGS_EDIT_") + Suffix;
+	FString EditSessionId = TEXT("VGS_EDIT_") + Suffix;
 	const TSharedRef<FJsonObject> Edit = MakeShared<FJsonObject>();
-	Edit->SetStringField(TEXT("action"), TEXT("begin"));
 	Edit->SetStringField(TEXT("mode"), TEXT("edit"));
-	Edit->SetStringField(TEXT("session_id"), EditSessionId);
-	Edit->SetStringField(TEXT("grid_id"), GridId);
 	Edit->SetStringField(TEXT("actor_ref"), ActorRef);
-	Edit->SetObjectField(TEXT("projection"), Projection);
 	TSharedPtr<FJsonObject> EditPayload;
 	if (!ParsePayload(
 			*this,
 			TEXT("edit session reloads from the UE-owned authoring component"),
-			SubmitPublic(Registry, Dispatch, GetSessionCommandId(), Edit),
+			SubmitPublic(Registry, Dispatch, GetBeginCommandId(), Edit),
 			EditPayload))
 	{
 		return false;
 	}
 	const TSharedPtr<FJsonObject>* EditReadback = nullptr;
+	if (EditPayload->TryGetObjectField(TEXT("readback"), EditReadback)
+		&& EditReadback && EditReadback->IsValid())
+	{
+		(*EditReadback)->TryGetStringField(TEXT("session_id"), EditSessionId);
+	}
 	Revision = -1.0;
 	OccupiedCells = -1.0;
 	TestTrue(
@@ -638,22 +634,29 @@ bool FUeAgentModelingVoxelGridPublicVerticalTest::RunTest(
 		return false;
 	}
 
-	const FString CancelGridId = TEXT("VG_CANCEL_") + Suffix;
-	const FString CancelSessionId = TEXT("VGS_CANCEL_") + Suffix;
+	FString CancelSessionId = TEXT("VGS_CANCEL_") + Suffix;
+	FString CancelGridId;
 	const TSharedRef<FJsonObject> CancelBegin = MakeShared<FJsonObject>();
-	CancelBegin->SetStringField(TEXT("action"), TEXT("begin"));
 	CancelBegin->SetStringField(TEXT("mode"), TEXT("create"));
-	CancelBegin->SetStringField(TEXT("session_id"), CancelSessionId);
-	CancelBegin->SetStringField(TEXT("grid_id"), CancelGridId);
 	TSharedPtr<FJsonObject> CancelBeginPayload;
 	if (!ParsePayload(
 			*this,
 			TEXT("second create session begins for cancellation"),
 			SubmitPublic(
-				Registry, Dispatch, GetSessionCommandId(), CancelBegin),
+				Registry, Dispatch, GetBeginCommandId(), CancelBegin),
 			CancelBeginPayload))
 	{
 		return false;
+	}
+	const TSharedPtr<FJsonObject>* CancelBeginReadback = nullptr;
+	if (CancelBeginPayload->TryGetObjectField(
+			TEXT("readback"), CancelBeginReadback)
+		&& CancelBeginReadback && CancelBeginReadback->IsValid())
+	{
+		(*CancelBeginReadback)->TryGetStringField(
+			TEXT("session_id"), CancelSessionId);
+		(*CancelBeginReadback)->TryGetStringField(
+			TEXT("grid_id"), CancelGridId);
 	}
 	const TSharedRef<FJsonObject> Cancel = MakeShared<FJsonObject>();
 	Cancel->SetStringField(TEXT("action"), TEXT("cancel"));
@@ -699,7 +702,7 @@ bool FUeAgentModelingVoxelGridLegacyMigrationTest::RunTest(
 	(void)Parameters;
 	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(16);
 	const FString GridId = TEXT("VG_LEGACY_") + Suffix;
-	const FString SessionId = TEXT("VGS_LEGACY_") + Suffix;
+	FString SessionId = TEXT("VGS_LEGACY_") + Suffix;
 	FScopedVoxelGridFixture Fixture(TEXT("Legacy_") + Suffix);
 	FScopedLegacySidecar Legacy(GridId);
 	if (!TestTrue(TEXT("legacy migration owns a persisted map"), Fixture.IsValid()))
@@ -741,16 +744,13 @@ bool FUeAgentModelingVoxelGridLegacyMigrationTest::RunTest(
 	}
 
 	const TSharedRef<FJsonObject> Begin = MakeShared<FJsonObject>();
-	Begin->SetStringField(TEXT("action"), TEXT("begin"));
 	Begin->SetStringField(TEXT("mode"), TEXT("edit"));
-	Begin->SetStringField(TEXT("session_id"), SessionId);
-	Begin->SetStringField(TEXT("grid_id"), GridId);
 	Begin->SetStringField(TEXT("actor_ref"), Actor->GetPathName());
 	TSharedPtr<FJsonObject> BeginPayload;
 	if (!ParsePayload(
 			*this,
 			TEXT("legacy edit imports the one-time sidecar"),
-			SubmitPublic(Registry, Dispatch, GetSessionCommandId(), Begin),
+			SubmitPublic(Registry, Dispatch, GetBeginCommandId(), Begin),
 			BeginPayload))
 	{
 		return false;
@@ -771,6 +771,10 @@ bool FUeAgentModelingVoxelGridLegacyMigrationTest::RunTest(
 			&& (*StateOwner)->TryGetBoolField(
 				TEXT("legacy_sidecar_imported"), bLegacyImported)
 			&& bLegacyImported);
+	if (BeginReadback && BeginReadback->IsValid())
+	{
+		(*BeginReadback)->TryGetStringField(TEXT("session_id"), SessionId);
+	}
 
 	const TSharedRef<FJsonObject> Apply = MakeShared<FJsonObject>();
 	Apply->SetStringField(TEXT("session_id"), SessionId);
@@ -807,7 +811,7 @@ bool FUeAgentModelingVoxelGridLegacyMigrationTest::RunTest(
 		TEXT("legacy state now has one UE-owned serialized component"),
 		TryFindAuthoringStateComponent(*Actor, Component, StateError)
 			&& Component
-			&& TryReadAuthoringState(*Component, 16, State, StateError)
+			&& TryReadAuthoringState(*Component, State, StateError)
 			&& State.GridId == GridId
 			&& State.Revision == 4
 			&& State.Cells.Num() == 2);

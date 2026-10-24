@@ -15,25 +15,17 @@ namespace UE::UAI::CommandHandlers::BlueprintNode
 		const FString CommandId = TEXT("blueprint.node.candidates");
 		const FString Owner = TEXT("blueprint-node-authoring-owner");
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request, UE::UAI::Contract::FDiagnostic Diagnostic)
 		{
-			const TSharedPtr<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString ErrorJson;
-			FString JsonError;
-			if (!Json::TryCanonicalize(Error, ErrorJson, JsonError))
-			{
-				ErrorJson = TEXT(
-					"{\"code\":\"blueprint_node_error_serialization_failed\"}");
-			}
-			return FUeAgentCommandResult::Failure(
-				Request, TEXT("{}"), MoveTemp(ErrorJson));
+			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
+		}
+
+		UE::UAI::Contract::FDiagnostic ResultFailure(const FString& Code, const FString& SubjectId, const UE::UAI::Contract::FDiagnostic& Cause)
+		{
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(Code, TEXT("The query input or result could not be encoded or decoded."), TEXT("command"), FString(), SubjectId);
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (!Cause.IsEmpty()) Diagnostic.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(Cause);
+			return Diagnostic;
 		}
 
 		class FHandler final : public IUeAgentExactCommandHandler
@@ -64,19 +56,11 @@ namespace UE::UAI::CommandHandlers::BlueprintNode
 				if (!Caller.IsValid()
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:query")))
 				{
-					return Failure(
-						Request,
-						TEXT("blueprint_node_query_authority_required"),
-						Request.GetCommandId(),
-						TEXT("the uai:query authority is required"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_node_query_authority_required"), TEXT("the uai:query authority is required"), TEXT("command"), FString(), Request.GetCommandId()));
 				}
 				if (!IsInGameThread())
 				{
-					return Failure(
-						Request,
-						TEXT("blueprint_node_game_thread_required"),
-						Request.GetCommandId(),
-						TEXT("Blueprint action discovery runs on the UE game thread"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_node_game_thread_required"), TEXT("Blueprint action discovery runs on the UE game thread"), TEXT("command"), FString(), Request.GetCommandId()));
 				}
 				FUeAgentBlueprintNodeCommandRequest ServiceRequest;
 				ServiceRequest.CommandId = Request.GetCommandId();
@@ -90,42 +74,24 @@ namespace UE::UAI::CommandHandlers::BlueprintNode
 				FUeAgentBlueprintNodeCommandError Error;
 				if (!Service->Execute(ServiceRequest, Response, Error))
 				{
-					return Failure(
-						Request,
-						Error.Code.IsEmpty()
-							? FString(TEXT("blueprint_node_query_failed"))
-							: Error.Code,
-						Error.SubjectId,
-						Error.Detail);
+					return Failure(Request, !Error.IsEmpty() ? Error : UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_node_query_failed"), TEXT("The candidate query failed without a diagnostic."), TEXT("query")));
 				}
 				if (!Response.bReadOnly)
 				{
-					return Failure(
-						Request,
-						TEXT("blueprint_node_query_not_read_only"),
-						Request.GetCommandId(),
-						TEXT("the candidate query service violated its contract"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_node_query_not_read_only"), TEXT("the candidate query service violated its contract"), TEXT("command"), FString(), Request.GetCommandId()));
 				}
 				TSharedPtr<FJsonObject> Payload;
-				FString JsonError;
+				UE::UAI::Contract::FDiagnostic JsonError;
 				if (!Json::TryParseObject(
 						Response.PayloadJson, Payload, JsonError))
 				{
-					return Failure(
-						Request,
-						TEXT("blueprint_node_result_invalid"),
-						Request.GetCommandId(),
-						JsonError);
+					return Failure(Request, ResultFailure(TEXT("blueprint_node_result_invalid"), Request.GetCommandId(), JsonError));
 				}
 				FString CanonicalPayload;
 				if (!Json::TryCanonicalize(
 						Payload, CanonicalPayload, JsonError))
 				{
-					return Failure(
-						Request,
-						TEXT("blueprint_node_result_invalid"),
-						Request.GetCommandId(),
-						JsonError);
+					return Failure(Request, ResultFailure(TEXT("blueprint_node_result_invalid"), Request.GetCommandId(), JsonError));
 				}
 				return FUeAgentCommandResult::Success(
 					Request, MoveTemp(CanonicalPayload));
@@ -139,7 +105,7 @@ namespace UE::UAI::CommandHandlers::BlueprintNode
 	bool TryCreateBlueprintNodeCommandHandlers(
 		TSharedRef<IUeAgentBlueprintNodeCommandService> Service,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
@@ -147,4 +113,3 @@ namespace UE::UAI::CommandHandlers::BlueprintNode
 		return true;
 	}
 }
-

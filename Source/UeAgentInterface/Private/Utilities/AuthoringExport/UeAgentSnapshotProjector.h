@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringExport/UeAgentExportContract.h"
@@ -53,7 +55,7 @@ namespace UeAgentSnapshotProjector
 	using FProjector = TFunction<bool(
 		const FProjectorRequest& Request,
 		FProjectedValue& OutValue,
-		FString& OutError)>;
+		UE::UAI::Contract::FDiagnostic& OutError)>;
 
 	class UEAGENTINTERFACE_API FProjectorRegistry
 	{
@@ -68,7 +70,7 @@ namespace UeAgentSnapshotProjector
 			const FProjectorDescriptor& Descriptor,
 			FProjector Projector,
 			ERegistrationResult& OutResult,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool FindProjector(const FString& ProjectorId, FProjectorDescriptor& OutDescriptor) const;
 		bool CopyProjector(const FString& ProjectorId, FProjector& OutProjector) const;
 		TArray<FProjectorDescriptor> ListProjectors() const;
@@ -109,8 +111,7 @@ namespace UeAgentSnapshotProjector
 	struct UEAGENTINTERFACE_API FProjectionResult
 	{
 		FString Status;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ContractId;
 		FString ContractVersion;
 		FString ProfileId;
@@ -125,11 +126,11 @@ namespace UeAgentSnapshotProjector
 	UEAGENTINTERFACE_API bool BuildProjectedFileRoot(
 		const FProjectedFile& File,
 		TSharedPtr<FJsonObject>& OutRoot,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool RegisterBuiltInProjectors(
 		FProjectorRegistry& Registry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool ProjectSnapshot(
 		const UeAgentExportContract::FContract& Contract,
 		const FString& ProfileId,

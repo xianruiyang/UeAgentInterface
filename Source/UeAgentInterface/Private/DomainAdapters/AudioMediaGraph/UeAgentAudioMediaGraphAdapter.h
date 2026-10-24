@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UE::UAI::DomainAdapters::AudioMediaGraph
@@ -12,18 +14,7 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 		Delete,
 	};
 
-	class UEAGENTINTERFACE_API FAudioMediaGraphError final
-	{
-	public:
-		const FString& GetCode() const { return Code; }
-		const FString& GetMessage() const { return Message; }
-		void Reset();
-		void Set(FString InCode, FString InMessage = FString());
-
-	private:
-		FString Code;
-		FString Message;
-	};
+	using FAudioMediaGraphError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FAudioMediaGraphStableIdentity final
 	{
@@ -123,7 +114,6 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 	UEAGENTINTERFACE_API bool TryValidateAudioMediaGraphAcyclicRelations(
 		const TArray<FAudioMediaGraphStableIdentity>& Items,
 		const TArray<FAudioMediaGraphRelation>& Relations,
-		int32 OperationBudget,
 		FAudioMediaGraphError& OutError);
 
 	UEAGENTINTERFACE_API bool TryValidateAudioMediaGraphLifecycleEvidence(

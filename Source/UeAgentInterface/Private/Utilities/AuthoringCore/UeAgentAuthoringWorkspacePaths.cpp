@@ -206,7 +206,7 @@ namespace UeAgentAuthoringWorkspacePaths
 		const FString& PathInput,
 		const FResolveOptions& Options,
 		FResolvedPath& OutPath,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		OutPath = FResolvedPath();
 		OutError.Reset();
@@ -216,7 +216,7 @@ namespace UeAgentAuthoringWorkspacePaths
 		Candidate.TrimStartAndEndInline();
 		if (WorkspaceRoot.IsEmpty() || Candidate.IsEmpty())
 		{
-			OutError = TEXT("workspace_source_invalid");
+			OutError = FDiagnostic::Failure(TEXT("workspace_source_invalid"), TEXT("The workspace source is missing or is not the required directory."), TEXT("workspace_path"));
 			return false;
 		}
 
@@ -234,12 +234,14 @@ namespace UeAgentAuthoringWorkspacePaths
 		}
 		if (!IsPathUnderRoot(AbsolutePath, WorkspaceRoot))
 		{
-			OutError = FString::Printf(TEXT("workspace_path_escape:%s"), *Candidate);
+			OutError = FDiagnostic::Failure(TEXT("workspace_path_escape"), TEXT("The requested path is outside the workspace root."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s"), *Candidate);
 			return false;
 		}
 		if (!Options.bAllowRoot && AbsolutePath.Equals(WorkspaceRoot, ESearchCase::IgnoreCase))
 		{
-			OutError = FString::Printf(TEXT("workspace_root_not_allowed:%s"), *AbsolutePath);
+			OutError = FDiagnostic::Failure(TEXT("workspace_root_not_allowed"), TEXT("This operation requires a workspace entry, not the root directory."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s"), *AbsolutePath);
 			return false;
 		}
 
@@ -256,27 +258,32 @@ namespace UeAgentAuthoringWorkspacePaths
 				FinalAbsolutePath,
 				bCandidateTraversedReparse))
 		{
-			OutError = FString::Printf(TEXT("workspace_reparse_resolution_failed:%s"), *AbsolutePath);
+			OutError = FDiagnostic::Failure(TEXT("workspace_reparse_resolution_failed"), TEXT("The filesystem could not resolve the final workspace path."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s"), *AbsolutePath);
 			return false;
 		}
 		if (bWorkspaceRootTraversedReparse)
 		{
-			OutError = FString::Printf(TEXT("workspace_reparse_not_allowed:%s"), *WorkspaceRoot);
+			OutError = FDiagnostic::Failure(TEXT("workspace_reparse_not_allowed"), TEXT("The workspace path passes through a reparse point that this operation does not allow."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s"), *WorkspaceRoot);
 			return false;
 		}
 		if (!IsPathUnderRoot(FinalAbsolutePath, FinalWorkspaceRoot))
 		{
-			OutError = FString::Printf(TEXT("workspace_reparse_escape:%s"), *AbsolutePath);
+			OutError = FDiagnostic::Failure(TEXT("workspace_reparse_escape"), TEXT("The resolved filesystem path escapes the workspace root."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s"), *AbsolutePath);
 			return false;
 		}
 		if (bCandidateTraversedReparse)
 		{
-			OutError = FString::Printf(TEXT("workspace_reparse_not_allowed:%s"), *AbsolutePath);
+			OutError = FDiagnostic::Failure(TEXT("workspace_reparse_not_allowed"), TEXT("The workspace path passes through a reparse point that this operation does not allow."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s"), *AbsolutePath);
 			return false;
 		}
 		if (Options.bRequireHjson && !FPaths::GetExtension(AbsolutePath, false).Equals(TEXT("hjson"), ESearchCase::IgnoreCase))
 		{
-			OutError = FString::Printf(TEXT("hjson_file_required:%s"), *AbsolutePath);
+			OutError = FDiagnostic::Failure(TEXT("hjson_file_required"), TEXT("The workspace entry must be an HJSON file."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s"), *AbsolutePath);
 			return false;
 		}
 
@@ -284,12 +291,14 @@ namespace UeAgentAuthoringWorkspacePaths
 		const bool bIsDirectory = IFileManager::Get().DirectoryExists(*AbsolutePath);
 		if (Options.bRequireExists && !bIsFile && !bIsDirectory)
 		{
-			OutError = FString::Printf(TEXT("workspace_entry_missing:%s"), *AbsolutePath);
+			OutError = FDiagnostic::Failure(TEXT("workspace_entry_missing"), TEXT("The requested workspace entry does not exist."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s"), *AbsolutePath);
 			return false;
 		}
 		if (Options.bRequireDirectory && Options.bRequireExists && !bIsDirectory)
 		{
-			OutError = FString::Printf(TEXT("workspace_source_invalid:%s"), *AbsolutePath);
+			OutError = FDiagnostic::Failure(TEXT("workspace_source_invalid"), TEXT("The workspace source is missing or is not the required directory."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s"), *AbsolutePath);
 			return false;
 		}
 
@@ -305,7 +314,7 @@ namespace UeAgentAuthoringWorkspacePaths
 		const FString& PathInput,
 		const FResolveOptions& Options,
 		FResolvedPath& OutPath,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		return ResolveUnderRoot(FPaths::ProjectDir(), PathInput, Options, OutPath, OutError);
 	}
@@ -316,14 +325,16 @@ namespace UeAgentAuthoringWorkspacePaths
 		const FString& ReferenceInput,
 		const FResolveOptions& Options,
 		FResolvedPath& OutPath,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		FResolveOptions SourceOptions;
 		SourceOptions.bAllowRoot = false;
 		FResolvedPath SourcePath;
 		if (!ResolveUnderRoot(WorkspaceRootInput, SourceFileInput, SourceOptions, SourcePath, OutError))
 		{
-			OutError = FString::Printf(TEXT("workspace_source_invalid:%s"), *OutError);
+			const FDiagnostic Cause = OutError;
+			OutError = FDiagnostic::Failure(TEXT("workspace_source_invalid"), TEXT("The source file cannot be resolved inside the workspace."), TEXT("workspace_path"));
+			OutError.PublicCause = MakeShared<FDiagnostic>(Cause);
 			return false;
 		}
 
@@ -331,7 +342,7 @@ namespace UeAgentAuthoringWorkspacePaths
 		Reference.TrimStartAndEndInline();
 		if (Reference.IsEmpty())
 		{
-			OutError = TEXT("workspace_reference_unresolved:empty");
+			OutError = FDiagnostic::Failure(TEXT("workspace_reference_unresolved"), TEXT("The workspace reference is empty."), TEXT("workspace_path"));
 			return false;
 		}
 
@@ -355,12 +366,15 @@ namespace UeAgentAuthoringWorkspacePaths
 
 		if (!ResolveUnderRoot(SourcePath.WorkspaceRoot, Candidate, Options, OutPath, OutError))
 		{
-			if (!OutError.StartsWith(TEXT("workspace_path_escape:"))
-				&& !OutError.StartsWith(TEXT("workspace_reparse_escape:"))
-				&& !OutError.StartsWith(TEXT("workspace_reparse_not_allowed:"))
-				&& !OutError.StartsWith(TEXT("workspace_reparse_resolution_failed:")))
+			if (!(OutError.Code == TEXT("workspace_path_escape"))
+				&& !(OutError.Code == TEXT("workspace_reparse_escape"))
+				&& !(OutError.Code == TEXT("workspace_reparse_not_allowed"))
+				&& !(OutError.Code == TEXT("workspace_reparse_resolution_failed")))
 			{
-				OutError = FString::Printf(TEXT("workspace_reference_unresolved:%s:%s"), *ReferenceInput, *OutError);
+				const FDiagnostic Cause = OutError;
+				OutError = FDiagnostic::Failure(TEXT("workspace_reference_unresolved"), TEXT("The workspace reference could not be resolved."), TEXT("workspace_path"));
+				OutError.InternalContext = ReferenceInput;
+				OutError.PublicCause = MakeShared<FDiagnostic>(Cause);
 			}
 			return false;
 		}
@@ -370,7 +384,7 @@ namespace UeAgentAuthoringWorkspacePaths
 	bool DetectCaseCollisions(
 		const FString& WorkspaceRootInput,
 		const TArray<FString>& PathInputs,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		TMap<FString, FString> OriginalByCanonicalKey;
@@ -387,10 +401,12 @@ namespace UeAgentAuthoringWorkspacePaths
 			{
 				if (!Existing->Equals(Resolved.RelativePath, ESearchCase::CaseSensitive))
 				{
-					OutError = FString::Printf(TEXT("workspace_path_case_collision:%s:%s"), **Existing, *Resolved.RelativePath);
+					OutError = FDiagnostic::Failure(TEXT("workspace_path_case_collision"), TEXT("Workspace paths collide when compared without case."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s:%s"), **Existing, *Resolved.RelativePath);
 					return false;
 				}
-				OutError = FString::Printf(TEXT("workspace_duplicate_target:%s"), *Resolved.RelativePath);
+				OutError = FDiagnostic::Failure(TEXT("workspace_duplicate_target"), TEXT("The workspace contains the same target path more than once."), TEXT("workspace_path"));
+			OutError.InternalContext = FString::Printf(TEXT("%s"), *Resolved.RelativePath);
 				return false;
 			}
 			OriginalByCanonicalKey.Add(Resolved.CanonicalKey, Resolved.RelativePath);
@@ -401,7 +417,7 @@ namespace UeAgentAuthoringWorkspacePaths
 	bool MakeAssetRelativePath(
 		const FString& AssetPathInput,
 		FString& OutRelativePath,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		OutRelativePath.Reset();
 		OutError.Reset();
@@ -410,7 +426,7 @@ namespace UeAgentAuthoringWorkspacePaths
 		AssetPath = FPackageName::ObjectPathToPackageName(AssetPath);
 		if (!FPackageName::IsValidLongPackageName(AssetPath))
 		{
-			OutError = TEXT("invalid_asset_path");
+			OutError = FDiagnostic::Failure(TEXT("invalid_asset_path"), TEXT("The asset path is invalid."), TEXT("workspace_path"));
 			return false;
 		}
 		while (AssetPath.StartsWith(TEXT("/")))
@@ -425,7 +441,7 @@ namespace UeAgentAuthoringWorkspacePaths
 		const FString& WorkspaceRootInput,
 		const FString& AssetPathInput,
 		FString& OutFolderPath,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		OutFolderPath.Reset();
 		FString RelativePath;

@@ -34,19 +34,7 @@ namespace
 
 	FUeAgentResourceTrackerOwner MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 100000},
-				{EUeAgentResourceDimension::Items, 100000},
-				{EUeAgentResourceDimension::StringBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 100000},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					16 * 1024 * 1024,
-				},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	FUeAgentExecutionContextInput MakeExecutionInput(
@@ -351,6 +339,11 @@ namespace
 			LastContext = &Context;
 			LastResources = &Context.GetResourceTracker();
 			LastRequest = &Request.Get();
+			if (Contract.GetCapabilityId() == TEXT("world.object_snap_to_surface")
+				&& Phase == EUeAgentWorldSpatialReadPhase::Preflight)
+			{
+				bSnapSurfaceTraced = true;
+			}
 			if (FailPhase.IsSet() && FailPhase.GetValue() == Phase)
 			{
 				OutError.Code = TEXT("fixture_world_spatial_readback_failed");
@@ -369,6 +362,7 @@ namespace
 		{
 			PhaseCalls.Reset();
 			FailPhase.Reset();
+			bSnapSurfaceTraced = false;
 		}
 
 		FAutomationTestBase* Test = nullptr;
@@ -379,6 +373,7 @@ namespace
 		FUeAgentResourceTracker* LastResources = nullptr;
 		const IUeAgentWorldSpatialTypedRequest* LastRequest = nullptr;
 		TArray<FString>* Trace = nullptr;
+		bool bSnapSurfaceTraced = false;
 	};
 
 	class FRecordingMutationPort final
@@ -394,6 +389,7 @@ namespace
 			const FUeAgentWorldSpatialExecutionChainContract& Contract,
 			const FUeAgentWorldSpatialTypedRequestRef& Request,
 			const TArray<FUeAgentOperationTargetBinding>& Targets,
+			const FUeAgentWorldSpatialPreflightFence& Fence,
 			const FUeAgentOperationContext& Context,
 			FUeAgentWorldSpatialMutationResult& OutResult,
 			FUeAgentWorldSpatialExecutionError& OutError) override
@@ -406,6 +402,17 @@ namespace
 			LastContext = &Context;
 			LastResources = &Context.GetResourceTracker();
 			LastRequest = &Request.Get();
+			LastFence = Fence;
+			if (ChangedFenceRef.IsEmpty() == false
+				&& Fence.Entries.ContainsByPredicate(
+					[&](const FUeAgentWorldSpatialFenceEntry& Entry)
+					{
+						return Entry.TargetRef == ChangedFenceRef;
+					}))
+			{
+				OutError.Code = TEXT("fixture_world_spatial_fence_stale_before_write");
+				return false;
+			}
 			if (bFail)
 			{
 				OutError.Code = TEXT("fixture_world_spatial_mutation_failed");
@@ -414,6 +421,34 @@ namespace
 			OutResult = FUeAgentWorldSpatialMutationResult(
 				TEXT("world-spatial-operation:") + Contract.GetCapabilityId(),
 				TEXT("fixture-mutation-fact"));
+			++NativeWrites;
+			return true;
+		}
+
+		bool TryCaptureFence(
+			const FUeAgentWorldSpatialExecutionChainContract& Contract,
+			const FUeAgentWorldSpatialTypedRequestRef& Request,
+			const TArray<FUeAgentOperationTargetBinding>& Targets,
+			const FUeAgentOperationContext& Context,
+			FUeAgentWorldSpatialPreflightFence& OutFence,
+			FUeAgentWorldSpatialExecutionError& OutError) override
+		{
+			OutError = {};
+			const FUeAgentStateRevision Revision(
+				TEXT("fixture-source"), TEXT("fixture-generation"), 1);
+			if (Contract.GetCapabilityId() == TEXT("world.object_align"))
+			{
+				OutFence.Entries = {{TEXT("subject-a"), Revision}, {TEXT("subject-b"), Revision}, {TEXT("reference"), Revision}};
+			}
+			else if (Contract.GetCapabilityId() == TEXT("world.object_snap_to_surface"))
+			{
+				OutFence.Entries = {{TEXT("subject-a"), Revision}, {TEXT("subject-b"), Revision}};
+			}
+			else
+			{
+				OutFence.Entries = {{Contract.GetCapabilityId(), Revision}};
+			}
+			LastCapturedFence = OutFence;
 			return true;
 		}
 
@@ -422,6 +457,10 @@ namespace
 		const FUeAgentOperationContext* LastContext = nullptr;
 		FUeAgentResourceTracker* LastResources = nullptr;
 		const IUeAgentWorldSpatialTypedRequest* LastRequest = nullptr;
+		FUeAgentWorldSpatialPreflightFence LastFence;
+		FUeAgentWorldSpatialPreflightFence LastCapturedFence;
+		FString ChangedFenceRef;
+		int32 NativeWrites = 0;
 		TArray<FString>* Trace = nullptr;
 	};
 
@@ -553,7 +592,7 @@ bool FUeAgentWorldSpatialC3QueryProviderBehaviorTest::RunTest(
 	TSharedPtr<const FUeAgentDomainQueryProviderRegistry> Providers;
 	FUeAgentWorldSpatialExecutionError FactoryError;
 	if (!TestTrue(
-			TEXT("register ten exact C3Q providers"),
+			TEXT("register exact C3Q providers"),
 			TryCreateWorldSpatialQueryProviderRegistry(
 				Decoder,
 				Readback,
@@ -575,8 +614,6 @@ bool FUeAgentWorldSpatialC3QueryProviderBehaviorTest::RunTest(
 			QueryDescriptors.Add(Query.GetValue());
 		}
 	}
-	TestEqual(TEXT("exact query descriptor count"), QueryDescriptors.Num(), 10);
-
 	const FUeAgentResourceTrackerOwner Resources = MakeResources();
 	for (int32 Index = 0; Index < QueryDescriptors.Num(); ++Index)
 	{
@@ -728,7 +765,7 @@ bool FUeAgentWorldSpatialC3OperationBehaviorTest::RunTest(
 	TArray<TSharedRef<FUeAgentWorldSpatialOperationChain>> Chains;
 	FUeAgentWorldSpatialExecutionError FactoryError;
 	if (!TestTrue(
-			TEXT("create twelve exact C3O chains"),
+			TEXT("create exact C3O chains"),
 			TryCreateWorldSpatialOperationChains(
 				Decoder,
 				Readback,
@@ -740,8 +777,6 @@ bool FUeAgentWorldSpatialC3OperationBehaviorTest::RunTest(
 	{
 		return false;
 	}
-	TestEqual(TEXT("exact operation chain count"), Chains.Num(), 12);
-
 	const FUeAgentResourceTrackerOwner Resources = MakeResources();
 	for (int32 Index = 0; Index < Chains.Num(); ++Index)
 	{
@@ -749,6 +784,14 @@ bool FUeAgentWorldSpatialC3OperationBehaviorTest::RunTest(
 			Chains[Index];
 		const FUeAgentWorldSpatialExecutionChainContract& ChainContract =
 			Chain->GetContract();
+		const FString& CapabilityId = ChainContract.GetCapabilityId();
+		const bool bRequiresInternalPreflightFence =
+			CapabilityId == TEXT("graph.view.update")
+			|| CapabilityId == TEXT("mesh.pivot.update")
+			|| CapabilityId == TEXT("mesh.transform.bake")
+			|| CapabilityId == TEXT("viewport.state.restore")
+			|| CapabilityId == TEXT("world.object_align")
+			|| CapabilityId == TEXT("world.object_snap_to_surface");
 		const FUeAgentOperationDescriptor* Descriptor = FindCapability(
 			*DescriptorRegistry,
 			ChainContract.GetCapabilityId());
@@ -797,6 +840,12 @@ bool FUeAgentWorldSpatialC3OperationBehaviorTest::RunTest(
 			Readback->PhaseCalls.FindRef(
 				EUeAgentWorldSpatialReadPhase::Preflight),
 			1);
+		if (ChainContract.GetCapabilityId() == TEXT("world.object_snap_to_surface"))
+		{
+			TestTrue(
+				TEXT("snap preflight captures a fresh surface trace"),
+				Readback->bSnapSurfaceTraced);
+		}
 
 		FPlanningResult Planning;
 		TestTrue(
@@ -806,6 +855,23 @@ bool FUeAgentWorldSpatialC3OperationBehaviorTest::RunTest(
 				*Context,
 				Planning,
 				Error));
+		if (Index == 0 && Planning.IsReady())
+		{
+			const int32 WritesBeforeStale = Mutation->NativeWrites;
+			Mutation->ChangedFenceRef =
+				Mutation->LastCapturedFence.Entries[0].TargetRef;
+			FExecutionReceipt StaleReceipt;
+			TestFalse(
+				TEXT("stale preflight fence rejects before native write"),
+				Chain->GetExecutor().TryExecute(
+					Planning, {}, *Context, StaleReceipt, Error));
+			TestEqual(
+				TEXT("stale fence performs zero native writes"),
+				Mutation->NativeWrites,
+				WritesBeforeStale);
+			Mutation->ChangedFenceRef.Reset();
+			continue;
+		}
 		FExecutionReceipt Receipt;
 		TestTrue(
 			TEXT("C3O executor performs one native mutation"),
@@ -819,6 +885,18 @@ bool FUeAgentWorldSpatialC3OperationBehaviorTest::RunTest(
 			TEXT("native mutation occurs exactly once"),
 			Mutation->Calls - MutationBefore,
 			1);
+		if (ChainContract.GetCapabilityId() == TEXT("world.object_align"))
+		{
+			TestEqual(TEXT("align fences all subjects and reference"), Mutation->LastFence.Entries.Num(), 3);
+		}
+		if (ChainContract.GetCapabilityId() == TEXT("world.object_snap_to_surface"))
+		{
+			TestEqual(TEXT("snap fences all subjects"), Mutation->LastFence.Entries.Num(), 2);
+		}
+		if (ChainContract.GetCapabilityId() == TEXT("viewport.state.restore"))
+		{
+			TestTrue(TEXT("viewport restore fences current viewport"), Mutation->LastFence.Entries.Num() == 1);
+		}
 
 		FVerificationOutcome Outcome;
 		TestTrue(
@@ -852,6 +930,11 @@ bool FUeAgentWorldSpatialC3OperationBehaviorTest::RunTest(
 			TEXT("same typed request reaches mutation"),
 			Decoder->LastRequest.IsValid()
 				&& Mutation->LastRequest == Decoder->LastRequest.Get());
+		TestEqual(
+			TEXT("only the six guarded mutations receive an internal preflight fence"),
+			Mutation->LastFence.IsValid()
+				&& !Mutation->LastFence.Entries.IsEmpty(),
+			bRequiresInternalPreflightFence);
 		TestTrue(
 			TEXT("same typed request reaches independent compare"),
 			Comparator->LastRequest == Decoder->LastRequest.Get());

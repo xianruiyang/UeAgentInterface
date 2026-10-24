@@ -2,12 +2,14 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UeAgentPCGAuthoring
 {
 	inline constexpr const TCHAR* DomainId = TEXT("pcg");
-	inline constexpr const TCHAR* ApplyProviderId = TEXT("pcg.graph.apply");
+	inline constexpr const TCHAR* ApplyProviderId = TEXT("pcg-hjson-apply-provider");
 	inline constexpr const TCHAR* AssetInputContractId = TEXT("uai.apply_input.pcg.graph");
 	inline constexpr const TCHAR* AssetWorkspaceContractId = TEXT("uai.apply_workspace.pcg.graph");
 	inline constexpr const TCHAR* StateAccessorId = TEXT("pcg.graph.state");
@@ -28,5 +30,5 @@ namespace UeAgentPCGAuthoring
 	inline constexpr const TCHAR* EdgeIdentityModelId = TEXT("pcg_edge_identity");
 	inline constexpr const TCHAR* ParametersIdentityModelId = TEXT("pcg_parameters_identity");
 
-	UEAGENTINTERFACE_API bool RegisterDescriptors(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError);
 }

@@ -1,16 +1,11 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
 
-#if __has_include("DomainAdapters/Blueprint/Node/UeAgentBlueprintNodeMechanics.h") \
-	&& __has_include("DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintSurfaceMechanics.h") \
-	&& __has_include("OperationOwners/BlueprintNode/UeAgentBlueprintNodeCommandService.h") \
-	&& __has_include("Module/CommandRegistration/BlueprintNode/UeAgentBlueprintNodeRegistration.h")
-#define UAI_T11_BLUEPRINT_NODE_AVAILABLE 1
 #include "BlueprintActionDatabase.h"
 #include "BlueprintEditorSettings.h"
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
 #include "Core/Contract/UeAgentCommandJson.h"
@@ -19,6 +14,7 @@
 #include "DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintCandidateBindingNormalizer.h"
 #include "DomainAdapters/Blueprint/Surfaces/UeAgentBlueprintSurfaceMechanics.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringIdentity.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintMutationModel.h"
 #include "Dom/JsonObject.h"
 #include "EdGraph/EdGraph.h"
@@ -41,11 +37,7 @@
 #include "UObject/Package.h"
 #include "UObject/ObjectKey.h"
 #include "UObject/StrongObjectPtr.h"
-#else
-#define UAI_T11_BLUEPRINT_NODE_AVAILABLE 0
-#endif
 
-#if UAI_T11_BLUEPRINT_NODE_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::CommandContract;
@@ -79,12 +71,10 @@ namespace
 			{
 				OutError.Code = TEXT("fixture_t11_failed");
 				OutError.SubjectId = Request.CommandId;
-				OutError.Detail = TEXT("typed fixture failure");
+				OutError.PublicMessage = TEXT("typed fixture failure");
 				return false;
 			}
-			OutResponse.PayloadJson = TEXT(
-				"{\"command_id\":\"blueprint.node.candidates\","
-				"\"read_only\":true,\"candidates\":[]}");
+			OutResponse.PayloadJson = TEXT("{\"names\":[]}");
 			OutResponse.bReadOnly = true;
 			return true;
 		}
@@ -106,7 +96,7 @@ namespace
 			TEXT("\"command_id\":\"blueprint.node.candidates\",")
 			TEXT("\"command_binding_hash\":\"%s\",")
 			TEXT("\"params\":{\"target\":\"/Game/T11.BP_T11\",")
-			TEXT("\"graph_id\":\"graph:fixture\"}}"),
+			TEXT("\"graph_name\":\"EventGraph\"}}"),
 			*ContractHash);
 		FTCHARToUTF8 Encoded(*Envelope);
 		TArray<uint8> Bytes;
@@ -131,7 +121,6 @@ namespace
 	}
 
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T11DomainProviderActivationTest,
@@ -141,10 +130,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T11DomainProviderActivationTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T11_BLUEPRINT_NODE_AVAILABLE
-	TestTrue(TEXT("T11 Blueprint node provider is available"), false);
-	return false;
-#else
 	FWorkspaceError Error;
 	TSharedPtr<const FImportInitializationDomainProviderRegistry> Registry;
 	if (!TestTrue(
@@ -200,7 +185,6 @@ bool FUeAgentStrictV2T11DomainProviderActivationTest::RunTest(
 			FString(TEXT("uai.init.blueprint.asset/1")));
 	}
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -211,10 +195,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T11ExactCandidateDispatchTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T11_BLUEPRINT_NODE_AVAILABLE
-	TestTrue(TEXT("T11 exact candidate command is available"), false);
-	return false;
-#else
 	const TSharedRef<FFixtureService> Service = MakeShared<FFixtureService>();
 	TSharedPtr<const UE::UAI::CommandRegistry::FUeAgentImmutableCommandRegistry>
 		Registry;
@@ -255,13 +235,19 @@ bool FUeAgentStrictV2T11ExactCandidateDispatchTest::RunTest(
 			TEXT("corr-t11")),
 		MakeShared<FNeverCancelled>());
 	TestTrue(TEXT("the fixture result succeeds"), Result.IsOk());
+	const TSharedPtr<FJsonObject> Payload = ParsePayload(this, Result.GetPayloadJson());
+	const TArray<TSharedPtr<FJsonValue>>* Names = nullptr;
+	TestTrue(
+		TEXT("the fixture exposes only the names result"),
+		Payload.IsValid()
+			&& Payload->Values.Num() == 1
+			&& Payload->TryGetArrayField(TEXT("names"), Names));
 	TestEqual(TEXT("the exact service is called once"), Service->Calls, 1);
 	TestEqual(
 		TEXT("the exact command identity is unchanged"),
 		Service->LastRequest.CommandId,
 		FString(TEXT("blueprint.node.candidates")));
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -272,10 +258,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T11_BLUEPRINT_NODE_AVAILABLE
-	TestTrue(TEXT("T11 production candidate query is available"), false);
-	return false;
-#else
 	const FString BlueprintName = TEXT("BP_NodeNative_")
 		+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
 	UBlueprintEditorSettings* BlueprintEditorSettings =
@@ -379,225 +361,188 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 			GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary, FInterpTo)));
 	EventGraph->AddNode(FunctionNode, false, false);
 	FString GraphId;
+	FString ResolvedGraphName;
 	FString GraphError;
-	FString StructurePayloadJson;
-	bool bStructureReadOnly = false;
-	FWorkspaceError StructureError;
-	const FString StructureParams = FString::Printf(
-		TEXT("{\"target\":\"%s\"}"), *ObjectPath);
 	if (!TestTrue(
-		TEXT("the active Blueprint exposes its public content graph"),
-		UE::UAI::DomainAdapters::Blueprint::Surfaces::TryExecuteContentGraph(
-			TEXT("content_graph.structure"), ObjectPath, StructureParams,
-			StructurePayloadJson, bStructureReadOnly, StructureError)))
+		TEXT("the candidate fixture resolves its exact graph identity"),
+		UeAgentPaletteSearch::TryResolveBlueprintGraphIdentity(
+			ObjectPath, TEXT("EventGraph"), GraphId, ResolvedGraphName,
+			GraphError)))
 	{
-		AddError(StructureError.GetCode());
+		AddError(GraphError);
 		return false;
 	}
-	TestTrue(TEXT("the public content graph is read-only"), bStructureReadOnly);
-	const TSharedPtr<FJsonObject> StructurePayload = ParsePayload(
-		this, StructurePayloadJson);
-	const TArray<TSharedPtr<FJsonValue>>* Containers = nullptr;
-	int32 MatchingGraphCount = 0;
-	if (StructurePayload.IsValid()
-		&& StructurePayload->TryGetArrayField(TEXT("containers"), Containers)
-		&& Containers)
-	{
-		for (const TSharedPtr<FJsonValue>& ContainerValue : *Containers)
-		{
-			const TSharedPtr<FJsonObject> Container = ContainerValue->AsObject();
-			const TSharedPtr<FJsonObject>* State = nullptr;
-			FString Kind;
-			FString Name;
-			FString GraphKind;
-			FString CandidateGraphId;
-			if (Container.IsValid()
-				&& Container->TryGetStringField(TEXT("kind"), Kind)
-				&& Kind == TEXT("blueprint_graph")
-				&& Container->TryGetObjectField(TEXT("value"), State)
-				&& State && State->IsValid()
-				&& (*State)->TryGetStringField(TEXT("name"), Name)
-				&& Name == TEXT("EventGraph")
-				&& (*State)->TryGetStringField(TEXT("graph_kind"), GraphKind)
-				&& GraphKind == TEXT("event_graph")
-				&& Container->TryGetStringField(TEXT("id"), CandidateGraphId)
-				&& !CandidateGraphId.IsEmpty())
-			{
-				++MatchingGraphCount;
-				GraphId = MoveTemp(CandidateGraphId);
-			}
-		}
-	}
-	if (!TestEqual(
-		TEXT("the public payload uniquely identifies EventGraph"),
-		MatchingGraphCount, 1))
-	{
-		return false;
-	}
-	const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
-	bool bFoundEventSemantics = false;
-	bool bFoundBoundEventSemantics = false;
-	bool bFoundFunctionSemantics = false;
-	if (StructurePayload.IsValid()
-		&& StructurePayload->TryGetArrayField(TEXT("items"), Items)
-		&& Items)
-	{
-		for (const TSharedPtr<FJsonValue>& ItemValue : *Items)
-		{
-			const TSharedPtr<FJsonObject> Item = ItemValue->AsObject();
-			const TSharedPtr<FJsonObject>* State = nullptr;
-			FString Kind;
-			if (!Item.IsValid()
-				|| !Item->TryGetStringField(TEXT("kind"), Kind)
-				|| Kind != TEXT("blueprint_node")
-				|| !Item->TryGetObjectField(TEXT("value"), State)
-				|| !State || !State->IsValid())
-			{
-				continue;
-			}
-			FString EventName;
-			FString EventClass;
-			bFoundEventSemantics |=
-				(*State)->TryGetStringField(TEXT("event_name"), EventName)
-				&& EventName == TEXT("ReceiveTick")
-				&& (*State)->TryGetStringField(TEXT("event_class"), EventClass)
-				&& EventClass == AActor::StaticClass()->GetPathName();
-
-			FString ComponentName;
-			FString DelegateName;
-			FString DelegateOwnerClass;
-			bFoundBoundEventSemantics |=
-				(*State)->TryGetStringField(
-					TEXT("component_name"), ComponentName)
-				&& ComponentName == TEXT("DetectionVolume")
-				&& (*State)->TryGetStringField(
-					TEXT("delegate_property_name"), DelegateName)
-				&& DelegateName == TEXT("OnComponentBeginOverlap")
-				&& (*State)->TryGetStringField(
-					TEXT("delegate_owner_class"), DelegateOwnerClass)
-				&& DelegateOwnerClass
-					== UPrimitiveComponent::StaticClass()->GetPathName();
-
-			FString FunctionName;
-			FString FunctionOwnerClass;
-			bFoundFunctionSemantics |=
-				(*State)->TryGetStringField(
-					TEXT("function_name"), FunctionName)
-				&& FunctionName == TEXT("FInterpTo")
-				&& (*State)->TryGetStringField(
-					TEXT("function_owner_class"), FunctionOwnerClass)
-				&& FunctionOwnerClass
-					== UKismetMathLibrary::StaticClass()->GetPathName();
-		}
-	}
-	TestTrue(
-		TEXT("the public structure exposes the native event identity"),
-		bFoundEventSemantics);
-	TestTrue(
-		TEXT("the public structure exposes component-bound event identity"),
-		bFoundBoundEventSemantics);
-	TestTrue(
-		TEXT("the public structure reuses the authoring function identity"),
-		bFoundFunctionSemantics);
+	const FString GraphName = TEXT("EventGraph");
+	TestEqual(
+		TEXT("the resolved candidate graph keeps its readable name"),
+		ResolvedGraphName,
+		GraphName);
 	TSharedPtr<IUeAgentBlueprintNodeCommandService> Service;
 	TestTrue(
 		TEXT("the production candidate service composes"),
 		TryCreateProductionBlueprintNodeCommandService(Service, GraphError));
-	FUeAgentBlueprintNodeCommandRequest Request;
-	Request.CommandId = TEXT("blueprint.node.candidates");
-	Request.RequestId = TEXT("native-t11-candidate");
-	Request.CanonicalParamsJson = FString::Printf(
-		TEXT("{\"graph_id\":\"%s\",\"target\":\"%s\"}"),
-		*GraphId,
-		*ObjectPath);
-	FUeAgentBlueprintNodeCommandResponse Response;
-	FUeAgentBlueprintNodeCommandError Error;
-	const bool bProductionQuerySucceeded = Service.IsValid()
-		&& Service->Execute(Request, Response, Error);
-	TestTrue(
-		TEXT("the production candidate query succeeds"),
-		bProductionQuerySucceeded);
-	if (!bProductionQuerySucceeded)
 	{
-		AddError(FString::Printf(
-			TEXT("production candidate query failed: code=%s subject=%s detail=%s"),
-			*Error.Code,
-			*Error.SubjectId,
-			*Error.Detail));
-	}
-	const TSharedPtr<FJsonObject> Payload = ParsePayload(
-		this, Response.PayloadJson);
-	const TArray<TSharedPtr<FJsonValue>>* Candidates = nullptr;
-	TestTrue(
-		TEXT("the real action database yields candidates"),
-		Payload.IsValid()
-			&& Payload->TryGetArrayField(TEXT("candidates"), Candidates)
-			&& Candidates && Candidates->Num() > 0);
-	if (Candidates && Candidates->Num() > 0)
-	{
-		const TSharedPtr<FJsonObject> Candidate = (*Candidates)[0]->AsObject();
-		FString CandidateName;
-		FString CandidateId;
+		UeAgentPaletteSearch::FSearchParams UnscopedMultiplyParams;
+		UnscopedMultiplyParams.CatalogType = TEXT("blueprint_node");
+		UnscopedMultiplyParams.AssetPath = ObjectPath;
+		UnscopedMultiplyParams.GraphName = GraphId;
+		UnscopedMultiplyParams.SearchText = TEXT("Multiply");
+		UnscopedMultiplyParams.bContextSensitive = true;
+		UeAgentPaletteSearch::FSearchResult UnscopedMultiplyResult;
+		FString UnscopedMultiplyError;
 		TestTrue(
-			TEXT("the native candidate exposes a direct non-empty name"),
-			Candidate.IsValid()
-				&& Candidate->TryGetStringField(TEXT("name"), CandidateName)
-				&& !CandidateName.IsEmpty());
-		TestTrue(
-			TEXT("the native candidate exposes a compact non-empty id"),
-			Candidate.IsValid()
-				&& Candidate->TryGetStringField(TEXT("id"), CandidateId)
-				&& !CandidateId.IsEmpty());
-
-		FUeAgentBlueprintNodeCommandRequest ResolveRequest;
-		ResolveRequest.CommandId = TEXT("blueprint.node.candidates");
-		ResolveRequest.RequestId = TEXT("native-t11-candidate-resolve");
-		ResolveRequest.CanonicalParamsJson = FString::Printf(
-			TEXT("{\"graph_id\":\"%s\",\"id\":\"%s\",\"target\":\"%s\"}"),
-			*GraphId,
-			*CandidateId,
-			*ObjectPath);
-		FUeAgentBlueprintNodeCommandResponse ResolveResponse;
-		FUeAgentBlueprintNodeCommandError ResolveError;
-		TestTrue(
-			TEXT("the compact id re-enumerates the same native context"),
-			Service->Execute(ResolveRequest, ResolveResponse, ResolveError));
-		const TSharedPtr<FJsonObject> ResolvePayload = ParsePayload(
-			this, ResolveResponse.PayloadJson);
-		const TArray<TSharedPtr<FJsonValue>>* ResolvedCandidates = nullptr;
-		TestTrue(
-			TEXT("the compact id resolves exactly one candidate"),
-			ResolvePayload.IsValid()
-				&& ResolvePayload->TryGetArrayField(
-					TEXT("candidates"), ResolvedCandidates)
-				&& ResolvedCandidates && ResolvedCandidates->Num() == 1);
-		if (ResolvedCandidates && ResolvedCandidates->Num() == 1)
+			TEXT("unscoped Multiply discovery succeeds"),
+			UeAgentPaletteSearch::ExecuteSearch(
+				UnscopedMultiplyParams,
+				UnscopedMultiplyResult,
+				UnscopedMultiplyError));
+		int32 ExactMultiplyOperationCount = 0;
+		bool bUnscopedMultiplyReturnedPower = false;
+		for (const UeAgentPaletteSearch::FCandidate& Candidate
+			: UnscopedMultiplyResult.MatchingCandidates)
 		{
-			const TSharedPtr<FJsonObject> Resolved =
-				(*ResolvedCandidates)[0]->AsObject();
-			TestEqual(
-				TEXT("id resolution preserves the native candidate name"),
-				Resolved->GetStringField(TEXT("name")),
-				CandidateName);
-			TestEqual(
-				TEXT("id resolution preserves the compact candidate identity"),
-				Resolved->GetStringField(TEXT("id")),
-				CandidateId);
+			ExactMultiplyOperationCount +=
+				Candidate.AuthoringSelectors.FindRef(TEXT("operation_name"))
+					== TEXT("Multiply") ? 1 : 0;
+			bUnscopedMultiplyReturnedPower |=
+				Candidate.AuthoringSelectors.FindRef(TEXT("function_name"))
+					== TEXT("MultiplyMultiply_FloatFloat");
 		}
+		if (ExactMultiplyOperationCount != 1
+			|| bUnscopedMultiplyReturnedPower)
+		{
+			TArray<FString> Diagnostics;
+			for (const UeAgentPaletteSearch::FCandidate& Candidate
+				: UnscopedMultiplyResult.MatchingCandidates)
+			{
+				Diagnostics.Add(
+					UeAgentPaletteSearch::GetBlueprintActionPublicName(Candidate)
+					+ TEXT(" {category=") + Candidate.CategoryPath
+					+ TEXT(", operation=")
+					+ Candidate.AuthoringSelectors.FindRef(TEXT("operation_name"))
+					+ TEXT(", function=")
+					+ Candidate.AuthoringSelectors.FindRef(TEXT("function_name"))
+					+ TEXT("}"));
+			}
+			AddError(TEXT("unscoped Multiply diagnostics: ")
+				+ FString::Join(Diagnostics, TEXT(", ")));
+		}
+		TestEqual(
+			TEXT("unscoped Multiply has one exact readable operation"),
+			ExactMultiplyOperationCount,
+			1);
+		TestFalse(
+			TEXT("unscoped Multiply does not expose Power under its internal name"),
+			bUnscopedMultiplyReturnedPower);
 	}
+	{
+		UeAgentPaletteSearch::FSearchParams SelectParams;
+		SelectParams.CatalogType = TEXT("blueprint_node");
+		SelectParams.AssetPath = ObjectPath;
+		SelectParams.GraphName = GraphId;
+		SelectParams.SearchText = TEXT("Select");
+		SelectParams.bContextSensitive = true;
+		UeAgentPaletteSearch::FSearchResult SelectResult;
+		FString SelectError;
+		TestTrue(
+			TEXT("unscoped Select discovery succeeds"),
+			UeAgentPaletteSearch::ExecuteSearch(
+				SelectParams, SelectResult, SelectError));
+		TArray<FString> SelectDiagnostics;
+		for (const UeAgentPaletteSearch::FCandidate& Candidate
+			: SelectResult.MatchingCandidates)
+		{
+			SelectDiagnostics.Add(
+				UeAgentPaletteSearch::GetBlueprintActionPublicName(Candidate)
+				+ TEXT(" {type=") + Candidate.Type
+				+ TEXT(", function=")
+				+ Candidate.AuthoringSelectors.FindRef(TEXT("function_name"))
+				+ TEXT(", operation=")
+				+ Candidate.AuthoringSelectors.FindRef(TEXT("operation_name"))
+				+ TEXT("}"));
+		}
+		AddInfo(TEXT("Select candidates: ")
+			+ FString::Join(SelectDiagnostics, TEXT(", ")));
+	}
+	{
+		UeAgentPaletteSearch::FSearchParams RawInterpParams;
+		RawInterpParams.CatalogType = TEXT("blueprint_node");
+		RawInterpParams.AssetPath = ObjectPath;
+		RawInterpParams.GraphName = GraphId;
+		RawInterpParams.bContextSensitive = true;
+		UeAgentPaletteSearch::FSearchResult RawInterpResult;
+		FString RawInterpError;
+		TestTrue(
+			TEXT("raw Blueprint candidate collection succeeds"),
+			UeAgentPaletteSearch::ExecuteSearch(
+				RawInterpParams, RawInterpResult, RawInterpError));
+		TArray<FString> RawInterpDiagnostics;
+		for (const UeAgentPaletteSearch::FCandidate& Candidate
+			: RawInterpResult.MatchingCandidates)
+		{
+			if (Candidate.AuthoringSelectors.FindRef(TEXT("function_name"))
+				== TEXT("FInterpTo"))
+			{
+				RawInterpDiagnostics.Add(
+					UeAgentPaletteSearch::GetBlueprintActionPublicName(Candidate));
+			}
+		}
+		if (RawInterpDiagnostics.IsEmpty())
+		{
+			AddError(TEXT("raw FInterp To candidate is absent"));
+		}
+		else
+		{
+			AddInfo(TEXT("raw FInterp To names: ")
+				+ FString::Join(RawInterpDiagnostics, TEXT(", ")));
+		}
 
-	auto QueryCandidates = [&Service, &GraphId, &ObjectPath, this](
+		UeAgentPaletteSearch::FSearchParams InterpParams;
+		InterpParams.CatalogType = TEXT("blueprint_node");
+		InterpParams.AssetPath = ObjectPath;
+		InterpParams.GraphName = GraphId;
+		InterpParams.SearchText = TEXT("FInterp To");
+		InterpParams.bContextSensitive = true;
+		UeAgentPaletteSearch::FSearchResult InterpResult;
+		FString InterpError;
+		TestTrue(
+			TEXT("unscoped FInterp To discovery succeeds"),
+			UeAgentPaletteSearch::ExecuteSearch(
+				InterpParams, InterpResult, InterpError));
+		bool bFoundFInterpTo = false;
+		TArray<FString> Diagnostics;
+		for (const UeAgentPaletteSearch::FCandidate& Candidate
+			: InterpResult.MatchingCandidates)
+		{
+			bFoundFInterpTo |= Candidate.AuthoringSelectors.FindRef(
+				TEXT("function_name")) == TEXT("FInterpTo");
+			Diagnostics.Add(
+				UeAgentPaletteSearch::GetBlueprintActionPublicName(Candidate)
+				+ TEXT(" {function=")
+				+ Candidate.AuthoringSelectors.FindRef(TEXT("function_name"))
+				+ TEXT("}"));
+		}
+		if (!bFoundFInterpTo)
+		{
+			AddError(TEXT("FInterp To diagnostics: ")
+				+ FString::Join(Diagnostics, TEXT(", ")));
+		}
+		TestTrue(
+			TEXT("FInterp To resolves by its readable function name"),
+			bFoundFInterpTo);
+	}
+	auto QueryCandidates = [&Service, &GraphId, &GraphName, &ObjectPath, this](
 		const FString& Query,
 		const FString& RequestId,
-		const TArray<TSharedPtr<FJsonValue>>*& OutCandidates,
+		const TArray<TSharedPtr<FJsonValue>>*& OutNames,
 		TSharedPtr<FJsonObject>& OutPayload) -> bool
 	{
 		FUeAgentBlueprintNodeCommandRequest CandidateRequest;
 		CandidateRequest.CommandId = TEXT("blueprint.node.candidates");
 		CandidateRequest.RequestId = RequestId;
 		CandidateRequest.CanonicalParamsJson = FString::Printf(
-			TEXT("{\"graph_id\":\"%s\",\"limit\":20,\"query\":\"%s\",\"target\":\"%s\"}"),
-			*GraphId,
+			TEXT("{\"graph_name\":\"%s\",\"limit\":3,\"query\":\"%s\",\"target\":\"%s\"}"),
+			*GraphName,
 			*Query,
 			*ObjectPath);
 		FUeAgentBlueprintNodeCommandResponse CandidateResponse;
@@ -610,55 +555,117 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 				TEXT("candidate query failed: code=%s subject=%s detail=%s"),
 				*CandidateError.Code,
 				*CandidateError.SubjectId,
-				*CandidateError.Detail));
+				*CandidateError.PublicMessage));
 			return false;
 		}
 		OutPayload = ParsePayload(this, CandidateResponse.PayloadJson);
 		return OutPayload.IsValid()
-			&& OutPayload->TryGetArrayField(TEXT("candidates"), OutCandidates)
-			&& OutCandidates;
+			&& OutPayload->TryGetArrayField(TEXT("names"), OutNames)
+			&& OutNames;
 	};
-
-	const TArray<TSharedPtr<FJsonValue>>* BoundCandidates = nullptr;
-	TSharedPtr<FJsonObject> BoundPayload;
-	FString BoundCandidateName;
-	FString BoundCandidateId;
-	int32 BoundCandidateCount = 0;
-	if (TestTrue(
-			TEXT("the component-bound action can be queried by its native menu context"),
-			QueryCandidates(
-				TEXT("HingeLeft Set Relative Rotation"),
-				TEXT("native-t11-component-bound-action"),
-				BoundCandidates,
-				BoundPayload)))
+	auto FindSemanticNodeOccurrence = [](const UEdGraph& Graph,
+		const UEdGraphNode& Target, const FString& SemanticName) -> int32
 	{
-		for (const TSharedPtr<FJsonValue>& Value : *BoundCandidates)
+		int32 Occurrence = 0;
+		for (const UEdGraphNode* Node : Graph.Nodes)
 		{
-			const TSharedPtr<FJsonObject> Candidate = Value->AsObject();
-			FString FunctionName;
-			FString FunctionOwnerClass;
-			if (Candidate.IsValid()
-				&& Candidate->TryGetStringField(
-					TEXT("function_name"), FunctionName)
-				&& FunctionName == TEXT("K2_SetRelativeRotation")
-				&& Candidate->TryGetStringField(
-					TEXT("function_owner_class"), FunctionOwnerClass)
-				&& FunctionOwnerClass
-					== USceneComponent::StaticClass()->GetPathName())
+			if (!Node || !UeAgentBlueprintAuthoring::NodeSemanticName(*Node).Equals(
+					SemanticName, ESearchCase::IgnoreCase))
 			{
-				++BoundCandidateCount;
-				Candidate->TryGetStringField(
-					TEXT("name"), BoundCandidateName);
-				Candidate->TryGetStringField(
-					TEXT("id"), BoundCandidateId);
+				continue;
+			}
+			if (Node == &Target)
+			{
+				return Occurrence;
+			}
+			++Occurrence;
+		}
+		return INDEX_NONE;
+	};
+	{
+		const TArray<TSharedPtr<FJsonValue>>* SelectNames = nullptr;
+		TSharedPtr<FJsonObject> SelectPayload;
+		if (TestTrue(
+				TEXT("Select discovery projects a bounded names-only page"),
+				QueryCandidates(
+					TEXT("Select"), TEXT("native-t11-select"),
+					SelectNames, SelectPayload))
+			&& SelectNames)
+		{
+			TestTrue(TEXT("Select discovery remains bounded"),
+				SelectNames->Num() <= 3);
+			TestTrue(TEXT("Select discovery keeps the generic node name"),
+				SelectNames->ContainsByPredicate(
+					[](const TSharedPtr<FJsonValue>& Value)
+					{
+						return Value.IsValid()
+							&& Value->Type == EJson::String
+							&& Value->AsString() == TEXT("Select");
+					}));
+		}
+	}
+	{
+		const TArray<TSharedPtr<FJsonValue>>* SelectFloatNames = nullptr;
+		TSharedPtr<FJsonObject> SelectFloatPayload;
+		if (TestTrue(
+				TEXT("Select Float is discoverable by its stable semantic name"),
+				QueryCandidates(
+					TEXT("Select Float"), TEXT("native-t11-select-float"),
+					SelectFloatNames, SelectFloatPayload))
+			&& SelectFloatNames)
+		{
+			TestTrue(TEXT("Select Float discovery returns the exact function"),
+				SelectFloatNames->ContainsByPredicate(
+					[](const TSharedPtr<FJsonValue>& Value)
+					{
+						return Value.IsValid()
+							&& Value->Type == EJson::String
+							&& Value->AsString() == TEXT("Select Float");
+					}));
+		}
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* GenericCandidates = nullptr;
+	TSharedPtr<FJsonObject> GenericPayload;
+	FString GenericCandidateName;
+	int32 GenericCandidateCount = 0;
+	UeAgentPaletteSearch::FSearchParams GenericPerformParams;
+	GenericPerformParams.CatalogType = TEXT("blueprint_node");
+	GenericPerformParams.AssetPath = ObjectPath;
+	GenericPerformParams.GraphName = GraphId;
+	GenericPerformParams.bContextSensitive = true;
+	if (TestTrue(
+			TEXT("the unbound component function can be queried by readable name"),
+			QueryCandidates(
+				TEXT("Set Relative Rotation"),
+				TEXT("native-t11-unbound-component-function"),
+				GenericCandidates,
+				GenericPayload)))
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *GenericCandidates)
+		{
+			if (!Value.IsValid() || Value->Type != EJson::String)
+			{
+				continue;
+			}
+			UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+			FString ResolveError;
+			if (UeAgentPaletteSearch::TryResolveBlueprintActionCandidate(
+					GenericPerformParams, Value->AsString(), FString(),
+					ResolvedCandidate, ResolveError)
+				&& ResolvedCandidate.AuthoringSelectors.FindRef(
+						TEXT("function_name")) == TEXT("K2_SetRelativeRotation"))
+			{
+				++GenericCandidateCount;
+				GenericCandidateName = Value->AsString();
 			}
 		}
 	}
 	TestEqual(
-		TEXT("the targeted component-bound action is unique"),
-		BoundCandidateCount,
+		TEXT("the generic component function action is unique"),
+		GenericCandidateCount,
 		1);
-	if (!BoundCandidateId.IsEmpty())
+	if (!GenericCandidateName.IsEmpty())
 	{
 		TSet<UEdGraphNode*> NodesBefore;
 		for (UEdGraphNode* Node : EventGraph->Nodes)
@@ -668,70 +675,49 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 				NodesBefore.Add(Node);
 			}
 		}
-		UeAgentPaletteSearch::FSearchParams BoundPerformParams;
-		BoundPerformParams.CatalogType = TEXT("blueprint_node");
-		BoundPerformParams.AssetPath = ObjectPath;
-		BoundPerformParams.GraphName = GraphId;
-		BoundPerformParams.bContextSensitive = true;
-		UEdGraphNode* BoundPrimaryNode = nullptr;
-		UeAgentPaletteSearch::FCandidate PerformedBoundCandidate;
-		FString BoundPerformError;
+		UEdGraphNode* GenericNode = nullptr;
+		UeAgentPaletteSearch::FCandidate PerformedGenericCandidate;
+		FString GenericPerformError;
 		TestTrue(
-			TEXT("one native component-bound action may create its companion node"),
+			TEXT("the generic component function action creates without an implicit component"),
 			UeAgentPaletteSearch::TryPerformBlueprintActionCandidate(
-				BoundPerformParams,
-				BoundCandidateName,
-				BoundCandidateId,
+				GenericPerformParams,
+				GenericCandidateName,
+				FString(),
 				FVector2f(900.0f, -320.0f),
-				BoundPrimaryNode,
-				PerformedBoundCandidate,
-				BoundPerformError));
-		TArray<UEdGraphNode*> BoundCreatedNodes;
+				GenericNode,
+				PerformedGenericCandidate,
+				GenericPerformError));
+		TArray<UEdGraphNode*> GenericCreatedNodes;
 		for (UEdGraphNode* Node : EventGraph->Nodes)
 		{
 			if (Node && !NodesBefore.Contains(Node))
 			{
-				BoundCreatedNodes.Add(Node);
+				GenericCreatedNodes.Add(Node);
 			}
 		}
 		TestEqual(
-			TEXT("the native bound action creates one primary and one companion"),
-			BoundCreatedNodes.Num(),
-			2);
-		UK2Node_CallFunction* BoundCall =
-			Cast<UK2Node_CallFunction>(BoundPrimaryNode);
+			TEXT("the generic action creates only its declared node"),
+			GenericCreatedNodes.Num(),
+			1);
+		UK2Node_CallFunction* GenericCall =
+			Cast<UK2Node_CallFunction>(GenericNode);
 		TestNotNull(
-			TEXT("the returned primary is the native function call"),
-			BoundCall);
-		UK2Node_VariableGet* BoundGetter = nullptr;
-		for (UEdGraphNode* Node : BoundCreatedNodes)
+			TEXT("the returned node is the native function call"),
+			GenericCall);
+		if (GenericCall)
 		{
-			if (UK2Node_VariableGet* Getter = Cast<UK2Node_VariableGet>(Node))
-			{
-				if (Getter->GetVarName() == TEXT("HingeLeft"))
-				{
-					BoundGetter = Getter;
-					break;
-				}
-			}
-		}
-		TestNotNull(
-			TEXT("the native action preserves its HingeLeft getter companion"),
-			BoundGetter);
-		if (BoundCall && BoundGetter)
-		{
-			const UFunction* TargetFunction = BoundCall->GetTargetFunction();
+			const UFunction* TargetFunction = GenericCall->GetTargetFunction();
 			TestTrue(
-				TEXT("the returned primary keeps K2_SetRelativeRotation semantics"),
+				TEXT("the returned node keeps K2_SetRelativeRotation semantics"),
 				TargetFunction
 					&& TargetFunction->GetFName()
 						== TEXT("K2_SetRelativeRotation"));
-			const UEdGraphPin* SelfPin = BoundCall->FindPin(
+			const UEdGraphPin* SelfPin = GenericCall->FindPin(
 				UEdGraphSchema_K2::PN_Self, EGPD_Input);
 			TestTrue(
-				TEXT("the native companion remains linked to the call self pin"),
-				SelfPin
-					&& SelfPin->LinkedTo.Contains(BoundGetter->GetValuePin()));
+				TEXT("the generic call self pin remains available for explicit HJSON wiring"),
+				SelfPin && SelfPin->LinkedTo.IsEmpty());
 		}
 	}
 
@@ -742,78 +728,81 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 		OtherActorPin);
 	if (OtherActorPin)
 	{
+		const FString ActorOverlapSemanticName =
+			UeAgentBlueprintAuthoring::NodeSemanticName(*ActorOverlapEvent);
+		const int32 ActorOverlapOccurrence = FindSemanticNodeOccurrence(
+			*EventGraph, *ActorOverlapEvent, ActorOverlapSemanticName);
 		FUeAgentBlueprintNodeCommandRequest EqualRequest;
 		EqualRequest.CommandId = TEXT("blueprint.node.candidates");
 		EqualRequest.RequestId = TEXT("native-t11-equal-semantics");
 		EqualRequest.CanonicalParamsJson = FString::Printf(
-			TEXT("{\"graph_id\":\"%s\",\"limit\":20,\"node_guid\":\"%s\",\"pin_name\":\"OtherActor\",\"query\":\"Equal\",\"target\":\"%s\"}"),
-			*GraphId,
-			*ActorOverlapEvent->NodeGuid.ToString(
-				EGuidFormats::DigitsWithHyphensLower),
+			TEXT("{\"graph_name\":\"%s\",\"limit\":3,\"node_name\":\"%s\",\"node_occurrence\":%d,\"pin_name\":\"OtherActor\",\"query\":\"Equal\",\"target\":\"%s\"}"),
+			*GraphName,
+			*ActorOverlapSemanticName,
+			ActorOverlapOccurrence,
 			*ObjectPath);
 		FUeAgentBlueprintNodeCommandResponse EqualResponse;
 		FUeAgentBlueprintNodeCommandError EqualError;
+		const bool bEqualQuerySucceeded = Service.IsValid()
+			&& Service->Execute(EqualRequest, EqualResponse, EqualError);
 		TestTrue(
 			TEXT("Equal candidates use the real OtherActor pin context"),
-			Service.IsValid()
-				&& Service->Execute(EqualRequest, EqualResponse, EqualError));
+			bEqualQuerySucceeded);
+		if (!bEqualQuerySucceeded)
+		{
+			AddError(EqualError.Code + TEXT(":") + EqualError.PublicMessage);
+		}
 		const TSharedPtr<FJsonObject> EqualPayload = ParsePayload(
 			this, EqualResponse.PayloadJson);
-		const TArray<TSharedPtr<FJsonValue>>* EqualCandidates = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* EqualNames = nullptr;
 		if (EqualPayload.IsValid())
 		{
-			EqualPayload->TryGetArrayField(TEXT("candidates"), EqualCandidates);
+			EqualPayload->TryGetArrayField(TEXT("names"), EqualNames);
 		}
 		FString EqualCandidateName;
-		FString EqualCandidateId;
-		if (EqualCandidates)
+		UeAgentPaletteSearch::FSearchParams EqualPerformParams;
+		EqualPerformParams.CatalogType = TEXT("blueprint_node");
+		EqualPerformParams.AssetPath = ObjectPath;
+		EqualPerformParams.GraphName = GraphId;
+		EqualPerformParams.NodeGuid = ActorOverlapEvent->NodeGuid.ToString(
+			EGuidFormats::DigitsWithHyphensLower);
+		EqualPerformParams.PinName = TEXT("OtherActor");
+		EqualPerformParams.bContextSensitive = true;
+		if (EqualNames)
 		{
-			for (const TSharedPtr<FJsonValue>& Value : *EqualCandidates)
+			for (const TSharedPtr<FJsonValue>& Value : *EqualNames)
 			{
-				const TSharedPtr<FJsonObject> Candidate = Value->AsObject();
-				FString OperationName;
-				if (!Candidate.IsValid()
-					|| !Candidate->TryGetStringField(
-						TEXT("operation_name"), OperationName)
-					|| OperationName != TEXT("EqualEqual"))
+				if (!Value.IsValid() || Value->Type != EJson::String)
 				{
 					continue;
 				}
-				TestEqual(
-					TEXT("EqualEqual projects the promotable operator node class"),
-					Candidate->GetStringField(TEXT("node_class")),
-					UK2Node_PromotableOperator::StaticClass()->GetPathName());
-				TestFalse(
-					TEXT("EqualEqual does not claim one representative function"),
-					Candidate->HasField(TEXT("function_name"))
-						|| Candidate->HasField(TEXT("function_owner_class")));
-				Candidate->TryGetStringField(TEXT("name"), EqualCandidateName);
-				Candidate->TryGetStringField(TEXT("id"), EqualCandidateId);
-				break;
+				UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+				FString ResolveError;
+				if (UeAgentPaletteSearch::TryResolveBlueprintActionCandidate(
+						EqualPerformParams, Value->AsString(), FString(),
+						ResolvedCandidate, ResolveError)
+					&& ResolvedCandidate.AuthoringSelectors.FindRef(
+							TEXT("operation_name")) == TEXT("EqualEqual"))
+				{
+					EqualCandidateName = Value->AsString();
+					break;
+				}
 			}
 		}
 		TestFalse(
-			TEXT("EqualEqual has a native contextual candidate"),
-			EqualCandidateId.IsEmpty());
-		if (!EqualCandidateId.IsEmpty())
+			TEXT("EqualEqual has a native contextual name"),
+			EqualCandidateName.IsEmpty());
+		if (!EqualCandidateName.IsEmpty())
 		{
-			UeAgentPaletteSearch::FSearchParams PerformParams;
-			PerformParams.CatalogType = TEXT("blueprint_node");
-			PerformParams.AssetPath = ObjectPath;
-			PerformParams.GraphName = GraphId;
-			PerformParams.NodeGuid = ActorOverlapEvent->NodeGuid.ToString(
-				EGuidFormats::DigitsWithHyphensLower);
-			PerformParams.PinName = TEXT("OtherActor");
-			PerformParams.bContextSensitive = true;
 			UEdGraphNode* CreatedNode = nullptr;
 			UeAgentPaletteSearch::FCandidate PerformedCandidate;
 			FString PerformError;
 			TestTrue(
 				TEXT("the native EqualEqual candidate creates from OtherActor"),
 				UeAgentPaletteSearch::TryPerformBlueprintActionCandidate(
-					PerformParams,
+					EqualPerformParams,
 					EqualCandidateName,
-					EqualCandidateId,
+					FString(),
 					FVector2f(640.0f, -80.0f),
 					CreatedNode,
 					PerformedCandidate,
@@ -848,132 +837,105 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 		TEXT("the ReceiveTick fixture exposes its native DeltaSeconds pin"),
 		DeltaSecondsPin);
 	FString MultiplyCandidateName;
-	FString MultiplyCandidateId;
+	bool bMultiplyQueryReturnedPower = false;
+	FString TickSemanticNameForCandidate;
 	if (DeltaSecondsPin)
 	{
+		const FString TickSemanticName =
+			UeAgentBlueprintAuthoring::NodeSemanticName(*EventNode);
+		const int32 TickOccurrence = FindSemanticNodeOccurrence(
+			*EventGraph, *EventNode, TickSemanticName);
+		TickSemanticNameForCandidate = TickSemanticName;
 		FUeAgentBlueprintNodeCommandRequest MultiplyRequest;
 		MultiplyRequest.CommandId = TEXT("blueprint.node.candidates");
 		MultiplyRequest.RequestId = TEXT("native-t11-multiply-semantics");
 		MultiplyRequest.CanonicalParamsJson = FString::Printf(
-			TEXT("{\"graph_id\":\"%s\",\"limit\":20,\"node_guid\":\"%s\",\"pin_name\":\"DeltaSeconds\",\"query\":\"Multiply\",\"target\":\"%s\"}"),
-			*GraphId,
-			*EventNode->NodeGuid.ToString(
-				EGuidFormats::DigitsWithHyphensLower),
+			TEXT("{\"graph_name\":\"%s\",\"limit\":3,\"node_name\":\"%s\",\"node_occurrence\":%d,\"pin_name\":\"DeltaSeconds\",\"query\":\"Multiply\",\"target\":\"%s\"}"),
+			*GraphName,
+			*TickSemanticName,
+			TickOccurrence,
 			*ObjectPath);
 		FUeAgentBlueprintNodeCommandResponse MultiplyResponse;
 		FUeAgentBlueprintNodeCommandError MultiplyError;
+		const bool bMultiplyQuerySucceeded = Service.IsValid()
+			&& Service->Execute(
+				MultiplyRequest, MultiplyResponse, MultiplyError);
 		TestTrue(
 			TEXT("Multiply candidates use the real DeltaSeconds pin context"),
-			Service.IsValid()
-				&& Service->Execute(
-					MultiplyRequest, MultiplyResponse, MultiplyError));
+			bMultiplyQuerySucceeded);
+		if (!bMultiplyQuerySucceeded)
+		{
+			AddError(MultiplyError.Code + TEXT(":") + MultiplyError.PublicMessage);
+		}
 		const TSharedPtr<FJsonObject> MultiplyPayload = ParsePayload(
 			this, MultiplyResponse.PayloadJson);
-		const TArray<TSharedPtr<FJsonValue>>* MultiplyCandidates = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* MultiplyNames = nullptr;
 		if (MultiplyPayload.IsValid())
 		{
 			MultiplyPayload->TryGetArrayField(
-				TEXT("candidates"), MultiplyCandidates);
+				TEXT("names"), MultiplyNames);
 		}
-		if (MultiplyCandidates)
+		if (MultiplyNames)
 		{
-			for (const TSharedPtr<FJsonValue>& Value : *MultiplyCandidates)
+			UeAgentPaletteSearch::FSearchParams ResolveParams;
+			ResolveParams.CatalogType = TEXT("blueprint_node");
+			ResolveParams.AssetPath = ObjectPath;
+			ResolveParams.GraphName = GraphId;
+			ResolveParams.NodeGuid = EventNode->NodeGuid.ToString(
+				EGuidFormats::DigitsWithHyphensLower);
+			ResolveParams.PinName = TEXT("DeltaSeconds");
+			ResolveParams.bContextSensitive = true;
+			for (const TSharedPtr<FJsonValue>& Value : *MultiplyNames)
 			{
-				const TSharedPtr<FJsonObject> Candidate = Value->AsObject();
-				FString OperationName;
-				if (!Candidate.IsValid()
-					|| !Candidate->TryGetStringField(
-						TEXT("operation_name"), OperationName)
-					|| OperationName != TEXT("Multiply"))
+				if (!Value.IsValid() || Value->Type != EJson::String)
 				{
 					continue;
 				}
-				TestEqual(
-					TEXT("Multiply projects the promotable operator node class"),
-					Candidate->GetStringField(TEXT("node_class")),
-					UK2Node_PromotableOperator::StaticClass()->GetPathName());
-				TestFalse(
-					TEXT("Multiply does not claim one representative function"),
-					Candidate->HasField(TEXT("function_name"))
-						|| Candidate->HasField(TEXT("function_owner_class")));
-				TestFalse(
-					TEXT("Multiply does not expose its private action signature"),
-					Candidate->HasField(TEXT("native_action_signature")));
-				Candidate->TryGetStringField(
-					TEXT("name"), MultiplyCandidateName);
-				Candidate->TryGetStringField(
-					TEXT("id"), MultiplyCandidateId);
-				break;
+				UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+				FString ResolveError;
+				if (UeAgentPaletteSearch::TryResolveBlueprintActionCandidate(
+						ResolveParams, Value->AsString(), FString(),
+						ResolvedCandidate, ResolveError))
+				{
+					bMultiplyQueryReturnedPower =
+						bMultiplyQueryReturnedPower
+						|| ResolvedCandidate.AuthoringSelectors.FindRef(
+							TEXT("function_name"))
+							== TEXT("MultiplyMultiply_FloatFloat");
+					if (ResolvedCandidate.AuthoringSelectors.FindRef(
+							TEXT("operation_name")) == TEXT("Multiply"))
+					{
+						MultiplyCandidateName = Value->AsString();
+					}
+				}
 			}
 		}
 	}
 	TestFalse(
-		TEXT("Multiply has a stable promotable-operator candidate"),
-		MultiplyCandidateId.IsEmpty());
+		TEXT("Multiply discovery does not surface the Power function through its internal name"),
+		bMultiplyQueryReturnedPower);
+	TestFalse(
+		TEXT("Multiply has a stable promotable-operator name"),
+		MultiplyCandidateName.IsEmpty());
 
-	if (DeltaSecondsPin && !MultiplyCandidateId.IsEmpty())
+	if (DeltaSecondsPin && !MultiplyCandidateName.IsEmpty())
 	{
-		FUeAgentBlueprintNodeCommandRequest ResolveMultiplyRequest;
-		ResolveMultiplyRequest.CommandId = TEXT("blueprint.node.candidates");
-		ResolveMultiplyRequest.RequestId =
-			TEXT("native-t11-multiply-resolve");
-		ResolveMultiplyRequest.CanonicalParamsJson = FString::Printf(
-			TEXT("{\"graph_id\":\"%s\",\"id\":\"%s\",\"node_guid\":\"%s\",\"pin_name\":\"DeltaSeconds\",\"target\":\"%s\"}"),
-			*GraphId,
-			*MultiplyCandidateId,
-			*EventNode->NodeGuid.ToString(
-				EGuidFormats::DigitsWithHyphensLower),
-			*ObjectPath);
-		FUeAgentBlueprintNodeCommandResponse ResolveMultiplyResponse;
-		FUeAgentBlueprintNodeCommandError ResolveMultiplyError;
-		TestTrue(
-			TEXT("Multiply compact id re-resolves in the same pin context"),
-			Service->Execute(
-				ResolveMultiplyRequest,
-				ResolveMultiplyResponse,
-				ResolveMultiplyError));
-		const TSharedPtr<FJsonObject> ResolveMultiplyPayload = ParsePayload(
-			this, ResolveMultiplyResponse.PayloadJson);
-		const TArray<TSharedPtr<FJsonValue>>* ResolvedMultiplyCandidates =
-			nullptr;
-		TestTrue(
-			TEXT("Multiply compact id resolves exactly one candidate"),
-			ResolveMultiplyPayload.IsValid()
-				&& ResolveMultiplyPayload->TryGetArrayField(
-					TEXT("candidates"), ResolvedMultiplyCandidates)
-				&& ResolvedMultiplyCandidates
-				&& ResolvedMultiplyCandidates->Num() == 1);
-		if (ResolvedMultiplyCandidates
-			&& ResolvedMultiplyCandidates->Num() == 1)
-		{
-			const TSharedPtr<FJsonObject> Resolved =
-				(*ResolvedMultiplyCandidates)[0]->AsObject();
-			TestEqual(
-				TEXT("Multiply id resolution preserves operator semantics"),
-				Resolved->GetStringField(TEXT("operation_name")),
-				FString(TEXT("Multiply")));
-			TestFalse(
-				TEXT("resolved Multiply still has no representative function"),
-				Resolved->HasField(TEXT("function_name"))
-					|| Resolved->HasField(TEXT("function_owner_class")));
-		}
-
 		auto BuildMultiplyAssertion = [
-			&MultiplyCandidateId,
-			&EventNode](const FString& OperationName)
+			&MultiplyCandidateName, &TickSemanticNameForCandidate,
+			EventNode]()
 		{
 			const TSharedPtr<FJsonObject> Candidate =
 				MakeShared<FJsonObject>();
-			Candidate->SetStringField(TEXT("id"), MultiplyCandidateId);
-			Candidate->SetStringField(TEXT("operation_name"), OperationName);
+			Candidate->SetStringField(TEXT("name"), MultiplyCandidateName);
 			const TSharedPtr<FJsonObject> CandidateContext =
 				MakeShared<FJsonObject>();
 			CandidateContext->SetStringField(
-				TEXT("node_guid"),
-				EventNode->NodeGuid.ToString(
-					EGuidFormats::DigitsWithHyphensLower));
+				TEXT("node"),
+				EventNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
 			CandidateContext->SetStringField(
-				TEXT("pin_name"), TEXT("DeltaSeconds"));
+				TEXT("alias"), TickSemanticNameForCandidate);
+			CandidateContext->SetStringField(
+				TEXT("pin"), TEXT("DeltaSeconds"));
 			const TSharedPtr<FJsonObject> NodeSpec =
 				MakeShared<FJsonObject>();
 			NodeSpec->SetObjectField(TEXT("candidate"), Candidate);
@@ -993,25 +955,12 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 		};
 		FWorkspaceError ValidMultiplyAssertionError;
 		TestTrue(
-			TEXT("matching operation_name assertion normalizes successfully"),
+			TEXT("matching short select normalizes successfully"),
 			UE::UAI::DomainAdapters::Blueprint::Surfaces::
 				TryNormalizeBlueprintCandidateBindings(
 					ObjectPath,
-					BuildMultiplyAssertion(TEXT("Multiply")),
+					BuildMultiplyAssertion(),
 					ValidMultiplyAssertionError));
-		FWorkspaceError InvalidMultiplyAssertionError;
-		TestFalse(
-			TEXT("conflicting operation_name assertion fails before write"),
-			UE::UAI::DomainAdapters::Blueprint::Surfaces::
-				TryNormalizeBlueprintCandidateBindings(
-					ObjectPath,
-					BuildMultiplyAssertion(TEXT("Add")),
-					InvalidMultiplyAssertionError));
-		TestEqual(
-			TEXT("conflicting operation_name has a typed failure"),
-			InvalidMultiplyAssertionError.GetCode(),
-			FString(TEXT(
-				"blueprint_surface_node_candidate_metadata_mismatch")));
 
 		UeAgentPaletteSearch::FSearchParams PerformParams;
 		PerformParams.CatalogType = TEXT("blueprint_node");
@@ -1030,7 +979,7 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 			UeAgentPaletteSearch::TryPerformBlueprintActionCandidate(
 				PerformParams,
 				MultiplyCandidateName,
-				MultiplyCandidateId,
+				FString(),
 				FVector2f(640.0f, 160.0f),
 				CreatedNode,
 				PerformedCandidate,
@@ -1061,129 +1010,17 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 		}
 	}
 
-	FString OperatorStructureJson;
-	bool bOperatorStructureReadOnly = false;
-	FWorkspaceError OperatorStructureError;
-	TestTrue(
-		TEXT("the public structure reads back created operator semantics"),
-		UE::UAI::DomainAdapters::Blueprint::Surfaces::TryExecuteContentGraph(
-			TEXT("content_graph.structure"), ObjectPath, StructureParams,
-			OperatorStructureJson,
-			bOperatorStructureReadOnly,
-			OperatorStructureError));
-	const TSharedPtr<FJsonObject> OperatorStructurePayload = ParsePayload(
-		this, OperatorStructureJson);
-	const TArray<TSharedPtr<FJsonValue>>* OperatorItems = nullptr;
-	bool bFoundEqualReadback = false;
-	bool bFoundMultiplyReadback = false;
-	bool bOrdinaryCallClaimsOperation = false;
-	if (OperatorStructurePayload.IsValid()
-		&& OperatorStructurePayload->TryGetArrayField(
-			TEXT("items"), OperatorItems)
-		&& OperatorItems)
-	{
-		for (const TSharedPtr<FJsonValue>& ItemValue : *OperatorItems)
-		{
-			const TSharedPtr<FJsonObject> Item = ItemValue->AsObject();
-			const TSharedPtr<FJsonObject>* State = nullptr;
-			FString Kind;
-			if (!Item.IsValid()
-				|| !Item->TryGetStringField(TEXT("kind"), Kind)
-				|| Kind != TEXT("blueprint_node")
-				|| !Item->TryGetObjectField(TEXT("value"), State)
-				|| !State || !State->IsValid())
-			{
-				continue;
-			}
-
-			FString FunctionName;
-			FString FunctionOwnerClass;
-			FString OperationName;
-			FString NodeClass;
-			const bool bHasFunctionSemantics =
-				(*State)->TryGetStringField(TEXT("function_name"), FunctionName)
-				&& (*State)->TryGetStringField(
-					TEXT("function_owner_class"), FunctionOwnerClass);
-			const bool bHasOperatorSemantics =
-				(*State)->TryGetStringField(TEXT("operation_name"), OperationName)
-				&& (*State)->TryGetStringField(TEXT("node_class"), NodeClass);
-			const bool bMathLibraryFunction = bHasFunctionSemantics
-				&& FunctionOwnerClass
-					== UKismetMathLibrary::StaticClass()->GetPathName();
-			const bool bPromotableOperator = bHasOperatorSemantics
-				&& NodeClass
-					== UK2Node_PromotableOperator::StaticClass()->GetPathName();
-			bFoundEqualReadback |= bMathLibraryFunction
-				&& bPromotableOperator
-				&& FunctionName == TEXT("EqualEqual_ObjectObject")
-				&& OperationName == TEXT("EqualEqual");
-			bFoundMultiplyReadback |= bMathLibraryFunction
-				&& bPromotableOperator
-				&& FunctionName == TEXT("Multiply_DoubleDouble")
-				&& OperationName == TEXT("Multiply");
-			bOrdinaryCallClaimsOperation |=
-				bMathLibraryFunction && FunctionName == TEXT("FInterpTo")
-				&& bHasOperatorSemantics;
-		}
-	}
-	TestTrue(
-		TEXT("EqualEqual readback keeps operator and resolved function semantics"),
-		bFoundEqualReadback);
-	TestTrue(
-		TEXT("Multiply readback keeps operator and resolved function semantics"),
-		bFoundMultiplyReadback);
-	TestFalse(
-		TEXT("ordinary CallFunction readback does not claim operator semantics"),
-		bOrdinaryCallClaimsOperation);
-
-	const TArray<TSharedPtr<FJsonValue>>* FunctionCandidates = nullptr;
-	TSharedPtr<FJsonObject> FunctionPayload;
-	FString FInterpCandidateId;
-	FString FInterpFunctionOwnerClass;
-	bool bFoundPrivateActionSignature = false;
-	if (TestTrue(
-			TEXT("FInterpTo candidates can be queried directly"),
-			QueryCandidates(
-				TEXT("FInterp To"), TEXT("native-t11-function-semantics"),
-				FunctionCandidates, FunctionPayload)))
-	{
-		for (const TSharedPtr<FJsonValue>& Value : *FunctionCandidates)
-		{
-			const TSharedPtr<FJsonObject> Candidate = Value->AsObject();
-			bFoundPrivateActionSignature |= Candidate.IsValid()
-				&& Candidate->HasField(TEXT("native_action_signature"));
-			FString FunctionName;
-			FString FunctionOwnerClass;
-			if (Candidate.IsValid()
-				&& Candidate->TryGetStringField(
-					TEXT("function_name"), FunctionName)
-				&& FunctionName == TEXT("FInterpTo")
-				&& Candidate->TryGetStringField(
-					TEXT("function_owner_class"), FunctionOwnerClass)
-				&& FunctionOwnerClass
-					== UKismetMathLibrary::StaticClass()->GetPathName())
-			{
-				Candidate->TryGetStringField(TEXT("id"), FInterpCandidateId);
-				FInterpFunctionOwnerClass = FunctionOwnerClass;
-				break;
-			}
-		}
-	}
-	TestFalse(
-		TEXT("candidate projection never exposes private action signatures"),
-		bFoundPrivateActionSignature);
-	TestFalse(
-		TEXT("FInterpTo is identifiable without localized display-name inference"),
-		FInterpCandidateId.IsEmpty());
-
 	const TArray<TSharedPtr<FJsonValue>>* VariableCandidates = nullptr;
 	TSharedPtr<FJsonObject> VariablePayload;
 	bool bFoundVariableGet = false;
 	bool bFoundVariableSet = false;
-	FString VariableGetCandidateId;
 	FString VariableGetCandidateName;
-	FString VariableSetCandidateId;
 	FString VariableSetCandidateName;
+	UeAgentPaletteSearch::FSearchParams VariableResolveParams;
+	VariableResolveParams.CatalogType = TEXT("blueprint_node");
+	VariableResolveParams.AssetPath = ObjectPath;
+	VariableResolveParams.GraphName = GraphId;
+	VariableResolveParams.bContextSensitive = true;
 	if (TestTrue(
 			TEXT("local variable candidates can be queried directly"),
 			QueryCandidates(
@@ -1192,30 +1029,29 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 	{
 		for (const TSharedPtr<FJsonValue>& Value : *VariableCandidates)
 		{
-			const TSharedPtr<FJsonObject> Candidate = Value->AsObject();
-			FString VariableName;
-			FString NodeType;
-			if (Candidate.IsValid()
-				&& Candidate->TryGetStringField(
-					TEXT("variable_name"), VariableName)
-				&& VariableName == TEXT("T84SemanticValue")
-				&& Candidate->TryGetStringField(TEXT("node_type"), NodeType))
+			if (Value.IsValid() && Value->Type == EJson::String)
 			{
-				bFoundVariableGet |= NodeType == TEXT("get");
-				bFoundVariableSet |= NodeType == TEXT("set");
+				UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+				FString ResolveError;
+				if (!UeAgentPaletteSearch::TryResolveBlueprintActionCandidate(
+						VariableResolveParams, Value->AsString(), FString(),
+						ResolvedCandidate, ResolveError)
+					|| ResolvedCandidate.AuthoringSelectors.FindRef(
+						TEXT("variable_name")) != TEXT("T84SemanticValue"))
+				{
+					continue;
+				}
+				const FString NodeType =
+					ResolvedCandidate.AuthoringSelectors.FindRef(TEXT("node_type"));
 				if (NodeType == TEXT("get"))
 				{
-					Candidate->TryGetStringField(
-						TEXT("id"), VariableGetCandidateId);
-					Candidate->TryGetStringField(
-						TEXT("name"), VariableGetCandidateName);
+					bFoundVariableGet = true;
+					VariableGetCandidateName = Value->AsString();
 				}
 				else if (NodeType == TEXT("set"))
 				{
-					Candidate->TryGetStringField(
-						TEXT("id"), VariableSetCandidateId);
-					Candidate->TryGetStringField(
-						TEXT("name"), VariableSetCandidateName);
+					bFoundVariableSet = true;
+					VariableSetCandidateName = Value->AsString();
 				}
 			}
 		}
@@ -1226,18 +1062,36 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 	TestTrue(
 		TEXT("the public candidate semantics distinguish variable set"),
 		bFoundVariableSet);
+	if ((!bFoundVariableGet || !bFoundVariableSet) && VariableCandidates)
 	{
-		auto BuildVariableProvider = [](const FString& CandidateId,
-			const FString& CandidateName,
+		TArray<FString> Diagnostics;
+		for (const TSharedPtr<FJsonValue>& Value : *VariableCandidates)
+		{
+			if (!Value.IsValid() || Value->Type != EJson::String
+				|| Diagnostics.Num() == 5) continue;
+			UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+			FString ResolveError;
+			const bool bResolved =
+				UeAgentPaletteSearch::TryResolveBlueprintActionCandidate(
+					VariableResolveParams, Value->AsString(), FString(),
+					ResolvedCandidate, ResolveError);
+			Diagnostics.Add(Value->AsString()
+				+ TEXT(" {variable=")
+				+ ResolvedCandidate.AuthoringSelectors.FindRef(TEXT("variable_name"))
+				+ TEXT(", type=")
+				+ ResolvedCandidate.AuthoringSelectors.FindRef(TEXT("node_type"))
+				+ (bResolved ? TEXT("}") : TEXT(", resolve=") + ResolveError + TEXT("}")));
+		}
+		AddError(TEXT("variable discovery diagnostics: ")
+			+ FString::Join(Diagnostics, TEXT(", ")));
+	}
+	{
+		auto BuildVariableProvider = [](const FString& CandidateName,
 			const FString& StableNodeId,
 			const bool bNormalizedShape)
 		{
 			const TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
-			Candidate->SetStringField(TEXT("id"), CandidateId);
-			if (!CandidateName.IsEmpty())
-			{
-				Candidate->SetStringField(TEXT("name"), CandidateName);
-			}
+			Candidate->SetStringField(TEXT("name"), CandidateName);
 			const TSharedPtr<FJsonObject> Node = MakeShared<FJsonObject>();
 			Node->SetStringField(TEXT("operation"), TEXT("create"));
 			Node->SetObjectField(TEXT("candidate"), Candidate);
@@ -1318,8 +1172,8 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 		RebindRequest.CommandId = TEXT("blueprint.node.candidates");
 		RebindRequest.RequestId = TEXT("native-t11-scratch-rebind-variable");
 		RebindRequest.CanonicalParamsJson = FString::Printf(
-			TEXT("{\"graph_id\":\"%s\",\"limit\":20,\"query\":\"ScratchRebindValue\",\"target\":\"%s\"}"),
-			*RebindGraphId,
+			TEXT("{\"graph_name\":\"%s\",\"limit\":3,\"query\":\"ScratchRebindValue\",\"target\":\"%s\"}"),
+			*RebindGraphName,
 			*RebindBlueprint->GetPathName());
 		FUeAgentBlueprintNodeCommandResponse RebindResponse;
 		FUeAgentBlueprintNodeCommandError RebindError;
@@ -1330,51 +1184,70 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 					RebindRequest, RebindResponse, RebindError));
 		const TSharedPtr<FJsonObject> RebindPayload = ParsePayload(
 			this, RebindResponse.PayloadJson);
-		const TArray<TSharedPtr<FJsonValue>>* RebindCandidates = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* RebindNames = nullptr;
 		if (RebindPayload.IsValid())
 		{
 			RebindPayload->TryGetArrayField(
-				TEXT("candidates"), RebindCandidates);
+				TEXT("names"), RebindNames);
 		}
-		TArray<TSharedPtr<FJsonObject>> RebindSetCandidates;
-		if (RebindCandidates)
+		TArray<FString> RebindSetNames;
+		UeAgentPaletteSearch::FSearchParams RebindResolveParams;
+		RebindResolveParams.CatalogType = TEXT("blueprint_node");
+		RebindResolveParams.AssetPath = RebindBlueprint->GetPathName();
+		RebindResolveParams.GraphName = RebindGraphId;
+		RebindResolveParams.bContextSensitive = true;
+		if (RebindNames)
 		{
-			for (const TSharedPtr<FJsonValue>& Value : *RebindCandidates)
+			for (const TSharedPtr<FJsonValue>& Value : *RebindNames)
 			{
-				const TSharedPtr<FJsonObject> Candidate = Value->AsObject();
-				FString VariableName;
-				FString NodeType;
-				if (Candidate.IsValid()
-					&& Candidate->TryGetStringField(
-						TEXT("variable_name"), VariableName)
-					&& VariableName == TEXT("ScratchRebindValue")
-					&& Candidate->TryGetStringField(
-						TEXT("node_type"), NodeType)
-					&& NodeType == TEXT("set"))
+				if (!Value.IsValid() || Value->Type != EJson::String)
 				{
-					RebindSetCandidates.Add(Candidate);
+					continue;
+				}
+				UeAgentPaletteSearch::FCandidate ResolvedCandidate;
+				FString ResolveError;
+				if (UeAgentPaletteSearch::TryResolveBlueprintActionCandidate(
+						RebindResolveParams, Value->AsString(), FString(),
+						ResolvedCandidate, ResolveError)
+					&& ResolvedCandidate.AuthoringSelectors.FindRef(
+							TEXT("variable_name")) == TEXT("ScratchRebindValue")
+					&& ResolvedCandidate.AuthoringSelectors.FindRef(
+							TEXT("node_type")) == TEXT("set"))
+				{
+					RebindSetNames.Add(Value->AsString());
 				}
 			}
 		}
+		if (RebindSetNames.IsEmpty() && RebindNames)
+		{
+			TArray<FString> ReturnedNames;
+			for (const TSharedPtr<FJsonValue>& Value : *RebindNames)
+			{
+				if (Value.IsValid() && Value->Type == EJson::String
+					&& ReturnedNames.Num() < 5)
+				{
+					ReturnedNames.Add(Value->AsString());
+				}
+			}
+			AddError(TEXT("rebind readable names: ")
+				+ FString::Join(ReturnedNames, TEXT(", ")));
+		}
 		if (!TestEqual(
 				TEXT("the isolated local-variable set action is unique"),
-				RebindSetCandidates.Num(),
+				RebindSetNames.Num(),
 				1))
 		{
 			return false;
 		}
-		const FString RebindCandidateId =
-			RebindSetCandidates[0]->GetStringField(TEXT("id"));
-		const FString RebindCandidateName =
-			RebindSetCandidates[0]->GetStringField(TEXT("name"));
+		const FString RebindCandidateName = RebindSetNames[0];
 
 		const FString ScratchNodeId =
-			TEXT("84a00000-0000-0000-0000-000000000001");
+			TEXT("native_action:scratch_rebind_set");
 		TSharedPtr<FJsonObject> NormalizedProvider = BuildVariableProvider(
-			RebindCandidateId, FString(), ScratchNodeId, true);
+			RebindCandidateName, ScratchNodeId, true);
 		FWorkspaceError NormalizeScratchError;
 		TestTrue(
-			TEXT("id-only local candidate normalizes on the real target"),
+			TEXT("name-only local candidate normalizes on the real target"),
 			UE::UAI::DomainAdapters::Blueprint::Surfaces::
 				TryNormalizeBlueprintCandidateBindings(
 					RebindBlueprint->GetPathName(),
@@ -1420,7 +1293,7 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 				UeAgentPaletteSearch::TryResolveBlueprintActionCandidate(
 					ScratchResolveParams,
 					RebindCandidateName,
-					RebindCandidateId,
+					FString(),
 					ScratchResolvedCandidate,
 					ScratchResolveError));
 			FBlueprintActionDatabase::Get().ClearAssetActions(ScratchBlueprint);
@@ -1452,9 +1325,8 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 					FObjectKey(ScratchBlueprint)));
 
 			const FString MissingNodeId =
-				TEXT("84a00000-0000-0000-0000-000000000002");
+				TEXT("native_action:missing_candidate");
 			TSharedPtr<FJsonObject> MissingProvider = BuildVariableProvider(
-				TEXT("candidate:00000000000000000000000000000000"),
 				TEXT("Definitely Missing Candidate"),
 				MissingNodeId,
 				false);
@@ -1474,12 +1346,13 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 				TEXT("scratch candidate failure identifies its public node and selector"),
 				MissingError.StartsWith(
 					TEXT("blueprint_action_candidate_not_found:node=")
-					+ MissingNodeId
-					+ TEXT(",selector=id(candidate:")));
+					+ MissingNodeId)
+					&& MissingError.Contains(TEXT("selector=name"))
+					&& !MissingError.Contains(TEXT("candidate_id")));
 		}
 	}
-	if (!VariableGetCandidateId.IsEmpty()
-		&& !VariableSetCandidateId.IsEmpty())
+	if (!VariableGetCandidateName.IsEmpty()
+		&& !VariableSetCandidateName.IsEmpty())
 	{
 		UeAgentPaletteSearch::FSearchParams VariablePerformParams;
 		VariablePerformParams.CatalogType = TEXT("blueprint_node");
@@ -1490,9 +1363,10 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 			this,
 			&VariablePerformParams](
 				const FString& CandidateName,
-				const FString& CandidateId,
+				const FString& UnusedLegacySelector,
 				const FVector2f Position) -> UEdGraphNode*
 		{
+			(void)UnusedLegacySelector;
 			UEdGraphNode* CreatedNode = nullptr;
 			UeAgentPaletteSearch::FCandidate PerformedCandidate;
 			FString PerformError;
@@ -1501,7 +1375,7 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 					UeAgentPaletteSearch::TryPerformBlueprintActionCandidate(
 						VariablePerformParams,
 						CandidateName,
-						CandidateId,
+						FString(),
 						Position,
 						CreatedNode,
 						PerformedCandidate,
@@ -1515,12 +1389,12 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 		const UK2Node_VariableGet* VariableGetNode =
 			Cast<UK2Node_VariableGet>(PerformVariableCandidate(
 				VariableGetCandidateName,
-				VariableGetCandidateId,
+				FString(),
 				FVector2f(900.0f, 160.0f)));
 		const UK2Node_VariableSet* VariableSetNode =
 			Cast<UK2Node_VariableSet>(PerformVariableCandidate(
 				VariableSetCandidateName,
-				VariableSetCandidateId,
+				FString(),
 				FVector2f(1160.0f, 160.0f)));
 		TestNotNull(
 			TEXT("the native get candidate creates a variable-get node"),
@@ -1541,54 +1415,7 @@ bool FUeAgentStrictV2T11ProductionCandidateTest::RunTest(
 		}
 	}
 
-	if (!FInterpCandidateId.IsEmpty())
-	{
-		auto BuildSemanticAssertion = [
-			&FInterpCandidateId,
-			&FInterpFunctionOwnerClass](const FString& FunctionName)
-		{
-			const TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
-			Candidate->SetStringField(TEXT("id"), FInterpCandidateId);
-			Candidate->SetStringField(TEXT("function_name"), FunctionName);
-			Candidate->SetStringField(
-				TEXT("function_owner_class"), FInterpFunctionOwnerClass);
-			const TSharedPtr<FJsonObject> NodeSpec = MakeShared<FJsonObject>();
-			NodeSpec->SetObjectField(TEXT("candidate"), Candidate);
-			const TSharedPtr<FJsonObject> Nodes = MakeShared<FJsonObject>();
-			Nodes->SetObjectField(TEXT("semantic_assertion"), NodeSpec);
-			const TSharedPtr<FJsonObject> GraphSpec = MakeShared<FJsonObject>();
-			GraphSpec->SetObjectField(TEXT("nodes"), Nodes);
-			const TSharedPtr<FJsonObject> Graphs = MakeShared<FJsonObject>();
-			Graphs->SetObjectField(TEXT("event_graph:EventGraph"), GraphSpec);
-			const TSharedPtr<FJsonObject> ProviderExtension =
-				MakeShared<FJsonObject>();
-			ProviderExtension->SetObjectField(TEXT("graphs"), Graphs);
-			return ProviderExtension;
-		};
-		FWorkspaceError ValidAssertionError;
-		TestTrue(
-			TEXT("matching optional candidate assertions normalize successfully"),
-			UE::UAI::DomainAdapters::Blueprint::Surfaces::
-				TryNormalizeBlueprintCandidateBindings(
-					ObjectPath,
-					BuildSemanticAssertion(TEXT("FInterpTo")),
-					ValidAssertionError));
-		FWorkspaceError AssertionError;
-		TestFalse(
-			TEXT("a conflicting optional candidate assertion fails before write"),
-			UE::UAI::DomainAdapters::Blueprint::Surfaces::
-				TryNormalizeBlueprintCandidateBindings(
-					ObjectPath,
-					BuildSemanticAssertion(TEXT("DefinitelyNotFInterpTo")),
-					AssertionError));
-		TestEqual(
-			TEXT("a conflicting optional assertion has a typed failure"),
-			AssertionError.GetCode(),
-			FString(TEXT(
-				"blueprint_surface_node_candidate_metadata_mismatch")));
-	}
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1599,15 +1426,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T11FailureBeforeWriteTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T11_BLUEPRINT_NODE_AVAILABLE
-	TestTrue(TEXT("T11 typed prewrite failures are available"), false);
-	return false;
-#else
 	FUeAgentBlueprintNodeCommandRequest Request;
 	Request.CommandId = TEXT("blueprint.node.candidates");
 	Request.RequestId = TEXT("native-t11-missing-target");
 	Request.CanonicalParamsJson = TEXT(
-		"{\"graph_id\":\"graph:missing\","
+		"{\"graph_name\":\"graph:missing\","
 		"\"target\":\"/Game/UAI/StrictV2/T11/Missing.Missing\"}");
 	TSharedPtr<IUeAgentBlueprintNodeCommandService> Service;
 	FString CreateError;
@@ -1624,5 +1447,4 @@ bool FUeAgentStrictV2T11FailureBeforeWriteTest::RunTest(
 		Error.Code,
 		FString(TEXT("blueprint_node_target_unresolved")));
 	return true;
-#endif
 }

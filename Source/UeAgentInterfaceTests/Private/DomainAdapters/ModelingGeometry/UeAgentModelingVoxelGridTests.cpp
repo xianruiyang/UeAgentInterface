@@ -136,6 +136,8 @@ bool FUeAgentModelingVoxelGridContractAndAlgorithmsTest::RunTest(
 	}
 	TestNotNull(TEXT("current voxel-grid session contract exists"),
 		Registry->FindExact(GetSessionCommandId()));
+	TestNotNull(TEXT("current voxel-grid begin contract exists"),
+		Registry->FindExact(GetBeginCommandId()));
 	TestNotNull(TEXT("current voxel-grid apply contract exists"),
 		Registry->FindExact(GetApplyCommandId()));
 
@@ -164,6 +166,12 @@ bool FUeAgentModelingVoxelGridContractAndAlgorithmsTest::RunTest(
 				{
 					return Entry.OperationId == GetSessionCommandId();
 				});
+		const FDomainOperationEntry* BeginOperation =
+				Modeling->Operation.Operations.FindByPredicate(
+				[](const FDomainOperationEntry& Entry)
+				{
+					return Entry.OperationId == GetBeginCommandId();
+				});
 		const FDomainOperationEntry* ApplyOperation =
 			Modeling->Operation.Operations.FindByPredicate(
 				[](const FDomainOperationEntry& Entry)
@@ -171,6 +179,7 @@ bool FUeAgentModelingVoxelGridContractAndAlgorithmsTest::RunTest(
 					return Entry.OperationId == GetApplyCommandId();
 				});
 		TestNotNull(TEXT("session operation is declared"), SessionOperation);
+		TestNotNull(TEXT("begin operation is declared"), BeginOperation);
 		TestNotNull(TEXT("apply operation is declared"), ApplyOperation);
 		if (SessionOperation)
 		{
@@ -179,6 +188,14 @@ bool FUeAgentModelingVoxelGridContractAndAlgorithmsTest::RunTest(
 				EDomainTransientStatePolicy::RecoverableSession);
 			TestFalse(TEXT("session does not claim persistence"),
 				SessionOperation->bPersists);
+		}
+		if (BeginOperation)
+		{
+			TestEqual(TEXT("begin is recoverable transient state"),
+				BeginOperation->TransientStatePolicy,
+				EDomainTransientStatePolicy::RecoverableSession);
+			TestFalse(TEXT("begin does not claim persistence"),
+				BeginOperation->bPersists);
 		}
 		if (ApplyOperation)
 		{
@@ -248,18 +265,18 @@ bool FUeAgentModelingVoxelGridAuthoringStateTest::RunTest(
 		FVector(100.0, 200.0, 300.0),
 		FVector::OneVector);
 	Expected.AnchorLocal = FVector(40.0);
-	Expected.Cells = {FIntVector(0, 0, 0), FIntVector(1, 2, 3)};
+	Expected.Cells = {FIntVector(1, 2, 3), FIntVector(-4, 5, -6)};
 	Expected.Revision = 7;
 	Expected.CollisionGeneration = TEXT("GEN_STATE_TEST");
 	Expected.CollisionMode = TEXT("exact_box_components");
 	Expected.MaterialRef = TEXT("/Engine/BasicShapes/BasicShapeMaterial");
 	TestTrue(
-		TEXT("valid authoring state writes"),
-		Component && TryWriteAuthoringState(*Component, Expected, 16, Error));
+		TEXT("authoring state writes"),
+		Component && TryWriteAuthoringState(*Component, Expected, Error));
 	FVoxelGridAuthoringState Observed;
 	TestTrue(
 		TEXT("serialized state reads through the canonical helper"),
-		Component && TryReadAuthoringState(*Component, 16, Observed, Error));
+		Component && TryReadAuthoringState(*Component, Observed, Error));
 	TestTrue(
 		TEXT("authoring state round-trips exactly"),
 		Observed.GridId == Expected.GridId
@@ -276,12 +293,12 @@ bool FUeAgentModelingVoxelGridAuthoringStateTest::RunTest(
 	Invalid.Revision = -1;
 	TestFalse(
 		TEXT("invalid replacement fails closed"),
-		TryWriteAuthoringState(*Component, Invalid, 16, Error));
+		TryWriteAuthoringState(*Component, Invalid, Error));
 	FVoxelGridAuthoringState AfterRejectedWrite;
 	TestTrue(
 		TEXT("failed replacement preserves the previous authoritative state"),
 		TryReadAuthoringState(
-			*Component, 16, AfterRejectedWrite, Error)
+			*Component, AfterRejectedWrite, Error)
 			&& AfterRejectedWrite.Revision == Expected.Revision
 			&& SameCells(AfterRejectedWrite.Cells, Expected.Cells));
 

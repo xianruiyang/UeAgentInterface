@@ -1,4 +1,7 @@
 #include "OperationOwners/DestructiveContent/UeAgentWorldDestructiveDurableRunner.h"
+#include "OperationOwners/DestructiveContent/UeAgentWorldDestructiveCheckpoint.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/AssetDurable/UeAgentPersistedWorld.h"
@@ -8,6 +11,7 @@
 #include "Core/ExecutionMutation/UeAgentExecutionMutation.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "Dom/JsonValue.h"
 #include "Engine/Level.h"
 #include "Engine/World.h"
 #include "HAL/PlatformTime.h"
@@ -28,22 +32,45 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 
 	namespace
 	{
+		FDiagnostic NativeValueFailure(const TCHAR* Code, const FString& Reason,
+			const TCHAR* Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const FString& Stage = TEXT("execution"), const FString& Target = FString())
+		{
+			auto Diagnostic = FDiagnostic::Failure(Code, Reason, Stage);
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.PropertyPath = Field;
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			Diagnostic.TargetPath = Target;
+			return Diagnostic;
+		}
+
+		FDiagnostic NativeConditionFailure(const TCHAR* Code, const FString& Reason,
+			const TCHAR* Condition, const bool bActual, const bool bExpected,
+			const FString& Stage = TEXT("execution"), const FString& Target = FString())
+		{
+			return NativeValueFailure(Code, Reason, Condition, MakeShared<FJsonValueBoolean>(bActual),
+				MakeShared<FJsonValueBoolean>(bExpected), Stage, Target);
+		}
+
+		FDiagnostic PreserveFailure(FDiagnostic Diagnostic, const TCHAR* Code, const FString& Reason,
+			const TCHAR* Condition, const FString& Stage = TEXT("execution"), const FString& Target = FString())
+		{
+			if (Diagnostic.IsEmpty()) Diagnostic = NativeConditionFailure(Code, Reason, Condition, false, true, Stage, Target);
+			return Diagnostic;
+		}
+
+		FDiagnostic InvalidFenceFailure(const FString& Stage, const TCHAR* Code = TEXT("world_destructive_operation_fence_invalid"))
+		{
+			return NativeConditionFailure(Code,
+				TEXT("The operation fencing token must be non-negative."), TEXT("operation_fence_valid"), false, true, Stage);
+		}
+
 		FUeAgentResourceTrackerOwner MakeResources()
 		{
 			return MakeShared<
 				FUeAgentResourceTracker,
-				ESPMode::ThreadSafe>(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 8192},
-				{EUeAgentResourceDimension::Items, 8192},
-				{EUeAgentResourceDimension::Files, 512},
-				{EUeAgentResourceDimension::ReferenceEdges, 8192},
-				{EUeAgentResourceDimension::WorkUnits, 131072},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					32 * 1024 * 1024},
-			}));
+				ESPMode::ThreadSafe>();
 		}
 
 		FUeAgentCanonicalIdentity MakePackageIdentity(
@@ -65,20 +92,20 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 
 		FPlanningPreflightPlanRef MakePlan(
 			const FUeAgentWorldDestructiveRequest& Request,
-			const FString& MapPackageName,
-			const FString& MutationPackageName,
 			const FString& OwnerId,
-			const FUeAgentCanonicalIdentity& MapIdentity,
-			const FUeAgentCanonicalIdentity& MutationIdentity)
+			const TArray<FWorldDestructivePackage>& Packages)
 		{
 			TArray<FPlannedChange> Changes;
 			TArray<FImpact> Impacts;
-			auto AddPackage = [&Changes, &Impacts](
-				const FUeAgentCanonicalIdentity& Identity)
+			FString PackageFingerprint;
+			for (const FWorldDestructivePackage& Package : Packages)
 			{
+				PackageFingerprint += FString::Printf(TEXT("\n%s\t%d\t%d\t%s"), *Package.PackageName,
+					static_cast<int32>(Package.HeaderKind), static_cast<int32>(Package.Intent), *Package.WorldPackageName);
+				const auto Identity = MakePackageIdentity(Package.PackageName, Package.HeaderKind == EPackageHeaderKind::Map);
 				Changes.Emplace(
 					Identity,
-					EChangeIntent::Update,
+					Package.Intent == EAssetDurableIntent::Delete ? EChangeIntent::Delete : EChangeIntent::Update,
 					FUeAgentCanonicalValuePtr(),
 					FUeAgentCanonicalValuePtr(),
 					TArray<FString>{TEXT("uai:asset:write")},
@@ -88,13 +115,6 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 					Identity,
 					TEXT("direct"),
 					TEXT("world-destructive:durable-runner"));
-			};
-			AddPackage(MapIdentity);
-			if (!MutationPackageName.Equals(
-					MapPackageName,
-					ESearchCase::CaseSensitive))
-			{
-				AddPackage(MutationIdentity);
 			}
 			return MakeShared<FPlanningPreflightPlan>(
 				FUeAgentDescriptorIdentity(
@@ -117,16 +137,15 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				TArray<FPrecondition>(),
 				Json::Sha256Utf8(
 					Request.CommandId + TEXT(":") + Request.RequestId
-					+ TEXT(":") + MapPackageName + TEXT(":")
-					+ MutationPackageName + TEXT(":")
-					+ Request.TargetRef));
+					+ TEXT(":") + Request.TargetRef + TEXT(":") + Request.ComponentName
+					+ PackageFingerprint));
 		}
 
 		bool TryMakeExecutionContext(
 			UWorld& World,
 			const FPlanningPreflightPlanRef& Plan,
 			FUeAgentExecutionContextRefPtr& OutContext,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			FUeAgentExecutionContextInput Input;
 			Input.ProjectInstanceId = FString(FApp::GetProjectName());
@@ -158,9 +177,8 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 					Error)
 				|| !Context.IsValid())
 			{
-				OutError = Error.Code.IsEmpty()
-					? TEXT("world_destructive_execution_context_invalid")
-					: Error.Code;
+				OutError = PreserveFailure(MoveTemp(Error), TEXT("world_destructive_execution_context_invalid"),
+					TEXT("The world execution context was not created and no diagnostic was provided."), TEXT("execution_context_ready"));
 				return false;
 			}
 			OutContext = MoveTemp(Context);
@@ -177,13 +195,26 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				TFunction<void()> Callback,
 				FExecutionMutationError& OutError) override
 			{
-				if (Affinity != EExecutionThreadAffinity::GameThread
-					|| !IsInGameThread()
-					|| !Callback)
+				if (Affinity != EExecutionThreadAffinity::GameThread)
 				{
-					OutError = FExecutionMutationError(
-						TEXT("world_destructive_execution_thread_invalid"),
-						OperationId);
+					OutError = NativeValueFailure(TEXT("world_destructive_execution_thread_invalid"),
+						TEXT("World destructive execution requires game-thread affinity."), TEXT("thread_affinity"),
+						MakeShared<FJsonValueString>(LexToString(Affinity)), MakeShared<FJsonValueString>(TEXT("game_thread")));
+					OutError.SubjectId = OperationId;
+					return false;
+				}
+				if (!IsInGameThread())
+				{
+					OutError = NativeConditionFailure(TEXT("world_destructive_execution_thread_invalid"),
+						TEXT("World destructive execution must run on the game thread."), TEXT("game_thread"), false, true);
+					OutError.SubjectId = OperationId;
+					return false;
+				}
+				if (!Callback)
+				{
+					OutError = NativeConditionFailure(TEXT("world_destructive_execution_thread_invalid"),
+						TEXT("World destructive execution requires a callback."), TEXT("callback_available"), false, true);
+					OutError.SubjectId = OperationId;
 					return false;
 				}
 				Callback();
@@ -210,8 +241,9 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				(void)Resources;
 				if (!Request.IsValid())
 				{
-					OutError = FExecutionMutationError(
-						TEXT("world_destructive_barrier_invalid"));
+					OutError = NativeValueFailure(TEXT("world_destructive_barrier_invalid"),
+						TEXT("The settle barrier subject generation must be non-negative."), TEXT("subject_generation"),
+						MakeShared<FJsonValueNumber>(Request.GetSubjectGeneration()), MakeShared<FJsonValueString>(TEXT("non-negative integer")));
 					return false;
 				}
 				OutResult = FBarrierResult(
@@ -260,10 +292,17 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				OutSession.Reset();
 				const TArray<FImpact>& Impacts =
 					Request.GetPlan()->GetImpactSet().GetImpacts();
-				if (FencingToken < 0 || Impacts.IsEmpty())
+				if (FencingToken < 0)
 				{
-					OutError = FExecutionMutationError(
-						TEXT("world_destructive_durable_target_invalid"));
+					OutError = InvalidFenceFailure(TEXT("prepare"), TEXT("world_destructive_durable_target_invalid"));
+					OutError.ActualEvidence = MakeShared<FJsonValueNumber>(FencingToken);
+					return false;
+				}
+				if (Impacts.IsEmpty())
+				{
+					OutError = NativeValueFailure(TEXT("world_destructive_durable_target_invalid"),
+						TEXT("Durable execution requires at least one impacted package."), TEXT("impact_count"),
+						MakeShared<FJsonValueNumber>(Impacts.Num()), MakeShared<FJsonValueString>(TEXT("at least one")), TEXT("prepare"));
 					return false;
 				}
 				TArray<FAssetDurableTarget> Targets;
@@ -283,19 +322,25 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 							PackageName,
 							true))
 					{
-						OutError = FExecutionMutationError(
-							TEXT(
-								"world_destructive_durable_package_invalid"),
-							PackageName);
+						const bool bKindValid = bMap || Identity.GetTargetKind() == TEXT("world_external_actor_package");
+						OutError = NativeValueFailure(TEXT("world_destructive_durable_package_invalid"),
+							bKindValid ? TEXT("Durable execution requires a valid long package name under /Game/.")
+								: TEXT("Durable execution accepts only world map or external actor package targets."),
+							bKindValid ? TEXT("package_name") : TEXT("target_kind"),
+							MakeShared<FJsonValueString>(bKindValid ? PackageName : Identity.GetTargetKind()),
+							MakeShared<FJsonValueString>(bKindValid ? TEXT("valid /Game/ long package name") : TEXT("world_map or world_external_actor_package")),
+							TEXT("prepare"), PackageName);
 						return false;
 					}
+					const FPlannedChange* Change = Request.GetPlan()->GetChangeSet().GetChanges().FindByPredicate(
+						[&Identity](const FPlannedChange& Item) { return Item.GetIdentity().GetCanonicalKey() == Identity.GetCanonicalKey(); });
 					Targets.Emplace(
 						Identity,
 						PackageName,
 						bMap
 							? EPackageHeaderKind::Map
 							: EPackageHeaderKind::EvidenceRequired,
-						EAssetDurableIntent::Save,
+						Change && Change->GetIntent() == EChangeIntent::Delete ? EAssetDurableIntent::Delete : EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup);
 				}
 
@@ -310,9 +355,8 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 							DurableFencingToken,
 							Error))
 					{
-						OutError = FExecutionMutationError(
-							Error.GetCode(),
-							Error.GetDetail());
+						OutError = PreserveFailure(MoveTemp(Error), TEXT("world_destructive_durable_fence_failed"),
+							TEXT("The durable package fence could not be acquired and no diagnostic was provided."), TEXT("durable_fence_acquired"), TEXT("prepare"));
 						return false;
 					}
 				}
@@ -332,9 +376,8 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						Error)
 					|| !Session.IsValid())
 				{
-					OutError = FExecutionMutationError(
-						Error.GetCode(),
-						Error.GetDetail());
+					OutError = PreserveFailure(MoveTemp(Error), TEXT("world_destructive_durable_session_invalid"),
+						TEXT("Durable preparation did not provide a session or a diagnostic."), TEXT("durable_session_ready"), TEXT("prepare"));
 					return false;
 				}
 				OutSession = MakeShared<
@@ -356,8 +399,8 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						FWorldDestructiveDurableSession>(Session);
 				if (FencingToken < 0)
 				{
-					OutError = FExecutionMutationError(
-						TEXT("world_destructive_operation_fence_invalid"));
+					OutError = InvalidFenceFailure(TEXT("persist"));
+					OutError.ActualEvidence = MakeShared<FJsonValueNumber>(FencingToken);
 					return false;
 				}
 				FAssetDurableError Error;
@@ -372,32 +415,21 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						Error)
 					|| !Enlisted.IsValid())
 				{
-					OutError = FExecutionMutationError(
-						Error.GetCode(),
-						Error.GetDetail());
+					OutError = PreserveFailure(MoveTemp(Error), TEXT("world_destructive_durable_enlist_failed"),
+						TEXT("The changed packages could not be enlisted for persistence and no diagnostic was provided."), TEXT("durable_targets_enlisted"), TEXT("persist"));
 					return false;
 				}
 				Typed->Session = Enlisted.ToSharedRef();
-				if (!TryPersistAssetDurability(
+				if (!TryPersistAssetDurabilityForVerification(
 						Typed->Session,
 						Backend,
 						Typed->Session->GetRequest().GetFencingToken(),
 						Resources,
 						OutReceipt,
-						Error)
-					|| OutReceipt.GetStatus()
-						!= EDurableStatus::PersistedUnverified
-					|| !OutReceipt.RequiresIndependentVerification())
+						Error))
 				{
-					OutError = FExecutionMutationError(
-						Error.IsPresent()
-							? Error.GetCode()
-							: TEXT(
-								"world_destructive_durable_persist_unconfirmed"),
-						Error.IsPresent()
-							? Error.GetDetail()
-							: AssetDurable::LexToString(
-								OutReceipt.GetStatus()));
+					OutError = PreserveFailure(MoveTemp(Error), TEXT("world_destructive_durable_persist_failed"),
+						TEXT("The packages could not be persisted for verification and no diagnostic was provided."), TEXT("packages_persisted"), TEXT("persist"));
 					return false;
 				}
 
@@ -445,8 +477,8 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						FWorldDestructiveDurableSession>(Session);
 				if (FencingToken < 0)
 				{
-					OutError = FExecutionMutationError(
-						TEXT("world_destructive_operation_fence_invalid"));
+					OutError = InvalidFenceFailure(TEXT("rollback"));
+					OutError.ActualEvidence = MakeShared<FJsonValueNumber>(FencingToken);
 					return false;
 				}
 				FAssetDurableError Error;
@@ -459,9 +491,8 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						OutReceipt,
 						Error))
 				{
-					OutError = FExecutionMutationError(
-						Error.GetCode(),
-						Error.GetDetail());
+					OutError = PreserveFailure(MoveTemp(Error), TEXT("world_destructive_durable_rollback_failed"),
+						TEXT("Durable rollback failed without providing a diagnostic."), TEXT("durable_rollback_succeeded"), TEXT("rollback"));
 					return false;
 				}
 				FScopeLock Lock(&Mutex);
@@ -492,7 +523,7 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 			bool TryAcknowledge(
 				const FDurableVerificationAcknowledgement& Acknowledgement,
 				FUeAgentResourceTracker& Resources,
-				FString& OutError)
+				UE::UAI::Contract::FDiagnostic& OutError)
 			{
 				FAssetDurableSessionPtr Session;
 				{
@@ -502,8 +533,9 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				}
 				if (!Session.IsValid())
 				{
-					OutError = TEXT(
-						"world_destructive_durable_session_missing");
+					OutError = NativeConditionFailure(TEXT("world_destructive_durable_session_missing"),
+						TEXT("The durable session for acknowledgement is no longer available."), TEXT("durable_session_available"), false, true, TEXT("durable_recovery"));
+					OutError.SubjectId = Acknowledgement.GetJournalId();
 					return false;
 				}
 				FAssetDurableError Error;
@@ -514,8 +546,8 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						Resources,
 						Error))
 				{
-					OutError = Error.GetCode() + TEXT(":")
-						+ Error.GetDetail();
+					OutError = PreserveFailure(MoveTemp(Error), TEXT("world_destructive_durable_acknowledge_failed"),
+						TEXT("Durability acknowledgement failed without providing a diagnostic."), TEXT("durability_acknowledged"), TEXT("independent_verify"));
 					return false;
 				}
 				FScopeLock Lock(&Mutex);
@@ -528,7 +560,7 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				const FString& JournalId,
 				const bool bMemoryRollbackConfirmed,
 				FUeAgentResourceTracker& Resources,
-				FString& OutError)
+				UE::UAI::Contract::FDiagnostic& OutError)
 			{
 				FAssetDurableSessionPtr Session;
 				{
@@ -537,8 +569,9 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				}
 				if (!Session.IsValid())
 				{
-					OutError = TEXT(
-						"world_destructive_durable_session_missing");
+					OutError = NativeConditionFailure(TEXT("world_destructive_durable_session_missing"),
+						TEXT("The durable session for rollback is no longer available."), TEXT("durable_session_available"), false, true, TEXT("durable_recovery"));
+					OutError.SubjectId = JournalId;
 					return false;
 				}
 				FDurableReceipt Receipt;
@@ -553,10 +586,8 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						Error)
 					|| Receipt.GetStatus() != EDurableStatus::RolledBack)
 				{
-					OutError = Error.IsPresent()
-						? Error.GetCode() + TEXT(":") + Error.GetDetail()
-						: TEXT(
-							"world_destructive_durable_rollback_unconfirmed");
+					OutError = PreserveFailure(MoveTemp(Error), TEXT("world_destructive_durable_rollback_unconfirmed"),
+						TEXT("The durable rollback could not be confirmed."), TEXT("durable_rollback_confirmed"), TEXT("rollback"));
 					return false;
 				}
 				FScopeLock Lock(&Mutex);
@@ -577,9 +608,9 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 		public:
 			FWorldDestructiveMutationHook(
 				TSharedRef<IUeAgentWorldDestructiveDurableMutation> InMutation,
-				FString InIdentityKey)
+				TArray<FString> InIdentityKeys)
 				: Mutation(MoveTemp(InMutation))
-				, IdentityKey(MoveTemp(InIdentityKey))
+				, IdentityKeys(MoveTemp(InIdentityKeys))
 			{
 			}
 
@@ -595,15 +626,14 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				(void)Resources;
 				OutFacts = FMutationFacts(
 					1,
-					{IdentityKey},
+					IdentityKeys,
 					{},
 					true);
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!Mutation->Apply(Error))
 				{
-					OutError = FExecutionMutationError(
-						TEXT("world_destructive_mutation_failed"),
-						Error);
+					OutError = PreserveFailure(MoveTemp(Error), TEXT("world_destructive_mutation_failed"),
+						TEXT("The world mutation failed without providing a diagnostic."), TEXT("mutation_succeeded"), TEXT("domain_execute"), Mutation->GetPackageName());
 					return false;
 				}
 				return true;
@@ -619,20 +649,19 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				(void)Request;
 				(void)Facts;
 				(void)Resources;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				bOutConfirmed = Mutation->Rollback(Error);
 				if (!bOutConfirmed)
 				{
-					OutError = FExecutionMutationError(
-						TEXT("world_destructive_memory_rollback_failed"),
-						Error);
+					OutError = PreserveFailure(MoveTemp(Error), TEXT("world_destructive_rollback_unconfirmed"),
+						TEXT("The world mutation rollback could not be confirmed and no diagnostic was provided."), TEXT("rollback_confirmed"), TEXT("rollback"), Mutation->GetPackageName());
 				}
 				return bOutConfirmed;
 			}
 
 		private:
 			TSharedRef<IUeAgentWorldDestructiveDurableMutation> Mutation;
-			FString IdentityKey;
+			TArray<FString> IdentityKeys;
 		};
 
 		class FWorldDestructiveDurableRunner final
@@ -643,6 +672,7 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				FString InJournalRoot,
 				FString InStableJournalOwnerId)
 				: StableJournalOwnerId(MoveTemp(InStableJournalOwnerId))
+				, CheckpointJournalRoot(InJournalRoot / TEXT("world-checkpoints"))
 				, Scheduler(MakeShared<
 					FInlineGameThreadScheduler,
 					ESPMode::ThreadSafe>())
@@ -661,8 +691,7 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 					Scheduler,
 					LockFence,
 					Barrier,
-					Durable,
-					32)
+					Durable)
 			{
 			}
 
@@ -677,65 +706,57 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 				Result.CommandId = Request.CommandId;
 				Result.TargetRef = Request.TargetRef;
 				Result.ResultRef = Request.OperandRef;
-				auto Fail = [&Result](
-					FString Code,
-					FString Detail = FString())
-				{
-					Result.ErrorCode = MoveTemp(Code);
-					Result.ErrorDetail = MoveTemp(Detail);
-					return Result;
-				};
+				auto Fail = [&Result](UE::UAI::Contract::FDiagnostic Diagnostic)
+                {
+                    Result.Diagnostic = MoveTemp(Diagnostic);
+                    if (Result.Diagnostic.TargetPath.IsEmpty()) Result.Diagnostic.TargetPath = Result.TargetRef;
+                    Result.Diagnostic.TerminalStatus = Result.TerminalState;
+                    return Result;
+                };
 				if (!IsInGameThread())
 				{
-					return Fail(
-						TEXT("world_destructive_game_thread_required"));
+					return Fail(NativeConditionFailure(TEXT("world_destructive_game_thread_required"),
+						TEXT("World destructive execution must start on the game thread."), TEXT("game_thread"), false, true, TEXT("world_destructive")));
 				}
-				if (!IsValid(&ExplicitWorld)
-					|| Mutation->GetPackageName().IsEmpty()
-					|| Mutation->GetMutationPackageName().IsEmpty())
+				if (!IsValid(&ExplicitWorld))
 				{
-					return Fail(
-						TEXT("world_destructive_durable_mutation_invalid"));
+					return Fail(NativeConditionFailure(TEXT("world_destructive_durable_mutation_invalid"),
+						TEXT("World destructive execution requires a valid explicit world."), TEXT("world_valid"), false, true, TEXT("world_destructive")));
+				}
+				if (Mutation->GetPackageName().IsEmpty() || Mutation->GetMutationPackages().IsEmpty())
+				{
+					return Fail(NativeValueFailure(TEXT("world_destructive_durable_mutation_invalid"),
+						TEXT("World destructive execution requires a primary map and a complete mutation package inventory."),
+						Mutation->GetPackageName().IsEmpty() ? TEXT("map_package_name") : TEXT("mutation_packages"),
+						MakeShared<FJsonValueString>(TEXT("")), MakeShared<FJsonValueString>(TEXT("non-empty package name")), TEXT("world_destructive")));
 				}
 				if (Cancellation->IsCancelled())
 				{
-					return Fail(
-						TEXT("world_destructive_cancelled"),
-						Request.RequestId);
+					auto Diagnostic = NativeConditionFailure(TEXT("world_destructive_cancelled"),
+						TEXT("The world destructive operation was cancelled before submission."), TEXT("cancellation_requested"), true, false, TEXT("world_destructive"));
+					Diagnostic.SubjectId = Request.RequestId;
+					return Fail(MoveTemp(Diagnostic));
 				}
 
-				const FUeAgentCanonicalIdentity MapIdentity =
-					MakePackageIdentity(
-						Mutation->GetPackageName(),
-						true);
-				const bool bMutationInMap =
-					Mutation->GetMutationPackageName().Equals(
-						Mutation->GetPackageName(),
-						ESearchCase::CaseSensitive);
-				const FUeAgentCanonicalIdentity MutationIdentity =
-					bMutationInMap
-					? MapIdentity
-					: MakePackageIdentity(
-						Mutation->GetMutationPackageName(),
-						false);
+				TArray<FString> IdentityKeys;
+				for (const auto& Package : Mutation->GetMutationPackages())
+					IdentityKeys.Add(MakePackageIdentity(Package.PackageName, Package.HeaderKind == EPackageHeaderKind::Map).GetCanonicalKey());
 				const FPlanningPreflightPlanRef Plan = MakePlan(
 					Request,
-					Mutation->GetPackageName(),
-					Mutation->GetMutationPackageName(),
 					StableJournalOwnerId,
-					MapIdentity,
-					MutationIdentity);
+					Mutation->GetMutationPackages());
+				if (Mutation->RequiresPackageCheckpoint())
+					return ExecuteCheckpointedWorldMutation(ExplicitWorld, Request, Mutation,
+						Plan, CheckpointJournalRoot, Cancellation);
 				FUeAgentExecutionContextRefPtr ExecutionContext;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!TryMakeExecutionContext(
 						ExplicitWorld,
 						Plan,
 						ExecutionContext,
 						Error))
 				{
-					return Fail(
-						TEXT("world_destructive_execution_context_failed"),
-						Error);
+					return Fail(MoveTemp(Error));
 				}
 
 				const FUeAgentResourceTrackerOwner Resources = MakeResources();
@@ -749,16 +770,14 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						FWorldDestructiveMutationHook,
 						ESPMode::ThreadSafe>(
 							Mutation,
-							MutationIdentity.GetCanonicalKey());
+							MoveTemp(IdentityKeys));
 				const FExecutionMutationRequest ExecutionRequest(
 					OperationId,
 					StableJournalOwnerId,
 					Plan,
 					ExecutionContext.ToSharedRef(),
 					Resources,
-					FUeAgentOperationDeadline::FromTimeout(
-						30.0,
-						[]() { return FPlatformTime::Seconds(); }),
+					FUeAgentOperationDeadline(),
 					CancellationSource.GetToken(),
 					EExecutionThreadAffinity::GameThread,
 					EExecutionReentrancyPolicy::RejectSameTarget);
@@ -770,9 +789,8 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						SubmittedId,
 						ExecutionError))
 				{
-					return Fail(
-						ExecutionError.GetCode(),
-						ExecutionError.GetDetail());
+					return Fail(PreserveFailure(MoveTemp(ExecutionError), TEXT("world_destructive_submit_failed"),
+						TEXT("The world mutation could not be submitted and no diagnostic was provided."), TEXT("operation_submitted")));
 				}
 				Coordinator.DispatchReady();
 				FExecutionReceipt Receipt;
@@ -783,15 +801,22 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						ExecutionError))
 				{
 					Result.TerminalState = TEXT("state_unknown");
-					return Fail(
-						ExecutionError.GetCode(),
-						ExecutionError.GetDetail());
+					auto Diagnostic = PreserveFailure(MoveTemp(ExecutionError), TEXT("world_destructive_receipt_unavailable"),
+						TEXT("The submitted world mutation receipt could not be read and no diagnostic was provided."), TEXT("execution_receipt_available"));
+					Diagnostic.MutationMayHaveStarted = true;
+					Diagnostic.bRetrySafe = false;
+					return Fail(MoveTemp(Diagnostic));
 				}
 				const FDurableReceipt* DurableReceipt =
 					Receipt.GetDurableReceipt();
 				if (DurableReceipt)
 				{
 					Result.JournalId = DurableReceipt->GetJournalId();
+				}
+				if (Receipt.GetStatus() == EExecutionStatus::PersistedUnverified)
+				{
+					Result.bChanged = true;
+					Result.bPersisted = true;
 				}
 				if (Receipt.GetStatus()
 					!= EExecutionStatus::PersistedUnverified
@@ -803,13 +828,17 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 							== EExecutionStatus::CancelledNoChange
 						? TEXT("rolled_back")
 						: TEXT("state_unknown");
-					return Fail(
-						Receipt.GetErrorCode().IsEmpty()
-							? TEXT(
-								"world_destructive_durable_execution_failed")
-							: Receipt.GetErrorCode(),
-						ExecutionMutation::LexToString(
-							Receipt.GetStatus()));
+					auto Diagnostic = Receipt.GetDiagnostic();
+					if (Diagnostic.IsEmpty())
+					{
+						Diagnostic = Receipt.GetStatus() != EExecutionStatus::PersistedUnverified
+							? NativeValueFailure(TEXT("world_destructive_durable_execution_failed"),
+								TEXT("The world mutation did not reach the persisted state required for verification."), TEXT("execution_status"),
+								MakeShared<FJsonValueString>(LexToString(Receipt.GetStatus())), MakeShared<FJsonValueString>(TEXT("persisted_unverified")))
+							: NativeConditionFailure(TEXT("world_destructive_durable_execution_failed"),
+								TEXT("The persisted world mutation has no durable receipt for verification."), TEXT("durable_receipt_available"), false, true);
+					}
+					return Fail(MoveTemp(Diagnostic));
 				}
 
 				FDurableInventory Inventory;
@@ -822,29 +851,31 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						DurableFencingToken))
 				{
 					Result.TerminalState = TEXT("state_unknown");
-					return Fail(
-						TEXT(
-							"world_destructive_durable_context_missing"),
-						DurableReceipt->GetJournalId());
+					auto Diagnostic = NativeConditionFailure(TEXT("world_destructive_durable_context_missing"),
+						TEXT("The world mutation was persisted, but its durable verification context is no longer available."),
+						TEXT("verification_context_available"), false, true, TEXT("independent_verify"));
+					Diagnostic.SubjectId = DurableReceipt->GetJournalId();
+					Diagnostic.MutationStarted = true;
+					return Fail(MoveTemp(Diagnostic));
 				}
 				FPersistedWorldLoadError ReadbackError;
-				FString SemanticError;
+				UE::UAI::Contract::FDiagnostic SemanticError;
 				Result.bReadbackVerified = TryObservePersistedWorld(
 					Inventory.GetArtifacts(),
 					[&Mutation, &SemanticError](
 						UWorld& PersistedWorld,
-						const FPersistedWorldReferenceMap&,
+						const FPersistedWorldReferenceMap& References,
 						FPersistedWorldLoadError& OutError)
 					{
 						if (Mutation->VerifyPersisted(
 							PersistedWorld,
+							References,
 							SemanticError))
 						{
 							return true;
 						}
-						OutError.Code = TEXT(
-							"world_destructive_persisted_semantic_mismatch");
-						OutError.Detail = SemanticError;
+						OutError = PreserveFailure(MoveTemp(SemanticError), TEXT("world_destructive_persisted_semantic_mismatch"),
+							TEXT("The persisted world does not match the requested change."), TEXT("persisted_state_equivalent"), TEXT("independent_verify"), Mutation->GetPackageName());
 						return false;
 					},
 					ReadbackError);
@@ -853,10 +884,13 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 					+ Request.RequestId;
 				if (!Result.bReadbackVerified)
 				{
-					FString MemoryRollbackError;
+					UE::UAI::Contract::FDiagnostic MemoryRollbackError;
 					const bool bMemoryRolledBack =
 						Mutation->Rollback(MemoryRollbackError);
-					FString DurableRollbackError;
+					if (!bMemoryRolledBack)
+						MemoryRollbackError = PreserveFailure(MoveTemp(MemoryRollbackError), TEXT("world_destructive_rollback_unconfirmed"),
+							TEXT("The in-memory world rollback could not be confirmed after readback failed."), TEXT("rollback_confirmed"), TEXT("rollback"), Mutation->GetPackageName());
+					UE::UAI::Contract::FDiagnostic DurableRollbackError;
 					const bool bDurableRolledBack =
 						Durable->TryRollbackPersisted(
 							DurableReceipt->GetJournalId(),
@@ -869,16 +903,16 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 						: TEXT("state_unknown");
 					Result.bChanged = !bMemoryRolledBack;
 					Result.bPersisted = !bDurableRolledBack;
-					return Fail(
-						TEXT(
-							"world_destructive_persisted_readback_failed"),
-						ReadbackError.Code + TEXT(":")
-						+ ReadbackError.Detail + TEXT(":")
-						+ MemoryRollbackError + TEXT(":")
-						+ DurableRollbackError);
+					ReadbackError = PreserveFailure(MoveTemp(ReadbackError), TEXT("world_destructive_readback_failed"),
+						TEXT("Persisted world readback failed without providing a diagnostic."), TEXT("readback_verified"), TEXT("independent_verify"), Mutation->GetPackageName());
+					ReadbackError.Append(MemoryRollbackError);
+                    ReadbackError.Append(DurableRollbackError);
+                    ReadbackError.RollbackAttempted = true;
+                    ReadbackError.RollbackSucceeded = bMemoryRolledBack && bDurableRolledBack;
+                    return Fail(ReadbackError);
 				}
 
-				FString AcknowledgeError;
+				UE::UAI::Contract::FDiagnostic AcknowledgeError;
 				if (!Durable->TryAcknowledge(
 						FDurableVerificationAcknowledgement(
 							DurableReceipt->GetJournalId(),
@@ -893,10 +927,8 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 					Result.TerminalState = TEXT("state_unknown");
 					Result.bChanged = true;
 					Result.bPersisted = true;
-					return Fail(
-						TEXT(
-							"world_destructive_durable_acknowledge_failed"),
-						AcknowledgeError);
+					return Fail(PreserveFailure(MoveTemp(AcknowledgeError), TEXT("world_destructive_durable_acknowledge_failed"),
+						TEXT("The persisted world could not be acknowledged after verification and no diagnostic was provided."), TEXT("durability_acknowledged"), TEXT("independent_verify")));
 				}
 
 				Result.bChanged = true;
@@ -908,6 +940,7 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 
 		private:
 			FString StableJournalOwnerId;
+			FString CheckpointJournalRoot;
 			TSharedRef<FInlineGameThreadScheduler, ESPMode::ThreadSafe>
 				Scheduler;
 			TSharedRef<FMonotonicLockFenceProvider, ESPMode::ThreadSafe>
@@ -923,16 +956,24 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 		FString JournalRoot,
 		FString StableJournalOwnerId,
 		TSharedPtr<IUeAgentWorldDestructiveDurableRunner>& OutRunner,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRunner.Reset();
 		OutError.Reset();
 		JournalRoot.TrimStartAndEndInline();
 		StableJournalOwnerId.TrimStartAndEndInline();
-		if (JournalRoot.IsEmpty() || StableJournalOwnerId.IsEmpty())
+		if (JournalRoot.IsEmpty())
 		{
-			OutError = TEXT(
-				"world_destructive_durable_runner_config_invalid");
+			OutError = NativeConditionFailure(TEXT("world_destructive_durable_runner_config_invalid"),
+				TEXT("The world destructive durable runner requires a non-empty journal root."), TEXT("journal_root_configured"), false, true, TEXT("authoring"));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(JournalRoot);
+			return false;
+		}
+		if (StableJournalOwnerId.IsEmpty())
+		{
+			OutError = NativeConditionFailure(TEXT("world_destructive_durable_runner_config_invalid"),
+				TEXT("The world destructive durable runner requires a non-empty stable journal owner identifier."), TEXT("journal_owner_configured"), false, true, TEXT("authoring"));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(StableJournalOwnerId);
 			return false;
 		}
 		OutRunner = MakeShared<FWorldDestructiveDurableRunner>(

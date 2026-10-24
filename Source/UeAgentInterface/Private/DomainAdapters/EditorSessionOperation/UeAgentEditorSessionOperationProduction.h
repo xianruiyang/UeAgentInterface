@@ -41,6 +41,7 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		const FString& GetMinimumExample() const;
 		bool HasDiscoveryContract() const;
 		bool IsValid() const;
+		const UE::UAI::Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		EUeAgentEditorSessionOperationFamily Family;
@@ -55,6 +56,7 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		FString ParameterGuidance;
 		FString ResultGuidance;
 		FString MinimumExample;
+		UE::UAI::Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API
@@ -71,6 +73,18 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 			TSharedPtr<
 				ExecutionMutation::ILongRunningOperationPort,
 				ESPMode::ThreadSafe>& OutPort,
+			ExecutionMutation::FExecutionMutationError& OutError) = 0;
+	};
+
+	class UEAGENTINTERFACE_API
+	IUeAgentEditorSessionOperationTargetResolver
+	{
+	public:
+		virtual ~IUeAgentEditorSessionOperationTargetResolver() = default;
+
+		virtual bool TryResolveTarget(
+			const FUeAgentEditorSessionOperationTypedRequest& Request,
+			const FUeAgentEditorSessionOperationPolicyDescriptor& Policy,
 			ExecutionMutation::FExecutionMutationError& OutError) = 0;
 	};
 
@@ -106,6 +120,16 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 				FUeAgentEditorSessionOperationProductionPortFactory>& OutFactory,
 			ExecutionMutation::FExecutionMutationError& OutError);
 
+		static bool TryCreate(
+			const TArray<FUeAgentEditorSessionOperationPolicyRegistration>&
+				Registrations,
+			TSharedRef<
+				IUeAgentEditorSessionOperationTargetResolver,
+				ESPMode::ThreadSafe> TargetResolver,
+			TSharedPtr<
+				FUeAgentEditorSessionOperationProductionPortFactory>& OutFactory,
+			ExecutionMutation::FExecutionMutationError& OutError);
+
 		const TArray<FUeAgentEditorSessionOperationPolicyDescriptor>&
 			GetPolicyDescriptors() const;
 
@@ -121,11 +145,17 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 	private:
 		explicit FUeAgentEditorSessionOperationProductionPortFactory(
 			TArray<FUeAgentEditorSessionOperationPolicyRegistration>
-				InRegistrations);
+				InRegistrations,
+			TSharedRef<
+				IUeAgentEditorSessionOperationTargetResolver,
+				ESPMode::ThreadSafe> InTargetResolver);
 
 		TArray<FUeAgentEditorSessionOperationPolicyRegistration>
 			Registrations;
 		TArray<FUeAgentEditorSessionOperationPolicyDescriptor> Descriptors;
+		TSharedRef<
+			IUeAgentEditorSessionOperationTargetResolver,
+			ESPMode::ThreadSafe> TargetResolver;
 	};
 
 	class UEAGENTINTERFACE_API
@@ -136,13 +166,14 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		FUeAgentEditorSessionNativeObservation(
 			ExecutionMutation::ELongRunningWorkState InState,
 			FString InPhase,
-			FString InErrorCode = FString(),
+			UE::UAI::Contract::FDiagnostic InDiagnostic = {},
 			FString InSessionRef = FString(),
 			TSharedPtr<FJsonObject> InDetails = nullptr);
 
 		ExecutionMutation::ELongRunningWorkState GetState() const;
 		const FString& GetPhase() const;
-		const FString& GetErrorCode() const;
+		const UE::UAI::Contract::FDiagnostic& GetDiagnostic() const;
+		const FString& GetErrorCode() const { return Diagnostic.Code; }
 		const FString& GetSessionRef() const;
 		const TSharedPtr<FJsonObject>& GetDetails() const;
 		bool IsValid() const;
@@ -151,7 +182,7 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 		ExecutionMutation::ELongRunningWorkState State =
 			ExecutionMutation::ELongRunningWorkState::Invalid;
 		FString Phase;
-		FString ErrorCode;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString SessionRef;
 		TSharedPtr<FJsonObject> Details;
 	};

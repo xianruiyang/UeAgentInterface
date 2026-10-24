@@ -1,21 +1,34 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Utilities/AuthoringExport/UeAgentCompoundProjectionExtension.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Dom/JsonValue.h"
 
 namespace
 {
+	UE::UAI::Contract::FDiagnostic ProjectionFailure(const FString& Code, const FString& Path,
+		const TSharedPtr<FJsonValue>& Expected, const TSharedPtr<FJsonValue>& Actual, const FString& Stage, const FString& Reason)
+	{
+		auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Path, Expected, Actual, Stage, Reason);
+		// These paths describe generated output or native projector metadata,
+		// not fields in an imported HJSON document.
+		Error.SourceKind = TEXT("native_result");
+		return Error;
+	}
+	TSharedPtr<FJsonValue> StringValue(const FString& Value) { return MakeShared<FJsonValueString>(Value); }
+	TSharedPtr<FJsonValue> SourceKindsValue(const TArray<UeAgentExportContract::EFieldSourceKind>& Kinds)
+	{
+		TArray<TSharedPtr<FJsonValue>> Values;
+		for (auto Kind : Kinds) Values.Add(StringValue(UeAgentExportContract::FieldSourceKindToString(Kind)));
+		return MakeShared<FJsonValueArray>(MoveTemp(Values));
+	}
+
 	FString NormalizeId(FString Value)
 	{
 		Value.TrimStartAndEndInline();
 		Value.ToLowerInline();
 		return Value;
-	}
-
-	FString EscapeJsonPointerSegment(FString Segment)
-	{
-		Segment.ReplaceInline(TEXT("~"), TEXT("~0"), ESearchCase::CaseSensitive);
-		Segment.ReplaceInline(TEXT("/"), TEXT("~1"), ESearchCase::CaseSensitive);
-		return Segment;
 	}
 
 	bool DecodeJsonPointerSegment(const FString& Encoded, FString& OutDecoded)
@@ -40,19 +53,19 @@ namespace
 		const FString& JsonPointer,
 		bool bAllowWildcards,
 		TArray<FString>& OutSegments,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutSegments.Reset();
 		if (!JsonPointer.StartsWith(TEXT("/")))
 		{
-			OutError = TEXT("json_pointer_must_start_with_slash");
+			OutError = ProjectionFailure(TEXT("json_pointer_must_start_with_slash"), JsonPointer, StringValue(TEXT("slash-prefixed JSON pointer")), StringValue(JsonPointer), TEXT("export_projection"), TEXT("The output JSON pointer must start with a slash."));
 			return false;
 		}
 		TArray<FString> EncodedSegments;
 		JsonPointer.Mid(1).ParseIntoArray(EncodedSegments, TEXT("/"), false);
 		if (EncodedSegments.IsEmpty())
 		{
-			OutError = TEXT("json_pointer_segments_missing");
+			OutError = ProjectionFailure(TEXT("json_pointer_segments_missing"), JsonPointer, StringValue(TEXT("at least one path segment")), StringValue(JsonPointer), TEXT("export_projection"), TEXT("The output JSON pointer has no path segments."));
 			return false;
 		}
 		for (const FString& Encoded : EncodedSegments)
@@ -60,17 +73,17 @@ namespace
 			FString Decoded;
 			if (!DecodeJsonPointerSegment(Encoded, Decoded))
 			{
-				OutError = TEXT("json_pointer_segment_invalid");
+				OutError = ProjectionFailure(TEXT("json_pointer_segment_invalid"), JsonPointer, StringValue(TEXT("nonempty segment with only ~0 or ~1 escapes")), StringValue(Encoded), TEXT("export_projection"), TEXT("The output JSON pointer contains an empty segment or invalid tilde escape."));
 				return false;
 			}
 			if (!bAllowWildcards && Decoded == TEXT("*"))
 			{
-				OutError = TEXT("json_pointer_unexpected_wildcard");
+				OutError = ProjectionFailure(TEXT("json_pointer_unexpected_wildcard"), JsonPointer, StringValue(TEXT("concrete path segment")), StringValue(Decoded), TEXT("export_projection"), TEXT("A concrete output JSON pointer cannot contain a wildcard."));
 				return false;
 			}
 			if (bAllowWildcards && Decoded.Contains(TEXT("*")) && Decoded != TEXT("*"))
 			{
-				OutError = TEXT("json_pointer_wildcard_must_fill_segment");
+				OutError = ProjectionFailure(TEXT("json_pointer_wildcard_must_fill_segment"), JsonPointer, StringValue(TEXT("* as a complete segment")), StringValue(Decoded), TEXT("export_projection"), TEXT("A wildcard must occupy a complete JSON pointer segment."));
 				return false;
 			}
 			OutSegments.Add(MoveTemp(Decoded));
@@ -85,7 +98,7 @@ namespace
 		FString Result;
 		for (int32 Index = 0; Index < Count; ++Index)
 		{
-			Result += TEXT("/") + EscapeJsonPointerSegment(Segments[Index]);
+			Result += TEXT("/") + UE::UAI::HjsonWorkspace::EscapeJsonPointerSegment(Segments[Index]);
 		}
 		return Result;
 	}
@@ -115,7 +128,7 @@ namespace UeAgentCompoundProjection
 		const FExtensionDescriptor& Descriptor,
 		FExtension Extension,
 		ERegistrationResult& OutResult,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FExtensionDescriptor Canonical = Descriptor;
 		Canonical.ProjectionId = NormalizeId(Canonical.ProjectionId);
@@ -123,15 +136,29 @@ namespace UeAgentCompoundProjection
 		if (Canonical.ProjectionId.IsEmpty() || Canonical.ImplementationId.IsEmpty()
 			|| Canonical.SourceKinds.IsEmpty() || !Extension)
 		{
-			OutError = TEXT("export_compound_extension_descriptor_invalid");
+			const bool bProjectionMissing = Canonical.ProjectionId.IsEmpty();
+			const bool bImplementationMissing = Canonical.ImplementationId.IsEmpty();
+			const bool bKindsMissing = Canonical.SourceKinds.IsEmpty();
+			OutError = ProjectionFailure(TEXT("export_compound_extension_descriptor_invalid"),
+				bProjectionMissing ? TEXT("projection_id") : bImplementationMissing ? TEXT("implementation_id") : bKindsMissing ? TEXT("source_kinds") : TEXT("extension"),
+				StringValue(bProjectionMissing || bImplementationMissing ? TEXT("nonempty identifier") : bKindsMissing ? TEXT("nonempty source kind array") : TEXT("callable projection extension")),
+				bProjectionMissing ? StringValue(Descriptor.ProjectionId) : bImplementationMissing ? StringValue(Descriptor.ImplementationId)
+				: bKindsMissing ? SourceKindsValue(Canonical.SourceKinds) : TSharedPtr<FJsonValue>(), TEXT("export_projection"),
+				bProjectionMissing ? TEXT("The projection identifier is empty after normalization.") : bImplementationMissing ? TEXT("The extension implementation identifier is empty after normalization.")
+				: bKindsMissing ? TEXT("The projection extension declares no supported source kinds.") : TEXT("The projection extension callback is missing."));
+			OutError.CandidateName = Canonical.ProjectionId;
+			if (!bProjectionMissing && !bImplementationMissing && !bKindsMissing) OutError.ActualValuePresent = false;
 			return false;
 		}
 		TSet<UeAgentExportContract::EFieldSourceKind> UniqueKinds;
-		for (UeAgentExportContract::EFieldSourceKind Kind : Canonical.SourceKinds)
+		for (int32 Index = 0; Index < Canonical.SourceKinds.Num(); ++Index)
 		{
+			const auto Kind = Canonical.SourceKinds[Index];
 			if (UniqueKinds.Contains(Kind))
 			{
-				OutError = TEXT("export_compound_extension_source_kind_duplicate");
+				OutError = ProjectionFailure(TEXT("export_compound_extension_source_kind_duplicate"), TEXT("source_kinds/") + FString::FromInt(Index),
+					StringValue(TEXT("unique source kind")), StringValue(UeAgentExportContract::FieldSourceKindToString(Kind)), TEXT("export_projection"), TEXT("The projection extension source kind duplicates an earlier entry."));
+				OutError.CandidateName = Canonical.ProjectionId;
 				return false;
 			}
 			UniqueKinds.Add(Kind);
@@ -142,7 +169,13 @@ namespace UeAgentCompoundProjection
 		{
 			if (Existing->Descriptor != Canonical)
 			{
-				OutError = TEXT("conflicting_export_compound_extension_") + Canonical.ProjectionId;
+				const bool bImplementationDiffers = Existing->Descriptor.ImplementationId != Canonical.ImplementationId;
+				OutError = ProjectionFailure(TEXT("conflicting_export_compound_extension"),
+					bImplementationDiffers ? TEXT("implementation_id") : TEXT("source_kinds"),
+					bImplementationDiffers ? StringValue(Existing->Descriptor.ImplementationId) : SourceKindsValue(Existing->Descriptor.SourceKinds),
+					bImplementationDiffers ? StringValue(Canonical.ImplementationId) : SourceKindsValue(Canonical.SourceKinds),
+					TEXT("export_registration"), TEXT("The extension descriptor differs from the projection already registered with this identifier."));
+				OutError.CandidateName = Canonical.ProjectionId;
 				return false;
 			}
 			OutResult = ERegistrationResult::AlreadyRegistered;
@@ -202,7 +235,7 @@ namespace UeAgentCompoundProjection
 	bool InspectJsonPointerPattern(
 		const FString& JsonPointerPattern,
 		FJsonPointerPatternInfo& OutInfo,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutInfo = FJsonPointerPatternInfo();
 		TArray<FString> Segments;
@@ -216,7 +249,8 @@ namespace UeAgentCompoundProjection
 		}
 		if (OutInfo.WildcardCount == 0)
 		{
-			OutError = TEXT("json_pointer_wildcard_missing");
+			OutError = ProjectionFailure(TEXT("json_pointer_wildcard_missing"), JsonPointerPattern,
+				StringValue(TEXT("at least one wildcard segment")), MakeShared<FJsonValueNumber>(0), TEXT("export_projection"), TEXT("The compound projection pattern contains no wildcard segments."));
 			return false;
 		}
 		OutInfo.EmptyContainerPointer = BuildJsonPointer(Segments, FirstWildcard);
@@ -228,7 +262,7 @@ namespace UeAgentCompoundProjection
 		const FString& JsonPointerPattern,
 		const TArray<FString>& WildcardValues,
 		FString& OutJsonPointer,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutJsonPointer.Reset();
 		TArray<FString> Segments;
@@ -241,14 +275,18 @@ namespace UeAgentCompoundProjection
 				|| WildcardValues[WildcardIndex].IsEmpty()
 				|| WildcardValues[WildcardIndex] == TEXT("*"))
 			{
-				OutError = TEXT("json_pointer_wildcard_value_invalid");
+				OutError = ProjectionFailure(TEXT("json_pointer_wildcard_value_invalid"), JsonPointerPattern,
+					StringValue(TEXT("nonempty concrete wildcard replacement")), WildcardValues.IsValidIndex(WildcardIndex) ? StringValue(WildcardValues[WildcardIndex]) : nullptr,
+					TEXT("export_projection"), FString::Printf(TEXT("Wildcard replacement %d is missing, empty, or still a wildcard."), WildcardIndex));
+				OutError.ActualValuePresent = WildcardValues.IsValidIndex(WildcardIndex);
 				return false;
 			}
 			Segment = WildcardValues[WildcardIndex++];
 		}
 		if (WildcardIndex != WildcardValues.Num())
 		{
-			OutError = TEXT("json_pointer_wildcard_cardinality_mismatch");
+			OutError = ProjectionFailure(TEXT("json_pointer_wildcard_cardinality_mismatch"), JsonPointerPattern,
+				MakeShared<FJsonValueNumber>(WildcardIndex), MakeShared<FJsonValueNumber>(WildcardValues.Num()), TEXT("export_projection"), TEXT("The wildcard replacement count differs from the number of wildcard segments."));
 			return false;
 		}
 		OutJsonPointer = BuildJsonPointer(Segments, Segments.Num());
@@ -262,7 +300,7 @@ namespace UeAgentCompoundProjection
 	{
 		TArray<FString> PatternSegments;
 		TArray<FString> ConcreteSegments;
-		FString Error;
+		UE::UAI::Contract::FDiagnostic Error;
 		if (!ParseJsonPointer(JsonPointerPattern, true, PatternSegments, Error)
 			|| !ParseJsonPointer(JsonPointer, false, ConcreteSegments, Error)
 			|| PatternSegments.Num() != ConcreteSegments.Num())

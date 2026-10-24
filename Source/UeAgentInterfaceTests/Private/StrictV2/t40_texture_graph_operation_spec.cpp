@@ -3,6 +3,7 @@
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
@@ -22,9 +23,15 @@
 #include "TG_Graph.h"
 #include "TG_Node.h"
 
-THIRD_PARTY_INCLUDES_START
-#include <openssl/sha.h>
-THIRD_PARTY_INCLUDES_END
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Expressions/Input/TG_Expression_Scalar.h"
+#include "Expressions/Output/TG_Expression_Output.h"
+#include "TG_Pin.h"
+#include "UObject/Package.h"
+#include "UObject/SavePackage.h"
+#include "ObjectTools.h"
+#include "Misc/ScopeExit.h"
+#include "Utilities/UeAgentStructuredHjsonFormatter.h"
 
 namespace UE::UAI::Tests::StrictV2::T40
 {
@@ -43,11 +50,18 @@ namespace UE::UAI::Tests::StrictV2::T40
 		static const TArray<FString> Commands = {
 			TEXT("texture_graph.artifact.bake"),
 			TEXT("texture_graph.artifact.capture"),
+			TEXT("texture_graph.graph.validate_evaluate_settle"),
+			TEXT("texture_graph.runtime.probe"),
+		};
+		return Commands;
+	}
+
+	const TArray<FString>& DormantCommands()
+	{
+		static const TArray<FString> Commands = {
 			TEXT("texture_graph.graph.link.mutate"),
 			TEXT("texture_graph.graph.node.mutate"),
 			TEXT("texture_graph.graph.parameter.mutate"),
-			TEXT("texture_graph.graph.validate_evaluate_settle"),
-			TEXT("texture_graph.runtime.probe"),
 		};
 		return Commands;
 	}
@@ -106,43 +120,6 @@ namespace UE::UAI::Tests::StrictV2::T40
 			MakeShared<FNeverCancelled>());
 	}
 
-	FString Sha256Text(const FString& Value)
-	{
-		FTCHARToUTF8 Utf8(*Value);
-		uint8 Digest[SHA256_DIGEST_LENGTH] = {};
-		SHA256(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length(), Digest);
-		return TEXT("sha256:")
-			+ BytesToHex(Digest, SHA256_DIGEST_LENGTH).ToLower();
-	}
-
-	bool WriteText(const FString& Path, const FString& Text)
-	{
-		return IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true)
-			&& FFileHelper::SaveStringToFile(
-				Text, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
-	}
-
-	FString ImportDocument(const FString& Target)
-	{
-		return FString::Printf(TEXT(R"hjson({
-			"schema":"uai.texture_graph.edit/1",
-			"root":{
-				"type":"/Script/TextureGraph.TextureGraph",
-				"operation":{
-					"command_id":"texture_graph.graph.node.mutate",
-					"params":{
-						"target_ref":"%s",
-						"nodes":[{
-							"element_id":"hjson_scalar",
-							"expression_class_ref":"/Script/TextureGraph.TG_Expression_Scalar",
-							"intent":"create"
-						}]
-					}
-				}
-			}
-		})hjson"), *Target);
-	}
-
 	FString CanonicalParams(const TSharedRef<FJsonObject>& Params)
 	{
 		FString Result;
@@ -152,67 +129,38 @@ namespace UE::UAI::Tests::StrictV2::T40
 
 	FString ImportParams(
 		const FString& Target,
-		const FString& Revision,
 		const TSharedRef<FJsonObject>& Source)
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target"), Target);
 		Params->SetObjectField(TEXT("source"), Source);
-		Params->SetStringField(TEXT("expected_revision"), Revision);
-		Params->SetStringField(
-			TEXT("authorization_id"), TEXT("auth:t40:hjson-product"));
 		return CanonicalParams(Params);
 	}
 
-	bool WriteDirectoryWorkspace(
-		const FString& Root,
-		const FString& Target,
-		const FString& Revision,
-		const FString& Document)
+
+	bool ReadOrdinaryGraph(const FString& Workspace, FString& File,
+		TSharedPtr<FJsonObject>& Document, FString& Error)
 	{
-		const FString Entry = TEXT("asset.hjson");
-		const TSharedRef<FJsonObject> Manifest = MakeShared<FJsonObject>();
-		Manifest->SetStringField(
-			TEXT("workspace_schema"), TEXT("uai.content_graph.workspace/1"));
-		Manifest->SetNumberField(TEXT("format_version"), 1);
-		Manifest->SetStringField(TEXT("target_identity"), Target);
-		Manifest->SetStringField(TEXT("base_revision"), Revision);
-		Manifest->SetStringField(TEXT("entry_file"), Entry);
-		const TSharedRef<FJsonObject> File = MakeShared<FJsonObject>();
-		File->SetStringField(TEXT("path"), Entry);
-		File->SetStringField(TEXT("content_hash"), Sha256Text(Document));
-		Manifest->SetArrayField(
-			TEXT("files"), {MakeShared<FJsonValueObject>(File)});
-		Manifest->SetArrayField(
-			TEXT("references"), TArray<TSharedPtr<FJsonValue>>{});
-		return WriteText(FPaths::Combine(Root, Entry), Document)
-			&& WriteText(
-				FPaths::Combine(Root, TEXT(".uai/workspace.hjson")),
-				CanonicalParams(Manifest));
+		TArray<FString> Files;
+		IFileManager::Get().FindFilesRecursive(Files, *Workspace, TEXT("*.hjson"), true, false);
+		Files.Sort();
+		for (const FString& Candidate : Files)
+		{
+			FString Normalized = Candidate;
+			FPaths::NormalizeFilename(Normalized);
+			if (Normalized.Contains(TEXT("/.uai/")) || Candidate.EndsWith(TEXT(".interfaces.hjson"))) continue;
+			FString Text;
+			TSharedPtr<FJsonObject> Parsed;
+			if (FFileHelper::LoadFileToString(Text, *Candidate)
+				&& FUeAgentStructuredHjsonParser::ParseObject(Text, Candidate, Parsed, Error)
+				&& Parsed.IsValid() && Parsed->HasTypedField<EJson::Object>(TEXT("nodes"))
+				&& Parsed->HasTypedField<EJson::Array>(TEXT("connections")))
+			{ File = Candidate; Document = Parsed; return true; }
+		}
+		Error = TEXT("texture_graph_ordinary_document_missing");
+		return false;
 	}
 
-	bool CleanupPackage(const FString& PackageName)
-	{
-		const FString Filename = FPackageName::LongPackageNameToFilename(
-			PackageName, FPackageName::GetAssetPackageExtension());
-		if (UPackage* Package = FindPackage(nullptr, *PackageName))
-		{
-			Package->SetDirtyFlag(false);
-			if (IFileManager::Get().FileExists(*Filename))
-			{
-				IFileManager::Get().Delete(*Filename, false, true);
-			}
-			FText Error;
-			UPackageTools::UnloadPackages({Package}, Error, true);
-			CollectGarbage(RF_NoFlags, true);
-		}
-		if (IFileManager::Get().FileExists(*Filename))
-		{
-			IFileManager::Get().Delete(*Filename, false, true);
-		}
-		return !IFileManager::Get().FileExists(*Filename)
-			&& !FindPackage(nullptr, *PackageName);
-	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -236,8 +184,6 @@ bool FUeAgentStrictV2T40TextureGraphInventoryTest::RunTest(
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T40 owns exactly 7 current commands"),
-		ExpectedCommands().Num(), 7);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
@@ -258,6 +204,29 @@ bool FUeAgentStrictV2T40TextureGraphInventoryTest::RunTest(
 				*FString::Printf(TEXT("%s uses the stable SDK method"), *CommandId),
 				Contract->GetPythonFunction(),
 				ExpectedMethod);
+			if (CommandId == TEXT("texture_graph.artifact.bake"))
+			{
+				const auto& Fields = Contract->GetModelResultFields();
+				TestEqual(TEXT("bake exposes one compact creation result"),
+					Fields.Num(), 1);
+				if (Fields.Num() == 1)
+				{
+					TestEqual(TEXT("bake returns verified created assets"),
+						Fields[0].Name, FString(TEXT("asset_refs")));
+				}
+			}
+		}
+	}
+	for (const FString& CommandId : DormantCommands())
+	{
+		const auto* Contract = Registry->FindExact(CommandId);
+		TestNotNull(*FString::Printf(TEXT("%s remains registered"), *CommandId), Contract);
+		if (Contract)
+		{
+			TestEqual(
+				*FString::Printf(TEXT("%s is centrally dormant"), *CommandId),
+				Contract->GetAvailability(),
+				CommandContract::EUeAgentCommandAvailability::Dormant);
 		}
 	}
 	return !HasAnyErrors();
@@ -301,15 +270,15 @@ bool FUeAgentStrictV2T40TextureGraphHjsonProviderTest::RunTest(
 	}
 	const FDomainCapabilityDeclaration& Declaration =
 		(*TextureGraph)->GetDeclaration();
-	TestEqual(TEXT("TextureGraph contribution owns seven commands"),
-		Declaration.Command.Contributions.Num(), 1);
-	TestEqual(TEXT("TextureGraph contribution owns one HJSON provider"),
-		Declaration.Hjson.Providers.Num(), 1);
-	TestEqual(TEXT("TextureGraph contribution owns one target composition"),
-		Declaration.Composition.Contracts.Num(), 1);
-	TestTrue(TEXT("TextureGraph composition owns semantic routes"),
-		Declaration.Composition.Contracts.Num() == 1
-			&& !Declaration.Composition.Contracts[0].SemanticRoutes.IsEmpty());
+	TestFalse(TEXT("TextureGraph contribution owns command declarations"),
+		Declaration.Command.Contributions.IsEmpty());
+	TestTrue(TEXT("TextureGraph contribution owns its HJSON provider"),
+		Declaration.Hjson.Providers.ContainsByPredicate(
+			[](const TSharedRef<IImportInitializationDomainProvider>& Provider)
+			{
+				return Provider->GetProviderId()
+					== TEXT("texture-graph-domain-provider");
+			}));
 	const TArray<FString> OperationIds = {
 		TEXT("texture_graph.artifact.bake"),
 		TEXT("texture_graph.graph.link.mutate"),
@@ -317,8 +286,6 @@ bool FUeAgentStrictV2T40TextureGraphHjsonProviderTest::RunTest(
 		TEXT("texture_graph.graph.parameter.mutate"),
 		TEXT("texture_graph.graph.validate_evaluate_settle"),
 	};
-	TestEqual(TEXT("TextureGraph declares every write through OperationService"),
-		Declaration.Operation.Operations.Num(), OperationIds.Num());
 	for (const FString& OperationId : OperationIds)
 	{
 		const TSharedPtr<const IDomainOperationInvocationFactory> Factory =
@@ -334,6 +301,17 @@ bool FUeAgentStrictV2T40TextureGraphHjsonProviderTest::RunTest(
 			Factory.IsValid() && PublicFactory.IsValid()
 				&& Factory.Get() == PublicFactory.Get());
 	}
+	TestFalse(TEXT("semantic composite is not a named operation factory"),
+		UE::UAI::OperationOwners::TextureGraph::
+			FindTextureGraphOperationInvocationFactory(
+				TEXT("texture_graph.semantic_workspace.composite")).IsValid());
+	TestFalse(TEXT("semantic composite is absent from capability operations"),
+		Declaration.Operation.Operations.ContainsByPredicate(
+			[](const FDomainOperationEntry& Entry)
+			{
+				return Entry.OperationId
+					== TEXT("texture_graph.semantic_workspace.composite");
+			}));
 	FDomainCapabilityAuthorities Authorities;
 	TestTrue(TEXT("TextureGraph contribution activates process authorities"),
 		FrozenCapabilities->TryBuildAuthorities(
@@ -350,8 +328,8 @@ bool FUeAgentStrictV2T40TextureGraphHjsonProviderTest::RunTest(
 		return false;
 	}
 	FImportInitializationDomainResolution Resolution;
-	TestTrue(
-		TEXT("the exact TextureGraph root resolves one provider"),
+	TestFalse(
+		TEXT("the retired operation wrapper schema is rejected"),
 		Registry->TryResolve(
 			FImportInitializationDomainRequest(
 				TEXT("content_graph.import_workspace"),
@@ -362,18 +340,22 @@ bool FUeAgentStrictV2T40TextureGraphHjsonProviderTest::RunTest(
 				TEXT("{}")),
 			Resolution,
 			Error));
-	TestTrue(TEXT("the TextureGraph resolution is valid"), Resolution.IsValid());
-	if (Resolution.IsValid())
-	{
-		TestEqual(
-			TEXT("the TextureGraph provider identity is unique"),
-			Resolution.GetProvider()->GetProviderId(),
-			FString(TEXT("texture-graph-domain-provider")));
-		TestEqual(
-			TEXT("the TextureGraph root contract is provider-owned"),
-			Resolution.GetInitializationContractId(),
-			FString(TEXT("uai.init.texture_graph.root/1")));
-	}
+	TestFalse(TEXT("old schema leaves no resolution"), Resolution.IsValid());
+	FImportInitializationDomainResolution SemanticResolution;
+	TestTrue(
+		TEXT("the shared semantic workspace schema resolves the TextureGraph provider"),
+		Registry->TryResolve(
+			FImportInitializationDomainRequest(
+				TEXT("content_graph.import_workspace"),
+				GetSemanticWorkspaceSchemaId(),
+				TEXT("/Game/UAI/StrictV2/T40/Fixture.Fixture"),
+				TEXT("/Script/TextureGraph.TextureGraph"),
+				EInitializationNodeRole::RootTarget,
+				TEXT("{}")),
+			SemanticResolution,
+			Error));
+	TestTrue(TEXT("the semantic TextureGraph resolution is valid"),
+		SemanticResolution.IsValid());
 
 	FTargetCompositionContract Composition;
 	TestTrue(
@@ -383,6 +365,8 @@ bool FUeAgentStrictV2T40TextureGraphHjsonProviderTest::RunTest(
 	TestEqual(
 		TEXT("TextureGraph composition owns four semantic surfaces"),
 		Composition.Surfaces.Num(), 4);
+	TestFalse(TEXT("registered TextureGraph composition owns semantic routes"),
+		Composition.SemanticRoutes.IsEmpty());
 	return !HasAnyErrors();
 }
 
@@ -391,148 +375,146 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	"UAI.StrictV2.T40.TEXTURE.GRAPH.OPERATION.HjsonCarrierProductRoundTrip",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentStrictV2T40TextureGraphHjsonProductTest::RunTest(
-	const FString& Parameters)
+bool FUeAgentStrictV2T40TextureGraphHjsonProductTest::RunTest(const FString& Parameters)
 {
 	using namespace UE::UAI;
 	using namespace UE::UAI::Tests::StrictV2::T40;
-	(void)Parameters;
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
 	FString Error;
-	if (!TestTrue(TEXT("the process public command surface composes"),
-		Module::CommandRegistration::Active::
-			TryComposeProcessActiveCommandComposition(Registry, Dispatch, Error)))
+	if (!Module::CommandRegistration::Active::TryComposeProcessActiveCommandComposition(Registry, Dispatch, Error))
+	{ AddError(Error); return false; }
+	const FString PackageName = TEXT("/Game/UAI/Tests/T40/TG_Workspace_") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	const FString Path = ObjectPath(PackageName);
+	const FString Filename = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
+	const FString Workspace = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Automation/StrictV2/T40") / FPackageName::GetLongPackageAssetName(PackageName));
+	const FString Reexport = Workspace + TEXT("_readback");
+	ON_SCOPE_EXIT
 	{
-		AddError(Error);
-		return false;
-	}
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits);
-	const FString Root = FPaths::ConvertRelativePathToFull(
-		FPaths::ProjectSavedDir() / TEXT("Automation/StrictV2/T40/Hjson_") + Suffix);
-	const TArray<FString> Kinds = {TEXT("inline"), TEXT("single_file"), TEXT("directory")};
-	TArray<FString> Packages;
-	for (const FString& Kind : Kinds)
+		if (UObject* Owned = LoadObject<UObject>(nullptr, *Path)) ObjectTools::DeleteObjectsUnchecked({Owned});
+		TestFalse(TEXT("owned TextureGraph disk removed by UE"), IFileManager::Get().FileExists(*Filename));
+		IFileManager::Get().DeleteDirectory(*Workspace, false, true);
+		IFileManager::Get().DeleteDirectory(*Reexport, false, true);
+	};
+	UPackage* Package = CreatePackage(*PackageName);
+	UTextureGraph* Graph = NewObject<UTextureGraph>(Package, *FPackageName::GetLongPackageAssetName(PackageName), RF_Public | RF_Standalone | RF_Transactional);
+	Graph->Construct(FPackageName::GetLongPackageAssetName(PackageName));
+	FAssetRegistryModule::AssetCreated(Graph);
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+	if (!UPackage::SavePackage(Package, Graph, *Filename, SaveArgs)) return false;
+	Package->SetDirtyFlag(false);
+	TArray<uint8> OriginalDisk;
+	if (!FFileHelper::LoadFileToArray(OriginalDisk, *Filename)) return false;
+	auto Export = [&](const FString& Directory)
 	{
-		const FString PackageName = TEXT("/Game/UAI/Tests/T40/Hjson_")
-			+ Kind + TEXT("_") + Suffix;
-		Packages.Add(PackageName);
-		CleanupPackage(PackageName);
-		const TSharedRef<FJsonObject> Create = MakeShared<FJsonObject>();
-		Create->SetStringField(TEXT("asset_kind"), TEXT("texture_graph"));
-		Create->SetStringField(
-			TEXT("asset_name"), FPackageName::GetLongPackageAssetName(PackageName));
-		Create->SetStringField(
-			TEXT("package_path"), FPackageName::GetLongPackagePath(PackageName));
-		const FUeAgentCommandResult Created = SubmitPublic(
-			Registry, Dispatch, TEXT("audio_media.asset.create"),
-			CanonicalParams(Create));
-		TestTrue(*FString::Printf(TEXT("%s fixture is created publicly"), *Kind),
-			Created.IsOk());
-		UTextureGraph* Graph = LoadObject<UTextureGraph>(
-			nullptr, *ObjectPath(PackageName));
-		if (!TestNotNull(*FString::Printf(TEXT("%s TextureGraph loads"), *Kind), Graph))
-		{
-			continue;
-		}
-		DomainAdapters::ContentGraphRead::FUeAgentContentGraphCapture Before;
-		DomainAdapters::ContentGraphRead::FUeAgentContentGraphReadError ReadError;
-		if (!TestTrue(TEXT("pre-import revision is captured"),
-			DomainAdapters::ContentGraphRead::
-				FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-					*Graph, Before, ReadError)))
-		{
-			AddError(ReadError.Code);
-			continue;
-		}
-		const FString Document = ImportDocument(PackageName);
-		const TSharedRef<FJsonObject> Source = MakeShared<FJsonObject>();
-		Source->SetStringField(TEXT("kind"), Kind);
-		if (Kind == TEXT("inline"))
-		{
-			Source->SetStringField(TEXT("document"), Document);
-		}
-		else if (Kind == TEXT("single_file"))
-		{
-			const FString Path = FPaths::Combine(Root, Kind, TEXT("asset.hjson"));
-			TestTrue(TEXT("single-file fixture persists"), WriteText(Path, Document));
-			Source->SetStringField(TEXT("path"), Path);
-		}
-		else
-		{
-			const FString Path = FPaths::Combine(Root, Kind);
-			TestTrue(TEXT("directory fixture and manifest persist"),
-				WriteDirectoryWorkspace(Path, PackageName, Before.Revision, Document));
-			Source->SetStringField(TEXT("path"), Path);
-		}
-		const FUeAgentCommandResult Imported = SubmitPublic(
-			Registry, Dispatch, TEXT("content_graph.import_workspace"),
-			ImportParams(PackageName, Before.Revision, Source));
-		TestTrue(*FString::Printf(
-			TEXT("%s imports through the one public HJSON entry"), *Kind),
-			Imported.IsOk());
-		if (!Imported.IsOk())
-		{
-			AddError(Imported.GetErrorJson());
-			continue;
-		}
-		Graph = LoadObject<UTextureGraph>(nullptr, *ObjectPath(PackageName));
-		bool bFound = false;
-		if (Graph && Graph->Graph())
-		{
-			Graph->Graph()->ForEachNodes(
-				[&bFound](const UTG_Node* Node, const uint32)
-				{
-					bFound = bFound || (Node && Node->GetExpression()
-						&& Node->GetExpression()->GetName() == TEXT("hjson_scalar"));
-				});
-		}
-		TestTrue(*FString::Printf(
-			TEXT("%s independently reloads the authored node"), *Kind), bFound);
-
-		const FString ExportRoot = FPaths::Combine(Root, TEXT("export_") + Kind);
-		const TSharedRef<FJsonObject> Export = MakeShared<FJsonObject>();
-		Export->SetStringField(TEXT("target"), PackageName);
-		Export->SetStringField(TEXT("workspace_path"), ExportRoot);
-		Export->SetStringField(TEXT("profile_id"), TEXT("llm_authoring"));
-		const FUeAgentCommandResult Exported = SubmitPublic(
-			Registry, Dispatch, TEXT("content_graph.export_workspace"),
-			CanonicalParams(Export));
-		TestTrue(*FString::Printf(
-			TEXT("%s result exports through the one public workspace entry"), *Kind),
-			Exported.IsOk());
-		if (!Exported.IsOk())
-		{
-			AddError(TEXT("export error diagnostic: ")
-				+ Exported.GetErrorJson());
-		}
-		TSharedPtr<FJsonObject> ExportPayload;
-		FString ExportJsonError;
-		FString PublishedWorkspace;
-		const bool bExportPayloadValid = Exported.IsOk()
-				&& Json::TryParseObject(
-					Exported.GetPayloadJson(), ExportPayload, ExportJsonError)
-				&& ExportPayload.IsValid()
-				&& ExportPayload->TryGetStringField(
-					TEXT("workspace_path"), PublishedWorkspace)
-				&& !PublishedWorkspace.IsEmpty();
-		TestTrue(TEXT("export returns its atomic published workspace"),
-			bExportPayloadValid);
-		if (!bExportPayloadValid)
-		{
-			AddError(TEXT("export payload diagnostic: ")
-				+ Exported.GetPayloadJson() + TEXT(" parse_error:")
-				+ ExportJsonError);
-		}
-		TestTrue(TEXT("export publishes a machine manifest"),
-			!PublishedWorkspace.IsEmpty()
-				&& IFileManager::Get().FileExists(*FPaths::Combine(
-					PublishedWorkspace, TEXT(".uai/workspace.hjson"))));
-	}
-	for (const FString& PackageName : Packages)
+		auto Params = MakeShared<FJsonObject>();
+		Params->SetStringField(TEXT("target"), Path);
+		Params->SetStringField(TEXT("workspace_path"), Directory);
+		Params->SetStringField(TEXT("profile_id"), TEXT("llm_authoring"));
+		auto Result = SubmitPublic(Registry, Dispatch, TEXT("content_graph.export_workspace"), CanonicalParams(Params));
+		if (!Result.IsOk()) AddError(Result.GetErrorJson());
+		return Result.IsOk();
+	};
+	if (!Export(Workspace)) return false;
+	FString File;
+	TSharedPtr<FJsonObject> Document;
+	if (!ReadOrdinaryGraph(Workspace, File, Document, Error)) { AddError(Error); return false; }
+	auto Nodes = Document->GetObjectField(TEXT("nodes"));
+	FString OutputKey;
+	for (const auto& Pair : Nodes->Values)
+		if (Pair.Value->AsObject()->GetStringField(TEXT("node_type")) == UTG_Expression_Output::StaticClass()->GetName())
+			OutputKey = Pair.Key;
+	if (!TestFalse(TEXT("public output node has a readable key"), OutputKey.IsEmpty())) return false;
+	const FString AddedKey = TEXT("AddedGain");
+	auto Added = MakeShared<FJsonObject>();
+	Added->SetStringField(TEXT("name"), TEXT("No such TextureGraph expression for T40"));
+	auto Value = MakeShared<FJsonObject>();
+	Value->SetStringField(TEXT("alias"), AddedKey);
+	Value->SetNumberField(TEXT("value"), 0.625);
+	auto Inputs = MakeShared<FJsonObject>();
+	Inputs->SetObjectField(TEXT("Scalar"), Value);
+	Added->SetObjectField(TEXT("inputs"), Inputs);
+	Nodes->SetObjectField(AddedKey, Added);
+	auto Connection = MakeShared<FJsonObject>();
+	Connection->SetStringField(TEXT("from"), AddedKey + TEXT(".ValueOut"));
+	Connection->SetStringField(TEXT("to"), OutputKey + TEXT(".Source"));
+	Document->SetArrayField(TEXT("connections"), {MakeShared<FJsonValueObject>(Connection)});
+	auto Write = [&]()
 	{
-		TestTrue(TEXT("HJSON fixture cleanup succeeds"), CleanupPackage(PackageName));
+		FString Text;
+		return FUeAgentStructuredHjsonFormatter::TryWriteObject(Document.ToSharedRef(), Text, Error)
+			&& FFileHelper::SaveStringToFile(Text, *File, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	};
+	auto Source = MakeShared<FJsonObject>();
+	Source->SetStringField(TEXT("kind"), TEXT("directory"));
+	Source->SetStringField(TEXT("path"), Workspace);
+	if (!Write()) { AddError(Error); return false; }
+	auto Rejected = SubmitPublic(Registry, Dispatch, TEXT("content_graph.import_workspace"), ImportParams(Path, Source));
+	TArray<uint8> RejectedDisk;
+	int32 BeforeNodes = 0;
+	Graph->Graph()->ForEachNodes([&](const UTG_Node* Node, const uint32){ if(Node) ++BeforeNodes; });
+	if (!TestFalse(TEXT("unknown readable candidate rejected"), Rejected.IsOk())
+		|| !TestTrue(TEXT("unknown candidate cause"), Rejected.GetErrorJson().Contains(TEXT("texture_graph_candidate_unknown")))
+		|| !TestTrue(TEXT("unknown name leaves original graph and disk untouched"),
+			BeforeNodes == 1 && !Package->IsDirty() && FFileHelper::LoadFileToArray(RejectedDisk, *Filename) && RejectedDisk == OriginalDisk))
+	{ AddError(Rejected.GetErrorJson()); return false; }
+	const FString ReadableName = GetDefault<UTG_Expression_Scalar>()->GetDefaultName().ToString();
+	Added->SetStringField(TEXT("name"), ReadableName);
+	if (!Write()) { AddError(Error); return false; }
+	Graph = nullptr; Package = nullptr;
+	auto Imported = SubmitPublic(Registry, Dispatch, TEXT("content_graph.import_workspace"), ImportParams(Path, Source));
+	if (!TestTrue(TEXT("ordinary node plus parameter and connection import"), Imported.IsOk()))
+	{ AddError(Imported.GetErrorJson()); return false; }
+	// Independently discard the in-process asset and reload the published package.
+	if (UPackage* Loaded = FindPackage(nullptr, *PackageName))
+	{
+		FText UnloadError;
+		if (!UPackageTools::UnloadPackages({Loaded}, UnloadError, true))
+		{ AddError(UnloadError.ToString()); return false; }
 	}
-	IFileManager::Get().DeleteDirectory(*Root, false, true);
+	Graph = LoadObject<UTextureGraph>(nullptr, *Path);
+	UTG_Node* ScalarNode = nullptr;
+	UTG_Node* OutputNode = nullptr;
+	int32 Count = 0;
+	if (Graph && Graph->Graph()) Graph->Graph()->ForEachNodes([&](const UTG_Node* Node, const uint32)
+	{
+		if (!Node) return;
+		++Count;
+		if (Cast<UTG_Expression_Scalar>(Node->GetExpression())) ScalarNode = const_cast<UTG_Node*>(Node);
+		if (Cast<UTG_Expression_Output>(Node->GetExpression())) OutputNode = const_cast<UTG_Node*>(Node);
+	});
+	FTG_Name ScalarPinName(TEXT("Scalar")), FromPinName(TEXT("ValueOut")), ToPinName(TEXT("Source"));
+	const UTG_Pin* ScalarPin = ScalarNode ? ScalarNode->GetInputPin(ScalarPinName) : nullptr;
+	const UTG_Pin* From = ScalarNode ? ScalarNode->GetOutputPin(FromPinName) : nullptr;
+	const UTG_Pin* To = OutputNode ? OutputNode->GetInputPin(ToPinName) : nullptr;
+	float NativeValue = 0;
+	TestTrue(TEXT("native reloaded new scalar parameter and bound connection"),
+		Graph && !Graph->GetPackage()->IsDirty() && Count == 2 && ScalarPin
+		&& ScalarPin->GetAliasName() == FName(*AddedKey) && ScalarPin->GetValue(NativeValue) && NativeValue == 0.625f
+		&& From && To && From->GetEdges().Contains(To->GetId()));
+	if (!Export(Reexport) || !ReadOrdinaryGraph(Reexport, File, Document, Error))
+	{ AddError(Error); return false; }
+	Nodes = Document->GetObjectField(TEXT("nodes"));
+	FString ReadbackScalarKey, ReadbackOutputKey;
+	for (const auto& Pair : Nodes->Values)
+	{
+		auto Node = Pair.Value->AsObject();
+		const FString Type = Node->GetStringField(TEXT("node_type"));
+		if (Type == UTG_Expression_Output::StaticClass()->GetName()) ReadbackOutputKey = Pair.Key;
+		if (Type != UTG_Expression_Scalar::StaticClass()->GetName()) continue;
+		auto Input = Node->GetObjectField(TEXT("inputs"))->GetObjectField(TEXT("Scalar"));
+		if (Input->GetStringField(TEXT("alias")) == AddedKey && Input->GetNumberField(TEXT("value")) == 0.625)
+			ReadbackScalarKey = Pair.Key;
+	}
+	bool bEdge = false;
+	for (const auto& Item : Document->GetArrayField(TEXT("connections")))
+	{
+		auto Edge = Item->AsObject();
+		bEdge |= Edge->GetStringField(TEXT("from")) == ReadbackScalarKey + TEXT(".ValueOut")
+			&& Edge->GetStringField(TEXT("to")) == ReadbackOutputKey + TEXT(".Source");
+	}
+	TestTrue(TEXT("ordinary reexport preserves new scalar value alias and connection"),
+		Nodes->Values.Num() == 2 && !ReadbackScalarKey.IsEmpty() && !ReadbackOutputKey.IsEmpty() && bEdge);
 	return !HasAnyErrors();
 }

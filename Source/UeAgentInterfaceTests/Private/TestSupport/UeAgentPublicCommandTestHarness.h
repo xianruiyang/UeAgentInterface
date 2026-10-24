@@ -3,12 +3,12 @@
 #include "CoreMinimal.h"
 
 #include "CommandEdge/UeAgentCommandProtocol.h"
-#include "CommandRegistry/UeAgentActiveCommandManifest.h"
-#include "Composition/UeAgentCommandServiceComposition.h"
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionActivation.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundActivation.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/Contract/UeAgentContractJson.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "GameFramework/WorldSettings.h"
 #include "Misc/Guid.h"
@@ -16,6 +16,8 @@
 #include "NetworkTransport/UeAgentHttpTransportAdapter.h"
 #include "ServiceComposition/CommandService/UeAgentCommandService.h"
 #include "ServiceComposition/Query/UeAgentQueryCommandIngress.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 namespace UE::UAI::Tests::PublicCommand
 {
@@ -24,6 +26,29 @@ namespace UE::UAI::Tests::PublicCommand
 	using namespace UE::UAI::CommandRegistry;
 	using namespace UE::UAI::Composition;
 	using namespace UE::UAI::NetworkTransport;
+
+	// Wire-facing tests inspect the response document, without reconstructing
+	// internal command results or diagnostics from their public projection.
+	inline bool ReadPublicResponse(const TArray<uint8>& Bytes,
+		TSharedPtr<FJsonObject>& OutResponse, FString& OutError)
+	{
+		Contract::FDiagnostic ParseError;
+		if (!Contract::Json::TryParseObject(Bytes, OutResponse, ParseError))
+		{
+			OutError = ParseError.PublicMessage;
+			return false;
+		}
+		return OutResponse.IsValid();
+	}
+
+	inline FString PublicErrorText(const TSharedPtr<FJsonObject>& Response)
+	{
+		const auto Error = Response->TryGetField(TEXT("error"));
+		if (!Error || Error->IsNull()) return TEXT("null");
+		FString Text;
+		FJsonSerializer::Serialize(Error->AsObject().ToSharedRef(), TJsonWriterFactory<>::Create(&Text));
+		return Text;
+	}
 
 	class FActiveCommandNeverCancelled final
 		: public UE::UAI::Contract::IUeAgentCancellationSignal
@@ -53,11 +78,10 @@ namespace UE::UAI::Tests::PublicCommand
 				RequestId,
 				CommandId,
 				TEXT("sha256:0000000000000000000000000000000000000000000000000000000000000000"),
-				TEXT("active_public_contract_missing"),
-				CommandId);
+				Contract::FDiagnostic::Failure(TEXT("active_public_contract_missing"), CommandId, TEXT("command_test")));
 		}
 		FString ParamsJson;
-		FString CanonicalError;
+		Contract::FDiagnostic CanonicalError;
 		if (!UE::UAI::Contract::Json::TryCanonicalize(
 				Params, ParamsJson, CanonicalError))
 		{
@@ -66,8 +90,7 @@ namespace UE::UAI::Tests::PublicCommand
 				RequestId,
 				CommandId,
 				Contract->GetContractHash(),
-				TEXT("active_public_params_invalid"),
-				CanonicalError);
+				Contract::FDiagnostic::WrapFailure(TEXT("active_public_params_invalid"), CanonicalError, TEXT("command_test")));
 		}
 		const FString Envelope = FString::Printf(
 			TEXT("{\"schema\":\"uai.command.v1\",\"version\":1,")
@@ -96,8 +119,7 @@ namespace UE::UAI::Tests::PublicCommand
 				RequestId,
 				CommandId,
 				Contract->GetContractHash(),
-				Diagnostic.Code,
-				Diagnostic.Message);
+				Diagnostic);
 		}
 		return Dispatch->Submit(
 			Request.GetValue(),
@@ -132,7 +154,8 @@ namespace UE::UAI::Tests::PublicCommand
 			const FString& InMethod,
 			const FString& InRoutePath,
 			FUeAgentHttpRequestHandler InHandler,
-			FUeAgentTransportDiagnostic& OutDiagnostic) override
+			FUeAgentTransportDiagnostic& OutDiagnostic,
+			EUeAgentHttpRouteExecution Execution = EUeAgentHttpRouteExecution::GameThread) override
 		{
 			OutDiagnostic = {};
 			if (Handlers.Contains(InRoutePath)
@@ -197,7 +220,6 @@ namespace UE::UAI::Tests::PublicCommand
 		FString TicketIntegrityKey;
 		double QueryTimeoutSeconds = 0.0;
 		double TicketTtlSeconds = 0.0;
-		int64 MaxFrameBytes = 0;
 	};
 
 	inline FPublicCommandTransportConfig MakeConfig(
@@ -212,7 +234,6 @@ namespace UE::UAI::Tests::PublicCommand
 		Result.TicketIntegrityKey = Scope + TEXT("-ticket-integrity-key");
 		Result.QueryTimeoutSeconds = 15.0;
 		Result.TicketTtlSeconds = 30.0;
-		Result.MaxFrameBytes = 16 * 1024 * 1024;
 		return Result;
 	}
 
@@ -272,18 +293,6 @@ namespace UE::UAI::Tests::PublicCommand
 				OutError = TEXT("active_public_command_authority_missing");
 				return false;
 			}
-			if (!FUeAgentActiveCommandManifest::TryVerify(
-					Registry.ToSharedRef(),
-					GetUaiCommandManifestPluginVersion(),
-					GetUaiCommandManifestBuildId(),
-					GetDefaultCommandManifestPath(),
-					OutError))
-			{
-				Registry.Reset();
-				Dispatch.Reset();
-				return false;
-			}
-
 			TSharedPtr<
 				IUeAgentTransportRequestHandler,
 				ESPMode::ThreadSafe> Ingress;
@@ -327,7 +336,6 @@ namespace UE::UAI::Tests::PublicCommand
 			HttpConfig.Channel = TEXT("uai.command.v1");
 			HttpConfig.PrincipalSubject =
 				TEXT("uai-public-command-test-client");
-			HttpConfig.MaxFrameBytes = Config.MaxFrameBytes;
 			ServerControl = MakeUnique<FUeAgentHttpTransportAdapter>(
 				MoveTemp(HttpConfig),
 				RouteHost.ToSharedRef(),
@@ -409,7 +417,7 @@ namespace UE::UAI::Tests::PublicCommand
 		const FPublicCommandTransportConfig& ServiceConfig,
 		const FString& CommandId,
 		const FString& ParamsJson,
-		TOptional<FUeAgentCommandResult>& OutResult,
+		TSharedPtr<FJsonObject>& OutResult,
 		FString& OutError)
 	{
 		OutResult.Reset();
@@ -468,16 +476,6 @@ namespace UE::UAI::Tests::PublicCommand
 				Response.StatusCode);
 			return false;
 		}
-		FUeAgentCommandProtocolDiagnostic Diagnostic;
-		FUeAgentCommandProtocolCodec Codec;
-		if (!Codec.DecodeResult(
-			Response.Body,
-			OutResult,
-			Diagnostic))
-		{
-			OutError = Diagnostic.Code + TEXT(":") + Diagnostic.Message;
-			return false;
-		}
-		return OutResult.IsSet();
+		return ReadPublicResponse(Response.Body, OutResult, OutError);
 	}
 }

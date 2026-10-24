@@ -20,19 +20,7 @@ namespace
 
 	TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 4096},
-				{EUeAgentResourceDimension::Files, 256},
-				{EUeAgentResourceDimension::ReferenceEdges, 4096},
-				{EUeAgentResourceDimension::WorkUnits, 65536},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	FUeAgentCanonicalValueRef MakeParameters(
@@ -526,19 +514,6 @@ bool FUeAgentCompileBuildJobAdapterBehaviorTest::RunTest(
 
 	const int32 FactoryCallsBeforeInvalid = Factory.Calls;
 	const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
-		LocalizationTimeoutResources = MakeResources();
-	const FUeAgentCompileBuildJobTypedRequest LocalizationTimeoutRequest(
-		EUeAgentCompileBuildJobFamily::ExternalProcess,
-		TEXT("localization:Game"),
-		TEXT("policy:owned-tool:localization-gather-text/v1"),
-		MakeParametersWithInteger(
-			*LocalizationTimeoutResources,
-			TEXT("timeout_seconds"),
-			TEXT("120")));
-	TestTrue(
-		TEXT("the exact localization owned-tool policy accepts its frozen top-level timeout"),
-		LocalizationTimeoutRequest.IsValid());
-	const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
 		InvalidLocalizationTimeoutResources = MakeResources();
 	const FUeAgentCompileBuildJobTypedRequest InvalidLocalizationTimeoutRequest(
 		EUeAgentCompileBuildJobFamily::ExternalProcess,
@@ -549,7 +524,7 @@ bool FUeAgentCompileBuildJobAdapterBehaviorTest::RunTest(
 			TEXT("timeout_seconds"),
 			TEXT("120")));
 	TestFalse(
-		TEXT("localization timeout must remain a bounded numeric value"),
+		TEXT("localization timeout must remain a numeric value"),
 		InvalidLocalizationTimeoutRequest.IsValid());
 
 	const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentExecutionContextPolicy.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
@@ -13,11 +15,7 @@ namespace UE::UAI::ExecutionContext
 		FString StableIdentity;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentExecutionContextError
-	{
-		FString Code;
-		FString Detail;
-	};
+	using FUeAgentExecutionContextError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentFrozenExecutionContext final
 	{

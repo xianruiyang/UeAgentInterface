@@ -31,22 +31,7 @@ namespace
 	{
 		return MakeShared<
 			FUeAgentResourceTracker,
-			ESPMode::ThreadSafe>(
-				FUeAgentResourceBudget({
-					{EUeAgentResourceDimension::InputBytes, 1048576},
-					{EUeAgentResourceDimension::OutputBytes, 1048576},
-					{EUeAgentResourceDimension::StringBytes, 1048576},
-					{EUeAgentResourceDimension::Nodes, 32768},
-					{EUeAgentResourceDimension::Items, 32768},
-					{EUeAgentResourceDimension::Files, 64},
-					{EUeAgentResourceDimension::ReferenceEdges, 32768},
-					{EUeAgentResourceDimension::WorkUnits, 1048576},
-					{
-						EUeAgentResourceDimension::
-							EstimatedMemoryBytes,
-						134217728,
-					},
-				}));
+			ESPMode::ThreadSafe>();
 	}
 
 	bool TryCanonicalValue(
@@ -446,13 +431,7 @@ namespace
 		const FString& CaseId,
 		const TSharedPtr<FJsonObject>& Input)
 	{
-		if (CaseId == TEXT("stale_target_revision"))
-		{
-			Input->SetStringField(
-				TEXT("expected_revision"),
-				TEXT("rev:target:stale"));
-		}
-		else if (CaseId == TEXT("duplicate_field"))
+		if (CaseId == TEXT("duplicate_field"))
 		{
 			TArray<TSharedPtr<FJsonValue>> Changes =
 				Input->GetArrayField(TEXT("changes"));
@@ -495,17 +474,6 @@ namespace
 			Properties[0]->AsObject()->SetStringField(
 				TEXT("field_ref"),
 				TEXT("uai://editor-project-field/unbound"));
-		}
-		else if (
-			CaseId == TEXT("stale_settings_field_revision"))
-		{
-			const TArray<TSharedPtr<FJsonValue>>& Properties =
-				FindChange(Input, TEXT("properties"))
-					->GetObjectField(TEXT("value"))
-					->GetArrayField(TEXT("canonical_value"));
-			Properties[0]->AsObject()->SetStringField(
-				TEXT("expected_revision"),
-				TEXT("field:stale"));
 		}
 		else if (
 			CaseId == TEXT("device_profile_inheritance_cycle"))

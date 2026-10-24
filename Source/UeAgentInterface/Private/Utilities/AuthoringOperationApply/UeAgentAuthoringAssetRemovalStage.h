@@ -3,17 +3,19 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 class UObject;
 
 namespace UeAgentAuthoringOperationApply
 {
+	using UE::UAI::Contract::FDiagnostic;
 	class UEAGENTINTERFACE_API FAssetRemovalStage
 	{
 	public:
-		bool Capture(UObject* InAsset, FString& OutError);
-		bool Stage(FString& OutError);
-		bool Rollback(FString& OutError);
+		bool Capture(UObject* InAsset, FDiagnostic& OutError);
+		bool Stage(FDiagnostic& OutError);
+		bool Rollback(FDiagnostic& OutError);
 		void Reset();
 
 		UObject* GetAsset() const { return Asset; }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -81,14 +83,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 		bool bReloaded = false;
 	};
 
-	struct UEAGENTINTERFACE_API FFactoryExternalImportError final
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsPresent() const { return !Code.IsEmpty(); }
-	};
+	using FFactoryExternalImportError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IFactoryExternalImportSession
 	{
@@ -129,5 +124,5 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 
 	UEAGENTINTERFACE_API bool TryCreateFactoryExternalImportProvider(
 		TSharedPtr<IFactoryExternalImportProvider>& OutProvider,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

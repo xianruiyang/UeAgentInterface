@@ -1,15 +1,20 @@
 {
   "FileVersion": 3,
-  "Version": 1,
-  "VersionName": "0.1",
+  "Version": 2,
+  "VersionName": "0.2.0",
   "FriendlyName": "UeAgentInterface",
-  "Description": "Project-local editor plugin providing a local HTTP interface for automated editing and screenshots.",
+  "Description": "Unreal Editor automation through structured queries, HJSON authoring and recoverable operations with the UAI SDK and CLI.",
   "Category": "Editor",
   "CreatedBy": "Codex",
   "EnabledByDefault": true,
   "CanContainContent": false,
   "IsBetaVersion": true,
   "Plugins": [
+    {
+      "Name": "ModelViewViewModel",
+      "Enabled": false,
+      "Optional": true
+    },
     {
       "Name": "EnhancedInput",
       "Enabled": true
@@ -56,6 +61,14 @@
     },
     {
       "Name": "DeformerGraph",
+      "Enabled": true
+    },
+    {
+      "Name": "MLDeformerFramework",
+      "Enabled": true
+    },
+    {
+      "Name": "NeuralMorphModel",
       "Enabled": true
     },
     {
@@ -109,15 +122,15 @@
   ],
   "Modules": [
     {
+      "Name": "UeAgentInterfaceMVVM",
+      "Type": "Editor",
+      "LoadingPhase": "None"
+    },
+    {
       "Name": "UeAgentInterface",
       "Type": "Editor",
       "LoadingPhase": "Default"
-    },
-		{
-			"Name": "UeAgentInterfaceTests",
-			"Type": "Editor",
-			"LoadingPhase": "None"
-		}
+    }
   ],
   "SupportedTargetPlatforms": [
     "Win64"

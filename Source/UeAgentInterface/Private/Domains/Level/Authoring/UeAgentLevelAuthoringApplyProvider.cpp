@@ -2,23 +2,44 @@
 
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringApplyProvider.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+
+#include "AI/NavigationSystemBase.h"
 #include "Components/ActorComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentBrushBuilderActorFactory.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringAuthorability.h"
+#include "Domains/Level/Authoring/UeAgentLevelActorDeletion.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringDescriptors.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringScratchWorld.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringSpatial.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
+#include "Domains/PCG/Authoring/UeAgentPcgComponentAuthoring.h"
 #include "Engine/Engine.h"
+#include "Engine/Brush.h"
 #include "Engine/Level.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
+#include "Editor.h"
+#include "FileHelpers.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/WorldSettings.h"
 #include "Misc/PackageName.h"
+#include "Misc/ScopeExit.h"
+#include "NavigationData.h"
+#include "NavigationSystem.h"
+#include "NavMesh/NavMeshBoundsVolume.h"
+#include "Serialization/JsonSerializer.h"
+#include "UObject/NoExportTypes.h"
 #include "UObject/StrongObjectPtr.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringObjectApplyProvider.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
@@ -31,23 +52,67 @@ namespace {
 using namespace UeAgentApplyInputContract;
 using namespace UeAgentAuthoringOperationApply;
 
-void SetFailure(FOperationFailure &OutFailure, const FString &Code,
-                const FString &Detail = FString()) {
-  OutFailure = FOperationFailure();
-  OutFailure.ErrorCode = Code;
-  OutFailure.ErrorDetail = Detail.IsEmpty() ? Code : Detail;
+
+
+
+
+using UE::UAI::Contract::FDiagnostic;
+using UeAgentAuthoringDiagnostics::FScopedSourceLocations;
+
+FDiagnostic LevelFailure(const TCHAR* Code, const FString& Reason,
+    const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+    const FJsonObject* Input = nullptr, const FString& InputField = FString(),
+    const FString& Pointer = FString()) {
+  auto Error = FDiagnostic::Failure(Code, Reason, TEXT("level_apply"));
+  Error.PropertyPath = Field;
+  Error.ActualValuePresent = Actual.IsValid();
+  Error.ActualValue = MoveTemp(Actual);
+  Error.ExpectedValue = MoveTemp(Expected);
+  Error.Source.JsonPath = Pointer;
+  if (Input) UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, *Input, InputField);
+  else Error.SourceKind = TEXT("native_result");
+  return Error;
 }
 
-void SetLookupFailure(FOperationFailure &OutFailure, const TCHAR *FallbackCode,
-                      const FString &LookupError,
-                      const EAuthorabilityPublicTarget PublicTarget) {
-  FAuthorabilityResult Authorability;
-  if (TryNormalizeAuthorabilityFailure(LookupError, PublicTarget,
-                                       Authorability)) {
-    SetFailure(OutFailure, Authorability.ErrorCode, Authorability.ErrorDetail);
-    return;
+FDiagnostic PresenceFailure(const TCHAR* Code, const FString& Reason, const FString& Field,
+    bool bActual, bool bExpected, const FString& TargetPath = FString(), const FString& Candidate = FString()) {
+  auto Error = LevelFailure(Code, Reason, Field, MakeShared<FJsonValueBoolean>(bActual), MakeShared<FJsonValueBoolean>(bExpected));
+  Error.TargetPath = TargetPath;
+  Error.CandidateName = Candidate;
+  return Error;
+}
+
+FDiagnostic TargetPresenceFailure(const TCHAR* Code, const FString& Reason,
+    const TSharedPtr<const FJsonObject>& Target, const FString& Field, bool bActual, bool bExpected) {
+  auto Error = LevelFailure(Code, Reason, Field, MakeShared<FJsonValueBoolean>(bActual),
+      MakeShared<FJsonValueBoolean>(bExpected), Target.Get());
+  if (Target.IsValid()) {
+    Target->TryGetStringField(TEXT("world_path"), Error.TargetPath);
+    Target->TryGetStringField(TEXT("component_name"), Error.CandidateName);
   }
-  SetFailure(OutFailure, FallbackCode, LookupError);
+  return Error;
+}
+
+class FDerivedTargetSources {
+public:
+  FDerivedTargetSources(const FJsonObject* Derived, const FJsonObject* Input, TMap<FString, FString> Fields)
+      : Scope(Derived, [Input, Fields = MoveTemp(Fields)](const FString& Pointer) {
+          UE::UAI::Contract::FSourceLocation Source;
+          if (!Input) return Source;
+          if (const FString* Field = Fields.Find(Pointer)) FScopedSourceLocations::Locate(*Input, *Field, Source);
+          else if (Pointer.IsEmpty() || Pointer == TEXT("/")) FScopedSourceLocations::Locate(*Input, FString(), Source);
+          return Source;
+        }) {}
+private:
+  FScopedSourceLocations Scope;
+};
+
+void SetFailure(FOperationFailure& OutFailure, UE::UAI::Contract::FDiagnostic Diagnostic) { OutFailure.Diagnostic = MoveTemp(Diagnostic); }
+
+FDiagnostic PublicLookupFailure(const FDiagnostic& LookupError, const EAuthorabilityPublicTarget PublicTarget) {
+  FAuthorabilityResult Authorability;
+  return TryMapAuthorabilityFailure(LookupError, PublicTarget, Authorability)
+      ? Authorability.Diagnostic : LookupError;
 }
 
 FString ReadString(const TSharedPtr<const FJsonObject> &Object,
@@ -70,7 +135,7 @@ ReadObject(const TSharedPtr<const FJsonObject> &Object, const TCHAR *Field) {
 bool BuildActorIdentityFromTarget(
     const TSharedPtr<const FJsonObject> &Target,
     UeAgentAuthoringIdentity::FCanonicalIdentity &OutIdentity,
-    FString &OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError) {
   return UeAgentAuthoringIdentity::BuildCanonicalIdentity(
       ActorIdentityModelId, TEXT("level_actor"),
       {
@@ -100,7 +165,7 @@ MakeOwnerActorTarget(const TSharedPtr<const FJsonObject> &ComponentTarget) {
 bool BuildComponentIdentityFromTarget(
     const TSharedPtr<const FJsonObject> &Target,
     UeAgentAuthoringIdentity::FCanonicalIdentity &OutIdentity,
-    FString &OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError) {
   return UeAgentAuthoringIdentity::BuildCanonicalIdentity(
       ComponentIdentityModelId, TEXT("level_component"),
       {
@@ -120,17 +185,21 @@ bool ParseActorExtension(const TSharedPtr<const FJsonObject> &Extension,
                          TOptional<FString> &OutLabel,
                          TOptional<FString> &OutFolder,
                          TOptional<FTransformPatch> &OutTransform,
-                         FString &OutError) {
+                         TOptional<TArray<FName>> &OutTags,
+                         UE::UAI::Contract::FDiagnostic& OutError) {
   OutLabel.Reset();
   OutFolder.Reset();
   OutTransform.Reset();
+  OutTags.Reset();
   OutError.Reset();
   if (!Extension.IsValid())
     return true;
   if (Extension->HasField(TEXT("label"))) {
     FString Value;
     if (!Extension->TryGetStringField(TEXT("label"), Value)) {
-      OutError = TEXT("level_actor_label_invalid");
+      OutError = LevelFailure(TEXT("level_actor_label_invalid"), TEXT("Actor label must be a string."),
+          TEXT("label"), Extension->TryGetField(TEXT("label")), MakeShared<FJsonValueString>(TEXT("string")),
+          Extension.Get(), TEXT("label"));
       return false;
     }
     OutLabel = Value;
@@ -138,7 +207,9 @@ bool ParseActorExtension(const TSharedPtr<const FJsonObject> &Extension,
   if (Extension->HasField(TEXT("folder_path"))) {
     FString Value;
     if (!Extension->TryGetStringField(TEXT("folder_path"), Value)) {
-      OutError = TEXT("level_actor_folder_path_invalid");
+      OutError = LevelFailure(TEXT("level_actor_folder_path_invalid"), TEXT("Actor folder_path must be a string."),
+          TEXT("folder_path"), Extension->TryGetField(TEXT("folder_path")), MakeShared<FJsonValueString>(TEXT("string")),
+          Extension.Get(), TEXT("folder_path"));
       return false;
     }
     OutFolder = Value;
@@ -147,16 +218,54 @@ bool ParseActorExtension(const TSharedPtr<const FJsonObject> &Extension,
     const TSharedPtr<const FJsonObject> TransformObject =
         ReadObject(Extension, TEXT("transform"));
     FTransformPatch Patch;
-    if (!TransformObject.IsValid() ||
-        !ParseTransformPatch(TransformObject, ETransformFrame::ActorWorld,
-                             Patch, OutError)) {
-      if (OutError.IsEmpty())
-        OutError = TEXT("level_actor_transform_invalid");
+    if (!TransformObject.IsValid()) {
+      OutError = LevelFailure(TEXT("level_actor_transform_invalid"), TEXT("Actor transform must be an object."),
+          TEXT("transform"), Extension->TryGetField(TEXT("transform")), MakeShared<FJsonValueString>(TEXT("transform object")),
+          Extension.Get(), TEXT("transform"));
       return false;
     }
+    if (!ParseTransformPatch(TransformObject, ETransformFrame::ActorWorld, Patch, OutError)) return false;
     OutTransform = MoveTemp(Patch);
   }
+  if (Extension->HasField(TEXT("tags"))) {
+    const TArray<TSharedPtr<FJsonValue>> *Values = nullptr;
+    if (!Extension->TryGetArrayField(TEXT("tags"), Values) || !Values) {
+      OutError = LevelFailure(TEXT("level_actor_tags_invalid"), TEXT("Actor tags must be an array of strings."),
+          TEXT("tags"), Extension->TryGetField(TEXT("tags")), MakeShared<FJsonValueString>(TEXT("array of strings")),
+          Extension.Get(), TEXT("tags"));
+      return false;
+    }
+    OutTags.Emplace();
+    for (int32 Index = 0; Index < Values->Num(); ++Index) {
+      const TSharedPtr<FJsonValue>& Value = (*Values)[Index];
+      FString TagText;
+      if (!Value.IsValid() || !Value->TryGetString(TagText)) {
+        OutError = LevelFailure(TEXT("level_actor_tag_invalid"), TEXT("Each actor tag must be a string."),
+            TEXT("tags"), Value, MakeShared<FJsonValueString>(TEXT("string")), Extension.Get(), TEXT("tags"),
+            FString::Printf(TEXT("/tags/%d"), Index));
+        return false;
+      }
+      TagText.TrimStartAndEndInline();
+      if (TagText.IsEmpty())
+        continue;
+      const FName Tag(*TagText);
+      if (IsManagedActorIdentityTag(Tag)) {
+        OutError = LevelFailure(TEXT("level_actor_managed_identity_tag_reserved"),
+            TEXT("The actor tag uses the reserved managed-identity prefix; use the target managed_id field instead."),
+            TEXT("tags"), Value, MakeShared<FJsonValueString>(TEXT("tag without the managed-identity prefix")),
+            Extension.Get(), TEXT("tags"), FString::Printf(TEXT("/tags/%d"), Index));
+        return false;
+      }
+      OutTags.GetValue().AddUnique(Tag);
+    }
+  }
   return true;
+}
+
+void ApplyActorTags(AActor& Actor, const TOptional<TArray<FName>>& Tags) {
+  if (!Tags.IsSet()) return;
+  Actor.Tags.RemoveAll([](const FName& Tag) { return !IsManagedActorIdentityTag(Tag); });
+  for (const FName& Tag : Tags.GetValue()) Actor.Tags.AddUnique(Tag);
 }
 
 struct FPlaceableActorPatch {
@@ -164,11 +273,12 @@ struct FPlaceableActorPatch {
   FString Name;
   FString Id;
   FString Category;
+  TMap<FString, FString> Select;
 };
 
 bool ParsePlaceableActorPatch(
     const TSharedPtr<const FJsonObject> &Extension,
-    FPlaceableActorPatch &OutPatch, FString &OutError) {
+    FPlaceableActorPatch &OutPatch, UE::UAI::Contract::FDiagnostic& OutError) {
   OutPatch = {};
   OutError.Reset();
   if (!Extension.IsValid() || !Extension->HasField(TEXT("candidate")))
@@ -176,23 +286,38 @@ bool ParsePlaceableActorPatch(
   const TSharedPtr<const FJsonObject> Candidate =
       ReadObject(Extension, TEXT("candidate"));
   if (!Candidate.IsValid()) {
-    OutError = TEXT("level_actor_candidate_invalid");
+    OutError = LevelFailure(TEXT("level_actor_candidate_invalid"), TEXT("Actor candidate must be an object."),
+        TEXT("candidate"), Extension.IsValid() ? Extension->TryGetField(TEXT("candidate")) : nullptr,
+        MakeShared<FJsonValueString>(TEXT("candidate object")), Extension.Get(), TEXT("candidate"));
     return false;
   }
   OutPatch.bPresent = true;
+  UE::UAI::HjsonWorkspace::DomainAuthoring::FDomainHjsonCandidateSelector Selector;
+  UE::UAI::HjsonWorkspace::FWorkspaceError SelectorError;
+  if (!UE::UAI::HjsonWorkspace::DomainAuthoring::TryReadCandidateSelector(
+          Candidate, TEXT("candidate"), Selector, SelectorError)) {
+    OutError = SelectorError.GetDiagnostic();
+    return false;
+  }
+  OutPatch.Select = MoveTemp(Selector.Select);
   Candidate->TryGetStringField(TEXT("name"), OutPatch.Name);
   Candidate->TryGetStringField(TEXT("id"), OutPatch.Id);
   OutPatch.Name.TrimStartAndEndInline();
   OutPatch.Id.TrimStartAndEndInline();
   if (OutPatch.Name.IsEmpty() && OutPatch.Id.IsEmpty()) {
-    OutError = TEXT("level_actor_candidate_selector_required");
+    OutError = LevelFailure(TEXT("level_actor_candidate_selector_required"),
+        TEXT("Actor candidate requires a non-empty name or id."), TEXT("candidate_selector_count"),
+        MakeShared<FJsonValueNumber>(0),
+        MakeShared<FJsonValueString>(TEXT("at least one non-empty name or id")), Candidate.Get());
     return false;
   }
   if (Extension->HasField(TEXT("placement_context"))) {
     const TSharedPtr<const FJsonObject> Context =
         ReadObject(Extension, TEXT("placement_context"));
     if (!Context.IsValid()) {
-      OutError = TEXT("level_actor_placement_context_invalid");
+      OutError = LevelFailure(TEXT("level_actor_placement_context_invalid"), TEXT("placement_context must be an object."),
+          TEXT("placement_context"), Extension->TryGetField(TEXT("placement_context")), MakeShared<FJsonValueString>(TEXT("object")),
+          Extension.Get(), TEXT("placement_context"));
       return false;
     }
     Context->TryGetStringField(TEXT("category"), OutPatch.Category);
@@ -204,11 +329,13 @@ bool ParsePlaceableActorPatch(
 bool ValidatePlaceableActorAssertions(
     const TSharedPtr<const FJsonObject> &Extension,
     const UeAgentPaletteSearch::FCandidate &Resolved,
-    FString &OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError) {
   const TSharedPtr<const FJsonObject> Candidate =
       ReadObject(Extension, TEXT("candidate"));
   if (!Candidate.IsValid()) {
-    OutError = TEXT("level_actor_candidate_invalid");
+    OutError = LevelFailure(TEXT("level_actor_candidate_invalid"), TEXT("Actor candidate must be an object."),
+        TEXT("candidate"), Extension.IsValid() ? Extension->TryGetField(TEXT("candidate")) : nullptr,
+        MakeShared<FJsonValueString>(TEXT("candidate object")), Extension.Get(), TEXT("candidate"));
     return false;
   }
   auto Check = [&Candidate, &Resolved, &OutError](
@@ -220,8 +347,10 @@ bool ValidatePlaceableActorAssertions(
         !Expected.TrimStartAndEnd().Equals(
             Resolved.AuthoringSelectors.FindRef(Selector),
             ESearchCase::CaseSensitive)) {
-      OutError = FString(TEXT("level_actor_candidate_assertion_mismatch:")) +
-                 Field;
+      OutError = LevelFailure(TEXT("level_actor_candidate_assertion_mismatch"),
+          FString::Printf(TEXT("Candidate assertion '%s' must match the resolved candidate."), Field), Field,
+          Candidate->TryGetField(Field), MakeShared<FJsonValueString>(Resolved.AuthoringSelectors.FindRef(Selector)),
+          Candidate.Get(), Field);
       return false;
     }
     return true;
@@ -235,13 +364,14 @@ bool ValidatePlaceableActorAssertions(
 
 struct FAttachmentPatch {
   bool bPresent = false;
+  TSharedPtr<const FJsonObject> Input;
   TOptional<FString> ParentComponent;
   TOptional<FString> SocketName;
   TOptional<FTransformPatch> Transform;
 };
 
 bool ParseAttachmentExtension(const TSharedPtr<const FJsonObject> &Extension,
-                              FAttachmentPatch &OutPatch, FString &OutError) {
+                              FAttachmentPatch &OutPatch, UE::UAI::Contract::FDiagnostic& OutError) {
   OutPatch = FAttachmentPatch();
   OutError.Reset();
   if (!Extension.IsValid() || !Extension->HasField(TEXT("attachment")))
@@ -249,14 +379,19 @@ bool ParseAttachmentExtension(const TSharedPtr<const FJsonObject> &Extension,
   const TSharedPtr<const FJsonObject> Attachment =
       ReadObject(Extension, TEXT("attachment"));
   if (!Attachment.IsValid()) {
-    OutError = TEXT("level_component_attachment_invalid");
+    OutError = LevelFailure(TEXT("level_component_attachment_invalid"), TEXT("Component attachment must be an object."),
+        TEXT("attachment"), Extension->TryGetField(TEXT("attachment")), MakeShared<FJsonValueString>(TEXT("attachment object")),
+        Extension.Get(), TEXT("attachment"));
     return false;
   }
   OutPatch.bPresent = true;
+  OutPatch.Input = Attachment;
   if (Attachment->HasField(TEXT("parent_component"))) {
     FString Value;
     if (!Attachment->TryGetStringField(TEXT("parent_component"), Value)) {
-      OutError = TEXT("level_component_parent_invalid");
+      OutError = LevelFailure(TEXT("level_component_parent_invalid"), TEXT("Attachment parent_component must be a string."),
+          TEXT("parent_component"), Attachment->TryGetField(TEXT("parent_component")), MakeShared<FJsonValueString>(TEXT("string")),
+          Attachment.Get(), TEXT("parent_component"));
       return false;
     }
     OutPatch.ParentComponent = Value;
@@ -264,27 +399,31 @@ bool ParseAttachmentExtension(const TSharedPtr<const FJsonObject> &Extension,
   if (Attachment->HasField(TEXT("socket_name"))) {
     FString Value;
     if (!Attachment->TryGetStringField(TEXT("socket_name"), Value)) {
-      OutError = TEXT("level_component_socket_invalid");
+      OutError = LevelFailure(TEXT("level_component_socket_invalid"), TEXT("Attachment socket_name must be a string."),
+          TEXT("socket_name"), Attachment->TryGetField(TEXT("socket_name")), MakeShared<FJsonValueString>(TEXT("string")),
+          Attachment.Get(), TEXT("socket_name"));
       return false;
     }
     OutPatch.SocketName = Value;
   }
   if (!OutPatch.ParentComponent.IsSet() || !OutPatch.SocketName.IsSet()) {
-    OutError = TEXT("level_component_attachment_patch_incomplete");
+    const TCHAR* Missing = !OutPatch.ParentComponent.IsSet() ? TEXT("parent_component") : TEXT("socket_name");
+    OutError = LevelFailure(TEXT("level_component_attachment_patch_incomplete"),
+        FString::Printf(TEXT("Component attachment requires '%s'; specify an empty string to detach or use no socket."), Missing),
+        Missing, nullptr, MakeShared<FJsonValueString>(TEXT("string")), Attachment.Get(), Missing);
     return false;
   }
   if (Attachment->HasField(TEXT("transform"))) {
     const TSharedPtr<const FJsonObject> TransformObject =
         ReadObject(Attachment, TEXT("transform"));
     FTransformPatch Patch;
-    if (!TransformObject.IsValid() ||
-        !ParseTransformPatch(TransformObject,
-                             ETransformFrame::ComponentParentRelative, Patch,
-                             OutError)) {
-      if (OutError.IsEmpty())
-        OutError = TEXT("level_component_transform_invalid");
+    if (!TransformObject.IsValid()) {
+      OutError = LevelFailure(TEXT("level_component_transform_invalid"), TEXT("Component attachment transform must be an object."),
+          TEXT("transform"), Attachment->TryGetField(TEXT("transform")), MakeShared<FJsonValueString>(TEXT("transform object")),
+          Attachment.Get(), TEXT("transform"));
       return false;
     }
+    if (!ParseTransformPatch(TransformObject, ETransformFrame::ComponentParentRelative, Patch, OutError)) return false;
     OutPatch.Transform = MoveTemp(Patch);
   }
   return true;
@@ -307,13 +446,14 @@ void ApplyActorExtension(AActor &Actor, const TOptional<FString> &Label,
 
 struct FActorAttachmentPatch {
   bool bPresent = false;
+  TSharedPtr<const FJsonObject> Input;
   FString ParentManagedId;
   FString SocketName;
 };
 
 bool ParseActorAttachmentExtension(
     const TSharedPtr<const FJsonObject> &Extension,
-    FActorAttachmentPatch &OutPatch, FString &OutError) {
+    FActorAttachmentPatch &OutPatch, UE::UAI::Contract::FDiagnostic& OutError) {
   OutPatch = FActorAttachmentPatch();
   OutError.Reset();
   if (!Extension.IsValid() || !Extension->HasField(TEXT("attachment")))
@@ -323,24 +463,41 @@ bool ParseActorAttachmentExtension(
   if (!Attachment.IsValid() ||
       !Attachment->TryGetStringField(TEXT("parent_managed_id"),
                                      OutPatch.ParentManagedId)) {
-    OutError = TEXT("level_actor_attachment_parent_managed_id_required");
+    OutError = LevelFailure(TEXT("level_actor_attachment_parent_managed_id_required"),
+        TEXT("Actor attachment requires a string parent_managed_id; an empty string detaches the actor."),
+        Attachment.IsValid() ? TEXT("parent_managed_id") : TEXT("attachment"),
+        Attachment.IsValid() ? Attachment->TryGetField(TEXT("parent_managed_id")) : Extension->TryGetField(TEXT("attachment")),
+        MakeShared<FJsonValueString>(Attachment.IsValid() ? TEXT("string") : TEXT("attachment object")),
+        Attachment.IsValid() ? Attachment.Get() : Extension.Get(),
+        Attachment.IsValid() ? TEXT("parent_managed_id") : TEXT("attachment"));
     return false;
   }
   if (Attachment->HasField(TEXT("socket_name")) &&
       !Attachment->TryGetStringField(TEXT("socket_name"),
                                      OutPatch.SocketName)) {
-    OutError = TEXT("level_actor_attachment_socket_invalid");
+    OutError = LevelFailure(TEXT("level_actor_attachment_socket_invalid"), TEXT("Actor attachment socket_name must be a string."),
+        TEXT("socket_name"), Attachment->TryGetField(TEXT("socket_name")), MakeShared<FJsonValueString>(TEXT("string")),
+        Attachment.Get(), TEXT("socket_name"));
     return false;
   }
+  OutPatch.Input = Attachment;
   OutPatch.ParentManagedId.TrimStartAndEndInline();
   OutPatch.SocketName.TrimStartAndEndInline();
   OutPatch.bPresent = true;
   return true;
 }
 
+bool IsUnchangedActorAttachment(const AActor* Actor, const FActorAttachmentPatch& Patch) {
+  if (!Actor || !Patch.bPresent) return false;
+  const AActor* Parent = Actor->GetAttachParentActor();
+  const FString ParentId = Parent ? GetManagedActorId(*Parent) : FString();
+  return ParentId.Equals(Patch.ParentManagedId, ESearchCase::IgnoreCase)
+      && Actor->GetAttachParentSocketName() == FName(*Patch.SocketName);
+}
+
 bool ApplyActorAttachment(AActor &Actor, UWorld &World,
                           const FActorAttachmentPatch &Patch,
-                          FString &OutError) {
+                          UE::UAI::Contract::FDiagnostic& OutError) {
   OutError.Reset();
   if (!Patch.bPresent)
     return true;
@@ -351,26 +508,42 @@ bool ApplyActorAttachment(AActor &Actor, UWorld &World,
   TSharedRef<FJsonObject> ParentTarget = MakeShared<FJsonObject>();
   ParentTarget->SetStringField(TEXT("world_path"), GetWorldPath(World));
   ParentTarget->SetStringField(TEXT("managed_id"), Patch.ParentManagedId);
+  FScopedSourceLocations ParentSources(&ParentTarget.Get(), [&Patch](const FString& Pointer) {
+    UE::UAI::Contract::FSourceLocation Source;
+    if (Patch.Input.IsValid()) FScopedSourceLocations::Locate(*Patch.Input,
+        Pointer == TEXT("/managed_id") ? TEXT("parent_managed_id") : FString(), Source);
+    return Source;
+  });
   AActor *Parent = FindActorExact(World, ParentTarget, OutError);
   if (!Parent) {
     if (OutError.IsEmpty())
-      OutError = TEXT("level_actor_attachment_parent_not_found:") +
-                 Patch.ParentManagedId;
+      OutError = LevelFailure(TEXT("level_actor_attachment_parent_not_found"),
+          TEXT("No actor matches the requested attachment parent managed id."), TEXT("matching_parent_count"),
+          MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueNumber>(1), Patch.Input.Get(), TEXT("parent_managed_id"));
     return false;
   }
   if (Parent == &Actor) {
-    OutError = TEXT("level_actor_attachment_self_parent");
+    OutError = LevelFailure(TEXT("level_actor_attachment_self_parent"), TEXT("An actor cannot be attached to itself."),
+        TEXT("parent_is_self"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false),
+        Patch.Input.Get(), TEXT("parent_managed_id"));
+    OutError.CandidateName = Actor.GetActorLabel();
     return false;
   }
   if (!Actor.GetRootComponent() || !Parent->GetRootComponent()) {
-    OutError = TEXT("level_actor_attachment_requires_root_components");
+    OutError = LevelFailure(TEXT("level_actor_attachment_requires_root_components"),
+        !Actor.GetRootComponent() ? TEXT("The actor to attach has no root component.") : TEXT("The requested parent actor has no root component."),
+        TEXT("root_component_present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true),
+        Patch.Input.Get(), TEXT("parent_managed_id"));
+    OutError.CandidateName = !Actor.GetRootComponent() ? Actor.GetActorLabel() : Parent->GetActorLabel();
     return false;
   }
   if (!Actor.AttachToActor(
           Parent, FAttachmentTransformRules::KeepWorldTransform,
           Patch.SocketName.IsEmpty() ? NAME_None : FName(*Patch.SocketName))) {
-    OutError = TEXT("level_actor_attachment_apply_failed:") +
-               Patch.ParentManagedId;
+    OutError = LevelFailure(TEXT("level_actor_attachment_apply_failed"),
+        FString::Printf(TEXT("Unreal rejected attaching actor '%s' to '%s' at socket '%s'."), *Actor.GetActorLabel(), *Parent->GetActorLabel(), *Patch.SocketName),
+        TEXT("attachment_succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Patch.Input.Get());
+    OutError.CandidateName = Actor.GetActorLabel();
     return false;
   }
   return true;
@@ -380,24 +553,28 @@ void AddTransformOverrideContext(TMap<FString, FString> &Context,
                                  const TCHAR *Prefix,
                                  const FTransform &Transform) {
   const FString KeyPrefix(Prefix);
-  Context.Add(KeyPrefix + TEXT("transform_override"), TEXT("true"));
-  Context.Add(KeyPrefix + TEXT("transform_location"),
-              Transform.GetLocation().ToString());
-  Context.Add(KeyPrefix + TEXT("transform_rotation"),
-              Transform.Rotator().ToString());
-  Context.Add(KeyPrefix + TEXT("transform_scale"),
-              Transform.GetScale3D().ToString());
+  // Display strings round vector/rotator components and are not value transport.
+  const TSharedPtr<FJsonValue> Value = UeAgentPropertyValueCodec::EncodeStructValue(
+      TBaseStructure<FTransform>::Get(), &Transform, nullptr, {});
+  FString Encoded;
+  FJsonSerializer::Serialize(Value->AsObject().ToSharedRef(),
+                            TJsonWriterFactory<>::Create(&Encoded));
+  Context.Add(KeyPrefix + TEXT("transform_value"), MoveTemp(Encoded));
 }
 
 bool ApplyComponentAttachment(UActorComponent &Component, AActor &Owner,
                               const FAttachmentPatch &Patch,
-                              FString &OutError) {
+                              UE::UAI::Contract::FDiagnostic& OutError) {
   OutError.Reset();
   if (!Patch.bPresent)
     return true;
   USceneComponent *Scene = Cast<USceneComponent>(&Component);
   if (!Scene) {
-    OutError = TEXT("level_component_attachment_requires_scene_component");
+    OutError = LevelFailure(TEXT("level_component_attachment_requires_scene_component"),
+        TEXT("Only a SceneComponent can have a spatial attachment."), TEXT("component_class"),
+        MakeShared<FJsonValueString>(Component.GetClass()->GetPathName()),
+        MakeShared<FJsonValueString>(USceneComponent::StaticClass()->GetPathName()), Patch.Input.Get());
+    OutError.CandidateName = Component.GetName();
     return false;
   }
 
@@ -409,13 +586,23 @@ bool ApplyComponentAttachment(UActorComponent &Component, AActor &Owner,
           FDetachmentTransformRules::KeepRelativeTransform);
       Parent = nullptr;
     } else {
-      FString FindError;
+      UE::UAI::Contract::FDiagnostic FindError;
       UActorComponent *Found = FindComponentExact(Owner, ParentName, FindError);
       Parent = Cast<USceneComponent>(Found);
       if (!Parent || Parent == Scene) {
-        OutError = FindError.IsEmpty()
-                       ? TEXT("level_component_parent_not_found:") + ParentName
-                       : FindError;
+        if (FindError.IsValid()) OutError = MoveTemp(FindError);
+        else if (!Found) OutError = LevelFailure(TEXT("level_component_parent_not_found"),
+            TEXT("No component on the owner matches the requested attachment parent."), TEXT("matching_parent_count"),
+            MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueNumber>(1), Patch.Input.Get(), TEXT("parent_component"));
+        else if (!Parent) OutError = LevelFailure(TEXT("level_component_parent_requires_scene_component"),
+            TEXT("The requested parent component is not a SceneComponent."), TEXT("parent_component_class"),
+            MakeShared<FJsonValueString>(Found->GetClass()->GetPathName()), MakeShared<FJsonValueString>(USceneComponent::StaticClass()->GetPathName()),
+            Patch.Input.Get(), TEXT("parent_component"));
+        else OutError = LevelFailure(TEXT("level_component_self_parent"), TEXT("A component cannot be attached to itself."),
+            TEXT("parent_is_self"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false),
+            Patch.Input.Get(), TEXT("parent_component"));
+        if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = ParentName;
+        if (Patch.Input.IsValid()) UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *Patch.Input, TEXT("parent_component"));
         return false;
       }
     }
@@ -426,7 +613,10 @@ bool ApplyComponentAttachment(UActorComponent &Component, AActor &Owner,
   if (Parent) {
     if (!Scene->AttachToComponent(
             Parent, FAttachmentTransformRules::KeepRelativeTransform, Socket)) {
-      OutError = TEXT("level_component_attach_failed:") + Parent->GetName();
+      OutError = LevelFailure(TEXT("level_component_attach_failed"),
+          FString::Printf(TEXT("Unreal rejected attaching component '%s' to '%s' at socket '%s'."), *Component.GetName(), *Parent->GetName(), *Socket.ToString()),
+          TEXT("attachment_succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Patch.Input.Get());
+      OutError.CandidateName = Component.GetName();
       return false;
     }
   }
@@ -446,11 +636,183 @@ TSharedRef<FJsonObject> BuildCounterMetadata(const TCHAR *Field,
   return Result;
 }
 
-class FWorldLifecycleState final : public IReflectionOperationLifecycleState {
+class FLevelPersistentContext {
+public:
+  explicit FLevelPersistentContext(UWorld& InWorld)
+      : World(&InWorld), Path(InWorld.GetPathName()), PackageName(InWorld.GetPackage()->GetName()) {
+    for (TActorIterator<ANavMeshBoundsVolume> It(&InWorld); It; ++It) {
+      NavigationBoundsBefore.Add(*It, It->GetComponentsBoundingBox(true));
+    }
+  }
+  TSet<const void*> Participants, Released;
+  TMap<const void*, TFunction<void()>> ClearBindings;
+  TSharedPtr<FLevelAuthoringScratchWorld> Scratch;
+  TWeakObjectPtr<UWorld> World;
+  FString Path, PackageName;
+  TSet<TWeakObjectPtr<AActor>> SettledInputActors;
+  TMap<TWeakObjectPtr<ANavMeshBoundsVolume>, FBox> NavigationBoundsBefore;
+  void PublishNavigationBounds(UNavigationSystemV1& Navigation) const {
+    if (!World.IsValid()) return;
+    for (TActorIterator<ANavMeshBoundsVolume> It(World.Get()); It; ++It) {
+      const FBox Bounds = It->GetComponentsBoundingBox(true);
+      const FBox* Before = NavigationBoundsBefore.Find(*It);
+      if (!Before || !(*Before == Bounds)) {
+        // Native registration captured the bounds before authoring finished.
+        // Direct transform/brush edits do not emit the editor's actor-moved
+        // event. Publish the final bounds without rerunning construction scripts.
+        Navigation.OnNavigationBoundsUpdated(*It);
+      }
+    }
+  }
+  bool SettleInputs(AActor* Actor, FOperationFailure& Failure) {
+    if (!Actor || SettledInputActors.Contains(Actor)) return true;
+    UE::UAI::Contract::FDiagnostic Error;
+    if (ABrush* Brush = Cast<ABrush>(Actor)) {
+      if (Brush->IsStaticBrush() && Brush->GetLevel()
+          && !UUeAgentBrushBuilderActorFactory::SettleLevel(*Brush->GetLevel(), Error)) {
+        SetFailure(Failure, MoveTemp(Error));
+        return false;
+      }
+    }
+    if (!UeAgentPcgComponentAuthoring::SettleOwnedInputs(*Actor, Error)) {
+      SetFailure(Failure, MoveTemp(Error));
+      return false;
+    }
+    SettledInputActors.Add(Actor);
+    return true;
+  }
+  bool Release(const void* State, FOperationFailure& Failure) {
+    Released.Add(State);
+    if (Released.Num() != Participants.Num()) return true;
+    // Every participant has released proposed/backup roots. The scratch world
+    // can still retain native references (for example Brush -> original Model).
+    if (Scratch.IsValid()) Scratch->ReleaseForPersistentReadback();
+    UWorld* Current = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!Current) {
+      SetFailure(Failure, PresenceFailure(TEXT("level_persistent_active_world_changed"),
+          TEXT("There is no active Editor world to release for persistent readback."), TEXT("active_editor_world_present"), false, true, PackageName)); return false;
+    }
+    if (Current->GetPackage()->GetName() != PackageName) { World.Reset(); return true; }
+    Current->GetPackage()->SetDirtyFlag(false);
+    World.Reset();
+    if (!UEditorLoadingAndSavingUtils::NewBlankMap(false)) {
+      SetFailure(Failure, PresenceFailure(TEXT("level_persistent_detach_failed"),
+          TEXT("Unreal could not open a blank map to release the saved world before readback."), TEXT("blank_map_opened"), false, true, PackageName)); return false;
+    }
+    return true;
+  }
+  bool Rebind(FOperationFailure& Failure) {
+    if (Released.IsEmpty() && World.IsValid()) return true;
+    UWorld* Current = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!Current || Current->GetPackage()->IsDirty()) {
+      SetFailure(Failure, PresenceFailure(TEXT("level_persistent_current_world_dirty"),
+          !Current ? TEXT("There is no active Editor world before persistent readback.")
+              : TEXT("The current Editor world has unsaved changes and cannot be replaced for readback."),
+          !Current ? TEXT("active_editor_world_present") : TEXT("package_dirty"), Current != nullptr, Current == nullptr, PackageName)); return false;
+    }
+    const FString Filename = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetMapPackageExtension());
+    World = UEditorLoadingAndSavingUtils::LoadMap(Filename);
+    if (!World.IsValid() || World->GetPathName() != Path) {
+      auto Error = PresenceFailure(TEXT("level_persistent_reload_failed"),
+          !World.IsValid() ? TEXT("Unreal could not reload the saved world for persistent readback.")
+              : TEXT("The reloaded world does not match the saved world."),
+          !World.IsValid() ? TEXT("world_loaded") : TEXT("world_path_matches"), false, true, PackageName);
+      if (World.IsValid()) {
+        Error.ActualEvidence = MakeShared<FJsonValueString>(World->GetPathName());
+        Error.ExpectedEvidence = MakeShared<FJsonValueString>(Path);
+      }
+      SetFailure(Failure, MoveTemp(Error)); return false;
+    }
+    Released.Reset();
+    return true;
+  }
+  void ReleaseReadbackBindings() {
+    for (const auto& Pair : ClearBindings) Pair.Value();
+    World.Reset();
+  }
+};
+
+class FLevelPersistentState : public IReflectionOperationLifecycleState {
+public:
+  ~FLevelPersistentState() override {
+    if (Persistent.IsValid()) { Persistent->Participants.Remove(this); Persistent->ClearBindings.Remove(this); }
+  }
+  void CaptureInputSources(const FPrepareRequest& Request) {
+    DiagnosticInput = MakeShared<FJsonObject>();
+    if (Request.Input->Target.IsValid())
+      DiagnosticInput->SetObjectField(TEXT("target"), ConstCastSharedPtr<FJsonObject>(Request.Input->Target));
+    if (Request.Input->ProviderExtension.IsValid())
+      DiagnosticInput->SetObjectField(TEXT("provider_extension"), ConstCastSharedPtr<FJsonObject>(Request.Input->ProviderExtension));
+    DiagnosticSources = FScopedSourceLocations::CaptureProjection(*DiagnosticInput);
+  }
+  void SetPersistentContext(const TSharedPtr<FLevelPersistentContext>& Context) {
+    Persistent = Context;
+    if (Persistent.IsValid()) {
+      Persistent->Participants.Add(this);
+      Persistent->ClearBindings.Add(this, [this] { ClearPersistentReferences(); });
+    }
+  }
+  bool BuildDurablePackagePlans(TArray<FPackageDurablePlan>& Plans, FOperationFailure& Failure) const override {
+    return Persistent.IsValid()
+      ? BuildPackageDurablePlan(Persistent->Path, Persistent->PackageName, Persistent->World.Get(), EPackageDurableIntent::Save, Plans, Failure)
+      : IReflectionOperationLifecycleState::BuildDurablePackagePlans(Plans, Failure);
+  }
+  bool SupportsPersistentReadback() const override { return Persistent.IsValid(); }
+  bool ReleaseForPersistentReadback(FOperationFailure& Failure) override {
+    ClearPersistentReferences();
+    if (!Persistent.IsValid()) {
+      SetFailure(Failure, StatePresenceFailure(TEXT("level_persistent_context_missing"),
+          TEXT("Persistent readback has no shared world context."), TEXT("persistent_context_present"), false, true));
+      return false;
+    }
+    return Persistent->Release(this, Failure);
+  }
+  bool RebindAfterPersistentReadback(FOperationFailure& Failure) override {
+    if (!Persistent.IsValid()) {
+      SetFailure(Failure, StatePresenceFailure(TEXT("level_persistent_context_missing"),
+          TEXT("Persistent readback has no shared world context to rebind."), TEXT("persistent_context_present"), false, true));
+      return false;
+    }
+    return Persistent->Rebind(Failure) && BindPersistentWorld(*Persistent->World, false, Failure);
+  }
+  bool RebindAfterCheckpointRestore(FOperationFailure& Failure) override {
+    if (!Persistent.IsValid()) {
+      SetFailure(Failure, StatePresenceFailure(TEXT("level_persistent_context_missing"),
+          TEXT("Checkpoint restore has no shared world context to rebind."), TEXT("persistent_context_present"), false, true));
+      return false;
+    }
+    return Persistent->Rebind(Failure) && BindPersistentWorld(*Persistent->World, true, Failure);
+  }
+protected:
+  void SetFailure(FOperationFailure& OutFailure, FDiagnostic Diagnostic) const {
+    if (Diagnostic.TargetPath.IsEmpty())
+      Diagnostic.TargetPath = ReadString(ReadObject(DiagnosticInput, TEXT("target")), TEXT("world_path"));
+    if (Diagnostic.Stage.IsEmpty()) Diagnostic.Stage = TEXT("level_apply");
+    OutFailure.Diagnostic = MoveTemp(Diagnostic);
+  }
+  FDiagnostic StatePresenceFailure(const TCHAR* Code, const FString& Reason, const FString& Field,
+      bool bActual, bool bExpected) const {
+    const auto Target = ReadObject(DiagnosticInput, TEXT("target"));
+    const auto Extension = ReadObject(DiagnosticInput, TEXT("provider_extension"));
+    const FString Component = ReadString(Target, TEXT("component_name"));
+    return PresenceFailure(Code, Reason, Field, bActual, bExpected, ReadString(Target, TEXT("world_path")),
+        Component.IsEmpty() ? ReadString(Extension, TEXT("label")) : Component);
+  }
+  TSharedPtr<FJsonObject> DiagnosticInput;
+  TMap<FString, UE::UAI::Contract::FSourceLocation> DiagnosticSources;
+  virtual void ClearPersistentReferences() = 0;
+  virtual bool BindPersistentWorld(UWorld&, bool, FOperationFailure&) = 0;
+  TSharedPtr<FLevelPersistentContext> Persistent;
+};
+
+class FWorldLifecycleState final : public FLevelPersistentState {
 public:
   FWorldLifecycleState(UWorld &InWorld,
+                       TSharedRef<FLevelAuthoringScratchWorld> InScratchWorld,
+                       AWorldSettings* InProposed,
                        UeAgentAuthoringIdentity::FCanonicalIdentity InIdentity)
-      : World(&InWorld), Identity(MoveTemp(InIdentity)) {}
+      : World(&InWorld), ScratchWorld(MoveTemp(InScratchWorld)),
+        Proposed(InProposed), Identity(MoveTemp(InIdentity)) {}
 
   virtual FString GetTargetKey() const override {
     return Identity.CanonicalKey;
@@ -459,17 +821,31 @@ public:
     return EOperation::Update;
   }
   virtual FReflectionRoot GetProposedRoot() const override {
-    return FReflectionRoot::MakeObject(World.Get());
+    return FReflectionRoot::MakeObject(Proposed.IsValid() ? Proposed.Get()
+        : World.IsValid() ? World->GetWorldSettings() : nullptr);
   }
   virtual FReflectionRoot GetActualRoot() const override {
-    return FReflectionRoot::MakeObject(World.Get());
+    return FReflectionRoot::MakeObject(World.IsValid() ? World->GetWorldSettings() : nullptr);
+  }
+  virtual bool ShouldApplyPropertiesToActualRoot() const override {
+    return true;
   }
   virtual bool CaptureRollback(FOperationFailure &OutFailure) override {
     OutFailure = {};
     return true;
   }
   virtual bool ApplyLifecycle(FOperationFailure &OutFailure) override {
+    FScopedSourceLocations Sources(DiagnosticInput.Get(), [this](const FString& Pointer) {
+      return FScopedSourceLocations::ResolveProjection(DiagnosticSources, Pointer);
+    });
     OutFailure = {};
+    if (Proposed.IsValid() && World.IsValid()) {
+      AWorldSettings* Settings = World->GetWorldSettings();
+      if (!Settings) { SetFailure(OutFailure, StatePresenceFailure(TEXT("level_world_settings_missing"),
+          TEXT("The world no longer has a WorldSettings object to update."), TEXT("world_settings_present"), false, true)); return false; }
+      Settings->Modify();
+      Settings->MarkPackageDirty();
+    }
     return true;
   }
   virtual bool Compile(FOperationFailure &OutFailure) override {
@@ -496,13 +872,15 @@ public:
   }
 
 private:
+  void ClearPersistentReferences() override { World.Reset(); Proposed.Reset(); }
+  bool BindPersistentWorld(UWorld& Reloaded, bool, FOperationFailure&) override { World = &Reloaded; return true; }
   bool BuildRequests(TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
                      FOperationFailure &OutFailure) const {
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!BuildWorldSnapshotReadRequests(
             World.Get(), Identity.GetSelector(TEXT("world_path")), false,
             OutRequests, Error)) {
-      SetFailure(OutFailure, TEXT("level_world_snapshot_failed"), Error);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
     OutFailure = {};
@@ -510,10 +888,12 @@ private:
   }
 
   TWeakObjectPtr<UWorld> World;
+  TSharedRef<FLevelAuthoringScratchWorld> ScratchWorld;
+  TStrongObjectPtr<AWorldSettings> Proposed;
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
 };
 
-class FActorLifecycleState final : public IReflectionOperationLifecycleState {
+class FActorLifecycleState final : public FLevelPersistentState {
 public:
   FActorLifecycleState(UWorld &InWorld,
                        TSharedRef<FLevelAuthoringScratchWorld> InScratchWorld,
@@ -524,6 +904,7 @@ public:
                        FTransform InBaseTransform, TOptional<FString> InLabel,
                        TOptional<FString> InFolder,
                        TOptional<FTransformPatch> InTransform,
+	                       TOptional<TArray<FName>> InTags,
 	                       FActorAttachmentPatch InAttachment,
 	                       FPlaceableActorPatch InPlaceableCandidate)
       : World(&InWorld), ScratchWorld(MoveTemp(InScratchWorld)),
@@ -532,6 +913,7 @@ public:
         BaseLabel(MoveTemp(InBaseLabel)), BaseFolder(MoveTemp(InBaseFolder)),
         BaseTransform(MoveTemp(InBaseTransform)), Label(MoveTemp(InLabel)),
         Folder(MoveTemp(InFolder)), Transform(MoveTemp(InTransform)),
+	        Tags(MoveTemp(InTags)),
 	        Attachment(MoveTemp(InAttachment)),
 	        PlaceableCandidate(MoveTemp(InPlaceableCandidate)) {}
 
@@ -556,53 +938,61 @@ public:
     OutFailure = {};
     if (!Existing.IsValid())
       return true;
-    FString Error;
+    if (Operation == EOperation::Remove) return true;
+    UE::UAI::Contract::FDiagnostic Error;
     Backup.Reset(ScratchWorld->DuplicateActor(*Existing, Error));
     if (!Backup.IsValid()) {
-      SetFailure(OutFailure, TEXT("level_actor_rollback_capture_failed"),
-                 Error);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
-    OriginalGuid = Existing->GetActorGuid();
-    OriginalName = Existing->GetFName();
     OriginalAttachParent = Existing->GetAttachParentActor();
     OriginalAttachSocket = Existing->GetAttachParentSocketName();
     return true;
   }
 
   virtual bool ApplyProposed(FOperationFailure &OutFailure) override {
+    FScopedSourceLocations Sources(DiagnosticInput.Get(), [this](const FString& Pointer) {
+      return FScopedSourceLocations::ResolveProjection(DiagnosticSources, Pointer);
+    });
     OutFailure = {};
     if (Operation == EOperation::Remove)
       return true;
     if (!Proposed.IsValid()) {
-      SetFailure(OutFailure, TEXT("level_actor_proposed_missing"),
-                 Identity.CanonicalKey);
+      SetFailure(OutFailure, StatePresenceFailure(TEXT("level_actor_proposed_missing"),
+          TEXT("The prepared actor is no longer available for application."), TEXT("proposed_actor_present"), false, true));
       return false;
     }
     return true;
   }
 
   virtual bool ApplyLifecycle(FOperationFailure &OutFailure) override {
+    FScopedSourceLocations Sources(DiagnosticInput.Get(), [this](const FString& Pointer) {
+      return FScopedSourceLocations::ResolveProjection(DiagnosticSources, Pointer);
+    });
     OutFailure = {};
     if (!World.IsValid()) {
-      SetFailure(OutFailure, TEXT("level_world_not_found"));
+      SetFailure(OutFailure, StatePresenceFailure(TEXT("level_world_not_found"),
+          TEXT("The target world is no longer available for actor application."), TEXT("world_present"), false, true));
       return false;
     }
     if (Operation == EOperation::Remove) {
-      if (!Existing.IsValid() ||
-          !World->DestroyActor(Existing.Get(), true, true)) {
-        SetFailure(OutFailure, TEXT("level_actor_remove_failed"),
-                   Identity.CanonicalKey);
+      UE::UAI::Contract::FDiagnostic Error;
+      if (!Existing.IsValid()) {
+        SetFailure(OutFailure, StatePresenceFailure(TEXT("level_actor_remove_failed"),
+            TEXT("The actor to remove is no longer available."), TEXT("actor_present"), false, true));
         return false;
       }
-      Existing.Reset();
+      if (!Deletion.Apply(*World, {Existing.Get()}, Error)) {
+        SetFailure(OutFailure, MoveTemp(Error));
+        return false;
+      }
       return true;
     }
     if (Operation == EOperation::Update) {
       Actual = Existing.Get();
       if (!Actual) {
-        SetFailure(OutFailure, TEXT("level_actor_not_found"),
-                   Identity.CanonicalKey);
+        SetFailure(OutFailure, StatePresenceFailure(TEXT("level_actor_not_found"),
+            TEXT("The actor to update is no longer available."), TEXT("actor_present"), false, true));
         return false;
       }
       Actual->Modify();
@@ -619,19 +1009,20 @@ public:
         Params.OverrideActorGuid = DesiredGuid;
 	      if (PlaceableCandidate.bPresent) {
 	        if (!World->PersistentLevel) {
-	          SetFailure(OutFailure, TEXT("level_actor_persistent_level_missing"));
+	          SetFailure(OutFailure, StatePresenceFailure(TEXT("level_actor_persistent_level_missing"),
+              TEXT("The target world has no persistent level for actor placement."), TEXT("persistent_level_present"), false, true));
 	          return false;
 	        }
 	        UeAgentPaletteSearch::FCandidate ResolvedCandidate;
-	        FString CandidateError;
+	        UE::UAI::Contract::FDiagnostic CandidateError;
 	        if (!UeAgentPaletteSearch::TryPerformPlaceableActorCandidate(
 	                PlaceableCandidate.Name, PlaceableCandidate.Id,
 	                PlaceableCandidate.Category, *World->PersistentLevel,
 	                Proposed->GetActorTransform(), Params, Actual,
-	                ResolvedCandidate, CandidateError)) {
-	          SetFailure(OutFailure,
-	                     TEXT("level_actor_native_candidate_create_failed"),
-	                     CandidateError);
+	                ResolvedCandidate, CandidateError, PlaceableCandidate.Select)) {
+	          const auto CandidateInput = ReadObject(ReadObject(DiagnosticInput, TEXT("provider_extension")), TEXT("candidate"));
+          if (CandidateInput.IsValid()) UeAgentAuthoringDiagnostics::LocateAuthoringSource(CandidateError, *CandidateInput);
+          SetFailure(OutFailure, MoveTemp(CandidateError));
 	          return false;
 	        }
 	      } else {
@@ -639,8 +1030,10 @@ public:
 	                                           Proposed->GetActorTransform(), Params);
 	      }
       if (!Actual) {
-        SetFailure(OutFailure, TEXT("level_actor_spawn_failed"),
-                   Identity.CanonicalKey);
+        auto Error = StatePresenceFailure(TEXT("level_actor_spawn_failed"),
+            TEXT("Unreal could not spawn the prepared actor in the target world."), TEXT("actor_created"), false, true);
+        Error.ProposedValue = MakeShared<FJsonValueString>(Proposed->GetClass()->GetPathName());
+        SetFailure(OutFailure, MoveTemp(Error));
         return false;
       }
       const FString ManagedId = Identity.GetSelector(TEXT("managed_id"));
@@ -648,10 +1041,10 @@ public:
         Actual->Tags.AddUnique(FName(*MakeManagedActorTag(ManagedId)));
       ApplyActorExtension(*Actual, Label, Folder, Transform);
     }
-    FString AttachmentError;
+    ApplyActorTags(*Actual, Tags);
+    UE::UAI::Contract::FDiagnostic AttachmentError;
     if (!ApplyActorAttachment(*Actual, *World, Attachment, AttachmentError)) {
-      SetLookupFailure(OutFailure, TEXT("level_actor_attachment_apply_failed"),
-                       AttachmentError, EAuthorabilityPublicTarget::Actor);
+      SetFailure(OutFailure, PublicLookupFailure(AttachmentError, EAuthorabilityPublicTarget::Actor));
       return false;
     }
     Actual->PostEditChange();
@@ -661,7 +1054,8 @@ public:
 
   virtual bool Compile(FOperationFailure &OutFailure) override {
     OutFailure = {};
-    return true;
+    return !Persistent.IsValid() || Persistent->SettleInputs(
+        Operation == EOperation::Remove ? nullptr : Actual, OutFailure);
   }
   virtual bool Save(FOperationFailure &OutFailure) override {
     OutFailure = {};
@@ -671,7 +1065,9 @@ public:
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const override {
     if (!BuildRequests(
-            Operation == EOperation::Remove ? nullptr : Proposed.Get(),
+            Operation == EOperation::Remove
+                ? nullptr
+                : Proposed.Get(),
             Operation == EOperation::Remove, OutRequests, OutFailure)) {
       return false;
     }
@@ -692,12 +1088,21 @@ public:
       if (Transform.IsSet())
         ApplyTransformPatch(Transform.GetValue(), Value);
       AddTransformOverrideContext(Context, TEXT("actor_"), Value);
+      AddCandidateTransformProjectionContext(Context);
       if (Attachment.bPresent) {
         Context.Add(TEXT("actor_attachment_override"), TEXT("true"));
         Context.Add(TEXT("actor_parent_managed_id_override"),
                     Attachment.ParentManagedId);
         Context.Add(TEXT("actor_socket_name_override"),
                     Attachment.SocketName);
+      } else if (Operation == EOperation::Update && Existing.IsValid()) {
+        // Scratch actors do not retain the live attachment graph. All other
+        // expected fields come from the edited proposed actor, not the old one.
+        const AActor* Parent = Existing->GetAttachParentActor();
+        Context.Add(TEXT("actor_attachment_override"), TEXT("true"));
+        Context.Add(TEXT("actor_parent_managed_id_override"), Parent ? GetManagedActorId(*Parent) : FString());
+        Context.Add(TEXT("actor_socket_name_override"), Existing->GetAttachParentSocketName().IsNone()
+            ? FString() : Existing->GetAttachParentSocketName().ToString());
       }
     }
     return true;
@@ -716,7 +1121,16 @@ public:
         !Label.IsSet() && !OutRequests.IsEmpty()) {
       OutRequests[0].Context.Add(TEXT("actor_label_omit"), TEXT("true"));
     }
+    if (!OutRequests.IsEmpty()) {
+      AddCandidateTransformProjectionContext(OutRequests[0].Context);
+    }
     return true;
+  }
+  virtual bool BuildDomainBeforeReadRequests(
+      TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+      FOperationFailure& OutFailure) const override {
+    AActor* Owner = Actual ? Actual : Existing.Get();
+    return BuildRequests(Owner, !Owner, OutRequests, OutFailure);
   }
   virtual TSharedPtr<FJsonObject> BuildResultMetadata() const override {
     if (Operation == EOperation::Remove)
@@ -728,20 +1142,30 @@ public:
   virtual bool Rollback(FOperationFailure &OutFailure) override {
     OutFailure = {};
     if (!World.IsValid()) {
-      SetFailure(OutFailure, TEXT("level_world_not_found"));
+      SetFailure(OutFailure, StatePresenceFailure(TEXT("level_world_not_found"),
+          TEXT("The target world is no longer available for actor rollback."), TEXT("world_present"), false, true));
       return false;
     }
     if (Operation == EOperation::Create || Operation == EOperation::Clone) {
+      const bool bRebuildBrush = Actual && Actual->IsA<ABrush>();
       if (Actual && !World->DestroyActor(Actual, true, true)) {
-        SetFailure(OutFailure, TEXT("level_actor_create_rollback_failed"),
-                   Identity.CanonicalKey);
+        SetFailure(OutFailure, StatePresenceFailure(TEXT("level_actor_create_rollback_failed"),
+            TEXT("Unreal could not destroy the newly created actor during rollback."), TEXT("actor_destroyed"), false, true));
         return false;
       }
       Actual = nullptr;
+      if (bRebuildBrush && World->PersistentLevel) {
+        UE::UAI::Contract::FDiagnostic Error;
+        if (!UUeAgentBrushBuilderActorFactory::SettleLevel(*World->PersistentLevel, Error)) {
+          SetFailure(OutFailure, MoveTemp(Error));
+          return false;
+        }
+      }
       return true;
     }
     if (Operation == EOperation::Update && Existing.IsValid() &&
         Backup.IsValid()) {
+      Existing->Tags = Backup->Tags;
       ApplyActorExtension(*Existing, BaseLabel, BaseFolder,
                           FTransformPatch{BaseTransform.GetLocation(),
                                           BaseTransform.Rotator(),
@@ -754,50 +1178,80 @@ public:
             OriginalAttachSocket);
       }
       Actual = Existing.Get();
+      if (Actual->IsA<ABrush>() && Actual->GetLevel()) {
+        UE::UAI::Contract::FDiagnostic Error;
+        if (!UUeAgentBrushBuilderActorFactory::SettleLevel(*Actual->GetLevel(), Error)) {
+          SetFailure(OutFailure, MoveTemp(Error));
+          return false;
+        }
+      }
       return true;
     }
-    if (Operation == EOperation::Remove && Backup.IsValid()) {
-      FActorSpawnParameters Params;
-      Params.Template = Backup.Get();
-      Params.OverrideLevel = World->PersistentLevel;
-      Params.OverrideActorGuid = OriginalGuid;
-      Params.Name = OriginalName;
-      Params.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;
-      Params.SpawnCollisionHandlingOverride =
-          ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-      Actual = World->SpawnActor<AActor>(Backup->GetClass(),
-                                         Backup->GetActorTransform(), Params);
-      if (!Actual) {
-        SetFailure(OutFailure, TEXT("level_actor_remove_rollback_failed"),
-                   Identity.CanonicalKey);
-        return false;
+    if (Operation == EOperation::Remove) {
+      UE::UAI::Contract::FDiagnostic Error;
+      if (!Deletion.Restore(Error)) {
+        SetFailure(OutFailure, MoveTemp(Error)); return false;
       }
+      const auto Target = MakeShared<FJsonObject>();
+      UeAgentAuthoringIdentity::WriteSelectorsFlat(Identity, Target);
+      Actual = FindActorExact(*World, Target, Error);
       Existing.Reset(Actual);
-      ApplyActorExtension(*Actual, BaseLabel, BaseFolder,
-                          FTransformPatch{BaseTransform.GetLocation(),
-                                          BaseTransform.Rotator(),
-                                          BaseTransform.GetScale3D()});
-      if (OriginalAttachParent.IsValid()) {
-        Actual->AttachToActor(
-            OriginalAttachParent.Get(),
-            FAttachmentTransformRules::KeepWorldTransform,
-            OriginalAttachSocket);
+      if (!Actual) {
+        SetFailure(OutFailure, Error.IsValid() ? MoveTemp(Error) : StatePresenceFailure(TEXT("level_actor_remove_rollback_failed"),
+            TEXT("The removed actor was not found after rollback restored its deletion record."), TEXT("restored_actor_present"), false, true));
+        return false;
       }
     }
     return true;
   }
 
 private:
+  void AddCandidateTransformProjectionContext(
+      TMap<FString, FString> &Context) const {
+    if (Operation != EOperation::Create || !PlaceableCandidate.bPresent)
+      return;
+    if (!Transform.IsSet() || !Transform.GetValue().Translation.IsSet())
+      Context.Add(TEXT("actor_transform_translation_omit"), TEXT("true"));
+    if (!Transform.IsSet() || !Transform.GetValue().Rotation.IsSet())
+      Context.Add(TEXT("actor_transform_rotation_omit"), TEXT("true"));
+    if (!Transform.IsSet() || !Transform.GetValue().Scale.IsSet())
+      Context.Add(TEXT("actor_transform_scale_omit"), TEXT("true"));
+  }
+
   bool BuildRequests(AActor *Actor, const bool bExpectedAbsent,
                      TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
                      FOperationFailure &OutFailure) const {
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!BuildActorSnapshotReadRequests(Actor, Identity, bExpectedAbsent,
                                         OutRequests, Error)) {
-      SetFailure(OutFailure, TEXT("level_actor_snapshot_failed"), Error);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
     OutFailure = {};
+    return true;
+  }
+
+  void ClearPersistentReferences() override {
+    Deletion.Release();
+    World.Reset(); Existing.Reset(); Proposed.Reset(); Backup.Reset(); Actual = nullptr;
+    OriginalAttachParent.Reset();
+  }
+  bool BindPersistentWorld(UWorld& Reloaded, bool bBefore, FOperationFailure& Failure) override {
+    World = &Reloaded;
+    const auto Target = MakeShared<FJsonObject>();
+    UeAgentAuthoringIdentity::WriteSelectorsFlat(Identity, Target);
+    UE::UAI::Contract::FDiagnostic Error;
+    Actual = FindActorExact(Reloaded, Target, Error);
+    Existing.Reset(Actual);
+    if (Error.IsValid()) { SetFailure(Failure, MoveTemp(Error)); return false; }
+    const bool bAbsent = bBefore ? (Operation == EOperation::Create || Operation == EOperation::Clone) : Operation == EOperation::Remove;
+    if ((Actual == nullptr) != bAbsent) {
+      SetFailure(Failure, Error.IsValid() ? MoveTemp(Error) : StatePresenceFailure(TEXT("level_actor_persistent_rebind_failed"),
+          bAbsent ? TEXT("The actor is still present after reloading a state that requires its absence.")
+              : TEXT("The actor is missing after reloading a state that requires its presence."),
+          TEXT("actor_present"), Actual != nullptr, !bAbsent));
+      return false;
+    }
     return true;
   }
 
@@ -808,9 +1262,8 @@ private:
   TStrongObjectPtr<AActor> Existing;
   TStrongObjectPtr<AActor> Proposed;
   TStrongObjectPtr<AActor> Backup;
+  FActorDeletion Deletion;
   AActor *Actual = nullptr;
-  FGuid OriginalGuid;
-  FName OriginalName;
   TWeakObjectPtr<AActor> OriginalAttachParent;
   FName OriginalAttachSocket;
   FString BaseLabel;
@@ -819,25 +1272,29 @@ private:
   TOptional<FString> Label;
   TOptional<FString> Folder;
   TOptional<FTransformPatch> Transform;
+  TOptional<TArray<FName>> Tags;
   FActorAttachmentPatch Attachment;
 	  FPlaceableActorPatch PlaceableCandidate;
 };
 
 class FComponentLifecycleState final
-    : public IReflectionOperationLifecycleState {
+    : public FLevelPersistentState {
 public:
   FComponentLifecycleState(
       UWorld &InWorld, TSharedRef<FLevelAuthoringScratchWorld> InScratchWorld,
-      EOperation InOperation, bool bInResolveUpsertAgainstSpawnedOwner,
+      EOperation InRequestedOperation, EOperation InOperation,
+      bool bInAdoptMatchingComponentFromSpawnedOwner,
       UeAgentAuthoringIdentity::FCanonicalIdentity InIdentity,
       TSharedPtr<const FJsonObject> InOwnerTarget, UActorComponent *InExisting,
-      UActorComponent *InProposed, FAttachmentPatch InAttachment)
+      UActorComponent *InProposed, FAttachmentPatch InAttachment,
+      TSharedPtr<const FJsonObject> InPcg)
       : World(&InWorld), ScratchWorld(MoveTemp(InScratchWorld)),
-        Operation(InOperation),
-        bResolveUpsertAgainstSpawnedOwner(bInResolveUpsertAgainstSpawnedOwner),
+        RequestedOperation(InRequestedOperation), Operation(InOperation),
+        bAdoptMatchingComponentFromSpawnedOwner(
+            bInAdoptMatchingComponentFromSpawnedOwner),
         Identity(MoveTemp(InIdentity)), OwnerTarget(MoveTemp(InOwnerTarget)),
         Existing(InExisting), Proposed(InProposed),
-        Attachment(MoveTemp(InAttachment)) {}
+        Attachment(MoveTemp(InAttachment)), Pcg(MoveTemp(InPcg)) {}
 
   virtual FString GetTargetKey() const override {
     return Identity.CanonicalKey;
@@ -849,22 +1306,35 @@ public:
   }
   virtual FReflectionRoot GetActualRoot() const override {
     return FReflectionRoot::MakeObject(
-        Operation == EOperation::Remove ? nullptr
-                                        : (Actual ? Actual : Existing.Get()));
+        Operation == EOperation::Remove ? nullptr : ResolveCurrentComponent());
   }
   virtual bool ShouldApplyPropertiesToActualRoot() const override {
     return true;
+  }
+
+  bool RequiresCheckpointRollback() const override {
+    // Native property notifications can replace construction-script components.
+    // Their prepared property addresses no longer identify the live instance.
+    return Persistent.IsValid() && Existing.IsValid()
+        && Existing->IsCreatedByConstructionScript();
+  }
+
+  void ConfigurePropertyOptions(UeAgentAuthoringObjectApply::FOptions& Options) const override {
+    // Per-field post-edit reconstructs SCS components. Subsequent prepared
+    // addresses would still refer to the retired component instance.
+    if (Existing.IsValid() && Existing->IsCreatedByConstructionScript()) {
+      Options.bWholeObjectNotification = true;
+    }
   }
 
   virtual bool CaptureRollback(FOperationFailure &OutFailure) override {
     OutFailure = {};
     if (!Existing.IsValid())
       return true;
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     Backup.Reset(ScratchWorld->DuplicateComponent(*Existing, Error));
     if (!Backup.IsValid()) {
-      SetFailure(OutFailure, TEXT("level_component_rollback_capture_failed"),
-                 Error);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
     OriginalName = Existing->GetFName();
@@ -884,51 +1354,74 @@ public:
   }
 
   virtual bool ApplyProposed(FOperationFailure &OutFailure) override {
+    FScopedSourceLocations Sources(DiagnosticInput.Get(), [this](const FString& Pointer) {
+      return FScopedSourceLocations::ResolveProjection(DiagnosticSources, Pointer);
+    });
     OutFailure = {};
     if (Operation == EOperation::Remove)
       return true;
     if (!Proposed.IsValid()) {
-      SetFailure(OutFailure, TEXT("level_component_proposed_missing"),
-                 Identity.CanonicalKey);
+      SetFailure(OutFailure, StatePresenceFailure(TEXT("level_component_proposed_missing"),
+          TEXT("The prepared component is no longer available for application."), TEXT("proposed_component_present"), false, true));
       return false;
     }
     if (Attachment.Transform.IsSet()) {
       if (!Cast<USceneComponent>(Proposed.Get())) {
-        SetFailure(OutFailure,
-                   TEXT("level_component_transform_requires_scene_component"));
+        auto Error = LevelFailure(TEXT("level_component_transform_requires_scene_component"),
+            TEXT("An attachment transform requires a SceneComponent."), TEXT("component_class"),
+            MakeShared<FJsonValueString>(Proposed->GetClass()->GetPathName()),
+            MakeShared<FJsonValueString>(USceneComponent::StaticClass()->GetPathName()), Attachment.Input.Get(), TEXT("transform"));
+        Error.CandidateName = Proposed->GetName();
+        SetFailure(OutFailure, MoveTemp(Error));
         return false;
       }
+    }
+    UE::UAI::Contract::FDiagnostic PcgError;
+    if (!UeAgentPcgComponentAuthoring::Apply(*Proposed, Pcg, PcgError,
+            ReadString(ReadObject(DiagnosticInput, TEXT("target")), TEXT("world_path")))) {
+      if (PcgError.CandidateName.IsEmpty()) PcgError.CandidateName = Identity.GetSelector(TEXT("component_name"));
+      SetFailure(OutFailure, MoveTemp(PcgError));
+      return false;
     }
     return true;
   }
 
   virtual bool ApplyLifecycle(FOperationFailure &OutFailure) override {
+    FScopedSourceLocations Sources(DiagnosticInput.Get(), [this](const FString& Pointer) {
+      return FScopedSourceLocations::ResolveProjection(DiagnosticSources, Pointer);
+    });
     OutFailure = {};
     if (!World.IsValid()) {
-      SetFailure(OutFailure, TEXT("level_world_not_found"));
+      SetFailure(OutFailure, StatePresenceFailure(TEXT("level_world_not_found"),
+          TEXT("The target world is no longer available for component application."), TEXT("world_present"), false, true));
       return false;
     }
-    FString OwnerError;
+    const auto OriginalTarget = ReadObject(DiagnosticInput, TEXT("target"));
+    FDerivedTargetSources OwnerSources(OwnerTarget.Get(), OriginalTarget.Get(), {
+        {TEXT("/world_path"), TEXT("world_path")}, {TEXT("/actor_guid"), TEXT("owner_actor_guid")},
+        {TEXT("/managed_id"), TEXT("owner_managed_id")}});
+    UE::UAI::Contract::FDiagnostic OwnerError;
     AActor *Owner = FindActorExact(*World, OwnerTarget, OwnerError);
     if (!Owner) {
-      SetLookupFailure(OutFailure, TEXT("level_component_owner_not_found"),
-                       OwnerError, EAuthorabilityPublicTarget::Component);
+      if (OwnerError.IsEmpty()) OwnerError = StatePresenceFailure(TEXT("level_component_owner_not_found"),
+          TEXT("The component owner actor is no longer available for application."), TEXT("owner_actor_present"), false, true);
+      SetFailure(OutFailure, PublicLookupFailure(OwnerError, EAuthorabilityPublicTarget::Component));
       return false;
     }
     if (Operation == EOperation::Remove) {
       if (!Existing.IsValid()) {
-        FString FindError;
+        UE::UAI::Contract::FDiagnostic FindError;
         Existing.Reset(FindComponentExact(
             *Owner, Identity.GetSelector(TEXT("component_name")), FindError));
         if (!Existing.IsValid() && !FindError.IsEmpty()) {
-          SetLookupFailure(OutFailure, TEXT("level_component_identity_invalid"),
-                           FindError, EAuthorabilityPublicTarget::Component);
+          if (OriginalTarget.IsValid()) UeAgentAuthoringDiagnostics::LocateAuthoringSource(FindError, *OriginalTarget, TEXT("component_name"));
+          SetFailure(OutFailure, PublicLookupFailure(FindError, EAuthorabilityPublicTarget::Component));
           return false;
         }
       }
       if (!Existing.IsValid()) {
-        SetFailure(OutFailure, TEXT("level_component_not_found"),
-                   Identity.CanonicalKey);
+        SetFailure(OutFailure, StatePresenceFailure(TEXT("level_component_not_found"),
+            TEXT("The component to remove was not found on its owner."), TEXT("component_present"), false, true));
         return false;
       }
       const FName RetiredName = MakeUniqueObjectName(
@@ -938,8 +1431,8 @@ public:
               *RetiredName.ToString(), Owner,
               REN_DontCreateRedirectors | REN_DoNotDirty |
                   REN_NonTransactional)) {
-        SetFailure(OutFailure, TEXT("level_component_remove_failed"),
-                   TEXT("component_retire_rename_failed"));
+        SetFailure(OutFailure, StatePresenceFailure(TEXT("level_component_remove_failed"),
+            TEXT("Unreal could not rename the component before removing it."), TEXT("component_renamed"), false, true));
         return false;
       }
       Existing->Modify();
@@ -948,37 +1441,42 @@ public:
       return true;
     }
 
-    FString FindError;
+    UE::UAI::Contract::FDiagnostic FindError;
     UActorComponent *Current = FindComponentExact(
         *Owner, Identity.GetSelector(TEXT("component_name")), FindError);
     if (!FindError.IsEmpty()) {
-      SetLookupFailure(OutFailure, TEXT("level_component_identity_invalid"),
-                       FindError, EAuthorabilityPublicTarget::Component);
+      if (OriginalTarget.IsValid()) UeAgentAuthoringDiagnostics::LocateAuthoringSource(FindError, *OriginalTarget, TEXT("component_name"));
+      SetFailure(OutFailure, PublicLookupFailure(FindError, EAuthorabilityPublicTarget::Component));
       return false;
     }
     if (Operation == EOperation::Create && Current &&
-        bResolveUpsertAgainstSpawnedOwner) {
+        bAdoptMatchingComponentFromSpawnedOwner) {
       if (Current->GetClass() != Proposed->GetClass()) {
-        SetFailure(OutFailure, TEXT("level_component_class_conflict"),
-                   Current->GetClass()->GetPathName());
+        auto Error = LevelFailure(TEXT("level_component_class_conflict"),
+            TEXT("The spawned owner's existing component has a different class from the prepared component."), TEXT("component_class"),
+            MakeShared<FJsonValueString>(Current->GetClass()->GetPathName()), MakeShared<FJsonValueString>(Proposed->GetClass()->GetPathName()));
+        Error.CandidateName = Current->GetName();
+        SetFailure(OutFailure, MoveTemp(Error));
         return false;
       }
-      Operation = EOperation::Update;
-      Existing.Reset(Current);
+      if (RequestedOperation == EOperation::Upsert) {
+        Operation = EOperation::Update;
+        Existing.Reset(Current);
+      }
       Actual = Current;
       Actual->Modify();
     } else if (Operation == EOperation::Update) {
       Actual = Current ? Current : Existing.Get();
       if (!Actual) {
-        SetFailure(OutFailure, TEXT("level_component_not_found"),
-                   Identity.CanonicalKey);
+        SetFailure(OutFailure, StatePresenceFailure(TEXT("level_component_not_found"),
+            TEXT("The component to update is no longer available."), TEXT("component_present"), false, true));
         return false;
       }
       Actual->Modify();
     } else {
       if (Current) {
-        SetFailure(OutFailure, TEXT("level_component_already_exists"),
-                   Identity.CanonicalKey);
+        SetFailure(OutFailure, StatePresenceFailure(TEXT("level_component_already_exists"),
+            TEXT("The owner already has a component with the requested name."), TEXT("component_present"), true, false));
         return false;
       }
       Actual = NewObject<UActorComponent>(
@@ -986,8 +1484,10 @@ public:
           FName(*Identity.GetSelector(TEXT("component_name"))),
           RF_Transactional, Proposed.Get());
       if (!Actual) {
-        SetFailure(OutFailure, TEXT("level_component_create_failed"),
-                   Identity.CanonicalKey);
+        auto Error = StatePresenceFailure(TEXT("level_component_create_failed"),
+            TEXT("Unreal could not create the prepared component on its owner."), TEXT("component_created"), false, true);
+        Error.ProposedValue = MakeShared<FJsonValueString>(Proposed->GetClass()->GetPathName());
+        SetFailure(OutFailure, MoveTemp(Error));
         return false;
       }
       Owner->AddOwnedComponent(Actual);
@@ -999,22 +1499,32 @@ public:
           Owner->SetRootComponent(Scene);
       }
     }
-    FString AttachmentError;
-    if (!ApplyComponentAttachment(*Actual, *Owner, Attachment,
-                                  AttachmentError)) {
-      SetLookupFailure(OutFailure,
-                       TEXT("level_component_attachment_apply_failed"),
-                       AttachmentError, EAuthorabilityPublicTarget::Component);
+    UE::UAI::Contract::FDiagnostic AttachmentError;
+    if (!UeAgentPcgComponentAuthoring::Apply(*Actual, Pcg, AttachmentError,
+            ReadString(ReadObject(DiagnosticInput, TEXT("target")), TEXT("world_path")))) {
+      if (AttachmentError.CandidateName.IsEmpty()) AttachmentError.CandidateName = Identity.GetSelector(TEXT("component_name"));
+      SetFailure(OutFailure, MoveTemp(AttachmentError));
       return false;
     }
-    Actual->PostEditChange();
-    Actual->MarkPackageDirty();
+    if (!ApplyComponentAttachment(*Actual, *Owner, Attachment,
+                                  AttachmentError)) {
+      SetFailure(OutFailure, PublicLookupFailure(AttachmentError, EAuthorabilityPublicTarget::Component));
+      return false;
+    }
+    if (Operation != EOperation::Update || Attachment.bPresent || Pcg.IsValid()) {
+      Actual->PostEditChange();
+      Owner->MarkPackageDirty();
+    }
     return true;
   }
 
   virtual bool Compile(FOperationFailure &OutFailure) override {
     OutFailure = {};
-    return true;
+    if (!Persistent.IsValid() || !World.IsValid()) return true;
+    UE::UAI::Contract::FDiagnostic Error;
+    AActor* Owner = FindActorExact(*World, OwnerTarget, Error);
+    if (Error.IsValid()) { SetFailure(OutFailure, PublicLookupFailure(Error, EAuthorabilityPublicTarget::Component)); return false; }
+    return Persistent->SettleInputs(Owner, OutFailure);
   }
   virtual bool Save(FOperationFailure &OutFailure) override {
     OutFailure = {};
@@ -1023,8 +1533,13 @@ public:
   virtual bool BuildDomainExpectedReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const override {
-    if (!BuildRequests(
-            Operation == EOperation::Remove ? nullptr : Proposed.Get(),
+    const bool bPropertyOnlyUpdate =
+        Operation == EOperation::Update && !Attachment.bPresent && !Pcg.IsValid();
+    FDiagnostic LookupError;
+    UActorComponent* Expected = Operation == EOperation::Remove ? nullptr
+        : bPropertyOnlyUpdate ? ResolveCurrentComponent(&LookupError) : Proposed.Get();
+    if (LookupError.IsValid()) { SetFailure(OutFailure, MoveTemp(LookupError)); return false; }
+    if (!BuildRequests(Expected,
             Operation == EOperation::Remove, OutRequests, OutFailure)) {
       return false;
     }
@@ -1052,10 +1567,18 @@ public:
   virtual bool BuildDomainActualReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const override {
-    return BuildRequests(
-        Operation == EOperation::Remove ? nullptr
-                                        : (Actual ? Actual : Existing.Get()),
-        Operation == EOperation::Remove, OutRequests, OutFailure);
+    FDiagnostic LookupError;
+    UActorComponent* Current = Operation == EOperation::Remove ? nullptr : ResolveCurrentComponent(&LookupError);
+    if (LookupError.IsValid()) { SetFailure(OutFailure, MoveTemp(LookupError)); return false; }
+    return BuildRequests(Current, Operation == EOperation::Remove, OutRequests, OutFailure);
+  }
+  virtual bool BuildDomainBeforeReadRequests(
+      TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+      FOperationFailure& OutFailure) const override {
+    FDiagnostic LookupError;
+    UActorComponent* Owner = ResolveCurrentComponent(&LookupError);
+    if (LookupError.IsValid()) { SetFailure(OutFailure, MoveTemp(LookupError)); return false; }
+    return BuildRequests(Owner, !Owner, OutRequests, OutFailure);
   }
   virtual TSharedPtr<FJsonObject> BuildResultMetadata() const override {
     if (Operation == EOperation::Remove)
@@ -1067,14 +1590,17 @@ public:
   virtual bool Rollback(FOperationFailure &OutFailure) override {
     OutFailure = {};
     if (!World.IsValid()) {
-      SetFailure(OutFailure, TEXT("level_world_not_found"));
+      SetFailure(OutFailure, StatePresenceFailure(TEXT("level_world_not_found"),
+          TEXT("The target world is no longer available for component rollback."), TEXT("world_present"), false, true));
       return false;
     }
-    FString OwnerError;
+    UE::UAI::Contract::FDiagnostic OwnerError;
     AActor *Owner = FindActorExact(*World, OwnerTarget, OwnerError);
     if (!Owner) {
-      SetLookupFailure(OutFailure, TEXT("level_component_owner_not_found"),
-                       OwnerError, EAuthorabilityPublicTarget::Component);
+      if (OwnerError.IsEmpty()) OwnerError = StatePresenceFailure(TEXT("level_component_owner_not_found"),
+          TEXT("The component owner actor is no longer available for rollback."), TEXT("owner_actor_present"), false, true);
+      if (OwnerError.SourceKind.IsEmpty()) OwnerError.SourceKind = TEXT("native_result");
+      SetFailure(OutFailure, PublicLookupFailure(OwnerError, EAuthorabilityPublicTarget::Component));
       return false;
     }
     if (Operation == EOperation::Create || Operation == EOperation::Clone) {
@@ -1086,6 +1612,15 @@ public:
     if (Operation == EOperation::Update && Existing.IsValid() &&
         Backup.IsValid()) {
       Actual = Existing.Get();
+      UE::UAI::Contract::FDiagnostic PcgError;
+      if (Pcg.IsValid() && !UeAgentPcgComponentAuthoring::Apply(
+              *Actual, UeAgentPcgComponentAuthoring::Read(*Backup), PcgError,
+              ReadString(ReadObject(DiagnosticInput, TEXT("target")), TEXT("world_path")))) {
+        if (PcgError.SourceKind.IsEmpty()) PcgError.SourceKind = TEXT("native_result");
+        if (PcgError.CandidateName.IsEmpty()) PcgError.CandidateName = Identity.GetSelector(TEXT("component_name"));
+        SetFailure(OutFailure, MoveTemp(PcgError));
+        return false;
+      }
       if (bHadSceneState) {
         FAttachmentPatch Restore;
         Restore.bPresent = true;
@@ -1095,11 +1630,9 @@ public:
             FTransformPatch{OriginalRelativeTransform.GetLocation(),
                             OriginalRelativeTransform.Rotator(),
                             OriginalRelativeTransform.GetScale3D()};
-        FString RestoreError;
+        UE::UAI::Contract::FDiagnostic RestoreError;
         if (!ApplyComponentAttachment(*Actual, *Owner, Restore, RestoreError)) {
-          SetLookupFailure(OutFailure,
-                           TEXT("level_component_update_rollback_failed"),
-                           RestoreError, EAuthorabilityPublicTarget::Component);
+          SetFailure(OutFailure, PublicLookupFailure(RestoreError, EAuthorabilityPublicTarget::Component));
           return false;
         }
       }
@@ -1110,8 +1643,8 @@ public:
           NewObject<UActorComponent>(Owner, Backup->GetClass(), OriginalName,
                                      RF_Transactional, Backup.Get());
       if (!Actual) {
-        SetFailure(OutFailure, TEXT("level_component_remove_rollback_failed"),
-                   Identity.CanonicalKey);
+        SetFailure(OutFailure, StatePresenceFailure(TEXT("level_component_remove_rollback_failed"),
+            TEXT("Unreal could not recreate the removed component during rollback."), TEXT("restored_component_created"), false, true));
         return false;
       }
       Owner->AddOwnedComponent(Actual);
@@ -1127,20 +1660,19 @@ public:
             FTransformPatch{OriginalRelativeTransform.GetLocation(),
                             OriginalRelativeTransform.Rotator(),
                             OriginalRelativeTransform.GetScale3D()};
-        FString RestoreError;
+        UE::UAI::Contract::FDiagnostic RestoreError;
         if (!ApplyComponentAttachment(*Actual, *Owner, Restore, RestoreError)) {
-          SetLookupFailure(OutFailure,
-                           TEXT("level_component_remove_rollback_failed"),
-                           RestoreError, EAuthorabilityPublicTarget::Component);
+          SetFailure(OutFailure, PublicLookupFailure(RestoreError, EAuthorabilityPublicTarget::Component));
           return false;
         }
       }
       if (bWasRootComponent) {
         USceneComponent *RestoredRoot = Cast<USceneComponent>(Actual);
         if (!RestoredRoot || !Owner->SetRootComponent(RestoredRoot)) {
-          SetFailure(OutFailure,
-                     TEXT("level_component_remove_rollback_failed"),
-                     TEXT("root_component_restore_failed"));
+          SetFailure(OutFailure, StatePresenceFailure(TEXT("level_component_remove_rollback_failed"),
+              !RestoredRoot ? TEXT("The restored root component is not a SceneComponent.")
+                  : TEXT("Unreal rejected restoring the owner's root component."),
+              !RestoredRoot ? TEXT("restored_root_is_scene_component") : TEXT("root_component_restored"), false, true));
           return false;
         }
       }
@@ -1150,23 +1682,56 @@ public:
   }
 
 private:
+  UActorComponent* ResolveCurrentComponent(FDiagnostic* OutError = nullptr) const {
+    if (OutError) OutError->Reset();
+    if (!World.IsValid()) return nullptr;
+    FDiagnostic Error;
+    AActor* Owner = FindActorExact(*World, OwnerTarget, Error);
+    UActorComponent* Component = Owner ? FindComponentExact(*Owner,
+        Identity.GetSelector(TEXT("component_name")), Error) : nullptr;
+    if (OutError && Error.IsValid()) *OutError = PublicLookupFailure(Error, EAuthorabilityPublicTarget::Component);
+    return Component;
+  }
+
   bool BuildRequests(UActorComponent *Component, const bool bExpectedAbsent,
                      TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
                      FOperationFailure &OutFailure) const {
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!BuildComponentSnapshotReadRequests(
             Component, Identity, bExpectedAbsent, OutRequests, Error)) {
-      SetFailure(OutFailure, TEXT("level_component_snapshot_failed"), Error);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
     OutFailure = {};
     return true;
   }
 
+  void ClearPersistentReferences() override {
+    World.Reset(); Existing.Reset(); Proposed.Reset(); Backup.Reset(); Actual = nullptr;
+  }
+  bool BindPersistentWorld(UWorld& Reloaded, bool bBefore, FOperationFailure& Failure) override {
+    World = &Reloaded;
+    UE::UAI::Contract::FDiagnostic Error;
+    AActor* Owner = FindActorExact(Reloaded, OwnerTarget, Error);
+    Actual = Owner ? FindComponentExact(*Owner, Identity.GetSelector(TEXT("component_name")), Error) : nullptr;
+    Existing.Reset(Actual);
+    if (Error.IsValid()) { SetFailure(Failure, PublicLookupFailure(Error, EAuthorabilityPublicTarget::Component)); return false; }
+    const bool bAbsent = bBefore ? Operation == EOperation::Create : Operation == EOperation::Remove;
+    if ((Actual == nullptr) != bAbsent) {
+      SetFailure(Failure, Error.IsValid() ? MoveTemp(Error) : StatePresenceFailure(TEXT("level_component_persistent_rebind_failed"),
+          bAbsent ? TEXT("The component is still present after reloading a state that requires its absence.")
+              : TEXT("The component is missing after reloading a state that requires its presence."),
+          TEXT("component_present"), Actual != nullptr, !bAbsent));
+      return false;
+    }
+    return true;
+  }
+
   TWeakObjectPtr<UWorld> World;
   TSharedRef<FLevelAuthoringScratchWorld> ScratchWorld;
+  EOperation RequestedOperation = EOperation::Update;
   EOperation Operation = EOperation::Update;
-  bool bResolveUpsertAgainstSpawnedOwner = false;
+  bool bAdoptMatchingComponentFromSpawnedOwner = false;
   UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
   TSharedPtr<const FJsonObject> OwnerTarget;
   TStrongObjectPtr<UActorComponent> Existing;
@@ -1180,16 +1745,20 @@ private:
   FString OriginalSocketName;
   FTransform OriginalRelativeTransform = FTransform::Identity;
   FAttachmentPatch Attachment;
+  TSharedPtr<const FJsonObject> Pcg;
 };
 
 class FLevelLifecycle final : public IReflectionOperationLifecycle {
 public:
   FLevelLifecycle() = default;
 
-  explicit FLevelLifecycle(UWorld &InBoundWorld)
+  explicit FLevelLifecycle(UWorld &InBoundWorld, const TSharedPtr<FLevelPersistentContext>& InPersistent)
       : BoundWorld(&InBoundWorld),
         SharedScratchWorld(MakeShared<FLevelAuthoringScratchWorld>()),
-        bHasBoundWorld(true) {}
+        bHasBoundWorld(true) {
+    Persistent = InPersistent;
+    if (Persistent.IsValid()) Persistent->Scratch = SharedScratchWorld;
+  }
 
   virtual bool
   PrepareLifecycle(const FPrepareRequest &Request,
@@ -1197,38 +1766,80 @@ public:
                    FOperationFailure &OutFailure) const override {
     OutState.Reset();
     OutFailure = {};
+    ON_SCOPE_EXIT {
+      if (OutFailure.Diagnostic.IsValid() && OutFailure.Diagnostic.TargetPath.IsEmpty()
+          && Request.Input && Request.Input->Target.IsValid())
+        Request.Input->Target->TryGetStringField(TEXT("world_path"), OutFailure.Diagnostic.TargetPath);
+    };
     if (!Request.IsValid() || !Request.Input->Target.IsValid()) {
-      SetFailure(OutFailure, TEXT("level_apply_request_invalid"));
+      SetFailure(OutFailure, PresenceFailure(TEXT("level_apply_request_invalid"),
+          !Request.IsValid() ? TEXT("Level apply requires a valid prepared request and contract.")
+              : TEXT("Level apply requires a target object."),
+          !Request.IsValid() ? TEXT("request_valid") : TEXT("target_present"), false, true));
       return false;
     }
     const FString WorldPath =
         ReadString(Request.Input->Target, TEXT("world_path"));
     UWorld *World = ResolveWorld(WorldPath);
     if (!World) {
-      SetFailure(OutFailure, TEXT("level_world_not_found"), WorldPath);
+      SetFailure(OutFailure, LevelFailure(TEXT("level_world_not_found"),
+          TEXT("The requested world is not currently loaded in the allowed Editor context."),
+          TEXT("world_path"), Request.Input->Target->TryGetField(TEXT("world_path")),
+          MakeShared<FJsonValueString>(TEXT("loaded Editor world")), Request.Input->Target.Get(), TEXT("world_path")));
       return false;
     }
 
     if (Request.Contract->ContractId == WorldInputContractId) {
       UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
-      FString Error;
-      if (Request.Input->RequestedOperation != EOperation::Update ||
-          !BuildWorldIdentity(*World, Identity, Error)) {
-        SetFailure(OutFailure, TEXT("level_world_operation_invalid"), Error);
+      UE::UAI::Contract::FDiagnostic Error;
+      if (Request.Input->RequestedOperation != EOperation::Update) {
+        auto OperationError = FDiagnostic::Failure(TEXT("level_world_operation_invalid"),
+            TEXT("World settings support only the update operation."), TEXT("level_apply"));
+        OperationError.SemanticPointer = TEXT("/operation");
+        OperationError.ActualValue = MakeShared<FJsonValueString>(OperationToString(Request.Input->RequestedOperation));
+        OperationError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("update"));
+        SetFailure(OutFailure, MoveTemp(OperationError));
         return false;
       }
-      OutState = MakeUnique<FWorldLifecycleState>(*World, MoveTemp(Identity));
+      if (!BuildWorldIdentity(*World, Identity, Error)) {
+        SetFailure(OutFailure, MoveTemp(Error));
+        return false;
+      }
+      TSharedRef<FLevelAuthoringScratchWorld> ScratchWorld = GetScratchWorld();
+      AWorldSettings* Proposed = nullptr;
+      if (Request.Input->HasProperties()) {
+        AWorldSettings* Settings = World->GetWorldSettings();
+        Proposed = Settings ? Cast<AWorldSettings>(ScratchWorld->DuplicateActor(*Settings, Error)) : nullptr;
+        if (!Proposed) {
+          SetFailure(OutFailure, Error.IsValid() ? MoveTemp(Error) : PresenceFailure(TEXT("level_world_settings_prepare_failed"),
+              !Settings ? TEXT("The world has no WorldSettings object to prepare.")
+                  : TEXT("The scratch copy of WorldSettings has the wrong native type."),
+              !Settings ? TEXT("world_settings_present") : TEXT("scratch_is_world_settings"), false, true, WorldPath));
+          return false;
+        }
+      }
+      OutState = MakeUnique<FWorldLifecycleState>(*World, ScratchWorld, Proposed, MoveTemp(Identity));
+      static_cast<FLevelPersistentState*>(OutState.Get())->CaptureInputSources(Request);
+      static_cast<FLevelPersistentState*>(OutState.Get())->SetPersistentContext(Persistent);
       return true;
     }
 
     if (Request.Contract->ContractId == ActorInputContractId) {
-      return PrepareActor(*World, Request, OutState, OutFailure);
+      if (!PrepareActor(*World, Request, OutState, OutFailure)) return false;
+      static_cast<FLevelPersistentState*>(OutState.Get())->CaptureInputSources(Request);
+      static_cast<FLevelPersistentState*>(OutState.Get())->SetPersistentContext(Persistent);
+      return true;
     }
     if (Request.Contract->ContractId == ComponentInputContractId) {
-      return PrepareComponent(*World, Request, OutState, OutFailure);
+      if (!PrepareComponent(*World, Request, OutState, OutFailure)) return false;
+      static_cast<FLevelPersistentState*>(OutState.Get())->CaptureInputSources(Request);
+      static_cast<FLevelPersistentState*>(OutState.Get())->SetPersistentContext(Persistent);
+      return true;
     }
-    SetFailure(OutFailure, TEXT("level_apply_contract_unsupported"),
-               Request.Contract->ContractId);
+    auto Error = PresenceFailure(TEXT("level_apply_contract_unsupported"),
+        TEXT("The prepared contract is not a Level world, actor or component contract."), TEXT("level_contract_supported"), false, true, WorldPath);
+    Error.InternalContext = Request.Contract->ContractId;
+    SetFailure(OutFailure, MoveTemp(Error));
     return false;
   }
 
@@ -1252,16 +1863,16 @@ private:
   bool PrepareActor(UWorld &World, const FPrepareRequest &Request,
                     TUniquePtr<IReflectionOperationLifecycleState> &OutState,
                     FOperationFailure &OutFailure) const {
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
     if (!BuildActorIdentityFromTarget(Request.Input->Target, Identity, Error)) {
-      SetFailure(OutFailure, TEXT("level_actor_identity_invalid"), Error);
+      UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, *Request.Input->Target);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
     AActor *Existing = FindActorExact(World, Request.Input->Target, Error);
     if (!Error.IsEmpty()) {
-      SetLookupFailure(OutFailure, TEXT("level_actor_identity_invalid"), Error,
-                       EAuthorabilityPublicTarget::Actor);
+      SetFailure(OutFailure, PublicLookupFailure(Error, EAuthorabilityPublicTarget::Actor));
       return false;
     }
     EOperation Operation = Request.Input->RequestedOperation;
@@ -1269,14 +1880,16 @@ private:
       Operation = Existing ? EOperation::Update : EOperation::Create;
     if ((Operation == EOperation::Create || Operation == EOperation::Clone) &&
         Existing) {
-      SetFailure(OutFailure, TEXT("level_actor_already_exists"),
-                 Identity.CanonicalKey);
+      auto ExistingError = TargetPresenceFailure(TEXT("level_actor_already_exists"),
+          TEXT("An actor already matches the target of this create or clone operation."), Request.Input->Target, TEXT("actor_present"), true, false);
+      ExistingError.CandidateName = Existing->GetActorLabel();
+      SetFailure(OutFailure, MoveTemp(ExistingError));
       return false;
     }
     if ((Operation == EOperation::Update || Operation == EOperation::Remove) &&
         !Existing) {
-      SetFailure(OutFailure, TEXT("level_actor_not_found"),
-                 Identity.CanonicalKey);
+      SetFailure(OutFailure, TargetPresenceFailure(TEXT("level_actor_not_found"),
+          TEXT("No actor matches the target of this update or remove operation."), Request.Input->Target, TEXT("actor_present"), false, true));
       return false;
     }
 
@@ -1284,21 +1897,27 @@ private:
 	    FString CandidateActorClass;
 	    if (!ParsePlaceableActorPatch(Request.Input->ProviderExtension,
 	                                  PlaceableCandidate, Error)) {
-	      SetFailure(OutFailure, TEXT("level_actor_candidate_invalid"), Error);
+	      SetFailure(OutFailure, MoveTemp(Error));
 	      return false;
 	    }
 	    if (PlaceableCandidate.bPresent) {
 	      if (Operation == EOperation::Clone || Operation == EOperation::Remove) {
-	        SetFailure(OutFailure,
-	                   TEXT("level_actor_candidate_operation_unsupported"));
+	        auto OperationError = FDiagnostic::Failure(TEXT("level_actor_candidate_operation_unsupported"),
+            TEXT("A placement candidate cannot be used with clone or remove."), TEXT("level_apply"));
+        OperationError.SemanticPointer = TEXT("/operation");
+        OperationError.ActualValue = MakeShared<FJsonValueString>(OperationToString(Operation));
+        OperationError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("create, update or upsert"));
+        SetFailure(OutFailure, MoveTemp(OperationError));
 	        return false;
 	      }
 	      UeAgentPaletteSearch::FCandidate ResolvedCandidate;
 	      if (!UeAgentPaletteSearch::TryResolvePlaceableActorCandidate(
 	              PlaceableCandidate.Name, PlaceableCandidate.Id,
-	              PlaceableCandidate.Category, ResolvedCandidate, Error)) {
-	        SetFailure(OutFailure, TEXT("level_actor_candidate_unresolved"),
-	                   Error);
+	              PlaceableCandidate.Category, ResolvedCandidate, Error,
+	              PlaceableCandidate.Select)) {
+	        const auto CandidateInput = ReadObject(Request.Input->ProviderExtension, TEXT("candidate"));
+        if (CandidateInput.IsValid()) UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, *CandidateInput);
+        SetFailure(OutFailure, MoveTemp(Error));
 	        return false;
 	      }
 	      const FString ResolvedClass =
@@ -1308,21 +1927,29 @@ private:
 	          ReadString(Request.Input->Target, TEXT("actor_class"));
 	      if (ResolvedClass.IsEmpty() ||
 	          (!AssertedClass.IsEmpty() && AssertedClass != ResolvedClass)) {
-	        SetFailure(OutFailure, TEXT("level_actor_candidate_class_mismatch"),
-	                   AssertedClass);
+	        const auto CandidateInput = ReadObject(Request.Input->ProviderExtension, TEXT("candidate"));
+        auto ClassError = LevelFailure(TEXT("level_actor_candidate_class_mismatch"),
+            ResolvedClass.IsEmpty() ? TEXT("The resolved placement candidate has no actor class.")
+                : TEXT("The target actor_class differs from the resolved placement candidate class."),
+            TEXT("actor_class"), MakeShared<FJsonValueString>(AssertedClass),
+            MakeShared<FJsonValueString>(ResolvedClass.IsEmpty() ? TEXT("candidate with an actor class") : ResolvedClass),
+            ResolvedClass.IsEmpty() ? CandidateInput.Get() : Request.Input->Target.Get(),
+            ResolvedClass.IsEmpty() ? FString() : TEXT("actor_class"));
+        ClassError.CandidateName = PlaceableCandidate.Name;
+        if (ResolvedClass.IsEmpty()) ClassError.ActualValue = MakeShared<FJsonValueString>(ResolvedClass);
+        SetFailure(OutFailure, MoveTemp(ClassError));
 	        return false;
 	      }
 	      if (!ValidatePlaceableActorAssertions(Request.Input->ProviderExtension,
 	                                             ResolvedCandidate, Error)) {
-	        SetFailure(OutFailure,
-	                   TEXT("level_actor_candidate_assertion_mismatch"), Error);
+	        SetFailure(OutFailure, MoveTemp(Error));
 	        return false;
 	      }
 	      if (Operation == EOperation::Create &&
 	          !ResolvedCandidate.bSupportedInContext) {
-	        SetFailure(OutFailure,
-	                   TEXT("level_actor_candidate_not_headless_creatable"),
-	                   ResolvedCandidate.SupportReason);
+	        SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("level_actor_candidate_not_headless_creatable"), ResolvedCandidate.SupportDiagnostic));
+	        if (OutFailure.Diagnostic.TargetPath.IsEmpty())
+	          OutFailure.Diagnostic.TargetPath = ReadString(Request.Input->Target, TEXT("world_path"));
 	        return false;
 	      }
 	    }
@@ -1338,14 +1965,19 @@ private:
         const FAuthorabilityResult ClassAuthorability =
             EvaluateActorClassAuthorability(*Class);
         if (!ClassAuthorability.bAuthorable) {
-          SetFailure(OutFailure, ClassAuthorability.ErrorCode,
-                     ClassAuthorability.ErrorDetail);
+          SetFailure(OutFailure, ClassAuthorability.Diagnostic);
           return false;
         }
       }
       Template = Class ? Class->GetDefaultObject<AActor>() : nullptr;
       if (!Template) {
-        SetFailure(OutFailure, TEXT("level_actor_class_invalid"), ClassPath);
+        const auto CandidateInput = ReadObject(Request.Input->ProviderExtension, TEXT("candidate"));
+        SetFailure(OutFailure, LevelFailure(TEXT("level_actor_class_invalid"),
+            Class ? TEXT("The actor class has no actor default object.") : TEXT("The requested actor class could not be loaded."),
+            TEXT("actor_class"), MakeShared<FJsonValueString>(ClassPath),
+            MakeShared<FJsonValueString>(TEXT("loadable Actor class with a default object")),
+            CandidateActorClass.IsEmpty() ? Request.Input->Target.Get() : CandidateInput.Get(),
+            CandidateActorClass.IsEmpty() ? TEXT("actor_class") : FString()));
         return false;
       }
     } else if (Operation == EOperation::Clone) {
@@ -1359,10 +1991,16 @@ private:
         SourceTarget->SetStringField(TEXT("actor_guid"), SourceGuid);
       if (!SourceManaged.IsEmpty())
         SourceTarget->SetStringField(TEXT("managed_id"), SourceManaged);
+      FDerivedTargetSources SourceScope(&SourceTarget.Get(), Request.Input->Target.Get(), {
+          {TEXT("/world_path"), TEXT("world_path")}, {TEXT("/actor_guid"), TEXT("source_actor_guid")},
+          {TEXT("/managed_id"), TEXT("source_managed_id")}});
       Template = FindActorExact(World, SourceTarget, Error);
       if (!Template) {
-        SetLookupFailure(OutFailure, TEXT("level_actor_clone_source_not_found"),
-                         Error, EAuthorabilityPublicTarget::Actor);
+        if (Error.IsEmpty()) Error = LevelFailure(TEXT("level_actor_clone_source_not_found"),
+            TEXT("No actor matches the requested clone source."), TEXT("source_actor_present"),
+            MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true),
+            Request.Input->Target.Get(), SourceGuid.IsEmpty() ? TEXT("source_managed_id") : TEXT("source_actor_guid"));
+        SetFailure(OutFailure, PublicLookupFailure(Error, EAuthorabilityPublicTarget::Actor));
         return false;
       }
     } else if (Existing) {
@@ -1370,7 +2008,12 @@ private:
           ReadString(Request.Input->Target, TEXT("actor_class"));
       if (!ClassPath.IsEmpty() &&
           Existing->GetClass()->GetPathName() != ClassPath) {
-        SetFailure(OutFailure, TEXT("level_actor_class_conflict"), ClassPath);
+        auto ClassError = LevelFailure(TEXT("level_actor_class_conflict"),
+            TEXT("The target actor's class differs from the requested actor_class."),
+            TEXT("actor_class"), MakeShared<FJsonValueString>(Existing->GetClass()->GetPathName()),
+            MakeShared<FJsonValueString>(ClassPath), Request.Input->Target.Get(), TEXT("actor_class"));
+        ClassError.CandidateName = Existing->GetActorLabel();
+        SetFailure(OutFailure, MoveTemp(ClassError));
         return false;
       }
     }
@@ -1381,7 +2024,7 @@ private:
                            ? Existing
                            : ScratchWorld->DuplicateActor(*Template, Error);
     if (Operation != EOperation::Remove && !Proposed) {
-      SetFailure(OutFailure, TEXT("level_actor_proposed_create_failed"), Error);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
     if (Proposed && Operation != EOperation::Remove) {
@@ -1390,22 +2033,31 @@ private:
     TOptional<FString> Label;
     TOptional<FString> Folder;
     TOptional<FTransformPatch> Transform;
+    TOptional<TArray<FName>> Tags;
     FActorAttachmentPatch Attachment;
     if (!ParseActorExtension(Request.Input->ProviderExtension, Label, Folder,
-                             Transform, Error)) {
-      SetFailure(OutFailure, TEXT("level_actor_extension_invalid"), Error);
+                             Transform, Tags, Error)) {
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
+    if (Proposed && Operation != EOperation::Remove) ApplyActorTags(*Proposed, Tags);
     if (!ParseActorAttachmentExtension(Request.Input->ProviderExtension,
                                        Attachment, Error)) {
-      SetFailure(OutFailure, TEXT("level_actor_extension_invalid"), Error);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
+    // Exported context is not a request to restore a relation changed by an
+    // earlier native mutation in this batch (for example deleting the parent).
+    if (Operation == EOperation::Update && IsUnchangedActorAttachment(Existing, Attachment))
+      Attachment.bPresent = false;
+    // GetActorLabel can cache a generated label. Never mutate a class default
+    // or archetype while reading the baseline used by a prepared operation.
+    const FString BaseLabel = Template->GetActorLabel(!Template->IsTemplate());
     OutState = MakeUnique<FActorLifecycleState>(
         World, ScratchWorld, Operation, MoveTemp(Identity), Existing, Proposed,
-        Template->GetActorLabel(), GetActorFolderPathText(*Template),
+        BaseLabel, GetActorFolderPathText(*Template),
         Template->GetActorTransform(), MoveTemp(Label), MoveTemp(Folder),
-	        MoveTemp(Transform), MoveTemp(Attachment),
+	        MoveTemp(Transform), MoveTemp(Tags), MoveTemp(Attachment),
 	        MoveTemp(PlaceableCandidate));
     return true;
   }
@@ -1414,24 +2066,28 @@ private:
   PrepareComponent(UWorld &World, const FPrepareRequest &Request,
                    TUniquePtr<IReflectionOperationLifecycleState> &OutState,
                    FOperationFailure &OutFailure) const {
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
     if (!BuildComponentIdentityFromTarget(Request.Input->Target, Identity,
                                           Error)) {
-      SetFailure(OutFailure, TEXT("level_component_identity_invalid"), Error);
+      UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, *Request.Input->Target);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
     const TSharedRef<FJsonObject> OwnerTarget =
         MakeOwnerActorTarget(Request.Input->Target);
+    FDerivedTargetSources OwnerSources(&OwnerTarget.Get(), Request.Input->Target.Get(), {
+        {TEXT("/world_path"), TEXT("world_path")}, {TEXT("/actor_guid"), TEXT("owner_actor_guid")},
+        {TEXT("/managed_id"), TEXT("owner_managed_id")}});
     UeAgentAuthoringIdentity::FCanonicalIdentity OwnerIdentity;
     if (!BuildActorIdentityFromTarget(OwnerTarget, OwnerIdentity, Error)) {
-      SetFailure(OutFailure, TEXT("level_component_owner_invalid"), Error);
+      UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, OwnerTarget.Get());
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
     AActor *Owner = FindActorExact(World, OwnerTarget, Error);
     if (!Error.IsEmpty()) {
-      SetLookupFailure(OutFailure, TEXT("level_component_owner_invalid"), Error,
-                       EAuthorabilityPublicTarget::Component);
+      SetFailure(OutFailure, PublicLookupFailure(Error, EAuthorabilityPublicTarget::Component));
       return false;
     }
     UActorComponent *Existing = nullptr;
@@ -1439,8 +2095,8 @@ private:
       Existing = FindComponentExact(
           *Owner, Identity.GetSelector(TEXT("component_name")), Error);
       if (!Error.IsEmpty()) {
-        SetLookupFailure(OutFailure, TEXT("level_component_identity_invalid"),
-                         Error, EAuthorabilityPublicTarget::Component);
+        UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, *Request.Input->Target, TEXT("component_name"));
+        SetFailure(OutFailure, PublicLookupFailure(Error, EAuthorabilityPublicTarget::Component));
         return false;
       }
     }
@@ -1449,23 +2105,28 @@ private:
     EOperation Operation = RequestedOperation;
     if (Operation == EOperation::Upsert)
       Operation = Existing ? EOperation::Update : EOperation::Create;
-    const bool bResolveUpsertAgainstSpawnedOwner =
-        RequestedOperation == EOperation::Upsert && Owner == nullptr;
+    const bool bAdoptMatchingComponentFromSpawnedOwner =
+        Owner == nullptr &&
+        (RequestedOperation == EOperation::Create ||
+         RequestedOperation == EOperation::Upsert);
     if ((Operation == EOperation::Create || Operation == EOperation::Clone) &&
         Existing) {
-      SetFailure(OutFailure, TEXT("level_component_already_exists"),
-                 Identity.CanonicalKey);
+      SetFailure(OutFailure, TargetPresenceFailure(TEXT("level_component_already_exists"),
+          TEXT("The owner already has a component with the target name for this create or clone operation."),
+          Request.Input->Target, TEXT("component_present"), true, false));
       return false;
     }
     if ((Operation == EOperation::Update || Operation == EOperation::Remove) &&
         !Existing && Owner) {
-      SetFailure(OutFailure, TEXT("level_component_not_found"),
-                 Identity.CanonicalKey);
+      SetFailure(OutFailure, TargetPresenceFailure(TEXT("level_component_not_found"),
+          TEXT("No component matches the target of this update or remove operation."),
+          Request.Input->Target, TEXT("component_present"), false, true));
       return false;
     }
     if (Operation == EOperation::Remove && !Owner) {
-      SetFailure(OutFailure, TEXT("level_component_owner_not_found"),
-                 Identity.CanonicalKey);
+      SetFailure(OutFailure, TargetPresenceFailure(TEXT("level_component_owner_not_found"),
+          TEXT("The owner actor of the component to remove was not found."),
+          Request.Input->Target, TEXT("owner_actor_present"), false, true));
       return false;
     }
 
@@ -1480,20 +2141,24 @@ private:
         const FAuthorabilityResult ClassAuthorability =
             EvaluateComponentClassAuthorability(*Class);
         if (!ClassAuthorability.bAuthorable) {
-          SetFailure(OutFailure, ClassAuthorability.ErrorCode,
-                     ClassAuthorability.ErrorDetail);
+          SetFailure(OutFailure, ClassAuthorability.Diagnostic);
           return false;
         }
       }
       Template = Class ? Class->GetDefaultObject<UActorComponent>() : nullptr;
       if (!Template) {
-        SetFailure(OutFailure, TEXT("level_component_class_invalid"),
-                   ClassPath);
+        SetFailure(OutFailure, LevelFailure(TEXT("level_component_class_invalid"),
+            Class ? TEXT("The component class has no component default object.") : TEXT("The requested component class could not be loaded."),
+            TEXT("component_class"), MakeShared<FJsonValueString>(ClassPath),
+            MakeShared<FJsonValueString>(TEXT("loadable ActorComponent class with a default object")),
+            Request.Input->Target.Get(), TEXT("component_class")));
         return false;
       }
     } else if (Operation == EOperation::Clone) {
       if (!Owner) {
-        SetFailure(OutFailure, TEXT("level_component_clone_owner_not_found"));
+        SetFailure(OutFailure, TargetPresenceFailure(TEXT("level_component_clone_owner_not_found"),
+            TEXT("The owner actor must already exist before cloning one of its components."),
+            Request.Input->Target, TEXT("owner_actor_present"), false, true));
         return false;
       }
       Template = FindComponentExact(
@@ -1501,9 +2166,12 @@ private:
           ReadString(Request.Input->Target, TEXT("source_component_name")),
           Error);
       if (!Template) {
-        SetLookupFailure(OutFailure,
-                         TEXT("level_component_clone_source_not_found"), Error,
-                         EAuthorabilityPublicTarget::Component);
+        if (Error.IsEmpty()) Error = LevelFailure(TEXT("level_component_clone_source_not_found"),
+            TEXT("The owner has no component matching source_component_name."), TEXT("source_component_name"),
+            Request.Input->Target->TryGetField(TEXT("source_component_name")), MakeShared<FJsonValueString>(TEXT("existing component name")),
+            Request.Input->Target.Get(), TEXT("source_component_name"));
+        else UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, *Request.Input->Target, TEXT("source_component_name"));
+        SetFailure(OutFailure, PublicLookupFailure(Error, EAuthorabilityPublicTarget::Component));
         return false;
       }
     } else if (Existing) {
@@ -1511,8 +2179,10 @@ private:
           ReadString(Request.Input->Target, TEXT("component_class"));
       if (!ClassPath.IsEmpty() &&
           Existing->GetClass()->GetPathName() != ClassPath) {
-        SetFailure(OutFailure, TEXT("level_component_class_conflict"),
-                   ClassPath);
+        SetFailure(OutFailure, LevelFailure(TEXT("level_component_class_conflict"),
+            TEXT("The existing component's class differs from the requested component_class."),
+            TEXT("component_class"), MakeShared<FJsonValueString>(Existing->GetClass()->GetPathName()),
+            MakeShared<FJsonValueString>(ClassPath), Request.Input->Target.Get(), TEXT("component_class")));
         return false;
       }
     }
@@ -1525,8 +2195,9 @@ private:
           Owner ? ScratchWorld->DuplicateActor(*Owner, Error)
                 : ScratchWorld->FindPreparedActor(OwnerIdentity.CanonicalKey);
       if (!ScratchOwner) {
-        SetFailure(OutFailure, TEXT("level_component_scratch_owner_unresolved"),
-                   Error.IsEmpty() ? OwnerIdentity.CanonicalKey : Error);
+        SetFailure(OutFailure, Error.IsValid() ? MoveTemp(Error) : TargetPresenceFailure(TEXT("level_component_scratch_owner_unresolved"),
+            TEXT("The component owner has neither an existing actor nor a prepared actor in this workspace."),
+            Request.Input->Target, TEXT("prepared_owner_present"), false, true));
         return false;
       }
       const bool bReuseMatchingComponent =
@@ -1538,25 +2209,26 @@ private:
           bReuseMatchingComponent, Error);
     }
     if (Operation != EOperation::Remove && !Proposed) {
-      SetFailure(OutFailure, TEXT("level_component_proposed_create_failed"),
-                 Error);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
     FAttachmentPatch Attachment;
     if (!ParseAttachmentExtension(Request.Input->ProviderExtension, Attachment,
                                   Error)) {
-      SetFailure(OutFailure, TEXT("level_component_extension_invalid"), Error);
+      SetFailure(OutFailure, MoveTemp(Error));
       return false;
     }
     OutState = MakeUnique<FComponentLifecycleState>(
-        World, ScratchWorld, Operation, bResolveUpsertAgainstSpawnedOwner,
-        MoveTemp(Identity), OwnerTarget, Existing, Proposed,
-        MoveTemp(Attachment));
+        World, ScratchWorld, RequestedOperation, Operation,
+        bAdoptMatchingComponentFromSpawnedOwner, MoveTemp(Identity),
+        OwnerTarget, Existing, Proposed,
+        MoveTemp(Attachment), ReadObject(Request.Input->ProviderExtension, TEXT("pcg")));
     return true;
   }
 
   TWeakObjectPtr<UWorld> BoundWorld;
   TSharedPtr<FLevelAuthoringScratchWorld> SharedScratchWorld;
+  TSharedPtr<FLevelPersistentContext> Persistent;
   bool bHasBoundWorld = false;
 };
 
@@ -1602,12 +2274,11 @@ void ConfigureReflectionContract(FContract &Result) {
       TEXT("replace_reference_only");
   Result.ReflectionBaseline.OwnedObjectPolicy =
       TEXT("create_or_locate_with_real_outer_then_recurse");
-  Result.ReflectionBaseline.RuntimeLimitsSource = TEXT("shared_runtime_limits");
   Result.PropertyPayload.Mode = TEXT("reflection");
   Result.PropertyPayload.PropertyPathField = TEXT("property_path");
   Result.PropertyPayload.ValueField = TEXT("value");
   Result.PropertyPayload.OptionalAssertionFields = {
-      TEXT("value_kind"),   TEXT("struct_path"),  TEXT("enum_path"),
+      TEXT("kind"),         TEXT("struct_path"),  TEXT("enum_path"),
       TEXT("element_type"), TEXT("key_type"),     TEXT("mapped_type"),
       TEXT("inner_type"),   TEXT("fixed_length"), TEXT("allowed_class")};
   Result.PropertyPayload.OmittedPatchFieldPolicy = TEXT("preserve_current");
@@ -1625,16 +2296,18 @@ FContract MakeWorldInputContract() {
   Result.ContractVersion = TEXT("1.0.0");
   Result.ProfileId = TEXT("level.world");
   Result.TargetKind = TEXT("level_world");
-  Result.SemanticDescriptorRefs = {WorldStateSemanticId};
+  Result.SemanticDescriptorRefs = {WorldStateSemanticId, WorldPropertySemanticId};
   Result.InputFields = {
       Field(TEXT("world_path"), TEXT("identity"), TEXT("ue_asset_path"),
             {EOperation::Update}),
       Field(TEXT("operation"), TEXT("operation_control"),
             TEXT("apply_operation"), {EOperation::Update}),
+      Field(TEXT("properties"), TEXT("intent"),
+            TEXT("property_descriptor_list")),
   };
   FOperationDescriptor Update = OperationDescriptor(EOperation::Update);
   Update.IdentityOneOf = {{TEXT("world_path")}};
-  Update.AcceptedSections = {TEXT("target")};
+  Update.AcceptedSections = {TEXT("target"), TEXT("properties")};
   Result.Operations = {Update};
   ConfigureReflectionContract(Result);
   return Result;
@@ -1657,8 +2330,7 @@ FContract MakeActorInputContract() {
       Field(TEXT("actor_guid"), TEXT("identity"), TEXT("guid")),
       Field(TEXT("managed_id"), TEXT("identity"), TEXT("string")),
       Field(TEXT("object_path"), TEXT("identity"), TEXT("ue_object_path")),
-      Field(TEXT("actor_class"), TEXT("type_assertion"), TEXT("ue_class_path"),
-            {EOperation::Create}),
+      Field(TEXT("actor_class"), TEXT("type_assertion"), TEXT("ue_class_path")),
       Field(TEXT("source_actor_guid"), TEXT("selector"), TEXT("guid")),
       Field(TEXT("source_managed_id"), TEXT("selector"), TEXT("string")),
       Field(TEXT("operation"), TEXT("operation_control"),
@@ -1668,6 +2340,7 @@ FContract MakeActorInputContract() {
       Field(TEXT("label"), TEXT("provider_extension"), TEXT("string")),
       Field(TEXT("folder_path"), TEXT("provider_extension"), TEXT("string")),
       Field(TEXT("transform"), TEXT("provider_extension"), TEXT("transform")),
+      Field(TEXT("tags"), TEXT("provider_extension"), TEXT("string_array")),
       Field(TEXT("attachment"), TEXT("provider_extension"), TEXT("object")),
 	  Field(TEXT("candidate"), TEXT("provider_extension"), TEXT("object")),
 	  Field(TEXT("placement_context"), TEXT("provider_extension"),
@@ -1712,6 +2385,7 @@ FContract MakeComponentInputContract() {
       Field(TEXT("properties"), TEXT("intent"),
             TEXT("property_descriptor_list")),
       Field(TEXT("attachment"), TEXT("provider_extension"), TEXT("object")),
+      Field(TEXT("pcg"), TEXT("provider_extension"), TEXT("object")),
   };
   for (const EOperation Item : All) {
     FOperationDescriptor Descriptor = OperationDescriptor(Item);
@@ -1794,66 +2468,79 @@ UeAgentApplyWorkspaceContract::FContract MakeWorkspaceContract() {
   return Result;
 }
 
-bool GetOperation(const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit &Unit,
-                  EOperation &OutOperation) {
-  FString Text;
-  return Unit.Document.IsValid() &&
-         Unit.Document->TryGetStringField(TEXT("operation"), Text) &&
-         ParseOperation(Text, OutOperation);
-}
-
-bool GetTarget(const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit &Unit,
-               TSharedPtr<const FJsonObject> &OutTarget) {
-  OutTarget.Reset();
-  const TSharedPtr<FJsonObject> *Target = nullptr;
-  if (!Unit.Document.IsValid() ||
-      !Unit.Document->TryGetObjectField(TEXT("target"), Target) || !Target ||
-      !Target->IsValid()) {
-    return false;
-  }
-  OutTarget = *Target;
-  return true;
-}
-
 bool BuildDependenciesAndValidate(
     UWorld &World, const UeAgentAuthoringWorkspaceRouter::FWorkspace &Workspace,
     UeAgentAuthoringWorkspaceDependencyGraph::FDependencyInputs &OutInputs,
-    FString &OutErrorCode, FString &OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError) {
   OutInputs = {};
-  OutErrorCode.Reset();
   OutError.Reset();
+  TMap<FString, FOperationInput> OperationInputs;
+  for (const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit &Unit :
+       Workspace.Units) {
+    FScopedSourceLocations Sources(Unit.Document.Get(), [&Unit](const FString& Pointer) {
+      return Unit.ResolveDiagnosticSource(Pointer);
+    });
+    if (Unit.Action != UeAgentAuthoringWorkspaceRouter::EUnitAction::Apply ||
+        (Unit.UnitId != TEXT("world") && Unit.UnitId != TEXT("actor") &&
+         Unit.UnitId != TEXT("component"))) {
+      continue;
+    }
+    FContract Contract;
+    FOperationInput Input;
+    FOperationFailure InputFailure;
+    if (!TryResolveWorkspaceOperationInput(
+            Unit, FRegistry::Get(), Contract, Input, InputFailure)) {
+      OutError = InputFailure.Diagnostic;
+      return false;
+    }
+    OperationInputs.Add(Unit.CanonicalUnitKey, MoveTemp(Input));
+  }
+
   TMap<FString, const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit *>
       ActorUnits;
-  TMap<FString, EOperation> ActorOperations;
+  TMap<const AActor *, const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit *>
+      ResolvedActorUnits;
   TMap<FString, const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit *>
       ComponentUnits;
   for (const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit &Unit :
        Workspace.Units) {
+    FScopedSourceLocations Sources(Unit.Document.Get(), [&Unit](const FString& Pointer) {
+      return Unit.ResolveDiagnosticSource(Pointer);
+    });
     if (Unit.UnitId == TEXT("world") &&
         Unit.Action == UeAgentAuthoringWorkspaceRouter::EUnitAction::Apply) {
-      TSharedPtr<const FJsonObject> Target;
-      if (!GetTarget(Unit, Target) ||
-          ReadString(Target, TEXT("world_path")) != GetWorldPath(World)) {
-        OutError = TEXT("level_workspace_world_conflict");
+      const FOperationInput &Input =
+          OperationInputs.FindChecked(Unit.CanonicalUnitKey);
+      if (ReadString(Input.Target, TEXT("world_path")) !=
+          GetWorldPath(World)) {
+        OutError = LevelFailure(TEXT("level_workspace_world_conflict"),
+            TEXT("The workspace world_path differs from the world being imported into."),
+            TEXT("world_path"), Input.Target.IsValid() ? Input.Target->TryGetField(TEXT("world_path")) : nullptr,
+            MakeShared<FJsonValueString>(GetWorldPath(World)), Input.Target.Get(), TEXT("world_path"));
+        OutError.TargetPath = GetWorldPath(World);
         return false;
       }
     } else if (Unit.UnitId == TEXT("actor") &&
                Unit.Action ==
                    UeAgentAuthoringWorkspaceRouter::EUnitAction::Apply) {
-      TSharedPtr<const FJsonObject> Target;
+      const FOperationInput &Input =
+          OperationInputs.FindChecked(Unit.CanonicalUnitKey);
       UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
-      EOperation Operation;
-      FString Error;
-      if (!GetTarget(Unit, Target) ||
-          !BuildActorIdentityFromTarget(Target, Identity, Error) ||
-          !GetOperation(Unit, Operation)) {
-        OutError = Error.IsEmpty()
-                       ? TEXT("level_actor_unit_invalid:") + Unit.RelativePath
-                       : Error;
+      UE::UAI::Contract::FDiagnostic Error;
+      if (!BuildActorIdentityFromTarget(Input.Target, Identity, Error)) {
+        OutError = MoveTemp(Error);
+        if (Input.Target.IsValid()) UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *Input.Target);
         return false;
       }
       ActorUnits.Add(Identity.CanonicalKey, &Unit);
-      ActorOperations.Add(Identity.CanonicalKey, Operation);
+      // Actor units and component/attachment references may use different
+      // selectors for the same live actor (GUID versus managed ID).
+      // Preserve the declared identity for new actors; resolve existing actors
+      // so their dependent mutations still run after the owner mutation.
+      UE::UAI::Contract::FDiagnostic ResolveError;
+      if (const AActor *Actor = FindActorExact(World, Input.Target, ResolveError)) {
+        ResolvedActorUnits.Add(Actor, &Unit);
+      }
       UeAgentAuthoringWorkspaceDependencyGraph::FDependencyDeclaration
           Dependency;
       Dependency.SourceUnitKey = Unit.CanonicalUnitKey;
@@ -1863,14 +2550,13 @@ bool BuildDependenciesAndValidate(
     } else if (Unit.UnitId == TEXT("component") &&
                Unit.Action ==
                    UeAgentAuthoringWorkspaceRouter::EUnitAction::Apply) {
-      TSharedPtr<const FJsonObject> Target;
+      const FOperationInput &Input =
+          OperationInputs.FindChecked(Unit.CanonicalUnitKey);
       UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
-      FString Error;
-      if (!GetTarget(Unit, Target) ||
-          !BuildComponentIdentityFromTarget(Target, Identity, Error)) {
-        OutError = Error.IsEmpty() ? TEXT("level_component_unit_invalid:") +
-                                         Unit.RelativePath
-                                   : Error;
+      UE::UAI::Contract::FDiagnostic Error;
+      if (!BuildComponentIdentityFromTarget(Input.Target, Identity, Error)) {
+        OutError = MoveTemp(Error);
+        if (Input.Target.IsValid()) UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *Input.Target);
         return false;
       }
       ComponentUnits.Add(Identity.CanonicalKey, &Unit);
@@ -1879,47 +2565,76 @@ bool BuildDependenciesAndValidate(
 
   for (const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit &Unit :
        Workspace.Units) {
+    FScopedSourceLocations Sources(Unit.Document.Get(), [&Unit](const FString& Pointer) {
+      return Unit.ResolveDiagnosticSource(Pointer);
+    });
     if (Unit.UnitId != TEXT("actor") ||
         Unit.Action != UeAgentAuthoringWorkspaceRouter::EUnitAction::Apply)
       continue;
-    const TSharedPtr<const FJsonObject> Extension =
-        ReadObject(Unit.Document, TEXT("provider_extension"));
+    const FOperationInput &Input =
+        OperationInputs.FindChecked(Unit.CanonicalUnitKey);
+    if (Input.RequestedOperation == EOperation::Remove) continue;
+    const TSharedPtr<const FJsonObject> &Extension = Input.ProviderExtension;
     const TSharedPtr<const FJsonObject> Attachment =
         ReadObject(Extension, TEXT("attachment"));
     const FString ParentManagedId =
         ReadString(Attachment, TEXT("parent_managed_id"));
     if (ParentManagedId.IsEmpty())
       continue;
-    TSharedPtr<const FJsonObject> Target;
-    if (!GetTarget(Unit, Target)) {
-      OutError = TEXT("level_actor_unit_invalid:") + Unit.RelativePath;
-      return false;
-    }
     TSharedRef<FJsonObject> ParentTarget = MakeShared<FJsonObject>();
     ParentTarget->SetStringField(TEXT("world_path"),
-                                 ReadString(Target, TEXT("world_path")));
+                                 ReadString(Input.Target, TEXT("world_path")));
     ParentTarget->SetStringField(TEXT("managed_id"), ParentManagedId);
+    FScopedSourceLocations ParentSources(&ParentTarget.Get(), [&Input, &Attachment](const FString& Pointer) {
+      UE::UAI::Contract::FSourceLocation Source;
+      if (Pointer == TEXT("/world_path") && Input.Target.IsValid())
+        FScopedSourceLocations::Locate(*Input.Target, TEXT("world_path"), Source);
+      else if (Attachment.IsValid())
+        FScopedSourceLocations::Locate(*Attachment, TEXT("parent_managed_id"), Source);
+      return Source;
+    });
     UeAgentAuthoringIdentity::FCanonicalIdentity ParentIdentity;
-    FString ParentError;
+    UE::UAI::Contract::FDiagnostic ParentError;
     if (!BuildActorIdentityFromTarget(ParentTarget, ParentIdentity,
                                       ParentError)) {
-      OutError = ParentError;
+      OutError = MoveTemp(ParentError);
+      UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, ParentTarget.Get());
       return false;
     }
     const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit *const *ParentUnit =
         ActorUnits.Find(ParentIdentity.CanonicalKey);
     AActor *ExistingParent = FindActorExact(World, ParentTarget, ParentError);
+    if (!ParentUnit && ExistingParent) {
+      ParentUnit = ResolvedActorUnits.Find(ExistingParent);
+    }
     if (!ParentUnit && !ExistingParent) {
-      OutErrorCode = TEXT("level_actor_attachment_parent_not_found");
-      OutError = ParentError.IsEmpty() ? ParentManagedId : ParentError;
+      OutError = ParentError.IsValid() ? MoveTemp(ParentError) : LevelFailure(TEXT("level_actor_attachment_parent_not_found"),
+          TEXT("The attachment parent is neither an existing actor nor an actor declared by this workspace."),
+          TEXT("parent_actor_present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true),
+          Attachment.Get(), TEXT("parent_managed_id"));
       return false;
     }
     if (ParentUnit) {
-      if (ActorOperations.FindRef(ParentIdentity.CanonicalKey) ==
-          EOperation::Remove) {
-        OutErrorCode = TEXT("level_actor_attachment_parent_removed");
-        OutError = ParentManagedId;
-        return false;
+      const FOperationInput &ParentInput =
+          OperationInputs.FindChecked((*ParentUnit)->CanonicalUnitKey);
+      if (ParentInput.RequestedOperation == EOperation::Remove) {
+        FActorAttachmentPatch Patch;
+        UE::UAI::Contract::FDiagnostic ActorError;
+        const AActor* Actor = FindActorExact(World, Input.Target, ActorError);
+        FDiagnostic AttachmentError;
+        const bool bRetainedContext = (Input.RequestedOperation == EOperation::Update
+            || Input.RequestedOperation == EOperation::Upsert)
+            && ParseActorAttachmentExtension(Extension, Patch, AttachmentError)
+            && IsUnchangedActorAttachment(Actor, Patch);
+        if (!bRetainedContext) {
+          OutError = LevelFailure(TEXT("level_actor_attachment_parent_removed"),
+              TEXT("The requested attachment parent is removed by the same workspace."),
+              TEXT("parent_operation"), MakeShared<FJsonValueString>(TEXT("remove")),
+              MakeShared<FJsonValueString>(TEXT("parent remains present")), Attachment.Get(), TEXT("parent_managed_id"));
+          if (ActorError.IsValid()) OutError.Append(ActorError);
+          if (AttachmentError.IsValid()) OutError.Append(AttachmentError);
+          return false;
+        }
       }
       UeAgentAuthoringWorkspaceDependencyGraph::FDependencyDeclaration
           Dependency;
@@ -1933,44 +2648,55 @@ bool BuildDependenciesAndValidate(
 
   for (const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit &Unit :
        Workspace.Units) {
+    FScopedSourceLocations Sources(Unit.Document.Get(), [&Unit](const FString& Pointer) {
+      return Unit.ResolveDiagnosticSource(Pointer);
+    });
     if (Unit.UnitId != TEXT("component") ||
         Unit.Action != UeAgentAuthoringWorkspaceRouter::EUnitAction::Apply)
       continue;
-    TSharedPtr<const FJsonObject> Target;
-    EOperation ComponentOperation;
-    if (!GetTarget(Unit, Target) || !GetOperation(Unit, ComponentOperation)) {
-      OutError = TEXT("level_component_unit_invalid:") + Unit.RelativePath;
-      return false;
-    }
-    const TSharedRef<FJsonObject> OwnerTarget = MakeOwnerActorTarget(Target);
+    const FOperationInput &Input =
+        OperationInputs.FindChecked(Unit.CanonicalUnitKey);
+    const EOperation ComponentOperation = Input.RequestedOperation;
+    const TSharedRef<FJsonObject> OwnerTarget =
+        MakeOwnerActorTarget(Input.Target);
+    FDerivedTargetSources OwnerSources(&OwnerTarget.Get(), Input.Target.Get(), {
+        {TEXT("/world_path"), TEXT("world_path")}, {TEXT("/actor_guid"), TEXT("owner_actor_guid")},
+        {TEXT("/managed_id"), TEXT("owner_managed_id")}});
     UeAgentAuthoringIdentity::FCanonicalIdentity OwnerIdentity;
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!BuildActorIdentityFromTarget(OwnerTarget, OwnerIdentity, Error)) {
-      OutError = Error;
+      OutError = MoveTemp(Error);
+      UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, OwnerTarget.Get());
       return false;
     }
     const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit *const *OwnerUnit =
         ActorUnits.Find(OwnerIdentity.CanonicalKey);
     AActor *ExistingOwner = FindActorExact(World, OwnerTarget, Error);
+    if (!OwnerUnit && ExistingOwner) {
+      OwnerUnit = ResolvedActorUnits.Find(ExistingOwner);
+    }
     if (!OwnerUnit && !ExistingOwner) {
       FAuthorabilityResult Authorability;
-      if (TryNormalizeAuthorabilityFailure(
+      if (TryMapAuthorabilityFailure(
               Error, EAuthorabilityPublicTarget::Component, Authorability)) {
-        OutErrorCode = Authorability.ErrorCode;
-        OutError = Authorability.ErrorDetail;
+        OutError = Authorability.Diagnostic;
       } else {
-        OutError = Error.IsEmpty() ? TEXT("level_component_owner_unresolved:") +
-                                         Unit.RelativePath
-                                   : Error;
+        OutError = Error.IsValid() ? MoveTemp(Error) : TargetPresenceFailure(TEXT("level_component_owner_unresolved"),
+            TEXT("The component owner is neither an existing actor nor an actor declared by this workspace."),
+            Input.Target, TEXT("owner_actor_present"), false, true);
       }
       return false;
     }
     if (OwnerUnit) {
-      const EOperation OwnerOperation =
-          ActorOperations.FindRef(OwnerIdentity.CanonicalKey);
+      const FOperationInput &OwnerInput =
+          OperationInputs.FindChecked((*OwnerUnit)->CanonicalUnitKey);
+      const EOperation OwnerOperation = OwnerInput.RequestedOperation;
       if (OwnerOperation == EOperation::Remove &&
           ComponentOperation != EOperation::Remove) {
-        OutError = TEXT("level_component_owner_removed:") + Unit.RelativePath;
+        OutError = LevelFailure(TEXT("level_component_owner_removed"),
+            TEXT("The component cannot be applied because the same workspace removes its owner actor."),
+            TEXT("owner_operation"), MakeShared<FJsonValueString>(OperationToString(OwnerOperation)),
+            MakeShared<FJsonValueString>(TEXT("owner remains present unless the component is also removed")), Input.Target.Get());
         return false;
       }
       UeAgentAuthoringWorkspaceDependencyGraph::FDependencyDeclaration
@@ -1986,8 +2712,7 @@ bool BuildDependenciesAndValidate(
       OutInputs.ReferenceDependencies.Add(MoveTemp(Dependency));
     }
 
-    const TSharedPtr<const FJsonObject> Extension =
-        ReadObject(Unit.Document, TEXT("provider_extension"));
+    const TSharedPtr<const FJsonObject> &Extension = Input.ProviderExtension;
     const TSharedPtr<const FJsonObject> Attachment =
         ReadObject(Extension, TEXT("attachment"));
     const FString ParentName = ReadString(Attachment, TEXT("parent_component"));
@@ -1997,31 +2722,32 @@ bool BuildDependenciesAndValidate(
     if (!UeAgentAuthoringIdentity::BuildCanonicalIdentity(
             ComponentIdentityModelId, TEXT("level_component"),
             {
-                {TEXT("world_path"), ReadString(Target, TEXT("world_path"))},
+                {TEXT("world_path"),
+                 ReadString(Input.Target, TEXT("world_path"))},
                 {TEXT("owner_actor_guid"),
-                 ReadString(Target, TEXT("owner_actor_guid"))},
+                 ReadString(Input.Target, TEXT("owner_actor_guid"))},
                 {TEXT("owner_managed_id"),
-                 ReadString(Target, TEXT("owner_managed_id"))},
+                 ReadString(Input.Target, TEXT("owner_managed_id"))},
                 {TEXT("component_name"), ParentName},
             },
             ParentIdentity, Error)) {
-      OutError = Error;
+      OutError = MoveTemp(Error);
+      if (Attachment.IsValid()) UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *Attachment, TEXT("parent_component"));
       return false;
     }
     const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit *const *ParentUnit =
         ComponentUnits.Find(ParentIdentity.CanonicalKey);
-    FString ParentError;
+    UE::UAI::Contract::FDiagnostic ParentError;
     UActorComponent *ExistingParent =
         ExistingOwner
             ? FindComponentExact(*ExistingOwner, ParentName, ParentError)
             : nullptr;
     bool bNativeDefaultParent = false;
     if (!ParentUnit && !ExistingParent && OwnerUnit) {
-      TSharedPtr<const FJsonObject> OwnerUnitTarget;
+      const FOperationInput &OwnerInput =
+          OperationInputs.FindChecked((*OwnerUnit)->CanonicalUnitKey);
       const FString OwnerClassPath =
-          GetTarget(**OwnerUnit, OwnerUnitTarget)
-              ? ReadString(OwnerUnitTarget, TEXT("actor_class"))
-              : FString();
+          ReadString(OwnerInput.Target, TEXT("actor_class"));
       UClass *OwnerClass = OwnerClassPath.IsEmpty()
                                ? nullptr
                                : StaticLoadClass(AActor::StaticClass(), nullptr,
@@ -2043,15 +2769,15 @@ bool BuildDependenciesAndValidate(
     }
     if (!ParentUnit && !ExistingParent && !bNativeDefaultParent) {
       FAuthorabilityResult Authorability;
-      if (TryNormalizeAuthorabilityFailure(
+      if (TryMapAuthorabilityFailure(
               ParentError, EAuthorabilityPublicTarget::Component,
               Authorability)) {
-        OutErrorCode = Authorability.ErrorCode;
-        OutError = Authorability.ErrorDetail;
+        OutError = Authorability.Diagnostic;
       } else {
-        OutError = ParentError.IsEmpty()
-                       ? TEXT("level_component_parent_unresolved:") + ParentName
-                       : ParentError;
+        OutError = ParentError.IsValid() ? MoveTemp(ParentError) : LevelFailure(TEXT("level_component_parent_unresolved"),
+            TEXT("The attachment parent is not an existing component, a workspace component or a native default component."),
+            TEXT("parent_component"), MakeShared<FJsonValueString>(ParentName),
+            MakeShared<FJsonValueString>(TEXT("available parent component name")), Attachment.Get(), TEXT("parent_component"));
       }
       return false;
     }
@@ -2086,18 +2812,11 @@ void AddMetadataCounters(const TMap<FString, TSharedPtr<FJsonObject>> &Metadata,
   Add(TEXT("components_removed"), OutResult.ComponentsRemoved);
 }
 
-FString CanonicalDocument(const TSharedPtr<const FJsonObject> &Document) {
-  return Document.IsValid()
-             ? UeAgentAuthoringState::MakeStableCanonicalValueKey(
-                   MakeShared<FJsonValueObject>(
-                       ConstCastSharedPtr<FJsonObject>(Document)))
-             : FString();
-}
-
-TSharedRef<IApplyProvider> MakeBoundApplyProvider(UWorld &World) {
+TSharedRef<IApplyProvider> MakeBoundApplyProvider(UWorld &World, const TSharedPtr<FLevelPersistentContext>& Persistent) {
   const TSharedRef<IReflectionOperationLifecycle> Lifecycle =
-      MakeShared<FLevelLifecycle>(World);
+      MakeShared<FLevelLifecycle>(World, Persistent);
   UeAgentAuthoringObjectApply::FOptions Options;
+  Options.bCompactValues = true;
   Options.bAllowDomainAuthorizedOwners = true;
   Options.bAllowTemplateOwners = true;
   return MakeShared<FReflectionApplyProvider>(ApplyProviderId, Lifecycle,
@@ -2109,10 +2828,11 @@ TSharedRef<FJsonObject> FWorkspaceApplyResult::ToJsonObject() const {
   TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
   Result->SetStringField(TEXT("status"), Status);
   Result->SetStringField(TEXT("phase"), Phase);
-  if (!ErrorCode.IsEmpty())
-    Result->SetStringField(TEXT("error_code"), ErrorCode);
-  if (!ErrorDetail.IsEmpty())
-    Result->SetStringField(TEXT("error_detail"), ErrorDetail);
+  if (!Diagnostic.IsEmpty())
+  {
+    Result->SetStringField(TEXT("error_code"), Diagnostic.Code);
+    Result->SetObjectField(TEXT("diagnostic"), Diagnostic.ToJson());
+  }
   Result->SetNumberField(TEXT("units_checked"), UnitsChecked);
   Result->SetNumberField(TEXT("mutations_applied"), MutationsApplied);
   Result->SetNumberField(TEXT("actors_created"), ActorsCreated);
@@ -2126,7 +2846,7 @@ TSharedRef<FJsonObject> FWorkspaceApplyResult::ToJsonObject() const {
   return Result;
 }
 
-bool RegisterApplyContracts(FString &OutError) {
+bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentApplyInputContract::ERegistrationResult InputResult;
   if (!UeAgentApplyInputContract::FRegistry::Get().RegisterContract(
           MakeWorldInputContract(), InputResult, OutError) ||
@@ -2145,6 +2865,7 @@ TSharedRef<IApplyProvider> MakeApplyProvider() {
   static const TSharedRef<IReflectionOperationLifecycle> Lifecycle =
       MakeShared<FLevelLifecycle>();
   UeAgentAuthoringObjectApply::FOptions Options;
+  Options.bCompactValues = true;
   Options.bAllowDomainAuthorizedOwners = true;
   Options.bAllowTemplateOwners = true;
   return MakeShared<FReflectionApplyProvider>(ApplyProviderId, Lifecycle,
@@ -2162,7 +2883,9 @@ bool ApplyWorkspaceSource(
   if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(
           WorkspaceContractId, WorkspaceContract)) {
     OutResult.Phase = TEXT("registration");
-    OutResult.ErrorCode = TEXT("level_workspace_contract_missing");
+    OutResult.Diagnostic = PresenceFailure(TEXT("level_workspace_contract_missing"),
+        TEXT("The Level workspace import contract is not registered."), TEXT("workspace_contract_registered"), false, true, GetWorldPath(World));
+    OutResult.Diagnostic.Stage = OutResult.Phase;
     return false;
   }
 
@@ -2170,20 +2893,15 @@ bool ApplyWorkspaceSource(
   if (!UeAgentAuthoringWorkspaceLoader::LoadWorkspace(WorkspaceContract, Source,
                                                       LoadResult)) {
     OutResult.Phase = TEXT("load");
-    OutResult.ErrorCode = LoadResult.ErrorCode;
-    OutResult.ErrorDetail = LoadResult.ErrorDetail;
+    OutResult.Diagnostic = LoadResult.Diagnostic;
     return false;
   }
 
   UeAgentAuthoringWorkspaceDependencyGraph::FDependencyInputs DependencyInputs;
-  FString DependencyErrorCode;
   if (!BuildDependenciesAndValidate(World, LoadResult.Workspace,
-                                    DependencyInputs, DependencyErrorCode,
-                                    OutResult.ErrorDetail)) {
+                                    DependencyInputs, OutResult.Diagnostic)) {
     OutResult.Phase = TEXT("preflight");
-    OutResult.ErrorCode = DependencyErrorCode.IsEmpty()
-                              ? TEXT("level_workspace_reference_invalid")
-                              : DependencyErrorCode;
+    if (OutResult.Diagnostic.TargetPath.IsEmpty()) OutResult.Diagnostic.TargetPath = GetWorldPath(World);
     return false;
   }
   UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph Graph;
@@ -2192,21 +2910,20 @@ bool ApplyWorkspaceSource(
           WorkspaceContract, LoadResult.Workspace, DependencyInputs, Graph,
           GraphFailure)) {
     OutResult.Phase = TEXT("preflight");
-    OutResult.ErrorCode = GraphFailure.ErrorCode;
-    OutResult.ErrorDetail = GraphFailure.ErrorDetail;
+    OutResult.Diagnostic = GraphFailure.Diagnostic;
     return false;
   }
 
   UeAgentAuthoringOperationApply::FProviderRegistry ScopedProviders;
   UeAgentAuthoringOperationApply::ERegistrationResult ProviderRegistration;
-  FString ProviderRegistrationError;
-  if (!ScopedProviders.RegisterProvider(MakeBoundApplyProvider(World),
+  UE::UAI::Contract::FDiagnostic ProviderRegistrationError;
+  TSharedPtr<FLevelPersistentContext> Persistent;
+  if (Options.bPersistentReadback) Persistent = MakeShared<FLevelPersistentContext>(World);
+  if (!ScopedProviders.RegisterProvider(MakeBoundApplyProvider(World, Persistent),
                                         ProviderRegistration,
                                         ProviderRegistrationError)) {
     OutResult.Phase = TEXT("registration");
-    OutResult.ErrorCode =
-        TEXT("level_bound_apply_provider_registration_failed");
-    OutResult.ErrorDetail = ProviderRegistrationError;
+    OutResult.Diagnostic = ProviderRegistrationError;
     return false;
   }
 
@@ -2217,10 +2934,9 @@ bool ApplyWorkspaceSource(
     if (!UeAgentAuthoringWorkspaceTransaction::PreflightWorkspace(
             WorkspaceContract, LoadResult.Workspace, Graph, Provider,
             Preflight)) {
-      OutResult.Phase = TEXT("preflight");
-      OutResult.ErrorCode = Preflight.CauseCode.IsEmpty() ? Preflight.ErrorCode
-                                                          : Preflight.CauseCode;
-      OutResult.ErrorDetail = Preflight.ErrorDetail;
+      const FApplyFailureProjection Failure = ProjectApplyFailure(Preflight);
+      OutResult.Phase = Failure.Phase;
+      OutResult.Diagnostic = Failure.Diagnostic;
       OutResult.UnitsChecked = Preflight.UnitsChecked;
       return false;
     }
@@ -2235,12 +2951,48 @@ bool ApplyWorkspaceSource(
   if (!UeAgentAuthoringOperationApply::BuildApplyEntryExecutionOptions(
           RequestId, ExecutionOptions, RequestFailure)) {
     OutResult.Phase = TEXT("preflight");
-    OutResult.ErrorCode = RequestFailure.ErrorCode;
-    OutResult.ErrorDetail = RequestFailure.ErrorDetail;
+    OutResult.Diagnostic = RequestFailure.Diagnostic;
     return false;
   }
   UeAgentAuthoringOperationApply::FBackendOptions BackendOptions;
   BackendOptions.bUseEditorTransaction = Options.bUseEditorTransaction;
+  BackendOptions.FinalizeNativeUpdate = [&World, Persistent](FOperationFailure& Failure) {
+    Failure = {};
+    // Actor/component and brush updates enqueue navigation work. This import
+    // saves and reloads without returning to the Editor tick, so process that
+    // work once after all native input updates. In particular, newly generated
+    // NavData and the tile updates dispatched by this work must be included in
+    // the save. Otherwise reload can recreate an undersized mesh, and PIE can
+    // copy incomplete static navigation before pausing the editor's builder.
+    // Do not advance the world or force RebuildAll; retain the engine's build
+    // policy and finish only work already queued on registered navigation data.
+    if (UNavigationSystemBase* Navigation = World.GetNavigationSystem()) {
+      if (auto* NativeNavigation = Cast<UNavigationSystemV1>(Navigation)) {
+        Persistent->PublishNavigationBounds(*NativeNavigation);
+      }
+      Navigation->Tick(0.0f);
+      for (TActorIterator<ANavigationData> It(&World); It; ++It) {
+        ANavigationData* NavData = *It;
+        if (IsValid(NavData) && NavData->IsRegistered()) {
+          NavData->EnsureBuildCompletion();
+        }
+      }
+    }
+    return true;
+  };
+  if (Options.PackageStager.IsValid())
+    BackendOptions.PackageStager = Options.PackageStager;
+  ExecutionOptions.bSaveWhenCallerControlled = Options.bPersistentReadback;
+  if (Options.bPersistentReadback) {
+    BackendOptions.FinalReadback = [&Options, Persistent](FOperationFailure& Failure) {
+      if (Options.FinalReadback && !Options.FinalReadback(Failure)) return false;
+      if (Options.RestoreEditorContext) {
+        Persistent->ReleaseReadbackBindings();
+        return Options.RestoreEditorContext(Failure);
+      }
+      return true;
+    };
+  }
   BackendOptions.TransactionDescription =
       NSLOCTEXT("UeAgentInterface", "LevelAuthoringWorkspaceApply",
                 "Apply Level authoring workspace");
@@ -2254,17 +3006,10 @@ bool ApplyWorkspaceSource(
   OutResult.bRollbackAttempted = ApplyResult.Execution.bRollbackAttempted;
   OutResult.bRollbackSucceeded = ApplyResult.Execution.bRollbackSucceeded;
   if (!bApplied) {
-    const bool bPreflight = !ApplyResult.Preflight.IsReady();
-    OutResult.Phase =
-        bPreflight ? TEXT("preflight") : ApplyResult.Execution.Phase;
-    OutResult.ErrorCode = bPreflight ? ApplyResult.Preflight.CauseCode
-                                     : ApplyResult.Execution.CauseCode;
-    if (OutResult.ErrorCode.IsEmpty()) {
-      OutResult.ErrorCode = bPreflight ? ApplyResult.Preflight.ErrorCode
-                                       : ApplyResult.Execution.ErrorCode;
-    }
-    OutResult.ErrorDetail = bPreflight ? ApplyResult.Preflight.ErrorDetail
-                                       : ApplyResult.Execution.ErrorDetail;
+    FApplyFailureProjection Failure;
+    TryProjectApplyFailure(ApplyResult, Failure);
+    OutResult.Phase = Failure.Phase;
+    OutResult.Diagnostic = Failure.Diagnostic;
     return false;
   }
   OutResult.Status = TEXT("applied");
@@ -2292,80 +3037,4 @@ bool ValidateWorkspaceDirectory(UWorld &World, const FString &WorkspaceRoot,
   return ApplyWorkspaceDirectory(World, WorkspaceRoot, Options, OutResult);
 }
 
-bool DiffWorkspaceDirectories(const FString &BaseRoot,
-                              const FString &TargetRoot, const int32 MaxChanges,
-                              TSharedPtr<FJsonObject> &OutSummary,
-                              FString &OutError) {
-  OutSummary = MakeShared<FJsonObject>();
-  OutError.Reset();
-  UeAgentApplyWorkspaceContract::FContract Contract;
-  if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(
-          WorkspaceContractId, Contract)) {
-    OutError = TEXT("level_workspace_contract_missing");
-    return false;
-  }
-  UeAgentAuthoringWorkspaceLoader::FLoadResult Base;
-  UeAgentAuthoringWorkspaceLoader::FLoadResult Target;
-  if (!UeAgentAuthoringWorkspaceLoader::LoadWorkspace(
-          Contract,
-          UeAgentAuthoringWorkspaceLoader::FSourceRequest::MakeDirectory(
-              BaseRoot),
-          Base) ||
-      !UeAgentAuthoringWorkspaceLoader::LoadWorkspace(
-          Contract,
-          UeAgentAuthoringWorkspaceLoader::FSourceRequest::MakeDirectory(
-              TargetRoot),
-          Target)) {
-    OutError = !Base.IsLoaded()
-                   ? Base.ErrorCode + TEXT(":") + Base.ErrorDetail
-                   : Target.ErrorCode + TEXT(":") + Target.ErrorDetail;
-    return false;
-  }
-  TMap<FString, FString> BaseDocuments;
-  TMap<FString, FString> TargetDocuments;
-  for (const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit &Unit :
-       Base.Workspace.Units) {
-    if (Unit.Action == UeAgentAuthoringWorkspaceRouter::EUnitAction::Apply) {
-      BaseDocuments.Add(Unit.RelativePath.ToLower(),
-                        CanonicalDocument(Unit.Document));
-    }
-  }
-  for (const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit &Unit :
-       Target.Workspace.Units) {
-    if (Unit.Action == UeAgentAuthoringWorkspaceRouter::EUnitAction::Apply) {
-      TargetDocuments.Add(Unit.RelativePath.ToLower(),
-                          CanonicalDocument(Unit.Document));
-    }
-  }
-  TSet<FString> Paths;
-  for (const TPair<FString, FString> &Pair : BaseDocuments)
-    Paths.Add(Pair.Key);
-  for (const TPair<FString, FString> &Pair : TargetDocuments)
-    Paths.Add(Pair.Key);
-  TArray<FString> SortedPaths = Paths.Array();
-  SortedPaths.Sort();
-  TArray<TSharedPtr<FJsonValue>> Changes;
-  const int32 Limit = MaxChanges > 0 ? MaxChanges : 256;
-  for (const FString &Path : SortedPaths) {
-    const FString *Left = BaseDocuments.Find(Path);
-    const FString *Right = TargetDocuments.Find(Path);
-    if (Left && Right && *Left == *Right)
-      continue;
-    if (Changes.Num() >= Limit)
-      break;
-    TSharedRef<FJsonObject> Change = MakeShared<FJsonObject>();
-    Change->SetStringField(TEXT("path"), Path);
-    Change->SetStringField(TEXT("kind"), !Left    ? TEXT("added")
-                                         : !Right ? TEXT("removed")
-                                                  : TEXT("changed"));
-    Changes.Add(MakeShared<FJsonValueObject>(Change));
-  }
-  OutSummary->SetStringField(TEXT("schema"),
-                             TEXT("uai.level.workspace_diff.v1"));
-  OutSummary->SetBoolField(TEXT("equal"), Changes.IsEmpty());
-  OutSummary->SetNumberField(TEXT("change_count"), Changes.Num());
-  OutSummary->SetBoolField(TEXT("truncated"), Changes.Num() >= Limit);
-  OutSummary->SetArrayField(TEXT("changes"), Changes);
-  return true;
-}
 } // namespace UeAgentLevelAuthoring

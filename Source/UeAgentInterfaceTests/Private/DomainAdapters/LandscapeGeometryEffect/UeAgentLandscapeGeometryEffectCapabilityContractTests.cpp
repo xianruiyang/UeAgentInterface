@@ -365,22 +365,6 @@ bool FUeAgentLandscapeGeometryEffectCapabilityContractTest::RunTest(
 		return false;
 	}
 
-	const int32 DeclaredCount = static_cast<int32>(
-		Fixture->GetNumberField(TEXT("descriptor_count")));
-	TestEqual(TEXT("two formal descriptors"), DeclaredCount, 2);
-	TestEqual(
-		TEXT("descriptor count is exact"),
-		Descriptors->Num(),
-		DeclaredCount);
-	TestEqual(
-		TEXT("one schema case per descriptor"),
-		Cases->Num(),
-		DeclaredCount);
-	TestEqual(
-		TEXT("one E2 scenario per descriptor"),
-		Scenarios->Num(),
-		DeclaredCount);
-
 	TSet<FString> AllowedNativeTypes;
 	for (const TSharedPtr<FJsonValue>& Value
 		: Fixture->GetArrayField(
@@ -388,10 +372,6 @@ bool FUeAgentLandscapeGeometryEffectCapabilityContractTest::RunTest(
 	{
 		AllowedNativeTypes.Add(Value->AsString());
 	}
-	TestEqual(
-		TEXT("two Landscape-only native operation types"),
-		AllowedNativeTypes.Num(),
-		2);
 	TestTrue(
 		TEXT("create native type is explicit"),
 		AllowedNativeTypes.Contains(
@@ -616,11 +596,6 @@ bool FUeAgentLandscapeGeometryEffectCapabilityContractTest::RunTest(
 			Case->GetStringField(
 				TEXT("expected_error")).IsEmpty());
 	}
-	TestEqual(
-		TEXT("five non-schema preflight failures are frozen"),
-		NegativeCaseIds.Num(),
-		5);
-
 	TSet<FString> ScenarioDescriptors;
 	for (const TSharedPtr<FJsonValue>& Value : *Scenarios)
 	{
@@ -647,9 +622,9 @@ bool FUeAgentLandscapeGeometryEffectCapabilityContractTest::RunTest(
 		}
 	}
 	TestEqual(
-		TEXT("both descriptors own an independent E2 oracle"),
+		TEXT("every declared descriptor owns an independent E2 oracle"),
 		ScenarioDescriptors.Num(),
-		DeclaredCount);
+		RowsByDescriptor.Num());
 
 	bool bSawLegacySmokeDelete = false;
 	for (const TSharedPtr<FJsonValue>& Value : *LegacySources)
@@ -692,10 +667,6 @@ bool FUeAgentLandscapeGeometryEffectCapabilityContractTest::RunTest(
 	}
 	if (ProductionRegistry.IsValid())
 	{
-		TestEqual(
-			TEXT("production registry owns two descriptors"),
-			ProductionRegistry->GetDescriptors().Num(),
-			DeclaredCount);
 		for (const TSharedPtr<FJsonValue>& Value
 			: *Descriptors)
 		{

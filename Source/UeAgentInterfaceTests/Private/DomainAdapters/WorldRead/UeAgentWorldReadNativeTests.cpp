@@ -2,6 +2,7 @@
 
 // RE-003 supplies the optional production seam frozen by the RE-002 test.
 #include "DomainAdapters/WorldRead/UeAgentWorldReadNative.h"
+#include "DomainAdapters/WorldRead/UeAgentWorldReadDescriptors.h"
 
 
 #include "Components/BoxComponent.h"
@@ -173,29 +174,25 @@ namespace
 
 	FUeAgentDescriptorIdentity NativeTestIdentity()
 	{
-		return FUeAgentDescriptorIdentity(
-			TEXT("uai.query.world.summary"),
-			1,
-			TEXT(
-				"sha256:0c8c315c7e3f6d714fd0ee10c9fe1434"
-				"2917408f095d6d0da55c72fd4741234f"));
+		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+		FString Error;
+		if (TryCreateWorldReadDescriptorRegistry(Registry, Error)
+			&& Registry.IsValid())
+		{
+			const FUeAgentOperationDescriptor* Descriptor =
+				Registry->FindByDescriptorId(
+					TEXT("uai.query.world.summary"));
+			if (Descriptor)
+			{
+				return Descriptor->GetIdentity();
+			}
+		}
+		return FUeAgentDescriptorIdentity(FString(), 0, FString());
 	}
 
 	FUeAgentResourceTrackerOwner NativeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 100000},
-				{EUeAgentResourceDimension::Items, 100000},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 100000},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					8 * 1024 * 1024,
-				},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	TSharedPtr<FUeAgentOperationContext> NativeContext(
@@ -413,6 +410,44 @@ namespace
 				});
 	}
 
+	bool SnapshotArrayContainsObjectStringField(
+		const TSharedPtr<const FUeAgentCanonicalSnapshot>& Snapshot,
+		const FString& Selector,
+		const FString& FieldName,
+		const FString& ExpectedValue)
+	{
+		if (!Snapshot.IsValid())
+		{
+			return false;
+		}
+		for (const FUeAgentStateEntry& Entry : Snapshot->GetEntries())
+		{
+			if (Entry.GetIdentity().GetSelector() != Selector
+				|| Entry.GetValue()->GetKind() != EUeAgentValueKind::Array)
+			{
+				continue;
+			}
+			for (const FUeAgentCanonicalValueRef& Item
+				: Entry.GetValue()->GetArrayItems())
+			{
+				if (Item->GetKind() != EUeAgentValueKind::Object)
+				{
+					continue;
+				}
+				for (const auto& Field : Item->GetObjectItems())
+				{
+					if (Field.Key == FieldName
+						&& Field.Value->GetKind() == EUeAgentValueKind::String
+						&& Field.Value->GetText() == ExpectedValue)
+					{
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
 	const FUeAgentSpatialValue* FindWorldSpatial(
 		const TSharedPtr<const FUeAgentCanonicalSnapshot>& Snapshot)
 	{
@@ -525,6 +560,37 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 	TestNotNull(
 		TEXT("trace result is expressed in ue.world"),
 		FindWorldSpatial(Snapshot));
+	TestTrue(
+		TEXT("trace result explicitly reports a hit"),
+		SnapshotHasSelector(Snapshot, TEXT("hit")));
+	TestTrue(
+		TEXT("trace result exposes the readable hit target"),
+		SnapshotHasSelector(Snapshot, TEXT("target_ref")));
+
+	Snapshot.Reset();
+	TestTrue(
+		TEXT("a ray miss is a successful business observation"),
+		CaptureNative(
+			this,
+			TEXT("world.read.ray_trace"),
+			FUeAgentContractValue(TEXT(
+				"{\"direction\":{\"components\":[1,0,0],"
+				"\"frame_id\":\"ue.world\"},"
+				"\"distance_cm\":10,"
+				"\"start\":{\"components\":[10000,10000,10000],"
+				"\"frame_id\":\"ue.world\","
+				"\"unit\":\"centimeter\"}}")),
+			{},
+			Environment,
+			*Context,
+			Snapshot,
+			Error));
+	TestTrue(
+		TEXT("a ray miss still publishes the hit field"),
+		SnapshotHasSelector(Snapshot, TEXT("hit")));
+	TestFalse(
+		TEXT("a ray miss does not fabricate an impact point"),
+		SnapshotHasSelector(Snapshot, TEXT("impact_point")));
 
 	const FUeAgentCandidateBinding MeshTarget =
 		NativeTarget(
@@ -568,6 +634,7 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 			FUeAgentContractValue(TEXT(
 				"{\"center\":{\"components\":[0,0,0],"
 				"\"frame_id\":\"ue.world\",\"unit\":\"centimeter\"},"
+				"\"include_targets\":true,"
 				"\"radius_cm\":40,\"shape\":\"sphere\","
 				"\"trace_channel\":\"visibility\"}")),
 			{},
@@ -576,8 +643,11 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 			Snapshot,
 			Error));
 	TestTrue(
-		TEXT("overlap reports the owned collision component"),
-		SnapshotHasOwner(Snapshot, Owner.Collision->GetPathName()));
+		TEXT("overlap publishes a normalized target collection"),
+		SnapshotHasSelector(Snapshot, TEXT("targets")));
+	TestTrue(
+		TEXT("overlap publishes the matching unique target count"),
+		SnapshotHasSelector(Snapshot, TEXT("overlap_count")));
 
 	Snapshot.Reset();
 	TestTrue(
@@ -588,7 +658,8 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 			FUeAgentContractValue(TEXT(
 				"{\"end\":{\"components\":[50,0,0],\"frame_id\":\"ue.world\","
 				"\"unit\":\"centimeter\"},\"half_height_cm\":10,"
-				"\"radius_cm\":5,\"start\":{\"components\":[-50,0,0],"
+				"\"include_hits\":true,\"radius_cm\":5,"
+				"\"start\":{\"components\":[-50,0,0],"
 				"\"frame_id\":\"ue.world\",\"unit\":\"centimeter\"},"
 				"\"trace_channel\":\"visibility\"}")),
 			{},
@@ -596,7 +667,12 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 			*Context,
 			Snapshot,
 			Error));
-	TestTrue(TEXT("capsule sweep returns typed hit facts"), Snapshot.IsValid());
+	TestTrue(
+		TEXT("capsule sweep returns a normalized hit collection"),
+		SnapshotHasSelector(Snapshot, TEXT("hits")));
+	TestTrue(
+		TEXT("capsule sweep returns the matching hit count"),
+		SnapshotHasSelector(Snapshot, TEXT("hit_count")));
 
 	Snapshot.Reset();
 	TestTrue(
@@ -615,8 +691,11 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 			*Context,
 			Snapshot,
 			Error));
-	TestTrue(TEXT("capsule path returns a real obstruction summary"), Snapshot.IsValid());
+	TestTrue(
+		TEXT("capsule path returns a real obstruction summary"),
+		SnapshotHasSelector(Snapshot, TEXT("blocked_segments")));
 
+	Owner.CollisionB->SetIsVisualizationComponent(true);
 	Snapshot.Reset();
 	TestTrue(
 		TEXT("nearby shapes reads component bounds rather than echoing the query point"),
@@ -625,15 +704,26 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 			TEXT("world.read.nearby_shapes"),
 			FUeAgentContractValue(TEXT(
 				"{\"center\":{\"components\":[0,0,0],\"frame_id\":\"ue.world\","
-				"\"unit\":\"centimeter\"},\"radius_cm\":100}")),
+				"\"unit\":\"centimeter\"},\"include_shapes\":true,"
+				"\"radius_cm\":100}")),
 			{},
 			Environment,
 			*Context,
 			Snapshot,
 			Error));
 	TestTrue(
-		TEXT("nearby shapes includes the owned primitive bounds"),
-		SnapshotHasOwner(Snapshot, Owner.Collision->GetPathName()));
+		TEXT("nearby shapes publishes normalized component facts"),
+		SnapshotHasSelector(Snapshot, TEXT("shapes")));
+	TestTrue(
+		TEXT("nearby shapes publishes the matching unique count"),
+		SnapshotHasSelector(Snapshot, TEXT("nearby_shape_count")));
+	TestFalse(
+		TEXT("nearby shapes excludes visualization-only collision components"),
+		SnapshotArrayContainsObjectStringField(
+			Snapshot,
+			TEXT("shapes"),
+			TEXT("target_ref"),
+			Owner.CollisionB->GetPathName()));
 
 	Snapshot.Reset();
 	TestFalse(
@@ -661,7 +751,7 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 		CaptureNative(
 			this,
 			TEXT("world.read.streaming_levels"),
-			FUeAgentContractValue(TEXT("{\"scope\":\"world\"}")),
+			FUeAgentContractValue(TEXT("{}")),
 			{},
 			Environment,
 			*Context,
@@ -687,6 +777,57 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 	TestTrue(
 		TEXT("data layer query publishes the real layer count"),
 		SnapshotHasSelector(Snapshot, TEXT("data_layer_count")));
+
+	Snapshot.Reset();
+	TestTrue(
+		TEXT("partition query returns a compact default summary"),
+		CaptureNative(
+			this,
+			TEXT("world.read.partition"),
+			FUeAgentContractValue(TEXT("{}")),
+			{},
+			Environment,
+			*Context,
+			Snapshot,
+			Error));
+	TestTrue(
+		TEXT("partition default publishes region count"),
+		SnapshotHasSelector(Snapshot, TEXT("user_loaded_region_count")));
+	TestFalse(
+		TEXT("partition default does not expand region geometry"),
+		SnapshotHasSelector(Snapshot, TEXT("loaded_regions")));
+
+	Snapshot.Reset();
+	TestTrue(
+		TEXT("partition geometry is available only when explicitly requested"),
+		CaptureNative(
+			this,
+			TEXT("world.read.partition"),
+			FUeAgentContractValue(TEXT("{\"include_loaded_regions\":true}")),
+			{},
+			Environment,
+			*Context,
+			Snapshot,
+			Error));
+	TestTrue(
+		TEXT("requested partition geometry is one normalized collection"),
+		SnapshotHasSelector(Snapshot, TEXT("loaded_regions")));
+
+	Snapshot.Reset();
+	TestTrue(
+		TEXT("partition health returns a normalized issue collection"),
+		CaptureNative(
+			this,
+			TEXT("world.read.partition_health"),
+			FUeAgentContractValue(TEXT("{}")),
+			{},
+			Environment,
+			*Context,
+			Snapshot,
+			Error));
+	TestTrue(
+		TEXT("partition health always publishes the issue array"),
+		SnapshotHasSelector(Snapshot, TEXT("issues")));
 
 	const FUeAgentCandidateBinding PhysicsTarget =
 		NativeTarget(
@@ -757,7 +898,7 @@ bool FUeAgentWorldReadNativeOwnedWorldTest::RunTest(
 	TestEqual(
 		TEXT("one environment owns all world resolution"),
 		Environment->WorldCalls,
-		13);
+		17);
 	TestEqual(
 		TEXT("only target-bearing families resolve targets"),
 		Environment->TargetCalls,

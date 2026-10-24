@@ -4,9 +4,6 @@
   "temporal_contract_id": "uai.temporal_contract.v1",
   "space_contract_id": "uai.space_contract.v1",
   "typed_port_id": "uai.rig_simulation_spatial.typed_port.v1",
-  "descriptor_count": 18,
-  "query_count": 5,
-  "operation_count": 13,
   "components": {
     "target_ref": {
       "type": "string",
@@ -372,15 +369,27 @@
       "properties": {
         "linear_x_motion": {
           "type": "string",
-          "enum": ["locked", "limited", "free"]
+          "enum": [
+            "locked",
+            "limited",
+            "free"
+          ]
         },
         "linear_y_motion": {
           "type": "string",
-          "enum": ["locked", "limited", "free"]
+          "enum": [
+            "locked",
+            "limited",
+            "free"
+          ]
         },
         "linear_z_motion": {
           "type": "string",
-          "enum": ["locked", "limited", "free"]
+          "enum": [
+            "locked",
+            "limited",
+            "free"
+          ]
         },
         "linear_limit_cm": {
           "type": "string",
@@ -388,15 +397,27 @@
         },
         "twist_motion": {
           "type": "string",
-          "enum": ["locked", "limited", "free"]
+          "enum": [
+            "locked",
+            "limited",
+            "free"
+          ]
         },
         "swing1_motion": {
           "type": "string",
-          "enum": ["locked", "limited", "free"]
+          "enum": [
+            "locked",
+            "limited",
+            "free"
+          ]
         },
         "swing2_motion": {
           "type": "string",
-          "enum": ["locked", "limited", "free"]
+          "enum": [
+            "locked",
+            "limited",
+            "free"
+          ]
         },
         "twist_limit_degrees": {
           "type": "string",
@@ -1901,98 +1922,6 @@
           "component": "verification"
         }
       ]
-    },
-    {
-      "capability_id": "pcg.generated_spatial_data.read",
-      "descriptor_id": "uai.query.pcg.generated_spatial_data.read",
-      "operation_kind": "query",
-      "provider_binding": "rig_simulation_spatial.pcg.read_generated_data",
-      "query_kind": "runtime_probe",
-      "state_planes": [
-        "runtime_instance"
-      ],
-      "required_facets": [],
-      "oracle_kind": "independent_component_asset_or_generated_data_readback",
-      "input_fields": [
-        {
-          "name": "generation_identity",
-          "required": true,
-          "component": "generation_identity"
-        },
-        {
-          "name": "data_selector",
-          "required": true,
-          "component": "selector"
-        },
-        {
-          "name": "output_frame",
-          "required": true,
-          "component": "frame_3d"
-        }
-      ],
-      "result_fields": [
-        {
-          "name": "generation_identity",
-          "required": true,
-          "component": "generation_identity"
-        },
-        {
-          "name": "samples",
-          "required": true,
-          "component": "spatial_samples"
-        },
-        {
-          "name": "verification",
-          "required": true,
-          "component": "verification"
-        }
-      ]
-    },
-    {
-      "capability_id": "pcg.partition.spatial_state.read",
-      "descriptor_id": "uai.query.pcg.partition.spatial_state.read",
-      "operation_kind": "query",
-      "provider_binding": "rig_simulation_spatial.pcg.read_partition_state",
-      "query_kind": "runtime_probe",
-      "state_planes": [
-        "runtime_instance"
-      ],
-      "required_facets": [],
-      "oracle_kind": "independent_component_asset_or_generated_data_readback",
-      "input_fields": [
-        {
-          "name": "generation_identity",
-          "required": true,
-          "component": "generation_identity"
-        },
-        {
-          "name": "partition_selector",
-          "required": true,
-          "component": "selector"
-        },
-        {
-          "name": "output_frame",
-          "required": true,
-          "component": "frame_3d"
-        }
-      ],
-      "result_fields": [
-        {
-          "name": "generation_identity",
-          "required": true,
-          "component": "generation_identity"
-        },
-        {
-          "name": "samples",
-          "required": true,
-          "component": "spatial_samples"
-        },
-        {
-          "name": "verification",
-          "required": true,
-          "component": "verification"
-        }
-      ]
     }
   ],
   "chains": [
@@ -2310,46 +2239,6 @@
       "c6_change_kind": "",
       "native_action_id": "rig_simulation_spatial.deformer.sample_evaluation.observe",
       "readback_id": "rig_simulation_spatial.deformer.sample_evaluation.readback",
-      "readback_owner": "independent_rig_simulation_spatial_reader",
-      "settle_barrier": "none",
-      "oracle_kind": "independent_component_asset_or_generated_data_readback",
-      "requires_native_mutation": false,
-      "reads_back_after_mutation": false
-    },
-    {
-      "capability_id": "pcg.generated_spatial_data.read",
-      "descriptor_id": "uai.query.pcg.generated_spatial_data.read",
-      "operation_kind": "query",
-      "c3_lane": "c3q",
-      "family_id": "simulation_observation",
-      "binding_id": "rig_simulation_spatial.pcg.read_generated_data",
-      "typed_operation_id": "rig_simulation_spatial.pcg.read_generated_data",
-      "typed_port_id": "uai.rig_simulation_spatial.typed_port.v1",
-      "typed_request_id": "rig_simulation_spatial.pcg.read_generated_data.request.v1",
-      "typed_result_id": "rig_simulation_spatial.pcg.read_generated_data.result.v1",
-      "c6_change_kind": "",
-      "native_action_id": "rig_simulation_spatial.pcg.read_generated_data.observe",
-      "readback_id": "rig_simulation_spatial.pcg.read_generated_data.readback",
-      "readback_owner": "independent_rig_simulation_spatial_reader",
-      "settle_barrier": "none",
-      "oracle_kind": "independent_component_asset_or_generated_data_readback",
-      "requires_native_mutation": false,
-      "reads_back_after_mutation": false
-    },
-    {
-      "capability_id": "pcg.partition.spatial_state.read",
-      "descriptor_id": "uai.query.pcg.partition.spatial_state.read",
-      "operation_kind": "query",
-      "c3_lane": "c3q",
-      "family_id": "simulation_observation",
-      "binding_id": "rig_simulation_spatial.pcg.read_partition_state",
-      "typed_operation_id": "rig_simulation_spatial.pcg.read_partition_state",
-      "typed_port_id": "uai.rig_simulation_spatial.typed_port.v1",
-      "typed_request_id": "rig_simulation_spatial.pcg.read_partition_state.request.v1",
-      "typed_result_id": "rig_simulation_spatial.pcg.read_partition_state.result.v1",
-      "c6_change_kind": "",
-      "native_action_id": "rig_simulation_spatial.pcg.read_partition_state.observe",
-      "readback_id": "rig_simulation_spatial.pcg.read_partition_state.readback",
       "readback_owner": "independent_rig_simulation_spatial_reader",
       "settle_barrier": "none",
       "oracle_kind": "independent_component_asset_or_generated_data_readback",

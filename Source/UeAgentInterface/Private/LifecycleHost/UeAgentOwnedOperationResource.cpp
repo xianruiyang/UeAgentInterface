@@ -1,5 +1,6 @@
 #include "LifecycleHost/UeAgentOwnedOperationResource.h"
 
+#include "Dom/JsonValue.h"
 #include "Misc/ScopeLock.h"
 
 namespace UE::UAI::LifecycleHost
@@ -18,41 +19,53 @@ namespace UE::UAI::LifecycleHost
 		static void SetError(
 			FExecutionMutationError& OutError,
 			const TCHAR* Code,
-			FString Detail = FString())
+			const FString& Reason)
 		{
-			OutError = FExecutionMutationError(
-				Code,
-				MoveTemp(Detail));
+			OutError = FExecutionMutationError::Failure(Code, Reason, TEXT("execution"));
+			OutError.SourceKind = TEXT("native_result");
 		}
 
 		static void SetBackendError(
 			FExecutionMutationError& OutError,
 			const FUeAgentLifecycleDiagnostic& Diagnostic,
-			const TCHAR* Fallback)
+			const TCHAR* Fallback,
+			const FString& Reason)
 		{
-			SetError(
-				OutError,
-				Diagnostic.Code.IsEmpty()
-					? Fallback
-					: *Diagnostic.Code,
-				Diagnostic.Message);
+			if (Diagnostic.IsValid()) OutError = Diagnostic;
+			else SetError(OutError, Fallback, Reason);
 		}
 	}
 
 	bool FUeAgentOwnedOperationResourceSpec::IsValid() const
 	{
-		if (ResourceId.TrimStartAndEnd().IsEmpty()
-			|| OperationId.TrimStartAndEnd().IsEmpty()
-			|| OwnerLeaseId.TrimStartAndEnd().IsEmpty()
-			|| Generation <= 0
-			|| Executable.TrimStartAndEnd().IsEmpty())
+		FExecutionMutationError Error;
+		return Validate(Error);
+	}
+
+	bool FUeAgentOwnedOperationResourceSpec::Validate(FExecutionMutationError& OutError) const
+	{
+		OutError.Reset();
+		const TCHAR* Reason = ResourceId.TrimStartAndEnd().IsEmpty()
+			? TEXT("The owned resource specification is missing its resource identity.")
+			: OperationId.TrimStartAndEnd().IsEmpty()
+			? TEXT("The owned resource specification is missing its operation identity.")
+			: OwnerLeaseId.TrimStartAndEnd().IsEmpty()
+			? TEXT("The owned resource specification is missing its owner lease.")
+			: Generation <= 0 ? TEXT("The owned resource specification requires a positive generation.")
+			: Executable.TrimStartAndEnd().IsEmpty()
+			? TEXT("The owned resource specification is missing its executable.") : nullptr;
+		if (Reason)
 		{
+			SetError(OutError, TEXT("owned_resource_spec_invalid"), Reason);
 			return false;
 		}
-		for (const FString& Argument : Arguments)
+		for (int32 Index = 0; Index < Arguments.Num(); ++Index)
 		{
-			if (Argument.TrimStartAndEnd().IsEmpty())
+			if (Arguments[Index].TrimStartAndEnd().IsEmpty())
 			{
+				SetError(OutError, TEXT("owned_resource_spec_invalid"),
+					FString::Printf(TEXT("Executable argument at index %d is empty."), Index));
+				OutError.Source.InternalJsonPath = FString::Printf(TEXT("/arguments/%d"), Index);
 				return false;
 			}
 		}
@@ -80,19 +93,32 @@ namespace UE::UAI::LifecycleHost
 
 	bool FUeAgentOwnedOperationResourceObservation::IsValid() const
 	{
+		FExecutionMutationError Error;
+		return Validate(Error);
+	}
+
+	bool FUeAgentOwnedOperationResourceObservation::Validate(FExecutionMutationError& OutError) const
+	{
+		OutError.Reset();
 		if (bRunning && bExited)
 		{
+			SetError(OutError, TEXT("owned_resource_observation_invalid"),
+				TEXT("The native observation reports the resource as both running and exited."));
 			return false;
 		}
-		if (bRunning)
+		if (bExited && !ExitCode.IsSet())
 		{
-			return !ExitCode.IsSet();
+			SetError(OutError, TEXT("owned_resource_observation_invalid"),
+				TEXT("The native observation reports an exited resource without an exit code."));
+			return false;
 		}
-		if (bExited)
+		if (!bExited && ExitCode.IsSet())
 		{
-			return ExitCode.IsSet();
+			SetError(OutError, TEXT("owned_resource_observation_invalid"),
+				TEXT("The native observation supplies an exit code without reporting that the resource exited."));
+			return false;
 		}
-		return !ExitCode.IsSet();
+		return true;
 	}
 
 	FUeAgentOwnedOperationResourcePort::
@@ -122,32 +148,39 @@ namespace UE::UAI::LifecycleHost
 		OutError = {};
 		{
 			FScopeLock Lock(&Mutex);
-			if (!Spec.IsValid())
+			if (!Spec.Validate(OutError))
 			{
-				SetError(OutError, TEXT("owned_resource_spec_invalid"));
 				return false;
 			}
-			if (!Request.IsValid()
-				|| Request.GetOperationId() != Spec.OperationId
-				|| Request.GetOwnerLeaseId() != Spec.OwnerLeaseId)
+			if (!Request.IsValid())
+			{
+				OutError = Request.GetValidationDiagnostic();
+				return false;
+			}
+			if (Request.GetOperationId() != Spec.OperationId || Request.GetOwnerLeaseId() != Spec.OwnerLeaseId)
 			{
 				SetError(
 					OutError,
-					TEXT("owned_resource_request_mismatch"));
+					TEXT("owned_resource_request_mismatch"),
+					Request.GetOperationId() != Spec.OperationId
+						? TEXT("The resource start request belongs to a different operation.")
+						: TEXT("The resource start request belongs to a different owner lease."));
 				return false;
 			}
 			if (Cancellation.IsCancelled())
 			{
 				SetError(
 					OutError,
-					TEXT("owned_resource_start_cancelled"));
+					TEXT("owned_resource_start_cancelled"), TEXT("The operation was cancelled before its owned resource started."));
 				return false;
 			}
 			if (OwnedIdentity.IsSet() || bStartInFlight)
 			{
 				SetError(
 					OutError,
-					TEXT("owned_resource_already_started"));
+					TEXT("owned_resource_already_started"),
+					bStartInFlight ? TEXT("A start request for this owned resource is already in progress.")
+						: TEXT("This operation already owns a started resource."));
 				return false;
 			}
 			bStartInFlight = true;
@@ -167,7 +200,7 @@ namespace UE::UAI::LifecycleHost
 				SetBackendError(
 					OutError,
 					Diagnostic,
-					TEXT("owned_resource_start_failed"));
+					TEXT("owned_resource_start_failed"), TEXT("The resource backend failed to start the resource without reporting a diagnostic."));
 				return false;
 			}
 			FUeAgentOwnedOperationResourceIdentity IdentityValue{
@@ -181,7 +214,7 @@ namespace UE::UAI::LifecycleHost
 			{
 				SetError(
 					OutError,
-					TEXT("owned_resource_process_identity_invalid"));
+					TEXT("owned_resource_process_identity_invalid"), TEXT("The resource backend returned an invalid process identity after starting."));
 				return false;
 			}
 			OwnedIdentity = MoveTemp(IdentityValue);
@@ -197,16 +230,17 @@ namespace UE::UAI::LifecycleHost
 		const ExecutionMutation::FLongRunningWorkIdentity& Identity,
 		FExecutionMutationError& OutError) const
 	{
-		if (!OwnedIdentity.IsSet()
-			|| !OwnedIdentity->IsValid()
-			|| NormalizeText(OperationId) != OwnedIdentity->OperationId
-			|| !Identity.IsValid()
-			|| Identity.GetResourceId() != OwnedIdentity->ResourceId
-			|| Identity.GetGeneration() != OwnedIdentity->Generation)
+		const TCHAR* Reason = !OwnedIdentity.IsSet() ? TEXT("The operation has not acquired a resource identity.")
+			: !OwnedIdentity->IsValid() ? TEXT("The stored owned resource identity is invalid.")
+			: NormalizeText(OperationId) != OwnedIdentity->OperationId ? TEXT("The resource request belongs to a different operation.")
+			: !Identity.IsValid() ? TEXT("The requested work identity is invalid.")
+			: Identity.GetResourceId() != OwnedIdentity->ResourceId ? TEXT("The request identifies a different owned resource.")
+			: Identity.GetGeneration() != OwnedIdentity->Generation ? TEXT("The request identifies a different resource generation.") : nullptr;
+		if (Reason)
 		{
 			SetError(
 				OutError,
-				TEXT("owned_resource_identity_mismatch"));
+				TEXT("owned_resource_identity_mismatch"), Reason);
 			return false;
 		}
 		return true;
@@ -230,12 +264,12 @@ namespace UE::UAI::LifecycleHost
 			}
 			if (bReleased)
 			{
-				SetError(OutError, TEXT("owned_resource_released"));
+				SetError(OutError, TEXT("owned_resource_released"), TEXT("The owned resource has already been released."));
 				return false;
 			}
 			if (bCallInFlight)
 			{
-				SetError(OutError, TEXT("owned_resource_call_in_flight"));
+				SetError(OutError, TEXT("owned_resource_call_in_flight"), TEXT("Another lifecycle call for the owned resource is still in progress."));
 				return false;
 			}
 			bCallInFlight = true;
@@ -256,49 +290,53 @@ namespace UE::UAI::LifecycleHost
 				SetBackendError(
 					OutError,
 					Diagnostic,
-					TEXT("owned_resource_observe_failed"));
+					TEXT("owned_resource_observe_failed"), TEXT("The resource backend failed to observe the resource without reporting a diagnostic."));
 				return false;
 			}
-			if (!NativeObservation.IsValid())
+			if (!NativeObservation.Validate(OutError))
 			{
-				SetError(
-					OutError,
-					TEXT("owned_resource_observation_invalid"));
 				return false;
 			}
 			if (NativeObservation.bRunning)
 			{
 				OutObservation =
-					ExecutionMutation::FLongRunningWorkObservation(
-						Spec.Generation,
-						ELongRunningWorkState::Running,
-						FString());
+					ExecutionMutation::FLongRunningWorkObservation(Spec.Generation,
+			ELongRunningWorkState::Running,
+			UE::UAI::Contract::FDiagnostic());
 				return true;
 			}
 			if (!NativeObservation.bExited)
 			{
+				FExecutionMutationError UnknownState;
+				SetError(UnknownState, TEXT("owned_resource_state_unknown"),
+					TEXT("The native observation cannot determine whether the resource is running or has exited."));
+				UnknownState.Stage = TEXT("native_observation");
 				OutObservation =
-					ExecutionMutation::FLongRunningWorkObservation(
-						Spec.Generation,
-						ELongRunningWorkState::StateUnknown,
-						TEXT("owned_resource_state_unknown"));
+					ExecutionMutation::FLongRunningWorkObservation(Spec.Generation,
+			ELongRunningWorkState::StateUnknown,
+			MoveTemp(UnknownState));
 				return true;
 			}
 
 			bObservedExited = true;
 			const int32 ExitCode =
 				NativeObservation.ExitCode.GetValue();
+			FExecutionMutationError ExitDiagnostic;
+			if (ExitCode != 0)
+			{
+				const FString Code = FString::Printf(TEXT("native_resource_exit_code_%d"), ExitCode);
+				SetError(ExitDiagnostic, *Code, FString::Printf(TEXT("The native resource exited with code %d."), ExitCode));
+				ExitDiagnostic.Stage = TEXT("native_observation");
+				ExitDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(ExitCode);
+				ExitDiagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(0);
+			}
 			OutObservation =
 				ExecutionMutation::FLongRunningWorkObservation(
 					Spec.Generation,
 					ExitCode == 0
 						? ELongRunningWorkState::ExitedSuccess
 						: ELongRunningWorkState::ExitedFailure,
-					ExitCode == 0
-						? FString()
-						: FString::Printf(
-							TEXT("native_resource_exit_code_%d"),
-							ExitCode));
+					MoveTemp(ExitDiagnostic));
 			return true;
 		}
 	}
@@ -319,12 +357,12 @@ namespace UE::UAI::LifecycleHost
 			}
 			if (NormalizeText(Reason).IsEmpty())
 			{
-				SetError(OutError, TEXT("owned_resource_stop_reason_missing"));
+				SetError(OutError, TEXT("owned_resource_stop_reason_missing"), TEXT("Stopping the owned resource requires a non-empty reason."));
 				return false;
 			}
 			if (bReleased)
 			{
-				SetError(OutError, TEXT("owned_resource_released"));
+				SetError(OutError, TEXT("owned_resource_released"), TEXT("The owned resource has already been released."));
 				return false;
 			}
 			if (bStopRequested)
@@ -333,7 +371,7 @@ namespace UE::UAI::LifecycleHost
 			}
 			if (bCallInFlight)
 			{
-				SetError(OutError, TEXT("owned_resource_call_in_flight"));
+				SetError(OutError, TEXT("owned_resource_call_in_flight"), TEXT("Another lifecycle call for the owned resource is still in progress."));
 				return false;
 			}
 			bCallInFlight = true;
@@ -352,7 +390,7 @@ namespace UE::UAI::LifecycleHost
 				SetBackendError(
 					OutError,
 					Diagnostic,
-					TEXT("owned_resource_stop_failed"));
+					TEXT("owned_resource_stop_failed"), TEXT("The resource backend failed to request a resource stop without reporting a diagnostic."));
 				return false;
 			}
 			bStopRequested = true;
@@ -379,7 +417,7 @@ namespace UE::UAI::LifecycleHost
 			}
 			if (bCallInFlight)
 			{
-				SetError(OutError, TEXT("owned_resource_call_in_flight"));
+				SetError(OutError, TEXT("owned_resource_call_in_flight"), TEXT("Another lifecycle call for the owned resource is still in progress."));
 				return false;
 			}
 			bCallInFlight = true;
@@ -398,7 +436,7 @@ namespace UE::UAI::LifecycleHost
 				SetBackendError(
 					OutError,
 					Diagnostic,
-					TEXT("owned_resource_join_failed"));
+					TEXT("owned_resource_join_failed"), TEXT("The resource backend failed to join the resource without reporting a diagnostic."));
 				return false;
 			}
 			bJoined = true;
@@ -425,12 +463,12 @@ namespace UE::UAI::LifecycleHost
 			}
 			if (!bJoined)
 			{
-				SetError(OutError, TEXT("owned_resource_not_joined"));
+				SetError(OutError, TEXT("owned_resource_not_joined"), TEXT("The owned resource must finish joining before it can be released."));
 				return false;
 			}
 			if (bCallInFlight)
 			{
-				SetError(OutError, TEXT("owned_resource_call_in_flight"));
+				SetError(OutError, TEXT("owned_resource_call_in_flight"), TEXT("Another lifecycle call for the owned resource is still in progress."));
 				return false;
 			}
 			bCallInFlight = true;
@@ -449,7 +487,7 @@ namespace UE::UAI::LifecycleHost
 				SetBackendError(
 					OutError,
 					Diagnostic,
-					TEXT("owned_resource_release_failed"));
+					TEXT("owned_resource_release_failed"), TEXT("The resource backend failed to release the resource without reporting a diagnostic."));
 				return false;
 			}
 			bReleased = true;
@@ -475,12 +513,18 @@ namespace UE::UAI::LifecycleHost
 		bool bNeedsStop = false;
 		{
 			FScopeLock Lock(&Mutex);
-			if (!OwnedIdentity.IsSet()
-				|| !OwnedIdentity->Matches(ExpectedIdentity))
+			const TCHAR* IdentityReason = !OwnedIdentity.IsSet()
+				? TEXT("The operation has no owned resource identity to clean up.")
+				: OwnedIdentity->ResourceId != ExpectedIdentity.ResourceId ? TEXT("The cleanup request identifies a different resource.")
+				: OwnedIdentity->OperationId != ExpectedIdentity.OperationId ? TEXT("The cleanup request belongs to a different operation.")
+				: OwnedIdentity->OwnerLeaseId != ExpectedIdentity.OwnerLeaseId ? TEXT("The cleanup request belongs to a different owner lease.")
+				: OwnedIdentity->Generation != ExpectedIdentity.Generation ? TEXT("The cleanup request identifies a different resource generation.")
+				: !OwnedIdentity->Process.Matches(ExpectedIdentity.Process) ? TEXT("The cleanup request identifies a different native process.") : nullptr;
+			if (IdentityReason)
 			{
 				SetError(
 					OutError,
-					TEXT("owned_resource_identity_mismatch"));
+					TEXT("owned_resource_identity_mismatch"), IdentityReason);
 				return false;
 			}
 			if (bReleased)
@@ -513,7 +557,7 @@ namespace UE::UAI::LifecycleHost
 			}
 			if (bCallInFlight)
 			{
-				SetError(OutError, TEXT("owned_resource_call_in_flight"));
+				SetError(OutError, TEXT("owned_resource_call_in_flight"), TEXT("Another lifecycle call for the owned resource is still in progress."));
 				return false;
 			}
 			bCallInFlight = true;
@@ -534,24 +578,21 @@ namespace UE::UAI::LifecycleHost
 				SetBackendError(
 					OutError,
 					Diagnostic,
-					TEXT("owned_resource_observe_failed"));
+					TEXT("owned_resource_observe_failed"), TEXT("The resource backend failed to observe the resource without reporting a diagnostic."));
 				return false;
 			}
-			if (!NativeObservation.IsValid())
+			if (!NativeObservation.Validate(OutError))
 			{
-				SetError(
-					OutError,
-					TEXT("owned_resource_observation_invalid"));
 				return false;
 			}
 			if (NativeObservation.bRunning)
 			{
-				SetError(OutError, TEXT("owned_resource_still_running"));
+				SetError(OutError, TEXT("owned_resource_still_running"), TEXT("The owned resource is still running after the stop request."));
 				return false;
 			}
 			if (!NativeObservation.bExited)
 			{
-				SetError(OutError, TEXT("owned_resource_state_unknown"));
+				SetError(OutError, TEXT("owned_resource_state_unknown"), TEXT("The native observation cannot determine whether the resource is running or has exited."));
 				return false;
 			}
 			bObservedExited = true;

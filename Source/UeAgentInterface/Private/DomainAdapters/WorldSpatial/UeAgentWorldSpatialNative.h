@@ -19,6 +19,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FString ExplicitRef;
 		UPrimitiveComponent* Component = nullptr;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -73,6 +74,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TArray<double> Components;
 		FString EvidenceId;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -112,6 +114,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TSharedPtr<IUeAgentWorldSpatialSpaceCompiler> SpaceCompiler;
 		TSharedPtr<IUeAgentWorldSpatialRevisionSource> RevisionSource;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -122,6 +125,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		TSharedPtr<IUeAgentWorldSpatialSettlePort> Settle;
 		TSharedPtr<IUeAgentWorldSpatialResultComparator> Comparator;
 
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 

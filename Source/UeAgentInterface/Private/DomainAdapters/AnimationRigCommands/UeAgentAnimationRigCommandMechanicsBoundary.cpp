@@ -1,4 +1,5 @@
 #include "DomainAdapters/AnimationRigCommands/UeAgentAnimationRigCommandMechanicsBoundary.h"
+#include "Dom/JsonValue.h"
 
 #include "Composition/GraphCompound/UeAgentGraphCompoundAnimationBindings.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundCommandHandlers.h"
@@ -10,6 +11,29 @@
 namespace UE::UAI::DomainAdapters::AnimationRigCommands
 {
 	using namespace Composition::GraphCompound;
+
+	const TArray<FString>& GetCommandIds()
+	{
+		return QueryOwners::AnimationRigCommands::GetCommandIds();
+	}
+
+	const TArray<FString>& GetPublicCommandIds()
+	{
+		static const TArray<FString> Ids = []
+		{
+			TArray<FString> Result = GetCommandIds();
+			Result.Remove(TEXT("animation.control_rig.hierarchy_graph.apply"));
+			Result.Remove(TEXT("animation.deformer_graph.topology.apply"));
+			Result.Remove(TEXT("animation.ik_rig.definition.apply"));
+			Result.Remove(TEXT("animation.ik_retargeter.definition.apply"));
+			Result.Remove(TEXT("animation.ik_retargeter.settings.apply"));
+			Result.Remove(TEXT("animation.skeleton.definition.apply"));
+			Result.Remove(TEXT("animation.skeleton.compatibility.apply"));
+			Result.Remove(TEXT("animation.skeleton.virtual_bone.apply"));
+			return Result;
+		}();
+		return Ids;
+	}
 
 	namespace
 	{
@@ -27,7 +51,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigCommands
 
 		bool TryCreateGraphMechanics(
 			TMap<FString, TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutHandlers.Reset();
 			TArray<FUeAgentGraphCompoundActivationProfile> Profiles;
@@ -36,18 +60,16 @@ namespace UE::UAI::DomainAdapters::AnimationRigCommands
 				return false;
 			}
 			FGraphCompoundRuntimeConfig RuntimeConfig;
-			RuntimeConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 			FGraphCompoundAnimationProductionConfig ProductionConfig;
 			ProductionConfig.DurableJournalRoot = FPaths::ProjectSavedDir()
 				/ TEXT("UeAgentInterface/GraphCompound/AnimationRigCommands");
-			ProductionConfig.OperationTimeoutSeconds = 120.0;
 			TSharedPtr<FGraphCompoundRuntime> Runtime;
 			FGraphCompoundRuntimeError RuntimeError;
 			if (!TryCreateAnimationGraphProductionRuntime(
-					RuntimeConfig, ProductionConfig, Runtime, RuntimeError)
-				|| !Runtime.IsValid())
+				RuntimeConfig, ProductionConfig, Runtime, RuntimeError))
 			{
-				OutError = RuntimeError.Code + TEXT(":") + RuntimeError.Detail;
+				OutError = MoveTemp(RuntimeError);
 				return false;
 			}
 			TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>> Mechanics;
@@ -62,12 +84,25 @@ namespace UE::UAI::DomainAdapters::AnimationRigCommands
 				if (OutHandlers.Contains(Handler->GetCommandId()))
 				{
 					OutHandlers.Reset();
-					OutError = TEXT("animation_rig_graph_mechanics_duplicate:") + Handler->GetCommandId();
+					OutError = Contract::FDiagnostic::Failure(TEXT("animation_rig_graph_mechanics_duplicate"),
+						TEXT("Two animation graph mechanics handlers are registered for the same command."), TEXT("runtime_factory"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.ActualValue = MakeShared<FJsonValueString>(Handler->GetCommandId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("unique command identifier"));
 					return false;
 				}
 				OutHandlers.Add(Handler->GetCommandId(), Handler);
 			}
-			return OutHandlers.Num() == Profiles.Num();
+			if (OutHandlers.Num() != Profiles.Num())
+			{
+				OutError = Contract::FDiagnostic::Failure(TEXT("animation_rig_graph_mechanics_count_mismatch"),
+					TEXT("The number of created animation graph handlers does not match the registered profiles."), TEXT("runtime_factory"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(OutHandlers.Num());
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(Profiles.Num());
+				return false;
+			}
+			return true;
 		}
 	}
 
@@ -75,7 +110,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigCommands
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (CommandId == TEXT("animation.skeleton.slots.read"))
 		{
@@ -94,7 +129,11 @@ namespace UE::UAI::DomainAdapters::AnimationRigCommands
 		const TSharedRef<CommandEdge::IUeAgentCommandHandler>* Found = Host.Handlers.Find(CommandId);
 		if (!Found)
 		{
-			OutError = TEXT("animation_rig_graph_mechanics_missing:") + CommandId;
+			OutError = Contract::FDiagnostic::Failure(TEXT("animation_rig_graph_mechanics_missing"),
+				TEXT("No animation graph mechanics handler is registered for the requested command."), TEXT("runtime_factory"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.ActualValue = MakeShared<FJsonValueString>(CommandId);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("registered animation graph command"));
 			return false;
 		}
 		OutHandler = *Found;

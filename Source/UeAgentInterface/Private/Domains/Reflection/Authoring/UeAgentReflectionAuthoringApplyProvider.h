@@ -12,7 +12,10 @@ class FJsonValue;
 namespace UeAgentAuthoringOperationApply
 {
 	class IApplyProvider;
+	class IDurablePackageStager;
 }
+
+namespace UeAgentAuthoringWorkspaceTransaction { struct FOperationFailure; }
 
 namespace UeAgentReflectionAuthoring
 {
@@ -28,14 +31,18 @@ namespace UeAgentReflectionAuthoring
 		TArray<TSharedPtr<FJsonValue>> Properties;
 		TSharedPtr<FJsonObject> ProviderExtension;
 		bool bSave = false;
+		bool bCompactValues = false;
+		/** Native notifications also run on the proposed root unless its lifecycle declares external-only side effects. */
+		bool bEmitEditorNotifications = false;
+		TFunction<bool(UeAgentAuthoringWorkspaceTransaction::FOperationFailure&)> FinalReadback;
+		TSharedPtr<UeAgentAuthoringOperationApply::IDurablePackageStager> PackageStager;
 	};
 
 	struct FAssetApplyResult
 	{
 		FString Status;
 		FString Phase;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ProfileId;
 		FString AssetPath;
 		FString ResolvedOperation;
@@ -53,8 +60,7 @@ namespace UeAgentReflectionAuthoring
 	struct FWorkspaceInspectResult
 	{
 		FString Status;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ProfileId;
 		FString AssetPath;
 		FString RequestedOperation;
@@ -66,8 +72,8 @@ namespace UeAgentReflectionAuthoring
 		TSharedRef<FJsonObject> ToJsonObject() const;
 	};
 
-	UEAGENTINTERFACE_API bool RegisterApplyContracts(FString& OutError);
-	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeApplyProvider();
+	UEAGENTINTERFACE_API bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeApplyProvider(bool bCompactValues = false, bool bEmitEditorNotifications = false, TOptional<bool> SaveOverride = {});
 	UEAGENTINTERFACE_API bool ApplyAsset(const FAssetApplyRequest& Request, FAssetApplyResult& OutResult, const FString& RequestId = FString());
 	UEAGENTINTERFACE_API bool ApplyAssetSource(
 		const FProfile& Profile,
@@ -75,7 +81,11 @@ namespace UeAgentReflectionAuthoring
 		const FString& ExpectedAssetPath,
 		FAssetApplyResult& OutResult,
 		TOptional<bool> SaveOverride = TOptional<bool>(),
-		const FString& RequestId = FString());
+		const FString& RequestId = FString(),
+		bool bCompactValues = false,
+		TFunction<bool(UeAgentAuthoringWorkspaceTransaction::FOperationFailure&)> FinalReadback = {},
+		const TSharedPtr<UeAgentAuthoringOperationApply::IDurablePackageStager>& PackageStager = nullptr,
+		bool bEmitEditorNotifications = false);
 	UEAGENTINTERFACE_API bool InspectAssetSource(
 		const FProfile& Profile,
 		const UeAgentAuthoringWorkspaceLoader::FSourceRequest& Source,

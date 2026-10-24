@@ -12,10 +12,17 @@ namespace UE::UAI::Tests::StrictV2::T58
 			TEXT("animation.subject.pose.update"),
 			TEXT("rig.control.bake.animation"),
 			TEXT("rig.control.bake.controls"),
-			TEXT("rig.ik.definition.update"),
 			TEXT("rig.retarget.assets.generate"),
-			TEXT("rig.retarget.definition.update"),
 			TEXT("rig.retarget.pose.auto_align"),
+		};
+		return Commands;
+	}
+
+	const TArray<FString>& ExpectedDormantCommands()
+	{
+		static const TArray<FString> Commands = {
+			TEXT("rig.ik.definition.update"),
+			TEXT("rig.retarget.definition.update"),
 			TEXT("rig.retarget.pose.update"),
 			TEXT("rig.skeleton.preview_mesh.bind"),
 			TEXT("rig.skeleton.socket.update"),
@@ -44,15 +51,40 @@ bool FUeAgentStrictV2T58RigSpatialCommandMigrationTest::RunTest(const FString& P
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T58 owns exactly twelve non-HJSON commands"), ExpectedCommands().Num(), 12);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
 		TestNotNull(*FString::Printf(TEXT("%s is active"), *CommandId), Contract);
 		if (Contract)
 		{
+			TestEqual(*FString::Printf(TEXT("%s is enabled"), *CommandId),
+				Contract->GetAvailability(),
+				CommandContract::EUeAgentCommandAvailability::Enabled);
 			TestEqual(*FString::Printf(TEXT("%s has one T58 owner"), *CommandId),
 				Contract->GetPublicOwner(), FString(TEXT("rig-spatial-command-owner")));
+			if (CommandId == TEXT("rig.retarget.assets.generate"))
+			{
+				const auto& Fields = Contract->GetModelResultFields();
+				TestEqual(TEXT("retarget generation exposes one compact result"),
+					Fields.Num(), 1);
+				if (Fields.Num() == 1)
+				{
+					TestEqual(TEXT("retarget generation returns created assets"),
+						Fields[0].Name,
+						FString(TEXT("generated_asset_refs")));
+				}
+			}
+		}
+	}
+	for (const FString& CommandId : ExpectedDormantCommands())
+	{
+		const auto* Contract = Registry->FindExact(CommandId);
+		TestNotNull(*FString::Printf(TEXT("%s remains registered as dormant"), *CommandId), Contract);
+		if (Contract)
+		{
+			TestEqual(*FString::Printf(TEXT("%s is dormant"), *CommandId),
+				Contract->GetAvailability(),
+				CommandContract::EUeAgentCommandAvailability::Dormant);
 		}
 	}
 	return !HasAnyErrors();

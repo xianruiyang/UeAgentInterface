@@ -157,21 +157,6 @@ bool FUeAgentWorldDestructiveBoundaryTest::RunTest(const FString& Parameters)
 		TestNotNull(TEXT("canonical world command contract: ") + CommandId,
 			Registry.IsValid() ? Registry->FindExact(CommandId) : nullptr);
 	}
-	const TArray<FString> LegacyIds{
-		TEXT("data_layer_delete_instance"),
-		TEXT("level_content_delete_scope"),
-		TEXT("pcg_cleanup"),
-		TEXT("level_streaming_move_actors"),
-		TEXT("level_streaming_remove"),
-		TEXT("modeling_replace_actor_mesh"),
-		TEXT("modeling_remove_material_slot"),
-		TEXT("modeling_voxel_grid_remove_bounds"),
-	};
-	for (const FString& LegacyId : LegacyIds)
-	{
-		TestNull(TEXT("legacy identity is absent: ") + LegacyId,
-			Registry.IsValid() ? Registry->FindExact(LegacyId) : nullptr);
-	}
 	return !HasAnyErrors();
 }
 

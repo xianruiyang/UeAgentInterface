@@ -6,6 +6,8 @@
 
 #define UAI_CAPTURE_MEDIA_LONG_JOB_PRODUCTION_V1 1
 
+class FJsonObject;
+
 namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 {
 	class UEAGENTINTERFACE_API
@@ -29,6 +31,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		const TArray<ContextResource::EUeAgentExecutionWorldType>&
 			GetAllowedWorldTypes() const;
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		EUeAgentCaptureMediaLongJobFamily Family;
@@ -113,23 +116,33 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		FUeAgentCaptureMediaNativeObservation(
 			ExecutionMutation::ELongRunningWorkState InState,
 			FString InPhase,
-			FString InErrorCode = FString(),
+			UE::UAI::Contract::FDiagnostic InDiagnostic = {},
 			TOptional<ArtifactPublisher::FFileArtifactReference>
-				InArtifact = {});
+				InArtifact = {},
+			TArray<ArtifactPublisher::FFileArtifactReference>
+				InAdditionalArtifacts = {},
+			TSharedPtr<FJsonObject> InCaptureReceipt = nullptr);
 
 		ExecutionMutation::ELongRunningWorkState GetState() const;
 		const FString& GetPhase() const;
-		const FString& GetErrorCode() const;
+		const UE::UAI::Contract::FDiagnostic& GetDiagnostic() const;
+		const FString& GetErrorCode() const { return Diagnostic.Code; }
 		const TOptional<ArtifactPublisher::FFileArtifactReference>&
 			GetArtifact() const;
+		const TArray<ArtifactPublisher::FFileArtifactReference>&
+			GetAdditionalArtifacts() const;
+		const TSharedPtr<FJsonObject>& GetCaptureReceipt() const;
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		ExecutionMutation::ELongRunningWorkState State =
 			ExecutionMutation::ELongRunningWorkState::Invalid;
 		FString Phase;
-		FString ErrorCode;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		TOptional<ArtifactPublisher::FFileArtifactReference> Artifact;
+		TArray<ArtifactPublisher::FFileArtifactReference> AdditionalArtifacts;
+		TSharedPtr<FJsonObject> CaptureReceipt;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentCaptureMediaNativeSession
@@ -164,4 +177,3 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			ESPMode::ThreadSafe>& OutPort,
 		ExecutionMutation::FExecutionMutationError& OutError);
 }
-

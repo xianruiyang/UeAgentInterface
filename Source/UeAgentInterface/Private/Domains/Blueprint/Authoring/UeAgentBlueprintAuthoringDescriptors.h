@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class UObject;
@@ -42,7 +44,7 @@ namespace UeAgentBlueprintAuthoring
 	inline constexpr const TCHAR* ComponentPropertyIdentityModelId = TEXT("blueprint_component_property_identity");
 	inline constexpr const TCHAR* NodePropertyIdentityModelId = TEXT("blueprint_node_property_identity");
 
-	UEAGENTINTERFACE_API bool RegisterDescriptors(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API FString GetAssetKind(const UObject* Object);
 	UEAGENTINTERFACE_API FString GetAssetSemanticId(const UObject* Object);
 	UEAGENTINTERFACE_API FString GetAssetIdentityModelId(const UObject* Object);

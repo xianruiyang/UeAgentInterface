@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Templates/Function.h"
 
@@ -7,13 +9,7 @@ class UPackage;
 
 namespace UE::UAI::AssetDurable
 {
-	struct UEAGENTINTERFACE_API FPersistedPackageLoadError final
-	{
-		FString Code;
-		FString Detail;
-
-		bool IsPresent() const { return !Code.IsEmpty(); }
-	};
+	using FPersistedPackageLoadError = UE::UAI::Contract::FDiagnostic;
 
 	using FPersistedPackageObserver = TFunctionRef<bool(
 		UPackage& SnapshotPackage,

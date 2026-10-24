@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 
@@ -14,10 +16,10 @@ namespace UE::UAI::OperationOwners::TextureGraph
 			BakeFactory,
 		TMap<FString, TSharedRef<CommandEdge::IUeAgentCommandHandler>>&
 			OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateArtifactHandlers(
 		TMap<FString, TSharedRef<CommandEdge::IUeAgentCommandHandler>>&
 			OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

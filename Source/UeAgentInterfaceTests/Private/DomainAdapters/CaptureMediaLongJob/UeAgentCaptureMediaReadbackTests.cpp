@@ -32,17 +32,7 @@ namespace
 
 	FUeAgentResourceTracker MakeResources()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 8192},
-			{EUeAgentResourceDimension::Items, 8192},
-			{EUeAgentResourceDimension::Files, 128},
-			{EUeAgentResourceDimension::ReferenceEdges, 8192},
-			{EUeAgentResourceDimension::WorkUnits, 262144},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 64 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	class FScopedReadbackRoot final

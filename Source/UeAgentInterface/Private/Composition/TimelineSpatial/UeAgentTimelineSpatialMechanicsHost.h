@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 
 namespace UE::UAI::Composition::TimelineSpatial
@@ -8,5 +10,5 @@ namespace UE::UAI::Composition::TimelineSpatial
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

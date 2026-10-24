@@ -16,6 +16,8 @@
 #include "PhysicsEngine/BodySetup.h"
 #include "Selections/MeshConnectedComponents.h"
 #include "UDynamicMesh.h"
+#include "Dom/JsonValue.h"
+#include "UObject/Class.h"
 
 namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 {
@@ -51,45 +53,84 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			Object->SetArrayField(Field, MoveTemp(Items));
 		}
 
-		bool TryReadInteger(
-			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
-			int32& OutValue)
+		using UE::UAI::Contract::FDiagnostic;
+
+		FDiagnostic BaselineFailure(const FString& Field, const FString& Expected,
+			const TSharedPtr<FJsonValue>& Actual = nullptr, const bool bInternal = false)
+		{
+			auto Error = FDiagnostic::Failure(TEXT("modeling_geometry_baseline_field_invalid"),
+				TEXT("The Modeling field does not satisfy its required value."), TEXT("modeling_capture"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			Error.ActualValuePresent = Actual.IsValid();
+			if (bInternal) Error.ActualEvidence = Actual;
+			else if (Actual.IsValid() && (Actual->Type == EJson::Array || Actual->Type == EJson::Object))
+			{
+				auto Summary = MakeShared<FJsonObject>();
+				Summary->SetStringField(TEXT("kind"), Actual->Type == EJson::Array ? TEXT("array") : TEXT("object"));
+				if (Actual->Type == EJson::Array) Summary->SetNumberField(TEXT("count"), Actual->AsArray().Num());
+				Error.ActualValue = MakeShared<FJsonValueObject>(Summary);
+			}
+			else Error.ActualValue = Actual;
+			return Error;
+		}
+
+		void LocateBaselineRevision(FDiagnostic& Error)
+		{
+			Error.SourceKind = TEXT("native_result");
+			const FString Suffix = Error.PropertyPath == TEXT("target_revision") ? FString() : Error.PropertyPath;
+			Error.PropertyPath = TEXT("baseline/target_revision")
+				+ (Suffix.IsEmpty() ? FString() : Suffix.StartsWith(TEXT("/")) ? Suffix : TEXT("/") + Suffix);
+		}
+
+		bool ReadString(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field, FString& OutValue,
+			FDiagnostic& OutError, const FString& Path, const bool bInternal = false)
+		{
+			if (Object.IsValid() && Object->TryGetStringField(Field, OutValue)) return true;
+			OutError = BaselineFailure(Path, TEXT("string"), Object.IsValid() ? Object->TryGetField(Field) : nullptr, bInternal);
+			return false;
+		}
+
+		bool TryReadInteger(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field, int32& OutValue,
+			FDiagnostic& OutError, const FString& ParentPath)
 		{
 			double Value = 0.0;
-			if (!Object.IsValid()
-				|| !Object->TryGetNumberField(Field, Value)
-				|| !FMath::IsNearlyEqual(
-					Value,
-					FMath::RoundToDouble(Value)))
+			if (!Object.IsValid() || !Object->TryGetNumberField(Field, Value)
+				|| !FMath::IsNearlyEqual(Value, FMath::RoundToDouble(Value)))
 			{
+				OutError = BaselineFailure(ParentPath + TEXT("/") + Field, TEXT("integer-valued number"),
+					Object.IsValid() ? Object->TryGetField(Field) : nullptr);
 				return false;
 			}
 			OutValue = FMath::RoundToInt(Value);
 			return true;
 		}
 
-		bool TryReadNumberArray(
-			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
-			const int32 Count,
-			TArray<double>& OutValues)
+		bool TryReadNumberArray(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field,
+			const int32 Count, TArray<double>& OutValues, FDiagnostic& OutError, const FString& ParentPath = FString())
 		{
 			OutValues.Reset();
+			const FString Path = ParentPath.IsEmpty() ? FString(Field) : ParentPath + TEXT("/") + Field;
 			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-			if (!Object.IsValid()
-				|| !Object->TryGetArrayField(Field, Values)
-				|| !Values
-				|| Values->Num() != Count)
+			if (!Object.IsValid() || !Object->TryGetArrayField(Field, Values) || !Values)
 			{
+				OutError = BaselineFailure(Path, TEXT("number array"), Object.IsValid() ? Object->TryGetField(Field) : nullptr);
 				return false;
 			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			if (Values->Num() != Count)
 			{
-				if (!Value.IsValid()
-					|| Value->Type != EJson::Number)
+				OutError = BaselineFailure(Path, FString::Printf(TEXT("array with %d elements"), Count),
+					MakeShared<FJsonValueNumber>(Values->Num()));
+				return false;
+			}
+			for (int32 Index = 0; Index < Values->Num(); ++Index)
+			{
+				const auto& Value = (*Values)[Index];
+				if (!Value.IsValid() || Value->Type != EJson::Number)
 				{
 					OutValues.Reset();
+					OutError = BaselineFailure(Path + TEXT("/") + FString::FromInt(Index), TEXT("number"), Value);
 					return false;
 				}
 				OutValues.Add(Value->AsNumber());
@@ -124,7 +165,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 
 		bool ReadMeshState(
 			const FDynamicMesh3& Mesh,
-			FCarrierState& OutState)
+			FCarrierState& OutState,
+			FDiagnostic& OutError)
 		{
 			OutState.VertexCount = Mesh.VertexCount();
 			OutState.EdgeCount = Mesh.EdgeCount();
@@ -248,9 +290,30 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				OutState.TriangleCount,
 				OutState.EdgeCount,
 				OutState.VertexChecksum);
-			return OutState.Bounds.IsValid
-				&& OutState.VertexCount > 0
-				&& OutState.TriangleCount > 0;
+			if (!OutState.Bounds.IsValid || OutState.VertexCount <= 0 || OutState.TriangleCount <= 0)
+			{
+				const bool bInvalidBounds = !OutState.Bounds.IsValid;
+				const bool bNoVertices = OutState.VertexCount <= 0;
+				OutError = FDiagnostic::Failure(TEXT("modeling_geometry_mesh_state_invalid"),
+					bInvalidBounds ? TEXT("The captured Modeling mesh has no valid bounds.")
+						: bNoVertices ? TEXT("The captured Modeling mesh has no vertices.")
+						: TEXT("The captured Modeling mesh has no triangles."), TEXT("modeling_capture"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = bInvalidBounds ? TEXT("bounds/is_valid") : bNoVertices ? TEXT("vertex_count") : TEXT("triangle_count");
+				OutError.TargetPath = OutState.TargetRef;
+				if (bInvalidBounds)
+				{
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				}
+				else
+				{
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(bNoVertices ? OutState.VertexCount : OutState.TriangleCount);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("greater than zero"));
+				}
+				return false;
+			}
+			return true;
 		}
 
 		void ReadCollisionState(
@@ -432,54 +495,38 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			return Baseline;
 		}
 
-		bool TryReadNormalSplitTopology(
-			const TSharedPtr<FJsonObject>& Baseline,
-			FCarrierState& OutState)
+		bool TryReadNormalSplitTopology(const TSharedPtr<FJsonObject>& Baseline,
+			FCarrierState& OutState, FDiagnostic& OutError)
 		{
+			const FString Path = TEXT("baseline/normal_split_topology");
 			const TSharedPtr<FJsonObject>* Topology = nullptr;
 			if (!Baseline.IsValid())
 			{
+				OutError = BaselineFailure(TEXT("baseline"), TEXT("object"));
 				return false;
 			}
-			if (!Baseline->HasField(NormalSplitTopologyField))
+			if (!Baseline->HasField(NormalSplitTopologyField)) return true;
+			if (!Baseline->TryGetObjectField(NormalSplitTopologyField, Topology) || !Topology || !Topology->IsValid())
 			{
-				return true;
-			}
-			if (!Baseline->TryGetObjectField(
-					NormalSplitTopologyField,
-					Topology))
-			{
+				OutError = BaselineFailure(Path, TEXT("object"), Baseline->TryGetField(NormalSplitTopologyField));
 				return false;
 			}
 			FString Schema;
-			if (!Topology
-				|| !Topology->IsValid()
-				|| !(*Topology)->TryGetStringField(
-					TEXT("schema"),
-					Schema)
-				|| Schema != NormalSplitTopologySchema
-				|| !TryReadInteger(
-					*Topology,
-					TEXT("interior_edge_count"),
-					OutState.NormalObservation.InteriorEdgeCount)
-				|| !TryReadInteger(
-					*Topology,
-					TEXT("invalid_interior_edge_count"),
-					OutState.NormalObservation.InvalidInteriorEdgeCount)
-				|| !TryReadInteger(
-					*Topology,
-					TEXT("partially_split_interior_edge_count"),
-					OutState.NormalObservation.
-						PartiallySplitInteriorEdgeCount)
-				|| !TryReadInteger(
-					*Topology,
-					TEXT("split_endpoint_count"),
-					OutState.NormalSplitEndpointCount)
-				|| !(*Topology)->TryGetStringField(
-					TEXT("split_topology_sha1"),
-					OutState.NormalSplitTopologyFingerprint)
-				|| OutState.NormalSplitTopologyFingerprint.IsEmpty())
+			if (!ReadString(*Topology, TEXT("schema"), Schema, OutError, Path + TEXT("/schema"))) return false;
+			if (Schema != NormalSplitTopologySchema)
 			{
+				OutError = BaselineFailure(Path + TEXT("/schema"), NormalSplitTopologySchema, MakeShared<FJsonValueString>(Schema));
+				return false;
+			}
+			if (!TryReadInteger(*Topology, TEXT("interior_edge_count"), OutState.NormalObservation.InteriorEdgeCount, OutError, Path)
+				|| !TryReadInteger(*Topology, TEXT("invalid_interior_edge_count"), OutState.NormalObservation.InvalidInteriorEdgeCount, OutError, Path)
+				|| !TryReadInteger(*Topology, TEXT("partially_split_interior_edge_count"), OutState.NormalObservation.PartiallySplitInteriorEdgeCount, OutError, Path)
+				|| !TryReadInteger(*Topology, TEXT("split_endpoint_count"), OutState.NormalSplitEndpointCount, OutError, Path)
+				|| !ReadString(*Topology, TEXT("split_topology_sha1"), OutState.NormalSplitTopologyFingerprint, OutError, Path + TEXT("/split_topology_sha1"), true))
+				return false;
+			if (OutState.NormalSplitTopologyFingerprint.IsEmpty())
+			{
+				OutError = BaselineFailure(Path + TEXT("/split_topology_sha1"), TEXT("nonempty fingerprint"), MakeShared<FJsonValueString>(TEXT("")));
 				return false;
 			}
 			OutState.bHasNormalSplitTopologyEvidence = true;
@@ -533,6 +580,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		{
 			const TSharedPtr<FJsonObject>* DirectionObject = nullptr;
 			TArray<double> Vector;
+			FDiagnostic ProbeError;
 			if (!Payload->TryGetObjectField(
 					TEXT("direction"),
 					DirectionObject)
@@ -542,7 +590,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 					*DirectionObject,
 					TEXT("vector"),
 					3,
-					Vector))
+					Vector, ProbeError))
 			{
 				return false;
 			}
@@ -608,6 +656,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 					== After.NormalSplitEndpointCount
 				&& Before.NormalSplitTopologyFingerprint
 					== After.NormalSplitTopologyFingerprint;
+		}
+
+		int64 SubdividedTriangleCount(
+			const TSharedPtr<FJsonObject>& Payload,
+			const int32 BeforeTriangleCount)
+		{
+			const int32 Levels = IntegerOr(Payload, TEXT("levels"), 1);
+			// Both UE 5.6 tessellators use FUniformTessellate once with
+			// TessellationNum = Levels; PN then displaces the new vertices.
+			const int64 EdgeSegments = static_cast<int64>(Levels) + 1;
+			return static_cast<int64>(BeforeTriangleCount) * EdgeSegments * EdgeSegments;
 		}
 
 		bool SemanticMatches(
@@ -841,12 +900,13 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 					SelectionCount = ElementIds->Num();
 				}
 				TArray<double> Translation;
+				FDiagnostic ProbeError;
 				const bool bTranslation =
 					TryReadNumberArray(
 						Payload,
 						TEXT("translation_cm"),
 						3,
-						Translation);
+						Translation, ProbeError);
 				return After.TriangleCount
 						== Before.TriangleCount + SelectionCount
 					&& (!bTranslation
@@ -1013,16 +1073,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			}
 			if (OperationKey == TEXT("subdivide"))
 			{
-				const int32 Levels =
-					IntegerOr(Payload, TEXT("levels"), 1);
-				int64 TriangleMultiplier = 1;
-				for (int32 Level = 0; Level < Levels; ++Level)
-				{
-					TriangleMultiplier *= 4;
-				}
-				return Levels > 0
+				return IntegerOr(Payload, TEXT("levels"), 1) > 0
 					&& After.TriangleCount
-						>= Before.TriangleCount * TriangleMultiplier;
+						== SubdividedTriangleCount(Payload, Before.TriangleCount);
 			}
 			if (OperationKey == TEXT("trim"))
 			{
@@ -1069,18 +1122,59 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 
 	bool FCarrierState::IsValid() const
 	{
-		return !TargetRef.IsEmpty()
-			&& !DurablePackageName.IsEmpty()
-			&& TargetRevision.IsSet()
-			&& TargetRevision->IsValid()
-			&& !CarrierKind.IsEmpty()
-			&& (CarrierKind != TEXT("dynamic_mesh_actor")
-				|| ActorGuid.IsValid())
-			&& !GeometryFingerprint.IsEmpty()
-			&& !BoundaryGeometryFingerprint.IsEmpty()
-			&& Bounds.IsValid
-			&& VertexCount > 0
-			&& TriangleCount > 0;
+		FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FCarrierState::TryValidate(FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		const auto RequireText = [&](const FString& Value, const TCHAR* Field)
+		{
+			if (!Value.IsEmpty()) return true;
+			OutError = BaselineFailure(Field, TEXT("nonempty string"), MakeShared<FJsonValueString>(Value));
+			OutError.TargetPath = TargetRef;
+			return false;
+		};
+		if (!RequireText(TargetRef, TEXT("baseline/target_ref"))
+			|| !RequireText(DurablePackageName, TEXT("durable_package_name"))) return false;
+		if (!TargetRevision.IsSet())
+		{
+			OutError = BaselineFailure(TEXT("baseline/target_revision"), TEXT("state revision"));
+			OutError.TargetPath = TargetRef;
+			return false;
+		}
+		if (!TargetRevision->IsValid())
+		{
+			OutError = TargetRevision->GetValidationDiagnostic();
+			LocateBaselineRevision(OutError);
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+			return false;
+		}
+		if (!RequireText(CarrierKind, TEXT("baseline/carrier_kind"))) return false;
+		if (CarrierKind == TEXT("dynamic_mesh_actor") && !ActorGuid.IsValid())
+		{
+			OutError = BaselineFailure(TEXT("baseline/actor_guid"), TEXT("nonzero actor GUID"),
+				MakeShared<FJsonValueString>(ActorGuid.ToString()), true);
+			OutError.TargetPath = TargetRef;
+			return false;
+		}
+		if (!RequireText(GeometryFingerprint, TEXT("baseline/geometry_fingerprint"))
+			|| !RequireText(BoundaryGeometryFingerprint, TEXT("baseline/boundary_geometry_fingerprint"))) return false;
+		if (!Bounds.IsValid)
+		{
+			OutError = BaselineFailure(TEXT("baseline/bounds"), TEXT("initialized bounds"));
+			OutError.TargetPath = TargetRef;
+			return false;
+		}
+		if (VertexCount <= 0 || TriangleCount <= 0)
+		{
+			OutError = BaselineFailure(VertexCount <= 0 ? TEXT("baseline/vertex_count") : TEXT("baseline/triangle_count"),
+				TEXT("positive count"), MakeShared<FJsonValueNumber>(VertexCount <= 0 ? VertexCount : TriangleCount));
+			OutError.TargetPath = TargetRef;
+			return false;
+		}
+		return true;
 	}
 
 	bool TryReadCarrier(
@@ -1088,26 +1182,37 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		IUeAgentModelingGeometryEffectReferenceResolver& Resolver,
 		const FString& TargetRef,
 		FCarrierState& OutState,
-		FString& OutErrorCode,
-		FString& OutErrorDetail)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutState = FCarrierState();
-		OutErrorCode.Reset();
-		OutErrorDetail.Reset();
+		OutError.Reset();
 		UObject* Object = nullptr;
 		FExecutionMutationError Error;
-		if (TargetRef.IsEmpty()
-			|| !Resolver.TryResolveReference(
-				World,
-				TargetRef,
-				Object,
-				Error)
-			|| !Object)
+		if (TargetRef.IsEmpty())
 		{
-			OutErrorCode = Error.GetCode().IsEmpty()
-				? TEXT("modeling_geometry_target_unresolved")
-				: Error.GetCode();
-			OutErrorDetail = Error.GetDetail();
+			OutError = FDiagnostic::Failure(TEXT("modeling_geometry_target_unresolved"),
+				TEXT("The Modeling capture target reference is empty."), TEXT("modeling_capture"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("target_ref");
+			OutError.ActualValue = MakeShared<FJsonValueString>(TargetRef);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty public reference"));
+			return false;
+		}
+		const bool bResolved = Resolver.TryResolveReference(World, TargetRef, Object, Error);
+		if (!bResolved || !Object)
+		{
+			OutError = Error;
+			if (OutError.IsEmpty())
+			{
+				OutError = FDiagnostic::Failure(TEXT("modeling_geometry_target_unresolved"),
+					bResolved ? TEXT("The Modeling reference resolver reported success without a target object.")
+						: TEXT("The Modeling reference resolver failed without returning a diagnostic."), TEXT("modeling_capture"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = TEXT("target_ref");
+				OutError.ActualValuePresent = Object != nullptr;
+				OutError.ExpectedValuePresent = true;
+			}
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 			return false;
 		}
 
@@ -1120,8 +1225,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				OutState.TargetRevision,
 				Error))
 		{
-			OutErrorCode = Error.GetCode();
-			OutErrorDetail = Error.GetDetail();
+			OutError = MoveTemp(Error);
 			return false;
 		}
 		if (ADynamicMeshActor* Actor =
@@ -1130,9 +1234,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			OutState.ActorGuid = Actor->GetActorGuid();
 			if (!OutState.ActorGuid.IsValid())
 			{
-				OutErrorCode =
-					TEXT("modeling_geometry_actor_guid_invalid");
-				OutErrorDetail = Actor->GetPathName();
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_geometry_actor_guid_invalid"), TEXT("The dynamic mesh actor has no valid actor identity."), TEXT("modeling_capture"));
+				OutError.TargetPath = Actor->GetPathName();
 				return false;
 			}
 			UDynamicMeshComponent* Component =
@@ -1141,8 +1244,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				Component ? Component->GetDynamicMesh() : nullptr;
 			if (!DynamicMesh)
 			{
-				OutErrorCode =
-					TEXT("modeling_geometry_dynamic_mesh_missing");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_geometry_dynamic_mesh_missing"), TEXT("The actor has no dynamic mesh."), TEXT("modeling_capture"));
 				return false;
 			}
 			OutState.CarrierKind =
@@ -1168,12 +1270,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			DynamicMesh->ProcessMesh(
 				[&](const FDynamicMesh3& Mesh)
 				{
-					bRead = ReadMeshState(Mesh, OutState);
+					bRead = ReadMeshState(Mesh, OutState, OutError);
 				});
 			if (!bRead)
 			{
-				OutErrorCode =
-					TEXT("modeling_geometry_dynamic_mesh_read_failed");
+				if (OutError.IsEmpty())
+				{
+					OutError = FDiagnostic::Failure(TEXT("modeling_geometry_dynamic_mesh_read_failed"),
+						TEXT("The dynamic mesh read produced neither a state nor a diagnostic."), TEXT("modeling_capture"));
+					OutError.SourceKind = TEXT("native_result");
+				}
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 				return false;
 			}
 			return true;
@@ -1185,8 +1292,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				StaticMesh->GetMeshDescription(0);
 			if (!Description)
 			{
-				OutErrorCode =
-					TEXT("modeling_geometry_static_mesh_source_missing");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_geometry_static_mesh_source_missing"), TEXT("The static mesh has no source mesh description."), TEXT("modeling_capture"));
 				return false;
 			}
 			FDynamicMesh3 Mesh;
@@ -1210,18 +1316,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			ReadCollisionState(
 				StaticMesh->GetBodySetup(),
 				OutState);
-			if (!ReadMeshState(Mesh, OutState))
+			if (!ReadMeshState(Mesh, OutState, OutError))
 			{
-				OutErrorCode =
-					TEXT("modeling_geometry_static_mesh_read_failed");
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 				return false;
 			}
 			return true;
 		}
 
-		OutErrorCode =
-			TEXT("modeling_geometry_carrier_kind_unsupported");
-		OutErrorDetail = Object->GetClass()->GetPathName();
+		OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_geometry_carrier_kind_unsupported"), TEXT("The target is not a supported dynamic mesh actor or static mesh asset."), TEXT("modeling_capture"));
+		OutError.TargetPath = Object->GetPathName();
+		OutError.InternalContext = Object->GetClass()->GetPathName();
 		return false;
 	}
 
@@ -1284,15 +1389,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		const FString& OperationKey,
 		const FCarrierState& State,
 		const TSharedPtr<FJsonObject>& Payload,
-		FString& OutErrorCode,
-		FString& OutErrorDetail)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
-		OutErrorCode.Reset();
-		OutErrorDetail.Reset();
-		if (!State.IsValid() || !Payload.IsValid())
+		OutError.Reset();
+		if (!State.TryValidate(OutError)) return false;
+		if (!Payload.IsValid())
 		{
-			OutErrorCode =
-				TEXT("modeling_geometry_baseline_evidence_invalid");
+			OutError = BaselineFailure(TEXT("evidence"), TEXT("object"));
+			OutError.TargetPath = State.TargetRef;
 			return false;
 		}
 		Payload->SetObjectField(
@@ -1306,21 +1410,28 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 			FString MaterialRef;
 			UObject* MaterialObject = nullptr;
 			FExecutionMutationError Error;
-			if (!Payload->TryGetStringField(
-					TEXT("material_ref"),
-					MaterialRef)
-				|| !Resolver.TryResolveReference(
-					World,
-					MaterialRef,
-					MaterialObject,
-					Error)
-				|| !Cast<UMaterialInterface>(MaterialObject))
+			if (!ReadString(Payload, TEXT("material_ref"), MaterialRef, OutError, TEXT("material_ref")))
 			{
-				OutErrorCode = Error.GetCode().IsEmpty()
-					? TEXT(
-						"modeling_geometry_material_reference_invalid")
-					: Error.GetCode();
-				OutErrorDetail = Error.GetDetail();
+				OutError.SourceKind = TEXT("command_input");
+				OutError.Source.JsonPath = TEXT("/material_ref");
+				return false;
+			}
+			const bool bResolved = Resolver.TryResolveReference(World, MaterialRef, MaterialObject, Error);
+			if (!bResolved || !Cast<UMaterialInterface>(MaterialObject))
+			{
+				OutError = Error;
+				if (OutError.IsEmpty())
+				{
+					OutError = FDiagnostic::Failure(TEXT("modeling_geometry_material_reference_invalid"),
+						!bResolved ? TEXT("The Modeling material resolver failed without a diagnostic.")
+							: TEXT("The Modeling material reference did not resolve to a material interface."), TEXT("modeling_capture"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = TEXT("material_ref");
+					OutError.ActualValuePresent = MaterialObject != nullptr;
+					if (MaterialObject) OutError.ActualValue = MakeShared<FJsonValueString>(MaterialObject->GetClass()->GetPathName());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("/Script/Engine.MaterialInterface"));
+				}
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = MaterialRef;
 				return false;
 			}
 			Payload->SetStringField(
@@ -1330,180 +1441,113 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		return true;
 	}
 
-	bool TryReadBaseline(
-		const TSharedPtr<FJsonObject>& Payload,
-		FCarrierState& OutState)
+	bool TryReadBaseline(const TSharedPtr<FJsonObject>& Payload, FCarrierState& OutState, FDiagnostic& OutError)
 	{
 		OutState = FCarrierState();
+		OutError.Reset();
+		if (!Payload.IsValid())
+		{
+			OutError = BaselineFailure(TEXT("evidence"), TEXT("object"));
+			return false;
+		}
+		if (!TryReadDurablePackageNameEvidence(Payload, OutState.DurablePackageName, OutError)) return false;
 		const TSharedPtr<FJsonObject>* Baseline = nullptr;
-		TArray<double> BoundsMin;
-		TArray<double> BoundsMax;
-		TArray<double> CollisionBoundsMin;
-		TArray<double> CollisionBoundsMax;
+		if (!Payload->TryGetObjectField(BaselineField, Baseline) || !Baseline || !Baseline->IsValid())
+		{
+			OutError = BaselineFailure(TEXT("baseline"), TEXT("object"), Payload->TryGetField(BaselineField));
+			return false;
+		}
+		if (!ReadString(*Baseline, TEXT("target_ref"), OutState.TargetRef, OutError, TEXT("baseline/target_ref"))) return false;
 		const TSharedPtr<FJsonObject>* TargetRevision = nullptr;
-		bool bCollisionBoundsValid = false;
+		if (!(*Baseline)->TryGetObjectField(TEXT("target_revision"), TargetRevision) || !TargetRevision)
+		{
+			OutError = BaselineFailure(TEXT("baseline/target_revision"), TEXT("object"), (*Baseline)->TryGetField(TEXT("target_revision")), true);
+			return false;
+		}
+		if (!StateSemantic::FUeAgentStateRevisionJson::TryParse(*TargetRevision, OutState.TargetRevision, OutError))
+		{
+			LocateBaselineRevision(OutError);
+			return false;
+		}
 		double VertexChecksum = 0.0;
-		if (!Payload.IsValid()
-			|| !TryReadDurablePackageNameEvidence(
-				Payload,
-				OutState.DurablePackageName)
-			|| !Payload->TryGetObjectField(
-				BaselineField,
-				Baseline)
-			|| !Baseline
-			|| !Baseline->IsValid()
-			|| !(*Baseline)->TryGetStringField(
-				TEXT("target_ref"),
-				OutState.TargetRef)
-			|| !(*Baseline)->TryGetObjectField(
-				TEXT("target_revision"),
-				TargetRevision)
-			|| !TargetRevision
-			|| !StateSemantic::FUeAgentStateRevisionJson::TryParse(
-				*TargetRevision,
-				OutState.TargetRevision)
-			|| !(*Baseline)->TryGetStringField(
-				TEXT("carrier_kind"),
-				OutState.CarrierKind)
-			|| !(*Baseline)->TryGetStringField(
-				TEXT("geometry_fingerprint"),
-				OutState.GeometryFingerprint)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("vertex_count"),
-				OutState.VertexCount)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("triangle_count"),
-				OutState.TriangleCount)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("edge_count"),
-				OutState.EdgeCount)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("boundary_edge_count"),
-				OutState.BoundaryEdgeCount)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("boundary_vertex_count"),
-				OutState.BoundaryVertexCount)
-			|| !(*Baseline)->TryGetStringField(
-				TEXT("boundary_geometry_fingerprint"),
-				OutState.BoundaryGeometryFingerprint)
-			|| !(*Baseline)->TryGetNumberField(
-				TEXT("vertex_checksum"),
-				VertexChecksum)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("material_slot_count"),
-				OutState.MaterialSlotCount)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("connected_component_count"),
-				OutState.ConnectedComponentCount)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("collision_shape_count"),
-				OutState.CollisionShapeCount)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("collision_box_count"),
-				OutState.CollisionBoxCount)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("collision_sphere_count"),
-				OutState.CollisionSphereCount)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("collision_capsule_count"),
-				OutState.CollisionCapsuleCount)
-			|| !TryReadInteger(
-				*Baseline,
-				TEXT("collision_convex_count"),
-				OutState.CollisionConvexCount)
-			|| !TryReadNumberArray(
-				*Baseline,
-				TEXT("bounds_min"),
-				3,
-				BoundsMin)
-			|| !TryReadNumberArray(
-				*Baseline,
-				TEXT("bounds_max"),
-				3,
-				BoundsMax)
-			|| !(*Baseline)->TryGetBoolField(
-				TEXT("collision_bounds_valid"),
-				bCollisionBoundsValid)
-			|| !TryReadNumberArray(
-				*Baseline,
-				TEXT("collision_bounds_min"),
-				3,
-				CollisionBoundsMin)
-			|| !TryReadNumberArray(
-				*Baseline,
-				TEXT("collision_bounds_max"),
-				3,
-				CollisionBoundsMax))
+		const auto ReadChecksum = [&]()
 		{
+			if ((*Baseline)->TryGetNumberField(TEXT("vertex_checksum"), VertexChecksum)) return true;
+			OutError = BaselineFailure(TEXT("baseline/vertex_checksum"), TEXT("number"), (*Baseline)->TryGetField(TEXT("vertex_checksum")), true);
+			return false;
+		};
+		if (!ReadString(*Baseline, TEXT("carrier_kind"), OutState.CarrierKind, OutError, TEXT("baseline/carrier_kind"))
+			|| !ReadString(*Baseline, TEXT("geometry_fingerprint"), OutState.GeometryFingerprint, OutError, TEXT("baseline/geometry_fingerprint"), true)
+			|| !TryReadInteger(*Baseline, TEXT("vertex_count"), OutState.VertexCount, OutError, TEXT("baseline"))
+			|| !TryReadInteger(*Baseline, TEXT("triangle_count"), OutState.TriangleCount, OutError, TEXT("baseline"))
+			|| !TryReadInteger(*Baseline, TEXT("edge_count"), OutState.EdgeCount, OutError, TEXT("baseline"))
+			|| !TryReadInteger(*Baseline, TEXT("boundary_edge_count"), OutState.BoundaryEdgeCount, OutError, TEXT("baseline"))
+			|| !TryReadInteger(*Baseline, TEXT("boundary_vertex_count"), OutState.BoundaryVertexCount, OutError, TEXT("baseline"))
+			|| !ReadString(*Baseline, TEXT("boundary_geometry_fingerprint"), OutState.BoundaryGeometryFingerprint, OutError, TEXT("baseline/boundary_geometry_fingerprint"), true)
+			|| !ReadChecksum()
+			|| !TryReadInteger(*Baseline, TEXT("material_slot_count"), OutState.MaterialSlotCount, OutError, TEXT("baseline"))
+			|| !TryReadInteger(*Baseline, TEXT("connected_component_count"), OutState.ConnectedComponentCount, OutError, TEXT("baseline"))
+			|| !TryReadInteger(*Baseline, TEXT("collision_shape_count"), OutState.CollisionShapeCount, OutError, TEXT("baseline"))
+			|| !TryReadInteger(*Baseline, TEXT("collision_box_count"), OutState.CollisionBoxCount, OutError, TEXT("baseline"))
+			|| !TryReadInteger(*Baseline, TEXT("collision_sphere_count"), OutState.CollisionSphereCount, OutError, TEXT("baseline"))
+			|| !TryReadInteger(*Baseline, TEXT("collision_capsule_count"), OutState.CollisionCapsuleCount, OutError, TEXT("baseline"))
+			|| !TryReadInteger(*Baseline, TEXT("collision_convex_count"), OutState.CollisionConvexCount, OutError, TEXT("baseline")))
+			return false;
+		TArray<double> BoundsMin, BoundsMax, CollisionBoundsMin, CollisionBoundsMax;
+		if (!TryReadNumberArray(*Baseline, TEXT("bounds_min"), 3, BoundsMin, OutError, TEXT("baseline"))
+			|| !TryReadNumberArray(*Baseline, TEXT("bounds_max"), 3, BoundsMax, OutError, TEXT("baseline"))) return false;
+		bool bCollisionBoundsValid = false;
+		if (!(*Baseline)->TryGetBoolField(TEXT("collision_bounds_valid"), bCollisionBoundsValid))
+		{
+			OutError = BaselineFailure(TEXT("baseline/collision_bounds_valid"), TEXT("boolean"), (*Baseline)->TryGetField(TEXT("collision_bounds_valid")));
 			return false;
 		}
-		if (!TryReadNormalSplitTopology(*Baseline, OutState))
-		{
-			return false;
-		}
+		if (!TryReadNumberArray(*Baseline, TEXT("collision_bounds_min"), 3, CollisionBoundsMin, OutError, TEXT("baseline"))
+			|| !TryReadNumberArray(*Baseline, TEXT("collision_bounds_max"), 3, CollisionBoundsMax, OutError, TEXT("baseline"))
+			|| !TryReadNormalSplitTopology(*Baseline, OutState, OutError)) return false;
 		if (OutState.CarrierKind == TEXT("dynamic_mesh_actor"))
 		{
 			FString ActorGuid;
-			if (!(*Baseline)->TryGetStringField(
-					TEXT("actor_guid"),
-					ActorGuid)
-				|| !FGuid::Parse(ActorGuid, OutState.ActorGuid)
-				|| !OutState.ActorGuid.IsValid())
+			if (!ReadString(*Baseline, TEXT("actor_guid"), ActorGuid, OutError, TEXT("baseline/actor_guid"), true)) return false;
+			if (!FGuid::Parse(ActorGuid, OutState.ActorGuid) || !OutState.ActorGuid.IsValid())
 			{
+				OutError = BaselineFailure(TEXT("baseline/actor_guid"), TEXT("nonzero actor GUID"), MakeShared<FJsonValueString>(ActorGuid), true);
 				return false;
 			}
 		}
-		OutState.VertexChecksum =
-			FMath::RoundToInt64(VertexChecksum);
-		OutState.Bounds = FBox(
-			FVector(BoundsMin[0], BoundsMin[1], BoundsMin[2]),
-			FVector(BoundsMax[0], BoundsMax[1], BoundsMax[2]));
+		OutState.VertexChecksum = FMath::RoundToInt64(VertexChecksum);
+		OutState.Bounds = FBox(FVector(BoundsMin[0], BoundsMin[1], BoundsMin[2]), FVector(BoundsMax[0], BoundsMax[1], BoundsMax[2]));
 		if (bCollisionBoundsValid)
-		{
-			OutState.CollisionBounds = FBox(
-				FVector(
-					CollisionBoundsMin[0],
-					CollisionBoundsMin[1],
-					CollisionBoundsMin[2]),
-				FVector(
-					CollisionBoundsMax[0],
-					CollisionBoundsMax[1],
-					CollisionBoundsMax[2]));
-		}
-		return OutState.IsValid();
+			OutState.CollisionBounds = FBox(FVector(CollisionBoundsMin[0], CollisionBoundsMin[1], CollisionBoundsMin[2]),
+				FVector(CollisionBoundsMax[0], CollisionBoundsMax[1], CollisionBoundsMax[2]));
+		return OutState.TryValidate(OutError);
 	}
 
-	bool TryReadDurablePackageNameEvidence(
-		const TSharedPtr<FJsonObject>& Payload,
-		FString& OutPackageName)
+	bool TryReadDurablePackageNameEvidence(const TSharedPtr<FJsonObject>& Payload,
+		FString& OutPackageName, FDiagnostic& OutError)
 	{
 		OutPackageName.Reset();
-		return Payload.IsValid()
-			&& Payload->TryGetStringField(
-				DurablePackageNameField,
-				OutPackageName)
-			&& !OutPackageName.IsEmpty();
+		if (Payload.IsValid() && Payload->TryGetStringField(DurablePackageNameField, OutPackageName) && !OutPackageName.IsEmpty()) return true;
+		OutError = BaselineFailure(TEXT("durable_package_name"), TEXT("nonempty package name"),
+			Payload.IsValid() ? Payload->TryGetField(DurablePackageNameField) : nullptr);
+		return false;
 	}
 
 	TSharedPtr<FJsonObject> BuildExpectedVerificationState(
 		const FString& OperationKey,
-		const FCarrierState& Baseline)
+		const FCarrierState& Baseline,
+		const TSharedPtr<FJsonObject>& Payload)
 	{
-		return BuildVerificationState(
+		TSharedPtr<FJsonObject> State = BuildVerificationState(
 			OperationKey,
 			Baseline,
 			true);
+		if (OperationKey == TEXT("subdivide"))
+		{
+			State->SetNumberField(TEXT("triangle_count"),
+				SubdividedTriangleCount(Payload, Baseline.TriangleCount));
+		}
+		return State;
 	}
 
 	TSharedPtr<FJsonObject> BuildActualVerificationState(
@@ -1512,7 +1556,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 		const FCarrierState& Baseline,
 		const FCarrierState& Actual)
 	{
-		return BuildVerificationState(
+		TSharedPtr<FJsonObject> State = BuildVerificationState(
 			OperationKey,
 			Baseline,
 			SemanticMatches(
@@ -1520,5 +1564,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::Modeling::ExistingEdit
 				Payload,
 				Baseline,
 				Actual));
+		if (OperationKey == TEXT("subdivide"))
+		{
+			State->SetNumberField(TEXT("triangle_count"), Actual.TriangleCount);
+		}
+		return State;
 	}
 }

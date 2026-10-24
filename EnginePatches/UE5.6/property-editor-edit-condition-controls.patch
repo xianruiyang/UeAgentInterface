@@ -1,0 +1,214 @@
+--- a/Engine/Source/Editor/PropertyEditor/Private/EditConditionContext.cpp
++++ b/Engine/Source/Editor/PropertyEditor/Private/EditConditionContext.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "EditConditionContext.h"
+ #include "EditConditionParser.h"
++#include "HAL/IConsoleManager.h"
+ 
+ #include "ObjectPropertyNode.h"
+ #include "PropertyNode.h"
+@@ -10,6 +11,16 @@
+ 
+ DEFINE_LOG_CATEGORY(LogEditCondition);
+ 
++namespace UE::PropertyEditor::Private
++{
++	static bool bShowInlineEditConditionToggleWhenNotSpecifiedAndNotEditable = true;
++	static FAutoConsoleVariableRef CVarShowInlineEditConditionToggleWhenNotSpecifiedAndNotEditable(
++		TEXT("PropertyEditor.ShowInlineEditConditionToggleWhenNotSpecifiedAndNotEditable"),
++		bShowInlineEditConditionToggleWhenNotSpecifiedAndNotEditable,
++		TEXT("Enables legacy behavior to show the InlineEditConditionToggle when the edit condition property does not have this specifier and is not editable.")
++	);
++}
++
+ FEditConditionContext::FEditConditionContext(FPropertyNode& InPropertyNode)
+ {
+ 	PropertyNode = InPropertyNode.AsShared();
+@@ -29,13 +40,12 @@
+ const FBoolProperty* FEditConditionContext::GetSingleBoolProperty(const TSharedPtr<FEditConditionExpression>& Expression) const
+ {
+ 	TSharedPtr<FPropertyNode> PinnedNode = PropertyNode.Pin();
+-	if (!PinnedNode.IsValid())
+-	{
+-		return nullptr;
+-	}
+-
+-	const FProperty* Property = PinnedNode->GetProperty();
+-	if (Property == nullptr)
++	return GetSingleBoolProperty(PinnedNode.IsValid() ? PinnedNode->GetProperty() : nullptr, Expression);
++}
++
++const FBoolProperty* FEditConditionContext::GetSingleBoolProperty(const FProperty* Property, const TSharedPtr<FEditConditionExpression>& Expression)
++{
++	if (!Property || !Expression.IsValid())
+ 	{
+ 		return nullptr;
+ 	}
+@@ -61,6 +71,29 @@
+ 	}
+ 
+ 	return BoolProperty;
++}
++
++const FBoolProperty* FEditConditionContext::GetToggleProperty(const FProperty* Property, const TSharedPtr<FEditConditionExpression>& Expression)
++{
++	if (!Property || Property->HasMetaData(TEXT("HideEditConditionToggle"))) return nullptr;
++	const FBoolProperty* ConditionalProperty = GetSingleBoolProperty(Property, Expression);
++	if (!ConditionalProperty) return nullptr;
++	const bool bIsInlineEditCondition = ConditionalProperty->HasMetaData(TEXT("InlineEditConditionToggle"));
++	const bool bIsEditable = ConditionalProperty->HasAllPropertyFlags(CPF_Edit);
++	if (UE::PropertyEditor::Private::bShowInlineEditConditionToggleWhenNotSpecifiedAndNotEditable
++		&& bIsInlineEditCondition == bIsEditable)
++	{
++		return ConditionalProperty;
++	}
++	if (bIsInlineEditCondition)
++	{
++		if (!bIsEditable)
++		{
++			UE_LOG(LogPropertyNode, Warning, TEXT("Property being used as inline edit condition is not editable, but has InlineEditConditionToggle flag. Field \"%s\" in class \"%s\"."), *ConditionalProperty->GetNameCPP(), *Property->GetOwnerStruct()->GetName());
++		}
++		return ConditionalProperty;
++	}
++	return nullptr;
+ }
+ 
+ const TWeakObjectPtr<UFunction> FEditConditionContext::GetFunction(const FString& FieldName) const
+--- a/Engine/Source/Editor/PropertyEditor/Private/EditConditionContext.h
++++ b/Engine/Source/Editor/PropertyEditor/Private/EditConditionContext.h
+@@ -34,6 +34,7 @@
+ };
+ 
+ class FProperty;
++class FBoolProperty;
+ class FPropertyNode;
+ class FComplexPropertyNode;
+ class FEditConditionExpression;
+@@ -61,6 +62,8 @@
+ 	 * Returns nullptr if more than one property is referenced.
+ 	 */
+ 	const FBoolProperty* GetSingleBoolProperty(const TSharedPtr<FEditConditionExpression>& Expression) const;
++	static const FBoolProperty* GetSingleBoolProperty(const FProperty* Property, const TSharedPtr<FEditConditionExpression>& Expression);
++	static const FBoolProperty* GetToggleProperty(const FProperty* Property, const TSharedPtr<FEditConditionExpression>& Expression);
+ 
+ private:
+ 	TWeakPtr<FPropertyNode> PropertyNode;
+--- a/Engine/Source/Editor/PropertyEditor/Private/PropertyEditorModule.cpp
++++ b/Engine/Source/Editor/PropertyEditor/Private/PropertyEditorModule.cpp
+@@ -3,6 +3,8 @@
+ #include "PropertyEditorModule.h"
+ #include "AssetToolsModule.h"
+ #include "DetailRowMenuContextPrivate.h"
++#include "EditConditionContext.h"
++#include "EditConditionParser.h"
+ #include "IAssetTools.h"
+ #include "IDetailsView.h"
+ #include "IPropertyChangeListener.h"
+@@ -36,6 +38,13 @@
+ #include "IStructureDataProvider.h"
+ 
+ IMPLEMENT_MODULE( FPropertyEditorModule, PropertyEditor );
++
++const FBoolProperty* FPropertyEditorModule::GetEditConditionToggleProperty(const FProperty* Property) const
++{
++	if (!Property || !Property->HasMetaData(TEXT("EditCondition"))) return nullptr;
++	static const FEditConditionParser Parser;
++	return FEditConditionContext::GetToggleProperty(Property, Parser.Parse(Property->GetMetaData(TEXT("EditCondition"))));
++}
+ 
+ TSharedRef<IPropertyTypeCustomization> FPropertyTypeLayoutCallback::GetCustomizationInstance() const
+ {
+--- a/Engine/Source/Editor/PropertyEditor/Private/PropertyNode.cpp
++++ b/Engine/Source/Editor/PropertyEditor/Private/PropertyNode.cpp
+@@ -32,16 +32,6 @@
+ #include "UObject/UObjectArchetypeHelper.h"
+ 
+ #define LOCTEXT_NAMESPACE "PropertyNode"
+-
+-namespace UE::PropertyEditor::Private
+-{
+-	static bool bShowInlineEditConditionToggleWhenNotSpecifiedAndNotEditable = true;
+-	static FAutoConsoleVariableRef CVarShowInlineEditConditionToggleWhenNotSpecifiedAndNotEditable(
+-		TEXT("PropertyEditor.ShowInlineEditConditionToggleWhenNotSpecifiedAndNotEditable"),
+-		bShowInlineEditConditionToggleWhenNotSpecifiedAndNotEditable,
+-		TEXT("Enables legacy behavior to show the InlineEditConditionToggle when the edit condition property does not have this specifier and is not editable.")
+-	);
+-}
+ 
+ namespace PropertyEditorPolicy
+ {
+@@ -1498,48 +1488,7 @@
+ 
+ bool FPropertyNode::SupportsEditConditionToggle() const
+ {
+-	if (!Property.IsValid())
+-	{
+-		return false;
+-	}
+-
+-	FProperty* MyProperty = Property.Get();
+-
+-	static const FName Name_HideEditConditionToggle("HideEditConditionToggle");
+-	if (EditConditionExpression.IsValid() && !Property->HasMetaData(Name_HideEditConditionToggle))
+-	{
+-		const FBoolProperty* ConditionalProperty = EditConditionContext->GetSingleBoolProperty(EditConditionExpression);
+-		if (ConditionalProperty != nullptr)
+-		{
+-			static const FName Name_InlineEditConditionToggle("InlineEditConditionToggle");
+-			const bool bIsInlineEditCondition = ConditionalProperty->HasMetaData(Name_InlineEditConditionToggle);
+-			const bool bIsEditable = ConditionalProperty->HasAllPropertyFlags(CPF_Edit);
+-			
+-			// Support for legacy behavior ( case 2. in the comment below ) if enabled
+-			if (UE::PropertyEditor::Private::bShowInlineEditConditionToggleWhenNotSpecifiedAndNotEditable)
+-			{
+-				// There are 2 valid states for inline edit conditions:
+-				// 1. The property is marked as editable and has InlineEditConditionToggle set. 
+-				// 2. The property is not marked as editable and does not have InlineEditConditionToggle set.
+-				// In both cases, the original property will be hidden and only show up as a toggle.
+-				if (bIsInlineEditCondition == bIsEditable)
+-				{
+-					return true;
+-				}
+-			}
+-			
+-			if (bIsInlineEditCondition)
+-			{
+-				if (!bIsEditable)
+-				{
+-					UE_LOG(LogPropertyNode, Warning, TEXT("Property being used as inline edit condition is not editable, but has InlineEditConditionToggle flag. Field \"%s\" in class \"%s\"."), *ConditionalProperty->GetNameCPP(), *Property->GetOwnerStruct()->GetName());
+-				}
+-				return true;
+-			}
+-		}
+-	}
+-
+-	return false;
++	return FEditConditionContext::GetToggleProperty(Property.Get(), EditConditionExpression) != nullptr;
+ }
+ 
+ void FPropertyNode::ToggleEditConditionState()
+--- a/Engine/Source/Editor/PropertyEditor/Public/PropertyEditorModule.h
++++ b/Engine/Source/Editor/PropertyEditor/Public/PropertyEditorModule.h
+@@ -14,7 +14,9 @@
+ #include "Misc/Optional.h"
+ 
+ class FAssetEditorToolkit;
++class FBoolProperty;
+ class FNotifyHook;
++class FProperty;
+ class IPropertyHandle;
+ class IPropertyTable;
+ class IPropertyTableCellPresenter;
+@@ -237,6 +239,11 @@
+ 	 * Called by the module manager right before this module is unloaded
+ 	 */
+ 	virtual void ShutdownModule();
++
++	/** Returns the boolean exposed by this property's native edit-condition toggle, if any.
++	 * Uses the same parsed expression and toggle policy as Details without creating a view.
++	 * Resolves the control only; it does not evaluate the condition or change a value. */
++	PROPERTYEDITOR_API const FBoolProperty* GetEditConditionToggleProperty(const FProperty* Property) const;
+ 
+ 	/**
+ 	 * Refreshes property windows with a new list of objects to view

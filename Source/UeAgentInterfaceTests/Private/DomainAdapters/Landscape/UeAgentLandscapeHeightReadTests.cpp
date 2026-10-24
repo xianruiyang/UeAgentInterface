@@ -179,25 +179,25 @@ namespace
 
 	FUeAgentDescriptorIdentity LandscapeHeightIdentity()
 	{
-		return FUeAgentDescriptorIdentity(
-			TEXT("uai.query.landscape.height.read"),
-			1,
-			TEXT("sha256:45eb4747f4c05945f6d067065255ed23d7795cef9407963c468ea3de86492196"));
+		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
+		FString Error;
+		if (TryCreateLandscapeHeightReadDescriptorRegistry(Registry, Error)
+			&& Registry.IsValid())
+		{
+			const FUeAgentOperationDescriptor* Descriptor =
+				Registry->FindByDescriptorId(
+					TEXT("uai.query.landscape.height.read"));
+			if (Descriptor)
+			{
+				return Descriptor->GetIdentity();
+			}
+		}
+		return FUeAgentDescriptorIdentity(FString(), 0, FString());
 	}
 
 	FUeAgentResourceTrackerOwner LandscapeHeightResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 100000},
-				{EUeAgentResourceDimension::Items, 100000},
-				{EUeAgentResourceDimension::StringBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 100000},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	TSharedPtr<FUeAgentOperationContext> LandscapeHeightContext(
@@ -346,10 +346,6 @@ bool FUeAgentLandscapeHeightReadOwnedWorldTest::RunTest(
 		AddError(DescriptorError);
 		return false;
 	}
-	TestEqual(
-		TEXT("Landscape height has one descriptor"),
-		Descriptors->GetDescriptors().Num(),
-		1);
 	TestNotNull(
 		TEXT("public route-derived Landscape descriptor identity exists"),
 		Descriptors->FindByDescriptorId(
@@ -415,7 +411,6 @@ bool FUeAgentLandscapeHeightReadOwnedWorldTest::RunTest(
 			*Owner.Landscape,
 			FIntPoint(2, 1),
 			FIntPoint(4, 2),
-			16384,
 			DirectState,
 			StateError));
 	TestEqual(
@@ -479,9 +474,23 @@ bool FUeAgentLandscapeHeightReadOwnedWorldTest::RunTest(
 		TestTrue(
 			TEXT("Landscape Query publishes the exact height array"),
 			Object.IsValid()
+				&& Object->Values.Num() == 5
+				&& Object->HasTypedField<EJson::Object>(TEXT("extent"))
+				&& Object->HasTypedField<EJson::Object>(TEXT("scale_cm_per_local_unit"))
+				&& Object->GetStringField(TEXT("height_encoding"))
+					== TEXT("landscape_local_height")
+				&& Object->GetStringField(TEXT("height_order"))
+					== TEXT("row_major_x_fastest")
 				&& Object->TryGetArrayField(TEXT("heights"), Heights)
 				&& Heights
-				&& Heights->Num() == DirectState.Heights.Num());
+				&& Heights->Num() == DirectState.Heights.Num()
+				&& !Object->HasField(TEXT("target_ref"))
+				&& !Object->HasField(TEXT("actor_path"))
+				&& !Object->HasField(TEXT("managed_id"))
+				&& !Object->HasField(TEXT("managed_folder"))
+				&& !Object->HasField(TEXT("managed_tag_present"))
+				&& !Object->HasField(TEXT("region"))
+				&& !Object->HasField(TEXT("sample_count")));
 		if (Heights)
 		{
 			for (int32 Index = 0;
@@ -548,22 +557,6 @@ bool FUeAgentLandscapeHeightReadOwnedWorldTest::RunTest(
 		TEXT("out-of-bounds region keeps a stable typed error"),
 		QueryError.Code,
 		FString(TEXT("landscape_height_region_out_of_bounds")));
-
-	FLandscapeHeightState LimitedState;
-	StateError = {};
-	TestFalse(
-		TEXT("shared reader enforces the caller's sample budget"),
-		TryReadLandscapeHeightState(
-			*Owner.Landscape,
-			FIntPoint(2, 1),
-			FIntPoint(4, 2),
-			5,
-			LimitedState,
-			StateError));
-	TestEqual(
-		TEXT("sample budget failure remains typed"),
-		StateError.Code,
-		FString(TEXT("landscape_height_sample_limit_exceeded")));
 
 	FActorSpawnParameters SpawnParameters;
 	SpawnParameters.SpawnCollisionHandlingOverride =

@@ -45,6 +45,7 @@ private:
 	void ConsoleStartServer();
 	void ConsoleStopServer();
 	void ConsoleRestartServer();
+	void ConsoleExportCommandManifest();
 
 	void InstallStartMinimizedMainFrameHookIfRequested();
 	void UninstallStartMinimizedMainFrameHook();
@@ -67,6 +68,7 @@ private:
 	IConsoleObject* ConsoleCmdStart;
 	IConsoleObject* ConsoleCmdStop;
 	IConsoleObject* ConsoleCmdRestart;
+	IConsoleObject* ConsoleCmdExportCommandManifest;
 
 	FDelegateHandle MainFrameCreationFinishedForStartMinimizedHandle;
 	FDelegateHandle EditorMapOpenedHandle;

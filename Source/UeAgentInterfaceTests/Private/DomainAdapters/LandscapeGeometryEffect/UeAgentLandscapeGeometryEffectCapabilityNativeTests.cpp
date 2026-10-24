@@ -415,22 +415,7 @@ namespace
 	{
 		return MakeShared<
 			FUeAgentResourceTracker,
-			ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1048576},
-				{EUeAgentResourceDimension::OutputBytes, 1048576},
-				{EUeAgentResourceDimension::StringBytes, 1048576},
-				{EUeAgentResourceDimension::Nodes, 16384},
-				{EUeAgentResourceDimension::Items, 16384},
-				{EUeAgentResourceDimension::Files, 64},
-				{EUeAgentResourceDimension::ReferenceEdges, 16384},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{
-					EUeAgentResourceDimension::
-						EstimatedMemoryBytes,
-					33554432,
-				},
-			}));
+			ESPMode::ThreadSafe>();
 	}
 
 	bool TryCanonicalValue(

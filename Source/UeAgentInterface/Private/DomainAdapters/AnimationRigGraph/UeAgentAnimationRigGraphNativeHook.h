@@ -34,6 +34,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		double Minimum = 0.0;
 		double Maximum = 0.0;
 		int32 GridDivisions = 0;
+		FString InputPointer;
 	};
 
 	struct FAnimationRigGraphBlendSampleMutation final
@@ -42,6 +43,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FVector Coordinates = FVector::ZeroVector;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		FString InputPointer;
+		FString AnimationRef;
 	};
 
 	struct FAnimationRigGraphSkeletonBoneMutation final
@@ -50,6 +53,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FName ParentBone;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		FString InputPointer;
+		bool bHasParentBoneInput = false;
 	};
 
 	struct FAnimationRigGraphSkeletonCompatibilityMutation final
@@ -57,6 +62,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		USkeleton* CompatibleSkeleton = nullptr;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		FString InputPointer;
 	};
 
 	struct FAnimationRigGraphSkeletonVirtualBoneMutation final
@@ -66,6 +72,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FName TargetBone;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		FString InputPointer;
 	};
 
 	struct FAnimationRigGraphControlMutation final
@@ -75,13 +82,14 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FString ControlTypeRef;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		FString InputPointer;
 	};
 
 	struct FAnimationRigGraphUnitMutation final
 	{
 		FName NodeName;
 		FString CandidateName;
-		FString CandidateId;
+		TMap<FString, FString> CandidateSelect;
 		FString ScriptStructRef;
 		FName MethodName = TEXT("Execute");
 		FVector2D Position = FVector2D::ZeroVector;
@@ -89,6 +97,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		bool bHasMethodAssertion = false;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		FString InputPointer;
+		bool bHasMethodInput = false;
 	};
 
 	struct FAnimationRigGraphShapeMutation final
@@ -99,6 +109,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		int32 OrderIndex = INDEX_NONE;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		// Authored edit-value pointer, supplied by the input owner when available.
+		FString InputPointer;
 	};
 
 	struct FAnimationRigGraphIkGoalMutation final
@@ -107,6 +119,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FName BoneName;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		FString InputPointer;
 	};
 
 	struct FAnimationRigGraphIkSolverMutation final
@@ -115,6 +128,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		int32 OrderIndex = INDEX_NONE;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		FString InputPointer;
 	};
 
 	struct FAnimationRigGraphIkChainMutation final
@@ -125,6 +139,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FName GoalName;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		FString InputPointer;
 	};
 
 	struct FAnimationRigGraphRetargetMappingMutation final
@@ -135,6 +150,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		int32 OrderIndex = INDEX_NONE;
 		EAnimationRigGraphMutationIntent Intent =
 			EAnimationRigGraphMutationIntent::Create;
+		FString InputPointer;
 	};
 
 	struct FAnimationRigGraphRetargetSettingMutation final
@@ -143,6 +159,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 		FName ChainName;
 		FString SettingName;
 		FString Value;
+		FString InputPointer;
 	};
 
 	class FAnimationRigGraphNativeMutationReceipt final
@@ -225,7 +242,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			FAnimationRigGraphTopology& OutTopology,
 			FString& OutRevision,
 			FString& OutEvidenceId,
-			FAnimationRigGraphAdapterError& OutError) const;
+			FAnimationRigGraphAdapterError& OutError,
+			const FString& GraphNameInputPointer = FString()) const;
 
 		bool TryConfigureValidateAndCaptureBlendSpace(
 			UBlendSpace& BlendSpace,
@@ -345,7 +363,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			FAnimationRigGraphTopology& OutTopology,
 			FString& OutRevision,
 			FString& OutEvidenceId,
-			FAnimationRigGraphAdapterError& OutError) const;
+			FAnimationRigGraphAdapterError& OutError,
+			const FString& CommentNodeInputPointer = FString()) const;
 
 		bool TryConfigureValidateAndCaptureMeshDeformerCollection(
 			UMeshDeformerCollection& Collection,
@@ -382,7 +401,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			FAnimationRigGraphTopology& OutTopology,
 			FString& OutRevision,
 			FString& OutEvidenceId,
-			FAnimationRigGraphAdapterError& OutError) const;
+			FAnimationRigGraphAdapterError& OutError, const FString& RootInputPointer = FString()) const;
 
 		bool TryApplyAndCaptureIKRigAutoGenerate(
 			UIKRigDefinition& Rig,
@@ -393,7 +412,7 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			FAnimationRigGraphTopology& OutTopology,
 			FString& OutRevision,
 			FString& OutEvidenceId,
-			FAnimationRigGraphAdapterError& OutError) const;
+			FAnimationRigGraphAdapterError& OutError, const FString& InputPointer = FString()) const;
 
 		bool TryConfigureValidateAndCaptureIKRetargeter(
 			UIKRetargeter& Retargeter,
@@ -417,7 +436,8 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 			FAnimationRigGraphTopology& OutTopology,
 			FString& OutRevision,
 			FString& OutEvidenceId,
-			FAnimationRigGraphAdapterError& OutError) const;
+			FAnimationRigGraphAdapterError& OutError, const FString& SourceRigInputPointer = FString(),
+			const FString& TargetRigInputPointer = FString()) const;
 
 		bool TryApplyAndCaptureIKRetargeterSettings(
 			UIKRetargeter& Retargeter,

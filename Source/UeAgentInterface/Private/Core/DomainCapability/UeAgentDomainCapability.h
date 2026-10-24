@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
@@ -49,25 +51,7 @@ namespace UE::UAI::DomainCapability
 		RecoverableSession,
 	};
 
-	class UEAGENTINTERFACE_API FDomainOperationInvocationError final
-	{
-	public:
-		FDomainOperationInvocationError() = default;
-		FDomainOperationInvocationError(
-			FString InCode,
-			FString InSubjectId = FString(),
-			FString InDetail = FString());
-
-		const FString& GetCode() const;
-		const FString& GetSubjectId() const;
-		const FString& GetDetail() const;
-		bool IsPresent() const;
-
-	private:
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FDomainOperationInvocationError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IDomainOperationInvocationContext
 	{
@@ -77,12 +61,9 @@ namespace UE::UAI::DomainCapability
 		virtual bool TryBuildSuccessPayload(
 			const BindingGateway::Operation::FOperationLifecycleReceipt& Receipt,
 			FString& OutPayloadJson,
-			FString& OutError) const = 0;
+			UE::UAI::Contract::FDiagnostic& OutError) const = 0;
 
-		virtual FString GetFailureDetail() const
-		{
-			return FString();
-		}
+		
 	};
 
 	class UEAGENTINTERFACE_API FDomainOperationInvocation final
@@ -269,13 +250,6 @@ namespace UE::UAI::DomainCapability
 		TArray<FDomainSemanticSurfaceEntry> Surfaces;
 	};
 
-	struct UEAGENTINTERFACE_API FDomainMigrationCapability
-	{
-		EDomainCapabilitySupport Support =
-			EDomainCapabilitySupport::Undeclared;
-		FString OwnerId;
-	};
-
 	struct UEAGENTINTERFACE_API FDomainCapabilityDeclaration
 	{
 		FString DomainId;
@@ -289,7 +263,6 @@ namespace UE::UAI::DomainCapability
 		FDomainLayoutCapability Layout;
 		FDomainStateCapability State;
 		FDomainSemanticSurfaceCapability Surface;
-		FDomainMigrationCapability Migration;
 	};
 
 	UEAGENTINTERFACE_API FDomainCapabilityDeclaration
@@ -302,7 +275,7 @@ namespace UE::UAI::DomainCapability
 		static bool TryCreate(
 			FDomainCapabilityDeclaration Declaration,
 			TSharedPtr<const FDomainCapabilityContribution>& OutContribution,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		const FString& GetDomainId() const;
 		const FDomainCapabilityDeclaration& GetDeclaration() const;
@@ -358,7 +331,7 @@ namespace UE::UAI::DomainCapability
 			FindOperationFactory(const FString& OperationId) const;
 		bool TryBuildAuthorities(
 			FDomainCapabilityAuthorities& OutAuthorities,
-			FString& OutError) const;
+			UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		friend class FDomainCapabilityComposition;
@@ -375,10 +348,10 @@ namespace UE::UAI::DomainCapability
 	public:
 		bool TryAdd(
 			TSharedRef<const FDomainCapabilityContribution> Contribution,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool TryFreeze(
 			TSharedPtr<const FFrozenDomainCapabilitySet>& OutFrozen,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool IsSealed() const;
 
 	private:
@@ -390,7 +363,7 @@ namespace UE::UAI::DomainCapability
 
 	using FDomainCapabilityContributionFactory = bool (*)(
 		TSharedPtr<const FDomainCapabilityContribution>& OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	class UEAGENTINTERFACE_API
 		FDomainCapabilityContributionFactoryRegistration final
@@ -407,16 +380,11 @@ namespace UE::UAI::DomainCapability
 		Module::CommandRegistration::Active::
 			FUeAgentActiveCommandContributionFactory Factory);
 
-	UEAGENTINTERFACE_API bool RegisterProcessDomainHjsonCapabilityFactory(
-		const FString& DomainId,
-		const FString& ProviderId,
-		HjsonWorkspace::FImportInitializationDomainProviderFactory Factory);
-
 	UEAGENTINTERFACE_API bool TryFreezeProcessDomainCapabilities(
 		TSharedPtr<const FFrozenDomainCapabilitySet>& OutFrozen,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryGetOrBuildProcessDomainCapabilityAuthorities(
 		FDomainCapabilityAuthorities& OutAuthorities,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

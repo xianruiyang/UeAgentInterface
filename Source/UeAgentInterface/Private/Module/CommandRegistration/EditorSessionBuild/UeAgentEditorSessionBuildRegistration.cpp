@@ -36,7 +36,7 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 		bool TryConstStringSchema(
 			const FString& Value,
 			FString& OutSchema,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const TSharedRef<FJsonObject> Schema = MakeShared<FJsonObject>();
 			Schema->SetStringField(TEXT("type"), TEXT("string"));
@@ -46,14 +46,15 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 
 		bool TryAppendDiscoveryVariants(
 			FUeAgentCommandDeclaration& Declaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			using namespace DomainAdapters::EditorSessionOperation;
 			for (const FUeAgentEditorSessionOperationPolicyDescriptor& Policy :
 				Composition::LongRunningSession::
 					GetLongRunningEditorSessionPolicyDescriptors())
 			{
-				if (!Policy.HasDiscoveryContract())
+				// Host lifecycle is exposed by the fixed editor.safe_exit command.
+				if (Policy.GetFamily() == EUeAgentEditorSessionOperationFamily::HostLifecycle)
 				{
 					continue;
 				}
@@ -61,8 +62,8 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 					FindEditorSessionOperationFamilyContract(Policy.GetFamily());
 				if (Family == nullptr)
 				{
-					OutError = TEXT("editor_session_variant_family_missing:")
-						+ Policy.GetPolicyId();
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("editor_session_variant_family_missing"), TEXT("The editor session policy refers to a family with no registered discovery contract."), TEXT("registration"), FString(), Policy.GetPolicyId());
+					if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Policy.GetPolicyId();
 					return false;
 				}
 				FString FamilySchema;
@@ -82,8 +83,7 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 						RequestSchema,
 						OutError))
 				{
-					OutError = TEXT("editor_session_variant_schema_invalid:")
-						+ Policy.GetPolicyId() + TEXT(":") + OutError;
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Policy.GetPolicyId();
 					return false;
 				}
 				FUeAgentCommandVariantDeclaration Variant;
@@ -94,14 +94,14 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 					+ Policy.GetPolicyId() + TEXT(" call in family ")
 					+ Family->GetFamilyId() + TEXT(".");
 				Variant.Purpose.Preconditions = {
-					TEXT("Resolve the exact target subject before calling and preserve the candidate command/hash/variant identities."),
+					TEXT("Use the exact subject and policy returned by public discovery through the named SDK or CLI."),
 				};
 				Variant.Purpose.ParameterGuidance = Policy.GetParameterGuidance();
 				Variant.Purpose.ResultGuidance = Policy.GetResultGuidance();
 				Variant.Purpose.FailureGuidance = TEXT(
 					"Invalid subject, selector, parameters, save or load state fails typed; do not guess another policy or replay state_unknown.");
 				Variant.Purpose.SideEffectGuidance = TEXT(
-					"The operation may change declared Editor session state only; verify current World and dirty resources independently and release the operation.");
+					"Follow the selected policy for saved resources, session lifetime and cleanup. Inspect the operation receipt and affected Editor state before release.");
 				Variant.Purpose.MinimumExample = Policy.GetMinimumExample();
 				Variant.Purpose.RelatedFlows = {
 					TEXT("operation.status"),
@@ -112,6 +112,47 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 					Policy.GetPolicyId(),
 					Family->GetFamilyId(),
 				};
+				if (Policy.GetPolicyId()
+					== TEXT("policy:world-context:set-current/v1"))
+				{
+					Variant.Purpose.Summary = TEXT(
+						"Open or switch the Editor to one existing target map; "
+						"this variant does not create a map asset.");
+					Variant.Purpose.Target = TEXT(
+						"One existing target map that resolves before operation registration.");
+					Variant.Purpose.Preconditions = {
+						TEXT("Resolve an existing world:/Game/... map target before calling; set-current does not create missing assets."),
+						TEXT("Use the editor.session named SDK or CLI with this exact policy; connection and contract identities are managed by the client."),
+					};
+					Variant.Purpose.ParameterGuidance = TEXT(
+						"Pass the existing target as subject_ref and optionally save_existing_map; no create or factory parameters are accepted.");
+					Variant.Purpose.ResultGuidance = TEXT(
+						"accepted means operation registration only. Preserve the original operation_ref and call operation.resume with the latest generation until typed latest_signal reports phase entered/ready; only then is the session usable. After the task, call operation.cancel, operation.resume to a safe boundary until terminal, read operation.receipt, then operation.release.");
+					Variant.Purpose.FailureGuidance = TEXT(
+						"An invalid, missing or unresolvable target map fails typed before operation registration; do not retry it as asset creation or keep a running operation.");
+					Variant.Purpose.SideEffectGuidance = TEXT(
+						"This variant may save the current map and switch the Editor to the resolved existing map only; it does not create an asset.");
+					Variant.Purpose.RelatedFlows = {
+						TEXT("operation.status"),
+						TEXT("operation.resume"),
+						TEXT("operation.cancel"),
+						TEXT("operation.receipt"),
+						TEXT("operation.release"),
+					};
+					Variant.Purpose.Keywords = {
+						TEXT("open"),
+						TEXT("existing"),
+						TEXT("level"),
+						TEXT("map"),
+						TEXT("switch"),
+						Policy.GetPolicyId(),
+						Family->GetFamilyId(),
+					};
+					Variant.Purpose.Synonyms = {
+						TEXT("set current world"),
+						TEXT("open level"),
+					};
+				}
 				Declaration.Variants.Add(MoveTemp(Variant));
 			}
 			return true;
@@ -121,12 +162,15 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 			const FUeAgentEditorSessionBuildRoute& Route,
 			const FUeAgentCommandContractRegistry& Legacy,
 			FUeAgentCommandDeclaration& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(Route.CommandId);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("editor_session_build_contract_missing:") + Route.CommandId;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("editor_session_build_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("editor_session_build_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Route.CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Route.CommandId;
 				return false;
 			}
 			FUeAgentCommandDeclaration Result;
@@ -148,6 +192,7 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
 					TEXT("Exact Editor session/build operation parameter."),
+					Parameter.GetSchemaJson(),
 				});
 			}
 			Result.ResultFields = {{
@@ -162,11 +207,20 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 				{TEXT("long_running_session_operation_failed"),
 					TEXT("The owned session or build operation failed.")},
 			};
+			if (Route.CommandId == TEXT("editor.session"))
+			{
+				Result.Errors.Add({TEXT("world_context_subject_invalid"),
+					TEXT("The set-current world subject is not a valid map package identity.")});
+				Result.Errors.Add({TEXT("world_context_map_not_found"),
+					TEXT("The set-current target map does not exist.")});
+				Result.Errors.Add({TEXT("world_context_map_unresolvable"),
+					TEXT("The set-current package exists but does not resolve to a map target.")});
+			}
 			Result.Purpose.Summary = TEXT("Start ") + Route.CommandId
 				+ TEXT(" through the unique EditorSessionBuild owner and common OperationService.");
 			Result.Purpose.Target = TEXT("One exact Editor session, safe exit, or build operation.");
 			Result.Purpose.Preconditions = {
-				TEXT("Use query.command.detail for the exact family, subject, policy and parameter contract."),
+				TEXT("Use the generated naming SDK method and its public parameters for the exact family, subject, policy and parameter contract."),
 			};
 			Result.Purpose.ParameterGuidance = TEXT("Forward only the exact public fields.");
 			Result.Purpose.ResultGuidance = TEXT("Use operation_ref with T32 lifecycle commands until terminal, then release.");
@@ -204,7 +258,7 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::EditorSessionBuild::TryCreateHandlers(
 					Port, Registry, Out, OutError);
@@ -220,7 +274,7 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
@@ -233,7 +287,9 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 			return false;
 		}
 		TArray<FUeAgentCommandDeclaration> Declarations;
-		for (const FUeAgentEditorSessionBuildRoute& Route : GetRoutes())
+		TArray<FUeAgentEditorSessionBuildRoute> Routes;
+		if (!TryGetRoutes(Routes, OutError)) return false;
+		for (const FUeAgentEditorSessionBuildRoute& Route : Routes)
 		{
 			FUeAgentCommandDeclaration Declaration;
 			if (!TryDeclaration(Route, *Legacy, Declaration, OutError))
@@ -242,6 +298,39 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 			}
 			Declarations.Add(MoveTemp(Declaration));
 		}
+		FUeAgentCommandDeclaration Save;
+		Save.CommandId = TEXT("editor.save_resources");
+		Save.PythonNamespace = TEXT("editor");
+		Save.PythonFunction = TEXT("save_resources");
+		Save.ContractVersion = 1;
+		Save.PublicOwner = Owner;
+		Save.Availability = EUeAgentCommandAvailability::Enabled;
+		Save.SideEffect = EUeAgentCommandSideEffect::EditorState;
+		Save.StateLayers = {TEXT("authoring_memory"), TEXT("persisted")};
+		Save.InputFields = {{TEXT("resource_refs"), TEXT("array"), true, false,
+			TEXT("Only the exact package/object paths or config refs to save; [] saves nothing."),
+			TEXT(R"json({"items":{"minLength":1,"type":"string"},"type":"array"})json")}};
+		Save.ResultFields = {
+			{TEXT("resources"), TEXT("array"), true, false, TEXT("Per-resource saved, unchanged or failed status with failure reason.")},
+			{TEXT("remaining_dirty_resources"), TEXT("array"), true, false, TEXT("Dirty resources left after this request.")},
+			{TEXT("editor_open"), TEXT("boolean"), true, false, TEXT("The Editor remains open.")},
+		};
+		Save.Errors = {
+			{TEXT("editor_session_build_authority_required"), TEXT("uai:operate is required.")},
+			{TEXT("editor_save_resources_input_invalid"), TEXT("resource_refs must be an array of nonempty strings.")},
+			{TEXT("editor_save_resources_failed"), TEXT("One or more requested resources failed; inspect every item.")},
+		};
+		Save.Purpose.Summary = TEXT("Save specified Editor resources synchronously and keep the Editor open.");
+		Save.Purpose.Target = TEXT("Any persistent asset package or map in a mounted content root, plus supported config resources.");
+		Save.Purpose.Preconditions = {TEXT("The Editor is open. Asset refs identify existing packages on disk or newly created in memory; unloaded packages are resolved automatically.")};
+		Save.Purpose.ParameterGuidance = TEXT("Use package/object paths or refs from editor.dirty_resources. Asset types require no separate save routes. Empty lists are a no-op.");
+		Save.Purpose.ResultGuidance = TEXT("Inspect saved/unchanged/failed for each resource and remaining_dirty_resources; independent resources are all attempted.");
+		Save.Purpose.FailureGuidance = TEXT("Failed items report the reason; successful items are not rolled back.");
+		Save.Purpose.SideEffectGuidance = TEXT("Only requested resources, native-owned external packages and map build data are saved. Empty packages use native file cleanup. Unrelated dirty assets and configs remain untouched. Config persistence is confirmed against native serialized output. No operation handle is created.");
+		Save.Purpose.MinimumExample = TEXT("client.editor.save_resources(resource_refs=['/Game/MyMap'])");
+		Save.Purpose.RelatedFlows = {TEXT("editor.dirty_resources")};
+		Save.Purpose.Keywords = {TEXT("save"), TEXT("dirty"), TEXT("map"), TEXT("package"), TEXT("config")};
+		Declarations.Add(MoveTemp(Save));
 		FUeAgentCommandDeclaration Plan;
 		Plan.CommandId = TEXT("operation.plan.execute");
 		Plan.PythonNamespace = TEXT("operation");
@@ -271,13 +360,12 @@ namespace UE::UAI::Module::CommandRegistration::EditorSessionBuild
 		Plan.Purpose.FailureGuidance = TEXT("Partial completion is explicit; never replay state_unknown.");
 		Plan.Purpose.SideEffectGuidance = TEXT("The server freezes ordering, authority and provider routing.");
 		Plan.Purpose.MinimumExample = TEXT("client.operation.plan_execute(steps, 'stop', 'reject_non_atomic')");
-		Plan.Purpose.RelatedFlows = {TEXT("operation.status"), TEXT("query.command.detail")};
+		Plan.Purpose.RelatedFlows = {TEXT("operation.status"), TEXT("query.command.usage")};
 		Plan.Purpose.Keywords = {TEXT("batch"), TEXT("console"), TEXT("undo"), TEXT("redo")};
 		Plan.Purpose.Synonyms = {TEXT("server plan")};
 		Declarations.Add(MoveTemp(Plan));
 		TSharedPtr<Contract::IUeAgentOperationApplicationPort> Port;
-		if (Declarations.Num() != 4
-			|| !TryGetProductionOperationPort(Port, OutError)
+		if (!TryGetProductionOperationPort(Port, OutError)
 			|| !Port.IsValid())
 		{
 			return false;

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class FJsonObject;
@@ -25,7 +27,6 @@ namespace UeAgentExportContract
 	{
 		FString ProfileId;
 		TArray<FString> IncludedRoles;
-		int32 TokenBudget = 0;
 
 		bool IncludesRole(const FString& Role) const;
 		bool operator==(const FProfileDescriptor& Other) const;
@@ -146,7 +147,7 @@ namespace UeAgentExportContract
 		bool RegisterContract(
 			const FContract& Contract,
 			ERegistrationResult& OutResult,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool FindContract(const FString& ContractId, FContract& OutContract) const;
 		TArray<FContract> ListContracts() const;
 		int32 GetContractCount() const;
@@ -165,6 +166,6 @@ namespace UeAgentExportContract
 	UEAGENTINTERFACE_API bool ParseContract(
 		const TSharedPtr<FJsonObject>& Object,
 		FContract& OutContract,
-		FString& OutError);
-	UEAGENTINTERFACE_API bool ValidateContract(const FContract& Contract, FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API bool ValidateContract(const FContract& Contract, UE::UAI::Contract::FDiagnostic& OutError);
 }

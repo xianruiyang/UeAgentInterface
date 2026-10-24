@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/GraphCompound/UeAgentGraphCompoundCanonical.h"
 #include "Core/Contract/UeAgentContract.h"
 
@@ -17,7 +19,6 @@ namespace UE::UAI::Composition::GraphCompound
 		Invalid,
 		Query,
 		TypedOperation,
-		HjsonImport,
 	};
 
 	enum class EGraphCompoundTypedInputKind : uint8
@@ -39,14 +40,7 @@ namespace UE::UAI::Composition::GraphCompound
 		NiagaraCompileRefreshSettle,
 	};
 
-	struct UEAGENTINTERFACE_API FGraphCompoundRouteError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const { return !Code.IsEmpty(); }
-	};
+	using FGraphCompoundRouteError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FGraphCompoundDomainRouteProfile final
 	{
@@ -59,7 +53,6 @@ namespace UE::UAI::Composition::GraphCompound
 			EGraphCompoundDomainRouteKind InRouteKind,
 			EGraphCompoundTypedInputKind InTypedInputKind,
 			FString InTargetKind,
-			TArray<FString> InAllowedCompositionKinds,
 			FGraphCompoundExecutionContract InExecutionContract);
 
 		const FString& GetCapabilityId() const;
@@ -69,9 +62,9 @@ namespace UE::UAI::Composition::GraphCompound
 		EGraphCompoundDomainRouteKind GetRouteKind() const;
 		EGraphCompoundTypedInputKind GetTypedInputKind() const;
 		const FString& GetTargetKind() const;
-		const TArray<FString>& GetAllowedCompositionKinds() const;
 		const FGraphCompoundExecutionContract& GetExecutionContract() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString CapabilityId;
@@ -83,13 +76,12 @@ namespace UE::UAI::Composition::GraphCompound
 		EGraphCompoundTypedInputKind TypedInputKind =
 			EGraphCompoundTypedInputKind::None;
 		FString TargetKind;
-		TArray<FString> AllowedCompositionKinds;
 		FGraphCompoundExecutionContract ExecutionContract;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
-	UEAGENTINTERFACE_API const TArray<FGraphCompoundDomainRouteProfile>&
-	GetBlueprintMaterialGraphRouteProfiles();
+	UEAGENTINTERFACE_API bool TryGetBlueprintMaterialGraphRouteProfiles(
+		const TArray<FGraphCompoundDomainRouteProfile>*& OutProfiles, Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API const FGraphCompoundDomainRouteProfile*
 	FindBlueprintMaterialGraphRouteProfile(const FString& CapabilityId);
@@ -97,12 +89,12 @@ namespace UE::UAI::Composition::GraphCompound
 	UEAGENTINTERFACE_API bool
 	TryCreateBlueprintMaterialGraphDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	class UEAGENTINTERFACE_API FGraphCompoundEventQueryRequest final
 	{
 	public:
-		FGraphCompoundEventQueryRequest() = default;
+		FGraphCompoundEventQueryRequest();
 		FGraphCompoundEventQueryRequest(
 			FString InTargetRef,
 			FString InOwnerItemRef);
@@ -110,7 +102,6 @@ namespace UE::UAI::Composition::GraphCompound
 			FString InTargetRef,
 			FString InOwnerItemRef,
 			FString InQuery,
-			int32 InLimit,
 			bool bInOnlyUnbound,
 			bool bInIncludeHidden,
 			bool bInCompileBeforeQuery);
@@ -118,21 +109,20 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetTargetRef() const;
 		const FString& GetOwnerItemRef() const;
 		const FString& GetQuery() const;
-		int32 GetLimit() const;
 		bool IsOnlyUnbound() const;
 		bool IsIncludeHidden() const;
 		bool IsCompileBeforeQuery() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString TargetRef;
 		FString OwnerItemRef;
 		FString Query;
-		int32 Limit = 200;
 		bool bOnlyUnbound = false;
 		bool bIncludeHidden = false;
 		bool bCompileBeforeQuery = true;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	UEAGENTINTERFACE_API bool TryDecodeGraphCompoundEventQueryRequest(
@@ -149,7 +139,7 @@ namespace UE::UAI::Composition::GraphCompound
 	class UEAGENTINTERFACE_API FGraphCompoundAssetCreateRequest final
 	{
 	public:
-		FGraphCompoundAssetCreateRequest() = default;
+		FGraphCompoundAssetCreateRequest();
 		FGraphCompoundAssetCreateRequest(
 			EGraphCompoundTypedInputKind InInputKind,
 			FString InAssetName,
@@ -169,6 +159,7 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetParentMaterialRef() const;
 		const FString& GetSourceRef() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		EGraphCompoundTypedInputKind InputKind =
@@ -180,7 +171,7 @@ namespace UE::UAI::Composition::GraphCompound
 		FString ParentClassRef;
 		FString ParentMaterialRef;
 		FString SourceRef;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	UEAGENTINTERFACE_API bool TryDecodeGraphCompoundAssetCreateRequest(
@@ -188,59 +179,6 @@ namespace UE::UAI::Composition::GraphCompound
 		const Contract::FUeAgentContractValue& Input,
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FGraphCompoundAssetCreateRequest& OutRequest,
-		FGraphCompoundRouteError& OutError);
-
-	enum class EGraphCompoundHjsonSourceKind : uint8
-	{
-		Invalid,
-		Directory,
-		SingleFile,
-		Inline,
-	};
-
-	class UEAGENTINTERFACE_API FGraphCompoundHjsonSourceRequest final
-	{
-	public:
-		FGraphCompoundHjsonSourceRequest() = default;
-		FGraphCompoundHjsonSourceRequest(
-			FString InCompositionKind,
-			FString InTargetRef,
-			EGraphCompoundHjsonSourceKind InSourceKind,
-			FString InSourceLocator,
-			FString InInlineHjson,
-			PlanningPreflight::EChangeIntent InIntent,
-			FString InExpectedRevision,
-			bool bInDryRun);
-
-		const FString& GetCompositionKind() const;
-		const FString& GetTargetRef() const;
-		EGraphCompoundHjsonSourceKind GetSourceKind() const;
-		const FString& GetSourceLocator() const;
-		const FString& GetInlineHjson() const;
-		PlanningPreflight::EChangeIntent GetIntent() const;
-		const FString& GetExpectedRevision() const;
-		bool IsDryRun() const;
-		bool IsValid() const;
-
-	private:
-		FString CompositionKind;
-		FString TargetRef;
-		EGraphCompoundHjsonSourceKind SourceKind =
-			EGraphCompoundHjsonSourceKind::Invalid;
-		FString SourceLocator;
-		FString InlineHjson;
-		PlanningPreflight::EChangeIntent Intent =
-			PlanningPreflight::EChangeIntent::Update;
-		FString ExpectedRevision;
-		bool bDryRun = false;
-		bool bValid = false;
-	};
-
-	UEAGENTINTERFACE_API bool TryDecodeGraphCompoundHjsonSourceRequest(
-		const FGraphCompoundDomainRouteProfile& Profile,
-		const Contract::FUeAgentContractValue& Input,
-		ContextResource::FUeAgentResourceTracker& Resources,
-		FGraphCompoundHjsonSourceRequest& OutRequest,
 		FGraphCompoundRouteError& OutError);
 
 	/**
@@ -251,7 +189,7 @@ namespace UE::UAI::Composition::GraphCompound
 	class UEAGENTINTERFACE_API FGraphCompoundNiagaraMutationSelector final
 	{
 	public:
-		FGraphCompoundNiagaraMutationSelector() = default;
+		FGraphCompoundNiagaraMutationSelector();
 		FGraphCompoundNiagaraMutationSelector(
 			EGraphCompoundTypedInputKind InInputKind,
 			FString InTargetRef,
@@ -282,6 +220,7 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetTypeRef() const;
 		FString GetStableSemanticId() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		EGraphCompoundTypedInputKind InputKind =
@@ -298,7 +237,7 @@ namespace UE::UAI::Composition::GraphCompound
 		FString RendererRef;
 		FString ParameterName;
 		FString TypeRef;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	UEAGENTINTERFACE_API bool TryDecodeGraphCompoundNiagaraMutationSelector(

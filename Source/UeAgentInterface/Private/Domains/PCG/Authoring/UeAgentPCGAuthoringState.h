@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 
@@ -13,17 +15,22 @@ namespace UeAgentPCGAuthoring
 		UObject* Outer,
 		FName Name,
 		EObjectFlags Flags,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool BuildAssetSnapshotReadRequests(
 		UPCGGraph* Graph,
 		const FString& CanonicalAssetPath,
 		bool bExpectedAbsent,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool BuildAssetExportSnapshotReadRequests(
 		UPCGGraph& Graph,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError);
-	UEAGENTINTERFACE_API bool RegisterStateAccessor(FString& OutError);
-	UEAGENTINTERFACE_API bool RegisterNativeDefaultProvider(FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API bool RegisterStateAccessor(UE::UAI::Contract::FDiagnostic& OutError);
+	/** Shared native export snapshot for workspace export and independent read queries. */
+	UEAGENTINTERFACE_API bool CaptureAssetExportSnapshot(
+		UPCGGraph& Graph,
+		UeAgentAuthoringState::FStateSnapshot& OutSnapshot,
+		UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API bool RegisterNativeDefaultProvider(UE::UAI::Contract::FDiagnostic& OutError);
 }

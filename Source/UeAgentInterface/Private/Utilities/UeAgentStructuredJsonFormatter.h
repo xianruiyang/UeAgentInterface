@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Dom/JsonObject.h"
 
@@ -28,13 +30,13 @@ public:
 	static bool SaveObjectToFile(
 		const FString& FilePath,
 		const TSharedPtr<FJsonObject>& Object,
-		FString* OutError = nullptr,
+		UE::UAI::Contract::FDiagnostic* OutError = nullptr,
 		const FUeAgentStructuredJsonFormatOptions& Options = FUeAgentStructuredJsonFormatOptions());
 
 	static bool SaveValueToFile(
 		const FString& FilePath,
 		const TSharedPtr<FJsonValue>& Value,
-		FString* OutError = nullptr,
+		UE::UAI::Contract::FDiagnostic* OutError = nullptr,
 		const FUeAgentStructuredJsonFormatOptions& Options = FUeAgentStructuredJsonFormatOptions());
 
 private:

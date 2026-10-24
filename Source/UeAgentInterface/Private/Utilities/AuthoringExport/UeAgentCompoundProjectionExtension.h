@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringExport/UeAgentExportContract.h"
@@ -52,7 +54,7 @@ namespace UeAgentCompoundProjection
 	using FExtension = TFunction<bool(
 		const FRequest& Request,
 		TArray<FExpansionSelection>& OutSelections,
-		FString& OutError)>;
+		UE::UAI::Contract::FDiagnostic& OutError)>;
 
 	class UEAGENTINTERFACE_API FRegistry
 	{
@@ -67,7 +69,7 @@ namespace UeAgentCompoundProjection
 			const FExtensionDescriptor& Descriptor,
 			FExtension Extension,
 			ERegistrationResult& OutResult,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool FindExtension(const FString& ProjectionId, FExtensionDescriptor& OutDescriptor) const;
 		bool CopyExtension(const FString& ProjectionId, FExtension& OutExtension) const;
 		TArray<FExtensionDescriptor> ListExtensions() const;
@@ -93,12 +95,12 @@ namespace UeAgentCompoundProjection
 	UEAGENTINTERFACE_API bool InspectJsonPointerPattern(
 		const FString& JsonPointerPattern,
 		FJsonPointerPatternInfo& OutInfo,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool ExpandJsonPointerPattern(
 		const FString& JsonPointerPattern,
 		const TArray<FString>& WildcardValues,
 		FString& OutJsonPointer,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool MatchesExpandedJsonPointer(
 		const FString& JsonPointerPattern,
 		const FString& JsonPointer);

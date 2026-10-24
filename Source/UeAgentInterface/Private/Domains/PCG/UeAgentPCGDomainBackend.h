@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class AActor;
@@ -19,9 +21,31 @@ class UWorld;
 struct FInstancedPropertyBag;
 struct FPCGDataCollection;
 enum class EPCGComponentGenerationTrigger : uint8;
+namespace UE::UAI::HjsonWorkspace { struct FGraphAuthoringConnectionContext; }
 
 namespace UeAgentPCG
 {
+	enum class EGraphNodeCreationOverrideDisposition : uint8
+	{
+		Unhandled,
+		Created,
+		Failed,
+	};
+
+	struct FGraphNodeCreationOverrideResult
+	{
+		EGraphNodeCreationOverrideDisposition Disposition =
+			EGraphNodeCreationOverrideDisposition::Unhandled;
+		UPCGNode* Node = nullptr;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
+	};
+
+	using FGraphNodeCreationOverride = TFunction<
+		FGraphNodeCreationOverrideResult(
+			UPCGGraph& Graph,
+			const TSharedPtr<FJsonObject>& NodeJson)>;
+	using FGraphNodePropertiesApply = TFunction<bool(const TMap<FString, UPCGNode*>&)>;
+
 	inline constexpr const TCHAR* SchemaCapabilities = TEXT("ue_agent_interface.pcg.capabilities.v1");
 	inline constexpr const TCHAR* SchemaCatalog = TEXT("ue_agent_interface.pcg.node_catalog.v1");
 	inline constexpr const TCHAR* SchemaFolder = TEXT("ue_agent_interface.pcg.graph_folder.v1");
@@ -40,48 +64,38 @@ namespace UeAgentPCG
 		return Cast<TObjectType>(LoadAssetObject(InPath));
 	}
 
-	bool SavePackagesForObjects(const TArray<UObject*>& Objects, FString& OutError);
+	bool SavePackagesForObjects(const TArray<UObject*>& Objects, UE::UAI::Contract::FDiagnostic& OutError);
 	bool SaveAuthoringFile(
 		const FString& OutputPathInput,
 		const TSharedPtr<FJsonObject>& Root,
 		FString& OutOutputPath,
-		FString& OutError);
-	bool PCGGraphHasMaterializedEditorGraph(const UPCGGraph* Graph);
-	void ClosePCGEditorOpenedForGraphInit(
-		UAssetEditorSubsystem* AssetEditorSubsystem,
-		UPCGGraph* Graph,
-		bool bOpenedEditorForGraphInit);
-	bool EnsurePCGEditorGraphMaterialized(UPCGGraph* Graph, bool& bOutOpenedEditor);
-	void AddIssue(
-		TArray<TSharedPtr<FJsonValue>>& Issues,
-		const FString& Severity,
-		const FString& Code,
-		const FString& Path,
-		const FString& Message);
-	int32 CountErrors(const TArray<TSharedPtr<FJsonValue>>& Issues);
+		UE::UAI::Contract::FDiagnostic& OutError);
+	int32 CountErrors(const TArray<UE::UAI::Contract::FDiagnostic>& Issues);
 	int32 ApplyPropertyArray(
 		UObject* Object,
 		const TArray<TSharedPtr<FJsonValue>>* PropertyValues,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const FString& PathPrefix);
 	UClass* ResolvePCGSettingsClass(const FString& ClassPathInput);
 	TSharedPtr<FJsonObject> SettingsClassToCatalogJson(UClass* Class);
 	FString MakeStableNodeId(UPCGGraph* Graph, UPCGNode* Node, TSet<FString>& UsedIds);
-	TMap<FString, UPCGNode*> BuildExportNodeMapById(UPCGGraph* Graph);
-	TSharedPtr<FJsonObject> NodeToJson(UPCGGraph* Graph, UPCGNode* Node, const FString& NodeId);
+	UEAGENTINTERFACE_API TMap<FString, UPCGNode*> BuildExportNodeMapById(UPCGGraph* Graph);
+	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> NodeToJson(
+		UPCGGraph* Graph,
+		UPCGNode* Node,
+		const FString& NodeId);
 	TSharedPtr<FJsonObject> ExportParameterBagToJson(const FInstancedPropertyBag* Bag);
-	TSharedPtr<FJsonObject> ExportGraphToJson(UPCGGraph* Graph);
 	int32 GetParameterBagPropertyCount(const FInstancedPropertyBag* Bag);
 	int32 ApplyCanonicalParameterBag(
 		FInstancedPropertyBag& Bag,
 		const TSharedPtr<FJsonObject>& BagJson,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		TArray<FName>* OutAppliedNames = nullptr,
 		bool bAllowLayoutChanges = true);
 	int32 PreflightCanonicalParameterBag(
 		const FInstancedPropertyBag* SourceBag,
 		const TSharedPtr<FJsonObject>& BagJson,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		bool bAllowLayoutChanges);
 	void RefreshGraphInstanceParameters(UPCGGraphInstance* Instance);
 	void NotifyGraphInstanceParameterValuesChanged(
@@ -91,21 +105,28 @@ namespace UeAgentPCG
 		const FString& AssetPathInput,
 		bool bCreateIfMissing,
 		bool& bOutCreated,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	bool ApplyGraphJson(
 		UPCGGraph* Graph,
 		const TSharedPtr<FJsonObject>& GraphJson,
 		bool bReplaceNodes,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		int32& OutAppliedNodes,
-		int32& OutAppliedEdges);
+		int32& OutAppliedEdges,
+		const FGraphNodeCreationOverride* NodeCreationOverride = nullptr,
+		bool bPreserveExistingNodes = false,
+		TMap<FString, UPCGNode*>* OutAppliedNodeBindings = nullptr,
+		const FGraphNodePropertiesApply* ApplyNodeProperties = nullptr,
+		const UE::UAI::HjsonWorkspace::FGraphAuthoringConnectionContext* Connections = nullptr,
+		const FString& LogicalTarget = FString());
 	bool PreflightApplyGraphJson(
 		UPCGGraph* ExistingGraph,
 		const TSharedPtr<FJsonObject>& GraphJson,
 		bool bReplaceNodes,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		int32& OutAppliedNodes,
-		int32& OutAppliedEdges);
+		int32& OutAppliedEdges,
+		const FGraphNodeCreationOverride* NodeCreationOverride = nullptr);
 	AActor* FindActorByNameOrLabelDirect(UWorld* World, const FString& NameOrLabel);
 	bool GetStringAny(
 		const TSharedPtr<FJsonObject>& Params,
@@ -114,11 +135,12 @@ namespace UeAgentPCG
 	UPCGComponent* FindPCGComponent(
 		UWorld* World,
 		const TSharedPtr<FJsonObject>& Params,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	bool TryParseGenerationTrigger(
 		const FString& TriggerText,
 		EPCGComponentGenerationTrigger& OutTrigger);
 	TSharedPtr<FJsonObject> ComponentToJson(UPCGComponent* Component);
+	TSharedPtr<FJsonObject> ComponentToJson(UPCGComponent* Component, bool bIncludeProperties);
 	TSharedPtr<FJsonObject> PCGDataCollectionToJson(
 		const FPCGDataCollection& Collection,
 		int32 MaxPointsPerData);

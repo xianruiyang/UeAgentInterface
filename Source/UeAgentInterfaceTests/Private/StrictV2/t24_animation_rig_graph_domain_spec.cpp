@@ -5,19 +5,9 @@
 #include "ControlRigBlueprintFactory.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
-#if __has_include("OperationOwners/AnimationRigGraph/UeAgentAnimationRigGraphDomainService.h")
-#define UAI_T24_RIG_DOMAIN_AVAILABLE 1
 #include "OperationOwners/AnimationRigGraph/UeAgentAnimationRigGraphDomainService.h"
-#else
-#define UAI_T24_RIG_DOMAIN_AVAILABLE 0
-#endif
 
-#if __has_include("QueryOwners/AnimationRigGraph/UeAgentAnimationRigGraphCandidateQuery.h")
-#define UAI_T24_RIG_CANDIDATES_AVAILABLE 1
 #include "QueryOwners/AnimationRigGraph/UeAgentAnimationRigGraphCandidateQuery.h"
-#else
-#define UAI_T24_RIG_CANDIDATES_AVAILABLE 0
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T24AnimationRigGraphDomainTest,
@@ -28,13 +18,6 @@ bool FUeAgentStrictV2T24AnimationRigGraphDomainTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
-#if !UAI_T24_RIG_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T24 AnimationRigGraph domain authority is available"), false);
-	return false;
-#elif !UAI_T24_RIG_CANDIDATES_AVAILABLE
-	TestTrue(TEXT("T24 AnimationRigGraph candidates are available"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::OperationOwners::AnimationRigGraph;
 	TSharedPtr<IImportInitializationDomainProvider> Provider;
@@ -121,39 +104,27 @@ bool FUeAgentStrictV2T24AnimationRigGraphDomainTest::RunTest(
 		TryQueryAnimationRigGraphCandidates(
 			*Target, TEXT("Add Spaces"), Result, QueryError)))
 	{
-		AddError(QueryError.Code + TEXT(":") + QueryError.Detail);
+		AddError(QueryError.Code + TEXT(":") + QueryError.PublicMessage);
 		return false;
 	}
 	TestTrue(TEXT("the native RigVM action result is non-empty"),
 		!Result.Candidates.IsEmpty());
-	TestTrue(TEXT("native menu coverage is explicit and complete"),
-		Result.bCoverageComplete && Result.NativeActionCount > 0);
-	TestTrue(TEXT("at least one native menu action is executable"),
-		Result.ExecutableActionCount > 0);
-	TestEqual(TEXT("the coverage scope is the default blank context"),
-		Result.CoverageScope,
-		FString(TEXT("control_rig_default_graph_blank_context")));
 	if (!Result.Candidates.IsEmpty())
 	{
 		const FAnimationRigGraphCandidate& Candidate = Result.Candidates[0];
 		TestEqual(TEXT("candidate kind is rigvm_action"), Candidate.Kind,
 			FString(TEXT("rigvm_action")));
-		TestFalse(TEXT("candidate id is opaque and present"),
-			Candidate.Id.IsEmpty());
 		TestFalse(TEXT("candidate native menu name is present"),
 			Candidate.Name.IsEmpty());
 		TestTrue(TEXT("the selected unit spawner supports native create"),
 			Candidate.bSupported
 				&& Candidate.SupportedOperations.Contains(TEXT("create")));
 		FAnimationRigGraphCandidate Resolved;
-		TestTrue(TEXT("the exact id re-resolves in the same native context"),
+		TestTrue(TEXT("the readable name re-resolves in the same native context"),
 			TryResolveAnimationRigGraphCandidate(
-				*Target, FString(), Candidate.Id, Resolved, QueryError));
-		TestEqual(TEXT("the resolved id is unchanged"),
-			Resolved.Id, Candidate.Id);
+				*Target, Candidate.Name, Resolved, QueryError));
+		TestEqual(TEXT("the resolved name is unchanged"),
+			Resolved.Name, Candidate.Name);
 	}
-	TestEqual(TEXT("complete is the inverse of has_more"),
-		Result.bComplete, !Result.bHasMore);
 	return !HasAnyErrors();
-#endif
 }

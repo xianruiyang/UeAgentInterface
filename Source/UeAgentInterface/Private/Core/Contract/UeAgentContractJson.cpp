@@ -37,14 +37,30 @@ namespace UE::UAI::Contract::Json
 			return true;
 		}
 
+		FDiagnostic EncodingFailure(const TCHAR* Code, const TCHAR* Reason, const FString& Path)
+		{
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, TEXT("contract_json_encode"));
+			Error.Source.JsonPath = Path;
+			return Error;
+		}
+
+		FString ChildPath(const FString& Path, FString Token)
+		{
+			Token.ReplaceInline(TEXT("~"), TEXT("~0"));
+			Token.ReplaceInline(TEXT("/"), TEXT("~1"));
+			return (Path == TEXT("/") ? FString() : Path) + TEXT("/") + Token;
+		}
+
 		bool WriteCanonical(
 			const TSharedPtr<FJsonValue>& Value,
 			FString& OutText,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError,
+			const FString& Path)
 		{
 			if (!Value.IsValid())
 			{
-				OutError = TEXT("contract_json_value_invalid");
+				OutError = EncodingFailure(TEXT("contract_json_value_invalid"), TEXT("The JSON value is missing."), Path);
+				OutError.ActualValuePresent = false;
 				return false;
 			}
 			switch (Value->Type)
@@ -57,8 +73,7 @@ namespace UE::UAI::Contract::Json
 				bool Boolean = false;
 				if (!Value->TryGetBool(Boolean))
 				{
-					OutError =
-						TEXT("contract_json_boolean_invalid");
+					OutError = EncodingFailure(TEXT("contract_json_boolean_invalid"), TEXT("The JSON boolean could not be read."), Path);
 					return false;
 				}
 				OutText += Boolean ? TEXT("true") : TEXT("false");
@@ -70,8 +85,7 @@ namespace UE::UAI::Contract::Json
 				if (!Value->TryGetString(Number)
 					|| Number.IsEmpty())
 				{
-					OutError =
-						TEXT("contract_json_number_invalid");
+					OutError = EncodingFailure(TEXT("contract_json_number_invalid"), TEXT("The JSON number has no serializable numeric representation."), Path);
 					return false;
 				}
 				OutText += Number;
@@ -84,8 +98,7 @@ namespace UE::UAI::Contract::Json
 				if (!Value->TryGetString(Text)
 					|| !EncodeJsonString(Text, Encoded))
 				{
-					OutError =
-						TEXT("contract_json_string_invalid");
+					OutError = EncodingFailure(TEXT("contract_json_string_invalid"), TEXT("The JSON string could not be read or encoded."), Path);
 					return false;
 				}
 				OutText += Encoded;
@@ -105,7 +118,7 @@ namespace UE::UAI::Contract::Json
 					if (!WriteCanonical(
 						Values[Index],
 						OutText,
-						OutError))
+						OutError, ChildPath(Path, FString::FromInt(Index))))
 					{
 						return false;
 					}
@@ -119,8 +132,7 @@ namespace UE::UAI::Contract::Json
 					Value->AsObject();
 				if (!Object.IsValid())
 				{
-					OutError =
-						TEXT("contract_json_object_invalid");
+					OutError = EncodingFailure(TEXT("contract_json_object_invalid"), TEXT("The JSON object value has no object storage."), Path);
 					return false;
 				}
 				TArray<FString> Keys;
@@ -138,15 +150,14 @@ namespace UE::UAI::Contract::Json
 						Keys[Index],
 						EncodedKey))
 					{
-						OutError =
-							TEXT("contract_json_key_invalid");
+						OutError = EncodingFailure(TEXT("contract_json_key_invalid"), TEXT("The JSON object key could not be encoded."), ChildPath(Path, Keys[Index]));
 						return false;
 					}
 					OutText += EncodedKey + TEXT(":");
 					if (!WriteCanonical(
 						Object->Values.FindRef(Keys[Index]),
 						OutText,
-						OutError))
+						OutError, ChildPath(Path, Keys[Index])))
 					{
 						return false;
 					}
@@ -155,8 +166,8 @@ namespace UE::UAI::Contract::Json
 				return true;
 			}
 			default:
-				OutError =
-					TEXT("contract_json_type_unsupported");
+				OutError = EncodingFailure(TEXT("contract_json_type_unsupported"), TEXT("The JSON value has an unsupported type tag."), Path);
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Value->Type));
 				return false;
 			}
 		}
@@ -165,13 +176,15 @@ namespace UE::UAI::Contract::Json
 	bool TryParseObject(
 		const FString& Text,
 		TSharedPtr<FJsonObject>& OutObject,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutObject.Reset();
 		OutError.Reset();
 		if (Text.IsEmpty())
 		{
-			OutError = TEXT("contract_json_empty");
+			OutError = FDiagnostic::Failure(TEXT("contract_json_empty"), TEXT("A non-empty JSON object document is required."), TEXT("contract_json_parse"));
+			OutError.Source.JsonPath = TEXT("/");
+			OutError.ActualValue = MakeShared<FJsonValueString>(Text);
 			return false;
 		}
 		const TSharedRef<TJsonReader<>> Reader =
@@ -182,7 +195,10 @@ namespace UE::UAI::Contract::Json
 				FJsonSerializer::EFlags::StoreNumbersAsStrings)
 			|| !OutObject.IsValid())
 		{
-			OutError = TEXT("contract_json_object_invalid");
+			OutError = FDiagnostic::Failure(TEXT("contract_json_object_invalid"),
+				Reader->GetErrorMessage().IsEmpty() ? TEXT("Expected a JSON object at the document root.") : Reader->GetErrorMessage(), TEXT("contract_json_parse"));
+			OutError.Source.Line = Reader->GetLineNumber();
+			OutError.Source.Column = Reader->GetCharacterNumber();
 			return false;
 		}
 		return true;
@@ -191,12 +207,14 @@ namespace UE::UAI::Contract::Json
 	bool TryParseObject(
 		const TArray<uint8>& Utf8Bytes,
 		TSharedPtr<FJsonObject>& OutObject,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (Utf8Bytes.IsEmpty())
 		{
 			OutObject.Reset();
-			OutError = TEXT("contract_json_empty");
+			OutError = FDiagnostic::Failure(TEXT("contract_json_empty"), TEXT("A non-empty UTF-8 JSON object document is required."), TEXT("contract_json_parse"));
+			OutError.Source.JsonPath = TEXT("/");
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
 			return false;
 		}
 		const FUTF8ToTCHAR Converted(
@@ -212,22 +230,23 @@ namespace UE::UAI::Contract::Json
 	bool TryCanonicalize(
 		const TSharedPtr<FJsonValue>& Value,
 		FString& OutText,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutText.Reset();
 		OutError.Reset();
-		return WriteCanonical(Value, OutText, OutError);
+		return WriteCanonical(Value, OutText, OutError, TEXT("/"));
 	}
 
 	bool TryCanonicalize(
 		const TSharedPtr<FJsonObject>& Object,
 		FString& OutText,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!Object.IsValid())
 		{
 			OutText.Reset();
-			OutError = TEXT("contract_json_object_invalid");
+			OutError = EncodingFailure(TEXT("contract_json_object_invalid"), TEXT("A JSON object is required for serialization."), TEXT("/"));
+			OutError.ActualValuePresent = false;
 			return false;
 		}
 		return TryCanonicalize(
@@ -239,7 +258,7 @@ namespace UE::UAI::Contract::Json
 	bool TryCanonicalUtf8(
 		const TSharedPtr<FJsonObject>& Object,
 		TArray<uint8>& OutBytes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FString Canonical;
 		if (!TryCanonicalize(Object, Canonical, OutError))

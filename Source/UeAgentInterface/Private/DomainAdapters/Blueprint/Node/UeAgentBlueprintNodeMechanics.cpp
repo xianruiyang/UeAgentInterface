@@ -1,30 +1,23 @@
 #include "DomainAdapters/Blueprint/Node/UeAgentBlueprintNodeMechanics.h"
 
-#include "BlueprintActionDatabase.h"
-#include "BlueprintNodeSpawner.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "Core/ArtifactPublisher/UeAgentVerifiedExport.h"
 #include "Core/Contract/UeAgentCommandJson.h"
-#include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+#include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
+#include "DomainAdapters/BlueprintUmgGraph/UeAgentBlueprintUmgGraphNativeHook.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringIdentity.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Misc/ScopeExit.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
-#include "EdGraph/EdGraphSchema.h"
-#include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
-#include "HAL/FileManager.h"
-#include "K2Node_IfThenElse.h"
-#include "Kismet2/BlueprintEditorUtils.h"
-#include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/FileHelper.h"
-#include "Misc/PackageName.h"
-#include "ObjectTools.h"
-#include "PackageTools.h"
 #include "Serialization/JsonSerializer.h"
-#include "UObject/Package.h"
-#include "UObject/SavePackage.h"
 
 THIRD_PARTY_INCLUDES_START
 #include <openssl/sha.h>
@@ -41,38 +34,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 	namespace
 	{
 		const FString BlueprintType = TEXT("/Script/Engine.Blueprint");
-		const FString BranchCandidate =
-			TEXT("/Script/BlueprintGraph.K2Node_IfThenElse");
 		const FString SchemaId = TEXT("uai.blueprint.node.edit/1");
-
-		struct FPlannedNode final
-		{
-			FString Id;
-			FString CandidateName;
-			FString BindingRevision;
-			int32 X = 0;
-			int32 Y = 0;
-		};
-
-		struct FPlannedConnection final
-		{
-			FString FromNode;
-			FString FromPin;
-			FString ToNode;
-			FString ToPin;
-		};
-
-		struct FPreparedImport final
-		{
-			FString Target;
-			FString ExpectedRevision;
-			FString GraphId;
-			FString InitialRevision;
-			TArray<FPlannedNode> Nodes;
-			TArray<FPlannedConnection> Connections;
-			UBlueprint* Blueprint = nullptr;
-			UEdGraph* Graph = nullptr;
-		};
 
 		FString Normalize(FString Value)
 		{
@@ -80,16 +42,26 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 			return Value;
 		}
 
-		bool Fail(
-			FUeAgentBlueprintNodeMechanicsError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool ForwardDiagnostic(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
 			return false;
+		}
+
+		UE::UAI::Contract::FDiagnostic QueryFact(const FString& Code, const FString& Target,
+			const FString& Reason, const FString& Path, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected, const FString& Name = FString(), const FString& Kind = TEXT("native_result"))
+		{
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("candidate_query"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.TargetPath = Target;
+			Diagnostic.CandidateName = Name;
+			Diagnostic.PropertyPath = Path;
+			Diagnostic.SourceKind = Kind;
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			return Diagnostic;
 		}
 
 		FString Sha256Bytes(const TArray<uint8>& Bytes)
@@ -117,28 +89,11 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 			return Sha256Bytes(Bytes);
 		}
 
-		FString Canonical(const TSharedPtr<FJsonObject>& Object)
-		{
-			FString Result;
-			FString Error;
-			return Json::TryCanonicalize(Object, Result, Error)
-				? Result
-				: FString(TEXT("{}"));
-		}
+		
 
 		FUeAgentResourceTracker MakeResources()
 		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 128 * 1024 * 1024},
-			}));
+			return FUeAgentResourceTracker();
 		}
 
 		FString GuidText(const FGuid& Guid)
@@ -148,40 +103,15 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 				: FString();
 		}
 
-		FString GraphIdentity(const UEdGraph& Graph)
-		{
-			const FString Guid = GuidText(Graph.GraphGuid);
-			return !Guid.IsEmpty()
-				? TEXT("graph:") + Guid
-				: TEXT("graph:name:") + Graph.GetName();
-		}
+		using UeAgentBlueprintAuthoring::GraphIdentity;
 
 		void AppendEditableGraphs(
 			UBlueprint& Blueprint,
 			TArray<UEdGraph*>& OutGraphs)
 		{
 			OutGraphs.Reset();
-			for (UEdGraph* Graph : Blueprint.UbergraphPages)
-			{
-				if (Graph)
-				{
-					OutGraphs.Add(Graph);
-				}
-			}
-			for (UEdGraph* Graph : Blueprint.FunctionGraphs)
-			{
-				if (Graph)
-				{
-					OutGraphs.Add(Graph);
-				}
-			}
-			for (UEdGraph* Graph : Blueprint.MacroGraphs)
-			{
-				if (Graph)
-				{
-					OutGraphs.Add(Graph);
-				}
-			}
+			Blueprint.GetAllGraphs(OutGraphs);
+			OutGraphs.Remove(nullptr);
 		}
 
 		UEdGraph* FindGraph(UBlueprint& Blueprint, const FString& GraphId)
@@ -247,57 +177,6 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 			return Sha256(FString::Join(Facts, TEXT("\n")));
 		}
 
-		FString BindingRevision(
-			const FString& Target,
-			const FString& GraphId,
-			const FString& CandidateName,
-			const FString& GraphRevisionValue)
-		{
-			return Sha256(
-				Target + TEXT("|") + GraphId + TEXT("|")
-				+ CandidateName + TEXT("|") + GraphRevisionValue);
-		}
-
-		bool ResolveBranchSpawner(
-			UEdGraph& Graph,
-			UBlueprintNodeSpawner*& OutSpawner,
-			FUeAgentBlueprintNodeMechanicsError& OutError)
-		{
-			OutSpawner = nullptr;
-			TArray<UBlueprintNodeSpawner*> Matches;
-			for (const TPair<FObjectKey, FBlueprintActionDatabase::FActionList>& Entry
-				: FBlueprintActionDatabase::Get().GetAllActions())
-			{
-				for (UBlueprintNodeSpawner* Spawner : Entry.Value)
-				{
-					if (Spawner
-						&& Spawner->NodeClass == UK2Node_IfThenElse::StaticClass())
-					{
-						Matches.AddUnique(Spawner);
-					}
-				}
-			}
-			if (Matches.Num() == 0)
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_candidate_unresolved"),
-					BranchCandidate,
-					TEXT("the real Blueprint action database has no Branch spawner"));
-			}
-			if (Matches.Num() > 1)
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_candidate_ambiguous"),
-					BranchCandidate,
-					FString::FromInt(Matches.Num()));
-			}
-			Matches[0]->PrimeDefaultUiSpec(&Graph);
-			OutSpawner = Matches[0];
-			return true;
-		}
-
 		UBlueprint* LoadBlueprint(
 			const FString& Target,
 			FUeAgentBlueprintNodeMechanicsError& OutError)
@@ -309,10 +188,8 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 			}
 			if (!Blueprint)
 			{
-				Fail(
-					OutError,
-					TEXT("blueprint_node_target_unresolved"),
-					Target);
+				ForwardDiagnostic(OutError, QueryFact(TEXT("blueprint_node_target_unresolved"), Target, TEXT("The Blueprint target could not be loaded."),
+					TEXT("/target/available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)), Target);
 			}
 			return Blueprint;
 		}
@@ -429,550 +306,8 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 			Result->SetArrayField(TEXT("connections"), MoveTemp(Connections));
 			Result->SetNumberField(TEXT("node_count"), Graph.Nodes.Num());
 			Result->SetNumberField(TEXT("connection_count"), Seen.Num());
-			Result->SetStringField(
-				TEXT("compile_status"),
-				Blueprint.Status == BS_Error ? TEXT("error") : TEXT("valid"));
+			UE::UAI::HjsonWorkspace::DomainAuthoring::AddStoredBlueprintDiagnostics(Blueprint, Result.ToSharedRef());
 			return Result;
-		}
-
-		const FHjsonNode* RequiredObjectField(
-			const FHjsonNode& Object,
-			const FString& Name)
-		{
-			const FHjsonNode* Value = Object.Get(Name);
-			return Value && Value->GetKind() == EHjsonNodeKind::Object
-				? Value
-				: nullptr;
-		}
-
-		bool StringField(
-			const FHjsonNode& Object,
-			const FString& Name,
-			FString& Out)
-		{
-			const FHjsonNode* Value = Object.Get(Name);
-			if (!Value || Value->GetKind() != EHjsonNodeKind::String)
-			{
-				Out.Reset();
-				return false;
-			}
-			Out = Normalize(Value->GetText());
-			return !Out.IsEmpty();
-		}
-
-		bool IntegerField(
-			const FHjsonNode& Object,
-			const FString& Name,
-			int32& Out)
-		{
-			const FHjsonNode* Value = Object.Get(Name);
-			if (!Value || Value->GetKind() != EHjsonNodeKind::Integer)
-			{
-				return false;
-			}
-			Out = FCString::Atoi(*Value->GetLexeme());
-			return true;
-		}
-
-		bool TryReadResolvedDocument(
-			const TSharedPtr<FJsonObject>& Params,
-			const FString& ExpectedTarget,
-			FString& OutDocument,
-			FUeAgentBlueprintNodeMechanicsError& OutError)
-		{
-			OutDocument.Reset();
-			if (!Params.IsValid()
-				|| Params->HasField(TEXT("carrier"))
-				|| Params->HasField(TEXT("hjson_document")))
-			{
-				return Fail(
-					OutError,
-					TEXT("content_graph_legacy_source_contract_rejected"),
-					ExpectedTarget);
-			}
-			const TSharedPtr<FJsonObject>* Source = nullptr;
-			if (!Params->TryGetObjectField(TEXT("source"), Source)
-				|| !Source || !Source->IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("content_graph_source_required"),
-					ExpectedTarget);
-			}
-			FString Kind;
-			FString TargetIdentity;
-			FString EntryFile;
-			const TArray<TSharedPtr<FJsonValue>>* Documents = nullptr;
-			if (!(*Source)->TryGetStringField(TEXT("kind"), Kind)
-				|| Kind != TEXT("resolved")
-				|| !(*Source)->TryGetStringField(
-					TEXT("target_identity"), TargetIdentity)
-				|| TargetIdentity != ExpectedTarget
-				|| !(*Source)->TryGetStringField(TEXT("entry_file"), EntryFile)
-				|| EntryFile.IsEmpty()
-				|| !(*Source)->TryGetArrayField(TEXT("documents"), Documents)
-				|| !Documents || Documents->IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("content_graph_resolved_source_invalid"),
-					ExpectedTarget);
-			}
-			int32 EntryMatches = 0;
-			for (const TSharedPtr<FJsonValue>& Value : *Documents)
-			{
-				const TSharedPtr<FJsonObject> Document = Value.IsValid()
-					? Value->AsObject()
-					: nullptr;
-				FString RelativePath;
-				FString DocumentText;
-				if (!Document.IsValid()
-					|| !Document->TryGetStringField(
-						TEXT("path"), RelativePath)
-					|| !Document->TryGetStringField(
-						TEXT("document"), DocumentText))
-				{
-					return Fail(
-						OutError,
-						TEXT("content_graph_resolved_source_invalid"),
-						ExpectedTarget);
-				}
-				if (RelativePath == EntryFile)
-				{
-					OutDocument = MoveTemp(DocumentText);
-					++EntryMatches;
-				}
-			}
-			if (EntryMatches != 1 || OutDocument.IsEmpty())
-			{
-				OutDocument.Reset();
-				return Fail(
-					OutError,
-					TEXT("content_graph_resolved_source_invalid"),
-					EntryFile,
-					FString::FromInt(EntryMatches));
-			}
-			return true;
-		}
-
-		bool TryPrepareImport(
-			const TSharedPtr<FJsonObject>& Params,
-			FPreparedImport& Out,
-			FUeAgentBlueprintNodeMechanicsError& OutError)
-		{
-			Out = {};
-			FString DocumentText;
-			if (!Params.IsValid()
-				|| !Params->TryGetStringField(TEXT("target"), Out.Target)
-				|| Normalize(Out.Target).IsEmpty()
-				|| !Params->TryGetStringField(
-					TEXT("expected_revision"), Out.ExpectedRevision))
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_import_params_invalid"));
-			}
-			Out.Target = Normalize(Out.Target);
-			Out.ExpectedRevision = Normalize(Out.ExpectedRevision);
-			if (!TryReadResolvedDocument(
-					Params, Out.Target, DocumentText, OutError))
-			{
-				return false;
-			}
-			Out.Blueprint = LoadBlueprint(Out.Target, OutError);
-			if (!Out.Blueprint)
-			{
-				return false;
-			}
-			if (Out.Blueprint->GetOutermost()->IsDirty())
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_target_dirty"),
-					Out.Target,
-					TEXT("save or discard the exact target before HJSON authoring"));
-			}
-
-			FUeAgentResourceTracker Resources = MakeResources();
-			FHjsonDocumentPtr Document;
-			FWorkspaceError WorkspaceError;
-			if (!TryParseHjsonDocument(
-					DocumentText,
-					TEXT("inline:blueprint-node"),
-					Resources,
-					Document,
-					WorkspaceError)
-				|| !Document.IsValid()
-				|| Document->GetRoot()->GetKind() != EHjsonNodeKind::Object)
-			{
-				return Fail(
-					OutError,
-					WorkspaceError.GetCode().IsEmpty()
-						? FString(TEXT("blueprint_node_hjson_invalid"))
-						: WorkspaceError.GetCode(),
-					WorkspaceError.GetSourceUnit(),
-					WorkspaceError.GetJsonPointer());
-			}
-			const FHjsonNode& DocumentRoot = *Document->GetRoot();
-			FString DocumentSchema;
-			if (!StringField(DocumentRoot, TEXT("schema"), DocumentSchema)
-				|| DocumentSchema != SchemaId)
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_schema_invalid"),
-					DocumentSchema);
-			}
-			const FHjsonNode* Root = RequiredObjectField(DocumentRoot, TEXT("root"));
-			FString RootType;
-			if (!Root || !StringField(*Root, TEXT("type"), RootType)
-				|| RootType != BlueprintType
-				|| !StringField(*Root, TEXT("graph_id"), Out.GraphId))
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_root_identity_invalid"),
-					Out.Target);
-			}
-			Out.Graph = FindGraph(*Out.Blueprint, Out.GraphId);
-			if (!Out.Graph)
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_graph_unresolved"),
-					Out.GraphId);
-			}
-			Out.InitialRevision = GraphRevision(*Out.Graph);
-			if (Out.ExpectedRevision != Out.InitialRevision)
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_stale_revision"),
-					Out.GraphId,
-					Out.InitialRevision);
-			}
-
-			UBlueprintNodeSpawner* Spawner = nullptr;
-			if (!ResolveBranchSpawner(*Out.Graph, Spawner, OutError))
-			{
-				return false;
-			}
-			const FString CurrentBinding = BindingRevision(
-				Out.Target,
-				Out.GraphId,
-				BranchCandidate,
-				Out.InitialRevision);
-			const FHjsonNode* Nodes = Root->Get(TEXT("nodes"));
-			if (!Nodes || Nodes->GetKind() != EHjsonNodeKind::Array
-				|| Nodes->GetItems().Num() == 0)
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_nodes_required"),
-					Out.GraphId);
-			}
-			TSet<FString> Ids;
-			for (const FHjsonNodeRef& NodeValue : Nodes->GetItems())
-			{
-				if (NodeValue->GetKind() != EHjsonNodeKind::Object)
-				{
-					return Fail(OutError, TEXT("blueprint_node_entry_invalid"));
-				}
-				FPlannedNode Planned;
-				const FHjsonNode* Candidate = RequiredObjectField(
-					*NodeValue, TEXT("candidate"));
-				const FHjsonNode* Position = RequiredObjectField(
-					*NodeValue, TEXT("position"));
-				if (!StringField(*NodeValue, TEXT("id"), Planned.Id)
-					|| Ids.Contains(Planned.Id)
-					|| !Candidate
-					|| !StringField(
-						*Candidate, TEXT("name"), Planned.CandidateName)
-					|| !StringField(
-						*Candidate,
-						TEXT("binding_revision"),
-						Planned.BindingRevision)
-					|| Planned.CandidateName != BranchCandidate
-					|| Planned.BindingRevision != CurrentBinding
-					|| !Position
-					|| !IntegerField(*Position, TEXT("x"), Planned.X)
-					|| !IntegerField(*Position, TEXT("y"), Planned.Y))
-				{
-					return Fail(
-						OutError,
-						TEXT("blueprint_node_candidate_binding_invalid"),
-						Planned.Id);
-				}
-				Ids.Add(Planned.Id);
-				Out.Nodes.Add(MoveTemp(Planned));
-			}
-
-			const FHjsonNode* Connections = Root->Get(TEXT("connections"));
-			if (Connections)
-			{
-				if (Connections->GetKind() != EHjsonNodeKind::Array)
-				{
-					return Fail(
-						OutError,
-						TEXT("blueprint_node_connections_invalid"));
-				}
-				for (const FHjsonNodeRef& LinkValue : Connections->GetItems())
-				{
-					if (LinkValue->GetKind() != EHjsonNodeKind::Object)
-					{
-						return Fail(
-							OutError,
-							TEXT("blueprint_node_connection_invalid"));
-					}
-					FPlannedConnection Link;
-					if (!StringField(*LinkValue, TEXT("from_node"), Link.FromNode)
-						|| !StringField(*LinkValue, TEXT("from_pin"), Link.FromPin)
-						|| !StringField(*LinkValue, TEXT("to_node"), Link.ToNode)
-						|| !StringField(*LinkValue, TEXT("to_pin"), Link.ToPin)
-						|| !Ids.Contains(Link.FromNode)
-						|| !Ids.Contains(Link.ToNode)
-						|| Link.FromNode == Link.ToNode
-						|| (Link.FromPin != TEXT("then")
-							&& Link.FromPin != TEXT("else"))
-						|| Link.ToPin != TEXT("execute"))
-					{
-						return Fail(
-							OutError,
-							TEXT("blueprint_node_connection_incompatible"),
-							Link.FromNode + TEXT("->") + Link.ToNode);
-					}
-					Out.Connections.Add(MoveTemp(Link));
-				}
-			}
-			return true;
-		}
-
-		UEdGraphPin* FindPin(
-			UEdGraphNode& Node,
-			const FString& Name,
-			const EEdGraphPinDirection Direction)
-		{
-			for (UEdGraphPin* Pin : Node.Pins)
-			{
-				if (Pin && Pin->Direction == Direction
-					&& Pin->PinName.ToString() == Name)
-				{
-					return Pin;
-				}
-			}
-			return nullptr;
-		}
-
-		bool SaveBlueprint(
-			UBlueprint& Blueprint,
-			FUeAgentBlueprintNodeMechanicsError& OutError)
-		{
-			UPackage* Package = Blueprint.GetOutermost();
-			const FString Filename = FPackageName::LongPackageNameToFilename(
-				Package->GetName(), FPackageName::GetAssetPackageExtension());
-			FSavePackageArgs Args;
-			Args.TopLevelFlags = RF_Public | RF_Standalone;
-			Args.SaveFlags = SAVE_NoError;
-			if (!UPackage::SavePackage(Package, &Blueprint, *Filename, Args))
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_save_failed"),
-					Blueprint.GetPathName(),
-					Filename);
-			}
-			return true;
-		}
-
-		void ReloadForRollback(UPackage* Package)
-		{
-			if (!Package)
-			{
-				return;
-			}
-			FText Error;
-			UPackageTools::ReloadPackages(
-				{Package},
-				Error,
-				EReloadPackagesInteractionMode::AssumeNegative);
-		}
-
-		bool ExecuteImport(
-			const TSharedPtr<FJsonObject>& Params,
-			FString& OutPayloadJson,
-			FUeAgentBlueprintNodeMechanicsError& OutError)
-		{
-			FPreparedImport Prepared;
-			if (!TryPrepareImport(Params, Prepared, OutError))
-			{
-				return false;
-			}
-
-			TSharedPtr<const FImportInitializationDomainProviderRegistry>
-				ProviderRegistry;
-			FWorkspaceError WorkspaceError;
-			if (!TryFreezeProcessImportInitializationDomainProviders(
-					ProviderRegistry, WorkspaceError)
-				|| !ProviderRegistry.IsValid())
-			{
-				return Fail(
-					OutError,
-					WorkspaceError.GetCode().IsEmpty()
-						? FString(TEXT("blueprint_node_provider_registry_unavailable"))
-						: WorkspaceError.GetCode());
-			}
-			for (const FPlannedNode& Planned : Prepared.Nodes)
-			{
-				FImportInitializationDomainResolution Resolution;
-				if (!ProviderRegistry->TryResolve(
-						FImportInitializationDomainRequest(
-							TEXT("content_graph.import_workspace"),
-							SchemaId,
-							Prepared.Target + TEXT("#") + Planned.Id,
-							Planned.CandidateName,
-							EInitializationNodeRole::OwnedObject,
-							TEXT("{}")),
-						Resolution,
-						WorkspaceError)
-					|| !Resolution.IsValid()
-					|| Resolution.GetInitializationContractId()
-						!= TEXT("uai.init.blueprint.node/1"))
-				{
-					return Fail(
-						OutError,
-						TEXT("blueprint_node_initialization_contract_unresolved"),
-						Planned.Id);
-				}
-			}
-
-			UPackage* Package = Prepared.Blueprint->GetOutermost();
-			Prepared.Blueprint->Modify();
-			Prepared.Graph->Modify();
-			TMap<FString, UEdGraphNode*> NodesById;
-			for (UEdGraphNode* Existing : Prepared.Graph->Nodes)
-			{
-				if (Existing && Existing->NodeComment.StartsWith(TEXT("uai_id:")))
-				{
-					NodesById.Add(LogicalNodeId(*Existing), Existing);
-				}
-			}
-			UBlueprintNodeSpawner* DatabaseSpawner = nullptr;
-			if (!ResolveBranchSpawner(
-					*Prepared.Graph, DatabaseSpawner, OutError))
-			{
-				return false;
-			}
-			for (const FPlannedNode& Planned : Prepared.Nodes)
-			{
-				UEdGraphNode* Node = NodesById.FindRef(Planned.Id);
-				if (Node && Node->GetClass() != UK2Node_IfThenElse::StaticClass())
-				{
-					ReloadForRollback(Package);
-					return Fail(
-						OutError,
-						TEXT("blueprint_node_existing_type_conflict"),
-						Planned.Id);
-				}
-				if (!Node)
-				{
-					Node = DatabaseSpawner->Invoke(
-						Prepared.Graph,
-						IBlueprintNodeBinder::FBindingSet(),
-						FVector2D(Planned.X, Planned.Y));
-					if (!Node)
-					{
-						ReloadForRollback(Package);
-						return Fail(
-							OutError,
-							TEXT("blueprint_node_spawn_failed"),
-							Planned.Id);
-					}
-					Node->NodeComment = TEXT("uai_id:") + Planned.Id;
-					NodesById.Add(Planned.Id, Node);
-				}
-				Node->Modify();
-				Node->NodePosX = Planned.X;
-				Node->NodePosY = Planned.Y;
-				Node->NodeComment = TEXT("uai_id:") + Planned.Id;
-			}
-			for (const FPlannedConnection& Link : Prepared.Connections)
-			{
-				UEdGraphNode* FromNode = NodesById.FindRef(Link.FromNode);
-				UEdGraphNode* ToNode = NodesById.FindRef(Link.ToNode);
-				UEdGraphPin* FromPin = FromNode
-					? FindPin(*FromNode, Link.FromPin, EGPD_Output)
-					: nullptr;
-				UEdGraphPin* ToPin = ToNode
-					? FindPin(*ToNode, Link.ToPin, EGPD_Input)
-					: nullptr;
-				if (!FromPin || !ToPin
-					|| (!FromPin->LinkedTo.Contains(ToPin)
-						&& !Prepared.Graph->GetSchema()->TryCreateConnection(
-							FromPin, ToPin)))
-				{
-					ReloadForRollback(Package);
-					return Fail(
-						OutError,
-						TEXT("blueprint_node_connection_failed"),
-						Link.FromNode + TEXT("->") + Link.ToNode);
-				}
-			}
-			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(
-				Prepared.Blueprint);
-			FKismetEditorUtilities::CompileBlueprint(
-				Prepared.Blueprint,
-				EBlueprintCompileOptions::SkipGarbageCollection);
-			if (Prepared.Blueprint->Status == BS_Error)
-			{
-				ReloadForRollback(Package);
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_compile_failed"),
-					Prepared.Target);
-			}
-			if (!SaveBlueprint(*Prepared.Blueprint, OutError))
-			{
-				ReloadForRollback(Package);
-				return false;
-			}
-
-			const FString Target = Prepared.Target;
-			const FString GraphId = Prepared.GraphId;
-			Prepared.Graph = nullptr;
-			Prepared.Blueprint = nullptr;
-			FText UnloadError;
-			if (!UPackageTools::UnloadPackages({Package}, UnloadError))
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_unload_failed"),
-					Target,
-					UnloadError.ToString());
-			}
-			UBlueprint* Reloaded = LoadBlueprint(Target, OutError);
-			UEdGraph* ReloadedGraph = Reloaded
-				? FindGraph(*Reloaded, GraphId)
-				: nullptr;
-			if (!Reloaded || !ReloadedGraph)
-			{
-				return Fail(
-					OutError,
-					TEXT("blueprint_node_reload_failed"),
-					Target);
-			}
-			const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-			Payload->SetStringField(
-				TEXT("command_id"), TEXT("content_graph.import_workspace"));
-			Payload->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
-			Payload->SetBoolField(TEXT("mutation_started"), true);
-			Payload->SetStringField(
-				TEXT("persistence_receipt_id"),
-				Sha256(Target + TEXT("|") + GraphRevision(*ReloadedGraph)));
-			Payload->SetObjectField(
-				TEXT("independent_readback"),
-				BuildReadback(*Reloaded, *ReloadedGraph, true));
-			OutPayloadJson = Canonical(Payload);
-			return true;
 		}
 
 		class FVerifiedBlueprintExportSource final
@@ -1035,7 +370,10 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 				const FString Path = StagedWorkspacePath / EntryFile;
 				if (!FFileHelper::LoadFileToArray(Bytes, *Path))
 				{
-					OutError.Set(TEXT("blueprint_node_export_rebuild_failed"), Path);
+					OutError = QueryFact(TEXT("blueprint_node_export_rebuild_failed"), Target, TEXT("The staged export entry file could not be read."),
+						TEXT("/workspace/entry/readable"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), EntryFile);
+					OutError.Stage = TEXT("artifact_publish");
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Path);
 					return false;
 				}
 				OutSemantic = Signature(Bytes);
@@ -1070,7 +408,11 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 				UEdGraph* Graph = Blueprint ? FindGraph(*Blueprint, GraphId) : nullptr;
 				if (!Blueprint || !Graph)
 				{
-					OutError.Set(TEXT("blueprint_node_export_target_missing"), Target);
+					OutError = QueryFact(TEXT("blueprint_node_export_target_missing"), Target,
+						Blueprint ? TEXT("The selected graph no longer exists in the Blueprint export target.") : TEXT("The Blueprint export target could not be loaded."),
+						Blueprint ? TEXT("/graph/available") : TEXT("/target/available"), MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true), Blueprint ? GraphId : FString());
+					OutError.Stage = TEXT("artifact_publish");
 					return false;
 				}
 				OutRevision = FUeAgentStateRevision(
@@ -1105,7 +447,7 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 	bool TryGetFirstEditableGraphIdentity(
 		UBlueprint& Blueprint,
 		FString& OutGraphId,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutGraphId.Reset();
 		OutError.Reset();
@@ -1113,7 +455,8 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 		AppendEditableGraphs(Blueprint, Graphs);
 		if (Graphs.Num() == 0)
 		{
-			OutError = TEXT("blueprint_node_graph_unresolved");
+			OutError = QueryFact(TEXT("blueprint_node_graph_unresolved"), Blueprint.GetPathName(), TEXT("The Blueprint contains no editable graph."),
+				TEXT("/editable_graph_count"), MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one editable graph")));
 			return false;
 		}
 		OutGraphId = GraphIdentity(*Graphs[0]);
@@ -1127,195 +470,309 @@ namespace UE::UAI::DomainAdapters::Blueprint::Node
 	{
 		OutPayloadJson.Reset();
 		OutError = {};
-		if (Query.Limit < 1 || Query.Limit > 20 || Query.Cursor < 0)
+		ON_SCOPE_EXIT
 		{
-			return Fail(
-				OutError,
-				TEXT("blueprint_node_candidate_page_invalid"),
-				Query.GraphId);
+			if (OutError.IsValid() && OutError.TargetPath.IsEmpty()) OutError.TargetPath = Query.Target.TrimStartAndEnd();
+		};
+		if ((Query.NodeOccurrence.IsSet()
+				&& Query.NodeOccurrence.GetValue() < 0)
+			|| (Query.PinOccurrence.IsSet()
+				&& Query.PinOccurrence.GetValue() < 0))
+		{
+			const bool bNodeInvalid = Query.NodeOccurrence.IsSet() && Query.NodeOccurrence.GetValue() < 0;
+			auto Diagnostic = QueryFact(TEXT("blueprint_node_candidate_query_invalid"), Query.Target,
+				TEXT("Node and pin occurrence indices must be nonnegative."),
+				bNodeInvalid ? TEXT("/node_occurrence") : TEXT("/pin_occurrence"),
+				MakeShared<FJsonValueNumber>(bNodeInvalid ? Query.NodeOccurrence.GetValue() : Query.PinOccurrence.GetValue()),
+				MakeShared<FJsonValueString>(TEXT("nonnegative index")), Query.GraphName, TEXT("command_input"));
+			Diagnostic.Source.JsonPath = Diagnostic.PropertyPath;
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Query.GraphName);
 		}
 		const FString Target = Normalize(Query.Target);
-		const FString GraphId = Normalize(Query.GraphId);
+		const FString GraphName = Normalize(Query.GraphName);
 		UBlueprint* Blueprint = LoadBlueprint(Target, OutError);
-		UEdGraph* Graph = Blueprint
-			? FindGraph(*Blueprint, GraphId)
-			: nullptr;
 		if (!Blueprint)
 		{
 			return false;
 		}
-		if (!Graph)
+		TArray<UEdGraph*> EditableGraphs;
+		AppendEditableGraphs(*Blueprint, EditableGraphs);
+		TArray<UEdGraph*> MatchingGraphs;
+		for (UEdGraph* CandidateGraph : EditableGraphs)
 		{
-			return Fail(
-				OutError,
-				TEXT("blueprint_node_graph_unresolved"),
-				GraphId);
+			if (CandidateGraph && (CandidateGraph->GetName().Equals(GraphName, ESearchCase::IgnoreCase)
+				|| CandidateGraph->GetPathName().Equals(GraphName, ESearchCase::IgnoreCase)))
+			{
+				MatchingGraphs.AddUnique(CandidateGraph);
+			}
+		}
+		if (MatchingGraphs.Num() != 1)
+		{
+			return ForwardDiagnostic(OutError, QueryFact(MatchingGraphs.IsEmpty() ? TEXT("blueprint_node_graph_unresolved") : TEXT("blueprint_node_graph_ambiguous"),
+				Target, TEXT("The graph name must identify exactly one editable graph."), TEXT("/graph/match_count"),
+				MakeShared<FJsonValueNumber>(MatchingGraphs.Num()), MakeShared<FJsonValueNumber>(1), GraphName), GraphName);
+		}
+		UEdGraph* Graph = MatchingGraphs[0];
+		if (Query.NodeName.IsEmpty() != Query.PinName.IsEmpty())
+		{
+			auto Actual = MakeShared<FJsonObject>();
+			Actual->SetStringField(TEXT("node"), Query.NodeName);
+			Actual->SetStringField(TEXT("pin"), Query.PinName);
+			return ForwardDiagnostic(OutError, QueryFact(TEXT("blueprint_node_pin_context_incomplete"), Target,
+				TEXT("Pin context requires both a node name and a pin name."), TEXT("/candidate_context"),
+				MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(TEXT("both node and pin names")), GraphName, TEXT("command_input")), GraphName);
 		}
 		UeAgentPaletteSearch::FSearchParams SearchParams;
 		SearchParams.CatalogType = TEXT("blueprint_node");
 		SearchParams.SearchText = Normalize(Query.Query);
-		SearchParams.CandidateId = Normalize(Query.CandidateId);
 		SearchParams.AssetPath = Blueprint->GetPathName();
-		SearchParams.GraphName = Graph->GetName();
-		SearchParams.NodeGuid = Normalize(Query.NodeGuid);
-		SearchParams.PinGuid = Normalize(Query.PinGuid);
-		SearchParams.PinName = Normalize(Query.PinName);
+		SearchParams.GraphName = Graph->GetPathName();
+		TSharedPtr<FJsonObject> CandidateContext;
+		if (!Query.NodeName.IsEmpty())
+		{
+			using namespace UE::UAI::DomainAdapters::BlueprintUmgGraph;
+			FBlueprintUmgGraphNativeHook Hook;
+			FBlueprintUmgGraphTopology Topology;
+			FBlueprintUmgGraphAdapterError CaptureError;
+			FString Revision, Evidence;
+			if (!Hook.TryCaptureBlueprintGraph(*Blueprint, *Graph, Blueprint->GetPathName(),
+				UeAgentBlueprintAuthoring::GraphIdentity(*Graph), Topology, Revision, Evidence, CaptureError))
+				return ForwardDiagnostic(OutError, CaptureError, GraphName);
+			TMap<FString, UEdGraphNode*> NodesByGuid;
+			for (UEdGraphNode* Node : Graph->Nodes)
+				if (Node && Node->NodeGuid.IsValid())
+					NodesByGuid.Add(Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens), Node);
+			TArray<FGraphAuthoringNodeAliasInput> AliasInputs;
+			TMap<FString, UEdGraphNode*> NodesByKey;
+			for (const auto& Item : Topology.GetItems())
+			{
+				UEdGraphNode* Node = NodesByGuid.FindRef(Item.GetNativeGuid());
+				AliasInputs.Add({Item.GetItemKey(), Node
+					? UeAgentBlueprintAuthoring::NodeSemanticName(*Node)
+					: (Item.GetStableBuiltinRole().IsEmpty() ? TEXT("builtin") : Item.GetStableBuiltinRole()),
+					Node ? UeAgentBlueprintAuthoring::NodeReference(Node) : Item.GetItemKey()});
+				if (Node) NodesByKey.Add(Item.GetItemKey(), Node);
+			}
+			FGraphAuthoringAliasProjection Aliases;
+			FWorkspaceError AliasError;
+			if (!TryBuildGraphAuthoringAliasProjection(AliasInputs, Aliases, AliasError))
+				return ForwardDiagnostic(OutError, AliasError.GetDiagnostic(), GraphName);
+			TArray<UEdGraphNode*> MatchingNodes;
+			if (!Query.NodeOccurrence.IsSet())
+				if (const FString* Id = Aliases.SourceIdByAlias.Find(Query.NodeName))
+					if (UEdGraphNode* Node = NodesByKey.FindRef(*Id)) MatchingNodes.Add(Node);
+			if (MatchingNodes.IsEmpty())
+			for (UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (Node && UeAgentBlueprintAuthoring::NodeSemanticName(*Node).Equals(
+						Query.NodeName, ESearchCase::IgnoreCase))
+				{
+					MatchingNodes.Add(Node);
+				}
+			}
+			const int32 NodeIndex = Query.NodeOccurrence.Get(0);
+			if (MatchingNodes.IsEmpty()
+				|| (!Query.NodeOccurrence.IsSet() && MatchingNodes.Num() != 1)
+				|| !MatchingNodes.IsValidIndex(NodeIndex))
+			{
+				auto Actual = MakeShared<FJsonObject>();
+				Actual->SetNumberField(TEXT("match_count"), MatchingNodes.Num());
+				if (Query.NodeOccurrence.IsSet()) Actual->SetNumberField(TEXT("occurrence"), NodeIndex);
+				const FString Reason = MatchingNodes.IsEmpty() ? TEXT("No node matches the context node name or alias.")
+					: !Query.NodeOccurrence.IsSet() ? TEXT("The context node name matches multiple nodes; an occurrence is required.")
+					: TEXT("The node occurrence is outside the matching nodes.");
+				return ForwardDiagnostic(OutError, QueryFact(MatchingNodes.IsEmpty() ? TEXT("blueprint_node_context_not_found") : TEXT("blueprint_node_context_ambiguous"),
+					Target, Reason, TEXT("/candidate_context/node"), MakeShared<FJsonValueObject>(Actual),
+					MakeShared<FJsonValueString>(TEXT("one match, or an occurrence within match_count")), Query.NodeName), Query.NodeName);
+			}
+			UEdGraphNode* ContextNode = MatchingNodes[NodeIndex];
+			TArray<UEdGraphPin*> MatchingPins;
+			TMap<FString, UEdGraphPin*> PinAliases;
+			UE::UAI::Contract::FDiagnostic PinAliasError;
+			if (!UeAgentBlueprintAuthoring::BuildPinAliasLookup(*ContextNode, PinAliases, PinAliasError))
+				return ForwardDiagnostic(OutError, PinAliasError, Query.PinName);
+			if (!Query.PinOccurrence.IsSet())
+				if (UEdGraphPin* Pin = PinAliases.FindRef(Query.PinName)) MatchingPins.Add(Pin);
+			if (MatchingPins.IsEmpty())
+			for (UEdGraphPin* Pin : ContextNode->Pins)
+			{
+				if (Pin && Pin->PinName.ToString().Equals(
+						Query.PinName, ESearchCase::IgnoreCase))
+				{
+					MatchingPins.Add(Pin);
+				}
+			}
+			const int32 PinIndex = Query.PinOccurrence.Get(0);
+			if (MatchingPins.IsEmpty()
+				|| (!Query.PinOccurrence.IsSet() && MatchingPins.Num() != 1)
+				|| !MatchingPins.IsValidIndex(PinIndex))
+			{
+				auto Actual = MakeShared<FJsonObject>();
+				Actual->SetNumberField(TEXT("match_count"), MatchingPins.Num());
+				if (Query.PinOccurrence.IsSet()) Actual->SetNumberField(TEXT("occurrence"), PinIndex);
+				const FString Reason = MatchingPins.IsEmpty() ? TEXT("No pin matches the context pin name or alias.")
+					: !Query.PinOccurrence.IsSet() ? TEXT("The context pin name matches multiple pins; an occurrence is required.")
+					: TEXT("The pin occurrence is outside the matching pins.");
+				return ForwardDiagnostic(OutError, QueryFact(MatchingPins.IsEmpty() ? TEXT("blueprint_pin_context_not_found") : TEXT("blueprint_pin_context_ambiguous"),
+					Target, Reason, TEXT("/candidate_context/pin"), MakeShared<FJsonValueObject>(Actual),
+					MakeShared<FJsonValueString>(TEXT("one match, or an occurrence within match_count")), Query.PinName), Query.PinName);
+			}
+			SearchParams.NodeGuid = ContextNode->NodeGuid.ToString(
+				EGuidFormats::DigitsWithHyphensLower);
+			SearchParams.PinGuid = MatchingPins[PinIndex]->PinId.ToString(
+				EGuidFormats::DigitsWithHyphensLower);
+			SearchParams.PinName = MatchingPins[PinIndex]->PinName.ToString();
+			// Return the same public aliases consumed by graph authoring, including
+			// occurrence disambiguation. The caller must not translate native names.
+			FString NodeAlias, PinAlias;
+			for (const auto& Alias : Aliases.SourceIdByAlias)
+				if (NodesByKey.FindRef(Alias.Value) == ContextNode) { NodeAlias = Alias.Key; break; }
+			for (const auto& Alias : PinAliases)
+				if (Alias.Value == MatchingPins[PinIndex]) { PinAlias = Alias.Key; break; }
+			if (NodeAlias.IsEmpty() || PinAlias.IsEmpty())
+			{
+				auto Actual = MakeShared<FJsonObject>();
+				Actual->SetBoolField(TEXT("node_alias_available"), !NodeAlias.IsEmpty());
+				Actual->SetBoolField(TEXT("pin_alias_available"), !PinAlias.IsEmpty());
+				auto Expected = MakeShared<FJsonObject>();
+				Expected->SetBoolField(TEXT("node_alias_available"), true);
+				Expected->SetBoolField(TEXT("pin_alias_available"), true);
+				return ForwardDiagnostic(OutError, QueryFact(TEXT("blueprint_node_context_alias_unresolved"), Target,
+					TEXT("The resolved native node or pin has no public authoring alias."), TEXT("/candidate_context/aliases"),
+					MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueObject>(Expected), GraphName), GraphName);
+			}
+			CandidateContext = MakeShared<FJsonObject>();
+			CandidateContext->SetStringField(TEXT("node"), NodeAlias);
+			CandidateContext->SetStringField(TEXT("pin"), PinAlias);
+		}
 		SearchParams.bContextSensitive = true;
-		SearchParams.bIncludeItems = true;
-		SearchParams.bIncludeGroups = false;
-		SearchParams.bIncludeCategoryTree = false;
-		SearchParams.Limit = Query.Limit;
-		SearchParams.Offset = Query.Cursor;
+		SearchParams.bIncludeNameContext = true;
 		UeAgentPaletteSearch::FSearchResult SearchResult;
-		FString SearchError;
+		UE::UAI::Contract::FDiagnostic SearchError;
 		if (!UeAgentPaletteSearch::ExecuteSearch(
 				SearchParams,
 				SearchResult,
 				SearchError))
 		{
-			return Fail(
-				OutError,
-				TEXT("blueprint_node_candidate_query_failed"),
-				GraphId,
-				SearchError);
+			return ForwardDiagnostic(OutError, MoveTemp(SearchError), GraphName);
 		}
-		const FString Revision = GraphRevision(*Graph);
-		const int32 StartIndex = FMath::Min(
-			Query.Cursor, SearchResult.MatchingCandidates.Num());
-		const int32 EndIndex = FMath::Min(
-			StartIndex + Query.Limit,
-			SearchResult.MatchingCandidates.Num());
-		const bool bHasMore = EndIndex < SearchResult.TotalMatching;
-
-		const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-		Payload->SetStringField(
-			TEXT("command_id"), TEXT("blueprint.node.candidates"));
-		Payload->SetBoolField(TEXT("read_only"), true);
-		Payload->SetStringField(TEXT("target"), Target);
-		Payload->SetObjectField(TEXT("graph"), BuildGraphObject(*Graph));
-		Payload->SetStringField(TEXT("graph_revision"), Revision);
-		const TSharedPtr<FJsonObject> Context = MakeShared<FJsonObject>();
-		Context->SetStringField(TEXT("graph_id"), GraphId);
-		if (!Query.NodeGuid.IsEmpty())
+		const TArray<UeAgentPaletteSearch::FCandidate>& FullCandidates = SearchResult.NameContextCandidates;
+		TArray<ContentDiscovery::FNameSelectionEntry> FullEntries;
+		TMultiMap<FString, int32> FullSemanticIndices;
+		FullEntries.Reserve(FullCandidates.Num());
+		for (const UeAgentPaletteSearch::FCandidate& Match : FullCandidates)
 		{
-			Context->SetStringField(TEXT("node_guid"), Query.NodeGuid);
+			if (Match.SupportDiagnostic.Code == TEXT("native_view_action_is_navigation_not_creation")) continue;
+			const FString& SemanticIdentity = Match.Identity.CanonicalKey;
+			ContentDiscovery::FScopedNameDiscoveryEntry Entry;
+			// Name context includes actions outside this query. It supplies readable
+			// disambiguation scopes; only actual matches can fail the query below.
+			if (!UeAgentPaletteSearch::TryBuildBlueprintActionScopedDiscoveryEntry(Match, Entry)) continue;
+			const int32 FullIndex = FullEntries.Add({MoveTemp(Entry.Name), SemanticIdentity, {}, MoveTemp(Entry.Scopes)});
+			FullSemanticIndices.Add(SemanticIdentity, FullIndex);
 		}
-		if (!Query.PinGuid.IsEmpty())
+		UE::UAI::Contract::FDiagnostic ProjectionError;
+		TArray<int32> MatchedIndices;
+		auto ReadableNameMatchesQuery = [&Query](const FString& Name)
 		{
-			Context->SetStringField(TEXT("pin_guid"), Query.PinGuid);
-		}
-		if (!Query.PinName.IsEmpty())
-		{
-			Context->SetStringField(TEXT("pin_name"), Query.PinName);
-		}
-		Payload->SetObjectField(TEXT("context"), Context);
-		Payload->SetBoolField(TEXT("complete"), !bHasMore);
-		Payload->SetBoolField(TEXT("has_more"), bHasMore);
-		Payload->SetNumberField(TEXT("total_matching"), SearchResult.TotalMatching);
-		Payload->SetNumberField(
-			TEXT("next_cursor"), bHasMore ? EndIndex : -1);
-		TArray<TSharedPtr<FJsonValue>> Candidates;
-		for (int32 Index = StartIndex; Index < EndIndex; ++Index)
-		{
-			const UeAgentPaletteSearch::FCandidate& Match =
-				SearchResult.MatchingCandidates[Index];
-			const TSharedPtr<FJsonObject> Candidate = MakeShared<FJsonObject>();
-			Candidate->SetStringField(
-				TEXT("name"),
-				Match.Name.IsEmpty() ? Match.DisplayName : Match.Name);
-			Candidate->SetStringField(TEXT("id"), Match.GetPublicId());
-			Candidate->SetStringField(
-				TEXT("display_name"),
-				Match.DisplayName.IsEmpty() ? Match.Name : Match.DisplayName);
-			Candidate->SetStringField(TEXT("kind"), Match.Kind);
-			if (!Match.CategoryPath.IsEmpty())
+			auto Compact = [](const FString& Value)
 			{
-				Candidate->SetStringField(
-					TEXT("category"), Match.CategoryPath);
-			}
-			for (const TPair<FString, FString>& Selector :
-				Match.AuthoringSelectors)
-			{
-				if (UeAgentPaletteSearch::
-						IsPublicBlueprintCandidateSemanticField(Selector.Key)
-					&& !Selector.Value.IsEmpty())
+				FString Result;
+				for (const TCHAR Character : Value.ToLower())
 				{
-					Candidate->SetStringField(Selector.Key, Selector.Value);
+					if (FChar::IsAlnum(Character))
+					{
+						Result.AppendChar(Character);
+					}
+				}
+				return Result;
+			};
+			const FString CompactName = Compact(Name);
+			const FString CompactQuery = Compact(Query.Query);
+			if (!CompactQuery.IsEmpty() && CompactName.Contains(CompactQuery))
+			{
+				return true;
+			}
+			TArray<FString> QueryWords;
+			Query.Query.ParseIntoArrayWS(QueryWords);
+			for (const FString& QueryWord : QueryWords)
+			{
+				const FString CompactWord = Compact(QueryWord);
+				if (!CompactWord.IsEmpty() && !CompactName.Contains(CompactWord))
+				{
+					return false;
 				}
 			}
-			Candidates.Add(MakeShared<FJsonValueObject>(Candidate));
-		}
-		Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));
-		OutPayloadJson = Canonical(Payload);
-		return true;
-	}
-
-	bool TryQueryBlueprintNodeCandidates(
-		const FString& Target,
-		const FString& GraphId,
-		const FString& Query,
-		FString& OutPayloadJson,
-		FUeAgentBlueprintNodeMechanicsError& OutError)
-	{
-		FUeAgentBlueprintNodeCandidateQuery Request;
-		Request.Target = Target;
-		Request.GraphId = GraphId;
-		Request.Query = Query;
-		return TryQueryBlueprintNodeCandidates(
-			Request, OutPayloadJson, OutError);
-	}
-
-	bool TryValidateLegacyBlueprintNodeCandidateBinding(
-		const FString& Target,
-		const FString& GraphId,
-		const FString& Name,
-		const FString& CandidateId,
-		const FString& BindingRevisionValue,
-		FUeAgentBlueprintNodeMechanicsError& OutError)
-	{
-		OutError = {};
-		UBlueprint* Blueprint = LoadBlueprint(Normalize(Target), OutError);
-		UEdGraph* Graph = Blueprint
-			? FindGraph(*Blueprint, Normalize(GraphId))
-			: nullptr;
-		if (!Blueprint)
+			return !QueryWords.IsEmpty();
+		};
+		for (const UeAgentPaletteSearch::FCandidate& Match : SearchResult.MatchingCandidates)
 		{
-			return false;
+			if (Match.SupportDiagnostic.Code == TEXT("native_view_action_is_navigation_not_creation")) continue;
+			const FString PublicName = UeAgentPaletteSearch::GetBlueprintActionPublicName(Match);
+			if (!ContentDiscovery::IsReadableDiscoveryName(PublicName))
+			{
+				auto Diagnostic = QueryFact(TEXT("candidate_name_invalid"), Target,
+					TEXT("A matched native Blueprint creation action has no readable public name."), TEXT("/candidate/name"),
+					MakeShared<FJsonValueString>(PublicName), MakeShared<FJsonValueString>(TEXT("readable native action name")), GraphName);
+				Diagnostic.InternalContext = Match.Identity.CanonicalKey;
+				return ForwardDiagnostic(OutError, Diagnostic, GraphName);
+			}
+			TArray<int32> FullIndices;
+			FullSemanticIndices.MultiFind(Match.Identity.CanonicalKey, FullIndices, true);
+			if (FullIndices.IsEmpty())
+			{
+				auto Diagnostic = QueryFact(TEXT("candidate_projection_identity_missing"), Target,
+					TEXT("A matched Blueprint action is missing from the catalog used for public projection."), TEXT("/candidate/catalog_membership"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Match.Name);
+				Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Match.Identity.CanonicalKey);
+				return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Match.Name);
+			}
+			// Native menu text and keywords are valid discovery terms even when
+			// the stable authoring name differs. Keep the native match; return
+			// the stable name; actual selection resolves any semantic ambiguity.
+			MatchedIndices.Append(FullIndices);
 		}
-		if (!Graph)
+		// Match all declared semantic search fields before grouping public names.
+		for (int32 Index = 0; Index < FullEntries.Num(); ++Index)
 		{
-			return Fail(
-				OutError,
-				TEXT("blueprint_node_graph_unresolved"),
-				GraphId);
+			const ContentDiscovery::FNameSelectionEntry& Entry = FullEntries[Index];
+			FString SearchableFields = Entry.Name;
+			for (const FString& Scope : Entry.SearchTerms)
+			{
+				SearchableFields += TEXT(" ");
+				SearchableFields += Scope;
+			}
+			if (ReadableNameMatchesQuery(SearchableFields))
+			{
+				MatchedIndices.Add(Index);
+			}
 		}
-
-		UeAgentPaletteSearch::FSearchParams Params;
-		Params.CatalogType = TEXT("blueprint_node");
-		Params.AssetPath = Blueprint->GetPathName();
-		Params.GraphName = Graph->GetName();
-		Params.bContextSensitive = true;
-		UeAgentPaletteSearch::FCandidate Candidate;
-		FString ResolveError;
-		if (!UeAgentPaletteSearch::TryResolveBlueprintActionCandidate(
-				Params, Name, CandidateId, Candidate, ResolveError))
+		if (!ContentDiscovery::TryBuildCandidateNamesOnlyPayloadForIndices(
+				FullEntries, MatchedIndices,
+				ContentDiscovery::ENameComparison::IgnoreCase,
+				OutPayloadJson,
+				ProjectionError))
 		{
-			return Fail(
-				OutError,
-				ResolveError.IsEmpty()
-					? FString(TEXT("blueprint_action_candidate_not_found"))
-					: ResolveError,
-				Name);
+			return ForwardDiagnostic(OutError, MoveTemp(ProjectionError), FString());
 		}
-		const FString CurrentBinding = BindingRevision(
-			Target, GraphId, Name, GraphRevision(*Graph));
-		if (CurrentBinding != BindingRevisionValue)
+		if (CandidateContext.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("blueprint_surface_node_candidate_binding_stale"),
-				Name);
+			TSharedPtr<FJsonObject> Result;
+			if (!Json::TryParseObject(OutPayloadJson, Result, ProjectionError))
+				return ForwardDiagnostic(OutError, MoveTemp(ProjectionError), GraphName);
+			Result->SetObjectField(TEXT("candidate_context"), CandidateContext);
+			OutPayloadJson.Reset();
+			const auto Writer = TJsonWriterFactory<>::Create(&OutPayloadJson);
+			if (!FJsonSerializer::Serialize(Result.ToSharedRef(), Writer))
+				return ForwardDiagnostic(OutError, QueryFact(TEXT("blueprint_node_candidate_payload_invalid"), Target,
+					TEXT("The candidate payload with its resolved context could not be serialized."), TEXT("/candidate_payload/serialized"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), GraphName), GraphName);
 		}
+		const auto Scope = MakeShared<FJsonObject>();
+		Scope->SetStringField(TEXT("target"), Target);
+		Scope->SetStringField(TEXT("graph_name"), GraphName);
+		if (!ContentDiscovery::TryAddDiscoveryScope(Scope, OutPayloadJson, ProjectionError))
+			return ForwardDiagnostic(OutError, MoveTemp(ProjectionError), GraphName);
 		return true;
 	}
 

@@ -1,4 +1,5 @@
 #include "Core/Contract/UeAgentContract.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::Contract
 {
@@ -9,6 +10,48 @@ namespace UE::UAI::Contract
 			Value.TrimStartAndEndInline();
 			return Value;
 		}
+
+		FDiagnostic ContractValidationFailure(const TCHAR* Code, const TCHAR* Reason, const TCHAR* Path)
+		{
+			auto Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("contract_validation"));
+			Diagnostic.PropertyPath = Path;
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
+		}
+		FDiagnostic ValidateResult(const FUeAgentDescriptorIdentity& Identity, const FString& RequestId,
+			const FUeAgentContractValue& Value, const FDiagnostic& Diagnostic)
+		{
+			if (!Identity.IsValid()) return Identity.GetValidationDiagnostic();
+			if (RequestId.IsEmpty()) return ContractValidationFailure(TEXT("result_request_id_missing"),
+				TEXT("The result requires a non-empty request identifier."), TEXT("/request_id"));
+			if (Diagnostic.IsEmpty() && !Value.IsValid()) return ContractValidationFailure(TEXT("result_value_missing"),
+				TEXT("The result contains neither a value nor a failure diagnostic."), TEXT("/value"));
+			return {};
+		}
+
+		FDiagnostic ValidateRequest(const FUeAgentDescriptorIdentity& Identity, const FString& RequestId,
+			const FUeAgentContractValue& Payload, const FString* IdempotencyKey = nullptr)
+		{
+			if (!Identity.IsValid()) return Identity.GetValidationDiagnostic();
+			FDiagnostic Diagnostic;
+			if (RequestId.IsEmpty())
+				Diagnostic = ContractValidationFailure(TEXT("request_id_missing"),
+					TEXT("The request requires a non-empty request identifier."), TEXT("/request_id"));
+			else if (IdempotencyKey && IdempotencyKey->IsEmpty())
+				Diagnostic = ContractValidationFailure(TEXT("request_idempotency_key_missing"),
+					TEXT("The operation request requires a non-empty idempotency key."), TEXT("/idempotency_key"));
+			else if (!Payload.IsValid())
+				Diagnostic = ContractValidationFailure(TEXT("request_payload_missing"),
+					TEXT("The request payload must contain a non-empty JSON document."), TEXT("/payload"));
+			if (!Diagnostic.IsEmpty())
+			{
+				Diagnostic.SourceKind = TEXT("native_request");
+				Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(FString());
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty string"));
+			}
+			return Diagnostic;
+		}
+
 	}
 
 	FUeAgentDescriptorIdentity::FUeAgentDescriptorIdentity(
@@ -19,6 +62,22 @@ namespace UE::UAI::Contract
 		, Version(InVersion)
 		, DescriptorHash(RequiredText(MoveTemp(InDescriptorHash)))
 	{
+		if (DescriptorId.IsEmpty())
+			ValidationDiagnostic = ContractValidationFailure(TEXT("descriptor_identity_id_missing"),
+				TEXT("The operation descriptor requires a non-empty identifier."), TEXT("/descriptor_id"));
+		else if (Version <= 0)
+		{
+			ValidationDiagnostic = ContractValidationFailure(TEXT("descriptor_identity_version_invalid"),
+				TEXT("The operation descriptor version must be a positive integer."), TEXT("/version"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(Version);
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("positive integer"));
+		}
+		else if (!DescriptorHash.StartsWith(TEXT("sha256:")) || DescriptorHash.Len() != 71)
+		{
+			ValidationDiagnostic = ContractValidationFailure(TEXT("descriptor_identity_hash_invalid"),
+				TEXT("The operation descriptor requires a sha256 digest with a 64-character payload."), TEXT("/descriptor_hash"));
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(DescriptorHash);
+		}
 	}
 
 	const FString& FUeAgentDescriptorIdentity::GetDescriptorId() const
@@ -38,10 +97,7 @@ namespace UE::UAI::Contract
 
 	bool FUeAgentDescriptorIdentity::IsValid() const
 	{
-		return !DescriptorId.IsEmpty()
-			&& Version > 0
-			&& DescriptorHash.StartsWith(TEXT("sha256:"))
-			&& DescriptorHash.Len() == 71;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
 	bool FUeAgentDescriptorIdentity::operator==(
@@ -82,6 +138,7 @@ namespace UE::UAI::Contract
 		, RequestId(RequiredText(MoveTemp(InRequestId)))
 		, Payload(MoveTemp(InPayload))
 	{
+		ValidationDiagnostic = ValidateRequest(DescriptorIdentity, RequestId, Payload);
 	}
 
 	const FUeAgentDescriptorIdentity&
@@ -102,20 +159,34 @@ namespace UE::UAI::Contract
 
 	bool FUeAgentQueryRequest::IsValid() const
 	{
-		return DescriptorIdentity.IsValid()
-			&& !RequestId.IsEmpty()
-			&& Payload.IsValid();
+		return ValidationDiagnostic.IsEmpty();
 	}
 
 	FUeAgentQueryResult::FUeAgentQueryResult(
 		FUeAgentDescriptorIdentity InDescriptorIdentity,
 		FString InRequestId,
-		FUeAgentContractValue InValue)
+		FUeAgentContractValue InValue, TArray<FDiagnostic> InDiagnostics)
 		: DescriptorIdentity(MoveTemp(InDescriptorIdentity))
 		, RequestId(RequiredText(MoveTemp(InRequestId)))
 		, Value(MoveTemp(InValue))
+		, Diagnostics(MoveTemp(InDiagnostics))
 	{
+		ValidationDiagnostic = ValidateResult(DescriptorIdentity, RequestId, Value, Diagnostic);
 	}
+
+	FUeAgentQueryResult::FUeAgentQueryResult(FUeAgentDescriptorIdentity InDescriptorIdentity, FString InRequestId, FDiagnostic InDiagnostic)
+		: DescriptorIdentity(MoveTemp(InDescriptorIdentity))
+		, RequestId(RequiredText(MoveTemp(InRequestId)))
+		, Value(FString())
+		, Diagnostic(MoveTemp(InDiagnostic))
+	{
+		ValidationDiagnostic = ValidateResult(DescriptorIdentity, RequestId, Value, Diagnostic);
+	}
+
+	const FDiagnostic& FUeAgentQueryResult::GetDiagnostic() const { return Diagnostic; }
+	const TArray<FDiagnostic>& FUeAgentQueryResult::GetDiagnostics() const { return Diagnostics; }
+	bool FUeAgentQueryResult::HasDiagnostic() const { return !Diagnostic.IsEmpty(); }
+
 
 	const FUeAgentDescriptorIdentity&
 	FUeAgentQueryResult::GetDescriptorIdentity() const
@@ -135,10 +206,10 @@ namespace UE::UAI::Contract
 
 	bool FUeAgentQueryResult::IsValid() const
 	{
-		return DescriptorIdentity.IsValid()
-			&& !RequestId.IsEmpty()
-			&& Value.IsValid();
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FDiagnostic& FUeAgentQueryResult::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentOperationRequest::FUeAgentOperationRequest(
 		FUeAgentDescriptorIdentity InDescriptorIdentity,
@@ -150,6 +221,7 @@ namespace UE::UAI::Contract
 		, IdempotencyKey(RequiredText(MoveTemp(InIdempotencyKey)))
 		, Payload(MoveTemp(InPayload))
 	{
+		ValidationDiagnostic = ValidateRequest(DescriptorIdentity, RequestId, Payload, &IdempotencyKey);
 	}
 
 	const FUeAgentDescriptorIdentity&
@@ -176,21 +248,34 @@ namespace UE::UAI::Contract
 
 	bool FUeAgentOperationRequest::IsValid() const
 	{
-		return DescriptorIdentity.IsValid()
-			&& !RequestId.IsEmpty()
-			&& !IdempotencyKey.IsEmpty()
-			&& Payload.IsValid();
+		return ValidationDiagnostic.IsEmpty();
 	}
 
 	FUeAgentOperationResult::FUeAgentOperationResult(
 		FUeAgentDescriptorIdentity InDescriptorIdentity,
 		FString InRequestId,
-		FUeAgentContractValue InValue)
+		FUeAgentContractValue InValue, TArray<FDiagnostic> InDiagnostics)
 		: DescriptorIdentity(MoveTemp(InDescriptorIdentity))
 		, RequestId(RequiredText(MoveTemp(InRequestId)))
 		, Value(MoveTemp(InValue))
+		, Diagnostics(MoveTemp(InDiagnostics))
 	{
+		ValidationDiagnostic = ValidateResult(DescriptorIdentity, RequestId, Value, Diagnostic);
 	}
+
+	FUeAgentOperationResult::FUeAgentOperationResult(FUeAgentDescriptorIdentity InDescriptorIdentity, FString InRequestId, FDiagnostic InDiagnostic)
+		: DescriptorIdentity(MoveTemp(InDescriptorIdentity))
+		, RequestId(RequiredText(MoveTemp(InRequestId)))
+		, Value(FString())
+		, Diagnostic(MoveTemp(InDiagnostic))
+	{
+		ValidationDiagnostic = ValidateResult(DescriptorIdentity, RequestId, Value, Diagnostic);
+	}
+
+	const FDiagnostic& FUeAgentOperationResult::GetDiagnostic() const { return Diagnostic; }
+	const TArray<FDiagnostic>& FUeAgentOperationResult::GetDiagnostics() const { return Diagnostics; }
+	bool FUeAgentOperationResult::HasDiagnostic() const { return !Diagnostic.IsEmpty(); }
+
 
 	const FUeAgentDescriptorIdentity&
 	FUeAgentOperationResult::GetDescriptorIdentity() const
@@ -210,10 +295,10 @@ namespace UE::UAI::Contract
 
 	bool FUeAgentOperationResult::IsValid() const
 	{
-		return DescriptorIdentity.IsValid()
-			&& !RequestId.IsEmpty()
-			&& Value.IsValid();
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FDiagnostic& FUeAgentOperationResult::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentCallerContext::FUeAgentCallerContext(
 		FString InCallerId,
@@ -223,6 +308,12 @@ namespace UE::UAI::Contract
 		, AuthorityScopes(MoveTemp(InAuthorityScopes))
 		, CorrelationId(RequiredText(MoveTemp(InCorrelationId)))
 	{
+		if (CallerId.IsEmpty())
+			ValidationDiagnostic = ContractValidationFailure(TEXT("caller_context_id_missing"),
+				TEXT("The caller context requires a non-empty caller identifier."), TEXT("/caller_id"));
+		else if (CorrelationId.IsEmpty())
+			ValidationDiagnostic = ContractValidationFailure(TEXT("caller_context_correlation_missing"),
+				TEXT("The caller context requires a non-empty correlation identifier."), TEXT("/correlation_id"));
 		for (FString& Scope : AuthorityScopes)
 		{
 			Scope = RequiredText(MoveTemp(Scope));
@@ -260,6 +351,6 @@ namespace UE::UAI::Contract
 
 	bool FUeAgentCallerContext::IsValid() const
 	{
-		return !CallerId.IsEmpty() && !CorrelationId.IsEmpty();
+		return ValidationDiagnostic.IsEmpty();
 	}
 }

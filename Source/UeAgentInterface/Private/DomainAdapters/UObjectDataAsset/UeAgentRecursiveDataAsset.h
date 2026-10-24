@@ -16,7 +16,7 @@ public:
 	int32 NativeDefaultValue = 29;
 };
 
-UCLASS(EditInlineNew, DefaultToInstanced)
+UCLASS(EditInlineNew)
 class UEAGENTINTERFACE_API UUeAgentRecursiveOwnedObject final : public UObject
 {
 	GENERATED_BODY()

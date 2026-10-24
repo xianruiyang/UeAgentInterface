@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UeAgentNiagaraAuthoring
@@ -32,7 +34,7 @@ namespace UeAgentNiagaraAuthoring
 	inline constexpr const TCHAR* EventHandlerSemanticId = TEXT("uai.semantic.niagara.event_handler");
 	inline constexpr const TCHAR* UserParameterSemanticId = TEXT("uai.semantic.niagara.user_parameter");
 
-	UEAGENTINTERFACE_API bool RegisterDescriptors(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API FString GetAssetKind(const UObject* Object);
 	UEAGENTINTERFACE_API FString GetAssetSemanticId(const UObject* Object);
 	UEAGENTINTERFACE_API FString GetAssetIdentityModelId(const UObject* Object);

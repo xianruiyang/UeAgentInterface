@@ -8,6 +8,8 @@ public class UeAgentInterface : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		bUseUnity = false;
+		PrivateIncludePathModuleNames.Add("UeAgentInterfaceMVVM");
+		DynamicallyLoadedModuleNames.Add("UeAgentInterfaceMVVM");
 
 		PrivateIncludePaths.AddRange(
 			new string[]
@@ -44,8 +46,8 @@ public class UeAgentInterface : ModuleRules
 				"ToolMenus",
 				"Projects",
 				"Settings",
+				"DeveloperSettings",
 				"EngineSettings",
-				"HTTPServer",
 				"HTTP",
 				"Sockets",
 				"Json",
@@ -76,6 +78,7 @@ public class UeAgentInterface : ModuleRules
 				"AssetTools",
 				"Persona",
 				"StaticMeshEditor",
+				"TextureEditor",
 				"SkeletalMeshEditor",
 				"SkeletonEditor",
 				"UMG",
@@ -93,14 +96,17 @@ public class UeAgentInterface : ModuleRules
 				"SmartObjectsEditorModule",
 				"WorldConditions",
 				"PropertyBindingUtils",
+				"PropertyBindingUtilsEditor",
 				"PhysicsCore",
 				"PhysicsAssetEditor",
+				"PhysicsUtilities",
 				"HairStrandsCore",
 				"HairStrandsEditor",
 				"MaterialEditor",
 				"LevelSequence",
 				"LevelSequenceEditor",
 				"MovieScene",
+				"UniversalObjectLocator",
 				"MovieSceneTools",
 				"MovieSceneTracks",
 				"Sequencer",
@@ -124,6 +130,7 @@ public class UeAgentInterface : ModuleRules
 				"SparseVolumeTexture",
 				"ComputeFramework",
 				"OptimusCore",
+				"MLDeformerFramework",
 				"InteractiveToolsFramework",
 				"EditorInteractiveToolsFramework",
 				"ModelingToolsEditorMode",
@@ -144,6 +151,7 @@ public class UeAgentInterface : ModuleRules
 				"TextureGraphEngine",
 				"AudioEditor",
 				"AudioMixer",
+				"SignalProcessing",
 				"MetasoundEngine",
 				"MetasoundEditor",
 				"MetasoundFrontend",

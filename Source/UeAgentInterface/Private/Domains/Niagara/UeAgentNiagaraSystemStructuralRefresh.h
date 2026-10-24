@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class UNiagaraSystem;
@@ -9,10 +11,20 @@ class UObject;
 
 namespace UeAgentNiagaraOps
 {
+	// Release live instances before changing emitter handle storage. Kept
+	// separate from asset-editor isolation, which is also used by previews.
+	void ReleaseSystemInstancesForEmitterHandleEdit(UNiagaraSystem& System);
+	void RemoveEmitterHandlesForStructuralEdit(UNiagaraSystem& System, const TSet<FGuid>& HandleIds);
+
 	UEAGENTINTERFACE_API bool PrepareAssetForStructuralNiagaraEdit(
 		UObject& Asset,
 		int32& OutClosedEditorCount,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
+
+	UEAGENTINTERFACE_API bool SynchronizeSystemEditorData(
+		UNiagaraSystem& NiagaraSystem,
+		int32& OutOverviewNodeCountBefore,
+		int32& OutOverviewNodeCountAfter);
 
 	struct FNiagaraSystemRefreshResult
 	{

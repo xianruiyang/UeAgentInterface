@@ -10,7 +10,7 @@ namespace UE::UAI::ExecutionContext
 			FString Detail)
 		{
 			OutError.Code = Code;
-			OutError.Detail = MoveTemp(Detail);
+			OutError.InternalContext = MoveTemp(Detail);
 		}
 
 		bool IsMeaningful(const FString& Value)

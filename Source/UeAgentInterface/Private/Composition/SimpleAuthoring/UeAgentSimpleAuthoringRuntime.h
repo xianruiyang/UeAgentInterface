@@ -4,6 +4,7 @@
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringApplication.h"
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/Contract/UeAgentCommandContract.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
 #include "Core/Projection/UeAgentProjection.h"
 #include "Templates/SharedPointer.h"
@@ -22,24 +23,13 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		FString EditorInstanceId;
 		FString ServerSessionId;
 		int64 RegistryEpoch = 0;
-		double TimeoutSeconds = 0.0;
-		int64 MaxFrameBytes = 0;
 		FString JournalRoot;
 
 		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentSimpleAuthoringRuntimeError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	using FUeAgentSimpleAuthoringRuntimeError = Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentSimpleAuthoringRuntime final
 	{

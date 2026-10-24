@@ -22,20 +22,7 @@ namespace
 	static FUeAgentResourceTracker MakeTracker(
 		const int64 WorkLimit = 262144)
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 1048576},
-			{EUeAgentResourceDimension::OutputBytes, 1048576},
-			{EUeAgentResourceDimension::StringBytes, 1048576},
-			{EUeAgentResourceDimension::Nodes, 65536},
-			{EUeAgentResourceDimension::Items, 65536},
-			{EUeAgentResourceDimension::Files, 4096},
-			{EUeAgentResourceDimension::ReferenceEdges, 65536},
-			{EUeAgentResourceDimension::WorkUnits, WorkLimit},
-			{
-				EUeAgentResourceDimension::EstimatedMemoryBytes,
-				8388608
-			},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FUeAgentCanonicalIdentity MakeIdentity(
@@ -425,7 +412,7 @@ namespace
 		FRecordingAcknowledger& Acknowledger,
 		FUeAgentResourceTracker& Tracker,
 		FVerificationOutcome& OutOutcome,
-		FVerificationError& OutError)
+		FVerificationError& OutError, bool bObservationOnly = false)
 	{
 		FRecordingAbsenceOracle Absence;
 		FRecordingReferenceOracle References;
@@ -449,7 +436,7 @@ namespace
 			Deadline,
 			Cancellation.GetToken(),
 			OutOutcome,
-			OutError);
+			OutError, bObservationOnly);
 	}
 }
 
@@ -662,6 +649,11 @@ bool FUeAgentVerificationPersistedOracleDiagnosticTest::RunTest(
 		TEXT("unavailable oracle is not acknowledged"),
 		Acknowledger.CallCount,
 		0);
+	TestFalse(TEXT("production observation preserves actual read failure"),
+		Service.TryVerify(MakeRequest(Expected), Tracker, Deadline, Cancellation.GetToken(), Outcome, Error, true));
+	TestEqual(TEXT("production failure retains the original cause"), Error.GetCode(),
+		FString(TEXT("world_simple_persisted_world_load_failed")));
+	TestEqual(TEXT("failed read cannot commit"), Acknowledger.CallCount, 0);
 	return true;
 }
 
@@ -714,6 +706,12 @@ bool FUeAgentVerificationMismatchTest::RunTest(
 	TestFalse(
 		TEXT("C4 semantic difference is preserved"),
 		Outcome.GetTargets()[0].GetComparison().IsEquivalent());
+	TestTrue(TEXT("production observation completes despite semantic mismatch"),
+		RunPersistedVerification(MakeRequest(Expected), ReadPort, Acknowledger, Tracker, Outcome, Error, true));
+	TestEqual(TEXT("observation acknowledges completed persistence"), Acknowledger.CallCount, 1);
+	TestEqual(TEXT("observation retains mismatch outcome"), Outcome.GetStatus(), EVerificationStatus::Mismatch);
+	if (TestNotNull(TEXT("observation has completion acknowledgement"), Outcome.GetAcknowledgement()))
+		TestFalse(TEXT("observation does not claim a semantic proof"), Outcome.GetAcknowledgement()->IsSemanticVerified());
 	return true;
 }
 

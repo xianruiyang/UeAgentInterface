@@ -13,8 +13,7 @@ namespace UE::UAI::SemanticContract
 			const StateSemantic::FUeAgentStateSemanticError& Source,
 			FUeAgentStateValueContextError& OutError)
 		{
-			OutError.Code = Source.Code;
-			OutError.Detail = Source.Detail;
+			OutError = Source;
 		}
 
 		bool ValidateContext(
@@ -25,8 +24,7 @@ namespace UE::UAI::SemanticContract
 			{
 				return true;
 			}
-			OutError.Code = TEXT("state_value_context_invalid");
-			OutError.Detail = TEXT("the request execution context is not frozen");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("state_value_context_invalid"), TEXT("The request execution context is not frozen."), TEXT("semantic_context"));
 			return false;
 		}
 	}
@@ -43,9 +41,8 @@ namespace UE::UAI::SemanticContract
 		}
 		if (!Entry.IsValid())
 		{
-			OutError.Code = TEXT("state_value_entry_invalid");
-			OutError.Detail =
-				TEXT("identity, type, value, default, presence and override must agree");
+			OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("state_value_entry_invalid"),
+				Entry.GetValidationDiagnostic(), TEXT("semantic_context"));
 			return false;
 		}
 		return true;

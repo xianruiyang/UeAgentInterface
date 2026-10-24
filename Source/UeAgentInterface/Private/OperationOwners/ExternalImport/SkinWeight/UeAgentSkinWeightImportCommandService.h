@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "DomainAdapters/ExternalImport/SkinWeight/UeAgentSkinWeightImportProvider.h"
 #include "Templates/SharedPointer.h"
@@ -12,6 +14,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::SkinWeight
 		FString PythonFunction;
 
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 	};
 
 	UEAGENTINTERFACE_API const TArray<FUeAgentSkinWeightImportCommandRoute>&
@@ -33,15 +36,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::SkinWeight
 		FString PayloadJson;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentSkinWeightImportCommandError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-		FString TerminalStatus = TEXT("rejected");
-		bool bMutationStarted = false;
-		bool bRetrySafe = true;
-	};
+	using FUeAgentSkinWeightImportCommandError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentSkinWeightImportCommandService
 	{
@@ -56,5 +51,5 @@ namespace UE::UAI::OperationOwners::ExternalImport::SkinWeight
 
 	UEAGENTINTERFACE_API bool TryCreateProductionSkinWeightImportCommandService(
 		TSharedPtr<IUeAgentSkinWeightImportCommandService>& OutService,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

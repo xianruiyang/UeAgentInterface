@@ -17,38 +17,62 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 	{
 #include "DomainAdapters/TimelineAnimation/UeAgentTimelineAnimationDescriptorSpec.inl"
 
-		TSharedPtr<FJsonValue> ExpandSchemaValue(
-			const TSharedPtr<FJsonValue>& Value,
-			const TSharedPtr<FJsonObject>& Components,
-			TSet<FString>& ExpansionStack,
-			FString& OutError)
+		FString PointerKey(FString Key)
+		{
+			Key.ReplaceInline(TEXT("~"), TEXT("~0"));
+			Key.ReplaceInline(TEXT("/"), TEXT("~1"));
+			return Key;
+		}
+
+		TSharedPtr<FJsonValue> RegistrationValue(const TSharedPtr<FJsonValue>& Value)
+		{
+			if (!Value) return MakeShared<FJsonValueString>(TEXT("<missing>"));
+			if (Value->Type == EJson::Object) return MakeShared<FJsonValueString>(TEXT("object"));
+			if (Value->Type == EJson::Array) return MakeShared<FJsonValueString>(TEXT("array"));
+			return Value;
+		}
+
+		TSharedPtr<FJsonValue> RegistrationChoices(const TArray<FString>& Names)
+		{
+			TArray<TSharedPtr<FJsonValue>> Values;
+			for (const FString& Name : Names) Values.Add(MakeShared<FJsonValueString>(Name));
+			return MakeShared<FJsonValueArray>(MoveTemp(Values));
+		}
+
+		FDiagnostic RegistrationFact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("registration"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Path;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
+		TSharedPtr<FJsonValue> ExpandSchemaValue(const TSharedPtr<FJsonValue>& Value,
+			const TSharedPtr<FJsonObject>& Components, TSet<FString>& ExpansionStack,
+			FDiagnostic& OutError, const FString& Path)
 		{
 			if (!Value.IsValid())
 			{
-				OutError = TEXT("timeline_animation_schema_value_invalid");
+				OutError = RegistrationFact(TEXT("timeline_animation_schema_value_invalid"),
+					TEXT("Descriptor schema value is missing."), Path, MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return nullptr;
 			}
 			switch (Value->Type)
 			{
-			case EJson::Null:
-				return MakeShared<FJsonValueNull>();
-			case EJson::String:
-				return MakeShared<FJsonValueString>(Value->AsString());
-			case EJson::Number:
-				return MakeShared<FJsonValueNumber>(Value->AsNumber());
-			case EJson::Boolean:
-				return MakeShared<FJsonValueBoolean>(Value->AsBool());
+			case EJson::Null: return MakeShared<FJsonValueNull>();
+			case EJson::String: return MakeShared<FJsonValueString>(Value->AsString());
+			case EJson::Number: return MakeShared<FJsonValueNumber>(Value->AsNumber());
+			case EJson::Boolean: return MakeShared<FJsonValueBoolean>(Value->AsBool());
 			case EJson::Array:
 			{
 				TArray<TSharedPtr<FJsonValue>> Expanded;
-				for (const TSharedPtr<FJsonValue>& Item : Value->AsArray())
+				for (const auto& Item : Value->AsArray())
 				{
-					TSharedPtr<FJsonValue> ExpandedItem = ExpandSchemaValue(
-						Item, Components, ExpansionStack, OutError);
-					if (!ExpandedItem.IsValid())
-					{
-						return nullptr;
-					}
+					auto ExpandedItem = ExpandSchemaValue(Item, Components, ExpansionStack, OutError, Path + TEXT("/") + FString::FromInt(Expanded.Num()));
+					if (!ExpandedItem.IsValid()) return nullptr;
 					Expanded.Add(MoveTemp(ExpandedItem));
 				}
 				return MakeShared<FJsonValueArray>(MoveTemp(Expanded));
@@ -58,124 +82,139 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				const TSharedPtr<FJsonObject> Object = Value->AsObject();
 				if (!Object.IsValid())
 				{
-					OutError = TEXT("timeline_animation_schema_object_invalid");
+					OutError = RegistrationFact(TEXT("timeline_animation_schema_object_invalid"),
+						TEXT("Descriptor schema object is missing."), Path, MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return nullptr;
 				}
 				FString ComponentName;
 				if (Object->TryGetStringField(TEXT("component"), ComponentName))
 				{
-					if (Object->Values.Num() != 1 || ComponentName.IsEmpty())
+					if (Object->Values.Num() != 1)
 					{
-						OutError = TEXT("timeline_animation_component_reference_invalid");
+						OutError = RegistrationFact(TEXT("timeline_animation_component_reference_invalid"),
+							TEXT("Schema component reference cannot contain additional fields."), Path,
+							MakeShared<FJsonValueNumber>(Object->Values.Num()), MakeShared<FJsonValueNumber>(1));
 						return nullptr;
 					}
-					const TSharedPtr<FJsonValue>* Definition =
-						Components->Values.Find(ComponentName);
+					if (ComponentName.IsEmpty())
+					{
+						OutError = RegistrationFact(TEXT("timeline_animation_component_reference_invalid"),
+							TEXT("Schema component name cannot be empty."), Path + TEXT("/component"),
+							MakeShared<FJsonValueString>(ComponentName), MakeShared<FJsonValueString>(TEXT("non-empty component name")));
+						return nullptr;
+					}
+					const TSharedPtr<FJsonValue>* Definition = Components->Values.Find(ComponentName);
 					if (!Definition || !Definition->IsValid())
 					{
-						OutError = TEXT("timeline_animation_component_missing:")
-							+ ComponentName;
+						OutError = RegistrationFact(TEXT("timeline_animation_component_missing"),
+							TEXT("Referenced schema component has no definition."), Path + TEXT("/component"),
+							MakeShared<FJsonValueString>(ComponentName), MakeShared<FJsonValueString>(TEXT("defined schema component")));
 						return nullptr;
 					}
 					if (ExpansionStack.Contains(ComponentName))
 					{
-						OutError = TEXT("timeline_animation_component_cycle:")
-							+ ComponentName;
+						OutError = RegistrationFact(TEXT("timeline_animation_component_cycle"),
+							TEXT("Schema component reference creates a recursive expansion cycle."), Path + TEXT("/component"),
+							MakeShared<FJsonValueString>(ComponentName), MakeShared<FJsonValueString>(TEXT("acyclic component references")));
 						return nullptr;
 					}
 					ExpansionStack.Add(ComponentName);
-					TSharedPtr<FJsonValue> Expanded = ExpandSchemaValue(
-						*Definition, Components, ExpansionStack, OutError);
+					auto Expanded = ExpandSchemaValue(*Definition, Components, ExpansionStack, OutError, TEXT("/components/") + PointerKey(ComponentName));
 					ExpansionStack.Remove(ComponentName);
 					return Expanded;
 				}
-
-				const TSharedPtr<FJsonObject> Expanded = MakeShared<FJsonObject>();
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair
-					: Object->Values)
+				const auto Expanded = MakeShared<FJsonObject>();
+				for (const auto& Pair : Object->Values)
 				{
-					TSharedPtr<FJsonValue> ExpandedField = ExpandSchemaValue(
-						Pair.Value, Components, ExpansionStack, OutError);
-					if (!ExpandedField.IsValid())
-					{
-						return nullptr;
-					}
+					auto ExpandedField = ExpandSchemaValue(Pair.Value, Components, ExpansionStack, OutError, Path + TEXT("/") + PointerKey(Pair.Key));
+					if (!ExpandedField.IsValid()) return nullptr;
 					Expanded->SetField(Pair.Key, MoveTemp(ExpandedField));
 				}
 				return MakeShared<FJsonValueObject>(Expanded);
 			}
 			default:
-				OutError = TEXT("timeline_animation_schema_json_kind_invalid");
+				OutError = RegistrationFact(TEXT("timeline_animation_schema_json_kind_invalid"),
+					TEXT("Descriptor schema contains an unsupported JSON kind."), Path,
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Value->Type)), MakeShared<FJsonValueString>(TEXT("null, string, number, boolean, array or object")));
 				return nullptr;
 			}
 		}
 
-		bool TryBuildSchema(
-			const TArray<TSharedPtr<FJsonValue>>& Fields,
-			const TSharedPtr<FJsonObject>& Components,
-			FString& OutCanonical,
-			FString& OutError)
+		bool TryBuildSchema(const TArray<TSharedPtr<FJsonValue>>& Fields,
+			const TSharedPtr<FJsonObject>& Components, FString& OutCanonical, FDiagnostic& OutError, const FString& FieldsPath)
 		{
-			const TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+			const auto Properties = MakeShared<FJsonObject>();
 			TArray<TSharedPtr<FJsonValue>> Required;
-			for (const TSharedPtr<FJsonValue>& FieldValue : Fields)
+			for (int32 Index = 0; Index < Fields.Num(); ++Index)
 			{
-				const TSharedPtr<FJsonObject> Field =
-					FieldValue.IsValid() ? FieldValue->AsObject() : nullptr;
-				FString Name;
-				bool bRequired = false;
-				if (!Field.IsValid()
-					|| !Field->TryGetStringField(TEXT("name"), Name)
-					|| Name.IsEmpty()
-					|| !Field->TryGetBoolField(TEXT("required"), bRequired)
-					|| Properties->HasField(Name))
+				const auto& FieldValue = Fields[Index];
+				const TSharedPtr<FJsonObject> Field = FieldValue.IsValid() ? FieldValue->AsObject() : nullptr;
+				const FString FieldPath = FieldsPath + TEXT("/") + FString::FromInt(Index);
+				if (!Field.IsValid())
 				{
-					OutError = TEXT("timeline_animation_schema_field_invalid");
+					OutError = RegistrationFact(TEXT("timeline_animation_schema_field_invalid"), TEXT("Descriptor field must be an object."),
+						FieldPath, RegistrationValue(FieldValue), MakeShared<FJsonValueString>(TEXT("field object")));
 					return false;
 				}
-
+				FString Name;
+				bool bRequired = false;
+				if (!Field->TryGetStringField(TEXT("name"), Name) || Name.IsEmpty())
+				{
+					OutError = RegistrationFact(TEXT("timeline_animation_schema_field_invalid"), TEXT("Descriptor field requires a non-empty name."),
+						FieldPath + TEXT("/name"), RegistrationValue(Field->TryGetField(TEXT("name"))), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+					return false;
+				}
+				if (!Field->TryGetBoolField(TEXT("required"), bRequired))
+				{
+					OutError = RegistrationFact(TEXT("timeline_animation_schema_field_invalid"), TEXT("Descriptor field required flag must be boolean."),
+						FieldPath + TEXT("/required"), RegistrationValue(Field->TryGetField(TEXT("required"))), MakeShared<FJsonValueString>(TEXT("boolean")));
+					return false;
+				}
+				if (Properties->HasField(Name))
+				{
+					OutError = RegistrationFact(TEXT("timeline_animation_schema_field_invalid"), TEXT("Descriptor schema repeats a field name."),
+						FieldPath + TEXT("/name"), MakeShared<FJsonValueString>(Name), MakeShared<FJsonValueString>(TEXT("unique field name")));
+					return false;
+				}
 				TSharedPtr<FJsonValue> Template;
+				FString TemplatePath = FieldPath;
 				FString ComponentName;
 				if (Field->TryGetStringField(TEXT("component"), ComponentName))
 				{
-					const TSharedPtr<FJsonObject> Reference = MakeShared<FJsonObject>();
+					const auto Reference = MakeShared<FJsonObject>();
 					Reference->SetStringField(TEXT("component"), ComponentName);
 					Template = MakeShared<FJsonValueObject>(Reference);
 				}
 				else
 				{
 					const TSharedPtr<FJsonObject>* Schema = nullptr;
-					if (!Field->TryGetObjectField(TEXT("schema"), Schema)
-						|| !Schema || !Schema->IsValid())
+					if (!Field->TryGetObjectField(TEXT("schema"), Schema) || !Schema || !Schema->IsValid())
 					{
-						OutError = TEXT("timeline_animation_schema_field_missing");
+						OutError = RegistrationFact(TEXT("timeline_animation_schema_field_missing"), TEXT("Descriptor field requires a schema object or component reference."),
+							FieldPath + TEXT("/schema"), RegistrationValue(Field->TryGetField(TEXT("schema"))), MakeShared<FJsonValueString>(TEXT("schema object")));
 						return false;
 					}
 					Template = MakeShared<FJsonValueObject>(*Schema);
+					TemplatePath += TEXT("/schema");
 				}
 				TSet<FString> Stack;
-				TSharedPtr<FJsonValue> Expanded = ExpandSchemaValue(
-					Template, Components, Stack, OutError);
-				if (!Expanded.IsValid())
-				{
-					return false;
-				}
+				auto Expanded = ExpandSchemaValue(Template, Components, Stack, OutError, TemplatePath);
+				if (!Expanded.IsValid()) return false;
 				Properties->SetField(Name, MoveTemp(Expanded));
-				if (bRequired)
-				{
-					Required.Add(MakeShared<FJsonValueString>(Name));
-				}
+				if (bRequired) Required.Add(MakeShared<FJsonValueString>(Name));
 			}
-
-			const TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+			const auto Root = MakeShared<FJsonObject>();
 			Root->SetStringField(TEXT("type"), TEXT("object"));
 			Root->SetObjectField(TEXT("properties"), Properties);
-			if (!Required.IsEmpty())
-			{
-				Root->SetArrayField(TEXT("required"), MoveTemp(Required));
-			}
+			if (!Required.IsEmpty()) Root->SetArrayField(TEXT("required"), MoveTemp(Required));
 			Root->SetBoolField(TEXT("additionalProperties"), false);
-			return Json::TryCanonicalize(Root, OutCanonical, OutError);
+			const bool bCanonical = Json::TryCanonicalize(Root, OutCanonical, OutError);
+			if (!bCanonical)
+			{
+				OutError.SourceKind = TEXT("native_result");
+				if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = FieldsPath;
+			}
+			return bCanonical;
 		}
 
 		bool TryFacet(
@@ -215,11 +254,12 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 
 		TSharedPtr<FJsonObject> ParseCanonicalObject(
 			const FString& Canonical,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<FJsonObject> Object;
 			if (!Json::TryParseObject(Canonical, Object, OutError))
 			{
+				OutError.SourceKind = TEXT("native_result");
 				return nullptr;
 			}
 			return Object;
@@ -229,16 +269,13 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			const TSharedPtr<FJsonObject>& Profile,
 			const FString& InputSchema,
 			const FString& ResultSchema,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const TSharedPtr<FJsonObject> Input =
 				ParseCanonicalObject(InputSchema, OutError);
-			const TSharedPtr<FJsonObject> Result =
-				ParseCanonicalObject(ResultSchema, OutError);
-			if (!Input.IsValid() || !Result.IsValid())
-			{
-				return nullptr;
-			}
+			if (!Input.IsValid()) return nullptr;
+			const TSharedPtr<FJsonObject> Result = ParseCanonicalObject(ResultSchema, OutError);
+			if (!Result.IsValid()) return nullptr;
 
 			const TSharedPtr<FJsonObject> Policy = MakeShared<FJsonObject>();
 			Policy->SetArrayField(
@@ -290,7 +327,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 
 	bool TryCreateTimelineAnimationDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
@@ -305,28 +342,36 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			TJsonReaderFactory<>::Create(SpecText);
 		if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
 		{
-			OutError = TEXT("timeline_animation_descriptor_spec_invalid");
+			OutError = RegistrationFact(TEXT("timeline_animation_descriptor_spec_invalid"),
+				TEXT("Timeline-animation descriptor specification must be object JSON. ") + Reader->GetErrorMessage(), TEXT("/"),
+				MakeShared<FJsonValueString>(TEXT("invalid object JSON")), MakeShared<FJsonValueString>(TEXT("object JSON")));
 			return false;
 		}
 		const TSharedPtr<FJsonObject> Components =
 			Root->GetObjectField(TEXT("components"));
 		const TArray<TSharedPtr<FJsonValue>>& Profiles =
 			Root->GetArrayField(TEXT("descriptors"));
-		if (!Components.IsValid() || Profiles.Num() != 20)
+		if (!Components.IsValid())
 		{
-			OutError = TEXT("timeline_animation_descriptor_spec_incomplete");
+			OutError = RegistrationFact(TEXT("timeline_animation_descriptor_spec_incomplete"),
+				TEXT("Descriptor specification requires a components object."), TEXT("/components"),
+				RegistrationValue(Root->TryGetField(TEXT("components"))), MakeShared<FJsonValueString>(TEXT("object")));
 			return false;
 		}
 
 		TArray<FUeAgentOperationDescriptor> Descriptors;
 		Descriptors.Reserve(Profiles.Num());
-		for (const TSharedPtr<FJsonValue>& ProfileValue : Profiles)
+		for (int32 ProfileIndex = 0; ProfileIndex < Profiles.Num(); ++ProfileIndex)
 		{
+			const auto& ProfileValue = Profiles[ProfileIndex];
+			const FString ProfilePath = TEXT("/descriptors/") + FString::FromInt(ProfileIndex);
 			const TSharedPtr<FJsonObject> Profile =
 				ProfileValue.IsValid() ? ProfileValue->AsObject() : nullptr;
 			if (!Profile.IsValid())
 			{
-				OutError = TEXT("timeline_animation_descriptor_profile_invalid");
+				OutError = RegistrationFact(TEXT("timeline_animation_descriptor_profile_invalid"),
+					TEXT("Descriptor profile must be an object."), ProfilePath,
+					RegistrationValue(ProfileValue), MakeShared<FJsonValueString>(TEXT("descriptor profile object")));
 				return false;
 			}
 
@@ -334,10 +379,10 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			FString ResultSchema;
 			if (!TryBuildSchema(
 					Profile->GetArrayField(TEXT("input_fields")),
-					Components, InputSchema, OutError)
+					Components, InputSchema, OutError, ProfilePath + TEXT("/input_fields"))
 				|| !TryBuildSchema(
 					Profile->GetArrayField(TEXT("result_fields")),
-					Components, ResultSchema, OutError))
+					Components, ResultSchema, OutError, ProfilePath + TEXT("/result_fields")))
 			{
 				return false;
 			}
@@ -349,7 +394,10 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				EUeAgentStatePlane Plane = EUeAgentStatePlane::Invalid;
 				if (!TryParseStatePlane(Value->AsString(), Plane))
 				{
-					OutError = TEXT("timeline_animation_state_plane_invalid");
+					OutError = RegistrationFact(TEXT("timeline_animation_state_plane_invalid"),
+						TEXT("Descriptor state plane is not recognized."), ProfilePath + TEXT("/state_planes/") + FString::FromInt(StatePlanes.Num()),
+						RegistrationValue(Value), RegistrationChoices({TEXT("authoring_memory"), TEXT("persisted"), TEXT("compiled_generated"),
+							TEXT("runtime_instance"), TEXT("rendered_observation"), TEXT("registry_index")}));
 					return false;
 				}
 				StatePlanes.Add(Plane);
@@ -361,7 +409,10 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				EUeAgentExecutionContextFacet Facet = EUeAgentExecutionContextFacet::Invalid;
 				if (!TryFacet(Value->AsString(), Facet))
 				{
-					OutError = TEXT("timeline_animation_context_facet_invalid");
+					OutError = RegistrationFact(TEXT("timeline_animation_context_facet_invalid"),
+						TEXT("Descriptor execution-context facet is not recognized."), ProfilePath + TEXT("/required_facets/") + FString::FromInt(Facets.Num()),
+						RegistrationValue(Value), RegistrationChoices({TEXT("world"), TEXT("level"), TEXT("data_layer"), TEXT("world_partition"),
+							TEXT("pie_instance"), TEXT("net_mode"), TEXT("net_role"), TEXT("asset_editor"), TEXT("viewport"), TEXT("selection")}));
 					return false;
 				}
 				Facets.Add(Facet);
@@ -392,7 +443,10 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 						Profile->GetStringField(TEXT("query_kind")),
 						QueryKind))
 				{
-					OutError = TEXT("timeline_animation_query_kind_invalid");
+					OutError = RegistrationFact(TEXT("timeline_animation_query_kind_invalid"),
+						TEXT("Descriptor query kind is not recognized."), ProfilePath + TEXT("/query_kind"),
+						RegistrationValue(Profile->TryGetField(TEXT("query_kind"))),
+						RegistrationChoices({TEXT("catalog"), TEXT("state"), TEXT("runtime_probe"), TEXT("capability"), TEXT("reference")}));
 					return false;
 				}
 				QueryBinding.Emplace(
@@ -410,6 +464,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 				|| !Json::TryCanonicalize(
 					DescriptorObject, CanonicalDescriptor, OutError))
 			{
+				OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			Descriptors.Emplace(

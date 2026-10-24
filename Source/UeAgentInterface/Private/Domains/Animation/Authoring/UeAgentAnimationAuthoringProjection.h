@@ -2,14 +2,16 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDescriptors.h"
 #include "Utilities/AuthoringExport/UeAgentExportContract.h"
 
 namespace UeAgentAnimationAuthoring {
-UEAGENTINTERFACE_API bool RegisterExportAuthoring(FString &OutError);
+UEAGENTINTERFACE_API bool RegisterExportAuthoring(UE::UAI::Contract::FDiagnostic& OutError);
 UEAGENTINTERFACE_API bool
 GetExportContract(const FProfile &Profile,
                   UeAgentExportContract::FContract &OutContract,
-                  FString &OutError);
+                  UE::UAI::Contract::FDiagnostic& OutError);
 } // namespace UeAgentAnimationAuthoring

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
@@ -40,10 +41,11 @@ namespace UE::UAI::Projection
 		Operation,
 	};
 
-	enum class EUeAgentProjectionCompleteness : uint8
+	enum class EUeAgentProjectionPageUnit : uint8
 	{
-		Complete,
-		PartialPage,
+		Entry,
+		OwnerRecord,
+		SingleRecord,
 	};
 
 	enum class EUeAgentTokenEstimateKind : uint8
@@ -52,23 +54,7 @@ namespace UE::UAI::Projection
 		Conservative,
 	};
 
-	enum class EUeAgentDiagnosticSeverity : uint8
-	{
-		Info,
-		Warning,
-		Error,
-	};
-
-	struct UEAGENTINTERFACE_API FUeAgentProjectionError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-		EUeAgentResourceDimension ResourceDimension =
-			EUeAgentResourceDimension::WorkUnits;
-		int64 ResourceLimit = 0;
-		int64 ResourceObserved = 0;
-	};
+	using FUeAgentProjectionError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentProjectionProfile final
 	{
@@ -84,60 +70,27 @@ namespace UE::UAI::Projection
 		bool IncludesDetails() const;
 		bool IncludesProvenance() const;
 		bool IsValid() const;
+		const FUeAgentProjectionError& GetValidationDiagnostic() const;
 
 	private:
 		FString ProfileId;
 		bool bIncludeDefaults = false;
 		bool bIncludeDetails = false;
 		bool bIncludeProvenance = false;
-	};
-
-	class UEAGENTINTERFACE_API FUeAgentPageRequest final
-	{
-	public:
-		FUeAgentPageRequest();
-		explicit FUeAgentPageRequest(FString InCursor);
-		FUeAgentPageRequest(int32 InMaxItems, FString InCursor);
-
-		bool HasMaxItems() const;
-		int32 GetMaxItems() const;
-		const FString& GetCursor() const;
-		bool IsValid() const;
-
-	private:
-		TOptional<int32> MaxItems;
-		FString Cursor;
-		bool bValid = true;
+		FUeAgentProjectionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentProjectionDiagnostic final
 	{
 	public:
-		FUeAgentProjectionDiagnostic(
-			FString InCode,
-			EUeAgentDiagnosticSeverity InSeverity,
-			FString InMessage,
-			FString InPath,
-			FString InSubjectId,
-			bool bInRetrySafe);
-
-		const FString& GetCode() const;
-		EUeAgentDiagnosticSeverity GetSeverity() const;
-		const FString& GetMessage() const;
-		const FString& GetPath() const;
-		const FString& GetSubjectId() const;
-		bool IsRetrySafe() const;
+		explicit FUeAgentProjectionDiagnostic(FUeAgentProjectionError InDiagnostic);
+		const FUeAgentProjectionError& GetDiagnostic() const;
 		bool IsValid() const;
+		const FUeAgentProjectionError& GetValidationDiagnostic() const;
 
 	private:
-		FString Code;
-		EUeAgentDiagnosticSeverity Severity =
-			EUeAgentDiagnosticSeverity::Info;
-		FString Message;
-		FString Path;
-		FString SubjectId;
-		bool bRetrySafe = false;
-		bool bValid = false;
+		FUeAgentProjectionError Diagnostic;
+		FUeAgentProjectionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentArtifactDescriptor final
@@ -162,6 +115,7 @@ namespace UE::UAI::Projection
 		const FString& GetReceiptId() const;
 		bool IsImportable() const;
 		bool IsValid() const;
+		const FUeAgentProjectionError& GetValidationDiagnostic() const;
 
 	private:
 		FString ArtifactId;
@@ -172,7 +126,7 @@ namespace UE::UAI::Projection
 		int64 ByteCount = -1;
 		FString ReceiptId;
 		bool bImportable = false;
-		bool bValid = false;
+		FUeAgentProjectionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentTokenEstimate final
@@ -188,13 +142,14 @@ namespace UE::UAI::Projection
 		int64 GetTokens() const;
 		int64 GetUtf8Bytes() const;
 		bool IsValid() const;
+		const FUeAgentProjectionError& GetValidationDiagnostic() const;
 
 	private:
 		EUeAgentTokenEstimateKind Kind =
 			EUeAgentTokenEstimateKind::Exact;
 		int64 Tokens = -1;
 		int64 Utf8Bytes = -1;
-		bool bValid = false;
+		FUeAgentProjectionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentProjectedEntry final
@@ -215,6 +170,7 @@ namespace UE::UAI::Projection
 		const TOptional<FUeAgentDefaultValue>& GetDefault() const;
 		const TOptional<FUeAgentStateDetails>& GetDetails() const;
 		bool IsValid() const;
+		const FUeAgentProjectionError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentCanonicalIdentity Identity;
@@ -223,7 +179,7 @@ namespace UE::UAI::Projection
 		FUeAgentStateRevision ObservedRevision;
 		TOptional<FUeAgentDefaultValue> Default;
 		TOptional<FUeAgentStateDetails> Details;
-		bool bValid = false;
+		FUeAgentProjectionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentPageInfo final
@@ -231,22 +187,17 @@ namespace UE::UAI::Projection
 	public:
 		FUeAgentPageInfo(
 			int32 InReturnedItems,
-			int32 InTotalItems,
-			bool bInHasMore,
-			FString InNextCursor);
+			int32 InTotalItems);
 
 		int32 GetReturnedItems() const;
 		int32 GetTotalItems() const;
-		bool HasMore() const;
-		const FString& GetNextCursor() const;
 		bool IsValid() const;
+		const FUeAgentProjectionError& GetValidationDiagnostic() const;
 
 	private:
 		int32 ReturnedItems = -1;
 		int32 TotalItems = -1;
-		bool bHasMore = false;
-		FString NextCursor;
-		bool bValid = false;
+		FUeAgentProjectionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentProjectedSnapshot final
@@ -271,6 +222,7 @@ namespace UE::UAI::Projection
 		const FUeAgentPageInfo& GetPage() const;
 		const TArray<FString>& GetOmittedSections() const;
 		bool IsValid() const;
+		const FUeAgentProjectionError& GetValidationDiagnostic() const;
 
 	private:
 		FString SnapshotId;
@@ -282,7 +234,7 @@ namespace UE::UAI::Projection
 		TArray<FUeAgentProjectedEntry> Entries;
 		FUeAgentPageInfo Page;
 		TArray<FString> OmittedSections;
-		bool bValid = false;
+		FUeAgentProjectionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentProjectedCatalog final
@@ -305,6 +257,7 @@ namespace UE::UAI::Projection
 		const TArray<FUeAgentCatalogDiagnostic>& GetDiagnostics() const;
 		const FUeAgentPageInfo& GetPage() const;
 		bool IsValid() const;
+		const FUeAgentProjectionError& GetValidationDiagnostic() const;
 
 	private:
 		FString CatalogId;
@@ -315,7 +268,7 @@ namespace UE::UAI::Projection
 		TArray<FUeAgentCandidateSummary> Candidates;
 		TArray<FUeAgentCatalogDiagnostic> Diagnostics;
 		FUeAgentPageInfo Page;
-		bool bValid = false;
+		FUeAgentProjectionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentProjectedPayload final
@@ -352,25 +305,25 @@ namespace UE::UAI::Projection
 	public:
 		FUeAgentProjectionRequest(
 			FUeAgentProjectionProfile InProfile,
-			FUeAgentPageRequest InPage,
-			TOptional<int64> InTokenBudget,
 			TArray<FUeAgentArtifactDescriptor> InArtifacts,
-			TArray<FUeAgentProjectionDiagnostic> InDiagnostics);
+			TArray<FUeAgentProjectionDiagnostic> InDiagnostics,
+			EUeAgentProjectionPageUnit InPageUnit =
+				EUeAgentProjectionPageUnit::Entry);
 
 		const FUeAgentProjectionProfile& GetProfile() const;
-		const FUeAgentPageRequest& GetPage() const;
-		const TOptional<int64>& GetTokenBudget() const;
+		EUeAgentProjectionPageUnit GetPageUnit() const;
 		const TArray<FUeAgentArtifactDescriptor>& GetArtifacts() const;
 		const TArray<FUeAgentProjectionDiagnostic>& GetDiagnostics() const;
 		bool IsValid() const;
+		const FUeAgentProjectionError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentProjectionProfile Profile;
-		FUeAgentPageRequest Page;
-		TOptional<int64> TokenBudget;
 		TArray<FUeAgentArtifactDescriptor> Artifacts;
 		TArray<FUeAgentProjectionDiagnostic> Diagnostics;
-		bool bValid = false;
+		EUeAgentProjectionPageUnit PageUnit =
+			EUeAgentProjectionPageUnit::Entry;
+		FUeAgentProjectionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentProjectionSourceValue final
@@ -430,12 +383,12 @@ namespace UE::UAI::Projection
 		const FString& GetRequestId() const;
 		EUeAgentProjectionResultKind GetResultKind() const;
 		const FString& GetProfileId() const;
-		EUeAgentProjectionCompleteness GetCompleteness() const;
 		const FUeAgentProjectedPayload& GetPayload() const;
 		const TArray<FUeAgentArtifactDescriptor>& GetArtifacts() const;
 		const TArray<FUeAgentProjectionDiagnostic>& GetDiagnostics() const;
 		const FUeAgentTokenEstimate& GetTokenEstimate() const;
 		bool IsValid() const;
+		const FUeAgentProjectionError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentProjectedResponse(
@@ -443,7 +396,6 @@ namespace UE::UAI::Projection
 			FString InRequestId,
 			EUeAgentProjectionResultKind InResultKind,
 			FString InProfileId,
-			EUeAgentProjectionCompleteness InCompleteness,
 			FUeAgentProjectedPayload InPayload,
 			TArray<FUeAgentArtifactDescriptor> InArtifacts,
 			TArray<FUeAgentProjectionDiagnostic> InDiagnostics,
@@ -454,13 +406,11 @@ namespace UE::UAI::Projection
 		EUeAgentProjectionResultKind ResultKind =
 			EUeAgentProjectionResultKind::Query;
 		FString ProfileId;
-		EUeAgentProjectionCompleteness Completeness =
-			EUeAgentProjectionCompleteness::Complete;
 		FUeAgentProjectedPayload Payload;
 		TArray<FUeAgentArtifactDescriptor> Artifacts;
 		TArray<FUeAgentProjectionDiagnostic> Diagnostics;
 		FUeAgentTokenEstimate TokenEstimate;
-		bool bValid = false;
+		FUeAgentProjectionError ValidationDiagnostic;
 
 		friend class FUeAgentResponseProjector;
 	};

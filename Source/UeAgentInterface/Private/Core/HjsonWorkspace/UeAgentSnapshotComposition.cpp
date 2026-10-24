@@ -1,5 +1,8 @@
 #include "Core/HjsonWorkspace/UeAgentSnapshotComposition.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonValue.h"
+
 namespace UE::UAI::HjsonWorkspace
 {
 	using namespace UE::UAI::StateSemantic;
@@ -21,11 +24,26 @@ namespace UE::UAI::HjsonWorkspace
 		, ProfileId(Normalize(MoveTemp(InProfileId)))
 		, Snapshot(MoveTemp(InSnapshot))
 	{
-		bValid = !TargetKind.IsEmpty()
-			&& !ProfileId.IsEmpty()
-			&& Snapshot->GetRevision().IsValid()
-			&& Snapshot->GetProvenance().IsValid()
-			&& !Snapshot->GetSnapshotId().IsEmpty();
+		if (TargetKind.IsEmpty() || ProfileId.IsEmpty())
+		{
+			ValidationDiagnostic = Contract::FDiagnostic::Failure(TEXT("snapshot_composition_request_invalid"),
+				TargetKind.IsEmpty() ? TEXT("The snapshot composition request requires a target kind.") : TEXT("The snapshot composition request requires a profile identifier."), TEXT("snapshot_composition"));
+			ValidationDiagnostic.PropertyPath = TargetKind.IsEmpty() ? TEXT("/target_kind") : TEXT("/profile_id");
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(FString());
+			ValidationDiagnostic.SourceKind = TEXT("native_result");
+		}
+		else if (!Snapshot->GetRevision().IsValid())
+			ValidationDiagnostic = Contract::FDiagnostic::WrapFailure(TEXT("snapshot_composition_request_invalid"), Snapshot->GetRevision().GetValidationDiagnostic());
+		else if (!Snapshot->GetProvenance().IsValid())
+			ValidationDiagnostic = Contract::FDiagnostic::WrapFailure(TEXT("snapshot_composition_request_invalid"), Snapshot->GetProvenance().GetValidationDiagnostic());
+		else if (Snapshot->GetSnapshotId().IsEmpty())
+		{
+			ValidationDiagnostic = Contract::FDiagnostic::Failure(TEXT("snapshot_composition_request_invalid"),
+				TEXT("The snapshot composition request requires a source snapshot identifier."), TEXT("snapshot_composition"));
+			ValidationDiagnostic.PropertyPath = TEXT("/snapshot/snapshot_id");
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(FString());
+			ValidationDiagnostic.SourceKind = TEXT("native_result");
+		}
 	}
 
 	const FString& FSnapshotCompositionRequest::GetTargetKind() const
@@ -46,7 +64,7 @@ namespace UE::UAI::HjsonWorkspace
 
 	bool FSnapshotCompositionRequest::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
 	bool TryComposeSnapshotAuthoringModel(
@@ -59,16 +77,14 @@ namespace UE::UAI::HjsonWorkspace
 		OutError.Reset();
 		if (!Request.IsValid())
 		{
-			OutError.Set(TEXT("snapshot_composition_request_invalid"));
+			OutError.SetFailure(Request.GetValidationDiagnostic());
 			return false;
 		}
-		FString ContractError;
+		UE::UAI::Contract::FDiagnostic ContractError;
 		if (!RegisterGraphTreeTargetCompositionContracts(ContractError)
 			|| !RegisterOtherTargetCompositionContracts(ContractError))
 		{
-			OutError.Set(
-				TEXT("target_composition_contract_registration_failed"),
-				ContractError);
+			OutError.SetFailure(MoveTemp(ContractError));
 			return false;
 		}
 		FCanonicalCompositionRequest Composition;
@@ -117,6 +133,6 @@ namespace UE::UAI::HjsonWorkspace
 			MoveTemp(Telemetry),
 			Resources,
 			OutPlan,
-			OutError);
+			OutError, Request.GetTargetKind());
 	}
 }

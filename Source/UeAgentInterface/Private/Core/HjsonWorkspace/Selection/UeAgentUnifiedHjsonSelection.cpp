@@ -12,19 +12,14 @@ namespace UE::UAI::HjsonWorkspace
 			const FEditBundleSelectionError& Error,
 			FWorkspaceError& OutError)
 		{
-			OutError.Set(Error.Code, Error.Subject);
+			OutError.SetFailure(Error);
 		}
 
 		bool FailResource(
 			FWorkspaceError& OutError,
-			const FUeAgentResourceBudgetExceeded& Error)
+			const FUeAgentResourceChargeError& Error)
 		{
-			OutError.Set(
-				Error.Code,
-				Error.Path,
-				TEXT("/"),
-				Error.Observed,
-				Error.bStoppedEarly);
+			OutError.SetFailure(Error);
 			return false;
 		}
 	}
@@ -77,7 +72,7 @@ namespace UE::UAI::HjsonWorkspace
 		OutError.Reset();
 		if (!Model->IsValid())
 		{
-			OutError.Set(TEXT("hjson_unified_model_invalid"));
+			OutError.SetFailure(Model->GetValidationDiagnostic());
 			return false;
 		}
 
@@ -95,7 +90,7 @@ namespace UE::UAI::HjsonWorkspace
 		}
 		if (!InitialClosure.IsSet())
 		{
-			OutError.Set(TEXT("hjson_selection_closure_missing"));
+			OutError.SetSourceFailure(TEXT("hjson_selection_closure_missing"), TEXT("Selection resolution reported success but returned no closure."));
 			return false;
 		}
 
@@ -145,11 +140,11 @@ namespace UE::UAI::HjsonWorkspace
 		}
 		if (!FinalClosure.IsSet())
 		{
-			OutError.Set(TEXT("hjson_selection_closure_missing"));
+			OutError.SetSourceFailure(TEXT("hjson_selection_closure_missing"), TEXT("Selection resolution returned no closure after expanding the selected relations."));
 			return false;
 		}
 
-		FUeAgentResourceBudgetExceeded ResourceError;
+		FUeAgentResourceChargeError ResourceError;
 		if (!Resources.TryChargeMany(
 			{
 				{EUeAgentResourceDimension::Nodes,
@@ -175,7 +170,10 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(FinalClosure.GetValue())));
 		if (!Candidate->IsValid())
 		{
-			OutError.Set(TEXT("hjson_selection_package_invalid"));
+			if (!Candidate->GetModel()->IsValid()) OutError.SetFailure(Candidate->GetModel()->GetValidationDiagnostic());
+			else OutError.SetSourceFailure(TEXT("hjson_selection_package_invalid"),
+				!Candidate->GetClosure().IsValid() ? TEXT("The resolved selection closure is invalid.")
+				: TEXT("The selected model has no valid SHA-256 fingerprint."));
 			return false;
 		}
 		OutPackage = MoveTemp(Candidate);

@@ -68,7 +68,7 @@ namespace UeAgentDetailsAuthoring
 		Selectors.Add(TEXT("object_path"), OwnerInfo.OwnerPath);
 		Selectors.Add(TEXT("class_path"), OwnerInfo.OwnerClassPath);
 		UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
-		FString IdentityError;
+		UE::UAI::Contract::FDiagnostic IdentityError;
 		if (UeAgentAuthoringIdentity::BuildCanonicalIdentity(
 			TEXT("owner_identity"), TEXT("owner"), Selectors, Identity, IdentityError))
 		{

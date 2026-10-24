@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class UObject;
@@ -19,10 +21,12 @@ namespace UE::UAI::QueryOwners::Material
 		FString Id;
 		FString Name;
 		FString Label;
+		TArray<FString> Scopes;
 		FString Kind;
 		FString Category;
 		bool bSupported = false;
 		FString SupportReason;
+		UE::UAI::Contract::FDiagnostic SupportDiagnostic;
 		TArray<FString> SupportedOperations;
 		FString InputContract;
 		FString PlacementContract;
@@ -36,33 +40,17 @@ namespace UE::UAI::QueryOwners::Material
 		FString TargetRevision;
 		TArray<FMaterialExpressionCandidate> Candidates;
 		int32 TotalMatches = 0;
-		int32 NextCursor = INDEX_NONE;
-		bool bComplete = false;
-		bool bHasMore = false;
-		bool bCoverageComplete = false;
-		FString CoverageScope;
+		UE::UAI::Contract::FDiagnostic CatalogDiagnostic;
 		FMaterialExpressionCandidateContext Context;
 	};
 
-	struct UEAGENTINTERFACE_API FMaterialExpressionCandidateQueryError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FMaterialExpressionCandidateQueryError = UE::UAI::Contract::FDiagnostic;
 
 	UEAGENTINTERFACE_API bool TryQueryMaterialExpressionCandidates(
 		UObject& Target,
 		const FString& Query,
 		FMaterialExpressionCandidateQueryResult& OutResult,
 		FMaterialExpressionCandidateQueryError& OutError,
-		int32 Limit = 20,
-		int32 Cursor = 0,
 		const FMaterialExpressionCandidateContext& Context = {});
 
-	UEAGENTINTERFACE_API bool IsCurrentMaterialExpressionCandidateBinding(
-		UObject& Target,
-		const FString& CandidateName,
-		const FString& BindingRevision,
-		FMaterialExpressionCandidateQueryError& OutError);
 }

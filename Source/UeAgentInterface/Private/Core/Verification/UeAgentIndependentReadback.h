@@ -29,6 +29,7 @@ namespace UE::UAI::Verification
 		const TOptional<ArtifactPublisher::FFileArtifactReference>&
 			GetArtifact() const;
 		bool IsValid() const;
+		const FVerificationError* GetValidationDiagnostic() const;
 
 	private:
 		FString OperationId;
@@ -36,34 +37,36 @@ namespace UE::UAI::Verification
 		FString SubjectRef;
 		StateSemantic::FUeAgentCanonicalValueRef ExpectedValue;
 		TOptional<ArtifactPublisher::FFileArtifactReference> Artifact;
-		bool bValid = false;
+		TSharedPtr<const FVerificationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FIndependentReadbackObservation final
 	{
 	public:
-		FIndependentReadbackObservation() = default;
+		FIndependentReadbackObservation();
 
 		static FIndependentReadbackObservation Available(
 			StateSemantic::FUeAgentCanonicalValueRef InActualValue,
 			FString InEvidenceId);
 		static FIndependentReadbackObservation Unavailable(
-			FString InDiagnosticCode,
+			FVerificationError InDiagnostic,
 			FString InEvidenceId = FString());
 
 		bool IsValid() const;
+		const FVerificationError* GetValidationDiagnostic() const;
 		bool IsAvailable() const;
 		const StateSemantic::FUeAgentCanonicalValuePtr&
 			GetActualValue() const;
 		const FString& GetEvidenceId() const;
 		const FString& GetDiagnosticCode() const;
+		const FVerificationError& GetDiagnostic() const;
 
 	private:
 		StateSemantic::FUeAgentCanonicalValuePtr ActualValue;
 		FString EvidenceId;
-		FString DiagnosticCode;
+		FVerificationError Diagnostic;
 		bool bAvailable = false;
-		bool bValid = false;
+		TSharedPtr<const FVerificationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IIndependentReadbackOracle
@@ -86,7 +89,7 @@ namespace UE::UAI::Verification
 		FIndependentReadbackOutcome(
 			EVerificationStatus InStatus,
 			EEffectOutcome InEffectOutcome,
-			FString InDiagnosticCode,
+			FVerificationError InDiagnostic,
 			FString InEvidenceId,
 			StateSemantic::FUeAgentCanonicalValuePtr InActualValue,
 			StateSemantic::FUeAgentSemanticComparison InComparison);
@@ -94,7 +97,9 @@ namespace UE::UAI::Verification
 		EVerificationStatus GetStatus() const;
 		EEffectOutcome GetEffectOutcome() const;
 		const FString& GetDiagnosticCode() const;
+		const FVerificationError& GetDiagnostic() const;
 		const FString& GetEvidenceId() const;
+		FVerificationError GetFailureDiagnostic(const FVerificationError& Error = FVerificationError()) const;
 		const StateSemantic::FUeAgentCanonicalValuePtr&
 			GetActualValue() const;
 		const StateSemantic::FUeAgentSemanticComparison&
@@ -103,7 +108,7 @@ namespace UE::UAI::Verification
 	private:
 		EVerificationStatus Status = EVerificationStatus::Unavailable;
 		EEffectOutcome EffectOutcome = EEffectOutcome::StateUnknown;
-		FString DiagnosticCode;
+		FVerificationError Diagnostic;
 		FString EvidenceId;
 		StateSemantic::FUeAgentCanonicalValuePtr ActualValue;
 		StateSemantic::FUeAgentSemanticComparison Comparison;
@@ -124,8 +129,20 @@ namespace UE::UAI::Verification
 			ContextResource::FUeAgentResourceTracker& Resources,
 			FIndependentReadbackOutcome& OutOutcome,
 			FVerificationError& OutError) const;
+		// Production observation preserves the native result. Semantic mismatch
+		// or unavailable comparison is a warning; actual oracle read failures
+		// remain errors. TryVerify retains the pure development-test contract.
+		bool TryObserve(
+			const FIndependentReadbackRequest& Request,
+			ContextResource::FUeAgentResourceTracker& Resources,
+			FIndependentReadbackOutcome& OutOutcome,
+			FVerificationError& OutError) const;
 
 	private:
+		bool TryReadAndCompare(const FIndependentReadbackRequest& Request,
+			ContextResource::FUeAgentResourceTracker& Resources,
+			FIndependentReadbackOutcome& OutOutcome, FVerificationError& OutError,
+			bool bObservationOnly) const;
 		explicit FIndependentReadbackService(
 			TArray<TSharedRef<
 				IIndependentReadbackOracle,

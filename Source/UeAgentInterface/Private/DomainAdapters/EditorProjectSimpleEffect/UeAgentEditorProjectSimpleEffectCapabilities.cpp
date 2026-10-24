@@ -1,8 +1,10 @@
 #include "DomainAdapters/EditorProjectSimpleEffect/UeAgentEditorProjectSimpleEffectCapabilities.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Misc/ScopeExit.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -217,15 +219,77 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			},
 		};
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
+		bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
+            return false;
+        }
+
+
+		FString PayloadPointerPart(const FString& Text)
 		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
-			return false;
+			return Text.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		}
+
+		TSharedPtr<FJsonValue> PayloadKind(const TSharedPtr<FJsonValue>& Value)
+		{
+			const TCHAR* Kind = !Value.IsValid() ? TEXT("missing")
+				: Value->Type == EJson::Null ? TEXT("null")
+				: Value->Type == EJson::String ? TEXT("string")
+				: Value->Type == EJson::Number ? TEXT("number")
+				: Value->Type == EJson::Boolean ? TEXT("boolean")
+				: Value->Type == EJson::Array ? TEXT("array")
+				: Value->Type == EJson::Object ? TEXT("object") : TEXT("none");
+			return MakeShared<FJsonValueString>(Kind);
+		}
+
+		FExecutionMutationError CapsValueFailure(const FString& Code, const FString& Reason,
+			const FString& Path, const TSharedPtr<FJsonValue>& Actual,
+			const TSharedPtr<FJsonValue>& Expected, const FString& SourceKind = TEXT("command_input"))
+		{
+			auto Error = FExecutionMutationError::Failure(Code, Reason, TEXT("execution"));
+			Error.SourceKind = SourceKind;
+			Error.PropertyPath = Path;
+			Error.ActualValue = Actual;
+			Error.ExpectedValue = Expected;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValuePresent = Expected.IsValid();
+			return Error;
+		}
+
+		FExecutionMutationError CapsCondition(const FString& Code, const FString& Reason,
+			const FString& Path, bool Actual = false, bool Expected = true,
+			const FString& SourceKind = TEXT("command_input"))
+		{
+			return CapsValueFailure(Code, Reason, Path, MakeShared<FJsonValueBoolean>(Actual),
+				MakeShared<FJsonValueBoolean>(Expected), SourceKind);
+		}
+
+		const TCHAR* PayloadExpectedKind(EFieldValueKind Kind)
+		{
+			switch (Kind)
+			{
+			case EFieldValueKind::String: return TEXT("string");
+			case EFieldValueKind::Boolean: return TEXT("boolean");
+			case EFieldValueKind::Integer: return TEXT("integer number");
+			case EFieldValueKind::Number: return TEXT("number");
+			case EFieldValueKind::Array: return TEXT("array");
+			case EFieldValueKind::Object: return TEXT("object");
+			}
+			return TEXT("supported field kind");
+		}
+
+		FString PayloadTargetKind(const FString& Profile)
+		{
+			if (Profile == TEXT("config_section")) return TEXT("configuration section");
+			if (Profile == TEXT("device_profile")) return TEXT("device profile");
+			if (Profile == TEXT("localization_target")) return TEXT("localization target");
+			if (Profile == TEXT("platform_config")) return TEXT("platform configuration");
+			if (Profile == TEXT("scalability_group")) return TEXT("scalability group");
+			if (Profile == TEXT("project_settings")) return TEXT("project settings");
+			if (Profile == TEXT("string_table")) return TEXT("string table");
+			return TEXT("unrecognized target kind");
 		}
 
 		TArray<FString> SplitValues(const TCHAR* Source)
@@ -455,9 +519,6 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			Properties->SetObjectField(
 				TEXT("target_ref"),
 				StringSchema());
-			Properties->SetObjectField(
-				TEXT("expected_revision"),
-				StringSchema());
 
 			const TSharedPtr<FJsonObject> Changes =
 				MakeShared<FJsonObject>();
@@ -488,7 +549,6 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 				Properties,
 				{
 					TEXT("target_ref"),
-					TEXT("expected_revision"),
 					TEXT("changes"),
 				});
 		}
@@ -542,7 +602,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 		bool TryCanonicalize(
 			const TSharedPtr<FJsonObject>& Object,
 			FString& OutCanonical,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			return Object.IsValid()
 				&& Json::TryCanonicalize(
@@ -556,7 +616,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			const TSharedPtr<FJsonObject>& InputSchema,
 			const TSharedPtr<FJsonObject>& ResultSchema,
 			FString& OutHash,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const TSharedPtr<FJsonObject> Policy =
 				MakeShared<FJsonObject>();
@@ -622,7 +682,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 					continue;
 				}
 				FString Hash;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (TryBuildDescriptorHash(
 						Spec,
 						BuildInputSchema(Spec),
@@ -642,16 +702,13 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			TSharedPtr<FJsonObject>& OutPayload,
 			FExecutionMutationError& OutError)
 		{
-			OutPayload.Reset();
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(
-					Request.GetPayload().GetJsonValue());
-			if (!FJsonSerializer::Deserialize(Reader, OutPayload)
-				|| !OutPayload.IsValid())
+			UE::UAI::Contract::FDiagnostic ParseError;
+			if (!UE::UAI::Contract::Json::TryParseObject(
+				Request.GetPayload().GetJsonValue(), OutPayload, ParseError))
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_payload_parse_failed"));
+				auto Error = FExecutionMutationError::WrapFailure(TEXT("editor_project_payload_parse_failed"), ParseError);
+				if (Error.SourceKind.IsEmpty()) Error.SourceKind = TEXT("command_input");
+				return Fail(OutError, MoveTemp(Error));
 			}
 			return true;
 		}
@@ -701,147 +758,9 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
-			OutValue.Reset();
-			FUeAgentStateSemanticError Error;
-			if (!JsonValue.IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_canonical_value_missing"));
-			}
-			switch (JsonValue->Type)
-			{
-			case EJson::Null:
-				if (FUeAgentCanonicalValue::TryNull(
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::Boolean:
-				if (FUeAgentCanonicalValue::TryBoolean(
-						JsonValue->AsBool(),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::String:
-				if (FUeAgentCanonicalValue::TryString(
-						JsonValue->AsString(),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::Number:
-				{
-					const double Number = JsonValue->AsNumber();
-					const bool bInteger =
-						FMath::IsNearlyEqual(
-							Number,
-							FMath::FloorToDouble(Number))
-						&& Number
-							>= static_cast<double>(MIN_int64)
-						&& Number
-							<= static_cast<double>(MAX_int64);
-					const bool bBuilt = bInteger
-						? FUeAgentCanonicalValue::TryInteger(
-							FString::Printf(
-								TEXT("%lld"),
-								static_cast<long long>(
-									Number)),
-							Resources,
-							OutValue,
-							Error)
-						: FUeAgentCanonicalValue::TryDecimal(
-							FString::SanitizeFloat(Number),
-							Resources,
-							OutValue,
-							Error);
-					if (bBuilt)
-					{
-						return true;
-					}
-					break;
-				}
-			case EJson::Array:
-				{
-					TArray<FUeAgentCanonicalValueRef> Items;
-					for (const TSharedPtr<FJsonValue>& Item
-						: JsonValue->AsArray())
-					{
-						FUeAgentCanonicalValuePtr CanonicalItem;
-						if (!TryCanonicalValue(
-								Item,
-								Resources,
-								CanonicalItem,
-								OutError))
-						{
-							return false;
-						}
-						Items.Add(CanonicalItem.ToSharedRef());
-					}
-					if (FUeAgentCanonicalValue::TryArray(
-							Items,
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
-					break;
-				}
-			case EJson::Object:
-				{
-					TArray<
-						TPair<
-							FString,
-							FUeAgentCanonicalValueRef>> Items;
-					for (const TPair<
-						FString,
-						TSharedPtr<FJsonValue>>& Pair
-							: JsonValue->AsObject()->Values)
-					{
-						FUeAgentCanonicalValuePtr CanonicalItem;
-						if (!TryCanonicalValue(
-								Pair.Value,
-								Resources,
-								CanonicalItem,
-								OutError))
-						{
-							return false;
-						}
-						Items.Emplace(
-							Pair.Key,
-							CanonicalItem.ToSharedRef());
-					}
-					if (FUeAgentCanonicalValue::TryObject(
-							Items,
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
-					break;
-				}
-			default:
-				break;
-			}
-			return Fail(
-				OutError,
-				Error.Code.IsEmpty()
-					? TEXT(
-						"editor_project_canonical_value_failed")
-					: Error.Code,
-				Error.Detail);
+			UE::UAI::Contract::FDiagnostic Error;
+			return CanonicalJson::TryFromJsonValue(JsonValue, Resources, OutValue, Error)
+				? true : Fail(OutError, Error);
 		}
 
 		bool JsonValueMatchesKind(
@@ -859,10 +778,11 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			case EFieldValueKind::Boolean:
 				return Value->Type == EJson::Boolean;
 			case EFieldValueKind::Integer:
-				return Value->Type == EJson::Number
-					&& FMath::IsNearlyEqual(
-						Value->AsNumber(),
-						FMath::FloorToDouble(Value->AsNumber()));
+				{
+					FString Lexeme;
+					return CanonicalJson::TryGetNumberLexeme(*Value, Lexeme)
+						&& IsIntegralNumberLexeme(Lexeme);
+				}
 			case EFieldValueKind::Number:
 				return Value->Type == EJson::Number;
 			case EFieldValueKind::Array:
@@ -883,159 +803,110 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 				&& !Text.Contains(TEXT("\n"));
 		}
 
-		bool ValidateConfigEntryMap(
-			const TSharedPtr<FJsonValue>& Value,
-			FExecutionMutationError& OutError)
+		bool ValidateConfigEntryMap(const TSharedPtr<FJsonValue>& Value,
+			const FString& Path, FExecutionMutationError& OutError)
 		{
 			if (!Value.IsValid() || Value->Type != EJson::Object)
+				return Fail(OutError, CapsValueFailure(TEXT("editor_project_config_entry_invalid"),
+					TEXT("Configuration entries must be an object of single-line string values."), Path,
+					PayloadKind(Value), MakeShared<FJsonValueString>(TEXT("object"))));
+			for (const auto& Pair : Value->AsObject()->Values)
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_config_entry_invalid"));
-			}
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair
-				: Value->AsObject()->Values)
-			{
-				if (!IsSafeText(Pair.Key)
-					|| !Pair.Value.IsValid()
-					|| Pair.Value->Type != EJson::String
-					|| Pair.Value->AsString().Contains(TEXT("\r"))
-					|| Pair.Value->AsString().Contains(TEXT("\n")))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"editor_project_config_entry_invalid"),
-						Pair.Key);
-				}
+				const FString EntryPath = Path + TEXT("/") + PayloadPointerPart(Pair.Key);
+				if (!IsSafeText(Pair.Key))
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_config_entry_invalid"),
+						TEXT("Configuration keys must be non-empty, trimmed and contain no line breaks."), EntryPath,
+						MakeShared<FJsonValueString>(Pair.Key), MakeShared<FJsonValueString>(TEXT("non-empty trimmed single-line key"))));
+				if (!Pair.Value.IsValid() || Pair.Value->Type != EJson::String)
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_config_entry_invalid"),
+						TEXT("Each configuration entry value must be a string."), EntryPath,
+						PayloadKind(Pair.Value), MakeShared<FJsonValueString>(TEXT("string"))));
+				const FString Text = Pair.Value->AsString();
+				if (Text.Contains(TEXT("\r")) || Text.Contains(TEXT("\n")))
+					return Fail(OutError, CapsCondition(TEXT("editor_project_config_entry_invalid"),
+						TEXT("Configuration entry values must not contain line breaks."), EntryPath, true, false));
 			}
 			return true;
 		}
 
-		bool ValidateSettingsChanges(
-			const TSharedPtr<FJsonValue>& Value,
-			const FUeAgentCanonicalSnapshotRef& Snapshot,
-			FExecutionMutationError& OutError)
+		bool ValidateSettingsChanges(const TSharedPtr<FJsonValue>& Value,
+			const FUeAgentCanonicalSnapshotRef& Snapshot, const FString& Path, FExecutionMutationError& OutError)
 		{
 			if (!Value.IsValid() || Value->Type != EJson::Array)
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"editor_project_settings_changes_invalid"));
-			}
+				return Fail(OutError, CapsValueFailure(TEXT("editor_project_settings_changes_invalid"),
+					TEXT("Settings changes must be an array."), Path, PayloadKind(Value), MakeShared<FJsonValueString>(TEXT("array"))));
 			TSet<FString> SeenFields;
-			for (const TSharedPtr<FJsonValue>& Item
-				: Value->AsArray())
+			for (int32 Index = 0; Index < Value->AsArray().Num(); ++Index)
 			{
-				const TSharedPtr<FJsonObject> Change =
-					Item.IsValid() ? Item->AsObject() : nullptr;
-				FString FieldRef;
-				FString ExpectedRevision;
-				FString Presence;
-				FString TypeId;
-				if (!Change.IsValid()
-					|| !Change->TryGetStringField(
-						TEXT("field_ref"),
-						FieldRef)
-					|| !Change->TryGetStringField(
-						TEXT("expected_revision"),
-						ExpectedRevision)
-					|| !Change->TryGetStringField(
-						TEXT("presence"),
-						Presence)
-					|| !Change->TryGetStringField(
-						TEXT("type_id"),
-						TypeId)
-					|| !IsSafeText(FieldRef)
-					|| !IsSafeText(ExpectedRevision)
-					|| !IsSafeText(TypeId)
-					|| !TSet<FString>({
-						TEXT("set"),
-						TEXT("null"),
-						TEXT("clear"),
-					}).Contains(Presence))
+				const auto& Item = Value->AsArray()[Index];
+				const FString ItemPath = Path + TEXT("/") + FString::FromInt(Index);
+				const auto Change = Item.IsValid() && Item->Type == EJson::Object ? Item->AsObject() : nullptr;
+				FString FieldRef, Presence, TypeId;
+				if (!Change.IsValid())
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_settings_change_invalid"),
+						TEXT("Each settings change must be an object."), ItemPath, PayloadKind(Item), MakeShared<FJsonValueString>(TEXT("object"))));
+				for (const auto& Field : {TPair<const TCHAR*, FString*>(TEXT("field_ref"), &FieldRef),
+					TPair<const TCHAR*, FString*>(TEXT("presence"), &Presence), TPair<const TCHAR*, FString*>(TEXT("type_id"), &TypeId)})
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"editor_project_settings_change_invalid"),
-						FieldRef);
+					if (!Change->TryGetStringField(Field.Key, *Field.Value))
+						return Fail(OutError, CapsValueFailure(TEXT("editor_project_settings_change_invalid"),
+							TEXT("A settings change is missing a required string field."), ItemPath + TEXT("/") + Field.Key,
+							PayloadKind(Change->TryGetField(Field.Key)), MakeShared<FJsonValueString>(TEXT("string"))));
 				}
+				if (!IsSafeText(FieldRef) || !IsSafeText(TypeId))
+				{
+					const bool bFieldRef = !IsSafeText(FieldRef);
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_settings_change_invalid"),
+						TEXT("Settings field and type references must be non-empty, trimmed and contain no line breaks."),
+						ItemPath + (bFieldRef ? TEXT("/field_ref") : TEXT("/type_id")),
+						MakeShared<FJsonValueString>(bFieldRef ? FieldRef : TypeId),
+						MakeShared<FJsonValueString>(TEXT("non-empty trimmed single-line reference"))));
+				}
+				if (!TSet<FString>({TEXT("set"), TEXT("null"), TEXT("clear")}).Contains(Presence))
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_settings_change_invalid"),
+						TEXT("The settings change presence is not supported."), ItemPath + TEXT("/presence"),
+						MakeShared<FJsonValueString>(Presence), MakeShared<FJsonValueString>(TEXT("set, null or clear"))));
 				if (SeenFields.Contains(FieldRef))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"editor_project_settings_field_duplicate"),
-						FieldRef);
-				}
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_settings_field_duplicate"),
+						TEXT("A settings field appears more than once in this change list."), ItemPath + TEXT("/field_ref"),
+						MakeShared<FJsonValueString>(FieldRef), MakeShared<FJsonValueString>(TEXT("unique field reference"))));
 				SeenFields.Add(FieldRef);
-
-				const FUeAgentStateEntry* FieldEntry =
-					FindEntry(Snapshot, FieldRef);
+				const auto* FieldEntry = FindEntry(Snapshot, FieldRef);
 				if (!FieldEntry)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"editor_project_settings_field_unresolved"),
-						FieldRef);
+					auto Error = CapsCondition(TEXT("editor_project_settings_field_unresolved"),
+						TEXT("The current snapshot has no observation for the requested settings field."),
+						ItemPath + TEXT("/field_ref"), false, true, TEXT("native_result"));
+					Error.CandidateName = FieldRef;
+					return Fail(OutError, MoveTemp(Error));
 				}
-				FString CurrentRevision;
 				FString CurrentType;
-				if (!TryGetObjectString(
-						FieldEntry->GetValue(),
-						TEXT("target_revision"),
-						CurrentRevision)
-					|| CurrentRevision != ExpectedRevision)
+				const bool bTypeCaptured = TryGetObjectString(FieldEntry->GetValue(), TEXT("type_id"), CurrentType);
+				if (!bTypeCaptured || CurrentType != TypeId)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"editor_project_settings_field_revision_stale"),
-						FieldRef);
+					auto Error = CapsValueFailure(TEXT("editor_project_settings_field_type_mismatch"),
+						bTypeCaptured ? TEXT("The requested settings field type differs from its captured type.")
+							: TEXT("The captured settings field has no string type identifier."),
+						ItemPath + TEXT("/type_id"), MakeShared<FJsonValueString>(bTypeCaptured ? TypeId : TEXT("missing or non-string captured type")),
+						MakeShared<FJsonValueString>(bTypeCaptured ? CurrentType : TEXT("captured string type identifier")),
+						bTypeCaptured ? TEXT("command_input") : TEXT("native_result"));
+					Error.CandidateName = FieldRef;
+					return Fail(OutError, MoveTemp(Error));
 				}
-				if (!TryGetObjectString(
-						FieldEntry->GetValue(),
-						TEXT("type_id"),
-						CurrentType)
-					|| CurrentType != TypeId)
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"editor_project_settings_field_type_mismatch"),
-						FieldRef);
-				}
-				const TSharedPtr<FJsonValue> PropertyValue =
-					Change->TryGetField(TEXT("value"));
-				if ((Presence == TEXT("set"))
-					!= PropertyValue.IsValid())
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"editor_project_settings_value_presence_mismatch"),
-						FieldRef);
-				}
+				const auto PropertyValue = Change->TryGetField(TEXT("value"));
+				if ((Presence == TEXT("set")) != PropertyValue.IsValid())
+					return Fail(OutError, CapsCondition(TEXT("editor_project_settings_value_presence_mismatch"),
+						Presence == TEXT("set") ? TEXT("A set settings change requires a value.")
+							: TEXT("A null or clear settings change must omit value."),
+						ItemPath + TEXT("/value"), PropertyValue.IsValid(), Presence == TEXT("set")));
 				if (Presence == TEXT("set")
-					&& ((TypeId == TEXT("uai.value.boolean.v1")
-							&& PropertyValue->Type
-								!= EJson::Boolean)
-						|| (TypeId == TEXT("uai.value.string.v1")
-							&& PropertyValue->Type
-								!= EJson::String)
-						|| (TypeId == TEXT("uai.value.integer.v1")
-							&& PropertyValue->Type
-								!= EJson::Number)))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"editor_project_settings_value_type_mismatch"),
-						FieldRef);
-				}
+					&& ((TypeId == TEXT("uai.value.boolean.v1") && PropertyValue->Type != EJson::Boolean)
+						|| (TypeId == TEXT("uai.value.string.v1") && PropertyValue->Type != EJson::String)
+						|| (TypeId == TEXT("uai.value.integer.v1") && PropertyValue->Type != EJson::Number)))
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_settings_value_type_mismatch"),
+						TEXT("The settings value JSON kind does not match its declared field type."), ItemPath + TEXT("/value"),
+						PayloadKind(PropertyValue), MakeShared<FJsonValueString>(TypeId == TEXT("uai.value.boolean.v1")
+							? TEXT("boolean") : TypeId == TEXT("uai.value.string.v1") ? TEXT("string") : TEXT("number"))));
 			}
 			return true;
 		}
@@ -1048,95 +919,89 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 				&& !Culture.Contains(TEXT("\\"));
 		}
 
-		bool ValidateCultures(
-			const TSharedPtr<FJsonValue>& Value,
-			FExecutionMutationError& OutError)
+		bool ValidateCultures(const TSharedPtr<FJsonValue>& Value,
+			const FString& Path, FExecutionMutationError& OutError)
 		{
 			if (!Value.IsValid() || Value->Type != EJson::Array)
-			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_culture_set_invalid"));
-			}
+				return Fail(OutError, CapsValueFailure(TEXT("editor_project_culture_set_invalid"),
+					TEXT("The culture set must be an array."), Path, PayloadKind(Value), MakeShared<FJsonValueString>(TEXT("array"))));
 			TSet<FString> Cultures;
-			for (const TSharedPtr<FJsonValue>& Item
-				: Value->AsArray())
+			for (int32 Index = 0; Index < Value->AsArray().Num(); ++Index)
 			{
-				if (!Item.IsValid()
-					|| Item->Type != EJson::String
-					|| !ValidateCultureName(Item->AsString())
-					|| Cultures.Contains(Item->AsString()))
-				{
-					return Fail(
-						OutError,
-						TEXT("editor_project_culture_set_invalid"));
-				}
-				Cultures.Add(Item->AsString());
+				const auto& Item = Value->AsArray()[Index];
+				const FString ItemPath = Path + TEXT("/") + FString::FromInt(Index);
+				if (!Item.IsValid() || Item->Type != EJson::String)
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_culture_set_invalid"),
+						TEXT("Each culture must be a string culture name."), ItemPath, PayloadKind(Item), MakeShared<FJsonValueString>(TEXT("string"))));
+				const FString Culture = Item->AsString();
+				if (!ValidateCultureName(Culture))
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_culture_set_invalid"),
+						TEXT("The culture name is not recognized or is not valid single-line text."), ItemPath,
+						MakeShared<FJsonValueString>(Culture), MakeShared<FJsonValueString>(TEXT("recognized culture name"))));
+				if (Cultures.Contains(Culture))
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_culture_set_invalid"),
+						TEXT("The culture set contains a duplicate culture."), ItemPath,
+						MakeShared<FJsonValueString>(Culture), MakeShared<FJsonValueString>(TEXT("unique culture name"))));
+				Cultures.Add(Culture);
 			}
 			return true;
 		}
 
-		bool ValidateStringTableEntries(
-			const TSharedPtr<FJsonValue>& Value,
-			FExecutionMutationError& OutError)
+		bool ValidateStringTableEntries(const TSharedPtr<FJsonValue>& Value,
+			const FString& Path, FExecutionMutationError& OutError)
 		{
 			if (!Value.IsValid() || Value->Type != EJson::Array)
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"editor_project_string_table_entries_invalid"));
-			}
+				return Fail(OutError, CapsValueFailure(TEXT("editor_project_string_table_entries_invalid"),
+					TEXT("String table entries must be an array."), Path, PayloadKind(Value), MakeShared<FJsonValueString>(TEXT("array"))));
 			TSet<FString> Keys;
-			for (const TSharedPtr<FJsonValue>& Item
-				: Value->AsArray())
+			for (int32 Index = 0; Index < Value->AsArray().Num(); ++Index)
 			{
-				const TSharedPtr<FJsonObject> Row =
-					Item.IsValid() ? Item->AsObject() : nullptr;
-				FString Key;
-				FString Source;
+				const auto& Item = Value->AsArray()[Index];
+				const FString ItemPath = Path + TEXT("/") + FString::FromInt(Index);
+				const auto Row = Item.IsValid() && Item->Type == EJson::Object ? Item->AsObject() : nullptr;
+				FString Key, Source;
 				const TSharedPtr<FJsonObject>* Metadata = nullptr;
-				if (!Row.IsValid()
-					|| !Row->TryGetStringField(TEXT("key"), Key)
-					|| !Row->TryGetStringField(
-						TEXT("source"),
-						Source)
-					|| !IsSafeText(Key)
-					|| Keys.Contains(Key)
-					|| (Row->TryGetObjectField(
-							TEXT("metadata"),
-							Metadata)
-						&& (!Metadata
-							|| !Metadata->IsValid())))
+				if (!Row.IsValid())
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_string_table_entry_invalid"),
+						TEXT("Each string table entry must be an object."), ItemPath, PayloadKind(Item), MakeShared<FJsonValueString>(TEXT("object"))));
+				if (!Row->TryGetStringField(TEXT("key"), Key) || !Row->TryGetStringField(TEXT("source"), Source))
 				{
-					return Fail(
-						OutError,
-						Keys.Contains(Key)
-							? TEXT(
-								"editor_project_string_table_key_duplicate")
-							: TEXT(
-								"editor_project_string_table_entry_invalid"),
-						Key);
+					const auto KeyValue = Row->TryGetField(TEXT("key"));
+					const bool bKey = KeyValue.IsValid() && KeyValue->Type == EJson::String;
+					auto Error = CapsValueFailure(Keys.Contains(Key) ? TEXT("editor_project_string_table_key_duplicate")
+						: TEXT("editor_project_string_table_entry_invalid"),
+						Keys.Contains(Key) ? TEXT("The entry repeats an existing key and has no string source.")
+							: TEXT("String table entries require string key and source fields."),
+						ItemPath + (bKey ? TEXT("/source") : TEXT("/key")),
+						PayloadKind(bKey ? Row->TryGetField(TEXT("source")) : KeyValue), MakeShared<FJsonValueString>(TEXT("string")));
+					Error.CandidateName = Key;
+					return Fail(OutError, MoveTemp(Error));
 				}
+				if (!IsSafeText(Key))
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_string_table_entry_invalid"),
+						TEXT("String table keys must be non-empty, trimmed and contain no line breaks."), ItemPath + TEXT("/key"),
+						MakeShared<FJsonValueString>(Key), MakeShared<FJsonValueString>(TEXT("non-empty trimmed single-line key"))));
+				if (Keys.Contains(Key))
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_string_table_key_duplicate"),
+						TEXT("The string table entries contain a duplicate key."), ItemPath + TEXT("/key"),
+						MakeShared<FJsonValueString>(Key), MakeShared<FJsonValueString>(TEXT("unique key"))));
+				if (Row->TryGetObjectField(TEXT("metadata"), Metadata) && (!Metadata || !Metadata->IsValid()))
+					return Fail(OutError, CapsCondition(TEXT("editor_project_string_table_entry_invalid"),
+						TEXT("The string table metadata object is unavailable."), ItemPath + TEXT("/metadata")));
 				Keys.Add(Key);
 				if (Metadata && Metadata->IsValid())
 				{
-					for (const TPair<
-						FString,
-						TSharedPtr<FJsonValue>>& Pair
-							: (*Metadata)->Values)
+					for (const auto& Pair : (*Metadata)->Values)
 					{
-						if (!IsSafeText(Pair.Key)
-							|| !Pair.Value.IsValid()
-							|| Pair.Value->Type
-								!= EJson::String)
-						{
-							return Fail(
-								OutError,
-								TEXT(
-									"editor_project_string_table_metadata_invalid"),
-								Key);
-						}
+						const FString MetadataPath = ItemPath + TEXT("/metadata/") + PayloadPointerPart(Pair.Key);
+						if (!IsSafeText(Pair.Key))
+							return Fail(OutError, CapsValueFailure(TEXT("editor_project_string_table_metadata_invalid"),
+								TEXT("String table metadata names must be non-empty, trimmed and contain no line breaks."), MetadataPath,
+								MakeShared<FJsonValueString>(Pair.Key), MakeShared<FJsonValueString>(TEXT("non-empty trimmed single-line name"))));
+						if (!Pair.Value.IsValid() || Pair.Value->Type != EJson::String)
+							return Fail(OutError, CapsValueFailure(TEXT("editor_project_string_table_metadata_invalid"),
+								TEXT("String table metadata values must be strings."), MetadataPath,
+								PayloadKind(Pair.Value), MakeShared<FJsonValueString>(TEXT("string"))));
 					}
 				}
 			}
@@ -1159,7 +1024,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 
 	bool TryCreateEditorProjectSimpleEffectDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
@@ -1213,12 +1078,6 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 				FUeAgentContractValue(MoveTemp(CanonicalInput)),
 				FUeAgentContractValue(CanonicalResult));
 		}
-		if (Descriptors.Num() != 7)
-		{
-			OutError =
-				TEXT("editor_project_descriptor_count_invalid");
-			return false;
-		}
 		return FUeAgentDescriptorRegistry::TryCreate(
 			MoveTemp(Descriptors),
 			OutRegistry,
@@ -1228,7 +1087,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 	bool TryGetEditorProjectSimpleEffectProductionProfiles(
 		TArray<FUeAgentEditorProjectSimpleEffectProductionProfile>&
 			OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		OutError.Reset();
@@ -1254,9 +1113,12 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 					});
 			if (!Descriptor)
 			{
-				OutError =
-					TEXT("editor_project_production_descriptor_missing:")
-					+ FString(Spec.DescriptorId);
+				OutError = CapsCondition(TEXT("editor_project_production_descriptor_missing"),
+					TEXT("A required editor/project operation descriptor is missing from the registry."),
+					TEXT("/registry/descriptor/registered"), false, true, TEXT("native_result"));
+				OutError.Stage = TEXT("registry");
+				OutError.CandidateName = Spec.CapabilityId;
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Spec.DescriptorId);
 				OutProfiles.Reset();
 				return false;
 			}
@@ -1274,20 +1136,24 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			Profile.FieldIds = SplitValues(Spec.FieldIds);
 			if (!Profile.IsValid())
 			{
-				OutError =
-					TEXT("editor_project_production_profile_invalid:")
-					+ FString(Spec.DescriptorId);
+				const TCHAR* Field = Profile.DescriptorId.IsEmpty() ? TEXT("descriptor")
+					: Profile.DescriptorVersion <= 0 ? TEXT("descriptor_version")
+					: Profile.DescriptorHash.IsEmpty() ? TEXT("descriptor_fingerprint")
+					: Profile.CapabilityId.IsEmpty() ? TEXT("capability")
+					: Profile.ProfileId.IsEmpty() ? TEXT("target_kind")
+					: Profile.NativeOperationType.IsEmpty() ? TEXT("native_operation")
+					: Profile.NativeBindingId.IsEmpty() ? TEXT("native_binding")
+					: Profile.NativeMechanicId.IsEmpty() ? TEXT("native_mechanic") : TEXT("registered_fields");
+				OutError = CapsCondition(TEXT("editor_project_production_profile_invalid"),
+					FString::Printf(TEXT("The editor/project production profile has invalid or missing required %s data."), Field),
+					TEXT("/profile/") + FString(Field) + TEXT("/valid"), false, true, TEXT("native_result"));
+				OutError.Stage = TEXT("registry");
+				OutError.CandidateName = Profile.CapabilityId;
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Spec.DescriptorId);
 				OutProfiles.Reset();
 				return false;
 			}
 			OutProfiles.Add(MoveTemp(Profile));
-		}
-		if (OutProfiles.Num() != 7)
-		{
-			OutError =
-				TEXT("editor_project_production_profile_count_mismatch");
-			OutProfiles.Reset();
-			return false;
 		}
 		return true;
 	}
@@ -1309,18 +1175,39 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			|| CurrentSnapshot->GetStatePlane()
 				!= EUeAgentStatePlane::AuthoringMemory)
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_draft_request_invalid"));
+			if (!Request.IsValid())
+				return Fail(OutError, FExecutionMutationError::WrapFailure(
+					TEXT("editor_project_draft_request_invalid"), Request.GetValidationDiagnostic()));
+			const TCHAR* Field = Context.GetProjectInstanceId().IsEmpty() ? TEXT("/context/project_identity/present")
+				: Context.GetEditorInstanceId().IsEmpty() ? TEXT("/context/editor_identity/present")
+				: Context.GetContextRevision().IsEmpty() ? TEXT("/context/revision/present") : TEXT("/snapshot/state_plane");
+			const TCHAR* Reason = Context.GetProjectInstanceId().IsEmpty() ? TEXT("The operation context has no project identity.")
+				: Context.GetEditorInstanceId().IsEmpty() ? TEXT("The operation context has no editor identity.")
+				: Context.GetContextRevision().IsEmpty() ? TEXT("The operation context has no revision.")
+				: TEXT("Draft creation requires an authoring memory snapshot.");
+			if (CurrentSnapshot->GetStatePlane() == EUeAgentStatePlane::AuthoringMemory
+				|| Context.GetProjectInstanceId().IsEmpty() || Context.GetEditorInstanceId().IsEmpty() || Context.GetContextRevision().IsEmpty())
+				return Fail(OutError, CapsCondition(TEXT("editor_project_draft_request_invalid"), Reason, Field, false, true, TEXT("native_result")));
+			auto Plane = MakeShared<FJsonObject>();
+			Plane->SetStringField(TEXT("enum_type"), TEXT("EUeAgentStatePlane"));
+			Plane->SetNumberField(TEXT("value"), static_cast<int32>(CurrentSnapshot->GetStatePlane()));
+			return Fail(OutError, CapsValueFailure(TEXT("editor_project_draft_request_invalid"), Reason, Field,
+				MakeShared<FJsonValueObject>(Plane), MakeShared<FJsonValueString>(TEXT("AuthoringMemory")), TEXT("native_result")));
 		}
 
 		const FDescriptorSpec* Spec =
 			FindSpec(Request.GetDescriptorIdentity());
 		if (!Spec)
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_descriptor_not_exact"));
+			OutError = CapsCondition(TEXT("editor_project_descriptor_not_exact"),
+				TEXT("No exact editor/project production descriptor is registered for this operation request."),
+				TEXT("/descriptor/exact_match"), false, true, TEXT("native_result"));
+			auto Identity = MakeShared<FJsonObject>();
+			Identity->SetStringField(TEXT("descriptor_id"), Request.GetDescriptorIdentity().GetDescriptorId());
+			Identity->SetNumberField(TEXT("version"), Request.GetDescriptorIdentity().GetVersion());
+			Identity->SetStringField(TEXT("hash"), Request.GetDescriptorIdentity().GetDescriptorHash());
+			OutError.ActualEvidence = MakeShared<FJsonValueObject>(Identity);
+			return false;
 		}
 
 		TSharedPtr<FJsonObject> Payload;
@@ -1329,42 +1216,41 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			return false;
 		}
 		FString TargetRef;
-		FString ExpectedRevision;
 		if (!Payload->TryGetStringField(
 				TEXT("target_ref"),
 				TargetRef)
-			|| !Payload->TryGetStringField(
-				TEXT("expected_revision"),
-				ExpectedRevision)
-			|| !IsSafeText(TargetRef)
-			|| !IsSafeText(ExpectedRevision))
+			|| !IsSafeText(TargetRef))
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_target_ref_invalid"));
+			const auto Value = Payload->TryGetField(TEXT("target_ref"));
+			return Fail(OutError, CapsValueFailure(TEXT("editor_project_target_ref_invalid"),
+				TEXT("target_ref must be a non-empty, trimmed resource reference without line breaks."), TEXT("/target_ref"),
+				Value.IsValid() && Value->Type == EJson::String ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TargetRef)) : PayloadKind(Value),
+				MakeShared<FJsonValueString>(TEXT("non-empty trimmed single-line resource reference"))));
 		}
+
+		ON_SCOPE_EXIT
+		{
+			if (OutError.IsValid() && OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+		};
 
 		const FUeAgentStateEntry* TargetEntry =
 			FindEntry(CurrentSnapshot, TargetRef);
 		if (!TargetEntry)
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_target_snapshot_missing"),
-				TargetRef);
+			return Fail(OutError, CapsCondition(TEXT("editor_project_target_snapshot_missing"),
+				TEXT("The current snapshot has no observation for the requested target."), TEXT("/target/observation/available"),
+				false, true, TEXT("native_result")));
 		}
 		FString CurrentRevision;
 		FString CurrentProfile;
 		if (!TryGetObjectString(
-				TargetEntry->GetValue(),
-				TEXT("target_revision"),
-				CurrentRevision)
-			|| CurrentRevision != ExpectedRevision)
+			TargetEntry->GetValue(),
+			TEXT("target_revision"),
+			CurrentRevision)
+			|| CurrentRevision.IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_target_revision_stale"),
-				TargetRef);
+			return Fail(OutError, CapsCondition(TEXT("editor_project_target_revision_stale"),
+				TEXT("The target observation has no usable string revision."), TEXT("/target/revision/available"), false, true, TEXT("native_result")));
 		}
 		if (!TryGetObjectString(
 				TargetEntry->GetValue(),
@@ -1372,10 +1258,13 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 				CurrentProfile)
 			|| CurrentProfile != Spec->ProfileId)
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_target_profile_mismatch"),
-				TargetRef);
+			OutError = CapsValueFailure(TEXT("editor_project_target_profile_mismatch"),
+				TEXT("The target kind does not match the operation's required target kind."), TEXT("/target/kind"),
+				MakeShared<FJsonValueString>(PayloadTargetKind(CurrentProfile)), MakeShared<FJsonValueString>(PayloadTargetKind(Spec->ProfileId)),
+				TEXT("native_result"));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(CurrentProfile);
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Spec->ProfileId);
+			return false;
 		}
 
 		const TArray<TSharedPtr<FJsonValue>>* Changes = nullptr;
@@ -1383,9 +1272,10 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			|| !Changes
 			|| Changes->IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_changes_missing"));
+			return Fail(OutError, CapsValueFailure(TEXT("editor_project_changes_missing"),
+				TEXT("The operation requires a non-empty changes array."), TEXT("/changes"),
+				Changes ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Changes->Num())) : PayloadKind(Payload->TryGetField(TEXT("changes"))),
+				MakeShared<FJsonValueString>(TEXT("non-empty array"))));
 		}
 
 		const TSet<FString> RegisteredFields(
@@ -1394,9 +1284,12 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 		TArray<TSharedPtr<FJsonValue>> TypedChanges;
 		bool bHasNativeCulture = false;
 		FString RequestedNativeCulture;
+		FString NativeCultureValuePath;
 		TSet<FString> RequestedCultures;
-		for (const TSharedPtr<FJsonValue>& ChangeValue : *Changes)
+		for (int32 ChangeIndex = 0; ChangeIndex < Changes->Num(); ++ChangeIndex)
 		{
+			const auto& ChangeValue = (*Changes)[ChangeIndex];
+			const FString ChangePath = TEXT("/changes/") + FString::FromInt(ChangeIndex);
 			const TSharedPtr<FJsonObject> Change =
 				ChangeValue.IsValid()
 					? ChangeValue->AsObject()
@@ -1409,17 +1302,21 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 					FieldId)
 				|| !RegisteredFields.Contains(FieldId))
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_change_field_unregistered"),
-					FieldId);
+				const auto FieldValue = Change.IsValid() ? Change->TryGetField(TEXT("field_id")) : nullptr;
+				return Fail(OutError, CapsValueFailure(TEXT("editor_project_change_field_unregistered"),
+					!Change.IsValid() ? TEXT("Each change must be an object.")
+						: FieldValue.IsValid() && FieldValue->Type == EJson::String
+							? TEXT("The requested field is not registered for this operation.") : TEXT("Each change requires a string field_id."),
+					!Change.IsValid() ? ChangePath : ChangePath + TEXT("/field_id"),
+					!Change.IsValid() ? PayloadKind(ChangeValue) : FieldValue.IsValid() && FieldValue->Type == EJson::String
+						? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(FieldId)) : PayloadKind(FieldValue),
+					MakeShared<FJsonValueString>(!Change.IsValid() ? FString(TEXT("object")) : FString(Spec->FieldIds).Replace(TEXT("|"), TEXT(", ")))));
 			}
 			if (SeenFields.Contains(FieldId))
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_change_field_duplicate"),
-					FieldId);
+				return Fail(OutError, CapsValueFailure(TEXT("editor_project_change_field_duplicate"),
+					TEXT("A field appears more than once in the operation change list."), ChangePath + TEXT("/field_id"),
+					MakeShared<FJsonValueString>(FieldId), MakeShared<FJsonValueString>(TEXT("unique field"))));
 			}
 			SeenFields.Add(FieldId);
 
@@ -1433,10 +1330,19 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 					SplitValues(Field->AllowedPresences))
 					.Contains(Presence))
 			{
-				return Fail(
-					OutError,
-					TEXT("editor_project_field_contract_mismatch"),
-					FieldId);
+				if (!Field)
+				{
+					OutError = CapsCondition(TEXT("editor_project_field_contract_mismatch"),
+						TEXT("No native field contract is registered for the requested operation field."),
+						ChangePath + TEXT("/field_id"), false, true, TEXT("native_result"));
+					OutError.CandidateName = FieldId;
+					return false;
+				}
+				const auto Value = Change->TryGetField(TEXT("presence"));
+				return Fail(OutError, CapsValueFailure(TEXT("editor_project_field_contract_mismatch"),
+					TEXT("The field presence is missing or is not allowed by this field contract."), ChangePath + TEXT("/presence"),
+					Value.IsValid() && Value->Type == EJson::String ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Presence)) : PayloadKind(Value),
+					MakeShared<FJsonValueString>(FString(Field->AllowedPresences).Replace(TEXT("|"), TEXT(", ")))));
 			}
 
 			const TSharedPtr<FJsonObject>* TypedValue = nullptr;
@@ -1448,11 +1354,10 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 				&& TypedValue->IsValid();
 			if (PresenceRequiresValue(Presence) != bHasValue)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"editor_project_value_presence_mismatch"),
-					FieldId);
+				return Fail(OutError, CapsCondition(TEXT("editor_project_value_presence_mismatch"),
+					PresenceRequiresValue(Presence) ? TEXT("This field presence requires a typed value object.")
+						: TEXT("This field presence must omit the typed value object."),
+					ChangePath + TEXT("/value"), bHasValue, PresenceRequiresValue(Presence)));
 			}
 
 			TSharedPtr<FJsonValue> CanonicalValue;
@@ -1467,6 +1372,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			InternalChange->SetStringField(
 				TEXT("presence"),
 				Presence);
+			const FString ValuePath = ChangePath + TEXT("/value/canonical_value");
 			if (bHasValue)
 			{
 				FString TypeId;
@@ -1481,11 +1387,16 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 						CanonicalValue,
 						Field->ValueKind))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"editor_project_field_value_type_mismatch"),
-						FieldId);
+					const auto TypeValue = (*TypedValue)->TryGetField(TEXT("type_id"));
+					const bool bTypeMatches = TypeValue.IsValid() && TypeValue->Type == EJson::String && TypeId == Field->TypeId;
+					return Fail(OutError, CapsValueFailure(TEXT("editor_project_field_value_type_mismatch"),
+						bTypeMatches ? TEXT("The canonical value does not match the field's required value kind.")
+							: TEXT("The typed value identifier does not match the field contract."),
+						ChangePath + (bTypeMatches ? TEXT("/value/canonical_value") : TEXT("/value/type_id")),
+						bTypeMatches ? Field->ValueKind == EFieldValueKind::Integer && CanonicalValue.IsValid() && CanonicalValue->Type == EJson::Number
+							? CanonicalValue : PayloadKind(CanonicalValue)
+							: TypeValue.IsValid() && TypeValue->Type == EJson::String ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TypeId)) : PayloadKind(TypeValue),
+						MakeShared<FJsonValueString>(bTypeMatches ? PayloadExpectedKind(Field->ValueKind) : Field->TypeId)));
 				}
 
 				if ((FieldId == TEXT("entries")
@@ -1493,7 +1404,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 					&& FString(Spec->ProfileId)
 						!= TEXT("string_table")
 					&& !ValidateConfigEntryMap(
-						CanonicalValue,
+						CanonicalValue, ValuePath,
 						OutError))
 				{
 					return false;
@@ -1502,7 +1413,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 						== TEXT("project_settings")
 					&& !ValidateSettingsChanges(
 						CanonicalValue,
-						CurrentSnapshot,
+						CurrentSnapshot, ValuePath,
 						OutError))
 				{
 					return false;
@@ -1515,11 +1426,9 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 						CanonicalValue->AsString();
 					if (BaseRef == TargetRef)
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"editor_project_device_profile_cycle"),
-							BaseRef);
+						return Fail(OutError, CapsValueFailure(TEXT("editor_project_device_profile_cycle"),
+							TEXT("A device profile cannot name itself as its base profile."), ValuePath,
+							MakeShared<FJsonValueString>(BaseRef), MakeShared<FJsonValueString>(TEXT("different device profile reference"))));
 					}
 					const FUeAgentStateEntry* BaseEntry =
 						FindEntry(CurrentSnapshot, BaseRef);
@@ -1531,11 +1440,14 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 							BaseProfile)
 						|| BaseProfile != TEXT("device_profile"))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"editor_project_device_profile_base_unresolved"),
-							BaseRef);
+						OutError = CapsValueFailure(TEXT("editor_project_device_profile_base_unresolved"),
+							!BaseEntry ? TEXT("The selected base device profile has no observation in the current snapshot.")
+								: TEXT("The selected base resource is not a device profile."), ValuePath,
+							MakeShared<FJsonValueString>(BaseEntry ? PayloadTargetKind(BaseProfile) : TEXT("missing target observation")),
+							MakeShared<FJsonValueString>(TEXT("device profile")), TEXT("native_result"));
+						OutError.CandidateName = BaseRef;
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(BaseProfile);
+						return false;
 					}
 				}
 				if (FString(Spec->ProfileId)
@@ -1544,13 +1456,13 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 				{
 					RequestedNativeCulture =
 						CanonicalValue->AsString();
+					NativeCultureValuePath = ValuePath;
 					if (!ValidateCultureName(
 							RequestedNativeCulture))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"editor_project_native_culture_invalid"));
+						return Fail(OutError, CapsValueFailure(TEXT("editor_project_native_culture_invalid"),
+							TEXT("The requested native culture name is not recognized or is not valid single-line text."), ValuePath,
+							MakeShared<FJsonValueString>(RequestedNativeCulture), MakeShared<FJsonValueString>(TEXT("recognized culture name"))));
 					}
 					bHasNativeCulture = true;
 				}
@@ -1559,7 +1471,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 					&& FieldId == TEXT("cultures"))
 				{
 					if (!ValidateCultures(
-							CanonicalValue,
+							CanonicalValue, ValuePath,
 							OutError))
 					{
 						return false;
@@ -1575,7 +1487,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 						== TEXT("string_table")
 					&& FieldId == TEXT("entries")
 					&& !ValidateStringTableEntries(
-						CanonicalValue,
+						CanonicalValue, ValuePath,
 						OutError))
 				{
 					return false;
@@ -1601,20 +1513,23 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 				== TEXT("localization_target")
 			&& !bHasNativeCulture)
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_native_culture_missing"));
+			OutError = CapsCondition(TEXT("editor_project_native_culture_missing"),
+				TEXT("A localization target update requires a native_culture change."), TEXT("/changes"));
+			OutError.CandidateName = TEXT("native_culture");
+			return false;
 		}
 		if (bHasNativeCulture
 			&& !RequestedCultures.IsEmpty()
 			&& !RequestedCultures.Contains(
 				RequestedNativeCulture))
 		{
-			return Fail(
-				OutError,
-				TEXT(
-					"editor_project_native_culture_not_generated"),
-				RequestedNativeCulture);
+			TArray<TSharedPtr<FJsonValue>> Cultures;
+			TArray<FString> Names = RequestedCultures.Array();
+			Names.Sort();
+			for (const FString& Name : Names) Cultures.Add(MakeShared<FJsonValueString>(Name));
+			return Fail(OutError, CapsValueFailure(TEXT("editor_project_native_culture_not_generated"),
+				TEXT("The native culture is not included in the requested generation cultures."), NativeCultureValuePath,
+				MakeShared<FJsonValueString>(RequestedNativeCulture), MakeShared<FJsonValueArray>(Cultures)));
 		}
 
 		const TSharedPtr<FJsonObject> ProposedAfter =
@@ -1636,7 +1551,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			TargetRef);
 		ProposedAfter->SetStringField(
 			TEXT("target_revision"),
-			ExpectedRevision);
+			CurrentRevision);
 		ProposedAfter->SetArrayField(
 			TEXT("typed_changes"),
 			MoveTemp(TypedChanges));
@@ -1670,9 +1585,8 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			{});
 		if (!Change.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_change_draft_invalid"));
+			return Fail(OutError, FExecutionMutationError::WrapFailure(
+				TEXT("editor_project_change_draft_invalid"), Change.GetValidationDiagnostic()));
 		}
 
 		FChangeSetDraft Draft(
@@ -1683,9 +1597,8 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			{MoveTemp(Change)});
 		if (!Draft.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("editor_project_change_set_draft_invalid"));
+			return Fail(OutError, FExecutionMutationError::WrapFailure(
+				TEXT("editor_project_change_set_draft_invalid"), Draft.GetValidationDiagnostic()));
 		}
 		OutDraft.Emplace(MoveTemp(Draft));
 		return true;
@@ -1696,7 +1609,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 		FString& OutNativeOperationType,
 		FString& OutProfileId,
 		FString& OutNativeMechanicId,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutNativeOperationType.Reset();
 		OutProfileId.Reset();
@@ -1706,9 +1619,11 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			FindSpecByBinding(NativeBindingId);
 		if (!Spec)
 		{
-			OutError =
-				TEXT(
-					"editor_project_native_binding_not_registered");
+			OutError = CapsCondition(TEXT("editor_project_native_binding_not_registered"),
+				TEXT("No editor/project execution contract is registered for the requested native binding."),
+				TEXT("/native_binding/registered"), false, true, TEXT("native_result"));
+			OutError.Stage = TEXT("registry");
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(NativeBindingId);
 			return false;
 		}
 		OutNativeOperationType = Spec->NativeOperationType;
@@ -1724,7 +1639,7 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 		FString& OutTypeId,
 		EUeAgentValueKind& OutValueKind,
 		TArray<FString>& OutAllowedPresences,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutFieldBindingId.Reset();
 		OutTypeId.Reset();
@@ -1740,9 +1655,15 @@ namespace UE::UAI::DomainAdapters::EditorProjectSimpleEffect
 			|| !TSet<FString>(SplitValues(Spec->FieldIds))
 				.Contains(FieldId))
 		{
-			OutError =
-				TEXT(
-					"editor_project_field_contract_not_registered");
+			OutError = CapsCondition(TEXT("editor_project_field_contract_not_registered"),
+				!Spec ? TEXT("The requested native binding has no registered editor/project contract.")
+					: !Field ? TEXT("The requested field has no contract for this target kind.")
+					: TEXT("The requested field is not exposed by this operation."),
+				!Spec ? FString(TEXT("/native_binding/registered")) : TEXT("/fields/") + PayloadPointerPart(FieldId) + TEXT("/registered"),
+				false, true, TEXT("native_result"));
+			OutError.Stage = TEXT("registry");
+			OutError.CandidateName = FieldId;
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(NativeBindingId);
 			return false;
 		}
 		OutFieldBindingId = Field->FieldBindingId;

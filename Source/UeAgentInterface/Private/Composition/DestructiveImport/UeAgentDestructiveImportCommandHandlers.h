@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "DomainAdapters/AssetDestructiveImport/UeAgentAssetDeleteOwner.h"
 #include "DomainAdapters/AssetDestructiveImport/UeAgentAssetOperationsOwner.h"
@@ -12,5 +14,5 @@ namespace UE::UAI::Composition::DestructiveImport
 		TSharedRef<DomainAdapters::AssetDestructiveImport::
 			IUeAgentAssetOperationsOwner> AssetOperationsOwner,
 		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

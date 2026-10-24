@@ -13,7 +13,7 @@ namespace UE::UAI::Module::CommandRegistration::LocalizationStringTable
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::
 				FDomainCapabilityContribution>& OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<HjsonWorkspace::
 				IImportInitializationDomainProvider> Provider;
@@ -23,7 +23,7 @@ namespace UE::UAI::Module::CommandRegistration::LocalizationStringTable
 					Provider,
 					WorkspaceError))
 			{
-				OutError = WorkspaceError.GetCode();
+				OutError = WorkspaceError.GetDiagnostic();
 				return false;
 			}
 			DomainCapability::FDomainCapabilityDeclaration Declaration =
@@ -61,10 +61,6 @@ namespace UE::UAI::Module::CommandRegistration::LocalizationStringTable
 				TEXT("uai.init.localization.settings.root/1"),
 				TEXT("uai.init.localization.string_table.root/1"),
 			};
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId =
-				TEXT("T30-EXTERNAL-PROVENANCE-DOMAIN");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration),
 				OutContribution,

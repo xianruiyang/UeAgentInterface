@@ -6,22 +6,20 @@
 #include "Templates/SharedPointer.h"
 
 class FJsonObject;
+class FJsonValue;
 
 namespace UE::UAI::Contract
 {
-	struct UEAGENTINTERFACE_API FUeAgentContractSchemaError
-	{
-		FString Code;
-		FString InstancePath;
-		FString SchemaPath;
-		FString Keyword;
-		FString Detail;
+	/** Construct an owner's input diagnostic without changing its error code or inventing a schema path. */
+	UEAGENTINTERFACE_API FDiagnostic MakeInputDiagnostic(
+		const FString& Code,
+		const FString& InstancePath,
+		const FString& Keyword,
+		const FString& Message,
+		const FString* SchemaPath = nullptr,
+		TSharedPtr<FJsonValue> Expected = nullptr);
 
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	using FUeAgentContractSchemaError = FDiagnostic;
 
 	using FUeAgentContractSchemaCheckpoint = TFunction<bool(
 		int64 WorkUnits,

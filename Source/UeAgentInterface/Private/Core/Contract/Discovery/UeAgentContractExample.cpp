@@ -1,5 +1,7 @@
 #include "Core/Contract/Discovery/UeAgentContractExample.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/Contract/UeAgentContractSchema.h"
 #include "Dom/JsonObject.h"
@@ -11,11 +13,18 @@ namespace UE::UAI::Contract
 {
 	namespace
 	{
-		constexpr int32 MaxGenerationWork = 4096;
-
-		bool Fail(FString& OutError, const FString& Code)
+		FString ChildPath(const FString& Path, const FString& Field)
 		{
-			OutError = Code;
+			return Path + TEXT("/") + Field.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		}
+
+		bool Fail(FDiagnostic& OutError, const FString& Code, const FString& Reason, const FString& SchemaPath,
+			const TSharedPtr<FJsonValue>& Actual = nullptr)
+		{
+			OutError = FDiagnostic::Failure(Code, Reason, TEXT("contract_example"));
+			OutError.SchemaPath = SchemaPath;
+			OutError.ActualValue = Actual;
+			OutError.ActualValuePresent = Actual.IsValid();
 			return false;
 		}
 
@@ -46,26 +55,86 @@ namespace UE::UAI::Contract
 		bool TryMinimalValue(
 			const TSharedRef<const FJsonObject>& Schema,
 			TSharedPtr<FJsonValue>& OutValue,
-			int32& Work,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError,
+			const FString& SchemaPath = FString())
 		{
-			if (++Work > MaxGenerationWork)
+			for (const TCHAR* Composition : {TEXT("oneOf"), TEXT("anyOf")})
 			{
-				return Fail(OutError, TEXT("contract_example_generation_limit"));
+				const TArray<TSharedPtr<FJsonValue>>* Branches = nullptr;
+				if (!Schema->TryGetArrayField(Composition, Branches) || !Branches)
+				{
+					continue;
+				}
+				FString SchemaJson;
+				const TSharedRef<FJsonObject> SchemaObject = MakeShared<FJsonObject>();
+				SchemaObject->Values = Schema->Values;
+				TSharedPtr<const FUeAgentContractSchema> Compiled;
+				FUeAgentContractSchemaError SchemaError;
+				if (!Json::TryCanonicalize(SchemaObject, SchemaJson, OutError))
+				{
+					OutError = FDiagnostic::WrapFailure(TEXT("contract_example_composition_invalid"), OutError,
+						TEXT("contract_example"), TEXT("The composed schema could not be encoded for example generation."));
+					OutError.SchemaPath = SchemaPath;
+					return false;
+				}
+				if (!FUeAgentContractSchema::TryCompile(FUeAgentContractValue(MoveTemp(SchemaJson)), Compiled, SchemaError))
+				{
+					OutError = FDiagnostic::WrapFailure(TEXT("contract_example_composition_invalid"), SchemaError,
+						TEXT("contract_example"), TEXT("The composed schema is invalid; an example cannot be generated."));
+					OutError.SchemaPath = SchemaPath;
+					return false;
+				}
+				TArray<FDiagnostic> BranchErrors;
+				for (int32 Index = 0; Index < Branches->Num(); ++Index)
+				{
+					const TSharedPtr<FJsonValue>& Branch = (*Branches)[Index];
+					const FString BranchPath = ChildPath(ChildPath(SchemaPath, Composition), FString::FromInt(Index));
+					const TSharedPtr<FJsonObject>* BranchObject = nullptr;
+					TSharedPtr<FJsonValue> Candidate;
+					FString CandidateJson;
+					UE::UAI::Contract::FDiagnostic CandidateError;
+					TOptional<FUeAgentContractValue> Canonical;
+					FUeAgentContractSchemaError ValidationError;
+					if (Branch.IsValid() && Branch->TryGetObject(BranchObject)
+						&& BranchObject && BranchObject->IsValid()
+						&& TryMinimalValue(BranchObject->ToSharedRef(), Candidate, CandidateError, BranchPath)
+						&& Json::TryCanonicalize(Candidate, CandidateJson, CandidateError)
+						&& Compiled->TryValidateAndCanonicalize(
+							FUeAgentContractValue(MoveTemp(CandidateJson)),
+							[](int64, const FString&, FUeAgentContractSchemaError&) { return true; },
+							Canonical, ValidationError))
+					{
+						OutValue = MoveTemp(Candidate);
+						OutError.Reset();
+						return true;
+					}
+					if (!ValidationError.IsEmpty()) CandidateError = ValidationError;
+					if (CandidateError.IsEmpty())
+					{
+						Fail(CandidateError, TEXT("contract_example_branch_invalid"),
+							TEXT("Each composition branch must be a schema object."), BranchPath, Branch);
+					}
+					if (CandidateError.SchemaPath.IsEmpty()) CandidateError.SchemaPath = BranchPath;
+					BranchErrors.Add(MoveTemp(CandidateError));
+				}
+				Fail(OutError, TEXT("contract_example_composition_no_valid_candidate"),
+					TEXT("No generated branch example satisfies the composed schema."), ChildPath(SchemaPath, Composition));
+				OutError.Diagnostics = MoveTemp(BranchErrors);
+				return false;
 			}
-			if (Schema->HasField(TEXT("allOf"))
-				|| Schema->HasField(TEXT("anyOf"))
-				|| Schema->HasField(TEXT("oneOf")))
+			if (Schema->HasField(TEXT("allOf")))
 			{
 				return Fail(
 					OutError,
-					TEXT("contract_example_composition_unsupported"));
+					TEXT("contract_example_composition_unsupported"),
+					TEXT("Automatic example generation does not support allOf composition."), ChildPath(SchemaPath, TEXT("allOf")));
 			}
 			if (const TSharedPtr<FJsonValue>* Constant =
 				Schema->Values.Find(TEXT("const")))
 			{
 				OutValue = *Constant;
-				return OutValue.IsValid();
+				return OutValue.IsValid() || Fail(OutError, TEXT("contract_example_value_invalid"),
+					TEXT("The schema constant has no JSON value."), ChildPath(SchemaPath, TEXT("const")));
 			}
 			const TArray<TSharedPtr<FJsonValue>>* Enum = nullptr;
 			if (Schema->TryGetArrayField(TEXT("enum"), Enum)
@@ -73,13 +142,16 @@ namespace UE::UAI::Contract
 				&& !Enum->IsEmpty())
 			{
 				OutValue = (*Enum)[0];
-				return OutValue.IsValid();
+				return OutValue.IsValid() || Fail(OutError, TEXT("contract_example_value_invalid"),
+					TEXT("The first enum member has no JSON value."), ChildPath(SchemaPath, TEXT("enum")) + TEXT("/0"));
 			}
 
 			FString Type;
 			if (!TryType(Schema, Type))
 			{
-				return Fail(OutError, TEXT("contract_example_type_missing"));
+				return Fail(OutError, TEXT("contract_example_type_missing"),
+					TEXT("Example generation requires a string type or a non-empty array of string types."),
+					ChildPath(SchemaPath, TEXT("type")), Schema->TryGetField(TEXT("type")));
 			}
 			if (Type == TEXT("object"))
 			{
@@ -96,17 +168,20 @@ namespace UE::UAI::Contract
 					{
 						return Fail(
 							OutError,
-							TEXT("contract_example_required_schema_missing"));
+						TEXT("contract_example_required_schema_missing"), TEXT("Required fields need a properties schema object."),
+						ChildPath(SchemaPath, TEXT("properties")), Schema->TryGetField(TEXT("properties")));
 					}
-					for (const TSharedPtr<FJsonValue>& RequiredValue : *Required)
+					for (int32 RequiredIndex = 0; RequiredIndex < Required->Num(); ++RequiredIndex)
 					{
+						const TSharedPtr<FJsonValue>& RequiredValue = (*Required)[RequiredIndex];
 						FString Name;
 						if (!RequiredValue.IsValid()
 							|| !RequiredValue->TryGetString(Name))
 						{
 							return Fail(
 								OutError,
-								TEXT("contract_example_required_invalid"));
+								TEXT("contract_example_required_invalid"), TEXT("A required field name must be a string."),
+								ChildPath(SchemaPath, TEXT("required")) + TEXT("/") + FString::FromInt(RequiredIndex), RequiredValue);
 						}
 						const TSharedPtr<FJsonObject>* PropertySchema = nullptr;
 						if (!(*Properties)->TryGetObjectField(Name, PropertySchema)
@@ -116,14 +191,14 @@ namespace UE::UAI::Contract
 							return Fail(
 								OutError,
 								TEXT("contract_example_required_schema_missing:")
-									+ Name);
+									+ Name, TEXT("The required field has no schema object."),
+								ChildPath(ChildPath(SchemaPath, TEXT("properties")), Name), (*Properties)->TryGetField(Name));
 						}
 						TSharedPtr<FJsonValue> PropertyValue;
 						if (!TryMinimalValue(
 								PropertySchema->ToSharedRef(),
 								PropertyValue,
-								Work,
-								OutError))
+								OutError, ChildPath(ChildPath(SchemaPath, TEXT("properties")), Name)))
 						{
 							return false;
 						}
@@ -148,7 +223,8 @@ namespace UE::UAI::Contract
 					{
 						return Fail(
 							OutError,
-							TEXT("contract_example_items_schema_missing"));
+							TEXT("contract_example_items_schema_missing"), TEXT("A non-empty array example requires an items schema object."),
+							ChildPath(SchemaPath, TEXT("items")), Schema->TryGetField(TEXT("items")));
 					}
 					for (int32 Index = 0; Index < Count; ++Index)
 					{
@@ -156,8 +232,7 @@ namespace UE::UAI::Contract
 						if (!TryMinimalValue(
 								ItemSchema->ToSharedRef(),
 								Item,
-								Work,
-								OutError))
+								OutError, ChildPath(SchemaPath, TEXT("items"))))
 						{
 							return false;
 						}
@@ -263,17 +338,19 @@ namespace UE::UAI::Contract
 				OutValue = MakeShared<FJsonValueNull>();
 				return true;
 			}
-			return Fail(OutError, TEXT("contract_example_type_unsupported:") + Type);
+			return Fail(OutError, TEXT("contract_example_type_unsupported:") + Type,
+				TEXT("Example generation supports object, array, string, integer, number, boolean and null types."),
+				ChildPath(SchemaPath, TEXT("type")), MakeShared<FJsonValueString>(Type));
 		}
 
 		bool TryPythonLiteral(
 			const TSharedPtr<FJsonValue>& Value,
 			FString& OutLiteral,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!Value.IsValid())
 			{
-				return Fail(OutError, TEXT("contract_example_value_invalid"));
+				return Fail(OutError, TEXT("contract_example_value_invalid"), TEXT("The generated example has no JSON value."), FString());
 			}
 			switch (Value->Type)
 			{
@@ -330,7 +407,9 @@ namespace UE::UAI::Contract
 				return true;
 			}
 			default:
-				return Fail(OutError, TEXT("contract_example_json_type_unsupported"));
+				return Fail(OutError, TEXT("contract_example_json_type_unsupported"),
+					TEXT("The generated example contains a JSON type that cannot be represented as a Python literal."), FString(),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Value->Type)));
 			}
 		}
 	}
@@ -339,7 +418,7 @@ namespace UE::UAI::Contract
 		const FUeAgentContractSchema& Schema,
 		FUeAgentContractValue& OutCanonicalInstance,
 		FString& OutPythonLiteral,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutCanonicalInstance = FUeAgentContractValue(FString());
 		OutPythonLiteral.Reset();
@@ -349,53 +428,48 @@ namespace UE::UAI::Contract
 			Schema.GetCanonicalSchema().GetJsonValue());
 		if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
 		{
-			return Fail(OutError, TEXT("contract_example_schema_parse_failed"));
+			return Fail(OutError, TEXT("contract_example_schema_parse_failed"),
+				TEXT("The canonical schema could not be decoded as a JSON object: ") + Reader->GetErrorMessage(), TEXT("/"));
 		}
-		int32 Work = 0;
 		TSharedPtr<FJsonValue> Candidate;
-		if (!TryMinimalValue(Root.ToSharedRef(), Candidate, Work, OutError))
+		if (!TryMinimalValue(Root.ToSharedRef(), Candidate, OutError))
 		{
 			return false;
 		}
 		FString CandidateJson;
 		if (!Json::TryCanonicalize(Candidate, CandidateJson, OutError))
 		{
-			OutError = TEXT("contract_example_serialization_failed:") + OutError;
+			if (OutError.Stage.IsEmpty()) OutError.Stage = TEXT("contract_example");
 			return false;
 		}
 		TOptional<FUeAgentContractValue> Canonical;
 		FUeAgentContractSchemaError ValidationError;
 		if (!Schema.TryValidateAndCanonicalize(
 				FUeAgentContractValue(MoveTemp(CandidateJson)),
-				[&Work](
-					const int64 WorkUnits,
-					const FString& InstancePath,
-					FUeAgentContractSchemaError& OutCheckpointError)
+				[](
+					const int64,
+					const FString&,
+					FUeAgentContractSchemaError&)
 				{
-					Work += static_cast<int32>(WorkUnits);
-					if (Work <= MaxGenerationWork)
-					{
-						return true;
-					}
-					OutCheckpointError.Code =
-						TEXT("contract_example_generation_limit");
-					OutCheckpointError.InstancePath = InstancePath;
-					return false;
+					return true;
 				},
 				Canonical,
 				ValidationError)
 			|| !Canonical.IsSet())
 		{
-			OutError = TEXT("contract_example_validation_failed:")
-				+ ValidationError.Code + TEXT(":")
-				+ ValidationError.InstancePath;
+			OutError = FDiagnostic::WrapFailure(TEXT("contract_example_validation_failed"), ValidationError,
+				TEXT("contract_example"), TEXT("The generated example does not satisfy its command schema."));
 			return false;
 		}
 		TSharedPtr<FJsonValue> CanonicalValue;
 		const TSharedRef<TJsonReader<>> CanonicalReader =
 			TJsonReaderFactory<>::Create(Canonical->GetJsonValue());
-		if (!FJsonSerializer::Deserialize(CanonicalReader, CanonicalValue)
-			|| !TryPythonLiteral(CanonicalValue, OutPythonLiteral, OutError))
+		if (!FJsonSerializer::Deserialize(CanonicalReader, CanonicalValue))
+		{
+			return Fail(OutError, TEXT("contract_example_value_parse_failed"),
+				TEXT("The validated example could not be decoded: ") + CanonicalReader->GetErrorMessage(), FString());
+		}
+		if (!TryPythonLiteral(CanonicalValue, OutPythonLiteral, OutError))
 		{
 			return false;
 		}

@@ -11,7 +11,7 @@ namespace UE::UAI::ArtifactPublisher
 	class UEAGENTINTERFACE_API FExportSemanticSignature final
 	{
 	public:
-		FExportSemanticSignature() = default;
+		FExportSemanticSignature();
 		FExportSemanticSignature(
 			FString InInventory,
 			FString InReferenceClosure,
@@ -25,6 +25,7 @@ namespace UE::UAI::ArtifactPublisher
 		const FString& GetContractSemantic() const;
 		const FString& GetBusinessSemantic() const;
 		bool IsValid() const;
+		const FArtifactPublishError& GetValidationDiagnostic() const;
 		bool operator==(const FExportSemanticSignature& Other) const;
 		bool operator!=(const FExportSemanticSignature& Other) const;
 		TMap<FString, FString> ToReceiptFields() const;
@@ -35,6 +36,7 @@ namespace UE::UAI::ArtifactPublisher
 		FString ContentDigests;
 		FString ContractSemantic;
 		FString BusinessSemantic;
+		FArtifactPublishError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IVerifiedExportWorkspaceSource
@@ -74,12 +76,13 @@ namespace UE::UAI::ArtifactPublisher
 		const FString& GetFinalPath() const;
 		const FString& GetPublisherOwnerId() const;
 		bool IsValid() const;
+		const FArtifactPublishError& GetValidationDiagnostic() const;
 
 	private:
 		TSharedRef<IVerifiedExportWorkspaceSource> Source;
 		FString FinalPath;
 		FString PublisherOwnerId;
-		bool bValid = false;
+		FArtifactPublishError ValidationDiagnostic;
 	};
 
 	UEAGENTINTERFACE_API bool TryExportVerifiedWorkspace(

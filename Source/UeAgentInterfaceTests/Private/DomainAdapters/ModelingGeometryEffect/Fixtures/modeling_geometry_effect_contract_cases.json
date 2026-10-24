@@ -1,6 +1,5 @@
 {
   "schema": "uai.domain_adapter.modeling_geometry_effect.test_fixture.v1",
-  "descriptor_count": 31,
   "native_operation_types": [
     "geometry.primitive.create",
     "geometry.topology.edit",
@@ -436,11 +435,9 @@
   "e1_negative_cases": [
     {"case_id": "primitive-output-key-already-exists", "descriptor_id": "uai.operation.mesh.primitive.box.create", "expected_error": "modeling_geometry_output_already_exists", "mutation_count": 0},
     {"case_id": "target-unresolved", "descriptor_id": "uai.operation.mesh.topology.subdivide", "expected_error": "modeling_geometry_reference_unresolved", "mutation_count": 0},
-    {"case_id": "target-revision-stale", "descriptor_id": "uai.operation.mesh.topology.simplify", "expected_error": "modeling_geometry_target_revision_stale", "mutation_count": 0},
     {"case_id": "selection-element-invalid", "descriptor_id": "uai.operation.mesh.topology.faces.extrude", "expected_error": "modeling_geometry_selection_element_invalid", "mutation_count": 0},
     {"case_id": "boundary-edge-no-longer-boundary", "descriptor_id": "uai.operation.mesh.topology.holes.fill", "expected_error": "modeling_geometry_boundary_edge_invalid", "mutation_count": 0},
     {"case_id": "operand-unresolved", "descriptor_id": "uai.operation.mesh.topology.boolean", "expected_error": "modeling_geometry_operand_unresolved", "mutation_count": 0},
-    {"case_id": "operand-revision-stale", "descriptor_id": "uai.operation.mesh.topology.trim", "expected_error": "modeling_geometry_operand_revision_stale", "mutation_count": 0},
     {"case_id": "operand-transform-singular", "descriptor_id": "uai.operation.mesh.topology.voxel_boolean", "expected_error": "modeling_geometry_operand_transform_invalid", "mutation_count": 0},
     {"case_id": "plane-normal-zero", "descriptor_id": "uai.operation.mesh.topology.plane_cut", "expected_error": "modeling_geometry_plane_invalid", "mutation_count": 0},
     {"case_id": "fixed-direction-missing", "descriptor_id": "uai.operation.mesh.topology.faces.push_pull", "expected_error": "modeling_geometry_direction_required", "mutation_count": 0},

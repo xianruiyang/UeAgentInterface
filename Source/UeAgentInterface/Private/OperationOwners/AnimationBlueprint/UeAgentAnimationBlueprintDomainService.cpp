@@ -1,17 +1,21 @@
 #include "OperationOwners/AnimationBlueprint/UeAgentAnimationBlueprintDomainService.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
+
 #include "CommandHandlers/AnimationBlueprint/UeAgentAnimationBlueprintDomainCommandHandlers.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "OperationOwners/UObjectDataAsset/UeAgentUObjectDataAssetCommandService.h"
 #include "QueryOwners/AnimationBlueprint/UeAgentAnimationBlueprintQueryOwner.h"
+#include "Utilities/AuthoringCore/UeAgentCandidatePropertyDescription.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 namespace UE::UAI::OperationOwners::AnimationBlueprint
 {
 	using namespace CommandContract;
+	using namespace ContentDiscovery;
 	using namespace HjsonWorkspace;
-	using namespace OperationOwners::UObjectDataAsset;
 	using namespace QueryOwners::AnimationBlueprint;
 
 	namespace
@@ -19,7 +23,6 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 		const FString ProviderId = TEXT("animation-blueprint-domain-provider");
 		const FString SchemaId = TEXT("uai.animation_blueprint.edit/1");
 		const FString RootType = TEXT("/Script/Engine.AnimBlueprint");
-		const FString PublicCommandId = TEXT("animation_blueprint.authoring.apply");
 		const FString CandidateCommandId =
 			TEXT("animation.state_machine.candidates");
 
@@ -69,7 +72,7 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 				}
 				return Request.GetCommandId()
 						!= TEXT("content_graph.import_workspace")
-					|| Request.GetSchemaId() == SchemaId;
+					|| MatchesDomainImportSchema(Request, SchemaId);
 			}
 
 			virtual bool TryResolveInitializationContract(
@@ -98,9 +101,20 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 						!= InitializationContract(
 							Request.GetRootTypeIdentity(), Request.GetRole()))
 				{
-					OutError.Set(
-						TEXT("animation_blueprint_domain_contract_not_executable"),
-						InitializationContractId);
+					auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_blueprint_domain_contract_not_executable"),
+						Request.GetRole() != EInitializationNodeRole::RootTarget
+						? TEXT("This domain executor requires a root-target initialization request.")
+						: TEXT("The initialization contract does not match the requested root type."), TEXT("domain_execute"));
+					Detail.TargetPath = Request.GetTargetIdentity();
+					Detail.SourceKind = TEXT("native_result");
+					Detail.InternalContext = InitializationContractId;
+					const bool bRootTarget = Request.GetRole() == EInitializationNodeRole::RootTarget;
+					Detail.PropertyPath = bRootTarget ? TEXT("initialization_contract_matches") : TEXT("root_target_role");
+					Detail.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					Detail.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					if (bRootTarget) Detail.PublicMessage += FString::Printf(
+						TEXT(" Requested root type: '%s'."), *Request.GetRootTypeIdentity());
+					OutError.SetFailure(MoveTemp(Detail));
 					return false;
 				}
 				return CommandHandlers::AnimationBlueprint::TryHandleDomainRequest(
@@ -108,29 +122,21 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 			}
 		};
 
-		bool Fail(
-			FAnimationBlueprintCommandError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool ForwardDiagnostic(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
 			return false;
 		}
 
-		bool FailCandidate(
-			FAnimationBlueprintCandidateCommandError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		UE::UAI::Contract::FDiagnostic CandidateDiagnostic(FString Code, FString Subject, FString PublicReason, FString InternalContext = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-			return false;
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(PublicReason), TEXT("candidate_query"), MoveTemp(InternalContext), MoveTemp(Subject));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
 		}
+
 
 		class FAnimationBlueprintCandidateCommandService final
 			: public IUeAgentAnimationBlueprintCandidateCommandService
@@ -145,53 +151,71 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 				OutError = {};
 				if (Request.bCancellationRequested)
 				{
-					return FailCandidate(
-						OutError,
-						TEXT("animation_blueprint_candidate_cancelled"),
-						Request.CommandId);
+					auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_cancelled"), Request.CommandId,
+						TEXT("The Animation Blueprint candidate request was cancelled before discovery started."));
+					Diagnostic.PropertyPath = TEXT("cancellation_requested");
+					Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(true);
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Request.CommandId);
 				}
 				if (Request.CommandId != CandidateCommandId)
 				{
-					return FailCandidate(
-						OutError,
-						TEXT("animation_blueprint_candidate_command_not_supported"),
-						Request.CommandId);
+					auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_command_not_supported"), Request.CommandId,
+						FString::Printf(TEXT("This service accepts only '%s'."), *CandidateCommandId));
+					Diagnostic.PropertyPath = TEXT("command_supported");
+					Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Request.CommandId);
 				}
 
 				TSharedPtr<FJsonObject> Params;
-				FString JsonError;
+				UE::UAI::Contract::FDiagnostic JsonError;
 				if (!Json::TryParseObject(
 						Request.CanonicalParamsJson, Params, JsonError)
 					|| !Params.IsValid())
 				{
-					return FailCandidate(
-						OutError,
-						TEXT("animation_blueprint_candidate_params_invalid"),
-						Request.CommandId,
-						JsonError);
+					if (!JsonError.IsEmpty()) return ForwardDiagnostic(OutError, Contract::FDiagnostic::WrapFailure(
+						TEXT("animation_blueprint_candidate_params_invalid"), JsonError, TEXT("candidate_query")), Request.CommandId);
+					auto Diagnostic = CandidateDiagnostic(TEXT("animation_blueprint_candidate_params_invalid"), Request.CommandId,
+						TEXT("The Animation Blueprint candidate parameters must be a JSON object."));
+					Diagnostic.SourceKind = TEXT("command_input");
+					Diagnostic.Source.JsonPath = TEXT("/");
+					Diagnostic.PropertyPath = TEXT("params");
+					Diagnostic.ActualValue = MakeShared<FJsonValueNull>();
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object"));
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Request.CommandId);
 				}
 				FString Target;
 				FString Surface;
 				FString Query;
-				FString CandidateId;
 				if (!Params->TryGetStringField(TEXT("target"), Target)
 					|| Target.TrimStartAndEnd().IsEmpty())
 				{
-					return FailCandidate(
-						OutError,
-						TEXT("animation_blueprint_candidate_target_required"),
-						Request.CommandId);
+					auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("animation_blueprint_candidate_target_required"),
+						TEXT("Animation candidate discovery requires a non-empty target asset reference."), TEXT("candidate_query"));
+					Diagnostic.SourceKind = TEXT("command_input");
+					Diagnostic.Source.JsonPath = TEXT("/target");
+					Diagnostic.PropertyPath = TEXT("target");
+					Diagnostic.ActualValue = Params->TryGetField(TEXT("target"));
+					Diagnostic.ActualValuePresent = Diagnostic.ActualValue.IsValid();
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty asset reference"));
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Request.CommandId);
 				}
 				if (!Params->TryGetStringField(TEXT("surface"), Surface)
 					|| Surface.TrimStartAndEnd().IsEmpty())
 				{
-					return FailCandidate(
-						OutError,
-						TEXT("animation_blueprint_candidate_surface_required"),
-						Request.CommandId);
+					auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("animation_blueprint_candidate_surface_required"),
+						TEXT("Animation candidate discovery requires a non-empty surface name."), TEXT("candidate_query"));
+					Diagnostic.SourceKind = TEXT("command_input");
+					Diagnostic.Source.JsonPath = TEXT("/surface");
+					Diagnostic.PropertyPath = TEXT("surface");
+					Diagnostic.TargetPath = Target;
+					Diagnostic.ActualValue = Params->TryGetField(TEXT("surface"));
+					Diagnostic.ActualValuePresent = Diagnostic.ActualValue.IsValid();
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("animation_graph or state_machine_graph"));
+					return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Request.CommandId);
 				}
 				Params->TryGetStringField(TEXT("query"), Query);
-				Params->TryGetStringField(TEXT("id"), CandidateId);
 				const TSharedPtr<FJsonObject>* ClassSettingsField = nullptr;
 				TSharedPtr<FJsonObject> ClassSettings = MakeShared<FJsonObject>();
 				if (Params->TryGetObjectField(
@@ -200,18 +224,35 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 				{
 					ClassSettings = *ClassSettingsField;
 				}
-				int32 Limit = 64;
-				int32 Cursor = 0;
-				double Number = 0.0;
-				if (Params->TryGetNumberField(TEXT("limit"), Number))
+				const auto Scope = MakeShared<FJsonObject>();
+				Scope->SetStringField(TEXT("target"), Target.TrimStartAndEnd());
+				Scope->SetStringField(TEXT("surface"), Surface.TrimStartAndEnd());
+				if (!ClassSettings->Values.IsEmpty()) Scope->SetObjectField(TEXT("class_settings"), ClassSettings);
+				CandidateProperties::FRequest DescriptionRequest;
+				const bool bDescribe = Params->HasField(TEXT("describe"));
+				if (bDescribe)
 				{
-					Limit = static_cast<int32>(Number);
+					const TSharedPtr<FJsonObject>* Description = nullptr;
+					if (!Params->TryGetObjectField(TEXT("describe"), Description))
+					{
+						auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("animation_blueprint_candidate_description_invalid"),
+							TEXT("The candidate description request must be an object."), TEXT("candidate_query"));
+						Diagnostic.SourceKind = TEXT("command_input");
+						Diagnostic.Source.JsonPath = TEXT("/describe");
+						Diagnostic.TargetPath = Target;
+						Diagnostic.ActualValue = Params->TryGetField(TEXT("describe"));
+						Diagnostic.ActualValuePresent = Diagnostic.ActualValue.IsValid();
+						Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object"));
+						return ForwardDiagnostic(OutError, MoveTemp(Diagnostic));
+					}
+					if (!CandidateProperties::ReadRequest(*Description, DescriptionRequest, JsonError))
+					{
+						UeAgentAuthoringDiagnostics::PrefixDocumentFailure(JsonError, TEXT("/describe"));
+						if (JsonError.TargetPath.IsEmpty()) JsonError.TargetPath = Target;
+						return ForwardDiagnostic(OutError, MoveTemp(JsonError));
+					}
+					Query = DescriptionRequest.Name;
 				}
-				if (Params->TryGetNumberField(TEXT("cursor"), Number))
-				{
-					Cursor = static_cast<int32>(Number);
-				}
-
 				FAnimationBlueprintCandidateQueryResult QueryResult;
 				FAnimationBlueprintCandidateQueryError QueryError;
 				if (!TryQueryAnimationBlueprintCandidates(
@@ -220,155 +261,67 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 						ClassSettings,
 						Query,
 						QueryResult,
-						QueryError,
-						Limit,
-						Cursor,
-						CandidateId))
+						QueryError))
 				{
-					return FailCandidate(
-						OutError,
-						QueryError.Code.IsEmpty()
-							? FString(TEXT("animation_blueprint_candidate_query_failed"))
-							: QueryError.Code,
-						QueryError.SubjectId,
-						QueryError.Detail);
+					if (QueryError.IsEmpty())
+					{
+						QueryError = Contract::FDiagnostic::Failure(TEXT("animation_blueprint_candidate_query_failed"),
+							TEXT("Animation candidate discovery failed without providing a diagnostic."), TEXT("candidate_query"));
+						QueryError.SourceKind = TEXT("native_result");
+						QueryError.PropertyPath = TEXT("query_succeeded");
+						QueryError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+						QueryError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					}
+					if (QueryError.TargetPath.IsEmpty()) QueryError.TargetPath = Target;
+					return ForwardDiagnostic(OutError, QueryError, QueryError.SubjectId);
 				}
-
-				const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-				Payload->SetStringField(TEXT("command_id"), CandidateCommandId);
-				Payload->SetBoolField(TEXT("read_only"), true);
-				Payload->SetStringField(TEXT("target"), QueryResult.Target);
-				Payload->SetStringField(
-					TEXT("target_revision"), QueryResult.TargetRevision);
-				Payload->SetStringField(TEXT("surface"), QueryResult.Surface);
-				Payload->SetNumberField(
-					TEXT("total_matches"), QueryResult.TotalMatches);
-				Payload->SetNumberField(
-					TEXT("next_cursor"), QueryResult.NextCursor);
-				Payload->SetBoolField(TEXT("complete"), QueryResult.bComplete);
-				Payload->SetBoolField(TEXT("has_more"), QueryResult.bHasMore);
-				Payload->SetStringField(
-					TEXT("coverage_scope"), QueryResult.CoverageScope);
-				Payload->SetBoolField(
-					TEXT("coverage_complete"), QueryResult.bCoverageComplete);
-				Payload->SetBoolField(
-					TEXT("creation_coverage_complete"),
-					QueryResult.bCreationCoverageComplete);
-				TArray<TSharedPtr<FJsonValue>> Candidates;
+				if (bDescribe)
+				{
+					TArray<ContentDiscovery::FNameSelectionEntry> Choices;
+					for (const FAnimationBlueprintCandidate& Candidate : QueryResult.Candidates)
+						Choices.Add({Candidate.Name, Candidate.Identity.CanonicalKey, Candidate.SelectionFields});
+					int32 SelectedIndex = INDEX_NONE;
+					if (!ContentDiscovery::TryResolveNameSelection(Choices, DescriptionRequest.Name,
+						DescriptionRequest.Select, SelectedIndex, JsonError, ContentDiscovery::ENameComparison::IgnoreCase))
+					{
+						UeAgentAuthoringDiagnostics::PrefixDocumentFailure(JsonError, TEXT("/describe"));
+						if (JsonError.SourceKind.IsEmpty()) JsonError.SourceKind = TEXT("command_input");
+						if (JsonError.TargetPath.IsEmpty()) JsonError.TargetPath = Target;
+						return ForwardDiagnostic(OutError, JsonError, DescriptionRequest.Name);
+					}
+					const FAnimationBlueprintCandidate* Selected = &QueryResult.Candidates[SelectedIndex];
+					if (!CandidateProperties::BuildCreationSupportPayload(DescriptionRequest,
+						Selected->bSupported, Selected->SupportDiagnostic.IsEmpty() ? Selected->SupportReason : Selected->SupportDiagnostic.PublicMessage, TEXT("native_animation_graph_action"),
+						TEXT("creation_support_only; editable_fields_resolve_after_creation"),
+						OutResponse.PayloadJson, JsonError))
+					{
+						if (JsonError.TargetPath.IsEmpty()) JsonError.TargetPath = Target;
+						return ForwardDiagnostic(OutError, Contract::FDiagnostic::WrapFailure(TEXT("animation_blueprint_candidate_description_failed"), JsonError), DescriptionRequest.Name);
+					}
+					if (!TryAddDiscoveryScope(Scope, OutResponse.PayloadJson, JsonError)) return ForwardDiagnostic(OutError, JsonError, FString());
+					OutResponse.bReadOnly = true;
+					return true;
+				}
+				const ContentDiscovery::FNameDiscoveryCompleteness Completeness{
+					QueryResult.TotalMatches, QueryResult.Candidates.Num(), QueryResult.CatalogDiagnostic};
+				if (!ContentDiscovery::TryValidateNameDiscoveryCompleteness(Completeness, JsonError))
+					return ForwardDiagnostic(OutError, JsonError, FString());
+				TArray<ContentDiscovery::FNameSelectionEntry> Names;
 				for (const FAnimationBlueprintCandidate& Candidate
 					: QueryResult.Candidates)
 				{
-					const TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
-					Value->SetStringField(TEXT("id"), Candidate.Id);
-					Value->SetStringField(TEXT("name"), Candidate.Name);
-					Value->SetStringField(TEXT("label"), Candidate.Label);
-					Value->SetStringField(TEXT("surface"), Candidate.Surface);
-					Value->SetStringField(TEXT("kind"), Candidate.Kind);
-					Value->SetStringField(
-						TEXT("action_kind"), Candidate.ActionKind);
-					Value->SetStringField(TEXT("category"), Candidate.Category);
-					Value->SetStringField(TEXT("summary"), Candidate.Summary);
-					Value->SetStringField(
-						TEXT("node_class"), Candidate.NodeClassPath);
-					Value->SetStringField(
-						TEXT("source_origin"), Candidate.SourceOrigin);
-					Value->SetBoolField(TEXT("supported"), Candidate.bSupported);
-					Value->SetStringField(
-						TEXT("write_support"), Candidate.WriteSupport);
-					Value->SetStringField(
-						TEXT("support_reason"), Candidate.SupportReason);
-					Candidates.Add(MakeShared<FJsonValueObject>(Value));
+					Names.Add({Candidate.Name, Candidate.Identity.CanonicalKey, Candidate.SelectionFields});
 				}
-				Payload->SetArrayField(TEXT("candidates"), MoveTemp(Candidates));
-				if (!Json::TryCanonicalize(
-						Payload, OutResponse.PayloadJson, JsonError))
+				if (!ContentDiscovery::TryBuildCandidateNamesOnlyPayload(
+					Names, ContentDiscovery::ENameComparison::IgnoreCase,
+					OutResponse.PayloadJson, JsonError, QueryResult.CatalogDiagnostic))
 				{
-					return FailCandidate(
-						OutError,
-						TEXT("animation_blueprint_candidate_result_invalid"),
-						Request.CommandId,
-						JsonError);
+					return ForwardDiagnostic(OutError, JsonError, FString());
 				}
+				if (!ContentDiscovery::TryAddDiscoveryScope(Scope, OutResponse.PayloadJson, JsonError)) return ForwardDiagnostic(OutError, JsonError, FString());
 				OutResponse.bReadOnly = true;
 				return true;
 			}
-		};
-
-		class FAnimationBlueprintCommandService final
-			: public IUeAgentAnimationBlueprintCommandService
-		{
-		public:
-			explicit FAnimationBlueprintCommandService(
-				TSharedRef<IUeAgentUObjectDataAssetCommandService> InCommonService)
-				: CommonService(MoveTemp(InCommonService))
-			{
-			}
-
-			virtual bool Execute(
-				const FAnimationBlueprintCommandRequest& Request,
-				FAnimationBlueprintCommandResponse& OutResponse,
-				FAnimationBlueprintCommandError& OutError) override
-			{
-				OutResponse = {};
-				OutError = {};
-				if (Request.bCancellationRequested)
-				{
-					return Fail(OutError,
-						TEXT("animation_blueprint_cancelled"), Request.CommandId);
-				}
-				if (Request.CommandId != PublicCommandId)
-				{
-					return Fail(OutError,
-						TEXT("animation_blueprint_command_not_supported"),
-						Request.CommandId);
-				}
-
-				FUeAgentUObjectDataAssetCommandRequest CommonRequest;
-				CommonRequest.CommandId = TEXT("content_graph.import_workspace");
-				CommonRequest.RequestId = Request.RequestId;
-				CommonRequest.CanonicalParamsJson = Request.CanonicalParamsJson;
-				CommonRequest.CallerId = Request.CallerId;
-				CommonRequest.AuthorityScopes = Request.AuthorityScopes;
-				CommonRequest.CorrelationId = Request.CorrelationId;
-				CommonRequest.bCancellationRequested = Request.bCancellationRequested;
-				FUeAgentUObjectDataAssetCommandResponse CommonResponse;
-				FUeAgentUObjectDataAssetCommandError CommonError;
-				if (!CommonService->Execute(
-					CommonRequest, CommonResponse, CommonError))
-				{
-					return Fail(
-						OutError,
-						CommonError.Code.IsEmpty()
-							? FString(TEXT("animation_blueprint_execution_failed"))
-							: CommonError.Code,
-						CommonError.SubjectId,
-						CommonError.Detail);
-				}
-
-				TSharedPtr<FJsonObject> Payload;
-				FString JsonError;
-				if (!Json::TryParseObject(
-					CommonResponse.PayloadJson, Payload, JsonError)
-					|| !Payload.IsValid())
-				{
-					return Fail(OutError,
-						TEXT("animation_blueprint_result_invalid"),
-						Request.CommandId, JsonError);
-				}
-				Payload->SetStringField(TEXT("command_id"), PublicCommandId);
-				if (!Json::TryCanonicalize(
-					Payload, OutResponse.PayloadJson, JsonError))
-				{
-					return Fail(OutError,
-						TEXT("animation_blueprint_result_invalid"),
-						Request.CommandId, JsonError);
-				}
-				OutResponse.bReadOnly = false;
-				return true;
-			}
-
-		private:
-			TSharedRef<IUeAgentUObjectDataAssetCommandService> CommonService;
 		};
 	}
 
@@ -381,27 +334,9 @@ namespace UE::UAI::OperationOwners::AnimationBlueprint
 		return true;
 	}
 
-	bool TryCreateProductionAnimationBlueprintCommandService(
-		TSharedPtr<IUeAgentAnimationBlueprintCommandService>& OutService,
-		FString& OutError)
-	{
-		TSharedPtr<IUeAgentUObjectDataAssetCommandService> CommonService;
-		if (!TryCreateProductionUObjectDataAssetCommandService(
-			CommonService, OutError)
-			|| !CommonService.IsValid())
-		{
-			OutService.Reset();
-			return false;
-		}
-		OutService = MakeShared<FAnimationBlueprintCommandService>(
-			CommonService.ToSharedRef());
-		OutError.Reset();
-		return true;
-	}
-
 	bool TryCreateProductionAnimationBlueprintCandidateCommandService(
 		TSharedPtr<IUeAgentAnimationBlueprintCandidateCommandService>& OutService,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutService = MakeShared<FAnimationBlueprintCandidateCommandService>();
 		OutError.Reset();

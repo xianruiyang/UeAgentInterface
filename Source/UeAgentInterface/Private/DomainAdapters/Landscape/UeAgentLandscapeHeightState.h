@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -14,27 +16,16 @@ namespace UE::UAI::DomainAdapters::LandscapeGeometryEffect
 
 namespace UE::UAI::DomainAdapters::Landscape
 {
-	struct UEAGENTINTERFACE_API FLandscapeHeightStateError final
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FLandscapeHeightStateError = UE::UAI::Contract::FDiagnostic;
 
 	struct UEAGENTINTERFACE_API FLandscapeHeightState final
 	{
 		FString ActorPath;
-		FString ManagedId;
-		FString ManagedFolder;
-		bool bManagedTagPresent = false;
 		FIntPoint ExtentMinInclusive = FIntPoint::ZeroValue;
 		FIntPoint ExtentMaxInclusive = FIntPoint::ZeroValue;
-		FIntPoint RegionMinInclusive = FIntPoint::ZeroValue;
-		FIntPoint RegionMaxInclusive = FIntPoint::ZeroValue;
 		FVector Scale = FVector::OneVector;
 		TArray<double> Heights;
 
-		int64 GetSampleCount() const;
 	};
 
 	/**
@@ -57,13 +48,11 @@ namespace UE::UAI::DomainAdapters::Landscape
 		ALandscape& Landscape,
 		const FIntPoint& RegionMinInclusive,
 		const FIntPoint& RegionMaxInclusive,
-		int64 MaxSamples,
 		FLandscapeHeightState& OutState,
 		FLandscapeHeightStateError& OutError);
 
-	/** Projects the shared native state without rereading or reinterpreting it. */
+	/** Builds the normalized Query value consumed by the public projection. */
 	UEAGENTINTERFACE_API TSharedRef<FJsonObject>
-	BuildLandscapeHeightStateObject(
-		const FString& ExactTarget,
+	BuildLandscapeHeightQueryObject(
 		const FLandscapeHeightState& State);
 }

@@ -3,13 +3,17 @@
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 
 #include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringEncodedTypes.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringReflectionDescriptors.h"
 #include "Utilities/UeAgentPropertyValueCodec.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Core/StateSemantic/UeAgentStateSemantic.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/PackageName.h"
 #include "Misc/ScopeRWLock.h"
+#include "Misc/ScopeExit.h"
 #include "UObject/Class.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
@@ -40,18 +44,53 @@ FStateAccessorDescriptor Normalize(FStateAccessorDescriptor Descriptor) {
   return Descriptor;
 }
 
+FDiagnostic StateFailure(const TCHAR* Code, const TCHAR* Reason, const FString& Field,
+    const TSharedPtr<FJsonValue>& Expected = nullptr, const TSharedPtr<FJsonValue>& Actual = nullptr) {
+  auto Error = FDiagnostic::Failure(Code, Reason, TEXT("state_snapshot"));
+  Error.SourceKind = TEXT("native_result");
+  Error.PropertyPath = Field;
+  Error.ExpectedValue = Expected; Error.ActualValue = Actual;
+  return Error;
+}
+FDiagnostic MissingStateField(const TCHAR* Code, const TCHAR* Reason, const FString& Field) {
+  auto Error = StateFailure(Code, Reason, Field);
+  Error.ExpectedValuePresent = true; Error.ActualValuePresent = false;
+  return Error;
+}
+TSharedPtr<FJsonValue> DescriptorValue(const FString& Value) { return MakeShared<FJsonValueString>(Value); }
+TSharedPtr<FJsonValue> DescriptorValue(int32 Value) { return MakeShared<FJsonValueNumber>(Value); }
+template<typename T>
+bool DescriptorEqual(const T& Expected, const T& Actual, const FString& Path, FDiagnostic* Error) {
+  if (Expected == Actual) return true;
+  if (Error) { Error->PropertyPath = Path; Error->ExpectedValue = DescriptorValue(Expected); Error->ActualValue = DescriptorValue(Actual); }
+  return false;
+}
+bool DescriptorEqual(const TArray<FString>& Expected, const TArray<FString>& Actual, const FString& Path, FDiagnostic* Error) {
+  if (!DescriptorEqual(Expected.Num(), Actual.Num(), Path + TEXT("/count"), Error)) return false;
+  for (int32 Index = 0; Index < Expected.Num(); ++Index)
+    if (!DescriptorEqual(Expected[Index], Actual[Index], Path + TEXT("/") + FString::FromInt(Index), Error)) return false;
+  return true;
+}
+bool AccessorsEqual(const FStateAccessorDescriptor& Expected, const FStateAccessorDescriptor& Actual, FDiagnostic* Error) {
+  return DescriptorEqual(Expected.AccessorId, Actual.AccessorId, TEXT("/accessor_id"), Error)
+    && DescriptorEqual(Expected.TargetKinds, Actual.TargetKinds, TEXT("/target_kinds"), Error)
+    && DescriptorEqual(Expected.CapabilityTags, Actual.CapabilityTags, TEXT("/capability_tags"), Error);
+}
+
 bool ValidateAccessor(const FStateAccessorDescriptor &Descriptor,
-                      const FStateAccessor &Accessor, FString &OutError) {
+                      const FStateAccessor &Accessor, UE::UAI::Contract::FDiagnostic& OutError) {
   if (Descriptor.AccessorId.IsEmpty())
-    OutError = TEXT("state_accessor_id_missing");
+    OutError = MissingStateField(TEXT("state_accessor_id_missing"), TEXT("The state accessor identifier is empty."), TEXT("accessor_id"));
   else if (Descriptor.TargetKinds.IsEmpty())
-    OutError = TEXT("state_accessor_target_kinds_missing");
+    OutError = MissingStateField(TEXT("state_accessor_target_kinds_missing"), TEXT("The state accessor declares no supported target kinds."), TEXT("target_kinds"));
   else if (!Accessor)
-    OutError = TEXT("state_accessor_callback_missing");
+    OutError = MissingStateField(TEXT("state_accessor_callback_missing"), TEXT("The state accessor has no read callback."), TEXT("callback"));
   else {
     OutError.Reset();
     return true;
   }
+  OutError.Stage = TEXT("semantic_registry");
+  OutError.CandidateName = Descriptor.AccessorId;
   return false;
 }
 
@@ -59,7 +98,7 @@ TSharedPtr<FJsonValue> CloneJsonValue(const TSharedPtr<FJsonValue> &Value) {
   if (!Value.IsValid())
     return nullptr;
 
-  auto MakeCloneShell = [](const TSharedPtr<FJsonValue> &Source) {
+  auto MakeUntypedCloneShell = [](const TSharedPtr<FJsonValue> &Source) {
     if (!Source.IsValid())
       return TSharedPtr<FJsonValue>();
     switch (Source->Type) {
@@ -67,6 +106,11 @@ TSharedPtr<FJsonValue> CloneJsonValue(const TSharedPtr<FJsonValue> &Value) {
       return TSharedPtr<FJsonValue>(
           MakeShared<FJsonValueString>(Source->AsString()));
     case EJson::Number:
+      if (Source->PreferStringRepresentation()) {
+        FString Lexeme;
+        if (Source->TryGetString(Lexeme))
+          return TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumberString>(Lexeme));
+      }
       return TSharedPtr<FJsonValue>(
           MakeShared<FJsonValueNumber>(Source->AsNumber()));
     case EJson::Boolean:
@@ -85,6 +129,11 @@ TSharedPtr<FJsonValue> CloneJsonValue(const TSharedPtr<FJsonValue> &Value) {
     }
   };
 
+  auto MakeCloneShell = [&](const TSharedPtr<FJsonValue>& Source) {
+    auto Clone = MakeUntypedCloneShell(Source);
+    UeAgentAuthoringEncodedTypes::FScope::Copy(Source, Clone);
+    return Clone;
+  };
   TSharedPtr<FJsonValue> Root = MakeCloneShell(Value);
   if (Value->Type != EJson::Array && Value->Type != EJson::Object)
     return Root;
@@ -274,10 +323,26 @@ void AppendStableJson(const TSharedPtr<FJsonValue> &Value, FString &Out) {
       Out += TEXT("s:") + EscapeStableString(Task.JsonValue->AsString()) +
              TEXT(";");
       break;
-    case EJson::Number:
-      Out += TEXT("n") +
-             FString::Printf(TEXT("%.17g"), Task.JsonValue->AsNumber());
+    case EJson::Number: {
+      FString Lexeme, Normalized;
+      if (!UE::UAI::StateSemantic::CanonicalJson::TryGetNumberLexeme(*Task.JsonValue, Lexeme) ||
+          !UE::UAI::StateSemantic::TryNormalizeNumberLexeme(Lexeme, Normalized)) {
+        Out += TEXT("invalid-number");
+        break;
+      }
+      // Retain the existing revision material only when its numeric spelling
+      // is exact. NumberString values must not collapse through double.
+      double LegacyNumber = 0.0;
+      if (Task.JsonValue->TryGetNumber(LegacyNumber) && FMath::IsFinite(LegacyNumber)) {
+        const FString Legacy = FString::Printf(TEXT("%.17g"), LegacyNumber == 0.0 ? 0.0 : LegacyNumber);
+        FString LegacyNormalized;
+        if (UE::UAI::StateSemantic::TryNormalizeNumberLexeme(Legacy, LegacyNormalized) &&
+            LegacyNormalized == Normalized)
+          Normalized = Legacy;
+      }
+      Out += TEXT("n") + Normalized;
       break;
+    }
     case EJson::Boolean:
       Out += Task.JsonValue->AsBool() ? TEXT("bt") : TEXT("bf");
       break;
@@ -342,7 +407,53 @@ FString StableJsonKey(const TSharedPtr<FJsonValue> &Value) {
 
 TSharedPtr<FJsonValue>
 NormalizePropertyValue(FProperty *Property, const TSharedPtr<FJsonValue> &Value,
-                       bool bIgnoreFixedArray = false) {
+                       bool bIgnoreFixedArray = false,
+                       TSharedPtr<FJsonValue>* InOutDefinition = nullptr) {
+  if (InOutDefinition) *InOutDefinition = CloneJsonValue(*InOutDefinition);
+  const auto Definition = InOutDefinition && *InOutDefinition && (*InOutDefinition)->Type == EJson::Object
+      ? (*InOutDefinition)->AsObject() : nullptr;
+  const TSharedPtr<FJsonObject>* FieldType = nullptr;
+  if (Definition && Definition->TryGetObjectField(TEXT("type"), FieldType)) {
+    auto NestedDefinition = Definition->TryGetField(TEXT("value_definition"));
+    auto Result = NormalizePropertyValue(Property, Value, bIgnoreFixedArray, &NestedDefinition);
+    if (NestedDefinition) Definition->SetField(TEXT("value_definition"), NestedDefinition);
+    return Result;
+  }
+  auto NormalizeField = [&](FProperty* Field, const TSharedPtr<FJsonValue>& FieldValue,
+                            const TSharedPtr<FJsonObject>& Fields, const FString& Name) {
+    auto FieldDefinition = Fields ? Fields->TryGetField(Name) : nullptr;
+    auto Result = NormalizePropertyValue(Field, FieldValue, false, &FieldDefinition);
+    if (Fields && FieldDefinition) Fields->SetField(Name, FieldDefinition);
+    return Result;
+  };
+  auto DefinitionFields = [](const TSharedPtr<FJsonObject>& Object) -> TSharedPtr<FJsonObject> {
+    const TSharedPtr<FJsonObject>* Fields = nullptr;
+    return Object && Object->TryGetObjectField(TEXT("fields"), Fields) ? *Fields : nullptr;
+  };
+  struct FItem {
+    TSharedPtr<FJsonValue> Value;
+    TSharedPtr<FJsonValue> Definition;
+  };
+  auto NormalizeItems = [&](FProperty* Element, const TArray<TSharedPtr<FJsonValue>>& Source,
+                            const TSharedPtr<FJsonObject>& ItemSchema, bool bFixed, bool bSort) {
+    const TArray<TSharedPtr<FJsonValue>>* Definitions = nullptr;
+    if (ItemSchema) ItemSchema->TryGetArrayField(TEXT("items"), Definitions);
+    TArray<FItem> Paired;
+    for (int32 Index = 0; Index < Source.Num(); ++Index) {
+      FItem Item;
+      Item.Definition = Definitions && Definitions->IsValidIndex(Index) ? (*Definitions)[Index] : nullptr;
+      Item.Value = NormalizePropertyValue(Element, Source[Index], bFixed, &Item.Definition);
+      Paired.Add(MoveTemp(Item));
+    }
+    if (bSort) Paired.Sort([](const FItem& Left, const FItem& Right) { return StableJsonKey(Left.Value) < StableJsonKey(Right.Value); });
+    TArray<TSharedPtr<FJsonValue>> Values, Schemas;
+    for (const auto& Item : Paired) {
+      Values.Add(Item.Value);
+      Schemas.Add(Item.Definition ? Item.Definition : MakeShared<FJsonValueNull>());
+    }
+    if (Definitions) ItemSchema->SetArrayField(TEXT("items"), Schemas);
+    return Values;
+  };
   if (!Property || !Value.IsValid())
     return CloneJsonValue(Value);
   if (Property->ArrayDim > 1 && !bIgnoreFixedArray &&
@@ -350,11 +461,7 @@ NormalizePropertyValue(FProperty *Property, const TSharedPtr<FJsonValue> &Value,
     TSharedPtr<FJsonObject> Object = CloneJsonObject(Value->AsObject());
     const TArray<TSharedPtr<FJsonValue>> *SourceItems = nullptr;
     if (Object->TryGetArrayField(TEXT("items"), SourceItems) && SourceItems) {
-      TArray<TSharedPtr<FJsonValue>> Items;
-      for (const TSharedPtr<FJsonValue> &Item : *SourceItems) {
-        Items.Add(NormalizePropertyValue(Property, Item, true));
-      }
-      Object->SetArrayField(TEXT("items"), Items);
+      Object->SetArrayField(TEXT("items"), NormalizeItems(Property, *SourceItems, Definition, true, false));
     }
     return MakeShared<FJsonValueObject>(Object);
   }
@@ -375,8 +482,7 @@ NormalizePropertyValue(FProperty *Property, const TSharedPtr<FJsonValue> &Value,
            It; ++It) {
         if (const TSharedPtr<FJsonValue> FieldValue =
                 NormalizedFields->TryGetField(It->GetName())) {
-          NormalizedFields->SetField(It->GetName(),
-                                     NormalizePropertyValue(*It, FieldValue));
+          NormalizedFields->SetField(It->GetName(), NormalizeField(*It, FieldValue, DefinitionFields(Definition), It->GetName()));
         }
       }
       Object->SetObjectField(TEXT("fields"), NormalizedFields);
@@ -391,10 +497,7 @@ NormalizePropertyValue(FProperty *Property, const TSharedPtr<FJsonValue> &Value,
     if (!Object.IsValid() ||
         !Object->TryGetArrayField(TEXT("items"), SourceItems) || !SourceItems)
       return CloneJsonValue(Value);
-    TArray<TSharedPtr<FJsonValue>> Items;
-    for (const TSharedPtr<FJsonValue> &Item : *SourceItems)
-      Items.Add(NormalizePropertyValue(Array->Inner, Item));
-    Object->SetArrayField(TEXT("items"), Items);
+    Object->SetArrayField(TEXT("items"), NormalizeItems(Array->Inner, *SourceItems, Definition, false, false));
     return MakeShared<FJsonValueObject>(Object);
   }
   if (FSetProperty *Set = CastField<FSetProperty>(Property)) {
@@ -405,14 +508,7 @@ NormalizePropertyValue(FProperty *Property, const TSharedPtr<FJsonValue> &Value,
     if (!Object.IsValid() ||
         !Object->TryGetArrayField(TEXT("items"), SourceItems) || !SourceItems)
       return CloneJsonValue(Value);
-    TArray<TSharedPtr<FJsonValue>> Items;
-    for (const TSharedPtr<FJsonValue> &Item : *SourceItems)
-      Items.Add(NormalizePropertyValue(Set->ElementProp, Item));
-    Items.Sort([](const TSharedPtr<FJsonValue> &Left,
-                  const TSharedPtr<FJsonValue> &Right) {
-      return StableJsonKey(Left) < StableJsonKey(Right);
-    });
-    Object->SetArrayField(TEXT("items"), Items);
+    Object->SetArrayField(TEXT("items"), NormalizeItems(Set->ElementProp, *SourceItems, Definition, false, true));
     return MakeShared<FJsonValueObject>(Object);
   }
   if (FMapProperty *Map = CastField<FMapProperty>(Property)) {
@@ -424,25 +520,35 @@ NormalizePropertyValue(FProperty *Property, const TSharedPtr<FJsonValue> &Value,
         !Object->TryGetArrayField(TEXT("entries"), SourceEntries) ||
         !SourceEntries)
       return CloneJsonValue(Value);
-    TArray<TSharedPtr<FJsonValue>> Entries;
-    for (const TSharedPtr<FJsonValue> &SourceEntryValue : *SourceEntries) {
+    const auto Fields = DefinitionFields(Definition);
+    const TSharedPtr<FJsonObject>* EntriesSchemaPtr = nullptr;
+    const auto EntriesSchema = Fields && Fields->TryGetObjectField(TEXT("entries"), EntriesSchemaPtr) ? *EntriesSchemaPtr : nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* EntryDefinitions = nullptr;
+    if (EntriesSchema) EntriesSchema->TryGetArrayField(TEXT("items"), EntryDefinitions);
+    TArray<FItem> Entries;
+    for (int32 Index = 0; Index < SourceEntries->Num(); ++Index) {
+      const auto& SourceEntryValue = (*SourceEntries)[Index];
+      FItem Item;
+      Item.Definition = EntryDefinitions && EntryDefinitions->IsValidIndex(Index) ? CloneJsonValue((*EntryDefinitions)[Index]) : nullptr;
       if (!SourceEntryValue.IsValid() ||
           SourceEntryValue->Type != EJson::Object) {
-        Entries.Add(CloneJsonValue(SourceEntryValue));
+        Item.Value = CloneJsonValue(SourceEntryValue);
+        Entries.Add(MoveTemp(Item));
         continue;
       }
       TSharedPtr<FJsonObject> Entry =
           CloneJsonObject(SourceEntryValue->AsObject());
+      const auto EntryFields = DefinitionFields(Item.Definition && Item.Definition->Type == EJson::Object ? Item.Definition->AsObject() : nullptr);
       Entry->SetField(TEXT("key"),
-                      NormalizePropertyValue(Map->KeyProp,
-                                             Entry->TryGetField(TEXT("key"))));
+                      NormalizeField(Map->KeyProp, Entry->TryGetField(TEXT("key")), EntryFields, TEXT("key")));
       Entry->SetField(TEXT("value"),
-                      NormalizePropertyValue(
-                          Map->ValueProp, Entry->TryGetField(TEXT("value"))));
-      Entries.Add(MakeShared<FJsonValueObject>(Entry));
+                      NormalizeField(Map->ValueProp, Entry->TryGetField(TEXT("value")), EntryFields, TEXT("value")));
+      Item.Value = MakeShared<FJsonValueObject>(Entry);
+      Entries.Add(MoveTemp(Item));
     }
-    Entries.Sort([](const TSharedPtr<FJsonValue> &Left,
-                    const TSharedPtr<FJsonValue> &Right) {
+    Entries.Sort([](const FItem& LeftItem, const FItem& RightItem) {
+      const auto& Left = LeftItem.Value;
+      const auto& Right = RightItem.Value;
       const TSharedPtr<FJsonObject> LeftObject =
           Left.IsValid() ? Left->AsObject() : nullptr;
       const TSharedPtr<FJsonObject> RightObject =
@@ -457,7 +563,13 @@ NormalizePropertyValue(FProperty *Property, const TSharedPtr<FJsonValue> &Value,
         return LeftKey < RightKey;
       return StableJsonKey(Left) < StableJsonKey(Right);
     });
-    Object->SetArrayField(TEXT("entries"), Entries);
+    TArray<TSharedPtr<FJsonValue>> Values, Schemas;
+    for (const auto& Item : Entries) {
+      Values.Add(Item.Value);
+      Schemas.Add(Item.Definition ? Item.Definition : MakeShared<FJsonValueNull>());
+    }
+    Object->SetArrayField(TEXT("entries"), Values);
+    if (EntryDefinitions) EntriesSchema->SetArrayField(TEXT("items"), Schemas);
     return MakeShared<FJsonValueObject>(Object);
   }
   if (FOptionalProperty *Optional = CastField<FOptionalProperty>(Property)) {
@@ -468,9 +580,8 @@ NormalizePropertyValue(FProperty *Property, const TSharedPtr<FJsonValue> &Value,
       return CloneJsonValue(Value);
     bool bSet = false;
     if (Object->TryGetBoolField(TEXT("is_set"), bSet) && bSet) {
-      Object->SetField(TEXT("value"), NormalizePropertyValue(
-                                          Optional->GetValueProperty(),
-                                          Object->TryGetField(TEXT("value"))));
+      Object->SetField(TEXT("value"), NormalizeField(Optional->GetValueProperty(),
+          Object->TryGetField(TEXT("value")), DefinitionFields(Definition), TEXT("value")));
     }
     return MakeShared<FJsonValueObject>(Object);
   }
@@ -493,27 +604,30 @@ bool EncodeAuthoringPropertyValue(FProperty *Property, const void *ValuePtr,
                                   int32 Depth,
                                   TSet<const UObject *> &ObjectStack,
                                   TSharedPtr<FJsonValue> &OutValue,
-                                  FString &OutError) {
+                                  FDiagnostic& OutError,
+                                  TSharedPtr<FJsonValue> &OutValueDefinition) {
   OutValue.Reset();
+  OutValueDefinition.Reset();
   if (!Property || !ValuePtr) {
-    OutError = TEXT("state_property_value_invalid");
+    OutError = MissingStateField(TEXT("state_property_value_invalid"), !Property ? TEXT("The property descriptor is missing.") : TEXT("The native property value storage is missing."), !Property ? TEXT("property") : Property->GetName());
     return false;
   }
   OutError.Reset();
 
   UeAgentPropertyValueCodec::FOptions CodecOptions;
-	CodecOptions.MaxDepth = -1;
-  CodecOptions.MaxContainerItems = Limits.MaxContainerItems;
-  CodecOptions.MaxStringChars = Limits.MaxStringChars;
+  CodecOptions.bCaptureOwnedObjectDefinitions = true;
+  CodecOptions.bCaptureStructFieldDescriptors = true;
 	CodecOptions.StructFieldFilter = Limits.StructFieldFilter;
   CodecOptions.ObjectReferenceEncoder =
       [&CodecOptions, &Limits, &ObjectStack, &OutError](
           const FObjectPropertyBase *ObjectProperty, const void *ObjectValuePtr,
           UObject *ObjectOwner, int32 ObjectDepth,
-          TSharedPtr<FJsonValue> &OutEncoded) -> bool {
-    if (!UeAgentAuthoringReflection::IsOwnedObjectProperty(ObjectProperty))
+          TSharedPtr<FJsonValue> &OutEncoded, TSharedPtr<FJsonObject>* OutDefinition) -> bool {
+    if (!UeAgentAuthoringReflection::IsOwnedObjectProperty(ObjectProperty)
+        && !UeAgentAuthoringReflection::IsExistingInlineObjectProperty(
+            ObjectProperty, ObjectValuePtr, ObjectOwner))
       return false;
-    auto FailOwnedObject = [&OutEncoded, &OutError](FString Error) {
+    auto FailOwnedObject = [&OutEncoded, &OutError](FDiagnostic Error) {
       OutError = MoveTemp(Error);
       OutEncoded = MakeShared<FJsonValueNull>();
       return true;
@@ -522,21 +636,36 @@ bool EncodeAuthoringPropertyValue(FProperty *Property, const void *ValuePtr,
     UObject *Referenced =
         ObjectProperty->GetObjectPropertyValue(ObjectValuePtr);
     if (!Referenced) {
+      if (OutDefinition) {
+        *OutDefinition = MakeShared<FJsonObject>();
+        (*OutDefinition)->SetStringField(TEXT("builtin"), TEXT("owned_object"));
+      }
       TSharedRef<FJsonObject> NullReference = MakeShared<FJsonObject>();
       NullReference->SetField(TEXT("path"), MakeShared<FJsonValueNull>());
       OutEncoded = MakeShared<FJsonValueObject>(NullReference);
       return true;
     }
     if (!ObjectOwner || !IsObjectWithin(Referenced, ObjectOwner)) {
-      return FailOwnedObject(TEXT("state_owned_object_outside_owner:") +
-                             Referenced->GetPathName());
+      auto Failure = StateFailure(TEXT("state_owned_object_outside_owner"),
+          !ObjectOwner ? TEXT("The owned object reference has no containing owner.")
+              : TEXT("The referenced object is outside the containing owner."),
+          ObjectProperty->GetName(), MakeShared<FJsonValueString>(ObjectOwner ? ObjectOwner->GetName() : TEXT("containing owner")),
+          MakeShared<FJsonValueString>(Referenced->GetName()));
+      Failure.InternalContext = Referenced->GetPathName();
+      if (ObjectOwner) Failure.ExpectedEvidence = MakeShared<FJsonValueString>(ObjectOwner->GetPathName());
+      return FailOwnedObject(MoveTemp(Failure));
     }
     if (ObjectStack.Contains(Referenced)) {
-      return FailOwnedObject(TEXT("state_owned_object_cycle:") +
-                             Referenced->GetPathName());
+      auto Failure = StateFailure(TEXT("state_owned_object_cycle"),
+          TEXT("The owned object reference revisits an object already on the current traversal path."),
+          ObjectProperty->GetName(), MakeShared<FJsonValueString>(TEXT("object outside the active traversal path")),
+          MakeShared<FJsonValueString>(Referenced->GetName()));
+      Failure.InternalContext = Referenced->GetPathName();
+      return FailOwnedObject(MoveTemp(Failure));
     }
 
     TArray<FProperty *> Properties;
+    TMap<FProperty*, TArray<FString>> PropertyCategories;
     for (TFieldIterator<FProperty> It(Referenced->GetClass(),
                                       EFieldIterationFlags::IncludeSuper);
          It; ++It) {
@@ -546,58 +675,98 @@ bool EncodeAuthoringPropertyValue(FProperty *Property, const void *ValuePtr,
               ? NestedProperty->ContainerPtrToValuePtr<void>(Referenced)
               : nullptr;
       UeAgentAuthoringReflection::FDescriptor Reflection;
-      FString ReflectionError;
-      if (!NestedProperty || !UeAgentAuthoringReflection::Build(
-                                 NestedProperty, Referenced, NestedValuePtr,
-                                 Reflection, ReflectionError)) {
-        return FailOwnedObject(
-            ReflectionError.IsEmpty()
-                ? FString(TEXT("state_owned_object_property_descriptor_failed"))
-                : MoveTemp(ReflectionError));
+      FDiagnostic ReflectionError;
+      if (!UeAgentAuthoringReflection::Build(
+              NestedProperty, Referenced, NestedValuePtr, Reflection, ReflectionError, Limits.bShowDefaultsOnly, Limits.bUseInstanceEditability)) {
+        return FailOwnedObject(MoveTemp(ReflectionError));
       }
-      if (Reflection.bEditable)
+      if (Reflection.bEditable || (Limits.AuthorizeProperty && Limits.AuthorizeProperty(NestedProperty))) {
         Properties.Add(NestedProperty);
+        PropertyCategories.Add(NestedProperty, Reflection.CategoryPath);
+      }
     }
     Properties.Sort([](const FProperty &Left, const FProperty &Right) {
       return Left.GetName() < Right.GetName();
     });
-    if (Limits.MaxContainerItems > 0 &&
-        Properties.Num() > Limits.MaxContainerItems) {
-      return FailOwnedObject(FString::Printf(
-          TEXT("state_owned_object_property_limit_exceeded:%s:%d"),
-          *Referenced->GetPathName(), Properties.Num()));
-    }
 
     ObjectStack.Add(Referenced);
     TArray<TSharedPtr<FJsonValue>> PropertyValues;
+    TArray<TSharedPtr<FJsonValue>> PropertyDefinitions;
     PropertyValues.Reserve(Properties.Num());
     for (FProperty *NestedProperty : Properties) {
+      TSharedPtr<FJsonObject> NestedDefinition;
       TSharedPtr<FJsonValue> NestedValue = UeAgentPropertyValueCodec::Encode(
           NestedProperty,
           NestedProperty->ContainerPtrToValuePtr<void>(Referenced), Referenced,
-          CodecOptions, ObjectDepth + 1);
+          CodecOptions, ObjectDepth + 1, OutDefinition ? &NestedDefinition : nullptr);
       if (!OutError.IsEmpty()) {
         ObjectStack.Remove(Referenced);
         OutEncoded = MakeShared<FJsonValueNull>();
         return true;
       }
-      FString ReliabilityReason;
+      FDiagnostic ReliabilityReason;
       if (!UeAgentPropertyValueCodec::IsReliableCanonicalValue(
               NestedProperty, NestedValue, &ReliabilityReason)) {
         ObjectStack.Remove(Referenced);
-        return FailOwnedObject(
-            ReliabilityReason.IsEmpty()
-                ? FString(TEXT("state_owned_object_property_value_unreliable"))
-                : MoveTemp(ReliabilityReason));
+        if (ReliabilityReason.PropertyPath.IsEmpty()) ReliabilityReason.PropertyPath = NestedProperty->GetName();
+        return FailOwnedObject(MoveTemp(ReliabilityReason));
       }
       TSharedRef<FJsonObject> Descriptor = MakeShared<FJsonObject>();
       Descriptor->SetStringField(TEXT("property_path"),
                                  NestedProperty->GetName());
+      TSharedPtr<FJsonValue> NormalizedDefinition = NestedDefinition
+          ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueObject>(NestedDefinition)) : nullptr;
       Descriptor->SetField(TEXT("value"),
-                           NormalizePropertyValue(NestedProperty, NestedValue));
+                           NormalizePropertyValue(NestedProperty, NestedValue, false, &NormalizedDefinition));
+      NestedDefinition = NormalizedDefinition && NormalizedDefinition->Type == EJson::Object ? NormalizedDefinition->AsObject() : nullptr;
       PropertyValues.Add(MakeShared<FJsonValueObject>(Descriptor));
+      auto DescriptorDefinition = MakeShared<FJsonObject>();
+      DescriptorDefinition->SetStringField(TEXT("property_name"), NestedProperty->GetName());
+      TArray<TSharedPtr<FJsonValue>> CategoryPath;
+      for (const auto& Segment : PropertyCategories.FindChecked(NestedProperty))
+        CategoryPath.Add(MakeShared<FJsonValueString>(Segment));
+      DescriptorDefinition->SetArrayField(TEXT("category_path"), CategoryPath);
+      auto PropertyDefinition = MakeShared<FJsonObject>();
+      PropertyDefinition->SetObjectField(TEXT("type"), UeAgentPropertyValueCodec::BuildTypeDescriptor(NestedProperty));
+      if (NestedDefinition) PropertyDefinition->SetObjectField(TEXT("value_definition"), NestedDefinition);
+      if (const auto Candidates = UeAgentAuthoringTypeDescriptors::BuildEnumCandidates(
+              UeAgentAuthoringTypeDescriptors::GetPropertyEnum(NestedProperty), false, NestedProperty))
+        for (const auto& Field : Candidates->Values) PropertyDefinition->SetField(Field.Key, Field.Value);
+      auto Fields = MakeShared<FJsonObject>();
+      Fields->SetObjectField(TEXT("value"), PropertyDefinition);
+      DescriptorDefinition->SetObjectField(TEXT("fields"), Fields);
+      PropertyDefinitions.Add(MakeShared<FJsonValueObject>(DescriptorDefinition));
     }
     ObjectStack.Remove(Referenced);
+
+    if (OutDefinition) {
+      *OutDefinition = MakeShared<FJsonObject>();
+      (*OutDefinition)->SetStringField(TEXT("builtin"), TEXT("owned_object"));
+      // Edit binding metadata is relative to the native value owner, not the
+      // proposed scratch package. It does not change business-value equality.
+      (*OutDefinition)->SetStringField(TEXT("owner_relative_path"), Referenced->GetPathName(ObjectOwner));
+      (*OutDefinition)->SetStringField(TEXT("instance_name"), Referenced->GetClass()->GetDisplayNameText().ToString());
+      const bool bExistingInlineOnly =
+          UeAgentAuthoringReflection::IsExistingInlineObjectProperty(ObjectProperty, ObjectValuePtr, ObjectOwner)
+          && (!UeAgentAuthoringReflection::IsOwnedObjectProperty(ObjectProperty)
+              || (!UeAgentAuthoringReflection::IsEditableByFlags(ObjectProperty->GetOwnerProperty(), ObjectOwner, Limits.bShowDefaultsOnly, Limits.bUseInstanceEditability)
+                  && !(Limits.AuthorizeProperty && Limits.AuthorizeProperty(ObjectProperty->GetOwnerProperty()))));
+      if (bExistingInlineOnly)
+        (*OutDefinition)->SetBoolField(TEXT("existing_inline_only"), true);
+      auto PropertiesDefinition = MakeShared<FJsonObject>();
+      PropertiesDefinition->SetStringField(TEXT("element_kind"), TEXT("reflected_property"));
+      PropertiesDefinition->SetArrayField(TEXT("items"), PropertyDefinitions);
+      auto OwnedFields = MakeShared<FJsonObject>();
+      OwnedFields->SetObjectField(TEXT("properties"), PropertiesDefinition);
+      auto OwnedDefinition = MakeShared<FJsonObject>();
+      // This is the reflected-property portion of a native owned record. Class,
+      // selection and identity metadata are validated by the owned-value owner.
+      OwnedDefinition->SetBoolField(TEXT("fields_complete"), false);
+      OwnedDefinition->SetObjectField(TEXT("fields"), OwnedFields);
+      auto Fields = MakeShared<FJsonObject>();
+      Fields->SetObjectField(TEXT("owned_object"), OwnedDefinition);
+      (*OutDefinition)->SetObjectField(TEXT("fields"), Fields);
+    }
 
     TSharedRef<FJsonObject> OwnedObject = MakeShared<FJsonObject>();
     OwnedObject->SetStringField(TEXT("class_path"),
@@ -609,19 +778,20 @@ bool EncodeAuthoringPropertyValue(FProperty *Property, const void *ValuePtr,
     return true;
   };
 
+  TSharedPtr<FJsonObject> Definition;
   TSharedPtr<FJsonValue> Encoded = UeAgentPropertyValueCodec::Encode(
-      Property, ValuePtr, Owner, CodecOptions, Depth);
+      Property, ValuePtr, Owner, CodecOptions, Depth, &Definition);
   if (!OutError.IsEmpty())
     return false;
-  FString ReliabilityReason;
+  FDiagnostic ReliabilityReason;
   if (!UeAgentPropertyValueCodec::IsReliableCanonicalValue(
           Property, Encoded, &ReliabilityReason)) {
-    OutError = ReliabilityReason.IsEmpty()
-                   ? FString(TEXT("state_property_value_unreliable"))
-                   : ReliabilityReason;
+    OutError = MoveTemp(ReliabilityReason);
+    if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = Property->GetName();
     return false;
   }
-  OutValue = NormalizePropertyValue(Property, Encoded);
+  if (Definition.IsValid()) OutValueDefinition = MakeShared<FJsonValueObject>(Definition);
+  OutValue = NormalizePropertyValue(Property, Encoded, false, &OutValueDefinition);
   OutError.Reset();
   return true;
 }
@@ -634,13 +804,15 @@ FString MakeEntryKey(const FString &SemanticId, const FString &CanonicalKey) {
 FStateEntry CloneStateEntry(const FStateEntry &Entry) {
   FStateEntry Clone = Entry;
   Clone.Value = CloneJsonValue(Entry.Value);
+  Clone.ValueDefinition = CloneJsonValue(Entry.ValueDefinition);
+  Clone.ComparisonValueDefinition = CloneJsonValue(Entry.ComparisonValueDefinition);
 	Clone.CandidatesHeader = CloneJsonValue(Entry.CandidatesHeader);
 	Clone.Candidates = CloneJsonValue(Entry.Candidates);
   return Clone;
 }
 
 EReadOutcome ReadPropertyState(const FReadRequest &Request,
-                               FStateValue &OutValue, FString &OutError) {
+                               FStateValue &OutValue, FDiagnostic& OutError) {
   UeAgentAuthoringTargetLocator::FResolvedPropertyTarget Target;
   UeAgentAuthoringTargetLocator::FResolveResult TargetResult;
   const bool bResolved =
@@ -654,13 +826,19 @@ EReadOutcome ReadPropertyState(const FReadRequest &Request,
                 const_cast<UObject *>(Request.NotificationOwner),
                 Request.PropertyPath, Target, TargetResult);
   if (!bResolved) {
-    OutError = TargetResult.ErrorCode.IsEmpty()
-                   ? FString(TEXT("state_property_target_not_found"))
-                   : TargetResult.ErrorCode;
+    OutError = MoveTemp(TargetResult.Diagnostic);
     return EReadOutcome::Failed;
   }
   if (Target.Identity.CanonicalKey != Request.TargetIdentity.CanonicalKey) {
-    OutError = TEXT("state_accessor_identity_mismatch");
+    auto ExpectedIdentity = MakeShared<FJsonObject>();
+    ExpectedIdentity->SetBoolField(TEXT("matches_requested_identity"), true);
+    auto ActualIdentity = MakeShared<FJsonObject>();
+    ActualIdentity->SetBoolField(TEXT("matches_requested_identity"), false);
+    OutError = StateFailure(TEXT("state_accessor_identity_mismatch"),
+        TEXT("The resolved property identity differs from the identity requested by the state accessor."),
+        Request.PropertyPath, MakeShared<FJsonValueObject>(ExpectedIdentity), MakeShared<FJsonValueObject>(ActualIdentity));
+    OutError.ActualEvidence = MakeShared<FJsonValueString>(Target.Identity.CanonicalKey);
+    OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Request.TargetIdentity.CanonicalKey);
     return EReadOutcome::Failed;
   }
 
@@ -671,7 +849,7 @@ EReadOutcome ReadPropertyState(const FReadRequest &Request,
                                                    : Request.RootObject);
   UeAgentAuthoringReflection::FDescriptor Reflection;
   if (!UeAgentAuthoringReflection::Build(
-          Target.Property, Owner, Target.ValuePtr, Reflection, OutError)) {
+          Target.Property, Owner, Target.ValuePtr, Reflection, OutError, Request.Limits.bShowDefaultsOnly, Request.Limits.bUseInstanceEditability, Target.PropertyScope)) {
     return EReadOutcome::Failed;
   }
   TSharedPtr<FJsonValue> Encoded;
@@ -680,7 +858,7 @@ EReadOutcome ReadPropertyState(const FReadRequest &Request,
     ObjectStack.Add(Owner);
   if (!EncodeAuthoringPropertyValue(Target.Property, Target.ValuePtr, Owner,
                                     Request.Limits, 0, ObjectStack, Encoded,
-                                    OutError)) {
+                                    OutError, OutValue.ValueDefinition)) {
     return EReadOutcome::Failed;
   }
 
@@ -695,28 +873,20 @@ EReadOutcome ReadPropertyState(const FReadRequest &Request,
   OutValue.bAvailable = true;
   OutValue.bEditable = Reflection.bEditable;
   OutValue.AvailabilityReason = Reflection.AvailabilityReason;
+  if (Request.Limits.AuthorizeProperty && Request.Limits.AuthorizeProperty(Target.Property)) {
+    OutValue.bEditable = true;
+    OutValue.AvailabilityReason.Reset();
+  }
   OutValue.Constraints = Reflection.Constraints;
 	OutValue.DisplayName = Reflection.DisplayName;
 	OutValue.Tooltip = Reflection.Tooltip;
 	OutValue.CategoryPath = Reflection.CategoryPath;
 	OutValue.PropertyFlags = Reflection.PropertyFlags;
-	if (const UEnum* Enum = UeAgentAuthoringTypeDescriptors::GetPropertyEnum(Target.Property)) {
-		TArray<TSharedPtr<FJsonValue>> Header;
-		Header.Add(MakeShared<FJsonValueString>(TEXT("name")));
-		TArray<TSharedPtr<FJsonValue>> Rows;
-		for (int32 Index = 0; Index < Enum->NumEnums(); ++Index) {
-			if (Enum->HasMetaData(TEXT("Hidden"), Index)) continue;
-			const FString Name = Enum->GetNameStringByIndex(Index);
-			if (Name.IsEmpty() || Name.Equals(TEXT("MAX"), ESearchCase::IgnoreCase)
-				|| Name.EndsWith(TEXT("_MAX"), ESearchCase::IgnoreCase)) continue;
-			Rows.Add(MakeShared<FJsonValueArray>(
-				TArray<TSharedPtr<FJsonValue>>{MakeShared<FJsonValueString>(Name)}));
-		}
-		if (!Rows.IsEmpty()) {
-			OutValue.CandidatesHeader = MakeShared<FJsonValueArray>(MoveTemp(Header));
-			OutValue.Candidates = MakeShared<FJsonValueArray>(MoveTemp(Rows));
-		}
+	if (const auto Candidates = UeAgentAuthoringTypeDescriptors::BuildEnumCandidates(UeAgentAuthoringTypeDescriptors::GetPropertyEnum(Target.Property), false, Target.Property)) {
+		OutValue.CandidatesHeader = Candidates->TryGetField(TEXT("candidates_header"));
+		OutValue.Candidates = Candidates->TryGetField(TEXT("candidates"));
 	}
+
   Target.Property->ExportTextItem_Direct(OutValue.ValueText, Target.ValuePtr,
                                          nullptr, Owner, PPF_None);
   OutValue.Provenance = TEXT("shared_property_accessor");
@@ -733,7 +903,10 @@ bool ValidateTarget(
           ? Request.SnapshotIdentityOverride.GetValue()
           : Request.TargetIdentity;
   if (!Request.TargetIdentity.IsValid() || !SemanticIdentity.IsValid()) {
-    OutResult.ErrorCode = TEXT("state_target_identity_invalid");
+    const auto& InvalidIdentity = !Request.TargetIdentity.IsValid() ? Request.TargetIdentity : SemanticIdentity;
+    OutResult.Diagnostic = FDiagnostic::WrapFailure(TEXT("state_target_identity_invalid"), InvalidIdentity.GetValidationDiagnostic(), TEXT("state_snapshot"));
+    OutResult.Diagnostic.PropertyPath = (!Request.TargetIdentity.IsValid() ? TEXT("target_identity.") : TEXT("snapshot_identity.")) + OutResult.Diagnostic.PropertyPath;
+    OutResult.Diagnostic.SourceKind = TEXT("native_result");
     return false;
   }
   if (!Request.TargetQuery.ModelId.IsEmpty() ||
@@ -755,16 +928,16 @@ bool ValidateTarget(
     UeAgentAuthoringTargetLocator::FResolveResult RequestTargetResult;
     if (!UeAgentAuthoringTargetLocator::ResolveExact(
             CompletedQuery, {Request.TargetIdentity}, RequestTargetResult)) {
-      OutResult.ErrorCode = RequestTargetResult.ErrorCode;
+      OutResult.Diagnostic = RequestTargetResult.Diagnostic;
       return false;
     }
   }
   if (SemanticIdentity.ModelId != Semantic.IdentityModel) {
-    OutResult.ErrorCode = TEXT("state_identity_model_mismatch");
+    OutResult.Diagnostic = StateFailure(TEXT("state_identity_model_mismatch"), TEXT("The target identity model does not match the requested semantic."), TEXT("identity_model"), DescriptorValue(Semantic.IdentityModel), DescriptorValue(SemanticIdentity.ModelId));
     return false;
   }
   if (SemanticIdentity.TargetKind != Semantic.TargetKind) {
-    OutResult.ErrorCode = TEXT("state_target_kind_mismatch");
+    OutResult.Diagnostic = StateFailure(TEXT("state_target_kind_mismatch"), TEXT("The target kind does not match the requested semantic."), TEXT("target_kind"), DescriptorValue(Semantic.TargetKind), DescriptorValue(SemanticIdentity.TargetKind));
     return false;
   }
 
@@ -775,7 +948,7 @@ bool ValidateTarget(
   UeAgentAuthoringTargetLocator::FResolveResult TargetResult;
   if (!UeAgentAuthoringTargetLocator::ResolveExact(Query, {SemanticIdentity},
                                                    TargetResult)) {
-    OutResult.ErrorCode = TargetResult.ErrorCode;
+    OutResult.Diagnostic = TargetResult.Diagnostic;
     return false;
   }
   return true;
@@ -799,14 +972,13 @@ bool FStateAccessorDescriptor::SupportsTargetKind(
 
 bool FStateAccessorDescriptor::operator==(
     const FStateAccessorDescriptor &Other) const {
-  return AccessorId == Other.AccessorId && TargetKinds == Other.TargetKinds &&
-         CapabilityTags == Other.CapabilityTags;
+  return AccessorsEqual(*this, Other, nullptr);
 }
 
 FStateAccessorRegistry &FStateAccessorRegistry::Get() {
   static FStateAccessorRegistry Registry;
   static const bool bBuiltInsRegistered = []() {
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     return RegisterBuiltInStateAccessors(Registry, Error);
   }();
   ensureAlwaysMsgf(bBuiltInsRegistered,
@@ -816,15 +988,15 @@ FStateAccessorRegistry &FStateAccessorRegistry::Get() {
 
 bool FStateAccessorRegistry::RegisterAccessor(
     const FStateAccessorDescriptor &Descriptor, FStateAccessor Accessor,
-    ERegistrationResult &OutResult, FString &OutError) {
+    ERegistrationResult &OutResult, UE::UAI::Contract::FDiagnostic& OutError) {
   const FStateAccessorDescriptor Canonical = Normalize(Descriptor);
   if (!ValidateAccessor(Canonical, Accessor, OutError))
     return false;
   FWriteScopeLock Lock(RegistryLock);
   if (const FEntry *Existing = Accessors.Find(Canonical.AccessorId)) {
-    if (Existing->Descriptor != Canonical) {
-      OutError = FString::Printf(TEXT("state_accessor_conflict_%s"),
-                                 *Canonical.AccessorId);
+    OutError = StateFailure(TEXT("state_accessor_conflict"), TEXT("The state accessor differs from its existing registration."), FString());
+    OutError.Stage = TEXT("semantic_registry"); OutError.CandidateName = Canonical.AccessorId;
+    if (!AccessorsEqual(Existing->Descriptor, Canonical, &OutError)) {
       return false;
     }
     OutResult = ERegistrationResult::AlreadyRegistered;
@@ -877,9 +1049,22 @@ int32 FStateAccessorRegistry::GetAccessorCount() const {
 }
 
 bool FStateEntry::IsValid() const {
-  return !SemanticId.IsEmpty() && TargetIdentity.IsValid() &&
-         !Type.Kind.IsEmpty() && !AccessorId.IsEmpty() &&
-         (!bAvailable || Value.IsValid());
+  return GetValidationDiagnostic().IsEmpty();
+}
+
+FDiagnostic FStateEntry::GetValidationDiagnostic() const {
+  FDiagnostic Error;
+  if (SemanticId.IsEmpty()) Error = MissingStateField(TEXT("state_entry_invalid"), TEXT("The state entry has no semantic identifier."), TEXT("semantic_id"));
+  else if (auto IdentityError = TargetIdentity.GetValidationDiagnostic(); !IdentityError.IsEmpty()) {
+    Error = FDiagnostic::WrapFailure(TEXT("state_entry_invalid"), IdentityError, TEXT("state_snapshot"));
+    Error.PropertyPath = TEXT("target_identity.") + Error.PropertyPath;
+    Error.SourceKind = TEXT("native_result");
+  }
+  else if (Type.Kind.IsEmpty()) Error = MissingStateField(TEXT("state_entry_invalid"), TEXT("The state entry has no declared value type."), TEXT("type.kind"));
+  else if (AccessorId.IsEmpty()) Error = MissingStateField(TEXT("state_entry_invalid"), TEXT("The state entry has no accessor identifier."), TEXT("accessor_id"));
+  else if (bAvailable && !Value.IsValid()) Error = MissingStateField(TEXT("state_entry_invalid"), TEXT("An available state entry must contain a value."), TEXT("value"));
+  if (!Error.IsEmpty()) Error.SemanticId = SemanticId;
+  return Error;
 }
 
 TSharedRef<FJsonObject> FStateEntry::ToJsonObject() const {
@@ -923,6 +1108,8 @@ TSharedRef<FJsonObject> FStateEntry::ToJsonObject() const {
 		Object->SetField(TEXT("candidates_header"), CloneJsonValue(CandidatesHeader));
 	if (Candidates.IsValid())
 		Object->SetField(TEXT("candidates"), CloneJsonValue(Candidates));
+	if (ValueDefinition.IsValid())
+		Object->SetField(TEXT("value_definition"), CloneJsonValue(ValueDefinition));
   if (bAvailable && Value.IsValid())
     Object->SetField(TEXT("value"), CloneJsonValue(Value));
   return Object;
@@ -969,6 +1156,13 @@ TArray<FStateEntry> FStateSnapshot::CopyEntries() const {
   return Result;
 }
 
+void FStateSnapshot::ReleaseNativeValues() {
+  for (FStateEntry &Entry : Entries) {
+    Entry.NativeValue.Reset();
+    Entry.NativeReadLimits.Reset();
+  }
+}
+
 TSharedRef<FJsonObject> FStateSnapshot::ToJsonObject() const {
   TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
   Object->SetStringField(TEXT("schema"), TEXT("uai.state_snapshot.v1"));
@@ -982,36 +1176,18 @@ TSharedRef<FJsonObject> FStateSnapshot::ToJsonObject() const {
 }
 
 bool FCaptureResult::IsCaptured() const {
-  return Status == TEXT("captured") &&
-         ErrorCode == TEXT("state_snapshot_captured");
+  return Status == TEXT("captured") && Diagnostic.IsEmpty();
 }
 
 TSharedRef<FJsonObject> FCaptureResult::ToJsonObject() const {
   TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
   Object->SetStringField(TEXT("status"), Status);
-  Object->SetStringField(TEXT("error_code"), ErrorCode);
-  if (!ErrorDetail.IsEmpty())
-    Object->SetStringField(TEXT("error_detail"), ErrorDetail);
-  if (!SemanticId.IsEmpty())
-    Object->SetStringField(TEXT("semantic_id"), SemanticId);
-  if (!AccessorId.IsEmpty())
-    Object->SetStringField(TEXT("accessor_id"), AccessorId);
-  if (TargetIdentity.IsValid())
-    Object->SetObjectField(TEXT("target_identity"),
-                           TargetIdentity.ToJsonObject());
-  if (IsCaptured())
-    Object->SetObjectField(TEXT("snapshot"), Snapshot.ToJsonObject());
-  else if (!ErrorCode.IsEmpty()) {
-    UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic;
-    Diagnostic.Code = ErrorCode;
-    Diagnostic.Stage = TEXT("state_snapshot");
-    Diagnostic.Severity = UeAgentAuthoringDiagnostics::ESeverity::Error;
-    Diagnostic.Message = ErrorDetail;
-    Diagnostic.TargetPath = TargetIdentity.CanonicalKey;
-    Diagnostic.PropertyPath = TargetIdentity.GetSelector(TEXT("property_path"));
-    Diagnostic.SemanticId = SemanticId;
-    Object->SetObjectField(TEXT("diagnostic"), Diagnostic.ToJson());
-  }
+  Object->SetStringField(TEXT("error_code"), IsCaptured() ? TEXT("state_snapshot_captured") : Diagnostic.Code);
+  if (!SemanticId.IsEmpty()) Object->SetStringField(TEXT("semantic_id"), SemanticId);
+  if (!AccessorId.IsEmpty()) Object->SetStringField(TEXT("accessor_id"), AccessorId);
+  if (TargetIdentity.IsValid()) Object->SetObjectField(TEXT("target_identity"), TargetIdentity.ToJsonObject());
+  if (IsCaptured()) Object->SetObjectField(TEXT("snapshot"), Snapshot.ToJsonObject());
+  else if (!Diagnostic.IsEmpty()) Object->SetObjectField(TEXT("diagnostic"), Diagnostic.ToJson());
   return Object;
 }
 
@@ -1025,7 +1201,7 @@ FString MakeStableCanonicalValueKey(const TSharedPtr<FJsonValue> &Value) {
 }
 
 bool RegisterBuiltInStateAccessors(FStateAccessorRegistry &Registry,
-                                   FString &OutError) {
+                                   UE::UAI::Contract::FDiagnostic& OutError) {
   FStateAccessorDescriptor Descriptor;
   Descriptor.AccessorId = TEXT("core.property");
   Descriptor.TargetKinds = {TEXT("property")};
@@ -1039,10 +1215,16 @@ bool RegisterBuiltInStateAccessors(FStateAccessorRegistry &Registry,
 bool BuildPropertyReadRequest(
     const UObject *RootObject, const FString &PropertyPath,
     const FString &SemanticId, FReadRequest &OutRequest,
-    UeAgentAuthoringTargetLocator::FResolveResult &OutTargetResult) {
+    UeAgentAuthoringTargetLocator::FResolveResult &OutTargetResult,
+    const FString &CanonicalRootOwnerPath) {
   OutRequest = FReadRequest();
+  const FString RootOwnerPath = !CanonicalRootOwnerPath.IsEmpty()
+      ? CanonicalRootOwnerPath
+      : (RootObject ? RootObject->GetPathName() : FString());
   UeAgentAuthoringTargetLocator::FResolvedPropertyTarget Target;
   if (!UeAgentAuthoringTargetLocator::ResolvePropertyPath(
+          RootObject ? RootObject->GetClass() : nullptr,
+          const_cast<UObject *>(RootObject), RootOwnerPath,
           const_cast<UObject *>(RootObject), PropertyPath, Target,
           OutTargetResult)) {
     return false;
@@ -1053,7 +1235,7 @@ bool BuildPropertyReadRequest(
   OutRequest.TargetQuery.TargetKind = Target.Identity.TargetKind;
   OutRequest.TargetQuery.CanonicalKey = Target.Identity.CanonicalKey;
   OutRequest.RootObject = RootObject;
-  OutRequest.RootOwnerPath = RootObject ? RootObject->GetPathName() : FString();
+  OutRequest.RootOwnerPath = RootOwnerPath;
   OutRequest.NotificationOwner = RootObject;
   OutRequest.PropertyPath = Target.Identity.GetSelector(TEXT("property_path"));
   return true;
@@ -1091,12 +1273,29 @@ bool BuildStructPropertyReadRequest(
   return true;
 }
 
+static FReadLimits EditableReadLimits(const FReadLimits& Limits) {
+  FReadLimits Result = Limits;
+  Result.StructFieldFilter = [Filter = Limits.StructFieldFilter, Authorize = Limits.AuthorizeProperty](const UScriptStruct* Struct, const FProperty* Field) {
+    return (UeAgentPropertyValueCodec::IsStructFieldAuthoringEditable(Field, Struct) || (Authorize && Authorize(Field)))
+        && (!Filter || Filter(Struct, Field));
+  };
+  return Result;
+}
+
 bool AppendEditableObjectPropertyReadRequests(
     const UObject *RootObject, const FEditablePropertyReadOptions &Options,
-    TArray<FReadRequest> &OutRequests, FString &OutError) {
+    TArray<FReadRequest> &OutRequests, FDiagnostic& OutError) {
   OutError.Reset();
   if (!IsValid(RootObject) || Options.SemanticId.TrimStartAndEnd().IsEmpty()) {
-    OutError = TEXT("editable_property_read_input_invalid");
+    const bool bObjectValid = IsValid(RootObject);
+    OutError = FDiagnostic::Failure(TEXT("editable_property_read_input_invalid"),
+        bObjectValid ? TEXT("Editable property capture requires a non-empty semantic identity.")
+                     : TEXT("Editable property capture requires a valid root object."),
+        TEXT("state_snapshot"), Options.SemanticId);
+    OutError.SourceKind = TEXT("native_result");
+    OutError.PropertyPath = bObjectValid ? TEXT("semantic_identity_present") : TEXT("root_object_valid");
+    OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+    OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
     return false;
   }
 
@@ -1107,7 +1306,12 @@ bool AppendEditableObjectPropertyReadRequests(
     FProperty *Property = *It;
     if (!Property ||
         Options.ExcludedProperties.Contains(Property->GetFName()) ||
-        !UeAgentAuthoringReflection::IsEditableByFlags(Property, RootObject)) {
+        (!UeAgentAuthoringReflection::IsEditableByFlags(
+             Property, RootObject, Options.Limits.bShowDefaultsOnly, Options.Limits.bUseInstanceEditability)
+         && !(Options.Limits.AuthorizeProperty && Options.Limits.AuthorizeProperty(Property))
+         && !UeAgentAuthoringReflection::IsExistingInlineObjectProperty(
+             Property, Property->ContainerPtrToValuePtr<void>(RootObject),
+             RootObject))) {
       continue;
     }
     const void *ValuePtr = Property->ContainerPtrToValuePtr<void>(RootObject);
@@ -1115,7 +1319,7 @@ bool AppendEditableObjectPropertyReadRequests(
 		&& !Options.IncludeProperty(Property, ValuePtr, RootObject)) {
 		continue;
 	}
-    FString SupportReason;
+    FDiagnostic SupportReason;
     if (!UeAgentPropertyValueCodec::IsAuthoringSupported(Property, ValuePtr,
                                                          SupportReason))
       continue;
@@ -1130,18 +1334,32 @@ bool AppendEditableObjectPropertyReadRequests(
     UeAgentAuthoringTargetLocator::FResolveResult TargetResult;
     if (!BuildPropertyReadRequest(RootObject, Property->GetName(),
                                   Options.SemanticId, Request, TargetResult)) {
-      OutError = TargetResult.ErrorCode.IsEmpty()
-                     ? TEXT("editable_property_read_request_failed")
-                     : TargetResult.ErrorCode;
+      OutError = TargetResult.Diagnostic;
+      if (OutError.IsEmpty()) {
+        OutError = FDiagnostic::Failure(TEXT("editable_property_read_request_failed"),
+            TEXT("The editable object property could not be resolved for snapshot capture."),
+            TEXT("state_snapshot"), Options.SemanticId);
+        OutError.SourceKind = TEXT("native_result");
+        OutError.PropertyPath = Property->GetName();
+        OutError.ActualValue = MakeShared<FJsonValueString>(Property->GetName());
+        OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("resolvable editable property"));
+      }
       return false;
     }
-    Request.Limits = Options.Limits;
+    Request.Limits = EditableReadLimits(Options.Limits);
     if (Options.BuildSnapshotIdentity) {
       UeAgentAuthoringIdentity::FCanonicalIdentity SnapshotIdentity;
       if (!Options.BuildSnapshotIdentity(Request.PropertyPath, SnapshotIdentity,
                                          OutError)) {
-        if (OutError.IsEmpty())
-          OutError = TEXT("editable_property_snapshot_identity_failed");
+        if (OutError.IsEmpty()) {
+          OutError = FDiagnostic::Failure(TEXT("editable_property_snapshot_identity_failed"),
+              TEXT("The snapshot identity callback rejected the editable object property without providing a diagnostic."),
+              TEXT("state_snapshot"), Options.SemanticId);
+          OutError.SourceKind = TEXT("native_result");
+          OutError.PropertyPath = Request.PropertyPath;
+          OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+          OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+        }
         return false;
       }
       Request.SnapshotIdentityOverride = MoveTemp(SnapshotIdentity);
@@ -1155,10 +1373,19 @@ bool AppendEditableStructPropertyReadRequests(
 	UStruct *RootStruct, const void *RootData, const FString &RootOwnerPath,
 	const UObject *NotificationOwner,
 	const FEditablePropertyReadOptions &Options,
-	TArray<FReadRequest> &OutRequests, FString &OutError) {
+	TArray<FReadRequest> &OutRequests, FDiagnostic& OutError) {
 	OutError.Reset();
 	if (!RootStruct || !RootData || Options.SemanticId.TrimStartAndEnd().IsEmpty()) {
-		OutError = TEXT("editable_struct_property_read_input_invalid");
+		OutError = FDiagnostic::Failure(TEXT("editable_struct_property_read_input_invalid"),
+			!RootStruct ? TEXT("Editable struct property capture requires a root struct type.")
+			: !RootData ? TEXT("Editable struct property capture requires root struct data.")
+			: TEXT("Editable struct property capture requires a non-empty semantic identity."),
+			TEXT("state_snapshot"), Options.SemanticId);
+		OutError.SourceKind = TEXT("native_result");
+		OutError.PropertyPath = !RootStruct ? TEXT("root_struct_present")
+			: !RootData ? TEXT("root_data_present") : TEXT("semantic_identity_present");
+		OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+		OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 		return false;
 	}
 
@@ -1170,10 +1397,10 @@ bool AppendEditableStructPropertyReadRequests(
 			continue;
 		const void *ValuePtr = Property->ContainerPtrToValuePtr<void>(RootData);
 		UeAgentAuthoringReflection::FDescriptor Reflection;
-		FString ReflectionError;
+		FDiagnostic ReflectionError;
 		if (!UeAgentAuthoringReflection::Build(
 				Property, const_cast<UObject *>(NotificationOwner), ValuePtr,
-				Reflection, ReflectionError)
+				Reflection, ReflectionError, Options.Limits.bShowDefaultsOnly, Options.Limits.bUseInstanceEditability, RootStruct)
 			|| !Reflection.bEditable) {
 			continue;
 		}
@@ -1181,7 +1408,7 @@ bool AppendEditableStructPropertyReadRequests(
 			&& !Options.IncludeProperty(Property, ValuePtr, NotificationOwner)) {
 			continue;
 		}
-		FString SupportReason;
+		FDiagnostic SupportReason;
 		if (!UeAgentPropertyValueCodec::IsAuthoringSupported(
 				Property, ValuePtr, SupportReason)) {
 			continue;
@@ -1198,18 +1425,32 @@ bool AppendEditableStructPropertyReadRequests(
 		if (!BuildStructPropertyReadRequest(
 				RootStruct, RootData, RootOwnerPath, NotificationOwner,
 				Property->GetName(), Options.SemanticId, Request, TargetResult)) {
-			OutError = TargetResult.ErrorCode.IsEmpty()
-				? TEXT("editable_struct_property_read_request_failed")
-				: TargetResult.ErrorCode;
+			OutError = TargetResult.Diagnostic;
+			if (OutError.IsEmpty()) {
+				OutError = FDiagnostic::Failure(TEXT("editable_struct_property_read_request_failed"),
+					TEXT("The editable struct property could not be resolved for snapshot capture."),
+					TEXT("state_snapshot"), Options.SemanticId);
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = Property->GetName();
+				OutError.ActualValue = MakeShared<FJsonValueString>(Property->GetName());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("resolvable editable property"));
+			}
 			return false;
 		}
-		Request.Limits = Options.Limits;
+		Request.Limits = EditableReadLimits(Options.Limits);
 		if (Options.BuildSnapshotIdentity) {
 			UeAgentAuthoringIdentity::FCanonicalIdentity SnapshotIdentity;
 			if (!Options.BuildSnapshotIdentity(
 					Request.PropertyPath, SnapshotIdentity, OutError)) {
-				if (OutError.IsEmpty())
-					OutError = TEXT("editable_struct_property_snapshot_identity_failed");
+				if (OutError.IsEmpty()) {
+					OutError = FDiagnostic::Failure(TEXT("editable_struct_property_snapshot_identity_failed"),
+						TEXT("The snapshot identity callback rejected the editable struct property without providing a diagnostic."),
+						TEXT("state_snapshot"), Options.SemanticId);
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = Request.PropertyPath;
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				}
 				return false;
 			}
 			Request.SnapshotIdentityOverride = MoveTemp(SnapshotIdentity);
@@ -1220,7 +1461,7 @@ bool AppendEditableStructPropertyReadRequests(
 }
 
 UObject *ResolveRequestRootObject(
-	const FReadRequest &Request, FString &OutError) {
+	const FReadRequest &Request, FDiagnostic& OutError) {
 	OutError.Reset();
 	if (Request.RootObject)
 		return const_cast<UObject *>(Request.RootObject);
@@ -1228,7 +1469,7 @@ UObject *ResolveRequestRootObject(
 	if (Path.IsEmpty())
 		Path = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
 	if (Path.IsEmpty()) {
-		OutError = TEXT("state_request_object_path_missing");
+		OutError = MissingStateField(TEXT("state_request_object_path_missing"), TEXT("The state request has neither a root object nor an object_path or asset_path selector."), TEXT("object_path"));
 		return nullptr;
 	}
 	if (!Path.Contains(TEXT("."))) {
@@ -1238,7 +1479,8 @@ UObject *ResolveRequestRootObject(
 	}
 	UObject *Object = StaticLoadObject(UObject::StaticClass(), nullptr, *Path);
 	if (!IsValid(Object)) {
-		OutError = TEXT("state_request_object_not_found:") + Path;
+		OutError = FDiagnostic::Failure(TEXT("state_request_object_not_found"), TEXT("The requested state object could not be found."), TEXT("state_snapshot"));
+        OutError.TargetPath = Path;
 		return nullptr;
 	}
 	return Object;
@@ -1247,11 +1489,21 @@ UObject *ResolveRequestRootObject(
 bool CaptureSnapshot(
     const TArray<FReadRequest> &Requests, FCaptureResult &OutResult,
     const UeAgentAuthoringSemanticRegistry::FRegistry *SemanticRegistry,
-    const FStateAccessorRegistry *AccessorRegistry) {
+    const FStateAccessorRegistry *AccessorRegistry, ECaptureValueMode ValueMode) {
   OutResult = FCaptureResult();
+  ON_SCOPE_EXIT {
+    auto& Diagnostic = OutResult.Diagnostic;
+    if (!Diagnostic.IsEmpty()) {
+      if (Diagnostic.Stage.IsEmpty()) Diagnostic.Stage = TEXT("state_snapshot");
+      if (Diagnostic.SemanticId.IsEmpty()) Diagnostic.SemanticId = OutResult.SemanticId;
+      if (Diagnostic.PropertyPath.IsEmpty()) Diagnostic.PropertyPath = OutResult.TargetIdentity.GetSelector(TEXT("property_path"));
+      if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = OutResult.TargetIdentity.GetSelector(TEXT("asset_path"));
+      if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = OutResult.TargetIdentity.GetSelector(TEXT("owner_path"));
+    }
+  };
   if (!IsInGameThread()) {
     OutResult.Status = TEXT("failed");
-    OutResult.ErrorCode = TEXT("state_snapshot_game_thread_required");
+    OutResult.Diagnostic = StateFailure(TEXT("state_snapshot_game_thread_required"), TEXT("Native state capture must run on the game thread."), TEXT("execution_thread"), DescriptorValue(FString(TEXT("game thread"))), DescriptorValue(FString(TEXT("non-game thread"))));
     return false;
   }
   const UeAgentAuthoringSemanticRegistry::FRegistry &Semantics =
@@ -1268,7 +1520,7 @@ bool CaptureSnapshot(
     UeAgentAuthoringSemanticRegistry::FSemanticDescriptor Semantic;
     if (!Semantics.FindSemantic(SemanticId, Semantic)) {
       OutResult.Status = TEXT("failed");
-      OutResult.ErrorCode = TEXT("state_semantic_unknown");
+      OutResult.Diagnostic = StateFailure(TEXT("state_semantic_unknown"), TEXT("The requested state semantic is not registered."), TEXT("semantic_id"), DescriptorValue(FString(TEXT("registered semantic"))), DescriptorValue(SemanticId));
       return false;
     }
     if (!ValidateTarget(Request, Semantic, OutResult)) {
@@ -1280,37 +1532,67 @@ bool CaptureSnapshot(
     OutResult.AccessorId = Semantic.StateAccessor;
     if (!Accessors.FindAccessor(Semantic.StateAccessor, AccessorDescriptor)) {
       OutResult.Status = TEXT("failed");
-      OutResult.ErrorCode = TEXT("state_accessor_unknown");
-      OutResult.ErrorDetail = Semantic.StateAccessor;
+      OutResult.Diagnostic = StateFailure(TEXT("state_accessor_unknown"), TEXT("The semantic state accessor is not registered or has no callable implementation."), TEXT("accessor_id"), DescriptorValue(FString(TEXT("registered callable accessor"))), DescriptorValue(Semantic.StateAccessor));
+      OutResult.Diagnostic.InternalContext = Semantic.StateAccessor;
       return false;
     }
     if (!AccessorDescriptor.SupportsTargetKind(
             Request.TargetIdentity.TargetKind)) {
       OutResult.Status = TEXT("failed");
-      OutResult.ErrorCode = TEXT("state_accessor_target_kind_unsupported");
+      OutResult.Diagnostic = StateFailure(TEXT("state_accessor_target_kind_unsupported"), TEXT("The state accessor does not support the requested target kind."), TEXT("target_kind"));
+      TArray<TSharedPtr<FJsonValue>> Allowed;
+      for (const auto& Kind : AccessorDescriptor.TargetKinds) Allowed.Add(DescriptorValue(Kind));
+      OutResult.Diagnostic.ExpectedValue = MakeShared<FJsonValueArray>(Allowed);
+      OutResult.Diagnostic.ActualValue = DescriptorValue(Request.TargetIdentity.TargetKind);
+      OutResult.Diagnostic.CandidateName = AccessorDescriptor.AccessorId;
       return false;
     }
     FStateAccessor Accessor;
     if (!Accessors.CopyAccessor(Semantic.StateAccessor, Accessor)) {
       OutResult.Status = TEXT("failed");
-      OutResult.ErrorCode = TEXT("state_accessor_unknown");
+      OutResult.Diagnostic = StateFailure(TEXT("state_accessor_unknown"), TEXT("The semantic state accessor is not registered or has no callable implementation."), TEXT("accessor_id"), DescriptorValue(FString(TEXT("registered callable accessor"))), DescriptorValue(Semantic.StateAccessor));
       return false;
     }
 
     FStateValue StateValue;
-    FString AccessorError;
-    const EReadOutcome Outcome = Accessor(Request, StateValue, AccessorError);
+    TSharedPtr<FJsonValue> ComparisonValueDefinition;
+    FDiagnostic AccessorError;
+    EReadOutcome Outcome;
+    {
+      UeAgentAuthoringEncodedTypes::FScope EncodedTypes;
+      Outcome = Accessor(Request, StateValue, AccessorError);
+      if (Outcome == EReadOutcome::Resolved)
+      {
+        if (ValueMode == ECaptureValueMode::Authoring)
+          StateValue.Value = EncodedTypes.ProjectAuthoringValue(StateValue.Value);
+        if (auto Definition = EncodedTypes.BuildDefinition(StateValue.Value))
+        {
+          // A document may declare only its collection contract. Keep native
+          // leaf provenance too, without duplicating a complete codec definition.
+          if (!StateValue.ValueDefinition || StateValue.ValueDefinition->Type != EJson::Object
+              || StateValue.ValueDefinition->AsObject() != Definition)
+            ComparisonValueDefinition = MakeShared<FJsonValueObject>(Definition);
+        }
+      }
+    }
     if (Outcome == EReadOutcome::Failed) {
       OutResult.Status = TEXT("failed");
-      OutResult.ErrorCode = TEXT("state_accessor_failed");
-      OutResult.ErrorDetail = AccessorError;
+      OutResult.Diagnostic = AccessorError.IsEmpty()
+          ? StateFailure(TEXT("state_accessor_failed"), TEXT("The state accessor reported failure without a diagnostic."), TEXT("accessor_id"), nullptr, DescriptorValue(Semantic.StateAccessor))
+          : FDiagnostic::WrapFailure(TEXT("state_accessor_failed"), AccessorError, TEXT("state_snapshot"));
       return false;
     }
     if (!StateValue.TargetIdentity.IsValid() ||
         StateValue.TargetIdentity.CanonicalKey !=
             Request.TargetIdentity.CanonicalKey) {
       OutResult.Status = TEXT("failed");
-      OutResult.ErrorCode = TEXT("state_accessor_identity_mismatch");
+      const auto IdentityError = StateValue.TargetIdentity.GetValidationDiagnostic();
+      OutResult.Diagnostic = !IdentityError.IsEmpty()
+          ? FDiagnostic::WrapFailure(TEXT("state_accessor_identity_mismatch"), IdentityError, TEXT("state_snapshot"))
+          : StateFailure(TEXT("state_accessor_identity_mismatch"), TEXT("The state accessor returned a different target from the requested target."), TEXT("target_identity"));
+      OutResult.Diagnostic.ExpectedEvidence = DescriptorValue(Request.TargetIdentity.CanonicalKey);
+      OutResult.Diagnostic.ActualEvidence = DescriptorValue(StateValue.TargetIdentity.CanonicalKey);
+      OutResult.Diagnostic.SourceKind = TEXT("native_result");
       return false;
     }
     if (StateValue.Type.Kind.IsEmpty())
@@ -1318,8 +1600,8 @@ bool CaptureSnapshot(
     if (Semantic.ValueType != TEXT("*") &&
         NormalizeId(StateValue.Type.Kind) != Semantic.ValueType) {
       OutResult.Status = TEXT("failed");
-      OutResult.ErrorCode = TEXT("state_value_type_mismatch");
-      OutResult.ErrorDetail = StateValue.Type.Kind;
+      OutResult.Diagnostic = StateFailure(TEXT("state_value_type_mismatch"), TEXT("The captured value type does not match the declared semantic type."), TEXT("type.kind"), DescriptorValue(Semantic.ValueType), DescriptorValue(StateValue.Type.Kind));
+      OutResult.Diagnostic.InternalContext = StateValue.Type.Kind;
       return false;
     }
 
@@ -1330,7 +1612,14 @@ bool CaptureSnapshot(
           SnapshotIdentity.ModelId != Semantic.IdentityModel ||
           SnapshotIdentity.TargetKind != Semantic.TargetKind) {
         OutResult.Status = TEXT("failed");
-        OutResult.ErrorCode = TEXT("state_snapshot_identity_override_invalid");
+        const auto IdentityError = SnapshotIdentity.GetValidationDiagnostic();
+        if (!IdentityError.IsEmpty()) OutResult.Diagnostic = FDiagnostic::WrapFailure(TEXT("state_snapshot_identity_override_invalid"), IdentityError, TEXT("state_snapshot"));
+        else {
+          const bool bModelMismatch = SnapshotIdentity.ModelId != Semantic.IdentityModel;
+          OutResult.Diagnostic = StateFailure(TEXT("state_snapshot_identity_override_invalid"), TEXT("The snapshot identity override does not match the semantic model or target kind."),
+              bModelMismatch ? TEXT("identity_model") : TEXT("target_kind"), DescriptorValue(bModelMismatch ? Semantic.IdentityModel : Semantic.TargetKind), DescriptorValue(bModelMismatch ? SnapshotIdentity.ModelId : SnapshotIdentity.TargetKind));
+        }
+        OutResult.Diagnostic.SourceKind = TEXT("native_result");
         return false;
       }
     }
@@ -1343,7 +1632,9 @@ bool CaptureSnapshot(
     Entry.Type = StateValue.Type;
     Entry.bAvailable =
         Outcome == EReadOutcome::Resolved && StateValue.bAvailable;
-    Entry.bEditable = Entry.bAvailable && StateValue.bEditable;
+    Entry.bEditable = Entry.bAvailable && StateValue.bEditable.Get(
+        Semantic.WriteCapability == UeAgentAuthoringSemanticRegistry::EWriteCapability::DomainMutation);
+    Entry.bAuthoringVisible = StateValue.bAuthoringVisible;
     Entry.AvailabilityReason = StateValue.AvailabilityReason;
 	Entry.Constraints = StateValue.Constraints;
 	Entry.DisplayName = StateValue.DisplayName;
@@ -1352,6 +1643,8 @@ bool CaptureSnapshot(
 	Entry.PropertyFlags = StateValue.PropertyFlags;
 	Entry.CandidatesHeader = CloneJsonValue(StateValue.CandidatesHeader);
 	Entry.Candidates = CloneJsonValue(StateValue.Candidates);
+	Entry.ValueDefinition = CloneJsonValue(StateValue.ValueDefinition);
+	Entry.ComparisonValueDefinition = CloneJsonValue(ComparisonValueDefinition);
     Entry.AccessorId = AccessorDescriptor.AccessorId;
     Entry.ValueText = StateValue.ValueText;
     Entry.Provenance = StateValue.Provenance;
@@ -1363,7 +1656,7 @@ bool CaptureSnapshot(
     } else {
       if (!StateValue.Value.IsValid()) {
         OutResult.Status = TEXT("failed");
-        OutResult.ErrorCode = TEXT("state_value_missing");
+        OutResult.Diagnostic = MissingStateField(TEXT("state_value_missing"), TEXT("The state accessor reported a resolved value but returned no value storage."), TEXT("value"));
         return false;
       }
       Entry.Value =
@@ -1372,7 +1665,7 @@ bool CaptureSnapshot(
                                        StateValue.Value)
               : CloneJsonValue(StateValue.Value);
       if (StateValue.NativeValue.IsValid()) {
-        FString StorageError;
+        FDiagnostic StorageError;
         TSharedPtr<UeAgentAuthoringPropertyValues::FPropertyValueStorage>
             Detached =
                 UeAgentAuthoringPropertyValues::FPropertyValueStorage::CopyFrom(
@@ -1380,24 +1673,25 @@ bool CaptureSnapshot(
                     StateValue.NativeValue->GetValuePtr(), StorageError);
         if (!Detached.IsValid()) {
           OutResult.Status = TEXT("failed");
-          OutResult.ErrorCode = TEXT("state_native_value_copy_failed");
-          OutResult.ErrorDetail = StorageError;
+          OutResult.Diagnostic = FDiagnostic::WrapFailure(TEXT("state_native_value_copy_failed"), StorageError, TEXT("state_snapshot"));
           return false;
         }
         Entry.NativeValue = Detached;
+        Entry.NativeTargetIdentity = StateValue.TargetIdentity;
+        Entry.NativeReadLimits = MakeShared<FReadLimits>(Request.Limits);
       }
     }
     if (!Entry.IsValid()) {
       OutResult.Status = TEXT("failed");
-      OutResult.ErrorCode = TEXT("state_entry_invalid");
+      OutResult.Diagnostic = Entry.GetValidationDiagnostic();
       return false;
     }
     const FString EntryKey =
         MakeEntryKey(Entry.SemanticId, Entry.TargetIdentity.CanonicalKey);
     if (EntryKeys.Contains(EntryKey)) {
       OutResult.Status = TEXT("failed");
-      OutResult.ErrorCode = TEXT("state_snapshot_duplicate_entry");
-      OutResult.ErrorDetail = EntryKey;
+      OutResult.Diagnostic = StateFailure(TEXT("state_snapshot_duplicate_entry"), TEXT("The snapshot contains the same semantic and target more than once."), Entry.TargetIdentity.GetSelector(TEXT("property_path")));
+      OutResult.Diagnostic.InternalContext = EntryKey;
       OutResult.SemanticId = Entry.SemanticId;
       OutResult.AccessorId = Entry.AccessorId;
       OutResult.TargetIdentity = Entry.TargetIdentity;
@@ -1414,8 +1708,7 @@ bool CaptureSnapshot(
   });
   FSnapshotBuilder::SetEntries(OutResult.Snapshot, MoveTemp(CapturedEntries));
   OutResult.Status = TEXT("captured");
-  OutResult.ErrorCode = TEXT("state_snapshot_captured");
-  OutResult.ErrorDetail.Reset();
+  OutResult.Diagnostic.Reset();
   OutResult.SemanticId.Reset();
   OutResult.AccessorId.Reset();
   OutResult.TargetIdentity = UeAgentAuthoringIdentity::FCanonicalIdentity();

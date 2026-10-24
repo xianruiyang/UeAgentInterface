@@ -3,7 +3,8 @@
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringApplyProvider.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
-#include "Commands/Blueprint/UeAgentHttpServer_BlueprintOps.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringOps.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringDescriptors.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
@@ -16,12 +17,17 @@
 #include "Misc/PackageName.h"
 #include "ObjectTools.h"
 #include "UObject/StrongObjectPtr.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringAssetIdentity.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringAssetRemovalStage.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringObjectApplyProvider.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentApplyWorkspaceContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceApply.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceInput.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceDependencyGraph.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceLoader.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceRouter.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
 
 namespace UeAgentBlueprintAuthoring
@@ -32,14 +38,35 @@ namespace UeAgentBlueprintAuthoring
 		using namespace UeAgentAuthoringOperationApply;
 		using namespace UeAgentBlueprintAssetLifecycle;
 
-		void SetFailure(
-			FOperationFailure& OutFailure,
-			const FString& Code,
-			const FString& Detail = FString())
+		void SetFailure(FOperationFailure& OutFailure, FDiagnostic Diagnostic)
 		{
 			OutFailure = FOperationFailure();
-			OutFailure.ErrorCode = Code;
-			OutFailure.ErrorDetail = Detail.IsEmpty() ? Code : Detail;
+			OutFailure.Diagnostic = MoveTemp(Diagnostic);
+		}
+
+		FDiagnostic AssetFailure(const FString& Target, const FString& Code, const FString& Reason,
+			const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, TEXT("blueprint_apply"));
+			Error.TargetPath = Target;
+			Error.PropertyPath = Field;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
+		FDiagnostic NativeAssetFailure(const FString& Target, const FString& Code, const FString& Reason,
+			const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			FDiagnostic Error = AssetFailure(Target, Code, Reason, Field, MoveTemp(Actual), MoveTemp(Expected));
+			Error.SourceKind = TEXT("native_result");
+			return Error;
+		}
+
+		void LocateInputFailure(FDiagnostic& Error, const FPrepareRequest& Request, const FString& Pointer)
+		{
+			Error.SemanticPointer = Pointer;
+			if (Request.Unit) Error.Source = Request.Unit->ResolveDiagnosticSource(Pointer);
 		}
 
 		bool ReadBool(
@@ -74,6 +101,7 @@ namespace UeAgentBlueprintAuthoring
 			UAI_SET_BLUEPRINT_COUNTER("nodes_added", Counters.NodesAdded);
 			UAI_SET_BLUEPRINT_COUNTER("nodes_updated", Counters.NodesUpdated);
 			UAI_SET_BLUEPRINT_COUNTER("nodes_removed", Counters.NodesRemoved);
+			UAI_SET_BLUEPRINT_COUNTER("pin_groups_resized", Counters.PinGroupsResized);
 			UAI_SET_BLUEPRINT_COUNTER("pin_defaults_applied", Counters.PinDefaultsApplied);
 			UAI_SET_BLUEPRINT_COUNTER("edges_added", Counters.EdgesAdded);
 			UAI_SET_BLUEPRINT_COUNTER("edges_removed", Counters.EdgesRemoved);
@@ -112,6 +140,7 @@ namespace UeAgentBlueprintAuthoring
 			UAI_READ_BLUEPRINT_COUNTER("nodes_added", OutCounters.NodesAdded);
 			UAI_READ_BLUEPRINT_COUNTER("nodes_updated", OutCounters.NodesUpdated);
 			UAI_READ_BLUEPRINT_COUNTER("nodes_removed", OutCounters.NodesRemoved);
+			UAI_READ_BLUEPRINT_COUNTER("pin_groups_resized", OutCounters.PinGroupsResized);
 			UAI_READ_BLUEPRINT_COUNTER("pin_defaults_applied", OutCounters.PinDefaultsApplied);
 			UAI_READ_BLUEPRINT_COUNTER("edges_added", OutCounters.EdgesAdded);
 			UAI_READ_BLUEPRINT_COUNTER("edges_removed", OutCounters.EdgesRemoved);
@@ -128,6 +157,8 @@ namespace UeAgentBlueprintAuthoring
 				EOperation InOperation,
 				UBlueprint* InExisting,
 				UBlueprint* InProposed,
+				TArray<UBlueprint*> InDependentBlueprints,
+				const TArray<AActor*>& InAffectedActors,
 				TUniquePtr<FPreparedBlueprintMutation> InMutation,
 				FMutationCounters InPreparedCounters,
 				bool bInCompile,
@@ -142,6 +173,14 @@ namespace UeAgentBlueprintAuthoring
 				, bCompile(bInCompile)
 				, bSave(bInSave)
 			{
+				ComponentInstances.SetActors(InAffectedActors);
+				for (UBlueprint* Dependent : InDependentBlueprints)
+				{
+					FDependentBlueprint& Entry = DependentBlueprints.AddDefaulted_GetRef();
+					Entry.PackagePath = Dependent->GetOutermost()->GetName();
+					Entry.AssetKind = GetAssetKind(Dependent);
+					Entry.Target.Reset(Dependent);
+				}
 			}
 
 			virtual FString GetTargetKey() const override { return PackagePath; }
@@ -156,27 +195,53 @@ namespace UeAgentBlueprintAuthoring
 				return FReflectionRoot::MakeObject(Actual ? Actual : Existing.Get());
 			}
 
+			virtual void CollectRollbackObjects(TArray<UObject*>& OutObjects) const override
+			{
+				ComponentInstances.CollectObjects(OutObjects);
+				for (const auto& Entry : DependentBlueprints)
+					if (Entry.Target.IsValid()) OutObjects.AddUnique(Entry.Target.Get());
+			}
+
 			virtual bool CaptureRollback(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
+				FDiagnostic InstanceError;
+				if (!ComponentInstances.Capture(InstanceError))
+				{ SetFailure(OutFailure, MoveTemp(InstanceError)); return false; }
+				if (RequiresCheckpointRollback()) return true;
 				if (Operation == EOperation::Update)
 				{
 					UPackage* Package = CreatePackage(*FString::Printf(
 						TEXT("/Temp/UAI/Blueprint/Rollback_%s"),
 						*FGuid::NewGuid().ToString(EGuidFormats::Digits)));
-					Backup.Reset(DuplicateBlueprint(Existing.Get(), Package));
+					Backup.Reset(DuplicateBlueprint(Existing.Get(), Package, NAME_None, true, &OutFailure.Diagnostic));
 					if (!Backup.IsValid())
 					{
-						SetFailure(OutFailure, TEXT("blueprint_rollback_capture_failed"));
+						if (OutFailure.Diagnostic.IsEmpty()) SetFailure(OutFailure, NativeAssetFailure(PackagePath, TEXT("blueprint_rollback_capture_failed"),
+							TEXT("The native editor could not duplicate the Blueprint for rollback."),
+							TEXT("rollback_backup"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 						return false;
+					}
+					for (auto& Entry : DependentBlueprints)
+					{
+						UPackage* DependentPackage = CreatePackage(*FString::Printf(
+							TEXT("/Temp/UAI/Blueprint/Rollback_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+						Entry.Backup.Reset(DuplicateBlueprint(Entry.Target.Get(), DependentPackage, NAME_None, true, &OutFailure.Diagnostic));
+						if (!Entry.Backup.IsValid())
+{
+							if (OutFailure.Diagnostic.IsEmpty()) SetFailure(OutFailure, NativeAssetFailure(Entry.PackagePath, TEXT("blueprint_rollback_capture_failed"),
+								TEXT("The native editor could not duplicate a dependent Blueprint for rollback."),
+								TEXT("rollback_backup"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+							return false;
+						}
 					}
 					return true;
 				}
 				if (Operation != EOperation::Remove || !Existing.IsValid()) return true;
-				FString Error;
+				FDiagnostic Error;
 				if (!RemovalStage.Capture(Existing.Get(), Error))
 				{
-					SetFailure(OutFailure, TEXT("blueprint_remove_capture_failed"), Error);
+					SetFailure(OutFailure, MoveTemp(Error));
 					return false;
 				}
 				return true;
@@ -186,12 +251,13 @@ namespace UeAgentBlueprintAuthoring
 			{
 				OutFailure = FOperationFailure();
 				if (Operation != EOperation::Update || !Mutation.IsValid()) return true;
-				FString Error;
+				FDiagnostic Error;
 				if (!Mutation->ApplyTo(*Existing, ActualCounters, Error))
 				{
-					SetFailure(OutFailure, TEXT("blueprint_mutation_apply_failed"), Error);
+					SetFailure(OutFailure, MoveTemp(Error));
 					return false;
 				}
+				bMutationApplied = true;
 				return true;
 			}
 
@@ -200,10 +266,10 @@ namespace UeAgentBlueprintAuthoring
 				OutFailure = FOperationFailure();
 				if (Operation == EOperation::Remove)
 				{
-					FString Error;
+					FDiagnostic Error;
 					if (!RemovalStage.Stage(Error))
 					{
-						SetFailure(OutFailure, TEXT("blueprint_remove_stage_failed"), Error);
+						SetFailure(OutFailure, MoveTemp(Error));
 						return false;
 					}
 					Actual = nullptr;
@@ -216,19 +282,22 @@ namespace UeAgentBlueprintAuthoring
 				}
 				if (!Proposed.IsValid())
 				{
-					SetFailure(OutFailure, TEXT("blueprint_proposed_asset_missing"));
+					SetFailure(OutFailure, NativeAssetFailure(PackagePath, TEXT("blueprint_proposed_asset_missing"),
+						TEXT("No prepared Blueprint is available for publishing."),
+						TEXT("proposed_blueprint"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 					return false;
 				}
 				UPackage* TargetPackage = CreatePackage(*PackagePath);
 				Actual = PublishBlueprint(
-					Proposed.Get(), TargetPackage, FPackageName::GetLongPackageAssetName(PackagePath));
+					Proposed.Get(), TargetPackage, FPackageName::GetLongPackageAssetName(PackagePath), OutFailure.Diagnostic);
 				if (!Actual)
 				{
-					SetFailure(OutFailure, TEXT("blueprint_asset_publish_failed"));
 					return false;
 				}
 				FAssetRegistryModule::AssetCreated(Actual);
+				bCreated = Operation == EOperation::Create;
 				Actual->MarkPackageDirty();
+				bMutationApplied = true;
 				return true;
 			}
 
@@ -237,11 +306,12 @@ namespace UeAgentBlueprintAuthoring
 				OutFailure = FOperationFailure();
 				if (Operation == EOperation::Remove) return true;
 				UBlueprint* Target = Actual ? Actual : Existing.Get();
-				FString Error;
+				FDiagnostic Error;
 				if ((bCompile || (Mutation.IsValid() && Mutation->RequiresCompile()))
 					&& !CompileBlueprint(Target, Error))
 				{
-					SetFailure(OutFailure, TEXT("blueprint_compile_failed_after_apply"), Error);
+					if (Error.TargetPath.IsEmpty()) Error.TargetPath = PackagePath;
+					SetFailure(OutFailure, MoveTemp(Error));
 					return false;
 				}
 				if (Mutation.IsValid())
@@ -249,22 +319,105 @@ namespace UeAgentBlueprintAuthoring
 					FMutationCounters Deferred;
 					if (!Mutation->FinalizeAfterCompile(*Target, Deferred, Error))
 					{
-						SetFailure(OutFailure, TEXT("blueprint_defaults_finalize_failed"), Error);
+						SetFailure(OutFailure, MoveTemp(Error));
 						return false;
 					}
 					ActualCounters.Add(Deferred);
 				}
-				return true;
+				return ValidateBlueprintPersistence(*Target, OutFailure.Diagnostic);
 			}
 
 			virtual bool Save(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
 				if (!bSave || Operation == EOperation::Remove) return true;
-				FString Error;
-				if (!UeAgentBlueprintOps::SaveBlueprintPackage(Actual ? Actual : Existing.Get(), Error))
+				FDiagnostic Error;
+				if (!UeAgentBlueprintAuthoringOps::SaveBlueprintPackage(Actual ? Actual : Existing.Get(), Error))
 				{
-					SetFailure(OutFailure, TEXT("blueprint_save_failed_after_apply"), Error);
+					if (Error.TargetPath.IsEmpty()) Error.TargetPath = PackagePath;
+					SetFailure(OutFailure, MoveTemp(Error));
+					return false;
+				}
+				for (const auto& Entry : DependentBlueprints)
+					if (!UeAgentBlueprintAuthoringOps::SaveBlueprintPackage(Entry.Target.Get(), Error))
+						{ if (Error.TargetPath.IsEmpty()) Error.TargetPath = Entry.PackagePath; SetFailure(OutFailure, MoveTemp(Error)); return false; }
+				return true;
+			}
+
+			virtual bool RequiresCheckpointRollback() const override { return (Operation == EOperation::Update || Operation == EOperation::Create) && bSave; }
+			virtual bool SupportsPersistentReadback() const override { return RequiresCheckpointRollback(); }
+			virtual bool ReleaseForPersistentReadback(FOperationFailure& OutFailure) override
+			{
+				OutFailure = FOperationFailure();
+				Existing.Reset();
+				Proposed.Reset();
+				Backup.Reset();
+				for (auto& Entry : DependentBlueprints) { Entry.Target.Reset(); Entry.Backup.Reset(); }
+				Actual = nullptr;
+				return true;
+			}
+			virtual bool RebindAfterPersistentReadback(FOperationFailure& OutFailure) override
+			{
+				OutFailure = FOperationFailure();
+				Existing.Reset(LoadBlueprint(PackagePath));
+				Actual = Existing.Get();
+				if (!Actual)
+				{
+					SetFailure(OutFailure, NativeAssetFailure(PackagePath, TEXT("blueprint_persistent_reload_failed"),
+						TEXT("The Blueprint could not be loaded after persistent readback."),
+						TEXT("blueprint_loaded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+					return false;
+				}
+				for (auto& Entry : DependentBlueprints)
+				{
+					Entry.Target.Reset(LoadBlueprint(Entry.PackagePath));
+					if (!Entry.Target.IsValid())
+{
+						SetFailure(OutFailure, NativeAssetFailure(Entry.PackagePath, TEXT("blueprint_persistent_reload_failed"),
+							TEXT("A dependent Blueprint could not be loaded after persistent readback."),
+							TEXT("blueprint_loaded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+						return false;
+					}
+				}
+				return true;
+			}
+			virtual bool PrepareCheckpointRestore(FOperationFailure& OutFailure) override
+			{
+				if (Operation != EOperation::Create) return ReleaseForPersistentReadback(OutFailure);
+				UBlueprint* Created = Actual ? Actual : LoadBlueprint(PackagePath);
+				ReleaseForPersistentReadback(OutFailure);
+				if (bCreated && Created)
+				{
+					const int32 DeletedCount = ObjectTools::DeleteObjects({Created}, false);
+					if (DeletedCount != 1)
+					{
+						SetFailure(OutFailure, NativeAssetFailure(PackagePath, TEXT("blueprint_created_restore_delete_failed"),
+							TEXT("Restoring the absent checkpoint did not delete exactly one created Blueprint."),
+							TEXT("deleted_count"), MakeShared<FJsonValueNumber>(DeletedCount), MakeShared<FJsonValueNumber>(1)));
+						return false;
+					}
+				}
+				bCreated = false;
+				return true;
+			}
+			virtual bool RebindAfterCheckpointRestore(FOperationFailure& OutFailure) override
+			{
+				if (Operation != EOperation::Create)
+				{
+					if (!RebindAfterPersistentReadback(OutFailure)) return false;
+					FDiagnostic Error;
+					if (!ComponentInstances.Restore(Error)) { SetFailure(OutFailure, MoveTemp(Error)); return false; }
+					return true;
+				}
+				bool bPresent = false;
+				const bool bPresenceKnown = UE::UAI::HjsonWorkspace::DomainAuthoring::TryInspectObjectTargetPresence(PackagePath, bPresent);
+				if (!bPresenceKnown || bPresent)
+				{
+					SetFailure(OutFailure, NativeAssetFailure(PackagePath, TEXT("blueprint_absent_restore_unconfirmed"),
+						!bPresenceKnown ? TEXT("The native query could not confirm whether the Blueprint is absent after checkpoint restore.")
+							: TEXT("The Blueprint is still present after restoring its absent checkpoint."),
+						!bPresenceKnown ? TEXT("presence_query_succeeded") : TEXT("asset_present"),
+						MakeShared<FJsonValueBoolean>(bPresenceKnown && bPresent), MakeShared<FJsonValueBoolean>(!bPresenceKnown)));
 					return false;
 				}
 				return true;
@@ -274,15 +427,28 @@ namespace UeAgentBlueprintAuthoring
 				TArray<FPackageDurablePlan>& OutPlans,
 				FOperationFailure& OutFailure) const override
 			{
-				return BuildPackageDurablePlan(
+				UBlueprint* Target = Operation == EOperation::Remove ? Existing.Get()
+					: (Operation == EOperation::Create ? Actual : (Existing.IsValid() ? Existing.Get() : Proposed.Get()));
+				if (!BuildPackageDurablePlan(
 					PackagePath,
 					PackagePath,
-					Operation == EOperation::Remove ? Existing.Get()
-						: (Existing.IsValid() ? Existing.Get() : Proposed.Get()),
+					Target,
 					Operation == EOperation::Remove ? EPackageDurableIntent::Delete
 						: EPackageDurableIntent::Save,
 					OutPlans,
-					OutFailure);
+					OutFailure, true, Operation == EOperation::Create ? EPackageBeforePresence::Absent : EPackageBeforePresence::Present,
+					Proposed.IsValid() ? Proposed->GetClass() : nullptr)) return false;
+				for (const auto& Entry : DependentBlueprints)
+					if (!BuildPackageDurablePlan(Entry.PackagePath, Entry.PackagePath, Entry.Target.Get(),
+						EPackageDurableIntent::Save, OutPlans, OutFailure, true, EPackageBeforePresence::Present)) return false;
+				return true;
+			}
+
+			virtual bool BuildDomainBeforeReadRequests(TArray<UeAgentAuthoringState::FReadRequest>& OutRequests, FOperationFailure& OutFailure) const override
+			{
+				return Operation == EOperation::Create && bSave ? BuildReadRequests(nullptr, true, OutRequests, OutFailure)
+					: BuildReadRequests(Operation == EOperation::Remove ? nullptr : (Actual ? Actual : Existing.Get()),
+						Operation == EOperation::Remove, OutRequests, OutFailure);
 			}
 
 			virtual bool BuildDomainExpectedReadRequests(
@@ -295,7 +461,7 @@ namespace UeAgentBlueprintAuthoring
 						: (Operation == EOperation::Update ? Existing.Get() : Proposed.Get()),
 					Operation == EOperation::Remove,
 					OutRequests,
-					OutFailure);
+					OutFailure, true);
 			}
 
 			virtual bool BuildDomainActualReadRequests(
@@ -304,9 +470,9 @@ namespace UeAgentBlueprintAuthoring
 			{
 				return BuildReadRequests(
 					Operation == EOperation::Remove ? nullptr : (Actual ? Actual : Existing.Get()),
-					Operation == EOperation::Remove,
+					Operation == EOperation::Remove || (Operation == EOperation::Create && bSave && !Actual && !Existing.IsValid()),
 					OutRequests,
-					OutFailure);
+					OutFailure, bMutationApplied);
 			}
 
 			virtual TSharedPtr<FJsonObject> BuildResultMetadata() const override
@@ -319,10 +485,11 @@ namespace UeAgentBlueprintAuthoring
 				OutFailure = FOperationFailure();
 				if (Operation == EOperation::Remove && RemovalStage.IsStaged())
 				{
-					FString Error;
-					if (!DeleteBlueprint(Cast<UBlueprint>(RemovalStage.GetAsset()), Error))
+					FDiagnostic Error;
+					if (!DeleteBlueprint(Cast<UBlueprint>(RemovalStage.GetAsset()), PackagePath, Error))
 					{
-						SetFailure(OutFailure, TEXT("blueprint_remove_commit_failed"), Error);
+						if (Error.TargetPath.IsEmpty()) Error.TargetPath = PackagePath;
+						SetFailure(OutFailure, MoveTemp(Error));
 						return false;
 					}
 					RemovalStage.Reset();
@@ -334,25 +501,30 @@ namespace UeAgentBlueprintAuthoring
 			virtual bool Rollback(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
-				FString Error;
+				FDiagnostic Error;
 				if (Operation == EOperation::Update && Backup.IsValid())
 				{
 					if (!FPreparedBlueprintMutation::RestoreFromBackup(*Backup, *Existing, Error))
 					{
-						SetFailure(OutFailure, TEXT("blueprint_update_rollback_failed"), Error);
+						SetFailure(OutFailure, MoveTemp(Error));
 						return false;
 					}
 					Actual = Existing.Get();
+					for (auto& Entry : DependentBlueprints)
+						if (Entry.Backup.IsValid() && !FPreparedBlueprintMutation::RestoreFromBackup(*Entry.Backup, *Entry.Target, Error))
+						{ SetFailure(OutFailure, MoveTemp(Error)); return false; }
+					if (!ComponentInstances.Restore(Error)) { SetFailure(OutFailure, MoveTemp(Error)); return false; }
 					return true;
 				}
 				if (Operation == EOperation::Create || Operation == EOperation::Clone)
 				{
-					if (Actual && !DeleteBlueprint(Actual, Error))
+					if (Actual && !DeleteBlueprint(Actual, PackagePath, Error))
 					{
 						TArray<UObject*> Objects = { Actual };
 						if (ObjectTools::DeleteObjectsUnchecked(Objects) <= 0)
 						{
-							SetFailure(OutFailure, TEXT("blueprint_create_rollback_failed"), Error);
+							if (Error.TargetPath.IsEmpty()) Error.TargetPath = PackagePath;
+							SetFailure(OutFailure, MoveTemp(Error));
 							return false;
 						}
 					}
@@ -363,7 +535,7 @@ namespace UeAgentBlueprintAuthoring
 				{
 					if (!RemovalStage.Rollback(Error))
 					{
-						SetFailure(OutFailure, TEXT("blueprint_remove_rollback_failed"), Error);
+						SetFailure(OutFailure, MoveTemp(Error));
 						return false;
 					}
 					Actual = Existing.Get();
@@ -376,10 +548,16 @@ namespace UeAgentBlueprintAuthoring
 				UBlueprint* Root,
 				const bool bExpectedAbsent,
 				TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-				FOperationFailure& OutFailure) const
+				FOperationFailure& OutFailure, bool bVerifyIntent = false) const
 			{
 				OutFailure = FOperationFailure();
-				FString Error;
+				FDiagnostic Error;
+				if (bVerifyIntent && Root && !bExpectedAbsent && Mutation
+					&& !Mutation->VerifyIntent(*Root, Error))
+				{
+					UeAgentAuthoringDiagnostics::ReportConsistencyWarning(TEXT("blueprint_authored_intent_failed"), Error, TEXT("blueprint_readback"));
+					Error.Reset();
+				}
 				if (!BuildAssetSnapshotReadRequest(
 					Root,
 					PackagePath,
@@ -388,14 +566,33 @@ namespace UeAgentBlueprintAuthoring
 					OutRequests,
 					Error))
 				{
-					SetFailure(OutFailure, TEXT("blueprint_snapshot_request_failed"), Error);
+					SetFailure(OutFailure, MoveTemp(Error));
 					return false;
 				}
+				if (Operation == EOperation::Create && bExpectedAbsent)
+				{
+					// Create before/restore reads observe absence; Remove expected reads describe a future state.
+					OutRequests.Last().Context.Add(TEXT("observe_absence"), TEXT("true"));
+				}
+				for (const auto& Entry : DependentBlueprints)
+					if (!BuildAssetSnapshotReadRequest(Entry.Target.Get(), Entry.PackagePath, Entry.AssetKind,
+						false, OutRequests, Error))
+					{ SetFailure(OutFailure, MoveTemp(Error)); return false; }
 				return true;
 			}
 
 			FString PackagePath;
+			struct FDependentBlueprint
+			{
+				FString PackagePath;
+				FString AssetKind;
+				TStrongObjectPtr<UBlueprint> Target;
+				TStrongObjectPtr<UBlueprint> Backup;
+			};
+			TArray<FDependentBlueprint> DependentBlueprints;
+			FComponentInstanceRollback ComponentInstances;
 			FString AssetKind;
+			bool bMutationApplied = false;
 			EOperation Operation = EOperation::Update;
 			TStrongObjectPtr<UBlueprint> Existing;
 			TStrongObjectPtr<UBlueprint> Proposed;
@@ -406,6 +603,7 @@ namespace UeAgentBlueprintAuthoring
 			FMutationCounters ActualCounters;
 			bool bCompile = true;
 			bool bSave = false;
+			bool bCreated = false;
 		};
 
 		class FAssetLifecycle final : public IReflectionOperationLifecycle
@@ -420,18 +618,35 @@ namespace UeAgentBlueprintAuthoring
 				OutFailure = FOperationFailure();
 				if (!Request.IsValid() || !Request.Input->Target.IsValid())
 				{
-					SetFailure(OutFailure, TEXT("blueprint_apply_request_invalid"));
+					FDiagnostic Error = AssetFailure(FString(), TEXT("blueprint_apply_request_invalid"),
+						!Request.IsValid() ? TEXT("The Blueprint apply request is missing its contract, workspace unit, or parsed input.")
+							: TEXT("The Blueprint apply input has no target object."),
+						!Request.IsValid() ? TEXT("request") : TEXT("target"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					auto Facts = MakeShared<FJsonObject>();
+					Facts->SetBoolField(TEXT("contract_present"), Request.Contract != nullptr);
+					Facts->SetBoolField(TEXT("unit_present"), Request.Unit != nullptr);
+					Facts->SetBoolField(TEXT("input_present"), Request.Input != nullptr);
+					Facts->SetBoolField(TEXT("target_present"), Request.Input && Request.Input->Target.IsValid());
+					Error.ActualEvidence = MakeShared<FJsonValueObject>(Facts);
+					LocateInputFailure(Error, Request, Request.IsValid() ? TEXT("/target") : TEXT("/"));
+					SetFailure(OutFailure, MoveTemp(Error));
 					return false;
 				}
 
 				FString PackagePath;
 				Request.Input->Target->TryGetStringField(TEXT("asset_path"), PackagePath);
-				PackagePath = NormalizePackagePath(PackagePath);
+				PackagePath = UeAgentAuthoringAssetIdentity::NormalizePackagePath(PackagePath);
 				if (!FPackageName::IsValidLongPackageName(PackagePath)
 					|| FPackageName::GetLongPackageAssetName(PackagePath).IsEmpty()
 					|| (!PackagePath.Equals(TEXT("/Game")) && !PackagePath.StartsWith(TEXT("/Game/"))))
 				{
-					SetFailure(OutFailure, TEXT("invalid_asset_path"), PackagePath);
+					const auto InputValue = Request.Input->Target->TryGetField(TEXT("asset_path"));
+					FDiagnostic Error = AssetFailure(PackagePath, TEXT("invalid_asset_path"),
+						TEXT("The asset path must normalize to a valid long package name with an asset name under /Game."),
+						TEXT("asset_path"), InputValue.IsValid() ? InputValue : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+						MakeShared<FJsonValueString>(TEXT("a valid /Game package path with an asset name")));
+					LocateInputFailure(Error, Request, TEXT("/target/asset_path"));
+					SetFailure(OutFailure, MoveTemp(Error));
 					return false;
 				}
 
@@ -443,12 +658,20 @@ namespace UeAgentBlueprintAuthoring
 				}
 				if ((Operation == EOperation::Create || Operation == EOperation::Clone) && Existing)
 				{
-					SetFailure(OutFailure, TEXT("asset_already_exists"), PackagePath);
+					FDiagnostic Error = AssetFailure(PackagePath, TEXT("asset_already_exists"),
+						TEXT("Create or clone requires an absent target, but a Blueprint already exists at this asset path."),
+						TEXT("asset_present"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+					LocateInputFailure(Error, Request, TEXT("/target/asset_path"));
+					SetFailure(OutFailure, MoveTemp(Error));
 					return false;
 				}
 				if ((Operation == EOperation::Update || Operation == EOperation::Remove) && !Existing)
 				{
-					SetFailure(OutFailure, TEXT("asset_not_found"), PackagePath);
+					FDiagnostic Error = AssetFailure(PackagePath, TEXT("asset_not_found"),
+						TEXT("Update or remove requires an existing Blueprint, but no Blueprint could be loaded at this asset path."),
+						TEXT("blueprint_loaded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					LocateInputFailure(Error, Request, TEXT("/target/asset_path"));
+					SetFailure(OutFailure, MoveTemp(Error));
 					return false;
 				}
 
@@ -460,7 +683,12 @@ namespace UeAgentBlueprintAuthoring
 					Source = LoadBlueprint(SourcePath);
 					if (!Source || GetAssetKind(Source).IsEmpty())
 					{
-						SetFailure(OutFailure, TEXT("source_asset_not_found"), SourcePath);
+						FDiagnostic Error = AssetFailure(PackagePath, TEXT("source_asset_not_found"),
+							!Source ? TEXT("The clone source path does not load a Blueprint.") : TEXT("The loaded clone source is not a supported Blueprint asset kind."),
+							TEXT("source_asset_path"), MakeShared<FJsonValueString>(SourcePath),
+							MakeShared<FJsonValueString>(TEXT("a loadable Blueprint or Actor Blueprint asset")));
+						LocateInputFailure(Error, Request, TEXT("/target/source_asset_path"));
+						SetFailure(OutFailure, MoveTemp(Error));
 						return false;
 					}
 				}
@@ -473,11 +701,16 @@ namespace UeAgentBlueprintAuthoring
 					&& Request.Input->ProviderExtension->TryGetStringField(
 						TEXT("parent_class"), ParentClassPath))
 				{
-					ParentClass = UeAgentBlueprintOps::ResolveClassByPath(ParentClassPath);
+					ParentClass = UeAgentBlueprintAuthoringOps::ResolveClassByPath(ParentClassPath);
 					if (!ParentClass
 						|| !FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass))
 					{
-						SetFailure(OutFailure, TEXT("blueprint_parent_class_invalid"), ParentClassPath);
+						FDiagnostic Error = AssetFailure(PackagePath, TEXT("blueprint_parent_class_invalid"),
+							!ParentClass ? TEXT("The requested parent class could not be resolved.") : TEXT("The native editor does not allow Blueprint creation from the requested parent class."),
+							TEXT("parent_class"), MakeShared<FJsonValueString>(ParentClassPath),
+							MakeShared<FJsonValueString>(TEXT("a resolved class that permits Blueprint creation")));
+						LocateInputFailure(Error, Request, TEXT("/provider_extension/parent_class"));
+						SetFailure(OutFailure, MoveTemp(Error));
 						return false;
 					}
 				}
@@ -496,17 +729,31 @@ namespace UeAgentBlueprintAuthoring
 					|| (RequestedAssetKind == TEXT("actor_blueprint")
 						&& ResolvedAssetKind != TEXT("actor_blueprint")))
 				{
-					SetFailure(
-						OutFailure,
-						TEXT("blueprint_asset_kind_conflict"),
-						RequestedAssetKind + TEXT(" != ") + ResolvedAssetKind);
+					FDiagnostic Error = AssetFailure(PackagePath, TEXT("blueprint_asset_kind_conflict"),
+						FString::Printf(TEXT("Requested asset kind '%s' is incompatible with parent class kind '%s'. Generic blueprint accepts either kind; actor_blueprint requires an Actor parent."),
+							*RequestedAssetKind, *ResolvedAssetKind),
+						TEXT("asset_kind"), MakeShared<FJsonValueString>(RequestedAssetKind),
+						MakeShared<FJsonValueString>(ResolvedAssetKind == TEXT("actor_blueprint") ? TEXT("blueprint or actor_blueprint") : TEXT("blueprint")));
+					LocateInputFailure(Error, Request, TEXT("/target/asset_kind"));
+					SetFailure(OutFailure, MoveTemp(Error));
 					return false;
 				}
 
 				UBlueprint* Proposed = Existing;
 				UBlueprint* ValidationTarget = nullptr;
 				UPackage* ScratchPackage = nullptr;
-				FString Error;
+				FDiagnostic Error;
+				if (Existing && Operation == EOperation::Update
+					&& (!FPreparedBlueprintMutation::ValidateGraphNames(*Existing, Request.Input->ProviderExtension, Error)
+						|| !FPreparedBlueprintMutation::ValidateMemberNames(*Existing, Request.Input->ProviderExtension, Error)
+						|| !FPreparedBlueprintMutation::ValidateCustomEventNames(*Existing, Request.Input->ProviderExtension, Error)
+						|| !FPreparedBlueprintMutation::ValidateRemovals(*Existing, Request.Input->ProviderExtension, Error)))
+				{
+					UeAgentAuthoringDiagnostics::LocateFailure(Error, *Request.Input->ProviderExtension,
+						TEXT("blueprint_preflight"), PackagePath);
+					SetFailure(OutFailure, MoveTemp(Error));
+					return false;
+				}
 				if (Operation != EOperation::Remove)
 				{
 					ScratchPackage = CreatePackage(*FString::Printf(
@@ -525,22 +772,31 @@ namespace UeAgentBlueprintAuthoring
 					}
 					else if (Operation == EOperation::Clone)
 					{
-						ValidationTarget = DuplicateBlueprint(Source, ScratchPackage);
+						ValidationTarget = DuplicateBlueprint(Source, ScratchPackage, NAME_None, false, &Error);
 						Proposed = ValidationTarget;
 					}
 					else
 					{
-						ValidationTarget = DuplicateBlueprint(Existing, ScratchPackage);
+						ValidationTarget = DuplicateBlueprint(Existing, ScratchPackage, NAME_None, true, &Error);
 					}
 					if (!ValidationTarget)
 					{
-						SetFailure(
-							OutFailure,
-							Error.IsEmpty() ? TEXT("blueprint_proposed_asset_create_failed") : Error);
+						if (Error.IsEmpty())
+						{
+							Error = NativeAssetFailure(PackagePath, TEXT("blueprint_proposed_asset_create_failed"),
+								Operation == EOperation::Clone ? TEXT("The native editor could not duplicate the clone source as a proposed Blueprint.")
+									: Operation == EOperation::Update ? TEXT("The native editor could not duplicate the existing Blueprint for validation.")
+									: TEXT("The Blueprint factory did not return a Blueprint validation target."),
+								TEXT("validation_blueprint"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(ResolvedAssetKind));
+						}
+						else if (Error.TargetPath.IsEmpty()) Error.TargetPath = PackagePath;
+						SetFailure(OutFailure, MoveTemp(Error));
 						return false;
 					}
 				}
 
+				if (ValidationTarget)
+					SetAuthoringContext(*ValidationTarget, PackagePath, Existing);
 				TUniquePtr<FPreparedBlueprintMutation> Mutation;
 				FMutationCounters ExpectedCounters;
 				if (Operation != EOperation::Remove
@@ -551,16 +807,26 @@ namespace UeAgentBlueprintAuthoring
 						ExpectedCounters,
 						Error))
 				{
-					SetFailure(OutFailure, TEXT("blueprint_mutation_preflight_failed"), Error);
+					UeAgentAuthoringDiagnostics::LocateFailure(Error, *Request.Input->ProviderExtension,
+						TEXT("blueprint_preflight"), PackagePath);
+					SetFailure(OutFailure, MoveTemp(Error));
 					return false;
 				}
 
+				TArray<UBlueprint*> DependentBlueprints;
+				TArray<AActor*> AffectedActors;
+				if (Operation == EOperation::Update && Existing
+					&& !FPreparedBlueprintMutation::CollectNativeDependentBlueprints(
+						*Existing, Request.Input->ProviderExtension, DependentBlueprints, AffectedActors, Error))
+				{ SetFailure(OutFailure, MoveTemp(Error)); return false; }
 				OutState = MakeUnique<FAssetLifecycleState>(
 					PackagePath,
 					ResolvedAssetKind,
 					Operation,
 					Existing,
 					Proposed,
+					MoveTemp(DependentBlueprints),
+					AffectedActors,
 					MoveTemp(Mutation),
 					MoveTemp(ExpectedCounters),
 					ReadBool(Request.Input->ProviderExtension, TEXT("compile"), true),
@@ -633,12 +899,11 @@ namespace UeAgentBlueprintAuthoring
 			Result.ReflectionBaseline.ExternalReferencePolicy = TEXT("replace_reference_only");
 			Result.ReflectionBaseline.OwnedObjectPolicy =
 				TEXT("create_or_locate_with_real_outer_then_recurse");
-			Result.ReflectionBaseline.RuntimeLimitsSource = TEXT("shared_runtime_limits");
 			Result.PropertyPayload.Mode = TEXT("reflection");
 			Result.PropertyPayload.PropertyPathField = TEXT("property_path");
 			Result.PropertyPayload.ValueField = TEXT("value");
 			Result.PropertyPayload.OptionalAssertionFields = {
-				TEXT("value_kind"), TEXT("struct_path"), TEXT("enum_path"), TEXT("element_type"),
+				TEXT("kind"), TEXT("struct_path"), TEXT("enum_path"), TEXT("element_type"),
 				TEXT("key_type"), TEXT("mapped_type"), TEXT("inner_type"), TEXT("fixed_length"),
 				TEXT("allowed_class")
 			};
@@ -751,52 +1016,39 @@ namespace UeAgentBlueprintAuthoring
 			const UeAgentAuthoringWorkspaceLoader::FSourceRequest& Source,
 			const FString& ExpectedAssetPath,
 			FAssetApplyResult& OutResult,
-			const FString& RequestId)
+			const FString& RequestId, bool bCompactValues = false,
+			TFunction<bool(FOperationFailure&)> FinalReadback = {},
+			const TSharedPtr<IDurablePackageStager>& PackageStager = nullptr)
 		{
 			OutResult = FAssetApplyResult();
 			OutResult.Status = TEXT("failed");
-			UeAgentApplyWorkspaceContract::FContract WorkspaceContract;
-			if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(
-				AssetWorkspaceContractId, WorkspaceContract))
+			UeAgentAuthoringAssetWorkspaceInput::FRequest ResolveRequest;
+			ResolveRequest.WorkspaceContractId = AssetWorkspaceContractId;
+			ResolveRequest.Source = Source;
+			ResolveRequest.ExpectedAssetPath = ExpectedAssetPath;
+			ResolveRequest.Errors.ContractMissing = TEXT("blueprint_workspace_contract_missing");
+			ResolveRequest.Errors.EntryInvalid = TEXT("blueprint_workspace_entry_invalid");
+			ResolveRequest.Errors.AssetKindConflict =
+				TEXT("blueprint_workspace_asset_kind_conflict");
+			ResolveRequest.Errors.AssetPathConflict =
+				TEXT("blueprint_workspace_asset_path_conflict");
+			UeAgentAuthoringAssetWorkspaceInput::FResult Resolved;
+			if (!UeAgentAuthoringAssetWorkspaceInput::Resolve(ResolveRequest, Resolved))
 			{
-				OutResult.Phase = TEXT("registration");
-				OutResult.ErrorCode = TEXT("blueprint_workspace_contract_missing");
+				OutResult.Phase = Resolved.Phase;
+				OutResult.Diagnostic = Resolved.Diagnostic;
 				return false;
 			}
+			const UeAgentApplyWorkspaceContract::FContract& WorkspaceContract =
+				Resolved.WorkspaceContract;
+			const UeAgentAuthoringWorkspaceLoader::FLoadResult& LoadResult = Resolved.Load;
+			const UeAgentApplyInputContract::FOperationInput& Input = Resolved.Input;
 
-			UeAgentAuthoringWorkspaceLoader::FLoadResult LoadResult;
-			if (!UeAgentAuthoringWorkspaceLoader::LoadWorkspace(
-				WorkspaceContract, Source, LoadResult))
-			{
-				OutResult.Phase = TEXT("load");
-				OutResult.ErrorCode = LoadResult.ErrorCode;
-				OutResult.ErrorDetail = LoadResult.ErrorDetail;
-				return false;
-			}
-
-			const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit* AssetUnit =
-				LoadResult.Workspace.FindSingleUnit(TEXT("asset"));
-			const TSharedPtr<const FJsonObject> Document = AssetUnit ? AssetUnit->Document : nullptr;
-			const TSharedPtr<FJsonObject>* Target = nullptr;
-			FString OperationText;
 			FAssetApplyRequest Request;
-			if (!Document.IsValid()
-				|| !Document->TryGetStringField(TEXT("operation"), OperationText)
-				|| !ParseOperation(OperationText, Request.Operation)
-				|| !Document->TryGetObjectField(TEXT("target"), Target)
-				|| !Target || !Target->IsValid())
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = TEXT("blueprint_workspace_entry_invalid");
-				OutResult.ErrorDetail = OutResult.ErrorCode;
-				return false;
-			}
-
-			(*Target)->TryGetStringField(TEXT("asset_path"), Request.AssetPath);
-			Request.AssetPath = NormalizePackagePath(Request.AssetPath);
-			(*Target)->TryGetStringField(TEXT("source_asset_path"), Request.SourceAssetPath);
-			FString AssetKind;
-			(*Target)->TryGetStringField(TEXT("asset_kind"), AssetKind);
+			Request.Operation = Input.RequestedOperation;
+			Request.AssetPath = Resolved.AssetPath;
+			Request.SourceAssetPath = Resolved.SourceAssetPath;
+			FString AssetKind = Resolved.AssetKind;
 			AssetKind.TrimStartAndEndInline();
 			AssetKind.ToLowerInline();
 			if (!AssetKind.IsEmpty()
@@ -804,93 +1056,53 @@ namespace UeAgentBlueprintAuthoring
 				&& AssetKind != TEXT("actor_blueprint"))
 			{
 				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = TEXT("blueprint_workspace_asset_kind_conflict");
-				OutResult.ErrorDetail = AssetKind;
+				OutResult.Diagnostic = AssetFailure(Resolved.AssetPath, TEXT("blueprint_workspace_asset_kind_conflict"),
+					TEXT("This workspace requires a Blueprint or Actor Blueprint asset kind."), TEXT("asset_kind"),
+					MakeShared<FJsonValueString>(AssetKind), MakeShared<FJsonValueString>(TEXT("blueprint or actor_blueprint")));
+				OutResult.Diagnostic.Stage = OutResult.Phase;
+				OutResult.Diagnostic.SemanticPointer = TEXT("/target/asset_kind");
+				if (const auto* Unit = LoadResult.Workspace.FindSingleUnit(WorkspaceContract.Entry.VirtualUnitId))
+					OutResult.Diagnostic.Source = Unit->ResolveDiagnosticSource(TEXT("/target/asset_kind"));
+				else if (Input.Target.IsValid())
+					UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutResult.Diagnostic, *Input.Target, TEXT("asset_kind"));
 				return false;
 			}
-			const FString NormalizedExpectedPath = NormalizePackagePath(ExpectedAssetPath);
-			if (!NormalizedExpectedPath.IsEmpty()
-				&& !Request.AssetPath.Equals(NormalizedExpectedPath, ESearchCase::IgnoreCase))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = TEXT("blueprint_workspace_asset_path_conflict");
-				OutResult.ErrorDetail = Request.AssetPath + TEXT(" != ") + NormalizedExpectedPath;
-				return false;
-			}
-
-			const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
-			if (Document->TryGetArrayField(TEXT("properties"), Properties) && Properties)
-			{
-				Request.Properties = *Properties;
-			}
-			const TSharedPtr<FJsonObject>* ProviderExtension = nullptr;
-			if (Document->TryGetObjectField(TEXT("provider_extension"), ProviderExtension)
-				&& ProviderExtension && ProviderExtension->IsValid())
-			{
-				Request.ProviderExtension = *ProviderExtension;
-			}
-
-			UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph Graph;
-			UeAgentAuthoringWorkspaceDependencyGraph::FGraphFailure GraphFailure;
-			if (!UeAgentAuthoringWorkspaceDependencyGraph::BuildDependencyGraph(
-				WorkspaceContract,
-				LoadResult.Workspace,
-				UeAgentAuthoringWorkspaceDependencyGraph::FDependencyInputs(),
-				Graph,
-				GraphFailure))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = GraphFailure.ErrorCode;
-				OutResult.ErrorDetail = GraphFailure.ErrorDetail;
-				return false;
-			}
-
 			const bool bExisted = LoadBlueprint(Request.AssetPath) != nullptr;
 			FBackendOptions BackendOptions;
+			BackendOptions.FinalReadback = MoveTemp(FinalReadback);
+			if (PackageStager.IsValid()) BackendOptions.PackageStager = PackageStager;
 			BackendOptions.bUseEditorTransaction = Request.Operation != EOperation::Remove;
 			BackendOptions.TransactionDescription = NSLOCTEXT(
 				"UeAgentInterface", "BlueprintAssetWorkspaceApply", "Apply Blueprint asset workspace");
-			UeAgentAuthoringWorkspaceTransaction::FExecutionOptions ExecutionOptions;
-			FOperationFailure RequestFailure;
-			if (!BuildApplyEntryExecutionOptions(RequestId, ExecutionOptions, RequestFailure))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = RequestFailure.ErrorCode;
-				OutResult.ErrorDetail = RequestFailure.ErrorDetail;
-				return false;
-			}
-			ExecutionOptions.bSaveWhenCallerControlled =
-				ReadBool(Request.ProviderExtension, TEXT("save"), false);
 			FApplyWorkspaceResult ApplyResult;
-			const bool bApplied = ApplyWorkspace(
+			UeAgentAuthoringAssetWorkspaceApply::FFailure ApplyFailure;
+			FProviderRegistry LocalProviders;
+			const FProviderRegistry* Providers = &FProviderRegistry::Get();
+			if (bCompactValues)
+			{
+				UeAgentAuthoringOperationApply::ERegistrationResult Registered;
+				UE::UAI::Contract::FDiagnostic RegistrationError;
+				if (!LocalProviders.RegisterProvider(MakeApplyProvider(true), Registered, RegistrationError))
+				{ OutResult.Phase = TEXT("preflight"); OutResult.Diagnostic = RegistrationError; return false; }
+				Providers = &LocalProviders;
+			}
+			const bool bApplied = UeAgentAuthoringAssetWorkspaceApply::Execute(
 				WorkspaceContract,
 				LoadResult.Workspace,
-				Graph,
-				UeAgentApplyInputContract::FRegistry::Get(),
-				FProviderRegistry::Get(),
-				ExecutionOptions,
+				*Providers,
+				RequestId,
+				ReadBool(Input.ProviderExtension, TEXT("save"), false),
 				BackendOptions,
-				ApplyResult);
+				ApplyResult,
+				ApplyFailure);
 			OutResult.UnitsChecked = ApplyResult.Preflight.UnitsChecked;
 			OutResult.MutationsApplied = ApplyResult.Execution.MutationsApplied;
 			OutResult.bRollbackAttempted = ApplyResult.Execution.bRollbackAttempted;
 			OutResult.bRollbackSucceeded = ApplyResult.Execution.bRollbackSucceeded;
 			if (!bApplied)
 			{
-				const bool bPreflight = !ApplyResult.Preflight.IsReady();
-				OutResult.Phase = bPreflight ? TEXT("preflight") : ApplyResult.Execution.Phase;
-				OutResult.ErrorCode = bPreflight
-					? ApplyResult.Preflight.CauseCode
-					: ApplyResult.Execution.CauseCode;
-				if (OutResult.ErrorCode.IsEmpty())
-				{
-					OutResult.ErrorCode = bPreflight
-						? ApplyResult.Preflight.ErrorCode
-						: ApplyResult.Execution.ErrorCode;
-				}
-				OutResult.ErrorDetail = bPreflight
-					? ApplyResult.Preflight.ErrorDetail
-					: ApplyResult.Execution.ErrorDetail;
+				OutResult.Phase = ApplyFailure.Phase;
+				OutResult.Diagnostic = ApplyFailure.Diagnostic;
 				return false;
 			}
 
@@ -906,12 +1118,12 @@ namespace UeAgentBlueprintAuthoring
 				: LoadBlueprint(Request.AssetPath);
 			OutResult.ObjectPath = OutResult.Asset
 				? OutResult.Asset->GetPathName()
-				: ToObjectPath(Request.AssetPath);
+				: UeAgentAuthoringAssetIdentity::ToObjectPath(Request.AssetPath);
 			OutResult.AssetKind = OutResult.Asset
 				? GetAssetKind(OutResult.Asset)
 				: AssetKind;
 			const TSharedPtr<FJsonObject>* ResultMetadata =
-				ApplyResult.UnitResultMetadata.Find(AssetUnit->CanonicalUnitKey);
+				ApplyResult.UnitResultMetadata.Find(Resolved.CanonicalUnitKey);
 			ReadMutationResultMetadata(
 				ResultMetadata ? *ResultMetadata : nullptr,
 				OutResult.Domain);
@@ -919,7 +1131,7 @@ namespace UeAgentBlueprintAuthoring
 		}
 	}
 
-	bool RegisterApplyContracts(FString& OutError)
+	bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentApplyInputContract::ERegistrationResult InputResult;
 		if (!UeAgentApplyInputContract::FRegistry::Get().RegisterContract(
@@ -932,11 +1144,12 @@ namespace UeAgentBlueprintAuthoring
 			MakeWorkspaceContract(), WorkspaceResult, OutError);
 	}
 
-	TSharedRef<IApplyProvider> MakeApplyProvider()
+	TSharedRef<IApplyProvider> MakeApplyProvider(bool bCompactValues)
 	{
 		static const TSharedRef<IReflectionOperationLifecycle> Lifecycle = MakeShared<FAssetLifecycle>();
 		UeAgentAuthoringObjectApply::FOptions Options;
 		Options.bAllowDomainAuthorizedOwners = true;
+		Options.bCompactValues = bCompactValues;
 		return MakeShared<FReflectionApplyProvider>(ApplyProviderId, Lifecycle, Options);
 	}
 
@@ -947,7 +1160,7 @@ namespace UeAgentBlueprintAuthoring
 				MakeApplyDocument(Request), TEXT("inline://blueprint-asset-apply")),
 			Request.AssetPath,
 			OutResult,
-			RequestId);
+			RequestId, Request.bCompactValues, Request.FinalReadback, Request.PackageStager);
 	}
 
 	bool ApplyAssetWorkspace(
@@ -967,13 +1180,14 @@ namespace UeAgentBlueprintAuthoring
 		const TSharedPtr<const FJsonObject>& Document,
 		const FString& ExpectedAssetPath,
 		FAssetApplyResult& OutResult,
-		const FString& RequestId)
+		const FString& RequestId,
+		TFunction<bool(FOperationFailure&)> FinalReadback)
 	{
 		return ExecuteAssetWorkspaceSource(
 			UeAgentAuthoringWorkspaceLoader::FSourceRequest::MakeInlineObject(
 				Document, TEXT("inline://blueprint-surface-domain")),
 			ExpectedAssetPath,
 			OutResult,
-			RequestId);
+			RequestId, false, MoveTemp(FinalReadback));
 	}
 }

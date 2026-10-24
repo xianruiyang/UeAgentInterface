@@ -13,24 +13,14 @@ namespace UE::UAI::CommandHandlers::DestructiveContent
 	{
 		const FString Owner = TEXT("destructive-content-owner");
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(TEXT("code"), Code);
-			Object->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Object->SetStringField(TEXT("detail"), Detail);
-			Object->SetStringField(TEXT("terminal_status"), TEXT("not_started"));
-			Object->SetBoolField(TEXT("retry_safe"), true);
-			FString ErrorJson;
-			const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>>
-				Writer = TJsonWriterFactory<TCHAR,
-					TCondensedJsonPrintPolicy<TCHAR>>::Create(&ErrorJson);
-			FJsonSerializer::Serialize(Object, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), ErrorJson);
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request,
+            UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = SubjectId.IsEmpty() ? Request.GetCommandId() : SubjectId;
+            if (Diagnostic.Stage.IsEmpty()) Diagnostic.Stage = TEXT("command_submit");
+            if (Diagnostic.TerminalStatus.IsEmpty()) { Diagnostic.TerminalStatus = TEXT("not_started"); Diagnostic.bRetrySafe = true; }
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -59,10 +49,7 @@ namespace UE::UAI::CommandHandlers::DestructiveContent
 				if (!Caller.IsValid()
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:operate")))
 				{
-					return Failure(
-						Request,
-						TEXT("destructive_content_authority_required"),
-						TEXT("the exact destructive operation requires uai:operate"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("destructive_content_authority_required"), TEXT("the exact destructive operation requires uai:operate"), TEXT("command_submit")));
 				}
 				return OperationOwners::DestructiveContent::
 					SubmitProductionDestructiveContentOperation(
@@ -76,7 +63,7 @@ namespace UE::UAI::CommandHandlers::DestructiveContent
 
 	bool TryCreateDestructiveContentCommandHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
@@ -84,12 +71,6 @@ namespace UE::UAI::CommandHandlers::DestructiveContent
 			GetDestructiveContentCommandIds())
 		{
 			OutHandlers.Add(MakeShared<FHandler>(CommandId));
-		}
-		if (OutHandlers.Num() != 14)
-		{
-			OutHandlers.Reset();
-			OutError = TEXT("destructive_content_handler_count_mismatch");
-			return false;
 		}
 		return true;
 	}

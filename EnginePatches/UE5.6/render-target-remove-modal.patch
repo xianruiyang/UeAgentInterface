@@ -1,0 +1,26 @@
+--- a/Engine/Source/Runtime/Engine/Private/TextureRenderTarget2D.cpp
++++ b/Engine/Source/Runtime/Engine/Private/TextureRenderTarget2D.cpp
+@@ -225,23 +225,6 @@
+ 
+ 	EPixelFormat Format = GetFormat();
+ 
+-	const int32 WarnSize = 2048; 
+-
+-	if (SizeX > WarnSize || SizeY > WarnSize)
+-	{
+-		const float MemoryMb = SizeX * SizeY * GPixelFormats[Format].BlockBytes / 1024.0f / 1024.0f;
+-		FNumberFormattingOptions FloatFormat;
+-		FloatFormat.SetMaximumFractionalDigits(1);
+-		FText Message = FText::Format( NSLOCTEXT("TextureRenderTarget2D", "LargeTextureRenderTarget2DWarning", "A TextureRenderTarget2D of size {0}x{1} will use {2}Mb, which may result in extremely poor performance or an Out Of Video Memory crash.\nAre you sure?"), FText::AsNumber(SizeX), FText::AsNumber(SizeY), FText::AsNumber(MemoryMb, &FloatFormat));
+-		const EAppReturnType::Type Choice = FMessageDialog::Open(EAppMsgType::YesNo, Message);
+-	
+-		if (Choice == EAppReturnType::No)
+-		{
+-			SizeX = FMath::Clamp<int32>(SizeX,1,WarnSize);
+-			SizeY = FMath::Clamp<int32>(SizeY,1,WarnSize);
+-		}
+-	}
+-
+ 	const int32 MaxSize = 16384;
+ 	
+ 	SizeX = FMath::Clamp<int32>(SizeX - (SizeX % GPixelFormats[Format].BlockSizeX),1,MaxSize);

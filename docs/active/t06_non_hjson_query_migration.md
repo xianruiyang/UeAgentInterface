@@ -2,49 +2,106 @@
 
 ## Active ownership boundary
 
-The `query` active-command contribution publishes exactly forty-two non-HJSON read routes through `query-command-owner`: thirty-nine active routes and three centrally dormant World compatibility routes. They join the one process-level immutable command registry and exact dispatch owned by the active command composition; the contribution does not create a private command registry or a second public route. Provider authority is separately frozen by `DomainCapability`: the Query domain contributes forty-one established providers and the Landscape domain contributes `landscape.read.height`.
+The `query` command contribution publishes its non-HJSON read routes through `query-command-owner`. They join the one process-level immutable command registry and exact dispatch owned by the active command composition; the contribution does not create a private command registry or a second public route. Provider authority is separately frozen by `DomainCapability`.
 
 The inventory is:
 
-- asset state: `asset.collection`, `asset.properties`, `asset.registry_record`, `asset.registry_relations`, `asset.relations`, `asset.sample`, `asset.summary`, `asset.validation`;
+- asset state: `asset.collection`, `asset.registry_record`, `asset.relations`, `asset.sample`, `asset.validation`;
 - configuration and Editor state: `config.resolved_value`, `config.section`, `editor.dirty_resources`, `editor.open_assets`;
+- content-graph state: `content_graph.summary`, `content_graph.structure`, `content_graph.items`, `content_graph.relations`, `content_graph.properties`, `content_graph.diagnostics`, `content_graph.compound`;
 - Landscape state: `landscape.height.read`;
 - project state: `project.platform`, `project.settings`, `project.summary`, `project.validation`;
-- reference state: `reference.asset_read`, `reference.origin.resolve`;
-- world state and runtime probes: `world.capsule_path`, `world.capsule_sweep`, `world.content`, `world.data_layers`, `world.hlod_assignments`, `world.mesh_closest_vertex`, `world.mesh_vertex_position`, `world.nav_connectivity`, `world.nav_find_path`, `world.nav_project_point`, `world.nearby_shapes`, `world.overlap`, `world.partition`, `world.partition_health`, `world.physics_component`, `world.physics_constraint`, `world.ray_trace`, `world.selection`, `world.streaming_levels`, `world.summary`.
+- reference state: `reference.origin.resolve`;
+- world state and runtime probes: `world.capsule_path`, `world.capsule_sweep`, `world.data_layers`, `world.hlod_assignments`, `world.mesh_closest_vertex`, `world.mesh_vertex_position`, `world.nav_connectivity`, `world.nav_find_path`, `world.nav_project_point`, `world.nearby_shapes`, `world.overlap`, `world.partition`, `world.partition_health`, `world.physics_component`, `world.physics_constraint`, `world.ray_trace`, `world.selection`, `world.streaming_levels`, `world.summary`.
 
-Forty-one public IDs select a descriptor whose ID is `uai.query.<mechanics_command_id>`. A descriptor may use a more specific capability ID such as `asset.collection.read`; route-to-descriptor identity is therefore proved by the exact descriptor ID, Query operation kind, query binding, uniqueness and full forty-two-route coverage, not by forcing the capability ID to equal the public route. `reference.asset_read` is the separate exact public contract whose server-owned route selects the internal `reference.read` descriptor and freezes `BlueprintDisplayName`, the persisted property written by `reference.asset_apply`. Its dedicated AssetProjectRead provider is the only read path on which a missing asset is a successful complete persisted snapshot with zero entries; generic `asset.properties` continues to reject an unresolved target. The SDK does not translate either command into the other, and callers cannot substitute one identity for the other.
+Each public ID selects a descriptor whose ID is `uai.query.<mechanics_command_id>`. A descriptor may use a more specific capability ID such as `asset.collection.read`; route-to-descriptor identity is therefore proved by the exact descriptor ID, Query operation kind, query binding and uniqueness, not by forcing the capability ID to equal the public route or by freezing a command count.
 
-The former public `world.actors`, `world.actor_components`, and `world.property` identities are dormant. Persisted World actor structure, component structure and editable reflected properties belong to the World HJSON owner: use `content_graph.structure`, filtered `content_graph.items`, and filtered `content_graph.properties`. `query.content.search` returns `detail_command_id`, `detail_target_identity`, and `detail_input` so callers can forward the detail request without rebuilding a World/Actor/Component identity.
+The former public `asset.registry_relations`, `asset.properties`, `asset.summary`,
+`world.actors`, `world.actor_components`, `world.content`, and `world.property`
+identities are dormant. `asset.registry_relations` remains an exact compatibility
+identity but reuses the same Asset Registry mechanics and projects only its
+historical depth-one string view; ordinary discovery and generated named bindings
+expose only `asset.relations`. Persisted asset and World structure, items, summary
+and editable reflected properties belong to HJSON export and the ContentGraph query
+family. `query.content.search` is discovery-only and returns readable names with the
+shortest necessary readable scope; it does not return detail-routing identities or
+machine selectors. Asset and ContentGraph Query targets, and shared HJSON export,
+resolve these names through the same current ContentDiscovery service before
+entering the existing exact-target owner. Search scopes each selected name against
+the full current same-name group so filtering does not change its meaning.
+Existing exact paths remain accepted. Creation-candidate queries for an existing
+asset use the same reference resolver: Blueprint nodes/components, Material,
+Niagara, AI, PCG, UMG, Rig, Audio, World Actors, and Timeline tracks accept the
+current content-search name, including any returned existing-object scope.
+The create-only Animation Blueprint query still requires a future package.object
+path; AssetFactory discovery has no existing-asset target.
 
 ## Request, mechanics and result
 
 Every request enters `/api/uai/command`, passes the exact command contract, and is dispatched once to the Query handler. The handler requires `uai:query`, preserves the exact command ID, canonicalizes the supplied parameter object, and delegates once to `IUeAgentQueryService`.
 
-Commands that address one object require `target`; `reference.asset_read` instead requires `object_path` and the server supplies the exact `BlueprintDisplayName` property selection. `input` contains only descriptor-specific query fields. It remains optional when the descriptor input schema has no nested required field, and becomes a required public parameter when that schema does. `context` selects an allowed current state plane and execution context, and `projection` controls fields, provenance and bounded paging. The service does not use HJSON and does not perform alias guessing.
+Commands that address one object require `target`. `input` contains only descriptor-specific query fields. Registration validates `{}` against the actual compiled input contract to decide whether omission is legal, including composition branches; it does not infer this from only a root `required` array. `context` selects an allowed current state plane and execution context, and `projection` controls fields and provenance. The service does not use HJSON and does not perform alias guessing.
 
-The production Query composition creates the immutable forty-two-descriptor registry once and returns it beside the runtime service. Runtime execution and command registration consume that same registry instance. Registration maps every route to its exact descriptor and projects the descriptor `input_schema` into the frozen command field `SchemaJson`; missing, duplicate, non-Query, unbound or uncovered mappings fail composition instead of falling back to an opaque object. `query.command.detail` consequently exposes the nested schema without a per-command tutorial table. When nested required fields exist, the Contract/Discovery tutorial projector chooses a compact candidate from supported `const`, `enum`, primitive, object or bounded-array constraints, validates and canonicalizes it through the same compiled input contract, and only then includes it in `purpose.minimum_example`; an unsupported or unsatisfied schema fails composition instead of publishing an invalid tutorial.
+The production Query composition creates the immutable descriptor registry once and returns it beside the runtime service. Runtime execution and command registration consume that same registry instance. Registration maps every route to its exact descriptor and projects the descriptor `input_schema` into the frozen command field `SchemaJson`; missing, duplicate, non-Query, unbound or uncovered mappings fail composition instead of falling back to an opaque object. `ueagentinterfacecmd describe <command-id> --parameter input` exposes that projected input schema without a per-command tutorial table. The Contract/Discovery example projector supports `const`, `enum`, primitive, object, array and `oneOf`/`anyOf` candidates, and validates each composed candidate against the complete contract. Only validated literals enter minimum examples; when no literal can be constructed, Query discovery keeps the required named input variable rather than disabling the command. Identity placeholders describe input shape and must be replaced with actual discovered identities. `query.command.usage` preserves generated object literals and named keyword arguments.
 
-For example, `asset.registry_relations` now exposes `input.required=["direction"]`, the exact `dependencies|referencers|both` enum, and this executable minimum shape:
+For settings discovery, call `project.settings` with `input.editor_project_capability="project_settings.index"`; optional `input.parameters.container` narrows the index to `Editor` or `Project`. Its sections provide actual `section_id` and `settings_object_path`. Read a selected page with capability `project_settings.page` and `parameters.section_id`; its public `observation.properties` preserves native `property_path`, `kind`, authoring-coded `value` (including `literal`, `selected` and nested collections), and `availability`. Both calls are read-only; output paths and write flags do not create page files. Canonical `input={"section_id":...,"field_ids":[...]}` resolves that same registered page and reads only selected values under `fields`; omitting `field_ids` deliberately returns only `property_count`. Optional `include_defaults=true` adds selected `defaults` as UE text values, or `null` when the common property readback has no independent default; it never substitutes the current settings CDO as its own default.
+
+For example, `asset.relations` exposes `input.required=["direction"]`, the exact `dependencies|referencers|both` enum, and optional `relation_kinds` and `package_scope`, with this executable minimum shape:
 
 ```text
-client.asset.registry_relations(target, {"direction":"dependencies"})
+client.asset.relations(target, {"direction":"dependencies"})
 ```
 
-The production service composes the audited Asset/Project, World, and Landscape descriptor registries. It resolves every provider from the cached frozen process `DomainCapability` authority at execution time; it does not construct or retain a local provider registry. Real native hooks execute on the game thread with the current Editor/World context, a bounded resource tracker, and the shared response projector. They are read-only and do not save or mutate assets. Projection may page or report partial/degraded source state; it is not rejected solely because an estimated total token count is large.
+Its single `relation_graph` state entry contains stable Asset Registry identity plus package/object identity when available, token-compact node aliases, actual source-to-target edges, traversal direction, depth, path, cycle, semantic relation properties, redirector facts and explicit Registry completeness. It is based on the on-disk Asset Registry and does not claim live runtime references.
+
+The production service composes the audited Asset/Project, World, ContentGraphRead, and Landscape descriptor registries. It resolves every provider from the cached frozen process `DomainCapability` authority at execution time; it does not construct or retain a local provider registry. Real native hooks execute on the game thread with the current Editor/World context, a resource accounting tracker, and the shared response projector. They are read-only and do not save or mutate assets. Projection returns the complete selected result and is not rejected because an estimated total token count is large.
+
+Content-graph reads use one staged owner. `content_graph.structure` discovers readable graph/container names without expanding nodes, relations, properties, or diagnostics. `content_graph.items` selects current items with `items`/`item_kinds` and requests their exposed top-level keys with `fields`. Dynamic `pin_interface` is omitted by default and returned only when explicitly requested for selected nodes. `content_graph.compound` is the explicit multi-facet batch form, not the default discovery call.
+
+Requested properties report their current values, including inherited/class-default
+values; a value equal to its default is not an absent property. `include_presence`
+adds authored-presence information when requested. The legacy `include_defaults`
+input remains accepted for compatibility and does not select an overrides-only
+view or change which fields are captured.
+
+Field projection checks the entire selected item set before producing entries.
+Incompatible fields are reported by item kind and actual field contract, with
+readable affected-item locations in `related_sources`. A failure's `choose`
+contains compatible `items`/`containers` selections derived from the same capture
+when publicly addressable items exist; keep the requested fields when refining
+the selection. Failure does not return partial entries or silently omit
+incompatible items. It does not mean every item in the asset lacks that field.
 
 The process composition binds World reads to the current Editor World. If the
 Editor changes maps, the process host invalidates the cached World runtime and
 rebuilds the World-backed handlers before resolving the next command; a
 handler composed for the previous map is not reused against the new map.
 
+`asset.registry_record` returns object, class and package identity by default.
+`include_tags=true` adds the native Asset Registry tag map; `include_chunk_ids=true`
+adds its integer chunk array, including an empty array when no chunks are assigned.
+Omitted/false options do not expand those fields. Tags remain native strings.
+Public query projection preserves explicitly returned business arrays/maps even
+when empty; a missing optional field remains absent. This applies to nested and
+record-array results as well as ordinary records.
+`asset.collection` without selected `field_ids` retains the native field/count
+inventory under `fields`; recursive public projection must preserve that inventory.
+
+`world.mesh_vertex_position` and `world.mesh_closest_vertex` share component mesh
+reading for StaticMesh (source LOD 0) and DynamicMesh. Target the actual component,
+not its Actor or asset. `vertex_index` is the zero-based position in ascending live
+vertex-ID order; it is local to the current topology. Positions are transformed
+through the component into the requested world-space observation.
+
 `editor.dirty_resources` owns a read-only dirty-resource observation rather
 than reusing the open-asset set. For `map` resources it observes loaded World
 packages, their loaded map-build-data packages, and loaded External Actor
-packages. For `asset` resources it observes ordinary dirty content packages,
-and configuration kinds remain separate. `resource_kinds` filters these
+packages. For `asset` resources it observes dirty persistent packages in every
+mounted content root, including plugin content; it does not use an asset-class allowlist.
+Configuration kinds remain separate. `resource_kinds` filters these
 sources before projection. The query does not call an Editor save helper whose
-enumeration would itself mark a newly created World dirty.
+enumeration would itself mark a newly created World dirty. Dirty discovery,
+explicit resource save and safe-exit share the EditorResources persistence owner.
 
 `world.nav_find_path` and `world.nav_connectivity` both expose
 `allow_projection_failure`. It is meaningful only when `project_to_nav` is
@@ -54,43 +111,75 @@ silently ignored.
 
 `world.selection` freezes the current actor selection at the public Query boundary. The world facet is required, but a selection is a collection result rather than a required non-empty context identity: no selected actors therefore returns a successful complete snapshot with zero entries. It must not fail with `execution_context_required_facet_missing` or synthesize a placeholder identity.
 
-A successful response contains:
-
-- `command_id`: the unchanged public identity;
-- `mechanics_command_id`: the exact server-side mechanics identity;
-- `read_only: true`;
-- `query_result`: the typed projected result, including its descriptor/source identity, state semantics, revision and completeness where supplied by the provider.
+For each single `content_graph` facet, the public success payload is the business
+projection itself with the minimal shape `{"entries":[...]}`.
+`content_graph.compound` instead returns `{"sections":{...}}`, grouping each
+requested business category once. It never exposes a cursor, snapshot/revision,
+owner, selector, command envelope, or any hash/GUID-like
+machine identity. The internal typed snapshot keeps those fields for service
+coordination and readback, but they are not part of the model-facing result.
+Originally empty business objects and observed empty arrays remain present;
+objects emptied solely by removal of private fields may be omitted. Shared
+record projections do not truncate to the first owner or skip malformed rows.
+A single-record result requires exactly one matching record. Invalid nested
+values or missing required fields return structured diagnostics with the public
+field/index path instead of a successful partial or empty result.
+Non-content-graph Query routes retain their own
+current contracts until separately migrated.
 
 Distinct failures remain distinct. They include missing `uai:query` authority, cancellation, invalid parameters, a missing exact target, an unsupported command, invalid thread/context/state plane, descriptor/provider failure, projection failure, or a provider that cannot attest read-only behavior. None falls back to a prefix, alias, old route or another provider.
 
+Explicit context and projection fields are validated before provider execution.
+Unknown fields, invalid types and unsupported state planes return a structured
+input diagnostic. An explicit empty `selection_identities` array clears selection;
+omitting the field retains the current context. Projection reports a missing
+required field in a recognized record instead of silently dropping that record.
+
+Candidate catalog completeness is checked at its source, separately from result
+transfer counts and display-name grouping. Known source-enumeration gaps return a structured
+failure independently of keyword filtering. A known action's missing creation binding is
+recorded only after that action matches the requested context/query, before display grouping;
+unmatched actions and name-resolution-only context cannot invalidate the requested result.
+The declared SoundCue, MetaSound and UMG partial catalogs retain their
+existing capabilities with a public `diagnostics` warning. Description queries
+can explain a specific action's support without creating it.
+
 ## Public SDK and CLI
 
+Diagnostics report coverage separately from messages and never trigger compile
+or open an editor. Niagara stored VM freshness follows its native owner:
+standalone Emitter definitions and non-compilable auxiliary scripts report
+`not_applicable`, not proof of a clean compile. The successful native-context
+compile result covers that operation; actual stored messages remain visible,
+and System/compilable-script stale or pending state is not hidden.
+Coverage sources include `owner/context/status`: `observed` means the source was
+read, not that this operation compiled or executed it. PCG retained component logs
+do not prove the current graph ran; MaterialFunction preview resources belong to
+the existing preview context. Blueprint Dirty/Unknown remain stale/unknown.
+Native update completion is operation-stage evidence, separate from diagnostics.
+
 The final manifest projects these contracts into their ordinary domain
-namespaces. Callers import only `uai`, connect from one TOML file, and use
+namespaces. Callers import only `uai`, use `uai.connect_project()` for the local project, and use
 methods such as `client.project.summary(...)`,
-`client.asset.registry_relations(target, {"direction":"dependencies"})`,
+`client.asset.relations(target, {"direction":"dependencies"})`,
 `client.content_graph.items(...)`, and
-`client.reference.asset_read(...)`, and
 `client.landscape.height_read(...)`. `client.execute(...)`,
-`client.execute_exact(...)`, and `uai-cli exec` share the same generated
+`client.execute_exact(...)`, and `ueagentinterfacecmd exec` share the same generated
 catalog, Client, Protocol, and Transport. No T06-specific Python binding
 module, command-ID table, contract-hash table, alias layer, transport, or
 result interpreter remains authoritative.
 
 ```text
-uai-cli --connection connection.toml exec project.summary --params-json {"projection":{"max_items":25}}
+ueagentinterfacecmd exec project.summary --params-json '{"projection":{"profile_id":"compact"}}'
 ```
 
 ## Legacy exit and evidence boundary
 
-The old read/export contract and handler registry no longer exist in the active compiled tree. T13 moved the former `content_graph.*` routes into its current contribution, so neither those routes nor any of the current thirty-nine Query IDs is duplicated in the sole immutable registry. T44 also isolated the obsolete module-owned Query-service composition and its `ReferenceCommand` handler. `reference.asset_read` therefore has one active public owner and composes shared asset mechanics only behind the current Query service.
+The old read/export contract and handler registry no longer exist in the active compiled tree. The seven read-only `content_graph.*` facets now belong to `query-command-owner` and resolve through ContentGraphRead providers; the T13 workspace contribution retains only `content_graph.import_workspace` and `content_graph.export_workspace`. The sole immutable registry therefore has no duplicate content-graph read route. T44 also isolated the obsolete module-owned Query-service composition and its `ReferenceCommand` handler.
 
-T06 Automation verifies the exact thirty-nine active Query routes plus the three centrally dormant World identities, unique owner, exact dispatch, typed failures, the descriptor-derived required schema and minimum tutorial for `asset.registry_relations`, an optional-input non-regression, a real production `project.summary` readback, and the complete zero-entry result of an empty current `world.selection`. The command-detail suite validates active and dormant invocation shapes according to lifecycle instead of requiring active named calls from dormant commands. Manifest projection retains each frozen field schema, and generated Python tests prove that `asset.registry_relations(..., input)` requires and forwards the nested object once. It also asserts that normal discovery and generated named bindings hide the dormant identities, compatibility discovery exposes them with their HJSON successors and confirmation requirement, and exact dormant execution remains available through the guarded compatibility entry point. Product evidence additionally executes `client.landscape.height_read` through the live Editor against an exact managed Landscape before and after native mutation, verifies bounded local heights and no package dirtiness, and confirms exact absence after cleanup.
-
-The authoritative historical mapping is the adjacent
-`successors/t06_non_hjson_query_migration.json` v2 record. It consumes all 21
-active frozen obligations assigned to T06, preserves their purpose/input/output
-contracts, names one exact current Query or HJSON command for each row, and records the
-absence of every old public ID, manifest entry, SDK binding, and compatibility
-alias. That record is validated before a T06 verification receipt can be
-emitted; T61 only aggregates it and does not infer or implement a successor.
+The immutable registry owns exact dispatch, typed failures, descriptor-derived schemas and
+centralized lifecycle behavior without a command-count oracle. Manifest projection retains each
+frozen field schema, and active `asset.relations(..., input)` forwards the nested object once.
+Normal discovery and generated named bindings hide dormant identities; compatibility discovery
+exposes them with their active successors, while exact dormant execution remains available through
+the compatibility entry point.

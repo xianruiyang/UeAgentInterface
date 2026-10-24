@@ -206,7 +206,7 @@ namespace UE::UAI::Tests::EditorProjectSimpleEffect
 		Properties->SetObjectField(
 			TEXT("canonical_value"),
 			ValueKindSchema(
-				Field->GetStringField(TEXT("value_kind"))));
+				Field->GetStringField(TEXT("kind"))));
 		return ObjectSchema(
 			Properties,
 			{TEXT("type_id"), TEXT("canonical_value")});
@@ -289,9 +289,6 @@ namespace UE::UAI::Tests::EditorProjectSimpleEffect
 		const TSharedPtr<FJsonObject> Properties =
 			MakeShared<FJsonObject>();
 		Properties->SetObjectField(TEXT("target_ref"), StringSchema());
-		Properties->SetObjectField(
-			TEXT("expected_revision"),
-			StringSchema());
 
 		const TSharedPtr<FJsonObject> Changes =
 			MakeShared<FJsonObject>();
@@ -318,7 +315,6 @@ namespace UE::UAI::Tests::EditorProjectSimpleEffect
 			Properties,
 			{
 				TEXT("target_ref"),
-				TEXT("expected_revision"),
 				TEXT("changes"),
 			});
 	}
@@ -370,10 +366,6 @@ namespace UE::UAI::Tests::EditorProjectSimpleEffect
 		Input->SetStringField(
 			TEXT("target_ref"),
 			TEXT("uai://editor-project/fixture-target"));
-		Input->SetStringField(
-			TEXT("expected_revision"),
-			TEXT("rev:target:1"));
-
 		TArray<TSharedPtr<FJsonValue>> Changes;
 		for (const TSharedPtr<FJsonObject>& Field
 			: FieldContracts(Fixture, Row))
@@ -537,4 +529,3 @@ namespace UE::UAI::Tests::EditorProjectSimpleEffect
 		return false;
 	}
 }
-

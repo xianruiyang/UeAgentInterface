@@ -203,8 +203,6 @@ namespace
 			TJsonReaderFactory<>::Create(Result.GetValue().GetJsonValue());
 		FString TargetRef;
 		FString TerminalStatus;
-		FString PersistenceReceiptId;
-		FString ReadbackEvidenceId;
 		bool bMutationApplied = false;
 		bool bCompileSettled = false;
 		bool bSaved = false;
@@ -221,14 +219,10 @@ namespace
 			&& bCompileSettled
 			&& Root->TryGetBoolField(TEXT("saved"), bSaved) && bSaved
 			&& Root->TryGetBoolField(TEXT("reloaded"), bReloaded) && bReloaded
-			&& Root->TryGetStringField(
-				TEXT("persistence_receipt_id"), PersistenceReceiptId)
-			&& !PersistenceReceiptId.IsEmpty()
-			&& Root->TryGetStringField(
-				TEXT("independent_readback_evidence_id"), ReadbackEvidenceId)
-			&& !ReadbackEvidenceId.IsEmpty();
+			&& !Root->HasField(TEXT("persistence_receipt_id"))
+			&& !Root->HasField(TEXT("independent_readback_evidence_id"));
 		return Test.TestTrue(
-			*(Label + TEXT(" returns exact target and lifecycle receipt")),
+			*(Label + TEXT(" returns exact target and short lifecycle state")),
 			bExact);
 	}
 
@@ -287,9 +281,8 @@ bool FUeAgentGraphCompoundAnimationAssetsProductionTest::RunTest(
 	}
 
 	FGraphCompoundRuntimeConfig RuntimeConfig;
-	RuntimeConfig.MaxFrameBytes = 1024 * 1024;
+
 	FGraphCompoundAnimationProductionConfig ProductionConfig;
-	ProductionConfig.OperationTimeoutSeconds = 30.0;
 	TSharedPtr<FGraphCompoundRuntime> Runtime;
 	FGraphCompoundRuntimeError RuntimeError;
 	if (!TestTrue(TEXT("Animation/Rig production runtime builds"),

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class FJsonObject;
@@ -32,10 +34,6 @@ namespace UeAgentUObjectProperties
 		bool bIncludeEditorOnly;
 		bool bIncludeReadOnly;
 		bool bIncludeNonEditable;
-		int32 MaxProperties;
-		int32 MaxDepth;
-		int32 MaxContainerItems;
-		int32 MaxStringChars;
 		TFunction<TOptional<bool>(const UScriptStruct* Struct, const FProperty* Field)> StructFieldOverride;
 		TFunction<bool(const UScriptStruct* Struct, const FProperty* Field)> StructFieldFilter;
 	};
@@ -49,17 +47,16 @@ namespace UeAgentUObjectProperties
 		bool bAllowDomainAuthorizedOwners;
 		bool bEmitEditorNotifications;
 		bool bMarkPackageDirty;
-		int32 MaxContainerItems;
-		int32 MaxStringChars;
+		// Original properties-array occurrence; supplement the whole diagnostic only.
+		TFunction<void(UE::UAI::Contract::FDiagnostic&, int32)> SupplementDiagnosticSource;
 	};
 
 	struct UEAGENTINTERFACE_API FApplySummaryResult
 	{
 		bool bApplied = false;
 		int32 PropertiesApplied = 0;
-		FString ErrorCode;
-		FString ErrorDetail;
-		FString PropertyPath;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
+        TArray<FString> AppliedPropertyPaths;
 	};
 
 	UEAGENTINTERFACE_API FString GetClassPath(const UClass* Class);
@@ -70,7 +67,7 @@ namespace UeAgentUObjectProperties
 		const FProperty* Field,
 		const FExportOptions& Options,
 		const UObject* Owner = nullptr);
-	UEAGENTINTERFACE_API TSharedPtr<FJsonValue> ExportPropertyValue(FProperty* Property, const void* ValuePtr, UObject* Owner, const FExportOptions& Options, int32 Depth = 0);
+	UEAGENTINTERFACE_API TSharedPtr<FJsonValue> ExportPropertyValue(FProperty* Property, const void* ValuePtr, UObject* Owner, const FExportOptions& Options, int32 Depth = 0, TSharedPtr<FJsonObject>* OutValueDefinition = nullptr);
 	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> BuildPropertyDescriptor(UObject* Object, FProperty* Property, const FExportOptions& Options);
 	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> ExportObjectProperties(UObject* Object, const FExportOptions& Options);
 	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> ExportActorProperties(AActor* Actor, const FExportOptions& Options);
@@ -80,15 +77,12 @@ namespace UeAgentUObjectProperties
 		const TSharedPtr<FJsonObject>& Descriptor,
 		FString& OutPropertyPath,
 		TSharedPtr<FJsonValue>& OutValue,
-		FString& OutError);
-	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> ApplyStructProperties(
+		UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API bool ApplyStructProperties(
 		UStruct* StructType,
 		void* StructData,
 		UObject* Owner,
 		const TSharedPtr<FJsonObject>& PropertiesJson,
-		const FApplyOptions& Options);
-	UEAGENTINTERFACE_API TSharedPtr<FJsonObject> ApplyObjectProperties(UObject* Object, const TSharedPtr<FJsonObject>& PropertiesJson, const FApplyOptions& Options);
-	UEAGENTINTERFACE_API bool ParseApplySummary(
-		const TSharedPtr<FJsonObject>& Summary,
-		FApplySummaryResult& OutResult);
+		const FApplyOptions& Options, FApplySummaryResult& OutResult);
+    UEAGENTINTERFACE_API bool ApplyObjectProperties(UObject* Object, const TSharedPtr<FJsonObject>& PropertiesJson, const FApplyOptions& Options, FApplySummaryResult& OutResult);
 }

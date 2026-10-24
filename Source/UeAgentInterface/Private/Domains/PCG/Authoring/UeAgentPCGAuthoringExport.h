@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringExport/UeAgentExportWorkspaceWriter.h"
 
@@ -13,6 +15,5 @@ namespace UeAgentPCGAuthoring
 		UPCGGraph& Graph,
 		const FString& WorkspaceRoot,
 		const FString& ProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
-		FString& OutError);
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult);
 }

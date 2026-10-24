@@ -17,8 +17,7 @@ client.rig.skeleton_preview_mesh_bind(...)
 client.rig.skeleton_socket_update(...)
 ```
 
-They are discovered through command_search and command_detail and mirrored by
-uai-cli exact execution. The rig-spatial owner uses a production binding seam
+For unknown command names or parameter shapes, follow [public command discovery](../../../../UeAgentInterfaceCMD/docs/PYTHON_SDK_AND_CLI.md#command-discovery). The rig-spatial owner uses a production binding seam
 that resolves and freezes explicit request targets/inputs/context into real
 native bindings, then delegates to the single TimelineAnimation and
 RigSimulationSpatial ports. It must not use empty bindings, fixture-only

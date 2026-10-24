@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialActivation.h"
 
 namespace UE::UAI::QueryOwners::RigSpatialCommands
@@ -9,6 +11,6 @@ namespace UE::UAI::QueryOwners::RigSpatialCommands
 	UEAGENTINTERFACE_API bool IsQuery(const FString& CommandId);
 	UEAGENTINTERFACE_API bool TryGetTimelineProfiles(
 		TArray<Composition::TimelineSpatial::FUeAgentTimelineSpatialActivationProfile>& OutProfiles,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API const TArray<FString>& GetReadbackFlows();
 }

@@ -1,5 +1,7 @@
 #include "Misc/AutomationTest.h"
 
+#include "Containers/StringConv.h"
+
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringDescriptors.h"
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringState.h"
@@ -24,7 +26,7 @@ namespace
 			{EUeAgentResourceDimension::WorkUnits, 1048576},
 			{EUeAgentResourceDimension::EstimatedMemoryBytes, 128 * 1024 * 1024},
 		};
-		return FUeAgentResourceTracker(FUeAgentResourceBudget(Limits));
+		return FUeAgentResourceTracker();
 	}
 
 	UeAgentAuthoringState::FStateEntry MakeEntry(
@@ -150,13 +152,22 @@ namespace
 		FUeAgentResourceTracker Resources = MakeCompositionTracker();
 		FAuthoringModelPtr Model;
 		FWorkspaceError Error;
+		const bool bComposed = TryComposeAuthoringModel(
+			Request,
+			Resources,
+			Model,
+			Error);
 		Test.TestTrue(
 			FString::Printf(TEXT("%s fixture composes"), *TargetKind),
-			TryComposeAuthoringModel(
-				Request,
-				Resources,
-				Model,
-				Error));
+			bComposed);
+		if (!bComposed)
+		{
+			Test.AddError(FString::Printf(
+				TEXT("composition_error:%s:%s:%s"),
+				*Error.GetCode(),
+				*Error.GetSourceUnit(),
+				*Error.GetJsonPointer()));
+		}
 		Test.TestTrue(
 			FString::Printf(TEXT("%s fixture model is available"), *TargetKind),
 			Model.IsValid());
@@ -268,6 +279,15 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentGraphTreeAuthoringCompositionContractTest::RunTest(
 	const FString& Parameters)
 {
+	(void)Parameters;
+	FString ContractError;
+	TestTrue(
+		TEXT("graph/tree composition contracts register"),
+		RegisterGraphTreeTargetCompositionContracts(ContractError));
+	if (!ContractError.IsEmpty())
+	{
+		AddError(ContractError);
+	}
 	static const TCHAR* BlueprintSurfaces[] = {
 		TEXT("target_settings"),
 		TEXT("class_defaults"),
@@ -302,6 +322,12 @@ bool FUeAgentGraphTreeAuthoringCompositionContractTest::RunTest(
 		TEXT("graph_collection"),
 		TEXT("node_properties"),
 	};
+	static const TCHAR* TypedGraphSurfaces[] = {
+		TEXT("target_settings"),
+		TEXT("parameter_collection"),
+		TEXT("graph_collection"),
+		TEXT("node_properties"),
+	};
 	const FExpectedComposition Expected[] = {
 		{TEXT("ue.blueprint.asset"), BlueprintSurfaces, UE_ARRAY_COUNT(BlueprintSurfaces)},
 		{TEXT("ue.widget_blueprint.asset"), WidgetSurfaces, UE_ARRAY_COUNT(WidgetSurfaces)},
@@ -310,6 +336,8 @@ bool FUeAgentGraphTreeAuthoringCompositionContractTest::RunTest(
 		{TEXT("ue.material_function.asset"), MaterialSurfaces, UE_ARRAY_COUNT(MaterialSurfaces)},
 		{TEXT("ue.material_instance.asset"), MaterialSurfaces, UE_ARRAY_COUNT(MaterialSurfaces)},
 		{TEXT("ue.pcg_graph.asset"), PcgSurfaces, UE_ARRAY_COUNT(PcgSurfaces)},
+		{TEXT("ue.texture_graph.asset"), TypedGraphSurfaces, UE_ARRAY_COUNT(TypedGraphSurfaces)},
+		{TEXT("ue.deformer_graph.asset"), TypedGraphSurfaces, UE_ARRAY_COUNT(TypedGraphSurfaces)},
 	};
 	TestEqual(
 		TEXT("composition schema is stable"),
@@ -319,7 +347,25 @@ bool FUeAgentGraphTreeAuthoringCompositionContractTest::RunTest(
 	{
 		VerifyComposition(*this, Row);
 	}
-
+	FCompositionSemanticRouteContract MaterialGraphRoute;
+	TestTrue(
+		TEXT("Material export graph resolves through the declared common Graph route"),
+		TryResolveTargetCompositionSemanticRoute(
+			TEXT("ue.material.asset"),
+			UeAgentMaterialAuthoring::ExportGraphSemanticId,
+			MaterialGraphRoute));
+	TestEqual(
+		TEXT("Material export graph uses the shared graph surface"),
+		MaterialGraphRoute.SurfaceId,
+		FString(TEXT("graph_collection")));
+	TestEqual(
+		TEXT("Material export graph is a structure unit"),
+		MaterialGraphRoute.UnitKind,
+		ESemanticUnitKind::StructureState);
+	TestEqual(
+		TEXT("Material export graph uses the common Graph role"),
+		MaterialGraphRoute.Role,
+		ECompositionSemanticRouteRole::Graph);
 	TSharedRef<FJsonObject> Target = MakeShared<FJsonObject>();
 	Target->SetStringField(TEXT("asset_path"), TEXT("/Game/Fixture/BP_Composition"));
 	Target->SetStringField(TEXT("asset_kind"), TEXT("blueprint"));
@@ -344,7 +390,6 @@ bool FUeAgentGraphTreeAuthoringCompositionContractTest::RunTest(
 	SecondEdge->SetStringField(TEXT("from_pin"), TEXT("then"));
 	SecondEdge->SetStringField(TEXT("to_node"), TEXT("builtin:self"));
 	SecondEdge->SetStringField(TEXT("to_pin"), TEXT("execute"));
-
 	FCompositionRequest Request;
 	Request.TargetKind = TEXT("ue.blueprint.asset");
 	Request.ProfileId = TEXT("llm_authoring");
@@ -502,7 +547,7 @@ bool FUeAgentGraphTreeAuthoringCompositionContractTest::RunTest(
 
 		FUeAgentResourceTracker PlanResources = MakeCompositionTracker();
 		FExportWorkspacePlanPtr Plan;
-		TestTrue(
+		const bool bPlanBuilt = TestTrue(
 			TEXT("large token telemetry does not block composition export planning"),
 			TryBuildCompositionExportPlan(
 				Model.ToSharedRef(),
@@ -513,6 +558,14 @@ bool FUeAgentGraphTreeAuthoringCompositionContractTest::RunTest(
 				PlanResources,
 				Plan,
 				Error));
+		if (!bPlanBuilt)
+		{
+			AddError(FString::Printf(
+				TEXT("composition_export_error:%s:%s:%s"),
+				*Error.GetCode(),
+				*Error.GetSourceUnit(),
+				*Error.GetJsonPointer()));
+		}
 		TestTrue(TEXT("composition export plan is available"), Plan.IsValid());
 		if (Plan.IsValid())
 		{
@@ -607,6 +660,36 @@ bool FUeAgentGraphTreeAuthoringCompositionContractTest::RunTest(
 						}));
 		}
 	}
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentBlueprintMemberCompositionContractTest,
+	"UeAgentInterface.Core.HjsonWorkspace.AuthoringComposition.BlueprintMembers",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentBlueprintMemberCompositionContractTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	FString ContractError;
+	TestTrue(
+		TEXT("graph/tree composition contracts register"),
+		RegisterGraphTreeTargetCompositionContracts(ContractError));
+	FTargetCompositionContract BlueprintContract;
+	TestTrue(
+		TEXT("Blueprint composition contract is available"),
+		FTargetCompositionRegistry::Get().FindContract(
+			TEXT("ue.blueprint.asset"), BlueprintContract));
+	TestTrue(
+		TEXT("Blueprint members use one readable structure-state surface"),
+		BlueprintContract.Surfaces.ContainsByPredicate(
+			[](const FCompositionSurfaceContract& Surface)
+			{
+				return Surface.SurfaceId == TEXT("member_collection")
+					&& Surface.SurfaceKind == EAuthoringSurfaceKind::Structure
+					&& Surface.UnitKind == ESemanticUnitKind::StructureState;
+			}));
 	return !HasAnyErrors();
 }
 
@@ -741,7 +824,6 @@ bool FUeAgentOtherDomainAuthoringCompositionContractTest::RunTest(
 		{TEXT("ue.niagara_script.asset"), NiagaraSurfaces, UE_ARRAY_COUNT(NiagaraSurfaces)},
 		{TEXT("ue.level_sequence.asset"), TimelineSurfaces, UE_ARRAY_COUNT(TimelineSurfaces)},
 		{TEXT("ue.animation_sequence.asset"), TimelineSurfaces, UE_ARRAY_COUNT(TimelineSurfaces)},
-		{TEXT("ue.curve.asset"), TimelineSurfaces, UE_ARRAY_COUNT(TimelineSurfaces)},
 		{TEXT("ue.level.asset"), LevelSurfaces, UE_ARRAY_COUNT(LevelSurfaces)},
 		{TEXT("ue.control_rig.asset"), RigSurfaces, UE_ARRAY_COUNT(RigSurfaces)},
 		{TEXT("ue.ik_rig.asset"), RigSurfaces, UE_ARRAY_COUNT(RigSurfaces)},
@@ -868,6 +950,8 @@ bool FUeAgentOtherDomainAuthoringCompositionContractTest::RunTest(
 
 	TSharedRef<FJsonObject> ActorTarget = MakeShared<FJsonObject>();
 	ActorTarget->SetStringField(TEXT("actor_guid"), TEXT("actor-1"));
+	ActorTarget->SetStringField(TEXT("actor_class"), TEXT("/Script/Engine.Actor"));
+	ActorTarget->SetStringField(TEXT("actor_class"), TEXT("/Script/Engine.PointLight"));
 	TSharedRef<FJsonObject> ActorState = MakeShared<FJsonObject>();
 	ActorState->SetStringField(TEXT("label"), TEXT("FixtureActor"));
 	TSharedRef<FJsonObject> ActorTransform = MakeShared<FJsonObject>();
@@ -881,6 +965,7 @@ bool FUeAgentOtherDomainAuthoringCompositionContractTest::RunTest(
 	ActorState->SetObjectField(TEXT("transform"), ActorTransform);
 	TSharedRef<FJsonObject> ComponentTarget = MakeShared<FJsonObject>();
 	ComponentTarget->SetStringField(TEXT("component_name"), TEXT("Root"));
+	ComponentTarget->SetStringField(TEXT("component_class"), TEXT("/Script/Engine.SceneComponent"));
 	TSharedRef<FJsonObject> ComponentProperty =
 		MakeShared<FJsonObject>();
 	ComponentProperty->SetBoolField(TEXT("value"), true);
@@ -888,8 +973,20 @@ bool FUeAgentOtherDomainAuthoringCompositionContractTest::RunTest(
 		{TEXT("asset_path"), TEXT("/Game/Fixture/Level")},
 		{TEXT("actor_guid"), TEXT("actor-1")},
 	};
-	TMap<FString, FString> ComponentSelectors = ActorSelectors;
-	ComponentSelectors.Add(TEXT("component_name"), TEXT("Root"));
+	TSharedRef<FJsonObject> UnlabelledActorTarget = MakeShared<FJsonObject>();
+	UnlabelledActorTarget->SetStringField(TEXT("actor_guid"), TEXT("actor-2"));
+	UnlabelledActorTarget->SetStringField(
+		TEXT("actor_class"), TEXT("/Script/Engine.PointLight"));
+	TSharedRef<FJsonObject> UnlabelledActorState = MakeShared<FJsonObject>();
+	const TMap<FString, FString> UnlabelledActorSelectors{
+		{TEXT("asset_path"), TEXT("/Game/Fixture/Level")},
+		{TEXT("actor_guid"), TEXT("actor-2")},
+	};
+	const TMap<FString, FString> ComponentSelectors{
+		{TEXT("asset_path"), TEXT("/Game/Fixture/Level")},
+		{TEXT("owner_actor_guid"), TEXT("actor-1")},
+		{TEXT("component_name"), TEXT("Root")},
+	};
 	FAuthoringModelPtr LevelModel = ComposeFixture(
 		*this,
 		TEXT("ue.level.asset"),
@@ -913,6 +1010,18 @@ bool FUeAgentOtherDomainAuthoringCompositionContractTest::RunTest(
 				ActorSelectors,
 				MakeShared<FJsonValueObject>(ActorState)),
 			MakeEntry(
+				TEXT("uai.semantic.level.actor.target"),
+				TEXT("level_actor"),
+				TEXT("actor:actor-2"),
+				UnlabelledActorSelectors,
+				MakeShared<FJsonValueObject>(UnlabelledActorTarget)),
+			MakeEntry(
+				TEXT("uai.semantic.level.actor"),
+				TEXT("level_actor"),
+				TEXT("actor:actor-2"),
+				UnlabelledActorSelectors,
+				MakeShared<FJsonValueObject>(UnlabelledActorState)),
+			MakeEntry(
 				TEXT("uai.semantic.level.component.target"),
 				TEXT("level_component"),
 				TEXT("component:actor-1:Root"),
@@ -924,7 +1033,7 @@ bool FUeAgentOtherDomainAuthoringCompositionContractTest::RunTest(
 				TEXT("component_property:actor-1:Root:Visible"),
 				{
 					{TEXT("asset_path"), TEXT("/Game/Fixture/Level")},
-					{TEXT("actor_guid"), TEXT("actor-1")},
+					{TEXT("owner_actor_guid"), TEXT("actor-1")},
 					{TEXT("component_name"), TEXT("Root")},
 					{TEXT("property_path"), TEXT("Visible")},
 				},
@@ -943,6 +1052,29 @@ bool FUeAgentOtherDomainAuthoringCompositionContractTest::RunTest(
 			TEXT("actor_component_properties"),
 			ESemanticUnitKind::PropertySet));
 	TestTrue(
+		TEXT("level state fallback uses a readable semantic field-set key"),
+		LevelModel.IsValid()
+			&& LevelModel->GetUnits().ContainsByPredicate(
+				[](const FSemanticUnit& Unit)
+				{
+					return Unit.GetRole()
+							== TEXT("actor_component_properties")
+						&& Unit.GetSemanticTypeRef()
+							== TEXT("uai.semantic.level.actor")
+						&& Unit.GetFieldSetRef() == TEXT("level_actor");
+				}));
+	TestFalse(
+		TEXT("level property field-set keys contain no binding or hash-shaped fallback"),
+		LevelModel.IsValid()
+			&& LevelModel->GetUnits().ContainsByPredicate(
+				[](const FSemanticUnit& Unit)
+				{
+					return Unit.GetRole()
+							== TEXT("actor_component_properties")
+						&& (Unit.GetFieldSetRef().Contains(TEXT("binding:"))
+							|| Unit.GetFieldSetRef().StartsWith(TEXT("sha")));
+				}));
+	TestTrue(
 		TEXT("level spatial transform remains a canonical structured value"),
 		LevelModel.IsValid()
 			&& LevelModel->GetUnits().ContainsByPredicate(
@@ -953,26 +1085,99 @@ bool FUeAgentOtherDomainAuthoringCompositionContractTest::RunTest(
 						&& Unit.GetValues().Contains(
 							TEXT("transform"));
 				}));
+	TestTrue(
+		TEXT("level hierarchy owns one keyed actors desired-state map"),
+		LevelModel.IsValid()
+			&& LevelModel->GetUnits().ContainsByPredicate(
+				[](const FSemanticUnit& Unit)
+				{
+					return Unit.GetRole() == TEXT("actor_component_hierarchy")
+						&& Unit.GetUnitKind() == ESemanticUnitKind::StructureState
+						&& Unit.GetValues().Contains(TEXT("actors"));
+				}));
+	if (LevelModel.IsValid())
+	{
+		FUeAgentResourceTracker LevelPlanResources = MakeCompositionTracker();
+		FExportWorkspacePlanPtr LevelPlan;
+		FWorkspaceError LevelPlanError;
+		TestTrue(TEXT("level keyed actors export plan builds"),
+			TryBuildCompositionExportPlan(
+				LevelModel.ToSharedRef(), {}, LevelPlanResources, LevelPlan, LevelPlanError));
+		bool bFoundActorsDocument = false;
+		bool bFoundVisibleHierarchyItem = false;
+		bool bManifestCapturedActors = false;
+		bool bManifestCapturedItemIdentity = false;
+		if (LevelPlan.IsValid())
+		{
+			for (const FExportFilePlan& File : LevelPlan->GetFiles())
+			{
+				const FUTF8ToTCHAR Text(
+					reinterpret_cast<const ANSICHAR*>(File.GetCanonicalUtf8().GetData()),
+					File.GetCanonicalUtf8().Num());
+				const FString Visible(Text.Length(), Text.Get());
+				if (File.GetRelativePath() == TEXT(".uai/workspace.hjson"))
+				{
+					bManifestCapturedActors =
+						Visible.Contains(TEXT("captured_values"))
+						&& Visible.Contains(TEXT("actors"));
+					bManifestCapturedItemIdentity =
+						Visible.Contains(TEXT("actor_guid"))
+						&& Visible.Contains(TEXT("component_name"));
+					continue;
+				}
+				if (Visible.Contains(TEXT("actor_class"))
+					|| Visible.Contains(TEXT("component_class")))
+				{
+					bFoundVisibleHierarchyItem = true;
+					TestFalse(TEXT("visible hierarchy item omits unit id"),
+						Visible.Contains(TEXT("unit_id")));
+					TestFalse(TEXT("visible hierarchy item omits actor guid"),
+						Visible.Contains(TEXT("actor_guid")));
+					TestFalse(TEXT("visible hierarchy item omits object path"),
+						Visible.Contains(TEXT("object_path")));
+				}
+				if (Visible.Contains(TEXT("actors"))
+					&& Visible.Contains(TEXT("FixtureActor")))
+				{
+					bFoundActorsDocument = true;
+					TestFalse(TEXT("visible actors omit captured values"),
+						Visible.Contains(TEXT("captured_values")));
+					TestFalse(TEXT("visible actors omit actor guid"),
+						Visible.Contains(TEXT("actor_guid")));
+					TestFalse(TEXT("visible actors omit operations"),
+						Visible.Contains(TEXT("operation")));
+				}
+			}
+		}
+		TestTrue(TEXT("ordinary level file contains readable keyed actors"),
+			bFoundActorsDocument);
+		TestTrue(TEXT("level manifest captures keyed actor baseline"),
+			bManifestCapturedActors);
+		TestTrue(TEXT("ordinary level files contain readable hierarchy items"),
+			bFoundVisibleHierarchyItem);
+		TestTrue(TEXT("level manifest captures hierarchy item identity"),
+			bManifestCapturedItemIdentity);
+	}
 	bool bComponentOwnedByActor = false;
 	if (LevelModel.IsValid())
 	{
-		FString ActorUnitId;
+		TSet<FString> ActorUnitIds;
 		for (const FSemanticUnit& Unit : LevelModel->GetUnits())
 		{
 			if (Unit.GetSemanticTypeRef().EndsWith(
 				TEXT(".actor.target")))
 			{
-				ActorUnitId = Unit.GetUnitId();
+				ActorUnitIds.Add(Unit.GetUnitId());
 			}
 		}
 		bComponentOwnedByActor =
-			!ActorUnitId.IsEmpty()
+			!ActorUnitIds.IsEmpty()
 			&& LevelModel->GetUnits().ContainsByPredicate(
-				[&ActorUnitId](const FSemanticUnit& Unit)
+				[&ActorUnitIds](const FSemanticUnit& Unit)
 				{
 					return Unit.GetSemanticTypeRef().EndsWith(
 							TEXT(".component.target"))
-						&& Unit.GetOwnerRef() == ActorUnitId;
+						&& ActorUnitIds.Contains(Unit.GetOwnerRef());
 				});
 	}
 	TestTrue(
@@ -1083,5 +1288,244 @@ bool FUeAgentOtherDomainAuthoringCompositionContractTest::RunTest(
 			AudioModel,
 			TEXT("audio_graph"),
 			ESemanticUnitKind::RelationSet));
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentBlueprintKeyedComponentEnvelopeTest,
+	"UeAgentInterface.Core.HjsonWorkspace.AuthoringComposition.BlueprintKeyedComponentEnvelope",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentBlueprintKeyedComponentEnvelopeTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+	FString ContractError;
+	TestTrue(
+		TEXT("Blueprint composition contracts register"),
+		RegisterGraphTreeTargetCompositionContracts(ContractError));
+	if (!ContractError.IsEmpty())
+	{
+		AddError(ContractError);
+	}
+
+	TSharedRef<FJsonObject> Target = MakeShared<FJsonObject>();
+	Target->SetStringField(
+		TEXT("asset_path"), TEXT("/Game/Fixture/BP_ComponentProjection"));
+	Target->SetStringField(TEXT("asset_kind"), TEXT("blueprint"));
+	TSharedRef<FJsonObject> Component = MakeShared<FJsonObject>();
+	Component->SetStringField(TEXT("name"), TEXT("DefaultSceneRoot"));
+	Component->SetStringField(
+		TEXT("class"), TEXT("/Script/Engine.SceneComponent"));
+	Component->SetStringField(TEXT("parent"), TEXT(""));
+	Component->SetStringField(
+		TEXT("component_guid"), TEXT("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+
+	FCompositionRequest Request;
+	Request.TargetKind = TEXT("ue.blueprint.asset");
+	Request.ProfileId = TEXT("llm_authoring");
+	Request.BaseRevision = TEXT("fixture-component-r1");
+	Request.SourceProvenance = TEXT("fixture:component:native");
+	Request.Entries = {
+		MakeEntry(
+			TEXT("uai.semantic.blueprint.export.target"),
+			TEXT("blueprint_asset"),
+			TEXT("blueprint:/Game/Fixture/BP_ComponentProjection"),
+			{{TEXT("asset_path"), TEXT("/Game/Fixture/BP_ComponentProjection")}},
+			MakeShared<FJsonValueObject>(Target)),
+		MakeEntry(
+			TEXT("uai.semantic.blueprint.component"),
+			TEXT("blueprint_component"),
+			TEXT("component:DefaultSceneRoot"),
+			{
+				{TEXT("asset_path"), TEXT("/Game/Fixture/BP_ComponentProjection")},
+				{TEXT("component_guid"), TEXT("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")},
+				{TEXT("component_name"), TEXT("DefaultSceneRoot")},
+			},
+			MakeShared<FJsonValueObject>(Component)),
+	};
+
+	FUeAgentResourceTracker Resources = MakeCompositionTracker();
+	FAuthoringModelPtr Model;
+	FWorkspaceError Error;
+	TestTrue(
+		TEXT("minimal Blueprint component state composes"),
+		TryComposeAuthoringModel(Request, Resources, Model, Error));
+	if (!Model.IsValid())
+	{
+		AddError(Error.GetCode());
+		return false;
+	}
+
+	FUeAgentResourceTracker PlanResources = MakeCompositionTracker();
+	FExportWorkspacePlanPtr Plan;
+	TestTrue(
+		TEXT("minimal Blueprint component export plan builds"),
+		TryBuildCompositionExportPlan(
+			Model.ToSharedRef(), {}, PlanResources, Plan, Error));
+	if (!Plan.IsValid())
+	{
+		AddError(Error.GetCode());
+		return false;
+	}
+
+	bool bFoundVisibleComponents = false;
+	bool bManifestCapturedComponents = false;
+	for (const FExportFilePlan& File : Plan->GetFiles())
+	{
+		const FUTF8ToTCHAR Text(
+			reinterpret_cast<const ANSICHAR*>(File.GetCanonicalUtf8().GetData()),
+			File.GetCanonicalUtf8().Num());
+		const FString Contents(Text.Length(), Text.Get());
+		if (File.GetRelativePath() == TEXT(".uai/workspace.hjson"))
+		{
+			bManifestCapturedComponents =
+				Contents.Contains(TEXT("captured_values"))
+				&& Contents.Contains(TEXT("components"))
+				&& Contents.Contains(TEXT("component_guid"));
+			continue;
+		}
+		if (Contents.Contains(TEXT("components"))
+			&& Contents.Contains(TEXT("DefaultSceneRoot")))
+		{
+			bFoundVisibleComponents =
+				Contents.Contains(TEXT("Component1"))
+				&& Contents.Contains(TEXT("name"))
+				&& Contents.Contains(TEXT("class"))
+				&& Contents.Contains(TEXT("parent"))
+				&& !Contents.Contains(TEXT("captured_values"))
+				&& !Contents.Contains(TEXT("operation"))
+				&& !Contents.Contains(TEXT("component_guid"));
+		}
+	}
+	TestTrue(TEXT("ordinary Blueprint file exposes readable components"),
+		bFoundVisibleComponents);
+	TestTrue(TEXT("machine manifest captures component baseline"),
+		bManifestCapturedComponents);
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentLevelKeyedActorEnvelopeTest,
+	"UeAgentInterface.Core.HjsonWorkspace.AuthoringComposition.LevelKeyedActorEnvelope",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentLevelKeyedActorEnvelopeTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	FString ContractError;
+	TestTrue(
+		TEXT("level composition contracts register"),
+		RegisterOtherTargetCompositionContracts(ContractError));
+	TSharedRef<FJsonObject> LevelTarget = MakeShared<FJsonObject>();
+	LevelTarget->SetStringField(TEXT("asset_path"), TEXT("/Game/Fixture/Level"));
+	TSharedRef<FJsonObject> ActorTarget = MakeShared<FJsonObject>();
+	ActorTarget->SetStringField(TEXT("actor_guid"), TEXT("actor-1"));
+	TSharedRef<FJsonObject> ActorState = MakeShared<FJsonObject>();
+	ActorState->SetStringField(TEXT("label"), TEXT("FixtureActor"));
+	TSharedRef<FJsonObject> ActorTransform = MakeShared<FJsonObject>();
+	ActorTransform->SetArrayField(
+		TEXT("location"),
+		{
+			MakeShared<FJsonValueNumber>(100.0),
+			MakeShared<FJsonValueNumber>(200.0),
+			MakeShared<FJsonValueNumber>(300.0),
+		});
+	ActorState->SetObjectField(TEXT("transform"), ActorTransform);
+	const TMap<FString, FString> ActorSelectors{
+		{TEXT("asset_path"), TEXT("/Game/Fixture/Level")},
+		{TEXT("actor_guid"), TEXT("actor-1")},
+	};
+	FAuthoringModelPtr Model = ComposeFixture(
+		*this,
+		TEXT("ue.level.asset"),
+		{
+			MakeEntry(
+				TEXT("uai.semantic.level.world.target"),
+				TEXT("level_world"),
+				TEXT("world:/Game/Fixture/Level"),
+				{{TEXT("asset_path"), TEXT("/Game/Fixture/Level")}},
+				MakeShared<FJsonValueObject>(LevelTarget)),
+			MakeEntry(
+				TEXT("uai.semantic.level.actor.target"),
+				TEXT("level_actor"),
+				TEXT("actor:actor-1"),
+				ActorSelectors,
+				MakeShared<FJsonValueObject>(ActorTarget)),
+			MakeEntry(
+				TEXT("uai.semantic.level.actor"),
+				TEXT("level_actor"),
+				TEXT("actor:actor-1"),
+				ActorSelectors,
+				MakeShared<FJsonValueObject>(ActorState)),
+		});
+	if (!Model.IsValid())
+	{
+		return false;
+	}
+
+	FUeAgentResourceTracker PlanResources = MakeCompositionTracker();
+	FExportWorkspacePlanPtr Plan;
+	FWorkspaceError Error;
+	TestTrue(
+		TEXT("minimal level keyed actor export plan builds"),
+		TryBuildCompositionExportPlan(
+			Model.ToSharedRef(), {}, PlanResources, Plan, Error));
+	if (!Plan.IsValid())
+	{
+		return false;
+	}
+
+	bool bManifestCapturedActors = false;
+	bool bFoundVisibleActors = false;
+	bool bFoundFallbackActor = false;
+	bool bFoundReadableActorProperties = false;
+	for (const FExportFilePlan& File : Plan->GetFiles())
+	{
+		const FUTF8ToTCHAR Text(
+			reinterpret_cast<const ANSICHAR*>(File.GetCanonicalUtf8().GetData()),
+			File.GetCanonicalUtf8().Num());
+		const FString Contents(Text.Length(), Text.Get());
+		if (File.GetRelativePath() == TEXT(".uai/workspace.hjson"))
+		{
+			bManifestCapturedActors =
+				Contents.Contains(TEXT("captured_values"))
+				&& Contents.Contains(TEXT("actors"));
+			continue;
+		}
+		if (Contents.Contains(TEXT("actors"))
+			&& (Contents.Contains(TEXT("FixtureActor: {"))
+				|| Contents.Contains(TEXT("\"FixtureActor\": {"))))
+		{
+			bFoundVisibleActors = true;
+			bFoundFallbackActor = Contents.Contains(TEXT("Actor: {"))
+				|| Contents.Contains(TEXT("\"Actor\": {"));
+			TestFalse(TEXT("visible actor structure omits captured values"),
+				Contents.Contains(TEXT("captured_values")));
+			TestFalse(TEXT("visible actor structure omits actor guid"),
+				Contents.Contains(TEXT("actor_guid")));
+			TestFalse(TEXT("visible actor structure omits operations"),
+				Contents.Contains(TEXT("operation")));
+		}
+		if (File.GetRelativePath().EndsWith(TEXT("/properties.hjson"))
+			&& Contents.Contains(TEXT("FixtureActor"))
+			&& Contents.Contains(TEXT("transform")))
+		{
+			bFoundReadableActorProperties =
+				Contents.Contains(TEXT("level_actor"));
+			TestFalse(TEXT("visible actor property rows omit binding identities"),
+				Contents.Contains(TEXT("binding:")));
+			TestFalse(TEXT("visible actor property rows omit digest markers"),
+				Contents.Contains(TEXT("sha256:")));
+		}
+	}
+	TestTrue(TEXT("machine manifest captures actors baseline"),
+		bManifestCapturedActors);
+	TestTrue(TEXT("ordinary structure exposes readable actors"),
+		bFoundVisibleActors);
+	TestTrue(TEXT("unlabelled actor uses a stable readable fallback key"),
+		bFoundFallbackActor);
+	TestTrue(TEXT("ordinary properties expose a readable actor state row"),
+		bFoundReadableActorProperties);
 	return !HasAnyErrors();
 }

@@ -2,6 +2,7 @@
 
 #include "Animation/AnimSequence.h"
 #include "Components/SceneComponent.h"
+#include "Dom/JsonValue.h"
 #include "GeometryCache.h"
 #include "GeometryCacheMeshData.h"
 #include "Grid/PCGPartitionActor.h"
@@ -25,16 +26,56 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 
 	namespace
 	{
-		bool Fail(
-			FUeAgentRigSimulationSpatialExecutionError& OutError,
-			FString Code,
-			FString Subject = FString(),
-			FString Detail = FString())
+		using UE::UAI::Contract::FDiagnostic;
+
+		FDiagnostic NativeFact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, const FString& Expected, const FString& Target = FString())
 		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(Subject);
-			OutError.Detail = MoveTemp(Detail);
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("native_execution"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Path;
+			Error.TargetPath = Target;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValuePresent = true;
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			return Error;
+		}
+
+		void NativeContext(FDiagnostic& Error, const FString& Path = FString(), bool bCanonicalValue = false)
+		{
+			Error.SourceKind = TEXT("native_result");
+			if (!Path.IsEmpty() || bCanonicalValue)
+			{
+				auto Locate = [&Path, bCanonicalValue](FString Pointer)
+				{
+					// Canonical constructors locate their value parameter at /value.
+					if (bCanonicalValue && (Pointer == TEXT("/value") || Pointer.StartsWith(TEXT("/value/"))))
+						Pointer.RightChopInline(6);
+					if (Pointer.IsEmpty() || Pointer == TEXT("/")) return Path;
+					if (!Pointer.StartsWith(TEXT("/")))
+						Pointer = TEXT("/") + Pointer.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+					return Path + Pointer;
+				};
+				if (Error.Source.InternalJsonPath.IsEmpty()) Error.Source.InternalJsonPath = Error.Source.JsonPath;
+				Error.Source.JsonPath = Locate(Error.Source.JsonPath);
+				Error.PropertyPath = Error.PropertyPath.IsEmpty() ? Error.Source.JsonPath : Locate(Error.PropertyPath);
+				if (!Error.SemanticPointer.IsEmpty()) Error.SemanticPointer = Locate(Error.SemanticPointer);
+			}
+			for (auto& Child : Error.Diagnostics) NativeContext(Child, Path, bCanonicalValue);
+			if (Error.PublicCause)
+			{
+				auto Cause = MakeShared<FDiagnostic>(*Error.PublicCause);
+				NativeContext(*Cause, Path, bCanonicalValue);
+				Error.PublicCause = MoveTemp(Cause);
+			}
+		}
+		bool Fail(FDiagnostic& OutError, FDiagnostic Diagnostic, const FString& Subject = FString(),
+			const FString& NativePath = FString(), bool bCanonicalValue = false)
+		{
+			NativeContext(Diagnostic, NativePath, bCanonicalValue);
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
 			return false;
 		}
 
@@ -42,22 +83,24 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		{
 			return CapabilityId == TEXT("deformer.geometry.sample")
 				|| CapabilityId == TEXT("deformer.training_inputs.validate")
-				|| CapabilityId == TEXT("deformer.evaluation.sample")
-				|| CapabilityId == TEXT("pcg.generated_spatial_data.read")
-				|| CapabilityId == TEXT("pcg.partition.spatial_state.read");
+				|| CapabilityId == TEXT("deformer.evaluation.sample");
 		}
 
 		const FUeAgentRigSimulationSpatialRequest* ProductionRequest(
 			const FUeAgentRigSimulationSpatialTypedRequestRef& Request,
 			FUeAgentRigSimulationSpatialExecutionError& OutError)
 		{
-			if (Request->GetFamilyId() != TEXT("simulation_observation")
-				|| Request->GetTypeId().IsEmpty()
-				|| Request->GetRequestKindId().IsEmpty())
+			const FString Field = Request->GetFamilyId() != TEXT("simulation_observation") ? TEXT("family_id")
+				: Request->GetTypeId().IsEmpty() ? TEXT("type_id")
+				: Request->GetRequestKindId().IsEmpty() ? TEXT("request_kind_id") : FString();
+			if (!Field.IsEmpty())
 			{
-				Fail(OutError,
-					TEXT("rig_simulation_spatial_deformer_pcg_typed_request_invalid"),
-					Request->GetTypeId());
+				const FString Actual = Field == TEXT("family_id") ? Request->GetFamilyId()
+					: Field == TEXT("type_id") ? Request->GetTypeId() : Request->GetRequestKindId();
+				Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_typed_request_invalid"),
+					TEXT("The Deformer/PCG request does not identify the required request family or type."),
+					TEXT("/") + Field, MakeShared<FJsonValueString>(Actual),
+					Field == TEXT("family_id") ? TEXT("simulation_observation") : TEXT("nonempty identifier")), Request->GetTypeId());
 				return nullptr;
 			}
 			return static_cast<const FUeAgentRigSimulationSpatialRequest*>(&Request.Get());
@@ -118,21 +161,6 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			return Result;
 		}
 
-		TSharedPtr<FJsonObject> GenerationJson(
-			const FRigSimulationSpatialGenerationIdentity& Identity)
-		{
-			const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-			Result->SetStringField(TEXT("source_ref"), Identity.SourceRef);
-			Result->SetStringField(TEXT("generation"), Identity.Generation);
-			const TSharedPtr<FJsonObject> Revision = MakeShared<FJsonObject>();
-			Revision->SetStringField(TEXT("source_id"), Identity.Revision.SourceId);
-			Revision->SetStringField(TEXT("generation"), Identity.Revision.Generation);
-			Revision->SetStringField(TEXT("sequence"),
-				FString::Printf(TEXT("%lld"), Identity.Revision.Sequence));
-			Result->SetObjectField(TEXT("revision"), Revision);
-			return Result;
-		}
-
 		FUeAgentSpatialFrame FrameAt(
 			const FUeAgentSpatialFrame& Frame,
 			const FUeAgentTemporalPoint& Time)
@@ -146,21 +174,29 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			const FUeAgentTemporalPoint& Point,
 			double& OutSeconds,
 			FUeAgentRigSimulationSpatialExecutionError& OutError,
-			const FString& Subject)
+			const FString& Subject, const FString& Path = TEXT("/converted_point"))
 		{
 			int64 Tick = 0;
 			int64 Numerator = 0;
 			int64 Denominator = 0;
-			if (!LexTryParseString(Tick, *Point.GetTick())
-				|| !LexTryParseString(Numerator, *Point.GetRateNumerator())
-				|| !LexTryParseString(Denominator, *Point.GetRateDenominator())
-				|| Numerator <= 0 || Denominator <= 0)
-				return Fail(OutError,
-					TEXT("rig_simulation_spatial_deformer_pcg_time_invalid"), Subject);
+			FString Field;
+			FString Actual;
+			FString Expected = TEXT("int64 decimal value");
+			if (!LexTryParseString(Tick, *Point.GetTick())) { Field = TEXT("tick"); Actual = Point.GetTick(); }
+			else if (!LexTryParseString(Numerator, *Point.GetRateNumerator())) { Field = TEXT("rate_numerator"); Actual = Point.GetRateNumerator(); }
+			else if (!LexTryParseString(Denominator, *Point.GetRateDenominator())) { Field = TEXT("rate_denominator"); Actual = Point.GetRateDenominator(); }
+			else if (Numerator <= 0) { Field = TEXT("rate_numerator"); Actual = Point.GetRateNumerator(); Expected = TEXT("positive int64"); }
+			else if (Denominator <= 0) { Field = TEXT("rate_denominator"); Actual = Point.GetRateDenominator(); Expected = TEXT("positive int64"); }
+			if (!Field.IsEmpty())
+				return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_time_invalid"),
+					TEXT("Native time cannot be converted to seconds because its tick or rate is invalid."),
+					Path + TEXT("/") + Field, MakeShared<FJsonValueString>(Actual), Expected), Subject);
 			OutSeconds = static_cast<double>(Tick) * static_cast<double>(Denominator)
 				/ static_cast<double>(Numerator);
 			return FMath::IsFinite(OutSeconds) ? true : Fail(OutError,
-				TEXT("rig_simulation_spatial_deformer_pcg_time_invalid"), Subject);
+				NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_time_invalid"),
+					TEXT("Native time conversion produced non-finite seconds."), Path + TEXT("/seconds"),
+					MakeShared<FJsonValueString>(ExactNumber(OutSeconds)), TEXT("finite seconds")), Subject);
 		}
 
 		bool TryNativePoint(
@@ -175,7 +211,11 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		{
 			TOptional<FUeAgentTemporalPoint> Native;
 			if (!Environment.TryConvertTemporalPointToClock(Input.ToTemporalPoint(),
-				NativeClockId, Resources, Native, OutError) || !Native.IsSet()) return false;
+				NativeClockId, Resources, Native, OutError)) return false;
+			if (!Native.IsSet()) return Fail(OutError,
+				NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_time_conversion_missing"),
+					TEXT("Temporal conversion reported success without a converted point."), TEXT("/converted_point"),
+					MakeShared<FJsonValueBoolean>(false), TEXT("converted temporal point")), Subject);
 			OutPoint = Native.GetValue();
 			return TrySeconds(OutPoint, OutSeconds, OutError, Subject);
 		}
@@ -191,16 +231,32 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		{
 			TOptional<FUeAgentTemporalRange> Native;
 			if (!Environment.TryConvertTemporalRangeToClock(Input.ToTemporalRange(),
-				NativeClockId, Resources, Native, OutError) || !Native.IsSet()
-				|| !Native->GetLowerBound().GetPoint().IsSet()
-				|| !Native->GetUpperBound().GetPoint().IsSet()) return false;
+				NativeClockId, Resources, Native, OutError)) return false;
+			if (!Native.IsSet() || !Native->GetLowerBound().GetPoint().IsSet()
+				|| !Native->GetUpperBound().GetPoint().IsSet())
+			{
+				const FString Path = !Native.IsSet() ? TEXT("/converted_range")
+					: !Native->GetLowerBound().GetPoint().IsSet() ? TEXT("/converted_range/lower")
+					: TEXT("/converted_range/upper");
+				return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_time_conversion_missing"),
+					TEXT("Temporal conversion did not provide the bounded range required for sampling."),
+					Path, MakeShared<FJsonValueBoolean>(false), TEXT("present converted range bound")), Subject);
+			}
 			OutRange = Native.GetValue();
 			double Lower = 0.0;
 			double Upper = 0.0;
-			return TrySeconds(OutRange.GetLowerBound().GetPoint().GetValue(), Lower,
-				OutError, Subject) && TrySeconds(
-				OutRange.GetUpperBound().GetPoint().GetValue(), Upper, OutError, Subject)
-				&& Lower <= Upper;
+			if (!TrySeconds(OutRange.GetLowerBound().GetPoint().GetValue(), Lower, OutError, Subject, TEXT("/converted_range/lower"))
+				|| !TrySeconds(OutRange.GetUpperBound().GetPoint().GetValue(), Upper, OutError, Subject, TEXT("/converted_range/upper"))) return false;
+			if (Lower > Upper)
+			{
+				const auto Bounds = MakeShared<FJsonObject>();
+				Bounds->SetNumberField(TEXT("lower_seconds"), Lower);
+				Bounds->SetNumberField(TEXT("upper_seconds"), Upper);
+				return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_time_range_invalid"),
+					TEXT("The native sampling range starts after it ends."), TEXT("/converted_range"),
+					MakeShared<FJsonValueObject>(Bounds), TEXT("lower_seconds <= upper_seconds")), Subject);
+			}
+			return true;
 		}
 
 		bool TryConvertValue(
@@ -218,10 +274,13 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		{
 			const FUeAgentSpatialValue NativeValue(Subject, Kind,
 				FrameAt(NativeFrame, Time), MoveTemp(Components), Time, {Evidence});
-			if (!NativeValue.IsValid()) return Fail(OutError,
-				TEXT("rig_simulation_spatial_deformer_pcg_native_sample_invalid"), Subject);
-			return Environment.TryConvertSpatialValueToFrame(NativeValue, OutputFrameId,
-				Resources, OutValue, OutError) && OutValue.IsValid();
+			if (!NativeValue.IsValid()) return Fail(OutError, NativeValue.GetValidationDiagnostic(), Subject);
+			if (!Environment.TryConvertSpatialValueToFrame(NativeValue, OutputFrameId,
+				Resources, OutValue, OutError)) return false;
+			return OutValue.IsValid() ? true : Fail(OutError,
+				NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_native_sample_missing"),
+					TEXT("Spatial conversion reported success without a converted sample."), TEXT("/converted_sample"),
+					MakeShared<FJsonValueBoolean>(false), TEXT("converted spatial sample")), Subject);
 		}
 
 		TSharedPtr<FJsonObject> SpatialValueJson(const FUeAgentSpatialValue& Value)
@@ -251,12 +310,18 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			else if (Selector.Mode == TEXT("refs"))
 			{
 				if (Selector.Refs.IsEmpty()) return Fail(OutError,
-					TEXT("rig_simulation_spatial_selector_refs_empty"));
-				for (const FString& Ref : Selector.Refs)
+					NativeFact(TEXT("rig_simulation_spatial_selector_refs_empty"),
+						TEXT("Reference selection requires at least one vertex reference."), TEXT("/vertex_selector/refs"),
+						MakeShared<FJsonValueNumber>(0), TEXT("one or more vertex references")));
+				for (int32 RefIndex = 0; RefIndex < Selector.Refs.Num(); ++RefIndex)
 				{
+					const FString& Ref = Selector.Refs[RefIndex];
 					const int32 Index = Refs.Find(Ref);
 					if (Index == INDEX_NONE) return Fail(OutError,
-						TEXT("rig_simulation_spatial_selector_ref_unavailable"), Ref);
+						NativeFact(TEXT("rig_simulation_spatial_selector_ref_unavailable"),
+							TEXT("The selected vertex reference is absent from the sampled geometry."),
+							TEXT("/vertex_selector/refs/") + FString::FromInt(RefIndex),
+							MakeShared<FJsonValueString>(Ref), TEXT("reference present in sampled geometry")), Ref);
 					OutIndices.AddUnique(Index);
 				}
 			}
@@ -264,14 +329,22 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			{
 				const int32 Start = Selector.Start.Get(0);
 				const int32 Count = Selector.Count.Get(Refs.Num() - Start);
-				if (Start < 0 || Count < 0 || Start > Refs.Num()
-					|| Count > Refs.Num() - Start) return Fail(OutError,
-					TEXT("rig_simulation_spatial_selector_range_invalid"));
+				if (Start < 0 || Count < 0 || Start > Refs.Num() || Count > Refs.Num() - Start)
+				{
+					const auto Range = MakeShared<FJsonObject>();
+					Range->SetNumberField(TEXT("start"), Start);
+					Range->SetNumberField(TEXT("count"), Count);
+					Range->SetNumberField(TEXT("available"), Refs.Num());
+					return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_selector_range_invalid"),
+						TEXT("The vertex selection range is outside the sampled geometry."), TEXT("/vertex_selector"),
+						MakeShared<FJsonValueObject>(Range), TEXT("0 <= start <= available; 0 <= count <= available - start")));
+				}
 				for (int32 Index = Start; Index < Start + Count; ++Index)
 					OutIndices.Add(Index);
 			}
-			else return Fail(OutError,
-				TEXT("rig_simulation_spatial_selector_mode_invalid"), Selector.Mode);
+			else return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_selector_mode_invalid"),
+				TEXT("The vertex selector mode is unsupported."), TEXT("/vertex_selector/mode"),
+				MakeShared<FJsonValueString>(Selector.Mode), TEXT("all, refs or range")), Selector.Mode);
 			return true;
 		}
 
@@ -288,10 +361,16 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			FUeAgentRigSimulationSpatialExecutionError& OutError,
 			const FString& Subject)
 		{
-			if (Seconds < 0.0 || Seconds > static_cast<double>(Cache.CalculateDuration())
-				+ UE_DOUBLE_SMALL_NUMBER) return Fail(OutError,
-				TEXT("rig_simulation_spatial_geometry_sample_time_out_of_range"), Subject,
-				ExactNumber(Seconds));
+			const double Duration = static_cast<double>(Cache.CalculateDuration());
+			if (Seconds < 0.0 || Seconds > Duration + UE_DOUBLE_SMALL_NUMBER)
+			{
+				const auto SampleTime = MakeShared<FJsonObject>();
+				SampleTime->SetStringField(TEXT("seconds"), ExactNumber(Seconds));
+				SampleTime->SetStringField(TEXT("duration_seconds"), ExactNumber(Duration));
+				return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_geometry_sample_time_out_of_range"),
+					TEXT("The sample time lies outside the geometry cache duration."), TEXT("/sample_time"),
+					MakeShared<FJsonValueObject>(SampleTime), TEXT("0 <= seconds <= duration_seconds + UE_DOUBLE_SMALL_NUMBER"), Subject), Subject);
+			}
 			TArray<FGeometryCacheMeshData> Meshes;
 			Cache.GetMeshDataAtTime(static_cast<float>(Seconds), Meshes);
 			OutVertices.Reset();
@@ -305,8 +384,13 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 						FVector(Meshes[MeshIndex].Positions[VertexIndex])});
 				}
 			}
-			return !OutVertices.IsEmpty() ? true : Fail(OutError,
-				TEXT("rig_simulation_spatial_geometry_sample_empty"), Subject);
+			if (!OutVertices.IsEmpty()) return true;
+			const auto Sample = MakeShared<FJsonObject>();
+			Sample->SetStringField(TEXT("seconds"), ExactNumber(Seconds));
+			Sample->SetNumberField(TEXT("vertex_count"), 0);
+			return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_geometry_sample_empty"),
+				TEXT("The geometry cache returned no vertices at the requested sample time."), TEXT("/vertices"),
+				MakeShared<FJsonValueObject>(Sample), TEXT("one or more sampled vertices"), Subject), Subject);
 		}
 
 		bool TryGeometrySample(
@@ -388,8 +472,15 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		{
 			if (Input.TrainingInputRefs.Num() != Input.TemporalRanges.Num()
 				|| Input.TrainingInputRefs.Num() != Input.FrameMappings.Num())
-				return Fail(OutError,
-					TEXT("rig_simulation_spatial_training_input_alignment_invalid"));
+			{
+				const auto Counts = MakeShared<FJsonObject>();
+				Counts->SetNumberField(TEXT("training_input_refs"), Input.TrainingInputRefs.Num());
+				Counts->SetNumberField(TEXT("temporal_ranges"), Input.TemporalRanges.Num());
+				Counts->SetNumberField(TEXT("frame_mappings"), Input.FrameMappings.Num());
+				return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_training_input_alignment_invalid"),
+					TEXT("Training inputs, temporal ranges and frame mappings have different counts."),
+					FString(), MakeShared<FJsonValueObject>(Counts), TEXT("equal array lengths")));
+			}
 			struct FObserved
 			{
 				const FUeAgentRigSimulationSpatialDeformerTrainingInputBinding* Binding = nullptr;
@@ -409,9 +500,13 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			{
 				const auto* Binding = Environment.FindDeformerTrainingInputBinding(
 					Input.TrainingInputRefs[Index]);
-				if (!Binding || !Binding->IsValid()) return Fail(OutError,
-					TEXT("rig_simulation_spatial_training_input_binding_unavailable"),
-					Input.TrainingInputRefs[Index]);
+				if (!Binding) return Fail(OutError,
+					NativeFact(TEXT("rig_simulation_spatial_training_input_binding_unavailable"),
+						TEXT("No native training input binding exists for this reference."),
+						TEXT("/training_input_refs/") + FString::FromInt(Index),
+						MakeShared<FJsonValueString>(Input.TrainingInputRefs[Index]),
+						TEXT("registered training input binding"), Input.TrainingInputRefs[Index]));
+				if (!Binding->TryValidate(OutError)) return false;
 				FObserved Item;
 				Item.Binding = Binding;
 				FUeAgentTemporalRange NativeRange =
@@ -424,10 +519,18 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					Item.Range->GetLowerBound().GetPoint().GetValue();
 				if (Index == 0) OutCapturedAt = ProbeTime;
 				const FRigSimulationSpatialFrameMapping& Mapping = Input.FrameMappings[Index];
-				if (Mapping.SourceFrame.FrameId != Binding->NativeFrame.GetFrameId()
-					|| Mapping.ConversionEvidenceIds.IsEmpty()) return Fail(OutError,
-					TEXT("rig_simulation_spatial_training_frame_mapping_invalid"),
-					Binding->Identity);
+				if (Mapping.SourceFrame.FrameId != Binding->NativeFrame.GetFrameId())
+					return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_training_frame_mapping_invalid"),
+						TEXT("The training mapping source frame differs from the bound native frame."),
+						TEXT("/frame_mappings/") + FString::FromInt(Index) + TEXT("/source_frame/frame_id"),
+						MakeShared<FJsonValueString>(Mapping.SourceFrame.FrameId),
+						Binding->NativeFrame.GetFrameId(), Input.TrainingInputRefs[Index]), Binding->Identity);
+				if (Mapping.ConversionEvidenceIds.IsEmpty())
+					return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_training_frame_mapping_invalid"),
+						TEXT("The training frame mapping contains no conversion evidence."),
+						TEXT("/frame_mappings/") + FString::FromInt(Index) + TEXT("/conversion_evidence_ids"),
+						MakeShared<FJsonValueNumber>(0), TEXT("one or more conversion evidence references"),
+						Input.TrainingInputRefs[Index]), Binding->Identity);
 				if (!TryConvertValue(Environment, Binding->Identity,
 					EUeAgentSpatialQuantityKind::Point, Binding->NativeFrame, ProbeTime,
 					{TEXT("0"), TEXT("0"), TEXT("0")},
@@ -475,13 +578,13 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				TArray<FGeometryVertex> Lower;
 				TArray<FGeometryVertex> Upper;
 				if (!TrySeconds(Range.GetLowerBound().GetPoint().GetValue(), LowerSeconds,
-					OutError, Geometry->GetPathName())
+					OutError, Input.TrainingInputRefs[GeometryIndex], TEXT("/converted_range/lower"))
 					|| !TrySeconds(Range.GetUpperBound().GetPoint().GetValue(), UpperSeconds,
-						OutError, Geometry->GetPathName())
+						OutError, Input.TrainingInputRefs[GeometryIndex], TEXT("/converted_range/upper"))
 					|| !TryReadGeometry(*Geometry, LowerSeconds,
-						Lower, OutError, Geometry->GetPathName())
+						Lower, OutError, Input.TrainingInputRefs[GeometryIndex])
 					|| !TryReadGeometry(*Geometry, UpperSeconds,
-						Upper, OutError, Geometry->GetPathName())) return false;
+						Upper, OutError, Input.TrainingInputRefs[GeometryIndex])) return false;
 				if (ExpectedCount < 0 || Lower.Num() != ExpectedCount
 					|| Upper.Num() != ExpectedCount)
 				{
@@ -517,236 +620,28 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			return true;
 		}
 
-		bool SameGeneration(
-			const FRigSimulationSpatialGenerationIdentity& Left,
-			const FRigSimulationSpatialGenerationIdentity& Right)
-		{
-			return Left.SourceRef == Right.SourceRef
-				&& Left.Generation == Right.Generation
-				&& Left.Revision == Right.Revision;
-		}
-
-		bool CheckGeneration(
-			const FRigSimulationSpatialGenerationIdentity& Requested,
-			const FUeAgentRigSimulationSpatialPcgGenerationBinding& Binding,
-			IUeAgentRigSimulationSpatialNativeEnvironment& Environment,
-			FUeAgentRigSimulationSpatialExecutionError& OutError)
-		{
-			FRigSimulationSpatialRevision Current;
-			return SameGeneration(Requested, Binding.Identity)
-				&& Environment.TryReadRevision(Requested.SourceRef, Current, OutError)
-				&& Current == Requested.Revision
-				? true : Fail(OutError,
-					TEXT("rig_simulation_spatial_pcg_generation_identity_mismatch"),
-					Requested.SourceRef);
-		}
-
-		struct FPcgPointRecord
-		{
-			FString Ref;
-			FPCGPoint Point;
-			FString DataPath;
-			FString Pin;
-			TArray<FString> Tags;
-		};
-
-		bool TryPcgData(
-			const FUeAgentRigSimulationSpatialExecutionChainContract& Contract,
-			const FPcgGeneratedSpatialDataReadInput& Input,
-			const FUeAgentRigSimulationSpatialPcgGenerationBinding& Binding,
-			IUeAgentRigSimulationSpatialNativeEnvironment& Environment,
-			const FUeAgentOperationContext& Context,
-			TSharedPtr<FJsonObject>& OutRoot,
-			FUeAgentTemporalPoint& OutCapturedAt,
-			FUeAgentRigSimulationSpatialExecutionError& OutError)
-		{
-			if (!CheckGeneration(Input.GenerationIdentity, Binding, Environment,
-				OutError)) return false;
-			OutCapturedAt = Binding.GeneratedAt;
-			TArray<FPcgPointRecord> Records;
-			const FPCGDataCollection& Collection = Binding.GeneratedData->Data;
-			for (int32 DataIndex = 0; DataIndex < Collection.TaggedData.Num(); ++DataIndex)
-			{
-				const FPCGTaggedData& Tagged = Collection.TaggedData[DataIndex];
-				const UPCGBasePointData* PointData = Cast<UPCGBasePointData>(Tagged.Data.Get());
-				if (!PointData) continue;
-				const FConstPCGPointValueRanges PointRanges(PointData);
-				for (int32 PointIndex = 0; PointIndex < PointData->GetNumPoints(); ++PointIndex)
-				{
-					TArray<FString> Tags = Tagged.Tags.Array();
-					Tags.Sort();
-					FPcgPointRecord Record;
-					Record.Ref = FString::Printf(TEXT("data:%d/point:%d"),
-						DataIndex, PointIndex);
-					Record.Point = PointRanges.GetPoint(PointIndex);
-					Record.DataPath = PointData->GetPathName();
-					Record.Pin = Tagged.Pin.ToString();
-					Record.Tags = MoveTemp(Tags);
-					Records.Add(MoveTemp(Record));
-				}
-			}
-			TArray<FString> Refs;
-			for (const FPcgPointRecord& Record : Records) Refs.Add(Record.Ref);
-			TArray<int32> Indices;
-			if (!SelectIndices(Input.DataSelector, Refs, Indices, OutError)) return false;
-			TArray<TSharedPtr<FJsonValue>> Items;
-			for (const int32 Index : Indices)
-			{
-				const FPcgPointRecord& Record = Records[Index];
-				const FPCGPoint& Point = Record.Point;
-				const FMatrix Matrix = Point.Transform.ToMatrixWithScale();
-				TArray<FString> MatrixValues;
-				for (int32 Row = 0; Row < 4; ++Row)
-					for (int32 Column = 0; Column < 4; ++Column)
-						MatrixValues.Add(ExactNumber(Matrix.M[Column][Row]));
-				const FString Evidence = Binding.GeneratedData->GetPathName() + TEXT("#")
-					+ Record.Ref + TEXT("@") + Binding.Identity.Generation;
-				FUeAgentSpatialValuePtr Transform;
-				FUeAgentSpatialValuePtr BoundsMin;
-				FUeAgentSpatialValuePtr BoundsMax;
-				if (!TryConvertValue(Environment, Binding.Identity.SourceRef + TEXT("#")
-						+ Record.Ref, EUeAgentSpatialQuantityKind::Transform,
-						Binding.NativeFrame, Binding.GeneratedAt, MoveTemp(MatrixValues),
-						Evidence, Input.OutputFrame.FrameId, Context.GetResourceTracker(),
-						Transform, OutError)
-					|| !TryConvertValue(Environment, Binding.Identity.SourceRef + TEXT("#")
-						+ Record.Ref + TEXT("/bounds_min"), EUeAgentSpatialQuantityKind::Point,
-						Binding.NativeFrame, Binding.GeneratedAt,
-						{ExactNumber(Point.BoundsMin.X), ExactNumber(Point.BoundsMin.Y),
-							ExactNumber(Point.BoundsMin.Z)}, Evidence,
-						Input.OutputFrame.FrameId, Context.GetResourceTracker(), BoundsMin,
-						OutError)
-					|| !TryConvertValue(Environment, Binding.Identity.SourceRef + TEXT("#")
-						+ Record.Ref + TEXT("/bounds_max"), EUeAgentSpatialQuantityKind::Point,
-						Binding.NativeFrame, Binding.GeneratedAt,
-						{ExactNumber(Point.BoundsMax.X), ExactNumber(Point.BoundsMax.Y),
-							ExactNumber(Point.BoundsMax.Z)}, Evidence,
-						Input.OutputFrame.FrameId, Context.GetResourceTracker(), BoundsMax,
-						OutError)) return false;
-				const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
-				Json->SetStringField(TEXT("data_ref"), Record.Ref);
-				Json->SetStringField(TEXT("data_path"), Record.DataPath);
-				Json->SetStringField(TEXT("pin"), Record.Pin);
-				Json->SetArrayField(TEXT("tags"), StringValues(Record.Tags));
-				Json->SetObjectField(TEXT("transform"), SpatialValueJson(*Transform));
-				Json->SetObjectField(TEXT("bounds_min"), SpatialValueJson(*BoundsMin));
-				Json->SetObjectField(TEXT("bounds_max"), SpatialValueJson(*BoundsMax));
-				Json->SetStringField(TEXT("density"), ExactNumber(Point.Density));
-				Json->SetStringField(TEXT("seed"),
-					FString::Printf(TEXT("%d"), Point.Seed));
-				Json->SetStringField(TEXT("native_evidence_id"), Evidence);
-				Items.Add(MakeShared<FJsonValueObject>(Json));
-			}
-			OutRoot = MakeShared<FJsonObject>();
-			OutRoot->SetStringField(TEXT("capability_id"), Contract.GetCapabilityId());
-			OutRoot->SetObjectField(TEXT("generation_identity"),
-				GenerationJson(Input.GenerationIdentity));
-			OutRoot->SetObjectField(TEXT("time"), TemporalJson(Binding.GeneratedAt));
-			OutRoot->SetObjectField(TEXT("frame"),
-				Items.IsEmpty() ? FrameJson(Binding.NativeFrame)
-					: (*Items[0]->AsObject()).GetObjectField(TEXT("transform"))
-						->GetObjectField(TEXT("frame")));
-			OutRoot->SetArrayField(TEXT("items"), Items);
-			OutRoot->SetArrayField(TEXT("evidence"), StringValues({
-				Binding.GeneratedData->GetPathName(), Contract.GetReadbackId()}));
-			return true;
-		}
-
-		bool TryPcgPartitions(
-			const FUeAgentRigSimulationSpatialExecutionChainContract& Contract,
-			const FPcgPartitionSpatialStateReadInput& Input,
-			const FUeAgentRigSimulationSpatialPcgGenerationBinding& Binding,
-			IUeAgentRigSimulationSpatialNativeEnvironment& Environment,
-			const FUeAgentOperationContext& Context,
-			TSharedPtr<FJsonObject>& OutRoot,
-			FUeAgentTemporalPoint& OutCapturedAt,
-			FUeAgentRigSimulationSpatialExecutionError& OutError)
-		{
-			if (!CheckGeneration(Input.GenerationIdentity, Binding, Environment,
-				OutError)) return false;
-			OutCapturedAt = Binding.GeneratedAt;
-			TArray<FString> Refs;
-			for (int32 Index = 0; Index < Binding.Partitions.Num(); ++Index)
-				Refs.Add(FString::Printf(TEXT("partition:%d:%s"), Index,
-					*Binding.Partitions[Index]->GetPathName()));
-			TArray<int32> Indices;
-			if (!SelectIndices(Input.PartitionSelector, Refs, Indices, OutError)) return false;
-			TArray<TSharedPtr<FJsonValue>> Items;
-			for (const int32 Index : Indices)
-			{
-				const APCGPartitionActor* Partition = Binding.Partitions[Index].Get();
-				if (!Partition) return Fail(OutError,
-					TEXT("rig_simulation_spatial_pcg_partition_unavailable"), Refs[Index]);
-				const FBox Bounds = Partition->GetFixedBounds();
-				const FString Evidence = Partition->GetPathName() + TEXT("@")
-					+ Binding.Identity.Generation;
-				FUeAgentSpatialValuePtr BoundsMin;
-				FUeAgentSpatialValuePtr BoundsMax;
-				if (!TryConvertValue(Environment, Refs[Index] + TEXT("/bounds_min"),
-						EUeAgentSpatialQuantityKind::Point, Binding.NativeFrame,
-						Binding.GeneratedAt, {ExactNumber(Bounds.Min.X),
-							ExactNumber(Bounds.Min.Y), ExactNumber(Bounds.Min.Z)}, Evidence,
-						Input.OutputFrame.FrameId, Context.GetResourceTracker(), BoundsMin,
-						OutError)
-					|| !TryConvertValue(Environment, Refs[Index] + TEXT("/bounds_max"),
-						EUeAgentSpatialQuantityKind::Point, Binding.NativeFrame,
-						Binding.GeneratedAt, {ExactNumber(Bounds.Max.X),
-							ExactNumber(Bounds.Max.Y), ExactNumber(Bounds.Max.Z)}, Evidence,
-						Input.OutputFrame.FrameId, Context.GetResourceTracker(), BoundsMax,
-						OutError)) return false;
-				const FIntVector Grid = Partition->GetGridCoord();
-				const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
-				Json->SetStringField(TEXT("partition_ref"), Refs[Index]);
-				Json->SetStringField(TEXT("object_path"), Partition->GetPathName());
-				Json->SetArrayField(TEXT("grid_coord"), StringValues({
-					FString::Printf(TEXT("%d"), Grid.X),
-					FString::Printf(TEXT("%d"), Grid.Y),
-					FString::Printf(TEXT("%d"), Grid.Z)}));
-				Json->SetStringField(TEXT("grid_size"),
-					FString::Printf(TEXT("%u"), Partition->GetPCGGridSize()));
-				Json->SetBoolField(TEXT("using_2d_grid"), Partition->IsUsing2DGrid());
-				Json->SetBoolField(TEXT("runtime_generated"),
-					Partition->IsRuntimeGenerated());
-				Json->SetObjectField(TEXT("bounds_min"), SpatialValueJson(*BoundsMin));
-				Json->SetObjectField(TEXT("bounds_max"), SpatialValueJson(*BoundsMax));
-				Json->SetStringField(TEXT("native_evidence_id"), Evidence);
-				Items.Add(MakeShared<FJsonValueObject>(Json));
-			}
-			OutRoot = MakeShared<FJsonObject>();
-			OutRoot->SetStringField(TEXT("capability_id"), Contract.GetCapabilityId());
-			OutRoot->SetObjectField(TEXT("generation_identity"),
-				GenerationJson(Input.GenerationIdentity));
-			OutRoot->SetObjectField(TEXT("time"), TemporalJson(Binding.GeneratedAt));
-			OutRoot->SetObjectField(TEXT("frame"),
-				Items.IsEmpty() ? FrameJson(Binding.NativeFrame)
-					: (*Items[0]->AsObject()).GetObjectField(TEXT("bounds_min"))
-						->GetObjectField(TEXT("frame")));
-			OutRoot->SetArrayField(TEXT("items"), Items);
-			OutRoot->SetArrayField(TEXT("evidence"), StringValues({
-				Binding.SourceComponent->GetPathName(), Contract.GetReadbackId()}));
-			return true;
-		}
-
 		bool ConvertCanonicalValue(
 			const TSharedPtr<FJsonValue>& JsonValue,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FUeAgentRigSimulationSpatialExecutionError& OutError)
+			FUeAgentRigSimulationSpatialExecutionError& OutError, const FString& Path = FString())
 		{
 			FUeAgentStateSemanticError Error;
 			if (!JsonValue.IsValid()) return Fail(OutError,
-				TEXT("rig_simulation_spatial_deformer_pcg_result_json_invalid"));
+				NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_result_json_invalid"),
+					TEXT("Native observation contains a missing JSON value."), Path,
+					MakeShared<FJsonValueBoolean>(false), TEXT("present JSON value")));
 			switch (JsonValue->Type)
 			{
 			case EJson::Null:
 				return FUeAgentCanonicalValue::TryNull(Resources, OutValue, Error)
-					|| Fail(OutError, Error.Code, Error.Path);
+					|| Fail(OutError, Error, FString(), Path, true);
 			case EJson::Boolean:
 				return FUeAgentCanonicalValue::TryBoolean(JsonValue->AsBool(), Resources,
-					OutValue, Error) || Fail(OutError, Error.Code, Error.Path);
+					OutValue, Error) || Fail(OutError, Error, FString(), Path, true);
 			case EJson::String:
 				return FUeAgentCanonicalValue::TryString(JsonValue->AsString(), Resources,
-					OutValue, Error) || Fail(OutError, Error.Code, Error.Path);
+					OutValue, Error) || Fail(OutError, Error, FString(), Path, true);
 			case EJson::Number:
 			{
 				const double Number = JsonValue->AsNumber();
@@ -754,7 +649,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				return (FMath::IsNearlyEqual(Number, FMath::RoundToDouble(Number))
 					? FUeAgentCanonicalValue::TryInteger(Lexeme, Resources, OutValue, Error)
 					: FUeAgentCanonicalValue::TryDecimal(Lexeme, Resources, OutValue, Error))
-					|| Fail(OutError, Error.Code, Error.Path);
+					|| Fail(OutError, Error, FString(), Path, true);
 			}
 			case EJson::Array:
 			{
@@ -762,11 +657,11 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				for (const TSharedPtr<FJsonValue>& Item : JsonValue->AsArray())
 				{
 					FUeAgentCanonicalValuePtr Converted;
-					if (!ConvertCanonicalValue(Item, Resources, Converted, OutError)) return false;
+					if (!ConvertCanonicalValue(Item, Resources, Converted, OutError, Path + TEXT("/") + FString::FromInt(Items.Num()))) return false;
 					Items.Add(Converted.ToSharedRef());
 				}
 				return FUeAgentCanonicalValue::TryArray(Items, Resources, OutValue, Error)
-					|| Fail(OutError, Error.Code, Error.Path);
+					|| Fail(OutError, Error, FString(), Path, true);
 			}
 			case EJson::Object:
 			{
@@ -778,15 +673,17 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				{
 					FUeAgentCanonicalValuePtr Converted;
 					if (!ConvertCanonicalValue(JsonValue->AsObject()->Values.FindChecked(Key),
-						Resources, Converted, OutError)) return false;
+						Resources, Converted, OutError, Path + TEXT("/") + Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")))) return false;
 					Items.Emplace(Key, Converted.ToSharedRef());
 				}
 				return FUeAgentCanonicalValue::TryObject(Items, Resources, OutValue, Error)
-					|| Fail(OutError, Error.Code, Error.Path);
+					|| Fail(OutError, Error, FString(), Path, true);
 			}
 			default:
-				return Fail(OutError,
-					TEXT("rig_simulation_spatial_deformer_pcg_result_kind_invalid"));
+				return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_result_kind_invalid"),
+					TEXT("Native observation contains an unsupported JSON kind."), Path,
+					MakeShared<FJsonValueNumber>(static_cast<int32>(JsonValue->Type)),
+					TEXT("null, boolean, string, number, array or object")));
 			}
 		}
 
@@ -802,7 +699,11 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		{
 			FUeAgentCanonicalValuePtr Value;
 			if (!ConvertCanonicalValue(MakeShared<FJsonValueObject>(Root),
-				Context.GetResourceTracker(), Value, OutError) || !Value.IsValid()) return false;
+				Context.GetResourceTracker(), Value, OutError)) return false;
+			if (!Value.IsValid()) return Fail(OutError,
+				NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_snapshot_value_missing"),
+					TEXT("Canonical conversion reported success without a snapshot value."), TEXT("/snapshot/value"),
+					MakeShared<FJsonValueBoolean>(false), TEXT("canonical snapshot value"), PublicRef));
 			FString JsonText;
 			const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
 				TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&JsonText);
@@ -837,9 +738,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					Contract.GetReadbackId(),
 					TEXT("native-state:") + Contract.GetCapabilityId()),
 				{Entry}, Context.GetResourceTracker(), OutSnapshot, Error)
-				? true : Fail(OutError,
-					TEXT("rig_simulation_spatial_deformer_pcg_snapshot_failed"),
-					Error.Path, Error.Code);
+				? true : Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("rig_simulation_spatial_deformer_pcg_snapshot_failed"), Error, TEXT("native_execution")), Error.Source.JsonPath);
 		}
 
 		class FReadback final : public IUeAgentRigSimulationSpatialReadbackPort
@@ -855,22 +754,29 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				const TOptional<FUeAgentCandidateBinding>& Target,
 				EUeAgentRigSimulationSpatialReadPhase Phase,
 				const FUeAgentOperationContext& Context,
-				TSharedPtr<const FUeAgentCanonicalSnapshot>& OutSnapshot,
+				TOptional<FUeAgentRigSimulationSpatialReadbackResult>& OutReadback,
 				FUeAgentRigSimulationSpatialExecutionError& OutError) override
 			{
-				OutSnapshot.Reset();
+				OutReadback.Reset();
+				TSharedPtr<const FUeAgentCanonicalSnapshot> OutSnapshot;
 				OutError = {};
 				Environment->CountFamilyDispatch();
 				if (!IsCapability(Contract.GetCapabilityId())) return Fail(OutError,
-					TEXT("rig_simulation_spatial_family_port_unavailable"),
-					Contract.GetCapabilityId());
+					NativeFact(TEXT("rig_simulation_spatial_family_port_unavailable"),
+						TEXT("The Deformer/PCG native port does not support this capability."), TEXT("/capability_id"),
+						MakeShared<FJsonValueString>(Contract.GetCapabilityId()),
+						TEXT("deformer.geometry.sample, deformer.training_inputs.validate or deformer.evaluation.sample")), Contract.GetCapabilityId());
 				const auto* Typed = ProductionRequest(Request, OutError);
 				if (!Typed) return false;
 				const FString PublicRef = Typed->GetPrimaryTargetRef();
-				if (PublicRef.IsEmpty()
-					|| (Target.IsSet() && Target->GetPublicRef() != PublicRef)) return Fail(
-					OutError, TEXT("rig_simulation_spatial_explicit_target_mismatch"),
-					PublicRef);
+				if (PublicRef.IsEmpty())
+					return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_explicit_target_mismatch"),
+						TEXT("The typed request has no primary target reference."), TEXT("/primary_target_ref"),
+						MakeShared<FJsonValueString>(PublicRef), TEXT("nonempty target reference")));
+				if (Target.IsSet() && Target->GetPublicRef() != PublicRef)
+					return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_explicit_target_mismatch"),
+						TEXT("The bound target differs from the typed request target."), TEXT("/primary_target_ref"),
+						MakeShared<FJsonValueString>(Target->GetPublicRef()), PublicRef, PublicRef));
 				TSharedPtr<FJsonObject> Root;
 				FUeAgentTemporalPoint CapturedAt(TEXT(""), TEXT(""));
 				if (Contract.GetCapabilityId() == TEXT("deformer.geometry.sample"))
@@ -878,9 +784,11 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					const auto& Input = Typed->GetPayload().Get<FDeformerGeometrySampleInput>();
 					const auto* Binding = Environment->FindDeformerGeometryBinding(
 						Input.GeometryCacheRef);
-					if (!Binding || !Binding->IsValid()) return Fail(OutError,
-						TEXT("rig_simulation_spatial_deformer_geometry_binding_unavailable"),
-						Input.GeometryCacheRef);
+					if (!Binding) return Fail(OutError,
+						NativeFact(TEXT("rig_simulation_spatial_deformer_geometry_binding_unavailable"),
+							TEXT("No native geometry cache binding exists for this reference."), TEXT("/geometry_cache_ref"),
+							MakeShared<FJsonValueString>(Input.GeometryCacheRef), TEXT("registered geometry cache binding"), Input.GeometryCacheRef));
+					if (!Binding->TryValidate(OutError)) return false;
 					if (!TryGeometrySample(Contract, Input.GeometryCacheRef,
 						*Binding->GeometryCache.Get(), Binding->NativeClockId,
 						Binding->NativeFrame, Input.SampleTime, Input.OutputFrame,
@@ -899,10 +807,15 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					const auto& Input = Typed->GetPayload().Get<FDeformerEvaluationSampleInput>();
 					const auto* Binding = Environment->FindDeformerEvaluationBinding(
 						Input.DeformerRef);
-					if (!Binding || !Binding->IsValid()
-						|| Binding->SubjectIdentity != Input.SubjectRef) return Fail(OutError,
-						TEXT("rig_simulation_spatial_deformer_evaluation_binding_unavailable"),
-						Input.DeformerRef, Input.SubjectRef);
+					if (!Binding) return Fail(OutError,
+						NativeFact(TEXT("rig_simulation_spatial_deformer_evaluation_binding_unavailable"),
+							TEXT("No native deformer evaluation binding exists for this reference."), TEXT("/deformer_ref"),
+							MakeShared<FJsonValueString>(Input.DeformerRef), TEXT("registered evaluation binding"), Input.DeformerRef));
+					if (!Binding->TryValidate(OutError)) return false;
+					if (Binding->SubjectIdentity != Input.SubjectRef)
+						return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_deformer_evaluation_binding_unavailable"),
+							TEXT("The evaluation binding subject differs from the requested subject."), TEXT("/subject_ref"),
+							MakeShared<FJsonValueString>(Input.SubjectRef), Binding->SubjectIdentity, Input.DeformerRef));
 					if (!TryGeometrySample(Contract, Input.DeformerRef,
 						*Binding->EvaluationGeometry.Get(), Binding->NativeClockId,
 						Binding->NativeFrame, Input.SampleTime, Input.OutputFrame,
@@ -912,32 +825,15 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 					Root->SetStringField(TEXT("subject_object_path"),
 						Binding->Subject->GetPathName());
 				}
-				else if (Contract.GetCapabilityId()
-					== TEXT("pcg.generated_spatial_data.read"))
-				{
-					const auto& Input = Typed->GetPayload().Get<FPcgGeneratedSpatialDataReadInput>();
-					const auto* Binding = Environment->FindPcgGenerationBinding(
-						Input.GenerationIdentity.SourceRef);
-					if (!Binding || !Binding->IsValid()) return Fail(OutError,
-						TEXT("rig_simulation_spatial_pcg_generation_binding_unavailable"),
-						Input.GenerationIdentity.SourceRef);
-					if (!TryPcgData(Contract, Input, *Binding, *Environment, Context,
-						Root, CapturedAt, OutError)) return false;
-				}
-				else
-				{
-					const auto& Input = Typed->GetPayload().Get<FPcgPartitionSpatialStateReadInput>();
-					const auto* Binding = Environment->FindPcgGenerationBinding(
-						Input.GenerationIdentity.SourceRef);
-					if (!Binding || !Binding->IsValid()) return Fail(OutError,
-						TEXT("rig_simulation_spatial_pcg_generation_binding_unavailable"),
-						Input.GenerationIdentity.SourceRef);
-					if (!TryPcgPartitions(Contract, Input, *Binding, *Environment, Context,
-						Root, CapturedAt, OutError)) return false;
-				}
-				return Root.IsValid() && CapturedAt.IsValid()
-					&& TrySnapshot(Contract, Phase, PublicRef, Root.ToSharedRef(), CapturedAt,
-						Context, OutSnapshot, OutError);
+				if (!Root.IsValid()) return Fail(OutError,
+					NativeFact(TEXT("rig_simulation_spatial_deformer_pcg_result_missing"),
+						TEXT("Native observation completed without a result object."), TEXT("/result"),
+						MakeShared<FJsonValueBoolean>(false), TEXT("native observation result"), PublicRef));
+				if (!CapturedAt.IsValid()) return Fail(OutError, CapturedAt.GetValidationDiagnostic(), PublicRef, TEXT("/captured_at"));
+				if (!TrySnapshot(Contract, Phase, PublicRef, Root.ToSharedRef(), CapturedAt,
+					Context, OutSnapshot, OutError)) return false;
+				OutReadback.Emplace(OutSnapshot.ToSharedRef());
+				return true;
 			}
 
 		private:
@@ -956,9 +852,9 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				FUeAgentRigSimulationSpatialExecutionError& OutError) override
 			{
 				OutResult = {};
-				return Fail(OutError,
-					TEXT("rig_simulation_spatial_read_only_family_mutation_forbidden"),
-					Contract.GetCapabilityId());
+				return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_read_only_family_mutation_forbidden"),
+					TEXT("This read-only Deformer/PCG capability does not support mutation."), TEXT("/capability_id"),
+					MakeShared<FJsonValueString>(Contract.GetCapabilityId()), TEXT("read-only observation")), Contract.GetCapabilityId());
 			}
 		};
 
@@ -971,9 +867,9 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				const FUeAgentOperationContext& Context,
 				FUeAgentRigSimulationSpatialExecutionError& OutError) override
 			{
-				return Fail(OutError,
-					TEXT("rig_simulation_spatial_read_only_family_settle_forbidden"),
-					Contract.GetCapabilityId());
+				return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_read_only_family_settle_forbidden"),
+					TEXT("This read-only Deformer/PCG capability does not support settle."), TEXT("/capability_id"),
+					MakeShared<FJsonValueString>(Contract.GetCapabilityId()), TEXT("read-only observation")), Contract.GetCapabilityId());
 			}
 		};
 
@@ -985,46 +881,110 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				const FUeAgentRigSimulationSpatialExecutionChainContract& Contract,
 				const FUeAgentRigSimulationSpatialTypedRequestRef& Request,
 				const FUeAgentCanonicalSnapshot& Before,
-				const FUeAgentCanonicalSnapshot& After,
+				const FUeAgentRigSimulationSpatialReadbackResult& After,
 				const FUeAgentOperationContext& Context,
 				FVerificationOutcome& OutOutcome,
 				FUeAgentRigSimulationSpatialExecutionError& OutError) override
 			{
-				return Fail(OutError,
-					TEXT("rig_simulation_spatial_read_only_family_compare_forbidden"),
-					Contract.GetCapabilityId());
+				return Fail(OutError, NativeFact(TEXT("rig_simulation_spatial_read_only_family_compare_forbidden"),
+					TEXT("This read-only Deformer/PCG capability does not support compare."), TEXT("/capability_id"),
+					MakeShared<FJsonValueString>(Contract.GetCapabilityId()), TEXT("read-only observation")), Contract.GetCapabilityId());
 			}
 		};
 	}
 
+	namespace
+	{
+		bool DeformerBindingFailure(Contract::FDiagnostic& OutError, const TCHAR* Code,
+			const TCHAR* Reason, const TCHAR* Field, const FString& Identity,
+			TSharedPtr<FJsonValue> Actual, const TCHAR* Expected)
+		{
+			OutError = Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_binding"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = Field;
+			OutError.TargetPath = Identity;
+			OutError.ActualValuePresent = Actual.IsValid();
+			OutError.ActualValue = MoveTemp(Actual);
+			OutError.ExpectedValuePresent = true;
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			return false;
+		}
+
+		bool ValidateDeformerFrame(const FUeAgentSpatialFrame& Frame, const FString& Identity,
+			Contract::FDiagnostic& OutError)
+		{
+			if (Frame.IsValid()) return true;
+			OutError = Frame.GetValidationDiagnostic();
+			NativeContext(OutError);
+			OutError.PropertyPath = TEXT("native_frame.") + OutError.PropertyPath;
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Identity;
+			return false;
+		}
+	}
+
+	bool FUeAgentRigSimulationSpatialDeformerGeometryBinding::TryValidate(Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		if (Identity.IsEmpty()) return DeformerBindingFailure(OutError, TEXT("deformer_geometry_binding_invalid"),
+			TEXT("The deformer geometry binding requires an object reference."), TEXT("identity"), Identity,
+			MakeShared<FJsonValueString>(Identity), TEXT("non-empty object reference"));
+		if (!GeometryCache.IsValid()) return DeformerBindingFailure(OutError, TEXT("deformer_geometry_binding_invalid"),
+			TEXT("The deformer geometry cache is unavailable."), TEXT("geometry_cache"), Identity, nullptr, TEXT("valid geometry cache"));
+		if (NativeClockId.IsEmpty()) return DeformerBindingFailure(OutError, TEXT("deformer_geometry_binding_invalid"),
+			TEXT("The deformer geometry binding requires a native clock reference."), TEXT("native_clock_id"), Identity,
+			MakeShared<FJsonValueString>(NativeClockId), TEXT("non-empty clock reference"));
+		return ValidateDeformerFrame(NativeFrame, Identity, OutError);
+	}
+
 	bool FUeAgentRigSimulationSpatialDeformerGeometryBinding::IsValid() const
 	{
-		return !Identity.IsEmpty() && GeometryCache.IsValid()
-			&& !NativeClockId.IsEmpty() && NativeFrame.IsValid();
+		Contract::FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FUeAgentRigSimulationSpatialDeformerTrainingInputBinding::TryValidate(Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		if (Identity.IsEmpty()) return DeformerBindingFailure(OutError, TEXT("deformer_training_input_binding_invalid"),
+			TEXT("The deformer training input binding requires an object reference."), TEXT("identity"), Identity,
+			MakeShared<FJsonValueString>(Identity), TEXT("non-empty object reference"));
+		if (!Input.IsValid()) return DeformerBindingFailure(OutError, TEXT("deformer_training_input_binding_invalid"),
+			TEXT("The deformer training input object is unavailable."), TEXT("input"), Identity, nullptr, TEXT("valid input object"));
+		if (NativeClockId.IsEmpty()) return DeformerBindingFailure(OutError, TEXT("deformer_training_input_binding_invalid"),
+			TEXT("The deformer training input binding requires a native clock reference."), TEXT("native_clock_id"), Identity,
+			MakeShared<FJsonValueString>(NativeClockId), TEXT("non-empty clock reference"));
+		return ValidateDeformerFrame(NativeFrame, Identity, OutError);
 	}
 
 	bool FUeAgentRigSimulationSpatialDeformerTrainingInputBinding::IsValid() const
 	{
-		return !Identity.IsEmpty() && Input.IsValid()
-			&& !NativeClockId.IsEmpty() && NativeFrame.IsValid();
+		Contract::FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FUeAgentRigSimulationSpatialDeformerEvaluationBinding::TryValidate(Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		if (Identity.IsEmpty()) return DeformerBindingFailure(OutError, TEXT("deformer_evaluation_binding_invalid"),
+			TEXT("The deformer evaluation binding requires an object reference."), TEXT("identity"), Identity,
+			MakeShared<FJsonValueString>(Identity), TEXT("non-empty object reference"));
+		if (SubjectIdentity.IsEmpty()) return DeformerBindingFailure(OutError, TEXT("deformer_evaluation_binding_invalid"),
+			TEXT("The deformer evaluation binding requires a subject reference."), TEXT("subject_identity"), Identity,
+			MakeShared<FJsonValueString>(SubjectIdentity), TEXT("non-empty subject reference"));
+		if (!EvaluationGeometry.IsValid()) return DeformerBindingFailure(OutError, TEXT("deformer_evaluation_binding_invalid"),
+			TEXT("The evaluation geometry cache is unavailable."), TEXT("evaluation_geometry"), Identity, nullptr, TEXT("valid geometry cache"));
+		if (!Subject.IsValid()) return DeformerBindingFailure(OutError, TEXT("deformer_evaluation_binding_invalid"),
+			TEXT("The evaluation subject object is unavailable."), TEXT("subject"), Identity, nullptr, TEXT("valid subject object"));
+		if (NativeClockId.IsEmpty()) return DeformerBindingFailure(OutError, TEXT("deformer_evaluation_binding_invalid"),
+			TEXT("The deformer evaluation binding requires a native clock reference."), TEXT("native_clock_id"), Identity,
+			MakeShared<FJsonValueString>(NativeClockId), TEXT("non-empty clock reference"));
+		return ValidateDeformerFrame(NativeFrame, Identity, OutError);
 	}
 
 	bool FUeAgentRigSimulationSpatialDeformerEvaluationBinding::IsValid() const
 	{
-		return !Identity.IsEmpty() && !SubjectIdentity.IsEmpty()
-			&& EvaluationGeometry.IsValid() && Subject.IsValid()
-			&& !NativeClockId.IsEmpty() && NativeFrame.IsValid();
-	}
-
-	bool FUeAgentRigSimulationSpatialPcgGenerationBinding::IsValid() const
-	{
-		if (Identity.SourceRef.IsEmpty() || Identity.Generation.IsEmpty()
-			|| !Identity.Revision.IsValid() || SourceComponent.IsValid() == false
-			|| GeneratedData.IsValid() == false || !GeneratedAt.IsValid()
-			|| !NativeFrame.IsValid()) return false;
-		for (const TWeakObjectPtr<APCGPartitionActor>& Partition : Partitions)
-			if (!Partition.IsValid()) return false;
-		return true;
+		Contract::FDiagnostic Error;
+		return TryValidate(Error);
 	}
 
 	bool TryCreateRigSimulationSpatialDeformerPcgNativePorts(
@@ -1037,14 +997,11 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		OutPorts.SupportedCapabilities = {
 			TEXT("deformer.geometry.sample"),
 			TEXT("deformer.training_inputs.validate"),
-			TEXT("deformer.evaluation.sample"),
-			TEXT("pcg.generated_spatial_data.read"),
-			TEXT("pcg.partition.spatial_state.read")};
+			TEXT("deformer.evaluation.sample")};
 		OutPorts.Readback = MakeShared<FReadback>(Environment);
 		OutPorts.Mutation = MakeShared<FReadOnlyMutation>();
 		OutPorts.Settle = MakeShared<FReadOnlySettle>();
 		OutPorts.Comparator = MakeShared<FReadOnlyComparator>();
-		return OutPorts.IsValid() ? true : Fail(OutError,
-			TEXT("rig_simulation_spatial_deformer_pcg_ports_unavailable"));
+		return OutPorts.TryValidate(OutError);
 	}
 }

@@ -11,12 +11,14 @@ namespace UE::UAI::Composition::DestructiveImport
 	bool TryExtendDestructiveImportProductionCommandContractRegistry(
 		TSharedRef<const FUeAgentCommandContractRegistry> BaseRegistry,
 		TSharedPtr<const FUeAgentCommandContractRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TArray<FUeAgentCommandContract> Contracts = BaseRegistry->GetContracts();
 		TArray<FUeAgentCommandParameter> Parameters;
 		Parameters.Emplace(
-			TEXT("target_ref"), EUeAgentCommandWireType::String, true, false);
+			TEXT("targets"), EUeAgentCommandWireType::Array, true, false);
+		Parameters.Emplace(
+			TEXT("recursive"), EUeAgentCommandWireType::Boolean, false, false);
 		Contracts.Emplace(
 			TEXT("asset.delete"),
 			TEXT("asset"),
@@ -78,7 +80,7 @@ namespace UE::UAI::Composition::DestructiveImport
 
 	bool TryCreateDestructiveImportProductionCommandContractRegistry(
 		TSharedPtr<const FUeAgentCommandContractRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TSharedPtr<const FUeAgentCommandContractRegistry> Base;
 		if (!GraphCompound::

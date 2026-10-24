@@ -1,9 +1,7 @@
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialCommandHandlers.h"
 
-#include "Core/Contract/UeAgentContractJson.h"
-#include "Dom/JsonObject.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
+#include "CommandEdge/UeAgentApplicationResultProjection.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::Composition::TimelineSpatial
 {
@@ -12,49 +10,9 @@ namespace UE::UAI::Composition::TimelineSpatial
 
 	namespace
 	{
-		FString JsonText(const TSharedRef<FJsonObject>& Object)
-		{
-			FString Text;
-			FString Error;
-			return Json::TryCanonicalize(Object, Text, Error)
-				? Text
-				: FString();
-		}
+		
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			return JsonText(Error);
-		}
 
-		bool TryReadApplicationError(
-			const FString& PayloadJson,
-			const TCHAR* ErrorField,
-			FString& OutErrorJson)
-		{
-			OutErrorJson.Reset();
-			TSharedPtr<FJsonObject> Root;
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(PayloadJson);
-			if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
-			{
-				return false;
-			}
-			const TSharedPtr<FJsonObject>* Error = nullptr;
-			if (Root->TryGetObjectField(ErrorField, Error)
-				&& Error
-				&& Error->IsValid())
-			{
-				OutErrorJson = JsonText(Error->ToSharedRef());
-			}
-			return true;
-		}
 
 		class FTimelineSpatialCommandHandler final
 			: public IUeAgentCommandHandler
@@ -89,42 +47,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 							FUeAgentContractValue(Request.GetParamsJson())),
 						CallerContext,
 						Cancellation);
-					if (!Result.IsValid()
-						|| !(Result.GetDescriptorIdentity()
-							== Profile.DescriptorIdentity)
-						|| Result.GetRequestId() != Request.GetRequestId())
-					{
-						return FUeAgentCommandResult::Failure(
-							Request,
-							TEXT("{}"),
-							ErrorJson(
-								TEXT("command_query_result_invalid"),
-								Request.GetRequestId(),
-								TEXT("C3Q returned an invalid or mismatched result.")));
-					}
-					const FString& PayloadJson = Result.GetValue().GetJsonValue();
-					FString ApplicationError;
-					if (!TryReadApplicationError(
-							PayloadJson,
-							TEXT("query_error"),
-							ApplicationError))
-					{
-						return FUeAgentCommandResult::Failure(
-							Request,
-							TEXT("{}"),
-							ErrorJson(
-								TEXT("command_query_payload_invalid"),
-								Request.GetRequestId(),
-								TEXT("C3Q returned a non-object JSON payload.")));
-					}
-					if (!ApplicationError.IsEmpty())
-					{
-						return FUeAgentCommandResult::Failure(
-							Request,
-							PayloadJson,
-							ApplicationError);
-					}
-					return FUeAgentCommandResult::Success(Request, PayloadJson);
+					return ProjectQueryResult(Request, Profile.DescriptorIdentity, Result);
 				}
 
 				const FUeAgentOperationResult Result = OperationPort->Submit(
@@ -135,42 +58,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 						FUeAgentContractValue(Request.GetParamsJson())),
 					CallerContext,
 					Cancellation);
-				if (!Result.IsValid()
-					|| !(Result.GetDescriptorIdentity()
-						== Profile.DescriptorIdentity)
-					|| Result.GetRequestId() != Request.GetRequestId())
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT("command_operation_result_invalid"),
-							Request.GetRequestId(),
-							TEXT("C3O returned an invalid or mismatched result.")));
-				}
-				const FString& PayloadJson = Result.GetValue().GetJsonValue();
-				FString ApplicationError;
-				if (!TryReadApplicationError(
-						PayloadJson,
-						TEXT("operation_error"),
-						ApplicationError))
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT("command_operation_payload_invalid"),
-							Request.GetRequestId(),
-							TEXT("C3O returned a non-object JSON payload.")));
-				}
-				if (!ApplicationError.IsEmpty())
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						PayloadJson,
-						ApplicationError);
-				}
-				return FUeAgentCommandResult::Success(Request, PayloadJson);
+				return ProjectOperationResult(Request, Profile.DescriptorIdentity, Result);
 			}
 
 		private:
@@ -185,34 +73,51 @@ namespace UE::UAI::Composition::TimelineSpatial
 		TSharedRef<IUeAgentQueryApplicationPort> QueryPort,
 		TSharedRef<IUeAgentOperationApplicationPort> OperationPort,
 		TArray<TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
-		if (Profiles.Num() != 60)
+		if (Profiles.IsEmpty())
 		{
-			OutError = TEXT("timeline_spatial_activation_profile_count_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_spatial_activation_profile_count_invalid"),
+				TEXT("At least one activation profile is required to register Timeline/Spatial handlers"), TEXT("registration"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("activation_profile_count");
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT(">= 1"));
 			return false;
 		}
 
 		TSet<FString> CommandIds;
 		TSet<FString> DescriptorIds;
 		OutHandlers.Reserve(Profiles.Num());
-		for (const FUeAgentTimelineSpatialActivationProfile& Profile : Profiles)
+		for (int32 ProfileIndex = 0; ProfileIndex < Profiles.Num(); ++ProfileIndex)
 		{
+			const FUeAgentTimelineSpatialActivationProfile& Profile = Profiles[ProfileIndex];
 			const FString DescriptorId =
 				Profile.DescriptorIdentity.GetDescriptorId();
-			if (!Profile.IsValid())
+			if (!Profile.TryValidate(OutError))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("timeline_spatial_activation_profile_invalid");
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(
+					TEXT("timeline_spatial_activation_profile_invalid"), OutError, TEXT("registration"));
 				return false;
 			}
 			if (CommandIds.Contains(Profile.CommandId)
 				|| DescriptorIds.Contains(DescriptorId))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("timeline_spatial_command_handler_duplicate");
+				const bool bDuplicateCommand = CommandIds.Contains(Profile.CommandId);
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_spatial_command_handler_duplicate"),
+					bDuplicateCommand ? TEXT("The activation profile repeats a command already registered in this batch")
+						: TEXT("The activation profile repeats a descriptor already registered in this batch"), TEXT("registration"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.CandidateName = Profile.CommandId;
+				OutError.OperationIndex = ProfileIndex;
+				OutError.PropertyPath = bDuplicateCommand ? TEXT("command_id_unique") : TEXT("descriptor_id_unique");
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(bDuplicateCommand ? Profile.CommandId : DescriptorId);
 				return false;
 			}
 			CommandIds.Add(Profile.CommandId);

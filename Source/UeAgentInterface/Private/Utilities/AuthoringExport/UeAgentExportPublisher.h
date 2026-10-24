@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/UeAgentStructuredHjsonFormatter.h"
 
@@ -37,19 +39,17 @@ namespace UeAgentExportPublisher
 		const TArray<FFilePlan>& Files,
 		const FPublishContext& Context,
 		FPublishResult& OutResult,
-		FString& OutErrorCode,
-		FString& OutErrorDetail);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool PublishSingleFile(
 		const FString& OutputFile,
 		const FFilePlan& File,
 		const FPublishContext& Context,
 		FPublishResult& OutResult,
-		FString& OutErrorCode,
-		FString& OutErrorDetail);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ResetOwnedWorkspace(
 		const FString& FolderPathInput,
 		FString& OutResolvedFolderPath,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

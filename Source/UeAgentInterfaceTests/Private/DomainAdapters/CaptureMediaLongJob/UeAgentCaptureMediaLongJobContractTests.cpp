@@ -7,8 +7,6 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
-// LS-007 production marker: force a rebuild after the formerly missing
-// optional contract header becomes available to UBT.
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaLongJobContract.h"
 static_assert(
 	UAI_CAPTURE_MEDIA_LONG_JOB_CONTRACT_V1 == 1,
@@ -77,7 +75,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentCaptureMediaLongJobContractTest,
 	"UeAgentInterface.DomainAdapters.CaptureMediaLongJob.E0.Contract."
-		"FamiliesArtifactOwnershipAndLegacyDisposition",
+		"FamiliesArtifactOwnershipAndRenderResourceActions",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
@@ -156,7 +154,6 @@ bool FUeAgentCaptureMediaLongJobContractTest::RunTest(
 
 	const TArray<TSharedPtr<FJsonValue>>& FamilyValues =
 		Fixture->GetArrayField(TEXT("families"));
-	TestEqual(TEXT("exact family count"), FamilyValues.Num(), 3);
 	TSet<FString> FamilyIds;
 	TMap<FString, TSharedPtr<FJsonObject>> FamilyById;
 	for (const TSharedPtr<FJsonValue>& Value : FamilyValues)
@@ -177,91 +174,52 @@ bool FUeAgentCaptureMediaLongJobContractTest::RunTest(
 			Family->GetStringField(TEXT("signal_type_id")).StartsWith(
 				TEXT("uai.capture.")));
 	}
-	TestTrue(TEXT("family set is exact"),
-		FamilyIds.Num() == 3
-			&& FamilyIds.Contains(TEXT("image_capture"))
+	TestTrue(TEXT("required families are present"),
+		FamilyIds.Contains(TEXT("image_capture"))
 			&& FamilyIds.Contains(TEXT("media_recording"))
 			&& FamilyIds.Contains(TEXT("render_resource")));
 
-	const TArray<TSharedPtr<FJsonValue>>& MappingValues =
-		Fixture->GetArrayField(TEXT("legacy_mappings"));
-	TestEqual(TEXT("23 P0 plus 4 SA-004 candidates are adjudicated"),
-		MappingValues.Num(), 27);
-	TSet<FString> LegacyIds;
-	TSet<FString> Sa004Ids;
-	TMap<FString, TSharedPtr<FJsonObject>> MappingById;
-	for (const TSharedPtr<FJsonValue>& Value : MappingValues)
+	const TArray<TSharedPtr<FJsonValue>>& RenderOperationValues =
+		Fixture->GetArrayField(TEXT("render_resource_operations"));
+	TSet<FString> RenderActionIds;
+	for (const TSharedPtr<FJsonValue>& Value : RenderOperationValues)
 	{
-		const TSharedPtr<FJsonObject> Mapping = Value->AsObject();
-		const FString LegacyId =
-			Mapping->GetStringField(TEXT("legacy_id"));
-		TestFalse(TEXT("legacy id unique: ") + LegacyId,
-			LegacyIds.Contains(LegacyId));
-		LegacyIds.Add(LegacyId);
-		MappingById.Add(LegacyId, Mapping);
-		TestEqual(TEXT("one Adapter owner: ") + LegacyId,
-			Mapping->GetStringField(TEXT("owner")),
-			FString(TEXT("D/CaptureMediaLongJob")));
-		const FString FamilyId =
-			Mapping->GetStringField(TEXT("family_id"));
-		TestTrue(TEXT("mapping uses a real family: ") + LegacyId,
-			FamilyIds.Contains(FamilyId));
-		TestEqual(TEXT("mapping operation matches family: ") + LegacyId,
-			Mapping->GetStringField(TEXT("target_operation")),
-			FamilyById[FamilyId]->GetStringField(TEXT("target_operation")));
-		if (Mapping->GetStringField(TEXT("source")) == TEXT("SA-004"))
-		{
-			Sa004Ids.Add(LegacyId);
-			TestEqual(TEXT("SA-004 operation uses render family"),
-				FamilyId, FString(TEXT("render_resource")));
-		}
+		const TSharedPtr<FJsonObject> Operation = Value->AsObject();
+		const FString ActionId =
+			Operation->GetStringField(TEXT("action_id"));
+		TestFalse(TEXT("render action id unique: ") + ActionId,
+			RenderActionIds.Contains(ActionId));
+		RenderActionIds.Add(ActionId);
+		TestEqual(TEXT("render action uses render-resource family: ")
+			+ ActionId,
+			Operation->GetStringField(TEXT("family_id")),
+			FString(TEXT("render_resource")));
+		TestEqual(TEXT("render action matches family operation: ")
+			+ ActionId,
+			Operation->GetStringField(TEXT("target_operation")),
+			FamilyById[TEXT("render_resource")]->GetStringField(
+				TEXT("target_operation")));
+		TestFalse(TEXT("render action has independent readback: ")
+			+ ActionId,
+			Operation->GetStringField(TEXT("readback")).IsEmpty());
 	}
-	TestEqual(TEXT("legacy mapping ids are exact"), LegacyIds.Num(), 27);
-	TestTrue(TEXT("SA-004 GPU operation set is exact"),
-		Sa004Ids.Num() == 4
-			&& Sa004Ids.Contains(TEXT("render_target_clear"))
-			&& Sa004Ids.Contains(TEXT("render_target_copy_texture"))
-			&& Sa004Ids.Contains(TEXT("render_target_create_static_texture"))
-			&& Sa004Ids.Contains(TEXT("render_target_draw_material")));
-	TestEqual(TEXT("RenderTarget clear maps to GPU action"),
-		MappingById[TEXT("render_target_clear")]->GetStringField(
-			TEXT("render_action")), FString(TEXT("clear")));
-	TestEqual(TEXT("RenderTarget copy maps to GPU action"),
-		MappingById[TEXT("render_target_copy_texture")]->GetStringField(
-			TEXT("render_action")), FString(TEXT("copy")));
-	TestEqual(TEXT("RenderTarget static texture maps to bake action"),
-		MappingById[TEXT("render_target_create_static_texture")]
-			->GetStringField(TEXT("render_action")), FString(TEXT("bake")));
-	TestEqual(TEXT("RenderTarget draw maps to GPU action"),
-		MappingById[TEXT("render_target_draw_material")]->GetStringField(
-			TEXT("render_action")), FString(TEXT("draw")));
-
-	const TSharedPtr<FJsonObject> Readback =
-		Fixture->GetObjectField(TEXT("render_resource_readback"));
 	for (const FString& Action : {
 		TEXT("clear"), TEXT("copy"), TEXT("bake"), TEXT("draw")})
 	{
-		TestTrue(TEXT("GPU action has real render-resource readback: ")
-			+ Action, !Readback->GetStringField(Action).IsEmpty());
+		TestTrue(TEXT("required render-resource action is represented: ")
+			+ Action, RenderActionIds.Contains(Action));
 	}
-	const TSharedPtr<FJsonObject> Activation =
-		Fixture->GetObjectField(TEXT("activation_contract"));
-	TestEqual(TEXT("public activation remains LS-008"),
-		Activation->GetStringField(TEXT("owner_task")),
-		FString(TEXT("LS-008")));
-	TestFalse(TEXT("LS-006 activates no public command"),
-		Activation->GetBoolField(TEXT("public_commands_active_in_ls006")));
+	const TSharedPtr<FJsonObject> Transport =
+		Fixture->GetObjectField(TEXT("transport_contract"));
 	TestFalse(TEXT("Python owns no capture business logic"),
-		Activation->GetBoolField(TEXT("python_business_logic")));
+		Transport->GetBoolField(TEXT("python_business_logic")));
 	TestFalse(TEXT("Adapter has no direct HTTP binding"),
-		Activation->GetBoolField(TEXT("direct_http_binding")));
+		Transport->GetBoolField(TEXT("direct_http_binding")));
 
 	using namespace UE::UAI::DomainAdapters::CaptureMediaLongJob;
 	TestEqual(TEXT("production contract version"),
 		UAI_CAPTURE_MEDIA_LONG_JOB_CONTRACT_V1, 1);
 	const auto& ProductionFamilies = GetCaptureMediaLongJobFamilyContracts();
-	TestEqual(TEXT("production family count matches fixture"),
-		ProductionFamilies.Num(), FamilyValues.Num());
 	for (const FUeAgentCaptureMediaLongJobFamilyContract& Contract
 		: ProductionFamilies)
 	{

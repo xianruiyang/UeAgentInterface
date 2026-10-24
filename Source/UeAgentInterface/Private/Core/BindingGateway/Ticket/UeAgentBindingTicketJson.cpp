@@ -11,29 +11,64 @@ namespace UE::UAI::BindingGateway::Ticket
 			const FString& SubjectId,
 			const FString& Detail)
 		{
-			OutError = {
-				TEXT("binding_ticket_json_invalid"),
-				SubjectId,
-				Detail,
-			};
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("binding_ticket_json_invalid"), Detail, TEXT("binding_ticket_json"), FString(), SubjectId);
+			OutError.PropertyPath = SubjectId;
+			OutError.Source.JsonPath = SubjectId;
 		}
 
-		bool HasStrings(
-			const TSharedPtr<FJsonObject>& Object,
-			const TArray<const TCHAR*>& Fields)
+		void LocateDiagnostic(FUeAgentBindingTicketJsonError& Error, const FString& InputPath, const FString& SemanticRoot = FString())
+		{
+			FString Relative = Error.PropertyPath;
+			if (Relative.IsEmpty() && !SemanticRoot.IsEmpty() && Error.SemanticPointer.StartsWith(SemanticRoot))
+				Relative = Error.SemanticPointer.Mid(SemanticRoot.Len());
+			Relative.ReplaceInline(TEXT("/"), TEXT("."));
+			Relative.RemoveFromStart(TEXT("."));
+			Error.Source.JsonPath = InputPath + (Relative.IsEmpty() ? FString() : TEXT(".") + Relative);
+		}
+
+		const TCHAR* JsonTypeName(EJson Type)
+		{
+			switch (Type)
+			{
+			case EJson::Null: return TEXT("null");
+			case EJson::String: return TEXT("string");
+			case EJson::Number: return TEXT("number");
+			case EJson::Boolean: return TEXT("boolean");
+			case EJson::Array: return TEXT("array");
+			case EJson::Object: return TEXT("object");
+			default: return TEXT("missing");
+			}
+		}
+
+		bool RequireFields(const TSharedPtr<FJsonObject>& Object, const FString& Path,
+			const TArray<const TCHAR*>& Strings, const TArray<const TCHAR*>& Numbers,
+			const TArray<const TCHAR*>& Objects, const TArray<const TCHAR*>& Arrays,
+			FUeAgentBindingTicketJsonError& OutError)
 		{
 			if (!Object.IsValid())
 			{
+				Fail(OutError, Path, TEXT("A JSON object is required."));
+				OutError.ActualValue = MakeShared<FJsonValueString>(TEXT("missing"));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object"));
 				return false;
 			}
-			for (const TCHAR* Field : Fields)
+			auto Require = [&](const TArray<const TCHAR*>& Fields, EJson Type)
 			{
-				if (!Object->HasTypedField<EJson::String>(Field))
+				for (const TCHAR* Field : Fields)
 				{
+					const TSharedPtr<FJsonValue> Value = Object->TryGetField(Field);
+					if (Value.IsValid() && Value->Type == Type) continue;
+					Fail(OutError, Path + TEXT(".") + Field,
+						Value.IsValid() ? TEXT("The JSON field has the wrong type.") : TEXT("The required JSON field is missing."));
+					OutError.ActualValue = MakeShared<FJsonValueString>(Value.IsValid() ? JsonTypeName(Value->Type) : TEXT("missing"));
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(JsonTypeName(Type));
+					OutError.ActualEvidence = Value;
 					return false;
 				}
-			}
-			return true;
+				return true;
+			};
+			return Require(Strings, EJson::String) && Require(Numbers, EJson::Number)
+				&& Require(Objects, EJson::Object) && Require(Arrays, EJson::Array);
 		}
 
 		TArray<TSharedPtr<FJsonValue>> Strings(
@@ -76,27 +111,11 @@ namespace UE::UAI::BindingGateway::Ticket
 		bool TryParseSummary(
 			const TSharedPtr<FJsonObject>& Object,
 			TOptional<Discovery::FUeAgentCandidateSummary>& OutSummary,
-			FUeAgentBindingTicketJsonError& OutError)
+			FUeAgentBindingTicketJsonError& OutError, const FString& InputPath)
 		{
 			OutSummary.Reset();
-			if (!HasStrings(
-					Object,
-					{
-						TEXT("catalog_kind"),
-						TEXT("display_name"),
-						TEXT("summary"),
-					})
-				|| !Object->HasTypedField<EJson::Object>(
-					TEXT("identity"))
-				|| !Object->HasTypedField<EJson::Object>(
-					TEXT("descriptor"))
-				|| !Object->HasTypedField<EJson::Array>(
-					TEXT("category_path")))
+			if (!RequireFields(Object, InputPath, {TEXT("catalog_kind"), TEXT("display_name"), TEXT("summary")}, {}, {TEXT("identity"), TEXT("descriptor")}, {TEXT("category_path")}, OutError))
 			{
-				Fail(
-					OutError,
-					TEXT("candidate_summary"),
-					TEXT("candidate summary fields are missing"));
 				return false;
 			}
 			TOptional<StateSemantic::FUeAgentCanonicalIdentity>
@@ -105,11 +124,11 @@ namespace UE::UAI::BindingGateway::Ticket
 			if (!FUeAgentBindingTicketJsonCodec::TryParseIdentity(
 					Object->GetObjectField(TEXT("identity")),
 					Identity,
-					OutError)
+					OutError, InputPath + TEXT(".identity"))
 				|| !FUeAgentBindingTicketJsonCodec::TryParseDescriptor(
 					Object->GetObjectField(TEXT("descriptor")),
 					Descriptor,
-					OutError))
+					OutError, InputPath + TEXT(".descriptor")))
 			{
 				return false;
 			}
@@ -121,8 +140,10 @@ namespace UE::UAI::BindingGateway::Ticket
 				{
 					Fail(
 						OutError,
-						TEXT("candidate_summary.category_path"),
+						InputPath + FString::Printf(TEXT(".category_path[%d]"), CategoryPath.Num()),
 						TEXT("category path must contain strings"));
+					OutError.ActualValue = MakeShared<FJsonValueString>(Item.IsValid() ? JsonTypeName(Item->Type) : TEXT("missing"));
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("string"));
 					return false;
 				}
 				CategoryPath.Add(Item->AsString());
@@ -136,10 +157,8 @@ namespace UE::UAI::BindingGateway::Ticket
 				MoveTemp(CategoryPath));
 			if (!Summary.IsValid())
 			{
-				Fail(
-					OutError,
-					TEXT("candidate_summary"),
-					TEXT("candidate summary is invalid"));
+				OutError = *Summary.GetValidationDiagnostic();
+				LocateDiagnostic(OutError, InputPath);
 				return false;
 			}
 			OutSummary.Emplace(MoveTemp(Summary));
@@ -197,20 +216,12 @@ namespace UE::UAI::BindingGateway::Ticket
 	bool FUeAgentBindingTicketJsonCodec::TryParseSession(
 		const TSharedPtr<FJsonObject>& Object,
 		TOptional<FUeAgentOperationSessionIdentity>& OutSession,
-		FUeAgentBindingTicketJsonError& OutError)
+		FUeAgentBindingTicketJsonError& OutError, const FString& InputPath)
 	{
 		OutSession.Reset();
 		OutError = {};
-		if (!HasStrings(
-				Object,
-				{TEXT("server_session_id"), TEXT("registry_hash")})
-			|| !Object->HasTypedField<EJson::Number>(
-				TEXT("registry_epoch")))
+		if (!RequireFields(Object, InputPath, {TEXT("server_session_id"), TEXT("registry_hash")}, {TEXT("registry_epoch")}, {}, {}, OutError))
 		{
-			Fail(
-				OutError,
-				TEXT("session"),
-				TEXT("session fields are missing"));
 			return false;
 		}
 		FUeAgentOperationSessionIdentity Session(
@@ -220,10 +231,8 @@ namespace UE::UAI::BindingGateway::Ticket
 			Object->GetStringField(TEXT("registry_hash")));
 		if (!Session.IsValid())
 		{
-			Fail(
-				OutError,
-				TEXT("session"),
-				TEXT("session identity is invalid"));
+			OutError = Session.GetValidationDiagnostic();
+			LocateDiagnostic(OutError, InputPath);
 			return false;
 		}
 		OutSession.Emplace(MoveTemp(Session));
@@ -250,19 +259,12 @@ namespace UE::UAI::BindingGateway::Ticket
 	bool FUeAgentBindingTicketJsonCodec::TryParseDescriptor(
 		const TSharedPtr<FJsonObject>& Object,
 		TOptional<Contract::FUeAgentDescriptorIdentity>& OutDescriptor,
-		FUeAgentBindingTicketJsonError& OutError)
+		FUeAgentBindingTicketJsonError& OutError, const FString& InputPath)
 	{
 		OutDescriptor.Reset();
 		OutError = {};
-		if (!HasStrings(
-				Object,
-				{TEXT("descriptor_id"), TEXT("descriptor_hash")})
-			|| !Object->HasTypedField<EJson::Number>(TEXT("version")))
+		if (!RequireFields(Object, InputPath, {TEXT("descriptor_id"), TEXT("descriptor_hash")}, {TEXT("version")}, {}, {}, OutError))
 		{
-			Fail(
-				OutError,
-				TEXT("descriptor"),
-				TEXT("descriptor identity fields are missing"));
 			return false;
 		}
 		Contract::FUeAgentDescriptorIdentity Descriptor(
@@ -272,10 +274,8 @@ namespace UE::UAI::BindingGateway::Ticket
 			Object->GetStringField(TEXT("descriptor_hash")));
 		if (!Descriptor.IsValid())
 		{
-			Fail(
-				OutError,
-				TEXT("descriptor"),
-				TEXT("descriptor identity is invalid"));
+			OutError = Descriptor.GetValidationDiagnostic();
+			LocateDiagnostic(OutError, InputPath);
 			return false;
 		}
 		OutDescriptor.Emplace(MoveTemp(Descriptor));
@@ -302,25 +302,12 @@ namespace UE::UAI::BindingGateway::Ticket
 	bool FUeAgentBindingTicketJsonCodec::TryParseIdentity(
 		const TSharedPtr<FJsonObject>& Object,
 		TOptional<StateSemantic::FUeAgentCanonicalIdentity>& OutIdentity,
-		FUeAgentBindingTicketJsonError& OutError)
+		FUeAgentBindingTicketJsonError& OutError, const FString& InputPath)
 	{
 		OutIdentity.Reset();
 		OutError = {};
-		if (!HasStrings(
-				Object,
-				{
-					TEXT("semantic_id"),
-					TEXT("target_kind"),
-					TEXT("owner_id"),
-					TEXT("selector"),
-					TEXT("object_role"),
-					TEXT("generation"),
-				}))
+		if (!RequireFields(Object, InputPath, {TEXT("semantic_id"), TEXT("target_kind"), TEXT("owner_id"), TEXT("selector"), TEXT("object_role"), TEXT("generation")}, {}, {}, {}, OutError))
 		{
-			Fail(
-				OutError,
-				TEXT("identity"),
-				TEXT("canonical identity fields are missing"));
 			return false;
 		}
 		StateSemantic::FUeAgentCanonicalIdentity Identity(
@@ -332,10 +319,8 @@ namespace UE::UAI::BindingGateway::Ticket
 			Object->GetStringField(TEXT("generation")));
 		if (!Identity.IsValid())
 		{
-			Fail(
-				OutError,
-				TEXT("identity"),
-				TEXT("canonical identity is invalid"));
+			OutError = Identity.GetValidationDiagnostic();
+			LocateDiagnostic(OutError, InputPath, TEXT("/identity"));
 			return false;
 		}
 		OutIdentity.Emplace(MoveTemp(Identity));
@@ -367,19 +352,12 @@ namespace UE::UAI::BindingGateway::Ticket
 	bool FUeAgentBindingTicketJsonCodec::TryParseCatalogRevision(
 		const TSharedPtr<FJsonObject>& Object,
 		TOptional<Discovery::FUeAgentCatalogRevision>& OutRevision,
-		FUeAgentBindingTicketJsonError& OutError)
+		FUeAgentBindingTicketJsonError& OutError, const FString& InputPath)
 	{
 		OutRevision.Reset();
 		OutError = {};
-		if (!HasStrings(
-				Object,
-				{TEXT("source_id"), TEXT("generation")})
-			|| !Object->HasTypedField<EJson::Number>(TEXT("sequence")))
+		if (!RequireFields(Object, InputPath, {TEXT("source_id"), TEXT("generation")}, {TEXT("sequence")}, {}, {}, OutError))
 		{
-			Fail(
-				OutError,
-				TEXT("catalog_revision"),
-				TEXT("catalog revision fields are missing"));
 			return false;
 		}
 		Discovery::FUeAgentCatalogRevision Revision(
@@ -389,10 +367,8 @@ namespace UE::UAI::BindingGateway::Ticket
 				Object->GetNumberField(TEXT("sequence"))));
 		if (!Revision.IsValid())
 		{
-			Fail(
-				OutError,
-				TEXT("catalog_revision"),
-				TEXT("catalog revision is invalid"));
+			OutError = *Revision.GetValidationDiagnostic();
+			LocateDiagnostic(OutError, InputPath);
 			return false;
 		}
 		OutRevision.Emplace(MoveTemp(Revision));
@@ -417,19 +393,12 @@ namespace UE::UAI::BindingGateway::Ticket
 	bool FUeAgentBindingTicketJsonCodec::TryParseStateRevision(
 		const TSharedPtr<FJsonObject>& Object,
 		TOptional<StateSemantic::FUeAgentStateRevision>& OutRevision,
-		FUeAgentBindingTicketJsonError& OutError)
+		FUeAgentBindingTicketJsonError& OutError, const FString& InputPath)
 	{
 		OutRevision.Reset();
 		OutError = {};
-		if (!HasStrings(
-				Object,
-				{TEXT("source_id"), TEXT("generation")})
-			|| !Object->HasTypedField<EJson::Number>(TEXT("sequence")))
+		if (!RequireFields(Object, InputPath, {TEXT("source_id"), TEXT("generation")}, {TEXT("sequence")}, {}, {}, OutError))
 		{
-			Fail(
-				OutError,
-				TEXT("state_revision"),
-				TEXT("state revision fields are missing"));
 			return false;
 		}
 		StateSemantic::FUeAgentStateRevision Revision(
@@ -439,10 +408,8 @@ namespace UE::UAI::BindingGateway::Ticket
 				Object->GetNumberField(TEXT("sequence"))));
 		if (!Revision.IsValid())
 		{
-			Fail(
-				OutError,
-				TEXT("state_revision"),
-				TEXT("state revision is invalid"));
+			OutError = Revision.GetValidationDiagnostic();
+			LocateDiagnostic(OutError, InputPath);
 			return false;
 		}
 		OutRevision.Emplace(MoveTemp(Revision));
@@ -467,28 +434,12 @@ namespace UE::UAI::BindingGateway::Ticket
 	bool FUeAgentBindingTicketJsonCodec::TryParseBinding(
 		const TSharedPtr<FJsonObject>& Object,
 		TOptional<Discovery::FUeAgentCandidateBinding>& OutBinding,
-		FUeAgentBindingTicketJsonError& OutError)
+		FUeAgentBindingTicketJsonError& OutError, const FString& InputPath)
 	{
 		OutBinding.Reset();
 		OutError = {};
-		if (!HasStrings(
-				Object,
-				{
-					TEXT("binding_id"),
-					TEXT("public_ref"),
-					TEXT("read_port_id"),
-					TEXT("binding_evidence"),
-				})
-			|| !Object->HasTypedField<EJson::Object>(TEXT("summary"))
-			|| !Object->HasTypedField<EJson::Object>(
-				TEXT("catalog_revision"))
-			|| !Object->HasTypedField<EJson::Array>(
-				TEXT("supported_operations")))
+		if (!RequireFields(Object, InputPath, {TEXT("binding_id"), TEXT("public_ref"), TEXT("read_port_id"), TEXT("binding_evidence")}, {}, {TEXT("summary"), TEXT("catalog_revision")}, {TEXT("supported_operations")}, OutError))
 		{
-			Fail(
-				OutError,
-				TEXT("binding"),
-				TEXT("candidate binding fields are missing"));
 			return false;
 		}
 		TOptional<Discovery::FUeAgentCandidateSummary> Summary;
@@ -496,11 +447,11 @@ namespace UE::UAI::BindingGateway::Ticket
 		if (!TryParseSummary(
 				Object->GetObjectField(TEXT("summary")),
 				Summary,
-				OutError)
+				OutError, InputPath + TEXT(".summary"))
 			|| !TryParseCatalogRevision(
 				Object->GetObjectField(TEXT("catalog_revision")),
 				Revision,
-				OutError))
+				OutError, InputPath + TEXT(".catalog_revision")))
 		{
 			return false;
 		}
@@ -516,8 +467,9 @@ namespace UE::UAI::BindingGateway::Ticket
 			{
 				Fail(
 					OutError,
-					TEXT("binding.supported_operations"),
-					TEXT("candidate operation is invalid"));
+					InputPath + FString::Printf(TEXT(".supported_operations[%d]"), Operations.Num()),
+					TEXT("candidate operation must be read, create, update, replace or delete"));
+				OutError.ActualValue = Item.IsValid() && Item->Type == EJson::String ? Item : MakeShared<FJsonValueString>(Item.IsValid() ? JsonTypeName(Item->Type) : TEXT("missing"));
 				return false;
 			}
 			Operations.Add(Operation);
@@ -532,10 +484,8 @@ namespace UE::UAI::BindingGateway::Ticket
 			Object->GetStringField(TEXT("binding_evidence")));
 		if (!Binding.IsValid())
 		{
-			Fail(
-				OutError,
-				TEXT("binding"),
-				TEXT("candidate binding is invalid"));
+			OutError = *Binding.GetValidationDiagnostic();
+			LocateDiagnostic(OutError, InputPath);
 			return false;
 		}
 		OutBinding.Emplace(MoveTemp(Binding));
@@ -582,38 +532,12 @@ namespace UE::UAI::BindingGateway::Ticket
 	bool FUeAgentBindingTicketJsonCodec::TryParseTicket(
 		const TSharedPtr<FJsonObject>& Object,
 		TOptional<FUeAgentOperationTicket>& OutTicket,
-		FUeAgentBindingTicketJsonError& OutError)
+		FUeAgentBindingTicketJsonError& OutError, const FString& InputPath)
 	{
 		OutTicket.Reset();
 		OutError = {};
-		if (!HasStrings(
-				Object,
-				{
-					TEXT("ticket_id"),
-					TEXT("candidate_binding_id"),
-					TEXT("candidate_fingerprint"),
-					TEXT("server_session_id"),
-					TEXT("registry_hash"),
-					TEXT("context_fingerprint"),
-					TEXT("signature"),
-				})
-			|| !Object->HasTypedField<EJson::Object>(
-				TEXT("descriptor"))
-			|| !Object->HasTypedField<EJson::Object>(
-				TEXT("candidate_identity"))
-			|| !Object->HasTypedField<EJson::Object>(
-				TEXT("catalog_revision"))
-			|| !Object->HasTypedField<EJson::Number>(
-				TEXT("registry_epoch"))
-			|| !Object->HasTypedField<EJson::Number>(
-				TEXT("issued_at"))
-			|| !Object->HasTypedField<EJson::Number>(
-				TEXT("expires_at")))
+		if (!RequireFields(Object, InputPath, {TEXT("ticket_id"), TEXT("candidate_binding_id"), TEXT("candidate_fingerprint"), TEXT("server_session_id"), TEXT("registry_hash"), TEXT("context_fingerprint"), TEXT("signature")}, {TEXT("registry_epoch"), TEXT("issued_at"), TEXT("expires_at")}, {TEXT("descriptor"), TEXT("candidate_identity"), TEXT("catalog_revision")}, {}, OutError))
 		{
-			Fail(
-				OutError,
-				TEXT("ticket"),
-				TEXT("operation ticket fields are missing"));
 			return false;
 		}
 		TOptional<Contract::FUeAgentDescriptorIdentity> Descriptor;
@@ -622,15 +546,15 @@ namespace UE::UAI::BindingGateway::Ticket
 		if (!TryParseDescriptor(
 				Object->GetObjectField(TEXT("descriptor")),
 				Descriptor,
-				OutError)
+				OutError, InputPath + TEXT(".descriptor"))
 			|| !TryParseIdentity(
 				Object->GetObjectField(TEXT("candidate_identity")),
 				Identity,
-				OutError)
+				OutError, InputPath + TEXT(".candidate_identity"))
 			|| !TryParseCatalogRevision(
 				Object->GetObjectField(TEXT("catalog_revision")),
 				CatalogRevision,
-				OutError))
+				OutError, InputPath + TEXT(".catalog_revision")))
 		{
 			return false;
 		}
@@ -641,7 +565,7 @@ namespace UE::UAI::BindingGateway::Ticket
 			&& !TryParseStateRevision(
 				Object->GetObjectField(TEXT("target_revision")),
 				TargetRevision,
-				OutError))
+				OutError, InputPath + TEXT(".target_revision")))
 		{
 			return false;
 		}
@@ -663,10 +587,8 @@ namespace UE::UAI::BindingGateway::Ticket
 			MoveTemp(TargetRevision));
 		if (!Ticket.IsValid())
 		{
-			Fail(
-				OutError,
-				TEXT("ticket"),
-				TEXT("operation ticket is invalid"));
+			OutError = Ticket.GetValidationDiagnostic();
+			LocateDiagnostic(OutError, InputPath);
 			return false;
 		}
 		OutTicket.Emplace(MoveTemp(Ticket));

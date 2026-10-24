@@ -1,4 +1,5 @@
 #include "Misc/AutomationTest.h"
+#include "Utilities/AuthoringCore/UeAgentMovieSceneAuthoring.h"
 
 #include "Animation/AnimData/IAnimationDataController.h"
 #include "Animation/AnimMontage.h"
@@ -22,6 +23,9 @@
 #include "LevelSequence.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
+#include "ObjectTools.h"
+#include "Vertical/T85/UeAgentT85FixtureLifecycle.h"
 #include "MovieScene.h"
 #include "Channels/MovieSceneFloatChannel.h"
 #include "Sections/MovieSceneFloatSection.h"
@@ -206,16 +210,7 @@ namespace
 
 	FUeAgentResourceTrackerOwner MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 100000},
-				{EUeAgentResourceDimension::Items, 100000},
-				{EUeAgentResourceDimension::StringBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 100000},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	TSharedPtr<FJsonObject> JsonRate(const FTimelineAnimationRate& Value)
@@ -749,6 +744,53 @@ namespace
 		return Result;
 	}
 
+	bool CreateLevelSettingsFixture(FAutomationTestBase& Test, FFixture& Out)
+	{
+		const FString LevelPackageName = Out.AddPackage(TEXT("Level"));
+		UPackage* LevelPackage = CreatePackage(*LevelPackageName);
+		Out.LevelSequence = NewObject<ULevelSequence>(LevelPackage, TEXT("Level"),
+			RF_Public | RF_Standalone | RF_Transactional);
+		Out.LevelSequenceRef = Out.ObjectPath(LevelPackageName);
+		Out.LevelSequence->Initialize();
+		Out.LevelSequence->GetMovieScene()->SetDisplayRate(FFrameRate(30, 1));
+		Out.LevelSequence->GetMovieScene()->SetTickResolutionDirectly(FFrameRate(30, 1));
+		Out.LevelSequence->GetMovieScene()->SetPlaybackRange(0, 30);
+		UMovieSceneFloatTrack* LevelTrack =
+			Out.LevelSequence->GetMovieScene()->AddTrack<UMovieSceneFloatTrack>();
+		if (!Test.TestNotNull(
+			TEXT("create LevelSequence preservation track"), LevelTrack))
+		{
+			return false;
+		}
+		LevelTrack->SetDisplayName(
+			FText::FromString(TEXT("TS010A_PreservedTrack")));
+		UMovieSceneFloatSection* LevelSection = Cast<UMovieSceneFloatSection>(
+			LevelTrack->CreateNewSection());
+		if (!Test.TestNotNull(
+			TEXT("create LevelSequence preservation section"), LevelSection))
+		{
+			return false;
+		}
+		LevelSection->SetRange(TRange<FFrameNumber>(
+			FFrameNumber(0), FFrameNumber(30)));
+		LevelTrack->AddSection(*LevelSection);
+		FMovieSceneFloatChannel* LevelChannel = LevelSection->
+			GetChannelProxy().GetChannel<FMovieSceneFloatChannel>(0);
+		if (!Test.TestNotNull(
+			TEXT("create LevelSequence preservation channel"), LevelChannel))
+		{
+			return false;
+		}
+		LevelChannel->AddLinearKey(FFrameNumber(10), 0.5f);
+		if (!Test.TestTrue(TEXT("save LevelSequence fixture"),
+				Out.Save(*Out.LevelSequence)))
+		{
+			return false;
+		}
+
+		return true;
+	}
+
 	bool CreateFixture(FAutomationTestBase& Test, FFixture& Out)
 	{
 		Out.Mesh = LoadObject<USkeletalMesh>(nullptr,
@@ -807,47 +849,7 @@ namespace
 			return false;
 		}
 
-		const FString LevelPackageName = Out.AddPackage(TEXT("Level"));
-		UPackage* LevelPackage = CreatePackage(*LevelPackageName);
-		Out.LevelSequence = NewObject<ULevelSequence>(LevelPackage, TEXT("Level"),
-			RF_Public | RF_Standalone | RF_Transactional);
-		Out.LevelSequenceRef = Out.ObjectPath(LevelPackageName);
-		Out.LevelSequence->Initialize();
-		Out.LevelSequence->GetMovieScene()->SetDisplayRate(FFrameRate(30, 1));
-		Out.LevelSequence->GetMovieScene()->SetTickResolutionDirectly(FFrameRate(30, 1));
-		Out.LevelSequence->GetMovieScene()->SetPlaybackRange(0, 30);
-		UMovieSceneFloatTrack* LevelTrack =
-			Out.LevelSequence->GetMovieScene()->AddTrack<UMovieSceneFloatTrack>();
-		if (!Test.TestNotNull(
-			TEXT("create LevelSequence preservation track"), LevelTrack))
-		{
-			return false;
-		}
-		LevelTrack->SetDisplayName(
-			FText::FromString(TEXT("TS010A_PreservedTrack")));
-		UMovieSceneFloatSection* LevelSection = Cast<UMovieSceneFloatSection>(
-			LevelTrack->CreateNewSection());
-		if (!Test.TestNotNull(
-			TEXT("create LevelSequence preservation section"), LevelSection))
-		{
-			return false;
-		}
-		LevelSection->SetRange(TRange<FFrameNumber>(
-			FFrameNumber(0), FFrameNumber(30)));
-		LevelTrack->AddSection(*LevelSection);
-		FMovieSceneFloatChannel* LevelChannel = LevelSection->
-			GetChannelProxy().GetChannel<FMovieSceneFloatChannel>(0);
-		if (!Test.TestNotNull(
-			TEXT("create LevelSequence preservation channel"), LevelChannel))
-		{
-			return false;
-		}
-		LevelChannel->AddLinearKey(FFrameNumber(10), 0.5f);
-		if (!Test.TestTrue(TEXT("save LevelSequence fixture"),
-				Out.Save(*Out.LevelSequence)))
-		{
-			return false;
-		}
+		if (!CreateLevelSettingsFixture(Test, Out)) return false;
 
 		const FString WidgetPackageName = Out.AddPackage(TEXT("Widget"));
 		UPackage* WidgetPackage = CreatePackage(*WidgetPackageName);
@@ -921,7 +923,9 @@ namespace
 		EUeAgentTimelineAnimationRequestKind Kind,
 		FTimelineAnimationRequestData Data,
 		const FString& Ref,
-		const FUeAgentResourceTrackerOwner& Resources)
+		const FUeAgentResourceTrackerOwner& Resources,
+		bool bValidateLevelSequenceShape = false,
+		TSharedPtr<const FUeAgentCanonicalSnapshot>* OutSnapshot = nullptr)
 	{
 		const auto* ContractValue = Contract(Capability);
 		const auto* DescriptorValue = Descriptor(Runtime, Capability);
@@ -945,7 +949,71 @@ namespace
 			*Context, Source, Error);
 		if (!Test.TestTrue(TEXT("execute exact production C3Q: ") + Capability, bRead))
 			Test.AddError(Capability + TEXT(":") + Error.Code + TEXT(":") + Error.Detail);
-		return bRead && Test.TestTrue(TEXT("C3Q returns independent snapshot"),
+		if (!bRead) return false;
+		if (OutSnapshot) *OutSnapshot = Source->GetSnapshot();
+		if (bValidateLevelSequenceShape)
+		{
+			const TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot = Source->GetSnapshot();
+			const FUeAgentStateEntry* SequenceEntry = Snapshot->GetEntries().FindByPredicate(
+				[](const FUeAgentStateEntry& Entry)
+				{
+					return Entry.GetIdentity().GetObjectRole()
+						== TEXT("timeline_sequence.sequence");
+				});
+			const FUeAgentStateEntry* StructureEntry = Snapshot->GetEntries().FindByPredicate(
+				[](const FUeAgentStateEntry& Entry)
+				{
+					return Entry.GetIdentity().GetObjectRole()
+						== TEXT("timeline_sequence.structure");
+				});
+			Test.TestNotNull(
+				TEXT("timeline.sequence.read exposes a sequence business entry"),
+				SequenceEntry);
+			Test.TestNotNull(
+				TEXT("timeline.sequence.read exposes a structure business entry"),
+				StructureEntry);
+			if (SequenceEntry && StructureEntry)
+			{
+				const auto HasField = [&](const FUeAgentCanonicalValueRef& Value, const TCHAR* Field)
+				{
+					return Value->GetObjectItems().ContainsByPredicate(
+						[&](const auto& Pair) { return Pair.Key == Field; });
+				};
+				Test.TestTrue(TEXT("timeline.sequence.read includes sequence summary"),
+					HasField(SequenceEntry->GetValue(), TEXT("asset_ref"))
+						&& HasField(SequenceEntry->GetValue(), TEXT("asset_kind")));
+				Test.TestTrue(TEXT("timeline.sequence.read includes display/tick/range"),
+					HasField(StructureEntry->GetValue(), TEXT("display_rate"))
+						&& HasField(StructureEntry->GetValue(), TEXT("tick_resolution"))
+						&& HasField(StructureEntry->GetValue(), TEXT("playback_range")));
+				Test.TestEqual(
+					TEXT("timeline.sequence.read emits bindings only when requested"),
+					HasField(StructureEntry->GetValue(), TEXT("bindings")),
+					Data.IncludeBindings.Get(false));
+				Test.TestEqual(
+					TEXT("timeline.sequence.read emits root tracks only when requested"),
+					HasField(StructureEntry->GetValue(), TEXT("root_tracks")),
+					Data.IncludeTracks.Get(false));
+				TFunction<bool(const FUeAgentCanonicalValueRef&)> ContainsOpaqueTimelineIdentity;
+				ContainsOpaqueTimelineIdentity = [&](const FUeAgentCanonicalValueRef& Value)
+				{
+					if (Value->GetKind() == EUeAgentValueKind::String)
+						return Value->GetText().Contains(TEXT("/Game/"))
+							|| Value->GetText().Contains(TEXT("signature"));
+					if (Value->GetKind() == EUeAgentValueKind::Array)
+						return Value->GetArrayItems().ContainsByPredicate(ContainsOpaqueTimelineIdentity);
+					if (Value->GetKind() == EUeAgentValueKind::Object)
+						return Value->GetObjectItems().ContainsByPredicate(
+							[&](const auto& Pair) { return Pair.Key != TEXT("asset_ref")
+								&& ContainsOpaqueTimelineIdentity(Pair.Value); });
+					return false;
+				};
+			Test.TestFalse(TEXT("timeline.sequence.read omits path/signature blobs"),
+				ContainsOpaqueTimelineIdentity(SequenceEntry->GetValue())
+					|| ContainsOpaqueTimelineIdentity(StructureEntry->GetValue()));
+			}
+		}
+		return Test.TestTrue(TEXT("C3Q returns independent snapshot"),
 			Source.IsValid() && Source->IsValid() && Source->GetSnapshot().IsValid()
 			&& !Source->GetSnapshot()->GetEntries().IsEmpty());
 	}
@@ -1009,9 +1077,232 @@ namespace
 	}
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUeAgentTimelineSequenceQueryReferencesTest,
+	"UAI.Root.T85.LevelSequence.QueryReferences",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentTimelineSequenceQueryReferencesTest::RunTest(const FString&)
+{
+	const FString PackageName = TEXT("/Game/UAI/Transient/T85SequenceQuery/LS_") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
+	const FString Name = FPackageName::GetLongPackageAssetName(PackageName);
+	const FString ObjectPath = PackageName + TEXT(".") + Name;
+	ON_SCOPE_EXIT {
+		if (UObject* Asset = LoadObject<UObject>(nullptr, *ObjectPath)) ObjectTools::DeleteObjectsUnchecked({Asset});
+		UE::UAI::T85::FixtureLifecycle::TryRemoveEmptyRootForPackage(*this, PackageName);
+	};
+	UPackage* Package = CreatePackage(*PackageName);
+	auto* Sequence = NewObject<ULevelSequence>(Package, *Name, RF_Public | RF_Standalone);
+	Sequence->Initialize();
+	Sequence->GetMovieScene()->SetPlaybackRange(0, 24000);
+	const FGuid Binding = Sequence->GetMovieScene()->AddPossessable(TEXT("Readable"), UObject::StaticClass());
+	for (UMovieSceneFloatTrack* Track : {Sequence->GetMovieScene()->AddTrack<UMovieSceneFloatTrack>(),
+		Sequence->GetMovieScene()->AddTrack<UMovieSceneFloatTrack>(Binding)})
+	{
+		Track->SetDisplayName(FText::FromString(TEXT("Shared")));
+		auto* Section = CastChecked<UMovieSceneFloatSection>(Track->CreateNewSection());
+		Section->SetRange(TRange<FFrameNumber>(0, 24000)); Track->AddSection(*Section);
+		Section->GetChannel().AddCubicKey(FFrameNumber(5), 2.5f);
+	}
+	FAssetRegistryModule::AssetCreated(Sequence);
+	FSavePackageArgs SaveArgs; SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+	const FString Filename = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
+	if (!UPackage::SavePackage(Package, Sequence, *Filename, SaveArgs)) return false;
+	FUeAgentTimelineAnimationProductionRuntimeConfig Config;
+	Config.ProjectInstanceId = TEXT("t85-query-project"); Config.EditorInstanceId = TEXT("t85-query-editor");
+	Config.ServerSessionId = TEXT("t85-query-session"); Config.RegistryEpoch = 1;
+	TSharedPtr<FUeAgentTimelineAnimationProductionRuntime> Runtime;
+	FUeAgentTimelineAnimationExecutionError Error;
+	if (!FUeAgentTimelineAnimationProductionRuntime::TryCreate(Config, Runtime, Error)) return false;
+	FTimelineAnimationRequestData Data; Data.IncludeBindings = true; Data.IncludeTracks = true; Data.IncludeKeys = true;
+	TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
+	if (!ExecuteQuery(*this, *Runtime, TEXT("timeline.sequence.read"), EUeAgentTimelineAnimationRequestKind::LevelSequenceRead,
+		Data, ObjectPath, MakeResources(), true, &Snapshot)) return false;
+	TArray<FString> TrackRefs, SectionRefs;
+	TFunction<void(const FUeAgentCanonicalValue&)> Visit = [&](const FUeAgentCanonicalValue& Value) {
+		if (Value.GetKind() == EUeAgentValueKind::Array) for (const auto& Item : Value.GetArrayItems()) Visit(Item.Get());
+		if (Value.GetKind() == EUeAgentValueKind::Object) for (const auto& Field : Value.GetObjectItems())
+		{
+			if (Field.Key == TEXT("track_ref")) TrackRefs.Add(Field.Value->GetText());
+			if (Field.Key == TEXT("section_ref")) SectionRefs.Add(Field.Value->GetText());
+			Visit(Field.Value.Get());
+		}
+	};
+	for (const auto& Entry : Snapshot->GetEntries()) Visit(Entry.GetValue().Get());
+	TrackRefs.Sort(); SectionRefs.Sort();
+	TestTrue(TEXT("real query source retains ordinal public track refs without native object names or binding GUIDs"),
+		TrackRefs == TArray<FString>{TEXT("binding:0:track:0"), TEXT("root_track:0")});
+	TestTrue(TEXT("real query section refs derive only from ordinal public track refs"),
+		SectionRefs == TArray<FString>{TEXT("binding:0:track:0:section:0"), TEXT("root_track:0:section:0")});
+	return !HasAnyErrors();
+}
+
+namespace
+{
+bool VerifyLevelSettings(FAutomationTestBase& Test, FUeAgentTimelineAnimationProductionRuntime& Runtime,
+    const FString& LevelRef, const FUeAgentResourceTrackerOwner& Resources)
+{
+    FTimelineAnimationRevision Revision;
+    FUeAgentTimelineAnimationExecutionError Error;
+    FTimelineAnimationRequestData Data;
+	Runtime.TryReadRevision(LevelRef, Revision, Error);
+	ULevelSequence* const BeforeSettingsLevel = LoadObject<ULevelSequence>(
+		nullptr, *LevelRef);
+	if (!Test.TestNotNull(
+			TEXT("reload live LevelSequence before settings update"),
+			BeforeSettingsLevel))
+	{
+		return false;
+	}
+	const UMovieScene* BeforeSettingsScene =
+		BeforeSettingsLevel->GetMovieScene();
+	const UMovieSceneTrack* BeforeSettingsTrack =
+		BeforeSettingsScene && !BeforeSettingsScene->GetTracks().IsEmpty()
+			? BeforeSettingsScene->GetTracks()[0]
+			: nullptr;
+	const UMovieSceneSection* BeforeSettingsSection =
+		BeforeSettingsTrack && !BeforeSettingsTrack->GetAllSections().IsEmpty()
+			? BeforeSettingsTrack->GetAllSections()[0]
+			: nullptr;
+	const FString PreservedTrackPath = BeforeSettingsTrack
+		? BeforeSettingsTrack->GetPathName()
+		: FString();
+	const FString PreservedSectionPath = BeforeSettingsSection
+		? BeforeSettingsSection->GetPathName()
+		: FString();
+	Data = {};
+	Data.ExpectedRevision = Revision;
+	Data.DisplayRate = FTimelineAnimationRate{TEXT("24"), TEXT("1")};
+	Data.TemporalRange = Range(TEXT("level_sequence:") + LevelRef, 5, 45);
+	// Inclusive 44 denotes the same persisted endpoint as exclusive 45.
+	Data.TemporalRange->Upper.Kind = TEXT("inclusive");
+	Data.TemporalRange->Upper.Point->Tick = TEXT("44");
+	ExecuteOperation(Test, Runtime,
+		TEXT("timeline.sequence.settings.update"),
+		EUeAgentTimelineAnimationRequestKind::LevelSequenceSettingsUpdate,
+		Data, LevelRef, Resources);
+	ULevelSequence* SettingsReloadedLevel = LoadObject<ULevelSequence>(
+		nullptr, *LevelRef);
+	UMovieScene* SettingsReloadedScene = SettingsReloadedLevel
+		? SettingsReloadedLevel->GetMovieScene()
+		: nullptr;
+	Test.TestNotNull(
+		TEXT("level sequence settings update reloads its target"),
+		SettingsReloadedScene);
+	if (SettingsReloadedScene)
+	{
+		Test.TestEqual(
+			TEXT("settings update changes display rate"),
+			SettingsReloadedScene->GetDisplayRate(),
+			FFrameRate(24, 1));
+		Test.TestEqual(
+			TEXT("settings update preserves tick resolution"),
+			SettingsReloadedScene->GetTickResolution(),
+			FFrameRate(30, 1));
+		Test.TestEqual(
+			TEXT("settings update changes playback lower tick"),
+			SettingsReloadedScene->GetPlaybackRange().GetLowerBoundValue().Value,
+			5);
+		Test.TestEqual(
+			TEXT("settings update changes playback upper tick"),
+			SettingsReloadedScene->GetPlaybackRange().GetUpperBoundValue().Value,
+			45);
+		Test.TestEqual(
+			TEXT("settings update preserves root track count"),
+			SettingsReloadedScene->GetTracks().Num(),
+			1);
+		const UMovieSceneTrack* PreservedTrack =
+			SettingsReloadedScene->GetTracks().Num() == 1
+				? SettingsReloadedScene->GetTracks()[0]
+				: nullptr;
+		Test.TestEqual(
+			TEXT("settings update preserves root track identity"),
+			PreservedTrack ? PreservedTrack->GetPathName() : FString(),
+			PreservedTrackPath);
+		const UMovieSceneSection* PreservedSection =
+			PreservedTrack && PreservedTrack->GetAllSections().Num() == 1
+				? PreservedTrack->GetAllSections()[0]
+				: nullptr;
+		Test.TestEqual(
+			TEXT("settings update preserves section identity"),
+			PreservedSection ? PreservedSection->GetPathName() : FString(),
+			PreservedSectionPath);
+		const UMovieSceneFloatSection* PreservedFloatSection =
+			Cast<UMovieSceneFloatSection>(PreservedSection);
+		const FMovieSceneFloatChannel* PreservedChannel =
+			PreservedFloatSection
+				? PreservedFloatSection->GetChannelProxy()
+					.GetChannel<FMovieSceneFloatChannel>(0)
+				: nullptr;
+		Test.TestEqual(
+			TEXT("settings update preserves key count"),
+			PreservedChannel
+				? PreservedChannel->GetData().GetTimes().Num()
+				: -1,
+			1);
+		if (PreservedChannel
+			&& PreservedChannel->GetData().GetTimes().Num() == 1
+			&& PreservedChannel->GetData().GetValues().Num() == 1)
+		{
+			Test.TestEqual(
+				TEXT("settings update preserves key time"),
+				PreservedChannel->GetData().GetTimes()[0].Value,
+				10);
+			Test.TestEqual(
+				TEXT("settings update preserves key value"),
+				PreservedChannel->GetData().GetValues()[0].Value,
+				0.5f);
+		}
+		Test.TestEqual(
+			TEXT("settings update preserves section lower tick"),
+			PreservedSection
+				? PreservedSection->GetRange().GetLowerBoundValue().Value
+				: -1,
+			0);
+		Test.TestEqual(
+			TEXT("settings update preserves section upper tick"),
+			PreservedSection
+				? PreservedSection->GetRange().GetUpperBoundValue().Value
+				: -1,
+			30);
+		Test.TestTrue(
+			TEXT("settings update settles compiled data after formal reload"),
+			UMovieSceneCompiledDataManager::GetPrecompiledData()
+				->FindDataID(SettingsReloadedLevel).IsValid());
+		Test.TestTrue(TEXT("inclusive playback upper is persisted as exclusive"), SettingsReloadedScene->GetPlaybackRange().GetUpperBound().IsExclusive());
+		auto Overflow = Range(TEXT("level_sequence:") + LevelRef, 5, MAX_int32);
+		Overflow.Upper.Kind = TEXT("inclusive");
+		UE::UAI::Authoring::Timeline::FPreparedMovieSceneSettings Prepared;
+		Test.TestFalse(TEXT("inclusive playback upper overflow rejected before native writes"),
+			UE::UAI::Authoring::Timeline::TryPrepareMovieSceneSettings(*SettingsReloadedScene,
+				TEXT("level_sequence:") + LevelRef, {}, Overflow, Prepared, Error));
+		Test.TestEqual(TEXT("overflow leaves native upper unchanged"), SettingsReloadedScene->GetPlaybackRange().GetUpperBoundValue().Value, 45);
+	}
+
+    return !Test.HasAnyErrors();
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUeAgentTimelineAnimationSequenceSettingsTest,
+    "UeAgentInterface.DomainAdapters.TimelineAnimation.E2.ProductionNative.SequenceSettings",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FUeAgentTimelineAnimationSequenceSettingsTest::RunTest(const FString&)
+{
+    FFixture Fixture;
+    if (!CreateLevelSettingsFixture(*this, Fixture)) return false;
+    FUeAgentTimelineAnimationProductionRuntimeConfig Config;
+    Config.ProjectInstanceId = TEXT("t208-settings-project");
+    Config.EditorInstanceId = TEXT("t208-settings-editor");
+    Config.ServerSessionId = TEXT("t208-settings-session");
+    Config.RegistryEpoch = 1;
+    TSharedPtr<FUeAgentTimelineAnimationProductionRuntime> Runtime;
+    FUeAgentTimelineAnimationExecutionError Error;
+    if (!FUeAgentTimelineAnimationProductionRuntime::TryCreate(Config, Runtime, Error) || !Runtime) return false;
+    return VerifyLevelSettings(*this, *Runtime, Fixture.LevelSequenceRef, MakeResources());
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentTimelineAnimationProductionNativeCapabilitiesTest,
-	"UeAgentInterface.DomainAdapters.TimelineAnimation.E2.ProductionNative.All20Capabilities",
+	"UeAgentInterface.DomainAdapters.TimelineAnimation.E2.ProductionNative.Capabilities",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
@@ -1091,7 +1382,14 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 		EUeAgentTimelineAnimationRequestKind::SkeletonSlotsRead, {},
 		SkeletonRef, Resources);
 	ExecuteQuery(*this, *Runtime, TEXT("timeline.sequence.read"),
-		EUeAgentTimelineAnimationRequestKind::LevelSequenceRead, {}, LevelRef, Resources);
+		EUeAgentTimelineAnimationRequestKind::LevelSequenceRead, {},
+		LevelRef, Resources, true);
+	Data = {};
+	Data.IncludeBindings = true;
+	Data.IncludeTracks = true;
+	Data.IncludeKeys = true;
+	ExecuteQuery(*this, *Runtime, TEXT("timeline.sequence.read"),
+		EUeAgentTimelineAnimationRequestKind::LevelSequenceRead, Data, LevelRef, Resources, true);
 	ExecuteQuery(*this, *Runtime,
 		TEXT("timeline.widget_animation.read"),
 		EUeAgentTimelineAnimationRequestKind::WidgetAnimationRead, {},
@@ -1165,6 +1463,72 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 	ExecuteOperation(*this, *Runtime, TEXT("animation.montage.create"),
 		EUeAgentTimelineAnimationRequestKind::MontageCreate, Data, FString(), Resources);
 
+	const FString MissingDependencyPackage = Fixture.AddPackage(
+		TEXT("MontageMissingDependency"));
+	const FString MissingDependencyRef = Fixture.ObjectPath(
+		MissingDependencyPackage);
+	Data = {};
+	Data.DestinationRef = MissingDependencyRef;
+	Data.SkeletonRef = TEXT("/Game/UAI/Tests/MissingSkeleton.MissingSkeleton");
+	Data.Structure = Structure(TEXT("animation_montage:")
+		+ MissingDependencyRef, 60);
+	const auto* MontageCreateDescriptor = Descriptor(
+		*Runtime, TEXT("animation.montage.create"));
+	TestNotNull(TEXT("montage create descriptor for dependency failure"),
+		MontageCreateDescriptor);
+	if (MontageCreateDescriptor)
+	{
+		const auto Context = MakeContext(*this, *MontageCreateDescriptor,
+			EUeAgentRequestKind::Operation,
+			TEXT("operation-animation.montage.create-missing-dependency"),
+			Resources);
+		const auto Targets = MakeOperationTargets(*this,
+			*MontageCreateDescriptor, TEXT("animation.montage.create"), FString());
+		const TSharedRef<FUeAgentTimelineAnimationOperationChain>* Chain =
+			Runtime->GetOperationChains().FindByPredicate(
+				[](const TSharedRef<FUeAgentTimelineAnimationOperationChain>& Candidate)
+				{
+					return Candidate->GetContract().GetCapabilityId()
+						== TEXT("animation.montage.create");
+				});
+		TestNotNull(TEXT("montage create chain for dependency failure"), Chain);
+		if (Context.IsValid() && Chain)
+		{
+			FUeAgentOperationBindingError BindingError;
+			TOptional<FPlanningRequest> Request;
+			const bool bBuilt = (*Chain)->TryBuildPlanningRequest(
+				CanonicalInput(EUeAgentTimelineAnimationRequestKind::MontageCreate,
+					Data),
+				Targets, *Context, Request, BindingError);
+			TestTrue(TEXT("missing montage dependency reaches execution"),
+				bBuilt && Request.IsSet());
+			TestNull(TEXT("missing montage preflight leaves no package"),
+				FindPackage(nullptr, *MissingDependencyPackage));
+			if (bBuilt && Request.IsSet())
+			{
+				FPlanningResult Planning;
+				const bool bPlanned = (*Chain)->GetPlanner().TryPlan(
+					*Request, *Context, Planning, BindingError);
+				TestTrue(TEXT("missing montage dependency plans without mutation"),
+					bPlanned);
+				TestNull(TEXT("missing montage planning leaves no package"),
+					FindPackage(nullptr, *MissingDependencyPackage));
+				if (bPlanned)
+				{
+					FExecutionReceipt Receipt;
+					TestFalse(TEXT("missing montage skeleton rejects create"),
+						(*Chain)->GetExecutor().TryExecute(
+							Planning, Targets, *Context, Receipt, BindingError));
+					TestEqual(TEXT("missing montage skeleton failure code"),
+						BindingError.Code,
+						FString(TEXT("timeline_animation_montage_create_dependency_missing")));
+				}
+			}
+		}
+	}
+	TestNull(TEXT("missing montage dependency leaves no package"),
+		FindPackage(nullptr, *MissingDependencyPackage));
+
 	Runtime->TryReadRevision(MontageRef, Revision, Error);
 	Data = {};
 	Data.ExpectedRevision = Revision;
@@ -1193,128 +1557,7 @@ bool FUeAgentTimelineAnimationProductionNativeCapabilitiesTest::RunTest(
 				->FindDataID(CreatedLevel).IsValid());
 	}
 
-	Runtime->TryReadRevision(LevelRef, Revision, Error);
-	ULevelSequence* const BeforeSettingsLevel = LoadObject<ULevelSequence>(
-		nullptr, *LevelRef);
-	if (!TestNotNull(
-			TEXT("reload live LevelSequence before settings update"),
-			BeforeSettingsLevel))
-	{
-		return false;
-	}
-	const UMovieScene* BeforeSettingsScene =
-		BeforeSettingsLevel->GetMovieScene();
-	const UMovieSceneTrack* BeforeSettingsTrack =
-		BeforeSettingsScene && !BeforeSettingsScene->GetTracks().IsEmpty()
-			? BeforeSettingsScene->GetTracks()[0]
-			: nullptr;
-	const UMovieSceneSection* BeforeSettingsSection =
-		BeforeSettingsTrack && !BeforeSettingsTrack->GetAllSections().IsEmpty()
-			? BeforeSettingsTrack->GetAllSections()[0]
-			: nullptr;
-	const FString PreservedTrackPath = BeforeSettingsTrack
-		? BeforeSettingsTrack->GetPathName()
-		: FString();
-	const FString PreservedSectionPath = BeforeSettingsSection
-		? BeforeSettingsSection->GetPathName()
-		: FString();
-	Data = {};
-	Data.ExpectedRevision = Revision;
-	Data.DisplayRate = FTimelineAnimationRate{TEXT("24"), TEXT("1")};
-	Data.TemporalRange = Range(TEXT("level_sequence:") + LevelRef, 5, 45);
-	ExecuteOperation(*this, *Runtime,
-		TEXT("timeline.sequence.settings.update"),
-		EUeAgentTimelineAnimationRequestKind::LevelSequenceSettingsUpdate,
-		Data, LevelRef, Resources);
-	ULevelSequence* SettingsReloadedLevel = LoadObject<ULevelSequence>(
-		nullptr, *LevelRef);
-	UMovieScene* SettingsReloadedScene = SettingsReloadedLevel
-		? SettingsReloadedLevel->GetMovieScene()
-		: nullptr;
-	TestNotNull(
-		TEXT("level sequence settings update reloads its target"),
-		SettingsReloadedScene);
-	if (SettingsReloadedScene)
-	{
-		TestEqual(
-			TEXT("settings update changes display rate"),
-			SettingsReloadedScene->GetDisplayRate(),
-			FFrameRate(24, 1));
-		TestEqual(
-			TEXT("settings update preserves tick resolution"),
-			SettingsReloadedScene->GetTickResolution(),
-			FFrameRate(30, 1));
-		TestEqual(
-			TEXT("settings update changes playback lower tick"),
-			SettingsReloadedScene->GetPlaybackRange().GetLowerBoundValue().Value,
-			5);
-		TestEqual(
-			TEXT("settings update changes playback upper tick"),
-			SettingsReloadedScene->GetPlaybackRange().GetUpperBoundValue().Value,
-			45);
-		TestEqual(
-			TEXT("settings update preserves root track count"),
-			SettingsReloadedScene->GetTracks().Num(),
-			1);
-		const UMovieSceneTrack* PreservedTrack =
-			SettingsReloadedScene->GetTracks().Num() == 1
-				? SettingsReloadedScene->GetTracks()[0]
-				: nullptr;
-		TestEqual(
-			TEXT("settings update preserves root track identity"),
-			PreservedTrack ? PreservedTrack->GetPathName() : FString(),
-			PreservedTrackPath);
-		const UMovieSceneSection* PreservedSection =
-			PreservedTrack && PreservedTrack->GetAllSections().Num() == 1
-				? PreservedTrack->GetAllSections()[0]
-				: nullptr;
-		TestEqual(
-			TEXT("settings update preserves section identity"),
-			PreservedSection ? PreservedSection->GetPathName() : FString(),
-			PreservedSectionPath);
-		const UMovieSceneFloatSection* PreservedFloatSection =
-			Cast<UMovieSceneFloatSection>(PreservedSection);
-		const FMovieSceneFloatChannel* PreservedChannel =
-			PreservedFloatSection
-				? PreservedFloatSection->GetChannelProxy()
-					.GetChannel<FMovieSceneFloatChannel>(0)
-				: nullptr;
-		TestEqual(
-			TEXT("settings update preserves key count"),
-			PreservedChannel
-				? PreservedChannel->GetData().GetTimes().Num()
-				: -1,
-			1);
-		if (PreservedChannel
-			&& PreservedChannel->GetData().GetTimes().Num() == 1
-			&& PreservedChannel->GetData().GetValues().Num() == 1)
-		{
-			TestEqual(
-				TEXT("settings update preserves key time"),
-				PreservedChannel->GetData().GetTimes()[0].Value,
-				10);
-			TestEqual(
-				TEXT("settings update preserves key value"),
-				PreservedChannel->GetData().GetValues()[0].Value,
-				0.5f);
-		}
-		TestEqual(
-			TEXT("settings update preserves section lower tick"),
-			PreservedSection
-				? PreservedSection->GetRange().GetLowerBoundValue().Value
-				: -1,
-			0);
-		TestEqual(
-			TEXT("settings update preserves section upper tick"),
-			PreservedSection
-				? PreservedSection->GetRange().GetUpperBoundValue().Value
-				: -1,
-			30);
-		TestTrue(
-			TEXT("settings update settles compiled data after formal reload"),
-			UMovieSceneCompiledDataManager::GetPrecompiledData()
-				->FindDataID(SettingsReloadedLevel).IsValid());
-	}
+	if (!VerifyLevelSettings(*this, *Runtime, LevelRef, Resources)) return false;
 
 	Runtime->TryReadRevision(LevelRef, Revision, Error);
 	Data = {};

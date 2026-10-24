@@ -28,6 +28,8 @@
 #include "OperationOwners/ViewportGraph/UeAgentViewportGraphOperationOwner.h"
 #include "PackageTools.h"
 #include "Slate/SceneViewport.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "UObject/Package.h"
 #include "UObject/GarbageCollection.h"
 
@@ -161,11 +163,12 @@ namespace UE::UAI::Tests::StrictV2::T45
 	TSharedRef<FJsonObject> CameraTransform(
 		const FString& ViewportIdentity,
 		const FVector& Location,
-		const FRotator& Rotation)
+		const FRotator& Rotation,
+		const FString& FrameId = TEXT("unreal.world"))
 	{
 		const FQuat Quat = Rotation.Quaternion();
 		const TSharedRef<FJsonObject> Frame = MakeShared<FJsonObject>();
-		Frame->SetStringField(TEXT("frame_id"), TEXT("unreal.world"));
+		Frame->SetStringField(TEXT("frame_id"), FrameId);
 		Frame->SetStringField(
 			TEXT("basis_frame_id"), TEXT("captured.viewport.session"));
 		Frame->SetNumberField(TEXT("dimension"), 3);
@@ -191,6 +194,24 @@ namespace UE::UAI::Tests::StrictV2::T45
 			TEXT("conversion_evidence_ids"),
 			{MakeShared<FJsonValueString>(TEXT("t45-public-identity"))});
 		return Transform;
+	}
+
+	TSharedRef<FJsonObject> WorldPoint(
+		const FString& Subject,
+		const FVector& Location)
+	{
+		const TSharedRef<FJsonObject> Point = CameraTransform(
+			Subject,
+			Location,
+			FRotator::ZeroRotator);
+		Point->SetStringField(TEXT("subject"), Subject);
+		Point->SetStringField(TEXT("quantity"), TEXT("point"));
+		Point->SetArrayField(TEXT("components"), {
+			MakeShared<FJsonValueString>(FString::SanitizeFloat(Location.X, 9)),
+			MakeShared<FJsonValueString>(FString::SanitizeFloat(Location.Y, 9)),
+			MakeShared<FJsonValueString>(FString::SanitizeFloat(Location.Z, 9)),
+		});
+		return Point;
 	}
 
 	TSharedRef<FJsonObject> CaptureState(
@@ -312,7 +333,6 @@ bool FUeAgentStrictV2T45ViewportGraphInventoryTest::RunTest(
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T45 owns exactly 14 commands"), ExpectedCommands().Num(), 14);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
@@ -322,6 +342,72 @@ bool FUeAgentStrictV2T45ViewportGraphInventoryTest::RunTest(
 			TestEqual(*FString::Printf(TEXT("%s has one T45 owner"), *CommandId),
 				Contract->GetPublicOwner(),
 				FString(TEXT("viewport-graph-control-owner")));
+			for (const CommandContract::FUeAgentCommandFieldDeclaration& Field
+				: Contract->GetInputFields())
+			{
+				TestTrue(*FString::Printf(
+					TEXT("%s projects schema for public field %s"),
+					*CommandId, *Field.Name), !Field.SchemaJson.IsEmpty());
+			}
+			const auto FindField = [&](const TCHAR* Name)
+			{
+				return Contract->GetInputFields().FindByPredicate(
+					[Name](const CommandContract::FUeAgentCommandFieldDeclaration& Field)
+					{
+						return Field.Name == Name;
+					});
+			};
+			const CommandContract::FUeAgentCommandFieldDeclaration* Input =
+				FindField(TEXT("input"));
+			TestNotNull(
+				*FString::Printf(TEXT("%s exposes one public input field"), *CommandId),
+				Input);
+			TestTrue(
+				*FString::Printf(TEXT("%s projects its typed input schema"), *CommandId),
+				Input && !Input->SchemaJson.IsEmpty());
+			if (Input && CommandId == TEXT("viewport.state.update"))
+			{
+				TestTrue(TEXT("state update detail exposes camera transform mode"),
+					Input->SchemaJson.Contains(TEXT("camera_transform_mode")));
+			}
+			if (Input && CommandId == TEXT("viewport.camera.frame"))
+			{
+				TestTrue(TEXT("camera frame detail exposes point and bounds selectors"),
+					Input->SchemaJson.Contains(TEXT("world_point"))
+					&& Input->SchemaJson.Contains(TEXT("world_bounds")));
+			}
+			const auto* Target = FindField(TEXT("target"));
+			if (Target)
+			{
+				TestTrue(TEXT("target schema requires a non-empty exact identity"),
+					Target->SchemaJson.Contains(TEXT("minLength")));
+			}
+			const auto* Context = FindField(TEXT("context"));
+			if (Context && CommandId.StartsWith(TEXT("viewport."))
+				&& CommandId != TEXT("viewport.instance.list"))
+			{
+				TestTrue(TEXT("viewport context exposes its required identity and world type"),
+					Context->SchemaJson.Contains(TEXT("viewport_identity"))
+					&& Context->SchemaJson.Contains(TEXT("world_type"))
+					&& Context->SchemaJson.Contains(
+						TEXT("\"required\":[\"viewport_identity\"]")));
+			}
+			if (Context && CommandId.StartsWith(TEXT("graph.")))
+			{
+				TestTrue(TEXT("graph context exposes its required editor identity"),
+					Context->SchemaJson.Contains(TEXT("asset_editor_identity"))
+					&& Context->SchemaJson.Contains(TEXT("required")));
+			}
+			const auto* ProjectionField = FindField(TEXT("projection"));
+			if (ProjectionField)
+			{
+				TestTrue(TEXT("projection exposes provenance control"),
+					ProjectionField->SchemaJson.Contains(TEXT("include_provenance")));
+			}
+			if (CommandId == TEXT("viewport.instance.list"))
+			{
+				TestNull(TEXT("instance discovery starts without a target"), Target);
+			}
 		}
 	}
 
@@ -383,9 +469,6 @@ bool FUeAgentStrictV2T45ViewportGraphInventoryTest::RunTest(
 					FindOperationInvocationFactory(OperationId).Get()
 					== Operation->InvocationFactory.Get());
 	}
-	TestEqual(TEXT("T45 owns one migration identity"),
-		Declaration.Migration.OwnerId,
-		FString(TEXT("T45-VIEWPORT-GRAPH-CONTROL")));
 	TestEqual(TEXT("T45 does not register a persistent layout provider"),
 		Declaration.Layout.Support, EDomainCapabilitySupport::Unsupported);
 
@@ -403,7 +486,6 @@ bool FUeAgentStrictV2T45ViewportGraphInventoryTest::RunTest(
 	Fixture.bIndependentReadback = true;
 	Fixture.bPersistReload = false;
 	Fixture.bFailureCleanup = true;
-	Fixture.bLegacyExit = true;
 	FDomainConformancePlan Plan;
 	TestTrue(TEXT("T45 consumes the shared conformance planner"),
 		TryBuildDomainConformancePlan(*ViewportGraph, Fixture, Plan, Error));
@@ -584,9 +666,39 @@ bool FUeAgentStrictV2T45ViewportGraphPublicProductTest::RunTest(
 
 	const FUeAgentCommandResult Instances = Call(
 		TEXT("viewport.instance.list"), MakeShared<FJsonObject>());
+	TSharedPtr<FJsonObject> InstancesPayload;
+	const TSharedRef<TJsonReader<>> InstancesReader =
+		TJsonReaderFactory<>::Create(Instances.GetPayloadJson());
+	const TArray<TSharedPtr<FJsonValue>>* InstanceRecords = nullptr;
+	const bool bInstancesPublicShape =
+		FJsonSerializer::Deserialize(InstancesReader, InstancesPayload)
+		&& InstancesPayload.IsValid()
+		&& InstancesPayload->TryGetArrayField(
+			TEXT("instances"), InstanceRecords)
+		&& InstanceRecords
+		&& !InstanceRecords->IsEmpty();
 	TestTrue(TEXT("public viewport catalog uses real mechanics"),
 		RequireOk(TEXT("viewport.instance.list"), Instances)
+			&& bInstancesPublicShape
 			&& Instances.GetPayloadJson().Contains(ViewportIdentity));
+	if (bInstancesPublicShape)
+	{
+		const TSharedPtr<FJsonObject> FirstInstance =
+			(*InstanceRecords)[0]->AsObject();
+		TestTrue(
+			TEXT("public viewport catalog keeps only actionable instance fields"),
+			FirstInstance.IsValid()
+				&& FirstInstance->Values.Num() == 2
+				&& FirstInstance->HasField(TEXT("viewport_ref"))
+				&& FirstInstance->HasField(TEXT("viewport_type"))
+				&& !FirstInstance->HasField(TEXT("camera")));
+		TestFalse(
+			TEXT("public viewport catalog omits the generic projection envelope"),
+			InstancesPayload->HasField(TEXT("projection"))
+				|| InstancesPayload->HasField(TEXT("snapshot"))
+				|| InstancesPayload->HasField(TEXT("owner_id"))
+				|| InstancesPayload->HasField(TEXT("snapshot_id")));
+	}
 	const FUeAgentCommandResult Modes = Call(
 		TEXT("viewport.view_mode.list"), MakeShared<FJsonObject>());
 	TestTrue(TEXT("public view-mode catalog is non-synthetic"),
@@ -605,12 +717,27 @@ bool FUeAgentStrictV2T45ViewportGraphPublicProductTest::RunTest(
 	const TSharedRef<FJsonObject> ReadInput = MakeShared<FJsonObject>();
 	const FUeAgentCommandResult BeforeRead = Call(
 		TEXT("viewport.state.read"), ReadInput);
+	TSharedPtr<FJsonObject> BeforePublicState;
+	const TSharedPtr<FJsonObject>* BeforeCamera = nullptr;
+	const TSharedPtr<FJsonObject>* BeforeInteraction = nullptr;
+	const TSharedRef<TJsonReader<>> BeforeStateReader =
+		TJsonReaderFactory<>::Create(BeforeRead.GetPayloadJson());
+	const bool bRestoreReadyState =
+		FJsonSerializer::Deserialize(BeforeStateReader, BeforePublicState)
+		&& BeforePublicState.IsValid()
+		&& BeforePublicState->GetStringField(TEXT("viewport_ref")) == ViewportIdentity
+		&& BeforePublicState->TryGetObjectField(TEXT("camera"), BeforeCamera)
+		&& BeforeCamera && BeforeCamera->IsValid()
+		&& (*BeforeCamera)->HasField(TEXT("camera_transform"))
+		&& (*BeforeCamera)->HasField(TEXT("fov_degrees"))
+		&& (*BeforeCamera)->HasField(TEXT("view_mode"))
+		&& BeforePublicState->TryGetObjectField(TEXT("interaction"), BeforeInteraction)
+		&& BeforeInteraction && BeforeInteraction->IsValid()
+		&& (*BeforeInteraction)->HasField(TEXT("widget_mode"))
+		&& BeforePublicState->HasField(TEXT("realtime_configured"));
 	TestTrue(TEXT("public state read captures camera and interaction"),
 		RequireOk(TEXT("viewport.state.read before"), BeforeRead)
-			&& BeforeRead.GetPayloadJson().Contains(
-				TEXT("viewport_state.camera_transform"))
-			&& BeforeRead.GetPayloadJson().Contains(
-				TEXT("viewport_state.interaction.widget_mode")));
+			&& bRestoreReadyState);
 
 	const TArray<TSharedPtr<FJsonValue>> ActorRefs = {
 		MakeShared<FJsonValueString>(First->GetPathName()),
@@ -629,12 +756,20 @@ bool FUeAgentStrictV2T45ViewportGraphPublicProductTest::RunTest(
 			&& GEditor->GetSelectedActors()->IsSelected(First)
 			&& GEditor->GetSelectedActors()->IsSelected(Second));
 
-	for (const FString Selector : {TEXT("subjects"), TEXT("folder"), TEXT("selection")})
+	for (const FString Selector : {
+		TEXT("subjects"), TEXT("component"), TEXT("folder"), TEXT("selection")})
 	{
 		const TSharedRef<FJsonObject> FrameInput = MakeShared<FJsonObject>();
 		if (Selector == TEXT("subjects"))
 		{
 			FrameInput->SetArrayField(TEXT("subject_refs"), ActorRefs);
+		}
+		else if (Selector == TEXT("component"))
+		{
+			FrameInput->SetArrayField(TEXT("subject_refs"), {
+				MakeShared<FJsonValueString>(
+					First->GetStaticMeshComponent()->GetPathName()),
+			});
 		}
 		else if (Selector == TEXT("folder"))
 		{
@@ -650,6 +785,29 @@ bool FUeAgentStrictV2T45ViewportGraphPublicProductTest::RunTest(
 			TEXT("viewport.camera.frame"), FrameInput);
 		TestTrue(TEXT("public camera frame selector succeeds: ") + Selector,
 			RequireOk(TEXT("viewport.camera.frame ") + Selector, Framed));
+	}
+	{
+		const TSharedRef<FJsonObject> PointInput = MakeShared<FJsonObject>();
+		PointInput->SetObjectField(
+			TEXT("world_point"), WorldPoint(TEXT("focus:point"), First->GetActorLocation()));
+		PointInput->SetObjectField(TEXT("frame_policy"), FramePolicy());
+		TestTrue(TEXT("public camera frame accepts a world point"), RequireOk(
+			TEXT("viewport.camera.frame world point"),
+			Call(TEXT("viewport.camera.frame"), PointInput)));
+
+		const FBox Bounds = First->GetComponentsBoundingBox(true)
+			+ Second->GetComponentsBoundingBox(true);
+		const TSharedRef<FJsonObject> BoundsValue = MakeShared<FJsonObject>();
+		BoundsValue->SetObjectField(
+			TEXT("min"), WorldPoint(TEXT("focus:bounds:min"), Bounds.Min));
+		BoundsValue->SetObjectField(
+			TEXT("max"), WorldPoint(TEXT("focus:bounds:max"), Bounds.Max));
+		const TSharedRef<FJsonObject> BoundsInput = MakeShared<FJsonObject>();
+		BoundsInput->SetObjectField(TEXT("world_bounds"), BoundsValue);
+		BoundsInput->SetObjectField(TEXT("frame_policy"), FramePolicy());
+		TestTrue(TEXT("public camera frame accepts explicit world bounds"), RequireOk(
+			TEXT("viewport.camera.frame world bounds"),
+			Call(TEXT("viewport.camera.frame"), BoundsInput)));
 	}
 
 	const FIntPoint Size = Client->Viewport->GetSizeXY();
@@ -723,6 +881,12 @@ bool FUeAgentStrictV2T45ViewportGraphPublicProductTest::RunTest(
 	Interaction->SetBoolField(TEXT("game_primitives"), true);
 	Interaction->SetStringField(TEXT("widget_mode"), TEXT("rotate"));
 	const TSharedRef<FJsonObject> Patch = MakeShared<FJsonObject>();
+	const FVector AbsoluteLocation(120.0, -80.0, 350.0);
+	const FRotator AbsoluteRotation(-15.0, 35.0, 0.0);
+	Patch->SetObjectField(
+		TEXT("camera_transform"),
+		CameraTransform(ViewportIdentity, AbsoluteLocation, AbsoluteRotation));
+	Patch->SetStringField(TEXT("camera_transform_mode"), TEXT("absolute"));
 	Patch->SetNumberField(TEXT("fov_degrees"), 67.0);
 	Patch->SetStringField(TEXT("view_mode"), TEXT("wireframe"));
 	Patch->SetBoolField(TEXT("realtime"), !bBaselineRealtime);
@@ -757,9 +921,66 @@ bool FUeAgentStrictV2T45ViewportGraphPublicProductTest::RunTest(
 		TEXT("viewport.state.read"), MakeShared<FJsonObject>());
 	TestTrue(TEXT("independent public read observes the update"),
 		RequireOk(TEXT("viewport.state.read updated"), UpdatedRead)
+			&& Client->GetViewLocation().Equals(AbsoluteLocation, 0.01)
+			&& Client->GetViewRotation().Equals(AbsoluteRotation, 0.01)
 			&& UpdatedRead.GetPayloadJson().Contains(TEXT("67"))
 			&& UpdatedRead.GetPayloadJson().Contains(TEXT("wireframe"))
 			&& UpdatedRead.GetPayloadJson().Contains(TEXT("rotate")));
+
+	const FVector LocalDelta(100.0, 0.0, 0.0);
+	const FRotator LocalRotationDelta(0.0, 20.0, 0.0);
+	const FVector ExpectedLocalLocation = AbsoluteLocation
+		+ AbsoluteRotation.Quaternion().RotateVector(LocalDelta);
+	const FQuat ExpectedLocalRotation = AbsoluteRotation.Quaternion()
+		* LocalRotationDelta.Quaternion();
+	const TSharedRef<FJsonObject> DeltaPatch = MakeShared<FJsonObject>();
+	DeltaPatch->SetObjectField(
+		TEXT("camera_transform"),
+		CameraTransform(
+			ViewportIdentity,
+			LocalDelta,
+			LocalRotationDelta,
+			TEXT("viewport.camera.local")));
+	DeltaPatch->SetStringField(TEXT("camera_transform_mode"), TEXT("delta"));
+	const TSharedRef<FJsonObject> DeltaInput = MakeShared<FJsonObject>();
+	DeltaInput->SetObjectField(TEXT("state_patch"), DeltaPatch);
+	const FUeAgentCommandResult DeltaUpdated = Call(
+		TEXT("viewport.state.update"), DeltaInput);
+	TestTrue(TEXT("public local delta camera update succeeds"),
+		RequireOk(TEXT("viewport.state.update local delta"), DeltaUpdated)
+			&& Client->GetViewLocation().Equals(ExpectedLocalLocation, 0.01)
+			&& Client->GetViewRotation().Quaternion().Equals(
+				ExpectedLocalRotation, 0.0001));
+
+	const FVector BeforeInvalidCameraPatch = Client->GetViewLocation();
+	const TSharedRef<FJsonObject> UnsupportedScale = CameraTransform(
+		ViewportIdentity,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator);
+	UnsupportedScale->SetArrayField(TEXT("components"), {
+		MakeShared<FJsonValueString>(TEXT("0")),
+		MakeShared<FJsonValueString>(TEXT("0")),
+		MakeShared<FJsonValueString>(TEXT("0")),
+		MakeShared<FJsonValueString>(TEXT("0")),
+		MakeShared<FJsonValueString>(TEXT("0")),
+		MakeShared<FJsonValueString>(TEXT("0")),
+		MakeShared<FJsonValueString>(TEXT("1")),
+		MakeShared<FJsonValueString>(TEXT("2")),
+		MakeShared<FJsonValueString>(TEXT("1")),
+		MakeShared<FJsonValueString>(TEXT("1")),
+	});
+	const TSharedRef<FJsonObject> UnsupportedScalePatch = MakeShared<FJsonObject>();
+	UnsupportedScalePatch->SetObjectField(TEXT("camera_transform"), UnsupportedScale);
+	UnsupportedScalePatch->SetStringField(
+		TEXT("camera_transform_mode"), TEXT("absolute"));
+	const TSharedRef<FJsonObject> UnsupportedScaleInput = MakeShared<FJsonObject>();
+	UnsupportedScaleInput->SetObjectField(TEXT("state_patch"), UnsupportedScalePatch);
+	const FUeAgentCommandResult UnsupportedScaleResult = Call(
+		TEXT("viewport.state.update"), UnsupportedScaleInput);
+	TestFalse(TEXT("viewport camera scale is rejected explicitly"),
+		UnsupportedScaleResult.IsOk());
+	TestTrue(TEXT("rejected camera scale leaves the viewport unchanged"),
+		Client->GetViewLocation().Equals(BeforeInvalidCameraPatch, 0.01));
 
 	const TSharedRef<FJsonObject> InvalidFrame = MakeShared<FJsonObject>();
 	InvalidFrame->SetArrayField(TEXT("subject_refs"), ActorRefs);

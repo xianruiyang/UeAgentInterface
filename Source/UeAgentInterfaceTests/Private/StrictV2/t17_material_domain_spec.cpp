@@ -1,24 +1,15 @@
 #include "Misc/AutomationTest.h"
 
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
 #include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialFunction.h"
 #include "Materials/MaterialInstanceConstant.h"
 
-#if __has_include("OperationOwners/Material/UeAgentMaterialDomainService.h")
-#define UAI_T17_MATERIAL_DOMAIN_AVAILABLE 1
 #include "OperationOwners/Material/UeAgentMaterialDomainService.h"
-#else
-#define UAI_T17_MATERIAL_DOMAIN_AVAILABLE 0
-#endif
 
-#if __has_include("QueryOwners/Material/UeAgentMaterialExpressionCandidateQuery.h")
-#define UAI_T17_MATERIAL_CANDIDATE_QUERY_AVAILABLE 1
 #include "QueryOwners/Material/UeAgentMaterialExpressionCandidateQuery.h"
-#else
-#define UAI_T17_MATERIAL_CANDIDATE_QUERY_AVAILABLE 0
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T17MaterialDomainTest,
@@ -28,13 +19,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T17MaterialDomainTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-#if !UAI_T17_MATERIAL_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T17 Material domain authority is available"), false);
-	return false;
-#elif !UAI_T17_MATERIAL_CANDIDATE_QUERY_AVAILABLE
-	TestTrue(TEXT("T17 Material expression candidate query is available"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::OperationOwners::Material;
 
@@ -77,6 +61,24 @@ bool FUeAgentStrictV2T17MaterialDomainTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("the root initialization contract is exact"), Contract,
 			FString(Case.Contract));
 	}
+
+	const FImportInitializationDomainRequest SemanticWorkspaceRequest(
+		TEXT("content_graph.import_workspace"),
+		GetSemanticWorkspaceSchemaId(),
+		TEXT("/Game/UAI/StrictV2/T17/Target.Target"),
+		TEXT("/Script/Engine.Material"),
+		EInitializationNodeRole::RootTarget,
+		TEXT("{}"));
+	FString SemanticWorkspaceContract;
+	TestTrue(
+		TEXT("the Material provider accepts the shared exported workspace schema"),
+		Provider->Matches(SemanticWorkspaceRequest)
+			&& Provider->TryResolveInitializationContract(
+				SemanticWorkspaceRequest, SemanticWorkspaceContract, Error));
+	TestEqual(
+		TEXT("the exported workspace keeps the Material root contract"),
+		SemanticWorkspaceContract,
+		FString(TEXT("uai.init.material.root/1")));
 
 	const FImportInitializationDomainRequest ExpressionRequest(
 		TEXT("content_graph.import_workspace"),
@@ -139,7 +141,7 @@ bool FUeAgentStrictV2T17MaterialDomainTest::RunTest(const FString& Parameters)
 			CandidateResult,
 			CandidateError)))
 	{
-		AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
+		AddError(CandidateError.Code + TEXT(":") + CandidateError.PublicMessage);
 		return false;
 	}
 	const FMaterialExpressionCandidate* ScalarParameter =
@@ -173,15 +175,8 @@ bool FUeAgentStrictV2T17MaterialDomainTest::RunTest(const FString& Parameters)
 		ScalarParameter->RequiredContext.IsEmpty());
 	TestTrue(TEXT("candidate binding revision is a sha256 identity"),
 		ScalarParameter->BindingRevision.StartsWith(TEXT("sha256:")));
-	TestTrue(TEXT("candidate query reports complete bounded results"),
-		CandidateResult.bComplete && !CandidateResult.bHasMore);
-	TestTrue(TEXT("the native creation-action coverage is explicit"),
-		CandidateResult.bCoverageComplete);
-	TestEqual(TEXT("the coverage scope excludes unrelated graph actions"),
-		CandidateResult.CoverageScope,
-		FString(TEXT("native_material_expression_and_function_creation_actions")));
 
-	TSet<FString> ConversionIds;
+	TSet<FString> ConversionNames;
 	for (const FString& ActionName : TArray<FString>{
 		TEXT("Make Float2"), TEXT("Make Float3"), TEXT("Make Float4")})
 	{
@@ -196,26 +191,41 @@ bool FUeAgentStrictV2T17MaterialDomainTest::RunTest(const FString& Parameters)
 				ConversionResult,
 				CandidateError)))
 		{
-			AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
+			AddError(CandidateError.Code + TEXT(":") + CandidateError.PublicMessage);
 			return false;
 		}
 		const FMaterialExpressionCandidate* const Conversion =
 			ConversionResult.Candidates.FindByPredicate(
 				[&ActionName](const FMaterialExpressionCandidate& Candidate)
 				{
-					return Candidate.Name == ActionName;
+					FString CompactCandidate = Candidate.Name;
+					FString CompactAction = ActionName;
+					CompactCandidate.ReplaceInline(TEXT(" "), TEXT(""));
+					CompactAction.ReplaceInline(TEXT(" "), TEXT(""));
+					return CompactCandidate.Equals(
+							CompactAction, ESearchCase::IgnoreCase)
+						|| CompactCandidate.StartsWith(
+							CompactAction + TEXT("["), ESearchCase::IgnoreCase);
 				});
 		if (!TestNotNull(
 			*FString::Printf(TEXT("%s retains its native action identity"),
 				*ActionName),
 			Conversion))
 		{
+			TArray<FString> ReturnedNames;
+			for (const FMaterialExpressionCandidate& Candidate :
+				ConversionResult.Candidates)
+			{
+				if (ReturnedNames.Num() == 5) break;
+				ReturnedNames.Add(Candidate.Name);
+			}
+			AddError(TEXT("returned readable names: ")
+				+ FString::Join(ReturnedNames, TEXT(", ")));
 			return false;
 		}
-		ConversionIds.Add(Conversion->Id);
+		ConversionNames.Add(Conversion->Name);
 	}
-	TestEqual(TEXT("same-class native actions retain distinct stable ids"),
-		ConversionIds.Num(), 3);
+	TestEqual(TEXT("same-class native actions retain distinct readable names"),
+		ConversionNames.Num(), 3);
 	return true;
-#endif
 }

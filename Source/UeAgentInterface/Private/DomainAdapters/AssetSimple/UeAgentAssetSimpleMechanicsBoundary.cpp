@@ -22,6 +22,7 @@ namespace UE::UAI::DomainAdapters::AssetSimple
 			TEXT("asset.media_source.update"),
 			TEXT("asset.media_texture.create"),
 			TEXT("asset.media_texture.update"),
+			TEXT("asset.object.create"),
 			TEXT("asset.paper_flipbook.create"),
 			TEXT("asset.paper_flipbook.update"),
 			TEXT("asset.paper_sprite.create"),

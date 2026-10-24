@@ -25,6 +25,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		const StateSemantic::FUeAgentCanonicalValueRef&
 			GetParameters() const;
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		EUeAgentCaptureMediaLongJobFamily Family;

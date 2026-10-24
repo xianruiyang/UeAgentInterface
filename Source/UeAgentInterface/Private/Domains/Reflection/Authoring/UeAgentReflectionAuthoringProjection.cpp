@@ -2,6 +2,10 @@
 
 #include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringProjection.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+
 #include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringDescriptors.h"
 
 namespace UeAgentReflectionAuthoring
@@ -10,12 +14,11 @@ namespace UeAgentReflectionAuthoring
 	{
 		using namespace UeAgentExportContract;
 
-		FProfileDescriptor ExportProfile(const TCHAR* Id, const TArray<FString>& Roles, const int32 Budget)
+		FProfileDescriptor ExportProfile(const TCHAR* Id, const TArray<FString>& Roles)
 		{
 			FProfileDescriptor Result;
 			Result.ProfileId = Id;
 			Result.IncludedRoles = Roles;
-			Result.TokenBudget = Budget;
 			return Result;
 		}
 
@@ -60,10 +63,10 @@ namespace UeAgentReflectionAuthoring
 			}
 			Result.DefaultProfile = TEXT("llm_authoring");
 			Result.Profiles = {
-				ExportProfile(TEXT("llm_authoring"), {TEXT("identity"), TEXT("authoring")}, 262144),
-				ExportProfile(TEXT("readback"), {TEXT("identity"), TEXT("authoring"), TEXT("readback")}, 327680),
-				ExportProfile(TEXT("debug"), {TEXT("identity"), TEXT("authoring"), TEXT("readback"), TEXT("diagnostics")}, 524288),
-				ExportProfile(TEXT("validation"), {TEXT("identity"), TEXT("validation")}, 32768),
+				ExportProfile(TEXT("llm_authoring"), {TEXT("identity"), TEXT("authoring")}),
+				ExportProfile(TEXT("readback"), {TEXT("identity"), TEXT("authoring"), TEXT("readback")}),
+				ExportProfile(TEXT("debug"), {TEXT("identity"), TEXT("authoring"), TEXT("readback"), TEXT("diagnostics")}),
+				ExportProfile(TEXT("validation"), {TEXT("identity"), TEXT("validation")}),
 			};
 			FFileDescriptor Index;
 			Index.FileId = TEXT("index");
@@ -110,7 +113,7 @@ namespace UeAgentReflectionAuthoring
 		}
 	}
 
-	bool RegisterExportAuthoring(FString& OutError)
+	bool RegisterExportAuthoring(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		for (const FProfile& Profile : GetProfiles())
 		{
@@ -120,11 +123,19 @@ namespace UeAgentReflectionAuthoring
 		return true;
 	}
 
-	bool GetExportContract(const FProfile& Profile, UeAgentExportContract::FContract& OutContract, FString& OutError)
+	bool GetExportContract(const FProfile& Profile, UeAgentExportContract::FContract& OutContract, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!UeAgentExportContract::FRegistry::Get().FindContract(Profile.ExportContractId, OutContract))
 		{
-			OutError = TEXT("reflection_export_contract_missing:") + Profile.TypeId;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("reflection_export_contract_missing"),
+				TEXT("The export contract required by the Reflection profile is not registered."), TEXT("export"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("export_contract");
+			auto Actual = MakeShared<FJsonObject>();
+			Actual->SetStringField(TEXT("profile_type"), Profile.TypeId);
+			Actual->SetStringField(TEXT("export_contract"), Profile.ExportContractId);
+			OutError.ActualValue = MakeShared<FJsonValueObject>(Actual);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a registered export contract"));
 			return false;
 		}
 		OutError.Reset();

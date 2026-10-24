@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Templates/SharedPointer.h"
@@ -21,13 +22,14 @@ namespace UE::UAI::HjsonWorkspace
 		const UE::UAI::StateSemantic::
 			FUeAgentCanonicalSnapshotRef& GetSnapshot() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString TargetKind;
 		FString ProfileId;
 		UE::UAI::StateSemantic::
 			FUeAgentCanonicalSnapshotRef Snapshot;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	UEAGENTINTERFACE_API bool TryComposeSnapshotAuthoringModel(

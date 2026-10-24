@@ -38,41 +38,16 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintComponent
 			Result.StateLayers = {TEXT("asset_persisted_state")};
 			Result.InputFields = {
 				Field(TEXT("target"), TEXT("string"), true,
-					TEXT("Exact public Blueprint package.object identity copied from content search.")),
+					TEXT("Blueprint name returned by content search, or an exact Blueprint package.object path.")),
 				Field(TEXT("parent"), TEXT("string"), false,
-					TEXT("Optional exact SCS parent variable name; actor root is used when omitted.")),
+					TEXT("Optional component name copied from the Blueprint export: an SCS node or inherited scene component; actor root is used when omitted.")),
 				Field(TEXT("query"), TEXT("string"), false,
-					TEXT("Optional bounded Add Component menu search text.")),
-				Field(TEXT("id"), TEXT("string"), false,
-					TEXT("Optional exact candidate id returned by an earlier page.")),
-				Field(TEXT("limit"), TEXT("integer"), false,
-					TEXT("Optional page size from 1 through 20; defaults to 20.")),
-				Field(TEXT("cursor"), TEXT("integer"), false,
-					TEXT("Optional non-negative result offset; defaults to zero.")),
+					TEXT("Optional Add Component menu search text.")),
 			};
 			Result.ResultFields = {
-				Field(TEXT("command_id"), TEXT("string"), true,
-					TEXT("The unchanged exact public command identity.")),
-				Field(TEXT("read_only"), TEXT("boolean"), true,
-					TEXT("Always true.")),
-				Field(TEXT("target"), TEXT("string"), true,
-					TEXT("The unchanged exact Blueprint identity.")),
-				Field(TEXT("scs_revision"), TEXT("string"), true,
-					TEXT("Current persisted SCS revision for optimistic fencing.")),
-				Field(TEXT("context"), TEXT("object"), true,
-					TEXT("Exact parent and deterministic content-selection policy used for enumeration.")),
-				Field(TEXT("candidates"), TEXT("array"), true,
-					TEXT("Native Add Component entries; candidate.name or candidate.id is a direct HJSON creation selector.")),
-				Field(TEXT("total_matching"), TEXT("integer"), true,
-					TEXT("Total native registry candidates matching the current query.")),
-				Field(TEXT("next_cursor"), TEXT("integer"), true,
-					TEXT("Next result offset, or -1 when complete.")),
-				Field(TEXT("existing_components"), TEXT("array"), true,
-					TEXT("Independent current SCS readback used after reload.")),
-				Field(TEXT("complete"), TEXT("boolean"), true,
-					TEXT("True only when this is the final page of the native menu set.")),
-				Field(TEXT("has_more"), TEXT("boolean"), true,
-					TEXT("True only while another page remains.")),
+				Field(TEXT("scope"), TEXT("object"), true, TEXT("Public target and optional parent for this query; response metadata, not a selector.")),
+				Field(TEXT("names"), TEXT("array"), true,
+					TEXT("Names of components available in the requested native context.")),
 			};
 			Result.Errors = {
 				{TEXT("blueprint_component_query_authority_required"),
@@ -80,30 +55,28 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintComponent
 				{TEXT("blueprint_component_target_unresolved"),
 					TEXT("The exact Blueprint identity could not be resolved.")},
 				{TEXT("blueprint_component_parent_unresolved"),
-					TEXT("The exact SCS parent does not exist in this Blueprint.")},
-				{TEXT("blueprint_component_candidate_page_invalid"),
-					TEXT("The requested limit or cursor is outside the bounded contract.")},
+					TEXT("The component name does not resolve to an SCS node or inherited scene component in this Blueprint.")},
 				{TEXT("blueprint_component_candidate_query_failed"),
 					TEXT("The native Add Component registry could not be enumerated.")},
 			};
 			Result.Purpose.Summary =
-				TEXT("Search the native Add Component menu for one Blueprint SCS context.");
+				TEXT("Search the native Add Component menu for one Blueprint component context.");
 			Result.Purpose.Target =
-				TEXT("One exact persisted Blueprint SCS graph.");
+				TEXT("One exact persisted Blueprint component tree.");
 			Result.Purpose.Preconditions = {
 				TEXT("Copy target unchanged from public Blueprint asset creation or search."),
-				TEXT("Provide parent only when reproducing a selected SCS parent context."),
+				TEXT("Copy an optional parent name from the current exported component tree, including inherited scene components."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Search and page the exact native registry, then copy either candidate.name or candidate.id into the HJSON candidate selector; the stable map key remains the component instance name.");
+				TEXT("Search the exact native registry and use a returned name as the component creation selector.");
 			Result.Purpose.ResultGuidance =
-				TEXT("candidate.name is sufficient only when unique in this registry; candidate.id preserves class, asset override and native action identity. class_path and asset_path are optional diagnostics, not required creation fields.");
+				TEXT("The response contains names and one scope. Re-query needed names when the target or parent context changes. Use a short semantic selection if ambiguous; scope is response metadata, not a candidate selector.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Unknown, ambiguous or stale selectors fail before mutation; there is no class-only fallback.");
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Read-only with no persistent or external side effects.");
 			Result.Purpose.MinimumExample =
-				TEXT("client.blueprint.component_candidates(target=target, parent='DefaultSceneRoot', query='Point Light', limit=10)");
+				TEXT("client.blueprint.component_candidates(target=target, parent='DefaultSceneRoot', query='Point Light')");
 			Result.Purpose.RelatedFlows = {
 				TEXT("blueprint.asset.create"),
 				TEXT("content_graph.import_workspace"),
@@ -144,7 +117,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintComponent
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return TryCreateBlueprintComponentCommandHandlers(
 					Service, OutHandlers, OutError);
@@ -163,7 +136,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintComponent
 	bool TryCreateBlueprintComponentContribution(
 		TSharedRef<IUeAgentBlueprintComponentCommandService> Service,
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution = MakeShared<FContribution>(MoveTemp(Service));
 		OutError.Reset();
@@ -172,7 +145,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintComponent
 
 	bool TryCreateProductionBlueprintComponentContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TSharedPtr<IUeAgentBlueprintComponentCommandService> Service;
 		if (!TryCreateProductionBlueprintComponentCommandService(Service, OutError))
@@ -188,7 +161,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintComponent
 		TSharedRef<IUeAgentBlueprintComponentCommandService> Service,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();

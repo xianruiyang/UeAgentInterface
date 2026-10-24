@@ -41,7 +41,7 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson0[] = R"UAIWSD0({
         "basis_evidence_id":{"type":"string","minLength":1},
         "observed_at":{"component":"temporal_point"}
       },
-      "required":["frame_id","basis_frame_id","dimension","unit","basis_evidence_id","observed_at"],
+      "required":["frame_id","dimension","unit"],
       "additionalProperties":false
     },
     "frame_3d": {
@@ -54,10 +54,20 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson0[] = R"UAIWSD0({
         "basis_evidence_id":{"type":"string","minLength":1},
         "observed_at":{"component":"temporal_point"}
       },
-      "required":["frame_id","basis_frame_id","dimension","unit","basis_evidence_id","observed_at"],
+      "required":["frame_id","dimension","unit"],
       "additionalProperties":false
     },
-    "point_2d": {
+    "point_2d": {"anyOf":[
+      {"component":"observed_point_2d"},
+      {"type":"object","properties":{
+        "quantity":{"type":"string","const":"point"},
+        "frame_id":{"type":"string","minLength":1},
+        "dimension":{"type":"integer","const":2},
+        "unit":{"type":"string","minLength":1},
+        "components":{"type":"array","items":{"anyOf":[{"type":"number"},{"type":"string","minLength":1}]},"minItems":2,"maxItems":2}
+      },"required":["quantity","frame_id","dimension","unit","components"],"additionalProperties":false}
+    ]},
+    "observed_point_2d": {
       "type":"object",
       "properties": {
         "subject":{"type":"string","minLength":1},
@@ -69,7 +79,17 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson0[] = R"UAIWSD0({
       "required":["subject","quantity","frame","components","conversion_evidence_ids"],
       "additionalProperties":false
     },
-    "point_3d": {
+    "point_3d": {"anyOf":[
+      {"component":"observed_point_3d"},
+      {"type":"object","properties":{
+        "quantity":{"type":"string","const":"point"},
+        "frame_id":{"type":"string","minLength":1},
+        "dimension":{"type":"integer","const":3},
+        "unit":{"type":"string","minLength":1},
+        "components":{"type":"array","items":{"anyOf":[{"type":"number"},{"type":"string","minLength":1}]},"minItems":3,"maxItems":3}
+      },"required":["quantity","frame_id","dimension","unit","components"],"additionalProperties":false}
+    ]},
+    "observed_point_3d": {
       "type":"object",
       "properties": {
         "subject":{"type":"string","minLength":1},
@@ -81,7 +101,17 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson0[] = R"UAIWSD0({
       "required":["subject","quantity","frame","components","conversion_evidence_ids"],
       "additionalProperties":false
     },
-    "direction_3d": {
+    "direction_3d": {"anyOf":[
+      {"component":"observed_direction_3d"},
+      {"type":"object","properties":{
+        "quantity":{"type":"string","const":"direction"},
+        "frame_id":{"type":"string","minLength":1},
+        "dimension":{"type":"integer","const":3},
+        "unit":{"type":"string","minLength":1},
+        "components":{"type":"array","items":{"anyOf":[{"type":"number"},{"type":"string","minLength":1}]},"minItems":3,"maxItems":3}
+      },"required":["quantity","frame_id","dimension","unit","components"],"additionalProperties":false}
+    ]},
+    "observed_direction_3d": {
       "type":"object",
       "properties": {
         "subject":{"type":"string","minLength":1},
@@ -93,7 +123,17 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson0[] = R"UAIWSD0({
       "required":["subject","quantity","frame","components","conversion_evidence_ids"],
       "additionalProperties":false
     },
-    "normal_3d": {
+    "normal_3d": {"anyOf":[
+      {"component":"observed_normal_3d"},
+      {"type":"object","properties":{
+        "quantity":{"type":"string","const":"normal"},
+        "frame_id":{"type":"string","minLength":1},
+        "dimension":{"type":"integer","const":3},
+        "unit":{"type":"string","minLength":1},
+        "components":{"type":"array","items":{"anyOf":[{"type":"number"},{"type":"string","minLength":1}]},"minItems":3,"maxItems":3}
+      },"required":["quantity","frame_id","dimension","unit","components"],"additionalProperties":false}
+    ]},
+    "observed_normal_3d": {
       "type":"object",
       "properties": {
         "subject":{"type":"string","minLength":1},
@@ -105,7 +145,17 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson0[] = R"UAIWSD0({
       "required":["subject","quantity","frame","components","conversion_evidence_ids"],
       "additionalProperties":false
     },
-    "transform_3d": {
+    "transform_3d": {"anyOf":[
+      {"component":"observed_transform_3d"},
+      {"type":"object","properties":{
+        "quantity":{"type":"string","const":"transform"},
+        "frame_id":{"type":"string","minLength":1},
+        "dimension":{"type":"integer","const":3},
+        "unit":{"type":"string","minLength":1},
+        "components":{"type":"array","items":{"anyOf":[{"type":"number"},{"type":"string","minLength":1}]},"minItems":10,"maxItems":10}
+      },"required":["quantity","frame_id","dimension","unit","components"],"additionalProperties":false}
+    ]},
+    "observed_transform_3d": {
       "type":"object",
       "properties": {
         "subject":{"type":"string","minLength":1},
@@ -126,23 +176,13 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson0[] = R"UAIWSD0({
       "required":["oracle_kind","evidence_ids"],
       "additionalProperties":false
     },
-    "expected_revision_entry": {
-      "type":"object",
-      "properties": {
-        "target_ref":{"component":"target_ref"},
-        "revision":{"component":"revision"}
-      },
-      "required":["target_ref","revision"],
-      "additionalProperties":false
-    },
     "graph_view_state": {
       "type":"object",
       "properties": {
         "location":{"component":"point_2d"},
-        "zoom":{"type":"number","exclusiveMinimum":0},
-        "graph_revision":{"component":"revision"}
+        "zoom":{"type":"number","exclusiveMinimum":0}
       },
-      "required":["location","zoom","graph_revision"],
+      "required":["location","zoom"],
       "additionalProperties":false
     },
     "node_placement": {
@@ -265,6 +305,15 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson1[] = R"UAIWSD1(      "
       "required":["target_ref","transform","observed_revision"],
       "additionalProperties":false
     },
+    "target_transform_business_observation": {
+      "type":"object",
+      "properties": {
+        "target_ref":{"component":"target_ref"},
+        "transform":{"component":"transform_3d"}
+      },
+      "required":["target_ref","transform"],
+      "additionalProperties":false
+    },
     "frame_policy": {
       "type":"object",
       "properties": {
@@ -287,7 +336,7 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson1[] = R"UAIWSD1(      "
         "view_mode":{"type":"string","minLength":1},
         "observed_at":{"component":"temporal_point"}
       },
-      "required":["camera_transform","fov_degrees","view_mode","observed_at"],
+      "required":["camera_transform","fov_degrees","view_mode"],
       "additionalProperties":false
     },
     "viewport_interaction_state": {
@@ -309,23 +358,25 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson1[] = R"UAIWSD1(      "
         "viewport_ref":{"component":"target_ref"},
         "camera":{"component":"viewport_camera_state"},
         "realtime":{"type":"boolean"},
+        "realtime_configured":{"type":"boolean"},
+        "realtime_override_reason":{"type":"string"},
         "game_view":{"type":"boolean"},
-        "show_flags":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true},
-        "interaction":{"component":"viewport_interaction_state"},
-        "observed_revision":{"component":"revision"}
+        "show_flags":{"component":"viewport_show_flags"},
+        "interaction":{"component":"viewport_interaction_state"}
       },
-      "required":["viewport_ref","camera","realtime","game_view","show_flags","interaction","observed_revision"],
+      "required":["viewport_ref","camera","realtime","game_view","show_flags","interaction"],
       "additionalProperties":false
     },
     "viewport_state_patch": {
       "type":"object",
       "properties": {
         "camera_transform":{"component":"transform_3d"},
+        "camera_transform_mode":{"type":"string","enum":["absolute","delta"]},
         "fov_degrees":{"type":"number","exclusiveMinimum":0,"maximum":179},
         "view_mode":{"type":"string","minLength":1},
         "realtime":{"type":"boolean"},
         "game_view":{"type":"boolean"},
-        "show_flags":{"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true},
+        "show_flags":{"component":"viewport_show_flags"},
         "interaction":{"component":"viewport_interaction_state"}
       },
       "additionalProperties":false
@@ -345,7 +396,7 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson1[] = R"UAIWSD1(      "
     {
       "capability_id":"graph.layout.apply","descriptor_id":"uai.ope)UAIWSD1";
 static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson2[] = R"UAIWSD2(ration.graph.layout.apply","operation_kind":"operation","state_planes":["authoring_memory","persisted"],"required_facets":[],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_node_position_and_connection_readback",
-      "input_fields":[{"name":"graph_ref","required":true,"component":"target_ref"},{"name":"node_placements","required":true,"schema":{"type":"array","items":{"component":"node_placement"},"minItems":1}},{"name":"expected_revision","required":true,"component":"revision"},{"name":"layout_relations","required":false,"schema":{"type":"array","items":{"component":"layout_relation"}}}],
+      "input_fields":[{"name":"graph_ref","required":true,"component":"target_ref"},{"name":"node_placements","required":true,"schema":{"type":"array","items":{"component":"node_placement"},"minItems":1}},{"name":"layout_relations","required":false,"schema":{"type":"array","items":{"component":"layout_relation"}}}],
       "result_fields":[{"name":"node_observations","required":true,"schema":{"type":"array","items":{"component":"node_observation"},"minItems":1}},{"name":"observed_revision","required":true,"component":"revision"},{"name":"verification","required":true,"component":"verification"}]
     },
     {
@@ -355,28 +406,28 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson2[] = R"UAIWSD2(ration.
     },
     {
       "capability_id":"world.object_transform.update","descriptor_id":"uai.operation.world.object_transform.update","operation_kind":"operation","state_planes":["authoring_memory","persisted"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_persisted_actor_transform_readback",
-      "input_fields":[{"name":"transform","required":true,"component":"transform_3d"},{"name":"expected_revision","required":true,"component":"revision"}],
+      "input_fields":[{"name":"transform","required":true,"component":"transform_3d"}],
       "result_fields":[{"name":"transforms","required":true,"schema":{"type":"array","items":{"component":"target_transform_observation"},"minItems":1,"maxItems":1}},{"name":"observed_revision","required":true,"component":"revision"},{"name":"verification","required":true,"component":"verification"}]
     },
     {
       "capability_id":"world.object_align","descriptor_id":"uai.operation.world.object_align","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_anchor_and_transform_readback",
-      "input_fields":[{"name":"subject_refs","required":true,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"alignment","required":true,"component":"alignment"},{"name":"expected_revisions","required":false,"schema":{"type":"array","items":{"component":"expected_revision_entry"},"minItems":1}},{"name":"anchor_ref","required":false,"component":"target_ref"}],
-      "result_fields":[{"name":"transforms","required":true,"schema":{"type":"array","items":{"component":"target_transform_observation"},"minItems":1}},{"name":"verification","required":true,"component":"verification"}]
+      "input_fields":[{"name":"subject_refs","required":true,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"alignment","required":true,"component":"alignment"},{"name":"anchor_ref","required":false,"component":"target_ref"}],
+      "result_fields":[{"name":"transforms","required":true,"schema":{"type":"array","items":{"component":"target_transform_business_observation"},"minItems":1}},{"name":"verification","required":true,"component":"verification"}]
     },
     {
       "capability_id":"world.object_snap_to_surface","descriptor_id":"uai.operation.world.object_snap_to_surface","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_surface_hit_and_transform_readback",
-      "input_fields":[{"name":"subject_refs","required":true,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"surface_query","required":true,"component":"surface_query"},{"name":"placement_policy","required":true,"component":"placement_policy"},{"name":"expected_revisions","required":false,"schema":{"type":"array","items":{"component":"expected_revision_entry"},"minItems":1}}],
-      "result_fields":[{"name":"surface_hit","required":true,"component":"hit_observation"},{"name":"transforms","required":true,"schema":{"type":"array","items":{"component":"target_transform_observation"},"minItems":1}},{"name":"verification","required":true,"component":"verification"}]
+      "input_fields":[{"name":"subject_refs","required":true,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"surface_query","required":true,"component":"surface_query"},{"name":"placement_policy","required":true,"component":"placement_policy"}],
+      "result_fields":[{"name":"surface_hit","required":true,"component":"hit_observation"},{"name":"transforms","required":true,"schema":{"type":"array","items":{"component":"target_transform_business_observation"},"minItems":1}},{"name":"verification","required":true,"component":"verification"}]
     },
     {
       "capability_id":"mesh.transform.bake","descriptor_id":"uai.operation.mesh.transform.bake","operation_kind":"operation","state_planes":["persisted"],"required_facets":[],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_mesh_geometry_and_placement_readback",
-      "input_fields":[{"name":"transform","required":true,"component":"transform_3d"},{"name":"expected_revision","required":true,"component":"revision"},{"name":"preserve_placement","required":false,"schema":{"type":"boolean"}}],
-      "result_fields":[{"name":"geometry_revision","required":true,"component":"revision"},{"name":"placement","required":true,"component":"transform_3d"},{"name":"verification","required":true,"component":"verification"}]
+      "input_fields":[{"name":"transform","required":true,"component":"transform_3d"},{"name":"preserve_placement","required":false,"schema":{"type":"boolean"}}],
+      "result_fields":[{"name":"placement","required":true,"component":"transform_3d"},{"name":"verification","required":true,"component":"verification"}]
     },
     {
       "capability_id":"mesh.pivot.update","descriptor_id":"uai.operation.mesh.pivot.update","operation_kind":"operation","state_planes":["persisted"],"required_facets":[],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"independent_pivot_geometry_and_placement_readback",
-      "input_fields":[{"name":"pivot","required":true,"component":"point_3d"},{"name":"expected_revision","required":true,"component":"revision"},{"name":"preserve_world_geometry","required":false,"schema":{"type":"boolean"}}],
-      "result_fields":[{"name":"pivot","required":true,"component":"point_3d"},{"name":"geometry_revision","required":true,"component":"revision"},{"name":"placement","required":true,"component":"transform_3d"},{"name":"verification","required":true,"component":"verification"}]
+      "input_fields":[{"name":"pivot","required":true,"component":"point_3d"},{"name":"preserve_world_geometry","required":false,"schema":{"type":"boolean"}}],
+      "result_fields":[{"name":"pivot","required":true,"component":"point_3d"},{"name":"placement","required":true,"component":"transform_3d"},{"name":"verification","required":true,"component":"verification"}]
     },
     {
       "capability_id":"viewport.ray.deproject","descriptor_id":"uai.query.viewport.ray.deproject","operation_kind":"query","provider_binding":"world_spatial.viewport_projection.deproject","query_kind":"runtime_probe","state_planes":["authoring_memory"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"camera_projection_reconstruction",
@@ -411,7 +462,7 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson3[] = R"UAIWSD3(tion_ki
     },
     {
       "capability_id":"viewport.camera.frame","descriptor_id":"uai.operation.viewport.camera.frame","operation_kind":"operation","state_planes":["authoring_memory"],"required_facets":["viewport","world"],"resolution_policy":"explicit_only","transient_access_policy":"temporary_mutation_allowed","oracle_kind":"same_viewport_camera_readback",
-      "input_fields":[{"name":"subject_refs","required":false,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"folder_path","required":false,"schema":{"type":"string","minLength":1}},{"name":"include_child_folders","required":false,"schema":{"type":"boolean"}},{"name":"use_current_selection","required":false,"schema":{"type":"boolean"}},{"name":"frame_policy","required":true,"component":"frame_policy"}],
+      "input_fields":[{"name":"subject_refs","required":false,"schema":{"type":"array","items":{"component":"target_ref"},"minItems":1,"uniqueItems":true}},{"name":"folder_path","required":false,"schema":{"type":"string","minLength":1}},{"name":"include_child_folders","required":false,"schema":{"type":"boolean"}},{"name":"use_current_selection","required":false,"schema":{"type":"boolean"}},{"name":"world_point","required":false,"component":"point_3d"},{"name":"world_bounds","required":false,"schema":{"type":"object","properties":{"min":{"component":"point_3d"},"max":{"component":"point_3d"}},"required":["min","max"],"additionalProperties":false}},{"name":"frame_policy","required":true,"component":"frame_policy"}],
       "result_fields":[{"name":"state","required":true,"component":"viewport_state"},{"name":"verification","required":true,"component":"verification"}]
     },
     {
@@ -432,7 +483,7 @@ static constexpr ANSICHAR GWorldSpatialDescriptorSpecJson4[] = R"UAIWSD4(type":"
     },
     {
       "capability_id":"viewport.view_mode.list","descriptor_id":"uai.query.viewport.view_mode.list","operation_kind":"query","provider_binding":"world_spatial.viewport_session.list_view_modes","query_kind":"catalog","state_planes":["registry_index"],"required_facets":["viewport"],"resolution_policy":"explicit_only","transient_access_policy":"read_only","oracle_kind":"engine_view_mode_catalog",
-      "input_fields":[],
+      "input_fields":[{"name":"query","required":false,"schema":{"type":"string","minLength":1}}],
       "result_fields":[{"name":"modes","required":true,"schema":{"type":"array","items":{"type":"object","properties":{"mode_id":{"type":"string","minLength":1},"label":{"type":"string","minLength":1}},"required":["mode_id","label"],"additionalProperties":false},"minItems":1}},{"name":"active_mode_id","required":true,"schema":{"type":"string","minLength":1}}]
     },
     {

@@ -31,7 +31,7 @@ bool FUeAgentStrictV2T62UnifiedGraphLayoutContractTest::RunTest(
 		FString(TEXT("unified-graph-layout-owner")));
 	const TArray<FString> ExpectedParameters = {
 		TEXT("targets"), TEXT("strategy"), TEXT("parameters"),
-		TEXT("authorization_id"), TEXT("projection")};
+		TEXT("projection")};
 	TArray<FString> ActualParameters;
 	for (const CommandContract::FUeAgentCommandFieldDeclaration& Field
 		: Contract->GetInputFields())
@@ -40,5 +40,15 @@ bool FUeAgentStrictV2T62UnifiedGraphLayoutContractTest::RunTest(
 	}
 	TestEqual(TEXT("the public contract uses one multi-target shape"),
 		ActualParameters, ExpectedParameters);
+	const TArray<FString> ExpectedResults = {
+		TEXT("terminal_status"), TEXT("layout_summary")};
+	TArray<FString> ActualResults;
+	for (const CommandContract::FUeAgentCommandFieldDeclaration& Field
+		: Contract->GetResultFields())
+	{
+		ActualResults.Add(Field.Name);
+	}
+	TestEqual(TEXT("the public result is a short layout summary"),
+		ActualResults, ExpectedResults);
 	return !HasAnyErrors();
 }

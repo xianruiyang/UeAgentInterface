@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
@@ -45,16 +46,7 @@ namespace UE::UAI::Discovery
 		Delete,
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentDiscoveryError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-		EUeAgentResourceDimension ResourceDimension =
-			EUeAgentResourceDimension::WorkUnits;
-		int64 ResourceLimit = 0;
-		int64 ResourceObserved = 0;
-	};
+	using FUeAgentDiscoveryError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentCatalogRevision final
 	{
@@ -68,6 +60,7 @@ namespace UE::UAI::Discovery
 		const FString& GetGeneration() const;
 		int64 GetSequence() const;
 		bool IsValid() const;
+		const FUeAgentDiscoveryError* GetValidationDiagnostic() const;
 		bool operator==(const FUeAgentCatalogRevision& Other) const;
 		bool operator!=(const FUeAgentCatalogRevision& Other) const;
 
@@ -75,7 +68,7 @@ namespace UE::UAI::Discovery
 		FString SourceId;
 		FString Generation;
 		int64 Sequence = -1;
-		bool bValid = false;
+		TSharedPtr<const FUeAgentDiscoveryError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentCatalogDiagnostic final
@@ -83,20 +76,19 @@ namespace UE::UAI::Discovery
 	public:
 		FUeAgentCatalogDiagnostic(
 			FString InSourceId,
-			FString InCode,
-			FString InMessage);
+			FUeAgentDiscoveryError InDiagnostic);
 
 		const FString& GetSourceId() const;
 		const FString& GetCode() const;
 		const FString& GetMessage() const;
+		const FUeAgentDiscoveryError& GetDiagnostic() const;
 		bool IsValid() const;
-		bool operator==(const FUeAgentCatalogDiagnostic& Other) const;
+		const FUeAgentDiscoveryError* GetValidationDiagnostic() const;
 
 	private:
 		FString SourceId;
-		FString Code;
-		FString Message;
-		bool bValid = false;
+		FUeAgentDiscoveryError Diagnostic;
+		TSharedPtr<const FUeAgentDiscoveryError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentDiscoveryQuery final
@@ -113,6 +105,7 @@ namespace UE::UAI::Discovery
 		EUeAgentDiscoveryMatchMode GetMatchMode() const;
 		EUeAgentMaterializationPolicy GetMaterializationPolicy() const;
 		bool IsValid() const;
+		const FUeAgentDiscoveryError* GetValidationDiagnostic() const;
 
 	private:
 		FString CatalogKind;
@@ -121,7 +114,7 @@ namespace UE::UAI::Discovery
 			EUeAgentDiscoveryMatchMode::Broad;
 		EUeAgentMaterializationPolicy MaterializationPolicy =
 			EUeAgentMaterializationPolicy::IndexOnly;
-		bool bValid = false;
+		TSharedPtr<const FUeAgentDiscoveryError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentCandidateSummary final
@@ -133,7 +126,8 @@ namespace UE::UAI::Discovery
 			FString InCatalogKind,
 			FString InDisplayName,
 			FString InSummary,
-			TArray<FString> InCategoryPath);
+			TArray<FString> InCategoryPath,
+			TArray<FString> InDiscoveryScopes = {});
 
 		const FUeAgentCanonicalIdentity& GetIdentity() const;
 		const FUeAgentDescriptorIdentity& GetDescriptorIdentity() const;
@@ -141,7 +135,9 @@ namespace UE::UAI::Discovery
 		const FString& GetDisplayName() const;
 		const FString& GetSummary() const;
 		const TArray<FString>& GetCategoryPath() const;
+		const TArray<FString>& GetDiscoveryScopes() const;
 		bool IsValid() const;
+		const FUeAgentDiscoveryError* GetValidationDiagnostic() const;
 		bool operator==(const FUeAgentCandidateSummary& Other) const;
 		bool operator!=(const FUeAgentCandidateSummary& Other) const;
 
@@ -152,7 +148,8 @@ namespace UE::UAI::Discovery
 		FString DisplayName;
 		FString Summary;
 		TArray<FString> CategoryPath;
-		bool bValid = false;
+		TArray<FString> DiscoveryScopes;
+		TSharedPtr<const FUeAgentDiscoveryError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentCandidateBinding final
@@ -176,6 +173,7 @@ namespace UE::UAI::Discovery
 		const FString& GetBindingEvidence() const;
 		bool Supports(EUeAgentCandidateOperation Operation) const;
 		bool IsValid() const;
+		const FUeAgentDiscoveryError* GetValidationDiagnostic() const;
 		bool operator==(const FUeAgentCandidateBinding& Other) const;
 
 	private:
@@ -186,7 +184,7 @@ namespace UE::UAI::Discovery
 		FString ReadPortId;
 		TArray<EUeAgentCandidateOperation> SupportedOperations;
 		FString BindingEvidence;
-		bool bValid = false;
+		TSharedPtr<const FUeAgentDiscoveryError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentCatalogSnapshot final
@@ -261,6 +259,14 @@ namespace UE::UAI::Discovery
 			const FUeAgentCancellationToken& Cancellation,
 			TSharedPtr<const FUeAgentCatalogSnapshot>& OutCatalog,
 			FUeAgentDiscoveryError& OutError) = 0;
+		virtual bool TrySearchResolved(
+			const FUeAgentDiscoveryQuery& Query,
+			FUeAgentResourceTracker& Resources,
+			const FUeAgentOperationDeadline& Deadline,
+			const FUeAgentCancellationToken& Cancellation,
+			TSharedPtr<const FUeAgentCatalogSnapshot>& OutCatalog,
+			TArray<TSharedRef<const FUeAgentCandidateBinding>>& OutBindings,
+			FUeAgentDiscoveryError& OutError);
 		virtual bool TryResolveExact(
 			const FString& CandidateId,
 			const FUeAgentCatalogRevision& ExpectedRevision,

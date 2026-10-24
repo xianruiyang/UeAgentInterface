@@ -1,8 +1,10 @@
 # T39 EditorProject Operation Authority
 
-The active `editor-project-operation` contribution owns exactly the seven
-`editor_project.*.update` identities assigned to
-`T39-EDITOR-PROJECT-OPERATION` in `UAI_COMMAND_TASK_INVENTORY.json`. Every
+The `editor-project-operation` contribution owns exactly the seven
+`editor_project.*.update` identities assigned to its domain. Five remain active:
+config-section, device-profile, platform-config, project-settings and scalability-group
+updates. Localization-target and StringTable updates are centrally dormant because
+their registered HJSON profiles are now the normal authoring surface. Every
 frozen contract reports `editor-project-operation-owner`; no namespace or
 catch-all fallback adds commands.
 
@@ -13,59 +15,60 @@ of the native config, settings, localization and StringTable mechanics. It is an
 internal dependency, not a second public route, registry, handler, contract,
 test or documentation authority.
 
-The common lifecycle performs schema validation, exact target and revision
-binding, native execution, settle, persistence, reload, independent readback
+The common lifecycle performs schema validation, exact target and field
+resolution, server-owned current-revision binding, native execution, settle,
+persistence, reload, independent readback
 and rollback or `state_unknown` handling. A stale revision or invalid typed
 change fails before mutation; `state_unknown` is not safe for automatic replay.
 
 ## Public SDK and CLI
 
-The final manifest projects all seven identities into the default
-`editor_project` namespace. Callers import only `uai`, connect from one complete
-Connection TOML and call methods such as
-`client.editor_project.config_section_update(...)` and
-`client.editor_project.string_table_update(...)`. Generic `client.execute(...)`,
-exact `client.execute_exact(...)`, and `uai-cli exec` reuse the same generated
-catalog, Client, Protocol and Transport. No T39-specific Python module remains
-authoritative.
+The generated catalog retains all seven identities. Only the five active
+identities belong in the named methods of the default `editor_project`
+namespace. Callers import only `uai`, use `uai.connect_project()` for the local project and
+call methods such as `client.editor_project.config_section_update(...)`. Localization
+and StringTable edits use `workspace = client.content_graph.export_workspace(...)`,
+ordinary HJSON editing and `workspace.import_changes()`; their old exact handlers
+remain compatibility-only behind the central dormant lifecycle. Generic
+`client.execute(...)`, exact compatibility dispatch, and `ueagentinterfacecmd exec` reuse the same
+generated catalog, Client, Protocol and Transport. No T39-specific Python module
+remains authoritative.
 
-`expected_revision` is the exact revision of the selected target, not a retry
-token or user-authored label. Obtain it immediately before writing with the
-closed `target.read` action on the matching active Query command; never guess it
-or reuse a stale value. `reference.catalog_search` is retired and must not be
-restored as a second target directory.
+The five active update methods accept only the readable `target_ref` and typed
+`changes`. The EditorProject target resolver reads the current revision and
+freezes it inside the same Operation before planning; later prestate and
+prewrite checks still reject an internally changed target. The revision is not
+a Python/HJSON/CLI parameter. `reference.catalog_search` is retired and must
+not be restored as a second target directory.
 
 For example, a config-section target is read through `config.section`:
 
 ```python
 query_result = client.config.section(
     input={
-        "config_scope": "game",
-        "section_id": "/Script/EngineSettings.GeneralProjectSettings",
         "editor_project_capability": "target.read",
         "parameters": {"target_ref": target_ref},
     },
-    projection={"max_items": 2},
 )
-# Parse the returned observation_json entry. It contains target_revision and
-# independently loaded entries; use that revision in the update below.
+# Use query_result.payload["observation"]["entries"] to choose the typed change.
 ```
 
 The same `target.read` action is closed over `config.section`,
 `config.resolved_value`, `project.settings`, `project.platform`, and
 `project.validation`. Project-settings observations additionally return
-`fields[]` with exact field ref, field revision, type and current canonical
-value. After the update, repeat `target.read` for independent product readback.
+`fields[]` with exact field ref, type and current canonical value. Target and
+field revisions remain hidden inside the same server-owned operation. Explicit
+capability requests return `observation`; ordinary queries retain their compact
+sections/settings/values results. After
+the update, repeat `target.read` for independent product readback.
 
 ```text
-uai-cli --connection connection.toml exec editor_project.config_section.update --params-json {"changes":[{"field_id":"entries","presence":"set","value":{"type_id":"uai.editor_project.config_entry_map.v1","canonical_value":{"UAI_StrictV2_T39":"public-write"}}}],"expected_revision":"<current-target-revision>","target_ref":"uai://editor-project/v1/config-section/game/%2FScript%2FEngineSettings.GeneralProjectSettings"}
+ueagentinterfacecmd exec editor_project.config_section.update --params-json '{"changes":[{"field_id":"entries","presence":"set","value":{"type_id":"uai.editor_project.config_entry_map.v1","canonical_value":{"UAI_StrictV2_T39":"public-write"}}}],"target_ref":"uai://editor-project/v1/config-section/game/%2FScript%2FEngineSettings.GeneralProjectSettings"}'
 ```
 
-Use `client.query.command_search("update project config section", limit=5)` and
-then `client.query.command_detail(command_id, contract_hash)` to obtain the exact
-request schema, named SDK/CLI forms, owner, failures and tutorial references.
-Search is the only fuzzy command-selection step; execute the selected ID and
-hash unchanged.
+For unknown command names or parameter shapes, follow [public command discovery](../../../../UeAgentInterfaceCMD/docs/PYTHON_SDK_AND_CLI.md#command-discovery).
+Search matches only positive tokens from command IDs, registered keywords and
+registered synonyms; call the selected generated method by name.
 
 ## Historical read capabilities
 

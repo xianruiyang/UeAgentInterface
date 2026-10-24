@@ -9,14 +9,7 @@ namespace UE::UAI::Tests::StrictV2::T54
 		static const TArray<FString> Commands = {
 			TEXT("audio_media.asset.create"),
 			TEXT("metasound.graph.compile_settle"),
-			TEXT("metasound.graph.default.mutate"),
-			TEXT("metasound.graph.interface.mutate"),
-			TEXT("metasound.graph.link.mutate"),
-			TEXT("metasound.graph.node.mutate"),
 			TEXT("sound_cue.graph.compile_settle"),
-			TEXT("sound_cue.graph.node.mutate"),
-			TEXT("sound_cue.graph.relation.mutate"),
-			TEXT("sound_cue.graph.root.mutate"),
 		};
 		return Commands;
 	}
@@ -42,7 +35,6 @@ bool FUeAgentStrictV2T54AudioCommandMigrationTest::RunTest(const FString& Parame
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T54 owns exactly ten non-HJSON commands"), ExpectedCommands().Num(), 10);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
@@ -52,6 +44,20 @@ bool FUeAgentStrictV2T54AudioCommandMigrationTest::RunTest(const FString& Parame
 			TestEqual(*FString::Printf(TEXT("%s has one T54 owner"), *CommandId),
 				Contract->GetPublicOwner(), FString(TEXT("audio-media-command-owner")));
 		}
+	}
+	const TArray<FString> InternalHjsonOperationIds = {
+		TEXT("metasound.graph.default.mutate"),
+		TEXT("metasound.graph.interface.mutate"),
+		TEXT("metasound.graph.link.mutate"),
+		TEXT("metasound.graph.node.mutate"),
+		TEXT("sound_cue.graph.node.mutate"),
+		TEXT("sound_cue.graph.relation.mutate"),
+		TEXT("sound_cue.graph.root.mutate"),
+	};
+	for (const FString& CommandId : InternalHjsonOperationIds)
+	{
+		TestNull(*FString::Printf(TEXT("%s is not a public command"), *CommandId),
+			Registry->FindExact(CommandId));
 	}
 	return !HasAnyErrors();
 }

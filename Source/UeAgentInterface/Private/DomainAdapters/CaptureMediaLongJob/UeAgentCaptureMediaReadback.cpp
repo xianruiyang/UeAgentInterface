@@ -1,4 +1,5 @@
 #include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaReadback.h"
+#include "DomainAdapters/CaptureMediaLongJob/UeAgentCaptureMediaDiagnostics.h"
 
 #include "Engine/TextureRenderTarget2D.h"
 #include "HAL/FileManager.h"
@@ -34,6 +35,33 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			return !Value.IsEmpty()
 				&& Value == NormalizeText(Value)
 				&& Value.StartsWith(TEXT("uai.readback.capture."));
+		}
+
+		FVerificationError InvalidOracle(const TCHAR* Code, const FString& OracleId, const FString& SubjectRef)
+		{
+			const bool bOracleInvalid = !IsOracleId(OracleId);
+			auto Error = CaptureDiagnostics::Native(Code,
+				bOracleInvalid ? TEXT("The capture readback oracle identifier has an unsupported format.")
+					: SubjectRef.IsEmpty() ? TEXT("The capture readback subject reference is empty.")
+					: TEXT("The capture readback render target is unavailable."),
+				TEXT("verification"), bOracleInvalid ? TEXT("oracle_id_valid")
+					: SubjectRef.IsEmpty() ? TEXT("subject_ref_available") : TEXT("render_target_available"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			Error.SubjectId = SubjectRef;
+			if (bOracleInvalid)
+			{
+				Error.ActualEvidence = MakeShared<FJsonValueString>(OracleId);
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(TEXT("uai.readback.capture."));
+			}
+			return Error;
+		}
+
+		TSharedPtr<FJsonValue> FourCcValue(const TArray<uint8>& Bytes, int32 Offset)
+		{
+			TArray<TSharedPtr<FJsonValue>> Value;
+			for (int32 Index = Offset; Index < Offset + 4 && Index < Bytes.Num(); ++Index)
+				Value.Add(CaptureDiagnostics::Number(Bytes[Index]));
+			return MakeShared<FJsonValueArray>(Value);
 		}
 
 		FString Sha256(const void* Data, const int64 NumBytes)
@@ -72,7 +100,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			FUeAgentResourceTracker& Resources,
 			FVerificationError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded BudgetError;
+			FUeAgentResourceChargeError ChargeError;
 			if (!Resources.TryChargeMany(
 				{
 					{EUeAgentResourceDimension::Files, Files},
@@ -82,11 +110,9 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					{EUeAgentResourceDimension::EstimatedMemoryBytes, Bytes},
 				},
 				Path,
-				BudgetError))
+				ChargeError))
 			{
-				OutError = FVerificationError(
-					BudgetError.Code,
-					BudgetError.Path);
+				OutError = ChargeError;
 				return false;
 			}
 			return true;
@@ -102,7 +128,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			if (!FUeAgentCanonicalValue::TryString(
 				Value, Resources, OutValue, Error))
 			{
-				OutError = FVerificationError(Error.Code, Error.Path);
+				OutError = Error;
 				return false;
 			}
 			return true;
@@ -121,7 +147,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				OutValue,
 				Error))
 			{
-				OutError = FVerificationError(Error.Code, Error.Path);
+				OutError = Error;
 				return false;
 			}
 			return true;
@@ -158,7 +184,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 			if (!FUeAgentCanonicalValue::TryObject(
 				Items, Resources, Object, Error))
 			{
-				OutError = FVerificationError(Error.Code, Error.Path);
+				OutError = Error;
 				return false;
 			}
 			OutValue = MoveTemp(Object);
@@ -187,8 +213,15 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				if (Request.GetOracleId() != OracleId
 					|| Request.GetSubjectRef() != SubjectRef)
 				{
-					OutError = FVerificationError(
-						TEXT("capture_readback_binding_mismatch"));
+					const bool bOracleMismatch = Request.GetOracleId() != OracleId;
+					OutError = CaptureDiagnostics::Native(TEXT("capture_readback_binding_mismatch"),
+						bOracleMismatch ? TEXT("The readback request selects a different capture oracle.")
+							: TEXT("The readback request selects a different capture subject."),
+						TEXT("verification"), bOracleMismatch ? TEXT("oracle_matches") : TEXT("subject_matches"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(bOracleMismatch ? Request.GetOracleId() : Request.GetSubjectRef());
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(bOracleMismatch ? OracleId : SubjectRef);
+					OutError.SubjectId = SubjectRef;
 					return false;
 				}
 				return true;
@@ -215,10 +248,14 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					|| !Request.GetArtifact().IsSet()
 					|| Request.GetArtifact()->GetArtifactKind() != TEXT("image"))
 				{
-					if (!OutError.IsPresent())
+					if (!(!OutError.IsEmpty()))
 					{
-						OutError = FVerificationError(
-							TEXT("capture_image_artifact_required"));
+						OutError = CaptureDiagnostics::Native(TEXT("capture_image_artifact_required"),
+							TEXT("Capture image readback requires a image artifact."),
+							TEXT("verification"), TEXT("artifact_kind"),
+							Request.GetArtifact().IsSet() ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Request.GetArtifact()->GetArtifactKind())) : nullptr,
+							MakeShared<FJsonValueString>(TEXT("image")));
+						OutError.SubjectId = SubjectRef;
 					}
 					return false;
 				}
@@ -234,18 +271,25 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 						Resources,
 						OutError))
 				{
-					if (!OutError.IsPresent())
+					if (!(!OutError.IsEmpty()))
 					{
-						OutError = FVerificationError(
-							TEXT("capture_image_artifact_unavailable"));
+						OutError = CaptureDiagnostics::Native(TEXT("capture_image_artifact_unavailable"),
+							TEXT("The captured image file size could not be read."),
+							TEXT("verification"), TEXT("file_size"),
+							CaptureDiagnostics::Number(FileSize),
+							MakeShared<FJsonValueString>(TEXT("non-negative byte count")));
+						OutError.TargetPath = Artifact.GetLocator();
 					}
 					return false;
 				}
 				FImage Image;
 				if (!FImageUtils::LoadImage(*Artifact.GetLocator(), Image))
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("capture_image_decode_unavailable"));
+					auto Error = CaptureDiagnostics::Native(TEXT("capture_image_decode_unavailable"),
+						TEXT("The captured image file could not be decoded."), TEXT("independent_readback"),
+						TEXT("image_decoded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					Error.TargetPath = Artifact.GetLocator();
+					OutObservation = FIndependentReadbackObservation::Unavailable(MoveTemp(Error));
 					return true;
 				}
 				Image.ChangeFormat(ERawImageFormat::BGRA8, EGammaSpace::sRGB);
@@ -332,10 +376,14 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					|| !Request.GetArtifact().IsSet()
 					|| Request.GetArtifact()->GetArtifactKind() != TEXT("media"))
 				{
-					if (!OutError.IsPresent())
+					if (!(!OutError.IsEmpty()))
 					{
-						OutError = FVerificationError(
-							TEXT("capture_media_artifact_required"));
+						OutError = CaptureDiagnostics::Native(TEXT("capture_media_artifact_required"),
+							TEXT("Capture media readback requires a media artifact."),
+							TEXT("verification"), TEXT("artifact_kind"),
+							Request.GetArtifact().IsSet() ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Request.GetArtifact()->GetArtifactKind())) : nullptr,
+							MakeShared<FJsonValueString>(TEXT("media")));
+						OutError.SubjectId = SubjectRef;
 					}
 					return false;
 				}
@@ -350,10 +398,14 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 						Resources,
 						OutError))
 				{
-					if (!OutError.IsPresent())
+					if (!(!OutError.IsEmpty()))
 					{
-						OutError = FVerificationError(
-							TEXT("capture_media_artifact_unavailable"));
+						OutError = CaptureDiagnostics::Native(TEXT("capture_media_artifact_unavailable"),
+							TEXT("The captured media file could not be loaded."),
+							TEXT("verification"), TEXT("file_loaded"),
+							MakeShared<FJsonValueBoolean>(false),
+							MakeShared<FJsonValueBoolean>(true));
+						OutError.TargetPath = Artifact.GetLocator();
 					}
 					return false;
 				}
@@ -367,8 +419,13 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				if (!HasFourCc(Bytes, 0, "RIFF")
 					|| !HasFourCc(Bytes, 8, "WAVE"))
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("capture_media_container_invalid"));
+					const bool bRiffMissing = !HasFourCc(Bytes, 0, "RIFF");
+					auto Error = CaptureDiagnostics::Native(TEXT("capture_media_container_invalid"),
+						bRiffMissing ? TEXT("The media artifact is missing the RIFF header.") : TEXT("The RIFF artifact is not a WAVE container."),
+						TEXT("independent_readback"), bRiffMissing ? TEXT("riff_header_bytes") : TEXT("wave_header_bytes"),
+						FourCcValue(Bytes, bRiffMissing ? 0 : 8), MakeShared<FJsonValueString>(bRiffMissing ? TEXT("RIFF") : TEXT("WAVE")));
+					Error.TargetPath = Artifact.GetLocator();
+					OutObservation = FIndependentReadbackObservation::Unavailable(MoveTemp(Error));
 					return true;
 				}
 				for (int64 Offset = 12; Offset + 8 <= Bytes.Num();)
@@ -397,8 +454,23 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 					|| Channels == 0 || SampleRate == 0 || BlockAlign == 0
 					|| DataSize % BlockAlign != 0)
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("capture_media_stream_invalid"));
+					const FString Field = !bFmt ? TEXT("format_chunk_available") : !bData ? TEXT("data_chunk_available")
+						: AudioFormat != 1 ? TEXT("audio_format") : Channels == 0 ? TEXT("channels")
+						: SampleRate == 0 ? TEXT("sample_rate") : BlockAlign == 0 ? TEXT("block_align") : TEXT("data_alignment_remainder");
+					const TSharedPtr<FJsonValue> Actual = !bFmt || !bData
+						? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false))
+						: CaptureDiagnostics::Number(AudioFormat != 1 ? AudioFormat : Channels == 0 ? Channels
+							: SampleRate == 0 ? SampleRate : BlockAlign == 0 ? BlockAlign : DataSize % BlockAlign);
+					const TSharedPtr<FJsonValue> Expected = !bFmt || !bData
+						? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true))
+						: AudioFormat != 1 ? CaptureDiagnostics::Number(1)
+						: Channels == 0 || SampleRate == 0 || BlockAlign == 0
+							? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("greater than zero"))) : CaptureDiagnostics::Number(0);
+					auto Error = CaptureDiagnostics::Native(TEXT("capture_media_stream_invalid"),
+						FString::Printf(TEXT("The WAVE stream has an invalid %s."), *Field),
+						TEXT("independent_readback"), Field, Actual, Expected);
+					Error.TargetPath = Artifact.GetLocator();
+					OutObservation = FIndependentReadbackObservation::Unavailable(MoveTemp(Error));
 					return true;
 				}
 				const FString ActualArtifactHash = Sha256(
@@ -455,39 +527,61 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 				}
 				if (!FApp::CanEverRender() || GUsingNullRHI || GDynamicRHI == nullptr)
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("capture_render_readback_rhi_unavailable"));
+					auto Error = CaptureDiagnostics::Native(TEXT("capture_render_readback_rhi_unavailable"),
+						TEXT("Rendering is unavailable for capture readback."), TEXT("independent_readback"), !FApp::CanEverRender() ? TEXT("can_render") : GUsingNullRHI ? TEXT("non_null_rhi") : TEXT("dynamic_rhi_available"),
+						MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true));
+					Error.SubjectId = SubjectRef;
+					OutObservation = FIndependentReadbackObservation::Unavailable(MoveTemp(Error));
 					return true;
 				}
 				if (!IsInGameThread())
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("capture_render_readback_game_thread_required"));
+					auto Error = CaptureDiagnostics::Native(TEXT("capture_render_readback_game_thread_required"),
+						TEXT("Render-target readback requires the game thread."), TEXT("independent_readback"), TEXT("game_thread"),
+						MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true));
+					Error.SubjectId = SubjectRef;
+					OutObservation = FIndependentReadbackObservation::Unavailable(MoveTemp(Error));
 					return true;
 				}
 				UTextureRenderTarget2D* Target = RenderTarget.Get();
 				if (Target == nullptr)
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("capture_render_readback_target_unavailable"));
+					auto Error = CaptureDiagnostics::Native(TEXT("capture_render_readback_target_unavailable"),
+						TEXT("The capture render target is no longer available."), TEXT("independent_readback"), TEXT("render_target_available"),
+						MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true));
+					Error.SubjectId = SubjectRef;
+					OutObservation = FIndependentReadbackObservation::Unavailable(MoveTemp(Error));
 					return true;
 				}
 				FTextureRenderTargetResource* Resource =
 					Target->GameThread_GetRenderTargetResource();
 				if (Resource == nullptr)
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("capture_render_readback_resource_unavailable"));
+					auto Error = CaptureDiagnostics::Native(TEXT("capture_render_readback_resource_unavailable"),
+						TEXT("The capture render target has no readable render resource."), TEXT("independent_readback"), TEXT("render_resource_available"),
+						MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true));
+					Error.SubjectId = SubjectRef;
+					Error.TargetPath = Target->GetPathName();
+					OutObservation = FIndependentReadbackObservation::Unavailable(MoveTemp(Error));
 					return true;
 				}
 				FlushRenderingCommands();
 				TArray<FColor> Pixels;
 				FReadSurfaceDataFlags Flags(RCM_UNorm);
-				if (!Resource->ReadPixels(Pixels, Flags)
-					|| Pixels.Num() <= 0)
+				const bool bReadPixels = Resource->ReadPixels(Pixels, Flags);
+				if (!bReadPixels || Pixels.Num() <= 0)
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("capture_render_readback_pixels_unavailable"));
+					auto Error = CaptureDiagnostics::Native(TEXT("capture_render_readback_pixels_unavailable"),
+						TEXT("The capture render target did not return readable pixels."), TEXT("independent_readback"), bReadPixels ? TEXT("pixel_count") : TEXT("read_pixels_succeeded"),
+						bReadPixels ? CaptureDiagnostics::Number(Pixels.Num()) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)),
+						bReadPixels ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("at least one pixel"))) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)));
+					Error.SubjectId = SubjectRef;
+					Error.TargetPath = Target->GetPathName();
+					OutObservation = FIndependentReadbackObservation::Unavailable(MoveTemp(Error));
 					return true;
 				}
 				const int64 PixelBytes = Pixels.Num() * sizeof(FColor);
@@ -539,8 +633,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		SubjectRef = NormalizeText(MoveTemp(SubjectRef));
 		if (!IsOracleId(OracleId) || SubjectRef.IsEmpty())
 		{
-			OutError = FVerificationError(
-				TEXT("capture_image_readback_oracle_invalid"));
+			OutError = InvalidOracle(TEXT("capture_image_readback_oracle_invalid"), OracleId, SubjectRef);
 			return false;
 		}
 		OutOracle = MakeShared<FImageArtifactReadbackOracle,
@@ -559,8 +652,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		SubjectRef = NormalizeText(MoveTemp(SubjectRef));
 		if (!IsOracleId(OracleId) || SubjectRef.IsEmpty())
 		{
-			OutError = FVerificationError(
-				TEXT("capture_media_readback_oracle_invalid"));
+			OutError = InvalidOracle(TEXT("capture_media_readback_oracle_invalid"), OracleId, SubjectRef);
 			return false;
 		}
 		OutOracle = MakeShared<FWaveArtifactReadbackOracle,
@@ -581,8 +673,7 @@ namespace UE::UAI::DomainAdapters::CaptureMediaLongJob
 		if (!IsOracleId(OracleId) || SubjectRef.IsEmpty()
 			|| RenderTarget == nullptr)
 		{
-			OutError = FVerificationError(
-				TEXT("capture_render_readback_oracle_invalid"));
+			OutError = InvalidOracle(TEXT("capture_render_readback_oracle_invalid"), OracleId, SubjectRef);
 			return false;
 		}
 		OutOracle = MakeShared<FRenderTargetReadbackOracle,

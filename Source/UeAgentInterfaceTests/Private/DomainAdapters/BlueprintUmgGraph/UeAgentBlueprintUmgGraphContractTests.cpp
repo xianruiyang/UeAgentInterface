@@ -93,7 +93,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentBlueprintUmgGraphContractTest,
 	"UeAgentInterface.DomainAdapters.BlueprintUmgGraph.E0.Contract."
-		"IdentityTopologyLifecycleAndLegacyBoundary",
+		"IdentityTopologyLifecycleContract",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
@@ -124,23 +124,6 @@ bool FUeAgentBlueprintUmgGraphContractTest::RunTest(
 		Fixture->GetArrayField(TEXT("port_families"));
 	const TArray<TSharedPtr<FJsonValue>>& Capabilities =
 		Fixture->GetArrayField(TEXT("capabilities"));
-	const TArray<TSharedPtr<FJsonValue>>& Mappings =
-		Fixture->GetArrayField(TEXT("legacy_mappings"));
-	TestEqual(
-		TEXT("six native port families"),
-		Families.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("port_family_count"))));
-	TestEqual(
-		TEXT("six exact capabilities"),
-		Capabilities.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("capability_count"))));
-	TestEqual(
-		TEXT("all six legacy inputs adjudicated"),
-		Mappings.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("legacy_candidate_count"))));
 
 	const TSet<FString> ExpectedFamilies = {
 		TEXT("asset_lifecycle"),
@@ -202,19 +185,6 @@ bool FUeAgentBlueprintUmgGraphContractTest::RunTest(
 				Capability->GetNumberField(TEXT("version"))),
 			1);
 	}
-	for (const TSharedPtr<FJsonValue>& Value : Mappings)
-	{
-		const TSharedPtr<FJsonObject> Mapping = Value->AsObject();
-		for (const FString& Target :
-			ReadStrings(Mapping, TEXT("target_capability_ids")))
-		{
-			TestTrue(
-				TEXT("legacy mapping resolves exact capability: ")
-					+ Mapping->GetStringField(TEXT("legacy_id")),
-				CapabilityIds.Contains(Target));
-		}
-	}
-
 	const TArray<TSharedPtr<FJsonValue>>& IdentityCases =
 		Fixture->GetArrayField(TEXT("identity_cases"));
 	const TSharedPtr<FJsonObject> BlueprintCase = FindByStringField(
@@ -324,10 +294,6 @@ bool FUeAgentBlueprintUmgGraphContractTest::RunTest(
 		HasExactStrings(
 			ReadStrings(Fixture, TEXT("forbidden_owners")),
 			RequiredForbiddenOwners.Array()));
-	TestTrue(TEXT("old folder provider is never an oracle"),
-		ReadStrings(Fixture, TEXT("forbidden_oracles")).Contains(
-			TEXT("legacy_folder_apply_provider")));
-
 	using namespace UE::UAI::DomainAdapters::BlueprintUmgGraph;
 	TestEqual(TEXT("production contract version"),
 		UAI_BLUEPRINT_UMG_GRAPH_CONTRACT_V1, 1);
@@ -335,10 +301,6 @@ bool FUeAgentBlueprintUmgGraphContractTest::RunTest(
 		GetBlueprintUmgGraphPortFamilyContracts();
 	const auto& ProductionCapabilities =
 		GetBlueprintUmgGraphCapabilityContracts();
-	TestEqual(TEXT("production family count"),
-		ProductionFamilies.Num(), Families.Num());
-	TestEqual(TEXT("production capability count"),
-		ProductionCapabilities.Num(), Capabilities.Num());
 	for (const auto& Family : ProductionFamilies)
 	{
 		const TSharedPtr<FJsonObject> Expected = FindByStringField(

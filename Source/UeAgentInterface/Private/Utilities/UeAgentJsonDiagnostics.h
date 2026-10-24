@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class FJsonObject;
@@ -15,28 +17,28 @@ namespace UeAgentJsonDiagnostics
 
 	FString JsonValueTypeToString(const TSharedPtr<FJsonValue>& Value);
 
-	TSharedPtr<FJsonObject> MakeIssue(
+	UE::UAI::Contract::FDiagnostic MakeIssue(
 			const FString& Severity,
 			const FString& Code,
 			const FString& Path,
 			const FString& Message);
 
 	void AddIssue(
-			TArray<TSharedPtr<FJsonValue>>& Issues,
+			TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 			const FString& Severity,
 			const FString& Code,
 			const FString& Path,
 			const FString& Message);
 
 	int32 CountIssuesBySeverity(
-			const TArray<TSharedPtr<FJsonValue>>& Issues,
+			const TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 			const FString& Severity);
 
 	bool HasIssueWithSeverity(
-			const TArray<TSharedPtr<FJsonValue>>& Issues,
+			const TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 			const FString& Severity);
 
-	bool HasErrorIssue(const TArray<TSharedPtr<FJsonValue>>& Issues);
+	bool HasErrorIssue(const TArray<UE::UAI::Contract::FDiagnostic>& Issues);
 
 	bool JsonValueHasExplicitWriteIntent(const TSharedPtr<FJsonValue>& Value);
 
@@ -46,7 +48,7 @@ namespace UeAgentJsonDiagnostics
 			const TSharedPtr<FJsonObject>& Obj,
 			const FString& Path,
 			const FString& ProfileName,
-			TArray<TSharedPtr<FJsonValue>>& Issues);
+			TArray<UE::UAI::Contract::FDiagnostic>& Issues);
 
 	bool SerializeJsonObjectCompact(const TSharedPtr<FJsonObject>& Obj, FString& OutText);
 
@@ -62,7 +64,7 @@ namespace UeAgentJsonDiagnostics
 			const TSharedPtr<FJsonObject>& Obj,
 			const FString& Path,
 			const TArray<FString>& KnownFields,
-			TArray<TSharedPtr<FJsonValue>>& Warnings);
+			TArray<UE::UAI::Contract::FDiagnostic>& Warnings);
 
 	const TSharedPtr<FJsonValue>* FindFieldValue(const TSharedPtr<FJsonObject>& Obj, const FString& FieldName);
 
@@ -71,7 +73,7 @@ namespace UeAgentJsonDiagnostics
 			const FString& FieldName,
 			const FString& Path,
 			FString& OutValue,
-			TArray<TSharedPtr<FJsonValue>>& Issues,
+			TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 			const bool bRequired);
 
 	UEAGENTINTERFACE_API bool ReadBoolField(
@@ -79,7 +81,7 @@ namespace UeAgentJsonDiagnostics
 			const FString& FieldName,
 			const FString& Path,
 			bool& bOutValue,
-			TArray<TSharedPtr<FJsonValue>>& Issues,
+			TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 			const bool bRequired);
 
 	bool TryReadNumberValue(const TSharedPtr<FJsonValue>& Value, double& OutValue);
@@ -89,24 +91,16 @@ namespace UeAgentJsonDiagnostics
 			const TArray<FString>& FieldNames,
 			double& OutValue);
 
-	bool TryReadVectorObject(const TSharedPtr<FJsonObject>& Obj, FVector& OutValue);
+	UEAGENTINTERFACE_API bool TryReadVectorValue(const TSharedPtr<FJsonValue>& Value, FVector& OutValue, UE::UAI::Contract::FDiagnostic& OutError);
 
-	bool TryReadRotatorObject(const TSharedPtr<FJsonObject>& Obj, FRotator& OutValue);
-
-	UEAGENTINTERFACE_API bool TryReadVectorValue(const TSharedPtr<FJsonValue>& Value, FVector& OutValue);
-
-	UEAGENTINTERFACE_API bool TryReadVector2DValue(const TSharedPtr<FJsonValue>& Value, FVector2D& OutValue);
-
-	UEAGENTINTERFACE_API bool TryReadRotatorValue(const TSharedPtr<FJsonValue>& Value, FRotator& OutValue);
-
-	UEAGENTINTERFACE_API bool TryReadLinearColorValue(const TSharedPtr<FJsonValue>& Value, FLinearColor& OutValue);
+	UEAGENTINTERFACE_API bool TryReadRotatorValue(const TSharedPtr<FJsonValue>& Value, FRotator& OutValue, UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ReadVectorField(
 			const TSharedPtr<FJsonObject>& Obj,
 			const FString& FieldName,
 			const FString& Path,
 			FVector& OutValue,
-			TArray<TSharedPtr<FJsonValue>>& Issues,
+			TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 			const bool bRequired);
 
 	UEAGENTINTERFACE_API bool ReadRotatorField(
@@ -114,7 +108,7 @@ namespace UeAgentJsonDiagnostics
 			const FString& FieldName,
 			const FString& Path,
 			FRotator& OutValue,
-			TArray<TSharedPtr<FJsonValue>>& Issues,
+			TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 			const bool bRequired);
 
 	bool ReadArrayField(
@@ -122,19 +116,19 @@ namespace UeAgentJsonDiagnostics
 			const FString& FieldName,
 			const FString& Path,
 			const TArray<TSharedPtr<FJsonValue>>*& OutArray,
-			TArray<TSharedPtr<FJsonValue>>& Issues,
+			TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 			const bool bRequired);
 
 	UEAGENTINTERFACE_API bool ReadObjectFromValue(
 			const TSharedPtr<FJsonValue>& Value,
 			const FString& Path,
 			TSharedPtr<FJsonObject>& OutObject,
-			TArray<TSharedPtr<FJsonValue>>& Issues);
+			TArray<UE::UAI::Contract::FDiagnostic>& Issues);
 
 	bool LoadJsonObjectFile(
 			const FString& FilePath,
 			TSharedPtr<FJsonObject>& OutObj,
-			TArray<TSharedPtr<FJsonValue>>* OutIssues,
-			FString& OutError,
+			TArray<UE::UAI::Contract::FDiagnostic>* OutIssues,
+			UE::UAI::Contract::FDiagnostic& OutError,
 			const bool bOptional);
 }

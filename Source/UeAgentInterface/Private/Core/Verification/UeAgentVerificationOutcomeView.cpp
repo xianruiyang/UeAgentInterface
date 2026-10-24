@@ -1,9 +1,10 @@
 #include "Core/Verification/UeAgentVerificationOutcomeView.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::Verification
 {
 	using UE::UAI::StateSemantic::EUeAgentDifferenceKind;
-	using UE::UAI::StateSemantic::FUeAgentCanonicalIdentity;
 	using UE::UAI::StateSemantic::FUeAgentCanonicalValue;
 	using UE::UAI::StateSemantic::FUeAgentCanonicalValuePtr;
 	using UE::UAI::StateSemantic::FUeAgentCanonicalValueRef;
@@ -111,14 +112,7 @@ namespace UE::UAI::Verification
 		private:
 			bool Fail(const FUeAgentStateSemanticError& StateError)
 			{
-				FString Detail = StateError.Detail;
-				if (Detail.IsEmpty())
-				{
-					Detail = StateError.Path;
-				}
-				Error = FVerificationError(
-					StateError.Code,
-					MoveTemp(Detail));
+				Error = StateError;
 				return false;
 			}
 
@@ -195,51 +189,6 @@ namespace UE::UAI::Verification
 			return Writer.TryArray(Items, OutValue);
 		}
 
-		bool TryIdentityView(
-			const FUeAgentCanonicalIdentity& Identity,
-			FCanonicalViewWriter& Writer,
-			FUeAgentCanonicalValuePtr& OutValue)
-		{
-			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields;
-			FUeAgentCanonicalValuePtr Value;
-			if (!Writer.TryString(TEXT("canonical_identity"), Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("$type"), Value);
-			if (!Writer.TryString(Identity.GetSemanticId(), Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("semantic_id"), Value);
-			if (!Writer.TryString(Identity.GetTargetKind(), Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("target_kind"), Value);
-			if (!Writer.TryString(Identity.GetOwnerId(), Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("owner_id"), Value);
-			if (!Writer.TryString(Identity.GetSelector(), Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("selector"), Value);
-			if (!Writer.TryString(Identity.GetObjectRole(), Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("object_role"), Value);
-			if (!Writer.TryString(Identity.GetGeneration(), Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("generation"), Value);
-			return Writer.TryObject(Fields, OutValue);
-		}
-
 		bool TryDifferenceView(
 			const FUeAgentSemanticDifference& Difference,
 			FCanonicalViewWriter& Writer,
@@ -259,18 +208,18 @@ namespace UE::UAI::Verification
 				return false;
 			}
 			AddField(Fields, TEXT("kind"), Value);
-			if (!Writer.TryString(Difference.GetPath(), Value))
+			if (!Writer.TryString(Difference.GetPublicPath(), Value))
 			{
 				return false;
 			}
 			AddField(Fields, TEXT("path"), Value);
-			if (Difference.GetLeft().IsValid())
+			if (Difference.GetPublicLeft().IsValid())
 			{
-				AddField(Fields, TEXT("left"), Difference.GetLeft());
+				AddField(Fields, TEXT("left"), Difference.GetPublicLeft());
 			}
-			if (Difference.GetRight().IsValid())
+			if (Difference.GetPublicRight().IsValid())
 			{
-				AddField(Fields, TEXT("right"), Difference.GetRight());
+				AddField(Fields, TEXT("right"), Difference.GetPublicRight());
 			}
 			return Writer.TryObject(Fields, OutValue);
 		}
@@ -326,11 +275,6 @@ namespace UE::UAI::Verification
 				return false;
 			}
 			AddField(Fields, TEXT("$type"), Value);
-			if (!TryIdentityView(Target.GetIdentity(), Writer, Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("identity"), Value);
 			if (!Writer.TryString(
 				LexToString(Target.GetOracleKind()),
 				Value))
@@ -345,20 +289,22 @@ namespace UE::UAI::Verification
 				return false;
 			}
 			AddField(Fields, TEXT("status"), Value);
-			if (!Writer.TryString(
-				Target.GetExpectedSnapshotId(),
-				Value))
+			const auto& Identity = Target.GetIdentity();
+			TArray<TPair<FString, FUeAgentCanonicalValueRef>> SubjectFields;
+			if (!Writer.TryString(Identity.GetTargetKind(), Value)) return false;
+			AddField(SubjectFields, TEXT("kind"), Value);
+			if (!Writer.TryString(Identity.GetObjectRole(), Value)) return false;
+			AddField(SubjectFields, TEXT("role"), Value);
+			TArray<TPair<FString, FUeAgentCanonicalValueRef>> SelectorFields;
+			for (const auto& Selector : Identity.GetSelectors())
 			{
-				return false;
+				if (!Writer.TryString(Selector.Value, Value)) return false;
+				AddField(SelectorFields, *Selector.Key, Value);
 			}
-			AddField(Fields, TEXT("expected_snapshot_id"), Value);
-			if (!Writer.TryString(
-				Target.GetActualSnapshotId(),
-				Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("actual_snapshot_id"), Value);
+			if (!Writer.TryObject(SelectorFields, Value)) return false;
+			AddField(SubjectFields, TEXT("selectors"), Value);
+			if (!Writer.TryObject(SubjectFields, Value)) return false;
+			AddField(Fields, TEXT("target"), Value);
 			if (Target.HasComparison())
 			{
 				if (!TryComparisonView(
@@ -370,73 +316,6 @@ namespace UE::UAI::Verification
 				}
 				AddField(Fields, TEXT("comparison"), Value);
 			}
-			if (!TryStringArray(
-				Target.GetEvidenceIds(),
-				Writer,
-				Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("evidence_ids"), Value);
-			return Writer.TryObject(Fields, OutValue);
-		}
-
-		bool TryAcknowledgementView(
-			const FVerificationAcknowledgement& Acknowledgement,
-			FCanonicalViewWriter& Writer,
-			FUeAgentCanonicalValuePtr& OutValue)
-		{
-			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields;
-			FUeAgentCanonicalValuePtr Value;
-			if (!Writer.TryString(
-				TEXT("durable_verification_acknowledgement"),
-				Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("$type"), Value);
-			if (!Writer.TryString(
-				Acknowledgement.GetJournalId(),
-				Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("journal_id"), Value);
-			if (!Writer.TryString(
-				Acknowledgement.GetPlanFingerprint(),
-				Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("plan_fingerprint"), Value);
-			if (!Writer.TryString(
-				Acknowledgement.GetInventoryHash(),
-				Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("inventory_hash"), Value);
-			if (!Writer.TryString(
-				Acknowledgement.GetVerificationId(),
-				Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("verification_id"), Value);
-			if (!Writer.TryString(
-				Acknowledgement.GetJournalOwnerId(),
-				Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("journal_owner_id"), Value);
-			if (!Writer.TryInteger(
-				Acknowledgement.GetFencingToken(),
-				Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("fencing_token"), Value);
 			return Writer.TryObject(Fields, OutValue);
 		}
 	}
@@ -489,11 +368,6 @@ namespace UE::UAI::Verification
 			return false;
 		}
 		AddField(Fields, TEXT("$type"), Value);
-		if (!Writer.TryString(Outcome.GetVerificationId(), Value))
-		{
-			return false;
-		}
-		AddField(Fields, TEXT("verification_id"), Value);
 		if (!Writer.TryString(LexToString(Outcome.GetStatus()), Value))
 		{
 			return false;
@@ -511,6 +385,12 @@ namespace UE::UAI::Verification
 			return false;
 		}
 		AddField(Fields, TEXT("diagnostic_code"), Value);
+		if (!StateSemantic::CanonicalJson::TryFromJsonValue(
+			MakeShared<FJsonValueObject>(Outcome.GetDiagnostic().ToPublicJson()), Resources, Value, OutError))
+		{
+			return false;
+		}
+		AddField(Fields, TEXT("diagnostic"), Value);
 		if (!Writer.TryBoolean(Outcome.IsRetrySafe(), Value))
 		{
 			return false;
@@ -521,27 +401,13 @@ namespace UE::UAI::Verification
 			return false;
 		}
 		AddField(Fields, TEXT("targets"), Value);
-		if (!TryStringArray(
-			Outcome.GetEvidenceIds(),
-			Writer,
-			Value))
+		if (Outcome.GetPublicResult().IsValid())
 		{
-			return false;
+			AddField(
+				Fields,
+				TEXT("result"),
+				Outcome.GetPublicResult());
 		}
-		AddField(Fields, TEXT("evidence_ids"), Value);
-		if (const FVerificationAcknowledgement* Acknowledgement =
-			Outcome.GetAcknowledgement())
-		{
-			if (!TryAcknowledgementView(
-				*Acknowledgement,
-				Writer,
-				Value))
-			{
-				return false;
-			}
-			AddField(Fields, TEXT("acknowledgement"), Value);
-		}
-
 		FUeAgentCanonicalValuePtr Root;
 		if (!Writer.TryObject(Fields, Root))
 		{

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Domains/Rigging/Authoring/UeAgentRiggingAuthoringDescriptors.h"
 
@@ -31,18 +33,21 @@ namespace UeAgentRiggingAuthoring
 		UObject* Outer,
 		FName Name,
 		EObjectFlags Flags,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool BuildDocument(
 		EAssetKind Kind,
 		UObject& Asset,
 		TSharedPtr<FJsonObject>& OutDocument,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const FString& CanonicalAssetPath = FString());
 	UEAGENTINTERFACE_API bool ApplyDocument(
 		EAssetKind Kind,
 		UObject& Asset,
 		const TSharedPtr<const FJsonObject>& Document,
 		FMutationStats& OutStats,
-		FString& OutError);
-	UEAGENTINTERFACE_API bool CompileAsset(EAssetKind Kind, UObject& Asset, FString& OutError);
-	UEAGENTINTERFACE_API bool SaveAsset(EAssetKind Kind, UObject& Asset, FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const TSharedPtr<const FJsonObject>& CapturedDocument = nullptr,
+		const FString& CanonicalAssetPath = FString());
+	UEAGENTINTERFACE_API bool CompileAsset(EAssetKind Kind, UObject& Asset, UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API bool SaveAsset(EAssetKind Kind, UObject& Asset, UE::UAI::Contract::FDiagnostic& OutError);
 }

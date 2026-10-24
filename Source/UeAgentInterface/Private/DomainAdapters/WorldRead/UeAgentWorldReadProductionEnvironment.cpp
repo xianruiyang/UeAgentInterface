@@ -1,5 +1,7 @@
 #include "DomainAdapters/WorldRead/UeAgentWorldReadProductionEnvironment.h"
+#include "DomainAdapters/ContentDiscovery/UeAgentEditorContentDiscovery.h"
 
+#include "Dom/JsonValue.h"
 #include "Editor.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -8,15 +10,9 @@ namespace UE::UAI::DomainAdapters::WorldRead
 {
 	namespace
 	{
-		bool Fail(
-			FUeAgentWorldReadError& OutError,
-			FString Code,
-			FString SubjectId,
-			FString Detail = FString())
+		bool Fail(FUeAgentWorldReadError& OutError, FUeAgentWorldReadError Diagnostic)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
 			return false;
 		}
 
@@ -74,12 +70,14 @@ namespace UE::UAI::DomainAdapters::WorldRead
 		{
 			OutWorld = GEditor->GetEditorWorldContext().World();
 		}
-		return IsValid(OutWorld)
-			? true
-			: Fail(
-				OutError,
-				TEXT("world_read_world_unresolved"),
-				Expected);
+		if (IsValid(OutWorld)) return true;
+		auto Diagnostic = FUeAgentWorldReadError::Failure(TEXT("world_read_world_unresolved"),
+			TEXT("No live world could be resolved for this query execution context."), TEXT("world_read"), FString(), Expected);
+		Diagnostic.SourceKind = TEXT("native_result");
+		Diagnostic.PropertyPath = TEXT("/world");
+		Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+		Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+		return Fail(OutError, MoveTemp(Diagnostic));
 	}
 
 	bool FUeAgentWorldReadProductionEnvironment::TryResolveTarget(
@@ -88,12 +86,24 @@ namespace UE::UAI::DomainAdapters::WorldRead
 		FUeAgentWorldReadError& OutError)
 	{
 		OutError = {};
-		OutObject = ResolveObject(Target.GetPublicRef());
-		return IsValid(OutObject)
-			? true
-			: Fail(
-				OutError,
-				TEXT("world_read_target_unresolved"),
-				Target.GetPublicRef());
+		OutObject = nullptr;
+		FString ObjectPath = Target.GetPublicRef();
+		UE::UAI::ContentDiscovery::FContentDiscoveryError ResolveError;
+		if (!ContentDiscovery::TryResolveEditorContentReference(ObjectPath, FString(), ResolveError))
+		{
+			OutError = MoveTemp(ResolveError);
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target.GetPublicRef();
+			return false;
+		}
+		OutObject = ResolveObject(ObjectPath);
+		if (IsValid(OutObject)) return true;
+		auto Diagnostic = FUeAgentWorldReadError::Failure(TEXT("world_read_target_unresolved"),
+			TEXT("The query target reference did not resolve to a valid object."), TEXT("world_read"));
+		Diagnostic.SourceKind = TEXT("native_result");
+		Diagnostic.TargetPath = Target.GetPublicRef();
+		Diagnostic.PropertyPath = TEXT("/target");
+		Diagnostic.ActualValue = MakeShared<FJsonValueString>(Target.GetPublicRef());
+		Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("loadable valid object"));
+		return Fail(OutError, MoveTemp(Diagnostic));
 	}
 }

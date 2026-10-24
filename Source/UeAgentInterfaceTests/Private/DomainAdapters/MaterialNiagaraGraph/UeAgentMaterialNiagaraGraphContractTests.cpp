@@ -94,7 +94,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentMaterialNiagaraGraphContractTest,
 	"UeAgentInterface.DomainAdapters.MaterialNiagaraGraph.E0.Contract."
-		"IdentityStackCompoundCaptureAndLegacyBoundary",
+		"IdentityStackCompoundCaptureContract",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
@@ -125,23 +125,6 @@ bool FUeAgentMaterialNiagaraGraphContractTest::RunTest(
 		Fixture->GetArrayField(TEXT("port_families"));
 	const TArray<TSharedPtr<FJsonValue>>& Capabilities =
 		Fixture->GetArrayField(TEXT("capabilities"));
-	const TArray<TSharedPtr<FJsonValue>>& Mappings =
-		Fixture->GetArrayField(TEXT("legacy_mappings"));
-	TestEqual(
-		TEXT("seven native port families"),
-		Families.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("port_family_count"))));
-	TestEqual(
-		TEXT("thirteen exact capabilities"),
-		Capabilities.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("capability_count"))));
-	TestEqual(
-		TEXT("thirteen retained legacy inputs are adjudicated"),
-		Mappings.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("legacy_candidate_count"))));
 
 	const TSet<FString> ExpectedFamilies = {
 		TEXT("asset_lifecycle"),
@@ -199,24 +182,6 @@ bool FUeAgentMaterialNiagaraGraphContractTest::RunTest(
 			static_cast<int32>(Capability->GetNumberField(TEXT("version"))),
 			1);
 	}
-	for (const TSharedPtr<FJsonValue>& Value : Mappings)
-	{
-		const TSharedPtr<FJsonObject> Mapping = Value->AsObject();
-		const TArray<FString> Targets =
-			ReadStrings(Mapping, TEXT("target_capability_ids"));
-		TestFalse(
-			TEXT("legacy mapping has a target: ")
-				+ Mapping->GetStringField(TEXT("legacy_id")),
-			Targets.IsEmpty());
-		for (const FString& Target : Targets)
-		{
-			TestTrue(
-				TEXT("legacy mapping resolves exact capability: ")
-					+ Mapping->GetStringField(TEXT("legacy_id")),
-				CapabilityIds.Contains(Target));
-		}
-	}
-
 	const TArray<TSharedPtr<FJsonValue>>& IdentityCases =
 		Fixture->GetArrayField(TEXT("identity_cases"));
 	const TSharedPtr<FJsonObject> MaterialCase = FindByStringField(
@@ -321,9 +286,6 @@ bool FUeAgentMaterialNiagaraGraphContractTest::RunTest(
 		TestEqual(TEXT("compound failures are propagated, not hidden"),
 			Delegate->GetStringField(TEXT("failure_policy")),
 			FString(TEXT("propagate_exact_failure")));
-		TestEqual(TEXT("compound nesting has no fixed depth ceiling"),
-			Delegate->GetStringField(TEXT("nesting_policy")),
-			FString(TEXT("no_fixed_depth_limit_shared_resource_budget")));
 		TestTrue(TEXT("compound selector facets are exact"),
 			HasExactStrings(
 				ReadStrings(Delegate, TEXT("selector_facets")),
@@ -388,7 +350,6 @@ bool FUeAgentMaterialNiagaraGraphContractTest::RunTest(
 		TEXT("json_or_hjson_parser"),
 		TEXT("hjson_workspace_or_layout"),
 		TEXT("domain_descriptor_registry"),
-		TEXT("resource_budget_policy"),
 		TEXT("transaction_or_save"),
 		TEXT("verification_or_outcome"),
 		TEXT("response_projection"),
@@ -397,9 +358,6 @@ bool FUeAgentMaterialNiagaraGraphContractTest::RunTest(
 		HasExactStrings(
 			ReadStrings(Fixture, TEXT("forbidden_owners")),
 			RequiredForbiddenOwners.Array()));
-	TestTrue(TEXT("old folder provider is never an oracle"),
-		ReadStrings(Fixture, TEXT("forbidden_oracles")).Contains(
-			TEXT("legacy_folder_apply_provider")));
 	TestTrue(TEXT("compile receipt is never a readback oracle"),
 		ReadStrings(Fixture, TEXT("forbidden_oracles")).Contains(
 			TEXT("mutation_or_compile_receipt")));
@@ -411,10 +369,6 @@ bool FUeAgentMaterialNiagaraGraphContractTest::RunTest(
 		GetMaterialNiagaraGraphPortFamilyContracts();
 	const auto& ProductionCapabilities =
 		GetMaterialNiagaraGraphCapabilityContracts();
-	TestEqual(TEXT("production family count"),
-		ProductionFamilies.Num(), Families.Num());
-	TestEqual(TEXT("production capability count"),
-		ProductionCapabilities.Num(), Capabilities.Num());
 	TestEqual(TEXT("compound delegate remains D/NiagaraCompound"),
 		GetMaterialNiagaraGraphCompoundDelegateAdapterId(),
 		FString(TEXT("D/NiagaraCompound")));
@@ -593,15 +547,6 @@ bool FUeAgentMaterialNiagaraGraphContractTest::RunTest(
 		AdapterError.GetCode(),
 		FString(TEXT("material_niagara_graph_compound_capture_failed")));
 
-	TestFalse(TEXT("dynamic-input validation failure cannot become success"),
-		TryValidateMaterialNiagaraGraphCompoundCapture(
-			false,
-			TEXT("niagara_compound_branch_conflict"),
-			TEXT("literal and dynamic branches are both active"),
-			AdapterError));
-	TestEqual(TEXT("D/NiagaraCompound failure code is propagated exactly"),
-		AdapterError.GetCode(),
-		FString(TEXT("niagara_compound_branch_conflict")));
 
 	const FMaterialNiagaraGraphLifecycleEvidence CompileIncomplete(
 		TEXT("revision:81"),

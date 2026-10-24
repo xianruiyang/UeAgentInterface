@@ -1,12 +1,7 @@
 #include "Misc/AutomationTest.h"
 
-#if __has_include("OperationOwners/AnimationCurve/UeAgentAnimationCurveDomainService.h")
-#define UAI_T23_ANIMATION_CURVE_DOMAIN_AVAILABLE 1
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "OperationOwners/AnimationCurve/UeAgentAnimationCurveDomainService.h"
-#else
-#define UAI_T23_ANIMATION_CURVE_DOMAIN_AVAILABLE 0
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T23AnimationCurveDomainProviderTest,
@@ -16,10 +11,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T23AnimationCurveDomainProviderTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T23_ANIMATION_CURVE_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T23 Animation/Curve domain provider is available"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	FWorkspaceError Error;
 	TSharedPtr<const FImportInitializationDomainProviderRegistry> Registry;
@@ -57,7 +48,6 @@ bool FUeAgentStrictV2T23AnimationCurveDomainProviderTest::RunTest(
 			FString(TEXT("uai.init.animation_curve.blend_space.root/1")));
 	}
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -68,10 +58,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T23AnimationCurveDomainRejectsUnknownTypeTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T23_ANIMATION_CURVE_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T23 Animation/Curve prewrite gate is available"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	FWorkspaceError Error;
 	TSharedPtr<const FImportInitializationDomainProviderRegistry> Registry;
@@ -96,5 +82,4 @@ bool FUeAgentStrictV2T23AnimationCurveDomainRejectsUnknownTypeTest::RunTest(
 			Error));
 	TestFalse(TEXT("the rejected resolution stays invalid"), Resolution.IsValid());
 	return true;
-#endif
 }

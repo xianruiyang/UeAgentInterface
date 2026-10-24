@@ -7,6 +7,7 @@
 #include "Domains/Niagara/Authoring/UeAgentNiagaraAuthoringExport.h"
 #include "Domains/Niagara/Authoring/UeAgentNiagaraAuthoringStateAccessors.h"
 #include "Domains/Niagara/Authoring/UeAgentNiagaraStackApplyProvider.h"
+#include "Dom/JsonValue.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringDomainRegistry.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 
@@ -32,8 +33,12 @@ namespace UeAgentNiagaraAuthoring
 			{
 				if (!Request.Contract)
 				{
-					OutFailure.ErrorCode = TEXT("niagara_apply_contract_missing");
-					OutFailure.ErrorDetail = OutFailure.ErrorCode;
+					OutFailure.Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_apply_contract_missing"),
+						TEXT("The Niagara apply provider requires an operation contract before dispatch."), TEXT("registration"));
+					OutFailure.Diagnostic.SourceKind = TEXT("native_result");
+					OutFailure.Diagnostic.PropertyPath = TEXT("contract_available");
+					OutFailure.Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutFailure.Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 					return false;
 				}
 				if (Request.Contract->ContractId == AssetInputContractId)
@@ -45,8 +50,14 @@ namespace UeAgentNiagaraAuthoring
 				{
 					return StackProvider->PrepareOperation(Request, OutState, OutFailure);
 				}
-				OutFailure.ErrorCode = TEXT("niagara_apply_contract_unsupported");
-				OutFailure.ErrorDetail = Request.Contract->ContractId;
+				OutFailure.Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_apply_contract_unsupported"),
+					TEXT("The Niagara apply provider supports asset, module and dynamic-input contracts."), TEXT("registration"));
+				OutFailure.Diagnostic.SourceKind = TEXT("native_result");
+				OutFailure.Diagnostic.PropertyPath = TEXT("contract_id");
+				OutFailure.Diagnostic.ActualValue = MakeShared<FJsonValueString>(Request.Contract->ContractId);
+				OutFailure.Diagnostic.ExpectedValue = MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+					MakeShared<FJsonValueString>(AssetInputContractId), MakeShared<FJsonValueString>(ModuleInputContractId),
+					MakeShared<FJsonValueString>(DynamicInputInputContractId)});
 				return false;
 			}
 
@@ -55,7 +66,7 @@ namespace UeAgentNiagaraAuthoring
 			TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> StackProvider;
 		};
 
-		bool RegisterApplyContractsAndProvider(FString& OutError)
+		bool RegisterApplyContractsAndProvider(UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!RegisterAssetApplyContracts(OutError) || !RegisterStackApplyContracts(OutError)) return false;
 			static const TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> Provider = MakeShared<FNiagaraApplyProvider>();
@@ -64,7 +75,7 @@ namespace UeAgentNiagaraAuthoring
 		}
 	}
 
-	bool RegisterAuthoring(FString& OutError)
+	bool RegisterAuthoring(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!RegisterDescriptors(OutError)
 			|| !RegisterStateAccessors(OutError)

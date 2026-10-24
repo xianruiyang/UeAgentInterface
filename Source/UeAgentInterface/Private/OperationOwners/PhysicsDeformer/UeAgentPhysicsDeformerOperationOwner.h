@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 
@@ -8,13 +10,13 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 	UEAGENTINTERFACE_API bool TryCreateMechanicsHandlers(
 		TMap<FString, TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryResolveMechanics(
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API TSharedRef<const DomainCapability::
 		IDomainOperationInvocationFactory> FindOperationInvocationFactory(

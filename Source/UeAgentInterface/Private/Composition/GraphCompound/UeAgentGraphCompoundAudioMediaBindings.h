@@ -1,9 +1,14 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
+class FJsonValue;
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaRoutes.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundRuntime.h"
 #include "Core/BindingGateway/Operation/UeAgentOperationLifecycleService.h"
+#include "DomainAdapters/AudioMediaGraph/UeAgentAudioMediaGraphTextureGraphNativeHook.h"
 
 #define UAI_GRAPH_COMPOUND_AUDIO_MEDIA_BINDINGS_V1 1
 
@@ -63,11 +68,12 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetTargetRef() const;
 		const FString& GetTargetKind() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString TargetRef;
 		FString TargetKind;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FGraphCompoundAudioMediaOperationRequest final
@@ -82,11 +88,12 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetTargetKind() const;
 		const FGraphCompoundCanonicalPayload& GetPayload() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FGraphCompoundAudioMediaTargetRequest Target;
 		FGraphCompoundCanonicalPayload Payload;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IGraphCompoundAudioMediaEnvironment
@@ -139,7 +146,23 @@ namespace UE::UAI::Composition::GraphCompound
 	struct UEAGENTINTERFACE_API FGraphCompoundAudioMediaProductionConfig
 	{
 		FString DurableJournalRoot;
-		double OperationTimeoutSeconds = 120.0;
+	};
+
+	struct UEAGENTINTERFACE_API FTextureGraphSemanticCompositeRequest final
+	{
+		FString TargetRef;
+		DomainAdapters::AudioMediaGraph::FAudioMediaGraphTextureGraphNodeBindings NodeBindings;
+		TArray<DomainAdapters::AudioMediaGraph::
+			FAudioMediaGraphTextureGraphNodeMutation> Nodes;
+		TArray<DomainAdapters::AudioMediaGraph::
+			FAudioMediaGraphTextureGraphParameterMutation> Parameters;
+		TArray<DomainAdapters::AudioMediaGraph::
+			FAudioMediaGraphTextureGraphLinkMutation> Links;
+
+		// Reflected TG_Setting descriptors keyed by the captured native node identity.
+		TMap<int32, TArray<TSharedPtr<FJsonValue>>> Settings;
+		// Inline node properties have no captured index until native creation completes.
+		TMap<FString, TArray<TSharedPtr<FJsonValue>>> ElementSettings;
 
 		bool IsValid() const;
 	};
@@ -170,4 +193,18 @@ namespace UE::UAI::Composition::GraphCompound
 		const FGraphCompoundAudioMediaProductionConfig& ProductionConfig,
 		FGraphCompoundAudioMediaLifecycleInvocation& OutInvocation,
 		FGraphCompoundRuntimeError& OutError);
+
+	UEAGENTINTERFACE_API bool TryValidateTextureGraphSemanticComposite(
+		const FTextureGraphSemanticCompositeRequest& Request,
+		const PlanningPreflight::FPlanningPreflightPlanRef& Plan,
+		const TSharedRef<Contract::IUeAgentCancellationSignal>& Cancellation,
+		FGraphCompoundRuntimeError& OutError);
+	UEAGENTINTERFACE_API bool TryApplyTextureGraphSemanticCompositeNative(
+		UObject& Asset, const FTextureGraphSemanticCompositeRequest& Request,
+		FGraphCompoundRuntimeError& OutError,
+		DomainAdapters::AudioMediaGraph::FAudioMediaGraphTextureGraphNodeBindings& Bindings);
+	UEAGENTINTERFACE_API bool TryVerifyTextureGraphSemanticCompositeNative(
+		UObject& Asset, const FTextureGraphSemanticCompositeRequest& Request,
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const DomainAdapters::AudioMediaGraph::FAudioMediaGraphTextureGraphNodeBindings& Bindings);
 }

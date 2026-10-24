@@ -1,17 +1,9 @@
 #include "NetworkTransport/UeAgentNetworkTransport.h"
 
-#if __has_include("ServiceComposition/CommandService/UeAgentCommandService.h") \
-	&& __has_include("ServiceComposition/Transport/UeAgentTransportService.h")
-#define UAI_STRICT_V2_T01_IMPLEMENTATION_AVAILABLE 1
 #include "ServiceComposition/CommandService/UeAgentCommandService.h"
 #include "ServiceComposition/Transport/UeAgentTransportService.h"
-#else
-#define UAI_STRICT_V2_T01_IMPLEMENTATION_AVAILABLE 0
-#endif
 
 #include "Misc/AutomationTest.h"
-#include "Misc/FileHelper.h"
-#include "Misc/Paths.h"
 
 namespace
 {
@@ -106,7 +98,6 @@ namespace
 		int32 Calls = 0;
 	};
 
-#if UAI_STRICT_V2_T01_IMPLEMENTATION_AVAILABLE
 	class FContextInvalidator final
 		: public UE::UAI::ServiceComposition::CommandService::
 			IUeAgentRequestContextInvalidator
@@ -130,36 +121,14 @@ namespace
 		Config.Capabilities.bOrdered = true;
 		Config.Capabilities.bReliable = true;
 		Config.Capabilities.bPreservesMessageBoundaries = true;
-		Config.Capabilities.MaxFrameBytes = 1024;
 		Config.Capabilities.bRequestReply = true;
 		Config.Requirements.bRequireOrdered = true;
 		Config.Requirements.bRequireReliable = true;
 		Config.Requirements.bRequireMessageBoundaries = true;
-		Config.Requirements.MaxFrameBytes = 512;
 		Config.Requirements.bRequireRequestReply = true;
 		return Config;
 	}
-#endif
 
-	static FString ProductSource(const FString& RelativePath)
-	{
-		return FPaths::ConvertRelativePathToFull(FPaths::Combine(
-			FPaths::ProjectPluginsDir(),
-			TEXT("UeAgentInterface/Source/UeAgentInterface"),
-			RelativePath));
-	}
-
-	static bool LoadSource(
-		FAutomationTestBase& Test,
-		const FString& RelativePath,
-		FString& OutSource)
-	{
-		return Test.TestTrue(
-			*FString::Printf(TEXT("load source %s"), *RelativePath),
-			FFileHelper::LoadFileToString(
-				OutSource,
-				*ProductSource(RelativePath)));
-	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -170,10 +139,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUaiStrictV2T01OwnedTransportLifecycleTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_STRICT_V2_T01_IMPLEMENTATION_AVAILABLE
-	AddError(TEXT("strict_v2_t01_transport_service_missing"));
-	return false;
-#else
 	using namespace UE::UAI::ServiceComposition::Transport;
 
 	const TSharedRef<FServerProbe> Probe = MakeShared<FServerProbe>();
@@ -217,7 +182,6 @@ bool FUaiStrictV2T01OwnedTransportLifecycleTest::RunTest(
 		CleanupProbe->StopCalls,
 		1);
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -228,10 +192,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUaiStrictV2T01TransportFailureSemanticsTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_STRICT_V2_T01_IMPLEMENTATION_AVAILABLE
-	AddError(TEXT("strict_v2_t01_transport_service_missing"));
-	return false;
-#else
 	using namespace UE::UAI::ServiceComposition::Transport;
 
 	const TSharedRef<FServerProbe> CapabilityProbe = MakeShared<FServerProbe>();
@@ -277,7 +237,6 @@ bool FUaiStrictV2T01TransportFailureSemanticsTest::RunTest(
 	TestFalse(TEXT("failed start does not report running"), Service->IsRunning());
 	TestEqual(TEXT("start is not replayed"), StartProbe->StartCalls, 1);
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -288,10 +247,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUaiStrictV2T01WorldContextInvalidationTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_STRICT_V2_T01_IMPLEMENTATION_AVAILABLE
-	AddError(TEXT("strict_v2_t01_command_service_missing"));
-	return false;
-#else
 	using namespace UE::UAI::ServiceComposition::CommandService;
 
 	const TSharedRef<FEchoHandler, ESPMode::ThreadSafe> Handler =
@@ -329,74 +284,4 @@ bool FUaiStrictV2T01WorldContextInvalidationTest::RunTest(
 		Invalidator->InvalidatedWorlds.Last(),
 		FString(TEXT("/Game/Maps/B")));
 	return true;
-#endif
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUaiStrictV2T01ActiveHttpBoundaryTest,
-	"UAI.StrictV2.T01.TRANSPORT.SERVICE.ActiveHttpBoundary",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUaiStrictV2T01ActiveHttpBoundaryTest::RunTest(
-	const FString& Parameters)
-{
-	FString ModuleSource;
-	if (!LoadSource(
-			*this,
-			TEXT("Private/Module/UeAgentInterfaceModule.cpp"),
-			ModuleSource))
-	{
-		return false;
-	}
-	TestTrue(
-		TEXT("module owns the concrete HTTP adapter"),
-		ModuleSource.Contains(TEXT("UeAgentHttpTransportAdapter.h")));
-	TestTrue(
-		TEXT("module owns the engine HTTP route host"),
-		ModuleSource.Contains(TEXT("FUeAgentEngineHttpRouteHost")));
-	TestTrue(
-		TEXT("module composes the transport-neutral service"),
-		ModuleSource.Contains(TEXT("FUeAgentTransportService")));
-	TestTrue(
-		TEXT("module composes the command service"),
-		ModuleSource.Contains(TEXT("FUeAgentCommandService")));
-	TestFalse(
-		TEXT("legacy HTTP server is unreachable from module startup"),
-		ModuleSource.Contains(TEXT("FUeAgentLegacyMechanics")));
-	TestFalse(
-		TEXT("legacy query composition is unreachable from module startup"),
-		ModuleSource.Contains(TEXT("FUeAgentQueryServiceComposition")));
-	TestFalse(
-		TEXT("startup does not register legacy Authoring providers"),
-		ModuleSource.Contains(TEXT("RegisterAuthoring(")));
-	TestFalse(
-		TEXT("startup does not register legacy HJSON compositions"),
-		ModuleSource.Contains(
-			TEXT("RegisterGraphTreeTargetCompositionContracts"))
-			|| ModuleSource.Contains(
-				TEXT("RegisterOtherTargetCompositionContracts")));
-	TestFalse(
-		TEXT("World changes do not replace the service composition"),
-		ModuleSource.Contains(TEXT("ReplaceQueryCompositionForWorld")));
-
-	for (const FString& RelativePath : {
-		TEXT("Private/ServiceComposition/Transport/UeAgentTransportService.h"),
-		TEXT("Private/ServiceComposition/Transport/UeAgentTransportService.cpp"),
-		TEXT("Private/ServiceComposition/CommandService/UeAgentCommandService.h"),
-		TEXT("Private/ServiceComposition/CommandService/UeAgentCommandService.cpp"),
-	})
-	{
-		FString Source;
-		if (!LoadSource(*this, RelativePath, Source))
-		{
-			continue;
-		}
-		TestFalse(
-			*FString::Printf(
-				TEXT("transport-neutral service excludes HTTP: %s"),
-				*RelativePath),
-			Source.Contains(TEXT("Http"))
-				|| Source.Contains(TEXT("HTTP")));
-	}
-	return !HasAnyErrors();
 }

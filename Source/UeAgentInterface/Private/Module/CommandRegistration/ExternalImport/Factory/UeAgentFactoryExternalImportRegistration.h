@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
@@ -12,13 +14,13 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Factory
 			IUeAgentFactoryExternalImportCommandService> Service,
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>&
 			OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool
 	TryCreateProductionFactoryExternalImportContribution(
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>&
 			OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateFactoryExternalImportRegistration(
 		TSharedRef<OperationOwners::ExternalImport::Factory::
@@ -27,5 +29,5 @@ namespace UE::UAI::Module::CommandRegistration::ExternalImport::Factory
 			OutRegistry,
 		TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>&
 			OutDispatch,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

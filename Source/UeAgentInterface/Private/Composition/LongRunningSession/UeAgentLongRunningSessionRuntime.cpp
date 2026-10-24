@@ -1,5 +1,7 @@
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionRuntime.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/LongRunningSession/UeAgentLongRunningSessionActivation.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/ContextResource/UeAgentOperationContext.h"
@@ -11,6 +13,11 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/CriticalSection.h"
+#include "Misc/ScopeLock.h"
+#include "Misc/ScopeExit.h"
+#include "Async/Async.h"
+#include "Templates/Atomic.h"
 
 namespace UE::UAI::Composition::LongRunningSession
 {
@@ -22,81 +29,88 @@ namespace UE::UAI::Composition::LongRunningSession
 
 	namespace
 	{
-		void SetError(
-			FUeAgentLongRunningSessionRuntimeError& OutError,
-			FString Code,
-			FString SubjectId,
-			FString Detail)
+		FDiagnostic RuntimeFailure(const FString& Code, const FString& SubjectId, const FString& Reason,
+			const FDiagnostic& Cause = {})
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			FDiagnostic Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("runtime"), FString(), SubjectId);
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (!Cause.IsEmpty()) Diagnostic.PublicCause = MakeShared<FDiagnostic>(Cause);
+			return Diagnostic;
 		}
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		FDiagnostic ValueFailure(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const FString& SourceKind = TEXT("native_result"))
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-			Root->SetObjectField(TEXT("operation_error"), Error);
-			FString Text;
-			FString CanonicalError;
-			return Json::TryCanonicalize(Root, Text, CanonicalError)
-				? Text
-				: FString(TEXT("{\"operation_error\":{\"code\":"
-					"\"long_running_session_error_encoding_failed\"," 
-					"\"detail\":\"\",\"subject_id\":\"\"}}"));
+			FDiagnostic Error = RuntimeFailure(Code, FString(), Reason);
+			Error.SourceKind = SourceKind;
+			Error.PropertyPath = Path;
+			if (SourceKind == TEXT("command_input")) Error.Source.JsonPath = Path;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
 
-		FUeAgentOperationResult Failure(
-			const FUeAgentOperationRequest& Request,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		FDiagnostic InputValueFailure(const FString& Code, const FString& Reason, const FString& Path,
+			const TSharedPtr<FJsonValue>& Value, const FString& Expected, const bool bInternal = false,
+			const FString& SourceKind = TEXT("command_input"))
 		{
-			return FUeAgentOperationResult(
-				Request.GetDescriptorIdentity(),
-				Request.GetRequestId(),
-				FUeAgentContractValue(ErrorJson(
-					Code.IsEmpty()
-						? FString(TEXT("long_running_session_operation_failed"))
-						: Code,
-					SubjectId,
-					Detail)));
+			TSharedPtr<FJsonValue> Actual = Value;
+			if (Value.IsValid() && (Value->Type == EJson::Array || Value->Type == EJson::Object))
+			{
+				const auto Summary = MakeShared<FJsonObject>();
+				Summary->SetStringField(TEXT("type"), Value->Type == EJson::Array ? TEXT("array") : TEXT("object"));
+				Summary->SetNumberField(TEXT("count"), Value->Type == EJson::Array ? Value->AsArray().Num()
+					: Value->AsObject().IsValid() ? Value->AsObject()->Values.Num() : 0);
+				Actual = MakeShared<FJsonValueObject>(Summary);
+			}
+			FDiagnostic Error = ValueFailure(Code, Reason, Path, bInternal ? nullptr : Actual,
+				MakeShared<FJsonValueString>(Expected), SourceKind);
+			Error.ActualValuePresent = Value.IsValid();
+			Error.ExpectedValuePresent = true;
+			if (bInternal) Error.ActualEvidence = Actual;
+			return Error;
 		}
 
-		FUeAgentOperationResult Failure(
-			const FUeAgentOperationRequest& Request,
-			const FExecutionMutationError& Error,
-			const FString& SubjectId)
+		FDiagnostic UnboundPort(const FString& Action)
 		{
-			return Failure(
-				Request,
-				Error.GetCode(),
-				SubjectId,
-				Error.GetDetail());
+			FDiagnostic Error = ValueFailure(TEXT("long_running_session_operation_port_not_bound"),
+				TEXT("The long-running operation port is not bound; the requested action cannot run."),
+				TEXT("/operation_port"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			Error.SubjectId = Action;
+			return Error;
 		}
 
-		FUeAgentResourceBudget RuntimeBudget(const int64 MaxFrameBytes)
+		FString PathKey(FString Key)
 		{
-			return FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, MaxFrameBytes},
-				{EUeAgentResourceDimension::OutputBytes, MaxFrameBytes * 4},
-				{EUeAgentResourceDimension::StringBytes, MaxFrameBytes * 4},
-				{EUeAgentResourceDimension::Nodes, MaxFrameBytes},
-				{EUeAgentResourceDimension::Items, MaxFrameBytes},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, MaxFrameBytes},
-				{EUeAgentResourceDimension::WorkUnits, MaxFrameBytes * 8},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					MaxFrameBytes * 8},
-			});
+			return Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
 		}
+
+		TSharedPtr<FJsonValue> DescriptorValue(const FUeAgentDescriptorIdentity& Identity)
+		{
+			const auto Value = MakeShared<FJsonObject>();
+			Value->SetStringField(TEXT("descriptor_id"), Identity.GetDescriptorId());
+			Value->SetNumberField(TEXT("version"), Identity.GetVersion());
+			return MakeShared<FJsonValueObject>(Value);
+		}
+
+		FDiagnostic MissingDescriptor(const FString& Code, const FString& Reason,
+			const FUeAgentDescriptorIdentity& Identity)
+		{
+			FDiagnostic Error = ValueFailure(Code, Reason, TEXT("/descriptor_identity"), DescriptorValue(Identity),
+				MakeShared<FJsonValueString>(TEXT("registered exact descriptor with compiled input schema")));
+			Error.SubjectId = Identity.GetDescriptorId();
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Identity.GetDescriptorHash());
+			return Error;
+		}
+
+		FUeAgentOperationResult Failure(const FUeAgentOperationRequest& Request,
+			FDiagnostic Diagnostic, const FString& SubjectId = FString())
+		{
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = SubjectId;
+			return FUeAgentOperationResult(Request.GetDescriptorIdentity(), Request.GetRequestId(), MoveTemp(Diagnostic));
+		}
+
 
 		class FRejectingDefaultPort final : public ILongRunningOperationPort
 		{
@@ -107,8 +121,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				FLongRunningWorkIdentity& OutIdentity,
 				FExecutionMutationError& OutError) override
 			{
-				OutError = FExecutionMutationError(
-					TEXT("long_running_session_operation_port_not_bound"));
+				OutError = UnboundPort(TEXT("start"));
 				return false;
 			}
 
@@ -119,8 +132,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				FLongRunningWorkObservation& OutObservation,
 				FExecutionMutationError& OutError) override
 			{
-				OutError = FExecutionMutationError(
-					TEXT("long_running_session_operation_port_not_bound"));
+				OutError = UnboundPort(TEXT("observe"));
 				return false;
 			}
 
@@ -130,8 +142,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				const FString& Reason,
 				FExecutionMutationError& OutError) override
 			{
-				OutError = FExecutionMutationError(
-					TEXT("long_running_session_operation_port_not_bound"));
+				OutError = UnboundPort(TEXT("request_stop"));
 				return false;
 			}
 
@@ -140,8 +151,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				const FLongRunningWorkIdentity& Identity,
 				FExecutionMutationError& OutError) override
 			{
-				OutError = FExecutionMutationError(
-					TEXT("long_running_session_operation_port_not_bound"));
+				OutError = UnboundPort(TEXT("join"));
 				return false;
 			}
 
@@ -150,8 +160,7 @@ namespace UE::UAI::Composition::LongRunningSession
 				const FLongRunningWorkIdentity& Identity,
 				FExecutionMutationError& OutError) override
 			{
-				OutError = FExecutionMutationError(
-					TEXT("long_running_session_operation_port_not_bound"));
+				OutError = UnboundPort(TEXT("release"));
 				return false;
 			}
 		};
@@ -226,13 +235,17 @@ namespace UE::UAI::Composition::LongRunningSession
 			}
 		}
 
-		FString CanonicalObjectText(const TSharedRef<FJsonObject>& Object)
+		FUeAgentOperationResult ResultObject(const FUeAgentOperationRequest& Request, const TSharedRef<FJsonObject>& Object,
+			const FDiagnostic& PayloadDiagnostic = {})
 		{
-			FString Text;
-			FString Error;
-			return Json::TryCanonicalize(Object, Text, Error)
-				? Text
-				: FString(TEXT("{}"));
+			FString Payload;
+			FDiagnostic Error;
+			if (!Json::TryCanonicalize(Object, Payload, Error))
+			{
+				Error.Append(PayloadDiagnostic);
+				return Failure(Request, MoveTemp(Error));
+			}
+			return FUeAgentOperationResult(Request.GetDescriptorIdentity(), Request.GetRequestId(), FUeAgentContractValue(MoveTemp(Payload)));
 		}
 
 		void SetExactIntegerField(
@@ -246,9 +259,24 @@ namespace UE::UAI::Composition::LongRunningSession
 					TEXT("%lld"), static_cast<long long>(Value))));
 		}
 
-		FUeAgentOperationResult SnapshotResult(
-			const FUeAgentOperationRequest& Request,
-			const FLongRunningOperationSnapshot& Snapshot)
+		bool TryAddLatestSignal(const FLongRunningOperationSnapshot& Snapshot,
+			const TSharedRef<FJsonObject>& Root, FDiagnostic& OutError)
+		{
+			if (!Snapshot.GetLatestSignal().IsSet()) return true;
+			const FLongRunningOperationSignal& Signal = Snapshot.GetLatestSignal().GetValue();
+			TSharedPtr<FJsonValue> Payload;
+			if (!StateSemantic::CanonicalJson::TryToJsonValue(*Signal.GetPayload(), Payload, OutError))
+				return false;
+			const TSharedRef<FJsonObject> LatestSignal = MakeShared<FJsonObject>();
+			LatestSignal->SetStringField(TEXT("type_id"), Signal.GetTypeId());
+			SetExactIntegerField(LatestSignal, TEXT("revision"), Signal.GetRevision());
+			LatestSignal->SetField(TEXT("payload"), MoveTemp(Payload));
+			Root->SetObjectField(TEXT("latest_signal"), LatestSignal);
+			return true;
+		}
+
+		TSharedRef<FJsonObject> SnapshotObject(
+			const FLongRunningOperationSnapshot& Snapshot, FDiagnostic& OutError)
 		{
 			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 			Root->SetStringField(TEXT("schema"), TEXT("uai.long_running.snapshot.v1"));
@@ -269,38 +297,28 @@ namespace UE::UAI::Composition::LongRunningSession
 			Root->SetBoolField(
 				TEXT("stop_requested"), Snapshot.IsStopRequested());
 			Root->SetBoolField(TEXT("terminal"), Snapshot.IsTerminal());
+			Root->SetBoolField(TEXT("cleanup_complete"), Snapshot.IsCleanupComplete());
+			if (!Snapshot.GetProgressDiagnostic().IsEmpty())
+				Root->SetObjectField(TEXT("progress_diagnostic"), Snapshot.GetProgressDiagnostic().ToPublicJson());
 			Root->SetBoolField(TEXT("retry_safe"), false);
 			if (!Snapshot.GetErrorCode().IsEmpty())
 			{
 				Root->SetStringField(TEXT("error_code"), Snapshot.GetErrorCode());
+				Root->SetObjectField(TEXT("diagnostic"), Snapshot.GetDiagnostic().ToPublicJson());
 			}
-			if (Snapshot.GetLatestSignal().IsSet())
-			{
-				const FLongRunningOperationSignal& Signal =
-					Snapshot.GetLatestSignal().GetValue();
-				TSharedPtr<FJsonValue> Payload;
-				FString PayloadError;
-				if (!StateSemantic::CanonicalJson::TryToJsonValue(
-						*Signal.GetPayload(), Payload, PayloadError))
-				{
-					return Failure(
-						Request,
-						TEXT("long_running_session_signal_encoding_failed"),
-						Snapshot.GetOperationId(),
-						PayloadError);
-				}
-				const TSharedRef<FJsonObject> LatestSignal =
-					MakeShared<FJsonObject>();
-				LatestSignal->SetStringField(TEXT("type_id"), Signal.GetTypeId());
-				SetExactIntegerField(
-					LatestSignal, TEXT("revision"), Signal.GetRevision());
-				LatestSignal->SetField(TEXT("payload"), MoveTemp(Payload));
-				Root->SetObjectField(TEXT("latest_signal"), LatestSignal);
-			}
-			return FUeAgentOperationResult(
-				Request.GetDescriptorIdentity(),
-				Request.GetRequestId(),
-				FUeAgentContractValue(CanonicalObjectText(Root)));
+			TryAddLatestSignal(Snapshot, Root, OutError);
+			return Root;
+		}
+
+		FUeAgentOperationResult SnapshotResult(
+			const FUeAgentOperationRequest& Request,
+			const FLongRunningOperationSnapshot& Snapshot)
+		{
+			FDiagnostic PayloadError;
+			const auto Root = SnapshotObject(Snapshot, PayloadError);
+			if (!PayloadError.IsEmpty())
+				return Failure(Request, RuntimeFailure(TEXT("long_running_session_signal_encoding_failed"), Snapshot.GetOperationId(), TEXT("The latest operation signal could not be encoded."), PayloadError));
+			return ResultObject(Request, Root, Snapshot.GetDiagnostic());
 		}
 
 		FUeAgentOperationResult UnknownReconcileResult(
@@ -324,18 +342,17 @@ namespace UE::UAI::Composition::LongRunningSession
 				TEXT("error_code"), TEXT("operation_reconcile_evidence_missing"));
 			Root->SetBoolField(TEXT("stop_requested"), false);
 			Root->SetBoolField(TEXT("terminal"), true);
+			Root->SetBoolField(TEXT("cleanup_complete"), false);
 			Root->SetBoolField(TEXT("retry_safe"), false);
-			return FUeAgentOperationResult(
-				Request.GetDescriptorIdentity(),
-				Request.GetRequestId(),
-				FUeAgentContractValue(CanonicalObjectText(Root)));
+			return ResultObject(Request, Root);
 		}
 
 		FUeAgentOperationResult ReceiptResult(
 			const FUeAgentOperationRequest& Request,
 			const FOperationRef& Ref,
 			const FLongRunningOperationReceipt& Receipt,
-			const FString& OverrideStatus = FString())
+			const FString& OverrideStatus = FString(),
+			const FLongRunningOperationSnapshot* Snapshot = nullptr)
 		{
 			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 			Root->SetStringField(TEXT("schema"), TEXT("uai.long_running.receipt.v1"));
@@ -348,59 +365,86 @@ namespace UE::UAI::Composition::LongRunningSession
 					? ReceiptStatus(Receipt)
 					: OverrideStatus);
 			Root->SetStringField(TEXT("error_code"), Receipt.GetErrorCode());
+			if (!Receipt.GetDiagnostic().IsEmpty()) Root->SetObjectField(TEXT("diagnostic"), Receipt.GetDiagnostic().ToPublicJson());
 			Root->SetBoolField(TEXT("retry_safe"), Receipt.IsRetrySafe());
-			return FUeAgentOperationResult(
-				Request.GetDescriptorIdentity(),
-				Request.GetRequestId(),
-				FUeAgentContractValue(CanonicalObjectText(Root)));
+			Root->SetBoolField(TEXT("cleanup_complete"), Snapshot && Snapshot->IsCleanupComplete());
+			FDiagnostic PayloadError;
+			if (Snapshot && !TryAddLatestSignal(*Snapshot, Root, PayloadError))
+			{
+				// The receipt owns the terminal diagnostic; the earlier snapshot only supplies the signal.
+				PayloadError.Append(Receipt.GetDiagnostic());
+				return Failure(Request, RuntimeFailure(TEXT("long_running_session_signal_encoding_failed"), Ref.OperationId, TEXT("The latest operation signal could not be encoded."), PayloadError));
+			}
+			return ResultObject(Request, Root, Receipt.GetDiagnostic());
 		}
 
 		bool TryReadOperationRef(
 			const TSharedPtr<FJsonObject>& Root,
-			FOperationRef& OutRef)
+			FOperationRef& OutRef, FDiagnostic& OutError)
 		{
 			OutRef = {};
 			const TSharedPtr<FJsonObject>* Ref = nullptr;
-			return Root.IsValid()
-				&& Root->TryGetObjectField(TEXT("operation_ref"), Ref)
-				&& Ref
-				&& Ref->IsValid()
-				&& (*Ref)->TryGetStringField(
-					TEXT("operation_id"), OutRef.OperationId)
-				&& (*Ref)->TryGetStringField(
-					TEXT("owner_lease_id"), OutRef.OwnerLeaseId)
-				&& (*Ref)->TryGetStringField(
-					TEXT("server_session_id"), OutRef.ServerSessionId)
-				&& OutRef.IsValid();
+			if (!Root.IsValid() || !Root->TryGetObjectField(TEXT("operation_ref"), Ref) || !Ref || !Ref->IsValid())
+			{
+				OutError = InputValueFailure(TEXT("long_running_session_operation_ref_invalid"),
+					TEXT("operation_ref must be an object containing operation, lease and server session identifiers."),
+					TEXT("/operation_ref"), Root.IsValid() ? Root->TryGetField(TEXT("operation_ref")) : nullptr, TEXT("object"), true);
+				return false;
+			}
+			auto Read = [&](const TCHAR* Field, FString& Value)
+			{
+				if ((*Ref)->TryGetStringField(Field, Value)) return true;
+				OutError = InputValueFailure(TEXT("long_running_session_operation_ref_invalid"),
+					TEXT("The operation reference identifier must be a string."),
+					FString(TEXT("/operation_ref/")) + Field, (*Ref)->TryGetField(Field), TEXT("string"), true);
+				return false;
+			};
+			if (!Read(TEXT("operation_id"), OutRef.OperationId)
+				|| !Read(TEXT("owner_lease_id"), OutRef.OwnerLeaseId)
+				|| !Read(TEXT("server_session_id"), OutRef.ServerSessionId)) return false;
+			if (!OutRef.IsValid())
+			{
+				const TCHAR* Field = OutRef.OperationId.IsEmpty() ? TEXT("operation_id")
+					: OutRef.OwnerLeaseId.IsEmpty() ? TEXT("owner_lease_id") : TEXT("server_session_id");
+				OutError = InputValueFailure(TEXT("long_running_session_operation_ref_invalid"),
+					TEXT("The operation reference identifier must not be empty."),
+					FString(TEXT("/operation_ref/")) + Field, (*Ref)->TryGetField(Field), TEXT("non-empty string"), true);
+				return false;
+			}
+			return true;
 		}
 
 		bool TryReadInteger(
 			const TSharedPtr<FJsonObject>& Root,
 			const TCHAR* Field,
-			int64& OutValue)
+			int64& OutValue, FDiagnostic& OutError)
 		{
 			OutValue = 0;
 			const TSharedPtr<FJsonValue> Value =
 				Root.IsValid() ? Root->TryGetField(Field) : nullptr;
 			FString Lexeme;
-			return Value.IsValid()
+			if (Value.IsValid()
 				&& Value->Type == EJson::Number
 				&& Value->TryGetString(Lexeme)
-				&& LexTryParseString(OutValue, *Lexeme);
+				&& LexTryParseString(OutValue, *Lexeme)) return true;
+			OutError = InputValueFailure(TEXT("operation_generation_invalid"),
+				TEXT("The generation must be a representable 64-bit integer."), FString(TEXT("/")) + Field, Value, TEXT("int64 JSON number"));
+			return false;
 		}
 
 		bool TryCanonicalStateValue(
 			const TSharedPtr<FJsonValue>& RootValue,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& RootPath = FString(),
+			const FString& SourceKind = TEXT("native_result"))
 		{
 			OutValue.Reset();
 			OutError = {};
 			if (!RootValue.IsValid())
 			{
-				OutError = FExecutionMutationError(
-					TEXT("long_running_session_canonical_value_missing"));
+				OutError = InputValueFailure(TEXT("long_running_session_canonical_value_missing"),
+					TEXT("The value to canonicalize is missing."), RootPath, RootValue, TEXT("JSON value"), false, SourceKind);
 				return false;
 			}
 
@@ -408,31 +452,32 @@ namespace UE::UAI::Composition::LongRunningSession
 			{
 				TSharedPtr<FJsonValue> Value;
 				bool bExpanded = false;
+				FString Path;
 			};
 			TArray<FWork> Work;
-			Work.Add({RootValue, false});
+			Work.Add({RootValue, false, RootPath});
 			TMap<const FJsonValue*, FUeAgentCanonicalValuePtr> Built;
 			while (!Work.IsEmpty())
 			{
 				const FWork Current = Work.Pop(EAllowShrinking::No);
 				if (!Current.Value.IsValid())
 				{
-					OutError = FExecutionMutationError(
-						TEXT("long_running_session_canonical_value_invalid"));
+					OutError = InputValueFailure(TEXT("long_running_session_canonical_value_invalid"),
+						TEXT("A nested JSON value is missing."), Current.Path, Current.Value, TEXT("JSON value"), false, SourceKind);
 					return false;
 				}
 				const bool bContainer = Current.Value->Type == EJson::Array
 					|| Current.Value->Type == EJson::Object;
 				if (bContainer && !Current.bExpanded)
 				{
-					Work.Add({Current.Value, true});
+					Work.Add({Current.Value, true, Current.Path});
 					if (Current.Value->Type == EJson::Array)
 					{
 						const TArray<TSharedPtr<FJsonValue>>& Items =
 							Current.Value->AsArray();
 						for (int32 Index = Items.Num() - 1; Index >= 0; --Index)
 						{
-							Work.Add({Items[Index], false});
+							Work.Add({Items[Index], false, Current.Path + TEXT("/") + FString::FromInt(Index)});
 						}
 					}
 					else
@@ -444,7 +489,7 @@ namespace UE::UAI::Composition::LongRunningSession
 						{
 							Work.Add({
 								Current.Value->AsObject()->Values.FindRef(Keys[Index]),
-								false});
+								false, Current.Path + TEXT("/") + PathKey(Keys[Index])});
 						}
 					}
 					continue;
@@ -484,14 +529,17 @@ namespace UE::UAI::Composition::LongRunningSession
 				case EJson::Array:
 				{
 					TArray<FUeAgentCanonicalValueRef> Items;
-					for (const TSharedPtr<FJsonValue>& Item
-						: Current.Value->AsArray())
+					const TArray<TSharedPtr<FJsonValue>>& Values = Current.Value->AsArray();
+					for (int32 Index = 0; Index < Values.Num(); ++Index)
 					{
+						const TSharedPtr<FJsonValue>& Item = Values[Index];
 						const FUeAgentCanonicalValuePtr* Found = Built.Find(Item.Get());
 						if (!Found || !Found->IsValid())
 						{
-							OutError = FExecutionMutationError(
-								TEXT("long_running_session_canonical_child_missing"));
+							OutError = ValueFailure(TEXT("long_running_session_canonical_child_missing"),
+								TEXT("The canonical array element was not produced."),
+								Current.Path + TEXT("/") + FString::FromInt(Index),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), SourceKind);
 							return false;
 						}
 						Items.Add(Found->ToSharedRef());
@@ -513,8 +561,10 @@ namespace UE::UAI::Composition::LongRunningSession
 						const FUeAgentCanonicalValuePtr* Found = Built.Find(Child.Get());
 						if (!Found || !Found->IsValid())
 						{
-							OutError = FExecutionMutationError(
-								TEXT("long_running_session_canonical_child_missing"));
+							OutError = ValueFailure(TEXT("long_running_session_canonical_child_missing"),
+								TEXT("The canonical object member was not produced."),
+								Current.Path + TEXT("/") + PathKey(Key),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), SourceKind);
 							return false;
 						}
 						Items.Emplace(Key, Found->ToSharedRef());
@@ -526,13 +576,13 @@ namespace UE::UAI::Composition::LongRunningSession
 				default:
 					break;
 				}
-				if (!bConverted || !Converted.IsValid())
+				if (!bConverted)
 				{
-					OutError = FExecutionMutationError(
-						StateError.Code.IsEmpty()
-							? FString(TEXT("long_running_session_canonical_value_failed"))
-							: StateError.Code,
-						StateError.Path);
+					OutError = StateError.IsEmpty() ? ValueFailure(TEXT("long_running_session_canonical_value_failed"),
+						TEXT("The JSON value kind cannot be converted to a canonical value."), Current.Path,
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Current.Value->Type)),
+						MakeShared<FJsonValueString>(TEXT("null, boolean, string, number, array or object")), SourceKind) : MoveTemp(StateError);
+					if (OutError.Source.JsonPath.IsEmpty()) OutError.Source.JsonPath = Current.Path;
 					return false;
 				}
 				Built.Add(Current.Value.Get(), Converted);
@@ -540,8 +590,9 @@ namespace UE::UAI::Composition::LongRunningSession
 			const FUeAgentCanonicalValuePtr* Found = Built.Find(RootValue.Get());
 			if (!Found || !Found->IsValid())
 			{
-				OutError = FExecutionMutationError(
-					TEXT("long_running_session_canonical_root_missing"));
+				OutError = ValueFailure(TEXT("long_running_session_canonical_root_missing"),
+					TEXT("The canonical root value was not produced."), RootPath,
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), SourceKind);
 				return false;
 			}
 			OutValue = *Found;
@@ -605,6 +656,7 @@ namespace UE::UAI::Composition::LongRunningSession
 		FState(
 			FUeAgentLongRunningSessionRuntimeConfig InConfig,
 			TSharedRef<const FUeAgentDescriptorRegistry> InDescriptors,
+			const TArray<FUeAgentLongRunningSessionActivationProfile>& ActivationProfiles,
 			TSharedRef<CompileBuildJob::IUeAgentCompileBuildJobPortFactory,
 				ESPMode::ThreadSafe> InCompileBuildFactory,
 			TSharedRef<EditorSessionOperation::
@@ -624,12 +676,10 @@ namespace UE::UAI::Composition::LongRunningSession
 			, PieRuntimeScenarioFactory(MoveTemp(InPieRuntimeScenarioFactory))
 			, Owner(
 				MakeShared<FRejectingDefaultPort, ESPMode::ThreadSafe>(),
-				[]() { return FPlatformTime::Seconds(); },
-				Config.MaxActiveOperations,
-				Config.MaxRetainedOperations)
+				[]() { return FPlatformTime::Seconds(); })
 		{
 			for (const FUeAgentLongRunningSessionActivationProfile& Profile
-				: GetLongRunningSessionActivationProfiles())
+				: ActivationProfiles)
 			{
 				Profiles.Add(
 					Profile.DescriptorIdentity.GetDescriptorId(), Profile);
@@ -658,6 +708,8 @@ namespace UE::UAI::Composition::LongRunningSession
 		TSharedRef<PieRuntimeDebug::IUeAgentPieRuntimeScenarioPortFactory,
 			ESPMode::ThreadSafe> PieRuntimeScenarioFactory;
 		FLongRunningOperationOwner Owner;
+		TAtomic<bool> bPolling{false};
+		TAtomic<bool> bShutdownRequested{false};
 		TMap<FString, FUeAgentLongRunningSessionActivationProfile> Profiles;
 	};
 
@@ -673,21 +725,18 @@ namespace UE::UAI::Composition::LongRunningSession
 			TOptional<FUeAgentContractValue>& OutCanonical,
 			FUeAgentContractSchemaError& OutError)
 		{
-			OutResources = MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-				RuntimeBudget(State->Config.MaxFrameBytes));
+			OutResources = MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 			const auto Clock = []() { return FPlatformTime::Seconds(); };
-			OutDeadline = FUeAgentOperationDeadline::FromTimeout(
-				State->Config.TimeoutSeconds, Clock);
+			OutDeadline = FUeAgentOperationDeadline();
 			const FTCHARToUTF8 InputBytes(*Request.GetPayload().GetJsonValue());
-			FUeAgentResourceBudgetExceeded BudgetError;
+			FUeAgentResourceChargeError ChargeError;
 			if (!OutResources->TryCharge(
 					EUeAgentResourceDimension::InputBytes,
 					InputBytes.Length(),
 					TEXT("long_running_session.c0.input"),
-					BudgetError))
+					ChargeError))
 			{
-				OutError.Code = BudgetError.Code;
-				OutError.Detail = TEXT("Input byte budget was exceeded.");
+				OutError = ChargeError;
 				return false;
 			}
 			const FUeAgentContractSchema* Schema =
@@ -695,7 +744,8 @@ namespace UE::UAI::Composition::LongRunningSession
 					Request.GetDescriptorIdentity());
 			if (!Schema)
 			{
-				OutError.Code = TEXT("long_running_session_schema_unavailable");
+				OutError = MissingDescriptor(TEXT("long_running_session_schema_unavailable"),
+					TEXT("No compiled input schema is registered for the requested descriptor identity."), Request.GetDescriptorIdentity());
 				return false;
 			}
 			const FUeAgentContractSchemaCheckpoint Checkpoint = [
@@ -709,36 +759,25 @@ namespace UE::UAI::Composition::LongRunningSession
 			{
 				if (Cancellation->IsCancelled())
 				{
-					Error.Code = TEXT("operation_cancelled");
-					Error.InstancePath = InstancePath;
+					Error = FDiagnostic::Failure(TEXT("operation_cancelled"), TEXT("The operation was cancelled."), TEXT("cancellation"));
+					if (Error.Source.JsonPath.IsEmpty()) Error.Source.JsonPath = InstancePath;
 					return false;
 				}
-				FUeAgentOperationDeadlineExceeded Expired;
-				if (!Deadline.TryCheckpoint(
-						TEXT("long_running_session.c0.schema"), Expired))
-				{
-					Error.Code = TEXT("operation_deadline_exceeded");
-					Error.InstancePath = InstancePath;
-					Error.Detail = Expired.Stage;
-					return false;
-				}
-				FUeAgentResourceBudgetExceeded ResourceError;
+				FUeAgentResourceChargeError ResourceError;
 				if (!Resources->TryCharge(
 						EUeAgentResourceDimension::WorkUnits,
 						WorkUnits,
 						TEXT("long_running_session.c0.schema"),
 						ResourceError))
 				{
-					Error.Code = ResourceError.Code;
-					Error.InstancePath = InstancePath;
-					Error.Detail = TEXT("Schema work budget was exceeded.");
+					Error = ResourceError;
+				if (Error.Source.JsonPath.IsEmpty()) Error.Source.JsonPath = InstancePath;
 					return false;
 				}
 				return true;
 			};
 			return Schema->TryValidateAndCanonicalize(
-				Request.GetPayload(), Checkpoint, OutCanonical, OutError)
-				&& OutCanonical.IsSet();
+				Request.GetPayload(), Checkpoint, OutCanonical, OutError);
 		}
 
 		bool TryContext(
@@ -754,8 +793,8 @@ namespace UE::UAI::Composition::LongRunningSession
 				State.Descriptors->FindExact(Profile.DescriptorIdentity);
 			if (!Descriptor)
 			{
-				OutError = FExecutionMutationError(
-					TEXT("long_running_session_descriptor_missing"));
+				OutError = MissingDescriptor(TEXT("long_running_session_descriptor_missing"),
+					TEXT("The active profile's exact descriptor is absent from the registry."), Profile.DescriptorIdentity);
 				return false;
 			}
 			FUeAgentExecutionContextInput Input;
@@ -791,9 +830,9 @@ namespace UE::UAI::Composition::LongRunningSession
 						PieInstanceId, *Suffix.Left(Separator))
 					|| PieInstanceId < 0)
 				{
-					OutError = FExecutionMutationError(
-						TEXT("long_running_session_pie_debug_subject_invalid"),
-						TEXT("runtime scenario requires an exact PIE debug session ref."));
+					OutError = InputValueFailure(TEXT("long_running_session_pie_debug_subject_invalid"),
+						TEXT("The runtime scenario subject must identify a PIE debug session with a non-negative instance id."), TEXT("/subject_ref"),
+						MakeShared<FJsonValueString>(SubjectRef), TEXT("runtime-session:pie-debug:<non-negative instance>:<session>"));
 					return false;
 				}
 				Input.WorldType = EUeAgentExecutionWorldType::Pie;
@@ -805,19 +844,15 @@ namespace UE::UAI::Composition::LongRunningSession
 				|| Profile.CommandId == TEXT("capture.render.execute")
 				|| FamilyId == TEXT("world_context")
 				|| FamilyId == TEXT("modeling_tool")
-				|| FamilyId == TEXT("voxel_grid"))
+				|| FamilyId == TEXT("pcg_generation"))
 			{
 				Input.WorldType = EUeAgentExecutionWorldType::Editor;
-				Input.WorldIdentity = State.Config.EditorWorldIdentity;
-				Input.LevelIdentity = State.Config.EditorLevelIdentity;
 			}
 			if (FamilyId == TEXT("runtime_preview")
 				&& PolicyId
 					== TEXT("policy:runtime-session:culture-preview/v1"))
 			{
 				Input.WorldType = EUeAgentExecutionWorldType::Editor;
-				Input.WorldIdentity = State.Config.EditorWorldIdentity;
-				Input.LevelIdentity = State.Config.EditorLevelIdentity;
 			}
 			else if (FamilyId == TEXT("runtime_preview"))
 			{
@@ -829,14 +864,23 @@ namespace UE::UAI::Composition::LongRunningSession
 						*SubjectRef.RightChop(Prefix.Len()))
 					|| PieInstanceId < 0)
 				{
-					OutError = FExecutionMutationError(
-						TEXT("long_running_session_pie_subject_invalid"),
-						TEXT("runtime_preview requires runtime-subject:pie:<instance>."));
+					OutError = InputValueFailure(TEXT("long_running_session_pie_subject_invalid"),
+						TEXT("The runtime preview subject must identify a non-negative PIE instance."), TEXT("/subject_ref"),
+						MakeShared<FJsonValueString>(SubjectRef), TEXT("runtime-subject:pie:<non-negative instance>"));
 					return false;
 				}
 				Input.WorldType = EUeAgentExecutionWorldType::Pie;
 				Input.PieInstanceId = PieInstanceId;
 				Input.WorldIdentity = SubjectRef;
+			}
+			if (Input.WorldType == EUeAgentExecutionWorldType::Editor)
+			{
+				Input.WorldIdentity = State.Config.EditorWorldIdentity;
+				Input.LevelIdentity = State.Config.EditorLevelIdentity;
+				if (State.Config.ResolveEditorIdentities)
+				{
+					State.Config.ResolveEditorIdentities(Input.WorldIdentity, Input.LevelIdentity);
+				}
 			}
 			Input.ContextRevision =
 				TEXT("long-running-session:") + State.Config.ServerSessionId
@@ -849,19 +893,110 @@ namespace UE::UAI::Composition::LongRunningSession
 					EUeAgentRequestKind::Operation,
 					Descriptor->GetExecutionContextPolicy(),
 					Context,
-					ContextError)
-				|| !Context.IsValid())
+					ContextError))
 			{
-				OutError = FExecutionMutationError(
-					ContextError.Code.IsEmpty()
-						? FString(TEXT("long_running_session_context_invalid"))
-						: ContextError.Code,
-					TEXT("The explicit execution context does not satisfy the exact descriptor."));
+				OutError = MoveTemp(ContextError);
 				return false;
 			}
 			OutContext = Context;
 			return true;
 		}
+
+		class FDeferredCommandPort final : public ILongRunningOperationPort
+		{
+			struct FWorkState
+			{
+				explicit FWorkState(TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> InResources)
+					: Resources(MoveTemp(InResources)) {}
+				FCriticalSection Mutex;
+				TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> Resources;
+				bool bComplete = false;
+				bool bCancelRequested = false;
+				bool bSignalDelivered = false;
+				UE::UAI::Contract::FDiagnostic Error;
+				TOptional<FLongRunningOperationSignal> Signal;
+			};
+		public:
+			using FWork = TFunction<void(TFunction<bool()>, TFunction<void(CommandEdge::FUeAgentCommandResult)>)>;
+			FDeferredCommandPort(TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> Resources, FWork InWork)
+				: Work(MoveTemp(InWork)), WorkState(MakeShared<FWorkState, ESPMode::ThreadSafe>(MoveTemp(Resources))) {}
+
+			bool Start(const FLongRunningOperationRequest& Request, const FUeAgentCancellationToken& Cancellation,
+				FLongRunningWorkIdentity& OutIdentity, FExecutionMutationError& OutError) override
+			{
+				OutIdentity = FLongRunningWorkIdentity(TEXT("deferred-command:") + Request.GetOperationId(), 1);
+				Work([State = WorkState]() { FScopeLock Lock(&State->Mutex); return State->bCancelRequested; },
+					[State = WorkState](CommandEdge::FUeAgentCommandResult Result)
+					{
+						CommandEdge::FUeAgentCommandProtocolCodec Codec;
+						TSharedPtr<FJsonObject> Root;
+						FUeAgentCanonicalValuePtr Canonical;
+						FDiagnostic Error;
+						bool bProjected = Codec.TryProjectResult(Result, Root, Error);
+						if (bProjected)
+						{
+							bProjected = TryCanonicalStateValue(MakeShared<FJsonValueObject>(Root), *State->Resources, Canonical, Error);
+							if (!bProjected)
+							{
+								if (!Result.GetDiagnostic().IsEmpty()) Error.Diagnostics.Add(Result.GetDiagnostic());
+								Error.Diagnostics.Append(Result.GetDiagnostics());
+							}
+						}
+						FScopeLock Lock(&State->Mutex);
+						if (bProjected)
+							State->Signal.Emplace(TEXT("uai.command.result.v1"), 1, Canonical.ToSharedRef());
+						else
+							State->Error = MoveTemp(Error);
+						State->bComplete = true;
+					});
+				return true;
+			}
+
+			bool Observe(const FString& OperationId, const FLongRunningWorkIdentity& Identity,
+				FUeAgentResourceTracker& Resources, FLongRunningWorkObservation& OutObservation,
+				FExecutionMutationError& OutError) override
+			{
+				FScopeLock Lock(&WorkState->Mutex);
+				TOptional<FLongRunningOperationSignal> Signal;
+				if (WorkState->bComplete && !WorkState->bSignalDelivered && WorkState->Signal.IsSet())
+				{
+					Signal = WorkState->Signal;
+					WorkState->bSignalDelivered = true;
+				}
+				OutObservation = FLongRunningWorkObservation(Identity.GetGeneration(),
+					!WorkState->bComplete ? ELongRunningWorkState::Running
+						: WorkState->Error.IsEmpty() ? ELongRunningWorkState::ExitedSuccess : ELongRunningWorkState::ExitedFailure,
+					WorkState->Error, MoveTemp(Signal));
+				return true;
+			}
+
+			bool RequestStop(const FString& OperationId, const FLongRunningWorkIdentity& Identity,
+				const FString& Reason, FExecutionMutationError& OutError) override
+			{
+				FScopeLock Lock(&WorkState->Mutex);
+				// A queued command can stop before dispatch. A dispatched atomic import
+				// completes its native transaction; its actual reply remains in the receipt.
+				WorkState->bCancelRequested = true;
+				return true;
+			}
+
+			bool Join(const FString& OperationId, const FLongRunningWorkIdentity& Identity,
+				FExecutionMutationError& OutError) override
+			{
+				FScopeLock Lock(&WorkState->Mutex);
+				return WorkState->bComplete;
+			}
+
+			bool Release(const FString& OperationId, const FLongRunningWorkIdentity& Identity,
+				FExecutionMutationError& OutError) override
+			{
+				Work = {};
+				return true;
+			}
+		private:
+			FWork Work;
+			TSharedRef<FWorkState, ESPMode::ThreadSafe> WorkState;
+		};
 
 		FString DerivedIdentity(const FString& Prefix, const FString& Material)
 		{
@@ -875,10 +1010,14 @@ namespace UE::UAI::Composition::LongRunningSession
 				ESPMode::ThreadSafe>& State,
 			const FUeAgentLongRunningSessionActivationProfile& Profile,
 			const FUeAgentOperationRequest& Request,
+			const FUeAgentCallerContext& CallerContext,
 			const FUeAgentContractValue& CanonicalPayload,
 			const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>& Resources,
 			const FUeAgentOperationDeadline& Deadline)
 		{
+			if (State->bShutdownRequested.Load())
+				return Failure(Request, RuntimeFailure(TEXT("operation_runtime_shutting_down"),
+					Profile.CommandId, TEXT("The Editor is draining owned operations before shutdown.")));
 			const FString ParamsHash =
 				Json::Sha256Utf8(CanonicalPayload.GetJsonValue());
 			const FString OperationId = DerivedIdentity(
@@ -900,22 +1039,16 @@ namespace UE::UAI::Composition::LongRunningSession
 			{
 				return SnapshotResult(Request, Snapshot);
 			}
-			if (OwnerError.GetCode() != TEXT("operation_not_found"))
+			if (OwnerError.Code != TEXT("operation_not_found"))
 			{
 				return Failure(Request, OwnerError, OperationId);
 			}
 
 			TSharedPtr<FJsonObject> Root;
-			FString JsonError;
-			if (!Json::TryParseObject(
-					CanonicalPayload.GetJsonValue(), Root, JsonError)
-				|| !Root.IsValid())
+			FDiagnostic JsonError;
+			if (!Json::TryParseObject(CanonicalPayload.GetJsonValue(), Root, JsonError))
 			{
-				return Failure(
-					Request,
-					TEXT("long_running_session_canonical_payload_invalid"),
-					Request.GetRequestId(),
-					JsonError);
+				return Failure(Request, MoveTemp(JsonError));
 			}
 
 			FString SubjectRef;
@@ -955,11 +1088,12 @@ namespace UE::UAI::Composition::LongRunningSession
 				Profile.DescriptorIdentity,
 				Context.ToSharedRef(),
 				Resources,
-				Deadline);
+				Deadline,
+				{CallerContext.GetCallerId(), Request.GetRequestId(), Profile.CommandId, SubjectRef,
+					FamilyId == TEXT("host_lifecycle")});
 			FUeAgentCanonicalValuePtr CanonicalParameters;
-			if (!TryCanonicalStateValue(
-					Parameters, *Resources, CanonicalParameters, OwnerError)
-				|| !CanonicalParameters.IsValid())
+			if (!TryCanonicalStateValue(Parameters, *Resources, CanonicalParameters, OwnerError,
+					Profile.CommandId == TEXT("editor.safe_exit") ? FString() : TEXT("/parameters"), TEXT("command_input")))
 			{
 				return Failure(Request, OwnerError, Request.GetRequestId());
 			}
@@ -971,11 +1105,12 @@ namespace UE::UAI::Composition::LongRunningSession
 					CompileBuildJob::EUeAgentCompileBuildJobFamily::AssetCompile;
 				if (!TryCompileFamily(FamilyId, Family))
 				{
-					return Failure(
-						Request,
-						TEXT("compile_build_job_family_invalid"),
-						FamilyId,
-						TEXT("Unknown CompileBuild family."));
+					TArray<TSharedPtr<FJsonValue>> Allowed;
+					for (const auto& Contract : CompileBuildJob::GetCompileBuildJobFamilyContracts())
+						Allowed.Add(MakeShared<FJsonValueString>(Contract.GetFamilyId()));
+					return Failure(Request, ValueFailure(TEXT("compile_build_job_family_invalid"),
+						TEXT("The requested CompileBuild family is not registered."), TEXT("/family_id"),
+						MakeShared<FJsonValueString>(FamilyId), MakeShared<FJsonValueArray>(Allowed), TEXT("command_input")));
 				}
 				bAccepted = CompileBuildJob::TryAcceptCompileBuildJob(
 					CompileBuildJob::FUeAgentCompileBuildJobTypedRequest(
@@ -995,13 +1130,20 @@ namespace UE::UAI::Composition::LongRunningSession
 				EditorSessionOperation::EUeAgentEditorSessionOperationFamily Family =
 					EditorSessionOperation::EUeAgentEditorSessionOperationFamily::
 						AssetEditor;
-				if (!TryEditorFamily(FamilyId, Family))
+				if (!TryEditorFamily(FamilyId, Family)
+					|| (Profile.CommandId == TEXT("editor.session")
+						&& !EditorSessionOperation::IsEditorSessionCommandFamily(Family)))
 				{
-					return Failure(
-						Request,
-						TEXT("editor_session_operation_family_invalid"),
-						FamilyId,
-						TEXT("Unknown EditorSession family."));
+					TArray<TSharedPtr<FJsonValue>> Allowed;
+					for (const auto& Contract : EditorSessionOperation::GetEditorSessionOperationFamilyContracts())
+					{
+						const bool bPublicSessionFamily = EditorSessionOperation::IsEditorSessionCommandFamily(Contract.GetFamily());
+						if ((Profile.CommandId == TEXT("editor.session")) == bPublicSessionFamily)
+							Allowed.Add(MakeShared<FJsonValueString>(Contract.GetFamilyId()));
+					}
+					return Failure(Request, ValueFailure(TEXT("editor_session_operation_family_invalid"),
+						TEXT("The requested EditorSession family is not available through this command."), TEXT("/family_id"),
+						MakeShared<FJsonValueString>(FamilyId), MakeShared<FJsonValueArray>(Allowed), TEXT("command_input")));
 				}
 				bAccepted = EditorSessionOperation::TryAcceptEditorSessionOperation(
 					EditorSessionOperation::FUeAgentEditorSessionOperationTypedRequest(
@@ -1044,7 +1186,7 @@ namespace UE::UAI::Composition::LongRunningSession
 			}
 			if (!bAccepted)
 			{
-				if (OwnerError.GetCode() == TEXT("operation_already_exists")
+				if (OwnerError.Code == TEXT("operation_already_exists")
 					&& State->Owner.GetSnapshot(
 						OperationId,
 						OwnerLeaseId,
@@ -1064,44 +1206,67 @@ namespace UE::UAI::Composition::LongRunningSession
 				ESPMode::ThreadSafe>& State,
 			const FUeAgentLongRunningSessionActivationProfile& Profile,
 			const FUeAgentOperationRequest& Request,
+			const FUeAgentCallerContext& CallerContext,
 			const FUeAgentContractValue& CanonicalPayload,
 			const FUeAgentOperationDeadline& CallDeadline)
 		{
 			TSharedPtr<FJsonObject> Root;
-			FString JsonError;
+			FDiagnostic JsonError;
 			FOperationRef Ref;
-			if (!Json::TryParseObject(
-					CanonicalPayload.GetJsonValue(), Root, JsonError)
-				|| !TryReadOperationRef(Root, Ref))
+			if (!Json::TryParseObject(CanonicalPayload.GetJsonValue(), Root, JsonError))
 			{
-				return Failure(
-					Request,
-					TEXT("long_running_session_operation_ref_invalid"),
-					Request.GetRequestId(),
-					JsonError);
+				return Failure(Request, MoveTemp(JsonError));
 			}
-			if (Ref.ServerSessionId != State->Config.ServerSessionId)
-			{
-				return Failure(
-					Request,
-					TEXT("operation_server_session_mismatch"),
-					Ref.OperationId,
-					TEXT("operation_ref belongs to a different server session."));
-			}
-			const FString ExpectedOwnerLeaseId = DerivedIdentity(
-				TEXT("lease:"),
-				State->Config.OwnerLeaseSecret + TEXT("\n") + Ref.OperationId);
-			if (Ref.OwnerLeaseId != ExpectedOwnerLeaseId)
-			{
-				return Failure(
-					Request,
-					TEXT("operation_owner_lease_mismatch"),
-					Ref.OperationId,
-					TEXT("operation_ref owner lease is not server-derived."));
-			}
-
 			FExecutionMutationError OwnerError;
 			FLongRunningOperationSnapshot Snapshot;
+			if (Profile.CommandId == TEXT("operation.discover"))
+			{
+				TArray<TSharedPtr<FJsonValue>> Entries;
+				for (const auto& Entry : State->Owner.Discover(CallerContext.GetCallerId()))
+				{
+					const auto Item = MakeShared<FJsonObject>();
+					Item->SetStringField(TEXT("operation_id"), Entry.Snapshot.GetOperationId());
+					Item->SetStringField(TEXT("command_id"), Entry.Origin.CommandId);
+					Item->SetStringField(TEXT("subject_ref"), Entry.Origin.SubjectRef);
+					Item->SetStringField(TEXT("phase"), LexToString(Entry.Snapshot.GetPhase()));
+					Item->SetStringField(TEXT("lifecycle_status"), LifecycleStatus(Entry.Snapshot));
+					Item->SetBoolField(TEXT("terminal"), Entry.Snapshot.IsTerminal());
+					Item->SetBoolField(TEXT("cleanup_complete"), Entry.Snapshot.IsCleanupComplete());
+					Entries.Add(MakeShared<FJsonValueObject>(Item));
+				}
+				const auto Result = MakeShared<FJsonObject>();
+				Result->SetStringField(TEXT("schema"), TEXT("uai.long_running.discovery.v1"));
+				Result->SetArrayField(TEXT("operations"), Entries);
+				return ResultObject(Request, Result);
+			}
+			if (Profile.CommandId == TEXT("operation.recover"))
+			{
+				FString OriginalRequestId, CommandId;
+				Root->TryGetStringField(TEXT("request_id"), OriginalRequestId);
+				Root->TryGetStringField(TEXT("command_id"), CommandId);
+				return State->Owner.Recover(CallerContext.GetCallerId(), OriginalRequestId, CommandId, Snapshot, OwnerError)
+					? SnapshotResult(Request, Snapshot) : Failure(Request, OwnerError);
+			}
+			if (Profile.CommandId == TEXT("operation.takeover"))
+			{
+				FString OperationId;
+				Root->TryGetStringField(TEXT("operation_id"), OperationId);
+				const FString Lease = DerivedIdentity(TEXT("lease:"), State->Config.OwnerLeaseSecret
+					+ TEXT("\n") + OperationId + TEXT("\ntakeover:") + Request.GetRequestId());
+				return State->Owner.TakeOver(OperationId, CallerContext.GetCallerId(), Lease, Request.GetRequestId(), Snapshot, OwnerError)
+					? SnapshotResult(Request, Snapshot) : Failure(Request, OwnerError, OperationId);
+			}
+			if (!TryReadOperationRef(Root, Ref, JsonError)) return Failure(Request, MoveTemp(JsonError));
+			if (Ref.ServerSessionId != State->Config.ServerSessionId)
+			{
+				FDiagnostic Error = ValueFailure(TEXT("operation_server_session_mismatch"),
+					TEXT("The operation reference server_session_id does not match the active server-derived identity."),
+					TEXT("/operation_ref/server_session_id"), MakeShared<FJsonValueBoolean>(false),
+					MakeShared<FJsonValueBoolean>(true), TEXT("command_input"));
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Ref.ServerSessionId);
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(State->Config.ServerSessionId);
+				return Failure(Request, MoveTemp(Error), Ref.OperationId);
+			}
 			if (Profile.CommandId == TEXT("operation.status"))
 			{
 				return State->Owner.GetSnapshot(
@@ -1116,13 +1281,9 @@ namespace UE::UAI::Composition::LongRunningSession
 			if (Profile.CommandId == TEXT("operation.resume"))
 			{
 				int64 ExpectedGeneration = 0;
-				if (!TryReadInteger(Root, TEXT("expected_generation"), ExpectedGeneration))
+				if (!TryReadInteger(Root, TEXT("expected_generation"), ExpectedGeneration, OwnerError))
 				{
-					return Failure(
-						Request,
-						TEXT("operation_generation_invalid"),
-						Ref.OperationId,
-						TEXT("expected_generation must be an integer."));
+					return Failure(Request, MoveTemp(OwnerError), Ref.OperationId);
 				}
 				return State->Owner.Advance(
 						Ref.OperationId,
@@ -1152,13 +1313,9 @@ namespace UE::UAI::Composition::LongRunningSession
 			if (Profile.CommandId == TEXT("operation.reconcile"))
 			{
 				int64 ExpectedGeneration = 0;
-				if (!TryReadInteger(Root, TEXT("expected_generation"), ExpectedGeneration))
+				if (!TryReadInteger(Root, TEXT("expected_generation"), ExpectedGeneration, OwnerError))
 				{
-					return Failure(
-						Request,
-						TEXT("operation_generation_invalid"),
-						Ref.OperationId,
-						TEXT("expected_generation must be an integer."));
+					return Failure(Request, MoveTemp(OwnerError), Ref.OperationId);
 				}
 				if (!State->Owner.GetSnapshot(
 						Ref.OperationId,
@@ -1167,17 +1324,16 @@ namespace UE::UAI::Composition::LongRunningSession
 						Snapshot,
 						OwnerError))
 				{
-					return OwnerError.GetCode() == TEXT("operation_not_found")
+					return OwnerError.Code == TEXT("operation_not_found")
 						? UnknownReconcileResult(Request, Ref, ExpectedGeneration)
 						: Failure(Request, OwnerError, Ref.OperationId);
 				}
 				if (Snapshot.GetGeneration() != ExpectedGeneration)
 				{
-					return Failure(
-						Request,
-						TEXT("operation_generation_mismatch"),
-						Ref.OperationId,
-						TEXT("reconcile generation does not match current snapshot."));
+					return Failure(Request, ValueFailure(TEXT("operation_generation_mismatch"),
+						TEXT("The supplied generation does not match the current operation snapshot."),
+						TEXT("/expected_generation"), MakeShared<FJsonValueNumberString>(FString::Printf(TEXT("%lld"), static_cast<long long>(ExpectedGeneration))),
+						MakeShared<FJsonValueNumberString>(FString::Printf(TEXT("%lld"), static_cast<long long>(Snapshot.GetGeneration()))), TEXT("command_input")), Ref.OperationId);
 				}
 				return SnapshotResult(Request, Snapshot);
 			}
@@ -1185,16 +1341,20 @@ namespace UE::UAI::Composition::LongRunningSession
 			FLongRunningOperationReceipt Receipt;
 			if (Profile.CommandId == TEXT("operation.receipt"))
 			{
+				if (!State->Owner.GetSnapshot(Ref.OperationId, Ref.OwnerLeaseId,
+					Ref.ServerSessionId, Snapshot, OwnerError))
+					return Failure(Request, OwnerError, Ref.OperationId);
 				return State->Owner.GetTerminalReceipt(
 						Ref.OperationId,
 						Ref.OwnerLeaseId,
 						Ref.ServerSessionId,
 						Receipt,
 						OwnerError)
-					? ReceiptResult(Request, Ref, Receipt)
+					? ReceiptResult(Request, Ref, Receipt, FString(), &Snapshot)
 					: Failure(Request, OwnerError, Ref.OperationId);
 			}
-			if (!State->Owner.GetTerminalReceipt(
+			if (!State->Owner.GetSnapshot(Ref.OperationId, Ref.OwnerLeaseId, Ref.ServerSessionId, Snapshot, OwnerError)
+				|| !State->Owner.GetTerminalReceipt(
 					Ref.OperationId,
 					Ref.OwnerLeaseId,
 					Ref.ServerSessionId,
@@ -1208,7 +1368,7 @@ namespace UE::UAI::Composition::LongRunningSession
 			{
 				return Failure(Request, OwnerError, Ref.OperationId);
 			}
-			return ReceiptResult(Request, Ref, Receipt, TEXT("released"));
+			return ReceiptResult(Request, Ref, Receipt, TEXT("released"), &Snapshot);
 		}
 
 		FUeAgentOperationResult Execute(
@@ -1220,23 +1380,16 @@ namespace UE::UAI::Composition::LongRunningSession
 		{
 			const FUeAgentLongRunningSessionActivationProfile* Profile =
 				State->FindProfile(Request.GetDescriptorIdentity());
-			if (!Request.IsValid()
-				|| !CallerContext.IsValid()
-				|| !Profile)
+			if (!Request.IsValid()) return Failure(Request, Request.GetValidationDiagnostic());
+			if (!CallerContext.IsValid()) return Failure(Request, CallerContext.GetValidationDiagnostic());
+			if (!Profile)
 			{
-				return Failure(
-					Request,
-					TEXT("long_running_session_route_invalid"),
-					Request.GetDescriptorIdentity().GetDescriptorId(),
-					TEXT("Exact active LongRunningSession descriptor is required."));
+				return Failure(Request, MissingDescriptor(TEXT("long_running_session_route_invalid"),
+					TEXT("No active long-running session profile matches the requested exact descriptor."), Request.GetDescriptorIdentity()));
 			}
 			TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> Resources =
-				MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-					RuntimeBudget(State->Config.MaxFrameBytes));
-			FUeAgentOperationDeadline Deadline =
-				FUeAgentOperationDeadline::FromTimeout(
-					State->Config.TimeoutSeconds,
-					[]() { return FPlatformTime::Seconds(); });
+				MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
+			FUeAgentOperationDeadline Deadline;
 			TOptional<FUeAgentContractValue> CanonicalPayload;
 			FUeAgentContractSchemaError SchemaError;
 			if (!TryCanonicalRequest(
@@ -1246,22 +1399,16 @@ namespace UE::UAI::Composition::LongRunningSession
 					Resources,
 					Deadline,
 					CanonicalPayload,
-					SchemaError)
-				|| !CanonicalPayload.IsSet())
+					SchemaError))
 			{
-				return Failure(
-					Request,
-					SchemaError.Code.IsEmpty()
-						? FString(TEXT("long_running_session_input_invalid"))
-						: SchemaError.Code,
-					SchemaError.InstancePath,
-					SchemaError.Detail);
+				return Failure(Request, MoveTemp(SchemaError));
 			}
 			return Profile->IsStartCommand()
 				? ExecuteStart(
 					State,
 					*Profile,
 					Request,
+					CallerContext,
 					CanonicalPayload.GetValue(),
 					Resources,
 					Deadline)
@@ -1269,6 +1416,7 @@ namespace UE::UAI::Composition::LongRunningSession
 					State,
 					*Profile,
 					Request,
+					CallerContext,
 					CanonicalPayload.GetValue(),
 					Deadline);
 		}
@@ -1304,12 +1452,7 @@ namespace UE::UAI::Composition::LongRunningSession
 		return !ProjectInstanceId.TrimStartAndEnd().IsEmpty()
 			&& !EditorInstanceId.TrimStartAndEnd().IsEmpty()
 			&& !ServerSessionId.TrimStartAndEnd().IsEmpty()
-			&& !OwnerLeaseSecret.TrimStartAndEnd().IsEmpty()
-			&& TimeoutSeconds > 0.0
-			&& MaxFrameBytes > 0
-			&& MaxFrameBytes <= MAX_int64 / 8
-			&& MaxActiveOperations > 0
-			&& MaxRetainedOperations >= MaxActiveOperations;
+			&& !OwnerLeaseSecret.TrimStartAndEnd().IsEmpty();
 	}
 
 	FUeAgentLongRunningSessionRuntime::FUeAgentLongRunningSessionRuntime(
@@ -1338,33 +1481,30 @@ namespace UE::UAI::Composition::LongRunningSession
 		OutError = {};
 		if (!Config.IsValid())
 		{
-			SetError(
-				OutError,
-				TEXT("long_running_session_runtime_config_invalid"),
-				TEXT("long_running_session"),
-				TEXT("Explicit server identity, lease secret and bounded resources are required."));
+			const TCHAR* Field = Config.ProjectInstanceId.TrimStartAndEnd().IsEmpty() ? TEXT("project_instance_id")
+				: Config.EditorInstanceId.TrimStartAndEnd().IsEmpty() ? TEXT("editor_instance_id")
+				: Config.ServerSessionId.TrimStartAndEnd().IsEmpty() ? TEXT("server_session_id") : TEXT("owner_lease_secret");
+			OutError = ValueFailure(TEXT("long_running_session_runtime_config_invalid"),
+				TEXT("The runtime configuration requires a non-blank identity or lease secret."),
+				FString(TEXT("/")) + Field, MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			OutError.SubjectId = TEXT("long_running_session");
 			return false;
 		}
 		TSharedPtr<const FUeAgentDescriptorRegistry> Descriptors;
-		FString DescriptorError;
+		FDiagnostic DescriptorError;
 		if (!TryCreateLongRunningSessionDescriptorRegistry(
-				Descriptors, DescriptorError)
-			|| !Descriptors.IsValid()
-			|| Descriptors->GetDescriptors().Num() != 13)
+				Descriptors, DescriptorError))
 		{
-			SetError(
-				OutError,
-				DescriptorError.IsEmpty()
-					? FString(TEXT("long_running_session_descriptor_registry_invalid"))
-					: DescriptorError,
-				TEXT("long_running_session"),
-				TEXT("The exact thirteen-descriptor registry is required."));
+			OutError = MoveTemp(DescriptorError);
 			return false;
 		}
+		const TArray<FUeAgentLongRunningSessionActivationProfile>* ActivationProfiles = nullptr;
+		if (!TryGetLongRunningSessionActivationProfiles(ActivationProfiles, OutError)) return false;
 		const TSharedRef<FState, ESPMode::ThreadSafe> StateRef =
 			MakeShared<FState, ESPMode::ThreadSafe>(
 				Config,
 				Descriptors.ToSharedRef(),
+				*ActivationProfiles,
 				MoveTemp(CompileBuildFactory),
 				MoveTemp(EditorSessionFactory),
 				MoveTemp(CaptureMediaFactory),
@@ -1374,6 +1514,83 @@ namespace UE::UAI::Composition::LongRunningSession
 		OutRuntime = MakeShareable(
 			new FUeAgentLongRunningSessionRuntime(StateRef, OperationPort));
 		return true;
+	}
+
+	CommandEdge::FUeAgentCommandResult FUeAgentLongRunningSessionRuntime::AcceptDeferredCommand(
+		const CommandEdge::FUeAgentCommandRequest& Request, const FUeAgentCallerContext& CallerContext,
+		FDeferredCommandPort::FWork Work)
+	{
+		using namespace CommandEdge;
+		auto Fail = [&](const UE::UAI::Contract::FDiagnostic& Diagnostic) {
+			return FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(), Request.GetCommandId(), Request.GetCommandBindingHash(), Diagnostic);
+		};
+		if (!CallerContext.IsValid()) return Fail(CallerContext.GetValidationDiagnostic());
+		if (State->bShutdownRequested.Load())
+			return Fail(RuntimeFailure(TEXT("operation_runtime_shutting_down"),
+				Request.GetCommandId(), TEXT("The Editor is draining owned operations before shutdown.")));
+		const FString OperationId = DerivedIdentity(TEXT("operation:"), State->Config.ServerSessionId + TEXT("\n")
+			+ Request.GetCommandId() + TEXT("\n") + Request.GetCommandBindingHash() + TEXT("\n")
+			+ Request.GetRequestId() + TEXT("\n") + Json::Sha256Utf8(Request.GetParamsJson()));
+		const FString Lease = DerivedIdentity(TEXT("lease:"), State->Config.OwnerLeaseSecret + TEXT("\n") + OperationId);
+		FLongRunningOperationSnapshot Snapshot;
+		FExecutionMutationError Error;
+		if (!State->Owner.GetSnapshot(OperationId, Lease, State->Config.ServerSessionId, Snapshot, Error))
+		{
+			if (Error.Code != TEXT("operation_not_found")) return Fail(Error);
+			const FUeAgentDescriptorIdentity Descriptor(Request.GetCommandId(), 1, Request.GetCommandBindingHash());
+			FUeAgentExecutionContextInput Input;
+			Input.ProjectInstanceId = State->Config.ProjectInstanceId;
+			Input.EditorInstanceId = State->Config.EditorInstanceId;
+			Input.StatePlane = EUeAgentStatePlane::AuthoringMemory;
+			Input.ContextRevision = TEXT("deferred-command:") + State->Config.ServerSessionId;
+			FUeAgentExecutionContextRefPtr Context;
+			FUeAgentExecutionContextError ContextError;
+			const FUeAgentExecutionContextPolicy Policy({EUeAgentStatePlane::AuthoringMemory}, {},
+				EUeAgentContextResolutionPolicy::ExplicitOnly, EUeAgentTransientContextPolicy::TemporaryMutationAllowed);
+			if (!FUeAgentExecutionContextRef::TryCreate(Input, Descriptor, EUeAgentRequestKind::Operation,
+				Policy, Context, ContextError)) return Fail(ContextError);
+			const auto Resources = MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
+			const FLongRunningOperationRequest OperationRequest(OperationId, Lease, State->Config.ServerSessionId,
+				Descriptor, Context.ToSharedRef(), Resources, FUeAgentOperationDeadline(),
+				{CallerContext.GetCallerId(), Request.GetRequestId(), Request.GetCommandId(), FString()});
+			if (!State->Owner.Accept(OperationRequest,
+				MakeShared<FDeferredCommandPort, ESPMode::ThreadSafe>(Resources, MoveTemp(Work)), Snapshot, Error))
+				return Fail(Error);
+		}
+		UE::UAI::Contract::FDiagnostic SignalError;
+		const auto Payload = SnapshotObject(Snapshot, SignalError);
+		if (!SignalError.IsEmpty()) return Fail(SignalError);
+		FString PayloadText;
+        if (!Json::TryCanonicalize(Payload, PayloadText, SignalError)) return Fail(SignalError);
+        return FUeAgentCommandResult::Success(Request, PayloadText);
+	}
+
+	void FUeAgentLongRunningSessionRuntime::Pump()
+	{
+		if (State->bPolling.Exchange(true)) return;
+		Async(EAsyncExecution::ThreadPool, [SharedState = State]()
+		{
+			ON_SCOPE_EXIT { SharedState->bPolling.Store(false); };
+			if (SharedState->bShutdownRequested.Load())
+				SharedState->Owner.RequestShutdown(TEXT("editor_shutdown"));
+			SharedState->Owner.PollStarted();
+		});
+	}
+
+	void FUeAgentLongRunningSessionRuntime::RequestShutdown()
+	{
+		State->bShutdownRequested.Store(true);
+		Pump();
+	}
+
+	bool FUeAgentLongRunningSessionRuntime::IsPolling() const
+	{
+		return State->bPolling.Load();
+	}
+
+	int32 FUeAgentLongRunningSessionRuntime::GetPendingCount() const
+	{
+		return State->Owner.GetPendingCount();
 	}
 
 	const TSharedRef<IUeAgentOperationApplicationPort>&

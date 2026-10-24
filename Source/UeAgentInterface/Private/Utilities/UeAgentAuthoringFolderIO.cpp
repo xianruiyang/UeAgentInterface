@@ -1,5 +1,7 @@
 #include "Utilities/UeAgentAuthoringFolderIO.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringWorkspacePaths.h"
@@ -10,7 +12,7 @@ namespace UeAgentAuthoringFolderIO
 	bool ResetExportFolder(
 		const FString& FolderPathInput,
 		FString& OutResolvedFolderPath,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return UeAgentExportPublisher::ResetOwnedWorkspace(
 			FolderPathInput,
@@ -18,7 +20,7 @@ namespace UeAgentAuthoringFolderIO
 			OutError);
 	}
 
-	bool ResetExportFolder(const FString& FolderPathInput, FString& OutError)
+	bool ResetExportFolder(const FString& FolderPathInput, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FString ResolvedFolderPath;
 		return ResetExportFolder(FolderPathInput, ResolvedFolderPath, OutError);
@@ -27,7 +29,7 @@ namespace UeAgentAuthoringFolderIO
 	bool CopyAuthoringTreeIfExists(
 		const FString& SourceFolderPath,
 		const FString& DestinationFolderPath,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 
@@ -71,7 +73,12 @@ namespace UeAgentAuthoringFolderIO
 			FString RelativePath = SourceFile;
 			if (!FPaths::MakePathRelativeTo(RelativePath, *SourceRootWithSlash))
 			{
-				OutError = FString::Printf(TEXT("authoring_tree_relative_path_failed:%s"), *SourceFile);
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("authoring_tree_relative_path_failed"),
+					TEXT("The source file could not be expressed relative to the authoring folder."), TEXT("authoring_io"));
+				OutError.Source.SourceFile = SourceFile;
+				OutError.TargetPath = SourceFolderPath;
+				OutError.SourceKind = TEXT("native_result");
+				OutError.InternalContext = SourceRoot;
 				return false;
 			}
 
@@ -88,10 +95,24 @@ namespace UeAgentAuthoringFolderIO
 				return false;
 			}
 			const FString& DestinationFile = DestinationFilePath.AbsolutePath;
-			if (!IFileManager::Get().MakeDirectory(*FPaths::GetPath(DestinationFile), true)
-				|| IFileManager::Get().Copy(*DestinationFile, *SourceFile, true, true) != COPY_OK)
+			if (!IFileManager::Get().MakeDirectory(*FPaths::GetPath(DestinationFile), true))
 			{
-				OutError = FString::Printf(TEXT("authoring_tree_copy_failed:%s"), *RelativePath);
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("authoring_tree_copy_failed"),
+					TEXT("The destination directory for the authoring file could not be created."), TEXT("authoring_io"));
+				OutError.Source.SourceFile = SourceFile;
+				OutError.TargetPath = DestinationFile;
+				OutError.SourceKind = TEXT("native_result");
+				return false;
+			}
+			const uint32 CopyResult = IFileManager::Get().Copy(*DestinationFile, *SourceFile, true, true);
+			if (CopyResult != COPY_OK)
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("authoring_tree_copy_failed"),
+					TEXT("The authoring file could not be copied to its destination."), TEXT("authoring_io"));
+				OutError.Source.SourceFile = SourceFile;
+				OutError.TargetPath = DestinationFile;
+				OutError.SourceKind = TEXT("native_result");
+				OutError.InternalContext = FString::Printf(TEXT("copy_result=%u"), CopyResult);
 				return false;
 			}
 		}

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
 namespace UE::UAI::Module::CommandRegistration::AiBehavior
@@ -8,5 +10,5 @@ namespace UE::UAI::Module::CommandRegistration::AiBehavior
 
 	UEAGENTINTERFACE_API bool TryCreateProductionAiBehaviorCandidateContribution(
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

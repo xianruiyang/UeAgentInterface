@@ -1,8 +1,11 @@
 #include "OperationOwners/CaptureMedia/UeAgentCaptureMediaOwner.h"
+#include "CommandEdge/UeAgentApplicationResultProjection.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/DomainCapability/DelegatedCommandOperation/UeAgentDelegatedCommandOperation.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "OperationOwners/LongRunning/UeAgentLongRunningLifecycleOwner.h"
 
 namespace UE::UAI::OperationOwners::CaptureMedia
@@ -17,46 +20,60 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 				|| Id == TEXT("capture.render.execute");
 		}
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& Subject,
-			const FString& Detail,
-			const FString& TerminalStatus = TEXT("not_started"),
-			const bool bRetrySafe = true)
+		UE::UAI::Contract::FDiagnostic CommandFailure(FString Code, const FString& Subject, FString Reason, FString InternalContext = FString())
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), Subject);
-			Error->SetStringField(TEXT("detail"), Detail);
-			Error->SetStringField(TEXT("terminal_status"), TerminalStatus);
-			Error->SetBoolField(TEXT("retry_safe"), bRetrySafe);
-			FString Text;
-			FString CanonicalError;
-			return Contract::Json::TryCanonicalize(
-				Error, Text, CanonicalError) ? Text : FString(TEXT("{}"));
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("command"), MoveTemp(InternalContext), Subject);
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.TerminalStatus = TEXT("not_started");
+			Diagnostic.bRetrySafe = true;
+			Diagnostic.MutationStarted = false;
+			Diagnostic.MutationMayHaveStarted = false;
+			return Diagnostic;
 		}
 
-		bool TryReadOperationError(
-			const FString& Payload,
-			FString& OutError)
+		UE::UAI::Contract::FDiagnostic InvocationFailure(const FString& Code, const FString& Subject, const UE::UAI::Contract::FDiagnostic& Cause)
 		{
-			OutError.Reset();
-			TSharedPtr<FJsonObject> Root;
-			FString ParseError;
-			if (!Contract::Json::TryParseObject(
-					Payload, Root, ParseError) || !Root.IsValid())
+			auto Diagnostic = Cause.IsEmpty()
+				? CommandFailure(Code, Subject, TEXT("The operation runtime could not be prepared."))
+				: Contract::FDiagnostic::WrapFailure(Code, Cause, TEXT("command"), TEXT("The operation runtime could not be prepared."));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Subject;
+			Diagnostic.TerminalStatus = TEXT("not_started");
+			Diagnostic.bRetrySafe = true;
+			Diagnostic.MutationStarted = false;
+			Diagnostic.MutationMayHaveStarted = false;
+			if (Cause.IsEmpty())
 			{
-				return false;
+				Diagnostic.PropertyPath = TEXT("runtime_ready");
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 			}
-			const TSharedPtr<FJsonObject>* Error = nullptr;
-			if (Root->TryGetObjectField(TEXT("operation_error"), Error)
-				&& Error && Error->IsValid())
-			{
-				return Contract::Json::TryCanonicalize(
-					Error->ToSharedRef(), OutError, ParseError);
-			}
-			return true;
+			return Diagnostic;
 		}
+
+		UE::UAI::Contract::FDiagnostic ProjectionFailure(const FString& Code, const UE::UAI::Contract::FDiagnostic& Cause,
+			const BindingGateway::Operation::FOperationLifecycleReceipt& Receipt)
+		{
+			auto Diagnostic = Cause.IsEmpty()
+				? Contract::FDiagnostic::Failure(Code, TEXT("The operation completed, but its result payload could not be produced."), TEXT("result_projection"))
+				: Contract::FDiagnostic::WrapFailure(Code, Cause, TEXT("result_projection"), TEXT("The operation completed, but its result payload could not be produced."));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (Cause.IsEmpty())
+			{
+				Diagnostic.SourceKind = TEXT("native_result");
+				Diagnostic.PropertyPath = TEXT("result_payload_ready");
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			}
+			Diagnostic.TerminalStatus = BindingGateway::Operation::LexToString(Receipt.GetStatus());
+			Diagnostic.MutationStarted = Receipt.DidMutationStart();
+			Diagnostic.MutationMayHaveStarted = Receipt.DidMutationStart();
+			Diagnostic.bRetrySafe = Receipt.IsRetrySafe();
+			return Diagnostic;
+		}
+
+		
 
 		class FPortMechanicsHandler final
 			: public CommandEdge::IUeAgentCommandHandler
@@ -89,34 +106,13 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 						Contract::FUeAgentContractValue(Request.GetParamsJson())),
 					Caller,
 					Cancellation);
-				if (!Result.IsValid()
-					|| !(Result.GetDescriptorIdentity() == Route.DescriptorIdentity)
-					|| Result.GetRequestId() != Request.GetRequestId())
-				{
-					return CommandEdge::FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT("capture_media_result_invalid"),
-							Request.GetRequestId(),
-							TEXT("OperationService returned an invalid result.")));
-				}
-				const FString& Payload = Result.GetValue().GetJsonValue();
-				FString OperationError;
-				if (!TryReadOperationError(Payload, OperationError))
-				{
-					return CommandEdge::FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT("capture_media_payload_invalid"),
-							Request.GetRequestId(),
-							TEXT("OperationService returned a non-object payload.")));
-				}
-				return OperationError.IsEmpty()
-					? CommandEdge::FUeAgentCommandResult::Success(Request, Payload)
-					: CommandEdge::FUeAgentCommandResult::Failure(
-						Request, Payload, OperationError);
+				CommandEdge::FApplicationResultProjectionPolicy Policy;
+				Policy.InvalidResultCode = TEXT("capture_media_result_invalid");
+				Policy.BoundaryFailureKind = CommandEdge::EApplicationFailureKind::None;
+				Policy.ApplicationFailureKind = CommandEdge::EApplicationFailureKind::None;
+				Policy.bValidateObjectPayload = false; // The public codec owns this route's payload validation.
+				Policy.bInvalidResultMayHaveMutated = true;
+				return CommandEdge::ProjectOperationResult(Request, Route.DescriptorIdentity, Result, Policy);
 			}
 
 		private:
@@ -128,19 +124,25 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 			const FString& CommandId,
 			TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 			TArray<FString>& OutAuthorityScopes,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutHandler.Reset();
 			OutAuthorityScopes.Reset();
 			OutError.Reset();
-			const FUeAgentCaptureMediaRoute* Route = GetRoutes().FindByPredicate(
+			const TArray<FUeAgentCaptureMediaRoute>* Routes = nullptr;
+			if (!TryGetRoutes(Routes, OutError)) return false;
+			const FUeAgentCaptureMediaRoute* Route = Routes->FindByPredicate(
 				[&CommandId](const FUeAgentCaptureMediaRoute& Item)
 				{
 					return Item.CommandId == CommandId;
 				});
 			if (!Route)
 			{
-				OutError = TEXT("capture_media_command_not_supported:") + CommandId;
+				OutError = CommandFailure(TEXT("capture_media_command_not_supported"), CommandId,
+					TEXT("This owner accepts capture.image.execute, capture.media.execute and capture.render.execute."));
+				OutError.PropertyPath = TEXT("command_supported");
+				OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 				return false;
 			}
 			TSharedPtr<Contract::IUeAgentOperationApplicationPort> Port;
@@ -162,32 +164,44 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 			&& DescriptorIdentity.IsValid();
 	}
 
-	const TArray<FUeAgentCaptureMediaRoute>& GetRoutes()
+	bool TryGetRoutes(const TArray<FUeAgentCaptureMediaRoute>*& OutRoutes, Contract::FDiagnostic& OutError)
 	{
-		static const TArray<FUeAgentCaptureMediaRoute> Routes = []()
+		OutRoutes = nullptr;
+		const TArray<FUeAgentLongRunningSessionActivationProfile>* Profiles = nullptr;
+		if (!TryGetLongRunningSessionActivationProfiles(Profiles, OutError)) return false;
+		static const TArray<FUeAgentCaptureMediaRoute> Routes = [Profiles]()
 		{
 			TArray<FUeAgentCaptureMediaRoute> Result;
 			for (const FUeAgentLongRunningSessionActivationProfile& Profile
-				: GetLongRunningSessionActivationProfiles())
+				: *Profiles)
 			{
 				if (!IsOwnedCommand(Profile.CommandId)) continue;
 				FUeAgentCaptureMediaRoute Route{
 					Profile.CommandId, Profile.Method, Profile.DescriptorIdentity};
-				if (!Route.IsValid()) return TArray<FUeAgentCaptureMediaRoute>();
 				Result.Add(MoveTemp(Route));
 			}
 			Result.Sort([](const auto& A, const auto& B)
 			{
 				return A.CommandId < B.CommandId;
 			});
-			return Result.Num() == 3 ? Result : TArray<FUeAgentCaptureMediaRoute>();
+			return Result;
 		}();
-		return Routes;
+		if (Routes.Num() != 3)
+		{
+			OutError = CommandFailure(TEXT("capture_media_route_count_mismatch"), FString(),
+				TEXT("The activation profiles did not produce the three capture command routes."));
+			OutError.PropertyPath = TEXT("route_count");
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(Routes.Num());
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(3);
+			return false;
+		}
+		OutRoutes = &Routes;
+		return true;
 	}
 
 	bool TryGetProductionOperationPort(
 		TSharedPtr<Contract::IUeAgentOperationApplicationPort>& OutPort,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TSharedPtr<FUeAgentLongRunningSessionRuntime> Runtime;
 		return OperationOwners::LongRunning::
@@ -195,15 +209,20 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 			&& OutPort.IsValid();
 	}
 
-	TSharedRef<const DomainCapability::IDomainOperationInvocationFactory>
-	FindOperationInvocationFactory(const FString& CommandId)
+	bool TryFindOperationInvocationFactory(
+		const FString& CommandId,
+		TSharedPtr<const DomainCapability::IDomainOperationInvocationFactory>& OutFactory,
+		Contract::FDiagnostic& OutError)
 	{
+		OutFactory.Reset();
+		const TArray<FUeAgentCaptureMediaRoute>* Routes = nullptr;
+		if (!TryGetRoutes(Routes, OutError)) return false;
 		static const TArray<TSharedRef<const DomainCapability::
-			IDomainOperationInvocationFactory>> Factories = []
+			IDomainOperationInvocationFactory>> Factories = [Routes]()
 		{
 			TArray<TSharedRef<const DomainCapability::
 				IDomainOperationInvocationFactory>> Result;
-			for (const FUeAgentCaptureMediaRoute& Route : GetRoutes())
+			for (const FUeAgentCaptureMediaRoute& Route : *Routes)
 			{
 				Result.Add(DomainCapability::DelegatedCommandOperation::
 					CreateInvocationFactory(
@@ -222,8 +241,17 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 				{
 					return Factory->GetOperationId() == CommandId;
 				});
-		checkf(Found, TEXT("unknown capture media operation %s"), *CommandId);
-		return Found ? *Found : Factories[0];
+		if (!Found)
+		{
+			OutError = CommandFailure(TEXT("capture_media_command_not_supported"), CommandId,
+				TEXT("This owner accepts capture.image.execute, capture.media.execute and capture.render.execute."));
+			OutError.PropertyPath = TEXT("command_supported");
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			return false;
+		}
+		OutFactory = *Found;
+		return true;
 	}
 
 	CommandEdge::FUeAgentCommandResult Submit(
@@ -231,9 +259,10 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 		const Contract::FUeAgentCallerContext& Caller,
 		const TSharedRef<Contract::IUeAgentCancellationSignal>& Cancellation)
 	{
-		const TSharedRef<const DomainCapability::
-			IDomainOperationInvocationFactory> Factory =
-			FindOperationInvocationFactory(Request.GetCommandId());
+		TSharedPtr<const DomainCapability::IDomainOperationInvocationFactory> Factory;
+		Contract::FDiagnostic FactoryError;
+		if (!TryFindOperationInvocationFactory(Request.GetCommandId(), Factory, FactoryError))
+			return CommandEdge::FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(FactoryError));
 		DomainCapability::FDomainOperationInvocation Invocation;
 		DomainCapability::FDomainOperationInvocationError InvocationError;
 		if (!Factory->TryCreate(
@@ -242,44 +271,22 @@ namespace UE::UAI::OperationOwners::CaptureMedia
 			return CommandEdge::FUeAgentCommandResult::Failure(
 				Request,
 				TEXT("{}"),
-				ErrorJson(
-					TEXT("capture_media_runtime_unavailable"),
-					Request.GetCommandId(),
-					InvocationError.GetCode() + TEXT(":")
-						+ InvocationError.GetDetail()));
+				InvocationFailure(TEXT("capture_media_runtime_unavailable"), Request.GetCommandId(), InvocationError));
 		}
 		BindingGateway::Operation::FOperationLifecycleReceipt Receipt;
 		if (!Invocation.GetService()->Run(
 				*Invocation.GetPlan(), *Invocation.GetAuthorization(), Receipt))
 		{
-			FString Detail = Invocation.GetContext()->GetFailureDetail();
-			if (Detail.IsEmpty())
-			{
-				Detail = TEXT("phase_history:")
-					+ FString::Join(Receipt.GetPhaseHistory(), TEXT(","));
-			}
-			return CommandEdge::FUeAgentCommandResult::Failure(
-				Request,
-				TEXT("{}"),
-				ErrorJson(
-					Receipt.GetErrorCode(),
-					Request.GetCommandId(),
-					Detail,
-					BindingGateway::Operation::LexToString(Receipt.GetStatus()),
-					Receipt.IsRetrySafe()));
+			auto Diagnostic = Receipt.GetDiagnostic();
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetCommandId();
+			return CommandEdge::FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
 		}
 		FString Payload;
-		FString PayloadError;
+		UE::UAI::Contract::FDiagnostic PayloadError;
 		if (!Invocation.GetContext()->TryBuildSuccessPayload(
 				Receipt, Payload, PayloadError))
 		{
-			return CommandEdge::FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(),
-				Request.GetRequestId(),
-				Request.GetCommandId(),
-				Request.GetCommandBindingHash(),
-				TEXT("domain_operation_result_invalid"),
-				PayloadError);
+			return CommandEdge::FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(), Request.GetCommandId(), Request.GetCommandBindingHash(), ProjectionFailure(TEXT("domain_operation_result_invalid"), PayloadError, Receipt));
 		}
 		return CommandEdge::FUeAgentCommandResult::Success(
 			Request, MoveTemp(Payload));

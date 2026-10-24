@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
@@ -47,12 +49,7 @@ namespace UE::UAI::ContextResource
 		bool bResolvedFromCurrent = false;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentExecutionContextError
-	{
-		FString Code;
-		Contract::EUeAgentExecutionContextFacet Facet =
-			Contract::EUeAgentExecutionContextFacet::Invalid;
-	};
+	using FUeAgentExecutionContextError = Contract::FDiagnostic;
 
 	class FUeAgentExecutionContextRef;
 	using FUeAgentExecutionContextRefPtr =
@@ -140,10 +137,7 @@ namespace UE::UAI::ContextResource
 		FUeAgentExecutionContextRefOwner Expected;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentOperationContextError
-	{
-		FString Code;
-	};
+	using FUeAgentOperationContextError = Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentOperationContext final
 	{
@@ -182,8 +176,8 @@ namespace UE::UAI::ContextResource
 			if (!Request.IsValid())
 			{
 				OutContext.Reset();
-				OutError.Code =
-					TEXT("operation_context_request_invalid");
+				OutError = Contract::FDiagnostic::Failure(TEXT("operation_context_request_invalid"), TEXT("The operation context requires a valid request."), TEXT("context"));
+				OutError.Schema = TEXT("uai.runtime.diagnostic/1");
 				return false;
 			}
 			return TryCreateInternal(

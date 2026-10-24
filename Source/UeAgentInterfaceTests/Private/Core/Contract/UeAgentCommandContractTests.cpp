@@ -1,14 +1,9 @@
 #include "Misc/AutomationTest.h"
 
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
-#include "CommandRegistry/UeAgentActiveCommandManifest.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/Command/UeAgentCommandContractModel.h"
-#include "Core/Contract/UeAgentContractJson.h"
-#include "Dom/JsonObject.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
 
 namespace
 {
@@ -62,20 +57,17 @@ bool FUeAgentCommandContractRegistryTest::RunTest(
 
 	const FUeAgentFrozenCommandContract* Search =
 		Registry->FindExact(TEXT("query.command.search"));
-	const FUeAgentFrozenCommandContract* Detail =
-		Registry->FindExact(TEXT("query.command.detail"));
-	const FUeAgentFrozenCommandContract* Read =
-		Registry->FindExact(TEXT("reference.asset_read"));
-	const FUeAgentFrozenCommandContract* Effect =
-		Registry->FindExact(TEXT("reference.asset_apply"));
+	const FUeAgentFrozenCommandContract* Usage =
+		Registry->FindExact(TEXT("query.command.usage"));
+	const FUeAgentFrozenCommandContract* Origin =
+		Registry->FindExact(TEXT("reference.origin.resolve"));
 	TestNotNull(TEXT("command search contract"), Search);
-	TestNotNull(TEXT("command detail contract"), Detail);
-	TestNotNull(TEXT("asset read contract"), Read);
-	TestNotNull(TEXT("asset apply contract"), Effect);
+	TestNotNull(TEXT("command usage contract"), Usage);
+	TestNotNull(TEXT("reference origin contract"), Origin);
 	TestNull(
 		TEXT("retired global reference catalog is absent"),
 		Registry->FindExact(TEXT("reference.catalog_search")));
-	if (!Search || !Detail || !Read || !Effect)
+	if (!Search || !Usage || !Origin)
 	{
 		return false;
 	}
@@ -89,33 +81,31 @@ bool FUeAgentCommandContractRegistryTest::RunTest(
 		Search->GetPythonFunction(),
 		FString(TEXT("command_search")));
 	TestEqual(
-		TEXT("detail method"),
-		Detail->GetPythonFunction(),
-		FString(TEXT("command_detail")));
-	TestEqual(
-		TEXT("read method"),
-		Read->GetPythonFunction(),
-		FString(TEXT("asset_read")));
-	TestEqual(
-		TEXT("read exposes object path plus optional context/projection"),
-		Read->GetInputFields().Num(),
-		3);
-	TestEqual(
-		TEXT("read object path field"),
-		Read->GetInputFields()[0].Name,
-		FString(TEXT("object_path")));
+		TEXT("usage method"),
+		Usage->GetPythonFunction(),
+		FString(TEXT("command_usage")));
 	TestTrue(
-		TEXT("read object path is required and not nullable"),
-		Read->GetInputFields()[0].bRequired
-			&& !Read->GetInputFields()[0].bNullable);
+		TEXT("search exposes only the intent input"),
+		Search->GetInputFields().Num() == 1
+			&& Search->GetInputFields()[0].Name == TEXT("intent"));
+	TestTrue(
+		TEXT("search result is the canonical commands list"),
+		Search->GetResultFields().Num() == 1
+			&& Search->GetResultFields()[0].Name == TEXT("commands"));
+	TestTrue(
+		TEXT("usage accepts one commands array"),
+		Usage->GetInputFields().Num() == 1
+			&& Usage->GetInputFields()[0].Name == TEXT("commands")
+			&& Usage->GetResultFields().Num() == 1
+			&& Usage->GetResultFields()[0].Name == TEXT("usage"));
 	TestEqual(
-		TEXT("effect method"),
-		Effect->GetPythonFunction(),
-		FString(TEXT("asset_apply")));
+		TEXT("reference origin method"),
+		Origin->GetPythonFunction(),
+		FString(TEXT("origin_resolve")));
 	TestTrue(
 		TEXT("command-specific contract hashes differ"),
-		Search->GetContractHash() != Read->GetContractHash()
-			&& Read->GetContractHash() != Effect->GetContractHash());
+		Search->GetContractHash() != Usage->GetContractHash()
+			&& Usage->GetContractHash() != Origin->GetContractHash());
 
 	TSet<FString> CommandIds;
 	for (const FUeAgentFrozenCommandContract& Contract :
@@ -127,180 +117,5 @@ bool FUeAgentCommandContractRegistryTest::RunTest(
 		TEXT("active command identities are unique"),
 		CommandIds.Num(),
 		Registry->GetContracts().Num());
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentCommandManifestProjectionTest,
-	"UeAgentInterface.CommandEdge.Contract.ManifestProjection",
-	EAutomationTestFlags::EditorContext
-		| EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentCommandManifestProjectionTest::RunTest(
-	const FString& Parameters)
-{
-	(void)Parameters;
-	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
-	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
-	FString Error;
-	if (!TestTrue(
-			TEXT("process immutable command authority is available"),
-			TryGetProcessRegistry(Registry, Dispatch, Error))
-		|| !Registry.IsValid())
-	{
-		AddError(Error);
-		return false;
-	}
-
-	FString Manifest;
-	TestTrue(
-		TEXT("active registry deterministically builds its manifest"),
-		FUeAgentActiveCommandManifest::TryBuild(
-			Registry.ToSharedRef(),
-			GetUaiCommandManifestPluginVersion(),
-			GetUaiCommandManifestBuildId(),
-			Manifest,
-			Error));
-	FString SecondManifest;
-	TestTrue(
-		TEXT("second projection succeeds"),
-		FUeAgentActiveCommandManifest::TryBuild(
-			Registry.ToSharedRef(),
-			GetUaiCommandManifestPluginVersion(),
-			GetUaiCommandManifestBuildId(),
-			SecondManifest,
-			Error));
-	TestEqual(
-		TEXT("manifest bytes are deterministic"),
-		SecondManifest,
-		Manifest);
-	TestTrue(
-		TEXT("committed manifest equals the active registry projection"),
-		FUeAgentActiveCommandManifest::TryVerify(
-			Registry.ToSharedRef(),
-			GetUaiCommandManifestPluginVersion(),
-			GetUaiCommandManifestBuildId(),
-			GetDefaultCommandManifestPath(),
-			Error));
-	if (!Error.IsEmpty())
-	{
-		AddError(Error);
-	}
-
-	TSharedPtr<FJsonObject> Root;
-	const TSharedRef<TJsonReader<>> Reader =
-		TJsonReaderFactory<>::Create(Manifest);
-	TestTrue(
-		TEXT("manifest is valid JSON"),
-		FJsonSerializer::Deserialize(
-			Reader,
-			Root,
-			FJsonSerializer::EFlags::StoreNumbersAsStrings)
-			&& Root.IsValid());
-	if (!Root.IsValid())
-	{
-		return false;
-	}
-	TestEqual(
-		TEXT("manifest source is the immutable C++ registry"),
-		Root->GetObjectField(TEXT("source"))
-			->GetStringField(TEXT("kind")),
-		FString(TEXT("cpp_immutable_command_registry_export")));
-	const TArray<TSharedPtr<FJsonValue>>& Commands =
-		Root->GetArrayField(TEXT("commands"));
-	TestEqual(
-		TEXT("manifest contains exactly the active registry commands"),
-		Commands.Num(),
-		Registry->GetContracts().Num());
-	const TSet<FString> ForbiddenFields{
-		TEXT("descriptor_id"),
-		TEXT("descriptor_hash"),
-		TEXT("route"),
-		TEXT("route_path"),
-		TEXT("default"),
-		TEXT("success_condition"),
-		TEXT("verification"),
-	};
-	for (const TSharedPtr<FJsonValue>& Value : Commands)
-	{
-		const TSharedPtr<FJsonObject> Command = Value->AsObject();
-		const FString CommandId =
-			Command->GetStringField(TEXT("command_id"));
-		const FUeAgentFrozenCommandContract* Contract =
-			Registry->FindExact(CommandId);
-		TestNotNull(
-			TEXT("manifest command resolves to frozen contract"),
-			Contract);
-		TestTrue(
-			TEXT("manifest command carries tutorial references"),
-			Command->HasTypedField<EJson::Array>(
-				TEXT("tutorial_references")));
-		if (Contract
-			&& Command->HasTypedField<EJson::Array>(
-				TEXT("tutorial_references")))
-		{
-			const TArray<TSharedPtr<FJsonValue>>& References =
-				Command->GetArrayField(TEXT("tutorial_references"));
-			TestEqual(
-				TEXT("manifest tutorial count matches frozen contract"),
-				References.Num(),
-				Contract->GetTutorialReferences().Num());
-			for (int32 Index = 0;
-				Index < References.Num()
-					&& Index < Contract->GetTutorialReferences().Num();
-				++Index)
-			{
-				TestEqual(
-					TEXT("manifest tutorial reference matches frozen contract"),
-					References[Index]->AsString(),
-					Contract->GetTutorialReferences()[Index]);
-			}
-		}
-		if (Contract)
-		{
-			const TArray<TSharedPtr<FJsonValue>>& ManifestParameters =
-				Command->GetArrayField(TEXT("parameters"));
-			TestEqual(
-				TEXT("manifest parameter count matches frozen contract"),
-				ManifestParameters.Num(),
-				Contract->GetInputFields().Num());
-			for (int32 Index = 0;
-				Index < ManifestParameters.Num()
-					&& Index < Contract->GetInputFields().Num();
-				++Index)
-			{
-				const TSharedPtr<FJsonObject> Parameter =
-					ManifestParameters[Index]->AsObject();
-				const FUeAgentCommandFieldDeclaration& Field =
-					Contract->GetInputFields()[Index];
-				TestEqual(
-					TEXT("manifest parameter schema presence matches frozen contract"),
-					Parameter->HasTypedField<EJson::Object>(TEXT("schema")),
-					!Field.SchemaJson.IsEmpty());
-				if (!Field.SchemaJson.IsEmpty()
-					&& Parameter->HasTypedField<EJson::Object>(TEXT("schema")))
-				{
-					FString ManifestSchema;
-					FString SchemaError;
-					TestTrue(
-						TEXT("manifest parameter schema canonicalizes"),
-						UE::UAI::Contract::Json::TryCanonicalize(
-							Parameter->GetObjectField(TEXT("schema")),
-							ManifestSchema,
-							SchemaError));
-					TestEqual(
-						TEXT("manifest parameter schema equals frozen contract"),
-						ManifestSchema,
-						Field.SchemaJson);
-				}
-			}
-		}
-		for (const FString& Forbidden : ForbiddenFields)
-		{
-			TestFalse(
-				TEXT("manifest excludes business and transport truth"),
-				Command->HasField(Forbidden));
-		}
-	}
 	return true;
 }

@@ -1,13 +1,13 @@
 #include "CommandHandlers/ModelingGeometry/UeAgentModelingGeometryCommandHandlers.h"
 
 #include "DomainAdapters/ModelingGeometry/UeAgentModelingGeometryMechanicsBoundary.h"
-#include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "OperationOwners/ModelingGeometry/UeAgentModelingGeometryOperationOwner.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 namespace UE::UAI::CommandHandlers::ModelingGeometry
 {
@@ -16,38 +16,42 @@ namespace UE::UAI::CommandHandlers::ModelingGeometry
 	{
 		const FString Owner = TEXT("modeling-geometry-owner");
 
-		FString JsonText(const TSharedPtr<FJsonObject>& Object)
+		void BindSessionInputSource(Contract::FDiagnostic& Error, bool bInjectedActorIds, bool bInjectedActorId)
 		{
-			FString Text;
-			FString Error;
-			return CommandContract::Json::TryCanonicalize(Object, Text, Error)
-				? Text : FString(TEXT("{}"));
+			for (auto& Child : Error.Diagnostics) BindSessionInputSource(Child, bInjectedActorIds, bInjectedActorId);
+			if (Error.PublicCause)
+			{
+				auto Cause = MakeShared<Contract::FDiagnostic>(*Error.PublicCause);
+				BindSessionInputSource(*Cause, bInjectedActorIds, bInjectedActorId); Error.PublicCause = MoveTemp(Cause);
+			}
+			if (Error.SourceKind == TEXT("native_result") || !Error.Source.SourceFile.IsEmpty()) return;
+			const FString Pointer = !Error.Source.InternalJsonPath.IsEmpty() ? Error.Source.InternalJsonPath
+				: !Error.SemanticPointer.IsEmpty() ? Error.SemanticPointer : Error.Source.JsonPath;
+			if (Pointer.IsEmpty() || Pointer.StartsWith(TEXT("/params/"))) return;
+			const bool bTarget = (bInjectedActorIds && (Pointer == TEXT("/actor_ids") || Pointer.StartsWith(TEXT("/actor_ids/"))))
+				|| (bInjectedActorId && (Pointer == TEXT("/actor_id") || Pointer.StartsWith(TEXT("/actor_id/"))));
+			const FString SourcePointer = bTarget ? TEXT("/params/target") : TEXT("/params/input") + (Pointer == TEXT("/") ? FString() : Pointer);
+			Error.Source.JsonPath = SourcePointer; Error.Source.InternalJsonPath = SourcePointer; Error.SemanticPointer = SourcePointer;
+			Error.SourceKind = TEXT("command_input");
 		}
 
 		FUeAgentCommandResult InputFailure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), TEXT("modeling_session_input_invalid"));
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), Detail);
-			Error->SetStringField(TEXT("terminal_status"), TEXT("not_started"));
-			Error->SetBoolField(TEXT("retry_safe"), true);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), JsonText(Error));
-		}
+            const FUeAgentCommandRequest& Request, UE::UAI::Contract::FDiagnostic Diagnostic)
+        {
+            Diagnostic.TerminalStatus = TEXT("not_started");
+            Diagnostic.bRetrySafe = true;
+            Diagnostic.MutationStarted = false;
+            Diagnostic.MutationMayHaveStarted = false;
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic),
+                TEXT("modeling_session_input_invalid"));
+        }
 		FUeAgentCommandResult Unauthorized(const FUeAgentCommandRequest& Request)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), TEXT("modeling_geometry_authority_required"));
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), TEXT("uai:operate is required"));
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+        {
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"),
+                UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_geometry_authority_required"),
+                    TEXT("uai:operate is required."), TEXT("authorization"),
+                    FString(), Request.GetCommandId()));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -90,26 +94,6 @@ namespace UE::UAI::CommandHandlers::ModelingGeometry
 			}
 			const FString& GetPublicOwner() const override { return Owner; }
 
-			bool BindNestedExactDispatch(
-				TWeakPtr<const FUeAgentExactCommandDispatch> InDispatch,
-				TSharedRef<const CommandRegistry::FUeAgentImmutableCommandRegistry> InRegistry,
-				FString& OutError) override
-			{
-				OutError.Reset();
-				if (!InDispatch.IsValid()
-					|| !InRegistry->FindExact(TEXT("world.selection"))
-					|| !InRegistry->FindExact(TEXT("mesh.element.select_by_ray"))
-					|| !InRegistry->FindExact(TEXT("modeling.actor.mesh.replace"))
-					|| !InRegistry->FindExact(TEXT("world.object_snap_to_surface")))
-				{
-					OutError = TEXT("modeling_session_native_successor_dependency_missing");
-					return false;
-				}
-				Dispatch = MoveTemp(InDispatch);
-				Registry = MoveTemp(InRegistry);
-				return true;
-			}
-
 			FUeAgentCommandResult Submit(
 				const FUeAgentCommandRequest& Request,
 				const Contract::FUeAgentCallerContext& Caller,
@@ -122,18 +106,16 @@ namespace UE::UAI::CommandHandlers::ModelingGeometry
 				}
 				if (Cancellation->IsCancelled())
 				{
-					return InputFailure(Request, TEXT("request_cancelled_before_start"));
+					return InputFailure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("request_cancelled_before_start"), TEXT("The request was cancelled before execution started."), TEXT("modeling_session_input")));
 				}
 				FString Action;
 				if (!Request.GetParams().IsValid()
 					|| !Request.GetParams()->TryGetStringField(TEXT("action"), Action)
 					|| !DomainAdapters::ModelingGeometry::IsModelingSessionAction(Action))
 				{
-					return InputFailure(Request, TEXT("action_missing_or_unknown"));
-				}
-				if (const FString* Successor = ExactSuccessorByAction.Find(Action))
-				{
-					return SubmitExactSuccessor(Request, Caller, Cancellation, *Successor);
+					auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("action_missing_or_unknown"), TEXT("/params/action"), MakeShared<FJsonValueString>(TEXT("supported modeling session action")), Request.GetParams().IsValid() ? Request.GetParams()->Values.FindRef(TEXT("action")) : nullptr, TEXT("modeling_session_input"), TEXT("Specify a supported modeling session action."));
+					Error.SourceKind = TEXT("command_input");
+					return InputFailure(Request, MoveTemp(Error));
 				}
 				return SubmitNativeModelingAction(Request, Action);
 			}
@@ -145,6 +127,7 @@ namespace UE::UAI::CommandHandlers::ModelingGeometry
 			{
 				const TSharedPtr<FJsonObject>* Input = nullptr;
 				TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
+				bool bInjectedActorIds = false, bInjectedActorId = false;
 				if (Request.GetParams()->TryGetObjectField(TEXT("input"), Input)
 					&& Input && Input->IsValid())
 				{
@@ -161,11 +144,13 @@ namespace UE::UAI::CommandHandlers::ModelingGeometry
 						{
 							Params->SetArrayField(TEXT("actor_ids"), {
 								MakeShared<FJsonValueString>(Target)});
+							bInjectedActorIds = true;
 						}
 					}
 					else
 					{
 						Params->SetStringField(TEXT("actor_id"), Target);
+						bInjectedActorId = true;
 					}
 				}
 
@@ -174,18 +159,25 @@ namespace UE::UAI::CommandHandlers::ModelingGeometry
 				NativeRequest.CommandId = Request.GetCommandId();
 				NativeRequest.Params = MoveTemp(Params);
 				TSharedPtr<FJsonObject> Observation;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				const bool bOk = NativeMechanicsPort->Execute(
 					Action, NativeRequest, Observation, Error);
 				if (!bOk)
 				{
-					const TSharedRef<FJsonObject> ErrorObject = MakeShared<FJsonObject>();
-					ErrorObject->SetStringField(TEXT("code"), TEXT("modeling_session_action_failed"));
-					ErrorObject->SetStringField(TEXT("subject_id"), Action);
-					ErrorObject->SetStringField(TEXT("detail"), Error);
-					ErrorObject->SetStringField(TEXT("terminal_status"), TEXT("failed"));
-					ErrorObject->SetBoolField(TEXT("retry_safe"), false);
-					return FUeAgentCommandResult::Failure(Request, TEXT("{}"), JsonText(ErrorObject));
+                    if (Error.IsEmpty()) {
+                        Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("modeling_session_action_failed"),
+                            TEXT("The native modeling action returned failure without a diagnostic."), TEXT("modeling_session.") + Action);
+                        Error.PropertyPath = TEXT("/action");
+                        Error.ActualValue = MakeShared<FJsonValueString>(Action);
+                        Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("native result with a specific diagnostic"));
+                        Error.SourceKind = TEXT("native_result");
+                    }
+                    BindSessionInputSource(Error, bInjectedActorIds, bInjectedActorId);
+                    if (Error.Stage.IsEmpty()) Error.Stage = TEXT("modeling_session.") + Action;
+                    Error.TerminalStatus = TEXT("failed");
+                    Error.bRetrySafe = false;
+                    return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Error),
+                        TEXT("modeling_session_action_failed"));
 				}
 				const TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
 				Payload->SetStringField(TEXT("action"), Action);
@@ -194,99 +186,21 @@ namespace UE::UAI::CommandHandlers::ModelingGeometry
 					? Observation : MakeShared<FJsonObject>());
 				Payload->SetArrayField(TEXT("errors"), {});
 				Payload->SetArrayField(TEXT("warnings"), {});
-				return FUeAgentCommandResult::Success(Request, JsonText(Payload));
+				FString PayloadJson;
+				Contract::FDiagnostic EncodeError;
+				if (!CommandContract::Json::TryCanonicalize(Payload, PayloadJson, EncodeError))
+				{
+					if (EncodeError.SourceKind.IsEmpty()) EncodeError.SourceKind = TEXT("native_result");
+					EncodeError.TerminalStatus = TEXT("failed");
+					EncodeError.MutationMayHaveStarted = true;
+					EncodeError.bRetrySafe = false;
+					return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(EncodeError), TEXT("modeling_observation_encode_failed"));
+				}
+				return FUeAgentCommandResult::Success(Request, PayloadJson);
 			}
 
-			FUeAgentCommandResult SubmitExactSuccessor(
-				const FUeAgentCommandRequest& Request,
-				const Contract::FUeAgentCallerContext& Caller,
-				const TSharedRef<Contract::IUeAgentCancellationSignal>& Cancellation,
-				const FString& SuccessorId) const
-			{
-				const TSharedPtr<const FUeAgentExactCommandDispatch> Bound = Dispatch.Pin();
-				const CommandContract::FUeAgentFrozenCommandContract* Contract =
-					Registry.IsValid() ? Registry->FindExact(SuccessorId) : nullptr;
-				if (!Bound.IsValid() || Contract == nullptr)
-				{
-					return InputFailure(Request, TEXT("modeling_session_successor_unavailable"));
-				}
-				const TSharedPtr<FJsonObject>* Input = nullptr;
-				TSharedPtr<FJsonObject> SuccessorParams = MakeShared<FJsonObject>();
-				if (Request.GetParams()->TryGetObjectField(TEXT("input"), Input)
-					&& Input && Input->IsValid())
-				{
-					SuccessorParams = MakeShared<FJsonObject>(**Input);
-				}
-				FString Target;
-				if (Request.GetParams()->TryGetStringField(TEXT("target"), Target)
-					&& !Target.IsEmpty())
-				{
-					if (SuccessorId == TEXT("modeling.actor.mesh.replace"))
-					{
-						SuccessorParams->SetStringField(TEXT("actor_ref"), Target);
-					}
-					else
-					{
-						SuccessorParams->SetStringField(TEXT("target"), Target);
-					}
-				}
-				FString ParamsJson;
-				FString JsonError;
-				if (!CommandContract::Json::TryCanonicalize(SuccessorParams, ParamsJson, JsonError))
-				{
-					return InputFailure(Request, JsonError);
-				}
-				const TSharedPtr<FJsonObject> Wire = MakeShared<FJsonObject>();
-				Wire->SetStringField(TEXT("schema"), TEXT("uai.command.v1"));
-				Wire->SetNumberField(TEXT("version"), 1);
-				Wire->SetStringField(TEXT("channel"), TEXT("uai.command"));
-				Wire->SetStringField(TEXT("correlation_id"), Request.GetCorrelationId());
-				Wire->SetStringField(TEXT("request_id"), Request.GetRequestId() + TEXT(":modeling-session"));
-				Wire->SetStringField(TEXT("command_id"), SuccessorId);
-				Wire->SetStringField(TEXT("command_binding_hash"), Contract->GetContractHash());
-				Wire->SetObjectField(TEXT("params"), SuccessorParams);
-				FString WireText;
-				if (!CommandContract::Json::TryCanonicalize(Wire, WireText, JsonError))
-				{
-					return InputFailure(Request, JsonError);
-				}
-				FUeAgentCommandProtocolCodec Codec;
-				const FTCHARToUTF8 Converted(*WireText);
-				TArray<uint8> Bytes;
-				Bytes.Append(
-					reinterpret_cast<const uint8*>(Converted.Get()),
-					Converted.Length());
-				TOptional<FUeAgentCommandRequest> Nested;
-				FUeAgentCommandProtocolDiagnostic Diagnostic;
-				if (!Codec.DecodeRequest(Bytes, Nested, Diagnostic) || !Nested.IsSet())
-				{
-					return InputFailure(Request, Diagnostic.Message);
-				}
-				const FUeAgentCommandResult NestedResult = Bound->Submit(Nested.GetValue(), Caller, Cancellation);
-				if (!NestedResult.IsOk())
-				{
-					return FUeAgentCommandResult::Failure(Request, TEXT("{}"), NestedResult.GetErrorJson());
-				}
-				const TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
-				Payload->SetStringField(TEXT("action"), Request.GetParams()->GetStringField(TEXT("action")));
-				Payload->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
-				Payload->SetStringField(TEXT("observation_json"), NestedResult.GetPayloadJson());
-				Payload->SetArrayField(TEXT("errors"), {});
-				Payload->SetArrayField(TEXT("warnings"), {});
-				return FUeAgentCommandResult::Success(Request, JsonText(Payload));
-			}
-
-			TWeakPtr<const FUeAgentExactCommandDispatch> Dispatch;
-			TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry;
 			TSharedRef<const DomainAdapters::ModelingGeometry::IUeAgentModelingSessionNativeMechanicsPort>
 				NativeMechanicsPort;
-			const TMap<FString, FString> ExactSuccessorByAction = {
-				{TEXT("observe_selection"), TEXT("world.selection")},
-				{TEXT("set_actor_selection"), TEXT("world.selection")},
-				{TEXT("select_via_world_ray"), TEXT("mesh.element.select_by_ray")},
-				{TEXT("replace_actor_mesh"), TEXT("modeling.actor.mesh.replace")},
-				{TEXT("snap_to_surface"), TEXT("world.object_snap_to_surface")},
-			};
 		};
 	}
 
@@ -294,7 +208,7 @@ namespace UE::UAI::CommandHandlers::ModelingGeometry
 		TSharedRef<const DomainAdapters::ModelingGeometry::IUeAgentModelingSessionNativeMechanicsPort>
 			NativeMechanicsPort,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset(); OutError.Reset();
 		for (const FString& Id : DomainAdapters::ModelingGeometry::GetCommandIds())
@@ -304,6 +218,6 @@ namespace UE::UAI::CommandHandlers::ModelingGeometry
 					MakeShared<FModelingSessionHandler>(NativeMechanicsPort))
 				: StaticCastSharedRef<IUeAgentExactCommandHandler>(MakeShared<FHandler>(Id)));
 		}
-		return OutHandlers.Num() == 34;
+		return true;
 	}
 }

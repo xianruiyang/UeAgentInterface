@@ -31,6 +31,7 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 		GetCanonicalType() const;
 		const FString& GetTypeBindingEvidence() const;
 		bool IsValid() const;
+		const ExecutionMutation::FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		Discovery::FUeAgentCandidateBinding CandidateBinding;
@@ -38,12 +39,16 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 		StateSemantic::FUeAgentCanonicalType CanonicalType;
 		FString TypeBindingEvidence;
 		bool bValid = false;
+		TSharedPtr<const ExecutionMutation::FExecutionMutationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentGenericEffectApplyResult final
 	{
 	public:
-		FUeAgentGenericEffectApplyResult() = default;
+		FUeAgentGenericEffectApplyResult();
+		// Use only while no target writes have been attempted; clear before Apply.
+		static FUeAgentGenericEffectApplyResult NoMutation();
+		bool IsNoMutationConfirmed() const;
 		FUeAgentGenericEffectApplyResult(
 			int64 InSubjectGeneration,
 			TArray<FString> InMutatedIdentityKeys,
@@ -63,6 +68,7 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 			GetDurableTargets() const;
 		bool DidMutationStart() const;
 		bool IsValid() const;
+		const ExecutionMutation::FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		int64 SubjectGeneration = -1;
@@ -72,7 +78,9 @@ namespace UE::UAI::DomainAdapters::GenericEffect
 		FString RollbackToken;
 		TArray<AssetDurable::FAssetDurableTarget> DurableTargets;
 		bool bMutationStarted = false;
+		bool bNoMutationConfirmed = false;
 		bool bValid = false;
+		TSharedPtr<const ExecutionMutation::FExecutionMutationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentGenericEffectUeHook

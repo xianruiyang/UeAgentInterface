@@ -1,6 +1,7 @@
 #include "Core/Projection/UeAgentProjection.h"
 
-#include "Misc/SecureHash.h"
+#include "Dom/JsonValue.h"
+#include "Dom/JsonObject.h"
 
 namespace UE::UAI::Projection
 {
@@ -8,17 +9,30 @@ namespace UE::UAI::Projection
 	{
 		using namespace UE::UAI::ContextResource;
 
-		constexpr int32 CursorFieldCount = 13;
-
-		struct FCursorSource
+		FUeAgentProjectionError ValidationFailure(const TCHAR* Code, const TCHAR* Reason, const FString& Path)
 		{
-			FString Kind;
-			FString SourceId;
-			FString RevisionSourceId;
-			FString RevisionGeneration;
-			int64 RevisionSequence = -1;
-			int32 TotalItems = 0;
-		};
+			auto Error = FUeAgentProjectionError::Failure(Code, Reason, TEXT("projection"));
+			Error.PropertyPath = Path;
+			return Error;
+		}
+
+		const FUeAgentProjectionError& ValidationOf(const FUeAgentCandidateSummary& Item) { return *Item.GetValidationDiagnostic(); }
+		const FUeAgentProjectionError& ValidationOf(const FUeAgentCatalogDiagnostic& Item) { return *Item.GetValidationDiagnostic(); }
+		template <typename T> const FUeAgentProjectionError& ValidationOf(const T& Item) { return Item.GetValidationDiagnostic(); }
+
+		template <typename T>
+		bool ValidateItems(const TArray<T>& Items, const TCHAR* Field, FUeAgentProjectionError& OutError)
+		{
+			for (int32 Index = 0; Index < Items.Num(); ++Index)
+			{
+				if (Items[Index].IsValid()) continue;
+				OutError = ValidationOf(Items[Index]);
+				OutError.PropertyPath = FString::Printf(TEXT("%s[%d]"), Field, Index)
+					+ (OutError.PropertyPath.IsEmpty() ? FString() : TEXT(".") + OutError.PropertyPath);
+				return false;
+			}
+			return true;
+		}
 
 		void ResetError(FUeAgentProjectionError& OutError)
 		{
@@ -28,12 +42,10 @@ namespace UE::UAI::Projection
 		bool Fail(
 			FUeAgentProjectionError& OutError,
 			const FString& Code,
-			const FString& SubjectId = FString(),
-			const FString& Detail = FString())
+			const FString& SubjectId,
+			const FString& PublicReason)
 		{
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
+			OutError = FUeAgentProjectionError::Failure(Code, PublicReason, TEXT("projection"), FString(), SubjectId);
 			return false;
 		}
 
@@ -74,17 +86,12 @@ namespace UE::UAI::Projection
 			const FString& Path,
 			FUeAgentProjectionError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded BudgetError;
-			if (Resources.TryChargeMany(Amounts, Path, BudgetError))
+			FUeAgentResourceChargeError ChargeError;
+			if (Resources.TryChargeMany(Amounts, Path, ChargeError))
 			{
 				return true;
 			}
-			OutError.Code = BudgetError.Code;
-			OutError.SubjectId = BudgetError.Path;
-			OutError.Detail = TEXT("projection resource budget exceeded");
-			OutError.ResourceDimension = BudgetError.Dimension;
-			OutError.ResourceLimit = BudgetError.Limit;
-			OutError.ResourceObserved = BudgetError.Observed;
+			OutError = ChargeError;
 			return false;
 		}
 
@@ -97,318 +104,12 @@ namespace UE::UAI::Projection
 			FUeAgentCancellationRequested CancellationError;
 			if (!Cancellation.TryCheckpoint(CancellationError))
 			{
-				return Fail(
-					OutError,
-					CancellationError.Code,
-					Stage,
-					CancellationError.Reason);
-			}
-
-			FUeAgentOperationDeadlineExceeded DeadlineError;
-			if (!Deadline.TryCheckpoint(Stage, DeadlineError))
-			{
-				return Fail(
-					OutError,
-					DeadlineError.Code,
-					Stage,
-					DeadlineError.Stage);
-			}
-			return true;
-		}
-
-		int32 HexNibble(const TCHAR Character)
-		{
-			if (Character >= TEXT('0') && Character <= TEXT('9'))
-			{
-				return Character - TEXT('0');
-			}
-			if (Character >= TEXT('a') && Character <= TEXT('f'))
-			{
-				return Character - TEXT('a') + 10;
-			}
-			if (Character >= TEXT('A') && Character <= TEXT('F'))
-			{
-				return Character - TEXT('A') + 10;
-			}
-			return -1;
-		}
-
-		FString HexBytes(const uint8* Data, const int32 Count)
-		{
-			static const TCHAR Digits[] = TEXT("0123456789abcdef");
-			FString Result;
-			Result.Reserve(Count * 2);
-			for (int32 Index = 0; Index < Count; ++Index)
-			{
-				Result.AppendChar(Digits[(Data[Index] >> 4) & 0x0f]);
-				Result.AppendChar(Digits[Data[Index] & 0x0f]);
-			}
-			return Result;
-		}
-
-		FString EncodeCursorText(const FString& Value)
-		{
-			const FTCHARToUTF8 Utf8(*Value);
-			return HexBytes(
-				reinterpret_cast<const uint8*>(Utf8.Get()),
-				Utf8.Length());
-		}
-
-		bool DecodeCursorText(const FString& Encoded, FString& OutValue)
-		{
-			if ((Encoded.Len() % 2) != 0)
-			{
+				OutError = CancellationError;
+				OutError.Stage = Stage;
 				return false;
 			}
-			const int32 ByteCount = Encoded.Len() / 2;
-			TArray<ANSICHAR> Bytes;
-			Bytes.SetNumUninitialized(ByteCount + 1);
-			for (int32 Index = 0; Index < ByteCount; ++Index)
-			{
-				const int32 High = HexNibble(Encoded[Index * 2]);
-				const int32 Low = HexNibble(Encoded[Index * 2 + 1]);
-				if (High < 0 || Low < 0)
-				{
-					return false;
-				}
-				Bytes[Index] = static_cast<ANSICHAR>((High << 4) | Low);
-			}
-			Bytes[ByteCount] = '\0';
-			const FUTF8ToTCHAR Converted(Bytes.GetData(), ByteCount);
-			OutValue = FString(Converted.Length(), Converted.Get());
+
 			return true;
-		}
-
-		FString CursorChecksum(const FString& Body)
-		{
-			const FTCHARToUTF8 Utf8(*Body);
-			uint8 Digest[FSHA1::DigestSize];
-			FSHA1::HashBuffer(Utf8.Get(), Utf8.Length(), Digest);
-			return HexBytes(Digest, FSHA1::DigestSize);
-		}
-
-		FString ResultKindToken(const EUeAgentProjectionResultKind Kind)
-		{
-			return Kind == EUeAgentProjectionResultKind::Query
-				? TEXT("q")
-				: TEXT("o");
-		}
-
-		FCursorSource CursorSource(
-			const FUeAgentCanonicalSnapshot& Snapshot)
-		{
-			return FCursorSource{
-				TEXT("snapshot"),
-				Snapshot.GetSnapshotId(),
-				Snapshot.GetRevision().GetSourceId(),
-				Snapshot.GetRevision().GetGeneration(),
-				Snapshot.GetRevision().GetSequence(),
-				Snapshot.GetEntries().Num(),
-			};
-		}
-
-		FCursorSource CursorSource(const FUeAgentCatalogSnapshot& Catalog)
-		{
-			return FCursorSource{
-				TEXT("catalog"),
-				Catalog.GetCatalogId(),
-				Catalog.GetRevision().GetSourceId(),
-				Catalog.GetRevision().GetGeneration(),
-				Catalog.GetRevision().GetSequence(),
-				Catalog.GetCandidates().Num(),
-			};
-		}
-
-		FString EncodeCursor(
-			const FUeAgentDescriptorIdentity& DescriptorIdentity,
-			const EUeAgentProjectionResultKind ResultKind,
-			const FUeAgentProjectionProfile& Profile,
-			const FCursorSource& Source,
-			const int32 NextIndex)
-		{
-			const TArray<FString> Fields = {
-				TEXT("uai-c10-v1"),
-				EncodeCursorText(DescriptorIdentity.GetDescriptorId()),
-				FString::FromInt(DescriptorIdentity.GetVersion()),
-				EncodeCursorText(DescriptorIdentity.GetDescriptorHash()),
-				ResultKindToken(ResultKind),
-				EncodeCursorText(Profile.GetProfileId()),
-				Source.Kind,
-				EncodeCursorText(Source.SourceId),
-				EncodeCursorText(Source.RevisionSourceId),
-				EncodeCursorText(Source.RevisionGeneration),
-				FString::Printf(
-					TEXT("%lld"),
-					static_cast<long long>(Source.RevisionSequence)),
-				FString::FromInt(NextIndex),
-			};
-			const FString Body = FString::Join(Fields, TEXT("."));
-			return Body + TEXT(".") + CursorChecksum(Body);
-		}
-
-		bool DecodeCursor(
-			const FString& Cursor,
-			const FUeAgentDescriptorIdentity& DescriptorIdentity,
-			const EUeAgentProjectionResultKind ResultKind,
-			const FUeAgentProjectionProfile& Profile,
-			const FCursorSource& Source,
-			int32& OutNextIndex,
-			FUeAgentProjectionError& OutError)
-		{
-			TArray<FString> Fields;
-			Cursor.ParseIntoArray(Fields, TEXT("."), false);
-			if (Fields.Num() != CursorFieldCount)
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_cursor_invalid"),
-					Source.SourceId,
-					TEXT("cursor field count is invalid"));
-			}
-			TArray<FString> BodyFields = Fields;
-			BodyFields.RemoveAt(CursorFieldCount - 1);
-			const FString Body = FString::Join(BodyFields, TEXT("."));
-			if (Fields[0] != TEXT("uai-c10-v1")
-				|| Fields[12] != CursorChecksum(Body))
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_cursor_invalid"),
-					Source.SourceId,
-					TEXT("cursor schema or integrity is invalid"));
-			}
-
-			FString CursorDescriptorId;
-			FString CursorDescriptorHash;
-			FString CursorProfileId;
-			FString CursorSourceId;
-			FString CursorRevisionSourceId;
-			FString CursorRevisionGeneration;
-			int32 CursorDescriptorVersion = 0;
-			int64 CursorRevisionSequence = -1;
-			int32 CursorNextIndex = -1;
-			if (!DecodeCursorText(Fields[1], CursorDescriptorId)
-				|| !LexTryParseString(
-					CursorDescriptorVersion,
-					*Fields[2])
-				|| !DecodeCursorText(Fields[3], CursorDescriptorHash)
-				|| !DecodeCursorText(Fields[5], CursorProfileId)
-				|| !DecodeCursorText(Fields[7], CursorSourceId)
-				|| !DecodeCursorText(
-					Fields[8],
-					CursorRevisionSourceId)
-				|| !DecodeCursorText(
-					Fields[9],
-					CursorRevisionGeneration)
-				|| !LexTryParseString(
-					CursorRevisionSequence,
-					*Fields[10])
-				|| !LexTryParseString(CursorNextIndex, *Fields[11]))
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_cursor_invalid"),
-					Source.SourceId,
-					TEXT("cursor field encoding is invalid"));
-			}
-
-			if (CursorDescriptorId
-					!= DescriptorIdentity.GetDescriptorId()
-				|| CursorDescriptorVersion
-					!= DescriptorIdentity.GetVersion()
-				|| CursorDescriptorHash
-					!= DescriptorIdentity.GetDescriptorHash())
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_cursor_descriptor_mismatch"),
-					DescriptorIdentity.GetDescriptorId(),
-					TEXT("cursor descriptor does not match result"));
-			}
-			if (Fields[4] != ResultKindToken(ResultKind))
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_cursor_result_kind_mismatch"),
-					Source.SourceId,
-					TEXT("cursor result kind does not match result"));
-			}
-			if (CursorProfileId != Profile.GetProfileId())
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_cursor_profile_mismatch"),
-					Profile.GetProfileId(),
-					TEXT("cursor profile does not match request"));
-			}
-			if (Fields[6] != Source.Kind
-				|| CursorSourceId != Source.SourceId)
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_cursor_source_mismatch"),
-					Source.SourceId,
-					TEXT("cursor source does not match payload"));
-			}
-			if (CursorRevisionSourceId != Source.RevisionSourceId
-				|| CursorRevisionGeneration != Source.RevisionGeneration
-				|| CursorRevisionSequence != Source.RevisionSequence)
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_cursor_revision_mismatch"),
-					Source.SourceId,
-					TEXT("cursor revision does not match payload"));
-			}
-			if (CursorNextIndex <= 0
-				|| CursorNextIndex >= Source.TotalItems)
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_cursor_invalid"),
-					Source.SourceId,
-					TEXT("cursor position is outside payload"));
-			}
-			OutNextIndex = CursorNextIndex;
-			return true;
-		}
-
-		bool TryPageStart(
-			const FUeAgentPageRequest& Page,
-			const FUeAgentDescriptorIdentity& DescriptorIdentity,
-			const EUeAgentProjectionResultKind ResultKind,
-			const FUeAgentProjectionProfile& Profile,
-			const FCursorSource& Source,
-			FUeAgentResourceTracker& Resources,
-			int32& OutStart,
-			FUeAgentProjectionError& OutError)
-		{
-			OutStart = 0;
-			if (Page.GetCursor().IsEmpty())
-			{
-				return true;
-			}
-			const FUeAgentTextUnits Units = MeasureText(Page.GetCursor());
-			if (!Charge(
-				Resources,
-				{
-					{EUeAgentResourceDimension::InputBytes, Units.Utf8Bytes},
-					{EUeAgentResourceDimension::StringBytes, Units.Utf8Bytes},
-					{EUeAgentResourceDimension::WorkUnits, 1},
-				},
-				TEXT("/projection/cursor"),
-				OutError))
-			{
-				return false;
-			}
-			return DecodeCursor(
-				Page.GetCursor(),
-				DescriptorIdentity,
-				ResultKind,
-				Profile,
-				Source,
-				OutStart,
-				OutError);
 		}
 
 		bool ChargePayload(
@@ -431,70 +132,7 @@ namespace UE::UAI::Projection
 				OutError);
 		}
 
-		bool AllArtifactsValid(
-			const TArray<FUeAgentArtifactDescriptor>& Artifacts)
-		{
-			for (const FUeAgentArtifactDescriptor& Artifact : Artifacts)
-			{
-				if (!Artifact.IsValid())
-				{
-					return false;
-				}
-			}
-			return true;
-		}
 
-		bool AllDiagnosticsValid(
-			const TArray<FUeAgentProjectionDiagnostic>& Diagnostics)
-		{
-			for (const FUeAgentProjectionDiagnostic& Diagnostic : Diagnostics)
-			{
-				if (!Diagnostic.IsValid())
-				{
-					return false;
-				}
-			}
-			return true;
-		}
-
-		bool AllEntriesValid(
-			const TArray<FUeAgentProjectedEntry>& Entries)
-		{
-			for (const FUeAgentProjectedEntry& Entry : Entries)
-			{
-				if (!Entry.IsValid())
-				{
-					return false;
-				}
-			}
-			return true;
-		}
-
-		bool AllCandidatesValid(
-			const TArray<FUeAgentCandidateSummary>& Candidates)
-		{
-			for (const FUeAgentCandidateSummary& Candidate : Candidates)
-			{
-				if (!Candidate.IsValid())
-				{
-					return false;
-				}
-			}
-			return true;
-		}
-
-		bool AllCatalogDiagnosticsValid(
-			const TArray<FUeAgentCatalogDiagnostic>& Diagnostics)
-		{
-			for (const FUeAgentCatalogDiagnostic& Diagnostic : Diagnostics)
-			{
-				if (!Diagnostic.IsValid())
-				{
-					return false;
-				}
-			}
-			return true;
-		}
 	}
 
 	FUeAgentProjectionProfile::FUeAgentProjectionProfile(
@@ -507,6 +145,9 @@ namespace UE::UAI::Projection
 		, bIncludeDetails(bInIncludeDetails)
 		, bIncludeProvenance(bInIncludeProvenance)
 	{
+		if (ProfileId.IsEmpty())
+			ValidationDiagnostic = ValidationFailure(TEXT("projection_profile_invalid"),
+				TEXT("The projection profile identifier must not be empty."), TEXT("profile_id"));
 	}
 
 	const FString& FUeAgentProjectionProfile::GetProfileId() const
@@ -531,100 +172,31 @@ namespace UE::UAI::Projection
 
 	bool FUeAgentProjectionProfile::IsValid() const
 	{
-		return !ProfileId.IsEmpty();
+		return ValidationDiagnostic.IsEmpty();
 	}
 
-	FUeAgentPageRequest::FUeAgentPageRequest() = default;
-
-	FUeAgentPageRequest::FUeAgentPageRequest(FString InCursor)
-		: Cursor(NormalizeOptional(MoveTemp(InCursor)))
-		, bValid(!Cursor.IsEmpty())
-	{
-	}
-
-	FUeAgentPageRequest::FUeAgentPageRequest(
-		const int32 InMaxItems,
-		FString InCursor)
-		: MaxItems(InMaxItems)
-		, Cursor(NormalizeOptional(MoveTemp(InCursor)))
-		, bValid(InMaxItems > 0)
-	{
-	}
-
-	bool FUeAgentPageRequest::HasMaxItems() const
-	{
-		return MaxItems.IsSet();
-	}
-
-	int32 FUeAgentPageRequest::GetMaxItems() const
-	{
-		return MaxItems.IsSet() ? MaxItems.GetValue() : 0;
-	}
-
-	const FString& FUeAgentPageRequest::GetCursor() const
-	{
-		return Cursor;
-	}
-
-	bool FUeAgentPageRequest::IsValid() const
-	{
-		return bValid;
-	}
+	const FUeAgentProjectionError& FUeAgentProjectionProfile::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentProjectionDiagnostic::FUeAgentProjectionDiagnostic(
-		FString InCode,
-		const EUeAgentDiagnosticSeverity InSeverity,
-		FString InMessage,
-		FString InPath,
-		FString InSubjectId,
-		const bool bInRetrySafe)
-		: Code(NormalizeRequired(MoveTemp(InCode)))
-		, Severity(InSeverity)
-		, Message(NormalizeRequired(MoveTemp(InMessage)))
-		, Path(NormalizeOptional(MoveTemp(InPath)))
-		, SubjectId(NormalizeOptional(MoveTemp(InSubjectId)))
-		, bRetrySafe(bInRetrySafe)
-		, bValid(
-			!Code.IsEmpty()
-			&& !Message.IsEmpty()
-			&& (Path.IsEmpty() || Path.StartsWith(TEXT("/"))))
+		FUeAgentProjectionError InDiagnostic)
+		: Diagnostic(MoveTemp(InDiagnostic))
 	{
+		if (Diagnostic.Code.TrimStartAndEnd().IsEmpty() || Diagnostic.PublicMessage.TrimStartAndEnd().IsEmpty())
+		{
+			const bool bCodeMissing = Diagnostic.Code.TrimStartAndEnd().IsEmpty();
+			ValidationDiagnostic = ValidationFailure(TEXT("projection_diagnostic_invalid"),
+				bCodeMissing ? TEXT("The projection diagnostic has no code.") : TEXT("The projection diagnostic has no public reason."),
+				bCodeMissing ? TEXT("code") : TEXT("message"));
+			if (!Diagnostic.IsEmpty()) ValidationDiagnostic.PublicCause = MakeShared<FUeAgentProjectionError>(Diagnostic);
+		}
 	}
 
-	const FString& FUeAgentProjectionDiagnostic::GetCode() const
-	{
-		return Code;
-	}
-
-	EUeAgentDiagnosticSeverity
-	FUeAgentProjectionDiagnostic::GetSeverity() const
-	{
-		return Severity;
-	}
-
-	const FString& FUeAgentProjectionDiagnostic::GetMessage() const
-	{
-		return Message;
-	}
-
-	const FString& FUeAgentProjectionDiagnostic::GetPath() const
-	{
-		return Path;
-	}
-
-	const FString& FUeAgentProjectionDiagnostic::GetSubjectId() const
-	{
-		return SubjectId;
-	}
-
-	bool FUeAgentProjectionDiagnostic::IsRetrySafe() const
-	{
-		return bRetrySafe;
-	}
+	const FUeAgentProjectionError& FUeAgentProjectionDiagnostic::GetDiagnostic() const { return Diagnostic; }
+	const FUeAgentProjectionError& FUeAgentProjectionDiagnostic::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	bool FUeAgentProjectionDiagnostic::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
 	FUeAgentArtifactDescriptor::FUeAgentArtifactDescriptor(
@@ -644,15 +216,24 @@ namespace UE::UAI::Projection
 		, ByteCount(InByteCount)
 		, ReceiptId(NormalizeRequired(MoveTemp(InReceiptId)))
 		, bImportable(bInImportable)
-		, bValid(
-			!ArtifactId.IsEmpty()
-			&& !Kind.IsEmpty()
-			&& !Locator.IsEmpty()
-			&& !MediaType.IsEmpty()
-			&& IsSha256(ContentHash)
-			&& ByteCount >= 0
-			&& !ReceiptId.IsEmpty())
 	{
+		auto Reject = [this](const TCHAR* Reason, const TCHAR* Path, const FString& Actual, bool bPublic)
+		{
+			ValidationDiagnostic = ValidationFailure(TEXT("projection_artifact_invalid"), Reason, Path);
+			if (bPublic) ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(Actual);
+			else ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(Actual);
+		};
+		if (ArtifactId.IsEmpty()) Reject(TEXT("The projected artifact has no identifier."), TEXT("artifact_id"), ArtifactId, false);
+		else if (Kind.IsEmpty()) Reject(TEXT("The projected artifact has no kind."), TEXT("kind"), Kind, true);
+		else if (Locator.IsEmpty()) Reject(TEXT("The projected artifact has no locator."), TEXT("locator"), Locator, false);
+		else if (MediaType.IsEmpty()) Reject(TEXT("The projected artifact has no media type."), TEXT("media_type"), MediaType, true);
+		else if (!IsSha256(ContentHash)) Reject(TEXT("The projected artifact content hash must be 'sha256:' followed by 64 hexadecimal digits."), TEXT("content_hash"), ContentHash, false);
+		else if (ByteCount < 0)
+		{
+			ValidationDiagnostic = ValidationFailure(TEXT("projection_artifact_invalid"), TEXT("The projected artifact byte count must be non-negative."), TEXT("byte_count"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<double>(ByteCount));
+		}
+		else if (ReceiptId.IsEmpty()) Reject(TEXT("The projected artifact has no receipt identifier."), TEXT("receipt_id"), ReceiptId, false);
 	}
 
 	const FString& FUeAgentArtifactDescriptor::GetArtifactId() const
@@ -697,10 +278,15 @@ namespace UE::UAI::Projection
 
 	bool FUeAgentArtifactDescriptor::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
-	FUeAgentTokenEstimate::FUeAgentTokenEstimate() = default;
+	const FUeAgentProjectionError& FUeAgentArtifactDescriptor::GetValidationDiagnostic() const { return ValidationDiagnostic; }
+
+	FUeAgentTokenEstimate::FUeAgentTokenEstimate()
+		: FUeAgentTokenEstimate(EUeAgentTokenEstimateKind::Exact, -1, -1)
+	{
+	}
 
 	FUeAgentTokenEstimate::FUeAgentTokenEstimate(
 		const EUeAgentTokenEstimateKind InKind,
@@ -709,8 +295,14 @@ namespace UE::UAI::Projection
 		: Kind(InKind)
 		, Tokens(InTokens)
 		, Utf8Bytes(InUtf8Bytes)
-		, bValid(InTokens >= 0 && InUtf8Bytes >= 0)
 	{
+		if (Tokens < 0 || Utf8Bytes < 0)
+		{
+			ValidationDiagnostic = ValidationFailure(TEXT("projection_token_estimate_invalid"),
+				Tokens < 0 ? TEXT("The projection token estimate must be non-negative.") : TEXT("The projection UTF-8 byte estimate must be non-negative."),
+				Tokens < 0 ? TEXT("tokens") : TEXT("utf8_bytes"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<double>(Tokens < 0 ? Tokens : Utf8Bytes));
+		}
 	}
 
 	EUeAgentTokenEstimateKind FUeAgentTokenEstimate::GetKind() const
@@ -730,8 +322,10 @@ namespace UE::UAI::Projection
 
 	bool FUeAgentTokenEstimate::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FUeAgentProjectionError& FUeAgentTokenEstimate::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentProjectedEntry::FUeAgentProjectedEntry(
 		FUeAgentCanonicalIdentity InIdentity,
@@ -746,13 +340,12 @@ namespace UE::UAI::Projection
 		, ObservedRevision(MoveTemp(InObservedRevision))
 		, Default(MoveTemp(InDefault))
 		, Details(MoveTemp(InDetails))
-		, bValid(
-			Identity.IsValid()
-			&& Type.IsValid()
-			&& ObservedRevision.IsValid()
-			&& (!Default.IsSet() || Default->IsValid())
-			&& (!Details.IsSet() || Details->IsValid()))
 	{
+		if (!Identity.IsValid()) ValidationDiagnostic = Identity.GetValidationDiagnostic();
+		else if (!Type.IsValid()) ValidationDiagnostic = Type.GetValidationDiagnostic();
+		else if (!ObservedRevision.IsValid()) ValidationDiagnostic = ObservedRevision.GetValidationDiagnostic();
+		else if (Default.IsSet() && !Default->IsValid()) ValidationDiagnostic = Default->GetValidationDiagnostic();
+		else if (Details.IsSet() && !Details->IsValid()) ValidationDiagnostic = Details->GetValidationDiagnostic();
 	}
 
 	const FUeAgentCanonicalIdentity&
@@ -792,26 +385,25 @@ namespace UE::UAI::Projection
 
 	bool FUeAgentProjectedEntry::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FUeAgentProjectionError& FUeAgentProjectedEntry::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentPageInfo::FUeAgentPageInfo(
 		const int32 InReturnedItems,
-		const int32 InTotalItems,
-		const bool bInHasMore,
-		FString InNextCursor)
+		const int32 InTotalItems)
 		: ReturnedItems(InReturnedItems)
 		, TotalItems(InTotalItems)
-		, bHasMore(bInHasMore)
-		, NextCursor(NormalizeOptional(MoveTemp(InNextCursor)))
-		, bValid(
-			InReturnedItems >= 0
-			&& InTotalItems >= 0
-			&& InReturnedItems <= InTotalItems
-			&& (bInHasMore
-				? !NextCursor.IsEmpty()
-				: NextCursor.IsEmpty()))
 	{
+		if (ReturnedItems < 0 || TotalItems < 0 || ReturnedItems > TotalItems)
+		{
+			ValidationDiagnostic = ValidationFailure(TEXT("projection_page_invalid"), TEXT("Returned and total item counts must be non-negative, and returned items cannot exceed the total."), ReturnedItems < 0 || ReturnedItems > TotalItems ? TEXT("returned_items") : TEXT("total_items"));
+			TSharedRef<FJsonObject> Counts = MakeShared<FJsonObject>();
+			Counts->SetNumberField(TEXT("returned_items"), ReturnedItems);
+			Counts->SetNumberField(TEXT("total_items"), TotalItems);
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueObject>(Counts);
+		}
 	}
 
 	int32 FUeAgentPageInfo::GetReturnedItems() const
@@ -824,20 +416,12 @@ namespace UE::UAI::Projection
 		return TotalItems;
 	}
 
-	bool FUeAgentPageInfo::HasMore() const
-	{
-		return bHasMore;
-	}
-
-	const FString& FUeAgentPageInfo::GetNextCursor() const
-	{
-		return NextCursor;
-	}
-
 	bool FUeAgentPageInfo::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FUeAgentProjectionError& FUeAgentPageInfo::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentProjectedSnapshot::FUeAgentProjectedSnapshot(
 		FString InSnapshotId,
@@ -856,14 +440,13 @@ namespace UE::UAI::Projection
 		, Entries(MoveTemp(InEntries))
 		, Page(MoveTemp(InPage))
 		, OmittedSections(MoveTemp(InOmittedSections))
-		, bValid(
-			!SnapshotId.IsEmpty()
-			&& Revision.IsValid()
-			&& CapturedAt.IsValid()
-			&& (!Provenance.IsSet() || Provenance->IsValid())
-			&& AllEntriesValid(Entries)
-			&& Page.IsValid())
 	{
+		if (SnapshotId.IsEmpty()) ValidationDiagnostic = ValidationFailure(TEXT("projection_payload_invalid"), TEXT("The projected snapshot identifier is empty."), TEXT("snapshot_id"));
+		else if (!Revision.IsValid()) ValidationDiagnostic = Revision.GetValidationDiagnostic();
+		else if (!CapturedAt.IsValid()) ValidationDiagnostic = CapturedAt.GetValidationDiagnostic();
+		else if (Provenance.IsSet() && !Provenance->IsValid()) ValidationDiagnostic = Provenance->GetValidationDiagnostic();
+		else if (!ValidateItems(Entries, TEXT("entries"), ValidationDiagnostic)) {}
+		else if (!Page.IsValid()) ValidationDiagnostic = Page.GetValidationDiagnostic();
 	}
 
 	const FString& FUeAgentProjectedSnapshot::GetSnapshotId() const
@@ -913,8 +496,10 @@ namespace UE::UAI::Projection
 
 	bool FUeAgentProjectedSnapshot::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FUeAgentProjectionError& FUeAgentProjectedSnapshot::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentProjectedCatalog::FUeAgentProjectedCatalog(
 		FString InCatalogId,
@@ -931,14 +516,13 @@ namespace UE::UAI::Projection
 		, Candidates(MoveTemp(InCandidates))
 		, Diagnostics(MoveTemp(InDiagnostics))
 		, Page(MoveTemp(InPage))
-		, bValid(
-			!CatalogId.IsEmpty()
-			&& !CatalogKind.IsEmpty()
-			&& Revision.IsValid()
-			&& AllCandidatesValid(Candidates)
-			&& AllCatalogDiagnosticsValid(Diagnostics)
-			&& Page.IsValid())
 	{
+		if (CatalogId.IsEmpty()) ValidationDiagnostic = ValidationFailure(TEXT("projection_payload_invalid"), TEXT("The projected catalog identifier is empty."), TEXT("catalog_id"));
+		else if (CatalogKind.IsEmpty()) ValidationDiagnostic = ValidationFailure(TEXT("projection_payload_invalid"), TEXT("The projected catalog kind is empty."), TEXT("catalog_kind"));
+		else if (!Revision.IsValid()) ValidationDiagnostic = *Revision.GetValidationDiagnostic();
+		else if (!ValidateItems(Candidates, TEXT("candidates"), ValidationDiagnostic)) {}
+		else if (!ValidateItems(Diagnostics, TEXT("diagnostics"), ValidationDiagnostic)) {}
+		else if (!Page.IsValid()) ValidationDiagnostic = Page.GetValidationDiagnostic();
 	}
 
 	const FString& FUeAgentProjectedCatalog::GetCatalogId() const
@@ -982,8 +566,10 @@ namespace UE::UAI::Projection
 
 	bool FUeAgentProjectedCatalog::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FUeAgentProjectionError& FUeAgentProjectedCatalog::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentProjectedPayload::FUeAgentProjectedPayload(
 		TSharedRef<const FUeAgentProjectedSnapshot> InSnapshot)
@@ -1057,22 +643,17 @@ namespace UE::UAI::Projection
 
 	FUeAgentProjectionRequest::FUeAgentProjectionRequest(
 		FUeAgentProjectionProfile InProfile,
-		FUeAgentPageRequest InPage,
-		TOptional<int64> InTokenBudget,
 		TArray<FUeAgentArtifactDescriptor> InArtifacts,
-		TArray<FUeAgentProjectionDiagnostic> InDiagnostics)
+		TArray<FUeAgentProjectionDiagnostic> InDiagnostics,
+		const EUeAgentProjectionPageUnit InPageUnit)
 		: Profile(MoveTemp(InProfile))
-		, Page(MoveTemp(InPage))
-		, TokenBudget(MoveTemp(InTokenBudget))
 		, Artifacts(MoveTemp(InArtifacts))
 		, Diagnostics(MoveTemp(InDiagnostics))
-		, bValid(
-			Profile.IsValid()
-			&& Page.IsValid()
-			&& (!TokenBudget.IsSet() || TokenBudget.GetValue() >= 0)
-			&& AllArtifactsValid(Artifacts)
-			&& AllDiagnosticsValid(Diagnostics))
+		, PageUnit(InPageUnit)
 	{
+		if (!Profile.IsValid()) ValidationDiagnostic = Profile.GetValidationDiagnostic();
+		else if (ValidateItems(Artifacts, TEXT("artifacts"), ValidationDiagnostic))
+			ValidateItems(Diagnostics, TEXT("diagnostics"), ValidationDiagnostic);
 	}
 
 	const FUeAgentProjectionProfile&
@@ -1081,15 +662,9 @@ namespace UE::UAI::Projection
 		return Profile;
 	}
 
-	const FUeAgentPageRequest& FUeAgentProjectionRequest::GetPage() const
+	EUeAgentProjectionPageUnit FUeAgentProjectionRequest::GetPageUnit() const
 	{
-		return Page;
-	}
-
-	const TOptional<int64>&
-	FUeAgentProjectionRequest::GetTokenBudget() const
-	{
-		return TokenBudget;
+		return PageUnit;
 	}
 
 	const TArray<FUeAgentArtifactDescriptor>&
@@ -1106,8 +681,10 @@ namespace UE::UAI::Projection
 
 	bool FUeAgentProjectionRequest::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FUeAgentProjectionError& FUeAgentProjectionRequest::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentProjectionSourceValue::FUeAgentProjectionSourceValue(
 		TSharedRef<const FUeAgentCanonicalSnapshot> InSnapshot)
@@ -1184,7 +761,6 @@ namespace UE::UAI::Projection
 		FString InRequestId,
 		const EUeAgentProjectionResultKind InResultKind,
 		FString InProfileId,
-		const EUeAgentProjectionCompleteness InCompleteness,
 		FUeAgentProjectedPayload InPayload,
 		TArray<FUeAgentArtifactDescriptor> InArtifacts,
 		TArray<FUeAgentProjectionDiagnostic> InDiagnostics,
@@ -1193,20 +769,26 @@ namespace UE::UAI::Projection
 		, RequestId(NormalizeRequired(MoveTemp(InRequestId)))
 		, ResultKind(InResultKind)
 		, ProfileId(NormalizeRequired(MoveTemp(InProfileId)))
-		, Completeness(InCompleteness)
 		, Payload(MoveTemp(InPayload))
 		, Artifacts(MoveTemp(InArtifacts))
 		, Diagnostics(MoveTemp(InDiagnostics))
 		, TokenEstimate(MoveTemp(InTokenEstimate))
-		, bValid(
-			DescriptorIdentity.IsValid()
-			&& !RequestId.IsEmpty()
-			&& !ProfileId.IsEmpty()
-			&& Payload.IsValid()
-			&& AllArtifactsValid(Artifacts)
-			&& AllDiagnosticsValid(Diagnostics)
-			&& TokenEstimate.IsValid())
 	{
+		if (!DescriptorIdentity.IsValid()) ValidationDiagnostic = DescriptorIdentity.GetValidationDiagnostic();
+		else if (RequestId.IsEmpty()) ValidationDiagnostic = ValidationFailure(TEXT("projection_response_invalid"), TEXT("The projected response has no request identifier."), TEXT("request_id"));
+		else if (ProfileId.IsEmpty()) ValidationDiagnostic = ValidationFailure(TEXT("projection_response_invalid"), TEXT("The projected response has no profile identifier."), TEXT("profile_id"));
+		else if (!Payload.IsValid())
+		{
+			ValidationDiagnostic = ValidationFailure(TEXT("projection_response_invalid"), TEXT("The projected response must contain exactly one payload variant."), TEXT("payload"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(
+				static_cast<int32>(Payload.GetSnapshot().IsValid()) + static_cast<int32>(Payload.GetCatalog().IsValid())
+				+ static_cast<int32>(Payload.GetCandidateBinding().IsValid()) + static_cast<int32>(Payload.GetValue().IsValid())
+				+ static_cast<int32>(Payload.GetComparison().IsValid()));
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+		}
+		else if (ValidateItems(Artifacts, TEXT("artifacts"), ValidationDiagnostic)
+			&& ValidateItems(Diagnostics, TEXT("diagnostics"), ValidationDiagnostic) && !TokenEstimate.IsValid())
+			ValidationDiagnostic = TokenEstimate.GetValidationDiagnostic();
 	}
 
 	const FUeAgentDescriptorIdentity&
@@ -1229,12 +811,6 @@ namespace UE::UAI::Projection
 	const FString& FUeAgentProjectedResponse::GetProfileId() const
 	{
 		return ProfileId;
-	}
-
-	EUeAgentProjectionCompleteness
-	FUeAgentProjectedResponse::GetCompleteness() const
-	{
-		return Completeness;
 	}
 
 	const FUeAgentProjectedPayload&
@@ -1263,8 +839,10 @@ namespace UE::UAI::Projection
 
 	bool FUeAgentProjectedResponse::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
+
+	const FUeAgentProjectionError& FUeAgentProjectedResponse::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FUeAgentResponseProjector::FUeAgentResponseProjector(
 		TSharedRef<IUeAgentTokenEstimator> InEstimator)
@@ -1296,11 +874,10 @@ namespace UE::UAI::Projection
 		OutResponse.Reset();
 		if (!Result.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("projection_result_invalid"),
-				Result.GetRequestId(),
-				TEXT("C0 QueryResult is invalid"));
+			if (!Result.GetDescriptorIdentity().IsValid()) OutError = Result.GetDescriptorIdentity().GetValidationDiagnostic();
+			else if (Result.GetRequestId().IsEmpty()) OutError = ValidationFailure(TEXT("projection_result_invalid"), TEXT("The projection result request identifier is empty."), TEXT("request_id"));
+			else OutError = ValidationFailure(TEXT("projection_result_invalid"), TEXT("The projection source must contain exactly one typed value."), TEXT("value"));
+			return false;
 		}
 		return TryProjectInternal(
 			Result.GetDescriptorIdentity(),
@@ -1328,11 +905,10 @@ namespace UE::UAI::Projection
 		OutResponse.Reset();
 		if (!Result.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("projection_result_invalid"),
-				Result.GetRequestId(),
-				TEXT("C0 OperationResult is invalid"));
+			if (!Result.GetDescriptorIdentity().IsValid()) OutError = Result.GetDescriptorIdentity().GetValidationDiagnostic();
+			else if (Result.GetRequestId().IsEmpty()) OutError = ValidationFailure(TEXT("projection_result_invalid"), TEXT("The projection result request identifier is empty."), TEXT("request_id"));
+			else OutError = ValidationFailure(TEXT("projection_result_invalid"), TEXT("The projection source must contain exactly one typed value."), TEXT("value"));
+			return false;
 		}
 		return TryProjectInternal(
 			Result.GetDescriptorIdentity(),
@@ -1361,11 +937,8 @@ namespace UE::UAI::Projection
 	{
 		if (!Request.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("projection_request_invalid"),
-				RequestId,
-				TEXT("projection request is invalid"));
+			OutError = (Request).GetValidationDiagnostic();
+			return false;
 		}
 		if (!Source.IsValid())
 		{
@@ -1421,11 +994,8 @@ namespace UE::UAI::Projection
 				}
 				if (!OutEstimate.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT("projection_token_estimate_invalid"),
-						RequestId,
-						TEXT("token estimator returned invalid estimate"));
+					OutError = (OutEstimate).GetValidationDiagnostic();
+					return false;
 				}
 				return true;
 			};
@@ -1434,33 +1004,52 @@ namespace UE::UAI::Projection
 		TSharedPtr<const FUeAgentProjectedCatalog> ProjectedCatalog;
 		TOptional<FUeAgentProjectedPayload> FinalPayload;
 		FUeAgentTokenEstimate FinalEstimate;
-		bool bHasMore = false;
 
 		if (Source.GetSnapshot().IsValid())
 		{
 			const FUeAgentCanonicalSnapshot& Snapshot =
 				*Source.GetSnapshot();
-			const FCursorSource PagedSource = CursorSource(Snapshot);
-			int32 Start = 0;
-			if (!TryPageStart(
-				Request.GetPage(),
-				DescriptorIdentity,
-				ResultKind,
-				Request.GetProfile(),
-				PagedSource,
-				Resources,
-				Start,
-				OutError))
+			const EUeAgentProjectionPageUnit PageUnit =
+				Request.GetPageUnit();
+			struct FOwnerRecord final
 			{
-				return false;
-			}
-			int32 MaximumCount = PagedSource.TotalItems - Start;
-			if (Request.GetPage().HasMaxItems())
+				FString OwnerId;
+				TArray<int32> EntryIndices;
+			};
+			TArray<FOwnerRecord> OwnerRecords;
+			if (PageUnit != EUeAgentProjectionPageUnit::Entry)
 			{
-				MaximumCount = FMath::Min(
-					MaximumCount,
-					Request.GetPage().GetMaxItems());
+				TMap<FString, int32> OwnerRecordIndices;
+				for (int32 EntryIndex = 0;
+					EntryIndex < Snapshot.GetEntries().Num();
+					++EntryIndex)
+				{
+					const FString& OwnerId = Snapshot.GetEntries()[EntryIndex]
+						.GetIdentity().GetOwnerId();
+					int32* RecordIndex = OwnerRecordIndices.Find(OwnerId);
+					if (!RecordIndex)
+					{
+						FOwnerRecord NewRecord;
+						NewRecord.OwnerId = OwnerId;
+						OwnerRecords.Add(MoveTemp(NewRecord));
+						RecordIndex = &OwnerRecordIndices.Add(
+							OwnerId,
+							OwnerRecords.Num() - 1);
+					}
+					OwnerRecords[*RecordIndex].EntryIndices.Add(EntryIndex);
+				}
+				OwnerRecords.Sort(
+					[](const FOwnerRecord& Left, const FOwnerRecord& Right)
+					{
+						return Left.OwnerId < Right.OwnerId;
+					});
 			}
+			const int32 LogicalTotal = PageUnit ==
+				EUeAgentProjectionPageUnit::Entry
+				? Snapshot.GetEntries().Num()
+				: OwnerRecords.Num();
+			constexpr int32 Start = 0;
+			const int32 MaximumCount = LogicalTotal;
 
 			auto TryBuild =
 				[&](
@@ -1468,21 +1057,45 @@ namespace UE::UAI::Projection
 					TSharedPtr<const FUeAgentProjectedSnapshot>& OutSnapshot,
 					FUeAgentTokenEstimate& OutEstimate) -> bool
 				{
+					TArray<int32> SelectedEntryIndices;
+					if (PageUnit == EUeAgentProjectionPageUnit::Entry)
+					{
+						SelectedEntryIndices.Reserve(Count);
+						for (int32 Offset = 0; Offset < Count; ++Offset)
+						{
+							SelectedEntryIndices.Add(Start + Offset);
+						}
+					}
+					else
+					{
+						for (int32 Group = Start;
+							Group < Start + Count;
+							++Group)
+						{
+							SelectedEntryIndices.Append(
+								OwnerRecords[Group].EntryIndices);
+						}
+					}
+					const int32 EntryCount = SelectedEntryIndices.Num();
 					if (!Checkpoint(
 						TEXT("projection_snapshot"),
 						Deadline,
 						Cancellation,
 						OutError)
-						|| !ChargePayload(Resources, Count, OutError))
+						|| !ChargePayload(
+							Resources,
+							EntryCount,
+							OutError))
 					{
 						return false;
 					}
 					TArray<FUeAgentProjectedEntry> Entries;
-					Entries.Reserve(Count);
-					for (int32 Offset = 0; Offset < Count; ++Offset)
+					Entries.Reserve(EntryCount);
+					for (int32 Offset = 0; Offset < EntryCount; ++Offset)
 					{
+						const int32 EntryIndex = SelectedEntryIndices[Offset];
 						const FUeAgentStateEntry& Entry =
-							Snapshot.GetEntries()[Start + Offset];
+							Snapshot.GetEntries()[EntryIndex];
 						TOptional<FUeAgentDefaultValue> Default;
 						TOptional<FUeAgentStateDetails> Details;
 						if (Request.GetProfile().IncludesDefaults())
@@ -1501,17 +1114,6 @@ namespace UE::UAI::Projection
 							MoveTemp(Default),
 							MoveTemp(Details));
 					}
-					const int32 End = Start + Count;
-					const bool bPageHasMore =
-						End < PagedSource.TotalItems;
-					const FString NextCursor = bPageHasMore
-						? EncodeCursor(
-							DescriptorIdentity,
-							ResultKind,
-							Request.GetProfile(),
-							PagedSource,
-							End)
-						: FString();
 					TOptional<FUeAgentStateProvenance> Provenance;
 					if (Request.GetProfile().IncludesProvenance())
 					{
@@ -1540,17 +1142,12 @@ namespace UE::UAI::Projection
 							MoveTemp(Entries),
 							FUeAgentPageInfo(
 								Count,
-								PagedSource.TotalItems,
-								bPageHasMore,
-								NextCursor),
+								LogicalTotal),
 							MoveTemp(Omissions));
 					if (!OutSnapshot->IsValid())
 					{
-						return Fail(
-							OutError,
-							TEXT("projection_payload_invalid"),
-							Snapshot.GetSnapshotId(),
-							TEXT("projected snapshot is invalid"));
+						OutError = (*OutSnapshot).GetValidationDiagnostic();
+						return false;
 					}
 					const FUeAgentProjectedPayload Payload(
 						OutSnapshot.ToSharedRef());
@@ -1562,100 +1159,23 @@ namespace UE::UAI::Projection
 					TSharedPtr<const FUeAgentProjectedSnapshot>& OutSnapshot,
 					FUeAgentTokenEstimate& OutEstimate) -> bool
 				{
-					if (!TryBuild(
+					return TryBuild(
 						MaximumCount,
 						OutSnapshot,
-						OutEstimate))
-					{
-						return false;
-					}
-					if (!Request.GetTokenBudget().IsSet()
-						|| OutEstimate.GetTokens()
-							<= Request.GetTokenBudget().GetValue())
-					{
-						return true;
-					}
-					if (MaximumCount == 0)
-					{
-						return Fail(
-							OutError,
-							TEXT("projection_token_budget_exceeded"),
-							RequestId,
-							TEXT("required response metadata exceeds token budget"));
-					}
-					TSharedPtr<const FUeAgentProjectedSnapshot> Best;
-					FUeAgentTokenEstimate BestEstimate;
-					int32 Low = 1;
-					int32 High = MaximumCount - 1;
-					while (Low <= High)
-					{
-						const int32 Count = Low + (High - Low) / 2;
-						TSharedPtr<const FUeAgentProjectedSnapshot>
-							Candidate;
-						FUeAgentTokenEstimate CandidateEstimate;
-						if (!TryBuild(
-							Count,
-							Candidate,
-							CandidateEstimate))
-						{
-							return false;
-						}
-						if (CandidateEstimate.GetTokens()
-							<= Request.GetTokenBudget().GetValue())
-						{
-							Best = MoveTemp(Candidate);
-							BestEstimate = CandidateEstimate;
-							Low = Count + 1;
-						}
-						else
-						{
-							High = Count - 1;
-						}
-					}
-					if (!Best.IsValid())
-					{
-						return Fail(
-							OutError,
-							TEXT("projection_token_budget_exceeded"),
-							RequestId,
-							TEXT("one complete projected entry exceeds token budget"));
-					}
-					OutSnapshot = MoveTemp(Best);
-					OutEstimate = BestEstimate;
-					return true;
+						OutEstimate);
 				};
 
 			if (!TryFit(ProjectedSnapshot, FinalEstimate))
 			{
 				return false;
 			}
-			bHasMore = ProjectedSnapshot->GetPage().HasMore();
 			FinalPayload.Emplace(ProjectedSnapshot.ToSharedRef());
 		}
 		else if (Source.GetCatalog().IsValid())
 		{
 			const FUeAgentCatalogSnapshot& Catalog = *Source.GetCatalog();
-			const FCursorSource PagedSource = CursorSource(Catalog);
-			int32 Start = 0;
-			if (!TryPageStart(
-				Request.GetPage(),
-				DescriptorIdentity,
-				ResultKind,
-				Request.GetProfile(),
-				PagedSource,
-				Resources,
-				Start,
-				OutError))
-			{
-				return false;
-			}
-			int32 MaximumCount = PagedSource.TotalItems - Start;
-			if (Request.GetPage().HasMaxItems())
-			{
-				MaximumCount = FMath::Min(
-					MaximumCount,
-					Request.GetPage().GetMaxItems());
-			}
+			constexpr int32 Start = 0;
+			const int32 MaximumCount = Catalog.GetCandidates().Num();
 
 			auto TryBuild =
 				[&](
@@ -1679,17 +1199,6 @@ namespace UE::UAI::Projection
 						Candidates.Add(
 							Catalog.GetCandidates()[Start + Offset]);
 					}
-					const int32 End = Start + Count;
-					const bool bPageHasMore =
-						End < PagedSource.TotalItems;
-					const FString NextCursor = bPageHasMore
-						? EncodeCursor(
-							DescriptorIdentity,
-							ResultKind,
-							Request.GetProfile(),
-							PagedSource,
-							End)
-						: FString();
 					OutCatalog = MakeShared<FUeAgentProjectedCatalog>(
 						Catalog.GetCatalogId(),
 						Catalog.GetCatalogKind(),
@@ -1699,16 +1208,11 @@ namespace UE::UAI::Projection
 						Catalog.GetDiagnostics(),
 						FUeAgentPageInfo(
 							Count,
-							PagedSource.TotalItems,
-							bPageHasMore,
-							NextCursor));
+							Catalog.GetCandidates().Num()));
 					if (!OutCatalog->IsValid())
 					{
-						return Fail(
-							OutError,
-							TEXT("projection_payload_invalid"),
-							Catalog.GetCatalogId(),
-							TEXT("projected catalog is invalid"));
+						OutError = (*OutCatalog).GetValidationDiagnostic();
+						return false;
 					}
 					const FUeAgentProjectedPayload Payload(
 						OutCatalog.ToSharedRef());
@@ -1720,86 +1224,20 @@ namespace UE::UAI::Projection
 					TSharedPtr<const FUeAgentProjectedCatalog>& OutCatalog,
 					FUeAgentTokenEstimate& OutEstimate) -> bool
 				{
-					if (!TryBuild(
+					return TryBuild(
 						MaximumCount,
 						OutCatalog,
-						OutEstimate))
-					{
-						return false;
-					}
-					if (!Request.GetTokenBudget().IsSet()
-						|| OutEstimate.GetTokens()
-							<= Request.GetTokenBudget().GetValue())
-					{
-						return true;
-					}
-					if (MaximumCount == 0)
-					{
-						return Fail(
-							OutError,
-							TEXT("projection_token_budget_exceeded"),
-							RequestId,
-							TEXT("required response metadata exceeds token budget"));
-					}
-					TSharedPtr<const FUeAgentProjectedCatalog> Best;
-					FUeAgentTokenEstimate BestEstimate;
-					int32 Low = 1;
-					int32 High = MaximumCount - 1;
-					while (Low <= High)
-					{
-						const int32 Count = Low + (High - Low) / 2;
-						TSharedPtr<const FUeAgentProjectedCatalog>
-							Candidate;
-						FUeAgentTokenEstimate CandidateEstimate;
-						if (!TryBuild(
-							Count,
-							Candidate,
-							CandidateEstimate))
-						{
-							return false;
-						}
-						if (CandidateEstimate.GetTokens()
-							<= Request.GetTokenBudget().GetValue())
-						{
-							Best = MoveTemp(Candidate);
-							BestEstimate = CandidateEstimate;
-							Low = Count + 1;
-						}
-						else
-						{
-							High = Count - 1;
-						}
-					}
-					if (!Best.IsValid())
-					{
-						return Fail(
-							OutError,
-							TEXT("projection_token_budget_exceeded"),
-							RequestId,
-							TEXT("one complete projected candidate exceeds token budget"));
-					}
-					OutCatalog = MoveTemp(Best);
-					OutEstimate = BestEstimate;
-					return true;
+						OutEstimate);
 				};
 
 			if (!TryFit(ProjectedCatalog, FinalEstimate))
 			{
 				return false;
 			}
-			bHasMore = ProjectedCatalog->GetPage().HasMore();
 			FinalPayload.Emplace(ProjectedCatalog.ToSharedRef());
 		}
 		else
 		{
-			if (!Request.GetPage().GetCursor().IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_cursor_invalid"),
-					RequestId,
-					TEXT("cursor is only valid for paged payloads"));
-			}
 			if (!Checkpoint(
 				TEXT("projection_payload"),
 				Deadline,
@@ -1835,16 +1273,6 @@ namespace UE::UAI::Projection
 			{
 				return false;
 			}
-			if (Request.GetTokenBudget().IsSet()
-				&& FinalEstimate.GetTokens()
-					> Request.GetTokenBudget().GetValue())
-			{
-				return Fail(
-					OutError,
-					TEXT("projection_token_budget_exceeded"),
-					RequestId,
-					TEXT("complete typed value exceeds token budget"));
-			}
 		}
 
 		if (!Checkpoint(
@@ -1873,21 +1301,15 @@ namespace UE::UAI::Projection
 				RequestId,
 				ResultKind,
 				Request.GetProfile().GetProfileId(),
-				bHasMore
-					? EUeAgentProjectionCompleteness::PartialPage
-					: EUeAgentProjectionCompleteness::Complete,
 				MoveTemp(FinalPayload.GetValue()),
 				Request.GetArtifacts(),
 				Request.GetDiagnostics(),
 				FinalEstimate));
 		if (!OutResponse->IsValid())
 		{
+			OutError = OutResponse->GetValidationDiagnostic();
 			OutResponse.Reset();
-			return Fail(
-				OutError,
-				TEXT("projection_response_invalid"),
-				RequestId,
-				TEXT("projected response is invalid"));
+			return false;
 		}
 		return true;
 	}

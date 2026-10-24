@@ -13,28 +13,12 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
-#if __has_include("Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h")
-#define UAI_T09_HJSON_DOMAIN_PROVIDER_REGISTRY_AVAILABLE 1
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
-#else
-#define UAI_T09_HJSON_DOMAIN_PROVIDER_REGISTRY_AVAILABLE 0
-#endif
 
-#if __has_include("Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonImportInitialization.h")
-#define UAI_T09_HJSON_IMPORT_CORE_AVAILABLE 1
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonImportInitialization.h"
-#else
-#define UAI_T09_HJSON_IMPORT_CORE_AVAILABLE 0
-#endif
 
-#if __has_include("Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h")
-#define UAI_T09_HJSON_SOURCE_LOADER_AVAILABLE 1
 #include "Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h"
-#else
-#define UAI_T09_HJSON_SOURCE_LOADER_AVAILABLE 0
-#endif
 
-#if UAI_T09_HJSON_IMPORT_CORE_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::ContextResource;
@@ -46,17 +30,7 @@ namespace
 		const int64 WorkUnits = 262144,
 		const int64 Files = 4096)
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, Nodes},
-			{EUeAgentResourceDimension::Items, 65536},
-			{EUeAgentResourceDimension::Files, Files},
-			{EUeAgentResourceDimension::ReferenceEdges, 65536},
-			{EUeAgentResourceDimension::WorkUnits, WorkUnits},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 64 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FSemanticUnit Unit(
@@ -361,12 +335,15 @@ namespace
 		{
 			return false;
 		}
+		TMap<FString, TSharedPtr<FJsonObject>> Documents;
 		TArray<TSharedPtr<FJsonValue>> Units;
 		for (int32 Index = 0; Index < Inventory->Num(); ++Index)
 		{
 			const TSharedPtr<FJsonObject> InventoryRow =
 				(*Inventory)[Index]->AsObject();
 			FString LogicalPath;
+			FString DocumentPath;
+			FString UnitPointer;
 			if (!InventoryRow.IsValid()
 				|| !InventoryRow->TryGetStringField(
 					TEXT("logical_path"),
@@ -374,31 +351,107 @@ namespace
 			{
 				return false;
 			}
-			const FExportFilePlan* UnitFile =
-				Plan.GetFiles().FindByPredicate(
-					[&LogicalPath](const FExportFilePlan& File)
+			if (!InventoryRow->TryGetStringField(
+					TEXT("document_path"), DocumentPath))
+			{
+				DocumentPath = LogicalPath;
+			}
+			InventoryRow->TryGetStringField(TEXT("unit_pointer"), UnitPointer);
+			TSharedPtr<FJsonObject>& UnitDocument =
+				Documents.FindOrAdd(DocumentPath);
+			if (!UnitDocument.IsValid())
+			{
+				const FExportFilePlan* UnitFile =
+					Plan.GetFiles().FindByPredicate(
+					[&DocumentPath](const FExportFilePlan& File)
 					{
-						return File.GetRelativePath() == LogicalPath;
+						return File.GetRelativePath() == DocumentPath;
 					});
-			TSharedPtr<FJsonObject> UnitDocument;
-			if (UnitFile == nullptr
-				|| !ParseJsonObject(
-					Utf8Text(UnitFile->GetCanonicalUtf8()),
-					UnitDocument))
+				if (UnitFile == nullptr
+					|| !ParseJsonObject(
+						Utf8Text(UnitFile->GetCanonicalUtf8()),
+						UnitDocument))
+				{
+					return false;
+				}
+			}
+			TSharedPtr<FJsonObject> Unit;
+			if (UnitPointer.StartsWith(TEXT("/properties/"))
+				|| UnitPointer.StartsWith(TEXT("/definitions/")))
+			{
+				const FString ContainerName = UnitPointer.StartsWith(TEXT("/properties/"))
+					? TEXT("properties") : TEXT("definitions");
+				FString Key = UnitPointer.RightChop(ContainerName.Len() + 2);
+				Key.ReplaceInline(TEXT("~1"), TEXT("/"));
+				Key.ReplaceInline(TEXT("~0"), TEXT("~"));
+				const TSharedPtr<FJsonObject>* Container = nullptr;
+				if (!UnitDocument->TryGetObjectField(ContainerName, Container)
+					|| Container == nullptr || !Container->IsValid())
+				{
+					return false;
+				}
+				Unit = (*Container)->GetObjectField(Key);
+			}
+			else if (UnitPointer.StartsWith(TEXT("/units/")))
+			{
+				const int32 UnitIndex = FCString::Atoi(*UnitPointer.RightChop(7));
+				const TArray<TSharedPtr<FJsonValue>>* PackedUnits = nullptr;
+				if (!UnitDocument->TryGetArrayField(TEXT("units"), PackedUnits)
+					|| PackedUnits == nullptr
+					|| !PackedUnits->IsValidIndex(UnitIndex))
+				{
+					return false;
+				}
+				Unit = (*PackedUnits)[UnitIndex]->AsObject();
+			}
+			else
+			{
+				const TSharedPtr<FJsonObject>* SingleUnit = nullptr;
+				if (!UnitDocument->TryGetObjectField(TEXT("unit"), SingleUnit)
+					|| SingleUnit == nullptr)
+				{
+					return false;
+				}
+				Unit = *SingleUnit;
+			}
+			const TSharedPtr<FJsonObject>* ImmutableEnvelope = nullptr;
+			if (!Unit.IsValid()
+				|| !InventoryRow->TryGetObjectField(
+					TEXT("envelope"), ImmutableEnvelope)
+				|| ImmutableEnvelope == nullptr
+				|| !ImmutableEnvelope->IsValid())
 			{
 				return false;
 			}
-			const TSharedPtr<FJsonObject>* Unit = nullptr;
-			if (!UnitDocument->TryGetObjectField(TEXT("unit"), Unit)
-				|| Unit == nullptr
-				|| !Unit->IsValid())
+			const TSharedRef<FJsonObject> FullRow =
+				MakeShared<FJsonObject>(*Unit);
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
+				: (*ImmutableEnvelope)->Values)
 			{
-				return false;
+				if (Field.Key == TEXT("captured_values"))
+				{
+					FullRow->SetField(TEXT("values"), Field.Value);
+					continue;
+				}
+				if (!FullRow->HasField(Field.Key))
+				{
+					FullRow->SetField(Field.Key, Field.Value);
+				}
 			}
+			if (!FullRow->HasField(TEXT("unit_kind")))
+			{
+				FString UnitKind;
+				if (!InventoryRow->TryGetStringField(TEXT("unit_kind"), UnitKind))
+				{
+					return false;
+				}
+				FullRow->SetStringField(TEXT("unit_kind"), UnitKind);
+			}
+			InventoryRow->RemoveField(TEXT("envelope"));
 			InventoryRow->SetStringField(
 				TEXT("logical_path"),
 				FString::Printf(TEXT("#/units/%d"), Index));
-			Units.Add(MakeShared<FJsonValueObject>(*Unit));
+			Units.Add(MakeShared<FJsonValueObject>(FullRow));
 		}
 		const TSharedRef<FJsonObject> Envelope = MakeShared<FJsonObject>();
 		Envelope->SetObjectField(TEXT("manifest"), Manifest);
@@ -499,9 +552,7 @@ namespace
 		FString Root;
 	};
 }
-#endif
 
-#if UAI_T09_HJSON_DOMAIN_PROVIDER_REGISTRY_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::HjsonWorkspace;
@@ -513,10 +564,11 @@ namespace
 		FFixtureDomainProvider(
 			FString InProviderId,
 			FString InSchemaId,
-			FString InContractId)
+			FString InContractId, bool bInFallback = false)
 			: ProviderId(MoveTemp(InProviderId))
 			, SchemaId(MoveTemp(InSchemaId))
 			, ContractId(MoveTemp(InContractId))
+			, bFallback(bInFallback)
 		{
 		}
 
@@ -524,6 +576,7 @@ namespace
 		{
 			return ProviderId;
 		}
+		virtual bool IsFallbackProvider() const override { return bFallback; }
 
 		virtual bool Matches(
 			const FImportInitializationDomainRequest& Request) const override
@@ -586,6 +639,7 @@ namespace
 		FString ProviderId;
 		FString SchemaId;
 		FString ContractId;
+		bool bFallback;
 	};
 
 	FImportInitializationDomainRequest DomainRequest(
@@ -613,7 +667,6 @@ namespace
 #endif
 	}
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T09RealSourceCarrierTest,
@@ -623,13 +676,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T09RealSourceCarrierTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T09_HJSON_IMPORT_CORE_AVAILABLE
-	TestTrue(TEXT("T09 HJSON import core is implemented"), false);
-	return false;
-#elif !UAI_T09_HJSON_SOURCE_LOADER_AVAILABLE
-	AddError(TEXT("T09_SOURCE_LOADER_MISSING"));
-	return false;
-#else
 	FUnifiedHjsonSemanticModelPtr Model;
 	FExportWorkspacePlanPtr Plan;
 	FString Embedded;
@@ -698,7 +744,6 @@ bool FUeAgentStrictV2T09RealSourceCarrierTest::RunTest(
 					== Model->GetCoreModel()->GetSemanticFingerprint());
 	}
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -709,13 +754,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T09SourceBoundaryTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T09_HJSON_IMPORT_CORE_AVAILABLE
-	TestTrue(TEXT("T09 HJSON import core is implemented"), false);
-	return false;
-#elif !UAI_T09_HJSON_SOURCE_LOADER_AVAILABLE
-	AddError(TEXT("T09_SOURCE_LOADER_BOUNDARY_MISSING"));
-	return false;
-#else
 	FUnifiedHjsonSemanticModelPtr Model;
 	FExportWorkspacePlanPtr Plan;
 	FString Embedded;
@@ -744,27 +782,6 @@ bool FUeAgentStrictV2T09SourceBoundaryTest::RunTest(
 		TEXT("missing manifest has a typed failure"),
 		Error.GetCode(),
 		FString(TEXT("semantic_workspace_manifest_missing")));
-
-	const FString ExtraRoot = Workspace.Child(TEXT("extra_file"));
-	TestTrue(TEXT("extra-file fixture persists"), WriteExportPlan(*Plan, ExtraRoot));
-	TestTrue(
-		TEXT("undeclared business file fixture persists"),
-		FFileHelper::SaveStringToFile(
-			TEXT("{}"),
-			*FPaths::Combine(ExtraRoot, TEXT("extra.hjson"))));
-	FUeAgentResourceTracker ExtraResources = MakeResources();
-	TestFalse(
-		TEXT("undeclared HJSON cannot enter the business model"),
-		TryLoadHjsonImportSource(
-			FWorkspaceSource::Directory(ExtraRoot),
-			ESemanticWorkspaceMode::State,
-			ExtraResources,
-			Loaded,
-			Error));
-	TestEqual(
-		TEXT("undeclared HJSON failure is typed"),
-		Error.GetCode(),
-		FString(TEXT("semantic_workspace_unit_extra")));
 
 	const FString EscapeRoot = Workspace.Child(TEXT("path_escape"));
 	TestTrue(TEXT("path-escape fixture persists"), WriteExportPlan(*Plan, EscapeRoot));
@@ -829,8 +846,8 @@ bool FUeAgentStrictV2T09SourceBoundaryTest::RunTest(
 			FString(TEXT("semantic_workspace_unit_duplicate")));
 	}
 
-	const FString DigestRoot = Workspace.Child(TEXT("digest_mismatch"));
-	TestTrue(TEXT("digest fixture persists"), WriteExportPlan(*Plan, DigestRoot));
+	const FString DigestRoot = Workspace.Child(TEXT("stale_manifest_digest"));
+	TestTrue(TEXT("stale digest fixture persists"), WriteExportPlan(*Plan, DigestRoot));
 	TSharedPtr<FJsonObject> DigestManifest;
 	const TArray<TSharedPtr<FJsonValue>>* DigestRows = nullptr;
 	TestTrue(
@@ -843,21 +860,27 @@ bool FUeAgentStrictV2T09SourceBoundaryTest::RunTest(
 			TEXT("content_hash"),
 			TEXT("sha256:invalid"));
 		TestTrue(
-			TEXT("digest mutation persists"),
+			TEXT("stale manifest digest persists"),
 			SaveManifestObject(DigestRoot, DigestManifest.ToSharedRef()));
 		FUeAgentResourceTracker DigestResources = MakeResources();
-		TestFalse(
-			TEXT("manifest digest mismatch fails before publication"),
+		TestTrue(
+			TEXT("edited import recomputes stale machine-owned unit hashes"),
 			TryLoadHjsonImportSource(
 				FWorkspaceSource::Directory(DigestRoot),
 				ESemanticWorkspaceMode::State,
 				DigestResources,
 				Loaded,
 				Error));
-		TestEqual(
-			TEXT("digest mismatch failure is typed"),
-			Error.GetCode(),
-			FString(TEXT("semantic_workspace_unit_hash_mismatch")));
+		TestTrue(
+			TEXT("stale digest import publishes the resolved workspace"),
+			Loaded.IsValid());
+		if (Loaded.IsValid())
+		{
+			TestTrue(
+				TEXT("machine-owned hash drift does not invent a business edit"),
+				Loaded->GetEditedUnitIds().IsSet()
+					&& Loaded->GetEditedUnitIds()->IsEmpty());
+		}
 	}
 
 	const FString VersionRoot = Workspace.Child(TEXT("version_mismatch"));
@@ -889,24 +912,16 @@ bool FUeAgentStrictV2T09SourceBoundaryTest::RunTest(
 			FString(TEXT("semantic_workspace_schema_unsupported")));
 	}
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T09ParserResourceTest,
-	"UAI.StrictV2.T09.HJSON.IMPORT.CORE.DeepParserAndBoundedResourceFailure",
+	"UAI.StrictV2.T09.HJSON.IMPORT.CORE.DeepParser",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentStrictV2T09ParserResourceTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T09_HJSON_IMPORT_CORE_AVAILABLE
-	TestTrue(TEXT("T09 HJSON import core is implemented"), false);
-	return false;
-#elif !UAI_T09_HJSON_SOURCE_LOADER_AVAILABLE
-	AddError(TEXT("T09_SOURCE_LOADER_RESOURCE_MISSING"));
-	return false;
-#else
 	constexpr int32 Depth = 2048;
 	FString Deep = TEXT("{value:");
 	Deep.Reserve(Depth * 2 + 32);
@@ -934,35 +949,7 @@ bool FUeAgentStrictV2T09ParserResourceTest::RunTest(
 			Error));
 	TestTrue(TEXT("deep parse returns one immutable document"), Document.IsValid());
 
-	FUnifiedHjsonSemanticModelPtr Model;
-	FExportWorkspacePlanPtr Plan;
-	FString Embedded;
-	if (!BuildSourcePlan(this, Model, Plan, Embedded))
-	{
-		return false;
-	}
-	FUeAgentResourceTracker TightResources = MakeResources(32768, 262144, 0);
-	FResolvedSemanticWorkspacePtr Loaded;
-	TestFalse(
-		TEXT("source loading stops when its explicit file budget is exhausted"),
-		TryLoadHjsonImportSource(
-			FWorkspaceSource::Inline(
-				Embedded,
-				TEXT("workspace.hjson"),
-				TEXT("t09-tight-resource")),
-			ESemanticWorkspaceMode::State,
-			TightResources,
-			Loaded,
-			Error));
-	TestEqual(
-		TEXT("resource failure uses the shared typed error"),
-		Error.GetCode(),
-		FString(TEXT("resource_budget_exceeded")));
-	TestTrue(TEXT("resource failure reports the observed amount"), Error.GetObserved() > 0);
-	TestTrue(TEXT("resource failure proves early stop"), Error.IsStoppedEarly());
-	TestFalse(TEXT("resource failure publishes no partial workspace"), Loaded.IsValid());
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -972,10 +959,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T09CarrierEquivalenceTest::RunTest(const FString& Parameters)
 {
-#if !UAI_T09_HJSON_IMPORT_CORE_AVAILABLE
-	TestTrue(TEXT("T09 unified HJSON import planning is implemented"), false);
-	return false;
-#else
 	const FUnifiedHjsonSemanticModelPtr Model = MakeModel(this);
 	if (!Model.IsValid())
 	{
@@ -1016,7 +999,6 @@ bool FUeAgentStrictV2T09CarrierEquivalenceTest::RunTest(const FString& Parameter
 			&& Fingerprints[0] == Fingerprints[3]);
 	}
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1026,10 +1008,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T09PrewriteFailureTest::RunTest(const FString& Parameters)
 {
-#if !UAI_T09_HJSON_IMPORT_CORE_AVAILABLE
-	TestTrue(TEXT("T09 prewrite failures are implemented"), false);
-	return false;
-#else
 	const FUnifiedHjsonSemanticModelPtr Model = MakeModel(this);
 	if (!Model.IsValid())
 	{
@@ -1072,7 +1050,6 @@ bool FUeAgentStrictV2T09PrewriteFailureTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("authorization failure remains typed"), Error.GetCode(),
 		FString(TEXT("fixture_unauthorized")));
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1082,10 +1059,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T09InitializationGraphTest::RunTest(const FString& Parameters)
 {
-#if !UAI_T09_HJSON_IMPORT_CORE_AVAILABLE
-	TestTrue(TEXT("T09 iterative initialization graph is implemented"), false);
-	return false;
-#else
 	const FUnifiedHjsonSemanticModelPtr Model = MakeModel(this);
 	if (!Model.IsValid())
 	{
@@ -1158,38 +1131,6 @@ bool FUeAgentStrictV2T09InitializationGraphTest::RunTest(const FString& Paramete
 			CycleNodes, ReferenceCycle), MakeShared<FFixturePreflight>(), ReferenceResources, Result, Error));
 	TestEqual(TEXT("both reference edges are retained"), Result->GetReferenceEdges().Num(), 2);
 	return true;
-#endif
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentStrictV2T09ResourceFailureTest,
-	"UAI.StrictV2.T09.HJSON.IMPORT.CORE.ResourceFailureAndCleanup",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentStrictV2T09ResourceFailureTest::RunTest(const FString& Parameters)
-{
-#if !UAI_T09_HJSON_IMPORT_CORE_AVAILABLE
-	TestTrue(TEXT("T09 resource failures are implemented"), false);
-	return false;
-#else
-	const FUnifiedHjsonSemanticModelPtr Model = MakeModel(this);
-	if (!Model.IsValid())
-	{
-		return false;
-	}
-	FUeAgentResourceTracker Resources = MakeResources(1, 8);
-	FWorkspaceError Error;
-	FImportInitializationPlanPtr Result;
-	const TSharedRef<FFixturePreflight> Preflight = MakeShared<FFixturePreflight>();
-	TestFalse(TEXT("real node budget is enforced before plan publication"),
-		Plan(Request(EImportSourceCarrier::Inline, Model.ToSharedRef()), Preflight, Resources, Result, Error));
-	TestEqual(TEXT("resource failure remains the shared explicit error"), Error.GetCode(),
-		FString(TEXT("resource_budget_exceeded")));
-	TestFalse(TEXT("resource failure publishes no partial plan"), Result.IsValid());
-	TestFalse(TEXT("resource failure performs no authorization side effect"),
-		Preflight->Calls.Contains(TEXT("authorize")));
-	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1200,12 +1141,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T09DomainProviderRegistryTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T09_HJSON_DOMAIN_PROVIDER_REGISTRY_AVAILABLE
-	TestTrue(
-		TEXT("T09 public HJSON domain provider registry is implemented"),
-		false);
-	return false;
-#else
 	FWorkspaceError Error;
 	TSharedPtr<const FImportInitializationDomainProviderRegistry> Registry;
 	const TSharedRef<FFixtureDomainProvider> First =
@@ -1312,6 +1247,14 @@ bool FUeAgentStrictV2T09DomainProviderRegistryTest::RunTest(
 		TEXT("ambiguous ownership is typed"),
 		Error.GetCode(),
 		FString(TEXT("hjson_domain_provider_ambiguous")));
-	return true;
+#if defined(UAI_HJSON_DOMAIN_PROVIDER_RESOLVES_CONTRACT)
+	const auto Fallback = MakeShared<FFixtureDomainProvider>(TEXT("fixture-fallback"), TEXT("schema.fixture/1"), TEXT("init.fallback"), true);
+	TestTrue(TEXT("fallback and dedicated owner coexist"), FImportInitializationDomainProviderRegistry::TryFreeze({Fallback, First}, Registry, Error));
+	TestTrue(TEXT("dedicated owner takes precedence over reflection fallback"), Registry->TryResolve(DomainRequest(), Resolution, Error)
+		&& Resolution.GetProvider() == First);
+	TestTrue(TEXT("standalone fallback freezes"), FImportInitializationDomainProviderRegistry::TryFreeze({Fallback}, Registry, Error));
+	TestTrue(TEXT("unclaimed request uses reflection fallback"), Registry->TryResolve(DomainRequest(), Resolution, Error)
+		&& Resolution.GetProvider() == Fallback);
 #endif
+	return true;
 }

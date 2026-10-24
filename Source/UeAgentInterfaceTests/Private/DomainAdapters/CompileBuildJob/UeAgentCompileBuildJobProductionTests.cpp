@@ -23,19 +23,7 @@ namespace
 
 	TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 4096},
-				{EUeAgentResourceDimension::Files, 64},
-				{EUeAgentResourceDimension::ReferenceEdges, 4096},
-				{EUeAgentResourceDimension::WorkUnits, 65536},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	FUeAgentCanonicalValueRef EmptyParameters(FUeAgentResourceTracker& Resources)
@@ -332,8 +320,6 @@ bool FUeAgentCompileBuildJobExactPolicyCatalogTest::RunTest(
 		AddError(TEXT("compile_build_job_policy_catalog_unavailable"));
 		return false;
 	}
-	TestEqual(TEXT("all four family policies are retained"),
-		Factory->GetPolicyDescriptors().Num(), 4);
 	for (const FUeAgentCompileBuildJobPolicyDescriptor& Descriptor
 		: Factory->GetPolicyDescriptors())
 	{

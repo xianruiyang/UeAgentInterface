@@ -31,27 +31,21 @@ namespace UE::UAI::Module::CommandRegistration::UnifiedGraphLayout
 				Declaration.StateLayers = {TEXT("persisted")};
 				Declaration.InputFields = {
 					{TEXT("targets"), TEXT("array"), true, false,
-						TEXT("One or more exact graph identities from one owning Blueprint asset, each with that asset's public content_graph revision.")},
+						TEXT("One or more exact graph identities from one owning Blueprint asset; the service binds the current revision during the operation.")},
 					{TEXT("strategy"), TEXT("string"), true, false,
 						TEXT("The shared layout strategy identity.")},
 					{TEXT("parameters"), TEXT("object"), true, false,
 						TEXT("Bounded strategy parameters such as spacing.")},
-					{TEXT("authorization_id"), TEXT("string"), true, false,
-						TEXT("Authorization bound to the complete target impact plan.")},
 					{TEXT("projection"), TEXT("object"), false, false,
 						TEXT("Optional bounded response projection.")},
 				};
 				Declaration.ResultFields = {
 					{TEXT("terminal_status"), TEXT("string"), true, false,
 						TEXT("Succeeded only after save and independent layout readback.")},
-					{TEXT("impact_plan"), TEXT("object"), true, false,
-						TEXT("The complete multi-target impact and atomicity plan.")},
-					{TEXT("independent_readback"), TEXT("array"), true, false,
-						TEXT("Persisted node positions and revisions for every target.")},
+					{TEXT("layout_summary"), TEXT("array"), true, false,
+						TEXT("Short per-target layout counts and readback status.")},
 				};
 				Declaration.Errors = {
-					{TEXT("unified_graph_layout_authority_required"),
-						TEXT("The complete impact plan is not authorized.")},
 					{TEXT("unified_graph_layout_target_duplicate"),
 						TEXT("A graph identity appears more than once.")},
 					{TEXT("unified_graph_layout_target_unsupported"),
@@ -80,22 +74,20 @@ namespace UE::UAI::Module::CommandRegistration::UnifiedGraphLayout
 				Declaration.Purpose.Target =
 					TEXT("Exact Blueprint, Widget Blueprint, or Animation Blueprint graph identities that share one owning asset and package.");
 				Declaration.Purpose.Preconditions = {
-					TEXT("Read the owning asset through content_graph.* and use its returned public revision for every target."),
 					TEXT("Keep every graph in one request within the same owning Blueprint asset and package."),
-					TEXT("Authorize the complete targets array before execution."),
 				};
 				Declaration.Purpose.ParameterGuidance =
 					TEXT("Do not pass provider names; use hierarchical_left_to_right and bounded spacing, padding, or origin parameters.");
 				Declaration.Purpose.ResultGuidance =
-					TEXT("Verify the reloaded public revision and every persisted node position in independent_readback; retain the impact and persistence receipts.");
+					TEXT("Verify the short layout summary after the service reloads and reads the package back.");
 				Declaration.Purpose.FailureGuidance =
 					TEXT("Unknown, duplicate, cross-package, unsupported, stale, or unmeasurable targets fail before the first write; post-save reload failure is explicitly state-unknown.");
 				Declaration.Purpose.SideEffectGuidance =
 					TEXT("The owner measures graph geometry offscreen, applies the shared topology algorithm, compiles and saves one package, reloads it, then reads positions back.");
 				Declaration.Purpose.MinimumExample =
-					TEXT("client.graph.layout_apply(targets, strategy, parameters, authorization_id)");
+					TEXT("client.graph.layout_apply(targets, strategy, parameters)");
 				Declaration.Purpose.RelatedFlows = {
-					TEXT("query.command.search"), TEXT("query.command.detail"),
+					TEXT("query.command.search"), TEXT("query.command.usage"),
 					TEXT("content_graph.structure"),
 				};
 				Declaration.Purpose.Keywords = {
@@ -109,7 +101,7 @@ namespace UE::UAI::Module::CommandRegistration::UnifiedGraphLayout
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				TSharedPtr<IUeAgentExactCommandHandler> Handler;
 				if (!CommandHandlers::UnifiedGraphLayout::TryCreateHandler(
@@ -129,7 +121,7 @@ namespace UE::UAI::Module::CommandRegistration::UnifiedGraphLayout
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		OutContribution = MakeShared<FContribution>();

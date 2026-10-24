@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Templates/SharedPointer.h"
@@ -23,12 +24,7 @@ namespace UE::UAI::DomainAdapters::GenericRead
 	using UE::UAI::StateSemantic::FUeAgentStateRevision;
 	using UE::UAI::StateSemantic::FUeAgentTemporalPoint;
 
-	struct UEAGENTINTERFACE_API FUeAgentGenericReadError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FUeAgentGenericReadError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentUeTypeBinding final
 	{
@@ -42,12 +38,14 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		const FUeAgentCanonicalType& GetCanonicalType() const;
 		const FString& GetBindingEvidence() const;
 		bool IsValid() const;
+		const FUeAgentGenericReadError& GetValidationDiagnostic() const;
 
 	private:
 		FString SourceTypeId;
 		FUeAgentCanonicalType CanonicalType;
 		FString BindingEvidence;
 		bool bValid = false;
+		TSharedPtr<const FUeAgentGenericReadError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentUeReadEntry final
@@ -68,6 +66,7 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		const FUeAgentStateDetails& GetDetails() const;
 		const FUeAgentStateRevision& GetObservedRevision() const;
 		bool IsValid() const;
+		const FUeAgentGenericReadError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentCanonicalIdentity Identity;
@@ -77,6 +76,7 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		FUeAgentStateDetails Details;
 		FUeAgentStateRevision ObservedRevision;
 		bool bValid = false;
+		TSharedPtr<const FUeAgentGenericReadError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentUeReadCapture final
@@ -99,6 +99,7 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		bool IsSettled() const;
 		const TArray<FUeAgentUeReadEntry>& GetEntries() const;
 		bool IsValid() const;
+		const FUeAgentGenericReadError& GetValidationDiagnostic() const;
 
 	private:
 		FString SnapshotId;
@@ -109,6 +110,7 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		bool bSettled = false;
 		TArray<FUeAgentUeReadEntry> Entries;
 		bool bValid = false;
+		TSharedPtr<const FUeAgentGenericReadError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentUeReadHook

@@ -1,6 +1,8 @@
 #include "Core/ArtifactPublisher/UeAgentFileArtifactPublisher.h"
+#include "Utilities/UeAgentFileOperationDiagnostic.h"
 
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
@@ -63,13 +65,25 @@ namespace UE::UAI::ArtifactPublisher
 			return true;
 		}
 
-		void SetError(
-			FFileArtifactPublishError& OutError,
-			FString Code,
-			FString Path = FString(),
-			FString Detail = FString())
+		FFileArtifactPublishError Failure(
+			const TCHAR* Code, const FString& Reason,
+			const FString& PropertyPath = FString(), const FString& InternalPath = FString())
 		{
-			OutError.Set(MoveTemp(Code), MoveTemp(Path), MoveTemp(Detail));
+			auto Error = FFileArtifactPublishError::Failure(Code, Reason, TEXT("artifact_publish"), InternalPath);
+			Error.PropertyPath = PropertyPath;
+			return Error;
+		}
+
+		FFileArtifactPublishError FileFailure(
+			const TCHAR* Code, const FString& Reason, const FString& InternalPath)
+		{
+			return FileDiagnostics::MakeFileOperationFailure(Code, Reason, TEXT("artifact_publish"), InternalPath);
+		}
+
+		void AppendFailure(FFileArtifactPublishError& OutError, FFileArtifactPublishError Error)
+		{
+			if (OutError.Code.IsEmpty()) OutError = MoveTemp(Error);
+			else OutError.Append(MoveTemp(Error));
 		}
 
 		FString Sha256(const TArray<uint8>& Bytes)
@@ -113,7 +127,8 @@ namespace UE::UAI::ArtifactPublisher
 
 		bool SaveOwnerRecord(
 			const FString& Path,
-			const FFileArtifactReference& Reference)
+			const FFileArtifactReference& Reference,
+			FFileArtifactPublishError& OutError)
 		{
 			const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
 			Object->SetStringField(TEXT("format"), FileArtifactFormat);
@@ -127,11 +142,19 @@ namespace UE::UAI::ArtifactPublisher
 			Object->SetNumberField(
 				TEXT("byte_count"), static_cast<double>(Reference.GetByteCount()));
 			FString Text;
-			return SerializeJson(Object, Text)
-				&& FFileHelper::SaveStringToFile(
-					Text + TEXT("\n"),
-					*Path,
-					FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+			if (!SerializeJson(Object, Text))
+			{
+				OutError = Failure(TEXT("file_artifact_staging_write_failed"),
+					TEXT("The artifact ownership record could not be encoded as JSON."), TEXT("ownership_marker"), Path);
+				return false;
+			}
+			if (!FFileHelper::SaveStringToFile(Text + TEXT("\n"), *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+			{
+				OutError = FileFailure(TEXT("file_artifact_staging_write_failed"),
+					TEXT("The staged artifact ownership record could not be written."), Path);
+				return false;
+			}
+			return true;
 		}
 
 		bool ExistingFinalIsOwned(
@@ -149,41 +172,63 @@ namespace UE::UAI::ArtifactPublisher
 			}
 			if (!bFinalExists || !bMarkerExists)
 			{
-				SetError(
-					OutError,
-					TEXT("file_artifact_final_ownership_required"),
-					Final,
-					TEXT("final and ownership marker are inconsistent"));
+				OutError = Failure(TEXT("file_artifact_final_ownership_required"),
+					bFinalExists ? TEXT("An existing artifact has no ownership record; it cannot be replaced.")
+						: TEXT("An artifact ownership record exists but its artifact file is missing."), TEXT("ownership_marker"), Final);
+				auto Presence = MakeShared<FJsonObject>();
+				Presence->SetBoolField(TEXT("artifact_exists"), bFinalExists);
+				Presence->SetBoolField(TEXT("ownership_record_exists"), bMarkerExists);
+				OutError.ActualValue = MakeShared<FJsonValueObject>(Presence);
 				return false;
 			}
 			FString Text;
 			TSharedPtr<FJsonObject> Object;
-			if (!FFileHelper::LoadFileToString(Text, *Marker)
-				|| !FJsonSerializer::Deserialize(
-					TJsonReaderFactory<>::Create(Text), Object)
-				|| !Object.IsValid())
+			if (!FFileHelper::LoadFileToString(Text, *Marker))
 			{
-				SetError(
-					OutError,
-					TEXT("file_artifact_final_ownership_required"), Marker);
+				OutError = FileFailure(TEXT("file_artifact_final_ownership_required"),
+					TEXT("The existing artifact ownership record could not be read."), Marker);
+				return false;
+			}
+			const auto Reader = TJsonReaderFactory<>::Create(Text);
+			if (!FJsonSerializer::Deserialize(Reader, Object) || !Object.IsValid())
+			{
+				OutError = Failure(TEXT("file_artifact_final_ownership_required"),
+					TEXT("The existing artifact ownership record is not a valid JSON object."), TEXT("ownership_marker"), Marker);
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Reader->GetErrorMessage());
 				return false;
 			}
 			FString Format;
 			FString MarkerOwner;
 			FString MarkerFinal;
-			if (!Object->TryGetStringField(TEXT("format"), Format)
-				|| Format != FileArtifactFormat
-				|| !Object->TryGetStringField(
-					TEXT("publisher_owner_id"), MarkerOwner)
-				|| MarkerOwner != OwnerId
-				|| !Object->TryGetStringField(TEXT("locator"), MarkerFinal)
-				|| NormalizePath(MarkerFinal) != Final)
+			auto ReadField = [&](const TCHAR* Field, FString& Value)
 			{
-				SetError(
-					OutError,
-					TEXT("file_artifact_final_ownership_required"), Marker);
+				if (Object->TryGetStringField(Field, Value)) return true;
+				const auto* Actual = Object->Values.Find(Field);
+				const FString Reason = Actual
+					? FString::Printf(TEXT("The artifact ownership field '%s' is not a string."), Field)
+					: FString::Printf(TEXT("The artifact ownership record is missing the required field '%s'."), Field);
+				OutError = Failure(TEXT("file_artifact_final_ownership_required"),
+					Reason,
+					FString(TEXT("ownership_marker.")) + Field, Marker);
+				if (Actual) OutError.ActualEvidence = *Actual;
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("string"));
 				return false;
-			}
+			};
+			auto Matches = [&](const TCHAR* Field, const FString& Actual, const FString& Expected, const TCHAR* Reason)
+			{
+				if (Actual == Expected) return true;
+				OutError = Failure(TEXT("file_artifact_final_ownership_required"), Reason,
+					FString(TEXT("ownership_marker.")) + Field, Marker);
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Actual);
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Expected);
+				return false;
+			};
+			if (!ReadField(TEXT("format"), Format)
+				|| !Matches(TEXT("format"), Format, FileArtifactFormat, TEXT("The existing artifact ownership record uses an unsupported format."))
+				|| !ReadField(TEXT("publisher_owner_id"), MarkerOwner)
+				|| !Matches(TEXT("publisher_owner_id"), MarkerOwner, OwnerId, TEXT("The existing artifact belongs to a different publisher."))
+				|| !ReadField(TEXT("locator"), MarkerFinal)
+				|| !Matches(TEXT("locator"), NormalizePath(MarkerFinal), Final, TEXT("The ownership record refers to a different artifact location."))) return false;
 			return true;
 		}
 
@@ -199,6 +244,47 @@ namespace UE::UAI::ArtifactPublisher
 				|| IFileManager::Get().Delete(*Path, false, true, true);
 		}
 
+		bool CleanupFile(const FString& Path, const TCHAR* Reason, FFileArtifactPublishError& OutError)
+		{
+			if (DeleteFile(Path)) return true;
+			AppendFailure(OutError, FileFailure(TEXT("file_artifact_cleanup_failed"), Reason, Path));
+			return false;
+		}
+
+		bool RestoreFile(const FString& Destination, const FString& Backup, const TCHAR* Reason, FFileArtifactPublishError& OutError)
+		{
+			if (MoveFile(Destination, Backup)) return true;
+			auto Error = FileFailure(TEXT("file_artifact_restore_failed"), Reason, Backup);
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(Destination);
+			AppendFailure(OutError, MoveTemp(Error));
+			return false;
+		}
+
+		bool VerifyBytes(const TArray<uint8>& Actual, const TArray<uint8>& Expected, const FString& ExpectedHash,
+			const TCHAR* Code, const TCHAR* Reason, const FString& Path, FFileArtifactPublishError& OutError)
+		{
+			const FString ActualHash = Sha256(Actual);
+			if (Actual == Expected && ActualHash == ExpectedHash) return true;
+			OutError = Failure(Code, Reason, TEXT("content"), Path);
+			auto ActualInfo = MakeShared<FJsonObject>();
+			auto ExpectedInfo = MakeShared<FJsonObject>();
+			ActualInfo->SetNumberField(TEXT("byte_count"), Actual.Num());
+			ExpectedInfo->SetNumberField(TEXT("byte_count"), Expected.Num());
+			OutError.ActualValue = MakeShared<FJsonValueObject>(ActualInfo);
+			OutError.ExpectedValue = MakeShared<FJsonValueObject>(ExpectedInfo);
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(ActualHash);
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedHash);
+			for (int32 Index = 0; Index < FMath::Min(Actual.Num(), Expected.Num()); ++Index)
+			{
+				if (Actual[Index] != Expected[Index])
+				{
+					OutError.PropertyPath = FString::Printf(TEXT("content[%d]"), Index);
+					break;
+				}
+			}
+			return false;
+		}
+
 		bool MakeStringValue(
 			const FString& Value,
 			FUeAgentResourceTracker& Resources,
@@ -209,7 +295,7 @@ namespace UE::UAI::ArtifactPublisher
 			if (!FUeAgentCanonicalValue::TryString(
 				Value, Resources, OutValue, Error))
 			{
-				SetError(OutError, Error.Code, Error.Path);
+				OutError = MoveTemp(Error);
 				return false;
 			}
 			return true;
@@ -228,7 +314,7 @@ namespace UE::UAI::ArtifactPublisher
 				OutValue,
 				Error))
 			{
-				SetError(OutError, Error.Code, Error.Path);
+				OutError = MoveTemp(Error);
 				return false;
 			}
 			return true;
@@ -249,14 +335,21 @@ namespace UE::UAI::ArtifactPublisher
 		, Format(NormalizeLower(MoveTemp(InFormat)))
 		, MimeType(NormalizeLower(MoveTemp(InMimeType)))
 	{
-		bValid = !SourcePath.IsEmpty()
-			&& !FinalPath.IsEmpty()
-			&& !SourcePath.Equals(FinalPath, ESearchCase::IgnoreCase)
-			&& !PublisherOwnerId.IsEmpty()
-			&& IsToken(ArtifactKind)
-			&& IsToken(Format)
-			&& MimeType.Contains(TEXT("/"))
-			&& !FPaths::GetPath(FinalPath).IsEmpty();
+		auto Reject = [this](const TCHAR* Reason, const TCHAR* Path, const FString& Actual, const bool bPublic)
+		{
+			auto Error = Failure(TEXT("file_artifact_request_invalid"), Reason, Path);
+			if (bPublic) Error.ActualValue = MakeShared<FJsonValueString>(Actual);
+			else Error.ActualEvidence = MakeShared<FJsonValueString>(Actual);
+			ValidationDiagnostic = MakeShared<FFileArtifactPublishError>(MoveTemp(Error));
+		};
+		if (SourcePath.IsEmpty()) Reject(TEXT("The artifact publication request has no source file path."), TEXT("source_path"), SourcePath, false);
+		else if (FinalPath.IsEmpty()) Reject(TEXT("The artifact publication request has no destination file path."), TEXT("final_path"), FinalPath, false);
+		else if (SourcePath.Equals(FinalPath, ESearchCase::IgnoreCase)) Reject(TEXT("The artifact source and destination must be different files."), TEXT("final_path"), FinalPath, false);
+		else if (PublisherOwnerId.IsEmpty()) Reject(TEXT("The artifact publication request has no publisher owner."), TEXT("publisher_owner_id"), PublisherOwnerId, false);
+		else if (!IsToken(ArtifactKind)) Reject(TEXT("The artifact kind must be a non-empty token containing only letters, digits, '_', '-', '.' or '+'."), TEXT("kind"), ArtifactKind, true);
+		else if (!IsToken(Format)) Reject(TEXT("The artifact format must be a non-empty token containing only letters, digits, '_', '-', '.' or '+'."), TEXT("format"), Format, true);
+		else if (!MimeType.Contains(TEXT("/"))) Reject(TEXT("The artifact MIME type must contain '/'."), TEXT("mime_type"), MimeType, true);
+		else if (FPaths::GetPath(FinalPath).IsEmpty()) Reject(TEXT("The artifact destination must have a parent directory."), TEXT("final_path"), FinalPath, false);
 	}
 
 	const FString& FFileArtifactPublishRequest::GetSourcePath() const
@@ -291,7 +384,20 @@ namespace UE::UAI::ArtifactPublisher
 
 	bool FFileArtifactPublishRequest::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FFileArtifactPublishError* FFileArtifactPublishRequest::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic.Get();
+	}
+
+	FFileArtifactReference::FFileArtifactReference()
+	{
+		auto Error = FFileArtifactPublishError::Failure(TEXT("file_artifact_reference_invalid"),
+			TEXT("The file artifact reference has no artifact identifier."), TEXT("artifact_publish"));
+		Error.PropertyPath = TEXT("artifact_id");
+		ValidationDiagnostic = MakeShared<FFileArtifactPublishError>(MoveTemp(Error));
 	}
 
 	FFileArtifactReference::FFileArtifactReference(
@@ -312,16 +418,30 @@ namespace UE::UAI::ArtifactPublisher
 		, ContentHash(NormalizeLower(MoveTemp(InContentHash)))
 		, ByteCount(InByteCount)
 	{
-		bValid = ArtifactId.StartsWith(TEXT("sha256:"))
-			|| ArtifactId.StartsWith(TEXT("artifact:"));
-		bValid = bValid
-			&& !PublisherOwnerId.IsEmpty()
-			&& IsToken(ArtifactKind)
-			&& IsToken(Format)
-			&& MimeType.Contains(TEXT("/"))
-			&& !Locator.IsEmpty()
-			&& ContentHash.StartsWith(TEXT("sha256:"))
-			&& ByteCount >= 0;
+		auto Reject = [this](const FString& Reason, const FString& Path, const FString& Actual, const bool bPublic)
+		{
+			auto Error = FFileArtifactPublishError::Failure(TEXT("file_artifact_reference_invalid"), Reason, TEXT("artifact_publish"));
+			Error.PropertyPath = Path;
+			if (bPublic) Error.ActualValue = MakeShared<FJsonValueString>(Actual);
+			else Error.ActualEvidence = MakeShared<FJsonValueString>(Actual);
+			ValidationDiagnostic = MakeShared<FFileArtifactPublishError>(MoveTemp(Error));
+		};
+		if (!ArtifactId.StartsWith(TEXT("sha256:")) && !ArtifactId.StartsWith(TEXT("artifact:")))
+			Reject(TEXT("The file artifact identifier must start with 'sha256:' or 'artifact:'."), TEXT("artifact_id"), ArtifactId, false);
+		else if (PublisherOwnerId.IsEmpty()) Reject(TEXT("The file artifact reference has no publisher owner."), TEXT("publisher_owner_id"), PublisherOwnerId, false);
+		else if (!IsToken(ArtifactKind)) Reject(TEXT("The file artifact kind must be a non-empty token containing only letters, digits, '_', '-', '.' or '+'."), TEXT("kind"), ArtifactKind, true);
+		else if (!IsToken(Format)) Reject(TEXT("The file artifact format must be a non-empty token containing only letters, digits, '_', '-', '.' or '+'."), TEXT("format"), Format, true);
+		else if (!MimeType.Contains(TEXT("/"))) Reject(TEXT("The file artifact MIME type must contain '/'."), TEXT("mime_type"), MimeType, true);
+		else if (Locator.IsEmpty()) Reject(TEXT("The file artifact reference has no file locator."), TEXT("locator"), Locator, false);
+		else if (!ContentHash.StartsWith(TEXT("sha256:"))) Reject(TEXT("The file artifact content hash must start with 'sha256:'."), TEXT("content_hash"), ContentHash, false);
+		else if (ByteCount < 0)
+		{
+			auto Error = FFileArtifactPublishError::Failure(TEXT("file_artifact_reference_invalid"),
+				TEXT("The file artifact byte count must be non-negative."), TEXT("artifact_publish"));
+			Error.PropertyPath = TEXT("byte_count");
+			Error.ActualValue = MakeShared<FJsonValueNumber>(static_cast<double>(ByteCount));
+			ValidationDiagnostic = MakeShared<FFileArtifactPublishError>(MoveTemp(Error));
+		}
 	}
 
 	const FString& FFileArtifactReference::GetArtifactId() const
@@ -366,33 +486,21 @@ namespace UE::UAI::ArtifactPublisher
 
 	bool FFileArtifactReference::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
 	}
 
-	const FString& FFileArtifactPublishError::GetCode() const
+	const FFileArtifactPublishError* FFileArtifactReference::GetValidationDiagnostic() const
 	{
-		return Code;
+		return ValidationDiagnostic.Get();
 	}
 
-	const FString& FFileArtifactPublishError::GetPath() const
-	{
-		return Path;
-	}
+	
 
-	const FString& FFileArtifactPublishError::GetDetail() const
-	{
-		return Detail;
-	}
+	
 
-	void FFileArtifactPublishError::Set(
-		FString InCode,
-		FString InPath,
-		FString InDetail)
-	{
-		Code = NormalizeText(MoveTemp(InCode));
-		Path = NormalizeText(MoveTemp(InPath));
-		Detail = NormalizeText(MoveTemp(InDetail));
-	}
+	
+
+	
 
 	bool TryPublishFileArtifact(
 		const FFileArtifactPublishRequest& Request,
@@ -404,7 +512,7 @@ namespace UE::UAI::ArtifactPublisher
 		OutError = FFileArtifactPublishError();
 		if (!Request.IsValid())
 		{
-			SetError(OutError, TEXT("file_artifact_request_invalid"));
+			OutError = *Request.GetValidationDiagnostic();
 			return false;
 		}
 
@@ -412,13 +520,11 @@ namespace UE::UAI::ArtifactPublisher
 		if (!FFileHelper::LoadFileToArray(
 			SourceBytes, *Request.GetSourcePath()))
 		{
-			SetError(
-				OutError,
-				TEXT("file_artifact_source_read_failed"),
-				Request.GetSourcePath());
+			OutError = FileFailure(TEXT("file_artifact_source_read_failed"),
+				TEXT("The source file for artifact publication could not be read."), Request.GetSourcePath());
 			return false;
 		}
-		FUeAgentResourceBudgetExceeded BudgetError;
+		FUeAgentResourceChargeError ChargeError;
 		if (!Resources.TryChargeMany(
 			{
 				{EUeAgentResourceDimension::Files, 2},
@@ -430,31 +536,22 @@ namespace UE::UAI::ArtifactPublisher
 					SourceBytes.Num() * 2LL},
 			},
 			TEXT("file_artifact_publish"),
-			BudgetError))
+			ChargeError))
 		{
-			SetError(
-				OutError,
-				BudgetError.Code,
-				BudgetError.Path,
-				LexToString(BudgetError.Dimension));
+			OutError = MoveTemp(ChargeError);
 			return false;
 		}
 
 		const FString Final = Request.GetFinalPath();
 		const FString Parent = FPaths::GetPath(Final);
 		const FString Marker = Final + TEXT(".uai-artifact-owner.json");
-		if (!IFileManager::Get().MakeDirectory(*Parent, true)
-			|| !ExistingFinalIsOwned(
-				Final, Marker, Request.GetPublisherOwnerId(), OutError))
+		if (!IFileManager::Get().MakeDirectory(*Parent, true))
 		{
-			if (OutError.GetCode().IsEmpty())
-			{
-				SetError(
-					OutError,
-					TEXT("file_artifact_final_parent_create_failed"), Parent);
-			}
+			OutError = FileFailure(TEXT("file_artifact_final_parent_create_failed"),
+				TEXT("The artifact destination directory could not be created."), Parent);
 			return false;
 		}
+		if (!ExistingFinalIsOwned(Final, Marker, Request.GetPublisherOwnerId(), OutError)) return false;
 
 		const FString TransactionId =
 			FGuid::NewGuid().ToString(EGuidFormats::Digits);
@@ -466,14 +563,17 @@ namespace UE::UAI::ArtifactPublisher
 		const FString Backup = Prefix + TEXT(".backup");
 		const FString BackupMarker = Prefix + TEXT(".backup-owner.json");
 		IFileManager& Files = IFileManager::Get();
-		if (Files.FileExists(*Staging)
-			|| Files.FileExists(*StagingMarker)
-			|| Files.FileExists(*Backup)
-			|| Files.FileExists(*BackupMarker))
+		const TArray<TPair<FString, FString>> TransactionFiles = {
+			{TEXT("staging"), Staging}, {TEXT("staging_owner"), StagingMarker},
+			{TEXT("backup"), Backup}, {TEXT("backup_owner"), BackupMarker}};
+		for (const auto& File : TransactionFiles)
 		{
-			SetError(
-				OutError, TEXT("file_artifact_transaction_collision"), Prefix);
-			return false;
+			if (Files.FileExists(*File.Value))
+			{
+				OutError = Failure(TEXT("file_artifact_transaction_collision"),
+					TEXT("A temporary file required for artifact publication already exists."), File.Key, File.Value);
+				return false;
+			}
 		}
 
 		const FString ContentHash = Sha256(SourceBytes);
@@ -494,81 +594,108 @@ namespace UE::UAI::ArtifactPublisher
 			Final,
 			ContentHash,
 			SourceBytes.Num());
-		if (!Reference.IsValid()
-			|| !FFileHelper::SaveArrayToFile(SourceBytes, *Staging)
-			|| !SaveOwnerRecord(StagingMarker, Reference))
+		if (!Reference.IsValid())
 		{
-			DeleteFile(Staging);
-			DeleteFile(StagingMarker);
-			SetError(
-				OutError, TEXT("file_artifact_staging_write_failed"), Staging);
+			OutError = *Reference.GetValidationDiagnostic();
+			return false;
+		}
+		auto CleanupStaging = [&]()
+		{
+			CleanupFile(Staging, TEXT("The temporary artifact file could not be removed."), OutError);
+			CleanupFile(StagingMarker, TEXT("The temporary artifact ownership record could not be removed."), OutError);
+		};
+		if (!FFileHelper::SaveArrayToFile(SourceBytes, *Staging))
+		{
+			OutError = FileFailure(TEXT("file_artifact_staging_write_failed"),
+				TEXT("The staged artifact content could not be written."), Staging);
+			CleanupStaging();
+			return false;
+		}
+		if (!SaveOwnerRecord(StagingMarker, Reference, OutError))
+		{
+			CleanupStaging();
 			return false;
 		}
 
 		TArray<uint8> StagingBytes;
-		if (!FFileHelper::LoadFileToArray(StagingBytes, *Staging)
-			|| StagingBytes != SourceBytes
-			|| Sha256(StagingBytes) != ContentHash)
+		if (!FFileHelper::LoadFileToArray(StagingBytes, *Staging))
 		{
-			DeleteFile(Staging);
-			DeleteFile(StagingMarker);
-			SetError(
-				OutError, TEXT("file_artifact_staging_verify_failed"), Staging);
+			OutError = FileFailure(TEXT("file_artifact_staging_verify_failed"),
+				TEXT("The staged artifact could not be read back for verification."), Staging);
+			CleanupStaging();
+			return false;
+		}
+		if (!VerifyBytes(StagingBytes, SourceBytes, ContentHash, TEXT("file_artifact_staging_verify_failed"),
+			TEXT("The staged artifact content differs from the source file."), Staging, OutError))
+		{
+			CleanupStaging();
 			return false;
 		}
 
 		const bool bHadFinal = Files.FileExists(*Final);
-		if (bHadFinal
-			&& (!MoveFile(Backup, Final)
-				|| !MoveFile(BackupMarker, Marker)))
+		if (bHadFinal)
 		{
-			if (Files.FileExists(*Backup) && !Files.FileExists(*Final))
+			if (!MoveFile(Backup, Final))
 			{
-				MoveFile(Final, Backup);
+				OutError = FileFailure(TEXT("file_artifact_backup_failed"),
+					TEXT("The existing artifact could not be moved to its transaction backup."), Final);
 			}
-			if (Files.FileExists(*BackupMarker)
-				&& !Files.FileExists(*Marker))
+			else if (!MoveFile(BackupMarker, Marker))
 			{
-				MoveFile(Marker, BackupMarker);
+				OutError = FileFailure(TEXT("file_artifact_backup_failed"),
+					TEXT("The existing artifact ownership record could not be moved to its transaction backup."), Marker);
 			}
-			DeleteFile(Staging);
-			DeleteFile(StagingMarker);
-			SetError(
-				OutError, TEXT("file_artifact_backup_failed"), Final);
-			return false;
+			if (!OutError.Code.IsEmpty())
+			{
+				if (Files.FileExists(*Backup) && !Files.FileExists(*Final))
+					RestoreFile(Final, Backup, TEXT("The previous artifact could not be restored after the backup step failed."), OutError);
+				if (Files.FileExists(*BackupMarker) && !Files.FileExists(*Marker))
+					RestoreFile(Marker, BackupMarker, TEXT("The previous ownership record could not be restored after the backup step failed."), OutError);
+				CleanupStaging();
+				return false;
+			}
 		}
 
-		const bool bPublished = MoveFile(Final, Staging)
-			&& MoveFile(Marker, StagingMarker);
 		TArray<uint8> FinalBytes;
-		const bool bVerified = bPublished
-			&& FFileHelper::LoadFileToArray(FinalBytes, *Final)
-			&& FinalBytes == SourceBytes
-			&& Sha256(FinalBytes) == ContentHash;
+		bool bVerified = false;
+		if (!MoveFile(Final, Staging))
+			OutError = FileFailure(TEXT("file_artifact_publish_move_failed"), TEXT("The staged artifact could not be moved to its destination."), Staging);
+		else if (!MoveFile(Marker, StagingMarker))
+			OutError = FileFailure(TEXT("file_artifact_publish_move_failed"), TEXT("The staged ownership record could not be moved to its destination."), StagingMarker);
+		else if (!FFileHelper::LoadFileToArray(FinalBytes, *Final))
+			OutError = FileFailure(TEXT("file_artifact_publish_verify_failed"), TEXT("The published artifact could not be read back for verification."), Final);
+		else bVerified = VerifyBytes(FinalBytes, SourceBytes, ContentHash, TEXT("file_artifact_publish_verify_failed"),
+			TEXT("The published artifact content differs from the source file."), Final, OutError);
 		if (!bVerified)
 		{
-			DeleteFile(Final);
-			DeleteFile(Marker);
-			bool bRestored = !bHadFinal;
+			const bool bFinalRemoved = CleanupFile(Final, TEXT("The failed publication's artifact file could not be removed."), OutError);
+			const bool bMarkerRemoved = CleanupFile(Marker, TEXT("The failed publication's ownership record could not be removed."), OutError);
+			bool bRestored = bFinalRemoved && bMarkerRemoved;
 			if (bHadFinal)
 			{
-				bRestored = MoveFile(Final, Backup)
-					&& MoveFile(Marker, BackupMarker);
+				const bool bFileRestored = RestoreFile(Final, Backup, TEXT("The previous artifact could not be restored after publication failed."), OutError);
+				const bool bMarkerRestored = RestoreFile(Marker, BackupMarker, TEXT("The previous ownership record could not be restored after publication failed."), OutError);
+				bRestored = bRestored && bFileRestored && bMarkerRestored;
 			}
-			DeleteFile(Staging);
-			DeleteFile(StagingMarker);
-			SetError(
-				OutError,
-				bRestored
-					? TEXT("file_artifact_publish_failed_restored")
-					: TEXT("file_artifact_publish_state_unknown"),
-				Final);
+			CleanupStaging();
+			auto Result = Failure(bRestored ? TEXT("file_artifact_publish_failed_restored") : TEXT("file_artifact_publish_state_unknown"),
+				bRestored ? TEXT("Artifact publication failed; the previous destination state was restored.")
+					: TEXT("Artifact publication failed and the previous destination state could not be fully restored."), FString(), Final);
+			Result.PublicCause = MakeShared<FFileArtifactPublishError>(MoveTemp(OutError));
+			OutError = MoveTemp(Result);
 			return false;
 		}
 
-		DeleteFile(Backup);
-		DeleteFile(BackupMarker);
 		OutReference = Reference;
+		const bool bBackupRemoved = CleanupFile(Backup, TEXT("The artifact was published and verified, but its previous backup could not be removed."), OutError);
+		const bool bBackupMarkerRemoved = CleanupFile(BackupMarker, TEXT("The artifact was published and verified, but its previous ownership backup could not be removed."), OutError);
+		if (!bBackupRemoved || !bBackupMarkerRemoved)
+		{
+			auto State = MakeShared<FJsonObject>();
+			State->SetBoolField(TEXT("artifact_published"), true);
+			OutError.ActualValue = MakeShared<FJsonValueObject>(State);
+			return false;
+		}
 		return true;
 	}
 
@@ -582,7 +709,7 @@ namespace UE::UAI::ArtifactPublisher
 		OutError = FFileArtifactPublishError();
 		if (!Reference.IsValid())
 		{
-			SetError(OutError, TEXT("file_artifact_reference_invalid"));
+			OutError = *Reference.GetValidationDiagnostic();
 			return false;
 		}
 		TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
@@ -601,6 +728,7 @@ namespace UE::UAI::ArtifactPublisher
 			FUeAgentCanonicalValuePtr Value;
 			if (!MakeStringValue(Item.Value, Resources, Value, OutError))
 			{
+				if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = Item.Key;
 				return false;
 			}
 			Items.Emplace(Item.Key, Value.ToSharedRef());
@@ -609,6 +737,7 @@ namespace UE::UAI::ArtifactPublisher
 		if (!MakeIntegerValue(
 			Reference.GetByteCount(), Resources, ByteCount, OutError))
 		{
+			if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = TEXT("byte_count");
 			return false;
 		}
 		Items.Emplace(TEXT("byte_count"), ByteCount.ToSharedRef());
@@ -616,8 +745,7 @@ namespace UE::UAI::ArtifactPublisher
 		if (!FUeAgentCanonicalValue::TryObject(
 			Items, Resources, OutValue, SemanticError))
 		{
-			SetError(
-				OutError, SemanticError.Code, SemanticError.Path);
+			OutError = MoveTemp(SemanticError);
 			return false;
 		}
 		return true;

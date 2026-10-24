@@ -1,5 +1,6 @@
 #include "DomainAdapters/GenericRead/UeAgentGenericRead.h"
 
+#include "Dom/JsonValue.h"
 #include "HAL/PlatformTime.h"
 #include "UObject/Class.h"
 #include "UObject/UnrealType.h"
@@ -10,16 +11,39 @@ namespace UE::UAI::DomainAdapters::GenericRead
 	{
 		bool Fail(
 			FUeAgentGenericReadDiagnostic& OutDiagnostic,
-			FString Code,
-			FString Message,
-			FString SubjectId = FString())
+			FUeAgentGenericReadDiagnostic Diagnostic)
 		{
-			OutDiagnostic = {
-				MoveTemp(Code),
-				MoveTemp(Message),
-				MoveTemp(SubjectId),
-			};
+			OutDiagnostic = MoveTemp(Diagnostic);
 			return false;
+		}
+
+		FUeAgentGenericReadDiagnostic NativeValueFailure(
+			FString Code, FString Reason, FString Field,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			auto Error = FUeAgentGenericReadDiagnostic::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("generic_read"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = MoveTemp(Field);
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			Error.ActualValuePresent = Error.ActualValue.IsValid();
+			Error.ExpectedValuePresent = Error.ExpectedValue.IsValid();
+			return Error;
+		}
+
+		FUeAgentGenericReadDiagnostic NativeConditionFailure(
+			FString Code, FString Reason, FString Field, bool bActual, bool bExpected)
+		{
+			return NativeValueFailure(MoveTemp(Code), MoveTemp(Reason), MoveTemp(Field),
+				MakeShared<FJsonValueBoolean>(bActual), MakeShared<FJsonValueBoolean>(bExpected));
+		}
+
+		FUeAgentGenericReadDiagnostic AtBinding(FUeAgentGenericReadDiagnostic Error,
+			const Discovery::FUeAgentCandidateBinding& Binding)
+		{
+			if (Error.TargetPath.IsEmpty()) Error.TargetPath = Binding.GetPublicRef();
+			if (Error.SubjectId.IsEmpty()) Error.SubjectId = Binding.GetBindingId();
+			return Error;
 		}
 
 		bool RequireText(
@@ -31,13 +55,10 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			{
 				return true;
 			}
-			return Fail(
-				OutDiagnostic,
-				TEXT("ue_read_request_invalid"),
-				FString::Printf(
-					TEXT("%s must be non-empty"),
-					FieldName),
-				FieldName);
+			auto Error = NativeConditionFailure(TEXT("ue_read_request_invalid"),
+				FString::Printf(TEXT("%s must be non-empty"), FieldName), FieldName, false, true);
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Value);
+			return Fail(OutDiagnostic, MoveTemp(Error));
 		}
 
 		bool Checkpoint(
@@ -49,22 +70,11 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			ContextResource::FUeAgentCancellationRequested Cancelled;
 			if (!Cancellation.TryCheckpoint(Cancelled))
 			{
-				return Fail(
-					OutDiagnostic,
-					Cancelled.Code,
-					TEXT("generic UE read was cancelled"),
-					Cancelled.Reason);
+				OutDiagnostic = Cancelled;
+				if (OutDiagnostic.Stage.IsEmpty()) OutDiagnostic.Stage = Stage;
+				return false;
 			}
 
-			ContextResource::FUeAgentOperationDeadlineExceeded Expired;
-			if (!Deadline.TryCheckpoint(Stage, Expired))
-			{
-				return Fail(
-					OutDiagnostic,
-					Expired.Code,
-					TEXT("generic UE read deadline expired"),
-					Stage);
-			}
 			return true;
 		}
 
@@ -102,11 +112,12 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			}
 			if (Identity.OwnerId != RootObject.GetPathName())
 			{
-				return Fail(
-					OutDiagnostic,
-					TEXT("ue_read_identity_owner_mismatch"),
-					TEXT("identity owner does not match the resolved UObject"),
-					Identity.OwnerId);
+				auto Error = NativeConditionFailure(TEXT("ue_read_identity_owner_mismatch"),
+					TEXT("The property binding owner differs from the resolved native object."),
+					TEXT("/identity/owner_matches_object"), false, true);
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Identity.OwnerId);
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(RootObject.GetPathName());
+				return Fail(OutDiagnostic, MoveTemp(Error));
 			}
 			return true;
 		}
@@ -152,11 +163,9 @@ namespace UE::UAI::DomainAdapters::GenericRead
 				CastField<FStrProperty>(&Property);
 			if (!StringProperty)
 			{
-				return Fail(
-					OutDiagnostic,
-					TEXT("ue_type_binding_mismatch"),
-					TEXT("decimal lexeme binding requires FString"),
-					Property.GetName());
+				return Fail(OutDiagnostic, NativeValueFailure(TEXT("ue_type_binding_mismatch"),
+					TEXT("A decimal lexeme binding requires a native FString property."), Property.GetName() + TEXT("/native_type"),
+					MakeShared<FJsonValueString>(SourceTypeId(Property)), MakeShared<FJsonValueString>(TEXT("FString"))));
 			}
 			OutEntry.ValueLexeme =
 				StringProperty->GetPropertyValue_InContainer(
@@ -181,11 +190,9 @@ namespace UE::UAI::DomainAdapters::GenericRead
 				|| StructProperty->Struct
 					!= TBaseStructure<FVector>::Get())
 			{
-				return Fail(
-					OutDiagnostic,
-					TEXT("ue_type_binding_mismatch"),
-					TEXT("spatial point binding requires FVector"),
-					Property.GetName());
+				return Fail(OutDiagnostic, NativeValueFailure(TEXT("ue_type_binding_mismatch"),
+					TEXT("A spatial point binding requires a native FVector property."), Property.GetName() + TEXT("/native_type"),
+					MakeShared<FJsonValueString>(SourceTypeId(Property)), MakeShared<FJsonValueString>(TEXT("FVector"))));
 			}
 			if (!RequireText(
 					Binding.Subject,
@@ -219,11 +226,10 @@ namespace UE::UAI::DomainAdapters::GenericRead
 					&DefaultObject);
 			if (!Value || !Default)
 			{
-				return Fail(
-					OutDiagnostic,
-					TEXT("ue_property_value_unavailable"),
-					TEXT("FVector storage could not be resolved"),
-					Property.GetName());
+				return Fail(OutDiagnostic, NativeConditionFailure(TEXT("ue_property_value_unavailable"),
+					!Value ? TEXT("The native FVector value storage could not be resolved.")
+						: TEXT("The native FVector default storage could not be resolved."),
+					Property.GetName() + (!Value ? TEXT("/value_storage_present") : TEXT("/default_storage_present")), false, true));
 			}
 			const TArray<FString> DefaultComponents = {
 				LexToString(Default->X),
@@ -290,21 +296,17 @@ namespace UE::UAI::DomainAdapters::GenericRead
 				*Binding.PropertyPath);
 			if (!Property)
 			{
-				return Fail(
-					OutDiagnostic,
-					TEXT("ue_property_not_found"),
-					TEXT("reflected property was not found"),
-					Binding.PropertyPath);
+				return Fail(OutDiagnostic, NativeConditionFailure(TEXT("ue_property_not_found"),
+					TEXT("The requested reflected property was not found on the native object."), Binding.PropertyPath, false, true));
 			}
 			const UObject* DefaultObject =
 				RootObject.GetClass()->GetDefaultObject();
 			if (!DefaultObject)
 			{
-				return Fail(
-					OutDiagnostic,
-					TEXT("ue_native_default_unavailable"),
-					TEXT("class default object was not available"),
-					RootObject.GetClass()->GetPathName());
+				auto Error = NativeConditionFailure(TEXT("ue_native_default_unavailable"),
+					TEXT("The native class default object was not available."), Binding.PropertyPath + TEXT("/class_default_present"), false, true);
+				Error.SubjectId = RootObject.GetClass()->GetPathName();
+				return Fail(OutDiagnostic, MoveTemp(Error));
 			}
 
 			OutEntry = {};
@@ -339,26 +341,43 @@ namespace UE::UAI::DomainAdapters::GenericRead
 					OutEntry,
 					OutDiagnostic);
 			default:
-				return Fail(
-					OutDiagnostic,
-					TEXT("ue_type_binding_unsupported"),
-					TEXT("generic value kind is unsupported"),
-					Binding.PropertyPath);
+				return Fail(OutDiagnostic, NativeValueFailure(TEXT("ue_type_binding_unsupported"),
+					TEXT("The native reflection reader does not support this value kind."), Binding.PropertyPath + TEXT("/value_kind"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Binding.ValueKind)),
+					MakeShared<FJsonValueString>(TEXT("DecimalLexeme or SpatialPoint"))));
 			}
 		}
 
-		bool SameRead(
+		FUeAgentGenericReadDiagnostic CompareRead(
 			const FUeAgentGenericReadEntry& Left,
 			const FUeAgentGenericReadEntry& Right)
 		{
-			return Left.ValueLexeme == Right.ValueLexeme
-				&& Left.DefaultLexeme == Right.DefaultLexeme
-				&& Left.TypeBinding.SourceTypeId
-					== Right.TypeBinding.SourceTypeId
-				&& Left.Spatial.Components
-					== Right.Spatial.Components
-				&& Left.Spatial.DefaultComponents
-					== Right.Spatial.DefaultComponents;
+			const auto Difference = [](const FString& Field, TSharedPtr<FJsonValue> Expected, TSharedPtr<FJsonValue> Actual)
+			{
+				return NativeValueFailure(TEXT("ue_read_not_settled"),
+					TEXT("Consecutive native property reads produced different facts."), Field, MoveTemp(Actual), MoveTemp(Expected));
+			};
+			const auto CompareComponents = [&Difference](const FString& Field, const TArray<FString>& Expected, const TArray<FString>& Actual)
+			{
+				if (Expected.Num() != Actual.Num())
+					return Difference(Field + TEXT("/count"), MakeShared<FJsonValueNumber>(Expected.Num()), MakeShared<FJsonValueNumber>(Actual.Num()));
+				for (int32 Index = 0; Index < Expected.Num(); ++Index)
+					if (Expected[Index] != Actual[Index])
+						return Difference(Field + TEXT("/") + FString::FromInt(Index),
+							MakeShared<FJsonValueString>(Expected[Index]), MakeShared<FJsonValueString>(Actual[Index]));
+				return FUeAgentGenericReadDiagnostic();
+			};
+			auto Error = CompareComponents(TEXT("/spatial/components"), Left.Spatial.Components, Right.Spatial.Components);
+			if (!Error.IsEmpty()) return Error;
+			Error = CompareComponents(TEXT("/spatial/default_components"), Left.Spatial.DefaultComponents, Right.Spatial.DefaultComponents);
+			if (!Error.IsEmpty()) return Error;
+			if (Left.ValueLexeme != Right.ValueLexeme)
+				return Difference(TEXT("/value"), MakeShared<FJsonValueString>(Left.ValueLexeme), MakeShared<FJsonValueString>(Right.ValueLexeme));
+			if (Left.DefaultLexeme != Right.DefaultLexeme)
+				return Difference(TEXT("/default"), MakeShared<FJsonValueString>(Left.DefaultLexeme), MakeShared<FJsonValueString>(Right.DefaultLexeme));
+			if (Left.TypeBinding.SourceTypeId != Right.TypeBinding.SourceTypeId)
+				return Difference(TEXT("/type_binding/source_type_id"), MakeShared<FJsonValueString>(Left.TypeBinding.SourceTypeId), MakeShared<FJsonValueString>(Right.TypeBinding.SourceTypeId));
+			return {};
 		}
 
 		FString LexStatePlane(StateSemantic::EUeAgentStatePlane StatePlane)
@@ -382,10 +401,10 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			const StateSemantic::FUeAgentStateSemanticError& Source,
 			FUeAgentGenericReadError& OutError)
 		{
-			OutError.Code = Source.Code;
-			OutError.SubjectId = Source.Path;
-			OutError.Detail = Source.Detail;
+			OutError = Source;
+			if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("native_result");
 		}
+
 
 		bool TryCreateSpatialValue(
 			const FUeAgentGenericSpatialValue& Source,
@@ -444,18 +463,24 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			{
 			case EUeAgentGenericValueKind::DecimalLexeme:
 				CanonicalKind = StateSemantic::EUeAgentValueKind::Decimal;
-				if (!StateSemantic::FUeAgentCanonicalValue::TryDecimal(
+			if (!StateSemantic::FUeAgentCanonicalValue::TryDecimal(
 						Source.ValueLexeme,
 						Resources,
 						Value,
-						StateError)
-					|| !StateSemantic::FUeAgentCanonicalValue::TryDecimal(
+						StateError))
+				{
+					MapStateError(StateError, OutError);
+					OutError.PropertyPath = Source.Identity.Selector + TEXT("/value") + OutError.PropertyPath;
+					return false;
+				}
+				if (!StateSemantic::FUeAgentCanonicalValue::TryDecimal(
 						Source.DefaultLexeme,
 						Resources,
 						DefaultValue,
 						StateError))
 				{
 					MapStateError(StateError, OutError);
+					OutError.PropertyPath = Source.Identity.Selector + TEXT("/default") + OutError.PropertyPath;
 					return false;
 				}
 				break;
@@ -467,8 +492,12 @@ namespace UE::UAI::DomainAdapters::GenericRead
 						CapturedAt,
 						Resources,
 						Value,
-						OutError)
-					|| !TryCreateSpatialValue(
+						OutError))
+				{
+					OutError.PropertyPath = Source.Identity.Selector + TEXT("/value") + OutError.PropertyPath;
+					return false;
+				}
+				if (!TryCreateSpatialValue(
 						Source.Spatial,
 						Source.Spatial.DefaultComponents,
 						CapturedAt,
@@ -476,15 +505,15 @@ namespace UE::UAI::DomainAdapters::GenericRead
 						DefaultValue,
 						OutError))
 				{
+					OutError.PropertyPath = Source.Identity.Selector + TEXT("/default") + OutError.PropertyPath;
 					return false;
 				}
 				break;
 			default:
-				OutError = {
-					TEXT("ue_type_binding_unsupported"),
-					Source.Identity.Selector,
-					TEXT("generic value kind is unsupported"),
-				};
+				OutError = NativeValueFailure(TEXT("ue_type_binding_unsupported"),
+					TEXT("The native reflection reader does not support this value kind."), Source.Identity.Selector + TEXT("/value_kind"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Source.TypeBinding.ValueKind)),
+					MakeShared<FJsonValueString>(TEXT("DecimalLexeme or SpatialPoint")));
 				return false;
 			}
 
@@ -514,12 +543,9 @@ namespace UE::UAI::DomainAdapters::GenericRead
 				Revision);
 			if (!OutEntries.Last().IsValid())
 			{
+				OutError = OutEntries.Last().GetValidationDiagnostic();
+				OutError.PropertyPath = Source.Identity.Selector + OutError.PropertyPath;
 				OutEntries.Pop();
-				OutError = {
-					TEXT("ue_read_entry_invalid"),
-					Source.Identity.Selector,
-					TEXT("reflected UE fact did not satisfy the typed state contract"),
-				};
 				return false;
 			}
 			return true;
@@ -551,17 +577,13 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		}
 		if (!IsInGameThread())
 		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("ue_read_requires_game_thread"),
-				TEXT("UObject reflection read must run on GameThread"));
+			return Fail(OutDiagnostic, NativeConditionFailure(TEXT("ue_read_requires_game_thread"),
+				TEXT("UObject reflection read must run on GameThread."), TEXT("/game_thread"), false, true));
 		}
 		if (!IsValid(Request.RootObject))
 		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("ue_read_root_invalid"),
-				TEXT("root UObject is invalid"));
+			return Fail(OutDiagnostic, NativeConditionFailure(TEXT("ue_read_root_invalid"),
+				TEXT("The native root object is missing or no longer valid."), TEXT("/root_object_valid"), false, true));
 		}
 		if (!RequireText(
 				Request.SnapshotId,
@@ -584,19 +606,17 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		}
 		if (Request.Sequence < 0)
 		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("ue_read_request_invalid"),
-				TEXT("sequence must be non-negative"),
-				TEXT("sequence"));
+			auto Error = NativeConditionFailure(TEXT("ue_read_request_invalid"),
+				TEXT("The native read revision sequence must be non-negative."), TEXT("/sequence_non_negative"), false, true);
+			Error.ActualEvidence = MakeShared<FJsonValueString>(LexToString(Request.Sequence));
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(TEXT(">= 0"));
+			return Fail(OutDiagnostic, MoveTemp(Error));
 		}
 		if (Request.Properties.IsEmpty())
 		{
-			return Fail(
-				OutDiagnostic,
-				TEXT("ue_read_request_invalid"),
-				TEXT("at least one property binding is required"),
-				TEXT("properties"));
+			return Fail(OutDiagnostic, NativeValueFailure(TEXT("ue_read_request_invalid"),
+				TEXT("At least one native property binding is required."), TEXT("/properties/count"),
+				MakeShared<FJsonValueNumber>(Request.Properties.Num()), MakeShared<FJsonValueString>(TEXT(">= 1"))));
 		}
 
 		OutCapture.SnapshotId = Request.SnapshotId;
@@ -632,17 +652,16 @@ namespace UE::UAI::DomainAdapters::GenericRead
 					Second,
 					OutDiagnostic))
 			{
+				if (OutDiagnostic.PropertyPath.IsEmpty()) OutDiagnostic.PropertyPath = Binding.PropertyPath;
 				OutCapture = {};
 				return false;
 			}
-			if (!SameRead(First, Second))
+			auto Difference = CompareRead(First, Second);
+			if (!Difference.IsEmpty())
 			{
 				OutCapture = {};
-				return Fail(
-					OutDiagnostic,
-					TEXT("ue_read_not_settled"),
-					TEXT("consecutive UE reads produced different facts"),
-					Binding.PropertyPath);
+				Difference.PropertyPath = Binding.PropertyPath + Difference.PropertyPath;
+				return Fail(OutDiagnostic, MoveTemp(Difference));
 			}
 			OutCapture.Entries.Add(MoveTemp(Second));
 		}
@@ -668,33 +687,34 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		OutError = {};
 		if (!ReadTemplate.IsSet())
 		{
-			OutError = {
-				TEXT("ue_read_hook_unconfigured"),
-				Request.GetBinding().GetBindingId(),
-				TEXT("reflection hook requires an injected UE object/property template"),
-			};
+			OutError = AtBinding(NativeConditionFailure(TEXT("ue_read_hook_unconfigured"),
+				TEXT("The reflection hook has no native object/property template."), TEXT("/read_template_present"), false, true), Request.GetBinding());
 			return false;
 		}
 		if (!Request.IsValid())
 		{
-			OutError = {
-				TEXT("ue_read_request_invalid"),
-				Request.GetBinding().GetBindingId(),
-				TEXT("typed C2 read request is invalid"),
-			};
+			const auto& Validation = Request.GetBinding().GetValidationDiagnostic();
+			OutError = Validation ? *Validation : NativeConditionFailure(TEXT("ue_read_request_invalid"),
+				TEXT("The native read binding is invalid but supplied no validation diagnostic."), TEXT("/binding_valid"), false, true);
+			OutError = AtBinding(MoveTemp(OutError), Request.GetBinding());
 			return false;
 		}
 
 		FUeAgentGenericReadRequest LegacyRequest = ReadTemplate.GetValue();
-		if (!IsValid(LegacyRequest.RootObject)
-			|| Request.GetBinding().GetSummary().GetIdentity().GetOwnerId()
-				!= LegacyRequest.RootObject->GetPathName())
+		if (!IsValid(LegacyRequest.RootObject))
 		{
-			OutError = {
-				TEXT("ue_read_binding_owner_mismatch"),
-				Request.GetBinding().GetBindingId(),
-				TEXT("C2 binding owner does not match the injected UObject"),
-			};
+			OutError = AtBinding(NativeConditionFailure(TEXT("ue_read_binding_owner_mismatch"),
+				TEXT("The injected native read object is missing or no longer valid."), TEXT("/root_object_valid"), false, true), Request.GetBinding());
+			return false;
+		}
+		const FString NativeOwner = LegacyRequest.RootObject->GetPathName();
+		const FString& BindingOwner = Request.GetBinding().GetSummary().GetIdentity().GetOwnerId();
+		if (BindingOwner != NativeOwner)
+		{
+			OutError = AtBinding(NativeConditionFailure(TEXT("ue_read_binding_owner_mismatch"),
+				TEXT("The binding owner differs from the injected native read object."), TEXT("/binding_owner_matches_object"), false, true), Request.GetBinding());
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(NativeOwner);
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(BindingOwner);
 			return false;
 		}
 
@@ -718,11 +738,7 @@ namespace UE::UAI::DomainAdapters::GenericRead
 				LegacyCapture,
 				Diagnostic))
 		{
-			OutError = {
-				Diagnostic.Code,
-				Diagnostic.SubjectId,
-				Diagnostic.Message,
-			};
+			OutError = AtBinding(MoveTemp(Diagnostic), Request.GetBinding());
 			return false;
 		}
 
@@ -749,6 +765,7 @@ namespace UE::UAI::DomainAdapters::GenericRead
 					Entries,
 					OutError))
 			{
+				OutError = AtBinding(MoveTemp(OutError), Request.GetBinding());
 				return false;
 			}
 		}
@@ -763,12 +780,8 @@ namespace UE::UAI::DomainAdapters::GenericRead
 			MoveTemp(Entries));
 		if (!OutCapture->IsValid())
 		{
+			OutError = AtBinding(OutCapture->GetValidationDiagnostic(), Request.GetBinding());
 			OutCapture.Reset();
-			OutError = {
-				TEXT("ue_read_capture_invalid"),
-				Request.GetBinding().GetBindingId(),
-				TEXT("reflection capture did not satisfy the typed UE read contract"),
-			};
 			return false;
 		}
 		return true;

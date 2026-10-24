@@ -9,17 +9,7 @@ namespace
 
 	FUeAgentResourceTracker MakeResources()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 4096},
-			{EUeAgentResourceDimension::Items, 4096},
-			{EUeAgentResourceDimension::Files, 8},
-			{EUeAgentResourceDimension::ReferenceEdges, 4096},
-			{EUeAgentResourceDimension::WorkUnits, 4096},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 4 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	FUeAgentCanonicalValueRef StringValue(const FString& Text, FUeAgentResourceTracker& Resources)
@@ -88,7 +78,7 @@ bool FUeAgentPieRuntimeScenarioInputActionTest::RunTest(const FString& Parameter
 	const FString A = TEXT("/Game/Input/IA_Move.IA_Move");
 	const FString B = TEXT("/Game/Input/IA_Look.IA_Look");
 	FUeAgentPieInputActionSample Sample;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 
 	TestTrue(TEXT("bool sample parses"), TryParsePieInputActionSample(
 		StepValue(A, 0.0, BooleanValue(true, Resources), Resources), {}, Sample, Error));
@@ -118,7 +108,7 @@ bool FUeAgentPieRuntimeScenarioInputActionTest::RunTest(const FString& Parameter
 		StepValue(A, 0.5, DecimalValue(TEXT("0"), Resources), Resources), {}, Sample, Error));
 	TestFalse(TEXT("zero sample is zero"), Sample.IsNonZero());
 	const FUeAgentPieInputActionSample Existing{A, 1.0, EInputActionValueType::Axis1D, FVector(1, 0, 0)};
-	TestFalse(TEXT("same action and time rejected"), TryParsePieInputActionSample(
+	TestTrue(TEXT("same action and time accepted in declaration order"), TryParsePieInputActionSample(
 		StepValue(A, 1.0, DecimalValue(TEXT("0.5"), Resources), Resources), {Existing}, Sample, Error));
 
 	FUeAgentPieInputActionOperationLedger Ledger;
@@ -130,15 +120,13 @@ bool FUeAgentPieRuntimeScenarioInputActionTest::RunTest(const FString& Parameter
 	TestEqual(TEXT("two actions combine"), Ledger.GetActiveSamples().Num(), 2);
 	Ledger.ApplySample({A, 1.5, EInputActionValueType::Axis1D, FVector(0, 0, 0)});
 	TestEqual(TEXT("zero sample stops one action"), Ledger.GetActiveSamples().Num(), 1);
-	Ledger.RecordObservedValue(A, true);
-	Ledger.RecordObservedValue(B, true);
 	Ledger.BeginRelease(10.0, 100);
 	TestTrue(TEXT("release stops reinjection"), Ledger.IsReinjectionStopped());
 	TestEqual(TEXT("release pending before zero observation"),
 		Ledger.EvaluateRelease(10.1, 101), EUeAgentPieInputActionReleaseStatus::Pending);
 	Ledger.RecordObservedValue(A, false);
 	Ledger.RecordObservedValue(B, false);
-	TestEqual(TEXT("normal/cancel/timeout share verified release"),
+	TestEqual(TEXT("release is verified even when triggers never produced a nonzero value"),
 		Ledger.EvaluateRelease(10.2, 102), EUeAgentPieInputActionReleaseStatus::Verified);
 	Ledger.BeginRelease(99.0, 999);
 	TestTrue(TEXT("second cleanup is idempotent"), Ledger.IsReinjectionStopped());

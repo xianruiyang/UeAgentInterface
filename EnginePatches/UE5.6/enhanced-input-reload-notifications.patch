@@ -1,0 +1,72 @@
+--- a/Engine/Plugins/EnhancedInput/Source/InputBlueprintNodes/Private/InputBlueprintNodesModule.cpp
++++ b/Engine/Plugins/EnhancedInput/Source/InputBlueprintNodes/Private/InputBlueprintNodesModule.cpp
+@@ -12,6 +12,8 @@
+ #include "Widgets/Notifications/SNotificationList.h"
+ #include "BlueprintNodeTemplateCache.h"
+ #include "TickableEditorObject.h"
++#include "UObject/PackageReload.h"
++#include "UObject/UObjectGlobals.h"
+ #include "UObject/UObjectIterator.h"
+ 
+ #include "Modules/ModuleManager.h"
+@@ -79,11 +81,50 @@
+ 		{
+ 			GraphModule.RegisterGraphAction(UInputAction::StaticClass(), MakeUnique<FInputActionGraphActions>());
+ 		}
++		PackageReloadHandle = FCoreUObjectDelegates::OnPackageReloaded.AddRaw(this, &FInputBlueprintNodesModule::OnPackageReloaded);
++	}
++
++	virtual void ShutdownModule() override
++	{
++		FCoreUObjectDelegates::OnPackageReloaded.Remove(PackageReloadHandle);
+ 	}
+ 	// End IModuleInterface interface
+ 
+ 	// FTickableEditorObject interface
+ 	virtual void Tick(float DeltaTime) override
++	{
++		FlushInputActionNodeUpdates();
++	}
++
++	virtual TStatId GetStatId() const override { RETURN_QUICK_DECLARE_CYCLE_STAT(FInputBlueprintNodesModule, STATGROUP_Tickables); }
++	// End FTickableEditorObject interface
++
++	void OnPackageReloaded(EPackageReloadPhase Phase, FPackageReloadedEvent* Event)
++	{
++		if (Phase == EPackageReloadPhase::OnPackageFixup && Event)
++		{
++			// These queues are not reflected references. Preserve only pending
++			// changes while node references are repointed to replacement assets.
++			for (const TPair<UObject*, UObject*>& Pair : Event->GetRepointedObjects())
++			{
++				const UInputAction* OldAction = Cast<UInputAction>(Pair.Key);
++				if (!OldAction) continue;
++				const UInputAction* NewAction = Cast<UInputAction>(Pair.Value);
++				for (TSet<const UInputAction*>* Pending : {&UInputAction::ActionsWithModifiedValueTypes, &UInputAction::ActionsWithModifiedTriggers})
++				{
++					if (Pending->Remove(OldAction) && NewAction) Pending->Add(NewAction);
++				}
++			}
++		}
++		else if (Phase == EPackageReloadPhase::PostBatchPostGC)
++		{
++			// Reconstruct only after every referencer has been fixed up and old
++			// objects have been purged, before another edit can consume stale pins.
++			FlushInputActionNodeUpdates();
++		}
++	}
++
++	void FlushInputActionNodeUpdates()
+ 	{
+ 		// Update any blueprints that are referencing an input action with a modified value type
+ 		if (UInputAction::ActionsWithModifiedValueTypes.Num() || UInputAction::ActionsWithModifiedTriggers.Num())
+@@ -142,8 +183,7 @@
+ 		}
+ 	}
+ 	
+-	virtual TStatId GetStatId() const override { RETURN_QUICK_DECLARE_CYCLE_STAT(FInputBlueprintNodesModule, STATGROUP_Tickables); }
+-	// End FTickableEditorObject interface
++	FDelegateHandle PackageReloadHandle;
+ };
+ 
+ IMPLEMENT_MODULE(FInputBlueprintNodesModule, InputBlueprintNodes)

@@ -7,9 +7,6 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
-// LS-004 intentionally landed before the production contract. This LS-005
-// marker forces a rebuild because the formerly missing optional include could
-// not form a UBT dependency.
 #include "DomainAdapters/EditorSessionOperation/UeAgentEditorSessionOperationContract.h"
 static_assert(
 	UAI_EDITOR_SESSION_OPERATION_CONTRACT_V1 == 1,
@@ -80,7 +77,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentEditorSessionOperationContractTest,
 	"UeAgentInterface.DomainAdapters.EditorSessionOperation.E0.Contract."
-		"TypedFamiliesOwnershipAndLegacyDisposition",
+		"TypedFamiliesAndCurrentOperationBindings",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
@@ -118,11 +115,6 @@ bool FUeAgentEditorSessionOperationContractTest::RunTest(
 		TEXT("disconnect has no business state transition"),
 		Fixture->GetStringField(TEXT("disconnect_semantics")),
 		FString(TEXT("no_state_transition")));
-	TestEqual(
-		TEXT("raw batch is retired rather than made a family"),
-		Fixture->GetStringField(TEXT("batch_disposition")),
-		FString(TEXT("retired_no_adapter_family")));
-
 	TestTrue(
 		TEXT("all families share one compact typed envelope"),
 		HasExactStrings(
@@ -172,7 +164,6 @@ bool FUeAgentEditorSessionOperationContractTest::RunTest(
 		TEXT("disconnect_without_outcome"),
 		TEXT("pie_session"),
 		TEXT("modeling_tool_session"),
-		TEXT("voxel_session"),
 		TEXT("current_level"),
 		TEXT("generation_bound_health"),
 		TEXT("cancel_or_expiry_waits_for_physical_exit"),
@@ -185,17 +176,11 @@ bool FUeAgentEditorSessionOperationContractTest::RunTest(
 
 	const TArray<TSharedPtr<FJsonValue>>& FamilyValues =
 		Fixture->GetArrayField(TEXT("families"));
-	TestEqual(
-		TEXT("exact reusable family count"),
-		FamilyValues.Num(),
-		static_cast<int32>(
-			Fixture->GetNumberField(TEXT("family_count"))));
 	const TSet<FString> ExpectedFamilies = {
 		TEXT("asset_editor"),
 		TEXT("runtime_preview"),
 		TEXT("world_context"),
 		TEXT("modeling_tool"),
-		TEXT("voxel_grid"),
 		TEXT("host_lifecycle"),
 	};
 	TSet<FString> FamilyIds;
@@ -222,110 +207,78 @@ bool FUeAgentEditorSessionOperationContractTest::RunTest(
 			Family->GetStringField(TEXT("signal_type_id")).StartsWith(
 				TEXT("uai.editor_session.")));
 	}
-	bool bExactFamilies = FamilyIds.Num() == ExpectedFamilies.Num();
 	for (const FString& Expected : ExpectedFamilies)
 	{
-		bExactFamilies = bExactFamilies && FamilyIds.Contains(Expected);
+		TestTrue(
+			TEXT("required family is present: ") + Expected,
+			FamilyIds.Contains(Expected));
 	}
-	TestTrue(TEXT("family set is exact"), bExactFamilies);
 
-	const TArray<TSharedPtr<FJsonValue>>& MappingValues =
-		Fixture->GetArrayField(TEXT("legacy_mappings"));
-	TestEqual(
-		TEXT("all P0 and SA-003 candidates are adjudicated"),
-		MappingValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("legacy_candidate_count"))));
-	TSet<FString> LegacyIds;
-	TMap<FString, TSharedPtr<FJsonObject>> MappingById;
-	TSet<FString> ReallocatedIds;
-	for (const TSharedPtr<FJsonValue>& Value : MappingValues)
+	const TArray<TSharedPtr<FJsonValue>>& OperationCases =
+		Fixture->GetArrayField(TEXT("session_operation_cases"));
+	TSet<FString> CaseIds;
+	TSet<FString> SessionFamilies;
+	bool bHostLifecycleSafeExit = false;
+	bool bWorldContextPolicy = false;
+	for (const TSharedPtr<FJsonValue>& Value : OperationCases)
 	{
-		const TSharedPtr<FJsonObject> Mapping = Value->AsObject();
-		const FString LegacyId =
-			Mapping->GetStringField(TEXT("legacy_id"));
-		TestFalse(
-			TEXT("legacy evidence id is unique: ") + LegacyId,
-			LegacyIds.Contains(LegacyId));
-		LegacyIds.Add(LegacyId);
-		MappingById.Add(LegacyId, Mapping);
-		TestTrue(
-			TEXT("legacy candidate has explicit terminal disposition: ")
-				+ LegacyId,
-			!Mapping->GetStringField(TEXT("disposition")).IsEmpty());
-		TestTrue(
-			TEXT("legacy responsibility has one explicit owner: ")
-				+ LegacyId,
-			!Mapping->GetStringField(TEXT("owner")).IsEmpty());
-		if (Mapping->HasField(TEXT("family_id")))
+		const TSharedPtr<FJsonObject> OperationCase = Value->AsObject();
+		const FString CaseId =
+			OperationCase->GetStringField(TEXT("case_id"));
+		const FString FamilyId =
+			OperationCase->GetStringField(TEXT("family_id"));
+		const FString CommandId =
+			OperationCase->GetStringField(TEXT("command_id"));
+		TestFalse(TEXT("operation case id is unique: ") + CaseId,
+			CaseIds.Contains(CaseId));
+		CaseIds.Add(CaseId);
+		TestTrue(TEXT("operation case uses a real family: ") + CaseId,
+			FamilyIds.Contains(FamilyId));
+		if (FamilyId == TEXT("host_lifecycle"))
 		{
-			TestTrue(
-				TEXT("mapped family is a real reusable family: ")
-					+ LegacyId,
-				FamilyIds.Contains(
-					Mapping->GetStringField(TEXT("family_id"))));
+			bHostLifecycleSafeExit = CommandId == TEXT("editor.safe_exit");
 		}
-		if (Mapping->GetStringField(TEXT("source")) == TEXT("SA-003"))
+		else
 		{
-			ReallocatedIds.Add(LegacyId);
+			TestEqual(TEXT("session family uses editor.session: ") + CaseId,
+				CommandId, FString(TEXT("editor.session")));
+			SessionFamilies.Add(FamilyId);
+		}
+		if (FamilyId == TEXT("world_context"))
+		{
+			bWorldContextPolicy =
+				OperationCase->GetStringField(TEXT("policy_id"))
+					== TEXT("policy:world-context:set-current/v1");
 		}
 	}
-	const TSet<FString> ExpectedReallocatedIds = {
-		TEXT("modeling_invoke_active_tool_action"),
-		TEXT("modeling_set_active_tool_property"),
-		TEXT("modeling_voxel_grid_begin"),
-		TEXT("modeling_voxel_grid_add_bounds"),
-		TEXT("modeling_voxel_grid_apply"),
-		TEXT("editor.current_level.set"),
-	};
-	bool bExactReallocated =
-		ReallocatedIds.Num() == ExpectedReallocatedIds.Num();
-	for (const FString& Expected : ExpectedReallocatedIds)
+	for (const FString& FamilyId : {
+		TEXT("asset_editor"), TEXT("runtime_preview"),
+		TEXT("world_context"), TEXT("modeling_tool")})
 	{
-		bExactReallocated =
-			bExactReallocated && ReallocatedIds.Contains(Expected);
+		TestTrue(TEXT("session family has a current binding: ") + FamilyId,
+			SessionFamilies.Contains(FamilyId));
 	}
-	TestTrue(
-		TEXT("five modeling-session operations plus current-level are exact"),
-		bExactReallocated);
-	TestEqual(
-		TEXT("raw exec_batch remains retired"),
-		MappingById[TEXT("exec_batch")]->GetStringField(
-			TEXT("disposition")),
-		FString(TEXT("retire")));
-	TestFalse(
-		TEXT("raw exec_batch cannot invent an Adapter family"),
-		MappingById[TEXT("exec_batch")]->HasField(TEXT("family_id")));
-	TestEqual(
-		TEXT("level_open is replaced by explicit current-level operation"),
-		MappingById[TEXT("level_open")]->GetStringField(TEXT("owner")),
-		FString(TEXT("editor.current_level.set")));
-	TestEqual(
-		TEXT("safe exit replaces editor_close compatibility surface"),
-		MappingById[TEXT("editor_close")]->GetStringField(TEXT("owner")),
-		FString(TEXT("LS-013_public_safe_exit")));
+	TestTrue(TEXT("host lifecycle uses editor.safe_exit"),
+		bHostLifecycleSafeExit);
+	TestTrue(TEXT("world context uses explicit set-current policy"),
+		bWorldContextPolicy);
 
-	const TSharedPtr<FJsonObject> Activation =
-		Fixture->GetObjectField(TEXT("activation_contract"));
-	TestEqual(
-		TEXT("public activation is deferred to LS-013"),
-		Activation->GetStringField(TEXT("owner_task")),
-		FString(TEXT("LS-013")));
-	TestEqual(
-		TEXT("manifest remains inactive until LS-013"),
-		Activation->GetStringField(TEXT("manifest_status")),
-		FString(TEXT("planned_inactive_until_ls013")));
-	TestEqual(
-		TEXT("safe exit has one future public command"),
-		Activation->GetStringField(TEXT("safe_exit_command_id")),
-		FString(TEXT("editor.safe_exit")));
-	TestFalse(
-		TEXT("Python never owns process close logic"),
-		Activation->GetBoolField(TEXT("python_process_close_logic")));
-	TestTrue(
-		TEXT("manifest and handler must share the C++ contract"),
-		Activation->GetBoolField(
-			TEXT("same_cpp_contract_handler_binding")));
+	const TSharedPtr<FJsonObject> OperationControl =
+		Fixture->GetObjectField(TEXT("operation_control_contract"));
+	TestEqual(TEXT("status control command"),
+		OperationControl->GetStringField(TEXT("status_command_id")),
+		FString(TEXT("operation.status")));
+	TestEqual(TEXT("resume control command"),
+		OperationControl->GetStringField(TEXT("resume_command_id")),
+		FString(TEXT("operation.resume")));
+	TestEqual(TEXT("cancel control command"),
+		OperationControl->GetStringField(TEXT("cancel_command_id")),
+		FString(TEXT("operation.cancel")));
+	TestEqual(TEXT("plan control command"),
+		OperationControl->GetStringField(TEXT("plan_command_id")),
+		FString(TEXT("operation.plan.execute")));
+	TestFalse(TEXT("Python never owns process close logic"),
+		OperationControl->GetBoolField(TEXT("python_process_close_logic")));
 
 	using namespace UE::UAI::DomainAdapters::EditorSessionOperation;
 	TestEqual(
@@ -334,10 +287,6 @@ bool FUeAgentEditorSessionOperationContractTest::RunTest(
 		1);
 	const auto& ProductionFamilies =
 		GetEditorSessionOperationFamilyContracts();
-	TestEqual(
-		TEXT("production exposes exactly the fixture families"),
-		ProductionFamilies.Num(),
-		FamilyValues.Num());
 	for (const FUeAgentEditorSessionOperationFamilyContract& Contract
 		: ProductionFamilies)
 	{

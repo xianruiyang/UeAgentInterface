@@ -5,6 +5,8 @@
 #include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
 #include "Core/HjsonWorkspace/UeAgentSnapshotComposition.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "Dom/JsonObject.h"
+#include "Utilities/UeAgentStructuredHjsonFormatter.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -19,17 +21,7 @@ namespace
 
 	FUeAgentResourceTracker MakeSnapshotExportTracker()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 2 * 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 32768},
-			{EUeAgentResourceDimension::Items, 32768},
-			{EUeAgentResourceDimension::Files, 256},
-			{EUeAgentResourceDimension::ReferenceEdges, 32768},
-			{EUeAgentResourceDimension::WorkUnits, 262144},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 32 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	FUeAgentStateEntry MakeSnapshotField(
@@ -52,7 +44,8 @@ namespace
 				TEXT("fixture.structured_value.v1"),
 				Value->GetKind(),
 				false,
-				TEXT("scalar")),
+				Value->GetKind() == EUeAgentValueKind::Object ? TEXT("object")
+					: Value->GetKind() == EUeAgentValueKind::Array ? TEXT("array") : TEXT("scalar")),
 			Value,
 			FUeAgentDefaultValue(
 				EUeAgentDefaultSourceKind::DomainNative,
@@ -160,6 +153,22 @@ bool FUeAgentSnapshotSemanticExportTest::RunTest(
 	const FString GraphOwner(
 		TEXT("/Game/RE008/BP_SemanticExport:EventGraph"));
 	const FString NodeOwner(GraphOwner + TEXT(":K2Node_1"));
+	FUeAgentCanonicalValuePtr NodeId;
+	FUeAgentCanonicalValuePtr NodeName;
+	FUeAgentCanonicalValuePtr NodeValue;
+	FUeAgentCanonicalValuePtr LayoutX, LayoutY, LayoutPosition;
+	if (!FUeAgentCanonicalValue::TryInteger(TEXT("320"), Resources, LayoutX, StateError)
+		|| !FUeAgentCanonicalValue::TryInteger(TEXT("96"), Resources, LayoutY, StateError)
+		|| !FUeAgentCanonicalValue::TryArray({LayoutX.ToSharedRef(), LayoutY.ToSharedRef()},
+			Resources, LayoutPosition, StateError)) return false;
+	TestTrue(TEXT("captured node carries its native identity"),
+		FUeAgentCanonicalValue::TryString(TEXT("K2Node_1"), Resources, NodeId, StateError)
+		&& FUeAgentCanonicalValue::TryString(TEXT("Fixture Node"), Resources, NodeName, StateError)
+		&& FUeAgentCanonicalValue::TryObject({
+			{TEXT("id"), NodeId.ToSharedRef()},
+			{TEXT("name"), NodeName.ToSharedRef()},
+			{TEXT("position"), LayoutPosition.ToSharedRef()}}, Resources, NodeValue, StateError));
+	if (!NodeValue.IsValid()) return false;
 
 	const FUeAgentTemporalPoint AuthoredTime(
 		TEXT("fixture-timeline"),
@@ -203,6 +212,13 @@ bool FUeAgentSnapshotSemanticExportTest::RunTest(
 			Resources,
 			SpatialValue,
 			StateError));
+	if (!BoolValue.IsValid() || !BoolDefault.IsValid()
+		|| !ExactInteger.IsValid() || !ExactIntegerDefault.IsValid()
+		|| !WholeDecimal.IsValid() || !TemporalValue.IsValid() || !SpatialValue.IsValid())
+	{
+		AddError(StateError.Code + TEXT(":") + StateError.Path);
+		return false;
+	}
 
 	const FUeAgentStateRevision Revision(
 		TEXT("fixture:content-graph"),
@@ -234,8 +250,8 @@ bool FUeAgentSnapshotSemanticExportTest::RunTest(
 				{TEXT("graph_name"), TEXT("EventGraph")},
 				{TEXT("node_id"), TEXT("K2Node_1")},
 			},
-			ExactInteger.ToSharedRef(),
-			ExactIntegerDefault.ToSharedRef(),
+			NodeValue.ToSharedRef(),
+			NodeValue.ToSharedRef(),
 			Revision),
 		MakeSnapshotField(
 			TEXT("uai.semantic.blueprint.node.property"),
@@ -309,6 +325,11 @@ bool FUeAgentSnapshotSemanticExportTest::RunTest(
 			Resources,
 			Snapshot,
 			StateError));
+	if (!Snapshot.IsValid())
+	{
+		AddError(StateError.Code + TEXT(":") + StateError.Path);
+		return false;
+	}
 
 	FWorkspaceError CompositionError;
 	FAuthoringModelPtr Model;
@@ -339,6 +360,16 @@ bool FUeAgentSnapshotSemanticExportTest::RunTest(
 	TestTrue(
 		TEXT("Blueprint target contract contributes graph_collection"),
 		ContainsRole(*Model, TEXT("graph_collection")));
+	bool bCanonicalLayout = false;
+	for (const auto& Unit : Model->GetUnits())
+		if (Unit.GetUnitKind() == ESemanticUnitKind::LayoutState)
+		{
+			const auto* X = Unit.GetValues().Find(TEXT("x"));
+			const auto* Y = Unit.GetValues().Find(TEXT("y"));
+			bCanonicalLayout |= X && Y && Unit.GetValues().Num() == 2
+				&& (*X)->GetLexeme() == TEXT("320") && (*Y)->GetLexeme() == TEXT("96");
+		}
+	TestTrue(TEXT("graph array layout normalizes internal x/y once"), bCanonicalLayout);
 	TestTrue(
 		TEXT("Blueprint target contract contributes node_properties"),
 		ContainsRole(*Model, TEXT("node_properties")));
@@ -448,6 +479,7 @@ bool FUeAgentSnapshotSemanticExportTest::RunTest(
 		bool bTemporalPreserved = false;
 		bool bSpatialPreserved = false;
 		bool bWholeDecimalPreserved = false;
+		bool bExactIntegerPreserved = false;
 		for (const FSemanticUnit& Unit : Resolved->GetModel()->GetUnits())
 		{
 			const FUeAgentCanonicalValueRef* Value =
@@ -466,6 +498,9 @@ bool FUeAgentSnapshotSemanticExportTest::RunTest(
 					== TEXT("WholeDecimal")
 				&& (*Value)->GetKind() == EUeAgentValueKind::Decimal
 				&& (*Value)->GetLexeme() == TEXT("320");
+			bExactIntegerPreserved |= Unit.GetFieldSetRef() == TEXT("InputPriority")
+				&& (*Value)->GetKind() == EUeAgentValueKind::Integer
+				&& (*Value)->GetLexeme() == TEXT("9007199254740993");
 		}
 		TestTrue(
 			TEXT("typed temporal semantics survive HJSON round-trip"),
@@ -476,10 +511,46 @@ bool FUeAgentSnapshotSemanticExportTest::RunTest(
 		TestTrue(
 			TEXT("whole-valued decimals survive HJSON round-trip"),
 			bWholeDecimalPreserved);
+		TestTrue(TEXT("exact editable integer survives snapshot export and normal resolve"), bExactIntegerPreserved);
 	}
-	IFileManager::Get().DeleteDirectory(
-		*OutputRoot,
-		false,
-		true);
-	return true;
+	FString GraphPath, GraphText, ParseError;
+	TSharedPtr<FJsonObject> Ordinary;
+	for (const auto& File : Plan->GetFiles())
+	{
+		if (File.GetRelativePath().StartsWith(TEXT(".uai/")) || File.GetRelativePath().EndsWith(TEXT(".interfaces.hjson"))) continue;
+		const FUTF8ToTCHAR Converted(reinterpret_cast<const ANSICHAR*>(File.GetCanonicalUtf8().GetData()), File.GetCanonicalUtf8().Num());
+		TSharedPtr<FJsonObject> Candidate;
+		if (FUeAgentStructuredHjsonParser::ParseObject(FString(Converted.Length(), Converted.Get()), File.GetRelativePath(), Candidate, ParseError)
+			&& Candidate->HasTypedField<EJson::Object>(TEXT("nodes")))
+		{ GraphPath = OutputRoot / File.GetRelativePath(); Ordinary = Candidate; break; }
+	}
+	if (!TestTrue(TEXT("split captured layout is present in the ordinary graph"), Ordinary.IsValid())) return false;
+	const auto Nodes = Ordinary->GetObjectField(TEXT("nodes"));
+	if (!TestEqual(TEXT("layout fixture has one ordinary node"), Nodes->Values.Num(), 1)) return false;
+	TSharedPtr<FJsonObject> NodeSpec = Nodes->Values.CreateConstIterator().Value()->AsObject();
+	const TSharedPtr<FJsonObject>* Position = nullptr;
+	if (!TestTrue(TEXT("ordinary node receives separated LayoutState coordinates"),
+		NodeSpec->TryGetObjectField(TEXT("pos"), Position) && Position
+		&& (*Position)->GetNumberField(TEXT("x")) == 320 && (*Position)->GetNumberField(TEXT("y")) == 96)) return false;
+	(*Position)->SetNumberField(TEXT("x"), 640);
+	if (!FUeAgentStructuredHjsonFormatter::TryWriteObject(Ordinary.ToSharedRef(), GraphText, ParseError)
+		|| !FFileHelper::SaveStringToFile(GraphText, *GraphPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM)) return false;
+	FResolvedSemanticWorkspacePtr Edited;
+	auto EditResources = MakeSnapshotExportTracker();
+	if (!TestTrue(TEXT("ordinary position edit resolves"), TryResolveEditedSemanticWorkspace(FWorkspaceSource::Directory(OutputRoot),
+		ESemanticWorkspaceMode::State, EditResources, Edited, ResolveError)))
+	{ AddError(ResolveError.GetCode()); return false; }
+	bool bDerivedLayout = false;
+	for (const auto& Unit : Edited->GetModel()->GetUnits())
+		if (Unit.GetUnitKind() == ESemanticUnitKind::LayoutState)
+		{
+			const auto* X = Unit.GetValues().Find(TEXT("x"));
+			bDerivedLayout |= X && ((*X)->GetKind() == EUeAgentValueKind::Integer || (*X)->GetKind() == EUeAgentValueKind::Decimal)
+				&& FCString::Atod(*(*X)->GetLexeme()) == 640;
+			if (Edited->GetEditedUnitIds().IsSet())
+				TestFalse(TEXT("derived layout is not a second independently edited unit"), Edited->GetEditedUnitIds().GetValue().Contains(Unit.GetUnitId()));
+		}
+	TestTrue(TEXT("resolved layout derives its changed value from ordinary graph pos"), bDerivedLayout);
+	IFileManager::Get().DeleteDirectory(*OutputRoot, false, true);
+	return !HasAnyErrors();
 }

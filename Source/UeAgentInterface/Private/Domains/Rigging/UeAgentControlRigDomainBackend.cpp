@@ -2,6 +2,14 @@
 
 #include "Domains/Rigging/UeAgentControlRigDomainBackend.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintMutationModel.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringOps.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/EditorResources/UeAgentEditorResourcePersistence.h"
+
 #include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
 #include "Utilities/UeAgentAuthoringFileIO.h"
 #include "Utilities/UeAgentAuthoringJson.h"
@@ -44,6 +52,7 @@
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "RigVMModel/Nodes/RigVMTemplateNode.h"
+#include "Domains/Rigging/Authoring/UeAgentRigVMNodeAuthoring.h"
 #include "RigVMModel/Nodes/RigVMUnitNode.h"
 #include "RigVMModel/Nodes/RigVMVariableNode.h"
 #include "RigVMModel/RigVMController.h"
@@ -226,32 +235,6 @@ namespace UeAgentControlRigOps
 		}
 	}
 
-	static bool ParsePinContainerType(const FString& InText, EPinContainerType& OutType)
-	{
-		const FString Text = InText.TrimStartAndEnd().ToLower();
-		if (Text.IsEmpty() || Text == TEXT("none"))
-		{
-			OutType = EPinContainerType::None;
-			return true;
-		}
-		if (Text == TEXT("array"))
-		{
-			OutType = EPinContainerType::Array;
-			return true;
-		}
-		if (Text == TEXT("set"))
-		{
-			OutType = EPinContainerType::Set;
-			return true;
-		}
-		if (Text == TEXT("map"))
-		{
-			OutType = EPinContainerType::Map;
-			return true;
-		}
-		return false;
-	}
-
 	static FString PinTypeToCppType(const FEdGraphPinType& PinType)
 	{
 		if (PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean) return TEXT("bool");
@@ -322,7 +305,7 @@ namespace UeAgentControlRigOps
 				{
 					UeAgentAuthoringState::FStateEntry Entry;
 					TSharedPtr<FJsonObject> Descriptor;
-					FString CaptureError;
+					UE::UAI::Contract::FDiagnostic CaptureError;
 					if (UeAgentDetailsAuthoringService::CaptureObjectProperty(
 							CDO, Property->GetName(), UeAgentDetailsAuthoringService::FCapturePolicy(),
 							Entry, Descriptor, CaptureError))
@@ -361,167 +344,32 @@ namespace UeAgentControlRigOps
 		return Root;
 	}
 
-	static bool BuildPinTypeFromJsonObject(const TSharedPtr<FJsonObject>& Obj, FEdGraphPinType& OutPinType, FString& OutError)
-	{
-		if (!Obj.IsValid())
-		{
-			OutError = TEXT("missing_pin_type");
-			return false;
-		}
-		FString Category;
-		if (!Obj->TryGetStringField(TEXT("pin_category"), Category) || Category.TrimStartAndEnd().IsEmpty())
-		{
-			OutError = TEXT("missing_pin_category");
-			return false;
-		}
-
-		FString CategoryToken = Category.TrimStartAndEnd().ToLower();
-		OutPinType = FEdGraphPinType();
-		if (CategoryToken == TEXT("bool") || CategoryToken == TEXT("boolean"))
-		{
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
-		}
-		else if (CategoryToken == TEXT("int") || CategoryToken == TEXT("int32"))
-		{
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Int;
-		}
-		else if (CategoryToken == TEXT("int64"))
-		{
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Int64;
-		}
-		else if (CategoryToken == TEXT("float") || CategoryToken == TEXT("double") || CategoryToken == TEXT("real"))
-		{
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Real;
-			OutPinType.PinSubCategory = CategoryToken == TEXT("double") ? UEdGraphSchema_K2::PC_Double : UEdGraphSchema_K2::PC_Float;
-		}
-		else if (CategoryToken == TEXT("name"))
-		{
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Name;
-		}
-		else if (CategoryToken == TEXT("string"))
-		{
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_String;
-		}
-		else if (CategoryToken == TEXT("text"))
-		{
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Text;
-		}
-		else if (CategoryToken == TEXT("byte"))
-		{
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
-		}
-		else if (CategoryToken == TEXT("object") || CategoryToken == TEXT("class") || CategoryToken == TEXT("softobject") || CategoryToken == TEXT("softclass"))
-		{
-			OutPinType.PinCategory = CategoryToken == TEXT("class") ? UEdGraphSchema_K2::PC_Class :
-				CategoryToken == TEXT("softobject") ? UEdGraphSchema_K2::PC_SoftObject :
-				CategoryToken == TEXT("softclass") ? UEdGraphSchema_K2::PC_SoftClass :
-				UEdGraphSchema_K2::PC_Object;
-		}
-		else
-		{
-			OutPinType.PinCategory = FName(*Category.TrimStartAndEnd());
-		}
-
-		FString SubCategory;
-		Obj->TryGetStringField(TEXT("pin_subcategory"), SubCategory);
-		if (!SubCategory.TrimStartAndEnd().IsEmpty())
-		{
-			if (OutPinType.PinCategory == UEdGraphSchema_K2::PC_Real)
-			{
-				OutPinType.PinSubCategory = SubCategory.Equals(TEXT("double"), ESearchCase::IgnoreCase) ? UEdGraphSchema_K2::PC_Double : UEdGraphSchema_K2::PC_Float;
-			}
-			else
-			{
-				OutPinType.PinSubCategory = FName(*SubCategory.TrimStartAndEnd());
-			}
-		}
-
-		FString SubCategoryObjectPath;
-		Obj->TryGetStringField(TEXT("pin_subcategory_object"), SubCategoryObjectPath);
-		if (!SubCategoryObjectPath.TrimStartAndEnd().IsEmpty())
-		{
-			if (OutPinType.PinCategory == UEdGraphSchema_K2::PC_Struct)
-			{
-				OutPinType.PinSubCategoryObject = ResolveStructByPathOrAlias(SubCategoryObjectPath);
-			}
-			else
-			{
-				UObject* LoadedObject = LoadAssetObject(SubCategoryObjectPath);
-				OutPinType.PinSubCategoryObject = LoadedObject ? LoadedObject : ResolveClassByPathOrAlias(SubCategoryObjectPath);
-			}
-			if (!OutPinType.PinSubCategoryObject.IsValid())
-			{
-				OutError = TEXT("invalid_pin_subcategory_object");
-				return false;
-			}
-		}
-
-		if (UScriptStruct* Struct = ResolveStructByPathOrAlias(Category))
-		{
-			OutPinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
-			OutPinType.PinSubCategory = NAME_None;
-			OutPinType.PinSubCategoryObject = Struct;
-		}
-		if (OutPinType.PinCategory == UEdGraphSchema_K2::PC_Struct && !OutPinType.PinSubCategoryObject.IsValid())
-		{
-			if (UScriptStruct* Struct = ResolveStructByPathOrAlias(SubCategory))
-			{
-				OutPinType.PinSubCategoryObject = Struct;
-			}
-		}
-		if (OutPinType.PinCategory == UEdGraphSchema_K2::PC_Struct && !OutPinType.PinSubCategoryObject.IsValid())
-		{
-			OutError = TEXT("missing_struct_pin_subcategory_object");
-			return false;
-		}
-		if ((OutPinType.PinCategory == UEdGraphSchema_K2::PC_Object
-			|| OutPinType.PinCategory == UEdGraphSchema_K2::PC_Class
-			|| OutPinType.PinCategory == UEdGraphSchema_K2::PC_SoftObject
-			|| OutPinType.PinCategory == UEdGraphSchema_K2::PC_SoftClass)
-			&& !OutPinType.PinSubCategoryObject.IsValid())
-		{
-			OutPinType.PinSubCategoryObject = UObject::StaticClass();
-		}
-
-		FString ContainerTypeText;
-		Obj->TryGetStringField(TEXT("container_type"), ContainerTypeText);
-		if (!ParsePinContainerType(ContainerTypeText, OutPinType.ContainerType))
-		{
-			OutError = TEXT("invalid_container_type");
-			return false;
-		}
-		if (OutPinType.ContainerType == EPinContainerType::Map)
-		{
-			const TSharedPtr<FJsonObject>* ValueTypeObj = nullptr;
-			if (!Obj->TryGetObjectField(TEXT("value_type"), ValueTypeObj) || !ValueTypeObj || !ValueTypeObj->IsValid())
-			{
-				OutError = TEXT("missing_map_value_type");
-				return false;
-			}
-			FEdGraphPinType ValuePinType;
-			if (!BuildPinTypeFromJsonObject(*ValueTypeObj, ValuePinType, OutError))
-			{
-				return false;
-			}
-			OutPinType.PinValueType.TerminalCategory = ValuePinType.PinCategory;
-			OutPinType.PinValueType.TerminalSubCategory = ValuePinType.PinSubCategory;
-			OutPinType.PinValueType.TerminalSubCategoryObject = ValuePinType.PinSubCategoryObject;
-		}
-		return true;
-	}
-
-	static bool BuildPinTypeFromVariableJson(const TSharedPtr<FJsonObject>& VarObj, FEdGraphPinType& OutPinType, FString& OutError)
+	static bool BuildPinTypeFromVariableJson(const TSharedPtr<FJsonObject>& VarObj, FEdGraphPinType& OutPinType, UE::UAI::Contract::FDiagnostic& OutError, UBlueprint* Context)
 	{
 		const TSharedPtr<FJsonObject>* TypeObj = nullptr;
 		if (VarObj.IsValid() && VarObj->TryGetObjectField(TEXT("type"), TypeObj) && TypeObj && TypeObj->IsValid())
 		{
-			return BuildPinTypeFromJsonObject(*TypeObj, OutPinType, OutError);
+			if (UeAgentBlueprintAuthoringOps::BuildPinTypeFromJsonObject(*TypeObj, OutPinType, OutError, Context)) return true;
+			UeAgentAuthoringDiagnostics::PrefixInternalDocumentFailure(OutError, TEXT("/type"));
+			UeAgentAuthoringDiagnostics::LocateFailure(OutError, *VarObj, TEXT("variable_type_decode"), OutError.TargetPath, TEXT("type"));
+			return false;
 		}
+		const auto FailCppType = [&](const TCHAR* Code, const TCHAR* Reason)
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("variable_type_decode"));
+			OutError.PropertyPath = TEXT("cpp_type");
+			OutError.SemanticPointer = TEXT("/cpp_type");
+			OutError.ActualValue = VarObj.IsValid() ? VarObj->TryGetField(TEXT("cpp_type")) : TSharedPtr<FJsonValue>();
+			OutError.ActualValuePresent = OutError.ActualValue.IsValid();
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a type object, or cpp_type naming float/double/bool/int/int32/int64/name/string/text or a resolvable struct/class"));
+			if (Context) OutError.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Context);
+			if (VarObj.IsValid()) UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutError, *VarObj, TEXT("cpp_type"));
+			return false;
+		};
 		FString CppType;
 		if (!VarObj.IsValid() || !VarObj->TryGetStringField(TEXT("cpp_type"), CppType) || CppType.TrimStartAndEnd().IsEmpty())
 		{
-			OutError = TEXT("missing_variable_type");
-			return false;
+			return FailCppType(TEXT("missing_variable_type"), TEXT("The variable requires a type object or a non-empty cpp_type string."));
 		}
 		TSharedPtr<FJsonObject> TypeFromCpp = MakeShared<FJsonObject>();
 		const FString TypeToken = CppType.TrimStartAndEnd().ToLower();
@@ -550,10 +398,23 @@ namespace UeAgentControlRigOps
 		}
 		else
 		{
-			OutError = TEXT("unsupported_variable_cpp_type");
-			return false;
+			return FailCppType(TEXT("unsupported_variable_cpp_type"), TEXT("The variable cpp_type is not a supported primitive and did not resolve to a struct or class."));
 		}
-		return BuildPinTypeFromJsonObject(TypeFromCpp, OutPinType, OutError);
+		if (UeAgentBlueprintAuthoringOps::BuildPinTypeFromJsonObject(TypeFromCpp, OutPinType, OutError, Context)) return true;
+		// TypeFromCpp is derived; the actual input is the cpp_type field on this row.
+		const FString TypeField = OutError.PropertyPath;
+		OutError.SemanticPointer = TEXT("/cpp_type");
+		OutError.Source.InternalJsonPath = TEXT("/cpp_type");
+		UeAgentAuthoringDiagnostics::LocateFailure(OutError, *VarObj, TEXT("variable_type_decode"), OutError.TargetPath, TEXT("cpp_type"));
+		OutError.PropertyPath = TypeField;
+		if (OutError.SourceKind != TEXT("command_input")) OutError.SourceKind = TEXT("related_input");
+		if (!OutError.ActualEvidence.IsValid())
+		{
+			auto Facts = MakeShared<FJsonObject>();
+			Facts->SetStringField(TEXT("cpp_type"), CppType);
+			OutError.ActualEvidence = MakeShared<FJsonValueObject>(Facts);
+		}
+		return false;
 	}
 
 	FControlRigVariableApplyStats::FControlRigVariableApplyStats()
@@ -564,12 +425,39 @@ namespace UeAgentControlRigOps
 	{
 	}
 
-	void ApplyVariablesJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<TSharedPtr<FJsonValue>>& Issues, FControlRigVariableApplyStats& Stats)
+	bool CollectVariableTypeChangeDependents(UControlRigBlueprint& Blueprint,
+		const FJsonObject& Variables, TArray<UBlueprint*>& OutBlueprints, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Rows = nullptr;
+		if (!Variables.TryGetArrayField(TEXT("variables"), Rows)) return true;
+		for (int32 RowIndex = 0; RowIndex < Rows->Num(); ++RowIndex)
+		{
+			const auto& Value = (*Rows)[RowIndex];
+			const auto Row = Value.IsValid() && Value->Type == EJson::Object ? Value->AsObject() : nullptr;
+			FString Name;
+			if (!Row || !Row->TryGetStringField(TEXT("name"), Name)) continue;
+			const int32 Index = FBlueprintEditorUtils::FindNewVariableIndex(&Blueprint, FName(*Name));
+			if (Index == INDEX_NONE) continue;
+			FEdGraphPinType Type;
+			if (!BuildPinTypeFromVariableJson(Row, Type, OutError, &Blueprint))
+			{
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Name;
+				UeAgentAuthoringDiagnostics::PrefixInternalDocumentFailure(OutError, FString::Printf(TEXT("/variables/%d"), RowIndex));
+				return false;
+			}
+			if (Blueprint.NewVariables[Index].VarType != Type)
+				UeAgentBlueprintAuthoring::CollectNativeMemberTypeDependents(Blueprint, FName(*Name), OutBlueprints);
+		}
+		return true;
+	}
+
+	void ApplyVariablesJson(UControlRigBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Obj, const FString& Path, TArray<UE::UAI::Contract::FDiagnostic>& Issues, FControlRigVariableApplyStats& Stats, const FString& SourcePointerPrefix)
 	{
 		if (!Blueprint || !Obj.IsValid())
 		{
 			return;
 		}
+		FRigVMBlueprintCompileScope CompileScope(Blueprint);
 		UeAgentJsonDiagnostics::WarnUnknownFields(Obj, Path, { TEXT("schema"), TEXT("variables"), TEXT("variable_count"), TEXT("delete_missing") }, Issues);
 		const TArray<TSharedPtr<FJsonValue>>* Variables = nullptr;
 		if (!UeAgentJsonDiagnostics::ReadArrayField(Obj, TEXT("variables"), Path + TEXT(".variables"), Variables, Issues, false) || !Variables)
@@ -584,6 +472,7 @@ namespace UeAgentControlRigOps
 		};
 		TArray<FPendingVariableDefault> PendingDefaults;
 		TSet<FName> DesiredVariables;
+		bool bVariableLayoutChanged = false;
 
 		for (int32 VariableIndex = 0; VariableIndex < Variables->Num(); ++VariableIndex)
 		{
@@ -601,10 +490,13 @@ namespace UeAgentControlRigOps
 				continue;
 			}
 			FEdGraphPinType PinType;
-			FString TypeError;
-			if (!BuildPinTypeFromVariableJson(VarObj, PinType, TypeError))
+			UE::UAI::Contract::FDiagnostic TypeError;
+			if (!BuildPinTypeFromVariableJson(VarObj, PinType, TypeError, Blueprint))
 			{
-				UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TypeError, VarPath + TEXT(".type"), FString::Printf(TEXT("Invalid Control Rig variable type for '%s'."), *Name));
+				if (TypeError.CandidateName.IsEmpty()) TypeError.CandidateName = Name;
+				UeAgentAuthoringDiagnostics::PrefixInternalDocumentFailure(TypeError,
+					FString::Printf(TEXT("%s/variables/%d"), *SourcePointerPrefix, VariableIndex));
+                Issues.Add(TypeError);
 				continue;
 			}
 
@@ -622,18 +514,15 @@ namespace UeAgentControlRigOps
 					continue;
 				}
 				++Stats.Added;
+				bVariableLayoutChanged = true;
 			}
 			else
 			{
-				const FBPVariableDescription& ExistingVar = Blueprint->NewVariables[ExistingIndex];
-				const bool bSameType =
-					ExistingVar.VarType.PinCategory == PinType.PinCategory
-					&& ExistingVar.VarType.PinSubCategory == PinType.PinSubCategory
-					&& ExistingVar.VarType.ContainerType == PinType.ContainerType
-					&& ExistingVar.VarType.PinSubCategoryObject.Get() == PinType.PinSubCategoryObject.Get();
-				if (!bSameType)
+				bVariableLayoutChanged |= Blueprint->NewVariables[ExistingIndex].VarType != PinType;
+				if (!UeAgentBlueprintAuthoring::ChangeNativeMemberType(*Blueprint, VariableName, PinType, TypeError))
 				{
-					UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("control_rig_variable_type_update_not_supported"), VarPath + TEXT(".type"), FString::Printf(TEXT("Variable '%s' already exists with another type. Rename/remove explicitly before changing type."), *Name));
+					if (TypeError.PropertyPath.IsEmpty()) TypeError.PropertyPath = VarPath + TEXT(".type");
+                    Issues.Add(TypeError);
 					continue;
 				}
 				++Stats.Existing;
@@ -702,14 +591,29 @@ namespace UeAgentControlRigOps
 			}
 			if (!VariablesToRemove.IsEmpty())
 			{
+				bVariableLayoutChanged = true;
 				FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 			}
 		}
 
-		if (!PendingDefaults.IsEmpty())
+		// RigVM compiles against GeneratedClass CDO external properties, not the
+		// skeleton class. Settle its layout once before the VM bracket can close,
+		// even when unchanged default descriptors were correctly omitted.
+		if (bVariableLayoutChanged || !PendingDefaults.IsEmpty())
 		{
 			FCompilerResultsLog LocalCompileLog;
 			FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &LocalCompileLog);
+			if (LocalCompileLog.NumErrors > 0 || Blueprint->Status == BS_Error)
+			{
+				auto CompileError = UeAgentAuthoringDiagnostics::MakeCompileFailure(TEXT("control_rig_variable_compile_failed"),
+                    Blueprint->GetPathName(), LocalCompileLog, Blueprint);
+                if (CompileError.PropertyPath.IsEmpty()) CompileError.PropertyPath = Path;
+                Issues.Add(MoveTemp(CompileError));
+				return;
+			}
+		}
+		if (!PendingDefaults.IsEmpty())
+		{
 			UObject* CDO = Blueprint->GeneratedClass ? Blueprint->GeneratedClass->GetDefaultObject(false) : nullptr;
 			if (!CDO)
 			{
@@ -761,104 +665,75 @@ namespace UeAgentControlRigOps
 			ApplyOptions.bAllowTemplateOwners = true;
 			ApplyOptions.bAllowDomainAuthorizedOwners = true;
 			UeAgentAuthoringDirectApply::FResult ApplyResult;
-			FString ApplyError;
-			if (!UeAgentDetailsAuthoringService::ApplyObjectProperties(
-					CDO, Payload, ApplyOptions, ApplyResult, ApplyError))
+			UE::UAI::Contract::FDiagnostic ApplyError;
+			if (!UeAgentDetailsAuthoringService::ApplyObjectProperties(CDO, Payload, ApplyOptions, ApplyResult))
 			{
-				UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("control_rig_variable_default_apply_failed"), Path, TEXT("Canonical variable default apply failed."));
+				ApplyError = ApplyResult.Diagnostic;
+				if (ApplyError.PropertyPath.IsEmpty()) ApplyError.PropertyPath = Path;
+				Issues.Add(MoveTemp(ApplyError));
 				return;
 			}
 			Stats.DefaultsUpdated += ApplyResult.PropertiesSeen;
 		}
 	}
 
-	bool SaveAssetPackage(UObject* Asset, FString& OutError)
+	bool SaveAssetPackage(UObject* Asset, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!Asset)
 		{
-			OutError = TEXT("asset_not_found");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_not_found"),
+				TEXT("The asset cannot be saved because its native object is unavailable."), TEXT("asset_save"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("asset_available");
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 			return false;
 		}
 
 		TArray<UPackage*> PackagesToSave;
 		PackagesToSave.Add(Asset->GetOutermost());
-		if (!UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, false))
+		if (!UE::UAI::EditorResources::SavePackages(PackagesToSave, false, OutError))
 		{
-			OutError = TEXT("save_asset_failed");
+			OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("save_asset_failed"), OutError, TEXT(""));
 			return false;
 		}
 		return true;
 	}
 
-	bool HasBlockingIssue(const TArray<TSharedPtr<FJsonValue>>& Issues)
-	{
-		for (const TSharedPtr<FJsonValue>& IssueValue : Issues)
-		{
-			const TSharedPtr<FJsonObject>* IssueObj = nullptr;
-			if (!IssueValue.IsValid() || !IssueValue->TryGetObject(IssueObj) || !IssueObj || !IssueObj->IsValid())
-			{
-				continue;
-			}
+	bool HasBlockingIssue(const TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+    {
+        return Issues.ContainsByPredicate([](const auto& Issue) {
+            return Issue.Severity == UE::UAI::Contract::ESeverity::Error || !Issue.Code.Equals(TEXT("json_unknown_field"), ESearchCase::IgnoreCase);
+        });
+    }
 
-			FString Severity;
-			FString Code;
-			(*IssueObj)->TryGetStringField(TEXT("severity"), Severity);
-			(*IssueObj)->TryGetStringField(TEXT("code"), Code);
-			if (Severity.Equals(TEXT("error"), ESearchCase::IgnoreCase))
-			{
-				return true;
-			}
-			if (!Code.Equals(TEXT("json_unknown_field"), ESearchCase::IgnoreCase))
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-	int32 CountIssuesBySeverity(const TArray<TSharedPtr<FJsonValue>>& Issues, const FString& SeverityToMatch)
-	{
-		int32 Count = 0;
-		for (const TSharedPtr<FJsonValue>& IssueValue : Issues)
-		{
-			const TSharedPtr<FJsonObject>* IssueObj = nullptr;
-			if (!IssueValue.IsValid() || !IssueValue->TryGetObject(IssueObj) || !IssueObj || !IssueObj->IsValid())
-			{
-				continue;
-			}
-			FString Severity;
-			(*IssueObj)->TryGetStringField(TEXT("severity"), Severity);
-			if (Severity.Equals(SeverityToMatch, ESearchCase::IgnoreCase))
-			{
-				++Count;
-			}
-		}
-		return Count;
-	}
+	int32 CountIssuesBySeverity(const TArray<UE::UAI::Contract::FDiagnostic>& Issues, const FString& SeverityToMatch)
+    { return UeAgentJsonDiagnostics::CountIssuesBySeverity(Issues, SeverityToMatch); }
 
 	static bool MakeJsonString(const TSharedPtr<FJsonObject>& Obj, FString& OutJson)
 	{
 		return UeAgentJsonDiagnostics::SerializeJsonObjectCompact(Obj, OutJson);
 	}
 
-	bool SaveAuthoringFile(const FString& FilePath, const TSharedPtr<FJsonObject>& Obj, FString& OutError)
+	bool SaveAuthoringFile(const FString& FilePath, const TSharedPtr<FJsonObject>& Obj, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentAuthoringFileIO::FSaveOptions Options;
-		Options.SourceCommand = TEXT("control_rig_export_folder");
+		Options.SourceCommand = TEXT("control_rig_shape_library_export_json");
 		Options.bExternalizeInlineDetails = false;
 		return UeAgentAuthoringFileIO::SaveObject(FilePath, Obj, Options, &OutError);
 	}
 
-	bool LoadAuthoringFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObj, TArray<TSharedPtr<FJsonValue>>& Issues, FString& OutError, const bool bOptional)
+	bool LoadAuthoringFile(const FString& FilePath, TSharedPtr<FJsonObject>& OutObj, TArray<UE::UAI::Contract::FDiagnostic>& Issues, UE::UAI::Contract::FDiagnostic& OutError, const bool bOptional)
 	{
 		UeAgentAuthoringFileIO::FLoadOptions Options;
 		Options.bOptional = bOptional;
-		FString LoadError;
+		UE::UAI::Contract::FDiagnostic LoadError;
 		const bool bOk = UeAgentAuthoringFileIO::LoadObject(FilePath, OutObj, Options, LoadError);
 		if (!bOk)
 		{
-			OutError = LoadError.IsEmpty() ? TEXT("hjson_load_failed") : LoadError;
-			UeAgentJsonDiagnostics::AddIssue(Issues, TEXT("error"), TEXT("hjson_load_failed"), FilePath, OutError);
+			OutError = LoadError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_load_failed"), TEXT("The authoring file could not be loaded."), TEXT("input_decode")) : LoadError;
+			if (OutError.Source.SourceFile.IsEmpty()) OutError.Source.SourceFile = FilePath;
+            Issues.Add(OutError);
 		}
 		return bOk;
 	}
@@ -922,7 +797,7 @@ namespace UeAgentControlRigOps
 		const FString& FieldName,
 		const FString& Path,
 		FLinearColor& OutValue,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const bool bRequired)
 	{
 		const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, FieldName);
@@ -986,7 +861,7 @@ namespace UeAgentControlRigOps
 		const FString& FieldName,
 		const FString& Path,
 		FVector2D& OutValue,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const bool bRequired)
 	{
 		const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, FieldName);
@@ -1039,7 +914,7 @@ namespace UeAgentControlRigOps
 		const FString& FieldName,
 		const FString& Path,
 		FTransform& OutValue,
-		TArray<TSharedPtr<FJsonValue>>& Issues,
+		TArray<UE::UAI::Contract::FDiagnostic>& Issues,
 		const bool bRequired)
 	{
 		const TSharedPtr<FJsonValue>* FieldValue = UeAgentJsonDiagnostics::FindFieldValue(Obj, FieldName);

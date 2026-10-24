@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringProduction.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
 #include "DomainAdapters/WorldSimpleEffect/UeAgentWorldSimpleEffectCapabilities.h"
@@ -11,18 +13,7 @@
 
 namespace UE::UAI::Composition::SimpleAuthoring::World
 {
-	struct UEAGENTINTERFACE_API
-		FUeAgentWorldSimpleAuthoringError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	using FUeAgentWorldSimpleAuthoringError = UE::UAI::Contract::FDiagnostic;
 
 	struct UEAGENTINTERFACE_API
 		FUeAgentWorldSimpleAuthoringProviderConfig
@@ -52,7 +43,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			ESPMode::ThreadSafe> ReferenceOracle;
 		TOptional<Projection::FUeAgentProjectionRequest> Projection;
 		FString OwnerLeaseId;
-		int32 MaxQueueItems = 64;
 	};
 
 	class UEAGENTINTERFACE_API

@@ -1,8 +1,12 @@
 #include "Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonDiagnostic.h"
 
 #include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
 #include "Containers/StringConv.h"
+#include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Utilities/UeAgentJsonDiagnostics.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
@@ -50,10 +54,100 @@ namespace UE::UAI::HjsonWorkspace
 		bool Fail(
 			FWorkspaceError& OutError,
 			FString Code,
-			FString SourceUnit)
+			FString Reason,
+			FString SourceUnit,
+			FString Pointer = TEXT("/"),
+			TSharedPtr<FJsonValue> Actual = nullptr,
+			TSharedPtr<FJsonValue> Expected = nullptr)
 		{
-			OutError.Set(MoveTemp(Code), MoveTemp(SourceUnit));
+			auto Diagnostic = Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("workspace_load"));
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			if (Pointer != TEXT("/")) Diagnostic.Source.JsonPath = Pointer;
+			OutError.SetFailure(MoveTemp(Diagnostic), SourceUnit, Pointer);
 			return false;
+		}
+
+		bool FailEvidence(FWorkspaceError& OutError, const TCHAR* Code, const TCHAR* Reason,
+			const FString& SourceUnit, const FString& Expected, const FString& Actual, const FString& Pointer = TEXT("/"))
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("workspace_load"));
+			Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(Expected);
+			Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Actual);
+			Diagnostic.Source.InternalJsonPath = Pointer;
+			OutError.SetFailure(MoveTemp(Diagnostic), SourceUnit, Pointer);
+			return false;
+		}
+
+		bool FailSourceField(FWorkspaceError& OutError, const FString& Target,
+			const TSharedPtr<FJsonObject>& Source, const TCHAR* Field, const TCHAR* Reason,
+			const TCHAR* Expected, const TCHAR* Code = TEXT("content_graph_source_invalid"), bool bPublicActual = true)
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("workspace_load"));
+			Diagnostic.TargetPath = Target;
+			Diagnostic.Source.JsonPath = FString(TEXT("/source/")) + Field;
+			Diagnostic.SourceKind = TEXT("command_input");
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			const auto Actual = Source ? Source->TryGetField(Field) : nullptr;
+			Diagnostic.ActualValuePresent = Actual.IsValid();
+			if (Actual)
+			{
+				const FString Type = UeAgentJsonDiagnostics::JsonValueTypeToString(Actual);
+				if (!bPublicActual)
+				{
+					Diagnostic.ActualEvidence = Actual;
+					Diagnostic.ActualValue = MakeShared<FJsonValueString>(Type);
+				}
+				else if (Actual->Type == EJson::Array || Actual->Type == EJson::Object)
+				{
+					const auto Summary = MakeShared<FJsonObject>();
+					Summary->SetStringField(TEXT("type"), Type);
+					if (Actual->Type == EJson::Array) Summary->SetNumberField(TEXT("count"), Actual->AsArray().Num());
+					else if (Actual->AsObject().IsValid()) Summary->SetNumberField(TEXT("count"), Actual->AsObject()->Values.Num());
+					Diagnostic.ActualValue = MakeShared<FJsonValueObject>(Summary);
+					Diagnostic.ActualEvidence = Actual;
+				}
+				else Diagnostic.ActualValue = Actual;
+			}
+			OutError.SetFailure(MoveTemp(Diagnostic));
+			return false;
+		}
+
+		bool FailSourceShape(FWorkspaceError& OutError, const FString& Target, const FJsonObject& Source, const TCHAR* ValueField)
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("content_graph_source_invalid"),
+				FString::Printf(TEXT("An import source must contain exactly 'kind' and '%s'."), ValueField), TEXT("workspace_load"));
+			Diagnostic.SourceKind = TEXT("command_input");
+			Diagnostic.Source.JsonPath = TEXT("/source");
+			TArray<TSharedPtr<FJsonValue>> ActualFields;
+			for (const auto& Field : Source.Values) ActualFields.Add(MakeShared<FJsonValueString>(Field.Key));
+			Diagnostic.ActualValue = MakeShared<FJsonValueArray>(MoveTemp(ActualFields));
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+				MakeShared<FJsonValueString>(TEXT("kind")), MakeShared<FJsonValueString>(ValueField)});
+			OutError.SetFailure(MoveTemp(Diagnostic), Target);
+			return false;
+		}
+
+		bool FailPreparedField(FWorkspaceError& OutError, const TSharedPtr<FJsonObject>& Object,
+			const TCHAR* Field, const TCHAR* Requirement, const FString& SourceUnit,
+			const FString& ParentPointer = FString())
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("content_graph_normalized_source_invalid"),
+				FString::Printf(TEXT("Prepared import metadata field '%s' %s."), Field, Requirement), TEXT("workspace_load"));
+			Diagnostic.Source.InternalJsonPath = ParentPointer + TEXT("/") + Field;
+			Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(Requirement);
+			Diagnostic.ActualEvidence = Object ? Object->TryGetField(Field) : nullptr;
+			OutError.SetFailure(MoveTemp(Diagnostic), SourceUnit);
+			return false;
+		}
+
+		bool ReadPreparedString(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field,
+			FString& OutValue, bool bAllowEmpty, FWorkspaceError& OutError,
+			const FString& SourceUnit, const FString& ParentPointer = FString())
+		{
+			if (Object->TryGetStringField(Field, OutValue) && (bAllowEmpty || !OutValue.IsEmpty())) return true;
+			return FailPreparedField(OutError, Object, Field,
+				bAllowEmpty ? TEXT("must be a string") : TEXT("must be a non-empty string"), SourceUnit, ParentPointer);
 		}
 
 		bool Charge(
@@ -67,17 +161,14 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				Values.Add(Value.Key, Value.Value);
 			}
-			FUeAgentResourceBudgetExceeded BudgetError;
-			if (Resources.TryChargeMany(Values, Path, BudgetError))
+			FUeAgentResourceChargeError ChargeError;
+			if (Resources.TryChargeMany(Values, Path, ChargeError))
 			{
 				return true;
 			}
-			OutError.Set(
-				BudgetError.Code,
-				BudgetError.Path,
-				TEXT("/"),
-				BudgetError.Observed,
-				BudgetError.bStoppedEarly);
+			ChargeError.Source.InternalJsonPath = MoveTemp(ChargeError.Source.JsonPath);
+			ChargeError.Source.JsonPath.Reset();
+			OutError.SetFailure(MoveTemp(ChargeError), Path);
 			return false;
 		}
 
@@ -103,36 +194,56 @@ namespace UE::UAI::HjsonWorkspace
 			return Sha256(Bytes);
 		}
 
+		bool IsSha256(const FString& Value)
+		{
+			if (!Value.StartsWith(TEXT("sha256:")) || Value.Len() != 71)
+			{
+				return false;
+			}
+			for (int32 Index = 7; Index < Value.Len(); ++Index)
+			{
+				if (!FChar::IsHexDigit(Value[Index]))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
 		bool TryBuildSemanticFingerprint(
 			const TArray<FContentGraphImportDocument>& Documents,
 			const FString& EntryFile,
 			FUeAgentResourceTracker& Resources,
 			FString& OutFingerprint,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			const FString& DocumentRoot = FString())
 		{
 			OutFingerprint.Reset();
 			if (Documents.IsEmpty() || EntryFile.IsEmpty())
 			{
 				return Fail(
 					OutError,
-					TEXT("content_graph_semantic_source_invalid"),
-					EntryFile);
+					TEXT("content_graph_semantic_source_invalid"), TEXT("An import source requires at least one document and an entry file."),
+					EntryFile, TEXT("/"), MakeShared<FJsonValueNumber>(Documents.Num()));
 			}
 			TArray<TPair<FString, FString>> CanonicalDocuments;
 			CanonicalDocuments.Reserve(Documents.Num());
 			int32 EntryMatches = 0;
+			FWorkspaceError Diagnostics;
 			for (const FContentGraphImportDocument& SourceDocument : Documents)
 			{
 				FHjsonDocumentPtr Parsed;
 				if (!TryParseHjsonDocument(
 						SourceDocument.GetDocument(),
-						SourceDocument.GetRelativePath(),
+						DocumentRoot.IsEmpty() ? SourceDocument.GetRelativePath()
+							: FPaths::Combine(DocumentRoot, SourceDocument.GetRelativePath()),
 						Resources,
 						Parsed,
 						OutError)
 					|| !Parsed.IsValid())
 				{
-					return false;
+					Diagnostics.Append(OutError);
+					continue;
 				}
 				TArray<uint8> CanonicalUtf8;
 				if (!TryWriteHjsonDocument(
@@ -141,7 +252,8 @@ namespace UE::UAI::HjsonWorkspace
 						CanonicalUtf8,
 						OutError))
 				{
-					return false;
+					Diagnostics.Append(OutError);
+					continue;
 				}
 				const FString RelativeIdentity =
 					SourceDocument.GetRelativePath().ToLower();
@@ -154,12 +266,18 @@ namespace UE::UAI::HjsonWorkspace
 					? 1
 					: 0;
 			}
+			if (Diagnostics.HasErrors())
+			{
+				Diagnostics.MarkUnchecked(TEXT("workspace_resolution"));
+				OutError = MoveTemp(Diagnostics);
+				return false;
+			}
 			if (EntryMatches != 1)
 			{
 				return Fail(
 					OutError,
-					TEXT("content_graph_semantic_entry_invalid"),
-					EntryFile);
+					TEXT("content_graph_semantic_entry_invalid"), TEXT("The entry file must identify exactly one source document."),
+					EntryFile, TEXT("/"), MakeShared<FJsonValueNumber>(EntryMatches), MakeShared<FJsonValueNumber>(1));
 			}
 			if (CanonicalDocuments.Num() == 1)
 			{
@@ -223,7 +341,7 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_reparse_point_rejected"),
+					TEXT("workspace_reparse_point_rejected"), TEXT("The source file is a reparse point; workspace imports require regular files."),
 					File);
 			}
 			FString Relative = File;
@@ -236,7 +354,7 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_path_escape"),
+					TEXT("workspace_path_escape"), TEXT("The source file cannot be resolved relative to the workspace directory."),
 					File);
 			}
 			FPaths::NormalizeFilename(Relative);
@@ -250,7 +368,7 @@ namespace UE::UAI::HjsonWorkspace
 				{
 					return Fail(
 						OutError,
-						TEXT("workspace_reparse_point_rejected"),
+						TEXT("workspace_reparse_point_rejected"), TEXT("A source file ancestor is a reparse point; workspace imports require regular directories."),
 						Current);
 				}
 			}
@@ -267,7 +385,7 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_source_read_failed"),
+					TEXT("workspace_source_read_failed"), TEXT("The source file size could not be read."),
 					File);
 			}
 			OutSnapshot.Files.Add({
@@ -288,15 +406,15 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_source_directory_missing"),
-					Root);
+					TEXT("workspace_source_directory_missing"), TEXT("The workspace source directory does not exist."),
+					Root, TEXT("/source/path"), MakeShared<FJsonValueString>(Root));
 			}
 			if (IsReparsePoint(Root))
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_reparse_point_rejected"),
-					Root);
+					TEXT("workspace_reparse_point_rejected"), TEXT("The workspace directory is a reparse point."),
+					Root, TEXT("/source/path"), MakeShared<FJsonValueString>(Root));
 			}
 			TArray<FString> Files;
 			IFileManager::Get().FindFilesRecursive(
@@ -316,7 +434,7 @@ namespace UE::UAI::HjsonWorkspace
 				{
 					return Fail(
 						OutError,
-						TEXT("workspace_path_escape"),
+						TEXT("workspace_path_escape"), TEXT("A discovered source file is outside the workspace directory."),
 						File);
 				}
 				if (!RejectReparseAncestors(Root, File, OutError)
@@ -350,14 +468,14 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_source_file_missing"),
+					TEXT("workspace_source_file_missing"), TEXT("The workspace source file does not exist."),
 					File);
 			}
 			if (IsReparsePoint(File))
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_reparse_point_rejected"),
+					TEXT("workspace_reparse_point_rejected"), TEXT("The source file is a reparse point; workspace imports require regular files."),
 					File);
 			}
 			return AddFileStamp(File, OutSnapshot, OutError);
@@ -370,6 +488,7 @@ namespace UE::UAI::HjsonWorkspace
 			const FString& SourceUnit)
 		{
 			OutPath.Reset();
+			const FString Original = Value;
 			Value.TrimStartAndEndInline();
 			FPaths::NormalizeFilename(Value);
 			FPaths::RemoveDuplicateSlashes(Value);
@@ -383,8 +502,8 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_path_invalid"),
-					SourceUnit);
+					TEXT("workspace_path_invalid"), TEXT("A workspace document path must be non-empty, relative, and remain inside the workspace."),
+					SourceUnit, TEXT("/"), MakeShared<FJsonValueString>(Original));
 			}
 			FString Collapsed = Value;
 			if (!FPaths::CollapseRelativeDirectories(Collapsed)
@@ -393,8 +512,8 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_path_invalid"),
-					SourceUnit);
+					TEXT("workspace_path_invalid"), TEXT("The document path cannot be normalized to a location inside the workspace."),
+					SourceUnit, TEXT("/"), MakeShared<FJsonValueString>(Original));
 			}
 			OutPath = MoveTemp(Collapsed);
 			return true;
@@ -413,7 +532,7 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_source_read_failed"),
+					TEXT("workspace_source_read_failed"), TEXT("The workspace source file could not be read."),
 					Path);
 			}
 			if (!Charge(
@@ -441,6 +560,14 @@ namespace UE::UAI::HjsonWorkspace
 			return true;
 		}
 
+		bool FailManifestField(FWorkspaceError& OutError, const FString& Reason, const FHjsonNode& Object,
+			const FString& Field, const FString& Expected, bool bPublicActual = false)
+		{
+			OutError.SetFailure(HjsonFieldFailure(TEXT("content_graph_workspace_manifest_invalid"), Reason,
+				TEXT("workspace_load"), Object, Field, MakeShared<FJsonValueString>(Expected), bPublicActual));
+			return false;
+		}
+
 		bool RequiredString(
 			const FHjsonNode& Object,
 			const TCHAR* Field,
@@ -450,17 +577,14 @@ namespace UE::UAI::HjsonWorkspace
 			const FHjsonNode* Value = Object.Get(Field);
 			if (!Value || Value->GetKind() != EHjsonNodeKind::String)
 			{
-				return Fail(
-					OutError,
-					TEXT("content_graph_workspace_manifest_invalid"),
-					Object.GetProvenance().GetSourceUnit());
+				return FailManifestField(OutError, FString::Printf(TEXT("Workspace metadata field '%s' must be a string."), Field),
+					Object, Field, TEXT("string"));
 			}
 			OutValue = Value->GetText();
 			OutValue.TrimStartAndEndInline();
-			return !OutValue.IsEmpty() || Fail(
-				OutError,
-				TEXT("content_graph_workspace_manifest_invalid"),
-				Object.GetProvenance().GetSourceUnit());
+			if (!OutValue.IsEmpty()) return true;
+			return FailManifestField(OutError, FString::Printf(TEXT("Workspace metadata field '%s' must not be empty."), Field),
+				Object, Field, TEXT("non-empty string"), true);
 		}
 
 		bool RequiredInteger(
@@ -470,13 +594,11 @@ namespace UE::UAI::HjsonWorkspace
 			FWorkspaceError& OutError)
 		{
 			const FHjsonNode* Value = Object.Get(Field);
-			return Value
+			if (Value
 				&& Value->GetKind() == EHjsonNodeKind::Integer
-				&& LexTryParseString(OutValue, *Value->GetLexeme())
-				|| Fail(
-					OutError,
-					TEXT("content_graph_workspace_manifest_invalid"),
-					Object.GetProvenance().GetSourceUnit());
+				&& LexTryParseString(OutValue, *Value->GetLexeme())) return true;
+			return FailManifestField(OutError, FString::Printf(TEXT("Workspace metadata field '%s' must be a signed 64-bit integer."), Field),
+				Object, Field, TEXT("int64"));
 		}
 
 		bool TryParseManifest(
@@ -487,11 +609,13 @@ namespace UE::UAI::HjsonWorkspace
 			FString& OutEntryFile,
 			FString& OutBaseRevision,
 			TArray<TPair<FString, FString>>& OutFiles,
+			bool& bOutSemanticWorkspace,
 			FWorkspaceError& OutError)
 		{
 			OutEntryFile.Reset();
 			OutBaseRevision.Reset();
 			OutFiles.Reset();
+			bOutSemanticWorkspace = false;
 			FHjsonDocumentPtr Manifest;
 			if (!TryParseHjsonDocument(
 					ManifestText,
@@ -504,37 +628,52 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				if (OutError.GetCode().IsEmpty())
 				{
-					OutError.Set(
-						TEXT("content_graph_workspace_manifest_invalid"),
-						ManifestPath);
+					if (Manifest.IsValid())
+						OutError.SetFailure(HjsonNodeFailure(TEXT("content_graph_workspace_manifest_invalid"),
+							TEXT("The workspace metadata document must have an object root."), TEXT("workspace_load"),
+							*Manifest->GetRoot(), MakeShared<FJsonValueString>(TEXT("object")), false));
+					else
+						OutError.SetSourceFailure(TEXT("content_graph_workspace_manifest_invalid"),
+							TEXT("Workspace metadata parsing returned no document or diagnostic."), ManifestPath);
 				}
 				return false;
 			}
 			const FHjsonNode& Root = *Manifest->GetRoot();
 			FString Schema;
+			if (!RequiredString(Root, TEXT("workspace_schema"), Schema, OutError))
+			{
+				return false;
+			}
+			if (Schema == GetSemanticWorkspaceSchemaId())
+			{
+				bOutSemanticWorkspace = true;
+				return true;
+			}
 			FString TargetIdentity;
 			int64 FormatVersion = 0;
-			if (!RequiredString(Root, TEXT("workspace_schema"), Schema, OutError)
-				|| !RequiredInteger(Root, TEXT("format_version"), FormatVersion, OutError)
+			if (!RequiredInteger(Root, TEXT("format_version"), FormatVersion, OutError)
 				|| !RequiredString(Root, TEXT("target_identity"), TargetIdentity, OutError)
 				|| !RequiredString(Root, TEXT("base_revision"), OutBaseRevision, OutError)
 				|| !RequiredString(Root, TEXT("entry_file"), OutEntryFile, OutError))
 			{
 				return false;
 			}
-			if (Schema != ContentGraphWorkspaceSchema || FormatVersion != 1)
+			if (Schema != ContentGraphWorkspaceSchema)
 			{
 				return Fail(
 					OutError,
-					TEXT("content_graph_workspace_schema_unsupported"),
-					ManifestPath);
+					TEXT("content_graph_workspace_schema_unsupported"), TEXT("The workspace metadata schema is unsupported."),
+					ManifestPath, TEXT("/workspace_schema"), MakeShared<FJsonValueString>(Schema), MakeShared<FJsonValueString>(ContentGraphWorkspaceSchema));
 			}
+			if (FormatVersion != 1)
+				return Fail(OutError, TEXT("content_graph_workspace_schema_unsupported"), TEXT("The workspace format version is unsupported."),
+					ManifestPath, TEXT("/format_version"), MakeShared<FJsonValueNumber>(FormatVersion), MakeShared<FJsonValueNumber>(1));
 			if (TargetIdentity != ExpectedTargetIdentity)
 			{
-				return Fail(
+				return FailEvidence(
 					OutError,
-					TEXT("content_graph_workspace_target_mismatch"),
-					TargetIdentity);
+					TEXT("content_graph_workspace_target_mismatch"), TEXT("The workspace belongs to a different target."),
+					ManifestPath, ExpectedTargetIdentity, TargetIdentity, TEXT("/target_identity"));
 			}
 			if (!TryNormalizeRelativePath(
 					OutEntryFile,
@@ -546,24 +685,22 @@ namespace UE::UAI::HjsonWorkspace
 			}
 			const FHjsonNode* Files = Root.Get(TEXT("files"));
 			const FHjsonNode* References = Root.Get(TEXT("references"));
-			if (!Files || Files->GetKind() != EHjsonNodeKind::Array
-				|| Files->GetItems().IsEmpty()
-				|| !References || References->GetKind() != EHjsonNodeKind::Array)
+			if (!Files || Files->GetKind() != EHjsonNodeKind::Array || Files->GetItems().IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("content_graph_workspace_manifest_invalid"),
-					ManifestPath);
+				return FailManifestField(OutError, TEXT("Workspace metadata requires a non-empty files array."),
+					Root, TEXT("files"), TEXT("non-empty array"), true);
 			}
+			if (!References || References->GetKind() != EHjsonNodeKind::Array)
+				return FailManifestField(OutError, TEXT("Workspace metadata requires a references array."), Root, TEXT("references"), TEXT("array"), true);
 			TSet<FString> Identities;
 			for (const FHjsonNodeRef& FileValue : Files->GetItems())
 			{
 				if (FileValue->GetKind() != EHjsonNodeKind::Object)
 				{
-					return Fail(
-						OutError,
-						TEXT("content_graph_workspace_manifest_invalid"),
-						ManifestPath);
+					OutError.SetFailure(HjsonNodeFailure(TEXT("content_graph_workspace_manifest_invalid"),
+						TEXT("Each workspace files entry must be an object."), TEXT("workspace_load"), FileValue.Get(),
+						MakeShared<FJsonValueString>(TEXT("object"))));
+					return false;
 				}
 				FString RelativePath;
 				FString ContentHash;
@@ -578,50 +715,51 @@ namespace UE::UAI::HjsonWorkspace
 					return false;
 				}
 				const FString Identity = RelativePath.ToLower();
-				if (Identities.Contains(Identity)
-					|| !ContentHash.StartsWith(TEXT("sha256:"))
-					|| ContentHash.Len() != 71
-					|| !RelativePath.EndsWith(TEXT(".hjson"), ESearchCase::IgnoreCase)
+				if (Identities.Contains(Identity))
+					return FailManifestField(OutError, TEXT("A document path is declared more than once."), *FileValue, TEXT("path"), TEXT("unique document path"), true);
+				if (!ContentHash.StartsWith(TEXT("sha256:")) || ContentHash.Len() != 71)
+					return FailEvidence(OutError, TEXT("content_graph_workspace_manifest_invalid"), TEXT("A workspace files entry has an invalid SHA-256 content digest."),
+						ManifestPath, TEXT("sha256: followed by 64 hexadecimal characters"), ContentHash,
+						FileValue->Get(TEXT("content_hash"))->GetProvenance().GetJsonPointer());
+				if (!RelativePath.EndsWith(TEXT(".hjson"), ESearchCase::IgnoreCase)
 					|| RelativePath.Equals(
 						ContentGraphWorkspaceManifest,
 						ESearchCase::IgnoreCase))
 				{
-					return Fail(
-						OutError,
-						TEXT("content_graph_workspace_manifest_invalid"),
-						RelativePath);
+					return FailManifestField(OutError, TEXT("Workspace files must reference HJSON documents other than the metadata file itself."),
+						*FileValue, TEXT("path"), TEXT("HJSON document other than the metadata file"), true);
 				}
 				Identities.Add(Identity);
 				OutFiles.Emplace(MoveTemp(RelativePath), ContentHash.ToLower());
 			}
 			if (!Identities.Contains(OutEntryFile.ToLower()))
 			{
-				return Fail(
-					OutError,
-					TEXT("content_graph_workspace_entry_missing"),
-					OutEntryFile);
+				OutError.SetFailure(HjsonFieldFailure(TEXT("content_graph_workspace_entry_missing"),
+					TEXT("The entry document is not declared in the workspace files list."), TEXT("workspace_load"),
+					Root, TEXT("entry_file"), MakeShared<FJsonValueString>(TEXT("declared document path"))));
+				return false;
 			}
 			for (const FHjsonNodeRef& Reference : References->GetItems())
 			{
 				if (Reference->GetKind() != EHjsonNodeKind::String)
 				{
-					return Fail(
-						OutError,
-						TEXT("content_graph_workspace_manifest_invalid"),
-						ManifestPath);
+					OutError.SetFailure(HjsonNodeFailure(TEXT("content_graph_workspace_manifest_invalid"),
+						TEXT("Each workspace reference must be a document path string."), TEXT("workspace_load"), Reference.Get(),
+						MakeShared<FJsonValueString>(TEXT("string"))));
+					return false;
 				}
 				FString RelativePath;
 				if (!TryNormalizeRelativePath(
 						Reference->GetText(),
 						RelativePath,
 						OutError,
-						ManifestPath)
-					|| !Identities.Contains(RelativePath.ToLower()))
+						ManifestPath)) return false;
+				if (!Identities.Contains(RelativePath.ToLower()))
 				{
-					return Fail(
-						OutError,
-						TEXT("content_graph_workspace_reference_unresolved"),
-						RelativePath);
+					OutError.SetFailure(HjsonNodeFailure(TEXT("content_graph_workspace_reference_unresolved"),
+						TEXT("The workspace reference does not identify a declared document."), TEXT("workspace_load"), Reference.Get(),
+						MakeShared<FJsonValueString>(TEXT("declared document path"))));
+					return false;
 				}
 			}
 			return true;
@@ -639,12 +777,12 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_source_directory_missing"),
+					TEXT("workspace_source_directory_missing"), TEXT("The workspace source directory does not exist."),
 					Root);
 			}
 			if (FPaths::IsRelative(SourcePath))
 			{
-				return Fail(OutError, TEXT("workspace_path_invalid"), SourcePath);
+				return Fail(OutError, TEXT("workspace_path_invalid"), TEXT("The resolved workspace directory path must be absolute."), SourcePath);
 			}
 			const FString ManifestPath =
 				FPaths::Combine(Root, ContentGraphWorkspaceManifest);
@@ -652,7 +790,7 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("content_graph_workspace_manifest_missing"),
+					TEXT("content_graph_workspace_manifest_missing"), TEXT("The directory has no workspace metadata; export the workspace before importing it."),
 					ManifestPath);
 			}
 			FSourceVersionSnapshot Before;
@@ -675,6 +813,7 @@ namespace UE::UAI::HjsonWorkspace
 			FString EntryFile;
 			FString BaseRevision;
 			TArray<TPair<FString, FString>> DeclaredFiles;
+			bool bSemanticWorkspace = false;
 			if (!TryParseManifest(
 					ManifestText,
 					ManifestPath,
@@ -683,9 +822,33 @@ namespace UE::UAI::HjsonWorkspace
 					EntryFile,
 					BaseRevision,
 					DeclaredFiles,
+					bSemanticWorkspace,
 					OutError))
 			{
 				return false;
+			}
+			if (bSemanticWorkspace)
+			{
+				FSourceVersionSnapshot After;
+				if (!CaptureDirectory(Root, After, OutError)) return false;
+				if (!(Before == After))
+				{
+					return Fail(
+						OutError,
+						TEXT("workspace_source_version_changed"), TEXT("Workspace source files changed while they were being loaded."),
+						Root);
+				}
+				OutSource = MakeShared<FResolvedContentGraphImportSource>(
+					EWorkspaceSourceKind::Directory,
+					Root,
+					ExpectedTargetIdentity,
+					FString(),
+					FString(),
+					FString(),
+					FString(),
+					TArray<FContentGraphImportDocument>(),
+					true);
+				return true;
 			}
 			TSet<FString> DeclaredIdentities;
 			TArray<FContentGraphImportDocument> Documents;
@@ -695,8 +858,9 @@ namespace UE::UAI::HjsonWorkspace
 				const FString FullPath = NormalizedFullPath(
 					FPaths::Combine(Root, Declared.Key),
 					false);
-				if (!IsWithinRoot(Root, FullPath)
-					|| !RejectReparseAncestors(Root, FullPath, OutError))
+				if (!IsWithinRoot(Root, FullPath))
+					return Fail(OutError, TEXT("workspace_path_escape"), TEXT("A declared source file resolves outside the workspace directory."), FullPath);
+				if (!RejectReparseAncestors(Root, FullPath, OutError))
 				{
 					return false;
 				}
@@ -714,10 +878,10 @@ namespace UE::UAI::HjsonWorkspace
 				const FString ActualHash = Sha256(Bytes);
 				if (ActualHash != Declared.Value)
 				{
-					return Fail(
+					return FailEvidence(
 						OutError,
-						TEXT("content_graph_workspace_digest_mismatch"),
-						Declared.Key);
+						TEXT("content_graph_workspace_digest_mismatch"), TEXT("The source document content does not match its recorded workspace digest."),
+						FullPath, Declared.Value, ActualHash);
 				}
 				DeclaredIdentities.Add(Declared.Key.ToLower());
 				FingerprintMaterial += TEXT("|") + Declared.Key
@@ -742,7 +906,7 @@ namespace UE::UAI::HjsonWorkspace
 				}
 				if (!FPaths::MakePathRelativeTo(Relative, *RelativeRoot))
 				{
-					return Fail(OutError, TEXT("workspace_path_escape"), Actual);
+					return Fail(OutError, TEXT("workspace_path_escape"), TEXT("A source file cannot be resolved relative to the workspace directory."), Actual);
 				}
 				FPaths::NormalizeFilename(Relative);
 				if (!Relative.Equals(
@@ -752,16 +916,17 @@ namespace UE::UAI::HjsonWorkspace
 				{
 					return Fail(
 						OutError,
-						TEXT("content_graph_workspace_file_undeclared"),
-						Relative);
+						TEXT("content_graph_workspace_file_undeclared"), TEXT("An HJSON file is present but is not declared by the workspace."),
+						Actual);
 				}
 			}
 			FSourceVersionSnapshot After;
-			if (!CaptureDirectory(Root, After, OutError) || !(Before == After))
+			if (!CaptureDirectory(Root, After, OutError)) return false;
+			if (!(Before == After))
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_source_version_changed"),
+					TEXT("workspace_source_version_changed"), TEXT("Workspace source files changed while they were being loaded."),
 					Root);
 			}
 			FString SemanticFingerprint;
@@ -770,7 +935,7 @@ namespace UE::UAI::HjsonWorkspace
 					EntryFile,
 					Resources,
 					SemanticFingerprint,
-					OutError))
+					OutError, Root))
 			{
 				return false;
 			}
@@ -795,7 +960,7 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			if (FPaths::IsRelative(SourcePath))
 			{
-				return Fail(OutError, TEXT("workspace_path_invalid"), SourcePath);
+				return Fail(OutError, TEXT("workspace_path_invalid"), TEXT("The resolved source file path must be absolute."), SourcePath);
 			}
 			const FString Path = NormalizedFullPath(SourcePath, false);
 			FSourceVersionSnapshot Before;
@@ -816,12 +981,12 @@ namespace UE::UAI::HjsonWorkspace
 			if (!CaptureSourceVersion(
 					FWorkspaceSource::SingleFile(Path),
 					After,
-					OutError)
-				|| !(Before == After))
+					OutError)) return false;
+			if (!(Before == After))
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_source_version_changed"),
+					TEXT("workspace_source_version_changed"), TEXT("The source file changed while it was being read."),
 					Path);
 			}
 			const FString Hash = Sha256(Bytes);
@@ -837,7 +1002,7 @@ namespace UE::UAI::HjsonWorkspace
 					FPaths::GetCleanFilename(Path),
 					Resources,
 					SemanticFingerprint,
-					OutError))
+					OutError, FPaths::GetPath(Path)))
 			{
 				return false;
 			}
@@ -887,7 +1052,8 @@ namespace UE::UAI::HjsonWorkspace
 		FString InEntryFile,
 		FString InSourceFingerprint,
 		FString InSemanticFingerprint,
-		TArray<FContentGraphImportDocument> InDocuments)
+		TArray<FContentGraphImportDocument> InDocuments,
+		const bool bInSemanticWorkspaceDirectory)
 		: Kind(InKind)
 		, SourceUnit(MoveTemp(InSourceUnit))
 		, TargetIdentity(MoveTemp(InTargetIdentity))
@@ -896,6 +1062,7 @@ namespace UE::UAI::HjsonWorkspace
 		, SourceFingerprint(MoveTemp(InSourceFingerprint))
 		, SemanticFingerprint(MoveTemp(InSemanticFingerprint))
 		, Documents(MoveTemp(InDocuments))
+		, bSemanticWorkspaceDirectory(bInSemanticWorkspaceDirectory)
 	{
 	}
 
@@ -952,10 +1119,27 @@ namespace UE::UAI::HjsonWorkspace
 			});
 	}
 
+	bool FResolvedContentGraphImportSource::IsSemanticWorkspaceDirectory() const
+	{
+		return bSemanticWorkspaceDirectory;
+	}
+
 	TSharedRef<FJsonObject>
 	FResolvedContentGraphImportSource::MakeNormalizedSourceObject() const
 	{
 		const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		if (bSemanticWorkspaceDirectory)
+		{
+			Result->SetStringField(TEXT("kind"), TEXT("semantic_workspace"));
+			Result->SetStringField(TEXT("workspace_root"), SourceUnit);
+			Result->SetStringField(TEXT("target_identity"), TargetIdentity);
+			Result->SetStringField(TEXT("base_revision"), BaseRevision);
+			Result->SetStringField(
+				TEXT("workspace_fingerprint"), SourceFingerprint);
+			Result->SetStringField(
+				TEXT("semantic_fingerprint"), SemanticFingerprint);
+			return Result;
+		}
 		Result->SetStringField(TEXT("kind"), TEXT("resolved"));
 		Result->SetStringField(
 			TEXT("carrier"),
@@ -1012,33 +1196,44 @@ namespace UE::UAI::HjsonWorkspace
 	{
 		OutSource.Reset();
 		OutError.Reset();
-		if (!SourceObject.IsValid() || ExpectedTargetIdentity.IsEmpty())
+		if (!SourceObject.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("content_graph_source_invalid"),
-				ExpectedTargetIdentity);
+			auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("content_graph_source_invalid"),
+				TEXT("The import source object is unavailable to the source loader."), TEXT("workspace_load"));
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.PropertyPath = TEXT("/source");
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object"));
+			Diagnostic.ActualValuePresent = false;
+			OutError.SetFailure(MoveTemp(Diagnostic), ExpectedTargetIdentity);
+			return false;
+		}
+		if (ExpectedTargetIdentity.IsEmpty())
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("content_graph_source_invalid"), TEXT("The import target must not be empty."), TEXT("workspace_load"));
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.PropertyPath = TEXT("/target");
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty target identity"));
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(ExpectedTargetIdentity);
+			OutError.SetFailure(MoveTemp(Diagnostic));
+			return false;
 		}
 		FString Kind;
 		if (!SourceObject->TryGetStringField(TEXT("kind"), Kind))
 		{
-			return Fail(
-				OutError,
-				TEXT("content_graph_source_invalid"),
-				ExpectedTargetIdentity);
+			return FailSourceField(OutError, ExpectedTargetIdentity, SourceObject, TEXT("kind"),
+				TEXT("The import source requires a string kind field."), TEXT("inline, single_file, or directory"));
 		}
 		Kind.TrimStartAndEndInline();
 		if (Kind == TEXT("inline"))
 		{
 			FString Document;
-			if (SourceObject->Values.Num() != 2
-				|| !SourceObject->TryGetStringField(TEXT("document"), Document)
+			if (SourceObject->Values.Num() != 2)
+				return FailSourceShape(OutError, ExpectedTargetIdentity, *SourceObject, TEXT("document"));
+			if (!SourceObject->TryGetStringField(TEXT("document"), Document)
 				|| Document.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("content_graph_source_invalid"),
-					ExpectedTargetIdentity);
+				return FailSourceField(OutError, ExpectedTargetIdentity, SourceObject, TEXT("document"),
+					TEXT("An inline source requires non-empty document text."), TEXT("non-empty string"));
 			}
 			FTCHARToUTF8 Utf8(*Document);
 			if (!Charge(
@@ -1082,15 +1277,18 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(Documents));
 			return true;
 		}
+		if (Kind != TEXT("single_file") && Kind != TEXT("directory"))
+			return FailSourceField(OutError, ExpectedTargetIdentity, SourceObject, TEXT("kind"),
+				TEXT("The source kind must be inline, single_file, or directory."), TEXT("inline, single_file, or directory"),
+				TEXT("content_graph_source_kind_unsupported"));
 		FString Path;
-		if (SourceObject->Values.Num() != 2
-			|| !SourceObject->TryGetStringField(TEXT("path"), Path)
+		if (SourceObject->Values.Num() != 2)
+			return FailSourceShape(OutError, ExpectedTargetIdentity, *SourceObject, TEXT("path"));
+		if (!SourceObject->TryGetStringField(TEXT("path"), Path)
 			|| Path.TrimStartAndEnd().IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("content_graph_source_invalid"),
-				ExpectedTargetIdentity);
+			return FailSourceField(OutError, ExpectedTargetIdentity, SourceObject, TEXT("path"),
+				TEXT("A file or directory source requires a non-empty path."), TEXT("non-empty path string"), TEXT("content_graph_source_invalid"), false);
 		}
 		return Kind == TEXT("single_file")
 			? TryLoadSingleFileSource(
@@ -1099,17 +1297,375 @@ namespace UE::UAI::HjsonWorkspace
 				Resources,
 				OutSource,
 				OutError)
-			: Kind == TEXT("directory")
-				? TryLoadDirectorySource(
+			: TryLoadDirectorySource(
 					Path,
 					ExpectedTargetIdentity,
 					Resources,
 					OutSource,
+					OutError);
+	}
+
+	bool TryRecoverContentGraphImportMachineContext(
+		const TSharedPtr<FJsonObject>& SourceObject,
+		const FString& ExpectedTargetIdentity,
+		FUeAgentResourceTracker& Resources,
+		FResolvedContentGraphImportSourcePtr& OutResolvedSource,
+		FString& OutExpectedRevision,
+		FString& OutAuthorizationId,
+		FWorkspaceError& OutError)
+	{
+		OutResolvedSource.Reset();
+		OutExpectedRevision.Reset();
+		OutAuthorizationId.Reset();
+		OutError.Reset();
+
+		if (!TryLoadContentGraphImportSource(
+			SourceObject,
+			ExpectedTargetIdentity,
+			Resources,
+			OutResolvedSource,
+			OutError)
+			|| !OutResolvedSource.IsValid())
+		{
+			return false;
+		}
+		FString WorkspaceFingerprint;
+		if (OutResolvedSource->GetKind() != EWorkspaceSourceKind::Directory)
+		{
+			OutExpectedRevision = TEXT("missing");
+			WorkspaceFingerprint =
+				OutResolvedSource->GetSourceFingerprint()
+				+ TEXT("|")
+				+ OutResolvedSource->GetSemanticFingerprint();
+		}
+		else if (OutResolvedSource->IsSemanticWorkspaceDirectory())
+		{
+			const FString WorkspaceRoot = OutResolvedSource->GetSourceUnit();
+			FResolvedSemanticWorkspacePtr SemanticWorkspace;
+			if (!TryLoadHjsonImportSource(
+					FWorkspaceSource::Directory(
+						WorkspaceRoot),
+					ESemanticWorkspaceMode::State,
+					Resources,
+					SemanticWorkspace,
 					OutError)
-				: Fail(
+				|| !SemanticWorkspace.IsValid())
+			{
+				return false;
+			}
+			OutExpectedRevision =
+				SemanticWorkspace->GetModel()->GetBaseRevision();
+			WorkspaceFingerprint =
+				SemanticWorkspace->GetWorkspaceFingerprint();
+			OutResolvedSource = MakeShared<FResolvedContentGraphImportSource>(
+				EWorkspaceSourceKind::Directory,
+				WorkspaceRoot,
+				ExpectedTargetIdentity,
+				OutExpectedRevision,
+				FString(),
+				WorkspaceFingerprint,
+				SemanticWorkspace->GetModel()->GetSemanticFingerprint(),
+				TArray<FContentGraphImportDocument>(),
+				true);
+		}
+		else
+		{
+			OutExpectedRevision = OutResolvedSource->GetBaseRevision();
+			WorkspaceFingerprint =
+				OutResolvedSource->GetSourceFingerprint()
+				+ TEXT("|")
+				+ OutResolvedSource->GetSemanticFingerprint();
+		}
+
+		if (OutExpectedRevision.IsEmpty()
+			|| WorkspaceFingerprint.IsEmpty())
+		{
+			OutExpectedRevision.Reset();
+			return Fail(
+				OutError,
+				TEXT("content_graph_workspace_machine_context_unavailable"), TEXT("The workspace is missing the target revision or source fingerprint required to prepare the import."),
+				OutResolvedSource->GetSourceUnit());
+		}
+		OutAuthorizationId = Sha256Text(
+			TEXT("content_graph.import_workspace|")
+			+ ExpectedTargetIdentity
+			+ TEXT("|")
+			+ OutExpectedRevision
+			+ TEXT("|")
+			+ WorkspaceFingerprint);
+		return true;
+	}
+
+	bool TryLoadNormalizedContentGraphImportSource(
+		const TSharedPtr<FJsonObject>& SourceObject,
+		const FString& ExpectedTargetIdentity,
+		const FString& ExpectedRevision,
+		FUeAgentResourceTracker& Resources,
+		FResolvedContentGraphImportSourcePtr& OutSource,
+		FWorkspaceError& OutError)
+	{
+		OutSource.Reset();
+		OutError.Reset();
+		if (!SourceObject.IsValid())
+			return Fail(OutError, TEXT("content_graph_normalized_source_invalid"), TEXT("The prepared import source object is missing."), ExpectedTargetIdentity);
+		if (ExpectedTargetIdentity.IsEmpty())
+			return Fail(OutError, TEXT("content_graph_normalized_source_invalid"), TEXT("The prepared import has no target identity."), FString());
+		if (ExpectedRevision.IsEmpty())
+			return Fail(OutError, TEXT("content_graph_normalized_source_invalid"), TEXT("The prepared import has no expected target revision."), ExpectedTargetIdentity);
+
+		FString Kind;
+		FString Carrier;
+		FString SourceUnit;
+		FString TargetIdentity;
+		FString BaseRevision;
+		FString EntryFile;
+		FString SourceFingerprint;
+		FString SemanticFingerprint;
+		const TArray<TSharedPtr<FJsonValue>>* DocumentValues = nullptr;
+		if (!ReadPreparedString(SourceObject, TEXT("kind"), Kind, true, OutError, ExpectedTargetIdentity)) return false;
+		if (Kind == TEXT("semantic_workspace"))
+		{
+			FString WorkspaceRoot;
+			FString WorkspaceFingerprint;
+			FString ExpectedSemanticFingerprint;
+			if (!ReadPreparedString(SourceObject, TEXT("workspace_root"), WorkspaceRoot, false, OutError, FString())
+				|| !ReadPreparedString(SourceObject, TEXT("target_identity"), TargetIdentity, true, OutError, WorkspaceRoot)
+				|| !ReadPreparedString(SourceObject, TEXT("base_revision"), BaseRevision, false, OutError, WorkspaceRoot)
+				|| !ReadPreparedString(SourceObject, TEXT("workspace_fingerprint"), WorkspaceFingerprint, false, OutError, WorkspaceRoot)
+				|| !ReadPreparedString(SourceObject, TEXT("semantic_fingerprint"), ExpectedSemanticFingerprint, false, OutError, WorkspaceRoot)) return false;
+			if (SourceObject->Values.Num() != 6)
+				return Fail(OutError, TEXT("content_graph_normalized_source_invalid"),
+					TEXT("The prepared workspace source contains fields beyond kind, workspace_root, target_identity, base_revision, workspace_fingerprint and semantic_fingerprint."),
+					WorkspaceRoot, TEXT("/"), MakeShared<FJsonValueNumber>(SourceObject->Values.Num()), MakeShared<FJsonValueNumber>(6));
+			if (TargetIdentity != ExpectedTargetIdentity)
+			{
+				return FailEvidence(
 					OutError,
-					TEXT("content_graph_source_kind_unsupported"),
-					Kind);
+					TEXT("content_graph_normalized_target_identity_mismatch"), TEXT("The prepared workspace source belongs to a different target."),
+					WorkspaceRoot, ExpectedTargetIdentity, TargetIdentity);
+			}
+			if (BaseRevision != ExpectedRevision)
+			{
+				return FailEvidence(
+					OutError,
+					TEXT("content_graph_normalized_base_revision_mismatch"), TEXT("The prepared workspace target revision differs from the authorized import revision."),
+					WorkspaceRoot, ExpectedRevision, BaseRevision);
+			}
+			const TSharedRef<FJsonObject> DirectorySource =
+				MakeShared<FJsonObject>();
+			DirectorySource->SetStringField(TEXT("kind"), TEXT("directory"));
+			DirectorySource->SetStringField(TEXT("path"), WorkspaceRoot);
+			FResolvedContentGraphImportSourcePtr ReloadedSource;
+			if (!TryLoadContentGraphImportSource(
+					DirectorySource,
+					ExpectedTargetIdentity,
+					Resources,
+					ReloadedSource,
+					OutError)
+				|| !ReloadedSource.IsValid()
+				|| !ReloadedSource->IsSemanticWorkspaceDirectory())
+			{
+				if (OutError.GetCode().IsEmpty())
+				{
+					OutError.SetSourceFailure(
+						TEXT("content_graph_normalized_source_invalid"),
+						TEXT("The reloaded source is not a semantic workspace directory."),
+						WorkspaceRoot);
+				}
+				return false;
+			}
+			FResolvedSemanticWorkspacePtr SemanticWorkspace;
+			if (!TryLoadHjsonImportSource(
+					FWorkspaceSource::Directory(WorkspaceRoot),
+					ESemanticWorkspaceMode::State,
+					Resources,
+					SemanticWorkspace,
+					OutError)
+				|| !SemanticWorkspace.IsValid())
+			{
+				return false;
+			}
+			if (SemanticWorkspace->GetModel()->GetBaseRevision() != BaseRevision)
+			{
+				return FailEvidence(
+					OutError,
+					TEXT("content_graph_normalized_base_revision_mismatch"), TEXT("The workspace target revision changed after import preparation."),
+					WorkspaceRoot, BaseRevision, SemanticWorkspace->GetModel()->GetBaseRevision());
+			}
+			if (SemanticWorkspace->GetWorkspaceFingerprint() != WorkspaceFingerprint)
+			{
+				return FailEvidence(
+					OutError,
+					TEXT("content_graph_normalized_source_fingerprint_mismatch"), TEXT("The workspace files changed after import preparation."),
+					WorkspaceRoot, WorkspaceFingerprint, SemanticWorkspace->GetWorkspaceFingerprint());
+			}
+			if (SemanticWorkspace->GetModel()->GetSemanticFingerprint() != ExpectedSemanticFingerprint)
+				return FailEvidence(OutError, TEXT("content_graph_normalized_source_fingerprint_mismatch"),
+					TEXT("The workspace semantic content changed after import preparation."), WorkspaceRoot,
+					ExpectedSemanticFingerprint, SemanticWorkspace->GetModel()->GetSemanticFingerprint());
+			OutSource = MakeShared<FResolvedContentGraphImportSource>(
+				EWorkspaceSourceKind::Directory,
+				WorkspaceRoot,
+				ExpectedTargetIdentity,
+				BaseRevision,
+				FString(),
+				WorkspaceFingerprint,
+				ExpectedSemanticFingerprint,
+				TArray<FContentGraphImportDocument>(),
+				true);
+			return true;
+		}
+		if (Kind != TEXT("resolved"))
+			return FailPreparedField(OutError, SourceObject, TEXT("kind"), TEXT("must be semantic_workspace or resolved"), FString());
+		if (!ReadPreparedString(SourceObject, TEXT("source_unit"), SourceUnit, false, OutError, FString())
+			|| !ReadPreparedString(SourceObject, TEXT("carrier"), Carrier, true, OutError, SourceUnit)
+			|| !ReadPreparedString(SourceObject, TEXT("target_identity"), TargetIdentity, true, OutError, SourceUnit)
+			|| !ReadPreparedString(SourceObject, TEXT("base_revision"), BaseRevision, true, OutError, SourceUnit)
+			|| !ReadPreparedString(SourceObject, TEXT("entry_file"), EntryFile, false, OutError, SourceUnit)
+			|| !ReadPreparedString(SourceObject, TEXT("source_fingerprint"), SourceFingerprint, true, OutError, SourceUnit)
+			|| !ReadPreparedString(SourceObject, TEXT("semantic_fingerprint"), SemanticFingerprint, true, OutError, SourceUnit)) return false;
+		if (!IsSha256(SourceFingerprint))
+			return FailPreparedField(OutError, SourceObject, TEXT("source_fingerprint"), TEXT("must be a SHA-256 digest"), SourceUnit);
+		if (!IsSha256(SemanticFingerprint))
+			return FailPreparedField(OutError, SourceObject, TEXT("semantic_fingerprint"), TEXT("must be a SHA-256 digest"), SourceUnit);
+		if (!SourceObject->TryGetArrayField(TEXT("documents"), DocumentValues) || !DocumentValues || DocumentValues->IsEmpty())
+			return FailPreparedField(OutError, SourceObject, TEXT("documents"), TEXT("must be a non-empty array"), SourceUnit);
+		if (TargetIdentity != ExpectedTargetIdentity)
+		{
+			return FailEvidence(OutError, TEXT("content_graph_normalized_target_identity_mismatch"), TEXT("The resolved import source belongs to a different target."), SourceUnit, ExpectedTargetIdentity, TargetIdentity);
+		}
+
+		EWorkspaceSourceKind SourceKind = EWorkspaceSourceKind::Inline;
+		if (Carrier == TEXT("directory"))
+		{
+			SourceKind = EWorkspaceSourceKind::Directory;
+			if (BaseRevision != ExpectedRevision)
+			{
+				return FailEvidence(OutError, TEXT("content_graph_normalized_base_revision_mismatch"), TEXT("The resolved workspace revision differs from the authorized import revision."), SourceUnit, ExpectedRevision, BaseRevision);
+			}
+		}
+		else if (Carrier == TEXT("single_file"))
+		{
+			SourceKind = EWorkspaceSourceKind::SingleFile;
+		}
+		else if (Carrier != TEXT("inline"))
+		{
+			return FailPreparedField(OutError, SourceObject, TEXT("carrier"), TEXT("must be inline, single_file, or directory"), SourceUnit);
+		}
+		if (SourceKind != EWorkspaceSourceKind::Directory && !BaseRevision.IsEmpty())
+		{
+			return FailEvidence(OutError, TEXT("content_graph_normalized_source_invalid"), TEXT("Only a directory source may contain a workspace base revision."), SourceUnit, FString(), BaseRevision);
+		}
+		if (SourceKind != EWorkspaceSourceKind::Directory && DocumentValues->Num() != 1)
+		{
+			return Fail(OutError, TEXT("content_graph_normalized_source_invalid"), TEXT("An inline or single-file source must contain exactly one document."), SourceUnit,
+				TEXT("/"), MakeShared<FJsonValueNumber>(DocumentValues->Num()), MakeShared<FJsonValueNumber>(1));
+		}
+
+		FString NormalizedEntryFile;
+		if (!TryNormalizeRelativePath(EntryFile, NormalizedEntryFile, OutError, SourceUnit))
+		{
+			return false;
+		}
+		TSet<FString> DocumentIdentities;
+		TArray<FContentGraphImportDocument> Documents;
+		Documents.Reserve(DocumentValues->Num());
+		int32 EntryMatches = 0;
+		for (int32 DocumentIndex = 0; DocumentIndex < DocumentValues->Num(); ++DocumentIndex)
+		{
+			const auto& DocumentValue = (*DocumentValues)[DocumentIndex];
+			const FString DocumentPointer = FString::Printf(TEXT("/documents/%d"), DocumentIndex);
+			const TSharedPtr<FJsonObject> DocumentObject =
+				DocumentValue.IsValid() && DocumentValue->Type == EJson::Object ? DocumentValue->AsObject() : nullptr;
+			FString RelativePath;
+			FString Document;
+			FString ContentHash;
+			if (!DocumentObject.IsValid())
+			{
+				auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("content_graph_normalized_source_invalid"),
+					FString::Printf(TEXT("Prepared import document at index %d must be an object."), DocumentIndex), TEXT("workspace_load"));
+				Diagnostic.Source.InternalJsonPath = DocumentPointer;
+				Diagnostic.ActualEvidence = DocumentValue;
+				OutError.SetFailure(MoveTemp(Diagnostic), SourceUnit);
+				return false;
+			}
+			if (!ReadPreparedString(DocumentObject, TEXT("path"), RelativePath, true, OutError, SourceUnit, DocumentPointer)
+				|| !ReadPreparedString(DocumentObject, TEXT("document"), Document, false, OutError, SourceUnit, DocumentPointer)
+				|| !ReadPreparedString(DocumentObject, TEXT("content_hash"), ContentHash, true, OutError, SourceUnit, DocumentPointer)) return false;
+			if (!IsSha256(ContentHash))
+				return FailPreparedField(OutError, DocumentObject, TEXT("content_hash"), TEXT("must be a SHA-256 digest"), SourceUnit, DocumentPointer);
+			FString NormalizedRelativePath;
+			if (!TryNormalizeRelativePath(RelativePath, NormalizedRelativePath, OutError, SourceUnit))
+			{
+				return false;
+			}
+			const FString DocumentIdentity = NormalizedRelativePath.ToLower();
+			if (DocumentIdentities.Contains(DocumentIdentity))
+			{
+				return Fail(OutError, TEXT("content_graph_normalized_document_ambiguous"), TEXT("More than one source document resolves to this path."), NormalizedRelativePath);
+			}
+			DocumentIdentities.Add(DocumentIdentity);
+			FTCHARToUTF8 Utf8(*Document);
+			if (!Charge(
+				Resources,
+				{
+					{EUeAgentResourceDimension::InputBytes, Utf8.Length()},
+					{EUeAgentResourceDimension::StringBytes, Utf8.Length()},
+					{EUeAgentResourceDimension::Files, 1},
+					{EUeAgentResourceDimension::Items, 1},
+					{EUeAgentResourceDimension::WorkUnits, 1},
+					{EUeAgentResourceDimension::EstimatedMemoryBytes, Utf8.Length() * 2},
+				},
+				SourceUnit + TEXT(":") + NormalizedRelativePath,
+				OutError))
+			{
+				return false;
+			}
+			const FString ActualHash = Sha256Text(Document);
+			if (ActualHash != ContentHash)
+			{
+				return FailEvidence(OutError, TEXT("content_graph_normalized_document_digest_mismatch"), TEXT("The resolved document text does not match its recorded digest."), NormalizedRelativePath, ContentHash, ActualHash);
+			}
+			EntryMatches += NormalizedRelativePath.Equals(
+				NormalizedEntryFile, ESearchCase::IgnoreCase) ? 1 : 0;
+			Documents.Emplace(
+				MoveTemp(NormalizedRelativePath),
+				MoveTemp(Document),
+				MoveTemp(ContentHash));
+		}
+		if (EntryMatches != 1)
+		{
+			return Fail(OutError, TEXT("content_graph_normalized_entry_document_missing"), TEXT("The entry file must identify exactly one resolved document."), NormalizedEntryFile,
+				TEXT("/"), MakeShared<FJsonValueNumber>(EntryMatches), MakeShared<FJsonValueNumber>(1));
+		}
+		if (SourceKind != EWorkspaceSourceKind::Directory
+			&& SourceFingerprint != Documents[0].GetContentHash())
+		{
+			return FailEvidence(OutError, TEXT("content_graph_normalized_source_fingerprint_mismatch"), TEXT("The single-document source fingerprint differs from the document digest."), SourceUnit, SourceFingerprint, Documents[0].GetContentHash());
+		}
+		FString ActualSemanticFingerprint;
+		const FString DocumentRoot = SourceKind == EWorkspaceSourceKind::Directory ? SourceUnit
+			: SourceKind == EWorkspaceSourceKind::SingleFile ? FPaths::GetPath(SourceUnit) : FString();
+		if (!TryBuildSemanticFingerprint(
+			Documents, NormalizedEntryFile, Resources, ActualSemanticFingerprint, OutError, DocumentRoot))
+		{
+			return false;
+		}
+		if (ActualSemanticFingerprint != SemanticFingerprint)
+		{
+			return FailEvidence(OutError, TEXT("content_graph_normalized_semantic_fingerprint_mismatch"), TEXT("The resolved source semantic content differs from its prepared fingerprint."), SourceUnit, SemanticFingerprint, ActualSemanticFingerprint);
+		}
+
+		OutSource = MakeShared<FResolvedContentGraphImportSource>(
+			SourceKind,
+			MoveTemp(SourceUnit),
+			MoveTemp(TargetIdentity),
+			MoveTemp(BaseRevision),
+			MoveTemp(NormalizedEntryFile),
+			MoveTemp(SourceFingerprint),
+			MoveTemp(SemanticFingerprint),
+			MoveTemp(Documents));
+		return true;
 	}
 
 	bool TryLoadHjsonImportSource(
@@ -1126,7 +1682,7 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return false;
 		}
-		if (!TryResolveSemanticWorkspace(
+		if (!TryResolveEditedSemanticWorkspace(
 				Source,
 				ExpectedMode,
 				Resources,
@@ -1139,15 +1695,18 @@ namespace UE::UAI::HjsonWorkspace
 		}
 		FSourceVersionSnapshot After;
 		FWorkspaceError VersionError;
-		if (!CaptureSourceVersion(Source, After, VersionError)
-			|| !(Before == After))
+		if (!CaptureSourceVersion(Source, After, VersionError))
 		{
 			OutWorkspace.Reset();
-			OutError.Set(
+			OutError = MoveTemp(VersionError);
+			return false;
+		}
+		if (!(Before == After))
+		{
+			OutWorkspace.Reset();
+			OutError.SetSourceFailure(
 				TEXT("workspace_source_version_changed"),
-				VersionError.GetSourceUnit().IsEmpty()
-					? Source.GetPath()
-					: VersionError.GetSourceUnit());
+				TEXT("Workspace source files changed while the import was being resolved."), Source.GetPath());
 			return false;
 		}
 		return true;

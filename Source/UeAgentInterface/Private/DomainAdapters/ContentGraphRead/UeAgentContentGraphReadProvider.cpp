@@ -3,6 +3,8 @@
 #include "Core/BindingGateway/Query/UeAgentQueryBinding.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
 #include "Core/Projection/UeAgentProjection.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::DomainAdapters::ContentGraphRead
 {
@@ -17,16 +19,9 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 
 	namespace
 	{
-		bool Fail(
-			FUeAgentQueryBindingError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool Fail(FUeAgentQueryBindingError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic)
 		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
 			return false;
 		}
 	}
@@ -60,12 +55,17 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		if (ProviderBinding.IsEmpty()
 			|| Descriptor.GetProviderBinding() != ProviderBinding)
 		{
-			return Fail(
-				OutError,
-				TEXT(
-					"content_graph_read_provider_binding_mismatch"),
-				Descriptor.GetProviderBinding(),
-				ProviderBinding);
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("content_graph_read_provider_binding_mismatch"),
+				TEXT("The query cannot use this content-graph provider because its binding is missing or differs from the descriptor binding."),
+				TEXT("content_graph_read"), ProviderBinding, Descriptor.GetProviderBinding());
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.PropertyPath = TEXT("/provider_binding");
+			auto Facts = MakeShared<FJsonObject>();
+			Facts->SetBoolField(TEXT("provider_binding_present"), !ProviderBinding.IsEmpty());
+			Facts->SetBoolField(TEXT("bindings_match"), Descriptor.GetProviderBinding() == ProviderBinding);
+			Diagnostic.ActualValue = MakeShared<FJsonValueObject>(Facts);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a configured provider binding matching the query descriptor"));
+			return Fail(OutError, MoveTemp(Diagnostic));
 		}
 
 		TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
@@ -77,20 +77,23 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				Snapshot,
 				HookError))
 		{
-			return Fail(
-				OutError,
-				HookError.Code.IsEmpty()
-					? TEXT("content_graph_read_capture_failed")
-					: HookError.Code,
-				HookError.SubjectId,
-				HookError.Detail);
+			if (HookError.IsEmpty())
+			{
+				HookError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("content_graph_read_capture_failed"),
+					TEXT("The content-graph capture hook failed without returning a diagnostic."), TEXT("content_graph_read"), ProviderBinding);
+				HookError.SourceKind = TEXT("native_result");
+			}
+			return Fail(OutError, MoveTemp(HookError));
 		}
 		if (!Snapshot.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("content_graph_read_snapshot_missing"),
-				ProviderBinding);
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("content_graph_read_snapshot_missing"),
+				TEXT("The content-graph capture hook returned success without a canonical snapshot."), TEXT("content_graph_read"), FString(), ProviderBinding);
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.PropertyPath = TEXT("/snapshot");
+			Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			return Fail(OutError, MoveTemp(Diagnostic));
 		}
 
 		OutSource = MakeShared<FUeAgentProjectionSourceValue>(

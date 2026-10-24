@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UeAgentAuthoringFolderIO
@@ -7,14 +9,14 @@ namespace UeAgentAuthoringFolderIO
 	UEAGENTINTERFACE_API bool ResetExportFolder(
 		const FString& FolderPathInput,
 		FString& OutResolvedFolderPath,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool ResetExportFolder(
 		const FString& FolderPathInput,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool CopyAuthoringTreeIfExists(
 		const FString& SourceFolderPath,
 		const FString& DestinationFolderPath,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

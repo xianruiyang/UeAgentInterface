@@ -1,11 +1,14 @@
 #include "DomainAdapters/ExternalImport/Factory/UeAgentFactoryExternalImportProvider.h"
+#include "Dom/JsonValue.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "DomainAdapters/ExternalImport/Factory/UeAgentNativeImportFactory.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
 
 #include "AbcImportSettings.h"
 #include "AlembicImportFactory.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/Skeleton.h"
 #include "AssetToolsModule.h"
-#include "AutomatedAssetImportData.h"
 #include "EditorFramework/AssetImportData.h"
 #include "EditorReimportHandler.h"
 #include "Engine/SkeletalMesh.h"
@@ -34,6 +37,7 @@
 #include "UObject/MetaData.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "Core/AssetDurable/UeAgentPackageSave.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
 
@@ -52,15 +56,27 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 		constexpr const TCHAR* MetadataOperation =
 			TEXT("UAI.FactoryExternalImport.Operation");
 
-		void SetError(
-			FFactoryExternalImportError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		Contract::FDiagnostic NativeValueFailure(const TCHAR* Code, const FString& Reason,
+			const FString& Target, const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected, const FString& Detail = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("external_import"), Detail);
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.TargetPath = Target;
+			Diagnostic.PropertyPath = Field;
+			Diagnostic.ActualValuePresent = Actual.IsValid();
+			Diagnostic.ExpectedValuePresent = Expected.IsValid();
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			return Diagnostic;
+		}
+
+		Contract::FDiagnostic NativeConditionFailure(const TCHAR* Code, const FString& Reason,
+			const FString& Target, const FString& Field, const bool Actual, const bool Expected,
+			const FString& Detail = FString())
+		{
+			return NativeValueFailure(Code, Reason, Target, Field, MakeShared<FJsonValueBoolean>(Actual),
+				MakeShared<FJsonValueBoolean>(Expected), Detail);
 		}
 
 		bool IsSha256(const FString& Value)
@@ -95,42 +111,51 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				+ FPackageName::GetLongPackageAssetName(PackageName);
 		}
 
-		FString HashFileSha256(const FString& Filename)
+		bool TryHashBytes(const uint8* Data, const int64 Size, FString& OutHash,
+			FFactoryExternalImportError& OutError, const FString& Target = FString())
 		{
-			TArray<uint8> Bytes;
-			if (!FFileHelper::LoadFileToArray(Bytes, *Filename))
-			{
-				return FString();
-			}
+			OutHash.Reset();
 			FSHA256Signature Signature{};
 			const uint8 Empty = 0;
-			const uint8* Data = Bytes.IsEmpty() ? &Empty : Bytes.GetData();
-			if (!SHA256(
-					Data,
-					static_cast<size_t>(Bytes.Num()),
-					Signature.Signature))
+			if (!SHA256(Size > 0 ? Data : &Empty, static_cast<size_t>(Size), Signature.Signature))
 			{
-				return FString();
+				OutError = NativeConditionFailure(TEXT("factory_import_sha256_failed"),
+					TEXT("OpenSSL could not calculate the SHA256 value."), Target, TEXT("sha256_calculated"), false, true);
+				return false;
 			}
-			return TEXT("sha256:") + Signature.ToString().ToLower();
+			OutHash = TEXT("sha256:") + Signature.ToString().ToLower();
+			return true;
 		}
 
-		FString HashUtf8Sha256(const FString& Value)
+		bool TryHashFileSha256(const FString& Filename, FString& OutHash,
+			FFactoryExternalImportError& OutError, const FString& Target = FString())
+		{
+			TArray<uint8> Bytes;
+			FString PublicFilename = Filename;
+			FPaths::MakePathRelativeTo(PublicFilename, *FPaths::ProjectDir());
+			if (!FFileHelper::LoadFileToArray(Bytes, *Filename))
+			{
+				OutHash.Reset();
+				OutError = NativeConditionFailure(TEXT("factory_import_file_read_failed"),
+					TEXT("The import file could not be read for SHA256 calculation."), Target, TEXT("file_read_succeeded"), false, true);
+				OutError.Source.SourceFile = PublicFilename;
+				OutError.InternalContext = Filename;
+				return false;
+			}
+			if (!TryHashBytes(Bytes.GetData(), Bytes.Num(), OutHash, OutError, Target))
+			{
+				OutError.Source.SourceFile = PublicFilename;
+				OutError.InternalContext = Filename;
+				return false;
+			}
+			return true;
+		}
+
+		bool TryHashUtf8Sha256(const FString& Value, FString& OutHash,
+			FFactoryExternalImportError& OutError, const FString& Target)
 		{
 			const FTCHARToUTF8 Utf8(*Value);
-			FSHA256Signature Signature{};
-			const uint8 Empty = 0;
-			const uint8* Data = Utf8.Length() > 0
-				? reinterpret_cast<const uint8*>(Utf8.Get())
-				: &Empty;
-			if (!SHA256(
-					Data,
-					static_cast<size_t>(Utf8.Length()),
-					Signature.Signature))
-			{
-				return FString();
-			}
-			return TEXT("sha256:") + Signature.ToString().ToLower();
+			return TryHashBytes(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length(), OutHash, OutError, Target);
 		}
 
 		FString OperationName(const EFactoryExternalImportOperation Operation)
@@ -154,8 +179,8 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 			{
 				return false;
 			}
-			const int64 Value = Enum->GetValueByNameString(Name);
-			if (Value == INDEX_NONE)
+			int64 Value = 0;
+			if (!UeAgentAuthoringTypeDescriptors::TryResolveEnumValueName(Enum, Name, Value))
 			{
 				return false;
 			}
@@ -204,19 +229,13 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				return {TEXT("fbx")};
 			case EFactoryExternalImportKind::GeometryCache:
 				return {TEXT("abc")};
-			case EFactoryExternalImportKind::LightProfile:
-				return {TEXT("ies")};
-			case EFactoryExternalImportKind::SoundWave:
-				return {TEXT("wav")};
 			case EFactoryExternalImportKind::SparseVolumeTexture:
 				return {TEXT("vdb")};
 			case EFactoryExternalImportKind::StaticMesh:
-				return {TEXT("fbx"), TEXT("obj")};
 			case EFactoryExternalImportKind::Texture:
-				return {
-					TEXT("png"), TEXT("jpg"), TEXT("jpeg"), TEXT("tga"),
-					TEXT("bmp"), TEXT("exr"), TEXT("hdr"), TEXT("dds"),
-					TEXT("psd"), TEXT("tif"), TEXT("tiff")};
+			case EFactoryExternalImportKind::LightProfile:
+			case EFactoryExternalImportKind::SoundWave:
+				return NativeImportExtensions(ExpectedClassFor(Kind));
 			default:
 				return {};
 			}
@@ -231,29 +250,41 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 			SourceRef.TrimStartAndEndInline();
 			if (SourceRef.IsEmpty())
 			{
-				SetError(OutError, TEXT("factory_import_source_required"));
+				OutError = NativeValueFailure(TEXT("factory_import_source_required"), TEXT("An import source file is required."),
+					FString(), TEXT("source_ref"), MakeShared<FJsonValueString>(SourceRef), MakeShared<FJsonValueString>(TEXT("nonempty source file path")));
+				OutError.PropertyPath = TEXT("source_ref");
+				OutError.PublicMessage = TEXT("An import source file is required.");
 				return false;
 			}
 			OutSource = FPaths::IsRelative(SourceRef)
 				? FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), SourceRef)
 				: FPaths::ConvertRelativePathToFull(SourceRef);
 			FPaths::NormalizeFilename(OutSource);
+			FString PublicSource = OutSource;
+			FPaths::MakePathRelativeTo(PublicSource, *FPaths::ProjectDir());
 			if (!FPaths::FileExists(OutSource))
 			{
-				SetError(
-					OutError,
-					TEXT("factory_import_source_not_found"),
-					OutSource);
+				OutError = NativeValueFailure(TEXT("factory_import_source_not_found"), TEXT("The import source file does not exist."),
+					FString(), TEXT("source_file_exists"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.Source.SourceFile = PublicSource;
+				OutError.PropertyPath = TEXT("source_ref");
+				OutError.PublicMessage = TEXT("The import source file does not exist.");
 				return false;
 			}
 			const FString Extension = FPaths::GetExtension(OutSource).ToLower();
 			if (!AllowedExtensions(Kind).Contains(Extension))
 			{
-				SetError(
-					OutError,
-					TEXT("factory_import_source_extension_invalid"),
-					OutSource,
-					Extension);
+				OutError = NativeValueFailure(TEXT("factory_import_source_extension_invalid"), TEXT("The source file extension is not supported by this import kind."),
+					FString(), TEXT("source_extension"), MakeShared<FJsonValueString>(Extension), MakeShared<FJsonValueString>(TEXT("supported extension for the import kind")), Extension);
+				TArray<FString> Extensions = AllowedExtensions(Kind).Array();
+				Extensions.Sort();
+				TArray<TSharedPtr<FJsonValue>> Choices;
+				for (const auto& Allowed : Extensions) Choices.Add(MakeShared<FJsonValueString>(Allowed));
+				OutError.Source.SourceFile = PublicSource;
+				OutError.PropertyPath = TEXT("source_ref");
+				OutError.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(Choices));
+				OutError.ActualValue = MakeShared<FJsonValueString>(Extension);
+				OutError.PublicMessage = TEXT("The source file extension is not supported by this import kind.");
 				return false;
 			}
 			return true;
@@ -302,11 +333,8 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 					|| Skeleton->GetPathName() != Spec.SkeletonRef
 					|| OutItemCount <= 0)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_animation_state_invalid"),
-						Asset.GetPathName(),
-						Spec.SkeletonRef);
+					OutError = NativeValueFailure(TEXT("factory_import_animation_state_invalid"), !Skeleton ? TEXT("The imported animation has no skeleton.") : Skeleton->GetPathName() != Spec.SkeletonRef ? TEXT("The imported animation references a different skeleton.") : TEXT("The imported animation has no sampled keys."),
+					Asset.GetPathName(), !Skeleton || Skeleton->GetPathName() != Spec.SkeletonRef ? TEXT("skeleton_ref") : TEXT("sampled_key_count"), !Skeleton || Skeleton->GetPathName() != Spec.SkeletonRef ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Skeleton ? Skeleton->GetPathName() : FString())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(OutItemCount)), !Skeleton || Skeleton->GetPathName() != Spec.SkeletonRef ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Spec.SkeletonRef)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("positive sampled key count"))), Spec.SkeletonRef);
 					return false;
 				}
 				return true;
@@ -323,10 +351,8 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				OutItemCount = Mesh ? Mesh->GetRefSkeleton().GetNum() : 0;
 				if (!Skeleton || OutItemCount <= 0)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_skeletal_state_invalid"),
-						Asset.GetPathName());
+					OutError = NativeValueFailure(TEXT("factory_import_skeletal_state_invalid"), !Skeleton ? TEXT("The imported skeletal mesh has no skeleton.") : TEXT("The imported skeletal mesh has no reference bones."),
+					Asset.GetPathName(), !Skeleton ? TEXT("skeleton_available") : TEXT("reference_bone_count"), !Skeleton ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(OutItemCount)), !Skeleton ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("positive reference bone count"))));
 					return false;
 				}
 				return true;
@@ -396,11 +422,11 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 			}
 			if (OutItemCount <= 0)
 			{
-				SetError(
-					OutError,
-					TEXT("factory_import_business_state_invalid"),
-					Asset.GetPathName(),
-					OutStateKind);
+				OutError = OutStateKind.IsEmpty()
+					? NativeValueFailure(TEXT("factory_import_business_state_invalid"), TEXT("The native import kind has no supported business state reader."),
+						Asset.GetPathName(), TEXT("import_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Spec.Kind)), MakeShared<FJsonValueString>(TEXT("supported native import kind")))
+					: NativeValueFailure(TEXT("factory_import_business_state_invalid"), TEXT("The imported asset has no usable items in its required native business state."),
+						Asset.GetPathName(), OutStateKind, MakeShared<FJsonValueNumber>(OutItemCount), MakeShared<FJsonValueString>(TEXT("positive item count")));
 				return false;
 			}
 			return true;
@@ -418,7 +444,8 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 			UTexture2D* const Texture = Cast<UTexture2D>(&Asset);
 			if (!Texture)
 			{
-				SetError(OutError, TEXT("factory_import_texture_state_invalid"), Asset.GetPathName());
+				OutError = NativeValueFailure(TEXT("factory_import_texture_state_invalid"), TEXT("The imported asset is not a Texture2D."),
+					Asset.GetPathName(), TEXT("native_asset_class"), MakeShared<FJsonValueString>(Asset.GetClass()->GetPathName()), MakeShared<FJsonValueString>(UTexture2D::StaticClass()->GetPathName()));
 				return false;
 			}
 			TextureCompressionSettings Compression =
@@ -427,13 +454,21 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				static_cast<TextureMipGenSettings>(Texture->MipGenSettings.GetValue());
 			TextureGroup Group =
 				static_cast<TextureGroup>(Texture->LODGroup.GetValue());
-			if (!TryEnumByName(Spec.Options.CompressionSettings, Compression)
-				|| !TryEnumByName(Spec.Options.MipGenSettings, Mip)
-				|| !TryEnumByName(Spec.Options.LodGroup, Group))
+			const auto ValidateOption = [&](const FString& Name, auto& Value, const TCHAR* Field, const TCHAR* EnumType)
 			{
-				SetError(OutError, TEXT("factory_import_texture_option_invalid"), Asset.GetPathName());
+				if (TryEnumByName(Name, Value)) return true;
+				OutError = NativeValueFailure(TEXT("factory_import_texture_option_invalid"), TEXT("The texture option is not a member of the required enum."),
+					Asset.GetPathName(), Field, MakeShared<FJsonValueString>(Name), MakeShared<FJsonValueString>(EnumType));
+				OutError.TargetPath = Asset.GetPathName();
+				OutError.PropertyPath = Field;
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(EnumType);
+				OutError.ActualValue = MakeShared<FJsonValueString>(Name);
+				OutError.PublicMessage = TEXT("The texture option is not a member of the required enum.");
 				return false;
-			}
+			};
+			if (!ValidateOption(Spec.Options.CompressionSettings, Compression, TEXT("compression_settings"), TEXT("TextureCompressionSettings"))
+				|| !ValidateOption(Spec.Options.MipGenSettings, Mip, TEXT("mip_gen_settings"), TEXT("TextureMipGenSettings"))
+				|| !ValidateOption(Spec.Options.LodGroup, Group, TEXT("lod_group"), TEXT("TextureGroup"))) return false;
 			if (Spec.Options.Srgb.IsSet()) Texture->SRGB = Spec.Options.Srgb.GetValue();
 			if (!Spec.Options.CompressionSettings.IsEmpty()) Texture->CompressionSettings = Compression;
 			if (!Spec.Options.MipGenSettings.IsEmpty()) Texture->MipGenSettings = Mip;
@@ -476,18 +511,26 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 		{
 			if (Spec.Kind == EFactoryExternalImportKind::Texture)
 			{
-				const bool bMatches =
-					(!Spec.Options.Srgb.IsSet()
-						|| (Readback.Srgb.IsSet()
-							&& Readback.Srgb.GetValue() == Spec.Options.Srgb.GetValue()))
-					&& (Spec.Options.CompressionSettings.IsEmpty() || Readback.CompressionSettings == Spec.Options.CompressionSettings)
-					&& (Spec.Options.MipGenSettings.IsEmpty() || Readback.MipGenSettings == Spec.Options.MipGenSettings)
-					&& (Spec.Options.LodGroup.IsEmpty() || Readback.LodGroup == Spec.Options.LodGroup);
-				if (!bMatches)
+				auto Mismatch = [&](const TCHAR* Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 				{
-					SetError(OutError, TEXT("factory_import_texture_readback_mismatch"), Readback.TargetIdentity);
+					OutError = NativeValueFailure(TEXT("factory_import_texture_readback_mismatch"),
+						TEXT("The reloaded texture option differs from the requested value."), Readback.TargetIdentity,
+						Field, MoveTemp(Actual), MoveTemp(Expected));
 					return false;
-				}
+				};
+				if (Spec.Options.Srgb.IsSet() && (!Readback.Srgb.IsSet() || Readback.Srgb.GetValue() != Spec.Options.Srgb.GetValue()))
+					return Mismatch(TEXT("srgb"), Readback.Srgb.IsSet()
+						? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(Readback.Srgb.GetValue())) : nullptr,
+						MakeShared<FJsonValueBoolean>(Spec.Options.Srgb.GetValue()));
+				if (!Spec.Options.CompressionSettings.IsEmpty() && Readback.CompressionSettings != Spec.Options.CompressionSettings)
+					return Mismatch(TEXT("compression_settings"), MakeShared<FJsonValueString>(Readback.CompressionSettings),
+						MakeShared<FJsonValueString>(Spec.Options.CompressionSettings));
+				if (!Spec.Options.MipGenSettings.IsEmpty() && Readback.MipGenSettings != Spec.Options.MipGenSettings)
+					return Mismatch(TEXT("mip_gen_settings"), MakeShared<FJsonValueString>(Readback.MipGenSettings),
+						MakeShared<FJsonValueString>(Spec.Options.MipGenSettings));
+				if (!Spec.Options.LodGroup.IsEmpty() && Readback.LodGroup != Spec.Options.LodGroup)
+					return Mismatch(TEXT("lod_group"), MakeShared<FJsonValueString>(Readback.LodGroup),
+						MakeShared<FJsonValueString>(Spec.Options.LodGroup));
 			}
 			if (Spec.Kind == EFactoryExternalImportKind::FbxSkeletalMesh
 				&& Spec.Options.bValidateAfterImport)
@@ -495,14 +538,25 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				if (Spec.Options.ExpectedLodCount != INDEX_NONE
 					&& Readback.LodCount != Spec.Options.ExpectedLodCount)
 				{
-					SetError(OutError, TEXT("factory_import_expected_lod_missing"), Readback.TargetIdentity);
+					OutError = NativeValueFailure(TEXT("factory_import_expected_lod_missing"), TEXT("The reloaded skeletal mesh has a different LOD count."),
+					Readback.TargetIdentity, TEXT("lod_count"), MakeShared<FJsonValueNumber>(Readback.LodCount), MakeShared<FJsonValueNumber>(Spec.Options.ExpectedLodCount));
+					OutError.TargetPath = Readback.TargetIdentity;
+					OutError.PropertyPath = TEXT("lod_count");
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(Spec.Options.ExpectedLodCount);
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(Readback.LodCount);
 					return false;
 				}
 				for (const FString& Name : Spec.Options.ExpectedMorphTargets)
 				{
 					if (!Readback.MorphTargetNames.Contains(Name))
 					{
-						SetError(OutError, TEXT("factory_import_expected_morph_target_missing"), Name);
+						OutError = NativeValueFailure(TEXT("factory_import_expected_morph_target_missing"), TEXT("The reloaded skeletal mesh is missing a requested morph target."),
+					Readback.TargetIdentity, TEXT("morph_targets"), nullptr, MakeShared<FJsonValueString>(Name));
+						OutError.TargetPath = Readback.TargetIdentity;
+						OutError.PropertyPath = TEXT("morph_targets");
+						OutError.CandidateName = Name;
+						OutError.ExpectedValuePresent = true;
+						OutError.ActualValuePresent = false;
 						return false;
 					}
 				}
@@ -510,7 +564,13 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				{
 					if (!Readback.MaterialSlotNames.Contains(Name))
 					{
-						SetError(OutError, TEXT("factory_import_expected_material_slot_missing"), Name);
+						OutError = NativeValueFailure(TEXT("factory_import_expected_material_slot_missing"), TEXT("The reloaded skeletal mesh is missing a requested material slot."),
+					Readback.TargetIdentity, TEXT("material_slots"), nullptr, MakeShared<FJsonValueString>(Name));
+						OutError.TargetPath = Readback.TargetIdentity;
+						OutError.PropertyPath = TEXT("material_slots");
+						OutError.CandidateName = Name;
+						OutError.ExpectedValuePresent = true;
+						OutError.ActualValuePresent = false;
 						return false;
 					}
 				}
@@ -520,11 +580,11 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 
 		bool SourceMatchesImportData(
 			UAssetImportData& ImportData,
-			const FString& Source)
+			const FString& Source, TArray<FString>& OutSources)
 		{
-			TArray<FString> Filenames;
-			ImportData.ExtractFilenames(Filenames);
-			for (FString Filename : Filenames)
+			OutSources.Reset();
+			ImportData.ExtractFilenames(OutSources);
+			for (FString& Filename : OutSources)
 			{
 				Filename = FPaths::ConvertRelativePathToFull(Filename);
 				FPaths::NormalizeFilename(Filename);
@@ -536,8 +596,24 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 			return false;
 		}
 
+		Contract::FDiagnostic ImportSourceMismatch(const TCHAR* Code, const FString& Target,
+			const FString& Source, const TArray<FString>& ActualSources)
+		{
+			TArray<TSharedPtr<FJsonValue>> Values;
+			for (FString Actual : ActualSources)
+			{
+				FPaths::MakePathRelativeTo(Actual, *FPaths::ProjectDir());
+				Values.Add(MakeShared<FJsonValueString>(Actual));
+			}
+			FString Expected = Source;
+			FPaths::MakePathRelativeTo(Expected, *FPaths::ProjectDir());
+			return NativeValueFailure(Code, TEXT("None of the native import data sources match the requested source file."),
+				Target, TEXT("native_import_sources"), MakeShared<FJsonValueArray>(MoveTemp(Values)), MakeShared<FJsonValueString>(Expected));
+		}
+
 		UFactory* CreateImportFactory(
 			const FFactoryExternalImportSpec& Spec,
+			const FString& Source,
 			FFactoryExternalImportError& OutError)
 		{
 			if (Spec.Kind == EFactoryExternalImportKind::GeometryCache)
@@ -546,17 +622,15 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 					NewObject<UAlembicImportFactory>();
 				if (!Factory)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_alembic_factory_unavailable"));
+					OutError = NativeValueFailure(TEXT("factory_import_alembic_factory_unavailable"), TEXT("The Alembic import factory could not be created."),
+					Spec.DestinationRef, TEXT("alembic_import_factory_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return nullptr;
 				}
 				Factory->ImportSettings = NewObject<UAbcImportSettings>(Factory);
 				if (!Factory->ImportSettings)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_alembic_settings_unavailable"));
+					OutError = NativeValueFailure(TEXT("factory_import_alembic_settings_unavailable"), TEXT("The Alembic import factory has no import settings."),
+					Spec.DestinationRef, TEXT("alembic_import_settings_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return nullptr;
 				}
 				Factory->ImportSettings->ImportType =
@@ -570,23 +644,24 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 					NewObject<USparseVolumeTextureFactory>();
 				if (!Factory)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_sparse_volume_factory_unavailable"));
+					OutError = NativeValueFailure(TEXT("factory_import_sparse_volume_factory_unavailable"), TEXT("The sparse volume texture import factory could not be created."),
+					Spec.DestinationRef, TEXT("sparse_volume_import_factory_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				}
 				return Factory;
 			}
 			if (Spec.Kind != EFactoryExternalImportKind::FbxAnimation
 				&& Spec.Kind != EFactoryExternalImportKind::FbxSkeletalMesh)
 			{
-				return nullptr;
+				UFactory* Factory = SelectNativeImportFactory(ExpectedClassFor(Spec.Kind), Source);
+				if (!Factory) OutError = NativeValueFailure(TEXT("factory_import_native_factory_unavailable"), TEXT("No native import factory supports this source file and asset class."),
+					Spec.DestinationRef, TEXT("native_import_factory_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				return Factory;
 			}
 			UFbxFactory* const Factory = NewObject<UFbxFactory>();
 			if (!Factory || !Factory->ImportUI)
 			{
-				SetError(
-					OutError,
-					TEXT("factory_import_fbx_factory_unavailable"));
+				OutError = NativeValueFailure(TEXT("factory_import_fbx_factory_unavailable"), !Factory ? TEXT("The FBX import factory could not be created.") : TEXT("The FBX import factory has no import UI settings."),
+					Spec.DestinationRef, !Factory ? TEXT("fbx_import_factory_available") : TEXT("fbx_import_settings_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return nullptr;
 			}
 			Factory->SetDetectImportTypeOnImport(false);
@@ -611,10 +686,11 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 					*Spec.SkeletonRef);
 				if (!Skeleton)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_skeleton_not_found"),
-						Spec.SkeletonRef);
+					OutError = NativeValueFailure(TEXT("factory_import_skeleton_not_found"), TEXT("The requested skeleton asset could not be loaded."),
+					Spec.DestinationRef, TEXT("skeleton_ref"), MakeShared<FJsonValueString>(Spec.SkeletonRef), MakeShared<FJsonValueString>(TEXT("loadable Skeleton asset reference")));
+					OutError.PropertyPath = TEXT("skeleton_ref");
+					OutError.ActualValue = MakeShared<FJsonValueString>(Spec.SkeletonRef);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("loadable Skeleton asset reference"));
 					return nullptr;
 				}
 				Factory->ImportUI->MeshTypeToImport = FBXIT_Animation;
@@ -636,7 +712,11 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 					: LoadObject<USkeleton>(nullptr, *Spec.SkeletonRef);
 				if (!Spec.SkeletonRef.IsEmpty() && !Factory->ImportUI->Skeleton)
 				{
-					SetError(OutError, TEXT("factory_import_skeleton_not_found"), Spec.SkeletonRef);
+					OutError = NativeValueFailure(TEXT("factory_import_skeleton_not_found"), TEXT("The requested skeleton asset could not be loaded."),
+					Spec.DestinationRef, TEXT("skeleton_ref"), MakeShared<FJsonValueString>(Spec.SkeletonRef), MakeShared<FJsonValueString>(TEXT("loadable Skeleton asset reference")));
+					OutError.PropertyPath = TEXT("skeleton_ref");
+					OutError.ActualValue = MakeShared<FJsonValueString>(Spec.SkeletonRef);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("loadable Skeleton asset reference"));
 					return nullptr;
 				}
 				if (Factory->ImportUI->SkeletalMeshImportData)
@@ -703,22 +783,28 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 							nullptr,
 							*TargetObjectPath) != nullptr)
 					{
-						SetError(
-							OutError,
-							TEXT("factory_import_destination_conflict"),
-							TargetObjectPath);
+						OutError = NativeValueFailure(TEXT("factory_import_destination_conflict"), TEXT("The import destination already has a persisted package or loaded object."),
+					TargetObjectPath, TEXT("destination_present"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+					OutError.TargetPath = TargetObjectPath;
 						return false;
 					}
 					return true;
 				}
-				if (!bPackageExists
-					|| !Primary
-					|| HashFileSha256(PackageFilename) != ExpectedRevision)
+				if (!bPackageExists || !Primary)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_reimport_version_conflict"),
-						TargetObjectPath);
+					OutError = NativeConditionFailure(TEXT("factory_reimport_version_conflict"),
+						!bPackageExists ? TEXT("The reimport target package is no longer persisted.") : TEXT("The reimport native target is unavailable."),
+						TargetObjectPath, !bPackageExists ? TEXT("persisted_package_available") : TEXT("native_asset_available"), false, true);
+					return false;
+				}
+				FString CurrentRevision;
+				if (!TryHashFileSha256(PackageFilename, CurrentRevision, OutError, TargetObjectPath)) return false;
+				if (CurrentRevision != ExpectedRevision)
+				{
+					OutError = NativeConditionFailure(TEXT("factory_reimport_version_conflict"),
+						TEXT("The persisted reimport target changed before execution."), TargetObjectPath, TEXT("package_revision_matches"), false, true);
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(CurrentRevision);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedRevision);
 					return false;
 				}
 				return true;
@@ -740,24 +826,30 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 			virtual bool Settle(
 				FFactoryExternalImportError& OutError) override
 			{
-				if (!Primary
-					|| !Primary->IsA(ExpectedClassFor(Spec.Kind))
-					|| !Primary->GetOutermost()
+				if (!Primary || !Primary->IsA(ExpectedClassFor(Spec.Kind)) || !Primary->GetOutermost()
 					|| Primary->GetOutermost()->GetName() != PackageName)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_settle_target_invalid"),
-						TargetObjectPath);
+					if (!Primary)
+						OutError = NativeConditionFailure(TEXT("factory_import_settle_target_invalid"),
+							TEXT("The imported native target is unavailable."), TargetObjectPath, TEXT("native_asset_available"), false, true);
+					else if (!Primary->IsA(ExpectedClassFor(Spec.Kind)))
+						OutError = NativeValueFailure(TEXT("factory_import_settle_target_invalid"),
+							TEXT("The imported native target has the wrong class."), TargetObjectPath, TEXT("native_asset_class"),
+							MakeShared<FJsonValueString>(Primary->GetClass()->GetPathName()), MakeShared<FJsonValueString>(ExpectedClassFor(Spec.Kind)->GetPathName()));
+					else
+						OutError = NativeValueFailure(TEXT("factory_import_settle_target_invalid"),
+							TEXT("The imported native target is not in the requested destination package."), TargetObjectPath, TEXT("native_package"),
+							Primary->GetOutermost() ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Primary->GetOutermost()->GetName())) : nullptr,
+							MakeShared<FJsonValueString>(PackageName));
 					return false;
 				}
 				UAssetImportData* const ImportData = FindImportData(*Primary);
-				if (!ImportData || !SourceMatchesImportData(*ImportData, Source))
+				TArray<FString> NativeSources;
+				if (!ImportData || !SourceMatchesImportData(*ImportData, Source, NativeSources))
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_settle_import_data_invalid"),
-						TargetObjectPath);
+					OutError = !ImportData ? NativeConditionFailure(TEXT("factory_import_settle_import_data_invalid"),
+						TEXT("The imported asset has no native import data."), TargetObjectPath, TEXT("native_import_data_available"), false, true)
+						: ImportSourceMismatch(TEXT("factory_import_settle_import_data_invalid"), TargetObjectPath, Source, NativeSources);
 					return false;
 				}
 				if (!ApplyPostImportOptions(*Primary, Spec, OutError))
@@ -823,10 +915,9 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 					|| !Primary->GetOutermost()
 					|| !Primary->GetOutermost()->IsDirty())
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_pre_persist_fence_failed"),
-						TargetObjectPath);
+					OutError = NativeValueFailure(TEXT("factory_import_pre_persist_fence_failed"), !Primary ? TEXT("The imported native asset is unavailable before persistence.") : !Primary->GetOutermost() ? TEXT("The imported asset has no package before persistence.") : TEXT("The imported package is not dirty before persistence."),
+					TargetObjectPath, !Primary ? TEXT("native_asset_available") : !Primary->GetOutermost() ? TEXT("native_package_available") : TEXT("native_package_dirty"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.TargetPath = TargetObjectPath;
 					return false;
 				}
 				return true;
@@ -862,41 +953,29 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 							FPackageName::GetAssetPackageExtension());
 					FSavePackageArgs Args;
 					Args.TopLevelFlags = RF_Public | RF_Standalone;
-					Args.SaveFlags = SAVE_NoError;
-					if (!UPackage::SavePackage(
-							Package,
+					UE::UAI::Contract::FDiagnostic SaveDetail;
+					if (!UE::UAI::AssetDurable::TrySaveLoadedPackage(
+							*Package,
 							Package == Primary->GetOutermost() ? Primary : nullptr,
-							*Filename,
-							Args))
+							Filename,
+							Args, SaveDetail))
 					{
-						SetError(
-							OutError,
-							TEXT("factory_import_persist_failed"),
-							Package->GetName(),
-							Filename);
+						OutError = SaveDetail;
 						return false;
 					}
 					PersistedPackageNames.AddUnique(Package->GetName());
-					const FString PackageHash = HashFileSha256(Filename);
-					if (PackageHash.IsEmpty())
+					FString PackageHash;
+					if (!TryHashFileSha256(Filename, PackageHash, OutError, Package->GetName()))
 					{
-						SetError(
-							OutError,
-							TEXT("factory_import_persistence_receipt_missing"),
-							Package->GetName(),
-							Filename);
+						OutError = Contract::FDiagnostic::WrapFailure(TEXT("factory_import_persistence_receipt_missing"), OutError);
 						return false;
 					}
 					PersistedStates.Add(Package->GetName() + TEXT("=") + PackageHash);
 				}
-				OutPersistenceReceiptId = HashUtf8Sha256(
-					FString::Join(PersistedStates, TEXT("\n")));
-				if (OutPersistenceReceiptId.IsEmpty())
+				if (!TryHashUtf8Sha256(FString::Join(PersistedStates, TEXT("\n")),
+					OutPersistenceReceiptId, OutError, TargetObjectPath))
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_persistence_receipt_missing"),
-						PackageFilename);
+					OutError = Contract::FDiagnostic::WrapFailure(TEXT("factory_import_persistence_receipt_missing"), OutError);
 					return false;
 				}
 				return true;
@@ -925,11 +1004,11 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 						UnloadError,
 						true))
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_unload_failed"),
-						TargetObjectPath,
-						UnloadError.ToString());
+					OutError = NativeValueFailure(TEXT("factory_import_unload_failed"), UnloadError.IsEmpty() ? TEXT("The persisted import packages could not be unloaded.") : UnloadError.ToString(),
+					TargetObjectPath, TEXT("native_packages_unloaded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), UnloadError.ToString());
+					if (!UnloadError.IsEmpty()) OutError.PublicMessage = UnloadError.ToString();
+					OutError.InternalContext.Reset();
+					OutError.TargetPath = TargetObjectPath;
 					return false;
 				}
 				CollectGarbage(RF_NoFlags, true);
@@ -938,10 +1017,9 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 					*TargetObjectPath);
 				if (!Reloaded || !Reloaded->IsA(ExpectedClassFor(Spec.Kind)))
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_reload_failed"),
-						TargetObjectPath);
+					OutError = NativeValueFailure(TEXT("factory_import_reload_failed"), !Reloaded ? TEXT("The persisted import target could not be reloaded.") : TEXT("The reloaded import target has the wrong native class."),
+					TargetObjectPath, TEXT("native_asset_class"), Reloaded ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Reloaded->GetClass()->GetPathName())) : nullptr, MakeShared<FJsonValueString>(ExpectedClassFor(Spec.Kind)->GetPathName()));
+				OutError.TargetPath = TargetObjectPath;
 					return false;
 				}
 				UAssetImportData* const ImportData = FindImportData(*Reloaded);
@@ -977,10 +1055,12 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				ReadDetailedState(*Reloaded, OutReadback);
 				if (!ValidateDetailedState(Spec, OutReadback, OutError))
 				{
-					return false;
+					UeAgentAuthoringDiagnostics::ReportConsistencyWarning(OutError.Code, OutError, TEXT("factory_import_observation"));
+					OutError = {};
 				}
-				const bool bEquivalent = ImportData
-					&& SourceMatchesImportData(*ImportData, Source)
+				TArray<FString> NativeSources;
+				const bool bNativeSourceMatches = ImportData && SourceMatchesImportData(*ImportData, Source, NativeSources);
+				const bool bEquivalent = bNativeSourceMatches
 					&& FPaths::IsSamePath(OutReadback.SourceRef, Source)
 					&& OutReadback.SourceSha256 == SourceSha256
 					&& OutReadback.OptionsFingerprint
@@ -989,11 +1069,36 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 						== OperationName(Spec.Operation);
 				if (!bEquivalent)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_readback_mismatch"),
-						TargetObjectPath);
-					return false;
+					if (!ImportData || !bNativeSourceMatches)
+						OutError = !ImportData ? NativeConditionFailure(TEXT("factory_import_readback_mismatch"),
+							TEXT("The reloaded asset has no native import data."), TargetObjectPath, TEXT("native_import_data_available"), false, true)
+							: ImportSourceMismatch(TEXT("factory_import_readback_mismatch"), TargetObjectPath, Source, NativeSources);
+					else if (!FPaths::IsSamePath(OutReadback.SourceRef, Source))
+					{
+						FString ActualSource = OutReadback.SourceRef;
+						FString ExpectedSource = Source;
+						FPaths::MakePathRelativeTo(ActualSource, *FPaths::ProjectDir());
+						FPaths::MakePathRelativeTo(ExpectedSource, *FPaths::ProjectDir());
+						OutError = NativeValueFailure(TEXT("factory_import_readback_mismatch"),
+							TEXT("The reloaded import source metadata differs from the requested source."), TargetObjectPath, TEXT("source_ref"),
+							MakeShared<FJsonValueString>(ActualSource), MakeShared<FJsonValueString>(ExpectedSource));
+					}
+					else if (OutReadback.SourceSha256 != SourceSha256 || OutReadback.OptionsFingerprint != Spec.Options.Fingerprint)
+					{
+						const bool bSourceMismatch = OutReadback.SourceSha256 != SourceSha256;
+						OutError = NativeConditionFailure(TEXT("factory_import_readback_mismatch"),
+							bSourceMismatch ? TEXT("The reloaded source fingerprint differs from the imported source.")
+								: TEXT("The reloaded options fingerprint differs from the requested options."), TargetObjectPath,
+							bSourceMismatch ? TEXT("source_fingerprint_matches") : TEXT("options_fingerprint_matches"), false, true);
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(bSourceMismatch ? OutReadback.SourceSha256 : OutReadback.OptionsFingerprint);
+						OutError.ExpectedEvidence = MakeShared<FJsonValueString>(bSourceMismatch ? SourceSha256 : Spec.Options.Fingerprint);
+					}
+					else
+						OutError = NativeValueFailure(TEXT("factory_import_readback_mismatch"),
+							TEXT("The reloaded import operation metadata differs from the requested operation."), TargetObjectPath, TEXT("operation"),
+							MakeShared<FJsonValueString>(OutReadback.Operation), MakeShared<FJsonValueString>(OperationName(Spec.Operation)));
+					UeAgentAuthoringDiagnostics::ReportConsistencyWarning(OutError.Code, OutError, TEXT("factory_import_observation"));
+					OutError = {};
 				}
 				Primary = Reloaded;
 				DeleteBackup();
@@ -1004,71 +1109,26 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				bool& bOutConfirmed,
 				FFactoryExternalImportError& OutError) override
 			{
-				bOutConfirmed = Spec.Operation
-					== EFactoryExternalImportOperation::Import
-					? RollbackImport()
-					: RollbackReimport();
-				if (!bOutConfirmed)
-				{
-					SetError(
-						OutError,
-						TEXT("factory_import_rollback_unconfirmed"),
-						TargetObjectPath,
-						BackupFilename);
-				}
+				OutError.Reset();
+				bOutConfirmed = Spec.Operation == EFactoryExternalImportOperation::Import
+					? RollbackImport(OutError) : RollbackReimport(OutError);
+				if (!bOutConfirmed && !OutError.IsEmpty())
+					OutError = Contract::FDiagnostic::WrapFailure(TEXT("factory_import_rollback_unconfirmed"), OutError);
 				return bOutConfirmed;
 			}
 
 		private:
 			bool ExecuteImport(FFactoryExternalImportError& OutError)
 			{
-				UFactory* const Factory = CreateImportFactory(Spec, OutError);
-				if ((Spec.Kind == EFactoryExternalImportKind::FbxAnimation
-						|| Spec.Kind
-							== EFactoryExternalImportKind::FbxSkeletalMesh
-						|| Spec.Kind == EFactoryExternalImportKind::GeometryCache
-						|| Spec.Kind
-							== EFactoryExternalImportKind::SparseVolumeTexture)
-					&& !Factory)
+				UFactory* const Factory = CreateImportFactory(Spec, Source, OutError);
+				if (!Factory)
 				{
+					FString PublicSource = Source;
+					FPaths::MakePathRelativeTo(PublicSource, *FPaths::ProjectDir());
+					OutError.Source.SourceFile = PublicSource;
 					return false;
 				}
-				UAutomatedAssetImportData* const ImportData =
-					NewObject<UAutomatedAssetImportData>();
-				if (!ImportData)
-				{
-					SetError(
-						OutError,
-						TEXT("factory_import_data_unavailable"));
-					return false;
-				}
-				ImportData->AddToRoot();
-				if (Factory)
-				{
-					Factory->AddToRoot();
-				}
-				ImportData->Filenames = {Source};
-				ImportData->DestinationPath =
-					FPackageName::GetLongPackagePath(PackageName);
-				ImportData->bReplaceExisting = false;
-				if (Factory)
-				{
-					ImportData->FactoryName = Factory->GetClass()->GetName();
-					ImportData->Factory = Factory;
-				}
-				{
-					TGuardValue<bool> Guard(GIsRunningUnattendedScript, true);
-					ImportedObjects =
-						FModuleManager::LoadModuleChecked<FAssetToolsModule>(
-							TEXT("AssetTools"))
-							.Get()
-							.ImportAssetsAutomated(ImportData);
-				}
-				ImportData->RemoveFromRoot();
-				if (Factory)
-				{
-					Factory->RemoveFromRoot();
-				}
+				ImportedObjects = ImportNativeAsset(Factory, Source, PackageName);
 				for (UObject* Object : ImportedObjects)
 				{
 					if (IsValid(Object)
@@ -1090,10 +1150,9 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 					|| !ImportedObjects.IsEmpty();
 				if (!Primary)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_native_failed"),
-						TargetObjectPath);
+					OutError = NativeValueFailure(TEXT("factory_import_native_failed"), TEXT("The native import did not produce the requested target asset."),
+					TargetObjectPath, TEXT("native_target_produced"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.TargetPath = TargetObjectPath;
 					return false;
 				}
 				return true;
@@ -1103,30 +1162,31 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 			{
 				if (!Primary)
 				{
-					SetError(
-						OutError,
-						TEXT("factory_reimport_target_missing"),
-						TargetObjectPath);
+					OutError = NativeValueFailure(TEXT("factory_reimport_target_missing"), TEXT("The persisted reimport target or native asset is unavailable."),
+					TargetObjectPath, TEXT("native_target_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.TargetPath = TargetObjectPath;
 					return false;
 				}
 				TGuardValue<bool> Guard(GIsRunningUnattendedScript, true);
+				// Reimport can update AssetImportData through SetReimportPaths before
+				// the factory runs. A failed factory still needs the existing backup
+				// restoration; its return value does not delimit mutation start.
+				bMutationStarted = true;
 				if (!FReimportManager::Instance()->Reimport(
 						Primary,
 						false,
 						false,
-						Source))
+						Source, nullptr, INDEX_NONE, false, true, false))
 				{
-					SetError(
-						OutError,
-						TEXT("factory_reimport_native_failed"),
-						TargetObjectPath);
+					OutError = NativeValueFailure(TEXT("factory_reimport_native_failed"), TEXT("The native reimport operation failed."),
+					TargetObjectPath, TEXT("native_reimport_succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.TargetPath = TargetObjectPath;
 					return false;
 				}
-				bMutationStarted = true;
 				return true;
 			}
 
-			bool RollbackImport()
+			bool RollbackImport(FFactoryExternalImportError& OutError)
 			{
 				TArray<UObject*> Objects = ImportedObjects;
 				if (Primary)
@@ -1160,29 +1220,38 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 							FPackageName::GetAssetPackageExtension());
 					if (IFileManager::Get().FileExists(*Filename))
 					{
-						bFilesRemoved = IFileManager::Get().Delete(
-							*Filename,
-							false,
-							true,
-							true) && bFilesRemoved;
+						const bool bRemoved = IFileManager::Get().Delete(*Filename, false, true, true);
+						bFilesRemoved = bRemoved && bFilesRemoved;
+						if (!bRemoved && OutError.IsEmpty())
+						{
+							OutError = NativeConditionFailure(TEXT("factory_import_rollback_delete_failed"),
+								TEXT("An imported package file could not be removed during rollback."), Name, TEXT("package_file_removed"), false, true);
+							OutError.Source.SourceFile = Filename;
+						}
 					}
 				}
 				bool bPackagesAbsent = true;
 				for (const FString& Name : PackageNames)
 				{
+					if (!bPackagesAbsent) continue;
 					FString Existing;
-					bPackagesAbsent = bPackagesAbsent
-						&& !FPackageName::DoesPackageExist(Name, &Existing)
-						&& FindPackage(nullptr, *Name) == nullptr;
+					const bool bPersisted = FPackageName::DoesPackageExist(Name, &Existing);
+					const bool bLoaded = FindPackage(nullptr, *Name) != nullptr;
+					bPackagesAbsent = !bPersisted && !bLoaded;
+					if (!bPackagesAbsent && OutError.IsEmpty())
+						OutError = NativeConditionFailure(TEXT("factory_import_rollback_package_present"),
+							bPersisted ? TEXT("An imported package is still persisted after rollback.") : TEXT("An imported package is still loaded after rollback."),
+							Name, bPersisted ? TEXT("persisted_package_present") : TEXT("loaded_package_present"), true, false);
 				}
 				return bFilesRemoved && bPackagesAbsent;
 			}
 
-			bool RollbackReimport()
+			bool RollbackReimport(FFactoryExternalImportError& OutError)
 			{
-				if (BackupFilename.IsEmpty()
-					|| !IFileManager::Get().FileExists(*BackupFilename))
+				if (BackupFilename.IsEmpty() || !IFileManager::Get().FileExists(*BackupFilename))
 				{
+					OutError = NativeConditionFailure(TEXT("factory_reimport_rollback_backup_missing"),
+						TEXT("The reimport rollback backup is unavailable."), TargetObjectPath, TEXT("rollback_backup_available"), false, true, BackupFilename);
 					return false;
 				}
 				if (Primary && Primary->GetOutermost())
@@ -1190,26 +1259,43 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 					UPackage* const Package = Primary->GetOutermost();
 					Package->SetDirtyFlag(false);
 					Primary = nullptr;
-					FText Error;
-					if (!UPackageTools::UnloadPackages({Package}, Error, true))
+					FText NativeError;
+					if (!UPackageTools::UnloadPackages({Package}, NativeError, true))
 					{
+						OutError = NativeConditionFailure(TEXT("factory_reimport_rollback_unload_failed"),
+							NativeError.IsEmpty() ? TEXT("The reimport target package could not be unloaded for rollback.") : NativeError.ToString(),
+							TargetObjectPath, TEXT("native_package_unloaded"), false, true);
 						return false;
 					}
 				}
 				CollectGarbage(RF_NoFlags, true);
-				if (IFileManager::Get().Copy(
-						*PackageFilename,
-						*BackupFilename,
-						true,
-						true)
-					!= COPY_OK)
+				const int32 CopyResult = IFileManager::Get().Copy(*PackageFilename, *BackupFilename, true, true);
+				if (CopyResult != COPY_OK)
 				{
+					OutError = NativeValueFailure(TEXT("factory_reimport_rollback_copy_failed"),
+						TEXT("The reimport rollback backup could not be copied back to the target package."), TargetObjectPath, TEXT("native_copy_result"),
+						MakeShared<FJsonValueNumber>(CopyResult), MakeShared<FJsonValueNumber>(COPY_OK), BackupFilename);
 					return false;
 				}
 				DeleteBackup();
 				Primary = LoadObject<UObject>(nullptr, *TargetObjectPath);
-				return Primary
-					&& HashFileSha256(PackageFilename) == ExpectedRevision;
+				if (!Primary)
+				{
+					OutError = NativeConditionFailure(TEXT("factory_reimport_rollback_reload_failed"),
+						TEXT("The restored reimport target could not be reloaded."), TargetObjectPath, TEXT("native_asset_available"), false, true);
+					return false;
+				}
+				FString CurrentRevision;
+				if (!TryHashFileSha256(PackageFilename, CurrentRevision, OutError, TargetObjectPath)) return false;
+				if (CurrentRevision != ExpectedRevision)
+				{
+					OutError = NativeConditionFailure(TEXT("factory_reimport_rollback_revision_mismatch"),
+						TEXT("The restored reimport package does not match its pre-import revision."), TargetObjectPath, TEXT("package_revision_matches"), false, true);
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(CurrentRevision);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedRevision);
+					return false;
+				}
+				return true;
 			}
 
 			void DeleteBackup()
@@ -1253,16 +1339,30 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 				OutError = {};
 				if (!IsInGameThread())
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_game_thread_required"));
+					OutError = NativeValueFailure(TEXT("factory_import_game_thread_required"), TEXT("Factory import preparation must run on the game thread."),
+					Spec.DestinationRef, TEXT("game_thread"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return false;
 				}
 				if (!Spec.IsValid())
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_spec_invalid"));
+					if (Spec.RequestId.IsEmpty())
+						OutError = NativeConditionFailure(TEXT("factory_import_spec_invalid"),
+							TEXT("The factory import specification has no request identity."), Spec.DestinationRef, TEXT("request_identity_present"), false, true);
+					else if (Spec.SourceRef.IsEmpty() || Spec.DestinationRef.IsEmpty())
+						OutError = NativeValueFailure(TEXT("factory_import_spec_invalid"),
+							Spec.SourceRef.IsEmpty() ? TEXT("The factory import specification has no source file.") : TEXT("The factory import specification has no destination."),
+							Spec.DestinationRef, Spec.SourceRef.IsEmpty() ? TEXT("source_ref") : TEXT("destination_ref"),
+							MakeShared<FJsonValueString>(FString()), MakeShared<FJsonValueString>(TEXT("nonempty reference")));
+					else if (!Spec.Options.IsValid())
+					{
+						OutError = NativeConditionFailure(TEXT("factory_import_spec_invalid"),
+							TEXT("The import options fingerprint is not a SHA256 value."), Spec.DestinationRef, TEXT("options_fingerprint_valid"), false, true);
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(Spec.Options.Fingerprint);
+					}
+					else
+						OutError = NativeValueFailure(TEXT("factory_import_spec_invalid"),
+							TEXT("Importing an FBX animation requires a skeleton reference."), Spec.DestinationRef, TEXT("skeleton_ref"),
+							MakeShared<FJsonValueString>(Spec.SkeletonRef), MakeShared<FJsonValueString>(TEXT("nonempty Skeleton asset reference")));
 					return false;
 				}
 				FString Source;
@@ -1272,15 +1372,13 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 						Source,
 						OutError))
 				{
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Spec.DestinationRef;
 					return false;
 				}
-				const FString SourceSha256 = HashFileSha256(Source);
-				if (SourceSha256.IsEmpty())
+				FString SourceSha256;
+				if (!TryHashFileSha256(Source, SourceSha256, OutError, Spec.DestinationRef))
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_source_hash_failed"),
-						Source);
+					OutError = Contract::FDiagnostic::WrapFailure(TEXT("factory_import_source_hash_failed"), OutError);
 					return false;
 				}
 				FString PackageName;
@@ -1290,21 +1388,8 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 						: Spec.DestinationRef;
 				if (!TryPackageName(TargetRef, PackageName))
 				{
-					SetError(
-						OutError,
-						TEXT("factory_import_target_invalid"),
-						TargetRef);
-					return false;
-				}
-				if (Spec.Operation == EFactoryExternalImportOperation::Import
-					&& FPaths::GetBaseFilename(Source)
-						!= FPackageName::GetLongPackageAssetName(PackageName))
-				{
-					SetError(
-						OutError,
-						TEXT("factory_import_source_name_mismatch"),
-						Source,
-						TEXT("source basename must match destination asset name"));
+					OutError = NativeValueFailure(TEXT("factory_import_target_invalid"), TEXT("The import destination must be a valid package or object reference under /Game/."),
+					TargetRef, TEXT("destination_ref"), MakeShared<FJsonValueString>(TargetRef), MakeShared<FJsonValueString>(TEXT("valid /Game/ package or object reference")));
 					return false;
 				}
 				FString PackageFilename;
@@ -1317,10 +1402,8 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 							PackageName,
 							&PackageFilename))
 					{
-						SetError(
-							OutError,
-							TEXT("factory_reimport_target_missing"),
-							ObjectPath(PackageName));
+						OutError = NativeValueFailure(TEXT("factory_reimport_target_missing"), TEXT("The persisted reimport target or native asset is unavailable."),
+					ObjectPath(PackageName), TEXT("native_target_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 						return false;
 					}
 					ExistingAsset = LoadObject<UObject>(
@@ -1329,40 +1412,33 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 					if (!ExistingAsset
 						|| !ExistingAsset->IsA(ExpectedClassFor(Spec.Kind)))
 					{
-						SetError(
-							OutError,
-							TEXT("factory_reimport_type_mismatch"),
-							ObjectPath(PackageName));
+						OutError = NativeValueFailure(TEXT("factory_reimport_type_mismatch"), !ExistingAsset ? TEXT("The reimport target could not be loaded.") : TEXT("The reimport target has the wrong native class."),
+					ObjectPath(PackageName), TEXT("native_asset_class"), ExistingAsset ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(ExistingAsset->GetClass()->GetPathName())) : nullptr, MakeShared<FJsonValueString>(ExpectedClassFor(Spec.Kind)->GetPathName()));
 						return false;
 					}
 					if (ExistingAsset->GetOutermost()->IsDirty())
 					{
-						SetError(
-							OutError,
-							TEXT("factory_reimport_dirty_package"),
-							ObjectPath(PackageName));
+						OutError = NativeValueFailure(TEXT("factory_reimport_dirty_package"), TEXT("The reimport target package has unsaved changes."),
+					ObjectPath(PackageName), TEXT("native_package_dirty"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 						return false;
 					}
-					ExpectedRevision = HashFileSha256(PackageFilename);
+					if (!TryHashFileSha256(PackageFilename, ExpectedRevision, OutError, ObjectPath(PackageName)))
+					{
+						OutError = Contract::FDiagnostic::WrapFailure(TEXT("factory_reimport_backup_failed"), OutError);
+						return false;
+					}
 					const FString BackupRoot = FPaths::ProjectSavedDir()
 						/ TEXT("UAI/FactoryExternalImportRollback");
 					IFileManager::Get().MakeDirectory(*BackupRoot, true);
 					BackupFilename = BackupRoot
 						/ (FGuid::NewGuid().ToString(EGuidFormats::Digits)
 							+ FPackageName::GetAssetPackageExtension());
-					if (ExpectedRevision.IsEmpty()
-						|| IFileManager::Get().Copy(
-								*BackupFilename,
-								*PackageFilename,
-								true,
-								true)
-							!= COPY_OK)
+					const int32 CopyResult = IFileManager::Get().Copy(*BackupFilename, *PackageFilename, true, true);
+					if (CopyResult != COPY_OK)
 					{
-						SetError(
-							OutError,
-							TEXT("factory_reimport_backup_failed"),
-							PackageFilename,
-							BackupFilename);
+						OutError = NativeValueFailure(TEXT("factory_reimport_backup_failed"),
+							TEXT("The persisted reimport package could not be copied to its rollback backup."), ObjectPath(PackageName), TEXT("native_copy_result"),
+							MakeShared<FJsonValueNumber>(CopyResult), MakeShared<FJsonValueNumber>(COPY_OK), BackupFilename);
 						return false;
 					}
 				}
@@ -1405,7 +1481,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Factory
 
 	bool TryCreateFactoryExternalImportProvider(
 		TSharedPtr<IFactoryExternalImportProvider>& OutProvider,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProvider = MakeShared<FProvider>();
 		OutError.Reset();

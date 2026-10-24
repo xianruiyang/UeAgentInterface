@@ -13,31 +13,28 @@
 
 namespace
 {
-	bool RequireHjsonFilePath(const FString& FilePath, FString* OutError)
+	bool RequireHjsonFilePath(const FString& FilePath, UE::UAI::Contract::FDiagnostic* OutError)
 	{
 		if (!FPaths::GetExtension(FilePath, false).Equals(TEXT("hjson"), ESearchCase::IgnoreCase))
 		{
 			if (OutError)
 			{
-				*OutError = FString::Printf(TEXT("hjson_file_required:%s"), *FilePath);
+				*OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_file_required"), TEXT("The authoring output file must have the .hjson extension."), TEXT("authoring_io"));
+				OutError->Source.SourceFile = FilePath;
+				OutError->ExpectedValue = MakeShared<FJsonValueString>(TEXT("hjson"));
+				OutError->ActualValue = MakeShared<FJsonValueString>(FPaths::GetExtension(FilePath, false));
 			}
 			return false;
 		}
 		return true;
 	}
 
-	FString MakeIoError(
-		const FString& Code,
-		const FString& Phase,
-		const FString& FilePath,
-		const FString& Message)
+	UE::UAI::Contract::FDiagnostic MakeIoError(
+		const FString& Code, const FString& Phase, const FString& FilePath, const FString& Message)
 	{
-		FUeAgentHjsonDiagnostic Diagnostic;
-		Diagnostic.Phase = Phase;
-		Diagnostic.Code = Code;
-		Diagnostic.SourceFile = FilePath;
-		Diagnostic.Message = Message;
-		return Diagnostic.ToString();
+		auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(Code, Message, Phase);
+		Diagnostic.Source.SourceFile = FilePath;
+		return Diagnostic;
 	}
 
 	bool SaveUtf8File(const FString& Path, const FString& Text)
@@ -81,7 +78,7 @@ namespace UeAgentStructuredAuthoringIO
 		return FUeAgentStructuredHjsonFormatter::WriteObject(Object, Options);
 	}
 
-	bool SaveObject(const FString& FilePath, const TSharedPtr<FJsonObject>& Object, FString* OutError)
+	bool SaveObject(const FString& FilePath, const TSharedPtr<FJsonObject>& Object, UE::UAI::Contract::FDiagnostic* OutError)
 	{
 		return SaveObject(FilePath, Object, FUeAgentStructuredHjsonWriteOptions(), OutError);
 	}
@@ -90,13 +87,15 @@ namespace UeAgentStructuredAuthoringIO
 		const FString& FilePath,
 		const TSharedPtr<FJsonObject>& Object,
 		const FUeAgentStructuredHjsonWriteOptions& Options,
-		FString* OutError)
+		UE::UAI::Contract::FDiagnostic* OutError)
 	{
 		if (!Object.IsValid())
 		{
 			if (OutError)
 			{
-				*OutError = TEXT("hjson_object_invalid");
+				*OutError = MakeIoError(TEXT("hjson_object_invalid"), TEXT("authoring_io"), FilePath, TEXT("The HJSON object to save is null."));
+				OutError->ExpectedValue = MakeShared<FJsonValueString>(TEXT("object"));
+				OutError->ActualValuePresent = false;
 			}
 			return false;
 		}
@@ -107,10 +106,9 @@ namespace UeAgentStructuredAuthoringIO
 			return false;
 		}
 
-		FUeAgentStructuredResourceTracker ResourceTracker(
-			Options.ResourceBudget);
+		FUeAgentStructuredResourceTracker ResourceTracker;
 		FString Text;
-		FString WriteError;
+		UE::UAI::Contract::FDiagnostic WriteError;
 		if (!ResourceTracker.ChargeOutputChars(
 				1,
 				TEXT("/"),
@@ -139,7 +137,7 @@ namespace UeAgentStructuredAuthoringIO
 		Text += TEXT("\n");
 
 		FUeAgentStructuredHjsonDocument Validation;
-		FString ValidationError;
+		UE::UAI::Contract::FDiagnostic ValidationError;
 		if (!FUeAgentStructuredHjsonParser::ParseDocument(
 				Text,
 				ResolvedFilePath,
@@ -248,7 +246,7 @@ namespace UeAgentStructuredAuthoringIO
 		return true;
 	}
 
-	bool LoadObject(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject, FString& OutError)
+	bool LoadObject(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FUeAgentStructuredHjsonDocument Document;
 		if (!LoadDocument(FilePath, Document, OutError))
@@ -263,20 +261,7 @@ namespace UeAgentStructuredAuthoringIO
 	bool LoadDocument(
 		const FString& FilePath,
 		FUeAgentStructuredHjsonDocument& OutDocument,
-		FString& OutError)
-	{
-		return LoadDocument(
-			FilePath,
-			FUeAgentStructuredResourceBudget(),
-			OutDocument,
-			OutError);
-	}
-
-	bool LoadDocument(
-		const FString& FilePath,
-		const FUeAgentStructuredResourceBudget& ResourceBudget,
-		FUeAgentStructuredHjsonDocument& OutDocument,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutDocument = FUeAgentStructuredHjsonDocument();
 		OutError.Reset();
@@ -314,7 +299,7 @@ namespace UeAgentStructuredAuthoringIO
 			return false;
 		}
 
-		FUeAgentStructuredResourceTracker ResourceTracker(ResourceBudget);
+		FUeAgentStructuredResourceTracker ResourceTracker;
 		const int64 EstimatedReadMemory =
 			FileBytes > (MAX_int64 - sizeof(FString)) / 3
 				? MAX_int64
@@ -356,7 +341,7 @@ namespace UeAgentStructuredAuthoringIO
 			OutError);
 	}
 
-	bool LoadOptionalObject(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject, FString& OutError)
+	bool LoadOptionalObject(const FString& FilePath, TSharedPtr<FJsonObject>& OutObject, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutObject.Reset();
 		OutError.Reset();

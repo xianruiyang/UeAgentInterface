@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/BindingGateway/Query/UeAgentQueryBindingError.h"
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/ContextResource/UeAgentOperationContext.h"
 #include "Core/Contract/UeAgentContract.h"
@@ -15,7 +16,6 @@ namespace UE::UAI::Contract
 
 namespace UE::UAI::BindingGateway::Query
 {
-	struct FUeAgentQueryBindingError;
 
 	using FUeAgentDomainQuerySessionIdentity =
 		UE::UAI::BindingGateway::Ticket::
@@ -34,11 +34,12 @@ namespace UE::UAI::BindingGateway::Query
 		const UE::UAI::Discovery::FUeAgentCandidateBinding&
 			GetBinding() const;
 		bool IsValid() const;
+		const FUeAgentQueryBindingError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentDomainQueryTicket Ticket;
 		UE::UAI::Discovery::FUeAgentCandidateBinding Binding;
-		bool bValid = false;
+		FUeAgentQueryBindingError ValidationDiagnostic;
 	};
 
 	/**
@@ -65,6 +66,7 @@ namespace UE::UAI::BindingGateway::Query
 		const UE::UAI::Projection::FUeAgentProjectionRequest&
 			GetProjection() const;
 		bool IsValid() const;
+		const FUeAgentQueryBindingError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentDomainQuerySessionIdentity Session;
@@ -73,7 +75,7 @@ namespace UE::UAI::BindingGateway::Query
 		UE::UAI::Contract::FUeAgentContractValue Input;
 		TOptional<FUeAgentDomainQueryTarget> Target;
 		UE::UAI::Projection::FUeAgentProjectionRequest Projection;
-		bool bValid = false;
+		FUeAgentQueryBindingError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentDomainQueryProvider
@@ -106,11 +108,12 @@ namespace UE::UAI::BindingGateway::Query
 		const FString& GetProviderBinding() const;
 		const TSharedRef<IUeAgentDomainQueryProvider>& GetProvider() const;
 		bool IsValid() const;
+		const FUeAgentQueryBindingError& GetValidationDiagnostic() const;
 
 	private:
 		FString ProviderBinding;
 		TSharedRef<IUeAgentDomainQueryProvider> Provider;
-		bool bValid = false;
+		FUeAgentQueryBindingError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API

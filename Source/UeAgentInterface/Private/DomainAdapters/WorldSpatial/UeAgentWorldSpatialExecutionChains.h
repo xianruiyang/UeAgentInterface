@@ -1,9 +1,12 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/BindingGateway/Operation/UeAgentOperationBinding.h"
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
 #include "Core/Contract/UeAgentContract.h"
+#include "Core/ExecutionMutation/UeAgentExecutionMutation.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Templates/SharedPointer.h"
@@ -72,13 +75,19 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	UEAGENTINTERFACE_API const TArray<FUeAgentWorldSpatialExecutionChainContract>&
 	GetWorldSpatialExecutionChainContracts();
 
-	struct UEAGENTINTERFACE_API FUeAgentWorldSpatialExecutionError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
+	using FUeAgentWorldSpatialExecutionError = UE::UAI::Contract::FDiagnostic;
 
-		bool IsValid() const { return !Code.IsEmpty(); }
+	struct UEAGENTINTERFACE_API FUeAgentWorldSpatialFenceEntry
+	{
+		FString TargetRef;
+		UE::UAI::StateSemantic::FUeAgentStateRevision Revision;
+	};
+
+	struct UEAGENTINTERFACE_API FUeAgentWorldSpatialPreflightFence
+	{
+		TArray<FUeAgentWorldSpatialFenceEntry> Entries;
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
+		bool IsValid() const;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentWorldSpatialTypedRequest
@@ -109,7 +118,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			const UE::UAI::Contract::FUeAgentContractValue& CanonicalInput,
 			UE::UAI::ContextResource::FUeAgentResourceTracker& Resources,
 			FUeAgentWorldSpatialTypedRequestPtr& OutRequest,
-			FUeAgentWorldSpatialExecutionError& OutError) = 0;
+			FUeAgentWorldSpatialExecutionError& OutError,
+			const FString& InputSubject = FString()) = 0;
 	};
 
 	enum class EUeAgentWorldSpatialReadPhase : uint8
@@ -136,19 +146,24 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	class UEAGENTINTERFACE_API FUeAgentWorldSpatialMutationResult final
 	{
 	public:
-		FUeAgentWorldSpatialMutationResult() = default;
+		FUeAgentWorldSpatialMutationResult();
+		// Failure evidence only: default/invalid results still mean unknown.
+		static FUeAgentWorldSpatialMutationResult NoMutation();
+		bool IsNoMutationConfirmed() const;
 		FUeAgentWorldSpatialMutationResult(
 			FString InOperationId,
 			FString InMutationEvidenceId);
 
 		const FString& GetOperationId() const;
 		const FString& GetMutationEvidenceId() const;
+		bool TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const;
 		bool IsValid() const;
 
 	private:
 		FString OperationId;
 		FString MutationEvidenceId;
-		bool bValid = false;
+		UE::UAI::ExecutionMutation::FMutationFacts FailureFacts;
+		FUeAgentWorldSpatialExecutionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentWorldSpatialMutationPort
@@ -159,8 +174,16 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			const FUeAgentWorldSpatialExecutionChainContract& Contract,
 			const FUeAgentWorldSpatialTypedRequestRef& Request,
 			const TArray<UE::UAI::BindingGateway::Operation::FUeAgentOperationTargetBinding>& Targets,
+			const FUeAgentWorldSpatialPreflightFence& Fence,
 			const UE::UAI::ContextResource::FUeAgentOperationContext& Context,
 			FUeAgentWorldSpatialMutationResult& OutResult,
+			FUeAgentWorldSpatialExecutionError& OutError) = 0;
+		virtual bool TryCaptureFence(
+			const FUeAgentWorldSpatialExecutionChainContract& Contract,
+			const FUeAgentWorldSpatialTypedRequestRef& Request,
+			const TArray<UE::UAI::BindingGateway::Operation::FUeAgentOperationTargetBinding>& Targets,
+			const UE::UAI::ContextResource::FUeAgentOperationContext& Context,
+			FUeAgentWorldSpatialPreflightFence& OutFence,
 			FUeAgentWorldSpatialExecutionError& OutError) = 0;
 	};
 

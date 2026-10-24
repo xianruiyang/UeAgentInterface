@@ -5,6 +5,7 @@
 
 namespace UE::UAI::DomainAdapters::HjsonExternalInput
 {
+	struct FResolvedExternalInputDocument;
 	enum class EHjsonExternalInputFamily : uint8
 	{
 		Factory,
@@ -20,14 +21,17 @@ namespace UE::UAI::DomainAdapters::HjsonExternalInput
 		TArray<FString> ImporterCommandIds;
 
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 	};
 
 	struct UEAGENTINTERFACE_API FHjsonExternalInputDelegation final
 	{
 		FString CommandId;
 		FString CanonicalParamsJson;
+		TSharedPtr<const FResolvedExternalInputDocument> SourceDocument;
 
 		bool IsValid() const;
+		void LocateFailure(HjsonWorkspace::FWorkspaceError& Error) const;
 	};
 
 	UEAGENTINTERFACE_API const TArray<FHjsonExternalInputFamilyContract>&

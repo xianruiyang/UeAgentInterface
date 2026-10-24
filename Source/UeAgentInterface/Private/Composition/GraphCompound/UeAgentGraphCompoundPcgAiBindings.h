@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/GraphCompound/UeAgentGraphCompoundPcgAnimationRoutes.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundRuntime.h"
 
@@ -21,11 +23,12 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetTargetRef() const;
 		const FString& GetTargetKind() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString TargetRef;
 		FString TargetKind;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	/** Typed post-C4 request passed to native execution. */
@@ -41,11 +44,12 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetTargetKind() const;
 		const FGraphCompoundCanonicalPayload& GetPayload() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FGraphCompoundPcgAiTargetRequest Target;
 		FGraphCompoundCanonicalPayload Payload;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	/**
@@ -84,15 +88,12 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		/** Empty selects Saved/UeAgentInterface/GraphCompoundDurable. */
 		FString DurableJournalRoot;
-		double OperationTimeoutSeconds = 120.0;
-
-		bool IsValid() const;
 	};
 
 	/** Projects the exact 17 PCG/AI descriptors from the combined route truth. */
 	UEAGENTINTERFACE_API bool TryCreatePcgAiGraphDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	/** Creates one exact operation owner for each PCG/AI descriptor. */
 	UEAGENTINTERFACE_API bool TryCreatePcgAiGraphBindings(

@@ -4,9 +4,17 @@
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCapabilities.h"
 
 class UObject;
+class UTexture;
 
 namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 {
+	/** Generated source state only; contains no transient assembly input references. */
+	UEAGENTINTERFACE_API bool TryReadAssembledTextureSourceState(
+		UTexture& Target,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		StateSemantic::FUeAgentCanonicalValuePtr& OutState,
+		ExecutionMutation::FExecutionMutationError& OutError);
+
 	bool CanProjectTextureSourceState(
 		const FString& NativeMechanicId);
 

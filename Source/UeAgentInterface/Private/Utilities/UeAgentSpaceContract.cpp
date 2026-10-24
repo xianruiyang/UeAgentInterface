@@ -2,7 +2,10 @@
 
 #include "Utilities/UeAgentSpaceContract.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 namespace UeAgentSpaceContract
 {
@@ -23,16 +26,24 @@ namespace UeAgentSpaceContract
 			const TCHAR* Field,
 			const FString& ErrorPrefix,
 			FString& OutValue,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!Contract->HasField(Field))
 			{
-				OutError = FString::Printf(TEXT("%s_field_missing:%s"), *ErrorPrefix, Field);
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(ErrorPrefix + TEXT("_field_missing"), FString::Printf(TEXT("Space contract field '%s' is missing."), Field), TEXT("space_contract"));
+                OutError.PropertyPath = Field;
+				OutError.Source.JsonPath = TEXT("/") + FString(Field);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty string"));
+				OutError.ActualValuePresent = false;
 				return false;
 			}
 			if (!Contract->TryGetStringField(Field, OutValue) || OutValue.TrimStartAndEnd().IsEmpty())
 			{
-				OutError = FString::Printf(TEXT("%s_field_invalid:%s"), *ErrorPrefix, Field);
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(ErrorPrefix + TEXT("_field_invalid"), FString::Printf(TEXT("Space contract field '%s' is invalid."), Field), TEXT("space_contract"));
+                OutError.PropertyPath = Field;
+				OutError.Source.JsonPath = TEXT("/") + FString(Field);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty string"));
+				OutError.ActualValue = Contract->Values.FindRef(Field);
 				return false;
 			}
 			return true;
@@ -61,12 +72,14 @@ namespace UeAgentSpaceContract
 		const FString& ExpectedSubject,
 		const FString& ExpectedFrame,
 		const FString& ErrorPrefix,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		if (!Contract.IsValid())
 		{
-			OutError = ErrorPrefix + TEXT("_missing");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(ErrorPrefix + TEXT("_missing"), TEXT("The space contract object is missing."), TEXT("space_contract"));
+			OutError.CandidateName = ExpectedSubject;
+			OutError.ActualValuePresent = false;
 			return false;
 		}
 
@@ -74,7 +87,8 @@ namespace UeAgentSpaceContract
 		{
 			if (!AllowedFields.Contains(Field.Key))
 			{
-				OutError = FString::Printf(TEXT("%s_field_unknown:%s"), *ErrorPrefix, *Field.Key);
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(ErrorPrefix + TEXT("_field_unknown"), FString::Printf(TEXT("Space contract field '%s' is unknown."), *Field.Key), TEXT("space_contract"));
+                OutError.PropertyPath = Field.Key;
 				return false;
 			}
 		}
@@ -99,17 +113,30 @@ namespace UeAgentSpaceContract
 
 		if (Subject != ExpectedSubject)
 		{
-			OutError = ErrorPrefix + TEXT("_subject_mismatch");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(ErrorPrefix + TEXT("_subject_mismatch"), TEXT("The space contract names a different subject."), TEXT("space_contract"));
+			OutError.PropertyPath = TEXT("subject");
+			OutError.Source.JsonPath = TEXT("/subject");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(ExpectedSubject);
+			OutError.ActualValue = MakeShared<FJsonValueString>(Subject);
 			return false;
 		}
 		if (Dimension != TEXT("3d"))
 		{
-			OutError = ErrorPrefix + TEXT("_dimension_mismatch");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(ErrorPrefix + TEXT("_dimension_mismatch"), TEXT("The space contract must use three dimensions."), TEXT("space_contract"));
+			OutError.PropertyPath = TEXT("dimension");
+			OutError.Source.JsonPath = TEXT("/dimension");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("3d"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(Dimension);
 			return false;
 		}
 		if (WriteFrame != ExpectedFrame || ReadFrame != ExpectedFrame || VerifyFrame != ExpectedFrame)
 		{
-			OutError = ErrorPrefix + TEXT("_frame_mismatch");
+			const TCHAR* Field = WriteFrame != ExpectedFrame ? TEXT("Fwrite") : ReadFrame != ExpectedFrame ? TEXT("Fread") : TEXT("Fverify");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(ErrorPrefix + TEXT("_frame_mismatch"), TEXT("The space contract frame differs from the required frame."), TEXT("space_contract"));
+			OutError.PropertyPath = Field;
+			OutError.Source.JsonPath = TEXT("/") + FString(Field);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(ExpectedFrame);
+			OutError.ActualValue = Contract->Values.FindRef(Field);
 			return false;
 		}
 		return true;

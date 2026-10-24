@@ -83,18 +83,22 @@ namespace
 		return bMatches;
 	}
 
-	void SetFailure(
-		UeAgentAuthoringWorkspaceRouter::FRouteFailure& OutFailure,
-		const FString& ErrorCode,
-		const FString& ErrorDetail,
-		const UeAgentAuthoringWorkspaceRouter::FSourceProvenance* Provenance = nullptr)
-	{
-		OutFailure.ErrorCode = ErrorCode;
-		OutFailure.ErrorDetail = ErrorDetail;
-		OutFailure.Provenance = Provenance
-			? *Provenance
-			: UeAgentAuthoringWorkspaceRouter::FSourceProvenance();
-	}
+	void SetFailure(UeAgentAuthoringWorkspaceRouter::FRouteFailure& OutFailure, UE::UAI::Contract::FDiagnostic Diagnostic,
+        const UeAgentAuthoringWorkspaceRouter::FSourceProvenance* Provenance = nullptr)
+    {
+        OutFailure.Diagnostic = MoveTemp(Diagnostic);
+        if (Provenance)
+        {
+            const auto Source = Provenance->ToDiagnosticSource();
+            if (OutFailure.Diagnostic.Source.WorkspaceSource.IsEmpty()) OutFailure.Diagnostic.Source.WorkspaceSource = Source.WorkspaceSource;
+            if (OutFailure.Diagnostic.Source.SourceFile.IsEmpty()) OutFailure.Diagnostic.Source.SourceFile = Source.SourceFile;
+            if (OutFailure.Diagnostic.Source.SourceUnit.IsEmpty()) OutFailure.Diagnostic.Source.SourceUnit = Source.SourceUnit;
+            if (OutFailure.Diagnostic.Source.InternalJsonPath.IsEmpty()) OutFailure.Diagnostic.Source.InternalJsonPath = Source.InternalJsonPath;
+            if (OutFailure.Diagnostic.Source.JsonPath.IsEmpty()) OutFailure.Diagnostic.Source.JsonPath = Source.JsonPath;
+            if (OutFailure.Diagnostic.Source.Line <= 0) OutFailure.Diagnostic.Source.Line = Source.Line;
+            if (OutFailure.Diagnostic.Source.Column <= 0) OutFailure.Diagnostic.Source.Column = Source.Column;
+        }
+    }
 
 	bool IsRequiredCardinality(const FString& Cardinality)
 	{
@@ -129,6 +133,34 @@ namespace UeAgentAuthoringWorkspaceRouter
 	const FUeAgentHjsonSourceLocation* FWorkspaceUnit::FindSourceLocation(const FString& JsonPointer) const
 	{
 		return SourceLocations.Find(JsonPointer);
+	}
+
+	UeAgentAuthoringDiagnostics::FSourceLocation FWorkspaceUnit::ResolveDiagnosticSource(const FString& JsonPointer) const
+	{
+		if (ResolveOriginalSource)
+		{
+			auto Original = ResolveOriginalSource(JsonPointer);
+			if (!Original.SourceFile.IsEmpty()) return Original;
+		}
+		auto Location = Provenance.ToDiagnosticSource();
+		Location.JsonPath = JsonPointer.IsEmpty() ? TEXT("/") : JsonPointer;
+		Location.InternalJsonPath = Location.JsonPath;
+		FString Ancestor = JsonPointer;
+		for (;;)
+		{
+			if (const auto* Parsed = FindSourceLocation(Ancestor.IsEmpty() ? TEXT("/") : Ancestor))
+			{
+				if (!Parsed->FilePath.IsEmpty()) Location.SourceFile = Parsed->FilePath;
+				Location.JsonPath = Ancestor.IsEmpty() ? TEXT("/") : Ancestor;
+				Location.Line = Parsed->Line;
+				Location.Column = Parsed->Column;
+				break;
+			}
+			int32 Slash;
+			if (!Ancestor.FindLastChar(TEXT('/'), Slash)) break;
+			Ancestor.LeftInline(Slash);
+		}
+		return Location;
 	}
 
 	TArray<const FWorkspaceUnit*> FWorkspace::FindUnits(const FString& UnitId) const
@@ -243,9 +275,10 @@ namespace UeAgentAuthoringWorkspaceRouter
 	{
 		OutWorkspace = FWorkspace();
 		OutFailure = FRouteFailure();
-		if (!Contract.IsValid())
-		{
-			SetFailure(OutFailure, TEXT("apply_workspace_contract_invalid"), Contract.ContractId);
+        UE::UAI::Contract::FDiagnostic ContractError;
+        if (!UeAgentApplyWorkspaceContract::ValidateContract(Contract, ContractError))
+        {
+            SetFailure(OutFailure, MoveTemp(ContractError));
 			return false;
 		}
 
@@ -276,12 +309,26 @@ namespace UeAgentAuthoringWorkspaceRouter
 				}
 				if (Matches.IsEmpty())
 				{
-					SetFailure(OutFailure, TEXT("workspace_file_unknown"), Candidate.RelativePath, &Candidate.Provenance);
+					SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("workspace_file_unknown"), TEXT("The file is not supported by this workspace contract."), TEXT("workspace_route"), Candidate.RelativePath), &Candidate.Provenance);
 					return false;
 				}
 				if (Matches.Num() > 1)
 				{
-					SetFailure(OutFailure, TEXT("workspace_file_route_ambiguous"), Candidate.RelativePath, &Candidate.Provenance);
+                    auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("workspace_file_route_ambiguous"), TEXT("The file matches multiple workspace routes."), TEXT("workspace_route"));
+                    Diagnostic.CandidateName = Candidate.RelativePath;
+                    Diagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+                    Diagnostic.ActualValue = MakeShared<FJsonValueNumber>(Matches.Num());
+                    TArray<TSharedPtr<FJsonValue>> Choices;
+                    for (int32 Match : Matches) {
+                        const auto& Route = Contract.Units[Match];
+                        const auto Choice = MakeShared<FJsonObject>();
+                        Choice->SetStringField(TEXT("unit_id"), Route.UnitId);
+                        Choice->SetStringField(TEXT("route_id"), Route.RouteId);
+                        Choice->SetStringField(TEXT("path_pattern"), Route.PathPattern);
+                        Choices.Add(MakeShared<FJsonValueObject>(Choice));
+                    }
+                    Diagnostic.CandidateChoices = MakeShared<FJsonValueArray>(Choices);
+                    SetFailure(OutFailure, MoveTemp(Diagnostic), &Candidate.Provenance);
 					return false;
 				}
 				CandidatesByUnit[Matches[0]].Add(&Candidate);
@@ -306,7 +353,11 @@ namespace UeAgentAuthoringWorkspaceRouter
 				FSourceProvenance EntryProvenance = WorkspaceProvenance;
 				EntryProvenance.SourceUnit = Contract.Entry.VirtualUnitId;
 				EntryProvenance.RelativePath = Contract.Entry.DirectoryEntry;
-				SetFailure(OutFailure, TEXT("workspace_entry_missing"), Contract.Entry.DirectoryEntry, &EntryProvenance);
+                auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("workspace_entry_missing"), TEXT("The entry file did not route to the workspace's declared entry unit."), TEXT("workspace_route"));
+                Diagnostic.CandidateName = Contract.Entry.VirtualUnitId;
+                Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(Contract.Entry.DirectoryEntry);
+                Diagnostic.ActualValuePresent = false;
+                SetFailure(OutFailure, MoveTemp(Diagnostic), &EntryProvenance);
 				return false;
 			}
 		}
@@ -314,7 +365,9 @@ namespace UeAgentAuthoringWorkspaceRouter
 		{
 			if (Candidates.Num() != 1)
 			{
-				SetFailure(OutFailure, TEXT("workspace_source_invalid"), TEXT("virtual_source_requires_one_document"));
+                auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("workspace_source_invalid"), TEXT("document_count"),
+                    MakeShared<FJsonValueNumber>(1), MakeShared<FJsonValueNumber>(Candidates.Num()), TEXT("workspace_route"), TEXT("A virtual workspace source requires exactly one document."));
+                SetFailure(OutFailure, MoveTemp(Diagnostic), &WorkspaceProvenance);
 				return false;
 			}
 			const int32 VirtualUnitIndex = Contract.Units.IndexOfByPredicate(
@@ -324,7 +377,13 @@ namespace UeAgentAuthoringWorkspaceRouter
 				});
 			if (!CandidatesByUnit.IsValidIndex(VirtualUnitIndex))
 			{
-				SetFailure(OutFailure, TEXT("apply_workspace_contract_invalid"), TEXT("virtual_unit_missing"));
+                auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("apply_workspace_contract_invalid"), TEXT("The workspace contract does not define its virtual entry unit."), TEXT("workspace_route"));
+                Diagnostic.CandidateName = Contract.Entry.VirtualUnitId;
+                Diagnostic.PropertyPath = TEXT("/entry/virtual_unit_id");
+                Diagnostic.SourceKind = TEXT("native_result");
+                Diagnostic.ExpectedValuePresent = true;
+                Diagnostic.ActualValuePresent = false;
+                SetFailure(OutFailure, MoveTemp(Diagnostic));
 				return false;
 			}
 			CandidatesByUnit[VirtualUnitIndex].Add(&Candidates[0]);
@@ -351,7 +410,13 @@ namespace UeAgentAuthoringWorkspaceRouter
 			if (ExceedsCardinality(Descriptor.Cardinality, UnitCandidates.Num()))
 			{
 				const FSourceProvenance* Provenance = UnitCandidates.IsEmpty() ? nullptr : &UnitCandidates[0]->Provenance;
-				SetFailure(OutFailure, TEXT("workspace_duplicate_target"), Descriptor.UnitId, Provenance);
+                auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("workspace_duplicate_target"), TEXT("document_count"),
+                    MakeShared<FJsonValueNumber>(1), MakeShared<FJsonValueNumber>(UnitCandidates.Num()), TEXT("workspace_route"), TEXT("Multiple documents target a workspace unit that permits only one."));
+                Diagnostic.CandidateName = Descriptor.UnitId;
+                TArray<TSharedPtr<FJsonValue>> Choices;
+                for (const auto* Candidate : UnitCandidates) if (Candidate) Choices.Add(MakeShared<FJsonValueString>(Candidate->RelativePath));
+                Diagnostic.CandidateChoices = MakeShared<FJsonValueArray>(Choices);
+                SetFailure(OutFailure, MoveTemp(Diagnostic), Provenance);
 				return false;
 			}
 			if (UnitCandidates.IsEmpty())
@@ -361,7 +426,11 @@ namespace UeAgentAuthoringWorkspaceRouter
 					FSourceProvenance MissingProvenance = WorkspaceProvenance;
 					MissingProvenance.SourceUnit = Descriptor.UnitId;
 					MissingProvenance.RelativePath = Descriptor.PathPattern;
-					SetFailure(OutFailure, TEXT("workspace_entry_missing"), Descriptor.UnitId, &MissingProvenance);
+                    auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("workspace_entry_missing"), TEXT("No document matches a required workspace unit."), TEXT("workspace_route"));
+                    Diagnostic.CandidateName = Descriptor.UnitId;
+                    Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(Descriptor.PathPattern);
+                    Diagnostic.ActualValuePresent = false;
+                    SetFailure(OutFailure, MoveTemp(Diagnostic), &MissingProvenance);
 					return false;
 				}
 
@@ -390,7 +459,12 @@ namespace UeAgentAuthoringWorkspaceRouter
 			{
 				if (!Candidate)
 				{
-					SetFailure(OutFailure, TEXT("workspace_source_invalid"), Descriptor.UnitId);
+                    auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("workspace_source_invalid"), TEXT("The routed unit contains a null document candidate."), TEXT("workspace_route"));
+                    Diagnostic.CandidateName = Descriptor.UnitId;
+                    Diagnostic.SourceKind = TEXT("native_result");
+                    Diagnostic.ExpectedValuePresent = true;
+                    Diagnostic.ActualValuePresent = false;
+                    SetFailure(OutFailure, MoveTemp(Diagnostic));
 					return false;
 				}
 
@@ -406,13 +480,14 @@ namespace UeAgentAuthoringWorkspaceRouter
 				Unit.MergePolicy = Descriptor.MergePolicy;
 				Unit.Provenance = Candidate->Provenance;
 				Unit.SourceLocations = Candidate->SourceLocations;
+                Unit.ResolveOriginalSource = Candidate->ResolveOriginalSource;
 
 				if (Candidate->bEmpty)
 				{
 					Unit.Presence = EUnitPresence::Empty;
 					if (Descriptor.EmptySemantics == TEXT("error"))
 					{
-						SetFailure(OutFailure, TEXT("workspace_source_invalid"), TEXT("empty_unit:") + Descriptor.UnitId, &Candidate->Provenance);
+						SetFailure(OutFailure, UE::UAI::Contract::FDiagnostic::Failure(TEXT("workspace_source_invalid"), TEXT("The workspace contract does not allow an empty document for this unit."), TEXT("workspace_route"), TEXT("empty_unit:") + Descriptor.UnitId), &Candidate->Provenance);
 						return false;
 					}
 					if (Descriptor.EmptySemantics == TEXT("explicit_empty"))
@@ -427,7 +502,10 @@ namespace UeAgentAuthoringWorkspaceRouter
 				{
 					if (!Candidate->Document.IsValid())
 					{
-						SetFailure(OutFailure, TEXT("workspace_source_invalid"), Candidate->RelativePath, &Candidate->Provenance);
+                        auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("workspace_source_invalid"), FString(),
+                            MakeShared<FJsonValueString>(TEXT("parsed document object")), nullptr, TEXT("workspace_route"), TEXT("The candidate is marked nonempty but has no parsed document object."));
+                        Diagnostic.CandidateName = Candidate->RelativePath;
+                        SetFailure(OutFailure, MoveTemp(Diagnostic), &Candidate->Provenance);
 						return false;
 					}
 					Unit.Presence = EUnitPresence::Present;

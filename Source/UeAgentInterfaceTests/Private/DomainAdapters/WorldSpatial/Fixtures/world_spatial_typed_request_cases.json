@@ -1,7 +1,5 @@
 {
   "schema": "uai.domain_adapter.world_spatial.typed_request_fixture.v1",
-  "case_count": 22,
-  "family_count": 5,
   "cases": [
     {
       "capability_id": "graph.view.read",
@@ -31,8 +29,7 @@
             "components": ["320", "180"],
             "conversion_evidence_ids": ["convert:graph-view"]
           },
-          "zoom": 1.25,
-          "graph_revision": {"source_id":"graph-view","generation":"gen-1","sequence":1}
+          "zoom": 1.25
         }
       }
     },
@@ -75,7 +72,6 @@
           "target_anchor": "center",
           "rotation_policy": "preserve"
         },
-        "expected_revisions": [{"target_ref":"actor:subject","revision":{"source_id":"actor:subject","generation":"gen-1","sequence":3}}],
         "anchor_ref": "actor:anchor"
       }
     },
@@ -94,8 +90,7 @@
           "trace_complex": true,
           "ignore_target_refs": ["actor:subject"]
         },
-        "placement_policy": {"clearance_cm":5,"align_to_surface_normal":true,"preserve_yaw":true},
-        "expected_revisions": [{"target_ref":"actor:subject","revision":{"source_id":"actor:subject","generation":"gen-1","sequence":4}}]
+        "placement_policy": {"clearance_cm":5,"align_to_surface_normal":true,"preserve_yaw":true}
       }
     },
     {
@@ -105,7 +100,6 @@
       "typed_request_id": "world_spatial.object_transform.bake_mesh.request.v1",
       "valid_input": {
         "transform": {"subject":"mesh:fixture","quantity":"transform","frame":{"frame_id":"mesh.asset.local","basis_frame_id":"fixture.mesh.semantic","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:mesh","observed_at":{"clock_id":"editor","tick":"125","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["10","20","30","0","0","0","1","2","2","2"],"conversion_evidence_ids":["convert:mesh"]},
-        "expected_revision": {"source_id":"mesh:fixture","generation":"gen-1","sequence":5},
         "preserve_placement": true
       }
     },
@@ -116,7 +110,6 @@
       "typed_request_id": "world_spatial.object_transform.update_pivot.request.v1",
       "valid_input": {
         "pivot": {"subject":"mesh:fixture","quantity":"point","frame":{"frame_id":"mesh.geometry.local","basis_frame_id":"fixture.mesh.semantic","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:mesh","observed_at":{"clock_id":"editor","tick":"126","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["10","0","0"],"conversion_evidence_ids":["convert:pivot"]},
-        "expected_revision": {"source_id":"mesh:fixture","generation":"gen-1","sequence":6},
         "preserve_world_geometry": true
       }
     },
@@ -226,8 +219,7 @@
           "realtime": true,
           "game_view": false,
           "show_flags": ["Lighting", "StaticMeshes"],
-          "interaction": {"mode_widgets":true,"selection":true,"pivot":true,"editor_primitives":true,"game_primitives":false,"widget_mode":"none"},
-          "observed_revision": {"source_id":"viewport:fixture","generation":"gen-1","sequence":7}
+          "interaction": {"mode_widgets":true,"selection":true,"pivot":true,"editor_primitives":true,"game_primitives":false,"widget_mode":"none"}
         }
       }
     },
@@ -243,7 +235,7 @@
       "family_id": "viewport_session_state",
       "request_kind": "viewport_view_mode_list",
       "typed_request_id": "world_spatial.viewport_session.list_view_modes.request.v1",
-      "valid_input": {}
+      "valid_input": {"query":"shader complexity"}
     },
     {
       "capability_id": "viewport.instance.list",
@@ -260,6 +252,7 @@
       "valid_input": {
         "state_patch": {
           "camera_transform": {"subject":"viewport:fixture.camera","quantity":"transform","frame":{"frame_id":"unreal.world","basis_frame_id":"captured.viewport.session","dimension":3,"unit":"centimeter","basis_evidence_id":"basis:camera","observed_at":{"clock_id":"editor","tick":"135","rate_numerator":"60","rate_denominator":"1","state":"frozen"}},"components":["50","0","250","0","0","0","1","1","1","1"],"conversion_evidence_ids":["convert:camera-patch"]},
+          "camera_transform_mode": "absolute",
           "fov_degrees": 75,
           "view_mode": "wireframe",
           "realtime": false,

@@ -41,29 +41,7 @@ namespace
 		const QueryOwners::AudioGraph::FAudioGraphCandidate& Candidate)
 	{
 		const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-		Result->SetStringField(TEXT("target_ref"), Candidate.TargetRef);
-		Result->SetStringField(
-			TEXT("target_revision"), Candidate.TargetRevision);
 		Result->SetStringField(TEXT("name"), Candidate.Name);
-		Result->SetStringField(TEXT("kind"), Candidate.Kind);
-		Result->SetArrayField(
-			TEXT("supported_operations"),
-			StringValues(Candidate.SupportedOperations));
-		Result->SetStringField(
-			TEXT("input_contract"), Candidate.InputContract);
-		Result->SetStringField(
-			TEXT("placement_contract"), Candidate.PlacementContract);
-		Result->SetStringField(
-			TEXT("required_context"), Candidate.RequiredContext);
-		Result->SetStringField(
-			TEXT("binding_revision"), Candidate.BindingRevision);
-		if (Candidate.Kind == TEXT("metasound_node"))
-		{
-			Result->SetNumberField(
-				TEXT("major_version"), Candidate.MajorVersion);
-			Result->SetNumberField(
-				TEXT("minor_version"), Candidate.MinorVersion);
-		}
 		return Result;
 	}
 
@@ -72,7 +50,7 @@ namespace
 			Candidate)
 	{
 		const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-		Result->SetStringField(TEXT("id"), Candidate.Id);
+		Result->SetStringField(TEXT("name"), Candidate.Name);
 		return Result;
 	}
 
@@ -202,10 +180,10 @@ bool FUeAgentT40AudioCandidateBindingNormalizationTest::RunTest(
 	if (!TestTrue(
 			TEXT("the exact SoundNodeMixer candidate is queried"),
 			TryQueryAudioGraphCandidates(
-				*Cue, TEXT("SoundNodeMixer"), Query, QueryError, 64, 0))
+				*Cue, TEXT("SoundNodeMixer"), Query, QueryError))
 		|| !TestTrue(TEXT("the query returns a candidate"), !Query.Candidates.IsEmpty()))
 	{
-		AddError(QueryError.Code + TEXT(":") + QueryError.Detail);
+		AddError(QueryError.Code + TEXT(":") + QueryError.PublicMessage);
 		return false;
 	}
 	const FAudioGraphCandidate Candidate = Query.Candidates[0];
@@ -233,18 +211,18 @@ bool FUeAgentT40AudioCandidateBindingNormalizationTest::RunTest(
 		Node->HasField(TEXT("candidate")));
 
 	const TSharedRef<FJsonObject> Stale = AudioCandidateJson(Candidate);
-	Stale->SetStringField(TEXT("binding_revision"), TEXT("sha256:stale"));
+	const TSharedRef<FJsonObject> Select = MakeShared<FJsonObject>();
+	Select->SetStringField(TEXT("unsupported"), TEXT("value"));
+	Stale->SetObjectField(TEXT("select"), Select);
 	WorkspaceError.Reset();
 	TestFalse(
-		TEXT("a stale Audio candidate is rejected before mutation"),
+		TEXT("an unsupported Audio selector is rejected before mutation"),
 		TryNormalizeAudioGraphCandidateBindings(
 			Cue->GetPathName(),
 			AudioNativeParams(Stale, NodePath),
 			WorkspaceError));
-	TestEqual(
-		TEXT("the stale error is typed"),
-		WorkspaceError.GetCode(),
-		FString(TEXT("audio_graph_candidate_binding_stale")));
+	TestEqual(TEXT("the unsupported selector error is typed"), WorkspaceError.GetCode(),
+		FString(TEXT("audio_graph_candidate_selector_field_unsupported")));
 
 	WorkspaceError.Reset();
 	TestFalse(
@@ -296,11 +274,11 @@ bool FUeAgentT40RigCandidateAndRigVmUnitTest::RunTest(
 	if (!TestTrue(
 			TEXT("a current RigUnit candidate is queried"),
 			TryQueryAnimationRigGraphCandidates(
-				*Rig, TEXT("Add Spaces"), Query, QueryError, 64, 0))
+				*Rig, TEXT("Add Spaces"), Query, QueryError))
 		|| !TestTrue(TEXT("the RigUnit query returns a candidate"),
 			!Query.Candidates.IsEmpty()))
 	{
-		AddError(QueryError.Code + TEXT(":") + QueryError.Detail);
+		AddError(QueryError.Code + TEXT(":") + QueryError.PublicMessage);
 		return false;
 	}
 	const FAnimationRigGraphCandidate Candidate = Query.Candidates[0];
@@ -332,8 +310,6 @@ bool FUeAgentT40RigCandidateAndRigVmUnitTest::RunTest(
 		Edit->HasField(TEXT("semantic_id")));
 	const TSharedPtr<FJsonObject> NormalizedCandidate =
 		Value->GetObjectField(TEXT("candidate"));
-	TestEqual(TEXT("the exact candidate id is canonicalized"),
-		NormalizedCandidate->GetStringField(TEXT("id")), Candidate.Id);
 	TestEqual(TEXT("the native menu name is restored server-side"),
 		NormalizedCandidate->GetStringField(TEXT("name")), Candidate.Name);
 	TestFalse(TEXT("the minimal create input does not need a struct path"),
@@ -342,16 +318,18 @@ bool FUeAgentT40RigCandidateAndRigVmUnitTest::RunTest(
 		Value->HasField(TEXT("method")));
 
 	const TSharedRef<FJsonObject> Stale = RigCandidateJson(Candidate);
-	Stale->SetStringField(TEXT("id"), Candidate.Id + TEXT("-stale"));
+	const TSharedRef<FJsonObject> Select = MakeShared<FJsonObject>();
+	Select->SetStringField(TEXT("unsupported"), TEXT("value"));
+	Stale->SetObjectField(TEXT("select"), Select);
 	WorkspaceError.Reset();
 	TestFalse(
-		TEXT("an unknown Rig candidate id is rejected before mutation"),
+		TEXT("an unsupported Rig selector is rejected before mutation"),
 		TryNormalizeAnimationRigGraphCandidateBindings(
 			Rig->GetPathName(), RigNativeParams(Stale), WorkspaceError));
 	TestEqual(
-		TEXT("the Rig lookup error is typed"),
+		TEXT("the Rig selector error is typed"),
 		WorkspaceError.GetCode(),
-		FString(TEXT("animation_rig_graph_candidate_not_found")));
+		FString(TEXT("animation_rig_graph_candidate_selector_select_unsupported")));
 
 	FAnimationRigGraphNativeHook Hook;
 	FAnimationRigGraphNativeMutationReceipt Apply;
@@ -378,7 +356,7 @@ bool FUeAgentT40RigCandidateAndRigVmUnitTest::RunTest(
 	}
 	FAnimationRigGraphUnitMutation Unit;
 	Unit.NodeName = TEXT("T40Unit");
-	Unit.CandidateId = Candidate.Id;
+	Unit.CandidateName = Candidate.Name;
 	Unit.Position = FVector2D(120.0, -40.0);
 	TArray<FAnimationRigGraphUnitMutation> Units = {Unit};
 	if (!TestTrue(
@@ -523,7 +501,7 @@ bool FUeAgentT40RigIkContentGraphStructureReadbackTest::RunTest(
 			FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
 				*SourceRig, RigCapture, CaptureError)))
 	{
-		AddError(CaptureError.Code + TEXT(":") + CaptureError.Detail);
+		AddError(CaptureError.Code + TEXT(":") + CaptureError.PublicMessage);
 		return false;
 	}
 	const FUeAgentContentGraphItem* ChainItem =
@@ -612,7 +590,7 @@ bool FUeAgentT40RigIkContentGraphStructureReadbackTest::RunTest(
 			FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
 				*Retargeter, RetargetCapture, CaptureError)))
 	{
-		AddError(CaptureError.Code + TEXT(":") + CaptureError.Detail);
+		AddError(CaptureError.Code + TEXT(":") + CaptureError.PublicMessage);
 		return false;
 	}
 	const FUeAgentContentGraphItem* MappingItem =

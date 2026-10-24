@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -16,5 +18,5 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 	UEAGENTINTERFACE_API bool TryCreateTimelineAnimationDescriptorRegistry(
 		TSharedPtr<const UE::UAI::Contract::FUeAgentDescriptorRegistry>&
 			OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

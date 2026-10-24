@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "NetworkTransport/UeAgentNetworkTransport.h"
 
 #include "Templates/SharedPointer.h"
@@ -27,7 +29,7 @@ namespace UE::UAI::ServiceComposition::CommandService
 				IUeAgentRequestContextInvalidator,
 				ESPMode::ThreadSafe> ContextInvalidator,
 			TUniquePtr<FUeAgentCommandService>& OutService,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 		TSharedRef<
 			NetworkTransport::IUeAgentTransportRequestHandler,

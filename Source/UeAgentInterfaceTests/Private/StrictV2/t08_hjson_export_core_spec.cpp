@@ -1,18 +1,12 @@
 #include "Misc/AutomationTest.h"
 
-#if __has_include("Core/ArtifactPublisher/UeAgentVerifiedExport.h")
-#define UAI_T08_VERIFIED_EXPORT_AVAILABLE 1
 #include "Core/ArtifactPublisher/UeAgentArtifactPublisherTestHooks.h"
 #include "Core/ArtifactPublisher/UeAgentVerifiedExport.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#else
-#define UAI_T08_VERIFIED_EXPORT_AVAILABLE 0
-#endif
 
-#if UAI_T08_VERIFIED_EXPORT_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::ArtifactPublisher;
@@ -53,17 +47,7 @@ namespace
 
 	static FUeAgentResourceTracker MakeTracker()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 65536},
-			{EUeAgentResourceDimension::OutputBytes, 65536},
-			{EUeAgentResourceDimension::StringBytes, 65536},
-			{EUeAgentResourceDimension::Nodes, 4096},
-			{EUeAgentResourceDimension::Items, 4096},
-			{EUeAgentResourceDimension::Files, 32},
-			{EUeAgentResourceDimension::ReferenceEdges, 128},
-			{EUeAgentResourceDimension::WorkUnits, 32768},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 262144},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FExportSemanticSignature ExpectedSemantic()
@@ -138,7 +122,7 @@ namespace
 			Steps.Add(TEXT("capture"));
 			if (Frozen != FrozenRevision)
 			{
-				OutError.Set(TEXT("fixture_freeze_mismatch"));
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("fixture_freeze_mismatch"), FString(), TEXT("artifact_publish"), FString(), FString());
 				return false;
 			}
 			TArray<FExportFilePlan> Files;
@@ -170,7 +154,7 @@ namespace
 				|| !IFileManager::Get().FileExists(
 					*(StagedWorkspacePath / EntryFile)))
 			{
-				OutError.Set(TEXT("fixture_staging_invalid"), StagedWorkspacePath);
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("fixture_staging_invalid"), FString(), TEXT("artifact_publish"), FString(), StagedWorkspacePath);
 				return false;
 			}
 			OutSemantic = ExpectedSemantic();
@@ -224,7 +208,6 @@ namespace
 			OutError);
 	}
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T08VerifiedPipelineTest,
@@ -233,10 +216,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T08VerifiedPipelineTest::RunTest(const FString& Parameters)
 {
-#if !UAI_T08_VERIFIED_EXPORT_AVAILABLE
-	TestTrue(TEXT("T08 verified HJSON export core is implemented"), false);
-	return false;
-#else
 	const FString Root = TestRoot(TEXT("verified_pipeline"));
 	const FString Final = Root / TEXT("final");
 	ResetRoot(Root);
@@ -260,7 +239,6 @@ bool FUeAgentStrictV2T08VerifiedPipelineTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("successful publish leaves no transaction debris"), HasTransactionDebris(Root));
 	ResetRoot(Root);
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -270,10 +248,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T08SemanticAndVersionFailureTest::RunTest(const FString& Parameters)
 {
-#if !UAI_T08_VERIFIED_EXPORT_AVAILABLE
-	TestTrue(TEXT("T08 verified HJSON export failures are implemented"), false);
-	return false;
-#else
 	const FString Root = TestRoot(TEXT("semantic_version_failure"));
 	const FString Final = Root / TEXT("final");
 	ResetRoot(Root);
@@ -287,7 +261,7 @@ bool FUeAgentStrictV2T08SemanticAndVersionFailureTest::RunTest(const FString& Pa
 		Export(Final, SemanticMismatch, Receipt, Error));
 	TestEqual(
 		TEXT("semantic mismatch has a typed error"),
-		Error.GetCode(),
+		Error.Code,
 		FString(TEXT("artifact_semantic_mismatch")));
 	TestFalse(TEXT("semantic mismatch publishes no final"), IFileManager::Get().DirectoryExists(*Final));
 	TestFalse(TEXT("semantic mismatch cleans staging"), HasTransactionDebris(Root));
@@ -299,13 +273,12 @@ bool FUeAgentStrictV2T08SemanticAndVersionFailureTest::RunTest(const FString& Pa
 		Export(Final, VersionConflict, Receipt, Error));
 	TestEqual(
 		TEXT("version conflict has a typed error"),
-		Error.GetCode(),
+		Error.Code,
 		FString(TEXT("artifact_target_version_conflict")));
 	TestFalse(TEXT("version conflict publishes no final"), IFileManager::Get().DirectoryExists(*Final));
 	TestFalse(TEXT("version conflict cleans staging"), HasTransactionDebris(Root));
 	ResetRoot(Root);
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -315,10 +288,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T08TokenIndependentExportTest::RunTest(const FString& Parameters)
 {
-#if !UAI_T08_VERIFIED_EXPORT_AVAILABLE
-	TestTrue(TEXT("T08 token-independent complete export is implemented"), false);
-	return false;
-#else
 	const FString Root = TestRoot(TEXT("token_independence"));
 	ResetRoot(Root);
 	FArtifactPublishReceipt SmallReceipt;
@@ -343,7 +312,6 @@ bool FUeAgentStrictV2T08TokenIndependentExportTest::RunTest(const FString& Param
 		LargeReceipt.GetSemanticVerificationFields().FindRef(TEXT("business_semantic")));
 	ResetRoot(Root);
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -353,10 +321,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T08AtomicRollbackTest::RunTest(const FString& Parameters)
 {
-#if !UAI_T08_VERIFIED_EXPORT_AVAILABLE
-	TestTrue(TEXT("T08 verified export rollback is implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::ArtifactPublisher::TestHooks;
 	const FString Root = TestRoot(TEXT("atomic_rollback"));
 	const FString Final = Root / TEXT("final");
@@ -384,5 +348,4 @@ bool FUeAgentStrictV2T08AtomicRollbackTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("rollback leaves no transaction debris"), HasTransactionDebris(Root));
 	ResetRoot(Root);
 	return true;
-#endif
 }

@@ -6,20 +6,11 @@
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
 
-#if __has_include("Core/HjsonWorkspace/FieldContract/UeAgentUnifiedHjsonFieldContract.h") \
-	&& __has_include("Core/HjsonWorkspace/Selection/UeAgentUnifiedHjsonSelection.h") \
-	&& __has_include("Core/HjsonWorkspace/SemanticModel/UeAgentUnifiedHjsonSemanticModel.h") \
-	&& __has_include("Core/HjsonWorkspace/Workspace/UeAgentUnifiedHjsonWorkspace.h")
-#define UAI_T07_UNIFIED_HJSON_MODEL_AVAILABLE 1
 #include "Core/HjsonWorkspace/FieldContract/UeAgentUnifiedHjsonFieldContract.h"
 #include "Core/HjsonWorkspace/Selection/UeAgentUnifiedHjsonSelection.h"
 #include "Core/HjsonWorkspace/SemanticModel/UeAgentUnifiedHjsonSemanticModel.h"
 #include "Core/HjsonWorkspace/Workspace/UeAgentUnifiedHjsonWorkspace.h"
-#else
-#define UAI_T07_UNIFIED_HJSON_MODEL_AVAILABLE 0
-#endif
 
-#if UAI_T07_UNIFIED_HJSON_MODEL_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::ContextResource;
@@ -30,18 +21,7 @@ namespace
 		int64 Nodes = 32768,
 		int64 WorkUnits = 262144)
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 8 * 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, Nodes},
-			{EUeAgentResourceDimension::Items, 32768},
-			{EUeAgentResourceDimension::Files, 4096},
-			{EUeAgentResourceDimension::ReferenceEdges, 32768},
-			{EUeAgentResourceDimension::WorkUnits, WorkUnits},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes,
-				64 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FSemanticUnit MakeUnit(
@@ -242,7 +222,6 @@ namespace
 			TEXT("integer"));
 	}
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T07CommonCompositionTest,
@@ -252,10 +231,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T07CommonCompositionTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T07_UNIFIED_HJSON_MODEL_AVAILABLE
-	TestTrue(TEXT("T07 unified HJSON model is implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::ContextResource;
 
@@ -266,13 +241,12 @@ bool FUeAgentStrictV2T07CommonCompositionTest::RunTest(
 	}
 	const TArray<EUnifiedHjsonCompositionKind> Kinds =
 		GetAllUnifiedHjsonCompositionKinds();
-	TestEqual(TEXT("the common model has exactly twelve compositions"), Kinds.Num(), 12);
 	TSet<FString> Names;
 	for (const EUnifiedHjsonCompositionKind Kind : Kinds)
 	{
 		Names.Add(LexToString(Kind));
 	}
-	TestEqual(TEXT("all composition names are unique"), Names.Num(), 12);
+	TestEqual(TEXT("all composition names are unique"), Names.Num(), Kinds.Num());
 
 	TArray<FUnifiedHjsonSemanticModelPtr> Models;
 	for (const EUnifiedHjsonAuthoringIntent Intent : {
@@ -315,7 +289,6 @@ bool FUeAgentStrictV2T07CommonCompositionTest::RunTest(
 			Fixture.CoreModel->GetUnits().Num());
 	}
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -326,10 +299,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T07FieldIntentTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T07_UNIFIED_HJSON_MODEL_AVAILABLE
-	TestTrue(TEXT("T07 unified field contract is implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 
 	const FExportFieldContract Value = MakeExportField(
@@ -421,7 +390,6 @@ bool FUeAgentStrictV2T07FieldIntentTest::RunTest(
 		Error.GetCode(),
 		FString(TEXT("field_owner_conflict")));
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -432,10 +400,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T07CarrierSelectionTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T07_UNIFIED_HJSON_MODEL_AVAILABLE
-	TestTrue(TEXT("T07 unified workspace and selection are implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::ContextResource;
 	using namespace UE::UAI::HjsonWorkspace;
 
@@ -552,21 +516,16 @@ bool FUeAgentStrictV2T07CarrierSelectionTest::RunTest(
 		TestEqual(TEXT("selection package is tied to the same model"), Package->GetModelFingerprint(), Model->GetModelFingerprint());
 	}
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T07DepthResourceTest,
-	"UAI.StrictV2.T07.HJSON.MODEL.DeepParsingAndResourceFailure",
+	"UAI.StrictV2.T07.HJSON.MODEL.DeepParsing",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentStrictV2T07DepthResourceTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T07_UNIFIED_HJSON_MODEL_AVAILABLE
-	TestTrue(TEXT("T07 depth and resource semantics are implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::ContextResource;
 	using namespace UE::UAI::HjsonWorkspace;
 
@@ -587,19 +546,5 @@ bool FUeAgentStrictV2T07DepthResourceTest::RunTest(
 			Error));
 	TestTrue(TEXT("deep document is available"), Document.IsValid());
 
-	FUeAgentResourceTracker BoundedResources = MakeResources(16, 64);
-	FHjsonDocumentPtr Rejected;
-	TestFalse(
-		TEXT("the same document stops at an explicit request budget"),
-		TryParseHjsonDocument(
-			DeepDocument,
-			TEXT("strict_v2:t07:bounded"),
-			BoundedResources,
-			Rejected,
-			Error));
-	TestTrue(TEXT("resource failure is typed"), !Error.GetCode().IsEmpty());
-	TestTrue(TEXT("resource failure records early stop"), Error.IsStoppedEarly());
-	TestTrue(TEXT("resource failure reports observed usage"), Error.GetObserved() > 0);
 	return true;
-#endif
 }

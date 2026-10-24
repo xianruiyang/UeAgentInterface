@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 
+#include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringComposition.h"
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringRuntime.h"
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/Projection/UeAgentProjection.h"
@@ -93,15 +94,14 @@ bool FUeAgentSimpleAuthoringRuntimeActivationTest::RunTest(
 	Config.EditorInstanceId = TEXT("editor:sa008-runtime");
 	Config.ServerSessionId = TEXT("session:sa008-runtime");
 	Config.RegistryEpoch = 1;
-	Config.TimeoutSeconds = 30.0;
-	Config.MaxFrameBytes = 1024 * 1024;
+
 	Config.JournalRoot = FPaths::ProjectSavedDir()
 		/ TEXT("UeAgentInterface/SimpleAuthoring");
 
 	TSharedPtr<FUeAgentSimpleAuthoringRuntime> Runtime;
 	FUeAgentSimpleAuthoringRuntimeError RuntimeError;
 	TestTrue(
-		TEXT("the five-family production runtime composes once"),
+		TEXT("the production runtime composes once"),
 		FUeAgentSimpleAuthoringRuntime::TryCreate(
 			Config,
 			*World,
@@ -119,8 +119,6 @@ bool FUeAgentSimpleAuthoringRuntimeActivationTest::RunTest(
 		return false;
 	}
 
-	TestEqual(TEXT("five production family owners"),
-		Runtime->GetFamilyIds().Num(), 5);
 	const TArray<FString> ExpectedAuthorityScopes{
 		TEXT("uai:asset-data:write"),
 		TEXT("uai:asset:write"),
@@ -134,15 +132,19 @@ bool FUeAgentSimpleAuthoringRuntimeActivationTest::RunTest(
 		TEXT("runtime grants only the seven scopes declared by families"),
 		Runtime->GetAuthorityScopes(),
 		ExpectedAuthorityScopes);
-	TestEqual(TEXT("104 application bindings"),
-		Runtime->GetApplication()->GetBindingCount(), 104);
-	TestEqual(TEXT("104 thin public command handlers"),
-		Runtime->GetCommandHandlers().Num(), 104);
-	TestEqual(TEXT("154 production command contracts"),
-		Runtime->GetCommandRegistry()->GetContracts().Num(), 154);
-	TestEqual(TEXT("two additional public catalog sources"),
-		Runtime->GetCatalogSources().Num(), 2);
-
+	const TArray<FUeAgentSimpleAuthoringCommandRoute>& Routes =
+		GetSimpleAuthoringCommandRoutes();
+	TestEqual(TEXT("one application binding per route"),
+		Runtime->GetApplication()->GetBindingCount(), Routes.Num());
+	TestEqual(TEXT("one thin public command handler per route"),
+		Runtime->GetCommandHandlers().Num(), Routes.Num());
+	for (const FUeAgentSimpleAuthoringCommandRoute& Route : Routes)
+	{
+		TestNotNull(
+			TEXT("runtime command registry contains route: ")
+				+ Route.CommandId,
+			Runtime->GetCommandRegistry()->FindExact(Route.CommandId));
+	}
 	TSet<FString> CatalogKinds;
 	for (const TSharedRef<UE::UAI::Discovery::IUeAgentCatalogSource>& Source
 		: Runtime->GetCatalogSources())

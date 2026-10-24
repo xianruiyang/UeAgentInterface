@@ -1,8 +1,9 @@
 # T38 ModelingGeometry Operation Authority
 
-The active `modeling-geometry` contribution owns exactly the 32 mesh attribute,
+The `modeling-geometry` contribution owns its mesh attribute,
 collision, primitive, topology and Modeling Mode command identities assigned to
-`T38-MODELING-GEOMETRY-OPERATION` in `UAI_COMMAND_TASK_INVENTORY.json`. Every
+the domain. The central lifecycle policy removes HJSON-owned material-slot and
+persisted pivot mutations from the normal active surface. Every
 frozen contract reports `modeling-geometry-owner`; no namespace or catch-all
 fallback adds commands.
 
@@ -20,26 +21,28 @@ required by the selected descriptor. No success is emitted before all required
 stages finish. A prewrite rejection leaves no residue, and `state_unknown` is
 not safe for automatic replay.
 
-`mesh.modeling_session` is the single public successor for Modeling Mode
-lifecycle, active-tool observation, tool properties/actions, mesh selection,
-save, actor-mesh replacement and surface snapping that are not already owned by
-an exact current mesh command. Its required `action` discriminator is one of
+`mesh.modeling_session` owns only Modeling Mode lifecycle, active-tool
+observation, tool properties/actions, session-native actor selection, mesh
+selection mode and screen selection, and mesh save. Its required `action`
+discriminator is one of
 `activate`, `observe_tool`, `start_tool`, `set_tool_property`,
-`invoke_tool_action`, `accept_tool`, `cancel_tool`, `observe_selection`,
-`set_actor_selection`, `set_selection_mode`, `clear_mesh_selection`,
-`select_via_screen`, `select_via_world_ray`, `replace_actor_mesh`,
-`save_mesh_asset`, or `snap_to_surface`. The optional `target`, `input`,
+`invoke_tool_action`, `accept_tool`, `cancel_tool`, `set_actor_selection`,
+`set_selection_mode`, `clear_mesh_selection`, `select_via_screen`, or
+`save_mesh_asset`. Read selection through `world.selection`; use
+`mesh.element.select_by_ray` and `world.object_snap_to_surface` directly for ray
+selection and surface snapping. Actor-mesh replacement is expressed as HJSON
+desired state. The optional `target`, `input`,
 `context`, and `projection` objects carry only action-specific data. Unknown
 actions and missing required action inputs fail explicitly; historical
 `modeling_*` IDs are not aliases.
 
 ## Public SDK and CLI
 
-The final manifest projects all 32 identities into the default `mesh`
-namespace. Callers import only `uai`, connect from one complete Connection TOML,
+The final manifest projects active identities into their generated namespaces.
+Callers import only `uai`, use `uai.connect_project()` for the local project,
 and call generated methods such as `client.mesh.primitive_box_create(...)` and
 `client.mesh.topology_mirror(...)`. Generic `client.execute(...)`, exact
-`client.execute_exact(...)`, and `uai-cli exec` reuse the same generated catalog,
+`client.execute_exact(...)`, and `ueagentinterfacecmd exec` reuse the same generated catalog,
 Client, Protocol and Transport. No T38-specific Python module, command/hash
 table, parameter mapper, retry, persistence, rollback or readback path remains
 authoritative.
@@ -47,21 +50,19 @@ authoritative.
 ```python
 result = client.mesh.modeling_session(
     action="observe_tool",
-    target={},
-    input={},
-    context={},
-    projection={},
 )
 ```
 
 ```text
-uai-cli --connection connection.toml exec mesh.primitive.box.create --params-json {"anchor":"base_center","placement":{"semantic_frame_id":"uai.world","write_frame_id":"ue.world","read_frame_id":"ue.world","verify_frame_id":"ue.world","unit":"centimeter","translation":[125,-50,30],"rotation_quaternion_xyzw":[0,0,0,1],"scale":[1,1,1],"basis_evidence":"UE left-handed Z-up centimeters","conversion_chain":"identity"},"size_cm":[120,80,60],"subdivisions":[2,2,1],"target_ref":"UAI/StrictV2/T38/Box_Default_r58"}
+ueagentinterfacecmd exec mesh.primitive.box.create --params-json '{"anchor":"base_center","placement":{"semantic_frame_id":"uai.world","write_frame_id":"ue.world","read_frame_id":"ue.world","verify_frame_id":"ue.world","unit":"centimeter","translation":[125,-50,30],"rotation_quaternion_xyzw":[0,0,0,1],"scale":[1,1,1],"basis_evidence":"UE left-handed Z-up centimeters","conversion_chain":"identity"},"size_cm":[120,80,60],"subdivisions":[2,2,1],"target_ref":"UAI/StrictV2/T38/Box_Default"}'
 ```
 
-Use `client.query.command_search("create mesh box", limit=5)` and then
-`client.query.command_detail(command_id, contract_hash)` to obtain the exact
-schema, named SDK/CLI forms, owner, failure catalog and tutorial references.
-Search is the only fuzzy step; execute the selected ID and hash unchanged.
+For unknown command names or parameter shapes, follow [public command discovery](../../../../UeAgentInterfaceCMD/docs/PYTHON_SDK_AND_CLI.md#command-discovery).
+Search matches only positive tokens from command IDs, registered keywords and
+registered synonyms; call the selected generated method with business fields.
+Existing-carrier commands accept `target_ref`; binary operations also accept
+`operand_ref` and its transform. Target and operand revisions are derived and
+frozen by the server owner and are neither public parameters nor result fields.
 
 ## Persisted Modeling artifact readback
 
@@ -70,24 +71,25 @@ source asset that the user may still have open. For a `static_mesh_asset`
 carrier it consumes the exact package-header artifact owned by the operation
 receipt, remaps that `.uasset` into a unique transient package namespace, and
 runs the same semantic state observer against that isolated instance. A
-successful canonical C9 outcome therefore carries an evidence identity that
-starts with `modeling:persisted-package-instance:`. Re-resolving the live source
-object is not sufficient persisted-readback evidence.
+successful canonical C9 outcome records hidden persisted-package evidence.
+Re-resolving the live source object is not sufficient persisted-readback
+evidence, but that machine identity is not projected to the ordinary result.
 
 For world-package carriers the same production oracle consumes the Map and any
 External Actor artifacts owned by the operation receipt, loads them into an
 isolated transient World, and unloads that snapshot after observation. An
-existing `dynamic_mesh_actor` baseline carries a durable Actor GUID and resolves
-the exact snapshot Actor by that GUID; primitive profiles resolve their unique
+existing `dynamic_mesh_actor` baseline carries a hidden stable actor locator and
+resolves the exact snapshot Actor with it; primitive profiles resolve their unique
 target label through the same isolated World catalog and state reader. A
-successful world-carrier C9 outcome starts its evidence identity with
-`modeling:persisted-world-instance:`. Neither branch falls back to a live source
-object in the default production composition.
+successful world-carrier C9 outcome records hidden persisted-world evidence.
+Neither branch falls back to a live source object in the default production
+composition.
 
 An explicitly supplied persisted reference resolver remains owned by the
 custom or test composition that supplied it. The production runtime leaves
 that override unset and uses the artifact-aware oracle as the single default
-owner. Forged and stale carrier revisions are rejected before durable mutation.
+owner. Changed carriers are rejected by server-owned baseline and prewrite
+checks before durable mutation; callers do not supply carrier revisions.
 
 The current active-registry product proof covers 23 non-normals command
 identities on owned `UStaticMesh` assets: the six UV, material-slot and
@@ -109,13 +111,10 @@ by planning; the shared product runner proves target revision advancement and
 persisted target geometry while the operand file, geometry and revision remain
 unchanged.
 
-Voxel boolean maps `voxel_size_cm` to the operator's major-axis voxel count,
-applies the operator result transform before target writeback and enforces a
-maximum of 256 voxels per major axis. Finer requests fail with
-`modeling_geometry_voxel_resolution_limit_exceeded` before carrier mutation.
-The public rejection proof verifies exact errors and unchanged file hashes,
-dirty flags, live/reloaded geometry and revisions for both this limit and an
-insufficient weld tolerance. Simplify, remesh, selection, operand and voxel
+Voxel boolean maps `voxel_size_cm` to the operator's major-axis voxel count and
+applies the operator result transform before target writeback. The computed resolution must be finite and fit the
+native integer representation. Insufficient weld tolerance remains a geometric
+failure with unchanged carrier state. Simplify, remesh, selection, operand and voxel
 policies remain owned by shared native helpers rather than test-only adapters.
 
 For `ADynamicMeshActor`, simplify now solves on a transient candidate and commits
@@ -148,7 +147,15 @@ matrix or transfer the DynamicMeshActor oracle to StaticMesh.
 Two active-registry `ADynamicMeshActor` topology consumers now prove receipt-owned
 persisted-World C9 evidence, source-World unload/reload, exact Actor recovery and
 cleanup. `mesh.topology.subdivide` proves twelve-to-forty-eight-triangle
-persistence. `mesh.topology.simplify` covers ratio, tolerance and count targets,
+persistence at level 1. `levels` is passed to the selected native tessellator:
+both UE 5.6 `uniform` and `pn_triangles` use `FUniformTessellate` once and produce
+`(levels + 1)^2` triangles per input triangle. PN subsequently displaces the
+vertices; its header's recursive wording does not describe repeated four-way
+subdivision in this version. The shared ExistingEdit oracle for StaticMesh and
+DynamicMesh carriers compares the independently persisted triangle count; the count is
+also a named verification field so a mismatch reports expected and actual values.
+Level-1 evidence alone cannot distinguish this rule from an incorrect `4^levels` rule.
+`mesh.topology.simplify` covers ratio, tolerance and count targets,
 open-boundary preserved/free policies, stable source/reload revisions and the
 atomic unreachable-target rejection above.
 All seven `mesh.primitive.*.create` identities now have their own public-product

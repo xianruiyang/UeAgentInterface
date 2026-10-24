@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "NetworkTransport/UeAgentNetworkTransport.h"
 
@@ -13,5 +15,5 @@ namespace UE::UAI::ServiceComposition::Query
 		TSharedPtr<
 			NetworkTransport::IUeAgentTransportRequestHandler,
 			ESPMode::ThreadSafe>& OutIngress,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

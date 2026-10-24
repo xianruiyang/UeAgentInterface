@@ -5,6 +5,7 @@
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringObjectApplyProvider.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceDependencyGraph.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -37,12 +38,11 @@ namespace
 		Result.ReflectionBaseline.UnknownFieldPolicy = TEXT("reject");
 		Result.ReflectionBaseline.ExternalReferencePolicy = TEXT("replace_reference_only");
 		Result.ReflectionBaseline.OwnedObjectPolicy = TEXT("create_or_locate_with_real_outer_then_recurse");
-		Result.ReflectionBaseline.RuntimeLimitsSource = TEXT("shared_runtime_limits");
 		Result.PropertyPayload.Mode = TEXT("reflection");
 		Result.PropertyPayload.PropertyPathField = TEXT("property_path");
 		Result.PropertyPayload.ValueField = TEXT("value");
 		Result.PropertyPayload.OptionalAssertionFields = {
-			TEXT("value_kind"), TEXT("struct_path"), TEXT("enum_path"), TEXT("element_type"),
+			TEXT("kind"), TEXT("struct_path"), TEXT("enum_path"), TEXT("element_type"),
 			TEXT("key_type"), TEXT("mapped_type"), TEXT("inner_type"), TEXT("fixed_length"), TEXT("allowed_class")
 		};
 		Result.PropertyPayload.OmittedPatchFieldPolicy = TEXT("preserve_current");
@@ -131,9 +131,11 @@ namespace
 	class FDirectLifecycleState final : public IReflectionOperationLifecycleState
 	{
 	public:
-		FDirectLifecycleState(FString InTargetKey, FReflectionRoot InRoot)
+		FDirectLifecycleState(FString InTargetKey, FReflectionRoot InRoot,
+			TArray<UeAgentAuthoringObjectApply::FPropertyIntent>& InIntent)
 			: TargetKey(MoveTemp(InTargetKey))
 			, Root(MoveTemp(InRoot))
+			, Intent(InIntent)
 		{
 		}
 
@@ -153,17 +155,21 @@ namespace
 			TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
 			FOperationFailure& OutFailure) const override { OutFailure = FOperationFailure(); return true; }
 		virtual bool Rollback(FOperationFailure& OutFailure) override { OutFailure = FOperationFailure(); return true; }
+		virtual void RetainPropertyIntent(const UeAgentAuthoringObjectApply::FPropertyIntent& Value) override { if (!Value.IsEmpty()) Intent.Add(Value); }
 
 	private:
 		FString TargetKey;
 		FReflectionRoot Root;
+		TArray<UeAgentAuthoringObjectApply::FPropertyIntent>& Intent;
 	};
 
 	class FDirectLifecycle final : public IReflectionOperationLifecycle
 	{
 	public:
-		explicit FDirectLifecycle(FReflectionRoot InRoot)
+		explicit FDirectLifecycle(FReflectionRoot InRoot,
+			TArray<UeAgentAuthoringObjectApply::FPropertyIntent>& InIntent)
 			: Root(MoveTemp(InRoot))
+			, Intent(InIntent)
 		{
 		}
 
@@ -174,24 +180,45 @@ namespace
 		{
 			OutState.Reset();
 			OutFailure = FOperationFailure();
-			FString TargetKey;
-			if (!Request.IsValid()
-				|| Request.Input->RequestedOperation != EOperation::Update
-				|| !Request.Input->Target.IsValid()
-				|| !Request.Input->Target->TryGetStringField(TEXT("path"), TargetKey)
-				|| TargetKey.IsEmpty()
-				|| !Root.IsValid())
+			auto Fail = [&](const TCHAR* Reason, const TCHAR* Path)
 			{
-				OutFailure.ErrorCode = TEXT("direct_reflection_lifecycle_invalid");
-				OutFailure.ErrorDetail = OutFailure.ErrorCode;
+				OutFailure.Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(
+					TEXT("direct_reflection_lifecycle_invalid"), Reason, TEXT("preflight"));
+				OutFailure.Diagnostic.PropertyPath = Path;
+				OutFailure.Diagnostic.TargetPath = Root.OwnerPath;
+				return false;
+			};
+			if (!Request.Contract) return Fail(TEXT("Direct property apply preparation has no input contract."), TEXT("request.contract"));
+			if (!Request.Unit) return Fail(TEXT("Direct property apply preparation has no workspace unit."), TEXT("request.unit"));
+			if (!Request.Input) return Fail(TEXT("Direct property apply preparation has no prepared input."), TEXT("request.input"));
+			if (Request.Input->RequestedOperation != EOperation::Update)
+			{
+				Fail(TEXT("Direct property apply only supports the update operation."), TEXT("operation"));
+				OutFailure.Diagnostic.ActualValue = MakeShared<FJsonValueString>(OperationToString(Request.Input->RequestedOperation));
+				OutFailure.Diagnostic.Source.JsonPath = TEXT("/operation");
+				OutFailure.Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("update"));
 				return false;
 			}
-			OutState = MakeUnique<FDirectLifecycleState>(MoveTemp(TargetKey), Root);
+			if (!Request.Input->Target.IsValid())
+				return Fail(TEXT("Direct property apply requires a target object."), TEXT("target"));
+			FString TargetKey;
+			if (!Request.Input->Target->TryGetStringField(TEXT("path"), TargetKey) || TargetKey.IsEmpty())
+			{
+				Fail(TEXT("Direct property apply requires a non-empty target path string."), TEXT("target.path"));
+				OutFailure.Diagnostic.Source.JsonPath = TEXT("/target/path");
+				OutFailure.Diagnostic.ActualValue = Request.Input->Target->Values.FindRef(TEXT("path"));
+				OutFailure.Diagnostic.ActualValuePresent = Request.Input->Target->HasField(TEXT("path"));
+				return false;
+			}
+			if (!Root.IsValid())
+				return Fail(TEXT("The object or struct receiving the property patch is unavailable."), TEXT("target"));
+			OutState = MakeUnique<FDirectLifecycleState>(MoveTemp(TargetKey), Root, Intent);
 			return true;
 		}
 
 	private:
 		FReflectionRoot Root;
+		TArray<UeAgentAuthoringObjectApply::FPropertyIntent>& Intent;
 	};
 
 	bool ApplyPatch(
@@ -207,8 +234,9 @@ namespace
 		if (!Root.IsValid())
 		{
 			OutResult.Phase = TEXT("preflight");
-			OutResult.ErrorCode = TEXT("direct_reflection_root_invalid");
-			OutResult.ErrorDetail = OutResult.ErrorCode;
+			OutResult.Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("direct_reflection_root_invalid"),
+				TEXT("The object or struct receiving the property patch is unavailable."), TEXT("preflight"));
+			OutResult.Diagnostic.TargetPath = Root.OwnerPath;
 			return false;
 		}
 		if (PropertyDescriptors.IsEmpty())
@@ -217,10 +245,16 @@ namespace
 			OutResult.Phase = TEXT("complete");
 			return true;
 		}
+		// Capture sources while descriptor identities still belong to the caller's
+		// scope. The projection below keeps field paths and array order.
+		auto OriginalDocument = MakeShared<FJsonObject>();
+		OriginalDocument->SetArrayField(TEXT("properties"), PropertyDescriptors);
+		auto OriginalSources = UeAgentAuthoringDiagnostics::FScopedSourceLocations::CaptureProjection(*OriginalDocument);
 		TArray<TSharedPtr<FJsonValue>> ApplyDescriptors;
 		ApplyDescriptors.Reserve(PropertyDescriptors.Num());
-		for (const TSharedPtr<FJsonValue>& DescriptorValue : PropertyDescriptors)
+		for (int32 Index = 0; Index < PropertyDescriptors.Num(); ++Index)
 		{
+			const auto& DescriptorValue = PropertyDescriptors[Index];
 			const TSharedPtr<FJsonObject> ExportDescriptor =
 				DescriptorValue.IsValid() && DescriptorValue->Type == EJson::Object
 					? DescriptorValue->AsObject()
@@ -230,8 +264,18 @@ namespace
 			if (!ApplyDescriptor.IsValid())
 			{
 				OutResult.Phase = TEXT("decode");
-				OutResult.ErrorCode = TEXT("direct_property_descriptor_invalid");
-				OutResult.ErrorDetail = OutResult.ErrorCode;
+				const FString Pointer = FString::Printf(TEXT("/properties/%d"), Index)
+					+ (!ExportDescriptor ? TEXT("") : !ExportDescriptor->HasTypedField<EJson::String>(TEXT("property_path"))
+						? TEXT("/property_path") : TEXT("/value"));
+				OutResult.Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("direct_property_descriptor_invalid"),
+					!ExportDescriptor ? TEXT("A property patch descriptor must be an object.")
+						: !ExportDescriptor->HasTypedField<EJson::String>(TEXT("property_path"))
+							? TEXT("A property patch descriptor requires a string property_path.")
+							: TEXT("A property patch descriptor requires a value field."), TEXT("preflight"));
+				OutResult.Diagnostic.Source = UeAgentAuthoringDiagnostics::FScopedSourceLocations::ResolveProjection(OriginalSources, Pointer);
+				if (OutResult.Diagnostic.Source.bCommandInput) OutResult.Diagnostic.SourceKind = TEXT("command_input");
+				if (OutResult.Diagnostic.Source.JsonPath.IsEmpty() && OutResult.Diagnostic.Source.InternalJsonPath.IsEmpty())
+					OutResult.Diagnostic.Source.JsonPath = Pointer;
 				return false;
 			}
 			ApplyDescriptors.Add(MakeShared<FJsonValueObject>(ApplyDescriptor));
@@ -241,17 +285,16 @@ namespace
 		const UeAgentApplyWorkspaceContract::FContract WorkspaceContract = MakeWorkspaceContract();
 		UeAgentApplyInputContract::FRegistry InputContracts;
 		UeAgentApplyInputContract::ERegistrationResult InputRegistration;
-		FString RegistrationError;
+		UE::UAI::Contract::FDiagnostic RegistrationError;
 		if (!InputContracts.RegisterContract(InputContract, InputRegistration, RegistrationError))
 		{
 			OutResult.Phase = TEXT("preflight");
-			OutResult.ErrorCode = RegistrationError;
-			OutResult.ErrorDetail = RegistrationError;
+			OutResult.Diagnostic = RegistrationError;
 			return false;
 		}
 
 		FProviderRegistry Providers;
-		const TSharedRef<IReflectionOperationLifecycle> Lifecycle = MakeShared<FDirectLifecycle>(Root);
+		const TSharedRef<IReflectionOperationLifecycle> Lifecycle = MakeShared<FDirectLifecycle>(Root, OutResult.PropertyIntents);
 		const TSharedRef<IApplyProvider> Provider = MakeShared<FReflectionApplyProvider>(
 			DirectProviderId,
 			Lifecycle,
@@ -260,8 +303,7 @@ namespace
 		if (!Providers.RegisterProvider(Provider, ProviderRegistration, RegistrationError))
 		{
 			OutResult.Phase = TEXT("preflight");
-			OutResult.ErrorCode = RegistrationError;
-			OutResult.ErrorDetail = RegistrationError;
+			OutResult.Diagnostic = RegistrationError;
 			return false;
 		}
 
@@ -284,6 +326,8 @@ namespace
 		Unit.Presence = UeAgentAuthoringWorkspaceRouter::EUnitPresence::Present;
 		Unit.Action = UeAgentAuthoringWorkspaceRouter::EUnitAction::Apply;
 		Unit.Document = Document;
+		Unit.ResolveOriginalSource = [Sources = MoveTemp(OriginalSources)](const FString& Pointer)
+			{ return UeAgentAuthoringDiagnostics::FScopedSourceLocations::ResolveProjection(Sources, Pointer); };
 		Unit.Provenance.bVirtual = true;
 		Unit.Provenance.SourceUnit = TEXT("primary");
 
@@ -304,8 +348,7 @@ namespace
 			GraphFailure))
 		{
 			OutResult.Phase = TEXT("preflight");
-			OutResult.ErrorCode = GraphFailure.ErrorCode;
-			OutResult.ErrorDetail = GraphFailure.ErrorDetail;
+			OutResult.Diagnostic = GraphFailure.Diagnostic;
 			return false;
 		}
 
@@ -324,23 +367,10 @@ namespace
 			ApplyResult);
 		if (!bApplied)
 		{
-			const bool bPreflightFailure = !ApplyResult.Preflight.IsReady();
-			OutResult.Phase = bPreflightFailure ? TEXT("preflight") : ApplyResult.Execution.Phase;
-			OutResult.ErrorCode = bPreflightFailure
-				? ApplyResult.Preflight.CauseCode
-				: ApplyResult.Execution.CauseCode;
-			if (OutResult.ErrorCode.IsEmpty())
-			{
-				OutResult.ErrorCode = bPreflightFailure
-					? ApplyResult.Preflight.ErrorCode
-					: ApplyResult.Execution.ErrorCode;
-			}
-			OutResult.ErrorDetail = bPreflightFailure
-				? ApplyResult.Preflight.ErrorDetail
-				: ApplyResult.Execution.ErrorDetail;
-			OutResult.PropertyPath = bPreflightFailure
-				? ApplyResult.Preflight.Diagnostic.PropertyPath
-				: ApplyResult.Execution.Diagnostic.PropertyPath;
+			FApplyFailureProjection Failure;
+			TryProjectApplyFailure(ApplyResult, Failure);
+			OutResult.Phase = Failure.Phase;
+			OutResult.Diagnostic = Failure.Diagnostic;
 			OutResult.bRollbackAttempted = ApplyResult.Execution.bRollbackAttempted;
 			OutResult.bRollbackSucceeded = ApplyResult.Execution.bRollbackSucceeded;
 			return false;

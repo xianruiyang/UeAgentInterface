@@ -1,5 +1,7 @@
 #include "DomainAdapters/NiagaraCompound/UeAgentNiagaraCompoundNativeHook.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "DomainAdapters/NiagaraCompound/UeAgentNiagaraCompoundDiscovery.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -8,11 +10,13 @@
 #include "Domains/Niagara/UeAgentNiagaraStackValidation.h"
 #include "EdGraph/EdGraphPin.h"
 #include "Misc/PackageName.h"
+#include "NiagaraCommon.h"
 #include "NiagaraEmitter.h"
 #include "NiagaraNodeFunctionCall.h"
 #include "NiagaraScript.h"
 #include "NiagaraSystem.h"
 #include "UObject/Package.h"
+#include "UObject/Class.h"
 
 namespace UE::UAI::DomainAdapters::NiagaraCompound
 {
@@ -30,6 +34,84 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 		const FString CatalogKind(TEXT("uai_niagara_compound"));
 		const FString CatalogSourceId(TEXT("uai-niagara-compound-catalog"));
 		const FString ReadPortId(TEXT("uai-niagara-compound-read"));
+
+		Contract::FDiagnostic NativeCompoundFact(const TCHAR* Code, const TCHAR* Reason,
+			const FString& Path, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const FString& InputName = FString(), const FString& Stage = TEXT("niagara_capture"))
+		{
+			auto Error = Contract::FDiagnostic::Failure(Code, Reason, Stage);
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Path;
+			Error.CandidateName = InputName;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValuePresent = Expected.IsValid();
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
+		bool NativeCaptureFailure(Contract::FDiagnostic& Error, const FString& InputName, const FString& Path,
+			const FString& Target = FString())
+		{
+			TFunction<void(Contract::FDiagnostic&)> Supplement = [&](Contract::FDiagnostic& Item)
+			{
+				if (Item.CandidateName.IsEmpty()) Item.CandidateName = InputName;
+				if (Item.PropertyPath.IsEmpty()) Item.PropertyPath = Path;
+				if (Item.SemanticPointer.IsEmpty()) Item.SemanticPointer = Path;
+				if (Item.SourceKind.IsEmpty()) Item.SourceKind = TEXT("native_result");
+				if (Item.TargetPath.IsEmpty()) Item.TargetPath = Target;
+				for (auto& Child : Item.Diagnostics) Supplement(Child);
+				if (Item.PublicCause)
+				{
+					auto Cause = MakeShared<Contract::FDiagnostic>(*Item.PublicCause);
+					Supplement(*Cause);
+					Item.PublicCause = MoveTemp(Cause);
+				}
+			};
+			Supplement(Error);
+			return false;
+		}
+
+		TSharedPtr<FJsonValue> NativeJsonFact(const TSharedPtr<FJsonValue>& Value)
+		{
+			if (!Value.IsValid() || (Value->Type != EJson::Object && Value->Type != EJson::Array)) return Value;
+			const TSharedRef<FJsonObject> Shape = MakeShared<FJsonObject>();
+			Shape->SetStringField(TEXT("kind"), Value->Type == EJson::Object ? TEXT("object") : TEXT("array"));
+			Shape->SetNumberField(TEXT("count"), Value->Type == EJson::Object ? Value->AsObject()->Values.Num() : Value->AsArray().Num());
+			return MakeShared<FJsonValueObject>(Shape);
+		}
+
+		TSharedPtr<FJsonValue> NativeCanonicalFact(const FUeAgentCanonicalValue* Value)
+		{
+			if (!Value) return nullptr;
+			switch (Value->GetKind())
+			{
+			case EUeAgentValueKind::Null: return MakeShared<FJsonValueNull>();
+			case EUeAgentValueKind::Boolean: return MakeShared<FJsonValueBoolean>(Value->GetBoolean());
+			case EUeAgentValueKind::String: return MakeShared<FJsonValueString>(Value->GetText());
+			default: break;
+			}
+			const TSharedRef<FJsonObject> Shape = MakeShared<FJsonObject>();
+			const TCHAR* Kind = TEXT("unknown");
+			switch (Value->GetKind())
+			{
+			case EUeAgentValueKind::Null: Kind = TEXT("null"); break;
+			case EUeAgentValueKind::Boolean: Kind = TEXT("boolean"); break;
+			case EUeAgentValueKind::String: Kind = TEXT("string"); break;
+			case EUeAgentValueKind::Integer: Kind = TEXT("integer"); break;
+			case EUeAgentValueKind::Decimal: Kind = TEXT("decimal"); break;
+			case EUeAgentValueKind::Array: Kind = TEXT("array"); break;
+			case EUeAgentValueKind::Object: Kind = TEXT("object"); break;
+			case EUeAgentValueKind::Temporal: Kind = TEXT("temporal"); break;
+			case EUeAgentValueKind::Spatial: Kind = TEXT("spatial"); break;
+			}
+			Shape->SetStringField(TEXT("kind"), Kind);
+			if (Value->GetKind() == EUeAgentValueKind::Integer || Value->GetKind() == EUeAgentValueKind::Decimal)
+				Shape->SetStringField(TEXT("lexeme"), Value->GetLexeme());
+			if (Value->GetKind() == EUeAgentValueKind::Array) Shape->SetNumberField(TEXT("count"), Value->GetArrayItems().Num());
+			if (Value->GetKind() == EUeAgentValueKind::Object) Shape->SetNumberField(TEXT("count"), Value->GetObjectItems().Num());
+			return MakeShared<FJsonValueObject>(Shape);
+		}
 
 		class FCanonicalStateHasher final
 		{
@@ -288,7 +370,8 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			const FString& Text,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FUeAgentGenericReadError& OutError)
+			FUeAgentGenericReadError& OutError,
+			const FString& Path)
 		{
 			FUeAgentCanonicalValuePtr Value;
 			FUeAgentStateSemanticError Error;
@@ -298,12 +381,9 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					Value,
 					Error))
 			{
-				OutError = {
-					Error.Code,
-					TEXT("niagara_compound_native_capture"),
-					Error.Detail,
-				};
-				return false;
+				OutError = MoveTemp(Error);
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TEXT("niagara_compound_native_capture");
+				return NativeCaptureFailure(OutError, FString(), Path);
 			}
 			OutValue = MoveTemp(Value);
 			return true;
@@ -314,7 +394,8 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FUeAgentGenericReadError& OutError,
-			const FString& Subject)
+			const FString& Subject,
+			const FString& Path)
 		{
 			FUeAgentStateSemanticError Error;
 			if (!FUeAgentCanonicalValue::TryArray(
@@ -323,12 +404,9 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					OutValue,
 					Error))
 			{
-				OutError = {
-					Error.Code,
-					Subject,
-					Error.Detail,
-				};
-				return false;
+				OutError = MoveTemp(Error);
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
+				return NativeCaptureFailure(OutError, Subject, Path);
 			}
 			return true;
 		}
@@ -339,7 +417,8 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FUeAgentGenericReadError& OutError,
-			const FString& Subject)
+			const FString& Subject,
+			const FString& Path)
 		{
 			FUeAgentStateSemanticError Error;
 			if (!FUeAgentCanonicalValue::TryObject(
@@ -348,12 +427,9 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					OutValue,
 					Error))
 			{
-				OutError = {
-					Error.Code,
-					Subject,
-					Error.Detail,
-				};
-				return false;
+				OutError = MoveTemp(Error);
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
+				return NativeCaptureFailure(OutError, Subject, Path);
 			}
 			return true;
 		}
@@ -363,7 +439,8 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			const FString& ModeText,
 			FUeAgentResourceTracker& Resources,
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>>& OutFields,
-			FUeAgentGenericReadError& OutError)
+			FUeAgentGenericReadError& OutError,
+			const FString& Path)
 		{
 			FUeAgentCanonicalValuePtr Kind;
 			FUeAgentCanonicalValuePtr Name;
@@ -375,24 +452,24 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					TEXT("niagara_input"),
 					Resources,
 					Kind,
-					OutError)
+					OutError, Path + TEXT("/kind"))
 				|| !TryString(
 					Input.FullInputName,
 					Resources,
 					Name,
-					OutError)
+					OutError, Path + TEXT("/input_name"))
 				|| !TryString(
 					TypeId.IsEmpty() ? TEXT("unknown") : TypeId,
 					Resources,
 					Type,
-					OutError)
+					OutError, Path + TEXT("/type_id"))
 				|| !TryString(
 					ModeText,
 					Resources,
 					Mode,
-					OutError))
+					OutError, Path + TEXT("/mode")))
 			{
-				return false;
+				return NativeCaptureFailure(OutError, Input.FullInputName, Path);
 			}
 			OutFields = {
 				{TEXT("kind"), Kind.ToSharedRef()},
@@ -407,15 +484,14 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			const FResolvedModuleInput& Input,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FUeAgentGenericReadError& OutError)
+			FUeAgentGenericReadError& OutError,
+			const FString& Path)
 		{
 			if (!Input.VisiblePin)
 			{
-				OutError = {
-					TEXT("niagara_compound_input_pin_missing"),
-					Input.FullInputName,
-					TEXT("literal input has no readable pin"),
-				};
+				OutError = NativeCompoundFact(TEXT("niagara_compound_input_pin_missing"),
+					TEXT("The literal Niagara input has no readable native pin."), Path + TEXT("/literal/pin_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Input.FullInputName);
 				return false;
 			}
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields;
@@ -425,7 +501,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					TEXT("literal"),
 					Resources,
 					Fields,
-					OutError))
+					OutError, Path))
 			{
 				return false;
 			}
@@ -466,19 +542,22 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				CanonicalLiteral = Input.VisiblePin->DefaultValue;
 				bLiteralValid = true;
 			}
-			if (!bLiteralValid
-				|| !TryString(
-					CanonicalLiteral, Resources, LiteralValue, OutError)
-				|| !LiteralValue.IsValid())
+			if (!bLiteralValid)
 			{
-				if (OutError.Code.IsEmpty())
-				{
-					OutError = {
-						TEXT("niagara_compound_literal_capture_invalid"),
-						Input.FullInputName,
-						Input.VisiblePin->DefaultValue,
-					};
-				}
+				OutError = NativeCompoundFact(TEXT("niagara_compound_literal_capture_invalid"),
+					TEXT("The native Niagara input default cannot be read as its declared scalar type."), Path + TEXT("/literal"),
+					MakeShared<FJsonValueString>(Input.VisiblePin->DefaultValue),
+					MakeShared<FJsonValueString>(TypeId == TEXT("float") ? TEXT("finite float")
+						: (TypeId == TEXT("int32") ? TEXT("int32") : TEXT("true|false"))), Input.FullInputName);
+				return false;
+			}
+			if (!TryString(CanonicalLiteral, Resources, LiteralValue, OutError, Path + TEXT("/literal")))
+				return NativeCaptureFailure(OutError, Input.FullInputName, Path + TEXT("/literal"));
+			if (!LiteralValue.IsValid())
+			{
+				OutError = NativeCompoundFact(TEXT("niagara_compound_literal_capture_invalid"),
+					TEXT("Native literal conversion returned no canonical value."), Path + TEXT("/literal/available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Input.FullInputName);
 				return false;
 			}
 			Fields.Emplace(
@@ -489,7 +568,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				Resources,
 				OutValue,
 				OutError,
-				Input.FullInputName);
+				Input.FullInputName, Path);
 		}
 
 		bool TryMakeLinkedValue(
@@ -497,7 +576,8 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			const FString& LinkedParameter,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FUeAgentGenericReadError& OutError)
+			FUeAgentGenericReadError& OutError,
+			const FString& Path)
 		{
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields;
 			FUeAgentCanonicalValuePtr Linked;
@@ -506,14 +586,14 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					TEXT("linked_parameter"),
 					Resources,
 					Fields,
-					OutError)
+					OutError, Path)
 				|| !TryString(
 					LinkedParameter,
 					Resources,
 					Linked,
-					OutError))
+					OutError, Path + TEXT("/linked_parameter")))
 			{
-				return false;
+				return NativeCaptureFailure(OutError, Input.FullInputName, Path);
 			}
 			Fields.Emplace(
 				TEXT("linked_parameter"),
@@ -523,7 +603,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				Resources,
 				OutValue,
 				OutError,
-				Input.FullInputName);
+				Input.FullInputName, Path);
 		}
 
 		bool TryMakeDynamicValue(
@@ -532,7 +612,8 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			const TArray<FUeAgentCanonicalValueRef>& Children,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FUeAgentGenericReadError& OutError)
+			FUeAgentGenericReadError& OutError,
+			const FString& Path)
 		{
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields;
 			FUeAgentCanonicalValuePtr Script;
@@ -542,20 +623,20 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					TEXT("dynamic_input"),
 					Resources,
 					Fields,
-					OutError)
+					OutError, Path)
 				|| !TryString(
 					GetModuleScriptPath(Dynamic),
 					Resources,
 					Script,
-					OutError)
+					OutError, Path + TEXT("/dynamic_script_identity"))
 				|| !TryArray(
 					Children,
 					Resources,
 					Inputs,
 					OutError,
-					Input.FullInputName))
+					Input.FullInputName, Path + TEXT("/inputs")))
 			{
-				return false;
+				return NativeCaptureFailure(OutError, Input.FullInputName, Path);
 			}
 			Fields.Emplace(
 				TEXT("dynamic_script_identity"),
@@ -566,17 +647,21 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				Resources,
 				OutValue,
 				OutError,
-				Input.FullInputName);
+				Input.FullInputName, Path);
 		}
 
 		bool TryReadLinkedParameter(
 			const FResolvedModuleInput& Input,
 			FString& OutLinkedParameter,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError,
+			const FString& Path)
 		{
 			OutLinkedParameter.Reset();
 			if (!Input.VisiblePin)
 			{
+				OutError = NativeCompoundFact(TEXT("niagara_compound_input_pin_missing"),
+					TEXT("The linked Niagara input has no readable native pin."), Path + TEXT("/linked_parameter/pin_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Input.FullInputName);
 				return false;
 			}
 			TSharedPtr<FJsonObject> Payload;
@@ -588,23 +673,42 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					bHasValue,
 					OutError))
 			{
-				return false;
+				return NativeCaptureFailure(OutError, Input.FullInputName, Path + TEXT("/linked_parameter"));
 			}
 			const TSharedPtr<FJsonObject>* Value = nullptr;
 			FString Source;
-			return bHasValue
-				&& Payload.IsValid()
-				&& Payload->TryGetObjectField(TEXT("value"), Value)
-				&& Value
-				&& Value->IsValid()
-				&& (*Value)->TryGetStringField(TEXT("source"), Source)
-				&& Source.Equals(
-					TEXT("linked_input"),
-					ESearchCase::IgnoreCase)
-				&& (*Value)->TryGetStringField(
-					TEXT("linked_parameter"),
-					OutLinkedParameter)
-				&& !OutLinkedParameter.TrimStartAndEnd().IsEmpty();
+			if (!bHasValue || !Payload.IsValid())
+			{
+				OutError = NativeCompoundFact(TEXT("niagara_compound_linked_value_missing"),
+					!bHasValue ? TEXT("The linked Niagara pin returned no value.") : TEXT("The linked Niagara pin returned no value payload."),
+					Path + (!bHasValue ? TEXT("/linked_parameter/has_value") : TEXT("/linked_parameter/payload_available")),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Input.FullInputName);
+				return false;
+			}
+			if (!Payload->TryGetObjectField(TEXT("value"), Value) || !Value || !Value->IsValid())
+			{
+				OutError = NativeCompoundFact(TEXT("niagara_compound_linked_value_invalid"),
+					TEXT("The linked Niagara pin value must be an object."), Path + TEXT("/linked_parameter/value"),
+					NativeJsonFact(Payload->TryGetField(TEXT("value"))), MakeShared<FJsonValueString>(TEXT("object")), Input.FullInputName);
+				return false;
+			}
+			if (!(*Value)->TryGetStringField(TEXT("source"), Source) || !Source.Equals(TEXT("linked_input"), ESearchCase::IgnoreCase))
+			{
+				OutError = NativeCompoundFact(TEXT("niagara_compound_linked_source_invalid"),
+					TEXT("The linked Niagara pin value does not describe a linked input."), Path + TEXT("/linked_parameter/source"),
+					NativeJsonFact((*Value)->TryGetField(TEXT("source"))), MakeShared<FJsonValueString>(TEXT("linked_input")), Input.FullInputName);
+				return false;
+			}
+			if (!(*Value)->TryGetStringField(TEXT("linked_parameter"), OutLinkedParameter)
+				|| OutLinkedParameter.TrimStartAndEnd().IsEmpty())
+			{
+				OutError = NativeCompoundFact(TEXT("niagara_compound_linked_parameter_invalid"),
+					TEXT("The linked Niagara pin value requires a non-empty parameter name."), Path + TEXT("/linked_parameter"),
+					NativeJsonFact((*Value)->TryGetField(TEXT("linked_parameter"))),
+					MakeShared<FJsonValueString>(TEXT("non-empty parameter name")), Input.FullInputName);
+				return false;
+			}
+			return true;
 		}
 
 		bool TryCaptureCanonicalInput(
@@ -622,6 +726,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				int32 ParentIndex = INDEX_NONE;
 				TArray<int32> ChildIndices;
 				FUeAgentCanonicalValuePtr Value;
+				FString Path;
 			};
 
 			TArray<FNode> Nodes;
@@ -633,6 +738,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					INDEX_NONE,
 					{},
 					nullptr,
+					TEXT("/niagara_input"),
 				});
 			for (int32 Index = 0; Index < Nodes.Num(); ++Index)
 			{
@@ -640,11 +746,11 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				if (!Node.Owner
 					|| !Node.Input.InputVariable.IsValid())
 				{
-					OutError = {
-						TEXT("niagara_compound_capture_node_invalid"),
-						Node.Input.FullInputName,
-						TEXT("native input traversal lost its owner"),
-					};
+					OutError = NativeCompoundFact(TEXT("niagara_compound_capture_node_invalid"),
+						!Node.Owner ? TEXT("Native Niagara input traversal lost its owner node.")
+							: TEXT("Native Niagara input traversal found an invalid input variable."),
+						Node.Path + (!Node.Owner ? TEXT("/owner_available") : TEXT("/input_variable/valid")),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Node.Input.FullInputName);
 					return false;
 				}
 				if (!Node.Input.VisiblePin)
@@ -655,10 +761,8 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 							Node.Input);
 				}
 				FString ResolvedName;
-				Node.Dynamic = FindDynamicInputForModuleInput(
-					*Node.Owner,
-					Node.Input.FullInputName,
-					ResolvedName);
+				Node.Dynamic = FindDynamicInputForModuleInput(*Node.Owner, Node.Input.FullInputName, ResolvedName, OutError);
+				if (OutError.IsValid()) return NativeCaptureFailure(OutError, Node.Input.FullInputName, Node.Path);
 				if (!Node.Dynamic)
 				{
 					continue;
@@ -669,16 +773,14 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				{
 					if (Nodes[Parent].Dynamic == Node.Dynamic)
 					{
-						OutError = {
-							TEXT(
-								"niagara_compound_dynamic_cycle_detected"),
-							Node.Input.FullInputName,
-							Node.Dynamic->GetPathName(),
-						};
+						OutError = NativeCompoundFact(TEXT("niagara_compound_dynamic_cycle_detected"),
+							TEXT("The Niagara dynamic input recursively references an active ancestor node."), Node.Path + TEXT("/dynamic_cycle"),
+							MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), Node.Input.FullInputName);
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(Node.Dynamic->GetPathName());
 						return false;
 					}
 				}
-				FUeAgentResourceBudgetExceeded BudgetError;
+				FUeAgentResourceChargeError ChargeError;
 				if (!Resources.TryChargeMany(
 						{
 							{
@@ -691,14 +793,10 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 							},
 						},
 						Node.Input.FullInputName,
-						BudgetError))
+						ChargeError))
 				{
-					OutError = {
-						BudgetError.Code,
-						Node.Input.FullInputName,
-						BudgetError.Path,
-					};
-					return false;
+					OutError = MoveTemp(ChargeError);
+					return NativeCaptureFailure(OutError, Node.Input.FullInputName, Node.Path);
 				}
 				TArray<FResolvedModuleInput> Inputs;
 				UNiagaraNodeFunctionCall* const DynamicNode =
@@ -710,12 +808,12 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					{
 						continue;
 					}
+					const FString ChildPath = Nodes[Index].Path + TEXT("/inputs/")
+						+ FString::FromInt(Nodes[Index].ChildIndices.Num());
 					FString ChildName;
 					UNiagaraNodeFunctionCall* ChildDynamic =
-						FindDynamicInputForModuleInput(
-							*DynamicNode,
-							Input.FullInputName,
-							ChildName);
+						FindDynamicInputForModuleInput(*DynamicNode, Input.FullInputName, ChildName, OutError);
+					if (OutError.IsValid()) return NativeCaptureFailure(OutError, Input.FullInputName, ChildPath);
 					if (!ChildDynamic && !Input.VisiblePin)
 					{
 						continue;
@@ -728,6 +826,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 							Index,
 							{},
 							nullptr,
+							ChildPath,
 						});
 					Nodes[Index].ChildIndices.Add(ChildIndex);
 				}
@@ -742,17 +841,18 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				{
 					TArray<FUeAgentCanonicalValueRef> Children;
 					Children.Reserve(Node.ChildIndices.Num());
-					for (const int32 ChildIndex : Node.ChildIndices)
+					for (int32 Position = 0; Position < Node.ChildIndices.Num(); ++Position)
 					{
+						const int32 ChildIndex = Node.ChildIndices[Position];
 						if (!Nodes.IsValidIndex(ChildIndex)
 							|| !Nodes[ChildIndex].Value.IsValid())
 						{
-							OutError = {
-								TEXT(
-									"niagara_compound_capture_child_invalid"),
-								Node.Input.FullInputName,
-								FString::FromInt(ChildIndex),
-							};
+							OutError = NativeCompoundFact(TEXT("niagara_compound_capture_child_invalid"),
+								!Nodes.IsValidIndex(ChildIndex) ? TEXT("The native dynamic input references a missing captured child node.")
+									: TEXT("The native dynamic input child has no captured canonical value."),
+								Node.Path + TEXT("/inputs/") + FString::FromInt(Position) + TEXT("/available"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Node.Input.FullInputName);
+							OutError.ActualEvidence = MakeShared<FJsonValueNumber>(ChildIndex);
 							return false;
 						}
 						Children.Add(
@@ -764,7 +864,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 							Children,
 							Resources,
 							Node.Value,
-							OutError))
+							OutError, Node.Path))
 					{
 						return false;
 					}
@@ -774,39 +874,31 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 						.GetType()
 						.IsDataInterface())
 				{
-					OutError = {
-						TEXT(
-							"niagara_compound_data_interface_capture_not_bound"),
-						Node.Input.FullInputName,
-						TEXT(
-							"data-interface canonical projection is not bound"),
-					};
+					OutError = NativeCompoundFact(TEXT("niagara_compound_data_interface_capture_not_bound"),
+						TEXT("Canonical capture is not bound for this Niagara data interface type."), Node.Path + TEXT("/data_interface/type"),
+						MakeShared<FJsonValueString>(CanonicalNiagaraTypeId(Node.Input.InputVariable.GetType())),
+						MakeShared<FJsonValueString>(TEXT("data interface type with a canonical capture provider")), Node.Input.FullInputName);
 					return false;
 				}
 				FString LinkedParameter;
-				FString NativeError;
+				UE::UAI::Contract::FDiagnostic NativeError;
 				if (Node.Input.VisiblePin
 					&& !Node.Input.VisiblePin->LinkedTo.IsEmpty())
 				{
 					if (!TryReadLinkedParameter(
 							Node.Input,
 							LinkedParameter,
-							NativeError))
+							NativeError, Node.Path))
 					{
-						OutError = {
-							TEXT(
-								"niagara_compound_link_capture_failed"),
-							Node.Input.FullInputName,
-							NativeError,
-						};
-						return false;
+						OutError = MoveTemp(NativeError);
+						return NativeCaptureFailure(OutError, Node.Input.FullInputName, Node.Path);
 					}
 					if (!TryMakeLinkedValue(
 							Node.Input,
 							LinkedParameter,
 							Resources,
 							Node.Value,
-							OutError))
+							OutError, Node.Path))
 					{
 						return false;
 					}
@@ -815,13 +907,20 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 						Node.Input,
 						Resources,
 						Node.Value,
-						OutError))
+						OutError, Node.Path))
 				{
 					return false;
 				}
 			}
 			OutValue = Nodes[0].Value;
-			return OutValue.IsValid();
+			if (!OutValue.IsValid())
+			{
+				OutError = NativeCompoundFact(TEXT("niagara_compound_capture_value_missing"),
+					TEXT("Native Niagara input capture returned no canonical root value."), TEXT("/niagara_input/available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), RootInput.FullInputName);
+				return false;
+			}
+			return true;
 		}
 
 		const FUeAgentCanonicalValueRef* FindField(
@@ -847,7 +946,9 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 		bool TryBuildLiteralPayload(
 			const FUeAgentCanonicalValue& Value,
 			TSharedPtr<const FJsonObject>& OutPayload,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError,
+			const FString& Path,
+			const FString& InputName)
 		{
 			OutPayload.Reset();
 			const FUeAgentCanonicalValueRef* Mode =
@@ -863,8 +964,18 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				|| !Type
 				|| (*Type)->GetKind() != EUeAgentValueKind::String)
 			{
-				OutError =
-					TEXT("niagara_compound_literal_type_unsupported");
+				if (!Mode || (*Mode)->GetKind() != EUeAgentValueKind::String || (*Mode)->GetText() != TEXT("literal"))
+					OutError = NativeCompoundFact(TEXT("niagara_compound_literal_type_unsupported"),
+						TEXT("Literal conversion requires the literal mode."), Path + TEXT("/mode"),
+						NativeCanonicalFact(Mode ? &Mode->Get() : nullptr), MakeShared<FJsonValueString>(TEXT("literal")), InputName, TEXT("niagara_apply"));
+				else if (!Literal)
+					OutError = NativeCompoundFact(TEXT("niagara_compound_literal_type_unsupported"),
+						TEXT("Literal conversion requires a literal value."), Path + TEXT("/literal"),
+						nullptr, MakeShared<FJsonValueString>(TEXT("present scalar value")), InputName, TEXT("niagara_apply"));
+				else
+					OutError = NativeCompoundFact(TEXT("niagara_compound_literal_type_unsupported"),
+						TEXT("Literal conversion requires a string type identifier."), Path + TEXT("/type_id"),
+						NativeCanonicalFact(Type ? &Type->Get() : nullptr), MakeShared<FJsonValueString>(TEXT("string")), InputName, TEXT("niagara_apply"));
 				return false;
 			}
 			TSharedRef<FJsonObject> Payload =
@@ -885,8 +996,9 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					: TEXT("false");
 				break;
 			default:
-				OutError =
-					TEXT("niagara_compound_literal_type_unsupported");
+				OutError = NativeCompoundFact(TEXT("niagara_compound_literal_type_unsupported"),
+					TEXT("The Niagara literal value must be a string, number or boolean."), Path + TEXT("/literal"),
+					NativeCanonicalFact(&Literal->Get()), MakeShared<FJsonValueString>(TEXT("string|integer|decimal|boolean")), InputName, TEXT("niagara_apply"));
 				return false;
 			}
 			if ((*Type)->GetText() == TEXT("float"))
@@ -897,12 +1009,13 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 						*LiteralText)
 					|| !FMath::IsFinite(Number))
 				{
-					OutError =
-						TEXT("niagara_compound_literal_invalid");
+					OutError = NativeCompoundFact(TEXT("niagara_compound_literal_invalid"),
+						TEXT("The Niagara literal cannot be parsed as a finite float."), Path + TEXT("/literal"), MakeShared<FJsonValueString>(LiteralText),
+						MakeShared<FJsonValueString>(TEXT("finite float")), InputName, TEXT("niagara_apply"));
 					return false;
 				}
 				Payload->SetStringField(
-					TEXT("value_kind"),
+					TEXT("kind"),
 					TEXT("float"));
 				Payload->SetNumberField(TEXT("value"), Number);
 			}
@@ -912,12 +1025,13 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				Text.ToLowerInline();
 				if (Text != TEXT("true") && Text != TEXT("false"))
 				{
-					OutError =
-						TEXT("niagara_compound_literal_invalid");
+					OutError = NativeCompoundFact(TEXT("niagara_compound_literal_invalid"),
+						TEXT("The Niagara literal cannot be parsed as a boolean."), Path + TEXT("/literal"), MakeShared<FJsonValueString>(LiteralText),
+						MakeShared<FJsonValueString>(TEXT("true|false")), InputName, TEXT("niagara_apply"));
 					return false;
 				}
 				Payload->SetStringField(
-					TEXT("value_kind"),
+					TEXT("kind"),
 					TEXT("bool"));
 				Payload->SetBoolField(
 					TEXT("value"),
@@ -928,19 +1042,21 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				int32 Integer = 0;
 				if (!LexTryParseString(Integer, *LiteralText))
 				{
-					OutError =
-						TEXT("niagara_compound_literal_invalid");
+					OutError = NativeCompoundFact(TEXT("niagara_compound_literal_invalid"),
+						TEXT("The Niagara literal cannot be parsed as an int32."), Path + TEXT("/literal"), MakeShared<FJsonValueString>(LiteralText),
+						MakeShared<FJsonValueString>(TEXT("int32")), InputName, TEXT("niagara_apply"));
 					return false;
 				}
 				Payload->SetStringField(
-					TEXT("value_kind"),
+					TEXT("kind"),
 					TEXT("int"));
 				Payload->SetNumberField(TEXT("value"), Integer);
 			}
 			else
 			{
-				OutError =
-					TEXT("niagara_compound_literal_type_unsupported");
+				OutError = NativeCompoundFact(TEXT("niagara_compound_literal_type_unsupported"),
+					TEXT("This Niagara input type has no scalar literal payload conversion."), Path + TEXT("/type_id"),
+					MakeShared<FJsonValueString>((*Type)->GetText()), MakeShared<FJsonValueString>(TEXT("float|bool|int32")), InputName, TEXT("niagara_apply"));
 				return false;
 			}
 			OutPayload = Payload;
@@ -951,25 +1067,28 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			const FUeAgentCanonicalValue& Value,
 			const FString& Name,
 			FString& OutText,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError,
+			const FString& Path,
+			const FString& InputName)
 		{
-			const FUeAgentCanonicalValueRef* Field =
-				FindField(Value, Name);
-			if (!Field
-				|| (*Field)->GetKind()
-					!= EUeAgentValueKind::String)
+			const FUeAgentCanonicalValueRef* Field = FindField(Value, Name);
+			if (!Field || (*Field)->GetKind() != EUeAgentValueKind::String)
 			{
-				OutError =
-					TEXT("niagara_compound_field_invalid:")
-					+ Name;
+				OutError = NativeCompoundFact(TEXT("niagara_compound_field_invalid"),
+					Value.GetKind() != EUeAgentValueKind::Object ? TEXT("The Niagara input value must be an object.")
+						: TEXT("The Niagara input field must be a string."),
+					Value.GetKind() != EUeAgentValueKind::Object ? Path : Path + TEXT("/") + Name,
+					NativeCanonicalFact(Value.GetKind() != EUeAgentValueKind::Object ? &Value : (Field ? &Field->Get() : nullptr)),
+					MakeShared<FJsonValueString>(Value.GetKind() != EUeAgentValueKind::Object ? TEXT("object") : TEXT("string")),
+					InputName, TEXT("niagara_apply"));
 				return false;
 			}
 			OutText = (*Field)->GetText().TrimStartAndEnd();
 			if (OutText.IsEmpty())
 			{
-				OutError =
-					TEXT("niagara_compound_field_invalid:")
-					+ Name;
+				OutError = NativeCompoundFact(TEXT("niagara_compound_field_invalid"),
+					TEXT("The Niagara input field requires a non-empty string."), Path + TEXT("/") + Name,
+					NativeCanonicalFact(&Field->Get()), MakeShared<FJsonValueString>(TEXT("non-empty string")), InputName, TEXT("niagara_apply"));
 				return false;
 			}
 			return true;
@@ -981,7 +1100,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			const FUeAgentCanonicalValueRef& RootValue,
 			FUeAgentResourceTracker& Resources,
 			bool& bOutChanged,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			struct FFrame
 			{
@@ -990,276 +1109,160 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				FUeAgentCanonicalValueRef Value;
 				FString Path;
 			};
-
 			bOutChanged = false;
 			OutError.Reset();
 			TArray<FFrame> Stack;
-			Stack.Add(
-				{
-					&RootOwner,
-					RootInputName,
-					RootValue,
-					TEXT("/niagara_input"),
-				});
+			Stack.Add({&RootOwner, RootInputName, RootValue, TEXT("/niagara_input")});
 			while (!Stack.IsEmpty())
 			{
 				FFrame Frame = Stack.Pop(EAllowShrinking::No);
+				auto ApplyFact = [&](const TCHAR* Code, const TCHAR* Reason, const FString& Suffix,
+					TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+				{
+					return NativeCompoundFact(Code, Reason, Frame.Path + Suffix, MoveTemp(Actual), MoveTemp(Expected),
+						Frame.InputName, TEXT("niagara_apply"));
+				};
 				if (!Frame.Owner)
 				{
-					OutError =
-						TEXT("niagara_compound_apply_owner_missing:")
-						+ Frame.Path;
+					OutError = ApplyFact(TEXT("niagara_compound_apply_owner_missing"),
+						TEXT("The Niagara input owner is unavailable during native application."), TEXT("/owner_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return false;
 				}
-				FUeAgentResourceBudgetExceeded BudgetError;
+				FUeAgentResourceChargeError ChargeError;
 				if (!Resources.TryChargeMany(
-						{
-							{
-								EUeAgentResourceDimension::Nodes,
-								1,
-							},
-							{
-								EUeAgentResourceDimension::WorkUnits,
-								1,
-							},
-						},
-						Frame.Path,
-						BudgetError))
+					{{EUeAgentResourceDimension::Nodes, 1}, {EUeAgentResourceDimension::WorkUnits, 1}}, Frame.Path, ChargeError))
 				{
-					OutError = BudgetError.Code
-						+ TEXT(":")
-						+ BudgetError.Path;
-					return false;
+					OutError = MoveTemp(ChargeError);
+					return NativeCaptureFailure(OutError, Frame.InputName, Frame.Path);
 				}
-				FString InputName;
-				FString TypeId;
-				FString Mode;
-				if (!TryReadRequiredString(
-						*Frame.Value,
-						TEXT("input_name"),
-						InputName,
-						OutError)
-					|| !TryReadRequiredString(
-						*Frame.Value,
-						TEXT("type_id"),
-						TypeId,
-						OutError)
-					|| !TryReadRequiredString(
-						*Frame.Value,
-						TEXT("mode"),
-						Mode,
-						OutError))
-				{
-					OutError += TEXT(":") + Frame.Path;
+				FString InputName, TypeId, Mode;
+				if (!TryReadRequiredString(*Frame.Value, TEXT("input_name"), InputName, OutError, Frame.Path, Frame.InputName)
+					|| !TryReadRequiredString(*Frame.Value, TEXT("type_id"), TypeId, OutError, Frame.Path, Frame.InputName)
+					|| !TryReadRequiredString(*Frame.Value, TEXT("mode"), Mode, OutError, Frame.Path, Frame.InputName))
 					return false;
-				}
 				TArray<FResolvedModuleInput> ResolvedInputs;
-				BuildResolvedModuleInputs(
-					*Frame.Owner,
-					ResolvedInputs);
+				BuildResolvedModuleInputs(*Frame.Owner, ResolvedInputs);
 				FString ResolvedInputName;
-				const FResolvedModuleInput* ResolvedInput =
-					ResolveModuleInputByName(
-						ResolvedInputs,
-						Frame.InputName.IsEmpty()
-							? InputName
-							: Frame.InputName,
-						ResolvedInputName);
-				if (!ResolvedInput
-					|| !ResolvedInput->InputVariable.IsValid())
+				const FString RequestedInputName = Frame.InputName.IsEmpty() ? InputName : Frame.InputName;
+				const FResolvedModuleInput* ResolvedInput = ResolveModuleInputByName(ResolvedInputs, RequestedInputName, ResolvedInputName);
+				if (!ResolvedInput)
 				{
-					OutError =
-						TEXT("niagara_compound_input_not_found:")
-						+ Frame.Path
-						+ TEXT(":")
-						+ InputName;
+					OutError = ApplyFact(TEXT("niagara_compound_input_not_found"),
+						TEXT("The requested Niagara input name is absent from the native owner."), TEXT("/input_name"),
+						MakeShared<FJsonValueString>(RequestedInputName), MakeShared<FJsonValueString>(TEXT("existing native input name")));
 					return false;
 				}
-				if (!InputName.Equals(
-						ResolvedInput->FullInputName,
-						ESearchCase::CaseSensitive)
-					|| TypeId
-						!= CanonicalNiagaraTypeId(
-							ResolvedInput
-								->InputVariable
-								.GetType()))
+				if (!ResolvedInput->InputVariable.IsValid())
 				{
-					OutError =
-						TEXT("niagara_compound_input_type_mismatch:")
-						+ Frame.Path;
+					OutError = ApplyFact(TEXT("niagara_compound_input_not_found"),
+						TEXT("The resolved Niagara input variable is not valid."), TEXT("/input_variable/valid"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return false;
 				}
-
+				if (!InputName.Equals(ResolvedInput->FullInputName, ESearchCase::CaseSensitive))
+				{
+					OutError = ApplyFact(TEXT("niagara_compound_input_type_mismatch"),
+						TEXT("The authored input name does not match the resolved Niagara input name."), TEXT("/input_name"),
+						MakeShared<FJsonValueString>(InputName), MakeShared<FJsonValueString>(ResolvedInput->FullInputName));
+					return false;
+				}
+				const FString NativeType = CanonicalNiagaraTypeId(ResolvedInput->InputVariable.GetType());
+				if (TypeId != NativeType)
+				{
+					OutError = ApplyFact(TEXT("niagara_compound_input_type_mismatch"),
+						TEXT("The authored Niagara input type does not match the native input type."), TEXT("/type_id"),
+						MakeShared<FJsonValueString>(TypeId), MakeShared<FJsonValueString>(NativeType));
+					return false;
+				}
 				bool bChanged = false;
-				FString NativeError;
-				const FString TargetInputName =
-					ResolvedInput->FullInputName;
+				UE::UAI::Contract::FDiagnostic NativeError;
+				const FString TargetInputName = ResolvedInput->FullInputName;
 				FString AppliedInputName;
 				if (Mode == TEXT("literal"))
 				{
 					TSharedPtr<const FJsonObject> Payload;
-					if (!TryBuildLiteralPayload(
-							*Frame.Value,
-							Payload,
-							NativeError)
-						|| !SetLiteralInputValue(
-							*Frame.Owner,
-							TargetInputName,
-							Payload,
-							AppliedInputName,
-							bChanged,
-							NativeError))
+					if (!TryBuildLiteralPayload(*Frame.Value, Payload, NativeError, Frame.Path, TargetInputName)
+						|| !SetLiteralInputValue(*Frame.Owner, TargetInputName, Payload, AppliedInputName, bChanged, NativeError))
 					{
-						OutError =
-							TEXT(
-								"niagara_compound_literal_apply_failed:")
-							+ Frame.Path
-							+ TEXT(":")
-							+ NativeError;
-						return false;
+						OutError = MoveTemp(NativeError);
+						return NativeCaptureFailure(OutError, TargetInputName, Frame.Path + TEXT("/literal"));
 					}
 				}
 				else if (Mode == TEXT("linked_parameter"))
 				{
 					FString LinkedParameter;
-					if (!TryReadRequiredString(
-							*Frame.Value,
-							TEXT("linked_parameter"),
-							LinkedParameter,
-							NativeError)
-						|| !SetLinkedInputValue(
-							*Frame.Owner,
-							TargetInputName,
-							LinkedParameter,
-							AppliedInputName,
-							bChanged,
-							NativeError))
+					if (!TryReadRequiredString(*Frame.Value, TEXT("linked_parameter"), LinkedParameter, NativeError, Frame.Path, TargetInputName)
+						|| !SetLinkedInputValue(*Frame.Owner, TargetInputName, LinkedParameter, AppliedInputName, bChanged, NativeError))
 					{
-						OutError =
-							TEXT(
-								"niagara_compound_link_apply_failed:")
-							+ Frame.Path
-							+ TEXT(":")
-							+ NativeError;
-						return false;
+						OutError = MoveTemp(NativeError);
+						return NativeCaptureFailure(OutError, TargetInputName, Frame.Path + TEXT("/linked_parameter"));
 					}
 				}
 				else if (Mode == TEXT("dynamic_input"))
 				{
 					FString ScriptIdentity;
-					const FUeAgentCanonicalValueRef* Inputs =
-						FindField(*Frame.Value, TEXT("inputs"));
-					if (!TryReadRequiredString(
-							*Frame.Value,
-							TEXT("dynamic_script_identity"),
-							ScriptIdentity,
-							NativeError)
-						|| !Inputs
-						|| (*Inputs)->GetKind()
-							!= EUeAgentValueKind::Array)
+					const FUeAgentCanonicalValueRef* Inputs = FindField(*Frame.Value, TEXT("inputs"));
+					if (!TryReadRequiredString(*Frame.Value, TEXT("dynamic_script_identity"), ScriptIdentity, OutError, Frame.Path, TargetInputName))
+						return false;
+					if (!Inputs || (*Inputs)->GetKind() != EUeAgentValueKind::Array)
 					{
-						OutError =
-							TEXT(
-								"niagara_compound_dynamic_value_invalid:")
-							+ Frame.Path
-							+ TEXT(":")
-							+ NativeError;
+						OutError = ApplyFact(TEXT("niagara_compound_dynamic_value_invalid"),
+							TEXT("The Niagara dynamic input requires an input array."), TEXT("/inputs"),
+							NativeCanonicalFact(Inputs ? &Inputs->Get() : nullptr), MakeShared<FJsonValueString>(TEXT("array")));
 						return false;
 					}
-					UNiagaraScript* Script =
-						LoadObject<UNiagaraScript>(
-							nullptr,
-							*ScriptIdentity);
-					if (!IsValid(Script)
-						|| Script->GetUsage()
-							!= ENiagaraScriptUsage::DynamicInput)
+					UNiagaraScript* Script = LoadObject<UNiagaraScript>(nullptr, *ScriptIdentity);
+					if (!IsValid(Script))
 					{
-						OutError =
-							TEXT(
-								"niagara_compound_dynamic_script_invalid:")
-							+ ScriptIdentity;
+						OutError = ApplyFact(TEXT("niagara_compound_dynamic_script_invalid"),
+							TEXT("The Niagara dynamic input script asset could not be loaded."), TEXT("/dynamic_script_identity"),
+							MakeShared<FJsonValueString>(ScriptIdentity), MakeShared<FJsonValueString>(TEXT("loadable Niagara script asset")));
+						return false;
+					}
+					if (Script->GetUsage() != ENiagaraScriptUsage::DynamicInput)
+					{
+						OutError = ApplyFact(TEXT("niagara_compound_dynamic_script_invalid"),
+							TEXT("The selected Niagara script does not have DynamicInput usage."), TEXT("/dynamic_script_usage"),
+							MakeShared<FJsonValueString>(UEnum::GetValueAsString(Script->GetUsage())),
+							MakeShared<FJsonValueString>(UEnum::GetValueAsString(ENiagaraScriptUsage::DynamicInput)));
+						OutError.TargetPath = ScriptIdentity;
 						return false;
 					}
 					UNiagaraNodeFunctionCall* Dynamic = nullptr;
-					if (!SetDynamicInput(
-							*Frame.Owner,
-							TargetInputName,
-							*Script,
-							Script->GetName(),
-							Dynamic,
-							AppliedInputName,
-							NativeError)
-						|| !Dynamic)
+					if (!SetDynamicInput(*Frame.Owner, TargetInputName, *Script, Script->GetName(), Dynamic, AppliedInputName, NativeError))
 					{
-						OutError =
-							TEXT(
-								"niagara_compound_dynamic_apply_failed:")
-							+ Frame.Path
-							+ TEXT(":")
-							+ NativeError;
-						return false;
+						OutError = MoveTemp(NativeError);
+						return NativeCaptureFailure(OutError, TargetInputName, Frame.Path + TEXT("/dynamic_script_identity"));
 					}
-					FString InitializationSummary;
-					if (!InitializeDynamicInputDataInterfaces(
-							*Dynamic,
-							InitializationSummary,
-							NativeError))
+					if (!InitializeDynamicInputDataInterfaces(*Dynamic, NativeError))
 					{
-						OutError =
-							TEXT(
-								"niagara_compound_dynamic_initialize_failed:")
-							+ Frame.Path
-							+ TEXT(":")
-							+ NativeError;
-						return false;
+						OutError = MoveTemp(NativeError);
+						return NativeCaptureFailure(OutError, TargetInputName, Frame.Path + TEXT("/dynamic_script_identity"));
 					}
-					const TArray<FUeAgentCanonicalValueRef>& Children =
-						(*Inputs)->GetArrayItems();
-					for (int32 Index = Children.Num() - 1;
-						Index >= 0;
-						--Index)
+					const TArray<FUeAgentCanonicalValueRef>& Children = (*Inputs)->GetArrayItems();
+					for (int32 Index = Children.Num() - 1; Index >= 0; --Index)
 					{
+						const FString ChildPath = FString::Printf(TEXT("%s/inputs/%d"), *Frame.Path, Index);
 						FString ChildName;
-						if (!TryReadRequiredString(
-								*Children[Index],
-								TEXT("input_name"),
-								ChildName,
-								NativeError))
-						{
-							OutError =
-								TEXT(
-									"niagara_compound_dynamic_child_invalid:")
-								+ Frame.Path
-								+ TEXT(":")
-								+ NativeError;
+						if (!TryReadRequiredString(*Children[Index], TEXT("input_name"), ChildName, OutError, ChildPath, TargetInputName))
 							return false;
-						}
-						Stack.Add(
-							{
-								Dynamic,
-								ChildName,
-								Children[Index],
-								FString::Printf(
-									TEXT("%s/inputs/%d"),
-									*Frame.Path,
-									Index),
-							});
+						Stack.Add({Dynamic, ChildName, Children[Index], ChildPath});
 					}
 					bChanged = true;
 				}
 				else if (Mode == TEXT("data_interface"))
 				{
-					OutError =
-						TEXT(
-							"niagara_compound_data_interface_apply_not_bound:")
-						+ Frame.Path;
+					OutError = ApplyFact(TEXT("niagara_compound_data_interface_apply_not_bound"),
+						TEXT("Native application is not bound for this Niagara data interface type."), TEXT("/type_id"),
+						MakeShared<FJsonValueString>(TypeId), MakeShared<FJsonValueString>(TEXT("data interface type with a native apply provider")));
 					return false;
 				}
 				else
 				{
-					OutError =
-						TEXT("niagara_compound_mode_invalid:")
-						+ Frame.Path;
+					OutError = ApplyFact(TEXT("niagara_compound_mode_invalid"),
+						TEXT("The Niagara input mode is not supported."), TEXT("/mode"),
+						MakeShared<FJsonValueString>(Mode), MakeShared<FJsonValueString>(TEXT("literal|linked_parameter|dynamic_input|data_interface")));
 					return false;
 				}
 				bOutChanged = bOutChanged || bChanged;
@@ -1289,75 +1292,67 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			UObject& Asset,
 			UeAgentNiagaraCompileValidation::FResult& OutCompile,
 			UeAgentNiagaraStackValidation::FResult& OutStack,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			OutCompile =
-				UeAgentNiagaraCompileValidation::FResult();
-			OutStack =
-				UeAgentNiagaraStackValidation::FResult();
-			if (UNiagaraSystem* System =
-					Cast<UNiagaraSystem>(&Asset))
+			OutCompile = UeAgentNiagaraCompileValidation::FResult();
+			OutStack = UeAgentNiagaraStackValidation::FResult();
+			const FString AssetPath = Asset.GetPathName();
+			if (UNiagaraSystem* System = Cast<UNiagaraSystem>(&Asset))
 			{
 				System->RequestCompile(true);
 				System->WaitForCompilationComplete(true, false);
 				System->PollForCompilationComplete(true);
 				if (System->HasOutstandingCompilationRequests(true))
 				{
-					OutError =
-						TEXT("niagara_compile_incomplete");
+					OutError = NativeCompoundFact(TEXT("niagara_compile_incomplete"),
+						TEXT("The Niagara system still has outstanding compilation requests after waiting."),
+						TEXT("/compilation/outstanding_requests"), MakeShared<FJsonValueBoolean>(true),
+						MakeShared<FJsonValueBoolean>(false), FString(), TEXT("niagara_compile"));
+					OutError.TargetPath = AssetPath;
 					return false;
 				}
 				System->CacheFromCompiledData();
-				OutCompile =
-					UeAgentNiagaraCompileValidation::InspectAsset(
-						System);
+				OutCompile = UeAgentNiagaraCompileValidation::InspectAsset(System);
 			}
-			else if (UNiagaraEmitter* Emitter =
-					Cast<UNiagaraEmitter>(&Asset))
+			else if (UNiagaraEmitter* Emitter = Cast<UNiagaraEmitter>(&Asset))
 			{
 				UeAgentNiagaraEmitterCompileContext::FResult Result;
 				if (!UeAgentNiagaraEmitterCompileContext::Compile(
-						*Emitter,
-						Emitter
-							->GetExposedVersion()
-							.VersionGuid,
-						true,
-						Result,
-						OutError))
+					*Emitter, Emitter->GetExposedVersion().VersionGuid, true, Result, OutError))
 				{
-					return false;
+					return NativeCaptureFailure(OutError, FString(), FString(), AssetPath);
 				}
 				OutCompile = Result.Validation;
 			}
-			else if (UNiagaraScript* Script =
-					Cast<UNiagaraScript>(&Asset))
+			else if (UNiagaraScript* Script = Cast<UNiagaraScript>(&Asset))
 			{
-				Script->RequestCompile(
-					Script->GetExposedVersion().VersionGuid,
-					true);
-				OutCompile =
-					UeAgentNiagaraCompileValidation::InspectAsset(
-						Script);
+				Script->RequestCompile(Script->GetExposedVersion().VersionGuid, true);
+				OutCompile = UeAgentNiagaraCompileValidation::InspectAsset(Script);
 			}
 			else
 			{
-				OutError =
-					TEXT("niagara_compile_target_invalid");
+				OutError = NativeCompoundFact(TEXT("niagara_compile_target_invalid"),
+					TEXT("The compilation target is not a Niagara system, emitter, or script."),
+					TEXT("/compilation/target_class"), MakeShared<FJsonValueString>(Asset.GetClass()->GetPathName()),
+					MakeShared<FJsonValueString>(TEXT("NiagaraSystem | NiagaraEmitter | NiagaraScript")),
+					FString(), TEXT("niagara_compile"));
+				OutError.TargetPath = AssetPath;
 				return false;
 			}
 			if (!OutCompile.bCompilationComplete)
 			{
-				OutError = TEXT("niagara_compile_incomplete");
+				OutError = NativeCompoundFact(TEXT("niagara_compile_incomplete"),
+					TEXT("Niagara compilation did not reach a complete state."),
+					TEXT("/compilation/complete"), MakeShared<FJsonValueBoolean>(false),
+					MakeShared<FJsonValueBoolean>(true), FString(), TEXT("niagara_compile"));
+				OutError.TargetPath = AssetPath;
 				return false;
 			}
-			OutStack =
-				UeAgentNiagaraStackValidation::InspectAsset(&Asset);
+			OutStack = UeAgentNiagaraStackValidation::InspectAsset(&Asset);
 			if (!OutStack.bInspectionComplete)
 			{
-				OutError = OutStack.FirstError.IsEmpty()
-					? TEXT("niagara_stack_inspection_failed")
-					: OutStack.FirstError;
-				return false;
+				OutError = OutStack.GetFailure();
+				return NativeCaptureFailure(OutError, FString(), FString(), AssetPath);
 			}
 			return true;
 		}
@@ -1370,14 +1365,21 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 		{
 			TWeakObjectPtr<UNiagaraNodeFunctionCall> Module;
 			FString InputName;
+			FString AssetPath;
 			FUeAgentCanonicalValuePtr BeforeValue;
+		};
+
+		struct FAssetReference
+		{
+			TWeakObjectPtr<UObject> Asset;
+			FString AssetPath;
 		};
 
 		struct FOperation
 		{
 			int64 SubjectGeneration = -1;
 			TArray<FAppliedChange> AppliedChanges;
-			TArray<TWeakObjectPtr<UObject>> Assets;
+			TArray<FAssetReference> Assets;
 		};
 
 		FCriticalSection Mutex;
@@ -1419,7 +1421,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				using namespace Contract;
 				TSharedPtr<const FUeAgentDescriptorRegistry>
 					Result;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				const bool bCreated =
 					FUeAgentDescriptorRegistry::TryCreate(
 						{
@@ -1459,7 +1461,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					TEXT(
 						"Niagara compound descriptor "
 						"registry invalid: %s"),
-					*Error);
+					*Error.ToPublicDetail());
 				return Result.ToSharedRef();
 			}();
 		return Registry;
@@ -1494,59 +1496,47 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 		FUeAgentCancellationRequested Cancelled;
 		if (!Cancellation.TryCheckpoint(Cancelled))
 		{
-			OutError = {
-				Cancelled.Code,
-				Request.GetBinding().GetBindingId(),
-				Cancelled.Reason,
-			};
-			return false;
-		}
-		FUeAgentOperationDeadlineExceeded Expired;
-		if (!Deadline.TryCheckpoint(
-				TEXT("niagara_compound_native.capture"),
-				Expired))
-		{
-			OutError = {
-				Expired.Code,
-				Request.GetBinding().GetBindingId(),
-				Expired.Stage,
-			};
-			return false;
+			OutError = Cancelled;
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetBinding().GetBindingId();
+			return NativeCaptureFailure(OutError, FString(), TEXT("/niagara_input"),
+				Request.GetBinding().GetSummary().GetIdentity().GetOwnerId());
 		}
 		FUeAgentResolvedNiagaraCompoundInput Resolved;
-		FString ErrorCode;
-		FString Detail;
+		UE::UAI::Contract::FDiagnostic ResolveError;
 		if (!TryResolveNiagaraCompoundInput(
 				Request.GetBinding(),
 				Generation,
-				Resolved,
-				ErrorCode,
-				Detail))
+				Resolved, ResolveError))
 		{
-			OutError = {
-				ErrorCode,
-				Request.GetBinding().GetBindingId(),
-				Detail,
-			};
+			OutError = ResolveError;
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetBinding().GetBindingId();
+			return NativeCaptureFailure(OutError, FString(), TEXT("/niagara_input"),
+				Request.GetBinding().GetSummary().GetIdentity().GetOwnerId());
+		}
+		const FString AssetPath = Request.GetBinding().GetSummary().GetIdentity().GetOwnerId();
+		if (!Resolved.Asset || !Resolved.Module || !Resolved.Input.InputVariable.IsValid())
+		{
+			const bool bAssetMissing = !Resolved.Asset;
+			const bool bModuleMissing = !Resolved.Module;
+			OutError = NativeCompoundFact(TEXT("niagara_compound_persisted_state_unavailable"),
+				bAssetMissing ? TEXT("The resolved Niagara asset is no longer available.")
+					: (bModuleMissing ? TEXT("The resolved Niagara module is no longer available.")
+						: TEXT("The resolved Niagara input has no valid variable type.")),
+				bAssetMissing ? TEXT("/niagara_input/asset_available")
+					: (bModuleMissing ? TEXT("/niagara_input/module_available") : TEXT("/niagara_input/variable_valid")),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true),
+				Resolved.Input.FullInputName);
+			OutError.TargetPath = AssetPath;
 			return false;
 		}
-		if (!Resolved.Asset
-			|| !Resolved.Module
-			|| !Resolved.Input.InputVariable.IsValid()
-			|| (Request.GetStatePlane()
-					== EUeAgentStatePlane::Persisted
-				&& Resolved.Asset->GetOutermost()->IsDirty()))
+		if (Request.GetStatePlane() == EUeAgentStatePlane::Persisted
+			&& Resolved.Asset->GetOutermost()->IsDirty())
 		{
-			OutError = {
-				TEXT(
-					"niagara_compound_persisted_state_unavailable"),
-				Request.GetBinding()
-					.GetSummary()
-					.GetIdentity()
-					.GetOwnerId(),
-				TEXT(
-					"the Niagara asset is unavailable or dirty"),
-			};
+			OutError = NativeCompoundFact(TEXT("niagara_compound_persisted_state_unavailable"),
+				TEXT("Persisted Niagara input state is unavailable because the asset package has unsaved changes."),
+				TEXT("/niagara_input/package_dirty"), MakeShared<FJsonValueBoolean>(true),
+				MakeShared<FJsonValueBoolean>(false), Resolved.Input.FullInputName);
+			OutError.TargetPath = Resolved.Asset->GetPathName();
 			return false;
 		}
 		FUeAgentCanonicalValuePtr Value;
@@ -1557,7 +1547,8 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				Value,
 				OutError))
 		{
-			return false;
+			return NativeCaptureFailure(OutError, Resolved.Input.FullInputName,
+				TEXT("/niagara_input"), Resolved.Asset->GetPathName());
 		}
 		int64 CaptureSequence = 0;
 		{
@@ -1645,156 +1636,122 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 	{
 		OutResult = FUeAgentGenericEffectApplyResult();
 		OutError = FExecutionMutationError();
+		auto OperationAlreadyApplied = [&Request]()
+		{
+			auto Error = NativeCompoundFact(TEXT("niagara_compound_operation_already_applied"),
+				TEXT("This Niagara compound operation has already been applied."),
+				TEXT("/operation/state"), MakeShared<FJsonValueString>(TEXT("already_applied")),
+				MakeShared<FJsonValueString>(TEXT("not_applied")), FString(), TEXT("niagara_apply"));
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Request.GetOperationId());
+			return Error;
+		};
 		{
 			FScopeLock Lock(&State->Mutex);
-			if (State->AppliedByOperation.Contains(
-					Request.GetOperationId()))
+			if (State->AppliedByOperation.Contains(Request.GetOperationId()))
 			{
-				OutError = FExecutionMutationError(
-					TEXT(
-						"niagara_compound_operation_already_applied"),
-					Request.GetOperationId());
+				OutError = OperationAlreadyApplied();
 				return false;
 			}
 		}
+		OutResult = FUeAgentGenericEffectApplyResult::NoMutation();
 		TArray<FState::FAppliedChange> AppliedItems;
 		TArray<UObject*> Assets;
 		TArray<FString> MutatedKeys;
-		auto RestoreApplied =
-			[&Resources](
-				TArray<FState::FAppliedChange>& Items,
-				FString& OutRestoreError)
-			{
-				for (int32 Index = Items.Num() - 1;
-					Index >= 0;
-					--Index)
-				{
-					FState::FAppliedChange& Item = Items[Index];
-					UNiagaraNodeFunctionCall* Module =
-						Item.Module.Get();
-					bool bChanged = false;
-					if (!Module
-						|| !Item.BeforeValue.IsValid()
-						|| !TryApplyCanonicalInput(
-							*Module,
-							Item.InputName,
-							Item.BeforeValue.ToSharedRef(),
-							Resources,
-							bChanged,
-							OutRestoreError))
-					{
-						if (OutRestoreError.IsEmpty())
-						{
-							OutRestoreError =
-								TEXT(
-									"niagara_compound_restore_target_lost:")
-								+ Item.InputName;
-						}
-						return false;
-					}
-				}
-				return true;
-			};
-		auto FailWithRestore =
-			[&AppliedItems, &RestoreApplied, &OutError](
-				const FString& Code,
-				const FString& Detail)
-			{
-				FString RestoreError;
-				const bool bRestored =
-					AppliedItems.IsEmpty()
-					|| RestoreApplied(AppliedItems, RestoreError);
-				OutError = FExecutionMutationError(
-					bRestored
-						? Code
-						: TEXT(
-							"niagara_compound_apply_rollback_failed"),
-					Detail
-					+ (bRestored
-						? FString()
-						: TEXT(":restore=") + RestoreError));
-				return false;
-			};
-		for (const FPlannedChange& Change :
-			Request.GetPlan()->GetChangeSet().GetChanges())
+		auto RestoreApplied = [&Resources](TArray<FState::FAppliedChange>& Items,
+			UE::UAI::Contract::FDiagnostic& OutRestoreError)
 		{
-			const FString IdentityKey =
-				Change.GetIdentity().GetCanonicalKey();
-			const FUeAgentGenericEffectBinding* Binding =
-				FindBinding(Bindings, IdentityKey);
-			if (!Binding
-				|| !Lease.GetLockKeys().Contains(IdentityKey)
-				|| !Change.GetAfter().IsValid())
+			for (int32 Index = Items.Num() - 1; Index >= 0; --Index)
 			{
-				return FailWithRestore(
-					TEXT("niagara_compound_effect_binding_missing"),
-					IdentityKey);
+				FState::FAppliedChange& Item = Items[Index];
+				UNiagaraNodeFunctionCall* Module = Item.Module.Get();
+				if (!Module || !Item.BeforeValue.IsValid())
+				{
+					OutRestoreError = NativeCompoundFact(TEXT("niagara_compound_restore_target_lost"),
+						!Module ? TEXT("The Niagara module needed to restore the input is no longer available.")
+							: TEXT("The previous Niagara input value needed for restoration is unavailable."),
+						!Module ? TEXT("/niagara_input/module_available") : TEXT("/niagara_input/before_value_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true),
+						Item.InputName, TEXT("rollback"));
+					OutRestoreError.TargetPath = Item.AssetPath;
+					return false;
+				}
+				bool bChanged = false;
+				if (!TryApplyCanonicalInput(*Module, Item.InputName, Item.BeforeValue.ToSharedRef(),
+					Resources, bChanged, OutRestoreError))
+				{
+					return NativeCaptureFailure(OutRestoreError, Item.InputName, TEXT("/niagara_input"), Item.AssetPath);
+				}
+			}
+			return true;
+		};
+		auto FailWithRestore = [&AppliedItems, &RestoreApplied, &OutError](UE::UAI::Contract::FDiagnostic Diagnostic)
+		{
+			UE::UAI::Contract::FDiagnostic RestoreError;
+			const bool bAttempted = !AppliedItems.IsEmpty();
+			const bool bRestored = !bAttempted || RestoreApplied(AppliedItems, RestoreError);
+			OutError = MoveTemp(Diagnostic);
+			OutError.RollbackAttempted = bAttempted;
+			OutError.RollbackSucceeded = bRestored;
+			OutError.Append(RestoreError);
+			return false;
+		};
+		for (const FPlannedChange& Change : Request.GetPlan()->GetChangeSet().GetChanges())
+		{
+			const FString IdentityKey = Change.GetIdentity().GetCanonicalKey();
+			const FUeAgentGenericEffectBinding* Binding = FindBinding(Bindings, IdentityKey);
+			if (!Binding || !Lease.GetLockKeys().Contains(IdentityKey) || !Change.GetAfter().IsValid())
+			{
+				const bool bBindingMissing = !Binding;
+				const bool bLockMissing = !Lease.GetLockKeys().Contains(IdentityKey);
+				auto Error = NativeCompoundFact(TEXT("niagara_compound_effect_binding_missing"),
+					bBindingMissing ? TEXT("The planned Niagara input change has no effect binding.")
+						: (bLockMissing ? TEXT("The Niagara input change is not covered by the acquired lock lease.")
+							: TEXT("The planned Niagara input change has no replacement value.")),
+					bBindingMissing ? TEXT("/change/effect_binding_available")
+						: (bLockMissing ? TEXT("/change/lock_covered") : TEXT("/change/after_value_available")),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true),
+					FString(), TEXT("niagara_apply"));
+				Error.TargetPath = Change.GetIdentity().GetOwnerId();
+				Error.ActualEvidence = MakeShared<FJsonValueString>(IdentityKey);
+				return FailWithRestore(MoveTemp(Error));
 			}
 			FUeAgentResolvedNiagaraCompoundInput Resolved;
-			FString ErrorCode;
-			FString Detail;
-			if (!TryResolveNiagaraCompoundInput(
-					Binding->GetCandidateBinding(),
-					Generation,
-					Resolved,
-					ErrorCode,
-					Detail)
-				|| !Resolved.Module
-				|| !Resolved.Asset)
+			UE::UAI::Contract::FDiagnostic ResolveError;
+			if (!TryResolveNiagaraCompoundInput(Binding->GetCandidateBinding(), Generation, Resolved, ResolveError))
 			{
-				return FailWithRestore(
-					ErrorCode.IsEmpty()
-						? TEXT(
-							"niagara_compound_input_pin_missing")
-						: ErrorCode,
-					Detail);
+				NativeCaptureFailure(ResolveError, FString(), TEXT("/niagara_input"), Change.GetIdentity().GetOwnerId());
+				return FailWithRestore(MoveTemp(ResolveError));
 			}
 			FUeAgentCanonicalValuePtr NativeBefore;
 			FUeAgentGenericReadError CaptureError;
-			if (!TryCaptureCanonicalInput(
-					*Resolved.Module,
-					Resolved.Input,
-					Resources,
-					NativeBefore,
-					CaptureError))
+			if (!TryCaptureCanonicalInput(*Resolved.Module, Resolved.Input, Resources, NativeBefore, CaptureError))
 			{
-				return FailWithRestore(
-					CaptureError.Code,
-					CaptureError.SubjectId
-					+ TEXT(":")
-					+ CaptureError.Detail);
+				NativeCaptureFailure(CaptureError, Resolved.Input.FullInputName, TEXT("/niagara_input"), Resolved.Asset->GetPathName());
+				return FailWithRestore(MoveTemp(CaptureError));
 			}
 			FState::FAppliedChange Applied;
 			Applied.Module = Resolved.Module;
 			Applied.InputName = Resolved.Input.FullInputName;
+			Applied.AssetPath = Resolved.Asset->GetPathName();
 			Applied.BeforeValue = MoveTemp(NativeBefore);
 			AppliedItems.Add(Applied);
 			bool bChanged = false;
-			FString NativeError;
-			if (!TryApplyCanonicalInput(
-					*Resolved.Module,
-					Resolved.Input.FullInputName,
-					Change.GetAfter().ToSharedRef(),
-					Resources,
-					bChanged,
-					NativeError))
+			UE::UAI::Contract::FDiagnostic NativeError;
+			OutResult = FUeAgentGenericEffectApplyResult();
+			if (!TryApplyCanonicalInput(*Resolved.Module, Resolved.Input.FullInputName,
+				Change.GetAfter().ToSharedRef(), Resources, bChanged, NativeError))
 			{
-				return FailWithRestore(
-					TEXT("niagara_compound_native_apply_failed"),
-					NativeError);
+				NativeCaptureFailure(NativeError, Resolved.Input.FullInputName, TEXT("/niagara_input"), Resolved.Asset->GetPathName());
+				return FailWithRestore(MoveTemp(NativeError));
 			}
-			if (bChanged)
-			{
-				MutatedKeys.Add(IdentityKey);
-			}
+			if (bChanged) MutatedKeys.Add(IdentityKey);
 			Assets.AddUnique(Resolved.Asset);
 		}
 		int64 SubjectGeneration = 0;
 		bool bOperationAlreadyApplied = false;
 		{
 			FScopeLock Lock(&State->Mutex);
-			if (State->AppliedByOperation.Contains(
-					Request.GetOperationId()))
+			if (State->AppliedByOperation.Contains(Request.GetOperationId()))
 			{
 				bOperationAlreadyApplied = true;
 			}
@@ -1806,31 +1763,25 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				Operation.AppliedChanges = MoveTemp(AppliedItems);
 				for (UObject* Asset : Assets)
 				{
-					Operation.Assets.Add(Asset);
+					FState::FAssetReference AssetReference;
+					AssetReference.Asset = Asset;
+					AssetReference.AssetPath = Asset->GetPathName();
+					Operation.Assets.Add(MoveTemp(AssetReference));
 				}
-				State->AppliedByOperation.Add(
-					Request.GetOperationId(),
-					MoveTemp(Operation));
-				State->OperationByGeneration.Add(
-					SubjectGeneration,
-					Request.GetOperationId());
+				State->AppliedByOperation.Add(Request.GetOperationId(), MoveTemp(Operation));
+				State->OperationByGeneration.Add(SubjectGeneration, Request.GetOperationId());
 			}
 		}
-		if (bOperationAlreadyApplied)
-		{
-			return FailWithRestore(
-				TEXT("niagara_compound_operation_already_applied"),
-				Request.GetOperationId());
-		}
+		if (bOperationAlreadyApplied) return FailWithRestore(OperationAlreadyApplied());
 		const bool bDidMutationStart = !MutatedKeys.IsEmpty();
-		OutResult = FUeAgentGenericEffectApplyResult(
-			SubjectGeneration,
-			MoveTemp(MutatedKeys),
-			{TEXT("niagara.compile"), TEXT("niagara.stack")},
-			true,
-			Request.GetOperationId(),
-			bDidMutationStart);
-		return OutResult.IsValid();
+		OutResult = FUeAgentGenericEffectApplyResult(SubjectGeneration, MoveTemp(MutatedKeys),
+			{TEXT("niagara.compile"), TEXT("niagara.stack")}, true, Request.GetOperationId(), bDidMutationStart);
+		if (!OutResult.IsValid())
+		{
+			OutError = OutResult.GetValidationDiagnostic();
+			return false;
+		}
+		return true;
 	}
 
 	bool FUeAgentNiagaraCompoundNativeHook::TryRollback(
@@ -1850,10 +1801,13 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					Applied.GetRollbackToken());
 			if (!Found)
 			{
-				OutError = FExecutionMutationError(
-					TEXT(
-						"niagara_compound_rollback_state_missing"),
-					Applied.GetRollbackToken());
+				OutError = NativeCompoundFact(TEXT("niagara_compound_rollback_state_missing"),
+					TEXT("The saved Niagara compound operation needed for rollback is unavailable."),
+					TEXT("/rollback/state_available"), MakeShared<FJsonValueBoolean>(false),
+					MakeShared<FJsonValueBoolean>(true), FString(), TEXT("rollback"));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Applied.GetRollbackToken());
+				OutError.RollbackAttempted = true;
+				OutError.RollbackSucceeded = false;
 				return false;
 			}
 			Operation = *Found;
@@ -1867,14 +1821,19 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			UNiagaraNodeFunctionCall* Module = Item.Module.Get();
 			if (!Module || !Item.BeforeValue.IsValid())
 			{
-				OutError = FExecutionMutationError(
-					TEXT(
-						"niagara_compound_rollback_target_lost"),
-					Item.InputName);
+				OutError = NativeCompoundFact(TEXT("niagara_compound_rollback_target_lost"),
+					!Module ? TEXT("The Niagara module needed to roll back the input is no longer available.")
+						: TEXT("The previous Niagara input value needed for rollback is unavailable."),
+					!Module ? TEXT("/niagara_input/module_available") : TEXT("/niagara_input/before_value_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true),
+					Item.InputName, TEXT("rollback"));
+				OutError.TargetPath = Item.AssetPath;
+				OutError.RollbackAttempted = true;
+				OutError.RollbackSucceeded = false;
 				return false;
 			}
 			bool bChanged = false;
-			FString NativeError;
+			UE::UAI::Contract::FDiagnostic NativeError;
 			if (!TryApplyCanonicalInput(
 					*Module,
 					Item.InputName,
@@ -1883,11 +1842,10 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 					bChanged,
 					NativeError))
 			{
-				OutError = FExecutionMutationError(
-					TEXT(
-						"niagara_compound_native_rollback_failed"),
-					NativeError);
-				return false;
+				OutError = NativeError;
+				OutError.RollbackAttempted = true;
+				OutError.RollbackSucceeded = false;
+				return NativeCaptureFailure(OutError, Item.InputName, TEXT("/niagara_input"), Item.AssetPath);
 			}
 		}
 		{
@@ -1920,12 +1878,11 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 				: nullptr;
 			if (!Found)
 			{
-				OutError = FExecutionMutationError(
-					TEXT(
-						"niagara_compound_settle_generation_missing"),
-					FString::Printf(
-						TEXT("%lld"),
-						Request.GetSubjectGeneration()));
+				OutError = NativeCompoundFact(TEXT("niagara_compound_settle_generation_missing"),
+					TEXT("No applied Niagara compound operation is registered for this settle request."),
+					TEXT("/settle/operation_available"), MakeShared<FJsonValueBoolean>(false),
+					MakeShared<FJsonValueBoolean>(true), FString(), TEXT("niagara_settle"));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), Request.GetSubjectGeneration()));
 				return false;
 			}
 			Operation = *Found;
@@ -1938,21 +1895,20 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 		bool bCompilationComplete = true;
 		TArray<FString> CompiledTargets;
 		TArray<FString> AssetPaths;
-		for (const TWeakObjectPtr<UObject>& WeakAsset :
-			Operation.Assets)
+		for (const FState::FAssetReference& AssetReference : Operation.Assets)
 		{
-			UObject* Asset = WeakAsset.Get();
+			UObject* Asset = AssetReference.Asset.Get();
 			if (!Asset)
 			{
-				OutError = FExecutionMutationError(
-					TEXT(
-						"niagara_compound_settle_target_lost"),
-					FString::Printf(
-						TEXT("%lld"),
-						Request.GetSubjectGeneration()));
+				OutError = NativeCompoundFact(TEXT("niagara_compound_settle_target_lost"),
+					TEXT("The Niagara asset needed to compile and settle the applied operation is no longer available."),
+					TEXT("/settle/asset_available"), MakeShared<FJsonValueBoolean>(false),
+					MakeShared<FJsonValueBoolean>(true), FString(), TEXT("niagara_settle"));
+				OutError.TargetPath = AssetReference.AssetPath;
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), Request.GetSubjectGeneration()));
 				return false;
 			}
-			FUeAgentResourceBudgetExceeded BudgetError;
+			FUeAgentResourceChargeError ChargeError;
 			if (!Resources.TryChargeMany(
 					{
 						{
@@ -1965,29 +1921,22 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 						},
 					},
 					Asset->GetPathName(),
-					BudgetError))
+					ChargeError))
 			{
-				OutError = FExecutionMutationError(
-					BudgetError.Code,
-					BudgetError.Path);
-				return false;
+				OutError = ChargeError;
+				return NativeCaptureFailure(OutError, FString(), FString(), AssetReference.AssetPath);
 			}
 			UeAgentNiagaraCompileValidation::FResult Compile;
 			UeAgentNiagaraStackValidation::FResult Stack;
-			FString NativeError;
+			UE::UAI::Contract::FDiagnostic NativeError;
 			if (!TryCompileNiagaraAsset(
 					*Asset,
 					Compile,
 					Stack,
 					NativeError))
 			{
-				OutError = FExecutionMutationError(
-					NativeError.IsEmpty()
-						? TEXT(
-							"niagara_compound_settle_failed")
-						: NativeError,
-					Asset->GetPathName());
-				return false;
+				OutError = MoveTemp(NativeError);
+				return NativeCaptureFailure(OutError, FString(), FString(), AssetReference.AssetPath);
 			}
 			bCompilationComplete =
 				bCompilationComplete
@@ -2033,10 +1982,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 			EvidenceId);
 		if (!OutReceipt.IsValid())
 		{
-			OutError = FExecutionMutationError(
-				TEXT(
-					"niagara_compound_settle_receipt_invalid"),
-				EvidenceId);
+			OutError = OutReceipt.GetValidationDiagnostic();
 			return false;
 		}
 		return true;

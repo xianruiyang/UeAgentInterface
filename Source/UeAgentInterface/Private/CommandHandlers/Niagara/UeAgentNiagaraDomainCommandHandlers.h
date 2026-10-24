@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "OperationOwners/Niagara/UeAgentNiagaraDomainService.h"
@@ -14,5 +16,5 @@ namespace UE::UAI::CommandHandlers::Niagara
 	UEAGENTINTERFACE_API bool TryCreateNiagaraCandidateCommandHandlers(
 		TSharedRef<OperationOwners::Niagara::IUeAgentNiagaraCandidateCommandService> Service,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

@@ -1,6 +1,5 @@
 {
   "schema": "uai.domain_adapter.world_simple_effect.test_fixture.v1",
-  "descriptor_count": 11,
   "native_operation_types": [
     "world.entity.create",
     "world.membership.update",

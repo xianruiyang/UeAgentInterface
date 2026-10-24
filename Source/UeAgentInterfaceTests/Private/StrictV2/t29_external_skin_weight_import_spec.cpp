@@ -1,9 +1,5 @@
 #include "Misc/AutomationTest.h"
 
-#if __has_include("DomainAdapters/ExternalImport/SkinWeight/UeAgentSkinWeightImportProvider.h") \
-	&& __has_include("OperationOwners/ExternalImport/SkinWeight/UeAgentSkinWeightImportCommandService.h") \
-	&& __has_include("Module/CommandRegistration/ExternalImport/SkinWeight/UeAgentSkinWeightImportRegistration.h")
-#define UAI_T29_EXTERNAL_SKIN_WEIGHT_IMPORT_AVAILABLE 1
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Core/Contract/UeAgentCommandJson.h"
@@ -12,11 +8,7 @@
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "Module/CommandRegistration/ExternalImport/SkinWeight/UeAgentSkinWeightImportRegistration.h"
 #include "OperationOwners/ExternalImport/SkinWeight/UeAgentSkinWeightImportCommandService.h"
-#else
-#define UAI_T29_EXTERNAL_SKIN_WEIGHT_IMPORT_AVAILABLE 0
-#endif
 
-#if UAI_T29_EXTERNAL_SKIN_WEIGHT_IMPORT_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::CommandContract;
@@ -52,15 +44,12 @@ namespace
 			{
 				OutError.Code = TEXT("fixture_t29_failed");
 				OutError.SubjectId = Request.CommandId;
-				OutError.Detail = TEXT("fixture failure remains typed");
+				OutError.InternalContext = TEXT("fixture failure remains typed");
 				OutError.TerminalStatus = TEXT("rejected");
 				return false;
 			}
 			OutResponse.PayloadJson =
 				TEXT("{\"command_id\":\"external.skin_weight_profile.import\",")
-				TEXT("\"independent_readback\":{},\"mutation_started\":true,")
-				TEXT("\"persistence_receipt_id\":\"fixture\",")
-				TEXT("\"phase_history\":[\"planning\",\"terminal\"],")
 				TEXT("\"terminal_status\":\"succeeded\"}");
 			return true;
 		}
@@ -151,27 +140,27 @@ namespace
 			: FString(TEXT("{}"));
 	}
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentStrictV2T29InventoryAndLegacyExitTest,
-	"UAI.StrictV2.T29.EXTERNAL.SKIN.WEIGHT.IMPORT.InventoryAndLegacyExit",
+	FUeAgentStrictV2T29ActiveCompositionTest,
+	"UAI.StrictV2.T29.EXTERNAL.SKIN.WEIGHT.IMPORT.ActiveComposition",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentStrictV2T29InventoryAndLegacyExitTest::RunTest(
+bool FUeAgentStrictV2T29ActiveCompositionTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T29_EXTERNAL_SKIN_WEIGHT_IMPORT_AVAILABLE
-	TestTrue(TEXT("T29 skin-weight import owner is implemented"), false);
-	return false;
-#else
 	const TArray<FUeAgentSkinWeightImportCommandRoute>& Routes =
 		GetSkinWeightImportCommandRoutes();
-	TestEqual(TEXT("T29 owns exactly one audited command"), Routes.Num(), 1);
-	if (Routes.Num() == 1)
+	const FUeAgentSkinWeightImportCommandRoute* Route = Routes.FindByPredicate(
+		[](const FUeAgentSkinWeightImportCommandRoute& Candidate)
+		{
+			return Candidate.CommandId == ExpectedCommandId;
+		});
+	TestNotNull(TEXT("the T29 route identity is present"), Route);
+	if (Route)
 	{
-		TestTrue(TEXT("the T29 route is valid"), Routes[0].IsValid());
-		TestEqual(TEXT("the T29 route identity is exact"), Routes[0].CommandId, ExpectedCommandId);
+		TestTrue(TEXT("the T29 route is valid"), Route->IsValid());
+		TestEqual(TEXT("the T29 route identity is exact"), Route->CommandId, ExpectedCommandId);
 	}
 
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> ProcessRegistry;
@@ -195,7 +184,6 @@ bool FUeAgentStrictV2T29InventoryAndLegacyExitTest::RunTest(
 			FString(TEXT("skin-weight-import-owner")));
 	}
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -205,10 +193,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T29ExactDispatchTest::RunTest(const FString& Parameters)
 {
-#if !UAI_T29_EXTERNAL_SKIN_WEIGHT_IMPORT_AVAILABLE
-	TestTrue(TEXT("T29 exact public dispatch is implemented"), false);
-	return false;
-#else
 	const TSharedRef<FFixtureService> Service = MakeShared<FFixtureService>();
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
@@ -263,7 +247,6 @@ bool FUeAgentStrictV2T29ExactDispatchTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("owner failure remains a business failure"), !Failure.IsOk() && !Failure.IsProtocolError());
 	TestTrue(TEXT("owner code is preserved"), Failure.GetErrorJson().Contains(TEXT("fixture_t29_failed")));
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -274,10 +257,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T29ProductionFailureCleanupTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T29_EXTERNAL_SKIN_WEIGHT_IMPORT_AVAILABLE
-	TestTrue(TEXT("T29 production failure semantics are implemented"), false);
-	return false;
-#else
 	TSharedPtr<IUeAgentSkinWeightImportCommandService> Service;
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
@@ -317,5 +296,4 @@ bool FUeAgentStrictV2T29ProductionFailureCleanupTest::RunTest(
 		TEXT("prewrite failure creates no target"),
 		StaticFindObject(UObject::StaticClass(), nullptr, *MissingTarget));
 	return !HasAnyErrors();
-#endif
 }

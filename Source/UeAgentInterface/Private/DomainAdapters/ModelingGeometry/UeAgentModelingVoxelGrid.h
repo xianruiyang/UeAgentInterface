@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "CoreMinimal.h"
 
@@ -26,6 +28,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 	};
 
 	UEAGENTINTERFACE_API const FString& GetSessionCommandId();
+	UEAGENTINTERFACE_API const FString& GetBeginCommandId();
 	UEAGENTINTERFACE_API const FString& GetApplyCommandId();
 	UEAGENTINTERFACE_API const TArray<FString>& GetCommandIds();
 	UEAGENTINTERFACE_API bool IsCommand(const FString& CommandId);
@@ -37,7 +40,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 		const FVector& AnchorLocal,
 		double CellSize,
 		FVoxelGridCellRange& OutRange,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API TArray<FVoxelGridCollisionBox>
 		BuildExactCoverBoxes(const TSet<FIntVector>& Cells);
@@ -45,7 +48,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometry::VoxelGrid
 	UEAGENTINTERFACE_API bool TryCreateMechanicsHandler(
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 #if WITH_DEV_AUTOMATION_TESTS
 	UEAGENTINTERFACE_API void ResetProcessSessionsForAutomation();

@@ -3,22 +3,34 @@
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringApplyProvider.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
-#include "Commands/Material/UeAgentHttpServer_MaterialOps.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Domains/Material/Authoring/UeAgentMaterialAuthoringCompileAndPersistence.h"
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringDescriptors.h"
 #include "Domains/Material/Authoring/UeAgentMaterialAuthoringState.h"
 #include "Domains/Material/Authoring/UeAgentMaterialGraphAuthoring.h"
+#include "Domains/Material/Authoring/UeAgentMaterialInstanceAuthoring.h"
+#include "DomainAdapters/MaterialNiagaraGraph/UeAgentMaterialNiagaraGraphNativeHook.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "MaterialEditingLibrary.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialExpression.h"
 #include "Materials/MaterialFunction.h"
+#include "Materials/MaterialInstanceConstant.h"
 #include "Misc/PackageName.h"
+#include "Misc/ScopeExit.h"
 #include "ObjectTools.h"
 #include "UObject/StrongObjectPtr.h"
+#include "UObject/UnrealType.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringAssetIdentity.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringPropertyValues.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringObjectApplyProvider.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringAssetRemovalStage.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentApplyWorkspaceContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceApply.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceInput.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceDependencyGraph.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceLoader.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
@@ -30,31 +42,40 @@ namespace UeAgentMaterialAuthoring
 		using namespace UeAgentApplyInputContract;
 		using namespace UeAgentAuthoringOperationApply;
 
-		void SetFailure(FOperationFailure& OutFailure, const FString& Code, const FString& Detail = FString())
+		UE::UAI::Contract::FDiagnostic AssetFailure(const TCHAR* Code, const FString& Reason,
+			const FString& Field, const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected,
+			const FJsonObject* Input = nullptr)
 		{
-			OutFailure = FOperationFailure();
-			OutFailure.ErrorCode = Code;
-			OutFailure.ErrorDetail = Detail.IsEmpty() ? Code : Detail;
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("authoring_apply"));
+			Error.PropertyPath = Field;
+			Error.ActualValue = Actual;
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.ExpectedValue = Expected;
+			if (Input) UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, *Input, Field);
+			return Error;
 		}
 
-		FString NormalizePackagePath(const FString& InPath)
-		{
-			FString Path = InPath.TrimStartAndEnd();
-			if (Path.Contains(TEXT("."))) Path = FPackageName::ObjectPathToPackageName(Path);
-			return Path;
-		}
+		void SetFailure(FOperationFailure& OutFailure, UE::UAI::Contract::FDiagnostic Diagnostic,
+    const FString& Subject = FString()) {
+  OutFailure.Diagnostic = MoveTemp(Diagnostic);
+  if (OutFailure.Diagnostic.SubjectId.IsEmpty()) OutFailure.Diagnostic.SubjectId = Subject;
+}
 
-		FString ToObjectPath(const FString& PackagePath)
-		{
-			const FString Name = FPackageName::GetLongPackageAssetName(PackagePath);
-			return Name.IsEmpty() ? PackagePath : FString::Printf(TEXT("%s.%s"), *PackagePath, *Name);
-		}
+
+
+
+
+
 
 		UObject* LoadAsset(const FString& InPath)
 		{
-			const FString PackagePath = NormalizePackagePath(InPath);
+			const FString PackagePath =
+				UeAgentAuthoringAssetIdentity::NormalizePackagePath(InPath);
 			if (PackagePath.IsEmpty()) return nullptr;
-			UObject* Object = StaticLoadObject(UObject::StaticClass(), nullptr, *ToObjectPath(PackagePath));
+			UObject* Object = StaticLoadObject(
+				UObject::StaticClass(),
+				nullptr,
+				*UeAgentAuthoringAssetIdentity::ToObjectPath(PackagePath));
 			return GetAssetKind(Object).IsEmpty() ? nullptr : Object;
 		}
 
@@ -70,50 +91,55 @@ namespace UeAgentMaterialAuthoring
 			return Published;
 		}
 
-		bool DeleteAsset(UObject* Asset, FString& OutError)
+		bool DeleteAsset(UObject* Asset, const FString& Target, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutError.Reset();
-			if (!Asset)
-			{
-				OutError = TEXT("material_delete_target_missing");
+			if (!Asset) {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_delete_target_missing"),
+					TEXT("No material asset object was supplied for deletion."), TEXT("authoring_apply"));
+				OutError.SourceKind = TEXT("native_result"); OutError.TargetPath = Target; OutError.PropertyPath = TEXT("asset");
+				OutError.ActualValuePresent = true; OutError.ActualValue = MakeShared<FJsonValueNull>();
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("material asset object"));
 				return false;
 			}
 			TGuardValue<bool> UnattendedGuard(GIsRunningUnattendedScript, true);
-			if (!ObjectTools::DeleteSingleObject(Asset, true))
-			{
-				OutError = TEXT("material_delete_blocked_by_references");
+			if (!ObjectTools::DeleteSingleObject(Asset, true)) {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_delete_rejected"),
+					TEXT("The editor rejected deletion of the material asset object."), TEXT("authoring_apply"),
+					TEXT("DeleteSingleObject returned false with reference checking enabled; its bool API does not distinguish deletion-policy and reference-check rejection."));
+				OutError.SourceKind = TEXT("native_result"); OutError.TargetPath = Target; OutError.PropertyPath = TEXT("deletion_succeeded");
+				OutError.ActualValuePresent = true; OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 				return false;
 			}
 			return true;
 		}
 
-		bool CompileAsset(UObject* Asset, FString& OutError)
+		bool CompileAsset(UObject* Asset, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutError.Reset();
-			if (UMaterial* Material = Cast<UMaterial>(Asset))
+			if (Asset)
 			{
-				UMaterialEditingLibrary::RecompileMaterial(Material);
-				TArray<TSharedPtr<FJsonValue>> Messages;
-				int32 ErrorCount = 0;
-				UeAgentMaterialOps::CollectMaterialCompileMessages(
-					Material,
-					UeAgentMaterialOps::ECompileMessageSeverityFilter::Error,
-					64,
-					Messages,
-					ErrorCount);
-				if (ErrorCount > 0)
+				using namespace UE::UAI::DomainAdapters::MaterialNiagaraGraph;
+				FMaterialNiagaraGraphCompileSettleReceipt Receipt;
+				FMaterialNiagaraGraphAdapterError Error;
+				if (!FMaterialNiagaraGraphNativeHook().TryCompileAndSettleMaterial(*Asset, Receipt, Error))
 				{
-					OutError = FString::Printf(TEXT("material_compile_failed:%d"), ErrorCount);
+					OutError = Cast<UMaterial>(Asset)
+						? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("material_compile_failed"), Error)
+						: Error;
 					return false;
 				}
 				return true;
 			}
-			if (UMaterialFunction* Function = Cast<UMaterialFunction>(Asset))
-			{
-				UMaterialEditingLibrary::UpdateMaterialFunction(Function, nullptr);
-				return true;
-			}
-			OutError = TEXT("material_compile_target_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(
+				TEXT("material_compile_target_invalid"), TEXT("The material compile target is unavailable."), TEXT("authoring_apply"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("/target/available");
+			OutError.ActualValuePresent = true;
+			OutError.ExpectedValuePresent = true;
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 			return false;
 		}
 
@@ -137,15 +163,16 @@ namespace UeAgentMaterialAuthoring
 		bool ParseFunctionSettings(
 			const TSharedPtr<const FJsonObject>& Extension,
 			FFunctionSettings& OutSettings,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutSettings = FFunctionSettings();
 			OutError.Reset();
 			const TSharedPtr<FJsonObject>* Settings = nullptr;
-			if (!Extension.IsValid() || !Extension->TryGetObjectField(TEXT("function_settings"), Settings)) return true;
-			if (!Settings || !Settings->IsValid())
+			if (!Extension.IsValid() || !Extension->HasField(TEXT("function_settings"))) return true;
+			if (!Extension->TryGetObjectField(TEXT("function_settings"), Settings) || !Settings || !Settings->IsValid())
 			{
-				OutError = TEXT("material_function_settings_invalid");
+				OutError = AssetFailure(TEXT("material_function_settings_invalid"), TEXT("function_settings must be an object."),
+					TEXT("function_settings"), Extension->TryGetField(TEXT("function_settings")), MakeShared<FJsonValueString>(TEXT("object")), Extension.Get());
 				return false;
 			}
 			if ((*Settings)->HasField(TEXT("description")))
@@ -154,7 +181,8 @@ namespace UeAgentMaterialAuthoring
 					TEXT("description"), OutSettings.Description);
 				if (!OutSettings.bHasDescription)
 				{
-					OutError = TEXT("material_function_description_invalid");
+					OutError = AssetFailure(TEXT("material_function_description_invalid"), TEXT("Material function description must be a string."),
+						TEXT("description"), (*Settings)->TryGetField(TEXT("description")), MakeShared<FJsonValueString>(TEXT("string")), Settings->Get());
 					return false;
 				}
 			}
@@ -164,7 +192,8 @@ namespace UeAgentMaterialAuthoring
 					TEXT("expose_to_library"), OutSettings.bExposeToLibrary);
 				if (!OutSettings.bHasExposeToLibrary)
 				{
-					OutError = TEXT("material_function_expose_to_library_invalid");
+					OutError = AssetFailure(TEXT("material_function_expose_to_library_invalid"), TEXT("Material function expose_to_library must be a boolean."),
+						TEXT("expose_to_library"), (*Settings)->TryGetField(TEXT("expose_to_library")), MakeShared<FJsonValueString>(TEXT("boolean")), Settings->Get());
 					return false;
 				}
 			}
@@ -172,37 +201,13 @@ namespace UeAgentMaterialAuthoring
 			{
 				if (Field.Key != TEXT("description") && Field.Key != TEXT("expose_to_library"))
 				{
-					OutError = TEXT("material_function_settings_unknown_field:") + Field.Key;
+					OutError = AssetFailure(TEXT("material_function_settings_unknown_field"),
+						FString::Printf(TEXT("Unknown material function setting '%s'; allowed settings are description and expose_to_library."), *Field.Key),
+						Field.Key, Field.Value, MakeShared<FJsonValueString>(TEXT("description or expose_to_library")), Settings->Get());
 					return false;
 				}
 			}
 			return true;
-		}
-
-		bool HasPropertyPath(
-			const TArray<TSharedPtr<FJsonValue>>& Properties,
-			const FString& PropertyPath)
-		{
-			for (const TSharedPtr<FJsonValue>& Value : Properties)
-			{
-				const TSharedPtr<FJsonObject>* Object = nullptr;
-				FString Candidate;
-				if (Value.IsValid() && Value->TryGetObject(Object) && Object && Object->IsValid()
-					&& (*Object)->TryGetStringField(TEXT("property_path"), Candidate)
-					&& Candidate.Equals(PropertyPath, ESearchCase::IgnoreCase))
-				{
-					return true;
-				}
-			}
-			return false;
-		}
-
-		void ApplyFunctionSettings(UMaterialFunction& Function, const FFunctionSettings& Settings)
-		{
-			Function.Modify();
-			if (Settings.bHasDescription) Function.Description = Settings.Description;
-			if (Settings.bHasExposeToLibrary) Function.bExposeToLibrary = Settings.bExposeToLibrary;
-			Function.MarkPackageDirty();
 		}
 
 		class FAssetLifecycleState final : public IReflectionOperationLifecycleState
@@ -215,22 +220,31 @@ namespace UeAgentMaterialAuthoring
 				UObject* InExisting,
 				UObject* InProposed,
 				TUniquePtr<FPreparedGraph> InGraph,
+				TArray<FInstanceParameterEdit> InInstanceEdits,
+				TSharedPtr<FJsonValue> InInstanceLayers,
 				FFunctionSettings InFunctionSettings,
 				bool bInCompile,
-				bool bInSave)
+				bool bInSave, const TSharedPtr<const FJsonObject>& InTarget, const TSharedPtr<const FJsonObject>& InExtension)
 				: PackagePath(MoveTemp(InPackagePath))
 				, AssetKind(MoveTemp(InAssetKind))
 				, Operation(InOperation)
 				, Existing(InExisting)
 				, Proposed(InProposed)
 				, Graph(MoveTemp(InGraph))
+				, InstanceEdits(MoveTemp(InInstanceEdits))
+				, InstanceLayers(MoveTemp(InInstanceLayers))
 				, FunctionSettings(MoveTemp(InFunctionSettings))
 				, bCompile(bInCompile)
 				, bSave(bInSave)
 			{
+				// This diagnostic wrapper only reads the original objects; retaining identity preserves source locations.
+				if (InTarget) SourceDocument->SetObjectField(TEXT("target"), ConstCastSharedPtr<FJsonObject>(InTarget));
+				if (InExtension) SourceDocument->SetObjectField(TEXT("provider_extension"), ConstCastSharedPtr<FJsonObject>(InExtension));
+				SourceLocations = UeAgentAuthoringDiagnostics::FScopedSourceLocations::CaptureProjection(*SourceDocument);
 			}
 
 			virtual FString GetTargetKey() const override { return PackagePath; }
+			virtual bool ShouldApplyPropertiesToActualRoot() const override { return AssetKind == TEXT("material_instance"); }
 			virtual EOperation GetResolvedOperation() const override { return Operation; }
 			virtual FReflectionRoot GetProposedRoot() const override
 			{
@@ -240,20 +254,79 @@ namespace UeAgentMaterialAuthoring
 			{
 				return FReflectionRoot::MakeObject(Actual ? Actual : Existing);
 			}
+			virtual bool CollectPropertyDescriptors(TArray<TSharedPtr<FJsonValue>>& Descriptors,
+				FOperationFailure& OutFailure) const override
+			{
+				if (!FunctionSettings.HasAny()) return true;
+				UeAgentAuthoringDiagnostics::FScopedSourceLocations Sources(&SourceDocument.Get(),
+					[this](const FString& Pointer) { return UeAgentAuthoringDiagnostics::FScopedSourceLocations::ResolveProjection(SourceLocations, Pointer); });
+				auto Merge = [&](const TCHAR* Path, const TCHAR* InputField, const TSharedRef<FJsonValue>& Input)
+				{
+					FProperty* Property = FindFProperty<FProperty>(UMaterialFunction::StaticClass(), Path);
+					UE::UAI::Contract::FDiagnostic Error;
+					UeAgentPropertyValueCodec::FOptions Codec;
+					Codec.bCompareStoredValues = true;
+					auto Alias = UeAgentAuthoringPropertyValues::FPropertyValueStorage::CreateInitialized(Property, Error);
+					if (!Alias || !UeAgentPropertyValueCodec::Decode(Property, Input, Alias->GetMutableValuePtr(), Proposed.Get(), Codec, Error))
+					{
+						if (Error.PropertyPath.IsEmpty()) Error.PropertyPath = Path;
+						const TSharedPtr<FJsonObject>* Extension = nullptr;
+						const TSharedPtr<FJsonObject>* Settings = nullptr;
+						if (SourceDocument->TryGetObjectField(TEXT("provider_extension"), Extension) && Extension && *Extension
+							&& (*Extension)->TryGetObjectField(TEXT("function_settings"), Settings) && Settings && *Settings)
+							UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, **Settings, InputField);
+						SetFailure(OutFailure, Error); return false;
+					}
+					bool bPresent = false;
+					for (const auto& DescriptorValue : Descriptors)
+					{
+						const auto Descriptor = DescriptorValue && DescriptorValue->Type == EJson::Object ? DescriptorValue->AsObject() : nullptr;
+						FString Candidate;
+						if (!Descriptor || !Descriptor->TryGetStringField(TEXT("property_path"), Candidate)
+							|| !Candidate.Equals(Path, ESearchCase::IgnoreCase)) continue;
+						bPresent = true;
+						auto Other = UeAgentAuthoringPropertyValues::FPropertyValueStorage::CreateInitialized(Property, Error);
+						if (!Other || !UeAgentPropertyValueCodec::Decode(Property, Descriptor->TryGetField(TEXT("value")),
+							Other->GetMutableValuePtr(), Proposed.Get(), Codec, Error))
+						{
+							if (Error.PropertyPath.IsEmpty()) Error.PropertyPath = Candidate;
+							UeAgentAuthoringDiagnostics::LocatePropertyValueSource(Error, *Descriptor);
+							SetFailure(OutFailure, Error); return false;
+						}
+						const auto Difference = UeAgentPropertyValueCodec::ComparePropertyValues(
+							Property, Alias->GetValuePtr(), Other->GetValuePtr(), Proposed.Get(), Codec);
+						if (!Difference.bEquivalent)
+					{
+						if (Difference.IsComparable())
+							Error = AssetFailure(TEXT("material_function_settings_property_conflict"),
+								FString::Printf(TEXT("Function setting and property '%s' specify different values."), *Candidate), Candidate, nullptr, nullptr);
+						Difference.WithPrefix(TEXT("/value")).ApplyTo(Error);
+						if (Error.PropertyPath.IsEmpty()) Error.PropertyPath = Candidate;
+						UeAgentAuthoringDiagnostics::LocatePropertyValueSource(Error, *Descriptor);
+						SetFailure(OutFailure, Error); return false;
+					}
+					}
+					if (!bPresent)
+					{
+						auto Descriptor = MakeShared<FJsonObject>();
+						Descriptor->SetStringField(TEXT("property_path"), Path);
+						Descriptor->SetField(TEXT("value"), UeAgentPropertyValueCodec::Encode(Property, Alias->GetValuePtr(), Proposed.Get(), Codec));
+						Descriptors.Add(MakeShared<FJsonValueObject>(Descriptor));
+					}
+					return true;
+				};
+				return (!FunctionSettings.bHasDescription || Merge(TEXT("Description"), TEXT("description"), MakeShared<FJsonValueString>(FunctionSettings.Description)))
+					&& (!FunctionSettings.bHasExposeToLibrary || Merge(TEXT("bExposeToLibrary"), TEXT("expose_to_library"), MakeShared<FJsonValueBoolean>(FunctionSettings.bExposeToLibrary)));
+			}
 
 			virtual bool CaptureRollback(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
 				if (Operation == EOperation::Update)
 				{
-					if (UMaterialFunction* Function = Cast<UMaterialFunction>(Existing))
-					{
-						OldDescription = Function->Description;
-						bOldExposeToLibrary = Function->bExposeToLibrary;
-					}
 					if (Graph.IsValid())
 					{
-						FString Error;
+						UE::UAI::Contract::FDiagnostic Error;
 						if (!Graph->CaptureRollback(*Existing, Error))
 						{
 							SetFailure(OutFailure, Error);
@@ -263,7 +336,7 @@ namespace UeAgentMaterialAuthoring
 					return true;
 				}
 				if (Operation != EOperation::Remove || !Existing) return true;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!RemovalStage.Capture(Existing, Error))
 				{
 					SetFailure(OutFailure, Error);
@@ -275,21 +348,27 @@ namespace UeAgentMaterialAuthoring
 			virtual bool ApplyProposed(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
+				UeAgentAuthoringDiagnostics::FScopedSourceLocations Sources(&SourceDocument.Get(),
+					[this](const FString& Pointer) { return UeAgentAuthoringDiagnostics::FScopedSourceLocations::ResolveProjection(SourceLocations, Pointer); });
+				if (auto* Instance = Cast<UMaterialInstanceConstant>(Proposed.Get()))
+				{
+					UE::UAI::Contract::FDiagnostic Error;
+					if (!ApplyInstanceParameters(*Instance, InstanceEdits, Error)
+						|| (InstanceLayers && !ApplyInstanceLayers(*Instance, InstanceLayers, Error)))
+					{ if (Error.TargetPath.IsEmpty()) Error.TargetPath = GetTargetKey(); SetFailure(OutFailure, Error); return false; }
+					return true;
+				}
 				if (Operation == EOperation::Remove) return true;
 				if (Operation == EOperation::Update)
 				{
 					if (Graph.IsValid())
 					{
-						FString Error;
+						UE::UAI::Contract::FDiagnostic Error;
 						if (!Graph->ApplyTo(*Existing, Error))
 						{
 							SetFailure(OutFailure, Error);
 							return false;
 						}
-					}
-					if (UMaterialFunction* Function = Cast<UMaterialFunction>(Existing))
-					{
-						ApplyFunctionSettings(*Function, FunctionSettings);
 					}
 				}
 				return true;
@@ -298,9 +377,11 @@ namespace UeAgentMaterialAuthoring
 			virtual bool ApplyLifecycle(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
+				UeAgentAuthoringDiagnostics::FScopedSourceLocations Sources(&SourceDocument.Get(),
+					[this](const FString& Pointer) { return UeAgentAuthoringDiagnostics::FScopedSourceLocations::ResolveProjection(SourceLocations, Pointer); });
 				if (Operation == EOperation::Remove)
 				{
-					FString Error;
+					UE::UAI::Contract::FDiagnostic Error;
 					if (!RemovalStage.Stage(Error))
 					{
 						SetFailure(OutFailure, Error);
@@ -312,11 +393,22 @@ namespace UeAgentMaterialAuthoring
 				if (Operation == EOperation::Update)
 				{
 					Actual = Existing;
+					if (auto* Instance = Cast<UMaterialInstanceConstant>(Actual))
+					{
+						UE::UAI::Contract::FDiagnostic Error;
+						if (!ApplyInstanceParameters(*Instance, InstanceEdits, Error)
+							|| (InstanceLayers && !ApplyInstanceLayers(*Instance, InstanceLayers, Error)))
+						{ if (Error.TargetPath.IsEmpty()) Error.TargetPath = GetTargetKey(); SetFailure(OutFailure, Error); return false; }
+					}
 					return true;
 				}
 				if (!Proposed.IsValid())
 				{
-					SetFailure(OutFailure, TEXT("material_proposed_asset_missing"));
+					auto Error = AssetFailure(TEXT("material_proposed_asset_missing"),
+						FString::Printf(TEXT("The prepared material asset for '%s' is no longer available for publication."), *PackagePath),
+						TEXT("proposed_asset_present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					Error.TargetPath = PackagePath; Error.SourceKind = TEXT("native_result");
+					SetFailure(OutFailure, Error);
 					return false;
 				}
 				UPackage* TargetPackage = CreatePackage(*PackagePath);
@@ -324,7 +416,12 @@ namespace UeAgentMaterialAuthoring
 					Proposed.Get(), TargetPackage, FPackageName::GetLongPackageAssetName(PackagePath));
 				if (!Actual)
 				{
-					SetFailure(OutFailure, TEXT("material_asset_publish_failed"));
+					auto Error = AssetFailure(TEXT("material_asset_publish_failed"),
+						FString::Printf(TEXT("UE could not publish the prepared %s asset at '%s'%s."), *AssetKind, *PackagePath,
+							TargetPackage ? TEXT("") : TEXT(" because the destination package could not be created")),
+						TEXT("asset_published"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					Error.TargetPath = PackagePath; Error.SourceKind = TEXT("native_result");
+					SetFailure(OutFailure, Error);
 					return false;
 				}
 				FAssetRegistryModule::AssetCreated(Actual);
@@ -336,9 +433,10 @@ namespace UeAgentMaterialAuthoring
 			{
 				OutFailure = FOperationFailure();
 				if (!bCompile || Operation == EOperation::Remove) return true;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!CompileAsset(Actual ? Actual : Existing, Error))
 				{
+					if (Error.TargetPath.IsEmpty()) Error.TargetPath = GetTargetKey();
 					SetFailure(OutFailure, Error);
 					return false;
 				}
@@ -349,8 +447,8 @@ namespace UeAgentMaterialAuthoring
 			{
 				OutFailure = FOperationFailure();
 				if (!bSave || Operation == EOperation::Remove) return true;
-				FString Error;
-				if (!UeAgentMaterialOps::SaveAssetPackage(Actual ? Actual : Existing, Error))
+				UE::UAI::Contract::FDiagnostic Error;
+				if (!SaveAssetPackage(Actual ? Actual : Existing, Error))
 				{
 					SetFailure(OutFailure, Error);
 					return false;
@@ -362,7 +460,7 @@ namespace UeAgentMaterialAuthoring
 				TArray<FPackageDurablePlan>& OutPlans,
 				FOperationFailure& OutFailure) const override
 			{
-				return BuildPackageDurablePlan(
+				if (!BuildPackageDurablePlan(
 					PackagePath,
 					PackagePath,
 					Operation == EOperation::Remove ? Existing
@@ -370,7 +468,13 @@ namespace UeAgentMaterialAuthoring
 					Operation == EOperation::Remove ? EPackageDurableIntent::Delete
 						: EPackageDurableIntent::Save,
 					OutPlans,
-					OutFailure);
+					OutFailure)) return false;
+				// Materials and functions can remain reachable through parent,
+				// function-call and layer references. Native package replacement
+				// reloads the package and repoints those existing referencers.
+				if (Operation == EOperation::Update)
+					OutPlans.Last().ReadbackPolicy = EPackageReadbackPolicy::ReplaceResidentPackage;
+				return true;
 			}
 
 			virtual bool BuildDomainExpectedReadRequests(
@@ -401,8 +505,8 @@ namespace UeAgentMaterialAuthoring
 				if (Graph.IsValid()) Graph->Commit();
 				if (Operation == EOperation::Remove && RemovalStage.IsStaged())
 				{
-					FString Error;
-					if (!DeleteAsset(RemovalStage.GetAsset(), Error))
+					UE::UAI::Contract::FDiagnostic Error;
+					if (!DeleteAsset(RemovalStage.GetAsset(), PackagePath, Error))
 					{
 						SetFailure(OutFailure, Error);
 						return false;
@@ -413,10 +517,77 @@ namespace UeAgentMaterialAuthoring
 				return true;
 			}
 
+			virtual bool RequiresCheckpointRollback() const override { return AssetKind == TEXT("material_instance") || (Graph.IsValid() && Graph->PreservesExisting()); }
+			virtual bool SupportsPersistentReadback() const override { return Operation == EOperation::Update; }
+			virtual bool ReleaseForPersistentReadback(FOperationFailure& OutFailure) override
+			{
+				if (Graph.IsValid()) Graph->ReleaseForPersistentReadback();
+				if (Proposed.IsValid())
+				{
+					// In-place graph updates use the resident asset as their proposed
+					// state. Only an independently owned scratch copy may be retired.
+					if (Proposed.Get() != Existing && Proposed.Get() != Actual)
+					{
+						Proposed->ClearFlags(RF_Public | RF_Standalone);
+						Proposed->MarkAsGarbage();
+					}
+					Proposed.Reset();
+				}
+				Existing = nullptr;
+				Actual = nullptr;
+				return true;
+			}
+			virtual bool RebindAfterPersistentReadback(FOperationFailure& OutFailure) override
+			{
+				Existing = LoadAsset(PackagePath);
+				Actual = Existing;
+				if (!Existing)
+				{
+					auto Error = AssetFailure(TEXT("material_persistent_reload_failed"),
+						FString::Printf(TEXT("Saved material asset '%s' could not be loaded for persistent readback."), *PackagePath),
+						TEXT("asset_loaded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					Error.TargetPath = PackagePath; Error.SourceKind = TEXT("native_result");
+					SetFailure(OutFailure, Error);
+					return false;
+				}
+				return true;
+			}
+			virtual bool BuildDomainBeforeReadRequests(
+				TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+				FOperationFailure& OutFailure) const override
+			{
+				UObject* Owner = Actual ? Actual : Existing;
+				UE::UAI::Contract::FDiagnostic Error;
+				if (!BuildAssetSnapshotReadRequest(Owner, PackagePath, AssetKind, false, OutRequests, Error))
+				{
+					SetFailure(OutFailure, Error);
+					return false;
+				}
+				const FMaterialExpressionCollection* Collection = Owner ? GetExpressionCollection(*Owner) : nullptr;
+				if (Cast<UMaterialInstanceConstant>(Owner)) return true;
+				if (!Collection) {
+					Error = AssetFailure(TEXT("material_before_expression_collection_missing"),
+						TEXT("Cannot capture the previous graph properties because the material expression collection is unavailable."),
+						TEXT("expression_collection_present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					Error.SourceKind = TEXT("native_result"); Error.TargetPath = PackagePath;
+					SetFailure(OutFailure, Error); return false;
+				}
+				for (const UMaterialExpression* Expression : Collection->Expressions)
+				{
+					if (Expression && !UeAgentAuthoringState::AppendEditableObjectPropertyReadRequests(
+						Expression, UeAgentAuthoringState::FEditablePropertyReadOptions(), OutRequests, Error))
+					{
+						SetFailure(OutFailure, Error);
+						return false;
+					}
+				}
+				return true;
+			}
+
 			virtual bool Rollback(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (Operation == EOperation::Update)
 				{
 					if (Graph.IsValid() && !Graph->Rollback(*Existing, Error))
@@ -424,18 +595,12 @@ namespace UeAgentMaterialAuthoring
 						SetFailure(OutFailure, Error);
 						return false;
 					}
-					if (UMaterialFunction* Function = Cast<UMaterialFunction>(Existing))
-					{
-						Function->Description = OldDescription;
-						Function->bExposeToLibrary = bOldExposeToLibrary;
-						Function->MarkPackageDirty();
-					}
 					Actual = Existing;
 					return true;
 				}
 				if (Operation == EOperation::Create || Operation == EOperation::Clone)
 				{
-					if (Actual && !DeleteAsset(Actual, Error))
+					if (Actual && !DeleteAsset(Actual, PackagePath, Error))
 					{
 						TArray<UObject*> Objects = { Actual };
 						if (ObjectTools::DeleteObjectsUnchecked(Objects) <= 0)
@@ -472,11 +637,19 @@ namespace UeAgentMaterialAuthoring
 				FOperationFailure& OutFailure) const
 			{
 				OutFailure = FOperationFailure();
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
+				if (!bExpectedAbsent) {
+					UeAgentAuthoringDiagnostics::FScopedSourceLocations Sources(&SourceDocument.Get(),
+						[this](const FString& Pointer) { return UeAgentAuthoringDiagnostics::FScopedSourceLocations::ResolveProjection(SourceLocations, Pointer); });
+					if (auto* Instance = Cast<UMaterialInstanceConstant>(Root);
+						Instance && !VerifyInstanceParameters(*Instance, InstanceEdits, Error)) {
+						SetFailure(OutFailure, Error); return false;
+					}
+				}
 				if (!BuildAssetSnapshotReadRequest(
 					Root, PackagePath, AssetKind, bExpectedAbsent, OutRequests, Error))
 				{
-					SetFailure(OutFailure, TEXT("material_snapshot_request_failed"), Error);
+					SetFailure(OutFailure, Error);
 					return false;
 				}
 				if (!bExpectedAbsent && Root && Graph.IsValid()
@@ -488,6 +661,8 @@ namespace UeAgentMaterialAuthoring
 			}
 
 			FString PackagePath;
+			TSharedRef<FJsonObject> SourceDocument = MakeShared<FJsonObject>();
+			TMap<FString, UE::UAI::Contract::FSourceLocation> SourceLocations;
 			FString AssetKind;
 			EOperation Operation;
 			UObject* Existing = nullptr;
@@ -495,16 +670,18 @@ namespace UeAgentMaterialAuthoring
 			FAssetRemovalStage RemovalStage;
 			UObject* Actual = nullptr;
 			TUniquePtr<FPreparedGraph> Graph;
+			TArray<FInstanceParameterEdit> InstanceEdits;
+			TSharedPtr<FJsonValue> InstanceLayers;
 			FFunctionSettings FunctionSettings;
-			FString OldDescription;
-			bool bOldExposeToLibrary = false;
 			bool bCompile = true;
 			bool bSave = false;
 		};
 
 		class FAssetLifecycle final : public IReflectionOperationLifecycle
 		{
+			FGraphApplyContext Context;
 		public:
+			explicit FAssetLifecycle(const FGraphApplyContext& InContext) : Context(InContext) {}
 			virtual bool PrepareLifecycle(
 				const FPrepareRequest& Request,
 				TUniquePtr<IReflectionOperationLifecycleState>& OutState,
@@ -514,18 +691,25 @@ namespace UeAgentMaterialAuthoring
 				OutFailure = FOperationFailure();
 				if (!Request.IsValid() || !Request.Input->Target.IsValid())
 				{
-					SetFailure(OutFailure, TEXT("material_apply_request_invalid"));
+					SetFailure(OutFailure, AssetFailure(TEXT("material_apply_request_invalid"),
+						!Request.IsValid() ? TEXT("The material operation request is incomplete.") : TEXT("The material operation requires a target object."),
+						!Request.IsValid() ? TEXT("request_valid") : TEXT("target_present"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 					return false;
 				}
 
 				FString PackagePath;
 				Request.Input->Target->TryGetStringField(TEXT("asset_path"), PackagePath);
-				PackagePath = NormalizePackagePath(PackagePath);
+				PackagePath =
+					UeAgentAuthoringAssetIdentity::NormalizePackagePath(PackagePath);
 				if (!FPackageName::IsValidLongPackageName(PackagePath)
 					|| FPackageName::GetLongPackageAssetName(PackagePath).IsEmpty()
 					|| (!PackagePath.Equals(TEXT("/Game")) && !PackagePath.StartsWith(TEXT("/Game/"))))
 				{
-					SetFailure(OutFailure, TEXT("invalid_asset_path"), PackagePath);
+					SetFailure(OutFailure, AssetFailure(TEXT("invalid_asset_path"),
+						TEXT("Material asset_path must name a valid asset package under /Game."),
+						TEXT("asset_path"), Request.Input->Target->TryGetField(TEXT("asset_path")),
+						MakeShared<FJsonValueString>(TEXT("/Game/<folder>/<asset>")), Request.Input->Target.Get()));
 					return false;
 				}
 
@@ -537,12 +721,18 @@ namespace UeAgentMaterialAuthoring
 				}
 				if ((Operation == EOperation::Create || Operation == EOperation::Clone) && Existing)
 				{
-					SetFailure(OutFailure, TEXT("asset_already_exists"), PackagePath);
+					SetFailure(OutFailure, AssetFailure(TEXT("asset_already_exists"),
+						FString::Printf(TEXT("Cannot %s material asset '%s': the destination already exists."), Operation == EOperation::Clone ? TEXT("clone") : TEXT("create"), *PackagePath),
+						TEXT("asset_path"), MakeShared<FJsonValueString>(PackagePath),
+						MakeShared<FJsonValueString>(TEXT("unused destination asset path")), Request.Input->Target.Get()));
 					return false;
 				}
 				if ((Operation == EOperation::Update || Operation == EOperation::Remove) && !Existing)
 				{
-					SetFailure(OutFailure, TEXT("asset_not_found"), PackagePath);
+					SetFailure(OutFailure, AssetFailure(TEXT("asset_not_found"),
+						FString::Printf(TEXT("Cannot %s material asset '%s': it could not be loaded."), Operation == EOperation::Remove ? TEXT("remove") : TEXT("update"), *PackagePath),
+						TEXT("asset_path"), MakeShared<FJsonValueString>(PackagePath),
+						MakeShared<FJsonValueString>(TEXT("existing loadable material asset")), Request.Input->Target.Get()));
 					return false;
 				}
 
@@ -558,7 +748,10 @@ namespace UeAgentMaterialAuthoring
 					Source = LoadAsset(SourcePath);
 					if (!Source)
 					{
-						SetFailure(OutFailure, TEXT("source_asset_not_found"), SourcePath);
+						SetFailure(OutFailure, AssetFailure(TEXT("source_asset_not_found"),
+							FString::Printf(TEXT("Material clone source '%s' could not be loaded."), *SourcePath),
+							TEXT("source_asset_path"), Request.Input->Target->TryGetField(TEXT("source_asset_path")),
+							MakeShared<FJsonValueString>(TEXT("existing loadable material asset")), Request.Input->Target.Get()));
 						return false;
 					}
 				}
@@ -566,17 +759,45 @@ namespace UeAgentMaterialAuthoring
 				if (AssetKind.IsEmpty()) AssetKind = InferredKind;
 				if (!InferredKind.IsEmpty() && AssetKind != InferredKind)
 				{
-					SetFailure(OutFailure, TEXT("material_asset_kind_conflict"), AssetKind + TEXT(" != ") + InferredKind);
+					SetFailure(OutFailure, AssetFailure(TEXT("material_asset_kind_conflict"),
+						TEXT("The requested asset kind differs from the existing target or clone source."),
+						TEXT("asset_kind"), MakeShared<FJsonValueString>(AssetKind), MakeShared<FJsonValueString>(InferredKind), Request.Input->Target.Get()));
 					return false;
 				}
-				if (AssetKind != TEXT("material") && AssetKind != TEXT("material_function"))
+				if (AssetKind != TEXT("material") && AssetKind != TEXT("material_function") && AssetKind != TEXT("material_instance"))
 				{
-					SetFailure(OutFailure, TEXT("material_asset_kind_invalid"), AssetKind);
+					SetFailure(OutFailure, AssetFailure(TEXT("material_asset_kind_invalid"),
+						TEXT("Material authoring requires asset_kind material, material_function, or material_instance."),
+						TEXT("asset_kind"), MakeShared<FJsonValueString>(AssetKind),
+						MakeShared<FJsonValueString>(TEXT("material, material_function, material_instance")), Request.Input->Target.Get()));
+					return false;
+				}
+				if (AssetKind == TEXT("material_instance") && Operation != EOperation::Update)
+				{
+					SetFailure(OutFailure, AssetFailure(TEXT("material_instance_authoring_update_required"),
+						TEXT("Material instance authoring supports only updating an existing instance."), TEXT("operation"),
+						MakeShared<FJsonValueString>(Operation == EOperation::Create ? TEXT("create") : Operation == EOperation::Clone ? TEXT("clone") : TEXT("remove")),
+						MakeShared<FJsonValueString>(TEXT("update"))));
 					return false;
 				}
 
 				FFunctionSettings FunctionSettings;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
+				TArray<FInstanceParameterEdit> InstanceEdits;
+				const TArray<TSharedPtr<FJsonValue>>* Parameters = nullptr;
+				if (Request.Input->ProviderExtension.IsValid() && Request.Input->ProviderExtension->TryGetArrayField(TEXT("instance_parameters"), Parameters))
+				{
+					auto* Instance = Cast<UMaterialInstanceConstant>(Existing);
+					if (!Instance || !Parameters) {
+						SetFailure(OutFailure, AssetFailure(TEXT("material_instance_parameters_invalid"),
+							!Instance ? TEXT("instance_parameters requires an existing MaterialInstanceConstant target.") : TEXT("instance_parameters requires an array."),
+							TEXT("instance_parameters"), MakeShared<FJsonValueString>(AssetKind),
+							MakeShared<FJsonValueString>(!Instance ? TEXT("MaterialInstanceConstant") : TEXT("array")), Request.Input->ProviderExtension.Get()));
+						return false;
+					}
+					if (!PrepareInstanceParameters(*Instance, *Parameters, InstanceEdits, Error))
+					{ SetFailure(OutFailure, Error); return false; }
+				}
 				if (!ParseFunctionSettings(Request.Input->ProviderExtension, FunctionSettings, Error))
 				{
 					SetFailure(OutFailure, Error);
@@ -584,14 +805,10 @@ namespace UeAgentMaterialAuthoring
 				}
 				if (FunctionSettings.HasAny() && AssetKind != TEXT("material_function"))
 				{
-					SetFailure(OutFailure, TEXT("material_function_settings_target_conflict"));
-					return false;
-				}
-				if ((FunctionSettings.bHasDescription && HasPropertyPath(Request.Input->Properties, TEXT("Description")))
-					|| (FunctionSettings.bHasExposeToLibrary
-						&& HasPropertyPath(Request.Input->Properties, TEXT("bExposeToLibrary"))))
-				{
-					SetFailure(OutFailure, TEXT("material_function_settings_property_conflict"));
+					SetFailure(OutFailure, AssetFailure(TEXT("material_function_settings_target_conflict"),
+						TEXT("function_settings can be applied only to a material_function asset."),
+						TEXT("function_settings"), MakeShared<FJsonValueString>(AssetKind),
+						MakeShared<FJsonValueString>(TEXT("material_function")), Request.Input->ProviderExtension.Get()));
 					return false;
 				}
 
@@ -611,14 +828,22 @@ namespace UeAgentMaterialAuthoring
 					{
 						Proposed = StaticDuplicateObject(Source, ScratchPackage, NAME_None, RF_Transactional);
 					}
+					else if (AssetKind == TEXT("material_instance"))
+					{
+						Proposed = StaticDuplicateObject(Existing, ScratchPackage, NAME_None, RF_Transactional);
+					}
 					if (!Proposed)
 					{
-						SetFailure(OutFailure, Error.IsEmpty() ? TEXT("material_proposed_asset_create_failed") : Error);
+						if (Error.IsEmpty()) {
+							Error = AssetFailure(TEXT("material_proposed_asset_create_failed"),
+								FString::Printf(TEXT("UE could not prepare a %s asset for '%s'%s."), *AssetKind, *PackagePath,
+									ScratchPackage ? TEXT("") : TEXT(" because the temporary package could not be created")),
+								TEXT("proposed_asset_created"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+							Error.SourceKind = TEXT("native_result");
+						}
+						Error.TargetPath = PackagePath;
+						SetFailure(OutFailure, Error);
 						return false;
-					}
-					if (UMaterialFunction* Function = Cast<UMaterialFunction>(Proposed))
-					{
-						if (Operation != EOperation::Update) ApplyFunctionSettings(*Function, FunctionSettings);
 					}
 				}
 
@@ -629,15 +854,19 @@ namespace UeAgentMaterialAuthoring
 				{
 					if (!GraphDocument || !GraphDocument->IsValid() || Operation == EOperation::Remove)
 					{
-						SetFailure(OutFailure, TEXT("material_graph_extension_invalid"));
+						SetFailure(OutFailure, AssetFailure(TEXT("material_graph_extension_invalid"),
+							Operation == EOperation::Remove ? TEXT("A remove operation cannot include a material graph edit.") : TEXT("Material graph extension must be an object."),
+							TEXT("graph"), Request.Input->ProviderExtension->TryGetField(TEXT("graph")),
+							MakeShared<FJsonValueString>(Operation == EOperation::Remove ? TEXT("no graph edit") : TEXT("object")), Request.Input->ProviderExtension.Get()));
 						return false;
 					}
 					UObject* ValidationOwner = Proposed;
 					TStrongObjectPtr<UObject> ValidationSeed;
 					if (Operation == EOperation::Update)
 					{
-						ValidationSeed.Reset(CreateFactorySeed(
-							AssetKind, ScratchPackage, NAME_None, RF_Transactional, Error));
+						ValidationSeed.Reset(Context.Policy == EGraphApplyPolicy::PreserveExisting
+							? StaticDuplicateObject(Existing, ScratchPackage, NAME_None, RF_Transactional)
+							: CreateFactorySeed(AssetKind, ScratchPackage, NAME_None, RF_Transactional, Error));
 						ValidationOwner = ValidationSeed.Get();
 					}
 					Graph = MakeUnique<FPreparedGraph>();
@@ -646,9 +875,15 @@ namespace UeAgentMaterialAuthoring
 						*GraphDocument,
 						PackagePath,
 						AssetKind == TEXT("material") ? TEXT("MaterialGraph") : TEXT("MaterialFunctionGraph"),
-						Error))
+						Error, Context))
 					{
-						SetFailure(OutFailure, Error.IsEmpty() ? TEXT("material_graph_preflight_failed") : Error);
+						if (!ValidationOwner && Error.IsEmpty()) {
+							Error = AssetFailure(TEXT("material_graph_preflight_failed"),
+								FString::Printf(TEXT("UE could not create the validation owner for material graph '%s'."), *PackagePath),
+								TEXT("validation_owner_present"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+							Error.SourceKind = TEXT("native_result");
+						}
+						SetFailure(OutFailure, Error);
 						return false;
 					}
 				}
@@ -660,9 +895,12 @@ namespace UeAgentMaterialAuthoring
 					Existing,
 					Proposed,
 					MoveTemp(Graph),
+					MoveTemp(InstanceEdits),
+					Request.Input->ProviderExtension.IsValid() ? Request.Input->ProviderExtension->TryGetField(TEXT("instance_layers")) : nullptr,
 					MoveTemp(FunctionSettings),
 					ReadBool(Request.Input->ProviderExtension, TEXT("compile"), true),
-					ReadBool(Request.Input->ProviderExtension, TEXT("save"), false));
+					ReadBool(Request.Input->ProviderExtension, TEXT("save"), false),
+					Request.Input->Target, Request.Input->ProviderExtension);
 				return true;
 			}
 		};
@@ -730,12 +968,11 @@ namespace UeAgentMaterialAuthoring
 			Result.ReflectionBaseline.UnknownFieldPolicy = TEXT("reject");
 			Result.ReflectionBaseline.ExternalReferencePolicy = TEXT("replace_reference_only");
 			Result.ReflectionBaseline.OwnedObjectPolicy = TEXT("create_or_locate_with_real_outer_then_recurse");
-			Result.ReflectionBaseline.RuntimeLimitsSource = TEXT("shared_runtime_limits");
 			Result.PropertyPayload.Mode = TEXT("reflection");
 			Result.PropertyPayload.PropertyPathField = TEXT("property_path");
 			Result.PropertyPayload.ValueField = TEXT("value");
 			Result.PropertyPayload.OptionalAssertionFields = {
-				TEXT("value_kind"), TEXT("struct_path"), TEXT("enum_path"), TEXT("element_type"),
+				TEXT("kind"), TEXT("struct_path"), TEXT("enum_path"), TEXT("element_type"),
 				TEXT("key_type"), TEXT("mapped_type"), TEXT("inner_type"), TEXT("fixed_length"), TEXT("allowed_class")
 			};
 			Result.PropertyPayload.OmittedPatchFieldPolicy = TEXT("preserve_current");
@@ -750,6 +987,8 @@ namespace UeAgentMaterialAuthoring
 				Field(TEXT("properties"), TEXT("intent"), TEXT("property_descriptor_list")),
 				Field(TEXT("graph"), TEXT("provider_extension"), TEXT("material_graph")),
 				Field(TEXT("function_settings"), TEXT("provider_extension"), TEXT("object")),
+				Field(TEXT("instance_parameters"), TEXT("provider_extension"), TEXT("array")),
+				Field(TEXT("instance_layers"), TEXT("provider_extension"), TEXT("object")),
 				Field(TEXT("compile"), TEXT("provider_extension"), TEXT("bool")),
 				Field(TEXT("save"), TEXT("provider_extension"), TEXT("bool")),
 			};
@@ -822,6 +1061,8 @@ namespace UeAgentMaterialAuthoring
 			Extension->SetBoolField(TEXT("compile"), Request.bCompile);
 			Extension->SetBoolField(TEXT("save"), Request.bSave);
 			if (Request.Graph.IsValid()) Extension->SetObjectField(TEXT("graph"), Request.Graph);
+			if (!Request.InstanceParameters.IsEmpty()) Extension->SetArrayField(TEXT("instance_parameters"), Request.InstanceParameters);
+			if (Request.InstanceLayers) Extension->SetField(TEXT("instance_layers"), Request.InstanceLayers);
 			if (Request.FunctionSettings.IsValid())
 			{
 				Extension->SetObjectField(TEXT("function_settings"), Request.FunctionSettings);
@@ -850,152 +1091,126 @@ namespace UeAgentMaterialAuthoring
 			const FString& ExpectedAssetKind,
 			const FString& ExpectedAssetPath,
 			FAssetApplyResult& OutResult,
-			const FString& RequestId)
+			const FString& RequestId,
+			TFunction<bool(FOperationFailure&)> FinalReadback = {},
+			const FGraphApplyContext& Context = {},
+			const TSharedPtr<IDurablePackageStager>& PackageStager = nullptr)
 		{
 			OutResult = FAssetApplyResult();
 			OutResult.Status = TEXT("failed");
-			UeAgentApplyWorkspaceContract::FContract WorkspaceContract;
-			if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(
-				AssetWorkspaceContractId, WorkspaceContract))
+			UeAgentAuthoringAssetWorkspaceInput::FRequest ResolveRequest;
+			ResolveRequest.WorkspaceContractId = AssetWorkspaceContractId;
+			ResolveRequest.Source = Source;
+			ResolveRequest.ExpectedAssetPath = ExpectedAssetPath;
+			ResolveRequest.Errors.ContractMissing = TEXT("material_workspace_contract_missing");
+			ResolveRequest.Errors.EntryInvalid = TEXT("material_workspace_entry_invalid");
+			ResolveRequest.Errors.AssetKindConflict =
+				TEXT("material_workspace_asset_kind_conflict");
+			ResolveRequest.Errors.AssetPathConflict =
+				TEXT("material_workspace_asset_path_conflict");
+			UeAgentAuthoringAssetWorkspaceInput::FResult Resolved;
+			if (!UeAgentAuthoringAssetWorkspaceInput::Resolve(ResolveRequest, Resolved))
 			{
-				OutResult.Phase = TEXT("registration");
-				OutResult.ErrorCode = TEXT("material_workspace_contract_missing");
+				OutResult.Phase = Resolved.Phase;
+				OutResult.Diagnostic = Resolved.Diagnostic;
 				return false;
 			}
-			UeAgentAuthoringWorkspaceLoader::FLoadResult LoadResult;
-			if (!UeAgentAuthoringWorkspaceLoader::LoadWorkspace(
-				WorkspaceContract,
-				Source,
-				LoadResult))
-			{
-				OutResult.Phase = TEXT("load");
-				OutResult.ErrorCode = LoadResult.ErrorCode;
-				OutResult.ErrorDetail = LoadResult.ErrorDetail;
-				return false;
-			}
-
-			const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit* AssetUnit =
-				LoadResult.Workspace.FindSingleUnit(TEXT("asset"));
-			const TSharedPtr<const FJsonObject> Document = AssetUnit ? AssetUnit->Document : nullptr;
-			const TSharedPtr<FJsonObject>* Target = nullptr;
-			FString OperationText;
+			const UeAgentApplyWorkspaceContract::FContract& WorkspaceContract =
+				Resolved.WorkspaceContract;
+			const UeAgentAuthoringWorkspaceLoader::FLoadResult& LoadResult = Resolved.Load;
+			const UeAgentApplyInputContract::FOperationInput& OperationInput = Resolved.Input;
 			FAssetApplyRequest Request;
-			if (!Document.IsValid()
-				|| !Document->TryGetStringField(TEXT("operation"), OperationText)
-				|| !ParseOperation(OperationText, Request.Operation)
-				|| !Document->TryGetObjectField(TEXT("target"), Target)
-				|| !Target || !Target->IsValid())
-			{
-				OutResult.Phase = TEXT("load");
-				OutResult.ErrorCode = TEXT("material_workspace_entry_invalid");
-				OutResult.ErrorDetail = OutResult.ErrorCode;
-				return false;
-			}
-			(*Target)->TryGetStringField(TEXT("asset_path"), Request.AssetPath);
-			Request.AssetPath = NormalizePackagePath(Request.AssetPath);
-			(*Target)->TryGetStringField(TEXT("asset_kind"), Request.AssetKind);
-			Request.AssetKind.TrimStartAndEndInline();
-			Request.AssetKind.ToLowerInline();
-			(*Target)->TryGetStringField(TEXT("source_asset_path"), Request.SourceAssetPath);
-			const FString NormalizedExpectedPath = NormalizePackagePath(ExpectedAssetPath);
+			Request.Operation = OperationInput.RequestedOperation;
+			Request.AssetPath = Resolved.AssetPath;
+			Request.AssetKind = Resolved.AssetKind;
+			Request.SourceAssetPath = Resolved.SourceAssetPath;
 			FString NormalizedExpectedKind = ExpectedAssetKind.TrimStartAndEnd();
 			NormalizedExpectedKind.ToLowerInline();
-			if (!NormalizedExpectedPath.IsEmpty()
-				&& !Request.AssetPath.Equals(NormalizedExpectedPath, ESearchCase::IgnoreCase))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = TEXT("material_workspace_asset_path_conflict");
-				OutResult.ErrorDetail = Request.AssetPath + TEXT(" != ") + NormalizedExpectedPath;
-				return false;
-			}
 			UObject* ExistingBeforeApply = LoadAsset(Request.AssetPath);
 			if (Request.AssetKind.IsEmpty()) Request.AssetKind = GetAssetKind(ExistingBeforeApply);
 			if (!NormalizedExpectedKind.IsEmpty()
 				&& !Request.AssetKind.Equals(NormalizedExpectedKind, ESearchCase::IgnoreCase))
 			{
 				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = TEXT("material_workspace_asset_kind_conflict");
-				OutResult.ErrorDetail = Request.AssetKind + TEXT(" != ") + NormalizedExpectedKind;
+				OutResult.Diagnostic = AssetFailure(TEXT("material_workspace_asset_kind_conflict"),
+					TEXT("The workspace asset kind does not match the kind required by this command."), TEXT("asset_kind"),
+					MakeShared<FJsonValueString>(Request.AssetKind), MakeShared<FJsonValueString>(NormalizedExpectedKind), OperationInput.Target.Get());
+				OutResult.Diagnostic.Stage = OutResult.Phase;
+				OutResult.Diagnostic.TargetPath = Request.AssetPath;
+				for (const auto& Unit : LoadResult.Workspace.Units) {
+					if (Unit.CanonicalUnitKey != Resolved.CanonicalUnitKey || !Unit.Document) continue;
+					UeAgentAuthoringDiagnostics::FScopedSourceLocations Sources(Unit.Document.Get(),
+						[&Unit](const FString& Pointer) { return Unit.ResolveDiagnosticSource(Pointer); });
+					UeAgentAuthoringDiagnostics::LocateAuthoringSource(OutResult.Diagnostic, *OperationInput.Target, TEXT("asset_kind"));
+					break;
+				}
 				return false;
 			}
-			const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
-			if (Document->TryGetArrayField(TEXT("properties"), Properties) && Properties)
+			Request.Properties = OperationInput.Properties;
+			const TSharedPtr<const FJsonObject> ProviderExtension =
+				OperationInput.ProviderExtension;
+			if (ProviderExtension.IsValid())
 			{
-				Request.Properties = *Properties;
-			}
-			const TSharedPtr<FJsonObject>* ProviderExtension = nullptr;
-			if (Document->TryGetObjectField(TEXT("provider_extension"), ProviderExtension)
-				&& ProviderExtension && ProviderExtension->IsValid())
-			{
-				(*ProviderExtension)->TryGetBoolField(TEXT("compile"), Request.bCompile);
-				(*ProviderExtension)->TryGetBoolField(TEXT("save"), Request.bSave);
+				ProviderExtension->TryGetBoolField(TEXT("compile"), Request.bCompile);
+				ProviderExtension->TryGetBoolField(TEXT("save"), Request.bSave);
 				const TSharedPtr<FJsonObject>* GraphObject = nullptr;
-				if ((*ProviderExtension)->TryGetObjectField(TEXT("graph"), GraphObject)
+				if (ProviderExtension->TryGetObjectField(TEXT("graph"), GraphObject)
 					&& GraphObject && GraphObject->IsValid())
 				{
 					Request.Graph = *GraphObject;
 				}
 				const TSharedPtr<FJsonObject>* FunctionSettings = nullptr;
-				if ((*ProviderExtension)->TryGetObjectField(TEXT("function_settings"), FunctionSettings)
+				if (ProviderExtension->TryGetObjectField(
+						TEXT("function_settings"), FunctionSettings)
 					&& FunctionSettings && FunctionSettings->IsValid())
 				{
 					Request.FunctionSettings = *FunctionSettings;
 				}
 			}
-			UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph Graph;
-			UeAgentAuthoringWorkspaceDependencyGraph::FGraphFailure GraphFailure;
-			if (!UeAgentAuthoringWorkspaceDependencyGraph::BuildDependencyGraph(
-				WorkspaceContract,
-				LoadResult.Workspace,
-				UeAgentAuthoringWorkspaceDependencyGraph::FDependencyInputs(),
-				Graph,
-				GraphFailure))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = GraphFailure.ErrorCode;
-				OutResult.ErrorDetail = GraphFailure.ErrorDetail;
-				return false;
-			}
-
 			const bool bExisted = LoadAsset(Request.AssetPath) != nullptr;
 			FBackendOptions BackendOptions;
+			BackendOptions.FinalReadback = MoveTemp(FinalReadback);
+			if (PackageStager.IsValid()) BackendOptions.PackageStager = PackageStager;
 			BackendOptions.bUseEditorTransaction = Request.Operation != EOperation::Remove;
 			BackendOptions.TransactionDescription = NSLOCTEXT(
 				"UeAgentInterface", "MaterialAssetWorkspaceApply", "Apply Material asset workspace");
-			UeAgentAuthoringWorkspaceTransaction::FExecutionOptions ExecutionOptions;
-			FOperationFailure RequestFailure;
-			if (!BuildApplyEntryExecutionOptions(RequestId, ExecutionOptions, RequestFailure))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = RequestFailure.ErrorCode;
-				OutResult.ErrorDetail = RequestFailure.ErrorDetail;
-				return false;
-			}
-			ExecutionOptions.bSaveWhenCallerControlled = Request.bSave;
 			FApplyWorkspaceResult ApplyResult;
-			const bool bApplied = ApplyWorkspace(
+			UeAgentAuthoringAssetWorkspaceApply::FFailure ApplyFailure;
+			FProviderRegistry LocalProviders;
+			const FProviderRegistry* Providers = &FProviderRegistry::Get();
+			if (Context.Policy == EGraphApplyPolicy::PreserveExisting)
+			{
+				UeAgentAuthoringOperationApply::ERegistrationResult Registered;
+				UE::UAI::Contract::FDiagnostic RegistrationError;
+				if (!LocalProviders.RegisterProvider(MakeApplyProvider(Context), Registered, RegistrationError))
+				{ OutResult.Phase = TEXT("preflight"); OutResult.Diagnostic = RegistrationError; return false; }
+				Providers = &LocalProviders;
+			}
+			const bool bApplied = UeAgentAuthoringAssetWorkspaceApply::Execute(
 				WorkspaceContract,
 				LoadResult.Workspace,
-				Graph,
-				UeAgentApplyInputContract::FRegistry::Get(),
-				FProviderRegistry::Get(),
-				ExecutionOptions,
+				*Providers,
+				RequestId,
+				Request.bSave,
 				BackendOptions,
-				ApplyResult);
+				ApplyResult,
+				ApplyFailure);
 			OutResult.UnitsChecked = ApplyResult.Preflight.UnitsChecked;
 			OutResult.MutationsApplied = ApplyResult.Execution.MutationsApplied;
 			OutResult.bRollbackAttempted = ApplyResult.Execution.bRollbackAttempted;
 			OutResult.bRollbackSucceeded = ApplyResult.Execution.bRollbackSucceeded;
 			if (!bApplied)
 			{
-				const bool bPreflight = !ApplyResult.Preflight.IsReady();
-				OutResult.Phase = bPreflight ? TEXT("preflight") : ApplyResult.Execution.Phase;
-				OutResult.ErrorCode = bPreflight ? ApplyResult.Preflight.CauseCode : ApplyResult.Execution.CauseCode;
-				if (OutResult.ErrorCode.IsEmpty())
-				{
-					OutResult.ErrorCode = bPreflight ? ApplyResult.Preflight.ErrorCode : ApplyResult.Execution.ErrorCode;
-				}
-				OutResult.ErrorDetail = bPreflight ? ApplyResult.Preflight.ErrorDetail : ApplyResult.Execution.ErrorDetail;
+				OutResult.Status = ApplyResult.Execution.Status;
+				OutResult.Phase = ApplyFailure.Phase;
+				OutResult.Diagnostic = ApplyFailure.Diagnostic;
+				if (OutResult.bRollbackAttempted && !OutResult.bRollbackSucceeded)
+					{
+        const auto Cause = OutResult.Diagnostic;
+        OutResult.Diagnostic.Code = TEXT("material_import_state_unknown");
+        OutResult.Diagnostic.PublicMessage = TEXT("Rollback did not restore a confirmed asset state.");
+        OutResult.Diagnostic.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(Cause);
+      }
 				return false;
 			}
 
@@ -1005,9 +1220,14 @@ namespace UeAgentMaterialAuthoring
 				? (bExisted ? EOperation::Update : EOperation::Create)
 				: Request.Operation;
 			OutResult.ResolvedOperation = OperationToString(ResolvedOperation);
-			OutResult.AssetPath = NormalizePackagePath(Request.AssetPath);
+			OutResult.AssetPath =
+				UeAgentAuthoringAssetIdentity::NormalizePackagePath(
+					Request.AssetPath);
 			OutResult.Asset = ResolvedOperation == EOperation::Remove ? nullptr : LoadAsset(OutResult.AssetPath);
-			OutResult.ObjectPath = OutResult.Asset ? OutResult.Asset->GetPathName() : ToObjectPath(OutResult.AssetPath);
+			OutResult.ObjectPath = OutResult.Asset
+				? OutResult.Asset->GetPathName()
+				: UeAgentAuthoringAssetIdentity::ToObjectPath(
+					OutResult.AssetPath);
 			OutResult.AssetKind = OutResult.Asset ? GetAssetKind(OutResult.Asset) : Request.AssetKind;
 			if (Request.Graph.IsValid())
 			{
@@ -1019,7 +1239,7 @@ namespace UeAgentMaterialAuthoring
 		}
 	}
 
-	bool RegisterApplyContracts(FString& OutError)
+	bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentApplyInputContract::ERegistrationResult InputResult;
 		if (!UeAgentApplyInputContract::FRegistry::Get().RegisterContract(
@@ -1029,11 +1249,12 @@ namespace UeAgentMaterialAuthoring
 			MakeWorkspaceContract(), WorkspaceResult, OutError);
 	}
 
-	TSharedRef<IApplyProvider> MakeApplyProvider()
+	TSharedRef<IApplyProvider> MakeApplyProvider(const FGraphApplyContext& Context)
 	{
-		static const TSharedRef<IReflectionOperationLifecycle> Lifecycle = MakeShared<FAssetLifecycle>();
+		const TSharedRef<IReflectionOperationLifecycle> Lifecycle = MakeShared<FAssetLifecycle>(Context);
 		UeAgentAuthoringObjectApply::FOptions Options;
 		Options.bAllowDomainAuthorizedOwners = true;
+		Options.bCompactValues = Context.Policy == EGraphApplyPolicy::PreserveExisting;
 		return MakeShared<FReflectionApplyProvider>(ApplyProviderId, Lifecycle, Options);
 	}
 
@@ -1045,7 +1266,7 @@ namespace UeAgentMaterialAuthoring
 			Request.AssetKind,
 			Request.AssetPath,
 			OutResult,
-			RequestId);
+			RequestId, Request.FinalReadback, Request.GraphContext, Request.PackageStager);
 	}
 
 	bool ApplyAssetWorkspace(

@@ -5,6 +5,8 @@
 #include "Core/ExecutionMutation/UeAgentExecutionMutation.h"
 #include "Core/Projection/UeAgentProjection.h"
 #include "Core/Verification/UeAgentVerification.h"
+#include "Dom/JsonValue.h"
+#include "Misc/ScopeExit.h"
 #include "Misc/ScopeLock.h"
 
 namespace UE::UAI::DomainAdapters::WorldSpatial
@@ -20,65 +22,130 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	using namespace UE::UAI::StateSemantic;
 	using namespace UE::UAI::Verification;
 
+	bool FUeAgentWorldSpatialPreflightFence::TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const
+	{
+		OutError = {};
+		if (!Entries.IsEmpty()) return true;
+		OutError = FDiagnostic::Failure(TEXT("world_spatial_preflight_fence_missing"),
+			TEXT("The preflight fence contains no target revision entries."), TEXT("native_execution"));
+		OutError.PropertyPath = TEXT("/entries");
+		OutError.SourceKind = TEXT("native_result");
+		OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
+		OutError.ActualValuePresent = true;
+		OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one target revision entry"));
+		return false;
+	}
+
+	bool FUeAgentWorldSpatialPreflightFence::IsValid() const
+	{
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
+	}
+
 	namespace
 	{
-		void SetExecutionError(
-			FUeAgentWorldSpatialExecutionError& OutError,
-			const FString& Code,
-			const FString& SubjectId = FString(),
-			const FString& Detail = FString())
+		FString InputSubject(
+			const FUeAgentWorldSpatialExecutionChainContract& Contract,
+			const TOptional<FUeAgentCandidateBinding>& Target,
+			const FUeAgentOperationContext& Context)
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
+			const auto& Execution = Context.GetExecutionContext();
+			if (Contract.GetFamilyId() == TEXT("graph_view")
+				|| Contract.GetFamilyId() == TEXT("graph_layout"))
+			{
+				return Execution.GetAssetEditorIdentity();
+			}
+			if (Contract.GetFamilyId() == TEXT("viewport_projection")
+				|| Contract.GetFamilyId() == TEXT("viewport_session_state"))
+			{
+				return Execution.GetViewportIdentity();
+			}
+			return Target.IsSet() ? Target->GetPublicRef() : Execution.GetWorldIdentity();
 		}
 
-		void CopyError(
-			const FUeAgentWorldSpatialExecutionError& Error,
-			FUeAgentQueryBindingError& OutError)
+		
+
+		FDiagnostic ChainFact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& PrivateSubject = FString())
 		{
-			OutError = {};
-			OutError.Code = Error.Code;
-			OutError.SubjectId = Error.SubjectId;
-			OutError.Detail = Error.Detail;
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("native_execution"), FString(), PrivateSubject);
+			Error.Schema = TEXT("uai.runtime.diagnostic/1");
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Path;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
 
-		void CopyError(
-			const FUeAgentWorldSpatialExecutionError& Error,
-			FUeAgentOperationBindingError& OutError)
+		FDiagnostic ChainDescriptorMismatch(const FString& Code, const FUeAgentDescriptorIdentity& Actual,
+			const FUeAgentDescriptorIdentity& Expected, const FString& Path)
 		{
-			OutError = {};
-			OutError.Code = Error.Code;
-			OutError.SubjectId = Error.SubjectId;
-			OutError.Detail = Error.Detail;
+			if (Actual.GetDescriptorId() != Expected.GetDescriptorId())
+				return ChainFact(Code, TEXT("Descriptor id differs from the descriptor captured for this stage."), Path + TEXT("/descriptor_id"),
+					MakeShared<FJsonValueString>(Actual.GetDescriptorId()), MakeShared<FJsonValueString>(Expected.GetDescriptorId()));
+			if (Actual.GetVersion() != Expected.GetVersion())
+				return ChainFact(Code, TEXT("Descriptor version differs from the version captured for this stage."), Path + TEXT("/version"),
+					MakeShared<FJsonValueNumber>(Actual.GetVersion()), MakeShared<FJsonValueNumber>(Expected.GetVersion()));
+			auto Error = ChainFact(Code, TEXT("Descriptor binding differs from the binding captured for this stage."), Path + TEXT("/binding_matches"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Actual.GetDescriptorHash());
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetDescriptorHash());
+			return Error;
 		}
 
-		void SetBindingError(
-			FUeAgentOperationBindingError& OutError,
-			const FString& Code,
-			const FString& SubjectId = FString(),
-			const FString& Detail = FString())
+		void SupplementChainTarget(FDiagnostic& Error, const FString& Target)
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
+			if (Error.IsEmpty()) return;
+			if (Error.TargetPath.IsEmpty()) Error.TargetPath = Target;
+			if (Error.SourceKind.IsEmpty() && Error.Source.SourceFile.IsEmpty()) Error.SourceKind = TEXT("native_result");
+			for (auto& Child : Error.Diagnostics) SupplementChainTarget(Child, Target);
+			if (Error.PublicCause)
+			{
+				auto Cause = MakeShared<FDiagnostic>(*Error.PublicCause);
+				SupplementChainTarget(*Cause, Target);
+				Error.PublicCause = MoveTemp(Cause);
+			}
 		}
+
+		void SupplementChainTargets(FDiagnostic& Error, const TArray<FUeAgentOperationTargetBinding>& Targets)
+		{
+			if (!Targets.IsEmpty()) SupplementChainTarget(Error, Targets[0].GetBinding().GetPublicRef());
+		}
+
+
+		void ForwardDiagnostic(const UE::UAI::Contract::FDiagnostic& Error, UE::UAI::Contract::FDiagnostic& OutError)
+		{
+			OutError = Error;
+		}
+
+		
+
+		
 
 		bool IsTypedRequestExact(
 			const FUeAgentWorldSpatialExecutionChainContract& Contract,
 			const FUeAgentWorldSpatialTypedRequestPtr& Request,
 			FUeAgentWorldSpatialExecutionError& OutError)
 		{
-			if (!Request.IsValid()
-				|| Request->GetTypeId() != Contract.GetTypedRequestId()
-				|| Request->GetFamilyId() != Contract.GetFamilyId())
+			if (!Request.IsValid())
 			{
-				SetExecutionError(
-					OutError,
-					TEXT("world_spatial_typed_request_mismatch"),
-					Contract.GetCapabilityId());
+				OutError = ChainFact(TEXT("world_spatial_typed_request_mismatch"),
+					TEXT("Decoder did not return a typed spatial request."), TEXT("/typed_request"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetCapabilityId());
+				return false;
+			}
+			if (Request->GetTypeId() != Contract.GetTypedRequestId())
+			{
+				OutError = ChainFact(TEXT("world_spatial_typed_request_mismatch"),
+					TEXT("Decoded spatial request has a different type from the execution-chain contract."), TEXT("/typed_request/type"),
+					MakeShared<FJsonValueString>(Request->GetTypeId()), MakeShared<FJsonValueString>(Contract.GetTypedRequestId()), Contract.GetCapabilityId());
+				return false;
+			}
+			if (Request->GetFamilyId() != Contract.GetFamilyId())
+			{
+				OutError = ChainFact(TEXT("world_spatial_typed_request_mismatch"),
+					TEXT("Decoded spatial request belongs to a different port family."), TEXT("/typed_request/family"),
+					MakeShared<FJsonValueString>(Request->GetFamilyId()), MakeShared<FJsonValueString>(Contract.GetFamilyId()), Contract.GetCapabilityId());
 				return false;
 			}
 			return true;
@@ -94,51 +161,73 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			return Targets[0].GetBinding();
 		}
 
-		bool TargetsEqual(
-			const TArray<FUeAgentOperationTargetBinding>& Left,
-			const TArray<FUeAgentOperationTargetBinding>& Right)
+		bool ValidateChainTargets(const TArray<FUeAgentOperationTargetBinding>& Left,
+			const TArray<FUeAgentOperationTargetBinding>& Right, FDiagnostic& OutError, const FString& Code)
 		{
-			const auto IsPreparedByC3O = [](
-				const FUeAgentOperationTargetBinding& Target)
+			const auto IsPreparedByC3O = [](const FUeAgentOperationTargetBinding& Target)
 			{
-				return Target.GetBinding().GetBindingEvidence()
-					.EndsWith(TEXT(":c3o-prepared"))
-					|| Target.GetBinding().GetBindingEvidence()
-						== TEXT("c3o-operation-preparation");
+				return Target.GetBinding().GetBindingEvidence().EndsWith(TEXT(":c3o-prepared"))
+					|| Target.GetBinding().GetBindingEvidence() == TEXT("c3o-operation-preparation");
 			};
 			if (Left.IsEmpty())
 			{
-				if (Right.IsEmpty()) return true;
-				for (const FUeAgentOperationTargetBinding& Target : Right)
+				for (int32 Index = 0; Index < Right.Num(); ++Index)
 				{
-					if (!IsPreparedByC3O(Target)) return false;
+					if (!IsPreparedByC3O(Right[Index]))
+					{
+						OutError = ChainFact(Code, TEXT("A target added after empty preflight targets lacks a C3O preparation binding."),
+							TEXT("/targets/") + FString::FromInt(Index) + TEXT("/preparation_binding"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						OutError.TargetPath = Right[Index].GetBinding().GetPublicRef();
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(Right[Index].GetBinding().GetBindingEvidence());
+						return false;
+					}
 				}
 				return true;
 			}
 			if (Left.Num() != Right.Num())
 			{
+				OutError = ChainFact(Code, TEXT("Target count differs from the targets captured during preflight."), TEXT("/targets/count"),
+					MakeShared<FJsonValueNumber>(Right.Num()), MakeShared<FJsonValueNumber>(Left.Num()));
 				return false;
 			}
 			for (int32 Index = 0; Index < Left.Num(); ++Index)
 			{
-				if (IsPreparedByC3O(Right[Index]))
+				const auto& Expected = Left[Index].GetBinding();
+				const auto& Actual = Right[Index].GetBinding();
+				const FString Path = TEXT("/targets/") + FString::FromInt(Index);
+				if (!IsPreparedByC3O(Right[Index]) && Left[Index].GetTicket().GetTicketId() != Right[Index].GetTicket().GetTicketId())
 				{
-					if (Left[Index].GetBinding().GetPublicRef()
-							!= Right[Index].GetBinding().GetPublicRef()
-						|| Left[Index].GetBinding().GetSummary()
-							.GetDescriptorIdentity()
-							!= Right[Index].GetBinding().GetSummary()
-								.GetDescriptorIdentity())
+					OutError = ChainFact(Code, TEXT("Target ticket differs from the ticket captured during preflight."), Path + TEXT("/ticket_binding_matches"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Right[Index].GetTicket().GetTicketId());
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Left[Index].GetTicket().GetTicketId());
+				}
+				else
+				{
+					const bool bPrepared = IsPreparedByC3O(Right[Index]);
+					const bool bDifferent = bPrepared
+						? Expected.GetPublicRef() != Actual.GetPublicRef() || Expected.GetSummary().GetDescriptorIdentity() != Actual.GetSummary().GetDescriptorIdentity()
+						: Expected != Actual;
+					if (!bDifferent) continue;
+					if (Expected.GetPublicRef() != Actual.GetPublicRef())
+						OutError = ChainFact(Code, TEXT("Target reference differs from the reference captured during preflight."), Path + TEXT("/ref"),
+							MakeShared<FJsonValueString>(Actual.GetPublicRef()), MakeShared<FJsonValueString>(Expected.GetPublicRef()));
+					else if (Expected.GetSummary().GetDescriptorIdentity() != Actual.GetSummary().GetDescriptorIdentity())
+						OutError = ChainDescriptorMismatch(Code, Actual.GetSummary().GetDescriptorIdentity(), Expected.GetSummary().GetDescriptorIdentity(), Path + TEXT("/descriptor"));
+					else
 					{
-						return false;
+						OutError = ChainFact(Code, TEXT("Native candidate binding differs from the binding captured during preflight."), Path + TEXT("/binding_matches"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						if (Actual.GetBindingEvidence() != Expected.GetBindingEvidence())
+						{
+							OutError.ActualEvidence = MakeShared<FJsonValueString>(Actual.GetBindingEvidence());
+							OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetBindingEvidence());
+						}
 					}
 				}
-				else if (Left[Index].GetTicket().GetTicketId()
-						!= Right[Index].GetTicket().GetTicketId()
-					|| Left[Index].GetBinding() != Right[Index].GetBinding())
-				{
-					return false;
-				}
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Actual.GetPublicRef();
+				return false;
 			}
 			return true;
 		}
@@ -228,6 +317,23 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		return Contracts;
 	}
 
+	FUeAgentWorldSpatialMutationResult::FUeAgentWorldSpatialMutationResult()
+		: FUeAgentWorldSpatialMutationResult(FString(), FString())
+	{
+	}
+
+	FUeAgentWorldSpatialMutationResult FUeAgentWorldSpatialMutationResult::NoMutation()
+	{
+		FUeAgentWorldSpatialMutationResult Result;
+		Result.FailureFacts = UE::UAI::ExecutionMutation::FMutationFacts::NoMutation();
+		return Result;
+	}
+
+	bool FUeAgentWorldSpatialMutationResult::IsNoMutationConfirmed() const
+	{
+		return FailureFacts.IsNoMutationConfirmed();
+	}
+
 	FUeAgentWorldSpatialMutationResult::FUeAgentWorldSpatialMutationResult(
 		FString InOperationId,
 		FString InMutationEvidenceId)
@@ -236,12 +342,28 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	{
 		OperationId.TrimStartAndEndInline();
 		MutationEvidenceId.TrimStartAndEndInline();
-		bValid = !OperationId.IsEmpty() && !MutationEvidenceId.IsEmpty();
+		if (OperationId.IsEmpty() || MutationEvidenceId.IsEmpty())
+		{
+			const bool bOperationMissing = OperationId.IsEmpty();
+			ValidationDiagnostic = FDiagnostic::Failure(TEXT("world_spatial_mutation_result_invalid"),
+				bOperationMissing ? TEXT("The mutation receipt is missing its operation identifier.")
+					: TEXT("The mutation receipt is missing its evidence identifier."), TEXT("native_execution"));
+			ValidationDiagnostic.PropertyPath = bOperationMissing ? TEXT("/operation_id") : TEXT("/mutation_evidence_id");
+			ValidationDiagnostic.Source.JsonPath = ValidationDiagnostic.PropertyPath;
+			ValidationDiagnostic.SourceKind = TEXT("native_result");
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(bOperationMissing ? OperationId : MutationEvidenceId);
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty identifier"));
+		}
 	}
 
 	const FString& FUeAgentWorldSpatialMutationResult::GetOperationId() const { return OperationId; }
 	const FString& FUeAgentWorldSpatialMutationResult::GetMutationEvidenceId() const { return MutationEvidenceId; }
-	bool FUeAgentWorldSpatialMutationResult::IsValid() const { return bValid; }
+	bool FUeAgentWorldSpatialMutationResult::TryValidate(FUeAgentWorldSpatialExecutionError& OutError) const
+	{
+		OutError = ValidationDiagnostic;
+		return !ValidationDiagnostic.IsValid();
+	}
+	bool FUeAgentWorldSpatialMutationResult::IsValid() const { return !ValidationDiagnostic.IsValid(); }
 
 	class FWorldSpatialQueryProvider final : public IUeAgentDomainQueryProvider
 	{
@@ -266,59 +388,72 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		{
 			OutSource.Reset();
 			OutError = {};
-			if (Descriptor.GetCapabilityId() != Contract.GetCapabilityId()
-				|| Descriptor.GetIdentity().GetDescriptorId() != Contract.GetDescriptorId()
-				|| Descriptor.GetProviderBinding() != Contract.GetBindingId())
+			ON_SCOPE_EXIT { SupplementChainTarget(OutError, Target.IsSet() ? Target->GetPublicRef() : FString()); };
+			if (Descriptor.GetCapabilityId() != Contract.GetCapabilityId())
 			{
-				OutError.Code = TEXT("world_spatial_query_binding_mismatch");
-				OutError.SubjectId = Contract.GetBindingId();
+				OutError = ChainFact(TEXT("world_spatial_query_binding_mismatch"),
+					TEXT("Query capability differs from the execution-chain capability."), TEXT("/descriptor/capability_id"),
+					MakeShared<FJsonValueString>(Descriptor.GetCapabilityId()), MakeShared<FJsonValueString>(Contract.GetCapabilityId()));
 				return false;
 			}
-			if (Context.GetRequestKind() != EUeAgentRequestKind::Query
-				|| Context.GetDescriptorIdentity() != Descriptor.GetIdentity())
+			if (Descriptor.GetIdentity().GetDescriptorId() != Contract.GetDescriptorId())
 			{
-				OutError.Code = TEXT("world_spatial_context_descriptor_mismatch");
-				OutError.SubjectId = Contract.GetDescriptorId();
+				OutError = ChainFact(TEXT("world_spatial_query_binding_mismatch"),
+					TEXT("Query descriptor id differs from the execution-chain descriptor."), TEXT("/descriptor/descriptor_id"),
+					MakeShared<FJsonValueString>(Descriptor.GetIdentity().GetDescriptorId()), MakeShared<FJsonValueString>(Contract.GetDescriptorId()));
+				return false;
+			}
+			if (Descriptor.GetProviderBinding() != Contract.GetBindingId())
+			{
+				OutError = ChainFact(TEXT("world_spatial_query_binding_mismatch"),
+					TEXT("Query provider binding differs from the execution-chain binding."), TEXT("/descriptor/provider_binding_matches"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetBindingId());
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Descriptor.GetProviderBinding());
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Contract.GetBindingId());
+				return false;
+			}
+			if (Context.GetRequestKind() != EUeAgentRequestKind::Query)
+			{
+				OutError = ChainFact(TEXT("world_spatial_context_descriptor_mismatch"),
+					TEXT("A spatial query requires a query request context."), TEXT("/context/request_kind"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Context.GetRequestKind())),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(EUeAgentRequestKind::Query)));
+				return false;
+			}
+			if (Context.GetDescriptorIdentity() != Descriptor.GetIdentity())
+			{
+				OutError = ChainDescriptorMismatch(TEXT("world_spatial_context_descriptor_mismatch"),
+					Context.GetDescriptorIdentity(), Descriptor.GetIdentity(), TEXT("/context/descriptor"));
 				return false;
 			}
 
 			FUeAgentWorldSpatialTypedRequestPtr Request;
 			FUeAgentWorldSpatialExecutionError Error;
 			if (!Decoder->TryDecode(
-					Contract,
-					CanonicalInput,
-					Context.GetResourceTracker(),
-					Request,
-					Error)
+					Contract, CanonicalInput, Context.GetResourceTracker(), Request, Error,
+					InputSubject(Contract, Target, Context))
 				|| !IsTypedRequestExact(Contract, Request, Error))
 			{
-				CopyError(Error, OutError);
+				OutError = Error.IsEmpty() ? ChainFact(TEXT("world_spatial_request_decode_failed"),
+					TEXT("The spatial request decoder failed without returning a diagnostic."), TEXT("/decoder/succeeded"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetTypedRequestId()) : MoveTemp(Error);
 				return false;
 			}
 
 			TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
-			if (!Readback->TryRead(
-					Contract,
-					Request.ToSharedRef(),
-					Target,
-					EUeAgentWorldSpatialReadPhase::Query,
-					Context,
-					Snapshot,
-					Error)
-				|| !Snapshot.IsValid())
+			const bool bRead = Readback->TryRead(
+				Contract, Request.ToSharedRef(), Target, EUeAgentWorldSpatialReadPhase::Query, Context, Snapshot, Error);
+			if (!bRead || !Snapshot.IsValid())
 			{
-				if (!Error.IsValid())
-				{
-					SetExecutionError(
-						Error,
-						TEXT("world_spatial_query_readback_missing"),
-						Contract.GetReadbackId());
-				}
-				CopyError(Error, OutError);
+				if (Error.IsEmpty())
+					Error = ChainFact(TEXT("world_spatial_query_readback_missing"),
+						bRead ? TEXT("Query readback succeeded without returning a snapshot.") : TEXT("Query readback failed without returning a diagnostic."),
+						bRead ? TEXT("/readback/snapshot") : TEXT("/readback/succeeded"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetReadbackId());
+				ForwardDiagnostic(Error, OutError);
 				return false;
 			}
-			OutSource = MakeShared<FUeAgentProjectionSourceValue>(
-				Snapshot.ToSharedRef());
+			OutSource = MakeShared<FUeAgentProjectionSourceValue>(Snapshot.ToSharedRef());
 			return true;
 		}
 
@@ -335,6 +470,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		{
 			FUeAgentWorldSpatialTypedRequestPtr Request;
 			TSharedPtr<const FUeAgentCanonicalSnapshot> Before;
+			FUeAgentWorldSpatialPreflightFence Fence;
 			TArray<FUeAgentOperationTargetBinding> Targets;
 			const FUeAgentOperationContext* Context = nullptr;
 		};
@@ -346,8 +482,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		};
 
 		FCriticalSection Mutex;
-		TMap<FString, FPrepared> PreparedByRequest;
-		TMap<FString, FExecuted> ExecutedByOperation;
+			TMap<FString, FPrepared> PreparedByRequest;
+			TMap<FString, FExecuted> ExecutedByOperation;
+			TSharedPtr<IUeAgentWorldSpatialMutationPort> Mutation;
 	};
 
 	namespace
@@ -370,43 +507,41 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			{
 				OutResult = {};
 				OutError = {};
-				if (!Request.IsValid()
-					|| Request.GetDraft().GetDescriptorIdentity()
-						!= Context.GetDescriptorIdentity()
-					|| Context.GetDescriptorIdentity().GetDescriptorId()
-						!= Contract.GetDescriptorId())
+				ON_SCOPE_EXIT { SupplementChainTarget(OutError, FString()); };
+				if (!Request.IsValid())
 				{
-					SetBindingError(
-						OutError,
-						TEXT("world_spatial_planning_context_mismatch"),
-						Contract.GetDescriptorId());
+					OutError = Request.GetValidationDiagnostic();
+					return false;
+				}
+				if (Request.GetDraft().GetDescriptorIdentity() != Context.GetDescriptorIdentity())
+				{
+					OutError = ChainDescriptorMismatch(TEXT("world_spatial_planning_context_mismatch"),
+						Request.GetDraft().GetDescriptorIdentity(), Context.GetDescriptorIdentity(), TEXT("/draft/descriptor"));
+					return false;
+				}
+				if (Context.GetDescriptorIdentity().GetDescriptorId() != Contract.GetDescriptorId())
+				{
+					OutError = ChainFact(TEXT("world_spatial_planning_context_mismatch"),
+						TEXT("Planning context descriptor differs from the execution-chain descriptor."), TEXT("/context/descriptor/descriptor_id"),
+						MakeShared<FJsonValueString>(Context.GetDescriptorIdentity().GetDescriptorId()), MakeShared<FJsonValueString>(Contract.GetDescriptorId()));
 					return false;
 				}
 				{
 					FScopeLock Lock(&State->Mutex);
-					const auto* Prepared = State->PreparedByRequest.Find(
-						Request.GetDraft().GetRequestId());
+					const auto* Prepared = State->PreparedByRequest.Find(Request.GetDraft().GetRequestId());
 					if (!Prepared || Prepared->Context != &Context)
 					{
-						SetBindingError(
-							OutError,
-							TEXT("world_spatial_planning_request_not_prepared"),
-							Request.GetDraft().GetRequestId());
+						OutError = ChainFact(TEXT("world_spatial_planning_request_not_prepared"),
+							Prepared ? TEXT("The prepared request belongs to a different operation context.") : TEXT("No preflight preparation exists for this planning request."),
+							Prepared ? TEXT("/prepared_request/context_matches") : TEXT("/prepared_request/present"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Request.GetDraft().GetRequestId());
 						return false;
 					}
 				}
 				FPlanningPreflightError Error;
-				if (!TryPlanChanges(
-						Request,
-						Context.GetResourceTracker(),
-						OutResult,
-						Error))
+				if (!TryPlanChanges(Request, Context.GetResourceTracker(), OutResult, Error))
 				{
-					SetBindingError(
-						OutError,
-						Error.GetCode(),
-						Error.GetIdentityKey(),
-						Error.GetDetail());
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -439,13 +574,37 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			{
 				OutReceipt = {};
 				OutError = {};
-				if (!Planning.IsReady() || !Planning.IsMutationPermitted()
-					|| !Planning.GetPlan().IsValid())
+				bool bNoMutationConfirmed = true;
+				ON_SCOPE_EXIT
 				{
-					SetBindingError(
-						OutError,
-						TEXT("world_spatial_execution_plan_not_ready"),
-						Contract.GetCapabilityId());
+					SupplementChainTargets(OutError, Targets);
+					if (!OutError.IsEmpty() && bNoMutationConfirmed)
+					{
+						OutReceipt = FExecutionReceipt(TEXT("world-spatial:") + Context.GetRequestId(),
+							EExecutionPhase::Terminal, EExecutionStatus::Failed, OutError,
+							EExecutionCancellationMode::NotRequested, false, {}, true, {},
+							{TEXT("executing"), TEXT("terminal")});
+					}
+				};
+				if (!Planning.IsReady())
+				{
+					OutError = ChainFact(TEXT("world_spatial_execution_plan_not_ready"),
+						TEXT("The planning result is not ready for execution."), TEXT("/planning/ready"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetCapabilityId());
+					return false;
+				}
+				if (!Planning.IsMutationPermitted())
+				{
+					OutError = ChainFact(TEXT("world_spatial_execution_plan_not_ready"),
+						TEXT("The planning result does not permit mutation."), TEXT("/planning/mutation_permitted"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetCapabilityId());
+					return false;
+				}
+				if (!Planning.GetPlan().IsValid())
+				{
+					OutError = ChainFact(TEXT("world_spatial_execution_plan_not_ready"),
+						TEXT("The planning result has no executable plan."), TEXT("/planning/plan"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetCapabilityId());
 					return false;
 				}
 				const FString RequestId = Planning.GetPlan()->GetRequestId();
@@ -453,68 +612,59 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				{
 					FScopeLock Lock(&State->Mutex);
 					auto* Found = State->PreparedByRequest.Find(RequestId);
-					if (!Found || Found->Context != &Context
-						|| !TargetsEqual(Found->Targets, Targets))
+					if (!Found || Found->Context != &Context)
 					{
-						SetBindingError(
-							OutError,
-							TEXT("world_spatial_execution_request_mismatch"),
-							RequestId);
+						OutError = ChainFact(TEXT("world_spatial_execution_request_mismatch"),
+							Found ? TEXT("The prepared request belongs to a different execution context.") : TEXT("No preflight preparation exists for this execution request."),
+							Found ? TEXT("/prepared_request/context_matches") : TEXT("/prepared_request/present"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), RequestId);
 						return false;
 					}
+					if (!ValidateChainTargets(Found->Targets, Targets, OutError, TEXT("world_spatial_execution_request_mismatch"))) return false;
 					Prepared = MoveTemp(*Found);
 					State->PreparedByRequest.Remove(RequestId);
 				}
 
 				FUeAgentWorldSpatialMutationResult MutationResult;
 				FUeAgentWorldSpatialExecutionError Error;
-				if (!Mutation->TryMutate(
-						Contract,
-						Prepared.Request.ToSharedRef(),
-						Targets,
-						Context,
-						MutationResult,
-						Error)
-					|| !MutationResult.IsValid())
+				bNoMutationConfirmed = false;
+				const bool bMutated = Mutation->TryMutate(
+					Contract, Prepared.Request.ToSharedRef(), Targets, Prepared.Fence, Context, MutationResult, Error);
+				bNoMutationConfirmed = !bMutated && MutationResult.IsNoMutationConfirmed();
+				FUeAgentWorldSpatialExecutionError ResultError;
+				const bool bResultValid = MutationResult.TryValidate(ResultError);
+				if (!bMutated || !bResultValid)
 				{
-					if (!Error.IsValid())
+					if (Error.IsEmpty())
 					{
-						SetExecutionError(
-							Error,
-							TEXT("world_spatial_mutation_result_invalid"),
-							Contract.GetNativeActionId());
+						Error = !bResultValid ? MoveTemp(ResultError) : ChainFact(TEXT("world_spatial_mutation_result_invalid"),
+							TEXT("The native mutation provider failed without returning a diagnostic."), TEXT("/mutation/succeeded"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetNativeActionId());
 					}
-					CopyError(Error, OutError);
+					ForwardDiagnostic(Error, OutError);
 					return false;
 				}
 
 				{
 					FScopeLock Lock(&State->Mutex);
-					if (State->ExecutedByOperation.Contains(
-							MutationResult.GetOperationId()))
+					if (State->ExecutedByOperation.Contains(MutationResult.GetOperationId()))
 					{
-						SetBindingError(
-							OutError,
-							TEXT("world_spatial_operation_id_duplicate"),
-							MutationResult.GetOperationId());
+						OutError = ChainFact(TEXT("world_spatial_operation_id_duplicate"),
+							TEXT("The mutation returned an operation id that already has an execution record."), TEXT("/executed_operation/already_registered"),
+							MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), MutationResult.GetOperationId());
 						return false;
 					}
-					State->ExecutedByOperation.Add(
-						MutationResult.GetOperationId(),
-						{MoveTemp(Prepared), MutationResult});
+					State->ExecutedByOperation.Add(MutationResult.GetOperationId(), {MoveTemp(Prepared), MutationResult});
 				}
-				OutReceipt = FExecutionReceipt(
-					MutationResult.GetOperationId(),
-					EExecutionPhase::Terminal,
-					EExecutionStatus::AppliedInMemory,
-					FString(),
-					EExecutionCancellationMode::NotRequested,
-					true,
-					{},
-					false,
-					{},
-					{TEXT("executing"), TEXT("terminal")});
-				return OutReceipt.IsValid();
+				OutReceipt = FExecutionReceipt(MutationResult.GetOperationId(),
+					EExecutionPhase::Terminal, EExecutionStatus::AppliedInMemory, FExecutionMutationError(),
+					EExecutionCancellationMode::NotRequested, true, {}, false, {}, {TEXT("executing"), TEXT("terminal")});
+				if (!OutReceipt.IsValid())
+				{
+					OutError = OutReceipt.GetValidationDiagnostic();
+					return false;
+				}
+				return true;
 			}
 
 		private:
@@ -549,72 +699,66 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			{
 				OutOutcome = {};
 				OutError = {};
-				if (!Receipt.IsValid()
-					|| Receipt.GetStatus() != EExecutionStatus::AppliedInMemory)
+				ON_SCOPE_EXIT { SupplementChainTargets(OutError, Targets); };
+				if (!Receipt.IsValid())
 				{
-					SetBindingError(
-						OutError,
-						TEXT("world_spatial_verification_receipt_invalid"),
-						Receipt.GetOperationId());
+					OutError = Receipt.GetValidationDiagnostic();
+					return false;
+				}
+				if (Receipt.GetStatus() != EExecutionStatus::AppliedInMemory)
+				{
+					OutError = ChainFact(TEXT("world_spatial_verification_receipt_invalid"),
+						TEXT("Spatial verification requires a receipt with AppliedInMemory status."), TEXT("/receipt/status"),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Receipt.GetStatus())),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(EExecutionStatus::AppliedInMemory)), Receipt.GetOperationId());
 					return false;
 				}
 
 				FUeAgentWorldSpatialOperationChain::FState::FExecuted Executed;
 				{
 					FScopeLock Lock(&State->Mutex);
-					auto* Found = State->ExecutedByOperation.Find(
-						Receipt.GetOperationId());
-					if (!Found || Found->Prepared.Context != &Context
-						|| !TargetsEqual(Found->Prepared.Targets, Targets))
+					auto* Found = State->ExecutedByOperation.Find(Receipt.GetOperationId());
+					if (!Found || Found->Prepared.Context != &Context)
 					{
-						SetBindingError(
-							OutError,
-							TEXT("world_spatial_verification_request_mismatch"),
-							Receipt.GetOperationId());
+						OutError = ChainFact(TEXT("world_spatial_verification_request_mismatch"),
+							Found ? TEXT("The execution record belongs to a different verification context.") : TEXT("No execution record exists for this verification receipt."),
+							Found ? TEXT("/executed_operation/context_matches") : TEXT("/executed_operation/present"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Receipt.GetOperationId());
 						return false;
 					}
+					if (!ValidateChainTargets(Found->Prepared.Targets, Targets, OutError, TEXT("world_spatial_verification_request_mismatch"))) return false;
 					Executed = MoveTemp(*Found);
 					State->ExecutedByOperation.Remove(Receipt.GetOperationId());
 				}
 
 				FUeAgentWorldSpatialExecutionError Error;
-				if (!Settle->TrySettle(
-						Contract, Executed.Mutation, Context, Error))
+				if (!Settle->TrySettle(Contract, Executed.Mutation, Context, Error))
 				{
-					CopyError(Error, OutError);
+					OutError = Error.IsEmpty() ? ChainFact(TEXT("world_spatial_settle_failed"),
+						TEXT("The settle provider failed without returning a diagnostic."), TEXT("/settle/succeeded"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetSettleBarrier()) : MoveTemp(Error);
 					return false;
 				}
 				TSharedPtr<const FUeAgentCanonicalSnapshot> After;
-				if (!Readback->TryRead(
-						Contract,
-						Executed.Prepared.Request.ToSharedRef(),
-						FirstReadTarget(Targets),
-						EUeAgentWorldSpatialReadPhase::Verification,
-						Context,
-						After,
-						Error)
-					|| !After.IsValid())
+				const bool bRead = Readback->TryRead(
+					Contract, Executed.Prepared.Request.ToSharedRef(), FirstReadTarget(Targets),
+					EUeAgentWorldSpatialReadPhase::Verification, Context, After, Error);
+				if (!bRead || !After.IsValid())
 				{
-					if (!Error.IsValid())
-					{
-						SetExecutionError(
-							Error,
-							TEXT("world_spatial_verification_readback_missing"),
-							Contract.GetReadbackId());
-					}
-					CopyError(Error, OutError);
+					if (Error.IsEmpty())
+						Error = ChainFact(TEXT("world_spatial_verification_readback_missing"),
+							bRead ? TEXT("Verification readback succeeded without returning a snapshot.") : TEXT("Verification readback failed without returning a diagnostic."),
+							bRead ? TEXT("/readback/snapshot") : TEXT("/readback/succeeded"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetReadbackId());
+					ForwardDiagnostic(Error, OutError);
 					return false;
 				}
 				if (!Comparator->TryCompare(
-						Contract,
-						Executed.Prepared.Request.ToSharedRef(),
-						*Executed.Prepared.Before,
-						*After,
-						Context,
-						OutOutcome,
-						Error))
+					Contract, Executed.Prepared.Request.ToSharedRef(), *Executed.Prepared.Before, *After, Context, OutOutcome, Error))
 				{
-					CopyError(Error, OutError);
+					OutError = Error.IsEmpty() ? ChainFact(TEXT("world_spatial_comparison_failed"),
+						TEXT("The spatial comparator failed without returning a diagnostic."), TEXT("/comparison/succeeded"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetOracleKind()) : MoveTemp(Error);
 					return false;
 				}
 				return true;
@@ -662,83 +806,73 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	{
 		OutRequest.Reset();
 		OutError = {};
-		if (Context.GetRequestKind() != EUeAgentRequestKind::Operation
-			|| Context.GetDescriptorIdentity().GetDescriptorId()
-				!= Contract.GetDescriptorId())
+		ON_SCOPE_EXIT { SupplementChainTargets(OutError, Targets); };
+		if (Context.GetRequestKind() != EUeAgentRequestKind::Operation)
 		{
-			SetBindingError(
-				OutError,
-				TEXT("world_spatial_context_descriptor_mismatch"),
-				Contract.GetDescriptorId());
+			OutError = ChainFact(TEXT("world_spatial_context_descriptor_mismatch"),
+				TEXT("Spatial operation planning requires an operation request context."), TEXT("/context/request_kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Context.GetRequestKind())),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(EUeAgentRequestKind::Operation)));
+			return false;
+		}
+		if (Context.GetDescriptorIdentity().GetDescriptorId() != Contract.GetDescriptorId())
+		{
+			OutError = ChainFact(TEXT("world_spatial_context_descriptor_mismatch"),
+				TEXT("Operation context descriptor differs from the execution-chain descriptor."), TEXT("/context/descriptor/descriptor_id"),
+				MakeShared<FJsonValueString>(Context.GetDescriptorIdentity().GetDescriptorId()), MakeShared<FJsonValueString>(Contract.GetDescriptorId()));
 			return false;
 		}
 
 		FUeAgentWorldSpatialTypedRequestPtr TypedRequest;
 		FUeAgentWorldSpatialExecutionError Error;
 		if (!Decoder->TryDecode(
-				Contract,
-				CanonicalInput,
-				Context.GetResourceTracker(),
-				TypedRequest,
-				Error)
+				Contract, CanonicalInput, Context.GetResourceTracker(), TypedRequest, Error,
+				InputSubject(Contract, FirstReadTarget(Targets), Context))
 			|| !IsTypedRequestExact(Contract, TypedRequest, Error))
 		{
-			CopyError(Error, OutError);
+			OutError = Error.IsEmpty() ? ChainFact(TEXT("world_spatial_request_decode_failed"),
+				TEXT("The spatial request decoder failed without returning a diagnostic."), TEXT("/decoder/succeeded"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetTypedRequestId()) : MoveTemp(Error);
 			return false;
 		}
 
 		TSharedPtr<const FUeAgentCanonicalSnapshot> Before;
-		if (!Readback->TryRead(
-				Contract,
-				TypedRequest.ToSharedRef(),
-				FirstReadTarget(Targets),
-				EUeAgentWorldSpatialReadPhase::Preflight,
-				Context,
-				Before,
-				Error)
-			|| !Before.IsValid())
+		const bool bRead = Readback->TryRead(
+			Contract, TypedRequest.ToSharedRef(), FirstReadTarget(Targets), EUeAgentWorldSpatialReadPhase::Preflight, Context, Before, Error);
+		if (!bRead || !Before.IsValid())
 		{
-			if (!Error.IsValid())
-			{
-				SetExecutionError(
-					Error,
-					TEXT("world_spatial_preflight_readback_missing"),
-					Contract.GetReadbackId());
-			}
-			CopyError(Error, OutError);
+			if (Error.IsEmpty())
+				Error = ChainFact(TEXT("world_spatial_preflight_readback_missing"),
+					bRead ? TEXT("Preflight readback succeeded without returning a snapshot.") : TEXT("Preflight readback failed without returning a diagnostic."),
+					bRead ? TEXT("/readback/snapshot") : TEXT("/readback/succeeded"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetReadbackId());
+			ForwardDiagnostic(Error, OutError);
 			return false;
 		}
 
 		TOptional<FChangeDraft> Change;
-		if (!TypedRequest->TryBuildChangeDraft(
-				*Before, Context, Change, Error)
-			|| !Change.IsSet() || !Change->IsValid())
+		const bool bBuiltChange = TypedRequest->TryBuildChangeDraft(*Before, Context, Change, Error);
+		if (!bBuiltChange || !Change.IsSet() || !Change->IsValid())
 		{
-			if (!Error.IsValid())
+			if (Error.IsEmpty())
 			{
-				SetExecutionError(
-					Error,
-					TEXT("world_spatial_change_draft_invalid"),
-					Contract.GetC6ChangeKind());
+				if (Change.IsSet() && !Change->IsValid()) Error = Change->GetValidationDiagnostic();
+				else Error = ChainFact(TEXT("world_spatial_change_draft_invalid"),
+					!Change.IsSet() ? TEXT("The typed request did not return a change draft.") : TEXT("The change-draft provider failed without returning a diagnostic."),
+					!Change.IsSet() ? TEXT("/change_draft") : TEXT("/change_draft/build_succeeded"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetC6ChangeKind());
 			}
-			CopyError(Error, OutError);
+			ForwardDiagnostic(Error, OutError);
 			return false;
 		}
 
-		FChangeSetDraft Draft(
-			Context.GetDescriptorIdentity(),
-			Context.GetRequestId(),
-			Context.GetIdempotencyKey(),
-			Before.ToSharedRef(),
-			{MoveTemp(Change.GetValue())});
+		FChangeSetDraft Draft(Context.GetDescriptorIdentity(), Context.GetRequestId(), Context.GetIdempotencyKey(),
+			Before.ToSharedRef(), {MoveTemp(Change.GetValue())});
 		OutRequest.Emplace(Draft, Context.GetCallerContext(), false);
 		if (!OutRequest->IsValid())
 		{
+			OutError = OutRequest->GetValidationDiagnostic();
 			OutRequest.Reset();
-			SetBindingError(
-				OutError,
-				TEXT("world_spatial_planning_request_invalid"),
-				Contract.GetCapabilityId());
 			return false;
 		}
 
@@ -747,15 +881,34 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			if (State->PreparedByRequest.Contains(Context.GetRequestId()))
 			{
 				OutRequest.Reset();
-				SetBindingError(
-					OutError,
-					TEXT("world_spatial_request_already_prepared"),
-					Context.GetRequestId());
+				OutError = ChainFact(TEXT("world_spatial_request_already_prepared"),
+					TEXT("A preflight preparation already exists for this request."), TEXT("/prepared_request/already_registered"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), Context.GetRequestId());
 				return false;
 			}
-			State->PreparedByRequest.Add(
-				Context.GetRequestId(),
-				{TypedRequest, Before, Targets, &Context});
+			FUeAgentWorldSpatialPreflightFence Fence;
+			const bool bNeedsFence = Contract.GetCapabilityId() == TEXT("graph.view.update")
+				|| Contract.GetCapabilityId() == TEXT("mesh.transform.bake")
+				|| Contract.GetCapabilityId() == TEXT("mesh.pivot.update")
+				|| Contract.GetCapabilityId() == TEXT("world.object_align")
+				|| Contract.GetCapabilityId() == TEXT("world.object_snap_to_surface")
+				|| Contract.GetCapabilityId() == TEXT("viewport.state.restore");
+			if (bNeedsFence && !State->Mutation.IsValid())
+			{
+				OutError = ChainFact(TEXT("world_spatial_mutation_port_missing"),
+					TEXT("The mutation port required to capture the preflight fence is unavailable."), TEXT("/mutation_port"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetCapabilityId());
+				return false;
+			}
+			if (bNeedsFence && (!State->Mutation->TryCaptureFence(
+				Contract, TypedRequest.ToSharedRef(), Targets, Context, Fence, Error) || !Fence.TryValidate(Error)))
+			{
+				OutError = Error.IsEmpty() ? ChainFact(TEXT("world_spatial_preflight_fence_failed"),
+					TEXT("The preflight fence provider failed without returning a diagnostic."), TEXT("/preflight_fence/capture_succeeded"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Contract.GetCapabilityId()) : MoveTemp(Error);
+				return false;
+			}
+			State->PreparedByRequest.Add(Context.GetRequestId(), {TypedRequest, Before, MoveTemp(Fence), Targets, &Context});
 		}
 		return true;
 	}
@@ -785,19 +938,11 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				MakeShared<FWorldSpatialQueryProvider>(
 					Contract, Decoder, Readback));
 		}
-		if (Registrations.Num() != 10)
-		{
-			SetExecutionError(
-				OutError,
-				TEXT("world_spatial_query_contract_count_invalid"));
-			return false;
-		}
 		FUeAgentQueryBindingError Error;
 		if (!FUeAgentDomainQueryProviderRegistry::TryCreate(
 				MoveTemp(Registrations), OutRegistry, Error))
 		{
-			SetExecutionError(
-				OutError, Error.Code, Error.SubjectId, Error.Detail);
+			OutError = Error;
 			return false;
 		}
 		return true;
@@ -823,6 +968,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			}
 			const TSharedRef<FUeAgentWorldSpatialOperationChain::FState, ESPMode::ThreadSafe>
 				State = MakeShared<FUeAgentWorldSpatialOperationChain::FState, ESPMode::ThreadSafe>();
+			State->Mutation = Mutation;
 			const TSharedRef<IUeAgentOperationPlanner> Planner =
 				MakeShared<FWorldSpatialPlanner>(Contract, State);
 			const TSharedRef<IUeAgentOperationExecutor> Executor =
@@ -839,14 +985,6 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					Planner,
 					Executor,
 					Verifier)));
-		}
-		if (OutChains.Num() != 12)
-		{
-			OutChains.Reset();
-			SetExecutionError(
-				OutError,
-				TEXT("world_spatial_operation_contract_count_invalid"));
-			return false;
 		}
 		return true;
 	}

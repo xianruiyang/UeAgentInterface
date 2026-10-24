@@ -13,7 +13,7 @@ bool FUeAgentAssetDestructiveImportBoundaryTest::RunTest(
 	(void)Parameters;
 	TSharedPtr<UE::UAI::DomainAdapters::AssetDestructiveImport::
 		IUeAgentAssetDeleteOwner> Owner;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	TestFalse(
 		TEXT("domain owner rejects an empty durability/authority configuration"),
 		UE::UAI::DomainAdapters::AssetDestructiveImport::TryCreateAssetDeleteOwner(
@@ -21,7 +21,7 @@ bool FUeAgentAssetDestructiveImportBoundaryTest::RunTest(
 	TestFalse(TEXT("invalid configuration creates no owner"), Owner.IsValid());
 	TestEqual(
 		TEXT("invalid configuration has a typed failure"),
-		Error,
+		Error.Code,
 		FString(TEXT("asset_delete_owner_config_invalid")));
 	return !HasAnyErrors();
 }

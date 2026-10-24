@@ -78,9 +78,7 @@ namespace UE::UAI::HjsonWorkspace
 			FUeAgentCanonicalValuePtr OrderValue;
 			if (!TryIntegerValue(Item.Order, Resources, OrderValue, SemanticError))
 			{
-				OutError.Set(
-					TEXT("semantic_surface_order_value_failed"),
-					SemanticError.Code);
+				OutError.SetFailure(SemanticError, Item.Identity, TEXT("/order"));
 				return false;
 			}
 			OrderingValues.Add(Item.Identity, OrderValue.ToSharedRef());
@@ -122,7 +120,7 @@ namespace UE::UAI::HjsonWorkspace
 					RoleValue,
 					SemanticError))
 			{
-				OutError.Set(TEXT("semantic_surface_endpoint_value_failed"));
+				OutError.SetFailure(SemanticError, Endpoint.Identity, TEXT("/role"));
 				return false;
 			}
 			Values.Add(TEXT("role"), RoleValue.ToSharedRef());
@@ -155,7 +153,7 @@ namespace UE::UAI::HjsonWorkspace
 					TypeValue,
 					SemanticError))
 			{
-				OutError.Set(TEXT("semantic_surface_relation_value_failed"));
+				OutError.SetFailure(SemanticError, Relation.Identity, TEXT("/relation_type"));
 				return false;
 			}
 			Values.Add(TEXT("relation_type"), TypeValue.ToSharedRef());
@@ -205,7 +203,7 @@ namespace UE::UAI::HjsonWorkspace
 				KindValue,
 				SemanticError))
 		{
-			OutError.Set(TEXT("semantic_surface_target_value_failed"));
+			OutError.SetFailure(SemanticError, TargetId, TEXT("/kind"));
 			return false;
 		}
 		TargetValues.Add(TEXT("kind"), KindValue.ToSharedRef());

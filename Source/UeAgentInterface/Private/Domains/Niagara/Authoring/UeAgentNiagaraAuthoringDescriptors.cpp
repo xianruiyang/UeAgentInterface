@@ -15,7 +15,7 @@ namespace UeAgentNiagaraAuthoring
 		bool RegisterAssetIdentity(
 			const TCHAR* ModelId,
 			const TCHAR* TargetKind,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringIdentity::FModelDescriptor Model;
 			Model.ModelId = ModelId;
@@ -37,7 +37,7 @@ namespace UeAgentNiagaraAuthoring
 			const TCHAR* TargetKind,
 			const TArray<UeAgentAuthoringIdentity::FSelectorDescriptor>& Selectors,
 			const TArray<UeAgentAuthoringIdentity::FKeyPattern>& Patterns,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringIdentity::FModelDescriptor Model;
 			Model.ModelId = ModelId;
@@ -55,7 +55,7 @@ namespace UeAgentNiagaraAuthoring
 			const UeAgentAuthoringSemanticRegistry::EDefaultSourceKind DefaultSource,
 			const TCHAR* DefaultAccessor,
 			const TArray<FString>& Capabilities,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringSemanticRegistry::FSemanticDescriptor Semantic;
 			Semantic.SemanticId = SemanticId;
@@ -77,7 +77,7 @@ namespace UeAgentNiagaraAuthoring
 		}
 	}
 
-	bool RegisterDescriptors(FString& OutError)
+	bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!RegisterAssetIdentity(TEXT("niagara_asset_identity"), TEXT("niagara_asset"), OutError)
 			|| !RegisterAssetIdentity(TEXT("niagara_system_identity"), TEXT("niagara_system"), OutError)

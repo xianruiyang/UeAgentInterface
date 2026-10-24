@@ -12,16 +12,7 @@ namespace
 
 	FUeAgentResourceTracker MakeResources()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 4096},
-			{EUeAgentResourceDimension::Items, 4096},
-			{EUeAgentResourceDimension::ReferenceEdges, 4096},
-			{EUeAgentResourceDimension::WorkUnits, 32768},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 8 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	FUeAgentCanonicalValueRef RequireString(

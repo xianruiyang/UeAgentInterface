@@ -1,6 +1,7 @@
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Core/StateSemantic/UeAgentStateRevisionJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -31,15 +32,78 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			bool bPrimitiveOutput = false;
 		};
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
+		bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = TEXT(""))
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject; return false; }
+
+		TSharedPtr<FJsonValue> NumberFact(const double Value)
 		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
-			return false;
+			return FMath::IsFinite(Value) ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Value))
+				: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(FString::Printf(TEXT("%.17g"), Value)));
+		}
+
+		TSharedPtr<FJsonValue> NumberArrayFact(const TArray<double>& Values)
+		{
+			TArray<TSharedPtr<FJsonValue>> Items;
+			for (const double Value : Values) Items.Add(NumberFact(Value));
+			return MakeShared<FJsonValueArray>(MoveTemp(Items));
+		}
+
+		TSharedPtr<FJsonValue> JsonFact(const TSharedPtr<FJsonValue>& Value, const bool bIncludeScalar = true)
+		{
+			if (!Value.IsValid()) return MakeShared<FJsonValueNull>();
+			if (bIncludeScalar && Value->Type == EJson::Number) return NumberFact(Value->AsNumber());
+			if (bIncludeScalar && (Value->Type == EJson::Null || Value->Type == EJson::Boolean || Value->Type == EJson::String)) return Value;
+			const TSharedRef<FJsonObject> Shape = MakeShared<FJsonObject>();
+			const TCHAR* Kind = TEXT("none");
+			switch (Value->Type)
+			{
+			case EJson::Null: Kind = TEXT("null"); break;
+			case EJson::Boolean: Kind = TEXT("boolean"); break;
+			case EJson::String: Kind = TEXT("string"); break;
+			case EJson::Number: Kind = TEXT("number"); break;
+			case EJson::Array: Kind = TEXT("array"); Shape->SetNumberField(TEXT("count"), Value->AsArray().Num()); break;
+			case EJson::Object: Kind = TEXT("object"); Shape->SetNumberField(TEXT("count"), Value->AsObject()->Values.Num()); break;
+			default: break;
+			}
+			Shape->SetStringField(TEXT("kind"), Kind);
+			return MakeShared<FJsonValueObject>(Shape);
+		}
+
+		TSharedPtr<FJsonValue> CanonicalShape(const FUeAgentCanonicalValuePtr& Value)
+		{
+			if (!Value.IsValid()) return MakeShared<FJsonValueNull>();
+			const TSharedRef<FJsonObject> Shape = MakeShared<FJsonObject>();
+			const TCHAR* Kind = TEXT("unknown");
+			switch (Value->GetKind())
+			{
+			case EUeAgentValueKind::Null: Kind = TEXT("null"); break;
+			case EUeAgentValueKind::Boolean: Kind = TEXT("boolean"); break;
+			case EUeAgentValueKind::String: Kind = TEXT("string"); break;
+			case EUeAgentValueKind::Integer: Kind = TEXT("integer"); break;
+			case EUeAgentValueKind::Decimal: Kind = TEXT("decimal"); break;
+			case EUeAgentValueKind::Array: Kind = TEXT("array"); Shape->SetNumberField(TEXT("count"), Value->GetArrayItems().Num()); break;
+			case EUeAgentValueKind::Object: Kind = TEXT("object"); Shape->SetNumberField(TEXT("count"), Value->GetObjectItems().Num()); break;
+			case EUeAgentValueKind::Temporal: Kind = TEXT("temporal"); break;
+			case EUeAgentValueKind::Spatial: Kind = TEXT("spatial"); break;
+			}
+			Shape->SetStringField(TEXT("kind"), Kind);
+			return MakeShared<FJsonValueObject>(Shape);
+		}
+
+		FDiagnostic InputFact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target = FString())
+		{
+			FDiagnostic Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Path, MoveTemp(Expected), MoveTemp(Actual), TEXT("execution"), Reason);
+			Error.SourceKind = TEXT("authored_value"); Error.TargetPath = Target;
+			return Error;
+		}
+
+		FDiagnostic NativeFact(const FString& Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target = FString())
+		{
+			FDiagnostic Error = InputFact(Code, Reason, Path, MoveTemp(Actual), MoveTemp(Expected), Target);
+			Error.SourceKind = TEXT("native_result"); Error.Source.JsonPath.Reset(); Error.SemanticPointer.Reset();
+			return Error;
 		}
 
 		TSharedPtr<FJsonObject> ObjectSchema(
@@ -536,9 +600,6 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				&& bValue)
 			{
 				AddRequired(TEXT("target_ref"), StringSchema());
-				AddRequired(
-					TEXT("target_revision"),
-					StateRevisionSchema());
 			}
 			if (Row->TryGetBoolField(TEXT("placement"), bValue)
 				&& bValue)
@@ -567,9 +628,6 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				&& bValue)
 			{
 				AddRequired(TEXT("operand_ref"), StringSchema());
-				AddRequired(
-					TEXT("operand_revision"),
-					StateRevisionSchema());
 				AddRequired(
 					TEXT("operand_to_target"),
 					TransformSchema());
@@ -688,20 +746,20 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		bool TryCanonicalize(
 			const TSharedPtr<FJsonObject>& Object,
 			FString& OutCanonical,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutCanonical.Reset();
-			if (!Object.IsValid()
-				|| !Json::TryCanonicalize(
-					Object,
-					OutCanonical,
-					OutError))
+			if (!Object.IsValid())
 			{
-				if (OutError.IsEmpty())
-				{
-					OutError =
-						TEXT("modeling_geometry_schema_invalid");
-				}
+				OutError = NativeFact(TEXT("modeling_geometry_schema_invalid"),
+					TEXT("The generated modeling geometry schema object is missing."), TEXT("/schema_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.Stage = TEXT("registry");
+				return false;
+			}
+			if (!Json::TryCanonicalize(Object, OutCanonical, OutError))
+			{
+				if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			return true;
@@ -733,114 +791,87 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		bool TryLoadSpecs(
 			TArray<FDescriptorSpec>& OutSpecs,
 			FString& OutCanonicalResult,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			OutSpecs.Reset();
-			OutCanonicalResult.Reset();
-			OutError.Reset();
+			OutSpecs.Reset(); OutCanonicalResult.Reset(); OutError.Reset();
 			TSharedPtr<FJsonObject> Catalog;
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(
-					Private::DescriptorCatalogJson);
-			if (!FJsonSerializer::Deserialize(Reader, Catalog)
-				|| !Catalog.IsValid()
-				|| Catalog->GetStringField(TEXT("schema"))
-					!= TEXT(
-						"uai.domain_adapter.modeling_geometry_effect."
-						"production_catalog.v1"))
+			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Private::DescriptorCatalogJson);
+			if (!FJsonSerializer::Deserialize(Reader, Catalog) || !Catalog.IsValid())
 			{
-				OutError =
-					TEXT("modeling_geometry_catalog_parse_failed");
+				OutError = NativeFact(TEXT("modeling_geometry_catalog_parse_failed"),
+					Reader->GetErrorMessage().IsEmpty() ? TEXT("The embedded modeling geometry catalog must be a valid JSON object.")
+					: Reader->GetErrorMessage(), TEXT("/catalog"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.Stage = TEXT("registry"); OutError.Source.Line = Reader->GetLineNumber(); OutError.Source.Column = Reader->GetCharacterNumber();
 				return false;
 			}
-			const TSharedPtr<FJsonObject> ResultSchema =
-				BuildResultSchema();
-			if (!TryCanonicalize(
-					ResultSchema,
-					OutCanonicalResult,
-					OutError))
+			FString Schema;
+			const FString ExpectedSchema = TEXT("uai.domain_adapter.modeling_geometry_effect.production_catalog.v1");
+			if (!Catalog->TryGetStringField(TEXT("schema"), Schema) || Schema != ExpectedSchema)
 			{
+				OutError = NativeFact(TEXT("modeling_geometry_catalog_parse_failed"),
+					TEXT("The embedded modeling geometry catalog has a missing or unsupported schema."), TEXT("/catalog/schema_supported"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.Stage = TEXT("registry"); OutError.ActualEvidence = Catalog->TryGetField(TEXT("schema"));
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedSchema);
 				return false;
 			}
+			const TSharedPtr<FJsonObject> ResultSchema = BuildResultSchema();
+			if (!TryCanonicalize(ResultSchema, OutCanonicalResult, OutError)) return false;
 			const TArray<TSharedPtr<FJsonValue>>* Rows = nullptr;
-			if (!Catalog->TryGetArrayField(TEXT("descriptors"), Rows)
-				|| !Rows
-				|| Rows->Num() != 31)
+			if (!Catalog->TryGetArrayField(TEXT("descriptors"), Rows) || !Rows)
 			{
-				OutError =
-					TEXT("modeling_geometry_descriptor_count_invalid");
+				OutError = NativeFact(TEXT("modeling_geometry_descriptors_missing"),
+					TEXT("The embedded modeling catalog descriptors field must be an array."), TEXT("/catalog/descriptors"),
+					JsonFact(Catalog->TryGetField(TEXT("descriptors"))), MakeShared<FJsonValueString>(TEXT("array")));
+				OutError.Stage = TEXT("registry");
 				return false;
 			}
 			OutSpecs.Reserve(Rows->Num());
-			for (const TSharedPtr<FJsonValue>& Value : *Rows)
+			for (int32 Index = 0; Index < Rows->Num(); ++Index)
 			{
-				const TSharedPtr<FJsonObject> Row =
-					Value.IsValid() ? Value->AsObject() : nullptr;
-				const TSharedPtr<FJsonObject> InputSchema =
-					BuildInputSchema(Row);
-				FDescriptorSpec Spec;
-				if (!Row.IsValid()
-					|| !InputSchema.IsValid()
-					|| !Row->TryGetStringField(
-						TEXT("descriptor_id"),
-						Spec.DescriptorId)
-					|| !Row->TryGetStringField(
-						TEXT("capability_id"),
-						Spec.CapabilityId)
-					|| !Row->TryGetStringField(
-						TEXT("native_operation_type"),
-						Spec.NativeTargetKind)
-					|| !Row->TryGetStringField(
-						TEXT("operation_key"),
-						Spec.OperationKey)
-					|| !TryCanonicalize(
-						InputSchema,
-						Spec.CanonicalInputSchema,
-						OutError))
+				const TSharedPtr<FJsonValue>& Value = (*Rows)[Index];
+				const TSharedPtr<FJsonObject> Row = Value.IsValid() && Value->Type == EJson::Object ? Value->AsObject() : nullptr;
+				const FString RowPath = FString::Printf(TEXT("/catalog/descriptors/%d"), Index);
+				if (!Row.IsValid())
 				{
-					OutError =
-						TEXT("modeling_geometry_descriptor_invalid");
-					return false;
+					OutError = NativeFact(TEXT("modeling_geometry_descriptor_invalid"),
+						TEXT("The modeling catalog descriptor must be an object."), RowPath, JsonFact(Value), MakeShared<FJsonValueString>(TEXT("object")));
+					OutError.Stage = TEXT("registry"); return false;
 				}
-				Row->TryGetBoolField(
-					TEXT("primitive_output"),
-					Spec.bPrimitiveOutput);
-				const TSharedPtr<FJsonObject> Descriptor =
-					MakeShared<FJsonObject>();
-				Descriptor->SetStringField(
-					TEXT("capability_id"),
-					Spec.CapabilityId);
-				Descriptor->SetStringField(
-					TEXT("descriptor_id"),
-					Spec.DescriptorId);
-				Descriptor->SetStringField(
-					TEXT("domain_id"),
-					TEXT("mesh"));
-				Descriptor->SetObjectField(
-					TEXT("execution_context_policy"),
-					ExecutionPolicyObject());
-				Descriptor->SetObjectField(
-					TEXT("input_schema"),
-					InputSchema);
-				Descriptor->SetStringField(
-					TEXT("operation_kind"),
-					TEXT("operation"));
-				Descriptor->SetObjectField(
-					TEXT("result_schema"),
-					ResultSchema);
+				const TSharedPtr<FJsonObject> InputSchema = BuildInputSchema(Row);
+				if (!InputSchema.IsValid())
+				{
+					OutError = NativeFact(TEXT("modeling_geometry_descriptor_invalid"),
+						TEXT("No input schema could be built for the modeling catalog descriptor."), RowPath + TEXT("/input_schema_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					OutError.Stage = TEXT("registry"); return false;
+				}
+				FDescriptorSpec Spec;
+				const auto ReadField = [&](const TCHAR* Field, FString& Result)
+				{
+					if (Row->TryGetStringField(Field, Result)) return true;
+					OutError = NativeFact(TEXT("modeling_geometry_descriptor_invalid"),
+						FString::Printf(TEXT("The modeling catalog descriptor field '%s' must be a string."), Field),
+						RowPath + TEXT("/") + Field, JsonFact(Row->TryGetField(Field)), MakeShared<FJsonValueString>(TEXT("string")));
+					OutError.Stage = TEXT("registry"); return false;
+				};
+				if (!ReadField(TEXT("descriptor_id"), Spec.DescriptorId) || !ReadField(TEXT("capability_id"), Spec.CapabilityId)
+					|| !ReadField(TEXT("native_operation_type"), Spec.NativeTargetKind) || !ReadField(TEXT("operation_key"), Spec.OperationKey)) return false;
+				if (!TryCanonicalize(InputSchema, Spec.CanonicalInputSchema, OutError)) return false;
+				Row->TryGetBoolField(TEXT("primitive_output"), Spec.bPrimitiveOutput);
+				const TSharedPtr<FJsonObject> Descriptor = MakeShared<FJsonObject>();
+				Descriptor->SetStringField(TEXT("capability_id"), Spec.CapabilityId);
+				Descriptor->SetStringField(TEXT("descriptor_id"), Spec.DescriptorId);
+				Descriptor->SetStringField(TEXT("domain_id"), TEXT("mesh"));
+				Descriptor->SetObjectField(TEXT("execution_context_policy"), ExecutionPolicyObject());
+				Descriptor->SetObjectField(TEXT("input_schema"), InputSchema);
+				Descriptor->SetStringField(TEXT("operation_kind"), TEXT("operation"));
+				Descriptor->SetObjectField(TEXT("result_schema"), ResultSchema);
 				Descriptor->SetNumberField(TEXT("version"), 1);
 				FString CanonicalDescriptor;
-				if (!TryCanonicalize(
-						Descriptor,
-						CanonicalDescriptor,
-						OutError))
-				{
-					return false;
-				}
-				Spec.DescriptorHash =
-					Json::Sha256Utf8(CanonicalDescriptor);
-				Spec.Row = Row;
-				OutSpecs.Add(MoveTemp(Spec));
+				if (!TryCanonicalize(Descriptor, CanonicalDescriptor, OutError)) return false;
+				Spec.DescriptorHash = Json::Sha256Utf8(CanonicalDescriptor);
+				Spec.Row = Row; OutSpecs.Add(MoveTemp(Spec));
 			}
 			return true;
 		}
@@ -849,127 +880,67 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			const TSharedPtr<FJsonValue>& JsonValue,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError,
+			const FString& Path = TEXT("/draft_after"))
 		{
 			OutValue.Reset();
 			if (!JsonValue.IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_internal_value_missing"));
-			}
+				return Fail(OutError, NativeFact(TEXT("modeling_geometry_internal_value_missing"),
+					TEXT("The generated modeling change contains a missing value."), Path,
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 			FUeAgentStateSemanticError Error;
+			bool bConverted = false;
 			switch (JsonValue->Type)
 			{
-			case EJson::Null:
-				if (FUeAgentCanonicalValue::TryNull(
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::Boolean:
-				if (FUeAgentCanonicalValue::TryBoolean(
-						JsonValue->AsBool(),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
-			case EJson::String:
-				if (FUeAgentCanonicalValue::TryString(
-						JsonValue->AsString(),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
+			case EJson::Null: bConverted = FUeAgentCanonicalValue::TryNull(Resources, OutValue, Error); break;
+			case EJson::Boolean: bConverted = FUeAgentCanonicalValue::TryBoolean(JsonValue->AsBool(), Resources, OutValue, Error); break;
+			case EJson::String: bConverted = FUeAgentCanonicalValue::TryString(JsonValue->AsString(), Resources, OutValue, Error); break;
 			case EJson::Number:
-				if (FUeAgentCanonicalValue::TryDecimal(
-						FString::SanitizeFloat(
-							JsonValue->AsNumber()),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
+				bConverted = FUeAgentCanonicalValue::TryDecimal(FString::SanitizeFloat(JsonValue->AsNumber()), Resources, OutValue, Error);
 				break;
 			case EJson::Array:
 				{
 					TArray<FUeAgentCanonicalValueRef> Items;
-					for (const TSharedPtr<FJsonValue>& Item
-						: JsonValue->AsArray())
+					const TArray<TSharedPtr<FJsonValue>>& JsonItems = JsonValue->AsArray();
+					for (int32 Index = 0; Index < JsonItems.Num(); ++Index)
 					{
 						FUeAgentCanonicalValuePtr Canonical;
-						if (!TryCanonicalValue(
-								Item,
-								Resources,
-								Canonical,
-								OutError))
-						{
-							return false;
-						}
+						if (!TryCanonicalValue(JsonItems[Index], Resources, Canonical, OutError,
+							Path + FString::Printf(TEXT("/%d"), Index))) return false;
 						Items.Add(Canonical.ToSharedRef());
 					}
-					if (FUeAgentCanonicalValue::TryArray(
-							Items,
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
+					bConverted = FUeAgentCanonicalValue::TryArray(Items, Resources, OutValue, Error);
 					break;
 				}
 			case EJson::Object:
 				{
-					TArray<
-						TPair<FString, FUeAgentCanonicalValueRef>>
-						Items;
-					for (const TPair<
-						FString,
-						TSharedPtr<FJsonValue>>& Pair
-							: JsonValue->AsObject()->Values)
+					TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
+					for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : JsonValue->AsObject()->Values)
 					{
 						FUeAgentCanonicalValuePtr Canonical;
-						if (!TryCanonicalValue(
-								Pair.Value,
-								Resources,
-								Canonical,
-								OutError))
-						{
-							return false;
-						}
-						Items.Emplace(
-							Pair.Key,
-							Canonical.ToSharedRef());
+						const FString Key = Pair.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+						if (!TryCanonicalValue(Pair.Value, Resources, Canonical, OutError, Path + TEXT("/") + Key)) return false;
+						Items.Emplace(Pair.Key, Canonical.ToSharedRef());
 					}
-					if (FUeAgentCanonicalValue::TryObject(
-							Items,
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
+					bConverted = FUeAgentCanonicalValue::TryObject(Items, Resources, OutValue, Error);
 					break;
 				}
 			default:
-				break;
+				return Fail(OutError, NativeFact(TEXT("modeling_geometry_internal_value_failed"),
+					TEXT("The generated modeling change contains an unsupported JSON value kind."), Path,
+					JsonFact(JsonValue, false), MakeShared<FJsonValueString>(TEXT("null, boolean, string, number, array, or object"))));
 			}
-			return Fail(
-				OutError,
-				Error.Code.IsEmpty()
-					? TEXT("modeling_geometry_internal_value_failed")
-					: Error.Code,
-				Error.Detail);
+			if (!bConverted)
+			{
+				OutError = MoveTemp(Error);
+				if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = Path + OutError.PropertyPath;
+				if (OutError.SourceKind == TEXT("native_result"))
+				{
+					OutError.Source.JsonPath.Reset(); OutError.SemanticPointer.Reset();
+				}
+			}
+			return bConverted;
 		}
 
 		FUeAgentCanonicalValuePtr FindCanonicalField(
@@ -1011,26 +982,24 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		}
 
 		bool ReadCanonicalIntegerSet(
-			const FUeAgentCanonicalValuePtr& Object,
-			const FString& Field,
-			TSet<int32>& OutValues)
+			const FUeAgentCanonicalValuePtr& Object, const FString& Field, TSet<int32>& OutValues,
+			FExecutionMutationError& OutError, const FString& TargetRef)
 		{
 			OutValues.Reset();
-			const FUeAgentCanonicalValuePtr Value =
-				FindCanonicalField(Object, Field);
-			if (!Value.IsValid()
-				|| Value->GetKind() != EUeAgentValueKind::Array)
+			const FUeAgentCanonicalValuePtr Value = FindCanonicalField(Object, Field);
+			if (!Value.IsValid() || Value->GetKind() != EUeAgentValueKind::Array)
+				return Fail(OutError, NativeFact(TEXT("modeling_geometry_selection_element_invalid"),
+					TEXT("The target snapshot is missing an array of selectable element identifiers."),
+					TEXT("/snapshot/") + Field, CanonicalShape(Value), MakeShared<FJsonValueString>(TEXT("array of integer or decimal identifiers")), TargetRef));
+			const TArray<FUeAgentCanonicalValueRef>& Items = Value->GetArrayItems();
+			for (int32 Index = 0; Index < Items.Num(); ++Index)
 			{
-				return false;
-			}
-			for (const FUeAgentCanonicalValueRef& Item
-				: Value->GetArrayItems())
-			{
-				if (Item->GetKind() != EUeAgentValueKind::Integer
-					&& Item->GetKind() != EUeAgentValueKind::Decimal)
-				{
-					return false;
-				}
+				const FUeAgentCanonicalValueRef& Item = Items[Index];
+				if (Item->GetKind() != EUeAgentValueKind::Integer && Item->GetKind() != EUeAgentValueKind::Decimal)
+					return Fail(OutError, NativeFact(TEXT("modeling_geometry_selection_element_invalid"),
+						TEXT("The target snapshot contains a non-numeric element identifier."),
+						TEXT("/snapshot/") + Field + FString::Printf(TEXT("/%d"), Index), CanonicalShape(FUeAgentCanonicalValuePtr(Item)),
+						MakeShared<FJsonValueString>(TEXT("integer or decimal identifier")), TargetRef));
 				OutValues.Add(FCString::Atoi(*Item->GetLexeme()));
 			}
 			return true;
@@ -1038,8 +1007,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 		const FUeAgentStateEntry* FindSnapshotTarget(
 			const FUeAgentCanonicalSnapshotRef& Snapshot,
-			const FString& TargetRef)
+			const FString& TargetRef, int32* OutMatchCount = nullptr)
 		{
+			if (OutMatchCount) *OutMatchCount = 0;
 			const FUeAgentStateEntry* Match = nullptr;
 			for (const FUeAgentStateEntry& Entry
 				: Snapshot->GetEntries())
@@ -1054,6 +1024,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				{
 					continue;
 				}
+				if (OutMatchCount) ++*OutMatchCount;
 				if (Match)
 				{
 					return nullptr;
@@ -1064,213 +1035,145 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		}
 
 		bool ReadJsonNumberArray(
-			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
-			const int32 Count,
-			TArray<double>& OutValues)
+			const TSharedPtr<FJsonObject>& Object, const TCHAR* Field, const int32 Count,
+			TArray<double>& OutValues, FExecutionMutationError& OutError,
+			const FString& ParentPath, const FString& Code, const FString& TargetRef)
 		{
 			OutValues.Reset();
+			const FString Path = ParentPath + TEXT("/") + Field;
 			const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
-			if (!Object.IsValid()
-				|| !Object->TryGetArrayField(Field, Items)
-				|| !Items
-				|| Items->Num() != Count)
+			if (!Object.IsValid() || !Object->TryGetArrayField(Field, Items) || !Items || Items->Num() != Count)
+				return Fail(OutError, InputFact(Code, FString::Printf(TEXT("The field '%s' must contain exactly %d finite numbers."), Field, Count),
+					Path, JsonFact(Object.IsValid() ? Object->TryGetField(Field) : nullptr),
+					MakeShared<FJsonValueString>(FString::Printf(TEXT("array of %d finite numbers"), Count)), TargetRef));
+			for (int32 Index = 0; Index < Items->Num(); ++Index)
 			{
-				return false;
-			}
-			for (const TSharedPtr<FJsonValue>& Item : *Items)
-			{
+				const TSharedPtr<FJsonValue>& Item = (*Items)[Index];
 				double Number = 0.0;
-				if (!Item.IsValid()
-					|| !Item->TryGetNumber(Number)
-					|| !FMath::IsFinite(Number))
-				{
-					return false;
-				}
+				if (!Item.IsValid() || !Item->TryGetNumber(Number) || !FMath::IsFinite(Number))
+					return Fail(OutError, InputFact(Code, TEXT("This array component must be a finite number."),
+						Path + FString::Printf(TEXT("/%d"), Index), JsonFact(Item), MakeShared<FJsonValueString>(TEXT("finite number")), TargetRef));
 				OutValues.Add(Number);
 			}
 			return true;
 		}
 
 		bool ValidateSelection(
-			const TSharedPtr<FJsonObject>& Payload,
-			const FString& SelectionKind,
-			const FUeAgentCanonicalValuePtr& Current,
-			FExecutionMutationError& OutError)
+			const TSharedPtr<FJsonObject>& Payload, const FString& SelectionKind,
+			const FUeAgentCanonicalValuePtr& Current, FExecutionMutationError& OutError, const FString& TargetRef)
 		{
 			const TSharedPtr<FJsonObject>* Selection = nullptr;
-			if (!Payload->TryGetObjectField(
-					TEXT("selection"),
-					Selection)
-				|| !Selection
-				|| !Selection->IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_selection_element_invalid"));
-			}
-			const TCHAR* SnapshotField =
-				SelectionKind == TEXT("vertex")
-					? TEXT("vertex_ids")
-					: SelectionKind == TEXT("triangle")
-						? TEXT("triangle_ids")
-						: SelectionKind == TEXT("boundary_edge")
-							? TEXT("boundary_edge_ids")
-							: TEXT("edge_ids");
+			if (!Payload->TryGetObjectField(TEXT("selection"), Selection) || !Selection || !Selection->IsValid())
+				return Fail(OutError, InputFact(TEXT("modeling_geometry_selection_element_invalid"),
+					TEXT("The modeling selection must be an object."), TEXT("/selection"), JsonFact(Payload->TryGetField(TEXT("selection"))),
+					MakeShared<FJsonValueString>(TEXT("object with element_ids")), TargetRef));
+			const TCHAR* SnapshotField = SelectionKind == TEXT("vertex") ? TEXT("vertex_ids")
+				: SelectionKind == TEXT("triangle") ? TEXT("triangle_ids") : SelectionKind == TEXT("boundary_edge") ? TEXT("boundary_edge_ids") : TEXT("edge_ids");
 			TSet<int32> Allowed;
-			if (!ReadCanonicalIntegerSet(
-					Current,
-					SnapshotField,
-					Allowed))
+			if (!ReadCanonicalIntegerSet(Current, SnapshotField, Allowed, OutError, TargetRef)) return false;
+			const TArray<TSharedPtr<FJsonValue>>* ElementIds = nullptr;
+			if (!(*Selection)->TryGetArrayField(TEXT("element_ids"), ElementIds) || !ElementIds)
+				return Fail(OutError, InputFact(TEXT("modeling_geometry_selection_element_invalid"),
+					TEXT("The selection element_ids field must be an array."), TEXT("/selection/element_ids"),
+					JsonFact((*Selection)->TryGetField(TEXT("element_ids"))), MakeShared<FJsonValueString>(TEXT("array")), TargetRef));
+			for (int32 Index = 0; Index < ElementIds->Num(); ++Index)
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_selection_element_invalid"));
-			}
-			const TArray<TSharedPtr<FJsonValue>>* ElementIds =
-				nullptr;
-			if (!(*Selection)->TryGetArrayField(
-					TEXT("element_ids"),
-					ElementIds)
-				|| !ElementIds)
-			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_selection_element_invalid"));
-			}
-			for (const TSharedPtr<FJsonValue>& Item : *ElementIds)
-			{
+				const TSharedPtr<FJsonValue>& Item = (*ElementIds)[Index];
 				double Number = -1.0;
-				if (!Item.IsValid()
-					|| !Item->TryGetNumber(Number)
-					|| !Allowed.Contains(
-						static_cast<int32>(Number)))
+				const bool bNumber = Item.IsValid() && Item->TryGetNumber(Number);
+				const bool bRepresentable = bNumber && FMath::IsFinite(Number) && Number >= MIN_int32 && Number <= MAX_int32;
+				if (!bRepresentable || !Allowed.Contains(static_cast<int32>(Number)))
 				{
-					return Fail(
-						OutError,
-						SelectionKind == TEXT("boundary_edge")
-							? TEXT(
-								"modeling_geometry_boundary_edge_invalid")
-							: TEXT(
-								"modeling_geometry_selection_element_invalid"));
+					const TSharedRef<FJsonObject> Expected = MakeShared<FJsonObject>();
+					Expected->SetStringField(TEXT("selection_kind"), SelectionKind);
+					Expected->SetNumberField(TEXT("allowed_count"), Allowed.Num());
+					Expected->SetStringField(TEXT("constraint"), TEXT("numeric int32-representable identifier contained in the target snapshot"));
+					return Fail(OutError, InputFact(SelectionKind == TEXT("boundary_edge")
+						? TEXT("modeling_geometry_boundary_edge_invalid") : TEXT("modeling_geometry_selection_element_invalid"), bRepresentable
+						? TEXT("The selected element is not present in the target's current selectable identifiers.")
+						: TEXT("The selected element identifier is not a finite int32-representable number."),
+						FString::Printf(TEXT("/selection/element_ids/%d"), Index), JsonFact(Item), MakeShared<FJsonValueObject>(Expected), TargetRef));
 				}
 			}
 			return true;
 		}
 
-		bool ValidateOperandTransform(
-			const TSharedPtr<FJsonObject>& Payload,
-			FExecutionMutationError& OutError)
+		bool ValidateOperandTransform(const TSharedPtr<FJsonObject>& Payload, FExecutionMutationError& OutError, const FString& TargetRef)
 		{
+			const FString Code = TEXT("modeling_geometry_operand_transform_invalid");
 			const TSharedPtr<FJsonObject>* Transform = nullptr;
+			if (!Payload->TryGetObjectField(TEXT("operand_to_target"), Transform) || !Transform)
+				return Fail(OutError, InputFact(Code, TEXT("The operand_to_target transform must be an object."), TEXT("/operand_to_target"),
+					JsonFact(Payload->TryGetField(TEXT("operand_to_target"))), MakeShared<FJsonValueString>(TEXT("object")), TargetRef));
 			TArray<double> Rotation;
 			TArray<double> Scale;
-			if (!Payload->TryGetObjectField(
-					TEXT("operand_to_target"),
-					Transform)
-				|| !Transform
-				|| !ReadJsonNumberArray(
-					*Transform,
-					TEXT("rotation_quaternion_xyzw"),
-					4,
-					Rotation)
-				|| !ReadJsonNumberArray(
-					*Transform,
-					TEXT("scale"),
-					3,
-					Scale))
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_operand_transform_invalid"));
-			}
+			if (!ReadJsonNumberArray(*Transform, TEXT("rotation_quaternion_xyzw"), 4, Rotation, OutError, TEXT("/operand_to_target"), Code, TargetRef)
+				|| !ReadJsonNumberArray(*Transform, TEXT("scale"), 3, Scale, OutError, TEXT("/operand_to_target"), Code, TargetRef)) return false;
 			double QuaternionNormSquared = 0.0;
-			for (const double Component : Rotation)
+			for (const double Component : Rotation) QuaternionNormSquared += Component * Component;
+			if (QuaternionNormSquared <= UE_DOUBLE_SMALL_NUMBER)
+				return Fail(OutError, InputFact(Code, TEXT("The operand rotation quaternion has a near-zero norm."),
+					TEXT("/operand_to_target/rotation_quaternion_xyzw"), NumberArrayFact(Rotation),
+					MakeShared<FJsonValueString>(FString::Printf(TEXT("quaternion norm squared greater than %.17g"), static_cast<double>(UE_DOUBLE_SMALL_NUMBER))), TargetRef));
+			for (int32 Index = 0; Index < Scale.Num(); ++Index)
 			{
-				QuaternionNormSquared += Component * Component;
-			}
-			if (QuaternionNormSquared <= UE_DOUBLE_SMALL_NUMBER
-				|| Scale.ContainsByPredicate(
-					[](const double Value)
-					{
-						return FMath::Abs(Value)
-							<= UE_DOUBLE_SMALL_NUMBER;
-					}))
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_operand_transform_invalid"));
+				if (FMath::Abs(Scale[Index]) <= UE_DOUBLE_SMALL_NUMBER)
+					return Fail(OutError, InputFact(Code, TEXT("The operand transform contains a near-zero scale component."),
+						FString::Printf(TEXT("/operand_to_target/scale/%d"), Index), NumberFact(Scale[Index]),
+						MakeShared<FJsonValueString>(FString::Printf(TEXT("absolute scale greater than %.17g"), static_cast<double>(UE_DOUBLE_SMALL_NUMBER))), TargetRef));
 			}
 			return true;
 		}
 
-		bool ValidatePlane(
-			const TSharedPtr<FJsonObject>& Payload,
-			FExecutionMutationError& OutError)
+		bool ValidatePlane(const TSharedPtr<FJsonObject>& Payload, FExecutionMutationError& OutError, const FString& TargetRef)
 		{
+			const FString Code = TEXT("modeling_geometry_plane_invalid");
 			const TSharedPtr<FJsonObject>* Plane = nullptr;
+			if (!Payload->TryGetObjectField(TEXT("plane"), Plane) || !Plane)
+				return Fail(OutError, InputFact(Code, TEXT("The modeling plane must be an object."), TEXT("/plane"),
+					JsonFact(Payload->TryGetField(TEXT("plane"))), MakeShared<FJsonValueString>(TEXT("object with a normal")), TargetRef));
 			TArray<double> Normal;
-			if (!Payload->TryGetObjectField(TEXT("plane"), Plane)
-				|| !Plane
-				|| !ReadJsonNumberArray(
-					*Plane,
-					TEXT("normal"),
-					3,
-					Normal)
-				|| FVector3d(
-						Normal[0],
-						Normal[1],
-						Normal[2])
-					.IsNearlyZero())
-			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_plane_invalid"));
-			}
+			if (!ReadJsonNumberArray(*Plane, TEXT("normal"), 3, Normal, OutError, TEXT("/plane"), Code, TargetRef)) return false;
+			if (FVector3d(Normal[0], Normal[1], Normal[2]).IsNearlyZero())
+				return Fail(OutError, InputFact(Code, TEXT("The plane normal is nearly zero."), TEXT("/plane/normal"),
+					NumberArrayFact(Normal), MakeShared<FJsonValueString>(TEXT("normal outside the FVector3d nearly-zero tolerance")), TargetRef));
 			return true;
 		}
 
-		bool ValidateEdgePairs(
-			const TSharedPtr<FJsonObject>& Payload,
-			FExecutionMutationError& OutError)
+		bool ValidateEdgePairs(const TSharedPtr<FJsonObject>& Payload, FExecutionMutationError& OutError, const FString& TargetRef)
 		{
+			const FString Code = TEXT("modeling_geometry_edge_pair_invalid");
 			const TArray<TSharedPtr<FJsonValue>>* Pairs = nullptr;
-			if (!Payload->TryGetArrayField(
-					TEXT("edge_pairs"),
-					Pairs)
-				|| !Pairs)
-			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_edge_pair_invalid"));
-			}
+			if (!Payload->TryGetArrayField(TEXT("edge_pairs"), Pairs) || !Pairs)
+				return Fail(OutError, InputFact(Code, TEXT("The edge_pairs field must be an array."), TEXT("/edge_pairs"),
+					JsonFact(Payload->TryGetField(TEXT("edge_pairs"))), MakeShared<FJsonValueString>(TEXT("array of two-endpoint pairs")), TargetRef));
 			TSet<FString> CanonicalPairs;
-			for (const TSharedPtr<FJsonValue>& PairValue : *Pairs)
+			for (int32 Index = 0; Index < Pairs->Num(); ++Index)
 			{
-				const TArray<TSharedPtr<FJsonValue>>& Pair =
-					PairValue->AsArray();
-				if (Pair.Num() != 2)
+				const TSharedPtr<FJsonValue>& PairValue = (*Pairs)[Index];
+				const TArray<TSharedPtr<FJsonValue>>* Pair = nullptr;
+				if (!PairValue.IsValid() || !PairValue->TryGetArray(Pair) || !Pair || Pair->Num() != 2)
+					return Fail(OutError, InputFact(Code, TEXT("Each edge pair must contain exactly two endpoint identifiers."),
+						FString::Printf(TEXT("/edge_pairs/%d"), Index), JsonFact(PairValue), MakeShared<FJsonValueString>(TEXT("array of length 2")), TargetRef));
+				int32 Endpoints[2];
+				for (int32 Endpoint = 0; Endpoint < 2; ++Endpoint)
 				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_edge_pair_invalid"));
+					const TSharedPtr<FJsonValue>& Item = (*Pair)[Endpoint];
+					double Value = 0.0;
+					if (!Item.IsValid() || !Item->TryGetNumber(Value) || !FMath::IsFinite(Value) || Value < MIN_int32 || Value > MAX_int32)
+						return Fail(OutError, InputFact(Code, TEXT("The edge endpoint must be a finite int32-representable number."),
+							FString::Printf(TEXT("/edge_pairs/%d/%d"), Index, Endpoint), JsonFact(Item),
+							MakeShared<FJsonValueString>(TEXT("finite int32-representable identifier")), TargetRef));
+					Endpoints[Endpoint] = static_cast<int32>(Value);
 				}
-				const int32 A =
-					static_cast<int32>(Pair[0]->AsNumber());
-				const int32 B =
-					static_cast<int32>(Pair[1]->AsNumber());
-				const FString Key = FString::Printf(
-					TEXT("%d:%d"),
-					FMath::Min(A, B),
-					FMath::Max(A, B));
+				const int32 A = Endpoints[0];
+				const int32 B = Endpoints[1];
+				const FString Key = FString::Printf(TEXT("%d:%d"), FMath::Min(A, B), FMath::Max(A, B));
 				if (A == B || CanonicalPairs.Contains(Key))
-				{
-					return Fail(
-						OutError,
-						TEXT("modeling_geometry_edge_pair_invalid"));
-				}
+					return Fail(OutError, InputFact(Code, A == B ? TEXT("The edge pair repeats the same endpoint.")
+						: TEXT("This unordered edge pair is already listed."), FString::Printf(TEXT("/edge_pairs/%d"), Index),
+						NumberArrayFact(TArray<double>{ static_cast<double>(A), static_cast<double>(B) }),
+						MakeShared<FJsonValueString>(TEXT("two distinct endpoints forming an unlisted unordered pair")), TargetRef));
 				CanonicalPairs.Add(Key);
 			}
 			return true;
@@ -1291,8 +1194,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					MakeShared<FJsonValueObject>(InternalAfter),
 					Resources,
 					After,
-					OutError))
+				OutError))
 			{
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 				return false;
 			}
 			const FUeAgentCanonicalIdentity Identity(
@@ -1312,11 +1216,14 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				GetModelingGeometryEffectAuthorityScopes(),
 				TEXT("modeling-geometry:canonical-typed-draft"),
 				TArray<FUeAgentCanonicalIdentity>{});
-			return OutChanges.Last().IsValid()
-				|| Fail(
-					OutError,
-					TEXT("modeling_geometry_change_draft_invalid"),
-					TargetRef);
+			if (!OutChanges.Last().IsValid())
+			{
+				OutError = FDiagnostic::WrapFailure(TEXT("modeling_geometry_change_draft_invalid"),
+					OutChanges.Last().GetValidationDiagnostic(), TEXT("execution"), TEXT("The modeling geometry change draft is invalid."));
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+				return false;
+			}
+			return true;
 		}
 	}
 
@@ -1327,7 +1234,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 	bool TryCreateModelingGeometryEffectDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		TArray<FDescriptorSpec> Specs;
@@ -1369,7 +1276,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 	bool TryGetModelingGeometryEffectProductionProfiles(
 		TArray<FUeAgentModelingGeometryEffectProductionProfile>&
 			OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		TArray<FDescriptorSpec> Specs;
@@ -1392,13 +1299,18 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			if (!Profile.IsValid())
 			{
 				OutProfiles.Reset();
-				OutError =
-					TEXT("modeling_geometry_production_profile_invalid");
+				const FString Field = Profile.DescriptorId.IsEmpty() ? TEXT("descriptor_id")
+					: Profile.DescriptorVersion <= 0 ? TEXT("descriptor_version") : Profile.DescriptorHash.IsEmpty() ? TEXT("descriptor_hash")
+					: Profile.CapabilityId.IsEmpty() ? TEXT("capability_id") : Profile.NativeTargetKind.IsEmpty() ? TEXT("native_operation_type") : TEXT("operation_key");
+				OutError = NativeFact(TEXT("modeling_geometry_production_profile_invalid"),
+					FString::Printf(TEXT("The modeling geometry production profile has an invalid required field '%s'."), *Field),
+					TEXT("/profile/") + Field + TEXT("_valid"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.Stage = TEXT("registry"); OutError.CandidateName = Profile.DescriptorId;
 				return false;
 			}
 			OutProfiles.Add(MoveTemp(Profile));
 		}
-		return OutProfiles.Num() == 31;
+		return true;
 	}
 
 	bool TryBuildModelingGeometryEffectChangeSetDraft(
@@ -1411,27 +1323,31 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 	{
 		OutDraft.Reset();
 		OutError = FExecutionMutationError();
-		if (!Request.IsValid()
-			|| Context.GetWorldIdentity().IsEmpty()
-			|| Context.GetLevelIdentity().IsEmpty()
-			|| Context.GetContextRevision().IsEmpty()
-			|| CurrentSnapshot->GetStatePlane()
-				!= EUeAgentStatePlane::AuthoringMemory)
+		if (!Request.IsValid())
+			return Fail(OutError, FDiagnostic::WrapFailure(TEXT("modeling_geometry_draft_request_invalid"),
+				Request.GetValidationDiagnostic(), TEXT("execution"), TEXT("The modeling geometry operation request is invalid.")));
+		if (Context.GetWorldIdentity().IsEmpty() || Context.GetLevelIdentity().IsEmpty()
+			|| Context.GetContextRevision().IsEmpty() || CurrentSnapshot->GetStatePlane() != EUeAgentStatePlane::AuthoringMemory)
 		{
-			return Fail(
-				OutError,
-				TEXT("modeling_geometry_draft_request_invalid"));
+			const FString Field = Context.GetWorldIdentity().IsEmpty() ? TEXT("/execution_context/world_available")
+				: Context.GetLevelIdentity().IsEmpty() ? TEXT("/execution_context/level_available")
+				: Context.GetContextRevision().IsEmpty() ? TEXT("/execution_context/revision_available") : TEXT("/snapshot/authoring_memory");
+			const FString Reason = Context.GetWorldIdentity().IsEmpty() ? TEXT("The modeling geometry execution context has no world identity.")
+				: Context.GetLevelIdentity().IsEmpty() ? TEXT("The modeling geometry execution context has no level identity.")
+				: Context.GetContextRevision().IsEmpty() ? TEXT("The modeling geometry execution context has no revision.")
+				: TEXT("Modeling geometry drafts require an authoring-memory snapshot.");
+			OutError = NativeFact(TEXT("modeling_geometry_draft_request_invalid"), Reason, Field,
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			OutError.ActualEvidence = MakeShared<FJsonValueNumber>(static_cast<int32>(CurrentSnapshot->GetStatePlane()));
+			return false;
 		}
 
 		TArray<FDescriptorSpec> Specs;
 		FString CanonicalResult;
-		FString CatalogError;
+		UE::UAI::Contract::FDiagnostic CatalogError;
 		if (!TryLoadSpecs(Specs, CanonicalResult, CatalogError))
 		{
-			return Fail(
-				OutError,
-				TEXT("modeling_geometry_catalog_invalid"),
-				CatalogError);
+			return Fail(OutError, CatalogError);
 		}
 		const FDescriptorSpec* Spec = nullptr;
 		for (const FDescriptorSpec& Candidate : Specs)
@@ -1449,21 +1365,25 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		}
 		if (!Spec)
 		{
-			return Fail(
-				OutError,
-				TEXT("modeling_geometry_descriptor_not_exact"));
+			const FUeAgentDescriptorIdentity& Identity = Request.GetDescriptorIdentity();
+			OutError = NativeFact(TEXT("modeling_geometry_descriptor_not_exact"),
+				TEXT("The requested modeling geometry descriptor does not match a registered descriptor definition."),
+				TEXT("/descriptor_identity_matches"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			OutError.CandidateName = Identity.GetDescriptorId();
+			const TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
+			Actual->SetStringField(TEXT("descriptor_id"), Identity.GetDescriptorId());
+			Actual->SetNumberField(TEXT("version"), Identity.GetVersion());
+			Actual->SetStringField(TEXT("hash"), Identity.GetDescriptorHash());
+			OutError.ActualEvidence = MakeShared<FJsonValueObject>(Actual);
+			return false;
 		}
 
 		TSharedPtr<FJsonObject> Payload;
-		const TSharedRef<TJsonReader<>> Reader =
-			TJsonReaderFactory<>::Create(
-				Request.GetPayload().GetJsonValue());
-		if (!FJsonSerializer::Deserialize(Reader, Payload)
-			|| !Payload.IsValid())
+		UE::UAI::Contract::FDiagnostic ParseError;
+		if (!Contract::Json::TryParseObject(Request.GetPayload().GetJsonValue(), Payload, ParseError))
 		{
-			return Fail(
-				OutError,
-				TEXT("modeling_geometry_payload_parse_failed"));
+			return Fail(OutError, FDiagnostic::WrapFailure(TEXT("modeling_geometry_payload_parse_failed"), ParseError,
+				TEXT("execution"), TEXT("The modeling geometry request payload could not be parsed as an object.")));
 		}
 		FString TargetRef;
 		if (!Payload->TryGetStringField(
@@ -1471,13 +1391,13 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				TargetRef)
 			|| TargetRef.IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("modeling_geometry_reference_unresolved"));
+			return Fail(OutError, InputFact(TEXT("modeling_geometry_reference_unresolved"),
+				TEXT("A non-empty modeling target_ref string is required."), TEXT("/target_ref"),
+				JsonFact(Payload->TryGetField(TEXT("target_ref"))), MakeShared<FJsonValueString>(TEXT("non-empty target reference"))));
 		}
 
-		const FUeAgentStateEntry* Target =
-			FindSnapshotTarget(CurrentSnapshot, TargetRef);
+		int32 TargetMatchCount = 0;
+		const FUeAgentStateEntry* Target = FindSnapshotTarget(CurrentSnapshot, TargetRef, &TargetMatchCount);
 		FUeAgentCanonicalValuePtr Current;
 		FString CarrierKind = TEXT("dynamic_mesh_actor");
 		FString Fingerprint = TEXT("absent");
@@ -1485,43 +1405,38 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		{
 			if (Target)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_output_already_exists"));
+				return Fail(OutError, InputFact(TEXT("modeling_geometry_output_already_exists"),
+					TEXT("The primitive output target already exists in the current snapshot."), TEXT("/target_ref"),
+					MakeShared<FJsonValueString>(TargetRef), MakeShared<FJsonValueString>(TEXT("target absent from the current snapshot")), TargetRef));
 			}
 		}
 		else
 		{
 			if (!Target)
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_reference_unresolved"));
+				OutError = NativeFact(TEXT("modeling_geometry_reference_unresolved"), TargetMatchCount == 0
+					? TEXT("No target in the current modeling snapshot matches target_ref.")
+					: TEXT("Multiple targets in the current modeling snapshot match target_ref."),
+					TEXT("/snapshot/target_match_count"), TargetMatchCount < 2
+					? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(TargetMatchCount)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("at least 2"))),
+					MakeShared<FJsonValueNumber>(1), TargetRef);
+				OutError.SourceKind = TEXT("related_input"); OutError.Source.JsonPath = TEXT("/target_ref");
+				return false;
 			}
 			Current = FUeAgentCanonicalValuePtr(Target->GetValue());
-			const TSharedPtr<FJsonObject>* ExpectedRevisionJson = nullptr;
-			TOptional<FUeAgentStateRevision> ExpectedRevision;
-			TOptional<FUeAgentStateRevision> ActualRevision;
-			if (!Payload->TryGetObjectField(
-					TEXT("target_revision"),
-					ExpectedRevisionJson)
-				|| !ExpectedRevisionJson
-				|| !FUeAgentStateRevisionJson::TryParse(
-					*ExpectedRevisionJson,
-					ExpectedRevision)
-				|| !FUeAgentStateRevisionJson::TryReadCanonical(
+			TOptional<FUeAgentStateRevision> CurrentRevision;
+			if (!FUeAgentStateRevisionJson::TryReadCanonical(
 					FindCanonicalField(
 						Current,
 						TEXT("target_revision")),
-					ActualRevision)
-				|| ExpectedRevision.GetValue()
-					!= ActualRevision.GetValue())
+					CurrentRevision, OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_target_revision_stale"));
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+				OutError.SourceKind = TEXT("native_result");
+				const FString Suffix = OutError.PropertyPath == TEXT("target_revision") ? FString() : OutError.PropertyPath;
+				OutError.PropertyPath = TEXT("snapshot/target_revision")
+					+ (Suffix.IsEmpty() ? FString() : Suffix.StartsWith(TEXT("/")) ? Suffix : TEXT("/") + Suffix);
+				return false;
 			}
 			if (!ReadCanonicalString(
 					Current,
@@ -1531,20 +1446,23 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					&& CarrierKind
 						!= TEXT("static_mesh_asset")))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_carrier_unsupported"));
+				const FUeAgentCanonicalValuePtr Carrier = FindCanonicalField(Current, TEXT("carrier_kind"));
+				return Fail(OutError, NativeFact(TEXT("modeling_geometry_carrier_unsupported"),
+					TEXT("The modeling target snapshot must describe a dynamic mesh actor or static mesh asset."), TEXT("/snapshot/carrier_kind"),
+					Carrier.IsValid() && Carrier->GetKind() == EUeAgentValueKind::String
+					? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Carrier->GetText())) : CanonicalShape(Carrier),
+					MakeShared<FJsonValueString>(TEXT("dynamic_mesh_actor or static_mesh_asset")), TargetRef));
 			}
 			if (!ReadCanonicalString(
 					Current,
 					TEXT("geometry_fingerprint"),
 					Fingerprint))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_target_revision_stale"));
+				OutError = NativeFact(TEXT("modeling_geometry_target_state_unavailable"),
+					TEXT("The target snapshot has no readable non-empty geometry fingerprint."), TEXT("/snapshot/geometry_fingerprint_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TargetRef);
+				OutError.ActualEvidence = CanonicalShape(FindCanonicalField(Current, TEXT("geometry_fingerprint")));
+				return false;
 			}
 		}
 
@@ -1556,7 +1474,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				Payload,
 				SelectionKind,
 				Current,
-				OutError))
+				OutError, TargetRef))
 		{
 			return false;
 		}
@@ -1569,56 +1487,54 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				bOperand)
 			&& bOperand)
 		{
-			Payload->TryGetStringField(
-				TEXT("operand_ref"),
-				OperandRef);
-			const FUeAgentStateEntry* Operand =
-				FindSnapshotTarget(CurrentSnapshot, OperandRef);
+			if (!Payload->TryGetStringField(TEXT("operand_ref"), OperandRef) || OperandRef.IsEmpty())
+				return Fail(OutError, InputFact(TEXT("modeling_geometry_operand_unresolved"),
+					TEXT("A non-empty operand_ref string is required for this operation."), TEXT("/operand_ref"),
+					JsonFact(Payload->TryGetField(TEXT("operand_ref"))), MakeShared<FJsonValueString>(TEXT("non-empty operand reference")), TargetRef));
+			int32 OperandMatchCount = 0;
+			const FUeAgentStateEntry* Operand = FindSnapshotTarget(CurrentSnapshot, OperandRef, &OperandMatchCount);
 			if (!Operand)
 			{
-				return Fail(
-					OutError,
-					TEXT("modeling_geometry_operand_unresolved"));
+				OutError = NativeFact(TEXT("modeling_geometry_operand_unresolved"), OperandMatchCount == 0
+					? TEXT("No target in the current modeling snapshot matches operand_ref.")
+					: TEXT("Multiple targets in the current modeling snapshot match operand_ref."),
+					TEXT("/snapshot/operand_match_count"), OperandMatchCount < 2
+					? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(OperandMatchCount)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("at least 2"))),
+					MakeShared<FJsonValueNumber>(1), OperandRef);
+				OutError.SourceKind = TEXT("related_input"); OutError.Source.JsonPath = TEXT("/operand_ref");
+				return false;
 			}
 			const FUeAgentCanonicalValuePtr OperandCurrent(
 				Operand->GetValue());
-			const TSharedPtr<FJsonObject>* OperandRevisionJson = nullptr;
-			TOptional<FUeAgentStateRevision> OperandRevision;
-			TOptional<FUeAgentStateRevision> ActualRevision;
-			if (!Payload->TryGetObjectField(
-					TEXT("operand_revision"),
-					OperandRevisionJson)
-				|| !OperandRevisionJson
-				|| !FUeAgentStateRevisionJson::TryParse(
-					*OperandRevisionJson,
-					OperandRevision)
-				|| !FUeAgentStateRevisionJson::TryReadCanonical(
+			TOptional<FUeAgentStateRevision> OperandCurrentRevision;
+			if (!FUeAgentStateRevisionJson::TryReadCanonical(
 					FindCanonicalField(
 						OperandCurrent,
 						TEXT("target_revision")),
-					ActualRevision)
-				|| ActualRevision.GetValue()
-					!= OperandRevision.GetValue())
+					OperandCurrentRevision, OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_operand_revision_stale"));
-			}
-			if (!ReadCanonicalString(
-					OperandCurrent,
-					TEXT("geometry_fingerprint"),
-					OperandFingerprint)
-				|| !ValidateOperandTransform(Payload, OutError))
-			{
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = OperandRef;
+				OutError.SourceKind = TEXT("native_result");
+				const FString Suffix = OutError.PropertyPath == TEXT("target_revision") ? FString() : OutError.PropertyPath;
+				OutError.PropertyPath = TEXT("snapshot/target_revision")
+					+ (Suffix.IsEmpty() ? FString() : Suffix.StartsWith(TEXT("/")) ? Suffix : TEXT("/") + Suffix);
 				return false;
 			}
+			if (!ReadCanonicalString(OperandCurrent, TEXT("geometry_fingerprint"), OperandFingerprint))
+			{
+				OutError = NativeFact(TEXT("modeling_geometry_operand_state_unavailable"),
+					TEXT("The operand snapshot has no readable non-empty geometry fingerprint."), TEXT("/snapshot/geometry_fingerprint_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), OperandRef);
+				OutError.ActualEvidence = CanonicalShape(FindCanonicalField(OperandCurrent, TEXT("geometry_fingerprint")));
+				return false;
+			}
+			if (!ValidateOperandTransform(Payload, OutError, TargetRef)) return false;
 		}
 
 		bool bPlane = false;
 		if (Spec->Row->TryGetBoolField(TEXT("plane"), bPlane)
 			&& bPlane
-			&& !ValidatePlane(Payload, OutError))
+			&& !ValidatePlane(Payload, OutError, TargetRef))
 		{
 			return false;
 		}
@@ -1634,9 +1550,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			&& DirectionMode == TEXT("fixed")
 			&& !Payload->HasField(TEXT("direction")))
 		{
-			return Fail(
-				OutError,
-				TEXT("modeling_geometry_direction_required"));
+			return Fail(OutError, InputFact(TEXT("modeling_geometry_direction_required"),
+				TEXT("A direction must be supplied when direction_mode is fixed."), TEXT("/direction"),
+				JsonFact(Payload->TryGetField(TEXT("direction"))), MakeShared<FJsonValueString>(TEXT("direction value for fixed mode")), TargetRef));
 		}
 		if (Spec->OperationKey == TEXT("simplify"))
 		{
@@ -1651,10 +1567,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 					TargetValue)
 				&& TargetValue > 1.0)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"modeling_geometry_simplify_target_invalid"));
+				return Fail(OutError, InputFact(TEXT("modeling_geometry_simplify_target_invalid"),
+					TEXT("A triangle_ratio simplify target must not exceed 1."), TEXT("/target_value"), NumberFact(TargetValue),
+					MakeShared<FJsonValueString>(TEXT("value at most 1 when target_mode is triangle_ratio")), TargetRef));
 			}
 		}
 		bool bEdgePairs = false;
@@ -1662,7 +1577,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				TEXT("edge_pairs"),
 				bEdgePairs)
 			&& bEdgePairs
-			&& !ValidateEdgePairs(Payload, OutError))
+			&& !ValidateEdgePairs(Payload, OutError, TargetRef))
 		{
 			return false;
 		}
@@ -1673,9 +1588,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			: Payload->Values)
 		{
 			if (Pair.Key != TEXT("target_ref")
-				&& Pair.Key != TEXT("target_revision")
-				&& Pair.Key != TEXT("operand_ref")
-				&& Pair.Key != TEXT("operand_revision"))
+				&& Pair.Key != TEXT("operand_ref"))
 			{
 				TypedParameters->SetField(Pair.Key, Pair.Value);
 			}
@@ -1735,9 +1648,10 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			MoveTemp(Changes));
 		if (!Draft.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("modeling_geometry_change_set_draft_invalid"));
+			OutError = FDiagnostic::WrapFailure(TEXT("modeling_geometry_change_set_draft_invalid"), Draft.GetValidationDiagnostic(),
+				TEXT("execution"), TEXT("The modeling geometry change-set draft is invalid."));
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+			return false;
 		}
 		OutDraft.Emplace(MoveTemp(Draft));
 		return true;

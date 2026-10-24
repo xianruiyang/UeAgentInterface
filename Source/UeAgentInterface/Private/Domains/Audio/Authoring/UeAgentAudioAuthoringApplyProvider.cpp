@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Domains/Audio/Authoring/UeAgentAudioAuthoringApplyProvider.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Dom/JsonObject.h"
@@ -13,11 +14,14 @@
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringObjectApplyProvider.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentApplyWorkspaceContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceApply.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceInput.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceDependencyGraph.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceLoader.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
 
 #include "Domains/Audio/Authoring/UeAgentAudioAuthoringDocuments.h"
+#include "Domains/Audio/Authoring/UeAgentAudioGraphIntent.h"
 #include "Domains/Audio/Authoring/UeAgentAudioAuthoringState.h"
 
 namespace UeAgentAudioAuthoring {
@@ -25,11 +29,36 @@ namespace {
 using namespace UeAgentApplyInputContract;
 using namespace UeAgentAuthoringOperationApply;
 
-void SetFailure(FOperationFailure &OutFailure, const FString &Code,
-                const FString &Detail = FString()) {
-  OutFailure = FOperationFailure();
-  OutFailure.ErrorCode = Code;
-  OutFailure.ErrorDetail = Detail.IsEmpty() ? Code : Detail;
+
+
+
+
+
+
+
+using UE::UAI::Contract::FDiagnostic;
+
+FDiagnostic AudioFailure(const TCHAR* Code, const FString& Reason, const FString& Stage,
+    const FString& Target, const FString& Field, TSharedPtr<FJsonValue> Actual,
+    TSharedPtr<FJsonValue> Expected, const FJsonObject* Input = nullptr,
+    const FString& InputField = FString()) {
+  FDiagnostic Error = FDiagnostic::Failure(Code, Reason, Stage);
+  Error.TargetPath = Target;
+  Error.PropertyPath = Field;
+  Error.ActualValuePresent = Actual.IsValid();
+  Error.ExpectedValuePresent = Expected.IsValid();
+  Error.ActualValue = MoveTemp(Actual);
+  Error.ExpectedValue = MoveTemp(Expected);
+  if (Input) UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, *Input, InputField);
+  else Error.SourceKind = TEXT("native_result");
+  return Error;
+}
+
+void SetFailure(FOperationFailure& OutFailure, FDiagnostic Diagnostic,
+    const FString& Target = FString(), const FString& Stage = FString()) {
+  if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = Target;
+  if (Diagnostic.Stage.IsEmpty()) Diagnostic.Stage = Stage;
+  OutFailure.Diagnostic = MoveTemp(Diagnostic);
 }
 
 bool ReadBool(const TSharedPtr<const FJsonObject> &Object, const TCHAR *Field,
@@ -40,15 +69,22 @@ bool ReadBool(const TSharedPtr<const FJsonObject> &Object, const TCHAR *Field,
   return Value;
 }
 
-bool EnsureMetaSoundAssetIdentity(UObject *Asset, FString &OutError) {
+bool EnsureMetaSoundAssetIdentity(UObject *Asset, const FString& Target, FDiagnostic& OutError) {
   if (!Asset) {
-    OutError = TEXT("metasound_asset_identity_missing");
+    OutError = AudioFailure(TEXT("metasound_asset_identity_missing"),
+        TEXT("No MetaSound asset object is available to establish persistent asset identity."),
+        TEXT("asset_identity"), Target, TEXT("asset_available"),
+        MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
     return false;
   }
   Asset->ClearFlags(RF_Transient);
   Asset->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
   if (!Asset->IsAsset()) {
-    OutError = TEXT("metasound_asset_identity_invalid:") + Asset->GetPathName();
+    OutError = AudioFailure(TEXT("metasound_asset_identity_invalid"),
+        TEXT("The MetaSound object is not an asset after assigning the required asset flags."),
+        TEXT("asset_identity"), Target, TEXT("is_asset"),
+        MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+    OutError.InternalContext = Asset->GetPathName();
     return false;
   }
   return true;
@@ -58,9 +94,9 @@ TSet<FString> GetDocumentFields(const EAssetKind Kind) {
   switch (Kind) {
   case EAssetKind::MetaSound:
     return {TEXT("settings"), TEXT("interfaces"), TEXT("members"),
-            TEXT("graph")};
+            TEXT("graph"), TEXT("nodes"), TEXT("edges"), TEXT("connections")};
   case EAssetKind::SoundCue:
-    return {TEXT("graph")};
+    return {TEXT("graph"), TEXT("nodes"), TEXT("edges"), TEXT("connections")};
   case EAssetKind::SoundSubmix:
     return {TEXT("settings"), TEXT("children")};
   default:
@@ -70,7 +106,7 @@ TSet<FString> GetDocumentFields(const EAssetKind Kind) {
 
 bool ExtractDocument(const EAssetKind Kind,
                      const TSharedPtr<const FJsonObject> &Extension,
-                     TSharedPtr<FJsonObject> &OutDocument, FString &OutError) {
+                     TSharedPtr<FJsonObject> &OutDocument, UE::UAI::Contract::FDiagnostic& OutError) {
   OutDocument = MakeShared<FJsonObject>();
   OutError.Reset();
   if (!Extension.IsValid())
@@ -78,10 +114,18 @@ bool ExtractDocument(const EAssetKind Kind,
   const TSet<FString> DocumentFields = GetDocumentFields(Kind);
   for (const TPair<FString, TSharedPtr<FJsonValue>> &Field :
        Extension->Values) {
-    if (Field.Key == TEXT("compile") || Field.Key == TEXT("save"))
+    if (Field.Key == TEXT("compile") || Field.Key == TEXT("save") || Field.Key == TEXT("complete_document"))
       continue;
     if (!DocumentFields.Contains(Field.Key)) {
-      OutError = TEXT("audio_provider_extension_unknown_field:") + Field.Key;
+      TArray<FString> Names = DocumentFields.Array();
+      Names.Append({TEXT("compile"), TEXT("save"), TEXT("complete_document")});
+      Names.Sort();
+      TArray<TSharedPtr<FJsonValue>> Allowed;
+      for (const FString& Name : Names) Allowed.Add(MakeShared<FJsonValueString>(Name));
+      OutError = AudioFailure(TEXT("audio_provider_extension_unknown_field"),
+          TEXT("The audio provider extension contains an unsupported field."), TEXT("audio_prepare"),
+          FString(), Field.Key, MakeShared<FJsonValueString>(Field.Key),
+          MakeShared<FJsonValueArray>(MoveTemp(Allowed)), Extension.Get(), Field.Key);
       return false;
     }
     OutDocument->SetField(Field.Key, Field.Value);
@@ -90,13 +134,25 @@ bool ExtractDocument(const EAssetKind Kind,
 }
 
 bool DocumentsEqual(UObject &A, UObject &B, const EAssetKind Kind,
-                    const FString &CanonicalAssetPath) {
+                    const FString &CanonicalAssetPath, UE::UAI::Contract::FDiagnostic& OutReadError) {
   TSharedPtr<FJsonObject> ADocument;
   TSharedPtr<FJsonObject> BDocument;
-  FString Error;
-  return BuildDocument(Kind, A, ADocument, Error, CanonicalAssetPath) &&
-         BuildDocument(Kind, B, BDocument, Error, CanonicalAssetPath) &&
-         UeAgentAuthoringState::MakeStableCanonicalValueKey(
+  OutReadError.Reset();
+  if (!BuildDocument(Kind, A, ADocument, OutReadError, CanonicalAssetPath)) {
+    if (OutReadError.SourceKind.IsEmpty()) OutReadError.SourceKind = TEXT("native_result");
+    OutReadError = UE::UAI::Contract::FDiagnostic::WrapFailure(
+        TEXT("audio_noop_existing_document_read_failed"), OutReadError, TEXT("noop_comparison"),
+        TEXT("The existing audio document could not be read for no-op comparison."));
+    return false;
+  }
+  if (!BuildDocument(Kind, B, BDocument, OutReadError, CanonicalAssetPath)) {
+    if (OutReadError.SourceKind.IsEmpty()) OutReadError.SourceKind = TEXT("native_result");
+    OutReadError = UE::UAI::Contract::FDiagnostic::WrapFailure(
+        TEXT("audio_noop_proposed_document_read_failed"), OutReadError, TEXT("noop_comparison"),
+        TEXT("The proposed audio document could not be read for no-op comparison."));
+    return false;
+  }
+  return UeAgentAuthoringState::MakeStableCanonicalValueKey(
              MakeShared<FJsonValueObject>(ADocument)) ==
              UeAgentAuthoringState::MakeStableCanonicalValueKey(
                  MakeShared<FJsonValueObject>(BDocument));
@@ -131,15 +187,25 @@ void RetireTransientAsset(TStrongObjectPtr<UObject> &Asset,
   Asset.Reset();
 }
 
-bool DeleteAsset(UObject *Asset, FString &OutError) {
+bool DeleteAsset(UObject* Asset, const FString& Target, UE::UAI::Contract::FDiagnostic& OutError)
+{
   OutError.Reset();
   if (!Asset) {
-    OutError = TEXT("audio_delete_target_missing");
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("audio_delete_target_missing"),
+      TEXT("No audio asset object was supplied for deletion."), TEXT("authoring_apply"));
+    OutError.SourceKind = TEXT("native_result"); OutError.TargetPath = Target; OutError.PropertyPath = TEXT("asset");
+    OutError.ActualValuePresent = true; OutError.ActualValue = MakeShared<FJsonValueNull>();
+    OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("audio asset object"));
     return false;
   }
   TGuardValue<bool> UnattendedGuard(GIsRunningUnattendedScript, true);
   if (!ObjectTools::DeleteSingleObject(Asset, true)) {
-    OutError = TEXT("audio_delete_blocked_by_references");
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("audio_delete_rejected"),
+      TEXT("The editor rejected deletion of the audio asset object."), TEXT("authoring_apply"),
+      TEXT("DeleteSingleObject returned false with reference checking enabled; its bool API does not distinguish deletion-policy and reference-check rejection."));
+    OutError.SourceKind = TEXT("native_result"); OutError.TargetPath = Target; OutError.PropertyPath = TEXT("deletion_succeeded");
+    OutError.ActualValuePresent = true; OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+    OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
     return false;
   }
   return true;
@@ -175,11 +241,18 @@ public:
                        UObject *InProposed,
                        TSharedPtr<const FJsonObject> InDocument,
                        const FMutationStats &InStats, const bool bInCompile,
-                       const bool bInSave, const bool bInDocumentNoOp)
+                       const bool bInSave, const bool bInDocumentNoOp,
+                       TArray<FNodePropertyIntent> InPropertyIntents = {},
+                       bool bInCompleteDocument = false,
+                       FAudioGraphIntent InGraphIntent = {})
       : Profile(InProfile), PackagePath(MoveTemp(InPackagePath)),
         Operation(InOperation), Existing(InExisting), Proposed(InProposed),
         Document(MoveTemp(InDocument)), Stats(InStats), bCompile(bInCompile),
-        bSave(bInSave), bDocumentNoOp(bInDocumentNoOp) {}
+        bSave(bInSave), bDocumentNoOp(bInDocumentNoOp),
+        PropertyIntents(MoveTemp(InPropertyIntents)), bCompleteDocument(bInCompleteDocument),
+        ProposedGraphIntent(MoveTemp(InGraphIntent)), ActualGraphIntent(ProposedGraphIntent) {
+    if (Document) DocumentSources = UeAgentAuthoringDiagnostics::FScopedSourceLocations::CaptureProjection(*Document);
+  }
 
   virtual ~FAssetLifecycleState() override { RetireProposed(); }
 
@@ -204,15 +277,15 @@ public:
   virtual bool CaptureRollback(FOperationFailure &OutFailure) override {
     OutFailure = FOperationFailure();
     if (Operation == EOperation::Update && Existing) {
-      FString Error;
-      if (!BuildDocument(Profile.Kind, *Existing, RollbackDocument, Error)) {
-        SetFailure(OutFailure, TEXT("audio_rollback_capture_failed"), Error);
+      UE::UAI::Contract::FDiagnostic Error;
+      if (!BuildDocument(Profile.Kind, *Existing, RollbackDocument, Error, PackagePath)) {
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath, TEXT("rollback_capture"));
         return false;
       }
     } else if (Operation == EOperation::Remove && Existing) {
-      FString Error;
+      UE::UAI::Contract::FDiagnostic Error;
       if (!RemovalStage.Capture(Existing, Error)) {
-        SetFailure(OutFailure, Error);
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
     }
@@ -224,12 +297,36 @@ public:
     return true;
   }
 
+  virtual bool SupportsPersistentReadback() const override {
+    return Operation == EOperation::Update;
+  }
+  virtual bool ReleaseForPersistentReadback(FOperationFailure &OutFailure) override {
+    RetireProposed();
+    Existing = nullptr;
+    Actual = nullptr;
+    return true;
+  }
+  virtual bool RebindAfterPersistentReadback(FOperationFailure &OutFailure) override {
+    Existing = LoadAsset(Profile.Kind, PackagePath);
+    Actual = Existing;
+    if (!Existing) {
+      SetFailure(OutFailure, AudioFailure(TEXT("audio_persistent_reload_failed"),
+          TEXT("The saved audio asset could not be reloaded for persistent readback."), TEXT("persistent_readback"),
+          PackagePath, TEXT("asset_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+      return false;
+    }
+    return true;
+  }
+
   virtual bool ApplyLifecycle(FOperationFailure &OutFailure) override {
     OutFailure = FOperationFailure();
+    UeAgentAuthoringDiagnostics::FScopedSourceLocations Sources(Document.Get(), [this](const FString& Pointer) {
+      return UeAgentAuthoringDiagnostics::FScopedSourceLocations::ResolveProjection(DocumentSources, Pointer);
+    });
     if (Operation == EOperation::Remove) {
-      FString Error;
+      UE::UAI::Contract::FDiagnostic Error;
       if (!RemovalStage.Stage(Error)) {
-        SetFailure(OutFailure, Error);
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
       Actual = nullptr;
@@ -237,34 +334,40 @@ public:
     }
     if (Operation == EOperation::Update) {
       FMutationStats AppliedStats;
-      FString Error;
+      UE::UAI::Contract::FDiagnostic Error;
       if (!ApplyDocument(Profile.Kind, *Existing, Document, AppliedStats, Error,
-                         PackagePath)) {
-        SetFailure(OutFailure, TEXT("audio_document_apply_failed"), Error);
+                         PackagePath, nullptr, bCompleteDocument, &ActualGraphIntent)) {
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
       Stats = AppliedStats;
       Actual = Existing;
+      bDocumentApplied = true;
       return true;
     }
     if (!Proposed.IsValid()) {
-      SetFailure(OutFailure, TEXT("audio_proposed_asset_missing"));
+      SetFailure(OutFailure, AudioFailure(TEXT("audio_proposed_asset_missing"),
+          TEXT("The prepared audio asset is no longer available for publication."), TEXT("audio_publish"),
+          PackagePath, TEXT("proposed_asset_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
       return false;
     }
     Actual = PublishAsset(Proposed.Get(), PackagePath);
     if (!Actual) {
-      SetFailure(OutFailure, TEXT("audio_asset_publish_failed"));
+      SetFailure(OutFailure, AudioFailure(TEXT("audio_asset_publish_failed"),
+          TEXT("Unreal did not publish the proposed audio asset into the target package."), TEXT("audio_publish"),
+          PackagePath, TEXT("published_asset_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
       return false;
     }
     if (Profile.Kind == EAssetKind::MetaSound) {
-      FString Error;
-      if (!EnsureMetaSoundAssetIdentity(Actual, Error)) {
-        SetFailure(OutFailure, TEXT("audio_published_asset_invalid"), Error);
+      UE::UAI::Contract::FDiagnostic Error;
+      if (!EnsureMetaSoundAssetIdentity(Actual, PackagePath, Error)) {
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
     }
     FAssetRegistryModule::AssetCreated(Actual);
     Actual->MarkPackageDirty();
+    bDocumentApplied = true;
     return true;
   }
 
@@ -272,21 +375,21 @@ public:
     OutFailure = FOperationFailure();
     if (!bCompile || Operation == EOperation::Remove)
       return true;
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!CompileAsset(Profile.Kind, *(Actual ? Actual : Existing), Error)) {
-      SetFailure(OutFailure, Error);
+      SetFailure(OutFailure, MoveTemp(Error), PackagePath);
       return false;
     }
-    return true;
+    return VerifyOriginalIntent(Actual ? Actual : Existing, ActualGraphIntent, OutFailure);
   }
 
   virtual bool Save(FOperationFailure &OutFailure) override {
     OutFailure = FOperationFailure();
     if (!bSave || Operation == EOperation::Remove)
       return true;
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!SaveAsset(Profile.Kind, *(Actual ? Actual : Existing), Error)) {
-      SetFailure(OutFailure, Error);
+      SetFailure(OutFailure, MoveTemp(Error), PackagePath);
       return false;
     }
     return true;
@@ -308,6 +411,7 @@ public:
   virtual bool BuildDomainExpectedReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const override {
+    if (Operation != EOperation::Remove && !VerifyOriginalIntent(Proposed.Get(), ProposedGraphIntent, OutFailure)) return false;
     return BuildReadRequests(
         Operation == EOperation::Remove ? nullptr : Proposed.Get(),
         Operation == EOperation::Remove, OutRequests, OutFailure);
@@ -316,10 +420,20 @@ public:
   virtual bool BuildDomainActualReadRequests(
       TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
       FOperationFailure &OutFailure) const override {
+    if (bDocumentApplied && !VerifyOriginalIntent(Actual ? Actual : Existing, ActualGraphIntent, OutFailure)) return false;
     return BuildReadRequests(
         Operation == EOperation::Remove ? nullptr
                                         : (Actual ? Actual : Existing),
         Operation == EOperation::Remove, OutRequests, OutFailure);
+  }
+
+  virtual bool BuildDomainBeforeReadRequests(
+      TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+      FOperationFailure& OutFailure) const override {
+    // Checkpoint recovery bypasses ordinary Rollback(), so bDocumentApplied
+    // may still be true. Restored state is compared with the captured baseline.
+    UObject* Owner = Actual ? Actual : Existing;
+    return BuildReadRequests(Owner, !Owner, OutRequests, OutFailure);
   }
 
   virtual TSharedPtr<FJsonObject> BuildResultMetadata() const override {
@@ -329,9 +443,9 @@ public:
   virtual bool Commit(FOperationFailure &OutFailure) override {
     OutFailure = FOperationFailure();
     if (Operation == EOperation::Remove && RemovalStage.IsStaged()) {
-      FString Error;
-      if (!DeleteAsset(RemovalStage.GetAsset(), Error)) {
-        SetFailure(OutFailure, Error);
+      UE::UAI::Contract::FDiagnostic Error;
+      if (!DeleteAsset(RemovalStage.GetAsset(), PackagePath, Error)) {
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
       RemovalStage.Reset();
@@ -343,13 +457,14 @@ public:
 
   virtual bool Rollback(FOperationFailure &OutFailure) override {
     OutFailure = FOperationFailure();
-    FString Error;
+    bDocumentApplied = false;
+    UE::UAI::Contract::FDiagnostic Error;
     if (Operation == EOperation::Update && Existing &&
         RollbackDocument.IsValid()) {
       FMutationStats RollbackStats;
       if (!ApplyDocument(Profile.Kind, *Existing, RollbackDocument,
-                         RollbackStats, Error, PackagePath)) {
-        SetFailure(OutFailure, TEXT("audio_rollback_restore_failed"), Error);
+                         RollbackStats, Error, PackagePath, nullptr, true)) {
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
       Actual = Existing;
@@ -358,10 +473,16 @@ public:
     }
     if ((Operation == EOperation::Create || Operation == EOperation::Clone) &&
         Actual) {
-      if (!DeleteAsset(Actual, Error)) {
+      if (!DeleteAsset(Actual, PackagePath, Error)) {
         TArray<UObject *> Objects = {Actual};
-        if (ObjectTools::DeleteObjectsUnchecked(Objects) <= 0) {
-          SetFailure(OutFailure, Error);
+        const int32 DeletedCount = ObjectTools::DeleteObjectsUnchecked(Objects);
+        if (DeletedCount <= 0) {
+          Error.Diagnostics.Add(AudioFailure(TEXT("audio_rollback_delete_failed"),
+              TEXT("The fallback deletion also failed to remove the audio asset during rollback."), TEXT("audio_rollback"),
+              PackagePath, TEXT("deleted_objects"), MakeShared<FJsonValueNumber>(DeletedCount),
+              MakeShared<FJsonValueString>(TEXT("at least one deleted object"))));
+          UeAgentAuthoringDiagnostics::SetRollbackFacts(Error, false);
+          SetFailure(OutFailure, MoveTemp(Error), PackagePath);
           return false;
         }
       }
@@ -371,7 +492,7 @@ public:
     }
     if (Operation == EOperation::Remove && RemovalStage.IsCaptured()) {
       if (!RemovalStage.Rollback(Error)) {
-        SetFailure(OutFailure, Error);
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
       Actual = Existing;
@@ -381,16 +502,33 @@ public:
   }
 
 private:
+  bool VerifyOriginalIntent(UObject* Root, const FAudioGraphIntent& GraphIntent, FOperationFailure& OutFailure) const {
+    UeAgentAuthoringDiagnostics::FScopedSourceLocations Sources(Document.Get(), [this](const FString& Pointer) {
+      return UeAgentAuthoringDiagnostics::FScopedSourceLocations::ResolveProjection(DocumentSources, Pointer);
+    });
+    UE::UAI::Contract::FDiagnostic Error;
+    if (Root && VerifyNodePropertyIntents(*Root, PropertyIntents, Error)
+        && VerifyDocumentIntent(Profile.Kind, *Root, Document, bCompleteDocument, Error)
+        && GraphIntent.Verify(*Root, Error)) return true;
+    if (!Root) Error = AudioFailure(TEXT("audio_document_intent_owner_missing"),
+        TEXT("No audio asset object is available to observe the requested document state."), TEXT("audio_intent_observation"),
+        PackagePath, TEXT("asset_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+    if (Error.TargetPath.IsEmpty()) Error.TargetPath = PackagePath;
+    if (Document) UeAgentAuthoringDiagnostics::LocateAuthoringSource(Error, *Document);
+    UeAgentAuthoringDiagnostics::ReportConsistencyWarning(TEXT("audio_document_intent_not_retained"),
+        Error, TEXT("audio_intent_observation"));
+    return true;
+  }
   void RetireProposed() { RetireTransientAsset(Proposed, Actual); }
 
   bool
   BuildReadRequests(UObject *Asset, const bool bExpectedAbsent,
                     TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
                     FOperationFailure &OutFailure) const {
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!BuildAssetSnapshotReadRequests(Profile, Asset, PackagePath,
                                         bExpectedAbsent, OutRequests, Error)) {
-      SetFailure(OutFailure, TEXT("audio_snapshot_request_failed"), Error);
+      SetFailure(OutFailure, MoveTemp(Error), PackagePath);
       return false;
     }
     return true;
@@ -405,10 +543,16 @@ private:
   FAssetRemovalStage RemovalStage;
   UObject *Actual = nullptr;
   TSharedPtr<const FJsonObject> Document;
+  TMap<FString, UeAgentAuthoringDiagnostics::FSourceLocation> DocumentSources;
   mutable FMutationStats Stats;
   bool bCompile = true;
   bool bSave = false;
   bool bDocumentNoOp = false;
+  TArray<FNodePropertyIntent> PropertyIntents;
+  bool bCompleteDocument = false;
+  FAudioGraphIntent ProposedGraphIntent;
+  FAudioGraphIntent ActualGraphIntent;
+  bool bDocumentApplied = false;
 };
 
 class FAssetLifecycle final : public IReflectionOperationLifecycle {
@@ -421,14 +565,21 @@ public:
     OutFailure = FOperationFailure();
     if (!Request.IsValid() || !Request.Input->Target.IsValid() ||
         !Request.Contract) {
-      SetFailure(OutFailure, TEXT("audio_apply_request_invalid"));
+      const FString Missing = !Request.Contract ? TEXT("contract") : !Request.Unit ? TEXT("unit")
+          : !Request.Input ? TEXT("input") : TEXT("target");
+      SetFailure(OutFailure, AudioFailure(TEXT("audio_apply_request_invalid"),
+          TEXT("Audio preparation requires a valid ") + Missing + TEXT("."), TEXT("audio_prepare"),
+          FString(), TEXT("request.") + Missing + TEXT(".available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
       return false;
     }
     const FProfile *Profile =
         FindProfileByTargetKind(Request.Contract->TargetKind);
     if (!Profile) {
-      SetFailure(OutFailure, TEXT("audio_apply_profile_missing"),
-                 Request.Contract->TargetKind);
+      TArray<TSharedPtr<FJsonValue>> Kinds;
+      for (const FProfile& Supported : GetProfiles()) Kinds.Add(MakeShared<FJsonValueString>(Supported.TargetKind));
+      SetFailure(OutFailure, AudioFailure(TEXT("audio_apply_profile_missing"),
+          TEXT("No audio profile is registered for the requested target kind."), TEXT("audio_prepare"),
+          FString(), TEXT("target_kind"), MakeShared<FJsonValueString>(Request.Contract->TargetKind), MakeShared<FJsonValueArray>(MoveTemp(Kinds))));
       return false;
     }
     FString PackagePath;
@@ -438,14 +589,20 @@ public:
         FPackageName::GetLongPackageAssetName(PackagePath).IsEmpty() ||
         (!PackagePath.Equals(TEXT("/Game")) &&
          !PackagePath.StartsWith(TEXT("/Game/")))) {
-      SetFailure(OutFailure, TEXT("invalid_asset_path"), PackagePath);
+      SetFailure(OutFailure, AudioFailure(TEXT("invalid_asset_path"),
+          TEXT("An audio asset requires a valid long package path under /Game with a nonempty asset name."), TEXT("audio_prepare"),
+          PackagePath, TEXT("asset_path"), Request.Input->Target->TryGetField(TEXT("asset_path")),
+          MakeShared<FJsonValueString>(TEXT("a valid /Game/... asset package path")), Request.Input->Target.Get(), TEXT("asset_path")));
       return false;
     }
     FString AssetKind;
     if (Request.Input->Target->TryGetStringField(TEXT("asset_kind"),
                                                  AssetKind) &&
         !AssetKind.Equals(Profile->TypeId, ESearchCase::IgnoreCase)) {
-      SetFailure(OutFailure, TEXT("audio_asset_kind_conflict"), AssetKind);
+      SetFailure(OutFailure, AudioFailure(TEXT("audio_asset_kind_conflict"),
+          TEXT("The asserted audio asset kind does not match the selected profile."), TEXT("audio_prepare"),
+          PackagePath, TEXT("asset_kind"), MakeShared<FJsonValueString>(AssetKind),
+          MakeShared<FJsonValueString>(Profile->TypeId), Request.Input->Target.Get(), TEXT("asset_kind")));
       return false;
     }
 
@@ -455,36 +612,55 @@ public:
       Operation = Existing ? EOperation::Update : EOperation::Create;
     if ((Operation == EOperation::Create || Operation == EOperation::Clone) &&
         Existing) {
-      SetFailure(OutFailure, TEXT("asset_already_exists"), PackagePath);
+      SetFailure(OutFailure, AudioFailure(TEXT("asset_already_exists"),
+          Operation == EOperation::Clone ? TEXT("Clone requires an unused destination audio asset path.") : TEXT("Create requires an unused audio asset path."),
+          TEXT("audio_prepare"), PackagePath, TEXT("asset_exists"), MakeShared<FJsonValueBoolean>(true),
+          MakeShared<FJsonValueBoolean>(false), Request.Input->Target.Get(), TEXT("asset_path")));
       return false;
     }
     if ((Operation == EOperation::Update || Operation == EOperation::Remove) &&
         !Existing) {
-      SetFailure(OutFailure, TEXT("asset_not_found"), PackagePath);
+      SetFailure(OutFailure, AudioFailure(TEXT("asset_not_found"),
+          Operation == EOperation::Remove ? TEXT("Remove requires an existing audio asset of the selected kind.") : TEXT("Update requires an existing audio asset of the selected kind."),
+          TEXT("audio_prepare"), PackagePath, TEXT("asset_exists"), MakeShared<FJsonValueBoolean>(false),
+          MakeShared<FJsonValueBoolean>(true), Request.Input->Target.Get(), TEXT("asset_path")));
       return false;
     }
 
     TSharedPtr<FJsonObject> Document;
-    FString Error;
+    UE::UAI::Contract::FDiagnostic Error;
     if (!ExtractDocument(Profile->Kind, Request.Input->ProviderExtension,
                          Document, Error)) {
-      SetFailure(OutFailure, Error);
+      SetFailure(OutFailure, MoveTemp(Error), PackagePath, TEXT("audio_prepare"));
       return false;
     }
+    // ExtractDocument keeps the same field paths in a new root. Preserve the
+    // original extension map before preparation and the later lifecycle diverge.
+    const auto DocumentSources = Request.Input->ProviderExtension
+        ? UeAgentAuthoringDiagnostics::FScopedSourceLocations::CaptureProjection(*Request.Input->ProviderExtension)
+        : TMap<FString, UeAgentAuthoringDiagnostics::FSourceLocation>();
+    UeAgentAuthoringDiagnostics::FScopedSourceLocations Sources(Document.Get(), [&DocumentSources](const FString& Pointer) {
+      return UeAgentAuthoringDiagnostics::FScopedSourceLocations::ResolveProjection(DocumentSources, Pointer);
+    });
     UObject *Source = nullptr;
+    FString SourcePath;
     if (Operation == EOperation::Clone) {
-      FString SourcePath;
       Request.Input->Target->TryGetStringField(TEXT("source_asset_path"),
                                                SourcePath);
       Source = LoadAsset(Profile->Kind, SourcePath);
       if (!Source) {
-        SetFailure(OutFailure, TEXT("source_asset_not_found"), SourcePath);
+        SetFailure(OutFailure, AudioFailure(TEXT("source_asset_not_found"),
+            TEXT("The clone source could not be loaded as the selected audio asset kind."), TEXT("audio_prepare"),
+            PackagePath, TEXT("source_asset_path"), Request.Input->Target->TryGetField(TEXT("source_asset_path")),
+            MakeShared<FJsonValueString>(TEXT("an existing ") + Profile->TypeId + TEXT(" asset")), Request.Input->Target.Get(), TEXT("source_asset_path")));
         return false;
       }
     }
 
     UObject *Proposed = nullptr;
     FMutationStats Stats;
+    TArray<FNodePropertyIntent> PropertyIntents;
+    FAudioGraphIntent GraphIntent;
     if (Operation != EOperation::Remove) {
       UPackage *Scratch = CreatePackage(
           *FString::Printf(TEXT("/Temp/UAI/Audio/Proposed_%s"),
@@ -492,8 +668,8 @@ public:
       UObject *ProposedSource =
           Operation == EOperation::Clone ? Source : Existing;
       if (Profile->Kind == EAssetKind::MetaSound && ProposedSource &&
-          !EnsureMetaSoundAssetIdentity(ProposedSource, Error)) {
-        SetFailure(OutFailure, TEXT("audio_proposed_source_invalid"), Error);
+          !EnsureMetaSoundAssetIdentity(ProposedSource, Operation == EOperation::Clone ? NormalizePackagePath(SourcePath) : PackagePath, Error)) {
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
       Proposed = Operation == EOperation::Create
@@ -506,35 +682,47 @@ public:
                                                 RF_Transactional
                                           : RF_Transactional);
       if (!Proposed) {
-        SetFailure(OutFailure, Error.IsEmpty()
-                                   ? TEXT("audio_proposed_asset_create_failed")
-                                   : Error);
+        if (Operation == EOperation::Create) SetFailure(OutFailure, MoveTemp(Error), PackagePath);
+        else {
+          auto DuplicationError = AudioFailure(TEXT("audio_proposed_asset_create_failed"),
+              TEXT("Unreal did not duplicate the source audio asset for preparation."), TEXT("audio_prepare"),
+              PackagePath, TEXT("proposed_asset_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+          DuplicationError.CandidateName = Operation == EOperation::Clone ? SourcePath : PackagePath;
+          SetFailure(OutFailure, MoveTemp(DuplicationError), PackagePath);
+        }
         return false;
       }
       if (Profile->Kind == EAssetKind::MetaSound) {
-        if (!EnsureMetaSoundAssetIdentity(Proposed, Error)) {
+        if (!EnsureMetaSoundAssetIdentity(Proposed, PackagePath, Error)) {
           TStrongObjectPtr<UObject> InvalidGuard(Proposed);
           RetireTransientAsset(InvalidGuard);
-          SetFailure(OutFailure, TEXT("audio_proposed_asset_invalid"), Error);
+          SetFailure(OutFailure, MoveTemp(Error), PackagePath);
           return false;
         }
       }
       TStrongObjectPtr<UObject> ProposedGuard(Proposed);
       if (!ApplyDocument(Profile->Kind, *Proposed, Document, Stats, Error,
-                         PackagePath)) {
+                         PackagePath, &PropertyIntents,
+                         ReadBool(Request.Input->ProviderExtension, TEXT("complete_document"), false), &GraphIntent)) {
         RetireTransientAsset(ProposedGuard);
-        SetFailure(OutFailure, TEXT("audio_document_preflight_failed"), Error);
+        SetFailure(OutFailure, MoveTemp(Error), PackagePath);
         return false;
       }
 
+      UE::UAI::Contract::FDiagnostic ComparisonError;
       const bool bDocumentNoOp =
           Operation == EOperation::Update && Existing &&
-          DocumentsEqual(*Existing, *Proposed, Profile->Kind, PackagePath);
+          DocumentsEqual(*Existing, *Proposed, Profile->Kind, PackagePath, ComparisonError);
+      if (!ComparisonError.IsEmpty()) {
+        if (ComparisonError.TargetPath.IsEmpty()) ComparisonError.TargetPath = PackagePath;
+        UeAgentAuthoringDiagnostics::ReportConsistencyWarning(ComparisonError);
+      }
       OutState = MakeUnique<FAssetLifecycleState>(
           *Profile, PackagePath, Operation, Existing, Proposed, Document, Stats,
           ReadBool(Request.Input->ProviderExtension, TEXT("compile"), true),
           ReadBool(Request.Input->ProviderExtension, TEXT("save"), false),
-          bDocumentNoOp);
+          bDocumentNoOp, MoveTemp(PropertyIntents),
+          ReadBool(Request.Input->ProviderExtension, TEXT("complete_document"), false), MoveTemp(GraphIntent));
       ProposedGuard.Reset();
       return true;
     }
@@ -603,12 +791,11 @@ FContract MakeInputContract(const FProfile &Profile) {
       TEXT("replace_reference_only");
   Result.ReflectionBaseline.OwnedObjectPolicy =
       TEXT("create_or_locate_with_real_outer_then_recurse");
-  Result.ReflectionBaseline.RuntimeLimitsSource = TEXT("shared_runtime_limits");
   Result.PropertyPayload.Mode = TEXT("reflection");
   Result.PropertyPayload.PropertyPathField = TEXT("property_path");
   Result.PropertyPayload.ValueField = TEXT("value");
   Result.PropertyPayload.OptionalAssertionFields = {
-      TEXT("value_kind"),   TEXT("struct_path"),  TEXT("enum_path"),
+      TEXT("kind"),         TEXT("struct_path"),  TEXT("enum_path"),
       TEXT("element_type"), TEXT("key_type"),     TEXT("mapped_type"),
       TEXT("inner_type"),   TEXT("fixed_length"), TEXT("allowed_class")};
   Result.PropertyPayload.OmittedPatchFieldPolicy = TEXT("preserve_current");
@@ -626,6 +813,7 @@ FContract MakeInputContract(const FProfile &Profile) {
             TEXT("property_descriptor_list")),
       Field(TEXT("compile"), TEXT("provider_extension"), TEXT("bool")),
       Field(TEXT("save"), TEXT("provider_extension"), TEXT("bool")),
+      Field(TEXT("complete_document"), TEXT("provider_extension"), TEXT("bool")),
   };
   for (const FString &Name : GetDocumentFields(Profile.Kind))
     Result.InputFields.Add(Field(*Name, TEXT("provider_extension"),
@@ -702,6 +890,7 @@ TSharedRef<FJsonObject> MakeApplyDocument(const FAssetApplyRequest &Request) {
           : MakeShared<FJsonObject>();
   Extension->SetBoolField(TEXT("compile"), Request.bCompile);
   Extension->SetBoolField(TEXT("save"), Request.bSave);
+  Extension->SetBoolField(TEXT("complete_document"), Request.bCompleteDocument);
   TSharedRef<FJsonObject> Document = MakeShared<FJsonObject>();
   Document->SetStringField(TEXT("operation"),
                            OperationToString(Request.Operation));
@@ -712,65 +901,40 @@ TSharedRef<FJsonObject> MakeApplyDocument(const FAssetApplyRequest &Request) {
   return Document;
 }
 
-bool ReadWorkspaceIdentity(
-    const UeAgentAuthoringWorkspaceRouter::FWorkspace &Workspace,
-    FString &OutAssetPath, EOperation &OutOperation,
-    TSharedPtr<const FJsonObject> &OutDocument) {
-  const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit *Unit =
-      Workspace.FindSingleUnit(TEXT("asset"));
-  OutDocument = Unit ? Unit->Document : nullptr;
-  const TSharedPtr<FJsonObject> *Target = nullptr;
-  FString OperationText;
-  return OutDocument.IsValid() &&
-         OutDocument->TryGetStringField(TEXT("operation"), OperationText) &&
-         ParseOperation(OperationText, OutOperation) &&
-         OutDocument->TryGetObjectField(TEXT("target"), Target) && Target &&
-         Target->IsValid() &&
-         (*Target)->TryGetStringField(TEXT("asset_path"), OutAssetPath);
-}
-
 bool LoadWorkspace(
     const FProfile &Profile,
     const UeAgentAuthoringWorkspaceLoader::FSourceRequest &Source,
     UeAgentApplyWorkspaceContract::FContract &OutContract,
     UeAgentAuthoringWorkspaceLoader::FLoadResult &OutLoad,
-    FString &OutErrorCode, FString &OutErrorDetail) {
+    UE::UAI::Contract::FDiagnostic& OutDiagnostic) {
   if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(
           Profile.WorkspaceContractId, OutContract)) {
-    OutErrorCode = TEXT("audio_workspace_contract_missing");
+    OutDiagnostic = AudioFailure(TEXT("audio_workspace_contract_missing"),
+        TEXT("The audio profile references an unregistered workspace contract."), TEXT("workspace_load"),
+        FString(), TEXT("workspace_contract_id"), MakeShared<FJsonValueString>(Profile.WorkspaceContractId),
+        MakeShared<FJsonValueString>(TEXT("registered workspace contract")));
     return false;
   }
   if (!UeAgentAuthoringWorkspaceLoader::LoadWorkspace(OutContract, Source,
                                                       OutLoad)) {
-    OutErrorCode = OutLoad.ErrorCode;
-    OutErrorDetail = OutLoad.ErrorDetail;
+    OutDiagnostic = OutLoad.Diagnostic;
     return false;
   }
   return true;
-}
-
-bool ValidateExpectedPath(const FString &Actual, const FString &Expected,
-                          FString &OutErrorCode, FString &OutErrorDetail) {
-  if (Expected.IsEmpty() || Actual.Equals(Expected, ESearchCase::IgnoreCase))
-    return true;
-  OutErrorCode = TEXT("audio_workspace_asset_path_conflict");
-  OutErrorDetail = Actual + TEXT(" != ") + Expected;
-  return false;
 }
 
 bool BuildDependencyGraph(
     const UeAgentApplyWorkspaceContract::FContract &Contract,
     const UeAgentAuthoringWorkspaceRouter::FWorkspace &Workspace,
     UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph &OutGraph,
-    FString &OutErrorCode, FString &OutErrorDetail) {
+    UE::UAI::Contract::FDiagnostic& OutDiagnostic) {
   UeAgentAuthoringWorkspaceDependencyGraph::FGraphFailure Failure;
   if (UeAgentAuthoringWorkspaceDependencyGraph::BuildDependencyGraph(
           Contract, Workspace,
           UeAgentAuthoringWorkspaceDependencyGraph::FDependencyInputs(),
           OutGraph, Failure))
     return true;
-  OutErrorCode = Failure.ErrorCode;
-  OutErrorDetail = Failure.ErrorDetail;
+  OutDiagnostic = Failure.Diagnostic;
   return false;
 }
 
@@ -782,22 +946,22 @@ bool InspectWorkspaceSource(
   OutResult.Status = TEXT("failed");
   UeAgentApplyWorkspaceContract::FContract Contract;
   UeAgentAuthoringWorkspaceLoader::FLoadResult Load;
-  if (!LoadWorkspace(Profile, Source, Contract, Load, OutResult.ErrorCode,
-                     OutResult.ErrorDetail))
+  if (!LoadWorkspace(Profile, Source, Contract, Load, OutResult.Diagnostic))
     return false;
-  TSharedPtr<const FJsonObject> Document;
-  EOperation Operation;
-  if (!ReadWorkspaceIdentity(Load.Workspace, OutResult.AssetPath, Operation,
-                             Document)) {
-    OutResult.ErrorCode = TEXT("audio_workspace_entry_invalid");
+  UeAgentAuthoringAssetWorkspaceInput::FTargetRequest TargetRequest;
+  TargetRequest.ExpectedAssetPath = ExpectedAssetPath;
+  TargetRequest.Errors.EntryInvalid = TEXT("audio_workspace_entry_invalid");
+  TargetRequest.Errors.AssetPathConflict =
+      TEXT("audio_workspace_asset_path_conflict");
+  UeAgentAuthoringAssetWorkspaceInput::FTargetResult Target;
+  if (!UeAgentAuthoringAssetWorkspaceInput::ResolveTarget(
+          Load.Workspace, TargetRequest, Target)) {
+    OutResult.Diagnostic = Target.Diagnostic;
     return false;
   }
-  OutResult.AssetPath = NormalizePackagePath(OutResult.AssetPath);
+  const EOperation Operation = Target.Input.RequestedOperation;
+  OutResult.AssetPath = Target.AssetPath;
   OutResult.RequestedOperation = OperationToString(Operation);
-  if (!ValidateExpectedPath(OutResult.AssetPath,
-                            NormalizePackagePath(ExpectedAssetPath),
-                            OutResult.ErrorCode, OutResult.ErrorDetail))
-    return false;
   OutResult.bAssetExists =
       LoadAsset(Profile.Kind, OutResult.AssetPath) != nullptr;
   OutResult.bWouldCreate =
@@ -805,17 +969,16 @@ bool InspectWorkspaceSource(
       (Operation == EOperation::Upsert && !OutResult.bAssetExists);
   UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph Graph;
   if (!BuildDependencyGraph(Contract, Load.Workspace, Graph,
-                            OutResult.ErrorCode, OutResult.ErrorDetail))
+                            OutResult.Diagnostic))
     return false;
   FWorkspaceOperationPreflightProvider Provider(
       UeAgentApplyInputContract::FRegistry::Get(), FProviderRegistry::Get());
   UeAgentAuthoringWorkspaceTransaction::FPreflightResult Preflight;
   if (!UeAgentAuthoringWorkspaceTransaction::PreflightWorkspace(
           Contract, Load.Workspace, Graph, Provider, Preflight)) {
+    const FApplyFailureProjection Failure = ProjectApplyFailure(Preflight);
     OutResult.UnitsChecked = Preflight.UnitsChecked;
-    OutResult.ErrorCode = Preflight.CauseCode.IsEmpty() ? Preflight.ErrorCode
-                                                        : Preflight.CauseCode;
-    OutResult.ErrorDetail = Preflight.ErrorDetail;
+    OutResult.Diagnostic = Failure.Diagnostic;
     return false;
   }
   OutResult.UnitsChecked = Preflight.UnitsChecked;
@@ -832,79 +995,78 @@ bool ExecuteWorkspaceSource(
     const FProfile &Profile,
     const UeAgentAuthoringWorkspaceLoader::FSourceRequest &Source,
     const FString &ExpectedAssetPath, FAssetApplyResult &OutResult,
-    const FString &RequestId) {
+    const FString &RequestId,
+    TFunction<bool(FOperationFailure &)> FinalReadback = {},
+    bool bCompactValues = false) {
   OutResult = FAssetApplyResult();
   OutResult.Status = TEXT("failed");
   UeAgentApplyWorkspaceContract::FContract Contract;
   UeAgentAuthoringWorkspaceLoader::FLoadResult Load;
-  if (!LoadWorkspace(Profile, Source, Contract, Load, OutResult.ErrorCode,
-                     OutResult.ErrorDetail)) {
+  if (!LoadWorkspace(Profile, Source, Contract, Load, OutResult.Diagnostic)) {
     OutResult.Phase = TEXT("load");
     return false;
   }
-  TSharedPtr<const FJsonObject> Document;
-  EOperation RequestedOperation;
-  if (!ReadWorkspaceIdentity(Load.Workspace, OutResult.AssetPath,
-                             RequestedOperation, Document)) {
-    OutResult.Phase = TEXT("load");
-    OutResult.ErrorCode = TEXT("audio_workspace_entry_invalid");
+  UeAgentAuthoringAssetWorkspaceInput::FTargetRequest TargetRequest;
+  TargetRequest.ExpectedAssetPath = ExpectedAssetPath;
+  TargetRequest.Errors.EntryInvalid = TEXT("audio_workspace_entry_invalid");
+  TargetRequest.Errors.AssetPathConflict =
+      TEXT("audio_workspace_asset_path_conflict");
+  UeAgentAuthoringAssetWorkspaceInput::FTargetResult Target;
+  if (!UeAgentAuthoringAssetWorkspaceInput::ResolveTarget(
+          Load.Workspace, TargetRequest, Target)) {
+    OutResult.Phase = Target.Phase;
+    OutResult.Diagnostic = Target.Diagnostic;
     return false;
   }
-  OutResult.AssetPath = NormalizePackagePath(OutResult.AssetPath);
-  if (!ValidateExpectedPath(OutResult.AssetPath,
-                            NormalizePackagePath(ExpectedAssetPath),
-                            OutResult.ErrorCode, OutResult.ErrorDetail)) {
-    OutResult.Phase = TEXT("preflight");
-    return false;
-  }
-  UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph Graph;
-  if (!BuildDependencyGraph(Contract, Load.Workspace, Graph,
-                            OutResult.ErrorCode, OutResult.ErrorDetail)) {
-    OutResult.Phase = TEXT("preflight");
-    return false;
-  }
+  const UeAgentApplyInputContract::FOperationInput &OperationInput = Target.Input;
+  const EOperation RequestedOperation = OperationInput.RequestedOperation;
+  OutResult.AssetPath = Target.AssetPath;
   const bool bExisted = LoadAsset(Profile.Kind, OutResult.AssetPath) != nullptr;
   bool bSave = false;
-  const TSharedPtr<FJsonObject> *Extension = nullptr;
-  if (Document->TryGetObjectField(TEXT("provider_extension"), Extension) &&
-      Extension && Extension->IsValid())
-    (*Extension)->TryGetBoolField(TEXT("save"), bSave);
+  if (OperationInput.ProviderExtension.IsValid())
+    OperationInput.ProviderExtension->TryGetBoolField(TEXT("save"), bSave);
   FBackendOptions BackendOptions;
+  BackendOptions.FinalReadback = MoveTemp(FinalReadback);
   BackendOptions.bUseEditorTransaction =
       RequestedOperation != EOperation::Remove;
   BackendOptions.TransactionDescription =
       NSLOCTEXT("UeAgentInterface", "AudioAssetWorkspaceApply",
                 "Apply audio asset workspace");
-  UeAgentAuthoringWorkspaceTransaction::FExecutionOptions ExecutionOptions;
-  FOperationFailure RequestFailure;
-  if (!BuildApplyEntryExecutionOptions(RequestId, ExecutionOptions,
-                                       RequestFailure)) {
-    OutResult.Phase = TEXT("preflight");
-    OutResult.ErrorCode = RequestFailure.ErrorCode;
-    OutResult.ErrorDetail = RequestFailure.ErrorDetail;
-    return false;
-  }
-  ExecutionOptions.bSaveWhenCallerControlled = bSave;
   FApplyWorkspaceResult ApplyResult;
-  const bool bApplied = ApplyWorkspace(
-      Contract, Load.Workspace, Graph,
-      UeAgentApplyInputContract::FRegistry::Get(), FProviderRegistry::Get(),
-      ExecutionOptions, BackendOptions, ApplyResult);
+  UeAgentAuthoringAssetWorkspaceApply::FFailure ApplyFailure;
+  FProviderRegistry LocalProviders;
+  const FProviderRegistry* Providers = &FProviderRegistry::Get();
+  if (bCompactValues) {
+    UeAgentAuthoringOperationApply::ERegistrationResult Registered;
+    UE::UAI::Contract::FDiagnostic RegistrationError;
+    if (!LocalProviders.RegisterProvider(MakeApplyProvider(true), Registered, RegistrationError)) {
+      OutResult.Phase = TEXT("preflight");
+      OutResult.Diagnostic = RegistrationError;
+      return false;
+    }
+    Providers = &LocalProviders;
+  }
+  const bool bApplied = UeAgentAuthoringAssetWorkspaceApply::Execute(
+      Contract, Load.Workspace, *Providers, RequestId, bSave,
+      BackendOptions, ApplyResult, ApplyFailure);
   OutResult.UnitsChecked = ApplyResult.Preflight.UnitsChecked;
   OutResult.MutationsApplied = ApplyResult.Execution.MutationsApplied;
   OutResult.bRollbackAttempted = ApplyResult.Execution.bRollbackAttempted;
   OutResult.bRollbackSucceeded = ApplyResult.Execution.bRollbackSucceeded;
   if (!bApplied) {
-    const bool bPreflight = !ApplyResult.Preflight.IsReady();
-    OutResult.Phase =
-        bPreflight ? TEXT("preflight") : ApplyResult.Execution.Phase;
-    OutResult.ErrorCode = bPreflight ? ApplyResult.Preflight.CauseCode
-                                     : ApplyResult.Execution.CauseCode;
-    if (OutResult.ErrorCode.IsEmpty())
-      OutResult.ErrorCode = bPreflight ? ApplyResult.Preflight.ErrorCode
-                                       : ApplyResult.Execution.ErrorCode;
-    OutResult.ErrorDetail = bPreflight ? ApplyResult.Preflight.ErrorDetail
-                                       : ApplyResult.Execution.ErrorDetail;
+    OutResult.Status = ApplyResult.Execution.Status;
+    OutResult.Phase = ApplyFailure.Phase;
+    OutResult.Diagnostic = ApplyFailure.Diagnostic;
+    if (OutResult.bRollbackAttempted) {
+      if (!OutResult.bRollbackSucceeded)
+        {
+        const auto Cause = OutResult.Diagnostic;
+        OutResult.Diagnostic.Code = TEXT("audio_import_state_unknown");
+        OutResult.Diagnostic.PublicMessage = TEXT("Rollback did not restore a confirmed asset state.");
+        OutResult.Diagnostic.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(Cause);
+      }
+      UeAgentAuthoringDiagnostics::SetRollbackFacts(OutResult.Diagnostic, OutResult.bRollbackSucceeded);
+    }
     return false;
   }
   const EOperation Resolved =
@@ -939,10 +1101,11 @@ TSharedRef<FJsonObject> FAssetApplyResult::ToJsonObject() const {
   Json->SetBoolField(TEXT("rollback_attempted"), bRollbackAttempted);
   Json->SetBoolField(TEXT("rollback_succeeded"), bRollbackSucceeded);
   Json->SetObjectField(TEXT("applied"), StatsToJson(Stats));
-  if (!ErrorCode.IsEmpty())
-    Json->SetStringField(TEXT("error_code"), ErrorCode);
-  if (!ErrorDetail.IsEmpty())
-    Json->SetStringField(TEXT("error_detail"), ErrorDetail);
+  if (!Diagnostic.IsEmpty())
+  {
+    Json->SetStringField(TEXT("error_code"), Diagnostic.Code);
+    Json->SetObjectField(TEXT("diagnostic"), Diagnostic.ToJson());
+  }
   return Json;
 }
 
@@ -956,14 +1119,15 @@ TSharedRef<FJsonObject> FWorkspaceInspectResult::ToJsonObject() const {
   Json->SetBoolField(TEXT("would_create"), bWouldCreate);
   Json->SetBoolField(TEXT("no_op"), bNoOp);
   Json->SetObjectField(TEXT("planned"), StatsToJson(PlannedStats));
-  if (!ErrorCode.IsEmpty())
-    Json->SetStringField(TEXT("error_code"), ErrorCode);
-  if (!ErrorDetail.IsEmpty())
-    Json->SetStringField(TEXT("error_detail"), ErrorDetail);
+  if (!Diagnostic.IsEmpty())
+  {
+    Json->SetStringField(TEXT("error_code"), Diagnostic.Code);
+    Json->SetObjectField(TEXT("diagnostic"), Diagnostic.ToJson());
+  }
   return Json;
 }
 
-bool RegisterApplyContracts(FString &OutError) {
+bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError) {
   for (const FProfile &Profile : GetProfiles()) {
     UeAgentApplyInputContract::ERegistrationResult InputResult;
     if (!UeAgentApplyInputContract::FRegistry::Get().RegisterContract(
@@ -977,11 +1141,12 @@ bool RegisterApplyContracts(FString &OutError) {
   return true;
 }
 
-TSharedRef<IApplyProvider> MakeApplyProvider() {
+TSharedRef<IApplyProvider> MakeApplyProvider(bool bCompactValues) {
   static const TSharedRef<IReflectionOperationLifecycle> Lifecycle =
       MakeShared<FAssetLifecycle>();
   UeAgentAuthoringObjectApply::FOptions Options;
   Options.bAllowDomainAuthorizedOwners = true;
+  Options.bCompactValues = bCompactValues;
   return MakeShared<FReflectionApplyProvider>(ApplyProviderId, Lifecycle,
                                               Options);
 }
@@ -991,14 +1156,17 @@ bool ApplyAsset(const FAssetApplyRequest &Request,
   const FProfile *Profile = FindProfile(Request.Kind);
   if (!Profile) {
     OutResult = FAssetApplyResult();
-    OutResult.ErrorCode = TEXT("audio_apply_profile_missing");
+    OutResult.Diagnostic = AudioFailure(TEXT("audio_apply_profile_missing"),
+        TEXT("No audio apply profile is registered for the requested asset kind."), OutResult.Phase,
+        Request.AssetPath, TEXT("asset_kind"), MakeShared<FJsonValueString>(AssetKindToString(Request.Kind)),
+        MakeShared<FJsonValueString>(TEXT("asset kind with a registered audio apply profile")));
     return false;
   }
   return ExecuteWorkspaceSource(
       *Profile,
       UeAgentAuthoringWorkspaceLoader::FSourceRequest::MakeInlineObject(
           MakeApplyDocument(Request), TEXT("inline://audio-asset-apply")),
-      Request.AssetPath, OutResult, RequestId);
+      Request.AssetPath, OutResult, RequestId, Request.FinalReadback, Request.bCompactValues);
 }
 
 bool ApplyAssetWorkspace(const FProfile &Profile, const FString &WorkspaceRoot,

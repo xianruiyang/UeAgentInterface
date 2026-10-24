@@ -6,6 +6,8 @@
 #include "Templates/SharedPointer.h"
 #include "Templates/UniquePtr.h"
 
+#include <atomic>
+
 namespace UE::UAI::NetworkTransport
 {
 	UEAGENTINTERFACE_API const FString& GetUaiHttpCommandRoutePath();
@@ -27,6 +29,8 @@ namespace UE::UAI::NetworkTransport
 
 	struct FUeAgentHttpResponse
 	{
+		static FUeAgentHttpResponse Failure(int32 StatusCode, const FString& Code, const FString& Message);
+
 		int32 StatusCode = 500;
 		TMap<FString, FString> Headers;
 		TArray<uint8> Body;
@@ -34,6 +38,12 @@ namespace UE::UAI::NetworkTransport
 
 	using FUeAgentHttpRequestHandler =
 		TFunction<FUeAgentHttpResponse(const FUeAgentHttpRequest&)>;
+
+	enum class EUeAgentHttpRouteExecution : uint8
+	{
+		GameThread,
+		NetworkThread,
+	};
 
 	class UEAGENTINTERFACE_API IUeAgentHttpRouteHost
 	{
@@ -45,7 +55,8 @@ namespace UE::UAI::NetworkTransport
 			const FString& Method,
 			const FString& RoutePath,
 			FUeAgentHttpRequestHandler Handler,
-			FUeAgentTransportDiagnostic& OutDiagnostic) = 0;
+			FUeAgentTransportDiagnostic& OutDiagnostic,
+			EUeAgentHttpRouteExecution Execution = EUeAgentHttpRouteExecution::GameThread) = 0;
 		virtual bool Unbind(
 			const FString& InstanceId,
 			FUeAgentTransportDiagnostic& OutDiagnostic) = 0;
@@ -63,7 +74,6 @@ namespace UE::UAI::NetworkTransport
 		FString AuthToken;
 		FString Channel;
 		FString PrincipalSubject;
-		int64 MaxFrameBytes = 0;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentHttpTransportAdapter final
@@ -93,10 +103,6 @@ namespace UE::UAI::NetworkTransport
 		FUeAgentHttpResponse HandleProbeRequest(
 			const FUeAgentHttpRequest& Request) const;
 		bool ValidateConfig(FUeAgentTransportDiagnostic& OutDiagnostic) const;
-		FUeAgentHttpResponse MakeFailure(
-			int32 StatusCode,
-			const FString& Code,
-			const FString& Message) const;
 		FString FindHeader(
 			const TMap<FString, FString>& Headers,
 			const FString& Name) const;
@@ -104,24 +110,25 @@ namespace UE::UAI::NetworkTransport
 		FUeAgentHttpAdapterConfig Config;
 		TSharedRef<IUeAgentHttpRouteHost, ESPMode::ThreadSafe> RouteHost;
 		TSharedRef<IUeAgentTransportRequestHandler, ESPMode::ThreadSafe> Handler;
-		bool bCommandRouteBound = false;
-		bool bProbeRouteBound = false;
-		bool bRunning = false;
+		std::atomic<bool> bCommandRouteBound{false};
+		std::atomic<bool> bProbeRouteBound{false};
+		std::atomic<bool> bRunning{false};
 	};
 
-	class UEAGENTINTERFACE_API FUeAgentEngineHttpRouteHost final
+	class UEAGENTINTERFACE_API FUeAgentSocketHttpRouteHost final
 		: public IUeAgentHttpRouteHost
 	{
 	public:
-		explicit FUeAgentEngineHttpRouteHost(uint32 Port);
-		virtual ~FUeAgentEngineHttpRouteHost() override;
+		explicit FUeAgentSocketHttpRouteHost(uint32 Port);
+		virtual ~FUeAgentSocketHttpRouteHost() override;
 
 		virtual bool Bind(
 			const FString& InstanceId,
 			const FString& Method,
 			const FString& RoutePath,
 			FUeAgentHttpRequestHandler Handler,
-			FUeAgentTransportDiagnostic& OutDiagnostic) override;
+			FUeAgentTransportDiagnostic& OutDiagnostic,
+			EUeAgentHttpRouteExecution Execution = EUeAgentHttpRouteExecution::GameThread) override;
 		virtual bool Unbind(
 			const FString& InstanceId,
 			FUeAgentTransportDiagnostic& OutDiagnostic) override;
@@ -129,6 +136,6 @@ namespace UE::UAI::NetworkTransport
 
 	private:
 		struct FImpl;
-		TUniquePtr<FImpl> Impl;
+		TSharedPtr<FImpl, ESPMode::ThreadSafe> Impl;
 	};
 }

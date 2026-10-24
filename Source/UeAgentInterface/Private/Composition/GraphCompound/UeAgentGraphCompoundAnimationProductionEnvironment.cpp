@@ -1,4 +1,9 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundAnimationBindings.h"
+#include "Misc/ScopeExit.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Utilities/AuthoringOperationApply/UeAgentAuthoringPackageReadback.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundDeformerProduction.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundRigIkProduction.h"
 
@@ -11,14 +16,14 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/Contract/UeAgentContractJson.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Core/Verification/UeAgentIndependentReadback.h"
 #include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphNativeHook.h"
 #include "Dom/JsonObject.h"
 #include "Factories/AnimBlueprintFactory.h"
-#include "Factories/BlendSpaceFactory1D.h"
-#include "Factories/BlendSpaceFactoryNew.h"
+#include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDocuments.h"
 #include "HAL/FileManager.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -26,7 +31,6 @@
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Misc/SecureHash.h"
-#include "PackageTools.h"
 #include "ReferenceSkeleton.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
@@ -43,6 +47,14 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
+        void SetError(FGraphCompoundRuntimeError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic,
+            FString SubjectId = FString(), const UE::UAI::Contract::FDiagnostic& Recovery = UE::UAI::Contract::FDiagnostic())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = MoveTemp(SubjectId);
+            OutError.Append(Recovery);
+        }
+
 		const FString ReadbackOracleId =
 			TEXT("uai.readback.graph_compound.animation.assets");
 
@@ -66,7 +78,10 @@ namespace UE::UAI::Composition::GraphCompound
 			FString SkeletonRef;
 			FString ParentClassRef;
 			int32 Dimension = 0;
+			bool bHasBlendDefinition = false;
 			FName GraphName;
+			FString CreateInputPointer;
+			FString GraphNameInputPointer;
 			TArray<FAnimationRigGraphBlendAxisMutation> Axes;
 			TArray<FAnimationRigGraphBlendSampleMutation> Samples;
 			TArray<FAnimationRigGraphSkeletonBoneMutation> Bones;
@@ -82,17 +97,9 @@ namespace UE::UAI::Composition::GraphCompound
 			FUeAgentCanonicalValuePtr Value;
 		};
 
-		void SetError(
-			FGraphCompoundRuntimeError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
-		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-		}
+		
+
+        
 
 		bool IsW02CreateProfile(const FPcgAnimationGraphRouteProfile& Profile)
 		{
@@ -148,41 +155,6 @@ namespace UE::UAI::Composition::GraphCompound
 					FPackageName::GetAssetPackageExtension());
 		}
 
-		bool TryUnloadTarget(
-			const FString& TargetRef,
-			const bool bNotifyAssetRegistry,
-			FString& OutDetail)
-		{
-			OutDetail.Reset();
-			const FString TargetPackage = PackageName(TargetRef);
-			UPackage* const Package = FindPackage(nullptr, *TargetPackage);
-			if (!Package)
-			{
-				return true;
-			}
-			if (bNotifyAssetRegistry)
-			{
-				if (UObject* const Asset = FindObject<UObject>(
-						Package, *AssetName(TargetRef)))
-				{
-					FAssetRegistryModule::AssetDeleted(Asset);
-				}
-			}
-			Package->SetDirtyFlag(false);
-			FText Error;
-			if (!UPackageTools::UnloadPackages({Package}, Error, true))
-			{
-				OutDetail = Error.ToString();
-				return false;
-			}
-			CollectGarbage(RF_NoFlags, true);
-			if (FindPackage(nullptr, *TargetPackage))
-			{
-				OutDetail = TEXT("package remains loaded after unload");
-				return false;
-			}
-			return true;
-		}
 
 		FAssetDurableSessionRef PersistedSession(
 			const FAssetDurableSessionRef& Prepared,
@@ -202,19 +174,11 @@ namespace UE::UAI::Composition::GraphCompound
 			FPackageAssetDurableBackend& Backend,
 			const int64 FencingToken,
 			FUeAgentResourceTracker& Resources,
-			FString& OutDetail)
+			UE::UAI::Contract::FDiagnostic& OutDetail)
 		{
-			FString UnloadDetail;
-			const bool bMemoryClean = TryUnloadTarget(
-				TargetRef, bNotifyAssetRegistry, UnloadDetail);
-			FDurableReceipt Receipt;
-			FAssetDurableError Error;
-			const bool bDurableClean = TryRollbackAssetDurability(
-				Session, Backend, FencingToken, bMemoryClean,
-				Resources, Receipt, Error);
-			OutDetail = !UnloadDetail.IsEmpty()
-				? UnloadDetail : Error.GetCode() + TEXT(":") + Error.GetDetail();
-			return bMemoryClean && bDurableClean;
+			return UeAgentAuthoringOperationApply::TryRestorePackageDurability(
+				TargetRef, bNotifyAssetRegistry, Session, Backend, FencingToken,
+				Resources, OutDetail);
 		}
 
 		const FUeAgentCanonicalValue* FindField(
@@ -295,15 +259,13 @@ namespace UE::UAI::Composition::GraphCompound
 			FUeAgentCanonicalValuePtr& OutValue,
 			FGraphCompoundRuntimeError& OutError)
 		{
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			if (!CanonicalJson::TryFromJsonValue(
 					MakeShared<FJsonValueObject>(Object),
 					Resources, OutValue, Error)
 				|| !OutValue.IsValid())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_animation_value_invalid"),
-					FString(), Error);
+				SetError(OutError, Error, FString());
 				return false;
 			}
 			return true;
@@ -336,17 +298,20 @@ namespace UE::UAI::Composition::GraphCompound
 			FString Filename;
 			if (!TryPackageFilename(Request.GetTargetRef(), Filename))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_animation_target_invalid"),
-					Request.GetTargetRef());
+				SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_target_invalid"), TEXT("target_ref does not identify the required Animation Blueprint target."), TEXT("graph_compound"), FString()), Request.GetTargetRef());
 				return false;
 			}
-			if (FindPackage(nullptr, *Request.GetTargetRef())
-				|| IFileManager::Get().FileExists(*Filename))
+			bool bTargetPresent = false;
+			if (!HjsonWorkspace::DomainAuthoring::
+				TryInspectObjectTargetPresence(
+					Request.GetTargetRef(), bTargetPresent))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_animation_target_already_exists"),
-					Request.GetTargetRef());
+				SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_target_invalid"), TEXT("target_ref does not identify the required Animation Blueprint target."), TEXT("graph_compound"), FString()), Request.GetTargetRef());
+				return false;
+			}
+			if (bTargetPresent)
+			{
+				SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_target_already_exists"), TEXT("target_ref already resolves to an existing animation asset."), TEXT("graph_compound"), FString()), Request.GetTargetRef());
 				return false;
 			}
 			FUeAgentStateSemanticError Error;
@@ -366,8 +331,8 @@ namespace UE::UAI::Composition::GraphCompound
 					{}, Resources, OutSnapshot, Error)
 				|| !OutSnapshot.IsValid())
 			{
-				SetError(OutError, Error.Code,
-					Request.GetTargetRef(), Error.Detail);
+				OutError = Error;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
 				return false;
 			}
 			return true;
@@ -401,9 +366,7 @@ namespace UE::UAI::Composition::GraphCompound
 				nullptr, *Request.GetTargetRef());
 			if (!Target || Target->GetPathName() != Request.GetTargetRef())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_animation_target_invalid"),
-					Request.GetTargetRef());
+				SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_target_invalid"), TEXT("target_ref does not identify the required Animation Blueprint target."), TEXT("graph_compound"), FString()), Request.GetTargetRef());
 				return false;
 			}
 			TArray<FCapturedValue> Values;
@@ -449,9 +412,7 @@ namespace UE::UAI::Composition::GraphCompound
 				UAnimBlueprint* const Blueprint = Cast<UAnimBlueprint>(Target);
 				if (!Blueprint)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_animation_target_class_mismatch"),
-						Request.GetTargetRef());
+					SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_target_class_mismatch"), TEXT("target_ref resolves to an incompatible animation asset class."), TEXT("graph_compound"), FString()), Request.GetTargetRef());
 					return false;
 				}
 				TArray<UEdGraph*> Graphs;
@@ -479,9 +440,7 @@ namespace UE::UAI::Composition::GraphCompound
 				UBlendSpace* const BlendSpace = Cast<UBlendSpace>(Target);
 				if (!BlendSpace)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_animation_target_class_mismatch"),
-						Request.GetTargetRef());
+					SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_target_class_mismatch"), TEXT("target_ref resolves to an incompatible animation asset class."), TEXT("graph_compound"), FString()), Request.GetTargetRef());
 					return false;
 				}
 				for (int32 AxisIndex = 0; AxisIndex < 2; ++AxisIndex)
@@ -507,9 +466,7 @@ namespace UE::UAI::Composition::GraphCompound
 				USkeleton* const Skeleton = Cast<USkeleton>(Target);
 				if (!Skeleton)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_animation_target_class_mismatch"),
-						Request.GetTargetRef());
+					SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_target_class_mismatch"), TEXT("target_ref resolves to an incompatible animation asset class."), TEXT("graph_compound"), FString()), Request.GetTargetRef());
 					return false;
 				}
 				if (Capability == TEXT("animation.skeleton.definition.apply"))
@@ -604,9 +561,7 @@ namespace UE::UAI::Composition::GraphCompound
 					EUeAgentOverrideState::Overridden);
 				if (!Entry.IsValid())
 				{
-					SetError(OutError,
-						TEXT("graph_compound_animation_state_entry_invalid"),
-						Captured.SemanticId);
+					SetError(OutError, Entry.GetValidationDiagnostic(), Captured.SemanticId);
 					return false;
 				}
 				Entries.Add(MoveTemp(Entry));
@@ -628,11 +583,135 @@ namespace UE::UAI::Composition::GraphCompound
 					MoveTemp(Entries), Resources, OutSnapshot, StateError)
 				|| !OutSnapshot.IsValid())
 			{
-				SetError(OutError, StateError.Code,
-					Request.GetTargetRef(), StateError.Detail);
+				OutError = StateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
 				return false;
 			}
 			return true;
+		}
+
+		FString AnimationInputField(const FString& Pointer, const FString& Field)
+		{
+			return Pointer.IsEmpty() ? FString() : Pointer == TEXT("/") ? Field : Pointer + Field;
+		}
+
+		bool BlendValueFailure(const FUeAgentCanonicalValue* Value, const FString& Pointer,
+			const FString& Expected, const FString& Code, FGraphCompoundRuntimeError& OutError)
+		{
+			TSharedPtr<FJsonValue> Actual;
+			Contract::FDiagnostic ProjectionError;
+			if (Value && !CanonicalJson::TryToJsonValue(*Value, Actual, ProjectionError))
+			{
+				OutError = MoveTemp(ProjectionError);
+				OutError.Source.JsonPath = Pointer;
+				return false;
+			}
+			OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Pointer,
+				MakeShared<FJsonValueString>(Expected), Actual, TEXT("input_decode"),
+				TEXT("The BlendSpace value must satisfy: ") + Expected + TEXT("."));
+			return false;
+		}
+
+		bool ParseBlendAxis(const FUeAgentCanonicalValue& Value,
+			FAnimationRigGraphBlendAxisMutation& Axis, FGraphCompoundRuntimeError& OutError,
+			const FString& Prefix)
+		{
+			auto Invalid = [&](const TCHAR* Field, const TCHAR* Expected) {
+				return BlendValueFailure(FindField(Value, Field), AnimationInputField(Prefix, FString(TEXT("/")) + Field),
+					Expected, TEXT("graph_compound_animation_blend_axis_invalid"), OutError);
+			};
+			FString AxisName;
+			if (!TryIntegerField(Value, TEXT("axis_index"), Axis.AxisIndex)) return Invalid(TEXT("axis_index"), TEXT("a 32-bit integer"));
+			if (!TryStringField(Value, TEXT("axis_name"), AxisName)) return Invalid(TEXT("axis_name"), TEXT("a non-empty string"));
+			if (!TryNumberField(Value, TEXT("minimum"), Axis.Minimum)) return Invalid(TEXT("minimum"), TEXT("a finite number"));
+			if (!TryNumberField(Value, TEXT("maximum"), Axis.Maximum)) return Invalid(TEXT("maximum"), TEXT("a finite number"));
+			if (!TryIntegerField(Value, TEXT("grid_divisions"), Axis.GridDivisions)) return Invalid(TEXT("grid_divisions"), TEXT("a 32-bit integer"));
+			Axis.AxisName = *AxisName;
+			Axis.InputPointer = Prefix;
+			return true;
+		}
+
+		bool ParseBlendSample(const FUeAgentCanonicalValue& Value, EAnimationRigGraphMutationIntent Intent,
+			FAnimationRigGraphBlendSampleMutation& Sample, FGraphCompoundRuntimeError& OutError,
+			const FString& Prefix)
+		{
+			FString AnimationRef;
+			if (!TryStringField(Value, TEXT("animation_ref"), AnimationRef))
+				return BlendValueFailure(FindField(Value, TEXT("animation_ref")), AnimationInputField(Prefix, TEXT("/animation_ref")), TEXT("a non-empty animation reference"), TEXT("graph_compound_animation_blend_sample_invalid"), OutError);
+			const auto* Coordinates = FindField(Value, TEXT("coordinates"));
+			if (!Coordinates || Coordinates->GetKind() != EUeAgentValueKind::Array
+				|| Coordinates->GetArrayItems().IsEmpty() || Coordinates->GetArrayItems().Num() > 3)
+				return BlendValueFailure(Coordinates, AnimationInputField(Prefix, TEXT("/coordinates")), TEXT("an array of one to three finite numbers"), TEXT("graph_compound_animation_blend_sample_invalid"), OutError);
+			Sample.Animation = LoadObject<UAnimSequence>(nullptr, *AnimationRef);
+			for (int32 Index = 0; Index < Coordinates->GetArrayItems().Num(); ++Index)
+			{
+				const auto& Coordinate = Coordinates->GetArrayItems()[Index].Get();
+				if ((Coordinate.GetKind() != EUeAgentValueKind::Integer && Coordinate.GetKind() != EUeAgentValueKind::Decimal)
+					|| !FMath::IsFinite(FCString::Atod(*Coordinate.GetLexeme())))
+					return BlendValueFailure(&Coordinate, AnimationInputField(Prefix, TEXT("/coordinates/") + ::LexToString(Index)), TEXT("a finite number"), TEXT("graph_compound_animation_blend_coordinate_invalid"), OutError);
+				Sample.Coordinates[Index] = FCString::Atod(*Coordinate.GetLexeme());
+			}
+			Sample.Intent = Intent;
+			Sample.InputPointer = Prefix;
+			Sample.AnimationRef = AnimationRef;
+			return true;
+		}
+
+		bool ParseBlendCreationDefinition(const FUeAgentCanonicalValue& Value,
+			FAnimationReadbackSpec& Spec, FGraphCompoundRuntimeError& OutError)
+		{
+			const FString& InputPointer = Spec.CreateInputPointer;
+			const auto* Axes = FindField(Value, TEXT("axes"));
+			const auto* Samples = FindField(Value, TEXT("samples"));
+			Spec.bHasBlendDefinition = Axes || Samples;
+			if (Axes && Axes->GetKind() != EUeAgentValueKind::Array)
+				return BlendValueFailure(Axes, AnimationInputField(InputPointer, TEXT("/axes")), TEXT("an array"), TEXT("graph_compound_animation_blend_definition_invalid"), OutError);
+			if (Samples && Samples->GetKind() != EUeAgentValueKind::Array)
+				return BlendValueFailure(Samples, AnimationInputField(InputPointer, TEXT("/samples")), TEXT("an array"), TEXT("graph_compound_animation_blend_definition_invalid"), OutError);
+			if (Axes) for (int32 Index = 0; Index < Axes->GetArrayItems().Num(); ++Index) {
+				FAnimationRigGraphBlendAxisMutation Axis;
+				if (!ParseBlendAxis(*Axes->GetArrayItems()[Index], Axis, OutError, AnimationInputField(InputPointer, TEXT("/axes/") + ::LexToString(Index)))) return false;
+				Spec.Axes.Add(Axis);
+			}
+			if (Samples) for (int32 Index = 0; Index < Samples->GetArrayItems().Num(); ++Index) {
+				const auto& Item = Samples->GetArrayItems()[Index];
+				const FString Prefix = AnimationInputField(InputPointer, TEXT("/samples/") + ::LexToString(Index));
+				FString Text;
+				EAnimationRigGraphMutationIntent Intent;
+				TryStringField(*Item, TEXT("intent"), Text);
+				if (Text == TEXT("create")) Intent = EAnimationRigGraphMutationIntent::Create;
+				else if (Text == TEXT("update")) Intent = EAnimationRigGraphMutationIntent::Update;
+				else if (Text == TEXT("replace")) Intent = EAnimationRigGraphMutationIntent::Replace;
+				else if (Text == TEXT("delete")) Intent = EAnimationRigGraphMutationIntent::Delete;
+				else return BlendValueFailure(FindField(*Item, TEXT("intent")), AnimationInputField(Prefix, TEXT("/intent")), TEXT("create, update, replace or delete"), TEXT("graph_compound_animation_blend_sample_intent_invalid"), OutError);
+				FAnimationRigGraphBlendSampleMutation Sample;
+				if (!ParseBlendSample(*Item, Intent, Sample, OutError, Prefix)) return false;
+				Spec.Samples.Add(Sample);
+			}
+			return true;
+		}
+
+		FGraphCompoundRuntimeError AnimationInputFailure(
+			const FGraphCompoundAnimationOperationRequest& Request, const FGraphCompoundCanonicalEdit& Edit,
+			const TCHAR* Code, const FString& Reason, const FString& Field,
+			const FUeAgentCanonicalValue* Actual, const FString& Expected)
+		{
+			auto Error = FGraphCompoundRuntimeError::Failure(Code, Reason, TEXT("input_decode"));
+			Error.TargetPath = Request.GetTargetRef();
+			Error.SubjectId = Edit.GetIdentity().GetSemanticId();
+			Error.ActualValuePresent = Actual != nullptr;
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			if (Actual)
+			{
+				FDiagnostic ProjectionError;
+				if (!CanonicalJson::TryToJsonValue(*Actual, Error.ActualValue, ProjectionError)) Error.Append(ProjectionError);
+			}
+			if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edit.GetIdentity().GetSemanticId()))
+			{
+				Error.Source.JsonPath = Field.IsEmpty() ? *Pointer : *Pointer == TEXT("/") ? Field : *Pointer + Field;
+				Error.SourceKind = TEXT("related_input");
+			}
+			return Error;
 		}
 
 		bool TryParseReadbackSpec(
@@ -669,20 +748,25 @@ namespace UE::UAI::Composition::GraphCompound
 				Request.GetPayload().GetEdits();
 			if (Edits.IsEmpty())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_animation_plan_invalid"),
-					Request.GetTargetRef());
+				OutError = FGraphCompoundRuntimeError::Failure(TEXT("graph_compound_animation_plan_invalid"),
+					TEXT("The parsed animation operation contains no edits."), TEXT("graph_compound"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.TargetPath = Request.GetTargetRef();
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one edit"));
 				return false;
 			}
 			const FString& Capability = Profile.GetCapabilityId();
 			if (IsW02CreateProfile(Profile))
 			{
 				OutSpec.Kind = EAnimationReadbackKind::AssetCreate;
+				if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edits[0].GetIdentity().GetSemanticId()))
+					OutSpec.CreateInputPointer = *Pointer;
 				const FUeAgentCanonicalValuePtr& Value = Edits[0].GetProposedAfter();
 				if (!Value.IsValid())
 				{
-					SetError(OutError,
-						TEXT("graph_compound_animation_create_value_missing"));
+					OutError = AnimationInputFailure(Request, Edits[0], TEXT("graph_compound_animation_create_value_missing"),
+						TEXT("Animation asset creation requires a proposed value."), FString(), nullptr, TEXT("an asset creation value"));
 					return false;
 				}
 				TryStringField(*Value, TEXT("skeleton_ref"), OutSpec.SkeletonRef);
@@ -695,8 +779,10 @@ namespace UE::UAI::Composition::GraphCompound
 					if (OutSpec.SkeletonRef.IsEmpty()
 						|| OutSpec.ParentClassRef.IsEmpty())
 					{
-						SetError(OutError,
-							TEXT("graph_compound_animation_create_reference_missing"));
+						const TCHAR* Field = OutSpec.SkeletonRef.IsEmpty() ? TEXT("skeleton_ref") : TEXT("parent_class_ref");
+						OutError = AnimationInputFailure(Request, Edits[0], TEXT("graph_compound_animation_create_reference_missing"),
+							FString::Printf(TEXT("Animation Blueprint creation requires a non-empty '%s' reference."), Field),
+							FString(TEXT("/")) + Field, FindField(*Value, Field), TEXT("a non-empty asset or class reference"));
 						return false;
 					}
 				}
@@ -707,14 +793,19 @@ namespace UE::UAI::Composition::GraphCompound
 				}
 				else
 				{
+					if (!ParseBlendCreationDefinition(*Value, OutSpec, OutError)) return false;
 					OutSpec.NativeClassPath = OutSpec.Dimension == 1
 						? UBlendSpace1D::StaticClass()->GetPathName()
 						: UBlendSpace::StaticClass()->GetPathName();
 					if (OutSpec.SkeletonRef.IsEmpty()
 						|| (OutSpec.Dimension != 1 && OutSpec.Dimension != 2))
 					{
-						SetError(OutError,
-							TEXT("graph_compound_animation_blend_create_invalid"));
+						const bool bSkeletonMissing = OutSpec.SkeletonRef.IsEmpty();
+						const TCHAR* Field = bSkeletonMissing ? TEXT("skeleton_ref") : TEXT("dimension");
+						OutError = AnimationInputFailure(Request, Edits[0], TEXT("graph_compound_animation_blend_create_invalid"),
+							bSkeletonMissing ? TEXT("BlendSpace creation requires a non-empty skeleton reference.")
+								: TEXT("BlendSpace dimension must be 1 or 2."),
+							FString(TEXT("/")) + Field, FindField(*Value, Field), bSkeletonMissing ? TEXT("a non-empty skeleton reference") : TEXT("1 or 2"));
 						return false;
 					}
 				}
@@ -724,15 +815,27 @@ namespace UE::UAI::Composition::GraphCompound
 			if (Capability == TEXT("animation.anim_blueprint.graph.apply"))
 			{
 				OutSpec.Kind = EAnimationReadbackKind::AnimBlueprintGraph;
-				if (Edits.Num() != 1 || !Edits[0].GetProposedAfter().IsValid()
-					|| !TryStringField(
-						*Edits[0].GetProposedAfter(), TEXT("graph_name"),
-						OutSpec.NativeClassPath))
+				if (Edits.Num() != 1)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_animation_graph_plan_invalid"));
+					OutError = FDiagnostic::Failure(TEXT("graph_compound_animation_graph_plan_invalid"),
+						TEXT("An animation graph operation requires exactly one edit."), TEXT("input_decode"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Request.GetTargetRef();
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(Edits.Num());
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
 					return false;
 				}
+				const auto& Value = Edits[0].GetProposedAfter();
+				if (!Value || !TryStringField(*Value, TEXT("graph_name"), OutSpec.NativeClassPath))
+				{
+					OutError = AnimationInputFailure(Request, Edits[0], TEXT("graph_compound_animation_graph_plan_invalid"),
+						Value ? TEXT("The animation graph name must be a non-empty string.") : TEXT("The animation graph edit requires a proposed value."),
+						Value ? TEXT("/graph_name") : FString(), Value ? FindField(*Value, TEXT("graph_name")) : nullptr,
+						Value ? TEXT("a non-empty graph name") : TEXT("an animation graph value"));
+					return false;
+				}
+				if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edits[0].GetIdentity().GetSemanticId()))
+					OutSpec.GraphNameInputPointer = AnimationInputField(*Pointer, TEXT("/graph_name"));
 				OutSpec.GraphName = *OutSpec.NativeClassPath;
 				OutSpec.NativeClassPath = UAnimBlueprint::StaticClass()->GetPathName();
 				return true;
@@ -742,73 +845,37 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				OutSpec.Kind = EAnimationReadbackKind::BlendSpaceDefinition;
 				OutSpec.NativeClassPath = UBlendSpace::StaticClass()->GetPathName();
-				for (const FGraphCompoundCanonicalEdit& Edit : Edits)
-				{
-					const FUeAgentCanonicalValuePtr& Value = Edit.GetProposedAfter();
-					if (!Value.IsValid())
-					{
-						SetError(OutError,
-							TEXT("graph_compound_animation_blend_plan_invalid"));
+				for (const FGraphCompoundCanonicalEdit& Edit : Edits) {
+					ON_SCOPE_EXIT { Request.GetPayload().LocateDiagnostic(OutError, Edit.GetIdentity().GetSemanticId()); };
+					const auto& Value = Edit.GetProposedAfter();
+					const FString* InputPointer = Request.GetPayload().FindInputPointer(Edit.GetIdentity().GetSemanticId());
+					const FString Prefix = InputPointer ? *InputPointer : FString();
+					if (!Value) {
+						OutError = AnimationInputFailure(Request, Edit, TEXT("graph_compound_animation_blend_plan_invalid"),
+							TEXT("The BlendSpace edit requires a proposed axis or sample value."), FString(), nullptr, TEXT("an axis or sample value"));
 						return false;
 					}
-					if (Edit.GetIdentity().GetSemanticId().StartsWith(
-							TEXT("item:blend_axis:")))
-					{
+					if (Edit.GetIdentity().GetSemanticId().StartsWith(TEXT("item:blend_axis:"))) {
 						FAnimationRigGraphBlendAxisMutation Axis;
-						FString AxisName;
-						if (!TryIntegerField(*Value, TEXT("axis_index"), Axis.AxisIndex)
-							|| !TryStringField(*Value, TEXT("axis_name"), AxisName)
-							|| !TryNumberField(*Value, TEXT("minimum"), Axis.Minimum)
-							|| !TryNumberField(*Value, TEXT("maximum"), Axis.Maximum)
-							|| !TryIntegerField(
-								*Value, TEXT("grid_divisions"), Axis.GridDivisions))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_animation_blend_axis_invalid"));
-							return false;
-						}
-						Axis.AxisName = *AxisName;
+						if (!ParseBlendAxis(*Value, Axis, OutError, Prefix)) return false;
 						OutSpec.Axes.Add(Axis);
-					}
-					else
-					{
+					} else {
 						FAnimationRigGraphBlendSampleMutation Sample;
-						FString AnimationRef;
-						const FUeAgentCanonicalValue* Coordinates =
-							FindField(*Value, TEXT("coordinates"));
-						if (!TryStringField(
-								*Value, TEXT("animation_ref"), AnimationRef)
-							|| !Coordinates
-							|| Coordinates->GetKind() != EUeAgentValueKind::Array
-							|| Coordinates->GetArrayItems().IsEmpty()
-							|| Coordinates->GetArrayItems().Num() > 3)
-						{
-							SetError(OutError,
-								TEXT("graph_compound_animation_blend_sample_invalid"));
-							return false;
-						}
-						Sample.Animation = LoadObject<UAnimSequence>(
-							nullptr, *AnimationRef);
-						for (int32 Index = 0;
-							Index < Coordinates->GetArrayItems().Num(); ++Index)
-						{
-							const FUeAgentCanonicalValue& Coordinate =
-								Coordinates->GetArrayItems()[Index].Get();
-							if (Coordinate.GetKind() != EUeAgentValueKind::Integer
-								&& Coordinate.GetKind() != EUeAgentValueKind::Decimal)
-							{
-								SetError(OutError,
-									TEXT("graph_compound_animation_blend_coordinate_invalid"));
-								return false;
-							}
-							Sample.Coordinates[Index] =
-								FCString::Atod(*Coordinate.GetLexeme());
-						}
-						Sample.Intent = NativeIntent(Edit.GetIntent());
+						if (!ParseBlendSample(*Value, NativeIntent(Edit.GetIntent()), Sample, OutError, Prefix)) return false;
 						OutSpec.Samples.Add(Sample);
 					}
 				}
-				return !OutSpec.Axes.IsEmpty();
+				if (OutSpec.Axes.IsEmpty())
+				{
+					OutError = FDiagnostic::Failure(TEXT("graph_compound_animation_blend_axes_missing"),
+						TEXT("The BlendSpace definition contains no axis edits."), TEXT("input_decode"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Request.GetTargetRef();
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one axis edit"));
+					return false;
+				}
+				return true;
 			}
 
 			if (Capability == TEXT("animation.skeleton.definition.apply"))
@@ -817,25 +884,35 @@ namespace UE::UAI::Composition::GraphCompound
 				OutSpec.NativeClassPath = USkeleton::StaticClass()->GetPathName();
 				for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 				{
+					ON_SCOPE_EXIT { Request.GetPayload().LocateDiagnostic(OutError, Edit.GetIdentity().GetSemanticId()); };
 					FAnimationRigGraphSkeletonBoneMutation Bone;
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edit.GetIdentity().GetSemanticId()))
+						Bone.InputPointer = *Pointer;
 					FString BoneName;
 					FString ParentName;
-					if (!Edit.GetProposedAfter().IsValid()
-						|| !TryStringField(
-							*Edit.GetProposedAfter(), TEXT("bone_name"), BoneName))
+					if (!Edit.GetProposedAfter().IsValid())
 					{
-						SetError(OutError,
-							TEXT("graph_compound_animation_skeleton_bone_invalid"));
+						OutError = AnimationInputFailure(Request, Edit, TEXT("graph_compound_animation_skeleton_bone_invalid"),
+							TEXT("A skeleton bone edit requires a definition value."), FString(), nullptr, TEXT("bone definition object"));
+						return false;
+					}
+					if (!TryStringField(*Edit.GetProposedAfter(), TEXT("bone_name"), BoneName))
+					{
+						OutError = AnimationInputFailure(Request, Edit, TEXT("graph_compound_animation_skeleton_bone_invalid"),
+							TEXT("A skeleton bone definition requires a non-empty bone_name string."), TEXT("/bone_name"),
+							FindField(*Edit.GetProposedAfter(), TEXT("bone_name")), TEXT("non-empty string"));
 						return false;
 					}
 					TryStringField(
 						*Edit.GetProposedAfter(), TEXT("parent_bone"), ParentName);
+					const auto* Parent = FindField(*Edit.GetProposedAfter(), TEXT("parent_bone"));
+					Bone.bHasParentBoneInput = Parent && Parent->GetKind() == EUeAgentValueKind::String;
 					Bone.BoneName = *BoneName;
 					Bone.ParentBone = *ParentName;
 					Bone.Intent = NativeIntent(Edit.GetIntent());
 					OutSpec.Bones.Add(Bone);
 				}
-				return !OutSpec.Bones.IsEmpty();
+				return true;
 			}
 
 			if (Capability == TEXT("animation.skeleton.compatibility.apply"))
@@ -845,49 +922,79 @@ namespace UE::UAI::Composition::GraphCompound
 				const FString Prefix = TEXT("binding:compatible_skeleton:");
 				for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 				{
+					ON_SCOPE_EXIT { Request.GetPayload().LocateDiagnostic(OutError, Edit.GetIdentity().GetSemanticId()); };
 					const FString& SemanticId = Edit.GetIdentity().GetSemanticId();
 					if (!SemanticId.StartsWith(Prefix))
 					{
-						SetError(OutError,
-							TEXT("graph_compound_animation_compatibility_identity_invalid"));
+						OutError = AnimationInputFailure(Request, Edit, TEXT("graph_compound_animation_compatibility_identity_invalid"),
+							TEXT("The edit does not identify a compatible skeleton binding."), FString(), nullptr, TEXT("compatible skeleton binding"));
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(SemanticId);
+						OutError.ActualValuePresent.Reset();
 						return false;
 					}
 					FAnimationRigGraphSkeletonCompatibilityMutation Mutation;
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId)) Mutation.InputPointer = *Pointer;
 					Mutation.CompatibleSkeleton = LoadObject<USkeleton>(
 						nullptr, *SemanticId.Mid(Prefix.Len()));
 					Mutation.Intent = NativeIntent(Edit.GetIntent());
 					if (!Mutation.CompatibleSkeleton)
 					{
-						SetError(OutError,
-							TEXT("graph_compound_animation_compatible_skeleton_invalid"));
+						OutError = AnimationInputFailure(Request, Edit, TEXT("graph_compound_animation_compatible_skeleton_invalid"),
+							TEXT("The compatible skeleton reference could not be loaded as a Skeleton asset."), FString(), nullptr,
+							USkeleton::StaticClass()->GetPathName());
+						OutError.ActualValuePresent = true;
+						OutError.ActualValue = MakeShared<FJsonValueString>(SemanticId.Mid(Prefix.Len()));
 						return false;
 					}
 					OutSpec.Compatibility.Add(Mutation);
 				}
-				return !OutSpec.Compatibility.IsEmpty();
+				return true;
 			}
 
 			OutSpec.Kind = EAnimationReadbackKind::SkeletonVirtualBone;
 			OutSpec.NativeClassPath = USkeleton::StaticClass()->GetPathName();
 			const FString Prefix = TEXT("hierarchy:virtual_bone:");
-			const FGraphCompoundCanonicalEdit& Edit = Edits[0];
-			if (Edits.Num() != 1
-				|| !Edit.GetIdentity().GetSemanticId().StartsWith(Prefix)
-				|| !Edit.GetProposedAfter().IsValid())
+			if (Edits.Num() != 1)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_animation_virtual_bone_invalid"));
+				OutError = FGraphCompoundRuntimeError::Failure(TEXT("graph_compound_animation_virtual_bone_invalid"),
+					TEXT("A virtual bone operation requires exactly one edit."), TEXT("graph_compound"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.TargetPath = Request.GetTargetRef();
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(Edits.Num());
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+				return false;
+			}
+			const FGraphCompoundCanonicalEdit& Edit = Edits[0];
+			if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edit.GetIdentity().GetSemanticId()))
+				OutSpec.VirtualBone.InputPointer = *Pointer;
+			if (!Edit.GetIdentity().GetSemanticId().StartsWith(Prefix))
+			{
+				OutError = AnimationInputFailure(Request, Edit, TEXT("graph_compound_animation_virtual_bone_invalid"),
+					TEXT("The edit does not identify a virtual bone."), FString(), nullptr, TEXT("virtual bone identity"));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Edit.GetIdentity().GetSemanticId());
+				OutError.ActualValuePresent.Reset();
+				return false;
+			}
+			if (!Edit.GetProposedAfter().IsValid())
+			{
+				OutError = AnimationInputFailure(Request, Edit, TEXT("graph_compound_animation_virtual_bone_invalid"),
+					TEXT("A virtual bone edit requires a definition value."), FString(), nullptr, TEXT("virtual bone definition object"));
 				return false;
 			}
 			FString SourceBone;
 			FString TargetBone;
-			if (!TryStringField(
-					*Edit.GetProposedAfter(), TEXT("source_bone"), SourceBone)
-				|| !TryStringField(
-						*Edit.GetProposedAfter(), TEXT("target_bone"), TargetBone))
+			if (!TryStringField(*Edit.GetProposedAfter(), TEXT("source_bone"), SourceBone))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_animation_virtual_bone_invalid"));
+				OutError = AnimationInputFailure(Request, Edit, TEXT("graph_compound_animation_virtual_bone_invalid"),
+					TEXT("A virtual bone requires a non-empty source_bone string."), TEXT("/source_bone"),
+					FindField(*Edit.GetProposedAfter(), TEXT("source_bone")), TEXT("non-empty string"));
+				return false;
+			}
+			if (!TryStringField(*Edit.GetProposedAfter(), TEXT("target_bone"), TargetBone))
+			{
+				OutError = AnimationInputFailure(Request, Edit, TEXT("graph_compound_animation_virtual_bone_invalid"),
+					TEXT("A virtual bone requires a non-empty target_bone string."), TEXT("/target_bone"),
+					FindField(*Edit.GetProposedAfter(), TEXT("target_bone")), TEXT("non-empty string"));
 				return false;
 			}
 			OutSpec.VirtualBone.Name =
@@ -914,6 +1021,9 @@ namespace UE::UAI::Composition::GraphCompound
 			Root->SetStringField(TEXT("native_class"), Spec.NativeClassPath);
 			switch (Spec.Kind)
 			{
+			case EAnimationReadbackKind::AnimBlueprintGraph:
+				Root->SetStringField(TEXT("graph_name"), Spec.GraphName.ToString());
+				break;
 			case EAnimationReadbackKind::AssetCreate:
 				if (Spec.TargetKind == TEXT("anim_layer_interface"))
 				{
@@ -932,10 +1042,8 @@ namespace UE::UAI::Composition::GraphCompound
 						Root->SetNumberField(TEXT("dimension"), Spec.Dimension);
 					}
 				}
-				break;
-			case EAnimationReadbackKind::AnimBlueprintGraph:
-				Root->SetStringField(TEXT("graph_name"), Spec.GraphName.ToString());
-				break;
+				if (!Spec.bHasBlendDefinition) break;
+				[[fallthrough]];
 			case EAnimationReadbackKind::BlendSpaceDefinition:
 			{
 				TArray<TSharedPtr<FJsonValue>> Axes;
@@ -1020,7 +1128,7 @@ namespace UE::UAI::Composition::GraphCompound
 			const FString& TargetRef,
 			const FAnimationReadbackSpec& Spec,
 			TSharedRef<FJsonObject>& OutRoot,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutError.Reset();
 			if (Spec.Kind == EAnimationReadbackKind::RigIk)
@@ -1038,7 +1146,14 @@ namespace UE::UAI::Composition::GraphCompound
 				nullptr, *ObjectPath(TargetRef));
 			if (!Target || Target->GetClass()->GetPathName() != Spec.NativeClassPath)
 			{
-				OutError = TEXT("animation_readback_target_class_mismatch");
+				OutError = FDiagnostic::Failure(TEXT("animation_readback_target_class_mismatch"),
+					!Target ? TEXT("The animation readback target could not be loaded.")
+						: TEXT("The animation readback target has a different native class than the requested asset."), TEXT("readback"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.TargetPath = TargetRef;
+				if (Target) OutError.ActualValue = MakeShared<FJsonValueString>(Target->GetClass()->GetPathName());
+				else OutError.ActualValue = MakeShared<FJsonValueNull>();
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(Spec.NativeClassPath);
 				return false;
 			}
 			OutRoot->SetStringField(TEXT("target_kind"), Spec.TargetKind);
@@ -1071,7 +1186,7 @@ namespace UE::UAI::Composition::GraphCompound
 					OutRoot->SetNumberField(TEXT("dimension"),
 						Target->IsA<UBlendSpace1D>() ? 1 : 2);
 				}
-				return true;
+				if (!Spec.bHasBlendDefinition) return true;
 			}
 			if (Spec.Kind == EAnimationReadbackKind::AnimBlueprintGraph)
 			{
@@ -1089,18 +1204,32 @@ namespace UE::UAI::Composition::GraphCompound
 				const UEdGraph* const ActualGraph = FoundGraph ? *FoundGraph : nullptr;
 				if (!ActualGraph)
 				{
-					OutError = TEXT("animation_readback_graph_missing");
+					OutError = FDiagnostic::Failure(TEXT("animation_readback_graph_missing"),
+						FString::Printf(TEXT("Animation graph '%s' is missing from the reloaded Blueprint."), *Spec.GraphName.ToString()), TEXT("readback"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = TargetRef;
+					OutError.ActualValue = MakeShared<FJsonValueNull>();
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Spec.GraphName.ToString());
+					if (!Spec.GraphNameInputPointer.IsEmpty()) {
+						OutError.Source.JsonPath = Spec.GraphNameInputPointer;
+						OutError.SourceKind = TEXT("related_input");
+					}
 					return false;
 				}
 				OutRoot->SetStringField(TEXT("graph_name"), ActualGraph->GetName());
 				return true;
 			}
-			if (Spec.Kind == EAnimationReadbackKind::BlendSpaceDefinition)
+			if (Spec.Kind == EAnimationReadbackKind::BlendSpaceDefinition || Spec.bHasBlendDefinition)
 			{
 				const UBlendSpace* BlendSpace = Cast<UBlendSpace>(Target);
 				if (!BlendSpace)
 				{
-					OutError = TEXT("animation_readback_blend_missing");
+					OutError = FDiagnostic::Failure(TEXT("animation_readback_blend_missing"),
+						TEXT("BlendSpace definition readback requires a BlendSpace target."), TEXT("readback"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = TargetRef;
+					OutError.ActualValue = MakeShared<FJsonValueString>(Target->GetClass()->GetPathName());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(UBlendSpace::StaticClass()->GetPathName());
 					return false;
 				}
 				TArray<TSharedPtr<FJsonValue>> AxisValues;
@@ -1146,7 +1275,12 @@ namespace UE::UAI::Composition::GraphCompound
 			const USkeleton* Skeleton = Cast<USkeleton>(Target);
 			if (!Skeleton)
 			{
-				OutError = TEXT("animation_readback_skeleton_missing");
+				OutError = FDiagnostic::Failure(TEXT("animation_readback_skeleton_missing"),
+					TEXT("Skeleton readback requires a Skeleton asset."), TEXT("readback"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.TargetPath = TargetRef;
+				OutError.ActualValue = MakeShared<FJsonValueString>(Target->GetClass()->GetPathName());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(USkeleton::StaticClass()->GetPathName());
 				return false;
 			}
 			if (Spec.Kind == EAnimationReadbackKind::SkeletonDefinition)
@@ -1260,22 +1394,32 @@ namespace UE::UAI::Composition::GraphCompound
 						DependencyAnchors.Emplace(Item.CompatibleSkeleton);
 					}
 				}
-				FString UnloadDetail;
-				if (Request.GetOracleId() != ReadbackOracleId
-					|| Request.GetSubjectRef() != TargetRef
-					|| !TryUnloadTarget(TargetRef, false, UnloadDetail))
+				UE::UAI::Contract::FDiagnostic UnloadDetail;
+				if (Request.GetOracleId() != ReadbackOracleId || Request.GetSubjectRef() != TargetRef)
 				{
-					OutError = FVerificationError(
-						TEXT("animation_readback_unload_failed"),
-						TargetRef + TEXT(":") + UnloadDetail);
+					const bool bOracleMatches = Request.GetOracleId() == ReadbackOracleId;
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_readback_unload_failed"),
+						!bOracleMatches ? TEXT("The readback request selects a different oracle.") : TEXT("The readback request targets a different animation asset."));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = TargetRef;
+					OutError.PropertyPath = !bOracleMatches ? TEXT("oracle_matches") : TEXT("subject_ref");
+					OutError.ActualValue = !bOracleMatches ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false))
+						: MakeShared<FJsonValueString>(Request.GetSubjectRef());
+					OutError.ExpectedValue = !bOracleMatches ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true))
+						: MakeShared<FJsonValueString>(TargetRef);
+					return false;
+				}
+				if (!UeAgentAuthoringOperationApply::TryReloadPersistedPackage(TargetRef, UnloadDetail))
+				{
+					OutError = MoveTemp(UnloadDetail);
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 					return false;
 				}
 				TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
-				FString ReadError;
+				UE::UAI::Contract::FDiagnostic ReadError;
 				if (!TryBuildActualJson(TargetRef, Spec, Actual, ReadError))
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						ReadError, TEXT("animation-readback:") + TargetRef);
+					OutObservation = FIndependentReadbackObservation::Unavailable(ReadError, TEXT("animation-readback:") + TargetRef);
 					return true;
 				}
 				FUeAgentCanonicalValuePtr ActualValue;
@@ -1283,9 +1427,8 @@ namespace UE::UAI::Composition::GraphCompound
 				if (!TryCanonicalObject(
 						Actual, Resources, ActualValue, CanonicalError))
 				{
-					OutError = FVerificationError(
-						CanonicalError.Code,
-						TargetRef + TEXT(":") + CanonicalError.Detail);
+					OutError = MoveTemp(CanonicalError);
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 					return false;
 				}
 				OutObservation = FIndependentReadbackObservation::Available(
@@ -1322,74 +1465,64 @@ namespace UE::UAI::Composition::GraphCompound
 			if (Profile.GetCapabilityId()
 				== TEXT("animation.anim_blueprint.asset.create"))
 			{
-				USkeleton* const Skeleton = LoadObject<USkeleton>(
-					nullptr, *Spec.SkeletonRef);
-				UClass* const ParentClass = LoadObject<UClass>(
-					nullptr, *Spec.ParentClassRef);
-				if (!Skeleton || !ParentClass
-					|| !ParentClass->IsChildOf(UAnimInstance::StaticClass()))
+				USkeleton* const Skeleton = LoadObject<USkeleton>(nullptr, *Spec.SkeletonRef);
+				UClass* const ParentClass = LoadObject<UClass>(nullptr, *Spec.ParentClassRef);
+				if (!Skeleton || !ParentClass || !ParentClass->IsChildOf(UAnimInstance::StaticClass()))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_animation_create_reference_invalid"),
-						Request.GetTargetRef());
+					OutError = FDiagnostic::Failure(TEXT("graph_compound_animation_create_reference_invalid"),
+						!Skeleton ? TEXT("The animation Blueprint skeleton reference could not be loaded as a Skeleton asset.")
+							: !ParentClass ? TEXT("The animation Blueprint parent class reference could not be loaded.")
+							: TEXT("The animation Blueprint parent class must derive from AnimInstance."), TEXT("native_graph"));
+					OutError.TargetPath = Request.GetTargetRef();
+					OutError.ActualValue = MakeShared<FJsonValueString>(!Skeleton ? Spec.SkeletonRef : Spec.ParentClassRef);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(!Skeleton ? USkeleton::StaticClass()->GetPathName()
+						: FString(TEXT("a class derived from ")) + UAnimInstance::StaticClass()->GetPathName());
+					OutError.Source.JsonPath = AnimationInputField(Spec.CreateInputPointer, !Skeleton ? TEXT("/skeleton_ref") : TEXT("/parent_class_ref"));
+					OutError.SourceKind = OutError.Source.JsonPath.IsEmpty() ? TEXT("native_result") : TEXT("related_input");
 					return nullptr;
 				}
-				UAnimBlueprintFactory* const Factory =
-					NewObject<UAnimBlueprintFactory>();
+				UAnimBlueprintFactory* const Factory = NewObject<UAnimBlueprintFactory>();
 				Factory->TargetSkeleton = Skeleton;
 				Factory->ParentClass = ParentClass;
-				Created = Factory->FactoryCreateNew(
-					UAnimBlueprint::StaticClass(), &Package, Name,
-					RF_Public | RF_Standalone | RF_Transactional,
-					nullptr, GWarn);
+				Created = Factory->FactoryCreateNew(UAnimBlueprint::StaticClass(), &Package, Name,
+					RF_Public | RF_Standalone | RF_Transactional, nullptr, GWarn);
 			}
-			else if (Profile.GetCapabilityId()
-				== TEXT("animation.anim_blueprint.layer_interface.asset.create"))
+			else if (Profile.GetCapabilityId() == TEXT("animation.anim_blueprint.layer_interface.asset.create"))
 			{
-				UAnimLayerInterfaceFactory* const Factory =
-					NewObject<UAnimLayerInterfaceFactory>();
-				Created = Factory->FactoryCreateNew(
-					UAnimBlueprint::StaticClass(), &Package, Name,
-					RF_Public | RF_Standalone | RF_Transactional,
-					nullptr, GWarn);
+				UAnimLayerInterfaceFactory* const Factory = NewObject<UAnimLayerInterfaceFactory>();
+				Created = Factory->FactoryCreateNew(UAnimBlueprint::StaticClass(), &Package, Name,
+					RF_Public | RF_Standalone | RF_Transactional, nullptr, GWarn);
 			}
 			else
 			{
-				USkeleton* const Skeleton = LoadObject<USkeleton>(
-					nullptr, *Spec.SkeletonRef);
-				if (!Skeleton)
+				auto Seed = MakeShared<FJsonObject>();
+				Seed->SetStringField(TEXT("skeleton"), Spec.SkeletonRef);
+				Seed->SetNumberField(TEXT("dimension"), Spec.Dimension);
+				UE::UAI::Contract::FDiagnostic Error;
+				UeAgentAnimationAuthoring::FFactorySeedDiagnosticSource SeedSource;
+				SeedSource.TargetPath = Request.GetTargetRef();
+				SeedSource.Skeleton.JsonPath = AnimationInputField(Spec.CreateInputPointer, TEXT("/skeleton_ref"));
+				SeedSource.Dimension.JsonPath = AnimationInputField(Spec.CreateInputPointer, TEXT("/dimension"));
+				Created = UeAgentAnimationAuthoring::CreateFactorySeed(
+					UeAgentAnimationAuthoring::EAssetKind::BlendSpace, &Package, Name,
+					RF_Public | RF_Standalone | RF_Transactional, Seed, Error, SeedSource);
+				if (!Created)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_animation_skeleton_ref_invalid"),
-						Spec.SkeletonRef);
+					SetError(OutError, MoveTemp(Error), Request.GetTargetRef());
 					return nullptr;
-				}
-				if (Spec.Dimension == 1)
-				{
-					UBlendSpaceFactory1D* const Factory =
-						NewObject<UBlendSpaceFactory1D>();
-					Factory->TargetSkeleton = Skeleton;
-					Created = Factory->FactoryCreateNew(
-						UBlendSpace1D::StaticClass(), &Package, Name,
-						RF_Public | RF_Standalone | RF_Transactional,
-						nullptr, GWarn);
-				}
-				else
-				{
-					UBlendSpaceFactoryNew* const Factory =
-						NewObject<UBlendSpaceFactoryNew>();
-					Factory->TargetSkeleton = Skeleton;
-					Created = Factory->FactoryCreateNew(
-						UBlendSpace::StaticClass(), &Package, Name,
-						RF_Public | RF_Standalone | RF_Transactional,
-						nullptr, GWarn);
 				}
 			}
 			if (!Created || Created->GetClass()->GetPathName() != Spec.NativeClassPath)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_animation_factory_failed"),
-					Request.GetTargetRef(), Spec.NativeClassPath);
+				OutError = FDiagnostic::Failure(TEXT("graph_compound_animation_factory_failed"),
+					!Created ? TEXT("The Unreal animation factory did not create an asset.")
+						: TEXT("The Unreal animation factory returned an unexpected asset class."), TEXT("native_graph"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.TargetPath = Request.GetTargetRef();
+				OutError.PropertyPath = TEXT("asset_class");
+				OutError.ActualValue = Created ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Created->GetClass()->GetPathName()))
+					: MakeShared<FJsonValueNull>();
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(Spec.NativeClassPath);
 				return nullptr;
 			}
 			if (UAnimBlueprint* const Blueprint = Cast<UAnimBlueprint>(Created))
@@ -1399,9 +1532,9 @@ namespace UE::UAI::Composition::GraphCompound
 					Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
 				if (CompilerLog.NumErrors != 0 || Blueprint->Status == BS_Error)
 				{
-					SetError(OutError,
-						TEXT("animation_rig_graph_compile_incomplete"),
-						Request.GetTargetRef(), FString::FromInt(CompilerLog.NumErrors));
+					OutError = UeAgentAuthoringDiagnostics::MakeCompileFailure(TEXT("animation_rig_graph_compile_incomplete"),
+						Request.GetTargetRef(), CompilerLog, Blueprint);
+					OutError.SourceKind = TEXT("native_result");
 					return nullptr;
 				}
 			}
@@ -1432,32 +1565,60 @@ namespace UE::UAI::Composition::GraphCompound
 			FString Evidence;
 			FAnimationRigGraphAdapterError NativeError;
 			bool bApplied = false;
+			UClass* ExpectedMutationClass = nullptr;
 			if (Profile.GetCapabilityId()
 				== TEXT("animation.anim_blueprint.graph.apply"))
 			{
+				ExpectedMutationClass = UAnimBlueprint::StaticClass();
 				UAnimBlueprint* const Blueprint = Cast<UAnimBlueprint>(&Target);
 				if (Blueprint && Blueprint->TargetSkeleton)
 				{
 					bApplied = Hook.TryEnsureCompileAndCaptureAnimBlueprint(
 						*Blueprint, *Blueprint->TargetSkeleton, Spec.GraphName,
-						Apply, Barrier, Topology, OutRevision, Evidence, NativeError);
+						Apply, Barrier, Topology, OutRevision, Evidence, NativeError, Spec.GraphNameInputPointer);
+				}
+				else if (Blueprint) {
+					NativeError = FDiagnostic::Failure(TEXT("graph_compound_animation_skeleton_missing"),
+						TEXT("The animation Blueprint has no target skeleton for graph editing."), TEXT("native_graph"));
+					NativeError.SourceKind = TEXT("native_result");
+					NativeError.ActualValue = MakeShared<FJsonValueNull>();
+					NativeError.ExpectedValue = MakeShared<FJsonValueString>(USkeleton::StaticClass()->GetPathName());
 				}
 			}
 			else if (Profile.GetCapabilityId()
-				== TEXT("animation.blend_space.definition.apply"))
+				== TEXT("animation.blend_space.definition.apply") || Spec.bHasBlendDefinition)
 			{
+				ExpectedMutationClass = UBlendSpace::StaticClass();
 				UBlendSpace* const BlendSpace = Cast<UBlendSpace>(&Target);
 				if (BlendSpace && BlendSpace->GetSkeleton())
 				{
+					auto Axes = Spec.Axes;
+					if (Axes.IsEmpty() && Spec.bHasBlendDefinition) {
+						for (int32 Index = 0; Index < Spec.Dimension; ++Index) {
+							const auto& Current = BlendSpace->GetBlendParameter(Index);
+							FAnimationRigGraphBlendAxisMutation Axis;
+							Axis.AxisIndex = Index; Axis.AxisName = *Current.DisplayName;
+							Axis.Minimum = Current.Min; Axis.Maximum = Current.Max; Axis.GridDivisions = Current.GridNum;
+							Axes.Add(Axis);
+						}
+					}
 					bApplied = Hook.TryApplyAndCaptureBlendSpaceDefinition(
-						*BlendSpace, *BlendSpace->GetSkeleton(), Spec.Axes,
+						*BlendSpace, *BlendSpace->GetSkeleton(), Axes,
 						Spec.Samples, Apply, Barrier, Topology,
 						OutRevision, Evidence, NativeError);
+				}
+				else if (BlendSpace) {
+					NativeError = FDiagnostic::Failure(TEXT("graph_compound_animation_skeleton_missing"),
+						TEXT("The BlendSpace has no skeleton for definition editing."), TEXT("native_graph"));
+					NativeError.SourceKind = TEXT("native_result");
+					NativeError.ActualValue = MakeShared<FJsonValueNull>();
+					NativeError.ExpectedValue = MakeShared<FJsonValueString>(USkeleton::StaticClass()->GetPathName());
 				}
 			}
 			else if (Profile.GetCapabilityId()
 				== TEXT("animation.skeleton.definition.apply"))
 			{
+				ExpectedMutationClass = USkeleton::StaticClass();
 				if (USkeleton* const Skeleton = Cast<USkeleton>(&Target))
 				{
 					bApplied = Hook.TryApplyAndCaptureSkeletonDefinition(
@@ -1468,6 +1629,7 @@ namespace UE::UAI::Composition::GraphCompound
 			else if (Profile.GetCapabilityId()
 				== TEXT("animation.skeleton.compatibility.apply"))
 			{
+				ExpectedMutationClass = USkeleton::StaticClass();
 				if (USkeleton* const Skeleton = Cast<USkeleton>(&Target))
 				{
 					bApplied = Hook.TryApplyAndCaptureSkeletonCompatibility(
@@ -1475,19 +1637,40 @@ namespace UE::UAI::Composition::GraphCompound
 						OutRevision, Evidence, NativeError);
 				}
 			}
-			else if (USkeleton* const Skeleton = Cast<USkeleton>(&Target))
+			else
 			{
-				bApplied = Hook.TryApplyAndCaptureSkeletonVirtualBone(
-					*Skeleton, Spec.VirtualBone, Apply, Barrier, Topology,
-					OutRevision, Evidence, NativeError);
+				ExpectedMutationClass = USkeleton::StaticClass();
+				if (USkeleton* const Skeleton = Cast<USkeleton>(&Target))
+				{
+					bApplied = Hook.TryApplyAndCaptureSkeletonVirtualBone(
+						*Skeleton, Spec.VirtualBone, Apply, Barrier, Topology,
+						OutRevision, Evidence, NativeError);
+				}
 			}
 			if (!bApplied || !Barrier.IsComplete() || Barrier.GetErrorCount() != 0)
 			{
-				SetError(OutError,
-					NativeError.GetCode().IsEmpty()
-						? TEXT("graph_compound_animation_native_failed")
-						: NativeError.GetCode(),
-					Target.GetPathName(), NativeError.GetDetail());
+				if (NativeError.IsValid()) OutError = NativeError;
+				else
+				{
+					const bool bWrongClass = ExpectedMutationClass && !Target.IsA(ExpectedMutationClass);
+					OutError = FDiagnostic::Failure(TEXT("graph_compound_animation_native_failed"),
+						bWrongClass ? TEXT("The animation mutation target has an incompatible asset class.")
+							: !bApplied ? TEXT("The native animation mutation or its topology capture did not complete.")
+							: !Barrier.IsComplete() ? TEXT("The native animation refresh or compile barrier did not complete.")
+							: TEXT("The native animation barrier reported errors."), TEXT("native_graph"));
+					OutError.SourceKind = TEXT("native_result");
+					if (bWrongClass)
+					{
+						OutError.ActualValue = MakeShared<FJsonValueString>(Target.GetClass()->GetPathName());
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(ExpectedMutationClass->GetPathName());
+					}
+					else if (bApplied && Barrier.IsComplete())
+					{
+						OutError.ActualValue = MakeShared<FJsonValueNumber>(Barrier.GetErrorCount());
+						OutError.ExpectedValue = MakeShared<FJsonValueNumber>(0);
+					}
+				}
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target.GetPathName();
 				return false;
 			}
 			return true;
@@ -1495,42 +1678,26 @@ namespace UE::UAI::Composition::GraphCompound
 
 		bool TrySerializeResult(
 			const FString& TargetRef,
-			const FString& Revision,
-			const FString& PersistenceReceiptId,
-			const FString& ReadbackEvidenceId,
 			FUeAgentContractValue& OutResult,
 			FGraphCompoundRuntimeError& OutError)
 		{
-			if (TargetRef.IsEmpty()
-				|| Revision.IsEmpty()
-				|| PersistenceReceiptId.IsEmpty()
-				|| ReadbackEvidenceId.IsEmpty())
+			if (TargetRef.IsEmpty())
 			{
-				SetError(
-					OutError,
-					TEXT("graph_compound_animation_lifecycle_receipt_invalid"),
-					TargetRef);
+				SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_target_invalid"), TEXT("target_ref does not identify the required Animation Blueprint target."), TEXT("graph_compound"), FString()), TargetRef);
 				return false;
 			}
 			const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
 			Object->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
 			Object->SetStringField(TEXT("target_ref"), TargetRef);
-			Object->SetStringField(TEXT("revision"), Revision);
 			Object->SetBoolField(TEXT("mutation_applied"), true);
 			Object->SetBoolField(TEXT("compile_settled"), true);
 			Object->SetBoolField(TEXT("saved"), true);
 			Object->SetBoolField(TEXT("reloaded"), true);
-			Object->SetStringField(
-				TEXT("persistence_receipt_id"), PersistenceReceiptId);
-			Object->SetStringField(
-				TEXT("independent_readback_evidence_id"), ReadbackEvidenceId);
 			FString Canonical;
-			FString JsonError;
+			UE::UAI::Contract::FDiagnostic JsonError;
 			if (!Json::TryCanonicalize(Object, Canonical, JsonError))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_animation_result_invalid"),
-					TargetRef, JsonError);
+				SetError(OutError, JsonError, TargetRef);
 				return false;
 			}
 			OutResult = FUeAgentContractValue(MoveTemp(Canonical));
@@ -1566,9 +1733,13 @@ namespace UE::UAI::Composition::GraphCompound
 					&& !IsRigIkCreateProfile(Profile)
 					&& !IsRigIkMutationProfile(Profile))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_production_binding_unimplemented"),
-						Profile.GetCapabilityId());
+					auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_production_binding_unimplemented"), TEXT("No animation production binding supports the requested graph capability."), TEXT("graph_compound"));
+					Diagnostic.PropertyPath = TEXT("capability");
+					Diagnostic.ActualValue = MakeShared<FJsonValueString>(Profile.GetCapabilityId());
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("registered animation create or mutation capability"));
+					Diagnostic.SourceKind = TEXT("native_result");
+					Diagnostic.TargetPath = Request.GetTargetRef();
+					SetError(OutError, MoveTemp(Diagnostic), Profile.GetCapabilityId());
 					return false;
 				}
 				if (IsUnavailableConcreteDeformerProfile(Profile))
@@ -1577,11 +1748,14 @@ namespace UE::UAI::Composition::GraphCompound
 				}
 				if (!IsInGameThread() || Cancellation->IsCancelled())
 				{
-					SetError(OutError,
-						Cancellation->IsCancelled()
-							? TEXT("graph_compound_animation_cancelled")
-							: TEXT("graph_compound_animation_thread_invalid"),
-						Profile.GetCapabilityId());
+					const bool bCancelled = Cancellation->IsCancelled();
+					auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(bCancelled ? TEXT("graph_compound_animation_cancelled") : TEXT("graph_compound_animation_thread_invalid"), bCancelled ? TEXT("Animation graph capture was cancelled.") : TEXT("Animation graph capture requires the game thread."), TEXT("graph_compound"));
+					Diagnostic.PropertyPath = TEXT("execution_context");
+					Diagnostic.ActualValue = MakeShared<FJsonValueString>(bCancelled ? TEXT("cancelled") : TEXT("not_game_thread"));
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("game thread with no cancellation"));
+					Diagnostic.SourceKind = TEXT("native_result");
+					Diagnostic.TargetPath = Request.GetTargetRef();
+					SetError(OutError, MoveTemp(Diagnostic), Profile.GetCapabilityId());
 					return false;
 				}
 				return (IsW02CreateProfile(Profile)
@@ -1612,9 +1786,13 @@ namespace UE::UAI::Composition::GraphCompound
 					&& !IsDeformerMutationProfile(Profile)
 					&& !IsRigIkMutationProfile(Profile))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_production_binding_unimplemented"),
-						Profile.GetCapabilityId());
+					auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_production_binding_unimplemented"), TEXT("No animation production binding supports the requested graph capability."), TEXT("graph_compound"));
+					Diagnostic.PropertyPath = TEXT("capability");
+					Diagnostic.ActualValue = MakeShared<FJsonValueString>(Profile.GetCapabilityId());
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("registered animation create or mutation capability"));
+					Diagnostic.SourceKind = TEXT("native_result");
+					Diagnostic.TargetPath = Request.GetTargetRef();
+					SetError(OutError, MoveTemp(Diagnostic), Profile.GetCapabilityId());
 					return false;
 				}
 				if (!IsInGameThread() || Cancellation->IsCancelled()
@@ -1622,20 +1800,33 @@ namespace UE::UAI::Composition::GraphCompound
 						!= Profile.GetExecutionContract().GetDescriptorIdentity()
 					|| Plan->GetChangeSet().GetChanges().IsEmpty())
 				{
-					SetError(OutError,
-						Cancellation->IsCancelled()
-							? TEXT("graph_compound_animation_cancelled")
-							: TEXT("graph_compound_animation_plan_invalid"),
-						Request.GetTargetRef());
+					const bool bCancelled = Cancellation->IsCancelled();
+					auto Actual = MakeShared<FJsonObject>();
+					Actual->SetBoolField(TEXT("game_thread"), IsInGameThread());
+					Actual->SetBoolField(TEXT("cancelled"), bCancelled);
+					Actual->SetBoolField(TEXT("descriptor_matches"), Plan->GetDescriptorIdentity() == Profile.GetExecutionContract().GetDescriptorIdentity());
+					Actual->SetNumberField(TEXT("change_count"), Plan->GetChangeSet().GetChanges().Num());
+					auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(bCancelled ? TEXT("graph_compound_animation_cancelled") : TEXT("graph_compound_animation_plan_invalid"), bCancelled ? TEXT("Animation graph execution was cancelled.") : TEXT("Animation graph execution requires the game thread, a matching descriptor, and at least one planned change."), TEXT("graph_compound"));
+					Diagnostic.PropertyPath = TEXT("plan");
+					Diagnostic.ActualValue = MakeShared<FJsonValueObject>(Actual);
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("game_thread=true, cancelled=false, descriptor_matches=true, change_count>0"));
+					Diagnostic.SourceKind = TEXT("native_result");
+					Diagnostic.TargetPath = Request.GetTargetRef();
+					SetError(OutError, MoveTemp(Diagnostic), Request.GetTargetRef());
 					return false;
 				}
 				for (const FPlannedChange& Change : Plan->GetChangeSet().GetChanges())
 				{
 					if (Change.GetIdentity().GetOwnerId() != Request.GetTargetRef())
 					{
-						SetError(OutError,
-							TEXT("graph_compound_animation_plan_target_mismatch"),
-							Change.GetIdentity().GetOwnerId());
+						auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_plan_target_mismatch"), TEXT("A planned animation change targets a different owner than the execution request."), TEXT("graph_compound"));
+						Diagnostic.PropertyPath = TEXT("owner_matches_target");
+						Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+						Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+						Diagnostic.SourceKind = TEXT("native_result");
+						Diagnostic.TargetPath = Request.GetTargetRef();
+						SetError(OutError, MoveTemp(Diagnostic), Change.GetIdentity().GetSemanticId());
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(Change.GetIdentity().GetOwnerId());
 						return false;
 					}
 				}
@@ -1660,9 +1851,8 @@ namespace UE::UAI::Composition::GraphCompound
 						Plan, Current.ToSharedRef(), CallerContext,
 						*Resources, RevalidateError))
 				{
-					SetError(OutError, RevalidateError.GetCode(),
-						RevalidateError.GetIdentityKey(),
-						RevalidateError.GetDetail());
+					OutError = RevalidateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = RevalidateError.SubjectId;
 					return false;
 				}
 
@@ -1682,11 +1872,10 @@ namespace UE::UAI::Composition::GraphCompound
 				FAssetDurableError DurableError;
 				if (!TryPrepareAssetDurability(
 						DurableRequest, DurableBackend, JournalRoot,
-						*Resources, Prepared, DurableError)
-					|| !Prepared.IsValid())
+						*Resources, Prepared, DurableError))
 				{
-					SetError(OutError, DurableError.GetCode(),
-						Request.GetTargetRef(), DurableError.GetDetail());
+					OutError = DurableError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
 					return false;
 				}
 
@@ -1699,33 +1888,42 @@ namespace UE::UAI::Composition::GraphCompound
 					Target = Package
 						? TryCreateAsset(Profile, Request, Spec, *Package, OutError)
 						: nullptr;
+					if (!Package)
+					{
+						OutError = FDiagnostic::Failure(TEXT("graph_compound_animation_factory_failed"),
+							TEXT("The animation asset destination package could not be created."), TEXT("native_graph"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = Request.GetTargetRef();
+						OutError.PropertyPath = TEXT("package_created");
+						OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+						OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					}
 					FAnimationRigGraphNativeMutationReceipt Apply;
 					FAnimationRigGraphBarrierReceipt Barrier;
 					FAnimationRigGraphAssetIdentity Identity;
 					FString Evidence;
 					FAnimationRigGraphAdapterError NativeError;
-					if (!Target
-						|| !NativeHook.TryCaptureOwnedAssetObject(
+					bool bCaptured = Target != nullptr;
+					if (bCaptured)
+					{
+						bCaptured = NativeHook.TryCaptureOwnedAssetObject(
 							*Package, Request.GetTargetKind(), *Target->GetClass(),
 							*AssetName(Request.GetTargetRef()), *Target,
-							Apply, Barrier, Identity, Revision, Evidence, NativeError)
-						|| !Barrier.IsComplete() || Barrier.GetErrorCount() != 0)
+							Apply, Barrier, Identity, Revision, Evidence, NativeError);
+						if (!bCaptured) OutError = MoveTemp(NativeError);
+					}
+					if (!bCaptured || (Spec.bHasBlendDefinition && !TryApplyMutation(
+						Profile, *Target, Spec, NativeHook, Revision, OutError)))
 					{
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+						if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("native_result");
 						Target = nullptr;
 						Package = nullptr;
-						FString RollbackDetail;
+						UE::UAI::Contract::FDiagnostic RollbackDetail;
 						TryRollback(Request.GetTargetRef(), true,
 							Prepared.ToSharedRef(), DurableBackend,
 							FencingToken, *Resources, RollbackDetail);
-						if (OutError.Code.IsEmpty())
-						{
-							SetError(OutError,
-								NativeError.GetCode().IsEmpty()
-									? TEXT("graph_compound_animation_factory_failed")
-									: NativeError.GetCode(),
-								Request.GetTargetRef(), NativeError.GetDetail()
-									+ TEXT(";") + RollbackDetail);
-						}
+						OutError.Append(RollbackDetail);
 						return false;
 					}
 					Target->SetFlags(RF_Public | RF_Standalone);
@@ -1735,35 +1933,41 @@ namespace UE::UAI::Composition::GraphCompound
 				{
 					Target = LoadObject<UObject>(nullptr, *Request.GetTargetRef());
 					Package = Target ? Target->GetOutermost() : nullptr;
+					if (!Target)
+					{
+						OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_target_unavailable"),
+							TEXT("The animation mutation target could not be loaded."), TEXT("native_graph"));
+						OutError.TargetPath = Request.GetTargetRef();
+						OutError.SourceKind = TEXT("native_result");
+						OutError.ActualValuePresent = false;
+					}
 					if (!Target || !TryApplyMutation(
 							Profile, *Target, Spec, NativeHook, Revision, OutError))
 					{
 						Target = nullptr;
 						Package = nullptr;
-						FString RollbackDetail;
+						UE::UAI::Contract::FDiagnostic RollbackDetail;
 						TryRollback(Request.GetTargetRef(), false,
 							Prepared.ToSharedRef(), DurableBackend,
 							FencingToken, *Resources, RollbackDetail);
-						OutError.Detail += TEXT(";") + RollbackDetail;
+						OutError.Append(RollbackDetail);
 						return false;
 					}
 				}
 				Package->MarkPackageDirty();
 				FDurableReceipt DurableReceipt;
-				if (!TryPersistAssetDurability(
+				if (!TryPersistAssetDurabilityForVerification(
 						Prepared.ToSharedRef(), DurableBackend,
 						FencingToken, *Resources,
 						DurableReceipt, DurableError))
 				{
 					Target = nullptr;
 					Package = nullptr;
-					FString RollbackDetail;
+					UE::UAI::Contract::FDiagnostic RollbackDetail;
 					TryRollback(Request.GetTargetRef(), bCreate,
 						Prepared.ToSharedRef(), DurableBackend,
 						FencingToken, *Resources, RollbackDetail);
-					SetError(OutError, DurableError.GetCode(),
-						Request.GetTargetRef(), DurableError.GetDetail()
-							+ TEXT(";") + RollbackDetail);
+					SetError(OutError, DurableError, Request.GetTargetRef(), RollbackDetail);
 					return false;
 				}
 				Package->SetDirtyFlag(false);
@@ -1786,46 +1990,39 @@ namespace UE::UAI::Composition::GraphCompound
 				FIndependentReadbackOutcome Outcome;
 				if (!FIndependentReadbackService::TryCreate(
 						{Oracle}, Readback, VerifyError)
-					|| !Readback.IsValid()
-					|| !Readback->TryVerify(
+					|| !Readback->TryObserve(
 						FIndependentReadbackRequest(
 							TEXT("graph-compound-animation:") + Plan->GetRequestId(),
 							ReadbackOracleId, Request.GetTargetRef(),
 							Expected.ToSharedRef()),
-						*Resources, Outcome, VerifyError)
-					|| Outcome.GetStatus() != EVerificationStatus::Verified)
+						*Resources, Outcome, VerifyError))
 				{
-					FString RollbackDetail;
+					UE::UAI::Contract::FDiagnostic RollbackDetail;
 					TryRollback(Request.GetTargetRef(), bCreate, Persisted,
 						DurableBackend, FencingToken, *Resources, RollbackDetail);
-					SetError(OutError,
-						VerifyError.GetCode().IsEmpty()
-							? TEXT("graph_compound_animation_readback_failed")
-							: VerifyError.GetCode(),
-						Request.GetTargetRef(), Outcome.GetDiagnosticCode()
-							+ TEXT(";") + RollbackDetail);
+					OutError = MoveTemp(VerifyError);
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+					if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("native_result");
+					OutError.Append(RollbackDetail);
 					return false;
 				}
 
 				const FDurableVerificationAcknowledgement Acknowledgement(
 					DurableReceipt.GetJournalId(), Plan->GetFingerprint(),
 					Prepared->GetInventory().GetInventoryHash(),
-					Outcome.GetEvidenceId(), JournalOwner, FencingToken);
+					Outcome.GetEvidenceId(), JournalOwner, FencingToken, Outcome.GetStatus() == EVerificationStatus::Verified);
 				if (!TryAcknowledgeAssetDurability(
 						Persisted, Acknowledgement, FencingToken,
 						*Resources, DurableError))
 				{
-					FString RollbackDetail;
+					UE::UAI::Contract::FDiagnostic RollbackDetail;
 					TryRollback(Request.GetTargetRef(), bCreate, Persisted,
 						DurableBackend, FencingToken, *Resources, RollbackDetail);
-					SetError(OutError, DurableError.GetCode(),
-						Request.GetTargetRef(), DurableError.GetDetail()
-							+ TEXT(";") + RollbackDetail);
+					SetError(OutError, DurableError, Request.GetTargetRef(), RollbackDetail);
 					return false;
 				}
 				return TrySerializeResult(
-					Request.GetTargetRef(), Revision,
-					DurableReceipt.GetJournalId(), Outcome.GetEvidenceId(),
+					Request.GetTargetRef(),
 					OutResult, OutError);
 			}
 
@@ -1844,13 +2041,6 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		OutEnvironment.Reset();
 		OutError = {};
-		if (!Config.IsValid())
-		{
-			SetError(OutError,
-				TEXT("graph_compound_production_config_invalid"),
-				TEXT("animation_rig_graph"));
-			return false;
-		}
 		OutEnvironment = MakeShared<FAnimationProductionEnvironment>(Config);
 		return OutEnvironment.IsValid();
 	}

@@ -55,7 +55,7 @@ namespace UeAgentAuthoringRegistrySnapshot
 			return Result;
 		}
 
-		FString CanonicalHash(const TSharedRef<FJsonObject>& Object, FString& OutError)
+		FString CanonicalHash(const TSharedRef<FJsonObject>& Object, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			FString Text;
 			if (!FUeAgentStructuredHjsonFormatter::TryWriteObject(Object, Text, OutError)) return FString();
@@ -63,7 +63,8 @@ namespace UeAgentAuthoringRegistrySnapshot
 			uint8 Digest[SHA256_DIGEST_LENGTH];
 			if (!SHA256(reinterpret_cast<const uint8*>(Utf8.Get()), static_cast<size_t>(Utf8.Length()), Digest))
 			{
-				OutError = TEXT("authoring_registry_sha256_failed");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("authoring_registry_sha256_failed"), TEXT("SHA-256 could not produce a digest for the authoring registry snapshot."), TEXT("authoring_registry_snapshot"));
+				OutError.SourceKind = TEXT("native_result");
 				return FString();
 			}
 			TStringBuilder<SHA256_DIGEST_LENGTH * 2> Result;
@@ -72,7 +73,7 @@ namespace UeAgentAuthoringRegistrySnapshot
 		}
 	}
 
-	bool BuildSnapshot(TSharedPtr<FJsonObject>& OutSnapshot, FString& OutError)
+	bool BuildSnapshot(TSharedPtr<FJsonObject>& OutSnapshot, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutSnapshot.Reset();
 		OutError.Reset();
@@ -161,7 +162,7 @@ namespace UeAgentAuthoringRegistrySnapshot
 		return true;
 	}
 
-	bool SerializeSnapshot(FString& OutHjson, FString& OutError)
+	bool SerializeSnapshot(FString& OutHjson, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TSharedPtr<FJsonObject> Snapshot;
 		if (!BuildSnapshot(Snapshot, OutError) || !Snapshot.IsValid()) return false;

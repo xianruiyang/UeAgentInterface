@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/HjsonWorkspace/SemanticModel/UeAgentUnifiedHjsonSemanticModel.h"
 
 namespace UE::UAI::HjsonWorkspace
@@ -67,6 +68,7 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& GetCandidateBindingRevision() const;
 		bool HasCandidate() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString ChangeId;
@@ -74,7 +76,7 @@ namespace UE::UAI::HjsonWorkspace
 		FString TargetIdentity;
 		FString CandidateName;
 		FString CandidateBindingRevision;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FInitializationNode final
@@ -91,13 +93,14 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& GetTypeIdentity() const;
 		const FString& GetInitializationContractId() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString NodeId;
 		EInitializationNodeRole Role = EInitializationNodeRole::Value;
 		FString TypeIdentity;
 		FString InitializationContractId;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FInitializationEdge final
@@ -112,12 +115,13 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& GetToNodeId() const;
 		EInitializationEdgeKind GetKind() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString FromNodeId;
 		FString ToNodeId;
 		EInitializationEdgeKind Kind = EInitializationEdgeKind::Reference;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FImportInitializationPlanningRequest final
@@ -148,6 +152,7 @@ namespace UE::UAI::HjsonWorkspace
 		const TArray<FString>& GetImpactScopes() const;
 		const FString& GetAuthorizationId() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		EImportSourceCarrier Carrier = EImportSourceCarrier::Inline;
@@ -161,7 +166,7 @@ namespace UE::UAI::HjsonWorkspace
 		TArray<FInitializationEdge> Edges;
 		TArray<FString> ImpactScopes;
 		FString AuthorizationId;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IImportInitializationPreflight
@@ -208,6 +213,7 @@ namespace UE::UAI::HjsonWorkspace
 		const TArray<FString>& GetImpactScopes() const;
 		const FString& GetPlanFingerprint() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FImportInitializationPlan(
@@ -230,7 +236,7 @@ namespace UE::UAI::HjsonWorkspace
 		TMap<FString, FString> ResolvedCandidates;
 		TArray<FString> ImpactScopes;
 		FString PlanFingerprint;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 
 		friend UEAGENTINTERFACE_API bool TryPlanHjsonImportInitialization(
 			const FImportInitializationPlanningRequest&,

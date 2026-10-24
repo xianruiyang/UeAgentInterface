@@ -4,10 +4,6 @@
   "native_owner": "C11/operation_scoped_port",
   "verification_owner": "C9/independent_readback",
   "signal_payload_contract": "C4/FUeAgentCanonicalValueRef",
-  "family_count": 4,
-  "start_candidate_count": 19,
-  "non_start_candidate_count": 12,
-  "legacy_candidate_count": 31,
   "common_request_fields": [
     "family_id",
     "subject_ref",
@@ -48,40 +44,30 @@
       "subject_kind": "world_ref",
       "policy_kind": "resave_policy_ref",
       "signal_type_id": "uai.compile_build.world_partition_resave.progress/v1"
+    },
+    {
+      "family_id": "packaging",
+      "subject_kind": "project_ref",
+      "policy_kind": "packaging_policy_ref",
+      "signal_type_id": "uai.compile_build.packaging.report_ref/v1"
     }
   ],
-  "legacy_mappings": [
-    { "legacy_id": "anim_blueprint_compile", "responsibility": "start", "family_id": "asset_compile" },
-    { "legacy_id": "metasound_compile", "responsibility": "start", "family_id": "asset_compile" },
-    { "legacy_id": "blueprint_compile", "responsibility": "start", "family_id": "asset_compile" },
-    { "legacy_id": "control_rig_compile", "responsibility": "start", "family_id": "asset_compile" },
-    { "legacy_id": "deformer_graph_compile", "responsibility": "start", "family_id": "asset_compile" },
-    { "legacy_id": "material_compile", "responsibility": "start", "family_id": "asset_compile" },
-    { "legacy_id": "pcg_generate", "responsibility": "start", "family_id": "world_build" },
-    { "legacy_id": "pcg_graph_compile", "responsibility": "start", "family_id": "asset_compile" },
-    { "legacy_id": "pcg_regenerate", "responsibility": "start", "family_id": "world_build" },
-    { "legacy_id": "static_mesh_build", "responsibility": "start", "family_id": "asset_compile" },
-    { "legacy_id": "umg_compile", "responsibility": "start", "family_id": "asset_compile" },
-    { "legacy_id": "navmesh_build", "responsibility": "start", "family_id": "world_build" },
-    { "legacy_id": "hlod_build", "responsibility": "start", "family_id": "world_build" },
-    { "legacy_id": "world_partition_generate_streaming", "responsibility": "start", "family_id": "world_build" },
-    { "legacy_id": "ml_deformer_train", "responsibility": "start", "family_id": "external_process" },
-    { "legacy_id": "localization_compile_text", "responsibility": "start", "family_id": "external_process" },
-    { "legacy_id": "localization_gather_text", "responsibility": "start", "family_id": "external_process" },
-    { "legacy_id": "packaging_run_build", "responsibility": "start", "family_id": "external_process" },
-    { "legacy_id": "world_partition_resave_actors", "responsibility": "start", "family_id": "world_partition_resave", "source": "SA-003" },
-
-    { "legacy_id": "anim_blueprint_get_compile_log", "responsibility": "typed_observation", "owner": "C7_snapshot_and_artifact_ref" },
-    { "legacy_id": "blueprint_get_compile_log", "responsibility": "typed_observation", "owner": "C7_snapshot_and_artifact_ref" },
-    { "legacy_id": "control_rig_get_compile_log", "responsibility": "typed_observation", "owner": "C7_snapshot_and_artifact_ref" },
-    { "legacy_id": "deformer_graph_get_compile_log", "responsibility": "typed_observation", "owner": "C7_snapshot_and_artifact_ref" },
-    { "legacy_id": "material_get_compile_log", "responsibility": "typed_observation", "owner": "C7_snapshot_and_artifact_ref" },
-    { "legacy_id": "niagara_get_compile_log", "responsibility": "typed_observation", "owner": "C7_snapshot_and_artifact_ref" },
-    { "legacy_id": "umg_get_compile_log", "responsibility": "typed_observation", "owner": "C7_snapshot_and_artifact_ref" },
-    { "legacy_id": "packaging_task_status", "responsibility": "lifecycle_observation", "owner": "C7_snapshot" },
-    { "legacy_id": "packaging_cancel_task", "responsibility": "cancellation", "owner": "C7_cancellation" },
-    { "legacy_id": "packaging_plan_build", "responsibility": "preflight", "owner": "C6_planning" },
-    { "legacy_id": "packaging_clean_artifacts", "responsibility": "artifact_cleanup", "owner": "scoped_artifact_cleanup" },
-    { "legacy_id": "hlod_validate_build", "responsibility": "verification", "owner": "C9_independent_readback" }
+  "responsibility_routes": [
+    {"case_id":"asset_compile_start","responsibility":"start","family_id":"asset_compile"},
+    {"case_id":"world_build_start","responsibility":"start","family_id":"world_build"},
+    {"case_id":"external_process_start","responsibility":"start","family_id":"external_process"},
+    {"case_id":"world_partition_resave_start","responsibility":"start","family_id":"world_partition_resave"},
+    {"case_id":"packaging_start","responsibility":"start","family_id":"packaging"},
+    {"case_id":"typed_observation","responsibility":"typed_observation","owner":"C7_snapshot_and_artifact_ref"},
+    {"case_id":"lifecycle_observation","responsibility":"lifecycle_observation","owner":"C7_snapshot"},
+    {"case_id":"cancellation","responsibility":"cancellation","owner":"C7_cancellation"},
+    {"case_id":"preflight","responsibility":"preflight","owner":"C6_planning"},
+    {"case_id":"artifact_cleanup","responsibility":"artifact_cleanup","owner":"scoped_artifact_cleanup"},
+    {"case_id":"verification","responsibility":"verification","owner":"C9_independent_readback"}
+  ],
+  "pcg_operation_cases": [
+    {"case_id":"pcg_graph_asset_compile","family_id":"asset_compile"},
+    {"case_id":"pcg_world_generation","family_id":"world_build"},
+    {"case_id":"pcg_world_regeneration","family_id":"world_build"}
   ]
 }

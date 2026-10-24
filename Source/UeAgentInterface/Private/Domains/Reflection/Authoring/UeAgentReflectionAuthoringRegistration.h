@@ -2,10 +2,12 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UeAgentReflectionAuthoring
 {
-	UEAGENTINTERFACE_API bool RegisterAuthoring(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterAuthoring(UE::UAI::Contract::FDiagnostic& OutError);
 }
 

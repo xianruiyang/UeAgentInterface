@@ -2,10 +2,14 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class FJsonValue;
 class UObject;
+class UPackage;
+namespace UE::UAI::Authoring::Timeline { struct FMovieSceneCreationState; }
 
 namespace UeAgentReflectionAuthoring
 {
@@ -17,20 +21,26 @@ namespace UeAgentReflectionAuthoring
 		UEAGENTINTERFACE_API bool Validate(
 			const FProfile& Profile,
 			const TSharedPtr<FJsonValue>& Value,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		UEAGENTINTERFACE_API bool Read(
 			const FProfile& Profile,
 			UObject& Asset,
+			const FString& SemanticAssetPath,
 			TSharedPtr<FJsonValue>& OutValue,
-			FString& OutError);
+			bool& bOutAuthoringVisible,
+			UE::UAI::Contract::FDiagnostic& OutError);
 		UEAGENTINTERFACE_API bool Apply(
 			const FProfile& Profile,
 			UObject& Asset,
 			const TSharedPtr<FJsonValue>& Value,
-			FString& OutError);
+			const FString& SemanticAssetPath,
+			UE::UAI::Contract::FDiagnostic& OutError,
+			bool bPreserveExistingStructure = false,
+			UPackage* TextIdentityPackage = nullptr,
+			UE::UAI::Authoring::Timeline::FMovieSceneCreationState* MovieSceneCreation = nullptr);
 		UEAGENTINTERFACE_API bool CompileIfNeeded(
 			const FProfile& Profile,
 			UObject& Asset,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 	}
 }

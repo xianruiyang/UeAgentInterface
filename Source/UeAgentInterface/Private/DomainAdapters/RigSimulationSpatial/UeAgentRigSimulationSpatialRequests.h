@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialExecutionChains.h"
 #include "Misc/TVariant.h"
 
@@ -165,9 +166,11 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FString OwnerRef;
 		FString Generation;
 
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 		bool IsValid() const
 		{
-			return !SessionId.IsEmpty() && !OwnerRef.IsEmpty() && !Generation.IsEmpty();
+			Contract::FDiagnostic Error;
+			return TryValidate(Error);
 		}
 	};
 
@@ -193,13 +196,6 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FRigSimulationSpatialFrame3d SourceFrame;
 		FRigSimulationSpatialFrame3d TargetFrame;
 		TArray<FString> ConversionEvidenceIds;
-	};
-
-	struct FRigSimulationSpatialGenerationIdentity
-	{
-		FString SourceRef;
-		FString Generation;
-		FRigSimulationSpatialRevision Revision;
 	};
 
 	struct FRigSkeletonPreviewMeshBindInput
@@ -327,19 +323,6 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FRigSimulationSpatialFrame3d OutputFrame;
 		TOptional<FRigSimulationSpatialSelector> VertexSelector;
 	};
-	struct FPcgGeneratedSpatialDataReadInput
-	{
-		FRigSimulationSpatialGenerationIdentity GenerationIdentity;
-		FRigSimulationSpatialSelector DataSelector;
-		FRigSimulationSpatialFrame3d OutputFrame;
-	};
-	struct FPcgPartitionSpatialStateReadInput
-	{
-		FRigSimulationSpatialGenerationIdentity GenerationIdentity;
-		FRigSimulationSpatialSelector PartitionSelector;
-		FRigSimulationSpatialFrame3d OutputFrame;
-	};
-
 	using FUeAgentRigSimulationSpatialRequestPayload = TVariant<
 		FRigSkeletonPreviewMeshBindInput,
 		FRigSkeletonSocketUpdateInput,
@@ -356,20 +339,20 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FPhysicsSimulationProbeInput,
 		FDeformerGeometrySampleInput,
 		FDeformerTrainingInputsValidateInput,
-		FDeformerEvaluationSampleInput,
-		FPcgGeneratedSpatialDataReadInput,
-		FPcgPartitionSpatialStateReadInput>;
+		FDeformerEvaluationSampleInput>;
 
 	class UEAGENTINTERFACE_API IUeAgentRigSimulationSpatialRequestEnvironment
 	{
 	public:
 		virtual ~IUeAgentRigSimulationSpatialRequestEnvironment() = default;
+		virtual const FString& GetInputRootPointer() const = 0;
 		virtual bool HasExplicitObject(const FString& Identity) const = 0;
 		virtual bool HasTemporalPath(const FString& ClockId) const = 0;
 		virtual bool HasSpatialPath(const FString& FrameId) const = 0;
 		virtual bool TryResolveFrame(
 			const FRigSimulationSpatialFrame3d& WireFrame,
-			UE::UAI::StateSemantic::FUeAgentSpatialFrame& OutFrame) const = 0;
+			UE::UAI::StateSemantic::FUeAgentSpatialFrame& OutFrame,
+			FUeAgentRigSimulationSpatialExecutionError& OutError) const = 0;
 		virtual bool TryReadRevision(
 			const FString& ExplicitRef,
 			FRigSimulationSpatialRevision& OutRevision,

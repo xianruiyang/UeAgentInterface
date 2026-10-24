@@ -42,9 +42,8 @@ bool FUeAgentReadExportCommandContractTest::RunTest(
 	}
 
 	const TArray<FString> RequiredReadExportCommandIds{
-		TEXT("query.calibration.read"),
 		TEXT("query.command.search"),
-		TEXT("query.command.detail"),
+		TEXT("query.command.usage"),
 		TEXT("content_graph.compound"),
 		TEXT("content_graph.diagnostics"),
 		TEXT("content_graph.export_workspace"),
@@ -54,8 +53,6 @@ bool FUeAgentReadExportCommandContractTest::RunTest(
 		TEXT("content_graph.relations"),
 		TEXT("content_graph.structure"),
 		TEXT("content_graph.summary"),
-		TEXT("reference.asset_apply"),
-		TEXT("reference.asset_read"),
 		TEXT("reference.origin.resolve"),
 	};
 	for (const FString& CommandId : RequiredReadExportCommandIds)
@@ -75,9 +72,7 @@ bool FUeAgentReadExportCommandContractTest::RunTest(
 		CommandRegistry->FindExact(TEXT("content_graph.export_workspace"));
 	const FUeAgentFrozenCommandContract* Import =
 		CommandRegistry->FindExact(TEXT("content_graph.import_workspace"));
-	const FUeAgentFrozenCommandContract* Read =
-		CommandRegistry->FindExact(TEXT("reference.asset_read"));
-	if (!Export || !Import || !Read)
+	if (!Export || !Import)
 	{
 		return false;
 	}
@@ -86,9 +81,39 @@ bool FUeAgentReadExportCommandContractTest::RunTest(
 		Export->GetInputFields().Num(),
 		3);
 	TestEqual(
-		TEXT("asset read has object, context, and projection inputs"),
-		Read->GetInputFields().Num(),
+		TEXT("workspace import exposes only target, source, and optional limits"),
+		Import->GetInputFields().Num(),
 		3);
+	TestEqual(
+		TEXT("workspace export exposes one compact result field"),
+		Export->GetResultFields().Num(),
+		1);
+	TestTrue(
+		TEXT("workspace export result is the compact status"),
+		Export->GetResultFields().Num() == 1
+			&& Export->GetResultFields()[0].Name == TEXT("status"));
+	TestNull(
+		TEXT("workspace revision is not a public import parameter"),
+		Import->GetInputFields().FindByPredicate(
+			[](const FUeAgentCommandFieldDeclaration& Field)
+			{
+				return Field.Name == TEXT("expected_revision");
+			}));
+	TestNull(
+		TEXT("workspace authorization is not a public import parameter"),
+		Import->GetInputFields().FindByPredicate(
+			[](const FUeAgentCommandFieldDeclaration& Field)
+			{
+				return Field.Name == TEXT("authorization_id");
+			}));
+	TestEqual(
+		TEXT("workspace import exposes one compact result field"),
+		Import->GetResultFields().Num(),
+		1);
+	TestTrue(
+		TEXT("workspace import result is the compact status"),
+		Import->GetResultFields().Num() == 1
+			&& Import->GetResultFields()[0].Name == TEXT("status"));
 	const FUeAgentCommandFieldDeclaration* ImportSource =
 		Import->GetInputFields().FindByPredicate(
 			[](const FUeAgentCommandFieldDeclaration& Field)
@@ -131,14 +156,13 @@ bool FUeAgentReadExportCommandContractTest::RunTest(
 		return false;
 	}
 	FCommandSearchRequest Search;
-	Search.Intent = TEXT("initialize nested UObject graph with hjson");
-	Search.Limit = 3;
+	Search.Intent = TEXT("import initialize hjson");
 	FCommandSearchPage Page;
 	TestTrue(
-		TEXT("natural recursive initialization intent searches"),
+		TEXT("recursive initialization keywords search"),
 		Discovery->Search(Search, Page, DiscoveryError));
 	TestTrue(
-		TEXT("natural recursive initialization ranks exact import in top three"),
+		TEXT("recursive initialization keywords rank exact import in top three"),
 		Page.Candidates.ContainsByPredicate(
 			[](const FCommandCandidate& Candidate)
 			{

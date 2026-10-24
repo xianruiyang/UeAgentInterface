@@ -33,12 +33,15 @@ namespace UE::UAI::Module::CommandRegistration::AiCommands
 			const FString& Id,
 			const FUeAgentCommandContractRegistry& Legacy,
 			FUeAgentCommandDeclaration& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(Id);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("ai_command_contract_missing:") + Id;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("ai_command_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("ai_command_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			FUeAgentCommandDeclaration Result;
@@ -56,12 +59,17 @@ namespace UE::UAI::Module::CommandRegistration::AiCommands
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
 					TEXT("Exact AI mechanics parameter."),
+					Parameter.GetSchemaJson(),
 				});
 			}
 			Result.ResultFields = {{
 				TEXT("result"), TEXT("object"), true, false,
 				TEXT("Native AI result with revision and independent readback evidence."),
 			}};
+			if (Id.EndsWith(TEXT(".asset.create")))
+			{
+				Result.ModelResultFields = {{TEXT("target_ref"), {TEXT("target_ref")}}};
+			}
 			Result.Errors = {
 				{TEXT("ai_command_authority_required"),
 					TEXT("The caller lacks public operation authority.")},
@@ -77,7 +85,7 @@ namespace UE::UAI::Module::CommandRegistration::AiCommands
 			Result.Purpose.Preconditions = {
 				TEXT("Resolve the exact target and required revision before execution."),
 			};
-			Result.Purpose.ParameterGuidance = TEXT("Use only query.command.detail fields.");
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters.");
 			Result.Purpose.ResultGuidance =
 				TEXT("Use native revision and independent persisted asset readback.");
 			Result.Purpose.FailureGuidance =
@@ -85,7 +93,7 @@ namespace UE::UAI::Module::CommandRegistration::AiCommands
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Mutates only the exact AI target through native UE mechanics.");
 			Result.Purpose.MinimumExample = Result.PythonFunction + TEXT("(client, params)");
-			Result.Purpose.RelatedFlows = {TEXT("query.command.detail"), TEXT("asset readback")};
+			Result.Purpose.RelatedFlows = {TEXT("query.command.usage"), TEXT("asset readback")};
 			Result.Purpose.Keywords = {TEXT("ai"), TEXT("behavior"), TEXT("operation")};
 			Result.Purpose.Synonyms = {TEXT("AI authoring")};
 			Out = MoveTemp(Result);
@@ -109,7 +117,7 @@ namespace UE::UAI::Module::CommandRegistration::AiCommands
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& Out,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::AiCommands::TryCreateHandlers(Out, OutError);
 			}
@@ -123,7 +131,7 @@ namespace UE::UAI::Module::CommandRegistration::AiCommands
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
@@ -132,6 +140,13 @@ namespace UE::UAI::Module::CommandRegistration::AiCommands
 		{
 			return false;
 		}
+		const TArray<FString>& PublicCommandIds =
+			DomainAdapters::AiCommands::GetPublicCommandIds();
+		Profiles.RemoveAll(
+			[&PublicCommandIds](const auto& Profile)
+			{
+				return !PublicCommandIds.Contains(Profile.GetCommandId());
+			});
 		TSharedPtr<const FUeAgentCommandContractRegistry> Legacy;
 		if (!Composition::GraphCompound::
 				TryCreateGraphCompoundProductionCommandContractRegistry(
@@ -141,7 +156,7 @@ namespace UE::UAI::Module::CommandRegistration::AiCommands
 			return false;
 		}
 		TArray<FUeAgentCommandDeclaration> Declarations;
-		for (const FString& Id : DomainAdapters::AiCommands::GetCommandIds())
+		for (const FString& Id : PublicCommandIds)
 		{
 			FUeAgentCommandDeclaration Declaration;
 			if (!TryDeclaration(Id, *Legacy, Declaration, OutError))

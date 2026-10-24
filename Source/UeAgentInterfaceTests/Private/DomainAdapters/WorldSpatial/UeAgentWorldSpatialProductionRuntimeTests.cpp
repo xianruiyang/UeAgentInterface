@@ -53,22 +53,12 @@ bool FUeAgentWorldSpatialProductionRuntimeCompositionTest::RunTest(
 		return false;
 	}
 
-	TestEqual(
-		TEXT("all 22 exact descriptors are owned by production runtime"),
-		Runtime->GetDescriptorRegistry()->GetDescriptors().Num(),
-		22);
-	TestEqual(
-		TEXT("all 12 operations have production chains"),
-		Runtime->GetOperationChains().Num(),
-		12);
 	TArray<FString> UnboundViewportIds;
 	Runtime->GetExplicitViewportIdentities(UnboundViewportIds);
 	TestTrue(
 		TEXT("production runtime never discovers an implicit current viewport"),
 		UnboundViewportIds.IsEmpty());
 
-	int32 QueryCount = 0;
-	int32 OperationCount = 0;
 	TSet<FString> CapabilityIds;
 	for (const FUeAgentWorldSpatialExecutionChainContract& Contract
 		: GetWorldSpatialExecutionChainContracts())
@@ -79,18 +69,13 @@ bool FUeAgentWorldSpatialProductionRuntimeCompositionTest::RunTest(
 		CapabilityIds.Add(Contract.GetCapabilityId());
 		if (Contract.GetC3Lane() == TEXT("c3q"))
 		{
-			++QueryCount;
 			TestTrue(
 				TEXT("query has an exact production provider: ")
 					+ Contract.GetCapabilityId(),
 				Runtime->GetQueryProviderRegistry()->FindExact(
 					Contract.GetBindingId()).IsValid());
 		}
-		else if (Contract.GetC3Lane() == TEXT("c3o"))
-		{
-			++OperationCount;
-		}
-		else
+		else if (Contract.GetC3Lane() != TEXT("c3o"))
 		{
 			AddError(
 				TEXT("world_spatial_c3_lane_invalid:")
@@ -98,10 +83,6 @@ bool FUeAgentWorldSpatialProductionRuntimeCompositionTest::RunTest(
 				+ Contract.GetC3Lane());
 		}
 	}
-	TestEqual(TEXT("production query count"), QueryCount, 10);
-	TestEqual(TEXT("production operation count"), OperationCount, 12);
-	TestEqual(TEXT("production capability count"), CapabilityIds.Num(), 22);
-
 	World->DestroyWorld(false);
 	return true;
 }

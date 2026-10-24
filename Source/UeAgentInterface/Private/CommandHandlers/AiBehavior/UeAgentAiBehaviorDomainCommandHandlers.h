@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "OperationOwners/AiBehavior/UeAgentAiBehaviorDomainService.h"
@@ -14,5 +16,5 @@ namespace UE::UAI::CommandHandlers::AiBehavior
 	UEAGENTINTERFACE_API bool TryCreateAiBehaviorCandidateCommandHandlers(
 		TSharedRef<OperationOwners::AiBehavior::IUeAgentAiBehaviorCandidateCommandService> Service,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

@@ -144,28 +144,63 @@ namespace UE::UAI::Contract
 
 		bool TrySchemaObject(
 			const FUeAgentContractValue& Schema,
+			const FString& DescriptorId,
+			const TCHAR* Stage,
 			const TCHAR* ErrorCode,
 			TSharedPtr<FJsonObject>& OutObject,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			FString JsonError;
-			if (!Schema.IsValid()
-				|| !Json::TryParseObject(
+			UE::UAI::Contract::FDiagnostic JsonError;
+			if (!Schema.IsValid())
+			{
+				OutError = FDiagnostic::Failure(ErrorCode,
+					TEXT("The descriptor schema is empty; a canonical JSON object is required."), Stage);
+				OutError.CandidateName = DescriptorId;
+				OutError.PropertyPath = FString(Stage) + TEXT("_schema");
+				OutError.ActualValuePresent = false;
+				OutError.SourceKind = TEXT("native_result");
+				return false;
+			}
+			if (!Json::TryParseObject(
 					Schema.GetJsonValue(),
 					OutObject,
 					JsonError))
 			{
-				OutError = ErrorCode;
+				UE_LOG(LogTemp, Error,
+					TEXT("UAI descriptor schema rejected: descriptor=%s stage=%s reason=json_object_invalid detail=%s"),
+					*DescriptorId, Stage, *JsonError.Code);
+				OutError = FDiagnostic::WrapFailure(ErrorCode, JsonError, Stage);
+				OutError.CandidateName = DescriptorId;
+				OutError.PropertyPath = FString(Stage) + TEXT("_schema");
+				OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			FString Canonical;
 			if (!Json::TryCanonicalize(
 				OutObject,
 				Canonical,
-				JsonError)
-				|| Canonical != Schema.GetJsonValue())
+				JsonError))
 			{
-				OutError = ErrorCode;
+				UE_LOG(LogTemp, Error,
+					TEXT("UAI descriptor schema rejected: descriptor=%s stage=%s reason=canonicalization_failed detail=%s"),
+					*DescriptorId, Stage, *JsonError.Code);
+				OutError = FDiagnostic::WrapFailure(ErrorCode, JsonError, Stage);
+				OutError.CandidateName = DescriptorId;
+				if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = FString(Stage) + TEXT("_schema");
+				OutError.SourceKind = TEXT("native_result");
+				return false;
+			}
+			if (Canonical != Schema.GetJsonValue())
+			{
+				UE_LOG(LogTemp, Error,
+					TEXT("UAI descriptor schema rejected: descriptor=%s stage=%s reason=schema_not_canonical"),
+					*DescriptorId, Stage);
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(ErrorCode,
+					TEXT("The descriptor schema JSON is valid but is not in canonical form."), Stage);
+				OutError.CandidateName = DescriptorId;
+				OutError.PropertyPath = FString(Stage) + TEXT("_schema");
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("canonical JSON with sorted keys and normalized values"));
+				OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			return true;
@@ -173,27 +208,57 @@ namespace UE::UAI::Contract
 
 		bool TryDescriptorObject(
 			const FUeAgentOperationDescriptor& Descriptor,
+			const bool bRequireDescriptorHash,
 			TSharedPtr<FJsonObject>& OutObject,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutObject.Reset();
 			const FUeAgentDescriptorIdentity& Identity =
 				Descriptor.GetIdentity();
-			if (!Identity.IsValid()
-				|| !IsCanonicalSha256(
-					Identity.GetDescriptorHash())
-				|| Descriptor.GetCapabilityId().IsEmpty()
-				|| Descriptor.GetDomainId().IsEmpty()
-				|| FString(OperationKindText(
-					Descriptor.GetOperationKind())).IsEmpty())
+			if (Identity.GetDescriptorId().IsEmpty()
+				|| Identity.GetVersion() <= 0
+				|| (bRequireDescriptorHash && !Identity.IsValid()))
 			{
-				OutError = TEXT("descriptor_invalid");
+				OutError = FDiagnostic::WrapFailure(TEXT("descriptor_invalid"), Identity.GetValidationDiagnostic(), TEXT("registry"));
+				OutError.CandidateName = Identity.GetDescriptorId();
+				return false;
+			}
+			if (bRequireDescriptorHash && !IsCanonicalSha256(Identity.GetDescriptorHash()))
+			{
+				OutError = FDiagnostic::Failure(TEXT("descriptor_invalid"),
+					TEXT("The descriptor hash payload must contain exactly 64 lowercase hexadecimal characters."), TEXT("registry"));
+				OutError.CandidateName = Identity.GetDescriptorId();
+				OutError.PropertyPath = TEXT("descriptor_hash");
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Identity.GetDescriptorHash());
+				OutError.SourceKind = TEXT("native_result");
+				return false;
+			}
+			if (Descriptor.GetCapabilityId().IsEmpty() || Descriptor.GetDomainId().IsEmpty())
+			{
+				const bool bMissingCapability = Descriptor.GetCapabilityId().IsEmpty();
+				OutError = FDiagnostic::Failure(TEXT("descriptor_invalid"),
+					bMissingCapability ? TEXT("The descriptor capability identifier is empty.") : TEXT("The descriptor domain identifier is empty."), TEXT("registry"));
+				OutError.CandidateName = Identity.GetDescriptorId();
+				OutError.PropertyPath = bMissingCapability ? TEXT("capability_id") : TEXT("domain_id");
+				OutError.ActualValue = MakeShared<FJsonValueString>(FString());
+				OutError.SourceKind = TEXT("native_result");
+				return false;
+			}
+			if (FString(OperationKindText(Descriptor.GetOperationKind())).IsEmpty())
+			{
+				OutError = FDiagnostic::Failure(TEXT("descriptor_invalid"),
+					TEXT("The descriptor operation kind must be query or operation."), TEXT("registry"));
+				OutError.CandidateName = Identity.GetDescriptorId();
+				OutError.PropertyPath = TEXT("operation_kind");
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Descriptor.GetOperationKind()));
+				OutError.SourceKind = TEXT("native_result");
 				return false;
 			}
 			if (!Descriptor.GetExecutionContextPolicy().IsValid())
 			{
-				OutError = TEXT(
-					"descriptor_execution_context_policy_invalid");
+				OutError = FDiagnostic::WrapFailure(TEXT("descriptor_execution_context_policy_invalid"),
+					Descriptor.GetExecutionContextPolicy().GetValidationDiagnostic(), TEXT("registry"));
+				OutError.CandidateName = Identity.GetDescriptorId();
 				return false;
 			}
 
@@ -203,28 +268,35 @@ namespace UE::UAI::Contract
 			if (bIsQuery
 				&& !Descriptor.GetQueryBinding().IsSet())
 			{
-				OutError =
-					TEXT("descriptor_query_binding_required");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("descriptor_query_binding_required"), TEXT("A query descriptor requires a query binding."), TEXT("registry"));
+				OutError.CandidateName = Identity.GetDescriptorId();
+				OutError.PropertyPath = TEXT("query_binding");
+				OutError.ActualValuePresent = false;
 				return false;
 			}
 			if (!bIsQuery
 				&& Descriptor.GetQueryBinding().IsSet())
 			{
-				OutError =
-					TEXT("descriptor_query_binding_forbidden");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("descriptor_query_binding_forbidden"), TEXT("An operation descriptor cannot declare a query binding."), TEXT("registry"));
+				OutError.CandidateName = Identity.GetDescriptorId();
+				OutError.PropertyPath = TEXT("query_binding");
+				OutError.ActualValuePresent = true;
+				OutError.ExpectedValuePresent = false;
 				return false;
 			}
 			if (Descriptor.GetQueryBinding().IsSet()
 				&& !Descriptor.GetQueryBinding()->IsValid())
 			{
-				OutError =
-					TEXT("descriptor_query_binding_invalid");
+				OutError = FDiagnostic::WrapFailure(TEXT("descriptor_query_binding_invalid"),
+					Descriptor.GetQueryBinding()->GetValidationDiagnostic(), TEXT("registry"));
+				OutError.CandidateName = Identity.GetDescriptorId();
 				return false;
 			}
 
 			TSharedPtr<FJsonObject> InputSchema;
 			if (!TrySchemaObject(
 				Descriptor.GetInputSchema(),
+				Descriptor.GetIdentity().GetDescriptorId(), TEXT("input"),
 				TEXT("descriptor_input_schema_invalid"),
 				InputSchema,
 				OutError))
@@ -234,6 +306,7 @@ namespace UE::UAI::Contract
 			TSharedPtr<FJsonObject> ResultSchema;
 			if (!TrySchemaObject(
 				Descriptor.GetResultSchema(),
+				Descriptor.GetIdentity().GetDescriptorId(), TEXT("result"),
 				TEXT("descriptor_result_schema_invalid"),
 				ResultSchema,
 				OutError))
@@ -298,34 +371,63 @@ namespace UE::UAI::Contract
 		bool TryValidateDescriptorHash(
 			const FUeAgentOperationDescriptor& Descriptor,
 			TSharedPtr<FJsonObject>& OutDescriptorObject,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!TryDescriptorObject(
 				Descriptor,
+				true,
 				OutDescriptorObject,
 				OutError))
 			{
 				return false;
 			}
 			FString Canonical;
-			FString JsonError;
+			UE::UAI::Contract::FDiagnostic JsonError;
 			if (!Json::TryCanonicalize(
 				OutDescriptorObject,
 				Canonical,
 				JsonError))
 			{
-				OutError =
-					TEXT("descriptor_canonicalization_failed");
+				OutError = JsonError;
 				return false;
 			}
 			if (Json::Sha256Utf8(Canonical)
 				!= Descriptor.GetIdentity().GetDescriptorHash())
 			{
-				OutError = TEXT("descriptor_hash_mismatch");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("descriptor_hash_mismatch"), TEXT("The canonical descriptor content does not match its declared identity."), TEXT("registry"));
+				OutError.CandidateName = Descriptor.GetIdentity().GetDescriptorId();
+				OutError.PropertyPath = TEXT("descriptor_hash");
 				return false;
 			}
 			return true;
 		}
+	}
+
+	bool TryComputeOperationDescriptorHash(
+		const FUeAgentOperationDescriptor& DescriptorDraft,
+		FString& OutDescriptorHash,
+		UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		OutDescriptorHash.Reset();
+		TSharedPtr<FJsonObject> DescriptorObject;
+		if (!TryDescriptorObject(
+				DescriptorDraft,
+				false,
+				DescriptorObject,
+				OutError))
+		{
+			return false;
+		}
+		FString Canonical;
+		if (!Json::TryCanonicalize(
+				DescriptorObject,
+				Canonical,
+				OutError))
+		{
+			return false;
+		}
+		OutDescriptorHash = Json::Sha256Utf8(Canonical);
+		return true;
 	}
 
 	FUeAgentQueryBinding::FUeAgentQueryBinding(
@@ -341,6 +443,35 @@ namespace UE::UAI::Contract
 		, MaterializationPolicy(InMaterializationPolicy)
 		, SideEffectPolicy(InSideEffectPolicy)
 	{
+		if (ProviderBinding.IsEmpty())
+		{
+			ValidationDiagnostic = FDiagnostic::Failure(TEXT("query_binding_provider_missing"),
+				TEXT("The query binding requires a non-empty provider binding."), TEXT("contract_validation"));
+			ValidationDiagnostic.PropertyPath = TEXT("/query_binding/provider_binding");
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(ProviderBinding);
+		}
+		else if (FString(QueryKindText(QueryKind)).IsEmpty())
+		{
+			ValidationDiagnostic = FDiagnostic::Failure(TEXT("query_binding_kind_invalid"),
+				TEXT("The query kind must be capability, catalog, state, reference or runtime_probe."), TEXT("contract_validation"));
+			ValidationDiagnostic.PropertyPath = TEXT("/query_binding/query_kind");
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(QueryKind));
+		}
+		else if (FString(MaterializationPolicyText(MaterializationPolicy)).IsEmpty())
+		{
+			ValidationDiagnostic = FDiagnostic::Failure(TEXT("query_binding_materialization_invalid"),
+				TEXT("The query materialization policy must be index_only, load_readonly or runtime_observe."), TEXT("contract_validation"));
+			ValidationDiagnostic.PropertyPath = TEXT("/query_binding/materialization_policy");
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(MaterializationPolicy));
+		}
+		else if (FString(SideEffectPolicyText(SideEffectPolicy)).IsEmpty())
+		{
+			ValidationDiagnostic = FDiagnostic::Failure(TEXT("query_binding_side_effect_invalid"),
+				TEXT("The query side effect policy must be no_persistent_mutation."), TEXT("contract_validation"));
+			ValidationDiagnostic.PropertyPath = TEXT("/query_binding/side_effect_policy");
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(SideEffectPolicy));
+		}
+		if (!ValidationDiagnostic.IsEmpty()) ValidationDiagnostic.SourceKind = TEXT("native_result");
 	}
 
 	const FString&
@@ -368,12 +499,12 @@ namespace UE::UAI::Contract
 
 	bool FUeAgentQueryBinding::IsValid() const
 	{
-		return !ProviderBinding.IsEmpty()
-			&& FString(QueryKindText(QueryKind)).Len() > 0
-			&& FString(MaterializationPolicyText(
-				MaterializationPolicy)).Len() > 0
-			&& FString(SideEffectPolicyText(
-				SideEffectPolicy)).Len() > 0;
+		return ValidationDiagnostic.IsEmpty();
+	}
+
+	const FDiagnostic& FUeAgentQueryBinding::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic;
 	}
 
 	FUeAgentOperationDescriptor::FUeAgentOperationDescriptor(
@@ -576,13 +707,15 @@ namespace UE::UAI::Contract
 	bool FUeAgentDescriptorRegistry::TryCreate(
 		TArray<FUeAgentOperationDescriptor> Descriptors,
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
 		if (Descriptors.IsEmpty())
 		{
-			OutError = TEXT("descriptor_registry_empty");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("descriptor_registry_empty"), TEXT("The descriptor registry contains no descriptors."), TEXT("registry"));
+			OutError.PropertyPath = TEXT("descriptors");
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
 			return false;
 		}
 		Descriptors.Sort(
@@ -604,20 +737,19 @@ namespace UE::UAI::Contract
 						.GetIdentity()
 						.GetDescriptorId())
 			{
-				OutError =
-					TEXT(
-						"descriptor_registry_"
-						"descriptor_id_duplicate");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("descriptor_registry_descriptor_id_duplicate"), TEXT("The descriptor ID is registered more than once."), TEXT("registry"));
+				OutError.CandidateName = Descriptors[Index].GetIdentity().GetDescriptorId();
+				OutError.PropertyPath = TEXT("descriptor_id");
 				return false;
 			}
 			const FString& CapabilityId =
 				Descriptors[Index].GetCapabilityId();
 			if (CapabilityIds.Contains(CapabilityId))
 			{
-				OutError =
-					TEXT(
-						"descriptor_registry_"
-						"capability_id_duplicate");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("descriptor_registry_capability_id_duplicate"), TEXT("The capability ID is registered by more than one descriptor."), TEXT("registry"));
+				OutError.CandidateName = Descriptors[Index].GetIdentity().GetDescriptorId();
+				OutError.PropertyPath = TEXT("capability_id");
+				OutError.ActualValue = MakeShared<FJsonValueString>(CapabilityId);
 				return false;
 			}
 			CapabilityIds.Add(CapabilityId);
@@ -642,12 +774,17 @@ namespace UE::UAI::Contract
 					CompiledInput,
 					SchemaError))
 			{
-				OutError = SchemaError.Code
-						== TEXT(
-							"contract_schema_keyword_unsupported")
-					? TEXT(
-						"descriptor_input_schema_keyword_unsupported")
-					: TEXT("descriptor_input_schema_invalid");
+				UE_LOG(LogTemp, Error,
+					TEXT("UAI descriptor schema rejected: descriptor=%s stage=input code=%s schema_path=%s keyword=%s detail=%s"),
+					*Descriptor.GetIdentity().GetDescriptorId(), *SchemaError.Code,
+					*SchemaError.SchemaPath, *SchemaError.Keyword, *SchemaError.InternalContext);
+				OutError = FDiagnostic::WrapFailure(SchemaError.Code
+						== TEXT("contract_schema_keyword_unsupported")
+					? TEXT("descriptor_input_schema_keyword_unsupported")
+					: TEXT("descriptor_input_schema_invalid"), SchemaError, TEXT("registry"));
+				OutError.CandidateName = Descriptor.GetIdentity().GetDescriptorId();
+				if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = TEXT("input_schema");
+				OutError.SubjectId = Descriptor.GetIdentity().GetDescriptorId();
 				return false;
 			}
 			if (!FUeAgentContractSchema::TryCompile(
@@ -655,12 +792,17 @@ namespace UE::UAI::Contract
 					CompiledResult,
 					SchemaError))
 			{
-				OutError = SchemaError.Code
-						== TEXT(
-							"contract_schema_keyword_unsupported")
-					? TEXT(
-						"descriptor_result_schema_keyword_unsupported")
-					: TEXT("descriptor_result_schema_invalid");
+				UE_LOG(LogTemp, Error,
+					TEXT("UAI descriptor schema rejected: descriptor=%s stage=result code=%s schema_path=%s keyword=%s detail=%s"),
+					*Descriptor.GetIdentity().GetDescriptorId(), *SchemaError.Code,
+					*SchemaError.SchemaPath, *SchemaError.Keyword, *SchemaError.InternalContext);
+				OutError = FDiagnostic::WrapFailure(SchemaError.Code
+						== TEXT("contract_schema_keyword_unsupported")
+					? TEXT("descriptor_result_schema_keyword_unsupported")
+					: TEXT("descriptor_result_schema_invalid"), SchemaError, TEXT("registry"));
+				OutError.CandidateName = Descriptor.GetIdentity().GetDescriptorId();
+				if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = TEXT("result_schema");
+				OutError.SubjectId = Descriptor.GetIdentity().GetDescriptorId();
 				return false;
 			}
 			TSharedPtr<FJsonObject> DescriptorObject;
@@ -684,22 +826,20 @@ namespace UE::UAI::Contract
 			TEXT("descriptors"),
 			DescriptorValues);
 		FString CanonicalRegistry;
-		FString JsonError;
+		UE::UAI::Contract::FDiagnostic JsonError;
 		if (!Json::TryCanonicalize(
 			RegistryObject,
 			CanonicalRegistry,
 			JsonError))
 		{
-			OutError =
-				TEXT("descriptor_registry_hash_failed");
+			OutError = JsonError.IsValid() ? JsonError : UE::UAI::Contract::FDiagnostic::Failure(TEXT("descriptor_registry_hash_failed"), TEXT("The descriptor registry hash could not be computed."), TEXT("registry"));
 			return false;
 		}
 		const FString RegistryHash =
 			Json::Sha256Utf8(CanonicalRegistry);
 		if (!IsCanonicalSha256(RegistryHash))
 		{
-			OutError =
-				TEXT("descriptor_registry_hash_failed");
+			OutError = JsonError.IsValid() ? JsonError : UE::UAI::Contract::FDiagnostic::Failure(TEXT("descriptor_registry_hash_failed"), TEXT("The descriptor registry hash could not be computed."), TEXT("registry"));
 			return false;
 		}
 		OutRegistry =

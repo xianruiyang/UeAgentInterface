@@ -1,7 +1,11 @@
 #include "Composition/DestructiveImport/UeAgentDestructiveImportExternalCommandHandlers.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Utilities/UeAgentJsonDiagnostics.h"
 
 namespace UE::UAI::Composition::DestructiveImport
 {
@@ -11,14 +15,9 @@ namespace UE::UAI::Composition::DestructiveImport
 
 	namespace
 	{
-		FString JsonText(const TSharedRef<FJsonObject>& Object)
-		{
-			FString Text;
-			FString Error;
-			return Json::TryCanonicalize(Object, Text, Error) ? Text : TEXT("{}");
-		}
 
-		FString PayloadJson(const FUeAgentExternalDataImportResult& Result)
+
+		bool PayloadJson(const FUeAgentExternalDataImportResult& Result, FString& OutText, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 			Root->SetStringField(TEXT("command_id"), Result.CommandId);
@@ -36,64 +35,73 @@ namespace UE::UAI::Composition::DestructiveImport
 			Root->SetBoolField(TEXT("persisted"), Result.bPersisted);
 			Root->SetBoolField(
 				TEXT("readback_verified"), Result.bReadbackVerified);
-			return JsonText(Root);
+			return Json::TryCanonicalize(Root, OutText, OutError);
 		}
 
-		FString ErrorJson(const FUeAgentExternalDataImportResult& Result)
+
+
+		bool ParameterFailure(const TSharedPtr<FJsonObject>& Params, const TCHAR* Field,
+			const TCHAR* Constraint, FDiagnostic& OutError)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Result.ErrorCode);
-			Error->SetStringField(TEXT("detail"), Result.ErrorDetail);
-			Error->SetStringField(TEXT("source_ref"), Result.SourceRef);
-			Error->SetStringField(TEXT("result_ref"), Result.ResultRef);
-			return JsonText(Error);
+			const auto* Found = UeAgentJsonDiagnostics::FindFieldValue(Params, Field);
+			const TSharedPtr<FJsonValue> Actual = Found ? *Found : nullptr;
+			OutError = FDiagnostic::Failure(TEXT("external_import_params_invalid"),
+				FString::Printf(TEXT("Parameter %s must be %s; received %s."), Field, Constraint,
+					*UeAgentJsonDiagnostics::JsonValueTypeToString(Actual)), TEXT("parameters"));
+			OutError.SourceKind = TEXT("command_input");
+			OutError.PropertyPath = FString(TEXT("/")) + Field;
+			OutError.Source.JsonPath = FString(TEXT("/params/")) + Field;
+			if (Actual.IsValid() && Actual->Type != EJson::Object && Actual->Type != EJson::Array)
+				OutError.ActualValue = Actual;
+			else if (Actual.IsValid())
+				OutError.ActualValue = MakeShared<FJsonValueString>(UeAgentJsonDiagnostics::JsonValueTypeToString(Actual));
+			OutError.ActualValuePresent = Actual.IsValid();
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(Constraint);
+			OutError.ExpectedValuePresent = true;
+			return false;
 		}
 
-		bool TryString(
-			const TSharedPtr<FJsonObject>& Params,
-			const TCHAR* Field,
-			FString& Out)
+		bool TryString(const TSharedPtr<FJsonObject>& Params, const TCHAR* Field,
+			FString& Out, FDiagnostic& OutError)
 		{
-			return Params.IsValid()
-				&& Params->TryGetStringField(Field, Out)
-				&& !Out.TrimStartAndEnd().IsEmpty();
+			if (Params.IsValid() && Params->TryGetStringField(Field, Out)
+				&& !Out.TrimStartAndEnd().IsEmpty()) return true;
+			return ParameterFailure(Params, Field, TEXT("a non-empty string"), OutError);
 		}
 
-		bool TryBuildRequest(
-			const FUeAgentCommandRequest& CommandRequest,
-			const FUeAgentCallerContext& CallerContext,
-			FUeAgentExternalDataImportRequest& Out)
+		bool TryBuildRequest(const FUeAgentCommandRequest& CommandRequest,
+			const FUeAgentCallerContext& CallerContext, FUeAgentExternalDataImportRequest& Out,
+			FDiagnostic& OutError)
 		{
 			Out.RequestId = CommandRequest.GetRequestId();
 			Out.CommandId = CommandRequest.GetCommandId();
 			Out.CallerId = CallerContext.GetCallerId();
-			const TSharedPtr<FJsonObject> Params = CommandRequest.GetParams();
-			if (!TryString(Params, TEXT("source_ref"), Out.SourceRef))
-			{
-				return false;
-			}
+			const auto Params = CommandRequest.GetParams();
+			if (!TryString(Params, TEXT("source_ref"), Out.SourceRef, OutError)) return false;
 			if (Out.CommandId == TEXT("external.localization.po.import"))
-			{
-				return TryString(Params, TEXT("target_ref"), Out.TargetRef);
-			}
+				return TryString(Params, TEXT("target_ref"), Out.TargetRef, OutError);
 			if (Out.CommandId == TEXT("external.skin_weight_profile.import"))
 			{
 				double LodIndex = -1;
-				if (!TryString(Params, TEXT("target_ref"), Out.TargetRef)
-					|| !TryString(Params, TEXT("profile_name"), Out.ProfileName)
-					|| !Params->TryGetNumberField(TEXT("lod_index"), LodIndex))
+				if (!TryString(Params, TEXT("target_ref"), Out.TargetRef, OutError)
+					|| !TryString(Params, TEXT("profile_name"), Out.ProfileName, OutError)) return false;
+				if (!Params->TryGetNumberField(TEXT("lod_index"), LodIndex))
+					return ParameterFailure(Params, TEXT("lod_index"), TEXT("an integer within the int32 range"), OutError);
+				// Preserve the integer round-trip predicate without an undefined out-of-range cast.
+				if (!FMath::IsFinite(LodIndex) || LodIndex < MIN_int32 || LodIndex > MAX_int32)
 				{
+					ParameterFailure(Params, TEXT("lod_index"), TEXT("an integer within the int32 range"), OutError);
+					if (!FMath::IsFinite(LodIndex)) OutError.ActualValue = MakeShared<FJsonValueString>(FString::SanitizeFloat(LodIndex));
 					return false;
 				}
 				Out.LodIndex = static_cast<int32>(LodIndex);
-				return LodIndex == static_cast<double>(Out.LodIndex);
+				if (LodIndex != static_cast<double>(Out.LodIndex))
+					return ParameterFailure(Params, TEXT("lod_index"), TEXT("an integer within the int32 range"), OutError);
+				return true;
 			}
-			if (!TryString(Params, TEXT("destination_ref"), Out.DestinationRef))
-			{
-				return false;
-			}
+			if (!TryString(Params, TEXT("destination_ref"), Out.DestinationRef, OutError)) return false;
 			return Out.CommandId != TEXT("external.fbx.animation.import")
-				|| TryString(Params, TEXT("skeleton_ref"), Out.SkeletonRef);
+				|| TryString(Params, TEXT("skeleton_ref"), Out.SkeletonRef, OutError);
 		}
 
 		class FExternalDataImportCommandHandler final
@@ -115,21 +123,34 @@ namespace UE::UAI::Composition::DestructiveImport
 				const TSharedRef<IUeAgentCancellationSignal>& Cancellation) override
 			{
 				FUeAgentExternalDataImportRequest DomainRequest;
-				if (!TryBuildRequest(Request, CallerContext, DomainRequest))
+				FDiagnostic ParameterError;
+				if (!TryBuildRequest(Request, CallerContext, DomainRequest, ParameterError))
 				{
 					FUeAgentExternalDataImportResult Invalid;
 					Invalid.CommandId = CommandId;
-					Invalid.ErrorCode = TEXT("external_import_params_invalid");
-					return FUeAgentCommandResult::Failure(
-						Request, PayloadJson(Invalid), ErrorJson(Invalid));
+					Invalid.Diagnostic = MoveTemp(ParameterError);
+					FString Payload;
+					UE::UAI::Contract::FDiagnostic SerializationError;
+					if (!PayloadJson(Invalid, Payload, SerializationError)) Invalid.Diagnostic.Append(SerializationError);
+					return FUeAgentCommandResult::Failure(Request, Payload, Invalid.Diagnostic);
 				}
 				const FUeAgentExternalDataImportResult Result =
 					Owner->Execute(DomainRequest, Cancellation);
-				const FString Payload = PayloadJson(Result);
+				FString Payload;
+				UE::UAI::Contract::FDiagnostic SerializationError;
+				auto Diagnostic = Result.Diagnostic;
+				Diagnostic.TerminalStatus = Result.TerminalState;
+				if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = Result.ResultRef;
+				if (Result.bChanged) Diagnostic.MutationStarted = true;
+				if (!PayloadJson(Result, Payload, SerializationError))
+				{
+					Diagnostic.Append(SerializationError);
+					return FUeAgentCommandResult::Failure(Request, Payload, Diagnostic);
+				}
 				return Result.IsSuccess()
 					? FUeAgentCommandResult::Success(Request, Payload)
 					: FUeAgentCommandResult::Failure(
-						Request, Payload, ErrorJson(Result));
+						Request, Payload, Diagnostic);
 			}
 
 		private:
@@ -141,7 +162,7 @@ namespace UE::UAI::Composition::DestructiveImport
 	bool TryCreateDestructiveImportExternalCommandHandlers(
 		TSharedRef<IUeAgentExternalDataImportOwner> Owner,
 		TArray<TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();

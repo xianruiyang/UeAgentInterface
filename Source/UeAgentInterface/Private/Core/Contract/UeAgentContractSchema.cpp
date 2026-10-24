@@ -1,13 +1,31 @@
 #include "Core/Contract/UeAgentContractSchema.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 namespace UE::UAI::Contract
 {
+	FDiagnostic MakeInputDiagnostic(
+		const FString& Code, const FString& InstancePath, const FString& Keyword,
+		const FString& Message, const FString* SchemaPath, TSharedPtr<FJsonValue> Expected)
+	{
+		auto Diagnostic = FDiagnostic::Failure(Code, Message, TEXT("input_validation"));
+		Diagnostic.Schema = TEXT("uai.input.diagnostic/1");
+		Diagnostic.Source.JsonPath = InstancePath;
+		if (SchemaPath) Diagnostic.SchemaPath = *SchemaPath;
+		Diagnostic.Keyword = Keyword;
+		Diagnostic.SchemaExpected = MoveTemp(Expected);
+		return Diagnostic;
+	}
+
+
+
 	namespace
 	{
 		const TSet<FString>& SupportedKeywords()
@@ -68,19 +86,10 @@ namespace UE::UAI::Contract
 		}
 
 		bool Fail(
-			FUeAgentContractSchemaError& OutError,
-			const FString& Code,
-			const FString& InstancePath,
-			const FString& SchemaPath,
-			const FString& Keyword,
-			const FString& Detail)
+			FUeAgentContractSchemaError& OutError, const FString& Code, const FString& InstancePath,
+			const FString& SchemaPath, const FString& Keyword, const FString& Detail)
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.InstancePath = InstancePath;
-			OutError.SchemaPath = SchemaPath;
-			OutError.Keyword = Keyword;
-			OutError.Detail = Detail;
+			OutError = MakeInputDiagnostic(Code, InstancePath, Keyword, Detail, &SchemaPath);
 			return false;
 		}
 
@@ -92,13 +101,15 @@ namespace UE::UAI::Contract
 			const FString& Code =
 				TEXT("contract_schema_invalid"))
 		{
-			return Fail(
+			Fail(
 				OutError,
 				Code,
 				FString(),
 				SchemaPath,
 				Keyword,
 				Detail);
+			OutError.SourceKind = TEXT("native_result");
+			return false;
 		}
 
 		bool ValidationFail(
@@ -119,29 +130,58 @@ namespace UE::UAI::Contract
 
 		bool TryParseJsonValue(
 			const FString& Text,
-			TSharedPtr<FJsonValue>& OutValue)
+			TSharedPtr<FJsonValue>& OutValue,
+			FUeAgentContractSchemaError& OutError)
 		{
 			OutValue.Reset();
 			const TSharedRef<TJsonReader<>> Reader =
 				TJsonReaderFactory<>::Create(Text);
-			return FJsonSerializer::Deserialize(
+			if (FJsonSerializer::Deserialize(
 					Reader,
 					OutValue,
 					FJsonSerializer::EFlags::StoreNumbersAsStrings)
 				&& OutValue.IsValid()
-				&& OutValue->Type != EJson::None;
+				&& OutValue->Type != EJson::None)
+			{
+				return true;
+			}
+			OutError = MakeInputDiagnostic(TEXT("contract_input_schema_mismatch"), FString(), FString(),
+				Reader->GetErrorMessage().IsEmpty() ? TEXT("Expected a valid JSON value.") : Reader->GetErrorMessage());
+			OutError.Source.Line = Reader->GetLineNumber();
+			OutError.Source.Column = Reader->GetCharacterNumber();
+			return false;
 		}
 
 		bool TryCanonicalizeValue(
 			const TSharedPtr<FJsonValue>& Value,
-			FString& OutText)
+			FString& OutText,
+			FDiagnostic& OutError)
 		{
-			FString Error;
-			return Value.IsValid()
-				&& UE::UAI::Contract::Json::TryCanonicalize(
+			return UE::UAI::Contract::Json::TryCanonicalize(
 					Value,
 					OutText,
-					Error);
+					OutError);
+		}
+
+		StateSemantic::CanonicalJson::FValueComparison CompareSchemaValues(
+			const TSharedPtr<FJsonValue>& Expected, const TSharedPtr<FJsonValue>& Actual,
+			const FString& Path = FString())
+		{
+			// Preserve this schema owner's existing exact-number-text equality.
+			// The common traversal supplies typed differences without encoding both documents.
+			const StateSemantic::CanonicalJson::FDeclaredValueComparison NumberComparison =
+				[](const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonValue>& Right, const FString&)
+					-> TOptional<StateSemantic::CanonicalJson::FValueComparison>
+				{
+					if (Left->Type != EJson::Number || Right->Type != EJson::Number) return {};
+					FString LeftText;
+					FString RightText;
+					if (StateSemantic::CanonicalJson::TryGetNumberLexeme(*Left, LeftText)
+						&& StateSemantic::CanonicalJson::TryGetNumberLexeme(*Right, RightText)
+						&& LeftText == RightText) return StateSemantic::CanonicalJson::FValueComparison();
+					return StateSemantic::CanonicalJson::FValueComparison::Different(FString(), Left, Right);
+				};
+			return StateSemantic::CanonicalJson::CompareJsonValues(Expected, Actual, Path, &NumberComparison);
 		}
 
 		bool IsNonNegativeInteger(
@@ -536,24 +576,30 @@ namespace UE::UAI::Contract
 								Key,
 								TEXT("enum must be a non-empty array."));
 						}
-						TSet<FString> Seen;
-						for (const TSharedPtr<FJsonValue>& Item :
-							Value->AsArray())
+						TMap<FString, int32> Seen;
+						const auto& Items = Value->AsArray();
+						for (int32 Index = 0; Index < Items.Num(); ++Index)
 						{
 							FString Canonical;
-							if (!TryCanonicalizeValue(
-									Item,
-									Canonical)
-								|| Seen.Contains(Canonical))
+							FDiagnostic JsonError;
+							if (!TryCanonicalizeValue(Items[Index], Canonical, JsonError))
 							{
-								return CompileFail(
-									OutError,
-									KeywordPath,
-									Key,
-									TEXT(
-										"enum values must be valid and unique."));
+								OutError = FDiagnostic::WrapFailure(TEXT("contract_schema_invalid"), JsonError);
+								OutError.SchemaPath = AppendPath(KeywordPath, LexToString(Index)) + JsonError.Source.JsonPath;
+								OutError.Keyword = Key;
+								OutError.SourceKind = TEXT("native_result");
+								return false;
 							}
-							Seen.Add(MoveTemp(Canonical));
+							if (const int32* PreviousIndex = Seen.Find(Canonical))
+							{
+								CompileFail(OutError, AppendPath(KeywordPath, LexToString(Index)), Key,
+									FString::Printf(TEXT("The enum item duplicates item %d."), *PreviousIndex));
+								OutError.ActualValuePresent = true;
+								OutError.ActualEvidence = Items[Index];
+								if (Items[Index]->Type != EJson::Object && Items[Index]->Type != EJson::Array) OutError.ActualValue = Items[Index];
+								return false;
+							}
+							Seen.Add(MoveTemp(Canonical), Index);
 						}
 					}
 					else if (Key == TEXT("allOf")
@@ -927,7 +973,7 @@ namespace UE::UAI::Contract
 			int32 ChildIndex = 0;
 			int32 SuccessfulBranches = 0;
 			TArray<FString> ObjectKeys;
-			FUeAgentContractSchemaError FirstBranchError;
+			TArray<UE::UAI::Contract::FDiagnostic> BranchErrors;
 		};
 
 		FValidationResult ValidateLocal(
@@ -947,27 +993,19 @@ namespace UE::UAI::Contract
 						AppendPath(Frame.SchemaPath, TEXT("type")),
 						TEXT("type"),
 						TEXT("Instance type is not allowed."));
+					static const TCHAR* TypeNames[] = { TEXT("none"), TEXT("null"), TEXT("string"), TEXT("number"), TEXT("boolean"), TEXT("array"), TEXT("object") };
+					const int32 TypeIndex = static_cast<int32>(Frame.Instance->Type);
+					Result.Error.ActualValue = MakeShared<FJsonValueString>(TypeIndex >= 0 && TypeIndex < UE_ARRAY_COUNT(TypeNames) ? TypeNames[TypeIndex] : TEXT("unsupported"));
+					Result.Error.ActualEvidence = Frame.Instance;
 					return Result;
 				}
 			}
 
-			auto IsCanonicalEqual =
-				[&Frame](const TSharedPtr<FJsonValue>& Expected)
-				{
-					FString ActualText;
-					FString ExpectedText;
-					return TryCanonicalizeValue(
-							Frame.Instance,
-							ActualText)
-						&& TryCanonicalizeValue(
-							Expected,
-							ExpectedText)
-						&& ActualText == ExpectedText;
-				};
 			if (const TSharedPtr<FJsonValue>* Const =
 				Frame.Schema->Values.Find(TEXT("const")))
 			{
-				if (!IsCanonicalEqual(*Const))
+				const auto Difference = CompareSchemaValues(*Const, Frame.Instance, Frame.InstancePath);
+				if (!Difference.bEquivalent)
 				{
 					ValidationFail(
 						Result.Error,
@@ -975,6 +1013,7 @@ namespace UE::UAI::Contract
 						AppendPath(Frame.SchemaPath, TEXT("const")),
 						TEXT("const"),
 						TEXT("Instance does not equal const."));
+					Difference.ApplyTo(Result.Error);
 					return Result;
 				}
 			}
@@ -985,7 +1024,7 @@ namespace UE::UAI::Contract
 				for (const TSharedPtr<FJsonValue>& Candidate :
 					(*Enum)->AsArray())
 				{
-					if (IsCanonicalEqual(Candidate))
+					if (CompareSchemaValues(Candidate, Frame.Instance).bEquivalent)
 					{
 						bMatched = true;
 						break;
@@ -999,6 +1038,10 @@ namespace UE::UAI::Contract
 						AppendPath(Frame.SchemaPath, TEXT("enum")),
 						TEXT("enum"),
 						TEXT("Instance is not in enum."));
+					Result.Error.ActualValuePresent = true;
+					Result.Error.ActualEvidence = Frame.Instance;
+					if (Frame.Instance->Type != EJson::Object && Frame.Instance->Type != EJson::Array)
+						Result.Error.ActualValue = Frame.Instance;
 					return Result;
 				}
 			}
@@ -1022,7 +1065,7 @@ namespace UE::UAI::Contract
 						if ((bMinimum && Observed < Limit)
 							|| (!bMinimum && Observed > Limit))
 						{
-							return ValidationFail(
+							ValidationFail(
 								Result.Error,
 								Frame.InstancePath,
 								AppendPath(
@@ -1030,6 +1073,9 @@ namespace UE::UAI::Contract
 									Keyword),
 								Keyword,
 								TEXT("Object property count is outside the bound."));
+							Result.Error.ActualValue = MakeShared<FJsonValueNumber>(Observed);
+							Result.Error.ExpectedValue = *Bound;
+							return false;
 						}
 						return true;
 					};
@@ -1058,6 +1104,8 @@ namespace UE::UAI::Contract
 									TEXT("required")),
 								TEXT("required"),
 								TEXT("Required property is missing."));
+							Result.Error.ActualValuePresent = false;
+							Result.Error.ExpectedValuePresent = true;
 							return Result;
 						}
 					}
@@ -1092,6 +1140,9 @@ namespace UE::UAI::Contract
 								TEXT("additionalProperties"),
 								TEXT(
 									"Additional property is not allowed."));
+							Result.Error.ActualValuePresent = true;
+							Result.Error.ExpectedValuePresent = false;
+							Result.Error.ActualEvidence = Field.Value;
 							return Result;
 						}
 					}
@@ -1117,7 +1168,7 @@ namespace UE::UAI::Contract
 						if ((bMinimum && Observed < Limit)
 							|| (!bMinimum && Observed > Limit))
 						{
-							return ValidationFail(
+							ValidationFail(
 								Result.Error,
 								Frame.InstancePath,
 								AppendPath(
@@ -1125,6 +1176,9 @@ namespace UE::UAI::Contract
 									Keyword),
 								Keyword,
 								TEXT("Array item count is outside the bound."));
+							Result.Error.ActualValue = MakeShared<FJsonValueNumber>(Observed);
+							Result.Error.ExpectedValue = *Bound;
+							return false;
 						}
 						return true;
 					};
@@ -1137,14 +1191,20 @@ namespace UE::UAI::Contract
 					Frame.Schema->Values.Find(TEXT("uniqueItems"));
 				if (Unique && (*Unique)->AsBool())
 				{
-					TSet<FString> Seen;
+					TMap<FString, int32> Seen;
 					for (int32 Index = 0; Index < Array.Num(); ++Index)
 					{
 						FString Canonical;
-						if (!TryCanonicalizeValue(
-								Array[Index],
-								Canonical)
-							|| Seen.Contains(Canonical))
+						FDiagnostic JsonError;
+						if (!TryCanonicalizeValue(Array[Index], Canonical, JsonError))
+						{
+							Result.Error = FDiagnostic::WrapFailure(TEXT("contract_input_canonicalization_failed"), JsonError);
+							Result.Error.Source.JsonPath = AppendPath(Frame.InstancePath, LexToString(Index)) + JsonError.Source.JsonPath;
+							Result.Error.SchemaPath = AppendPath(Frame.SchemaPath, TEXT("uniqueItems"));
+							Result.Error.Keyword = TEXT("uniqueItems");
+							return Result;
+						}
+						if (const int32* PreviousIndex = Seen.Find(Canonical))
 						{
 							ValidationFail(
 								Result.Error,
@@ -1155,10 +1215,13 @@ namespace UE::UAI::Contract
 									Frame.SchemaPath,
 									TEXT("uniqueItems")),
 								TEXT("uniqueItems"),
-								TEXT("Array items are not unique."));
+								FString::Printf(TEXT("The array item duplicates item %d."), *PreviousIndex));
+							Result.Error.ActualValuePresent = true;
+							Result.Error.ActualEvidence = Array[Index];
+							if (Array[Index]->Type != EJson::Object && Array[Index]->Type != EJson::Array) Result.Error.ActualValue = Array[Index];
 							return Result;
 						}
-						Seen.Add(MoveTemp(Canonical));
+						Seen.Add(MoveTemp(Canonical), Index);
 					}
 				}
 			}
@@ -1181,7 +1244,7 @@ namespace UE::UAI::Contract
 						if ((bMinimum && Length < Limit)
 							|| (!bMinimum && Length > Limit))
 						{
-							return ValidationFail(
+							ValidationFail(
 								Result.Error,
 								Frame.InstancePath,
 								AppendPath(
@@ -1189,6 +1252,9 @@ namespace UE::UAI::Contract
 									Keyword),
 								Keyword,
 								TEXT("String length is outside the bound."));
+							Result.Error.ActualValue = MakeShared<FJsonValueNumber>(Length);
+							Result.Error.ExpectedValue = *Bound;
+							return false;
 						}
 						return true;
 					};
@@ -1224,7 +1290,7 @@ namespace UE::UAI::Contract
 							|| (RequiredSign == 2
 								&& Comparison >= 0))
 						{
-							return ValidationFail(
+							ValidationFail(
 								Result.Error,
 								Frame.InstancePath,
 								AppendPath(
@@ -1232,6 +1298,9 @@ namespace UE::UAI::Contract
 									Keyword),
 								Keyword,
 								TEXT("Number is outside the bound."));
+							Result.Error.ActualValue = Frame.Instance;
+							Result.Error.ExpectedValue = *Bound;
+							return false;
 						}
 						return true;
 					};
@@ -1306,10 +1375,9 @@ namespace UE::UAI::Contract
 						{
 							Frame.SuccessfulBranches = 1;
 						}
-						else if (!Frame.FirstBranchError.IsValid())
+						else
 						{
-							Frame.FirstBranchError =
-								Completed.Error;
+							Frame.BranchErrors.Add(Completed.Error);
 						}
 					}
 					else if (Relation == EChildRelation::OneOf)
@@ -1318,10 +1386,9 @@ namespace UE::UAI::Contract
 						{
 							++Frame.SuccessfulBranches;
 						}
-						else if (!Frame.FirstBranchError.IsValid())
+						else
 						{
-							Frame.FirstBranchError =
-								Completed.Error;
+							Frame.BranchErrors.Add(Completed.Error);
 						}
 					}
 					else if (Relation == EChildRelation::Not)
@@ -1337,6 +1404,11 @@ namespace UE::UAI::Contract
 									TEXT("not")),
 								TEXT("not"),
 								TEXT("Instance matches forbidden schema."));
+						Failure.Error.ActualValuePresent = true;
+						Failure.Error.ActualEvidence = Frame.Instance;
+						if (Frame.Instance->Type != EJson::Object && Frame.Instance->Type != EJson::Array)
+							Failure.Error.ActualValue = Frame.Instance;
+						Failure.Error.SchemaExpected = Frame.Schema->TryGetField(TEXT("not"));
 							ChildResult.Emplace(
 								MoveTemp(Failure));
 							Stack.Pop(EAllowShrinking::No);
@@ -1376,6 +1448,7 @@ namespace UE::UAI::Contract
 					FValidationResult Local = ValidateLocal(Frame);
 					if (!Local.bSuccess)
 					{
+						Local.Error.SchemaExpected = Frame.Schema->TryGetField(Local.Error.Keyword);
 						ChildResult.Emplace(MoveTemp(Local));
 						Stack.Pop(EAllowShrinking::No);
 						continue;
@@ -1423,7 +1496,7 @@ namespace UE::UAI::Contract
 					Frame.Phase = EFramePhase::AnyOf;
 					Frame.ChildIndex = 0;
 					Frame.SuccessfulBranches = 0;
-					Frame.FirstBranchError = {};
+					Frame.BranchErrors.Reset();
 				}
 				if (Frame.Phase == EFramePhase::AnyOf)
 				{
@@ -1447,6 +1520,8 @@ namespace UE::UAI::Contract
 								TEXT("anyOf")),
 							TEXT("anyOf"),
 							TEXT("Instance matches no anyOf branch."));
+						Failure.Error.ActualValuePresent = true;
+						Failure.Error.Diagnostics = MoveTemp(Frame.BranchErrors);
 						ChildResult.Emplace(MoveTemp(Failure));
 						Stack.Pop(EAllowShrinking::No);
 						continue;
@@ -1454,7 +1529,7 @@ namespace UE::UAI::Contract
 					Frame.Phase = EFramePhase::OneOf;
 					Frame.ChildIndex = 0;
 					Frame.SuccessfulBranches = 0;
-					Frame.FirstBranchError = {};
+					Frame.BranchErrors.Reset();
 				}
 				if (Frame.Phase == EFramePhase::OneOf)
 				{
@@ -1475,8 +1550,12 @@ namespace UE::UAI::Contract
 								Frame.SchemaPath,
 								TEXT("oneOf")),
 							TEXT("oneOf"),
-							TEXT(
-								"Instance must match exactly one oneOf branch."));
+							Frame.SuccessfulBranches == 0
+								? FString(TEXT("Instance matches no oneOf branch."))
+								: FString::Printf(TEXT("Instance matches %d oneOf branches; exactly one is required."), Frame.SuccessfulBranches));
+						Failure.Error.ActualValue = MakeShared<FJsonValueNumber>(Frame.SuccessfulBranches);
+						Failure.Error.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+						if (Frame.SuccessfulBranches == 0) Failure.Error.Diagnostics = MoveTemp(Frame.BranchErrors);
 						ChildResult.Emplace(MoveTemp(Failure));
 						Stack.Pop(EAllowShrinking::No);
 						continue;
@@ -1656,17 +1735,16 @@ namespace UE::UAI::Contract
 				TEXT("Schema text is empty."));
 		}
 		TSharedPtr<FJsonObject> RootObject;
-		FString JsonError;
+		UE::UAI::Contract::FDiagnostic JsonError;
 		if (!Json::TryParseObject(
 				Schema.GetJsonValue(),
 				RootObject,
 				JsonError))
 		{
-			return CompileFail(
-				OutError,
-				FString(),
-				FString(),
-				TEXT("Schema root must be a JSON object."));
+			OutError = FDiagnostic::WrapFailure(TEXT("contract_schema_invalid"), JsonError);
+			OutError.Schema = TEXT("uai.input.diagnostic/1");
+			OutError.SourceKind = TEXT("native_result");
+			return false;
 		}
 		if (!ValidateSchemaObject(RootObject, OutError))
 		{
@@ -1678,11 +1756,10 @@ namespace UE::UAI::Contract
 				CanonicalText,
 				JsonError))
 		{
-			return CompileFail(
-				OutError,
-				FString(),
-				FString(),
-				TEXT("Schema canonicalization failed."));
+			OutError = FDiagnostic::WrapFailure(TEXT("contract_schema_invalid"), JsonError);
+			OutError.Schema = TEXT("uai.input.diagnostic/1");
+			OutError.SourceKind = TEXT("native_result");
+			return false;
 		}
 		OutSchema = MakeShareable(new FUeAgentContractSchema(
 			FUeAgentContractValue(MoveTemp(CanonicalText)),
@@ -1727,14 +1804,9 @@ namespace UE::UAI::Contract
 		TSharedPtr<FJsonValue> InputValue;
 		if (!TryParseJsonValue(
 				Input.GetJsonValue(),
-				InputValue))
+				InputValue, OutError))
 		{
-			return ValidationFail(
-				OutError,
-				FString(),
-				FString(),
-				FString(),
-				TEXT("Input is not valid JSON."));
+			return false;
 		}
 		if (!ValidateInstance(
 				Root,
@@ -1745,15 +1817,12 @@ namespace UE::UAI::Contract
 			return false;
 		}
 		FString CanonicalInput;
-		if (!TryCanonicalizeValue(InputValue, CanonicalInput))
+		FDiagnostic JsonError;
+		if (!TryCanonicalizeValue(InputValue, CanonicalInput, JsonError))
 		{
-			return Fail(
-				OutError,
-				TEXT("contract_input_canonicalization_failed"),
-				FString(),
-				FString(),
-				FString(),
-				TEXT("Validated input could not be canonicalized."));
+			OutError = FDiagnostic::WrapFailure(TEXT("contract_input_canonicalization_failed"), JsonError);
+			OutError.Schema = TEXT("uai.input.diagnostic/1");
+			return false;
 		}
 		OutCanonicalInput.Emplace(MoveTemp(CanonicalInput));
 		return true;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
@@ -26,17 +28,18 @@ namespace UE::UAI::Composition::LongRunningSession
 		FString CommandKind;
 
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 		bool IsStartCommand() const;
 		bool IsLifecycleCommand() const;
 	};
 
-	UEAGENTINTERFACE_API const TArray<
-		FUeAgentLongRunningSessionActivationProfile>&
-	GetLongRunningSessionActivationProfiles();
+	UEAGENTINTERFACE_API bool TryGetLongRunningSessionActivationProfiles(
+		const TArray<FUeAgentLongRunningSessionActivationProfile>*& OutProfiles,
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateLongRunningSessionDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	/**
 	 * Builds the outermost production registry containing the current
@@ -46,5 +49,5 @@ namespace UE::UAI::Composition::LongRunningSession
 	TryCreateLongRunningSessionProductionCommandContractRegistry(
 		TSharedPtr<const CommandContract::FUeAgentCommandContractRegistry>&
 			OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

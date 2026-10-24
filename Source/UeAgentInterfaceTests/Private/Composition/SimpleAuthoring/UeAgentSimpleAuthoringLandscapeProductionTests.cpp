@@ -659,8 +659,6 @@ bool FUeAgentSimpleAuthoringLandscapeProductionContractTest::RunTest(
 			false,
 			false,
 			false),
-		FUeAgentPageRequest(),
-		TOptional<int64>(),
 		TArray<FUeAgentArtifactDescriptor>(),
 		TArray<FUeAgentProjectionDiagnostic>());
 
@@ -732,8 +730,7 @@ bool FUeAgentSimpleAuthoringLandscapeProductionContractTest::RunTest(
 	ApplicationConfig.ServerSessionId =
 		TEXT("session:sa008-landscape-production");
 	ApplicationConfig.RegistryEpoch = 1;
-	ApplicationConfig.TimeoutSeconds = 30.0;
-	ApplicationConfig.MaxFrameBytes = 1024 * 1024;
+
 
 	TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
 	FUeAgentSimpleAuthoringApplicationError ApplicationError;
@@ -1333,8 +1330,6 @@ bool FUeAgentSimpleAuthoringLandscapeCreateOwnedPackageTest::RunTest(
 				false,
 				false,
 				false),
-			FUeAgentPageRequest(),
-			TOptional<int64>(),
 			TArray<FUeAgentArtifactDescriptor>(),
 			TArray<FUeAgentProjectionDiagnostic>());
 		TSharedPtr<IUeAgentSimpleAuthoringCapabilityProvider> Provider;
@@ -1394,8 +1389,7 @@ bool FUeAgentSimpleAuthoringLandscapeCreateOwnedPackageTest::RunTest(
 		ApplicationConfig.ServerSessionId =
 			TEXT("session:sa008-landscape-create-e4");
 		ApplicationConfig.RegistryEpoch = 1;
-		ApplicationConfig.TimeoutSeconds = 60.0;
-		ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
+
 		TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
 		FUeAgentSimpleAuthoringApplicationError ApplicationError;
 		if (!TestTrue(
@@ -1639,8 +1633,6 @@ bool FUeAgentSimpleAuthoringLandscapeOwnedPackageTest::RunTest(
 				false,
 				false,
 				false),
-			FUeAgentPageRequest(),
-			TOptional<int64>(),
 			TArray<FUeAgentArtifactDescriptor>(),
 			TArray<FUeAgentProjectionDiagnostic>());
 		TSharedPtr<IUeAgentSimpleAuthoringCapabilityProvider> Provider;
@@ -1696,8 +1688,7 @@ bool FUeAgentSimpleAuthoringLandscapeOwnedPackageTest::RunTest(
 		ApplicationConfig.ServerSessionId =
 			TEXT("session:sa008-landscape-e4");
 		ApplicationConfig.RegistryEpoch = 1;
-		ApplicationConfig.TimeoutSeconds = 60.0;
-		ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
+
 		TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
 		FUeAgentSimpleAuthoringApplicationError ApplicationError;
 		if (!TestTrue(

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UE::UAI::Module::CommandRegistration::HjsonExternalInput
@@ -8,5 +10,5 @@ namespace UE::UAI::Module::CommandRegistration::HjsonExternalInput
 	GetHjsonExternalInputProviderContributionId();
 
 	UEAGENTINTERFACE_API bool ValidateHjsonExternalInputContribution(
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

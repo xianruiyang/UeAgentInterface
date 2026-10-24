@@ -76,13 +76,7 @@ namespace
 	static FUeAgentResourceTracker MakeEvidenceTracker(
 		int64 Nodes = 4096)
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::Nodes, Nodes},
-			{EUeAgentResourceDimension::Items, 4096},
-			{EUeAgentResourceDimension::StringBytes, 32768},
-			{EUeAgentResourceDimension::WorkUnits, 16384},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 1048576},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FUeAgentCanonicalValueRef RequireNull(
@@ -738,20 +732,6 @@ bool FUeAgentSemanticDifferenceEvidenceTypedShapeTest::RunTest(
 		}
 	}
 
-	FUeAgentResourceTracker BudgetTracker = MakeEvidenceTracker(1);
-	FUeAgentCanonicalValuePtr BudgetResult;
-	FUeAgentStateSemanticError BudgetError;
-	TestFalse(
-		TEXT("typed evidence conversion is resource-accounted"),
-		TryCanonicalizeDifferenceEvidence(
-			Entry,
-			BudgetTracker,
-			BudgetResult,
-			BudgetError));
-	TestEqual(
-		TEXT("budget failure is reported structurally"),
-		BudgetError.Code,
-		FString(TEXT("resource_budget_exceeded")));
 	return true;
 }
 
@@ -860,3 +840,33 @@ bool FUeAgentSemanticDifferenceEvidenceDepthTest::RunTest(
 	return true;
 }
 
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUeAgentCanonicalAuthoringDescriptorTest,
+ "UeAgentInterface.Core.StateSemantic.AuthoringDescriptor",
+ EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FUeAgentCanonicalAuthoringDescriptorTest::RunTest(const FString&)
+{
+ auto Resources = MakeEvidenceTracker(); FUeAgentStateSemanticError Error;
+ auto Manual = MakeEntry(this, Resources); FUeAgentCanonicalValuePtr Descriptor, Kind;
+ FUeAgentCanonicalValue::TryString(TEXT("enum"), Resources, Kind, Error);
+ FUeAgentCanonicalValue::TryObject({{TEXT("kind"), Kind.ToSharedRef()}}, Resources, Descriptor, Error);
+ FUeAgentStateEntry Rich(Manual.GetIdentity(), Manual.GetType(), Manual.GetValue(), Manual.GetDefault(),
+  Manual.GetDetails(), Manual.GetObservedRevision(), Manual.GetAuthoredPresence(), Manual.GetOverrideState(), Descriptor);
+ TestTrue(TEXT("descriptor entry remains valid"), Rich.IsValid());
+ TestTrue(TEXT("revision clone preserves immutable descriptor"), Rich.WithObservedRevision(MakeRevision()).GetAuthoringDescriptor() == Descriptor);
+ TestFalse(TEXT("manual field does not acquire invented metadata"), Manual.GetAuthoringDescriptor().IsValid());
+ FUeAgentCanonicalValuePtr Evidence;
+ if (!TestTrue(TEXT("descriptor participates in evidence"), TryCanonicalizeDifferenceEvidence(Rich, Resources, Evidence, Error))) return false;
+ TestNotNull(TEXT("state entry evidence contains descriptor"), FindObjectField(Evidence.ToSharedRef(), TEXT("authoring_descriptor")));
+ auto Snapshot = [&](const FUeAgentStateEntry& Entry, FUeAgentCanonicalSnapshotPtr& Out) {
+  return FUeAgentCanonicalSnapshot::TryCreate(TEXT("descriptor-test"), UE::UAI::Contract::EUeAgentStatePlane::AuthoringMemory,
+   MakeRevision(), FUeAgentTemporalPoint(TEXT("capture"), TEXT("0")),
+   FUeAgentStateProvenance(TEXT("independent_readback"), TEXT("descriptor-test"), TEXT("evidence")), {Entry}, Resources, Out, Error);
+ };
+ FUeAgentCanonicalSnapshotPtr Left, Right; FUeAgentSemanticComparison Comparison;
+ if (!Snapshot(Manual, Left) || !Snapshot(Rich, Right)
+  || !TryCompareSnapshots(Left.ToSharedRef(), Right.ToSharedRef(), Resources, Comparison, Error)) { AddError(Error.Code); return false; }
+ TestFalse(TEXT("descriptor change is part of snapshot comparison"), Comparison.IsEquivalent());
+ return !HasAnyErrors();
+}

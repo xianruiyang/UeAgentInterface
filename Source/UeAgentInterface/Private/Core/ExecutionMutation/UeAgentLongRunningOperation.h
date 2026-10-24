@@ -102,12 +102,13 @@ namespace UE::UAI::ExecutionMutation
 		FLongRunningWorkObservation(
 			int64 InGeneration,
 			ELongRunningWorkState InState,
-			FString InErrorCode,
+			FExecutionMutationError InDiagnostic,
 			TOptional<FLongRunningOperationSignal> InSignal = {});
 
 		int64 GetGeneration() const;
 		ELongRunningWorkState GetState() const;
 		const FString& GetErrorCode() const;
+		const FExecutionMutationError& GetDiagnostic() const;
 		const TOptional<FLongRunningOperationSignal>& GetSignal() const;
 		bool IsValid() const;
 
@@ -115,8 +116,17 @@ namespace UE::UAI::ExecutionMutation
 		int64 Generation = 0;
 		ELongRunningWorkState State =
 			ELongRunningWorkState::Invalid;
-		FString ErrorCode;
+		FExecutionMutationError Diagnostic;
 		TOptional<FLongRunningOperationSignal> Signal;
+	};
+
+	struct UEAGENTINTERFACE_API FLongRunningOperationOrigin final
+	{
+		FString CallerId;
+		FString RequestId;
+		FString CommandId;
+		FString SubjectRef;
+		bool bCompletesOnHostExit = false;
 	};
 
 	class UEAGENTINTERFACE_API FLongRunningOperationRequest final
@@ -131,7 +141,8 @@ namespace UE::UAI::ExecutionMutation
 			TSharedRef<
 				FUeAgentResourceTracker,
 				ESPMode::ThreadSafe> InResources,
-			FUeAgentOperationDeadline InDeadline);
+			FUeAgentOperationDeadline InDeadline,
+			FLongRunningOperationOrigin InOrigin = {});
 
 		const FString& GetOperationId() const;
 		const FString& GetOwnerLeaseId() const;
@@ -142,7 +153,9 @@ namespace UE::UAI::ExecutionMutation
 			GetExecutionContext() const;
 		FUeAgentResourceTracker& GetResources() const;
 		const FUeAgentOperationDeadline& GetDeadline() const;
+		const FLongRunningOperationOrigin& GetOrigin() const { return Origin; }
 		bool IsValid() const;
+		const FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		FString OperationId;
@@ -153,7 +166,8 @@ namespace UE::UAI::ExecutionMutation
 		TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
 			Resources;
 		FUeAgentOperationDeadline Deadline;
-		bool bValid = false;
+		FLongRunningOperationOrigin Origin;
+		TSharedPtr<const FExecutionMutationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FLongRunningOperationSnapshot final
@@ -168,9 +182,11 @@ namespace UE::UAI::ExecutionMutation
 			ELongRunningOperationPhase InPhase,
 			FLongRunningWorkIdentity InWorkIdentity,
 			ELongRunningOperationStatus InStatus,
-			FString InErrorCode,
+			FExecutionMutationError InDiagnostic,
 			bool bInStopRequested,
-			TOptional<FLongRunningOperationSignal> InLatestSignal = {});
+			TOptional<FLongRunningOperationSignal> InLatestSignal = {},
+			bool bInCleanupComplete = false,
+			FExecutionMutationError InProgressDiagnostic = {});
 
 		const FString& GetOperationId() const;
 		const FString& GetOwnerLeaseId() const;
@@ -182,10 +198,13 @@ namespace UE::UAI::ExecutionMutation
 		int64 GetGeneration() const;
 		ELongRunningOperationStatus GetStatus() const;
 		const FString& GetErrorCode() const;
+		const FExecutionMutationError& GetDiagnostic() const;
 		bool IsStopRequested() const;
 		const TOptional<FLongRunningOperationSignal>&
 			GetLatestSignal() const;
 		bool IsTerminal() const;
+		bool IsCleanupComplete() const { return bCleanupComplete; }
+		const FExecutionMutationError& GetProgressDiagnostic() const { return ProgressDiagnostic; }
 		bool IsValid() const;
 
 	private:
@@ -198,10 +217,18 @@ namespace UE::UAI::ExecutionMutation
 		FLongRunningWorkIdentity WorkIdentity;
 		ELongRunningOperationStatus Status =
 			ELongRunningOperationStatus::None;
-		FString ErrorCode;
+		FExecutionMutationError Diagnostic;
 		bool bStopRequested = false;
 		TOptional<FLongRunningOperationSignal> LatestSignal;
+		bool bCleanupComplete = false;
+		FExecutionMutationError ProgressDiagnostic;
 		bool bValid = false;
+	};
+
+	struct UEAGENTINTERFACE_API FLongRunningOperationEntry final
+	{
+		FLongRunningOperationOrigin Origin;
+		FLongRunningOperationSnapshot Snapshot;
 	};
 
 	class UEAGENTINTERFACE_API FLongRunningOperationReceipt final
@@ -212,7 +239,7 @@ namespace UE::UAI::ExecutionMutation
 			FString InOperationId,
 			FLongRunningWorkIdentity InWorkIdentity,
 			ELongRunningOperationStatus InStatus,
-			FString InErrorCode,
+			FExecutionMutationError InDiagnostic,
 			bool bInRetrySafe);
 
 		const FString& GetOperationId() const;
@@ -220,6 +247,7 @@ namespace UE::UAI::ExecutionMutation
 		int64 GetGeneration() const;
 		ELongRunningOperationStatus GetStatus() const;
 		const FString& GetErrorCode() const;
+		const FExecutionMutationError& GetDiagnostic() const;
 		bool IsRetrySafe() const;
 		bool IsValid() const;
 
@@ -228,7 +256,7 @@ namespace UE::UAI::ExecutionMutation
 		FLongRunningWorkIdentity WorkIdentity;
 		ELongRunningOperationStatus Status =
 			ELongRunningOperationStatus::None;
-		FString ErrorCode;
+		FExecutionMutationError Diagnostic;
 		bool bRetrySafe = false;
 		bool bValid = false;
 	};
@@ -243,6 +271,9 @@ namespace UE::UAI::ExecutionMutation
 			const FUeAgentCancellationToken& Cancellation,
 			FLongRunningWorkIdentity& OutIdentity,
 			FExecutionMutationError& OutError) = 0;
+		// Queried only after Start returned false. True is explicit proof that no
+		// operation-owned native resource remains; false preserves unknown cleanup.
+		virtual bool IsFailedStartCleanupComplete() const { return false; }
 		virtual bool Observe(
 			const FString& OperationId,
 			const FLongRunningWorkIdentity& Identity,
@@ -269,9 +300,7 @@ namespace UE::UAI::ExecutionMutation
 	public:
 		FLongRunningOperationOwner(
 			TSharedRef<ILongRunningOperationPort, ESPMode::ThreadSafe> InPort,
-			FUeAgentMonotonicClock InClock,
-			int32 InMaxActiveOperations = 1024,
-			int32 InMaxRetainedOperations = 4096);
+			FUeAgentMonotonicClock InClock);
 		~FLongRunningOperationOwner();
 
 		bool Accept(
@@ -322,6 +351,24 @@ namespace UE::UAI::ExecutionMutation
 			const FString& OwnerLeaseId,
 			const FString& ServerSessionId,
 			FExecutionMutationError& OutError);
+
+		/** Discovery is scoped to the authenticated caller, never to an asset path. */
+		TArray<FLongRunningOperationEntry> Discover(const FString& CallerId) const;
+		bool Recover(
+			const FString& CallerId, const FString& RequestId, const FString& CommandId,
+			FLongRunningOperationSnapshot& OutSnapshot, FExecutionMutationError& OutError) const;
+		bool TakeOver(
+			const FString& OperationId,
+			const FString& CallerId,
+			const FString& NewOwnerLeaseId,
+			const FString& ClaimRequestId,
+			FLongRunningOperationSnapshot& OutSnapshot,
+			FExecutionMutationError& OutError);
+		/** Observe and finish work already started; never starts an accepted operation. */
+		void PollStarted();
+		/** Request native shutdown through each owned port; later polls finish draining. */
+		void RequestShutdown(const FString& Reason);
+		int32 GetPendingCount() const;
 
 	private:
 		class FState;

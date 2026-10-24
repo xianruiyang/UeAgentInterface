@@ -63,13 +63,7 @@ namespace
 
 	FUeAgentResourceTracker MakeTracker()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::Nodes, 128},
-			{EUeAgentResourceDimension::Items, 1024},
-			{EUeAgentResourceDimension::StringBytes, 65536},
-			{EUeAgentResourceDimension::WorkUnits, 65536},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 1048576},
-		}));
+		return FUeAgentResourceTracker();
 	}
 }
 

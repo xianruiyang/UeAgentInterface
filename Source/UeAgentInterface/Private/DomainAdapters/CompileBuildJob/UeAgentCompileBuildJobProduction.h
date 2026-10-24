@@ -22,12 +22,14 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		const FString& GetNativeMechanismId() const;
 		const FString& GetReadbackOracleId() const;
 		bool IsValid() const;
+		const ExecutionMutation::FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		EUeAgentCompileBuildJobFamily Family;
 		FString PolicyId;
 		FString NativeMechanismId;
 		FString ReadbackOracleId;
+		ExecutionMutation::FExecutionMutationError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentCompileBuildJobPortBuilder
@@ -132,12 +134,14 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		const FString& GetWorkingDirectory() const;
 		double GetTimeoutSeconds() const;
 		bool IsValid() const;
+		const ExecutionMutation::FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		FString Executable;
 		FString Arguments;
 		FString WorkingDirectory;
 		double TimeoutSeconds = 0.0;
+		ExecutionMutation::FExecutionMutationError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API
@@ -149,6 +153,9 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 		virtual bool Append(
 			const FString& Chunk,
 			ExecutionMutation::FExecutionMutationError& OutError) = 0;
+		// Called after native completion and output drain, before terminal artifact publication.
+		// Structured sinks finalize once; streaming sinks are already complete.
+		virtual bool FinalizeReport(ExecutionMutation::FExecutionMutationError&) { return true; }
 		virtual FString GetReportRef() const = 0;
 		virtual bool Release(
 			ExecutionMutation::FExecutionMutationError& OutError) = 0;

@@ -1,13 +1,21 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundRigIkProduction.h"
+#include "Misc/ScopeExit.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "Animation/Skeleton.h"
 #include "ControlRig.h"
 #include "ControlRigBlueprint.h"
 #include "ControlRigBlueprintFactory.h"
 #include "ControlRigGizmoLibrary.h"
+#include "Core/ContentDiscovery/UeAgentContentDiscovery.h"
+#include "Core/DomainCapability/UeAgentDomainCapability.h"
+#include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphStructureCapture.h"
+#include "Dom/JsonValue.h"
 #include "Factories/Factory.h"
 #include "Materials/Material.h"
 #include "Misc/PackageName.h"
@@ -32,16 +40,21 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
-		void SetError(
-			FGraphCompoundRuntimeError& OutError,
-			FString Code,
-			FString Subject = FString(),
-			FString Detail = FString())
+		void SetError(FGraphCompoundRuntimeError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SubjectId;
+        }
+
+		Contract::FDiagnostic RigOperationFailure(const TCHAR* Code, const FString& Reason, const FString& Target,
+			const TSharedPtr<FJsonValue>& Actual = nullptr, const TSharedPtr<FJsonValue>& Expected = nullptr)
 		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(Subject);
-			OutError.Detail = MoveTemp(Detail);
+			auto Error = Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_graph"));
+			Error.SourceKind = TEXT("native_result");
+			Error.TargetPath = Target;
+			Error.ActualValue = Actual;
+			Error.ExpectedValue = Expected;
+			return Error;
 		}
 
 		EAnimationRigGraphMutationIntent NativeIntent(const EChangeIntent Intent)
@@ -93,6 +106,66 @@ namespace UE::UAI::Composition::GraphCompound
 			return true;
 		}
 
+		FString PointerToken(FString Token)
+		{
+			Token.ReplaceInline(TEXT("~"), TEXT("~0"));
+			Token.ReplaceInline(TEXT("/"), TEXT("~1"));
+			return Token;
+		}
+
+		FString JoinInputPointer(const FString& Base, const FString& Relative)
+		{
+			if (Relative.IsEmpty()) return Base;
+			return Base == TEXT("/") ? Relative : Base + Relative;
+		}
+
+		Contract::FDiagnostic RigInputFailure(const FGraphCompoundAnimationOperationRequest& Request,
+			const FGraphCompoundCanonicalEdit& Edit, const TCHAR* Code, const FString& Reason,
+			const FString& RelativePointer, const FUeAgentCanonicalValue* Actual,
+			const FString& Expected)
+		{
+			auto Error = Contract::FDiagnostic::Failure(Code, Reason, TEXT("graph_compound"));
+			Error.TargetPath = Request.GetTargetRef();
+			Error.SourceKind = TEXT("command_input");
+			Error.PropertyPath = RelativePointer;
+			Error.SemanticId = Edit.GetIdentity().GetSemanticId();
+			Error.ActualValuePresent = Actual != nullptr;
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			if (Actual)
+			{
+				Contract::FDiagnostic ProjectionError;
+				if (!CanonicalJson::TryToJsonValue(*Actual, Error.ActualValue, ProjectionError))
+					Error.Append(ProjectionError);
+			}
+			if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edit.GetIdentity().GetSemanticId()))
+			{
+				Error.Source.JsonPath = JoinInputPointer(*Pointer, RelativePointer);
+				Error.SourceKind = TEXT("related_input");
+			}
+			return Error;
+		}
+
+		bool RequireStringField(const FGraphCompoundAnimationOperationRequest& Request,
+			const FGraphCompoundCanonicalEdit& Edit, const FUeAgentCanonicalValue* Object,
+			const FString& Field, FString& OutValue, const TCHAR* Code,
+			FGraphCompoundRuntimeError& OutError, const FString& ParentPointer = FString())
+		{
+			const bool bObject = Object && Object->GetKind() == EUeAgentValueKind::Object;
+			const FUeAgentCanonicalValue* Value = bObject ? FindField(*Object, Field) : Object;
+			if (!bObject || !Value || Value->GetKind() != EUeAgentValueKind::String)
+			{
+				OutError = RigInputFailure(Request, Edit, Code,
+					!bObject ? TEXT("The proposed edit value must be an object.")
+						: FString::Printf(TEXT("Field '%s' %s."), *Field,
+							Value ? TEXT("must be a string") : TEXT("is missing")),
+					bObject ? ParentPointer + TEXT("/") + PointerToken(Field) : ParentPointer,
+					Value, bObject ? TEXT("string") : TEXT("object"));
+				return false;
+			}
+			OutValue = Value->GetText();
+			return true;
+		}
+
 		bool TryIntegerField(
 			const FUeAgentCanonicalValue& Object,
 			const FString& Name,
@@ -103,23 +176,17 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				return false;
 			}
-			if (Value->GetKind() == EUeAgentValueKind::Integer)
-			{
-				return LexTryParseString(OutValue, *Value->GetLexeme());
-			}
-			if (Value->GetKind() != EUeAgentValueKind::Decimal)
+			if (Value->GetKind() != EUeAgentValueKind::Integer && Value->GetKind() != EUeAgentValueKind::Decimal)
 			{
 				return false;
 			}
-			double Decimal = 0.0;
-			if (!LexTryParseString(Decimal, *Value->GetLexeme())
-				|| !FMath::IsNearlyEqual(Decimal, FMath::RoundToDouble(Decimal))
-				|| Decimal < static_cast<double>(MIN_int32)
-				|| Decimal > static_cast<double>(MAX_int32))
+			int64 Integer = 0;
+			if (!StateSemantic::TryParseInt64Number(Value->GetLexeme(), Integer)
+				|| Integer < MIN_int32 || Integer > MAX_int32)
 			{
 				return false;
 			}
-			OutValue = static_cast<int32>(FMath::RoundToDouble(Decimal));
+			OutValue = static_cast<int32>(Integer);
 			return true;
 		}
 
@@ -132,26 +199,37 @@ namespace UE::UAI::Composition::GraphCompound
 			if (!Value
 				|| (Value->GetKind() != EUeAgentValueKind::Integer
 					&& Value->GetKind() != EUeAgentValueKind::Decimal)
-				|| !LexTryParseString(OutValue, *Value->GetLexeme())
-				|| !FMath::IsFinite(OutValue))
+				|| !StateSemantic::TryParseFiniteDecimal(Value->GetLexeme(), OutValue))
 			{
 				return false;
 			}
 			return true;
 		}
 
-		bool TryPositionField(
+		bool RequirePositionField(
+			const FGraphCompoundAnimationOperationRequest& Request,
+			const FGraphCompoundCanonicalEdit& Edit,
 			const FUeAgentCanonicalValue& Object,
 			const FString& Name,
-			FVector2D& OutPosition)
+			FVector2D& OutPosition,
+			FGraphCompoundRuntimeError& OutError)
 		{
 			const FUeAgentCanonicalValue* Value = FindField(Object, Name);
 			double X = 0.0;
 			double Y = 0.0;
-			if (!Value || Value->GetKind() != EUeAgentValueKind::Object
-				|| !TryNumberField(*Value, TEXT("x"), X)
-				|| !TryNumberField(*Value, TEXT("y"), Y))
+			const FString Base = TEXT("/") + PointerToken(Name);
+			if (!Value || Value->GetKind() != EUeAgentValueKind::Object)
 			{
+				OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_control_rig_unit_edit_invalid"),
+					TEXT("The RigVM node position must be an object with finite x and y coordinates."), Base, Value, TEXT("object"));
+				return false;
+			}
+			for (const auto& Axis : {TPair<const TCHAR*, double*>(TEXT("x"), &X), TPair<const TCHAR*, double*>(TEXT("y"), &Y)})
+			{
+				if (TryNumberField(*Value, Axis.Key, *Axis.Value)) continue;
+				OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_control_rig_unit_edit_invalid"),
+					FString::Printf(TEXT("The RigVM node position '%s' coordinate must be a finite number."), Axis.Key),
+					Base + TEXT("/") + Axis.Key, FindField(*Value, Axis.Key), TEXT("finite number"));
 				return false;
 			}
 			OutPosition = FVector2D(X, Y);
@@ -253,11 +331,8 @@ namespace UE::UAI::Composition::GraphCompound
 		if (!TryCaptureAnimationRigGraphStructure(
 				Target, CapturedValues, CaptureError))
 		{
-			SetError(
-				OutError,
-				CaptureError.GetCode(),
-				Target.GetPathName(),
-				CaptureError.GetDetail());
+			OutError = CaptureError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Target.GetPathName();
 			return false;
 		}
 
@@ -273,10 +348,10 @@ namespace UE::UAI::Composition::GraphCompound
 					});
 			if (!Mesh)
 			{
-				SetError(
-					OutError,
-					TEXT("animation_rig_graph_structure_mesh_binding_missing"),
-					Target.GetPathName());
+				OutError = RigOperationFailure(TEXT("animation_rig_graph_structure_mesh_binding_missing"),
+					TEXT("The captured IK Rig structure did not provide the skeletal mesh binding required for automatic generation."),
+					Target.GetPathName(), nullptr, MakeShared<FJsonValueString>(TEXT("skeletal mesh binding")));
+				OutError.ActualValuePresent = false;
 				return false;
 			}
 			const TSharedRef<FJsonObject> Value =
@@ -348,8 +423,11 @@ namespace UE::UAI::Composition::GraphCompound
 		const TArray<FGraphCompoundCanonicalEdit>& Edits = Request.GetPayload().GetEdits();
 		if (Edits.IsEmpty())
 		{
-			SetError(OutError, TEXT("graph_compound_animation_plan_invalid"),
-				Request.GetTargetRef());
+			OutError = Contract::FDiagnostic::Failure(TEXT("graph_compound_animation_plan_invalid"),
+				TEXT("The animation operation has no edits to apply or verify."), TEXT("graph_compound"));
+			OutError.TargetPath = Request.GetTargetRef();
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one edit"));
 			return false;
 		}
 		if (IsRigIkCreateProfile(Profile))
@@ -357,18 +435,16 @@ namespace UE::UAI::Composition::GraphCompound
 			const FUeAgentCanonicalValuePtr& Value = Edits[0].GetProposedAfter();
 			if (!Value.IsValid())
 			{
-				SetError(OutError, TEXT("graph_compound_animation_create_value_missing"));
+				OutError = RigInputFailure(Request, Edits[0], TEXT("graph_compound_animation_create_value_missing"),
+					TEXT("The asset creation edit has no proposed value."), FString(), nullptr, TEXT("asset creation object"));
 				return false;
 			}
 			if (Capability == TEXT("animation.control_rig.asset.create"))
 			{
 				OutSpec.Kind = ERigIkReadbackKind::ControlRigCreate;
 				OutSpec.NativeClassPath = UControlRigBlueprint::StaticClass()->GetPathName();
-				if (!TryStringField(*Value, TEXT("skeleton_ref"), OutSpec.SkeletonRef))
-				{
-					SetError(OutError, TEXT("graph_compound_animation_create_reference_missing"));
-					return false;
-				}
+				if (!RequireStringField(Request, Edits[0], Value.Get(), TEXT("skeleton_ref"),
+					OutSpec.SkeletonRef, TEXT("graph_compound_animation_create_reference_missing"), OutError)) return false;
 			}
 			else if (Capability
 				== TEXT("animation.control_rig.shape_library.asset.create"))
@@ -380,24 +456,69 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				OutSpec.Kind = ERigIkReadbackKind::IkRigCreate;
 				OutSpec.NativeClassPath = UIKRigDefinition::StaticClass()->GetPathName();
-				if (!TryStringField(*Value, TEXT("skeletal_mesh_ref"),
-					OutSpec.SkeletalMeshRef))
-				{
-					SetError(OutError, TEXT("graph_compound_animation_create_reference_missing"));
-					return false;
-				}
+				if (!RequireStringField(Request, Edits[0], Value.Get(), TEXT("skeletal_mesh_ref"),
+					OutSpec.SkeletalMeshRef, TEXT("graph_compound_animation_create_reference_missing"), OutError)) return false;
 			}
 			else
 			{
 				OutSpec.Kind = ERigIkReadbackKind::IkRetargeterCreate;
 				OutSpec.NativeClassPath = UIKRetargeter::StaticClass()->GetPathName();
-				if (!TryStringField(*Value, TEXT("source_ik_rig_ref"), OutSpec.SourceRigRef)
-					|| !TryStringField(*Value, TEXT("target_ik_rig_ref"),
-						OutSpec.TargetRigRef))
+				if (!RequireStringField(Request, Edits[0], Value.Get(), TEXT("source_ik_rig_ref"), OutSpec.SourceRigRef,
+						TEXT("graph_compound_animation_create_reference_missing"), OutError)
+					|| !RequireStringField(Request, Edits[0], Value.Get(), TEXT("target_ik_rig_ref"), OutSpec.TargetRigRef,
+						TEXT("graph_compound_animation_create_reference_missing"), OutError))
 				{
-					SetError(OutError, TEXT("graph_compound_animation_create_reference_missing"));
 					return false;
 				}
+			}
+			// Resolve before expected readback, dependency anchors and native loading
+			// consume these references. Search aliases are owned by ContentDiscovery.
+			const TPair<const TCHAR*, FString*> References[] = {
+				{TEXT("skeleton_ref"), &OutSpec.SkeletonRef}, {TEXT("skeletal_mesh_ref"), &OutSpec.SkeletalMeshRef},
+				{TEXT("source_ik_rig_ref"), &OutSpec.SourceRigRef}, {TEXT("target_ik_rig_ref"), &OutSpec.TargetRigRef}};
+			for (const auto& Reference : References)
+			{
+				FString* Ref = Reference.Value;
+				if (Ref->IsEmpty() || Ref->StartsWith(TEXT("/"))) continue;
+				ON_SCOPE_EXIT
+				{
+					if (OutError.IsValid() && OutError.Source.SourceFile.IsEmpty()
+						&& OutError.Source.JsonPath.IsEmpty() && OutError.SemanticPointer.IsEmpty())
+					{
+						if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edits[0].GetIdentity().GetSemanticId()))
+						{
+							OutError.Source.JsonPath = JoinInputPointer(*Pointer, TEXT("/") + FString(Reference.Key));
+							OutError.SourceKind = TEXT("related_input");
+						}
+					}
+				};
+				DomainCapability::FDomainCapabilityAuthorities Authorities;
+				UE::UAI::Contract::FDiagnostic AuthorityError;
+				if (!DomainCapability::TryGetOrBuildProcessDomainCapabilityAuthorities(Authorities, AuthorityError)
+					|| !Authorities.GetContentDiscoveryService())
+				{
+					OutError = AuthorityError.IsEmpty()
+						? RigInputFailure(Request, Edits[0], TEXT("content_search_authority_unavailable"),
+							TEXT("The content discovery service is unavailable, so this asset reference cannot be resolved."),
+							TEXT("/") + FString(Reference.Key), FindField(*Value, Reference.Key), TEXT("resolvable asset reference"))
+						: AuthorityError;
+					return false;
+				}
+				ContentDiscovery::FContentDiscoveryItem Item;
+				ContentDiscovery::FContentDiscoveryError Error;
+				if (!Authorities.GetContentDiscoveryService()->TryResolveReadableName(*Ref, Item, Error))
+				{
+					SetError(OutError, Error, Error.SubjectId);
+					return false;
+				}
+				if (Item.ContentKind != TEXT("asset"))
+				{
+					OutError = RigInputFailure(Request, Edits[0], TEXT("graph_compound_animation_asset_reference_required"),
+						FString::Printf(TEXT("Reference '%s' resolves to content kind '%s'; an asset is required."), **Ref, *Item.ContentKind),
+						TEXT("/") + FString(Reference.Key), FindField(*Value, Reference.Key), TEXT("asset reference"));
+					return false;
+				}
+				*Ref = Item.Identity;
 			}
 			return true;
 		}
@@ -408,32 +529,29 @@ namespace UE::UAI::Composition::GraphCompound
 			OutSpec.NativeClassPath = UControlRigBlueprint::StaticClass()->GetPathName();
 			for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 			{
+				ON_SCOPE_EXIT { Request.GetPayload().LocateDiagnostic(OutError, Edit.GetIdentity().GetSemanticId()); };
 				const FString& SemanticId = Edit.GetIdentity().GetSemanticId();
 				if (SemanticId.StartsWith(TEXT("rig_element:control:")))
 				{
 					FAnimationRigGraphControlMutation Mutation;
 					Mutation.Name = *SemanticId.Mid(20);
 					Mutation.Intent = NativeIntent(Edit.GetIntent());
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId))
+						Mutation.InputPointer = *Pointer;
 					if (Mutation.Intent != EAnimationRigGraphMutationIntent::Delete)
 					{
 						FString ParentKey;
-						if (!Edit.GetProposedAfter().IsValid()
-							|| !TryStringField(
-								*Edit.GetProposedAfter(),
-								TEXT("parent_native_key"),
-								ParentKey)
-							|| !ParentKey.StartsWith(TEXT("Bone:"))
-							|| !TryStringField(
-								*Edit.GetProposedAfter(),
-								TEXT("control_type_ref"),
-								Mutation.ControlTypeRef))
+						if (!RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(),
+							TEXT("parent_native_key"), ParentKey, TEXT("graph_compound_control_rig_edit_invalid"), OutError)) return false;
+						if (!ParentKey.StartsWith(TEXT("Bone:")))
 						{
-							SetError(
-								OutError,
-								TEXT("graph_compound_control_rig_edit_invalid"),
-								Mutation.Name.ToString());
+							OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_control_rig_edit_invalid"),
+								TEXT("A control parent must identify a bone using the Bone: prefix."), TEXT("/parent_native_key"),
+								FindField(*Edit.GetProposedAfter(), TEXT("parent_native_key")), TEXT("Bone:<bone name>"));
 							return false;
 						}
+						if (!RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(),
+							TEXT("control_type_ref"), Mutation.ControlTypeRef, TEXT("graph_compound_control_rig_edit_invalid"), OutError)) return false;
 						Mutation.ParentBone = *ParentKey.Mid(5);
 					}
 					OutSpec.Controls.Add(MoveTemp(Mutation));
@@ -444,6 +562,8 @@ namespace UE::UAI::Composition::GraphCompound
 					FAnimationRigGraphUnitMutation Mutation;
 					Mutation.NodeName = *SemanticId.Mid(11);
 					Mutation.Intent = NativeIntent(Edit.GetIntent());
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId))
+						Mutation.InputPointer = *Pointer;
 					if (Mutation.Intent == EAnimationRigGraphMutationIntent::Create
 						|| Mutation.Intent
 							== EAnimationRigGraphMutationIntent::Replace)
@@ -454,32 +574,39 @@ namespace UE::UAI::Composition::GraphCompound
 									*Edit.GetProposedAfter(), TEXT("candidate"))
 								: nullptr;
 						FString Method;
-						const bool bHasCandidateName = Candidate
-							&& Candidate->GetKind() == EUeAgentValueKind::Object
-							&& TryStringField(
-								*Candidate,
-								TEXT("name"),
-								Mutation.CandidateName);
-						const bool bHasCandidateId = Candidate
-							&& Candidate->GetKind() == EUeAgentValueKind::Object
-							&& TryStringField(
-								*Candidate,
-								TEXT("id"),
-								Mutation.CandidateId);
 						if (!Edit.GetProposedAfter().IsValid()
 							|| !Candidate
-							|| Candidate->GetKind() != EUeAgentValueKind::Object
-							|| !TryPositionField(
-								*Edit.GetProposedAfter(),
-								TEXT("position"),
-								Mutation.Position)
-							|| (!bHasCandidateName && !bHasCandidateId))
+							|| Candidate->GetKind() != EUeAgentValueKind::Object)
 						{
-							SetError(
-								OutError,
-								TEXT("graph_compound_control_rig_unit_edit_invalid"),
-								Mutation.NodeName.ToString());
+							OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_control_rig_unit_edit_invalid"),
+								TEXT("The RigVM node edit requires a candidate object."), TEXT("/candidate"), Candidate, TEXT("object"));
 							return false;
+						}
+						if (!RequirePositionField(Request, Edit, *Edit.GetProposedAfter(), TEXT("position"), Mutation.Position, OutError)
+							|| !RequireStringField(Request, Edit, Candidate, TEXT("name"), Mutation.CandidateName,
+								TEXT("graph_compound_control_rig_unit_edit_invalid"), OutError, TEXT("/candidate"))) return false;
+						if (const FUeAgentCanonicalValue* Selection = FindField(*Candidate, TEXT("select")))
+						{
+							if (Selection->GetKind() != EUeAgentValueKind::Object)
+							{
+								OutError = RigInputFailure(Request, Edit, TEXT("candidate_selector_invalid"),
+									TEXT("Candidate select must be an object of semantic string fields."),
+									TEXT("/candidate/select"), Selection, TEXT("object"));
+								OutError.Stage = TEXT("candidate_resolve");
+								return false;
+							}
+							for (const auto& Field : Selection->GetObjectItems())
+							{
+								if (Field.Value->GetKind() != EUeAgentValueKind::String)
+								{
+									OutError = RigInputFailure(Request, Edit, TEXT("candidate_selector_invalid"),
+										FString::Printf(TEXT("Candidate select field '%s' must be a string."), *Field.Key),
+										TEXT("/candidate/select/") + PointerToken(Field.Key), &Field.Value.Get(), TEXT("string"));
+									OutError.Stage = TEXT("candidate_resolve");
+									return false;
+								}
+								Mutation.CandidateSelect.Add(Field.Key, Field.Value->GetText());
+							}
 						}
 						Mutation.bHasScriptStructAssertion = TryStringField(
 							*Edit.GetProposedAfter(),
@@ -490,46 +617,43 @@ namespace UE::UAI::Composition::GraphCompound
 						{
 							Mutation.MethodName = *Method;
 							Mutation.bHasMethodAssertion = true;
+							Mutation.bHasMethodInput = true;
 						}
 					}
 					else if (Mutation.Intent
 						== EAnimationRigGraphMutationIntent::Update)
 					{
 						FString Method;
-						if (!Edit.GetProposedAfter().IsValid()
-							|| !TryStringField(
-								*Edit.GetProposedAfter(),
-								TEXT("script_struct_ref"),
-								Mutation.ScriptStructRef)
-							|| !TryPositionField(
-								*Edit.GetProposedAfter(),
-								TEXT("position"),
-								Mutation.Position))
-						{
-							SetError(
-								OutError,
-								TEXT("graph_compound_control_rig_unit_edit_invalid"),
-								Mutation.NodeName.ToString());
-							return false;
-						}
+						if (!RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(), TEXT("script_struct_ref"),
+							Mutation.ScriptStructRef, TEXT("graph_compound_control_rig_unit_edit_invalid"), OutError)
+							|| !RequirePositionField(Request, Edit, *Edit.GetProposedAfter(), TEXT("position"), Mutation.Position, OutError)) return false;
 						Mutation.bHasScriptStructAssertion = true;
 						if (TryStringField(
 								*Edit.GetProposedAfter(), TEXT("method"), Method))
 						{
 							Mutation.MethodName = *Method;
+							Mutation.bHasMethodInput = true;
 						}
 						Mutation.bHasMethodAssertion = true;
 					}
 					OutSpec.Units.Add(MoveTemp(Mutation));
 					continue;
 				}
-				SetError(
-					OutError,
-					TEXT("graph_compound_control_rig_identity_unsupported"),
-					SemanticId);
+				OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_control_rig_identity_unsupported"),
+					TEXT("This edit does not identify a Control Rig control or RigVM node."), FString(), nullptr,
+					TEXT("control or RigVM node edit"));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(SemanticId);
+				OutError.ActualValuePresent.Reset();
 				return false;
 			}
-			return !OutSpec.Controls.IsEmpty() || !OutSpec.Units.IsEmpty();
+			if (OutSpec.Controls.IsEmpty() && OutSpec.Units.IsEmpty())
+			{
+				OutError = Contract::FDiagnostic::Failure(TEXT("graph_compound_control_rig_edits_required"),
+					TEXT("At least one control or RigVM node edit is required."), TEXT("graph_compound"));
+				OutError.TargetPath = Request.GetTargetRef();
+				return false;
+			}
+			return true;
 		}
 		if (Capability == TEXT("animation.control_rig.shape_library.apply"))
 		{
@@ -538,51 +662,60 @@ namespace UE::UAI::Composition::GraphCompound
 			const FString Prefix = TEXT("item:shape:");
 			for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 			{
+				ON_SCOPE_EXIT { Request.GetPayload().LocateDiagnostic(OutError, Edit.GetIdentity().GetSemanticId()); };
 				FAnimationRigGraphShapeMutation Mutation;
 				const FString& SemanticId = Edit.GetIdentity().GetSemanticId();
 				if (!SemanticId.StartsWith(Prefix))
 				{
-					SetError(OutError, TEXT("graph_compound_shape_identity_invalid"), SemanticId);
+					OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_shape_identity_invalid"),
+						TEXT("The edit identity does not identify a shape in the shape library."), FString(), nullptr,
+						TEXT("shape item identity"));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(SemanticId);
+					OutError.ActualValuePresent.Reset();
 					return false;
 				}
 				Mutation.Name = *SemanticId.Mid(Prefix.Len());
 				Mutation.Intent = NativeIntent(Edit.GetIntent());
+				if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId))
+					Mutation.InputPointer = *Pointer;
 				if (Mutation.Intent != EAnimationRigGraphMutationIntent::Delete)
 				{
 					FString MeshRef;
 					FString MaterialRef;
 					if (!Edit.GetProposedAfter().IsValid())
 					{
-						SetError(OutError, TEXT("graph_compound_shape_value_missing"),
-							Mutation.Name.ToString());
+						OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_shape_value_missing"),
+							FString::Printf(TEXT("Shape '%s' requires a proposed value."), *Mutation.Name.ToString()),
+							FString(), nullptr, TEXT("object"));
 						return false;
 					}
-					if (!TryStringField(*Edit.GetProposedAfter(), TEXT("mesh_ref"), MeshRef))
+					if (!RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(), TEXT("mesh_ref"), MeshRef,
+						TEXT("graph_compound_shape_mesh_field_invalid"), OutError))
 					{
-						SetError(OutError, TEXT("graph_compound_shape_mesh_field_invalid"),
-							Mutation.Name.ToString());
 						return false;
 					}
-					if (!TryStringField(*Edit.GetProposedAfter(), TEXT("material_ref"),
-						MaterialRef))
+					if (!RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(), TEXT("material_ref"), MaterialRef,
+						TEXT("graph_compound_shape_material_field_invalid"), OutError))
 					{
-						SetError(OutError, TEXT("graph_compound_shape_material_field_invalid"),
-							Mutation.Name.ToString());
 						return false;
 					}
 					if (!TryIntegerField(*Edit.GetProposedAfter(), TEXT("order_index"),
 						Mutation.OrderIndex))
 					{
-						SetError(OutError, TEXT("graph_compound_shape_order_field_invalid"),
-							Mutation.Name.ToString());
+						OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_shape_order_field_invalid"),
+							TEXT("Shape field 'order_index' must be an integer within the signed 32-bit range."),
+							TEXT("/order_index"), FindField(*Edit.GetProposedAfter(), TEXT("order_index")), TEXT("signed 32-bit integer"));
 						return false;
 					}
 					Mutation.Mesh = LoadObject<UStaticMesh>(nullptr, *MeshRef);
 					Mutation.Material = LoadObject<UMaterial>(nullptr, *MaterialRef);
 					if (!Mutation.Mesh || !Mutation.Material)
 					{
-						SetError(OutError, TEXT("graph_compound_shape_reference_invalid"),
-							Mutation.Name.ToString());
+						const TCHAR* Field = !Mutation.Mesh ? TEXT("mesh_ref") : TEXT("material_ref");
+						OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_shape_reference_invalid"),
+							FString::Printf(TEXT("Shape '%s' field '%s' could not be loaded as the required asset class."),
+								*Mutation.Name.ToString(), Field), TEXT("/") + FString(Field), FindField(*Edit.GetProposedAfter(), Field),
+							!Mutation.Mesh ? UStaticMesh::StaticClass()->GetPathName() : UMaterial::StaticClass()->GetPathName());
 						return false;
 					}
 				}
@@ -594,15 +727,21 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			OutSpec.Kind = ERigIkReadbackKind::IkRigDefinition;
 			OutSpec.NativeClassPath = UIKRigDefinition::StaticClass()->GetPathName();
+			const FGraphCompoundCanonicalEdit* RootEdit = nullptr;
 			for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 			{
+				ON_SCOPE_EXIT { Request.GetPayload().LocateDiagnostic(OutError, Edit.GetIdentity().GetSemanticId()); };
 				const FString& SemanticId = Edit.GetIdentity().GetSemanticId();
 				if (SemanticId == TEXT("property:retarget_root"))
 				{
+					RootEdit = &Edit;
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId))
+						OutSpec.RetargetRootInputPointer = *Pointer;
 					if (!Edit.GetProposedAfter().IsValid()
 						|| Edit.GetProposedAfter()->GetKind() != EUeAgentValueKind::String)
 					{
-						SetError(OutError, TEXT("graph_compound_ik_root_invalid"));
+						OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_ik_root_invalid"),
+							TEXT("The retarget root edit value must be a bone-name string."), FString(), Edit.GetProposedAfter().Get(), TEXT("string"));
 						return false;
 					}
 					OutSpec.RetargetRoot = *Edit.GetProposedAfter()->GetText();
@@ -612,12 +751,12 @@ namespace UE::UAI::Composition::GraphCompound
 					FAnimationRigGraphIkGoalMutation Goal;
 					Goal.Name = *SemanticId.Mid(13);
 					Goal.Intent = NativeIntent(Edit.GetIntent());
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId)) Goal.InputPointer = *Pointer;
 					FString Bone;
 					if (Goal.Intent != EAnimationRigGraphMutationIntent::Delete
-						&& (!Edit.GetProposedAfter().IsValid()
-							|| !TryStringField(*Edit.GetProposedAfter(), TEXT("bone_name"), Bone)))
+						&& !RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(), TEXT("bone_name"), Bone,
+							TEXT("graph_compound_ik_goal_invalid"), OutError))
 					{
-						SetError(OutError, TEXT("graph_compound_ik_goal_invalid"));
 						return false;
 					}
 					Goal.BoneName = *Bone;
@@ -627,15 +766,18 @@ namespace UE::UAI::Composition::GraphCompound
 				{
 					FAnimationRigGraphIkSolverMutation Solver;
 					Solver.Intent = NativeIntent(Edit.GetIntent());
-					if (Solver.Intent != EAnimationRigGraphMutationIntent::Delete
-						&& (!Edit.GetProposedAfter().IsValid()
-							|| !TryStringField(*Edit.GetProposedAfter(),
-								TEXT("solver_class_ref"), Solver.SolverClassRef)
-							|| !TryIntegerField(*Edit.GetProposedAfter(),
-								TEXT("order_index"), Solver.OrderIndex)))
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId)) Solver.InputPointer = *Pointer;
+					if (Solver.Intent != EAnimationRigGraphMutationIntent::Delete)
 					{
-						SetError(OutError, TEXT("graph_compound_ik_solver_invalid"));
-						return false;
+						if (!RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(), TEXT("solver_class_ref"),
+							Solver.SolverClassRef, TEXT("graph_compound_ik_solver_invalid"), OutError)) return false;
+						if (!TryIntegerField(*Edit.GetProposedAfter(), TEXT("order_index"), Solver.OrderIndex))
+						{
+							OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_ik_solver_invalid"),
+								TEXT("IK solver field 'order_index' must be an integer within the signed 32-bit range."),
+								TEXT("/order_index"), FindField(*Edit.GetProposedAfter(), TEXT("order_index")), TEXT("signed 32-bit integer"));
+							return false;
+						}
 					}
 					OutSpec.Solvers.Add(MoveTemp(Solver));
 				}
@@ -644,16 +786,15 @@ namespace UE::UAI::Composition::GraphCompound
 					FAnimationRigGraphIkChainMutation Chain;
 					Chain.Name = *SemanticId.Mid(19);
 					Chain.Intent = NativeIntent(Edit.GetIntent());
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId)) Chain.InputPointer = *Pointer;
 					FString Start;
 					FString End;
 					FString Goal;
 					if (Chain.Intent != EAnimationRigGraphMutationIntent::Delete
-						&& (!Edit.GetProposedAfter().IsValid()
-							|| !TryStringField(*Edit.GetProposedAfter(), TEXT("start_bone"), Start)
-							|| !TryStringField(*Edit.GetProposedAfter(), TEXT("end_bone"), End)
-							|| !TryStringField(*Edit.GetProposedAfter(), TEXT("goal_name"), Goal)))
+						&& (!RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(), TEXT("start_bone"), Start, TEXT("graph_compound_ik_chain_invalid"), OutError)
+							|| !RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(), TEXT("end_bone"), End, TEXT("graph_compound_ik_chain_invalid"), OutError)
+							|| !RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(), TEXT("goal_name"), Goal, TEXT("graph_compound_ik_chain_invalid"), OutError)))
 					{
-						SetError(OutError, TEXT("graph_compound_ik_chain_invalid"));
 						return false;
 					}
 					Chain.StartBone = *Start;
@@ -662,18 +803,37 @@ namespace UE::UAI::Composition::GraphCompound
 					OutSpec.Chains.Add(MoveTemp(Chain));
 				}
 			}
-			return !OutSpec.RetargetRoot.IsNone();
+			if (OutSpec.RetargetRoot.IsNone())
+			{
+				if (RootEdit)
+				{
+					OutError = RigInputFailure(Request, *RootEdit, TEXT("graph_compound_ik_root_invalid"),
+						TEXT("An IK Rig definition requires a nonempty retarget root bone."), FString(), RootEdit->GetProposedAfter().Get(),
+						TEXT("nonempty retarget root bone name"));
+					return false;
+				}
+				OutError = Contract::FDiagnostic::Failure(TEXT("graph_compound_ik_root_invalid"),
+					TEXT("An IK Rig definition requires a nonempty retarget root bone."), TEXT("graph_compound"));
+				OutError.TargetPath = Request.GetTargetRef();
+				OutError.SourceKind = TEXT("command_input");
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty retarget root bone name"));
+				OutError.ActualValuePresent = false;
+				return false;
+			}
+			return true;
 		}
 		if (Capability == TEXT("animation.ik_rig.definition.auto_generate"))
 		{
 			OutSpec.Kind = ERigIkReadbackKind::IkRigAutoGenerate;
 			OutSpec.NativeClassPath = UIKRigDefinition::StaticClass()->GetPathName();
 			const FUeAgentCanonicalValuePtr& Value = Edits[0].GetProposedAfter();
-			if (!Value.IsValid()
-				|| !TryStringField(*Value, TEXT("skeletal_mesh_ref"), OutSpec.SkeletalMeshRef)
-				|| !TryStringField(*Value, TEXT("preset"), OutSpec.Preset))
+			if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edits[0].GetIdentity().GetSemanticId()))
+				OutSpec.AutoGenerateInputPointer = *Pointer;
+			if (!RequireStringField(Request, Edits[0], Value.Get(), TEXT("skeletal_mesh_ref"), OutSpec.SkeletalMeshRef,
+					TEXT("graph_compound_ik_auto_generate_invalid"), OutError)
+				|| !RequireStringField(Request, Edits[0], Value.Get(), TEXT("preset"), OutSpec.Preset,
+					TEXT("graph_compound_ik_auto_generate_invalid"), OutError))
 			{
-				SetError(OutError, TEXT("graph_compound_ik_auto_generate_invalid"));
 				return false;
 			}
 			return true;
@@ -682,8 +842,11 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			OutSpec.Kind = ERigIkReadbackKind::IkRetargeterDefinition;
 			OutSpec.NativeClassPath = UIKRetargeter::StaticClass()->GetPathName();
+			const FGraphCompoundCanonicalEdit* SourceRigEdit = nullptr;
+			const FGraphCompoundCanonicalEdit* TargetRigEdit = nullptr;
 			for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 			{
+				ON_SCOPE_EXIT { Request.GetPayload().LocateDiagnostic(OutError, Edit.GetIdentity().GetSemanticId()); };
 				const FString& SemanticId = Edit.GetIdentity().GetSemanticId();
 				if (SemanticId == TEXT("binding:source_ik_rig")
 					|| SemanticId == TEXT("binding:target_ik_rig"))
@@ -691,29 +854,39 @@ namespace UE::UAI::Composition::GraphCompound
 					if (!Edit.GetProposedAfter().IsValid()
 						|| Edit.GetProposedAfter()->GetKind() != EUeAgentValueKind::String)
 					{
-						SetError(OutError, TEXT("graph_compound_retarget_rig_ref_invalid"));
+						OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_retarget_rig_ref_invalid"),
+							TEXT("The retargeter rig binding edit value must be an IK Rig reference string."),
+							FString(), Edit.GetProposedAfter().Get(), TEXT("IK Rig reference string"));
 						return false;
 					}
 					FString& Ref = SemanticId.Contains(TEXT("source"))
 						? OutSpec.SourceRigRef : OutSpec.TargetRigRef;
 					Ref = Edit.GetProposedAfter()->GetText();
+					const bool bSource = SemanticId == TEXT("binding:source_ik_rig");
+					(bSource ? SourceRigEdit : TargetRigEdit) = &Edit;
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId))
+						(bSource ? OutSpec.SourceRigInputPointer : OutSpec.TargetRigInputPointer) = *Pointer;
 				}
 				else if (SemanticId.StartsWith(TEXT("binding:chain_mapping:")))
 				{
 					FAnimationRigGraphRetargetMappingMutation Mapping;
 					Mapping.TargetChain = *SemanticId.Mid(22);
 					Mapping.Intent = NativeIntent(Edit.GetIntent());
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId)) Mapping.InputPointer = *Pointer;
 					FString Source;
-					if (Mapping.Intent != EAnimationRigGraphMutationIntent::Delete
-						&& (!Edit.GetProposedAfter().IsValid()
-							|| !TryStringField(*Edit.GetProposedAfter(), TEXT("source_chain"), Source)
-							|| !TryStringField(*Edit.GetProposedAfter(), TEXT("operation_ref"),
-								Mapping.OperationRef)
-							|| !TryIntegerField(*Edit.GetProposedAfter(), TEXT("order_index"),
-								Mapping.OrderIndex)))
+					if (Mapping.Intent != EAnimationRigGraphMutationIntent::Delete)
 					{
-						SetError(OutError, TEXT("graph_compound_retarget_mapping_invalid"));
-						return false;
+						if (!RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(), TEXT("source_chain"), Source,
+								TEXT("graph_compound_retarget_mapping_invalid"), OutError)
+							|| !RequireStringField(Request, Edit, Edit.GetProposedAfter().Get(), TEXT("operation_ref"), Mapping.OperationRef,
+								TEXT("graph_compound_retarget_mapping_invalid"), OutError)) return false;
+						if (!TryIntegerField(*Edit.GetProposedAfter(), TEXT("order_index"), Mapping.OrderIndex))
+						{
+							OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_retarget_mapping_invalid"),
+								TEXT("Retarget mapping field 'order_index' must be an integer within the signed 32-bit range."),
+								TEXT("/order_index"), FindField(*Edit.GetProposedAfter(), TEXT("order_index")), TEXT("signed 32-bit integer"));
+							return false;
+						}
 					}
 					Mapping.SourceChain = *Source;
 					OutSpec.Mappings.Add(MoveTemp(Mapping));
@@ -721,16 +894,28 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			if (OutSpec.SourceRigRef.IsEmpty() || OutSpec.TargetRigRef.IsEmpty())
 			{
-				SetError(
-					OutError,
-					TEXT("graph_compound_retarget_rig_ref_required"));
+				const bool bSource = OutSpec.SourceRigRef.IsEmpty();
+				const FGraphCompoundCanonicalEdit* MissingEdit = bSource ? SourceRigEdit : TargetRigEdit;
+				const FString Reason = bSource ? TEXT("The retargeter definition requires a nonempty source IK Rig binding.")
+					: TEXT("The retargeter definition requires a nonempty target IK Rig binding.");
+				OutError = MissingEdit ? RigInputFailure(Request, *MissingEdit, TEXT("graph_compound_retarget_rig_ref_required"), Reason,
+					FString(), MissingEdit->GetProposedAfter().Get(), TEXT("nonempty IK Rig reference"))
+					: Contract::FDiagnostic::Failure(TEXT("graph_compound_retarget_rig_ref_required"), Reason, TEXT("graph_compound"));
+				OutError.TargetPath = Request.GetTargetRef();
+				if (!MissingEdit)
+				{
+					OutError.SourceKind = TEXT("command_input");
+					OutError.ActualValuePresent = false;
+				}
 				return false;
 			}
 			if (OutSpec.Mappings.IsEmpty())
 			{
-				SetError(
-					OutError,
-					TEXT("graph_compound_retarget_mapping_required"));
+				OutError = Contract::FDiagnostic::Failure(TEXT("graph_compound_retarget_mapping_required"),
+					TEXT("The retargeter definition requires at least one chain mapping edit."), TEXT("graph_compound"));
+				OutError.TargetPath = Request.GetTargetRef();
+				OutError.SourceKind = TEXT("command_input");
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
 				return false;
 			}
 			return true;
@@ -741,6 +926,7 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString Prefix = TEXT("property:setting:");
 		for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 		{
+			ON_SCOPE_EXIT { Request.GetPayload().LocateDiagnostic(OutError, Edit.GetIdentity().GetSemanticId()); };
 			const FString& SemanticId = Edit.GetIdentity().GetSemanticId();
 			TArray<FString> Parts;
 			SemanticId.Mid(Prefix.Len()).ParseIntoArray(Parts, TEXT(":"), false);
@@ -749,15 +935,32 @@ namespace UE::UAI::Composition::GraphCompound
 				|| !Edit.GetProposedAfter().IsValid()
 				|| !TryScalarText(*Edit.GetProposedAfter(), Setting.Value))
 			{
-				SetError(OutError, TEXT("graph_compound_retarget_setting_invalid"), SemanticId);
+				const bool bIdentityInvalid = !SemanticId.StartsWith(Prefix) || Parts.Num() != 3;
+				OutError = RigInputFailure(Request, Edit, TEXT("graph_compound_retarget_setting_invalid"),
+					bIdentityInvalid ? TEXT("The retarget setting edit identity must identify a scope, chain and setting.")
+						: TEXT("The retarget setting edit value must be a string, number or boolean."), FString(),
+					bIdentityInvalid ? nullptr : Edit.GetProposedAfter().Get(), bIdentityInvalid ? TEXT("retarget setting identity") : TEXT("string, number or boolean"));
+				if (bIdentityInvalid)
+				{
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(SemanticId);
+					OutError.ActualValuePresent.Reset();
+				}
 				return false;
 			}
 			Setting.Scope = Parts[0];
 			Setting.ChainName = *Parts[1];
 			Setting.SettingName = Parts[2];
+			if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId)) Setting.InputPointer = *Pointer;
 			OutSpec.Settings.Add(MoveTemp(Setting));
 		}
-		return !OutSpec.Settings.IsEmpty();
+		if (OutSpec.Settings.IsEmpty())
+		{
+			OutError = Contract::FDiagnostic::Failure(TEXT("graph_compound_retarget_setting_required"),
+				TEXT("At least one retarget setting edit is required."), TEXT("graph_compound"));
+			OutError.TargetPath = Request.GetTargetRef();
+			return false;
+		}
+		return true;
 	}
 
 	TSharedRef<FJsonObject> RigIkExpectedJson(const FRigIkReadbackSpec& Spec)
@@ -931,14 +1134,20 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& TargetRef,
 		const FRigIkReadbackSpec& Spec,
 		TSharedRef<FJsonObject>& OutRoot,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		OutRoot = MakeShared<FJsonObject>();
 		UObject* const Target = LoadObject<UObject>(nullptr, *ObjectPath(TargetRef));
 		if (!Target || Target->GetClass()->GetPathName() != Spec.NativeClassPath)
 		{
-			OutError = TEXT("animation_readback_target_class_mismatch");
+			OutError = RigOperationFailure(TEXT("animation_readback_target_class_mismatch"),
+				!Target ? TEXT("The animation readback target could not be loaded.")
+					: TEXT("The animation readback target has a different native class than expected."), TargetRef,
+				nullptr,
+				MakeShared<FJsonValueString>(Spec.NativeClassPath));
+			if (Target) OutError.ActualValue = MakeShared<FJsonValueString>(Target->GetClass()->GetPathName());
+			OutError.ActualValuePresent = Target != nullptr;
 			return false;
 		}
 		OutRoot->SetStringField(TEXT("target_kind"), Spec.TargetKind);
@@ -1053,7 +1262,8 @@ namespace UE::UAI::Composition::GraphCompound
 			UIKRigController* Controller = UIKRigController::GetController(Rig);
 			if (!Controller)
 			{
-				OutError = TEXT("animation_readback_ik_controller_unavailable");
+				OutError = RigOperationFailure(TEXT("animation_readback_ik_controller_unavailable"),
+					TEXT("The IK Rig controller is unavailable for readback."), TargetRef);
 				return false;
 			}
 			if (Spec.Kind == ERigIkReadbackKind::IkRigCreate
@@ -1123,7 +1333,8 @@ namespace UE::UAI::Composition::GraphCompound
 		UIKRetargeterController* Controller = UIKRetargeterController::GetController(Retargeter);
 		if (!Controller)
 		{
-			OutError = TEXT("animation_readback_retarget_controller_unavailable");
+			OutError = RigOperationFailure(TEXT("animation_readback_retarget_controller_unavailable"),
+				TEXT("The IK Retargeter controller is unavailable for readback."), TargetRef);
 			return false;
 		}
 		const UIKRigDefinition* Source = Controller->GetIKRig(ERetargetSourceOrTarget::Source);
@@ -1182,7 +1393,16 @@ namespace UE::UAI::Composition::GraphCompound
 				});
 			if (!Chain)
 			{
-				OutError = TEXT("animation_readback_retarget_setting_missing");
+				OutError = RigOperationFailure(TEXT("animation_readback_retarget_setting_missing"),
+					!OpController ? TEXT("The first retarget operation has no FK chains controller for settings readback.")
+						: FString::Printf(TEXT("Retarget chain '%s' has no settings during readback of '%s'."),
+							*Requested.ChainName.ToString(), *Requested.SettingName), TargetRef);
+				OutError.ActualValuePresent = false;
+				if (OpController && !Requested.InputPointer.IsEmpty())
+				{
+					OutError.Source.JsonPath = Requested.InputPointer;
+					OutError.SourceKind = TEXT("related_input");
+				}
 				return false;
 			}
 			FString Actual;
@@ -1210,7 +1430,15 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			else
 			{
-				OutError = TEXT("animation_readback_retarget_setting_unsupported");
+				OutError = RigOperationFailure(TEXT("animation_readback_retarget_setting_unsupported"),
+					FString::Printf(TEXT("The requested setting is unsupported during readback for retarget chain '%s'."), *Requested.ChainName.ToString()),
+					TargetRef, MakeShared<FJsonValueString>(Requested.SettingName),
+					MakeShared<FJsonValueString>(TEXT("RotationMode, TranslationMode, RotationAlpha, TranslationAlpha or EnableFK")));
+				if (!Requested.InputPointer.IsEmpty())
+				{
+					OutError.Source.JsonPath = Requested.InputPointer;
+					OutError.SourceKind = TEXT("related_input");
+				}
 				return false;
 			}
 			const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
@@ -1241,8 +1469,19 @@ namespace UE::UAI::Composition::GraphCompound
 			USkeleton* const Skeleton = LoadObject<USkeleton>(nullptr, *Spec.SkeletonRef);
 			if (!Skeleton)
 			{
-				SetError(OutError, TEXT("graph_compound_animation_skeleton_ref_invalid"),
-					Spec.SkeletonRef);
+				OutError = RigOperationFailure(TEXT("graph_compound_animation_skeleton_ref_invalid"),
+					TEXT("The Control Rig creation skeleton could not be loaded as a Skeleton asset."), Request.GetTargetRef(),
+					MakeShared<FJsonValueString>(Spec.SkeletonRef), MakeShared<FJsonValueString>(USkeleton::StaticClass()->GetPathName()));
+				OutError.PropertyPath = TEXT("skeleton_ref");
+				const auto& Edits = Request.GetPayload().GetEdits();
+				if (!Edits.IsEmpty())
+				{
+					if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edits[0].GetIdentity().GetSemanticId()))
+					{
+						OutError.Source.JsonPath = JoinInputPointer(*Pointer, TEXT("/skeleton_ref"));
+						OutError.SourceKind = TEXT("related_input");
+					}
+				}
 				return nullptr;
 			}
 			UControlRigBlueprintFactory* const Factory =
@@ -1257,8 +1496,15 @@ namespace UE::UAI::Composition::GraphCompound
 				|| Controller->ImportBones(Skeleton->GetReferenceSkeleton(), NAME_None,
 					false, false, false, false).IsEmpty())
 			{
-				SetError(OutError, TEXT("graph_compound_control_rig_factory_failed"),
-					Request.GetTargetRef());
+				OutError = RigOperationFailure(TEXT("graph_compound_control_rig_factory_failed"),
+					!Blueprint ? TEXT("The Control Rig factory did not create a ControlRigBlueprint.")
+						: !Controller ? TEXT("The created Control Rig has no hierarchy controller.")
+						: TEXT("The hierarchy controller imported no bones from the selected skeleton."), Request.GetTargetRef());
+				if (Blueprint && Controller)
+				{
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one imported bone"));
+				}
 				return nullptr;
 			}
 			const FSoftObjectProperty* Property = FindFProperty<FSoftObjectProperty>(
@@ -1267,7 +1513,10 @@ namespace UE::UAI::Composition::GraphCompound
 				? Property->ContainerPtrToValuePtr<FSoftObjectPtr>(Blueprint) : nullptr;
 			if (!Source)
 			{
-				SetError(OutError, TEXT("graph_compound_control_rig_source_property_missing"));
+				OutError = RigOperationFailure(TEXT("graph_compound_control_rig_source_property_missing"),
+					!Property ? TEXT("ControlRigBlueprint has no SourceHierarchyImport soft-object property.")
+						: TEXT("The created Control Rig SourceHierarchyImport property could not be accessed."), Request.GetTargetRef());
+				OutError.PropertyPath = TEXT("SourceHierarchyImport");
 				return nullptr;
 			}
 			*Source = FSoftObjectPtr(Skeleton);
@@ -1294,8 +1543,26 @@ namespace UE::UAI::Composition::GraphCompound
 				? UIKRigController::GetController(Rig) : nullptr;
 			if (!Rig || !Controller || !Controller->SetSkeletalMesh(Mesh))
 			{
-				SetError(OutError, TEXT("graph_compound_ik_rig_factory_failed"),
-					Request.GetTargetRef());
+				OutError = RigOperationFailure(TEXT("graph_compound_ik_rig_factory_failed"),
+					!Mesh ? TEXT("The IK Rig creation skeletal mesh could not be loaded.")
+						: !Rig ? TEXT("The IK Rig factory did not create an IK Rig asset.")
+						: !Controller ? TEXT("The newly created IK Rig has no controller.")
+						: TEXT("The IK Rig controller rejected the creation skeletal mesh."), Request.GetTargetRef());
+				if (!Mesh || (Rig && Controller))
+				{
+					OutError.ActualValue = MakeShared<FJsonValueString>(Spec.SkeletalMeshRef);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(USkeletalMesh::StaticClass()->GetPathName());
+					OutError.PropertyPath = TEXT("/skeletal_mesh_ref");
+					const auto& Edits = Request.GetPayload().GetEdits();
+					if (!Edits.IsEmpty())
+					{
+						if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edits[0].GetIdentity().GetSemanticId()))
+						{
+							OutError.Source.JsonPath = JoinInputPointer(*Pointer, TEXT("/skeletal_mesh_ref"));
+							OutError.SourceKind = TEXT("related_input");
+						}
+					}
+				}
 				return nullptr;
 			}
 			Created = Rig;
@@ -1315,8 +1582,27 @@ namespace UE::UAI::Composition::GraphCompound
 				? UIKRetargeterController::GetController(Retargeter) : nullptr;
 			if (!Retargeter || !Controller)
 			{
-				SetError(OutError, TEXT("graph_compound_ik_retargeter_factory_failed"),
-					Request.GetTargetRef());
+				OutError = RigOperationFailure(TEXT("graph_compound_ik_retargeter_factory_failed"),
+					!Source ? TEXT("The source IK Rig for retargeter creation could not be loaded.")
+						: !Target ? TEXT("The target IK Rig for retargeter creation could not be loaded.")
+						: !Retargeter ? TEXT("The IK Retargeter factory did not create an asset.")
+						: TEXT("The newly created IK Retargeter has no controller."), Request.GetTargetRef());
+				if (!Source || !Target)
+				{
+					const FString Field = !Source ? TEXT("/source_ik_rig_ref") : TEXT("/target_ik_rig_ref");
+					OutError.ActualValue = MakeShared<FJsonValueString>(!Source ? Spec.SourceRigRef : Spec.TargetRigRef);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(UIKRigDefinition::StaticClass()->GetPathName());
+					OutError.PropertyPath = Field;
+					const auto& Edits = Request.GetPayload().GetEdits();
+					if (!Edits.IsEmpty())
+					{
+						if (const FString* Pointer = Request.GetPayload().FindInputPointer(Edits[0].GetIdentity().GetSemanticId()))
+						{
+							OutError.Source.JsonPath = JoinInputPointer(*Pointer, Field);
+							OutError.SourceKind = TEXT("related_input");
+						}
+					}
+				}
 				return nullptr;
 			}
 			Controller->SetIKRig(ERetargetSourceOrTarget::Source, Source);
@@ -1326,8 +1612,13 @@ namespace UE::UAI::Composition::GraphCompound
 		}
 		if (!Created || Created->GetClass()->GetPathName() != Spec.NativeClassPath)
 		{
-			SetError(OutError, TEXT("graph_compound_animation_factory_failed"),
-				Request.GetTargetRef(), Spec.NativeClassPath);
+			OutError = RigOperationFailure(TEXT("graph_compound_animation_factory_failed"),
+				!Created ? TEXT("The animation asset factory returned no asset.")
+					: TEXT("The animation asset factory created an asset with a different native class than requested."), Request.GetTargetRef(),
+				nullptr,
+				MakeShared<FJsonValueString>(Spec.NativeClassPath));
+			if (Created) OutError.ActualValue = MakeShared<FJsonValueString>(Created->GetClass()->GetPathName());
+			OutError.ActualValuePresent = Created != nullptr;
 			return nullptr;
 		}
 		return Created;
@@ -1357,6 +1648,13 @@ namespace UE::UAI::Composition::GraphCompound
 					Apply, Barrier, Topology,
 					OutRevision, Evidence, NativeError);
 			}
+			else
+			{
+				NativeError = RigOperationFailure(TEXT("graph_compound_animation_native_failed"),
+					TEXT("The hierarchy graph mutation requires a ControlRigBlueprint target."), Target.GetPathName(),
+					MakeShared<FJsonValueString>(Target.GetClass()->GetPathName()),
+					MakeShared<FJsonValueString>(UControlRigBlueprint::StaticClass()->GetPathName()));
+			}
 		}
 		else if (Capability == TEXT("animation.control_rig.shape_library.apply"))
 		{
@@ -1367,6 +1665,13 @@ namespace UE::UAI::Composition::GraphCompound
 					*Library, Spec.Shapes, Apply, Barrier, Topology,
 					OutRevision, Evidence, NativeError);
 			}
+			else
+			{
+				NativeError = RigOperationFailure(TEXT("graph_compound_animation_native_failed"),
+					TEXT("The shape library mutation requires a ControlRigShapeLibrary target."), Target.GetPathName(),
+					MakeShared<FJsonValueString>(Target.GetClass()->GetPathName()),
+					MakeShared<FJsonValueString>(UControlRigShapeLibrary::StaticClass()->GetPathName()));
+			}
 		}
 		else if (Capability == TEXT("animation.ik_rig.definition.apply"))
 		{
@@ -1374,7 +1679,14 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				bApplied = Hook.TryApplyAndCaptureIKRigDefinition(
 					*Rig, Spec.RetargetRoot, Spec.Goals, Spec.Solvers, Spec.Chains,
-					Apply, Barrier, Topology, OutRevision, Evidence, NativeError);
+					Apply, Barrier, Topology, OutRevision, Evidence, NativeError, Spec.RetargetRootInputPointer);
+			}
+			else
+			{
+				NativeError = RigOperationFailure(TEXT("graph_compound_animation_native_failed"),
+					TEXT("The IK definition mutation requires an IKRigDefinition target."), Target.GetPathName(),
+					MakeShared<FJsonValueString>(Target.GetClass()->GetPathName()),
+					MakeShared<FJsonValueString>(UIKRigDefinition::StaticClass()->GetPathName()));
 			}
 		}
 		else if (Capability == TEXT("animation.ik_rig.definition.auto_generate"))
@@ -1386,7 +1698,26 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				bApplied = Hook.TryApplyAndCaptureIKRigAutoGenerate(
 					*Rig, *Mesh, Spec.Preset, Apply, Barrier, Topology,
-					OutRevision, Evidence, NativeError);
+					OutRevision, Evidence, NativeError, Spec.AutoGenerateInputPointer);
+			}
+			else if (!Rig)
+			{
+				NativeError = RigOperationFailure(TEXT("graph_compound_animation_native_failed"),
+					TEXT("IK automatic generation requires an IKRigDefinition target."), Target.GetPathName(),
+					MakeShared<FJsonValueString>(Target.GetClass()->GetPathName()),
+					MakeShared<FJsonValueString>(UIKRigDefinition::StaticClass()->GetPathName()));
+			}
+			else
+			{
+				NativeError = RigOperationFailure(TEXT("graph_compound_animation_native_failed"),
+					TEXT("The skeletal mesh for IK automatic generation could not be loaded."), Target.GetPathName(),
+					MakeShared<FJsonValueString>(Spec.SkeletalMeshRef), MakeShared<FJsonValueString>(USkeletalMesh::StaticClass()->GetPathName()));
+				NativeError.PropertyPath = TEXT("/skeletal_mesh_ref");
+				if (!Spec.AutoGenerateInputPointer.IsEmpty())
+				{
+					NativeError.Source.JsonPath = JoinInputPointer(Spec.AutoGenerateInputPointer, TEXT("/skeletal_mesh_ref"));
+					NativeError.SourceKind = TEXT("related_input");
+				}
 			}
 		}
 		else if (Capability == TEXT("animation.ik_retargeter.definition.apply"))
@@ -1400,7 +1731,26 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				bApplied = Hook.TryApplyAndCaptureIKRetargeterDefinition(
 					*Retargeter, *Source, *TargetRig, Spec.Mappings,
-					Apply, Barrier, Topology, OutRevision, Evidence, NativeError);
+					Apply, Barrier, Topology, OutRevision, Evidence, NativeError, Spec.SourceRigInputPointer, Spec.TargetRigInputPointer);
+			}
+			else if (!Retargeter)
+			{
+				NativeError = RigOperationFailure(TEXT("graph_compound_animation_native_failed"),
+					TEXT("The retarget definition mutation requires an IKRetargeter target."), Target.GetPathName(),
+					MakeShared<FJsonValueString>(Target.GetClass()->GetPathName()), MakeShared<FJsonValueString>(UIKRetargeter::StaticClass()->GetPathName()));
+			}
+			else
+			{
+				NativeError = RigOperationFailure(TEXT("graph_compound_animation_native_failed"),
+					!Source ? TEXT("The retarget definition source IK Rig could not be loaded.") : TEXT("The retarget definition target IK Rig could not be loaded."),
+					Target.GetPathName(), MakeShared<FJsonValueString>(!Source ? Spec.SourceRigRef : Spec.TargetRigRef),
+					MakeShared<FJsonValueString>(UIKRigDefinition::StaticClass()->GetPathName()));
+				const FString& Pointer = !Source ? Spec.SourceRigInputPointer : Spec.TargetRigInputPointer;
+				if (!Pointer.IsEmpty())
+				{
+					NativeError.Source.JsonPath = Pointer;
+					NativeError.SourceKind = TEXT("related_input");
+				}
 			}
 		}
 		else if (UIKRetargeter* const Retargeter = Cast<UIKRetargeter>(&Target))
@@ -1409,13 +1759,28 @@ namespace UE::UAI::Composition::GraphCompound
 				*Retargeter, Spec.Settings, Apply, Barrier, Topology,
 				OutRevision, Evidence, NativeError);
 		}
+		else
+		{
+			NativeError = RigOperationFailure(TEXT("graph_compound_animation_native_failed"),
+				TEXT("The retarget settings mutation requires an IKRetargeter target."), Target.GetPathName(),
+				MakeShared<FJsonValueString>(Target.GetClass()->GetPathName()), MakeShared<FJsonValueString>(UIKRetargeter::StaticClass()->GetPathName()));
+		}
 		if (!bApplied || !Barrier.IsComplete() || Barrier.GetErrorCount() != 0)
 		{
-			SetError(OutError,
-				NativeError.GetCode().IsEmpty()
-					? TEXT("graph_compound_animation_native_failed")
-					: NativeError.GetCode(),
-				Target.GetPathName(), NativeError.GetDetail());
+			OutError = NativeError.IsValid() ? NativeError
+				: RigOperationFailure(TEXT("graph_compound_animation_native_failed"),
+					!bApplied ? TEXT("The native animation mutation could not be applied.")
+						: !Barrier.IsComplete() ? TEXT("The native animation mutation did not complete its compile or validation barrier.")
+						: TEXT("The native animation mutation completed with compile or validation errors."), Target.GetPathName());
+			if (!NativeError.IsValid())
+			{
+				const auto Facts = MakeShared<FJsonObject>();
+				Facts->SetBoolField(TEXT("applied"), bApplied);
+				Facts->SetBoolField(TEXT("barrier_complete"), Barrier.IsComplete());
+				Facts->SetNumberField(TEXT("barrier_error_count"), Barrier.GetErrorCount());
+				OutError.ActualValue = MakeShared<FJsonValueObject>(Facts);
+			}
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target.GetPathName();
 			return false;
 		}
 		return true;

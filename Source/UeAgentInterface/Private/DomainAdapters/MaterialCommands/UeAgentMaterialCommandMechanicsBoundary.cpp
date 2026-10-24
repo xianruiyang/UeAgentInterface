@@ -1,5 +1,7 @@
 #include "DomainAdapters/MaterialCommands/UeAgentMaterialCommandMechanicsBoundary.h"
 
+#include "Dom/JsonValue.h"
+
 namespace UE::UAI::DomainAdapters::MaterialCommands
 {
 	using Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile;
@@ -8,10 +10,16 @@ namespace UE::UAI::DomainAdapters::MaterialCommands
 	{
 		static const TArray<FString> Ids = {
 			TEXT("material.asset.create"),
-			TEXT("material.function.graph.apply"),
-			TEXT("material.graph.apply"),
 			TEXT("material_instance.asset.create"),
 			TEXT("material_instance.parameters.apply"),
+		};
+		return Ids;
+	}
+
+	const TArray<FString>& GetPublicCommandIds()
+	{
+		static const TArray<FString> Ids = {
+			TEXT("material_instance.asset.create"),
 		};
 		return Ids;
 	}
@@ -23,12 +31,13 @@ namespace UE::UAI::DomainAdapters::MaterialCommands
 
 	bool TryGetActivationProfiles(
 		TArray<FUeAgentGraphCompoundActivationProfile>& OutProfiles,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutProfiles.Reset();
 		OutError.Reset();
-		const TArray<FUeAgentGraphCompoundActivationProfile>& Canonical =
-			Composition::GraphCompound::GetGraphCompoundActivationProfiles();
+		const TArray<Composition::GraphCompound::FUeAgentGraphCompoundActivationProfile>* GraphProfiles = nullptr;
+		if (!Composition::GraphCompound::TryGetGraphCompoundActivationProfiles(GraphProfiles, OutError)) return false;
+		const auto& Canonical = *GraphProfiles;
 		for (const FString& CommandId : GetCommandIds())
 		{
 			const FUeAgentGraphCompoundActivationProfile* Match =
@@ -40,7 +49,21 @@ namespace UE::UAI::DomainAdapters::MaterialCommands
 			if (!Match || !Match->IsValid())
 			{
 				OutProfiles.Reset();
-				OutError = TEXT("material_command_profile_missing:") + CommandId;
+				if (Match) {
+					OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("material_command_profile_missing"),
+						Match->GetValidationDiagnostic(), TEXT("runtime_factory"),
+						TEXT("A required material activation profile failed validation."));
+				} else {
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_command_profile_missing"),
+						TEXT("No activation profile is registered for a required material command."), TEXT("runtime_factory"));
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.PropertyPath = TEXT("activation_profile_registered");
+				}
+				OutError.InternalContext = CommandId;
+				OutError.SourceKind = TEXT("native_result");
+				if (GetPublicCommandIds().Contains(CommandId))
+					OutError.PublicMessage += TEXT(" Command: ") + CommandId + TEXT(".");
 				return false;
 			}
 			OutProfiles.Add(*Match);

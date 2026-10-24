@@ -1,12 +1,13 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class FJsonObject;
 class FJsonValue;
 struct FUeAgentStructuredHjsonDocument;
 struct FUeAgentStructuredHjsonWriteOptions;
-struct FUeAgentStructuredResourceBudget;
 
 namespace UeAgentStructuredAuthoringIO
 {
@@ -20,32 +21,26 @@ namespace UeAgentStructuredAuthoringIO
 	UEAGENTINTERFACE_API bool SaveObject(
 			const FString& FilePath,
 			const TSharedPtr<FJsonObject>& Object,
-			FString* OutError = nullptr);
+			UE::UAI::Contract::FDiagnostic* OutError = nullptr);
 
 	UEAGENTINTERFACE_API bool SaveObject(
 			const FString& FilePath,
 			const TSharedPtr<FJsonObject>& Object,
 			const FUeAgentStructuredHjsonWriteOptions& Options,
-			FString* OutError = nullptr);
+			UE::UAI::Contract::FDiagnostic* OutError = nullptr);
 
 	UEAGENTINTERFACE_API bool LoadObject(
 			const FString& FilePath,
 			TSharedPtr<FJsonObject>& OutObject,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool LoadDocument(
 			const FString& FilePath,
 			FUeAgentStructuredHjsonDocument& OutDocument,
-			FString& OutError);
-
-	UEAGENTINTERFACE_API bool LoadDocument(
-			const FString& FilePath,
-			const FUeAgentStructuredResourceBudget& ResourceBudget,
-			FUeAgentStructuredHjsonDocument& OutDocument,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool LoadOptionalObject(
 			const FString& FilePath,
 			TSharedPtr<FJsonObject>& OutObject,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 }

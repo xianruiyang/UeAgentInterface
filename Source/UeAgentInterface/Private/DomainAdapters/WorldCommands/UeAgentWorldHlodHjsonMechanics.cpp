@@ -1,351 +1,311 @@
 #include "DomainAdapters/WorldCommands/UeAgentWorldHlodHjsonMechanics.h"
 
-#include "AssetRegistry/AssetRegistryModule.h"
-#include "AssetToolsModule.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
-#include "HAL/FileManager.h"
+#include "Core/Contract/UeAgentCommandJson.h"
+#include "Composition/HjsonImport/UeAgentReflectionRootPropertyImport.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringApplyProvider.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringAssets.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringDescriptors.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringExport.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringRegistration.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringState.h"
+#include "Utilities/AuthoringExport/UeAgentExportWorkspaceWriter.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/PackageName.h"
-#include "PackageTools.h"
-#include "UObject/GarbageCollection.h"
-#include "UObject/Package.h"
-#include "UObject/SavePackage.h"
-#include "WorldPartition/HLOD/HLODLayer.h"
-#include "WorldPartition/HLOD/HLODLayerFactory.h"
 
 namespace UE::UAI::DomainAdapters::WorldCommands
 {
 	using namespace HjsonWorkspace;
 	using namespace HjsonWorkspace::DomainAuthoring;
 	using namespace DomainAdapters::ContentGraphRead;
+	using namespace CommandContract;
 
 	namespace
 	{
-		const FString ProviderId = TEXT("world-hlod-domain-provider");
-		const FString SchemaId = TEXT("uai.world_hlod_layer.edit/1");
 		const FString RootType = TEXT("/Script/Engine.HLODLayer");
-		const FDomainHjsonDocumentContract DocumentContract(
-			TEXT("world-hlod"), SchemaId, RootType);
-
-		bool Fail(
-			FWorkspaceError& OutError,
-			FString Code,
-			FString Subject = FString(),
-			FString Detail = TEXT("/"))
+		FString PackageIdentity(const FString& Target)
 		{
-			OutError.Set(MoveTemp(Code), MoveTemp(Subject), MoveTemp(Detail));
-			return false;
+			return Target.Contains(TEXT("."))
+				? FPackageName::ObjectPathToPackageName(Target) : Target;
 		}
 
-		bool TryParseLayerType(
-			const FString& Text,
-			EHLODLayerType& OutType)
+		bool Fail(FWorkspaceError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic,
+			const FString& Target = FString(), const FString& Pointer = TEXT("/"))
+        {
+            OutError.SetFailure(MoveTemp(Diagnostic), Target, Pointer);
+            return false;
+        }
+
+		const UeAgentReflectionAuthoring::FProfile* ResolveProfile(
+			const FString& Target, FWorkspaceError& OutError)
 		{
-			if (Text.Equals(TEXT("Instancing"), ESearchCase::IgnoreCase))
+			UE::UAI::Contract::FDiagnostic Error;
+			if (!UeAgentReflectionAuthoring::RegisterAuthoring(Error))
 			{
-				OutType = EHLODLayerType::Instancing;
-				return true;
+				Fail(OutError, Error, Target);
+				return nullptr;
 			}
-			if (Text.Equals(TEXT("MeshMerge"), ESearchCase::IgnoreCase))
+			const auto* Profile =
+				UeAgentReflectionAuthoring::FindProfileByTypeId(TEXT("hlod_layer"));
+			if (!Profile)
 			{
-				OutType = EHLODLayerType::MeshMerge;
-				return true;
+				auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_hlod_reflection_profile_missing"),
+					TEXT("No reflection authoring profile is registered for HLODLayer."), TEXT("authoring_resolve"));
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.PropertyPath = TEXT("reflection_profile_registered");
+				Diagnostic.SourceKind = TEXT("native_result");
+				Fail(OutError, MoveTemp(Diagnostic), Target);
 			}
-			if (Text.Equals(TEXT("MeshSimplify"), ESearchCase::IgnoreCase))
-			{
-				OutType = EHLODLayerType::MeshSimplify;
-				return true;
-			}
-			if (Text.Equals(TEXT("MeshApproximate"), ESearchCase::IgnoreCase))
-			{
-				OutType = EHLODLayerType::MeshApproximate;
-				return true;
-			}
-			if (Text.Equals(TEXT("Custom"), ESearchCase::IgnoreCase))
-			{
-				OutType = EHLODLayerType::Custom;
-				return true;
-			}
-			return false;
+			return Profile;
 		}
 
-		bool TryRead(
-			const FString& Target,
-			FString& OutPayload,
-			FString& OutRevision,
-			TSharedPtr<FJsonObject>& OutSnapshot,
+		bool Read(const FString& Target, FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
 			UObject* Object = nullptr;
 			FUeAgentContentGraphCapture Capture;
-			if (!TryCaptureObject(
-				Target, RootType, Object, Capture, OutError))
-			{
+			if (!TryCaptureObject(Target, RootType, Object, Capture, OutError))
 				return false;
-			}
-			OutRevision = Capture.Revision;
-			if (!TryBuildCaptureSnapshot(
-				Target, RootType, Capture, OutSnapshot, OutError))
-			{
+			TSharedPtr<FJsonObject> Snapshot;
+			if (!TryBuildCaptureSnapshot(Target, RootType, Capture, Snapshot, OutError))
 				return false;
-			}
-			return TryCanonicalizeObject(OutSnapshot, OutPayload, OutError);
+			return TryCanonicalizeObject(Snapshot, OutPayload, OutError);
 		}
 
-		UHLODLayer* TryLoadLayer(const FString& Target)
+		bool ReadRevision(const FString& Target, FString& Payload,
+			FString& Revision, FWorkspaceError& Error)
 		{
-			return Cast<UHLODLayer>(StaticLoadObject(
-				UHLODLayer::StaticClass(), nullptr,
-				*ObjectPathFromPackageIdentity(Target)));
-		}
-
-		bool TryApplyNumericProperty(
-			UHLODLayer& Layer,
-			const TSharedPtr<FJsonObject>& Root,
-			const TCHAR* JsonField,
-			const TCHAR* PropertyName,
-			const bool bInteger,
-			FWorkspaceError& OutError)
-		{
-			double Value = 0.0;
-			if (!Root->TryGetNumberField(JsonField, Value)) return true;
-			if (!FMath::IsFinite(Value) || (bInteger && Value < 1.0))
-			{
-				return Fail(
-					OutError, TEXT("world_hlod_numeric_value_invalid"), JsonField);
-			}
-			if (bInteger)
-			{
-				FIntProperty* Property = FindFProperty<FIntProperty>(
-					UHLODLayer::StaticClass(), PropertyName);
-				if (!Property)
-				{
-					return Fail(
-						OutError, TEXT("world_hlod_property_unavailable"), PropertyName);
-				}
-				Property->SetPropertyValue_InContainer(
-					&Layer, FMath::RoundToInt(Value));
-			}
-			else
-			{
-				FDoubleProperty* Property = FindFProperty<FDoubleProperty>(
-					UHLODLayer::StaticClass(), PropertyName);
-				if (!Property)
-				{
-					return Fail(
-						OutError, TEXT("world_hlod_property_unavailable"), PropertyName);
-				}
-				Property->SetPropertyValue_InContainer(&Layer, Value);
-			}
+			if (!Read(Target, Payload, Error)) return false;
+			UObject* Owner = nullptr;
+			FUeAgentContentGraphCapture Capture;
+			if (!TryCaptureObject(Target, RootType, Owner, Capture, Error)) return false;
+			Revision = Capture.Revision;
 			return true;
 		}
 
-		bool TryCreateLayer(
-			const FString& Target,
-			UHLODLayer*& OutLayer,
-			FWorkspaceError& OutError)
+		bool Create(const UeAgentReflectionAuthoring::FProfile& Profile,
+			const FString& Target, const FResolvedDomainHjsonDocument& Document,
+			FString& Payload, FWorkspaceError& Error)
 		{
-			OutLayer = nullptr;
-			if (!FPackageName::IsValidLongPackageName(Target))
+			// The domain selects its root type; the existing Reflection input,
+			// native factory, preview, transaction and absent checkpoint own creation.
+			const TSharedPtr<FJsonObject>* Input = nullptr;
+			if (!Document.Root.IsValid()
+				|| !Document.Root->TryGetObjectField(TEXT("document"), Input)
+				|| !Input || !Input->IsValid())
 			{
-				return Fail(
-					OutError, TEXT("world_hlod_target_package_invalid"), Target);
+				const auto Actual = Document.Root.IsValid() ? Document.Root->TryGetField(TEXT("document")) : nullptr;
+				auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("world_hlod_create_document_required"),
+					TEXT("/root/document"), MakeShared<FJsonValueString>(TEXT("object")),
+					Actual.IsValid() ? Actual : MakeShared<FJsonValueNull>(), TEXT("input_decode"),
+					TEXT("Single-file HLOD creation requires an object-valued root.document."));
+				Diagnostic.ActualValuePresent = Actual.IsValid();
+				return Fail(Error, MoveTemp(Diagnostic), Target);
 			}
-			const FString AssetName = FPackageName::GetLongPackageAssetName(Target);
-			const FString PackagePath = FPackageName::GetLongPackagePath(Target);
-			if (AssetName.IsEmpty() || PackagePath.IsEmpty())
+			if (Document.ExpectedRevision != TEXT("missing"))
 			{
-				return Fail(
-					OutError, TEXT("world_hlod_target_package_invalid"), Target);
+				auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_hlod_expected_missing_required"),
+					TEXT("Single-file HLOD creation requires expected_revision to be 'missing'."), TEXT("input_preflight"));
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Document.ExpectedRevision);
+				Diagnostic.PropertyPath = TEXT("expects_absent_target");
+				Diagnostic.Source.JsonPath = TEXT("/expected_revision");
+				Diagnostic.SourceKind = TEXT("command_input");
+				return Fail(Error, MoveTemp(Diagnostic), Target);
 			}
-			UHLODLayerFactory* Factory = NewObject<UHLODLayerFactory>();
-			OutLayer = Cast<UHLODLayer>(
-				FAssetToolsModule::GetModule().Get().CreateAsset(
-					AssetName,
-					PackagePath,
-					UHLODLayer::StaticClass(),
-					Factory));
-			if (!OutLayer)
+			auto Source = UeAgentAuthoringWorkspaceLoader::FSourceRequest::MakeInlineObject(
+				*Input, TEXT("inline://world-hlod-create"));
+			Source.ResolveSource = [Document](const FString&, const FString& Pointer)
 			{
-				return Fail(
-					OutError, TEXT("world_hlod_create_failed"), Target);
+				return Document.ResolveSource(TEXT("/root/document") + (Pointer == TEXT("/") ? FString() : Pointer));
+			};
+			UeAgentReflectionAuthoring::FWorkspaceInspectResult Inspection;
+			if (!UeAgentReflectionAuthoring::InspectAssetSource(Profile, Source,
+				PackageIdentity(Target), Inspection))
+				return Fail(Error, Inspection.Diagnostic, Target);
+			if (Inspection.RequestedOperation != TEXT("create") || Inspection.bAssetExists)
+			{
+				if (Inspection.RequestedOperation != TEXT("create")) {
+					const auto Actual = (*Input)->TryGetField(TEXT("operation"));
+					auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("world_hlod_absent_create_required"),
+						TEXT("/root/document/operation"), MakeShared<FJsonValueString>(TEXT("create")),
+						Actual.IsValid() ? Actual : MakeShared<FJsonValueNull>(), TEXT("input_preflight"),
+						TEXT("Single-file HLOD import requires document.operation to be create."));
+					Diagnostic.ActualValuePresent = Actual.IsValid();
+					return Fail(Error, MoveTemp(Diagnostic), Target);
+				}
+				auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_hlod_absent_create_required"),
+					TEXT("The HLOD creation target already exists; creation requires an absent asset."), TEXT("input_preflight"));
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(true);
+				Diagnostic.PropertyPath = TEXT("target_present");
+				Diagnostic.SourceKind = TEXT("native_result");
+				return Fail(Error, MoveTemp(Diagnostic), Target);
+			}
+			bool bReadbackCompleted = false;
+			auto FinalReadback = [&](UeAgentAuthoringWorkspaceTransaction::FOperationFailure& Failure)
+			{
+				FWorkspaceError ReadError;
+				bReadbackCompleted = TryReadbackImportPayload(
+					TEXT("world-hlod-domain-provider"), Target, ObjectPathFromPackageIdentity(Target),
+					nullptr, TEXT("world_hlod_create_readback_invalid"),
+					TEXT("world_hlod_compile_not_settled"),
+					[&Target](FString& ReadPayload, FString& Revision, FWorkspaceError& ReadFailure)
+					{ return ReadRevision(Target, ReadPayload, Revision, ReadFailure); },
+					Payload, ReadError);
+				if (!bReadbackCompleted) {
+					Failure.Diagnostic = ReadError.GetDiagnostic();
+				}
+				return bReadbackCompleted;
+			};
+			UeAgentReflectionAuthoring::FAssetApplyResult Result;
+			if (!UeAgentReflectionAuthoring::ApplyAssetSource(Profile, Source,
+				PackageIdentity(Target), Result, true,
+				TEXT("world-hlod-create-") + FGuid::NewGuid().ToString(EGuidFormats::Digits),
+				true, FinalReadback, nullptr, true))
+				return Fail(Error, Result.Diagnostic, Target);
+			if (!bReadbackCompleted) {
+				auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("domain_hjson_atomic_readback_not_executed"),
+					TEXT("HLOD apply returned success without completing its required final readback."), TEXT("readback"));
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.PropertyPath = TEXT("final_readback_completed");
+				Diagnostic.SourceKind = TEXT("native_result");
+				Diagnostic.MutationMayHaveStarted = true;
+				return Fail(Error, MoveTemp(Diagnostic), Target);
 			}
 			return true;
-		}
-
-		bool TrySaveAndReload(
-			const FString& Target,
-			UHLODLayer*& Layer,
-			FWorkspaceError& OutError)
-		{
-			UPackage* Package = Layer ? Layer->GetOutermost() : nullptr;
-			if (!Package)
-			{
-				return Fail(OutError, TEXT("world_hlod_package_unavailable"), Target);
-			}
-			const FString Filename = FPackageName::LongPackageNameToFilename(
-				Target, FPackageName::GetAssetPackageExtension());
-			FSavePackageArgs SaveArgs;
-			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-			SaveArgs.SaveFlags = SAVE_NoError;
-			if (!UPackage::SavePackage(Package, Layer, *Filename, SaveArgs))
-			{
-				return Fail(OutError, TEXT("world_hlod_save_failed"), Target);
-			}
-			FAssetRegistryModule::AssetCreated(Layer);
-			Layer = nullptr;
-			TArray<UPackage*> Packages{Package};
-			FText UnloadError;
-			if (!UPackageTools::UnloadPackages(Packages, UnloadError, false))
-			{
-				return Fail(
-					OutError, TEXT("world_hlod_unload_failed"), Target,
-					UnloadError.ToString());
-			}
-			CollectGarbage(RF_NoFlags);
-			Layer = TryLoadLayer(Target);
-			if (!Layer)
-			{
-				return Fail(OutError, TEXT("world_hlod_reload_failed"), Target);
-			}
-			return true;
-		}
-
-		bool TryImport(
-			const FString& Target,
-			const FString& CanonicalParamsJson,
-			FString& OutPayload,
-			FWorkspaceError& OutError)
-		{
-			FResolvedDomainHjsonDocument Document;
-			if (!TryDecodeResolvedDocument(
-				Target, CanonicalParamsJson, DocumentContract, Document, OutError))
-			{
-				return false;
-			}
-			UHLODLayer* Layer = TryLoadLayer(Target);
-			const bool bCreated = Layer == nullptr;
-			if (bCreated)
-			{
-				if (Document.ExpectedRevision != TEXT("absent"))
-				{
-					return Fail(
-						OutError, TEXT("world_hlod_expected_absent_required"), Target);
-				}
-				if (!TryCreateLayer(Target, Layer, OutError)) return false;
-			}
-			else
-			{
-				FString BeforePayload;
-				FString Revision;
-				TSharedPtr<FJsonObject> BeforeSnapshot;
-				if (!TryRead(
-					Target, BeforePayload, Revision, BeforeSnapshot, OutError))
-				{
-					return false;
-				}
-				if (Revision != Document.ExpectedRevision)
-				{
-					return Fail(
-						OutError, TEXT("world_hlod_stale_revision"), Target, Revision);
-				}
-			}
-
-			FString LayerTypeText;
-			EHLODLayerType LayerType = EHLODLayerType::Instancing;
-			if (Document.Root->TryGetStringField(TEXT("layer_type"), LayerTypeText)
-				&& !TryParseLayerType(LayerTypeText, LayerType))
-			{
-				return Fail(
-					OutError, TEXT("world_hlod_layer_type_invalid"), LayerTypeText);
-			}
-			FString ParentPath;
-			UHLODLayer* Parent = nullptr;
-			if (Document.Root->TryGetStringField(TEXT("parent_layer"), ParentPath)
-				&& !ParentPath.IsEmpty())
-			{
-				Parent = TryLoadLayer(ParentPath);
-				if (!Parent)
-				{
-					return Fail(
-						OutError, TEXT("world_hlod_parent_unresolved"), ParentPath);
-				}
-			}
-
-			Layer->Modify();
-			Layer->PreEditChange(nullptr);
-			if (!LayerTypeText.IsEmpty()) Layer->SetLayerType(LayerType);
-			bool bSpatiallyLoaded = true;
-			if (Document.Root->TryGetBoolField(
-				TEXT("is_spatially_loaded"), bSpatiallyLoaded))
-			{
-				Layer->SetIsSpatiallyLoaded(bSpatiallyLoaded);
-			}
-			if (!TryApplyNumericProperty(
-				*Layer, Document.Root, TEXT("cell_size"), TEXT("CellSize"), true,
-				OutError)
-				|| !TryApplyNumericProperty(
-					*Layer, Document.Root, TEXT("loading_range"),
-					TEXT("LoadingRange"), false, OutError))
-			{
-				return false;
-			}
-			if (Document.Root->HasField(TEXT("parent_layer")))
-			{
-				Layer->SetParentLayer(Parent);
-			}
-			Layer->PostEditChange();
-			Layer->MarkPackageDirty();
-			if (!TrySaveAndReload(Target, Layer, OutError)) return false;
-
-			FString ReadbackPayload;
-			FString Revision;
-			TSharedPtr<FJsonObject> Readback;
-			if (!TryRead(
-				Target, ReadbackPayload, Revision, Readback, OutError))
-			{
-				return false;
-			}
-			const TSharedPtr<FJsonObject> Mutation = MakeShared<FJsonObject>();
-			Mutation->SetStringField(
-				TEXT("kind"), bCreated ? TEXT("created") : TEXT("updated"));
-			Mutation->SetStringField(TEXT("root_type"), RootType);
-			FDomainHjsonImportLifecycleReceipt LifecycleReceipt;
-			LifecycleReceipt.bMutationApplied = true;
-			LifecycleReceipt.bCompileSettled = true;
-			LifecycleReceipt.bPackageSaved = true;
-			LifecycleReceipt.bUnloadedReloaded = true;
-			LifecycleReceipt.PersistenceReceiptId = Revision;
-			return TryBuildImportSuccessPayload(
-				ProviderId, Target, Revision, LifecycleReceipt, Readback, Mutation,
-				OutPayload, OutError);
 		}
 	}
 
-	bool TryExecuteHlodContentGraph(
-		const FString& CommandId,
-		const FString& TargetIdentity,
-		const FString& CanonicalParamsJson,
-		FString& OutPayloadJson,
-		bool& bOutReadOnly,
-		FWorkspaceError& OutError)
+	bool TryExecuteHlodContentGraph(const FString& CommandId,
+		const FString& TargetIdentity, const FString& CanonicalParamsJson,
+		FString& OutPayloadJson, bool& bOutReadOnly, FWorkspaceError& OutError)
 	{
 		OutPayloadJson.Reset();
 		bOutReadOnly = false;
 		OutError.Reset();
+		TSharedPtr<FJsonObject> Params;
+		UE::UAI::Contract::FDiagnostic JsonError;
+		if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError)
+			|| !Params.IsValid())
+		{
+			if (JsonError.IsValid()) return Fail(OutError, MoveTemp(JsonError), TargetIdentity);
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_hlod_params_invalid"),
+				TEXT("The HLOD command parameters did not decode to a JSON object."), TEXT("input_decode"));
+			Error.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			Error.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			Error.PropertyPath = TEXT("parameters_object_decoded");
+			Error.SourceKind = TEXT("command_input");
+			return Fail(OutError, MoveTemp(Error), TargetIdentity);
+		}
+		FString Target;
+		if (!Params->TryGetStringField(TEXT("target"), Target)
+			|| ObjectPathFromPackageIdentity(Target)
+				!= ObjectPathFromPackageIdentity(TargetIdentity))
+		{
+			const auto Actual = Params->TryGetField(TEXT("target"));
+			auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("world_hlod_target_identity_mismatch"),
+				TEXT("/target"), MakeShared<FJsonValueString>(TargetIdentity), Actual.IsValid() ? Actual : MakeShared<FJsonValueNull>(),
+				TEXT("input_decode"), TEXT("The command target must match the asset selected for the HLOD domain."));
+			Error.ActualValuePresent = Actual.IsValid();
+			Error.SourceKind = TEXT("command_input");
+			return Fail(OutError, MoveTemp(Error), TargetIdentity);
+		}
+
+		const auto* Profile = ResolveProfile(Target, OutError);
+		if (!Profile) return false;
+		if (CommandId == TEXT("content_graph.export_workspace"))
+		{
+			FString WorkspacePath;
+			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
+				|| WorkspacePath.IsEmpty())
+			{
+				const auto Actual = Params->TryGetField(TEXT("workspace_path"));
+				auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("world_hlod_export_path_required"),
+					TEXT("/workspace_path"), MakeShared<FJsonValueString>(TEXT("non-empty workspace directory path")),
+					Actual.IsValid() ? Actual : MakeShared<FJsonValueNull>(), TEXT("input_decode"),
+					TEXT("HLOD export requires a non-empty workspace_path string."));
+				Error.ActualValuePresent = Actual.IsValid();
+				Error.SourceKind = TEXT("command_input");
+				return Fail(OutError, MoveTemp(Error), Target);
+			}
+			bOutReadOnly = true;
+			return Composition::HjsonImport::TryExportReflectionRootWorkspace(
+				*Profile, Target, WorkspacePath, OutPayloadJson, OutError);
+		}
 		if (CommandId == TEXT("content_graph.import_workspace"))
 		{
-			return TryImport(
-				TargetIdentity, CanonicalParamsJson, OutPayloadJson, OutError);
+			FResolvedDomainHjsonDocument Document;
+			if (!TryDecodeResolvedDocument(Target, CanonicalParamsJson,
+				FDomainHjsonDocumentContract(TEXT("world_hlod"),
+					TEXT("uai.world_hlod_layer.edit/1"), RootType),
+				Document, OutError)) return false;
+			FScopedDomainHjsonDiagnosticSource DiagnosticSource(Document, OutError);
+			if (!Document.bSemanticWorkspaceDirectory)
+				return Create(*Profile, Target, Document, OutPayloadJson, OutError);
+			if (!Document.SemanticWorkspace.IsValid())
+			{
+				auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_hlod_semantic_workspace_required"),
+					TEXT("The resolved HLOD workspace directory has no semantic workspace data."), TEXT("workspace_resolve"));
+				Error.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				Error.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Error.PropertyPath = TEXT("semantic_workspace_resolved");
+				Error.SourceKind = TEXT("native_result");
+				return Fail(OutError, MoveTemp(Error), Target);
+			}
+			return Composition::HjsonImport::TryImportReflectionWorkspace(
+				*Profile, Document.SemanticWorkspace.ToSharedRef(),
+				{TEXT("world-hlod-domain-provider"), Target, ObjectPathFromPackageIdentity(Target),
+					TEXT("world-hlod-semantic"),
+					TEXT("world_hlod_semantic_prepare_failed"),
+					TEXT("world_hlod_semantic_apply_failed"),
+					TEXT("world_hlod_semantic_readback_payload_invalid"),
+					TEXT("world_hlod_compile_not_settled")},
+				[](TArray<TSharedPtr<FJsonValue>>& Properties)
+				{
+					TArray<TSharedPtr<FJsonValue>> Ordered;
+					auto MoveNamed = [&Properties, &Ordered](const TCHAR* Name)
+					{
+						for (int32 Index = 0; Index < Properties.Num(); ++Index)
+						{
+							const TSharedPtr<FJsonObject> Descriptor = Properties[Index]->AsObject();
+							FString Path;
+							if (Descriptor.IsValid()
+								&& Descriptor->TryGetStringField(TEXT("property_path"), Path)
+								&& Path == Name)
+							{
+								Ordered.Add(Properties[Index]);
+								Properties.RemoveAt(Index);
+								return;
+							}
+						}
+					};
+					MoveNamed(TEXT("LayerType"));
+					MoveNamed(TEXT("HLODBuilderClass"));
+					Ordered.Append(MoveTemp(Properties));
+					Properties = MoveTemp(Ordered);
+				}, OutPayloadJson, OutError);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{
-			FString Revision;
-			TSharedPtr<FJsonObject> Snapshot;
 			bOutReadOnly = true;
-			return TryRead(
-				TargetIdentity, OutPayloadJson, Revision, Snapshot, OutError);
+			return Read(Target, OutPayloadJson, OutError);
 		}
-		return Fail(
-			OutError, TEXT("world_hlod_command_not_supported"), CommandId);
+		auto Error = UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_hlod_command_not_supported"),
+			TEXT("The HLOD domain adapter only supports content_graph commands."), TEXT("domain_resolve"), CommandId);
+		Error.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+		Error.ActualValue = MakeShared<FJsonValueBoolean>(false);
+		Error.PropertyPath = TEXT("content_graph_command");
+		Error.SourceKind = TEXT("native_result");
+		return Fail(OutError, MoveTemp(Error), Target);
 	}
 }

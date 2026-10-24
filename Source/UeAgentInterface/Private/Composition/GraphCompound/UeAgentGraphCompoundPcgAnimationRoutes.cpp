@@ -1,4 +1,6 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundPcgAnimationRoutes.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundLifecycleResultContract.h"
 
 #include "Core/Contract/UeAgentContractJson.h"
@@ -18,6 +20,20 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
+
+		FDiagnostic RouteFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Subject,
+			const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected)
+		{
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, TEXT("graph_compound"), FString(), Subject);
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
 		struct FRouteSpec final
 		{
 			const TCHAR* CapabilityId;
@@ -82,14 +98,14 @@ namespace UE::UAI::Composition::GraphCompound
 			return Values;
 		}
 
-		FString CanonicalSchema(const TCHAR* Text)
+		FString CanonicalSchema(UE::UAI::Contract::FDiagnostic& Error, const TCHAR* Text)
 		{
 			TSharedPtr<FJsonObject> Object;
-			FString Error;
 			FString Canonical;
 			if (!Json::TryParseObject(Text, Object, Error)
 				|| !Json::TryCanonicalize(Object, Canonical, Error))
 			{
+				MarkGraphCompoundNativeDiagnostic(Error);
 				return FString();
 			}
 			return Canonical;
@@ -103,7 +119,7 @@ namespace UE::UAI::Composition::GraphCompound
 			return Result;
 		}
 
-		FString GraphEditsSchema(const TArray<FString>& AllowedKinds)
+		FString GraphEditsSchema(const TArray<FString>& AllowedKinds, UE::UAI::Contract::FDiagnostic& Error)
 		{
 			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 			Root->SetStringField(TEXT("type"), TEXT("object"));
@@ -151,94 +167,129 @@ namespace UE::UAI::Composition::GraphCompound
 				MakeShared<FJsonValueString>(TEXT("target_ref")),
 				MakeShared<FJsonValueString>(TEXT("edits"))});
 			FString Canonical;
-			FString Error;
-			return Json::TryCanonicalize(Root, Canonical, Error)
-				? Canonical : FString();
+			if (!Json::TryCanonicalize(Root, Canonical, Error))
+			{
+				MarkGraphCompoundNativeDiagnostic(Error);
+				return FString();
+			}
+			return Canonical;
 		}
 
-		FString InputSchema(const FRouteSpec& Spec)
+		FString InputSchema(const FRouteSpec& Spec, UE::UAI::Contract::FDiagnostic& Error)
 		{
 			using E = EPcgAnimationGraphInputKind;
 			switch (Spec.InputKind)
 			{
 			case E::AssetCreateSimple:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\"],\"type\":\"object\"}"));
 			case E::AssetCreateAnimBlueprint:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"parent_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"skeleton_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"parent_class_ref\",\"skeleton_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"parent_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"skeleton_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"parent_class_ref\",\"skeleton_ref\"],\"type\":\"object\"}"));
 			case E::AssetCreateBlendSpace:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"dimension\":{\"maximum\":2,\"minimum\":1,\"type\":\"integer\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"skeleton_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"dimension\",\"package_path\",\"skeleton_ref\"],\"type\":\"object\"}"));
+			{
+				FRouteSpec DefinitionSpec = Spec;
+				DefinitionSpec.InputKind = E::BlendSpaceDefinition;
+				TSharedPtr<FJsonObject> Root, Definition;
+				FString Canonical;
+				const FString RootSchema = CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"dimension\":{\"maximum\":2,\"minimum\":1,\"type\":\"integer\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"skeleton_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"dimension\",\"package_path\",\"skeleton_ref\"],\"type\":\"object\"}"));
+				if (RootSchema.IsEmpty() || !Json::TryParseObject(RootSchema, Root, Error))
+				{
+					MarkGraphCompoundNativeDiagnostic(Error);
+					return FString();
+				}
+				const FString DefinitionSchema = InputSchema(DefinitionSpec, Error);
+				if (DefinitionSchema.IsEmpty() || !Json::TryParseObject(DefinitionSchema, Definition, Error))
+				{
+					MarkGraphCompoundNativeDiagnostic(Error);
+					return FString();
+				}
+				const auto Properties = Root->GetObjectField(TEXT("properties"));
+				const auto Fields = Definition->GetObjectField(TEXT("properties"));
+				Properties->SetField(TEXT("axes"), Fields->TryGetField(TEXT("axes")));
+				Properties->SetField(TEXT("samples"), Fields->TryGetField(TEXT("samples")));
+				if (!Json::TryCanonicalize(Root, Canonical, Error))
+				{
+					MarkGraphCompoundNativeDiagnostic(Error);
+					return FString();
+				}
+				return Canonical;
+			}
 			case E::AssetCreateSkeletonBound:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"skeleton_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"skeleton_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"skeleton_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"skeleton_ref\"],\"type\":\"object\"}"));
 			case E::AssetCreateDeformerGraph:
 			case E::AssetCreateIkRig:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"skeletal_mesh_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"skeletal_mesh_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"skeletal_mesh_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"skeletal_mesh_ref\"],\"type\":\"object\"}"));
 			case E::AssetCreateConcreteClass:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"concrete_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"concrete_class_ref\",\"package_path\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"concrete_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"concrete_class_ref\",\"package_path\"],\"type\":\"object\"}"));
 			case E::AssetCreateMlModel:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"model_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"model_class_ref\",\"package_path\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"model_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"model_class_ref\",\"package_path\"],\"type\":\"object\"}"));
 			case E::AssetCreateRetargeter:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"source_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"source_ik_rig_ref\",\"target_ik_rig_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"source_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"source_ik_rig_ref\",\"target_ik_rig_ref\"],\"type\":\"object\"}"));
 			case E::GraphEdits:
-				return GraphEditsSchema(Spec.AllowedElementKinds);
+				return GraphEditsSchema(Spec.AllowedElementKinds, Error);
 			case E::BlackboardSchema:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"entries\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"entry_name\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"key_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"ownership\":{\"enum\":[\"local\",\"inherited\"],\"type\":\"string\"}},\"required\":[\"entry_name\",\"intent\",\"key_type_ref\",\"ownership\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"entries\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"entries\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"entry_name\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"key_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"ownership\":{\"enum\":[\"local\",\"inherited\"],\"type\":\"string\"}},\"required\":[\"entry_name\",\"intent\",\"key_type_ref\",\"ownership\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"entries\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::SmartObjectDefinition:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"slots\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"behavior_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"slot_guid\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"behavior_type_ref\",\"data_type_ref\",\"intent\",\"slot_guid\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"slots\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"slots\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"behavior_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"slot_guid\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"behavior_type_ref\",\"data_type_ref\",\"intent\",\"slot_guid\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"slots\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::PcgGraphInstance:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"graph_ref\":{\"minLength\":1,\"type\":\"string\"},\"overrides\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"property_guid\":{\"minLength\":1,\"type\":\"string\"},\"property_name\":{\"minLength\":1,\"type\":\"string\"},\"property_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"property_guid\",\"property_name\",\"property_type_ref\",\"value\"],\"type\":\"object\"},\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"graph_ref\",\"overrides\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"graph_ref\":{\"minLength\":1,\"type\":\"string\"},\"overrides\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"property_guid\":{\"minLength\":1,\"type\":\"string\"},\"property_name\":{\"minLength\":1,\"type\":\"string\"},\"property_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"property_guid\",\"property_name\",\"property_type_ref\",\"value\"],\"type\":\"object\"},\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"graph_ref\",\"overrides\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::PcgParameters:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"parameters\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"property_guid\":{\"minLength\":1,\"type\":\"string\"},\"property_name\":{\"minLength\":1,\"type\":\"string\"},\"property_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"property_guid\",\"property_name\",\"property_type_ref\",\"value\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"parameters\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"parameters\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"property_guid\":{\"minLength\":1,\"type\":\"string\"},\"property_name\":{\"minLength\":1,\"type\":\"string\"},\"property_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"property_guid\",\"property_name\",\"property_type_ref\",\"value\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"parameters\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::PcgComponentBinding:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"generation_policy\":{\"enum\":[\"on_demand\",\"on_load\",\"runtime\"],\"type\":\"string\"},\"graph_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"generation_policy\",\"graph_ref\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"generation_policy\":{\"enum\":[\"on_demand\",\"on_load\",\"runtime\"],\"type\":\"string\"},\"graph_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"generation_policy\",\"graph_ref\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::PcgDataAsset:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"content_revision\":{\"minLength\":1,\"type\":\"string\"},\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"source_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"content_revision\",\"data_type_ref\",\"source_ref\",\"target_ref\",\"value\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"source_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"data_type_ref\",\"source_ref\",\"target_ref\",\"value\"],\"type\":\"object\"}"));
 			case E::PcgDataFromLevel:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"source_level_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"data_type_ref\",\"source_level_ref\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"data_type_ref\":{\"minLength\":1,\"type\":\"string\"},\"source_level_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"data_type_ref\",\"source_level_ref\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::PcgWorldBinding:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"actor_ref\":{\"minLength\":1,\"type\":\"string\"},\"component_ref\":{\"minLength\":1,\"type\":\"string\"},\"generation_policy\":{\"enum\":[\"on_demand\",\"on_load\",\"runtime\"],\"type\":\"string\"},\"graph_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"actor_ref\",\"component_ref\",\"generation_policy\",\"graph_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"actor_ref\":{\"minLength\":1,\"type\":\"string\"},\"component_ref\":{\"minLength\":1,\"type\":\"string\"},\"generation_policy\":{\"enum\":[\"on_demand\",\"on_load\",\"runtime\"],\"type\":\"string\"},\"graph_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"actor_ref\",\"component_ref\",\"generation_policy\",\"graph_ref\"],\"type\":\"object\"}"));
 			case E::BlendSpaceDefinition:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"axes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"axis_index\":{\"minimum\":0,\"type\":\"integer\"},\"axis_name\":{\"minLength\":1,\"type\":\"string\"},\"grid_divisions\":{\"minimum\":1,\"type\":\"integer\"},\"maximum\":{\"type\":\"number\"},\"minimum\":{\"type\":\"number\"}},\"required\":[\"axis_index\",\"axis_name\",\"grid_divisions\",\"maximum\",\"minimum\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"samples\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"animation_ref\":{\"minLength\":1,\"type\":\"string\"},\"coordinates\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":1,\"type\":\"array\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"}},\"required\":[\"animation_ref\",\"coordinates\",\"intent\"],\"type\":\"object\"},\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"axes\",\"samples\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"axes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"axis_index\":{\"minimum\":0,\"type\":\"integer\"},\"axis_name\":{\"minLength\":1,\"type\":\"string\"},\"grid_divisions\":{\"minimum\":1,\"type\":\"integer\"},\"maximum\":{\"type\":\"number\"},\"minimum\":{\"type\":\"number\"}},\"required\":[\"axis_index\",\"axis_name\",\"grid_divisions\",\"maximum\",\"minimum\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"samples\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"animation_ref\":{\"minLength\":1,\"type\":\"string\"},\"coordinates\":{\"items\":{\"type\":\"number\"},\"maxItems\":3,\"minItems\":1,\"type\":\"array\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"}},\"required\":[\"animation_ref\",\"coordinates\",\"intent\"],\"type\":\"object\"},\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"axes\",\"samples\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::SkeletonCompatibility:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"changes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"delete\"],\"type\":\"string\"},\"skeleton_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"skeleton_ref\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"changes\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"changes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"delete\"],\"type\":\"string\"},\"skeleton_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"skeleton_ref\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"changes\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::SkeletonVirtualBone:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"name\":{\"minLength\":1,\"type\":\"string\"},\"source_bone\":{\"minLength\":1,\"type\":\"string\"},\"target_bone\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"name\",\"source_bone\",\"target_bone\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"name\":{\"minLength\":1,\"type\":\"string\"},\"source_bone\":{\"minLength\":1,\"type\":\"string\"},\"target_bone\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"name\",\"source_bone\",\"target_bone\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::ControlRigShapeLibrary:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"shapes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"material_ref\":{\"minLength\":1,\"type\":\"string\"},\"mesh_ref\":{\"minLength\":1,\"type\":\"string\"},\"name\":{\"minLength\":1,\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"}},\"required\":[\"intent\",\"material_ref\",\"mesh_ref\",\"name\",\"order_index\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"shapes\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"shapes\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"material_ref\":{\"minLength\":1,\"type\":\"string\"},\"mesh_ref\":{\"minLength\":1,\"type\":\"string\"},\"name\":{\"minLength\":1,\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"}},\"required\":[\"intent\",\"material_ref\",\"mesh_ref\",\"name\",\"order_index\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"shapes\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::DeformerSourceBindings:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"bindings\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"asset_ref\":{\"minLength\":1,\"type\":\"string\"},\"binding_key\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"property_type_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_ref\",\"binding_key\",\"intent\",\"property_type_ref\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"concrete_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"bindings\",\"concrete_class_ref\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"bindings\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"asset_ref\":{\"minLength\":1,\"type\":\"string\"},\"binding_key\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"property_type_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_ref\",\"binding_key\",\"intent\",\"property_type_ref\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"concrete_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"bindings\",\"concrete_class_ref\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::MeshDeformerCollectionEntries:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"entries\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"entry_kind\":{\"enum\":[\"deformer\",\"child_collection\"],\"type\":\"string\"},\"entry_ref\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"}},\"required\":[\"entry_kind\",\"entry_ref\",\"intent\",\"order_index\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"entries\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"entries\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"entry_kind\":{\"enum\":[\"deformer\",\"child_collection\"],\"type\":\"string\"},\"entry_ref\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"}},\"required\":[\"entry_kind\",\"entry_ref\",\"intent\",\"order_index\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"entries\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::MlDeformerConfiguration:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"animation_ref\":{\"minLength\":1,\"type\":\"string\"},\"concrete_model_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"deformer_graph_ref\":{\"type\":\"string\"},\"skeletal_mesh_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_geometry_cache_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"animation_ref\",\"concrete_model_class_ref\",\"deformer_graph_ref\",\"skeletal_mesh_ref\",\"target_geometry_cache_ref\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"animation_ref\":{\"minLength\":1,\"type\":\"string\"},\"concrete_model_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"deformer_graph_ref\":{\"type\":\"string\"},\"skeletal_mesh_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_geometry_cache_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"animation_ref\",\"concrete_model_class_ref\",\"deformer_graph_ref\",\"skeletal_mesh_ref\",\"target_geometry_cache_ref\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::IkRigDefinition:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"chains\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"end_bone\":{\"minLength\":1,\"type\":\"string\"},\"goal_name\":{\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"name\":{\"minLength\":1,\"type\":\"string\"},\"start_bone\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"end_bone\",\"goal_name\",\"intent\",\"name\",\"start_bone\"],\"type\":\"object\"},\"type\":\"array\"},\"goals\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"bone_name\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"name\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"bone_name\",\"intent\",\"name\"],\"type\":\"object\"},\"type\":\"array\"},\"retarget_root\":{\"minLength\":1,\"type\":\"string\"},\"solvers\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"},\"solver_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"solver_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"order_index\",\"solver_class_ref\",\"solver_ref\"],\"type\":\"object\"},\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"chains\",\"goals\",\"retarget_root\",\"solvers\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"chains\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"end_bone\":{\"minLength\":1,\"type\":\"string\"},\"goal_name\":{\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"name\":{\"minLength\":1,\"type\":\"string\"},\"start_bone\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"end_bone\",\"goal_name\",\"intent\",\"name\",\"start_bone\"],\"type\":\"object\"},\"type\":\"array\"},\"goals\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"bone_name\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"name\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"bone_name\",\"intent\",\"name\"],\"type\":\"object\"},\"type\":\"array\"},\"retarget_root\":{\"minLength\":1,\"type\":\"string\"},\"solvers\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"},\"solver_class_ref\":{\"minLength\":1,\"type\":\"string\"},\"solver_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"order_index\",\"solver_class_ref\",\"solver_ref\"],\"type\":\"object\"},\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"chains\",\"goals\",\"retarget_root\",\"solvers\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::IkRigAutoGenerate:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"preset\":{\"enum\":[\"humanoid\",\"quadruped\",\"custom\"],\"type\":\"string\"},\"skeletal_mesh_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"preset\",\"skeletal_mesh_ref\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"preset\":{\"enum\":[\"humanoid\",\"quadruped\",\"custom\"],\"type\":\"string\"},\"skeletal_mesh_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"preset\",\"skeletal_mesh_ref\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::IkRetargeterDefinition:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"chain_mappings\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"operation_ref\":{\"minLength\":1,\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"},\"source_chain\":{\"minLength\":1,\"type\":\"string\"},\"target_chain\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"operation_ref\",\"order_index\",\"source_chain\",\"target_chain\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"source_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"chain_mappings\",\"source_ik_rig_ref\",\"target_ik_rig_ref\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"chain_mappings\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"operation_ref\":{\"minLength\":1,\"type\":\"string\"},\"order_index\":{\"minimum\":0,\"type\":\"integer\"},\"source_chain\":{\"minLength\":1,\"type\":\"string\"},\"target_chain\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"intent\",\"operation_ref\",\"order_index\",\"source_chain\",\"target_chain\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"source_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ik_rig_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"chain_mappings\",\"source_ik_rig_ref\",\"target_ik_rig_ref\",\"target_ref\"],\"type\":\"object\"}"));
 			case E::IkRetargeterSettings:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"settings\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"chain_name\":{\"type\":\"string\"},\"scope\":{\"enum\":[\"global\",\"root\",\"chain\"],\"type\":\"string\"},\"setting_name\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"chain_name\",\"scope\",\"setting_name\",\"value\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"settings\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"settings\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"chain_name\":{\"type\":\"string\"},\"scope\":{\"enum\":[\"global\",\"root\",\"chain\"],\"type\":\"string\"},\"setting_name\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"chain_name\",\"scope\",\"setting_name\",\"value\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"settings\",\"target_ref\"],\"type\":\"object\"}"));
 			default:
+				Error = RouteFailure(TEXT("graph_compound_input_schema_kind_invalid"),
+					TEXT("The registered graph route has no input schema for its input kind."),
+					Spec.CapabilityId, TEXT("input_kind"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Spec.InputKind)),
+					MakeShared<FJsonValueString>(TEXT("a supported input schema kind")));
 				return FString();
 			}
 		}
 
-		FString ResultSchema(const FRouteSpec& Spec)
+		FString ResultSchema(const FRouteSpec& Spec, UE::UAI::Contract::FDiagnostic& Error)
 		{
 			if (FCString::Strcmp(
 					Spec.DomainId, TEXT("animation_rig_graph")) == 0)
 			{
 				return LifecycleResultContract::
-					BuildMutationLifecycleResultSchema(true);
+					BuildMutationLifecycleResultSchema(false, Error);
 			}
-			return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"persistence_receipt_id\":{\"minLength\":1,\"type\":\"string\"},\"revision\":{\"type\":\"string\"},\"target_ref\":{\"type\":\"string\"}},\"required\":[\"target_ref\",\"revision\"],\"type\":\"object\"}"));
+			return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"target_ref\":{\"type\":\"string\"}},\"required\":[\"target_ref\"],\"type\":\"object\"}"));
 		}
 
 		TSharedPtr<FJsonObject> DescriptorObject(
 			const FRouteSpec& Spec,
 			const FString& Input,
 			const FString& Result,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<FJsonObject> InputObject;
 			TSharedPtr<FJsonObject> ResultObject;
@@ -278,7 +329,7 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			TArray<FPcgAnimationGraphRouteProfile> Profiles;
 			TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 		};
 
 		FRouteBundle BuildBundle()
@@ -287,16 +338,30 @@ namespace UE::UAI::Composition::GraphCompound
 			TArray<FUeAgentOperationDescriptor> Descriptors;
 			for (const FRouteSpec& Spec : RouteSpecs())
 			{
-				const FString Input = InputSchema(Spec);
-				const FString Result = ResultSchema(Spec);
-				TSharedPtr<FJsonObject> Object =
-					DescriptorObject(Spec, Input, Result, Bundle.Error);
-				FString CanonicalDescriptor;
-				if (Input.IsEmpty() || Result.IsEmpty() || !Object.IsValid()
-					|| !Json::TryCanonicalize(
-						Object, CanonicalDescriptor, Bundle.Error))
+				auto RejectSchema = [&](const TCHAR* Field)
 				{
+					MarkGraphCompoundNativeDiagnostic(Bundle.Error);
+					if (Bundle.Error.TargetPath.IsEmpty()) Bundle.Error.TargetPath = Spec.DescriptorId;
+					if (Bundle.Error.PropertyPath.IsEmpty()) Bundle.Error.PropertyPath = Field;
 					Bundle.Profiles.Reset();
+				};
+				const FString Input = InputSchema(Spec, Bundle.Error);
+				if (Input.IsEmpty())
+				{
+					RejectSchema(TEXT("input_schema"));
+					return Bundle;
+				}
+				const FString Result = ResultSchema(Spec, Bundle.Error);
+				if (Result.IsEmpty())
+				{
+					RejectSchema(TEXT("result_schema"));
+					return Bundle;
+				}
+				TSharedPtr<FJsonObject> Object = DescriptorObject(Spec, Input, Result, Bundle.Error);
+				FString CanonicalDescriptor;
+				if (!Object.IsValid() || !Json::TryCanonicalize(Object, CanonicalDescriptor, Bundle.Error))
+				{
+					RejectSchema(TEXT("descriptor"));
 					return Bundle;
 				}
 				const FUeAgentDescriptorIdentity Identity(
@@ -334,6 +399,7 @@ namespace UE::UAI::Composition::GraphCompound
 			if (!FUeAgentDescriptorRegistry::TryCreate(
 					MoveTemp(Descriptors), Bundle.Registry, Bundle.Error))
 			{
+				MarkGraphCompoundNativeDiagnostic(Bundle.Error);
 				Bundle.Profiles.Reset();
 			}
 			return Bundle;
@@ -359,16 +425,11 @@ namespace UE::UAI::Composition::GraphCompound
 			return nullptr;
 		}
 
-		void SetError(
-			FGraphCompoundRouteError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
-		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-		}
+		void SetError(FGraphCompoundRouteError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SubjectId;
+        }
 
 		bool TryValidatedObject(
 			const FPcgAnimationGraphRouteProfile& Profile,
@@ -380,27 +441,48 @@ namespace UE::UAI::Composition::GraphCompound
 			OutObject.Reset();
 			OutError = {};
 			const FRouteBundle& Bundle = RouteBundle();
-			if (!Profile.IsValid() || !Bundle.Registry.IsValid()
-				|| !FindSpec(Profile))
+			if (!Profile.IsValid())
 			{
-				SetError(OutError, TEXT("graph_compound_route_unavailable"),
-					Profile.GetCapabilityId(), Bundle.Error);
+				OutError = Profile.GetValidationDiagnostic();
+				return false;
+			}
+			if (!Bundle.Registry.IsValid())
+			{
+				OutError = Bundle.Error.IsValid() ? Bundle.Error : RouteFailure(
+					TEXT("graph_compound_registry_missing"),
+					TEXT("The graph route registry is unavailable."),
+					Profile.GetCapabilityId(), TEXT("registry.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				return false;
+			}
+			if (!FindSpec(Profile))
+			{
+				const TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
+				Actual->SetStringField(TEXT("capability_id"), Profile.GetCapabilityId());
+				Actual->SetStringField(TEXT("descriptor_id"), Profile.GetDescriptorId());
+				Actual->SetNumberField(TEXT("input_kind"), static_cast<int32>(Profile.GetInputKind()));
+				OutError = RouteFailure(TEXT("graph_compound_route_spec_missing"),
+					TEXT("No registered graph route specification matches the profile."),
+					Profile.GetCapabilityId(), TEXT("route_spec"), MakeShared<FJsonValueObject>(Actual),
+					MakeShared<FJsonValueString>(TEXT("registered route specification")));
 				return false;
 			}
 			const FUeAgentOperationDescriptor* Descriptor =
 				Bundle.Registry->FindByDescriptorId(Profile.GetDescriptorId());
 			if (!Descriptor)
 			{
-				SetError(OutError, TEXT("graph_compound_descriptor_missing"),
-					Profile.GetDescriptorId());
+				OutError = RouteFailure(TEXT("graph_compound_descriptor_missing"), TEXT("The graph route descriptor is missing from its registry."),
+					Profile.GetDescriptorId(), TEXT("descriptor.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
 			const FUeAgentContractSchema* Schema =
 				Bundle.Registry->FindCompiledInputSchemaExact(Descriptor->GetIdentity());
 			if (!Schema)
 			{
-				SetError(OutError, TEXT("graph_compound_schema_missing"),
-					Profile.GetDescriptorId());
+				OutError = RouteFailure(TEXT("graph_compound_schema_missing"), TEXT("The graph route descriptor has no compiled input schema."),
+					Profile.GetDescriptorId(), TEXT("input_schema.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
 			const FUeAgentContractSchemaCheckpoint Checkpoint =
@@ -409,39 +491,37 @@ namespace UE::UAI::Composition::GraphCompound
 					const FString& InstancePath,
 					FUeAgentContractSchemaError& Error)
 				{
-					FUeAgentResourceBudgetExceeded BudgetError;
+					FUeAgentResourceChargeError ChargeError;
 					if (!Resources.TryCharge(
 							EUeAgentResourceDimension::WorkUnits,
 							WorkUnits,
 							TEXT("graph_compound.gc016.schema"),
-							BudgetError))
+							ChargeError))
 					{
-						Error.Code = BudgetError.Code;
-						Error.InstancePath = InstancePath;
-						Error.Detail = TEXT("Schema work budget exceeded.");
+						Error = ChargeError;
+				Error.Source.JsonPath = InstancePath;
 						return false;
 					}
 					return true;
 				};
 			TOptional<FUeAgentContractValue> Canonical;
 			FUeAgentContractSchemaError SchemaError;
-			if (!Schema->TryValidateAndCanonicalize(
-					Input, Checkpoint, Canonical, SchemaError)
-				|| !Canonical.IsSet())
+			const bool bValidated = Schema->TryValidateAndCanonicalize(Input, Checkpoint, Canonical, SchemaError);
+			if (!bValidated || !Canonical.IsSet())
 			{
-				SetError(OutError,
-					SchemaError.Code.IsEmpty()
-						? TEXT("graph_compound_input_invalid") : SchemaError.Code,
-					SchemaError.InstancePath,
-					SchemaError.Detail);
+				OutError = SchemaError.IsValid() ? SchemaError : RouteFailure(
+					TEXT("graph_compound_input_invalid"),
+					bValidated ? TEXT("Graph input validation returned without a canonical value.")
+						: TEXT("Graph input validation failed without a diagnostic."),
+					Profile.GetCapabilityId(), bValidated ? TEXT("canonical_input.present") : TEXT("input_validation.succeeded"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
-			FString ParseError;
+			UE::UAI::Contract::FDiagnostic ParseError;
 			if (!Json::TryParseObject(
 					Canonical->GetJsonValue(), OutObject, ParseError))
 			{
-				SetError(OutError, TEXT("graph_compound_input_parse_failed"),
-					Profile.GetCapabilityId(), ParseError);
+				SetError(OutError, ParseError, Profile.GetCapabilityId());
 				return false;
 			}
 			return true;
@@ -497,13 +577,12 @@ namespace UE::UAI::Composition::GraphCompound
 			FGraphCompoundRouteError& OutError,
 			const FString& Subject)
 		{
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			if (!JsonValue.IsValid()
 				|| !CanonicalJson::TryFromJsonValue(
 					JsonValue, Resources, OutValue, Error))
 			{
-				SetError(OutError, TEXT("graph_compound_value_invalid"),
-					Subject, Error);
+				SetError(OutError, Error, Subject);
 				return false;
 			}
 			return true;
@@ -545,28 +624,52 @@ namespace UE::UAI::Composition::GraphCompound
 			const FUeAgentCanonicalSnapshot& Snapshot,
 			const FString& SemanticId,
 			const FString& Field,
-			FString& OutValue)
+			FString& OutValue, FGraphCompoundRouteError& OutError)
 		{
 			OutValue.Reset();
+			OutError = {};
+			FDiagnostic Missing = RouteFailure(TEXT("graph_compound_pcg_component_state_invalid"),
+				TEXT("The PCG component snapshot has no matching binding entry."),
+				SemanticId, TEXT("snapshot.entry_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			for (const FUeAgentStateEntry& Entry : Snapshot.GetEntries())
 			{
-				if (Entry.GetIdentity().GetSemanticId() != SemanticId
-					|| Entry.GetValue()->GetKind() != EUeAgentValueKind::Object)
+				if (Entry.GetIdentity().GetSemanticId() != SemanticId)
+					continue;
+				if (Entry.GetValue()->GetKind() != EUeAgentValueKind::Object)
 				{
+					Missing = RouteFailure(TEXT("graph_compound_pcg_component_state_invalid"),
+						TEXT("The PCG component binding snapshot entry must be an object."), SemanticId, TEXT("snapshot.value_kind"),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Entry.GetValue()->GetKind())),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(EUeAgentValueKind::Object)));
 					continue;
 				}
+				Missing = RouteFailure(TEXT("graph_compound_pcg_component_state_invalid"),
+					TEXT("The PCG component binding snapshot is missing the required string field."),
+					SemanticId, Field, MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				for (const TPair<FString, FUeAgentCanonicalValueRef>& Item
 					: Entry.GetValue()->GetObjectItems())
 				{
-					if (Item.Key == Field
-						&& Item.Value->GetKind() == EUeAgentValueKind::String)
+					if (Item.Key != Field)
+						continue;
+					if (Item.Value->GetKind() == EUeAgentValueKind::String)
 					{
 						OutValue = Item.Value->GetText();
-						return !OutValue.IsEmpty();
+						if (!OutValue.IsEmpty()) return true;
+						OutError = RouteFailure(TEXT("graph_compound_pcg_component_state_invalid"),
+							TEXT("The PCG component binding snapshot string field is empty."), SemanticId, Field,
+							MakeShared<FJsonValueString>(OutValue), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+						return false;
 					}
+					Missing = RouteFailure(TEXT("graph_compound_pcg_component_state_invalid"),
+						TEXT("The PCG component binding snapshot field must be a string."), SemanticId, Field,
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Item.Value->GetKind())),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(EUeAgentValueKind::String)));
 				}
+				OutError = MoveTemp(Missing);
 				return false;
 			}
+			OutError = MoveTemp(Missing);
 			return false;
 		}
 
@@ -603,11 +706,55 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			Value->TrimStartAndEndInline();
 		}
-		bValid = !CapabilityId.IsEmpty() && !DescriptorId.IsEmpty()
-			&& !DomainId.IsEmpty() && !FamilyId.IsEmpty()
-			&& !TargetKind.IsEmpty()
-			&& InputKind != EPcgAnimationGraphInputKind::Invalid
-			&& ExecutionContract.IsValid();
+		if (CapabilityId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route capability_id is empty after trimming."),
+				CapabilityId, TEXT("capability_id"), MakeShared<FJsonValueString>(CapabilityId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (DescriptorId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route descriptor_id is empty after trimming."),
+				CapabilityId, TEXT("descriptor_id"), MakeShared<FJsonValueString>(DescriptorId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (DomainId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route domain_id is empty after trimming."),
+				CapabilityId, TEXT("domain_id"), MakeShared<FJsonValueString>(DomainId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (FamilyId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route family_id is empty after trimming."),
+				CapabilityId, TEXT("family_id"), MakeShared<FJsonValueString>(FamilyId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (TargetKind.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route target_kind is empty after trimming."),
+				CapabilityId, TEXT("target_kind"), MakeShared<FJsonValueString>(TargetKind),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (InputKind == EPcgAnimationGraphInputKind::Invalid)
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route has an invalid input kind."),
+				CapabilityId, TEXT("input_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(InputKind)),
+				MakeShared<FJsonValueString>(TEXT("non-Invalid input kind")));
+		}
+		else if (!ExecutionContract.IsValid())
+		{
+			ValidationDiagnostic = FDiagnostic::WrapFailure(
+				TEXT("graph_compound_binding_profile_invalid"),
+				ExecutionContract.GetValidationDiagnostic(), TEXT("graph_compound"),
+				TEXT("The graph route execution contract is invalid."));
+		}
 	}
 
 	const FString& FPcgAnimationGraphRouteProfile::GetCapabilityId() const { return CapabilityId; }
@@ -617,12 +764,17 @@ namespace UE::UAI::Composition::GraphCompound
 	EPcgAnimationGraphInputKind FPcgAnimationGraphRouteProfile::GetInputKind() const { return InputKind; }
 	const FString& FPcgAnimationGraphRouteProfile::GetTargetKind() const { return TargetKind; }
 	const FGraphCompoundExecutionContract& FPcgAnimationGraphRouteProfile::GetExecutionContract() const { return ExecutionContract; }
-	bool FPcgAnimationGraphRouteProfile::IsValid() const { return bValid; }
+	bool FPcgAnimationGraphRouteProfile::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FDiagnostic& FPcgAnimationGraphRouteProfile::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
-	const TArray<FPcgAnimationGraphRouteProfile>&
-	GetPcgAnimationGraphRouteProfiles()
+	bool TryGetPcgAnimationGraphRouteProfiles(
+		const TArray<FPcgAnimationGraphRouteProfile>*& OutProfiles, FDiagnostic& OutError)
 	{
-		return RouteBundle().Profiles;
+		OutProfiles = nullptr;
+		OutError = RouteBundle().Error;
+		if (!OutError.IsEmpty()) return false;
+		OutProfiles = &RouteBundle().Profiles;
+		return true;
 	}
 
 	const FPcgAnimationGraphRouteProfile*
@@ -641,7 +793,7 @@ namespace UE::UAI::Composition::GraphCompound
 
 	bool TryCreatePcgAnimationGraphDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry = RouteBundle().Registry;
 		OutError = RouteBundle().Error;
@@ -675,19 +827,60 @@ namespace UE::UAI::Composition::GraphCompound
 			Profile.GetDomainId() + TEXT(".write")};
 		const FString Evidence = TEXT("request:") + Profile.GetCapabilityId();
 		TArray<FGraphCompoundCanonicalEdit> Edits;
+		TMap<FString, FString> InputPointers;
+		FString InputPointer;
+
+		auto FailInput = [&](const TCHAR* Code, const TCHAR* Reason,
+			const FString& Field, const FString& Pointer,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const int32 InputIndex = INDEX_NONE)
+		{
+			OutError = RouteFailure(Code, Reason, TargetRef, Field, MoveTemp(Actual), MoveTemp(Expected));
+			OutError.SourceKind = TEXT("command_input");
+			OutError.Source.JsonPath = Pointer;
+			if (InputIndex != INDEX_NONE) OutError.OperationIndex = InputIndex;
+			OutError.TargetPath = TargetRef;
+			OutError.ActualValuePresent = OutError.ActualValue.IsValid();
+			return false;
+		};
+		auto ReadIntent = [&](const TSharedPtr<FJsonObject>& Entry,
+			const TSharedPtr<FJsonValue>& Value, const TCHAR* Code,
+			const FString& Field, const int32 InputIndex, EChangeIntent& Intent)
+		{
+			if (!Entry.IsValid())
+				return FailInput(Code, TEXT("An edit entry must be an object."),
+					Field, InputPointer, Value, MakeShared<FJsonValueString>(TEXT("object")), InputIndex);
+			const FString IntentText = Entry->GetStringField(TEXT("intent"));
+			if (!TryIntent(IntentText, Intent))
+				return FailInput(Code, TEXT("The edit intent is not supported."),
+					TEXT("intent"), InputPointer + TEXT("/intent"),
+					MakeShared<FJsonValueString>(IntentText),
+					MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+						MakeShared<FJsonValueString>(TEXT("create")), MakeShared<FJsonValueString>(TEXT("update")),
+						MakeShared<FJsonValueString>(TEXT("replace")), MakeShared<FJsonValueString>(TEXT("delete"))}), InputIndex);
+			return true;
+		};
+
 
 		auto AddJsonEdit = [&] (
 			const FString& SemanticId,
 			const EGraphCompoundElementKind ElementKind,
 			const EChangeIntent Intent,
 			const TSharedPtr<FJsonValue>& JsonValue,
-			TArray<FUeAgentCanonicalIdentity> Dependencies = {})
+			TArray<FUeAgentCanonicalIdentity> Dependencies = {}, const bool bGeneratedValue = false)
 		{
+			FString ValuePointer = InputPointer;
+			if (ValuePointer.IsEmpty())
+				for (const auto& Field : Object->Values)
+					if (Field.Value == JsonValue) { ValuePointer = TEXT("/") + Field.Key; break; }
+			InputPointers.Add(SemanticId, ValuePointer.IsEmpty() ? TEXT("/") : ValuePointer);
 			FUeAgentCanonicalValuePtr Proposed;
 			if (Intent != EChangeIntent::Delete
 				&& !TryCanonical(
 					JsonValue, Resources, Proposed, OutError, SemanticId))
 			{
+				if (bGeneratedValue) MarkGraphCompoundNativeDiagnostic(OutError);
+				else BindGraphCompoundInputValueDiagnostic(OutError, ValuePointer.IsEmpty() ? TEXT("/") : ValuePointer);
 				return false;
 			}
 			const FUeAgentCanonicalIdentity EditIdentity = Identity(
@@ -705,16 +898,14 @@ namespace UE::UAI::Composition::GraphCompound
 			const TCHAR* Prefix,
 			const EGraphCompoundElementKind Kind)
 		{
-			for (const TSharedPtr<FJsonValue>& ItemValue
-				: Object->GetArrayField(Field))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(Field).Num(); ++InputIndex)
 			{
+				const auto& ItemValue = Object->GetArrayField(Field)[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + Field + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Item = ItemValue->AsObject();
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!Item.IsValid()
-					|| !TryIntent(Item->GetStringField(TEXT("intent")), Intent))
+				if (!ReadIntent(Item, ItemValue, TEXT("graph_compound_specialized_item_invalid"), Field, InputIndex, Intent))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_specialized_item_invalid"), Field);
 					return false;
 				}
 				const FString IdentityValue =
@@ -731,21 +922,21 @@ namespace UE::UAI::Composition::GraphCompound
 
 		auto AddParameters = [&] (const TCHAR* Field)
 		{
-			for (const TSharedPtr<FJsonValue>& ParameterValue
-				: Object->GetArrayField(Field))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(Field).Num(); ++InputIndex)
 			{
+				const auto& ParameterValue = Object->GetArrayField(Field)[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + Field + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Parameter = ParameterValue->AsObject();
 				if (!Parameter.IsValid())
-				{
-					SetError(OutError,
-						TEXT("graph_compound_parameter_invalid"), Field);
-					return false;
-				}
+					return FailInput(TEXT("graph_compound_parameter_invalid"),
+						TEXT("A graph parameter entry must be an object."), Field, InputPointer,
+						ParameterValue, MakeShared<FJsonValueString>(TEXT("object")), InputIndex);
 				const FString SemanticId = FString::Printf(
 					TEXT("property:parameter:%s:%s:%s"),
 					*Parameter->GetStringField(TEXT("property_guid")),
 					*Parameter->GetStringField(TEXT("property_name")),
 					*Parameter->GetStringField(TEXT("property_type_ref")));
+				InputPointer += TEXT("/value");
 				if (!AddJsonEdit(
 						SemanticId, EGraphCompoundElementKind::Property,
 						EChangeIntent::Update,
@@ -774,29 +965,33 @@ namespace UE::UAI::Composition::GraphCompound
 					TEXT("target:") + TargetRef,
 					EGraphCompoundElementKind::Target,
 					EChangeIntent::Create,
-					MakeShared<FJsonValueObject>(Definition)))
+					MakeShared<FJsonValueObject>(Definition), {}, true))
 			{
 				return false;
 			}
 		}
 		else if (Profile.GetInputKind() == E::GraphEdits)
 		{
-			for (const TSharedPtr<FJsonValue>& EditValue
-				: Object->GetArrayField(TEXT("edits")))
+			for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("edits")).Num(); ++InputIndex)
 			{
+				const auto& EditValue = Object->GetArrayField(TEXT("edits"))[InputIndex];
+				TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("edits") + TEXT("/") + ::LexToString(InputIndex));
 				const TSharedPtr<FJsonObject> Edit = EditValue->AsObject();
 				EGraphCompoundElementKind ElementKind =
 					EGraphCompoundElementKind::Item;
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!Edit.IsValid()
-					|| !TryElementKind(
-						Edit->GetStringField(TEXT("element_kind")), ElementKind)
-					|| !TryIntent(Edit->GetStringField(TEXT("intent")), Intent))
-				{
-					SetError(OutError, TEXT("graph_compound_edit_kind_invalid"),
-						Profile.GetCapabilityId());
+				if (!Edit.IsValid())
+					return FailInput(TEXT("graph_compound_edit_kind_invalid"),
+						TEXT("A graph edit must be an object."), TEXT("edits"), InputPointer,
+						EditValue, MakeShared<FJsonValueString>(TEXT("object")), InputIndex);
+				if (!TryElementKind(Edit->GetStringField(TEXT("element_kind")), ElementKind))
+					return FailInput(TEXT("graph_compound_edit_kind_invalid"),
+						TEXT("The graph edit element kind is not supported."),
+						TEXT("element_kind"), InputPointer + TEXT("/element_kind"),
+						MakeShared<FJsonValueString>(Edit->GetStringField(TEXT("element_kind"))),
+						MakeShared<FJsonValueString>(TEXT("target, structure, item, pin, relation, property, input, hierarchy, order, binding, dependency")), InputIndex);
+				if (!ReadIntent(Edit, EditValue, TEXT("graph_compound_edit_kind_invalid"), TEXT("edits"), InputIndex, Intent))
 					return false;
-				}
 				TArray<FUeAgentCanonicalIdentity> Dependencies;
 				const TArray<TSharedPtr<FJsonValue>>* DependencyValues = nullptr;
 				if (Edit->TryGetArrayField(TEXT("depends_on"), DependencyValues)
@@ -812,11 +1007,11 @@ namespace UE::UAI::Composition::GraphCompound
 				const TSharedPtr<FJsonValue>* Proposed =
 					Edit->Values.Find(TEXT("value"));
 				if (Intent != EChangeIntent::Delete && !Proposed)
-				{
-					SetError(OutError, TEXT("graph_compound_edit_value_missing"),
-						Edit->GetStringField(TEXT("identity")));
-					return false;
-				}
+					return FailInput(TEXT("graph_compound_edit_value_missing"),
+						TEXT("A non-delete graph edit requires a value."), TEXT("value"),
+						InputPointer + TEXT("/value"), MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true), InputIndex);
+				if (Proposed) InputPointer += TEXT("/value");
 				if (!AddJsonEdit(
 						Edit->GetStringField(TEXT("identity")), ElementKind, Intent,
 						Proposed ? *Proposed : TSharedPtr<FJsonValue>(),
@@ -831,16 +1026,14 @@ namespace UE::UAI::Composition::GraphCompound
 			switch (Profile.GetInputKind())
 			{
 			case E::BlackboardSchema:
-				for (const TSharedPtr<FJsonValue>& EntryValue
-					: Object->GetArrayField(TEXT("entries")))
+				for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("entries")).Num(); ++InputIndex)
 				{
+					const auto& EntryValue = Object->GetArrayField(TEXT("entries"))[InputIndex];
+					TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("entries") + TEXT("/") + ::LexToString(InputIndex));
 					const TSharedPtr<FJsonObject> Entry = EntryValue->AsObject();
 					EChangeIntent Intent = EChangeIntent::Update;
-					if (!Entry.IsValid()
-						|| !TryIntent(Entry->GetStringField(TEXT("intent")), Intent))
+					if (!ReadIntent(Entry, EntryValue, TEXT("graph_compound_blackboard_entry_invalid"), TEXT("entries"), InputIndex, Intent))
 					{
-						SetError(OutError,
-							TEXT("graph_compound_blackboard_entry_invalid"));
 						return false;
 					}
 					const FString SemanticId = TEXT("item:blackboard_entry:")
@@ -889,11 +1082,9 @@ namespace UE::UAI::Composition::GraphCompound
 				}
 				else if (!TrySnapshotStringField(
 						*Snapshot, TEXT("binding:pcg_component_graph"),
-						TEXT("actor_ref"), ActorRef))
+						TEXT("actor_ref"), ActorRef, OutError))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_component_state_invalid"),
-						TargetRef);
+					OutError.TargetPath = TargetRef;
 					return false;
 				}
 				const TSharedRef<FJsonObject> Binding = MakeShared<FJsonObject>();
@@ -907,7 +1098,7 @@ namespace UE::UAI::Composition::GraphCompound
 						TEXT("binding:pcg_component_graph"),
 						EGraphCompoundElementKind::Binding,
 						EChangeIntent::Update,
-						MakeShared<FJsonValueObject>(Binding)))
+						MakeShared<FJsonValueObject>(Binding), {}, true))
 				{
 					return false;
 				}
@@ -935,9 +1126,10 @@ namespace UE::UAI::Composition::GraphCompound
 				}
 				break;
 			case E::BlendSpaceDefinition:
-				for (const TSharedPtr<FJsonValue>& AxisValue
-					: Object->GetArrayField(TEXT("axes")))
+				for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("axes")).Num(); ++InputIndex)
 				{
+					const auto& AxisValue = Object->GetArrayField(TEXT("axes"))[InputIndex];
+					TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("axes") + TEXT("/") + ::LexToString(InputIndex));
 					const TSharedPtr<FJsonObject> Axis = AxisValue->AsObject();
 					const FString SemanticId = FString::Printf(
 						TEXT("item:blend_axis:%d"),
@@ -949,23 +1141,28 @@ namespace UE::UAI::Composition::GraphCompound
 						return false;
 					}
 				}
-				for (const TSharedPtr<FJsonValue>& SampleValue
-					: Object->GetArrayField(TEXT("samples")))
+				for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("samples")).Num(); ++InputIndex)
 				{
+					const auto& SampleValue = Object->GetArrayField(TEXT("samples"))[InputIndex];
+					TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("samples") + TEXT("/") + ::LexToString(InputIndex));
 					const TSharedPtr<FJsonObject> Sample = SampleValue->AsObject();
 					EChangeIntent Intent = EChangeIntent::Update;
 					TryIntent(Sample->GetStringField(TEXT("intent")), Intent);
 					FString CoordinateIdentity;
-					for (const TSharedPtr<FJsonValue>& Coordinate
-						: Sample->GetArrayField(TEXT("coordinates")))
+					const TArray<TSharedPtr<FJsonValue>>& Coordinates = Sample->GetArrayField(TEXT("coordinates"));
+					for (int32 CoordinateIndex = 0; CoordinateIndex < Coordinates.Num(); ++CoordinateIndex)
 					{
+						const TSharedPtr<FJsonValue>& Coordinate = Coordinates[CoordinateIndex];
 						double CoordinateValue = 0.0;
-						if (!Coordinate->TryGetNumber(CoordinateValue)
-							|| !FMath::IsFinite(CoordinateValue))
+						const bool bNumber = Coordinate->TryGetNumber(CoordinateValue);
+						if (!bNumber || !FMath::IsFinite(CoordinateValue))
 						{
-							SetError(OutError,
-								TEXT("graph_compound_blend_coordinate_invalid"));
-							return false;
+							TSharedPtr<FJsonValue> Actual = Coordinate;
+							if (bNumber) Actual = MakeShared<FJsonValueString>(::LexToString(CoordinateValue));
+							return FailInput(TEXT("graph_compound_blend_coordinate_invalid"),
+								bNumber ? TEXT("A Blend Space coordinate must be finite.") : TEXT("A Blend Space coordinate must be numeric."),
+								TEXT("coordinates"), InputPointer + TEXT("/coordinates/") + ::LexToString(CoordinateIndex),
+								MoveTemp(Actual), MakeShared<FJsonValueString>(TEXT("finite number")), InputIndex);
 						}
 						CoordinateIdentity += FString::SanitizeFloat(CoordinateValue)
 							+ TEXT(",");
@@ -1021,16 +1218,14 @@ namespace UE::UAI::Composition::GraphCompound
 				{
 					return false;
 				}
-				for (const TSharedPtr<FJsonValue>& BindingValue
-					: Object->GetArrayField(TEXT("bindings")))
+				for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("bindings")).Num(); ++InputIndex)
 				{
+					const auto& BindingValue = Object->GetArrayField(TEXT("bindings"))[InputIndex];
+					TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("bindings") + TEXT("/") + ::LexToString(InputIndex));
 					const TSharedPtr<FJsonObject> Binding = BindingValue->AsObject();
 					EChangeIntent Intent = EChangeIntent::Update;
-					if (!Binding.IsValid()
-						|| !TryIntent(Binding->GetStringField(TEXT("intent")), Intent))
+					if (!ReadIntent(Binding, BindingValue, TEXT("graph_compound_source_binding_invalid"), TEXT("bindings"), InputIndex, Intent))
 					{
-						SetError(OutError,
-							TEXT("graph_compound_source_binding_invalid"));
 						return false;
 					}
 					const FString SemanticId = TEXT("binding:source:")
@@ -1108,14 +1303,16 @@ namespace UE::UAI::Composition::GraphCompound
 				}
 				break;
 			case E::IkRetargeterSettings:
-				for (const TSharedPtr<FJsonValue>& SettingValue
-					: Object->GetArrayField(TEXT("settings")))
+				for (int32 InputIndex = 0; InputIndex < Object->GetArrayField(TEXT("settings")).Num(); ++InputIndex)
 				{
+					const auto& SettingValue = Object->GetArrayField(TEXT("settings"))[InputIndex];
+					TGuardValue<FString> InputScope(InputPointer, FString(TEXT("/")) + TEXT("settings") + TEXT("/") + ::LexToString(InputIndex));
 					const TSharedPtr<FJsonObject> Setting = SettingValue->AsObject();
 					const FString SemanticId = TEXT("property:setting:")
 						+ Setting->GetStringField(TEXT("scope")) + TEXT(":")
 						+ Setting->GetStringField(TEXT("chain_name")) + TEXT(":")
 						+ Setting->GetStringField(TEXT("setting_name"));
+					InputPointer += TEXT("/value");
 					if (!AddJsonEdit(
 							SemanticId,
 							EGraphCompoundElementKind::Property,
@@ -1128,16 +1325,21 @@ namespace UE::UAI::Composition::GraphCompound
 				}
 				break;
 			default:
-				SetError(OutError,
-					TEXT("graph_compound_typed_input_kind_invalid"),
-					Profile.GetCapabilityId());
+				OutError = RouteFailure(TEXT("graph_compound_typed_input_kind_invalid"),
+					TEXT("The PCG/animation typed operation input kind is not supported."), Profile.GetCapabilityId(), TEXT("input_kind"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Profile.GetInputKind())),
+					MakeShared<FJsonValueString>(TEXT("a supported PCG/animation typed operation input kind")));
 				return false;
 			}
 		}
 
 		OutPayload = FGraphCompoundCanonicalPayload(
-			GetGraphCompoundCanonicalSchemaId(), MoveTemp(Edits));
-		return !OutPayload.GetEdits().IsEmpty();
+			GetGraphCompoundCanonicalSchemaId(), MoveTemp(Edits), MoveTemp(InputPointers));
+		if (OutPayload.GetEdits().IsEmpty())
+			return FailInput(TEXT("graph_compound_typed_operation_empty"),
+				TEXT("The typed operation contains no edits."), TEXT("edits"), TEXT("/"),
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one edit")));
+		return true;
 	}
 
 	bool TryBuildPcgAnimationGraphTypedOperationDraft(
@@ -1156,9 +1358,29 @@ namespace UE::UAI::Composition::GraphCompound
 		if (DescriptorIdentity
 			!= Profile.GetExecutionContract().GetDescriptorIdentity())
 		{
-			SetError(OutError,
-				TEXT("graph_compound_descriptor_identity_mismatch"),
-				Profile.GetDescriptorId());
+			const FUeAgentDescriptorIdentity& Expected = Profile.GetExecutionContract().GetDescriptorIdentity();
+			OutError = RouteFailure(TEXT("graph_compound_descriptor_identity_mismatch"),
+				TEXT("The operation descriptor does not match the graph route."),
+				Profile.GetDescriptorId(), TEXT("descriptor_identity"), nullptr, nullptr);
+			if (DescriptorIdentity.GetDescriptorId() != Expected.GetDescriptorId())
+			{
+				OutError.PropertyPath = TEXT("descriptor_identity.descriptor_id");
+				OutError.ActualValue = MakeShared<FJsonValueString>(DescriptorIdentity.GetDescriptorId());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected.GetDescriptorId());
+			}
+			else if (DescriptorIdentity.GetVersion() != Expected.GetVersion())
+			{
+				OutError.PropertyPath = TEXT("descriptor_identity.version");
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(DescriptorIdentity.GetVersion());
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(Expected.GetVersion());
+			}
+			else
+			{
+				OutError.PublicMessage = TEXT("The operation descriptor content does not match the graph route.");
+				OutError.PropertyPath = TEXT("descriptor_identity.descriptor_hash");
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(DescriptorIdentity.GetDescriptorHash());
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetDescriptorHash());
+			}
 			return false;
 		}
 		FGraphCompoundCanonicalPayload Payload(
@@ -1174,8 +1396,8 @@ namespace UE::UAI::Composition::GraphCompound
 				RequestId, IdempotencyKey, Resources,
 				OutDraft, CanonicalError))
 		{
-			SetError(OutError, CanonicalError.Code,
-				CanonicalError.IdentityKey, CanonicalError.Detail);
+			Payload.LocateDiagnostic(CanonicalError);
+			SetError(OutError, CanonicalError, CanonicalError.SubjectId);
 			return false;
 		}
 		return OutDraft.IsSet();

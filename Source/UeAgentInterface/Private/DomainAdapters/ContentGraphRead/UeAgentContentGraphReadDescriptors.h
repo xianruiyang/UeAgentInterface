@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
 #include "Templates/SharedPointer.h"
@@ -11,5 +13,5 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		TSharedPtr<
 			const UE::UAI::Contract::
 				FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

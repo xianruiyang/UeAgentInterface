@@ -8,7 +8,7 @@ namespace UE::UAI::OperationOwners::RigSpatialCommands
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return DomainAdapters::RigSpatialCommands::TryResolveMechanics(
 			CommandId, OutHandler, OutAuthorityScopes, OutError);

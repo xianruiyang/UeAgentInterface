@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UeAgentLevelAuthoring
@@ -21,6 +23,7 @@ namespace UeAgentLevelAuthoring
 
 	inline constexpr const TCHAR* WorldStateSemanticId = TEXT("uai.semantic.level.world");
 	inline constexpr const TCHAR* WorldTargetSemanticId = TEXT("uai.semantic.level.world.target");
+	inline constexpr const TCHAR* WorldPropertySemanticId = TEXT("uai.semantic.level.world.property");
 	inline constexpr const TCHAR* ActorStateSemanticId = TEXT("uai.semantic.level.actor");
 	inline constexpr const TCHAR* ActorTargetSemanticId = TEXT("uai.semantic.level.actor.target");
 	inline constexpr const TCHAR* ActorPropertySemanticId = TEXT("uai.semantic.level.actor.property");
@@ -29,10 +32,11 @@ namespace UeAgentLevelAuthoring
 	inline constexpr const TCHAR* ComponentPropertySemanticId = TEXT("uai.semantic.level.component.property");
 
 	inline constexpr const TCHAR* WorldIdentityModelId = TEXT("level_world_identity");
+	inline constexpr const TCHAR* WorldPropertyIdentityModelId = TEXT("level_world_property_identity");
 	inline constexpr const TCHAR* ActorIdentityModelId = TEXT("level_actor_identity");
 	inline constexpr const TCHAR* ComponentIdentityModelId = TEXT("level_component_identity");
 	inline constexpr const TCHAR* ActorPropertyIdentityModelId = TEXT("level_actor_property_identity");
 	inline constexpr const TCHAR* ComponentPropertyIdentityModelId = TEXT("level_component_property_identity");
 
-	UEAGENTINTERFACE_API bool RegisterDescriptors(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError);
 }

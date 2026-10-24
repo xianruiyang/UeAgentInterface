@@ -37,12 +37,15 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 			const FString& CommandId,
 			const FUeAgentCommandContractRegistry& Legacy,
 			FUeAgentCommandDeclaration& OutDeclaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(CommandId);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("world_command_contract_missing:") + CommandId;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("world_command_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_command_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
 				return false;
 			}
 			FUeAgentCommandDeclaration Result;
@@ -62,6 +65,7 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
 					TEXT("Exact native World mechanics parameter."),
+					Parameter.GetSchemaJson(),
 				});
 			}
 			Result.ResultFields = {
@@ -70,6 +74,17 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 				{TEXT("projection"), TEXT("object"), true, false,
 					TEXT("Verified native outcome and independent readback evidence.")},
 			};
+			if (CommandId.EndsWith(TEXT(".create"))
+				|| CommandId == TEXT("world.wall.create_with_opening"))
+			{
+				Result.ModelResultFields = {
+					{TEXT("status"), {
+						TEXT("projection"), TEXT("payload"), TEXT("status")}},
+					{TEXT("effect_outcome"), {
+						TEXT("projection"), TEXT("payload"),
+						TEXT("effect_outcome")}},
+				};
+			}
 			Result.Errors = {
 				{TEXT("world_command_authority_required"),
 					TEXT("The caller lacks uai:operate authority.")},
@@ -86,7 +101,7 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 				TEXT("Resolve the exact current world and all referenced assets before mutation."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Use only query.command.detail fields; do not infer legacy payloads.");
+				TEXT("Use the generated naming SDK method and its public parameters; do not infer legacy payloads.");
 			Result.Purpose.ResultGuidance =
 				TEXT("Use terminal operation state and an independent World query readback.");
 			Result.Purpose.FailureGuidance =
@@ -127,7 +142,7 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::WorldCommands::TryCreateHandlers(
 					OutHandlers, OutError);
@@ -140,7 +155,7 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 		bool TryCreateDomainCapability(
 			TSharedPtr<const DomainCapability::FDomainCapabilityContribution>&
 				OutContribution,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<IUeAgentActiveCommandContribution> CommandContribution;
 			if (!TryCreateContribution(CommandContribution, OutError)
@@ -148,14 +163,12 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 			{
 				return false;
 			}
-			TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>
-				HjsonProvider;
+			TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider> HjsonProvider;
 			HjsonWorkspace::FWorkspaceError WorkspaceError;
 			if (!OperationOwners::WorldCommands::TryCreateWorldHlodDomainProvider(
-					HjsonProvider, WorkspaceError)
-				|| !HjsonProvider.IsValid())
+					HjsonProvider, WorkspaceError) || !HjsonProvider.IsValid())
 			{
-				OutError = WorkspaceError.GetCode();
+				OutError = WorkspaceError.GetDiagnostic();
 				return false;
 			}
 			DomainCapability::FDomainCapabilityDeclaration Declaration =
@@ -174,14 +187,11 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 				TEXT("ue.world.hlod_layer.asset"),
 				TEXT("/Script/Engine.HLODLayer"),
 				HjsonWorkspace::EInitializationNodeRole::RootTarget,
-				TEXT("uai.init.world_hlod_layer.root/1"),
-				true,
-			});
+				TEXT("uai.init.world_hlod_layer.root/1"), true});
 			Declaration.Initialization.Support =
 				DomainCapability::EDomainCapabilitySupport::Supported;
 			Declaration.Initialization.ContractIds.Add(
 				TEXT("uai.init.world_hlod_layer.root/1"));
-
 			Declaration.Operation.Support =
 				DomainCapability::EDomainCapabilitySupport::Supported;
 			for (const FString& CommandId
@@ -207,10 +217,6 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 						FindOperationInvocationFactory(CommandId);
 				Declaration.Operation.Operations.Add(MoveTemp(Operation));
 			}
-			Declaration.Migration.Support =
-				DomainCapability::EDomainCapabilitySupport::Supported;
-			Declaration.Migration.OwnerId =
-				TEXT("T59-WORLD-COMMAND-MIGRATION");
 			return DomainCapability::FDomainCapabilityContribution::TryCreate(
 				MoveTemp(Declaration), OutContribution, OutError);
 		}
@@ -222,7 +228,7 @@ namespace UE::UAI::Module::CommandRegistration::WorldCommands
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();

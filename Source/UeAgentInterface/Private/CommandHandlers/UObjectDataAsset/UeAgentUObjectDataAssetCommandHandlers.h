@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "OperationOwners/UObjectDataAsset/UeAgentUObjectDataAssetCommandService.h"
 
@@ -10,5 +12,5 @@ namespace UE::UAI::CommandHandlers::UObjectDataAsset
 			IUeAgentUObjectDataAssetCommandService> Service,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>&
 			OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

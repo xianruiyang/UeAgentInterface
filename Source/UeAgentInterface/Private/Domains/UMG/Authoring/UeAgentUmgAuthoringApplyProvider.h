@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Domains/UMG/Authoring/UeAgentUmgMutationModel.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
 
 class FJsonObject;
 class FJsonValue;
@@ -24,14 +25,14 @@ namespace UeAgentUmgAuthoring
 		FString SourceAssetPath;
 		TArray<TSharedPtr<FJsonValue>> Properties;
 		TSharedPtr<FJsonObject> ProviderExtension;
+		TFunction<bool(UeAgentAuthoringWorkspaceTransaction::FOperationFailure&)> FinalReadback;
 	};
 
 	struct UEAGENTINTERFACE_API FAssetApplyResult
 	{
 		FString Status;
 		FString Phase;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ResolvedOperation;
 		FString AssetPath;
 		FString ObjectPath;
@@ -45,7 +46,7 @@ namespace UeAgentUmgAuthoring
 		bool IsApplied() const { return Status == TEXT("applied"); }
 	};
 
-	UEAGENTINTERFACE_API bool RegisterApplyContracts(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeApplyProvider();
 	UEAGENTINTERFACE_API bool ApplyAsset(const FAssetApplyRequest& Request, FAssetApplyResult& OutResult, const FString& RequestId = FString());
 	UEAGENTINTERFACE_API bool ApplyAssetWorkspace(

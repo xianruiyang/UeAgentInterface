@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Domains/Niagara/UeAgentNiagaraCompileValidation.h"
 #include "NiagaraEmitter.h"
 #include "UObject/StrongObjectPtr.h"
@@ -26,7 +28,7 @@ namespace UeAgentNiagaraEmitterCompileContext
 		const FGuid& RequestedVersion,
 		bool bForceCompile,
 		FResult& OutResult,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	void GetCompiledScripts(const FResult& Result, TArray<UNiagaraScript*>& OutScripts);
 }

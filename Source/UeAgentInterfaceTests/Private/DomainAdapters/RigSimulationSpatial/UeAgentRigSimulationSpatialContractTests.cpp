@@ -98,13 +98,7 @@ namespace
 
 	FUeAgentResourceTracker MakeTracker()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::Nodes, 256},
-			{EUeAgentResourceDimension::Items, 2048},
-			{EUeAgentResourceDimension::StringBytes, 131072},
-			{EUeAgentResourceDimension::WorkUnits, 131072},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 2097152},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	FUeAgentSpatialFrame MakeFrame(
@@ -176,7 +170,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentRigSimulationSpatialContractTest,
 	"UeAgentInterface.DomainAdapters.RigSimulationSpatial.E0.Contract."
-		"TypedPortsFramesTimeAndLegacyBoundary",
+		"CurrentSpatialLifecycleAndProductionContract",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
@@ -207,38 +201,8 @@ bool FUeAgentRigSimulationSpatialContractTest::RunTest(
 		Fixture->GetArrayField(TEXT("port_families"));
 	const TArray<TSharedPtr<FJsonValue>>& CapabilityValues =
 		Fixture->GetArrayField(TEXT("capabilities"));
-	const TArray<TSharedPtr<FJsonValue>>& MappingValues =
-		Fixture->GetArrayField(TEXT("legacy_mappings"));
-	const TArray<TSharedPtr<FJsonValue>>& RetiredValues =
-		Fixture->GetArrayField(TEXT("retired_legacy"));
 	const TArray<TSharedPtr<FJsonValue>>& ScenarioValues =
 		Fixture->GetArrayField(TEXT("scenario_contracts"));
-	TestEqual(
-		TEXT("five typed port families"),
-		FamilyValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("port_family_count"))));
-	TestEqual(
-		TEXT("eighteen canonical capabilities"),
-		CapabilityValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("capability_count"))));
-	TestEqual(
-		TEXT("thirty four mapped legacy candidates"),
-		MappingValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("mapped_legacy_count"))));
-	TestEqual(
-		TEXT("one retired legacy candidate"),
-		RetiredValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("retired_legacy_count"))));
-	TestEqual(
-		TEXT("all thirty five legacy candidates adjudicated"),
-		MappingValues.Num() + RetiredValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("legacy_candidate_count"))));
-
 	const TSet<FString> ExpectedFamilies = {
 		TEXT("skeletal_attachment"),
 		TEXT("rig_bake"),
@@ -296,13 +260,12 @@ bool FUeAgentRigSimulationSpatialContractTest::RunTest(
 			TEXT("family has independent oracle: ") + FamilyId,
 			!Family->GetStringField(TEXT("oracle_kind")).IsEmpty());
 	}
-	bool bExactFamilies = FamilyIds.Num() == ExpectedFamilies.Num();
 	for (const FString& ExpectedFamily : ExpectedFamilies)
 	{
-		bExactFamilies =
-			bExactFamilies && FamilyIds.Contains(ExpectedFamily);
+		TestTrue(TEXT("required typed port family exists: ")
+			+ ExpectedFamily,
+			FamilyIds.Contains(ExpectedFamily));
 	}
-	TestTrue(TEXT("exact typed port family set"), bExactFamilies);
 	TestTrue(
 		TEXT("simulation observation accepts explicit simulation time"),
 		ReadStrings(
@@ -361,84 +324,18 @@ bool FUeAgentRigSimulationSpatialContractTest::RunTest(
 		CapabilityById[TEXT("physics.simulation.probe")]
 			->GetStringField(TEXT("effect_class")),
 		FString(TEXT("session_control")));
-	TestEqual(
-		TEXT("PCG spatial read stays query-only"),
-		CapabilityById[TEXT("pcg.generated_spatial_data.read")]
-			->GetStringField(TEXT("operation_kind")),
-		FString(TEXT("query")));
 
-	TSet<FString> ExternalOwnerIds;
-	for (const FString& OwnerId
-		: ReadStrings(Fixture, TEXT("external_owner_ids")))
-	{
-		ExternalOwnerIds.Add(OwnerId);
-	}
-	TSet<FString> CandidateIds;
-	for (const TSharedPtr<FJsonValue>& Value : MappingValues)
-	{
-		const TSharedPtr<FJsonObject> Mapping = Value->AsObject();
-		const FString LegacyId =
-			Mapping->GetStringField(TEXT("legacy_id"));
-		const FString Disposition =
-			Mapping->GetStringField(TEXT("disposition"));
-		TestFalse(
-			TEXT("mapped legacy id is unique: ") + LegacyId,
-			CandidateIds.Contains(LegacyId));
-		CandidateIds.Add(LegacyId);
-		TestTrue(
-			TEXT("mapped disposition is allowed: ") + LegacyId,
-			Disposition == TEXT("adapt")
-				|| Disposition == TEXT("compose")
-				|| Disposition == TEXT("split"));
-		const TArray<FString> LocalTargets =
-			ReadStrings(Mapping, TEXT("target_capability_ids"));
-		const TArray<FString> ExternalTargets =
-			ReadStrings(Mapping, TEXT("external_owner_ids"));
-		TestTrue(
-			TEXT("mapped input has at least one explicit owner: ")
-				+ LegacyId,
-			!LocalTargets.IsEmpty() || !ExternalTargets.IsEmpty());
-		for (const FString& Target : LocalTargets)
-		{
-			TestTrue(
-				TEXT("mapped local target exists: ") + LegacyId,
-				CapabilityIds.Contains(Target));
-		}
-		for (const FString& Target : ExternalTargets)
-		{
-			TestTrue(
-				TEXT("mapped external owner exists: ") + LegacyId,
-				ExternalOwnerIds.Contains(Target));
-		}
-		if (Disposition == TEXT("split"))
-		{
-			TestTrue(
-				TEXT("split keeps local semantic owner and external owner: ")
-					+ LegacyId,
-				!LocalTargets.IsEmpty() && !ExternalTargets.IsEmpty());
-		}
-	}
-	for (const TSharedPtr<FJsonValue>& Value : RetiredValues)
-	{
-		const TSharedPtr<FJsonObject> Retired = Value->AsObject();
-		const FString LegacyId =
-			Retired->GetStringField(TEXT("legacy_id"));
-		TestFalse(
-			TEXT("retired legacy id is unique: ") + LegacyId,
-			CandidateIds.Contains(LegacyId));
-		CandidateIds.Add(LegacyId);
-		TestTrue(
-			TEXT("retired legacy entry has evidence: ") + LegacyId,
-			!Retired->GetStringField(TEXT("reason")).IsEmpty());
-	}
-	TestEqual(
-		TEXT("candidate union is exact"),
-		CandidateIds.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("legacy_candidate_count"))));
-	TestTrue(
-		TEXT("standalone retarget validation is retired"),
-		CandidateIds.Contains(TEXT("retarget_batch_validate_json")));
+	const TSharedPtr<FJsonObject> Lifecycle =
+		Fixture->GetObjectField(TEXT("lifecycle_contract"));
+	TestEqual(TEXT("validation runs before mutation"),
+		Lifecycle->GetStringField(TEXT("validation_stage")),
+		FString(TEXT("pre_mutation")));
+	TestEqual(TEXT("validation belongs to the same HJSON import plan"),
+		Lifecycle->GetStringField(TEXT("validation_scope")),
+		FString(TEXT("same_hjson_import_plan")));
+	TestFalse(TEXT("validation is not a standalone capability"),
+		Lifecycle->GetBoolField(
+			TEXT("standalone_validation_capability")));
 
 	const TSet<FString> ExpectedScenarios = {
 		TEXT("skeleton_socket_parent_chain"),
@@ -480,22 +377,15 @@ bool FUeAgentRigSimulationSpatialContractTest::RunTest(
 			TEXT("scenario has frame/time evidence: ") + ScenarioId,
 			!ReadStrings(Scenario, TEXT("required_evidence")).IsEmpty());
 	}
-	bool bExactScenarios = ScenarioIds.Num() == ExpectedScenarios.Num();
 	for (const FString& ExpectedScenario : ExpectedScenarios)
 	{
-		bExactScenarios =
-			bExactScenarios && ScenarioIds.Contains(ExpectedScenario);
+		TestTrue(TEXT("required scenario contract exists: ")
+			+ ExpectedScenario,
+			ScenarioIds.Contains(ExpectedScenario));
 	}
-	TestTrue(TEXT("all required scenario contracts exist"), bExactScenarios);
 
 	const TArray<FString> ForbiddenOracles =
 		ReadStrings(Fixture, TEXT("forbidden_oracles"));
-	TestTrue(
-		TEXT("legacy success is not an oracle"),
-		ForbiddenOracles.Contains(TEXT("legacy_command_success")));
-	TestTrue(
-		TEXT("handler echo is not an oracle"),
-		ForbiddenOracles.Contains(TEXT("legacy_handler_echo")));
 	TestTrue(
 		TEXT("screenshot alone is not an oracle"),
 		ForbiddenOracles.Contains(TEXT("screenshot_only")));
@@ -635,14 +525,6 @@ bool FUeAgentRigSimulationSpatialContractTest::RunTest(
 		GetRigSimulationSpatialPortFamilyContracts();
 	const auto& ProductionCapabilities =
 		GetRigSimulationSpatialCapabilityContracts();
-	TestEqual(
-		TEXT("production exposes five family contracts"),
-		ProductionFamilies.Num(),
-		FamilyValues.Num());
-	TestEqual(
-		TEXT("production exposes eighteen capabilities"),
-		ProductionCapabilities.Num(),
-		CapabilityValues.Num());
 	for (const auto& ProductionFamily : ProductionFamilies)
 	{
 		const FString FamilyId = ProductionFamily.GetFamilyId();

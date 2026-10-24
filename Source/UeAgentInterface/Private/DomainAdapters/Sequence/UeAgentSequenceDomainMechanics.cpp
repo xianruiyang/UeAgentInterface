@@ -1,16 +1,27 @@
 #include "DomainAdapters/Sequence/UeAgentSequenceDomainMechanics.h"
 
-#include "CommandEdge/UeAgentCommandProtocol.h"
-#include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
-#include "Core/ArtifactPublisher/UeAgentArtifactPublisher.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
+
+#include "Composition/HjsonImport/UeAgentSemanticWorkspaceImport.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
-#include "DomainAdapters/Sequence/UeAgentSequenceHjsonContract.h"
-#include "DomainAdapters/TimelineSequenceCommands/UeAgentTimelineSequenceCommandMechanicsBoundary.h"
+#include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
+#include "OperationOwners/TimelineSequenceCommands/UeAgentTimelineSequenceCommandOperationOwner.h"
+#include "UObject/ObjectMacros.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringApplyProvider.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringAssets.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringDescriptors.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringExport.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringRegistration.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringState.h"
 #include "Dom/JsonObject.h"
-#include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
+#include "Dom/JsonValue.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
+#include "UObject/Package.h"
+#include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 
 THIRD_PARTY_INCLUDES_START
 #include <openssl/sha.h>
@@ -23,28 +34,58 @@ namespace UE::UAI::DomainAdapters::Sequence
 	using namespace ContextResource;
 	using namespace HjsonWorkspace;
 	using namespace HjsonWorkspace::DomainAuthoring;
-	using namespace ArtifactPublisher;
+	using namespace DomainAdapters::ContentGraphRead;
 
 	namespace
 	{
 		const FString SchemaId = TEXT("uai.sequence.edit/1");
 		const FString RootType = TEXT("/Script/LevelSequence.LevelSequence");
 
-		class FNeverCancelled final
-			: public Contract::IUeAgentCancellationSignal
-		{
-		public:
-			virtual bool IsCancelled() const override { return false; }
-		};
+		bool Fail(FWorkspaceError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic,
+            const FString& Target = FString(), const FString& Pointer = FString())
+        {
+            OutError.SetFailure(MoveTemp(Diagnostic), Target, Pointer);
+            return false;
+        }
 
-		bool Fail(
-			FWorkspaceError& OutError,
-			FString Code,
-			FString Source = FString(),
-			FString Pointer = TEXT("/"))
+		Contract::FDiagnostic ValueFailure(const TCHAR* Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target,
+			const FString& SourceKind = TEXT("native_result"))
 		{
-			OutError.Set(MoveTemp(Code), MoveTemp(Source), MoveTemp(Pointer));
-			return false;
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("authoring_apply"));
+			Diagnostic.TargetPath = Target;
+			Diagnostic.PropertyPath = Path;
+			Diagnostic.SourceKind = SourceKind;
+			Diagnostic.ActualValuePresent = Actual.IsValid();
+			Diagnostic.ExpectedValuePresent = true;
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			if (SourceKind != TEXT("native_result")) Diagnostic.Source.JsonPath = Path;
+			return Diagnostic;
+		}
+
+		const TCHAR* JsonKind(const TSharedPtr<FJsonValue>& Value)
+		{
+			if (!Value.IsValid()) return TEXT("missing");
+			switch (Value->Type)
+			{
+			case EJson::Null: return TEXT("null");
+			case EJson::String: return TEXT("string");
+			case EJson::Number: return TEXT("number");
+			case EJson::Boolean: return TEXT("boolean");
+			case EJson::Array: return TEXT("array");
+			case EJson::Object: return TEXT("object");
+			default: return TEXT("invalid");
+			}
+		}
+
+		Contract::FDiagnostic NativeShapeFailure(const FString& Path, const TCHAR* Expected,
+			const TSharedPtr<FJsonValue>& Actual, const FString& Target)
+		{
+			return ValueFailure(TEXT("sequence_domain_observed_state_missing"),
+				TEXT("The native sequence readback does not have the required field shape."), Path,
+				Actual.IsValid() ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(JsonKind(Actual))) : nullptr,
+				MakeShared<FJsonValueString>(Expected), Target);
 		}
 
 		FString Sha256(const FString& Text)
@@ -63,140 +104,33 @@ namespace UE::UAI::DomainAdapters::Sequence
 			return Result;
 		}
 
-		FUeAgentResourceTracker MakeExportResources()
-		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16ll * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16ll * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16ll * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 65536},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					512ll * 1024 * 1024},
-			}));
-		}
-
-		bool DecodeRequest(
-			const FString& CommandId,
-			const FString& ContractHash,
-			const FString& ParamsJson,
-			TOptional<FUeAgentCommandRequest>& OutRequest,
-			FWorkspaceError& OutError)
-		{
-			const FString RequestId = TEXT("sequence-domain-")
-				+ FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
-			const FString Envelope = FString::Printf(
-				TEXT("{\"schema\":\"uai.command.v1\",\"version\":1,")
-				TEXT("\"message_kind\":\"command_request\",")
-				TEXT("\"correlation_id\":\"%s\",\"request_id\":\"%s\",")
-				TEXT("\"command_id\":\"%s\",\"command_binding_hash\":\"%s\",")
-				TEXT("\"params\":%s}"),
-				*RequestId,
-				*RequestId,
-				*CommandId,
-				*ContractHash,
-				*ParamsJson);
-			FTCHARToUTF8 Encoded(*Envelope);
-			TArray<uint8> Bytes;
-			Bytes.Append(
-				reinterpret_cast<const uint8*>(Encoded.Get()),
-				Encoded.Length());
-			FUeAgentCommandProtocolDiagnostic Diagnostic;
-			if (!FUeAgentCommandProtocolCodec().DecodeRequest(
-					Bytes, OutRequest, Diagnostic)
-				|| !OutRequest.IsSet())
-			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_internal_request_invalid"),
-					Diagnostic.Code,
-					Diagnostic.Message);
-			}
-			return true;
-		}
-
 		bool SubmitTimelineCommand(
 			const FString& CommandId,
+			const FString& Target,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
 			FWorkspaceError& OutError)
 		{
 			OutPayload.Reset();
-			TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry>
-				Registry;
-			TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
-			FString CompositionError;
-			if (!Module::CommandRegistration::Active::
-					TryComposeProcessActiveCommandComposition(
-						Registry, Dispatch, CompositionError)
-				|| !Registry.IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_command_registry_unavailable"),
-					CompositionError);
-			}
-			const CommandContract::FUeAgentFrozenCommandContract* FrozenContract =
-				Registry->FindExact(CommandId);
-			if (!FrozenContract)
-			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_command_contract_missing"),
-					CommandId);
-			}
 			FString ParamsJson;
 			if (!TryCanonicalizeObject(Params, ParamsJson, OutError))
 			{
 				return false;
 			}
-			TOptional<FUeAgentCommandRequest> Request;
-			if (!DecodeRequest(
+			UE::UAI::Contract::FDiagnostic CommandDiagnostic;
+			if (!OperationOwners::TimelineSequenceCommands::TryExecuteInternal(
 					CommandId,
-					FrozenContract->GetContractHash(),
 					ParamsJson,
-					Request,
-					OutError))
-			{
-				return false;
-			}
-			TSharedPtr<IUeAgentCommandHandler> Mechanics;
-			TArray<FString> Scopes;
-			FString MechanicsError;
-			if (!TimelineSequenceCommands::TryResolveMechanics(
-					CommandId, Mechanics, Scopes, MechanicsError)
-				|| !Mechanics.IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_native_mechanics_unavailable"),
-					CommandId,
-					MechanicsError);
-			}
-			Scopes.AddUnique(TEXT("uai:query"));
-			Scopes.AddUnique(TEXT("uai:operate"));
-			const FUeAgentCommandResult Result =
-				TimelineSequenceCommands::Submit(
-					Mechanics.ToSharedRef(),
-					Request.GetValue(),
 					Contract::FUeAgentCallerContext(
 						TEXT("sequence-domain-provider"),
-						Scopes,
-						Request->GetCorrelationId()),
-					MakeShared<FNeverCancelled>());
-			if (!Result.IsOk())
+						{TEXT("uai:query"), TEXT("uai:operate")},
+						TEXT("sequence-domain-internal")),
+					OutPayload,
+					CommandDiagnostic))
 			{
-				SetWorkspaceErrorFromCommandFailure(
-					Result.GetErrorJson(),
-					TEXT("sequence_domain_native_command_failed"),
-					CommandId,
-					OutError);
+				OutError.SetFailure(CommandDiagnostic, Target);
 				return false;
 			}
-			OutPayload = Result.GetPayloadJson();
 			return true;
 		}
 
@@ -214,126 +148,72 @@ namespace UE::UAI::DomainAdapters::Sequence
 
 		bool ParsePayload(
 			const FString& PayloadJson,
+			const FString& Target,
 			TSharedPtr<FJsonObject>& OutPayload,
 			FWorkspaceError& OutError)
 		{
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			if (!Json::TryParseObject(PayloadJson, OutPayload, Error)
 				|| !OutPayload.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_native_payload_invalid"),
-					Error);
+				if (Error.IsEmpty()) Error = ValueFailure(TEXT("sequence_domain_native_payload_invalid"),
+					TEXT("The timeline read command did not return a decodable object payload."), TEXT("payload_object_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target);
+				Error.SourceKind = TEXT("native_result");
+				return Fail(OutError, MoveTemp(Error), Target);
 			}
-			return true;
-		}
-
-		bool ExtractRevision(
-			const TSharedPtr<FJsonObject>& ReadPayload,
-			TSharedPtr<FJsonObject>& OutRevision,
-			FWorkspaceError& OutError)
-		{
-			OutRevision.Reset();
-			const TSharedPtr<FJsonObject>* Projection = nullptr;
-			const TSharedPtr<FJsonObject>* ProjectedPayload = nullptr;
-			const TSharedPtr<FJsonObject>* Snapshot = nullptr;
-			const TSharedPtr<FJsonObject>* Revision = nullptr;
-			if (!ReadPayload.IsValid()
-				|| !ReadPayload->TryGetObjectField(TEXT("projection"), Projection)
-				|| !Projection || !Projection->IsValid()
-				|| !(*Projection)->TryGetObjectField(
-					TEXT("payload"), ProjectedPayload)
-				|| !ProjectedPayload || !ProjectedPayload->IsValid()
-				|| !(*ProjectedPayload)->TryGetObjectField(
-					TEXT("snapshot"), Snapshot)
-				|| !Snapshot || !Snapshot->IsValid()
-				|| !(*Snapshot)->TryGetObjectField(TEXT("revision"), Revision)
-				|| !Revision || !Revision->IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_native_revision_missing"));
-			}
-			FString SourceId;
-			FString Generation;
-			FString Sequence;
-			if (!(*Revision)->TryGetStringField(TEXT("source_id"), SourceId)
-				|| !(*Revision)->TryGetStringField(TEXT("generation"), Generation))
-			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_native_revision_invalid"));
-			}
-			if (!(*Revision)->TryGetStringField(TEXT("sequence"), Sequence))
-			{
-				double NumericSequence = 0.0;
-				if (!(*Revision)->TryGetNumberField(
-						TEXT("sequence"), NumericSequence)
-					|| NumericSequence < 0.0
-					|| NumericSequence > static_cast<double>(MAX_int64)
-					|| FMath::FloorToDouble(NumericSequence) != NumericSequence)
-				{
-					return Fail(
-						OutError,
-						TEXT("sequence_domain_native_revision_invalid"));
-				}
-				Sequence = FString::Printf(
-					TEXT("%lld"), static_cast<int64>(NumericSequence));
-			}
-			OutRevision = MakeShared<FJsonObject>();
-			OutRevision->SetStringField(TEXT("source_id"), SourceId);
-			OutRevision->SetStringField(TEXT("generation"), Generation);
-			OutRevision->SetStringField(TEXT("sequence"), Sequence);
 			return true;
 		}
 
 		bool StableRevision(
-			const TSharedPtr<FJsonObject>& ReadPayload,
-			FString& OutRevision,
-			FWorkspaceError& OutError)
+			const TSharedPtr<FJsonObject>& ReadPayload, const FString& Target,
+			FString& OutRevision, FWorkspaceError& OutError)
 		{
 			OutRevision.Reset();
-			const TSharedPtr<FJsonObject>* Projection = nullptr;
-			const TSharedPtr<FJsonObject>* ProjectedPayload = nullptr;
-			const TSharedPtr<FJsonObject>* Snapshot = nullptr;
+			if (!ReadPayload.IsValid()) return Fail(OutError, NativeShapeFailure(FString(), TEXT("object"), nullptr, Target));
+			auto RequireObject = [&OutError, &Target](const TSharedPtr<FJsonObject>& Parent, const TCHAR* Field,
+				const FString& Path, TSharedPtr<FJsonObject>& OutObject)
+			{
+				const auto Actual = Parent->TryGetField(Field);
+				if (!Actual.IsValid() || Actual->Type != EJson::Object || !Actual->AsObject().IsValid())
+					return Fail(OutError, NativeShapeFailure(Path, TEXT("object"), Actual, Target));
+				OutObject = Actual->AsObject();
+				return true;
+			};
+			TSharedPtr<FJsonObject> Node = ReadPayload;
+			FString Path;
+			const TCHAR* const ProjectionFields[] = {TEXT("projection"), TEXT("payload"), TEXT("snapshot")};
+			for (const TCHAR* Field : ProjectionFields)
+			{
+				Path += TEXT("/") + FString(Field);
+				if (!RequireObject(Node, Field, Path, Node)) return false;
+			}
+			Path += TEXT("/entries");
+			const auto EntriesValue = Node->TryGetField(TEXT("entries"));
 			const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
-			if (!ReadPayload.IsValid()
-				|| !ReadPayload->TryGetObjectField(TEXT("projection"), Projection)
-				|| !Projection || !Projection->IsValid()
-				|| !(*Projection)->TryGetObjectField(
-					TEXT("payload"), ProjectedPayload)
-				|| !ProjectedPayload || !ProjectedPayload->IsValid()
-				|| !(*ProjectedPayload)->TryGetObjectField(
-					TEXT("snapshot"), Snapshot)
-				|| !Snapshot || !Snapshot->IsValid()
-				|| !(*Snapshot)->TryGetArrayField(TEXT("entries"), Entries)
-				|| !Entries || Entries->IsEmpty())
+			if (!Node->TryGetArrayField(TEXT("entries"), Entries) || !Entries)
+				return Fail(OutError, NativeShapeFailure(Path, TEXT("non-empty array"), EntriesValue, Target));
+			if (Entries->IsEmpty()) return Fail(OutError, ValueFailure(TEXT("sequence_domain_observed_state_missing"),
+				TEXT("The native sequence snapshot contains no state entries."), Path,
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one entry")), Target));
+			const auto& Entry = (*Entries)[0];
+			Path += TEXT("/0");
+			if (!Entry.IsValid() || Entry->Type != EJson::Object || !Entry->AsObject().IsValid())
+				return Fail(OutError, NativeShapeFailure(Path, TEXT("object"), Entry, Target));
+			Node = Entry->AsObject();
+			const TCHAR* const StateFields[] = {TEXT("value"), TEXT("fields"), TEXT("observed_state")};
+			for (const TCHAR* Field : StateFields)
 			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_observed_state_missing"));
+				Path += TEXT("/") + FString(Field);
+				if (!RequireObject(Node, Field, Path, Node)) return false;
 			}
-			const TSharedPtr<FJsonObject> Entry = (*Entries)[0]->AsObject();
-			const TSharedPtr<FJsonObject>* Value = nullptr;
-			const TSharedPtr<FJsonObject>* Fields = nullptr;
-			const TSharedPtr<FJsonObject>* ObservedState = nullptr;
+			Path += TEXT("/text");
 			FString State;
-			if (!Entry.IsValid()
-				|| !Entry->TryGetObjectField(TEXT("value"), Value)
-				|| !Value || !Value->IsValid()
-				|| !(*Value)->TryGetObjectField(TEXT("fields"), Fields)
-				|| !Fields || !Fields->IsValid()
-				|| !(*Fields)->TryGetObjectField(
-					TEXT("observed_state"), ObservedState)
-				|| !ObservedState || !ObservedState->IsValid()
-				|| !(*ObservedState)->TryGetStringField(TEXT("text"), State)
-				|| State.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_observed_state_missing"));
-			}
+			if (!Node->TryGetStringField(TEXT("text"), State))
+				return Fail(OutError, NativeShapeFailure(Path, TEXT("non-empty string"), Node->TryGetField(TEXT("text")), Target));
+			if (State.IsEmpty()) return Fail(OutError, ValueFailure(TEXT("sequence_domain_observed_state_missing"),
+				TEXT("The native sequence snapshot has empty observed state text."), Path,
+				MakeShared<FJsonValueString>(State), MakeShared<FJsonValueString>(TEXT("non-empty string")), Target));
 			OutRevision = Sha256(State);
 			return true;
 		}
@@ -346,6 +226,41 @@ namespace UE::UAI::DomainAdapters::Sequence
 				: Target;
 		}
 
+		bool TryGetSequenceReflectionProfile(const FString& Target,
+			const UeAgentReflectionAuthoring::FProfile*& OutProfile, Contract::FDiagnostic& OutError)
+		{
+			OutProfile = UeAgentReflectionAuthoring::FindProfileByTypeId(TEXT("sequence"));
+			if (!OutProfile || OutProfile->AssetClassPath != RootType)
+			{
+				OutError = ValueFailure(TEXT("sequence_domain_reflection_profile_missing"),
+					OutProfile ? TEXT("The sequence reflection profile declares the wrong asset class.")
+						: TEXT("The sequence reflection profile is not registered."), TEXT("reflection_profile_asset_class"),
+					OutProfile ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(OutProfile->AssetClassPath)) : nullptr,
+					MakeShared<FJsonValueString>(RootType), Target);
+				OutProfile = nullptr;
+				return false;
+			}
+			return true;
+		}
+
+		bool EnsureReflectionAuthoringRegistered(const FString& Target, FWorkspaceError& OutError)
+		{
+			static const TPair<bool, UE::UAI::Contract::FDiagnostic> Registration = []()
+			{
+				UE::UAI::Contract::FDiagnostic Error;
+				const bool bRegistered =
+					UeAgentReflectionAuthoring::RegisterAuthoring(Error);
+				return TPair<bool, UE::UAI::Contract::FDiagnostic>(bRegistered, MoveTemp(Error));
+			}();
+			if (!Registration.Key)
+			{
+				return Fail(OutError, !Registration.Value.IsEmpty() ? Registration.Value : ValueFailure(TEXT("sequence_domain_reflection_registration_failed"),
+					TEXT("Sequence reflection authoring registration failed without providing a diagnostic."), TEXT("reflection_authoring_registered"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target), Target);
+			}
+			return true;
+		}
+
 		bool TryRead(
 			const FString& Target,
 			FString& OutPayload,
@@ -354,119 +269,12 @@ namespace UE::UAI::DomainAdapters::Sequence
 		{
 			return SubmitTimelineCommand(
 					TEXT("timeline.sequence.read"),
+					Target,
 					ReadParams(Target),
 					OutPayload,
 					OutError)
-				&& ParsePayload(OutPayload, OutPayloadObject, OutError);
+				&& ParsePayload(OutPayload, Target, OutPayloadObject, OutError);
 		}
-
-		void CopyWorkspaceError(
-			const FWorkspaceError& Error,
-			FArtifactPublishError& OutError)
-		{
-			OutError.Set(
-				Error.GetCode().IsEmpty()
-					? FString(TEXT("sequence_domain_export_verification_failed"))
-					: Error.GetCode(),
-				Error.GetSourceUnit(),
-				Error.GetJsonPointer());
-		}
-
-		class FSequenceDomainExportVerification final
-			: public IArtifactPublishVerification
-		{
-		public:
-			FSequenceDomainExportVerification(
-				FString InTarget,
-				FString InBaseRevision,
-				FString InEntryFile)
-				: Target(MoveTemp(InTarget))
-				, BaseRevision(MoveTemp(InBaseRevision))
-				, EntryFile(MoveTemp(InEntryFile))
-				, Contract(
-					GetSequenceHjsonFieldOwner(),
-					GetSequenceHjsonSchemaId(),
-					GetSequenceHjsonRootType())
-			{
-			}
-
-			virtual bool TryVerifyStagedWorkspace(
-				const FString& StagedWorkspacePath,
-				const EWorkspaceKind WorkspaceKind,
-				const FString& StagedEntryFile,
-				FUeAgentResourceTracker& Resources,
-				FArtifactPublishError& OutError) override
-			{
-				if (WorkspaceKind != EWorkspaceKind::Directory
-					|| StagedEntryFile != EntryFile)
-				{
-					OutError.Set(
-						TEXT("sequence_domain_export_workspace_identity_mismatch"),
-						StagedWorkspacePath,
-						StagedEntryFile);
-					return false;
-				}
-				FWorkspaceError WorkspaceError;
-				if (!TryVerifyDomainHjsonStagedWorkspace(
-						StagedWorkspacePath,
-						Target,
-						Contract,
-						BaseRevision,
-						EntryFile,
-						Resources,
-						WorkspaceError))
-				{
-					CopyWorkspaceError(WorkspaceError, OutError);
-					return false;
-				}
-				return true;
-			}
-
-			virtual bool TryRecheckTargetVersion(
-				FArtifactPublishError& OutError) override
-			{
-				FString Payload;
-				TSharedPtr<FJsonObject> ReadObject;
-				FWorkspaceError WorkspaceError;
-				FString CurrentRevision;
-				if (!TryRead(Target, Payload, ReadObject, WorkspaceError)
-					|| !StableRevision(
-						ReadObject, CurrentRevision, WorkspaceError))
-				{
-					CopyWorkspaceError(WorkspaceError, OutError);
-					return false;
-				}
-				if (CurrentRevision != BaseRevision)
-				{
-					OutError.Set(
-						TEXT("sequence_domain_export_target_changed"),
-						Target,
-						CurrentRevision);
-					return false;
-				}
-				return true;
-			}
-
-			virtual TMap<FString, FString>
-				GetSemanticVerificationFields() const override
-			{
-				return {
-					{TEXT("schema_id"), GetSequenceHjsonSchemaId()},
-					{TEXT("root_type"), GetSequenceHjsonRootType()},
-					{TEXT("field_set"), GetSequenceHjsonFieldSetId()},
-					{TEXT("base_revision"), BaseRevision},
-					{TEXT("staged_import_parse"), TEXT("verified")},
-					{TEXT("target_version_recheck"), TEXT("verified")},
-					{TEXT("asset_coverage"), TEXT("sequence_settings_only")},
-				};
-			}
-
-		private:
-			FString Target;
-			FString BaseRevision;
-			FString EntryFile;
-			FDomainHjsonDocumentContract Contract;
-		};
 
 		bool TryExport(
 			const FString& Target,
@@ -480,163 +288,248 @@ namespace UE::UAI::DomainAdapters::Sequence
 				|| !Params->TryGetStringField(
 					TEXT("workspace_path"), WorkspacePath))
 			{
-				return Fail(
-					OutError,
-					TEXT("content_graph_export_params_invalid"),
-					Target);
+				return Fail(OutError, ValueFailure(TEXT("content_graph_export_params_invalid"),
+					TEXT("Sequence workspace export requires a string workspace_path."), TEXT("/workspace_path"),
+					Params.IsValid() ? Params->TryGetField(TEXT("workspace_path")) : nullptr,
+					MakeShared<FJsonValueString>(TEXT("absolute directory path")), Target, TEXT("command_input")), Target);
 			}
 			Params->TryGetStringField(TEXT("profile_id"), ProfileId);
 			WorkspacePath.TrimStartAndEndInline();
 			ProfileId.TrimStartAndEndInline();
-			if (WorkspacePath.IsEmpty()
-				|| FPaths::IsRelative(WorkspacePath)
-				|| ProfileId.IsEmpty())
+			if (WorkspacePath.IsEmpty() || FPaths::IsRelative(WorkspacePath))
 			{
-				return Fail(
-					OutError,
-					TEXT("workspace_path_invalid"),
-					WorkspacePath);
+				return Fail(OutError, ValueFailure(TEXT("workspace_path_invalid"),
+					TEXT("Sequence workspace export requires a nonempty absolute directory path."), TEXT("/workspace_path"),
+					MakeShared<FJsonValueString>(WorkspacePath), MakeShared<FJsonValueString>(TEXT("nonempty absolute directory path")),
+					Target, TEXT("command_input")), Target);
+			}
+			if (ProfileId.IsEmpty())
+			{
+				return Fail(OutError, ValueFailure(TEXT("workspace_path_invalid"),
+					TEXT("Sequence workspace export requires a nonempty profile_id."), TEXT("/profile_id"),
+					MakeShared<FJsonValueString>(ProfileId), MakeShared<FJsonValueString>(TEXT("nonempty profile identifier")),
+					Target, TEXT("command_input")), Target);
 			}
 
-			FString ReadPayload;
-			TSharedPtr<FJsonObject> ReadObject;
-			FString Revision;
-			if (!TryRead(Target, ReadPayload, ReadObject, OutError)
-				|| !StableRevision(ReadObject, Revision, OutError))
+			const UeAgentReflectionAuthoring::FProfile* Profile = nullptr;
+			Contract::FDiagnostic ProfileError;
+			if (!TryGetSequenceReflectionProfile(Target, Profile, ProfileError))
+				return Fail(OutError, MoveTemp(ProfileError), Target);
+			if (!EnsureReflectionAuthoringRegistered(Target, OutError))
 			{
 				return false;
 			}
-			TSharedPtr<FJsonObject> Document;
-			if (!TryBuildSequenceHjsonExportDocument(
-					Target, Document, OutError)
-				|| !Document.IsValid())
+			const FString TargetPackage =
+				UeAgentReflectionAuthoring::NormalizePackagePath(Target);
+			Contract::FDiagnostic LoadError;
+			UObject* Asset =
+				UeAgentReflectionAuthoring::LoadAsset(*Profile, TargetPackage, LoadError);
+			if (LoadError.IsValid()) return Fail(OutError, MoveTemp(LoadError), Target);
+			if (!Asset || Asset->GetClass()->GetPathName() != RootType)
 			{
+				return Fail(OutError, ValueFailure(TEXT("sequence_domain_target_type_invalid"),
+					Asset ? TEXT("The loaded sequence target has the wrong native class.") : TEXT("The sequence target could not be loaded."),
+					TEXT("native_asset_class"), Asset ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Asset->GetClass()->GetPathName())) : nullptr,
+					MakeShared<FJsonValueString>(RootType), Target), Target);
+			}
+			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
+			if (!UeAgentReflectionAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, ProfileId, ExportResult))
+			{
+				OutError.SetFailure(ExportResult.Diagnostic, Target);
 				return false;
 			}
-
-			const FString EntryFile(TEXT("sequence.hjson"));
-			const FDomainHjsonDocumentContract Contract(
-				GetSequenceHjsonFieldOwner(),
-				GetSequenceHjsonSchemaId(),
-				GetSequenceHjsonRootType());
-			FUeAgentResourceTracker Resources = MakeExportResources();
-			FExportWorkspacePlanPtr Plan;
-			if (!TryBuildDomainHjsonDirectoryExportPlan(
-					Target,
-					Contract,
-					Revision,
-					ProfileId,
-					GetSequenceHjsonFieldOwner(),
-					EntryFile,
-					Document,
-					Resources,
-					Plan,
-					OutError)
-				|| !Plan.IsValid())
-			{
-				return false;
-			}
-
-			const TSharedRef<FSequenceDomainExportVerification> Verification =
-				MakeShared<FSequenceDomainExportVerification>(
-					Target, Revision, EntryFile);
-			FArtifactPublishReceipt Receipt;
-			FArtifactPublishError PublishError;
-			if (!TryPublishExportPlan(
-					FArtifactPublishRequest(
-						Plan.ToSharedRef(),
-						WorkspacePath,
-						GetSequenceHjsonFieldOwner(),
-						Verification),
-					Resources,
-					Receipt,
-					PublishError))
-			{
-				return Fail(
-					OutError,
-					PublishError.GetCode().IsEmpty()
-						? FString(TEXT("sequence_domain_export_publish_failed"))
-						: PublishError.GetCode(),
-					PublishError.GetPath(),
-					PublishError.GetDetail());
-			}
-
-			const TSharedPtr<FJsonObject> Semantic = MakeShared<FJsonObject>();
-			for (const TPair<FString, FString>& Field
-				: Receipt.GetSemanticVerificationFields())
-			{
-				Semantic->SetStringField(Field.Key, Field.Value);
-			}
-			const TSharedPtr<FJsonObject> Scope = MakeShared<FJsonObject>();
-			Scope->SetStringField(
-				TEXT("field_set"), GetSequenceHjsonFieldSetId());
-			Scope->SetBoolField(TEXT("field_set_complete"), true);
-			Scope->SetBoolField(TEXT("asset_structure_complete"), false);
-			Scope->SetBoolField(TEXT("omitted_structure_preserved"), true);
-
-			const TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
-			Response->SetStringField(
-				TEXT("command_id"), TEXT("content_graph.export_workspace"));
-			Response->SetStringField(TEXT("status"), TEXT("published"));
-			Response->SetStringField(TEXT("target"), Target);
-			Response->SetStringField(
-				TEXT("target_kind"), TEXT("ue.level_sequence.asset"));
-			Response->SetStringField(
-				TEXT("schema_id"), GetSequenceHjsonSchemaId());
-			Response->SetStringField(TEXT("base_revision"), Revision);
-			Response->SetStringField(
-				TEXT("workspace_path"), Receipt.GetFinalPath());
-			Response->SetStringField(
-				TEXT("entry_file"), Receipt.GetEntryFile());
-			Response->SetStringField(
-				TEXT("plan_fingerprint"), Receipt.GetPlanFingerprint());
-			Response->SetStringField(
-				TEXT("inventory_hash"), Receipt.GetInventoryHash());
-			Response->SetObjectField(TEXT("scope"), Scope);
-			Response->SetObjectField(TEXT("semantic_verification"), Semantic);
-			return TryCanonicalizeObject(
-				Response, OutPayloadJson, OutError);
+			const TSharedPtr<FJsonObject> Result = ExportResult.ToPublicJsonObject();
+			return TryCanonicalizeObject(Result, OutPayloadJson, OutError);
 		}
 
-		bool ParseTimelineLifecycleMutation(
-			const FString& MutationPayload,
-			TSharedPtr<FJsonObject>& OutMutation,
-			FDomainHjsonImportLifecycleReceipt& OutReceipt,
+		bool TryImportSemanticWorkspace(
+			const FString& Target,
+			const FResolvedDomainHjsonDocument& Document,
+			FString& OutPayloadJson,
 			FWorkspaceError& OutError)
 		{
-			FString JsonError;
-			FString OperationId;
-			FString ProfileId;
-			const TSharedPtr<FJsonObject>* Projection = nullptr;
-			const TSharedPtr<FJsonObject>* Payload = nullptr;
-			if (!Json::TryParseObject(
-					MutationPayload, OutMutation, JsonError)
-				|| !OutMutation.IsValid()
-				|| !OutMutation->TryGetStringField(
-					TEXT("operation_id"), OperationId)
-				|| OperationId.IsEmpty()
-				|| !OutMutation->TryGetObjectField(
-					TEXT("projection"), Projection)
-				|| !Projection || !Projection->IsValid()
-				|| !(*Projection)->TryGetStringField(
-					TEXT("profile_id"), ProfileId)
-				|| ProfileId.IsEmpty()
-				|| !(*Projection)->TryGetObjectField(TEXT("payload"), Payload)
-				|| !Payload || !Payload->IsValid())
+			using namespace UE::UAI::Composition::HjsonImport;
+
+			if (!Document.SemanticWorkspace.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_lifecycle_receipt_invalid"),
-					OperationId,
-					JsonError);
+				return Fail(OutError, ValueFailure(TEXT("sequence_domain_semantic_workspace_missing"),
+					TEXT("The resolved sequence document has no semantic workspace."), TEXT("semantic_workspace_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target), Target);
 			}
-			OutReceipt.bMutationApplied = true;
-			OutReceipt.bCompileSettled = true;
-			OutReceipt.bPackageSaved = true;
-			OutReceipt.bUnloadedReloaded = true;
-			OutReceipt.PersistenceReceiptId =
-				TEXT("timeline-operation:") + OperationId;
-			return true;
+			const UeAgentReflectionAuthoring::FProfile* Profile = nullptr;
+			Contract::FDiagnostic ProfileError;
+			if (!TryGetSequenceReflectionProfile(Target, Profile, ProfileError))
+				return Fail(OutError, MoveTemp(ProfileError), Target);
+			if (!EnsureReflectionAuthoringRegistered(Target, OutError))
+			{
+				return false;
+			}
+
+			const FString TargetPackage =
+				UeAgentReflectionAuthoring::NormalizePackagePath(Target);
+			Contract::FDiagnostic LoadError;
+			UObject* Asset =
+				UeAgentReflectionAuthoring::LoadAsset(*Profile, TargetPackage, LoadError);
+			if (LoadError.IsValid()) return Fail(OutError, MoveTemp(LoadError), Target);
+			if (!Asset || Asset->GetClass()->GetPathName() != RootType)
+			{
+				return Fail(OutError, ValueFailure(TEXT("sequence_domain_target_type_invalid"),
+					Asset ? TEXT("The loaded sequence target has the wrong native class.") : TEXT("The sequence target could not be loaded."),
+					TEXT("native_asset_class"), Asset ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Asset->GetClass()->GetPathName())) : nullptr,
+					MakeShared<FJsonValueString>(RootType), Target), Target);
+			}
+
+			TArray<UeAgentAuthoringState::FReadRequest> Requests;
+			UE::UAI::Contract::FDiagnostic CaptureError;
+			if (!UeAgentReflectionAuthoring::BuildAssetExportSnapshotReadRequests(
+					*Profile, *Asset, Requests, CaptureError))
+			{
+				OutError.SetFailure(CaptureError, Target);
+				return false;
+			}
+			UeAgentAuthoringState::FCaptureResult Capture;
+			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+			{
+				OutError.SetFailure(Capture.Diagnostic, Target);
+				return false;
+			}
+
+			FUeAgentResourceTracker Resources =
+				MakeSemanticWorkspaceResourceTracker();
+			StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
+			FAuthoringModelPtr Model;
+			const bool bCaptureBuilt = TryBuildCanonicalAuthoringCapture(
+					ResolveTargetCompositionKind(
+						Profile->TargetKind, Profile->TypeId),
+					TEXT("llm_authoring"),
+					Capture.Snapshot,
+					Resources,
+					CanonicalSnapshot,
+					Model,
+					OutError);
+			if (!bCaptureBuilt || !CanonicalSnapshot.IsValid()
+				|| !Model.IsValid())
+			{
+				if (OutError.GetDiagnostic().IsEmpty())
+				{
+					const bool bSnapshotAvailable = CanonicalSnapshot.IsValid();
+					return Fail(OutError, ValueFailure(TEXT("sequence_domain_semantic_capture_failed"),
+						!bCaptureBuilt ? TEXT("The canonical sequence capture failed without providing a diagnostic.")
+							: bSnapshotAvailable ? TEXT("The canonical sequence capture returned no authoring model and no diagnostic.")
+							: TEXT("The canonical sequence capture returned no snapshot and no diagnostic."),
+						!bCaptureBuilt ? TEXT("canonical_capture_succeeded")
+							: bSnapshotAvailable ? TEXT("authoring_model_available") : TEXT("canonical_snapshot_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target), Target);
+				}
+				return false;
+			}
+
+			Capture.Snapshot.ReleaseNativeValues();
+			const FString TargetObjectPath =
+				ObjectPathFromPackageIdentity(Target);
+			return TryCoordinateSemanticWorkspaceImport(
+				Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
+				CanonicalSnapshot.ToSharedRef(),
+				Contract::FUeAgentDescriptorIdentity(
+					TEXT("sequence.semantic_workspace"), 1,
+					Model->GetSemanticFingerprint()),
+				TargetObjectPath,
+				Resources,
+				{
+					TEXT("sequence-domain-provider"),
+					Target,
+					TargetObjectPath,
+					TEXT("sequence-semantic"),
+					TEXT("sequence_domain_semantic_prepare_failed"),
+					TEXT("sequence_domain_semantic_apply_failed"),
+					TEXT("sequence_domain_semantic_readback_payload_invalid"),
+					TEXT("sequence_domain_compile_not_settled"),
+					[Profile, TargetObjectPath](TArray<UeAgentAuthoringState::FReadRequest>& Requests, UE::UAI::Contract::FDiagnostic& Error)
+					{
+						UObject* Native = StaticLoadObject(UObject::StaticClass(), nullptr, *TargetObjectPath);
+						if (!Native)
+						{
+							Error = ValueFailure(TEXT("sequence_domain_target_type_invalid"),
+								TEXT("The saved sequence target could not be loaded for the export snapshot readback."),
+								TEXT("native_asset_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TargetObjectPath);
+							return false;
+						}
+						return UeAgentReflectionAuthoring::BuildAssetExportSnapshotReadRequests(*Profile, *Native, Requests, Error);
+					}},
+				[Profile, TargetPackage, Workspace = Document.SemanticWorkspace, &Asset](
+					const FString& RequestId,
+					const FPreparedAuthoringImport& Prepared,
+					FSemanticWorkspaceChangeProjection&& Projection,
+					FRootPropertyApplyOutcome& OutOutcome)
+				{
+					if (!Projection.StructuralEdits.IsEmpty())
+					{
+						auto Diagnostic = ValueFailure(TEXT("sequence_domain_structure_edit_unsupported"),
+							TEXT("Sequence semantic workspace import does not support structural edits."), TEXT("/structural_edits"),
+							MakeShared<FJsonValueNumber>(Projection.StructuralEdits.Num()), MakeShared<FJsonValueNumber>(0), TargetPackage, TEXT("authored_value"));
+						FWorkspaceError LocatedError;
+						LocatedError.SetFailure(MoveTemp(Diagnostic), TargetPackage);
+						if (Workspace->GetStructuralEditsSource().IsSet()) LocatedError.Locate(Workspace->GetStructuralEditsSource().GetValue());
+						OutOutcome.Diagnostic = LocatedError.GetDiagnostic();
+						return false;
+					}
+					UeAgentReflectionAuthoring::FAssetApplyRequest ApplyRequest;
+					ApplyRequest.TypeId = Profile->TypeId;
+					ApplyRequest.Operation =
+						UeAgentApplyInputContract::EOperation::Update;
+					ApplyRequest.AssetPath = TargetPackage;
+					ApplyRequest.Properties = MoveTemp(Projection.RootObjectProperties);
+					for (const auto& Change : Prepared.GetChangeSetDraft().GetChanges())
+					{
+						if (Change.GetIdentity().GetSemanticId() != Profile->ProfileStateSemanticId) continue;
+						TSharedPtr<FJsonValue> Structure;
+						UE::UAI::Contract::FDiagnostic Error;
+						if (!Change.GetProposedAfter().IsValid()
+							|| !StateSemantic::CanonicalJson::TryToJsonValue(
+								*Change.GetProposedAfter(), Structure, Error))
+						{
+							if (Error.IsEmpty()) Error = ValueFailure(TEXT("sequence_domain_structure_value_invalid"),
+								TEXT("The prepared sequence structure change has no proposed value."), TEXT("proposed_structure_available"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TargetPackage);
+							Error.SourceKind = TEXT("native_result");
+							OutOutcome.Diagnostic = Contract::FDiagnostic::WrapFailure(TEXT("sequence_domain_structure_value_invalid"), Error);
+							return false;
+						}
+						ApplyRequest.ProviderExtension = MakeShared<FJsonObject>();
+						ApplyRequest.ProviderExtension->SetField(Profile->ProfileStateField, MoveTemp(Structure));
+					}
+					ApplyRequest.bSave = true;
+					ApplyRequest.bCompactValues = true;
+					ApplyRequest.FinalReadback = MoveTemp(OutOutcome.FinalReadback);
+					Asset = nullptr;
+					UeAgentReflectionAuthoring::FAssetApplyResult ApplyResult;
+					const bool bApplied = UeAgentReflectionAuthoring::ApplyAsset(
+						ApplyRequest, ApplyResult, RequestId);
+					OutOutcome.bApplied =
+						bApplied && ApplyResult.Status == TEXT("applied");
+					OutOutcome.Phase = MoveTemp(ApplyResult.Phase);
+					OutOutcome.Diagnostic = MoveTemp(ApplyResult.Diagnostic);
+					return bApplied;
+				},
+				[&Target](
+					FString& OutReadbackPayload,
+					FString& OutRevision,
+					FWorkspaceError& OutReadError)
+				{
+					TSharedPtr<FJsonObject> ReadObject;
+					FString NativePayload;
+					if (!TryRead(
+							Target, NativePayload, ReadObject, OutReadError)
+						|| !TryReadPersistedPackageRevision(
+							Target, OutRevision, OutReadError))
+					{
+						return false;
+					}
+					return TryCanonicalizeObject(
+						ReadObject, OutReadbackPayload, OutReadError);
+				},
+				OutPayloadJson,
+				OutError);
 		}
 
 		bool TryImport(
@@ -656,194 +549,167 @@ namespace UE::UAI::DomainAdapters::Sequence
 			{
 				return false;
 			}
+			UE::UAI::HjsonWorkspace::DomainAuthoring::FScopedDomainHjsonDiagnosticSource DiagnosticSource(Document, OutError);
+			if (Document.bSemanticWorkspaceDirectory)
+			{
+				return TryImportSemanticWorkspace(
+					Target, Document, OutPayloadJson, OutError);
+			}
 			bool bPresent = false;
 			if (!TryInspectObjectTargetPresence(Target, bPresent))
 			{
-				return Fail(
-					OutError, TEXT("sequence_domain_target_invalid"), Target);
+				return Fail(OutError, ValueFailure(TEXT("sequence_domain_target_invalid"),
+					TEXT("The sequence target identity could not be inspected for object presence."), TEXT("target_presence_inspected"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target), Target);
 			}
-			FSequenceHjsonPatch Patch;
-			if (!TryResolveSequenceHjsonPatch(
-					Target,
-					bPresent,
-					Document.Root,
-					Patch,
-					OutError)
-				|| !Patch.IsValid())
+			if (bPresent)
+			{
+				return Fail(OutError, ValueFailure(TEXT("sequence_domain_existing_inline_unsupported"),
+					TEXT("The sequence target already exists; editing it requires an exported semantic workspace directory."),
+					TEXT("target_present"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), Target), Target);
+			}
+			if (Document.ExpectedRevision != TEXT("missing"))
+			{
+				auto Diagnostic = ValueFailure(TEXT("sequence_domain_stale_revision"),
+					TEXT("Creating an absent sequence requires the expected revision to describe an absent target."), TEXT("/expected_revision"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target, TEXT("command_input"));
+				Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(Document.ExpectedRevision);
+				Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(TEXT("missing"));
+				return Fail(OutError, MoveTemp(Diagnostic), Target);
+			}
+			if (Document.Root->HasField(TEXT("operation")))
+			{
+				return Fail(OutError, ValueFailure(TEXT("sequence_domain_create_then_edit_not_atomic"),
+					TEXT("Inline sequence creation does not accept an operation field because create-then-edit cannot be applied atomically."),
+					TEXT("/root/operation"), Document.Root->TryGetField(TEXT("operation")), MakeShared<FJsonValueString>(TEXT("field omitted")),
+					Target, TEXT("authored_value")), Target);
+			}
+			if (Document.Root->HasField(TEXT("fields")))
+			{
+				return Fail(OutError, ValueFailure(TEXT("sequence_hjson_fields_retired_use_structure_create_or_directory_edit"),
+					TEXT("The retired fields input is unsupported; use root.structure for sequence creation or a semantic workspace directory for editing."),
+					TEXT("/root/fields"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), Target, TEXT("authored_value")), Target);
+			}
+			const TSharedPtr<FJsonObject>* Structure = nullptr;
+			if (!Document.Root->TryGetObjectField(TEXT("structure"), Structure)
+				|| !Structure || !Structure->IsValid())
+			{
+				return Fail(OutError, ValueFailure(TEXT("sequence_hjson_create_structure_required"),
+					TEXT("Inline sequence creation requires an object at root.structure."), TEXT("/root/structure"),
+					Document.Root->TryGetField(TEXT("structure")), MakeShared<FJsonValueString>(TEXT("object")), Target, TEXT("authored_value")), Target);
+			}
+			const UeAgentReflectionAuthoring::FProfile* Profile = nullptr;
+			Contract::FDiagnostic ProfileError;
+			if (!TryGetSequenceReflectionProfile(Target, Profile, ProfileError))
+				return Fail(OutError, MoveTemp(ProfileError), Target);
+			if (!EnsureReflectionAuthoringRegistered(Target, OutError))
 			{
 				return false;
 			}
-			FString MutationPayload;
-			if (!bPresent)
-			{
-				if (Document.ExpectedRevision != TEXT("missing"))
-				{
-					return Fail(
-						OutError, TEXT("sequence_domain_stale_revision"),
-						Target, TEXT("missing"));
-				}
-				if (Document.Root->HasField(TEXT("operation")))
-				{
-					return Fail(
-						OutError, TEXT("sequence_domain_create_then_edit_not_atomic"));
-				}
-				const TSharedPtr<FJsonObject>* DisplayRate = nullptr;
-				const TSharedPtr<FJsonObject>* TickResolution = nullptr;
-				if (!Patch.Structure->TryGetObjectField(
-						TEXT("display_rate"), DisplayRate)
-					|| !DisplayRate || !DisplayRate->IsValid()
-					|| !Patch.Structure->TryGetObjectField(
-						TEXT("tick_resolution"), TickResolution)
-					|| !TickResolution || !TickResolution->IsValid())
-				{
-					return Fail(
-						OutError, TEXT("sequence_domain_rates_required"));
-				}
-				const TSharedPtr<FJsonObject> Input = MakeShared<FJsonObject>();
-				Input->SetStringField(
-					TEXT("destination_ref"), PackageRefFromObjectPath(Target));
-				Input->SetObjectField(
-					TEXT("initial_structure"), Patch.Structure.ToSharedRef());
-				Input->SetObjectField(TEXT("display_rate"), *DisplayRate);
-				Input->SetObjectField(TEXT("tick_resolution"), *TickResolution);
-				const TSharedPtr<FJsonObject> Create = MakeShared<FJsonObject>();
-				Create->SetObjectField(TEXT("input"), Input);
-				if (!SubmitTimelineCommand(
-						TEXT("timeline.sequence.create"),
-						Create,
-						MutationPayload,
-						OutError))
-				{
-					return false;
-				}
-			}
-			else
-			{
-				if (Document.ExpectedRevision == TEXT("missing"))
-				{
-					return Fail(
-						OutError, TEXT("sequence_domain_stale_revision"),
-						Target, TEXT("existing"));
-				}
-				FString BeforePayload;
-				TSharedPtr<FJsonObject> BeforeObject;
-				if (!TryRead(Target, BeforePayload, BeforeObject, OutError))
-				{
-					return false;
-				}
-				FString CurrentRevision;
-				if (!StableRevision(BeforeObject, CurrentRevision, OutError))
-				{
-					return false;
-				}
-				if (Document.ExpectedRevision != CurrentRevision)
-				{
-					return Fail(
-						OutError, TEXT("sequence_domain_stale_revision"),
-						Target, CurrentRevision);
-				}
-				TSharedPtr<FJsonObject> NativeRevision;
-				if (!ExtractRevision(BeforeObject, NativeRevision, OutError))
-				{
-					return false;
-				}
-				const TSharedPtr<FJsonObject> Input = MakeShared<FJsonObject>();
-				Input->SetObjectField(TEXT("expected_revision"), NativeRevision);
-				FString NativeCommand =
-					TEXT("timeline.sequence.structure.replace");
-				if (Patch.bSparseSettings)
-				{
-					for (const FString& FieldId : Patch.ChangedFields)
+			const FString TargetPackage =
+				UeAgentReflectionAuthoring::NormalizePackagePath(Target);
+			FRootPropertyApplyOutcome Outcome;
+			Outcome.FinalReadback =
+					[&Target, &OutPayloadJson](
+						UeAgentAuthoringWorkspaceTransaction::FOperationFailure& Failure)
 					{
-						const TSharedPtr<FJsonObject>* Value = nullptr;
-						if (!Patch.Structure->TryGetObjectField(FieldId, Value)
-							|| !Value || !Value->IsValid())
+						FWorkspaceError ReadError;
+						if (!TryReadbackImportPayload(
+								TEXT("sequence-domain-provider"), Target, Target,
+								nullptr,
+								TEXT("sequence_domain_final_readback_payload_invalid"),
+								TEXT("sequence_domain_compile_not_settled"),
+								[&Target](FString& ReadbackPayload,
+									FString& Revision, FWorkspaceError& CallbackError)
+								{
+									TSharedPtr<FJsonObject> ReadObject;
+									FString NativePayload;
+									if (!TryRead(Target, NativePayload, ReadObject, CallbackError)
+										|| !TryReadPersistedPackageRevision(
+											Target, Revision, CallbackError))
+									{
+										return false;
+									}
+									return TryCanonicalizeObject(
+										ReadObject, ReadbackPayload, CallbackError);
+								},
+								OutPayloadJson, ReadError))
 						{
-							return Fail(
-								OutError,
-								TEXT("sequence_domain_settings_patch_invalid"),
-								FieldId);
+							Failure.Diagnostic = ReadError.HasErrors() ? ReadError.GetDiagnostic() : UE::UAI::Contract::FDiagnostic::Failure(TEXT("sequence_domain_final_readback_failed"), TEXT("The saved sequence could not be read back."), TEXT("readback"));
+							return false;
 						}
-						Input->SetObjectField(FieldId, *Value);
-					}
-					NativeCommand = TEXT("timeline.sequence.settings.update");
-				}
-				else
-				{
-					Input->SetObjectField(
-						TEXT("structure"), Patch.Structure.ToSharedRef());
-				}
-				const TSharedPtr<FJsonObject> Mutation = MakeShared<FJsonObject>();
-				Mutation->SetStringField(TEXT("target"), Target);
-				Mutation->SetObjectField(TEXT("input"), Input);
-				if (!SubmitTimelineCommand(
-						NativeCommand,
-						Mutation,
-						MutationPayload,
-						OutError))
-				{
-					return false;
-				}
-			}
-
-			TSharedPtr<FJsonObject> MutationObject;
-			FDomainHjsonImportLifecycleReceipt LifecycleReceipt;
-			if (!ParseTimelineLifecycleMutation(
-					MutationPayload,
-					MutationObject,
-					LifecycleReceipt,
-					OutError))
+						return true;
+					};
+			if (!ApplySequenceStructureAuthoring(
+						TargetPackage,
+						TEXT("sequence-create-") + FGuid::NewGuid().ToString(
+							EGuidFormats::Digits),
+						*Structure,
+						Outcome))
 			{
-				return false;
+				if (Outcome.Diagnostic.IsEmpty()) Outcome.Diagnostic = ValueFailure(TEXT("sequence_domain_create_failed"),
+					TEXT("Sequence creation failed without providing a diagnostic."), TEXT("sequence_created"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target);
+				return Fail(OutError, MoveTemp(Outcome.Diagnostic), Target);
 			}
-			FString AfterPayload;
-			TSharedPtr<FJsonObject> AfterObject;
-			if (!TryRead(Target, AfterPayload, AfterObject, OutError))
-			{
-				return false;
-			}
-			FString AfterRevision;
-			if (!StableRevision(AfterObject, AfterRevision, OutError))
-			{
-				return false;
-			}
-			if (!TryBuildImportSuccessPayload(
-				TEXT("sequence-domain-provider"),
-				Target,
-				AfterRevision,
-				LifecycleReceipt,
-				AfterObject,
-				MutationObject,
-				OutPayloadJson,
-				OutError))
-			{
-				return false;
-			}
-			TSharedPtr<FJsonObject> Success;
-			FString SuccessError;
-			if (!Json::TryParseObject(OutPayloadJson, Success, SuccessError)
-				|| !Success.IsValid())
-			{
-				return Fail(
-					OutError,
-					TEXT("sequence_domain_result_invalid"),
-					Target,
-					SuccessError);
-			}
-			TArray<TSharedPtr<FJsonValue>> ChangedFields;
-			for (const FString& FieldId : Patch.ChangedFields)
-			{
-				ChangedFields.Add(MakeShared<FJsonValueString>(FieldId));
-			}
-			const TSharedRef<FJsonObject> SemanticDiff =
-				MakeShared<FJsonObject>();
-			SemanticDiff->SetArrayField(
-				TEXT("changed_fields"), MoveTemp(ChangedFields));
-			SemanticDiff->SetStringField(
-				TEXT("field_owner"), GetSequenceHjsonFieldOwner());
-			Success->SetObjectField(TEXT("semantic_diff"), SemanticDiff);
-			return TryCanonicalizeObject(Success, OutPayloadJson, OutError);
+			return true;
 		}
+	}
+
+	bool ApplySequenceStructureAuthoring(
+		const FString& Target,
+		const FString& RequestId,
+		const TSharedPtr<FJsonObject>& Structure,
+		FRootPropertyApplyOutcome& OutOutcome,
+		const UeAgentAuthoringOperationApply::FBackendOptions* BackendOptions)
+	{
+		OutOutcome.bApplied = false;
+		OutOutcome.Phase.Reset();
+		OutOutcome.Diagnostic.Reset();
+		FWorkspaceError RegistrationError;
+		if (!Structure.IsValid())
+		{
+			OutOutcome.Diagnostic = ValueFailure(TEXT("sequence_structure_missing"),
+				TEXT("The sequence apply request has no structure object."), TEXT("structure_object_available"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target);
+			OutOutcome.Phase = TEXT("registration");
+			return false;
+		}
+		if (!EnsureReflectionAuthoringRegistered(Target, RegistrationError))
+		{
+			OutOutcome.Diagnostic = RegistrationError.GetDiagnostic();
+			OutOutcome.Phase = TEXT("registration");
+			return false;
+		}
+		const UeAgentReflectionAuthoring::FProfile* Profile = nullptr;
+		if (!TryGetSequenceReflectionProfile(Target, Profile, OutOutcome.Diagnostic)) return false;
+		UeAgentReflectionAuthoring::FAssetApplyRequest ApplyRequest;
+		ApplyRequest.TypeId = Profile->TypeId;
+		ApplyRequest.Operation = UeAgentApplyInputContract::EOperation::Create;
+		ApplyRequest.AssetPath =
+			UeAgentReflectionAuthoring::NormalizePackagePath(Target);
+		ApplyRequest.ProviderExtension = MakeShared<FJsonObject>();
+		ApplyRequest.ProviderExtension->SetObjectField(
+			Profile->ProfileStateField, Structure.ToSharedRef());
+		ApplyRequest.bSave = true;
+		ApplyRequest.bCompactValues = true;
+		ApplyRequest.FinalReadback = MoveTemp(OutOutcome.FinalReadback);
+		if (BackendOptions)
+		{
+			ApplyRequest.PackageStager = BackendOptions->PackageStager;
+			if (BackendOptions->FinalReadback)
+			{
+				ApplyRequest.FinalReadback = BackendOptions->FinalReadback;
+			}
+		}
+		UeAgentReflectionAuthoring::FAssetApplyResult ApplyResult;
+		const bool bApplied = UeAgentReflectionAuthoring::ApplyAsset(
+			ApplyRequest, ApplyResult, RequestId);
+		OutOutcome.bApplied =
+			bApplied && ApplyResult.Status == TEXT("applied");
+		OutOutcome.Phase = MoveTemp(ApplyResult.Phase);
+		OutOutcome.Diagnostic = MoveTemp(ApplyResult.Diagnostic);
+		return bApplied;
 	}
 
 	bool TryExecuteContentGraph(
@@ -858,55 +724,27 @@ namespace UE::UAI::DomainAdapters::Sequence
 		bOutReadOnly = false;
 		OutError.Reset();
 		TSharedPtr<FJsonObject> Params;
-		FString JsonError;
+		UE::UAI::Contract::FDiagnostic JsonError;
 		if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError)
 			|| !Params.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("sequence_domain_params_invalid"),
-				JsonError);
+			if (JsonError.IsEmpty()) JsonError = ValueFailure(TEXT("sequence_domain_params_invalid"),
+				TEXT("Sequence command parameters could not be decoded as an object and no diagnostic was provided."), TEXT("parameter_object_available"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TargetIdentity, TEXT("command_input"));
+			JsonError.SourceKind = TEXT("command_input");
+			return Fail(OutError, MoveTemp(JsonError), TargetIdentity);
 		}
 		FString Target;
 		if (!Params->TryGetStringField(TEXT("target"), Target)
 			|| Target != TargetIdentity)
 		{
-			return Fail(
-				OutError,
-				TEXT("sequence_domain_target_identity_mismatch"),
-				TargetIdentity);
+			return Fail(OutError, ValueFailure(TEXT("sequence_domain_target_identity_mismatch"),
+				TEXT("The sequence command target must be a string matching the request target identity."), TEXT("/target"),
+				Params->TryGetField(TEXT("target")), MakeShared<FJsonValueString>(TargetIdentity), TargetIdentity, TEXT("command_input")), TargetIdentity);
 		}
 		if (CommandId == TEXT("content_graph.import_workspace"))
 		{
 			return TryImport(Target, CanonicalParamsJson, OutPayloadJson, OutError);
-		}
-		if (CommandId == TEXT("content_graph.authoring_schema"))
-		{
-			TSharedPtr<FJsonObject> Schema;
-			if (!TryBuildSequenceHjsonAuthoringSchema(
-					Target, Schema, OutError)
-				|| !Schema.IsValid())
-			{
-				return false;
-			}
-			FString ReadPayload;
-			TSharedPtr<FJsonObject> ReadObject;
-			FString Revision;
-			if (!TryRead(Target, ReadPayload, ReadObject, OutError)
-				|| !StableRevision(ReadObject, Revision, OutError))
-			{
-				return false;
-			}
-			Schema->SetStringField(TEXT("revision"), Revision);
-			const TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
-			Response->SetStringField(TEXT("command_id"), CommandId);
-			Response->SetStringField(TEXT("target"), Target);
-			Response->SetBoolField(TEXT("read_only"), true);
-			Response->SetBoolField(TEXT("complete"), true);
-			Response->SetBoolField(TEXT("has_more"), false);
-			Response->SetObjectField(TEXT("query_result"), Schema.ToSharedRef());
-			bOutReadOnly = true;
-			return TryCanonicalizeObject(Response, OutPayloadJson, OutError);
 		}
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
@@ -925,7 +763,7 @@ namespace UE::UAI::DomainAdapters::Sequence
 			Response->SetStringField(TEXT("target"), Target);
 			Response->SetStringField(TEXT("root_type"), RootType);
 			FString ReadRevision;
-			if (!StableRevision(ReadObject, ReadRevision, OutError))
+			if (!StableRevision(ReadObject, Target, ReadRevision, OutError))
 			{
 				return false;
 			}
@@ -936,9 +774,8 @@ namespace UE::UAI::DomainAdapters::Sequence
 			bOutReadOnly = true;
 			return TryCanonicalizeObject(Response, OutPayloadJson, OutError);
 		}
-		return Fail(
-			OutError,
-			TEXT("sequence_domain_command_not_supported"),
-			CommandId);
+		return Fail(OutError, ValueFailure(TEXT("sequence_domain_command_not_supported"),
+			TEXT("The sequence domain handles content_graph commands."), TEXT("/command"),
+			MakeShared<FJsonValueString>(CommandId), MakeShared<FJsonValueString>(TEXT("content_graph.*")), TargetIdentity, TEXT("command_input")), TargetIdentity);
 	}
 }

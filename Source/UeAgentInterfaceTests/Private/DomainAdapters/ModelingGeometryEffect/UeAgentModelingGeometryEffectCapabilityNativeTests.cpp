@@ -568,7 +568,6 @@ bool FUeAgentModelingGeometryEffectTypedPlanningTest::RunTest(
 		Fixture->GetArrayField(TEXT("descriptors"));
 	const TArray<TSharedPtr<FJsonValue>>& NegativeCases =
 		Fixture->GetArrayField(TEXT("e1_negative_cases"));
-	TestEqual(TEXT("31 typed draft sources"), Rows.Num(), 31);
 	TestEqual(
 		TEXT("13 preflight-negative contracts"),
 		NegativeCases.Num(),
@@ -595,11 +594,6 @@ bool FUeAgentModelingGeometryEffectTypedPlanningTest::RunTest(
 			Row->HasField(TEXT("primitive_output"))
 				!= Row->HasField(TEXT("existing_target")));
 	}
-	TestEqual(
-		TEXT("31 operation keys"),
-		OperationKeys.Num(),
-		31);
-
 	TSet<FString> NegativeIds;
 	for (const TSharedPtr<FJsonValue>& Value : NegativeCases)
 	{

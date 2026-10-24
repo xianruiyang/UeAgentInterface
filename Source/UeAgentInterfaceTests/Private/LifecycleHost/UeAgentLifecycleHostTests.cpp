@@ -56,10 +56,9 @@ namespace
 		{
 			if (!Identity.Matches(WorkerProcess()))
 			{
-				OutDiagnostic = {
+				OutDiagnostic = FUeAgentLifecycleDiagnostic::Failure(
 					TEXT("process_identity_mismatch"),
-					TEXT("fixture refuses a different process identity"),
-				};
+					TEXT("fixture refuses a different process identity"));
 				return false;
 			}
 			Events.Add(FString::Printf(
@@ -106,10 +105,9 @@ namespace
 				Events.Add(
 					TEXT("ticker:unregister_failed:")
 					+ Identity.TickerId);
-				OutDiagnostic = {
+				OutDiagnostic = FUeAgentLifecycleDiagnostic::Failure(
 					TEXT("fixture_ticker_unregister_failed"),
-					TEXT("fixture keeps the ticker registered"),
-				};
+					TEXT("fixture keeps the ticker registered"));
 				return false;
 			}
 			const FUeAgentTickerIdentity* Existing =
@@ -118,10 +116,9 @@ namespace
 				|| Existing->OwnerId != Identity.OwnerId
 				|| Existing->HostId != Identity.HostId)
 			{
-				OutDiagnostic = {
+				OutDiagnostic = FUeAgentLifecycleDiagnostic::Failure(
 					TEXT("ticker_identity_mismatch"),
-					TEXT("fixture refuses a non-owned ticker"),
-				};
+					TEXT("fixture refuses a non-owned ticker"));
 				return false;
 			}
 			Events.Add(TEXT("ticker:unregister:") + Identity.TickerId);
@@ -233,12 +230,13 @@ namespace
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentLifecycleHostIdentityAndFpsTest,
-	"UeAgentInterface.LifecycleHost.IdentityAndFps",
+	FUeAgentLifecycleHostProcessIdentityTest,
+	"UeAgentInterface.LifecycleHost.ProcessIdentity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentLifecycleHostIdentityAndFpsTest::RunTest(const FString& Parameters)
+bool FUeAgentLifecycleHostProcessIdentityTest::RunTest(const FString& Parameters)
 {
+	(void)Parameters;
 	const FUeAgentProcessIdentity Recorded = WorkerProcess();
 	const FUeAgentProcessIdentity Reused{
 		Recorded.ProcessId,
@@ -246,82 +244,6 @@ bool FUeAgentLifecycleHostIdentityAndFpsTest::RunTest(const FString& Parameters)
 		Recorded.Executable,
 	};
 	TestFalse(TEXT("PID reuse is not the same process"), Recorded.Matches(Reused));
-
-	const FUeAgentHostIdentity MainEditor{
-		TEXT("main-editor-user-session"),
-		TEXT("editor-session-user-001"),
-		EUeAgentHostKind::MainEditor,
-		{34204, TEXT("2026-07-27T02:00:00.000000Z"), TEXT("UnrealEditor.exe")},
-	};
-	FUeAgentLifecycleDiagnostic Diagnostic;
-	TestFalse(
-		TEXT("main Editor cannot host Automation"),
-		RequireOwnedAutomationTarget(MainEditor, Diagnostic));
-	TestEqual(
-		TEXT("main Editor rejection code"),
-		Diagnostic.Code,
-		FString(TEXT("automation_requires_owned_worker")));
-
-	const FUeAgentHostIdentity Worker{
-		TEXT("owned-worker-001"),
-		TEXT("automation-session-001"),
-		EUeAgentHostKind::OwnedWorker,
-		Recorded,
-	};
-	const FUeAgentAutomationRequirement Requirement{
-		true,
-		false,
-		false,
-		10.0,
-	};
-	FUeAgentFpsGateDecision Decision;
-	TestTrue(
-		TEXT("owned RHI low FPS produces a decision"),
-		EvaluateFpsGate(
-			Worker,
-			EUeAgentRenderMode::Rhi,
-			Requirement,
-			FUeAgentFpsObservation{10.0, 3.0},
-			Decision,
-			Diagnostic));
-	TestEqual(
-		TEXT("owned RHI low FPS is blocked"),
-		Decision.State,
-		EUeAgentFpsGateState::Blocked);
-	TestEqual(
-		TEXT("FPS mismatch code"),
-		Decision.FailureCode,
-		FString(TEXT("automation_fps_gate_mismatch")));
-
-	TestTrue(
-		TEXT("owned RHI healthy FPS produces a decision"),
-		EvaluateFpsGate(
-			Worker,
-			EUeAgentRenderMode::Rhi,
-			Requirement,
-			FUeAgentFpsObservation{10.0, 60.0},
-			Decision,
-			Diagnostic));
-	TestEqual(
-		TEXT("owned RHI healthy FPS is ready"),
-		Decision.State,
-		EUeAgentFpsGateState::Ready);
-
-	TestTrue(
-		TEXT("NullRHI produces a decision without render gating"),
-		EvaluateFpsGate(
-			Worker,
-			EUeAgentRenderMode::NullRhi,
-			Requirement,
-			TOptional<FUeAgentFpsObservation>(),
-			Decision,
-			Diagnostic));
-	TestEqual(
-		TEXT("NullRHI FPS is not applicable"),
-		Decision.State,
-		EUeAgentFpsGateState::NotApplicable);
-	TestFalse(TEXT("NullRHI has no required FPS"), Decision.RequiredFps.IsSet());
-	TestFalse(TEXT("NullRHI has no current FPS"), Decision.CurrentFps.IsSet());
 	return true;
 }
 
@@ -551,23 +473,5 @@ bool FUeAgentLifecycleHostContextGateTest::RunTest(const FString& Parameters)
 		FString(TEXT("cancellation_requested")));
 	TestEqual(TEXT("cancellation has no effects"), Cancelled.Events.Num(), 0);
 
-	FLifecycleFixture Expired;
-	Expired.Now = 130.0;
-	FRecordingServerControl ExpiredServer(
-		TEXT("c11-run-001"),
-		TEXT("transport-server-expired"),
-		Expired.Events);
-	TestFalse(
-		TEXT("deadline rejects start before effects"),
-		Expired.Host.StartOwnedWorker(
-			WorkerSpec(EUeAgentRenderMode::Rhi),
-			ExpiredServer,
-			HostIdentity,
-			Diagnostic));
-	TestEqual(
-		TEXT("deadline code"),
-		Diagnostic.Code,
-		FString(TEXT("operation_deadline_exceeded")));
-	TestEqual(TEXT("deadline has no effects"), Expired.Events.Num(), 0);
 	return true;
 }

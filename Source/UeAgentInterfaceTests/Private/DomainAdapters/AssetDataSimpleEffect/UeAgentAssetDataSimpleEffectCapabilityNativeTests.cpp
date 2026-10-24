@@ -5,6 +5,7 @@
 
 // Re-evaluate the SA-005 production seam after the header is introduced.
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCapabilities.h"
+#include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectTextureSourceMechanics.h"
 
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectFactoryCandidateTestSupport.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
@@ -212,22 +213,7 @@ namespace
 	{
 		return MakeShared<
 			FUeAgentResourceTracker,
-			ESPMode::ThreadSafe>(
-				FUeAgentResourceBudget({
-					{EUeAgentResourceDimension::InputBytes, 1048576},
-					{EUeAgentResourceDimension::OutputBytes, 1048576},
-					{EUeAgentResourceDimension::StringBytes, 1048576},
-					{EUeAgentResourceDimension::Nodes, 32768},
-					{EUeAgentResourceDimension::Items, 32768},
-					{EUeAgentResourceDimension::Files, 64},
-					{EUeAgentResourceDimension::ReferenceEdges, 32768},
-					{EUeAgentResourceDimension::WorkUnits, 1048576},
-					{
-						EUeAgentResourceDimension::
-							EstimatedMemoryBytes,
-						134217728,
-					},
-				}));
+			ESPMode::ThreadSafe>();
 	}
 
 	bool TryCanonicalValue(
@@ -5656,6 +5642,32 @@ namespace
 		}
 		return true;
 	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentVolumeTextureLargeSourceTest,
+	"UeAgentInterface.DomainAdapters.AssetDataSimpleEffect.E2.VolumeTextureLargeSource",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentVolumeTextureLargeSourceTest::RunTest(const FString& Parameters)
+{
+	using namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect;
+	UTexture2D* Slice = NewObject<UTexture2D>(GetTransientPackage());
+	const uint8 Pixel[] = {10, 20, 30, 255};
+	Slice->Source.Init(1, 1, 1, 1, TSF_BGRA8, Pixel);
+	UVolumeTexture* Volume = NewObject<UVolumeTexture>(GetTransientPackage());
+	TArray<UTexture2D*> Slices;
+	Slices.Init(Slice, 513);
+	FTextureSourcePreparedState Prepared;
+	UE::UAI::ExecutionMutation::FExecutionMutationError Error;
+	if (!TestTrue(TEXT("native assembly accepts more than 512 source slices"),
+		TryPrepareResolvedTextureSourceAssembly(*Volume, Slices, Prepared, Error)))
+		return false;
+	if (!TestTrue(TEXT("native source assembly applies"),
+		TryApplyTextureSourceReplacement(Volume, Prepared, Error)))
+		return false;
+	TestEqual(TEXT("all requested source slices are retained"), Volume->Source.GetNumSlices(), 513);
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

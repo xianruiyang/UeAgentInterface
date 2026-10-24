@@ -14,21 +14,13 @@ namespace UE::UAI::CommandHandlers::WorldCommands
 	{
 		const FString Owner(TEXT("world-command-owner"));
 
-		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& Detail)
-		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+		FUeAgentCommandResult Failure(const FUeAgentCommandRequest& Request,
+            UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = SubjectId.IsEmpty() ? Request.GetCommandId() : SubjectId;
+            if (Diagnostic.Stage.IsEmpty()) Diagnostic.Stage = TEXT("command_submit");
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -45,13 +37,11 @@ namespace UE::UAI::CommandHandlers::WorldCommands
 				if (!Caller.IsValid()
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:operate")))
 				{
-					return Failure(Request, TEXT("world_command_authority_required"),
-						TEXT("uai:operate is required"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_command_authority_required"), TEXT("uai:operate is required"), TEXT("command_submit")));
 				}
 				if (!IsInGameThread())
 				{
-					return Failure(Request, TEXT("world_command_game_thread_required"),
-						TEXT("native World mechanics must run on the game thread"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("world_command_game_thread_required"), TEXT("native World mechanics must run on the game thread"), TEXT("command_submit")));
 				}
 				return OperationOwners::WorldCommands::Submit(
 					Request, Caller, Cancellation);
@@ -64,7 +54,7 @@ namespace UE::UAI::CommandHandlers::WorldCommands
 
 	bool TryCreateHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();

@@ -815,8 +815,6 @@ FUeAgentSimpleAuthoringModelingPrimitiveProductionContractTest::
 			false,
 			false,
 			false),
-		FUeAgentPageRequest(),
-		TOptional<int64>(),
 		TArray<FUeAgentArtifactDescriptor>(),
 		TArray<FUeAgentProjectionDiagnostic>());
 
@@ -887,8 +885,7 @@ FUeAgentSimpleAuthoringModelingPrimitiveProductionContractTest::
 	ApplicationConfig.ServerSessionId =
 		TEXT("session:sa008-modeling-production");
 	ApplicationConfig.RegistryEpoch = 1;
-	ApplicationConfig.TimeoutSeconds = 60.0;
-	ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
+
 
 	TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
 	FUeAgentSimpleAuthoringApplicationError ApplicationError;
@@ -917,6 +914,7 @@ FUeAgentSimpleAuthoringModelingPrimitiveProductionContractTest::
 	const TSharedRef<FNeverCancelled> Cancellation =
 		MakeShared<FNeverCancelled>();
 	TArray<FString> CreatedLabels;
+	int32 SubmittedPrimitiveCount = 0;
 	for (int32 Index = 0;
 		Index < UE_ARRAY_COUNT(PrimitiveCapabilities);
 		++Index)
@@ -933,6 +931,7 @@ FUeAgentSimpleAuthoringModelingPrimitiveProductionContractTest::
 			Serialize(
 				PrimitivePayload(Capability, TargetRef),
 				Payload));
+		++SubmittedPrimitiveCount;
 		const FUeAgentOperationResult Result =
 			Application->Submit(
 				FUeAgentOperationRequest(
@@ -988,17 +987,17 @@ FUeAgentSimpleAuthoringModelingPrimitiveProductionContractTest::
 	}
 
 	TestEqual(
-		TEXT("seven primitive operations prepare exactly once"),
+		TEXT("every submitted primitive operation prepares exactly once"),
 		Durable->PrepareCount,
-		7);
+		SubmittedPrimitiveCount);
 	TestEqual(
-		TEXT("seven primitive operations persist exactly once"),
+		TEXT("every submitted primitive operation persists exactly once"),
 		Durable->PersistCount,
-		7);
+		SubmittedPrimitiveCount);
 	TestEqual(
-		TEXT("seven primitive operations acknowledge after C9"),
+		TEXT("every submitted primitive operation acknowledges after C9"),
 		Durable->AcknowledgeCount,
-		7);
+		SubmittedPrimitiveCount);
 	TestEqual(
 		TEXT("seven exact primitive actors exist"),
 		Owner.CountActors(),
@@ -1027,6 +1026,7 @@ FUeAgentSimpleAuthoringModelingPrimitiveProductionContractTest::
 	{
 		return false;
 	}
+	const int32 PrepareCountBeforeDuplicate = Durable->PrepareCount;
 	const FUeAgentOperationResult Duplicate =
 		Application->Submit(
 			FUeAgentOperationRequest(
@@ -1042,7 +1042,7 @@ FUeAgentSimpleAuthoringModelingPrimitiveProductionContractTest::
 	TestEqual(
 		TEXT("duplicate primitive does not prepare durable work"),
 		Durable->PrepareCount,
-		7);
+		PrepareCountBeforeDuplicate);
 	TestEqual(
 		TEXT("duplicate primitive does not spawn an actor"),
 		Owner.CountActors(),
@@ -2208,8 +2208,6 @@ bool FUeAgentSimpleAuthoringModelingOwnedPackageTest::RunTest(
 				false,
 				false,
 				false),
-			FUeAgentPageRequest(),
-			TOptional<int64>(),
 			TArray<FUeAgentArtifactDescriptor>(),
 			TArray<FUeAgentProjectionDiagnostic>());
 		TSharedPtr<IUeAgentSimpleAuthoringCapabilityProvider> Provider;
@@ -2265,8 +2263,7 @@ bool FUeAgentSimpleAuthoringModelingOwnedPackageTest::RunTest(
 		ApplicationConfig.ServerSessionId =
 			TEXT("session:sa008-modeling-e4");
 		ApplicationConfig.RegistryEpoch = 1;
-		ApplicationConfig.TimeoutSeconds = 60.0;
-		ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
+
 		TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
 		FUeAgentSimpleAuthoringApplicationError ApplicationError;
 		if (!TestTrue(

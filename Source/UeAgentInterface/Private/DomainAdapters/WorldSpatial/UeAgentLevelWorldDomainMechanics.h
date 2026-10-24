@@ -10,9 +10,6 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FString Target;
 		FString Category;
 		FString Query;
-		FString CandidateId;
-		int32 Limit = 20;
-		int32 Cursor = 0;
 	};
 
 	UEAGENTINTERFACE_API bool TryQueryWorldActorCandidates(
@@ -26,5 +23,6 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		const FString& CanonicalParamsJson,
 		FString& OutPayloadJson,
 		bool& bOutReadOnly,
-		HjsonWorkspace::FWorkspaceError& OutError);
+		HjsonWorkspace::FWorkspaceError& OutError,
+		const FString& RequestId = FString());
 }

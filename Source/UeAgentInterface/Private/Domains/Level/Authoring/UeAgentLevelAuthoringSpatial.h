@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 class FJsonObject;
@@ -26,16 +28,17 @@ namespace UeAgentLevelAuthoring
 		}
 	};
 
+	// The owning Actor/Component operation fixes the frame; input metadata does not convert values.
 	UEAGENTINTERFACE_API bool ParseTransformPatch(
 		const TSharedPtr<const FJsonObject>& Object,
 		ETransformFrame Frame,
 		FTransformPatch& OutPatch,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API void ApplyTransformPatch(
 		const FTransformPatch& Patch,
 		FTransform& InOutTransform);
 	UEAGENTINTERFACE_API TSharedRef<FJsonObject> BuildTransformState(
 		const FTransform& Transform,
-		ETransformFrame Frame);
+		ETransformFrame Frame,
+		bool bIncludeFrameMetadata = false);
 }
-

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
@@ -21,6 +22,7 @@ namespace UE::UAI::Verification
 	using UE::UAI::Discovery::FUeAgentCandidateBinding;
 	using UE::UAI::Discovery::IUeAgentStateReadPort;
 	using UE::UAI::StateSemantic::FUeAgentCanonicalIdentity;
+	using UE::UAI::StateSemantic::FUeAgentCanonicalValuePtr;
 	using UE::UAI::StateSemantic::FUeAgentCanonicalSnapshotPtr;
 	using UE::UAI::StateSemantic::FUeAgentSemanticComparison;
 
@@ -29,22 +31,7 @@ namespace UE::UAI::Verification
 	using IDurableVerificationAcknowledger =
 		IDurableVerificationAcknowledgerPort;
 
-	class UEAGENTINTERFACE_API FVerificationError final
-	{
-	public:
-		FVerificationError() = default;
-		explicit FVerificationError(
-			FString InCode,
-			FString InDetail = FString());
-
-		const FString& GetCode() const;
-		const FString& GetDetail() const;
-		bool IsPresent() const;
-
-	private:
-		FString Code;
-		FString Detail;
-	};
+	using FVerificationError = UE::UAI::Contract::FDiagnostic;
 
 	enum class EVerificationOracleKind : uint8
 	{
@@ -93,6 +80,7 @@ namespace UE::UAI::Verification
 		const TArray<FString>& GetArtifactIds() const;
 		const TArray<FString>& GetExpectedReferenceKeys() const;
 		bool IsValid() const;
+		const FVerificationError* GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentCanonicalIdentity Identity;
@@ -102,7 +90,7 @@ namespace UE::UAI::Verification
 		FUeAgentCanonicalSnapshotPtr ExpectedSnapshot;
 		TArray<FString> ArtifactIds;
 		TArray<FString> ExpectedReferenceKeys;
-		bool bValid = false;
+		TSharedPtr<const FVerificationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FVerificationRequest final
@@ -125,6 +113,7 @@ namespace UE::UAI::Verification
 		int64 GetFencingToken() const;
 		const TArray<FVerificationTarget>& GetTargets() const;
 		bool IsValid() const;
+		const FVerificationError* GetValidationDiagnostic() const;
 
 	private:
 		FString OperationId;
@@ -134,7 +123,7 @@ namespace UE::UAI::Verification
 		FString JournalOwnerId;
 		int64 FencingToken = -1;
 		TArray<FVerificationTarget> Targets;
-		bool bValid = false;
+		TSharedPtr<const FVerificationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FAbsenceObservation final
@@ -152,13 +141,14 @@ namespace UE::UAI::Verification
 		bool IsUnavailable() const;
 		const FString& GetEvidenceId() const;
 		bool IsValid() const;
+		const FVerificationError* GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentCanonicalIdentity Identity;
 		bool bAbsent = false;
 		bool bUnavailable = true;
 		FString EvidenceId;
-		bool bValid = false;
+		TSharedPtr<const FVerificationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FReferenceObservation final
@@ -176,13 +166,14 @@ namespace UE::UAI::Verification
 		bool IsUnavailable() const;
 		const FString& GetEvidenceId() const;
 		bool IsValid() const;
+		const FVerificationError* GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentCanonicalIdentity Identity;
 		TArray<FString> ReferenceKeys;
 		bool bUnavailable = true;
 		FString EvidenceId;
-		bool bValid = false;
+		TSharedPtr<const FVerificationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FTargetVerification final
@@ -228,22 +219,23 @@ namespace UE::UAI::Verification
 			FString InVerificationId,
 			EVerificationStatus InStatus,
 			EEffectOutcome InEffectOutcome,
-			FString InDiagnosticCode,
+			FVerificationError InDiagnostic,
 			bool bInRetrySafe,
 			TArray<FTargetVerification> InTargets,
 			TArray<FString> InEvidenceIds,
 			TOptional<FVerificationAcknowledgement> InAcknowledgement,
-			FString InDiagnosticDetail = FString());
+			FUeAgentCanonicalValuePtr InPublicResult = nullptr);
 
 		const FString& GetVerificationId() const;
 		EVerificationStatus GetStatus() const;
 		EEffectOutcome GetEffectOutcome() const;
 		const FString& GetDiagnosticCode() const;
-		const FString& GetDiagnosticDetail() const;
+		const FVerificationError& GetDiagnostic() const;
 		bool IsRetrySafe() const;
 		const TArray<FTargetVerification>& GetTargets() const;
 		const TArray<FString>& GetEvidenceIds() const;
 		const FVerificationAcknowledgement* GetAcknowledgement() const;
+		const FUeAgentCanonicalValuePtr& GetPublicResult() const;
 
 	private:
 		FString VerificationId;
@@ -251,12 +243,12 @@ namespace UE::UAI::Verification
 			EVerificationStatus::Unavailable;
 		EEffectOutcome EffectOutcome =
 			EEffectOutcome::StateUnknown;
-		FString DiagnosticCode;
-		FString DiagnosticDetail;
+		FVerificationError Diagnostic;
 		bool bRetrySafe = false;
 		TArray<FTargetVerification> Targets;
 		TArray<FString> EvidenceIds;
 		TOptional<FVerificationAcknowledgement> Acknowledgement;
+		FUeAgentCanonicalValuePtr PublicResult;
 	};
 
 	class UEAGENTINTERFACE_API IAbsenceOracle
@@ -348,7 +340,8 @@ namespace UE::UAI::Verification
 			const FUeAgentOperationDeadline& Deadline,
 			const FUeAgentCancellationToken& Cancellation,
 			FVerificationOutcome& OutOutcome,
-			FVerificationError& OutError) const;
+			FVerificationError& OutError,
+			bool bObservationOnly = false) const;
 
 	private:
 		IPersistedStateOracle* PersistedStateOracle = nullptr;

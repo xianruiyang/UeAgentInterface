@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
@@ -27,6 +29,9 @@ namespace UE::UAI::Composition::GraphCompound
 			GetDescriptorIdentity() const;
 		const FString& GetOperationKind() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
+		bool TryMatchDefinition(const FUeAgentGraphCompoundActivationProfile& Expected,
+			Contract::FDiagnostic& OutError, const FString& Stage) const;
 
 	private:
 		FString CapabilityId;
@@ -34,22 +39,23 @@ namespace UE::UAI::Composition::GraphCompound
 		FString Method;
 		Contract::FUeAgentDescriptorIdentity DescriptorIdentity;
 		FString OperationKind;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
-	UEAGENTINTERFACE_API const TArray<FUeAgentGraphCompoundActivationProfile>&
-	GetGraphCompoundActivationProfiles();
+	UEAGENTINTERFACE_API bool TryGetGraphCompoundActivationProfiles(
+		const TArray<FUeAgentGraphCompoundActivationProfile>*& OutProfiles,
+		Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateGraphCompoundDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
-	/** Builds the outermost production registry: 185 base + 78 Graph commands. */
+	/** Builds the outermost production registry from base and Graph contributions. */
 	UEAGENTINTERFACE_API bool
 	TryCreateGraphCompoundProductionCommandContractRegistry(
 		TSharedPtr<const CommandContract::FUeAgentCommandContractRegistry>&
 			OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	/** Builds the production registry for an explicit canonical Graph subset. */
 	UEAGENTINTERFACE_API bool
@@ -57,5 +63,5 @@ namespace UE::UAI::Composition::GraphCompound
 		const TArray<FUeAgentGraphCompoundActivationProfile>& Profiles,
 		TSharedPtr<const CommandContract::FUeAgentCommandContractRegistry>&
 			OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

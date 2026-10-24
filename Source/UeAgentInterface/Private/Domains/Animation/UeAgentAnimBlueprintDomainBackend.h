@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Animation/AnimBlueprint.h"
 #include "CoreMinimal.h"
 #include "EdGraph/EdGraph.h"
@@ -38,16 +40,7 @@ namespace UeAgentAnimBlueprintOps
 	UClass* ResolveClassByPath(const FString& InClassPath);
 	FString BlueprintStatusToString(EBlueprintStatus InStatus);
 	bool ParseCompilerSeverityFilter(const FString& InFilterText, ECompilerMessageSeverityFilter& OutFilter);
-	void BuildCompilerLogJson(
-		const FCompilerResultsLog& InCompilerLog,
-		ECompilerMessageSeverityFilter InFilter,
-		int32 InMaxMessages,
-		TArray<TSharedPtr<FJsonValue>>& OutMessages,
-		int32& OutFilteredErrorCount,
-		int32& OutFilteredWarningCount,
-		int32& OutFilteredInfoCount);
-	bool SaveAnimBlueprintPackage(UAnimBlueprint* AnimBlueprint, FString& OutError);
-	bool ResolveAnimBlueprintParentClass(UClass* ParentClass, const USkeleton* TargetSkeleton, bool bIsTemplate, FString& OutError);
+	bool SaveAnimBlueprintPackage(UAnimBlueprint* AnimBlueprint, UE::UAI::Contract::FDiagnostic& OutError);
 	FString PreviewApplicationMethodToString(EPreviewAnimationBlueprintApplicationMethod InMethod);
 	bool ParsePreviewApplicationMethod(const FString& InText, EPreviewAnimationBlueprintApplicationMethod& OutMethod);
 	void AppendAnimBlueprintGraphItems(
@@ -65,7 +58,7 @@ namespace UeAgentAnimBlueprintOps
 	bool IsLayerInterfaceBlueprint(const UAnimBlueprint* AnimBlueprint);
 	bool IsAnimLayerGraph(const UEdGraph* Graph);
 	UEdGraph* ResolveAnyAnimBlueprintGraph(UAnimBlueprint* AnimBlueprint, const FString& InGraphName);
-	bool FinalizeAnimBlueprintStructureMutation(UAnimBlueprint* AnimBlueprint, bool bCompile, bool bSave, FString& OutError);
+	bool FinalizeAnimBlueprintStructureMutation(UAnimBlueprint* AnimBlueprint, bool bCompile, bool bSave, UE::UAI::Contract::FDiagnostic& OutError);
 
 	template<typename NodeType>
 	NodeType* AddNodeToGraph(UEdGraph* Graph, const int32 PosX, const int32 PosY)
@@ -92,6 +85,6 @@ namespace UeAgentAnimBlueprintOps
 	UAnimStateTransitionNode* FindTransitionNode(UAnimationStateMachineGraph* StateMachineGraph, const FString& SourceStateName, const FString& TargetStateName);
 	UAnimStateTransitionNode* FindTransitionNodeByGuid(UAnimationStateMachineGraph* StateMachineGraph, const FGuid& NodeGuid);
 	UAnimStateNodeBase* GetEntryConnectedState(UAnimationStateMachineGraph* StateMachineGraph);
-	bool ClearEntryState(UAnimationStateMachineGraph* StateMachineGraph, int32& OutBrokenLinkCount, FString& OutError);
-	bool SetEntryState(UAnimationStateMachineGraph* StateMachineGraph, UAnimStateNodeBase* TargetStateNode, FString& OutError);
+	bool ClearEntryState(UAnimationStateMachineGraph* StateMachineGraph, int32& OutBrokenLinkCount, UE::UAI::Contract::FDiagnostic& OutError);
+	bool SetEntryState(UAnimationStateMachineGraph* StateMachineGraph, UAnimStateNodeBase* TargetStateNode, UE::UAI::Contract::FDiagnostic& OutError);
 }

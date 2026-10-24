@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "DomainAdapters/Query/UeAgentQueryService.h"
@@ -13,12 +15,12 @@ namespace UE::UAI::Module::CommandRegistration::Query
 			DescriptorRegistry,
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>&
 			OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateProductionQueryContribution(
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>&
 			OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateQueryRegistration(
 		TSharedRef<DomainAdapters::Query::IUeAgentQueryService> Service,
@@ -29,5 +31,5 @@ namespace UE::UAI::Module::CommandRegistration::Query
 			OutRegistry,
 		TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>&
 			OutDispatch,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

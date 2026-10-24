@@ -7,6 +7,7 @@
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -33,14 +34,16 @@ namespace
 	const TCHAR* CompatibilityOwnerId =
 		TEXT("uai.legacy.export.compatibility");
 
-	void SetError(
-		FString& OutCode,
-		FString& OutDetail,
-		const FString& Code,
-		const FString& Detail = FString())
+	UE::UAI::Contract::FDiagnostic PlanFailure(const FString& Code, const FString& Reason,
+		const FString& Target, const FString& Path)
 	{
-		OutCode = Code;
-		OutDetail = Detail.IsEmpty() ? Code : Detail;
+		UE::UAI::Contract::FDiagnostic Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("export_publish"));
+		Error.SourceKind = TEXT("native_result");
+		Error.TargetPath = Target;
+		Error.PropertyPath = Path;
+		Error.SemanticPointer = Path;
+		Error.Source.JsonPath = Path;
+		return Error;
 	}
 
 	TArray<uint8> Utf8(const FString& Text)
@@ -92,20 +95,7 @@ namespace
 
 	FUeAgentResourceTracker MakeResources()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 64 * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 64 * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 64 * 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 262144},
-			{EUeAgentResourceDimension::Items, 262144},
-			{EUeAgentResourceDimension::Files, 4096},
-			{EUeAgentResourceDimension::ReferenceEdges, 262144},
-			{EUeAgentResourceDimension::WorkUnits, 1048576},
-			{
-				EUeAgentResourceDimension::EstimatedMemoryBytes,
-				256 * 1024 * 1024,
-			},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	bool ResolveCompatibilityPath(
@@ -113,13 +103,13 @@ namespace
 		const bool bRequireHjson,
 		const bool bAllowRoot,
 		FString& OutPath,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentAuthoringWorkspacePaths::FResolveOptions Options;
 		Options.bRequireHjson = bRequireHjson;
 		Options.bAllowRoot = bAllowRoot;
 		UeAgentAuthoringWorkspacePaths::FResolvedPath Resolved;
-		FString SavedError;
+		UE::UAI::Contract::FDiagnostic SavedError;
 		if (UeAgentAuthoringWorkspacePaths::ResolveUnderRoot(
 				FPaths::ProjectSavedDir(),
 				Input,
@@ -154,17 +144,17 @@ namespace
 		const UeAgentExportPublisher::FPublishContext& Context,
 		const EWorkspaceKind WorkspaceKind,
 		const FString& EntryFile,
+		const FString& OutputPath,
 		FExportWorkspacePlanPtr& OutPlan,
-		FString& OutErrorCode,
-		FString& OutErrorDetail)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutPlan.Reset();
 		if (Files.IsEmpty())
 		{
-			SetError(
-				OutErrorCode,
-				OutErrorDetail,
-				TEXT("export_publish_no_files"));
+			OutError = PlanFailure(TEXT("export_publish_no_files"),
+				TEXT("The export plan contains no files to publish."), OutputPath, TEXT("/files"));
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(Files.Num());
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one file"));
 			return false;
 		}
 		TArray<FExportFilePlan> PlannedFiles;
@@ -173,16 +163,27 @@ namespace
 			+ Context.ContractVersion + TEXT("\x1f")
 			+ Context.ProfileId;
 		int64 ObservedTokens = 0;
-		for (const UeAgentExportPublisher::FFilePlan& File : Files)
+		for (int32 FileIndex = 0; FileIndex < Files.Num(); ++FileIndex)
 		{
+			const UeAgentExportPublisher::FFilePlan& File = Files[FileIndex];
 			if (!File.Root.IsValid()
 				|| File.RelativePath.TrimStartAndEnd().IsEmpty())
 			{
-				SetError(
-					OutErrorCode,
-					OutErrorDetail,
-					TEXT("export_publish_file_invalid"),
-					File.RelativePath);
+				OutError = PlanFailure(TEXT("export_publish_file_invalid"),
+					!File.Root.IsValid() ? TEXT("The planned export file has no document object.")
+						: TEXT("The planned export file has an empty relative path."), OutputPath,
+					FString::Printf(TEXT("/files/%d/%s"), FileIndex, !File.Root.IsValid() ? TEXT("root") : TEXT("relative_path")));
+				OutError.Source.SourceUnit = File.RelativePath;
+				if (!File.Root.IsValid())
+				{
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a document object"));
+				}
+				else
+				{
+					OutError.ActualValue = MakeShared<FJsonValueString>(File.RelativePath);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a nonempty relative file path"));
+				}
 				return false;
 			}
 			const FString Text = CanonicalizeLegacyRoot(
@@ -204,11 +205,10 @@ namespace
 					UeAgentExportPublisherTestHooks::EFailurePoint::
 						NthStagedFile))
 			{
-				SetError(
-					OutErrorCode,
-					OutErrorDetail,
-					TEXT("export_publisher_injected_stage_failure"),
-					File.RelativePath);
+				OutError = PlanFailure(TEXT("export_publisher_injected_stage_failure"),
+					TEXT("The export staging failure hook rejected this planned file."), OutputPath,
+					FString::Printf(TEXT("/files/%d"), FileIndex));
+				OutError.Source.SourceUnit = File.RelativePath;
 				return false;
 			}
 		}
@@ -267,6 +267,12 @@ namespace
 		Result->SetStringField(
 			TEXT("inventory_hash"),
 			Receipt.GetInventoryHash());
+		if (!Receipt.GetCleanupWarnings().IsEmpty()) {
+			TArray<TSharedPtr<FJsonValue>> Warnings;
+			for (const auto& Warning : Receipt.GetCleanupWarnings())
+				Warnings.Add(MakeShared<FJsonValueObject>(Warning.ToPublicJson()));
+			Result->SetArrayField(TEXT("warnings"), MoveTemp(Warnings));
+		}
 		return Result;
 	}
 
@@ -274,8 +280,7 @@ namespace
 		const FExportWorkspacePlanRef& Plan,
 		const FString& FinalPath,
 		UeAgentExportPublisher::FPublishResult& OutResult,
-		FString& OutErrorCode,
-		FString& OutErrorDetail)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TUniquePtr<
 			UE::UAI::ArtifactPublisher::TestHooks::
@@ -305,24 +310,16 @@ namespace
 				Receipt,
 				Error))
 		{
-			SetError(
-				OutErrorCode,
-				OutErrorDetail,
-				bInjectedAfterBackup
-					? TEXT("export_publish_failed")
-					: Error.GetCode(),
-				Error.GetPath().IsEmpty()
-					? Error.GetDetail()
-					: Error.GetPath() + TEXT(":") + Error.GetDetail());
+			OutError = Error;
 			UE_LOG(
 				LogUeAgentInterface,
 				Warning,
 				TEXT(
 					"Legacy export compatibility publish failed "
 					"code=%s path=%s detail=%s"),
-				*Error.GetCode(),
-				*Error.GetPath(),
-				*Error.GetDetail());
+				*Error.Code,
+				*Error.TargetPath,
+				*Error.InternalContext);
 			return false;
 		}
 		OutResult.Receipt = ReceiptJson(Receipt);
@@ -341,20 +338,36 @@ namespace
 
 	bool LoadJson(
 		const FString& Path,
-		TSharedPtr<FJsonObject>& OutObject)
+		const FString& Target,
+		TSharedPtr<FJsonObject>& OutObject,
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FString Text;
 		if (!FFileHelper::LoadFileToString(Text, *Path))
 		{
+			OutError = PlanFailure(TEXT("export_owner_marker_read_failed"),
+				TEXT("The export ownership record could not be read."), Target, FString());
+			OutError.Source.SourceUnit = C8fOwnerMarker;
+			OutError.InternalContext = Path;
 			return false;
 		}
 		const TSharedRef<TJsonReader<>> Reader =
 			TJsonReaderFactory<>::Create(Text);
-		return FJsonSerializer::Deserialize(Reader, OutObject)
-			&& OutObject.IsValid();
+		if (!FJsonSerializer::Deserialize(Reader, OutObject) || !OutObject.IsValid())
+		{
+			OutError = PlanFailure(TEXT("export_owner_marker_parse_failed"),
+				!Reader->GetErrorMessage().IsEmpty() ? Reader->GetErrorMessage()
+					: TEXT("The export ownership record does not contain a JSON object."), Target, FString());
+			OutError.Source.SourceUnit = C8fOwnerMarker;
+			OutError.Source.Line = static_cast<int32>(Reader->GetLineNumber());
+			OutError.Source.Column = static_cast<int32>(Reader->GetCharacterNumber());
+			OutError.InternalContext = Path;
+			return false;
+		}
+		return true;
 	}
 
-	bool HasCompatibleOwnership(const FString& Root)
+	bool HasCompatibleOwnership(const FString& Root, const FString& Target, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (Root.Contains(
 				TEXT("/Automation/UeAgentExportWorkspaceWriter"),
@@ -364,19 +377,43 @@ namespace
 		}
 		TSharedPtr<FJsonObject> Owner;
 		FString PublisherOwner;
+		UE::UAI::Contract::FDiagnostic CurrentError;
 		if (LoadJson(
 				FPaths::Combine(Root, C8fOwnerMarker),
-				Owner)
-			&& Owner->TryGetStringField(
-				TEXT("publisher_owner_id"),
-				PublisherOwner))
+				Target, Owner, CurrentError))
 		{
-			return PublisherOwner == CompatibilityOwnerId;
+			if (Owner->TryGetStringField(TEXT("publisher_owner_id"), PublisherOwner))
+			{
+				if (PublisherOwner == CompatibilityOwnerId) return true;
+				OutError = PlanFailure(TEXT("export_workspace_ownership_required"),
+					TEXT("The existing export workspace belongs to a different publisher."), Target, TEXT("/publisher_owner_id"));
+				OutError.Source.SourceUnit = C8fOwnerMarker;
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(PublisherOwner);
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(CompatibilityOwnerId);
+				OutError.InternalContext = Root;
+				return false;
+			}
+			CurrentError = PlanFailure(TEXT("export_owner_marker_field_invalid"),
+				TEXT("The export ownership record has no string publisher identifier."), Target, TEXT("/publisher_owner_id"));
+			CurrentError.Source.SourceUnit = C8fOwnerMarker;
+			CurrentError.ActualValuePresent = Owner->Values.Contains(TEXT("publisher_owner_id"));
+			CurrentError.ActualEvidence = Owner->Values.FindRef(TEXT("publisher_owner_id"));
+			CurrentError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a string"));
 		}
 		FString LegacyText;
-		return FFileHelper::LoadFileToString(
+		if (FFileHelper::LoadFileToString(
 			LegacyText,
-			*FPaths::Combine(Root, LegacyOwnerMarker));
+			*FPaths::Combine(Root, LegacyOwnerMarker))) return true;
+		OutError = PlanFailure(TEXT("export_workspace_ownership_required"),
+			TEXT("No readable compatible ownership record was found for the export workspace."), Target, FString());
+		OutError.InternalContext = Root;
+		OutError.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(CurrentError);
+		auto LegacyError = PlanFailure(TEXT("export_legacy_owner_marker_read_failed"),
+			TEXT("The legacy export ownership record could not be read."), Target, FString());
+		LegacyError.Source.SourceUnit = LegacyOwnerMarker;
+		LegacyError.InternalContext = FPaths::Combine(Root, LegacyOwnerMarker);
+		OutError.Append(LegacyError);
+		return false;
 	}
 }
 
@@ -394,8 +431,7 @@ namespace UeAgentExportPublisher
 		const TArray<FFilePlan>& Files,
 		const FPublishContext& Context,
 		FPublishResult& OutResult,
-		FString& OutErrorCode,
-		FString& OutErrorDetail)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutResult = {};
 		FString ResolvedRoot;
@@ -404,9 +440,8 @@ namespace UeAgentExportPublisher
 				false,
 				false,
 				ResolvedRoot,
-				OutErrorDetail))
+				OutError))
 		{
-			OutErrorCode = TEXT("export_workspace_path_invalid");
 			return false;
 		}
 		FExportWorkspacePlanPtr Plan;
@@ -417,9 +452,9 @@ namespace UeAgentExportPublisher
 				Context,
 				EWorkspaceKind::Directory,
 				Entry,
+				WorkspaceRoot,
 				Plan,
-				OutErrorCode,
-				OutErrorDetail))
+				OutError))
 		{
 			return false;
 		}
@@ -427,8 +462,7 @@ namespace UeAgentExportPublisher
 			Plan.ToSharedRef(),
 			ResolvedRoot,
 			OutResult,
-			OutErrorCode,
-			OutErrorDetail);
+			OutError);
 	}
 
 	bool PublishSingleFile(
@@ -436,8 +470,7 @@ namespace UeAgentExportPublisher
 		const FFilePlan& File,
 		const FPublishContext& Context,
 		FPublishResult& OutResult,
-		FString& OutErrorCode,
-		FString& OutErrorDetail)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutResult = {};
 		FString ResolvedFile;
@@ -446,9 +479,8 @@ namespace UeAgentExportPublisher
 				true,
 				false,
 				ResolvedFile,
-				OutErrorDetail))
+				OutError))
 		{
-			OutErrorCode = TEXT("export_single_file_path_invalid");
 			return false;
 		}
 		FFilePlan CanonicalFile = File;
@@ -460,9 +492,9 @@ namespace UeAgentExportPublisher
 				Context,
 				EWorkspaceKind::SingleFile,
 				CanonicalFile.RelativePath,
+				OutputFile,
 				Plan,
-				OutErrorCode,
-				OutErrorDetail))
+				OutError))
 		{
 			return false;
 		}
@@ -470,14 +502,13 @@ namespace UeAgentExportPublisher
 			Plan.ToSharedRef(),
 			ResolvedFile,
 			OutResult,
-			OutErrorCode,
-			OutErrorDetail);
+			OutError);
 	}
 
 	bool ResetOwnedWorkspace(
 		const FString& FolderPathInput,
 		FString& OutResolvedFolderPath,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutResolvedFolderPath.Reset();
 		if (!ResolveCompatibilityPath(
@@ -494,11 +525,8 @@ namespace UeAgentExportPublisher
 		{
 			return true;
 		}
-		if (!HasCompatibleOwnership(OutResolvedFolderPath))
+		if (!HasCompatibleOwnership(OutResolvedFolderPath, FolderPathInput, OutError))
 		{
-			OutError = FString::Printf(
-				TEXT("export_workspace_ownership_required:%s"),
-				*OutResolvedFolderPath);
 			return false;
 		}
 		if (!IFileManager::Get().DeleteDirectory(
@@ -506,13 +534,20 @@ namespace UeAgentExportPublisher
 				false,
 				true))
 		{
-			OutError = FString::Printf(
-				TEXT("export_workspace_delete_failed:%s"),
-				*OutResolvedFolderPath);
+			OutError = PlanFailure(TEXT("export_workspace_delete_failed"),
+				TEXT("The owned export workspace directory could not be deleted."), FolderPathInput, FString());
+			OutError.InternalContext = OutResolvedFolderPath;
 			return false;
 		}
-		return IFileManager::Get().MakeDirectory(
+		if (!IFileManager::Get().MakeDirectory(
 			*OutResolvedFolderPath,
-			true);
+			true))
+		{
+			OutError = PlanFailure(TEXT("export_workspace_create_failed"),
+				TEXT("The export workspace directory was deleted but could not be recreated."), FolderPathInput, FString());
+			OutError.InternalContext = OutResolvedFolderPath;
+			return false;
+		}
+		return true;
 	}
 }

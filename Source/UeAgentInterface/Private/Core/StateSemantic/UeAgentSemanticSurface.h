@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Templates/SharedPointer.h"
@@ -124,17 +126,17 @@ namespace UE::UAI::StateSemantic
 
 		bool TryAddItem(
 			FUeAgentSemanticSurfaceItem Item,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool TryAddEndpoint(
 			FUeAgentSemanticSurfaceEndpoint Endpoint,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool TryAddRelation(
 			FUeAgentSemanticSurfaceRelation Relation,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool TryBuild(
 			ContextResource::FUeAgentResourceTracker& Resources,
 			FUeAgentSemanticSurfacePtr& OutSurface,
-			FString& OutError) const;
+			UE::UAI::Contract::FDiagnostic& OutError) const;
 
 	private:
 		FString SurfaceId;
@@ -153,13 +155,13 @@ namespace UE::UAI::StateSemantic
 	UEAGENTINTERFACE_API bool TrySerializeSemanticSurface(
 		FUeAgentSemanticSurfaceRef Surface,
 		TArray<uint8>& OutCanonicalUtf8,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryParseSemanticSurface(
 		const TArray<uint8>& CanonicalUtf8,
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FUeAgentSemanticSurfacePtr& OutSurface,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryBuildSemanticSurfaceSnapshot(
 		FUeAgentSemanticSurfaceRef Surface,

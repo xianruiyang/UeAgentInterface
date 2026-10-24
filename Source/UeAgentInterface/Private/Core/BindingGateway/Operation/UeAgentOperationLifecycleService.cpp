@@ -1,4 +1,6 @@
 #include "Core/BindingGateway/Operation/UeAgentOperationLifecycleService.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::BindingGateway::Operation
 {
@@ -10,14 +12,38 @@ namespace UE::UAI::BindingGateway::Operation
 			return Value;
 		}
 
-		bool NormalizeSet(TArray<FString>& Values)
+		FOperationLifecycleError InvalidInput(const TCHAR* Code, const FString& Reason, const FString& Path)
 		{
-			for (FString& Value : Values)
+			auto Error = FOperationLifecycleError::Failure(Code, Reason, TEXT("operation_lifecycle"));
+			Error.PropertyPath = Path;
+			return Error;
+		}
+
+		bool NormalizeSet(TArray<FString>& Values, FOperationLifecycleError* OutError = nullptr,
+			const TCHAR* Code = TEXT("operation_value_set_invalid"), const FString& Path = FString())
+		{
+			TMap<FString, int32> FirstIndices;
+			TMap<FString, int32> DuplicateIndices;
+			for (int32 Index = 0; Index < Values.Num(); ++Index)
 			{
+				FString& Value = Values[Index];
 				Value = Normalize(MoveTemp(Value));
 				if (Value.IsEmpty())
 				{
+					if (OutError)
+					{
+						*OutError = InvalidInput(Code, TEXT("The set contains an empty value after trimming whitespace."), FString::Printf(TEXT("%s[%d]"), *Path, Index));
+						OutError->ActualEvidence = MakeShared<FJsonValueString>(Value);
+					}
 					return false;
+				}
+				if (OutError)
+				{
+					if (FirstIndices.Contains(Value))
+					{
+						if (!DuplicateIndices.Contains(Value)) DuplicateIndices.Add(Value, Index);
+					}
+					else FirstIndices.Add(Value, Index);
 				}
 			}
 			Values.Sort();
@@ -25,6 +51,12 @@ namespace UE::UAI::BindingGateway::Operation
 			{
 				if (Values[Index - 1] == Values[Index])
 				{
+					if (OutError)
+					{
+						*OutError = InvalidInput(Code, FString::Printf(TEXT("The value duplicates the entry at index %d after trimming whitespace."), FirstIndices.FindChecked(Values[Index])),
+							FString::Printf(TEXT("%s[%d]"), *Path, DuplicateIndices.FindChecked(Values[Index])));
+						OutError->ActualEvidence = MakeShared<FJsonValueString>(Values[Index]);
+					}
 					return false;
 				}
 			}
@@ -47,11 +79,14 @@ namespace UE::UAI::BindingGateway::Operation
 			return true;
 		}
 
-		FString ErrorCodeOr(
-			const FOperationLifecycleError& Error,
-			const TCHAR* Fallback)
+		FOperationLifecycleError PhaseFailure(
+			const FOperationLifecycleError& Error, const TCHAR* Code, const TCHAR* Reason,
+			const EOperationLifecycleStage Stage)
 		{
-			return Error.IsPresent() ? Error.GetCode() : FString(Fallback);
+			if (!Error.IsEmpty()) return Error;
+			auto Diagnostic = FOperationLifecycleError::Failure(Code, Reason, LexToString(Stage));
+			Diagnostic.SourceKind = TEXT("native_result");
+			return Diagnostic;
 		}
 
 		void AppendStage(
@@ -108,28 +143,6 @@ namespace UE::UAI::BindingGateway::Operation
 		}
 	}
 
-	FOperationLifecycleError::FOperationLifecycleError(
-		FString InCode,
-		FString InDetail)
-		: Code(Normalize(MoveTemp(InCode)))
-		, Detail(Normalize(MoveTemp(InDetail)))
-	{
-	}
-
-	const FString& FOperationLifecycleError::GetCode() const
-	{
-		return Code;
-	}
-
-	const FString& FOperationLifecycleError::GetDetail() const
-	{
-		return Detail;
-	}
-
-	bool FOperationLifecycleError::IsPresent() const
-	{
-		return !Code.IsEmpty();
-	}
 
 	FOperationLifecyclePlan::FOperationLifecyclePlan(
 		FString InPlanId,
@@ -143,12 +156,24 @@ namespace UE::UAI::BindingGateway::Operation
 		, ExpectedRevisions(MoveTemp(InExpectedRevisions))
 		, RequiredSettleSignals(MoveTemp(InRequiredSettleSignals))
 	{
-		bValid = !PlanId.IsEmpty()
-			&& IsSha256(PlanFingerprint)
-			&& !ImpactScope.IsEmpty()
-			&& NormalizeSet(ImpactScope)
-			&& NormalizeSet(RequiredSettleSignals)
-			&& ExpectedRevisions.Num() == ImpactScope.Num();
+		const TCHAR* Code = TEXT("operation_plan_invalid");
+		if (PlanId.IsEmpty())
+			ValidationDiagnostic = InvalidInput(Code, TEXT("The operation plan identifier is empty after trimming whitespace."), TEXT("plan_id"));
+		else if (!IsSha256(PlanFingerprint))
+		{
+			ValidationDiagnostic = InvalidInput(Code, TEXT("The operation plan fingerprint must contain a sha256 prefix and 64 hexadecimal digits."), TEXT("plan_fingerprint"));
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(PlanFingerprint);
+		}
+		else if (ImpactScope.IsEmpty())
+			ValidationDiagnostic = InvalidInput(Code, TEXT("The operation plan must declare at least one affected resource."), TEXT("impact_scope"));
+		else if (NormalizeSet(ImpactScope, &ValidationDiagnostic, Code, TEXT("impact_scope"))
+			&& NormalizeSet(RequiredSettleSignals, &ValidationDiagnostic, Code, TEXT("required_settle_signals"))
+			&& ExpectedRevisions.Num() != ImpactScope.Num())
+		{
+			ValidationDiagnostic = InvalidInput(Code, TEXT("The expected revision count must equal the number of affected resources."), TEXT("expected_revisions"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(ExpectedRevisions.Num());
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(ImpactScope.Num());
+		}
 		TMap<FString, FString> NormalizedRevisions;
 		for (TPair<FString, FString>& Pair : ExpectedRevisions)
 		{
@@ -158,7 +183,19 @@ namespace UE::UAI::BindingGateway::Operation
 				|| !ImpactScope.Contains(Key)
 				|| NormalizedRevisions.Contains(Key))
 			{
-				bValid = false;
+				if (ValidationDiagnostic.IsEmpty())
+				{
+					const bool bValueMissing = !Key.IsEmpty() && Value.IsEmpty();
+					ValidationDiagnostic = InvalidInput(Code,
+						Key.IsEmpty() ? TEXT("The expected revision has an empty resource identity.")
+						: bValueMissing ? TEXT("The expected revision value is empty.")
+						: !ImpactScope.Contains(Key) ? TEXT("The expected revision refers to a resource outside the plan impact scope.")
+						: TEXT("More than one expected revision refers to the same normalized resource identity."),
+						bValueMissing ? TEXT("expected_revisions.value") : TEXT("expected_revisions.key"));
+					ValidationDiagnostic.SubjectId = Key;
+					ValidationDiagnostic.InternalContext = Pair.Key;
+					ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(bValueMissing ? Value : Key);
+				}
 				break;
 			}
 			NormalizedRevisions.Add(MoveTemp(Key), MoveTemp(Value));
@@ -195,7 +232,7 @@ namespace UE::UAI::BindingGateway::Operation
 
 	bool FOperationLifecyclePlan::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
 	FOperationImpactAuthorization::FOperationImpactAuthorization(
@@ -203,11 +240,16 @@ namespace UE::UAI::BindingGateway::Operation
 		TArray<FString> InAuthorizedImpactScope)
 		: PlanFingerprint(Normalize(MoveTemp(InPlanFingerprint)))
 		, AuthorizedImpactScope(MoveTemp(InAuthorizedImpactScope))
-		, bValid(
-			IsSha256(PlanFingerprint)
-			&& !AuthorizedImpactScope.IsEmpty()
-			&& NormalizeSet(AuthorizedImpactScope))
 	{
+		const TCHAR* Code = TEXT("operation_authorization_invalid");
+		if (!IsSha256(PlanFingerprint))
+		{
+			ValidationDiagnostic = InvalidInput(Code, TEXT("The authorization fingerprint must contain a sha256 prefix and 64 hexadecimal digits."), TEXT("plan_fingerprint"));
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(PlanFingerprint);
+		}
+		else if (AuthorizedImpactScope.IsEmpty())
+			ValidationDiagnostic = InvalidInput(Code, TEXT("The authorization must cover at least one affected resource."), TEXT("authorized_impact_scope"));
+		else NormalizeSet(AuthorizedImpactScope, &ValidationDiagnostic, Code, TEXT("authorized_impact_scope"));
 	}
 
 	const FString&
@@ -225,15 +267,53 @@ namespace UE::UAI::BindingGateway::Operation
 	bool FOperationImpactAuthorization::Authorizes(
 		const FOperationLifecyclePlan& Plan) const
 	{
-		return bValid
-			&& Plan.IsValid()
-			&& PlanFingerprint == Plan.GetPlanFingerprint()
-			&& AuthorizedImpactScope == Plan.GetImpactScope();
+		FOperationLifecycleError Error;
+		return TryAuthorize(Plan, Error);
+	}
+
+	bool FOperationImpactAuthorization::TryAuthorize(
+		const FOperationLifecyclePlan& Plan, FOperationLifecycleError& OutError) const
+	{
+		OutError = ValidationDiagnostic;
+		if (!OutError.IsEmpty()) return false;
+		if (!Plan.IsValid())
+		{
+			OutError = Plan.GetValidationDiagnostic();
+			return false;
+		}
+		if (PlanFingerprint != Plan.GetPlanFingerprint())
+		{
+			OutError = InvalidInput(TEXT("operation_impact_not_authorized"), TEXT("The authorization was issued for a different operation plan."), TEXT("plan_fingerprint"));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(PlanFingerprint);
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Plan.GetPlanFingerprint());
+			return false;
+		}
+		if (AuthorizedImpactScope != Plan.GetImpactScope())
+		{
+			OutError = InvalidInput(TEXT("operation_impact_not_authorized"), TEXT("The authorized resources differ from the operation plan impact scope."), TEXT("authorized_impact_scope"));
+			TArray<TSharedPtr<FJsonValue>> Actual, Expected;
+			for (const auto& Value : AuthorizedImpactScope) Actual.Add(MakeShared<FJsonValueString>(Value));
+			for (const auto& Value : Plan.GetImpactScope()) Expected.Add(MakeShared<FJsonValueString>(Value));
+			OutError.ActualEvidence = MakeShared<FJsonValueArray>(MoveTemp(Actual));
+			OutError.ExpectedEvidence = MakeShared<FJsonValueArray>(MoveTemp(Expected));
+			return false;
+		}
+		return true;
 	}
 
 	bool FOperationImpactAuthorization::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
+	}
+
+	FOperationMutationFacts::FOperationMutationFacts()
+	{
+		ValidationDiagnostic = InvalidInput(TEXT("operation_mutation_facts_missing"),
+			TEXT("The operation did not provide mutation facts."), TEXT("mutation_facts"));
+		ValidationDiagnostic.SourceKind = TEXT("native_result");
+		ValidationDiagnostic.Stage = TEXT("domain_execute");
+		ValidationDiagnostic.ActualValuePresent = false;
+		ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("mutation facts"));
 	}
 
 	FOperationMutationFacts::FOperationMutationFacts(
@@ -243,11 +323,36 @@ namespace UE::UAI::BindingGateway::Operation
 		: MutationId(Normalize(MoveTemp(InMutationId)))
 		, MutatedIdentityKeys(MoveTemp(InMutatedIdentityKeys))
 		, bRollbackSupported(bInRollbackSupported)
-		, bValid(
-			!MutationId.IsEmpty()
-			&& !MutatedIdentityKeys.IsEmpty()
-			&& NormalizeSet(MutatedIdentityKeys))
+		, bProvided(true)
 	{
+		if (MutationId.IsEmpty())
+		{
+			ValidationDiagnostic = InvalidInput(TEXT("operation_mutation_id_missing"),
+				TEXT("The mutation facts contain an empty mutation identifier."), TEXT("mutation_facts.mutation_id"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(MutationId);
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty mutation identifier"));
+		}
+		else if (MutatedIdentityKeys.IsEmpty())
+		{
+			ValidationDiagnostic = InvalidInput(TEXT("operation_mutation_targets_missing"),
+				TEXT("The mutation facts contain no mutated target identities."), TEXT("mutation_facts.mutated_targets"));
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(0);
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one mutated target"));
+		}
+		else
+		{
+			if (!NormalizeSet(MutatedIdentityKeys, &ValidationDiagnostic,
+				TEXT("operation_mutation_targets_invalid"), TEXT("mutation_facts.mutated_targets")))
+			{
+				ValidationDiagnostic.ActualValuePresent = true;
+				ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("unique nonempty target identities"));
+			}
+		}
+		if (!ValidationDiagnostic.IsEmpty())
+		{
+			ValidationDiagnostic.SourceKind = TEXT("native_result");
+			ValidationDiagnostic.Stage = TEXT("domain_execute");
+		}
 	}
 
 	const FString& FOperationMutationFacts::GetMutationId() const
@@ -268,20 +373,26 @@ namespace UE::UAI::BindingGateway::Operation
 
 	bool FOperationMutationFacts::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
+	}
+
+	bool FOperationMutationFacts::TryValidate(FOperationLifecycleError& OutError) const
+	{
+		OutError = ValidationDiagnostic;
+		return IsValid();
 	}
 
 	FOperationLifecycleReceipt::FOperationLifecycleReceipt(
 		FString InPlanId,
 		const EOperationLifecycleStatus InStatus,
-		FString InErrorCode,
+		UE::UAI::Contract::FDiagnostic InDiagnostic,
 		const bool bInMutationStarted,
 		const bool bInRetrySafe,
 		FString InPersistenceReceiptId,
 		TArray<FString> InPhaseHistory)
 		: PlanId(Normalize(MoveTemp(InPlanId)))
 		, Status(InStatus)
-		, ErrorCode(Normalize(MoveTemp(InErrorCode)))
+		, Diagnostic(MoveTemp(InDiagnostic))
 		, bMutationStarted(bInMutationStarted)
 		, bRetrySafe(bInRetrySafe)
 		, PersistenceReceiptId(
@@ -289,6 +400,14 @@ namespace UE::UAI::BindingGateway::Operation
 		, PhaseHistory(MoveTemp(InPhaseHistory))
 		, bValid(!PlanId.IsEmpty() && !PhaseHistory.IsEmpty())
 	{
+		if (!Diagnostic.IsEmpty())
+		{
+			Diagnostic.Schema = TEXT("uai.operation.failure/1");
+			Diagnostic.TerminalStatus = LexToString(Status);
+			Diagnostic.MutationStarted = bMutationStarted;
+			Diagnostic.MutationMayHaveStarted = bMutationStarted || Status == EOperationLifecycleStatus::StateUnknown;
+			Diagnostic.bRetrySafe = bRetrySafe;
+		}
 	}
 
 	const FString& FOperationLifecycleReceipt::GetPlanId() const
@@ -302,9 +421,9 @@ namespace UE::UAI::BindingGateway::Operation
 		return Status;
 	}
 
-	const FString& FOperationLifecycleReceipt::GetErrorCode() const
+	const UE::UAI::Contract::FDiagnostic& FOperationLifecycleReceipt::GetDiagnostic() const
 	{
-		return ErrorCode;
+		return Diagnostic;
 	}
 
 	bool FOperationLifecycleReceipt::DidMutationStart() const
@@ -352,54 +471,36 @@ namespace UE::UAI::BindingGateway::Operation
 	bool FOperationLifecycleService::Rollback(
 		const FOperationLifecyclePlan& Plan,
 		const FOperationMutationFacts& Facts,
-		const FString& OriginalErrorCode,
+		UE::UAI::Contract::FDiagnostic OriginalDiagnostic,
 		TArray<FString> PhaseHistory,
 		FOperationLifecycleReceipt& OutReceipt) const
 	{
 		AppendStage(PhaseHistory, EOperationLifecycleStage::Rollback);
 		if (!Facts.IsValid() || !Facts.IsRollbackSupported())
 		{
+			if (!OriginalDiagnostic.RollbackAttempted.IsSet()) OriginalDiagnostic.RollbackAttempted = false;
+			if (!OriginalDiagnostic.RollbackSucceeded.IsSet()) OriginalDiagnostic.RollbackSucceeded = false;
+			if (!Facts.IsValid()) OriginalDiagnostic.Diagnostics.Add(Facts.GetValidationDiagnostic());
+			else OriginalDiagnostic.Diagnostics.Add(PhaseFailure({}, TEXT("operation_rollback_not_available"),
+				TEXT("The operation's mutation facts declare that rollback is unsupported."), EOperationLifecycleStage::Rollback));
 			AppendStage(PhaseHistory, EOperationLifecycleStage::Terminal);
-			OutReceipt = FOperationLifecycleReceipt(
-				Plan.GetPlanId(),
-				EOperationLifecycleStatus::StateUnknown,
-				TEXT("operation_rollback_not_available"),
-				true,
-				false,
-				FString(),
-				MoveTemp(PhaseHistory));
+			OutReceipt = FOperationLifecycleReceipt(Plan.GetPlanId(), EOperationLifecycleStatus::StateUnknown,
+				MoveTemp(OriginalDiagnostic), true, false, FString(), MoveTemp(PhaseHistory));
 			return false;
 		}
 		bool bConfirmed = false;
 		FOperationLifecycleError RollbackError;
-		const bool bRollbackCallSucceeded = DomainMutation->Rollback(
-			Plan,
-			Facts,
-			bConfirmed,
-			RollbackError);
+		OriginalDiagnostic.RollbackAttempted = true;
+		const bool bSucceeded = DomainMutation->Rollback(Plan, Facts, bConfirmed, RollbackError);
+		const bool bRolledBack = bSucceeded && bConfirmed;
+		OriginalDiagnostic.RollbackSucceeded = bRolledBack;
+		if (!bRolledBack)
+			OriginalDiagnostic.Diagnostics.Add(PhaseFailure(RollbackError, TEXT("operation_rollback_unconfirmed"),
+				!bSucceeded ? TEXT("The rollback provider failed without reporting a diagnostic.") : TEXT("The rollback provider returned success without confirming restoration."), EOperationLifecycleStage::Rollback));
 		AppendStage(PhaseHistory, EOperationLifecycleStage::Terminal);
-		if (bRollbackCallSucceeded && bConfirmed)
-		{
-			OutReceipt = FOperationLifecycleReceipt(
-				Plan.GetPlanId(),
-				EOperationLifecycleStatus::RolledBack,
-				OriginalErrorCode,
-				true,
-				true,
-				FString(),
-				MoveTemp(PhaseHistory));
-			return false;
-		}
-		OutReceipt = FOperationLifecycleReceipt(
-			Plan.GetPlanId(),
-			EOperationLifecycleStatus::StateUnknown,
-			ErrorCodeOr(
-				RollbackError,
-				TEXT("operation_rollback_unconfirmed")),
-			true,
-			false,
-			FString(),
-			MoveTemp(PhaseHistory));
+		OutReceipt = FOperationLifecycleReceipt(Plan.GetPlanId(),
+			bRolledBack ? EOperationLifecycleStatus::RolledBack : EOperationLifecycleStatus::StateUnknown,
+			MoveTemp(OriginalDiagnostic), true, bRolledBack, FString(), MoveTemp(PhaseHistory));
 		return false;
 	}
 
@@ -413,47 +514,48 @@ namespace UE::UAI::BindingGateway::Operation
 		if (!Plan.IsValid())
 		{
 			AppendStage(History, EOperationLifecycleStage::Terminal);
-			OutReceipt = FOperationLifecycleReceipt(
-				Plan.GetPlanId().IsEmpty() ? TEXT("invalid-plan") : Plan.GetPlanId(),
-				EOperationLifecycleStatus::Rejected,
-				TEXT("operation_plan_invalid"),
-				false,
-				true,
-				FString(),
-				MoveTemp(History));
+			OutReceipt = FOperationLifecycleReceipt(Plan.GetPlanId().IsEmpty() ? TEXT("invalid-plan") : Plan.GetPlanId(),
+		EOperationLifecycleStatus::Rejected,
+		Plan.GetValidationDiagnostic(),
+		false,
+		true,
+		FString(),
+		MoveTemp(History));
 			return false;
 		}
 
 		AppendStage(History, EOperationLifecycleStage::Authorization);
-		if (!Authorization.Authorizes(Plan))
+		FOperationLifecycleError AuthorizationError;
+		if (!Authorization.TryAuthorize(Plan, AuthorizationError))
 		{
 			AppendStage(History, EOperationLifecycleStage::Terminal);
-			OutReceipt = FOperationLifecycleReceipt(
-				Plan.GetPlanId(),
-				EOperationLifecycleStatus::Rejected,
-				TEXT("operation_impact_not_authorized"),
-				false,
-				true,
-				FString(),
-				MoveTemp(History));
+			OutReceipt = FOperationLifecycleReceipt(Plan.GetPlanId(),
+		EOperationLifecycleStatus::Rejected,
+		MoveTemp(AuthorizationError),
+		false,
+		true,
+		FString(),
+		MoveTemp(History));
 			return false;
 		}
 
 		AppendStage(History, EOperationLifecycleStage::PreExecuteFence);
 		bool bCurrent = false;
 		FOperationLifecycleError Error;
-		if (!VersionFence->Check(
+		const bool bPreExecuteChecked = VersionFence->Check(
 				Plan,
 				EOperationLifecycleStage::PreExecuteFence,
 				bCurrent,
-				Error)
-			|| !bCurrent)
+				Error);
+		if (!bPreExecuteChecked || !bCurrent)
 		{
 			AppendStage(History, EOperationLifecycleStage::Terminal);
 			OutReceipt = FOperationLifecycleReceipt(
 				Plan.GetPlanId(),
 				EOperationLifecycleStatus::Rejected,
-				ErrorCodeOr(Error, TEXT("operation_version_conflict")),
+				PhaseFailure(Error, TEXT("operation_version_conflict"),
+					!bPreExecuteChecked ? TEXT("The version check failed before execution without reporting a diagnostic.")
+						: TEXT("The operation's expected revisions are no longer current before execution."), EOperationLifecycleStage::PreExecuteFence),
 				false,
 				true,
 				FString(),
@@ -468,11 +570,22 @@ namespace UE::UAI::BindingGateway::Operation
 		{
 			if (!Facts.IsValid())
 			{
+				if (Facts.IsProvided())
+				{
+					const auto& Validation = Facts.GetValidationDiagnostic();
+					if (Error.IsEmpty()) Error = Validation;
+					else if (Error.Code != Validation.Code) Error.Append(Validation);
+					// An invalid supplied receipt cannot establish that execution made no changes.
+					AppendStage(History, EOperationLifecycleStage::Terminal);
+					OutReceipt = FOperationLifecycleReceipt(Plan.GetPlanId(), EOperationLifecycleStatus::StateUnknown,
+						MoveTemp(Error), false, false, FString(), MoveTemp(History));
+					return false;
+				}
 				AppendStage(History, EOperationLifecycleStage::Terminal);
 				OutReceipt = FOperationLifecycleReceipt(
 					Plan.GetPlanId(),
 					EOperationLifecycleStatus::Rejected,
-					ErrorCodeOr(Error, TEXT("operation_execute_failed_no_change")),
+					PhaseFailure(Error, TEXT("operation_execute_failed_no_change"), TEXT("The domain execution failed without reporting a diagnostic or mutation facts."), EOperationLifecycleStage::DomainExecute),
 					false,
 					true,
 					FString(),
@@ -482,21 +595,20 @@ namespace UE::UAI::BindingGateway::Operation
 			return Rollback(
 				Plan,
 				Facts,
-				ErrorCodeOr(Error, TEXT("operation_execute_failed")),
+				PhaseFailure(Error, TEXT("operation_execute_failed"), TEXT("The domain execution failed after reporting mutation facts, without providing a diagnostic."), EOperationLifecycleStage::DomainExecute),
 				MoveTemp(History),
 				OutReceipt);
 		}
 		if (!Facts.IsValid())
 		{
 			AppendStage(History, EOperationLifecycleStage::Terminal);
-			OutReceipt = FOperationLifecycleReceipt(
-				Plan.GetPlanId(),
-				EOperationLifecycleStatus::StateUnknown,
-				TEXT("operation_mutation_facts_missing"),
-				true,
-				false,
-				FString(),
-				MoveTemp(History));
+			OutReceipt = FOperationLifecycleReceipt(Plan.GetPlanId(),
+		EOperationLifecycleStatus::StateUnknown,
+		Facts.GetValidationDiagnostic(),
+		true,
+		false,
+		FString(),
+		MoveTemp(History));
 			return false;
 		}
 
@@ -507,7 +619,7 @@ namespace UE::UAI::BindingGateway::Operation
 			return Rollback(
 				Plan,
 				Facts,
-				ErrorCodeOr(Error, TEXT("operation_settle_failed")),
+				PhaseFailure(Error, TEXT("operation_settle_failed"), TEXT("The native stability stage failed without reporting a diagnostic."), EOperationLifecycleStage::Settle),
 				MoveTemp(History),
 				OutReceipt);
 		}
@@ -515,17 +627,19 @@ namespace UE::UAI::BindingGateway::Operation
 		AppendStage(History, EOperationLifecycleStage::PrePersistFence);
 		bCurrent = false;
 		Error = FOperationLifecycleError();
-		if (!VersionFence->Check(
+		const bool bPrePersistChecked = VersionFence->Check(
 				Plan,
 				EOperationLifecycleStage::PrePersistFence,
 				bCurrent,
-				Error)
-			|| !bCurrent)
+				Error);
+		if (!bPrePersistChecked || !bCurrent)
 		{
 			return Rollback(
 				Plan,
 				Facts,
-				ErrorCodeOr(Error, TEXT("operation_version_conflict")),
+				PhaseFailure(Error, TEXT("operation_version_conflict"),
+					!bPrePersistChecked ? TEXT("The version check failed before persistence without reporting a diagnostic.")
+						: TEXT("The operation's expected revisions are no longer current before persistence."), EOperationLifecycleStage::PrePersistFence),
 				MoveTemp(History),
 				OutReceipt);
 		}
@@ -533,17 +647,19 @@ namespace UE::UAI::BindingGateway::Operation
 		AppendStage(History, EOperationLifecycleStage::Persist);
 		FString PersistenceReceiptId;
 		Error = FOperationLifecycleError();
-		if (!Persistence->Persist(
+		const bool bPersisted = Persistence->Persist(
 				Plan,
 				Facts,
 				PersistenceReceiptId,
-				Error)
-			|| Normalize(PersistenceReceiptId).IsEmpty())
+				Error);
+		if (!bPersisted || Normalize(PersistenceReceiptId).IsEmpty())
 		{
 			return Rollback(
 				Plan,
 				Facts,
-				ErrorCodeOr(Error, TEXT("operation_persist_failed")),
+				PhaseFailure(Error, TEXT("operation_persist_failed"),
+					!bPersisted ? TEXT("The persistence provider failed without reporting a diagnostic.")
+						: TEXT("The persistence provider returned success without a nonempty receipt identifier."), EOperationLifecycleStage::Persist),
 				MoveTemp(History),
 				OutReceipt);
 		}
@@ -556,26 +672,36 @@ namespace UE::UAI::BindingGateway::Operation
 				Facts,
 				PersistenceReceiptId,
 				bEquivalent,
-				Error)
-			|| !bEquivalent)
+				Error))
 		{
 			return Rollback(
 				Plan,
 				Facts,
-				ErrorCodeOr(Error, TEXT("operation_readback_mismatch")),
+				PhaseFailure(Error, TEXT("operation_readback_mismatch"), TEXT("Independent readback failed without reporting a diagnostic."), EOperationLifecycleStage::IndependentVerify),
 				MoveTemp(History),
 				OutReceipt);
 		}
 
+		if (!bEquivalent)
+		{
+			auto Diagnostic = PhaseFailure(Error, TEXT("operation_readback_mismatch"),
+				TEXT("Independent readback completed but reported a non-equivalent result."), EOperationLifecycleStage::IndependentVerify);
+			if (Error.IsEmpty())
+			{
+				Diagnostic.PropertyPath = TEXT("equivalent");
+				Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			}
+			UeAgentAuthoringDiagnostics::ReportConsistencyWarning(Diagnostic);
+		}
 		AppendStage(History, EOperationLifecycleStage::Terminal);
-		OutReceipt = FOperationLifecycleReceipt(
-			Plan.GetPlanId(),
-			EOperationLifecycleStatus::Succeeded,
-			FString(),
-			true,
-			false,
-			MoveTemp(PersistenceReceiptId),
-			MoveTemp(History));
+		OutReceipt = FOperationLifecycleReceipt(Plan.GetPlanId(),
+		EOperationLifecycleStatus::Succeeded,
+		UE::UAI::Contract::FDiagnostic(),
+		true,
+		false,
+		MoveTemp(PersistenceReceiptId),
+		MoveTemp(History));
 		return true;
 	}
 }

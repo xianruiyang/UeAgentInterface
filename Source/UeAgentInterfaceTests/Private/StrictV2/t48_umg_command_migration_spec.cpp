@@ -35,7 +35,6 @@ bool FUeAgentStrictV2T48UmgCommandMigrationTest::RunTest(
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T48 owns exactly two non-HJSON commands"), ExpectedCommands().Num(), 2);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);

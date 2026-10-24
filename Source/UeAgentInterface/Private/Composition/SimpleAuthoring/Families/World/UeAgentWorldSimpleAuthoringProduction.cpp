@@ -1,10 +1,13 @@
 #include "Composition/SimpleAuthoring/Families/World/UeAgentWorldSimpleAuthoringProduction.h"
+#include "Core/Contract/UeAgentContractJson.h"
 
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Core/AssetDurable/UeAgentPersistedWorld.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "UObject/Class.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "Engine/Level.h"
 #include "Engine/LevelStreaming.h"
@@ -194,33 +197,63 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			return nullptr;
 		}
 
-		void SetError(
-			FUeAgentWorldSimpleAuthoringError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		FDiagnostic WorldFailure(const FString& Code, const FString& Reason, const FString& Field)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("simple_authoring"));
+			Error.Schema = TEXT("uai.runtime.diagnostic/1");
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			return Error;
 		}
 
-		void SetError(
-			FUeAgentSimpleAuthoringProductionError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		FDiagnostic JsonValueFailure(const FString& Path, const TSharedPtr<FJsonValue>& Actual, const FString& Expected)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			auto Error = WorldFailure(TEXT("world_simple_state_field_invalid"),
+				TEXT("The World state field does not satisfy the required value."), Path);
+			Error.ActualValuePresent = Actual.IsValid();
+			if (Actual.IsValid() && (Actual->Type == EJson::Array || Actual->Type == EJson::Object))
+			{
+				auto Summary = MakeShared<FJsonObject>();
+				Summary->SetStringField(TEXT("kind"), Actual->Type == EJson::Array ? TEXT("array") : TEXT("object"));
+				if (Actual->Type == EJson::Array) Summary->SetNumberField(TEXT("count"), Actual->AsArray().Num());
+				else if (Actual->AsObject().IsValid()) Summary->SetNumberField(TEXT("count"), Actual->AsObject()->Values.Num());
+				Error.ActualValue = MakeShared<FJsonValueObject>(Summary);
+			}
+			else Error.ActualValue = Actual;
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			return Error;
 		}
 
-		bool IsSupported(
-			const FUeAgentDescriptorIdentity& Identity)
+		FDiagnostic JsonFieldFailure(const TSharedPtr<FJsonObject>& Object, const FString& Field,
+			const FString& Expected, const FString& Path = FString())
 		{
-			return FindProfile(Identity) != nullptr;
+			return JsonValueFailure(Path.IsEmpty() ? Field : Path,
+				Object.IsValid() ? Object->Values.FindRef(Field) : nullptr, Expected);
 		}
+
+		FDiagnostic MissingProfile(const FUeAgentDescriptorIdentity& Identity)
+		{
+			auto Error = WorldFailure(TEXT("world_simple_authoring_profile_missing"),
+				TEXT("No World authoring profile is registered for the requested descriptor."), TEXT("descriptor_id"));
+			Error.CandidateName = Identity.GetDescriptorId();
+			Error.ActualValue = MakeShared<FJsonValueString>(Identity.GetDescriptorId());
+			TArray<TSharedPtr<FJsonValue>> Supported;
+			for (const auto& Profile : WorldProfiles) Supported.Add(MakeShared<FJsonValueString>(Profile.DescriptorId));
+			Error.ExpectedValue = MakeShared<FJsonValueArray>(Supported);
+			return Error;
+		}
+
+		FDiagnostic CountFailure(const FString& Code, const FString& Reason, const FString& Field, const int32 Actual, const int32 Expected)
+		{
+			auto Error = WorldFailure(Code, Reason, Field);
+			Error.ActualValue = MakeShared<FJsonValueNumber>(Actual);
+			Error.ExpectedValue = MakeShared<FJsonValueNumber>(Expected);
+			return Error;
+		}
+
+
+		
+
 
 		EUeAgentCandidateOperation CandidateOperation(
 			const EChangeIntent Intent)
@@ -285,24 +318,18 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			const FString Prefix(RequestEvidencePrefix);
 			if (!Evidence.StartsWith(Prefix))
 			{
-				OutError.Code =
-					TEXT(
-						"world_simple_state_scope_missing");
+				OutError = WorldFailure(TEXT("world_simple_state_scope_missing"),
+					TEXT("The World binding evidence has an unsupported format prefix."), TEXT("binding_evidence/prefix"));
 				OutError.SubjectId = Binding.GetBindingId();
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Evidence.Left(Prefix.Len()));
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Prefix);
 				return false;
 			}
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(
-					Evidence.RightChop(Prefix.Len()));
-			if (!FJsonSerializer::Deserialize(
-					Reader,
-					OutPayload)
-				|| !OutPayload.IsValid())
+			if (!Contract::Json::TryParseObject(Evidence.RightChop(Prefix.Len()), OutPayload, OutError))
 			{
-				OutError.Code =
-					TEXT(
-						"world_simple_state_scope_invalid");
-				OutError.SubjectId = Binding.GetBindingId();
+				OutError.SourceKind = TEXT("native_result");
+				if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = TEXT("binding_evidence");
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Binding.GetBindingId();
 				return false;
 			}
 			return true;
@@ -337,69 +364,84 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			const TSharedPtr<FJsonValue>& JsonValue,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FUeAgentStateSemanticError& OutError)
+			FUeAgentStateSemanticError& OutError,
+			const FString& Path = TEXT("state"))
 		{
 			OutValue.Reset();
 			if (!JsonValue.IsValid())
 			{
-				OutError.Code =
-					TEXT("world_simple_state_value_missing");
+				OutError = WorldFailure(TEXT("world_simple_state_value_missing"),
+					TEXT("The generated World state contains a missing JSON value."), Path);
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
 				return false;
 			}
+			const auto Complete = [&](const bool bSucceeded)
+			{
+				if (!bSucceeded)
+				{
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = OutError.PropertyPath.IsEmpty()
+						? Path : Path + (OutError.PropertyPath.StartsWith(TEXT("/")) ? OutError.PropertyPath : TEXT("/") + OutError.PropertyPath);
+				}
+				return bSucceeded;
+			};
 			switch (JsonValue->Type)
 			{
 			case EJson::Null:
-				return FUeAgentCanonicalValue::TryNull(
+				return Complete(FUeAgentCanonicalValue::TryNull(
 					Resources,
 					OutValue,
-					OutError);
+					OutError));
 			case EJson::Boolean:
-				return FUeAgentCanonicalValue::TryBoolean(
+				return Complete(FUeAgentCanonicalValue::TryBoolean(
 					JsonValue->AsBool(),
 					Resources,
 					OutValue,
-					OutError);
+					OutError));
 			case EJson::String:
-				return FUeAgentCanonicalValue::TryString(
+				return Complete(FUeAgentCanonicalValue::TryString(
 					JsonValue->AsString(),
 					Resources,
 					OutValue,
-					OutError);
+					OutError));
 			case EJson::Number:
-				return FUeAgentCanonicalValue::TryDecimal(
+				return Complete(FUeAgentCanonicalValue::TryDecimal(
 					FString::SanitizeFloat(
 						JsonValue->AsNumber()),
 					Resources,
 					OutValue,
-					OutError);
+					OutError));
 			case EJson::Array:
 				{
 					TArray<FUeAgentCanonicalValueRef> Items;
-					for (const TSharedPtr<FJsonValue>& Item
-						: JsonValue->AsArray())
+					const auto& Values = JsonValue->AsArray();
+					for (int32 Index = 0; Index < Values.Num(); ++Index)
 					{
 						FUeAgentCanonicalValuePtr CanonicalItem;
 						if (!TryCanonicalJsonValue(
-								Item,
+								Values[Index],
 								Resources,
 								CanonicalItem,
-								OutError))
+								OutError,
+								Path + TEXT("/") + FString::FromInt(Index)))
 						{
 							return false;
 						}
 						Items.Add(CanonicalItem.ToSharedRef());
 					}
-					return FUeAgentCanonicalValue::TryArray(
+					return Complete(FUeAgentCanonicalValue::TryArray(
 						Items,
 						Resources,
 						OutValue,
-						OutError);
+						OutError));
 				}
 			case EJson::Object:
 				{
-					TArray<TPair<
-						FString,
-						FUeAgentCanonicalValueRef>> Items;
+					TArray<
+						TPair<
+							FString,
+							FUeAgentCanonicalValueRef>> Items;
 					for (const TPair<
 						FString,
 						TSharedPtr<FJsonValue>>& Pair
@@ -410,7 +452,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 								Pair.Value,
 								Resources,
 								CanonicalItem,
-								OutError))
+								OutError,
+								Path + TEXT("/") + Pair.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"))))
 						{
 							return false;
 						}
@@ -418,15 +461,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 							Pair.Key,
 							CanonicalItem.ToSharedRef());
 					}
-					return FUeAgentCanonicalValue::TryObject(
+					return Complete(FUeAgentCanonicalValue::TryObject(
 						Items,
 						Resources,
 						OutValue,
-						OutError);
+						OutError));
 				}
 			default:
-				OutError.Code =
-					TEXT("world_simple_state_value_kind_invalid");
+				OutError = WorldFailure(TEXT("world_simple_state_value_kind_invalid"),
+					TEXT("The generated World state contains an unsupported JSON kind."), Path);
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(JsonValue->Type));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("null, boolean, string, number, array or object"));
 				return false;
 			}
 		}
@@ -462,23 +507,23 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					ResolvedObject,
 					ResolveError))
 			{
-				OutError.Code = ResolveError.GetCode().IsEmpty()
-					? TEXT(
-						"world_simple_state_reference_unresolved")
-					: ResolveError.GetCode();
-				OutError.SubjectId = Selector;
-				OutError.Detail = ResolveError.GetDetail();
+				OutError = ResolveError;
+				if (OutError.IsEmpty())
+					OutError = WorldFailure(TEXT("world_simple_state_reference_unresolved"),
+						TEXT("The World reference resolver failed without returning a diagnostic."), TEXT("reference"));
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Selector;
 				return false;
 			}
 			OutObject = Cast<TObject>(ResolvedObject);
 			if (!OutObject)
 			{
-				OutError.Code =
-					TEXT("world_simple_state_reference_type_invalid");
-				OutError.SubjectId = Selector;
-				OutError.Detail = ResolvedObject
-					? ResolvedObject->GetClass()->GetPathName()
-					: FString();
+				OutError = WorldFailure(TEXT("world_simple_state_reference_type_invalid"),
+					ResolvedObject ? TEXT("The resolved World reference has an incompatible object type.")
+						: TEXT("The World reference resolver returned no object."), TEXT("reference"));
+				OutError.TargetPath = Selector;
+				OutError.ActualValuePresent = ResolvedObject != nullptr;
+				if (ResolvedObject) OutError.ActualValue = MakeShared<FJsonValueString>(ResolvedObject->GetClass()->GetPathName());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TObject::StaticClass()->GetPathName());
 				return false;
 			}
 			return true;
@@ -530,7 +575,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			const AWorldSettings* WorldSettings = World.GetWorldSettings();
 			if (!WorldSettings)
 			{
-				OutError.Code = TEXT("world_simple_world_settings_missing");
+				OutError = WorldFailure(TEXT("world_simple_world_settings_missing"),
+					TEXT("The target world has no WorldSettings object."), TEXT("world_settings"));
+				OutError.TargetPath = World.GetOutermost()->GetName();
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
 				return false;
 			}
 			const FString GameModeClassRef = WorldSettings->DefaultGameMode
@@ -874,26 +923,33 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 
 		bool TryReadNumberArray(
 			const TSharedPtr<FJsonObject>& Object,
-			const TCHAR* Field,
+			const FString& Field,
 			const int32 ExpectedCount,
-			TArray<double>& OutValues)
+			TArray<double>& OutValues,
+			FDiagnostic& OutError,
+			const FString& ParentPath = FString())
 		{
 			OutValues.Reset();
+			const FString Path = ParentPath.IsEmpty() ? Field : ParentPath + TEXT("/") + Field;
 			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-			if (!Object.IsValid()
-				|| !Object->TryGetArrayField(Field, Values)
-				|| !Values
-				|| Values->Num() != ExpectedCount)
+			if (!Object.IsValid() || !Object->TryGetArrayField(Field, Values) || !Values)
 			{
+				OutError = JsonFieldFailure(Object, Field, TEXT("number array"), Path);
 				return false;
 			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			if (Values->Num() != ExpectedCount)
 			{
+				OutError = CountFailure(TEXT("world_simple_state_array_size_invalid"),
+					TEXT("The World state array has the wrong number of elements."), Path, Values->Num(), ExpectedCount);
+				return false;
+			}
+			for (int32 Index = 0; Index < Values->Num(); ++Index)
+			{
+				const TSharedPtr<FJsonValue>& Value = (*Values)[Index];
 				double Number = 0.0;
-				if (!Value.IsValid()
-					|| !Value->TryGetNumber(Number)
-					|| !FMath::IsFinite(Number))
+				if (!Value.IsValid() || !Value->TryGetNumber(Number) || !FMath::IsFinite(Number))
 				{
+					OutError = JsonValueFailure(Path + TEXT("/") + FString::FromInt(Index), Value, TEXT("finite number"));
 					return false;
 				}
 				OutValues.Add(Number);
@@ -905,7 +961,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			const TSharedPtr<FJsonObject>& Payload,
 			bool& bOutHasTransform,
 			FString& OutUnit,
-			FTransform& OutTransform)
+			FTransform& OutTransform,
+			FDiagnostic& OutError)
 		{
 			bOutHasTransform = false;
 			OutUnit = TEXT("centimeter");
@@ -917,30 +974,19 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					Placement)
 				|| !Placement)
 			{
-				return Payload.IsValid();
+				if (Payload.IsValid()) return true;
+				OutError = JsonValueFailure(TEXT("payload"), nullptr, TEXT("object"));
+				return false;
 			}
 			TArray<double> Translation;
 			TArray<double> Rotation;
 			TArray<double> Scale;
-			if (!TryReadNumberArray(
-					*Placement,
-					TEXT("translation"),
-					3,
-					Translation)
-				|| !TryReadNumberArray(
-					*Placement,
-					TEXT("rotation_quaternion_xyzw"),
-					4,
-					Rotation)
-				|| !TryReadNumberArray(
-					*Placement,
-					TEXT("scale"),
-					3,
-					Scale)
-				|| !(*Placement)->TryGetStringField(
-					TEXT("unit"),
-					OutUnit))
+			if (!TryReadNumberArray(*Placement, TEXT("translation"), 3, Translation, OutError, TEXT("placement"))
+				|| !TryReadNumberArray(*Placement, TEXT("rotation_quaternion_xyzw"), 4, Rotation, OutError, TEXT("placement"))
+				|| !TryReadNumberArray(*Placement, TEXT("scale"), 3, Scale, OutError, TEXT("placement"))) return false;
+			if (!(*Placement)->TryGetStringField(TEXT("unit"), OutUnit))
 			{
+				OutError = JsonFieldFailure(*Placement, TEXT("unit"), TEXT("string"), TEXT("placement/unit"));
 				return false;
 			}
 			const double UnitScale =
@@ -1053,55 +1099,44 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			{
 				FString ActorClassRef;
 				FString Label;
-				if (!Payload->TryGetStringField(
-						TEXT("actor_class_ref"),
-						ActorClassRef)
-					|| !Payload->TryGetStringField(
-						TEXT("label"),
-						Label)
-					|| Label.IsEmpty())
+				if (!Payload->TryGetStringField(TEXT("actor_class_ref"), ActorClassRef))
 				{
-					OutError.Code =
-						TEXT("world_simple_create_payload_invalid");
+					OutError = JsonFieldFailure(Payload, TEXT("actor_class_ref"), TEXT("string"));
+					return false;
+				}
+				if (!Payload->TryGetStringField(TEXT("label"), Label) || Label.IsEmpty())
+				{
+					OutError = JsonFieldFailure(Payload, TEXT("label"), TEXT("nonempty string"));
 					return false;
 				}
 				UClass* ActorClass = nullptr;
-				if (!TryResolveTypedReference(
-						ReferenceResolver,
-						World,
-						ActorClassRef,
-						ActorClass,
-						OutError)
-					|| !ActorClass->IsChildOf(AActor::StaticClass()))
+				if (!TryResolveTypedReference(ReferenceResolver, World, ActorClassRef, ActorClass, OutError)) return false;
+				if (!ActorClass->IsChildOf(AActor::StaticClass()))
 				{
-					if (OutError.Code.IsEmpty())
-					{
-						OutError.Code = TEXT(
-							"world_simple_create_reference_type_invalid");
-					}
+					OutError = WorldFailure(TEXT("world_simple_create_reference_type_invalid"),
+						TEXT("The requested actor class does not derive from Actor."), TEXT("actor_class_ref"));
+					OutError.TargetPath = ActorClassRef;
+					OutError.ActualValue = MakeShared<FJsonValueString>(ActorClass->GetPathName());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(AActor::StaticClass()->GetPathName());
 					return false;
 				}
 				bool bHasTransform = false;
 				FString Unit;
 				FTransform Transform;
-				if (!TryReadCreatePlacement(
-						Payload,
-						bHasTransform,
-						Unit,
-						Transform)
-					|| !bHasTransform)
+				if (!TryReadCreatePlacement(Payload, bHasTransform, Unit, Transform, OutError)) return false;
+				if (!bHasTransform)
 				{
-					OutError.Code =
-						TEXT("world_simple_create_placement_invalid");
+					OutError = JsonFieldFailure(Payload, TEXT("placement"), TEXT("placement object with translation, rotation_quaternion_xyzw, scale and unit"));
 					return false;
 				}
 				int32 MatchCount = 0;
 				FindActorByExactLabel(World, Label, MatchCount);
 				if (MatchCount > 0)
 				{
-					OutError.Code =
-						TEXT("world_simple_create_target_exists");
-					OutError.SubjectId = Label;
+					OutError = CountFailure(TEXT("world_simple_create_target_exists"),
+						TEXT("An actor with the requested label already exists."), TEXT("label"), MatchCount, 0);
+					OutError.CandidateName = Label;
+					OutError.TargetPath = World.GetOutermost()->GetName();
 					return false;
 				}
 				return true;
@@ -1116,8 +1151,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						Segment)
 					|| !Segment)
 				{
-					OutError.Code =
-						TEXT("world_simple_create_payload_invalid");
+					OutError = JsonFieldFailure(Payload, TEXT("segment_template"), TEXT("object"));
 					return false;
 				}
 				const FString ActorClassRef =
@@ -1128,29 +1162,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						TEXT("mesh_ref"));
 				UClass* ActorClass = nullptr;
 				UStaticMesh* Mesh = nullptr;
-				if (!TryResolveTypedReference(
-						ReferenceResolver,
-						World,
-						ActorClassRef,
-						ActorClass,
-						OutError)
-					|| !ActorClass->IsChildOf(
-						AActor::StaticClass())
-					|| !TryResolveTypedReference(
-						ReferenceResolver,
-						World,
-						MeshRef,
-						Mesh,
-						OutError))
+				if (!TryResolveTypedReference(ReferenceResolver, World, ActorClassRef, ActorClass, OutError)) return false;
+				if (!ActorClass->IsChildOf(AActor::StaticClass()))
 				{
-					if (OutError.Code.IsEmpty())
-					{
-						OutError.Code =
-							TEXT(
-								"world_simple_create_reference_type_invalid");
-					}
+					OutError = WorldFailure(TEXT("world_simple_create_reference_type_invalid"),
+						TEXT("The wall segment class does not derive from Actor."), TEXT("segment_template/actor_class_ref"));
+					OutError.TargetPath = ActorClassRef;
+					OutError.ActualValue = MakeShared<FJsonValueString>(ActorClass->GetPathName());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(AActor::StaticClass()->GetPathName());
 					return false;
 				}
+				if (!TryResolveTypedReference(ReferenceResolver, World, MeshRef, Mesh, OutError)) return false;
 				FString LabelPrefix = TEXT("WorldSimpleWall_");
 				(*Segment)->TryGetStringField(
 					TEXT("label_prefix"),
@@ -1168,10 +1190,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						MatchCount);
 					if (MatchCount > 0)
 					{
-						OutError.Code =
-							TEXT(
-								"world_simple_create_target_exists");
-						OutError.SubjectId = Label;
+						OutError = CountFailure(TEXT("world_simple_create_target_exists"),
+							TEXT("A wall segment actor with the generated label already exists."), TEXT("segment_template/label_prefix"), MatchCount, 0);
+						OutError.CandidateName = Label;
+						OutError.TargetPath = World.GetOutermost()->GetName();
 						return false;
 					}
 				}
@@ -1185,9 +1207,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					World.GetWorldDataLayers();
 				if (!WorldDataLayers)
 				{
-					OutError.Code =
-						TEXT(
-							"world_simple_world_data_layers_missing");
+					OutError = WorldFailure(TEXT("world_simple_world_data_layers_missing"),
+						TEXT("The target world has no WorldDataLayers object."), TEXT("world_data_layers"));
+					OutError.TargetPath = World.GetOutermost()->GetName();
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
 					return false;
 				}
 				FString ParentRef;
@@ -1225,10 +1249,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						.Num();
 					if (MatchCount > 0)
 					{
-						OutError.Code =
-							TEXT(
-								"world_simple_create_target_exists");
-						OutError.SubjectId = ShortName;
+						OutError = CountFailure(TEXT("world_simple_create_target_exists"),
+							TEXT("A private data layer with the requested name already exists."), TEXT("short_name"), MatchCount, 0);
+						OutError.CandidateName = ShortName;
+						OutError.TargetPath = World.GetOutermost()->GetName();
 						return false;
 					}
 					return true;
@@ -1247,9 +1271,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				}
 				if (WorldDataLayers->GetDataLayerInstance(Asset))
 				{
-					OutError.Code =
-						TEXT("world_simple_create_target_exists");
-					OutError.SubjectId = AssetRef;
+				OutError = WorldFailure(TEXT("world_simple_create_target_exists"),
+					TEXT("The world already has an instance for the requested data-layer asset."), TEXT("asset_ref"));
+				OutError.TargetPath = AssetRef;
+				OutError.ActualValuePresent = true;
+				OutError.ExpectedValuePresent = false;
 					return false;
 				}
 				return true;
@@ -1262,42 +1288,21 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					TEXT("streaming_class_ref"));
 			UWorld* LevelAsset = nullptr;
 			UClass* StreamingClass = nullptr;
-			if (!TryResolveTypedReference(
-					ReferenceResolver,
-					World,
-					LevelRef,
-					LevelAsset,
-					OutError)
-				|| !TryResolveTypedReference(
-					ReferenceResolver,
-					World,
-					ClassRef,
-					StreamingClass,
-					OutError)
-				|| !StreamingClass->IsChildOf(
-					ULevelStreaming::StaticClass()))
+			if (!TryResolveTypedReference(ReferenceResolver, World, LevelRef, LevelAsset, OutError)
+				|| !TryResolveTypedReference(ReferenceResolver, World, ClassRef, StreamingClass, OutError)) return false;
+			if (!StreamingClass->IsChildOf(ULevelStreaming::StaticClass()))
 			{
-				if (OutError.Code.IsEmpty())
-				{
-					OutError.Code =
-						TEXT(
-							"world_simple_create_reference_type_invalid");
-				}
+				OutError = WorldFailure(TEXT("world_simple_create_reference_type_invalid"),
+					TEXT("The requested streaming class does not derive from LevelStreaming."), TEXT("streaming_class_ref"));
+				OutError.TargetPath = ClassRef;
+				OutError.ActualValue = MakeShared<FJsonValueString>(StreamingClass->GetPathName());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(ULevelStreaming::StaticClass()->GetPathName());
 				return false;
 			}
 			bool bHasTransform = false;
 			FString Unit;
 			FTransform Transform;
-			if (!TryReadCreatePlacement(
-					Payload,
-					bHasTransform,
-					Unit,
-					Transform))
-			{
-				OutError.Code =
-					TEXT("world_simple_create_placement_invalid");
-				return false;
-			}
+			if (!TryReadCreatePlacement(Payload, bHasTransform, Unit, Transform, OutError)) return false;
 			int32 MatchCount = 0;
 			FindExactStreamingRelation(
 				World,
@@ -1307,10 +1312,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				MatchCount);
 			if (MatchCount > 0)
 			{
-				OutError.Code =
-					TEXT("world_simple_create_target_exists");
-				OutError.SubjectId =
-					LevelAsset->GetOutermost()->GetName();
+				OutError = CountFailure(TEXT("world_simple_create_target_exists"),
+					TEXT("A matching streaming relation already exists."), TEXT("level_asset_ref"), MatchCount, 0);
+				OutError.CandidateName = LevelRef;
+				OutError.TargetPath = World.GetOutermost()->GetName();
 				return false;
 			}
 			return true;
@@ -1330,9 +1335,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				Payload->GetStringField(TEXT("label"));
 			if (Selector != TEXT("actor-label:") + Label)
 			{
-				OutError.Code =
-					TEXT("world_simple_create_identity_invalid");
-				OutError.SubjectId = Selector;
+				OutError = WorldFailure(TEXT("world_simple_create_identity_invalid"),
+					TEXT("The actor readback selector differs from the requested label selector."), TEXT("selector"));
+				OutError.ActualValue = MakeShared<FJsonValueString>(Selector);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("actor-label:") + Label);
 				return false;
 			}
 			int32 MatchCount = 0;
@@ -1342,13 +1348,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				MatchCount);
 			if (!Actor || MatchCount != 1)
 			{
-				OutError.Code =
-					MatchCount > 1
-						? TEXT(
-							"world_simple_create_identity_ambiguous")
-						: TEXT(
-							"world_simple_created_target_unresolved");
-				OutError.SubjectId = Label;
+				OutError = CountFailure(MatchCount > 1 ? TEXT("world_simple_create_identity_ambiguous") : TEXT("world_simple_created_target_unresolved"),
+					TEXT("The created actor readback requires exactly one matching target."), TEXT("label"), MatchCount, 1);
+				OutError.CandidateName = Label;
+				OutError.TargetPath = World.GetOutermost()->GetName();
 				return false;
 			}
 			const FString ActorClassRef =
@@ -1366,15 +1369,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			bool bHasTransform = false;
 			FString Unit;
 			FTransform ExpectedTransform;
-			if (!TryReadCreatePlacement(
-					Payload,
-					bHasTransform,
-					Unit,
-					ExpectedTransform)
-				|| !bHasTransform)
+			if (!TryReadCreatePlacement(Payload, bHasTransform, Unit, ExpectedTransform, OutError)) return false;
+			if (!bHasTransform)
 			{
-				OutError.Code =
-					TEXT("world_simple_create_placement_invalid");
+				OutError = JsonFieldFailure(Payload, TEXT("placement"), TEXT("placement object with translation, rotation_quaternion_xyzw, scale and unit"));
 				return false;
 			}
 
@@ -1443,8 +1441,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					OutValue,
 					StateError))
 			{
-				OutError.Code = StateError.Code;
-				OutError.Detail = StateError.Detail;
+				OutError = StateError;
 				return false;
 			}
 			return true;
@@ -1474,10 +1471,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				|| SegmentIndex < 0
 				|| SegmentIndex >= 4)
 			{
-				OutError.Code =
-					TEXT(
-						"world_simple_create_identity_invalid");
-				OutError.SubjectId = Selector;
+				OutError = WorldFailure(TEXT("world_simple_create_identity_invalid"),
+					TEXT("The wall readback selector must end in a segment index from 0 to 3."), TEXT("selector"));
+				OutError.ActualValue = MakeShared<FJsonValueString>(Selector);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("colon followed by an integer from 0 to 3"));
 				return false;
 			}
 			const TSharedPtr<FJsonObject>* Segment = nullptr;
@@ -1486,8 +1483,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					Segment)
 				|| !Segment)
 			{
-				OutError.Code =
-					TEXT("world_simple_create_payload_invalid");
+				OutError = JsonFieldFailure(Payload, TEXT("segment_template"), TEXT("object"));
 				return false;
 			}
 			FString LabelPrefix = TEXT("WorldSimpleWall_");
@@ -1505,13 +1501,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				MatchCount);
 			if (!Actor || MatchCount != 1)
 			{
-				OutError.Code =
-					MatchCount > 1
-						? TEXT(
-							"world_simple_create_identity_ambiguous")
-						: TEXT(
-							"world_simple_created_target_unresolved");
-				OutError.SubjectId = Label;
+				OutError = CountFailure(MatchCount > 1 ? TEXT("world_simple_create_identity_ambiguous") : TEXT("world_simple_created_target_unresolved"),
+					TEXT("The created wall segment readback requires exactly one matching target."), TEXT("segment_template/label_prefix"), MatchCount, 1);
+				OutError.CandidateName = Label;
+				OutError.TargetPath = World.GetOutermost()->GetName();
 				return false;
 			}
 			const FString ActorClassRef =
@@ -1610,8 +1603,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					OutValue,
 					StateError))
 			{
-				OutError.Code = StateError.Code;
-				OutError.Detail = StateError.Detail;
+				OutError = StateError;
 				return false;
 			}
 			return true;
@@ -1630,9 +1622,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				World.GetWorldDataLayers();
 			if (!WorldDataLayers)
 			{
-				OutError.Code =
-					TEXT(
-						"world_simple_world_data_layers_missing");
+				OutError = WorldFailure(TEXT("world_simple_world_data_layers_missing"),
+					TEXT("The target world has no WorldDataLayers object."), TEXT("world_data_layers"));
+				OutError.TargetPath = World.GetOutermost()->GetName();
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
 				return false;
 			}
 			bool bPrivate = false;
@@ -1656,13 +1650,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				Instance = MatchCount == 1 ? Matches[0] : nullptr;
 				if (MatchCount != 1)
 				{
-					OutError.Code =
-						MatchCount > 1
-							? TEXT(
-								"world_simple_create_identity_ambiguous")
-							: TEXT(
-								"world_simple_created_target_unresolved");
-					OutError.SubjectId = ShortName;
+					OutError = CountFailure(MatchCount > 1 ? TEXT("world_simple_create_identity_ambiguous") : TEXT("world_simple_created_target_unresolved"),
+						TEXT("The created private data layer readback requires exactly one matching target."), TEXT("short_name"), MatchCount, 1);
+					OutError.CandidateName = ShortName;
+					OutError.TargetPath = World.GetOutermost()->GetName();
 					return false;
 				}
 			}
@@ -1684,10 +1675,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						ExpectedAsset));
 				if (!Instance)
 				{
-					OutError.Code =
-						TEXT(
-							"world_simple_created_target_unresolved");
-					OutError.SubjectId = AssetRef;
+					OutError = WorldFailure(TEXT("world_simple_created_target_unresolved"),
+						TEXT("The world has no data-layer instance for the created asset."), TEXT("asset_ref"));
+					OutError.TargetPath = AssetRef;
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
 					return false;
 				}
 			}
@@ -1783,8 +1775,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					OutValue,
 					StateError))
 			{
-				OutError.Code = StateError.Code;
-				OutError.Detail = StateError.Detail;
+				OutError = StateError;
 				return false;
 			}
 			return true;
@@ -1824,16 +1815,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			bool bHasTransform = false;
 			FString Unit;
 			FTransform ExpectedTransform;
-			if (!TryReadCreatePlacement(
-					Payload,
-					bHasTransform,
-					Unit,
-					ExpectedTransform))
-			{
-				OutError.Code =
-					TEXT("world_simple_create_placement_invalid");
-				return false;
-			}
+			if (!TryReadCreatePlacement(Payload, bHasTransform, Unit, ExpectedTransform, OutError)) return false;
 			int32 MatchCount = 0;
 			ULevelStreaming* Relation =
 				FindExactStreamingRelation(
@@ -1844,13 +1826,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					MatchCount);
 			if (!Relation || MatchCount != 1)
 			{
-				OutError.Code =
-					MatchCount > 1
-						? TEXT(
-							"world_simple_create_identity_ambiguous")
-						: TEXT(
-							"world_simple_created_target_unresolved");
-				OutError.SubjectId = LevelRef;
+				OutError = CountFailure(MatchCount > 1 ? TEXT("world_simple_create_identity_ambiguous") : TEXT("world_simple_created_target_unresolved"),
+					TEXT("The created streaming relation readback requires exactly one matching target."), TEXT("level_asset_ref"), MatchCount, 1);
+				OutError.CandidateName = LevelRef;
+				OutError.TargetPath = World.GetOutermost()->GetName();
 				return false;
 			}
 			const TSharedRef<FJsonObject> Value =
@@ -1915,8 +1894,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					OutValue,
 					StateError))
 			{
-				OutError.Code = StateError.Code;
-				OutError.Detail = StateError.Detail;
+				OutError = StateError;
 				return false;
 			}
 			return true;
@@ -2118,11 +2096,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			FExecutionMutationError Error;
 			if (!Catalog.TryEnumerate(Candidates, Error))
 			{
-				OutError.Code = Error.GetCode().IsEmpty()
-					? TEXT(
-						"world_simple_state_catalog_unavailable")
-					: Error.GetCode();
-				OutError.Detail = Error.GetDetail();
+				OutError = Error;
+				if (OutError.IsEmpty())
+					OutError = WorldFailure(TEXT("world_simple_state_catalog_unavailable"),
+						TEXT("The World catalog could not enumerate worlds and returned no diagnostic."), TEXT("world_catalog"));
 				return false;
 			}
 			for (const FUeAgentWorldSimpleEffectWorldCandidate& Candidate
@@ -2137,10 +2114,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				}
 				if (OutWorld)
 				{
-					OutError.Code =
-						TEXT("world_simple_state_world_ambiguous");
-					OutError.SubjectId =
-						Binding.GetBindingId();
+					OutError = CountFailure(TEXT("world_simple_state_world_ambiguous"),
+						TEXT("At least two worlds match the exact World binding; enumeration stopped at the second match."), TEXT("world"), 2, 1);
+					OutError.SubjectId = Binding.GetBindingId();
+					OutError.TargetPath = Binding.GetPublicRef();
 					OutWorld = nullptr;
 					return false;
 				}
@@ -2148,9 +2125,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			}
 			if (!OutWorld)
 			{
-				OutError.Code =
-					TEXT("world_simple_state_world_unresolved");
+				OutError = CountFailure(TEXT("world_simple_state_world_unresolved"),
+					TEXT("No world matches the exact World binding."), TEXT("world"), 0, 1);
 				OutError.SubjectId = Binding.GetBindingId();
+				OutError.TargetPath = Binding.GetPublicRef();
 				return false;
 			}
 			return true;
@@ -2183,55 +2161,33 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					OutError) override
 			{
 				OutTarget.Reset();
-				if (!IsSupported(
-						CanonicalRequest
-							.GetDescriptorIdentity()))
+				const FWorldProfileSpec* Profile = FindProfile(CanonicalRequest.GetDescriptorIdentity());
+				if (!Profile)
 				{
-					SetError(
-						OutError,
-						TEXT(
-							"world_simple_authoring_profile_missing"),
-						CanonicalRequest
-							.GetDescriptorIdentity()
-							.GetDescriptorId());
+					OutError = MissingProfile(CanonicalRequest.GetDescriptorIdentity());
 					return false;
 				}
 				UWorld* ResolvedWorld = nullptr;
 				FExecutionMutationError Error;
-				if (!WorldResolver->TryResolveWorld(
-						Context,
-						ResolvedWorld,
-						Error)
-					|| !ResolvedWorld
-					|| !ResolvedWorld->PersistentLevel)
+				const bool bResolved = WorldResolver->TryResolveWorld(Context, ResolvedWorld, Error);
+				if (!bResolved || !ResolvedWorld || !ResolvedWorld->PersistentLevel)
 				{
-					SetError(
-						OutError,
-						Error.GetCode().IsEmpty()
-							? TEXT(
-								"world_simple_target_unresolved")
-							: Error.GetCode(),
-						Context.GetWorldIdentity(),
-						Error.GetDetail());
+					OutError = Error;
+					if (OutError.IsEmpty())
+					{
+						OutError = WorldFailure(TEXT("world_simple_target_unresolved"),
+							!bResolved ? TEXT("The World resolver failed without returning a diagnostic.")
+								: !ResolvedWorld ? TEXT("The World resolver returned no world.")
+								: TEXT("The resolved world has no persistent level."),
+							!bResolved || !ResolvedWorld ? TEXT("world") : TEXT("world/persistent_level"));
+						OutError.ActualValuePresent = bResolved && ResolvedWorld && ResolvedWorld->PersistentLevel;
+						OutError.ExpectedValuePresent = true;
+					}
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Context.GetWorldIdentity();
 					return false;
 				}
 				const FUeAgentCanonicalIdentity Identity =
 					TargetIdentity(Context, CanonicalRequest);
-				const FWorldProfileSpec* Profile =
-					FindProfile(
-						CanonicalRequest
-							.GetDescriptorIdentity());
-				if (!Profile)
-				{
-					SetError(
-						OutError,
-						TEXT(
-							"world_simple_authoring_profile_missing"),
-						CanonicalRequest
-							.GetDescriptorIdentity()
-							.GetDescriptorId());
-					return false;
-				}
 				const FUeAgentCandidateBinding Binding(
 					TEXT("world-simple:")
 						+ CanonicalRequest.GetRequestId(),
@@ -2265,11 +2221,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				OutTarget.Emplace(Binding);
 				if (!OutTarget->IsValid())
 				{
-					SetError(
-						OutError,
-						TEXT(
-							"world_simple_target_binding_invalid"),
-						CanonicalRequest.GetRequestId());
+					OutError = *OutTarget->GetValidationDiagnostic();
 					OutTarget.Reset();
 					return false;
 				}
@@ -2325,43 +2277,37 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			{
 				OutSnapshot.Reset();
 				OutError = FUeAgentDiscoveryError();
-				if (!Request.IsValid()
-					|| Request.GetStatePlane() != RequiredPlane
-					|| !IsSupported(
-						Request.GetBinding()
-							.GetSummary()
-							.GetDescriptorIdentity()))
+				if (!Request.IsValid())
 				{
-					OutError.Code =
-						TEXT(
-							"world_simple_state_request_invalid");
-					OutError.SubjectId =
-						Request.GetBinding().GetBindingId();
+					OutError = *Request.GetBinding().GetValidationDiagnostic();
 					return false;
 				}
-				if (!Deadline.CanContinue()
-					|| Cancellation.IsCancelled())
+				if (Request.GetStatePlane() != RequiredPlane)
 				{
-					OutError.Code =
-						TEXT(
-							"world_simple_state_request_cancelled");
+					OutError = WorldFailure(TEXT("world_simple_state_request_invalid"),
+						TEXT("The World read port does not serve the requested state plane."), TEXT("state_plane"));
+					FString Actual = Contract::LexToString(Request.GetStatePlane());
+					if (Actual.IsEmpty()) Actual = FString::FromInt(static_cast<int32>(Request.GetStatePlane()));
+					OutError.ActualValue = MakeShared<FJsonValueString>(Actual);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Contract::LexToString(RequiredPlane));
+					OutError.TargetPath = Request.GetBinding().GetPublicRef();
+					return false;
+				}
+				const FWorldProfileSpec* Profile = FindProfile(Request.GetBinding().GetSummary().GetDescriptorIdentity());
+				if (!Profile)
+				{
+					OutError = MissingProfile(Request.GetBinding().GetSummary().GetDescriptorIdentity());
+					return false;
+				}
+				if (Cancellation.IsCancelled())
+				{
+					OutError = WorldFailure(TEXT("world_simple_state_request_cancelled"),
+						TEXT("The World state read was cancelled before resolving its target."), TEXT("cancellation"));
+					OutError.TargetPath = Request.GetBinding().GetPublicRef();
 					return false;
 				}
 				const FUeAgentCandidateBinding& Binding =
 					Request.GetBinding();
-				const FWorldProfileSpec* Profile =
-					FindProfile(
-						Binding.GetSummary()
-							.GetDescriptorIdentity());
-				if (!Profile)
-				{
-					OutError.Code =
-						TEXT(
-							"world_simple_state_profile_missing");
-					OutError.SubjectId =
-						Binding.GetBindingId();
-					return false;
-				}
 				TSharedPtr<FJsonObject> Payload;
 				if (!TryParseRequestEvidence(
 						Binding,
@@ -2389,8 +2335,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						DefaultValue,
 						StateError))
 				{
-					OutError.Code = StateError.Code;
-					OutError.Detail = StateError.Detail;
+					OutError = StateError;
 					return false;
 				}
 				const FUeAgentStateRevision Revision(
@@ -2496,12 +2441,14 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 								OutError);
 							break;
 						default:
-							OutError.Code =
-								TEXT(
-									"world_simple_create_reader_missing");
+							OutError = WorldFailure(TEXT("world_simple_create_reader_missing"),
+								TEXT("The World profile has no reader for its create mechanic."), TEXT("profile/mechanic"));
+							OutError.CandidateName = Profile->DescriptorId;
+							OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(Profile->Mechanic));
+							OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("ActorCreate, WallCreate, DataLayerCreate or StreamingRelationCreate"));
 							break;
 						}
-						if (!bRead || !CurrentValue.IsValid())
+						if (!bRead)
 						{
 							return false;
 						}
@@ -2520,8 +2467,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 							CurrentValue,
 							StateError))
 					{
-						OutError.Code = StateError.Code;
-						OutError.Detail = StateError.Detail;
+						OutError = StateError;
 						return false;
 					}
 					const FUeAgentCanonicalIdentity Identity =
@@ -2552,12 +2498,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						ResolvedWorld->GetWorldPartition();
 					if (!WorldPartition)
 					{
-						OutError.Code =
-							TEXT(
-								"world_simple_"
-								"world_partition_missing");
-						OutError.SubjectId =
-							ResolvedWorld->GetPathName();
+						OutError = WorldFailure(TEXT("world_simple_world_partition_missing"),
+							TEXT("The target world has no WorldPartition object."), TEXT("world_partition"));
+						OutError.TargetPath = ResolvedWorld->GetOutermost()->GetName();
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValuePresent = true;
 						return false;
 					}
 					FUeAgentCanonicalValuePtr CurrentValue;
@@ -2568,8 +2513,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 							CurrentValue,
 							StateError))
 					{
-						OutError.Code = StateError.Code;
-						OutError.Detail = StateError.Detail;
+						OutError = StateError;
 						return false;
 					}
 					const FUeAgentCanonicalIdentity Identity =
@@ -2610,40 +2554,23 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 							};
 					if (Selectors.IsEmpty())
 					{
-						OutError.Code =
-							TEXT(
-								"world_simple_state_scope_empty");
-						OutError.SubjectId =
-							Binding.GetBindingId();
+						const auto Raw = Payload->Values.FindRef(TEXT("target_refs"));
+						OutError = Raw.IsValid() && Raw->Type == EJson::Array && !Raw->AsArray().IsEmpty()
+							? JsonValueFailure(TEXT("target_refs/0"), Raw->AsArray()[0], TEXT("nonempty reference string; no usable selectors were read"))
+							: JsonFieldFailure(Payload, TEXT("target_refs"), TEXT("array containing at least one nonempty reference"));
+						OutError.TargetPath = Binding.GetPublicRef();
 						return false;
 					}
 					for (const FString& Selector : Selectors)
 					{
-						UObject* ResolvedObject = nullptr;
-						FExecutionMutationError ResolveError;
-						if (!ReferenceResolver
-								->TryResolveReference(
-									*ResolvedWorld,
-									Selector,
-									ResolvedObject,
-									ResolveError)
-							|| !Cast<AActor>(ResolvedObject))
+						AActor* ResolvedActor = nullptr;
+						if (!TryResolveTypedReference(*ReferenceResolver, *ResolvedWorld, Selector, ResolvedActor, OutError))
 						{
-							OutError.Code =
-								ResolveError.GetCode().IsEmpty()
-									? TEXT(
-										"world_simple_state_"
-										"reference_unresolved")
-									: ResolveError.GetCode();
-							OutError.SubjectId = Selector;
-							OutError.Detail =
-								ResolveError.GetDetail();
 							return false;
 						}
 						FUeAgentCanonicalValuePtr CurrentValue;
 						if (!TryMakeActorStreamingPolicyValue(
-								*CastChecked<AActor>(
-									ResolvedObject),
+								*ResolvedActor,
 								Selector,
 								Payload,
 								bAggregateTarget,
@@ -2651,8 +2578,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 								CurrentValue,
 								StateError))
 						{
-							OutError.Code = StateError.Code;
-							OutError.Detail = StateError.Detail;
+							OutError = StateError;
 							return false;
 						}
 						const FUeAgentCanonicalIdentity Identity =
@@ -2691,11 +2617,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 							};
 					if (Selectors.IsEmpty())
 					{
-						OutError.Code =
-							TEXT(
-								"world_simple_state_scope_empty");
-						OutError.SubjectId =
-							Binding.GetBindingId();
+						const auto Raw = Payload->Values.FindRef(TEXT("target_refs"));
+						OutError = Raw.IsValid() && Raw->Type == EJson::Array && !Raw->AsArray().IsEmpty()
+							? JsonValueFailure(TEXT("target_refs/0"), Raw->AsArray()[0], TEXT("nonempty reference string; no usable selectors were read"))
+							: JsonFieldFailure(Payload, TEXT("target_refs"), TEXT("array containing at least one nonempty reference"));
+						OutError.TargetPath = Binding.GetPublicRef();
 						return false;
 					}
 					for (const FString& Selector : Selectors)
@@ -2720,8 +2646,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 								CurrentValue,
 								StateError))
 						{
-							OutError.Code = StateError.Code;
-							OutError.Detail = StateError.Detail;
+							OutError = StateError;
 							return false;
 						}
 						AddStateEntry(
@@ -2755,11 +2680,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					}
 					if (Selectors.IsEmpty())
 					{
-						OutError.Code =
-							TEXT(
-								"world_simple_state_scope_empty");
-						OutError.SubjectId =
-							Binding.GetBindingId();
+						OutError = JsonFieldFailure(Payload, TEXT("target_ref"), TEXT("nonempty reference string"));
+						OutError.TargetPath = Binding.GetPublicRef();
 						return false;
 					}
 					for (const FString& Selector : Selectors)
@@ -2784,8 +2706,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 								CurrentValue,
 								StateError))
 						{
-							OutError.Code = StateError.Code;
-							OutError.Detail = StateError.Detail;
+							OutError = StateError;
 							return false;
 						}
 						AddStateEntry(
@@ -2813,11 +2734,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 							};
 					if (Selectors.IsEmpty())
 					{
-						OutError.Code =
-							TEXT(
-								"world_simple_state_scope_empty");
-						OutError.SubjectId =
-							Binding.GetBindingId();
+						const auto Raw = Payload->Values.FindRef(TEXT("subject_refs"));
+						OutError = Raw.IsValid() && Raw->Type == EJson::Array && !Raw->AsArray().IsEmpty()
+							? JsonValueFailure(TEXT("subject_refs/0"), Raw->AsArray()[0], TEXT("nonempty reference string; no usable selectors were read"))
+							: JsonFieldFailure(Payload, TEXT("subject_refs"), TEXT("array containing at least one nonempty reference"));
+						OutError.TargetPath = Binding.GetPublicRef();
 						return false;
 					}
 					for (const FString& Selector : Selectors)
@@ -2956,9 +2877,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 										Member->GetAsset();
 									if (!Asset)
 									{
-										OutError.Code = TEXT(
-											"world_simple_data_layer_asset_missing");
-										OutError.SubjectId = MemberRef;
+										OutError = WorldFailure(TEXT("world_simple_data_layer_asset_missing"),
+											TEXT("The referenced data-layer member has no asset."), TEXT("data_layer/asset"));
+										OutError.TargetPath = MemberRef;
+										OutError.ActualValuePresent = false;
+										OutError.ExpectedValuePresent = true;
 										return false;
 									}
 									Expected.Add(Asset->GetPathName());
@@ -3035,8 +2958,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 								CurrentValue,
 								StateError))
 						{
-							OutError.Code = StateError.Code;
-							OutError.Detail = StateError.Detail;
+							OutError = StateError;
 							return false;
 						}
 						AddStateEntry(
@@ -3049,11 +2971,15 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					|| Profile->Operation
 						!= EUeAgentCandidateOperation::Create)
 				{
-					OutError.Code =
-						TEXT(
-							"world_simple_profile_state_reader_missing");
-					OutError.SubjectId =
-						Profile->DescriptorId;
+					OutError = WorldFailure(TEXT("world_simple_profile_state_reader_missing"),
+						TEXT("The World profile has no state reader for this target and operation."), TEXT("profile"));
+					OutError.CandidateName = Profile->DescriptorId;
+					OutError.TargetPath = Binding.GetPublicRef();
+					auto Actual = MakeShared<FJsonObject>();
+					Actual->SetNumberField(TEXT("mechanic"), static_cast<int32>(Profile->Mechanic));
+					Actual->SetNumberField(TEXT("operation"), static_cast<int32>(Profile->Operation));
+					Actual->SetBoolField(TEXT("aggregate_target"), bAggregateTarget);
+					OutError.ActualValue = MakeShared<FJsonValueObject>(Actual);
 					return false;
 				}
 				FUeAgentCanonicalSnapshotPtr Snapshot;
@@ -3081,12 +3007,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						Snapshot,
 						StateError))
 				{
-					OutError.Code = StateError.Code;
-					OutError.Detail = StateError.Detail;
+					OutError = StateError;
 					return false;
 				}
 				OutSnapshot = MoveTemp(Snapshot);
-				return OutSnapshot.IsValid();
+				return true;
 			}
 
 		private:
@@ -3102,26 +3027,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			bool bRequireSourceInstance = true;
 		};
 
-		FString WorldPersistedErrorCode(const FString& SharedCode)
-		{
-			if (SharedCode == TEXT("persisted_world_artifact_invalid"))
-				return TEXT("world_simple_persisted_artifact_invalid");
-			if (SharedCode == TEXT("persisted_world_ambiguous"))
-				return TEXT("world_simple_persisted_world_ambiguous");
-			if (SharedCode == TEXT("persisted_world_map_missing"))
-				return TEXT("world_simple_persisted_world_missing");
-			if (SharedCode == TEXT("persisted_world_package_create_failed"))
-				return TEXT("world_simple_persisted_package_create_failed");
-			if (SharedCode == TEXT("persisted_world_load_failed"))
-				return TEXT("world_simple_persisted_world_load_failed");
-			if (SharedCode == TEXT("persisted_world_artifact_load_failed"))
-				return TEXT("world_simple_persisted_artifact_load_failed");
-			if (SharedCode == TEXT("persisted_world_cleanup_failed"))
-				return TEXT("world_simple_persisted_cleanup_failed");
-			return SharedCode.IsEmpty()
-				? FString(TEXT("world_simple_persisted_state_read_failed"))
-				: SharedCode;
-		}
 
 		class FPersistedWorldCatalog final
 			: public IUeAgentWorldSimpleEffectWorldCatalog
@@ -3144,13 +3049,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			{
 				OutCandidates.Reset();
 				OutError = FExecutionMutationError();
-				if (!World.IsValid()
-					|| !World->PersistentLevel
-					|| WorldIdentity.IsEmpty()
-					|| ContextRevision.IsEmpty())
+				if (!World.IsValid() || !World->PersistentLevel || WorldIdentity.IsEmpty() || ContextRevision.IsEmpty())
 				{
-					OutError = FExecutionMutationError(
-						TEXT("world_simple_persisted_catalog_invalid"));
+					const TCHAR* Field = !World.IsValid() ? TEXT("world") : !World->PersistentLevel
+						? TEXT("world/persistent_level") : WorldIdentity.IsEmpty() ? TEXT("world_identity") : TEXT("context_revision");
+					OutError = WorldFailure(TEXT("world_simple_persisted_catalog_invalid"),
+						FString::Printf(TEXT("The persisted World world catalog has no valid '%s'."), Field), Field);
+					if (!World.IsValid() || !World->PersistentLevel)
+					{
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValuePresent = true;
+					}
+					else
+					{
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(WorldIdentity.IsEmpty() ? WorldIdentity : ContextRevision);
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty identifier"));
+					}
 					return false;
 				}
 				OutCandidates.Emplace(
@@ -3160,7 +3074,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					EUeAgentExecutionWorldType::Preview,
 					TOptional<int32>(),
 					ContextRevision);
-				return OutCandidates.Last().IsValid();
+				return true;
 			}
 
 		private:
@@ -3210,12 +3124,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					return true;
 				}
 				OutObject = nullptr;
-				OutError = FExecutionMutationError(
-					ResolveError.GetCode().IsEmpty()
-						? FString(TEXT(
-							"world_simple_persisted_reference_unresolved"))
-						: ResolveError.GetCode(),
-					CanonicalRef);
+				OutError = ResolveError;
+				if (OutError.IsEmpty())
+					OutError = WorldFailure(TEXT("world_simple_persisted_reference_unresolved"),
+						TEXT("The persisted World reference resolver failed without returning a diagnostic."), TEXT("reference"));
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = CanonicalRef;
 				return false;
 			}
 
@@ -3254,15 +3167,29 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			{
 				OutSnapshot.Reset();
 				OutError = FVerificationError();
-				if (!Target.IsValid()
-					|| Artifacts.IsEmpty()
-					|| Target.GetBinding().GetReadPortId()
-						!= ReadPortId
-					|| !Deadline.CanContinue()
-					|| Cancellation.IsCancelled())
+				if (!Target.IsValid())
 				{
-					OutError = FVerificationError(
-						TEXT("world_simple_persisted_read_request_invalid"));
+					OutError = *Target.GetValidationDiagnostic();
+					return false;
+				}
+				if (Artifacts.IsEmpty())
+				{
+					OutError = CountFailure(TEXT("world_simple_persisted_read_request_invalid"),
+						TEXT("The World persisted-state read requires at least one durable artifact."), TEXT("artifacts"), 0, 1);
+					return false;
+				}
+				if (Target.GetBinding().GetReadPortId() != ReadPortId)
+				{
+					OutError = WorldFailure(TEXT("world_simple_persisted_read_request_invalid"),
+						TEXT("The World verification target uses a different persisted-state read port."), TEXT("read_port_id"));
+					OutError.ActualValue = MakeShared<FJsonValueString>(Target.GetBinding().GetReadPortId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(ReadPortId);
+					return false;
+				}
+				if (Cancellation.IsCancelled())
+				{
+					OutError = WorldFailure(TEXT("world_simple_persisted_read_request_invalid"),
+						TEXT("The World persisted-state read was cancelled before reading its evidence."), TEXT("cancellation"));
 					return false;
 				}
 
@@ -3274,11 +3201,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						const FPersistedWorldReferenceMap& ReferenceMap,
 						FPersistedWorldLoadError& ObserverError)
 					{
-						if (!Deadline.CanContinue()
-							|| Cancellation.IsCancelled())
+						if (Cancellation.IsCancelled())
 						{
-							ObserverError.Code =
-								TEXT("world_simple_persisted_read_cancelled");
+							ObserverError = WorldFailure(TEXT("world_simple_persisted_read_cancelled"),
+								TEXT("The persisted World read was cancelled after loading the snapshot world."), TEXT("cancellation"));
+							ObserverError.TargetPath = Target.GetBinding().GetPublicRef();
 							return false;
 						}
 
@@ -3333,25 +3260,27 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 								Snapshot,
 								ReadError))
 						{
-							ObserverError.Code = ReadError.Code.IsEmpty()
-								? TEXT("world_simple_persisted_state_read_failed")
-								: ReadError.Code;
-							ObserverError.Detail = ReadError.Detail;
+							ObserverError = ReadError;
+							if (ObserverError.IsEmpty())
+								ObserverError = WorldFailure(TEXT("world_simple_persisted_state_read_failed"),
+									TEXT("The persisted World state reader failed without returning a diagnostic."), TEXT("snapshot"));
+							if (ObserverError.TargetPath.IsEmpty()) ObserverError.TargetPath = SourceBinding.GetPublicRef();
 							return false;
 						}
-						return Snapshot.IsValid();
+						return true;
 					},
 					LoadError);
 				if (!bObserved)
 				{
-					OutError = FVerificationError(
-						WorldPersistedErrorCode(LoadError.Code),
-						LoadError.Detail);
+					OutError = LoadError;
+					if (OutError.IsEmpty())
+						OutError = WorldFailure(TEXT("world_simple_persisted_state_read_failed"),
+							TEXT("The persisted World observer failed without returning a diagnostic."), TEXT("persisted_world"));
 					return false;
 				}
 
 				OutSnapshot = MoveTemp(Snapshot);
-				return OutSnapshot.IsValid();
+				return true;
 			}
 
 		private:
@@ -3383,11 +3312,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						OutDraft,
 						Error))
 				{
-					SetError(
-						OutError,
-						Error.GetCode(),
-						CanonicalRequest.GetRequestId(),
-						Error.GetDetail());
+					OutError = Error;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = CanonicalRequest.GetRequestId();
 					return false;
 				}
 				return true;
@@ -3442,18 +3368,19 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						ResolvedTarget.GetBindingEvidence());
 					if (!OutTargets.Last().IsValid())
 					{
-						SetError(
-							OutError,
-							TEXT(
-								"world_simple_change_target_"
-								"invalid"),
-							Change.GetIdentity()
-								.GetCanonicalKey());
+						OutError = *OutTargets.Last().GetValidationDiagnostic();
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = OutTargets.Last().GetPublicRef();
 						OutTargets.Reset();
 						return false;
 					}
 				}
-				return !OutTargets.IsEmpty();
+				if (OutTargets.IsEmpty())
+				{
+					OutError = CountFailure(TEXT("world_simple_change_target_invalid"),
+						TEXT("At least one World change target is required."), TEXT("change_targets"), 0, 1);
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -3477,11 +3404,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					Plan->GetChangeSet().GetChanges();
 				if (Targets.Num() != Changes.Num())
 				{
-					SetError(
-						OutError,
-						TEXT(
-							"world_simple_change_targets_missing"),
-						Plan->GetRequestId());
+					OutError = CountFailure(TEXT("world_simple_change_targets_missing"),
+						TEXT("The number of World change targets differs from the planned changes."), TEXT("change_targets"), Targets.Num(), Changes.Num());
+					OutError.SubjectId = Plan->GetRequestId();
 					return false;
 				}
 				for (int32 Index = 0; Index < Changes.Num(); ++Index)
@@ -3501,25 +3426,32 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 							TEXT("object")),
 						TEXT(
 							"world-simple:typed-native-binding"));
-					if (Targets[Index].GetSummary()
-							.GetIdentity()
-							.GetCanonicalKey()
-							!= Change.GetIdentity()
-								.GetCanonicalKey()
-						|| !OutBindings.Last().IsValid())
+					if (Targets[Index].GetSummary().GetIdentity().GetCanonicalKey() != Change.GetIdentity().GetCanonicalKey())
 					{
-						SetError(
-							OutError,
-							TEXT(
-								"world_simple_mutation_"
-								"binding_invalid"),
-							Change.GetIdentity()
-								.GetCanonicalKey());
+						OutError = WorldFailure(TEXT("world_simple_mutation_binding_invalid"),
+							TEXT("The World mutation target identity differs from its planned change."),
+							FString::Printf(TEXT("targets/%d/identity"), Index));
+						OutError.TargetPath = Targets[Index].GetPublicRef();
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(Targets[Index].GetSummary().GetIdentity().GetCanonicalKey());
+						OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Change.GetIdentity().GetCanonicalKey());
+						OutBindings.Reset();
+						return false;
+					}
+					if (!OutBindings.Last().IsValid())
+					{
+						OutError = OutBindings.Last().GetValidationDiagnostic();
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Targets[Index].GetPublicRef();
 						OutBindings.Reset();
 						return false;
 					}
 				}
-				return !OutBindings.IsEmpty();
+				if (OutBindings.IsEmpty())
+				{
+					OutError = CountFailure(TEXT("world_simple_mutation_binding_invalid"),
+						TEXT("At least one World mutation binding is required."), TEXT("mutation_bindings"), 0, 1);
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -3539,14 +3471,20 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 				OutTargets.Reset();
 				const TArray<FPlannedChange>& Changes =
 					Plan->GetChangeSet().GetChanges();
-				if (Changes.IsEmpty()
-					|| Target.GetPublicRef().IsEmpty())
+				if (Changes.IsEmpty())
 				{
-					SetError(
-						OutError,
-						TEXT(
-							"world_simple_durable_target_missing"),
-						Target.GetBindingId());
+					OutError = CountFailure(TEXT("world_simple_durable_target_missing"),
+						TEXT("A World durable target requires at least one planned change."), TEXT("changes"), 0, 1);
+					OutError.SubjectId = Target.GetBindingId();
+					return false;
+				}
+				if (Target.GetPublicRef().IsEmpty())
+				{
+					OutError = WorldFailure(TEXT("world_simple_durable_target_missing"),
+						TEXT("The World durable target has an empty public reference."), TEXT("target_ref"));
+					OutError.ActualValue = MakeShared<FJsonValueString>(Target.GetPublicRef());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty package reference"));
+					OutError.SubjectId = Target.GetBindingId();
 					return false;
 				}
 				OutTargets.Emplace(
@@ -3555,7 +3493,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					EPackageHeaderKind::Map,
 					EAssetDurableIntent::Save,
 					ERollbackGrade::DurableBackup);
-				return OutTargets[0].IsValid();
+				if (!OutTargets[0].IsValid())
+				{
+					OutError = OutTargets[0].GetValidationDiagnostic();
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -3588,11 +3531,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						DefaultValue,
 						StateError))
 				{
-					SetError(
-						OutError,
-						StateError.Code,
-						Plan->GetRequestId(),
-						StateError.Detail);
+					OutError = StateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Plan->GetRequestId();
 					return false;
 				}
 				const FWorldProfileSpec* Profile =
@@ -3600,12 +3540,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						Plan->GetDescriptorIdentity());
 				if (!Profile)
 				{
-					SetError(
-						OutError,
-						TEXT(
-							"world_simple_expected_profile_missing"),
-						Plan->GetDescriptorIdentity()
-							.GetDescriptorId());
+					OutError = MissingProfile(Plan->GetDescriptorIdentity());
 					return false;
 				}
 				TArray<FString> ArtifactIds;
@@ -3629,23 +3564,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 							});
 					if (!ChangeTarget)
 					{
-						SetError(
-							OutError,
-							TEXT(
-								"world_simple_verification_"
-								"target_missing"),
-							Change.GetIdentity().GetCanonicalKey());
+						OutError = WorldFailure(TEXT("world_simple_verification_target_missing"),
+							TEXT("No resolved World target matches the planned change to verify."), TEXT("change_targets"));
+						OutError.TargetPath = ResolvedTarget.GetPublicRef();
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValuePresent = true;
+						OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Change.GetIdentity().GetCanonicalKey());
 						return false;
 					}
 					if (!Change.GetAfter().IsValid())
 					{
-						SetError(
-							OutError,
-							TEXT(
-								"world_simple_expected_"
-								"state_missing"),
-							Change.GetIdentity()
-								.GetCanonicalKey());
+						OutError = WorldFailure(TEXT("world_simple_expected_state_missing"),
+							TEXT("The planned World change has no after-state to verify."), TEXT("change/after"));
+						OutError.TargetPath = ChangeTarget->GetPublicRef();
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValuePresent = true;
+						OutError.SubjectId = Change.GetIdentity().GetCanonicalKey();
 						return false;
 					}
 					TArray<FUeAgentStateEntry> Entries;
@@ -3688,12 +3622,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 								Expected,
 								StateError))
 					{
-						SetError(
-							OutError,
-							StateError.Code,
-							Change.GetIdentity()
-								.GetCanonicalKey(),
-							StateError.Detail);
+						OutError = StateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Change.GetIdentity()
+								.GetCanonicalKey();
 						return false;
 					}
 					OutTargets.Emplace(
@@ -3705,16 +3636,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 						TArray<FString>());
 					if (!OutTargets.Last().IsValid())
 					{
-						SetError(
-							OutError,
-							TEXT(
-								"world_simple_verification_"
-								"target_invalid"),
-							Change.GetIdentity().GetCanonicalKey());
+						OutError = *OutTargets.Last().GetValidationDiagnostic();
 						return false;
 					}
 				}
-				return !OutTargets.IsEmpty();
+				if (OutTargets.IsEmpty())
+				{
+					OutError = CountFailure(TEXT("world_simple_verification_target_missing"),
+						TEXT("At least one World verification target is required."), TEXT("verification_targets"), 0, 1);
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -3722,21 +3654,32 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			const FUeAgentWorldSimpleAuthoringProviderConfig& Config,
 			FUeAgentWorldSimpleAuthoringError& OutError)
 		{
-			if (!Config.DescriptorRegistry.IsValid()
-				|| !Config.WorldCatalog.IsValid()
-				|| !Config.ReferenceResolver.IsValid()
-				|| !Config.DurableService.IsValid()
-				|| !Config.AbsenceOracle.IsValid()
-				|| !Config.ReferenceOracle.IsValid()
-				|| !Config.Projection.IsSet()
-				|| !Config.Projection->IsValid()
-				|| Config.OwnerLeaseId.IsEmpty()
-				|| Config.MaxQueueItems < 1)
+			const TCHAR* Missing = !Config.DescriptorRegistry.IsValid() ? TEXT("descriptor_registry")
+				: !Config.WorldCatalog.IsValid() ? TEXT("world_catalog")
+				: !Config.ReferenceResolver.IsValid() ? TEXT("reference_resolver")
+				: !Config.DurableService.IsValid() ? TEXT("durable_service")
+				: !Config.AbsenceOracle.IsValid() ? TEXT("absence_oracle")
+				: !Config.ReferenceOracle.IsValid() ? TEXT("reference_oracle")
+				: !Config.Projection.IsSet() ? TEXT("projection") : nullptr;
+			if (Missing)
 			{
-				SetError(
-					OutError,
-					TEXT(
-						"world_simple_authoring_dependencies_missing"));
+				OutError = WorldFailure(TEXT("world_simple_authoring_dependencies_missing"),
+					FString::Printf(TEXT("The World authoring provider has no '%s'."), Missing), Missing);
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
+				return false;
+			}
+			if (!Config.Projection->IsValid())
+			{
+				OutError = Config.Projection->GetValidationDiagnostic();
+				return false;
+			}
+			if (Config.OwnerLeaseId.IsEmpty())
+			{
+				OutError = WorldFailure(TEXT("world_simple_authoring_dependencies_missing"),
+					TEXT("The World authoring provider has an empty owner lease identifier."), TEXT("owner_lease_id"));
+				OutError.ActualValue = MakeShared<FJsonValueString>(TEXT(""));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty identifier"));
 				return false;
 			}
 			for (const FWorldProfileSpec& Profile : WorldProfiles)
@@ -3745,18 +3688,24 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 					Config.DescriptorRegistry
 						->FindByDescriptorId(
 							Profile.DescriptorId);
-				if (!Descriptor
-					|| Descriptor->GetCapabilityId()
-						!= Profile.CapabilityId
-					|| Descriptor->GetDomainId()
-						!= TEXT("world"))
+				if (!Descriptor)
 				{
-					SetError(
-						OutError,
-						TEXT(
-							"world_simple_authoring_"
-							"descriptor_missing"),
-						Profile.DescriptorId);
+					OutError = WorldFailure(TEXT("world_simple_authoring_descriptor_missing"),
+						TEXT("The required World operation descriptor is not registered."), TEXT("descriptor_id"));
+					OutError.CandidateName = Profile.DescriptorId;
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Profile.DescriptorId);
+					return false;
+				}
+				if (Descriptor->GetCapabilityId() != Profile.CapabilityId || Descriptor->GetDomainId() != TEXT("world"))
+				{
+					const bool bCapabilityMismatch = Descriptor->GetCapabilityId() != Profile.CapabilityId;
+					OutError = WorldFailure(TEXT("world_simple_authoring_descriptor_missing"),
+						TEXT("The registered World descriptor does not match its profile."),
+						bCapabilityMismatch ? TEXT("capability_id") : TEXT("domain_id"));
+					OutError.CandidateName = Profile.DescriptorId;
+					OutError.ActualValue = MakeShared<FJsonValueString>(bCapabilityMismatch ? Descriptor->GetCapabilityId() : Descriptor->GetDomainId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(bCapabilityMismatch ? Profile.CapabilityId : TEXT("world"));
 					return false;
 				}
 			}
@@ -3798,17 +3747,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 		if (!FUeAgentWorldSimpleEffectNativeHookFactory::TryCreate(
 				Config.ReferenceResolver.ToSharedRef(),
 				NativeHook,
-				NativeError)
-			|| !NativeHook.IsValid())
+				NativeError))
 		{
-			SetError(
-				OutError,
-				NativeError.GetCode().IsEmpty()
-					? TEXT(
-						"world_simple_native_hook_missing")
-					: NativeError.GetCode(),
-				TEXT("world"),
-				NativeError.GetDetail());
+			OutError = NativeError;
 			return false;
 		}
 
@@ -3820,7 +3761,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 			EUeAgentStatePlane::AuthoringMemory;
 		ProviderConfig.AtomicityMode =
 			EAtomicityMode::CompensatedSaga;
-		ProviderConfig.MaxQueueItems = Config.MaxQueueItems;
 		ProviderConfig.Projection = Config.Projection;
 		ProviderConfig.TargetResolver =
 			MakeShared<FWorldTargetResolver>(
@@ -3873,19 +3813,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::World
 		ProviderConfig.AbsenceOracle = Config.AbsenceOracle;
 		ProviderConfig.ReferenceOracle = Config.ReferenceOracle;
 
-		FUeAgentSimpleAuthoringProductionError Error;
-		if (!FUeAgentSimpleAuthoringProductionProvider::TryCreate(
-				ProviderConfig,
-				OutProvider,
-				Error))
-		{
-			SetError(
-				OutError,
-				Error.Code,
-				Error.SubjectId,
-				Error.Detail);
-			return false;
-		}
-		return OutProvider.IsValid();
+		return FUeAgentSimpleAuthoringProductionProvider::TryCreate(
+			ProviderConfig, OutProvider, OutError);
 	}
 }

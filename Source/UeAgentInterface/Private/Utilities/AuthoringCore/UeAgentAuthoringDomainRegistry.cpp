@@ -2,6 +2,9 @@
 
 #include "Utilities/AuthoringCore/UeAgentAuthoringDomainRegistry.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonValue.h"
+
 #include "Misc/ScopeRWLock.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticRegistry.h"
 #include "Utilities/AuthoringExport/UeAgentExportContract.h"
@@ -42,15 +45,112 @@ namespace UeAgentAuthoringDomainRegistry
 			Values = MoveTemp(Canonical);
 		}
 
-		bool StringMapsEqual(const TMap<FString, FString>& Left, const TMap<FString, FString>& Right)
+		using UE::UAI::Contract::FDiagnostic;
+
+		FString PointerToken(FString Value)
 		{
-			if (Left.Num() != Right.Num()) return false;
-			for (const TPair<FString, FString>& Pair : Left)
+			return Value.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		}
+
+		FDiagnostic RegistryFailure(const TCHAR* Code, const TCHAR* Reason, const FString& Name, const FString& Path)
+		{
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("authoring_domain_registry"));
+			Error.CandidateName = Name;
+			Error.PropertyPath = Path;
+			Error.SourceKind = TEXT("native_result");
+			return Error;
+		}
+
+		FDiagnostic InvalidValue(const TCHAR* Code, const TCHAR* Reason, const FString& Name,
+			const FString& Path, const FString& Expected, const FString& Actual)
+		{
+			auto Error = RegistryFailure(Code, Reason, Name, Path);
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			Error.ActualValue = MakeShared<FJsonValueString>(Actual);
+			return Error;
+		}
+
+		TSharedPtr<FJsonValue> ComparisonValue(const FString& Value) { return MakeShared<FJsonValueString>(Value); }
+		TSharedPtr<FJsonValue> ComparisonValue(int32 Value) { return MakeShared<FJsonValueNumber>(Value); }
+
+		template<typename T>
+		bool RegistrationValuesEqual(const T& Expected, const T& Actual, const FString& Path, FDiagnostic* Error)
+		{
+			if (Expected == Actual) return true;
+			if (Error)
 			{
-				const FString* Value = Right.Find(Pair.Key);
-				if (!Value || *Value != Pair.Value) return false;
+				Error->PropertyPath = Path;
+				Error->ExpectedValue = ComparisonValue(Expected);
+				Error->ActualValue = ComparisonValue(Actual);
+			}
+			return false;
+		}
+		bool RegistrationValuesEqual(const FCatalogBinding& Expected, const FCatalogBinding& Actual, const FString& Path, FDiagnostic* Error);
+		bool RegistrationValuesEqual(const FDomainRegistration& Expected, const FDomainRegistration& Actual, const FString& Path, FDiagnostic* Error);
+		template<typename T>
+		bool RegistrationValuesEqual(const TArray<T>& Expected, const TArray<T>& Actual, const FString& Path, FDiagnostic* Error)
+		{
+			if (!RegistrationValuesEqual(Expected.Num(), Actual.Num(), Path + TEXT("/count"), Error)) return false;
+			for (int32 Index = 0; Index < Expected.Num(); ++Index)
+				if (!RegistrationValuesEqual(Expected[Index], Actual[Index], Path + TEXT("/") + FString::FromInt(Index), Error)) return false;
+			return true;
+		}
+		bool RegistrationValuesEqual(const TMap<FString, FString>& Expected, const TMap<FString, FString>& Actual, const FString& Path, FDiagnostic* Error)
+		{
+			TArray<FString> Keys;
+			Expected.GetKeys(Keys);
+			for (const auto& Pair : Actual) Keys.AddUnique(Pair.Key);
+			Keys.Sort();
+			for (const FString& Key : Keys)
+			{
+				const auto* Left = Expected.Find(Key);
+				const auto* Right = Actual.Find(Key);
+				const FString FieldPath = Path + TEXT("/") + PointerToken(Key);
+				if (!Left || !Right)
+				{
+					if (Error)
+					{
+						Error->PropertyPath = FieldPath;
+						Error->ExpectedValuePresent = Left != nullptr;
+						Error->ActualValuePresent = Right != nullptr;
+						if (Left) Error->ExpectedValue = ComparisonValue(*Left);
+						if (Right) Error->ActualValue = ComparisonValue(*Right);
+					}
+					return false;
+				}
+				if (!RegistrationValuesEqual(*Left, *Right, FieldPath, Error)) return false;
 			}
 			return true;
+		}
+		bool RegistrationValuesEqual(const FCatalogBinding& Expected, const FCatalogBinding& Actual, const FString& Path, FDiagnostic* Error)
+		{
+			return RegistrationValuesEqual(Expected.Kind, Actual.Kind, Path + TEXT("/kind"), Error)
+				&& RegistrationValuesEqual(Expected.CatalogTypeAliases, Actual.CatalogTypeAliases, Path + TEXT("/catalog_type_aliases"), Error)
+				&& RegistrationValuesEqual(Expected.DomainId, Actual.DomainId, Path + TEXT("/domain_id"), Error)
+				&& RegistrationValuesEqual(Expected.WorkspaceContractId, Actual.WorkspaceContractId, Path + TEXT("/workspace_contract_id"), Error)
+				&& RegistrationValuesEqual(Expected.InputContractId, Actual.InputContractId, Path + TEXT("/input_contract_id"), Error)
+				&& RegistrationValuesEqual(Expected.UnitId, Actual.UnitId, Path + TEXT("/unit_id"), Error)
+				&& RegistrationValuesEqual(Expected.PathPattern, Actual.PathPattern, Path + TEXT("/path_pattern"), Error)
+				&& RegistrationValuesEqual(Expected.RelativePathTemplate, Actual.RelativePathTemplate, Path + TEXT("/relative_path_template"), Error)
+				&& RegistrationValuesEqual(Expected.ExactIdentityFields, Actual.ExactIdentityFields, Path + TEXT("/exact_identity_fields"), Error)
+				&& RegistrationValuesEqual(Expected.PointerTemplate, Actual.PointerTemplate, Path + TEXT("/pointer_template"), Error)
+				&& RegistrationValuesEqual(Expected.MergeMode, Actual.MergeMode, Path + TEXT("/merge_mode"), Error)
+				&& RegistrationValuesEqual(Expected.OperationMap, Actual.OperationMap, Path + TEXT("/operation_map"), Error)
+				&& RegistrationValuesEqual(Expected.SeedBindings, Actual.SeedBindings, Path + TEXT("/seed_bindings"), Error)
+				&& RegistrationValuesEqual(Expected.RequiredContext, Actual.RequiredContext, Path + TEXT("/required_context"), Error)
+				&& RegistrationValuesEqual(Expected.ContextBindings, Actual.ContextBindings, Path + TEXT("/context_bindings"), Error)
+				&& RegistrationValuesEqual(Expected.ContextValueAliases, Actual.ContextValueAliases, Path + TEXT("/context_value_aliases"), Error)
+				&& RegistrationValuesEqual(Expected.ConstantBindings, Actual.ConstantBindings, Path + TEXT("/constant_bindings"), Error)
+				&& RegistrationValuesEqual(Expected.RequiredSeedFields, Actual.RequiredSeedFields, Path + TEXT("/required_seed_fields"), Error)
+				&& RegistrationValuesEqual(Expected.OptionalSeedFields, Actual.OptionalSeedFields, Path + TEXT("/optional_seed_fields"), Error);
+		}
+		bool RegistrationValuesEqual(const FDomainRegistration& Expected, const FDomainRegistration& Actual, const FString& Path, FDiagnostic* Error)
+		{
+			return RegistrationValuesEqual(Expected.DomainId, Actual.DomainId, Path + TEXT("/domain_id"), Error)
+				&& RegistrationValuesEqual(Expected.WorkspaceContractIds, Actual.WorkspaceContractIds, Path + TEXT("/workspace_contract_ids"), Error)
+				&& RegistrationValuesEqual(Expected.InputContractIds, Actual.InputContractIds, Path + TEXT("/input_contract_ids"), Error)
+				&& RegistrationValuesEqual(Expected.ExportContractIds, Actual.ExportContractIds, Path + TEXT("/export_contract_ids"), Error)
+				&& RegistrationValuesEqual(Expected.CatalogBindings, Actual.CatalogBindings, Path + TEXT("/catalog_bindings"), Error);
 		}
 
 		FCatalogBinding Normalize(FCatalogBinding Binding, const FString& DomainId)
@@ -94,18 +194,18 @@ namespace UeAgentAuthoringDomainRegistry
 			return Registration;
 		}
 
-		bool Validate(const FDomainRegistration& Registration, FString& OutError)
+		bool Validate(const FDomainRegistration& Registration, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringSemanticRegistry::FDomainDescriptor SemanticDomain;
 			if (Registration.DomainId.IsEmpty())
 			{
-				OutError = TEXT("authoring_domain_id_missing");
+				OutError = InvalidValue(TEXT("authoring_domain_id_missing"), TEXT("The authoring domain identifier is empty."), Registration.DomainId, TEXT("/domain_id"), TEXT("nonempty domain identifier"), Registration.DomainId);
 				return false;
 			}
 			if (!UeAgentAuthoringSemanticRegistry::FRegistry::Get().FindDomain(
 				Registration.DomainId, SemanticDomain))
 			{
-				OutError = TEXT("authoring_semantic_domain_missing:") + Registration.DomainId;
+				OutError = InvalidValue(TEXT("authoring_semantic_domain_missing"), TEXT("The authoring domain has no registered semantic domain."), Registration.DomainId, TEXT("/domain_id"), TEXT("registered semantic domain"), Registration.DomainId);
 				return false;
 			}
 			for (const FString& ContractId : Registration.WorkspaceContractIds)
@@ -113,7 +213,7 @@ namespace UeAgentAuthoringDomainRegistry
 				UeAgentApplyWorkspaceContract::FContract Contract;
 				if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(ContractId, Contract))
 				{
-					OutError = TEXT("authoring_workspace_contract_missing:") + ContractId;
+					OutError = InvalidValue(TEXT("authoring_workspace_contract_missing"), TEXT("The domain references an unregistered workspace contract."), Registration.DomainId, TEXT("/workspace_contract_ids"), TEXT("registered workspace contract"), ContractId);
 					return false;
 				}
 			}
@@ -122,7 +222,7 @@ namespace UeAgentAuthoringDomainRegistry
 				UeAgentApplyInputContract::FContract Contract;
 				if (!UeAgentApplyInputContract::FRegistry::Get().FindContract(ContractId, Contract))
 				{
-					OutError = TEXT("authoring_input_contract_missing:") + ContractId;
+					OutError = InvalidValue(TEXT("authoring_input_contract_missing"), TEXT("The domain references an unregistered input contract."), Registration.DomainId, TEXT("/input_contract_ids"), TEXT("registered input contract"), ContractId);
 					return false;
 				}
 			}
@@ -131,44 +231,65 @@ namespace UeAgentAuthoringDomainRegistry
 				UeAgentExportContract::FContract Contract;
 				if (!UeAgentExportContract::FRegistry::Get().FindContract(ContractId, Contract))
 				{
-					OutError = TEXT("authoring_export_contract_missing:") + ContractId;
+					OutError = InvalidValue(TEXT("authoring_export_contract_missing"), TEXT("The domain references an unregistered export contract."), Registration.DomainId, TEXT("/export_contract_ids"), TEXT("registered export contract"), ContractId);
 					return false;
 				}
 			}
 			TSet<FString> LocalKinds;
 			for (const FCatalogBinding& Binding : Registration.CatalogBindings)
 			{
-				if (Binding.Kind.IsEmpty() || Binding.WorkspaceContractId.IsEmpty()
-					|| Binding.InputContractId.IsEmpty() || Binding.UnitId.IsEmpty()
-					|| Binding.PathPattern.IsEmpty() || Binding.RelativePathTemplate.IsEmpty()
-					|| Binding.ExactIdentityFields.IsEmpty() || !Binding.PointerTemplate.StartsWith(TEXT("/"))
-					|| Binding.MergeMode.IsEmpty())
+				const FString BindingPath = TEXT("/catalog_bindings/") + FString::FromInt(&Binding - Registration.CatalogBindings.GetData());
+				const auto RequireText = [&](const TCHAR* Field, const FString& Value)
 				{
-					OutError = TEXT("authoring_catalog_binding_invalid:") + Binding.Kind;
+					if (!Value.IsEmpty()) return true;
+					OutError = InvalidValue(TEXT("authoring_catalog_binding_invalid"), TEXT("A required catalog binding field is empty."), Binding.Kind, BindingPath + TEXT("/") + Field, TEXT("nonempty string"), Value);
+					return false;
+				};
+				if (!RequireText(TEXT("kind"), Binding.Kind) || !RequireText(TEXT("workspace_contract_id"), Binding.WorkspaceContractId)
+					|| !RequireText(TEXT("input_contract_id"), Binding.InputContractId) || !RequireText(TEXT("unit_id"), Binding.UnitId)
+					|| !RequireText(TEXT("path_pattern"), Binding.PathPattern) || !RequireText(TEXT("relative_path_template"), Binding.RelativePathTemplate)) return false;
+				if (Binding.ExactIdentityFields.IsEmpty())
+				{
+					OutError = RegistryFailure(TEXT("authoring_catalog_binding_invalid"), TEXT("A catalog binding requires at least one exact identity field."), Binding.Kind, BindingPath + TEXT("/exact_identity_fields/count"));
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least 1"));
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
 					return false;
 				}
+				if (!Binding.PointerTemplate.StartsWith(TEXT("/")))
+				{
+					OutError = InvalidValue(TEXT("authoring_catalog_binding_invalid"), TEXT("A catalog binding pointer template must start with '/'."), Binding.Kind, BindingPath + TEXT("/pointer_template"), TEXT("JSON pointer starting with /"), Binding.PointerTemplate);
+					return false;
+				}
+				if (!RequireText(TEXT("merge_mode"), Binding.MergeMode)) return false;
 				if (LocalKinds.Contains(Binding.Kind))
 				{
-					OutError = TEXT("authoring_catalog_binding_duplicate:") + Binding.Kind;
+					OutError = InvalidValue(TEXT("authoring_catalog_binding_duplicate"), TEXT("The domain declares the same catalog kind more than once."), Registration.DomainId, BindingPath + TEXT("/kind"), TEXT("unique catalog kind"), Binding.Kind);
 					return false;
 				}
 				LocalKinds.Add(Binding.Kind);
-				if (!Registration.WorkspaceContractIds.Contains(Binding.WorkspaceContractId)
-					|| !Registration.InputContractIds.Contains(Binding.InputContractId))
+				const auto RequireDomainContract = [&](const TCHAR* Field, const FString& Value, const TArray<FString>& Allowed)
 				{
-					OutError = TEXT("authoring_catalog_binding_contract_outside_domain:") + Binding.Kind;
+					if (Allowed.Contains(Value)) return true;
+					OutError = InvalidValue(TEXT("authoring_catalog_binding_contract_outside_domain"), TEXT("The catalog binding references a contract not declared by its domain."), Binding.Kind, BindingPath + TEXT("/") + Field, TEXT("contract declared by this domain"), Value);
+					TArray<TSharedPtr<FJsonValue>> Choices;
+					for (const FString& ContractId : Allowed) Choices.Add(MakeShared<FJsonValueString>(ContractId));
+					OutError.CandidateChoices = MakeShared<FJsonValueArray>(MoveTemp(Choices));
 					return false;
-				}
+				};
+				if (!RequireDomainContract(TEXT("workspace_contract_id"), Binding.WorkspaceContractId, Registration.WorkspaceContractIds)
+					|| !RequireDomainContract(TEXT("input_contract_id"), Binding.InputContractId, Registration.InputContractIds)) return false;
 				for (const FString& Field : Binding.RequiredSeedFields)
 				{
 					if (Binding.OptionalSeedFields.Contains(Field))
 					{
-						OutError = TEXT("authoring_catalog_seed_field_overlap:") + Binding.Kind + TEXT(":") + Field;
+						OutError = InvalidValue(TEXT("authoring_catalog_seed_field_overlap"), TEXT("A seed field is declared both required and optional."), Binding.Kind, BindingPath + TEXT("/required_seed_fields"), TEXT("disjoint required and optional fields"), Field);
 						return false;
 					}
 					if (!Binding.SeedBindings.Contains(Field))
 					{
-						OutError = TEXT("authoring_catalog_seed_binding_missing:") + Binding.Kind + TEXT(":") + Field;
+						OutError = RegistryFailure(TEXT("authoring_catalog_seed_binding_missing"), TEXT("A required seed field has no binding."), Binding.Kind, BindingPath + TEXT("/seed_bindings/") + PointerToken(Field));
+						OutError.ExpectedValuePresent = true;
+						OutError.ActualValuePresent = false;
 						return false;
 					}
 				}
@@ -176,7 +297,9 @@ namespace UeAgentAuthoringDomainRegistry
 				{
 					if (!Binding.SeedBindings.Contains(Field))
 					{
-						OutError = TEXT("authoring_catalog_seed_binding_missing:") + Binding.Kind + TEXT(":") + Field;
+						OutError = RegistryFailure(TEXT("authoring_catalog_seed_binding_missing"), TEXT("An optional seed field has no binding."), Binding.Kind, BindingPath + TEXT("/seed_bindings/") + PointerToken(Field));
+						OutError.ExpectedValuePresent = true;
+						OutError.ActualValuePresent = false;
 						return false;
 					}
 				}
@@ -184,7 +307,9 @@ namespace UeAgentAuthoringDomainRegistry
 				{
 					if (!Binding.ContextBindings.Contains(Field))
 					{
-						OutError = TEXT("authoring_catalog_context_binding_missing:") + Binding.Kind + TEXT(":") + Field;
+						OutError = RegistryFailure(TEXT("authoring_catalog_context_binding_missing"), TEXT("A required context field has no binding."), Binding.Kind, BindingPath + TEXT("/context_bindings/") + PointerToken(Field));
+						OutError.ExpectedValuePresent = true;
+						OutError.ActualValuePresent = false;
 						return false;
 					}
 				}
@@ -198,28 +323,12 @@ namespace UeAgentAuthoringDomainRegistry
 
 	bool FCatalogBinding::operator==(const FCatalogBinding& Other) const
 	{
-		return Kind == Other.Kind && CatalogTypeAliases == Other.CatalogTypeAliases && DomainId == Other.DomainId
-			&& WorkspaceContractId == Other.WorkspaceContractId
-			&& InputContractId == Other.InputContractId && UnitId == Other.UnitId
-			&& PathPattern == Other.PathPattern && RelativePathTemplate == Other.RelativePathTemplate
-			&& ExactIdentityFields == Other.ExactIdentityFields
-			&& PointerTemplate == Other.PointerTemplate && MergeMode == Other.MergeMode
-			&& StringMapsEqual(OperationMap, Other.OperationMap)
-			&& StringMapsEqual(SeedBindings, Other.SeedBindings) && RequiredContext == Other.RequiredContext
-			&& StringMapsEqual(ContextBindings, Other.ContextBindings)
-			&& StringMapsEqual(ContextValueAliases, Other.ContextValueAliases)
-			&& StringMapsEqual(ConstantBindings, Other.ConstantBindings)
-			&& RequiredSeedFields == Other.RequiredSeedFields
-			&& OptionalSeedFields == Other.OptionalSeedFields;
+		return RegistrationValuesEqual(*this, Other, FString(), nullptr);
 	}
 
 	bool FDomainRegistration::operator==(const FDomainRegistration& Other) const
 	{
-		return DomainId == Other.DomainId
-			&& WorkspaceContractIds == Other.WorkspaceContractIds
-			&& InputContractIds == Other.InputContractIds
-			&& ExportContractIds == Other.ExportContractIds
-			&& CatalogBindings == Other.CatalogBindings;
+		return RegistrationValuesEqual(*this, Other, FString(), nullptr);
 	}
 
 	FRegistry& FRegistry::Get()
@@ -231,7 +340,7 @@ namespace UeAgentAuthoringDomainRegistry
 	bool FRegistry::RegisterDomain(
 		const FDomainRegistration& Registration,
 		ERegistrationResult& OutResult,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const FDomainRegistration Canonical = Normalize(Registration);
 		if (!Validate(Canonical, OutError)) return false;
@@ -240,7 +349,8 @@ namespace UeAgentAuthoringDomainRegistry
 		{
 			if (*Existing != Canonical)
 			{
-				OutError = TEXT("conflicting_authoring_domain_registration:") + Canonical.DomainId;
+				OutError = RegistryFailure(TEXT("conflicting_authoring_domain_registration"), TEXT("The domain registration differs from the existing registration."), Canonical.DomainId, FString());
+				RegistrationValuesEqual(*Existing, Canonical, FString(), &OutError);
 				return false;
 			}
 			OutResult = ERegistrationResult::AlreadyRegistered;
@@ -252,27 +362,32 @@ namespace UeAgentAuthoringDomainRegistry
 		{
 			if (PendingCatalogNames.Contains(Binding.Kind))
 			{
-				OutError = TEXT("conflicting_authoring_catalog_name:") + Binding.Kind;
+				OutError = InvalidValue(TEXT("conflicting_authoring_catalog_name"), TEXT("The catalog kind conflicts with another kind or alias in this registration."), Canonical.DomainId, TEXT("/catalog_bindings/kind"), TEXT("unused catalog name"), Binding.Kind);
 				return false;
 			}
 			PendingCatalogNames.Add(Binding.Kind);
 			if (const FCatalogBinding* Existing = CatalogBindings.Find(Binding.Kind))
 			{
-				OutError = *Existing == Binding
-					? TEXT("authoring_catalog_binding_owned_by_another_root:") + Binding.Kind
-					: TEXT("conflicting_authoring_catalog_binding:") + Binding.Kind;
+				OutError = RegistryFailure(*Existing == Binding
+                    ? TEXT("authoring_catalog_binding_owned_by_another_root") : TEXT("conflicting_authoring_catalog_binding"),
+                    TEXT("The catalog kind already has an incompatible owner or binding."), Binding.Kind, TEXT("/catalog_bindings"));
+				if (RegistrationValuesEqual(*Existing, Binding, TEXT("/catalog_bindings"), &OutError))
+				{
+					OutError.ExpectedValuePresent = false;
+					OutError.ActualValuePresent = true;
+				}
 				return false;
 			}
 			if (CatalogAliases.Contains(Binding.Kind))
 			{
-				OutError = TEXT("authoring_catalog_kind_conflicts_with_alias:") + Binding.Kind;
+				OutError = InvalidValue(TEXT("authoring_catalog_kind_conflicts_with_alias"), TEXT("The catalog kind is already registered as an alias for another kind."), Binding.Kind, TEXT("/catalog_bindings/kind"), TEXT("unused catalog name"), CatalogAliases.FindChecked(Binding.Kind));
 				return false;
 			}
 			for (const FString& Alias : Binding.CatalogTypeAliases)
 			{
 				if (PendingCatalogNames.Contains(Alias) || CatalogBindings.Contains(Alias) || CatalogAliases.Contains(Alias))
 				{
-					OutError = TEXT("conflicting_authoring_catalog_alias:") + Alias;
+					OutError = InvalidValue(TEXT("conflicting_authoring_catalog_alias"), TEXT("The catalog alias conflicts with an existing kind or alias."), Binding.Kind, TEXT("/catalog_bindings/catalog_type_aliases"), TEXT("unused catalog alias"), Alias);
 					return false;
 				}
 				PendingCatalogNames.Add(Alias);
@@ -344,12 +459,12 @@ namespace UeAgentAuthoringDomainRegistry
 		return Result;
 	}
 
-	bool RegisterGeneratedDomain(const FString& DomainId, FString& OutError)
+	bool RegisterGeneratedDomain(const FString& DomainId, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FDomainRegistration Registration;
 		if (!BuildGeneratedDomainRegistration(NormalizeId(DomainId), Registration))
 		{
-			OutError = TEXT("generated_authoring_domain_missing:") + DomainId;
+			OutError = InvalidValue(TEXT("generated_authoring_domain_missing"), TEXT("No generated authoring registration exists for this domain."), DomainId, TEXT("/domain_id"), TEXT("generated authoring domain"), DomainId);
 			return false;
 		}
 		ERegistrationResult Result;

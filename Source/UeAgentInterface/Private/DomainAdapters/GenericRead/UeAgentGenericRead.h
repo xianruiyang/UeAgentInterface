@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "DomainAdapters/GenericRead/UeAgentGenericReadAdapter.h"
@@ -14,12 +16,7 @@ namespace UE::UAI::DomainAdapters::GenericRead
 		SpatialPoint,
 	};
 
-	struct FUeAgentGenericReadDiagnostic
-	{
-		FString Code;
-		FString Message;
-		FString SubjectId;
-	};
+	using FUeAgentGenericReadDiagnostic = UE::UAI::Contract::FDiagnostic;
 
 	struct FUeAgentGenericIdentity
 	{

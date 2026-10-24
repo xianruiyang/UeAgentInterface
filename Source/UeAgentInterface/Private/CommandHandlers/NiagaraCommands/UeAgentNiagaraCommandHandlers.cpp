@@ -18,16 +18,9 @@ namespace UE::UAI::CommandHandlers::NiagaraCommands
 			const FUeAgentCommandRequest& Request,
 			const FString& RequiredScope)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), TEXT("niagara_command_authority_required"));
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), RequiredScope + TEXT(" is required"));
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"),
+                UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_command_authority_required"), RequiredScope + TEXT(" is required"), TEXT("command_authority"), FString(), Request.GetCommandId()));
+        }
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -82,7 +75,7 @@ namespace UE::UAI::CommandHandlers::NiagaraCommands
 
 	bool TryCreateHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
@@ -92,18 +85,19 @@ namespace UE::UAI::CommandHandlers::NiagaraCommands
 			return false;
 		}
 		for (const FString& Id
-			: DomainAdapters::NiagaraCommands::GetCommandIds())
+			: DomainAdapters::NiagaraCommands::GetPublicCommandIds())
 		{
 			const TSharedRef<IUeAgentCommandHandler>* Match = Mechanics.Find(Id);
 			if (!Match)
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("niagara_command_mechanics_handler_missing:") + Id;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("niagara_command_mechanics_handler_missing"), TEXT("No mechanics handler is registered for this public command."), TEXT("handler_factory"), FString(), Id);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Id;
 				return false;
 			}
 			OutHandlers.Add(MakeShared<FHandler>(Id, *Match));
 		}
 		return OutHandlers.Num()
-			== DomainAdapters::NiagaraCommands::GetCommandIds().Num();
+			== DomainAdapters::NiagaraCommands::GetPublicCommandIds().Num();
 	}
 }

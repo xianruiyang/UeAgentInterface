@@ -7,49 +7,18 @@
     "query_ticket_binding",
     "cancel_before_query",
     "typed_error_propagation",
-    "typed_projection_error_propagation",
-    "query_payload_codec_conformance"
+    "typed_projection_error_propagation"
   ],
-  "resource_budget": {
-    "nodes": 100000,
-    "items": 100000,
-    "string_bytes": 1048576,
-    "work_units": 100000,
-    "estimated_memory_bytes": 8388608
-  },
   "projection": {
     "profile_id": "compact",
     "include_defaults": false,
     "include_details": false,
-    "include_provenance": false,
-    "max_items": 25,
-    "token_budget": 512
+    "include_provenance": false
   },
-  "payload_codec": {
-    "schema": "uai.c3q.query_payload.v1",
-    "catalog_search_request": {
-      "query_kind": "catalog_search",
-      "session": {
-        "server_session_id": "fixture-server-session-17",
-        "registry_epoch": 17,
-        "registry_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      },
-      "query": {
-        "catalog_kind": "fixture_asset",
-        "search_text": "Fixture",
-        "match_mode": "broad",
-        "materialization_policy": "index_only"
-      },
-      "projection": {
-        "profile_id": "compact",
-        "include_defaults": false,
-        "include_details": false,
-        "include_provenance": false,
-        "max_items": 25,
-        "continuation_token": "",
-        "token_budget": 512
-      }
-    }
+  "session": {
+    "server_session_id": "fixture-server-session-17",
+    "registry_epoch": 17,
+    "registry_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   },
   "catalog": {
     "catalog_id": "fixture-catalog",

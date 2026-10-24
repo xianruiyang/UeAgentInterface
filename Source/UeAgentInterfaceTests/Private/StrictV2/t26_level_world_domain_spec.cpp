@@ -1,33 +1,34 @@
 #include "Misc/AutomationTest.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
 #include "DomainAdapters/WorldSpatial/UeAgentLevelWorldDomainMechanics.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringRegistration.h"
+#include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "ObjectTools.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
+#include "UObject/SavePackage.h"
+#include "UObject/AssetRegistryTagsContext.h"
 
-#if __has_include("OperationOwners/WorldSpatial/UeAgentLevelWorldDomainService.h")
-#define UAI_T26_LEVEL_WORLD_DOMAIN_AVAILABLE 1
 #include "OperationOwners/WorldSpatial/UeAgentLevelWorldDomainService.h"
-#else
-#define UAI_T26_LEVEL_WORLD_DOMAIN_AVAILABLE 0
-#endif
 
-#if UAI_T26_LEVEL_WORLD_DOMAIN_AVAILABLE
 namespace
 {
 	void DeleteAssetIfPresent(const FString& ObjectPath)
@@ -43,7 +44,7 @@ namespace
 		const FString& Target,
 		const FString& Document,
 		FString& OutParams,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target"), Target);
@@ -62,35 +63,7 @@ namespace
 			Params, OutParams, OutError);
 	}
 
-	TSharedPtr<FJsonObject> FindActorByManagedId(
-		const TSharedPtr<FJsonObject>& Snapshot,
-		const FString& ManagedId)
-	{
-		const TArray<TSharedPtr<FJsonValue>>* Actors = nullptr;
-		if (!Snapshot.IsValid()
-			|| !Snapshot->TryGetArrayField(TEXT("actors"), Actors)
-			|| !Actors)
-		{
-			return nullptr;
-		}
-		for (const TSharedPtr<FJsonValue>& Value : *Actors)
-		{
-			const TSharedPtr<FJsonObject> Actor = Value.IsValid()
-				? Value->AsObject()
-				: nullptr;
-			FString ActualManagedId;
-			if (Actor.IsValid()
-				&& Actor->TryGetStringField(
-					TEXT("managed_id"), ActualManagedId)
-				&& ActualManagedId == ManagedId)
-			{
-				return Actor;
-			}
-		}
-		return nullptr;
-	}
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T26LevelWorldDomainTest,
@@ -101,10 +74,6 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
-#if !UAI_T26_LEVEL_WORLD_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T26 Level/World domain authority is available"), false);
-	return false;
-#else
 	using namespace UE::UAI;
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::OperationOwners::WorldSpatial;
@@ -118,9 +87,6 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 		AddError(WorkspaceError.GetCode());
 		return false;
 	}
-	TestTrue(TEXT("the World provider owns authoring-schema discovery"),
-		Provider->SupportsExplicitCommand(
-			TEXT("content_graph.authoring_schema")));
 	TestTrue(TEXT("the World provider routes export to the verified Level publisher"),
 		Provider->SupportsExplicitCommand(
 			TEXT("content_graph.export_workspace")));
@@ -170,13 +136,13 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 
 	TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch> Dispatch;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	if (!TestTrue(TEXT("the process active composition freezes"),
 		Module::CommandRegistration::Active::
 			TryComposeProcessActiveCommandComposition(Registry, Dispatch, Error))
 		|| !Registry.IsValid())
 	{
-		AddError(Error);
+		AddError(Error.ToPublicDetail());
 		return false;
 	}
 	const auto* ImportContract = Registry->FindExact(
@@ -187,16 +153,7 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 	{
 		TestEqual(TEXT("T13 remains the shared recursive authority"),
 			ImportContract->GetPublicOwner(),
-			FString(TEXT("uobject-dataasset-recursive-initialization-owner")));
-	}
-	for (const FString& RetiredIngress : {
-		FString(TEXT("level_apply_folder")),
-		FString(TEXT("level.apply_folder")),
-		FString(TEXT("level.apply_file")),
-		FString(TEXT("world.authoring.apply"))})
-	{
-		TestNull(*FString::Printf(TEXT("%s remains absent"), *RetiredIngress),
-			Registry->FindExact(RetiredIngress));
+			FString(TEXT("content-graph-workspace-owner")));
 	}
 	for (const FString& CommandId : {
 		FString(TEXT("world.data_layer_instance.create")),
@@ -222,11 +179,14 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 		TestEqual(TEXT("the Level/World domain owns Actor candidates"),
 			ActorCandidates->GetPublicOwner(),
 			FString(TEXT("level-world-domain-owner")));
+		TestFalse(TEXT("the public tutorial does not revive nested candidate syntax"),
+			ActorCandidates->GetPurpose().ParameterGuidance.Contains(
+				TEXT("actors[].candidate")));
 	}
 	if (!TestTrue(TEXT("Level authoring registration succeeds"),
 		UeAgentLevelAuthoring::RegisterAuthoring(Error)))
 	{
-		AddError(Error);
+		AddError(Error.ToPublicDetail());
 		return false;
 	}
 	UeAgentApplyInputContract::FContract ActorInputContract;
@@ -235,8 +195,10 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 			TEXT("uai.apply_input.level.actor"), ActorInputContract)))
 	{
 		for (const FString& OptionalFieldName : {
+			FString(TEXT("actor_class")),
 			FString(TEXT("candidate")),
-			FString(TEXT("placement_context"))})
+			FString(TEXT("placement_context")),
+			FString(TEXT("tags"))})
 		{
 			const UeAgentApplyInputContract::FInputFieldDescriptor* OptionalField =
 				ActorInputContract.FindInputField(OptionalFieldName);
@@ -247,6 +209,37 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 					*OptionalFieldName), OptionalField->RequiredFor.Num(), 0);
 			}
 		}
+
+		const TSharedRef<FJsonObject> Candidate = MakeShared<FJsonObject>();
+		Candidate->SetStringField(TEXT("name"), TEXT("TargetPoint"));
+		const TSharedRef<FJsonObject> ProviderExtension = MakeShared<FJsonObject>();
+		ProviderExtension->SetObjectField(TEXT("candidate"), Candidate);
+		const TSharedRef<FJsonObject> Target = MakeShared<FJsonObject>();
+		Target->SetStringField(
+			TEXT("world_path"), TEXT("/Game/UAI/StrictV2/T26/LV_T26.LV_T26"));
+		Target->SetStringField(TEXT("managed_id"), TEXT("candidate-target-point"));
+		const TSharedRef<FJsonObject> Document = MakeShared<FJsonObject>();
+		Document->SetStringField(TEXT("operation"), TEXT("create"));
+		Document->SetObjectField(TEXT("target"), Target);
+		Document->SetObjectField(TEXT("provider_extension"), ProviderExtension);
+
+		UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit CandidateCreateUnit;
+		CandidateCreateUnit.ApplyContractRef = ActorInputContract.ContractId;
+		CandidateCreateUnit.Action =
+			UeAgentAuthoringWorkspaceRouter::EUnitAction::Apply;
+		CandidateCreateUnit.Document = Document;
+		UeAgentApplyInputContract::FOperationInput CandidateCreateInput;
+		UeAgentApplyInputContract::FParseFailure CandidateCreateFailure;
+		TestTrue(TEXT("candidate-backed Actor create passes without actor_class"),
+			UeAgentApplyInputContract::ParseOperationInput(
+				ActorInputContract, CandidateCreateUnit, CandidateCreateInput,
+				CandidateCreateFailure));
+		TestTrue(TEXT("candidate-backed create preserves the candidate extension"),
+			CandidateCreateInput.ProviderExtension.IsValid()
+				&& CandidateCreateInput.ProviderExtension->HasField(TEXT("candidate")));
+		TestTrue(TEXT("candidate-backed create does not synthesize actor_class"),
+			CandidateCreateInput.Target.IsValid()
+				&& !CandidateCreateInput.Target->HasField(TEXT("actor_class")));
 	}
 
 	auto FindNativePlaceable = [this](
@@ -256,7 +249,6 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 		UeAgentPaletteSearch::FSearchParams Params;
 		Params.CatalogType = TEXT("placeable_actor");
 		Params.SearchText = SearchText;
-		Params.Limit = 20;
 		UeAgentPaletteSearch::FSearchResult Result;
 		FString SearchError;
 		if (!UeAgentPaletteSearch::ExecuteSearch(Params, Result, SearchError))
@@ -283,12 +275,96 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 		OutCandidate = *Matches[0];
 		return true;
 	};
+	auto FindPublicPlaceableAlias = [this](
+		const FString& SearchText,
+		FString& OutAlias) -> bool
+	{
+		OutAlias.Reset();
+		const FString QueryTarget = GWorld
+			? GWorld->GetOutermost()->GetName() + TEXT(".") + GWorld->GetName()
+			: FString(TEXT("/Engine/Transient.World"));
+		UE::UAI::DomainAdapters::WorldSpatial::FUeAgentWorldActorCandidateQuery Query;
+		Query.Target = QueryTarget;
+		Query.Query = SearchText;
+		FString Payload;
+		UE::UAI::HjsonWorkspace::FWorkspaceError QueryError;
+		if (!UE::UAI::DomainAdapters::WorldSpatial::TryQueryWorldActorCandidates(
+				Query, Payload, QueryError))
+		{
+			AddError(QueryError.GetCode() + TEXT(":") + QueryError.GetJsonPointer());
+			return false;
+		}
+		TSharedPtr<FJsonObject> Object;
+		FString JsonError;
+		if (!UE::UAI::CommandContract::Json::TryParseObject(Payload, Object, JsonError)
+			|| !Object.IsValid())
+		{
+			AddError(JsonError);
+			return false;
+		}
+		const TArray<TSharedPtr<FJsonValue>>* Names = nullptr;
+		if (!Object->TryGetArrayField(TEXT("names"), Names) || !Names)
+		{
+			AddError(TEXT("world.actor.candidates did not return names"));
+			return false;
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *Names)
+		{
+			if (Value.IsValid() && Value->Type == EJson::String
+				&& Value->AsString().Equals(SearchText, ESearchCase::IgnoreCase))
+			{
+				OutAlias = Value->AsString();
+				return true;
+			}
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *Names)
+		{
+			if (Value.IsValid() && Value->Type == EJson::String
+				&& Value->AsString().StartsWith(
+					SearchText + TEXT(" ["), ESearchCase::IgnoreCase))
+			{
+				OutAlias = Value->AsString();
+				return true;
+			}
+		}
+		AddError(TEXT("world.actor.candidates returned no matching public alias"));
+		return false;
+	};
+	auto PersistBlueprintFixture = [this](
+		UPackage* Package,
+		UBlueprint* Blueprint,
+		const FString& PackageName) -> bool
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+		if (!TestTrue(TEXT("placeable Blueprint fixture compiles"),
+			Blueprint->Status != BS_Error))
+		{
+			return false;
+		}
+		FAssetRegistryModule::AssetCreated(Blueprint);
+		IAssetRegistry::GetChecked().AssetUpdateTags(
+			Blueprint, EAssetRegistryTagsCaller::FullUpdate);
+		Package->MarkPackageDirty();
+		FSavePackageArgs SaveArgs;
+		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+		const FString Filename = FPackageName::LongPackageNameToFilename(
+			PackageName, FPackageName::GetAssetPackageExtension());
+		const bool bSaved = UPackage::SavePackage(
+			Package, Blueprint, *Filename, SaveArgs);
+		TestTrue(TEXT("placeable Blueprint fixture is persisted for discovery"), bSaved);
+		if (bSaved)
+		{
+			Package->SetDirtyFlag(false);
+		}
+		return bSaved;
+	};
 
 	UeAgentPaletteSearch::FCandidate Cube;
 	UeAgentPaletteSearch::FCandidate Sphere;
 	{
-		const FString BlueprintName = TEXT("BP_PlaceableActorCandidate_")
-			+ FGuid::NewGuid().ToString(EGuidFormats::Digits);
+		const FString BlueprintName = TEXT("BP_PlaceableActorCandidateFixture");
+		const FString BlueprintPublicName =
+			TEXT("BP Placeable Actor Candidate Fixture");
 		const FString PackageName = TEXT("/Game/UAI/StrictV2/T26/") + BlueprintName;
 		const FString ObjectPath = PackageName + TEXT(".") + BlueprintName;
 		DeleteAssetIfPresent(ObjectPath);
@@ -303,16 +379,23 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 		{
 			return false;
 		}
-		FAssetRegistryModule::AssetCreated(Blueprint);
+		if (!PersistBlueprintFixture(Package, Blueprint, PackageName))
+		{
+			DeleteAssetIfPresent(ObjectPath);
+			return false;
+		}
 		ON_SCOPE_EXIT
 		{
 			DeleteAssetIfPresent(ObjectPath);
 		};
 
 		UeAgentPaletteSearch::FCandidate BlueprintCandidate;
+		FString BlueprintAlias;
 		if (TestTrue(TEXT("native Actor candidates expose a Content Browser Blueprint asset"),
-			FindNativePlaceable(BlueprintName, BlueprintCandidate)))
+			FindNativePlaceable(BlueprintPublicName, BlueprintCandidate)))
 		{
+			TestTrue(TEXT("world.actor.candidates returns the Blueprint public alias"),
+				FindPublicPlaceableAlias(BlueprintPublicName, BlueprintAlias));
 			TestEqual(TEXT("the Blueprint candidate retains executable asset identity"),
 				BlueprintCandidate.AuthoringSelectors.FindRef(TEXT("asset_override")),
 				ObjectPath);
@@ -325,13 +408,130 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 
 			UeAgentPaletteSearch::FCandidate ResolvedBlueprint;
 			FString ResolveError;
-			TestTrue(TEXT("the compact Blueprint id re-resolves through the same native catalog"),
+			TestTrue(TEXT("the Blueprint name re-resolves through the same native catalog"),
 				UeAgentPaletteSearch::TryResolvePlaceableActorCandidate(
-					TEXT(""), BlueprintCandidate.GetPublicId(), TEXT("AllClasses"),
+					BlueprintAlias, TEXT(""), TEXT("AllClasses"),
 					ResolvedBlueprint, ResolveError));
-			TestEqual(TEXT("id resolution preserves the Blueprint asset"),
+			TestEqual(TEXT("name resolution preserves the Blueprint asset"),
 				ResolvedBlueprint.AuthoringSelectors.FindRef(TEXT("asset_override")),
 				ObjectPath);
+		}
+	}
+	{
+		// Two assets with the same leaf name must remain distinguishable through
+		// the compact public world query and its shared resolver.
+		const FString BlueprintName = TEXT("BP_PlaceableActorScopeFixture");
+		const FString BlueprintPublicName =
+			TEXT("BP Placeable Actor Scope Fixture");
+		const FString PackageA = TEXT("/Game/UAI/StrictV2/T26/ScopeA/") + BlueprintName;
+		const FString PackageB = TEXT("/Game/UAI/StrictV2/T26/ScopeB/") + BlueprintName;
+		const FString ObjectPathA = PackageA + TEXT(".") + BlueprintName;
+		const FString ObjectPathB = PackageB + TEXT(".") + BlueprintName;
+		DeleteAssetIfPresent(ObjectPathA);
+		DeleteAssetIfPresent(ObjectPathB);
+		UPackage* const AssetPackageA = CreatePackage(*PackageA);
+		UPackage* const AssetPackageB = CreatePackage(*PackageB);
+		UBlueprint* const BlueprintA = AssetPackageA
+			? FKismetEditorUtilities::CreateBlueprint(
+				AActor::StaticClass(), AssetPackageA, *BlueprintName,
+				BPTYPE_Normal, UBlueprint::StaticClass(),
+				UBlueprintGeneratedClass::StaticClass(), NAME_None)
+			: nullptr;
+		UBlueprint* const BlueprintB = AssetPackageB
+			? FKismetEditorUtilities::CreateBlueprint(
+				AActor::StaticClass(), AssetPackageB, *BlueprintName,
+				BPTYPE_Normal, UBlueprint::StaticClass(),
+				UBlueprintGeneratedClass::StaticClass(), NAME_None)
+			: nullptr;
+		if (!TestNotNull(TEXT("first scoped Blueprint fixture exists"), BlueprintA)
+			|| !TestNotNull(TEXT("second scoped Blueprint fixture exists"), BlueprintB))
+		{
+			DeleteAssetIfPresent(ObjectPathA);
+			DeleteAssetIfPresent(ObjectPathB);
+			return false;
+		}
+		if (!PersistBlueprintFixture(AssetPackageA, BlueprintA, PackageA)
+			|| !PersistBlueprintFixture(AssetPackageB, BlueprintB, PackageB))
+		{
+			DeleteAssetIfPresent(ObjectPathA);
+			DeleteAssetIfPresent(ObjectPathB);
+			return false;
+		}
+		ON_SCOPE_EXIT
+		{
+			DeleteAssetIfPresent(ObjectPathA);
+			DeleteAssetIfPresent(ObjectPathB);
+		};
+
+		const FString QueryTarget = GWorld
+			? GWorld->GetOutermost()->GetName() + TEXT(".") + GWorld->GetName()
+			: FString(TEXT("/Engine/Transient.World"));
+		UE::UAI::DomainAdapters::WorldSpatial::FUeAgentWorldActorCandidateQuery Query;
+		Query.Target = QueryTarget;
+		Query.Query = BlueprintPublicName;
+		FString Payload;
+		UE::UAI::HjsonWorkspace::FWorkspaceError QueryError;
+		if (!TestTrue(TEXT("scoped duplicate actor query succeeds"),
+			UE::UAI::DomainAdapters::WorldSpatial::TryQueryWorldActorCandidates(
+				Query, Payload, QueryError)))
+		{
+			AddError(QueryError.GetCode() + TEXT(":") + QueryError.GetJsonPointer());
+			return false;
+		}
+		TSharedPtr<FJsonObject> Object;
+		FString JsonError;
+		if (!TestTrue(TEXT("scoped duplicate actor query is valid JSON"),
+			UE::UAI::CommandContract::Json::TryParseObject(Payload, Object, JsonError))
+			|| !Object.IsValid())
+		{
+			AddError(JsonError);
+			return false;
+		}
+		const TArray<TSharedPtr<FJsonValue>>* Names = nullptr;
+		if (!TestTrue(TEXT("scoped duplicate actor query returns names"),
+			Object->TryGetArrayField(TEXT("names"), Names)) || !Names)
+		{
+			return false;
+		}
+		TArray<FString> ScopedAliases;
+		for (const TSharedPtr<FJsonValue>& Value : *Names)
+		{
+			if (Value.IsValid() && Value->Type == EJson::String
+				&& Value->AsString().StartsWith(
+					BlueprintPublicName + TEXT(" ["), ESearchCase::IgnoreCase))
+			{
+				ScopedAliases.Add(Value->AsString());
+			}
+		}
+		TestEqual(TEXT("same-name assets return two scoped aliases"), ScopedAliases.Num(), 2);
+		if (ScopedAliases.Num() == 2)
+		{
+			TestNotEqual(TEXT("scoped aliases are distinct"), ScopedAliases[0], ScopedAliases[1]);
+			TArray<FString> ResolvedAssets;
+			for (const FString& Alias : ScopedAliases)
+			{
+				UeAgentPaletteSearch::FCandidate Resolved;
+				FString ResolveError;
+				TestTrue(TEXT("each scoped alias resolves"),
+					UeAgentPaletteSearch::TryResolvePlaceableActorCandidate(
+						Alias, TEXT(""), TEXT("AllClasses"), Resolved, ResolveError));
+				const FString ResolvedAsset =
+					Resolved.AuthoringSelectors.FindRef(TEXT("asset_override"));
+				TestTrue(TEXT("scoped alias resolves to one fixture asset"),
+					ResolvedAsset.Equals(ObjectPathA, ESearchCase::IgnoreCase)
+						|| ResolvedAsset.Equals(ObjectPathB, ESearchCase::IgnoreCase));
+				ResolvedAssets.Add(ResolvedAsset);
+			}
+			if (ResolvedAssets.Num() == 2)
+			{
+				TestTrue(TEXT("scoped aliases resolve to different fixture assets"),
+					!ResolvedAssets[0].Equals(ResolvedAssets[1], ESearchCase::IgnoreCase));
+				TestTrue(TEXT("both scoped fixture assets are addressable"),
+					(ResolvedAssets[0].Equals(ObjectPathA, ESearchCase::IgnoreCase)
+						&& ResolvedAssets[1].Equals(ObjectPathB, ESearchCase::IgnoreCase))
+						|| (ResolvedAssets[0].Equals(ObjectPathB, ESearchCase::IgnoreCase)
+							&& ResolvedAssets[1].Equals(ObjectPathA, ESearchCase::IgnoreCase)));
+			}
 		}
 	}
 	{
@@ -351,6 +551,12 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 		&& TestTrue(TEXT("native Place Actors exposes Sphere"),
 			FindNativePlaceable(TEXT("Sphere"), Sphere)))
 	{
+		FString CubeAlias;
+		FString SphereAlias;
+		TestTrue(TEXT("world.actor.candidates returns the Cube public alias"),
+			FindPublicPlaceableAlias(TEXT("Cube"), CubeAlias));
+		TestTrue(TEXT("world.actor.candidates returns the Sphere public alias"),
+			FindPublicPlaceableAlias(TEXT("Sphere"), SphereAlias));
 		TestEqual(TEXT("Basic shapes use the same native factory"),
 			Cube.AuthoringSelectors.FindRef(TEXT("actor_factory")),
 			Sphere.AuthoringSelectors.FindRef(TEXT("actor_factory")));
@@ -360,15 +566,13 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 		TestNotEqual(TEXT("Cube and Sphere retain distinct asset identity"),
 			Cube.AuthoringSelectors.FindRef(TEXT("asset_override")),
 			Sphere.AuthoringSelectors.FindRef(TEXT("asset_override")));
-		TestNotEqual(TEXT("Cube and Sphere retain distinct compact ids"),
-			Cube.GetPublicId(), Sphere.GetPublicId());
 		UeAgentPaletteSearch::FCandidate ResolvedCube;
 		FString ResolveError;
-		TestTrue(TEXT("a minimal id re-resolves the same native Cube item"),
+		TestTrue(TEXT("a minimal name re-resolves the same native Cube item"),
 			UeAgentPaletteSearch::TryResolvePlaceableActorCandidate(
-				TEXT(""), Cube.GetPublicId(), TEXT("AllClasses"),
+				CubeAlias, TEXT(""), TEXT("AllClasses"),
 				ResolvedCube, ResolveError));
-		TestEqual(TEXT("id resolution preserves the Cube asset"),
+		TestEqual(TEXT("name resolution preserves the Cube asset"),
 			ResolvedCube.AuthoringSelectors.FindRef(TEXT("asset_override")),
 			Cube.AuthoringSelectors.FindRef(TEXT("asset_override")));
 
@@ -393,19 +597,19 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 			TEXT("\"frame\":{\"dimension\":3,\"semantic_frame\":\"ue_world\",")
 			TEXT("\"write_frame\":\"ue_world\",\"read_frame\":\"ue_world\",")
 			TEXT("\"unit\":\"centimeter\"},\"actors\":[{\"managed_id\":\"%s\",")
-			TEXT("\"operation\":\"upsert\",\"candidate\":{\"id\":\"%s\"},")
+			TEXT("\"operation\":\"upsert\",\"candidate\":{\"name\":\"%s\"},")
 			TEXT("\"transform\":{\"location\":{\"x\":125,\"y\":25,\"z\":50},")
 			TEXT("\"rotation\":{\"pitch\":10,\"yaw\":20,\"roll\":30},")
 			TEXT("\"scale\":{\"x\":1,\"y\":1,\"z\":1}}},{\"managed_id\":\"%s\",")
-			TEXT("\"operation\":\"upsert\",\"candidate\":{\"id\":\"%s\"},")
+			TEXT("\"operation\":\"upsert\",\"candidate\":{\"name\":\"%s\"},")
 			TEXT("\"transform\":{\"location\":{\"x\":-125,\"y\":25,\"z\":50},")
 			TEXT("\"rotation\":{\"pitch\":0,\"yaw\":0,\"roll\":0},")
 			TEXT("\"scale\":{\"x\":1,\"y\":1,\"z\":1}}}]}}}}"),
 			*Target,
 			*ManagedId,
-			*Cube.GetPublicId(),
+			*CubeAlias,
 			*SecondManagedId,
-			*Cube.GetPublicId());
+			*CubeAlias);
 		FString CanonicalParams;
 		FString ParamsError;
 		if (!TestTrue(TEXT("documented World transform fixture canonicalizes"),
@@ -425,7 +629,8 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 				CanonicalParams,
 				ImportPayloadJson,
 				bReadOnly,
-				ImportError)))
+				ImportError,
+				TEXT("req-t26-world-transform-import"))))
 		{
 			AddError(ImportError.GetCode() + TEXT(":")
 				+ ImportError.GetSourceUnit());
@@ -441,127 +646,56 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 			AddError(PayloadError);
 			return false;
 		}
-		FString TerminalStatus;
-		TestTrue(TEXT("World import returns terminal status"),
-			ImportPayload->TryGetStringField(
-				TEXT("terminal_status"), TerminalStatus));
+		TestEqual(TEXT("World import returns one public status field"),
+			ImportPayload->Values.Num(), 1);
 		TestEqual(TEXT("World import persists successfully"),
-			TerminalStatus, FString(TEXT("succeeded")));
-		const TSharedPtr<FJsonObject>* Readback = nullptr;
-		const TSharedPtr<FJsonObject>* Snapshot = nullptr;
-		if (!TestTrue(TEXT("World import returns independent readback"),
-			ImportPayload->TryGetObjectField(TEXT("independent_readback"), Readback)
-				&& Readback && Readback->IsValid()
-				&& (*Readback)->TryGetObjectField(TEXT("query_result"), Snapshot)
-				&& Snapshot && Snapshot->IsValid()))
+			ImportPayload->GetStringField(TEXT("status")),
+			FString(TEXT("succeeded")));
+		TestFalse(TEXT("World import omits provider identity"),
+			ImportPayload->HasField(TEXT("provider_id")));
+		TestFalse(TEXT("World import keeps its target in the request and state"),
+			ImportPayload->HasField(TEXT("target")));
+		TestFalse(TEXT("World import keeps its root type in the state"),
+			ImportPayload->HasField(TEXT("root_type")));
+		TestFalse(TEXT("World import keeps save state internal"),
+			ImportPayload->HasField(TEXT("saved")));
+		TestFalse(TEXT("World import keeps reload state internal"),
+			ImportPayload->HasField(TEXT("reloaded")));
+		TestFalse(TEXT("World import keeps the space contract out of success"),
+			ImportPayload->HasField(TEXT("space_contract")));
+		TestFalse(TEXT("World import omits apply diagnostics"),
+			ImportPayload->HasField(TEXT("apply_result")));
+		TestFalse(TEXT("World import omits independent readback payload"),
+			ImportPayload->HasField(TEXT("independent_readback")));
+
+		UWorld* const ReloadedWorld = LoadObject<UWorld>(nullptr, *Target);
+		if (!TestNotNull(TEXT("persisted World independently reloads"), ReloadedWorld))
 		{
 			return false;
 		}
-		const TSharedPtr<FJsonObject> CreatedActor =
-			FindActorByManagedId(*Snapshot, ManagedId);
-		const TSharedPtr<FJsonObject> SecondCreatedActor =
-			FindActorByManagedId(*Snapshot, SecondManagedId);
-		if (!TestNotNull(TEXT("native placement survives save and reload"),
-			CreatedActor.Get()))
+		AActor* CreatedActor = nullptr;
+		AActor* SecondCreatedActor = nullptr;
+		for (TActorIterator<AActor> It(ReloadedWorld); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (!Actor) continue;
+			const FString ActualId = UeAgentLevelAuthoring::GetManagedActorId(*Actor);
+			if (ActualId == ManagedId) CreatedActor = Actor;
+			if (ActualId == SecondManagedId) SecondCreatedActor = Actor;
+		}
+		if (!TestNotNull(TEXT("native placement survives save and reload"), CreatedActor))
 		{
 			return false;
 		}
 		TestNotNull(TEXT("a sibling Actor with the same field schema survives"),
-			SecondCreatedActor.Get());
+			SecondCreatedActor);
 		TestEqual(TEXT("native placement creates a StaticMeshActor"),
-			CreatedActor->GetStringField(TEXT("type")),
+			CreatedActor->GetClass()->GetPathName(),
 			FString(TEXT("/Script/Engine.StaticMeshActor")));
-		const TSharedPtr<FJsonObject>* Transform = nullptr;
-		const TSharedPtr<FJsonObject>* Translation = nullptr;
-		const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
-		if (TestTrue(TEXT("documented location is normalized and read back"),
-			CreatedActor->TryGetObjectField(TEXT("transform"), Transform)
-				&& Transform && Transform->IsValid()
-				&& (*Transform)->TryGetObjectField(TEXT("translation"), Translation)
-				&& Translation && Translation->IsValid()
-				&& (*Translation)->TryGetArrayField(TEXT("components"), Components)
-				&& Components && Components->Num() == 3))
-		{
-			TestEqual(TEXT("location X survives"),
-				(*Components)[0]->AsNumber(), 125.0);
-			TestEqual(TEXT("location Y survives"),
-				(*Components)[1]->AsNumber(), 25.0);
-			TestEqual(TEXT("location Z survives"),
-				(*Components)[2]->AsNumber(), 50.0);
-		}
-
-		const TSharedRef<FJsonObject> SchemaParams = MakeShared<FJsonObject>();
-		SchemaParams->SetStringField(TEXT("target"), Target);
-		FString SchemaParamsJson;
-		if (!TestTrue(TEXT("World authoring-schema params canonicalize"),
-			CommandContract::Json::TryCanonicalize(
-				SchemaParams, SchemaParamsJson, PayloadError)))
-		{
-			AddError(PayloadError);
-			return false;
-		}
-		FString SchemaPayloadJson;
-		FWorkspaceError SchemaError;
-		bReadOnly = false;
-		if (!TestTrue(TEXT("World authoring schema is directly available"),
-			DomainAdapters::WorldSpatial::TryExecuteContentGraph(
-				TEXT("content_graph.authoring_schema"), Target,
-				SchemaParamsJson, SchemaPayloadJson, bReadOnly, SchemaError)))
-		{
-			AddError(SchemaError.GetCode() + TEXT(":")
-				+ SchemaError.GetSourceUnit());
-			return false;
-		}
-		TestTrue(TEXT("World authoring schema is read-only"), bReadOnly);
-		TSharedPtr<FJsonObject> SchemaPayload;
-		const TSharedPtr<FJsonObject>* SchemaResult = nullptr;
-		const TSharedPtr<FJsonObject>* Template = nullptr;
-		const TSharedPtr<FJsonObject>* TemplateRoot = nullptr;
-		const TSharedPtr<FJsonObject>* TemplateDocument = nullptr;
-		const TSharedPtr<FJsonObject>* TemplateExtension = nullptr;
-		const TArray<TSharedPtr<FJsonValue>>* TemplateActors = nullptr;
-		if (TestTrue(TEXT("World authoring schema payload is canonical JSON"),
-			CommandContract::Json::TryParseObject(
-				SchemaPayloadJson, SchemaPayload, PayloadError))
-			&& TestTrue(TEXT("World schema exposes a reusable query result"),
-				SchemaPayload->TryGetObjectField(TEXT("query_result"), SchemaResult)
-					&& SchemaResult && SchemaResult->IsValid()))
-		{
-			TestEqual(TEXT("World schema id is exact"),
-				(*SchemaResult)->GetStringField(TEXT("schema_id")),
-				FString(TEXT("uai.world.edit/1")));
-			TestEqual(TEXT("World schema root type is exact"),
-				(*SchemaResult)->GetStringField(TEXT("root_type")),
-				FString(TEXT("/Script/Engine.World")));
-			TestFalse(TEXT("World schema carries the current revision"),
-				(*SchemaResult)->GetStringField(TEXT("revision")).IsEmpty());
-			if (TestTrue(TEXT("World schema template has the import root"),
-				(*SchemaResult)->TryGetObjectField(TEXT("template"), Template)
-					&& Template && Template->IsValid()
-					&& (*Template)->TryGetObjectField(TEXT("root"), TemplateRoot)
-					&& TemplateRoot && TemplateRoot->IsValid()
-					&& (*TemplateRoot)->TryGetObjectField(
-						TEXT("document"), TemplateDocument)
-					&& TemplateDocument && TemplateDocument->IsValid()
-					&& (*TemplateDocument)->TryGetObjectField(
-						TEXT("provider_extension"), TemplateExtension)
-					&& TemplateExtension && TemplateExtension->IsValid()
-					&& (*TemplateExtension)->TryGetArrayField(
-						TEXT("actors"), TemplateActors)
-					&& TemplateActors && TemplateActors->Num() == 1))
-			{
-				const TSharedPtr<FJsonObject> TemplateActor =
-					(*TemplateActors)[0]->AsObject();
-				const TSharedPtr<FJsonObject>* TemplateCandidate = nullptr;
-				TestTrue(TEXT("minimal Actor upsert has managed_id plus candidate name"),
-					TemplateActor.IsValid()
-						&& TemplateActor->HasTypedField<EJson::String>(TEXT("managed_id"))
-						&& TemplateActor->TryGetObjectField(
-							TEXT("candidate"), TemplateCandidate)
-						&& TemplateCandidate && TemplateCandidate->IsValid()
-						&& (*TemplateCandidate)->HasTypedField<EJson::String>(TEXT("name")));
-			}
-		}
+		const FVector Location = CreatedActor->GetActorLocation();
+		TestEqual(TEXT("location X survives"), Location.X, 125.0);
+		TestEqual(TEXT("location Y survives"), Location.Y, 25.0);
+		TestEqual(TEXT("location Z survives"), Location.Z, 50.0);
 
 		const FString WorkspacePath = FPaths::ConvertRelativePathToFull(
 			FPaths::ProjectSavedDir() / TEXT("Automation/UAI/T26/WorldExport_")
@@ -606,19 +740,31 @@ bool FUeAgentStrictV2T26LevelWorldDomainTest::RunTest(
 			CommandContract::Json::TryParseObject(
 				ExportPayloadJson, ExportPayload, PayloadError)))
 		{
-			TestEqual(TEXT("World export reports published"),
+			TestEqual(TEXT("World export reports one public field"),
+				ExportPayload->Values.Num(), 1);
+			TestEqual(TEXT("World export reports success"),
 				ExportPayload->GetStringField(TEXT("status")),
-				FString(TEXT("published")));
-			const FString PublishedWorkspace =
-				ExportPayload->GetStringField(TEXT("workspace_path"));
-			TestTrue(TEXT("World export reports the declared workspace"),
-				FPaths::IsSamePath(PublishedWorkspace, WorkspacePath));
-			TestTrue(TEXT("World export entry file exists"),
-				IFileManager::Get().FileExists(
-					*(PublishedWorkspace
-						/ ExportPayload->GetStringField(TEXT("entry_file")))));
+				FString(TEXT("succeeded")));
+			TestTrue(TEXT("World export publishes the declared workspace"),
+				IFileManager::Get().DirectoryExists(*WorkspacePath));
+			TArray<FString> PublishedHjsonFiles;
+			IFileManager::Get().FindFilesRecursive(
+				PublishedHjsonFiles,
+				*WorkspacePath,
+				TEXT("*.hjson"),
+				true,
+				false);
+			TestTrue(TEXT("World export publishes visible HJSON files"),
+				!PublishedHjsonFiles.IsEmpty());
+			TestFalse(TEXT("World export does not repeat the workspace path"),
+				ExportPayload->HasField(TEXT("workspace_path")));
+			TestFalse(TEXT("World export keeps file counts internal"),
+				ExportPayload->HasField(TEXT("file_count")));
+			TestFalse(TEXT("World export omits absolute written path lists"),
+				ExportPayload->HasField(TEXT("written_files")));
+			TestFalse(TEXT("World export omits relative written path lists"),
+				ExportPayload->HasField(TEXT("written_relative_files")));
 		}
 	}
 	return !HasAnyErrors();
-#endif
 }

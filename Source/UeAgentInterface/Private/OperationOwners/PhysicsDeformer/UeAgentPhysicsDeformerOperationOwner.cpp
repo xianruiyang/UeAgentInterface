@@ -1,5 +1,8 @@
 #include "OperationOwners/PhysicsDeformer/UeAgentPhysicsDeformerOperationOwner.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Dom/JsonValue.h"
+
 #include "Composition/GraphCompound/UeAgentGraphCompoundAnimationBindings.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundCommandHandlers.h"
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringRuntime.h"
@@ -32,24 +35,55 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 
 	namespace
 	{
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail,
-			const FString& TerminalStatus = TEXT("not_started"),
-			const bool bRetrySafe = true)
+		UE::UAI::Contract::FDiagnostic CommandFailure(FString Code, const FString& Subject, FString Reason, FString InternalContext = FString())
 		{
-			const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-			Object->SetStringField(TEXT("code"), Code);
-			Object->SetStringField(TEXT("subject_id"), SubjectId);
-			Object->SetStringField(TEXT("detail"), Detail);
-			Object->SetStringField(TEXT("terminal_status"), TerminalStatus);
-			Object->SetBoolField(TEXT("retry_safe"), bRetrySafe);
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Object, Writer);
-			return Text;
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("command"), MoveTemp(InternalContext), Subject);
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.TerminalStatus = TEXT("not_started");
+			Diagnostic.bRetrySafe = true;
+			Diagnostic.MutationStarted = false;
+			Diagnostic.MutationMayHaveStarted = false;
+			return Diagnostic;
+		}
+
+		Contract::FDiagnostic UnavailableFailure(FString Code, FString Reason, const TCHAR* ReadinessField, const FString& Subject = FString())
+		{
+			auto Diagnostic = CommandFailure(MoveTemp(Code), Subject, MoveTemp(Reason));
+			Diagnostic.Stage = TEXT("runtime_prepare");
+			Diagnostic.PropertyPath = ReadinessField;
+			Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic InvocationFailure(const FString& Code, const FString& Subject, const UE::UAI::Contract::FDiagnostic& Cause)
+		{
+			auto Diagnostic = Cause.IsEmpty()
+				? UnavailableFailure(Code, TEXT("The operation runtime could not be prepared."), TEXT("runtime_ready"), Subject)
+				: Contract::FDiagnostic::WrapFailure(Code, Cause, TEXT("command"), TEXT("The operation runtime could not be prepared."));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Subject;
+			Diagnostic.TerminalStatus = TEXT("not_started");
+			Diagnostic.bRetrySafe = true;
+			Diagnostic.MutationStarted = false;
+			Diagnostic.MutationMayHaveStarted = false;
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic ProjectionFailure(const FString& Code, const UE::UAI::Contract::FDiagnostic& Cause,
+			const BindingGateway::Operation::FOperationLifecycleReceipt& Receipt)
+		{
+			auto Diagnostic = Cause.IsEmpty()
+				? UnavailableFailure(Code, TEXT("The operation completed, but its result payload could not be produced."), TEXT("result_payload_ready"))
+				: Contract::FDiagnostic::WrapFailure(Code, Cause, TEXT("result_projection"), TEXT("The operation completed, but its result payload could not be produced."));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.Stage = TEXT("result_projection");
+			Diagnostic.TerminalStatus = BindingGateway::Operation::LexToString(Receipt.GetStatus());
+			Diagnostic.MutationStarted = Receipt.DidMutationStart();
+			Diagnostic.MutationMayHaveStarted = Receipt.DidMutationStart();
+			Diagnostic.bRetrySafe = Receipt.IsRetrySafe();
+			return Diagnostic;
 		}
 
 		struct FProcessMechanicsHost final
@@ -84,32 +118,17 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 				FUeAgentCancellationRequested Cancelled;
 				if (!Cancellation.TryCheckpoint(Cancelled))
 				{
-					OutError.Code = Cancelled.Code;
-					OutError.SubjectId = Cancelled.Reason;
-					OutError.Detail = TEXT("PhysicsDeformer projection cancelled");
+					OutError = Cancelled;
 					return false;
 				}
-				FUeAgentOperationDeadlineExceeded Expired;
-				if (!Deadline.TryCheckpoint(TEXT("physics_deformer.projection"), Expired))
-				{
-					OutError.Code = Expired.Code;
-					OutError.SubjectId = Expired.Stage;
-					OutError.Detail = TEXT("PhysicsDeformer projection deadline expired");
-					return false;
-				}
-				FUeAgentResourceBudgetExceeded BudgetError;
+				FUeAgentResourceChargeError ChargeError;
 				if (!Resources.TryCharge(
 						EUeAgentResourceDimension::WorkUnits,
 						1,
 						TEXT("physics_deformer.projection"),
-						BudgetError))
+						ChargeError))
 				{
-					OutError.Code = BudgetError.Code;
-					OutError.SubjectId = BudgetError.Path;
-					OutError.Detail = TEXT("PhysicsDeformer projection budget exceeded");
-					OutError.ResourceDimension = BudgetError.Dimension;
-					OutError.ResourceLimit = BudgetError.Limit;
-					OutError.ResourceObserved = BudgetError.Observed;
+					OutError = ChargeError;
 					return false;
 				}
 				int64 Utf8Bytes = 512 + Artifacts.Num() * 512
@@ -129,7 +148,7 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 		bool AddMechanics(
 			const TSharedRef<IUeAgentCommandHandler>& Handler,
 			TMap<FString, TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!DomainAdapters::PhysicsDeformer::IsCommand(
 					Handler->GetCommandId()))
@@ -138,8 +157,11 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 			}
 			if (OutHandlers.Contains(Handler->GetCommandId()))
 			{
-				OutError = TEXT("physics_deformer_mechanics_handler_duplicate:")
-					+ Handler->GetCommandId();
+				OutError = CommandFailure(TEXT("physics_deformer_mechanics_handler_duplicate"), Handler->GetCommandId(),
+					TEXT("More than one mechanics handler is registered for the same physics or deformer command."));
+				OutError.PropertyPath = TEXT("handler_registration_count");
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(2);
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
 				return false;
 			}
 			OutHandlers.Add(Handler->GetCommandId(), Handler);
@@ -150,7 +172,7 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 	bool TryCreateMechanicsHandlers(
 		TMap<FString, TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutAuthorityScopes.Reset();
@@ -163,18 +185,20 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 			return false;
 		}
 		FGraphCompoundRuntimeConfig GraphConfig;
-		GraphConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 		FGraphCompoundAnimationProductionConfig AnimationConfig;
 		AnimationConfig.DurableJournalRoot = FPaths::ProjectSavedDir()
 			/ TEXT("UeAgentInterface/GraphCompound/PhysicsDeformer");
-		AnimationConfig.OperationTimeoutSeconds = 120.0;
 		TSharedPtr<FGraphCompoundRuntime> GraphRuntime;
 		FGraphCompoundRuntimeError GraphError;
 		if (!TryCreateAnimationGraphProductionRuntime(
 				GraphConfig, AnimationConfig, GraphRuntime, GraphError)
 			|| !GraphRuntime.IsValid())
 		{
-			OutError = GraphError.Code + TEXT(":") + GraphError.Detail;
+			OutError = GraphError.IsEmpty()
+				? UnavailableFailure(TEXT("physics_deformer_graph_runtime_unavailable"),
+					TEXT("The animation graph runtime is unavailable and did not provide a diagnostic."), TEXT("graph_runtime_ready"))
+				: MoveTemp(GraphError);
 			return false;
 		}
 		TArray<TSharedRef<IUeAgentCommandHandler>> GraphHandlers;
@@ -201,7 +225,8 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 		if (!IsInGameThread())
 		{
 			OutHandlers.Reset();
-			OutError = TEXT("physics_deformer_game_thread_required");
+			OutError = UnavailableFailure(TEXT("physics_deformer_game_thread_required"),
+				TEXT("The physics and deformer mechanics must be prepared on the game thread."), TEXT("game_thread"));
 			return false;
 		}
 		UWorld* const World = GEditor
@@ -210,7 +235,8 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 		if (!World)
 		{
 			OutHandlers.Reset();
-			OutError = TEXT("physics_deformer_editor_world_unavailable");
+			OutError = UnavailableFailure(TEXT("physics_deformer_editor_world_unavailable"),
+				TEXT("The physics and deformer mechanics require an available Editor world."), TEXT("editor_world_available"));
 			return false;
 		}
 		const FString ServerSessionId = TEXT("server-session:")
@@ -226,7 +252,7 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 				TicketError))
 		{
 			OutHandlers.Reset();
-			OutError = TicketError.Code + TEXT(":") + TicketError.Detail;
+			OutError = TicketError;
 			return false;
 		}
 		TSharedPtr<const FUeAgentResponseProjector> Projector;
@@ -237,7 +263,7 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 				ProjectionError))
 		{
 			OutHandlers.Reset();
-			OutError = ProjectionError.Code + TEXT(":") + ProjectionError.Detail;
+			OutError = ProjectionError;
 			return false;
 		}
 
@@ -248,8 +274,7 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 			TEXT("editor-process:%u"), FPlatformProcess::GetCurrentProcessId());
 		SimpleConfig.ServerSessionId = ServerSessionId;
 		SimpleConfig.RegistryEpoch = 1;
-		SimpleConfig.TimeoutSeconds = 120.0;
-		SimpleConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 		SimpleConfig.JournalRoot = FPaths::ProjectSavedDir()
 			/ TEXT("UeAgentInterface/SimpleAuthoring/PhysicsDeformerFoundation");
 		TSharedPtr<FUeAgentSimpleAuthoringRuntime> SimpleRuntime;
@@ -264,7 +289,10 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 			|| !SimpleRuntime.IsValid())
 		{
 			OutHandlers.Reset();
-			OutError = SimpleError.Code + TEXT(":") + SimpleError.Detail;
+			OutError = SimpleError.IsEmpty()
+				? UnavailableFailure(TEXT("physics_deformer_authoring_runtime_unavailable"),
+					TEXT("The authoring runtime is unavailable and did not provide a diagnostic."), TEXT("authoring_runtime_ready"))
+				: MoveTemp(SimpleError);
 			return false;
 		}
 		TSharedPtr<const FUeAgentDiscoveryService> DiscoveryService;
@@ -277,7 +305,10 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 			|| !DiscoveryService.IsValid())
 		{
 			OutHandlers.Reset();
-			OutError = DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail;
+			OutError = DiscoveryError.IsEmpty()
+				? UnavailableFailure(TEXT("physics_deformer_discovery_service_unavailable"),
+					TEXT("The discovery service is unavailable and did not provide a diagnostic."), TEXT("discovery_service_ready"))
+				: MoveTemp(DiscoveryError);
 			return false;
 		}
 
@@ -286,8 +317,7 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 		TimelineConfig.EditorInstanceId = SimpleConfig.EditorInstanceId;
 		TimelineConfig.ServerSessionId = ServerSessionId;
 		TimelineConfig.RegistryEpoch = 1;
-		TimelineConfig.TimeoutSeconds = 120.0;
-		TimelineConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 		TimelineConfig.RigClockBindings.Add(
 			DomainAdapters::RigSimulationSpatial::
 				FUeAgentRigSimulationSpatialClockBinding(
@@ -321,8 +351,10 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 			|| !PhysicsSessionPort.IsValid())
 		{
 			OutHandlers.Reset();
-			OutError = PhysicsSessionError.Code + TEXT(":")
-				+ PhysicsSessionError.Detail;
+			OutError = PhysicsSessionError.IsEmpty()
+				? UnavailableFailure(TEXT("physics_deformer_physics_session_unavailable"),
+					TEXT("The physics session port is unavailable and did not provide a diagnostic."), TEXT("physics_session_ready"))
+				: MoveTemp(PhysicsSessionError);
 			return false;
 		}
 		TimelineConfig.RigPhysicsSessionPort = MoveTemp(PhysicsSessionPort);
@@ -339,7 +371,10 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 			|| !TimelineRuntime.IsValid())
 		{
 			OutHandlers.Reset();
-			OutError = TimelineError.Code + TEXT(":") + TimelineError.Detail;
+			OutError = TimelineError.IsEmpty()
+				? UnavailableFailure(TEXT("physics_deformer_timeline_runtime_unavailable"),
+					TEXT("The timeline runtime is unavailable and did not provide a diagnostic."), TEXT("timeline_runtime_ready"))
+				: MoveTemp(TimelineError);
 			return false;
 		}
 		for (const TSharedRef<IUeAgentCommandHandler>& Handler
@@ -358,8 +393,13 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 		if (OutHandlers.Num()
 			!= DomainAdapters::PhysicsDeformer::GetCommandIds().Num())
 		{
+			const int32 ActualCount = OutHandlers.Num();
 			OutHandlers.Reset();
-			OutError = TEXT("physics_deformer_mechanics_handler_count_mismatch");
+			OutError = CommandFailure(TEXT("physics_deformer_mechanics_handler_count_mismatch"), FString(),
+				TEXT("The mechanics handlers do not cover the declared physics and deformer commands."));
+			OutError.PropertyPath = TEXT("handler_count");
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(ActualCount);
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(DomainAdapters::PhysicsDeformer::GetCommandIds().Num());
 			return false;
 		}
 		return true;
@@ -369,7 +409,7 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 		const FString& CommandId,
 		TSharedPtr<IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandler.Reset();
 		OutAuthorityScopes.Reset();
@@ -386,8 +426,9 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 			Host.Handlers.Find(CommandId);
 		if (!Found)
 		{
-			OutError = TEXT("physics_deformer_mechanics_handler_missing:")
-				+ CommandId;
+			OutError = UnavailableFailure(TEXT("physics_deformer_mechanics_handler_missing"),
+				TEXT("No mechanics handler is registered for the requested physics or deformer command."),
+				TEXT("command_handler_registered"), CommandId);
 			return false;
 		}
 		OutHandler = *Found;
@@ -431,38 +472,22 @@ namespace UE::UAI::OperationOwners::PhysicsDeformer
 		{
 			return FUeAgentCommandResult::Failure(
 				Request, TEXT("{}"),
-				ErrorJson(
-					TEXT("physics_deformer_runtime_unavailable"),
-					Request.GetCommandId(),
-					InvocationError.GetCode() + TEXT(":")
-						+ InvocationError.GetDetail()));
+				InvocationFailure(TEXT("physics_deformer_runtime_unavailable"), Request.GetCommandId(), InvocationError));
 		}
 		BindingGateway::Operation::FOperationLifecycleReceipt Receipt;
 		if (!Invocation.GetService()->Run(
 			*Invocation.GetPlan(), *Invocation.GetAuthorization(), Receipt))
 		{
-			FString Detail = Invocation.GetContext()->GetFailureDetail();
-			if (Detail.IsEmpty())
-			{
-				Detail = TEXT("phase_history:")
-					+ FString::Join(Receipt.GetPhaseHistory(), TEXT(","));
-			}
-			return FUeAgentCommandResult::Failure(
-				Request, TEXT("{}"),
-				ErrorJson(
-					Receipt.GetErrorCode(), Request.GetCommandId(), Detail,
-					BindingGateway::Operation::LexToString(Receipt.GetStatus()),
-					Receipt.IsRetrySafe()));
+			auto Diagnostic = Receipt.GetDiagnostic();
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetCommandId();
+			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
 		}
 		FString Payload;
-		FString PayloadError;
+		UE::UAI::Contract::FDiagnostic PayloadError;
 		if (!Invocation.GetContext()->TryBuildSuccessPayload(
 			Receipt, Payload, PayloadError))
 		{
-			return FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(), Request.GetRequestId(),
-				Request.GetCommandId(), Request.GetCommandBindingHash(),
-				TEXT("domain_operation_result_invalid"), PayloadError);
+			return FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(), Request.GetCommandId(), Request.GetCommandBindingHash(), ProjectionFailure(TEXT("domain_operation_result_invalid"), PayloadError, Receipt));
 		}
 		return FUeAgentCommandResult::Success(Request, MoveTemp(Payload));
 	}

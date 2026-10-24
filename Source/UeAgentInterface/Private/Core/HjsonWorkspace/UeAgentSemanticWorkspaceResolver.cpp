@@ -1,6 +1,16 @@
 #include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonDiagnostic.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
+#include "Utilities/AuthoringCore/UeAgentDetailsAuthoringService.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
+#include "Core/HjsonWorkspace/UeAgentKeyedItemAuthoringProjection.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticLayout.h"
+#include "Core/StateSemantic/UeAgentStateSemanticEvidence.h"
 
 #include "Containers/StringConv.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
@@ -15,6 +25,31 @@ namespace UE::UAI::HjsonWorkspace
 	using namespace UE::UAI::ContextResource;
 	using namespace UE::UAI::StateSemantic;
 
+	struct FSemanticWorkspaceReadState
+	{
+		struct FDocument
+		{
+			FString SourceUnit;
+			FString Text;
+			FHjsonDocumentPtr Parsed;
+		};
+		FSemanticWorkspaceReadState* Previous = nullptr;
+		TMap<FString, FDocument> Documents;
+	};
+	static thread_local FSemanticWorkspaceReadState* ActiveReadState = nullptr;
+
+	FSemanticWorkspaceReadScope::FSemanticWorkspaceReadScope()
+		: State(MakeUnique<FSemanticWorkspaceReadState>())
+	{
+		State->Previous = ActiveReadState;
+		ActiveReadState = State.Get();
+	}
+
+	FSemanticWorkspaceReadScope::~FSemanticWorkspaceReadScope()
+	{
+		ActiveReadState = State->Previous;
+	}
+
 	namespace
 	{
 		const FString ManifestPath =
@@ -25,10 +60,17 @@ namespace UE::UAI::HjsonWorkspace
 		struct FInventoryRow
 		{
 			FString UnitId;
+			FString PublicRef;
 			ESemanticUnitKind UnitKind =
 				ESemanticUnitKind::OpaqueExtension;
 			FString LogicalPath;
+			FString DocumentPath;
+			FString UnitPointer;
 			FString ContentHash;
+			FString EditHash;
+			TArray<FString> ContentFiles;
+			const FHjsonNode* SourceNode = nullptr;
+			const FHjsonNode* Envelope = nullptr;
 		};
 
 		struct FParsedSource
@@ -38,33 +80,185 @@ namespace UE::UAI::HjsonWorkspace
 			TArray<FHjsonDocumentPtr> UnitDocuments;
 			const FHjsonNode* Manifest = nullptr;
 			TArray<const FHjsonNode*> UnitRows;
+			TArray<FHjsonNodeRef> AssembledRows;
+			TArray<const FHjsonNode*> UnitEnvelopes;
 			TArray<FString> ManagedPaths;
 		};
 
 		bool Fail(
 			FWorkspaceError& OutError,
 			const FString& Code,
+			const FString& Reason,
 			const FString& SourceUnit = FString(),
-			const FString& JsonPointer = TEXT("/"))
+			const FString& JsonPointer = TEXT("/"),
+			TSharedPtr<FJsonValue> Actual = nullptr, TSharedPtr<FJsonValue> Expected = nullptr)
 		{
-			OutError.Set(
-				Code,
-				SourceUnit,
-				JsonPointer);
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("workspace_resolve"));
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			OutError.SetFailure(MoveTemp(Diagnostic), SourceUnit, JsonPointer);
+			if (ActiveReadState)
+				if (const auto* Document = ActiveReadState->Documents.Find(SourceUnit); Document && Document->Parsed)
+					if (const auto* Node = Document->Parsed->Find(JsonPointer)) OutError.Locate(Node->GetProvenance());
 			return false;
 		}
 
 		bool FailResource(
 			FWorkspaceError& OutError,
-			const FUeAgentResourceBudgetExceeded& Error)
+			const FUeAgentResourceChargeError& Error)
 		{
-			OutError.Set(
-				Error.Code,
-				Error.Path,
-				TEXT("/"),
-				Error.Observed,
-				Error.bStoppedEarly);
+			OutError.SetFailure(Error);
 			return false;
+		}
+
+		bool FailAtNode(FWorkspaceError& OutError, FUeAgentStateSemanticError Error, const FHjsonNode& Node)
+		{
+			const auto& Source = Node.GetProvenance();
+			OutError.SetFailure(MoveTemp(Error), Source.GetSourceUnit(), Source.GetJsonPointer());
+			OutError.Locate(Source);
+			if (ActiveReadState)
+				if (const auto* Document = ActiveReadState->Documents.Find(Source.GetSourceUnit()); Document && Document->Parsed)
+					OutError.Locate(*Document->Parsed);
+			return false;
+		}
+
+		bool FailNode(FWorkspaceError& OutError, const FString& Code, const FString& Reason,
+			const FHjsonNode& Node, TSharedPtr<FJsonValue> Expected = nullptr, bool bPublicActual = true)
+		{
+			return FailAtNode(OutError, HjsonNodeFailure(Code, Reason, TEXT("workspace_resolve"),
+				Node, MoveTemp(Expected), bPublicActual), Node);
+		}
+
+		bool FailField(FWorkspaceError& OutError, const FString& Code, const FString& Reason,
+			const FHjsonNode& Object, const FString& Field, TSharedPtr<FJsonValue> Expected = nullptr, bool bPublicActual = true)
+		{
+			const auto* Node = Object.Get(Field);
+			return FailAtNode(OutError, HjsonFieldFailure(Code, Reason, TEXT("workspace_resolve"),
+				Object, Field, MoveTemp(Expected), bPublicActual), Node ? *Node : Object);
+		}
+
+		bool FailCapturedField(FWorkspaceError& OutError, const FString& Code, const FString& Reason,
+			const FHjsonNode& Object, const FString& Field, TSharedPtr<FJsonValue> Expected = nullptr)
+		{
+			auto Diagnostic = HjsonFieldFailure(Code, Reason, TEXT("workspace_resolve"), Object, Field, MoveTemp(Expected), false);
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.Source.SourceFile.Reset();
+			Diagnostic.Source.JsonPath.Reset();
+			Diagnostic.Source.Line = Diagnostic.Source.Column = 0;
+			Diagnostic.PropertyPath = Field;
+			OutError.SetFailure(MoveTemp(Diagnostic));
+			return false;
+		}
+
+		struct FNodeDifference
+		{
+			const FHjsonNode* Actual = nullptr;
+			const FHjsonNode* Expected = nullptr;
+			bool bCount = false;
+		};
+
+		bool EquivalentNode(const FHjsonNode& Left, const FHjsonNode& Right, FNodeDifference* Difference = nullptr)
+		{
+			const auto Reject = [&](const FHjsonNode* Expected = nullptr, bool bCount = false)
+			{
+				if (Difference) *Difference = {&Left, Expected, bCount};
+				return false;
+			};
+			if (Left.GetKind() != Right.GetKind())
+			{
+				return Reject(&Right);
+			}
+			switch (Left.GetKind())
+			{
+			case EHjsonNodeKind::Null:
+				return true;
+			case EHjsonNodeKind::Boolean:
+				return Left.GetBoolean() == Right.GetBoolean() || Reject(&Right);
+			case EHjsonNodeKind::String:
+				return Left.GetText() == Right.GetText() || Reject(&Right);
+			case EHjsonNodeKind::Integer:
+			case EHjsonNodeKind::Decimal:
+				return Left.GetLexeme() == Right.GetLexeme() || Reject(&Right);
+			case EHjsonNodeKind::Array:
+			{
+				const TArray<FHjsonNodeRef>& L = Left.GetItems();
+				const TArray<FHjsonNodeRef>& R = Right.GetItems();
+				if (L.Num() != R.Num())
+				{
+					return Reject(&Right, true);
+				}
+				for (int32 Index = 0; Index < L.Num(); ++Index)
+				{
+					if (!EquivalentNode(L[Index].Get(), R[Index].Get(), Difference))
+					{
+						return false;
+					}
+				}
+				return true;
+			}
+			case EHjsonNodeKind::Object:
+			{
+				const TArray<TPair<FString, FHjsonNodeRef>>& L =
+					Left.GetEntries();
+				const TArray<TPair<FString, FHjsonNodeRef>>& R =
+					Right.GetEntries();
+				if (L.Num() != R.Num())
+				{
+					return Reject(&Right, true);
+				}
+				for (const TPair<FString, FHjsonNodeRef>& Entry : L)
+				{
+					const FHjsonNode* Other = Right.Get(Entry.Key);
+					if (!Other)
+					{
+						if (Difference) *Difference = {&Entry.Value.Get(), nullptr, false};
+						return false;
+					}
+					if (!EquivalentNode(Entry.Value.Get(), *Other, Difference))
+					{
+						return false;
+					}
+				}
+				return true;
+			}
+			default:
+				return Reject(&Right);
+			}
+		}
+
+		bool FailMetadataDifference(FWorkspaceError& OutError, const FString& Reason, const FNodeDifference& Difference)
+		{
+			auto Diagnostic = HjsonNodeFailure(TEXT("semantic_workspace_envelope_mismatch"), Reason,
+				TEXT("workspace_resolve"), *Difference.Actual, nullptr, false);
+			Diagnostic.ExpectedEvidence = HjsonDiagnosticValue(Difference.Expected);
+			Diagnostic.ExpectedValuePresent = Difference.Expected != nullptr;
+			if (Difference.bCount)
+			{
+				const auto Count = [](const FHjsonNode& Node)
+				{ return Node.GetKind() == EHjsonNodeKind::Array ? Node.GetItems().Num() : Node.GetEntries().Num(); };
+				Diagnostic.ActualValue = MakeShared<FJsonValueNumber>(Count(*Difference.Actual));
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(Count(*Difference.Expected));
+			}
+			return FailAtNode(OutError, MoveTemp(Diagnostic), *Difference.Actual);
+		}
+
+		const FHjsonNode* ResolveEnvelopeField(
+			const FHjsonNode& Row,
+			const FHjsonNode* Envelope,
+			const FString& Key,
+			FWorkspaceError& OutError)
+		{
+			const FHjsonNode* RowValue = Row.Get(Key);
+			const FHjsonNode* EnvelopeValue =
+				Envelope == nullptr ? nullptr : Envelope->Get(Key);
+			FNodeDifference Difference;
+			if (RowValue != nullptr && EnvelopeValue != nullptr
+				&& !EquivalentNode(*RowValue, *EnvelopeValue, &Difference))
+			{
+				FailMetadataDifference(OutError, FString::Printf(TEXT("Metadata field '%s' differs from its captured workspace value."), *Key), Difference);
+				return nullptr;
+			}
+			return RowValue != nullptr ? RowValue : EnvelopeValue;
 		}
 
 		bool Charge(
@@ -75,7 +269,7 @@ namespace UE::UAI::HjsonWorkspace
 			const FString& Path,
 			FWorkspaceError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded ResourceError;
+			FUeAgentResourceChargeError ResourceError;
 			TMap<EUeAgentResourceDimension, int64> Values;
 			for (const TPair<
 				EUeAgentResourceDimension,
@@ -119,20 +313,45 @@ namespace UE::UAI::HjsonWorkspace
 			return Sha256(Bytes);
 		}
 
+		bool TryCanonicalValue(const FHjsonNode& Root, FUeAgentResourceTracker& Resources,
+			FUeAgentCanonicalValuePtr& OutValue, FWorkspaceError& OutError,
+			const TMap<FString, FString>* PublicRefToUnitId = nullptr,
+			bool bInterpretTypedValues = true);
+
+		bool TrySerializeEditNode(
+			const FHjsonNode& Node,
+			FUeAgentResourceTracker& Resources,
+			FWorkspaceError& OutError,
+			TArray<uint8>& OutBytes)
+		{
+			OutBytes.Reset();
+			FUeAgentCanonicalValuePtr Value;
+			if (!TryCanonicalValue(Node, Resources, Value, OutError, nullptr, false))
+			{
+				return false;
+			}
+			if (!Value.IsValid()) {
+				OutError.SetSourceFailure(TEXT("semantic_edit_value_missing"), TEXT("The edit node has no canonical value to serialize."),
+					Node.GetProvenance().GetSourceUnit(), Node.GetProvenance().GetJsonPointer());
+				OutError.Locate(Node.GetProvenance()); return false;
+			}
+			if (!TrySerializeSemanticHjsonObject(*Value, OutBytes, OutError, Node.GetProvenance().GetSourceUnit())) {
+				OutError.Locate(Node.GetProvenance()); return false;
+			}
+			return true;
+		}
+
 		const FHjsonNode* RequiredNode(
 			const FHjsonNode& Object,
 			const FString& Key,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError, const FString& ExpectedType = FString())
 		{
 			const FHjsonNode* Result = Object.Get(Key);
 			if (Result == nullptr)
 			{
-				Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_manifest_field_missing"),
-					Object.GetProvenance().GetSourceUnit(),
-					TEXT("/") + Key);
+				FailField(OutError, TEXT("semantic_workspace_manifest_field_missing"),
+					FString::Printf(TEXT("Required workspace metadata field '%s' is missing."), *Key), Object, Key,
+					ExpectedType.IsEmpty() ? TSharedPtr<FJsonValue>() : MakeShared<FJsonValueString>(ExpectedType), false);
 			}
 			return Result;
 		}
@@ -144,29 +363,23 @@ namespace UE::UAI::HjsonWorkspace
 			FWorkspaceError& OutError)
 		{
 			const FHjsonNode* Node =
-				RequiredNode(Object, Key, OutError);
+				RequiredNode(Object, Key, OutError, TEXT("string"));
 			if (Node == nullptr)
 			{
 				return false;
 			}
 			if (Node->GetKind() != EHjsonNodeKind::String)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_manifest_field_invalid"),
-					Node->GetProvenance().GetSourceUnit(),
-					Node->GetProvenance().GetJsonPointer());
+				return FailNode(OutError, TEXT("semantic_workspace_manifest_field_invalid"),
+					FString::Printf(TEXT("Workspace metadata field '%s' must be a string."), *Key), *Node,
+					MakeShared<FJsonValueString>(TEXT("string")), false);
 			}
 			OutValue = Node->GetText().TrimStartAndEnd();
 			if (OutValue.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_manifest_field_invalid"),
-					Node->GetProvenance().GetSourceUnit(),
-					Node->GetProvenance().GetJsonPointer());
+				return FailNode(OutError, TEXT("semantic_workspace_manifest_field_invalid"),
+					FString::Printf(TEXT("Workspace metadata field '%s' must not be empty."), *Key), *Node,
+					MakeShared<FJsonValueString>(TEXT("non-empty string")));
 			}
 			return true;
 		}
@@ -185,12 +398,9 @@ namespace UE::UAI::HjsonWorkspace
 			}
 			if (Node->GetKind() != EHjsonNodeKind::String)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_manifest_field_invalid"),
-					Node->GetProvenance().GetSourceUnit(),
-					Node->GetProvenance().GetJsonPointer());
+				return FailNode(OutError, TEXT("semantic_workspace_manifest_field_invalid"),
+					FString::Printf(TEXT("Optional workspace metadata field '%s' must be a string when present."), *Key), *Node,
+					MakeShared<FJsonValueString>(TEXT("string")), false);
 			}
 			OutValue = Node->GetText().TrimStartAndEnd();
 			return true;
@@ -204,7 +414,7 @@ namespace UE::UAI::HjsonWorkspace
 			FWorkspaceError& OutError)
 		{
 			const FHjsonNode* Node =
-				RequiredNode(Object, Key, OutError);
+				RequiredNode(Object, Key, OutError, TEXT("integer"));
 			if (Node == nullptr)
 			{
 				return false;
@@ -215,12 +425,9 @@ namespace UE::UAI::HjsonWorkspace
 					*Node->GetLexeme())
 				|| OutValue < Minimum)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_manifest_field_invalid"),
-					Node->GetProvenance().GetSourceUnit(),
-					Node->GetProvenance().GetJsonPointer());
+				return FailNode(OutError, TEXT("semantic_workspace_manifest_field_invalid"),
+					FString::Printf(TEXT("Workspace metadata field '%s' must be a signed 64-bit integer at least %lld."), *Key, Minimum), *Node,
+					MakeShared<FJsonValueString>(FString::Printf(TEXT("int64 >= %lld"), Minimum)), false);
 			}
 			return true;
 		}
@@ -236,44 +443,30 @@ namespace UE::UAI::HjsonWorkspace
 			const FHjsonNode* Node = Object.Get(Key);
 			if (Node == nullptr)
 			{
-				return !bRequired
-					|| Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_manifest_field_missing"),
-						Object.GetProvenance().GetSourceUnit(),
-						TEXT("/") + Key);
+				if (!bRequired) return true;
+				RequiredNode(Object, Key, OutError, TEXT("array"));
+				return false;
 			}
 			if (Node->GetKind() != EHjsonNodeKind::Array)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_manifest_field_invalid"),
-					Node->GetProvenance().GetSourceUnit(),
-					Node->GetProvenance().GetJsonPointer());
+				return FailNode(OutError, TEXT("semantic_workspace_manifest_field_invalid"),
+					TEXT("The workspace metadata field must be an array."), *Node, MakeShared<FJsonValueString>(TEXT("array")), false);
 			}
 			TSet<FString> Seen;
 			for (const FHjsonNodeRef& Item : Node->GetItems())
 			{
 				if (Item->GetKind() != EHjsonNodeKind::String)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_manifest_field_invalid"),
-						Item->GetProvenance().GetSourceUnit(),
-						Item->GetProvenance().GetJsonPointer());
+					return FailNode(OutError, TEXT("semantic_workspace_manifest_field_invalid"),
+						TEXT("Each entry in this workspace metadata array must be a string."), Item.Get(), MakeShared<FJsonValueString>(TEXT("string")), false);
 				}
 				FString Value = Item->GetText().TrimStartAndEnd();
 				if (Value.IsEmpty() || Seen.Contains(Value))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_manifest_field_invalid"),
-						Item->GetProvenance().GetSourceUnit(),
-						Item->GetProvenance().GetJsonPointer());
+					return FailNode(OutError, TEXT("semantic_workspace_manifest_field_invalid"),
+						Value.IsEmpty() ? TEXT("Workspace metadata array entries must not be empty.")
+							: TEXT("This workspace metadata array entry duplicates an earlier entry."), Item.Get(),
+						MakeShared<FJsonValueString>(TEXT("non-empty unique string")), false);
 				}
 				Seen.Add(Value);
 				OutValues.Add(MoveTemp(Value));
@@ -299,6 +492,14 @@ namespace UE::UAI::HjsonWorkspace
 				}
 			}
 			return false;
+		}
+
+		TSharedPtr<FJsonValue> UnitKindChoices()
+		{
+			TArray<TSharedPtr<FJsonValue>> Values;
+			for (uint8 Index = 0; Index <= static_cast<uint8>(ESemanticUnitKind::OpaqueExtension); ++Index)
+				Values.Add(MakeShared<FJsonValueString>(LexToString(static_cast<ESemanticUnitKind>(Index))));
+			return MakeShared<FJsonValueArray>(MoveTemp(Values));
 		}
 
 		bool ParseMode(
@@ -344,53 +545,68 @@ namespace UE::UAI::HjsonWorkspace
 		bool FailTypedValue(
 			FWorkspaceError& OutError,
 			const FHjsonNode& Node,
+			const FString& Reason,
+			TSharedPtr<FJsonValue> Expected = nullptr,
 			const FString& Code =
 				TEXT("semantic_workspace_typed_value_invalid"))
 		{
-			return Fail(
-				OutError,
-				Code,
-				Node.GetProvenance().GetSourceUnit(),
-				Node.GetProvenance().GetJsonPointer());
+			return FailNode(OutError, Code, Reason, Node, MoveTemp(Expected));
+		}
+
+		bool FailTypedValidation(FWorkspaceError& OutError, Contract::FDiagnostic Error, const FHjsonNode& Root)
+		{
+			const FString& Path = Error.PropertyPath.IsEmpty() ? Error.SemanticPointer : Error.PropertyPath;
+			FString Pointer = Path.StartsWith(TEXT("/")) ? Path : TEXT("/") + Path;
+			Pointer.ReplaceInline(TEXT("."), TEXT("/"));
+			Pointer.ReplaceInline(TEXT("["), TEXT("/"));
+			Pointer.ReplaceInline(TEXT("]"), TEXT(""));
+			if (const auto* Node = Path.IsEmpty() ? nullptr : Root.Find(Pointer))
+				return FailAtNode(OutError, MoveTemp(Error), *Node);
+			Error.SourceKind = TEXT("related_input");
+			return FailAtNode(OutError, MoveTemp(Error), Root);
 		}
 
 		bool ReadTypedString(
 			const FHjsonNode& Object,
 			const FString& Key,
 			FString& OutValue,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError, bool bPublicActual = true)
 		{
 			const FHjsonNode* Node = Object.Get(Key);
 			if (!Node || Node->GetKind() != EHjsonNodeKind::String)
 			{
-				return FailTypedValue(
-					OutError,
-					Node ? *Node : Object);
+				return FailField(OutError, TEXT("semantic_workspace_typed_value_invalid"),
+					FString::Printf(TEXT("Typed value field '%s' must be a string."), *Key), Object, Key,
+					MakeShared<FJsonValueString>(TEXT("string")), bPublicActual);
 			}
 			OutValue = Node->GetText().TrimStartAndEnd();
 			return !OutValue.IsEmpty()
-				|| FailTypedValue(OutError, *Node);
+				|| FailNode(OutError, TEXT("semantic_workspace_typed_value_invalid"),
+					FString::Printf(TEXT("Typed value field '%s' must not be empty."), *Key), *Node,
+					MakeShared<FJsonValueString>(TEXT("non-empty string")), bPublicActual);
 		}
 
 		bool ReadTypedStringArray(
 			const FHjsonNode& Object,
 			const FString& Key,
 			TArray<FString>& OutValues,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError, bool bPublicActual = true)
 		{
 			OutValues.Reset();
 			const FHjsonNode* Node = Object.Get(Key);
 			if (!Node || Node->GetKind() != EHjsonNodeKind::Array)
 			{
-				return FailTypedValue(
-					OutError,
-					Node ? *Node : Object);
+				return FailField(OutError, TEXT("semantic_workspace_typed_value_invalid"),
+					FString::Printf(TEXT("Typed value field '%s' must be an array."), *Key), Object, Key,
+					MakeShared<FJsonValueString>(TEXT("array")), bPublicActual);
 			}
 			for (const FHjsonNodeRef& Item : Node->GetItems())
 			{
 				if (Item->GetKind() != EHjsonNodeKind::String)
 				{
-					return FailTypedValue(OutError, Item.Get());
+					return FailNode(OutError, TEXT("semantic_workspace_typed_value_invalid"),
+						FString::Printf(TEXT("Each element of '%s' must be a string."), *Key), Item.Get(),
+						MakeShared<FJsonValueString>(TEXT("string")), bPublicActual);
 				}
 				OutValues.Add(Item->GetText().TrimStartAndEnd());
 			}
@@ -405,7 +621,7 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			if (Object.GetKind() != EHjsonNodeKind::Object)
 			{
-				return FailTypedValue(OutError, Object);
+				return FailTypedValue(OutError, Object, TEXT("A temporal value must be an object."), MakeShared<FJsonValueString>(TEXT("object")));
 			}
 			if (bRequireMarker)
 			{
@@ -414,11 +630,12 @@ namespace UE::UAI::HjsonWorkspace
 						Object,
 						TEXT("$uai"),
 						Marker,
-						OutError)
-					|| Marker != TEXT("temporal"))
+						OutError))
 				{
 					return false;
 				}
+				if (Marker != TEXT("temporal")) return FailTypedValue(OutError, *Object.Get(TEXT("$uai")),
+					TEXT("A temporal value requires $uai to be temporal."), MakeShared<FJsonValueString>(TEXT("temporal")));
 			}
 			FString ClockId;
 			FString Tick;
@@ -429,7 +646,7 @@ namespace UE::UAI::HjsonWorkspace
 					Object,
 					TEXT("clock_id"),
 					ClockId,
-					OutError)
+					OutError, false)
 				|| !ReadTypedString(
 					Object,
 					TEXT("tick"),
@@ -460,7 +677,7 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(RateDenominator),
 				MoveTemp(State));
 			return OutValue.IsValid()
-				|| FailTypedValue(OutError, Object);
+				|| FailTypedValidation(OutError, OutValue.GetValidationDiagnostic(), Object);
 		}
 
 		bool ParseSpatialQuantityKind(
@@ -497,7 +714,7 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			if (Object.GetKind() != EHjsonNodeKind::Object)
 			{
-				return FailTypedValue(OutError, Object);
+				return FailTypedValue(OutError, Object, TEXT("A spatial value must be an object."), MakeShared<FJsonValueString>(TEXT("object")));
 			}
 			FString Marker;
 			FString Subject;
@@ -507,7 +724,6 @@ namespace UE::UAI::HjsonWorkspace
 					TEXT("$uai"),
 					Marker,
 					OutError)
-				|| Marker != TEXT("spatial")
 				|| !ReadTypedString(
 					Object,
 					TEXT("subject"),
@@ -522,19 +738,24 @@ namespace UE::UAI::HjsonWorkspace
 				return false;
 			}
 			EUeAgentSpatialQuantityKind QuantityKind;
+			if (Marker != TEXT("spatial")) return FailTypedValue(OutError, *Object.Get(TEXT("$uai")),
+				TEXT("A spatial value requires $uai to be spatial."), MakeShared<FJsonValueString>(TEXT("spatial")));
 			if (!ParseSpatialQuantityKind(
 					QuantityText,
 					QuantityKind))
 			{
-				return FailTypedValue(OutError, Object);
+				return FailTypedValue(OutError, *Object.Get(TEXT("quantity_kind")),
+					TEXT("The spatial quantity_kind must be point, direction, normal, or transform."),
+					MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+						MakeShared<FJsonValueString>(TEXT("point")), MakeShared<FJsonValueString>(TEXT("direction")),
+						MakeShared<FJsonValueString>(TEXT("normal")), MakeShared<FJsonValueString>(TEXT("transform"))}));
 			}
 			const FHjsonNode* FrameNode = Object.Get(TEXT("frame"));
 			if (!FrameNode
 				|| FrameNode->GetKind() != EHjsonNodeKind::Object)
 			{
-				return FailTypedValue(
-					OutError,
-					FrameNode ? *FrameNode : Object);
+				return FailField(OutError, TEXT("semantic_workspace_typed_value_invalid"),
+					TEXT("A spatial value requires a frame object."), Object, TEXT("frame"), MakeShared<FJsonValueString>(TEXT("object")));
 			}
 			FString FrameId;
 			FString BasisFrameId;
@@ -544,12 +765,12 @@ namespace UE::UAI::HjsonWorkspace
 					*FrameNode,
 					TEXT("frame_id"),
 					FrameId,
-					OutError)
+					OutError, false)
 				|| !ReadTypedString(
 					*FrameNode,
 					TEXT("basis_frame_id"),
 					BasisFrameId,
-					OutError)
+					OutError, false)
 				|| !ReadTypedString(
 					*FrameNode,
 					TEXT("unit"),
@@ -559,7 +780,7 @@ namespace UE::UAI::HjsonWorkspace
 					*FrameNode,
 					TEXT("basis_evidence"),
 					BasisEvidence,
-					OutError))
+					OutError, false))
 			{
 				return false;
 			}
@@ -574,31 +795,30 @@ namespace UE::UAI::HjsonWorkspace
 				|| Dimension < 1
 				|| Dimension > MAX_int32)
 			{
-				return FailTypedValue(
-					OutError,
-					DimensionNode ? *DimensionNode : *FrameNode);
+				return FailField(OutError, TEXT("semantic_workspace_typed_value_invalid"),
+					TEXT("The spatial frame dimension must be an integer from 1 through 2147483647."), *FrameNode, TEXT("dimension"),
+					MakeShared<FJsonValueString>(TEXT("integer from 1 through 2147483647")));
 			}
 			const FHjsonNode* BasisNode = FrameNode->Get(TEXT("basis"));
 			TArray<TArray<FString>> Basis;
 			if (!BasisNode
 				|| BasisNode->GetKind() != EHjsonNodeKind::Array)
 			{
-				return FailTypedValue(
-					OutError,
-					BasisNode ? *BasisNode : *FrameNode);
+				return FailField(OutError, TEXT("semantic_workspace_typed_value_invalid"),
+					TEXT("The spatial frame basis must be an array of rows."), *FrameNode, TEXT("basis"), MakeShared<FJsonValueString>(TEXT("array")));
 			}
 			for (const FHjsonNodeRef& RowNode : BasisNode->GetItems())
 			{
 				if (RowNode->GetKind() != EHjsonNodeKind::Array)
 				{
-					return FailTypedValue(OutError, RowNode.Get());
+					return FailTypedValue(OutError, RowNode.Get(), TEXT("Each spatial frame basis row must be an array."), MakeShared<FJsonValueString>(TEXT("array")));
 				}
 				TArray<FString> Row;
 				for (const FHjsonNodeRef& Cell : RowNode->GetItems())
 				{
 					if (Cell->GetKind() != EHjsonNodeKind::String)
 					{
-						return FailTypedValue(OutError, Cell.Get());
+						return FailTypedValue(OutError, Cell.Get(), TEXT("Each spatial frame basis cell must be a numeric string."), MakeShared<FJsonValueString>(TEXT("numeric string")));
 					}
 					Row.Add(Cell->GetText().TrimStartAndEnd());
 				}
@@ -621,7 +841,7 @@ namespace UE::UAI::HjsonWorkspace
 					Object,
 					TEXT("conversion_evidence"),
 					ConversionEvidence,
-					OutError))
+					OutError, false))
 			{
 				return false;
 			}
@@ -631,9 +851,11 @@ namespace UE::UAI::HjsonWorkspace
 				Object.Get(TEXT("observed_at"));
 			FUeAgentTemporalPoint FrameTime(TEXT("invalid"), TEXT("0"));
 			FUeAgentTemporalPoint ValueTime(TEXT("invalid"), TEXT("0"));
-			if (!FrameObserved
-				|| !ValueObserved
-				|| !ParseTypedTemporal(
+			if (!FrameObserved) return FailField(OutError, TEXT("semantic_workspace_typed_value_invalid"),
+				TEXT("The spatial frame requires observed_at."), *FrameNode, TEXT("observed_at"), MakeShared<FJsonValueString>(TEXT("temporal object")));
+			if (!ValueObserved) return FailField(OutError, TEXT("semantic_workspace_typed_value_invalid"),
+				TEXT("The spatial value requires observed_at."), Object, TEXT("observed_at"), MakeShared<FJsonValueString>(TEXT("temporal object")));
+			if (!ParseTypedTemporal(
 					*FrameObserved,
 					false,
 					FrameTime,
@@ -657,7 +879,7 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(FrameTime));
 			if (!Frame.IsValid())
 			{
-				return FailTypedValue(OutError, *FrameNode);
+				return FailTypedValidation(OutError, Frame.GetValidationDiagnostic(), *FrameNode);
 			}
 			OutValue = FUeAgentSpatialValue(
 				MoveTemp(Subject),
@@ -667,7 +889,7 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(ValueTime),
 				MoveTemp(ConversionEvidence));
 			return OutValue.IsValid()
-				|| FailTypedValue(OutError, Object);
+				|| FailTypedValidation(OutError, OutValue.GetValidationDiagnostic(), Object);
 		}
 
 		bool TryTypedCanonicalValue(
@@ -690,7 +912,7 @@ namespace UE::UAI::HjsonWorkspace
 			bOutHandled = true;
 			if (MarkerNode->GetKind() != EHjsonNodeKind::String)
 			{
-				return FailTypedValue(OutError, *MarkerNode);
+				return FailTypedValue(OutError, *MarkerNode, TEXT("The $uai typed-value marker must be a string."), MakeShared<FJsonValueString>(TEXT("string")));
 			}
 			FUeAgentStateSemanticError StateError;
 			if (MarkerNode->GetText() == TEXT("decimal"))
@@ -710,11 +932,7 @@ namespace UE::UAI::HjsonWorkspace
 						OutValue,
 						StateError))
 				{
-					return Fail(
-						OutError,
-						StateError.Code,
-						Root.GetProvenance().GetSourceUnit(),
-						Root.GetProvenance().GetJsonPointer());
+					return FailAtNode(OutError, MoveTemp(StateError), Root);
 				}
 				return true;
 			}
@@ -735,11 +953,7 @@ namespace UE::UAI::HjsonWorkspace
 						OutValue,
 						StateError))
 				{
-					return Fail(
-						OutError,
-						StateError.Code,
-						Root.GetProvenance().GetSourceUnit(),
-						Root.GetProvenance().GetJsonPointer());
+					return FailAtNode(OutError, MoveTemp(StateError), Root);
 				}
 				return true;
 			}
@@ -771,17 +985,16 @@ namespace UE::UAI::HjsonWorkspace
 						OutValue,
 						StateError))
 				{
-					return Fail(
-						OutError,
-						StateError.Code,
-						Root.GetProvenance().GetSourceUnit(),
-						Root.GetProvenance().GetJsonPointer());
+					return FailAtNode(OutError, MoveTemp(StateError), Root);
 				}
 				return true;
 			}
 			return FailTypedValue(
 				OutError,
 				*MarkerNode,
+				TEXT("The $uai marker must be decimal, temporal, or spatial."),
+				MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{MakeShared<FJsonValueString>(TEXT("decimal")),
+					MakeShared<FJsonValueString>(TEXT("temporal")), MakeShared<FJsonValueString>(TEXT("spatial"))}),
 				TEXT("semantic_workspace_typed_value_kind_unsupported"));
 		}
 
@@ -789,7 +1002,9 @@ namespace UE::UAI::HjsonWorkspace
 			const FHjsonNode& Root,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			const TMap<FString, FString>* PublicRefToUnitId,
+			const bool bInterpretTypedValues)
 		{
 			struct FVisit
 			{
@@ -808,7 +1023,7 @@ namespace UE::UAI::HjsonWorkspace
 				{
 					continue;
 				}
-				if (!Visit.bExpanded
+				if (bInterpretTypedValues && !Visit.bExpanded
 					&& Visit.Node->GetKind()
 						== EHjsonNodeKind::Object)
 				{
@@ -886,13 +1101,19 @@ namespace UE::UAI::HjsonWorkspace
 							StateError);
 					break;
 				case EHjsonNodeKind::String:
+				{
+					const FString* Internal = PublicRefToUnitId == nullptr
+						? nullptr
+						: PublicRefToUnitId->Find(Visit.Node->GetText());
 					bCreated =
 						FUeAgentCanonicalValue::TryString(
-							Visit.Node->GetText(),
+							Internal == nullptr
+								? Visit.Node->GetText() : *Internal,
 							Resources,
 							Value,
 							StateError);
 					break;
+				}
 				case EHjsonNodeKind::Integer:
 					bCreated =
 						FUeAgentCanonicalValue::TryInteger(
@@ -937,8 +1158,12 @@ namespace UE::UAI::HjsonWorkspace
 						FHjsonNodeRef>& Item :
 						Visit.Node->GetEntries())
 					{
+						const FString* InternalKey =
+							PublicRefToUnitId == nullptr
+								? nullptr
+								: PublicRefToUnitId->Find(Item.Key);
 						Items.Emplace(
-							Item.Key,
+							InternalKey == nullptr ? Item.Key : *InternalKey,
 							Converted.FindChecked(
 								&Item.Value.Get())
 								.ToSharedRef());
@@ -956,16 +1181,10 @@ namespace UE::UAI::HjsonWorkspace
 				}
 				if (!bCreated || !Value.IsValid())
 				{
-					OutError.Set(
-						StateError.Code.IsEmpty()
-							? TEXT(
-								"semantic_workspace_unit_value_invalid")
-							: StateError.Code,
-						Visit.Node->GetProvenance().GetSourceUnit(),
-						Visit.Node->GetProvenance().GetJsonPointer(),
-						0,
-						false);
-					return false;
+					if (StateError.IsEmpty()) StateError = Contract::FDiagnostic::Failure(
+						TEXT("semantic_workspace_unit_value_invalid"),
+						TEXT("The HJSON node could not be represented as a semantic value."), TEXT("workspace_resolve"));
+					return FailAtNode(OutError, MoveTemp(StateError), *Visit.Node);
 				}
 				Converted.Add(Visit.Node, MoveTemp(Value));
 			}
@@ -975,17 +1194,27 @@ namespace UE::UAI::HjsonWorkspace
 
 		bool ParseSemanticUnit(
 			const FHjsonNode& Row,
+			const FHjsonNode* Envelope,
+			const FString& InventoryUnitId,
+			const FString& InventoryKind,
+			const TMap<FString, FString>& PublicRefToUnitId,
 			FUeAgentResourceTracker& Resources,
 			TOptional<FSemanticUnit>& OutUnit,
+			TOptional<bool>& OutManagedSemanticChanged,
+			TSet<FString>& OutResolvedKeyedOperationRoots,
+			FHjsonNodePtr& OutValueSources,
 			FWorkspaceError& OutError)
 		{
+			OutManagedSemanticChanged.Reset();
+			OutResolvedKeyedOperationRoots.Reset();
 			OutUnit.Reset();
+			OutValueSources.Reset();
 			if (Row.GetKind() != EHjsonNodeKind::Object)
 			{
 				return Fail(
 					OutError,
 					TEXT(
-						"semantic_workspace_unit_document_invalid"),
+						"semantic_workspace_unit_document_invalid"), TEXT("A semantic unit document row must be an object."),
 					Row.GetProvenance().GetSourceUnit(),
 					Row.GetProvenance().GetJsonPointer());
 			}
@@ -999,136 +1228,525 @@ namespace UE::UAI::HjsonWorkspace
 			FString LayoutRef;
 			FString SourceProvenance;
 			FString TargetIdentityKey;
-			if (!RequiredString(
-					Row,
-					TEXT("unit_id"),
-					UnitId,
-					OutError)
-				|| !RequiredString(
-					Row,
-					TEXT("unit_kind"),
-					KindText,
-					OutError)
-				|| !RequiredString(
-					Row,
-					TEXT("semantic_type_ref"),
-					SemanticTypeRef,
-					OutError)
-				|| !RequiredString(
-					Row,
-					TEXT("role"),
-					Role,
-					OutError)
-				|| !OptionalString(
-					Row,
-					TEXT("owner_ref"),
-					OwnerRef,
-					OutError)
-				|| !OptionalString(
-					Row,
-					TEXT("field_set_ref"),
-					FieldSetRef,
-					OutError)
-				|| !OptionalString(
-					Row,
-					TEXT("ordering_ref"),
-					OrderingRef,
-					OutError)
-				|| !OptionalString(
-					Row,
-					TEXT("layout_ref"),
-					LayoutRef,
-					OutError)
-				|| !OptionalString(
-					Row,
-					TEXT("source_provenance"),
-					SourceProvenance,
-					OutError)
-				|| !OptionalString(
-					Row,
-					TEXT("target_identity_key"),
-					TargetIdentityKey,
-					OutError))
+				auto RequiredResolvedString =
+				[&](const FString& Key, FString& Value)
+			{
+				const FHjsonNode* Node = ResolveEnvelopeField(
+					Row, Envelope, Key, OutError);
+				if (Node == nullptr)
+				{
+					if (!OutError.HasErrors()) FailField(OutError, TEXT("semantic_workspace_manifest_field_missing"),
+						FString::Printf(TEXT("Required semantic metadata field '%s' is missing."), *Key),
+						Row, Key, MakeShared<FJsonValueString>(TEXT("string")), false);
+					return false;
+				}
+				return RequiredString(Row.Get(Key) ? Row : *Envelope, Key, Value, OutError);
+			};
+			auto OptionalResolvedString =
+				[&](const FString& Key, FString& Value)
+			{
+				const FHjsonNode* Node = ResolveEnvelopeField(
+					Row, Envelope, Key, OutError);
+				if (Node == nullptr)
+				{
+					return OutError.GetCode().IsEmpty();
+				}
+				return OptionalString(Row.Get(Key) ? Row : *Envelope, Key, Value, OutError);
+			};
+			auto ReadResolvedArray =
+				[&](const FString& Key, TArray<FString>& Values)
+			{
+				const FHjsonNode* RowValue = Row.Get(Key);
+				const FHjsonNode* EnvelopeValue =
+					Envelope == nullptr ? nullptr : Envelope->Get(Key);
+				FNodeDifference Difference;
+				if (RowValue != nullptr && EnvelopeValue != nullptr
+					&& !EquivalentNode(*RowValue, *EnvelopeValue, &Difference))
+				{
+					return FailMetadataDifference(OutError,
+						FString::Printf(TEXT("Metadata array '%s' differs from its captured workspace value."), *Key), Difference);
+				}
+				if (RowValue != nullptr)
+				{
+					return ReadStringArray(Row, Key, false, Values, OutError);
+				}
+				if (EnvelopeValue != nullptr)
+				{
+					return ReadStringArray(
+						*Envelope, Key, false, Values, OutError);
+				}
+				return true;
+			};
+			const FHjsonNode* KindNode = Row.Get(TEXT("unit_kind"));
+			if (KindNode != nullptr)
+			{
+				if (KindNode->GetKind() != EHjsonNodeKind::String)
+				{
+					return FailNode(OutError, TEXT("semantic_workspace_unit_document_invalid"),
+						TEXT("The semantic unit_kind field must be a string."), *KindNode, MakeShared<FJsonValueString>(TEXT("string")));
+				}
+				KindText = KindNode->GetText().TrimStartAndEnd();
+				if (!InventoryKind.IsEmpty()
+					&& KindText != InventoryKind)
+				{
+					return FailNode(OutError, TEXT("semantic_workspace_envelope_mismatch"),
+						TEXT("The authored unit kind differs from the workspace inventory."), *KindNode, MakeShared<FJsonValueString>(InventoryKind));
+				}
+			}
+			else
+			{
+				KindText = InventoryKind;
+			}
+			const FHjsonNode* UnitIdNode = Row.Get(TEXT("unit_id"));
+			if (UnitIdNode == nullptr)
+			{
+				UnitId = InventoryUnitId;
+			}
+			else if (UnitIdNode->GetKind() != EHjsonNodeKind::String)
+			{
+				return FailNode(OutError, TEXT("semantic_workspace_unit_document_invalid"), TEXT("The semantic unit_id field must be a string."),
+					*UnitIdNode, MakeShared<FJsonValueString>(TEXT("string")), false);
+			}
+			else
+			{
+				UnitId = UnitIdNode->GetText().TrimStartAndEnd();
+				if (!InventoryUnitId.IsEmpty() && UnitId != InventoryUnitId)
+				{
+					auto Diagnostic = HjsonNodeFailure(TEXT("semantic_workspace_envelope_mismatch"),
+						TEXT("The authored unit identity differs from the workspace inventory."), TEXT("workspace_resolve"), *UnitIdNode, nullptr, false);
+					Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(InventoryUnitId);
+					return FailAtNode(OutError, MoveTemp(Diagnostic), *UnitIdNode);
+				}
+			}
+			if (UnitId.IsEmpty()) return FailField(OutError, TEXT("semantic_workspace_unit_document_invalid"),
+				TEXT("The semantic unit identity is empty in both the document and its inventory."), Row, TEXT("unit_id"),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")), false);
+			if (!RequiredResolvedString(TEXT("semantic_type_ref"), SemanticTypeRef)
+				|| !RequiredResolvedString(TEXT("role"), Role)
+				|| !OptionalResolvedString(TEXT("owner_ref"), OwnerRef)
+				|| !OptionalResolvedString(TEXT("field_set_ref"), FieldSetRef)
+				|| !OptionalResolvedString(TEXT("ordering_ref"), OrderingRef)
+				|| !OptionalResolvedString(TEXT("layout_ref"), LayoutRef)
+				|| !OptionalResolvedString(TEXT("source_provenance"), SourceProvenance)
+				|| !OptionalResolvedString(TEXT("target_identity_key"), TargetIdentityKey))
 			{
 				return false;
 			}
 			ESemanticUnitKind UnitKind;
 			if (!ParseUnitKind(KindText, UnitKind))
 			{
-				return Fail(
-					OutError,
-					TEXT("semantic_workspace_unit_kind_invalid"),
-					UnitId,
-					TEXT("/unit_kind"));
+				auto Diagnostic = HjsonFieldFailure(TEXT("semantic_workspace_unit_kind_invalid"),
+					TEXT("The semantic unit kind is unsupported."), TEXT("workspace_resolve"), KindNode ? Row : (Envelope ? *Envelope : Row),
+					TEXT("unit_kind"), UnitKindChoices());
+				Diagnostic.ActualValue = MakeShared<FJsonValueString>(KindText);
+				Diagnostic.ActualValuePresent = true;
+				return FailAtNode(OutError, MoveTemp(Diagnostic), KindNode ? *KindNode : Row);
+			}
+			const FHjsonNode* Definition = Row.Get(TEXT("definition"));
+			const bool bKeyedProperty = UnitKind == ESemanticUnitKind::PropertySet
+				&& Row.Get(TEXT("values")) == nullptr && Envelope && Envelope->Get(TEXT("captured_type"));
+			if (!bKeyedProperty
+				&& (Definition || (UnitKind == ESemanticUnitKind::ItemState && !FieldSetRef.IsEmpty())))
+			{
+				const FString* ResolvedDefinition = Definition && Definition->GetKind() == EHjsonNodeKind::String
+					? PublicRefToUnitId.Find(Definition->GetText()) : nullptr;
+				if (UnitKind != ESemanticUnitKind::ItemState || FieldSetRef.IsEmpty() || !Definition
+					|| Definition->GetKind() != EHjsonNodeKind::String
+					|| (ResolvedDefinition ? *ResolvedDefinition : Definition->GetText()) != FieldSetRef)
+					return Fail(OutError, TEXT("semantic_workspace_item_definition_read_only"), TEXT("The item's definition reference must retain its captured field-set definition."),
+						Row.GetProvenance().GetSourceUnit(), TEXT("/definition"));
 			}
 			const FHjsonNode* ValuesNode = Row.Get(TEXT("values"));
-			if (ValuesNode == nullptr
-				|| ValuesNode->GetKind()
-					!= EHjsonNodeKind::Object)
+			const FHjsonNode* CapturedValues =
+				Envelope == nullptr ? nullptr : Envelope->Get(TEXT("captured_values"));
+			const bool bGraphProjection =
+				UnitKind == ESemanticUnitKind::StructureState
+				&& ValuesNode == nullptr
+				&& IsGraphAuthoringStructureType(SemanticTypeRef,
+					CapturedValues && CapturedValues->Get(TEXT("nodes")) && CapturedValues->Get(TEXT("edges")));
+			// Decomposed document collections carry semantic-id#document-path.
+			// Their native capture and contract belong to composition, not to a
+			// global root-name match (e.g. Sequence and UMG both have "bindings").
+			const bool bDocumentCollectionProjection = UnitKind == ESemanticUnitKind::StructureState
+				&& ValuesNode == nullptr && SemanticTypeRef.Contains(TEXT("#"));
+			TArray<const FKeyedItemProjectionContract*> KeyedItemContracts;
+			for (const FKeyedItemProjectionContract& Contract : GetKeyedItemProjectionContracts())
+				if (!bGraphProjection && !bDocumentCollectionProjection && (Row.Get(Contract.RootField) != nullptr
+					|| (CapturedValues && CapturedValues->Get(Contract.RootField))))
+				{
+					KeyedItemContracts.Add(&Contract);
+				}
+			const bool bKeyedItemProjection =
+				UnitKind == ESemanticUnitKind::StructureState
+				&& ValuesNode == nullptr
+				&& !KeyedItemContracts.IsEmpty();
+			const bool bActorComponentItemProjection =
+				UnitKind == ESemanticUnitKind::ItemState
+				&& Role == TEXT("actor_component_hierarchy")
+				&& (SemanticTypeRef.EndsWith(TEXT(".actor.target"))
+					|| SemanticTypeRef.EndsWith(TEXT(".component.target")));
+			if (!bGraphProjection && !bKeyedProperty
+				&& !bKeyedItemProjection && !bActorComponentItemProjection
+				&& ValuesNode == nullptr)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_unit_values_invalid"),
-					UnitId,
-					TEXT("/values"));
+				ValuesNode = CapturedValues;
+			}
+			if (!bGraphProjection && !bKeyedProperty && !bKeyedItemProjection
+				&& !bActorComponentItemProjection
+				&& (ValuesNode == nullptr
+				|| ValuesNode->GetKind() != EHjsonNodeKind::Object))
+			{
+				return FailField(OutError, TEXT("semantic_workspace_unit_values_invalid"),
+					TEXT("The semantic unit requires a values object or a captured values object."),
+					Row.Get(TEXT("values")) || !Envelope ? Row : *Envelope,
+					Row.Get(TEXT("values")) || !Envelope ? TEXT("values") : TEXT("captured_values"),
+					MakeShared<FJsonValueString>(TEXT("object")), false);
 			}
 			TMap<FString, FUeAgentCanonicalValueRef> Values;
-			for (const TPair<FString, FHjsonNodeRef>& Item :
-				ValuesNode->GetEntries())
+			// Inspect only structural owner records, never reflected business values.
+			// Keep the original nodes until every independent seed has been checked.
+			if (UnitKind == ESemanticUnitKind::StructureState)
 			{
-				FUeAgentCanonicalValuePtr Value;
+				FWorkspaceError SeedErrors;
+				auto CheckPayload = [&SeedErrors](const FHjsonNode* Owner, const TCHAR* Field)
+				{
+					const FHjsonNode* Payload = Owner ? Owner->Get(Field) : nullptr;
+					if (!Payload) return;
+					FWorkspaceError Error;
+					if (!UeAgentDetailsAuthoringService::ValidatePropertyPayload(*Payload, Error)) SeedErrors.Append(Error);
+				};
+				auto CheckOwner = [&CheckPayload](const FHjsonNode& Owner)
+				{
+					CheckPayload(&Owner, TEXT("properties"));
+					CheckPayload(&Owner, TEXT("property_changes"));
+					CheckPayload(Owner.Get(TEXT("slot")), TEXT("properties"));
+					if (const FHjsonNode* Renderers = Owner.Get(TEXT("renderers")); Renderers && Renderers->GetKind() == EHjsonNodeKind::Object)
+						for (const auto& Renderer : Renderers->GetEntries()) CheckPayload(&Renderer.Value.Get(), TEXT("properties"));
+				};
+				auto CheckCollection = [&CheckOwner](const FHjsonNode* Collection)
+				{
+					if (!Collection || Collection->GetKind() != EHjsonNodeKind::Object) return;
+					for (const auto& Entry : Collection->GetEntries()) CheckOwner(Entry.Value.Get());
+				};
+				auto CheckStructure = [&CheckCollection](const FHjsonNode* Structure)
+				{
+					if (!Structure || Structure->GetKind() != EHjsonNodeKind::Object) return;
+					for (const TCHAR* Field : {TEXT("nodes"), TEXT("widgets"), TEXT("items"), TEXT("goals")})
+						CheckCollection(Structure->Get(Field));
+					const FHjsonNode* Emitters = Structure->Get(TEXT("emitters"));
+					CheckCollection(Emitters);
+					if (Emitters && Emitters->GetKind() == EHjsonNodeKind::Object)
+						for (const auto& Entry : Emitters->GetEntries()) CheckCollection(Entry.Value->Get(TEXT("renderers")));
+					const FHjsonNode* Tree = Structure->Get(TEXT("widget_tree"));
+					if (Tree) CheckCollection(Tree->Get(TEXT("widgets")));
+					const FHjsonNode* Graphs = Structure->Get(TEXT("graphs"));
+					if (Graphs && Graphs->GetKind() == EHjsonNodeKind::Object)
+						for (const auto& Graph : Graphs->GetEntries()) CheckCollection(Graph.Value->Get(TEXT("nodes")));
+				};
+				if (bKeyedItemProjection)
+				{
+					for (const auto* Contract : KeyedItemContracts)
+					{
+						// Typed record properties belong to their row schema. They are
+						// not reflected UObject property documents or creation seeds.
+						if (Contract->RecordSchemaField.IsEmpty() && Contract->bInterpretSemanticValues)
+							CheckCollection(Row.Get(Contract->RootField));
+					}
+				}
+				else
+				{
+					const FHjsonNode* Structure = bDocumentCollectionProjection || bGraphProjection ? &Row : ValuesNode;
+					if (!Structure) Structure = &Row;
+					CheckStructure(Structure);
+					CheckStructure(Structure->Get(TEXT("provider_extension")));
+				}
+				if (SeedErrors.HasErrors()) { OutError = MoveTemp(SeedErrors); return false; }
+			}
+			if (bDocumentCollectionProjection)
+			{
+				for (const auto& Field : CapturedValues->GetEntries())
+				{
+					const FHjsonNode* Edited = Row.Get(Field.Key);
+					FUeAgentCanonicalValuePtr Value;
+					if (!TryCanonicalValue(Edited ? *Edited : Field.Value.Get(), Resources, Value,
+						OutError, &PublicRefToUnitId)) return false;
+					Values.Add(Field.Key, Value.ToSharedRef());
+				}
+			}
+			else if (bGraphProjection)
+			{
+				if (CapturedValues == nullptr
+					|| CapturedValues->GetKind() != EHjsonNodeKind::Object)
+				{
+					return FailCapturedField(OutError, TEXT("semantic_workspace_graph_capture_missing"),
+						TEXT("The graph has no captured values object; export the workspace again."), Envelope ? *Envelope : Row,
+						TEXT("captured_values"), MakeShared<FJsonValueString>(TEXT("object")));
+				}
+				FUeAgentCanonicalValuePtr CapturedRoot;
+				FUeAgentCanonicalValuePtr VisibleRoot;
 				if (!TryCanonicalValue(
-						Item.Value.Get(),
+						*CapturedValues, Resources, CapturedRoot, OutError)
+					|| !TryCanonicalValue(
+						Row, Resources, VisibleRoot, OutError,
+						&PublicRefToUnitId)
+					|| !TryResolveGraphAuthoringProjection(
+						*VisibleRoot,
+						*CapturedRoot,
+						Row.GetProvenance().GetSourceUnit(),
 						Resources,
-						Value,
-						OutError))
+						Values,
+						OutError, &Row, &OutValueSources))
 				{
 					return false;
 				}
-				if (Values.Contains(Item.Key))
+			}
+			else if (bKeyedItemProjection)
+			{
+				auto IsCollectionRoot = [&](const FString& Name) {
+					return KeyedItemContracts.ContainsByPredicate([&](const auto* Contract) { return Contract->RootField == Name; });
+				};
+				auto IsDeclaredRootField = [&](const FString& Name) {
+					return KeyedItemContracts.ContainsByPredicate([&](const auto* Contract) {
+						return Contract->RootField == Name || Contract->RecordSchemaField == Name
+							|| Contract->IsReadOnlyRootField(Name) || Contract->IsEditableRootField(Name);
+					});
+				};
+				auto ResolveCollection = [&](const FKeyedItemProjectionContract& Contract, FWorkspaceError& OutError) -> bool {
+					const FHjsonNode* CapturedItems = CapturedValues == nullptr
+						? nullptr : CapturedValues->Get(Contract.RootField);
+					const FHjsonNode* VisibleItems = Row.Get(Contract.RootField);
+					if (CapturedItems == nullptr)
+					{
+						return FailCapturedField(OutError, TEXT("semantic_workspace_keyed_item_capture_missing"),
+							TEXT("The collection has no captured items; export the workspace again."),
+							CapturedValues ? *CapturedValues : (Envelope ? *Envelope : Row),
+							CapturedValues ? Contract.RootField : TEXT("captured_values"));
+					}
+					FUeAgentCanonicalValuePtr Captured;
+					FUeAgentCanonicalValuePtr Visible;
+					FUeAgentCanonicalValuePtr Resolved;
+					FUeAgentCanonicalValuePtr RecordSchema;
+					bool bSemanticChanged = false;
+					bool bRootChanged = false;
+					for (const auto& Field : Row.GetEntries())
+						if (Contract.IsEditableRootField(Field.Key) && !CapturedValues->Get(Field.Key))
+							return FailCapturedField(OutError, TEXT("keyed_item_root_field_not_captured"),
+								FString::Printf(TEXT("Editable root field '%s' has no captured baseline."), *Field.Key), *CapturedValues, Field.Key);
+					if (!Contract.ReadOnlyRootFields.IsEmpty() || !Contract.EditableRootFields.IsEmpty())
+						for (const auto& Field : Row.GetEntries())
+							if (!IsDeclaredRootField(Field.Key))
+							{
+								auto Diagnostic = HjsonNodeFailure(TEXT("keyed_item_root_field_unknown"),
+									FString::Printf(TEXT("Root field '%s' is not declared by this collection contract."), *Field.Key),
+									TEXT("workspace_resolve"), Field.Value.Get(), nullptr, false);
+								Diagnostic.ActualValue = MakeShared<FJsonValueString>(Field.Key);
+								return FailAtNode(OutError, MoveTemp(Diagnostic), Field.Value.Get());
+							}
+					if (!Contract.RecordSchemaField.IsEmpty())
+					{
+						const FHjsonNode* CapturedSchema = CapturedValues->Get(Contract.RecordSchemaField);
+						const FHjsonNode* VisibleSchema = Row.Get(Contract.RecordSchemaField);
+						FUeAgentCanonicalValuePtr VisibleSchemaValue;
+						FUeAgentSemanticComparison SchemaComparison;
+						FUeAgentStateSemanticError SchemaError;
+						if (!CapturedSchema) return FailCapturedField(OutError, TEXT("keyed_record_schema_read_only"),
+							TEXT("The record schema has no captured baseline; export the workspace again."), *CapturedValues, Contract.RecordSchemaField);
+						if (!VisibleSchema) return FailField(OutError, TEXT("keyed_record_schema_read_only"),
+							TEXT("The required read-only record schema was removed."), Row, Contract.RecordSchemaField);
+						if (!TryCanonicalValue(*CapturedSchema, Resources, RecordSchema, OutError)
+							|| !TryCanonicalValue(*VisibleSchema, Resources, VisibleSchemaValue, OutError)) return false;
+						if (!TryCompareValues(RecordSchema.ToSharedRef(), VisibleSchemaValue.ToSharedRef(),
+							VisibleSchema->GetProvenance().GetJsonPointer(), Resources, SchemaComparison, SchemaError))
+							return FailAtNode(OutError, MoveTemp(SchemaError), *VisibleSchema);
+						if (!SchemaComparison.IsEquivalent())
+							return FailAtNode(OutError, MakeComparisonDiagnostic(SchemaComparison, TEXT("keyed_record_schema_read_only"),
+								TEXT("The record schema is read-only and differs from its captured value."), TEXT("workspace_resolve")), *VisibleSchema);
+					}
+					for (const auto& Field : CapturedValues->GetEntries())
+					{
+						if (IsCollectionRoot(Field.Key)) continue;
+						FUeAgentCanonicalValuePtr Value;
+						if (!TryCanonicalValue(*Field.Value, Resources, Value, OutError, nullptr, Contract.bInterpretSemanticValues)) return false;
+						if (Contract.IsReadOnlyRootField(Field.Key))
+						{
+							const FHjsonNode* VisibleField = Row.Get(Field.Key);
+							FUeAgentCanonicalValuePtr VisibleValue;
+							FUeAgentSemanticComparison Comparison;
+							FUeAgentStateSemanticError Error;
+							if (!VisibleField)
+								return FailField(OutError, TEXT("keyed_item_root_field_read_only"),
+									FString::Printf(TEXT("Required read-only root field '%s' was removed."), *Field.Key), Row, Field.Key);
+							if (!TryCanonicalValue(*VisibleField, Resources, VisibleValue, OutError, nullptr, Contract.bInterpretSemanticValues)) return false;
+							if (!TryCompareValues(Value.ToSharedRef(), VisibleValue.ToSharedRef(),
+								VisibleField->GetProvenance().GetJsonPointer(), Resources, Comparison, Error))
+							{
+								return FailAtNode(OutError, MoveTemp(Error), *VisibleField);
+							}
+							if (!Comparison.IsEquivalent())
+								return FailAtNode(OutError, MakeComparisonDiagnostic(Comparison, TEXT("keyed_item_root_field_read_only"),
+									TEXT("A read-only root field differs from its captured value."), TEXT("workspace_resolve")), *VisibleField);
+						}
+						if (Contract.IsEditableRootField(Field.Key))
+						{
+							if (const FHjsonNode* VisibleField = Row.Get(Field.Key))
+							{
+								FUeAgentCanonicalValuePtr VisibleValue;
+								FUeAgentSemanticComparison Comparison;
+								FUeAgentStateSemanticError Error;
+								if (!TryCanonicalValue(*VisibleField, Resources, VisibleValue, OutError, nullptr, Contract.bInterpretSemanticValues)) return false;
+								if (!TryCompareValues(Value.ToSharedRef(), VisibleValue.ToSharedRef(),
+									VisibleField->GetProvenance().GetJsonPointer(), Resources, Comparison, Error))
+								{
+									return FailAtNode(OutError, MoveTemp(Error), *VisibleField);
+								}
+								bRootChanged |= !Comparison.IsEquivalent();
+								Value = MoveTemp(VisibleValue);
+							}
+						}
+						Values.Add(Field.Key, Value.ToSharedRef());
+					}
+					if (!TryCanonicalValue(*CapturedItems, Resources, Captured, OutError, nullptr, Contract.bInterpretSemanticValues)) return false;
+					// Absent fields retain captured state. Only an explicitly supplied
+					// collection participates in desired-state item removal/creation.
+					if (!VisibleItems) Resolved = Captured;
+					else if (VisibleItems == nullptr || !TryCanonicalValue(
+							*VisibleItems, Resources, Visible, OutError,
+							Contract.bInterpretSemanticValues ? &PublicRefToUnitId : nullptr, Contract.bInterpretSemanticValues)
+						|| !TryResolveKeyedItemDesiredState(
+							*Visible, *Captured, Row.GetProvenance().GetSourceUnit(),
+							Contract, RecordSchema.Get(), Resources, Resolved, bSemanticChanged, OutError, nullptr,
+							EKeyedItemInputKind::VisibleDesiredState, nullptr, VisibleItems))
+					{
+						return false;
+					}
+					Values.Add(Contract.RootField, Resolved.ToSharedRef());
+					if (VisibleItems && (!Contract.bIdentityFromMapKey || Contract.bEmitOperationRecords))
+						OutResolvedKeyedOperationRoots.Add(Contract.RootField);
+					OutManagedSemanticChanged = OutManagedSemanticChanged.Get(false) || bSemanticChanged || bRootChanged;
+					return true;
+					};
+				FWorkspaceError CollectionErrors;
+				for (const auto* Contract : KeyedItemContracts)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_unit_values_invalid"),
-						UnitId,
-						Item.Value->GetProvenance()
-							.GetJsonPointer());
+					FWorkspaceError Error;
+					if (!ResolveCollection(*Contract, Error))
+					{
+						const FHjsonNode* Source = Row.Get(Error.GetSourceUnit());
+						if (!Source) Source = Row.Get(Contract->RootField);
+						Error.Locate(Source ? Source->GetProvenance() : Row.GetProvenance());
+						CollectionErrors.Append(Error);
+					}
 				}
-				Values.Add(Item.Key, Value.ToSharedRef());
+				if (CollectionErrors.HasErrors()) { OutError = MoveTemp(CollectionErrors); return false; }
+			}
+			else if (bActorComponentItemProjection)
+			{
+				if (CapturedValues == nullptr
+					|| CapturedValues->GetKind() != EHjsonNodeKind::Object)
+				{
+					return FailCapturedField(OutError, TEXT("semantic_workspace_captured_values_missing"),
+						TEXT("The actor or component has no captured values object; export the workspace again."), Envelope ? *Envelope : Row,
+						TEXT("captured_values"), MakeShared<FJsonValueString>(TEXT("object")));
+				}
+				FUeAgentCanonicalValuePtr Captured;
+				FUeAgentCanonicalValuePtr Visible;
+				FUeAgentCanonicalValuePtr Resolved;
+				bool bSemanticChanged = false;
+				if (!TryCanonicalValue(*CapturedValues, Resources, Captured, OutError)
+					|| !TryCanonicalValue(
+						Row, Resources, Visible, OutError,
+						&PublicRefToUnitId)
+					|| !TryResolveCapturedItemDesiredState(
+						*Visible, *Captured, Row.GetProvenance().GetSourceUnit(),
+						GetActorComponentHierarchyItemVisibleFieldPolicy(),
+						Resources, Resolved, bSemanticChanged, OutError))
+				{
+					return false;
+				}
+				for (const auto& Field : Resolved->GetObjectItems())
+				{
+					Values.Add(Field.Key, Field.Value);
+				}
+				OutManagedSemanticChanged = bSemanticChanged;
+			}
+			else if (bKeyedProperty)
+			{
+				const FHjsonNode* CapturedType =
+					Envelope == nullptr ? nullptr : Envelope->Get(TEXT("captured_type"));
+				if (CapturedType == nullptr
+					|| CapturedType->GetKind() != EHjsonNodeKind::String)
+				{
+					return FailCapturedField(OutError, TEXT("semantic_workspace_property_type_missing"),
+						TEXT("The property has no captured type string; export the workspace again."), Envelope ? *Envelope : Row,
+						TEXT("captured_type"), MakeShared<FJsonValueString>(TEXT("string")));
+				}
+				if (CapturedValues == nullptr
+					|| CapturedValues->GetKind() != EHjsonNodeKind::Object)
+				{
+					return FailCapturedField(OutError, TEXT("semantic_workspace_captured_values_missing"),
+						TEXT("The property has no captured values object; export the workspace again."), Envelope ? *Envelope : Row,
+						TEXT("captured_values"), MakeShared<FJsonValueString>(TEXT("object")));
+				}
+				TArray<FString> TemplateFields;
+				for (const auto& Field : CapturedValues->GetEntries())
+					TemplateFields.Add(Field.Key);
+				if (!TryResolveKeyedPropertyValues(Row, CapturedType->GetText(), TemplateFields,
+					Resources, Values, OutError, &PublicRefToUnitId, &OutValueSources)) return false;
+				// The optional catalog reference cannot select a different property's schema.
+				const FHjsonNode* CapturedDefinition = Envelope->Get(TEXT("captured_definition"));
+				if (Definition && (Definition->GetKind() != EHjsonNodeKind::String
+					|| (CapturedDefinition && Definition->GetText() != CapturedDefinition->GetText())))
+					return FailNode(OutError, TEXT("semantic_workspace_property_definition_mismatch"),
+						TEXT("The authored property definition differs from the captured definition."), *Definition,
+						CapturedDefinition ? HjsonDiagnosticValue(CapturedDefinition) : TSharedPtr<FJsonValue>());
+			}
+			if (!bDocumentCollectionProjection && !bGraphProjection && !bKeyedItemProjection
+				&& !bActorComponentItemProjection
+				&& !bKeyedProperty)
+			{
+				for (const TPair<FString, FHjsonNodeRef>& Item : ValuesNode->GetEntries())
+				{
+					FUeAgentCanonicalValuePtr Value;
+					if (!TryCanonicalValue(
+							Item.Value.Get(), Resources, Value, OutError,
+							&PublicRefToUnitId))
+					{
+						return false;
+					}
+					if (Values.Contains(Item.Key))
+					{
+						auto Diagnostic = HjsonNodeFailure(TEXT("semantic_workspace_unit_values_invalid"),
+							TEXT("The semantic values contain a duplicate field name."), TEXT("workspace_resolve"), Item.Value.Get());
+						Diagnostic.ActualValue = MakeShared<FJsonValueString>(Item.Key);
+						return FailAtNode(OutError, MoveTemp(Diagnostic), Item.Value.Get());
+					}
+					Values.Add(Item.Key, Value.ToSharedRef());
+				}
 			}
 			TArray<FString> ItemRefs;
 			TArray<FString> RelationRefs;
 			TArray<FString> DependencyRefs;
 			TArray<FString> ProfileVisibility;
-			if (!ReadStringArray(
-					Row,
-					TEXT("item_refs"),
-					false,
-					ItemRefs,
-					OutError)
-				|| !ReadStringArray(
-					Row,
-					TEXT("relation_refs"),
-					false,
-					RelationRefs,
-					OutError)
-				|| !ReadStringArray(
-					Row,
-					TEXT("dependency_refs"),
-					false,
-					DependencyRefs,
-					OutError)
-				|| !ReadStringArray(
-					Row,
-					TEXT("profile_visibility"),
-					false,
-					ProfileVisibility,
-					OutError))
+			if (!ReadResolvedArray(TEXT("item_refs"), ItemRefs)
+				|| !ReadResolvedArray(TEXT("relation_refs"), RelationRefs)
+				|| !ReadResolvedArray(TEXT("dependency_refs"), DependencyRefs)
+				|| !ReadResolvedArray(TEXT("profile_visibility"), ProfileVisibility))
 			{
 				return false;
 			}
+			auto ResolvePublicRefs = [&PublicRefToUnitId](TArray<FString>& Values)
+			{
+				for (FString& Value : Values)
+				{
+					if (const FString* Internal = PublicRefToUnitId.Find(Value))
+					{
+						Value = *Internal;
+					}
+				}
+			};
+			ResolvePublicRefs(ItemRefs);
+			ResolvePublicRefs(RelationRefs);
+			ResolvePublicRefs(DependencyRefs);
 			OutUnit.Emplace(
 				MoveTemp(UnitId),
 				UnitKind,
@@ -1147,12 +1765,9 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(TargetIdentityKey));
 			if (!OutUnit->IsValid())
 			{
+				auto Diagnostic = OutUnit->GetValidationDiagnostic();
 				OutUnit.Reset();
-				return Fail(
-					OutError,
-					TEXT("semantic_workspace_unit_invalid"),
-					Row.GetProvenance().GetSourceUnit(),
-					Row.GetProvenance().GetJsonPointer());
+				return FailAtNode(OutError, MoveTemp(Diagnostic), Row);
 			}
 			return true;
 		}
@@ -1208,7 +1823,7 @@ namespace UE::UAI::HjsonWorkspace
 				return Fail(
 					OutError,
 					TEXT(
-						"workspace_reparse_point_rejected"),
+						"workspace_reparse_point_rejected"), TEXT("The document or one of its ancestor directories is a reparse point."),
 					SourceUnit);
 			}
 			if (!Charge(
@@ -1224,15 +1839,37 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				return Fail(
 					OutError,
-					TEXT("workspace_source_read_failed"),
+					TEXT("workspace_source_read_failed"), TEXT("The semantic workspace document could not be read."),
 					SourceUnit);
 			}
-			return TryParseHjsonDocument(
+			FString CachePath;
+			if (ActiveReadState)
+			{
+				CachePath = FPaths::ConvertRelativePathToFull(Path);
+				FPaths::NormalizeFilename(CachePath);
+				const auto* Cached = ActiveReadState->Documents.Find(CachePath);
+				if (Cached && Cached->SourceUnit.Equals(SourceUnit, ESearchCase::CaseSensitive)
+					&& Cached->Text.Equals(Text, ESearchCase::CaseSensitive))
+				{
+					OutDocument = Cached->Parsed;
+					OutError.Reset();
+					return true;
+				}
+			}
+			if (!TryParseHjsonDocument(
 				Text,
 				SourceUnit,
 				Resources,
 				OutDocument,
-				OutError);
+				OutError)) return false;
+			if (ActiveReadState)
+			{
+				auto& Cached = ActiveReadState->Documents.FindOrAdd(CachePath);
+				Cached.SourceUnit = SourceUnit;
+				Cached.Text = MoveTemp(Text);
+				Cached.Parsed = OutDocument;
+			}
+			return true;
 		}
 
 		bool ParseInventory(
@@ -1247,83 +1884,138 @@ namespace UE::UAI::HjsonWorkspace
 				|| Inventory->GetKind()
 					!= EHjsonNodeKind::Array)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_inventory_invalid"),
-					Manifest.GetProvenance().GetSourceUnit(),
-					TEXT("/unit_inventory"));
+				return FailField(OutError, TEXT("semantic_workspace_inventory_invalid"),
+					TEXT("Workspace metadata requires a unit_inventory array."), Manifest, TEXT("unit_inventory"), MakeShared<FJsonValueString>(TEXT("array")), false);
 			}
+			FWorkspaceError Diagnostics;
 			TSet<FString> UnitIds;
-			TSet<FString> Paths;
+			TSet<FString> PublicRefs;
+			TSet<FString> LogicalPaths;
 			for (const FHjsonNodeRef& Item :
 				Inventory->GetItems())
 			{
-				if (Item->GetKind()
-					!= EHjsonNodeKind::Object)
+				OutError.Reset();
+				auto ReadItem = [&]() -> bool
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_inventory_invalid"),
-						Item->GetProvenance().GetSourceUnit(),
-						Item->GetProvenance().GetJsonPointer());
-				}
-				FInventoryRow Row;
-				FString KindText;
-				if (!RequiredString(
-						Item.Get(),
-						TEXT("unit_id"),
-						Row.UnitId,
-						OutError)
-					|| !RequiredString(
-						Item.Get(),
-						TEXT("unit_kind"),
-						KindText,
-						OutError)
-					|| !RequiredString(
-						Item.Get(),
-						TEXT("logical_path"),
-						Row.LogicalPath,
-						OutError)
-					|| !RequiredString(
-						Item.Get(),
-						TEXT("content_hash"),
-						Row.ContentHash,
-						OutError))
-				{
-					return false;
-				}
-				if (!ParseUnitKind(KindText, Row.UnitKind))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_inventory_invalid"),
-						Row.UnitId,
-						TEXT("/unit_kind"));
-				}
-				if (UnitIds.Contains(Row.UnitId))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_unit_duplicate"),
-						Row.UnitId);
-				}
-				if (Paths.Contains(Row.LogicalPath))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_inventory_path_duplicate"),
-						Row.LogicalPath);
-				}
-				UnitIds.Add(Row.UnitId);
-				Paths.Add(Row.LogicalPath);
-				OutRows.Add(MoveTemp(Row));
+					if (Item->GetKind()
+						!= EHjsonNodeKind::Object)
+					{
+						return FailNode(OutError, TEXT("semantic_workspace_inventory_invalid"),
+							TEXT("Each workspace inventory entry must be an object."), Item.Get(), MakeShared<FJsonValueString>(TEXT("object")), false);
+					}
+					FInventoryRow Row;
+					Row.SourceNode = &Item.Get();
+					FString KindText;
+					if (!RequiredString(
+							Item.Get(),
+							TEXT("unit_id"),
+							Row.UnitId,
+							OutError)
+						|| !RequiredString(
+							Item.Get(),
+							TEXT("public_ref"),
+							Row.PublicRef,
+							OutError)
+						|| !RequiredString(
+							Item.Get(),
+							TEXT("unit_kind"),
+							KindText,
+							OutError)
+						|| !RequiredString(
+							Item.Get(),
+							TEXT("logical_path"),
+							Row.LogicalPath,
+							OutError)
+						|| !OptionalString(
+							Item.Get(),
+							TEXT("document_path"),
+							Row.DocumentPath,
+							OutError)
+						|| !OptionalString(
+							Item.Get(),
+							TEXT("unit_pointer"),
+							Row.UnitPointer,
+							OutError)
+						|| !RequiredString(
+							Item.Get(),
+							TEXT("content_hash"),
+							Row.ContentHash,
+							OutError)
+						|| !OptionalString(
+							Item.Get(),
+							TEXT("edit_hash"),
+							Row.EditHash,
+							OutError))
+					{
+						return false;
+					}
+					if (Row.DocumentPath.IsEmpty())
+					{
+						Row.DocumentPath = Row.LogicalPath;
+					}
+					if (Row.DocumentPath.IsEmpty())
+					{
+						return FailField(OutError, TEXT("semantic_workspace_inventory_invalid"),
+							TEXT("The inventory entry has neither a document path nor a logical path."), Item.Get(),
+							TEXT("document_path"), MakeShared<FJsonValueString>(TEXT("non-empty logical document path")));
+					}
+					if (Row.UnitPointer.IsEmpty())
+					{
+						Row.UnitPointer = TEXT("/unit");
+					}
+					if (const FHjsonNode* ContentFiles = Item->Get(TEXT("content_files")))
+					{
+						if (ContentFiles->GetKind() != EHjsonNodeKind::Array)
+							return FailNode(OutError, TEXT("semantic_workspace_content_files_invalid"),
+								TEXT("The inventory content_files field must be an array."), *ContentFiles, MakeShared<FJsonValueString>(TEXT("array")), false);
+						for (const auto& File : ContentFiles->GetItems())
+						{
+							if (File->GetKind() != EHjsonNodeKind::String)
+								return FailNode(OutError, TEXT("semantic_workspace_content_files_invalid"),
+									TEXT("Each inventory content_files entry must be a string."), File.Get(), MakeShared<FJsonValueString>(TEXT("string")), false);
+							Row.ContentFiles.Add(File->GetText());
+						}
+					}
+					Row.Envelope = Item->Get(TEXT("envelope"));
+					if (Row.Envelope != nullptr
+						&& Row.Envelope->GetKind() != EHjsonNodeKind::Object)
+					{
+						return FailNode(OutError, TEXT("semantic_workspace_inventory_invalid"),
+							TEXT("The captured inventory envelope must be an object."), *Row.Envelope, MakeShared<FJsonValueString>(TEXT("object")), false);
+					}
+					if (!ParseUnitKind(KindText, Row.UnitKind))
+					{
+						return FailField(OutError, TEXT("semantic_workspace_inventory_invalid"),
+							TEXT("The inventory unit_kind is unsupported."), Item.Get(), TEXT("unit_kind"), UnitKindChoices());
+					}
+					if (UnitIds.Contains(Row.UnitId))
+					{
+						return FailField(OutError, TEXT("semantic_workspace_unit_duplicate"),
+							TEXT("The workspace inventory contains a duplicate unit identity."), Item.Get(), TEXT("unit_id"),
+							MakeShared<FJsonValueString>(TEXT("unique unit identity")), false);
+					}
+					if (PublicRefs.Contains(Row.PublicRef))
+					{
+						return FailField(OutError, TEXT("semantic_workspace_public_ref_duplicate"),
+							TEXT("The workspace inventory contains a duplicate public reference."), Item.Get(), TEXT("public_ref"),
+							MakeShared<FJsonValueString>(TEXT("unique public reference")));
+					}
+					if (LogicalPaths.Contains(Row.LogicalPath))
+					{
+						return FailField(OutError, TEXT("semantic_workspace_inventory_path_duplicate"),
+							TEXT("The workspace inventory contains a duplicate logical path."), Item.Get(), TEXT("logical_path"),
+							MakeShared<FJsonValueString>(TEXT("unique logical path")));
+					}
+					UnitIds.Add(Row.UnitId);
+					PublicRefs.Add(Row.PublicRef);
+					LogicalPaths.Add(Row.LogicalPath);
+					OutRows.Add(MoveTemp(Row));
+					return true;
+				};
+				if (!ReadItem()) Diagnostics.Append(OutError);
 			}
-			return true;
+			OutError = MoveTemp(Diagnostics);
+			return !OutError.HasErrors();
 		}
 
 		const FHjsonNode* FindEntry(
@@ -1350,7 +2042,7 @@ namespace UE::UAI::HjsonWorkspace
 				return Fail(
 					OutError,
 					TEXT(
-						"workspace_source_directory_missing"),
+						"workspace_source_directory_missing"), TEXT("The semantic workspace directory does not exist."),
 					Root);
 			}
 			if (IsReparsePoint(Root))
@@ -1358,7 +2050,7 @@ namespace UE::UAI::HjsonWorkspace
 				return Fail(
 					OutError,
 					TEXT(
-						"workspace_reparse_point_rejected"),
+						"workspace_reparse_point_rejected"), TEXT("The semantic workspace directory is a reparse point."),
 					Root);
 			}
 			const FString FullManifest =
@@ -1368,7 +2060,7 @@ namespace UE::UAI::HjsonWorkspace
 				return Fail(
 					OutError,
 					TEXT(
-						"semantic_workspace_manifest_missing"),
+						"semantic_workspace_manifest_missing"), TEXT("The directory has no semantic workspace metadata; export the workspace again."),
 					ManifestPath);
 			}
 			if (!ReadDocument(
@@ -1383,115 +2075,335 @@ namespace UE::UAI::HjsonWorkspace
 			}
 			OutParsed.Manifest =
 				&OutParsed.ManifestDocument->GetRoot().Get();
-			if (OutParsed.Manifest->GetKind()
-				!= EHjsonNodeKind::Object
-				|| !ParseInventory(
-					*OutParsed.Manifest,
-					OutInventory,
-					OutError))
+			FWorkspaceError Diagnostics;
+			if (OutParsed.Manifest->GetKind() != EHjsonNodeKind::Object)
+				return Fail(OutError, TEXT("semantic_workspace_inventory_invalid"), TEXT("The workspace metadata root must be an object."), ManifestPath);
+			if (!ParseInventory(*OutParsed.Manifest, OutInventory, OutError))
 			{
-				return false;
+				Diagnostics.Append(OutError);
+				Diagnostics.MarkUnchecked(TEXT("inventory_units"), FString(), TEXT("invalid_inventory_rows"));
 			}
 
-			TSet<FString> ExpectedPaths;
+			TSet<FString> ManagedDocumentPaths;
+			TSet<FString> DocumentPointers;
+			TMap<FString, FHjsonDocumentPtr> Documents;
+			TMap<FString, FHjsonDocumentPtr> ContentDocuments;
+			TSet<FString> FailedDocuments;
+			TArray<FString> SourcePaths;
+			for (const FInventoryRow& Row : OutInventory)
+			{
+				SourcePaths.AddUnique(Row.DocumentPath);
+			}
+			SourcePaths.Sort();
+			for (const FString& Path : SourcePaths)
+			{
+				FString SafePath;
+				FWorkspaceError Error;
+				FHjsonDocumentPtr Document;
+				if (!SafeRelativePath(Path, SafePath))
+				{
+					Fail(Error, TEXT("workspace_path_invalid"), TEXT("A managed document path must be relative and remain inside the workspace."),
+						FString(), TEXT("/"), MakeShared<FJsonValueString>(Path));
+					Diagnostics.Append(Error);
+					continue;
+				}
+				if (!ReadDocument(FPaths::Combine(Root, SafePath), SafePath, Resources, Document, Error))
+				{
+					Diagnostics.Append(Error);
+					FailedDocuments.Add(SafePath);
+					continue;
+				}
+				Documents.Add(SafePath, Document);
+				ContentDocuments.Add(SafePath, Document);
+				OutParsed.UnitDocuments.Add(Document);
+			}
+
 			OutParsed.UnitDocuments.Reserve(
 				OutInventory.Num());
 			OutParsed.UnitRows.Reserve(OutInventory.Num());
 			for (FInventoryRow& Row : OutInventory)
 			{
-				FString Relative;
-				if (!SafeRelativePath(
-						Row.LogicalPath,
-						Relative))
+				OutError.Reset();
+				auto ReadRow = [&]() -> bool
 				{
-					return Fail(
-						OutError,
-						TEXT("workspace_path_invalid"),
-						Row.LogicalPath);
+					FString Relative;
+					if (!SafeRelativePath(
+							Row.DocumentPath,
+							Relative))
+					{
+						const auto* DocumentPath = Row.SourceNode->Get(TEXT("document_path"));
+						const FString Field = DocumentPath && !DocumentPath->GetText().TrimStartAndEnd().IsEmpty() ? TEXT("document_path") : TEXT("logical_path");
+						return FailField(OutError, TEXT("workspace_path_invalid"),
+							TEXT("The inventory document path must be relative and remain inside the workspace."), *Row.SourceNode, Field,
+							MakeShared<FJsonValueString>(TEXT("relative workspace document path")), false);
+					}
+					Row.DocumentPath = Relative;
+					if (FailedDocuments.Contains(Relative)) return false;
+					for (int32 Index = 0; Index < Row.ContentFiles.Num(); ++Index)
+					{
+						const FString& ContentPath = Row.ContentFiles[Index];
+						FString SafePath;
+						if (!SafeRelativePath(ContentPath, SafePath))
+							return FailNode(OutError, TEXT("workspace_path_invalid"),
+								TEXT("The content file path must be relative and remain inside the workspace."),
+								Row.SourceNode->Get(TEXT("content_files"))->GetItems()[Index].Get(),
+								MakeShared<FJsonValueString>(TEXT("relative workspace document path")), false);
+						if (!ManagedDocumentPaths.Contains(SafePath))
+						{
+							ManagedDocumentPaths.Add(SafePath);
+							OutParsed.ManagedPaths.Add(SafePath);
+						}
+					}
+					if (!Row.LogicalPath.IsEmpty())
+					{
+						FString Logical;
+						if (!SafeRelativePath(Row.LogicalPath, Logical))
+						{
+							return FailField(OutError, TEXT("workspace_path_invalid"),
+								TEXT("The inventory logical path must be relative and remain inside the workspace."), *Row.SourceNode, TEXT("logical_path"),
+								MakeShared<FJsonValueString>(TEXT("relative workspace document path")), false);
+						}
+						Row.LogicalPath = Logical;
+					}
+					if (DocumentPointers.Contains(Row.DocumentPath + TEXT("|") + Row.UnitPointer))
+					{
+						auto Diagnostic = HjsonNodeFailure(TEXT("semantic_workspace_unit_pointer_duplicate"),
+							TEXT("More than one inventory unit points to the same document node."), TEXT("workspace_resolve"), *Row.SourceNode, nullptr, false);
+						Diagnostic.ActualValue = MakeShared<FJsonValueNumber>(2);
+						Diagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+						Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Row.DocumentPath + TEXT("|") + Row.UnitPointer);
+						return FailAtNode(OutError, MoveTemp(Diagnostic), *Row.SourceNode);
+					}
+					DocumentPointers.Add(Row.DocumentPath + TEXT("|") + Row.UnitPointer);
+					const FString FullPath =
+						FPaths::Combine(Root, Relative);
+					if (!IFileManager::Get().FileExists(*FullPath))
+					{
+						const auto* DocumentPath = Row.SourceNode->Get(TEXT("document_path"));
+						const auto* PathNode = DocumentPath && !DocumentPath->GetText().TrimStartAndEnd().IsEmpty()
+							? DocumentPath : Row.SourceNode->Get(TEXT("logical_path"));
+						return FailNode(OutError, TEXT("semantic_workspace_unit_missing"),
+							TEXT("A document declared by the workspace inventory does not exist."), *PathNode,
+							MakeShared<FJsonValueString>(TEXT("existing workspace document")));
+					}
+					FHjsonDocumentPtr* ExistingDocument = Documents.Find(Row.DocumentPath);
+					if (ExistingDocument == nullptr)
+					{
+						FHjsonDocumentPtr Document;
+						if (!ReadDocument(
+								FullPath,
+								Row.DocumentPath,
+								Resources,
+								Document,
+								OutError)
+							|| !Document.IsValid())
+						{
+							return false;
+						}
+						Documents.Add(Row.DocumentPath, Document);
+						OutParsed.UnitDocuments.Add(Document);
+						ExistingDocument = Documents.Find(Row.DocumentPath);
+					}
+					const FHjsonNode* Unit = (*ExistingDocument)->Find(Row.UnitPointer);
+					if (Unit == nullptr
+						|| Unit->GetKind()
+							!= EHjsonNodeKind::Object)
+					{
+						if (Unit) return FailNode(OutError, TEXT("semantic_workspace_unit_document_invalid"),
+							TEXT("The inventory unit pointer does not identify an object in its document."), *Unit,
+							MakeShared<FJsonValueString>(TEXT("object")));
+						auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("semantic_workspace_unit_document_invalid"),
+							TEXT("The inventory unit pointer does not identify an object in its document."), TEXT("workspace_resolve"));
+						Diagnostic.ActualValuePresent = false;
+						Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object"));
+						Diagnostic.Source.JsonPath = Row.UnitPointer;
+						OutError.SetFailure(MoveTemp(Diagnostic), Row.DocumentPath, Row.UnitPointer);
+						OutError.Locate(*(*ExistingDocument)->GetRoot());
+						return false;
+					}
+					{
+						TSet<FString> Expanding;
+						TFunction<bool(const FHjsonNodeRef&, FHjsonNodePtr&)> Expand;
+						Expand = [&](const FHjsonNodeRef& Node, FHjsonNodePtr& Out) -> bool
+						{
+							if (Node->GetKind() == EHjsonNodeKind::Object)
+							{
+								const FHjsonNode* Reference = Node->Get(TEXT("content_ref"));
+								if (Reference && Node->GetEntries().Num() == 1
+									&& Reference->GetKind() == EHjsonNodeKind::String)
+								{
+									FString Path;
+									if (!SafeRelativePath(Reference->GetText(), Path))
+										return FailNode(OutError, TEXT("workspace_path_invalid"),
+											TEXT("The content reference must be relative and remain inside the workspace."), *Reference,
+											MakeShared<FJsonValueString>(TEXT("relative workspace document path")), false);
+									if (!ManagedDocumentPaths.Contains(Path))
+									{
+										ManagedDocumentPaths.Add(Path);
+										OutParsed.ManagedPaths.Add(Path);
+									}
+									if (Expanding.Contains(Path))
+										return FailNode(OutError, TEXT("semantic_workspace_content_reference_cycle"),
+											TEXT("This content reference forms a cycle."), *Reference, MakeShared<FJsonValueString>(TEXT("acyclic document reference")));
+									if (FailedDocuments.Contains(Path)) return false;
+									auto* ContentDocument = ContentDocuments.Find(Path);
+									if (!ContentDocument)
+									{
+										FHjsonDocumentPtr ParsedContent;
+										if (!ReadDocument(FPaths::Combine(Root, Path), Path, Resources, ParsedContent, OutError))
+										{
+											FailedDocuments.Add(Path);
+											return false;
+										}
+										ContentDocuments.Add(Path, ParsedContent);
+										OutParsed.UnitDocuments.Add(ParsedContent);
+										ContentDocument = ContentDocuments.Find(Path);
+									}
+									const auto& ContentRoot = (*ContentDocument)->GetRoot();
+									const auto* Content = ContentRoot->GetEntries().FindByPredicate([](const auto& Field) {
+										return Field.Key == TEXT("value"); });
+									if (ContentRoot->GetKind() != EHjsonNodeKind::Object)
+										return FailNode(OutError, TEXT("semantic_workspace_content_value_missing"),
+											TEXT("The referenced content document must be an object containing value."), *ContentRoot,
+											MakeShared<FJsonValueString>(TEXT("object")));
+									if (!Content) return FailField(OutError, TEXT("semantic_workspace_content_value_missing"),
+										TEXT("The referenced content document requires a value field."), *ContentRoot, TEXT("value"));
+									Expanding.Add(Path);
+									const bool bExpanded = Expand(Content->Value, Out);
+									Expanding.Remove(Path);
+									return bExpanded;
+								}
+								bool bChildrenValid = true;
+							TArray<TPair<FString, FHjsonNodeRef>> Entries;
+								for (const auto& Field : Node->GetEntries())
+								{
+									FHjsonNodePtr Value;
+									if (!Expand(Field.Value, Value))
+								{
+									Diagnostics.Append(OutError);
+									OutError.Reset();
+									bChildrenValid = false;
+									continue;
+								}
+									Entries.Emplace(Field.Key, Value.ToSharedRef());
+								}
+								if (!bChildrenValid) return false;
+							Out = MakeShared<FHjsonNode>(EHjsonNodeKind::Object, Node->GetProvenance(),
+									FString(), FString(), false, TArray<FHjsonNodeRef>{}, MoveTemp(Entries));
+							}
+							else if (Node->GetKind() == EHjsonNodeKind::Array)
+							{
+								bool bChildrenValid = true;
+							TArray<FHjsonNodeRef> Items;
+								for (const auto& Item : Node->GetItems())
+								{
+									FHjsonNodePtr Value;
+									if (!Expand(Item, Value))
+								{
+									Diagnostics.Append(OutError);
+									OutError.Reset();
+									bChildrenValid = false;
+									continue;
+								}
+									Items.Add(Value.ToSharedRef());
+								}
+								if (!bChildrenValid) return false;
+							Out = MakeShared<FHjsonNode>(EHjsonNodeKind::Array, Node->GetProvenance(),
+									FString(), FString(), false, MoveTemp(Items), TArray<TPair<FString, FHjsonNodeRef>>{});
+							}
+							else Out = Node; // Preserve scalar lexemes, including exact integers.
+							return true;
+					};
+					FHjsonNodePtr Expanded;
+					const FHjsonNodeRef Original = MakeShared<FHjsonNode>(*Unit);
+					if (!Expand(Original, Expanded)) return false;
+					OutParsed.AssembledRows.Add(Expanded.ToSharedRef());
+					Unit = Expanded.Get();
 				}
-				Row.LogicalPath = Relative;
-				ExpectedPaths.Add(Relative);
-				const FString FullPath =
-					FPaths::Combine(Root, Relative);
-				if (!IFileManager::Get().FileExists(*FullPath))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_unit_missing"),
-						Relative);
-				}
-				FHjsonDocumentPtr Document;
-				if (!ReadDocument(
-						FullPath,
-						Relative,
-						Resources,
-						Document,
-						OutError)
-					|| !Document.IsValid())
-				{
-					return false;
-				}
-				const FHjsonNode* Unit =
-					FindEntry(
-						Document->GetRoot().Get(),
-						TEXT("unit"));
-				if (Unit == nullptr
-					|| Unit->GetKind()
-						!= EHjsonNodeKind::Object)
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_unit_document_invalid"),
-						Relative);
-				}
-				OutParsed.UnitDocuments.Add(Document);
 				OutParsed.UnitRows.Add(Unit);
-				OutParsed.ManagedPaths.Add(Relative);
-			}
+				OutParsed.UnitEnvelopes.Add(Row.Envelope);
+				if (!ManagedDocumentPaths.Contains(Row.DocumentPath))
+				{
+					ManagedDocumentPaths.Add(Row.DocumentPath);
+					OutParsed.ManagedPaths.Add(Row.DocumentPath);
+				}
 
-			TArray<FString> Files;
-			IFileManager::Get().FindFilesRecursive(
-				Files,
-				*Root,
-				TEXT("*.hjson"),
-				true,
-				false);
-			FString RelativeBase = Root;
-			if (!RelativeBase.EndsWith(TEXT("/")))
-			{
-				RelativeBase += TEXT("/");
+				return true;
+				};
+				if (!ReadRow())
+				{
+					Diagnostics.Append(OutError);
+					Diagnostics.MarkUnchecked(TEXT("unit_semantics"), Row.DocumentPath, TEXT("unit_or_dependency_invalid"));
+				}
 			}
-			for (FString File : Files)
+			for (const TPair<FString, FHjsonDocumentPtr>& DocumentPair : Documents)
 			{
-				if (IsReparsePoint(File))
+				OutError.Reset();
+				auto ReadInterface = [&]() -> bool
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"workspace_reparse_point_rejected"),
-						File);
-				}
-				if (!FPaths::MakePathRelativeTo(
-						File,
-						*RelativeBase))
-				{
-					return Fail(
-						OutError,
-						TEXT("workspace_path_escape"),
-						File);
-				}
-				FPaths::NormalizeFilename(File);
-				if (File != ManifestPath
-					&& !ExpectedPaths.Contains(File))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_unit_extra"),
-						File);
-				}
+					const FHjsonNode* InterfaceRef =
+						DocumentPair.Value->Find(TEXT("/interface_ref"));
+					if (InterfaceRef == nullptr)
+					{
+						return true;
+					}
+					if (InterfaceRef->GetKind() != EHjsonNodeKind::String)
+					{
+						return Fail(
+							OutError,
+							TEXT("semantic_workspace_interface_ref_invalid"), TEXT("The interface_ref field must be a string."),
+							DocumentPair.Key,
+							TEXT("/interface_ref"));
+					}
+					const FString InterfaceFileName = InterfaceRef->GetText();
+					if (InterfaceFileName.IsEmpty()
+						|| FPaths::GetCleanFilename(InterfaceFileName)
+							!= InterfaceFileName
+						|| !InterfaceFileName.EndsWith(
+							TEXT(".interfaces.hjson"),
+							ESearchCase::IgnoreCase))
+					{
+						return Fail(
+							OutError,
+							TEXT("semantic_workspace_interface_ref_invalid"), TEXT("The interface reference must be a filename ending in .interfaces.hjson, without directory components."),
+							DocumentPair.Key,
+							TEXT("/interface_ref"));
+					}
+					FString InterfacePath;
+					if (!SafeRelativePath(
+							FPaths::Combine(
+								FPaths::GetPath(DocumentPair.Key),
+								InterfaceFileName),
+							InterfacePath))
+					{
+						return Fail(
+							OutError,
+							TEXT("semantic_workspace_interface_ref_invalid"), TEXT("The interface reference cannot be resolved inside the workspace."),
+							DocumentPair.Key,
+							TEXT("/interface_ref"));
+					}
+					if (!IFileManager::Get().FileExists(
+							*FPaths::Combine(Root, InterfacePath)))
+					{
+						return Fail(
+							OutError,
+							TEXT("semantic_workspace_interface_missing"), TEXT("The referenced interface document does not exist."),
+							InterfacePath);
+					}
+					if (!ManagedDocumentPaths.Contains(InterfacePath))
+					{
+						ManagedDocumentPaths.Add(InterfacePath);
+						OutParsed.ManagedPaths.Add(InterfacePath);
+					}
+					return true;
+				};
+				if (!ReadInterface()) Diagnostics.Append(OutError);
+			}
+			if (Diagnostics.HasErrors())
+			{
+				Diagnostics.MarkUnchecked(TEXT("workspace_semantics"), FString(), TEXT("invalid_units"));
+				OutError = MoveTemp(Diagnostics);
+				return false;
 			}
 			return true;
 		}
@@ -1541,7 +2453,7 @@ namespace UE::UAI::HjsonWorkspace
 					return Fail(
 						OutError,
 						TEXT(
-							"workspace_source_file_missing"),
+							"workspace_source_file_missing"), TEXT("The embedded semantic workspace file does not exist."),
 						Path);
 				}
 				if (!ReadDocument(
@@ -1574,7 +2486,7 @@ namespace UE::UAI::HjsonWorkspace
 				return Fail(
 					OutError,
 					TEXT(
-						"semantic_workspace_envelope_invalid"),
+						"semantic_workspace_envelope_invalid"), TEXT("The embedded workspace requires a manifest object and a units array."),
 					SourceUnit);
 			}
 			if (!ParseInventory(
@@ -1593,8 +2505,9 @@ namespace UE::UAI::HjsonWorkspace
 						? TEXT(
 							"semantic_workspace_unit_missing")
 						: TEXT(
-							"semantic_workspace_unit_extra"),
-					SourceUnit);
+							"semantic_workspace_unit_extra"), TEXT("The embedded unit count differs from the workspace inventory count."),
+					SourceUnit, Units->GetProvenance().GetJsonPointer(),
+					MakeShared<FJsonValueNumber>(Units->GetItems().Num()), MakeShared<FJsonValueNumber>(OutInventory.Num()));
 			}
 			for (int32 Index = 0;
 				Index < OutInventory.Num();
@@ -1612,11 +2525,12 @@ namespace UE::UAI::HjsonWorkspace
 					return Fail(
 						OutError,
 						TEXT(
-							"semantic_workspace_embedded_inventory_invalid"),
+							"semantic_workspace_embedded_inventory_invalid"), TEXT("An embedded unit must be an object at the array position declared by its inventory logical path."),
 						SourceUnit);
 				}
 				OutParsed.UnitRows.Add(
 					&Units->GetItems()[Index].Get());
+				OutParsed.UnitEnvelopes.Add(nullptr);
 				OutParsed.ManagedPaths.Add(ExpectedPath);
 			}
 			return true;
@@ -1633,12 +2547,9 @@ namespace UE::UAI::HjsonWorkspace
 				|| Revision->GetKind()
 					!= EHjsonNodeKind::Object)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_manifest_field_invalid"),
-					Manifest.GetProvenance().GetSourceUnit(),
-					TEXT("/base_state_revision"));
+				return FailField(OutError, TEXT("semantic_workspace_manifest_field_invalid"),
+					TEXT("Workspace metadata requires a base_state_revision object."), Manifest, TEXT("base_state_revision"),
+					MakeShared<FJsonValueString>(TEXT("object")), false);
 			}
 			FString SourceId;
 			FString Generation;
@@ -1667,12 +2578,8 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(Generation),
 				Sequence);
 			return OutRevision.IsValid()
-				|| Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_manifest_field_invalid"),
-					Manifest.GetProvenance().GetSourceUnit(),
-					TEXT("/base_state_revision"));
+				|| FailTypedValidation(OutError, Contract::FDiagnostic::WrapFailure(TEXT("semantic_workspace_manifest_field_invalid"),
+					OutRevision.GetValidationDiagnostic()), *Revision);
 		}
 
 		bool ParseStructuralEdits(
@@ -1688,25 +2595,22 @@ namespace UE::UAI::HjsonWorkspace
 				|| Edits->GetKind()
 					!= EHjsonNodeKind::Array)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_structural_edits_invalid"),
-					Manifest.GetProvenance().GetSourceUnit(),
-					TEXT("/structural_edits"));
+				return FailField(OutError, TEXT("semantic_workspace_structural_edits_invalid"),
+					TEXT("Workspace metadata requires a structural_edits array."), Manifest, TEXT("structural_edits"),
+					MakeShared<FJsonValueString>(TEXT("array")), false);
 			}
+			FWorkspaceError Diagnostics;
 			TSet<FString> EditIds;
 			for (const FHjsonNodeRef& Row : Edits->GetItems())
 			{
+				OutError.Reset();
+				auto ParseEdit = [&]() -> bool
+				{
 				if (Row->GetKind()
 					!= EHjsonNodeKind::Object)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_structural_edit_invalid"),
-						Row->GetProvenance().GetSourceUnit(),
-						Row->GetProvenance().GetJsonPointer());
+					return FailNode(OutError, TEXT("semantic_workspace_structural_edit_invalid"),
+						TEXT("Each structural edit must be an object."), Row.Get(), MakeShared<FJsonValueString>(TEXT("object")), false);
 				}
 				FString EditId;
 				FString KindText;
@@ -1754,20 +2658,20 @@ namespace UE::UAI::HjsonWorkspace
 				{
 					return false;
 				}
-				EStructuralEditKind Kind;
-				if (!ParseStructuralEditKind(
-						KindText,
-						Kind)
-					|| EditIds.Contains(EditId))
+				if (EditIds.Contains(EditId))
 				{
-					return Fail(
-						OutError,
-						EditIds.Contains(EditId)
-							? TEXT(
-								"semantic_workspace_structural_edit_duplicate")
-							: TEXT(
-								"semantic_workspace_structural_edit_invalid"),
-						EditId);
+					return FailField(OutError, TEXT("semantic_workspace_structural_edit_duplicate"),
+						TEXT("This structural edit identity occurs more than once."), Row.Get(), TEXT("edit_id"),
+						MakeShared<FJsonValueString>(TEXT("unique edit identity")), false);
+				}
+				EStructuralEditKind Kind;
+				if (!ParseStructuralEditKind(KindText, Kind))
+				{
+					TArray<TSharedPtr<FJsonValue>> Allowed;
+					for (uint8 Index = 0; Index <= static_cast<uint8>(EStructuralEditKind::SetOrder); ++Index)
+						Allowed.Add(MakeShared<FJsonValueString>(LexToString(static_cast<EStructuralEditKind>(Index))));
+					return FailField(OutError, TEXT("semantic_workspace_structural_edit_invalid"),
+						TEXT("The structural edit kind is unsupported."), Row.Get(), TEXT("kind"), MakeShared<FJsonValueArray>(MoveTemp(Allowed)));
 				}
 				FStructuralEdit Edit(
 					EditId,
@@ -1776,54 +2680,70 @@ namespace UE::UAI::HjsonWorkspace
 					SubjectUnitId,
 					ReplacementUnitId,
 					RelationId,
-					MoveTemp(OrderedUnitIds));
+					MoveTemp(OrderedUnitIds), Row->GetProvenance());
 				if (!Edit.IsValid())
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_structural_edit_invalid"),
-						EditId);
+					return FailTypedValidation(OutError, Contract::FDiagnostic::WrapFailure(TEXT("semantic_workspace_structural_edit_invalid"),
+						Edit.GetValidationDiagnostic()), Row.Get());
 				}
 				if (Model.FindUnit(OwnerUnitId) == nullptr)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_reference_unresolved"),
-						EditId);
+					return FailField(OutError, TEXT("semantic_workspace_reference_unresolved"),
+						TEXT("The structural edit owner is absent from the workspace."), Row.Get(), TEXT("owner_unit_id"),
+						MakeShared<FJsonValueString>(TEXT("existing workspace unit")), false);
 				}
-				for (const FString& Reference : {
-					SubjectUnitId,
-					ReplacementUnitId})
+				for (const auto& Reference : {TPair<FString, FString>(TEXT("subject_unit_id"), SubjectUnitId),
+					TPair<FString, FString>(TEXT("replacement_unit_id"), ReplacementUnitId)})
 				{
-					if (!Reference.IsEmpty()
-						&& Model.FindUnit(Reference) == nullptr)
+					if (!Reference.Value.IsEmpty()
+						&& Model.FindUnit(Reference.Value) == nullptr)
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"semantic_workspace_reference_unresolved"),
-							EditId);
+						return FailField(OutError, TEXT("semantic_workspace_reference_unresolved"),
+							FString::Printf(TEXT("Structural edit field '%s' refers to a unit absent from the workspace."), *Reference.Key),
+							Row.Get(), Reference.Key, MakeShared<FJsonValueString>(TEXT("existing workspace unit")), false);
 					}
 				}
-				for (const FString& Reference :
-					Edit.GetOrderedUnitIds())
+				for (int32 Index = 0; Index < Edit.GetOrderedUnitIds().Num(); ++Index)
 				{
+					const FString& Reference = Edit.GetOrderedUnitIds()[Index];
 					if (Model.FindUnit(Reference) == nullptr)
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"semantic_workspace_reference_unresolved"),
-							EditId);
+						const auto* Entries = Row->Get(TEXT("ordered_unit_ids"));
+						const auto* Entry = Entries && Entries->GetItems().IsValidIndex(Index) ? &Entries->GetItems()[Index].Get() : nullptr;
+						if (Entry) return FailNode(OutError, TEXT("semantic_workspace_reference_unresolved"),
+							TEXT("This ordered unit referenced by the structural edit is absent from the workspace."), *Entry,
+							MakeShared<FJsonValueString>(TEXT("existing workspace unit")), false);
+						return FailField(OutError, TEXT("semantic_workspace_reference_unresolved"),
+							TEXT("An ordered unit referenced by the structural edit is absent from the workspace."), Row.Get(), TEXT("ordered_unit_ids"), nullptr, false);
 					}
 				}
 				EditIds.Add(EditId);
 				OutEdits.Add(MoveTemp(Edit));
+				return true;
+				};
+				if (!ParseEdit())
+				{
+					OutError.Locate(Row->GetProvenance());
+					Diagnostics.Append(OutError);
+					Diagnostics.MarkUnchecked(TEXT("structural_edit"), Row->GetProvenance().GetSourceUnit(), TEXT("edit_invalid"));
+				}
 			}
-			return true;
+			OutError = MoveTemp(Diagnostics);
+			return !OutError.HasErrors();
 		}
+	}
+
+	bool TryCollectSemanticWorkspaceManagedPaths(
+		const FString& WorkspaceRoot, FUeAgentResourceTracker& Resources,
+		TArray<FString>& OutPaths, FWorkspaceError& OutError)
+	{
+		FParsedSource Parsed;
+		TArray<FInventoryRow> Inventory;
+		if (!ReadDirectorySource(FWorkspaceSource::Directory(WorkspaceRoot), Resources, Parsed, Inventory, OutError))
+			return false;
+		OutPaths = MoveTemp(Parsed.ManagedPaths);
+		OutPaths.AddUnique(ManifestPath);
+		return true;
 	}
 
 	static bool TryResolveSemanticWorkspaceInternal(
@@ -1916,10 +2836,11 @@ namespace UE::UAI::HjsonWorkspace
 			return Fail(
 				OutError,
 				TEXT(
-					"semantic_workspace_schema_unsupported"),
+					"semantic_workspace_schema_unsupported"), TEXT("The semantic workspace schema is unsupported."),
 				Parsed.Manifest->GetProvenance()
 					.GetSourceUnit(),
-				TEXT("/workspace_schema"));
+				Parsed.Manifest->Get(TEXT("workspace_schema"))->GetProvenance().GetJsonPointer(),
+				MakeShared<FJsonValueString>(Schema), MakeShared<FJsonValueString>(GetSemanticWorkspaceSchemaId()));
 		}
 		ESemanticWorkspaceMode Mode;
 		if (!ParseMode(ModeText, Mode))
@@ -1927,20 +2848,23 @@ namespace UE::UAI::HjsonWorkspace
 			return Fail(
 				OutError,
 				TEXT(
-					"semantic_workspace_mode_unsupported"),
+					"semantic_workspace_mode_unsupported"), TEXT("The semantic workspace import mode is unsupported."),
 				Parsed.Manifest->GetProvenance()
 					.GetSourceUnit(),
-				TEXT("/import_mode"));
+				Parsed.Manifest->Get(TEXT("import_mode"))->GetProvenance().GetJsonPointer(), MakeShared<FJsonValueString>(ModeText),
+				MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{MakeShared<FJsonValueString>(TEXT("state")),
+					MakeShared<FJsonValueString>(TEXT("seed")), MakeShared<FJsonValueString>(TEXT("edit_bundle"))}));
 		}
 		if (Mode != ExpectedMode)
 		{
 			return Fail(
 				OutError,
 				TEXT(
-					"semantic_workspace_mode_mismatch"),
+					"semantic_workspace_mode_mismatch"), TEXT("The workspace import mode differs from the mode required by this operation."),
 				Parsed.Manifest->GetProvenance()
 					.GetSourceUnit(),
-				TEXT("/import_mode"));
+				Parsed.Manifest->Get(TEXT("import_mode"))->GetProvenance().GetJsonPointer(),
+				MakeShared<FJsonValueString>(ModeText), MakeShared<FJsonValueString>(LexToString(ExpectedMode)));
 		}
 		if (Inventory.Num() != Parsed.UnitRows.Num())
 		{
@@ -1950,75 +2874,292 @@ namespace UE::UAI::HjsonWorkspace
 					? TEXT(
 						"semantic_workspace_unit_missing")
 					: TEXT(
-						"semantic_workspace_unit_extra"));
+						"semantic_workspace_unit_extra"), TEXT("The resolved document count differs from the workspace inventory count."),
+				Parsed.Manifest->GetProvenance().GetSourceUnit(), Parsed.Manifest->GetProvenance().GetJsonPointer(),
+				MakeShared<FJsonValueNumber>(Parsed.UnitRows.Num()), MakeShared<FJsonValueNumber>(Inventory.Num()));
 		}
 
 		TArray<FSemanticUnit> Units;
 		Units.Reserve(Parsed.UnitRows.Num());
+		TArray<FString> EditedUnitIds;
+		TMap<FString, TSet<FString>> ResolvedKeyedOperationRoots;
+		TMap<FString, FSourceProvenance> UnitSources;
+		TMap<FString, FHjsonDocumentRef> UnitSourceDocuments;
+		TMap<FString, FSemanticUnit> BaselineUnits;
 		TSet<FString> SeenUnitIds;
+		TMap<FString, FString> PublicRefToUnitId;
+		for (const FInventoryRow& Row : Inventory)
+		{
+			PublicRefToUnitId.Add(Row.PublicRef, Row.UnitId);
+		}
+		FWorkspaceError UnitDiagnostics;
 		for (int32 Index = 0;
 			Index < Parsed.UnitRows.Num();
 			++Index)
 		{
-			TOptional<FSemanticUnit> Unit;
-			if (!ParseSemanticUnit(
-					*Parsed.UnitRows[Index],
-					Resources,
-					Unit,
-					OutError)
-				|| !Unit.IsSet())
+			OutError.Reset();
+			auto ParseUnit = [&]() -> bool
 			{
+				const FHjsonNode* UnitEnvelope =
+					Parsed.UnitEnvelopes.IsValidIndex(Index)
+						? Parsed.UnitEnvelopes[Index]
+						: nullptr;
+				if (bAllowManagedUnitEdits && UnitEnvelope == nullptr)
+				{
+					return Fail(
+						OutError,
+						TEXT(
+							"semantic_workspace_editable_envelope_"
+							"reexport_required"), TEXT("The editable unit has no captured envelope; export the workspace again."),
+						Inventory[Index].UnitId,
+						TEXT("/unit_inventory/envelope"));
+				}
+				TOptional<FSemanticUnit> Unit;
+				TOptional<bool> ManagedSemanticChanged;
+				TSet<FString> UnitResolvedKeyedOperationRoots;
+				FHjsonNodePtr UnitValueSources;
+				if (!ParseSemanticUnit(
+						*Parsed.UnitRows[Index],
+						UnitEnvelope,
+						Inventory[Index].UnitId,
+						LexToString(Inventory[Index].UnitKind),
+						PublicRefToUnitId,
+						Resources,
+						Unit,
+						ManagedSemanticChanged,
+						UnitResolvedKeyedOperationRoots,
+						UnitValueSources,
+						OutError)
+					|| !Unit.IsSet())
+				{
+					return false;
+				}
+				const FInventoryRow& InventoryRow =
+					Inventory[Index];
+				if (Source.GetKind() == EWorkspaceSourceKind::Directory)
+				{
+					const FHjsonNode& Row = *Parsed.UnitRows[Index];
+					UnitSources.Add(Unit->GetUnitId(), Row.GetProvenance());
+					const FHjsonNode* Values = Row.Get(TEXT("values"));
+					// A shallow root copy retains the parser's original child nodes and
+					// provenance, including expanded public file references. No reparse.
+					UnitSourceDocuments.Add(Unit->GetUnitId(), MakeShared<FHjsonDocument>(
+						Row.GetProvenance().GetSourceUnit(), UnitValueSources.IsValid()
+							? UnitValueSources.ToSharedRef() : MakeShared<FHjsonNode>(Values ? *Values : Row)));
+				}
+				if (!UnitResolvedKeyedOperationRoots.IsEmpty())
+					ResolvedKeyedOperationRoots.Add(Unit->GetUnitId(), MoveTemp(UnitResolvedKeyedOperationRoots));
+				if (bAllowManagedUnitEdits && InventoryRow.EditHash.IsEmpty())
+				{
+					return Fail(
+						OutError,
+						TEXT("semantic_workspace_edit_hash_reexport_required"), TEXT("The editable unit has no baseline edit digest; export the workspace again."),
+						InventoryRow.UnitId,
+						TEXT("/unit_inventory/edit_hash"));
+				}
+				if (SeenUnitIds.Contains(Unit->GetUnitId()))
+				{
+					auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("semantic_workspace_unit_duplicate"),
+						TEXT("More than one resolved document declares the same semantic unit."), TEXT("workspace_resolve"));
+					Diagnostic.PropertyPath = TEXT("unit_id");
+					Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Unit->GetUnitId());
+					return FailAtNode(OutError, MoveTemp(Diagnostic), *Parsed.UnitRows[Index]);
+				}
+				if (Unit->GetUnitId() != InventoryRow.UnitId)
+				{
+					auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("semantic_workspace_unit_extra"),
+						TEXT("The resolved semantic unit identity differs from its inventory entry."), TEXT("workspace_resolve"));
+					Diagnostic.PropertyPath = TEXT("unit_id");
+					Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Unit->GetUnitId());
+					Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(InventoryRow.UnitId);
+					return FailAtNode(OutError, MoveTemp(Diagnostic), *Parsed.UnitRows[Index]);
+				}
+				if (Unit->GetUnitKind()
+					!= InventoryRow.UnitKind)
+				{
+					return Fail(
+						OutError,
+						TEXT(
+							"semantic_workspace_unit_kind_mismatch"), TEXT("The resolved semantic unit kind differs from its inventory entry."),
+						Parsed.UnitRows[Index]->GetProvenance().GetSourceUnit(),
+						Parsed.UnitRows[Index]->GetProvenance().GetJsonPointer(),
+						MakeShared<FJsonValueString>(LexToString(Unit->GetUnitKind())), MakeShared<FJsonValueString>(LexToString(InventoryRow.UnitKind)));
+				}
+				TArray<uint8> RowBytes;
+				if (!TrySerializeSemanticUnitRow(Unit.GetValue(), RowBytes, OutError, InventoryRow.DocumentPath)) return false;
+				const FString ActualContentHash = Sha256(RowBytes);
+				const bool bContentHashChanged = ActualContentHash != InventoryRow.ContentHash;
+				// Reuse the writer's captured machine values, not the edited visible row.
+				// A hash match binds the complete unit (including identity/definition refs).
+				// Older envelopes may lack these values; unchanged rows remain usable.
+				if (!bContentHashChanged) BaselineUnits.Add(Unit->GetUnitId(), Unit.GetValue());
+				else if (const FHjsonNode* Captured = UnitEnvelope ? UnitEnvelope->Get(TEXT("captured_values")) : nullptr;
+					Captured && Captured->GetKind() == EHjsonNodeKind::Object)
+				{
+					TMap<FString, FUeAgentCanonicalValueRef> Values;
+					FWorkspaceError BaselineError;
+					for (const auto& Field : Captured->GetEntries())
+					{
+						FUeAgentCanonicalValuePtr Value;
+						if (!TryCanonicalValue(*Field.Value, Resources, Value, BaselineError))
+						{ OutError = MoveTemp(BaselineError); return false; }
+						Values.Add(Field.Key, Value.ToSharedRef());
+					}
+					{
+						auto Baseline = Unit->WithValues(MoveTemp(Values));
+						FString BaselineHash;
+						if (!TryHashSemanticUnitRow(Baseline, BaselineHash, BaselineError, InventoryRow.DocumentPath))
+						{ OutError = MoveTemp(BaselineError); return false; }
+						if (BaselineHash == InventoryRow.ContentHash)
+							BaselineUnits.Add(Unit->GetUnitId(), MoveTemp(Baseline));
+					}
+				}
+				if (!bAllowManagedUnitEdits && bContentHashChanged)
+				{
+					auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("semantic_workspace_unit_hash_mismatch"),
+						TEXT("The semantic unit content differs from its recorded digest in a read-only workspace load."), TEXT("workspace_resolve"));
+					Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(ActualContentHash);
+					Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(InventoryRow.ContentHash);
+					return FailAtNode(OutError, MoveTemp(Diagnostic), *Parsed.UnitRows[Index]);
+				}
+				TArray<uint8> EditBytes;
+				if (bAllowManagedUnitEdits
+					&& !TrySerializeEditNode(
+						*Parsed.UnitRows[Index], Resources, OutError, EditBytes))
+				{
+					if (OutError.GetCode().IsEmpty())
+					{
+						return Fail(OutError,
+							TEXT("semantic_workspace_edit_hash_failed"), TEXT("The edited semantic unit could not be serialized for change detection."), InventoryRow.UnitId);
+					}
+					return false;
+				}
+				if (bAllowManagedUnitEdits && EditBytes.IsEmpty())
+				{
+					return Fail(
+						OutError,
+						TEXT("semantic_workspace_edit_hash_failed"), TEXT("Serializing the edited semantic unit produced no bytes for change detection."),
+						InventoryRow.UnitId);
+				}
+				if (bAllowManagedUnitEdits
+					&& Sha256(EditBytes) != InventoryRow.EditHash)
+				{
+					if (!ManagedSemanticChanged.IsSet()
+						|| ManagedSemanticChanged.GetValue())
+					{
+						EditedUnitIds.Add(Unit->GetUnitId());
+					}
+				}
+				SeenUnitIds.Add(Unit->GetUnitId());
+				Units.Add(MoveTemp(Unit.GetValue()));
+				return true;
+			};
+			if (!ParseUnit())
+			{
+				OutError.Locate(Parsed.UnitRows[Index]->GetProvenance());
+				UnitDiagnostics.Append(OutError);
+				UnitDiagnostics.MarkUnchecked(TEXT("unit_semantics"), Inventory[Index].DocumentPath, TEXT("unit_structure_invalid"));
+			}
+		}
+		if (UnitDiagnostics.HasErrors())
+		{
+			UnitDiagnostics.MarkUnchecked(TEXT("model_references"), FString(), TEXT("invalid_units"));
+			OutError = MoveTemp(UnitDiagnostics);
+			return false;
+		}
+
+		// Graph layout is edited through the ordinary node pos. Hidden layout units
+		// are derived from that same resolved value, never an independent edit source.
+		if (bAllowManagedUnitEdits)
+		{
+			FWorkspaceError LayoutDiagnostics;
+			TSet<FString> AmbiguousGraphs;
+			TMap<FString, int32> UnitIndices;
+			auto CollectLayoutError = [&](const FSemanticUnit& Unit)
+			{
+				if (const int32* Index = UnitIndices.Find(Unit.GetUnitId()))
+					OutError.Locate(Parsed.UnitRows[*Index]->GetProvenance());
+				LayoutDiagnostics.Append(OutError);
+				OutError.Reset();
+			};
+			TMap<FString, TMap<FString, FUeAgentCanonicalValueRef>> NodesByGraph;
+			for (int32 Index = 0; Index < Units.Num(); ++Index)
+			{
+				const FSemanticUnit& Unit = Units[Index];
+				UnitIndices.Add(Unit.GetUnitId(), Index);
+				if (Unit.GetUnitKind() != ESemanticUnitKind::StructureState) continue;
+				const auto* Nodes = Unit.GetValues().Find(TEXT("nodes"));
+				if (!Nodes || (*Nodes)->GetKind() != EUeAgentValueKind::Object || !Unit.GetValues().Contains(TEXT("edges"))) continue;
+				auto& ById = NodesByGraph.FindOrAdd(Unit.GetUnitId());
+				for (const auto& Node : (*Nodes)->GetObjectItems())
+				{
+					if (Node.Value->GetKind() != EUeAgentValueKind::Object) continue;
+					for (const auto& Field : Node.Value->GetObjectItems())
+						if (Field.Key == TEXT("id") && Field.Value->GetKind() == EUeAgentValueKind::String)
+						{
+							if (ById.Contains(Field.Value->GetText()))
+							{
+								Fail(OutError, TEXT("semantic_workspace_graph_layout_identity_ambiguous"), TEXT("More than one graph node declares the same layout identity."), Unit.GetUnitId());
+								CollectLayoutError(Unit);
+								AmbiguousGraphs.Add(Unit.GetUnitId());
+								continue;
+							}
+							ById.Add(Field.Value->GetText(), Node.Value);
+						}
+				}
+			}
+			for (const FSemanticUnit& Node : Units)
+			{
+				if (Node.GetUnitKind() != ESemanticUnitKind::ItemState || Node.GetLayoutRef().IsEmpty()) continue;
+				if (AmbiguousGraphs.Contains(Node.GetOwnerRef()))
+				{
+					LayoutDiagnostics.MarkUnchecked(TEXT("graph_layout"), Node.GetSourceProvenance(), TEXT("ambiguous_node_identity"));
+					continue;
+				}
+				const auto* ById = NodesByGraph.Find(Node.GetOwnerRef());
+				const auto* Identity = Node.GetValues().Find(TEXT("id"));
+				if (!ById || !Identity || (*Identity)->GetKind() != EUeAgentValueKind::String) continue;
+				const auto* Resolved = ById->Find((*Identity)->GetText());
+				if (!Resolved) continue;
+				TMap<FString, FUeAgentCanonicalValueRef> Fields;
+				for (const auto& Field : (*Resolved)->GetObjectItems()) Fields.Add(Field);
+				const auto* Operation = Fields.Find(TEXT("operation"));
+				if (Operation && (*Operation)->GetKind() == EUeAgentValueKind::String && (*Operation)->GetText() == TEXT("remove")) continue;
+				if (!TryNormalizeGraphAuthoringNodePosition(Fields, Node.GetUnitId(), Resources, OutError))
+				{
+					CollectLayoutError(Node);
+					continue;
+				}
+				const auto* Position = Fields.Find(TEXT("pos"));
+				if (!Position) continue;
+				const int32* LayoutIndex = UnitIndices.Find(Node.GetLayoutRef());
+				if (!LayoutIndex)
+				{
+					Fail(OutError, TEXT("semantic_workspace_graph_layout_missing"), TEXT("The graph node's referenced layout unit is missing."), Node.GetUnitId());
+					CollectLayoutError(Node);
+					continue;
+				}
+				const FSemanticUnit& Layout = Units[*LayoutIndex];
+				if (Layout.GetUnitKind() != ESemanticUnitKind::LayoutState || Layout.GetOwnerRef() != Node.GetUnitId())
+				{
+					Fail(OutError, TEXT("semantic_workspace_graph_layout_owner_mismatch"), TEXT("The graph node's layout has the wrong unit kind or belongs to a different owner."), Node.GetUnitId());
+					CollectLayoutError(Node);
+					continue;
+				}
+				TMap<FString, FUeAgentCanonicalValueRef> Values;
+				for (const auto& Field : (*Position)->GetObjectItems()) Values.Add(Field);
+				Units[*LayoutIndex] = FSemanticUnit(Layout.GetUnitId(), Layout.GetUnitKind(), Layout.GetOwnerRef(),
+					Layout.GetSemanticTypeRef(), Layout.GetRole(), Layout.GetFieldSetRef(), MoveTemp(Values),
+					Layout.GetItemRefs(), Layout.GetRelationRefs(), Layout.GetOrderingRef(), Layout.GetLayoutRef(),
+					Layout.GetDependencyRefs(), Layout.GetProfileVisibility(), Layout.GetSourceProvenance(),
+					Layout.GetTargetIdentityKey(), Layout.GetCategoryPath());
+			}
+			if (LayoutDiagnostics.HasErrors())
+			{
+				LayoutDiagnostics.MarkUnchecked(TEXT("model_references"), FString(), TEXT("invalid_graph_layout"));
+				OutError = MoveTemp(LayoutDiagnostics);
 				return false;
 			}
-			const FInventoryRow& InventoryRow =
-				Inventory[Index];
-			if (SeenUnitIds.Contains(Unit->GetUnitId()))
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_unit_duplicate"),
-					Unit->GetUnitId());
-			}
-			if (Unit->GetUnitId() != InventoryRow.UnitId)
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_unit_extra"),
-					Unit->GetUnitId());
-			}
-			if (Unit->GetUnitKind()
-				!= InventoryRow.UnitKind)
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_unit_kind_mismatch"),
-					Unit->GetUnitId());
-			}
-			TArray<uint8> RowBytes;
-			if (!TrySerializeSemanticUnitRow(
-					Unit.GetValue(),
-					RowBytes))
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_unit_serialize_failed"),
-					Unit->GetUnitId());
-			}
-			if (!bAllowManagedUnitEdits
-				&& Sha256(RowBytes) != InventoryRow.ContentHash)
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_unit_hash_mismatch"),
-					Unit->GetUnitId());
-			}
-			SeenUnitIds.Add(Unit->GetUnitId());
-			Units.Add(MoveTemp(Unit.GetValue()));
 		}
 
 		TArray<FString> TargetUnitIds;
@@ -2044,17 +3185,10 @@ namespace UE::UAI::HjsonWorkspace
 				OutError)
 			|| !Model.IsValid())
 		{
-			if (OutError.GetCode()
-				== TEXT(
-					"unresolved_semantic_unit_reference")
-				|| OutError.GetCode()
-					== TEXT("missing_target_unit"))
-			{
-				OutError.Set(
-					TEXT(
-						"semantic_workspace_reference_unresolved"),
-					OutError.GetSourceUnit());
-			}
+			OutError.LocateUnits(UnitSources);
+			if (OutError.GetCode() == TEXT("unresolved_semantic_unit_reference")
+				|| OutError.GetCode() == TEXT("missing_target_unit"))
+				OutError.Recode(TEXT("semantic_workspace_reference_unresolved"), TEXT("The workspace reference does not resolve to a semantic unit."));
 			return false;
 		}
 		if (!bAllowManagedUnitEdits
@@ -2063,7 +3197,7 @@ namespace UE::UAI::HjsonWorkspace
 			return Fail(
 				OutError,
 				TEXT(
-					"semantic_workspace_fingerprint_mismatch"),
+					"semantic_workspace_fingerprint_mismatch"), TEXT("The semantic workspace content differs from its recorded fingerprint."),
 				Parsed.Manifest->GetProvenance()
 					.GetSourceUnit(),
 				TEXT("/semantic_fingerprint"));
@@ -2114,26 +3248,32 @@ namespace UE::UAI::HjsonWorkspace
 		if (Mode == ESemanticWorkspaceMode::EditBundle)
 		{
 			TSet<FString> ClosureSet(ClosureUnitIds);
-			if (SelectionFingerprint.IsEmpty()
-				|| ClosureFingerprint.IsEmpty()
-				|| ClosureSet.Num()
-					!= Model->GetUnits().Num())
+			if (SelectionFingerprint.IsEmpty() || ClosureFingerprint.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"semantic_workspace_closure_incomplete"));
+				const FString Field = SelectionFingerprint.IsEmpty() ? TEXT("selection_fingerprint") : TEXT("closure_fingerprint");
+				return FailField(OutError, TEXT("semantic_workspace_closure_incomplete"),
+					FString::Printf(TEXT("Edit bundle metadata requires a non-empty %s."), *Field), *Parsed.Manifest, Field,
+					MakeShared<FJsonValueString>(TEXT("non-empty fingerprint")), false);
+			}
+			if (ClosureSet.Num() != Model->GetUnits().Num())
+			{
+				auto Diagnostic = HjsonFieldFailure(TEXT("semantic_workspace_closure_incomplete"),
+					TEXT("The edit bundle closure count differs from the model unit count."), TEXT("workspace_resolve"),
+					*Parsed.Manifest, TEXT("closure_unit_ids"), nullptr, false);
+				Diagnostic.ActualValue = MakeShared<FJsonValueNumber>(ClosureSet.Num());
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(Model->GetUnits().Num());
+				return FailAtNode(OutError, MoveTemp(Diagnostic), *Parsed.Manifest);
 			}
 			for (const FSemanticUnit& Unit :
 				Model->GetUnits())
 			{
 				if (!ClosureSet.Contains(Unit.GetUnitId()))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"semantic_workspace_closure_incomplete"),
-						Unit.GetUnitId());
+					auto Diagnostic = HjsonFieldFailure(TEXT("semantic_workspace_closure_incomplete"),
+						TEXT("The edit bundle closure omits a semantic unit required by the model."), TEXT("workspace_resolve"),
+						*Parsed.Manifest, TEXT("closure_unit_ids"), nullptr, false);
+					Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(Unit.GetUnitId());
+					return FailAtNode(OutError, MoveTemp(Diagnostic), *Parsed.Manifest);
 				}
 			}
 		}
@@ -2144,11 +3284,19 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			WorkspaceMaterial += TEXT("|") + Path;
 		}
+		TMap<FString, FString> BaselineUnitHashes;
 		for (const FInventoryRow& Row : Inventory)
 		{
 			WorkspaceMaterial += TEXT("|")
 				+ Row.UnitId + TEXT("|")
 				+ Row.ContentHash;
+			BaselineUnitHashes.Add(Row.UnitId, Row.ContentHash);
+		}
+		TOptional<TArray<FString>> ExplicitEditedUnitIds;
+		if (bAllowManagedUnitEdits
+			&& Source.GetKind() == EWorkspaceSourceKind::Directory)
+		{
+			ExplicitEditedUnitIds = MoveTemp(EditedUnitIds);
 		}
 		OutWorkspace =
 			MakeShared<FResolvedSemanticWorkspace>(
@@ -2161,16 +3309,108 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(SelectionFingerprint),
 				MoveTemp(ClosureFingerprint),
 				MoveTemp(ClosureUnitIds),
-				Sha256Text(WorkspaceMaterial));
+				Sha256Text(WorkspaceMaterial),
+				MoveTemp(ExplicitEditedUnitIds), MoveTemp(ResolvedKeyedOperationRoots), MoveTemp(UnitSources), MoveTemp(BaselineUnitHashes),
+				MoveTemp(UnitSourceDocuments), MoveTemp(BaselineUnits),
+				Parsed.Manifest->Get(TEXT("structural_edits"))->GetProvenance());
 		if (!OutWorkspace->IsValid())
 		{
+			auto Diagnostic = Contract::FDiagnostic::WrapFailure(TEXT("semantic_workspace_invalid"), OutWorkspace->GetValidationDiagnostic());
 			OutWorkspace.Reset();
-			return Fail(
-				OutError,
-				TEXT(
-					"semantic_workspace_invalid"));
+			OutError.SetFailure(MoveTemp(Diagnostic));
+			return false;
 		}
 		return true;
+	}
+
+	bool TryResolveKeyedPropertyValues(const FHjsonNode& Row, const FString& ExpectedType,
+		const TArray<FString>& TemplateFields, FUeAgentResourceTracker& Resources,
+		TMap<FString, FUeAgentCanonicalValueRef>& OutValues, FWorkspaceError& OutError,
+		const TMap<FString, FString>* PublicRefs, FHjsonNodePtr* OutValueSources)
+	{
+		OutValues.Reset();
+		if (OutValueSources) OutValueSources->Reset();
+		const auto* Type = Row.Get(TEXT("type"));
+		const auto* Value = Row.Get(TEXT("value"));
+		if (!Type || Type->GetKind() != EHjsonNodeKind::String)
+			return FailField(OutError, TEXT("semantic_workspace_property_type_missing"), TEXT("The property requires a string type field."),
+				Row, TEXT("type"), MakeShared<FJsonValueString>(TEXT("string")));
+		if (!Value)
+			return FailField(OutError, TEXT("semantic_workspace_property_value_missing"), TEXT("The property requires a value field."), Row, TEXT("value"));
+		if (!Type->GetText().TrimStartAndEnd().Equals(ExpectedType.TrimStartAndEnd(), ESearchCase::CaseSensitive))
+			return FailNode(OutError, TEXT("semantic_workspace_property_type_mismatch"),
+				TEXT("The authored property type differs from its declared type."), *Type, MakeShared<FJsonValueString>(ExpectedType));
+		TMap<FString, FUeAgentCanonicalValueRef> Result;
+		// The same owner that restores native aliases also binds those aliases
+		// to their original parser nodes. Only the source tree is synthesized.
+		const FHjsonNodeRef* ValueRef = nullptr;
+		for (const auto& Field : Row.GetEntries())
+			if (Field.Key == TEXT("value")) { ValueRef = &Field.Value; break; }
+		TArray<TPair<FString, FHjsonNodeRef>> SourceFields;
+		// Current exports use the native type. Legacy captured workspaces may still
+		// carry a definition alias here; preserve their captured text encoding.
+		const bool bTextType = ExpectedType == TEXT("text")
+			|| ExpectedType.StartsWith(TEXT("text#"));
+		if (bTextType && Value->GetKind() == EHjsonNodeKind::String)
+		{
+			FUeAgentCanonicalValuePtr Parsed;
+			if (!TryCanonicalValue(*Value, Resources, Parsed, OutError, PublicRefs)) return false;
+			// Pin defaults capture text in a direct value wrapper; native FText
+			// properties use literal/localized. Preserve the captured owner shape.
+			const FString TextField = TemplateFields.Num() == 1
+				&& TemplateFields[0] == TEXT("value") ? TEXT("value") : TEXT("literal");
+			Result.Add(TextField, Parsed.ToSharedRef());
+			if (OutValueSources && ValueRef) SourceFields.Emplace(TextField, *ValueRef);
+		}
+		else if (!bTextType && TemplateFields.Num() == 1
+			&& UeAgentAuthoringTypeDescriptors::IsDirectPropertyValueWrapper(TemplateFields[0])
+			&& !Value->Get(TemplateFields[0])
+			&& !(TemplateFields[0] == TEXT("path") && Value->Get(TEXT("owned_object"))))
+		{
+			// This is the captured PropertySet's outer values envelope, never a
+			// recursive business object. Native descendants are restored by the
+			// type-aware semantic overlay; this boundary consumes no nested names.
+			FUeAgentCanonicalValuePtr Parsed;
+			if (!TryCanonicalValue(*Value, Resources, Parsed, OutError, PublicRefs)) return false;
+			Result.Add(TemplateFields[0], Parsed.ToSharedRef());
+			if (OutValueSources && ValueRef) SourceFields.Emplace(TemplateFields[0], *ValueRef);
+		}
+		else
+		{
+			if (Value->GetKind() != EHjsonNodeKind::Object)
+				return FailNode(OutError, TEXT("semantic_workspace_unit_values_invalid"),
+					TEXT("A complex property value must be an object."), *Value, MakeShared<FJsonValueString>(TEXT("object")));
+			for (const auto& Field : Value->GetEntries())
+			{
+				FUeAgentCanonicalValuePtr Parsed;
+				if (Result.Contains(Field.Key))
+				{
+					auto Diagnostic = Contract::FDiagnostic::Failure(TEXT("semantic_workspace_unit_values_invalid"),
+						TEXT("The semantic values contain a duplicate field name."), TEXT("workspace_resolve"));
+					Diagnostic.CandidateName = Field.Key;
+					return FailAtNode(OutError, MoveTemp(Diagnostic), *Field.Value);
+				}
+				if (!TryCanonicalValue(*Field.Value, Resources, Parsed, OutError, PublicRefs)) return false;
+				Result.Add(Field.Key, Parsed.ToSharedRef());
+				if (OutValueSources) SourceFields.Emplace(Field.Key, Field.Value);
+			}
+		}
+		OutValues = MoveTemp(Result);
+		if (OutValueSources)
+		{
+			// Existing document bindings may name /value; retain that alias too.
+			if (ValueRef && !SourceFields.ContainsByPredicate([](const auto& Field) { return Field.Key == TEXT("value"); }))
+				SourceFields.Emplace(TEXT("value"), *ValueRef);
+			*OutValueSources = MakeShared<FHjsonNode>(EHjsonNodeKind::Object, Row.GetProvenance(),
+				FString(), FString(), false, TArray<FHjsonNodeRef>(), MoveTemp(SourceFields));
+		}
+		return true;
+	}
+
+	bool TryProjectHjsonCanonicalValue(const FHjsonNode& Root, FUeAgentResourceTracker& Resources,
+		FUeAgentCanonicalValuePtr& OutValue, FWorkspaceError& OutError, bool bInterpretSemanticValues)
+	{
+		return TryCanonicalValue(Root, Resources, OutValue, OutError, nullptr, bInterpretSemanticValues);
 	}
 
 	bool TryResolveSemanticWorkspace(

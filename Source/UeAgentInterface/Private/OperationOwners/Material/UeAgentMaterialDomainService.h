@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
 namespace UE::UAI::OperationOwners::Material
@@ -21,12 +23,7 @@ namespace UE::UAI::OperationOwners::Material
 		bool bReadOnly = false;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentMaterialCandidateCommandError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FUeAgentMaterialCandidateCommandError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentMaterialCandidateCommandService
 	{
@@ -45,5 +42,5 @@ namespace UE::UAI::OperationOwners::Material
 
 	UEAGENTINTERFACE_API bool TryCreateProductionMaterialCandidateCommandService(
 		TSharedPtr<IUeAgentMaterialCandidateCommandService>& OutService,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

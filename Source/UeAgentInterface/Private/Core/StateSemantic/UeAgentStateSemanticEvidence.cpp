@@ -1,7 +1,35 @@
 #include "Core/StateSemantic/UeAgentStateSemanticEvidence.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 
 namespace UE::UAI::StateSemantic
 {
+	Contract::FDiagnostic MakeComparisonDiagnostic(const FUeAgentSemanticComparison& Comparison,
+		const FString& Code, const FString& Reason, const FString& Stage, const FString& Schema)
+	{
+		auto Result = Contract::FDiagnostic::Failure(Code, Reason, Stage);
+		Result.Schema = Schema;
+		for (const auto& Difference : Comparison.GetDifferences())
+		{
+			auto Item = Contract::FDiagnostic::Failure(Code, Difference.GetPublicReason(), Stage);
+			Item.Schema = Schema;
+			Item.Source.JsonPath = Difference.GetPublicPath();
+			Item.ExpectedValuePresent = Difference.GetLeft().IsValid();
+			Item.ActualValuePresent = Difference.GetRight().IsValid();
+			Contract::FDiagnostic ProjectionError;
+			if (Difference.GetPublicLeft() && !CanonicalJson::TryToJsonValue(*Difference.GetPublicLeft(), Item.ExpectedValue, ProjectionError))
+				Item.Diagnostics.Add(ProjectionError);
+			if (Difference.GetPublicRight() && !CanonicalJson::TryToJsonValue(*Difference.GetPublicRight(), Item.ActualValue, ProjectionError))
+				Item.Diagnostics.Add(ProjectionError);
+			Item.Source.InternalJsonPath = Difference.GetPath();
+			if (Difference.GetLeft() && !CanonicalJson::TryToJsonValue(*Difference.GetLeft(), Item.ExpectedEvidence, ProjectionError))
+				Item.Diagnostics.Add(ProjectionError);
+			if (Difference.GetRight() && !CanonicalJson::TryToJsonValue(*Difference.GetRight(), Item.ActualEvidence, ProjectionError))
+				Item.Diagnostics.Add(ProjectionError);
+			Result.Diagnostics.Add(MoveTemp(Item));
+		}
+		return Result;
+	}
+
 	namespace
 	{
 		using FEvidenceFields =
@@ -21,10 +49,8 @@ namespace UE::UAI::StateSemantic
 			const FString& Detail)
 		{
 			OutValue.Reset();
-			OutError.Code = TEXT(
-				"semantic_difference_evidence_invalid");
-			OutError.Path = TEXT("/difference_evidence");
-			OutError.Detail = Detail;
+			OutError = FUeAgentStateSemanticError::Failure(TEXT("semantic_difference_evidence_invalid"), Detail, TEXT("state_semantic"));
+			OutError.Source.JsonPath = TEXT("/difference_evidence");
 			return false;
 		}
 
@@ -306,10 +332,58 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentCanonicalValuePtr& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
-		OutValue = Source;
+		if (Audience == EDifferenceEvidenceAudience::Internal || !Source) { OutValue = Source; return true; }
+		// Walk typed values, not JSON keys. Ordinary user objects retain every key.
+		TArray<TPair<FUeAgentCanonicalValuePtr, bool>> Pending;
+		TMap<const FUeAgentCanonicalValue*, FUeAgentCanonicalValuePtr> Converted;
+		Pending.Emplace(Source, false);
+		while (!Pending.IsEmpty())
+		{
+			auto Task = Pending.Pop(EAllowShrinking::No);
+			const auto& Value = Task.Key;
+			if (Converted.Contains(Value.Get())) continue;
+			const auto Kind = Value->GetKind();
+			if (!Task.Value && (Kind == EUeAgentValueKind::Array || Kind == EUeAgentValueKind::Object))
+			{
+				Pending.Emplace(Value, true);
+				if (Kind == EUeAgentValueKind::Array)
+					for (const auto& Child : Value->GetArrayItems()) Pending.Emplace(Child, false);
+				else
+					for (const auto& Child : Value->GetObjectItems()) Pending.Emplace(Child.Value, false);
+				continue;
+			}
+			FUeAgentCanonicalValuePtr Public = Value;
+			if (Kind == EUeAgentValueKind::Temporal)
+			{
+				if (!TryCanonicalizeDifferenceEvidence(*Value->GetTemporal(), Resources, Public, OutError, Audience)) return false;
+			}
+			else if (Kind == EUeAgentValueKind::Spatial)
+			{
+				if (!TryCanonicalizeDifferenceEvidence(*Value->GetSpatial(), Resources, Public, OutError, Audience)) return false;
+			}
+			else if (Kind == EUeAgentValueKind::Array)
+			{
+				TArray<FUeAgentCanonicalValueRef> Items;
+				bool Changed = false;
+				for (const auto& Child : Value->GetArrayItems())
+				{ const auto& Item = Converted.FindChecked(&Child.Get()); Changed |= Item.Get() != &Child.Get(); Items.Add(Item.ToSharedRef()); }
+				if (Changed && !FUeAgentCanonicalValue::TryArray(MoveTemp(Items), Resources, Public, OutError)) return false;
+			}
+			else if (Kind == EUeAgentValueKind::Object)
+			{
+				FEvidenceFields Fields;
+				bool Changed = false;
+				for (const auto& Child : Value->GetObjectItems())
+				{ const auto& Item = Converted.FindChecked(&Child.Value.Get()); Changed |= Item.Get() != &Child.Value.Get(); Fields.Emplace(Child.Key, Item.ToSharedRef()); }
+				if (Changed && !FUeAgentCanonicalValue::TryObject(MoveTemp(Fields), Resources, Public, OutError)) return false;
+			}
+			Converted.Add(Value.Get(), MoveTemp(Public));
+		}
+		OutValue = Converted.FindChecked(Source.Get());
 		return true;
 	}
 
@@ -317,7 +391,8 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentCanonicalIdentity& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		if (!Source.IsValid())
@@ -329,32 +404,41 @@ namespace UE::UAI::StateSemantic
 		}
 		FEvidenceBuilder Builder(Resources, OutError);
 		FEvidenceFields Fields;
-		if (!Builder.AddString(
+		if ((Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("semantic_id"),
-				Source.GetSemanticId())
+				Source.GetSemanticId()))
 			|| !Builder.AddString(
 				Fields,
 				TEXT("target_kind"),
 				Source.GetTargetKind())
-			|| !Builder.AddString(
+			|| (Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("owner_id"),
-				Source.GetOwnerId())
-			|| !Builder.AddString(
+				Source.GetOwnerId()))
+			|| (Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("selector"),
-				Source.GetSelector())
+				Source.GetSelector()))
 			|| !Builder.AddString(
 				Fields,
 				TEXT("object_role"),
 				Source.GetObjectRole())
-			|| !Builder.AddString(
+			|| (Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("generation"),
-				Source.GetGeneration()))
+				Source.GetGeneration())))
 		{
 			return false;
+		}
+		if (Audience == EDifferenceEvidenceAudience::Public)
+		{
+			FEvidenceFields Selectors;
+			for (const auto& Selector : Source.GetSelectors())
+				if (!Builder.AddString(Selectors, Selector.Key, Selector.Value)) return false;
+			FUeAgentCanonicalValuePtr PublicSelectors;
+			if (!FUeAgentCanonicalValue::TryObject(MoveTemp(Selectors), Resources, PublicSelectors, OutError)) return false;
+			Builder.AddValue(Fields, TEXT("selectors"), PublicSelectors.ToSharedRef());
 		}
 		return Builder.Finish(
 			TEXT("canonical_identity"),
@@ -366,7 +450,8 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentCanonicalType& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		const FString Kind = ValueKindName(Source.GetValueKind());
@@ -385,7 +470,7 @@ namespace UE::UAI::StateSemantic
 				Source.GetTypeId())
 			|| !Builder.AddString(
 				Fields,
-				TEXT("value_kind"),
+				TEXT("kind"),
 				Kind)
 			|| !Builder.AddBoolean(
 				Fields,
@@ -408,7 +493,8 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentDefaultValue& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		const FString SourceKind =
@@ -426,21 +512,20 @@ namespace UE::UAI::StateSemantic
 				Fields,
 				TEXT("source_kind"),
 				SourceKind)
-			|| !Builder.AddString(
+			|| (Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("source_identity"),
-				Source.GetSourceIdentity())
-			|| !Builder.AddString(
+				Source.GetSourceIdentity()))
+			|| (Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("provenance"),
-				Source.GetProvenance()))
+				Source.GetProvenance())))
 		{
 			return false;
 		}
-		Builder.AddValue(
-			Fields,
-			TEXT("value"),
-			Source.GetValue());
+		FUeAgentCanonicalValuePtr BusinessValue;
+		if (!TryCanonicalizeDifferenceEvidence(FUeAgentCanonicalValuePtr(Source.GetValue()), Resources, BusinessValue, OutError, Audience)) return false;
+		Builder.AddValue(Fields, TEXT("value"), BusinessValue.ToSharedRef());
 		return Builder.Finish(
 			TEXT("default_value"),
 			MoveTemp(Fields),
@@ -451,7 +536,8 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentStateDetails& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		if (!Source.IsValid())
@@ -522,7 +608,8 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentStateRevision& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		if (!Source.IsValid())
@@ -532,16 +619,17 @@ namespace UE::UAI::StateSemantic
 				OutError,
 				TEXT("state revision is invalid"));
 		}
+		if (Audience == EDifferenceEvidenceAudience::Public) return true;
 		FEvidenceBuilder Builder(Resources, OutError);
 		FEvidenceFields Fields;
 		if (!Builder.AddString(
 				Fields,
 				TEXT("source_id"),
 				Source.GetSourceId())
-			|| !Builder.AddString(
+			|| (Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("generation"),
-				Source.GetGeneration())
+				Source.GetGeneration()))
 			|| !Builder.AddInteger(
 				Fields,
 				TEXT("sequence"),
@@ -562,7 +650,8 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentTemporalPoint& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		if (!Source.IsValid())
@@ -574,10 +663,10 @@ namespace UE::UAI::StateSemantic
 		}
 		FEvidenceBuilder Builder(Resources, OutError);
 		FEvidenceFields Fields;
-		if (!Builder.AddString(
+		if ((Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("clock_id"),
-				Source.GetClockId())
+				Source.GetClockId()))
 			|| !Builder.AddInteger(
 				Fields,
 				TEXT("tick"),
@@ -607,7 +696,8 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentSpatialFrame& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		if (!Source.IsValid())
@@ -619,14 +709,14 @@ namespace UE::UAI::StateSemantic
 		}
 		FEvidenceBuilder Builder(Resources, OutError);
 		FEvidenceFields Fields;
-		if (!Builder.AddString(
+		if ((Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("frame_id"),
-				Source.GetFrameId())
-			|| !Builder.AddString(
+				Source.GetFrameId()))
+			|| (Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("basis_frame_id"),
-				Source.GetBasisFrameId())
+				Source.GetBasisFrameId()))
 			|| !Builder.AddInteger(
 				Fields,
 				TEXT("dimension"),
@@ -639,10 +729,10 @@ namespace UE::UAI::StateSemantic
 				Fields,
 				TEXT("unit"),
 				Source.GetUnit())
-			|| !Builder.AddString(
+			|| (Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddString(
 				Fields,
 				TEXT("basis_evidence"),
-				Source.GetBasisEvidence()))
+				Source.GetBasisEvidence())))
 		{
 			return false;
 		}
@@ -666,7 +756,7 @@ namespace UE::UAI::StateSemantic
 			Source.GetObservedAt(),
 			Resources,
 			ObservedAt,
-			OutError))
+			OutError, Audience))
 		{
 			return false;
 		}
@@ -684,7 +774,8 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentSpatialValue& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		const FString QuantityKind =
@@ -710,10 +801,10 @@ namespace UE::UAI::StateSemantic
 				Fields,
 				TEXT("components"),
 				Source.GetComponents())
-			|| !Builder.AddStringArray(
+			|| (Audience == EDifferenceEvidenceAudience::Internal && !Builder.AddStringArray(
 				Fields,
 				TEXT("conversion_evidence"),
-				Source.GetConversionEvidence()))
+				Source.GetConversionEvidence())))
 		{
 			return false;
 		}
@@ -723,7 +814,7 @@ namespace UE::UAI::StateSemantic
 			Source.GetFrame(),
 			Resources,
 			Frame,
-			OutError))
+			OutError, Audience))
 		{
 			return false;
 		}
@@ -737,7 +828,7 @@ namespace UE::UAI::StateSemantic
 			Source.GetObservedAt(),
 			Resources,
 			ObservedAt,
-			OutError))
+			OutError, Audience))
 		{
 			return false;
 		}
@@ -755,7 +846,8 @@ namespace UE::UAI::StateSemantic
 		const FUeAgentStateEntry& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		if (!Source.IsValid())
@@ -776,12 +868,15 @@ namespace UE::UAI::StateSemantic
 			return false;
 		}
 
+		if (Source.GetAuthoringDescriptor().IsValid())
+			Builder.AddValue(Fields, TEXT("authoring_descriptor"), Source.GetAuthoringDescriptor().ToSharedRef());
+
 		FUeAgentCanonicalValuePtr Identity;
 		if (!TryCanonicalizeDifferenceEvidence(
 			Source.GetIdentity(),
 			Resources,
 			Identity,
-			OutError))
+			OutError, Audience))
 		{
 			return false;
 		}
@@ -795,7 +890,7 @@ namespace UE::UAI::StateSemantic
 			Source.GetType(),
 			Resources,
 			Type,
-			OutError))
+			OutError, Audience))
 		{
 			return false;
 		}
@@ -803,17 +898,16 @@ namespace UE::UAI::StateSemantic
 			Fields,
 			TEXT("type"),
 			Type.ToSharedRef());
-		Builder.AddValue(
-			Fields,
-			TEXT("value"),
-			Source.GetValue());
+		FUeAgentCanonicalValuePtr BusinessValue;
+		if (!TryCanonicalizeDifferenceEvidence(FUeAgentCanonicalValuePtr(Source.GetValue()), Resources, BusinessValue, OutError, Audience)) return false;
+		Builder.AddValue(Fields, TEXT("value"), BusinessValue.ToSharedRef());
 
 		FUeAgentCanonicalValuePtr Default;
 		if (!TryCanonicalizeDifferenceEvidence(
 			Source.GetDefault(),
 			Resources,
 			Default,
-			OutError))
+			OutError, Audience))
 		{
 			return false;
 		}
@@ -827,7 +921,7 @@ namespace UE::UAI::StateSemantic
 			Source.GetDetails(),
 			Resources,
 			Details,
-			OutError))
+			OutError, Audience))
 		{
 			return false;
 		}
@@ -836,19 +930,22 @@ namespace UE::UAI::StateSemantic
 			TEXT("details"),
 			Details.ToSharedRef());
 
-		FUeAgentCanonicalValuePtr Revision;
-		if (!TryCanonicalizeDifferenceEvidence(
-			Source.GetObservedRevision(),
-			Resources,
-			Revision,
-			OutError))
+		if (Audience == EDifferenceEvidenceAudience::Internal)
 		{
-			return false;
+			FUeAgentCanonicalValuePtr Revision;
+			if (!TryCanonicalizeDifferenceEvidence(
+				Source.GetObservedRevision(),
+				Resources,
+				Revision,
+				OutError, Audience))
+			{
+				return false;
+			}
+			Builder.AddValue(
+				Fields,
+				TEXT("observed_revision"),
+				Revision.ToSharedRef());
 		}
-		Builder.AddValue(
-			Fields,
-			TEXT("observed_revision"),
-			Revision.ToSharedRef());
 		if (!Builder.AddString(
 			Fields,
 			TEXT("override_state"),
@@ -866,7 +963,8 @@ namespace UE::UAI::StateSemantic
 		EUeAgentAuthoredPresence Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		const FString Presence = AuthoredPresenceName(Source);
@@ -893,7 +991,8 @@ namespace UE::UAI::StateSemantic
 		EUeAgentOverrideState Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		const FString Override = OverrideStateName(Source);
@@ -920,7 +1019,8 @@ namespace UE::UAI::StateSemantic
 		EUeAgentStatePlane Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
 		const FString Plane = StatePlaneName(Source);
@@ -950,27 +1050,25 @@ namespace UE::UAI::StateSemantic
 		const TArray<FUeAgentCanonicalValueRef>& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
-		return FUeAgentCanonicalValue::TryArray(
-			Source,
-			Resources,
-			OutValue,
-			OutError);
+		FUeAgentCanonicalValuePtr Value;
+		if (!FUeAgentCanonicalValue::TryArray(Source, Resources, Value, OutError)) return false;
+		return TryCanonicalizeDifferenceEvidence(Value, Resources, OutValue, OutError, Audience);
 	}
 
 	bool TryCanonicalizeDifferenceEvidence(
 		const TArray<TPair<FString, FUeAgentCanonicalValueRef>>& Source,
 		FUeAgentResourceTracker& Resources,
 		FUeAgentCanonicalValuePtr& OutValue,
-		FUeAgentStateSemanticError& OutError)
+		FUeAgentStateSemanticError& OutError,
+		EDifferenceEvidenceAudience Audience)
 	{
 		ResetEvidence(OutValue, OutError);
-		return FUeAgentCanonicalValue::TryObject(
-			Source,
-			Resources,
-			OutValue,
-			OutError);
+		FUeAgentCanonicalValuePtr Value;
+		if (!FUeAgentCanonicalValue::TryObject(Source, Resources, Value, OutError)) return false;
+		return TryCanonicalizeDifferenceEvidence(Value, Resources, OutValue, OutError, Audience);
 	}
 }

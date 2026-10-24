@@ -1,30 +1,164 @@
 #include "DomainAdapters/WorldSpatial/UeAgentWorldSpatialRequests.h"
+#include "Core/Contract/UeAgentContractJson.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include <initializer_list>
 
 namespace UE::UAI::DomainAdapters::WorldSpatial
 {
 	using UE::UAI::ContextResource::EUeAgentResourceDimension;
-	using UE::UAI::ContextResource::FUeAgentResourceBudgetExceeded;
+	using UE::UAI::ContextResource::FUeAgentResourceChargeError;
 	using UE::UAI::ContextResource::FUeAgentResourceTracker;
 	using UE::UAI::Contract::FUeAgentContractValue;
 
 	namespace
 	{
+		bool ValueFailure(FUeAgentWorldSpatialExecutionError& Error, const TCHAR* Code,
+			const TCHAR* Reason, const FString& Path, const TSharedPtr<FJsonValue>& Actual,
+			const TSharedPtr<FJsonValue>& Expected, bool bPublicValue = true)
+		{
+			Error = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_execution"));
+			Error.PropertyPath = Path;
+			Error.SourceKind = TEXT("world_spatial_value");
+			Error.Source.JsonPath = Path;
+			Error.ActualValuePresent = Actual.IsValid();
+			if (bPublicValue) Error.ActualValue = Actual;
+			else Error.ActualEvidence = Actual;
+			Error.ExpectedValue = Expected;
+			return false;
+		}
+
+		bool ValueText(const FString& Value, const TCHAR* Path, const TCHAR* Code,
+			FUeAgentWorldSpatialExecutionError& Error, bool bPublicValue = true)
+		{
+			return !Value.IsEmpty() || ValueFailure(Error, Code, TEXT("The value must be a non-empty string."), Path,
+				MakeShared<FJsonValueString>(Value), MakeShared<FJsonValueString>(TEXT("non-empty string")), bPublicValue);
+		}
+
+		bool ValueChoice(const FString& Value, std::initializer_list<const TCHAR*> Choices,
+			const TCHAR* Path, const TCHAR* Code, FUeAgentWorldSpatialExecutionError& Error)
+		{
+			for (const TCHAR* Choice : Choices) if (Value == Choice) return true;
+			TArray<TSharedPtr<FJsonValue>> Expected;
+			for (const TCHAR* Choice : Choices) Expected.Add(MakeShared<FJsonValueString>(Choice));
+			return ValueFailure(Error, Code, TEXT("The value is not one of the supported choices."), Path,
+				MakeShared<FJsonValueString>(Value), MakeShared<FJsonValueArray>(MoveTemp(Expected)));
+		}
+
+		TSharedPtr<FJsonValue> DiagnosticNumber(double Value)
+		{
+			if (FMath::IsFinite(Value)) return MakeShared<FJsonValueNumber>(Value);
+			return MakeShared<FJsonValueString>(FMath::IsNaN(Value) ? TEXT("NaN") : Value < 0.0 ? TEXT("-Infinity") : TEXT("Infinity"));
+		}
+
+		bool ValueNumber(bool bAccepted, double Value, const TCHAR* Constraint,
+			const TCHAR* Path, const TCHAR* Code, FUeAgentWorldSpatialExecutionError& Error)
+		{
+			if (bAccepted) return true;
+			return ValueFailure(Error, Code, TEXT("The value does not satisfy the required numeric constraint."), Path,
+				DiagnosticNumber(Value), MakeShared<FJsonValueString>(Constraint));
+		}
+
+		bool ValuePresent(bool bPresent, const TCHAR* Path, const TCHAR* Code,
+			FUeAgentWorldSpatialExecutionError& Error)
+		{
+			return bPresent || ValueFailure(Error, Code, TEXT("This value is required by the selected operation."), Path,
+				nullptr, MakeShared<FJsonValueString>(TEXT("present value")));
+		}
+
+		template <typename ValueType>
+		bool ValidateChild(const ValueType& Value, const TCHAR* Path, FUeAgentWorldSpatialExecutionError& Error)
+		{
+			if (Value.TryValidate(Error)) return true;
+			UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, Path);
+			return false;
+		}
+
+		template <typename ValueType>
+		bool ValidateParsedValue(const TSharedPtr<FJsonObject>& Object, const ValueType& Value,
+			FUeAgentWorldSpatialExecutionError& Error)
+		{
+			if (Value.TryValidate(Error)) return true;
+			// The compact spatial schema places frame members alongside subject and components.
+			TArray<FString> Segments;
+			Error.Source.JsonPath.ParseIntoArray(Segments, TEXT("/"), true);
+			TSharedPtr<FJsonValue> Current = MakeShared<FJsonValueObject>(Object);
+			FString InputPath;
+			for (const FString& Segment : Segments)
+			{
+				const TSharedPtr<FJsonObject> CurrentObject = Current.IsValid() && Current->Type == EJson::Object ? Current->AsObject() : nullptr;
+				if (Segment == TEXT("frame") && CurrentObject.IsValid() && CurrentObject->HasField(TEXT("frame_id"))) continue;
+				InputPath += TEXT("/") + Segment;
+				if (CurrentObject.IsValid()) Current = CurrentObject->TryGetField(Segment);
+				else if (Current.IsValid() && Current->Type == EJson::Array)
+				{
+					int32 Index = INDEX_NONE;
+					const auto& Items = Current->AsArray();
+					Current = LexTryParseString(Index, *Segment) && Items.IsValidIndex(Index) ? Items[Index] : nullptr;
+				}
+				else Current.Reset();
+			}
+			Error.SourceKind = TEXT("command_input");
+			Error.Source.JsonPath = InputPath.IsEmpty() ? TEXT("/") : InputPath;
+			return false;
+		}
+
+		template <typename ValueType, typename ParserType>
+		bool ParseAt(const TSharedPtr<FJsonObject>& Object, ValueType& Value, ParserType Parser,
+			FUeAgentWorldSpatialExecutionError& Error, const TCHAR* Path)
+		{
+			if (Parser(Object, Value, Error)) return true;
+			UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, Path);
+			return false;
+		}
+
 		bool Fail(
 			FUeAgentWorldSpatialExecutionError& OutError,
 			const FString& Code,
 			const FString& SubjectId,
-			const FString& Detail = FString())
+			const FString& Detail)
 		{
-			OutError.Code = Code;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(Code, Detail, TEXT("native_execution"));
+			OutError.Schema = TEXT("uai.runtime.diagnostic/1");
 			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
 			return false;
+		}
+
+		bool InvalidField(FUeAgentWorldSpatialExecutionError& Error, const TSharedPtr<FJsonObject>& Object,
+			const TCHAR* Field, const TCHAR* Expected, bool bPublicValue = true,
+			const TCHAR* Code = TEXT("world_spatial_typed_field_invalid"))
+		{
+			const TSharedPtr<FJsonValue> Actual = Object ? Object->TryGetField(Field) : nullptr;
+			Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code,
+				TEXT("/") + FString(Field), MakeShared<FJsonValueString>(Expected), bPublicValue ? Actual : nullptr);
+			if (!bPublicValue) Error.ActualEvidence = Actual;
+			Error.ActualValuePresent = Object && Object->HasField(Field);
+			Error.PublicMessage = TEXT("The request field is missing or has an incompatible value.");
+			Error.SourceKind = TEXT("command_input");
+			return false;
+		}
+
+		bool RequestValueFailure(FUeAgentWorldSpatialExecutionError& Error, const TCHAR* Code,
+			const TCHAR* Reason, const FString& Path, const TSharedPtr<FJsonValue>& Actual,
+			const TSharedPtr<FJsonValue>& Expected)
+		{
+			ValueFailure(Error, Code, Reason, Path, Actual, Expected);
+			Error.SourceKind = TEXT("command_input");
+			return false;
+		}
+
+		bool SelectorFailure(FUeAgentWorldSpatialExecutionError& Error, const TCHAR* Code,
+			std::initializer_list<TPair<FString, bool>> Selectors)
+		{
+			auto Actual = MakeShared<FJsonObject>();
+			for (const auto& Selector : Selectors) Actual->SetBoolField(Selector.Key, Selector.Value);
+			return RequestValueFailure(Error, Code, TEXT("Exactly one selector must be active."), TEXT("/"),
+				MakeShared<FJsonValueObject>(MoveTemp(Actual)), MakeShared<FJsonValueString>(TEXT("exactly one active selector")));
 		}
 
 		bool ChargeDecode(
@@ -32,18 +166,16 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			const FString& CapabilityId,
 			FUeAgentWorldSpatialExecutionError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded Error;
+			FUeAgentResourceChargeError Error;
 			if (!Resources.TryCharge(
 					EUeAgentResourceDimension::WorkUnits,
 					1,
 					TEXT("world_spatial.request.decode/") + CapabilityId,
 					Error))
 			{
-				return Fail(
-					OutError,
-					TEXT("world_spatial_request_decode_budget_exceeded"),
-					CapabilityId,
-					Error.Path);
+				OutError = MoveTemp(Error);
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = CapabilityId;
+				return false;
 			}
 			return true;
 		}
@@ -53,16 +185,12 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			TSharedPtr<FJsonObject>& OutRoot,
 			FUeAgentWorldSpatialExecutionError& OutError)
 		{
-			OutRoot.Reset();
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(CanonicalInput.GetJsonValue());
-			if (!FJsonSerializer::Deserialize(Reader, OutRoot)
-				|| !OutRoot.IsValid())
+			UE::UAI::Contract::FDiagnostic ParseError;
+			if (!Contract::Json::TryParseObject(CanonicalInput.GetJsonValue(), OutRoot, ParseError))
 			{
-				return Fail(
-					OutError,
-					TEXT("world_spatial_request_json_invalid"),
-					TEXT("canonical_input"));
+				OutError = MoveTemp(ParseError);
+				if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("canonical_document");
+				return false;
 			}
 			return true;
 		}
@@ -71,16 +199,13 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			const TSharedPtr<FJsonObject>& Object,
 			const TCHAR* Field,
 			FString& Out,
-			FUeAgentWorldSpatialExecutionError& Error)
+			FUeAgentWorldSpatialExecutionError& Error, bool bPublicValue = true)
 		{
 			if (!Object.IsValid()
 				|| !Object->TryGetStringField(Field, Out)
 				|| Out.IsEmpty())
 			{
-				return Fail(
-					Error,
-					TEXT("world_spatial_typed_field_invalid"),
-					Field);
+				return InvalidField(Error, Object, Field, TEXT("non-empty string"), bPublicValue);
 			}
 			return true;
 		}
@@ -89,14 +214,11 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			const TSharedPtr<FJsonObject>& Object,
 			const TCHAR* Field,
 			double& Out,
-			FUeAgentWorldSpatialExecutionError& Error)
+			FUeAgentWorldSpatialExecutionError& Error, bool bPublicValue = true)
 		{
 			if (!Object.IsValid() || !Object->TryGetNumberField(Field, Out))
 			{
-				return Fail(
-					Error,
-					TEXT("world_spatial_typed_field_invalid"),
-					Field);
+				return InvalidField(Error, Object, Field, TEXT("number"), bPublicValue);
 			}
 			return true;
 		}
@@ -109,10 +231,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		{
 			if (!Object.IsValid() || !Object->TryGetBoolField(Field, Out))
 			{
-				return Fail(
-					Error,
-					TEXT("world_spatial_typed_field_invalid"),
-					Field);
+				return InvalidField(Error, Object, Field, TEXT("boolean"));
 			}
 			return true;
 		}
@@ -129,10 +248,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				|| !Found
 				|| !Found->IsValid())
 			{
-				return Fail(
-					Error,
-					TEXT("world_spatial_typed_field_invalid"),
-					Field);
+				return InvalidField(Error, Object, Field, TEXT("object"), false);
 			}
 			Out = *Found;
 			return true;
@@ -142,16 +258,13 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			const TSharedPtr<FJsonObject>& Object,
 			const TCHAR* Field,
 			const TArray<TSharedPtr<FJsonValue>>*& Out,
-			FUeAgentWorldSpatialExecutionError& Error)
+			FUeAgentWorldSpatialExecutionError& Error, bool bPublicValue = false)
 		{
 			if (!Object.IsValid()
 				|| !Object->TryGetArrayField(Field, Out)
 				|| !Out)
 			{
-				return Fail(
-					Error,
-					TEXT("world_spatial_typed_field_invalid"),
-					Field);
+				return InvalidField(Error, Object, Field, TEXT("array"), bPublicValue);
 			}
 			return true;
 		}
@@ -160,25 +273,29 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			const TSharedPtr<FJsonObject>& Object,
 			const TCHAR* Field,
 			TArray<FString>& Out,
-			FUeAgentWorldSpatialExecutionError& Error)
+			FUeAgentWorldSpatialExecutionError& Error, bool bPublicValue = true)
 		{
 			Out.Reset();
 			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-			if (!RequiredArray(Object, Field, Values, Error))
+			if (!RequiredArray(Object, Field, Values, Error, bPublicValue))
 			{
 				return false;
 			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			for (int32 Index = 0; Index < Values->Num(); ++Index)
 			{
+				const auto& Value = (*Values)[Index];
 				FString Text;
 				if (!Value.IsValid()
 					|| !Value->TryGetString(Text)
 					|| Text.IsEmpty())
 				{
-					return Fail(
-						Error,
-						TEXT("world_spatial_typed_array_item_invalid"),
-						Field);
+					Error = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("world_spatial_typed_array_item_invalid"),
+						TEXT("/") + FString(Field) + TEXT("/") + LexToString(Index), MakeShared<FJsonValueString>(TEXT("non-empty string")), bPublicValue ? Value : nullptr);
+					if (!bPublicValue) Error.ActualEvidence = Value;
+					Error.ActualValuePresent = Value.IsValid();
+					Error.SourceKind = TEXT("command_input");
+					Error.PublicMessage = TEXT("This array element must be a non-empty string.");
+					return false;
 				}
 				Out.Add(MoveTemp(Text));
 			}
@@ -191,15 +308,14 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			FUeAgentWorldSpatialExecutionError& Error)
 		{
 			double Sequence = -1.0;
-			if (!RequiredString(Object, TEXT("source_id"), Out.SourceId, Error)
-				|| !RequiredString(Object, TEXT("generation"), Out.Generation, Error)
-				|| !RequiredNumber(Object, TEXT("sequence"), Sequence, Error))
+			if (!RequiredString(Object, TEXT("source_id"), Out.SourceId, Error, false)
+				|| !RequiredString(Object, TEXT("generation"), Out.Generation, Error, false)
+				|| !RequiredNumber(Object, TEXT("sequence"), Sequence, Error, false))
 			{
 				return false;
 			}
 			Out.Sequence = static_cast<int64>(Sequence);
-			return Out.IsValid()
-				|| Fail(Error, TEXT("world_spatial_revision_invalid"), Out.SourceId);
+			return ValidateParsedValue(Object, Out, Error);
 		}
 
 		bool ParseTemporalPoint(
@@ -215,8 +331,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			{
 				return false;
 			}
-			return Out.IsValid()
-				|| Fail(Error, TEXT("world_spatial_temporal_point_invalid"), Out.ClockId);
+			return ValidateParsedValue(Object, Out, Error);
 		}
 
 		bool ParseFrame(
@@ -226,19 +341,33 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		{
 			double Dimension = 0.0;
 			TSharedPtr<FJsonObject> ObservedAt;
+			if (!Object->HasField(TEXT("basis_frame_id"))
+				&& !Object->HasField(TEXT("basis_evidence_id"))
+				&& !Object->HasField(TEXT("observed_at")))
+			{
+				Out.bAuthored = true;
+				if (!RequiredString(Object, TEXT("frame_id"), Out.FrameId, Error)
+					|| !RequiredNumber(Object, TEXT("dimension"), Dimension, Error)
+					|| !RequiredString(Object, TEXT("unit"), Out.Unit, Error)) return false;
+				Out.Dimension = static_cast<int32>(Dimension);
+				return ValidateParsedValue(Object, Out, Error);
+			}
 			if (!RequiredString(Object, TEXT("frame_id"), Out.FrameId, Error)
 				|| !RequiredString(Object, TEXT("basis_frame_id"), Out.BasisFrameId, Error)
 				|| !RequiredNumber(Object, TEXT("dimension"), Dimension, Error)
 				|| !RequiredString(Object, TEXT("unit"), Out.Unit, Error)
-				|| !RequiredString(Object, TEXT("basis_evidence_id"), Out.BasisEvidenceId, Error)
-				|| !RequiredObject(Object, TEXT("observed_at"), ObservedAt, Error)
-				|| !ParseTemporalPoint(ObservedAt, Out.ObservedAt, Error))
+				|| !RequiredString(Object, TEXT("basis_evidence_id"), Out.BasisEvidenceId, Error, false)
+				|| !RequiredObject(Object, TEXT("observed_at"), ObservedAt, Error))
 			{
 				return false;
 			}
+			if (!ParseTemporalPoint(ObservedAt, Out.ObservedAt, Error))
+			{
+				UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, TEXT("/observed_at"));
+				return false;
+			}
 			Out.Dimension = static_cast<int32>(Dimension);
-			return Out.IsValid()
-				|| Fail(Error, TEXT("world_spatial_frame_invalid"), Out.FrameId);
+			return ValidateParsedValue(Object, Out, Error);
 		}
 
 		bool ParseSpatialValue(
@@ -247,17 +376,50 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			FUeAgentWorldSpatialExecutionError& Error)
 		{
 			TSharedPtr<FJsonObject> Frame;
+			if (Object->HasField(TEXT("frame_id")))
+			{
+				const TArray<TSharedPtr<FJsonValue>>* Components = nullptr;
+				if (!RequiredString(Object, TEXT("subject"), Out.Subject, Error)
+					|| !RequiredString(Object, TEXT("quantity"), Out.Quantity, Error)
+					|| !ParseFrame(Object, Out.Frame, Error)
+					|| !RequiredArray(Object, TEXT("components"), Components, Error)) return false;
+				for (int32 Index = 0; Index < Components->Num(); ++Index)
+				{
+					const auto& Component = (*Components)[Index];
+					double Number = 0.0;
+					FString Lexeme;
+					if (Component.IsValid() && Component->Type == EJson::Number && Component->TryGetNumber(Number)
+						&& FMath::IsFinite(Number))
+					{
+						Lexeme = FString::Printf(TEXT("%.17g"), Number);
+					}
+					else if (!Component.IsValid() || !Component->TryGetString(Lexeme) || Lexeme.IsEmpty())
+					{
+						Error = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("world_spatial_typed_array_item_invalid"),
+							TEXT("/components/") + LexToString(Index), MakeShared<FJsonValueString>(TEXT("finite number or non-empty string")), Component);
+						Error.PublicMessage = TEXT("A component must be a finite number or a non-empty string.");
+						Error.ActualValuePresent = Component.IsValid();
+						Error.SourceKind = TEXT("command_input");
+						return false;
+					}
+					Out.Components.Add(MoveTemp(Lexeme));
+				}
+				return ValidateParsedValue(Object, Out, Error);
+			}
 			if (!RequiredString(Object, TEXT("subject"), Out.Subject, Error)
 				|| !RequiredString(Object, TEXT("quantity"), Out.Quantity, Error)
-				|| !RequiredObject(Object, TEXT("frame"), Frame, Error)
-				|| !ParseFrame(Frame, Out.Frame, Error)
-				|| !StringArray(Object, TEXT("components"), Out.Components, Error)
-				|| !StringArray(Object, TEXT("conversion_evidence_ids"), Out.ConversionEvidenceIds, Error))
+				|| !RequiredObject(Object, TEXT("frame"), Frame, Error)) return false;
+			if (!ParseFrame(Frame, Out.Frame, Error))
+			{
+				UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, TEXT("/frame"));
+				return false;
+			}
+			if (!StringArray(Object, TEXT("components"), Out.Components, Error)
+				|| !StringArray(Object, TEXT("conversion_evidence_ids"), Out.ConversionEvidenceIds, Error, false))
 			{
 				return false;
 			}
-			return Out.IsValid()
-				|| Fail(Error, TEXT("world_spatial_value_invalid"), Out.Subject);
+			return ValidateParsedValue(Object, Out, Error);
 		}
 
 		bool ParseExpectedRevisionEntry(
@@ -266,11 +428,14 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			FUeAgentWorldSpatialExecutionError& Error)
 		{
 			TSharedPtr<FJsonObject> Revision;
-			return RequiredString(Object, TEXT("target_ref"), Out.TargetRef, Error)
-				&& RequiredObject(Object, TEXT("revision"), Revision, Error)
-				&& ParseRevision(Revision, Out.Revision, Error)
-				&& (Out.IsValid()
-					|| Fail(Error, TEXT("world_spatial_expected_revision_invalid"), Out.TargetRef));
+			if (!RequiredString(Object, TEXT("target_ref"), Out.TargetRef, Error)
+				|| !RequiredObject(Object, TEXT("revision"), Revision, Error)) return false;
+			if (!ParseRevision(Revision, Out.Revision, Error))
+			{
+				UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, TEXT("/revision"));
+				return false;
+			}
+			return ValidateParsedValue(Object, Out, Error);
 		}
 
 		template <typename TValue, typename FParser>
@@ -287,20 +452,26 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			{
 				return false;
 			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			for (int32 Index = 0; Index < Values->Num(); ++Index)
 			{
+				const auto& Value = (*Values)[Index];
 				const TSharedPtr<FJsonObject> Item =
-					Value.IsValid() ? Value->AsObject() : nullptr;
+					Value.IsValid() && Value->Type == EJson::Object ? Value->AsObject() : nullptr;
 				TValue Parsed;
 				if (!Item.IsValid() || !Parser(Item, Parsed, Error))
 				{
-					return Fail(
-						Error,
-						Error.IsValid()
-							? Error.Code
-							: TEXT("world_spatial_typed_array_item_invalid"),
-						Field,
-						Error.Detail);
+					if (!Item || Error.IsEmpty())
+					{
+						Error = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("world_spatial_typed_array_item_invalid"),
+							TEXT("/"), MakeShared<FJsonValueString>(TEXT("valid request object")), nullptr);
+						Error.ActualEvidence = Value;
+						Error.ActualValuePresent = Value.IsValid();
+						Error.SourceKind = TEXT("command_input");
+						Error.PublicMessage = !Item ? TEXT("This array element must be an object.")
+							: TEXT("The array item parser failed without supplying a diagnostic.");
+					}
+					UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, TEXT("/") + FString(Field) + TEXT("/") + LexToString(Index));
+					return false;
 				}
 				Out.Add(MoveTemp(Parsed));
 			}
@@ -313,14 +484,10 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			FUeAgentWorldSpatialExecutionError& Error)
 		{
 			TSharedPtr<FJsonObject> Location;
-			TSharedPtr<FJsonObject> Revision;
 			return RequiredObject(Object, TEXT("location"), Location, Error)
-				&& ParseSpatialValue(Location, Out.Location, Error)
+				&& ParseAt(Location, Out.Location, ParseSpatialValue, Error, TEXT("/location"))
 				&& RequiredNumber(Object, TEXT("zoom"), Out.Zoom, Error)
-				&& RequiredObject(Object, TEXT("graph_revision"), Revision, Error)
-				&& ParseRevision(Revision, Out.GraphRevision, Error)
-				&& (Out.IsValid()
-					|| Fail(Error, TEXT("world_spatial_graph_view_state_invalid"), Out.Location.Subject));
+				&& (ValidateParsedValue(Object, Out, Error));
 		}
 
 		bool ParseNodePlacement(
@@ -331,9 +498,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			TSharedPtr<FJsonObject> Position;
 			return RequiredString(Object, TEXT("node_ref"), Out.NodeRef, Error)
 				&& RequiredObject(Object, TEXT("position"), Position, Error)
-				&& ParseSpatialValue(Position, Out.Position, Error)
-				&& (Out.IsValid()
-					|| Fail(Error, TEXT("world_spatial_node_placement_invalid"), Out.NodeRef));
+				&& ParseAt(Position, Out.Position, ParseSpatialValue, Error, TEXT("/position"))
+				&& (ValidateParsedValue(Object, Out, Error));
 		}
 
 		bool ParseLayoutRelation(
@@ -356,8 +522,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				}
 				Out.Gap = Gap;
 			}
-			return Out.IsValid()
-				|| Fail(Error, TEXT("world_spatial_layout_relation_invalid"), Out.SourceNodeRef);
+			return ValidateParsedValue(Object, Out, Error);
 		}
 
 		bool ParseAlignment(
@@ -368,7 +533,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			TSharedPtr<FJsonObject> VerifyFrame;
 			if (!RequiredString(Object, TEXT("kind"), Out.Kind, Error)
 				|| !RequiredObject(Object, TEXT("verify_frame"), VerifyFrame, Error)
-				|| !ParseFrame(VerifyFrame, Out.VerifyFrame, Error))
+				|| !ParseAt(VerifyFrame, Out.VerifyFrame, ParseFrame, Error, TEXT("/verify_frame")))
 			{
 				return false;
 			}
@@ -393,7 +558,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				&& AnchorObject && AnchorObject->IsValid())
 			{
 				FWorldSpatialValue Value;
-				if (!ParseSpatialValue(*AnchorObject, Value, Error))
+				if (!ParseAt(*AnchorObject, Value, ParseSpatialValue, Error, TEXT("/subject_anchor")))
 				{
 					return false;
 				}
@@ -404,7 +569,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				&& AnchorObject && AnchorObject->IsValid())
 			{
 				FWorldSpatialValue Value;
-				if (!ParseSpatialValue(*AnchorObject, Value, Error))
+				if (!ParseAt(*AnchorObject, Value, ParseSpatialValue, Error, TEXT("/reference_anchor")))
 				{
 					return false;
 				}
@@ -415,7 +580,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				&& Optional && Optional->IsValid())
 			{
 				FWorldSpatialValue Value;
-				if (!ParseSpatialValue(*Optional, Value, Error))
+				if (!ParseAt(*Optional, Value, ParseSpatialValue, Error, TEXT("/subject_normal")))
 				{
 					return false;
 				}
@@ -426,14 +591,13 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				&& Optional && Optional->IsValid())
 			{
 				FWorldSpatialValue Value;
-				if (!ParseSpatialValue(*Optional, Value, Error))
+				if (!ParseAt(*Optional, Value, ParseSpatialValue, Error, TEXT("/reference_normal")))
 				{
 					return false;
 				}
 				Out.ReferenceNormal = MoveTemp(Value);
 			}
-			return Out.IsValid()
-				|| Fail(Error, TEXT("world_spatial_alignment_invalid"), Out.Kind);
+			return ValidateParsedValue(Object, Out, Error);
 		}
 
 		bool ParseSurfaceQuery(
@@ -444,15 +608,14 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			TSharedPtr<FJsonObject> Origin;
 			TSharedPtr<FJsonObject> Direction;
 			return RequiredObject(Object, TEXT("origin"), Origin, Error)
-				&& ParseSpatialValue(Origin, Out.Origin, Error)
+				&& ParseAt(Origin, Out.Origin, ParseSpatialValue, Error, TEXT("/origin"))
 				&& RequiredObject(Object, TEXT("direction"), Direction, Error)
-				&& ParseSpatialValue(Direction, Out.Direction, Error)
+				&& ParseAt(Direction, Out.Direction, ParseSpatialValue, Error, TEXT("/direction"))
 				&& RequiredNumber(Object, TEXT("max_distance_cm"), Out.MaxDistanceCm, Error)
 				&& RequiredString(Object, TEXT("trace_channel"), Out.TraceChannel, Error)
 				&& RequiredBool(Object, TEXT("trace_complex"), Out.bTraceComplex, Error)
 				&& StringArray(Object, TEXT("ignore_target_refs"), Out.IgnoreTargetRefs, Error)
-				&& (Out.IsValid()
-					|| Fail(Error, TEXT("world_spatial_surface_query_invalid"), Out.TraceChannel));
+				&& (ValidateParsedValue(Object, Out, Error));
 		}
 
 		bool ParsePlacementPolicy(
@@ -463,8 +626,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			return RequiredNumber(Object, TEXT("clearance_cm"), Out.ClearanceCm, Error)
 				&& RequiredBool(Object, TEXT("align_to_surface_normal"), Out.bAlignToSurfaceNormal, Error)
 				&& RequiredBool(Object, TEXT("preserve_yaw"), Out.bPreserveYaw, Error)
-				&& (Out.IsValid()
-					|| Fail(Error, TEXT("world_spatial_placement_policy_invalid"), TEXT("placement_policy")));
+				&& (ValidateParsedValue(Object, Out, Error));
 		}
 
 		bool ParseTraceQuery(
@@ -476,8 +638,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				&& RequiredString(Object, TEXT("trace_channel"), Out.TraceChannel, Error)
 				&& RequiredBool(Object, TEXT("trace_complex"), Out.bTraceComplex, Error)
 				&& StringArray(Object, TEXT("ignore_target_refs"), Out.IgnoreTargetRefs, Error)
-				&& (Out.IsValid()
-					|| Fail(Error, TEXT("world_spatial_trace_query_invalid"), Out.TraceChannel));
+				&& (ValidateParsedValue(Object, Out, Error));
 		}
 
 		bool ParseFramePolicy(
@@ -495,8 +656,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			Object->TryGetBoolField(TEXT("collision_aware"), Out.bCollisionAware);
 			Object->TryGetBoolField(TEXT("look_at"), Out.bLookAt);
 			Object->TryGetBoolField(TEXT("auto_fallback"), Out.bAutoFallback);
-			return Out.IsValid()
-				|| Fail(Error, TEXT("world_spatial_frame_policy_invalid"), TEXT("frame_policy"));
+			return ValidateParsedValue(Object, Out, Error);
 		}
 
 		bool ParseViewportInteractionState(
@@ -510,8 +670,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				&& RequiredBool(Object, TEXT("editor_primitives"), Out.bEditorPrimitives, Error)
 				&& RequiredBool(Object, TEXT("game_primitives"), Out.bGamePrimitives, Error)
 				&& RequiredString(Object, TEXT("widget_mode"), Out.WidgetMode, Error)
-				&& (Out.IsValid()
-					|| Fail(Error, TEXT("world_spatial_viewport_interaction_state_invalid"), Out.WidgetMode));
+				&& (ValidateParsedValue(Object, Out, Error));
 		}
 
 		bool ParseViewportCameraState(
@@ -522,13 +681,13 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			TSharedPtr<FJsonObject> Transform;
 			TSharedPtr<FJsonObject> ObservedAt;
 			return RequiredObject(Object, TEXT("camera_transform"), Transform, Error)
-				&& ParseSpatialValue(Transform, Out.CameraTransform, Error)
+				&& ParseAt(Transform, Out.CameraTransform, ParseSpatialValue, Error, TEXT("/camera_transform"))
 				&& RequiredNumber(Object, TEXT("fov_degrees"), Out.FovDegrees, Error)
 				&& RequiredString(Object, TEXT("view_mode"), Out.ViewMode, Error)
-				&& RequiredObject(Object, TEXT("observed_at"), ObservedAt, Error)
-				&& ParseTemporalPoint(ObservedAt, Out.ObservedAt, Error)
-				&& (Out.IsValid()
-					|| Fail(Error, TEXT("world_spatial_viewport_camera_state_invalid"), Out.ViewMode));
+				&& (!Object->HasField(TEXT("observed_at"))
+					|| (RequiredObject(Object, TEXT("observed_at"), ObservedAt, Error)
+						&& ParseAt(ObservedAt, Out.ObservedAt, ParseTemporalPoint, Error, TEXT("/observed_at"))))
+				&& (ValidateParsedValue(Object, Out, Error));
 		}
 
 		bool ParseViewportState(
@@ -541,16 +700,17 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			TSharedPtr<FJsonObject> Revision;
 			return RequiredString(Object, TEXT("viewport_ref"), Out.ViewportRef, Error)
 				&& RequiredObject(Object, TEXT("camera"), Camera, Error)
-				&& ParseViewportCameraState(Camera, Out.Camera, Error)
-				&& RequiredBool(Object, TEXT("realtime"), Out.bRealtime, Error)
+				&& ParseAt(Camera, Out.Camera, ParseViewportCameraState, Error, TEXT("/camera"))
+				&& RequiredBool(Object, Object->HasField(TEXT("realtime_configured"))
+					? TEXT("realtime_configured") : TEXT("realtime"), Out.bRealtime, Error)
 				&& RequiredBool(Object, TEXT("game_view"), Out.bGameView, Error)
 				&& StringArray(Object, TEXT("show_flags"), Out.ShowFlags, Error)
 				&& RequiredObject(Object, TEXT("interaction"), Interaction, Error)
-				&& ParseViewportInteractionState(Interaction, Out.Interaction, Error)
-				&& RequiredObject(Object, TEXT("observed_revision"), Revision, Error)
-				&& ParseRevision(Revision, Out.ObservedRevision, Error)
-				&& (Out.IsValid()
-					|| Fail(Error, TEXT("world_spatial_viewport_state_invalid"), Out.ViewportRef));
+				&& ParseAt(Interaction, Out.Interaction, ParseViewportInteractionState, Error, TEXT("/interaction"))
+				&& (!Object->HasField(TEXT("observed_revision"))
+					|| (RequiredObject(Object, TEXT("observed_revision"), Revision, Error)
+						&& ParseAt(Revision, Out.ObservedRevision, ParseRevision, Error, TEXT("/observed_revision"))))
+				&& (ValidateParsedValue(Object, Out, Error));
 		}
 
 		bool ParseViewportStatePatch(
@@ -563,11 +723,17 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				&& Transform && Transform->IsValid())
 			{
 				FWorldSpatialValue Value;
-				if (!ParseSpatialValue(*Transform, Value, Error))
+				if (!ParseAt(*Transform, Value, ParseSpatialValue, Error, TEXT("/camera_transform")))
 				{
 					return false;
 				}
 				Out.CameraTransform = MoveTemp(Value);
+			}
+			FString CameraTransformMode;
+			if (Object->TryGetStringField(
+					TEXT("camera_transform_mode"), CameraTransformMode))
+			{
+				Out.CameraTransformMode = MoveTemp(CameraTransformMode);
 			}
 			double Number = 0.0;
 			if (Object->TryGetNumberField(TEXT("fov_degrees"), Number))
@@ -602,14 +768,13 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				&& Interaction && Interaction->IsValid())
 			{
 				FWorldSpatialViewportInteractionState Value;
-				if (!ParseViewportInteractionState(*Interaction, Value, Error))
+				if (!ParseAt(*Interaction, Value, ParseViewportInteractionState, Error, TEXT("/interaction")))
 				{
 					return false;
 				}
 				Out.Interaction = MoveTemp(Value);
 			}
-			return Out.IsValid()
-				|| Fail(Error, TEXT("world_spatial_viewport_state_patch_invalid"), TEXT("state_patch"));
+			return ValidateParsedValue(Object, Out, Error);
 		}
 
 		template <typename TPayload, typename FDecode>
@@ -655,9 +820,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 								|| Root->TryGetBoolField(
 									TEXT("include_document_state"),
 									P.bIncludeDocumentState)
-								|| Fail(Error,
-									TEXT("world_spatial_graph_document_state_flag_invalid"),
-									TEXT("include_document_state"));
+								|| InvalidField(Error, Root, TEXT("include_document_state"), TEXT("boolean"), true,
+									TEXT("world_spatial_graph_document_state_flag_invalid"));
 						}, Error);
 					}},
 				{TEXT("graph.view.update"), TEXT("world_spatial.graph_view.update.request.v1"), TEXT("graph_view"), TEXT("graph_view_update"), true,
@@ -667,7 +831,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						{
 							TSharedPtr<FJsonObject> ViewState;
 							if (!RequiredObject(Root, TEXT("view_state"), ViewState, Error)
-								|| !ParseGraphViewState(ViewState, P.ViewState, Error))
+								|| !ParseAt(ViewState, P.ViewState, ParseGraphViewState, Error, TEXT("/view_state")))
 							{
 								return false;
 							}
@@ -676,23 +840,21 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 									TEXT("update_document_state"),
 									P.bUpdateDocumentState))
 							{
-								return Fail(Error,
-									TEXT("world_spatial_graph_document_state_flag_invalid"),
-									TEXT("update_document_state"));
+								return InvalidField(Error, Root, TEXT("update_document_state"), TEXT("boolean"), true,
+									TEXT("world_spatial_graph_document_state_flag_invalid"));
 							}
 							if (Root->HasField(TEXT("save_after_update"))
 								&& !Root->TryGetBoolField(
 									TEXT("save_after_update"), P.bSaveAfterUpdate))
 							{
-								return Fail(Error,
-									TEXT("world_spatial_graph_document_state_flag_invalid"),
-									TEXT("save_after_update"));
+								return InvalidField(Error, Root, TEXT("save_after_update"), TEXT("boolean"), true,
+									TEXT("world_spatial_graph_document_state_flag_invalid"));
 							}
 							return !P.bSaveAfterUpdate || P.bUpdateDocumentState
 								? true
-								: Fail(Error,
-									TEXT("world_spatial_graph_save_requires_document_state"),
-									TEXT("save_after_update"));
+								: RequestValueFailure(Error, TEXT("world_spatial_graph_save_requires_document_state"),
+									TEXT("Saving after an update requires updating the document state."), TEXT("/update_document_state"),
+									MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 						}, Error);
 					}},
 				{TEXT("graph.layout.apply"), TEXT("world_spatial.graph_layout.apply.request.v1"), TEXT("graph_layout"), TEXT("graph_layout_apply"), true,
@@ -700,11 +862,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					{
 						return DecodeAs<FGraphLayoutApplyRequestInput>(Root, Out, [&](FGraphLayoutApplyRequestInput& P)
 						{
-							TSharedPtr<FJsonObject> Revision;
 							if (!RequiredString(Root, TEXT("graph_ref"), P.GraphRef, Error)
 								|| !ObjectArray(Root, TEXT("node_placements"), P.NodePlacements, ParseNodePlacement, Error)
-								|| !RequiredObject(Root, TEXT("expected_revision"), Revision, Error)
-								|| !ParseRevision(Revision, P.ExpectedRevision, Error))
+								)
 							{
 								return false;
 							}
@@ -719,7 +879,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						{
 							TSharedPtr<FJsonObject> Frame;
 							return RequiredObject(Root, TEXT("verify_frame"), Frame, Error)
-								&& ParseFrame(Frame, P.VerifyFrame, Error);
+								&& ParseAt(Frame, P.VerifyFrame, ParseFrame, Error, TEXT("/verify_frame"));
 						}, Error);
 					}},
 				{TEXT("world.object_transform.update"), TEXT("world_spatial.object_transform.update.request.v1"), TEXT("object_transform"), TEXT("object_transform_update"), true,
@@ -728,11 +888,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						return DecodeAs<FWorldObjectTransformUpdateRequestInput>(Root, Out, [&](FWorldObjectTransformUpdateRequestInput& P)
 						{
 							TSharedPtr<FJsonObject> Transform;
-							TSharedPtr<FJsonObject> Revision;
 							return RequiredObject(Root, TEXT("transform"), Transform, Error)
-								&& ParseSpatialValue(Transform, P.Transform, Error)
-								&& RequiredObject(Root, TEXT("expected_revision"), Revision, Error)
-								&& ParseRevision(Revision, P.ExpectedRevision, Error);
+								&& ParseAt(Transform, P.Transform, ParseSpatialValue, Error, TEXT("/transform"));
 						}, Error);
 					}},
 				{TEXT("world.object_align"), TEXT("world_spatial.object_transform.align.request.v1"), TEXT("object_transform"), TEXT("object_align"), true,
@@ -743,9 +900,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							TSharedPtr<FJsonObject> Alignment;
 							if (!StringArray(Root, TEXT("subject_refs"), P.SubjectRefs, Error)
 								|| !RequiredObject(Root, TEXT("alignment"), Alignment, Error)
-								|| !ParseAlignment(Alignment, P.Alignment, Error)
-								|| (Root->HasField(TEXT("expected_revisions"))
-									&& !ObjectArray(Root, TEXT("expected_revisions"), P.ExpectedRevisions, ParseExpectedRevisionEntry, Error)))
+								|| !ParseAt(Alignment, P.Alignment, ParseAlignment, Error, TEXT("/alignment"))
+								)
 							{
 								return false;
 							}
@@ -766,11 +922,10 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							TSharedPtr<FJsonObject> Policy;
 							return StringArray(Root, TEXT("subject_refs"), P.SubjectRefs, Error)
 								&& RequiredObject(Root, TEXT("surface_query"), Surface, Error)
-								&& ParseSurfaceQuery(Surface, P.SurfaceQuery, Error)
+								&& ParseAt(Surface, P.SurfaceQuery, ParseSurfaceQuery, Error, TEXT("/surface_query"))
 								&& RequiredObject(Root, TEXT("placement_policy"), Policy, Error)
-								&& ParsePlacementPolicy(Policy, P.PlacementPolicy, Error)
-								&& (!Root->HasField(TEXT("expected_revisions"))
-									|| ObjectArray(Root, TEXT("expected_revisions"), P.ExpectedRevisions, ParseExpectedRevisionEntry, Error));
+								&& ParseAt(Policy, P.PlacementPolicy, ParsePlacementPolicy, Error, TEXT("/placement_policy"))
+								;
 						}, Error);
 					}},
 				{TEXT("mesh.transform.bake"), TEXT("world_spatial.object_transform.bake_mesh.request.v1"), TEXT("object_transform"), TEXT("mesh_transform_bake"), true,
@@ -779,11 +934,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						return DecodeAs<FMeshTransformBakeRequestInput>(Root, Out, [&](FMeshTransformBakeRequestInput& P)
 						{
 							TSharedPtr<FJsonObject> Transform;
-							TSharedPtr<FJsonObject> Revision;
 							if (!RequiredObject(Root, TEXT("transform"), Transform, Error)
-								|| !ParseSpatialValue(Transform, P.Transform, Error)
-								|| !RequiredObject(Root, TEXT("expected_revision"), Revision, Error)
-								|| !ParseRevision(Revision, P.ExpectedRevision, Error))
+								|| !ParseAt(Transform, P.Transform, ParseSpatialValue, Error, TEXT("/transform")))
 							{
 								return false;
 							}
@@ -801,11 +953,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						return DecodeAs<FMeshPivotUpdateRequestInput>(Root, Out, [&](FMeshPivotUpdateRequestInput& P)
 						{
 							TSharedPtr<FJsonObject> Pivot;
-							TSharedPtr<FJsonObject> Revision;
 							if (!RequiredObject(Root, TEXT("pivot"), Pivot, Error)
-								|| !ParseSpatialValue(Pivot, P.Pivot, Error)
-								|| !RequiredObject(Root, TEXT("expected_revision"), Revision, Error)
-								|| !ParseRevision(Revision, P.ExpectedRevision, Error))
+								|| !ParseAt(Pivot, P.Pivot, ParseSpatialValue, Error, TEXT("/pivot")))
 							{
 								return false;
 							}
@@ -824,7 +973,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						{
 							TSharedPtr<FJsonObject> Value;
 							return RequiredObject(Root, TEXT("screen_point"), Value, Error)
-								&& ParseSpatialValue(Value, P.ScreenPoint, Error);
+								&& ParseAt(Value, P.ScreenPoint, ParseSpatialValue, Error, TEXT("/screen_point"));
 						}, Error);
 					}},
 				{TEXT("viewport.ray.trace"), TEXT("world_spatial.viewport_projection.trace.request.v1"), TEXT("viewport_projection"), TEXT("viewport_ray_trace"), false,
@@ -835,9 +984,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							TSharedPtr<FJsonObject> Point;
 							TSharedPtr<FJsonObject> Query;
 							return RequiredObject(Root, TEXT("screen_point"), Point, Error)
-								&& ParseSpatialValue(Point, P.ScreenPoint, Error)
+								&& ParseAt(Point, P.ScreenPoint, ParseSpatialValue, Error, TEXT("/screen_point"))
 								&& RequiredObject(Root, TEXT("trace_query"), Query, Error)
-								&& ParseTraceQuery(Query, P.TraceQuery, Error);
+								&& ParseAt(Query, P.TraceQuery, ParseTraceQuery, Error, TEXT("/trace_query"));
 						}, Error);
 					}},
 				{TEXT("viewport.actor.pick"), TEXT("world_spatial.viewport_projection.pick_actor.request.v1"), TEXT("viewport_projection"), TEXT("viewport_actor_pick"), false,
@@ -850,9 +999,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							Root->TryGetBoolField(
 								TEXT("allow_no_hit"), P.bAllowNoHit);
 							return RequiredObject(Root, TEXT("screen_point"), Point, Error)
-								&& ParseSpatialValue(Point, P.ScreenPoint, Error)
+								&& ParseAt(Point, P.ScreenPoint, ParseSpatialValue, Error, TEXT("/screen_point"))
 								&& RequiredObject(Root, TEXT("trace_query"), Query, Error)
-								&& ParseTraceQuery(Query, P.TraceQuery, Error);
+								&& ParseAt(Query, P.TraceQuery, ParseTraceQuery, Error, TEXT("/trace_query"));
 						}, Error);
 					}},
 				{TEXT("viewport.actor.select"), TEXT("world_spatial.viewport_projection.select_actor.request.v1"), TEXT("viewport_projection"), TEXT("viewport_actor_select"), true,
@@ -865,7 +1014,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 								&& Point && Point->IsValid())
 							{
 								FWorldSpatialValue ParsedPoint;
-								if (!ParseSpatialValue(*Point, ParsedPoint, Error))
+								if (!ParseAt(*Point, ParsedPoint, ParseSpatialValue, Error, TEXT("/screen_point")))
 								{
 									return false;
 								}
@@ -879,16 +1028,16 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							if (!RequiredString(Root, TEXT("selection_mode"), P.SelectionMode, Error)
 								|| !P.HasExactlyOneSelector())
 							{
-								return Error.IsValid() ? false : Fail(Error,
+								return Error.IsValid() ? false : SelectorFailure(Error,
 									TEXT("world_spatial_viewport_actor_selection_selector_invalid"),
-									TEXT("exactly one of screen_point or actor_refs is required"));
+									{{TEXT("screen_point"), P.ScreenPoint.IsSet()}, {TEXT("actor_refs"), !P.ActorRefs.IsEmpty()}});
 							}
 							const TSharedPtr<FJsonObject>* Query = nullptr;
 							if (Root->TryGetObjectField(TEXT("trace_query"), Query)
 								&& Query && Query->IsValid())
 							{
 								FWorldSpatialTraceQuery Parsed;
-								if (!ParseTraceQuery(*Query, Parsed, Error))
+								if (!ParseAt(*Query, Parsed, ParseTraceQuery, Error, TEXT("/trace_query")))
 								{
 									return false;
 								}
@@ -896,7 +1045,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							}
 							if (P.TraceQuery.IsSet() && !P.ScreenPoint.IsSet())
 							{
-								return Fail(Error, TEXT("world_spatial_viewport_actor_selection_trace_without_screen"), TEXT("trace_query"));
+								return RequestValueFailure(Error, TEXT("world_spatial_viewport_actor_selection_trace_without_screen"),
+									TEXT("A trace query requires a screen point selector."), TEXT("/screen_point"), nullptr,
+									MakeShared<FJsonValueString>(TEXT("screen point")));
 							}
 							return true;
 						}, Error);
@@ -908,7 +1059,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						{
 							TSharedPtr<FJsonObject> Point;
 							if (!RequiredObject(Root, TEXT("screen_point"), Point, Error)
-								|| !ParseSpatialValue(Point, P.ScreenPoint, Error)
+								|| !ParseAt(Point, P.ScreenPoint, ParseSpatialValue, Error, TEXT("/screen_point"))
 								|| !RequiredString(Root, TEXT("element_kind"), P.ElementKind, Error)
 								|| !RequiredString(Root, TEXT("selection_mode"), P.SelectionMode, Error))
 							{
@@ -919,7 +1070,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 								&& Query && Query->IsValid())
 							{
 								FWorldSpatialTraceQuery Parsed;
-								if (!ParseTraceQuery(*Query, Parsed, Error))
+								if (!ParseAt(*Query, Parsed, ParseTraceQuery, Error, TEXT("/trace_query")))
 								{
 									return false;
 								}
@@ -935,7 +1086,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						{
 							TSharedPtr<FJsonObject> Value;
 							return RequiredObject(Root, TEXT("sample_point"), Value, Error)
-								&& ParseSpatialValue(Value, P.SamplePoint, Error);
+								&& ParseAt(Value, P.SamplePoint, ParseSpatialValue, Error, TEXT("/sample_point"));
 						}, Error);
 					}},
 				{TEXT("viewport.camera.frame"), TEXT("world_spatial.viewport_session.frame_camera.request.v1"), TEXT("viewport_session_state"), TEXT("viewport_camera_frame"), true,
@@ -956,11 +1107,43 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 							}
 							Root->TryGetBoolField(TEXT("include_child_folders"), P.bIncludeChildFolders);
 							Root->TryGetBoolField(TEXT("use_current_selection"), P.bUseCurrentSelection);
+							const TSharedPtr<FJsonObject>* WorldPoint = nullptr;
+							if (Root->TryGetObjectField(TEXT("world_point"), WorldPoint)
+								&& WorldPoint && WorldPoint->IsValid())
+							{
+								FWorldSpatialValue Point;
+								if (!ParseAt(*WorldPoint, Point, ParseSpatialValue, Error, TEXT("/world_point")))
+								{
+									return false;
+								}
+								P.WorldPoint = MoveTemp(Point);
+							}
+							const TSharedPtr<FJsonObject>* WorldBounds = nullptr;
+							if (Root->TryGetObjectField(TEXT("world_bounds"), WorldBounds)
+								&& WorldBounds && WorldBounds->IsValid())
+							{
+								TSharedPtr<FJsonObject> Min;
+								TSharedPtr<FJsonObject> Max;
+								FWorldSpatialValue MinValue;
+								FWorldSpatialValue MaxValue;
+								if (!RequiredObject(*WorldBounds, TEXT("min"), Min, Error)
+									|| !RequiredObject(*WorldBounds, TEXT("max"), Max, Error)
+									|| !ParseAt(Min, MinValue, ParseSpatialValue, Error, TEXT("/min"))
+									|| !ParseAt(Max, MaxValue, ParseSpatialValue, Error, TEXT("/max")))
+								{
+									UeAgentAuthoringDiagnostics::PrefixDocumentFailure(Error, TEXT("/world_bounds"));
+									return false;
+								}
+								P.WorldBoundsMin = MoveTemp(MinValue);
+								P.WorldBoundsMax = MoveTemp(MaxValue);
+							}
 							return RequiredObject(Root, TEXT("frame_policy"), Policy, Error)
-								&& ParseFramePolicy(Policy, P.FramePolicy, Error)
+								&& ParseAt(Policy, P.FramePolicy, ParseFramePolicy, Error, TEXT("/frame_policy"))
 								&& (P.HasExactlyOneSelector()
-									|| Fail(Error, TEXT("world_spatial_viewport_frame_selector_invalid"),
-										TEXT("exactly one of subject_refs, folder_path or use_current_selection is required")));
+									|| SelectorFailure(Error, TEXT("world_spatial_viewport_frame_selector_invalid"),
+										{{TEXT("subject_refs"), !P.SubjectRefs.IsEmpty()}, {TEXT("folder_path"), P.FolderPath.IsSet() && !P.FolderPath->IsEmpty()},
+										 {TEXT("use_current_selection"), P.bUseCurrentSelection}, {TEXT("world_point"), P.WorldPoint.IsSet()},
+										 {TEXT("world_bounds"), P.WorldBoundsMin.IsSet() && P.WorldBoundsMax.IsSet()}}));
 						}, Error);
 					}},
 				{TEXT("viewport.state.read"), TEXT("world_spatial.viewport_session.read_state.request.v1"), TEXT("viewport_session_state"), TEXT("viewport_state_read"), false,
@@ -975,7 +1158,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						{
 							TSharedPtr<FJsonObject> Snapshot;
 							return RequiredObject(Root, TEXT("snapshot"), Snapshot, Error)
-								&& ParseViewportState(Snapshot, P.Snapshot, Error);
+								&& ParseAt(Snapshot, P.Snapshot, ParseViewportState, Error, TEXT("/snapshot"));
 						}, Error);
 					}},
 				{TEXT("viewport.warning.list"), TEXT("world_spatial.viewport_session.list_warnings.request.v1"), TEXT("viewport_session_state"), TEXT("viewport_warning_list"), false,
@@ -995,7 +1178,12 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				{TEXT("viewport.view_mode.list"), TEXT("world_spatial.viewport_session.list_view_modes.request.v1"), TEXT("viewport_session_state"), TEXT("viewport_view_mode_list"), false,
 					[](const TSharedPtr<FJsonObject>& Root, FUeAgentWorldSpatialRequestPayload& Out, FUeAgentWorldSpatialExecutionError& Error)
 					{
-						return DecodeAs<FViewportViewModeListRequestInput>(Root, Out, [](FViewportViewModeListRequestInput&) { return true; }, Error);
+						return DecodeAs<FViewportViewModeListRequestInput>(Root, Out, [&](FViewportViewModeListRequestInput& P)
+						{
+							Root->TryGetStringField(TEXT("query"), P.Query);
+							P.Query.TrimStartAndEndInline();
+							return true;
+						}, Error);
 					}},
 				{TEXT("viewport.instance.list"), TEXT("world_spatial.viewport_session.list_instances.request.v1"), TEXT("viewport_session_state"), TEXT("viewport_instance_list"), false,
 					[](const TSharedPtr<FJsonObject>& Root, FUeAgentWorldSpatialRequestPayload& Out, FUeAgentWorldSpatialExecutionError& Error)
@@ -1009,11 +1197,38 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						{
 							TSharedPtr<FJsonObject> Patch;
 							return RequiredObject(Root, TEXT("state_patch"), Patch, Error)
-								&& ParseViewportStatePatch(Patch, P.StatePatch, Error);
+								&& ParseAt(Patch, P.StatePatch, ParseViewportStatePatch, Error, TEXT("/state_patch"));
 						}, Error);
 					}},
 			};
 			return Specs;
+		}
+
+		void BindCompactInputSubjects(const TSharedPtr<FJsonObject>& Object, const FString& BoundSubject)
+		{
+			FString Subject = BoundSubject;
+			// Node placement already names its owner separately from coordinates.
+			Object->TryGetStringField(TEXT("node_ref"), Subject);
+			if (Object->HasField(TEXT("quantity")) && Object->HasField(TEXT("frame_id"))
+				&& Object->HasField(TEXT("components")))
+			{
+				Object->SetStringField(TEXT("subject"), Subject);
+				return;
+			}
+			for (const auto& Entry : Object->Values)
+			{
+				if (Entry.Value->Type == EJson::Object)
+				{
+					BindCompactInputSubjects(Entry.Value->AsObject(), Subject);
+				}
+				else if (Entry.Value->Type == EJson::Array)
+				{
+					for (const auto& Item : Entry.Value->AsArray())
+					{
+						if (Item->Type == EJson::Object) BindCompactInputSubjects(Item->AsObject(), Subject);
+					}
+				}
+			}
 		}
 
 		class FWorldSpatialRequestDecoder final
@@ -1025,7 +1240,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				const FUeAgentContractValue& CanonicalInput,
 				FUeAgentResourceTracker& Resources,
 				FUeAgentWorldSpatialTypedRequestPtr& OutRequest,
-				FUeAgentWorldSpatialExecutionError& OutError) override
+				FUeAgentWorldSpatialExecutionError& OutError,
+				const FString& InputSubject) override
 			{
 				OutRequest.Reset();
 				OutError = {};
@@ -1042,7 +1258,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					return Fail(
 						OutError,
 						TEXT("world_spatial_request_contract_mismatch"),
-						Contract.GetCapabilityId());
+						Contract.GetCapabilityId(), TEXT("The request execution contract does not match the registered capability."));
 				}
 				if (!ChargeDecode(Resources, Contract.GetCapabilityId(), OutError))
 				{
@@ -1054,6 +1270,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					return false;
 				}
 				FUeAgentWorldSpatialRequestPayload Payload;
+				BindCompactInputSubjects(Root, InputSubject);
 				if (!Spec->Decode(Root, Payload, OutError))
 				{
 					if (!OutError.IsValid())
@@ -1061,7 +1278,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 						Fail(
 							OutError,
 							TEXT("world_spatial_request_decode_failed"),
-							Contract.GetCapabilityId());
+							Contract.GetCapabilityId(), TEXT("The request decoder failed without supplying a diagnostic."));
 					}
 					return false;
 				}
@@ -1071,172 +1288,301 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					Spec->RequestKindId,
 					Spec->bOperation,
 					MoveTemp(Payload));
-				return OutRequest.IsValid();
+				return OutRequest.IsValid() || Fail(OutError, TEXT("world_spatial_typed_request_unavailable"),
+					Contract.GetCapabilityId(), TEXT("The decoder could not create the typed request."));
 			}
 		};
 	}
 
+	bool FWorldSpatialRevision::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_revision_invalid");
+		if (!ValueText(SourceId, TEXT("/source_id"), Code, Error, false)
+			|| !ValueText(Generation, TEXT("/generation"), Code, Error, false)) return false;
+		return Sequence >= 0 || ValueFailure(Error, Code, TEXT("The revision sequence must be non-negative."), TEXT("/sequence"),
+			MakeShared<FJsonValueString>(::LexToString(Sequence)), MakeShared<FJsonValueString>(TEXT("non-negative integer")), false);
+	}
+
+	bool FWorldSpatialTemporalPoint::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_temporal_point_invalid");
+		return ValueText(ClockId, TEXT("/clock_id"), Code, Error)
+			&& ValueText(Tick, TEXT("/tick"), Code, Error)
+			&& ValueText(RateNumerator, TEXT("/rate_numerator"), Code, Error)
+			&& ValueText(RateDenominator, TEXT("/rate_denominator"), Code, Error)
+			&& ValueChoice(State, {TEXT("captured"), TEXT("frozen")}, TEXT("/state"), Code, Error);
+	}
+
+	bool FWorldSpatialFrame::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_frame_invalid");
+		return ValueText(FrameId, TEXT("/frame_id"), Code, Error)
+			&& ValueNumber(Dimension == 2 || Dimension == 3, Dimension, TEXT("2 or 3"), TEXT("/dimension"), Code, Error)
+			&& ValueText(Unit, TEXT("/unit"), Code, Error)
+			&& (bAuthored || (ValueText(BasisFrameId, TEXT("/basis_frame_id"), Code, Error)
+				&& ValueText(BasisEvidenceId, TEXT("/basis_evidence_id"), Code, Error, false)
+				&& ValidateChild(ObservedAt, TEXT("/observed_at"), Error)));
+	}
+
+	bool FWorldSpatialValue::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_value_invalid");
+		const int32 ExpectedComponents = Quantity == TEXT("transform") ? 10 : Frame.Dimension;
+		if (!ValueText(Subject, TEXT("/subject"), Code, Error)
+			|| !ValueChoice(Quantity, {TEXT("point"), TEXT("direction"), TEXT("normal"), TEXT("transform")}, TEXT("/quantity"), Code, Error)
+			|| !ValidateChild(Frame, TEXT("/frame"), Error)) return false;
+		if (Components.Num() != ExpectedComponents)
+			return ValueFailure(Error, Code, TEXT("The component count does not match the spatial quantity and frame dimension."), TEXT("/components"),
+				MakeShared<FJsonValueNumber>(Components.Num()), MakeShared<FJsonValueNumber>(ExpectedComponents));
+		for (int32 Index = 0; Index < Components.Num(); ++Index)
+			if (!ValueText(Components[Index], *FString::Printf(TEXT("/components/%d"), Index), Code, Error)) return false;
+		return true;
+	}
+
+	bool FWorldSpatialExpectedRevisionEntry::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		return ValueText(TargetRef, TEXT("/target_ref"), TEXT("world_spatial_expected_revision_invalid"), Error)
+			&& ValidateChild(Revision, TEXT("/revision"), Error);
+	}
+
+	bool FWorldSpatialGraphViewState::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_graph_view_state_invalid");
+		return ValidateChild(Location, TEXT("/location"), Error)
+			&& ValueNumber(Location.Frame.Dimension == 2, Location.Frame.Dimension, TEXT("2"), TEXT("/location/frame/dimension"), Code, Error)
+			&& ValueNumber(Zoom > 0.0, Zoom, TEXT("greater than zero"), TEXT("/zoom"), Code, Error);
+	}
+
+	bool FWorldSpatialNodePlacement::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_node_placement_invalid");
+		return ValueText(NodeRef, TEXT("/node_ref"), Code, Error)
+			&& ValidateChild(Position, TEXT("/position"), Error)
+			&& ValueNumber(Position.Frame.Dimension == 2, Position.Frame.Dimension, TEXT("2"), TEXT("/position/frame/dimension"), Code, Error);
+	}
+
+	bool FWorldSpatialLayoutRelation::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_layout_relation_invalid");
+		return ValueText(SourceNodeRef, TEXT("/source_node_ref"), Code, Error)
+			&& ValueText(TargetNodeRef, TEXT("/target_node_ref"), Code, Error)
+			&& ValueText(Relation, TEXT("/relation"), Code, Error)
+			&& (!Gap.IsSet() || ValueNumber(Gap.GetValue() >= 0.0, Gap.GetValue(), TEXT("non-negative"), TEXT("/gap"), Code, Error));
+	}
+
+	bool FWorldSpatialAlignment::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_alignment_invalid");
+		if (!ValidateChild(VerifyFrame, TEXT("/verify_frame"), Error)
+			|| !ValueNumber(VerifyFrame.Dimension == 3, VerifyFrame.Dimension, TEXT("3"), TEXT("/verify_frame/dimension"), Code, Error)
+			|| !ValueChoice(RotationPolicy, {TEXT("preserve"), TEXT("align_normals"), TEXT("align_frames")}, TEXT("/rotation_policy"), Code, Error)
+			|| (SubjectNormal.IsSet() && !ValidateChild(SubjectNormal.GetValue(), TEXT("/subject_normal"), Error))
+			|| (ReferenceNormal.IsSet() && !ValidateChild(ReferenceNormal.GetValue(), TEXT("/reference_normal"), Error))) return false;
+		if (Kind == TEXT("anchors"))
+			return ValuePresent(SubjectAnchor.IsSet(), TEXT("/subject_anchor"), Code, Error)
+				&& ValidateChild(SubjectAnchor.GetValue(), TEXT("/subject_anchor"), Error)
+				&& ValuePresent(ReferenceAnchor.IsSet(), TEXT("/reference_anchor"), Code, Error)
+				&& ValidateChild(ReferenceAnchor.GetValue(), TEXT("/reference_anchor"), Error);
+		if (Kind == TEXT("bounds"))
+			return ValueChoice(Axis, {TEXT("x"), TEXT("y"), TEXT("z")}, TEXT("/axis"), Code, Error)
+				&& ValueChoice(SubjectBoundsAnchor, {TEXT("min"), TEXT("center"), TEXT("max")}, TEXT("/source_anchor"), Code, Error)
+				&& ValueChoice(ReferenceBoundsAnchor, {TEXT("min"), TEXT("center"), TEXT("max")}, TEXT("/target_anchor"), Code, Error);
+		if (Kind == TEXT("face"))
+			return ValueText(SubjectFace, TEXT("/source_face"), Code, Error)
+				&& ValueText(ReferenceFace, TEXT("/target_face"), Code, Error)
+				&& ValueChoice(Axis, {TEXT(""), TEXT("x"), TEXT("y"), TEXT("z")}, TEXT("/axis"), Code, Error);
+		if (Kind == TEXT("vertex"))
+			return (!SubjectVertexIndex.IsSet() || ValueNumber(SubjectVertexIndex.GetValue() >= 0, SubjectVertexIndex.GetValue(), TEXT("non-negative integer"), TEXT("/source_vertex_index"), Code, Error))
+				&& (!ReferenceVertexIndex.IsSet() || ValueNumber(ReferenceVertexIndex.GetValue() >= 0, ReferenceVertexIndex.GetValue(), TEXT("non-negative integer"), TEXT("/target_vertex_index"), Code, Error));
+		return ValueChoice(Kind, {TEXT("anchors"), TEXT("bounds"), TEXT("face"), TEXT("vertex")}, TEXT("/kind"), Code, Error);
+	}
+
+	bool FWorldSpatialSurfaceQuery::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_surface_query_invalid");
+		return ValidateChild(Origin, TEXT("/origin"), Error)
+			&& ValidateChild(Direction, TEXT("/direction"), Error)
+			&& ValueNumber(Origin.Frame.Dimension == 3, Origin.Frame.Dimension, TEXT("3"), TEXT("/origin/frame/dimension"), Code, Error)
+			&& ValueNumber(Direction.Frame.Dimension == 3, Direction.Frame.Dimension, TEXT("3"), TEXT("/direction/frame/dimension"), Code, Error)
+			&& ValueNumber(MaxDistanceCm > 0.0, MaxDistanceCm, TEXT("greater than zero"), TEXT("/max_distance_cm"), Code, Error)
+			&& ValueText(TraceChannel, TEXT("/trace_channel"), Code, Error);
+	}
+
+	bool FWorldSpatialPlacementPolicy::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		return ValueNumber(ClearanceCm >= 0.0, ClearanceCm, TEXT("non-negative"), TEXT("/clearance_cm"), TEXT("world_spatial_placement_policy_invalid"), Error);
+	}
+
+	bool FWorldSpatialTraceQuery::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_trace_query_invalid");
+		return ValueNumber(MaxDistanceCm > 0.0, MaxDistanceCm, TEXT("greater than zero"), TEXT("/max_distance_cm"), Code, Error)
+			&& ValueText(TraceChannel, TEXT("/trace_channel"), Code, Error);
+	}
+
+	bool FWorldSpatialFramePolicy::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_frame_policy_invalid");
+		if (!ValueNumber(PaddingRatio >= 0.0, PaddingRatio, TEXT("non-negative"), TEXT("/padding_ratio"), Code, Error)
+			|| !ValueNumber(MinimumDistanceCm >= 0.0, MinimumDistanceCm, TEXT("non-negative"), TEXT("/minimum_distance_cm"), Code, Error)
+			|| !ValueNumber(MaximumDistanceCm > 0.0, MaximumDistanceCm, TEXT("greater than zero"), TEXT("/maximum_distance_cm"), Code, Error)) return false;
+		return MaximumDistanceCm >= MinimumDistanceCm || ValueFailure(Error, Code,
+			TEXT("The maximum distance must be at least the minimum distance."), TEXT("/maximum_distance_cm"),
+			DiagnosticNumber(MaximumDistanceCm), DiagnosticNumber(MinimumDistanceCm));
+	}
+
+	bool FWorldSpatialViewportInteractionState::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		return ValueText(WidgetMode, TEXT("/widget_mode"), TEXT("world_spatial_viewport_interaction_state_invalid"), Error);
+	}
+
+	bool FWorldSpatialViewportCameraState::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_viewport_camera_state_invalid");
+		return ValidateChild(CameraTransform, TEXT("/camera_transform"), Error)
+			&& ValueNumber(CameraTransform.Frame.Dimension == 3, CameraTransform.Frame.Dimension, TEXT("3"), TEXT("/camera_transform/frame/dimension"), Code, Error)
+			&& ValueNumber(FovDegrees > 0.0 && FovDegrees <= 179.0, FovDegrees, TEXT("greater than zero and at most 179 degrees"), TEXT("/fov_degrees"), Code, Error)
+			&& ValueText(ViewMode, TEXT("/view_mode"), Code, Error)
+			&& (CameraTransform.Frame.bAuthored || ValidateChild(ObservedAt, TEXT("/observed_at"), Error));
+	}
+
+	bool FWorldSpatialViewportState::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		return ValueText(ViewportRef, TEXT("/viewport_ref"), TEXT("world_spatial_viewport_state_invalid"), Error)
+			&& ValidateChild(Camera, TEXT("/camera"), Error)
+			&& ValidateChild(Interaction, TEXT("/interaction"), Error);
+	}
+
+	bool FWorldSpatialViewportStatePatch::TryValidate(FUeAgentWorldSpatialExecutionError& Error) const
+	{
+		Error.Reset();
+		const TCHAR* Code = TEXT("world_spatial_viewport_state_patch_invalid");
+		if (CameraTransform.IsSet()
+			&& (!ValidateChild(CameraTransform.GetValue(), TEXT("/camera_transform"), Error)
+				|| !ValuePresent(CameraTransformMode.IsSet(), TEXT("/camera_transform_mode"), Code, Error)
+				|| !ValueChoice(CameraTransformMode.GetValue(), {TEXT("absolute"), TEXT("delta")}, TEXT("/camera_transform_mode"), Code, Error))) return false;
+		return (!CameraTransformMode.IsSet() || ValuePresent(CameraTransform.IsSet(), TEXT("/camera_transform"), Code, Error))
+			&& (!FovDegrees.IsSet() || ValueNumber(FovDegrees.GetValue() > 0.0 && FovDegrees.GetValue() <= 179.0, FovDegrees.GetValue(), TEXT("greater than zero and at most 179 degrees"), TEXT("/fov_degrees"), Code, Error))
+			&& (!ViewMode.IsSet() || ValueText(ViewMode.GetValue(), TEXT("/view_mode"), Code, Error))
+			&& (!Interaction.IsSet() || ValidateChild(Interaction.GetValue(), TEXT("/interaction"), Error));
+	}
+
 	bool FWorldSpatialRevision::IsValid() const
 	{
-		return !SourceId.IsEmpty() && !Generation.IsEmpty() && Sequence >= 0;
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialTemporalPoint::IsValid() const
 	{
-		return !ClockId.IsEmpty()
-			&& !Tick.IsEmpty()
-			&& !RateNumerator.IsEmpty()
-			&& !RateDenominator.IsEmpty()
-			&& (State == TEXT("captured") || State == TEXT("frozen"));
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialFrame::IsValid() const
 	{
-		return !FrameId.IsEmpty()
-			&& !BasisFrameId.IsEmpty()
-			&& (Dimension == 2 || Dimension == 3)
-			&& !Unit.IsEmpty()
-			&& !BasisEvidenceId.IsEmpty()
-			&& ObservedAt.IsValid();
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialValue::IsValid() const
 	{
-		const int32 ExpectedComponents = Quantity == TEXT("transform")
-			? 10
-			: Frame.Dimension;
-		return !Subject.IsEmpty()
-			&& (Quantity == TEXT("point")
-				|| Quantity == TEXT("direction")
-				|| Quantity == TEXT("normal")
-				|| Quantity == TEXT("transform"))
-			&& Frame.IsValid()
-			&& Components.Num() == ExpectedComponents
-			&& !Components.ContainsByPredicate(
-				[](const FString& Value) { return Value.IsEmpty(); });
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialExpectedRevisionEntry::IsValid() const
 	{
-		return !TargetRef.IsEmpty() && Revision.IsValid();
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialGraphViewState::IsValid() const
 	{
-		return Location.IsValid()
-			&& Location.Frame.Dimension == 2
-			&& Zoom > 0.0
-			&& GraphRevision.IsValid();
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialNodePlacement::IsValid() const
 	{
-		return !NodeRef.IsEmpty()
-			&& Position.IsValid()
-			&& Position.Frame.Dimension == 2;
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialLayoutRelation::IsValid() const
 	{
-		return !SourceNodeRef.IsEmpty()
-			&& !TargetNodeRef.IsEmpty()
-			&& !Relation.IsEmpty()
-			&& (!Gap.IsSet() || Gap.GetValue() >= 0.0);
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialAlignment::IsValid() const
 	{
-		if (!VerifyFrame.IsValid() || VerifyFrame.Dimension != 3
-			|| (RotationPolicy != TEXT("preserve")
-				&& RotationPolicy != TEXT("align_normals")
-				&& RotationPolicy != TEXT("align_frames"))
-			|| (SubjectNormal.IsSet() && !SubjectNormal->IsValid())
-			|| (ReferenceNormal.IsSet() && !ReferenceNormal->IsValid()))
-		{
-			return false;
-		}
-		if (Kind == TEXT("anchors"))
-		{
-			return SubjectAnchor.IsSet() && SubjectAnchor->IsValid()
-				&& ReferenceAnchor.IsSet() && ReferenceAnchor->IsValid();
-		}
-		if (Kind == TEXT("bounds"))
-		{
-			return (Axis == TEXT("x") || Axis == TEXT("y") || Axis == TEXT("z"))
-				&& (SubjectBoundsAnchor == TEXT("min") || SubjectBoundsAnchor == TEXT("center") || SubjectBoundsAnchor == TEXT("max"))
-				&& (ReferenceBoundsAnchor == TEXT("min") || ReferenceBoundsAnchor == TEXT("center") || ReferenceBoundsAnchor == TEXT("max"));
-		}
-		if (Kind == TEXT("face"))
-		{
-			return !SubjectFace.IsEmpty() && !ReferenceFace.IsEmpty()
-				&& (Axis.IsEmpty() || Axis == TEXT("x") || Axis == TEXT("y") || Axis == TEXT("z"));
-		}
-		if (Kind == TEXT("vertex"))
-		{
-			return (!SubjectVertexIndex.IsSet() || SubjectVertexIndex.GetValue() >= 0)
-				&& (!ReferenceVertexIndex.IsSet() || ReferenceVertexIndex.GetValue() >= 0);
-		}
-		return false;
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialSurfaceQuery::IsValid() const
 	{
-		return Origin.IsValid()
-			&& Direction.IsValid()
-			&& Origin.Frame.Dimension == 3
-			&& Direction.Frame.Dimension == 3
-			&& MaxDistanceCm > 0.0
-			&& !TraceChannel.IsEmpty();
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialPlacementPolicy::IsValid() const
 	{
-		return ClearanceCm >= 0.0;
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialTraceQuery::IsValid() const
 	{
-		return MaxDistanceCm > 0.0 && !TraceChannel.IsEmpty();
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialFramePolicy::IsValid() const
 	{
-		return PaddingRatio >= 0.0
-			&& MinimumDistanceCm >= 0.0
-			&& MaximumDistanceCm > 0.0
-			&& MaximumDistanceCm >= MinimumDistanceCm;
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialViewportInteractionState::IsValid() const
 	{
-		return !WidgetMode.IsEmpty();
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialViewportCameraState::IsValid() const
 	{
-		return CameraTransform.IsValid()
-			&& CameraTransform.Frame.Dimension == 3
-			&& FovDegrees > 0.0
-			&& FovDegrees <= 179.0
-			&& !ViewMode.IsEmpty()
-			&& ObservedAt.IsValid();
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialViewportState::IsValid() const
 	{
-		return !ViewportRef.IsEmpty()
-			&& Camera.IsValid()
-			&& Interaction.IsValid()
-			&& ObservedRevision.IsValid();
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FWorldSpatialViewportStatePatch::IsValid() const
 	{
-		return (!CameraTransform.IsSet() || CameraTransform->IsValid())
-			&& (!FovDegrees.IsSet()
-				|| (FovDegrees.GetValue() > 0.0 && FovDegrees.GetValue() <= 179.0))
-			&& (!ViewMode.IsSet() || !ViewMode->IsEmpty())
-			&& (!Interaction.IsSet() || Interaction->IsValid());
+		FUeAgentWorldSpatialExecutionError Error;
+		return TryValidate(Error);
 	}
 
 	bool FViewportActorSelectRequestInput::HasExactlyOneSelector() const
@@ -1247,9 +1593,16 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 
 	bool FViewportCameraFrameRequestInput::HasExactlyOneSelector() const
 	{
+		const bool bHasBounds = WorldBoundsMin.IsSet() && WorldBoundsMax.IsSet();
 		return static_cast<int32>(SubjectRefs.Num() > 0)
 			+ static_cast<int32>(FolderPath.IsSet() && !FolderPath->IsEmpty())
-			+ static_cast<int32>(bUseCurrentSelection) == 1;
+			+ static_cast<int32>(bUseCurrentSelection)
+			+ static_cast<int32>(WorldPoint.IsSet())
+			+ static_cast<int32>(bHasBounds) == 1
+			&& (WorldPoint.IsSet() ? WorldPoint->IsValid() : true)
+			&& (bHasBounds
+				? WorldBoundsMin->IsValid() && WorldBoundsMax->IsValid()
+				: !WorldBoundsMin.IsSet() && !WorldBoundsMax.IsSet());
 	}
 
 	namespace
@@ -1395,6 +1748,13 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				FUeAgentCanonicalValuePtr& Out)
 			{
 				TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
+				if (Value.bAuthored)
+				{
+					return AddString(Items, TEXT("frame_id"), Value.FrameId)
+						&& AddInteger(Items, TEXT("dimension"), Value.Dimension)
+						&& AddString(Items, TEXT("unit"), Value.Unit)
+						&& Object(Items, Out);
+				}
 				FUeAgentCanonicalValuePtr ObservedAt;
 				return Temporal(Value.ObservedAt, ObservedAt)
 					&& AddString(Items, TEXT("frame_id"), Value.FrameId)
@@ -1504,7 +1864,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			{
 				Error.Code = TEXT("world_spatial_typed_intent_build_failed");
 				Error.SubjectId = RequestKind;
-				Error.Detail = Detail;
+				Error.PublicMessage = Detail;
 				return false;
 			}
 
@@ -1546,11 +1906,12 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			FUeAgentCanonicalValuePtr CameraObservedAt;
 			FUeAgentCanonicalValuePtr Camera;
 			if (!Builder.SpatialValue(Value.Camera.CameraTransform, CameraTransform)
-				|| !Builder.Temporal(Value.Camera.ObservedAt, CameraObservedAt)
 				|| !Builder.Add(CameraFields, TEXT("camera_transform"), CameraTransform)
 				|| !Builder.AddDecimal(CameraFields, TEXT("fov_degrees"), Value.Camera.FovDegrees)
 				|| !Builder.AddString(CameraFields, TEXT("view_mode"), Value.Camera.ViewMode)
-				|| !Builder.Add(CameraFields, TEXT("observed_at"), CameraObservedAt)
+				|| (Value.Camera.ObservedAt.IsValid()
+					&& (!Builder.Temporal(Value.Camera.ObservedAt, CameraObservedAt)
+						|| !Builder.Add(CameraFields, TEXT("observed_at"), CameraObservedAt)))
 				|| !Builder.Object(CameraFields, Camera))
 			{
 				return false;
@@ -1569,16 +1930,13 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			}
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields;
 			FUeAgentCanonicalValuePtr ShowFlags;
-			FUeAgentCanonicalValuePtr Revision;
 			return Builder.StringArray(Value.ShowFlags, ShowFlags)
-				&& Builder.Revision(Value.ObservedRevision, Revision)
 				&& Builder.AddString(Fields, TEXT("viewport_ref"), Value.ViewportRef)
 				&& Builder.Add(Fields, TEXT("camera"), Camera)
 				&& Builder.AddBoolean(Fields, TEXT("realtime"), Value.bRealtime)
 				&& Builder.AddBoolean(Fields, TEXT("game_view"), Value.bGameView)
 				&& Builder.Add(Fields, TEXT("show_flags"), ShowFlags)
 				&& Builder.Add(Fields, TEXT("interaction"), Interaction)
-				&& Builder.Add(Fields, TEXT("observed_revision"), Revision)
 				&& Builder.Object(Fields, Out);
 		}
 
@@ -1595,13 +1953,10 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				const FWorldSpatialGraphViewState& Value = Input.ViewState;
 				TArray<TPair<FString, FUeAgentCanonicalValueRef>> StateFields;
 				FUeAgentCanonicalValuePtr Location;
-				FUeAgentCanonicalValuePtr Revision;
 				FUeAgentCanonicalValuePtr State;
 				return Builder.SpatialValue(Value.Location, Location)
-					&& Builder.Revision(Value.GraphRevision, Revision)
 					&& Builder.Add(StateFields, TEXT("location"), Location)
 					&& Builder.AddDecimal(StateFields, TEXT("zoom"), Value.Zoom)
-					&& Builder.Add(StateFields, TEXT("graph_revision"), Revision)
 					&& Builder.Object(StateFields, State)
 					&& Builder.Add(Fields, TEXT("view_state"), State)
 					&& Builder.AddBoolean(
@@ -1649,13 +2004,10 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				}
 				FUeAgentCanonicalValuePtr PlacementArray;
 				FUeAgentCanonicalValuePtr RelationArray;
-				FUeAgentCanonicalValuePtr Revision;
 				return Builder.Array(Placements, PlacementArray)
 					&& Builder.Array(Relations, RelationArray)
-					&& Builder.Revision(Value.ExpectedRevision, Revision)
 					&& Builder.AddString(Fields, TEXT("graph_ref"), Value.GraphRef)
 					&& Builder.Add(Fields, TEXT("node_placements"), PlacementArray)
-					&& Builder.Add(Fields, TEXT("expected_revision"), Revision)
 					&& Builder.Add(Fields, TEXT("layout_relations"), RelationArray)
 					&& Builder.Object(Fields, Out);
 			}
@@ -1664,11 +2016,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				const FWorldObjectTransformUpdateRequestInput& Value =
 					Payload.Get<FWorldObjectTransformUpdateRequestInput>();
 				FUeAgentCanonicalValuePtr Transform;
-				FUeAgentCanonicalValuePtr Revision;
 				return Builder.SpatialValue(Value.Transform, Transform)
-					&& Builder.Revision(Value.ExpectedRevision, Revision)
 					&& Builder.Add(Fields, TEXT("transform"), Transform)
-					&& Builder.Add(Fields, TEXT("expected_revision"), Revision)
 					&& Builder.Object(Fields, Out);
 			}
 			if (Payload.IsType<FWorldObjectAlignRequestInput>())
@@ -1680,7 +2029,6 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				FUeAgentCanonicalValuePtr VerifyFrame;
 				FUeAgentCanonicalValuePtr AlignmentValue;
 				FUeAgentCanonicalValuePtr Subjects;
-				FUeAgentCanonicalValuePtr Revisions;
 				if (!Builder.Frame(Alignment.VerifyFrame, VerifyFrame)
 					|| !Builder.AddString(AlignmentFields, TEXT("kind"), Alignment.Kind)
 					|| !Builder.Add(AlignmentFields, TEXT("verify_frame"), VerifyFrame))
@@ -1741,10 +2089,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					&& Builder.AddString(AlignmentFields, TEXT("rotation_policy"), Alignment.RotationPolicy)
 					&& Builder.Object(AlignmentFields, AlignmentValue)
 					&& Builder.StringArray(Value.SubjectRefs, Subjects)
-					&& TryBuildRevisionEntries(Builder, Value.ExpectedRevisions, Revisions)
 					&& Builder.Add(Fields, TEXT("subject_refs"), Subjects)
 					&& Builder.Add(Fields, TEXT("alignment"), AlignmentValue)
-					&& Builder.Add(Fields, TEXT("expected_revisions"), Revisions)
 					&& (!Value.AnchorRef.IsSet()
 						|| Builder.AddString(Fields, TEXT("anchor_ref"), Value.AnchorRef.GetValue()))
 					&& Builder.Object(Fields, Out);
@@ -1761,7 +2107,6 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				TArray<TPair<FString, FUeAgentCanonicalValueRef>> PolicyFields;
 				FUeAgentCanonicalValuePtr Policy;
 				FUeAgentCanonicalValuePtr Subjects;
-				FUeAgentCanonicalValuePtr Revisions;
 				return Builder.SpatialValue(Value.SurfaceQuery.Origin, Origin)
 					&& Builder.SpatialValue(Value.SurfaceQuery.Direction, Direction)
 					&& Builder.StringArray(Value.SurfaceQuery.IgnoreTargetRefs, Ignore)
@@ -1777,11 +2122,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 					&& Builder.AddBoolean(PolicyFields, TEXT("preserve_yaw"), Value.PlacementPolicy.bPreserveYaw)
 					&& Builder.Object(PolicyFields, Policy)
 					&& Builder.StringArray(Value.SubjectRefs, Subjects)
-					&& TryBuildRevisionEntries(Builder, Value.ExpectedRevisions, Revisions)
 					&& Builder.Add(Fields, TEXT("subject_refs"), Subjects)
 					&& Builder.Add(Fields, TEXT("surface_query"), Query)
 					&& Builder.Add(Fields, TEXT("placement_policy"), Policy)
-					&& Builder.Add(Fields, TEXT("expected_revisions"), Revisions)
 					&& Builder.Object(Fields, Out);
 			}
 			if (Payload.IsType<FMeshTransformBakeRequestInput>())
@@ -1789,11 +2132,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				const FMeshTransformBakeRequestInput& Value =
 					Payload.Get<FMeshTransformBakeRequestInput>();
 				FUeAgentCanonicalValuePtr Transform;
-				FUeAgentCanonicalValuePtr Revision;
 				return Builder.SpatialValue(Value.Transform, Transform)
-					&& Builder.Revision(Value.ExpectedRevision, Revision)
 					&& Builder.Add(Fields, TEXT("transform"), Transform)
-					&& Builder.Add(Fields, TEXT("expected_revision"), Revision)
 					&& (!Value.PreservePlacement.IsSet()
 						|| Builder.AddBoolean(Fields, TEXT("preserve_placement"), Value.PreservePlacement.GetValue()))
 					&& Builder.Object(Fields, Out);
@@ -1803,11 +2143,8 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				const FMeshPivotUpdateRequestInput& Value =
 					Payload.Get<FMeshPivotUpdateRequestInput>();
 				FUeAgentCanonicalValuePtr Pivot;
-				FUeAgentCanonicalValuePtr Revision;
 				return Builder.SpatialValue(Value.Pivot, Pivot)
-					&& Builder.Revision(Value.ExpectedRevision, Revision)
 					&& Builder.Add(Fields, TEXT("pivot"), Pivot)
-					&& Builder.Add(Fields, TEXT("expected_revision"), Revision)
 					&& (!Value.PreserveWorldGeometry.IsSet()
 						|| Builder.AddBoolean(Fields, TEXT("preserve_world_geometry"), Value.PreserveWorldGeometry.GetValue()))
 					&& Builder.Object(Fields, Out);
@@ -1945,6 +2282,11 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				{
 					return false;
 				}
+				if (Value.CameraTransformMode.IsSet()
+					&& !Builder.AddString(PatchFields, TEXT("camera_transform_mode"), Value.CameraTransformMode.GetValue()))
+				{
+					return false;
+				}
 				if (Value.ViewMode.IsSet()
 					&& !Builder.AddString(PatchFields, TEXT("view_mode"), Value.ViewMode.GetValue()))
 				{
@@ -2037,7 +2379,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			return Fail(
 				OutError,
 				TEXT("world_spatial_preflight_snapshot_empty"),
-				RequestKindId);
+				RequestKindId, TEXT("The preflight snapshot contains no state entry to update."));
 		}
 
 		FTypedIntentBuilder Builder(
@@ -2053,7 +2395,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				Fail(
 					OutError,
 					TEXT("world_spatial_typed_intent_unsupported"),
-					RequestKindId);
+					RequestKindId, TEXT("The request payload could not be converted to a typed mutation intent."));
 			}
 			return false;
 		}
@@ -2089,7 +2431,10 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 			TArray<FString>{TEXT("world-spatial:write")},
 			TEXT("world-spatial-typed-intent:") + RequestKindId,
 			MoveTemp(ImpactTargets));
-		return OutDraft->IsValid();
+		if (OutDraft->IsValid()) return true;
+		OutError = OutDraft->GetValidationDiagnostic();
+		if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = RequestKindId;
+		return false;
 	}
 
 	bool TryCreateWorldSpatialRequestDecoder(
@@ -2098,17 +2443,9 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 	{
 		OutDecoder.Reset();
 		OutError = {};
-		if (RequestSpecs().Num() != 22)
-		{
-			return Fail(
-				OutError,
-				TEXT("world_spatial_request_spec_count_invalid"),
-				TEXT("world_spatial"));
-		}
 		TSet<FString> Capabilities;
 		TSet<FString> Types;
 		TSet<FString> Kinds;
-		TSet<FString> Families;
 		for (const FRequestSpec& Spec : RequestSpecs())
 		{
 			if (Capabilities.Contains(Spec.CapabilityId)
@@ -2116,22 +2453,22 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 				|| Kinds.Contains(Spec.RequestKindId)
 				|| !Spec.Decode)
 			{
-				return Fail(
-					OutError,
-					TEXT("world_spatial_request_spec_duplicate"),
-					Spec.CapabilityId);
+				const bool bCapabilityDuplicate = Capabilities.Contains(Spec.CapabilityId);
+				const bool bTypeDuplicate = Types.Contains(Spec.TypeId);
+				const bool bKindDuplicate = Kinds.Contains(Spec.RequestKindId);
+				const bool bDuplicate = bCapabilityDuplicate || bTypeDuplicate || bKindDuplicate;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(bDuplicate ? TEXT("world_spatial_request_spec_duplicate") : TEXT("world_spatial_request_decoder_missing"),
+					bDuplicate ? TEXT("The request specifications contain a duplicate identifier.") : TEXT("The request specification has no payload decoder."), TEXT("native_execution"));
+				OutError.SubjectId = Spec.CapabilityId;
+				OutError.PropertyPath = bCapabilityDuplicate ? TEXT("capability_id") : bTypeDuplicate ? TEXT("type_id") : bKindDuplicate ? TEXT("request_kind_id") : TEXT("decoder");
+				if (bDuplicate) OutError.ActualValue = MakeShared<FJsonValueString>(bCapabilityDuplicate ? Spec.CapabilityId : bTypeDuplicate ? Spec.TypeId : Spec.RequestKindId);
+				OutError.ActualValuePresent = bDuplicate;
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(bDuplicate ? TEXT("unique request specification identifier") : TEXT("payload decoder"));
+				return false;
 			}
 			Capabilities.Add(Spec.CapabilityId);
 			Types.Add(Spec.TypeId);
 			Kinds.Add(Spec.RequestKindId);
-			Families.Add(Spec.FamilyId);
-		}
-		if (Families.Num() != 5)
-		{
-			return Fail(
-				OutError,
-				TEXT("world_spatial_request_family_count_invalid"),
-				TEXT("world_spatial"));
 		}
 		OutDecoder = MakeShared<FWorldSpatialRequestDecoder>();
 		return true;

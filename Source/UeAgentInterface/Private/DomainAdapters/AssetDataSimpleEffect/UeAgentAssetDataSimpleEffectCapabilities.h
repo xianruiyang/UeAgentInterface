@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
@@ -11,6 +13,8 @@
 #include "UObject/WeakObjectPtr.h"
 
 class UClass;
+class UFactory;
+class FJsonObject;
 class UObject;
 class UPackage;
 
@@ -131,12 +135,21 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FString InProfileId,
 			UClass* InConcreteClass,
 			FString InFactoryMechanicId);
+		FUeAgentAssetDataSimpleEffectFactoryBinding(
+			Discovery::FUeAgentCandidateBinding InCandidateBinding,
+			FString InProfileId,
+			UClass* InConcreteClass,
+			FString InFactoryMechanicId,
+			UFactory* InFactory,
+			bool bInGenericReady);
 
 		const Discovery::FUeAgentCandidateBinding*
 			GetCandidateBinding() const;
 		const FString& GetProfileId() const;
 		UClass* GetConcreteClass() const;
 		const FString& GetFactoryMechanicId() const;
+		UFactory* GetFactory() const;
+		bool IsGenericReady() const;
 		bool IsValid() const;
 
 	private:
@@ -145,6 +158,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		FString ProfileId;
 		TWeakObjectPtr<UClass> ConcreteClass;
 		FString FactoryMechanicId;
+		TWeakObjectPtr<UFactory> Factory;
+		bool bGenericReady = false;
 		bool bValid = false;
 	};
 
@@ -156,8 +171,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			default;
 
 		virtual bool TryResolveForPlanning(
-			const FString& FactoryRef,
-			const Discovery::FUeAgentCatalogRevision& ExpectedRevision,
+			const FString& FactoryName,
+			const TMap<FString, FString>& Select,
 			const FString& ProfileId,
 			FUeAgentAssetDataSimpleEffectFactoryBinding& OutBinding,
 			ExecutionMutation::FExecutionMutationError& OutError) = 0;
@@ -168,6 +183,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentAssetDataSimpleEffectFactoryBinding& OutBinding,
 			ExecutionMutation::FExecutionMutationError& OutError) = 0;
 	};
+
+	UEAGENTINTERFACE_API bool CanCreateNativeFactoryObject(const UFactory* Factory);
+
+	/** Native factory materialization, shared by generic actions and unpublished authoring templates. */
+	UEAGENTINTERFACE_API UObject* CreateNativeFactoryObject(
+		UPackage* Package, FName ObjectName, UClass* Class, UFactory* Factory,
+		bool bUnpublishedTemplate, ExecutionMutation::FExecutionMutationError& OutError);
 
 	class UEAGENTINTERFACE_API
 		IUeAgentAssetDataSimpleEffectNativeHook
@@ -202,7 +224,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 	TryCreateAssetDataSimpleEffectDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>&
 			OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API TArray<FString>
 	GetAssetDataSimpleEffectAuthorityScopes();
@@ -211,7 +233,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 	TryGetAssetDataSimpleEffectProductionProfiles(
 		TArray<FUeAgentAssetDataSimpleEffectProductionProfile>&
 			OutProfiles,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
+
+	/** True when asset.object.create exposes the same constructor mechanics. */
+	UEAGENTINTERFACE_API bool IsGenericAssetObjectCreateSuccessor(
+		const FUeAgentAssetDataSimpleEffectProductionProfile& Profile);
 
 	UEAGENTINTERFACE_API bool
 	CanProjectAssetDataSimpleEffectFieldState(
@@ -241,6 +267,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		StateSemantic::FUeAgentCanonicalValuePtr& OutExpectedFields,
 		ExecutionMutation::FExecutionMutationError& OutError);
 
+	// Supplement field-relative authored failures using the draft's preserved input order.
+	UEAGENTINTERFACE_API void LocateAssetDataSimpleEffectInputFailure(Contract::FDiagnostic& Error,
+		const StateSemantic::FUeAgentCanonicalValue& ProposedAfter);
+
 	UEAGENTINTERFACE_API bool
 	TryBuildAssetDataSimpleEffectChangeSetDraft(
 		const Contract::FUeAgentOperationRequest& Request,
@@ -259,14 +289,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		FString& OutProfileId,
 		FString& OutNativeMechanicId,
 		FString& OutStaticCreateClassPath,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool
 	TryResolveAssetDataSimpleEffectFactoryContract(
 		const FString& NativeBindingId,
 		FString& OutFactoryContractId,
 		FString& OutClassConstraintId,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
+
+	UEAGENTINTERFACE_API bool
+	TryParseAssetDataSimpleEffectFactorySelector(
+		const FJsonObject& Payload,
+		bool bGenericSelector,
+		FString& OutName,
+		TMap<FString, FString>& OutSelect,
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool
 	TryValidateAssetDataSimpleEffectFactoryBinding(
@@ -274,7 +312,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		const FString& FactoryBindingId,
 		const Discovery::FUeAgentCatalogRevision& ExpectedRevision,
 		const FUeAgentAssetDataSimpleEffectFactoryBinding& Binding,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool
 	TryValidateAssetDataSimpleEffectFieldBinding(
@@ -285,7 +323,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		const FString& TypeId,
 		bool bHasValue,
 		StateSemantic::EUeAgentValueKind ValueKind,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	class UEAGENTINTERFACE_API
 		FUeAgentAssetDataSimpleEffectNativeHookFactory final

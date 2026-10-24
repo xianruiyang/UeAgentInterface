@@ -16,10 +16,9 @@ bool UUeAgentWorldPartitionActorGuidResaveBuilder::PreRun(
 	ActorGuids.Reset();
 	if (!World || !World->GetWorldPartition())
 	{
-		UE_LOG(
-			LogUeAgentWorldPartitionActorGuidResave,
-			Error,
-			TEXT("The target world does not use World Partition."));
+		UE_LOG(LogUeAgentWorldPartitionActorGuidResave, Error,
+			TEXT("Actor GUID resave requires an existing world with World Partition; world=%s, world_present=%d, partition_present=%d."),
+			*GetPathNameSafe(World), World != nullptr, World && World->GetWorldPartition() != nullptr);
 		return false;
 	}
 
@@ -82,6 +81,9 @@ bool UUeAgentWorldPartitionActorGuidResaveBuilder::RunInternal(
 	UWorldPartition* Partition = World ? World->GetWorldPartition() : nullptr;
 	if (!Partition)
 	{
+		UE_LOG(LogUeAgentWorldPartitionActorGuidResave, Error,
+			TEXT("Actor GUID resave cannot run because World Partition is unavailable; world=%s, world_present=%d."),
+			*GetPathNameSafe(World), World != nullptr);
 		return false;
 	}
 	for (const FGuid& Guid : ActorGuids)
@@ -122,6 +124,10 @@ bool UUeAgentWorldPartitionActorGuidResaveBuilder::RunInternal(
 			UPackage* Package = Actor ? Actor->GetExternalPackage() : nullptr;
 			if (!Package)
 			{
+				UE_LOG(LogUeAgentWorldPartitionActorGuidResave, Error,
+					TEXT("Actor GUID resave could not obtain an external actor package; guid=%s, descriptor_present=%d, actor_present=%d, actor=%s."),
+					ActorDesc ? *ActorDesc->GetGuid().ToString(EGuidFormats::DigitsWithHyphens) : TEXT("<missing>"),
+					ActorDesc != nullptr, Actor != nullptr, *GetPathNameSafe(Actor));
 				bLoadedActorValid = false;
 				return false;
 			}
@@ -130,15 +136,24 @@ bool UUeAgentWorldPartitionActorGuidResaveBuilder::RunInternal(
 			return true;
 		},
 		Parameters);
-	if (!bLoadedActorValid || LoadedActorCount != ActorGuids.Num()
-		|| !bSaveSucceeded)
+	if (!bLoadedActorValid) return false;
+	if (LoadedActorCount != ActorGuids.Num())
 	{
-		UE_LOG(
-			LogUeAgentWorldPartitionActorGuidResave,
-			Error,
-			TEXT("Loaded package count does not match the exact ActorGuids set."));
+		UE_LOG(LogUeAgentWorldPartitionActorGuidResave, Error,
+			TEXT("Loaded actor count does not match the exact ActorGuids set; actual=%d, expected=%d."),
+			LoadedActorCount, ActorGuids.Num());
 		return false;
 	}
-	return PackagesToSave.IsEmpty()
-		|| SavePackages(PackagesToSave, PackageHelper);
+	if (!bSaveSucceeded)
+	{
+		UE_LOG(LogUeAgentWorldPartitionActorGuidResave, Error,
+			TEXT("Saving an actor package batch before garbage collection failed; see the preceding package/source-control diagnostics."));
+		return false;
+	}
+	if (PackagesToSave.IsEmpty()) return true;
+	if (SavePackages(PackagesToSave, PackageHelper)) return true;
+	UE_LOG(LogUeAgentWorldPartitionActorGuidResave, Error,
+		TEXT("Saving the final actor package batch failed; package_count=%d. See the preceding package/source-control diagnostics."),
+		PackagesToSave.Num());
+	return false;
 }

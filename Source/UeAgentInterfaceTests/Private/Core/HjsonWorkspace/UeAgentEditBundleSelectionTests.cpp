@@ -151,13 +151,12 @@ bool FUeAgentEditBundleSelectionModuleContractTest::RunTest(
 		TArray<FString>{},
 		TArray<FString>{},
 		TOptional<FUeAgentArtifactDescriptor>(),
-		FUeAgentPageInfo(0, 0, false, FString()),
-		1000000);
+		FUeAgentPageInfo(0, 0));
 	TestTrue(
 		TEXT("inline response projection is valid without rewriting the bundle"),
 		Projection.IsValid());
 	TestFalse(
-		TEXT("high-budget inline projection has no artifact"),
+		TEXT("inline projection has no artifact"),
 		Projection.GetArtifact().IsSet());
 	TestEqual(
 		TEXT("projection keeps the original bundle fingerprint"),

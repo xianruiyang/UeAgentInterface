@@ -1,5 +1,7 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundBlueprintMaterialRoutes.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/Contract/UeAgentContractJson.h"
 #include "Core/Contract/UeAgentContractSchema.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
@@ -9,6 +11,7 @@
 #include "Dom/JsonValue.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
 
 namespace UE::UAI::Composition::GraphCompound
 {
@@ -19,6 +22,32 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
+
+		FDiagnostic RouteFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Subject,
+			const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected)
+		{
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, TEXT("graph_compound"), FString(), Subject);
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
+		FDiagnostic InputFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Subject,
+			const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected)
+		{
+			FDiagnostic Error = RouteFailure(Code, Reason, Subject, Field, MoveTemp(Actual), MoveTemp(Expected));
+			Error.SourceKind = TEXT("command_input");
+			Error.Source.JsonPath = FString(TEXT("/")) + Field;
+			return Error;
+		}
+
+
 		struct FRouteSpec final
 		{
 			const TCHAR* CapabilityId;
@@ -28,250 +57,168 @@ namespace UE::UAI::Composition::GraphCompound
 			EGraphCompoundDomainRouteKind RouteKind;
 			EGraphCompoundTypedInputKind InputKind;
 			const TCHAR* TargetKind;
-			TArray<FString> CompositionKinds;
 		};
 
 		const TArray<FRouteSpec>& RouteSpecs()
 		{
 			static const TArray<FRouteSpec> Values = {
-				{TEXT("blueprint.asset.create"), TEXT("uai.operation.blueprint.asset.create"), TEXT("blueprint_umg_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::BlueprintAssetCreate, TEXT("blueprint"), {}},
-				{TEXT("blueprint.authoring.apply"), TEXT("uai.operation.blueprint.authoring.apply"), TEXT("blueprint_umg_graph"), TEXT("graph_mutation"), EGraphCompoundDomainRouteKind::HjsonImport, EGraphCompoundTypedInputKind::None, TEXT("blueprint"), {TEXT("ue.blueprint.asset")}},
-				{TEXT("blueprint.component.events.discover"), TEXT("uai.query.blueprint.component.events.discover"), TEXT("blueprint_umg_graph"), TEXT("event_discovery"), EGraphCompoundDomainRouteKind::Query, EGraphCompoundTypedInputKind::None, TEXT("blueprint"), {}},
-				{TEXT("umg.asset.create"), TEXT("uai.operation.umg.asset.create"), TEXT("blueprint_umg_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::UmgAssetCreate, TEXT("widget_blueprint"), {}},
-				{TEXT("umg.authoring.apply"), TEXT("uai.operation.umg.authoring.apply"), TEXT("blueprint_umg_graph"), TEXT("hierarchy_mutation"), EGraphCompoundDomainRouteKind::HjsonImport, EGraphCompoundTypedInputKind::None, TEXT("widget_blueprint"), {TEXT("ue.widget_blueprint.asset")}},
-				{TEXT("umg.widget.events.discover"), TEXT("uai.query.umg.widget.events.discover"), TEXT("blueprint_umg_graph"), TEXT("event_discovery"), EGraphCompoundDomainRouteKind::Query, EGraphCompoundTypedInputKind::None, TEXT("widget_blueprint"), {}},
-				{TEXT("material.asset.create"), TEXT("uai.operation.material.asset.create"), TEXT("material_niagara_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::MaterialAssetCreate, TEXT("material"), {}},
-				{TEXT("material.graph.apply"), TEXT("uai.operation.material.graph.apply"), TEXT("material_niagara_graph"), TEXT("material_graph_mutation"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::GraphEdits, TEXT("material"), {}},
-				{TEXT("material.function.graph.apply"), TEXT("uai.operation.material.function.graph.apply"), TEXT("material_niagara_graph"), TEXT("material_graph_mutation"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::GraphEdits, TEXT("material_function"), {}},
-				{TEXT("material_instance.asset.create"), TEXT("uai.operation.material_instance.asset.create"), TEXT("material_niagara_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::MaterialInstanceAssetCreate, TEXT("material_instance"), {}},
-				{TEXT("material_instance.parameters.apply"), TEXT("uai.operation.material_instance.parameters.apply"), TEXT("material_niagara_graph"), TEXT("material_instance_parameter_mutation"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::MaterialInstanceParameters, TEXT("material_instance"), {}},
-				{TEXT("niagara.emitter.asset.create"), TEXT("uai.operation.niagara.emitter.asset.create"), TEXT("material_niagara_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraEmitterAssetCreate, TEXT("niagara_emitter"), {}},
-				{TEXT("niagara.system.asset.create"), TEXT("uai.operation.niagara.system.asset.create"), TEXT("material_niagara_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraSystemAssetCreate, TEXT("niagara_system"), {}},
-				{TEXT("niagara.asset.duplicate"), TEXT("uai.operation.niagara.asset.duplicate"), TEXT("material_niagara_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraAssetDuplicate, TEXT("niagara_asset"), {}},
-				{TEXT("niagara.stack.reorder"), TEXT("uai.operation.niagara.stack.reorder"), TEXT("material_niagara_graph"), TEXT("niagara_stack_mutation"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraStackReorder, TEXT("niagara_stack"), {}},
-				{TEXT("niagara.stack.issue_fix"), TEXT("uai.operation.niagara.stack.issue_fix"), TEXT("material_niagara_graph"), TEXT("niagara_stack_mutation"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraStackIssueFix, TEXT("niagara_stack"), {}},
-				{TEXT("niagara.compound.apply"), TEXT("uai.operation.niagara.compound.apply"), TEXT("material_niagara_graph"), TEXT("niagara_compound_input"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraCompoundInput, TEXT("niagara_compound"), {}},
-				{TEXT("niagara.renderer_event_parameter.apply"), TEXT("uai.operation.niagara.renderer_event_parameter.apply"), TEXT("material_niagara_graph"), TEXT("niagara_renderer_event_parameter_mutation"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraRendererEventParameter, TEXT("niagara_renderer"), {}},
-				{TEXT("niagara.compile_refresh_settle"), TEXT("uai.operation.niagara.compile_refresh_settle"), TEXT("material_niagara_graph"), TEXT("compile_refresh_settle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraCompileRefreshSettle, TEXT("niagara_asset"), {}},
+				{TEXT("blueprint.asset.create"), TEXT("uai.operation.blueprint.asset.create"), TEXT("blueprint_umg_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::BlueprintAssetCreate, TEXT("blueprint")},
+				{TEXT("blueprint.component.events.discover"), TEXT("uai.query.blueprint.component.events.discover"), TEXT("blueprint_umg_graph"), TEXT("event_discovery"), EGraphCompoundDomainRouteKind::Query, EGraphCompoundTypedInputKind::None, TEXT("blueprint")},
+				{TEXT("umg.asset.create"), TEXT("uai.operation.umg.asset.create"), TEXT("blueprint_umg_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::UmgAssetCreate, TEXT("widget_blueprint")},
+				{TEXT("umg.widget.events.discover"), TEXT("uai.query.umg.widget.events.discover"), TEXT("blueprint_umg_graph"), TEXT("event_discovery"), EGraphCompoundDomainRouteKind::Query, EGraphCompoundTypedInputKind::None, TEXT("widget_blueprint")},
+				{TEXT("material.asset.create"), TEXT("uai.operation.material.asset.create"), TEXT("material_niagara_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::MaterialAssetCreate, TEXT("material")},
+				{TEXT("material_instance.asset.create"), TEXT("uai.operation.material_instance.asset.create"), TEXT("material_niagara_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::MaterialInstanceAssetCreate, TEXT("material_instance")},
+				{TEXT("material_instance.parameters.apply"), TEXT("uai.operation.material_instance.parameters.apply"), TEXT("material_niagara_graph"), TEXT("material_instance_parameter_mutation"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::MaterialInstanceParameters, TEXT("material_instance")},
+				{TEXT("niagara.emitter.asset.create"), TEXT("uai.operation.niagara.emitter.asset.create"), TEXT("material_niagara_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraEmitterAssetCreate, TEXT("niagara_emitter")},
+				{TEXT("niagara.system.asset.create"), TEXT("uai.operation.niagara.system.asset.create"), TEXT("material_niagara_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraSystemAssetCreate, TEXT("niagara_system")},
+				{TEXT("niagara.asset.duplicate"), TEXT("uai.operation.niagara.asset.duplicate"), TEXT("material_niagara_graph"), TEXT("asset_lifecycle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraAssetDuplicate, TEXT("niagara_asset")},
+				{TEXT("niagara.stack.reorder"), TEXT("uai.operation.niagara.stack.reorder"), TEXT("material_niagara_graph"), TEXT("niagara_stack_mutation"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraStackReorder, TEXT("niagara_stack")},
+				{TEXT("niagara.stack.issue_fix"), TEXT("uai.operation.niagara.stack.issue_fix"), TEXT("material_niagara_graph"), TEXT("niagara_stack_mutation"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraStackIssueFix, TEXT("niagara_stack")},
+				{TEXT("niagara.compound.apply"), TEXT("uai.operation.niagara.compound.apply"), TEXT("material_niagara_graph"), TEXT("niagara_compound_input"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraCompoundInput, TEXT("niagara_compound")},
+				{TEXT("niagara.renderer_event_parameter.apply"), TEXT("uai.operation.niagara.renderer_event_parameter.apply"), TEXT("material_niagara_graph"), TEXT("niagara_renderer_event_parameter_mutation"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraRendererEventParameter, TEXT("niagara_renderer")},
+				{TEXT("niagara.compile_refresh_settle"), TEXT("uai.operation.niagara.compile_refresh_settle"), TEXT("material_niagara_graph"), TEXT("compile_refresh_settle"), EGraphCompoundDomainRouteKind::TypedOperation, EGraphCompoundTypedInputKind::NiagaraCompileRefreshSettle, TEXT("niagara_asset")},
 			};
 			return Values;
 		}
 
-		FString CanonicalSchema(const TCHAR* Text)
+		FString CanonicalSchema(UE::UAI::Contract::FDiagnostic& Error, const TCHAR* Text)
 		{
 			TSharedPtr<FJsonObject> Object;
-			FString Error;
 			FString Canonical;
 			if (!Json::TryParseObject(Text, Object, Error)
 				|| !Json::TryCanonicalize(Object, Canonical, Error))
 			{
+				MarkGraphCompoundNativeDiagnostic(Error);
 				return FString();
 			}
 			return Canonical;
 		}
 
-		FString HjsonInputSchema(const TArray<FString>& CompositionKinds)
-		{
-			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-			Root->SetStringField(TEXT("type"), TEXT("object"));
-			Root->SetBoolField(TEXT("additionalProperties"), false);
-			const TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
-			auto StringSchema = []()
-			{
-				const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-				Result->SetStringField(TEXT("type"), TEXT("string"));
-				Result->SetNumberField(TEXT("minLength"), 1);
-				return Result;
-			};
-			const TSharedRef<FJsonObject> Composition = StringSchema();
-			TArray<TSharedPtr<FJsonValue>> CompositionEnum;
-			for (const FString& Value : CompositionKinds)
-			{
-				CompositionEnum.Add(MakeShared<FJsonValueString>(Value));
-			}
-			Composition->SetArrayField(TEXT("enum"), MoveTemp(CompositionEnum));
-			Properties->SetObjectField(TEXT("composition_kind"), Composition);
-			Properties->SetObjectField(TEXT("target_ref"), StringSchema());
-			const TSharedRef<FJsonObject> SourceKind = StringSchema();
-			SourceKind->SetArrayField(TEXT("enum"), {
-				MakeShared<FJsonValueString>(TEXT("directory")),
-				MakeShared<FJsonValueString>(TEXT("single_file")),
-				MakeShared<FJsonValueString>(TEXT("inline"))});
-			Properties->SetObjectField(TEXT("source_kind"), SourceKind);
-			Properties->SetObjectField(TEXT("source_locator"), StringSchema());
-			Properties->SetObjectField(TEXT("inline_hjson"), StringSchema());
-			const TSharedRef<FJsonObject> Intent = StringSchema();
-			Intent->SetArrayField(TEXT("enum"), {
-				MakeShared<FJsonValueString>(TEXT("update")),
-				MakeShared<FJsonValueString>(TEXT("replace"))});
-			Properties->SetObjectField(TEXT("intent"), Intent);
-			Properties->SetObjectField(TEXT("expected_revision"), StringSchema());
-			const TSharedRef<FJsonObject> Boolean = MakeShared<FJsonObject>();
-			Boolean->SetStringField(TEXT("type"), TEXT("boolean"));
-			Properties->SetObjectField(TEXT("dry_run"), Boolean);
-			Root->SetObjectField(TEXT("properties"), Properties);
-			Root->SetArrayField(TEXT("required"), {
-				MakeShared<FJsonValueString>(TEXT("composition_kind")),
-				MakeShared<FJsonValueString>(TEXT("target_ref")),
-				MakeShared<FJsonValueString>(TEXT("source_kind")),
-				MakeShared<FJsonValueString>(TEXT("intent")),
-				MakeShared<FJsonValueString>(TEXT("expected_revision")),
-				MakeShared<FJsonValueString>(TEXT("dry_run"))});
-
-			auto SourceVariant = [](const TCHAR* Kind, const TCHAR* RequiredField,
-				const TCHAR* ForbiddenField)
-			{
-				const TSharedRef<FJsonObject> Variant = MakeShared<FJsonObject>();
-				const TSharedRef<FJsonObject> VariantProperties =
-					MakeShared<FJsonObject>();
-				const TSharedRef<FJsonObject> KindSchema = MakeShared<FJsonObject>();
-				KindSchema->SetStringField(TEXT("const"), Kind);
-				VariantProperties->SetObjectField(TEXT("source_kind"), KindSchema);
-				Variant->SetObjectField(TEXT("properties"), VariantProperties);
-				Variant->SetArrayField(TEXT("required"), {
-					MakeShared<FJsonValueString>(TEXT("source_kind")),
-					MakeShared<FJsonValueString>(RequiredField)});
-				const TSharedRef<FJsonObject> Not = MakeShared<FJsonObject>();
-				Not->SetArrayField(TEXT("required"), {
-					MakeShared<FJsonValueString>(ForbiddenField)});
-				Variant->SetObjectField(TEXT("not"), Not);
-				return MakeShared<FJsonValueObject>(Variant);
-			};
-			Root->SetArrayField(TEXT("oneOf"), {
-				SourceVariant(TEXT("directory"), TEXT("source_locator"), TEXT("inline_hjson")),
-				SourceVariant(TEXT("single_file"), TEXT("source_locator"), TEXT("inline_hjson")),
-				SourceVariant(TEXT("inline"), TEXT("inline_hjson"), TEXT("source_locator"))});
-			FString Canonical;
-			FString Error;
-			return Json::TryCanonicalize(Root, Canonical, Error)
-				? Canonical : FString();
-		}
-
-		FString InputSchema(const FRouteSpec& Spec)
+		FString InputSchema(const FRouteSpec& Spec, UE::UAI::Contract::FDiagnostic& Error)
 		{
 			if (Spec.RouteKind == EGraphCompoundDomainRouteKind::Query)
 			{
 				if (FString(Spec.CapabilityId)
 					== TEXT("blueprint.component.events.discover"))
 				{
-					return CanonicalSchema(TEXT(
+					return CanonicalSchema(Error, TEXT(
 						"{\"additionalProperties\":false,\"properties\":{" 
 						"\"asset_path\":{\"minLength\":1,\"type\":\"string\"},"
 						"\"compile_before_query\":{\"type\":\"boolean\"},"
 						"\"component_name\":{\"minLength\":1,\"type\":\"string\"},"
 						"\"include_hidden\":{\"type\":\"boolean\"},"
-						"\"limit\":{\"maximum\":1000,\"minimum\":0,\"type\":\"integer\"},"
 						"\"only_unbound\":{\"type\":\"boolean\"},"
 						"\"query\":{\"type\":\"string\"}},"
 						"\"required\":[\"asset_path\",\"component_name\"],"
 						"\"type\":\"object\"}"));
 				}
-				return CanonicalSchema(TEXT(
+				return CanonicalSchema(Error, TEXT(
 					"{\"additionalProperties\":false,\"properties\":{"
 					"\"owner_item_ref\":{\"minLength\":1,\"type\":\"string\"},"
 					"\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},"
 					"\"required\":[\"owner_item_ref\",\"target_ref\"],"
 					"\"type\":\"object\"}"));
 			}
-			if (Spec.RouteKind == EGraphCompoundDomainRouteKind::HjsonImport)
-			{
-				return HjsonInputSchema(Spec.CompositionKinds);
-			}
 			switch (Spec.InputKind)
 			{
 			case EGraphCompoundTypedInputKind::BlueprintAssetCreate:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"parent_class_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"parent_class_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"parent_class_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"parent_class_ref\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::UmgAssetCreate:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::MaterialAssetCreate:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"material_kind\":{\"enum\":[\"material\",\"material_function\"],\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"material_kind\":{\"enum\":[\"material\",\"material_function\"],\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::MaterialInstanceAssetCreate:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"parent_material_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"parent_material_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"parent_material_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"parent_material_ref\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::NiagaraEmitterAssetCreate:
 			case EGraphCompoundTypedInputKind::NiagaraSystemAssetCreate:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"source_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"source_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"asset_name\":{\"minLength\":1,\"type\":\"string\"},\"package_path\":{\"minLength\":1,\"type\":\"string\"},\"source_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"asset_name\",\"package_path\",\"source_ref\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::GraphEdits:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"edits\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"depends_on\":{\"items\":{\"minLength\":1,\"type\":\"string\"},\"type\":\"array\",\"uniqueItems\":true},\"element_kind\":{\"enum\":[\"target\",\"structure\",\"item\",\"pin\",\"relation\",\"property\",\"input\",\"hierarchy\",\"order\",\"binding\",\"dependency\"],\"type\":\"string\"},\"identity\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"value\":{}},\"required\":[\"identity\",\"element_kind\",\"intent\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"edits\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"edits\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"depends_on\":{\"items\":{\"minLength\":1,\"type\":\"string\"},\"type\":\"array\",\"uniqueItems\":true},\"element_kind\":{\"enum\":[\"target\",\"structure\",\"item\",\"pin\",\"relation\",\"property\",\"input\",\"hierarchy\",\"order\",\"binding\",\"dependency\"],\"type\":\"string\"},\"identity\":{\"minLength\":1,\"type\":\"string\"},\"intent\":{\"enum\":[\"create\",\"update\",\"replace\",\"delete\"],\"type\":\"string\"},\"value\":{}},\"required\":[\"identity\",\"element_kind\",\"intent\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"edits\",\"target_ref\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::MaterialInstanceParameters:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"parameters\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"association\":{\"minLength\":1,\"type\":\"string\"},\"index\":{\"type\":\"integer\"},\"name\":{\"minLength\":1,\"type\":\"string\"},\"type\":{\"enum\":[\"scalar\",\"vector\",\"texture\",\"static_switch\",\"static_component_mask\"],\"type\":\"string\"},\"value\":{}},\"required\":[\"name\",\"association\",\"index\",\"type\",\"value\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"parameters\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"parameters\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"association\":{\"minLength\":1,\"type\":\"string\"},\"index\":{\"type\":\"integer\"},\"name\":{\"minLength\":1,\"type\":\"string\"},\"type\":{\"enum\":[\"scalar\",\"vector\",\"texture\",\"static_switch\",\"static_component_mask\"],\"type\":\"string\"},\"value\":{}},\"required\":[\"name\",\"association\",\"index\",\"type\",\"value\"],\"type\":\"object\"},\"minItems\":1,\"type\":\"array\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"parameters\",\"target_ref\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::NiagaraAssetDuplicate:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"source_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"source_ref\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"source_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"source_ref\",\"target_ref\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::NiagaraStackReorder:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"emitter_handle_id\":{\"minLength\":1,\"type\":\"string\"},\"item_ref\":{\"minLength\":1,\"type\":\"string\"},\"predecessor_ref\":{\"type\":\"string\"},\"stage_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"emitter_handle_id\",\"item_ref\",\"predecessor_ref\",\"stage_ref\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"emitter_handle_id\":{\"minLength\":1,\"type\":\"string\"},\"item_ref\":{\"minLength\":1,\"type\":\"string\"},\"predecessor_ref\":{\"type\":\"string\"},\"stage_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"emitter_handle_id\",\"item_ref\",\"predecessor_ref\",\"stage_ref\",\"target_ref\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::NiagaraStackIssueFix:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"emitter_handle_id\":{\"minLength\":1,\"type\":\"string\"},\"fix_id\":{\"minLength\":1,\"type\":\"string\"},\"issue_id\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"emitter_handle_id\",\"fix_id\",\"issue_id\",\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"emitter_handle_id\":{\"minLength\":1,\"type\":\"string\"},\"fix_id\":{\"minLength\":1,\"type\":\"string\"},\"issue_id\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"emitter_handle_id\",\"fix_id\",\"issue_id\",\"target_ref\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::NiagaraCompoundInput:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"emitter_handle_id\":{\"minLength\":1,\"type\":\"string\"},\"input_name\":{\"minLength\":1,\"type\":\"string\"},\"module_ref\":{\"minLength\":1,\"type\":\"string\"},\"stage_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"emitter_handle_id\",\"input_name\",\"module_ref\",\"stage_ref\",\"target_ref\",\"value\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"emitter_handle_id\":{\"minLength\":1,\"type\":\"string\"},\"input_name\":{\"minLength\":1,\"type\":\"string\"},\"module_ref\":{\"minLength\":1,\"type\":\"string\"},\"stage_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"emitter_handle_id\",\"input_name\",\"module_ref\",\"stage_ref\",\"target_ref\",\"value\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::NiagaraRendererEventParameter:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"emitter_handle_id\":{\"minLength\":1,\"type\":\"string\"},\"parameter_name\":{\"minLength\":1,\"type\":\"string\"},\"renderer_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"},\"type_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"emitter_handle_id\",\"parameter_name\",\"renderer_ref\",\"target_ref\",\"type_ref\",\"value\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"emitter_handle_id\":{\"minLength\":1,\"type\":\"string\"},\"parameter_name\":{\"minLength\":1,\"type\":\"string\"},\"renderer_ref\":{\"minLength\":1,\"type\":\"string\"},\"target_ref\":{\"minLength\":1,\"type\":\"string\"},\"type_ref\":{\"minLength\":1,\"type\":\"string\"},\"value\":{}},\"required\":[\"emitter_handle_id\",\"parameter_name\",\"renderer_ref\",\"target_ref\",\"type_ref\",\"value\"],\"type\":\"object\"}"));
 			case EGraphCompoundTypedInputKind::NiagaraCompileRefreshSettle:
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"target_ref\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"target_ref\":{\"minLength\":1,\"type\":\"string\"}},\"required\":[\"target_ref\"],\"type\":\"object\"}"));
 			default:
+				Error = RouteFailure(TEXT("graph_compound_input_schema_kind_invalid"),
+					TEXT("The registered graph route has no input schema for its input kind."),
+					Spec.CapabilityId, TEXT("input_kind"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Spec.InputKind)),
+					MakeShared<FJsonValueString>(TEXT("a supported input schema kind")));
 				return FString();
 			}
 		}
 
-		FString ResultSchema(const FRouteSpec& Spec)
+		FString ResultSchema(const FRouteSpec& Spec, UE::UAI::Contract::FDiagnostic& Error)
 		{
 			if (Spec.RouteKind == EGraphCompoundDomainRouteKind::Query)
 			{
 				if (FString(Spec.CapabilityId)
+					== TEXT("umg.widget.events.discover"))
+				{
+					return CanonicalSchema(Error, TEXT(
+						"{\"additionalProperties\":false,\"properties\":{"
+						"\"names\":{\"items\":{\"type\":\"string\"},\"type\":\"array\"}},"
+						"\"required\":[\"names\"],\"type\":\"object\"}"));
+				}
+				if (FString(Spec.CapabilityId)
 					== TEXT("blueprint.component.events.discover"))
 				{
-					return CanonicalSchema(TEXT(
+					return CanonicalSchema(Error, TEXT(
 						"{\"additionalProperties\":false,\"properties\":{" 
-						"\"asset_path\":{\"type\":\"string\"},"
-						"\"can_author_component_bound_event\":{\"type\":\"boolean\"},"
-						"\"compiled_before_query\":{\"type\":\"boolean\"},"
-						"\"component_name\":{\"type\":\"string\"},"
-						"\"component_property_found\":{\"type\":\"boolean\"},"
-						"\"events\":{\"items\":{\"additionalProperties\":false,\"properties\":{" 
-						"\"already_bound\":{\"type\":\"boolean\"},\"category\":{\"type\":\"string\"},"
-						"\"display_name\":{\"type\":\"string\"},\"event_ref\":{\"type\":\"string\"},"
-						"\"hidden\":{\"type\":\"boolean\"},\"native_field_name\":{\"type\":\"string\"},"
-						"\"signature_ref\":{\"type\":\"string\"}},"
-						"\"required\":[\"event_ref\",\"native_field_name\",\"signature_ref\",\"display_name\",\"category\",\"hidden\",\"already_bound\"],\"type\":\"object\"},\"type\":\"array\"},"
-						"\"matched_event_count\":{\"type\":\"integer\"},\"returned_event_count\":{\"type\":\"integer\"},"
-						"\"target_class\":{\"type\":\"string\"},\"total_event_count\":{\"type\":\"integer\"},"
-						"\"truncated\":{\"type\":\"boolean\"}},"
-						"\"required\":[\"asset_path\",\"component_name\",\"target_class\",\"component_property_found\",\"can_author_component_bound_event\",\"compiled_before_query\",\"total_event_count\",\"matched_event_count\",\"returned_event_count\",\"truncated\",\"events\"],\"type\":\"object\"}"));
+						"\"names\":{\"items\":{\"type\":\"string\"},"
+						"\"type\":\"array\"}},"
+						"\"required\":[\"names\"],\"type\":\"object\"}"));
 				}
-				return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"events\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"event_ref\":{\"type\":\"string\"},\"native_field_name\":{\"type\":\"string\"},\"signature_ref\":{\"type\":\"string\"}},\"required\":[\"event_ref\",\"native_field_name\",\"signature_ref\"],\"type\":\"object\"},\"type\":\"array\"}},\"required\":[\"events\"],\"type\":\"object\"}"));
+				return CanonicalSchema(Error, TEXT("{\"additionalProperties\":false,\"properties\":{\"events\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"event_ref\":{\"type\":\"string\"},\"native_field_name\":{\"type\":\"string\"},\"signature_ref\":{\"type\":\"string\"}},\"required\":[\"event_ref\",\"native_field_name\",\"signature_ref\"],\"type\":\"object\"},\"type\":\"array\"}},\"required\":[\"events\"],\"type\":\"object\"}"));
 			}
-			if (Spec.RouteKind == EGraphCompoundDomainRouteKind::HjsonImport)
+			TSharedPtr<FJsonObject> Schema;
+			FString Canonical;
+			if (!Json::TryParseObject(TEXT("{\"additionalProperties\":false,\"properties\":{\"target_ref\":{\"type\":\"string\"}},\"required\":[\"target_ref\"],\"type\":\"object\"}"), Schema, Error))
 			{
-				return CanonicalSchema(TEXT(
-					"{\"additionalProperties\":false,\"properties\":{"
-					"\"import\":{\"additionalProperties\":false,\"properties\":{"
-					"\"compile_settled\":{\"type\":\"boolean\"},"
-					"\"composition_kind\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"dry_run\":{\"type\":\"boolean\"},"
-					"\"mutation_applied\":{\"type\":\"boolean\"},"
-					"\"operation_id\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"package_saved\":{\"type\":\"boolean\"},"
-					"\"persisted_revision\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"plan_fingerprint\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"pre_revision\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"target\":{\"minLength\":1,\"type\":\"string\"},"
-					"\"unloaded_reloaded\":{\"type\":\"boolean\"},"
-					"\"verification_status\":{\"const\":\"verified\"},"
-					"\"workspace_fingerprint\":{\"minLength\":1,\"type\":\"string\"}},"
-					"\"required\":[\"compile_settled\",\"composition_kind\","
-					"\"dry_run\",\"mutation_applied\",\"operation_id\","
-					"\"package_saved\",\"persisted_revision\",\"plan_fingerprint\","
-					"\"pre_revision\",\"target\",\"unloaded_reloaded\","
-					"\"verification_status\",\"workspace_fingerprint\"],"
-					"\"type\":\"object\"}},\"required\":[\"import\"],"
-					"\"type\":\"object\"}"));
+				MarkGraphCompoundNativeDiagnostic(Error);
+				return FString();
 			}
-			return CanonicalSchema(TEXT("{\"additionalProperties\":false,\"properties\":{\"revision\":{\"type\":\"string\"},\"target_ref\":{\"type\":\"string\"}},\"required\":[\"target_ref\",\"revision\"],\"type\":\"object\"}"));
+			// The receipt layout comes from the common operation evidence owner.
+			// It is optional for older producers, never an asset-specific success flag.
+			const auto Stages = MakeShared<FJsonObject>();
+			const auto StageProperties = MakeShared<FJsonObject>();
+			TArray<TSharedPtr<FJsonValue>> Required;
+			const auto EvidenceShape = UeAgentAuthoringWorkspaceTransaction::FFinalReadbackEvidence().ToJsonObject();
+			for (const auto& Field : EvidenceShape->Values)
+			{
+				const auto Property = MakeShared<FJsonObject>();
+				Property->SetStringField(TEXT("type"), TEXT("boolean"));
+				StageProperties->SetObjectField(Field.Key, Property);
+				Required.Add(MakeShared<FJsonValueString>(Field.Key));
+			}
+			Stages->SetStringField(TEXT("type"), TEXT("object"));
+			Stages->SetBoolField(TEXT("additionalProperties"), false);
+			Stages->SetObjectField(TEXT("properties"), StageProperties);
+			Stages->SetArrayField(TEXT("required"), Required);
+			Schema->GetObjectField(TEXT("properties"))->SetObjectField(TEXT("operation_stages"), Stages);
+			if (!Json::TryCanonicalize(Schema, Canonical, Error))
+			{
+				MarkGraphCompoundNativeDiagnostic(Error);
+				return FString();
+			}
+			return Canonical;
 		}
 
 		TSharedPtr<FJsonObject> DescriptorObject(
 			const FRouteSpec& Spec,
 			const FString& Input,
 			const FString& Result,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<FJsonObject> InputObject;
 			TSharedPtr<FJsonObject> ResultObject;
@@ -325,7 +272,7 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			TArray<FGraphCompoundDomainRouteProfile> Profiles;
 			TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 		};
 
 		FRouteBundle BuildBundle()
@@ -334,16 +281,30 @@ namespace UE::UAI::Composition::GraphCompound
 			TArray<FUeAgentOperationDescriptor> Descriptors;
 			for (const FRouteSpec& Spec : RouteSpecs())
 			{
-				const FString Input = InputSchema(Spec);
-				const FString Result = ResultSchema(Spec);
-				TSharedPtr<FJsonObject> Object =
-					DescriptorObject(Spec, Input, Result, Bundle.Error);
-				FString CanonicalDescriptor;
-				if (Input.IsEmpty() || Result.IsEmpty() || !Object.IsValid()
-					|| !Json::TryCanonicalize(
-						Object, CanonicalDescriptor, Bundle.Error))
+				auto RejectSchema = [&](const TCHAR* Field)
 				{
+					MarkGraphCompoundNativeDiagnostic(Bundle.Error);
+					if (Bundle.Error.TargetPath.IsEmpty()) Bundle.Error.TargetPath = Spec.DescriptorId;
+					if (Bundle.Error.PropertyPath.IsEmpty()) Bundle.Error.PropertyPath = Field;
 					Bundle.Profiles.Reset();
+				};
+				const FString Input = InputSchema(Spec, Bundle.Error);
+				if (Input.IsEmpty())
+				{
+					RejectSchema(TEXT("input_schema"));
+					return Bundle;
+				}
+				const FString Result = ResultSchema(Spec, Bundle.Error);
+				if (Result.IsEmpty())
+				{
+					RejectSchema(TEXT("result_schema"));
+					return Bundle;
+				}
+				TSharedPtr<FJsonObject> Object = DescriptorObject(Spec, Input, Result, Bundle.Error);
+				FString CanonicalDescriptor;
+				if (!Object.IsValid() || !Json::TryCanonicalize(Object, CanonicalDescriptor, Bundle.Error))
+				{
+					RejectSchema(TEXT("descriptor"));
 					return Bundle;
 				}
 				const FUeAgentDescriptorIdentity Identity(
@@ -372,12 +333,10 @@ namespace UE::UAI::Composition::GraphCompound
 					FUeAgentContractValue(Result), MoveTemp(QueryBinding));
 
 				const FString Suffix = StableSuffix(Spec.CapabilityId);
-				const bool bHjson =
-					Spec.RouteKind == EGraphCompoundDomainRouteKind::HjsonImport;
 				Bundle.Profiles.Emplace(
 					Spec.CapabilityId, Spec.DescriptorId, Spec.DomainId,
 					Spec.FamilyId, Spec.RouteKind, Spec.InputKind,
-					Spec.TargetKind, Spec.CompositionKinds,
+					Spec.TargetKind,
 					FGraphCompoundExecutionContract(
 						Identity,
 						bQuery ? EGraphCompoundExecutionLane::Query
@@ -386,16 +345,10 @@ namespace UE::UAI::Composition::GraphCompound
 						FString(TEXT("graph_compound.")) + Spec.CapabilityId,
 						FString(TEXT("graph_compound.")) + Suffix + TEXT(".request.v1"),
 						FString(TEXT("graph_compound.")) + Suffix + TEXT(".result.v1"),
-						bQuery ? FString() : (bHjson
-							? TEXT("hjson_workspace_change_set")
-							: TEXT("graph_compound_identity_change")),
-						bQuery ? FString() : (bHjson
-							? TEXT("c5.semantic_workspace_import")
-							: FString(TEXT("native.")) + Spec.CapabilityId),
+						bQuery ? FString() : TEXT("graph_compound_identity_change"),
+						bQuery ? FString() : FString(TEXT("native.")) + Spec.CapabilityId,
 						FString(TEXT("readback.")) + Spec.CapabilityId,
-						bQuery ? FString() : (bHjson
-							? TEXT("compile_settle_save_reload")
-							: TEXT("domain_compile_refresh_settle")),
+						bQuery ? FString() : TEXT("domain_compile_refresh_settle"),
 						bQuery
 							? TEXT("independent_native_event_discovery")
 							: TEXT("independent_post_mutation_readback"),
@@ -404,6 +357,7 @@ namespace UE::UAI::Composition::GraphCompound
 			if (!FUeAgentDescriptorRegistry::TryCreate(
 					MoveTemp(Descriptors), Bundle.Registry, Bundle.Error))
 			{
+				MarkGraphCompoundNativeDiagnostic(Bundle.Error);
 				Bundle.Profiles.Reset();
 			}
 			return Bundle;
@@ -415,16 +369,11 @@ namespace UE::UAI::Composition::GraphCompound
 			return Bundle;
 		}
 
-		void SetError(
-			FGraphCompoundRouteError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
-		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-		}
+		void SetError(FGraphCompoundRouteError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SubjectId;
+        }
 
 		bool TryValidatedObject(
 			const FGraphCompoundDomainRouteProfile& Profile,
@@ -436,18 +385,27 @@ namespace UE::UAI::Composition::GraphCompound
 			OutObject.Reset();
 			OutError = {};
 			const FRouteBundle& Bundle = RouteBundle();
-			if (!Profile.IsValid() || !Bundle.Registry.IsValid())
+			if (!Profile.IsValid())
 			{
-				SetError(OutError, TEXT("graph_compound_route_unavailable"),
-					Profile.GetCapabilityId(), Bundle.Error);
+				OutError = Profile.GetValidationDiagnostic();
+				return false;
+			}
+			if (!Bundle.Registry.IsValid())
+			{
+				OutError = Bundle.Error.IsValid() ? Bundle.Error : RouteFailure(
+					TEXT("graph_compound_registry_missing"),
+					TEXT("The graph route registry is unavailable."),
+					Profile.GetCapabilityId(), TEXT("registry.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
 			const FUeAgentOperationDescriptor* Descriptor =
 				Bundle.Registry->FindByDescriptorId(Profile.GetDescriptorId());
 			if (!Descriptor)
 			{
-				SetError(OutError, TEXT("graph_compound_descriptor_missing"),
-					Profile.GetDescriptorId());
+				OutError = RouteFailure(TEXT("graph_compound_descriptor_missing"), TEXT("The graph route descriptor is missing from its registry."),
+					Profile.GetDescriptorId(), TEXT("descriptor.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
 			const FUeAgentContractSchema* Schema =
@@ -455,8 +413,9 @@ namespace UE::UAI::Composition::GraphCompound
 					Descriptor->GetIdentity());
 			if (!Schema)
 			{
-				SetError(OutError, TEXT("graph_compound_schema_missing"),
-					Profile.GetDescriptorId());
+				OutError = RouteFailure(TEXT("graph_compound_schema_missing"), TEXT("The graph route descriptor has no compiled input schema."),
+					Profile.GetDescriptorId(), TEXT("input_schema.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
 			const FUeAgentContractSchemaCheckpoint Checkpoint =
@@ -465,40 +424,37 @@ namespace UE::UAI::Composition::GraphCompound
 					const FString& InstancePath,
 					FUeAgentContractSchemaError& Error)
 				{
-					FUeAgentResourceBudgetExceeded BudgetError;
+					FUeAgentResourceChargeError ChargeError;
 					if (!Resources.TryCharge(
 							EUeAgentResourceDimension::WorkUnits,
 							WorkUnits,
 							TEXT("graph_compound.gc015.schema"),
-							BudgetError))
+							ChargeError))
 					{
-						Error.Code = BudgetError.Code;
-						Error.InstancePath = InstancePath;
-						Error.Detail = TEXT("Schema work budget exceeded.");
+						Error = ChargeError;
+				Error.Source.JsonPath = InstancePath;
 						return false;
 					}
 					return true;
 				};
 			TOptional<FUeAgentContractValue> Canonical;
 			FUeAgentContractSchemaError SchemaError;
-			if (!Schema->TryValidateAndCanonicalize(
-					Input, Checkpoint, Canonical, SchemaError)
-				|| !Canonical.IsSet())
+			const bool bValidated = Schema->TryValidateAndCanonicalize(Input, Checkpoint, Canonical, SchemaError);
+			if (!bValidated || !Canonical.IsSet())
 			{
-				SetError(OutError,
-					SchemaError.Code.IsEmpty()
-						? TEXT("graph_compound_input_invalid")
-						: SchemaError.Code,
-					SchemaError.InstancePath,
-					SchemaError.Detail);
+				OutError = SchemaError.IsValid() ? SchemaError : RouteFailure(
+					TEXT("graph_compound_input_invalid"),
+					bValidated ? TEXT("Graph input validation returned without a canonical value.")
+						: TEXT("Graph input validation failed without a diagnostic."),
+					Profile.GetCapabilityId(), bValidated ? TEXT("canonical_input.present") : TEXT("input_validation.succeeded"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
-			FString ParseError;
+			UE::UAI::Contract::FDiagnostic ParseError;
 			if (!Json::TryParseObject(
 					Canonical->GetJsonValue(), OutObject, ParseError))
 			{
-				SetError(OutError, TEXT("graph_compound_input_parse_failed"),
-					Profile.GetCapabilityId(), ParseError);
+				SetError(OutError, ParseError, Profile.GetCapabilityId());
 				return false;
 			}
 			return true;
@@ -554,12 +510,11 @@ namespace UE::UAI::Composition::GraphCompound
 			FGraphCompoundRouteError& OutError,
 			const FString& Subject)
 		{
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			if (!CanonicalJson::TryFromJsonValue(
 					JsonValue, Resources, OutValue, Error))
 			{
-				SetError(OutError, TEXT("graph_compound_value_invalid"),
-					Subject, Error);
+				SetError(OutError, Error, Subject);
 				return false;
 			}
 			return true;
@@ -576,10 +531,8 @@ namespace UE::UAI::Composition::GraphCompound
 			if (!FUeAgentCanonicalValue::TryString(
 					Text, Resources, OutValue, Error))
 			{
-				SetError(OutError,
-					Error.Code.IsEmpty()
-						? TEXT("graph_compound_value_invalid") : Error.Code,
-					Subject, Error.Path);
+				OutError = Error;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
 				return false;
 			}
 			return true;
@@ -594,6 +547,40 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			return PackagePath + TEXT("/")
 				+ Object.GetStringField(TEXT("asset_name"));
+		}
+
+		bool TryNormalizeAssetCreationTarget(const FString& Input, const TCHAR* InputPointer,
+			FString& OutPackageName, FGraphCompoundRouteError& OutError)
+		{
+			const FString Identity = Input.TrimStartAndEnd();
+			OutPackageName = FPackageName::ObjectPathToPackageName(Identity);
+			FText Reason;
+			if (!FPackageName::IsValidLongPackageName(OutPackageName, true, &Reason))
+			{
+				OutError = RouteFailure(TEXT("graph_compound_asset_target_invalid"),
+					Reason.ToString(), Identity, InputPointer == FString(TEXT("/target_ref")) ? TEXT("target_ref") : TEXT("asset_target"),
+					MakeShared<FJsonValueString>(OutPackageName),
+					MakeShared<FJsonValueString>(TEXT("valid long package name")));
+				OutError.SourceKind = TEXT("command_input");
+				OutError.Source.JsonPath = InputPointer;
+				return false;
+			}
+			if (Identity != OutPackageName
+				&& Identity != OutPackageName + TEXT(".")
+					+ FPackageName::GetLongPackageAssetName(OutPackageName))
+			{
+				const TArray<TSharedPtr<FJsonValue>> Expected = {
+					MakeShared<FJsonValueString>(OutPackageName),
+					MakeShared<FJsonValueString>(OutPackageName + TEXT(".") + FPackageName::GetLongPackageAssetName(OutPackageName))};
+				OutError = RouteFailure(TEXT("graph_compound_asset_target_invalid"),
+					TEXT("An asset creation target must be a package path or its matching top-level object path; subobjects and a different object name are not creation targets."),
+					Identity, InputPointer == FString(TEXT("/target_ref")) ? TEXT("target_ref") : TEXT("asset_target"), MakeShared<FJsonValueString>(Identity),
+					MakeShared<FJsonValueArray>(Expected));
+				OutError.SourceKind = TEXT("command_input");
+				OutError.Source.JsonPath = InputPointer;
+				return false;
+			}
+			return true;
 		}
 
 		bool IsNiagaraMutationKind(
@@ -624,23 +611,38 @@ namespace UE::UAI::Composition::GraphCompound
 		bool TryNormalizeModuleRef(
 			FString Text,
 			const bool bAllowEmpty,
-			FString& OutText)
+			FString& OutText,
+			const TCHAR* Field,
+			FGraphCompoundRouteError& OutError)
 		{
+			const FString Original = Text;
 			Text.TrimStartAndEndInline();
 			if (Text.IsEmpty())
 			{
 				OutText.Reset();
+				if (!bAllowEmpty)
+				{
+					OutError = InputFailure(TEXT("graph_compound_niagara_module_ref_invalid"),
+						TEXT("The required module reference is empty after trimming."), FString(), Field,
+						MakeShared<FJsonValueString>(Original), MakeShared<FJsonValueString>(TEXT("module:<non-zero GUID>")));
+				}
 				return bAllowEmpty;
 			}
 			if (!Text.StartsWith(TEXT("module:"), ESearchCase::IgnoreCase))
 			{
 				OutText.Reset();
+				OutError = InputFailure(TEXT("graph_compound_niagara_module_ref_invalid"),
+					TEXT("The module reference must begin with module:."), FString(), Field,
+					MakeShared<FJsonValueString>(Original), MakeShared<FJsonValueString>(TEXT("module:<non-zero GUID>")));
 				return false;
 			}
 			FString GuidText;
 			if (!TryNormalizeGuidText(Text.RightChop(7), GuidText))
 			{
 				OutText.Reset();
+				OutError = InputFailure(TEXT("graph_compound_niagara_module_ref_invalid"),
+					TEXT("The module reference suffix is not a valid non-zero GUID."), FString(), Field,
+					MakeShared<FJsonValueString>(Original), MakeShared<FJsonValueString>(TEXT("module:<non-zero GUID>")));
 				return false;
 			}
 			OutText = TEXT("module:") + GuidText;
@@ -658,20 +660,26 @@ namespace UE::UAI::Composition::GraphCompound
 				Profile.GetTypedInputKind();
 			if (!IsNiagaraMutationKind(InputKind))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_niagara_selector_kind_invalid"),
-					Profile.GetCapabilityId());
+				OutError = RouteFailure(TEXT("graph_compound_niagara_selector_kind_invalid"),
+					TEXT("The route input kind does not support a Niagara mutation selector."),
+					Profile.GetCapabilityId(), TEXT("typed_input_kind"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(InputKind)),
+					MakeShared<FJsonValueString>(TEXT("NiagaraStackReorder, NiagaraStackIssueFix, NiagaraCompoundInput or NiagaraRendererEventParameter")));
 				return false;
 			}
 
-			FString EmitterHandleId;
-			if (!TryNormalizeGuidText(
-					Object.GetStringField(TEXT("emitter_handle_id")),
-					EmitterHandleId))
+			FString EmitterHandleId = Object.GetStringField(TEXT("emitter_handle_id")).TrimStartAndEnd();
+			FString NormalizedEmitterId;
+			if (TryNormalizeGuidText(EmitterHandleId, NormalizedEmitterId))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_niagara_emitter_handle_invalid"),
-					Profile.GetCapabilityId(), TEXT("/emitter_handle_id"));
+				EmitterHandleId = MoveTemp(NormalizedEmitterId);
+			}
+			if (EmitterHandleId.IsEmpty())
+			{
+				OutError = InputFailure(TEXT("graph_compound_niagara_emitter_handle_invalid"),
+					TEXT("emitter_handle_id is empty after trimming."), Profile.GetCapabilityId(),
+					TEXT("emitter_handle_id"), Object.TryGetField(TEXT("emitter_handle_id")),
+					MakeShared<FJsonValueString>(TEXT("non-empty emitter handle identifier")));
 				return false;
 			}
 
@@ -686,15 +694,13 @@ namespace UE::UAI::Composition::GraphCompound
 			FString PredecessorRef = OptionalString(TEXT("predecessor_ref"));
 			FString ModuleRef = OptionalString(TEXT("module_ref"));
 			if ((InputKind == EGraphCompoundTypedInputKind::NiagaraStackReorder
-					&& (!TryNormalizeModuleRef(ItemRef, false, ItemRef)
+					&& (!TryNormalizeModuleRef(ItemRef, false, ItemRef, TEXT("item_ref"), OutError)
 						|| !TryNormalizeModuleRef(
-							PredecessorRef, true, PredecessorRef)))
+							PredecessorRef, true, PredecessorRef, TEXT("predecessor_ref"), OutError)))
 				|| (InputKind == EGraphCompoundTypedInputKind::NiagaraCompoundInput
-					&& !TryNormalizeModuleRef(ModuleRef, false, ModuleRef)))
+					&& !TryNormalizeModuleRef(ModuleRef, false, ModuleRef, TEXT("module_ref"), OutError)))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_niagara_module_ref_invalid"),
-					Profile.GetCapabilityId());
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Profile.GetCapabilityId();
 				return false;
 			}
 
@@ -705,9 +711,12 @@ namespace UE::UAI::Composition::GraphCompound
 						TEXT("renderer:"), ESearchCase::IgnoreCase)
 					|| RendererRef.Len() <= 9))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_niagara_renderer_ref_invalid"),
-					Profile.GetCapabilityId(), TEXT("/renderer_ref"));
+				OutError = InputFailure(TEXT("graph_compound_niagara_renderer_ref_invalid"),
+					!RendererRef.StartsWith(TEXT("renderer:"), ESearchCase::IgnoreCase)
+						? TEXT("renderer_ref must begin with renderer:.")
+						: TEXT("renderer_ref must include an identifier after renderer:."),
+					Profile.GetCapabilityId(), TEXT("renderer_ref"), MakeShared<FJsonValueString>(RendererRef),
+					MakeShared<FJsonValueString>(TEXT("renderer:<identifier>")));
 				return false;
 			}
 			if (!RendererRef.IsEmpty())
@@ -735,9 +744,7 @@ namespace UE::UAI::Composition::GraphCompound
 				MoveTemp(TypeRef));
 			if (!OutSelector.IsValid())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_niagara_selector_invalid"),
-					Profile.GetCapabilityId());
+				OutError = OutSelector.GetValidationDiagnostic();
 				return false;
 			}
 			return true;
@@ -752,7 +759,6 @@ namespace UE::UAI::Composition::GraphCompound
 		const EGraphCompoundDomainRouteKind InRouteKind,
 		const EGraphCompoundTypedInputKind InTypedInputKind,
 		FString InTargetKind,
-		TArray<FString> InAllowedCompositionKinds,
 		FGraphCompoundExecutionContract InExecutionContract)
 		: CapabilityId(MoveTemp(InCapabilityId))
 		, DescriptorId(MoveTemp(InDescriptorId))
@@ -761,7 +767,6 @@ namespace UE::UAI::Composition::GraphCompound
 		, RouteKind(InRouteKind)
 		, TypedInputKind(InTypedInputKind)
 		, TargetKind(MoveTemp(InTargetKind))
-		, AllowedCompositionKinds(MoveTemp(InAllowedCompositionKinds))
 		, ExecutionContract(MoveTemp(InExecutionContract))
 	{
 		for (FString* Value : {
@@ -769,24 +774,63 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			Value->TrimStartAndEndInline();
 		}
-		for (FString& Value : AllowedCompositionKinds)
-		{
-			Value.TrimStartAndEndInline();
-		}
 		const bool bKindValid =
 			(RouteKind == EGraphCompoundDomainRouteKind::Query
-				&& TypedInputKind == EGraphCompoundTypedInputKind::None
-				&& AllowedCompositionKinds.IsEmpty())
+				&& TypedInputKind == EGraphCompoundTypedInputKind::None)
 			|| (RouteKind == EGraphCompoundDomainRouteKind::TypedOperation
-				&& TypedInputKind != EGraphCompoundTypedInputKind::None
-				&& AllowedCompositionKinds.IsEmpty())
-			|| (RouteKind == EGraphCompoundDomainRouteKind::HjsonImport
-				&& TypedInputKind == EGraphCompoundTypedInputKind::None
-				&& !AllowedCompositionKinds.IsEmpty());
-		bValid = !CapabilityId.IsEmpty() && !DescriptorId.IsEmpty()
-			&& !DomainId.IsEmpty() && !FamilyId.IsEmpty()
-			&& !TargetKind.IsEmpty() && bKindValid
-			&& ExecutionContract.IsValid();
+				&& TypedInputKind != EGraphCompoundTypedInputKind::None);
+		if (CapabilityId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route capability_id is empty after trimming."),
+				CapabilityId, TEXT("capability_id"), MakeShared<FJsonValueString>(CapabilityId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (DescriptorId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route descriptor_id is empty after trimming."),
+				CapabilityId, TEXT("descriptor_id"), MakeShared<FJsonValueString>(DescriptorId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (DomainId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route domain_id is empty after trimming."),
+				CapabilityId, TEXT("domain_id"), MakeShared<FJsonValueString>(DomainId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (FamilyId.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route family_id is empty after trimming."),
+				CapabilityId, TEXT("family_id"), MakeShared<FJsonValueString>(FamilyId),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (TargetKind.IsEmpty())
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The graph route target_kind is empty after trimming."),
+				CapabilityId, TEXT("target_kind"), MakeShared<FJsonValueString>(TargetKind),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		}
+		else if (!bKindValid)
+		{
+			const TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
+			Actual->SetNumberField(TEXT("route_kind"), static_cast<int32>(RouteKind));
+			Actual->SetNumberField(TEXT("typed_input_kind"), static_cast<int32>(TypedInputKind));
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_binding_profile_invalid"),
+				TEXT("The route kind and typed input kind are incompatible."),
+				CapabilityId, TEXT("route_kind"), MakeShared<FJsonValueObject>(Actual),
+				MakeShared<FJsonValueString>(TEXT("Query requires None; TypedOperation requires a non-None input kind")));
+		}
+		else if (!ExecutionContract.IsValid())
+		{
+			ValidationDiagnostic = FDiagnostic::WrapFailure(
+				TEXT("graph_compound_binding_profile_invalid"),
+				ExecutionContract.GetValidationDiagnostic(), TEXT("graph_compound"),
+				TEXT("The graph route execution contract is invalid."));
+		}
 	}
 
 	const FString& FGraphCompoundDomainRouteProfile::GetCapabilityId() const { return CapabilityId; }
@@ -796,14 +840,18 @@ namespace UE::UAI::Composition::GraphCompound
 	EGraphCompoundDomainRouteKind FGraphCompoundDomainRouteProfile::GetRouteKind() const { return RouteKind; }
 	EGraphCompoundTypedInputKind FGraphCompoundDomainRouteProfile::GetTypedInputKind() const { return TypedInputKind; }
 	const FString& FGraphCompoundDomainRouteProfile::GetTargetKind() const { return TargetKind; }
-	const TArray<FString>& FGraphCompoundDomainRouteProfile::GetAllowedCompositionKinds() const { return AllowedCompositionKinds; }
 	const FGraphCompoundExecutionContract& FGraphCompoundDomainRouteProfile::GetExecutionContract() const { return ExecutionContract; }
-	bool FGraphCompoundDomainRouteProfile::IsValid() const { return bValid; }
+	bool FGraphCompoundDomainRouteProfile::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FDiagnostic& FGraphCompoundDomainRouteProfile::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
-	const TArray<FGraphCompoundDomainRouteProfile>&
-	GetBlueprintMaterialGraphRouteProfiles()
+	bool TryGetBlueprintMaterialGraphRouteProfiles(
+		const TArray<FGraphCompoundDomainRouteProfile>*& OutProfiles, FDiagnostic& OutError)
 	{
-		return RouteBundle().Profiles;
+		OutProfiles = nullptr;
+		OutError = RouteBundle().Error;
+		if (!OutError.IsEmpty()) return false;
+		OutProfiles = &RouteBundle().Profiles;
+		return true;
 	}
 
 	const FGraphCompoundDomainRouteProfile*
@@ -822,11 +870,16 @@ namespace UE::UAI::Composition::GraphCompound
 
 	bool TryCreateBlueprintMaterialGraphDescriptorRegistry(
 		TSharedPtr<const FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry = RouteBundle().Registry;
 		OutError = RouteBundle().Error;
 		return OutRegistry.IsValid() && OutError.IsEmpty();
+	}
+
+	FGraphCompoundEventQueryRequest::FGraphCompoundEventQueryRequest()
+		: FGraphCompoundEventQueryRequest(FString(), FString())
+	{
 	}
 
 	FGraphCompoundEventQueryRequest::FGraphCompoundEventQueryRequest(
@@ -834,7 +887,7 @@ namespace UE::UAI::Composition::GraphCompound
 		FString InOwnerItemRef)
 		: FGraphCompoundEventQueryRequest(
 			MoveTemp(InTargetRef), MoveTemp(InOwnerItemRef), FString(),
-			200, false, false, true)
+			false, false, true)
 	{
 	}
 
@@ -842,14 +895,12 @@ namespace UE::UAI::Composition::GraphCompound
 		FString InTargetRef,
 		FString InOwnerItemRef,
 		FString InQuery,
-		const int32 InLimit,
 		const bool bInOnlyUnbound,
 		const bool bInIncludeHidden,
 		const bool bInCompileBeforeQuery)
 		: TargetRef(MoveTemp(InTargetRef))
 		, OwnerItemRef(MoveTemp(InOwnerItemRef))
 		, Query(MoveTemp(InQuery))
-		, Limit(InLimit)
 		, bOnlyUnbound(bInOnlyUnbound)
 		, bIncludeHidden(bInIncludeHidden)
 		, bCompileBeforeQuery(bInCompileBeforeQuery)
@@ -857,18 +908,25 @@ namespace UE::UAI::Composition::GraphCompound
 		TargetRef.TrimStartAndEndInline();
 		OwnerItemRef.TrimStartAndEndInline();
 		Query.TrimStartAndEndInline();
-		bValid = !TargetRef.IsEmpty() && !OwnerItemRef.IsEmpty()
-			&& Limit >= 0 && Limit <= 1000;
+		if (TargetRef.IsEmpty() || OwnerItemRef.IsEmpty())
+		{
+			ValidationDiagnostic = InputFailure(TEXT("graph_compound_event_query_invalid"),
+				TargetRef.IsEmpty() ? TEXT("The event query target reference is empty after trimming.")
+					: TEXT("The event query owner item reference is empty after trimming."),
+				TargetRef, TargetRef.IsEmpty() ? TEXT("target_ref") : TEXT("owner_item_ref"),
+				MakeShared<FJsonValueString>(TargetRef.IsEmpty() ? TargetRef : OwnerItemRef),
+				MakeShared<FJsonValueString>(TEXT("non-empty reference")));
+		}
 	}
 
 	const FString& FGraphCompoundEventQueryRequest::GetTargetRef() const { return TargetRef; }
 	const FString& FGraphCompoundEventQueryRequest::GetOwnerItemRef() const { return OwnerItemRef; }
 	const FString& FGraphCompoundEventQueryRequest::GetQuery() const { return Query; }
-	int32 FGraphCompoundEventQueryRequest::GetLimit() const { return Limit; }
 	bool FGraphCompoundEventQueryRequest::IsOnlyUnbound() const { return bOnlyUnbound; }
 	bool FGraphCompoundEventQueryRequest::IsIncludeHidden() const { return bIncludeHidden; }
 	bool FGraphCompoundEventQueryRequest::IsCompileBeforeQuery() const { return bCompileBeforeQuery; }
-	bool FGraphCompoundEventQueryRequest::IsValid() const { return bValid; }
+	bool FGraphCompoundEventQueryRequest::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FDiagnostic& FGraphCompoundEventQueryRequest::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	bool TryDecodeGraphCompoundEventQueryRequest(
 		const FGraphCompoundDomainRouteProfile& Profile,
@@ -881,8 +939,11 @@ namespace UE::UAI::Composition::GraphCompound
 		OutError = {};
 		if (Profile.GetRouteKind() != EGraphCompoundDomainRouteKind::Query)
 		{
-			SetError(OutError, TEXT("graph_compound_route_kind_mismatch"),
-				Profile.GetCapabilityId(), TEXT("query"));
+			OutError = RouteFailure(TEXT("graph_compound_route_kind_mismatch"),
+				TEXT("The graph route kind does not match this request decoder."),
+				Profile.GetCapabilityId(), TEXT("route_kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Profile.GetRouteKind())),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(EGraphCompoundDomainRouteKind::Query)));
 			return false;
 		}
 		TSharedPtr<FJsonObject> Object;
@@ -895,8 +956,6 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			FString Query;
 			Object->TryGetStringField(TEXT("query"), Query);
-			double Limit = 200.0;
-			Object->TryGetNumberField(TEXT("limit"), Limit);
 			bool bOnlyUnbound = false;
 			Object->TryGetBoolField(TEXT("only_unbound"), bOnlyUnbound);
 			bool bIncludeHidden = false;
@@ -909,7 +968,7 @@ namespace UE::UAI::Composition::GraphCompound
 			OutRequest = FGraphCompoundEventQueryRequest(
 				Object->GetStringField(TEXT("asset_path")),
 				TEXT("component:") + ComponentName,
-				MoveTemp(Query), static_cast<int32>(Limit), bOnlyUnbound,
+				MoveTemp(Query), bOnlyUnbound,
 				bIncludeHidden, bCompileBeforeQuery);
 		}
 		else
@@ -918,7 +977,19 @@ namespace UE::UAI::Composition::GraphCompound
 				Object->GetStringField(TEXT("target_ref")),
 				Object->GetStringField(TEXT("owner_item_ref")));
 		}
-		return OutRequest.IsValid();
+		OutError = OutRequest.GetValidationDiagnostic();
+		if (!OutError.IsEmpty()
+			&& Profile.GetCapabilityId() == TEXT("blueprint.component.events.discover")
+			&& OutError.PropertyPath == TEXT("target_ref"))
+		{
+			OutError.Source.JsonPath = TEXT("/asset_path");
+		}
+		return OutError.IsEmpty();
+	}
+
+	FGraphCompoundAssetCreateRequest::FGraphCompoundAssetCreateRequest()
+		: FGraphCompoundAssetCreateRequest(EGraphCompoundTypedInputKind::None, FString(), FString(), FString(), FString(), FString(), FString(), FString())
+	{
 	}
 
 	FGraphCompoundAssetCreateRequest::FGraphCompoundAssetCreateRequest(
@@ -949,33 +1020,72 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			PackagePath.LeftChopInline(1);
 		}
-		const bool bKindSpecificFieldsValid =
-			(InputKind == EGraphCompoundTypedInputKind::BlueprintAssetCreate
-				&& !ParentClassRef.IsEmpty()
-				&& ParentMaterialRef.IsEmpty() && SourceRef.IsEmpty())
-			|| (((InputKind == EGraphCompoundTypedInputKind::UmgAssetCreate
-						&& MaterialKind.IsEmpty())
-					|| (InputKind
-							== EGraphCompoundTypedInputKind::MaterialAssetCreate
-						&& (MaterialKind == TEXT("material")
-							|| MaterialKind == TEXT("material_function"))))
-				&& ParentClassRef.IsEmpty()
-				&& ParentMaterialRef.IsEmpty() && SourceRef.IsEmpty())
-			|| (InputKind
-					== EGraphCompoundTypedInputKind::MaterialInstanceAssetCreate
-				&& ParentClassRef.IsEmpty()
-				&& !ParentMaterialRef.IsEmpty() && SourceRef.IsEmpty())
-			|| ((InputKind
-						== EGraphCompoundTypedInputKind::NiagaraEmitterAssetCreate
-					|| InputKind
-						== EGraphCompoundTypedInputKind::NiagaraSystemAssetCreate
-					|| InputKind
-						== EGraphCompoundTypedInputKind::NiagaraAssetDuplicate)
-				&& ParentClassRef.IsEmpty()
-				&& ParentMaterialRef.IsEmpty() && !SourceRef.IsEmpty());
-		bValid = !AssetName.IsEmpty() && !PackagePath.IsEmpty()
-			&& TargetRef == PackagePath + TEXT("/") + AssetName
-			&& bKindSpecificFieldsValid;
+		auto RejectField = [this](const TCHAR* Field, const FString& Value, const bool bExpectedEmpty)
+		{
+			if (Value.IsEmpty() == bExpectedEmpty) return false;
+			ValidationDiagnostic = InputFailure(TEXT("graph_compound_asset_create_invalid"),
+				FString::Printf(TEXT("Asset creation field %s must be %s after trimming for this input kind."),
+					Field, bExpectedEmpty ? TEXT("empty") : TEXT("non-empty")),
+				TargetRef, Field, MakeShared<FJsonValueString>(Value),
+				MakeShared<FJsonValueString>(bExpectedEmpty ? TEXT("empty string") : TEXT("non-empty string")));
+			return true;
+		};
+		if (RejectField(TEXT("asset_name"), AssetName, false)
+			|| RejectField(TEXT("package_path"), PackagePath, false)) return;
+		const FString ExpectedTarget = PackagePath + TEXT("/") + AssetName;
+		if (TargetRef != ExpectedTarget)
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_asset_create_invalid"),
+				TEXT("The normalized asset target does not equal package_path plus asset_name."),
+				TargetRef, TEXT("target_ref"), MakeShared<FJsonValueString>(TargetRef),
+				MakeShared<FJsonValueString>(ExpectedTarget));
+			return;
+		}
+		switch (InputKind)
+		{
+		case EGraphCompoundTypedInputKind::BlueprintAssetCreate:
+			if (RejectField(TEXT("parent_class_ref"), ParentClassRef, false)
+				|| RejectField(TEXT("parent_material_ref"), ParentMaterialRef, true)
+				|| RejectField(TEXT("source_ref"), SourceRef, true)) return;
+			break;
+		case EGraphCompoundTypedInputKind::UmgAssetCreate:
+			if (RejectField(TEXT("material_kind"), MaterialKind, true)
+				|| RejectField(TEXT("parent_class_ref"), ParentClassRef, true)
+				|| RejectField(TEXT("parent_material_ref"), ParentMaterialRef, true)
+				|| RejectField(TEXT("source_ref"), SourceRef, true)) return;
+			break;
+		case EGraphCompoundTypedInputKind::MaterialAssetCreate:
+			if (MaterialKind != TEXT("material") && MaterialKind != TEXT("material_function"))
+			{
+				ValidationDiagnostic = InputFailure(TEXT("graph_compound_asset_create_invalid"),
+					TEXT("material_kind must be material or material_function."),
+					TargetRef, TEXT("material_kind"), MakeShared<FJsonValueString>(MaterialKind),
+					MakeShared<FJsonValueString>(TEXT("material or material_function")));
+				return;
+			}
+			if (RejectField(TEXT("parent_class_ref"), ParentClassRef, true)
+				|| RejectField(TEXT("parent_material_ref"), ParentMaterialRef, true)
+				|| RejectField(TEXT("source_ref"), SourceRef, true)) return;
+			break;
+		case EGraphCompoundTypedInputKind::MaterialInstanceAssetCreate:
+			if (RejectField(TEXT("parent_class_ref"), ParentClassRef, true)
+				|| RejectField(TEXT("parent_material_ref"), ParentMaterialRef, false)
+				|| RejectField(TEXT("source_ref"), SourceRef, true)) return;
+			break;
+		case EGraphCompoundTypedInputKind::NiagaraEmitterAssetCreate:
+		case EGraphCompoundTypedInputKind::NiagaraSystemAssetCreate:
+		case EGraphCompoundTypedInputKind::NiagaraAssetDuplicate:
+			if (RejectField(TEXT("parent_class_ref"), ParentClassRef, true)
+				|| RejectField(TEXT("parent_material_ref"), ParentMaterialRef, true)
+				|| RejectField(TEXT("source_ref"), SourceRef, false)) return;
+			break;
+		default:
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_asset_create_invalid"),
+				TEXT("The typed input kind is not an asset creation or duplication kind."),
+				TargetRef, TEXT("input_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(InputKind)),
+				MakeShared<FJsonValueString>(TEXT("Blueprint/Umg/Material/MaterialInstance/Niagara asset creation or Niagara duplication")));
+			break;
+		}
 	}
 
 	EGraphCompoundTypedInputKind
@@ -1021,10 +1131,8 @@ namespace UE::UAI::Composition::GraphCompound
 		return SourceRef;
 	}
 
-	bool FGraphCompoundAssetCreateRequest::IsValid() const
-	{
-		return bValid;
-	}
+	bool FGraphCompoundAssetCreateRequest::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FDiagnostic& FGraphCompoundAssetCreateRequest::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	bool TryDecodeGraphCompoundAssetCreateRequest(
 		const FGraphCompoundDomainRouteProfile& Profile,
@@ -1038,8 +1146,11 @@ namespace UE::UAI::Composition::GraphCompound
 		if (Profile.GetRouteKind()
 			!= EGraphCompoundDomainRouteKind::TypedOperation)
 		{
-			SetError(OutError, TEXT("graph_compound_route_kind_mismatch"),
-				Profile.GetCapabilityId(), TEXT("typed_operation"));
+			OutError = RouteFailure(TEXT("graph_compound_route_kind_mismatch"),
+				TEXT("The graph route kind does not match this request decoder."),
+				Profile.GetCapabilityId(), TEXT("route_kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Profile.GetRouteKind())),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(EGraphCompoundDomainRouteKind::TypedOperation)));
 			return false;
 		}
 		const EGraphCompoundTypedInputKind InputKind =
@@ -1056,9 +1167,11 @@ namespace UE::UAI::Composition::GraphCompound
 			&& InputKind
 				!= EGraphCompoundTypedInputKind::NiagaraAssetDuplicate)
 		{
-			SetError(OutError,
-				TEXT("graph_compound_asset_create_route_mismatch"),
-				Profile.GetCapabilityId());
+			OutError = RouteFailure(TEXT("graph_compound_asset_create_route_mismatch"),
+				TEXT("The graph route input kind does not describe asset creation or duplication."),
+				Profile.GetCapabilityId(), TEXT("typed_input_kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(InputKind)),
+				MakeShared<FJsonValueString>(TEXT("Blueprint/Umg/Material/MaterialInstance/Niagara asset creation or Niagara duplication")));
 			return false;
 		}
 		TSharedPtr<FJsonObject> Object;
@@ -1074,9 +1187,15 @@ namespace UE::UAI::Composition::GraphCompound
 		};
 		const bool bDuplicate = InputKind
 			== EGraphCompoundTypedInputKind::NiagaraAssetDuplicate;
-		const FString TargetRef = bDuplicate
+		const FString TargetIdentity = (bDuplicate
 			? Object->GetStringField(TEXT("target_ref"))
-			: AssetTargetRef(*Object);
+			: AssetTargetRef(*Object)).TrimStartAndEnd();
+		FString TargetRef;
+		if (!TryNormalizeAssetCreationTarget(TargetIdentity,
+			bDuplicate ? TEXT("/target_ref") : TEXT("/"), TargetRef, OutError))
+		{
+			return false;
+		}
 		OutRequest = FGraphCompoundAssetCreateRequest(
 			InputKind,
 			bDuplicate
@@ -1096,131 +1215,15 @@ namespace UE::UAI::Composition::GraphCompound
 			OptionalString(TEXT("source_ref")));
 		if (!OutRequest.IsValid())
 		{
-			SetError(OutError, TEXT("graph_compound_asset_create_invalid"),
-				Profile.GetCapabilityId());
+			OutError = OutRequest.GetValidationDiagnostic();
 			return false;
 		}
 		return true;
 	}
 
-	FGraphCompoundHjsonSourceRequest::FGraphCompoundHjsonSourceRequest(
-		FString InCompositionKind,
-		FString InTargetRef,
-		const EGraphCompoundHjsonSourceKind InSourceKind,
-		FString InSourceLocator,
-		FString InInlineHjson,
-		const EChangeIntent InIntent,
-		FString InExpectedRevision,
-		const bool bInDryRun)
-		: CompositionKind(MoveTemp(InCompositionKind))
-		, TargetRef(MoveTemp(InTargetRef))
-		, SourceKind(InSourceKind)
-		, SourceLocator(MoveTemp(InSourceLocator))
-		, InlineHjson(MoveTemp(InInlineHjson))
-		, Intent(InIntent)
-		, ExpectedRevision(MoveTemp(InExpectedRevision))
-		, bDryRun(bInDryRun)
+	FGraphCompoundNiagaraMutationSelector::FGraphCompoundNiagaraMutationSelector()
+		: FGraphCompoundNiagaraMutationSelector(EGraphCompoundTypedInputKind::None, FString(), FString(), FString(), FString(), FString(), FString(), FString(), FString(), FString(), FString(), FString(), FString())
 	{
-		for (FString* Value : {
-			&CompositionKind, &TargetRef, &SourceLocator,
-			&InlineHjson, &ExpectedRevision})
-		{
-			Value->TrimStartAndEndInline();
-		}
-		const bool bSourceValid =
-			((SourceKind == EGraphCompoundHjsonSourceKind::Directory
-				|| SourceKind == EGraphCompoundHjsonSourceKind::SingleFile)
-				&& !SourceLocator.IsEmpty() && InlineHjson.IsEmpty())
-			|| (SourceKind == EGraphCompoundHjsonSourceKind::Inline
-				&& SourceLocator.IsEmpty() && !InlineHjson.IsEmpty());
-		bValid = !CompositionKind.IsEmpty() && !TargetRef.IsEmpty()
-			&& !ExpectedRevision.IsEmpty() && bSourceValid
-			&& (Intent == EChangeIntent::Update
-				|| Intent == EChangeIntent::Replace);
-	}
-
-	const FString& FGraphCompoundHjsonSourceRequest::GetCompositionKind() const { return CompositionKind; }
-	const FString& FGraphCompoundHjsonSourceRequest::GetTargetRef() const { return TargetRef; }
-	EGraphCompoundHjsonSourceKind FGraphCompoundHjsonSourceRequest::GetSourceKind() const { return SourceKind; }
-	const FString& FGraphCompoundHjsonSourceRequest::GetSourceLocator() const { return SourceLocator; }
-	const FString& FGraphCompoundHjsonSourceRequest::GetInlineHjson() const { return InlineHjson; }
-	EChangeIntent FGraphCompoundHjsonSourceRequest::GetIntent() const { return Intent; }
-	const FString& FGraphCompoundHjsonSourceRequest::GetExpectedRevision() const { return ExpectedRevision; }
-	bool FGraphCompoundHjsonSourceRequest::IsDryRun() const { return bDryRun; }
-	bool FGraphCompoundHjsonSourceRequest::IsValid() const { return bValid; }
-
-	bool TryDecodeGraphCompoundHjsonSourceRequest(
-		const FGraphCompoundDomainRouteProfile& Profile,
-		const FUeAgentContractValue& Input,
-		FUeAgentResourceTracker& Resources,
-		FGraphCompoundHjsonSourceRequest& OutRequest,
-		FGraphCompoundRouteError& OutError)
-	{
-		OutRequest = FGraphCompoundHjsonSourceRequest();
-		OutError = {};
-		if (Profile.GetRouteKind() != EGraphCompoundDomainRouteKind::HjsonImport)
-		{
-			SetError(OutError, TEXT("graph_compound_route_kind_mismatch"),
-				Profile.GetCapabilityId(), TEXT("hjson_import"));
-			return false;
-		}
-		TSharedPtr<FJsonObject> Object;
-		if (!TryValidatedObject(Profile, Input, Resources, Object, OutError))
-		{
-			return false;
-		}
-		const FString CompositionKind =
-			Object->GetStringField(TEXT("composition_kind"));
-		if (!Profile.GetAllowedCompositionKinds().Contains(CompositionKind))
-		{
-			SetError(OutError,
-				TEXT("graph_compound_hjson_composition_mismatch"),
-				CompositionKind, Profile.GetCapabilityId());
-			return false;
-		}
-		EGraphCompoundHjsonSourceKind SourceKind =
-			EGraphCompoundHjsonSourceKind::Invalid;
-		const FString SourceKindText =
-			Object->GetStringField(TEXT("source_kind"));
-		if (SourceKindText == TEXT("directory"))
-		{
-			SourceKind = EGraphCompoundHjsonSourceKind::Directory;
-		}
-		else if (SourceKindText == TEXT("single_file"))
-		{
-			SourceKind = EGraphCompoundHjsonSourceKind::SingleFile;
-		}
-		else if (SourceKindText == TEXT("inline"))
-		{
-			SourceKind = EGraphCompoundHjsonSourceKind::Inline;
-		}
-		EChangeIntent Intent = EChangeIntent::Update;
-		if (!TryIntent(Object->GetStringField(TEXT("intent")), Intent))
-		{
-			SetError(OutError, TEXT("graph_compound_hjson_intent_invalid"),
-				Profile.GetCapabilityId());
-			return false;
-		}
-		FString SourceLocator;
-		FString InlineHjson;
-		Object->TryGetStringField(TEXT("source_locator"), SourceLocator);
-		Object->TryGetStringField(TEXT("inline_hjson"), InlineHjson);
-		OutRequest = FGraphCompoundHjsonSourceRequest(
-			CompositionKind,
-			Object->GetStringField(TEXT("target_ref")),
-			SourceKind,
-			MoveTemp(SourceLocator),
-			MoveTemp(InlineHjson),
-			Intent,
-			Object->GetStringField(TEXT("expected_revision")),
-			Object->GetBoolField(TEXT("dry_run")));
-		if (!OutRequest.IsValid())
-		{
-			SetError(OutError, TEXT("graph_compound_hjson_source_invalid"),
-				Profile.GetCapabilityId());
-			return false;
-		}
-		return true;
 	}
 
 	FGraphCompoundNiagaraMutationSelector::
@@ -1259,23 +1262,39 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			Value->TrimStartAndEndInline();
 		}
-		const bool bCommon = IsNiagaraMutationKind(InputKind)
-			&& !TargetRef.IsEmpty() && !EmitterHandleId.IsEmpty();
+		if (!IsNiagaraMutationKind(InputKind))
+		{
+			ValidationDiagnostic = RouteFailure(TEXT("graph_compound_niagara_selector_kind_invalid"),
+				TEXT("The selector input kind is not a supported Niagara mutation."),
+				TargetRef, TEXT("input_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(InputKind)),
+				MakeShared<FJsonValueString>(TEXT("NiagaraStackReorder, NiagaraStackIssueFix, NiagaraCompoundInput or NiagaraRendererEventParameter")));
+			return;
+		}
+		auto Require = [this](const TCHAR* Field, const FString& Value)
+		{
+			if (!Value.IsEmpty()) return false;
+			ValidationDiagnostic = InputFailure(TEXT("graph_compound_niagara_selector_invalid"),
+				FString::Printf(TEXT("Niagara selector field %s is empty after trimming."), Field),
+				TargetRef, Field, MakeShared<FJsonValueString>(Value),
+				MakeShared<FJsonValueString>(TEXT("non-empty string")));
+			return true;
+		};
+		if (Require(TEXT("target_ref"), TargetRef) || Require(TEXT("emitter_handle_id"), EmitterHandleId)) return;
 		switch (InputKind)
 		{
 		case EGraphCompoundTypedInputKind::NiagaraStackReorder:
-			bValid = bCommon && !StageRef.IsEmpty() && !ItemRef.IsEmpty();
+			if (Require(TEXT("stage_ref"), StageRef) || Require(TEXT("item_ref"), ItemRef)) return;
 			break;
 		case EGraphCompoundTypedInputKind::NiagaraStackIssueFix:
-			bValid = bCommon && !IssueId.IsEmpty() && !FixId.IsEmpty();
+			if (Require(TEXT("issue_id"), IssueId) || Require(TEXT("fix_id"), FixId)) return;
 			break;
 		case EGraphCompoundTypedInputKind::NiagaraCompoundInput:
-			bValid = bCommon && !StageRef.IsEmpty() && !ModuleRef.IsEmpty()
-				&& !InputName.IsEmpty();
+			if (Require(TEXT("stage_ref"), StageRef) || Require(TEXT("module_ref"), ModuleRef)
+				|| Require(TEXT("input_name"), InputName)) return;
 			break;
 		case EGraphCompoundTypedInputKind::NiagaraRendererEventParameter:
-			bValid = bCommon && !RendererRef.IsEmpty()
-				&& !ParameterName.IsEmpty() && !TypeRef.IsEmpty();
+			if (Require(TEXT("renderer_ref"), RendererRef) || Require(TEXT("parameter_name"), ParameterName)
+				|| Require(TEXT("type_ref"), TypeRef)) return;
 			break;
 		default:
 			break;
@@ -1299,7 +1318,8 @@ namespace UE::UAI::Composition::GraphCompound
 	const FString& FGraphCompoundNiagaraMutationSelector::GetRendererRef() const { return RendererRef; }
 	const FString& FGraphCompoundNiagaraMutationSelector::GetParameterName() const { return ParameterName; }
 	const FString& FGraphCompoundNiagaraMutationSelector::GetTypeRef() const { return TypeRef; }
-	bool FGraphCompoundNiagaraMutationSelector::IsValid() const { return bValid; }
+	bool FGraphCompoundNiagaraMutationSelector::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FDiagnostic& FGraphCompoundNiagaraMutationSelector::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	FString FGraphCompoundNiagaraMutationSelector::GetStableSemanticId() const
 	{
@@ -1336,9 +1356,15 @@ namespace UE::UAI::Composition::GraphCompound
 				!= EGraphCompoundDomainRouteKind::TypedOperation
 			|| !IsNiagaraMutationKind(Profile.GetTypedInputKind()))
 		{
-			SetError(OutError,
-				TEXT("graph_compound_niagara_selector_kind_invalid"),
-				Profile.GetCapabilityId());
+			const bool bWrongRoute = Profile.GetRouteKind() != EGraphCompoundDomainRouteKind::TypedOperation;
+			OutError = RouteFailure(TEXT("graph_compound_niagara_selector_kind_invalid"),
+				bWrongRoute ? TEXT("Niagara mutation selector decoding requires a typed operation route.")
+					: TEXT("The route input kind does not support a Niagara mutation selector."),
+				Profile.GetCapabilityId(), bWrongRoute ? TEXT("route_kind") : TEXT("typed_input_kind"),
+				MakeShared<FJsonValueNumber>(bWrongRoute ? static_cast<int32>(Profile.GetRouteKind())
+					: static_cast<int32>(Profile.GetTypedInputKind())),
+				bWrongRoute ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(static_cast<int32>(EGraphCompoundDomainRouteKind::TypedOperation)))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("NiagaraStackReorder, NiagaraStackIssueFix, NiagaraCompoundInput or NiagaraRendererEventParameter"))));
 			return false;
 		}
 		TSharedPtr<FJsonObject> Object;
@@ -1361,8 +1387,10 @@ namespace UE::UAI::Composition::GraphCompound
 		if (Profile.GetRouteKind()
 			!= EGraphCompoundDomainRouteKind::TypedOperation)
 		{
-			SetError(OutError, TEXT("graph_compound_route_kind_mismatch"),
-				Profile.GetCapabilityId(), TEXT("typed_operation"));
+			OutError = RouteFailure(TEXT("graph_compound_route_kind_mismatch"),
+				TEXT("This graph route cannot decode a typed operation."), Profile.GetCapabilityId(), TEXT("route_kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Profile.GetRouteKind())),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(EGraphCompoundDomainRouteKind::TypedOperation)));
 			return false;
 		}
 		TSharedPtr<FJsonObject> Object;
@@ -1376,19 +1404,39 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString Evidence =
 			TEXT("request:") + Profile.GetCapabilityId();
 		TArray<FGraphCompoundCanonicalEdit> Edits;
+		TMap<FString, FString> InputPointers;
+		FString InputTargetRef;
+		Object->TryGetStringField(TEXT("target_ref"), InputTargetRef);
+
+		auto FailInput = [&](const TCHAR* Code, const TCHAR* Reason,
+			const FString& Field, const FString& Pointer,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+			const int32 InputIndex = INDEX_NONE)
+		{
+			OutError = RouteFailure(Code, Reason, InputTargetRef, Field, MoveTemp(Actual), MoveTemp(Expected));
+			OutError.SourceKind = TEXT("command_input");
+			OutError.Source.JsonPath = Pointer;
+			if (InputIndex != INDEX_NONE) OutError.OperationIndex = InputIndex;
+			OutError.TargetPath = InputTargetRef;
+			OutError.ActualValuePresent = OutError.ActualValue.IsValid();
+			return false;
+		};
 
 		auto AddStringEdit = [&] (
 			const FString& SemanticId,
 			const FString& OwnerId,
 			const EGraphCompoundElementKind ElementKind,
 			const EChangeIntent Intent,
-			const FString& Text,
+			const FString& Text, const FString& SourcePointer, const bool bGeneratedValue,
 			TArray<FUeAgentCanonicalIdentity> Dependencies = {})
 		{
+			InputPointers.Add(SemanticId, SourcePointer);
 			FUeAgentCanonicalValuePtr Value;
 			if (!TryCanonicalString(
 					Text, Resources, Value, OutError, SemanticId))
 			{
+				if (bGeneratedValue) MarkGraphCompoundNativeDiagnostic(OutError);
+				else BindGraphCompoundInputValueDiagnostic(OutError, SourcePointer, TEXT("/value"));
 				return false;
 			}
 			const FUeAgentCanonicalIdentity EditIdentity = Identity(
@@ -1409,7 +1457,9 @@ namespace UE::UAI::Composition::GraphCompound
 		case EGraphCompoundTypedInputKind::NiagaraEmitterAssetCreate:
 		case EGraphCompoundTypedInputKind::NiagaraSystemAssetCreate:
 		{
-			const FString TargetRef = AssetTargetRef(*Object);
+			FString TargetRef;
+			if (!TryNormalizeAssetCreationTarget(AssetTargetRef(*Object), TEXT("/"), TargetRef, OutError))
+				return false;
 			FString Definition = Profile.GetTargetKind();
 			if (Profile.GetTypedInputKind()
 				== EGraphCompoundTypedInputKind::MaterialAssetCreate)
@@ -1447,7 +1497,7 @@ namespace UE::UAI::Composition::GraphCompound
 					TargetRef,
 					EGraphCompoundElementKind::Target,
 					EChangeIntent::Create,
-					Definition,
+					Definition, TEXT("/"), true,
 					MoveTemp(Dependencies)))
 			{
 				return false;
@@ -1457,43 +1507,46 @@ namespace UE::UAI::Composition::GraphCompound
 		case EGraphCompoundTypedInputKind::GraphEdits:
 		{
 			const FString TargetRef = Object->GetStringField(TEXT("target_ref"));
-			for (const TSharedPtr<FJsonValue>& EditValue
-				: Object->GetArrayField(TEXT("edits")))
+			const TArray<TSharedPtr<FJsonValue>>& InputEdits = Object->GetArrayField(TEXT("edits"));
+			for (int32 InputIndex = 0; InputIndex < InputEdits.Num(); ++InputIndex)
 			{
+				const TSharedPtr<FJsonValue>& EditValue = InputEdits[InputIndex];
+				const FString InputPointer = TEXT("/edits/") + ::LexToString(InputIndex);
 				const TSharedPtr<FJsonObject> Edit = EditValue->AsObject();
 				if (!Edit.IsValid())
-				{
-					SetError(OutError, TEXT("graph_compound_edit_invalid"),
-						Profile.GetCapabilityId());
-					return false;
-				}
+					return FailInput(TEXT("graph_compound_edit_invalid"), TEXT("A graph edit must be an object."),
+						TEXT("edits"), InputPointer, EditValue, MakeShared<FJsonValueString>(TEXT("object")), InputIndex);
 				EGraphCompoundElementKind ElementKind =
 					EGraphCompoundElementKind::Item;
 				EChangeIntent Intent = EChangeIntent::Update;
-				if (!TryElementKind(
-						Edit->GetStringField(TEXT("element_kind")), ElementKind)
-					|| !TryIntent(Edit->GetStringField(TEXT("intent")), Intent))
-				{
-					SetError(OutError, TEXT("graph_compound_edit_kind_invalid"),
-						Profile.GetCapabilityId());
-					return false;
-				}
+				if (!TryElementKind(Edit->GetStringField(TEXT("element_kind")), ElementKind))
+					return FailInput(TEXT("graph_compound_edit_kind_invalid"),
+						TEXT("The graph edit element kind is not supported."),
+						TEXT("element_kind"), InputPointer + TEXT("/element_kind"),
+						MakeShared<FJsonValueString>(Edit->GetStringField(TEXT("element_kind"))),
+						MakeShared<FJsonValueString>(TEXT("target, structure, item, pin, relation, property, input, hierarchy, order, binding, dependency")), InputIndex);
+				if (!TryIntent(Edit->GetStringField(TEXT("intent")), Intent))
+					return FailInput(TEXT("graph_compound_edit_kind_invalid"),
+						TEXT("The graph edit intent is not supported."), TEXT("intent"), InputPointer + TEXT("/intent"),
+						MakeShared<FJsonValueString>(Edit->GetStringField(TEXT("intent"))),
+						MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+							MakeShared<FJsonValueString>(TEXT("create")), MakeShared<FJsonValueString>(TEXT("update")),
+							MakeShared<FJsonValueString>(TEXT("replace")), MakeShared<FJsonValueString>(TEXT("delete"))}), InputIndex);
 				const FString SemanticId = Edit->GetStringField(TEXT("identity"));
+				InputPointers.Add(SemanticId, InputPointer);
 				FUeAgentCanonicalValuePtr Proposed;
 				const TSharedPtr<FJsonValue>* ProposedJson =
 					Edit->Values.Find(TEXT("value"));
 				if (Intent != EChangeIntent::Delete)
 				{
-					if (!ProposedJson || !TryCanonical(
-							*ProposedJson, Resources, Proposed,
-							OutError, SemanticId))
+					if (!ProposedJson)
+						return FailInput(TEXT("graph_compound_edit_value_missing"),
+							TEXT("A non-delete graph edit requires a value."), TEXT("value"),
+							InputPointer + TEXT("/value"), MakeShared<FJsonValueBoolean>(false),
+							MakeShared<FJsonValueBoolean>(true), InputIndex);
+					if (!TryCanonical(*ProposedJson, Resources, Proposed, OutError, SemanticId))
 					{
-						if (!OutError.IsValid())
-						{
-							SetError(OutError,
-								TEXT("graph_compound_edit_value_missing"),
-								SemanticId);
-						}
+						BindGraphCompoundInputValueDiagnostic(OutError, InputPointer + TEXT("/value"));
 						return false;
 					}
 				}
@@ -1521,9 +1574,11 @@ namespace UE::UAI::Composition::GraphCompound
 		case EGraphCompoundTypedInputKind::MaterialInstanceParameters:
 		{
 			const FString TargetRef = Object->GetStringField(TEXT("target_ref"));
-			for (const TSharedPtr<FJsonValue>& ParameterValue
-				: Object->GetArrayField(TEXT("parameters")))
+			const TArray<TSharedPtr<FJsonValue>>& Parameters = Object->GetArrayField(TEXT("parameters"));
+			for (int32 InputIndex = 0; InputIndex < Parameters.Num(); ++InputIndex)
 			{
+				const TSharedPtr<FJsonValue>& ParameterValue = Parameters[InputIndex];
+				const FString InputPointer = TEXT("/parameters/") + ::LexToString(InputIndex);
 				const TSharedPtr<FJsonObject> Parameter = ParameterValue->AsObject();
 				const FString SemanticId = FString::Printf(
 					TEXT("property:%s:%s:%d:%s"),
@@ -1531,11 +1586,13 @@ namespace UE::UAI::Composition::GraphCompound
 					*Parameter->GetStringField(TEXT("association")),
 					static_cast<int32>(Parameter->GetIntegerField(TEXT("index"))),
 					*Parameter->GetStringField(TEXT("type")));
+				InputPointers.Add(SemanticId, InputPointer);
 				FUeAgentCanonicalValuePtr Proposed;
 				if (!TryCanonical(
 						Parameter->Values.FindChecked(TEXT("value")),
 						Resources, Proposed, OutError, SemanticId))
 				{
+					BindGraphCompoundInputValueDiagnostic(OutError, InputPointer + TEXT("/value"));
 					return false;
 				}
 				FUeAgentCanonicalValuePtr OverrideState;
@@ -1549,8 +1606,8 @@ namespace UE::UAI::Composition::GraphCompound
 							{TEXT("override_state"), OverrideState.ToSharedRef()}},
 						Resources, ProposedState, StateError))
 				{
-					SetError(OutError, StateError.Code,
-						SemanticId, StateError.Path);
+					SetError(OutError, StateError, SemanticId);
+					MarkGraphCompoundNativeDiagnostic(OutError);
 					return false;
 				}
 				const FUeAgentCanonicalIdentity EditIdentity = Identity(
@@ -1567,14 +1624,16 @@ namespace UE::UAI::Composition::GraphCompound
 		case EGraphCompoundTypedInputKind::NiagaraAssetDuplicate:
 		{
 			const FString SourceRef = Object->GetStringField(TEXT("source_ref"));
-			const FString TargetRef = Object->GetStringField(TEXT("target_ref"));
+			FString TargetRef;
+			if (!TryNormalizeAssetCreationTarget(Object->GetStringField(TEXT("target_ref")), TEXT("/target_ref"), TargetRef, OutError))
+				return false;
 			const FUeAgentCanonicalIdentity SourceIdentity = Identity(
 				TEXT("target:") + SourceRef, Profile.GetTargetKind(),
 				SourceRef, Generation);
 			if (!AddStringEdit(
 					TEXT("target:") + TargetRef, TargetRef,
 					EGraphCompoundElementKind::Target,
-					EChangeIntent::Create, SourceRef, {SourceIdentity}))
+					EChangeIntent::Create, SourceRef, TEXT("/source_ref"), false, {SourceIdentity}))
 			{
 				return false;
 			}
@@ -1592,7 +1651,7 @@ namespace UE::UAI::Composition::GraphCompound
 					Selector.GetStableSemanticId(), Selector.GetTargetRef(),
 					EGraphCompoundElementKind::Order,
 					EChangeIntent::Update,
-					Selector.GetPredecessorRef()))
+					Selector.GetPredecessorRef(), TEXT("/predecessor_ref"), false))
 			{
 				return false;
 			}
@@ -1610,7 +1669,7 @@ namespace UE::UAI::Composition::GraphCompound
 					Selector.GetStableSemanticId(), Selector.GetTargetRef(),
 					EGraphCompoundElementKind::Property,
 					EChangeIntent::Update,
-					TEXT("resolved")))
+					TEXT("resolved"), TEXT("/"), true))
 			{
 				return false;
 			}
@@ -1628,11 +1687,13 @@ namespace UE::UAI::Composition::GraphCompound
 			const bool bCompound = Profile.GetTypedInputKind()
 				== EGraphCompoundTypedInputKind::NiagaraCompoundInput;
 			const FString SemanticId = Selector.GetStableSemanticId();
+			InputPointers.Add(SemanticId, TEXT("/value"));
 			FUeAgentCanonicalValuePtr Proposed;
 			if (!TryCanonical(
 					Object->Values.FindChecked(TEXT("value")),
 					Resources, Proposed, OutError, SemanticId))
 			{
+				BindGraphCompoundInputValueDiagnostic(OutError, TEXT("/value"));
 				return false;
 			}
 			const FUeAgentCanonicalIdentity EditIdentity = Identity(
@@ -1653,21 +1714,27 @@ namespace UE::UAI::Composition::GraphCompound
 			if (!AddStringEdit(
 					TEXT("property:lifecycle:compile_refresh_settle"),
 					TargetRef, EGraphCompoundElementKind::Property,
-					EChangeIntent::Update, TEXT("requested")))
+					EChangeIntent::Update, TEXT("requested"), TEXT("/"), true))
 			{
 				return false;
 			}
 			break;
 		}
 		default:
-			SetError(OutError, TEXT("graph_compound_typed_input_kind_invalid"),
-				Profile.GetCapabilityId());
+			OutError = RouteFailure(TEXT("graph_compound_typed_input_kind_invalid"),
+				TEXT("The Blueprint/Material typed operation input kind is not supported."), Profile.GetCapabilityId(), TEXT("input_kind"),
+				MakeShared<FJsonValueNumber>(static_cast<int32>(Profile.GetTypedInputKind())),
+				MakeShared<FJsonValueString>(TEXT("a supported Blueprint/Material typed operation input kind")));
 			return false;
 		}
 
 		OutPayload = FGraphCompoundCanonicalPayload(
-			GetGraphCompoundCanonicalSchemaId(), MoveTemp(Edits));
-		return !OutPayload.GetEdits().IsEmpty();
+			GetGraphCompoundCanonicalSchemaId(), MoveTemp(Edits), MoveTemp(InputPointers));
+		if (OutPayload.GetEdits().IsEmpty())
+			return FailInput(TEXT("graph_compound_typed_operation_empty"),
+				TEXT("The typed operation contains no edits."), TEXT("edits"), TEXT("/"),
+				MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("at least one edit")));
+		return true;
 	}
 
 	bool TryDecodeGraphCompoundTypedOperationTargetRef(
@@ -1688,9 +1755,12 @@ namespace UE::UAI::Composition::GraphCompound
 				&& Profile.GetTypedInputKind()
 					!= EGraphCompoundTypedInputKind::NiagaraCompileRefreshSettle))
 		{
-			SetError(OutError,
-				TEXT("graph_compound_typed_target_kind_invalid"),
-				Profile.GetCapabilityId());
+			const bool bWrongRoute = Profile.GetRouteKind() != EGraphCompoundDomainRouteKind::TypedOperation;
+			OutError = RouteFailure(TEXT("graph_compound_typed_target_kind_invalid"),
+				bWrongRoute ? TEXT("This route cannot decode a typed operation target.") : TEXT("This typed operation does not use a direct target_ref selector."),
+				Profile.GetCapabilityId(), bWrongRoute ? TEXT("route_kind") : TEXT("input_kind"),
+				MakeShared<FJsonValueNumber>(bWrongRoute ? static_cast<int32>(Profile.GetRouteKind()) : static_cast<int32>(Profile.GetTypedInputKind())),
+				MakeShared<FJsonValueString>(bWrongRoute ? TEXT("TypedOperation") : TEXT("GraphEdits, MaterialInstanceParameters, NiagaraCompileRefreshSettle")));
 			return false;
 		}
 		TSharedPtr<FJsonObject> Object;
@@ -1701,9 +1771,10 @@ namespace UE::UAI::Composition::GraphCompound
 		if (!Object->TryGetStringField(TEXT("target_ref"), OutTargetRef)
 			|| OutTargetRef.TrimStartAndEnd().IsEmpty())
 		{
-			SetError(OutError,
-				TEXT("graph_compound_typed_target_missing"),
-				Profile.GetCapabilityId());
+			OutError = InputFailure(TEXT("graph_compound_typed_target_missing"),
+				TEXT("target_ref must be a non-empty string after trimming."), Profile.GetCapabilityId(), TEXT("target_ref"),
+				Object->Values.FindRef(TEXT("target_ref")), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+			OutError.ActualValuePresent = Object->HasField(TEXT("target_ref"));
 			return false;
 		}
 		return true;
@@ -1725,9 +1796,29 @@ namespace UE::UAI::Composition::GraphCompound
 		if (DescriptorIdentity
 			!= Profile.GetExecutionContract().GetDescriptorIdentity())
 		{
-			SetError(OutError,
-				TEXT("graph_compound_descriptor_identity_mismatch"),
-				Profile.GetDescriptorId());
+			const FUeAgentDescriptorIdentity& Expected = Profile.GetExecutionContract().GetDescriptorIdentity();
+			OutError = RouteFailure(TEXT("graph_compound_descriptor_identity_mismatch"),
+				TEXT("The operation descriptor does not match the graph route."),
+				Profile.GetDescriptorId(), TEXT("descriptor_identity"), nullptr, nullptr);
+			if (DescriptorIdentity.GetDescriptorId() != Expected.GetDescriptorId())
+			{
+				OutError.PropertyPath = TEXT("descriptor_identity.descriptor_id");
+				OutError.ActualValue = MakeShared<FJsonValueString>(DescriptorIdentity.GetDescriptorId());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected.GetDescriptorId());
+			}
+			else if (DescriptorIdentity.GetVersion() != Expected.GetVersion())
+			{
+				OutError.PropertyPath = TEXT("descriptor_identity.version");
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(DescriptorIdentity.GetVersion());
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(Expected.GetVersion());
+			}
+			else
+			{
+				OutError.PublicMessage = TEXT("The operation descriptor content does not match the graph route.");
+				OutError.PropertyPath = TEXT("descriptor_identity.descriptor_hash");
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(DescriptorIdentity.GetDescriptorHash());
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetDescriptorHash());
+			}
 			return false;
 		}
 		FGraphCompoundCanonicalPayload Payload(
@@ -1743,8 +1834,8 @@ namespace UE::UAI::Composition::GraphCompound
 				RequestId, IdempotencyKey, Resources,
 				OutDraft, CanonicalError))
 		{
-			SetError(OutError, CanonicalError.Code,
-				CanonicalError.IdentityKey, CanonicalError.Detail);
+			Payload.LocateDiagnostic(CanonicalError);
+			SetError(OutError, CanonicalError, CanonicalError.SubjectId);
 			return false;
 		}
 		return OutDraft.IsSet();

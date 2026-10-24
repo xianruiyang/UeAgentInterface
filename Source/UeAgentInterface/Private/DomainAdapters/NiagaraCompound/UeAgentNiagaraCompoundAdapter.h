@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "DomainAdapters/GenericEffect/UeAgentGenericEffectAdapter.h"
 #include "DomainAdapters/GenericRead/UeAgentGenericReadAdapter.h"
 #include "Templates/SharedPointer.h"
@@ -39,6 +40,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 		const FString& GetPostBarrierRevision() const;
 		const FString& GetEvidenceId() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		int64 SubjectGeneration = -1;
@@ -52,6 +54,7 @@ namespace UE::UAI::DomainAdapters::NiagaraCompound
 		FString PostBarrierRevision;
 		FString EvidenceId;
 		bool bValid = false;
+		TSharedPtr<const Contract::FDiagnostic> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentNiagaraCompoundUeHook

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Containers/UnrealString.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 class UObject;
 class UPackage;
@@ -21,11 +22,11 @@ namespace UE::UAI::AssetDurable
 		const FString& TargetRef,
 		EPackageHeaderKind HeaderKind,
 		FString& OutFilename,
-		FString& OutErrorCode);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryPrepareLoadedPackageHeaderForSave(
 		UPackage& Package,
 		UObject*& InOutTopLevelAsset,
 		FString& OutFilename,
-		FString& OutErrorCode);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

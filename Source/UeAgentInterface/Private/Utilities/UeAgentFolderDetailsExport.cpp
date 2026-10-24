@@ -1,5 +1,7 @@
 #include "Utilities/UeAgentFolderDetailsExport.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
 #include "Misc/SecureHash.h"
@@ -122,12 +124,17 @@ namespace UeAgentFolderDetailsExport
 		const FString& OwnerId,
 		const FString& Category,
 		const TSharedPtr<FJsonObject>& EntryObject,
-		FString& OutError,
+		UE::UAI::Contract::FDiagnostic& OutError,
 		const FOwnerDetailsAttachOptions& Options)
 	{
 		if (!Owner || !EntryObject.IsValid())
 		{
-			OutError = TEXT("details_owner_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("details_owner_invalid"),
+				!Owner ? TEXT("The details owner object is null.") : TEXT("The entry object that receives the details is null."), TEXT("details_export"));
+			OutError.CandidateName = OwnerId;
+			OutError.TargetPath = Owner ? Owner->GetPathName() : FString();
+			OutError.PropertyPath = !Owner ? TEXT("owner") : TEXT("entry");
+			OutError.ActualValuePresent = false;
 			return false;
 		}
 
@@ -179,7 +186,7 @@ namespace UeAgentFolderDetailsExport
 		const FString& OwnerId,
 		const FString& Category,
 		const TSharedPtr<FJsonObject>& EntryObject,
-		FString& OutError,
+		UE::UAI::Contract::FDiagnostic& OutError,
 		const FString& RefFieldName)
 	{
 		FOwnerDetailsAttachOptions Options;
@@ -199,12 +206,16 @@ namespace UeAgentFolderDetailsExport
 		const FString& OwnerClassPath,
 		const FString& Category,
 		const TSharedPtr<FJsonObject>& EntryObject,
-		FString& OutError,
+		UE::UAI::Contract::FDiagnostic& OutError,
 		const FPropertyArrayDetailsAttachOptions& Options)
 	{
 		if (!EntryObject.IsValid())
 		{
-			OutError = TEXT("details_entry_object_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("details_entry_object_invalid"), TEXT("The entry object that receives the property details is null."), TEXT("details_export"));
+			OutError.CandidateName = OwnerId;
+			OutError.TargetPath = OwnerPath;
+			OutError.PropertyPath = TEXT("entry");
+			OutError.ActualValuePresent = false;
 			return false;
 		}
 

@@ -1,13 +1,21 @@
 #include "QueryOwners/HjsonExternalInput/UeAgentHjsonExternalInputReadback.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Animation/AnimSequence.h"
 #include "Core/ArtifactPublisher/UeAgentVerifiedExport.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceResolver.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+#include "DomainAdapters/HjsonExternalInput/UeAgentHjsonExternalInputWorkspace.h"
+#include "DomainAdapters/HjsonExternalInput/UeAgentHjsonExternalInputDomain.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Dom/JsonObject.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "UObject/MetaData.h"
+#include "Utilities/AuthoringExport/UeAgentExportWorkspaceWriter.h"
 
 namespace UE::UAI::QueryOwners::HjsonExternalInput
 {
@@ -16,6 +24,7 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 	using namespace ContextResource;
 	using namespace HjsonWorkspace;
 	using namespace StateSemantic;
+	using namespace DomainAdapters::HjsonExternalInput;
 
 	namespace
 	{
@@ -32,23 +41,14 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 		FString Canonical(const TSharedPtr<FJsonObject>& Object)
 		{
 			FString Result;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			return Json::TryCanonicalize(Object, Result, Error)
 				? Result : FString();
 		}
 
 		FUeAgentResourceTracker MakeResources()
 		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 128 * 1024 * 1024},
-			}));
+			return FUeAgentResourceTracker();
 		}
 
 		bool TryFactoryCommandId(
@@ -162,15 +162,25 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 
 		bool TryBuildFactoryDocument(
 			const FString& TargetIdentity,
-			FString& OutDocument,
+			TSharedPtr<FJsonObject>& OutRoot,
+			FString& OutSourceDigest,
 			FWorkspaceError& OutError)
 		{
-			OutDocument.Reset();
+			OutRoot.Reset();
+			auto RejectNative = [&](const FString& Code, const FString& Reason)
+			{
+				auto Detail = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("external_input_readback"));
+				Detail.TargetPath = TargetIdentity;
+				Detail.SourceKind = TEXT("native_result");
+				OutError.SetFailure(MoveTemp(Detail));
+				return false;
+			};
 			UObject* Target = LoadObject<UObject>(nullptr, *TargetIdentity);
 			if (!Target || !Target->GetOutermost())
 			{
-				OutError.Set(TEXT("hjson_external_input_export_target_missing"), TargetIdentity);
-				return false;
+				return RejectNative(TEXT("hjson_external_input_export_target_missing"),
+					!Target ? TEXT("The external-input export target could not be loaded.")
+						: TEXT("The external-input export target has no package."));
 			}
 			FMetaData& Metadata = Target->GetOutermost()->GetMetaData();
 			const FString Source = Metadata.GetValue(Target, MetadataSource);
@@ -181,16 +191,21 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 			if (Source.IsEmpty() || SourceSha256.IsEmpty()
 				|| OptionsFingerprint.IsEmpty() || Operation.IsEmpty())
 			{
-				OutError.Set(TEXT("hjson_external_input_provenance_missing"), TargetIdentity);
-				return false;
+				TArray<FString> Missing;
+				if (Source.IsEmpty()) Missing.Add(TEXT("source path"));
+				if (SourceSha256.IsEmpty()) Missing.Add(TEXT("source content digest"));
+				if (OptionsFingerprint.IsEmpty()) Missing.Add(TEXT("import options record"));
+				if (Operation.IsEmpty()) Missing.Add(TEXT("import operation"));
+				return RejectNative(TEXT("hjson_external_input_provenance_missing"),
+					FString::Printf(TEXT("The target's external-input provenance is missing: %s."), *FString::Join(Missing, TEXT(", "))));
 			}
 			FString CommandId;
 			bool bFbx = false;
 			if (!TryFactoryCommandId(*Target, Operation, CommandId, bFbx))
 			{
-				OutError.Set(TEXT("hjson_external_input_factory_route_unresolved"),
-					Target->GetClass()->GetPathName());
-				return false;
+				return RejectNative(TEXT("hjson_external_input_factory_route_unresolved"),
+					FString::Printf(TEXT("No factory route supports target type '%s' and import operation '%s'."),
+						*Target->GetClass()->GetPathName(), *Operation));
 			}
 			const bool bReimport = Operation == TEXT("reimport");
 			TSharedPtr<FJsonObject> Options;
@@ -198,8 +213,12 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 					OptionsFingerprint, bReimport, bFbx, Options)
 				|| !Options.IsValid())
 			{
-				OutError.Set(TEXT("hjson_external_input_options_unrecoverable"),
-					OptionsFingerprint);
+				auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_options_unrecoverable"),
+					TEXT("The original import options could not be reconstructed from the target's stored provenance."), TEXT("external_input_readback"));
+				Detail.TargetPath = TargetIdentity;
+				Detail.SourceKind = TEXT("native_result");
+				Detail.InternalContext = OptionsFingerprint;
+				OutError.SetFailure(MoveTemp(Detail));
 				return false;
 			}
 			const TSharedPtr<FJsonObject> Parameters = MakeShared<FJsonObject>();
@@ -212,9 +231,9 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 				const UAnimSequence* Animation = Cast<UAnimSequence>(Target);
 				if (!Animation || !Animation->GetSkeleton())
 				{
-					OutError.Set(TEXT("hjson_external_input_skeleton_readback_missing"),
-						TargetIdentity);
-					return false;
+					return RejectNative(TEXT("hjson_external_input_skeleton_readback_missing"),
+						!Animation ? FString::Printf(TEXT("An animation import requires an AnimSequence target; the actual type is '%s'."), *Target->GetClass()->GetPathName())
+							: TEXT("The animation target has no skeleton to restore in the exported input."));
 				}
 				Parameters->SetStringField(
 					TEXT("skeleton_ref"), Animation->GetSkeleton()->GetPathName());
@@ -224,7 +243,7 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 			SourceInfo->SetStringField(TEXT("asset_class"),
 				Target->GetClass()->GetPathName());
 			SourceInfo->SetStringField(TEXT("import_operation"), Operation);
-			SourceInfo->SetStringField(TEXT("options_fingerprint"), OptionsFingerprint);
+			// The fingerprint remains in native provenance, never in editable HJSON.
 			SourceInfo->SetArrayField(TEXT("generated_assets"), {
 				MakeShared<FJsonValueString>(TargetIdentity)});
 			TArray<TSharedPtr<FJsonValue>> Dependencies;
@@ -237,7 +256,7 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 			SourceObject->SetStringField(TEXT("identity"), Source);
 			SourceObject->SetStringField(TEXT("format"),
 				FPaths::GetExtension(Source).ToLower());
-			SourceObject->SetStringField(TEXT("content_sha256"), SourceSha256);
+			OutSourceDigest = SourceSha256;
 			SourceObject->SetObjectField(TEXT("source_info"), SourceInfo);
 			const TSharedPtr<FJsonObject> TargetPolicy = MakeShared<FJsonObject>();
 			TargetPolicy->SetStringField(TEXT("command_id"), CommandId);
@@ -249,114 +268,113 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 			const TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 			Root->SetStringField(TEXT("type"), TEXT("uai.external_input.factory"));
 			Root->SetObjectField(TEXT("external_input"), ExternalInput);
-			const TSharedPtr<FJsonObject> Document = MakeShared<FJsonObject>();
-			Document->SetStringField(TEXT("schema"), SchemaId);
-			Document->SetObjectField(TEXT("root"), Root);
-			OutDocument = Canonical(Document);
-			if (OutDocument.IsEmpty())
+			// An existing texture/wave source is edited via its native reimport contract.
+			FString ReimportCommand;
+			bool bReimportFbx = false;
+			if (TryFactoryCommandId(*Target, TEXT("reimport"), ReimportCommand, bReimportFbx))
 			{
-				OutError.Set(TEXT("hjson_external_input_export_document_invalid"), TargetIdentity);
-				return false;
+				TargetPolicy->SetStringField(TEXT("command_id"), ReimportCommand);
+				Parameters->RemoveField(TEXT("destination_ref"));
+				Parameters->SetStringField(TEXT("target_ref"), TargetIdentity);
+				Options->SetBoolField(TEXT("replace_existing"), true);
 			}
+			OutRoot = Root;
 			return true;
 		}
 
-		class FVerifiedExternalInputExportSource final
-			: public IVerifiedExportWorkspaceSource
+		class FVerifiedExternalInputExportSource final : public IVerifiedExportWorkspaceSource
 		{
 		public:
-			FVerifiedExternalInputExportSource(FString InTarget, FString InDocument)
-				: Target(MoveTemp(InTarget)), Document(MoveTemp(InDocument)) {}
-
-			virtual bool TryFreezeTarget(
-				FUeAgentStateRevision& OutRevision,
+			FVerifiedExternalInputExportSource(FString InTarget, FAuthoringModelRef InModel)
+				: Target(MoveTemp(InTarget)), Model(MoveTemp(InModel)) {}
+			virtual bool TryFreezeTarget(FUeAgentStateRevision& OutRevision, FArtifactPublishError& OutError) override
+			{ return ReadRevision(OutRevision, OutError); }
+			virtual bool TryCaptureWorkspace(const FUeAgentStateRevision& FrozenRevision,
+				FExportWorkspacePlanPtr& OutPlan, FExportSemanticSignature& OutSemantic,
 				FArtifactPublishError& OutError) override
 			{
-				return ReadRevision(OutRevision, OutError);
-			}
-
-			virtual bool TryCaptureWorkspace(
-				const FUeAgentStateRevision& FrozenRevision,
-				FExportWorkspacePlanPtr& OutPlan,
-				FExportSemanticSignature& OutSemantic,
-				FArtifactPublishError& OutError) override
-			{
-				const FTCHARToUTF8 Utf8(*Document);
-				TArray<uint8> Bytes;
-				Bytes.Append(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
-				const FString FileHash = Json::Sha256Utf8(Document);
-				OutSemantic = Signature(FileHash);
-				OutPlan = MakeShared<FExportWorkspacePlan>(
-					EWorkspaceKind::Directory,
-					TEXT("asset.hjson"),
-					Target,
-					FrozenRevision,
-					Json::Sha256Utf8(Target + TEXT("|") + FileHash),
-					TArray<FExportFilePlan>{
-						FExportFilePlan(TEXT("asset.hjson"), Bytes, FileHash)},
-					Json::Sha256Utf8(FileHash + TEXT("|")
-						+ FrozenRevision.GetGeneration()),
-					FMath::Max<int64>(1, Bytes.Num() / 4));
-				return true;
-			}
-
-			virtual bool TryRebuildStagedWorkspace(
-				const FString& StagedWorkspacePath,
-				const EWorkspaceKind WorkspaceKind,
-				const FString& EntryFile,
-				FUeAgentResourceTracker& Resources,
-				FExportSemanticSignature& OutSemantic,
-				FArtifactPublishError& OutError) override
-			{
-				FString StagedDocument;
-				const FString Path = StagedWorkspacePath / EntryFile;
-				if (!FFileHelper::LoadFileToString(StagedDocument, *Path))
+				auto Resources = MakeResources();
+				FWorkspaceError Error;
+				if (!TryBuildCompositionExportPlan(Model,
+					{Target, FrozenRevision, Model->GetSemanticFingerprint()}, {}, Resources, OutPlan, Error))
 				{
-					OutError.Set(TEXT("hjson_external_input_export_rebuild_failed"), Path);
+					OutError = Error.GetDiagnostic();
 					return false;
 				}
-				OutSemantic = Signature(Json::Sha256Utf8(StagedDocument));
+				OutSemantic = Signature(Model->GetSemanticFingerprint());
 				return true;
 			}
-
-			virtual bool TryReadCurrentTargetRevision(
-				FUeAgentStateRevision& OutRevision,
-				FArtifactPublishError& OutError) override
+			virtual bool TryRebuildStagedWorkspace(const FString& Path, EWorkspaceKind,
+				const FString&, FUeAgentResourceTracker& Resources,
+				FExportSemanticSignature& OutSemantic, FArtifactPublishError& OutError) override
 			{
-				return ReadRevision(OutRevision, OutError);
+				FResolvedSemanticWorkspacePtr Workspace;
+				FWorkspaceError Error;
+				if (!TryResolveSemanticWorkspace(FWorkspaceSource::Directory(Path),
+					ESemanticWorkspaceMode::State, Resources, Workspace, Error))
+				{
+					OutError = Error.GetDiagnostic();
+					return false;
+				}
+				OutSemantic = Signature(Workspace->GetModel()->GetSemanticFingerprint());
+				return true;
 			}
-
+			virtual bool TryReadCurrentTargetRevision(FUeAgentStateRevision& OutRevision,
+				FArtifactPublishError& OutError) override { return ReadRevision(OutRevision, OutError); }
 		private:
-			FExportSemanticSignature Signature(const FString& FileHash) const
+			FExportSemanticSignature Signature(const FString& Fingerprint) const
+			{ return FExportSemanticSignature(Fingerprint, Fingerprint, Fingerprint, Fingerprint, Fingerprint); }
+			bool ReadRevision(FUeAgentStateRevision& OutRevision, FArtifactPublishError& OutError) const
 			{
-				return FExportSemanticSignature(
-					Json::Sha256Utf8(TEXT("asset.hjson")),
-					Json::Sha256Utf8(TEXT("hjson-external-input-reference-closure|") + FileHash),
-					FileHash,
-					Json::Sha256Utf8(SchemaId),
-					Json::Sha256Utf8(TEXT("hjson-external-input-business|") + FileHash));
-			}
-
-			bool ReadRevision(
-				FUeAgentStateRevision& OutRevision,
-				FArtifactPublishError& OutError) const
-			{
-				UObject* Object = LoadObject<UObject>(nullptr, *Target);
-				if (!Object || !Object->GetOutermost())
+				FString Revision;
+				FWorkspaceError Error;
+				const FSemanticUnit* TargetUnit = Model->FindUnit(TEXT("target"));
+				const FSemanticUnit* External = Model->FindUnit(TEXT("external"));
+				TSharedPtr<FJsonObject> Provenance;
+				FString Source; UE::UAI::Contract::FDiagnostic ParseError;
+				if (!TargetUnit || !External)
 				{
-					OutError.Set(TEXT("hjson_external_input_export_target_missing"), Target);
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_provenance_missing"),
+						!TargetUnit ? TEXT("The prepared workspace has no target record.") : TEXT("The prepared workspace has no external-input record."), TEXT("artifact_publish"));
+					OutError.TargetPath = Target;
+					OutError.SourceKind = TEXT("native_result");
 					return false;
 				}
-				OutRevision = FUeAgentStateRevision(
-					TEXT("hjson-external-input-export"),
-					Object->GetOutermost()->GetPersistentGuid().ToString(
-						EGuidFormats::Digits),
-					1);
+				if (!Json::TryParseObject(External->GetSourceProvenance(), Provenance, ParseError))
+				{
+					OutError = MoveTemp(ParseError);
+					OutError.TargetPath = Target;
+					OutError.SourceKind = TEXT("native_result");
+					return false;
+				}
+				if (!Provenance->TryGetStringField(TEXT("source"), Source))
+				{
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_provenance_missing"),
+						TEXT("The prepared external-input provenance has no readable source path."), TEXT("artifact_publish"));
+					OutError.TargetPath = Target;
+					OutError.SourceKind = TEXT("native_result");
+					return false;
+				}
+				if (!TryReadExternalInputTargetRevision(Target, Revision, Error, TargetUnit->GetSemanticTypeRef(), Source))
+				{
+					OutError = Error.GetDiagnostic();
+					return false;
+				}
+				if (Revision != Model->GetBaseRevision())
+				{
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_target_changed"),
+						TEXT("The external-input target changed after the workspace was prepared."), TEXT("artifact_publish"));
+					OutError.TargetPath = Target;
+					OutError.SourceKind = TEXT("native_result");
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Revision);
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Model->GetBaseRevision());
+					return false;
+				}
+				OutRevision = FUeAgentStateRevision(TEXT("external-input"), Revision, 1);
 				return true;
 			}
-
 			FString Target;
-			FString Document;
+			FAuthoringModelRef Model;
 		};
 	}
 
@@ -365,7 +383,6 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 		static const TArray<FString> Fields = {
 			TEXT("source.identity"),
 			TEXT("source.format"),
-			TEXT("source.content_sha256"),
 			TEXT("source.source_info"),
 			TEXT("options"),
 			TEXT("target_policy"),
@@ -398,58 +415,102 @@ namespace UE::UAI::QueryOwners::HjsonExternalInput
 		OutPayloadJson.Reset();
 		OutError.Reset();
 		TSharedPtr<FJsonObject> Params;
-		FString JsonError;
+		UE::UAI::Contract::FDiagnostic JsonError;
 		if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError)
 			|| !Params.IsValid())
 		{
-			OutError.Set(TEXT("hjson_external_input_export_params_invalid"), JsonError);
+			OutError.SetFailure(JsonError, FString());
 			return false;
 		}
 		FString WorkspacePath;
 		if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
 			|| WorkspacePath.TrimStartAndEnd().IsEmpty())
 		{
-			OutError.Set(TEXT("hjson_external_input_export_path_required"), TargetIdentity);
+			auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_export_path_required"),
+				TEXT("External-input workspace export requires a non-empty workspace_path."), TEXT("external_input_export"));
+			Detail.TargetPath = TargetIdentity;
+			Detail.SourceKind = TEXT("command_input");
+			Detail.Source.JsonPath = TEXT("/workspace_path");
+			Detail.ActualValue = Params->TryGetField(TEXT("workspace_path"));
+			Detail.ActualValuePresent = Detail.ActualValue.IsValid();
+			Detail.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty workspace path"));
+			OutError.SetFailure(MoveTemp(Detail));
 			return false;
 		}
-		FString Document;
-		if (!TryBuildFactoryDocument(TargetIdentity, Document, OutError))
+		TSharedPtr<FJsonObject> Root;
+		FString ExpectedSourceDigest;
+		if (Params->HasField(TEXT("source")))
 		{
+			// Source has already been normalized by the common public source owner.
+			DomainAuthoring::FResolvedDomainHjsonDocument Resolved;
+			TArray<FString> Families;
+			for (const auto& Family : GetHjsonExternalInputFamilyContracts()) Families.Add(Family.RootTypeIdentity);
+			if (!DomainAuthoring::TryDecodeResolvedDocument(TargetIdentity, CanonicalParamsJson,
+				{TEXT("external_input"), SchemaId, Families}, Resolved, OutError)) return false;
+			if (Resolved.bSemanticWorkspaceDirectory)
+			{
+				auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_prepare_requires_document"),
+					TEXT("External-input preparation requires a source document; the supplied source is an exported workspace directory."), TEXT("external_input_export"));
+				Detail.TargetPath = TargetIdentity;
+				Detail.SourceKind = TEXT("command_input");
+				Detail.Source.JsonPath = TEXT("/source");
+				OutError.SetFailure(MoveTemp(Detail));
+				return false;
+			}
+			Root = Resolved.Root;
+		}
+		else if (!TryBuildFactoryDocument(TargetIdentity, Root, ExpectedSourceDigest, OutError)) return false;
+		FString BaseRevision;
+		FString RootType, SourceIdentity;
+		const TSharedPtr<FJsonObject>* External = nullptr;
+		const TSharedPtr<FJsonObject>* Source = nullptr;
+		if (!Root.IsValid() || !Root->TryGetStringField(TEXT("type"), RootType)
+			|| !Root->TryGetObjectField(TEXT("external_input"), External)
+			|| !(*External)->TryGetObjectField(TEXT("source"), Source)
+			|| !(*Source)->TryGetStringField(TEXT("identity"), SourceIdentity))
+		{
+			auto Detail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("hjson_external_input_readable_source_required"),
+				!Root.IsValid() ? TEXT("The external-input export has no root object.")
+				: RootType.IsEmpty() ? TEXT("The external-input root type is missing or is not a string.")
+				: !External ? TEXT("The external-input body is missing or is not an object.")
+				: !Source ? TEXT("The external-input source is missing or is not an object.")
+				: TEXT("The external-input source identity is missing or is not a string."), TEXT("external_input_export"));
+			Detail.TargetPath = TargetIdentity;
+			Detail.Source.InternalJsonPath = !Root.IsValid() ? TEXT("/root") : RootType.IsEmpty() ? TEXT("/root/type")
+				: !External ? TEXT("/root/external_input") : !Source ? TEXT("/root/external_input/source")
+				: TEXT("/root/external_input/source/identity");
+			OutError.SetFailure(MoveTemp(Detail));
 			return false;
 		}
+		FAuthoringModelPtr Model;
+		if (!TryReadExternalInputTargetRevision(TargetIdentity, BaseRevision, OutError, RootType, SourceIdentity)
+			|| !TryBuildExternalInputWorkspaceModel(TargetIdentity, Root, BaseRevision,
+				ExpectedSourceDigest, Model, OutError)) return false;
+
 		FUeAgentResourceTracker Resources = MakeResources();
 		FArtifactPublishReceipt Receipt;
 		FArtifactPublishError PublishError;
 		if (!TryExportVerifiedWorkspace(
 				FVerifiedExportRequest(
 					MakeShared<FVerifiedExternalInputExportSource>(
-						TargetIdentity, Document),
+						TargetIdentity, Model.ToSharedRef()),
 					WorkspacePath,
 					TEXT("hjson-external-input-domain-owner")),
 				Resources,
 				Receipt,
 				PublishError))
 		{
-			OutError.Set(PublishError.GetCode(), PublishError.GetPath(),
-				PublishError.GetDetail());
+			OutError.SetFailure(PublishError);
 			return false;
 		}
-		const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-		Payload->SetStringField(TEXT("command_id"),
-			TEXT("content_graph.export_workspace"));
-		Payload->SetStringField(TEXT("status"), TEXT("published"));
-		Payload->SetStringField(TEXT("workspace_path"), Receipt.GetFinalPath());
-		Payload->SetStringField(TEXT("entry_file"), Receipt.GetEntryFile());
-		Payload->SetStringField(TEXT("plan_fingerprint"), Receipt.GetPlanFingerprint());
-		Payload->SetStringField(TEXT("inventory_hash"), Receipt.GetInventoryHash());
-		const TSharedPtr<FJsonObject> Semantic = MakeShared<FJsonObject>();
-		for (const TPair<FString, FString>& Field
-			: Receipt.GetSemanticVerificationFields())
+		const TSharedRef<FJsonObject> Payload =
+			UeAgentExportWorkspaceWriter::MakePublicWorkspaceSuccessResult(Receipt.GetCleanupWarnings());
+		UE::UAI::Contract::FDiagnostic ResultEncodingError;
+		if (!Json::TryCanonicalize(Payload, OutPayloadJson, ResultEncodingError))
 		{
-			Semantic->SetStringField(Field.Key, Field.Value);
+			OutError.SetFailure(Receipt.MakeResultEncodingFailure(ResultEncodingError));
+			return false;
 		}
-		Payload->SetObjectField(TEXT("semantic_verification"), Semantic);
-		OutPayloadJson = Canonical(Payload);
-		return !OutPayloadJson.IsEmpty();
+		return true;
 	}
 }

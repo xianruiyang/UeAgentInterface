@@ -1,4 +1,5 @@
 #include "Core/HjsonWorkspace/SemanticModel/UeAgentUnifiedHjsonSemanticModel.h"
+#include "Dom/JsonValue.h"
 
 #include "Core/ContextResource/UeAgentContextResource.h"
 
@@ -83,14 +84,9 @@ namespace UE::UAI::HjsonWorkspace
 
 		bool FailResource(
 			FWorkspaceError& OutError,
-			const FUeAgentResourceBudgetExceeded& Error)
+			const FUeAgentResourceChargeError& Error)
 		{
-			OutError.Set(
-				Error.Code,
-				Error.Path,
-				TEXT("/"),
-				Error.Observed,
-				Error.bStoppedEarly);
+			OutError.SetFailure(Error);
 			return false;
 		}
 	}
@@ -173,12 +169,26 @@ namespace UE::UAI::HjsonWorkspace
 		, Compositions(MoveTemp(InCompositions))
 		, BoundUnitCount(InBoundUnitCount)
 		, ModelFingerprint(Normalize(MoveTemp(InModelFingerprint)))
-		, bValid(
-			IsIntentValid(AuthoringIntent)
-			&& Compositions.Num() == 12
-			&& BoundUnitCount == CoreModel->GetUnits().Num()
-			&& ModelFingerprint.StartsWith(TEXT("sha256:")))
 	{
+		if (!IsIntentValid(AuthoringIntent)) {
+			ValidationDiagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_authoring_intent_invalid"), TEXT("The unified model authoring intent must be full state, minimal create or local edit."), TEXT("semantic_model"));
+			ValidationDiagnostic.PropertyPath = TEXT("authoring_intent");
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(AuthoringIntent));
+		} else if (Compositions.Num() != GetAllUnifiedHjsonCompositionKinds().Num()) {
+			ValidationDiagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_composition_set_incomplete"), TEXT("The unified model does not contain every required composition kind."), TEXT("semantic_model"));
+			ValidationDiagnostic.PropertyPath = TEXT("compositions");
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(GetAllUnifiedHjsonCompositionKinds().Num());
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(Compositions.Num());
+		} else if (BoundUnitCount != CoreModel->GetUnits().Num()) {
+			ValidationDiagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_composition_unit_unbound"), TEXT("The composition binding count does not match the semantic unit count."), TEXT("semantic_model"));
+			ValidationDiagnostic.PropertyPath = TEXT("compositions");
+			ValidationDiagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(CoreModel->GetUnits().Num());
+			ValidationDiagnostic.ActualValue = MakeShared<FJsonValueNumber>(BoundUnitCount);
+		} else if (!ModelFingerprint.StartsWith(TEXT("sha256:"))) {
+			ValidationDiagnostic = Contract::FDiagnostic::Failure(TEXT("hjson_unified_model_invalid"), TEXT("The unified model fingerprint has no SHA-256 identity prefix."), TEXT("semantic_model"));
+			ValidationDiagnostic.PropertyPath = TEXT("model_fingerprint");
+		}
+
 	}
 
 	const FAuthoringModelRef&
@@ -219,7 +229,7 @@ namespace UE::UAI::HjsonWorkspace
 
 	bool FUnifiedHjsonSemanticModel::IsValid() const
 	{
-		return bValid;
+		return ValidationDiagnostic.IsEmpty();
 	}
 
 	bool TryCreateUnifiedHjsonSemanticModel(
@@ -234,7 +244,10 @@ namespace UE::UAI::HjsonWorkspace
 		OutError.Reset();
 		if (!IsIntentValid(AuthoringIntent))
 		{
-			OutError.Set(TEXT("hjson_authoring_intent_invalid"));
+			auto Failure = Contract::FDiagnostic::Failure(TEXT("hjson_authoring_intent_invalid"), TEXT("The authoring intent must be full state, minimal create or local edit."), TEXT("semantic_model"));
+			Failure.PropertyPath = TEXT("authoring_intent");
+			Failure.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(AuthoringIntent));
+			OutError.SetFailure(MoveTemp(Failure));
 			return false;
 		}
 
@@ -242,9 +255,11 @@ namespace UE::UAI::HjsonWorkspace
 			GetAllUnifiedHjsonCompositionKinds();
 		if (Compositions.Num() != Kinds.Num())
 		{
-			OutError.Set(
-				TEXT("hjson_composition_set_incomplete"),
-				FString::FromInt(Compositions.Num()));
+			auto Failure = Contract::FDiagnostic::Failure(TEXT("hjson_composition_set_incomplete"), TEXT("The model must contain every required composition kind."), TEXT("semantic_model"));
+			Failure.PropertyPath = TEXT("compositions");
+			Failure.ExpectedValue = MakeShared<FJsonValueNumber>(Kinds.Num());
+			Failure.ActualValue = MakeShared<FJsonValueNumber>(Compositions.Num());
+			OutError.SetFailure(MoveTemp(Failure));
 			return false;
 		}
 
@@ -258,56 +273,64 @@ namespace UE::UAI::HjsonWorkspace
 			TArray<FString>* UnitIds = Compositions.Find(Kind);
 			if (!UnitIds)
 			{
-				OutError.Set(
-					TEXT("hjson_composition_missing"),
-					LexToString(Kind));
+				auto Failure = Contract::FDiagnostic::Failure(TEXT("hjson_composition_missing"), TEXT("A required composition kind is missing from the model."), TEXT("semantic_model"));
+				Failure.CandidateName = LexToString(Kind);
+				Failure.SemanticPointer = TEXT("/compositions/") + LexToString(Kind);
+				Failure.ActualValuePresent = false;
+				OutError.SetFailure(MoveTemp(Failure));
 				return false;
 			}
 			for (FString& UnitId : *UnitIds)
 			{
 				UnitId = Normalize(MoveTemp(UnitId));
 			}
-			UnitIds->Sort();
+			TSet<FString> CompositionUnits;
 			for (int32 Index = 0; Index < UnitIds->Num(); ++Index)
 			{
 				const FString& UnitId = (*UnitIds)[Index];
 				if (UnitId.IsEmpty()
-					|| (Index > 0 && (*UnitIds)[Index - 1] == UnitId)
+					|| CompositionUnits.Contains(UnitId)
 					|| BoundUnitIds.Contains(UnitId))
 				{
-					OutError.Set(
-						TEXT("hjson_composition_unit_duplicate"),
-						UnitId);
+					auto Failure = Contract::FDiagnostic::Failure(TEXT("hjson_composition_unit_duplicate"), UnitId.IsEmpty() ? TEXT("The composition contains an empty semantic unit reference.") : TEXT("The semantic unit is bound more than once in the compositions."), TEXT("semantic_model"));
+					Failure.CandidateName = LexToString(Kind);
+					Failure.PropertyPath = TEXT("compositions.") + LexToString(Kind) + TEXT("[") + FString::FromInt(Index) + TEXT("]");
+					OutError.SetFailure(MoveTemp(Failure), UnitId);
 					return false;
 				}
 				const FSemanticUnit* Unit = CoreModel->FindUnit(UnitId);
 				if (!Unit)
 				{
-					OutError.Set(
-						TEXT("hjson_composition_unit_missing"),
-						UnitId);
+					auto Failure = Contract::FDiagnostic::Failure(TEXT("hjson_composition_unit_missing"), TEXT("The composition references a semantic unit that is absent from the model."), TEXT("semantic_model"));
+					Failure.CandidateName = LexToString(Kind);
+					Failure.PropertyPath = TEXT("compositions.") + LexToString(Kind) + TEXT("[") + FString::FromInt(Index) + TEXT("]");
+					OutError.SetFailure(MoveTemp(Failure), UnitId);
 					return false;
 				}
 				if (!IsUnitKindAllowed(Kind, Unit->GetUnitKind()))
 				{
-					OutError.Set(
-						TEXT("hjson_composition_unit_kind_mismatch"),
-						UnitId);
+					auto Failure = Contract::FDiagnostic::Failure(TEXT("hjson_composition_unit_kind_mismatch"), TEXT("The semantic unit kind is not supported by its composition."), TEXT("semantic_model"));
+					Failure.CandidateName = LexToString(Kind);
+					Failure.PropertyPath = TEXT("compositions.") + LexToString(Kind) + TEXT("[") + FString::FromInt(Index) + TEXT("]");
+					Failure.ActualValue = MakeShared<FJsonValueString>(LexToString(Unit->GetUnitKind()));
+					OutError.SetFailure(MoveTemp(Failure), UnitId);
 					return false;
 				}
 				BoundUnitIds.Add(UnitId);
-				FingerprintMaterial += LexToString(Kind)
-					+ TEXT(":") + UnitId + TEXT(";");
+				CompositionUnits.Add(UnitId);
 				++ReferenceCount;
 			}
+			UnitIds->Sort();
+			for (const FString& UnitId : *UnitIds) FingerprintMaterial += LexToString(Kind) + TEXT(":") + UnitId + TEXT(";");
 		}
 
 		if (BoundUnitIds.Num() != CoreModel->GetUnits().Num())
 		{
-			OutError.Set(
-				TEXT("hjson_composition_unit_unbound"),
-				FString::FromInt(
-					CoreModel->GetUnits().Num() - BoundUnitIds.Num()));
+			auto Failure = Contract::FDiagnostic::Failure(TEXT("hjson_composition_unit_unbound"), TEXT("Some semantic units are not bound to any composition."), TEXT("semantic_model"));
+			Failure.PropertyPath = TEXT("compositions");
+			Failure.ExpectedValue = MakeShared<FJsonValueNumber>(CoreModel->GetUnits().Num());
+			Failure.ActualValue = MakeShared<FJsonValueNumber>(BoundUnitIds.Num());
+			OutError.SetFailure(MoveTemp(Failure));
 			return false;
 		}
 		const TArray<FString>& TargetBindings =
@@ -316,14 +339,13 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			if (!TargetBindings.Contains(TargetId))
 			{
-				OutError.Set(
-					TEXT("hjson_target_composition_mismatch"),
+				OutError.SetSourceFailure(TEXT("hjson_target_composition_mismatch"), TEXT("A target unit is not included in the target composition."),
 					TargetId);
 				return false;
 			}
 		}
 
-		FUeAgentResourceBudgetExceeded ResourceError;
+		FUeAgentResourceChargeError ResourceError;
 		if (!Resources.TryChargeMany(
 			{
 				{EUeAgentResourceDimension::Nodes,
@@ -347,7 +369,7 @@ namespace UE::UAI::HjsonWorkspace
 				Sha256(FingerprintMaterial)));
 		if (!Candidate->IsValid())
 		{
-			OutError.Set(TEXT("hjson_unified_model_invalid"));
+			OutError.SetFailure(Candidate->GetValidationDiagnostic());
 			return false;
 		}
 		OutModel = MoveTemp(Candidate);

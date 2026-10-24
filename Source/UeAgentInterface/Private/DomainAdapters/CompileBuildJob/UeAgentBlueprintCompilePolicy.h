@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 class FJsonObject;
 class UBlueprint;
@@ -11,7 +12,6 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 	{
 		FString AssetPath;
 		FString SeverityFilter = TEXT("all");
-		int32 MaxMessages = 200;
 		bool bIncludeMessages = false;
 		bool bSaveAfterCompile = false;
 	};
@@ -19,13 +19,11 @@ namespace UE::UAI::DomainAdapters::CompileBuildJob
 	bool TryDecodeBlueprintCompilePolicyRequest(
 		const TSharedPtr<FJsonObject>& Parameters,
 		FBlueprintCompilePolicyRequest& OutRequest,
-		FString& OutErrorCode,
-		FString& OutErrorDetail);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	bool TryExecuteBlueprintCompilePolicy(
 		UBlueprint& Blueprint,
 		const FBlueprintCompilePolicyRequest& Request,
 		TSharedPtr<FJsonObject>& OutReport,
-		FString& OutErrorCode,
-		FString& OutErrorDetail);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

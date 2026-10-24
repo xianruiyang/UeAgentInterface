@@ -24,7 +24,6 @@
     "deep_valid_parameters", "deep_forbidden_field_rejected",
     "render_target_clear_copy_bake_draw_use_render_resource_readback"
   ],
-  "family_count": 3,
   "families": [
     {
       "family_id": "image_capture",
@@ -48,45 +47,13 @@
       "target_operation": "capture.render.execute"
     }
   ],
-  "legacy_candidate_count": 27,
-  "legacy_mappings": [
-    {"legacy_id":"behavior_tree_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"state_tree_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"anim_blueprint_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"anim_sequence_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"metasound_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"sound_cue_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"blueprint_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"control_rig_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"screenshot_viewport","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"screenshot_viewport_buffer","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"geometry_cache_screenshot_frame","source":"P0-002","disposition":"split","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"editor_viewport_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"niagara_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"pcg_screenshot","source":"P0-002","disposition":"split","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"sequence_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"texture_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"umg_screenshot","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"image_capture","target_operation":"capture.image.execute"},
-    {"legacy_id":"audio_submix_record_start","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"media_recording","target_operation":"capture.media.execute"},
-    {"legacy_id":"audio_submix_record_stop","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"media_recording","target_operation":"capture.media.execute"},
-    {"legacy_id":"audio_submix_record_cancel","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"media_recording","target_operation":"capture.media.execute"},
-    {"legacy_id":"render_target_capture_scene","source":"P0-002","disposition":"adapt","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute"},
-    {"legacy_id":"scene_capture_runtime_probe","source":"P0-002","disposition":"split","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute"},
-    {"legacy_id":"scene_capture_validate_render_target","source":"P0-002","disposition":"split","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute"},
-    {"legacy_id":"render_target_clear","source":"SA-004","disposition":"reallocate","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute","render_action":"clear"},
-    {"legacy_id":"render_target_copy_texture","source":"SA-004","disposition":"reallocate","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute","render_action":"copy"},
-    {"legacy_id":"render_target_create_static_texture","source":"SA-004","disposition":"reallocate","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute","render_action":"bake"},
-    {"legacy_id":"render_target_draw_material","source":"SA-004","disposition":"reallocate","owner":"D/CaptureMediaLongJob","family_id":"render_resource","target_operation":"capture.render.execute","render_action":"draw"}
+  "render_resource_operations": [
+    {"action_id":"clear","family_id":"render_resource","target_operation":"capture.render.execute","readback":"target_pixel_stats"},
+    {"action_id":"copy","family_id":"render_resource","target_operation":"capture.render.execute","readback":"source_target_pixel_relation"},
+    {"action_id":"bake","family_id":"render_resource","target_operation":"capture.render.execute","readback":"created_texture_pixel_readback"},
+    {"action_id":"draw","family_id":"render_resource","target_operation":"capture.render.execute","readback":"target_pixel_stats"}
   ],
-  "render_resource_readback": {
-    "clear": "target_pixel_stats",
-    "copy": "source_target_pixel_relation",
-    "bake": "created_texture_pixel_readback",
-    "draw": "target_pixel_stats"
-  },
-  "activation_contract": {
-    "owner_task": "LS-008",
-    "public_commands_active_in_ls006": false,
+  "transport_contract": {
     "python_business_logic": false,
     "direct_http_binding": false
   }

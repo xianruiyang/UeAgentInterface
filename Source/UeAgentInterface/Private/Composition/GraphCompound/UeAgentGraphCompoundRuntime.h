@@ -12,19 +12,9 @@ namespace UE::UAI::Composition::GraphCompound
 {
 	struct UEAGENTINTERFACE_API FGraphCompoundRuntimeConfig
 	{
-		int64 MaxFrameBytes = 0;
-
-		bool IsValid() const;
 	};
 
-	struct UEAGENTINTERFACE_API FGraphCompoundRuntimeError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const { return !Code.IsEmpty(); }
-	};
+	using FGraphCompoundRuntimeError = Contract::FDiagnostic;
 
 	/**
 	 * One exact C3Q owner. The binding identity is the only dispatch key;

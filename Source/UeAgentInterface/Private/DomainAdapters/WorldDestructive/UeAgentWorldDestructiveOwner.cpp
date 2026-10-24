@@ -1,5 +1,11 @@
 #include "DomainAdapters/WorldDestructive/UeAgentWorldDestructiveOwner.h"
+#include "DomainAdapters/WorldDestructive/UeAgentPcgCleanupMutation.h"
+#include "DomainAdapters/ContentDiscovery/UeAgentEditorContentDiscovery.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
@@ -10,6 +16,7 @@
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "DataLayer/DataLayerEditorSubsystem.h"
 #include "Domains/Level/Authoring/UeAgentLevelAuthoringState.h"
+#include "Domains/Level/Authoring/UeAgentLevelActorDeletion.h"
 #include "Editor.h"
 #include "EditorLevelUtils.h"
 #include "Engine/LevelStreaming.h"
@@ -23,10 +30,10 @@
 #include "Misc/PackageName.h"
 #include "PCGComponent.h"
 #include "ScopedTransaction.h"
-#include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
-#include "PackageTools.h"
+#include "Core/AssetDurable/UeAgentPackageSave.h"
+#include "Utilities/AuthoringOperationApply/UeAgentAuthoringPackageReadback.h"
 #include "WorldPartition/DataLayer/DataLayerInstance.h"
 #include "WorldPartition/DataLayer/WorldDataLayers.h"
 
@@ -40,19 +47,51 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 
 	namespace
 	{
+		FDiagnostic WorldFailure(const FString& Code, const FString& Reason, const FString& Target,
+			const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& InternalContext = FString())
+		{
+			auto Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("world_destructive"), InternalContext);
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.TargetPath = Target;
+			Diagnostic.PropertyPath = Field;
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			return Diagnostic;
+		}
+
+		FDiagnostic WorldInputFailure(const FString& Code, const FString& Reason, const FString& Target,
+			const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			auto Diagnostic = WorldFailure(Code, Reason, Target, TEXT("/") + Field, MoveTemp(Actual), MoveTemp(Expected));
+			Diagnostic.SourceKind = TEXT("command_input");
+			Diagnostic.Source.JsonPath = TEXT("/params/") + Field;
+			return Diagnostic;
+		}
+
+		void SupplementWorldDiagnostic(FDiagnostic& Diagnostic, const FString& Target)
+		{
+			if (Diagnostic.IsEmpty()) return;
+			if (Diagnostic.TargetPath.IsEmpty()) Diagnostic.TargetPath = Target;
+			if (Diagnostic.Stage.IsEmpty()) Diagnostic.Stage = TEXT("world_destructive");
+			if (Diagnostic.SourceKind.IsEmpty() && Diagnostic.Source.SourceFile.IsEmpty()) Diagnostic.SourceKind = TEXT("native_result");
+			for (auto& Child : Diagnostic.Diagnostics) SupplementWorldDiagnostic(Child, Target);
+			if (Diagnostic.PublicCause)
+			{
+				auto Cause = MakeShared<FDiagnostic>(*Diagnostic.PublicCause);
+				SupplementWorldDiagnostic(*Cause, Target);
+				Diagnostic.PublicCause = MoveTemp(Cause);
+			}
+		}
+
+		TSharedPtr<FJsonValue> WorldVectorValue(const FVector& Value)
+		{
+			return MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+				MakeShared<FJsonValueNumber>(Value.X), MakeShared<FJsonValueNumber>(Value.Y), MakeShared<FJsonValueNumber>(Value.Z)});
+		}
+
 		FUeAgentResourceTracker MakeTracker()
 		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 8192},
-				{EUeAgentResourceDimension::Items, 8192},
-				{EUeAgentResourceDimension::Files, 512},
-				{EUeAgentResourceDimension::ReferenceEdges, 8192},
-				{EUeAgentResourceDimension::WorkUnits, 131072},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 32 * 1024 * 1024},
-			}));
+			return FUeAgentResourceTracker();
 		}
 
 		bool TryPackageName(FString Ref, FString& OutPackageName)
@@ -71,19 +110,19 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				+ FPackageName::GetLongPackageAssetName(PackageName);
 		}
 
-		UObject* ReloadForIndependentReadback(const FString& PackageName)
+		UObject* ReloadForIndependentReadback(const FString& PackageName, UE::UAI::Contract::FDiagnostic& Error)
 		{
-			if (UPackage* const Package = FindPackage(nullptr, *PackageName))
+			if (!UeAgentAuthoringOperationApply::TryReloadPersistedPackage(PackageName, Error))
 			{
-				Package->SetDirtyFlag(false);
-				FText Error;
-				if (!UPackageTools::UnloadPackages({Package}, Error, true))
-				{
-					return nullptr;
-				}
+				// This owner supplies a validated authored package reference. The
+				// shared readback helper also serves private transaction packages.
+				if (Error.TargetPath.IsEmpty()) Error.TargetPath = PackageName;
+				return nullptr;
 			}
-			CollectGarbage(RF_NoFlags, true);
-			return LoadObject<UObject>(nullptr, *ObjectPath(PackageName));
+			UObject* Reloaded = FindObject<UObject>(nullptr, *ObjectPath(PackageName));
+			if (!Reloaded)
+				Error = WorldFailure(TEXT("world_destructive_reloaded_asset_missing"), TEXT("Persisted package reloaded without its expected top-level asset."), PackageName, TEXT("/asset"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			return Reloaded;
 		}
 
 		FUeAgentCanonicalIdentity IdentityFor(const FString& PackageName)
@@ -137,7 +176,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				const FString& OwnerId,
 				const FString& JournalRoot,
 				const int64 FencingToken,
-				FString& OutError)
+				UE::UAI::Contract::FDiagnostic& OutError)
 			{
 				Identity = IdentityFor(PackageName);
 				Token = FencingToken;
@@ -151,28 +190,27 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 					Token, OwnerId, EAtomicityMode::CompensatedSaga);
 				FAssetDurableError Error;
 				if (!TryPrepareAssetDurability(
-						DurableRequest, Backend, JournalRoot, Resources, Session, Error)
-					|| !Session.IsValid())
+						DurableRequest, Backend, JournalRoot, Resources, Session, Error))
 				{
-					OutError = Error.GetCode() + TEXT(":") + Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
 			}
 
-			bool Persist(FString& OutError)
+			bool Persist(UE::UAI::Contract::FDiagnostic& OutError)
 			{
 				FAssetDurableError Error;
-				if (!TryPersistAssetDurability(
+				if (!TryPersistAssetDurabilityForVerification(
 						Session.ToSharedRef(), Backend, Token, Resources, Receipt, Error))
 				{
-					OutError = Error.GetCode() + TEXT(":") + Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
 			}
 
-			bool Acknowledge(const FString& VerificationId, FString& OutError)
+			bool Acknowledge(const FString& VerificationId, UE::UAI::Contract::FDiagnostic& OutError)
 			{
 				const FAssetDurableSessionRef Persisted =
 					MakeShared<const FAssetDurableSession>(
@@ -188,20 +226,24 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				if (!TryAcknowledgeAssetDurability(
 						Persisted, Ack, Token, Resources, Error))
 				{
-					OutError = Error.GetCode() + TEXT(":") + Error.GetDetail();
+					OutError = Error;
 					return false;
 				}
 				return true;
 			}
 
-			void Rollback(const bool bMemoryConfirmed)
+			void Rollback(const bool bMemoryConfirmed, FDiagnostic& OutError)
 			{
-				if (!Session.IsValid()) return;
+				OutError.Reset();
+				if (!Session.IsValid())
+				{
+					OutError = WorldFailure(TEXT("world_destructive_rollback_session_unavailable"), TEXT("Durable rollback has no prepared session."), FString(), TEXT("/rollback/session"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return;
+				}
 				FDurableReceipt RollbackReceipt;
 				FAssetDurableError Error;
-				TryRollbackAssetDurability(
-					Session.ToSharedRef(), Backend, Token, bMemoryConfirmed,
-					Resources, RollbackReceipt, Error);
+				if (!TryRollbackAssetDurability(Session.ToSharedRef(), Backend, Token, bMemoryConfirmed,
+					Resources, RollbackReceipt, Error)) OutError = MoveTemp(Error);
 			}
 
 			FString JournalId() const
@@ -264,7 +306,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 		bool PersistPackages(
 			const TArray<UPackage*>& Packages,
 			bool& bOutPersisted,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			bOutPersisted = false;
 			for (UPackage* const Package : Packages)
@@ -280,48 +322,46 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				}
 				UObject* TopLevelAsset = Package->FindAssetInPackage();
 				FString Filename;
-				FString HeaderErrorCode;
+				UE::UAI::Contract::FDiagnostic HeaderError;
 				if (!TryPrepareLoadedPackageHeaderForSave(
 						*Package,
 						TopLevelAsset,
 						Filename,
-						HeaderErrorCode))
+						HeaderError))
 				{
-					OutError = (HeaderErrorCode.IsEmpty()
-						? TEXT("world_destructive_package_header_unavailable")
-						: HeaderErrorCode)
-						+ TEXT(":") + PackageName;
+					OutError = HeaderError;
+                    if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = PackageName;
 					return false;
 				}
 				FSavePackageArgs Args;
 				Args.TopLevelFlags = RF_Public | RF_Standalone;
-				if (!UPackage::SavePackage(
-						Package,
+				UE::UAI::Contract::FDiagnostic SaveDetail;
+				if (!TrySaveLoadedPackage(
+						*Package,
 						TopLevelAsset,
-						*Filename,
-						Args))
+						Filename,
+						Args, SaveDetail))
 				{
-					OutError = TEXT("world_destructive_package_save_failed:")
-						+ PackageName;
+					OutError = SaveDetail;
 					return false;
 				}
 				FString ObservedFilename;
-				HeaderErrorCode.Reset();
-				if (!TryResolvePackageHeaderFilename(
-						PackageName,
-						EPackageHeaderKind::EvidenceRequired,
-						ObservedFilename,
-						HeaderErrorCode)
-					|| !ObservedFilename.Equals(
-						Filename,
-						ESearchCase::IgnoreCase)
-					|| !IFileManager::Get().FileExists(*ObservedFilename))
+				HeaderError.Reset();
+				if (!TryResolvePackageHeaderFilename(PackageName, EPackageHeaderKind::EvidenceRequired, ObservedFilename, HeaderError))
 				{
-					OutError = (HeaderErrorCode.IsEmpty()
-						? TEXT(
-							"world_destructive_package_save_readback_failed")
-						: HeaderErrorCode)
-						+ TEXT(":") + PackageName;
+					OutError = MoveTemp(HeaderError);
+					SupplementWorldDiagnostic(OutError, PackageName);
+					return false;
+				}
+				if (!ObservedFilename.Equals(Filename, ESearchCase::IgnoreCase))
+				{
+					OutError = WorldFailure(TEXT("world_destructive_package_save_readback_failed"), TEXT("Saved package header resolved to a different filename."), PackageName, TEXT("/package/header"), MakeShared<FJsonValueString>(ObservedFilename), MakeShared<FJsonValueString>(Filename));
+					return false;
+				}
+				if (!IFileManager::Get().FileExists(*ObservedFilename))
+				{
+					OutError = WorldFailure(TEXT("world_destructive_package_save_readback_failed"), TEXT("Saved package header file is missing on disk."), PackageName, TEXT("/package/header"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(ObservedFilename);
 					return false;
 				}
 				Package->SetDirtyFlag(false);
@@ -353,41 +393,46 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				FUeAgentWorldDestructiveResult Result;
 				Result.CommandId = Request.CommandId;
 				Result.TargetRef = Request.TargetRef;
-				auto Fail = [&Result](const FString& Code, const FString& Detail = FString())
+				auto Finish = [&Request](FUeAgentWorldDestructiveResult Value)
 				{
-					Result.ErrorCode = Code;
-					Result.ErrorDetail = Detail;
-					return Result;
+					SupplementWorldDiagnostic(Value.Diagnostic, Request.TargetRef);
+					if (!Value.Diagnostic.IsEmpty()) Value.Diagnostic.TerminalStatus = Value.TerminalState;
+					return Value;
+				};
+				auto Fail = [&Result, &Finish](FDiagnostic Diagnostic)
+				{
+					Result.Diagnostic = MoveTemp(Diagnostic);
+					return Finish(MoveTemp(Result));
 				};
 				if (!IsInGameThread())
 				{
-					return Fail(TEXT("world_destructive_game_thread_required"));
+					return Fail(WorldFailure(TEXT("world_destructive_game_thread_required"), TEXT("World destructive operations must run on the game thread."), Request.TargetRef, TEXT("/thread"), MakeShared<FJsonValueString>(TEXT("worker thread")), MakeShared<FJsonValueString>(TEXT("game thread"))));
 				}
 				if (!World.IsValid())
 				{
-					return Fail(TEXT("world_destructive_world_unavailable"));
+					return Fail(WorldFailure(TEXT("world_destructive_world_unavailable"), TEXT("The world bound to this destructive operation is no longer available."), Request.TargetRef, TEXT("/world"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 				}
 				if (Cancellation->IsCancelled())
 				{
-					return Fail(TEXT("world_destructive_cancelled"), Request.RequestId);
+					return Fail(WorldFailure(TEXT("world_destructive_cancelled"), TEXT("The destructive world operation was cancelled before execution."), Request.TargetRef, TEXT("/cancellation"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), Request.RequestId));
 				}
 				if (Request.CommandId == TEXT("world.data_layer.delete"))
-					return DeleteDataLayer(Request, Cancellation);
+					return Finish(DeleteDataLayer(Request, Cancellation));
 				if (Request.CommandId == TEXT("world.level_content.delete_scope"))
-					return DeleteFolder(Request);
+					return Finish(DeleteFolder(Request));
 				if (Request.CommandId == TEXT("world.pcg.cleanup"))
-					return CleanupPcg(Request);
+					return Finish(CleanupPcg(Request, Cancellation));
 				if (Request.CommandId == TEXT("world.level_streaming.move_actors"))
-					return MoveActor(Request);
+					return Finish(MoveActor(Request));
 				if (Request.CommandId == TEXT("world.level_streaming.remove"))
-					return RemoveStreamingLevel(Request);
+					return Finish(RemoveStreamingLevel(Request));
 				if (Request.CommandId == TEXT("modeling.actor.mesh.replace"))
-					return ReplaceActorMesh(Request);
+					return Finish(ReplaceActorMesh(Request));
 				if (Request.CommandId == TEXT("modeling.asset.material_slot.remove"))
-					return RemoveMaterialSlot(Request);
+					return Finish(RemoveMaterialSlot(Request));
 				if (Request.CommandId == TEXT("modeling.voxel.bounds.remove"))
-					return RemoveVoxelBounds(Request);
-				return Fail(TEXT("world_destructive_command_unknown"), Request.CommandId);
+					return Finish(RemoveVoxelBounds(Request));
+				return Fail(WorldFailure(TEXT("world_destructive_command_unknown"), TEXT("No destructive world operation is registered for this command."), Request.TargetRef, TEXT("/command_id"), MakeShared<FJsonValueString>(Request.CommandId), MakeShared<FJsonValueString>(TEXT("registered world destructive command"))));
 			}
 
 		private:
@@ -405,25 +450,24 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				const FUeAgentWorldDestructiveRequest& Request,
 				const TArray<UPackage*>& Packages,
 				const bool bChanged,
-				const bool bReadback)
+				FDiagnostic ReadbackError)
 			{
 				FUeAgentWorldDestructiveResult Result = Base(Request);
 				Result.bChanged = bChanged;
-				Result.bReadbackVerified = bReadback;
+				Result.bReadbackVerified = ReadbackError.IsEmpty();
 				Result.VerificationId = TEXT("world-destructive-readback:")
 					+ Request.RequestId;
-				FString Error;
-				if (!bReadback)
+				UE::UAI::Contract::FDiagnostic Error;
+				if (!ReadbackError.IsEmpty())
 				{
 					Result.TerminalState = TEXT("state_unknown");
-					Result.ErrorCode = TEXT("world_destructive_readback_failed");
+					Result.Diagnostic = MoveTemp(ReadbackError);
 					return Result;
 				}
 				if (!PersistPackages(Packages, Result.bPersisted, Error))
 				{
 					Result.TerminalState = TEXT("state_unknown");
-					Result.ErrorCode = TEXT("world_destructive_persist_failed");
-					Result.ErrorDetail = Error;
+					Result.Diagnostic = MoveTemp(Error);
 					return Result;
 				}
 				Result.PersistenceScope = Result.bPersisted
@@ -439,18 +483,21 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				FDataLayerDeleteMutation(
 					AWorldDataLayers& InLayers,
 					FName InLayerName,
+					FString InLayerRef,
 					FString InMapPackageName,
 					FString InMutationPackageName,
 					const FString& RequestId)
 					: Layers(&InLayers)
 					, LayerName(InLayerName)
+					, LayerRef(MoveTemp(InLayerRef))
 					, PackageName(MoveTemp(InMapPackageName))
-					, MutationPackageName(
-						MoveTemp(InMutationPackageName))
 					, TransactionTitle(
 						TEXT("UeAgentInterface Delete Data Layer ")
 						+ RequestId)
 				{
+					MutationPackages.Add({PackageName, EPackageHeaderKind::Map, EAssetDurableIntent::Save});
+					if (InMutationPackageName != PackageName)
+						MutationPackages.Add({MoveTemp(InMutationPackageName), EPackageHeaderKind::EvidenceRequired, EAssetDurableIntent::Save});
 				}
 
 				const FString& GetPackageName() const override
@@ -458,9 +505,9 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 					return PackageName;
 				}
 
-				const FString& GetMutationPackageName() const override
+				const TArray<FWorldDestructivePackage>& GetMutationPackages() const override
 				{
-					return MutationPackageName;
+					return MutationPackages;
 				}
 
 				const FString& GetPersistenceScope() const override
@@ -470,7 +517,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 					return Scope;
 				}
 
-				bool Apply(FString& OutError) override
+				bool Apply(UE::UAI::Contract::FDiagnostic& OutError) override
 				{
 					AWorldDataLayers* const Current = Layers.Get();
 					const UDataLayerInstance* const Layer = Current
@@ -478,28 +525,30 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 						: nullptr;
 					if (!Current || !Layer)
 					{
-						OutError = TEXT("world_data_layer_missing");
+						OutError = LayerFailure(TEXT("world_data_layer_missing"), TEXT("The requested data layer or its WorldDataLayers owner is no longer available."), MakeShared<FJsonValueString>(!Current ? TEXT("owner missing") : TEXT("layer missing")), MakeShared<FJsonValueString>(TEXT("data layer and owner present")));
 						return false;
 					}
 					if (!Layer->CanBeRemoved())
 					{
-						OutError = TEXT("world_data_layer_not_removable");
+						OutError = LayerFailure(TEXT("world_data_layer_not_removable"), TEXT("The data layer does not allow removal."), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 						return false;
 					}
 					UDataLayerEditorSubsystem* const DataLayerEditor =
 						UDataLayerEditorSubsystem::Get();
 					if (!DataLayerEditor)
 					{
-						OutError = TEXT(
-							"world_data_layer_editor_subsystem_unavailable");
+						OutError = LayerFailure(TEXT("world_data_layer_editor_subsystem_unavailable"), TEXT("Data-layer deletion requires the DataLayer Editor subsystem."), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 						return false;
 					}
 					if (!GEditor
 						|| !GEditor->CanTransact()
 						|| GEditor->IsTransactionActive())
 					{
-						OutError = TEXT(
-							"world_data_layer_transaction_unavailable");
+						auto Actual = MakeShared<FJsonObject>();
+						Actual->SetBoolField(TEXT("editor_available"), GEditor != nullptr);
+						Actual->SetBoolField(TEXT("can_transact"), GEditor && GEditor->CanTransact());
+						Actual->SetBoolField(TEXT("transaction_active"), GEditor && GEditor->IsTransactionActive());
+						OutError = LayerFailure(TEXT("world_data_layer_transaction_unavailable"), TEXT("Data-layer deletion requires an Editor that can transact with no active transaction."), MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(TEXT("Editor available, can transact, no active transaction")));
 						return false;
 					}
 					{
@@ -511,35 +560,36 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 					}
 					if (Current->GetDataLayerInstance(LayerName))
 					{
-						OutError = TEXT(
-							"world_data_layer_delete_readback_failed");
+						OutError = LayerFailure(TEXT("world_data_layer_delete_readback_failed"), TEXT("The data layer is still present after native deletion."), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 						return false;
 					}
 					return true;
 				}
 
-				bool Rollback(FString& OutError) override
+				bool Rollback(UE::UAI::Contract::FDiagnostic& OutError) override
 				{
 					AWorldDataLayers* const Current = Layers.Get();
 					if (!Current || !GEditor
 						|| GEditor->IsTransactionActive())
 					{
-						OutError = TEXT(
-							"world_data_layer_rollback_unavailable");
+						auto Actual = MakeShared<FJsonObject>();
+						Actual->SetBoolField(TEXT("owner_available"), Current != nullptr);
+						Actual->SetBoolField(TEXT("editor_available"), GEditor != nullptr);
+						Actual->SetBoolField(TEXT("transaction_active"), GEditor && GEditor->IsTransactionActive());
+						OutError = LayerFailure(TEXT("world_data_layer_rollback_unavailable"), TEXT("Data-layer rollback requires the original owner and an Editor with no active transaction."), MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(TEXT("owner and Editor present, no active transaction")));
 						return false;
 					}
 					if (GEditor->GetTransactionName().ToString()
 						!= TransactionTitle)
 					{
-						OutError = TEXT(
-							"world_data_layer_rollback_fence_stale");
+						OutError = LayerFailure(TEXT("world_data_layer_rollback_fence_stale"), TEXT("The latest Editor transaction no longer belongs to this data-layer deletion."), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						OutError.InternalContext = GEditor->GetTransactionName().ToString() + TEXT(" != ") + TransactionTitle;
 						return false;
 					}
-					if (!GEditor->UndoTransaction(false)
-						|| !Current->GetDataLayerInstance(LayerName))
+					const bool bUndoSucceeded = GEditor->UndoTransaction(false);
+					if (!bUndoSucceeded || !Current->GetDataLayerInstance(LayerName))
 					{
-						OutError = TEXT(
-							"world_data_layer_rollback_unconfirmed");
+						OutError = LayerFailure(TEXT("world_data_layer_rollback_unconfirmed"), TEXT("Data-layer rollback did not restore the deleted layer."), MakeShared<FJsonValueString>(!bUndoSucceeded ? TEXT("Editor undo failed") : TEXT("layer still missing")), MakeShared<FJsonValueString>(TEXT("undo succeeded and layer present")));
 						return false;
 					}
 					return true;
@@ -547,30 +597,38 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 
 				bool VerifyPersisted(
 					UWorld& PersistedWorld,
-					FString& OutError) const override
+					const FPersistedWorldReferenceMap& References,
+					UE::UAI::Contract::FDiagnostic& OutError) const override
 				{
 					const AWorldDataLayers* const PersistedLayers =
 						PersistedWorld.GetWorldDataLayers();
 					if (!PersistedLayers)
 					{
-						OutError = TEXT(
-							"world_data_layer_persisted_owner_missing");
+						OutError = LayerFailure(TEXT("world_data_layer_persisted_owner_missing"), TEXT("Independent persisted world readback has no WorldDataLayers owner."), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 						return false;
 					}
 					if (PersistedLayers->GetDataLayerInstance(LayerName))
 					{
-						OutError = TEXT(
-							"world_data_layer_persisted_instance_present");
+						OutError = LayerFailure(TEXT("world_data_layer_persisted_instance_present"), TEXT("The deleted data layer is still present in independent persisted world readback."), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 						return false;
 					}
 					return true;
 				}
 
 			private:
+				FDiagnostic LayerFailure(const FString& Code, const FString& Reason, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected) const
+				{
+					auto Diagnostic = WorldFailure(Code, Reason, PackageName, TEXT("/layer"), MoveTemp(Actual), MoveTemp(Expected));
+					Diagnostic.Stage = TEXT("authoring");
+					Diagnostic.CandidateName = LayerRef;
+					return Diagnostic;
+				}
+
 				TWeakObjectPtr<AWorldDataLayers> Layers;
 				FName LayerName;
+				FString LayerRef;
 				FString PackageName;
-				FString MutationPackageName;
+				TArray<FWorldDestructivePackage> MutationPackages;
 				FString TransactionTitle;
 			};
 
@@ -582,26 +640,22 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				AWorldDataLayers* const WorldLayers =
 					World->GetWorldDataLayers();
 				UDataLayerInstance* Layer = nullptr;
-				FString ResolveError;
-				if (!WorldLayers
-					|| !UeAgentLevelAuthoring::
-						TryResolveDataLayerInstanceExact(
-							*WorldLayers,
-							Request.TargetRef,
-							Layer,
-							ResolveError))
+				UE::UAI::Contract::FDiagnostic ResolveError;
+				if (!WorldLayers)
 				{
-					Result.ErrorCode = WorldLayers
-						? ResolveError
-						: TEXT("world_data_layers_missing");
+					Result.Diagnostic = WorldFailure(TEXT("world_data_layers_missing"), TEXT("The current world has no WorldDataLayers owner."), Request.TargetRef, TEXT("/layer"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return Result;
+				}
+				if (!UeAgentLevelAuthoring::TryResolveDataLayerInstanceExact(*WorldLayers, Request.TargetRef, Layer, ResolveError))
+				{
+					Result.Diagnostic = MoveTemp(ResolveError);
 					return Result;
 				}
 				AWorldDataLayers* const MutationLayers =
 					Layer->GetDirectOuterWorldDataLayers();
 				if (!MutationLayers)
 				{
-					Result.ErrorCode =
-						TEXT("world_data_layer_owner_missing");
+					Result.Diagnostic = WorldFailure(TEXT("world_data_layer_owner_missing"), TEXT("The resolved data layer has no direct WorldDataLayers owner."), Request.TargetRef, TEXT("/layer"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return Result;
 				}
 				const FName LayerName = Layer->GetDataLayerFName();
@@ -611,6 +665,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 					MakeShared<FDataLayerDeleteMutation>(
 						*MutationLayers,
 						LayerName,
+						Request.TargetRef,
 						World->GetOutermost()->GetName(),
 						MutationLayers->GetOutermost()->GetName(),
 						Request.RequestId),
@@ -625,25 +680,24 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				const FString ManagedId = Request.ManagedId.TrimStartAndEnd();
 				if (Root.IsEmpty())
 				{
-					Result.ErrorCode = TEXT("world_folder_path_required");
+					Result.Diagnostic = WorldInputFailure(TEXT("world_folder_path_required"),
+						TEXT("Folder deletion requires a non-empty folder path."), Request.TargetRef, TEXT("folder_path"),
+						MakeShared<FJsonValueString>(Request.TargetRef), MakeShared<FJsonValueString>(TEXT("non-empty folder path")));
 					return Result;
 				}
 				TArray<AActor*> Actors;
 				if (!ManagedId.IsEmpty())
 				{
 					AActor* Actor = nullptr;
-					FString ResolveError;
+					UE::UAI::Contract::FDiagnostic ResolveError;
 					if (!UeAgentLevelAuthoring::TryFindManagedActorExact(
 							*World,
 							ManagedId,
 							Root,
 							Actor,
-							ResolveError)
-						|| !Actor)
+							ResolveError))
 					{
-						Result.ErrorCode =
-							TEXT("world_exact_managed_actor_unavailable");
-						Result.ErrorDetail = ResolveError;
+						Result.Diagnostic = MoveTemp(ResolveError);
 						return Result;
 					}
 					Result.ResultRef = Actor->GetPathName();
@@ -662,61 +716,76 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				}
 				if (Actors.IsEmpty())
 				{
-					Result.ErrorCode = TEXT("world_folder_scope_empty");
+					Result.Diagnostic = WorldFailure(TEXT("world_folder_scope_empty"), TEXT("No actors were found in the requested folder scope."), Request.TargetRef, TEXT("/folder_path"), MakeShared<FJsonValueNumber>(Actors.Num()), MakeShared<FJsonValueString>(TEXT("at least one actor")));
 					return Result;
 				}
 				FScopedTransaction Transaction(
 					NSLOCTEXT("UeAgentInterface", "WorldDeleteFolder",
 						"UeAgentInterface Delete Folder Content"));
-				for (AActor* const Actor : Actors)
+				UeAgentLevelAuthoring::FActorDeletion Deletion;
+				if (!Deletion.Apply(*World, Actors, Result.Diagnostic))
 				{
-					if (!World->DestroyActor(Actor, true, true))
-					{
-						Result.TerminalState = TEXT("state_unknown");
-						Result.ErrorCode = TEXT("world_folder_delete_failed");
-						return Result;
-					}
+
+					return Result;
 				}
-				bool bAbsent = true;
+				FDiagnostic ReadbackError;
 				for (TActorIterator<AActor> It(World.Get()); It; ++It)
 				{
+					FString Folder;
+					bool bStillPresent;
 					if (!ManagedId.IsEmpty())
-					{
-						bAbsent &= !UeAgentLevelAuthoring::GetManagedActorId(**It)
-							.Equals(ManagedId, ESearchCase::CaseSensitive);
-					}
+						bStillPresent = UeAgentLevelAuthoring::GetManagedActorId(**It).Equals(ManagedId, ESearchCase::CaseSensitive);
 					else
 					{
-						const FString Folder = It->GetFolderPath().ToString();
-						bAbsent &= Folder != Root
-							&& !Folder.StartsWith(Root + TEXT("/"));
+						Folder = It->GetFolderPath().ToString();
+						bStillPresent = Folder == Root || Folder.StartsWith(Root + TEXT("/"));
+					}
+					if (bStillPresent && ReadbackError.IsEmpty())
+					{
+						if (!ManagedId.IsEmpty()) Folder = It->GetFolderPath().ToString();
+						ReadbackError = WorldFailure(TEXT("world_destructive_readback_failed"),
+							TEXT("An actor remains in the requested deletion scope after native deletion."),
+							It->GetPathName(), TEXT("/folder_path"), MakeShared<FJsonValueString>(Folder),
+							MakeShared<FJsonValueString>(TEXT("actor absent from the requested deletion scope")));
 					}
 				}
-				return CommitWorld(
-					Request, {World->GetOutermost()}, true, bAbsent);
+				return CommitWorld(Request, {World->GetOutermost()}, true, MoveTemp(ReadbackError));
 			}
 
 			FUeAgentWorldDestructiveResult CleanupPcg(
-				const FUeAgentWorldDestructiveRequest& Request)
+				const FUeAgentWorldDestructiveRequest& Request,
+				const TSharedRef<IUeAgentCancellationSignal>& Cancellation)
 			{
 				FUeAgentWorldDestructiveResult Result = Base(Request);
-				AActor* const Actor = FindActor(*World, Request.TargetRef);
-				UPCGComponent* const Component = Actor
-					? Cast<UPCGComponent>(FindComponent(*Actor, Request.ComponentName))
-					: nullptr;
-				if (!Component)
+				TArray<UObject*> Actors;
+				for (TActorIterator<AActor> It(World.Get()); It; ++It) if (IsValid(*It)) Actors.Add(*It);
+				UObject* Resolved = nullptr;
+				if (!DomainAdapters::ContentDiscovery::TryResolveScopedObjectReference(Actors, Request.TargetRef, Resolved, Result.Diagnostic))
 				{
-					Result.ErrorCode = TEXT("world_pcg_component_missing");
+					Result.Diagnostic.Source.JsonPath = TEXT("/actor_ref");
 					return Result;
 				}
-				FScopedTransaction Transaction(
-					NSLOCTEXT("UeAgentInterface", "WorldPcgCleanup",
-						"UeAgentInterface PCG Cleanup"));
-				Component->Modify();
-				Component->CleanupLocalImmediate(true, true);
-				return CommitWorld(
-					Request, {Actor->GetOutermost()}, true,
-					!Component->IsGenerating());
+				AActor* Actor = CastChecked<AActor>(Resolved);
+				TArray<UPCGComponent*> NativeComponents;
+				Actor->GetComponents(NativeComponents);
+				TArray<UObject*> Components;
+				for (UPCGComponent* Component : NativeComponents) if (IsValid(Component)) Components.Add(Component);
+				if (!DomainAdapters::ContentDiscovery::TryResolveScopedObjectReference(Components, Request.ComponentName, Resolved, Result.Diagnostic))
+				{
+					Result.Diagnostic.Source.JsonPath = TEXT("/component_name");
+					return Result;
+				}
+				TSharedPtr<IUeAgentWorldDestructiveDurableMutation> Mutation;
+				if (!TryCreatePcgCleanupMutation(*CastChecked<UPCGComponent>(Resolved), Mutation, Result.Diagnostic))
+				{
+					if (Result.Diagnostic.MutationMayHaveStarted.Get(false))
+					{
+						Result.TerminalState = TEXT("state_unknown");
+						Result.bChanged = true;
+					}
+					return Result;
+				}
+				return DurableRunner->Execute(*World, Request, Mutation.ToSharedRef(), Cancellation);
 			}
 
 			FUeAgentWorldDestructiveResult MoveActor(
@@ -729,9 +798,11 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				ULevel* const Level = Streaming ? Streaming->GetLoadedLevel() : nullptr;
 				if (!Actor || !Level)
 				{
-					Result.ErrorCode = Actor
-						? TEXT("world_streaming_level_missing")
-						: TEXT("world_actor_missing");
+					Result.Diagnostic = WorldFailure(Actor ? TEXT("world_streaming_level_missing") : TEXT("world_actor_missing"),
+						Actor ? TEXT("The destination streaming level is not loaded.") : TEXT("The actor to move was not found."),
+						Request.TargetRef, Actor ? TEXT("/level_package") : TEXT("/actor_ref"),
+						MakeShared<FJsonValueString>(Actor ? Request.OperandRef : Request.TargetRef),
+						MakeShared<FJsonValueString>(Actor ? TEXT("loaded streaming level") : TEXT("actor in the current world")));
 					return Result;
 				}
 				const FGuid StableActorGuid = Actor->GetActorGuid();
@@ -745,10 +816,12 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				if (Count != 1)
 				{
 					Transaction.Cancel();
-					Result.ErrorCode = TEXT("world_move_actor_failed");
+					Result.Diagnostic = WorldFailure(TEXT("world_move_actor_failed"), TEXT("Native move did not move exactly one actor to the requested streaming level."), Request.TargetRef, TEXT("/level_package"), MakeShared<FJsonValueNumber>(Count), MakeShared<FJsonValueNumber>(1));
+					Result.Diagnostic.CandidateName = Request.OperandRef;
 					return Result;
 				}
 				AActor* ReadbackActor = nullptr;
+				bool bLabelAmbiguous = false;
 				if (StableActorGuid.IsValid())
 				{
 					for (AActor* const Candidate : Level->Actors)
@@ -770,6 +843,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 						{
 							if (ReadbackActor)
 							{
+								bLabelAmbiguous = true;
 								ReadbackActor = nullptr;
 								break;
 							}
@@ -777,10 +851,20 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 						}
 					}
 				}
+				FDiagnostic ReadbackError;
+				if (!ReadbackActor)
+					ReadbackError = WorldFailure(TEXT("world_destructive_readback_failed"),
+						bLabelAmbiguous ? TEXT("Multiple actors in the destination level share the moved actor label.")
+							: TEXT("The moved actor is missing from the destination level."),
+						Request.TargetRef, TEXT("/level_package"), MakeShared<FJsonValueString>(StableActorLabel),
+						MakeShared<FJsonValueString>(Request.OperandRef));
+				else if (ReadbackActor->GetLevel() != Level)
+					ReadbackError = WorldFailure(TEXT("world_destructive_readback_failed"),
+						TEXT("The moved actor is in a different level than requested."), ReadbackActor->GetPathName(),
+						TEXT("/level_package"), MakeShared<FJsonValueString>(ReadbackActor->GetLevel() ? ReadbackActor->GetLevel()->GetPathName() : TEXT("<missing>")),
+						MakeShared<FJsonValueString>(Level->GetPathName()));
 				FUeAgentWorldDestructiveResult Committed = CommitWorld(
-					Request,
-					{World->GetOutermost(), Level->GetOutermost()}, true,
-					ReadbackActor && ReadbackActor->GetLevel() == Level);
+					Request, {World->GetOutermost(), Level->GetOutermost()}, true, MoveTemp(ReadbackError));
 				Committed.ResultRef = ReadbackActor
 					? ReadbackActor->GetPathName() : FString();
 				return Committed;
@@ -795,7 +879,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				ULevel* const Level = Streaming ? Streaming->GetLoadedLevel() : nullptr;
 				if (!Level)
 				{
-					Result.ErrorCode = TEXT("world_streaming_level_missing");
+					Result.Diagnostic = WorldFailure(TEXT("world_streaming_level_missing"), TEXT("The streaming level to remove is not loaded."), Request.TargetRef, TEXT("/level_package"), MakeShared<FJsonValueString>(Request.TargetRef), MakeShared<FJsonValueString>(TEXT("loaded streaming level")));
 					return Result;
 				}
 				const FString PackageName = Streaming->GetWorldAssetPackageName();
@@ -805,12 +889,15 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				if (!UEditorLevelUtils::RemoveLevelFromWorld(Level, false, false))
 				{
 					Transaction.Cancel();
-					Result.ErrorCode = TEXT("world_streaming_remove_failed");
+					Result.Diagnostic = WorldFailure(TEXT("world_streaming_remove_failed"), TEXT("Unreal Editor rejected removal of the loaded streaming level."), Request.TargetRef, TEXT("/level_package"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return Result;
 				}
-				return CommitWorld(
-					Request, {World->GetOutermost()}, true,
-					FindStreamingLevel(*World, PackageName) == nullptr);
+				FDiagnostic ReadbackError;
+				if (FindStreamingLevel(*World, PackageName) != nullptr)
+					ReadbackError = WorldFailure(TEXT("world_destructive_readback_failed"),
+						TEXT("The removed streaming level is still registered in the world."), PackageName,
+						TEXT("/streaming_levels"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+				return CommitWorld(Request, {World->GetOutermost()}, true, MoveTemp(ReadbackError));
 			}
 
 			FUeAgentWorldDestructiveResult ReplaceActorMesh(
@@ -824,11 +911,13 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 					? Actor->FindComponentByClass<UStaticMeshComponent>() : nullptr;
 				if (!Component || !Mesh)
 				{
-					Result.ErrorCode = !Actor
-						? TEXT("modeling_actor_missing")
-						: (!Component
-							? TEXT("modeling_static_mesh_component_missing")
-							: TEXT("modeling_static_mesh_missing"));
+					Result.Diagnostic = WorldFailure(!Actor ? TEXT("modeling_actor_missing")
+						: !Component ? TEXT("modeling_static_mesh_component_missing") : TEXT("modeling_static_mesh_missing"),
+						!Actor ? TEXT("The actor to receive the static mesh was not found.")
+							: !Component ? TEXT("The actor has no StaticMeshComponent.") : TEXT("The replacement static mesh asset could not be loaded."),
+						Request.TargetRef, !Actor ? TEXT("/actor_ref") : !Component ? TEXT("/component") : TEXT("/mesh_ref"),
+						MakeShared<FJsonValueString>(!Actor ? Request.TargetRef : !Component ? TEXT("component missing") : Request.OperandRef),
+						MakeShared<FJsonValueString>(!Actor ? TEXT("actor in current world") : !Component ? TEXT("StaticMeshComponent") : TEXT("loadable StaticMesh")));
 					return Result;
 				}
 				FScopedTransaction Transaction(
@@ -838,9 +927,14 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				Component->SetStaticMesh(Mesh);
 				Component->MarkRenderStateDirty();
 				Actor->MarkPackageDirty();
-				return CommitWorld(
-					Request, {Actor->GetOutermost()}, true,
-					Component->GetStaticMesh() == Mesh);
+				FDiagnostic ReadbackError;
+				UStaticMesh* const ObservedMesh = Component->GetStaticMesh();
+				if (ObservedMesh != Mesh)
+					ReadbackError = WorldFailure(TEXT("world_destructive_readback_failed"),
+						TEXT("The component static mesh differs from the requested replacement."), Component->GetPathName(),
+						TEXT("/mesh_ref"), MakeShared<FJsonValueString>(ObservedMesh ? ObservedMesh->GetPathName() : TEXT("<missing>")),
+						MakeShared<FJsonValueString>(Mesh->GetPathName()));
+				return CommitWorld(Request, {Actor->GetOutermost()}, true, MoveTemp(ReadbackError));
 			}
 
 			FUeAgentWorldDestructiveResult RemoveMaterialSlot(
@@ -850,29 +944,35 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				FString PackageName;
 				if (!TryPackageName(Request.TargetRef, PackageName))
 				{
-					Result.ErrorCode = TEXT("modeling_material_asset_ref_invalid");
+					Result.Diagnostic = WorldInputFailure(TEXT("modeling_material_asset_ref_invalid"),
+						TEXT("Material-slot removal requires a valid project asset package under /Game/."), Request.TargetRef, TEXT("target_ref"),
+						MakeShared<FJsonValueString>(Request.TargetRef), MakeShared<FJsonValueString>(TEXT("valid /Game/ asset package or object path")));
 					return Result;
 				}
 				UStaticMesh* const Mesh = LoadObject<UStaticMesh>(
 					nullptr, *Request.TargetRef);
 				if (!Mesh)
 				{
-					Result.ErrorCode = TEXT("modeling_material_asset_missing");
+					Result.Diagnostic = WorldFailure(TEXT("modeling_material_asset_missing"), TEXT("The static mesh asset for material-slot removal could not be loaded."), Request.TargetRef, TEXT("/target_ref"), MakeShared<FJsonValueString>(Request.TargetRef), MakeShared<FJsonValueString>(TEXT("loadable StaticMesh")));
 					return Result;
 				}
 				if (!Mesh->GetStaticMaterials().IsValidIndex(Request.Index))
 				{
-					Result.ErrorCode = TEXT("modeling_material_index_invalid");
+					auto Expected = MakeShared<FJsonObject>();
+					Expected->SetNumberField(TEXT("minimum"), 0);
+					Expected->SetNumberField(TEXT("exclusive_maximum"), Mesh->GetStaticMaterials().Num());
+					Result.Diagnostic = WorldInputFailure(TEXT("modeling_material_index_invalid"),
+						TEXT("The material-slot index is outside the static mesh material array."), Request.TargetRef, TEXT("index"),
+						MakeShared<FJsonValueNumber>(Request.Index), MakeShared<FJsonValueObject>(Expected));
 					return Result;
 				}
 				FAssetDurableMutation Durable;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!Durable.Prepare(
 						Request, PackageName, OwnerId, JournalRoot,
 						Counter.Increment(), Error))
 				{
-					Result.ErrorCode = TEXT("modeling_material_prepare_failed");
-					Result.ErrorDetail = Error;
+					Result.Diagnostic = MoveTemp(Error);
 					return Result;
 				}
 				Result.JournalId = Durable.JournalId();
@@ -888,24 +988,31 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				}
 				if (!Durable.Persist(Error))
 				{
-					Durable.Rollback(false);
+					FDiagnostic RollbackError;
+					Durable.Rollback(false, RollbackError);
 					Result.TerminalState = TEXT("state_unknown");
-					Result.ErrorCode = TEXT("modeling_material_persist_failed");
-					Result.ErrorDetail = Error;
+					Result.Diagnostic = MoveTemp(Error);
+					if (!RollbackError.IsEmpty()) Result.Diagnostic.Diagnostics.Add(MoveTemp(RollbackError));
 					return Result;
 				}
-				UStaticMesh* const Reloaded = Cast<UStaticMesh>(
-					ReloadForIndependentReadback(PackageName));
-				Result.bReadbackVerified = Reloaded
-					&& Reloaded->GetStaticMaterials().Num() == ExpectedCount;
-				Result.VerificationId = TEXT("modeling-material-readback:")
-					+ Request.RequestId;
-				if (!Result.bReadbackVerified
-					|| !Durable.Acknowledge(Result.VerificationId, Error))
+				UObject* ReloadedObject = ReloadForIndependentReadback(PackageName, Error);
+				UStaticMesh* const Reloaded = Cast<UStaticMesh>(ReloadedObject);
+				Result.bReadbackVerified = Reloaded && Reloaded->GetStaticMaterials().Num() == ExpectedCount;
+				Result.VerificationId = TEXT("modeling-material-readback:") + Request.RequestId;
+				if (!Result.bReadbackVerified)
 				{
 					Result.TerminalState = TEXT("state_unknown");
-					Result.ErrorCode = TEXT("modeling_material_readback_failed");
-					Result.ErrorDetail = Error;
+					if (!ReloadedObject) Result.Diagnostic = MoveTemp(Error);
+					else if (!Reloaded)
+						Result.Diagnostic = WorldFailure(TEXT("modeling_material_readback_failed"), TEXT("Reloaded material-slot asset is not a StaticMesh."), Request.TargetRef, TEXT("/class"), MakeShared<FJsonValueString>(ReloadedObject->GetClass()->GetPathName()), MakeShared<FJsonValueString>(TEXT("StaticMesh")));
+					else
+						Result.Diagnostic = WorldFailure(TEXT("modeling_material_readback_failed"), TEXT("Persisted material-slot count does not match the expected removal result."), Request.TargetRef, TEXT("/materials"), MakeShared<FJsonValueNumber>(Reloaded->GetStaticMaterials().Num()), MakeShared<FJsonValueNumber>(ExpectedCount));
+					return Result;
+				}
+				if (!Durable.Acknowledge(Result.VerificationId, Error))
+				{
+					Result.TerminalState = TEXT("state_unknown");
+					Result.Diagnostic = MoveTemp(Error);
 					return Result;
 				}
 				Result.bChanged = true;
@@ -924,7 +1031,17 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 					|| Request.BoundsMin.Y > Request.BoundsMax.Y
 					|| Request.BoundsMin.Z > Request.BoundsMax.Z)
 				{
-					Result.ErrorCode = TEXT("modeling_voxel_space_or_bounds_invalid");
+					const bool bSpaceInvalid = Request.Space != TEXT("component_local");
+					const TCHAR* Axis = Request.BoundsMin.X > Request.BoundsMax.X ? TEXT("x")
+						: Request.BoundsMin.Y > Request.BoundsMax.Y ? TEXT("y") : TEXT("z");
+					const double Minimum = Axis[0] == TEXT('x') ? Request.BoundsMin.X : Axis[0] == TEXT('y') ? Request.BoundsMin.Y : Request.BoundsMin.Z;
+					const double Maximum = Axis[0] == TEXT('x') ? Request.BoundsMax.X : Axis[0] == TEXT('y') ? Request.BoundsMax.Y : Request.BoundsMax.Z;
+					Result.Diagnostic = WorldInputFailure(TEXT("modeling_voxel_space_or_bounds_invalid"),
+						bSpaceInvalid ? TEXT("Voxel removal bounds must use component_local space.")
+							: FString::Printf(TEXT("Minimum %s bound must not exceed maximum %s bound."), Axis, Axis),
+						Request.TargetRef, bSpaceInvalid ? TEXT("space") : TEXT("min_") + FString(Axis),
+						bSpaceInvalid ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Request.Space)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Minimum)),
+						bSpaceInvalid ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("component_local"))) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Maximum)));
 					return Result;
 				}
 				AActor* const Actor = FindActor(*World, Request.TargetRef);
@@ -933,7 +1050,7 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 						FindComponent(*Actor, Request.ComponentName)) : nullptr;
 				if (!Component)
 				{
-					Result.ErrorCode = TEXT("modeling_voxel_component_missing");
+					Result.Diagnostic = WorldFailure(TEXT("modeling_voxel_component_missing"), !Actor ? TEXT("The voxel removal actor was not found.") : TEXT("The requested component could not be resolved as an InstancedStaticMeshComponent."), Request.TargetRef, TEXT("/component_name"), MakeShared<FJsonValueString>(Request.ComponentName), MakeShared<FJsonValueString>(TEXT("InstancedStaticMeshComponent on the requested actor")));
 					return Result;
 				}
 				const FBox Bounds(Request.BoundsMin, Request.BoundsMax);
@@ -943,7 +1060,9 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 					FTransform Transform;
 					if (!Component->GetInstanceTransform(Index, Transform, false))
 					{
-						Result.ErrorCode = TEXT("modeling_voxel_read_failed");
+						Result.Diagnostic = WorldFailure(TEXT("modeling_voxel_read_failed"), TEXT("The voxel instance transform could not be read in component-local space."), Request.TargetRef, TEXT("/instances"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						Result.Diagnostic.OperationIndex = Index;
+						Result.Diagnostic.CandidateName = Request.ComponentName;
 						return Result;
 					}
 					if (Bounds.IsInsideOrOn(Transform.GetLocation()))
@@ -953,7 +1072,8 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 				}
 				if (Indices.IsEmpty())
 				{
-					Result.ErrorCode = TEXT("modeling_voxel_bounds_empty");
+					Result.Diagnostic = WorldFailure(TEXT("modeling_voxel_bounds_empty"), TEXT("No component instances were found inside the requested voxel removal bounds."), Request.TargetRef, TEXT("/bounds"), MakeShared<FJsonValueNumber>(Indices.Num()), MakeShared<FJsonValueString>(TEXT("at least one instance inside bounds")));
+					Result.Diagnostic.CandidateName = Request.ComponentName;
 					return Result;
 				}
 				FScopedTransaction Transaction(
@@ -965,19 +1085,33 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 					if (!Component->RemoveInstance(Indices[Offset]))
 					{
 						Result.TerminalState = TEXT("state_unknown");
-						Result.ErrorCode = TEXT("modeling_voxel_remove_failed");
+						Result.Diagnostic = WorldFailure(TEXT("modeling_voxel_remove_failed"), TEXT("Native voxel instance removal failed."), Request.TargetRef, TEXT("/instances"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						Result.Diagnostic.OperationIndex = Indices[Offset];
+						Result.Diagnostic.CandidateName = Request.ComponentName;
 						return Result;
 					}
 				}
-				bool bAbsent = true;
+				FDiagnostic ReadbackError;
 				for (int32 Index = 0; Index < Component->GetInstanceCount(); ++Index)
 				{
 					FTransform Transform;
-					bAbsent &= Component->GetInstanceTransform(Index, Transform, false)
-						&& !Bounds.IsInsideOrOn(Transform.GetLocation());
+					const bool bReadable = Component->GetInstanceTransform(Index, Transform, false);
+					const bool bInside = bReadable && Bounds.IsInsideOrOn(Transform.GetLocation());
+					if ((!bReadable || bInside) && ReadbackError.IsEmpty())
+					{
+						auto Expected = MakeShared<FJsonObject>();
+						Expected->SetStringField(TEXT("space"), TEXT("component_local"));
+						Expected->SetStringField(TEXT("constraint"), TEXT("outside bounds"));
+						Expected->SetField(TEXT("minimum"), WorldVectorValue(Request.BoundsMin));
+						Expected->SetField(TEXT("maximum"), WorldVectorValue(Request.BoundsMax));
+						ReadbackError = WorldFailure(TEXT("world_destructive_readback_failed"),
+							bReadable ? TEXT("A voxel instance remains inside the removal bounds.") : TEXT("A remaining voxel instance transform could not be read."),
+							Component->GetPathName(), TEXT("/instances/") + FString::FromInt(Index),
+							bReadable ? WorldVectorValue(Transform.GetLocation()) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("transform unreadable"))),
+							bReadable ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueObject>(Expected)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("readable instance transform"))));
+					}
 				}
-				return CommitWorld(
-					Request, {Actor->GetOutermost()}, true, bAbsent);
+				return CommitWorld(Request, {Actor->GetOutermost()}, true, MoveTemp(ReadbackError));
 			}
 
 			TWeakObjectPtr<UWorld> World;
@@ -995,20 +1129,23 @@ namespace UE::UAI::DomainAdapters::WorldDestructive
 		FString JournalOwnerId,
 		TSharedRef<IUeAgentWorldDestructiveDurableRunner> DurableRunner,
 		TSharedPtr<IUeAgentWorldDestructiveOwner>& OutOwner,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutOwner.Reset();
 		OutError.Reset();
 		if (!IsValid(&ExplicitWorld))
 		{
-			OutError = TEXT("world_destructive_world_invalid");
+			OutError = WorldFailure(TEXT("world_destructive_world_invalid"), TEXT("World destructive owner creation requires a live explicit world."), FString(), TEXT("/world"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 			return false;
 		}
 		JournalRoot.TrimStartAndEndInline();
 		JournalOwnerId.TrimStartAndEndInline();
 		if (JournalRoot.IsEmpty() || JournalOwnerId.IsEmpty())
 		{
-			OutError = TEXT("world_destructive_journal_config_invalid");
+			auto Actual = MakeShared<FJsonObject>();
+			Actual->SetBoolField(TEXT("journal_root_present"), !JournalRoot.IsEmpty());
+			Actual->SetBoolField(TEXT("journal_owner_present"), !JournalOwnerId.IsEmpty());
+			OutError = WorldFailure(TEXT("world_destructive_journal_config_invalid"), TEXT("World destructive owner requires a journal root and owner identity."), ExplicitWorld.GetPathName(), TEXT("/journal"), MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(TEXT("journal root and owner present")));
 			return false;
 		}
 		OutOwner = MakeShared<FWorldDestructiveOwner>(

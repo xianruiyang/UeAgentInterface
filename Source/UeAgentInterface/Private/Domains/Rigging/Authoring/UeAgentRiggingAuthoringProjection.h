@@ -2,15 +2,17 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Domains/Rigging/Authoring/UeAgentRiggingAuthoringDescriptors.h"
 #include "Utilities/AuthoringExport/UeAgentExportContract.h"
 
 namespace UeAgentRiggingAuthoring
 {
-	UEAGENTINTERFACE_API bool RegisterExportAuthoring(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterExportAuthoring(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool GetExportContract(
 		const FProfile& Profile,
 		UeAgentExportContract::FContract& OutContract,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

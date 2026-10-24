@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -28,14 +30,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::SkinWeight
 		bool bReloaded = false;
 	};
 
-	struct UEAGENTINTERFACE_API FSkinWeightImportError final
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsPresent() const { return !Code.IsEmpty(); }
-	};
+	using FSkinWeightImportError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API ISkinWeightImportSession
 	{
@@ -73,5 +68,5 @@ namespace UE::UAI::DomainAdapters::ExternalImport::SkinWeight
 
 	UEAGENTINTERFACE_API bool TryCreateSkinWeightImportProvider(
 		TSharedPtr<ISkinWeightImportProvider>& OutProvider,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialRequests.h"
 #include "Templates/SharedPointer.h"
 #include "UObject/WeakObjectPtr.h"
@@ -20,6 +21,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		TWeakObjectPtr<USkeleton> Skeleton;
 
 		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 	};
 
 	struct UEAGENTINTERFACE_API FUeAgentRigSimulationSpatialSocketBinding
@@ -32,6 +34,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FString NativeParentFrameId;
 
 		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 	};
 
 	struct UEAGENTINTERFACE_API FUeAgentRigSimulationSpatialRigBakeBinding
@@ -45,6 +48,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		FString NativeControlFrameId;
 
 		bool IsValid() const;
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentRigSimulationSpatialNativeEnvironment
@@ -74,8 +78,6 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 			FindDeformerTrainingInputBinding(const FString& Identity) const = 0;
 		virtual const struct FUeAgentRigSimulationSpatialDeformerEvaluationBinding*
 			FindDeformerEvaluationBinding(const FString& Identity) const = 0;
-		virtual const struct FUeAgentRigSimulationSpatialPcgGenerationBinding*
-			FindPcgGenerationBinding(const FString& SourceIdentity) const = 0;
 		virtual bool TryConvertSpatialValueToFrame(
 			const UE::UAI::StateSemantic::FUeAgentSpatialValue& Value,
 			const FString& TargetFrameId,
@@ -107,6 +109,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		TSharedPtr<IUeAgentRigSimulationSpatialSettlePort> Settle;
 		TSharedPtr<IUeAgentRigSimulationSpatialResultComparator> Comparator;
 
+		bool TryValidate(Contract::FDiagnostic& OutError) const;
 		bool IsValid() const;
 		bool Supports(const FString& CapabilityId) const;
 	};

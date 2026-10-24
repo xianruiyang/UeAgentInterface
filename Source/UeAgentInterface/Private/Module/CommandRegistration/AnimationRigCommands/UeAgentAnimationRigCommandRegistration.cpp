@@ -3,6 +3,7 @@
 #include "CommandHandlers/AnimationRigCommands/UeAgentAnimationRigCommandHandlers.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundActivation.h"
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialActivation.h"
+#include "DomainAdapters/AnimationRigCommands/UeAgentAnimationRigCommandMechanicsBoundary.h"
 #include "QueryOwners/AnimationRigCommands/UeAgentAnimationRigCommandQueryOwner.h"
 
 namespace UE::UAI::Module::CommandRegistration::AnimationRigCommands
@@ -32,13 +33,18 @@ namespace UE::UAI::Module::CommandRegistration::AnimationRigCommands
 		bool TryDeclaration(
 			const FString& CommandId,
 			const FUeAgentCommandContractRegistry& Legacy,
+			const TArray<Composition::TimelineSpatial::
+				FUeAgentTimelineSpatialActivationProfile>& TimelineProfiles,
 			FUeAgentCommandDeclaration& OutDeclaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(CommandId);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("animation_rig_contract_missing:") + CommandId;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("animation_rig_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_rig_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
 				return false;
 			}
 			const bool bQuery = QueryOwners::AnimationRigCommands::IsQuery(CommandId);
@@ -56,10 +62,26 @@ namespace UE::UAI::Module::CommandRegistration::AnimationRigCommands
 			{
 				Result.InputFields.Add({Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
-					TEXT("Exact animation rig mechanics parameter.")});
+					TEXT("Exact animation rig mechanics parameter."), Parameter.GetSchemaJson()});
 			}
 			Result.ResultFields = {{TEXT("result"), TEXT("object"), true, false,
 				TEXT("Native rig, IK, skeleton, hierarchy, or slot result.")}};
+			if (const auto* Profile = TimelineProfiles.FindByPredicate(
+					[&CommandId](const auto& Candidate)
+					{
+						return Candidate.CommandId == CommandId;
+					}))
+			{
+				Result.ModelResultFields = Profile->ModelResultFields;
+			}
+			if (CommandId.EndsWith(TEXT(".asset.create")))
+			{
+				Result.ModelResultFields = {{TEXT("target_ref"), {TEXT("target_ref")}}};
+			}
+			if (CommandId == TEXT("animation.ik_rig.definition.auto_generate"))
+			{
+				Result.ModelResultFields = {{TEXT("target_ref"), {TEXT("target_ref")}}};
+			}
 			Result.Errors = {
 				{TEXT("animation_rig_authority_required"), TEXT("Query or Operation authority is missing.")},
 				{TEXT("animation_rig_runtime_unavailable"), TEXT("Native rig mechanics are unavailable.")},
@@ -69,7 +91,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationRigCommands
 				+ TEXT(" through the common Query/Operation service and native animation rig mechanics.");
 			Result.Purpose.Target = TEXT("One exact Control Rig, IK Rig, retargeter, skeleton, hierarchy, shape, or slot target.");
 			Result.Purpose.Preconditions = {TEXT("Resolve exact asset dependencies, identity, and expected revision before mutation.")};
-			Result.Purpose.ParameterGuidance = TEXT("Use only query.command.detail fields.");
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters.");
 			Result.Purpose.ResultGuidance = TEXT("Verify writes with persisted asset readback.");
 			Result.Purpose.FailureGuidance = TEXT("Failed writes preserve lifecycle diagnostics and owned cleanup.");
 			Result.Purpose.SideEffectGuidance = bQuery
@@ -100,7 +122,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationRigCommands
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::AnimationRigCommands::TryCreateHandlers(OutHandlers, OutError);
 			}
@@ -114,7 +136,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationRigCommands
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
@@ -133,10 +155,16 @@ namespace UE::UAI::Module::CommandRegistration::AnimationRigCommands
 			return false;
 		}
 		TArray<FUeAgentCommandDeclaration> Declarations;
-		for (const FString& CommandId : QueryOwners::AnimationRigCommands::GetCommandIds())
+		for (const FString& CommandId
+			: DomainAdapters::AnimationRigCommands::GetPublicCommandIds())
 		{
 			FUeAgentCommandDeclaration Declaration;
-			if (!TryDeclaration(CommandId, *Legacy, Declaration, OutError)) return false;
+			if (!TryDeclaration(
+					CommandId,
+					*Legacy,
+					TimelineProfiles,
+					Declaration,
+					OutError)) return false;
 			Declarations.Add(MoveTemp(Declaration));
 		}
 		OutContribution = MakeShared<FContribution>(MoveTemp(Declarations));

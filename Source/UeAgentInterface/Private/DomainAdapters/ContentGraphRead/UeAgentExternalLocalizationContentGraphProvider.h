@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -15,5 +17,5 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		const FString& Capability,
 		const TSharedPtr<FJsonObject>& Parameters,
 		TSharedPtr<FJsonObject>& OutObservation,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

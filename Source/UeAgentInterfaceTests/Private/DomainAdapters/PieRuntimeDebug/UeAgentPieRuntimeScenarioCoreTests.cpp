@@ -3,6 +3,7 @@
 #include "Misc/AutomationTest.h"
 
 #include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeScenarioCore.h"
+#include "DomainAdapters/PieRuntimeDebug/UeAgentPieRuntimeScenarioProduction.h"
 
 namespace
 {
@@ -14,7 +15,7 @@ namespace
 		bool IsCurrentPausedSnapshot(
 			const FString& SessionIdentity,
 			int64 ExpectedPauseEpoch,
-			int64 ExpectedWorkspaceRevision) const override
+			int64 ExpectedWorkspaceRevision, UE::UAI::Contract::FDiagnostic& OutError) const override
 		{
 			Calls.Add(TEXT("validate"));
 			ObservedSessionIdentity = SessionIdentity;
@@ -23,7 +24,7 @@ namespace
 			return bSnapshotCurrent;
 		}
 
-		bool Resume() override
+		bool Resume(UE::UAI::Contract::FDiagnostic& OutError) override
 		{
 			Calls.Add(TEXT("resume"));
 			return bResumeSucceeds;
@@ -32,7 +33,7 @@ namespace
 		EUeAgentPieScenarioStepResult ExecuteSteps(
 			double WallTimeLimitSeconds,
 			double GameTimeLimitSeconds,
-			int64 FrameLimit) override
+			int64 FrameLimit, UE::UAI::Contract::FDiagnostic& OutError) override
 		{
 			Calls.Add(TEXT("step"));
 			ObservedWallLimit = WallTimeLimitSeconds;
@@ -41,22 +42,23 @@ namespace
 			return StepResult;
 		}
 
-		bool StopDispatch() override
+		bool StopDispatch(UE::UAI::Contract::FDiagnostic& OutError) override
 		{
 			Calls.Add(TEXT("stop"));
 			return bStopSucceeds;
 		}
 
-		bool ReleaseAllForOperation() override
+		bool ReleaseAllForOperation(const FUeAgentPieScenarioReceipt& Receipt, UE::UAI::Contract::FDiagnostic& OutError) override
 		{
 			Calls.Add(TEXT("release"));
+			ReleasePauseEpoch = Receipt.PauseEpoch;
 			++ReleaseCount;
 			return bReleaseSucceeds;
 		}
 
 		bool RepauseAndVerify(
 			const FString& SessionIdentity,
-			int64& OutPauseEpoch) override
+			int64& OutPauseEpoch, UE::UAI::Contract::FDiagnostic& OutError) override
 		{
 			Calls.Add(TEXT("pause"));
 			ObservedSessionIdentity = SessionIdentity;
@@ -64,10 +66,16 @@ namespace
 			return bPauseSucceeds;
 		}
 
+		bool CapturePausedObservations(const FUeAgentPieScenarioReceipt& Receipt, UE::UAI::Contract::FDiagnostic& OutError) override
+		{
+			Calls.Add(TEXT("observe"));
+			return bObserveSucceeds;
+		}
+
 		bool RefreshCurrentWorkspace(
 			const FString& SessionIdentity,
 			int64 PreviousWorkspaceRevision,
-			int64& OutWorkspaceRevision) override
+			int64& OutWorkspaceRevision, UE::UAI::Contract::FDiagnostic& OutError) override
 		{
 			Calls.Add(TEXT("refresh"));
 			ObservedSessionIdentity = SessionIdentity;
@@ -84,12 +92,14 @@ namespace
 		double ObservedGameLimit = 0.0;
 		int64 ObservedFrameLimit = 0;
 		int32 ReleaseCount = 0;
+		int64 ReleasePauseEpoch = 0;
 		bool bSnapshotCurrent = true;
 		bool bResumeSucceeds = true;
 		bool bPauseSucceeds = true;
 		bool bRefreshSucceeds = true;
 		bool bStopSucceeds = true;
 		bool bReleaseSucceeds = true;
+		bool bObserveSucceeds = true;
 		int64 RefreshedRevision = 21;
 		EUeAgentPieScenarioStepResult StepResult =
 			EUeAgentPieScenarioStepResult::Succeeded;
@@ -133,7 +143,7 @@ bool FUeAgentPieRuntimeScenarioCoreTest::RunTest(const FString& Parameters)
 	{
 		FFakeScenarioPorts Ports;
 		FUeAgentPieScenarioRequest Invalid = MakeRequest();
-		Invalid.FrameLimit = 0;
+		Invalid.FrameLimit = -1;
 		const FUeAgentPieScenarioReceipt Receipt =
 			RunPieRuntimeScenario(Invalid, Ports);
 		TestEqual(TEXT("invalid request terminal"), Receipt.TerminalStatus,
@@ -158,13 +168,36 @@ bool FUeAgentPieRuntimeScenarioCoreTest::RunTest(const FString& Parameters)
 		const FUeAgentPieScenarioReceipt Receipt =
 			RunPieRuntimeScenario(MakeRequest(), Ports);
 		TestEqual(TEXT("success terminal"), Receipt.TerminalStatus, FString(TEXT("succeeded")));
-		TestTrue(TEXT("success finally order"), HasOrderedFinally(Ports.Calls));
-		TestEqual(TEXT("success release once"), Ports.ReleaseCount, 1);
+		TestTrue(TEXT("success pauses then refreshes"), Ports.Calls.Find(TEXT("stop")) < Ports.Calls.Find(TEXT("pause"))
+			&& Ports.Calls.Find(TEXT("pause")) < Ports.Calls.Find(TEXT("refresh")));
+		TestEqual(TEXT("success retains session input"), Ports.ReleaseCount, 0);
 		TestEqual(TEXT("refresh raises revision"), Receipt.WorkspaceRevision, int64(21));
 		TestEqual(TEXT("session identity frozen"), Ports.ObservedSessionIdentity, MakeRequest().SessionIdentity);
 		TestEqual(TEXT("wall limit forwarded"), Ports.ObservedWallLimit, 3.0);
 		TestEqual(TEXT("game limit forwarded"), Ports.ObservedGameLimit, 1.5);
 		TestEqual(TEXT("frame limit forwarded"), Ports.ObservedFrameLimit, int64(90));
+	}
+
+	{
+		FFakeScenarioPorts Ports;
+		Ports.bObserveSucceeds = false;
+		const FUeAgentPieScenarioReceipt Receipt = RunPieRuntimeScenario(MakeRequest(), Ports);
+		TestEqual(TEXT("late observation failure terminal"), Receipt.TerminalStatus, FString(TEXT("failed")));
+		TestEqual(TEXT("late observation failure cause"), Receipt.Diagnostic.Code, FString(TEXT("scenario_observation_failed")));
+		TestEqual(TEXT("late observation failure releases once"), Ports.ReleaseCount, 1);
+		TestEqual(TEXT("late release uses current pause epoch"), Ports.ReleasePauseEpoch, int64(12));
+		TestTrue(TEXT("release precedes final workspace publication"),
+			Ports.Calls.Find(TEXT("pause")) < Ports.Calls.Find(TEXT("observe"))
+			&& Ports.Calls.Find(TEXT("observe")) < Ports.Calls.Find(TEXT("release"))
+			&& Ports.Calls.Find(TEXT("release")) < Ports.Calls.Find(TEXT("refresh")));
+		TestTrue(TEXT("late failure still publishes paused current"), Receipt.bPaused && Receipt.bWorkspaceRefreshed);
+		FFakeScenarioPorts UnconfirmedRelease;
+		UnconfirmedRelease.bObserveSucceeds = false;
+		UnconfirmedRelease.bReleaseSucceeds = false;
+		const auto Unconfirmed = RunPieRuntimeScenario(MakeRequest(), UnconfirmedRelease);
+		TestEqual(TEXT("cleanup does not replace observation cause"), Unconfirmed.Diagnostic.Code, FString(TEXT("scenario_observation_failed")));
+		TestFalse(TEXT("unconfirmed release is not reported as known"), Unconfirmed.bStateKnown);
+		TestTrue(TEXT("unconfirmed release diagnostic retained"), Unconfirmed.CleanupDiagnostics.ContainsByPredicate([](const auto& Error) { return Error.Code == TEXT("scenario_release_all_failed"); }));
 	}
 
 	struct FOutcomeCase
@@ -193,7 +226,7 @@ bool FUeAgentPieRuntimeScenarioCoreTest::RunTest(const FString& Parameters)
 		Ports.bPauseSucceeds = false;
 		const FUeAgentPieScenarioReceipt Receipt =
 			RunPieRuntimeScenario(MakeRequest(), Ports);
-		TestEqual(TEXT("pause failure is unknown"), Receipt.TerminalStatus, FString(TEXT("state_unknown")));
+		TestFalse(TEXT("pause failure leaves state unknown"), Receipt.bStateKnown);
 		TestFalse(TEXT("pause failure skips refresh"), Ports.Calls.Contains(TEXT("refresh")));
 		TestEqual(TEXT("pause failure release once"), Ports.ReleaseCount, 1);
 	}
@@ -203,8 +236,8 @@ bool FUeAgentPieRuntimeScenarioCoreTest::RunTest(const FString& Parameters)
 		Ports.bRefreshSucceeds = false;
 		const FUeAgentPieScenarioReceipt Receipt =
 			RunPieRuntimeScenario(MakeRequest(), Ports);
-		TestEqual(TEXT("refresh failure is unknown"), Receipt.TerminalStatus, FString(TEXT("state_unknown")));
-		TestTrue(TEXT("refresh follows pause"), HasOrderedFinally(Ports.Calls));
+		TestFalse(TEXT("refresh failure leaves state unknown"), Receipt.bStateKnown);
+		TestTrue(TEXT("refresh follows pause"), Ports.Calls.Find(TEXT("pause")) < Ports.Calls.Find(TEXT("refresh")));
 		TestEqual(TEXT("failed refresh keeps old revision"), Receipt.WorkspaceRevision, int64(20));
 		TestEqual(TEXT("refresh failure release once"), Ports.ReleaseCount, 1);
 	}
@@ -214,7 +247,7 @@ bool FUeAgentPieRuntimeScenarioCoreTest::RunTest(const FString& Parameters)
 		Ports.RefreshedRevision = 20;
 		const FUeAgentPieScenarioReceipt Receipt =
 			RunPieRuntimeScenario(MakeRequest(), Ports);
-		TestEqual(TEXT("non-increasing refresh is unknown"), Receipt.TerminalStatus, FString(TEXT("state_unknown")));
+		TestFalse(TEXT("non-increasing refresh leaves state unknown"), Receipt.bStateKnown);
 	}
 
 	{
@@ -223,19 +256,34 @@ bool FUeAgentPieRuntimeScenarioCoreTest::RunTest(const FString& Parameters)
 		Ports.bStopSucceeds = false;
 		const FUeAgentPieScenarioReceipt Receipt =
 			RunPieRuntimeScenario(MakeRequest(), Ports);
-		TestEqual(TEXT("stop failure is unknown"), Receipt.TerminalStatus,
-			FString(TEXT("state_unknown")));
+		TestFalse(TEXT("stop failure leaves state unknown"), Receipt.bStateKnown);
 		TestTrue(TEXT("stop failure still refreshes"), HasOrderedFinally(Ports.Calls));
 	}
 
 	{
 		FFakeScenarioPorts Ports;
 		Ports.bReleaseSucceeds = false;
+		Ports.StepResult = EUeAgentPieScenarioStepResult::Failed;
 		const FUeAgentPieScenarioReceipt Receipt =
 			RunPieRuntimeScenario(MakeRequest(), Ports);
-		TestEqual(TEXT("release failure is unknown"), Receipt.TerminalStatus,
-			FString(TEXT("state_unknown")));
+		TestFalse(TEXT("release failure leaves state unknown"), Receipt.bStateKnown);
+		TestEqual(TEXT("release failure preserves primary failure"), Receipt.TerminalStatus, FString(TEXT("failed")));
 		TestEqual(TEXT("release failure calls release once"), Ports.ReleaseCount, 1);
+	}
+
+	{
+		const FTransform Expected(
+			FRotator(0.0, 30.0, 0.0), FVector(150.0, 0.0, 50.0),
+			FVector::OneVector);
+		const FTransform Unchanged(
+			FRotator::ZeroRotator, FVector(0.0, 0.0, 50.0),
+			FVector::OneVector);
+		TestFalse(TEXT("actor transform success requires immediate readback"),
+			DoesPieActorTransformReadbackMatch(
+				Expected, Unchanged, true, true, true));
+		TestTrue(TEXT("matching actor transform readback succeeds"),
+			DoesPieActorTransformReadbackMatch(
+				Expected, Expected, true, true, true));
 	}
 
 	return true;

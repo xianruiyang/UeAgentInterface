@@ -27,21 +27,7 @@ namespace
 	{
 		return MakeShared<
 			FUeAgentResourceTracker,
-			ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1048576},
-				{EUeAgentResourceDimension::OutputBytes, 1048576},
-				{EUeAgentResourceDimension::StringBytes, 1048576},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 4096},
-				{EUeAgentResourceDimension::Files, 64},
-				{EUeAgentResourceDimension::ReferenceEdges, 4096},
-				{EUeAgentResourceDimension::WorkUnits, 65536},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					16777216
-				},
-			}));
+			ESPMode::ThreadSafe>();
 	}
 
 	static FUeAgentCanonicalIdentity MakeIdentity(
@@ -646,6 +632,7 @@ bool FUeAgentGenericEffectBoundaryTest::RunTest(
 			TEXT("rejection has zero UE effects"),
 			UeHook->ApplyCalls,
 			0);
+		TestTrue(TEXT("boundary failure confirms no mutation"), Facts.IsNoMutationConfirmed());
 	};
 
 	const FUeAgentCanonicalIdentity Identity = MakeIdentity();
@@ -704,6 +691,16 @@ bool FUeAgentGenericEffectBoundaryTest::RunTest(
 	TestTrue(
 		TEXT("partial effect remains rollback-supported"),
 		Facts.IsRollbackSupported());
+	for (const bool bConfirmed : {false, true})
+	{
+		UeHook->ApplyResult = bConfirmed
+			? FUeAgentGenericEffectApplyResult::NoMutation() : FUeAgentGenericEffectApplyResult();
+		const auto FreshHook = MakeMutationHook(UeHook, MakeEffectBinding(Identity));
+		TestFalse(TEXT("native preparation failure propagates"), FreshHook->Execute(
+			Request, Lease, *Fixture.Resources, Facts, Error));
+		TestEqual(TEXT("explicit no-mutation evidence propagated"), Facts.IsNoMutationConfirmed(), bConfirmed);
+		TestFalse(TEXT("preparation failure does not invent mutated keys"), Facts.IsValid());
+	}
 	return true;
 }
 

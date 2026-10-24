@@ -24,9 +24,6 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category="Server")
 	FString AuthToken;
 
-	UPROPERTY(Config, EditAnywhere, Category="Screenshots")
-	bool bEnableScreenshots;
-
 	UPROPERTY(Config, EditAnywhere, Category="Artifacts")
 	FString ArtifactsDirRelative;
 

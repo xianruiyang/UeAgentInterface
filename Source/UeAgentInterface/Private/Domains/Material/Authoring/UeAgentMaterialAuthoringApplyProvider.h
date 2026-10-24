@@ -3,7 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Domains/Material/Authoring/UeAgentMaterialGraphAuthoring.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
 
 class FJsonObject;
 class FJsonValue;
@@ -23,17 +25,21 @@ namespace UeAgentMaterialAuthoring
 		FString SourceAssetPath;
 		TArray<TSharedPtr<FJsonValue>> Properties;
 		TSharedPtr<FJsonObject> Graph;
+		FGraphApplyContext GraphContext;
 		TSharedPtr<FJsonObject> FunctionSettings;
+		TArray<TSharedPtr<FJsonValue>> InstanceParameters;
+		TSharedPtr<FJsonValue> InstanceLayers;
 		bool bCompile = true;
 		bool bSave = false;
+		TFunction<bool(UeAgentAuthoringWorkspaceTransaction::FOperationFailure&)> FinalReadback;
+		TSharedPtr<UeAgentAuthoringOperationApply::IDurablePackageStager> PackageStager;
 	};
 
 	struct UEAGENTINTERFACE_API FAssetApplyResult
 	{
 		FString Status;
 		FString Phase;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ResolvedOperation;
 		FString AssetPath;
 		FString ObjectPath;
@@ -50,8 +56,8 @@ namespace UeAgentMaterialAuthoring
 		bool IsApplied() const { return Status == TEXT("applied"); }
 	};
 
-	UEAGENTINTERFACE_API bool RegisterApplyContracts(FString& OutError);
-	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeApplyProvider();
+	UEAGENTINTERFACE_API bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeApplyProvider(const FGraphApplyContext& Context = {});
 	UEAGENTINTERFACE_API bool ApplyAsset(const FAssetApplyRequest& Request, FAssetApplyResult& OutResult, const FString& RequestId = FString());
 	UEAGENTINTERFACE_API bool ApplyAssetWorkspace(
 		const FString& WorkspaceRoot,

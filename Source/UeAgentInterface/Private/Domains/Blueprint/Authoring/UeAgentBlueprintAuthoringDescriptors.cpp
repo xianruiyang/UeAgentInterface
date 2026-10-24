@@ -1,10 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringDescriptors.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringOps.h"
 
 #include "Engine/Blueprint.h"
+#include "Engine/SCS_Node.h"
 #include "GameFramework/Actor.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticRegistry.h"
 
 namespace UeAgentBlueprintAuthoring
@@ -14,12 +20,62 @@ namespace UeAgentBlueprintAuthoring
 		using UeAgentAuthoringIdentity::FKeyPattern;
 		using UeAgentAuthoringIdentity::FSelectorDescriptor;
 
+		bool RegisterComponentComparator(UE::UAI::Contract::FDiagnostic& Error)
+		{
+			UeAgentAuthoringSemanticCompare::FComparatorDescriptor Descriptor;
+			Descriptor.ComparatorId = TEXT("uai.compare.blueprint_component");
+			Descriptor.ValueKinds = {TEXT("object")};
+			Descriptor.CapabilityTags = {TEXT("native_reference_identity")};
+			UeAgentAuthoringSemanticCompare::ERegistrationResult Result;
+			return UeAgentAuthoringSemanticCompare::FComparatorRegistry::Get().RegisterComparator(
+				Descriptor, [](const auto& Left, const auto& Right, bool& Equivalent, UE::UAI::Contract::FDiagnostic& CompareError)
+				{
+					auto Expected = Left;
+					Expected.Value = UeAgentAuthoringState::CloneCanonicalValue(Left.Value);
+					if (Expected.Value && Right.Value && Expected.Value->Type == EJson::Object && Right.Value->Type == EJson::Object)
+					{
+						const auto A = Expected.Value->AsObject(), B = Right.Value->AsObject();
+						FString AParent, BParent;
+						if (A->TryGetStringField(TEXT("parent"), AParent) && B->TryGetStringField(TEXT("parent"), BParent)
+							&& AParent != BParent && !AParent.IsEmpty() && !BParent.IsEmpty())
+						{
+							if (auto* Blueprint = UeAgentBlueprintAuthoringOps::LoadBlueprintAsset(Left.TargetIdentity.GetSelector(TEXT("asset_path"))))
+							{
+								auto Resolve = [Blueprint](const FString& Name) -> UActorComponent*
+								{
+									if (auto* Node = UeAgentBlueprintAuthoringOps::FindSCSNodeByAnyName(Blueprint->SimpleConstructionScript, Name))
+										return Node->ComponentTemplate;
+									return UeAgentBlueprintAuthoringOps::ResolveInheritedComponent(*Blueprint, Name);
+								};
+								auto* Requested = Resolve(AParent);
+								if (Requested && Requested == Resolve(BParent)) A->SetStringField(TEXT("parent"), BParent);
+							}
+						}
+					}
+					UeAgentAuthoringSemanticCompare::FComparator Canonical;
+					if (!UeAgentAuthoringSemanticCompare::FComparatorRegistry::Get().CopyComparator(
+						TEXT("uai.compare.canonical_value"), Canonical))
+					{
+						CompareError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("semantic_comparator_unknown"),
+							TEXT("Blueprint component comparison requires the canonical value comparator, which is not registered."),
+							TEXT("semantic_compare"), TEXT("uai.compare.canonical_value"));
+						CompareError.SourceKind = TEXT("native_result");
+						CompareError.TargetPath = Left.TargetIdentity.GetSelector(TEXT("asset_path"));
+						CompareError.PropertyPath = TEXT("canonical_comparator_registered");
+						CompareError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+						CompareError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+						return false;
+					}
+					return Canonical(Expected, Right, Equivalent, CompareError);
+				}, Result, Error);
+		}
+
 		bool RegisterIdentity(
 			const TCHAR* ModelId,
 			const TCHAR* TargetKind,
 			const TArray<FSelectorDescriptor>& Selectors,
 			const TArray<FKeyPattern>& Patterns,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringIdentity::FModelDescriptor Model;
 			Model.ModelId = ModelId;
@@ -41,7 +97,8 @@ namespace UeAgentBlueprintAuthoring
 			const UeAgentAuthoringSemanticRegistry::EDefaultSourceKind DefaultSource,
 			const TCHAR* DefaultAccessor,
 			const TArray<FString>& CapabilityTags,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError,
+			const TCHAR* Comparator = TEXT("uai.compare.canonical_value"))
 		{
 			UeAgentAuthoringSemanticRegistry::FSemanticDescriptor Semantic;
 			Semantic.SemanticId = SemanticId;
@@ -56,7 +113,7 @@ namespace UeAgentBlueprintAuthoring
 			Semantic.AvailabilitySource = AccessorId;
 			Semantic.DefaultSourceKind = DefaultSource;
 			Semantic.DefaultAccessor = DefaultAccessor;
-			Semantic.Comparator = TEXT("uai.compare.canonical_value");
+			Semantic.Comparator = Comparator;
 			Semantic.CapabilityTags = CapabilityTags;
 			UeAgentAuthoringSemanticRegistry::ERegistrationResult Result;
 			return UeAgentAuthoringSemanticRegistry::FRegistry::Get().RegisterSemantic(
@@ -67,7 +124,7 @@ namespace UeAgentBlueprintAuthoring
 			const TCHAR* SemanticId,
 			const TCHAR* TargetKind,
 			const TCHAR* IdentityModelId,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			return RegisterSemantic(
 				SemanticId,
@@ -83,7 +140,7 @@ namespace UeAgentBlueprintAuthoring
 		}
 	}
 
-	bool RegisterDescriptors(FString& OutError)
+	bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const TArray<FSelectorDescriptor> AssetSelectors = {
 			{ TEXT("asset_path"), 100, false },
@@ -199,6 +256,7 @@ namespace UeAgentBlueprintAuthoring
 		PinSelectors.Append({
 			{ TEXT("pin_guid"), 160, false },
 			{ TEXT("pin_name"), 120, true },
+			{ TEXT("pin_occurrence"), 30, false },
 			{ TEXT("property_path"), 170, true },
 		});
 		if (!RegisterIdentity(
@@ -206,10 +264,13 @@ namespace UeAgentBlueprintAuthoring
 			TEXT("blueprint_pin_default"),
 			PinSelectors,
 			{
-				{ TEXT("guid"), 0, { TEXT("asset_path"), TEXT("node_guid"), TEXT("pin_guid") } },
+				{ TEXT("guid"), 0, {
+					TEXT("asset_path"), TEXT("node_guid"), TEXT("pin_guid"),
+					TEXT("pin_name"), TEXT("pin_occurrence") } },
 				{ TEXT("name_kind"), 100, {
 					TEXT("asset_path"), TEXT("graph_kind"), TEXT("graph_name"),
-					TEXT("node_kind"), TEXT("node_name"), TEXT("node_occurrence"), TEXT("pin_name") } },
+					TEXT("node_kind"), TEXT("node_name"), TEXT("node_occurrence"),
+					TEXT("pin_name"), TEXT("pin_occurrence") } },
 			},
 			OutError))
 		{
@@ -301,6 +362,7 @@ namespace UeAgentBlueprintAuthoring
 
 		using UeAgentAuthoringSemanticRegistry::EDefaultSourceKind;
 		using UeAgentAuthoringSemanticRegistry::EWriteCapability;
+		if (!RegisterComponentComparator(OutError)) return false;
 		return RegisterSemantic(
 				AssetSemanticId, TEXT("blueprint_asset"), AssetIdentityModelId,
 				StateAccessorId, TEXT("object"), EWriteCapability::DomainMutation,
@@ -335,20 +397,20 @@ namespace UeAgentBlueprintAuthoring
 				ComponentSemanticId, TEXT("blueprint_component"), ComponentIdentityModelId,
 				StateAccessorId, TEXT("object"), EWriteCapability::DomainMutation,
 				EDefaultSourceKind::None, TEXT(""),
-				{ TEXT("blueprint"), TEXT("scs"), TEXT("component") }, OutError)
+				{ TEXT("blueprint"), TEXT("scs"), TEXT("component") }, OutError, TEXT("uai.compare.blueprint_component"))
 			&& RegisterSemantic(
 				GraphSemanticId, TEXT("blueprint_graph"), GraphIdentityModelId,
 				StateAccessorId, TEXT("object"), EWriteCapability::DomainMutation,
 				EDefaultSourceKind::None, TEXT(""),
-				{ TEXT("blueprint"), TEXT("graph") }, OutError)
+				{ TEXT("blueprint"), TEXT("graph") }, OutError, TEXT("uai.compare.graph_rounded_int32_position"))
 			&& RegisterSemantic(
 				NodeSemanticId, TEXT("blueprint_node"), NodeIdentityModelId,
 				StateAccessorId, TEXT("object"), EWriteCapability::DomainMutation,
 				EDefaultSourceKind::None, TEXT(""),
-				{ TEXT("blueprint"), TEXT("graph"), TEXT("node") }, OutError)
+				{ TEXT("blueprint"), TEXT("graph"), TEXT("node") }, OutError, TEXT("uai.compare.graph_rounded_int32_position"))
 			&& RegisterSemantic(
 				PinDefaultSemanticId, TEXT("blueprint_pin_default"), PinDefaultIdentityModelId,
-				StateAccessorId, TEXT("object"), EWriteCapability::DomainMutation,
+				StateAccessorId, TEXT("*"), EWriteCapability::DomainMutation,
 				EDefaultSourceKind::ExistingInstance, TEXT(""),
 				{ TEXT("blueprint"), TEXT("graph"), TEXT("pin_default") }, OutError)
 			&& RegisterSemantic(

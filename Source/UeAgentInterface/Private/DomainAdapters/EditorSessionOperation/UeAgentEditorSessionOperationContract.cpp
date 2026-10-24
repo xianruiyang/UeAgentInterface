@@ -81,21 +81,27 @@ namespace UE::UAI::DomainAdapters::EditorSessionOperation
 					TEXT("uai.editor_session.modeling_tool.state/v1"),
 				},
 				{
-					EUeAgentEditorSessionOperationFamily::VoxelGrid,
-					TEXT("voxel_grid"),
-					TEXT("voxel_session_ref"),
-					TEXT("voxel_session_policy_ref"),
-					TEXT("uai.editor_session.voxel_grid.state/v1"),
-				},
-				{
 					EUeAgentEditorSessionOperationFamily::HostLifecycle,
 					TEXT("host_lifecycle"),
 					TEXT("editor_instance_ref"),
 					TEXT("host_lifecycle_policy_ref"),
 					TEXT("uai.editor_session.host_lifecycle.state/v1"),
 				},
+				{
+					EUeAgentEditorSessionOperationFamily::PcgGeneration,
+					TEXT("pcg_generation"),
+					TEXT("pcg_component_ref"),
+					TEXT("pcg_generation_policy_ref"),
+					TEXT("uai.editor_session.pcg_generation.state/v1"),
+				},
 			};
 		return Contracts;
+	}
+
+	bool IsEditorSessionCommandFamily(const EUeAgentEditorSessionOperationFamily Family)
+	{
+		return Family != EUeAgentEditorSessionOperationFamily::HostLifecycle
+			&& FindEditorSessionOperationFamilyContract(Family) != nullptr;
 	}
 
 	const FUeAgentEditorSessionOperationFamilyContract*

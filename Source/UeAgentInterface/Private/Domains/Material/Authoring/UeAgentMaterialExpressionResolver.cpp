@@ -2,8 +2,8 @@
 
 #include "Domains/Material/Authoring/UeAgentMaterialExpressionResolver.h"
 
-#include "Commands/PaletteSearch/UeAgentPaletteSearchAuthoring.h"
-#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Dom/JsonValue.h"
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialFunctionInterface.h"
@@ -17,20 +17,17 @@ namespace UeAgentMaterialAuthoring
 			UClass* Candidate,
 			const FString& Source,
 			UClass*& InOutResolved,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!Candidate || !Candidate->IsChildOf(UMaterialExpression::StaticClass())
 				|| Candidate->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
 			{
-				OutError = TEXT("material_expression_class_invalid:") + Source;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_expression_class_invalid"), FString::Printf(TEXT("The material expression class is invalid: %s."), *Source), TEXT("candidate_resolution"));
 				return false;
 			}
 			if (InOutResolved && InOutResolved != Candidate)
 			{
-				OutError = FString::Printf(
-					TEXT("material_expression_class_conflict:%s != %s"),
-					*InOutResolved->GetPathName(),
-					*Candidate->GetPathName());
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_expression_class_conflict"), FString::Printf(TEXT("The material expression class selectors disagree: %s and %s."), *InOutResolved->GetPathName(), *Candidate->GetPathName()), TEXT("candidate_resolution"));
 				return false;
 			}
 			InOutResolved = Candidate;
@@ -41,19 +38,16 @@ namespace UeAgentMaterialAuthoring
 			UMaterialFunctionInterface* Candidate,
 			const FString& Source,
 			UMaterialFunctionInterface*& InOutResolved,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!Candidate)
 			{
-				OutError = TEXT("material_function_not_found:") + Source;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_function_not_found"), FString::Printf(TEXT("The material function could not be resolved: %s."), *Source), TEXT("candidate_resolution"));
 				return false;
 			}
 			if (InOutResolved && InOutResolved != Candidate)
 			{
-				OutError = FString::Printf(
-					TEXT("material_function_identity_conflict:%s != %s"),
-					*InOutResolved->GetPathName(),
-					*Candidate->GetPathName());
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_function_identity_conflict"), FString::Printf(TEXT("The material function selectors disagree: %s and %s."), *InOutResolved->GetPathName(), *Candidate->GetPathName()), TEXT("candidate_resolution"));
 				return false;
 			}
 			InOutResolved = Candidate;
@@ -99,7 +93,7 @@ namespace UeAgentMaterialAuthoring
 	bool ResolveExpression(
 		const FExpressionResolveRequest& Request,
 		FExpressionResolveResult& OutResult,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutResult = FExpressionResolveResult();
 		OutError.Reset();
@@ -140,19 +134,27 @@ namespace UeAgentMaterialAuthoring
 		const FString CatalogName = Request.CatalogName.TrimStartAndEnd();
 		if (!CatalogName.IsEmpty())
 		{
+			UeAgentPaletteSearch::FSearchParams SearchParams;
+			SearchParams.CatalogType = TEXT("material_node");
+			SearchParams.SearchText = CatalogName;
+			SearchParams.SearchMode = TEXT("exact");
+			SearchParams.Sort = TEXT("score");
+			SearchParams.AssetPath = Request.ContextAssetPath;
+			SearchParams.GraphName = Request.ContextGraphName;
+			SearchParams.PinName = Request.ContextPinName;
 			UeAgentPaletteSearch::FCandidate Candidate;
-			FString ResolveError;
-			if (!UeAgentPaletteSearch::ResolveCatalogNameToCandidate(
-				TEXT("material_node"),
+			UE::UAI::Contract::FDiagnostic ResolveError;
+			if (!UeAgentPaletteSearch::TryResolveMaterialActionCandidate(
+				SearchParams,
 				CatalogName,
+				Request.CatalogSelect,
+				FString(),
 				Candidate,
-				ResolveError,
-				Request.ContextAssetPath,
-				Request.ContextGraphName))
+				ResolveError, Request.CatalogInputContext.JsonPath.IsEmpty() ? nullptr : &Request.CatalogInputContext))
 			{
-				OutError = ResolveError.IsEmpty()
-					? TEXT("material_expression_catalog_unresolved:") + CatalogName
-					: ResolveError;
+				OutError = ResolveError;
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CatalogName;
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.ContextAssetPath;
 				return false;
 			}
 			if (Candidate.Kind.Equals(TEXT("material_function_call"), ESearchCase::IgnoreCase))
@@ -183,7 +185,10 @@ namespace UeAgentMaterialAuthoring
 		}
 		if (!ResolvedClass)
 		{
-			OutError = TEXT("material_expression_identity_missing");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_expression_identity_missing"), TEXT("Specify a material expression class, function, or catalog candidate."), TEXT("candidate_resolution"));
+			OutError.PropertyPath = TEXT("candidate");
+			OutError.ActualValuePresent = false;
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("expression class, function path, or catalog candidate"));
 			return false;
 		}
 

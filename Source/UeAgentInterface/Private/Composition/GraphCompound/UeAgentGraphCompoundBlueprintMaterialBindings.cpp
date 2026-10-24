@@ -1,7 +1,10 @@
 #include "Composition/GraphCompound/UeAgentGraphCompoundBlueprintMaterialBindings.h"
 
-#include "Composition/HjsonImport/UeAgentHjsonImportOperationRuntime.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
+#include "Dom/JsonValue.h"
+#include "Misc/ScopeExit.h"
 
 namespace UE::UAI::Composition::GraphCompound
 {
@@ -11,17 +14,65 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
-		void SetError(
-			FGraphCompoundRuntimeError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		void SetError(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject; }
+
+		FDiagnostic BindingFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Subject,
+			const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected)
 		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, TEXT("graph_compound"), FString(), Subject);
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
+
+		FDiagnostic DescriptorMismatch(
+			const FUeAgentDescriptorIdentity& Actual,
+			const FUeAgentDescriptorIdentity& Expected)
+		{
+			FDiagnostic Error = FDiagnostic::Failure(
+				TEXT("graph_compound_binding_descriptor_mismatch"),
+				TEXT("The request descriptor does not match the graph binding."),
+				TEXT("graph_compound"), FString(), Expected.GetDescriptorId());
+			Error.SourceKind = TEXT("native_result");
+			if (Actual.GetDescriptorId() != Expected.GetDescriptorId())
+			{
+				Error.PropertyPath = TEXT("descriptor_identity.descriptor_id");
+				Error.ActualValue = MakeShared<FJsonValueString>(Actual.GetDescriptorId());
+				Error.ExpectedValue = MakeShared<FJsonValueString>(Expected.GetDescriptorId());
+			}
+			else if (Actual.GetVersion() != Expected.GetVersion())
+			{
+				Error.PropertyPath = TEXT("descriptor_identity.version");
+				Error.ActualValue = MakeShared<FJsonValueNumber>(Actual.GetVersion());
+				Error.ExpectedValue = MakeShared<FJsonValueNumber>(Expected.GetVersion());
+			}
+			else
+			{
+				Error.PropertyPath = TEXT("descriptor_identity.descriptor_hash");
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Actual.GetDescriptorHash());
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected.GetDescriptorHash());
+			}
+			return Error;
+		}
+
+		FDiagnostic PlanningFailure(
+			const bool bPlanned, const FPlanningResult& Planning, const FString& Subject)
+		{
+			return BindingFailure(TEXT("graph_compound_planning_not_ready"),
+				!bPlanned ? TEXT("Graph change planning failed without a diagnostic.")
+					: !Planning.IsReady() ? TEXT("Graph change planning did not reach the ready state.")
+					: TEXT("Graph change planning returned ready without a plan."),
+				Subject, !bPlanned ? TEXT("planning.succeeded")
+					: !Planning.IsReady() ? TEXT("planning.ready") : TEXT("planning.plan_present"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+		}
+
+
 
 		class FBlueprintMaterialQueryBinding final
 			: public IGraphCompoundQueryBinding
@@ -58,9 +109,7 @@ namespace UE::UAI::Composition::GraphCompound
 				OutError = {};
 				if (Request.GetDescriptorIdentity() != GetDescriptorIdentity())
 				{
-					SetError(OutError,
-						TEXT("graph_compound_binding_descriptor_mismatch"),
-						Profile.GetDescriptorId());
+					OutError = DescriptorMismatch(Request.GetDescriptorIdentity(), GetDescriptorIdentity());
 					return false;
 				}
 				FGraphCompoundEventQueryRequest Decoded;
@@ -69,8 +118,7 @@ namespace UE::UAI::Composition::GraphCompound
 						Profile, Request.GetPayload(), *Resources,
 						Decoded, DecodeError))
 				{
-					SetError(OutError, DecodeError.Code,
-						DecodeError.SubjectId, DecodeError.Detail);
+					SetError(OutError, DecodeError);
 					return false;
 				}
 				return Environment->TryQuery(
@@ -119,9 +167,7 @@ namespace UE::UAI::Composition::GraphCompound
 				OutError = {};
 				if (Request.GetDescriptorIdentity() != GetDescriptorIdentity())
 				{
-					SetError(OutError,
-						TEXT("graph_compound_binding_descriptor_mismatch"),
-						Profile.GetDescriptorId());
+					OutError = DescriptorMismatch(Request.GetDescriptorIdentity(), GetDescriptorIdentity());
 					return false;
 				}
 				if (Profile.GetRouteKind()
@@ -159,9 +205,11 @@ namespace UE::UAI::Composition::GraphCompound
 							== EGraphCompoundTypedInputKind::NiagaraRendererEventParameter;
 					if (!bAssetCreate && !bCanonicalMutation)
 					{
-						SetError(OutError,
-							TEXT("graph_compound_production_binding_unimplemented"),
-							Profile.GetCapabilityId());
+						OutError = BindingFailure(TEXT("graph_compound_production_binding_unimplemented"),
+							TEXT("The graph binding does not implement this typed input kind."),
+							Profile.GetCapabilityId(), TEXT("typed_input_kind"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Profile.GetTypedInputKind())),
+							MakeShared<FJsonValueString>(TEXT("supported asset creation or canonical mutation kind")));
 						return false;
 					}
 					if (bCanonicalMutation)
@@ -186,8 +234,7 @@ namespace UE::UAI::Composition::GraphCompound
 									Profile, Request.GetPayload(), *Resources,
 									Decoded, RouteError))
 							{
-								SetError(OutError, RouteError.Code,
-									RouteError.SubjectId, RouteError.Detail);
+								SetError(OutError, RouteError);
 								return false;
 							}
 							TargetRef = Decoded.GetTargetRef();
@@ -197,17 +244,22 @@ namespace UE::UAI::Composition::GraphCompound
 							Profile, Request.GetPayload(), *Resources,
 							TargetRef, RouteError))
 						{
-							SetError(OutError, RouteError.Code,
-								RouteError.SubjectId, RouteError.Detail);
+							SetError(OutError, RouteError);
 							return false;
 						}
 						StateSemantic::FUeAgentCanonicalSnapshotPtr Snapshot;
-						if (!Environment->TryCaptureTypedOperationSnapshot(
-								Profile, TargetRef, NiagaraSelector,
-								Resources, Cancellation,
-								Snapshot, OutError)
-							|| !Snapshot.IsValid())
+						const bool bCaptured = Environment->TryCaptureTypedOperationSnapshot(
+							Profile, TargetRef, NiagaraSelector, Resources, Cancellation, Snapshot, OutError);
+						if (!bCaptured || !Snapshot.IsValid())
 						{
+							if (OutError.IsEmpty())
+							{
+								OutError = BindingFailure(TEXT("graph_compound_snapshot_missing"),
+									bCaptured ? TEXT("Snapshot capture returned without a graph snapshot.")
+										: TEXT("Graph snapshot capture failed without a diagnostic."),
+									TargetRef, bCaptured ? TEXT("snapshot.present") : TEXT("snapshot.capture_succeeded"),
+									MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+							}
 							return false;
 						}
 						FGraphCompoundCanonicalPayload Payload(
@@ -217,38 +269,34 @@ namespace UE::UAI::Composition::GraphCompound
 								Snapshot.ToSharedRef(), *Resources,
 								Payload, RouteError))
 						{
-							SetError(OutError, RouteError.Code,
-								RouteError.SubjectId, RouteError.Detail);
+							SetError(OutError, RouteError);
 							return false;
 						}
+						ON_SCOPE_EXIT { Payload.LocateDiagnostic(OutError); };
 						TOptional<FChangeSetDraft> Draft;
 						FGraphCompoundCanonicalError CanonicalError;
-						if (!TryBuildGraphCompoundChangeSetDraft(
-								Payload, Snapshot.ToSharedRef(),
-								Request.GetDescriptorIdentity(),
-								Request.GetRequestId(), Request.GetIdempotencyKey(),
-								*Resources, Draft, CanonicalError)
-							|| !Draft.IsSet())
+						const bool bBuilt = TryBuildGraphCompoundChangeSetDraft(
+							Payload, Snapshot.ToSharedRef(), Request.GetDescriptorIdentity(),
+							Request.GetRequestId(), Request.GetIdempotencyKey(), *Resources, Draft, CanonicalError);
+						if (!bBuilt || !Draft.IsSet())
 						{
-							SetError(OutError, CanonicalError.Code,
-								CanonicalError.IdentityKey, CanonicalError.Detail);
+							OutError = CanonicalError.IsValid() ? CanonicalError : BindingFailure(
+								TEXT("graph_compound_draft_invalid"),
+								bBuilt ? TEXT("Graph change-set construction returned without a draft.")
+									: TEXT("Graph change-set construction failed without a diagnostic."),
+								TargetRef, bBuilt ? TEXT("draft.present") : TEXT("draft.build_succeeded"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 							return false;
 						}
 						FPlanningResult Planning;
 						FPlanningPreflightError PlanningError;
-						if (!TryPlanChanges(
-								FPlanningRequest(MoveTemp(Draft.GetValue()),
-									CallerContext, false),
-								*Resources, Planning, PlanningError)
-							|| !Planning.IsReady()
-							|| !Planning.GetPlan().IsValid())
+						const bool bPlanned = TryPlanChanges(
+							FPlanningRequest(MoveTemp(Draft.GetValue()), CallerContext, false),
+							*Resources, Planning, PlanningError);
+						if (!bPlanned || !Planning.IsReady() || !Planning.GetPlan().IsValid())
 						{
-							SetError(OutError,
-								PlanningError.GetCode().IsEmpty()
-									? TEXT("graph_compound_planning_not_ready")
-									: PlanningError.GetCode(),
-								PlanningError.GetIdentityKey(),
-								PlanningError.GetDetail());
+							OutError = PlanningError.IsValid() ? PlanningError
+								: PlanningFailure(bPlanned, Planning, TargetRef);
 							return false;
 						}
 						return Environment->TryExecuteTypedOperation(
@@ -263,44 +311,47 @@ namespace UE::UAI::Composition::GraphCompound
 							Profile, Request.GetPayload(), *Resources,
 							Decoded, RouteError))
 					{
-						SetError(OutError, RouteError.Code,
-							RouteError.SubjectId, RouteError.Detail);
+						SetError(OutError, RouteError);
 						return false;
 					}
 					StateSemantic::FUeAgentCanonicalSnapshotPtr Snapshot;
-					if (!Environment->TryCaptureAssetCreateSnapshot(
-							Profile, Decoded, Resources, Cancellation,
-							Snapshot, OutError)
-						|| !Snapshot.IsValid())
+					const bool bCaptured = Environment->TryCaptureAssetCreateSnapshot(
+						Profile, Decoded, Resources, Cancellation, Snapshot, OutError);
+					if (!bCaptured || !Snapshot.IsValid())
 					{
+						if (OutError.IsEmpty())
+						{
+							OutError = BindingFailure(TEXT("graph_compound_snapshot_missing"),
+								bCaptured ? TEXT("Snapshot capture returned without a graph snapshot.")
+									: TEXT("Graph snapshot capture failed without a diagnostic."),
+								Profile.GetCapabilityId(), bCaptured ? TEXT("snapshot.present") : TEXT("snapshot.capture_succeeded"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						}
 						return false;
 					}
 					TOptional<FChangeSetDraft> Draft;
-					if (!TryBuildGraphCompoundTypedOperationDraft(
-							Profile, Request.GetDescriptorIdentity(),
-							Request.GetPayload(), Snapshot.ToSharedRef(),
-							Request.GetRequestId(), Request.GetIdempotencyKey(),
-							*Resources, Draft, RouteError)
-						|| !Draft.IsSet())
+					const bool bBuilt = TryBuildGraphCompoundTypedOperationDraft(
+						Profile, Request.GetDescriptorIdentity(), Request.GetPayload(), Snapshot.ToSharedRef(),
+						Request.GetRequestId(), Request.GetIdempotencyKey(), *Resources, Draft, RouteError);
+					if (!bBuilt || !Draft.IsSet())
 					{
-						SetError(OutError, RouteError.Code,
-							RouteError.SubjectId, RouteError.Detail);
+						OutError = RouteError.IsValid() ? RouteError : BindingFailure(
+							TEXT("graph_compound_draft_invalid"),
+							bBuilt ? TEXT("Graph change-set construction returned without a draft.")
+								: TEXT("Graph change-set construction failed without a diagnostic."),
+							Profile.GetCapabilityId(), bBuilt ? TEXT("draft.present") : TEXT("draft.build_succeeded"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 						return false;
 					}
 					FPlanningResult Planning;
 					FPlanningPreflightError PlanningError;
-					if (!TryPlanChanges(
-							FPlanningRequest(MoveTemp(Draft.GetValue()),
-								CallerContext, false),
-							*Resources, Planning, PlanningError)
-						|| !Planning.IsReady() || !Planning.GetPlan().IsValid())
+					const bool bPlanned = TryPlanChanges(
+						FPlanningRequest(MoveTemp(Draft.GetValue()), CallerContext, false),
+						*Resources, Planning, PlanningError);
+					if (!bPlanned || !Planning.IsReady() || !Planning.GetPlan().IsValid())
 					{
-						SetError(OutError,
-							PlanningError.GetCode().IsEmpty()
-								? TEXT("graph_compound_planning_not_ready")
-								: PlanningError.GetCode(),
-							PlanningError.GetIdentityKey(),
-							PlanningError.GetDetail());
+						OutError = PlanningError.IsValid() ? PlanningError
+							: PlanningFailure(bPlanned, Planning, Profile.GetCapabilityId());
 						return false;
 					}
 					return Environment->TryExecuteAssetCreate(
@@ -308,29 +359,11 @@ namespace UE::UAI::Composition::GraphCompound
 						CallerContext, MoveTemp(Resources), Cancellation,
 						OutResult, OutError);
 				}
-				if (Profile.GetRouteKind()
-					== EGraphCompoundDomainRouteKind::HjsonImport)
-				{
-					FGraphCompoundHjsonSourceRequest Decoded;
-					FGraphCompoundRouteError DecodeError;
-					if (!TryDecodeGraphCompoundHjsonSourceRequest(
-							Profile, Request.GetPayload(), *Resources,
-							Decoded, DecodeError))
-					{
-						SetError(OutError, DecodeError.Code,
-							DecodeError.SubjectId, DecodeError.Detail);
-						return false;
-					}
-					return Environment->TryExecuteHjson(
-						Profile, Decoded, Request.GetDescriptorIdentity(),
-						Request.GetRequestId(), Request.GetIdempotencyKey(),
-						CallerContext,
-						MoveTemp(Resources), Cancellation,
-						OutResult, OutError);
-				}
-				SetError(OutError,
-					TEXT("graph_compound_binding_route_kind_invalid"),
-					Profile.GetCapabilityId());
+				OutError = BindingFailure(TEXT("graph_compound_binding_route_kind_invalid"),
+					TEXT("An operation binding requires a typed operation route."),
+					Profile.GetCapabilityId(), TEXT("route_kind"),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(Profile.GetRouteKind())),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(EGraphCompoundDomainRouteKind::TypedOperation)));
 				return false;
 			}
 
@@ -339,12 +372,6 @@ namespace UE::UAI::Composition::GraphCompound
 			TSharedRef<IGraphCompoundBlueprintMaterialEnvironment> Environment;
 			FString OwnerId;
 		};
-	}
-
-	bool FGraphCompoundBlueprintMaterialProductionConfig::IsValid() const
-	{
-		return FMath::IsFinite(OperationTimeoutSeconds)
-			&& OperationTimeoutSeconds > 0.0;
 	}
 
 	bool TryCreateBlueprintMaterialGraphBindings(
@@ -357,14 +384,13 @@ namespace UE::UAI::Composition::GraphCompound
 		OutQueryBindings.Reset();
 		OutOperationBindings.Reset();
 		OutError = {};
-		for (const FGraphCompoundDomainRouteProfile& Profile
-			: GetBlueprintMaterialGraphRouteProfiles())
+		const TArray<FGraphCompoundDomainRouteProfile>* Profiles = nullptr;
+		if (!TryGetBlueprintMaterialGraphRouteProfiles(Profiles, OutError)) return false;
+		for (const FGraphCompoundDomainRouteProfile& Profile : *Profiles)
 		{
 			if (!Profile.IsValid())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_binding_profile_invalid"),
-					Profile.GetCapabilityId());
+				OutError = Profile.GetValidationDiagnostic();
 				OutQueryBindings.Reset();
 				OutOperationBindings.Reset();
 				return false;
@@ -382,16 +408,6 @@ namespace UE::UAI::Composition::GraphCompound
 					MakeShared<FBlueprintMaterialOperationBinding>(
 						Profile, Environment));
 			}
-		}
-		if (OutQueryBindings.Num() != 2
-			|| OutOperationBindings.Num() != 17)
-		{
-			SetError(OutError,
-				TEXT("graph_compound_binding_count_invalid"),
-				TEXT("blueprint_material"));
-			OutQueryBindings.Reset();
-			OutOperationBindings.Reset();
-			return false;
 		}
 		return true;
 	}
@@ -412,14 +428,12 @@ namespace UE::UAI::Composition::GraphCompound
 			return false;
 		}
 		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-		FString RegistryError;
+		UE::UAI::Contract::FDiagnostic RegistryError;
 		if (!TryCreateBlueprintMaterialGraphDescriptorRegistry(
 				Registry, RegistryError)
 			|| !Registry.IsValid())
 		{
-			SetError(OutError,
-				TEXT("graph_compound_domain_registry_invalid"),
-				TEXT("blueprint_material"), RegistryError);
+			SetError(OutError, RegistryError, TEXT("blueprint_material"));
 			return false;
 		}
 		TArray<TSharedRef<IGraphCompoundQueryBinding>> QueryBindings;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 #include "Dom/JsonObject.h"
@@ -22,7 +24,7 @@ namespace UeAgentFolderDetailsExport
 		TFunction<bool(
 			const UeAgentDetailsAuthoring::FOwnerDetailsExportRequest& Request,
 			TSharedPtr<FJsonObject>& InOutDetailsSummary,
-			FString& OutError)> PostExportDetails;
+			UE::UAI::Contract::FDiagnostic& OutError)> PostExportDetails;
 
 		FOwnerDetailsAttachOptions()
 			: RefFieldName(TEXT("details"))
@@ -59,7 +61,7 @@ namespace UeAgentFolderDetailsExport
 		const FString& OwnerId,
 		const FString& Category,
 		const TSharedPtr<FJsonObject>& EntryObject,
-		FString& OutError,
+		UE::UAI::Contract::FDiagnostic& OutError,
 		const FOwnerDetailsAttachOptions& Options);
 
 	bool AttachOwnerDetails(
@@ -70,7 +72,7 @@ namespace UeAgentFolderDetailsExport
 		const FString& OwnerId,
 		const FString& Category,
 		const TSharedPtr<FJsonObject>& EntryObject,
-		FString& OutError,
+		UE::UAI::Contract::FDiagnostic& OutError,
 		const FString& RefFieldName = TEXT("details"));
 
 	bool AttachPropertyArrayDetails(
@@ -84,6 +86,6 @@ namespace UeAgentFolderDetailsExport
 		const FString& OwnerClassPath,
 		const FString& Category,
 		const TSharedPtr<FJsonObject>& EntryObject,
-		FString& OutError,
+		UE::UAI::Contract::FDiagnostic& OutError,
 		const FPropertyArrayDetailsAttachOptions& Options);
 }

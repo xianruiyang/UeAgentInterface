@@ -4,11 +4,28 @@
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "UObject/Class.h"
 #include "UObject/UnrealType.h"
 
 namespace UeAgentAuthoringTargetLocator
 {
+	bool EnsureArrayElement(FScriptArrayHelper& Array, int32 Index, FDiagnostic& OutError)
+	{
+		const int64 RequiredCount = static_cast<int64>(Index) + 1;
+		if (Index < 0 || RequiredCount > MAX_int32)
+		{
+			OutError = FDiagnostic::Failure(TEXT("array_index_exceeds_native_storage"),
+				TEXT("The array index cannot be represented by native array storage."), TEXT("target_resolve"));
+			OutError.PropertyPath = TEXT("index");
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("integer from 0 through 2147483646"));
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(Index);
+			return false;
+		}
+		if (RequiredCount > Array.Num()) Array.AddValues(static_cast<int32>(RequiredCount - Array.Num()));
+		return true;
+	}
+
 	namespace
 	{
 		struct FCriterion
@@ -74,10 +91,6 @@ namespace UeAgentAuthoringTargetLocator
 				if (Left.MatchedCriteria != Right.MatchedCriteria) return Left.MatchedCriteria > Right.MatchedCriteria;
 				return Left.Identity.CanonicalKey < Right.Identity.CanonicalKey;
 			});
-			if (MaxDiagnosticCandidates >= 0 && OutResult.Candidates.Num() > MaxDiagnosticCandidates)
-			{
-				OutResult.Candidates.SetNum(MaxDiagnosticCandidates, EAllowShrinking::No);
-			}
 		}
 
 		void AddPropertyCandidates(
@@ -88,12 +101,12 @@ namespace UeAgentAuthoringTargetLocator
 			int32 MaxDiagnosticCandidates,
 			FResolveResult& OutResult)
 		{
-			if (RootOwnerPath.IsEmpty() || !CurrentStruct || MaxDiagnosticCandidates == 0) return;
+			if (RootOwnerPath.IsEmpty() || !CurrentStruct) return;
 			TArray<UeAgentAuthoringIdentity::FCanonicalIdentity> Identities;
 			for (TFieldIterator<FProperty> It(CurrentStruct, EFieldIterationFlags::IncludeSuper); It; ++It)
 			{
 				UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
-				FString Error;
+				FDiagnostic Error;
 				const FString CandidatePath = Prefix.IsEmpty() ? It->GetName() : Prefix + TEXT(".") + It->GetName();
 				if (BuildPropertyIdentity(
 					RootOwnerPath,
@@ -109,10 +122,6 @@ namespace UeAgentAuthoringTargetLocator
 			{
 				return Left.GetSelector(TEXT("property_path")) < Right.GetSelector(TEXT("property_path"));
 			});
-			if (MaxDiagnosticCandidates >= 0 && Identities.Num() > MaxDiagnosticCandidates)
-			{
-				Identities.SetNum(MaxDiagnosticCandidates, EAllowShrinking::No);
-			}
 			for (int32 Index = 0; Index < Identities.Num(); ++Index)
 			{
 				FDiagnosticCandidate Candidate;
@@ -123,31 +132,47 @@ namespace UeAgentAuthoringTargetLocator
 		}
 
 		void SetPropertyFailure(
-			const FString& ErrorCode,
-			const FString& RootOwnerPath,
-			const UObject* NotificationOwner,
-			const UStruct* CurrentStruct,
-			const FString& Prefix,
-			int32 MaxDiagnosticCandidates,
-			FResolveResult& OutResult)
+            FDiagnostic Diagnostic,
+            const FString& RootOwnerPath,
+            const UObject* NotificationOwner,
+            const UStruct* CurrentStruct,
+            const FString& Prefix,
+            int32 MaxDiagnosticCandidates,
+            FResolveResult& OutResult)
+        {
+            OutResult = FResolveResult();
+            OutResult.Status = TEXT("failed");
+            OutResult.Diagnostic = MoveTemp(Diagnostic);
+            if (OutResult.Diagnostic.Stage.IsEmpty()) OutResult.Diagnostic.Stage = TEXT("property_target_resolve");
+            if (OutResult.Diagnostic.TargetPath.IsEmpty()) OutResult.Diagnostic.TargetPath = RootOwnerPath;
+            if (OutResult.Diagnostic.PropertyPath.IsEmpty()) OutResult.Diagnostic.PropertyPath = Prefix;
+            AddPropertyCandidates(RootOwnerPath, NotificationOwner, CurrentStruct, Prefix, MaxDiagnosticCandidates, OutResult);
+        }
+
+		FDiagnostic PropertyFailure(const TCHAR* Code, const TCHAR* Reason, const FString& Path,
+			const TCHAR* Expected, const TSharedPtr<FJsonValue>& Actual)
 		{
-			OutResult = FResolveResult();
-			OutResult.Status = TEXT("failed");
-			OutResult.ErrorCode = ErrorCode;
-			AddPropertyCandidates(RootOwnerPath, NotificationOwner, CurrentStruct, Prefix, MaxDiagnosticCandidates, OutResult);
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("property_target_resolve"));
+			Error.PropertyPath = Path;
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			Error.ActualValue = Actual;
+			Error.ExpectedValuePresent = true;
+			Error.ActualValuePresent = Actual.IsValid();
+			return Error;
 		}
 	}
 
 	bool FResolveResult::IsResolved() const
 	{
-		return ResolvedIndex != INDEX_NONE && ErrorCode == TEXT("target_resolved");
+		return ResolvedIndex != INDEX_NONE && Status == TEXT("resolved") && Diagnostic.IsEmpty();
 	}
 
 	TSharedRef<FJsonObject> FResolveResult::ToJsonObject() const
 	{
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetStringField(TEXT("status"), Status);
-		Result->SetStringField(TEXT("error_code"), ErrorCode);
+		Result->SetStringField(TEXT("error_code"), IsResolved() ? TEXT("target_resolved") : Diagnostic.Code);
+        if (!Diagnostic.IsEmpty()) Result->SetObjectField(TEXT("diagnostic"), Diagnostic.ToPublicJson());
 		if (ResolvedIndex != INDEX_NONE) Result->SetNumberField(TEXT("resolved_index"), ResolvedIndex);
 		TArray<TSharedPtr<FJsonValue>> ConflictValues;
 		for (const FString& Selector : ConflictingSelectors) ConflictValues.Add(MakeShared<FJsonValueString>(Selector));
@@ -182,32 +207,41 @@ namespace UeAgentAuthoringTargetLocator
 		const FString TargetKind = NormalizeId(Query.TargetKind);
 		if (ModelId.IsEmpty() || (Query.CanonicalKey.TrimStartAndEnd().IsEmpty() && Query.Selectors.IsEmpty()))
 		{
-			OutResult.ErrorCode = TEXT("target_query_invalid");
+			OutResult.Diagnostic = PropertyFailure(TEXT("target_query_invalid"), ModelId.IsEmpty()
+				? TEXT("A target query requires an identity model.") : TEXT("A target query requires selectors or a canonical identity key."),
+				ModelId.IsEmpty() ? TEXT("identity_model") : TEXT("selectors"), TEXT("non-empty query field"), nullptr);
 			return false;
 		}
 		if (!ResolvedRegistry.FindModel(ModelId, Model))
 		{
-			OutResult.ErrorCode = TEXT("target_identity_model_unknown");
+			OutResult.Diagnostic = PropertyFailure(TEXT("target_identity_model_unknown"), TEXT("The requested target identity model is not registered."),
+				TEXT("identity_model"), TEXT("registered identity model"), MakeShared<FJsonValueString>(ModelId));
 			return false;
 		}
 		if (!Model.TargetKind.IsEmpty() && (TargetKind.IsEmpty() || Model.TargetKind != TargetKind))
 		{
-			OutResult.ErrorCode = TEXT("target_identity_model_mismatch");
+			OutResult.Diagnostic = PropertyFailure(TEXT("target_identity_model_mismatch"), TEXT("The requested target kind does not match its identity model."),
+				TEXT("target_kind"), *Model.TargetKind, MakeShared<FJsonValueString>(TargetKind));
+			OutResult.Diagnostic.CandidateName = ModelId;
 			return false;
 		}
 		UeAgentAuthoringIdentity::FCanonicalIdentity ParsedCanonicalIdentity;
 		const bool bHasCanonicalKey = !Query.CanonicalKey.TrimStartAndEnd().IsEmpty();
 		if (bHasCanonicalKey)
 		{
-			FString ParseError;
+			FDiagnostic ParseError;
 			if (!UeAgentAuthoringIdentity::ParseCanonicalKey(Query.CanonicalKey, ParsedCanonicalIdentity, ParseError, &ResolvedRegistry))
 			{
-				OutResult.ErrorCode = TEXT("target_query_invalid");
+				OutResult.Diagnostic = FDiagnostic::WrapFailure(TEXT("target_query_invalid"), ParseError, TEXT("target_resolve"));
 				return false;
 			}
 			if (ParsedCanonicalIdentity.ModelId != ModelId || (!TargetKind.IsEmpty() && ParsedCanonicalIdentity.TargetKind != TargetKind))
 			{
-				OutResult.ErrorCode = TEXT("target_identity_model_mismatch");
+				const bool bModelMismatch = ParsedCanonicalIdentity.ModelId != ModelId;
+				OutResult.Diagnostic = PropertyFailure(TEXT("target_identity_model_mismatch"),
+					TEXT("The supplied canonical identity does not match the query model or target kind."),
+					bModelMismatch ? TEXT("identity_model") : TEXT("target_kind"),
+					*(bModelMismatch ? ModelId : TargetKind), MakeShared<FJsonValueString>(bModelMismatch ? ParsedCanonicalIdentity.ModelId : ParsedCanonicalIdentity.TargetKind));
 				return false;
 			}
 		}
@@ -230,7 +264,14 @@ namespace UeAgentAuthoringTargetLocator
 			const UeAgentAuthoringIdentity::FSelectorDescriptor* SelectorDescriptor = FindSelector(Model, SelectorName);
 			if (!SelectorDescriptor)
 			{
-				OutResult.ErrorCode = TEXT("target_selector_unknown");
+				OutResult.Diagnostic = FDiagnostic::Failure(TEXT("target_selector_unknown"),
+					FString::Printf(TEXT("Selector '%s' is not defined for target model '%s'."), *SelectorName, *ModelId), TEXT("target_resolve"));
+				OutResult.Diagnostic.PropertyPath = SelectorName;
+				OutResult.Diagnostic.CandidateName = ModelId;
+				OutResult.Diagnostic.ActualValue = MakeShared<FJsonValueString>(SelectorName);
+				TArray<TSharedPtr<FJsonValue>> Allowed;
+				for (const auto& Declared : Model.Selectors) Allowed.Add(MakeShared<FJsonValueString>(Declared.Name));
+				OutResult.Diagnostic.ExpectedValue = MakeShared<FJsonValueArray>(Allowed);
 				return false;
 			}
 			FString SelectorValue = Pair.Value;
@@ -242,7 +283,11 @@ namespace UeAgentAuthoringTargetLocator
 				const ESearchCase::Type SearchCase = SelectorDescriptor->bCaseSensitive ? ESearchCase::CaseSensitive : ESearchCase::IgnoreCase;
 				if (!CanonicalValue.IsEmpty() && !CanonicalValue.Equals(SelectorValue, SearchCase))
 				{
-					OutResult.ErrorCode = TEXT("target_identity_conflict");
+					OutResult.Diagnostic = FDiagnostic::Failure(TEXT("target_identity_conflict"),
+						FString::Printf(TEXT("Selector '%s' conflicts with the supplied target identity."), *SelectorName), TEXT("target_resolve"));
+					OutResult.Diagnostic.PropertyPath = SelectorName;
+					OutResult.Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(CanonicalValue);
+					OutResult.Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(SelectorValue);
 					OutResult.ConflictingSelectors.Add(SelectorName);
 					return false;
 				}
@@ -252,7 +297,11 @@ namespace UeAgentAuthoringTargetLocator
 				const ESearchCase::Type SearchCase = SelectorDescriptor->bCaseSensitive ? ESearchCase::CaseSensitive : ESearchCase::IgnoreCase;
 				if (!ExistingValue->Equals(SelectorValue, SearchCase))
 				{
-					OutResult.ErrorCode = TEXT("target_identity_conflict");
+					OutResult.Diagnostic = FDiagnostic::Failure(TEXT("target_identity_conflict"),
+						FString::Printf(TEXT("Selector '%s' was supplied more than once with conflicting values."), *SelectorName), TEXT("target_resolve"));
+					OutResult.Diagnostic.PropertyPath = SelectorName;
+					OutResult.Diagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(*ExistingValue);
+					OutResult.Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(SelectorValue);
 					OutResult.ConflictingSelectors.Add(SelectorName);
 					return false;
 				}
@@ -266,7 +315,8 @@ namespace UeAgentAuthoringTargetLocator
 		}
 		if (Criteria.IsEmpty())
 		{
-			OutResult.ErrorCode = TEXT("target_query_invalid");
+			OutResult.Diagnostic = FDiagnostic::Failure(TEXT("target_query_invalid"),
+				TEXT("Target resolution requires at least one nonempty identity or selector."), TEXT("target_resolve"));
 			return false;
 		}
 
@@ -297,7 +347,7 @@ namespace UeAgentAuthoringTargetLocator
 		if (FullMatches.Num() == 1)
 		{
 			OutResult.Status = TEXT("resolved");
-			OutResult.ErrorCode = TEXT("target_resolved");
+			OutResult.Diagnostic.Reset();
 			OutResult.ResolvedIndex = FullMatches[0];
 			AddDiagnosticCandidates(Candidates, FullMatches, Criteria, MaxDiagnosticCandidates, OutResult);
 			return true;
@@ -315,7 +365,7 @@ namespace UeAgentAuthoringTargetLocator
 			if (bSingleLogicalIdentity)
 			{
 				OutResult.Status = TEXT("resolved");
-				OutResult.ErrorCode = TEXT("target_resolved");
+				OutResult.Diagnostic.Reset();
 				OutResult.ResolvedIndex = FullMatches[0];
 				AddDiagnosticCandidates(
 					Candidates,
@@ -325,7 +375,8 @@ namespace UeAgentAuthoringTargetLocator
 					OutResult);
 				return true;
 			}
-			OutResult.ErrorCode = TEXT("target_ambiguous");
+			OutResult.Diagnostic = FDiagnostic::Failure(TEXT("target_ambiguous"),
+				FString::Printf(TEXT("The supplied selectors match %d distinct targets."), FullMatches.Num()), TEXT("target_resolve"));
 			for (const UeAgentAuthoringIdentity::FSelectorDescriptor& Selector : Model.Selectors)
 			{
 				if (QuerySelectorValues.Contains(Selector.Name)) continue;
@@ -338,6 +389,9 @@ namespace UeAgentAuthoringTargetLocator
 				}
 				if (Values.Num() > 1) OutResult.RequiredDiscriminators.Add(Selector.Name);
 			}
+			if (!OutResult.RequiredDiscriminators.IsEmpty())
+				OutResult.Diagnostic.SuggestedFix = TEXT("Specify a distinguishing target field: ")
+					+ FString::Join(OutResult.RequiredDiscriminators, TEXT(", ")) + TEXT(".");
 			AddDiagnosticCandidates(Candidates, FullMatches, Criteria, MaxDiagnosticCandidates, OutResult);
 			return false;
 		}
@@ -363,14 +417,16 @@ namespace UeAgentAuthoringTargetLocator
 		}
 		if (bCriteriaConflict)
 		{
-			OutResult.ErrorCode = TEXT("target_identity_conflict");
+			OutResult.Diagnostic = FDiagnostic::Failure(TEXT("target_identity_conflict"),
+				TEXT("The supplied selectors identify different targets; no target satisfies all of them."), TEXT("target_resolve"));
 			for (const int32 CriterionIndex : NonEmptyCriterionIndices) OutResult.ConflictingSelectors.Add(Criteria[CriterionIndex].Name);
 			TArray<int32> ConflictCandidates = ConflictCandidateSet.Array();
 			AddDiagnosticCandidates(Candidates, ConflictCandidates, Criteria, MaxDiagnosticCandidates, OutResult);
 			return false;
 		}
 
-		OutResult.ErrorCode = TEXT("target_not_found");
+		OutResult.Diagnostic = FDiagnostic::Failure(TEXT("target_not_found"),
+			TEXT("No target in the requested model and context matches all supplied selectors."), TEXT("target_resolve"));
 		TArray<int32> DiagnosticIndices;
 		if (!NonEmptyCriterionIndices.IsEmpty()) DiagnosticIndices = CriterionMatches[NonEmptyCriterionIndices[0]];
 		else DiagnosticIndices = EligibleIndices;
@@ -383,11 +439,13 @@ namespace UeAgentAuthoringTargetLocator
 		const FString& PropertyPath,
 		const UObject* NotificationOwner,
 		UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		if (!RootObject)
 		{
-			OutError = TEXT("target_query_invalid");
+			OutError = PropertyFailure(TEXT("target_query_invalid"), TEXT("A root object is required to identify a property."),
+				TEXT("root_object"), TEXT("a live object"), nullptr);
+			OutError.SourceKind = TEXT("native_result");
 			return false;
 		}
 		return BuildPropertyIdentity(
@@ -403,11 +461,13 @@ namespace UeAgentAuthoringTargetLocator
 		const FString& PropertyPath,
 		const FString& NotificationOwnerPath,
 		UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		if (RootOwnerPath.IsEmpty() || PropertyPath.IsEmpty())
 		{
-			OutError = TEXT("target_query_invalid");
+			OutError = PropertyFailure(TEXT("target_query_invalid"),
+				RootOwnerPath.IsEmpty() ? TEXT("The property owner path is empty.") : TEXT("The property path is empty."),
+				RootOwnerPath.IsEmpty() ? TEXT("owner_path") : TEXT("property_path"), TEXT("non-empty path"), MakeShared<FJsonValueString>(FString()));
 			return false;
 		}
 		TMap<FString, FString> Selectors;
@@ -428,7 +488,8 @@ namespace UeAgentAuthoringTargetLocator
 			const FString& PropertyPath,
 			FResolvedPropertyTarget& OutTarget,
 			FResolveResult& OutResult,
-			int32 MaxDiagnosticCandidates)
+			int32 MaxDiagnosticCandidates,
+			bool bAllowArrayAppend)
 		{
 			OutTarget = FResolvedPropertyTarget();
 			FString CanonicalPath = PropertyPath;
@@ -436,8 +497,20 @@ namespace UeAgentAuthoringTargetLocator
 				|| CanonicalPath.IsEmpty() || CanonicalPath.StartsWith(TEXT("."))
 				|| CanonicalPath.EndsWith(TEXT(".")) || CanonicalPath.Contains(TEXT("..")))
 			{
-				SetPropertyFailure(
-					TEXT("target_query_invalid"), RootOwnerPath, NotificationOwner, RootStruct,
+				FDiagnostic Error;
+				if (!RootStruct || !RootData)
+				{
+					Error = PropertyFailure(TEXT("target_query_invalid"), TEXT("The native property root has no type or storage."),
+						!RootStruct ? TEXT("root_type") : TEXT("root_storage"), TEXT("present native property root"), nullptr);
+					Error.SourceKind = TEXT("native_result");
+				}
+				else if (RootOwnerPath.IsEmpty())
+					Error = PropertyFailure(TEXT("target_query_invalid"), TEXT("The property owner path is empty."),
+						TEXT("owner_path"), TEXT("non-empty path"), MakeShared<FJsonValueString>(FString()));
+				else
+					Error = PropertyFailure(TEXT("target_query_invalid"), TEXT("A property path must contain non-empty dot-separated segments."),
+						CanonicalPath, TEXT("non-empty dot-separated property path"), MakeShared<FJsonValueString>(CanonicalPath));
+				SetPropertyFailure(MoveTemp(Error), RootOwnerPath, NotificationOwner, RootStruct,
 					FString(), MaxDiagnosticCandidates, OutResult);
 				return false;
 			}
@@ -447,23 +520,96 @@ namespace UeAgentAuthoringTargetLocator
 			UStruct* CurrentStruct = RootStruct;
 			void* CurrentContainer = RootData;
 			UObject* CurrentOwner = NotificationOwner;
+			TArray<FProperty*> NotificationChain;
+			bool bOwnerRoot = CurrentOwner && RootStruct == CurrentOwner->GetClass() && RootData == CurrentOwner;
 			FString Prefix;
 			for (int32 Index = 0; Index < Segments.Num(); ++Index)
 			{
-				FProperty* Property = FindFProperty<FProperty>(CurrentStruct, *Segments[Index]);
+				const FString ResolvedPath = Prefix.IsEmpty() ? Segments[Index] : Prefix + TEXT(".") + Segments[Index];
+				FString PropertyName = Segments[Index];
+				int32 ElementIndex = INDEX_NONE;
+				const int32 OpenBracket = PropertyName.Find(TEXT("["));
+				if (OpenBracket != INDEX_NONE)
+				{
+					if (!PropertyName.EndsWith(TEXT("]")) || OpenBracket == 0
+						|| PropertyName.Find(TEXT("["), ESearchCase::CaseSensitive, ESearchDir::FromStart, OpenBracket + 1) != INDEX_NONE)
+					{
+						SetPropertyFailure(PropertyFailure(TEXT("target_query_invalid"), TEXT("The array segment must end with one bracketed index after the property name."),
+							ResolvedPath, TEXT("property[index]"), MakeShared<FJsonValueString>(Segments[Index])), RootOwnerPath, CurrentOwner,
+							CurrentStruct, Prefix, MaxDiagnosticCandidates, OutResult);
+						return false;
+					}
+					const FString IndexText = PropertyName.Mid(OpenBracket + 1, PropertyName.Len() - OpenBracket - 2);
+					PropertyName.LeftInline(OpenBracket, EAllowShrinking::No);
+					int64 ParsedIndex = 0;
+					if (IndexText.IsEmpty() || !IndexText.IsNumeric()
+						|| !UE::UAI::StateSemantic::TryParseInt64Number(IndexText, ParsedIndex)
+						|| ParsedIndex < 0 || ParsedIndex > MAX_int32)
+					{
+						SetPropertyFailure(PropertyFailure(TEXT("target_query_invalid"), TEXT("The array index must be a non-negative native integer."),
+							ResolvedPath, TEXT("integer from 0 through 2147483647"), MakeShared<FJsonValueString>(IndexText)), RootOwnerPath, CurrentOwner,
+							CurrentStruct, Prefix, MaxDiagnosticCandidates, OutResult);
+						return false;
+					}
+					ElementIndex = static_cast<int32>(ParsedIndex);
+				}
+				FProperty* Property = FindFProperty<FProperty>(CurrentStruct, *PropertyName);
 				if (!Property)
 				{
-					SetPropertyFailure(
-						TEXT("target_not_found"), RootOwnerPath, CurrentOwner, CurrentStruct,
+					auto Error = PropertyFailure(TEXT("target_not_found"), TEXT("The property does not exist on the current type."),
+						ResolvedPath, TEXT("a property declared by the current type"), MakeShared<FJsonValueString>(PropertyName));
+					Error.CandidateName = CurrentStruct->GetName();
+					SetPropertyFailure(MoveTemp(Error), RootOwnerPath, CurrentOwner, CurrentStruct,
 						Prefix, MaxDiagnosticCandidates, OutResult);
 					return false;
 				}
+				if (Index == 0) OutTarget.RootProperty = Property;
 				void* ValuePtr = Property->ContainerPtrToValuePtr<void>(CurrentContainer);
-				const FString ResolvedPath = Prefix.IsEmpty() ? Segments[Index] : Prefix + TEXT(".") + Segments[Index];
+				if (bOwnerRoot) NotificationChain.Add(Property);
+				if (ElementIndex != INDEX_NONE)
+				{
+					auto* ArrayProperty = CastField<FArrayProperty>(Property);
+					if (!ArrayProperty || !ValuePtr)
+					{
+						auto Error = PropertyFailure(TEXT("target_not_found"), !ArrayProperty
+							? TEXT("The indexed property is not an array.") : TEXT("The indexed array has no native storage."),
+							ResolvedPath, TEXT("array with native storage"), !ArrayProperty ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Property->GetCPPType())) : nullptr);
+						if (!ValuePtr) Error.SourceKind = TEXT("native_result");
+						SetPropertyFailure(MoveTemp(Error), RootOwnerPath, CurrentOwner,
+							CurrentStruct, Prefix, MaxDiagnosticCandidates, OutResult);
+						return false;
+					}
+					FScriptArrayHelper Array(ArrayProperty, ValuePtr);
+					FDiagnostic ArrayError;
+					if (bAllowArrayAppend && !EnsureArrayElement(Array, ElementIndex, ArrayError))
+					{
+						SetPropertyFailure(ArrayError, RootOwnerPath, CurrentOwner,
+							CurrentStruct, ResolvedPath, MaxDiagnosticCandidates, OutResult);
+						return false;
+					}
+					if (!Array.IsValidIndex(ElementIndex))
+					{
+						auto Error = PropertyFailure(TEXT("target_not_found"), TEXT("The requested array element does not exist."),
+							ResolvedPath, *FString::Printf(TEXT("index below array length %d"), Array.Num()), MakeShared<FJsonValueNumber>(ElementIndex));
+						SetPropertyFailure(MoveTemp(Error), RootOwnerPath, CurrentOwner,
+							CurrentStruct, Prefix, MaxDiagnosticCandidates, OutResult);
+						return false;
+					}
+					Property = ArrayProperty->Inner;
+					ValuePtr = Array.GetRawPtr(ElementIndex);
+				}
 				if (Index == Segments.Num() - 1)
 				{
-					FString IdentityError;
-					if (!ValuePtr || !BuildPropertyIdentity(
+					FDiagnostic IdentityError;
+					if (!ValuePtr)
+					{
+						auto Error = PropertyFailure(TEXT("target_not_found"), TEXT("The resolved property has no native storage."),
+							ResolvedPath, TEXT("present property storage"), nullptr);
+						Error.SourceKind = TEXT("native_result");
+						SetPropertyFailure(MoveTemp(Error), RootOwnerPath, CurrentOwner, CurrentStruct, Prefix, MaxDiagnosticCandidates, OutResult);
+						return false;
+					}
+					if (!BuildPropertyIdentity(
 						RootOwnerPath,
 						ResolvedPath,
 						CurrentOwner ? CurrentOwner->GetPathName() : FString(),
@@ -471,17 +617,19 @@ namespace UeAgentAuthoringTargetLocator
 						IdentityError))
 					{
 						SetPropertyFailure(
-							IdentityError.IsEmpty() ? TEXT("target_not_found") : IdentityError,
-							RootOwnerPath, CurrentOwner, CurrentStruct, Prefix,
+							MoveTemp(IdentityError),
+							RootOwnerPath, CurrentOwner, CurrentStruct, ResolvedPath,
 							MaxDiagnosticCandidates, OutResult);
 						return false;
 					}
 					OutTarget.NotificationOwner = CurrentOwner;
 					OutTarget.Property = Property;
+					OutTarget.PropertyScope = CurrentStruct;
 					OutTarget.ValuePtr = ValuePtr;
+					OutTarget.NotificationChain = MoveTemp(NotificationChain);
 					OutResult = FResolveResult();
 					OutResult.Status = TEXT("resolved");
-					OutResult.ErrorCode = TEXT("target_resolved");
+					OutResult.Diagnostic.Reset();
 					OutResult.ResolvedIndex = 0;
 					FDiagnosticCandidate& Candidate = OutResult.Candidates.AddDefaulted_GetRef();
 					Candidate.SourceIndex = 0;
@@ -502,24 +650,26 @@ namespace UeAgentAuthoringTargetLocator
 					UObject* NestedObject = ObjectProperty->GetObjectPropertyValue(ValuePtr);
 					if (!NestedObject)
 					{
-						SetPropertyFailure(
-							TEXT("target_not_found"), RootOwnerPath, CurrentOwner, nullptr,
+						SetPropertyFailure(PropertyFailure(TEXT("target_not_found"), TEXT("The intermediate object reference is null."),
+							Prefix, TEXT("non-null object reference"), MakeShared<FJsonValueNull>()), RootOwnerPath, CurrentOwner, nullptr,
 							Prefix, MaxDiagnosticCandidates, OutResult);
 						return false;
 					}
 					CurrentOwner = NestedObject;
+					NotificationChain.Reset();
+					bOwnerRoot = true;
 					CurrentStruct = NestedObject->GetClass();
 					CurrentContainer = NestedObject;
 					continue;
 				}
-				SetPropertyFailure(
-					TEXT("target_not_found"), RootOwnerPath, CurrentOwner, CurrentStruct,
+				SetPropertyFailure(PropertyFailure(TEXT("target_not_found"), TEXT("The intermediate property cannot contain child properties."),
+					Prefix, TEXT("struct or object property"), MakeShared<FJsonValueString>(Property->GetCPPType())), RootOwnerPath, CurrentOwner, CurrentStruct,
 					Prefix, MaxDiagnosticCandidates, OutResult);
 				return false;
 			}
 
-			SetPropertyFailure(
-				TEXT("target_not_found"), RootOwnerPath, NotificationOwner, RootStruct,
+			SetPropertyFailure(PropertyFailure(TEXT("target_not_found"), TEXT("The property path resolved no leaf property."),
+				CanonicalPath, TEXT("a resolvable leaf property"), MakeShared<FJsonValueString>(CanonicalPath)), RootOwnerPath, NotificationOwner, RootStruct,
 				Prefix, MaxDiagnosticCandidates, OutResult);
 			return false;
 		}
@@ -530,7 +680,8 @@ namespace UeAgentAuthoringTargetLocator
 		const FString& PropertyPath,
 		FResolvedPropertyTarget& OutTarget,
 		FResolveResult& OutResult,
-		int32 MaxDiagnosticCandidates)
+		int32 MaxDiagnosticCandidates,
+		bool bAllowArrayAppend)
 	{
 		return ResolvePropertyPathInternal(
 			RootObject ? RootObject->GetClass() : nullptr,
@@ -540,7 +691,8 @@ namespace UeAgentAuthoringTargetLocator
 			PropertyPath,
 			OutTarget,
 			OutResult,
-			MaxDiagnosticCandidates);
+			MaxDiagnosticCandidates,
+			bAllowArrayAppend);
 	}
 
 	bool ResolvePropertyPath(
@@ -551,7 +703,8 @@ namespace UeAgentAuthoringTargetLocator
 		const FString& PropertyPath,
 		FResolvedPropertyTarget& OutTarget,
 		FResolveResult& OutResult,
-		int32 MaxDiagnosticCandidates)
+		int32 MaxDiagnosticCandidates,
+		bool bAllowArrayAppend)
 	{
 		return ResolvePropertyPathInternal(
 			RootStruct,
@@ -561,6 +714,7 @@ namespace UeAgentAuthoringTargetLocator
 			PropertyPath,
 			OutTarget,
 			OutResult,
-			MaxDiagnosticCandidates);
+			MaxDiagnosticCandidates,
+			bAllowArrayAppend);
 	}
 }

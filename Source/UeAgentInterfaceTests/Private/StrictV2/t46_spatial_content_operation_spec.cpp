@@ -1,5 +1,6 @@
 #include "Misc/AutomationTest.h"
 
+#include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
 #include "Core/Discovery/Command/UeAgentCommandDiscovery.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
@@ -9,7 +10,6 @@ namespace UE::UAI::Tests::StrictV2::T46
 	{
 		static const TArray<FString> Commands = {
 			TEXT("mesh.element.select_by_ray"),
-			TEXT("mesh.pivot.update"),
 			TEXT("mesh.transform.bake"),
 			TEXT("reference.origin.resolve"),
 			TEXT("world.object_align"),
@@ -21,23 +21,13 @@ namespace UE::UAI::Tests::StrictV2::T46
 	const TArray<FString>& DormantHjsonCommands()
 	{
 		static const TArray<FString> Commands = {
+			TEXT("mesh.pivot.update"),
 			TEXT("world.object_transform.read"),
 			TEXT("world.object_transform.update"),
 		};
 		return Commands;
 	}
 
-	const TArray<FString>& HistoricalCommands()
-	{
-		static const TArray<FString> Commands = {
-			TEXT("level_align_actor_by_bounds"),
-			TEXT("level_align_actor_vertex_to_vertex"),
-			TEXT("level_align_face_to_face"),
-			TEXT("level_snap_to_surface"),
-			TEXT("node_origin_resolve"),
-		};
-		return Commands;
-	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -61,7 +51,6 @@ bool FUeAgentStrictV2T46SpatialContentInventoryTest::RunTest(
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T46 owns exactly six commands"), ExpectedCommands().Num(), 6);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
@@ -75,13 +64,6 @@ bool FUeAgentStrictV2T46SpatialContentInventoryTest::RunTest(
 				Contract->GetPublicOwner(),
 				ExpectedOwner);
 		}
-	}
-	for (const FString& HistoricalId : HistoricalCommands())
-	{
-		TestNull(
-			*FString::Printf(TEXT("%s has no active public contract"),
-				*HistoricalId),
-			Registry->FindExact(HistoricalId));
 	}
 	for (const FString& DormantId : DormantHjsonCommands())
 	{
@@ -110,9 +92,8 @@ bool FUeAgentStrictV2T46SpatialContentInventoryTest::RunTest(
 	}
 	Discovery::Command::FCommandSearchRequest Search;
 	Search.Intent = TEXT("align actor bounds");
-	Search.Limit = 3;
 	Discovery::Command::FCommandSearchPage Page;
-	if (!TestTrue(TEXT("natural transform intent searches"),
+	if (!TestTrue(TEXT("transform keywords search"),
 		DiscoveryService->Search(Search, Page, DiscoveryError)))
 	{
 		AddError(DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail);

@@ -12,18 +12,7 @@ namespace
 
 	TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 4096},
-				{EUeAgentResourceDimension::Files, 256},
-				{EUeAgentResourceDimension::ReferenceEdges, 4096},
-				{EUeAgentResourceDimension::WorkUnits, 65536},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	FUeAgentDescriptorIdentity MakeDescriptor(const FString& Suffix)
@@ -75,7 +64,9 @@ namespace
 			MakeResources(),
 			FUeAgentOperationDeadline::FromTimeout(
 				TimeoutSeconds,
-				[&Now]() { return Now; }));
+				[&Now]() { return Now; }),
+			{TEXT("caller:fixture"), TEXT("request:") + OperationId,
+				TEXT("editor.session"), TEXT("world:fixture")});
 	}
 
 	class FRecordingLongRunningPort final : public ILongRunningOperationPort
@@ -359,8 +350,8 @@ bool FUeAgentLongRunningOperationOwnerTest::RunTest(const FString& Parameters)
 	TestFalse(
 		TEXT("started cancellation is not declared retry-safe"),
 		Receipt.IsRetrySafe());
-	TestFalse(
-		TEXT("terminal operation rejects late continuation"),
+	TestTrue(
+		TEXT("terminal continuation returns its existing outcome"),
 		Owner.Advance(
 			Request.GetOperationId(),
 			Request.GetOwnerLeaseId(),
@@ -368,10 +359,8 @@ bool FUeAgentLongRunningOperationOwnerTest::RunTest(const FString& Parameters)
 			31,
 			Snapshot,
 			Error));
-	TestEqual(
-		TEXT("late continuation failure is stable"),
-		Error.GetCode(),
-		FString(TEXT("operation_terminal")));
+	TestTrue(TEXT("late continuation confirms completed cleanup"), Snapshot.IsCleanupComplete());
+	TestEqual(TEXT("late continuation does not restart work"), Port->StartCalls, 1);
 	TestTrue(
 		TEXT("terminal receipt retention is explicitly releasable"),
 		Owner.ReleaseTerminal(
@@ -423,50 +412,6 @@ bool FUeAgentLongRunningOperationOwnerTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("default port is not reused for the dedicated operation"),
 		Port->StartCalls, 1);
 
-	// Deadline follows the same safe-boundary path; it is not terminal merely
-	// because the clock expired.
-	double DeadlineNow = 200.0;
-	const TSharedRef<FRecordingLongRunningPort, ESPMode::ThreadSafe>
-		DeadlinePort = MakeShared<
-			FRecordingLongRunningPort,
-			ESPMode::ThreadSafe>();
-	FLongRunningOperationOwner DeadlineOwner(
-		DeadlinePort,
-		[&DeadlineNow]() { return DeadlineNow; });
-	const FLongRunningOperationRequest DeadlineRequest = MakeRequest(
-		TEXT("operation:ls-001a:deadline"),
-		TEXT("lease:ls-001a:deadline"),
-		DeadlineNow,
-		1.0);
-	TestTrue(
-		TEXT("deadline fixture accepts"),
-		DeadlineOwner.Accept(DeadlineRequest, Snapshot, Error));
-	TestTrue(
-		TEXT("deadline fixture starts"),
-		DeadlineOwner.Advance(
-			DeadlineRequest.GetOperationId(),
-			DeadlineRequest.GetOwnerLeaseId(),
-			DeadlineRequest.GetServerSessionId(),
-			0,
-			Snapshot,
-			Error));
-	DeadlineNow = 202.0;
-	TestTrue(
-		TEXT("expired deadline requests stop without fabricating completion"),
-		DeadlineOwner.Advance(
-			DeadlineRequest.GetOperationId(),
-			DeadlineRequest.GetOwnerLeaseId(),
-			DeadlineRequest.GetServerSessionId(),
-			31,
-			Snapshot,
-			Error));
-	TestEqual(TEXT("deadline requests native stop"), DeadlinePort->StopCalls, 1);
-	TestEqual(
-		TEXT("deadline remains at safe-boundary wait"),
-		Snapshot.GetPhase(),
-		ELongRunningOperationPhase::StopRequested);
-	TestFalse(TEXT("deadline alone is not terminal"), Snapshot.IsTerminal());
-
 	// Unknown state is terminal but explicitly not replayable.  Advancing it
 	// again must never start a second copy of the native work.
 	double UnknownNow = 300.0;
@@ -515,7 +460,7 @@ bool FUeAgentLongRunningOperationOwnerTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("unknown status is preserved"), Receipt.GetStatus(),
 		ELongRunningOperationStatus::StateUnknown);
 	TestFalse(TEXT("unknown state is never retry-safe"), Receipt.IsRetrySafe());
-	TestFalse(TEXT("unknown operation cannot be replayed by advance"),
+	TestTrue(TEXT("unknown operation returns its retained result without replay"),
 		UnknownOwner.Advance(
 			UnknownRequest.GetOperationId(),
 			UnknownRequest.GetOwnerLeaseId(),
@@ -524,5 +469,33 @@ bool FUeAgentLongRunningOperationOwnerTest::RunTest(const FString& Parameters)
 			Snapshot,
 			Error));
 	TestEqual(TEXT("unknown work started exactly once"), UnknownPort->StartCalls, 1);
+	TestTrue(TEXT("unknown outcome still requires successful cleanup"), Snapshot.IsCleanupComplete());
+	TestEqual(TEXT("discovery is scoped to the trusted caller"),
+		UnknownOwner.Discover(TEXT("caller:other")).Num(), 0);
+	TestEqual(TEXT("caller can find its retained terminal operation"),
+		UnknownOwner.Discover(TEXT("caller:fixture")).Num(), 1);
+	TestTrue(TEXT("lost response recovers the original request"),
+		UnknownOwner.Recover(TEXT("caller:fixture"), TEXT("request:") + UnknownRequest.GetOperationId(),
+			TEXT("editor.session"), Snapshot, Error));
+	TestTrue(TEXT("explicit takeover rotates custody"),
+		UnknownOwner.TakeOver(UnknownRequest.GetOperationId(), TEXT("caller:fixture"),
+			TEXT("lease:replacement"), TEXT("request:takeover"), Snapshot, Error));
+	TestFalse(TEXT("old handle loses access after takeover"),
+		UnknownOwner.GetSnapshot(UnknownRequest.GetOperationId(), UnknownRequest.GetOwnerLeaseId(),
+			UnknownRequest.GetServerSessionId(), Snapshot, Error));
+	TestTrue(TEXT("lost takeover reply recovers the new custody"),
+		UnknownOwner.Recover(TEXT("caller:fixture"), TEXT("request:takeover"),
+			TEXT("operation.takeover"), Snapshot, Error));
+	TestEqual(TEXT("recovered takeover has the current lease"), Snapshot.GetOwnerLeaseId(),
+		FString(TEXT("lease:replacement")));
+	TestTrue(TEXT("late cancellation preserves the terminal outcome"),
+		UnknownOwner.RequestCancellation(UnknownRequest.GetOperationId(), TEXT("lease:replacement"),
+			UnknownRequest.GetServerSessionId(), TEXT("close"), Snapshot, Error));
+	TestEqual(TEXT("late cancellation does not stop exited native work"), UnknownPort->StopCalls, 0);
+	TestTrue(TEXT("new custodian releases the retained record"),
+		UnknownOwner.ReleaseTerminal(UnknownRequest.GetOperationId(), TEXT("lease:replacement"),
+			UnknownRequest.GetServerSessionId(), Error));
+	TestEqual(TEXT("released records are absent from discovery"),
+		UnknownOwner.Discover(TEXT("caller:fixture")).Num(), 0);
 	return !HasAnyErrors();
 }

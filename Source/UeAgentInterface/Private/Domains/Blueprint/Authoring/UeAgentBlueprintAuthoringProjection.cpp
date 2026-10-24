@@ -4,6 +4,8 @@
 
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringDescriptors.h"
 #include "Utilities/AuthoringExport/UeAgentCompoundProjectionExtension.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 namespace UeAgentBlueprintAuthoring
 {
@@ -13,13 +15,11 @@ namespace UeAgentBlueprintAuthoring
 
 		FProfileDescriptor Profile(
 			const TCHAR* Id,
-			const TArray<FString>& Roles,
-			const int32 TokenBudget)
+			const TArray<FString>& Roles)
 		{
 			FProfileDescriptor Result;
 			Result.ProfileId = Id;
 			Result.IncludedRoles = Roles;
-			Result.TokenBudget = TokenBudget;
 			return Result;
 		}
 
@@ -74,12 +74,12 @@ namespace UeAgentBlueprintAuthoring
 			};
 			Result.DefaultProfile = TEXT("llm_authoring");
 			Result.Profiles = {
-				Profile(TEXT("llm_authoring"), { TEXT("identity"), TEXT("authoring") }, 65536),
-				Profile(TEXT("readback"), { TEXT("identity"), TEXT("authoring"), TEXT("readback") }, 98304),
+				Profile(TEXT("llm_authoring"), { TEXT("identity"), TEXT("authoring") }),
+				Profile(TEXT("readback"), { TEXT("identity"), TEXT("authoring"), TEXT("readback") }),
 				Profile(TEXT("debug"), {
 					TEXT("identity"), TEXT("authoring"), TEXT("readback"),
-					TEXT("diagnostics"), TEXT("validation") }, 196608),
-				Profile(TEXT("validation"), { TEXT("identity"), TEXT("validation") }, 32768),
+					TEXT("diagnostics"), TEXT("validation") }),
+				Profile(TEXT("validation"), { TEXT("identity"), TEXT("validation") }),
 			};
 
 			FFileDescriptor IndexFile;
@@ -197,77 +197,101 @@ namespace UeAgentBlueprintAuthoring
 			return Result;
 		}
 
-		FString GraphKey(const UeAgentAuthoringState::FStateEntry& Entry)
+		FString GraphKey(
+			const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity)
 		{
 			return StableIdentityKey(
-				Entry.TargetIdentity, TEXT("graph_guid"), TEXT("graph_kind"), TEXT("graph_name"));
+				Identity, TEXT("graph_guid"), TEXT("graph_kind"), TEXT("graph_name"));
 		}
 
-		FString NodeKey(const UeAgentAuthoringState::FStateEntry& Entry)
+		FString NodeKey(
+			const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity)
 		{
 			return StableIdentityKey(
-				Entry.TargetIdentity, TEXT("node_guid"), TEXT("node_kind"), TEXT("node_name"),
+				Identity, TEXT("node_guid"), TEXT("node_kind"), TEXT("node_name"),
 				TEXT("node_occurrence"));
 		}
 
-		bool GetProjectionKeys(
-			const FString& FieldId,
-			const UeAgentAuthoringState::FStateEntry& Entry,
-			TArray<FString>& OutKeys)
+		bool GetProjectionKeys(const FString& FieldId,
+			const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity, TArray<FString>& OutKeys,
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			OutKeys.Reset();
-			if (FieldId == TEXT("interfaces"))
-			{
-				OutKeys.Add(Entry.TargetIdentity.GetSelector(TEXT("interface_class")));
-			}
+			OutKeys.Reset(); OutError.Reset();
+			const auto Reject = [&](const FString& Selector, const FString& Expected) {
+				if (!OutError.IsEmpty()) return;
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_projection_identity_missing"),
+					TEXT("Projection field '") + FieldId + TEXT("' has no usable identity for selector '") + Selector + TEXT("'."), TEXT("export_projection"));
+				OutError.TargetPath = Identity.GetSelector(TEXT("asset_path"));
+				OutError.PropertyPath = TEXT("/identity/") + Selector;
+				OutError.ActualValue = MakeShared<FJsonValueString>(Identity.GetSelector(Selector));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			};
+			const auto AddSelector = [&](const TCHAR* Selector) {
+				OutKeys.Add(Identity.GetSelector(Selector));
+				if (OutKeys.Last().IsEmpty()) Reject(Selector, TEXT("nonempty captured identity selector"));
+			};
+			const auto AddStable = [&](const TCHAR* Guid, const TCHAR* Kind, const TCHAR* Name, const TCHAR* Occurrence = nullptr) {
+				OutKeys.Add(StableIdentityKey(Identity, Guid, Kind, Name, Occurrence));
+				if (OutKeys.Last().IsEmpty()) Reject(Identity.GetSelector(Kind).IsEmpty() ? Kind : Name,
+					FString::Printf(TEXT("captured %s, or nonempty %s and %s"), Guid, Kind, Name));
+			};
+			if (FieldId == TEXT("interfaces")) AddSelector(TEXT("interface_class"));
 			else if (FieldId == TEXT("variables") || FieldId == TEXT("delegates"))
-			{
-				OutKeys.Add(StableIdentityKey(
-					Entry.TargetIdentity, TEXT("member_guid"), TEXT("member_kind"), TEXT("member_name")));
-			}
+				AddStable(TEXT("member_guid"), TEXT("member_kind"), TEXT("member_name"));
 			else if (FieldId == TEXT("components") || FieldId == TEXT("component_properties"))
-			{
-				OutKeys.Add(StableIdentityKey(
-					Entry.TargetIdentity, TEXT("component_guid"), TEXT("component_kind"),
-					TEXT("component_name")));
-			}
+				AddStable(TEXT("component_guid"), TEXT("component_kind"), TEXT("component_name"));
 			else if (FieldId == TEXT("graphs"))
-			{
-				OutKeys.Add(GraphKey(Entry));
+				AddStable(TEXT("graph_guid"), TEXT("graph_kind"), TEXT("graph_name"));
+			else if (FieldId == TEXT("nodes") || FieldId == TEXT("node_properties")) {
+				AddStable(TEXT("graph_guid"), TEXT("graph_kind"), TEXT("graph_name"));
+				AddStable(TEXT("node_guid"), TEXT("node_kind"), TEXT("node_name"), TEXT("node_occurrence"));
+			} else if (FieldId == TEXT("pin_defaults")) {
+				AddStable(TEXT("graph_guid"), TEXT("graph_kind"), TEXT("graph_name"));
+				AddStable(TEXT("node_guid"), TEXT("node_kind"), TEXT("node_name"), TEXT("node_occurrence"));
+				AddStable(TEXT("pin_guid"), TEXT("node_kind"), TEXT("pin_name"));
+			} else if (FieldId == TEXT("edges")) {
+				AddStable(TEXT("graph_guid"), TEXT("graph_kind"), TEXT("graph_name"));
+				AddSelector(TEXT("edge_key"));
+			} else {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_projection_field_unsupported"),
+					TEXT("The Blueprint projection has no identity mapping for this field."), TEXT("export_projection"));
+				OutError.PropertyPath = TEXT("/field_id");
+				OutError.ActualValue = MakeShared<FJsonValueString>(FieldId);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("interfaces, variables, delegates, components, component_properties, graphs, nodes, node_properties, pin_defaults, or edges"));
 			}
-			else if (FieldId == TEXT("nodes") || FieldId == TEXT("node_properties"))
-			{
-				OutKeys = { GraphKey(Entry), NodeKey(Entry) };
-			}
-			else if (FieldId == TEXT("pin_defaults"))
-			{
-				OutKeys = {
-					GraphKey(Entry),
-					NodeKey(Entry),
-					StableIdentityKey(
-						Entry.TargetIdentity, TEXT("pin_guid"), TEXT("node_kind"), TEXT("pin_name"))
-				};
-			}
-			else if (FieldId == TEXT("edges"))
-			{
-				OutKeys = { GraphKey(Entry), Entry.TargetIdentity.GetSelector(TEXT("edge_key")) };
-			}
-			return !OutKeys.IsEmpty() && !OutKeys.ContainsByPredicate([](const FString& Key)
-			{
-				return Key.IsEmpty();
-			});
+			return !OutKeys.IsEmpty() && !OutKeys.ContainsByPredicate([](const FString& Key) { return Key.IsEmpty(); });
 		}
 
 		bool ProjectBlueprintStructure(
 			const UeAgentCompoundProjection::FRequest& Request,
 			TArray<UeAgentCompoundProjection::FExpansionSelection>& OutSelections,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutSelections.Reset();
 			OutError.Reset();
-			if (!Request.IsValid() || Request.File->ProjectionId != BlueprintProjectionId)
-			{
-				OutError = TEXT("blueprint_projection_request_invalid");
+			if (!Request.IsValid()) {
+				const TCHAR* Missing = !Request.Contract ? TEXT("contract") : !Request.Profile ? TEXT("profile")
+					: !Request.File ? TEXT("file") : !Request.Field ? TEXT("field") : TEXT("wildcard_count");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_projection_request_invalid"),
+					FString::Printf(TEXT("Export projection requires %s."), Missing), TEXT("export_projection"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = TEXT("/") + FString(Missing);
+				if (Request.Contract && Request.Profile && Request.File && Request.Field) {
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(Request.WildcardCount);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("positive wildcard count"));
+				} else {
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+				}
+				return false;
+			}
+			if (Request.File->ProjectionId != BlueprintProjectionId) {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_projection_request_invalid"),
+					TEXT("The export file is assigned to a different projection."), TEXT("export_projection"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = TEXT("/file/projection_id");
+				OutError.ActualValue = MakeShared<FJsonValueString>(Request.File->ProjectionId);
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(BlueprintProjectionId);
 				return false;
 			}
 
@@ -280,10 +304,20 @@ namespace UeAgentBlueprintAuthoring
 			for (int32 Index = 0; Index < Request.Entries.Num(); ++Index)
 			{
 				TArray<FString> Keys;
-				if (!GetProjectionKeys(Request.Field->FieldId, Request.Entries[Index], Keys)
-					|| Keys.Num() != Request.WildcardCount)
-				{
-					OutError = TEXT("blueprint_projection_identity_missing");
+				if (!GetProjectionKeys(Request.Field->FieldId, Request.Entries[Index].TargetIdentity, Keys, OutError)) {
+					OutError.SourceKind = TEXT("native_result");
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.Entries[Index].TargetIdentity.GetSelector(TEXT("asset_path"));
+					OutError.PropertyPath = TEXT("/entries/") + FString::FromInt(Index) + OutError.PropertyPath;
+					return false;
+				}
+				if (Keys.Num() != Request.WildcardCount) {
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_projection_key_count_mismatch"),
+						TEXT("Projection field '") + Request.Field->FieldId + TEXT("' produced a key count different from its wildcard count."), TEXT("export_projection"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Request.Entries[Index].TargetIdentity.GetSelector(TEXT("asset_path"));
+					OutError.PropertyPath = TEXT("/entries/") + FString::FromInt(Index) + TEXT("/keys/count");
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(Keys.Num());
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(Request.WildcardCount);
 					return false;
 				}
 				const FString GroupKey = FString::Join(Keys, TEXT("\x1f"));
@@ -310,12 +344,42 @@ namespace UeAgentBlueprintAuthoring
 	bool GetReusableProjectionKeys(
 		const FString& FieldId,
 		const UeAgentAuthoringState::FStateEntry& Entry,
-		TArray<FString>& OutKeys)
+		TArray<FString>& OutKeys, UE::UAI::Contract::FDiagnostic& OutError)
 	{
-		return GetProjectionKeys(FieldId, Entry, OutKeys);
+		return GetProjectionKeys(FieldId, Entry.TargetIdentity, OutKeys, OutError);
 	}
 
-	bool RegisterExportAuthoring(FString& OutError)
+	bool GetReusableProjectionKeys(
+		const FString& FieldId,
+		const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity,
+		TArray<FString>& OutKeys, UE::UAI::Contract::FDiagnostic& OutError)
+	{
+		return GetProjectionKeys(FieldId, Identity, OutKeys, OutError);
+	}
+
+	FString GetReusableComponentKey(
+		const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity)
+	{
+		return StableIdentityKey(
+			Identity,
+			TEXT("component_guid"),
+			TEXT("component_kind"),
+			TEXT("component_name"));
+	}
+
+	FString GetReusableGraphKey(
+		const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity)
+	{
+		return GraphKey(Identity);
+	}
+
+	FString GetReusableNodeKey(
+		const UeAgentAuthoringIdentity::FCanonicalIdentity& Identity)
+	{
+		return NodeKey(Identity);
+	}
+
+	bool RegisterExportAuthoring(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentExportContract::ERegistrationResult ContractResult;
 		if (!UeAgentExportContract::FRegistry::Get().RegisterContract(
@@ -332,12 +396,17 @@ namespace UeAgentBlueprintAuthoring
 			Descriptor, ProjectBlueprintStructure, ExtensionResult, OutError);
 	}
 
-	bool GetExportContract(UeAgentExportContract::FContract& OutContract, FString& OutError)
+	bool GetExportContract(UeAgentExportContract::FContract& OutContract, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!UeAgentExportContract::FRegistry::Get().FindContract(
 			BlueprintExportContractId, OutContract))
 		{
-			OutError = TEXT("blueprint_export_contract_missing");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("blueprint_export_contract_missing"),
+				TEXT("The Blueprint export contract is not registered."), TEXT("export_projection"), FString(BlueprintExportContractId));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("export_contract_registered");
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 			return false;
 		}
 		OutError.Reset();

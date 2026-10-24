@@ -1,15 +1,27 @@
 #include "DomainAdapters/AudioGraph/UeAgentAudioGraphDomainMechanics.h"
 
-#include "CommandEdge/UeAgentCommandProtocol.h"
-#include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
+
+#include "Composition/HjsonImport/UeAgentSemanticWorkspaceImport.h"
 #include "Core/Contract/UeAgentCommandJson.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
+#include "Core/HjsonWorkspace/UeAgentSemanticWorkspaceIO.h"
+#include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
 #include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "DomainAdapters/AudioGraph/UeAgentAudioGraphCandidateBindingNormalizer.h"
 #include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
+#include "UObject/ObjectMacros.h"
+#include "Domains/Audio/Authoring/UeAgentAudioAuthoringApplyProvider.h"
+#include "Domains/Audio/Authoring/UeAgentAudioAuthoringDocuments.h"
+#include "Domains/Audio/Authoring/UeAgentAudioAuthoringExport.h"
+#include "Domains/Audio/Authoring/UeAgentAudioAuthoringRegistration.h"
+#include "Domains/Audio/Authoring/UeAgentAudioAuthoringState.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/PackageName.h"
-#include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "OperationOwners/AudioCommands/UeAgentAudioCommandOperationOwner.h"
+#include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace UE::UAI::DomainAdapters::AudioGraph
@@ -27,25 +39,133 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 		const FString MetaSoundSourceType = TEXT("/Script/MetasoundEngine.MetaSoundSource");
 		const FString SoundCueType = TEXT("/Script/Engine.SoundCue");
 
-		class FNeverCancelled final : public Contract::IUeAgentCancellationSignal
+		Contract::FDiagnostic AudioFact(
+			const TCHAR* Code, const FString& Reason, const FString& Target, const FString& Path,
+			TSharedPtr<FJsonValue> Actual = nullptr, TSharedPtr<FJsonValue> Expected = nullptr,
+			const TCHAR* SourceKind = TEXT(""))
 		{
-		public:
-			virtual bool IsCancelled() const override { return false; }
-		};
-
-		bool Fail(
-			FWorkspaceError& OutError,
-			FString Code,
-			FString Source = FString(),
-			FString Pointer = TEXT("/"))
-		{
-			OutError.Set(MoveTemp(Code), MoveTemp(Source), MoveTemp(Pointer));
-			return false;
+			auto Error = Contract::FDiagnostic::Failure(Code, Reason, TEXT("authoring_apply"));
+			Error.TargetPath = Target;
+			Error.PropertyPath = Path;
+			Error.SemanticPointer = Path;
+			Error.Source.InternalJsonPath = Path;
+			Error.SourceKind = SourceKind;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
 
+		TSharedPtr<FJsonValue> StringChoices(const TArray<FString>& Values)
+		{
+			TArray<TSharedPtr<FJsonValue>> Items;
+			for (const FString& Value : Values) Items.Add(MakeShared<FJsonValueString>(Value));
+			return MakeShared<FJsonValueArray>(MoveTemp(Items));
+		}
+
+		TSharedPtr<FJsonValue> RootTypes()
+		{
+			return StringChoices({MetaSoundSourceType, SoundCueType});
+		}
+
+		TSharedPtr<FJsonValue> JsonShape(const TSharedPtr<FJsonValue>& Value)
+		{
+			if (!Value.IsValid()) return nullptr;
+			switch (Value->Type)
+			{
+			case EJson::Object: return MakeShared<FJsonValueString>(TEXT("object"));
+			case EJson::Array: return MakeShared<FJsonValueString>(TEXT("array"));
+			case EJson::None: return MakeShared<FJsonValueString>(TEXT("none"));
+			default: return Value;
+			}
+		}
+
+		Contract::FDiagnostic AudioInput(const TCHAR* Code, const FString& Reason,
+			const FString& Target, const FString& Path, const TSharedPtr<FJsonValue>& Value,
+			const FString& Expected, const TCHAR* SourceKind = TEXT(""))
+		{
+			auto Error = AudioFact(Code, Reason, Target, Path, JsonShape(Value),
+				MakeShared<FJsonValueString>(Expected), SourceKind);
+			Error.ActualValuePresent = Value.IsValid();
+			Error.ExpectedValuePresent = true;
+			if (Value.IsValid() && (Value->Type == EJson::Object || Value->Type == EJson::Array))
+				Error.ActualEvidence = Value;
+			return Error;
+		}
+
+		Contract::FDiagnostic StaleRevision(const FString& Target,
+			const FString& Current, const FString& Expected)
+		{
+			auto Error = AudioFact(TEXT("audio_graph_domain_stale_revision"),
+				TEXT("The target revision does not match expected_revision."), Target, TEXT("/expected_revision"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("command_input"));
+			Error.ActualEvidence = MakeShared<FJsonValueString>(Current);
+			Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected);
+			return Error;
+		}
+
+		void LocateSemanticFailure(const FResolvedSemanticWorkspace& Workspace,
+			const FString& UnitId, Contract::FDiagnostic& Error)
+		{
+			const bool bConcreteSource = !Error.Source.SourceFile.IsEmpty() && Error.Source.Line > 0
+				&& !Error.Source.SourceFile.StartsWith(TEXT("inline://"))
+				&& !Error.Source.SourceFile.StartsWith(TEXT("resolved:"));
+			if (!bConcreteSource && Error.SourceKind != TEXT("native_result")
+				&& Error.SourceKind != TEXT("command_input"))
+			{
+				if (Error.Source.SourceUnit.IsEmpty()) Error.Source.SourceUnit = UnitId;
+				if (Error.Source.InternalJsonPath.IsEmpty()) Error.Source.InternalJsonPath =
+					!Error.SemanticPointer.IsEmpty() ? Error.SemanticPointer : TEXT("/");
+				Workspace.LocateDocumentDiagnostic({}, {}, Error, UnitId);
+			}
+			if (Error.PublicCause)
+			{
+				auto Cause = *Error.PublicCause;
+				LocateSemanticFailure(Workspace, UnitId, Cause);
+				Error.PublicCause = MakeShared<Contract::FDiagnostic>(MoveTemp(Cause));
+			}
+			for (auto& Child : Error.Diagnostics) LocateSemanticFailure(Workspace, UnitId, Child);
+		}
+
+		bool Fail(FWorkspaceError& OutError, Contract::FDiagnostic Diagnostic)
+		{
+			OutError.SetFailure(MoveTemp(Diagnostic));
+			return false;
+		}
 		bool IsSupportedRootType(const FString& Type)
 		{
 			return Type == MetaSoundSourceType || Type == SoundCueType;
+		}
+
+		const UeAgentAudioAuthoring::FProfile* ProfileForRootType(
+			const FString& RootType)
+		{
+			if (RootType == MetaSoundSourceType)
+			{
+				return UeAgentAudioAuthoring::FindProfile(
+					UeAgentAudioAuthoring::EAssetKind::MetaSound);
+			}
+			if (RootType == SoundCueType)
+			{
+				return UeAgentAudioAuthoring::FindProfile(
+					UeAgentAudioAuthoring::EAssetKind::SoundCue);
+			}
+			return nullptr;
+		}
+
+		bool EnsureAuthoringRegistered(FWorkspaceError& OutError)
+		{
+			static const TPair<bool, UE::UAI::Contract::FDiagnostic> Registration = []()
+			{
+				UE::UAI::Contract::FDiagnostic Error;
+				const bool bRegistered =
+					UeAgentAudioAuthoring::RegisterAuthoring(Error);
+				return TPair<bool, UE::UAI::Contract::FDiagnostic>(bRegistered, MoveTemp(Error));
+			}();
+			if (!Registration.Key)
+			{
+				return Fail(OutError, Registration.Value);
+			}
+			return true;
 		}
 
 		FString PackageIdentity(const FString& Target)
@@ -55,92 +175,34 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 				: Target;
 		}
 
-		bool DecodeRequest(
-			const FString& CommandId,
-			const FString& ContractHash,
-			const FString& ParamsJson,
-			TOptional<FUeAgentCommandRequest>& OutRequest,
-			FWorkspaceError& OutError)
-		{
-			const FString RequestId = TEXT("audio-graph-domain-")
-				+ FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
-			const FString Envelope = FString::Printf(
-				TEXT("{\"schema\":\"uai.command.v1\",\"version\":1,")
-				TEXT("\"message_kind\":\"command_request\",")
-				TEXT("\"correlation_id\":\"%s\",\"request_id\":\"%s\",")
-				TEXT("\"command_id\":\"%s\",\"command_binding_hash\":\"%s\",")
-				TEXT("\"params\":%s}"),
-				*RequestId, *RequestId, *CommandId, *ContractHash, *ParamsJson);
-			FTCHARToUTF8 Encoded(*Envelope);
-			TArray<uint8> Bytes;
-			Bytes.Append(reinterpret_cast<const uint8*>(Encoded.Get()), Encoded.Length());
-			FUeAgentCommandProtocolDiagnostic Diagnostic;
-			if (!FUeAgentCommandProtocolCodec().DecodeRequest(Bytes, OutRequest, Diagnostic)
-				|| !OutRequest.IsSet())
-			{
-				return Fail(OutError, TEXT("audio_graph_domain_internal_request_invalid"), Diagnostic.Code, Diagnostic.Message);
-			}
-			return true;
-		}
-
 		bool SubmitAudioCommand(
 			const FString& CommandId,
 			const TSharedPtr<FJsonObject>& Params,
 			FString& OutPayload,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError,
+			const FResolvedDomainHjsonDocument& Document, const FString& SourcePrefix)
 		{
-			TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry;
-			TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
-			FString CompositionError;
-			if (!Module::CommandRegistration::Active::TryComposeProcessActiveCommandComposition(
-					Registry, Dispatch, CompositionError)
-				|| !Registry.IsValid())
-			{
-				return Fail(OutError, TEXT("audio_graph_domain_registry_unavailable"), CompositionError);
-			}
-			const FUeAgentFrozenCommandContract* Contract = Registry->FindExact(CommandId);
-			if (!Contract)
-			{
-				return Fail(OutError, TEXT("audio_graph_domain_command_missing"), CommandId);
-			}
+			FScopedDomainHjsonDiagnosticSource NativeSource(Document, OutError, SourcePrefix);
 			FString ParamsJson;
 			if (!TryCanonicalizeObject(Params, ParamsJson, OutError)) return false;
-			TOptional<FUeAgentCommandRequest> Request;
-			if (!DecodeRequest(CommandId, Contract->GetContractHash(), ParamsJson, Request, OutError)) return false;
-
-			TMap<FString, TSharedRef<IUeAgentCommandHandler>> Mechanics;
-			FString MechanicsError;
-			if (!OperationOwners::AudioCommands::TryCreateMechanicsHandlers(Mechanics, MechanicsError))
-			{
-				return Fail(OutError, TEXT("audio_graph_domain_mechanics_unavailable"), CommandId, MechanicsError);
-			}
-			const TSharedRef<IUeAgentCommandHandler>* Handler = Mechanics.Find(CommandId);
-			if (!Handler)
-			{
-				return Fail(OutError, TEXT("audio_graph_domain_mechanics_unavailable"), CommandId);
-			}
 			const TArray<FString> AuthorityScopes = {
 				TEXT("uai:query"),
 				TEXT("uai:operate"),
 				TEXT("uai:authoring:hjson:import"),
 				TEXT("audio_media_graph.write"),
 			};
-			const FUeAgentCommandResult Result = OperationOwners::AudioCommands::Submit(
-				*Handler,
-				Request.GetValue(),
-				Contract::FUeAgentCallerContext(
-					TEXT("audio-graph-domain-provider"), AuthorityScopes, Request->GetCorrelationId()),
-				MakeShared<FNeverCancelled>());
-			if (!Result.IsOk())
+			UE::UAI::Contract::FDiagnostic CommandDiagnostic;
+			const FString CorrelationId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+			if (!OperationOwners::AudioCommands::TryExecuteInternal(
+					CommandId, ParamsJson,
+					Contract::FUeAgentCallerContext(
+						TEXT("audio-graph-domain-provider"), AuthorityScopes, CorrelationId),
+					OutPayload, CommandDiagnostic))
 			{
-				SetWorkspaceErrorFromCommandFailure(
-					Result.GetErrorJson(),
-					TEXT("audio_graph_domain_native_command_failed"),
-					CommandId,
-					OutError);
+				SetWorkspaceErrorFromCommandFailure(CommandDiagnostic,
+					TEXT("audio_graph_domain_native_command_failed"), CommandId, OutError);
 				return false;
 			}
-			OutPayload = Result.GetPayloadJson();
 			return true;
 		}
 
@@ -165,9 +227,9 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			const FString RootType = Owner->GetClass()->GetPathName();
 			if (!IsSupportedRootType(RootType))
 			{
-				return Fail(
-					OutError, TEXT("audio_graph_domain_target_type_invalid"),
-					RootType);
+				return Fail(OutError, AudioFact(TEXT("audio_graph_domain_target_type_invalid"),
+					TEXT("The audio graph target must be a MetaSoundSource or SoundCue."), Target, TEXT("target.class"),
+					MakeShared<FJsonValueString>(RootType), RootTypes(), TEXT("native_result")));
 			}
 			TSharedPtr<FJsonObject> Snapshot;
 			if (!TryBuildCaptureSnapshot(
@@ -187,14 +249,15 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			bool bPresent = false;
 			if (!TryInspectObjectTargetPresence(Target, bPresent))
 			{
-				return Fail(
-					OutError, TEXT("audio_graph_domain_target_invalid"), Target);
+				return Fail(OutError, AudioFact(TEXT("audio_graph_domain_target_invalid"),
+					TEXT("The target presence probe could not resolve this asset reference."), Target, TEXT("/target"),
+					MakeShared<FJsonValueString>(Target), MakeShared<FJsonValueString>(TEXT("resolvable asset reference")), TEXT("command_input")));
 			}
 			if (bPresent)
 			{
-				return Fail(
-					OutError, TEXT("audio_graph_domain_stale_revision"),
-					Target, TEXT("existing"));
+				return Fail(OutError, AudioFact(TEXT("audio_graph_domain_stale_revision"),
+					TEXT("Creating with expected_revision 'missing' requires an absent target."), Target, TEXT("target.present"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), TEXT("native_result")));
 			}
 			return true;
 		}
@@ -218,24 +281,30 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 				|| ExpectedPath.IsEmpty()
 				|| !FPackageName::IsValidLongPackageName(Package))
 			{
-				return Fail(
-					OutError, TEXT("audio_graph_domain_create_contract_invalid"),
-					Target);
+				auto Error = AudioFact(TEXT("audio_graph_domain_create_contract_invalid"),
+					Create.IsValid() ? TEXT("The target must be a valid asset package with a non-empty name and directory.")
+						: TEXT("The audio asset create contract must be an object."),
+					Target, Create.IsValid() ? TEXT("/target") : TEXT("/root/create"),
+					Create.IsValid() ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Package))
+						: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)),
+					MakeShared<FJsonValueString>(Create.IsValid() ? TEXT("valid long package path") : TEXT("object")),
+					Create.IsValid() ? TEXT("command_input") : TEXT(""));
+				return Fail(OutError, MoveTemp(Error));
 			}
 			FString Declared;
 			if (Create->TryGetStringField(TEXT("asset_kind"), Declared)
 				&& Declared != AssetKind)
 			{
-				return Fail(
-					OutError, TEXT("audio_graph_domain_create_kind_mismatch"),
-					Declared, AssetKind);
+				return Fail(OutError, AudioFact(TEXT("audio_graph_domain_create_kind_mismatch"),
+					TEXT("The declared asset kind does not match the document root type."), Target, TEXT("/root/create/asset_kind"),
+					MakeShared<FJsonValueString>(Declared), MakeShared<FJsonValueString>(AssetKind)));
 			}
 			if (Create->TryGetStringField(TEXT("asset_name"), Declared)
 				&& Declared != ExpectedName)
 			{
-				return Fail(
-					OutError, TEXT("audio_graph_domain_create_name_mismatch"),
-					Declared, ExpectedName);
+				return Fail(OutError, AudioFact(TEXT("audio_graph_domain_create_name_mismatch"),
+					TEXT("The declared asset name does not match the target package."), Target, TEXT("/root/create/asset_name"),
+					MakeShared<FJsonValueString>(Declared), MakeShared<FJsonValueString>(ExpectedName)));
 			}
 			if (Create->TryGetStringField(TEXT("package_path"), Declared))
 			{
@@ -245,9 +314,9 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 				}
 				if (Declared != ExpectedPath)
 				{
-					return Fail(
-						OutError, TEXT("audio_graph_domain_create_path_mismatch"),
-						Declared, ExpectedPath);
+					return Fail(OutError, AudioFact(TEXT("audio_graph_domain_create_path_mismatch"),
+						TEXT("The declared package directory does not match the target package."), Target, TEXT("/root/create/package_path"),
+						MakeShared<FJsonValueString>(Declared), MakeShared<FJsonValueString>(ExpectedPath)));
 				}
 			}
 			OutNative = MakeShared<FJsonObject>(*Create);
@@ -264,66 +333,216 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			FDomainHjsonImportLifecycleReceipt& OutReceipt,
 			FWorkspaceError& OutError)
 		{
-			FString JsonError;
-			FString TerminalStatus;
-			FString MutationTarget;
-			FString MutationRevision;
-			FString ReceiptId;
-			bool bMutationApplied = false;
-			bool bCompileSettled = false;
-			bool bSaved = false;
-			bool bReloaded = false;
-			if (!Json::TryParseObject(
-					MutationPayload, OutMutation, JsonError)
-				|| !OutMutation.IsValid()
-				|| !OutMutation->TryGetStringField(
-					TEXT("terminal_status"), TerminalStatus)
-				|| TerminalStatus != TEXT("succeeded")
-				|| !OutMutation->TryGetStringField(
-					TEXT("target_ref"), MutationTarget)
-				|| ObjectPathFromPackageIdentity(MutationTarget)
-					!= ObjectPathFromPackageIdentity(Target)
-				|| !OutMutation->TryGetStringField(
-					TEXT("revision"), MutationRevision)
-				|| MutationRevision.IsEmpty()
-				|| !OutMutation->TryGetBoolField(
-					TEXT("mutation_applied"), bMutationApplied)
-				|| !OutMutation->TryGetBoolField(
-					TEXT("compile_settled"), bCompileSettled)
-				|| !OutMutation->TryGetBoolField(TEXT("saved"), bSaved)
-				|| !OutMutation->TryGetBoolField(TEXT("reloaded"), bReloaded)
-				|| !OutMutation->TryGetStringField(
-					TEXT("persistence_receipt_id"), ReceiptId)
-				|| ReceiptId.IsEmpty()
-				|| !bMutationApplied || !bCompileSettled || !bSaved || !bReloaded)
-			{
-				return Fail(
-					OutError, TEXT("audio_graph_domain_lifecycle_receipt_invalid"),
-					MutationTarget, JsonError);
-			}
-			OutReceipt.bMutationApplied = bMutationApplied;
-			OutReceipt.bCompileSettled = bCompileSettled;
-			OutReceipt.bPackageSaved = bSaved;
-			OutReceipt.bUnloadedReloaded = bReloaded;
-			OutReceipt.PersistenceReceiptId = MoveTemp(ReceiptId);
-			return true;
+			return TryReadNativeMutationPayload(Target, MutationPayload, OutMutation, OutError, &OutReceipt);
+		}
+
+		const TArray<FString>& AllowedOperations(const FString& RootType)
+		{
+			static const TArray<FString> MetaSound = {
+				TEXT("metasound.graph.interface.mutate"), TEXT("metasound.graph.node.mutate"),
+				TEXT("metasound.graph.link.mutate"), TEXT("metasound.graph.default.mutate"),
+				TEXT("metasound.graph.compile_settle")};
+			static const TArray<FString> SoundCue = {
+				TEXT("sound_cue.graph.node.mutate"), TEXT("sound_cue.graph.relation.mutate"),
+				TEXT("sound_cue.graph.root.mutate"), TEXT("sound_cue.graph.compile_settle")};
+			static const TArray<FString> Empty;
+			return RootType == MetaSoundSourceType ? MetaSound : RootType == SoundCueType ? SoundCue : Empty;
 		}
 
 		bool IsAllowedOperation(const FString& RootType, const FString& CommandId)
 		{
-			if (RootType == MetaSoundSourceType)
+			return AllowedOperations(RootType).Contains(CommandId);
+		}
+
+		bool TryImportSemanticWorkspace(
+			const FString& Target,
+			const FResolvedDomainHjsonDocument& Document,
+			FString& OutPayload,
+			FWorkspaceError& OutError)
+		{
+			if (!Document.SemanticWorkspace.IsValid())
 			{
-				return CommandId == TEXT("metasound.graph.interface.mutate")
-					|| CommandId == TEXT("metasound.graph.node.mutate")
-					|| CommandId == TEXT("metasound.graph.link.mutate")
-					|| CommandId == TEXT("metasound.graph.default.mutate")
-					|| CommandId == TEXT("metasound.graph.compile_settle");
+				return Fail(OutError, AudioFact(TEXT("audio_graph_semantic_workspace_missing"),
+					TEXT("The resolved audio semantic workspace is unavailable."), Target, TEXT("semantic_workspace.available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("native_result")));
 			}
-			return RootType == SoundCueType
-				&& (CommandId == TEXT("sound_cue.graph.node.mutate")
-					|| CommandId == TEXT("sound_cue.graph.relation.mutate")
-					|| CommandId == TEXT("sound_cue.graph.root.mutate")
-					|| CommandId == TEXT("sound_cue.graph.compile_settle"));
+			UObject* Asset = nullptr;
+			FUeAgentContentGraphCapture TargetCapture;
+			if (!TryCaptureObject(
+					Target, TArray<FString>{MetaSoundSourceType, SoundCueType},
+					Asset, TargetCapture, OutError))
+			{
+				return false;
+			}
+			const FString RootType = Asset
+				? Asset->GetClass()->GetPathName() : FString();
+			const UeAgentAudioAuthoring::FProfile* Profile =
+				ProfileForRootType(RootType);
+			if (!Profile)
+			{
+				return Fail(OutError, AudioFact(TEXT("audio_graph_domain_schema_or_type_invalid"),
+					TEXT("The audio graph target must be a MetaSoundSource or SoundCue."), Target, TEXT("target.class"),
+					MakeShared<FJsonValueString>(RootType), RootTypes(), TEXT("native_result")));
+			}
+			if (!EnsureAuthoringRegistered(OutError)) return false;
+
+			const FString TargetPackage = PackageIdentity(Target);
+			TArray<UeAgentAuthoringState::FReadRequest> Requests;
+			UE::UAI::Contract::FDiagnostic CaptureError;
+			if (!UeAgentAudioAuthoring::BuildAssetExportSnapshotReadRequests(
+					*Profile, *Asset, Requests, CaptureError))
+			{
+				OutError.SetFailure(CaptureError);
+				return false;
+			}
+			UeAgentAuthoringState::FCaptureResult Capture;
+			if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture))
+			{
+				OutError.SetFailure(Capture.Diagnostic);
+				return false;
+			}
+
+			ContextResource::FUeAgentResourceTracker Resources =
+				MakeSemanticWorkspaceResourceTracker();
+			StateSemantic::FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
+			FAuthoringModelPtr Model;
+			if (!TryBuildCanonicalAuthoringCapture(
+					ResolveTargetCompositionKind(Profile->TargetKind, Profile->TypeId),
+					TEXT("llm_authoring"), Capture.Snapshot, Resources,
+					CanonicalSnapshot, Model, OutError))
+			{
+				return false;
+			}
+
+			Capture.Snapshot.ReleaseNativeValues();
+			const FString TargetObjectPath = ObjectPathFromPackageIdentity(Target);
+			const UeAgentAudioAuthoring::EAssetKind AssetKind = Profile->Kind;
+			return TryCoordinateSemanticWorkspaceImport(
+				Document.SemanticWorkspace.ToSharedRef(), Model.ToSharedRef(),
+				CanonicalSnapshot.ToSharedRef(),
+				Contract::FUeAgentDescriptorIdentity(
+					TEXT("audio_graph.semantic_workspace"), 1,
+					Model->GetSemanticFingerprint()),
+				TargetObjectPath,
+				Resources,
+				{
+					TEXT("audio-graph-domain-provider"),
+					Target,
+					TargetObjectPath,
+					TEXT("audio-graph-semantic"),
+					TEXT("audio_graph_semantic_prepare_failed"),
+					TEXT("audio_graph_semantic_apply_failed"),
+					TEXT("audio_graph_semantic_readback_payload_invalid"),
+					TEXT("audio_graph_domain_compile_not_settled"),
+					[Profile, TargetObjectPath](TArray<UeAgentAuthoringState::FReadRequest>& Requests, UE::UAI::Contract::FDiagnostic& Error)
+					{
+						UObject* Native = StaticLoadObject(UObject::StaticClass(), nullptr, *TargetObjectPath);
+						if (!Native)
+						{
+							Error = AudioFact(TEXT("audio_graph_semantic_readback_target_unresolved"),
+								TEXT("The audio asset could not be loaded for semantic readback."), TargetObjectPath, TEXT("target.available"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("native_result"));
+							return false;
+						}
+						return UeAgentAudioAuthoring::BuildAssetExportSnapshotReadRequests(*Profile, *Native, Requests, Error);
+					}},
+				[AssetKind, TargetPackage,
+					DocumentSemanticId = Profile->DocumentSemanticId, &Asset](
+					const FString& RequestId,
+					const Composition::HjsonImport::FPreparedAuthoringImport& Prepared,
+					Composition::HjsonImport::FSemanticWorkspaceChangeProjection&& Projection,
+					FRootPropertyApplyOutcome& OutOutcome)
+				{
+					TSharedPtr<FJsonObject> DesiredDocument;
+					for (const auto& Change : Prepared.GetChangeSetDraft().GetChanges())
+					{
+						const FString& SemanticId = Change.GetIdentity().GetSemanticId();
+						if (SemanticId == TEXT("core.property")) continue;
+						FString SourceUnit;
+						for (const FString& UnitId : Projection.ChangedUnitIds)
+						{
+							const auto* Unit = Prepared.GetWorkspace()->GetModel()->FindUnit(UnitId);
+							if (Unit && (Unit->GetTargetIdentityKey() == Change.GetIdentity().GetCanonicalKey()
+								|| Unit->GetTargetIdentityKey() == Change.GetIdentity().GetSelector(CanonicalAuthoringTargetIdentitySelector)))
+							{
+								SourceUnit = UnitId;
+								break;
+							}
+						}
+						const auto RejectChange = [&](Contract::FDiagnostic Error)
+						{
+							OutOutcome.Phase = TEXT("semantic_projection");
+							if (!SourceUnit.IsEmpty()) LocateSemanticFailure(*Prepared.GetWorkspace(), SourceUnit, Error);
+							OutOutcome.Diagnostic = MoveTemp(Error);
+							return false;
+						};
+						if (SemanticId != DocumentSemanticId)
+							return RejectChange(AudioFact(TEXT("audio_graph_semantic_document_invalid"),
+								TEXT("The changed semantic surface is not the audio document surface."), TargetPackage, TEXT("/"),
+								MakeShared<FJsonValueString>(SemanticId), MakeShared<FJsonValueString>(DocumentSemanticId)));
+						if (DesiredDocument.IsValid())
+							return RejectChange(AudioFact(TEXT("audio_graph_semantic_document_invalid"),
+								TEXT("The import contains more than one audio document change."), TargetPackage, TEXT("/"),
+								MakeShared<FJsonValueNumber>(2), MakeShared<FJsonValueNumber>(1)));
+						if (!Change.GetProposedAfter().IsValid())
+							return RejectChange(AudioFact(TEXT("audio_graph_semantic_document_invalid"),
+								TEXT("The audio document change requires a proposed document value."), TargetPackage, TEXT("/"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+						TSharedPtr<FJsonValue> Value;
+						if (!StateSemantic::CanonicalJson::TryToJsonValue(*Change.GetProposedAfter(), Value, OutOutcome.Diagnostic))
+							return RejectChange(MoveTemp(OutOutcome.Diagnostic));
+						if (!Value.IsValid() || Value->Type != EJson::Object)
+							return RejectChange(AudioInput(TEXT("audio_graph_semantic_document_invalid"),
+								TEXT("The proposed audio document must be an object."), TargetPackage, TEXT("/"), Value, TEXT("object")));
+						// Composition already rebuilt the complete document from the selected edits.
+						DesiredDocument = Value->AsObject();
+						if (AssetKind != UeAgentAudioAuthoring::EAssetKind::SoundCue && Change.GetExpectedBefore().IsValid())
+						{
+							TMap<FString, StateSemantic::FUeAgentCanonicalValueRef> BeforeFields, AfterFields;
+							for (const auto& Field : Change.GetExpectedBefore()->GetObjectItems()) BeforeFields.Add(Field.Key, Field.Value);
+							for (const auto& Field : Change.GetProposedAfter()->GetObjectItems()) AfterFields.Add(Field.Key, Field.Value);
+							TSharedPtr<FJsonObject> Nodes;
+							FWorkspaceError NodeError;
+							if (!TryProjectGraphAuthoringNodeChanges(DocumentSemanticId, BeforeFields, AfterFields, Nodes, NodeError, true))
+							{
+								OutOutcome.Diagnostic = NodeError.GetDiagnostic();
+								OutOutcome.Phase = TEXT("semantic_projection");
+								return false;
+							}
+							if (AfterFields.Contains(TEXT("nodes"))) DesiredDocument->SetObjectField(TEXT("nodes"), Nodes);
+						}
+					}
+					const int32 ChangedUnitCount = Projection.ChangedUnitIds.Num();
+					UeAgentAudioAuthoring::FAssetApplyRequest ApplyRequest;
+					ApplyRequest.Kind = AssetKind;
+					ApplyRequest.Operation =
+						UeAgentApplyInputContract::EOperation::Update;
+					ApplyRequest.AssetPath = TargetPackage;
+					ApplyRequest.Document = DesiredDocument;
+					ApplyRequest.bCompleteDocument = true;
+					ApplyRequest.Properties = MoveTemp(Projection.RootObjectProperties);
+					ApplyRequest.bCompactValues = true;
+					ApplyRequest.bCompile = true;
+					ApplyRequest.bSave = true;
+					ApplyRequest.FinalReadback = OutOutcome.FinalReadback;
+					Asset = nullptr;
+					UeAgentAudioAuthoring::FAssetApplyResult ApplyResult;
+					const bool bApplied = UeAgentAudioAuthoring::ApplyAsset(
+						ApplyRequest, ApplyResult, RequestId);
+					OutOutcome.bApplied = bApplied && ApplyResult.IsApplied();
+					OutOutcome.Phase = MoveTemp(ApplyResult.Phase);
+					OutOutcome.Diagnostic = MoveTemp(ApplyResult.Diagnostic);
+					ApplyResult.Asset = nullptr;
+					Asset = nullptr;
+					return bApplied;
+				},
+				[&Target](FString& OutReadbackPayload, FString& OutRevision,
+					FWorkspaceError& OutReadError)
+				{
+					return TryRead(
+						Target, OutReadbackPayload, OutRevision, nullptr, OutReadError);
+				},
+				OutPayload, OutError);
 		}
 
 		bool TryImport(
@@ -345,16 +564,23 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			{
 				return false;
 			}
+			UE::UAI::HjsonWorkspace::DomainAuthoring::FScopedDomainHjsonDiagnosticSource DiagnosticSource(Document, OutError);
+			if (Document.bSemanticWorkspaceDirectory)
+			{
+				return TryImportSemanticWorkspace(
+					Target, Document, OutPayload, OutError);
+			}
 			FString RootType;
 			if (!Document.Root.IsValid()
 				|| !Document.Root->TryGetStringField(TEXT("type"), RootType)
 				|| !IsSupportedRootType(RootType))
 			{
-				return Fail(
-					OutError, TEXT("audio_graph_domain_schema_or_type_invalid"),
-					RootType);
+				const auto Value = Document.Root.IsValid() ? Document.Root->TryGetField(TEXT("type")) : nullptr;
+				auto Error = AudioInput(TEXT("audio_graph_domain_schema_or_type_invalid"),
+					TEXT("The document type must be MetaSoundSource or SoundCue."), Target, TEXT("/root/type"), Value, TEXT("supported audio class"));
+				Error.ExpectedValue = RootTypes();
+				return Fail(OutError, MoveTemp(Error));
 			}
-
 			FString MutationPayload;
 			if (Document.ExpectedRevision == TEXT("missing"))
 			{
@@ -363,20 +589,22 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 				if (!Document.Root->TryGetObjectField(TEXT("create"), Create)
 					|| !Create || !Create->IsValid())
 				{
-					return Fail(
-						OutError, TEXT("audio_graph_domain_create_contract_required"));
+					return Fail(OutError, AudioInput(TEXT("audio_graph_domain_create_contract_required"),
+						TEXT("Creating a missing audio target requires a create object."), Target, TEXT("/root/create"),
+						Document.Root->TryGetField(TEXT("create")), TEXT("object")));
 				}
 				if (Document.Root->HasField(TEXT("operation")))
 				{
-					return Fail(
-						OutError, TEXT("audio_graph_domain_create_then_edit_not_atomic"));
+					return Fail(OutError, AudioFact(TEXT("audio_graph_domain_create_then_edit_not_atomic"),
+						TEXT("An audio import cannot create and edit the target in the same request."), Target, TEXT("/root/operation"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false)));
 				}
 				TSharedPtr<FJsonObject> Native;
 				if (!TryBuildCreateParams(
 						Target, RootType, *Create, Native, OutError)
 					|| !SubmitAudioCommand(
 						TEXT("audio_media.asset.create"), Native,
-						MutationPayload, OutError))
+						MutationPayload, OutError, Document, TEXT("/root/create")))
 				{
 					return false;
 				}
@@ -392,35 +620,41 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 				}
 				if (Document.ExpectedRevision != CurrentRevision)
 				{
-					return Fail(
-						OutError, TEXT("audio_graph_domain_stale_revision"),
-						Target, CurrentRevision);
+					return Fail(OutError, StaleRevision(Target, CurrentRevision, Document.ExpectedRevision));
 				}
 				if (Document.Root->HasField(TEXT("create")))
 				{
-					return Fail(
-						OutError, TEXT("audio_graph_domain_create_requires_missing"));
+					return Fail(OutError, AudioFact(TEXT("audio_graph_domain_create_requires_missing"),
+						TEXT("A create contract is only allowed when expected_revision is 'missing'."), Target, TEXT("/root/create"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false)));
 				}
 				const TSharedPtr<FJsonObject>* Operation = nullptr;
 				const TSharedPtr<FJsonObject>* NativeParams = nullptr;
 				FString CommandId;
-				if (!Document.Root->TryGetObjectField(
-						TEXT("operation"), Operation)
-					|| !Operation || !Operation->IsValid()
-					|| !(*Operation)->TryGetStringField(
-						TEXT("command_id"), CommandId)
-					|| !(*Operation)->TryGetObjectField(
-						TEXT("params"), NativeParams)
-					|| !NativeParams || !NativeParams->IsValid())
+				if (!Document.Root->TryGetObjectField(TEXT("operation"), Operation) || !Operation || !Operation->IsValid())
 				{
-					return Fail(
-						OutError, TEXT("audio_graph_domain_operation_contract_required"));
+					return Fail(OutError, AudioInput(TEXT("audio_graph_domain_operation_contract_required"),
+						TEXT("Editing an audio target requires an operation object."), Target, TEXT("/root/operation"),
+						Document.Root->TryGetField(TEXT("operation")), TEXT("object")));
+				}
+				if (!(*Operation)->TryGetStringField(TEXT("command_id"), CommandId))
+				{
+					return Fail(OutError, AudioInput(TEXT("audio_graph_domain_operation_contract_required"),
+						TEXT("The operation command_id must be a string."), Target, TEXT("/root/operation/command_id"),
+						(*Operation)->TryGetField(TEXT("command_id")), TEXT("string")));
+				}
+				if (!(*Operation)->TryGetObjectField(TEXT("params"), NativeParams) || !NativeParams || !NativeParams->IsValid())
+				{
+					return Fail(OutError, AudioInput(TEXT("audio_graph_domain_operation_contract_required"),
+						TEXT("The operation params must be an object."), Target, TEXT("/root/operation/params"),
+						(*Operation)->TryGetField(TEXT("params")), TEXT("object")));
 				}
 				if (!IsAllowedOperation(RootType, CommandId))
 				{
-					return Fail(
-						OutError, TEXT("audio_graph_domain_operation_not_supported"),
-						CommandId);
+					return Fail(OutError, AudioFact(TEXT("audio_graph_domain_operation_not_supported"),
+						FString::Printf(TEXT("This command is not supported for audio root type '%s'."), *RootType),
+						Target, TEXT("/root/operation/command_id"), MakeShared<FJsonValueString>(CommandId),
+						StringChoices(AllowedOperations(RootType))));
 				}
 				const TSharedPtr<FJsonObject> Native =
 					MakeShared<FJsonObject>(**NativeParams);
@@ -429,16 +663,17 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 					&& ObjectPathFromPackageIdentity(NativeTarget)
 						!= ObjectPathFromPackageIdentity(Target))
 				{
-					return Fail(
-						OutError, TEXT("audio_graph_domain_operation_target_mismatch"),
-						CommandId);
+					return Fail(OutError, AudioFact(TEXT("audio_graph_domain_operation_target_mismatch"),
+						TEXT("The operation target_ref does not match the import target."), Target, TEXT("/root/operation/params/target_ref"),
+						MakeShared<FJsonValueString>(NativeTarget),
+MakeShared<FJsonValueString>(ObjectPathFromPackageIdentity(Target))));
 				}
 				Native->SetStringField(
 					TEXT("target_ref"), ObjectPathFromPackageIdentity(Target));
 				if (!TryNormalizeAudioGraphCandidateBindings(
 						Target, Native, OutError)
 					|| !SubmitAudioCommand(
-						CommandId, Native, MutationPayload, OutError))
+						CommandId, Native, MutationPayload, OutError, Document, TEXT("/root/operation/params")))
 				{
 					return false;
 				}
@@ -460,16 +695,9 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			{
 				return false;
 			}
-			FString CompileStatus;
-			if (!AfterSnapshot.IsValid()
-				|| !AfterSnapshot->TryGetStringField(
-					TEXT("compile_status"), CompileStatus)
-				|| CompileStatus != TEXT("valid"))
-			{
-				return Fail(
-					OutError, TEXT("audio_graph_domain_compile_not_settled"),
-					Target, CompileStatus);
-			}
+			if (!TryValidateReadbackDiagnostics(AfterSnapshot, Target,
+				TEXT("audio_graph_domain_compile_not_settled"), OutError))
+				return false;
 			return TryBuildImportSuccessPayload(
 				TEXT("audio-graph-domain-provider"),
 				Target,
@@ -479,6 +707,48 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 				Mutation,
 				OutPayload,
 				OutError);
+		}
+
+		bool TryExport(
+			const FString& Target,
+			const TSharedPtr<FJsonObject>& Params,
+			FString& OutPayload,
+			FWorkspaceError& OutError)
+		{
+			FString WorkspacePath;
+			if (!Params->TryGetStringField(TEXT("workspace_path"), WorkspacePath)
+				|| WorkspacePath.IsEmpty())
+			{
+				return Fail(OutError, AudioInput(TEXT("audio_graph_domain_export_path_required"),
+					TEXT("Export requires a non-empty workspace_path string."), Target, TEXT("/workspace_path"),
+					Params->TryGetField(TEXT("workspace_path")), TEXT("non-empty string"), TEXT("command_input")));
+			}
+			UObject* Asset = nullptr;
+			FUeAgentContentGraphCapture Capture;
+			if (!TryCaptureObject(
+					Target, TArray<FString>{MetaSoundSourceType, SoundCueType},
+					Asset, Capture, OutError))
+			{
+				return false;
+			}
+			const UeAgentAudioAuthoring::FProfile* Profile = Asset
+				? ProfileForRootType(Asset->GetClass()->GetPathName()) : nullptr;
+			if (!Profile)
+			{
+				return Fail(OutError, AudioFact(TEXT("audio_graph_domain_target_type_invalid"),
+					TEXT("The audio graph target must be a MetaSoundSource or SoundCue."), Target, TEXT("target.class"),
+					MakeShared<FJsonValueString>(Asset ? Asset->GetClass()->GetPathName() : FString()), RootTypes(), TEXT("native_result")));
+			}
+			if (!EnsureAuthoringRegistered(OutError)) return false;
+			UeAgentExportWorkspaceWriter::FWorkspaceResult ExportResult;
+			FString ExportError;
+			if (!UeAgentAudioAuthoring::ExportAssetWorkspace(*Profile, *Asset, WorkspacePath, TEXT("llm_authoring"), ExportResult))
+			{
+				OutError.SetFailure(ExportResult.Diagnostic);
+				return false;
+			}
+			const TSharedPtr<FJsonObject> Result = ExportResult.ToPublicJsonObject();
+			return TryCanonicalizeObject(Result, OutPayload, OutError);
 		}
 	}
 
@@ -494,15 +764,17 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 		bOutReadOnly = false;
 		OutError.Reset();
 		TSharedPtr<FJsonObject> Params;
-		FString JsonError;
-		if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError) || !Params.IsValid())
+		UE::UAI::Contract::FDiagnostic JsonError;
+if (!Json::TryParseObject(CanonicalParamsJson, Params, JsonError))
 		{
-			return Fail(OutError, TEXT("audio_graph_domain_params_invalid"), JsonError);
+			return Fail(OutError, MoveTemp(JsonError));
 		}
 		FString Target;
 		if (!Params->TryGetStringField(TEXT("target"), Target) || Target != TargetIdentity)
 		{
-			return Fail(OutError, TEXT("audio_graph_domain_target_identity_mismatch"), TargetIdentity);
+				return Fail(OutError, AudioInput(TEXT("audio_graph_domain_target_identity_mismatch"),
+					TEXT("The target parameter must match the routed audio target."), TargetIdentity, TEXT("/target"),
+					Params->TryGetField(TEXT("target")), TargetIdentity, TEXT("command_input")));
 		}
 		if (CommandId == TEXT("content_graph.import_workspace"))
 		{
@@ -510,7 +782,8 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 		}
 		if (CommandId == TEXT("content_graph.export_workspace"))
 		{
-			return Fail(OutError, TEXT("audio_graph_domain_export_not_registered"), Target);
+			bOutReadOnly = true;
+			return TryExport(Target, Params, OutPayloadJson, OutError);
 		}
 		if (CommandId.StartsWith(TEXT("content_graph.")))
 		{
@@ -518,6 +791,8 @@ namespace UE::UAI::DomainAdapters::AudioGraph
 			bOutReadOnly = true;
 			return TryRead(Target, OutPayloadJson, Revision, nullptr, OutError);
 		}
-		return Fail(OutError, TEXT("audio_graph_domain_command_not_supported"), CommandId);
+		return Fail(OutError, AudioFact(TEXT("audio_graph_domain_command_not_supported"),
+			TEXT("This audio adapter requires a content_graph command."), Target, TEXT("/command_id"),
+			MakeShared<FJsonValueString>(CommandId), MakeShared<FJsonValueString>(TEXT("content_graph.*")), TEXT("command_input")));
 	}
 }

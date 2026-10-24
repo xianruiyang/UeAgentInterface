@@ -1,4 +1,8 @@
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectMediaMechanics.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Dom/JsonValue.h"
+#include "Dom/JsonObject.h"
 
 #include "MediaPlayer.h"
 #include "MediaTexture.h"
@@ -18,16 +22,37 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		const TCHAR* MediaTextureMechanicId =
 			TEXT("uai.asset_data.mechanic:update_media_texture:v1");
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
-		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
-			return false;
-		}
+        bool Fail(FExecutionMutationError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic)
+        {
+            OutError = MoveTemp(Diagnostic);
+            return false;
+        }
+
+        FExecutionMutationError JsonFailure(const TCHAR* Code, const FString& Reason, const FString& Field,
+            const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected,
+            const TCHAR* SourceKind = TEXT("authored_value"))
+        {
+            auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Field, Expected, Actual, TEXT("execution"), Reason);
+            Error.SourceKind = SourceKind;
+            Error.ActualValuePresent = Actual.IsValid();
+            Error.ExpectedValuePresent = Expected.IsValid();
+            return Error;
+        }
+
+        FExecutionMutationError ValueFailure(const TCHAR* Code, const FString& Reason, const FString& Field,
+            const FUeAgentCanonicalValue* Actual, const FString& Expected,
+            const TCHAR* SourceKind = TEXT("authored_value"))
+        {
+            auto Error = JsonFailure(Code, Reason, Field, nullptr, MakeShared<FJsonValueString>(Expected), SourceKind);
+            Error.ActualValuePresent = Actual != nullptr;
+            Contract::FDiagnostic ProjectionError;
+            if (Actual && !CanonicalJson::TryToJsonValue(*Actual, Error.ActualValue, ProjectionError))
+            {
+                ProjectionError.SourceKind = TEXT("native_result");
+                Error.Diagnostics.Add(MoveTemp(ProjectionError));
+            }
+            return Error;
+        }
 
 		const FUeAgentCanonicalValue* FindObjectField(
 			const FUeAgentCanonicalValue& Object,
@@ -61,12 +86,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutValue,
 					StateError)
 				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
+				: Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(StateError.Code.IsEmpty()
 						? TEXT("asset_data_media_projection_string_invalid")
-						: StateError.Code,
-					StateError.Detail);
+						: StateError.Code, StateError, TEXT("execution")));
 		}
 
 		bool TryBuildBoolean(
@@ -82,12 +104,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutValue,
 					StateError)
 				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
+				: Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(StateError.Code.IsEmpty()
 						? TEXT("asset_data_media_projection_boolean_invalid")
-						: StateError.Code,
-					StateError.Detail);
+						: StateError.Code, StateError, TEXT("execution")));
 		}
 
 		bool TryBuildDecimal(
@@ -96,21 +115,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
-			FUeAgentStateSemanticError StateError;
-			return FMath::IsFinite(Value)
-				&& FUeAgentCanonicalValue::TryDecimal(
-					FString::SanitizeFloat(
-						static_cast<double>(Value)),
-					Resources,
-					OutValue,
-					StateError)
-				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
-						? TEXT("asset_data_media_projection_decimal_invalid")
-						: StateError.Code,
-					StateError.Detail);
+            if (!FMath::IsFinite(Value))
+                return Fail(OutError, JsonFailure(TEXT("asset_data_media_projection_decimal_invalid"),
+                    TEXT("The native media value is not finite and cannot be represented as a canonical decimal."), FString(),
+                    MakeShared<FJsonValueString>(FString::SanitizeFloat(static_cast<double>(Value))),
+                    MakeShared<FJsonValueString>(TEXT("finite decimal")), TEXT("native_result")));
+            FUeAgentStateSemanticError StateError;
+            return FUeAgentCanonicalValue::TryDecimal(
+                FString::SanitizeFloat(static_cast<double>(Value)), Resources, OutValue, StateError)
+                ? true
+                : Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(StateError.Code.IsEmpty()
+                    ? TEXT("asset_data_media_projection_decimal_invalid") : StateError.Code, StateError, TEXT("execution")));
 		}
 
 		bool TryBuildNull(
@@ -124,12 +139,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutValue,
 					StateError)
 				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
+				: Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(StateError.Code.IsEmpty()
 						? TEXT("asset_data_media_projection_null_invalid")
-						: StateError.Code,
-					StateError.Detail);
+						: StateError.Code, StateError, TEXT("execution")));
 		}
 
 		bool TryBuildObject(
@@ -151,12 +163,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					OutValue,
 					StateError)
 				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
+				: Fail(OutError, UE::UAI::Contract::FDiagnostic::WrapFailure(StateError.Code.IsEmpty()
 						? TEXT("asset_data_media_projection_object_invalid")
-						: StateError.Code,
-					StateError.Detail);
+						: StateError.Code, StateError, TEXT("execution")));
 		}
 
 		bool TryReadString(
@@ -217,9 +226,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEXT("Loop"));
 			if (!LoopProperty)
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_player_loop_property_missing"));
+                auto Error = JsonFailure(TEXT("asset_data_media_player_loop_property_missing"),
+                    TEXT("The MediaPlayer class does not expose the required serialized Loop boolean property."),
+                    TEXT("Loop"), nullptr, MakeShared<FJsonValueString>(TEXT("FBoolProperty")), TEXT("native_result"));
+                Error.TargetPath = Player.GetPathName();
+                return Fail(OutError, MoveTemp(Error));
 			}
 			bOutLoop = LoopProperty->GetPropertyValue_InContainer(
 				&Player);
@@ -228,88 +239,69 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 		bool TryBuildLinearColor(
 			const FLinearColor& Color,
+			const FString& Field,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
-			FUeAgentCanonicalValuePtr Red;
-			FUeAgentCanonicalValuePtr Green;
-			FUeAgentCanonicalValuePtr Blue;
-			FUeAgentCanonicalValuePtr Alpha;
-			return TryBuildDecimal(
-					Color.R,
-					Resources,
-					Red,
-					OutError)
-				&& TryBuildDecimal(
-					Color.G,
-					Resources,
-					Green,
-					OutError)
-				&& TryBuildDecimal(
-					Color.B,
-					Resources,
-					Blue,
-					OutError)
-				&& TryBuildDecimal(
-					Color.A,
-					Resources,
-					Alpha,
-					OutError)
-				&& TryBuildObject(
-					{
-						{TEXT("r"), Red.ToSharedRef()},
-						{TEXT("g"), Green.ToSharedRef()},
-						{TEXT("b"), Blue.ToSharedRef()},
-						{TEXT("a"), Alpha.ToSharedRef()},
-					},
-					Resources,
-					OutValue,
-					OutError);
+            TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
+            const TCHAR* Names[] = {TEXT("r"), TEXT("g"), TEXT("b"), TEXT("a")};
+            const float Components[] = {Color.R, Color.G, Color.B, Color.A};
+            for (int32 Index = 0; Index < 4; ++Index)
+            {
+                FUeAgentCanonicalValuePtr Component;
+                if (!TryBuildDecimal(Components[Index], Resources, Component, OutError))
+                {
+                    if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = Field + TEXT("/") + Names[Index];
+                    return false;
+                }
+                Items.Emplace(Names[Index], Component.ToSharedRef());
+            }
+            return TryBuildObject(MoveTemp(Items), Resources, OutValue, OutError);
 		}
 
-		bool TryReadLinearColor(
-			const FUeAgentCanonicalValue& Value,
-			FLinearColor& OutColor)
-		{
-			if (Value.GetKind() != EUeAgentValueKind::Object
-				|| Value.GetObjectItems().Num() != 4)
-			{
-				return false;
-			}
-			const FUeAgentCanonicalValue* Red =
-				FindObjectField(Value, TEXT("r"));
-			const FUeAgentCanonicalValue* Green =
-				FindObjectField(Value, TEXT("g"));
-			const FUeAgentCanonicalValue* Blue =
-				FindObjectField(Value, TEXT("b"));
-			const FUeAgentCanonicalValue* Alpha =
-				FindObjectField(Value, TEXT("a"));
-			double R = 0.0;
-			double G = 0.0;
-			double B = 0.0;
-			double A = 0.0;
-			if (!Red
-				|| !Green
-				|| !Blue
-				|| !Alpha
-				|| !TryReadNumber(*Red, R)
-				|| !TryReadNumber(*Green, G)
-				|| !TryReadNumber(*Blue, B)
-				|| !TryReadNumber(*Alpha, A))
-			{
-				return false;
-			}
-			OutColor = FLinearColor(
-				static_cast<float>(R),
-				static_cast<float>(G),
-				static_cast<float>(B),
-				static_cast<float>(A));
-			return FMath::IsFinite(OutColor.R)
-				&& FMath::IsFinite(OutColor.G)
-				&& FMath::IsFinite(OutColor.B)
-				&& FMath::IsFinite(OutColor.A);
-		}
+        bool TryReadLinearColor(
+            const FUeAgentCanonicalValue& Value,
+            const FString& Field,
+            const TCHAR* Code,
+            const TCHAR* SourceKind,
+            FLinearColor& OutColor,
+            FExecutionMutationError& OutError)
+        {
+            if (Value.GetKind() != EUeAgentValueKind::Object || Value.GetObjectItems().Num() != 4)
+                return Fail(OutError, ValueFailure(Code,
+                    TEXT("A linear color must be an object containing exactly r, g, b and a."), Field,
+                    &Value, TEXT("object with four numeric components: r, g, b, a"), SourceKind));
+            const TCHAR* Names[] = {TEXT("r"), TEXT("g"), TEXT("b"), TEXT("a")};
+            const FUeAgentCanonicalValue* Components[4] = {};
+            double Numbers[4] = {};
+            for (int32 Index = 0; Index < 4; ++Index)
+            {
+                Components[Index] = FindObjectField(Value, Names[Index]);
+                if (!Components[Index])
+                    return Fail(OutError, ValueFailure(Code,
+                        TEXT("The linear color is missing a required component."), Field + TEXT("/") + Names[Index],
+                        nullptr, TEXT("finite number"), SourceKind));
+            }
+            for (int32 Index = 0; Index < 4; ++Index)
+            {
+                if (!TryReadNumber(*Components[Index], Numbers[Index]))
+                    return Fail(OutError, ValueFailure(Code,
+                        TEXT("The linear color component must be a finite number."), Field + TEXT("/") + Names[Index],
+                        Components[Index], TEXT("finite number"), SourceKind));
+            }
+            OutColor = FLinearColor(static_cast<float>(Numbers[0]), static_cast<float>(Numbers[1]),
+                static_cast<float>(Numbers[2]), static_cast<float>(Numbers[3]));
+            const float Floats[] = {OutColor.R, OutColor.G, OutColor.B, OutColor.A};
+            for (int32 Index = 0; Index < 4; ++Index)
+            {
+                if (!FMath::IsFinite(Floats[Index]))
+                    return Fail(OutError, ValueFailure(Code,
+                        TEXT("The linear color component is outside the finite native float range."), Field + TEXT("/") + Names[Index],
+                        Components[Index], TEXT("finite float"), SourceKind));
+            }
+            return true;
+        }
 
 		bool TryBuildMediaPlayerProjectionMap(
 			const UMediaPlayer* Player,
@@ -320,9 +312,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			OutValues.Reset();
 			if (!Player)
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_player_projection_invalid"));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_media_player_projection_invalid"),
+                    TEXT("A MediaPlayer object is required to capture media fields."), TEXT("target"),
+                    nullptr, MakeShared<FJsonValueString>(UMediaPlayer::StaticClass()->GetPathName()), TEXT("native_result")));
 			}
 			bool bLoop = false;
 			FUeAgentCanonicalValuePtr PlayOnOpen;
@@ -355,31 +347,27 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			OutValues.Reset();
 			if (!Texture)
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_texture_projection_invalid"));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_media_texture_projection_invalid"),
+                    TEXT("A MediaTexture object is required to capture media fields."), TEXT("target"),
+                    nullptr, MakeShared<FJsonValueString>(UMediaTexture::StaticClass()->GetPathName()), TEXT("native_result")));
 			}
 			FUeAgentCanonicalValuePtr Player;
 			FUeAgentCanonicalValuePtr AutoClear;
 			FUeAgentCanonicalValuePtr ClearColor;
-			if (!TryBuildReference(
-					Texture->GetMediaPlayer(),
-					Resources,
-					Player,
-					OutError)
-				|| !TryBuildBoolean(
-					Texture->AutoClear,
-					Resources,
-					AutoClear,
-					OutError)
-				|| !TryBuildLinearColor(
-					Texture->ClearColor,
-					Resources,
-					ClearColor,
-					OutError))
-			{
-				return false;
-			}
+            if (!TryBuildReference(Texture->GetMediaPlayer(), Resources, Player, OutError))
+            {
+                if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = TEXT("media_player_ref");
+                return false;
+            }
+            if (!TryBuildBoolean(Texture->AutoClear, Resources, AutoClear, OutError))
+            {
+                if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = TEXT("auto_clear");
+                return false;
+            }
+            if (!TryBuildLinearColor(Texture->ClearColor, TEXT("clear_color"), Resources, ClearColor, OutError))
+            {
+                return false;
+            }
 			OutValues.Add(TEXT("media_player_ref"), Player.ToSharedRef());
 			OutValues.Add(TEXT("auto_clear"), AutoClear.ToSharedRef());
 			OutValues.Add(TEXT("clear_color"), ClearColor.ToSharedRef());
@@ -427,9 +415,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		{
 			if (SelectedFieldIds.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_selected_fields_missing"));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_media_selected_fields_missing"),
+                    TEXT("Media field projection requires at least one selected field."), TEXT("selected_fields"),
+                    MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("one or more fields"))));
 			}
 			TSet<FString> Seen;
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>> CurrentItems;
@@ -447,18 +435,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				if (Seen.Contains(FieldId)
 					|| !Current
 					|| !Default
-					|| !ContextTag
-					|| !TryBuildString(
-						ContextTag,
-						Resources,
-						Context,
-						OutError))
+					|| !ContextTag)
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_media_selected_field_invalid"),
-						FieldId);
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_media_selected_field_invalid"),
+                        Seen.Contains(FieldId) ? TEXT("The field is selected more than once.")
+                            : !Current ? TEXT("The selected field has no captured current value.")
+                            : !Default ? TEXT("The selected field has no captured default value.")
+                            : TEXT("The selected field has no projection context for this asset type."),
+                        FieldId, MakeShared<FJsonValueString>(FieldId),
+                        MakeShared<FJsonValueString>(TEXT("unique supported field with current, default and context values"))));
 				}
+				if (!TryBuildString(ContextTag, Resources, Context, OutError)) return false;
 				Seen.Add(FieldId);
 				CurrentItems.Emplace(FieldId, *Current);
 				DefaultItems.Emplace(FieldId, *Default);
@@ -500,9 +487,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				|| TypedChanges->GetArrayItems().Num()
 					!= CurrentFields.GetObjectItems().Num())
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_expected_state_invalid"));
+                if (CurrentFields.GetKind() != EUeAgentValueKind::Object)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_expected_state_invalid"),
+                        TEXT("Captured current media fields must be an object."), TEXT("field_state"), &CurrentFields, TEXT("object"), TEXT("native_result")));
+                if (DefaultFields.GetKind() != EUeAgentValueKind::Object)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_expected_state_invalid"),
+                        TEXT("Captured default media fields must be an object."), TEXT("field_defaults"), &DefaultFields, TEXT("object"), TEXT("native_result")));
+                if (ProjectionContext.GetKind() != EUeAgentValueKind::Object)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_expected_state_invalid"),
+                        TEXT("Media field projection context must be an object."), TEXT("field_projection_context"), &ProjectionContext, TEXT("object"), TEXT("native_result")));
+                if (!TypedChanges || TypedChanges->GetKind() != EUeAgentValueKind::Array)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_expected_state_invalid"),
+                        TEXT("The proposed media state requires a typed_changes array."), TEXT("typed_changes"), TypedChanges, TEXT("array")));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_media_expected_state_invalid"),
+                    TEXT("The number of typed changes must match the number of selected current fields."), TEXT("typed_changes"),
+                    MakeShared<FJsonValueNumber>(TypedChanges->GetArrayItems().Num()),
+                    MakeShared<FJsonValueNumber>(CurrentFields.GetObjectItems().Num())));
 			}
 			for (const FUeAgentCanonicalValueRef& Change
 				: TypedChanges->GetArrayItems())
@@ -514,9 +514,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					|| !TryReadString(*Field, FieldId)
 					|| OutChanges.Contains(FieldId))
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_media_expected_change_invalid"));
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_expected_change_invalid"),
+                        OutChanges.Contains(FieldId) ? TEXT("The same field_id occurs more than once in typed_changes.")
+                            : TEXT("Each typed change requires a non-empty string field_id."),
+                        TEXT("typed_changes/") + ::LexToString(OutChanges.Num()) + TEXT("/field_id"),
+                        Field, TEXT("unique non-empty field_id")));
 				}
 				OutChanges.Add(FieldId, &Change.Get());
 			}
@@ -544,163 +546,130 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return true;
 		}
 
-		bool TryBuildExpectedReference(
-			IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
-			const FString& Presence,
-			const FUeAgentCanonicalValue& Default,
-			const FUeAgentCanonicalValue* Requested,
-			FUeAgentResourceTracker& Resources,
-			FUeAgentCanonicalValuePtr& OutExpected,
-			FExecutionMutationError& OutError)
-		{
-			if (Presence == TEXT("clear"))
-			{
-				if (Requested)
-				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_media_reference_clear_invalid"));
-				}
-				if (Default.GetKind() == EUeAgentValueKind::Null)
-				{
-					return TryBuildNull(
-						Resources,
-						OutExpected,
-						OutError);
-				}
-				FString DefaultRef;
-				return TryReadString(Default, DefaultRef)
-					? TryBuildString(
-						DefaultRef,
-						Resources,
-						OutExpected,
-						OutError)
-					: Fail(
-						OutError,
-						TEXT("asset_data_media_reference_default_invalid"));
-			}
-			if (Presence == TEXT("null"))
-			{
-				return Requested
-					? Fail(
-						OutError,
-						TEXT("asset_data_media_reference_null_invalid"))
-					: TryBuildNull(Resources, OutExpected, OutError);
-			}
-			FString CanonicalRef;
-			UObject* Resolved = nullptr;
-			if (Presence != TEXT("set")
-				|| !Requested
-				|| !TryReadString(*Requested, CanonicalRef)
-				|| !Resolver.TryResolveExisting(
-					CanonicalRef,
-					Resolved,
-					OutError))
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_texture_player_expected_invalid"),
-					CanonicalRef);
-			}
-			UMediaPlayer* Player = Cast<UMediaPlayer>(Resolved);
-			if (!Player)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_texture_player_expected_invalid"),
-					CanonicalRef);
-			}
-			return TryBuildReference(
-				Player,
-				Resources,
-				OutExpected,
-				OutError);
-		}
+        bool TryBuildExpectedReference(
+            IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
+            const FString& Field,
+            const FString& Presence,
+            const FUeAgentCanonicalValue& Default,
+            const FUeAgentCanonicalValue* Requested,
+            FUeAgentResourceTracker& Resources,
+            FUeAgentCanonicalValuePtr& OutExpected,
+            FExecutionMutationError& OutError)
+        {
+            if (Presence == TEXT("clear"))
+            {
+                if (Requested)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_reference_clear_invalid"),
+                        TEXT("Clearing a media reference must omit the requested value."), Field,
+                        Requested, TEXT("value absent")));
+                if (Default.GetKind() == EUeAgentValueKind::Null)
+                    return TryBuildNull(Resources, OutExpected, OutError);
+                FString DefaultRef;
+                return TryReadString(Default, DefaultRef)
+                    ? TryBuildString(DefaultRef, Resources, OutExpected, OutError)
+                    : Fail(OutError, ValueFailure(TEXT("asset_data_media_reference_default_invalid"),
+                        TEXT("The native default media reference must be null or a non-empty string."),
+                        Field, &Default, TEXT("null or non-empty asset reference"), TEXT("native_result")));
+            }
+            if (Presence == TEXT("null"))
+                return Requested
+                    ? Fail(OutError, ValueFailure(TEXT("asset_data_media_reference_null_invalid"),
+                        TEXT("A null media reference operation must omit the requested value."), Field,
+                        Requested, TEXT("value absent")))
+                    : TryBuildNull(Resources, OutExpected, OutError);
+            if (Presence != TEXT("set"))
+                return Fail(OutError, JsonFailure(TEXT("asset_data_media_texture_player_expected_invalid"),
+                    TEXT("The media reference change uses an unsupported operation."), Field + TEXT("/presence"),
+                    MakeShared<FJsonValueString>(Presence), MakeShared<FJsonValueString>(TEXT("set, clear or null"))));
+            FString CanonicalRef;
+            if (!Requested || !TryReadString(*Requested, CanonicalRef))
+                return Fail(OutError, ValueFailure(TEXT("asset_data_media_texture_player_expected_invalid"),
+                    TEXT("Setting a media reference requires a non-empty asset reference string."),
+                    Field, Requested, TEXT("non-empty MediaPlayer asset reference")));
+            UObject* Resolved = nullptr;
+            if (!Resolver.TryResolveExisting(CanonicalRef, Resolved, OutError))
+                return Fail(OutError, OutError.IsValid()
+                    ? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("asset_data_media_texture_player_expected_invalid"), OutError)
+                    : ValueFailure(TEXT("asset_data_media_texture_player_expected_invalid"),
+                        TEXT("The asset resolver could not resolve the requested MediaPlayer reference."),
+                        Field, Requested, TEXT("resolvable MediaPlayer asset reference")));
+            UMediaPlayer* Player = Cast<UMediaPlayer>(Resolved);
+            if (!Player)
+            {
+                auto Actual = MakeShared<FJsonObject>();
+                Actual->SetStringField(TEXT("reference"), CanonicalRef);
+                if (Resolved) Actual->SetStringField(TEXT("class"), Resolved->GetClass()->GetPathName());
+                else Actual->SetField(TEXT("class"), MakeShared<FJsonValueNull>());
+                return Fail(OutError, JsonFailure(TEXT("asset_data_media_texture_player_expected_invalid"),
+                    TEXT("The resolved reference is not a MediaPlayer object."), Field,
+                    MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(UMediaPlayer::StaticClass()->GetPathName())));
+            }
+            return TryBuildReference(Player, Resources, OutExpected, OutError);
+        }
 
-		bool TryBuildExpectedBoolean(
-			const FString& Presence,
-			const FUeAgentCanonicalValue& Default,
-			const FUeAgentCanonicalValue* Requested,
-			const bool bAllowClear,
-			FUeAgentResourceTracker& Resources,
-			FUeAgentCanonicalValuePtr& OutExpected,
-			FExecutionMutationError& OutError)
-		{
-			if (bAllowClear && Presence == TEXT("clear"))
-			{
-				if (Requested)
-				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_media_boolean_clear_invalid"));
-				}
-				return Default.GetKind() == EUeAgentValueKind::Boolean
-					? TryBuildBoolean(
-						Default.GetBoolean(),
-						Resources,
-						OutExpected,
-						OutError)
-					: Fail(
-						OutError,
-						TEXT("asset_data_media_boolean_default_invalid"));
-			}
-			if (Presence != TEXT("set")
-				|| !Requested
-				|| Requested->GetKind() != EUeAgentValueKind::Boolean)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_boolean_expected_invalid"));
-			}
-			return TryBuildBoolean(
-				Requested->GetBoolean(),
-				Resources,
-				OutExpected,
-				OutError);
-		}
+        bool TryBuildExpectedBoolean(
+            const FString& Field,
+            const FString& Presence,
+            const FUeAgentCanonicalValue& Default,
+            const FUeAgentCanonicalValue* Requested,
+            const bool bAllowClear,
+            FUeAgentResourceTracker& Resources,
+            FUeAgentCanonicalValuePtr& OutExpected,
+            FExecutionMutationError& OutError)
+        {
+            if (bAllowClear && Presence == TEXT("clear"))
+            {
+                if (Requested)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_boolean_clear_invalid"),
+                        TEXT("Clearing a media boolean must omit the requested value."),
+                        Field, Requested, TEXT("value absent")));
+                return Default.GetKind() == EUeAgentValueKind::Boolean
+                    ? TryBuildBoolean(Default.GetBoolean(), Resources, OutExpected, OutError)
+                    : Fail(OutError, ValueFailure(TEXT("asset_data_media_boolean_default_invalid"),
+                        TEXT("The native default media value must be a boolean."),
+                        Field, &Default, TEXT("boolean"), TEXT("native_result")));
+            }
+            if (Presence != TEXT("set"))
+                return Fail(OutError, JsonFailure(TEXT("asset_data_media_boolean_expected_invalid"),
+                    TEXT("The media boolean change uses an unsupported operation."), Field + TEXT("/presence"),
+                    MakeShared<FJsonValueString>(Presence), MakeShared<FJsonValueString>(bAllowClear ? TEXT("set or clear") : TEXT("set"))));
+            if (!Requested || Requested->GetKind() != EUeAgentValueKind::Boolean)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_media_boolean_expected_invalid"),
+                    TEXT("Setting a media boolean requires a boolean value."), Field, Requested, TEXT("boolean")));
+            return TryBuildBoolean(Requested->GetBoolean(), Resources, OutExpected, OutError);
+        }
 
-		bool TryBuildExpectedColor(
-			const FString& Presence,
-			const FUeAgentCanonicalValue& Default,
-			const FUeAgentCanonicalValue* Requested,
-			FUeAgentResourceTracker& Resources,
-			FUeAgentCanonicalValuePtr& OutExpected,
-			FExecutionMutationError& OutError)
-		{
-			if (Presence == TEXT("clear"))
-			{
-				if (Requested)
-				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_media_color_clear_invalid"));
-				}
-				FLinearColor DefaultColor;
-				return TryReadLinearColor(Default, DefaultColor)
-					? TryBuildLinearColor(
-						DefaultColor,
-						Resources,
-						OutExpected,
-						OutError)
-					: Fail(
-						OutError,
-						TEXT("asset_data_media_color_default_invalid"));
-			}
-			FLinearColor Color;
-			if (Presence != TEXT("set")
-				|| !Requested
-				|| !TryReadLinearColor(*Requested, Color))
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_color_expected_invalid"));
-			}
-			return TryBuildLinearColor(
-				Color,
-				Resources,
-				OutExpected,
-				OutError);
-		}
+        bool TryBuildExpectedColor(
+            const FString& Field,
+            const FString& Presence,
+            const FUeAgentCanonicalValue& Default,
+            const FUeAgentCanonicalValue* Requested,
+            FUeAgentResourceTracker& Resources,
+            FUeAgentCanonicalValuePtr& OutExpected,
+            FExecutionMutationError& OutError)
+        {
+            if (Presence == TEXT("clear"))
+            {
+                if (Requested)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_color_clear_invalid"),
+                        TEXT("Clearing a media color must omit the requested value."), Field, Requested, TEXT("value absent")));
+                FLinearColor DefaultColor;
+                if (!TryReadLinearColor(Default, Field, TEXT("asset_data_media_color_default_invalid"),
+                    TEXT("native_result"), DefaultColor, OutError)) return false;
+                return TryBuildLinearColor(DefaultColor, Field, Resources, OutExpected, OutError);
+            }
+            if (Presence != TEXT("set"))
+                return Fail(OutError, JsonFailure(TEXT("asset_data_media_color_expected_invalid"),
+                    TEXT("The media color change uses an unsupported operation."), Field + TEXT("/presence"),
+                    MakeShared<FJsonValueString>(Presence), MakeShared<FJsonValueString>(TEXT("set or clear"))));
+            if (!Requested)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_media_color_expected_invalid"),
+                    TEXT("Setting a media color requires a value."), Field, nullptr, TEXT("linear color object")));
+            FLinearColor Color;
+            if (!TryReadLinearColor(*Requested, Field, TEXT("asset_data_media_color_expected_invalid"),
+                TEXT("authored_value"), Color, OutError)) return false;
+            return TryBuildLinearColor(Color, Field, Resources, OutExpected, OutError);
+        }
 	}
 
 	bool CanProjectMediaFieldState(
@@ -727,18 +696,33 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		OutProjectionContext.Reset();
 		if (!CanProjectMediaFieldState(NativeMechanicId) || !Target)
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_media_field_projection_unsupported"),
-				NativeMechanicId);
+            auto Error = JsonFailure(TEXT("asset_data_media_field_projection_unsupported"),
+                !CanProjectMediaFieldState(NativeMechanicId)
+                    ? TEXT("No media field projector is registered for this requested mechanic.")
+                    : TEXT("Media field projection requires an available target object."),
+                !CanProjectMediaFieldState(NativeMechanicId) ? TEXT("media_projector_available") : TEXT("target_available"),
+                MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TEXT("native_result"));
+            Error.InternalContext = NativeMechanicId;
+            if (Target) Error.TargetPath = Target->GetPathName();
+            return Fail(OutError, MoveTemp(Error));
 		}
 
 		TMap<FString, FUeAgentCanonicalValueRef> CurrentValues;
 		TMap<FString, FUeAgentCanonicalValueRef> DefaultValues;
 		if (NativeMechanicId == MediaPlayerMechanicId)
 		{
-			if (!TryBuildMediaPlayerProjectionMap(
-					Cast<UMediaPlayer>(Target),
+            UMediaPlayer* PlayerTarget = Cast<UMediaPlayer>(Target);
+            if (!PlayerTarget)
+            {
+                auto Error = JsonFailure(TEXT("asset_data_media_player_projection_invalid"),
+                    TEXT("The media player projector received an object of another class."), TEXT("target"),
+                    MakeShared<FJsonValueString>(Target->GetClass()->GetPathName()),
+                    MakeShared<FJsonValueString>(UMediaPlayer::StaticClass()->GetPathName()), TEXT("native_result"));
+                Error.TargetPath = Target->GetPathName();
+                return Fail(OutError, MoveTemp(Error));
+            }
+            if (!TryBuildMediaPlayerProjectionMap(
+                    PlayerTarget,
 					Resources,
 					CurrentValues,
 					OutError)
@@ -751,19 +735,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				return false;
 			}
 		}
-		else if (!TryBuildMediaTextureProjectionMap(
-				Cast<UMediaTexture>(Target),
-				Resources,
-				CurrentValues,
-				OutError)
-			|| !TryBuildMediaTextureProjectionMap(
-				GetDefault<UMediaTexture>(),
-				Resources,
-				DefaultValues,
-				OutError))
-		{
-			return false;
-		}
+        else
+        {
+            UMediaTexture* TextureTarget = Cast<UMediaTexture>(Target);
+            if (!TextureTarget)
+            {
+                auto Error = JsonFailure(TEXT("asset_data_media_texture_projection_invalid"),
+                    TEXT("The media texture projector received an object of another class."), TEXT("target"),
+                    MakeShared<FJsonValueString>(Target->GetClass()->GetPathName()),
+                    MakeShared<FJsonValueString>(UMediaTexture::StaticClass()->GetPathName()), TEXT("native_result"));
+                Error.TargetPath = Target->GetPathName();
+                return Fail(OutError, MoveTemp(Error));
+            }
+            if (!TryBuildMediaTextureProjectionMap(TextureTarget, Resources, CurrentValues, OutError)
+                || !TryBuildMediaTextureProjectionMap(GetDefault<UMediaTexture>(), Resources, DefaultValues, OutError))
+                return false;
+        }
 
 		return TrySelectFields(
 			NativeMechanicId,
@@ -791,10 +778,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		OutExpectedFields.Reset();
 		if (!CanProjectMediaFieldState(NativeMechanicId))
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_media_field_projection_unsupported"),
-				NativeMechanicId);
+            auto Error = JsonFailure(TEXT("asset_data_media_field_projection_unsupported"),
+                TEXT("No media expected-state projector is registered for this requested mechanic."),
+                TEXT("media_projector_available"), MakeShared<FJsonValueBoolean>(false),
+                MakeShared<FJsonValueBoolean>(true), TEXT("native_result"));
+            Error.InternalContext = NativeMechanicId;
+            return Fail(OutError, MoveTemp(Error));
 		}
 		TMap<FString, const FUeAgentCanonicalValue*> Changes;
 		if (!TryReadTypedChangeMap(
@@ -828,10 +817,25 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				|| !TryReadString(*Context, ContextText)
 				|| ContextText != ExpectedContext)
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_expected_context_invalid"),
-					Current.Key);
+                if (!Change)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_expected_context_invalid"),
+                        TEXT("The selected media field has no matching typed change."), Current.Key,
+                        nullptr, TEXT("typed change for this field")));
+                if (!Default)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_expected_context_invalid"),
+                        TEXT("The selected media field has no captured default value."), Current.Key,
+                        nullptr, TEXT("captured default value"), TEXT("native_result")));
+                if (!Context)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_media_expected_context_invalid"),
+                        TEXT("The selected media field has no projection context."), Current.Key,
+                        nullptr, TEXT("field projection context"), TEXT("native_result")));
+                if (!ExpectedContext)
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_media_expected_context_invalid"),
+                        TEXT("This media field is not supported by the selected projector."), Current.Key,
+                        MakeShared<FJsonValueString>(Current.Key), MakeShared<FJsonValueString>(TEXT("supported media field"))));
+                return Fail(OutError, ValueFailure(TEXT("asset_data_media_expected_context_invalid"),
+                    TEXT("The captured media field projection context has the wrong type or tag."), Current.Key,
+                    Context, ExpectedContext, TEXT("native_result")));
 			}
 
 			FString Presence;
@@ -841,17 +845,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Presence,
 					Requested))
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_expected_presence_invalid"),
-					Current.Key);
+                return Fail(OutError, ValueFailure(TEXT("asset_data_media_expected_presence_invalid"),
+                    TEXT("The media field change must declare a non-empty string presence operation."),
+                    Current.Key + TEXT("/presence"), FindObjectField(**Change, TEXT("presence")), TEXT("non-empty operation string")));
 			}
 
 			FUeAgentCanonicalValuePtr Expected;
 			if (NativeMechanicId == MediaPlayerMechanicId)
 			{
-				if (!TryBuildExpectedBoolean(
-						Presence,
+                if (!TryBuildExpectedBoolean(
+                        Current.Key,
+                        Presence,
 						*Default,
 						Requested,
 						false,
@@ -864,9 +868,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else if (Current.Key == TEXT("media_player_ref"))
 			{
-				if (!TryBuildExpectedReference(
-						Resolver,
-						Presence,
+                if (!TryBuildExpectedReference(
+                        Resolver,
+                        Current.Key,
+                        Presence,
 						*Default,
 						Requested,
 						Resources,
@@ -878,8 +883,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else if (Current.Key == TEXT("auto_clear"))
 			{
-				if (!TryBuildExpectedBoolean(
-						Presence,
+                if (!TryBuildExpectedBoolean(
+                        Current.Key,
+                        Presence,
 						*Default,
 						Requested,
 						true,
@@ -892,8 +898,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else if (Current.Key == TEXT("clear_color"))
 			{
-				if (!TryBuildExpectedColor(
-						Presence,
+                if (!TryBuildExpectedColor(
+                        Current.Key,
+                        Presence,
 						*Default,
 						Requested,
 						Resources,
@@ -905,10 +912,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_expected_field_invalid"),
-					Current.Key);
+                return Fail(OutError, JsonFailure(TEXT("asset_data_media_expected_field_invalid"),
+                    TEXT("This field has no media expected-state builder for the selected asset type."), Current.Key,
+                    MakeShared<FJsonValueString>(Current.Key), MakeShared<FJsonValueString>(TEXT("supported media field"))));
 			}
 			ExpectedItems.Emplace(
 				Current.Key,

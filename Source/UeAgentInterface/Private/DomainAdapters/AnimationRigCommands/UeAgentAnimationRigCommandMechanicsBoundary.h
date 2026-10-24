@@ -1,14 +1,18 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 
 namespace UE::UAI::DomainAdapters::AnimationRigCommands
 {
+	UEAGENTINTERFACE_API const TArray<FString>& GetCommandIds();
+	UEAGENTINTERFACE_API const TArray<FString>& GetPublicCommandIds();
 	UEAGENTINTERFACE_API bool TryResolveMechanics(
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API CommandEdge::FUeAgentCommandResult Submit(
 		const TSharedRef<CommandEdge::IUeAgentCommandHandler>& Mechanics,
 		const CommandEdge::FUeAgentCommandRequest& Request,

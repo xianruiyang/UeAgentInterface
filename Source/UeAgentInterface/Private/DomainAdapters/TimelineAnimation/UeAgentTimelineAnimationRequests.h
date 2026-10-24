@@ -1,8 +1,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Utilities/AuthoringCore/UeAgentTimelineValueTypes.h"
+#include "Utilities/AuthoringCore/UeAgentAnimationSequenceChanges.h"
 #include "DomainAdapters/TimelineAnimation/UeAgentTimelineAnimationExecutionChains.h"
 #include "Templates/SharedPointer.h"
+
+class FJsonValue;
 
 #define UAI_TIMELINE_ANIMATION_TYPED_REQUESTS_V1 1
 
@@ -14,77 +18,28 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		FString Generation;
 		int64 Sequence = -1;
 
+		bool TryValidate(FUeAgentTimelineAnimationExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
-	struct UEAGENTINTERFACE_API FTimelineAnimationRate
-	{
-		FString Numerator;
-		FString Denominator;
+	using Authoring::Timeline::FTimelineAnimationRate;
 
-		bool IsValid() const;
-	};
+	using Authoring::Timeline::FTimelineAnimationPoint;
 
-	struct UEAGENTINTERFACE_API FTimelineAnimationPoint
-	{
-		FString ClockId;
-		FString Tick;
-		FTimelineAnimationRate Rate;
-		FString State;
+	using Authoring::Timeline::FTimelineAnimationBound;
 
-		bool IsValid() const;
-		UE::UAI::StateSemantic::FUeAgentTemporalPoint ToTemporalPoint() const;
-	};
+	using Authoring::Timeline::FTimelineAnimationRange;
 
-	struct UEAGENTINTERFACE_API FTimelineAnimationBound
-	{
-		FString Kind;
-		TOptional<FTimelineAnimationPoint> Point;
+	using Authoring::Timeline::FTimelineAnimationFrame3d;
 
-		bool IsValid() const;
-	};
-
-	struct UEAGENTINTERFACE_API FTimelineAnimationRange
-	{
-		FString ClockId;
-		FString State;
-		FTimelineAnimationBound Lower;
-		FTimelineAnimationBound Upper;
-
-		bool IsValid() const;
-	};
-
-	struct UEAGENTINTERFACE_API FTimelineAnimationFrame3d
-	{
-		FString FrameId;
-		FString BasisFrameId;
-		int32 Dimension = 0;
-		FString Unit;
-		FString BasisEvidenceId;
-
-		bool IsValid() const;
-	};
-
-	struct UEAGENTINTERFACE_API FTimelineAnimationTransform3d
-	{
-		FString Subject;
-		FString Quantity;
-		FTimelineAnimationFrame3d Frame;
-		TArray<FString> Components;
-		TArray<FString> ConversionEvidenceIds;
-
-		bool IsValid() const;
-		bool TryToNativeTransform(
-			const FString& NativeFrameId,
-			FTransform& OutTransform,
-			FUeAgentTimelineAnimationExecutionError& OutError) const;
-	};
+	using Authoring::Timeline::FTimelineAnimationTransform3d;
 
 	struct UEAGENTINTERFACE_API FTimelineAnimationBoneKey
 	{
 		FTimelineAnimationPoint Time;
 		FTimelineAnimationTransform3d Transform;
 
+		bool TryValidate(FUeAgentTimelineAnimationExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -93,116 +48,47 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		FString BoneRef;
 		TArray<FTimelineAnimationBoneKey> Keys;
 
+		bool TryValidate(FUeAgentTimelineAnimationExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
-	struct UEAGENTINTERFACE_API FTimelineAnimationCurveKey
-	{
-		FTimelineAnimationPoint Time;
-		double Value = 0.0;
-		FString Interpolation;
-
-		bool IsValid() const;
-	};
-
-	struct UEAGENTINTERFACE_API FTimelineAnimationCurveChange
-	{
-		FString CurveRef;
-		FString Operation;
-		TArray<FTimelineAnimationCurveKey> Keys;
-
-		bool IsValid() const;
-	};
-
-	struct UEAGENTINTERFACE_API FTimelineAnimationMetadataChange
-	{
-		FString MetadataRef;
-		FString Operation;
-		FString ValueType;
-		FString ValueLexeme;
-
-		bool IsValid() const;
-	};
-
-	struct UEAGENTINTERFACE_API FTimelineAnimationEventChange
-	{
-		FString EventRef;
-		FString EventKind;
-		FString Operation;
-		TOptional<FTimelineAnimationPoint> Time;
-		TOptional<FTimelineAnimationRange> Range;
-		FString PayloadClassRef;
-		FString TrackRef;
-
-		bool IsValid() const;
-	};
+	using Authoring::Timeline::FTimelineAnimationCurveKey;
+	using Authoring::Timeline::FTimelineAnimationCurveChange;
+	using Authoring::Timeline::FTimelineAnimationMetadataChange;
+	using Authoring::Timeline::FTimelineAnimationEventChange;
 
 	struct UEAGENTINTERFACE_API FTimelineAnimationBlendParameter
 	{
 		FString AxisRef;
 		double Value = 0.0;
 
+		bool TryValidate(FUeAgentTimelineAnimationExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
-	struct UEAGENTINTERFACE_API FTimelineAnimationKey
-	{
-		FString KeyRef;
-		FTimelineAnimationPoint Time;
-		FString ValueType;
-		FString ValueLexeme;
-		TOptional<FTimelineAnimationTransform3d> Transform;
+	using Authoring::Timeline::FTimelineAnimationKey;
 
-		bool IsValid() const;
-	};
+	using Authoring::Timeline::FTimelineAnimationChannel;
 
-	struct UEAGENTINTERFACE_API FTimelineAnimationSection
-	{
-		FString SectionRef;
-		FString SectionKind;
-		FTimelineAnimationRange Range;
-		FString SourceRef;
-		TArray<FTimelineAnimationKey> Keys;
+	using Authoring::Timeline::FTimelineAnimationSection;
 
-		bool IsValid() const;
-	};
+	using Authoring::Timeline::FTimelineAnimationTrack;
 
-	struct UEAGENTINTERFACE_API FTimelineAnimationTrack
-	{
-		FString TrackRef;
-		FString TrackKind;
-		FString PropertyPath;
-		TArray<FTimelineAnimationSection> Sections;
+	using Authoring::Timeline::FTimelineAnimationBinding;
 
-		bool IsValid() const;
-	};
+	using Authoring::Timeline::FTimelineAnimationStructure;
 
-	struct UEAGENTINTERFACE_API FTimelineAnimationBinding
-	{
-		FString BindingRef;
-		FString BindingKind;
-		FString ObjectRef;
-		TArray<FTimelineAnimationTrack> Tracks;
-
-		bool IsValid() const;
-	};
-
-	struct UEAGENTINTERFACE_API FTimelineAnimationStructure
-	{
-		FTimelineAnimationRate DisplayRate;
-		FTimelineAnimationRate TickResolution;
-		FTimelineAnimationRange PlaybackRange;
-		TArray<FTimelineAnimationBinding> Bindings;
-		TArray<FTimelineAnimationTrack> RootTracks;
-
-		bool IsValid() const;
-	};
+	UEAGENTINTERFACE_API bool TryParseTimelineAnimationStructure(
+		const TSharedPtr<FJsonObject>& Root,
+		FTimelineAnimationStructure& OutStructure,
+		FUeAgentTimelineAnimationExecutionError& OutError);
 
 	struct UEAGENTINTERFACE_API FTimelineAnimationPoseItem
 	{
 		FString BoneRef;
 		FTimelineAnimationTransform3d Transform;
 
+		bool TryValidate(FUeAgentTimelineAnimationExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -211,6 +97,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		FString MorphRef;
 		double Weight = 0.0;
 
+		bool TryValidate(FUeAgentTimelineAnimationExecutionError& OutError) const;
 		bool IsValid() const;
 	};
 
@@ -238,7 +125,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		IkProbeCandidateApply,
 	};
 
-	struct UEAGENTINTERFACE_API FTimelineAnimationRequestData
+	struct UEAGENTINTERFACE_API FTimelineAnimationRequestData : Authoring::Timeline::FSequenceChanges
 	{
 		TOptional<FTimelineAnimationRange> TemporalRange;
 		TOptional<FTimelineAnimationRate> SampleRate;
@@ -261,9 +148,6 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		TArray<FString> BoneRefs;
 		TArray<FTimelineAnimationBlendParameter> BlendParameters;
 		TArray<FTimelineAnimationBoneTrack> BoneTracks;
-		TArray<FTimelineAnimationCurveChange> CurveChanges;
-		TArray<FTimelineAnimationMetadataChange> MetadataChanges;
-		TArray<FTimelineAnimationEventChange> EventChanges;
 		TArray<FTimelineAnimationPoseItem> Pose;
 		TArray<FTimelineAnimationMorphWeight> MorphWeights;
 		FString RootBoneRef;
@@ -273,6 +157,7 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		FString RigRef;
 		FString GoalRef;
 
+		bool TryValidateFor(EUeAgentTimelineAnimationRequestKind Kind, FUeAgentTimelineAnimationExecutionError& OutError) const;
 		bool IsValidFor(EUeAgentTimelineAnimationRequestKind Kind) const;
 	};
 

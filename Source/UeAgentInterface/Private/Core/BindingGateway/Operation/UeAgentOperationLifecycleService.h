@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -30,22 +32,7 @@ namespace UE::UAI::BindingGateway::Operation
 	UEAGENTINTERFACE_API FString LexToString(EOperationLifecycleStage Stage);
 	UEAGENTINTERFACE_API FString LexToString(EOperationLifecycleStatus Status);
 
-	class UEAGENTINTERFACE_API FOperationLifecycleError final
-	{
-	public:
-		FOperationLifecycleError() = default;
-		explicit FOperationLifecycleError(
-			FString InCode,
-			FString InDetail = FString());
-
-		const FString& GetCode() const;
-		const FString& GetDetail() const;
-		bool IsPresent() const;
-
-	private:
-		FString Code;
-		FString Detail;
-	};
+	using FOperationLifecycleError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FOperationLifecyclePlan final
 	{
@@ -63,6 +50,7 @@ namespace UE::UAI::BindingGateway::Operation
 		const TMap<FString, FString>& GetExpectedRevisions() const;
 		const TArray<FString>& GetRequiredSettleSignals() const;
 		bool IsValid() const;
+		const FOperationLifecycleError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString PlanId;
@@ -70,7 +58,7 @@ namespace UE::UAI::BindingGateway::Operation
 		TArray<FString> ImpactScope;
 		TMap<FString, FString> ExpectedRevisions;
 		TArray<FString> RequiredSettleSignals;
-		bool bValid = false;
+		FOperationLifecycleError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FOperationImpactAuthorization final
@@ -83,18 +71,20 @@ namespace UE::UAI::BindingGateway::Operation
 		const FString& GetPlanFingerprint() const;
 		const TArray<FString>& GetAuthorizedImpactScope() const;
 		bool Authorizes(const FOperationLifecyclePlan& Plan) const;
+		bool TryAuthorize(const FOperationLifecyclePlan& Plan, FOperationLifecycleError& OutError) const;
 		bool IsValid() const;
+		const FOperationLifecycleError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString PlanFingerprint;
 		TArray<FString> AuthorizedImpactScope;
-		bool bValid = false;
+		FOperationLifecycleError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FOperationMutationFacts final
 	{
 	public:
-		FOperationMutationFacts() = default;
+		FOperationMutationFacts();
 		FOperationMutationFacts(
 			FString InMutationId,
 			TArray<FString> InMutatedIdentityKeys,
@@ -103,13 +93,17 @@ namespace UE::UAI::BindingGateway::Operation
 		const FString& GetMutationId() const;
 		const TArray<FString>& GetMutatedIdentityKeys() const;
 		bool IsRollbackSupported() const;
+		bool IsProvided() const { return bProvided; }
 		bool IsValid() const;
+		bool TryValidate(FOperationLifecycleError& OutError) const;
+		const FOperationLifecycleError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString MutationId;
 		TArray<FString> MutatedIdentityKeys;
 		bool bRollbackSupported = false;
-		bool bValid = false;
+		bool bProvided = false;
+		FOperationLifecycleError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IOperationVersionFencePort
@@ -178,7 +172,7 @@ namespace UE::UAI::BindingGateway::Operation
 		FOperationLifecycleReceipt(
 			FString InPlanId,
 			EOperationLifecycleStatus InStatus,
-			FString InErrorCode,
+			UE::UAI::Contract::FDiagnostic InDiagnostic,
 			bool bInMutationStarted,
 			bool bInRetrySafe,
 			FString InPersistenceReceiptId,
@@ -186,7 +180,8 @@ namespace UE::UAI::BindingGateway::Operation
 
 		const FString& GetPlanId() const;
 		EOperationLifecycleStatus GetStatus() const;
-		const FString& GetErrorCode() const;
+		const UE::UAI::Contract::FDiagnostic& GetDiagnostic() const;
+		const FString& GetErrorCode() const { return Diagnostic.Code; }
 		bool DidMutationStart() const;
 		bool IsRetrySafe() const;
 		const FString& GetPersistenceReceiptId() const;
@@ -197,7 +192,7 @@ namespace UE::UAI::BindingGateway::Operation
 		FString PlanId;
 		EOperationLifecycleStatus Status =
 			EOperationLifecycleStatus::Rejected;
-		FString ErrorCode;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		bool bMutationStarted = false;
 		bool bRetrySafe = false;
 		FString PersistenceReceiptId;
@@ -225,7 +220,7 @@ namespace UE::UAI::BindingGateway::Operation
 		bool Rollback(
 			const FOperationLifecyclePlan& Plan,
 			const FOperationMutationFacts& Facts,
-			const FString& OriginalErrorCode,
+			UE::UAI::Contract::FDiagnostic OriginalDiagnostic,
 			TArray<FString> PhaseHistory,
 			FOperationLifecycleReceipt& OutReceipt) const;
 

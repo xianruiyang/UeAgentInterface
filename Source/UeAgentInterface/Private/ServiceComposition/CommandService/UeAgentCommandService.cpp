@@ -1,5 +1,7 @@
 #include "ServiceComposition/CommandService/UeAgentCommandService.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandProtocol.h"
 
 namespace UE::UAI::ServiceComposition::CommandService
@@ -20,26 +22,14 @@ namespace UE::UAI::ServiceComposition::CommandService
 				TOptional<FUeAgentCommandRequest> Request;
 				FUeAgentCommandProtocolDiagnostic Diagnostic;
 				FUeAgentCommandResult Result =
-					FUeAgentCommandResult::ProtocolError(
-						Ingress.Frame.GetCorrelationId(),
-						FString(),
-						FString(),
-						FString(),
-						TEXT("command_service_unavailable"),
-						TEXT("command contracts have not been activated"));
+					FUeAgentCommandResult::ProtocolError(Ingress.Frame.GetCorrelationId(), FString(), FString(), FString(), UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_service_unavailable"), TEXT("command contracts have not been activated"), TEXT("command_protocol")));
 				if (Codec.DecodeRequest(
 						Ingress.Frame.GetPayload(),
 						Request,
 						Diagnostic)
 					&& Request.IsSet())
 				{
-					Result = FUeAgentCommandResult::ProtocolError(
-						Request->GetCorrelationId(),
-						Request->GetRequestId(),
-						Request->GetCommandId(),
-						Request->GetCommandBindingHash(),
-						TEXT("command_service_unavailable"),
-						TEXT("command contracts have not been activated"));
+					Result = FUeAgentCommandResult::ProtocolError(Request->GetCorrelationId(), Request->GetRequestId(), Request->GetCommandId(), Request->GetCommandBindingHash(), UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_service_unavailable"), TEXT("command contracts have not been activated"), TEXT("command_protocol")));
 				}
 
 				TArray<uint8> Payload;
@@ -71,7 +61,7 @@ namespace UE::UAI::ServiceComposition::CommandService
 			IUeAgentRequestContextInvalidator,
 			ESPMode::ThreadSafe> ContextInvalidator,
 		TUniquePtr<FUeAgentCommandService>& OutService,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		OutService = TUniquePtr<FUeAgentCommandService>(

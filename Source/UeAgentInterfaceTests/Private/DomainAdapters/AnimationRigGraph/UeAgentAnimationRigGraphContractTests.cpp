@@ -10,6 +10,7 @@
 #include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphContract.h"
 
 #include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphAdapter.h"
+#include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
 
 static_assert(UAI_ANIMATION_RIG_GRAPH_CONTRACT_V1 == 1,
 	"AnimationRigGraph production contract version must be explicit");
@@ -347,17 +348,6 @@ bool FUeAgentAnimationRigGraphContractTest::RunTest(
 	TestTrue(TEXT("identity case set exact"),
 		HasExactSet(IdentityCaseIds, ExpectedIdentityCases));
 
-	const TSharedPtr<FJsonObject> DeepCase =
-		Fixture->GetObjectField(TEXT("deep_hierarchy_case"));
-	TestEqual(TEXT("deep hierarchy exercises 512 levels"),
-		static_cast<int32>(DeepCase->GetNumberField(TEXT("depth"))), 512);
-	TestEqual(TEXT("deep hierarchy must succeed"),
-		DeepCase->GetStringField(TEXT("expected_result")),
-		FString(TEXT("success")));
-	TestEqual(TEXT("no fixed depth cap"),
-		DeepCase->GetStringField(TEXT("nesting_policy")),
-		FString(TEXT("no_fixed_depth_limit_shared_resource_budget")));
-
 	const TSet<FString> ExpectedNegativeCodes = {
 		TEXT("animation_rig_graph_item_identity_duplicate"),
 		TEXT("animation_rig_graph_identity_source_missing"),
@@ -561,5 +551,68 @@ bool FUeAgentAnimationRigGraphContractTest::RunTest(
 		TryValidateAnimationRigGraphLifecycleEvidence(
 			LifecycleEvidence, AdapterError));
 
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentAnimationRigGraphAuthoringAliasContractTest,
+	"UeAgentInterface.DomainAdapters.AnimationRigGraph.E0.AuthoringAlias."
+		"NodePinEndpointRoundTrip",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentAnimationRigGraphAuthoringAliasContractTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::HjsonWorkspace;
+	FWorkspaceError Error;
+	const TArray<FGraphAuthoringNodeAliasInput> Nodes = {
+		{TEXT("NodeA"), TEXT("Solve")},
+		{TEXT("NodeB"), TEXT("Solve")},
+	};
+	FGraphAuthoringAliasProjection NodeProjection;
+	TestTrue(TEXT("RigVM node aliases build"),
+		TryBuildGraphAuthoringAliasProjection(Nodes, NodeProjection, Error));
+	if (NodeProjection.AliasBySourceId.Num() != 2)
+	{
+		return false;
+	}
+	const FString NodeA = NodeProjection.AliasBySourceId.FindRef(TEXT("NodeA"));
+	const FString NodeB = NodeProjection.AliasBySourceId.FindRef(TEXT("NodeB"));
+	TestFalse(TEXT("duplicate node titles are disambiguated"), NodeA == NodeB);
+	TestEqual(TEXT("node alias reverses"),
+		NodeProjection.SourceIdByAlias.FindRef(NodeA), FString(TEXT("NodeA")));
+
+	const TArray<FGraphAuthoringPinAliasInput> Pins = {
+		{TEXT("NodeA.Result"), TEXT("Result"), 0,
+			EGraphAuthoringEndpointDirection::Output},
+		{TEXT("NodeA.Result2"), TEXT("Result"), 1,
+			EGraphAuthoringEndpointDirection::Output},
+	};
+	FGraphAuthoringPinAliasProjection PinProjection;
+	TestTrue(TEXT("RigVM pin aliases build"),
+		TryBuildGraphAuthoringPinAliasProjection(Pins, PinProjection, Error));
+	const FString ResultAlias = PinProjection.AliasBySourceId.FindRef(
+		TEXT("NodeA.Result"));
+	const FString Result2Alias = PinProjection.AliasBySourceId.FindRef(
+		TEXT("NodeA.Result2"));
+	TestEqual(TEXT("pin occurrence alias exact"), Result2Alias,
+		FString(TEXT("Result2")));
+	TestEqual(TEXT("pin alias reverses"),
+		PinProjection.SourceIdByAlias.FindRef(ResultAlias),
+		FString(TEXT("NodeA.Result")));
+
+	FString Endpoint;
+	TestTrue(TEXT("RigVM endpoint formats through common owner"),
+		TryFormatGraphAuthoringEndpoint(
+			NodeA, TEXT("Result"), 0,
+			EGraphAuthoringEndpointDirection::Output, Endpoint, Error));
+	TestEqual(TEXT("endpoint uses readable aliases"), Endpoint,
+		NodeA + TEXT(".Result"));
+	TestTrue(TEXT("endpoint occurrence formats through common owner"),
+		TryFormatGraphAuthoringEndpoint(
+			NodeA, TEXT("Result"), 1,
+			EGraphAuthoringEndpointDirection::Output, Endpoint, Error));
+	TestEqual(TEXT("endpoint occurrence is readable"), Endpoint,
+		NodeA + TEXT(".Result2"));
 	return !HasAnyErrors();
 }

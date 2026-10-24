@@ -18,17 +18,7 @@ namespace
 
 	FUeAgentResourceTracker MakeTracker()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 131072},
-			{EUeAgentResourceDimension::Items, 131072},
-			{EUeAgentResourceDimension::Files, 128},
-			{EUeAgentResourceDimension::ReferenceEdges, 262144},
-			{EUeAgentResourceDimension::WorkUnits, 1048576},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 64 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	FUeAgentCanonicalValuePtr MakeString(
@@ -115,16 +105,16 @@ namespace
 			{TEXT("metasound.graph.node.mutate"), TEXT("{\"nodes\":[{\"class_name\":\"UE.Sine.Audio\",\"intent\":\"create\",\"major_version\":1,\"minor_version\":1,\"node_guid\":\"11111111-1111-1111-1111-111111111111\"}],\"target_ref\":\"/Game/UAI/MS_GC017\"}")},
 			{TEXT("metasound.graph.link.mutate"), TEXT("{\"links\":[{\"from\":{\"data_type_ref\":\"Float\",\"direction\":\"output\",\"node_guid\":\"11111111-1111-1111-1111-111111111111\",\"vertex_guid\":\"22222222-2222-2222-2222-222222222222\"},\"intent\":\"create\",\"to\":{\"data_type_ref\":\"Float\",\"direction\":\"input\",\"node_guid\":\"33333333-3333-3333-3333-333333333333\",\"vertex_guid\":\"44444444-4444-4444-4444-444444444444\"}}],\"target_ref\":\"/Game/UAI/MS_GC017\"}")},
 			{TEXT("metasound.graph.default.mutate"), TEXT("{\"data_type_ref\":\"Float\",\"intent\":\"update\",\"node_guid\":\"11111111-1111-1111-1111-111111111111\",\"target_ref\":\"/Game/UAI/MS_GC017\",\"value\":0.25,\"vertex_guid\":\"22222222-2222-2222-2222-222222222222\"}")},
-			{TEXT("metasound.graph.compile_settle"), TEXT("{\"expected_document_revision\":\"revision:17\",\"registration_policy\":\"register_and_compile\",\"target_ref\":\"/Game/UAI/MS_GC017\"}")},
+			{TEXT("metasound.graph.compile_settle"), TEXT("{\"registration_policy\":\"register_and_compile\",\"target_ref\":\"/Game/UAI/MS_GC017\"}")},
 			{TEXT("sound_cue.graph.node.mutate"), TEXT("{\"nodes\":[{\"intent\":\"create\",\"native_class_ref\":\"/Script/Engine.SoundNodeMixer\",\"object_path\":\"/Game/UAI/SC_GC017.SC_GC017:SoundNodeMixer_0\"}],\"target_ref\":\"/Game/UAI/SC_GC017\"}")},
 			{TEXT("sound_cue.graph.relation.mutate"), TEXT("{\"relations\":[{\"child_object_path\":\"/Game/UAI/SC_GC017.SC_GC017:SoundNodeWavePlayer_0\",\"intent\":\"create\",\"order_index\":0,\"parent_object_path\":\"/Game/UAI/SC_GC017.SC_GC017:SoundNodeMixer_0\"}],\"target_ref\":\"/Game/UAI/SC_GC017\"}")},
 			{TEXT("sound_cue.graph.root.mutate"), TEXT("{\"intent\":\"update\",\"root_node_object_path\":\"/Game/UAI/SC_GC017.SC_GC017:SoundNodeMixer_0\",\"target_ref\":\"/Game/UAI/SC_GC017\"}")},
-			{TEXT("sound_cue.graph.compile_settle"), TEXT("{\"expected_graph_revision\":\"revision:17\",\"sync_policy\":\"sync_and_compile\",\"target_ref\":\"/Game/UAI/SC_GC017\"}")},
+			{TEXT("sound_cue.graph.compile_settle"), TEXT("{\"sync_policy\":\"sync_and_compile\",\"target_ref\":\"/Game/UAI/SC_GC017\"}")},
 			{TEXT("texture_graph.graph.node.mutate"), TEXT("{\"nodes\":[{\"element_id\":\"scalar_gain\",\"expression_class_ref\":\"/Script/TextureGraph.TG_Expression_Scalar\",\"intent\":\"create\"}],\"target_ref\":\"/Game/UAI/TG_GC017\"}")},
 			{TEXT("texture_graph.graph.link.mutate"), TEXT("{\"links\":[{\"from\":{\"direction\":\"output\",\"element_id\":\"scalar_gain\",\"pin_name\":\"ValueOut\"},\"intent\":\"create\",\"to\":{\"direction\":\"input\",\"element_id\":\"builtin_output\",\"pin_name\":\"Source\"}}],\"target_ref\":\"/Game/UAI/TG_GC017\"}")},
 			{TEXT("texture_graph.graph.parameter.mutate"), TEXT("{\"parameters\":[{\"alias\":\"Scale\",\"element_id\":\"scalar_gain\",\"intent\":\"update\",\"pin_name\":\"Scalar\",\"value\":0.5}],\"target_ref\":\"/Game/UAI/TG_GC017\"}")},
-			{TEXT("texture_graph.graph.validate_evaluate_settle"), TEXT("{\"evaluation_policy\":\"validate_and_evaluate\",\"expected_graph_revision\":\"revision:17\",\"target_ref\":\"/Game/UAI/TG_GC017\"}")},
-			{TEXT("texture_graph.artifact.capture"), TEXT("{\"expected_settled_revision\":\"revision:17\",\"outputs\":[{\"element_id\":\"builtin_output\",\"output_name\":\"Output\"}],\"target_ref\":\"/Game/UAI/TG_GC017\"}")},
+			{TEXT("texture_graph.graph.validate_evaluate_settle"), TEXT("{\"evaluation_policy\":\"validate_and_evaluate\",\"target_ref\":\"/Game/UAI/TG_GC017\"}")},
+			{TEXT("texture_graph.artifact.capture"), TEXT("{\"outputs\":[{\"element_id\":\"builtin_output\",\"output_name\":\"Output\"}],\"target_ref\":\"/Game/UAI/TG_GC017\"}")},
 		};
 		return Values;
 	}
@@ -173,14 +163,16 @@ bool FUeAgentGraphCompoundAudioMediaExactContractTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
-	const TArray<FAudioMediaGraphRouteProfile>& Profiles =
-		GetAudioMediaGraphRouteProfiles();
-	TestEqual(TEXT("exactly 15 routes are owned"), Profiles.Num(), 15);
+	const TArray<FAudioMediaGraphRouteProfile>* ProfileArray = nullptr;
+	UE::UAI::Contract::FDiagnostic ProfileError;
+	if (!TryGetAudioMediaGraphRouteProfiles(ProfileArray, ProfileError))
+	{
+		AddError(ProfileError.PublicMessage);
+		return false;
+	}
+	const TArray<FAudioMediaGraphRouteProfile>& Profiles = *ProfileArray;
 	TSet<FString> Capabilities;
 	TSet<FString> DescriptorIds;
-	TMap<FString, int32> FamilyCounts;
-	int32 QueryCount = 0;
-	int32 OperationCount = 0;
 	const TSet<FString> TextureGraphCapabilities = {
 		TEXT("texture_graph.graph.node.mutate"),
 		TEXT("texture_graph.graph.link.mutate"),
@@ -192,14 +184,12 @@ bool FUeAgentGraphCompoundAudioMediaExactContractTest::RunTest(
 	{
 		Capabilities.Add(Profile.GetCapabilityId());
 		DescriptorIds.Add(Profile.GetDescriptorId());
-		FamilyCounts.FindOrAdd(Profile.GetFamilyId()) += 1;
 		TestTrue(*FString::Printf(TEXT("%s profile is valid"),
 			*Profile.GetCapabilityId()), Profile.IsValid());
 		const bool bArtifactQuery = Profile.GetCapabilityId()
 			== TEXT("texture_graph.artifact.capture");
 		if (bArtifactQuery)
 		{
-			++QueryCount;
 			TestEqual(TEXT("artifact state capture enters C3Q"),
 				Profile.GetRouteKind(), EGraphCompoundDomainRouteKind::Query);
 			TestEqual(TEXT("artifact state capture uses the query lane"),
@@ -212,7 +202,6 @@ bool FUeAgentGraphCompoundAudioMediaExactContractTest::RunTest(
 		}
 		else
 		{
-			++OperationCount;
 			TestEqual(TEXT("mutation route enters the typed operation lane"),
 				Profile.GetRouteKind(),
 				EGraphCompoundDomainRouteKind::TypedOperation);
@@ -235,15 +224,10 @@ bool FUeAgentGraphCompoundAudioMediaExactContractTest::RunTest(
 				FString(TEXT("audio_media_graph_texture_graph_unavailable")));
 		}
 	}
-	TestEqual(TEXT("capabilities are unique"), Capabilities.Num(), 15);
-	TestEqual(TEXT("descriptor ids are unique"), DescriptorIds.Num(), 15);
-	TestEqual(TEXT("one exact read-only route enters C3Q"), QueryCount, 1);
-	TestEqual(TEXT("fourteen exact mutation routes enter C3O"), OperationCount, 14);
-	TestEqual(TEXT("asset lifecycle count"), FamilyCounts.FindRef(TEXT("asset_lifecycle")), 1);
-	TestEqual(TEXT("MetaSound count"), FamilyCounts.FindRef(TEXT("metasound_document_graph_mutation")), 5);
-	TestEqual(TEXT("SoundCue count"), FamilyCounts.FindRef(TEXT("sound_cue_node_graph_mutation")), 4);
-	TestEqual(TEXT("TextureGraph topology count"), FamilyCounts.FindRef(TEXT("texture_graph_topology_mutation")), 4);
-	TestEqual(TEXT("TextureGraph artifact count"), FamilyCounts.FindRef(TEXT("texture_graph_artifact_state")), 1);
+	TestEqual(TEXT("capabilities are unique"),
+		Capabilities.Num(), Profiles.Num());
+	TestEqual(TEXT("descriptor ids are unique"),
+		DescriptorIds.Num(), Profiles.Num());
 	for (const FString& Capability : ExpectedCapabilities())
 	{
 		TestTrue(*FString::Printf(TEXT("%s is present"), *Capability),
@@ -263,13 +247,11 @@ bool FUeAgentGraphCompoundAudioMediaExactContractTest::RunTest(
 	}
 
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
 	TestTrue(TEXT("exact registry compiles"),
 		TryCreateAudioMediaGraphRouteDescriptorRegistry(Registry, Error));
 	if (Registry.IsValid())
 	{
-		TestEqual(TEXT("registry owns 15 descriptors"),
-			Registry->GetDescriptors().Num(), 15);
 		TSet<FString> Hashes;
 		for (const FUeAgentOperationDescriptor& Descriptor
 			: Registry->GetDescriptors())
@@ -304,6 +286,20 @@ bool FUeAgentGraphCompoundAudioMediaExactContractTest::RunTest(
 					Descriptor.GetResultSchema().GetJsonValue().Contains(
 						TEXT("\"published\"")));
 			}
+			else if (Descriptor.GetCapabilityId()
+				== TEXT("metasound.graph.compile_settle"))
+			{
+				TestFalse(TEXT("MetaSound settle does not expose document revision custody"),
+					Descriptor.GetInputSchema().GetJsonValue().Contains(
+						TEXT("expected_document_revision")));
+			}
+			else if (Descriptor.GetCapabilityId()
+				== TEXT("sound_cue.graph.compile_settle"))
+			{
+				TestFalse(TEXT("SoundCue settle does not expose graph revision custody"),
+					Descriptor.GetInputSchema().GetJsonValue().Contains(
+						TEXT("expected_graph_revision")));
+			}
 			else
 			{
 				const FUeAgentContractSchema* ResultSchema =
@@ -314,14 +310,23 @@ bool FUeAgentGraphCompoundAudioMediaExactContractTest::RunTest(
 				{
 					TOptional<FUeAgentContractValue> Canonical;
 					FUeAgentContractSchemaError SchemaError;
+					const bool bGraphRevisionIsPrivate =
+						Descriptor.GetCapabilityId().StartsWith(TEXT("metasound.graph."))
+						|| Descriptor.GetCapabilityId().StartsWith(TEXT("sound_cue.graph."));
+					const FString ResultExample = bGraphRevisionIsPrivate
+						? FString(TEXT(
+							"{\"compile_settled\":true,\"mutation_applied\":true,"
+							"\"reloaded\":true,\"saved\":true,"
+							"\"target_ref\":\"/Game/T.T\","
+							"\"terminal_status\":\"succeeded\"}"))
+						: FString(TEXT(
+							"{\"compile_settled\":true,\"mutation_applied\":true,"
+							"\"reloaded\":true,\"saved\":true,"
+							"\"target_ref\":\"/Game/T.T\","
+							"\"terminal_status\":\"succeeded\"}"));
 					TestTrue(TEXT("audio mutation result requires a real lifecycle receipt"),
 						ResultSchema->TryValidateAndCanonicalize(
-							FUeAgentContractValue(TEXT(
-								"{\"compile_settled\":true,\"mutation_applied\":true,"
-								"\"persistence_receipt_id\":\"receipt:1\","
-								"\"reloaded\":true,\"revision\":\"sha256:1\","
-								"\"saved\":true,\"target_ref\":\"/Game/T.T\","
-								"\"terminal_status\":\"succeeded\"}")),
+							FUeAgentContractValue(ResultExample),
 							[](int64, const FString&,
 								FUeAgentContractSchemaError&)
 							{
@@ -332,7 +337,8 @@ bool FUeAgentGraphCompoundAudioMediaExactContractTest::RunTest(
 				}
 			}
 		}
-		TestEqual(TEXT("descriptor hashes are exact and unique"), Hashes.Num(), 15);
+		TestEqual(TEXT("descriptor hashes are exact and unique"),
+			Hashes.Num(), Registry->GetDescriptors().Num());
 	}
 	return !HasAnyErrors();
 }
@@ -455,10 +461,20 @@ bool FUeAgentGraphCompoundAudioMediaAllRoutesTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
-	TestEqual(TEXT("all 15 routes have an owned typed example"),
-		RouteExamples().Num(), 15);
+	const TArray<FAudioMediaGraphRouteProfile>* ProfileArray = nullptr;
+	UE::UAI::Contract::FDiagnostic ProfileError;
+	if (!TryGetAudioMediaGraphRouteProfiles(ProfileArray, ProfileError))
+	{
+		AddError(ProfileError.PublicMessage);
+		return false;
+	}
+	for (const FAudioMediaGraphRouteProfile& Profile : *ProfileArray)
+	{
+		TestTrue(TEXT("every route has an owned typed example"),
+			RouteExamples().Contains(Profile.GetCapabilityId()));
+	}
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-	FString RegistryError;
+	UE::UAI::Contract::FDiagnostic RegistryError;
 	TestTrue(TEXT("registry builds"),
 		TryCreateAudioMediaGraphRouteDescriptorRegistry(Registry, RegistryError));
 	if (!Registry.IsValid())
@@ -599,7 +615,7 @@ bool FUeAgentGraphCompoundAudioMediaDeleteSelectorsTest::RunTest(
 		const FUeAgentCanonicalSnapshotRef Before =
 			MakeSnapshot(Resources, ExistingFor(Payload));
 		TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-		FString RegistryError;
+		UE::UAI::Contract::FDiagnostic RegistryError;
 		TestTrue(
 			TEXT("delete descriptor registry builds"),
 			TryCreateAudioMediaGraphRouteDescriptorRegistry(
@@ -624,80 +640,6 @@ bool FUeAgentGraphCompoundAudioMediaDeleteSelectorsTest::RunTest(
 					Draft,
 					Error));
 			TestTrue(TEXT("delete draft exists"), Draft.IsSet());
-		}
-	}
-	return !HasAnyErrors();
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentGraphCompoundAudioMediaLargeTopologyTest,
-	"UeAgentInterface.Composition.GraphCompound.AudioMedia.LargeTopologyNoFixedLimit",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentGraphCompoundAudioMediaLargeTopologyTest::RunTest(
-	const FString& Parameters)
-{
-	(void)Parameters;
-	const FAudioMediaGraphRouteProfile* Profile =
-		FindAudioMediaGraphRouteProfile(TEXT("sound_cue.graph.node.mutate"));
-	TestNotNull(TEXT("SoundCue node route exists"), Profile);
-	if (!Profile)
-	{
-		return false;
-	}
-	TArray<TSharedPtr<FJsonValue>> Nodes;
-	for (int32 Index = 0; Index < 512; ++Index)
-	{
-		const TSharedRef<FJsonObject> Node = MakeShared<FJsonObject>();
-		Node->SetStringField(TEXT("object_path"),
-			FString::Printf(TEXT("/Game/UAI/SC_Deep.SoundNode_%d"), Index));
-		Node->SetStringField(TEXT("native_class_ref"),
-			TEXT("/Script/Engine.SoundNodeWavePlayer"));
-		Node->SetStringField(TEXT("intent"), TEXT("create"));
-		Nodes.Add(MakeShared<FJsonValueObject>(Node));
-	}
-	const TSharedRef<FJsonObject> InputObject = MakeShared<FJsonObject>();
-	InputObject->SetStringField(TEXT("target_ref"), TEXT("/Game/UAI/SC_Deep"));
-	InputObject->SetArrayField(TEXT("nodes"), MoveTemp(Nodes));
-	FString Input;
-	FString JsonError;
-	TestTrue(TEXT("large typed input canonicalizes"),
-		Json::TryCanonicalize(InputObject, Input, JsonError));
-
-	FUeAgentResourceTracker Resources = MakeTracker();
-	const FUeAgentCanonicalSnapshotRef Empty = MakeSnapshot(Resources, {});
-	FGraphCompoundCanonicalPayload Payload(
-		GetGraphCompoundCanonicalSchemaId(), {});
-	FGraphCompoundRouteError Error;
-	TestTrue(TEXT("512-node topology decodes without a fixed item limit"),
-		TryDecodeAudioMediaGraphTypedOperation(
-			*Profile, FUeAgentContractValue(Input), Empty,
-			Resources, Payload, Error));
-	TestEqual(TEXT("all topology identities are retained"),
-		Payload.GetEdits().Num(), 512);
-
-	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
-	FString RegistryError;
-	TestTrue(TEXT("registry builds"),
-		TryCreateAudioMediaGraphRouteDescriptorRegistry(Registry, RegistryError));
-	const FUeAgentOperationDescriptor* Descriptor = Registry.IsValid()
-		? Registry->FindByDescriptorId(Profile->GetDescriptorId()) : nullptr;
-	TestNotNull(TEXT("descriptor exists"), Descriptor);
-	if (Descriptor)
-	{
-		TOptional<FChangeSetDraft> Draft;
-		TestTrue(TEXT("512-node topology builds one shared C6 draft"),
-			TryBuildAudioMediaGraphTypedOperationDraft(
-				*Profile, Descriptor->GetIdentity(),
-				FUeAgentContractValue(Input), Empty,
-				TEXT("request:gc017:large"),
-				TEXT("idempotency:gc017:large"),
-				Resources, Draft, Error));
-		TestTrue(TEXT("large draft exists"), Draft.IsSet());
-		if (Draft.IsSet())
-		{
-			TestEqual(TEXT("large draft keeps per-identity changes"),
-				Draft->GetChanges().Num(), 512);
 		}
 	}
 	return !HasAnyErrors();

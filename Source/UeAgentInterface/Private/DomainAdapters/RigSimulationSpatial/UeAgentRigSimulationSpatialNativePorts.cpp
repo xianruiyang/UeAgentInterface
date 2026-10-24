@@ -1,4 +1,5 @@
 #include "DomainAdapters/RigSimulationSpatial/UeAgentRigSimulationSpatialNative.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 {
@@ -7,12 +8,22 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		bool Fail(
 			FUeAgentRigSimulationSpatialExecutionError& OutError,
 			const FString& Code,
-			const FString& Subject = FString())
+			const TCHAR* Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual, const TCHAR* Expected)
 		{
-			OutError = {};
-			OutError.Code = Code;
-			OutError.SubjectId = Subject;
+			OutError = Contract::FDiagnostic::Failure(Code, Reason, TEXT("native_ports"));
+			OutError.PropertyPath = Path;
+			OutError.ActualValuePresent = Actual.IsValid();
+			OutError.ActualValue = MoveTemp(Actual);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected);
 			return false;
+		}
+
+		bool MissingFamily(FUeAgentRigSimulationSpatialExecutionError& OutError, const FString& CapabilityId)
+		{
+			return Fail(OutError, TEXT("rig_simulation_spatial_family_port_unavailable"),
+				TEXT("No native port family supports the requested capability."), TEXT("capability_id"),
+				MakeShared<FJsonValueString>(CapabilityId), TEXT("capability supported by a native port family"));
 		}
 
 		const FUeAgentRigSimulationSpatialNativePorts* FindFamily(
@@ -40,15 +51,14 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				const TOptional<UE::UAI::Discovery::FUeAgentCandidateBinding>& Target,
 				EUeAgentRigSimulationSpatialReadPhase Phase,
 				const UE::UAI::ContextResource::FUeAgentOperationContext& Context,
-				TSharedPtr<const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot>& OutSnapshot,
+				TOptional<FUeAgentRigSimulationSpatialReadbackResult>& OutReadback,
 				FUeAgentRigSimulationSpatialExecutionError& OutError) override
 			{
 				const auto* Family = FindFamily(Families, Contract.GetCapabilityId());
 				return Family
 					? Family->Readback->TryRead(Contract, Request, Target, Phase,
-						Context, OutSnapshot, OutError)
-					: Fail(OutError, TEXT("rig_simulation_spatial_family_port_unavailable"),
-						Contract.GetCapabilityId());
+						Context, OutReadback, OutError)
+					: MissingFamily(OutError, Contract.GetCapabilityId());
 			}
 
 		private:
@@ -75,8 +85,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				return Family
 					? Family->Mutation->TryMutate(Contract, Request, Targets, Context,
 						OutResult, OutError)
-					: Fail(OutError, TEXT("rig_simulation_spatial_family_port_unavailable"),
-						Contract.GetCapabilityId());
+					: MissingFamily(OutError, Contract.GetCapabilityId());
 			}
 
 		private:
@@ -100,8 +109,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				const auto* Family = FindFamily(Families, Contract.GetCapabilityId());
 				return Family
 					? Family->Settle->TrySettle(Contract, Mutation, Context, OutError)
-					: Fail(OutError, TEXT("rig_simulation_spatial_family_port_unavailable"),
-						Contract.GetCapabilityId());
+					: MissingFamily(OutError, Contract.GetCapabilityId());
 			}
 
 		private:
@@ -120,7 +128,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				const FUeAgentRigSimulationSpatialExecutionChainContract& Contract,
 				const FUeAgentRigSimulationSpatialTypedRequestRef& Request,
 				const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot& Before,
-				const UE::UAI::StateSemantic::FUeAgentCanonicalSnapshot& After,
+				const FUeAgentRigSimulationSpatialReadbackResult& After,
 				const UE::UAI::ContextResource::FUeAgentOperationContext& Context,
 				UE::UAI::Verification::FVerificationOutcome& OutOutcome,
 				FUeAgentRigSimulationSpatialExecutionError& OutError) override
@@ -129,8 +137,7 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 				return Family
 					? Family->Comparator->TryCompare(Contract, Request, Before, After,
 						Context, OutOutcome, OutError)
-					: Fail(OutError, TEXT("rig_simulation_spatial_family_port_unavailable"),
-						Contract.GetCapabilityId());
+					: MissingFamily(OutError, Contract.GetCapabilityId());
 			}
 
 		private:
@@ -146,18 +153,26 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		OutPorts = {};
 		OutError = {};
 		if (FamilyPorts.IsEmpty())
-			return Fail(OutError, TEXT("rig_simulation_spatial_native_family_ports_empty"));
-		for (const FUeAgentRigSimulationSpatialNativePorts& Family : FamilyPorts)
+			return Fail(OutError, TEXT("rig_simulation_spatial_native_family_ports_empty"),
+				TEXT("No native port families were supplied."), TEXT("families"),
+				MakeShared<FJsonValueNumber>(0), TEXT("at least one native port family"));
+		for (int32 Index = 0; Index < FamilyPorts.Num(); ++Index)
 		{
-			if (!Family.IsValid())
-				return Fail(OutError,
-					TEXT("rig_simulation_spatial_native_family_ports_invalid"));
+			const FUeAgentRigSimulationSpatialNativePorts& Family = FamilyPorts[Index];
+			const FString Prefix = FString::Printf(TEXT("families[%d]"), Index);
+			if (!Family.TryValidate(OutError))
+			{
+				OutError.PropertyPath = OutError.PropertyPath.IsEmpty() ? Prefix : Prefix + TEXT(".") + OutError.PropertyPath;
+				return false;
+			}
 			for (const FString& CapabilityId : Family.SupportedCapabilities)
 			{
 				if (OutPorts.SupportedCapabilities.Contains(CapabilityId))
 					return Fail(OutError,
 						TEXT("rig_simulation_spatial_native_capability_owner_ambiguous"),
-						CapabilityId);
+						TEXT("This capability is provided by more than one native port family."),
+						Prefix + TEXT(".supported_capabilities"), MakeShared<FJsonValueString>(CapabilityId),
+						TEXT("one native port family per capability"));
 				OutPorts.SupportedCapabilities.Add(CapabilityId);
 			}
 		}
@@ -165,7 +180,6 @@ namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 		OutPorts.Mutation = MakeShared<FCompositeMutation>(FamilyPorts);
 		OutPorts.Settle = MakeShared<FCompositeSettle>(FamilyPorts);
 		OutPorts.Comparator = MakeShared<FCompositeComparator>(MoveTemp(FamilyPorts));
-		return OutPorts.IsValid() ? true : Fail(OutError,
-			TEXT("rig_simulation_spatial_native_composite_ports_unavailable"));
+		return OutPorts.TryValidate(OutError);
 	}
 }

@@ -1,6 +1,9 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 
 class FJsonObject;
 class UAnimBlueprint;
@@ -12,6 +15,8 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 {
 	struct UEAGENTINTERFACE_API FAnimationBlueprintCandidate
 	{
+		/** Server-side identity retained for internal re-resolution only. */
+		UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
 		FString Id;
 		FString Name;
 		FString Label;
@@ -24,6 +29,10 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 		FString SourceOrigin;
 		FString WriteSupport;
 		FString SupportReason;
+		Contract::FDiagnostic SupportDiagnostic;
+		TMap<FString, FString> SelectionFields;
+		/** Original provider binding, retained only for native re-resolution. */
+		TMap<FString, FString> NativeSelectors;
 		bool bSupported = false;
 	};
 
@@ -34,20 +43,10 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 		FString Surface;
 		TArray<FAnimationBlueprintCandidate> Candidates;
 		int32 TotalMatches = 0;
-		int32 NextCursor = INDEX_NONE;
-		bool bComplete = false;
-		bool bHasMore = false;
-		FString CoverageScope;
-		bool bCoverageComplete = false;
-		bool bCreationCoverageComplete = false;
+		UE::UAI::Contract::FDiagnostic CatalogDiagnostic;
 	};
 
-	struct UEAGENTINTERFACE_API FAnimationBlueprintCandidateQueryError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FAnimationBlueprintCandidateQueryError = UE::UAI::Contract::FDiagnostic;
 
 	/**
 	 * Enumerates one native creation surface on a transient AnimBlueprint made
@@ -59,31 +58,28 @@ namespace UE::UAI::QueryOwners::AnimationBlueprint
 		const TSharedPtr<FJsonObject>& ClassSettings,
 		const FString& Query,
 		FAnimationBlueprintCandidateQueryResult& OutResult,
-		FAnimationBlueprintCandidateQueryError& OutError,
-		int32 Limit = 64,
-		int32 Cursor = 0,
-		const FString& CandidateId = FString());
+		FAnimationBlueprintCandidateQueryError& OutError);
 
 	/** Re-enumerates and invokes the native AnimGraph StateMachine spawner. */
 	UEAGENTINTERFACE_API bool TryPerformAnimationGraphStateMachineCandidate(
 		UAnimBlueprint& Blueprint,
 		UEdGraph& Graph,
 		const FString& Name,
-		const FString& Id,
 		const FVector2f& Location,
 		UEdGraphNode*& OutNode,
 		FAnimationBlueprintCandidate& OutCandidate,
-		FAnimationBlueprintCandidateQueryError& OutError);
+		FAnimationBlueprintCandidateQueryError& OutError,
+		const TMap<FString, FString>& Select = {});
 
 	/** Re-enumerates and invokes one native StateMachine graph schema action. */
 	UEAGENTINTERFACE_API bool TryPerformStateMachineGraphCandidate(
 		UAnimationStateMachineGraph& Graph,
 		const FString& Name,
-		const FString& Id,
 		const FVector2f& Location,
 		UEdGraphNode*& OutNode,
 		FAnimationBlueprintCandidate& OutCandidate,
-		FAnimationBlueprintCandidateQueryError& OutError);
+		FAnimationBlueprintCandidateQueryError& OutError,
+		const TMap<FString, FString>& Select = {});
 
 	UEAGENTINTERFACE_API bool IsReadOnlyContentGraphCommand(
 		const FString& CommandId);

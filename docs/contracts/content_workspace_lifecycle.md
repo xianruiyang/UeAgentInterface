@@ -54,7 +54,7 @@ Representative evidence may be retained in task-specific `tmp/<run-id>/` while i
 task or result still consumes it; this does not require retaining every generated package or
 recreating the retired `runtimeLogs/` and `reports/` roots.
 
-## Cleanup and migration gates
+## Cleanup and migration safety
 
 Cleanup or migration is permitted only for the exact packages owned by the
 current task/run or by a formally retired fixture. The caller must use the

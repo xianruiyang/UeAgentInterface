@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 
-#include "Core/Contract/UeAgentContractSchema.h"
+#include "DomainAdapters/TimelineSequenceCommands/UeAgentTimelineSequenceCommandMechanicsBoundary.h"
+#include "Composition/TimelineSpatial/UeAgentTimelineSpatialActivation.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
 namespace UE::UAI::Tests::StrictV2::T55
@@ -9,8 +10,14 @@ namespace UE::UAI::Tests::StrictV2::T55
 	{
 		static const TArray<FString> Commands = {
 			TEXT("timeline.sequence.create"),
+		};
+		return Commands;
+	}
+
+	const TArray<FString>& ExpectedDormantCommands()
+	{
+		static const TArray<FString> Commands = {
 			TEXT("timeline.sequence.read"),
-			TEXT("timeline.sequence.settings.update"),
 			TEXT("timeline.sequence.structure.replace"),
 			TEXT("timeline.widget_animation.read"),
 		};
@@ -38,46 +45,56 @@ bool FUeAgentStrictV2T55TimelineSequenceCommandMigrationTest::RunTest(const FStr
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T55 owns exactly five non-HJSON commands"), ExpectedCommands().Num(), 5);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
 		TestNotNull(*FString::Printf(TEXT("%s is active"), *CommandId), Contract);
 		if (Contract)
 		{
+			TestEqual(*FString::Printf(TEXT("%s is enabled"), *CommandId),
+				Contract->GetAvailability(),
+				CommandContract::EUeAgentCommandAvailability::Enabled);
 			TestEqual(*FString::Printf(TEXT("%s has one T55 owner"), *CommandId),
 				Contract->GetPublicOwner(), FString(TEXT("timeline-sequence-command-owner")));
 		}
 	}
-	const auto* SettingsUpdate =
-		Registry->FindExact(TEXT("timeline.sequence.settings.update"));
-	const UE::UAI::CommandContract::FUeAgentCommandFieldDeclaration* SettingsInput =
-		SettingsUpdate
-			? SettingsUpdate->GetInputFields().FindByPredicate(
-				[](const UE::UAI::CommandContract::FUeAgentCommandFieldDeclaration& Field)
-				{
-					return Field.Name == TEXT("input");
-				})
-			: nullptr;
-	TestNotNull(
-		TEXT("settings update exposes one model-consumable input schema"),
-		SettingsInput);
-	if (SettingsInput)
+	for (const FString& CommandId : ExpectedDormantCommands())
 	{
-		TestTrue(
-			TEXT("settings schema exposes only supported mutable settings and revision"),
-			SettingsInput->SchemaJson.Contains(TEXT("\"display_rate\""))
-				&& SettingsInput->SchemaJson.Contains(TEXT("\"playback_range\""))
-				&& SettingsInput->SchemaJson.Contains(TEXT("\"expected_revision\""))
-				&& !SettingsInput->SchemaJson.Contains(TEXT("\"tick_resolution\"")));
-		TSharedPtr<const UE::UAI::Contract::FUeAgentContractSchema> CompiledSchema;
-		UE::UAI::Contract::FUeAgentContractSchemaError SchemaError;
-		TestTrue(
-			TEXT("settings input schema compiles as ContractSchema v1"),
-			UE::UAI::Contract::FUeAgentContractSchema::TryCompile(
-				UE::UAI::Contract::FUeAgentContractValue(SettingsInput->SchemaJson),
-				CompiledSchema,
-				SchemaError));
+		const auto* Contract = Registry->FindExact(CommandId);
+		TestNotNull(*FString::Printf(TEXT("%s remains registered as dormant"), *CommandId), Contract);
+		if (Contract)
+		{
+			TestEqual(*FString::Printf(TEXT("%s is dormant"), *CommandId),
+				Contract->GetAvailability(),
+				CommandContract::EUeAgentCommandAvailability::Dormant);
+		}
+	}
+	TestNull(
+		TEXT("settings update exits the public registry after Sequence HJSON coverage"),
+		Registry->FindExact(TEXT("timeline.sequence.settings.update")));
+	TestTrue(
+		TEXT("settings update remains an internal Sequence operation kind"),
+		DomainAdapters::TimelineSequenceCommands::GetCommandIds().Contains(
+			TEXT("timeline.sequence.settings.update")));
+	TestFalse(
+		TEXT("settings update is absent from the public Sequence command surface"),
+		DomainAdapters::TimelineSequenceCommands::GetPublicCommandIds().Contains(
+			TEXT("timeline.sequence.settings.update")));
+	TSharedPtr<const CommandContract::FUeAgentCommandContractRegistry> InternalContracts;
+	FString InternalContractError;
+	TestTrue(
+		TEXT("the private production contract retains settings update for internal execution"),
+		Composition::TimelineSpatial::TryCreateTimelineSpatialProductionCommandContractRegistry(
+			InternalContracts, InternalContractError));
+	if (!InternalContracts.IsValid())
+	{
+		AddError(InternalContractError);
+	}
+	else
+	{
+		TestNotNull(
+			TEXT("settings update has a private canonical contract"),
+			InternalContracts->FindExact(TEXT("timeline.sequence.settings.update")));
 	}
 	return !HasAnyErrors();
 }

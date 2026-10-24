@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "DomainAdapters/ExternalDataImport/UeAgentExternalDataImportOwner.h"
@@ -10,5 +12,5 @@ namespace UE::UAI::Composition::DestructiveImport
 		TSharedRef<DomainAdapters::ExternalDataImport::
 			IUeAgentExternalDataImportOwner> Owner,
 		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

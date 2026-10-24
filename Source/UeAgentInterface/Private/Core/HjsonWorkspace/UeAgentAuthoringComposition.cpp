@@ -1,12 +1,31 @@
 #include "Core/HjsonWorkspace/UeAgentAuthoringComposition.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/HjsonWorkspace/UeAgentHjsonWorkspace.h"
+#include "Utilities/UeAgentReadableName.h"
+#include "Core/AssetPreview/UeAgentAssetPreviewState.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringContentLayout.h"
+#include "Core/HjsonWorkspace/UeAgentAuthoringExamples.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "Core/StateSemantic/UeAgentStateSemanticEvidence.h"
+#include "Core/HjsonWorkspace/UeAgentReflectedPropertyRows.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringTypeDescriptors.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringEncodedTypes.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+
 #include "Containers/StringConv.h"
 #include "Core/ArtifactPublisher/UeAgentArtifactPublisher.h"
+#include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
+#include "Core/HjsonWorkspace/UeAgentKeyedItemAuthoringProjection.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "Utilities/UeAgentStructuredHjsonFormatter.h"
 
 THIRD_PARTY_INCLUDES_START
 #include <openssl/sha.h>
@@ -32,8 +51,596 @@ namespace UE::UAI::HjsonWorkspace
 		const FString ManifestPath =
 			TEXT(".uai/workspace.hjson");
 
+		TSharedPtr<FJsonValue> OrderedDefinitionIdentity(const TSharedPtr<FJsonValue>& Value)
+		{
+			if (!Value) return MakeShared<FJsonValueNull>();
+			if (Value->Type == EJson::Object)
+			{
+				const auto Result = MakeShared<FJsonObject>();
+				TArray<FString> Keys;
+				Value->AsObject()->Values.GetKeys(Keys); Keys.Sort();
+				for (const FString& Key : Keys) Result->SetField(Key, OrderedDefinitionIdentity(Value->AsObject()->Values.FindChecked(Key)));
+				return MakeShared<FJsonValueObject>(Result);
+			}
+			if (Value->Type == EJson::Array)
+			{
+				TArray<TSharedPtr<FJsonValue>> Items;
+				for (const auto& Item : Value->AsArray()) Items.Add(OrderedDefinitionIdentity(Item));
+				return MakeShared<FJsonValueArray>(Items);
+			}
+			return Value;
+		}
+
+		FString DefinitionIdentity(const TSharedRef<FJsonObject>& Definition)
+		{
+			FString Result;
+			FJsonSerializer::Serialize(OrderedDefinitionIdentity(MakeShared<FJsonValueObject>(Definition))->AsObject().ToSharedRef(),
+				TJsonWriterFactory<>::Create(&Result));
+			return Result;
+		}
+
+		bool TryReadHjsonObject(
+			const TArray<uint8>& Bytes,
+			TSharedPtr<FJsonObject>& OutObject)
+		{
+			OutObject.Reset();
+			const FUTF8ToTCHAR Conversion(
+				reinterpret_cast<const ANSICHAR*>(Bytes.GetData()),
+				Bytes.Num());
+			FString Text(Conversion.Length(), Conversion.Get());
+			UE::UAI::Contract::FDiagnostic Error;
+			return FUeAgentStructuredHjsonParser::ParseObject(
+				Text,
+				TEXT("semantic-unit-row.hjson"),
+				OutObject,
+				Error);
+		}
+
+		void AddSemanticEnvelope(
+			const FSemanticUnit& Unit,
+			const TSharedRef<FJsonObject>& Inventory)
+		{
+			TSharedRef<FJsonObject> Envelope = MakeShared<FJsonObject>();
+			Envelope->SetStringField(TEXT("owner_ref"), Unit.GetOwnerRef());
+			Envelope->SetStringField(
+				TEXT("semantic_type_ref"), Unit.GetSemanticTypeRef());
+			Envelope->SetStringField(TEXT("role"), Unit.GetRole());
+			Envelope->SetStringField(
+				TEXT("field_set_ref"), Unit.GetFieldSetRef());
+			if (!Unit.GetItemRefs().IsEmpty())
+			{
+				TArray<TSharedPtr<FJsonValue>> Values;
+				for (const FString& Value : Unit.GetItemRefs())
+				{
+					Values.Add(MakeShared<FJsonValueString>(Value));
+				}
+				Envelope->SetArrayField(TEXT("item_refs"), MoveTemp(Values));
+			}
+			if (!Unit.GetRelationRefs().IsEmpty())
+			{
+				TArray<TSharedPtr<FJsonValue>> Values;
+				for (const FString& Value : Unit.GetRelationRefs())
+				{
+					Values.Add(MakeShared<FJsonValueString>(Value));
+				}
+				Envelope->SetArrayField(TEXT("relation_refs"), MoveTemp(Values));
+			}
+			if (!Unit.GetOrderingRef().IsEmpty())
+			{
+				Envelope->SetStringField(
+					TEXT("ordering_ref"), Unit.GetOrderingRef());
+			}
+			if (!Unit.GetLayoutRef().IsEmpty())
+			{
+				Envelope->SetStringField(
+					TEXT("layout_ref"), Unit.GetLayoutRef());
+			}
+			if (!Unit.GetDependencyRefs().IsEmpty())
+			{
+				TArray<TSharedPtr<FJsonValue>> Values;
+				for (const FString& Value : Unit.GetDependencyRefs())
+				{
+					Values.Add(MakeShared<FJsonValueString>(Value));
+				}
+				Envelope->SetArrayField(
+					TEXT("dependency_refs"), MoveTemp(Values));
+			}
+			if (!Unit.GetProfileVisibility().IsEmpty())
+			{
+				TArray<TSharedPtr<FJsonValue>> Values;
+				for (const FString& Value : Unit.GetProfileVisibility())
+				{
+					Values.Add(MakeShared<FJsonValueString>(Value));
+				}
+				Envelope->SetArrayField(
+					TEXT("profile_visibility"), MoveTemp(Values));
+			}
+			if (!Unit.GetTargetIdentityKey().IsEmpty())
+			{
+				Envelope->SetStringField(
+					TEXT("target_identity_key"),
+					Unit.GetTargetIdentityKey());
+			}
+			if (!Unit.GetSourceProvenance().IsEmpty())
+			{
+				Envelope->SetStringField(
+					TEXT("source_provenance"),
+					Unit.GetSourceProvenance());
+			}
+			Inventory->SetObjectField(TEXT("envelope"), Envelope);
+		}
+
+		bool TryBuildCompactRow(
+			const FSemanticUnit& Unit,
+			TSharedPtr<FJsonObject>& OutRow, FWorkspaceError& OutError,
+			const TMap<FString, FString>* PublicRefs = nullptr, const FString& SourceFile = FString())
+		{
+			OutRow.Reset();
+			return TryBuildSemanticModelUnitRow(Unit, OutRow, OutError, PublicRefs, SourceFile);
+		}
+
+		// The model already owns definition interning and cycle validation. Keep
+		// expansion shared by nested-record export and workspace edit comparison.
+		TSharedPtr<FJsonValue> ExpandPropertyDefinition(const FAuthoringModel& Model,
+			const TSharedPtr<FJsonValue>& Value, FWorkspaceError& OutError,
+			const FString& SourceUnit = FString(), const FString& Pointer = FString())
+		{
+			if (!Value)
+			{
+				auto Error = Contract::FDiagnostic::Failure(TEXT("property_definition_value_missing"),
+					TEXT("The property definition contains a missing value."), TEXT("definition_expansion"));
+				Error.ActualValuePresent = false;
+				OutError.SetFailure(MoveTemp(Error), SourceUnit, Pointer);
+				return nullptr;
+			}
+			if (Value->Type == EJson::String)
+			{
+				const auto* Definition = Model.FindUnit(Value->AsString());
+				if (!Definition || Definition->GetRole() != TEXT("property_definition")) return Value;
+				TSharedPtr<FJsonObject> Row;
+				if (!TryBuildCompactRow(*Definition, Row, OutError)) return nullptr;
+				// Row construction owns the values object; it cannot be absent on success.
+				return ExpandPropertyDefinition(Model, Row->TryGetField(TEXT("values")), OutError,
+					Definition->GetUnitId(), TEXT("/values"));
+			}
+			if (Value->Type == EJson::Array)
+			{
+				TArray<TSharedPtr<FJsonValue>> Items;
+				for (int32 Index = 0; Index < Value->AsArray().Num(); ++Index)
+				{
+					auto Expanded = ExpandPropertyDefinition(Model, Value->AsArray()[Index], OutError,
+						SourceUnit, Pointer + TEXT("/") + FString::FromInt(Index));
+					if (!Expanded) return nullptr;
+					Items.Add(MoveTemp(Expanded));
+				}
+				return MakeShared<FJsonValueArray>(Items);
+			}
+			if (Value->Type != EJson::Object) return Value;
+			const auto Object = MakeShared<FJsonObject>();
+			for (const auto& Field : Value->AsObject()->Values)
+			{
+				auto Expanded = ExpandPropertyDefinition(Model, Field.Value, OutError,
+					SourceUnit, Pointer + TEXT("/") + EscapeJsonPointerSegment(Field.Key));
+				if (!Expanded) return nullptr;
+				Object->SetField(Field.Key, MoveTemp(Expanded));
+			}
+			return MakeShared<FJsonValueObject>(Object);
+		}
+
+		FString ReadablePropertyDefinition(const FSemanticUnit& Unit, const FAuthoringModel& Model)
+		{
+			if (const FString* Name = Model.FindReadablePropertyDefinitionName(Unit.GetUnitId())) return *Name;
+			for (const FString& Dependency : Unit.GetDependencyRefs())
+				if (const FString* Name = Model.FindReadablePropertyDefinitionName(Dependency)) return *Name;
+			return FString();
+		}
+
+		FString ReadablePropertyType(
+			const FSemanticUnit& Unit,
+			const FAuthoringModel& Model)
+		{
+			auto FromDefinition = [](const FSemanticUnit& Definition) -> FString
+			{
+				const FUeAgentCanonicalValueRef* Type =
+					Definition.GetValues().Find(TEXT("type"));
+				if (Type == nullptr
+					|| (*Type)->GetKind() != EUeAgentValueKind::Object)
+				{
+					return FString();
+				}
+				// A type describes the value, not the property's edit/candidate contract.
+				return ReadablePropertyTypeName(Type->Get());
+			};
+			if (const FString OwnType = FromDefinition(Unit); !OwnType.IsEmpty())
+			{
+				return OwnType;
+			}
+			for (const FString& Dependency : Unit.GetDependencyRefs())
+			{
+				const FSemanticUnit* Definition = Model.FindUnit(Dependency);
+				if (Definition == nullptr)
+				{
+					continue;
+				}
+				if (const FString DependencyType = FromDefinition(*Definition);
+					!DependencyType.IsEmpty())
+				{
+					return DependencyType;
+				}
+			}
+			return ShortReadableTypeName(Unit.GetSemanticTypeRef());
+		}
+
+		const FUeAgentCanonicalValue* ProjectionTypeField(const FUeAgentCanonicalValue* Type, const TCHAR* Name)
+		{
+			if (!Type || Type->GetKind() != EUeAgentValueKind::Object) return nullptr;
+			const auto* Field = Type->GetObjectItems().FindByPredicate([Name](const auto& Item) { return Item.Key == Name; });
+			return Field ? &Field->Value.Get() : nullptr;
+		}
+
+		TSharedPtr<FJsonValue> ProjectDirectPropertyValue(
+			const TSharedPtr<FJsonValue>& Value,
+			const FAuthoringModel& Model, UE::UAI::Contract::FDiagnostic& OutError,
+			const FUeAgentCanonicalValue* ValueDefinition = nullptr, bool bOrderedItem = false, int32 Occurrence = 0,
+			bool bNativeScope = false, const FUeAgentCanonicalValue* ValueType = nullptr,
+			bool bEnvelopeContents = false)
+		{
+			if (!Value.IsValid()) return nullptr;
+            // Captured templates and native struct members may still carry an
+            // inline descriptor; interned members use a definition reference below.
+            if (const auto* InlineType = ProjectionTypeField(ValueDefinition, TEXT("type"));
+                ProjectionTypeField(InlineType, TEXT("kind")))
+            {
+                ValueType = InlineType;
+                ValueDefinition = ProjectionTypeField(ValueDefinition, TEXT("value_definition"));
+            }
+            const auto FailProjection = [&](const FString& Reason) -> TSharedPtr<FJsonValue>
+            {
+                if (OutError.IsEmpty()) OutError = UE::UAI::Contract::FDiagnostic::Failure(
+                    TEXT("composition_property_value_invalid"), Reason, TEXT("property_projection"));
+                return nullptr;
+            };
+			if (ValueDefinition && ValueDefinition->GetKind() == EUeAgentValueKind::String)
+			{
+				const auto* Definition = Model.FindUnit(ValueDefinition->GetText());
+				const auto* Type = Definition ? Definition->GetValues().Find(TEXT("type")) : nullptr;
+				bool bReflectedType = false;
+				if (Type && Type->Get().GetKind() == EUeAgentValueKind::Object)
+					for (const auto& Field : Type->Get().GetObjectItems())
+						bReflectedType |= Field.Key == TEXT("kind");
+				// Native field descriptors reference the same centralized definitions
+				// as root properties. Contract-defined business leaves retain their shape.
+				if (!bReflectedType) return Value;
+				const auto* Nested = Definition->GetValues().Find(TEXT("value_definition"));
+				const auto Projected = ProjectDirectPropertyValue(Value, Model, OutError, Nested ? &Nested->Get() : nullptr,
+					bOrderedItem, Occurrence, bNativeScope, &Type->Get(), bEnvelopeContents);
+				if (Projected && UeAgentAuthoringEncodedTypes::FScope::IsActive())
+				{
+					TSharedPtr<FJsonValue> NativeType, NativeDefinition;
+					if (!CanonicalJson::TryToJsonValue(Type->Get(), NativeType, OutError)) return nullptr;
+					if (Nested && !CanonicalJson::TryToJsonValue(Nested->Get(), NativeDefinition, OutError)) return nullptr;
+					const auto Descriptor = NativeDefinition && NativeDefinition->Type == EJson::Object ? NativeDefinition->AsObject() : MakeShared<FJsonObject>();
+					Descriptor->SetField(TEXT("type"), NativeType);
+					UeAgentAuthoringTypeDescriptors::FDescriptor Declared;
+					NativeType->AsObject()->TryGetStringField(TEXT("kind"), Declared.Kind);
+					UeAgentAuthoringEncodedTypes::FScope::Record(Projected, Declared, Descriptor);
+				}
+				return Projected;
+			}
+			// A deferred inline patch already contains readable rows. Validate its
+			// catalog aliases before rebinding those rows to the live native schema.
+			if (bNativeScope && Value->Type == EJson::Object && ValueDefinition
+				&& ValueDefinition->GetKind() == EUeAgentValueKind::Object)
+			{
+				bool bPropertyRows = false;
+				const FUeAgentCanonicalValue* Items = nullptr;
+				for (const auto& Field : ValueDefinition->GetObjectItems())
+				{
+					if (Field.Key == TEXT("element_kind") && Field.Value->GetKind() == EUeAgentValueKind::String)
+						bPropertyRows = Field.Value->GetText() == TEXT("reflected_property");
+					if (Field.Key == TEXT("items")) Items = &Field.Value.Get();
+				}
+				if (bPropertyRows)
+				{
+					if (!Items || Items->GetKind() != EUeAgentValueKind::Array) return FailProjection(TEXT("The reflected property schema must contain an array of items."));
+					TArray<FReadablePropertySchema> Schema;
+					TArray<const FSemanticUnit*> Units;
+					TArray<const FUeAgentCanonicalValue*> Definitions;
+					for (const auto& Item : Items->GetArrayItems())
+					{
+						const FUeAgentCanonicalValue* Definition = nullptr;
+						if (Item->GetKind() != EUeAgentValueKind::Object) return FailProjection(TEXT("A reflected property schema item must be an object."));
+						for (const auto& Field : Item->GetObjectItems())
+							if (Field.Key == TEXT("fields") && Field.Value->GetKind() == EUeAgentValueKind::Object)
+								for (const auto& Member : Field.Value->GetObjectItems())
+									if (Member.Key == TEXT("value")) Definition = &Member.Value.Get();
+						const auto* Unit = Definition && Definition->GetKind() == EUeAgentValueKind::String ? Model.FindUnit(Definition->GetText()) : nullptr;
+						const auto* Type = Unit ? Unit->GetValues().Find(TEXT("type")) : nullptr;
+						FReadablePropertySchema Row;
+						if (!Type || !TryDescribeReadableProperty(Item.Get(), Type->Get(), Row)) return FailProjection(TEXT("The reflected property row has no readable type descriptor."));
+						Row.Type = ReadablePropertyType(*Unit, Model);
+						Row.Definition = ReadablePropertyDefinition(*Unit, Model);
+						Schema.Add(MoveTemp(Row)); Units.Add(Unit); Definitions.Add(Definition);
+					}
+					// A preceding root edit can change the inline class. Only rebind
+					// aliases proven by the captured schema; leave new native rows for
+					// ObjectApply to validate against that actual class.
+					for (const auto& Category : Value->AsObject()->Values)
+					{
+						if (!Category.Value || Category.Value->Type != EJson::Object) return FailProjection(TEXT("A reflected property category must be an object."));
+						for (const auto& Field : Category.Value->AsObject()->Values)
+						{
+							FString Type;
+							if (!Field.Value || Field.Value->Type != EJson::Object || !Field.Value->AsObject()->TryGetStringField(TEXT("type"), Type)) return FailProjection(TEXT("A reflected property row must declare its type."));
+							const int32 Index = Schema.IndexOfByPredicate([&](const FReadablePropertySchema& Row) { return Row.Category == Category.Key && Row.Name == Field.Key; });
+							if (Index == INDEX_NONE)
+							{
+								Schema.Add({Field.Key, Category.Key, Type}); Units.Add(nullptr); Definitions.Add(nullptr);
+							}
+							else if (Schema[Index].Type != Type)
+							{
+								Schema[Index].Type = Type; Units[Index] = nullptr; Definitions[Index] = nullptr;
+							}
+						}
+					}
+					auto Resources = MakeSemanticWorkspaceResourceTracker();
+					FUeAgentCanonicalValuePtr Canonical;
+					
+					TArray<FResolvedReadableProperty> Rows;
+					FUeAgentStateSemanticError RowError;
+					if (!CanonicalJson::TryFromJsonValue(Value, Resources, Canonical, OutError)) return nullptr;
+                    if (!TryReadReadablePropertyRows(*Canonical, Schema, Rows, RowError))
+                    { OutError = MoveTemp(RowError); return nullptr; }
+					const auto Categories = MakeShared<FJsonObject>();
+					for (const auto& Row : Rows)
+					{
+						auto NativeSchema = Schema[Row.SchemaIndex];
+						if (Units[Row.SchemaIndex]) NativeSchema.Type = ReadablePropertyType(*Units[Row.SchemaIndex], Model);
+						NativeSchema.Definition.Reset();
+						TSharedPtr<FJsonValue> Inner;
+						if (!CanonicalJson::TryToJsonValue(*Row.Value, Inner, OutError)) return nullptr;
+						const auto NativeValue = Units[Row.SchemaIndex]
+							? ProjectDirectPropertyValue(Inner, Model, OutError, Definitions[Row.SchemaIndex], false, 0, true) : Inner;
+						if (!NativeValue || !TryAddReadablePropertyRow(Categories, NativeSchema, NativeValue)) return FailProjection(TEXT("The projected property row could not be added to its category."));
+					}
+					return MakeShared<FJsonValueObject>(Categories);
+				}
+			}
+			if (ValueDefinition && ValueDefinition->GetKind() == EUeAgentValueKind::Object)
+				for (const auto& DefinitionField : ValueDefinition->GetObjectItems())
+					if (DefinitionField.Key == TEXT("builtin") && DefinitionField.Value->GetKind() == EUeAgentValueKind::String
+						&& DefinitionField.Value->GetText() == TEXT("text") && Value->Type == EJson::Object)
+					{
+						const auto TextObject = Value->AsObject();
+						const TSharedPtr<FJsonObject>* Localized = nullptr;
+						FString Source;
+						if (TextObject->TryGetObjectField(TEXT("localized"), Localized)
+							&& (*Localized)->TryGetStringField(TEXT("source"), Source))
+							return MakeShared<FJsonValueString>(Source);
+					}
+			const auto* Kind = ProjectionTypeField(ValueType, TEXT("kind"));
+			const FString NativeKind = Kind && Kind->GetKind() == EUeAgentValueKind::String ? Kind->GetText() : FString();
+			const FString CodecWrapper = UeAgentAuthoringTypeDescriptors::NativeCodecValueWrapper(NativeKind);
+			if (Value->Type == EJson::Array)
+			{
+				TArray<TSharedPtr<FJsonValue>> Items;
+				const FUeAgentCanonicalValue* ItemDefinitions = nullptr;
+				bool bOrderedOwnedItems = false;
+				bool bOrderedStructuredItems = false;
+				bool bPropertyRows = false;
+				if (ValueDefinition && ValueDefinition->GetKind() == EUeAgentValueKind::Object)
+					for (const auto& Field : ValueDefinition->GetObjectItems())
+					{
+						if (Field.Key == TEXT("element_kind") && Field.Value->GetKind() == EUeAgentValueKind::String)
+						{
+							bOrderedOwnedItems = Field.Value->GetText() == TEXT("owned_object");
+							bOrderedStructuredItems = Field.Value->GetText() == TEXT("structured_owned_item");
+							bPropertyRows = Field.Value->GetText() == TEXT("reflected_property");
+						}
+						if (Field.Key == TEXT("items") && Field.Value->GetKind() == EUeAgentValueKind::Array)
+							ItemDefinitions = &Field.Value.Get();
+					}
+				if (bPropertyRows)
+				{
+					if (!ItemDefinitions || ItemDefinitions->GetArrayItems().Num() != Value->AsArray().Num()) return FailProjection(TEXT("The property value count does not match its captured schema."));
+					const auto Categories = MakeShared<FJsonObject>();
+					for (int32 RowIndex = 0; RowIndex < Value->AsArray().Num(); ++RowIndex)
+					{
+						const auto& Definition = ItemDefinitions->GetArrayItems()[RowIndex].Get();
+						const FUeAgentCanonicalValue* ValueSchema = nullptr;
+						if (Definition.GetKind() != EUeAgentValueKind::Object) return FailProjection(TEXT("A reflected property definition must be an object."));
+						for (const auto& Field : Definition.GetObjectItems())
+							if (Field.Key == TEXT("fields") && Field.Value->GetKind() == EUeAgentValueKind::Object)
+								for (const auto& Member : Field.Value->GetObjectItems())
+									if (Member.Key == TEXT("value")) ValueSchema = &Member.Value.Get();
+						const auto* Unit = ValueSchema && ValueSchema->GetKind() == EUeAgentValueKind::String ? Model.FindUnit(ValueSchema->GetText()) : nullptr;
+						const auto* Type = Unit ? Unit->GetValues().Find(TEXT("type")) : nullptr;
+						FReadablePropertySchema Schema;
+						if (!Type || !TryDescribeReadableProperty(Definition, Type->Get(), Schema)) return FailProjection(TEXT("The reflected property definition has no readable type descriptor."));
+						Schema.Type = ReadablePropertyType(*Unit, Model);
+						if (!bNativeScope) Schema.Definition = ReadablePropertyDefinition(*Unit, Model);
+						const auto& Item = Value->AsArray()[RowIndex];
+						if (!Item || Item->Type != EJson::Object) return FailProjection(TEXT("A reflected property value must be an object."));
+						const auto Inner = Item->AsObject()->TryGetField(TEXT("value"));
+						if (!TryAddReadablePropertyRow(Categories, Schema, ProjectDirectPropertyValue(Inner, Model, OutError, ValueSchema, false, 0, bNativeScope))) return FailProjection(TEXT("The projected property row could not be added to its category."));
+					}
+					return MakeShared<FJsonValueObject>(Categories);
+				}
+				int32 Index = 0;
+				TMap<FString, int32> Occurrences;
+				for (const TSharedPtr<FJsonValue>& Item : Value->AsArray())
+				{
+					const FUeAgentCanonicalValue* ItemDefinition = ItemDefinitions && ItemDefinitions->GetArrayItems().IsValidIndex(Index)
+						? &ItemDefinitions->GetArrayItems()[Index].Get() : nullptr;
+					int32 ItemOccurrence = 0;
+					if (ItemDefinition && ItemDefinition->GetKind() == EUeAgentValueKind::Object)
+						for (const auto& Field : ItemDefinition->GetObjectItems())
+							if (Field.Key == TEXT("instance_name") && Field.Value->GetKind() == EUeAgentValueKind::String)
+								ItemOccurrence = Occurrences.FindOrAdd(Field.Value->GetText().TrimStartAndEnd().ToLower())++;
+					const auto* ItemType = NativeKind == TEXT("map") ? ValueType : ProjectionTypeField(ValueType, TEXT("element_type"));
+					auto ProjectedItem = ProjectDirectPropertyValue(Item, Model, OutError, ItemDefinition,
+						bOrderedOwnedItems, ItemOccurrence, bNativeScope, ItemType);
+					if (!OutError.IsEmpty()) return nullptr;
+					if (bOrderedStructuredItems)
+					{
+						if (!ProjectedItem.IsValid() || ProjectedItem->Type != EJson::Object) return FailProjection(TEXT("An ordered structured item must project to an object."));
+						FString Key;
+						FWorkspaceError KeyError;
+						if (!TryFormatReadableKeyedItemOrdinal(TEXT("Entry"), Index, Key, KeyError)) { OutError = KeyError.GetDiagnostic(); return nullptr; }
+						auto Structured = MakeShared<FJsonObject>();
+						Structured->Values = ProjectedItem->AsObject()->Values;
+						Structured->SetStringField(TEXT("instance"), Key);
+						ProjectedItem = MakeShared<FJsonValueObject>(Structured);
+					}
+					Items.Add(ProjectedItem);
+					++Index;
+				}
+				return MakeShared<FJsonValueArray>(MoveTemp(Items));
+			}
+			if (Value->Type != EJson::Object) return Value;
+			const TSharedPtr<FJsonObject> Object = Value->AsObject();
+			if (!Object.IsValid()) return FailProjection(TEXT("The property object is invalid."));
+			if (Object->Values.Num() == 1)
+			{
+				const TPair<FString, TSharedPtr<FJsonValue>>& Only =
+					*Object->Values.CreateConstIterator();
+				if (!bEnvelopeContents && !CodecWrapper.IsEmpty() && Only.Key == CodecWrapper)
+				{
+					return ProjectDirectPropertyValue(Only.Value, Model, OutError, ValueDefinition, false, 0, bNativeScope, ValueType, true);
+				}
+			}
+			TSharedRef<FJsonObject> Projected = MakeShared<FJsonObject>();
+			const FUeAgentCanonicalValue* FieldDefinitions = nullptr;
+			bool bHashSource = false;
+			if (ValueDefinition && ValueDefinition->GetKind() == EUeAgentValueKind::Object)
+				for (const auto& Field : ValueDefinition->GetObjectItems())
+				{
+					bHashSource |= Field.Key == TEXT("hash_source");
+					if (Field.Key == TEXT("fields") && Field.Value->GetKind() == EUeAgentValueKind::Object)
+						FieldDefinitions = &Field.Value.Get();
+				}
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+			{
+				// Matching facts keep the complete canonical codec representation;
+				// ordinary source/text shorthand is only for the editable value.
+				if (bHashSource && Field.Key == TEXT("from")) { Projected->SetField(Field.Key, Field.Value); continue; }
+				if (Field.Key.Equals(TEXT("fields"), ESearchCase::CaseSensitive)
+					&& Field.Value.IsValid() && Field.Value->Type == EJson::Object)
+				{
+					// Codec fields are a member map, not a value envelope. A native
+					// member named Value (or another wrapper name) keeps its key.
+					const auto Members = MakeShared<FJsonObject>();
+					for (const auto& Member : Field.Value->AsObject()->Values)
+					{
+						const FUeAgentCanonicalValue* MemberDefinition = nullptr;
+						if (FieldDefinitions)
+							for (const auto& Candidate : FieldDefinitions->GetObjectItems())
+								if (Candidate.Key.Equals(Member.Key, ESearchCase::CaseSensitive)) { MemberDefinition = &Candidate.Value.Get(); break; }
+						Members->SetField(Member.Key, ProjectDirectPropertyValue(Member.Value, Model, OutError, MemberDefinition, false, 0, bNativeScope));
+                        if (!OutError.IsEmpty()) return nullptr;
+					}
+					Projected->SetObjectField(Field.Key, Members);
+					continue;
+				}
+				const FUeAgentCanonicalValue* ChildDefinition = nullptr;
+				if (FieldDefinitions)
+				{
+					if (Field.Key == TEXT("fields")) ChildDefinition = ValueDefinition;
+					else for (const auto& Candidate : FieldDefinitions->GetObjectItems())
+						if (Candidate.Key.Equals(Field.Key, ESearchCase::CaseSensitive)) { ChildDefinition = &Candidate.Value.Get(); break; }
+				}
+				const FUeAgentCanonicalValue* ChildType = nullptr;
+				if (NativeKind == TEXT("map"))
+				{
+					if (Field.Key == TEXT("entries")) ChildType = ValueType;
+					else if (Field.Key == TEXT("key")) ChildType = ProjectionTypeField(ValueType, TEXT("key_type"));
+					else if (Field.Key == TEXT("value")) ChildType = ProjectionTypeField(ValueType, TEXT("mapped_type"));
+				}
+				else if (NativeKind == TEXT("optional") && Field.Key == TEXT("value"))
+					ChildType = ProjectionTypeField(ValueType, TEXT("inner_type"));
+				Projected->SetField(
+					Field.Key, ProjectDirectPropertyValue(Field.Value, Model, OutError, ChildDefinition, false, 0, bNativeScope, ChildType));
+                if (!OutError.IsEmpty()) return nullptr;
+			}
+			if (bOrderedItem && Projected->HasField(TEXT("owned_object")) && ValueDefinition && ValueDefinition->GetKind() == EUeAgentValueKind::Object)
+				for (const auto& Field : ValueDefinition->GetObjectItems())
+					if (Field.Key == TEXT("builtin") && Field.Value->GetKind() == EUeAgentValueKind::String
+						&& Field.Value->GetText() == TEXT("owned_object"))
+					{
+						FString Key, RelativePath; FWorkspaceError Error;
+						if (!TryGetOwnedItemBinding(*ValueDefinition, Key, RelativePath, Error, Occurrence)) { OutError = Error.GetDiagnostic(); return nullptr; }
+						// The captured instance binding owns the exact class. Ordinary
+						// edits do not repeat or reselect it.
+						Projected->GetObjectField(TEXT("owned_object"))->RemoveField(TEXT("class_path"));
+						Projected->GetObjectField(TEXT("owned_object"))->SetStringField(TEXT("instance"), Key);
+					}
+			return MakeShared<FJsonValueObject>(Projected);
+		}
+
+		bool ProjectElementTemplates(const TSharedPtr<FJsonValue>& PublicDefinition,
+			const FUeAgentCanonicalValue& CapturedDefinition, const FAuthoringModel& Model, UE::UAI::Contract::FDiagnostic& OutError)
+		{
+			if (!PublicDefinition) return true;
+			if (PublicDefinition->Type == EJson::Array && CapturedDefinition.GetKind() == EUeAgentValueKind::Array)
+			{
+				const auto& Items = PublicDefinition->AsArray(); const auto& Captured = CapturedDefinition.GetArrayItems();
+				for (int32 Index = 0; Index < FMath::Min(Items.Num(), Captured.Num()); ++Index)
+					if (!ProjectElementTemplates(Items[Index], Captured[Index].Get(), Model, OutError)) return false;
+				return true;
+			}
+			if (PublicDefinition->Type != EJson::Object || CapturedDefinition.GetKind() != EUeAgentValueKind::Object) return true;
+			const auto Object = PublicDefinition->AsObject();
+			const auto* Element = CapturedDefinition.GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("element_definition"); });
+			if (const auto Template = Object->TryGetField(TEXT("element_template")); Template && Element)
+			{
+				// Project defaults through the same codec-value projection as a real
+				// property, but never request an existing ordered-item identity.
+				Object->SetField(TEXT("element_template"), ProjectDirectPropertyValue(Template, Model, OutError, &Element->Value.Get()));
+                if (!OutError.IsEmpty()) return false;
+			}
+			for (const auto& Field : CapturedDefinition.GetObjectItems())
+				if (Field.Key != TEXT("element_template"))
+					if (!ProjectElementTemplates(Object->TryGetField(Field.Key), Field.Value.Get(), Model, OutError)) return false;
+		    return true;
+		}
+
+		TSharedPtr<FJsonValue> DirectPropertyValue(
+			const TSharedPtr<FJsonObject>& CompactRow,
+			const FSemanticUnit& Unit, const FAuthoringModel& Model, UE::UAI::Contract::FDiagnostic& OutError, bool bNativeScope = false)
+		{
+			const TSharedPtr<FJsonObject>* Values = nullptr;
+			if (!CompactRow.IsValid()
+				|| !CompactRow->TryGetObjectField(TEXT("values"), Values)
+				|| Values == nullptr || !Values->IsValid())
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("composition_property_values_missing"), TEXT("The property row has no values object."), TEXT("property_projection"));
+                return nullptr;
+			}
+			const FUeAgentCanonicalValue* ValueDefinition = nullptr;
+			const FUeAgentCanonicalValue* ValueType = nullptr;
+			for (const FString& Dependency : Unit.GetDependencyRefs())
+			{
+				const auto* Definition = Model.FindUnit(Dependency);
+				if (Definition && Definition->GetRole() == TEXT("property_definition"))
+				{
+					if (const auto* Type = Definition->GetValues().Find(TEXT("type"))) ValueType = &Type->Get();
+					if (const auto* Value = Definition->GetValues().Find(TEXT("value_definition")))
+						ValueDefinition = &Value->Get();
+					break;
+				}
+			}
+			// The unit's value slot is a semantic envelope. It is consumed exactly once;
+			// nested business maps named value/items/path are never inferred envelopes.
+			if ((*Values)->Values.Num() == 1 && (*Values)->HasField(TEXT("value")))
+				return ProjectDirectPropertyValue((*Values)->TryGetField(TEXT("value")), Model, OutError,
+					ValueDefinition, false, 0, bNativeScope, ValueType);
+			return ProjectDirectPropertyValue(
+				MakeShared<FJsonValueObject>((*Values).ToSharedRef()), Model, OutError, ValueDefinition, false, 0, bNativeScope, ValueType);
+		}
+
 		struct FUnitDraft
 		{
+			FString GraphOwnerRef;
 			FString UnitId;
 			ESemanticUnitKind UnitKind =
 				ESemanticUnitKind::PropertySet;
@@ -53,6 +660,7 @@ namespace UE::UAI::HjsonWorkspace
 				TEXT("edit_bundle")};
 			FString SourceProvenance;
 			FString TargetIdentityKey;
+			TArray<FString> CategoryPath;
 		};
 
 		struct FEntryRoute
@@ -63,6 +671,7 @@ namespace UE::UAI::HjsonWorkspace
 			bool bTargetValues = false;
 			bool bGraph = false;
 			bool bItem = false;
+			bool bGraphItem = false;
 			bool bProperty = false;
 			bool bRelation = false;
 			bool bDocument = false;
@@ -84,8 +693,16 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			FString SemanticId;
 			FCompositionIdentityView TargetIdentity;
+			TSharedPtr<FJsonObject> Type;
 			FUeAgentCanonicalValuePtr Value;
 			bool bAvailable = true;
+			bool bEditable = false;
+			bool bAuthoringVisible = true;
+			TMap<FString, FString> Constraints;
+			TSharedPtr<FJsonValue> CandidatesHeader;
+			TSharedPtr<FJsonValue> Candidates;
+			TSharedPtr<FJsonValue> ValueDefinition;
+			TArray<FString> CategoryPath;
 			FString Provenance;
 		};
 
@@ -98,6 +715,97 @@ namespace UE::UAI::HjsonWorkspace
 			TArray<FCompositionEntryView> Entries;
 		};
 
+		struct FDocumentAddressStep
+		{
+			FString Key;
+			int32 Index = INDEX_NONE;
+		};
+		using FDocumentAddress = TArray<FDocumentAddressStep>;
+		FString DocumentAddressPointer(const FDocumentAddress& Address)
+		{
+			FString Pointer;
+			for (const auto& Step : Address)
+				Pointer += TEXT("/") + (Step.Index != INDEX_NONE ? FString::FromInt(Step.Index)
+					: Step.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")));
+			return Pointer.IsEmpty() ? FString(TEXT("/")) : Pointer;
+		}
+		FDocumentAddress ChildAddress(FDocumentAddress Parent, const FString& Key, int32 Index = INDEX_NONE)
+		{
+			Parent.Add({Key, Index});
+			return Parent;
+		}
+		const FKeyedItemProjectionContract* FindLevelSequenceCollectionContract(
+			const FString& TargetKind, const FString& SemanticId, const FString& SurfaceId, const FString& Path)
+		{
+			if (!(TargetKind == TEXT("ue.level_sequence.asset")
+				&& SemanticId == TEXT("uai.semantic.reflection.sequence.profile_state")
+				&& SurfaceId == TEXT("timeline_collection"))) return nullptr;
+			if (Path == TEXT("bindings") || Path.EndsWith(TEXT("/bindings"))) return &GetLevelSequenceBindingProjectionContract();
+			if (Path == TEXT("folders") || Path.EndsWith(TEXT("/folders"))) return &GetLevelSequenceFolderProjectionContract();
+			if (Path == TEXT("root_tracks") || Path.EndsWith(TEXT("/root_tracks"))) return &GetLevelSequenceRootScalarTrackProjectionContract();
+			if (Path == TEXT("tracks") || Path.EndsWith(TEXT("/tracks"))) return &GetLevelSequenceBindingScalarTrackProjectionContract();
+			return nullptr;
+		}
+		struct FDocumentValueBinding
+		{
+			FString SourceKey;
+			FDocumentAddress Address;
+			bool bWholeValue = false;
+			const FKeyedItemProjectionContract* KeyedContract = nullptr;
+			FUeAgentCanonicalValuePtr RecordDefaults;
+			FUeAgentCanonicalValuePtr NestedRecordDefaults;
+			FUeAgentCanonicalValuePtr CapturedItems;
+		};
+
+		FString PointerToken(const FString& Key)
+		{
+			return Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		}
+
+		void BindKeyedDocumentSources(const FUeAgentCanonicalValue& Visible,
+			const FUeAgentCanonicalValue& Resolved, const FKeyedItemProjectionContract& Contract,
+			const FDocumentValueSourceBinding& Parent, TArray<FDocumentValueSourceBinding>& Sources)
+		{
+			// The keyed resolver emits array records in visible-key order. Keep
+			// that binding while both representations still exist, before a native
+			// owner can reorder items or replace private creation identities.
+			if (!Contract.bIdentityFromMapKey || Visible.GetKind() != EUeAgentValueKind::Object
+				|| Resolved.GetKind() != EUeAgentValueKind::Array || Contract.bEmitOperationRecords) return;
+			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
+			for (const auto& Item : Visible.GetObjectItems())
+			{
+				const auto* Operation = Item.Value->GetObjectItems().FindByPredicate([](const auto& Field) {
+					return Field.Key == TEXT("operation"); });
+				if (Operation && Operation->Value->GetKind() == EUeAgentValueKind::String
+					&& Operation->Value->GetText() == TEXT("remove")) continue;
+				Items.Add(Item);
+			}
+			Items.Sort([](const auto& A, const auto& B) { return A.Key.Compare(B.Key, ESearchCase::CaseSensitive) < 0; });
+			if (Items.Num() != Resolved.GetArrayItems().Num()) return;
+			for (int32 Index = 0; Index < Items.Num(); ++Index)
+			{
+				FDocumentValueSourceBinding Binding = Parent;
+				Binding.DocumentPointer += TEXT("/") + FString::FromInt(Index);
+				Binding.UnitValuePointer += TEXT("/") + PointerToken(Items[Index].Key);
+				Sources.Add(Binding);
+				for (const auto& Child : Contract.CollectionFieldContracts)
+				{
+					const auto* VisibleChild = Items[Index].Value->GetObjectItems().FindByPredicate([&](const auto& Field) {
+						return Field.Key == Child.Key; });
+					const auto* ResolvedChild = Resolved.GetArrayItems()[Index]->GetObjectItems().FindByPredicate([&](const auto& Field) {
+						return Field.Key == Child.Key; });
+					if (!VisibleChild || !ResolvedChild) continue;
+					FDocumentValueSourceBinding Nested = Binding;
+					Nested.DocumentPointer += TEXT("/") + PointerToken(Child.Key);
+					Nested.UnitValuePointer += TEXT("/") + PointerToken(Child.Key);
+					BindKeyedDocumentSources(*VisibleChild->Value, *ResolvedChild->Value, *Child.Value, Nested, Sources);
+				}
+			}
+		}
+		FString DocumentSourceKey(const FString& SemanticId, const FString& TargetKey)
+		{
+			return FString::FromInt(SemanticId.Len()) + TEXT(":") + SemanticId + TargetKey;
+		}
 		struct FDocumentVisit
 		{
 			FUeAgentCanonicalValuePtr Value;
@@ -106,6 +814,7 @@ namespace UE::UAI::HjsonWorkspace
 			FString OwnerId;
 			FString SurfaceId;
 			int32 SourceIndex = INDEX_NONE;
+			FDocumentAddress Address;
 		};
 
 		struct FRelationAggregate
@@ -116,6 +825,474 @@ namespace UE::UAI::HjsonWorkspace
 				FString,
 				TMap<FString, FUeAgentCanonicalValueRef>> Groups;
 		};
+
+		const FUeAgentCanonicalValueRef* FindDraftValue(
+			const FUnitDraft& Draft,
+			const TCHAR* Field)
+		{
+			return Draft.Values.Find(Field);
+		}
+
+		FString ReadDraftString(
+			const FUnitDraft& Draft,
+			const TCHAR* Field)
+		{
+			const FUeAgentCanonicalValueRef* Value = FindDraftValue(Draft, Field);
+			return Value != nullptr
+				&& (*Value)->GetKind() == EUeAgentValueKind::String
+					? (*Value)->GetText()
+					: FString();
+		}
+
+		bool IsGraphStructureDraft(const FUnitDraft& Draft)
+		{
+			return Draft.UnitKind == ESemanticUnitKind::StructureState
+				&& (Draft.SemanticTypeRef.EndsWith(TEXT(".graph"))
+					|| Draft.SemanticTypeRef.Contains(TEXT(".graph."))
+					|| (Draft.Values.Contains(TEXT("nodes"))
+						&& Draft.Values.Contains(TEXT("edges"))));
+		}
+
+		bool TryAddGraphDesiredStateProjection(
+			TArray<FUnitDraft>& Drafts,
+			FUeAgentResourceTracker& Resources,
+			FWorkspaceError& OutError)
+		{
+			FUeAgentCanonicalValuePtr UpdateValue;
+			FUeAgentStateSemanticError SemanticError;
+			if (!FUeAgentCanonicalValue::TryString(
+				TEXT("update"), Resources, UpdateValue, SemanticError))
+			{
+				OutError.SetFailure(SemanticError, FString());
+				return false;
+			}
+			TMap<FString, FUnitDraft*> LayoutByOwner;
+			TSet<FString> AmbiguousLayoutOwners;
+			TMap<FString, TMap<FString, FUeAgentCanonicalValueRef>> PropertiesByOwner;
+			for (const FUnitDraft& Draft : Drafts)
+			{
+				if (Draft.UnitKind != ESemanticUnitKind::PropertySet || Draft.FieldSetRef.IsEmpty()) continue;
+				if (const auto* Value = FindGraphNodeNativeNameProperty(Draft.FieldSetRef, Draft.Values))
+					PropertiesByOwner.FindOrAdd(Draft.OwnerRef).Add(Draft.FieldSetRef, *Value);
+			}
+			for (FUnitDraft& Draft : Drafts)
+				if (Draft.UnitKind == ESemanticUnitKind::LayoutState)
+				{
+					if (LayoutByOwner.Contains(Draft.OwnerRef))
+						AmbiguousLayoutOwners.Add(Draft.OwnerRef);
+					LayoutByOwner.Add(Draft.OwnerRef, &Draft);
+				}
+
+			FWorkspaceError ProjectionErrors;
+			for (FUnitDraft& Graph : Drafts)
+			{
+				if (!IsGraphStructureDraft(Graph))
+				{
+					continue;
+				}
+
+				TArray<const FUnitDraft*> Nodes;
+				for (const FUnitDraft& Candidate : Drafts)
+				{
+					if ((Candidate.OwnerRef == Graph.UnitId || Candidate.GraphOwnerRef == Graph.UnitId)
+						&& Candidate.UnitKind == ESemanticUnitKind::ItemState)
+					{
+						Nodes.Add(&Candidate);
+					}
+				}
+				TArray<FGraphAuthoringNodeAliasInput> AliasInputs;
+				for (const FUnitDraft* Node : Nodes)
+				{
+					const FString SemanticName = ReadGraphNodeSemanticName(
+						Node->Values, PropertiesByOwner.Find(Node->UnitId));
+					AliasInputs.Add({Node->UnitId, SemanticName,
+						ReadGraphNodeNativeIdentity(Node->Values)});
+				}
+
+				FGraphAuthoringAliasProjection Aliases;
+				if (!TryBuildGraphAuthoringAliasProjection(
+					AliasInputs, Aliases, OutError))
+				{
+					ProjectionErrors.Append(OutError);
+					ProjectionErrors.MarkUnchecked(TEXT("graph_projection"), Graph.UnitId, TEXT("alias_projection_failed"));
+					OutError.Reset();
+					continue;
+				}
+
+				TArray<TPair<FString, FUeAgentCanonicalValueRef>> NodeRows;
+				for (const FUnitDraft* Node : Nodes)
+				{
+					const auto ProjectNode = [&]() -> bool {
+					const FString Alias =
+						Aliases.AliasBySourceId.FindChecked(Node->UnitId);
+					TMap<FString, FUeAgentCanonicalValueRef> FieldMap;
+					for (const TPair<FString, FUeAgentCanonicalValueRef>& Field : Node->Values)
+					{
+						FieldMap.Add(Field.Key, Field.Value);
+					}
+					if (!Node->GraphOwnerRef.IsEmpty() && Node->OwnerRef != Graph.UnitId)
+					{
+						const FUnitDraft* const* Parent = Nodes.FindByPredicate(
+							[&](const FUnitDraft* Candidate) { return Candidate->UnitId == Node->OwnerRef; });
+						FUeAgentCanonicalValuePtr ParentId;
+						if (!Parent) { OutError.SetSourceFailure(TEXT("composition_graph_parent_invalid"),
+							FString::Printf(TEXT("Parent node for '%s' is absent from the captured graph."), *Alias), Node->UnitId, TEXT("/parent")); return false; }
+						if (!FUeAgentCanonicalValue::TryString(ReadDraftString(**Parent, TEXT("id")),
+							Resources, ParentId, SemanticError))
+						{ OutError.SetFailure(SemanticError, Node->UnitId, TEXT("/parent")); return false; }
+						FieldMap.Add(TEXT("parent"), ParentId.ToSharedRef());
+					}
+					if (!TryNormalizeGraphAuthoringNodePosition(FieldMap, Alias, Resources, OutError)) return false;
+					if (FUnitDraft* const* Layout = LayoutByOwner.Find(Node->UnitId))
+					{
+						if (AmbiguousLayoutOwners.Contains(Node->UnitId))
+						{ OutError.SetSourceFailure(TEXT("composition_graph_layout_ambiguous"), FString::Printf(TEXT("Node '%s' has more than one captured layout."), *Alias), Node->UnitId, TEXT("/pos")); return false; }
+						FUeAgentCanonicalValuePtr Position;
+						if ((*Layout)->Values.Num() == 1 && (*Layout)->Values.Contains(TEXT("value")))
+							Position = (*Layout)->Values.FindChecked(TEXT("value"));
+						else
+						{
+							TArray<TPair<FString, FUeAgentCanonicalValueRef>> Coordinates;
+							for (const auto& Field : (*Layout)->Values) Coordinates.Add(Field);
+							if (!FUeAgentCanonicalValue::TryObject(Coordinates, Resources, Position, SemanticError))
+							{ OutError.SetFailure(SemanticError, Node->UnitId); return false; }
+						}
+						TMap<FString, FUeAgentCanonicalValueRef> LayoutPosition;
+						LayoutPosition.Add(TEXT("pos"), Position.ToSharedRef());
+						if (!TryNormalizeGraphAuthoringNodePosition(LayoutPosition, Alias, Resources, OutError)) return false;
+						Position = LayoutPosition.FindChecked(TEXT("pos"));
+						(*Layout)->Values.Reset();
+						for (const auto& Coordinate : Position->GetObjectItems())
+							(*Layout)->Values.Add(Coordinate.Key, Coordinate.Value);
+						if (const auto* Inline = FieldMap.Find(TEXT("pos")))
+						{
+							FUeAgentSemanticComparison Comparison;
+							if (!TryCompareValues(*Inline, Position.ToSharedRef(), TEXT("/pos"), Resources, Comparison, SemanticError))
+							{ OutError.SetFailure(SemanticError, Node->UnitId, TEXT("/pos")); return false; }
+							if (!Comparison.IsEquivalent())
+							{ OutError.SetFailure(MakeComparisonDiagnostic(Comparison, TEXT("composition_graph_layout_conflict"),
+								FString::Printf(TEXT("Inline and layout positions disagree for node '%s'."), *Alias), TEXT("authoring_composition")), Node->UnitId, TEXT("/pos")); return false; }
+						}
+						FieldMap.Add(TEXT("pos"), Position.ToSharedRef());
+					}
+					if (!TryNormalizeGraphAuthoringNodePosition(
+							FieldMap, Alias, Resources, OutError))
+					{
+						return false;
+					}
+					FieldMap.Add(TEXT("operation"), UpdateValue.ToSharedRef());
+					TArray<FString> FieldKeys;
+					FieldMap.GetKeys(FieldKeys);
+					FieldKeys.Sort();
+					TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields;
+					for (const FString& FieldKey : FieldKeys)
+					{
+						Fields.Emplace(FieldKey, FieldMap.FindChecked(FieldKey));
+					}
+					FUeAgentCanonicalValuePtr NodeValue;
+					if (!FUeAgentCanonicalValue::TryObject(
+						Fields, Resources, NodeValue, SemanticError))
+					{
+						OutError.SetFailure(SemanticError, FString());
+						return false;
+					}
+					NodeRows.Emplace(Alias, NodeValue.ToSharedRef());
+					return true;
+					};
+					if (!ProjectNode())
+					{
+						ProjectionErrors.Append(OutError);
+						ProjectionErrors.MarkUnchecked(TEXT("node_projection"), Node->UnitId, TEXT("node_fields_invalid"));
+						OutError.Reset();
+					}
+				}
+				if (NodeRows.Num() != Nodes.Num()) continue;
+				FUeAgentCanonicalValuePtr NodeMap;
+				if (!FUeAgentCanonicalValue::TryObject(
+					NodeRows, Resources, NodeMap, SemanticError))
+				{
+					OutError.SetFailure(SemanticError, FString());
+					return false;
+				}
+
+				TArray<TPair<FString, FUeAgentCanonicalValueRef>> EdgeRows;
+				bool bHasRelationSet = false;
+				for (const FUnitDraft& RelationSet : Drafts)
+				{
+					if (RelationSet.OwnerRef != Graph.UnitId
+						|| RelationSet.UnitKind != ESemanticUnitKind::RelationSet)
+					{
+						continue;
+					}
+					bHasRelationSet = true;
+					const FUeAgentCanonicalValueRef* Relations =
+						FindDraftValue(RelationSet, TEXT("relations"));
+					if (Relations == nullptr
+						|| (*Relations)->GetKind() != EUeAgentValueKind::Object)
+					{
+						continue;
+					}
+					for (const TPair<FString, FUeAgentCanonicalValueRef>& Group
+						: (*Relations)->GetObjectItems())
+					{
+						if (Group.Value->GetKind() != EUeAgentValueKind::Object)
+						{
+							continue;
+						}
+						for (const TPair<FString, FUeAgentCanonicalValueRef>& Record
+							: Group.Value->GetObjectItems())
+						{
+							if (Record.Value->GetKind() != EUeAgentValueKind::Object)
+							{
+								continue;
+							}
+							bool bHasFrom = false;
+							bool bHasTo = false;
+							for (const TPair<FString, FUeAgentCanonicalValueRef>& Field
+								: Record.Value->GetObjectItems())
+							{
+								bHasFrom = bHasFrom || Field.Key == TEXT("from");
+								bHasTo = bHasTo || Field.Key == TEXT("to");
+							}
+							if (!bHasFrom || !bHasTo)
+							{
+								continue;
+							}
+							TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields =
+								Record.Value->GetObjectItems();
+							Fields.RemoveAll([](const auto& Field) { return Field.Key == TEXT("operation"); });
+							Fields.Emplace(TEXT("operation"), UpdateValue.ToSharedRef());
+							FUeAgentCanonicalValuePtr EdgeValue;
+							if (!FUeAgentCanonicalValue::TryObject(
+								Fields, Resources, EdgeValue, SemanticError))
+							{
+								OutError.SetFailure(SemanticError, FString());
+								return false;
+							}
+							EdgeRows.Emplace(Record.Key, EdgeValue.ToSharedRef());
+						}
+					}
+				}
+				FUeAgentCanonicalValuePtr EdgeMap;
+				if (!FUeAgentCanonicalValue::TryObject(
+					EdgeRows, Resources, EdgeMap, SemanticError))
+				{
+					OutError.SetFailure(SemanticError, FString());
+					return false;
+				}
+
+				const FUeAgentCanonicalValueRef* InlineNodes =
+					FindDraftValue(Graph, TEXT("nodes"));
+				if (!Nodes.IsEmpty() || InlineNodes == nullptr
+					|| (*InlineNodes)->GetKind() != EUeAgentValueKind::Object)
+				{
+					Graph.Values.Add(TEXT("nodes"), NodeMap.ToSharedRef());
+				}
+				const FUeAgentCanonicalValueRef* InlineEdges =
+					FindDraftValue(Graph, TEXT("edges"));
+				if (bHasRelationSet || InlineEdges == nullptr
+					|| (*InlineEdges)->GetKind() != EUeAgentValueKind::Object)
+				{
+					Graph.Values.Add(TEXT("edges"), EdgeMap.ToSharedRef());
+				}
+			}
+			if (ProjectionErrors.HasErrors())
+			{
+				OutError = MoveTemp(ProjectionErrors);
+				return false;
+			}
+			return true;
+		}
+
+		bool TryAddKeyedItemDesiredStateProjection(
+			TArray<FUnitDraft>& Drafts,
+			const FString& SurfaceRole,
+			const FString& ItemSemanticSuffix,
+			const FString& RootField,
+			const FKeyedItemNamingPolicy& NamingPolicy,
+			FUeAgentResourceTracker& Resources,
+			FWorkspaceError& OutError)
+		{
+			FKeyedItemProjectionContract Contract;
+			TryGetKeyedItemProjectionContract(RootField, Contract);
+			for (FUnitDraft& RootDraft : Drafts)
+			{
+				FUnitDraft* Root = &RootDraft;
+				if (Root->UnitKind != ESemanticUnitKind::StructureState || Root->Role != SurfaceRole)
+					continue;
+				if (!Contract.AggregatedParentSemanticSuffix.IsEmpty()
+					&& !Root->SemanticTypeRef.EndsWith(Contract.AggregatedParentSemanticSuffix))
+					continue;
+				TArray<const FUnitDraft*> Items;
+				for (const FUnitDraft& Draft : Drafts)
+				{
+					if (Draft.OwnerRef == Root->UnitId
+						&& Draft.UnitKind == ESemanticUnitKind::ItemState
+						&& (Draft.SemanticTypeRef.EndsWith(ItemSemanticSuffix)
+							|| Draft.SemanticTypeRef.Contains(ItemSemanticSuffix + TEXT("#"))))
+					{
+						Items.Add(&Draft);
+					}
+				}
+				Items.Sort([](const FUnitDraft& Left, const FUnitDraft& Right)
+				{
+					return Left.UnitId < Right.UnitId;
+				});
+				TArray<TPair<FString, FUeAgentCanonicalValueRef>> Rows;
+				TMap<FString, int32> Occurrences;
+				TSet<FString> UsedAliases;
+				TSet<FString> ReservedAliases;
+				TMap<FString, FString> NamesByItem;
+				for (const FUnitDraft* Item : Items)
+				{
+					auto ReadItemOrChildString = [&Drafts, &Contract, Item](const TCHAR* Field)
+					{
+						FString Value = ReadDraftString(*Item, Field);
+						if (!Value.IsEmpty())
+						{
+							return Value;
+						}
+						for (const FUnitDraft& Child : Drafts)
+						{
+							if (Contract.bMergeChildPropertyValues && Child.OwnerRef == Item->UnitId
+								&& Child.UnitKind == ESemanticUnitKind::PropertySet
+								&& !Child.SemanticTypeRef.EndsWith(TEXT(".property")))
+							{
+								Value = ReadDraftString(Child, Field);
+								if (!Value.IsEmpty())
+								{
+									return Value;
+								}
+							}
+						}
+						return FString();
+					};
+					FString SemanticName;
+					for (const FString& Field : NamingPolicy.Fields)
+					{
+						SemanticName = ReadItemOrChildString(*Field);
+						if (!SemanticName.IsEmpty()) break;
+					}
+					if (SemanticName.IsEmpty())
+					{
+						SemanticName = NamingPolicy.FallbackName;
+					}
+					NamesByItem.Add(Item->UnitId, SemanticName);
+					ReservedAliases.Add(SemanticName.TrimStartAndEnd().ToLower());
+				}
+				for (const FUnitDraft* Item : Items)
+				{
+					const FString& SemanticName = NamesByItem.FindChecked(Item->UnitId);
+					FString Alias;
+					if (!TryAllocateReadableKeyedItemAlias(
+							SemanticName, Occurrences, UsedAliases, Alias, OutError, &ReservedAliases))
+					{
+						return false;
+					}
+					TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields;
+					for (const auto& Field : Item->Values)
+					{
+						if ((Field.Key == TEXT("name") || Field.Key == TEXT("label"))
+							&& !Contract.ImplicitCapturedFields.Contains(Field.Key)
+							&& Field.Value->GetKind() == EUeAgentValueKind::String
+							&& Field.Value->GetText() == Alias)
+						{
+							continue;
+						}
+						Fields.Emplace(Field.Key, Field.Value);
+					}
+					for (const FUnitDraft& Child : Drafts)
+					{
+						if (Contract.bMergeChildPropertyValues && Child.OwnerRef == Item->UnitId
+							&& Child.UnitKind == ESemanticUnitKind::PropertySet
+							&& !Child.SemanticTypeRef.EndsWith(TEXT(".property")))
+						{
+							for (const auto& Field : Child.Values)
+							{
+								Fields.Emplace(Field.Key, Field.Value);
+							}
+						}
+					}
+					FUeAgentCanonicalValuePtr Operation;
+					FUeAgentCanonicalValuePtr Row;
+					FUeAgentStateSemanticError Error;
+					if (!FUeAgentCanonicalValue::TryString(
+							TEXT("update"), Resources, Operation, Error))
+					{
+						OutError.SetFailure(Error, FString());
+						return false;
+					}
+					Fields.RemoveAll([](const auto& Field) { return Field.Key == TEXT("operation"); });
+					Fields.Emplace(TEXT("operation"), Operation.ToSharedRef());
+					if (!Contract.AggregatedItemSemanticSuffix.IsEmpty())
+					{
+						FUeAgentCanonicalValuePtr Binding;
+						if (!FUeAgentCanonicalValue::TryString(Item->UnitId, Resources, Binding, Error))
+						{
+							OutError.SetFailure(Error, FString());
+							return false;
+						}
+						Fields.Emplace(TEXT("unit_id"), Binding.ToSharedRef());
+					}
+					if (!FUeAgentCanonicalValue::TryObject(Fields, Resources, Row, Error))
+					{
+						OutError.SetFailure(Error, FString());
+						return false;
+					}
+					Rows.Emplace(Alias, Row.ToSharedRef());
+				}
+				FUeAgentCanonicalValuePtr ItemMap;
+				FUeAgentStateSemanticError Error;
+				if (!FUeAgentCanonicalValue::TryObject(Rows, Resources, ItemMap, Error))
+				{
+					OutError.SetFailure(Error, FString());
+					return false;
+				}
+				Root->Values.Add(RootField, ItemMap.ToSharedRef());
+			}
+			return true;
+		}
+
+		bool TryAddBlueprintGraphDeclarations(TArray<FUnitDraft>& Drafts,
+			FUeAgentResourceTracker& Resources, FWorkspaceError& OutError)
+		{
+			FUnitDraft* Root = Drafts.FindByPredicate([](const FUnitDraft& Draft) {
+				return Draft.SemanticTypeRef == TEXT("uai.authoring.surface.graph_collection"); });
+			if (!Root) { OutError.SetSourceFailure(TEXT("composition_graph_collection_missing"), TEXT("The captured Blueprint has no graph-collection surface for graph declarations.")); return false; }
+			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Rows;
+			TSet<FString> Names;
+			for (const FUnitDraft& Draft : Drafts)
+			{
+				if (Draft.SemanticTypeRef != TEXT("uai.semantic.blueprint.graph")) continue;
+				const auto* Header = Draft.Values.Find(TEXT("graph"));
+				if (!Header || (*Header)->GetKind() != EUeAgentValueKind::Object) continue;
+				const auto& Fields = (*Header)->GetObjectItems();
+				const auto* Owned = Fields.FindByPredicate([](const auto& F) { return F.Key == TEXT("graph_declaration_owned"); });
+				if (!Owned || Owned->Value->GetKind() != EUeAgentValueKind::Boolean || !Owned->Value->GetBoolean()) continue;
+				const auto* Name = Fields.FindByPredicate([](const auto& F) { return F.Key == TEXT("name"); });
+				const auto* Kind = Fields.FindByPredicate([](const auto& F) { return F.Key == TEXT("graph_kind"); });
+				const auto* Id = Fields.FindByPredicate([](const auto& F) { return F.Key == TEXT("graph_guid"); });
+				if (!Name || !Kind || !Id || Name->Value->GetKind() != EUeAgentValueKind::String
+					|| Names.Contains(Name->Value->GetText().ToLower()))
+				{ OutError.SetSourceFailure(TEXT("composition_graph_declaration_identity_invalid"),
+					!Name ? TEXT("Graph declaration is missing name.") : !Kind ? TEXT("Graph declaration is missing graph_kind.")
+					: !Id ? TEXT("Graph declaration has no captured graph identity.") : Name->Value->GetKind() != EUeAgentValueKind::String
+					? TEXT("Graph declaration name must be a string.") : FString::Printf(TEXT("Graph declaration name '%s' is duplicated."), *Name->Value->GetText()), Draft.UnitId, TEXT("/graph")); return false; }
+				Names.Add(Name->Value->GetText().ToLower());
+				FUeAgentCanonicalValuePtr Row;
+				FUeAgentStateSemanticError Error;
+				if (!FUeAgentCanonicalValue::TryObject({{TEXT("name"), Name->Value}, {TEXT("graph_kind"), Kind->Value},
+					{TEXT("graph_guid"), Id->Value}}, Resources, Row, Error))
+				{ OutError.SetFailure(Error, FString()); return false; }
+				Rows.Emplace(Name->Value->GetText(), Row.ToSharedRef());
+			}
+			FUeAgentCanonicalValuePtr Collection;
+			FUeAgentStateSemanticError Error;
+			if (!FUeAgentCanonicalValue::TryObject(Rows, Resources, Collection, Error))
+			{ OutError.SetFailure(Error, FString()); return false; }
+			Root->Values.Add(TEXT("graph_declarations"), Collection.ToSharedRef());
+			return true;
+		}
 
 		FString Normalize(FString Value)
 		{
@@ -157,34 +1334,81 @@ namespace UE::UAI::HjsonWorkspace
 			return Prefix + TEXT(":") + Sha256Text(Identity).Right(24);
 		}
 
-		bool SurfaceEquals(
-			const FCompositionSurfaceContract& Left,
-			const FCompositionSurfaceContract& Right)
+		FString CanonicalValueKindName(const EUeAgentValueKind Kind)
 		{
-			return Left.SurfaceId == Right.SurfaceId
-				&& Left.SurfaceKind == Right.SurfaceKind
-				&& Left.UnitKind == Right.UnitKind;
+			switch (Kind)
+			{
+			case EUeAgentValueKind::Null: return TEXT("null");
+			case EUeAgentValueKind::Boolean: return TEXT("boolean");
+			case EUeAgentValueKind::String: return TEXT("string");
+			case EUeAgentValueKind::Integer: return TEXT("integer");
+			case EUeAgentValueKind::Decimal: return TEXT("decimal");
+			case EUeAgentValueKind::Array: return TEXT("array");
+			case EUeAgentValueKind::Object: return TEXT("object");
+			case EUeAgentValueKind::Temporal: return TEXT("temporal");
+			case EUeAgentValueKind::Spatial: return TEXT("spatial");
+			default: return TEXT("unknown");
+			}
+		}
+
+		FString CanonicalAuthoringTargetKey(const FUeAgentStateEntry& Entry)
+		{
+			const FString NativeKey = Entry.GetIdentity().GetSelector(CanonicalAuthoringTargetIdentitySelector);
+			return NativeKey.IsEmpty() ? Entry.GetIdentity().GetCanonicalKey() : NativeKey;
+		}
+
+		TSharedPtr<FJsonObject> CanonicalTypeJson(
+			const FUeAgentCanonicalType& Type)
+		{
+			TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("kind"), CanonicalValueKindName(Type.GetValueKind()));
+			Result->SetStringField(TEXT("type_id"), Type.GetTypeId());
+			if (Type.IsNullable()) Result->SetBoolField(TEXT("nullable"), true);
+			if (!Type.GetContainerKind().IsEmpty())
+			{
+				Result->SetStringField(TEXT("container_kind"), Type.GetContainerKind());
+			}
+			return Result;
 		}
 
 		bool ContractEquals(
 			const FTargetCompositionContract& Left,
-			const FTargetCompositionContract& Right)
+			const FTargetCompositionContract& Right, UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			if (Left.SchemaId != Right.SchemaId
-				|| Left.TargetKind != Right.TargetKind
-				|| Left.Surfaces.Num() != Right.Surfaces.Num()
-				|| Left.SemanticRoutes.Num() != Right.SemanticRoutes.Num())
-			{
+			auto Mismatch = [&](const FString& Path, TSharedPtr<FJsonValue> Expected, TSharedPtr<FJsonValue> Actual) {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("target_composition_contract_conflict"),
+					FString::Printf(TEXT("Registered and proposed composition contracts disagree at '%s'."), *Path), TEXT("composition_contract"));
+				OutError.CandidateName = Right.TargetKind;
+				OutError.PropertyPath = Path;
+				OutError.ExpectedValue = MoveTemp(Expected);
+				OutError.ActualValue = MoveTemp(Actual);
 				return false;
+			};
+			auto String = [](const FString& Value) -> TSharedPtr<FJsonValue> { return MakeShared<FJsonValueString>(Value); };
+			auto Number = [](int32 Value) -> TSharedPtr<FJsonValue> { return MakeShared<FJsonValueNumber>(Value); };
+			auto Strings = [](const auto& Values) -> TSharedPtr<FJsonValue> {
+				TArray<TSharedPtr<FJsonValue>> Items;
+				for (const auto& Value : Values) Items.Add(MakeShared<FJsonValueString>(Value));
+				return MakeShared<FJsonValueArray>(MoveTemp(Items));
+			};
+			if (Left.SchemaId != Right.SchemaId) return Mismatch(TEXT("/schema"), String(Left.SchemaId), String(Right.SchemaId));
+			if (Left.TargetKind != Right.TargetKind) return Mismatch(TEXT("/target_kind"), String(Left.TargetKind), String(Right.TargetKind));
+			if (Left.Surfaces.Num() != Right.Surfaces.Num()) return Mismatch(TEXT("/surfaces/count"), Number(Left.Surfaces.Num()), Number(Right.Surfaces.Num()));
+			if (Left.SemanticRoutes.Num() != Right.SemanticRoutes.Num()) return Mismatch(TEXT("/semantic_routes/count"), Number(Left.SemanticRoutes.Num()), Number(Right.SemanticRoutes.Num()));
+			if (Left.DocumentValueFields.Num() != Right.DocumentValueFields.Num()) return Mismatch(TEXT("/document_value_fields/count"), Number(Left.DocumentValueFields.Num()), Number(Right.DocumentValueFields.Num()));
+			for (const auto& Fields : Left.DocumentValueFields)
+			{
+				const auto* Other = Right.DocumentValueFields.Find(Fields.Key);
+				if (!Other || *Other != Fields.Value)
+					return Mismatch(TEXT("/document_value_fields/") + EscapeJsonPointerSegment(Fields.Key), Strings(Fields.Value), Other ? Strings(*Other) : nullptr);
 			}
 			for (int32 Index = 0; Index < Left.Surfaces.Num(); ++Index)
 			{
-				if (!SurfaceEquals(
-					Left.Surfaces[Index],
-					Right.Surfaces[Index]))
-				{
-					return false;
-				}
+				const auto& L = Left.Surfaces[Index]; const auto& R = Right.Surfaces[Index];
+				const FString Path = FString::Printf(TEXT("/surfaces/%d"), Index);
+				if (L.SurfaceId != R.SurfaceId) return Mismatch(Path + TEXT("/surface_id"), String(L.SurfaceId), String(R.SurfaceId));
+				if (L.SurfaceKind != R.SurfaceKind) return Mismatch(Path + TEXT("/surface_kind"), Number(static_cast<int32>(L.SurfaceKind)), Number(static_cast<int32>(R.SurfaceKind)));
+				if (L.UnitKind != R.UnitKind) return Mismatch(Path + TEXT("/unit_kind"), String(LexToString(L.UnitKind)), String(LexToString(R.UnitKind)));
 			}
 			for (int32 Index = 0; Index < Left.SemanticRoutes.Num(); ++Index)
 			{
@@ -192,15 +1416,13 @@ namespace UE::UAI::HjsonWorkspace
 					Left.SemanticRoutes[Index];
 				const FCompositionSemanticRouteContract& RightRoute =
 					Right.SemanticRoutes[Index];
-				if (LeftRoute.Match != RightRoute.Match
-					|| LeftRoute.Pattern != RightRoute.Pattern
-					|| LeftRoute.SurfaceId != RightRoute.SurfaceId
-					|| LeftRoute.UnitKind != RightRoute.UnitKind
-					|| LeftRoute.Role != RightRoute.Role
-					|| LeftRoute.Priority != RightRoute.Priority)
-				{
-					return false;
-				}
+				const FString Path = FString::Printf(TEXT("/semantic_routes/%d"), Index);
+				if (LeftRoute.Match != RightRoute.Match) return Mismatch(Path + TEXT("/match"), Number(static_cast<int32>(LeftRoute.Match)), Number(static_cast<int32>(RightRoute.Match)));
+				if (LeftRoute.Pattern != RightRoute.Pattern) return Mismatch(Path + TEXT("/pattern"), String(LeftRoute.Pattern), String(RightRoute.Pattern));
+				if (LeftRoute.SurfaceId != RightRoute.SurfaceId) return Mismatch(Path + TEXT("/surface_id"), String(LeftRoute.SurfaceId), String(RightRoute.SurfaceId));
+				if (LeftRoute.UnitKind != RightRoute.UnitKind) return Mismatch(Path + TEXT("/unit_kind"), String(LexToString(LeftRoute.UnitKind)), String(LexToString(RightRoute.UnitKind)));
+				if (LeftRoute.Role != RightRoute.Role) return Mismatch(Path + TEXT("/role"), Number(static_cast<int32>(LeftRoute.Role)), Number(static_cast<int32>(RightRoute.Role)));
+				if (LeftRoute.Priority != RightRoute.Priority) return Mismatch(Path + TEXT("/priority"), Number(LeftRoute.Priority), Number(RightRoute.Priority));
 			}
 			return true;
 		}
@@ -219,12 +1441,14 @@ namespace UE::UAI::HjsonWorkspace
 
 		FTargetCompositionContract Contract(
 			const TCHAR* TargetKind,
-			TArray<FCompositionSurfaceContract> Surfaces)
+			TArray<FCompositionSurfaceContract> Surfaces,
+			TArray<FCompositionSemanticRouteContract> SemanticRoutes = {})
 		{
 			FTargetCompositionContract Result;
 			Result.SchemaId = CompositionSchema;
 			Result.TargetKind = TargetKind;
 			Result.Surfaces = MoveTemp(Surfaces);
+			Result.SemanticRoutes = MoveTemp(SemanticRoutes);
 			return Result;
 		}
 
@@ -237,24 +1461,26 @@ namespace UE::UAI::HjsonWorkspace
 			OutValue.Reset();
 			if (!Root.IsValid())
 			{
-				OutError.Set(TEXT("composition_json_value_invalid"));
+				OutError.SetSourceFailure(TEXT("composition_json_value_invalid"), TEXT("The composition value is missing and cannot be converted to canonical form."));
 				return false;
 			}
 			struct FVisit
 			{
 				TSharedPtr<FJsonValue> Value;
 				bool bExpanded = false;
+				FString Path;
 			};
 			TArray<FVisit> Stack;
 			TArray<TSharedPtr<FJsonValue>> Order;
 			TSet<const FJsonValue*> Expanded;
-			Stack.Add({Root, false});
+			TMap<const FJsonValue*, FString> Paths;
+			Stack.Add({Root, false, TEXT("")});
 			while (!Stack.IsEmpty())
 			{
 				FVisit Visit = Stack.Pop(EAllowShrinking::No);
 				if (!Visit.Value.IsValid())
 				{
-					OutError.Set(TEXT("composition_json_value_invalid"));
+					OutError.SetSourceFailure(TEXT("composition_json_value_invalid"), TEXT("The composition contains a missing child value."), FString(), Visit.Path);
 					return false;
 				}
 				const FJsonValue* Key = Visit.Value.Get();
@@ -268,7 +1494,8 @@ namespace UE::UAI::HjsonWorkspace
 					continue;
 				}
 				Expanded.Add(Key);
-				Stack.Add({Visit.Value, true});
+				Paths.Add(Key, Visit.Path);
+				Stack.Add({Visit.Value, true, Visit.Path});
 				if (Visit.Value->Type == EJson::Array)
 				{
 					const TArray<TSharedPtr<FJsonValue>>& Items =
@@ -277,7 +1504,7 @@ namespace UE::UAI::HjsonWorkspace
 						Index >= 0;
 						--Index)
 					{
-						Stack.Add({Items[Index], false});
+						Stack.Add({Items[Index], false, Visit.Path + TEXT("/") + FString::FromInt(Index)});
 					}
 				}
 				else if (Visit.Value->Type == EJson::Object)
@@ -286,8 +1513,7 @@ namespace UE::UAI::HjsonWorkspace
 						Visit.Value->AsObject();
 					if (!Object.IsValid())
 					{
-						OutError.Set(
-							TEXT("composition_json_object_invalid"));
+						OutError.SetSourceFailure(TEXT("composition_json_object_invalid"), TEXT("A composition value declares object type but has no object storage."), FString(), Visit.Path);
 						return false;
 					}
 					TArray<FString> Keys;
@@ -299,7 +1525,7 @@ namespace UE::UAI::HjsonWorkspace
 					{
 						Stack.Add({
 							Object->Values.FindChecked(Keys[Index]),
-							false});
+							false, Visit.Path + TEXT("/") + EscapeJsonPointerSegment(Keys[Index])});
 					}
 				}
 			}
@@ -334,12 +1560,16 @@ namespace UE::UAI::HjsonWorkspace
 						SemanticError);
 					break;
 				case EJson::Number:
-					bBuilt = FUeAgentCanonicalValue::TryDecimal(
-						FString::SanitizeFloat(Value->AsNumber()),
-						Resources,
-						Canonical,
-						SemanticError);
+				{
+					UE::UAI::Contract::FDiagnostic NumericError;
+					if (!CanonicalJson::TryFromJsonValue(Value, Resources, Canonical, NumericError))
+					{
+						OutError.SetFailure(NumericError, FString(), Paths.FindChecked(Value.Get()));
+						return false;
+					}
+					bBuilt = true;
 					break;
+				}
 				case EJson::Array:
 				{
 					TArray<FUeAgentCanonicalValueRef> Items;
@@ -350,9 +1580,8 @@ namespace UE::UAI::HjsonWorkspace
 							Built.Find(Item.Get());
 						if (!Found || !Found->IsValid())
 						{
-							OutError.Set(
-								TEXT(
-									"composition_json_child_missing"));
+							OutError.SetSourceFailure(TEXT("composition_json_child_missing"), TEXT("Array child was not converted before its parent; the input may contain a cyclic reference."),
+								FString(), Paths.FindChecked(Value.Get()) + TEXT("/") + FString::FromInt(Items.Num()));
 							return false;
 						}
 						Items.Add(Found->ToSharedRef());
@@ -382,9 +1611,8 @@ namespace UE::UAI::HjsonWorkspace
 							Built.Find(Child.Get());
 						if (!Found || !Found->IsValid())
 						{
-							OutError.Set(
-								TEXT(
-									"composition_json_child_missing"));
+							OutError.SetSourceFailure(TEXT("composition_json_child_missing"), TEXT("Object child was not converted before its parent; the input may contain a cyclic reference."),
+								FString(), Paths.FindChecked(Value.Get()) + TEXT("/") + EscapeJsonPointerSegment(ChildKey));
 							return false;
 						}
 						Items.Emplace(
@@ -403,11 +1631,9 @@ namespace UE::UAI::HjsonWorkspace
 				}
 				if (!bBuilt || !Canonical.IsValid())
 				{
-					OutError.Set(
-						SemanticError.Code.IsEmpty()
-							? TEXT("composition_canonical_value_failed")
-							: SemanticError.Code,
-						SemanticError.Path);
+					OutError.SetFailure(SemanticError.Code.IsEmpty()
+							? UE::UAI::Contract::FDiagnostic::Failure(TEXT("composition_canonical_value_failed"), TEXT("The composition value could not be represented as a canonical value."), TEXT("authoring_composition"))
+							: SemanticError, FString(), Paths.FindChecked(Value.Get()));
 					return false;
 				}
 				Built.Add(Value.Get(), Canonical);
@@ -416,12 +1642,35 @@ namespace UE::UAI::HjsonWorkspace
 				Built.Find(Root.Get());
 			if (!Result || !Result->IsValid())
 			{
-				OutError.Set(TEXT("composition_canonical_root_missing"));
+				OutError.SetSourceFailure(TEXT("composition_canonical_root_missing"), TEXT("Canonical conversion completed without producing its root value."));
 				return false;
 			}
 			OutValue = *Result;
 			return true;
 		}
+		bool TryProjectCanonicalAuthoringDescriptor(const FUeAgentStateEntry& Entry,
+			FCompositionEntryView& View, FUeAgentResourceTracker& Resources, FWorkspaceError& OutError)
+		{
+			if (!Entry.GetAuthoringDescriptor().IsValid()) return true;
+			TSharedPtr<FJsonValue> Json, NativeValue; UE::UAI::Contract::FDiagnostic Error;
+			if (!CanonicalJson::TryToJsonValue(*Entry.GetAuthoringDescriptor(), Json, Error)
+				|| !Json.IsValid() || Json->Type != EJson::Object)
+			{ OutError.SetFailure(Error.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("authoring_descriptor_invalid"), TEXT("The authoring descriptor must convert to a JSON object."), TEXT("authoring_composition")) : Error, Entry.GetIdentity().GetCanonicalKey()); return false; }
+			const auto Descriptor = Json->AsObject(); const TSharedPtr<FJsonObject>* Type = nullptr;
+			if (!Descriptor->TryGetObjectField(TEXT("type"), Type) || !Type || !Type->IsValid())
+			{ OutError.SetSourceFailure(TEXT("authoring_descriptor_type_missing"), TEXT("The authoring descriptor requires an object type definition."), Entry.GetIdentity().GetCanonicalKey(), TEXT("/type")); return false; }
+			View.Type = *Type;
+			View.CandidatesHeader = Descriptor->TryGetField(TEXT("candidates_header"));
+			View.Candidates = Descriptor->TryGetField(TEXT("candidates"));
+			View.ValueDefinition = Descriptor->TryGetField(TEXT("value_definition"));
+			if (!CanonicalJson::TryToJsonValue(Entry.GetValue().Get(), NativeValue, Error))
+			{ OutError.SetFailure(Error.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("authoring_descriptor_value_invalid"), TEXT("The captured property value could not be represented as JSON."), TEXT("authoring_composition")) : Error, Entry.GetIdentity().GetCanonicalKey()); return false; }
+			TSharedPtr<FJsonValue> Projected;
+			View.bAuthoringVisible &= UeAgentPropertyValueCodec::ProjectAuthoringValue(
+				View.Type, NativeValue, View.ValueDefinition, Projected, View.ValueDefinition);
+			return !Projected.IsValid() || TryCanonicalizeJson(Projected, Resources, View.Value, OutError);
+		}
+
 
 		bool TryBuildValues(
 			const TSharedPtr<FJsonValue>& Value,
@@ -440,7 +1689,7 @@ namespace UE::UAI::HjsonWorkspace
 				const TSharedPtr<FJsonObject> Object = Value->AsObject();
 				if (!Object.IsValid())
 				{
-					OutError.Set(TEXT("composition_json_object_invalid"));
+					OutError.SetSourceFailure(TEXT("composition_json_object_invalid"), TEXT("A composition value declares object type but has no object storage."));
 					return false;
 				}
 				TArray<FString> Keys;
@@ -510,7 +1759,7 @@ namespace UE::UAI::HjsonWorkspace
 			const TArray<FString>& Values,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FWorkspaceError& OutError)
+			FWorkspaceError& OutError, const FString& SourceUnit, const FString& Field)
 		{
 			TArray<FUeAgentCanonicalValueRef> Items;
 			for (const FString& Value : Values)
@@ -523,7 +1772,8 @@ namespace UE::UAI::HjsonWorkspace
 					Item,
 					SemanticError))
 				{
-					OutError.Set(SemanticError.Code, SemanticError.Path);
+					if (SemanticError.PropertyPath.IsEmpty()) SemanticError.PropertyPath = Field + TEXT("/") + FString::FromInt(Items.Num());
+					OutError.SetFailure(SemanticError, SourceUnit);
 					return false;
 				}
 				Items.Add(Item.ToSharedRef());
@@ -535,7 +1785,8 @@ namespace UE::UAI::HjsonWorkspace
 				OutValue,
 				SemanticError))
 			{
-				OutError.Set(SemanticError.Code, SemanticError.Path);
+				if (SemanticError.PropertyPath.IsEmpty()) SemanticError.PropertyPath = Field;
+				OutError.SetFailure(SemanticError, SourceUnit);
 				return false;
 			}
 			return true;
@@ -565,7 +1816,8 @@ namespace UE::UAI::HjsonWorkspace
 					Selector(Entry, TEXT("usage_id"));
 				if (!Usage.IsEmpty() || !UsageId.IsEmpty())
 				{
-					Graph = TEXT("stage=") + Usage
+					Graph = TEXT("stage=") + Selector(Entry, TEXT("stage_owner_id"))
+						+ TEXT("|") + Usage
 						+ TEXT("@") + UsageId;
 				}
 			}
@@ -606,6 +1858,7 @@ namespace UE::UAI::HjsonWorkspace
 				TEXT("widget_name"),
 				TEXT("member_guid"),
 				TEXT("member_name"),
+				TEXT("key_name"),
 				TEXT("renderer_name"),
 				TEXT("script_usage_id"),
 				TEXT("module_guid"),
@@ -659,6 +1912,10 @@ namespace UE::UAI::HjsonWorkspace
 			case ECompositionSemanticRouteRole::Item:
 				OutRoute.bItem = true;
 				break;
+			case ECompositionSemanticRouteRole::GraphItem:
+				OutRoute.bItem = true;
+				OutRoute.bGraphItem = true;
+				break;
 			case ECompositionSemanticRouteRole::Property:
 				OutRoute.bProperty = true;
 				break;
@@ -676,10 +1933,23 @@ namespace UE::UAI::HjsonWorkspace
 
 		FEntryRoute RouteEntry(
 			const FString& TargetKind,
-			const FString& SemanticId)
+			const FString& SemanticId,
+			const FString& PreviewTarget = FString())
 		{
 			FEntryRoute Route;
-			if (SemanticId.StartsWith(TEXT("content_graph.summary:")))
+			if (AssetPreview::IsPreviewSemantic(SemanticId))
+			{
+				Route.SurfaceId = TEXT("preview/") + (PreviewTarget.IsEmpty() ? FString(TEXT("main")) : PreviewTarget)
+					+ TEXT("/") + AssetPreview::GroupFromSemantic(SemanticId);
+				Route.UnitKind = ESemanticUnitKind::PropertySet;
+				Route.bProperty = true;
+				return Route;
+			}
+			if (SemanticId.StartsWith(TEXT("content_graph.summary:"))
+				|| SemanticId.StartsWith(TEXT("content_graph.container:"))
+				|| SemanticId.StartsWith(TEXT("content_graph.item:"))
+				|| SemanticId.StartsWith(TEXT("content_graph.relation:"))
+				|| SemanticId.StartsWith(TEXT("content_graph.diagnostic:")))
 			{
 				return Route;
 			}
@@ -690,20 +1960,19 @@ namespace UE::UAI::HjsonWorkspace
 				Route.bTargetValues = true;
 				return Route;
 			}
+			if (TryResolveDeclaredSemanticRoute(
+					TargetKind,
+					SemanticId,
+					Route))
+			{
+				return Route;
+			}
 
 			if (SemanticId.EndsWith(TEXT(".document"))
 				|| SemanticId.EndsWith(TEXT(".profile_state"))
 				|| SemanticId.EndsWith(TEXT(".seed")))
 			{
 				Route.bDocument = true;
-				return Route;
-			}
-
-			if (TryResolveDeclaredSemanticRoute(
-				TargetKind,
-				SemanticId,
-				Route))
-			{
 				return Route;
 			}
 
@@ -735,6 +2004,12 @@ namespace UE::UAI::HjsonWorkspace
 					Route.SurfaceId = TEXT("stack_collection");
 					Route.UnitKind = ESemanticUnitKind::RelationSet;
 					Route.bRelation = true;
+				}
+				else if (SemanticId.EndsWith(TEXT(".user_parameter")))
+				{
+					Route.SurfaceId = TEXT("user_parameters");
+					Route.UnitKind = ESemanticUnitKind::ItemState;
+					Route.bItem = true;
 				}
 				else if (SemanticId.EndsWith(TEXT(".dynamic_input")))
 				{
@@ -773,6 +2048,12 @@ namespace UE::UAI::HjsonWorkspace
 					Route.SurfaceId = TEXT("target_settings");
 					Route.UnitKind = ESemanticUnitKind::TargetState;
 					Route.bTargetValues = true;
+				}
+				else if (SemanticId.EndsWith(TEXT(".world.property")))
+				{
+					Route.SurfaceId = TEXT("target_settings");
+					Route.UnitKind = ESemanticUnitKind::PropertySet;
+					Route.bProperty = true;
 				}
 				else if (SemanticId.EndsWith(TEXT(".actor.target"))
 					|| SemanticId.EndsWith(TEXT(".component.target")))
@@ -897,8 +2178,13 @@ namespace UE::UAI::HjsonWorkspace
 					Route.UnitKind = ESemanticUnitKind::PropertySet;
 					Route.bProperty = true;
 				}
-				else if (SemanticId.EndsWith(TEXT(".slot"))
-					|| SemanticId.EndsWith(TEXT(".binding")))
+				else if (SemanticId.EndsWith(TEXT(".binding")))
+				{
+					Route.SurfaceId = TEXT("binding_collection");
+					Route.UnitKind = ESemanticUnitKind::ItemState;
+					Route.bItem = true;
+				}
+				else if (SemanticId.EndsWith(TEXT(".slot")))
 				{
 					Route.SurfaceId = TEXT("widget_tree");
 					Route.UnitKind = ESemanticUnitKind::RelationSet;
@@ -919,45 +2205,15 @@ namespace UE::UAI::HjsonWorkspace
 				return Route;
 			}
 
-			if (TargetKind.StartsWith(TEXT("ue.material")))
-			{
-				if (SemanticId.Contains(TEXT("expression_property")))
-				{
-					Route.SurfaceId = TEXT("expression_properties");
-					Route.UnitKind = ESemanticUnitKind::PropertySet;
-					Route.bProperty = true;
-				}
-				else if (SemanticId.EndsWith(TEXT(".expression")))
-				{
-					Route.SurfaceId = TEXT("graph_collection");
-					Route.UnitKind = ESemanticUnitKind::ItemState;
-					Route.bItem = true;
-				}
-				else if (SemanticId.EndsWith(TEXT(".edge"))
-					|| SemanticId.EndsWith(TEXT(".root_input")))
-				{
-					Route.SurfaceId = TEXT("graph_collection");
-					Route.UnitKind = ESemanticUnitKind::RelationSet;
-					Route.bRelation = true;
-				}
-				else if (SemanticId.Contains(TEXT("parameter")))
-				{
-					Route.SurfaceId = TEXT("parameter_collection");
-					Route.UnitKind = ESemanticUnitKind::ItemState;
-					Route.bItem = true;
-				}
-				else
-				{
-					Route.SurfaceId = TEXT("target_settings");
-					Route.UnitKind = ESemanticUnitKind::PropertySet;
-					Route.bProperty = true;
-				}
-				return Route;
-			}
-
 			if (TargetKind == TEXT("ue.pcg_graph.asset"))
 			{
-				if (SemanticId.Contains(TEXT("node_property")))
+				if (SemanticId.EndsWith(TEXT(".graph")))
+				{
+					Route.SurfaceId = TEXT("graph_collection");
+					Route.UnitKind = ESemanticUnitKind::StructureState;
+					Route.bGraph = true;
+				}
+				else if (SemanticId.Contains(TEXT("node_property")))
 				{
 					Route.SurfaceId = TEXT("node_properties");
 					Route.UnitKind = ESemanticUnitKind::PropertySet;
@@ -1318,42 +2574,23 @@ namespace UE::UAI::HjsonWorkspace
 			return Result;
 		}
 
-		bool SerializeJson(
-			const TSharedRef<FJsonObject>& Object,
-			TArray<uint8>& OutBytes)
-		{
-			FString Text;
-			const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>>
-				Writer =
-					TJsonWriterFactory<
-						TCHAR,
-						TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			if (!FJsonSerializer::Serialize(Object, Writer))
-			{
-				return false;
-			}
-			Text.AppendChar(TEXT('\n'));
-			const FTCHARToUTF8 Utf8(*Text);
-			OutBytes.Reset(Utf8.Length());
-			OutBytes.Append(
-				reinterpret_cast<const uint8*>(Utf8.Get()),
-				Utf8.Length());
-			return true;
-		}
-
 		int64 EstimatedTokens(const TArray<FExportFilePlan>& Files)
 		{
 			int64 Bytes = 0;
 			for (const FExportFilePlan& File : Files)
 			{
-				Bytes += File.GetCanonicalUtf8().Num();
+				if (IsModelVisibleSemanticWorkspacePath(
+						File.GetRelativePath()))
+				{
+					Bytes += File.GetCanonicalUtf8().Num();
+				}
 			}
 			return (Bytes + 3) / 4;
 		}
 
 		bool RegisterOne(
 			FTargetCompositionContract Value,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			return FTargetCompositionRegistry::Get().RegisterContract(
 				MoveTemp(Value),
@@ -1370,7 +2607,7 @@ namespace UE::UAI::HjsonWorkspace
 
 	bool FTargetCompositionRegistry::RegisterContract(
 		FTargetCompositionContract ContractValue,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return RegisterContracts(
 			{MoveTemp(ContractValue)},
@@ -1379,7 +2616,7 @@ namespace UE::UAI::HjsonWorkspace
 
 	bool FTargetCompositionRegistry::RegisterContracts(
 		TArray<FTargetCompositionContract> InContracts,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		TMap<FString, FTargetCompositionContract> Pending;
@@ -1394,10 +2631,8 @@ namespace UE::UAI::HjsonWorkspace
 			if (const FTargetCompositionContract* ExistingPending =
 				Pending.Find(ContractValue.TargetKind))
 			{
-				if (!ContractEquals(*ExistingPending, ContractValue))
+				if (!ContractEquals(*ExistingPending, ContractValue, OutError))
 				{
-					OutError = TEXT("target_composition_contract_conflict:")
-						+ ContractValue.TargetKind;
 					return false;
 				}
 				continue;
@@ -1412,10 +2647,8 @@ namespace UE::UAI::HjsonWorkspace
 			if (const FTargetCompositionContract* Existing =
 				Contracts.Find(Pair.Key))
 			{
-				if (!ContractEquals(*Existing, Pair.Value))
+				if (!ContractEquals(*Existing, Pair.Value, OutError))
 				{
-					OutError = TEXT("target_composition_contract_conflict:")
-						+ Pair.Key;
 					return false;
 				}
 			}
@@ -1517,32 +2750,46 @@ namespace UE::UAI::HjsonWorkspace
 
 	bool ValidateTargetCompositionContract(
 		const FTargetCompositionContract& ContractValue,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutError.Reset();
+		auto Reject = [&](const TCHAR* Code, const FString& Reason, const FString& Path,
+			TSharedPtr<FJsonValue> Actual = nullptr, TSharedPtr<FJsonValue> Expected = nullptr) {
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(Code, Reason, TEXT("composition_contract"));
+			OutError.CandidateName = ContractValue.TargetKind;
+			OutError.PropertyPath = Path;
+			OutError.ActualValue = MoveTemp(Actual);
+			OutError.ExpectedValue = MoveTemp(Expected);
+			return false;
+		};
 		if (Normalize(ContractValue.SchemaId) != CompositionSchema
 			|| Normalize(ContractValue.TargetKind).IsEmpty()
 			|| ContractValue.Surfaces.IsEmpty())
 		{
-			OutError = TEXT("target_composition_contract_invalid");
-			return false;
+			return Reject(TEXT("target_composition_contract_invalid"), Normalize(ContractValue.SchemaId) != CompositionSchema
+				? FString::Printf(TEXT("Composition schema must be '%s'."), *CompositionSchema)
+				: Normalize(ContractValue.TargetKind).IsEmpty() ? TEXT("Composition target kind must not be empty.")
+				: TEXT("Composition requires at least one surface."), Normalize(ContractValue.SchemaId) != CompositionSchema
+				? TEXT("/schema") : Normalize(ContractValue.TargetKind).IsEmpty() ? TEXT("/target_kind") : TEXT("/surfaces"));
 		}
 		TSet<FString> SurfaceIds;
 		bool bHasProperties = false;
 		bool bHasCompound = false;
+		int32 SurfaceIndex = -1;
 		for (const FCompositionSurfaceContract& Item
 			: ContractValue.Surfaces)
 		{
+			++SurfaceIndex;
 			const FString SurfaceId = Normalize(Item.SurfaceId);
 			if (SurfaceId.IsEmpty()
 				|| SurfaceIds.Contains(SurfaceId)
 				|| Item.UnitKind
 					== ESemanticUnitKind::OpaqueExtension)
 			{
-				OutError =
-					TEXT("target_composition_surface_invalid:")
-					+ SurfaceId;
-				return false;
+				return Reject(TEXT("target_composition_surface_invalid"), SurfaceId.IsEmpty() ? TEXT("Surface identifier must not be empty.")
+					: SurfaceIds.Contains(SurfaceId) ? FString::Printf(TEXT("Surface '%s' is declared more than once."), *SurfaceId)
+					: FString::Printf(TEXT("Surface '%s' cannot use the opaque-extension unit kind."), *SurfaceId),
+					FString::Printf(TEXT("/surfaces/%d"), SurfaceIndex), MakeShared<FJsonValueString>(SurfaceId));
 			}
 			SurfaceIds.Add(SurfaceId);
 			bHasProperties |= Item.SurfaceKind
@@ -1554,47 +2801,42 @@ namespace UE::UAI::HjsonWorkspace
 			|| !bHasProperties
 			|| !bHasCompound)
 		{
-			OutError =
-				TEXT("target_composition_surface_coverage_invalid");
-			return false;
+			return Reject(TEXT("target_composition_surface_coverage_invalid"), !SurfaceIds.Contains(TEXT("target_settings"))
+				? TEXT("Composition must declare the target_settings surface.") : !bHasProperties
+				? TEXT("Composition must declare a properties surface.") : TEXT("Composition must declare a non-property surface."), TEXT("/surfaces"));
 		}
 		TSet<int32> Priorities;
 		int32 DefaultCount = 0;
 		int32 DefaultPriority = MAX_int32;
 		int32 LowestSpecificPriority = MAX_int32;
+		int32 RouteIndex = -1;
 		for (const FCompositionSemanticRouteContract& Route :
 			ContractValue.SemanticRoutes)
 		{
+			++RouteIndex;
 			const FString SurfaceId = Normalize(Route.SurfaceId);
+			const FString RoutePath = FString::Printf(TEXT("/semantic_routes/%d"), RouteIndex);
 			const FString Pattern = Normalize(Route.Pattern);
 			if (!SurfaceIds.Contains(SurfaceId))
 			{
-				OutError =
-					TEXT("target_composition_semantic_route_surface_missing:")
-					+ SurfaceId;
-				return false;
+				return Reject(TEXT("target_composition_semantic_route_surface_missing"), TEXT("The semantic route refers to an undeclared surface."), RoutePath + TEXT("/surface_id"), MakeShared<FJsonValueString>(SurfaceId));
 			}
 			if (Route.Role == ECompositionSemanticRouteRole::Undeclared
 				|| Route.UnitKind == ESemanticUnitKind::OpaqueExtension)
 			{
-				OutError = TEXT("target_composition_semantic_route_invalid:")
-					+ SurfaceId;
-				return false;
+				return Reject(TEXT("target_composition_semantic_route_invalid"), Route.Role == ECompositionSemanticRouteRole::Undeclared
+					? TEXT("A semantic route must declare its role.") : TEXT("A semantic route cannot use the opaque-extension unit kind."), RoutePath);
 			}
 			if (Priorities.Contains(Route.Priority))
 			{
-				OutError =
-					TEXT("target_composition_semantic_route_priority_duplicate:")
-					+ FString::FromInt(Route.Priority);
-				return false;
+				return Reject(TEXT("target_composition_semantic_route_priority_duplicate"), TEXT("Semantic route priorities must be unique."), RoutePath + TEXT("/priority"), MakeShared<FJsonValueNumber>(Route.Priority));
 			}
 			Priorities.Add(Route.Priority);
 			if (Route.Match == ECompositionSemanticRouteMatch::Default)
 			{
 				if (!Pattern.IsEmpty())
 				{
-					OutError = TEXT("target_composition_semantic_route_default_pattern_invalid");
-					return false;
+					return Reject(TEXT("target_composition_semantic_route_default_pattern_invalid"), TEXT("A default semantic route must not declare a pattern."), RoutePath + TEXT("/pattern"), MakeShared<FJsonValueString>(Pattern));
 				}
 				++DefaultCount;
 				DefaultPriority = Route.Priority;
@@ -1603,8 +2845,7 @@ namespace UE::UAI::HjsonWorkspace
 			{
 				if (Pattern.IsEmpty())
 				{
-					OutError = TEXT("target_composition_semantic_route_pattern_missing");
-					return false;
+					return Reject(TEXT("target_composition_semantic_route_pattern_missing"), TEXT("A non-default semantic route requires a nonempty pattern."), RoutePath + TEXT("/pattern"));
 				}
 				LowestSpecificPriority = FMath::Min(
 					LowestSpecificPriority,
@@ -1616,14 +2857,15 @@ namespace UE::UAI::HjsonWorkspace
 				|| (LowestSpecificPriority != MAX_int32
 					&& DefaultPriority >= LowestSpecificPriority)))
 		{
-			OutError = TEXT("target_composition_semantic_route_default_invalid");
-			return false;
+			return Reject(TEXT("target_composition_semantic_route_default_invalid"), DefaultCount != 1
+				? FString::Printf(TEXT("Exactly one default semantic route is required; found %d."), DefaultCount)
+				: FString::Printf(TEXT("Default route priority %d must be below every specific route priority; lowest is %d."), DefaultPriority, LowestSpecificPriority), TEXT("/semantic_routes"));
 		}
 		return true;
 	}
 
 	bool RegisterGraphTreeTargetCompositionContracts(
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const TArray<FCompositionSurfaceContract> Blueprint{
 			Surface(
@@ -1636,8 +2878,8 @@ namespace UE::UAI::HjsonWorkspace
 				ESemanticUnitKind::PropertySet),
 			Surface(
 				TEXT("member_collection"),
-				EAuthoringSurfaceKind::Collection,
-				ESemanticUnitKind::CollectionState),
+				EAuthoringSurfaceKind::Structure,
+				ESemanticUnitKind::StructureState),
 			Surface(
 				TEXT("component_tree"),
 				EAuthoringSurfaceKind::Hierarchy,
@@ -1661,23 +2903,35 @@ namespace UE::UAI::HjsonWorkspace
 				EAuthoringSurfaceKind::Properties,
 				ESemanticUnitKind::PropertySet),
 			Surface(
+				TEXT("class_defaults"),
+				EAuthoringSurfaceKind::Properties,
+				ESemanticUnitKind::PropertySet),
+			Surface(
 				TEXT("member_collection"),
-				EAuthoringSurfaceKind::Collection,
-				ESemanticUnitKind::CollectionState),
+				EAuthoringSurfaceKind::Structure,
+				ESemanticUnitKind::StructureState),
 			Surface(
 				TEXT("widget_tree"),
 				EAuthoringSurfaceKind::Hierarchy,
 				ESemanticUnitKind::StructureState),
 			Surface(
+				TEXT("binding_collection"),
+				EAuthoringSurfaceKind::Structure,
+				ESemanticUnitKind::StructureState),
+			Surface(
 				TEXT("animation_collection"),
 				EAuthoringSurfaceKind::Timeline,
-				ESemanticUnitKind::CollectionState),
+				ESemanticUnitKind::StructureState),
 			Surface(
 				TEXT("graph_collection"),
 				EAuthoringSurfaceKind::Structure,
 				ESemanticUnitKind::StructureState),
 			Surface(
 				TEXT("widget_properties"),
+				EAuthoringSurfaceKind::Properties,
+				ESemanticUnitKind::PropertySet),
+			Surface(
+				TEXT("node_properties"),
 				EAuthoringSurfaceKind::Properties,
 				ESemanticUnitKind::PropertySet),
 		};
@@ -1688,8 +2942,8 @@ namespace UE::UAI::HjsonWorkspace
 				ESemanticUnitKind::PropertySet),
 			Surface(
 				TEXT("member_collection"),
-				EAuthoringSurfaceKind::Collection,
-				ESemanticUnitKind::CollectionState),
+				EAuthoringSurfaceKind::Structure,
+				ESemanticUnitKind::StructureState),
 			Surface(
 				TEXT("graph_collection"),
 				EAuthoringSurfaceKind::Structure,
@@ -1731,6 +2985,89 @@ namespace UE::UAI::HjsonWorkspace
 				EAuthoringSurfaceKind::Properties,
 				ESemanticUnitKind::PropertySet),
 		};
+		const TArray<FCompositionSurfaceContract> TextureGraph{
+			Surface(
+				TEXT("target_settings"),
+				EAuthoringSurfaceKind::Properties,
+				ESemanticUnitKind::PropertySet),
+			Surface(
+				TEXT("parameter_collection"),
+				EAuthoringSurfaceKind::Collection,
+				ESemanticUnitKind::CollectionState),
+			Surface(
+				TEXT("graph_collection"),
+				EAuthoringSurfaceKind::Structure,
+				ESemanticUnitKind::StructureState),
+			Surface(
+				TEXT("node_properties"),
+				EAuthoringSurfaceKind::Properties,
+				ESemanticUnitKind::PropertySet),
+		};
+		const TArray<FCompositionSurfaceContract> DeformerGraph = TextureGraph;
+		const TArray<FCompositionSemanticRouteContract> MaterialRoutes{
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".graph"), TEXT("graph_collection"),
+				ESemanticUnitKind::StructureState,
+				ECompositionSemanticRouteRole::Graph, 600},
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".expression"), TEXT("graph_collection"),
+				ESemanticUnitKind::ItemState,
+				ECompositionSemanticRouteRole::Item, 500},
+			{ECompositionSemanticRouteMatch::Contains,
+				TEXT("expression_property"), TEXT("expression_properties"),
+				ESemanticUnitKind::PropertySet,
+				ECompositionSemanticRouteRole::Property, 400},
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".edge"), TEXT("graph_collection"),
+				ESemanticUnitKind::RelationSet,
+				ECompositionSemanticRouteRole::Relation, 300},
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".root_input"), TEXT("graph_collection"),
+				ESemanticUnitKind::RelationSet,
+				ECompositionSemanticRouteRole::Relation, 250},
+			{ECompositionSemanticRouteMatch::Contains,
+				TEXT("parameter"), TEXT("parameter_collection"),
+				ESemanticUnitKind::ItemState,
+				ECompositionSemanticRouteRole::Item, 200},
+			{ECompositionSemanticRouteMatch::Default,
+				FString(), TEXT("target_settings"),
+				ESemanticUnitKind::PropertySet,
+				ECompositionSemanticRouteRole::Property, 0},
+		};
+		const TArray<FCompositionSemanticRouteContract> TextureGraphRoutes{
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".graph"), TEXT("graph_collection"),
+				ESemanticUnitKind::StructureState,
+				ECompositionSemanticRouteRole::Graph, 600},
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".node"), TEXT("graph_collection"),
+				ESemanticUnitKind::ItemState,
+				ECompositionSemanticRouteRole::Item, 500},
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".pin"), TEXT("graph_collection"),
+				ESemanticUnitKind::ItemState,
+				ECompositionSemanticRouteRole::Item, 400},
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".node_pin"), TEXT("graph_collection"),
+				ESemanticUnitKind::RelationSet,
+				ECompositionSemanticRouteRole::Relation, 350},
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".edge"), TEXT("graph_collection"),
+				ESemanticUnitKind::RelationSet,
+				ECompositionSemanticRouteRole::Relation, 300},
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".parameter"), TEXT("parameter_collection"),
+				ESemanticUnitKind::ItemState,
+				ECompositionSemanticRouteRole::Item, 250},
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".pin_value"), TEXT("node_properties"),
+				ESemanticUnitKind::PropertySet,
+				ECompositionSemanticRouteRole::Property, 200},
+			{ECompositionSemanticRouteMatch::Default,
+				FString(), TEXT("target_settings"),
+				ESemanticUnitKind::PropertySet,
+				ECompositionSemanticRouteRole::Property, 0},
+		};
 		return RegisterOne(
 				Contract(TEXT("ue.blueprint.asset"), Blueprint),
 				OutError)
@@ -1743,25 +3080,35 @@ namespace UE::UAI::HjsonWorkspace
 					AnimBlueprint),
 				OutError)
 			&& RegisterOne(
-				Contract(TEXT("ue.material.asset"), Material),
+				Contract(TEXT("ue.material.asset"), Material, MaterialRoutes),
 				OutError)
 			&& RegisterOne(
 				Contract(
 					TEXT("ue.material_function.asset"),
-					Material),
+					Material,
+					MaterialRoutes),
 				OutError)
 			&& RegisterOne(
 				Contract(
 					TEXT("ue.material_instance.asset"),
-					Material),
+					Material,
+					MaterialRoutes),
 				OutError)
 			&& RegisterOne(
 				Contract(TEXT("ue.pcg_graph.asset"), Pcg),
+				OutError)
+			&& RegisterOne(
+				Contract(TEXT("ue.texture_graph.asset"), TextureGraph,
+					TextureGraphRoutes),
+			OutError)
+			&& RegisterOne(
+				Contract(TEXT("ue.deformer_graph.asset"), DeformerGraph,
+					TextureGraphRoutes),
 				OutError);
 	}
 
 	bool RegisterOtherTargetCompositionContracts(
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const TArray<FCompositionSurfaceContract> Generic{
 			Surface(
@@ -1781,6 +3128,10 @@ namespace UE::UAI::HjsonWorkspace
 			Surface(
 				TEXT("emitter_hierarchy"),
 				EAuthoringSurfaceKind::Hierarchy,
+				ESemanticUnitKind::StructureState),
+			Surface(
+				TEXT("user_parameters"),
+				EAuthoringSurfaceKind::Collection,
 				ESemanticUnitKind::StructureState),
 			Surface(
 				TEXT("stack_collection"),
@@ -1869,6 +3220,104 @@ namespace UE::UAI::HjsonWorkspace
 				EAuthoringSurfaceKind::Properties,
 				ESemanticUnitKind::PropertySet),
 		};
+		const TArray<FCompositionSemanticRouteContract> AudioGraphRoutes{
+			{ECompositionSemanticRouteMatch::Suffix,
+				TEXT(".document"), TEXT("audio_graph"),
+				ESemanticUnitKind::StructureState,
+				ECompositionSemanticRouteRole::Graph, 600},
+			{ECompositionSemanticRouteMatch::Default,
+				FString(), TEXT("target_settings"),
+				ESemanticUnitKind::PropertySet,
+				ECompositionSemanticRouteRole::Property, 0},
+		};
+		const TArray<FCompositionSemanticRouteContract> BehaviorRoutes{
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".graph"), TEXT("behavior_tree"),
+				ESemanticUnitKind::StructureState, ECompositionSemanticRouteRole::Graph, 630},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".node"), TEXT("behavior_tree"),
+				ESemanticUnitKind::ItemState, ECompositionSemanticRouteRole::GraphItem, 620},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".edge"), TEXT("behavior_tree"),
+				ESemanticUnitKind::RelationSet, ECompositionSemanticRouteRole::Relation, 610},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".node_property"), TEXT("item_properties"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 600},
+			{ECompositionSemanticRouteMatch::Default, FString(), TEXT("target_settings"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 0},
+		};
+		const TArray<FCompositionSurfaceContract> Eqs{
+			Surface(TEXT("target_settings"), EAuthoringSurfaceKind::Properties, ESemanticUnitKind::PropertySet),
+			Surface(TEXT("eqs"), EAuthoringSurfaceKind::Structure, ESemanticUnitKind::StructureState),
+			Surface(TEXT("item_properties"), EAuthoringSurfaceKind::Properties, ESemanticUnitKind::PropertySet),
+		};
+		const TArray<FCompositionSemanticRouteContract> EqsRoutes{
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".graph"), TEXT("eqs"),
+				ESemanticUnitKind::StructureState, ECompositionSemanticRouteRole::Graph, 630},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".node"), TEXT("eqs"),
+				ESemanticUnitKind::ItemState, ECompositionSemanticRouteRole::GraphItem, 620},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".edge"), TEXT("eqs"),
+				ESemanticUnitKind::RelationSet, ECompositionSemanticRouteRole::Relation, 610},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".node_property"), TEXT("item_properties"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 600},
+			{ECompositionSemanticRouteMatch::Default, FString(), TEXT("target_settings"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 0},
+		};
+		const TArray<FCompositionSurfaceContract> StateTree{
+			Surface(TEXT("target_settings"), EAuthoringSurfaceKind::Properties, ESemanticUnitKind::PropertySet),
+			Surface(TEXT("state_tree"), EAuthoringSurfaceKind::Hierarchy, ESemanticUnitKind::StructureState),
+			Surface(TEXT("item_properties"), EAuthoringSurfaceKind::Properties, ESemanticUnitKind::PropertySet),
+		};
+		const TArray<FCompositionSurfaceContract> Blackboard{
+			Surface(TEXT("target_settings"), EAuthoringSurfaceKind::Properties, ESemanticUnitKind::PropertySet),
+			Surface(TEXT("blackboard"), EAuthoringSurfaceKind::Collection, ESemanticUnitKind::StructureState),
+			Surface(TEXT("item_properties"), EAuthoringSurfaceKind::Properties, ESemanticUnitKind::PropertySet),
+		};
+		const TArray<FCompositionSemanticRouteContract> BlackboardRoutes{
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".blackboard.document"), TEXT("blackboard"),
+				ESemanticUnitKind::StructureState, ECompositionSemanticRouteRole::Graph, 630},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".blackboard.key"), TEXT("blackboard"),
+				ESemanticUnitKind::ItemState, ECompositionSemanticRouteRole::Item, 620},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".blackboard.key_property"), TEXT("item_properties"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 600},
+			{ECompositionSemanticRouteMatch::Default, FString(), TEXT("target_settings"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 0},
+		};
+		const TArray<FCompositionSurfaceContract> SmartObject{
+			Surface(TEXT("target_settings"), EAuthoringSurfaceKind::Properties, ESemanticUnitKind::PropertySet),
+			Surface(TEXT("smart_object"), EAuthoringSurfaceKind::Collection, ESemanticUnitKind::StructureState),
+			Surface(TEXT("item_properties"), EAuthoringSurfaceKind::Properties, ESemanticUnitKind::PropertySet),
+		};
+		const TArray<FCompositionSemanticRouteContract> SmartObjectRoutes{
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".smart_object.definition"), TEXT("smart_object"),
+				ESemanticUnitKind::StructureState, ECompositionSemanticRouteRole::Graph, 630},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".smart_object.item"), TEXT("smart_object"),
+				ESemanticUnitKind::ItemState, ECompositionSemanticRouteRole::Item, 620},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".smart_object.item_property"), TEXT("item_properties"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 600},
+			{ECompositionSemanticRouteMatch::Default, FString(), TEXT("target_settings"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 0},
+		};
+		const TArray<FCompositionSemanticRouteContract> StateTreeRoutes{
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".state_tree.tree"), TEXT("state_tree"),
+				ESemanticUnitKind::StructureState, ECompositionSemanticRouteRole::Graph, 630},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".state_tree.item"), TEXT("state_tree"),
+				ESemanticUnitKind::ItemState, ECompositionSemanticRouteRole::Item, 620},
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".state_tree.item_property"), TEXT("item_properties"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 600},
+			{ECompositionSemanticRouteMatch::Default, FString(), TEXT("target_settings"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 0},
+		};
+		const TArray<FCompositionSurfaceContract> Curve{
+			Surface(TEXT("target_settings"), EAuthoringSurfaceKind::Properties, ESemanticUnitKind::PropertySet),
+			Surface(TEXT("curve"), EAuthoringSurfaceKind::Structure, ESemanticUnitKind::StructureState),
+		};
+		const TArray<FCompositionSemanticRouteContract> CurveRoutes{
+			{ECompositionSemanticRouteMatch::Suffix, TEXT(".profile_state"), TEXT("curve"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 600},
+			{ECompositionSemanticRouteMatch::Default, FString(), TEXT("target_settings"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 0},
+		};
+		const TArray<FCompositionSemanticRouteContract> AssetRelationRoutes{
+			{ECompositionSemanticRouteMatch::Default, FString(), TEXT("target_settings"),
+				ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 0},
+		};
 		const TArray<FCompositionSurfaceContract> Table{
 			Surface(
 				TEXT("target_settings"),
@@ -1889,25 +3338,40 @@ namespace UE::UAI::HjsonWorkspace
 				EAuthoringSurfaceKind::ExternalPayload,
 				ESemanticUnitKind::ExternalPayloadState),
 		};
+		if (!RegisterOne(
+				Contract(TEXT("ue.metasound.asset"), Audio, AudioGraphRoutes),
+				OutError)
+			|| !RegisterOne(Contract(TEXT("ue.sound_cue.asset"), Audio, AudioGraphRoutes), OutError)
+			|| !RegisterOne(Contract(TEXT("ue.behavior_tree.asset"), Behavior, BehaviorRoutes), OutError)
+			|| !RegisterOne(Contract(TEXT("ue.eqs.asset"), Eqs, EqsRoutes), OutError)
+			|| !RegisterOne(Contract(TEXT("ue.curve.asset"), Curve, CurveRoutes), OutError)
+			|| !RegisterOne(Contract(TEXT("ue.sound_class.asset"), Generic, AssetRelationRoutes), OutError)
+			|| !RegisterOne(Contract(TEXT("ue.sound_submix.asset"), Generic, AssetRelationRoutes), OutError)
+				|| !RegisterOne(Contract(TEXT("ue.state_tree.asset"), StateTree, StateTreeRoutes), OutError)
+				|| !RegisterOne(Contract(TEXT("ue.blackboard.asset"), Blackboard, BlackboardRoutes), OutError)
+				|| !RegisterOne(Contract(TEXT("ue.smart_object.asset"), SmartObject, SmartObjectRoutes), OutError))
+		{
+			return false;
+		}
 		const TArray<TPair<FString, const TArray<FCompositionSurfaceContract>*>>
 			Registrations{
 				{TEXT("ue.generic.object"), &Generic},
+				{TEXT("ue.project_settings.config"), &Generic},
+				{TEXT("ue.physics_asset.asset"), &Generic},
 				{TEXT("ue.niagara_system.asset"), &Niagara},
 				{TEXT("ue.niagara_emitter.asset"), &Niagara},
 				{TEXT("ue.niagara_script.asset"), &Niagara},
 				{TEXT("ue.level_sequence.asset"), &Timeline},
 				{TEXT("ue.animation_sequence.asset"), &Timeline},
-				{TEXT("ue.curve.asset"), &Timeline},
 				{TEXT("ue.level.asset"), &Level},
 				{TEXT("ue.control_rig.asset"), &Rig},
 				{TEXT("ue.ik_rig.asset"), &Rig},
 				{TEXT("ue.ik_retargeter.asset"), &Rig},
 				{TEXT("ue.skeleton.asset"), &Rig},
-				{TEXT("ue.behavior_tree.asset"), &Behavior},
-				{TEXT("ue.metasound.asset"), &Audio},
-				{TEXT("ue.sound_cue.asset"), &Audio},
-				{TEXT("ue.sound_submix.asset"), &Audio},
 				{TEXT("ue.data_table.asset"), &Table},
+				{TEXT("ue.curve_table.asset"), &Table},
+				{TEXT("ue.string_table.asset"), &Table},
+				{TEXT("ue.localization_settings.config"), &Table},
 				{TEXT("ue.imported_texture.asset"), &External},
 				{TEXT("ue.imported_mesh.asset"), &External},
 				{TEXT("ue.imported_audio.asset"), &External},
@@ -1918,11 +3382,93 @@ namespace UE::UAI::HjsonWorkspace
 			const TArray<FCompositionSurfaceContract>*>& Registration
 			: Registrations)
 		{
-			if (!RegisterOne(
-				Contract(
-					*Registration.Key,
-					*Registration.Value),
-				OutError))
+			TArray<FCompositionSemanticRouteContract> Routes;
+			if (Registration.Key == TEXT("ue.generic.object") || Registration.Key == TEXT("ue.project_settings.config"))
+			{
+				int32 Priority = 600;
+				for (const TCHAR* Semantic : {
+					TEXT("uai.semantic.animation.anim_sequence.document"),
+					TEXT("uai.semantic.animation.anim_montage.document"),
+					TEXT("uai.semantic.animation.pose_asset.document"),
+					TEXT("uai.semantic.reflection.pcg_data_asset.profile_state"),
+					TEXT("uai.semantic.reflection.ml_deformer.profile_state"),
+					TEXT("uai.semantic.reflection.material_parameter_collection.profile_state"),
+					TEXT("uai.semantic.reflection.material_function_instance.profile_state"),
+					TEXT("uai.semantic.reflection.material_layer_instance.profile_state"),
+					TEXT("uai.semantic.reflection.material_layer_blend_instance.profile_state")})
+					Routes.Add({ECompositionSemanticRouteMatch::Exact, Semantic,
+						TEXT("target_settings"), ESemanticUnitKind::PropertySet,
+						ECompositionSemanticRouteRole::Property, Priority++});
+				int32 DocumentPriority = 500;
+				for (const TCHAR* Suffix : {TEXT(".document"), TEXT(".profile_state"), TEXT(".seed")})
+					Routes.Add({ECompositionSemanticRouteMatch::Suffix, Suffix,
+						TEXT("target_settings"), ESemanticUnitKind::PropertySet,
+						ECompositionSemanticRouteRole::Document, DocumentPriority--});
+				Routes.Add({ECompositionSemanticRouteMatch::Default, FString(),
+					TEXT("target_settings"), ESemanticUnitKind::PropertySet,
+					ECompositionSemanticRouteRole::Property, 0});
+			}
+			if (Registration.Key == TEXT("ue.physics_asset.asset"))
+			{
+				Routes.Add({ECompositionSemanticRouteMatch::Exact, TEXT("uai.semantic.reflection.physics_asset.profile_state"),
+					TEXT("target_settings"), ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 600});
+				Routes.Add({ECompositionSemanticRouteMatch::Default, FString(),
+					TEXT("target_settings"), ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 0});
+			}
+			if (Registration.Key == TEXT("ue.skeleton.asset"))
+			{
+				Routes.Add({ECompositionSemanticRouteMatch::Exact, TEXT("uai.semantic.animation.skeleton.document"),
+					TEXT("target_settings"), ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 600});
+				Routes.Add({ECompositionSemanticRouteMatch::Default, FString(),
+					TEXT("target_settings"), ESemanticUnitKind::PropertySet, ECompositionSemanticRouteRole::Property, 0});
+			}
+			if (Registration.Key == TEXT("ue.imported_texture.asset") || Registration.Key == TEXT("ue.imported_mesh.asset"))
+			{
+				// Whole input values use the shared property projection, but retain a
+				// distinct semantic identity from the generated asset state.
+				if (Registration.Key == TEXT("ue.imported_texture.asset"))
+				Routes.Add({ECompositionSemanticRouteMatch::Suffix, TEXT(".generation_input"),
+					TEXT("source_payload"), ESemanticUnitKind::PropertySet,
+					ECompositionSemanticRouteRole::Property, 600});
+				if (Registration.Key == TEXT("ue.imported_mesh.asset"))
+				{
+					int32 MeshPropertyPriority = 600;
+					for (const TCHAR* Semantic : {TEXT("uai.semantic.reflection.static_mesh.profile_state"), TEXT("uai.semantic.reflection.skeletal_mesh.profile_state")})
+						Routes.Add({ECompositionSemanticRouteMatch::Exact, Semantic,
+							TEXT("target_settings"), ESemanticUnitKind::PropertySet,
+							ECompositionSemanticRouteRole::Property, MeshPropertyPriority++});
+				}
+				// Explicit routes replace RouteEntry's fallback. Preserve its document
+				// decomposition for all existing texture profiles before the default.
+				int32 DocumentPriority = 500;
+				for (const TCHAR* Suffix : {TEXT(".document"), TEXT(".profile_state"), TEXT(".seed")})
+				{
+					Routes.Add({ECompositionSemanticRouteMatch::Suffix, Suffix,
+						TEXT("target_settings"), ESemanticUnitKind::PropertySet,
+						ECompositionSemanticRouteRole::Document, DocumentPriority--});
+				}
+				Routes.Add({ECompositionSemanticRouteMatch::Default, FString(),
+					TEXT("target_settings"), ESemanticUnitKind::PropertySet,
+					ECompositionSemanticRouteRole::Property, 0});
+			}
+			if (Registration.Key == TEXT("ue.data_table.asset") || Registration.Key == TEXT("ue.curve_table.asset") || Registration.Key == TEXT("ue.string_table.asset")
+				|| Registration.Key == TEXT("ue.localization_settings.config"))
+			{
+				Routes.Add({ECompositionSemanticRouteMatch::Exact,
+					Registration.Key == TEXT("ue.data_table.asset") ? TEXT("data_table.rows")
+						: Registration.Key == TEXT("ue.curve_table.asset") ? TEXT("curve_table.rows")
+						: Registration.Key == TEXT("ue.string_table.asset") ? TEXT("string_table.entries") : TEXT("localization_settings.targets"),
+					TEXT("table_collection"), ESemanticUnitKind::StructureState,
+					ECompositionSemanticRouteRole::Graph, 600});
+				Routes.Add({ECompositionSemanticRouteMatch::Default, FString(),
+					TEXT("target_settings"), ESemanticUnitKind::PropertySet,
+					ECompositionSemanticRouteRole::Property, 0});
+			}
+			auto TargetContract = Contract(*Registration.Key, *Registration.Value, Routes);
+			if (Registration.Key == TEXT("ue.level_sequence.asset"))
+				TargetContract.DocumentValueFields.Add(TEXT("uai.semantic.reflection.sequence.profile_state"),
+					{TEXT("display_rate"), TEXT("tick_resolution"), TEXT("playback_range")});
+			if (!RegisterOne(MoveTemp(TargetContract), OutError))
 			{
 				return false;
 			}
@@ -1959,6 +3505,7 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return TEXT("ue.skeleton.asset");
 		}
+		if (Type == TEXT("physics_asset")) return TEXT("ue.physics_asset.asset");
 		if (Target == TEXT("animation.skeletal_mesh")
 			|| Type == TEXT("skeletal_mesh")
 			|| Type == TEXT("static_mesh"))
@@ -1995,6 +3542,10 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return TEXT("ue.sound_submix.asset");
 		}
+		if (Type == TEXT("sound_class"))
+		{
+			return TEXT("ue.sound_class.asset");
+		}
 		if (Type == TEXT("sequence"))
 		{
 			return TEXT("ue.level_sequence.asset");
@@ -2003,6 +3554,26 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			return TEXT("ue.behavior_tree.asset");
 		}
+		if (Type == TEXT("blackboard"))
+		{
+			return TEXT("ue.blackboard.asset");
+		}
+		if (Type == TEXT("eqs"))
+		{
+			return TEXT("ue.eqs.asset");
+		}
+		if (Type == TEXT("state_tree"))
+		{
+			return TEXT("ue.state_tree.asset");
+		}
+		if (Type == TEXT("smart_object"))
+		{
+			return TEXT("ue.smart_object.asset");
+		}
+		if (Type == TEXT("curve_table"))
+		{
+			return TEXT("ue.curve_table.asset");
+		}
 		if (Type.Contains(TEXT("curve")))
 		{
 			return TEXT("ue.curve.asset");
@@ -2010,6 +3581,15 @@ namespace UE::UAI::HjsonWorkspace
 		if (Type == TEXT("data_table"))
 		{
 			return TEXT("ue.data_table.asset");
+		}
+		if (Type == TEXT("string_table"))
+		{
+			return TEXT("ue.string_table.asset");
+		}
+		if (Type == TEXT("project_settings")) return TEXT("ue.project_settings.config");
+		if (Type == TEXT("localization_settings"))
+		{
+			return TEXT("ue.localization_settings.config");
 		}
 		if (Type.Contains(TEXT("texture"))
 			|| Type == TEXT("paper_sprite")
@@ -2030,7 +3610,8 @@ namespace UE::UAI::HjsonWorkspace
 		const FCompositionInput& Request,
 		FUeAgentResourceTracker& Resources,
 		FAuthoringModelPtr& OutModel,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError,
+		TMap<FString, FDocumentValueBinding>* DocumentBindings = nullptr)
 	{
 		OutModel.Reset();
 		OutError.Reset();
@@ -2039,20 +3620,28 @@ namespace UE::UAI::HjsonWorkspace
 			Request.TargetKind,
 			CompositionContract))
 		{
-			OutError.Set(
-				TEXT("target_composition_contract_missing"),
-				Request.TargetKind);
+			OutError.SetSourceFailure(TEXT("target_composition_contract_missing"),
+				FString::Printf(TEXT("No composition contract is registered for target kind '%s'."), *Request.TargetKind));
 			return false;
 		}
 		if (Normalize(Request.ProfileId).IsEmpty()
 			|| Normalize(Request.BaseRevision).IsEmpty())
 		{
-			OutError.Set(TEXT("composition_request_invalid"));
+			OutError.SetSourceFailure(TEXT("composition_request_invalid"), Normalize(Request.ProfileId).IsEmpty()
+				? TEXT("Composition requires a nonempty profile identifier.") : TEXT("Composition requires a captured base revision."));
 			return false;
 		}
 
 		TArray<FCompositionEntryView> Entries =
 			Request.Entries;
+		TSet<FString> PreviewSurfaces;
+		for (const auto& Entry : Entries)
+		{
+			if (!AssetPreview::IsPreviewSemantic(Entry.SemanticId)) continue;
+			const FString Surface = RouteEntry(Request.TargetKind, Entry.SemanticId, Selector(Entry, TEXT("preview_target"))).SurfaceId;
+			if (PreviewSurfaces.Contains(Surface)) continue;
+			PreviewSurfaces.Add(Surface);
+		}
 		Entries.Sort(
 			[](const FCompositionEntryView& Left,
 				const FCompositionEntryView& Right)
@@ -2130,10 +3719,18 @@ namespace UE::UAI::HjsonWorkspace
 				Root.UnitId);
 			AddDraft(MoveTemp(Root));
 		}
+		// Preview entries choose their surface explicitly in RouteEntry. Keep
+		// those physical views out of the asset document's fallback routing:
+		// otherwise an unmatched collection can become preview properties.
+		for (const FString& Surface : PreviewSurfaces)
+		{
+			SurfaceUnits.Add(Surface, TargetId);
+		}
 
 		TMap<FString, FString> GraphUnits;
 		TMap<FString, FString> ItemUnits;
 		TMap<FString, FString> SourceItemUnits;
+		TMap<FString, FString> DefinitionUnits;
 		TMap<FString, TArray<FString>> ExplicitOrder;
 		TMap<FString, const FCompositionEntryView*>
 			EntryByUnit;
@@ -2165,15 +3762,332 @@ namespace UE::UAI::HjsonWorkspace
 				return Entry.TargetIdentity.CanonicalKey;
 			};
 
+		TFunction<bool(const TSharedPtr<FJsonValue>&, TSharedPtr<FJsonValue>&, TArray<FString>&)> InternValueDefinition;
+		auto DescribeObjectBranches = [](const FKeyedItemProjectionContract& Contract) {
+			const auto ObjectBranches = MakeShared<FJsonObject>();
+			for (const auto& ObjectPolicy : Contract.ObjectFieldPolicies)
+			{
+				if (ObjectPolicy.Value.DiscriminatorField.IsEmpty()) continue;
+				const auto BranchContract = MakeShared<FJsonObject>();
+				BranchContract->SetStringField(TEXT("discriminator"), ObjectPolicy.Value.DiscriminatorField);
+				const auto Variants = MakeShared<FJsonObject>();
+				const auto RequiredVariants = MakeShared<FJsonObject>();
+				for (const auto& Branch : ObjectPolicy.Value.BranchFields)
+				{
+					TArray<FString> Names = Branch.Value.Array();
+					Names.Sort();
+					TArray<TSharedPtr<FJsonValue>> Members;
+					for (const FString& Name : Names) Members.Add(MakeShared<FJsonValueString>(Name));
+					Variants->SetArrayField(Branch.Key, Members);
+					TArray<TSharedPtr<FJsonValue>> RequiredMembers;
+					for (const auto& Name : Names)
+						if (!ObjectPolicy.Value.ExclusiveBranchFields.ContainsByPredicate([&](const auto& Group) { return Group.Contains(Name); })) RequiredMembers.Add(MakeShared<FJsonValueString>(Name));
+					RequiredVariants->SetArrayField(Branch.Key, RequiredMembers);
+				}
+				BranchContract->SetObjectField(ObjectPolicy.Value.ExclusiveBranchFields.IsEmpty() ? TEXT("required_and_allowed_members") : TEXT("allowed_members"), Variants);
+				if (!ObjectPolicy.Value.ExclusiveBranchFields.IsEmpty())
+				{
+					BranchContract->SetObjectField(TEXT("required_members"), RequiredVariants);
+					TArray<TSharedPtr<FJsonValue>> Groups;
+					for (const auto& Group : ObjectPolicy.Value.ExclusiveBranchFields)
+					{
+						TArray<FString> Names = Group.Array(); Names.Sort(); TArray<TSharedPtr<FJsonValue>> Members;
+						for (const auto& Name : Names) Members.Add(MakeShared<FJsonValueString>(Name));
+						Groups.Add(MakeShared<FJsonValueArray>(Members));
+					}
+					BranchContract->SetArrayField(TEXT("exactly_one_when_allowed"), Groups);
+				}
+				ObjectBranches->SetObjectField(ObjectPolicy.Key, BranchContract);
+			}
+			return ObjectBranches;
+		};
+		TFunction<bool(const FCompositionEntryView&, FString&)> EnsurePropertyDefinition;
+		InternValueDefinition = [&](const TSharedPtr<FJsonValue>& Input,
+			TSharedPtr<FJsonValue>& Output, TArray<FString>& Dependencies) -> bool
+		{
+			if (!Input.IsValid() || Input->Type != EJson::Object)
+			{
+				OutError.SetSourceFailure(TEXT("composition_value_definition_invalid"), TEXT("A value definition must be an object.")); return false;
+			}
+			const auto Object = Input->AsObject();
+			const TSharedPtr<FJsonObject>* NativeType = nullptr;
+			if (Object->TryGetObjectField(TEXT("type"), NativeType))
+			{
+				FCompositionEntryView FieldDescriptor;
+				FieldDescriptor.Type = *NativeType;
+				FieldDescriptor.bEditable = true;
+				// Re-interning a complete nested definition must preserve its contract.
+				// Codec-only descriptors may omit these fields; their defaults stay unchanged.
+				if (Object->HasField(TEXT("editable"))
+					&& !Object->TryGetBoolField(TEXT("editable"), FieldDescriptor.bEditable))
+				{ OutError.SetSourceFailure(TEXT("composition_value_definition_invalid"), TEXT("Value-definition editable must be a boolean."), FString(), TEXT("/editable")); return false; }
+				const TSharedPtr<FJsonObject>* Constraints = nullptr;
+				if (Object->HasField(TEXT("constraints")))
+				{
+					if (!Object->TryGetObjectField(TEXT("constraints"), Constraints))
+					{ OutError.SetSourceFailure(TEXT("composition_value_definition_invalid"), TEXT("Value-definition constraints must be an object."), FString(), TEXT("/constraints")); return false; }
+					for (const auto& Constraint : (*Constraints)->Values)
+					{
+						FString Value;
+						if (!Constraint.Value || !Constraint.Value->TryGetString(Value))
+						{ OutError.SetSourceFailure(TEXT("composition_value_definition_invalid"), FString::Printf(TEXT("Constraint '%s' must be a string."), *Constraint.Key), FString(), TEXT("/constraints/") + EscapeJsonPointerSegment(Constraint.Key)); return false; }
+						FieldDescriptor.Constraints.Add(Constraint.Key, MoveTemp(Value));
+					}
+				}
+				FieldDescriptor.ValueDefinition = Object->TryGetField(TEXT("value_definition"));
+				FieldDescriptor.CandidatesHeader = Object->TryGetField(TEXT("candidates_header"));
+				FieldDescriptor.Candidates = Object->TryGetField(TEXT("candidates"));
+				FString DefinitionId;
+				if (!EnsurePropertyDefinition(FieldDescriptor, DefinitionId)) return false;
+				Dependencies.AddUnique(DefinitionId);
+				Output = MakeShared<FJsonValueString>(DefinitionId);
+				return true;
+			}
+			FString Builtin;
+			if (Object->Values.Num() == 1 && Object->HasField(TEXT("hash_source")))
+			{
+				Output = Input;
+				return true;
+			}
+			if (Object->Values.Num() == 1 && Object->TryGetStringField(TEXT("builtin"), Builtin)
+				&& (Builtin == TEXT("text") || Builtin == TEXT("owned_object") || Builtin == TEXT("property_bag")))
+			{
+				Output = Input;
+				return true;
+			}
+			const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
+			if (Object->TryGetArrayField(TEXT("items"), Items))
+			{
+				TArray<TSharedPtr<FJsonValue>> ProjectedItems;
+				for (const auto& Item : *Items)
+				{
+					if (Item.IsValid() && Item->Type == EJson::Null) { ProjectedItems.Add(Item); continue; }
+					TSharedPtr<FJsonValue> Projected;
+					if (!InternValueDefinition(Item, Projected, Dependencies)) return false;
+					ProjectedItems.Add(Projected);
+				}
+				const auto Result = MakeShared<FJsonObject>();
+				// Intern only structural child definitions. Preserve the remaining
+				// contract metadata rather than maintaining another partial key list.
+				Result->Values = Object->Values;
+				Result->SetArrayField(TEXT("items"), ProjectedItems);
+				if (const auto Element = Object->TryGetField(TEXT("element_definition")))
+				{
+					TSharedPtr<FJsonValue> Projected;
+					if (!InternValueDefinition(Element, Projected, Dependencies)) return false;
+					Result->SetField(TEXT("element_definition"), Projected);
+				}
+				Output = MakeShared<FJsonValueObject>(Result);
+				return true;
+			}
+			const TSharedPtr<FJsonObject>* Fields = nullptr;
+			if (Object->TryGetObjectField(TEXT("fields"), Fields))
+			{
+				const auto ProjectedFields = MakeShared<FJsonObject>();
+				for (const auto& Field : (*Fields)->Values)
+				{
+					TSharedPtr<FJsonValue> Projected;
+					if (!InternValueDefinition(Field.Value, Projected, Dependencies)) return false;
+					ProjectedFields->SetField(Field.Key, Projected);
+				}
+				const auto Result = MakeShared<FJsonObject>();
+				Result->Values = Object->Values;
+				Result->SetObjectField(TEXT("fields"), ProjectedFields);
+				Output = MakeShared<FJsonValueObject>(Result);
+				return true;
+			}
+			FString TypeName;
+			const TSharedPtr<FJsonObject>* Contract = nullptr;
+			if (!Object->TryGetStringField(TEXT("type"), TypeName) || TypeName.IsEmpty()
+				|| !Object->TryGetObjectField(TEXT("contract"), Contract))
+			{
+				OutError.SetSourceFailure(TEXT("composition_value_definition_invalid"), TypeName.IsEmpty()
+					? TEXT("Value definition requires a nonempty string type.") : TEXT("Value definition requires an object contract."), FString(), TypeName.IsEmpty() ? TEXT("/type") : TEXT("/contract")); return false;
+			}
+			const FString Signature = DefinitionIdentity(Object.ToSharedRef());
+			const FString Key = TEXT("value-definition:") + Signature;
+			FString DefinitionId;
+			if (const FString* Existing = DefinitionUnits.Find(Key)) DefinitionId = *Existing;
+			else
+			{
+				DefinitionId = StableId(TEXT("property_definition"), Key);
+				FUnitDraft Definition;
+				Definition.UnitId = DefinitionId;
+				Definition.UnitKind = ESemanticUnitKind::CollectionState;
+				Definition.OwnerRef = TargetId;
+				Definition.SemanticTypeRef = TEXT("uai.authoring.property_definition/1");
+				Definition.Role = TEXT("property_definition");
+				Definition.FieldSetRef = DefinitionId;
+				Definition.SourceProvenance = Provenance;
+				const auto Type = MakeShared<FJsonObject>();
+				Type->SetStringField(TEXT("type_id"), TypeName);
+				for (const auto& Field : TArray<TPair<FString, TSharedPtr<FJsonValue>>>{
+					{TEXT("type"), MakeShared<FJsonValueObject>(Type)},
+					{TEXT("name"), MakeShared<FJsonValueString>(TypeName)},
+					{TEXT("value_definition"), MakeShared<FJsonValueObject>(*Contract)}})
+				{
+					FUeAgentCanonicalValuePtr Value;
+					if (!TryCanonicalizeJson(Field.Value, Resources, Value, OutError)) return false;
+					Definition.Values.Add(Field.Key, Value.ToSharedRef());
+				}
+				DefinitionUnits.Add(Key, DefinitionId);
+				AddDraft(MoveTemp(Definition));
+			}
+			Dependencies.AddUnique(DefinitionId);
+			Output = MakeShared<FJsonValueString>(DefinitionId);
+			return true;
+		};
+
+		EnsurePropertyDefinition =
+			[&](const FCompositionEntryView& Entry, FString& OutDefinitionId) -> bool
+		{
+			OutDefinitionId.Reset();
+			if (!Entry.Type.IsValid()) return true;
+			TSharedPtr<FJsonValue> ProjectedValueDefinition;
+			TArray<FString> ValueDefinitionDependencies;
+			if (Entry.ValueDefinition.IsValid()
+				&& !InternValueDefinition(Entry.ValueDefinition, ProjectedValueDefinition, ValueDefinitionDependencies)) return false;
+			const auto Identity = MakeShared<FJsonObject>();
+			Identity->SetObjectField(TEXT("type"), Entry.Type);
+			Identity->SetBoolField(TEXT("editable"), Entry.bEditable);
+			const auto IdentityConstraints = MakeShared<FJsonObject>();
+			TArray<FString> Keys;
+			Entry.Constraints.GetKeys(Keys); Keys.Sort();
+			for (const FString& Key : Keys)
+			{
+				FString Value = Entry.Constraints.FindChecked(Key);
+				// Only the native numeric bound contracts have numeric equivalence.
+				// Scope, expressions, class paths and arbitrary metadata retain their exact identity.
+				if (Key == TEXT("clamp_min") || Key == TEXT("clamp_max") || Key == TEXT("ui_min") || Key == TEXT("ui_max"))
+				{
+					FString Normalized;
+					if (TryNormalizeNumberLexeme(Value, Normalized)) Value = MoveTemp(Normalized);
+				}
+				IdentityConstraints->SetStringField(Key, Value);
+			}
+			Identity->SetObjectField(TEXT("constraints"), IdentityConstraints);
+			Identity->SetField(TEXT("candidates_header"), OrderedDefinitionIdentity(Entry.CandidatesHeader));
+			Identity->SetField(TEXT("candidates"), OrderedDefinitionIdentity(Entry.Candidates));
+			// Child definitions have already been interned by their complete normalized
+			// contracts, so equivalent nested bounds cannot split the parent definition.
+			Identity->SetField(TEXT("value_definition"), OrderedDefinitionIdentity(ProjectedValueDefinition));
+			const FString Signature = DefinitionIdentity(Identity);
+			const FString DefinitionKey = TEXT("definition:") + Signature;
+			if (const FString* Existing = DefinitionUnits.Find(DefinitionKey))
+			{
+				OutDefinitionId = *Existing; return true;
+			}
+			OutDefinitionId = StableId(TEXT("property_definition"), Signature);
+			FUnitDraft Definition;
+			Definition.UnitId = OutDefinitionId;
+			Definition.UnitKind = ESemanticUnitKind::CollectionState;
+			Definition.OwnerRef = TargetId;
+			Definition.SemanticTypeRef = TEXT("uai.authoring.property_definition/1");
+			Definition.Role = TEXT("property_definition");
+			Definition.FieldSetRef = OutDefinitionId;
+			Definition.SourceProvenance = Provenance;
+			if (ProjectedValueDefinition.IsValid())
+			{
+				FUeAgentCanonicalValuePtr Value;
+				if (!TryCanonicalizeJson(ProjectedValueDefinition, Resources, Value, OutError)) return false;
+				Definition.Values.Add(TEXT("value_definition"), Value.ToSharedRef());
+				Definition.DependencyRefs = MoveTemp(ValueDefinitionDependencies);
+			}
+			FUeAgentCanonicalValuePtr TypeValue;
+			FUeAgentStateSemanticError SemanticError;
+			if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(Entry.Type.ToSharedRef()), Resources, TypeValue, OutError)) return false;
+			Definition.Values.Add(TEXT("type"), TypeValue.ToSharedRef());
+			FUeAgentCanonicalValuePtr EditableValue;
+			if (!FUeAgentCanonicalValue::TryBoolean(Entry.bEditable, Resources, EditableValue, SemanticError))
+			{
+				OutError.SetFailure(SemanticError, FString()); return false;
+			}
+			Definition.Values.Add(TEXT("editable"), EditableValue.ToSharedRef());
+			if (!Entry.Constraints.IsEmpty())
+			{
+				TSharedRef<FJsonObject> ConstraintObject = MakeShared<FJsonObject>();
+				for (const FString& Key : Keys)
+				{
+					ConstraintObject->SetStringField(Key, Entry.Constraints.FindChecked(Key));
+				}
+				FUeAgentCanonicalValuePtr ConstraintValue;
+				if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(ConstraintObject), Resources, ConstraintValue, OutError)) return false;
+				Definition.Values.Add(TEXT("constraints"), ConstraintValue.ToSharedRef());
+			}
+			FUeAgentCanonicalValuePtr CandidateHeaderValue;
+			if (Entry.CandidatesHeader.IsValid())
+			{
+				if (!TryCanonicalizeJson(Entry.CandidatesHeader, Resources, CandidateHeaderValue, OutError)) return false;
+				Definition.Values.Add(TEXT("candidates_header"), CandidateHeaderValue.ToSharedRef());
+			}
+			FUeAgentCanonicalValuePtr CandidateValue;
+			if (Entry.Candidates.IsValid())
+			{
+				if (!TryCanonicalizeJson(Entry.Candidates, Resources, CandidateValue, OutError)) return false;
+				Definition.Values.Add(TEXT("candidates"), CandidateValue.ToSharedRef());
+			}
+			DefinitionUnits.Add(DefinitionKey, OutDefinitionId);
+			AddDraft(MoveTemp(Definition));
+			return true;
+		};
+
+		auto BindDocumentValue = [&](const FString& UnitId, const FCompositionEntryView& Entry,
+			const FDocumentAddress& Address, bool bWholeValue)
+		{
+			if (!DocumentBindings) return true;
+			if (DocumentBindings->Contains(UnitId))
+			{
+				OutError.SetSourceFailure(TEXT("composition_document_address_ambiguous"), TEXT("A composed unit is bound to more than one document address."), UnitId, DocumentAddressPointer(Address));
+				return false;
+			}
+			DocumentBindings->Add(UnitId, {
+				DocumentSourceKey(Entry.SemanticId, Entry.TargetIdentity.CanonicalKey), Address, bWholeValue});
+			return true;
+		};
+
+		const auto GetDocumentCollectionContract = [](
+			const FString& TargetKind,
+			const FCompositionEntryView& Entry,
+			const FDocumentVisit& Visit) -> const FKeyedItemProjectionContract*
+		{
+			if (TargetKind == TEXT("ue.control_rig.asset")
+				&& Entry.SemanticId == TEXT("uai.semantic.rigging.control_rig.document"))
+			{
+				const FString RootField = Visit.Path == TEXT("hierarchy/elements")
+					? TEXT("rig_elements")
+					: Visit.Path == TEXT("graphs/graphs")
+						? TEXT("rig_graphs") : FString();
+				for (const auto& Contract : GetKeyedItemProjectionContracts())
+					if (Contract.RootField == RootField) return &Contract;
+			}
+			if (TargetKind == TEXT("ue.ik_rig.asset")
+				&& Entry.SemanticId == TEXT("uai.semantic.rigging.ik_rig.document")
+				&& (Visit.Path == TEXT("goals") || Visit.Path == TEXT("solvers") || Visit.Path == TEXT("chains")))
+			{
+				for (const auto& Contract : GetKeyedItemProjectionContracts())
+					if (Contract.RootField == TEXT("ik_") + Visit.Path) return &Contract;
+			}
+			if (TargetKind == TEXT("ue.ik_retargeter.asset")
+				&& Entry.SemanticId == TEXT("uai.semantic.rigging.ik_retargeter.document")
+				&& (Visit.Path == TEXT("ops") || Visit.Path == TEXT("mappings") || Visit.Path == TEXT("poses")))
+			{
+				for (const auto& Contract : GetKeyedItemProjectionContracts())
+					if (Contract.RootField == TEXT("ik_retarget_") + Visit.Path) return &Contract;
+			}
+			return FindLevelSequenceCollectionContract(TargetKind, Entry.SemanticId, Visit.SurfaceId, Visit.Path);
+		};
 		auto AddDocumentProperty =
 			[&](
 				const FCompositionEntryView& Entry,
 				const FString& OwnerId,
 				const FString& SurfaceId,
 				const FString& Path,
-				const FUeAgentCanonicalValuePtr& Value) -> bool
-			{
-				FUnitDraft Property;
+				const FUeAgentCanonicalValuePtr& Value,
+				const FDocumentAddress& Address) -> bool
+		{
+			FString DefinitionId;
+			if (!EnsurePropertyDefinition(Entry, DefinitionId)) return false;
+			FUnitDraft Property;
 				Property.UnitId = StableId(
 					TEXT("property"),
 					Request.TargetKind + TEXT("|")
@@ -2186,20 +4100,20 @@ namespace UE::UAI::HjsonWorkspace
 					Entry.SemanticId + TEXT("#") + Path;
 				Property.Role = SurfaceId;
 				Property.FieldSetRef = Path;
-				Property.TargetIdentityKey =
+			Property.TargetIdentityKey =
 					BindingForOwner(OwnerId, Entry);
-				Property.SourceProvenance =
+			Property.SourceProvenance =
 					Entry.Provenance.IsEmpty()
 						? Provenance
 						: Entry.Provenance;
-				if (!Value.IsValid())
+			if (!DefinitionId.IsEmpty()) Property.DependencyRefs.Add(DefinitionId);
+			if (!Value.IsValid())
 				{
-					OutError.Set(
-						TEXT("composition_document_value_invalid"),
-						Path);
+					OutError.SetSourceFailure(TEXT("composition_document_value_invalid"), TEXT("The document property has no captured value."), Property.UnitId, DocumentAddressPointer(Address));
 					return false;
 				}
 				Property.Values.Add(TEXT("value"), Value.ToSharedRef());
+				if (!BindDocumentValue(Property.UnitId, Entry, Address, true)) return false;
 				AddDraft(MoveTemp(Property));
 				return true;
 			};
@@ -2224,25 +4138,27 @@ namespace UE::UAI::HjsonWorkspace
 							Fields[Index].Value);
 						const bool bStructured =
 							IsStructuredValue(Fields[Index].Value);
+						const auto* ValueFields = CompositionContract.DocumentValueFields.Find(Entry.SemanticId);
+						const bool bNamedValue = ValueFields && ValueFields->Contains(Key);
 						const FString SurfaceId =
 							ChooseDocumentSurface(
 								CompositionContract,
 								Key,
-								bStructured);
+								bStructured && !bNamedValue);
 						const FString* SurfaceOwner =
 							SurfaceUnits.Find(SurfaceId);
 						if (!SurfaceOwner)
 						{
 							continue;
 						}
-						if (!bStructured)
+						if (!bStructured || bNamedValue)
 						{
 							if (!AddDocumentProperty(
 								Entry,
 								*SurfaceOwner,
 								SurfaceId,
 								Key,
-								Value))
+									Value, ChildAddress({}, Key)))
 							{
 								return false;
 							}
@@ -2254,7 +4170,7 @@ namespace UE::UAI::HjsonWorkspace
 							Key,
 							*SurfaceOwner,
 							SurfaceId,
-							INDEX_NONE});
+							INDEX_NONE, ChildAddress({}, Key)});
 					}
 				}
 				else
@@ -2279,7 +4195,7 @@ namespace UE::UAI::HjsonWorkspace
 							*SurfaceOwner,
 							SurfaceId,
 							TEXT("document"),
-							Entry.Value);
+							Entry.Value, {});
 					}
 					Visits.Add({
 						Entry.Value,
@@ -2287,7 +4203,7 @@ namespace UE::UAI::HjsonWorkspace
 						TEXT("document"),
 						*SurfaceOwner,
 						SurfaceId,
-						INDEX_NONE});
+						INDEX_NONE, {}});
 				}
 
 				while (!Visits.IsEmpty())
@@ -2296,14 +4212,295 @@ namespace UE::UAI::HjsonWorkspace
 						Visits.Pop(EAllowShrinking::No);
 					if (!Visit.Value.IsValid())
 					{
-						OutError.Set(
-							TEXT("composition_document_value_invalid"),
-							Visit.Path);
+						OutError.SetSourceFailure(TEXT("composition_document_value_invalid"), TEXT("The document property has no captured value."), Visit.OwnerId, DocumentAddressPointer(Visit.Address));
 						return false;
 					}
-					if (Visit.Value->GetKind()
-						== EUeAgentValueKind::Array)
+					const FKeyedItemProjectionContract* KeyedContract =
+						GetDocumentCollectionContract(Request.TargetKind, Entry, Visit);
+					// Scalar arrays are values, including at the document root. Splitting
+					// them into fixed item refs loses editable membership/order (e.g. solver_order).
+					if (!KeyedContract && IsScalarCollection(Visit.Value.ToSharedRef()))
 					{
+						if (!AddDocumentProperty(Entry, Visit.OwnerId, Visit.SurfaceId,
+							Visit.Path, Visit.Value, Visit.Address)) return false;
+						continue;
+					}
+					if (Visit.Value->GetKind() == EUeAgentValueKind::Array || KeyedContract)
+					{
+						if (KeyedContract)
+						{
+							const FKeyedItemProjectionContract& Contract = *KeyedContract;
+							FUeAgentCanonicalValuePtr VisibleKeys;
+							FKeyedItemReferenceContext ReferenceContext;
+							if (Entry.Value.IsValid() && Entry.Value->GetKind() == EUeAgentValueKind::Object)
+								for (const auto& Root : Entry.Value->GetObjectItems())
+									if (const auto* Target = FindLevelSequenceCollectionContract(Request.TargetKind, Entry.SemanticId, Visit.SurfaceId, Root.Key))
+										ReferenceContext.Add(Root.Key, {Target, &Root.Value.Get(), nullptr, false});
+							if (!TryProjectKeyedItemVisibleValue(
+									Visit.Path, *Visit.Value, Contract, Resources,
+									VisibleKeys, OutError, EKeyedItemProjectionInputKind::CapturedItems, &ReferenceContext))
+							{
+								return false;
+							}
+							FUnitDraft Collection;
+							Collection.UnitId = StableId(
+								TEXT("keyed_collection"),
+								Request.TargetKind + TEXT("|") + Entry.SemanticId
+									+ TEXT("|") + Entry.TargetIdentity.CanonicalKey
+									+ TEXT("|") + Visit.Path);
+							Collection.UnitKind = ESemanticUnitKind::StructureState;
+							Collection.OwnerRef = Visit.OwnerId;
+							Collection.SemanticTypeRef = Entry.SemanticId + TEXT("#") + Visit.Path;
+							Collection.Role = Visit.SurfaceId;
+							Collection.TargetIdentityKey = BindingForOwner(Visit.OwnerId, Entry);
+							Collection.SourceProvenance = Entry.Provenance.IsEmpty()
+								? Provenance : Entry.Provenance;
+							Collection.Values.Add(Contract.RootField, VisibleKeys.ToSharedRef());
+							// One template/definition owner serves root tracks and tracks nested
+							// under captured bindings. The binding alias is supplied by keyed projection.
+							auto InternRecordProperties = [&](const FUeAgentCanonicalValue& Record, const FString& Field,
+								FUnitDraft& DefinitionCollection, TSharedPtr<FJsonObject>& Out) {
+								Out = MakeShared<FJsonObject>();
+								const auto* Definitions = Record.GetObjectItems().FindByPredicate([&](const auto& Item) { return Item.Key == Field; });
+								if (!Field.IsEmpty() && !Definitions) return true;
+								UE::UAI::Contract::FDiagnostic ProjectionError;
+								const auto& Entries = Field.IsEmpty() ? Record.GetObjectItems() : Definitions->Value->GetObjectItems();
+								for (const auto& Definition : Entries)
+								{
+									TSharedPtr<FJsonValue> Json, Reference;
+									if (!CanonicalJson::TryToJsonValue(Definition.Value.Get(), Json, ProjectionError))
+                                { OutError.SetFailure(ProjectionError, Visit.Path); return false; }
+                                if (!InternValueDefinition(Json, Reference, DefinitionCollection.DependencyRefs)) return false;
+									Out->SetField(Definition.Key, Reference);
+								}
+								return true;
+							};
+							auto BuildTrackDefinitions = [&](const FKeyedItemProjectionContract& TrackContract,
+								const FUeAgentCanonicalValue& TrackValue, FUnitDraft& DefinitionCollection) -> bool
+							{
+								FUeAgentStateSemanticError KeyError;
+								FUeAgentCanonicalValuePtr Template;
+								FKeyedItemProjectionContract TemplateContract;
+								FUeAgentCanonicalValuePtr DefaultMap;
+								TSharedPtr<FJsonValue> TemplateJson, DefinitionRef;
+								UE::UAI::Contract::FDiagnostic ProjectionError;
+								FUeAgentCanonicalValuePtr CanonicalDefinitionRef;
+								// Each track supplies native defaults. Reuse its exact readable alias policy,
+								// then intern projected templates by content (Float/Double may share one).
+								FKeyedItemProjectionContract DefaultSourceContract = TrackContract;
+								DefaultSourceContract.VisibleFieldPolicy = {{TEXT("default_range"), TEXT("default_channels"), TEXT("default_native_channels"), TEXT("default_properties"), TEXT("default_property_definitions"), TEXT("property_definitions"), TEXT("sections")}};
+								DefaultSourceContract.CollectionFieldContracts.Reset();
+								FUeAgentCanonicalValuePtr DefaultSources;
+								if (!TryProjectKeyedItemVisibleValue(Visit.Path, TrackValue, DefaultSourceContract,
+									Resources, DefaultSources, OutError)) return false;
+								TArray<TPair<FString, FUeAgentCanonicalValueRef>> SectionDefinitions, KeyDefinitions, ChannelDefinitions;
+								const auto ObjectPropertyDefinitions = MakeShared<FJsonObject>();
+								TemplateContract = GetLevelSequenceScalarSectionProjectionContract();
+								TemplateContract.CapturedRecordIdentityField.Reset();
+								for (const auto& Source : DefaultSources->GetObjectItems())
+								{
+									TSharedPtr<FJsonObject> TrackPropertiesDefinition, DefaultPropertiesDefinition;
+									if (!InternRecordProperties(Source.Value.Get(), TEXT("property_definitions"), DefinitionCollection, TrackPropertiesDefinition)
+										|| !InternRecordProperties(Source.Value.Get(), TEXT("default_property_definitions"), DefinitionCollection, DefaultPropertiesDefinition)) return false;
+									const auto OwnerDefinitions = MakeShared<FJsonObject>();
+									OwnerDefinitions->SetObjectField(TEXT("track"), TrackPropertiesDefinition);
+									OwnerDefinitions->SetObjectField(TEXT("section_template"), DefaultPropertiesDefinition);
+									const auto* CapturedSections = Source.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("sections"); });
+									if (CapturedSections)
+									{
+										auto DefinitionContract = GetLevelSequenceScalarSectionProjectionContract();
+										DefinitionContract.VisibleFieldPolicy = {{TEXT("property_definitions")}};
+										FUeAgentCanonicalValuePtr Records;
+										if (!TryProjectKeyedItemVisibleValue(Visit.Path, CapturedSections->Value.Get(), DefinitionContract, Resources, Records, OutError)) return false;
+										const auto Sections = MakeShared<FJsonObject>();
+										for (const auto& Record : Records->GetObjectItems())
+										{
+											TSharedPtr<FJsonObject> Definitions;
+											if (!InternRecordProperties(Record.Value.Get(), TEXT("property_definitions"), DefinitionCollection, Definitions)) return false;
+											Sections->SetObjectField(Record.Key, Definitions);
+										}
+										OwnerDefinitions->SetObjectField(TEXT("sections"), Sections);
+									}
+									ObjectPropertyDefinitions->SetObjectField(Source.Key, OwnerDefinitions);
+									const auto* Channels = Source.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("default_channels"); });
+									const auto* Range = Source.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("default_range"); });
+									const auto* ObjectProperties = Source.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("default_properties"); });
+									if (!Channels || !Range) { OutError.SetSourceFailure(TEXT("composition_native_section_defaults_missing"), FString::Printf(TEXT("Track '%s' has no captured %s required to create sections."), *Source.Key, !Channels ? TEXT("default_channels") : TEXT("default_range")), Visit.Path); return false; }
+									FKeyedItemProjectionContract ChannelSourceContract = GetLevelSequenceScalarChannelProjectionContract();
+									ChannelSourceContract.VisibleFieldPolicy = {{TEXT("default_key"), TEXT("key_properties_definition"), TEXT("key_value_definition"), TEXT("default"), TEXT("properties"), TEXT("properties_definition"), TEXT("keys")}};
+									FUeAgentCanonicalValuePtr ChannelSources;
+									if (!TryProjectKeyedItemVisibleValue(Visit.Path, Channels->Value.Get(), ChannelSourceContract, Resources, ChannelSources, OutError)) return false;
+									TArray<TPair<FString, FUeAgentCanonicalValueRef>> ChannelKeyDefinitions, ChannelPropertyDefinitions;
+									for (const auto& ChannelSource : ChannelSources->GetObjectItems())
+									{
+										const auto* Properties = ChannelSource.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("default_key"); });
+										const auto* PropertyDefinition = ChannelSource.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("key_properties_definition"); });
+										if (!Properties) { OutError.SetSourceFailure(TEXT("composition_native_key_defaults_missing"), FString::Printf(TEXT("Channel '%s' on track '%s' has no captured default_key required to create keys."), *ChannelSource.Key, *Source.Key), Visit.Path); return false; }
+										const auto& DefaultFields = Properties->Value->GetObjectItems();
+										FUeAgentCanonicalValuePtr KeyDefaults, KeyTemplate;
+										FKeyedItemProjectionContract KeyTemplateContract = GetLevelSequenceScalarKeyProjectionContract();
+										KeyTemplateContract.CapturedRecordIdentityField.Reset();
+										if (!FUeAgentCanonicalValue::TryObject(DefaultFields, Resources, KeyDefaults, KeyError)
+											|| !FUeAgentCanonicalValue::TryObject({{TEXT("new_key"), KeyDefaults.ToSharedRef()}}, Resources, DefaultMap, KeyError)
+											|| !TryProjectKeyedItemVisibleValue(Visit.Path, *DefaultMap, KeyTemplateContract, Resources, KeyTemplate, OutError)
+											|| !CanonicalJson::TryToJsonValue(KeyTemplate->GetObjectItems()[0].Value.Get(), TemplateJson, ProjectionError)) { if (!KeyError.IsEmpty()) OutError.SetFailure(KeyError, Visit.Path); else if (!ProjectionError.IsEmpty()) OutError.SetFailure(ProjectionError, Visit.Path); return false; }
+										const auto KeyContract = MakeShared<FJsonObject>(); KeyContract->SetField(TEXT("template"), TemplateJson);
+										KeyContract->SetStringField(TEXT("time_unit"), TEXT("sequence_tick"));
+										if (PropertyDefinition)
+										{
+											TSharedPtr<FJsonValue> NativeDefinition, PublicDefinition;
+											if (!CanonicalJson::TryToJsonValue(PropertyDefinition->Value.Get(), NativeDefinition, ProjectionError)
+												|| !InternValueDefinition(NativeDefinition, PublicDefinition, DefinitionCollection.DependencyRefs)) { if (!ProjectionError.IsEmpty()) OutError.SetFailure(ProjectionError, Visit.Path); return false; }
+											KeyContract->SetField(TEXT("properties_definition"), PublicDefinition);
+										}
+										TSharedPtr<FJsonValue> PublicValueDefinition;
+										const auto* ValueDefinition = ChannelSource.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("key_value_definition"); });
+										if (ValueDefinition)
+										{
+											TSharedPtr<FJsonValue> NativeDefinition;
+											if (!CanonicalJson::TryToJsonValue(ValueDefinition->Value.Get(), NativeDefinition, ProjectionError)
+												|| !InternValueDefinition(NativeDefinition, PublicValueDefinition, DefinitionCollection.DependencyRefs)) { if (!ProjectionError.IsEmpty()) OutError.SetFailure(ProjectionError, Visit.Path); return false; }
+											const bool bLexeme = TemplateJson->AsObject()->HasField(TEXT("value_lexeme"));
+											KeyContract->SetField(bLexeme ? TEXT("value_lexeme_definition") : TEXT("value_definition"), PublicValueDefinition);
+											if (bLexeme) KeyContract->SetBoolField(TEXT("value_lexeme_requires_selection"), TemplateJson->AsObject()->GetStringField(TEXT("value_lexeme")).IsEmpty());
+										}
+										const auto KeyDefinition = MakeShared<FJsonObject>(); KeyDefinition->SetStringField(TEXT("type"), TEXT("LevelSequenceScalarKey"));
+										KeyDefinition->SetObjectField(TEXT("contract"), KeyContract);
+										if (!InternValueDefinition(MakeShared<FJsonValueObject>(KeyDefinition), DefinitionRef, DefinitionCollection.DependencyRefs)
+											|| !TryCanonicalizeJson(DefinitionRef, Resources, CanonicalDefinitionRef, OutError)) return false;
+										ChannelKeyDefinitions.Emplace(ChannelSource.Key, CanonicalDefinitionRef.ToSharedRef());
+										const auto ChannelContract = MakeShared<FJsonObject>();
+										TSharedPtr<FJsonValue> ChannelJson;
+										if (!CanonicalJson::TryToJsonValue(ChannelSource.Value.Get(), ChannelJson, ProjectionError)) { if (!ProjectionError.IsEmpty()) OutError.SetFailure(ProjectionError, Visit.Path); return false; }
+										const auto ChannelTemplate = ChannelJson->AsObject();
+										const auto NativeChannelDefinition = ChannelTemplate->TryGetField(TEXT("properties_definition"));
+										ChannelTemplate->RemoveField(TEXT("default_key"));
+										ChannelTemplate->RemoveField(TEXT("key_properties_definition"));
+										ChannelTemplate->RemoveField(TEXT("properties_definition"));
+										ChannelTemplate->RemoveField(TEXT("key_value_definition"));
+										ChannelContract->SetObjectField(TEXT("template"), ChannelTemplate);
+										if (PublicValueDefinition) {
+											const bool bLexeme = TemplateJson->AsObject()->HasField(TEXT("value_lexeme"));
+											ChannelContract->SetField(bLexeme ? TEXT("value_lexeme_definition") : TEXT("value_definition"), PublicValueDefinition);
+											if (bLexeme) ChannelContract->SetStringField(TEXT("unnamed_value_policy"), TEXT("An empty existing name preserves its captured native value; new values require an enum selection."));
+										}
+										ChannelContract->SetObjectField(TEXT("object_branches"), DescribeObjectBranches(GetLevelSequenceScalarChannelProjectionContract()));
+										if (NativeChannelDefinition.IsValid())
+										{
+											TSharedPtr<FJsonValue> PublicDefinition;
+											if (!InternValueDefinition(NativeChannelDefinition, PublicDefinition, DefinitionCollection.DependencyRefs)) return false;
+											ChannelContract->SetField(TEXT("properties_definition"), PublicDefinition);
+										}
+										const auto ChannelDefinition = MakeShared<FJsonObject>();
+										ChannelDefinition->SetStringField(TEXT("type"), TEXT("LevelSequenceScalarChannel"));
+										ChannelDefinition->SetObjectField(TEXT("contract"), ChannelContract);
+										if (!InternValueDefinition(MakeShared<FJsonValueObject>(ChannelDefinition), DefinitionRef, DefinitionCollection.DependencyRefs)
+											|| !TryCanonicalizeJson(DefinitionRef, Resources, CanonicalDefinitionRef, OutError)) return false;
+										ChannelPropertyDefinitions.Emplace(ChannelSource.Key, CanonicalDefinitionRef.ToSharedRef());
+									}
+									FUeAgentCanonicalValuePtr ChannelDefinitionMap;
+									if (!FUeAgentCanonicalValue::TryObject(ChannelKeyDefinitions, Resources, ChannelDefinitionMap, KeyError)) { if (!KeyError.IsEmpty()) OutError.SetFailure(KeyError, Visit.Path); return false; }
+									KeyDefinitions.Emplace(Source.Key, ChannelDefinitionMap.ToSharedRef());
+									if (!FUeAgentCanonicalValue::TryObject(ChannelPropertyDefinitions, Resources, ChannelDefinitionMap, KeyError)) { if (!KeyError.IsEmpty()) OutError.SetFailure(KeyError, Visit.Path); return false; }
+									ChannelDefinitions.Emplace(Source.Key, ChannelDefinitionMap.ToSharedRef());
+									FUeAgentCanonicalValuePtr NativeDefaults;
+									auto NativeDefaultFields = TArray<TPair<FString, FUeAgentCanonicalValueRef>>{{TEXT("range"), Range->Value}, {TEXT("channels"), Channels->Value}};
+									if (ObjectProperties) NativeDefaultFields.Emplace(TEXT("properties"), ObjectProperties->Value);
+									if (const auto* NativeContext = Source.Value->GetObjectItems().FindByPredicate([](const auto& Field) { return Field.Key == TEXT("default_native_channels"); }))
+										NativeDefaultFields.Emplace(TEXT("native_channels"), NativeContext->Value);
+									if (!FUeAgentCanonicalValue::TryObject(NativeDefaultFields, Resources, NativeDefaults, KeyError)
+										|| !FUeAgentCanonicalValue::TryObject({{TEXT("new_section"), NativeDefaults.ToSharedRef()}}, Resources, DefaultMap, KeyError)
+										|| !TryProjectKeyedItemVisibleValue(Visit.Path, *DefaultMap, TemplateContract, Resources, Template, OutError)
+										|| !CanonicalJson::TryToJsonValue(Template->GetObjectItems()[0].Value.Get(), TemplateJson, ProjectionError)) { if (!KeyError.IsEmpty()) OutError.SetFailure(KeyError, Visit.Path); else if (!ProjectionError.IsEmpty()) OutError.SetFailure(ProjectionError, Visit.Path); return false; }
+									const auto SectionDefinitionContract = MakeShared<FJsonObject>();
+									SectionDefinitionContract->SetField(TEXT("template"), TemplateJson);
+									SectionDefinitionContract->SetStringField(TEXT("time_unit"), TEXT("sequence_tick"));
+									SectionDefinitionContract->SetObjectField(TEXT("object_branches"), DescribeObjectBranches(TemplateContract));
+									const auto SectionDefinition = MakeShared<FJsonObject>();
+									SectionDefinition->SetStringField(TEXT("type"), TEXT("LevelSequenceScalarSection"));
+									SectionDefinition->SetObjectField(TEXT("contract"), SectionDefinitionContract);
+									if (!InternValueDefinition(MakeShared<FJsonValueObject>(SectionDefinition), DefinitionRef, DefinitionCollection.DependencyRefs)
+										|| !TryCanonicalizeJson(DefinitionRef, Resources, CanonicalDefinitionRef, OutError)) return false;
+									SectionDefinitions.Emplace(Source.Key, CanonicalDefinitionRef.ToSharedRef());
+								}
+								FUeAgentCanonicalValuePtr ContextDefinitions;
+								if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(ObjectPropertyDefinitions), Resources, ContextDefinitions, OutError)) return false;
+								DefinitionCollection.Values.Add(TEXT("object_property_definitions"), ContextDefinitions.ToSharedRef());
+								if (!FUeAgentCanonicalValue::TryObject(SectionDefinitions, Resources, ContextDefinitions, KeyError))
+								{ OutError.SetFailure(KeyError, Visit.Path); return false; }
+								DefinitionCollection.Values.Add(TEXT("section_definitions"), ContextDefinitions.ToSharedRef());
+								if (!FUeAgentCanonicalValue::TryObject(KeyDefinitions, Resources, ContextDefinitions, KeyError)) { if (!KeyError.IsEmpty()) OutError.SetFailure(KeyError, Visit.Path); return false; }
+								DefinitionCollection.Values.Add(TEXT("key_definitions"), ContextDefinitions.ToSharedRef());
+								if (!FUeAgentCanonicalValue::TryObject(ChannelDefinitions, Resources, ContextDefinitions, KeyError)) { if (!KeyError.IsEmpty()) OutError.SetFailure(KeyError, Visit.Path); return false; }
+								DefinitionCollection.Values.Add(TEXT("channel_definitions"), ContextDefinitions.ToSharedRef());
+								return true;
+							};
+							if (Contract.RootField == TEXT("root_tracks") || Contract.RootField == TEXT("tracks"))
+							{
+								if (!BuildTrackDefinitions(Contract, *Visit.Value, Collection)) return false;
+							}
+							else if (Contract.RootField == TEXT("bindings"))
+							{
+								auto BindingSourcesContract = Contract;
+								BindingSourcesContract.VisibleFieldPolicy = {{TEXT("tracks"), TEXT("property_definitions"), TEXT("template_property_definitions")}};
+								BindingSourcesContract.CollectionFieldContracts.Reset();
+								FUeAgentCanonicalValuePtr BindingSources;
+								if (!TryProjectKeyedItemVisibleValue(Visit.Path, *Visit.Value, BindingSourcesContract,
+									Resources, BindingSources, OutError)) return false;
+								TMap<FString, TArray<TPair<FString, FUeAgentCanonicalValueRef>>> GroupedDefinitions;
+								for (const auto& SourceBinding : BindingSources->GetObjectItems())
+								{
+									TSharedPtr<FJsonObject> BindingProperties;
+									if (!InternRecordProperties(SourceBinding.Value.Get(), TEXT("property_definitions"), Collection, BindingProperties)) return false;
+									FUeAgentCanonicalValuePtr BindingPropertyDefinitions;
+									if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(BindingProperties), Resources, BindingPropertyDefinitions, OutError)) return false;
+									GroupedDefinitions.FindOrAdd(TEXT("binding_property_definitions")).Emplace(SourceBinding.Key, BindingPropertyDefinitions.ToSharedRef());
+									const auto* Templates = SourceBinding.Value->GetObjectItems().FindByPredicate([](const auto& Field) {
+										return Field.Key == TEXT("template_property_definitions"); });
+									if (Templates)
+									{
+										const auto Definitions = MakeShared<FJsonObject>();
+										for (const auto& Template : Templates->Value->GetObjectItems())
+										{
+											TSharedPtr<FJsonObject> TemplateProperties;
+											if (!InternRecordProperties(Template.Value.Get(), FString(), Collection, TemplateProperties)) return false;
+											Definitions->SetObjectField(Template.Key, TemplateProperties);
+										}
+										FUeAgentCanonicalValuePtr Value;
+										if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(Definitions), Resources, Value, OutError)) return false;
+										GroupedDefinitions.FindOrAdd(TEXT("template_property_definitions")).Emplace(SourceBinding.Key, Value.ToSharedRef());
+									}
+									const auto* Tracks = SourceBinding.Value->GetObjectItems().FindByPredicate([](const auto& Field) {
+										return Field.Key == TEXT("tracks"); });
+									if (!Tracks) { OutError.SetSourceFailure(TEXT("composition_binding_tracks_missing"), FString::Printf(TEXT("Binding '%s' has no captured tracks collection."), *SourceBinding.Key), Visit.Path); return false; }
+									FUnitDraft TrackDefinitions;
+									if (!BuildTrackDefinitions(GetLevelSequenceBindingScalarTrackProjectionContract(), Tracks->Value.Get(),
+										TrackDefinitions)) return false;
+									for (const auto& Dependency : TrackDefinitions.DependencyRefs) Collection.DependencyRefs.AddUnique(Dependency);
+									for (const auto& Definition : TrackDefinitions.Values)
+										GroupedDefinitions.FindOrAdd(Definition.Key).Emplace(SourceBinding.Key, Definition.Value);
+								}
+								FUeAgentStateSemanticError DefinitionError;
+								for (const auto& Group : GroupedDefinitions)
+								{
+									FUeAgentCanonicalValuePtr Value;
+									if (!FUeAgentCanonicalValue::TryObject(Group.Value, Resources, Value, DefinitionError))
+								{ OutError.SetFailure(DefinitionError, Collection.UnitId); return false; }
+									Collection.Values.Add(Group.Key, Value.ToSharedRef());
+								}
+							}
+							const FString CollectionId = Collection.UnitId;
+							if (!BindDocumentValue(CollectionId, Entry, Visit.Address, true)) return false;
+							if (DocumentBindings)
+							{
+								auto& Binding = DocumentBindings->FindChecked(CollectionId);
+							Binding.KeyedContract = &Contract;
+							Binding.CapturedItems = Visit.Value;
+							}
+							AddDraft(MoveTemp(Collection));
+							ExplicitOrder.FindOrAdd(Visit.OwnerId).Add(CollectionId);
+							continue;
+						}
 						const FString CollectionId = StableId(
 							TEXT("collection"),
 							Request.TargetKind + TEXT("|")
@@ -2349,7 +4546,7 @@ namespace UE::UAI::HjsonWorkspace
 									Visit.RoleHint,
 									CollectionId,
 									Visit.SurfaceId,
-									Index});
+									Index, ChildAddress(Visit.Address, FString(), Index)});
 							}
 							else
 							{
@@ -2381,6 +4578,8 @@ namespace UE::UAI::HjsonWorkspace
 									return false;
 								}
 								const FString ItemId = Item.UnitId;
+								if (!BindDocumentValue(ItemId, Entry,
+									ChildAddress(Visit.Address, FString(), Index), true)) return false;
 								AddDraft(MoveTemp(Item));
 								ExplicitOrder.FindOrAdd(
 									CollectionId).Insert(ItemId, 0);
@@ -2397,7 +4596,7 @@ namespace UE::UAI::HjsonWorkspace
 							Visit.OwnerId,
 							Visit.SurfaceId,
 							Visit.Path,
-							Visit.Value))
+								Visit.Value, Visit.Address))
 						{
 							return false;
 						}
@@ -2428,6 +4627,7 @@ namespace UE::UAI::HjsonWorkspace
 							? Provenance
 							: Entry.Provenance;
 					FUeAgentCanonicalValuePtr LayoutValue;
+					FString LayoutFieldKey;
 					const auto& Fields = Visit.Value->GetObjectItems();
 					for (const TPair<FString, FUeAgentCanonicalValueRef>& Field
 						: Fields)
@@ -2438,15 +4638,23 @@ namespace UE::UAI::HjsonWorkspace
 						{
 							LayoutValue =
 								FUeAgentCanonicalValuePtr(Field.Value);
+							LayoutFieldKey = Field.Key;
 							continue;
 						}
+						const FDocumentVisit ChildVisit{
+							FUeAgentCanonicalValuePtr(Field.Value), Visit.Path + TEXT("/") + Field.Key,
+							Field.Key, Unit.UnitId, Visit.SurfaceId, INDEX_NONE,
+							ChildAddress(Visit.Address, Field.Key)};
+						const bool bDocumentKeyedCollection =
+							GetDocumentCollectionContract(Request.TargetKind, Entry, ChildVisit) != nullptr;
 						if (!IsStructuredValue(Field.Value)
-							|| IsScalarCollection(Field.Value))
+							|| (IsScalarCollection(Field.Value) && !bDocumentKeyedCollection))
 						{
 							Unit.Values.Add(Field.Key, Field.Value);
 						}
 					}
 					const FString UnitId = Unit.UnitId;
+					if (!BindDocumentValue(UnitId, Entry, Visit.Address, false)) return false;
 					AddDraft(MoveTemp(Unit));
 					if (!bRelation)
 					{
@@ -2478,6 +4686,13 @@ namespace UE::UAI::HjsonWorkspace
 						{
 							return false;
 						}
+						const FString LayoutId = Layout.UnitId;
+						if (!BindDocumentValue(
+							LayoutId, Entry,
+							ChildAddress(Visit.Address, LayoutFieldKey), false))
+						{
+							return false;
+						}
 						AddDraft(MoveTemp(Layout));
 					}
 					for (int32 Index = Fields.Num() - 1;
@@ -2497,17 +4712,16 @@ namespace UE::UAI::HjsonWorkspace
 						{
 							continue;
 						}
-						if (IsScalarCollection(Child))
+						const FDocumentVisit ChildVisit{
+							FUeAgentCanonicalValuePtr(Child), Visit.Path + TEXT("/") + Key,
+							Key, UnitId, Visit.SurfaceId, INDEX_NONE,
+							ChildAddress(Visit.Address, Key)};
+						if (IsScalarCollection(Child)
+							&& GetDocumentCollectionContract(Request.TargetKind, Entry, ChildVisit) == nullptr)
 						{
 							continue;
 						}
-						Visits.Add({
-							FUeAgentCanonicalValuePtr(Child),
-							Visit.Path + TEXT("/") + Key,
-							Key,
-							UnitId,
-							Visit.SurfaceId,
-							INDEX_NONE});
+						Visits.Add(ChildVisit);
 					}
 				}
 				return true;
@@ -2515,8 +4729,12 @@ namespace UE::UAI::HjsonWorkspace
 
 		for (const FCompositionEntryView& Entry : Entries)
 		{
+			if (!Entry.bAuthoringVisible)
+			{
+				continue;
+			}
 			const FEntryRoute Route =
-				RouteEntry(Request.TargetKind, Entry.SemanticId);
+				RouteEntry(Request.TargetKind, Entry.SemanticId, Selector(Entry, TEXT("preview_target")));
 			if (Entry.bAvailable
 				&& Route.bDocument
 				&& !DecomposeDocument(Entry))
@@ -2527,12 +4745,12 @@ namespace UE::UAI::HjsonWorkspace
 
 		for (const FCompositionEntryView& Entry : Entries)
 		{
-			if (!Entry.bAvailable || !Entry.Value.IsValid())
+			if (!Entry.bAvailable || !Entry.Value.IsValid() || !Entry.bAuthoringVisible)
 			{
 				continue;
 			}
 			const FEntryRoute Route =
-				RouteEntry(Request.TargetKind, Entry.SemanticId);
+				RouteEntry(Request.TargetKind, Entry.SemanticId, Selector(Entry, TEXT("preview_target")));
 			if (Route.bDocument)
 			{
 				continue;
@@ -2549,8 +4767,7 @@ namespace UE::UAI::HjsonWorkspace
 				else if (TargetDraft.TargetIdentityKey
 					!= Entry.TargetIdentity.CanonicalKey)
 				{
-					OutError.Set(
-						TEXT("composition_target_identity_conflict"),
+					OutError.SetSourceFailure(TEXT("composition_target_identity_conflict"), TEXT("Target-level entries resolve to different target identities."),
 						Entry.SemanticId);
 					return false;
 				}
@@ -2596,6 +4813,14 @@ namespace UE::UAI::HjsonWorkspace
 				Entry.Provenance.IsEmpty()
 					? Provenance
 					: Entry.Provenance;
+			Draft.CategoryPath = Entry.CategoryPath;
+			// An item's captured field schema belongs to the shared definition
+			// catalog, not to its editable business values or identity.
+			if (Route.bItem && Entry.ValueDefinition.IsValid())
+			{
+				if (!EnsurePropertyDefinition(Entry, Draft.FieldSetRef)) return false;
+				if (!Draft.FieldSetRef.IsEmpty()) Draft.DependencyRefs.Add(Draft.FieldSetRef);
+			}
 			if (!TryBuildValues(
 				Entry.Value,
 				{
@@ -2617,7 +4842,13 @@ namespace UE::UAI::HjsonWorkspace
 			}
 			else
 			{
-				ItemUnits.Add(ItemSelectorKey(Entry), DraftId);
+				// Pins are owned leaves. Their node selector intentionally matches
+				// the parent node, so indexing a Pin as an owner would replace that
+				// node and can assign sibling Pins (or the Pin itself) as owners.
+				if (!Entry.SemanticId.EndsWith(TEXT(".pin")))
+				{
+					ItemUnits.Add(ItemSelectorKey(Entry), DraftId);
+				}
 				const FString SourceItemId =
 					Selector(Entry, TEXT("item_id"));
 				if (!SourceItemId.IsEmpty())
@@ -2637,13 +4868,35 @@ namespace UE::UAI::HjsonWorkspace
 				Drafts[DraftIndex.FindChecked(Pair.Key)];
 			const FCompositionEntryView& Entry = *Pair.Value;
 			const FEntryRoute Route =
-				RouteEntry(Request.TargetKind, Entry.SemanticId);
+				RouteEntry(Request.TargetKind, Entry.SemanticId, Selector(Entry, TEXT("preview_target")));
+			if (Route.bGraph)
+			{
+				const FString DeclaredOwner = FindDeclaredItemOwner(Entry, SourceItemUnits);
+				if (!Selector(Entry, TEXT("owner_item_id")).IsEmpty() && DeclaredOwner.IsEmpty())
+				{
+					OutError.SetSourceFailure(TEXT("composition_graph_owner_unresolved"), TEXT("The declared graph owner does not match any captured item."), Draft.UnitId);
+					return false;
+				}
+				if (!DeclaredOwner.IsEmpty())
+				{
+					Draft.OwnerRef = DeclaredOwner;
+					FUeAgentCanonicalValuePtr OwnerValue;
+					FUeAgentStateSemanticError Error;
+					if (!FUeAgentCanonicalValue::TryString(DeclaredOwner, Resources, OwnerValue, Error))
+					{
+						OutError.SetFailure(Error, FString());
+						return false;
+					}
+					Draft.Values.Add(TEXT("owner"), OwnerValue.ToSharedRef());
+				}
+			}
 			if (Route.bItem)
 			{
 				Draft.OwnerRef = FindGraphOwner(
 					Entry,
 					GraphUnits,
 					Draft.OwnerRef);
+				if (Route.bGraphItem) Draft.GraphOwnerRef = Draft.OwnerRef;
 				const FString DeclaredOwner =
 					FindDeclaredItemOwner(Entry, SourceItemUnits);
 				if (!DeclaredOwner.IsEmpty())
@@ -2735,8 +4988,12 @@ namespace UE::UAI::HjsonWorkspace
 				continue;
 			}
 			const FEntryRoute Route =
-				RouteEntry(Request.TargetKind, Entry.SemanticId);
+				RouteEntry(Request.TargetKind, Entry.SemanticId, Selector(Entry, TEXT("preview_target")));
 			if (!Route.bProperty && !Route.bRelation)
+			{
+				continue;
+			}
+			if (!Entry.bAuthoringVisible)
 			{
 				continue;
 			}
@@ -2754,6 +5011,12 @@ namespace UE::UAI::HjsonWorkspace
 				: Route.bProperty
 					? FindItemOwner(Entry, ItemUnits, *SurfaceUnit)
 					: FindGraphOwner(Entry, GraphUnits, *SurfaceUnit);
+			FString DefinitionId;
+			if (Route.bProperty
+				&& !EnsurePropertyDefinition(Entry, DefinitionId))
+			{
+				return false;
+			}
 			if (Route.bRelation)
 			{
 				const FString AggregateKey =
@@ -2766,8 +5029,7 @@ namespace UE::UAI::HjsonWorkspace
 					Aggregate.Groups.FindOrAdd(Entry.SemanticId);
 				if (Group.Contains(Entry.TargetIdentity.CanonicalKey))
 				{
-					OutError.Set(
-						TEXT("composition_relation_identity_conflict"),
+					OutError.SetSourceFailure(TEXT("composition_relation_identity_conflict"), TEXT("Two captured relations have the same identity within one relation group."),
 						Entry.TargetIdentity.CanonicalKey);
 					return false;
 				}
@@ -2819,9 +5081,7 @@ namespace UE::UAI::HjsonWorkspace
 							BuiltinValue,
 							SemanticError))
 						{
-							OutError.Set(
-								SemanticError.Code,
-								SemanticError.Path);
+							OutError.SetFailure(SemanticError, FString());
 							return false;
 						}
 						Builtin.Values.Add(
@@ -2849,22 +5109,38 @@ namespace UE::UAI::HjsonWorkspace
 				: FString();
 			if (Draft.FieldSetRef.IsEmpty() && Route.bProperty)
 			{
-				FString FieldSetBase =
+				Draft.FieldSetRef =
 					Normalize(Selector(Entry, TEXT("selector")));
-				if (FieldSetBase.IsEmpty())
+				if (Draft.FieldSetRef.IsEmpty())
 				{
-					FieldSetBase = Route.SurfaceId;
+					TArray<FString> SemanticSegments;
+					Entry.SemanticId.ParseIntoArray(
+						SemanticSegments, TEXT("."), true);
+					if (SemanticSegments.Num() >= 2)
+					{
+						Draft.FieldSetRef = NormalizeRoleToken(
+							SemanticSegments[SemanticSegments.Num() - 2])
+							+ TEXT("_")
+							+ NormalizeRoleToken(SemanticSegments.Last());
+					}
+					else
+					{
+						Draft.FieldSetRef =
+							NormalizeRoleToken(Entry.SemanticId);
+					}
+					if (Draft.FieldSetRef.IsEmpty())
+					{
+						Draft.FieldSetRef =
+							NormalizeRoleToken(Route.SurfaceId);
+					}
 				}
-				Draft.FieldSetRef = FieldSetBase + TEXT("-")
-					+ StableId(
-						TEXT("binding"),
-						Entry.SemanticId + TEXT("|")
-							+ Entry.TargetIdentity.CanonicalKey);
 			}
 			Draft.SourceProvenance =
 				Entry.Provenance.IsEmpty()
 					? Provenance
 					: Entry.Provenance;
+			Draft.CategoryPath = Entry.CategoryPath;
+			if (!DefinitionId.IsEmpty()) Draft.DependencyRefs.Add(DefinitionId);
 			if (!TryBuildValues(
 				Entry.Value,
 				{},
@@ -2910,9 +5186,7 @@ namespace UE::UAI::HjsonWorkspace
 					GroupValue,
 					SemanticError))
 				{
-					OutError.Set(
-						SemanticError.Code,
-						SemanticError.Path);
+					OutError.SetFailure(SemanticError, FString());
 					return false;
 				}
 				GroupValues.Emplace(
@@ -2927,9 +5201,7 @@ namespace UE::UAI::HjsonWorkspace
 				RelationsValue,
 				SemanticError))
 			{
-				OutError.Set(
-					SemanticError.Code,
-					SemanticError.Path);
+				OutError.SetFailure(SemanticError, FString());
 				return false;
 			}
 			FUnitDraft RelationSet;
@@ -2992,7 +5264,7 @@ namespace UE::UAI::HjsonWorkspace
 				DependencyPaths,
 				Resources,
 				PathsValue,
-				OutError))
+				OutError, Dependencies.UnitId, TEXT("asset_paths")))
 			{
 				return false;
 			}
@@ -3014,6 +5286,14 @@ namespace UE::UAI::HjsonWorkspace
 			}
 		}
 
+		TSet<FString> DefinitionUnitIds;
+		for (const FUnitDraft& Draft : Drafts)
+		{
+			if (Draft.Role == TEXT("property_definition"))
+			{
+				DefinitionUnitIds.Add(Draft.UnitId);
+			}
+		}
 		const int32 ContainerCount = Drafts.Num();
 		for (int32 Index = 0; Index < ContainerCount; ++Index)
 		{
@@ -3021,6 +5301,33 @@ namespace UE::UAI::HjsonWorkspace
 			if (Container.ItemRefs.IsEmpty())
 			{
 				continue;
+			}
+			// Navigation reflects the native sequence owner; it does not author a second order.
+			if (!ExplicitOrder.Contains(Container.UnitId))
+			{
+				for (const FKeyedItemProjectionContract& Contract : GetKeyedItemProjectionContracts())
+				{
+					if (Contract.NativeOrderField.IsEmpty() || Contract.AggregatedParentSemanticSuffix.IsEmpty()
+						|| !Container.SemanticTypeRef.EndsWith(Contract.AggregatedParentSemanticSuffix)) continue;
+					TArray<TPair<FString, FString>> NativeOrder;
+					for (const FString& ItemId : Container.ItemRefs)
+					{
+						const FUnitDraft& Item = Drafts[DraftIndex.FindChecked(ItemId)];
+						if (!Item.SemanticTypeRef.EndsWith(Contract.AggregatedItemSemanticSuffix)) continue;
+						const FUeAgentCanonicalValueRef* Value = Item.Values.Find(Contract.NativeOrderField);
+						if (Value && ((*Value)->GetKind() == EUeAgentValueKind::Integer
+							|| (*Value)->GetKind() == EUeAgentValueKind::Decimal))
+							NativeOrder.Emplace((*Value)->GetLexeme(), ItemId);
+					}
+					NativeOrder.Sort([](const auto& Left, const auto& Right) {
+						int32 Comparison = 0;
+						return TryCompareNumberLexemes(Left.Key, Right.Key, Comparison) && Comparison != 0
+							? Comparison < 0 : Left.Value < Right.Value;
+					});
+					TArray<FString>& Ordered = ExplicitOrder.FindOrAdd(Container.UnitId);
+					for (const auto& Item : NativeOrder) Ordered.Add(Item.Value);
+					break;
+				}
 			}
 			if (const TArray<FString>* Ordered =
 				ExplicitOrder.Find(Container.UnitId))
@@ -3058,12 +5365,18 @@ namespace UE::UAI::HjsonWorkspace
 				TEXT("uai.authoring.ordering/1");
 			Ordering.Role = TEXT("stable_item_order");
 			Ordering.SourceProvenance = Provenance;
+			TArray<FString> ModelVisibleOrder = Container.ItemRefs;
+			ModelVisibleOrder.RemoveAll(
+				[&DefinitionUnitIds](const FString& ItemId)
+				{
+					return DefinitionUnitIds.Contains(ItemId);
+				});
 			FUeAgentCanonicalValuePtr OrderValue;
 			if (!TryStringArrayValue(
-				Container.ItemRefs,
+				ModelVisibleOrder,
 				Resources,
 				OrderValue,
-				OutError))
+				OutError, Ordering.UnitId, TEXT("item_refs")))
 			{
 				return false;
 			}
@@ -3073,6 +5386,133 @@ namespace UE::UAI::HjsonWorkspace
 			Container.OrderingRef = Ordering.UnitId;
 			AddDraft(MoveTemp(Ordering));
 		}
+
+		FKeyedItemProjectionContract ActorItems;
+		FKeyedItemProjectionContract ComponentItems;
+		FKeyedItemProjectionContract ModuleItems;
+		FKeyedItemProjectionContract EmitterItems;
+		FKeyedItemProjectionContract UserParameterItems;
+		FKeyedItemProjectionContract WidgetItems;
+		FKeyedItemProjectionContract BindingItems;
+		FKeyedItemProjectionContract AnimationItems;
+		FKeyedItemProjectionContract TreeItems;
+		FKeyedItemProjectionContract BlackboardItems;
+		FKeyedItemProjectionContract SmartObjectItems;
+		TryGetKeyedItemProjectionContract(TEXT("actors"), ActorItems);
+		TryGetKeyedItemProjectionContract(TEXT("components"), ComponentItems);
+		TryGetKeyedItemProjectionContract(TEXT("modules"), ModuleItems);
+		TryGetKeyedItemProjectionContract(TEXT("emitters"), EmitterItems);
+		TryGetKeyedItemProjectionContract(TEXT("user_parameters"), UserParameterItems);
+		TryGetKeyedItemProjectionContract(TEXT("widgets"), WidgetItems);
+		TryGetKeyedItemProjectionContract(TEXT("bindings"), BindingItems);
+		TryGetKeyedItemProjectionContract(TEXT("animations"), AnimationItems);
+		TryGetKeyedItemProjectionContract(TEXT("tree_items"), TreeItems);
+		TryGetKeyedItemProjectionContract(TEXT("blackboard_keys"), BlackboardItems);
+		TryGetKeyedItemProjectionContract(TEXT("smart_object_items"), SmartObjectItems);
+		if (Request.TargetKind == TEXT("ue.smart_object.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(Drafts, TEXT("smart_object"),
+				SmartObjectItems.AggregatedItemSemanticSuffix, SmartObjectItems.RootField,
+				SmartObjectItems.NamingPolicy, Resources, OutError)) return false;
+		if (Request.TargetKind == TEXT("ue.state_tree.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(Drafts, TEXT("state_tree"),
+				TreeItems.AggregatedItemSemanticSuffix, TreeItems.RootField,
+				TreeItems.NamingPolicy, Resources, OutError)) return false;
+		if (Request.TargetKind == TEXT("ue.blackboard.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(Drafts, TEXT("blackboard"),
+				BlackboardItems.AggregatedItemSemanticSuffix, BlackboardItems.RootField,
+				BlackboardItems.NamingPolicy, Resources, OutError)) return false;
+		if (Request.TargetKind == TEXT("ue.widget_blueprint.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(Drafts, TEXT("widget_tree"),
+				WidgetItems.AggregatedItemSemanticSuffix, WidgetItems.RootField,
+				WidgetItems.NamingPolicy, Resources, OutError))
+		{
+			return false;
+		}
+		if (Request.TargetKind == TEXT("ue.widget_blueprint.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(Drafts, TEXT("binding_collection"),
+				BindingItems.AggregatedItemSemanticSuffix, BindingItems.RootField,
+				BindingItems.NamingPolicy, Resources, OutError)) return false;
+		if (Request.TargetKind == TEXT("ue.widget_blueprint.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(Drafts, TEXT("animation_collection"),
+				AnimationItems.AggregatedItemSemanticSuffix, AnimationItems.RootField,
+				AnimationItems.NamingPolicy, Resources, OutError)) return false;
+		if (Request.TargetKind.StartsWith(TEXT("ue.niagara_"))
+			&& !TryAddKeyedItemDesiredStateProjection(Drafts, TEXT("stack_collection"),
+				ModuleItems.AggregatedItemSemanticSuffix, ModuleItems.RootField,
+				ModuleItems.NamingPolicy, Resources, OutError))
+		{
+			return false;
+		}
+		if (Request.TargetKind == TEXT("ue.niagara_system.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(Drafts, TEXT("emitter_hierarchy"),
+				EmitterItems.AggregatedItemSemanticSuffix, EmitterItems.RootField,
+				EmitterItems.NamingPolicy, Resources, OutError)) return false;
+		if (Request.TargetKind == TEXT("ue.niagara_system.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(Drafts, TEXT("user_parameters"),
+				UserParameterItems.AggregatedItemSemanticSuffix, UserParameterItems.RootField,
+				UserParameterItems.NamingPolicy, Resources, OutError)) return false;
+		if (Request.TargetKind == TEXT("ue.level.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(
+				Drafts,
+				TEXT("actor_component_hierarchy"),
+				TEXT(".actor.target"),
+				TEXT("actors"),
+				ActorItems.NamingPolicy,
+				Resources,
+				OutError))
+		{
+			return false;
+		}
+
+		if (Request.TargetKind == TEXT("ue.blueprint.asset")
+			&& !TryAddKeyedItemDesiredStateProjection(
+				Drafts,
+				TEXT("component_tree"),
+				TEXT(".component"),
+				TEXT("components"),
+				ComponentItems.NamingPolicy,
+				Resources,
+				OutError))
+		{
+			return false;
+		}
+
+		if ((Request.TargetKind == TEXT("ue.blueprint.asset") || Request.TargetKind == TEXT("ue.widget_blueprint.asset") || Request.TargetKind == TEXT("ue.anim_blueprint.asset"))
+			&& (!TryAddKeyedItemDesiredStateProjection(
+					Drafts,
+					TEXT("member_collection"),
+					TEXT(".interface"),
+					TEXT("interfaces"),
+					ComponentItems.NamingPolicy,
+					Resources,
+					OutError)
+				|| !TryAddKeyedItemDesiredStateProjection(
+					Drafts,
+					TEXT("member_collection"),
+					TEXT(".member.variable"),
+					TEXT("variables"),
+					ComponentItems.NamingPolicy,
+					Resources,
+					OutError)
+				|| !TryAddKeyedItemDesiredStateProjection(
+					Drafts,
+					TEXT("member_collection"),
+					TEXT(".member.delegate"),
+					TEXT("delegates"),
+					ComponentItems.NamingPolicy,
+					Resources,
+					OutError)))
+		{
+			return false;
+		}
+
+		if (!TryAddGraphDesiredStateProjection(Drafts, Resources, OutError))
+		{
+			return false;
+		}
+		if ((Request.TargetKind == TEXT("ue.blueprint.asset") || Request.TargetKind == TEXT("ue.widget_blueprint.asset")
+			|| Request.TargetKind == TEXT("ue.anim_blueprint.asset"))
+			&& !TryAddBlueprintGraphDeclarations(Drafts, Resources, OutError)) return false;
 
 		TArray<FSemanticUnit> Units;
 		Units.Reserve(Drafts.Num());
@@ -3096,7 +5536,8 @@ namespace UE::UAI::HjsonWorkspace
 				MoveTemp(Draft.DependencyRefs),
 				MoveTemp(Draft.ProfileVisibility),
 				MoveTemp(Draft.SourceProvenance),
-				MoveTemp(Draft.TargetIdentityKey));
+				MoveTemp(Draft.TargetIdentityKey),
+				MoveTemp(Draft.CategoryPath));
 		}
 		return TryCompileAuthoringModel(
 			CompositionSchema,
@@ -3131,11 +5572,22 @@ namespace UE::UAI::HjsonWorkspace
 				Entry.TargetIdentity.CanonicalKey;
 			View.TargetIdentity.Selectors =
 				Entry.TargetIdentity.Selectors;
+			View.Type = Entry.Type.ToJsonObject();
 			View.bAvailable = Entry.bAvailable;
+			View.bEditable = Entry.bEditable;
+			View.bAuthoringVisible = Entry.bAuthoringVisible;
+			View.Constraints = Entry.Constraints;
+			View.CandidatesHeader = Entry.CandidatesHeader;
+			View.Candidates = Entry.Candidates;
+			View.ValueDefinition = Entry.ValueDefinition;
+			View.CategoryPath = Entry.CategoryPath;
 			View.Provenance = Entry.Provenance;
-			if (Entry.Value.IsValid()
+			TSharedPtr<FJsonValue> ProjectedValue;
+			View.bAuthoringVisible &= UeAgentPropertyValueCodec::ProjectAuthoringValue(
+				View.Type, Entry.Value, Entry.ValueDefinition, ProjectedValue, View.ValueDefinition);
+			if (ProjectedValue.IsValid()
 				&& !TryCanonicalizeJson(
-					Entry.Value,
+					ProjectedValue,
 					Resources,
 					View.Value,
 					OutError))
@@ -3167,26 +5619,551 @@ namespace UE::UAI::HjsonWorkspace
 		{
 			FCompositionEntryView View;
 			View.SemanticId = Entry.GetIdentity().GetSemanticId();
-			View.TargetIdentity.CanonicalKey =
-				Entry.GetIdentity().GetCanonicalKey();
+			View.TargetIdentity.CanonicalKey = CanonicalAuthoringTargetKey(Entry);
 			View.TargetIdentity.Selectors =
 				Entry.GetIdentity().GetSelectors();
+			View.Type = CanonicalTypeJson(Entry.GetType());
+			View.bEditable = Entry.GetDetails().IsEditable();
+			View.Constraints = Entry.GetDetails().GetConstraints();
+			View.CategoryPath = Entry.GetDetails().GetCategoryPath();
 			if (View.TargetIdentity.Selectors.IsEmpty()
 				&& !Entry.GetIdentity().GetSelector().IsEmpty())
 			{
 				View.TargetIdentity.Selectors.Add(
-					TEXT("selector"),
-					Entry.GetIdentity().GetSelector());
+					TEXT("selector"), Entry.GetIdentity().GetSelector());
 			}
 			View.Value = FUeAgentCanonicalValuePtr(Entry.GetValue());
-			View.bAvailable =
-				Entry.GetDetails().GetAvailability()
-					!= TEXT("unavailable");
+			View.bAvailable = Entry.GetDetails().GetAvailability() != TEXT("unavailable");
 			View.Provenance = Request.SourceProvenance;
+			if (!TryProjectCanonicalAuthoringDescriptor(Entry, View, Resources, OutError)) return false;
 			Input.Entries.Add(MoveTemp(View));
 		}
-		return TryComposeEntryViews(
-			Input,
+		return TryComposeEntryViews(Input, Resources, OutModel, OutError);
+	}
+
+	bool TryCompareWorkspaceValues(const FAuthoringModel& Model, const FUeAgentCanonicalValue* Type,
+		const FUeAgentCanonicalValue* Definition, const TSharedPtr<FJsonValue>& Before,
+		const TSharedPtr<FJsonValue>& After, CanonicalJson::FValueComparison& OutComparison, FWorkspaceError& OutError)
+	{
+		TSharedPtr<FJsonValue> JsonType, JsonDefinition;
+		UE::UAI::Contract::FDiagnostic Error;
+		if ((Type && !CanonicalJson::TryToJsonValue(*Type, JsonType, Error))
+			|| (Definition && !CanonicalJson::TryToJsonValue(*Definition, JsonDefinition, Error)))
+		{ OutError.SetFailure(Error, FString()); return false; }
+		if (JsonDefinition)
+		{
+			JsonDefinition = ExpandPropertyDefinition(Model, JsonDefinition, OutError);
+			if (!JsonDefinition) return false;
+		}
+		// A nested catalog reference expands to a complete descriptor.
+		if (JsonDefinition && JsonDefinition->Type == EJson::Object)
+		{
+			const auto Descriptor = JsonDefinition->AsObject();
+			if (const auto CapturedType = Descriptor->TryGetField(TEXT("type")))
+			{
+				JsonType = CapturedType;
+				JsonDefinition = Descriptor->TryGetField(TEXT("value_definition"));
+			}
+		}
+		if (!JsonType && JsonDefinition && JsonDefinition->Type == EJson::Object
+			&& JsonDefinition->AsObject()->HasTypedField<EJson::Object>(TEXT("fields")))
+		{
+			const auto RecordType = MakeShared<FJsonObject>();
+			RecordType->SetStringField(TEXT("kind"), TEXT("object"));
+			JsonType = MakeShared<FJsonValueObject>(RecordType);
+		}
+		OutComparison = UeAgentAuthoringSemanticCompare::CompareDeclaredValues(
+			JsonType && JsonType->Type == EJson::Object ? JsonType->AsObject() : nullptr,
+			JsonDefinition && JsonDefinition->Type == EJson::Object ? JsonDefinition->AsObject() : nullptr,
+			Before, After);
+		if (!OutComparison.IsComparable()) {
+			OutComparison.ApplyTo(Error);
+			OutError.SetFailure(Error, FString());
+			return false;
+		}
+		return true;
+	}
+
+	bool TryCompareWorkspaceValues(const FAuthoringModel& Model, const FUeAgentCanonicalValue* Type,
+		const FUeAgentCanonicalValue* Definition, const FUeAgentCanonicalValueRef& Before,
+		const FUeAgentCanonicalValueRef& After, CanonicalJson::FValueComparison& OutComparison, FWorkspaceError& OutError)
+	{
+		TSharedPtr<FJsonValue> A, B; UE::UAI::Contract::FDiagnostic Error;
+		if (!CanonicalJson::TryToJsonValue(*Before, A, Error) || !CanonicalJson::TryToJsonValue(*After, B, Error))
+		{ OutError.SetFailure(Error, FString()); return false; }
+		return TryCompareWorkspaceValues(Model, Type, Definition, A, B, OutComparison, OutError);
+	}
+
+	bool TryCollectChangedUnitValueFields(
+		const FSemanticUnit* Before, const FSemanticUnit& Edited,
+		FUeAgentResourceTracker& Resources, TSet<FString>& OutFields,
+		FWorkspaceError& OutError, const FAuthoringModel* Model)
+	{
+		OutFields.Reset();
+		const FUeAgentCanonicalValue* Type = nullptr;
+		const FUeAgentCanonicalValue* Definition = nullptr;
+		if (Model)
+			for (const auto& Dependency : Edited.GetDependencyRefs())
+				if (const auto* Unit = Model->FindUnit(Dependency); Unit && Unit->GetRole() == TEXT("property_definition"))
+				{
+					if (const auto* Value = Unit->GetValues().Find(TEXT("type"))) Type = &Value->Get();
+					if (const auto* Value = Unit->GetValues().Find(TEXT("value_definition"))) Definition = &Value->Get();
+					break;
+				}
+		for (const auto& Field : Edited.GetValues())
+		{
+			const auto* Previous = Before ? Before->GetValues().Find(Field.Key) : nullptr;
+			if (!Previous) { OutFields.Add(Field.Key); continue; }
+			if (Model && (Type || Definition))
+			{
+				TSharedPtr<FJsonValue> A, B; UE::UAI::Contract::FDiagnostic Error;
+				if (!CanonicalJson::TryToJsonValue(**Previous, A, Error)
+					|| !CanonicalJson::TryToJsonValue(*Field.Value, B, Error))
+				{ OutError.SetFailure(Error, Edited.GetUnitId()); return false; }
+				if (!(Edited.GetValues().Num() == 1 && Field.Key == TEXT("value")))
+				{
+					const auto Left = MakeShared<FJsonObject>(), Right = MakeShared<FJsonObject>();
+					Left->SetField(Field.Key, A); Right->SetField(Field.Key, B);
+					A = MakeShared<FJsonValueObject>(Left); B = MakeShared<FJsonValueObject>(Right);
+				}
+				CanonicalJson::FValueComparison Compared;
+				if (!TryCompareWorkspaceValues(*Model, Type, Definition, A, B, Compared, OutError)) return false;
+				if (!Compared.bEquivalent) OutFields.Add(Field.Key);
+				continue;
+			}
+			FUeAgentSemanticComparison Comparison;
+			FUeAgentStateSemanticError Error;
+			if (!TryCompareValues(*Previous, Field.Value, TEXT("/"), Resources, Comparison, Error))
+			{ OutError.SetFailure(Error, Edited.GetUnitId()); return false; }
+			if (!Comparison.IsEquivalent()) OutFields.Add(Field.Key);
+		}
+		if (Before)
+			for (const auto& Field : Before->GetValues())
+				if (!Edited.GetValues().Contains(Field.Key)) OutFields.Add(Field.Key);
+		return true;
+	}
+
+	bool TryProjectDocumentValueChanges(
+		const FUeAgentCanonicalSnapshotRef& Snapshot,
+		const FAuthoringModelRef& CurrentModel, const FAuthoringModelRef& EditedModel,
+		const TOptional<TArray<FString>>& EditedUnitIds, FUeAgentResourceTracker& Resources,
+		TMap<FString, FUeAgentCanonicalValuePtr>& OutDocuments,
+		TSet<FString>& OutDocumentUnitIds, FWorkspaceError& OutError,
+		const TMap<FString, TSet<FString>>* ResolvedKeyedOperationRoots,
+		TArray<FDocumentValueSourceBinding>* OutSourceBindings,
+		const FAuthoringValueSourceResolver& FindValueSource)
+	{
+		OutDocuments.Reset();
+		OutDocumentUnitIds.Reset();
+		if (OutSourceBindings) OutSourceBindings->Reset();
+		FCompositionInput Input;
+		Input.TargetKind = Snapshot->GetProvenance().GetSourceId();
+		Input.ProfileId = CurrentModel->GetProfileId();
+		Input.BaseRevision = CurrentModel->GetBaseRevision();
+		Input.SourceProvenance = TEXT("authoring_state.capture");
+		TMap<FString, const FUeAgentStateEntry*> Sources;
+		TSet<FString> VisibleDocumentSemantics;
+		for (const FSemanticUnit& Unit : CurrentModel->GetUnits())
+		{
+			const FString& Type = Unit.GetSemanticTypeRef();
+			for (int32 Position = Type.Find(TEXT("#")); Position != INDEX_NONE;
+				Position = Type.Find(TEXT("#"), ESearchCase::CaseSensitive,
+					ESearchDir::FromStart, Position + 1))
+				VisibleDocumentSemantics.Add(Type.Left(Position).ToLower());
+		}
+		for (const FUeAgentStateEntry& Entry : Snapshot->GetEntries())
+		{
+			FCompositionEntryView View;
+			View.SemanticId = Entry.GetIdentity().GetSemanticId();
+			View.TargetIdentity.CanonicalKey = CanonicalAuthoringTargetKey(Entry);
+			View.TargetIdentity.Selectors = Entry.GetIdentity().GetSelectors();
+			View.Type = CanonicalTypeJson(Entry.GetType());
+			View.Value = Entry.GetValue();
+			View.bEditable = Entry.GetDetails().IsEditable();
+			View.bAvailable = Entry.GetDetails().GetAvailability() != TEXT("unavailable");
+			View.Constraints = Entry.GetDetails().GetConstraints();
+			View.CategoryPath = Entry.GetDetails().GetCategoryPath();
+			View.Provenance = Input.SourceProvenance;
+			if (!TryProjectCanonicalAuthoringDescriptor(Entry, View, Resources, OutError)) return false;
+			if (RouteEntry(Input.TargetKind, View.SemanticId).bDocument)
+			{
+				// The supplied current model is the authoritative visible capture.
+				View.bAuthoringVisible = VisibleDocumentSemantics.Contains(View.SemanticId.ToLower());
+				if (View.bAuthoringVisible)
+				{
+					const FString SourceKey = DocumentSourceKey(View.SemanticId, View.TargetIdentity.CanonicalKey);
+					if (Sources.Contains(SourceKey))
+					{ OutError.SetSourceFailure(TEXT("composition_document_source_ambiguous"), TEXT("More than one captured document has the same semantic binding.")); return false; }
+					Sources.Add(SourceKey, &Entry);
+				}
+			}
+			Input.Entries.Add(MoveTemp(View));
+		}
+		if (Sources.IsEmpty()) return true;
+		TMap<FString, FDocumentValueBinding> Bindings;
+		FAuthoringModelPtr RebuiltModel;
+		if (!TryComposeEntryViews(Input, Resources, RebuiltModel, OutError, &Bindings)) return false;
+		TMap<FString, FUeAgentCanonicalValuePtr> ProposedDocuments;
+		TMap<FString, TArray<FDocumentAddress>> WrittenAddresses;
+		for (const auto& Pair : Bindings)
+		{
+			const auto RejectEdit = [&](const FString& Code, const FString& Reason, const FString& Pointer = TEXT("/"))
+			{
+				OutError.SetSourceFailure(Code, Reason, Pair.Key, Pointer);
+				if (FindValueSource)
+					if (const auto* Node = FindValueSource(Pair.Key, Pointer)) OutError.Locate(Node->GetProvenance());
+				return false;
+			};
+			const FSemanticUnit* Before = CurrentModel->FindUnit(Pair.Key);
+			const FSemanticUnit* Generated = RebuiltModel->FindUnit(Pair.Key);
+			if (!Before || !Generated) continue;
+			if (Before->GetOwnerRef() != Generated->GetOwnerRef()
+				|| Before->GetTargetIdentityKey() != Generated->GetTargetIdentityKey()
+				|| Before->GetSemanticTypeRef() != Generated->GetSemanticTypeRef())
+			{ return RejectEdit(TEXT("composition_document_binding_mismatch"),
+				Before->GetOwnerRef() != Generated->GetOwnerRef() ? TEXT("The captured document owner differs from the workspace binding.")
+				: Before->GetTargetIdentityKey() != Generated->GetTargetIdentityKey() ? TEXT("The captured document target differs from the workspace binding.")
+				: TEXT("The captured document semantic type differs from the workspace binding.")); }
+			OutDocumentUnitIds.Add(Pair.Key);
+			if (OutSourceBindings)
+			{
+				const FUeAgentStateEntry* Source = Sources.FindRef(Pair.Value.SourceKey);
+				if (Source)
+				{
+					FDocumentValueSourceBinding Binding;
+					Binding.DocumentIdentity = Source->GetIdentity().GetCanonicalKey();
+					Binding.UnitId = Pair.Key;
+					for (const FDocumentAddressStep& Step : Pair.Value.Address)
+					{
+						const FString Token = Step.Index != INDEX_NONE ? FString::FromInt(Step.Index)
+							: Step.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+						Binding.DocumentPointer += TEXT("/") + Token;
+					}
+					Binding.UnitValuePointer = Pair.Value.KeyedContract
+						? TEXT("/") + Pair.Value.KeyedContract->RootField
+						: Pair.Value.bWholeValue ? TEXT("/value") : FString();
+					OutSourceBindings->Add(MoveTemp(Binding));
+				}
+			}
+			if (EditedUnitIds.IsSet() && !EditedUnitIds.GetValue().Contains(Pair.Key)) continue;
+			const FSemanticUnit* Edited = EditedModel->FindUnit(Pair.Key);
+			if (!Edited || Edited->GetUnitKind() != Before->GetUnitKind()
+				|| Edited->GetOwnerRef() != Before->GetOwnerRef()
+				|| Edited->GetItemRefs() != Before->GetItemRefs()
+				|| Edited->GetRelationRefs() != Before->GetRelationRefs())
+			{ return RejectEdit(TEXT("composition_document_structure_edit_unsupported"),
+				!Edited ? TEXT("This document unit cannot be removed.")
+				: Edited->GetUnitKind() != Before->GetUnitKind() ? TEXT("The document unit kind cannot be changed.")
+				: Edited->GetOwnerRef() != Before->GetOwnerRef() ? TEXT("The document unit owner cannot be changed.")
+				: Edited->GetItemRefs() != Before->GetItemRefs() ? TEXT("The document unit item bindings cannot be changed directly.")
+				: TEXT("The document unit relation bindings cannot be changed directly.")); }
+			const FKeyedItemProjectionContract* KeyedContract = Pair.Value.KeyedContract;
+			if (Edited->GetValues().Num() != Before->GetValues().Num())
+			{ return RejectEdit(TEXT("composition_document_structure_edit_unsupported"), FString::Printf(TEXT("The document unit must retain its %d value fields; %d were supplied."), Before->GetValues().Num(), Edited->GetValues().Num())); }
+			TSet<FString> ChangedFields;
+			if (!TryCollectChangedUnitValueFields(Before, *Edited, Resources, ChangedFields, OutError, &EditedModel.Get())) return false;
+			for (const FString& Field : ChangedFields)
+			{
+				if (!Edited->GetValues().Contains(Field))
+				{ return RejectEdit(TEXT("composition_document_field_missing"), FString::Printf(TEXT("Required document field '%s' was removed."), *Field), TEXT("/") + Field.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"))); }
+				if (KeyedContract && Field != KeyedContract->RootField)
+				{ return RejectEdit(TEXT("composition_document_definition_read_only"), FString::Printf(TEXT("Document definition field '%s' is read-only; edit collection '%s' instead."), *Field, *KeyedContract->RootField), TEXT("/") + Field.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"))); }
+			}
+			if (ChangedFields.IsEmpty()) continue;
+			const FUeAgentStateEntry* Source = Sources.FindRef(Pair.Value.SourceKey);
+			if (!Source || !Source->GetDetails().IsEditable())
+			{ return RejectEdit(TEXT("composition_document_not_editable"), !Source ? TEXT("The edited document has no captured source binding.") : TEXT("The captured source document is read-only.")); }
+			const FString SourceId = Source->GetIdentity().GetCanonicalKey();
+			TArray<FDocumentAddress> Writes;
+			if (Pair.Value.bWholeValue) Writes.Add(Pair.Value.Address);
+			else for (const FString& Field : ChangedFields) Writes.Add(ChildAddress(Pair.Value.Address, Field));
+			for (const auto& Write : Writes)
+			{
+				for (const auto& Existing : WrittenAddresses.FindOrAdd(SourceId))
+				{
+					bool bOverlaps = true;
+					for (int32 Index = 0; Index < FMath::Min(Write.Num(), Existing.Num()); ++Index)
+						bOverlaps &= Write[Index].Index == Existing[Index].Index
+							&& Write[Index].Key.Equals(Existing[Index].Key, ESearchCase::CaseSensitive);
+					if (bOverlaps) { return RejectEdit(TEXT("composition_document_overlapping_edits"), FString::Printf(TEXT("Document edits at '%s' and '%s' overlap."), *DocumentAddressPointer(Write), *DocumentAddressPointer(Existing))); }
+				}
+				WrittenAddresses.FindOrAdd(SourceId).Add(Write);
+			}
+			FUeAgentCanonicalValuePtr Document = ProposedDocuments.FindRef(SourceId);
+			if (!Document.IsValid()) Document = Source->GetValue();
+			TArray<FUeAgentCanonicalValueRef> Parents;
+			FUeAgentCanonicalValuePtr Value = Document;
+			for (const FDocumentAddressStep& Step : Pair.Value.Address)
+			{
+				Parents.Add(Value.ToSharedRef());
+				if (Step.Index != INDEX_NONE && Value->GetKind() == EUeAgentValueKind::Array
+					&& Value->GetArrayItems().IsValidIndex(Step.Index))
+					Value = Value->GetArrayItems()[Step.Index];
+				else if (Step.Index == INDEX_NONE && Value->GetKind() == EUeAgentValueKind::Object)
+				{
+					const auto* Field = Value->GetObjectItems().FindByPredicate([&](const auto& Item) {
+						return Item.Key.Equals(Step.Key, ESearchCase::CaseSensitive); });
+					if (!Field) { return RejectEdit(TEXT("composition_document_address_missing"), FString::Printf(TEXT("Field '%s' is absent from the captured document at '%s'."), *Step.Key, *DocumentAddressPointer(Pair.Value.Address))); }
+					Value = Field->Value;
+				}
+				else { return RejectEdit(TEXT("composition_document_address_invalid"),
+					Step.Index != INDEX_NONE ? FString::Printf(TEXT("Document path '%s' requires array index %d, but the captured value is not an array or the index is out of range."), *DocumentAddressPointer(Pair.Value.Address), Step.Index)
+					: FString::Printf(TEXT("Document path '%s' requires an object at field '%s'."), *DocumentAddressPointer(Pair.Value.Address), *Step.Key)); }
+			}
+			FUeAgentStateSemanticError Error;
+			if (KeyedContract)
+			{
+				const auto* Keys = Edited->GetValues().Find(KeyedContract->RootField);
+				bool bSemanticChanged = false;
+				FUeAgentCanonicalValuePtr Resolved;
+				// Trust only collections actually normalized by the workspace resolver.
+				// A registered name or a caller-supplied operation is not provenance.
+				const TSet<FString>* ResolvedRoots = ResolvedKeyedOperationRoots
+					? ResolvedKeyedOperationRoots->Find(Pair.Key) : nullptr;
+				const bool bOperationRecords = ResolvedRoots && ResolvedRoots->Contains(KeyedContract->RootField);
+				FKeyedItemReferenceContext ReferenceContext;
+				for (const auto& Sibling : Bindings)
+				{
+					const auto& Binding = Sibling.Value;
+					if (Binding.SourceKey != Pair.Value.SourceKey || !Binding.KeyedContract || !Binding.CapturedItems) continue;
+					const auto* SiblingUnit = EditedModel->FindUnit(Sibling.Key);
+					const auto* Desired = SiblingUnit ? SiblingUnit->GetValues().Find(Binding.KeyedContract->RootField) : nullptr;
+					const auto* SiblingResolved = ResolvedKeyedOperationRoots ? ResolvedKeyedOperationRoots->Find(Sibling.Key) : nullptr;
+					ReferenceContext.Add(Binding.KeyedContract->RootField, {Binding.KeyedContract, Binding.CapturedItems.Get(),
+						Desired ? &Desired->Get() : nullptr, SiblingResolved && SiblingResolved->Contains(Binding.KeyedContract->RootField)});
+				}
+				if (!Keys) return RejectEdit(TEXT("composition_document_field_missing"), FString::Printf(TEXT("Required collection '%s' was removed."), *KeyedContract->RootField), TEXT("/") + KeyedContract->RootField);
+				if (!TryResolveKeyedItemDesiredState(Keys->Get(), *Value, Pair.Key,
+					*KeyedContract, Pair.Value.RecordDefaults.Get(), Resources, Resolved, bSemanticChanged, OutError,
+					Pair.Value.NestedRecordDefaults.Get(), bOperationRecords
+						? EKeyedItemInputKind::ResolvedOperationRecords : EKeyedItemInputKind::VisibleDesiredState, &ReferenceContext,
+					FindValueSource ? FindValueSource(Pair.Key, TEXT("/") + KeyedContract->RootField) : nullptr)) return false;
+				if (OutSourceBindings)
+				{
+					// Copy: adding nested bindings may reallocate the source array.
+					const auto* Root = OutSourceBindings->FindByPredicate([&](const auto& Binding) {
+						return Binding.DocumentIdentity == SourceId && Binding.UnitId == Pair.Key; });
+					if (Root)
+					{
+						const auto RootBinding = *Root;
+						BindKeyedDocumentSources(Keys->Get(), *Resolved, *KeyedContract, RootBinding, *OutSourceBindings);
+					}
+				}
+				Value = Resolved;
+			}
+			else if (Pair.Value.bWholeValue)
+			{
+				const auto* Whole = Edited->GetValues().Find(TEXT("value"));
+				if (!Whole) return RejectEdit(TEXT("composition_document_value_missing"), TEXT("The edited document is missing its required value field."), TEXT("/value"));
+				Value = *Whole;
+			}
+			else
+			{
+				if (Value->GetKind() != EUeAgentValueKind::Object)
+				{ return RejectEdit(TEXT("composition_document_object_required"), TEXT("Field edits require the captured document value to be an object.")); }
+				auto Fields = Value->GetObjectItems();
+				for (auto& Field : Fields)
+					if (ChangedFields.Contains(Field.Key)) Field.Value = Edited->GetValues().FindChecked(Field.Key);
+				if (!FUeAgentCanonicalValue::TryObject(Fields, Resources, Value, Error))
+				{ OutError.SetFailure(Error, Pair.Key); return false; }
+			}
+			for (int32 Index = Parents.Num() - 1; Index >= 0; --Index)
+			{
+				const auto& Parent = Parents[Index];
+				const auto& Step = Pair.Value.Address[Index];
+				if (Step.Index != INDEX_NONE)
+				{
+					auto Items = Parent->GetArrayItems();
+					Items[Step.Index] = Value.ToSharedRef();
+					if (!FUeAgentCanonicalValue::TryArray(Items, Resources, Value, Error))
+					{ OutError.SetFailure(Error, Pair.Key); return false; }
+				}
+				else
+				{
+					auto Fields = Parent->GetObjectItems();
+					for (auto& Field : Fields)
+						if (Field.Key.Equals(Step.Key, ESearchCase::CaseSensitive)) Field.Value = Value.ToSharedRef();
+					if (!FUeAgentCanonicalValue::TryObject(Fields, Resources, Value, Error))
+					{ OutError.SetFailure(Error, Pair.Key); return false; }
+				}
+			}
+			ProposedDocuments.Add(SourceId, Value);
+		}
+		OutDocuments = MoveTemp(ProposedDocuments);
+		return true;
+	}
+
+	bool TryBuildCanonicalAuthoringCapture(const FString& TargetKind, const FString& ProfileId,
+		const UeAgentAuthoringState::FStateSnapshot& Snapshot, FUeAgentResourceTracker& Resources,
+		FUeAgentCanonicalSnapshotPtr& OutSnapshot, FAuthoringModelPtr& OutModel,
+		FWorkspaceError& OutError)
+	{
+		OutSnapshot.Reset();
+		OutModel.Reset();
+		OutError.Reset();
+		TArray<UeAgentAuthoringState::FStateEntry> SourceEntries = Snapshot.CopyEntries();
+		UE::UAI::Contract::FDiagnostic PreviewError;
+		if (!AssetPreview::AppendState(TargetKind, SourceEntries, PreviewError))
+		{
+			OutError.SetFailure(PreviewError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_preview_capture_failed"), TEXT("Asset preview capture failed without returning a diagnostic.")) : PreviewError, TargetKind);
+			return false;
+		}
+		if (TargetKind.IsEmpty() || SourceEntries.IsEmpty())
+		{
+			OutError.SetSourceFailure(TEXT("authoring_capture_contract_invalid"), TargetKind.IsEmpty() ? TEXT("Authoring capture requires a target kind.") : TEXT("Authoring capture returned no state entries."));
+			return false;
+		}
+
+		FString RevisionMaterial = TargetKind;
+		for (const UeAgentAuthoringState::FStateEntry& Entry : SourceEntries)
+		{
+			RevisionMaterial +=
+				TEXT("|") + Entry.SemanticId
+				+ TEXT("|") + Entry.TargetIdentity.CanonicalKey
+				+ TEXT("|")
+				+ UeAgentAuthoringState::MakeStableCanonicalValueKey(
+					Entry.Value);
+		}
+		const FString BaseRevision = TEXT("capture:") + Sha256Text(RevisionMaterial).Right(24);
+		const FUeAgentStateRevision Revision(TEXT("authoring.capture"), BaseRevision, 0);
+		const FString SnapshotId = TEXT("authoring.capture:") +
+								   Sha256Text(TargetKind + TEXT("|") + BaseRevision).Right(24);
+		const FString EvidenceId = TEXT("independent-readback:") + SnapshotId;
+
+		TArray<FUeAgentStateEntry> CanonicalEntries;
+		CanonicalEntries.Reserve(SourceEntries.Num());
+		for (const UeAgentAuthoringState::FStateEntry& Entry : SourceEntries)
+		{
+			FUeAgentCanonicalValuePtr Value;
+			const auto ForwardCaptureFailure = [&](Contract::FDiagnostic Failure)
+			{
+				if (Failure.CandidateName.IsEmpty()) Failure.CandidateName = Entry.DisplayName;
+				if (Failure.TargetPath.IsEmpty())
+					if (const auto* AssetPath = Entry.TargetIdentity.Selectors.Find(TEXT("asset_path"))) Failure.TargetPath = *AssetPath;
+				OutError.SetFailure(MoveTemp(Failure), Entry.TargetIdentity.CanonicalKey);
+				return false;
+			};
+			if (!Entry.Value.IsValid() ||
+				!TryCanonicalizeJson(Entry.Value, Resources, Value, OutError) || !Value.IsValid())
+			{
+				if (OutError.GetCode().IsEmpty())
+				{
+					OutError.SetSourceFailure(TEXT("authoring_capture_value_invalid"), TEXT("The captured entry has no value to convert."), Entry.TargetIdentity.CanonicalKey);
+				}
+				return false;
+			}
+			const FString TypeId =
+				!Entry.Type.EnumPath.IsEmpty()			 ? Entry.Type.EnumPath
+				: !Entry.Type.StructPath.IsEmpty()		 ? Entry.Type.StructPath
+				: !Entry.Type.AllowedClassPath.IsEmpty() ? Entry.Type.AllowedClassPath
+				: Entry.Type.Kind.IsEmpty()				 ? FString(TEXT("uai.authoring.value"))
+														 : Entry.Type.Kind;
+			const FString ContainerKind =
+				Value->GetKind() == EUeAgentValueKind::Array	? FString(TEXT("array"))
+				: Value->GetKind() == EUeAgentValueKind::Object ? FString(TEXT("object"))
+																: FString(TEXT("scalar"));
+			TMap<FString, FString> CanonicalSelectors =
+				Entry.TargetIdentity.Selectors;
+			CanonicalSelectors.Add(
+				CanonicalAuthoringTargetIdentitySelector,
+				Entry.TargetIdentity.CanonicalKey);
+			FUeAgentCanonicalIdentity Identity(Entry.SemanticId, Entry.TargetIdentity.TargetKind,
+				Entry.TargetIdentity.ModelId, MoveTemp(CanonicalSelectors),
+				Entry.TargetIdentity.KeyPattern.IsEmpty() ? Entry.TargetIdentity.TargetKind
+														  : Entry.TargetIdentity.KeyPattern,
+				BaseRevision);
+			FUeAgentCanonicalType Type(TypeId, Value->GetKind(),
+				Value->GetKind() == EUeAgentValueKind::Null, ContainerKind);
+			const FString Provenance = Entry.Provenance.IsEmpty()
+										   ? FString(TEXT("authoring_state.capture"))
+										   : Entry.Provenance;
+			FUeAgentDefaultValue Default(EUeAgentDefaultSourceKind::PostCreateReadback,
+				Identity.GetCanonicalKey(), Provenance, Value.ToSharedRef());
+			const FString DisplayName = !Entry.DisplayName.IsEmpty() ? Entry.DisplayName
+										: !Entry.SemanticId.IsEmpty()
+											? Entry.SemanticId
+											: Entry.TargetIdentity.TargetKind;
+			FUeAgentStateDetails Details(DisplayName, Entry.Tooltip, Entry.CategoryPath,
+				Entry.bEditable,
+				Entry.bAvailable					 ? FString(TEXT("available"))
+				: Entry.AvailabilityReason.IsEmpty() ? FString(TEXT("unavailable"))
+													 : Entry.AvailabilityReason,
+				Entry.Constraints);
+			if (!Identity.IsValid())
+			{
+				return ForwardCaptureFailure(Identity.GetValidationDiagnostic());
+			}
+			if (!Type.IsValid())
+			{
+				return ForwardCaptureFailure(Type.GetValidationDiagnostic());
+			}
+			if (!Default.IsValid())
+			{
+				return ForwardCaptureFailure(Default.GetValidationDiagnostic());
+			}
+			if (!Details.IsValid())
+			{
+				return ForwardCaptureFailure(Details.GetValidationDiagnostic());
+			}
+			// Preserve captured metadata at the state/canonical boundary. The
+			// shared export/restore/intent projection cannot reconstruct editable
+			// struct membership from a bare canonical type ID.
+			const auto Metadata = MakeShared<FJsonObject>();
+			Metadata->SetObjectField(TEXT("type"), Entry.Type.ToJsonObject());
+			if (Entry.ValueDefinition) Metadata->SetField(TEXT("value_definition"), Entry.ValueDefinition);
+			if (Entry.CandidatesHeader) Metadata->SetField(TEXT("candidates_header"), Entry.CandidatesHeader);
+			if (Entry.Candidates) Metadata->SetField(TEXT("candidates"), Entry.Candidates);
+			FUeAgentCanonicalValuePtr AuthoringDescriptor;
+			if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(Metadata), Resources, AuthoringDescriptor, OutError)) return false;
+			FUeAgentStateEntry CanonicalEntry(MoveTemp(Identity), MoveTemp(Type),
+				Value.ToSharedRef(), MoveTemp(Default), MoveTemp(Details), Revision,
+				EUeAgentAuthoredPresence::Present, EUeAgentOverrideState::None, MoveTemp(AuthoringDescriptor));
+			if (!CanonicalEntry.IsValid())
+			{
+				return ForwardCaptureFailure(CanonicalEntry.GetValidationDiagnostic());
+			}
+			CanonicalEntries.Add(MoveTemp(CanonicalEntry));
+		}
+
+		FUeAgentStateSemanticError SemanticError;
+		if (!FUeAgentCanonicalSnapshot::TryCreate(
+			SnapshotId,
+			Contract::EUeAgentStatePlane::AuthoringMemory,
+			Revision,
+			FUeAgentTemporalPoint(
+				TEXT("authoring.capture"), TEXT("0")),
+			FUeAgentStateProvenance(
+				TEXT("independent_readback"),
+				TargetKind,
+				EvidenceId),
+			CanonicalEntries,
+			Resources,
+			OutSnapshot,
+			SemanticError)
+			|| !OutSnapshot.IsValid())
+		{
+			OutError.SetFailure(SemanticError.Code.IsEmpty()
+					? UE::UAI::Contract::FDiagnostic::Failure(TEXT("authoring_capture_snapshot_invalid"), TEXT("Canonical authoring capture did not produce a valid snapshot."))
+					: SemanticError, FString(), SemanticError.Source.JsonPath);
+			return false;
+		}
+
+		FCompositionRequest Request;
+		Request.TargetKind = TargetKind;
+		Request.ProfileId = ProfileId.IsEmpty()
+			? TEXT("llm_authoring") : ProfileId;
+		Request.BaseRevision = BaseRevision;
+		Request.SourceProvenance = TEXT("authoring_state.capture");
+		Request.Entries = SourceEntries;
+		UE::UAI::Contract::FDiagnostic ContractError;
+		if (!RegisterGraphTreeTargetCompositionContracts(ContractError)
+			|| !RegisterOtherTargetCompositionContracts(ContractError))
+		{
+			OutError.SetFailure(ContractError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("target_composition_contract_registration_failed"), TEXT("Target composition contract registration failed without returning a diagnostic.")) : ContractError, FString());
+			return false;
+		}
+		return TryComposeAuthoringModel(
+			Request,
 			Resources,
 			OutModel,
 			OutError);
@@ -3218,20 +6195,53 @@ namespace UE::UAI::HjsonWorkspace
 			OutError);
 	}
 
+	namespace
+	{
+		bool IsGraphStructureUnit(const FSemanticUnit& Unit)
+		{
+			return Unit.GetUnitKind() == ESemanticUnitKind::StructureState
+				&& IsGraphAuthoringStructureType(Unit.GetSemanticTypeRef(),
+					Unit.GetValues().Contains(TEXT("nodes")) && Unit.GetValues().Contains(TEXT("edges")));
+		}
+
+		FString KeyedItemRootField(const FSemanticUnit& Unit)
+		{
+			if (Unit.GetUnitKind() == ESemanticUnitKind::StructureState)
+				for (const FKeyedItemProjectionContract& Contract : GetKeyedItemProjectionContracts())
+					if (Unit.GetValues().Contains(Contract.RootField)) return Contract.RootField;
+			return FString();
+		}
+
+		bool IsKeyedItemStructureUnit(const FSemanticUnit& Unit)
+		{
+			// Graph metadata may contain names such as interfaces. Those fields
+			// belong to the graph document, not a standalone keyed collection.
+			return !IsGraphStructureUnit(Unit) && !KeyedItemRootField(Unit).IsEmpty();
+		}
+
+		bool IsActorComponentHierarchyItemUnit(const FSemanticUnit& Unit)
+		{
+			return Unit.GetUnitKind() == ESemanticUnitKind::ItemState
+				&& Unit.GetRole() == TEXT("actor_component_hierarchy")
+				&& (Unit.GetSemanticTypeRef().EndsWith(TEXT(".actor.target"))
+					|| Unit.GetSemanticTypeRef().EndsWith(TEXT(".component.target")));
+		}
+
+	}
+
 	bool TryBuildCompositionExportPlan(
 		FAuthoringModelRef Model,
 		const FCompositionSnapshotBinding& SnapshotBinding,
 		TMap<FString, int64> Telemetry,
 		FUeAgentResourceTracker& Resources,
 		FExportWorkspacePlanPtr& OutPlan,
-		FWorkspaceError& OutError)
+		FWorkspaceError& OutError, const FString& TargetKind)
 	{
 		OutPlan.Reset();
 		OutError.Reset();
 		if (!SnapshotBinding.IsValid())
 		{
-			OutError.Set(
-				TEXT("composition_snapshot_binding_invalid"));
+			OutError.SetSourceFailure(TEXT("composition_snapshot_binding_invalid"), SnapshotBinding.SnapshotId.TrimStartAndEnd().IsEmpty() ? TEXT("The captured snapshot binding has no snapshot identifier.") : !SnapshotBinding.Revision.IsValid() ? TEXT("The captured snapshot binding has an invalid revision.") : TEXT("The captured snapshot binding has no readback evidence identifier."));
 			return false;
 		}
 		FWorkspaceLayoutPlanPtr Layout;
@@ -3249,44 +6259,719 @@ namespace UE::UAI::HjsonWorkspace
 		}
 
 		TArray<FExportFilePlan> Files;
+		FAuthoringExampleCatalog Examples;
+		RegisterDomainAuthoringExampleRules(Examples);
 		TArray<TSharedRef<FJsonObject>> InventoryRows;
+		TMap<FString, FString> UnitPointers;
+		TMap<FString, FString> UnitEditHashes;
+		TMap<FString, TArray<FString>> UnitContentFiles;
+		TSet<FString> ContentPaths;
+		TMap<FString, FString> ContentDirectories;
+		if (!TryBuildAuthoringContentDirectories(*Model, Layout->GetPhysicalPlacements(), ContentDirectories, OutError)) return false;
+		auto OrganizeContent = [&](const FString& UnitId, const FString& DocumentPath,
+			FUeAgentCanonicalValuePtr& Row) -> bool
+		{
+			if (DocumentPath.StartsWith(TEXT(".uai/"))) return true;
+			const FSemanticUnit* Unit = Model->FindUnit(UnitId);
+			if (!Unit) return true;
+			const FString Base = ContentDirectories.FindChecked(UnitId);
+			return TryOrganizeAuthoringContent(Unit->GetSemanticTypeRef(), Unit->GetRole(), Row,
+				[&](const FUeAgentCanonicalValuePtr& Value, const FString& RelativeStem,
+					FUeAgentCanonicalValuePtr& OutReference) -> bool
+				{
+					const FString Stem = Base + TEXT("/") + RelativeStem;
+					FString Path = AllocateReadableName(Stem, [&](const FString& Candidate) {
+						return ContentPaths.Contains((Candidate + TEXT(".hjson")).ToLower());
+					}) + TEXT(".hjson");
+					FUeAgentCanonicalValuePtr Content;
+					FUeAgentStateSemanticError Error;
+					if (!FUeAgentCanonicalValue::TryObject({{TEXT("value"), Value.ToSharedRef()}}, Resources, Content, Error))
+					{ OutError.SetFailure(Error, Path); return false; }
+					Examples.AddDocument(Path, Content.ToSharedRef(), Unit->GetSemanticTypeRef(), Unit->GetRole(), RelativeStem);
+					TArray<uint8> Bytes;
+					if (!TrySerializeSemanticHjsonObject(*Content, Bytes, OutError, Path))
+					{
+						 return false;
+					}
+					Files.Emplace(Path, Bytes, Sha256(Bytes));
+					ContentPaths.Add(Path.ToLower());
+					UnitContentFiles.FindOrAdd(UnitId).Add(Path);
+					FUeAgentCanonicalValuePtr ReferencePath;
+					if (!FUeAgentCanonicalValue::TryString(Path, Resources, ReferencePath, Error)
+						|| !FUeAgentCanonicalValue::TryObject({{TEXT("content_ref"), ReferencePath.ToSharedRef()}}, Resources, OutReference, Error))
+					{ OutError.SetFailure(Error, Path); return false; }
+					return true;
+				}, Resources, OutError);
+		};
+		TMap<FString, TSharedRef<FJsonObject>> PackedDocuments;
+		TMap<FString, FString> PropertyPathsByItemRef;
+		for (const FSemanticUnit& Property : Model->GetUnits())
+		{
+			if (Property.GetUnitKind() != ESemanticUnitKind::PropertySet) continue;
+			// Layout-slot properties belong to the widget's placement, not its body.
+			if (Property.GetSemanticTypeRef() == TEXT("uai.semantic.umg.slot.property")) continue;
+			const FSemanticUnit* Owner = Model->FindUnit(Property.GetOwnerRef());
+			const FString* Path = Layout->GetPhysicalPlacements().Find(Property.GetUnitId());
+			if (!Owner || Owner->GetUnitKind() != ESemanticUnitKind::ItemState
+				|| !Path || !Path->EndsWith(TEXT("/properties.hjson"))) continue;
+			PropertyPathsByItemRef.Add(Owner->GetUnitId(), *Path);
+			if (const FString* PublicRef = Layout->GetMachineManifest().PublicRefMapping.Find(Owner->GetUnitId()))
+				PropertyPathsByItemRef.Add(*PublicRef, *Path);
+		}
+		for (const TPair<FString, TArray<FString>>& PhysicalFile
+			: Layout->GetPhysicalFiles())
+		{
+			if (PhysicalFile.Key == ManifestPath
+				|| PhysicalFile.Value.IsEmpty())
+			{
+				continue;
+			}
+			const bool bPackedPropertyContainer =
+				!PhysicalFile.Value.IsEmpty()
+				&& Model->FindUnit(PhysicalFile.Value[0]) != nullptr
+				&& Model->FindUnit(PhysicalFile.Value[0])->GetUnitKind()
+					== ESemanticUnitKind::PropertySet;
+			const bool bPackedDefinitionContainer =
+				!PhysicalFile.Value.IsEmpty()
+				&& Model->FindUnit(PhysicalFile.Value[0]) != nullptr
+				&& Model->FindUnit(PhysicalFile.Value[0])->GetUnitKind()
+					== ESemanticUnitKind::CollectionState
+				&& Model->FindUnit(PhysicalFile.Value[0])->GetRole()
+					== TEXT("property_definition");
+			const bool bGraphStructureDocument =
+				PhysicalFile.Value.Num() == 1
+				&& Model->FindUnit(PhysicalFile.Value[0]) != nullptr
+				&& IsGraphStructureUnit(*Model->FindUnit(PhysicalFile.Value[0]));
+			const bool bKeyedItemDocument =
+				PhysicalFile.Value.Num() == 1
+				&& Model->FindUnit(PhysicalFile.Value[0]) != nullptr
+				&& IsKeyedItemStructureUnit(
+					*Model->FindUnit(PhysicalFile.Value[0]));
+			if (bKeyedItemDocument)
+			{
+				const FString& UnitId = PhysicalFile.Value[0];
+				const FSemanticUnit* Unit = Model->FindUnit(UnitId);
+				check(Unit != nullptr);
+				TArray<TPair<FString, FUeAgentCanonicalValueRef>> Fields;
+				TSet<FString> ProjectedRoots;
+				FString SemanticId, DocumentPath;
+				Unit->GetSemanticTypeRef().Split(TEXT("#"), &SemanticId, &DocumentPath);
+				const auto* DocumentContract = FindLevelSequenceCollectionContract(TargetKind, SemanticId, Unit->GetRole(), DocumentPath);
+				for (const auto& Contract : GetKeyedItemProjectionContracts())
+				{
+					const auto* CapturedItems = Unit->GetValues().Find(Contract.RootField);
+					if (!CapturedItems) continue;
+					FUeAgentCanonicalValuePtr VisibleItems;
+					const auto& ProjectionContract = DocumentContract && DocumentContract->RootField == Contract.RootField ? *DocumentContract : Contract;
+					if (!TryProjectKeyedItemVisibleValue(UnitId, CapturedItems->Get(), ProjectionContract, Resources, VisibleItems, OutError,
+						DocumentContract ? EKeyedItemProjectionInputKind::ProjectedMap : EKeyedItemProjectionInputKind::CapturedItems))
+					{
+						if (OutError.GetCode().IsEmpty()) OutError.SetSourceFailure(TEXT("composition_keyed_item_projection_invalid"), FString::Printf(TEXT("The captured collection '%s' could not be projected to editable records."), *Contract.RootField), UnitId);
+						return false;
+					}
+					ProjectedRoots.Add(Contract.RootField);
+					// Folded items retain their schema navigation without putting metadata
+					// in captured business values or downstream operation payloads.
+					if (!ProjectionContract.AggregatedItemSemanticSuffix.IsEmpty())
+					{
+						TArray<TPair<FString, FUeAgentCanonicalValueRef>> Rows;
+						FUeAgentStateSemanticError Error;
+						TMap<FString, const FUeAgentCanonicalValue*> CapturedByKey;
+						for (const auto& CapturedItem : (*CapturedItems)->GetObjectItems())
+							CapturedByKey.Add(CapturedItem.Key, &CapturedItem.Value.Get());
+						for (const auto& Item : VisibleItems->GetObjectItems())
+						{
+							TArray<TPair<FString, FUeAgentCanonicalValueRef>> RowFields = Item.Value->GetObjectItems();
+							if (const auto* Captured = CapturedByKey.Find(Item.Key))
+							{
+								for (const auto& Field : (*Captured)->GetObjectItems())
+								{
+									if (Field.Key != TEXT("unit_id") || Field.Value->GetKind() != EUeAgentValueKind::String) continue;
+									const FSemanticUnit* Bound = Model->FindUnit(Field.Value->GetText());
+									const FString* Ref = Bound ? Layout->GetMachineManifest().PublicRefMapping.Find(Bound->GetFieldSetRef()) : nullptr;
+									if (!Ref) continue;
+									FUeAgentCanonicalValuePtr Definition;
+									if (!FUeAgentCanonicalValue::TryString(*Ref, Resources, Definition, Error))
+									{ OutError.SetFailure(Error, UnitId); return false; }
+									RowFields.Emplace(TEXT("definition"), Definition.ToSharedRef());
+								}
+							}
+							FUeAgentCanonicalValuePtr Row;
+							if (!FUeAgentCanonicalValue::TryObject(RowFields, Resources, Row, Error))
+							{ OutError.SetFailure(Error, UnitId); return false; }
+							Rows.Emplace(Item.Key, Row.ToSharedRef());
+						}
+						if (!FUeAgentCanonicalValue::TryObject(Rows, Resources, VisibleItems, Error))
+						{ OutError.SetFailure(Error, UnitId); return false; }
+					}
+					Fields.Emplace(Contract.RootField, VisibleItems.ToSharedRef());
+				}
+				for (const auto& Field : Unit->GetValues())
+				{
+					if (ProjectedRoots.Contains(Field.Key)) continue;
+					for (const auto& Contract : GetKeyedItemProjectionContracts())
+						if (ProjectedRoots.Contains(Contract.RootField)
+							&& (Contract.IsReadOnlyRootField(Field.Key) || Contract.IsEditableRootField(Field.Key)
+								|| (!Contract.RecordSchemaField.IsEmpty() && Field.Key.Equals(Contract.RecordSchemaField, ESearchCase::CaseSensitive))))
+						{
+							Fields.Add(Field);
+							break;
+						}
+				}
+				FUeAgentCanonicalValuePtr VisibleRow;
+				FUeAgentStateSemanticError StateError;
+				if (!FUeAgentCanonicalValue::TryObject(Fields, Resources, VisibleRow, StateError))
+				{
+					OutError.SetFailure(StateError, UnitId); return false;
+				}
+				TArray<uint8> FileBytes;
+				if (!TrySerializeSemanticHjsonObject(*VisibleRow, FileBytes, OutError, PhysicalFile.Key))
+				{
+					 return false;
+				}
+				UnitEditHashes.Add(UnitId, Sha256(FileBytes));
+				if (!OrganizeContent(UnitId, PhysicalFile.Key, VisibleRow)) return false;
+                if (!TrySerializeSemanticHjsonObject(*VisibleRow, FileBytes, OutError, PhysicalFile.Key))
+                {  return false; }
+				Examples.AddDocument(PhysicalFile.Key, VisibleRow.ToSharedRef(), Unit->GetSemanticTypeRef(), Unit->GetRole());
+				for (const auto& Contract : GetKeyedItemProjectionContracts())
+					if (ProjectedRoots.Contains(Contract.RootField))
+						Examples.AddCollection(PhysicalFile.Key, VisibleRow.ToSharedRef(),
+							DocumentContract && DocumentContract->RootField == Contract.RootField ? *DocumentContract : Contract);
+				Files.Emplace(PhysicalFile.Key, FileBytes, Sha256(FileBytes));
+				UnitPointers.Add(UnitId, TEXT("/"));
+			}
+			else if (PhysicalFile.Value.Num() == 1
+				&& Model->FindUnit(PhysicalFile.Value[0]) != nullptr
+				&& IsActorComponentHierarchyItemUnit(
+					*Model->FindUnit(PhysicalFile.Value[0])))
+			{
+				const FString& UnitId = PhysicalFile.Value[0];
+				const FSemanticUnit* Unit = Model->FindUnit(UnitId);
+				check(Unit != nullptr);
+				TSharedPtr<FJsonObject> CompactRow;
+				const TSharedPtr<FJsonObject>* CapturedValues = nullptr;
+				TSharedRef<FJsonObject> VisibleRow = MakeShared<FJsonObject>();
+				if (!TryBuildCompactRow(*Unit, CompactRow, OutError, nullptr, PhysicalFile.Key)
+					|| !CompactRow.IsValid()
+					|| !CompactRow->TryGetObjectField(TEXT("values"), CapturedValues)
+					|| CapturedValues == nullptr || !CapturedValues->IsValid()
+					|| !TryProjectItemVisibleObject(UnitId,
+						(*CapturedValues).ToSharedRef(),
+						GetActorComponentHierarchyItemVisibleFieldPolicy(),
+						VisibleRow, OutError))
+				{
+					if (OutError.GetCode().IsEmpty())
+					{
+						OutError.SetSourceFailure(TEXT("composition_item_projection_invalid"), TEXT("The item projection did not provide the required values object."), UnitId, TEXT("/values"));
+					}
+					return false;
+				}
+				TArray<uint8> FileBytes;
+				if (!TrySerializeSemanticHjsonObject(VisibleRow, FileBytes, OutError, PhysicalFile.Key))
+				{
+					
+					return false;
+				}
+				Files.Emplace(PhysicalFile.Key, FileBytes, Sha256(FileBytes));
+				UnitPointers.Add(UnitId, TEXT("/"));
+				UnitEditHashes.Add(UnitId, Sha256(FileBytes));
+			}
+			else if (bGraphStructureDocument)
+			{
+				const FString& UnitId = PhysicalFile.Value[0];
+				const FSemanticUnit* Unit = Model->FindUnit(UnitId);
+				check(Unit != nullptr);
+				TSharedPtr<FJsonObject> CompactRow;
+				TSharedRef<FJsonObject> VisibleRow = MakeShared<FJsonObject>();
+				TSharedPtr<FJsonObject> InterfaceRow;
+				if (!TryBuildCompactRow(*Unit, CompactRow, OutError, &Layout->GetMachineManifest().PublicRefMapping, PhysicalFile.Key)
+					|| !CompactRow.IsValid()
+					|| !TryProjectGraphAuthoringVisibleRow(
+						UnitId, CompactRow.ToSharedRef(), VisibleRow,
+						InterfaceRow, OutError))
+				{
+					if (OutError.GetCode().IsEmpty())
+					{
+						OutError.SetSourceFailure(TEXT("composition_graph_projection_invalid"),
+							TEXT("The graph could not be projected into its authoring document."), UnitId);
+					}
+					return false;
+				}
+				const TSharedPtr<FJsonObject>* VisibleNodes = nullptr;
+				if (VisibleRow->TryGetObjectField(TEXT("nodes"), VisibleNodes))
+				{
+					FGraphAuthoringAliasProjection Aliases;
+					if (!TryBuildGraphModelNodeAliases(*Model, UnitId, Aliases, OutError)) return false;
+					for (const auto& Alias : Aliases.AliasBySourceId)
+					{
+						const TSharedPtr<FJsonObject>* VisibleNode = nullptr;
+						if (!(*VisibleNodes)->TryGetObjectField(Alias.Value, VisibleNode)) continue;
+						if (const FString* PropertyPath = PropertyPathsByItemRef.Find(Alias.Key))
+						{
+							FString RelativePath = *PropertyPath;
+							const FString GraphDirectory = FPaths::GetPath(PhysicalFile.Key) + TEXT("/");
+							FPaths::MakePathRelativeTo(RelativePath, *GraphDirectory);
+							(*VisibleNode)->SetStringField(TEXT("properties_ref"), RelativePath);
+						}
+					}
+				}
+				if (InterfaceRow.IsValid())
+				{
+					const FString InterfaceFileName =
+						FPaths::GetBaseFilename(PhysicalFile.Key)
+						+ TEXT(".interfaces.hjson");
+					const FString InterfacePath = FPaths::Combine(
+						FPaths::GetPath(PhysicalFile.Key), InterfaceFileName);
+					VisibleRow->SetStringField(
+						TEXT("interface_ref"), InterfaceFileName);
+					TArray<uint8> InterfaceBytes;
+					if (!TrySerializeSemanticHjsonObject(
+						InterfaceRow.ToSharedRef(), InterfaceBytes, OutError, InterfacePath))
+					{
+						
+						return false;
+					}
+					Files.Emplace(
+						InterfacePath, InterfaceBytes, Sha256(InterfaceBytes));
+				}
+				TArray<uint8> FileBytes;
+				if (!TrySerializeSemanticHjsonObject(VisibleRow, FileBytes, OutError, PhysicalFile.Key))
+				{
+					
+					return false;
+				}
+				FUeAgentCanonicalValuePtr ExampleDocument;
+				if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(VisibleRow), Resources, ExampleDocument, OutError)) return false;
+				Examples.AddDocument(PhysicalFile.Key, ExampleDocument.ToSharedRef(), Unit->GetSemanticTypeRef(), Unit->GetRole());
+				Files.Emplace(PhysicalFile.Key, FileBytes, Sha256(FileBytes));
+				UnitPointers.Add(UnitId, TEXT("/"));
+				UnitEditHashes.Add(UnitId, Sha256(FileBytes));
+			}
+			else if (bPackedPropertyContainer || bPackedDefinitionContainer)
+			{
+				TSharedRef<FJsonObject> Container =
+					MakeShared<FJsonObject>();
+				TSharedRef<FJsonObject> KeyedRows = MakeShared<FJsonObject>();
+				TMap<FString, TSharedRef<FJsonObject>> CategoryRows;
+				TSet<FString> PropertyRowKeys;
+				TSharedRef<FJsonObject> EnumCatalog = MakeShared<FJsonObject>();
+				TMap<FString, TSet<FString>> EnumCandidates;
+				for (int32 Index = 0; Index < PhysicalFile.Value.Num(); ++Index)
+				{
+					const FString& UnitId = PhysicalFile.Value[Index];
+					const FSemanticUnit* Unit = Model->FindUnit(UnitId);
+					if (Unit == nullptr)
+					{
+						OutError.SetSourceFailure(TEXT("composition_unit_missing"), TEXT("A unit assigned to this exported document is absent from the authoring model."), UnitId);
+						return false;
+					}
+					TSharedPtr<FJsonObject> CompactRow;
+					if (!TryBuildCompactRow(*Unit, CompactRow, OutError,
+						bPackedDefinitionContainer ? &Layout->GetMachineManifest().PublicRefMapping : nullptr, PhysicalFile.Key)
+						|| !CompactRow.IsValid())
+					{
+						return false;
+					}
+					TArray<uint8> CompactRowBytes;
+					if (!TrySerializeSemanticHjsonObject(
+							CompactRow.ToSharedRef(),
+							CompactRowBytes, OutError, PhysicalFile.Key))
+					{
+						
+						return false;
+					}
+					UnitEditHashes.Add(UnitId, Sha256(CompactRowBytes));
+					FString RowKey;
+					TSharedRef<FJsonObject> VisibleRow = MakeShared<FJsonObject>();
+					if (bPackedPropertyContainer)
+					{
+						const auto Address = DescribeReadableProperty(*Unit, *Model);
+						RowKey = Address.Key;
+						const FString CategoryKey = Address.Category;
+						CategoryRows.FindOrAdd(
+							CategoryKey,
+							MakeShared<FJsonObject>());
+						if (RowKey.IsEmpty() || PropertyRowKeys.Contains(RowKey))
+						{
+							UE_LOG(LogTemp, Warning, TEXT("UAI property composition conflict: file=%s property=%s category=%s semantic=%s owner=%s target=%s"),
+								*PhysicalFile.Key, *RowKey, *CategoryKey, *Unit->GetSemanticTypeRef(), *Unit->GetOwnerRef(), *Unit->GetTargetIdentityKey());
+							OutError.SetSourceFailure(TEXT("composition_property_key_invalid"), RowKey.IsEmpty() ? TEXT("The exported property has no readable name.") : FString::Printf(TEXT("More than one property would be exported under the name '%s'."), *RowKey), PhysicalFile.Key,
+								TEXT("/categories/") + CategoryKey + TEXT("/") + RowKey);
+							return false;
+						}
+						PropertyRowKeys.Add(RowKey);
+						VisibleRow->SetStringField(
+							TEXT("type"), Address.Type);
+						if (!Address.Definition.IsEmpty()) VisibleRow->SetStringField(TEXT("definition"), Address.Definition);
+						UE::UAI::Contract::FDiagnostic ProjectionError;
+                        TSharedPtr<FJsonValue> DirectValue = DirectPropertyValue(CompactRow, *Unit, *Model, ProjectionError);
+						if (!DirectValue.IsValid())
+						{
+							OutError.SetFailure(ProjectionError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("composition_property_value_invalid"), TEXT("The property could not be projected.")) : ProjectionError, UnitId);
+							return false;
+						}
+						VisibleRow->SetField(TEXT("value"), MoveTemp(DirectValue));
+					}
+					else
+					{
+						const FString TypeName = ReadablePropertyType(*Unit, Model.Get());
+						RowKey = ReadablePropertyDefinition(*Unit, Model.Get());
+						if (RowKey.IsEmpty()) RowKey = TEXT("definition");
+						const FString BaseKey = RowKey;
+						RowKey = AllocateReadableName(BaseKey, [&](const FString& Candidate) {
+							return KeyedRows->HasField(Candidate);
+						});
+						const TSharedPtr<FJsonObject>* Values = nullptr;
+						if (CompactRow->TryGetObjectField(TEXT("values"), Values)
+							&& Values != nullptr && Values->IsValid())
+						{
+							for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
+								: (*Values)->Values)
+							{
+								if (Field.Key != TEXT("candidates")
+									&& Field.Key != TEXT("candidates_header"))
+								{
+									if (Field.Key == TEXT("value_definition"))
+									{
+										if (auto PublicDefinition = ProjectPublicOwnedItemDefinition(Field.Value))
+										{
+											if (const auto* Captured = Unit->GetValues().Find(TEXT("value_definition")))
+												{
+                                                UE::UAI::Contract::FDiagnostic TemplateError;
+                                                if (!ProjectElementTemplates(PublicDefinition, Captured->Get(), Model.Get(), TemplateError))
+                                                { OutError.SetFailure(TemplateError, UnitId); return false; }
+                                            }
+											VisibleRow->SetField(Field.Key, PublicDefinition);
+										}
+									}
+									else VisibleRow->SetField(Field.Key, Field.Value);
+								}
+							}
+							// Native field definitions are referenced by other definitions too.
+							// Their binding must be resolvable from the ordinary catalog itself.
+							VisibleRow->SetStringField(TEXT("ref"), Layout->GetMachineManifest().PublicRefMapping.FindChecked(UnitId));
+							const TArray<TSharedPtr<FJsonValue>>* Candidates = nullptr;
+							if (!TypeName.IsEmpty()
+								&& (*Values)->TryGetArrayField(TEXT("candidates"), Candidates)
+								&& Candidates != nullptr)
+							{
+								for (const TSharedPtr<FJsonValue>& Candidate : *Candidates)
+								{
+									FString Name;
+									if (Candidate.IsValid() && Candidate->Type == EJson::Object)
+									{
+										const TSharedPtr<FJsonObject> CandidateObject = Candidate->AsObject();
+										if (CandidateObject.IsValid())
+										{
+											CandidateObject->TryGetStringField(TEXT("name"), Name);
+										}
+									}
+									else if (Candidate.IsValid() && Candidate->Type == EJson::Array)
+									{
+										const TArray<TSharedPtr<FJsonValue>>& Cells = Candidate->AsArray();
+										if (!Cells.IsEmpty() && Cells[0].IsValid()
+											&& Cells[0]->Type == EJson::String)
+										{
+											Name = Cells[0]->AsString();
+										}
+									}
+									else if (Candidate.IsValid() && Candidate->Type == EJson::String)
+									{
+										Name = Candidate->AsString();
+									}
+									Name.TrimStartAndEndInline();
+									if (!Name.IsEmpty())
+									{
+									EnumCandidates.FindOrAdd(RowKey).Add(Name);
+									}
+								}
+							}
+						}
+					}
+					TArray<uint8> VisibleBytes;
+					if (!TrySerializeSemanticHjsonObject(VisibleRow, VisibleBytes, OutError, PhysicalFile.Key))
+					{
+						
+						return false;
+					}
+					UnitEditHashes[UnitId] = Sha256(VisibleBytes);
+					if (bPackedPropertyContainer)
+					{
+						FUeAgentCanonicalValuePtr Content;
+						if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(VisibleRow), Resources, Content, OutError)
+							|| !OrganizeContent(UnitId, PhysicalFile.Key, Content)) return false;
+						TSharedPtr<FJsonValue> Json;
+						UE::UAI::Contract::FDiagnostic Error;
+						if (!CanonicalJson::TryToJsonValue(*Content, Json, Error))
+						{ OutError.SetFailure(Error, UnitId); return false; }
+						VisibleRow->Values = Json->AsObject()->Values;
+					}
+					if (bPackedPropertyContainer)
+					{
+						CategoryRows.FindChecked(
+							ReadablePropertyCategory(Unit->GetCategoryPath()))
+							->SetObjectField(RowKey, VisibleRow);
+					}
+					else
+					{
+						KeyedRows->SetObjectField(RowKey, VisibleRow);
+					}
+					UnitPointers.Add(
+						UnitId,
+						bPackedPropertyContainer
+							? TEXT("/categories/")
+								+ EscapeJsonPointerSegment(
+									ReadablePropertyCategory(Unit->GetCategoryPath()))
+								+ TEXT("/") + EscapeJsonPointerSegment(RowKey)
+							: TEXT("/definitions/")
+								+ EscapeJsonPointerSegment(RowKey));
+				}
+				if (bPackedPropertyContainer)
+				{
+					TSharedRef<FJsonObject> Categories = MakeShared<FJsonObject>();
+					TArray<FString> CategoryKeys;
+					CategoryRows.GetKeys(CategoryKeys);
+					CategoryKeys.Sort();
+					for (const FString& CategoryKey : CategoryKeys)
+					{
+						Categories->SetObjectField(
+							CategoryKey, CategoryRows.FindChecked(CategoryKey));
+					}
+					Container->SetObjectField(TEXT("categories"), Categories);
+				}
+				else
+				{
+					Container->SetObjectField(TEXT("definitions"), KeyedRows);
+				}
+				if (bPackedDefinitionContainer)
+				{
+					for (TPair<FString, TSet<FString>>& Catalog : EnumCandidates)
+					{
+						TArray<FString> Names = Catalog.Value.Array();
+						Names.Sort();
+						TArray<TSharedPtr<FJsonValue>> Values;
+						for (const FString& Name : Names)
+						{
+							Values.Add(MakeShared<FJsonValueString>(Name));
+						}
+						EnumCatalog->SetArrayField(Catalog.Key, MoveTemp(Values));
+					}
+					Container->SetObjectField(TEXT("enums"), EnumCatalog);
+				}
+				PackedDocuments.Add(PhysicalFile.Key, Container);
+			}
+			else
+			{
+				const FString& UnitId = PhysicalFile.Value[0];
+				const FSemanticUnit* Unit = Model->FindUnit(UnitId);
+				if (Unit == nullptr)
+				{
+					OutError.SetSourceFailure(TEXT("composition_unit_missing"), TEXT("A unit assigned to this exported document is absent from the authoring model."), UnitId);
+					return false;
+				}
+				TArray<uint8> FileBytes;
+				if (!TrySerializeSemanticUnitDocument(
+						*Unit,
+						Layout->GetMachineManifest().PublicRefMapping,
+						FileBytes, OutError, PhysicalFile.Key))
+				{
+					return false;
+				}
+				Files.Emplace(
+					PhysicalFile.Key,
+					FileBytes,
+					Sha256(FileBytes));
+				UnitPointers.Add(UnitId, TEXT("/unit"));
+				TArray<uint8> RowBytes;
+				if (!TrySerializeSemanticModelUnitRow(
+						*Unit,
+						Layout->GetMachineManifest().PublicRefMapping,
+						RowBytes, OutError, PhysicalFile.Key))
+				{
+					
+					return false;
+				}
+				UnitEditHashes.Add(UnitId, Sha256(RowBytes));
+			}
+		}
+		for (const TPair<FString, TSharedRef<FJsonObject>>& Packed
+			: PackedDocuments)
+		{
+			if (Packed.Value->HasTypedField<EJson::Object>(TEXT("definitions")))
+				Examples.AddDefinitions(Packed.Key, Packed.Value->GetObjectField(TEXT("definitions")).ToSharedRef(), Packed.Value->GetObjectField(TEXT("enums")));
+			else
+			{
+				FUeAgentCanonicalValuePtr ExampleDocument;
+				if (!TryCanonicalizeJson(MakeShared<FJsonValueObject>(Packed.Value), Resources, ExampleDocument, OutError)) return false;
+				Examples.AddDocument(Packed.Key, ExampleDocument.ToSharedRef());
+			}
+			TArray<uint8> FileBytes;
+			if (!TrySerializeSemanticHjsonObject(Packed.Value, FileBytes, OutError, Packed.Key))
+			{
+				
+				return false;
+			}
+			Files.Emplace(Packed.Key, FileBytes, Sha256(FileBytes));
+		}
 		for (const FSemanticUnit& Unit : Model->GetUnits())
 		{
 			TArray<uint8> RowBytes;
-			TArray<uint8> FileBytes;
-			if (!TrySerializeSemanticUnitRow(Unit, RowBytes)
-				|| !TrySerializeSemanticUnitDocument(
-					Unit,
-					FileBytes))
+			if (!TrySerializeSemanticUnitRow(Unit, RowBytes, OutError,
+				Layout->GetPhysicalPlacements().FindChecked(Unit.GetUnitId())))
 			{
-				OutError.Set(
-					TEXT("composition_unit_serialize_failed"),
-					Unit.GetUnitId());
 				return false;
 			}
-			const FString RelativePath =
-				Layout->GetLogicalPlacements().FindChecked(
-					Unit.GetUnitId());
-			Files.Emplace(
-				RelativePath,
-				FileBytes,
-				Sha256(FileBytes));
 			TSharedRef<FJsonObject> Inventory =
 				MakeShared<FJsonObject>();
 			Inventory->SetStringField(
 				TEXT("unit_id"),
 				Unit.GetUnitId());
 			Inventory->SetStringField(
+				TEXT("public_ref"),
+				Layout->GetMachineManifest().PublicRefMapping.FindChecked(
+					Unit.GetUnitId()));
+			Inventory->SetStringField(
 				TEXT("unit_kind"),
 				LexToString(Unit.GetUnitKind()));
 			Inventory->SetStringField(
 				TEXT("logical_path"),
-				RelativePath);
+				Layout->GetLogicalPlacements().FindChecked(
+					Unit.GetUnitId()));
+			Inventory->SetStringField(
+				TEXT("document_path"),
+				Layout->GetPhysicalPlacements().FindChecked(
+					Unit.GetUnitId()));
+			const FString* UnitPointer = UnitPointers.Find(Unit.GetUnitId());
+			const FString* UnitEditHash = UnitEditHashes.Find(Unit.GetUnitId());
+			if (!UnitPointer || !UnitEditHash)
+			{
+				OutError.SetSourceFailure(TEXT("composition_unit_document_missing"), !UnitPointer ? TEXT("The exported unit has no document location.") : TEXT("The exported unit has no content fingerprint."),
+					Layout->GetPhysicalPlacements().FindChecked(Unit.GetUnitId()));
+				return false;
+			}
+			Inventory->SetStringField(TEXT("unit_pointer"), *UnitPointer);
 			Inventory->SetStringField(
 				TEXT("content_hash"),
 				Sha256(RowBytes));
+			Inventory->SetStringField(
+				TEXT("edit_hash"),
+				*UnitEditHash);
+			if (const auto* ContentFiles = UnitContentFiles.Find(Unit.GetUnitId()))
+				Inventory->SetArrayField(TEXT("content_files"), StringArray(*ContentFiles));
+			AddSemanticEnvelope(Unit, Inventory);
+			// The existing machine envelope is the baseline for every unit;
+			// these values do not enter model-facing editable files.
+			{
+				TSharedPtr<FJsonObject> CompactRow;
+				const TSharedPtr<FJsonObject>* Values = nullptr;
+				if (!TryBuildCompactRow(Unit, CompactRow, OutError, nullptr,
+					Layout->GetPhysicalPlacements().FindChecked(Unit.GetUnitId()))
+					|| !CompactRow.IsValid()
+					|| !CompactRow->TryGetObjectField(TEXT("values"), Values)
+					|| Values == nullptr || !Values->IsValid())
+				{
+					if (!OutError.HasErrors()) OutError.SetSourceFailure(TEXT("composition_unit_envelope_failed"), TEXT("The semantic row did not provide the values required for its captured baseline."), Unit.GetUnitId(), TEXT("/values"));
+					return false;
+				}
+				Inventory->GetObjectField(TEXT("envelope"))->SetObjectField(
+					TEXT("captured_values"), (*Values).ToSharedRef());
+				if (Unit.GetUnitKind() == ESemanticUnitKind::PropertySet)
+				{
+					Inventory->GetObjectField(TEXT("envelope"))->SetStringField(
+						TEXT("captured_type"), ReadablePropertyType(Unit, Model.Get()));
+					Inventory->GetObjectField(TEXT("envelope"))->SetStringField(
+						TEXT("captured_definition"), ReadablePropertyDefinition(Unit, Model.Get()));
+				}
+			}
 			InventoryRows.Add(Inventory);
 		}
+
+		const auto Targets = MakeShared<FJsonObject>();
+		TMap<FString, FString> PreviewAssetPaths;
+		for (const FSemanticUnit& Unit : Model->GetUnits())
+		{
+			if (!AssetPreview::IsPreviewSemantic(Unit.GetSemanticTypeRef())) continue;
+			const FString Group = AssetPreview::GroupFromSemantic(Unit.GetSemanticTypeRef());
+			UeAgentAuthoringIdentity::FCanonicalIdentity Identity;
+			UE::UAI::Contract::FDiagnostic IdentityError;
+			if (!UeAgentAuthoringIdentity::ParseCanonicalKey(Unit.GetTargetIdentityKey(), Identity, IdentityError)) continue;
+			FString Target, GroupSuffix;
+			if (!Unit.GetRole().Mid(FCString::Strlen(TEXT("preview/"))).Split(TEXT("/"), &Target, &GroupSuffix)) continue;
+			auto TargetInfo = Targets->HasField(Target) ? Targets->GetObjectField(Target) : MakeShared<FJsonObject>();
+			auto PreviewGroups = TargetInfo->HasField(TEXT("groups")) ? TargetInfo->GetObjectField(TEXT("groups")) : MakeShared<FJsonObject>();
+			const FString OwnerPath = Identity.GetSelector(TEXT("owner_path"));
+			FString PreviewAssetPath, LocalSuffix;
+			if (OwnerPath.Split(TEXT(":preview:"), &PreviewAssetPath, &LocalSuffix))
+				PreviewAssetPaths.Add(Target, PreviewAssetPath);
+			FString Scope = OwnerPath.Contains(TEXT(":preview:"))
+				? (Group == TEXT("capture") ? TEXT("capture") : TEXT("viewport")) : TEXT("shared_profile");
+			FString NativeProfile;
+			for (const FString& Dependency : Unit.GetDependencyRefs())
+			{
+				const auto* Definition = Model->FindUnit(Dependency);
+				if (!Definition) continue;
+				const auto* Constraints = Definition->GetValues().Find(TEXT("constraints"));
+				if (!Constraints) continue;
+				if (const auto* Value = FindObjectField(*Constraints, TEXT("scope"))) Scope = (*Value)->GetText();
+				if (const auto* Value = FindObjectField(*Constraints, TEXT("profile"))) NativeProfile = (*Value)->GetText();
+			}
+			auto Description = PreviewGroups->HasField(Group) ? PreviewGroups->GetObjectField(Group) : MakeShared<FJsonObject>();
+			Description->SetStringField(TEXT("file"), Target + TEXT("/") + Group + TEXT(".hjson"));
+			auto Owners = Description->HasField(TEXT("owners")) ? Description->GetObjectField(TEXT("owners")) : MakeShared<FJsonObject>();
+			auto Owner = Owners->HasField(Scope) ? Owners->GetObjectField(Scope) : MakeShared<FJsonObject>();
+			Owner->SetStringField(TEXT("source"), Unit.GetSourceProvenance().RightChop(FCString::Strlen(TEXT("asset_preview."))));
+			if (Scope == TEXT("shared_profile"))
+			{
+				if (!NativeProfile.IsEmpty()) Owner->SetStringField(TEXT("profile"), NativeProfile);
+			}
+			TArray<TSharedPtr<FJsonValue>> Fields;
+			if (Owner->HasField(TEXT("fields"))) Fields = Owner->GetArrayField(TEXT("fields"));
+			Fields.Add(MakeShared<FJsonValueString>(Unit.GetFieldSetRef()));
+			Owner->SetArrayField(TEXT("fields"), MoveTemp(Fields));
+			Owners->SetObjectField(Scope, Owner);
+			Description->SetObjectField(TEXT("owners"), Owners);
+			PreviewGroups->SetObjectField(Group, Description);
+			TargetInfo->SetObjectField(TEXT("groups"), PreviewGroups);
+			Targets->SetObjectField(Target, TargetInfo);
+		}
+		if (!Targets->Values.IsEmpty())
+		{
+			TArray<FString> TargetNames;
+			Targets->Values.GetKeys(TargetNames);
+			TargetNames.Sort();
+			for (const FString& TargetName : TargetNames)
+			{
+			const auto Main = Targets->GetObjectField(TargetName);
+			const auto PreviewGroups = Main->GetObjectField(TEXT("groups"));
+			for (auto& Pair : PreviewGroups->Values)
+			{
+				auto Owners = Pair.Value->AsObject()->GetObjectField(TEXT("owners"));
+				if (Owners->Values.Num() == 1)
+					for (auto& Owner : Owners->Values) Owner.Value->AsObject()->RemoveField(TEXT("fields"));
+			}
+			if (!PreviewGroups->HasField(TEXT("view")))
+				Main->SetStringField(TEXT("view_state"), TEXT("requires_open_preview"));
+			Main->SetArrayField(TEXT("operations"), StringArray({TEXT("configure"), TEXT("capture_single"), TEXT("capture_sequence")}));
+			if (const auto* AssetPath = PreviewAssetPaths.Find(TargetName))
+				Main->SetArrayField(TEXT("actions"), StringArray(AssetPreview::GetActions(
+					FindObject<UObject>(nullptr, **AssetPath), TargetName)));
+			}
+			const auto Navigation = MakeShared<FJsonObject>();
+			Navigation->SetStringField(TEXT("default_target"), TargetNames.Contains(TEXT("main")) ? TEXT("main") : TargetNames[0]);
+			Navigation->SetObjectField(TEXT("targets"), Targets);
+			TArray<uint8> NavigationBytes;
+			if (!TrySerializeSemanticHjsonObject(Navigation, NavigationBytes, OutError, TEXT("preview/index.hjson")))
+			{
+				
+				return false;
+			}
+			// Generated navigation shares the publisher lifecycle, but is not an
+			// editable semantic unit or a second source of property values.
+			Files.Emplace(TEXT("preview/index.hjson"), NavigationBytes, Sha256(NavigationBytes));
+		}
+
+		if (!Examples.Publish(Files, OutError, [](const TArray<uint8>& Bytes) { return Sha256(Bytes); })) return false;
 
 		const FUeAgentStateRevision& Revision =
 			SnapshotBinding.Revision;
@@ -3344,10 +7029,9 @@ namespace UE::UAI::HjsonWorkspace
 			TArray<TSharedPtr<FJsonValue>>{});
 
 		TArray<uint8> ManifestBytes;
-		if (!SerializeJson(Manifest, ManifestBytes))
+		if (!TrySerializeSemanticHjsonObject(Manifest, ManifestBytes, OutError, ManifestPath))
 		{
-			OutError.Set(
-				TEXT("composition_manifest_serialize_failed"));
+			
 			return false;
 		}
 		Files.Emplace(
@@ -3378,7 +7062,7 @@ namespace UE::UAI::HjsonWorkspace
 			PlanMaterial += TEXT("|") + File.GetRelativePath()
 				+ TEXT("|") + File.GetContentHash();
 		}
-		FUeAgentResourceBudgetExceeded ResourceError;
+		FUeAgentResourceChargeError ResourceError;
 		if (!Resources.TryChargeMany(
 			{
 				{EUeAgentResourceDimension::OutputBytes, OutputBytes},
@@ -3391,12 +7075,7 @@ namespace UE::UAI::HjsonWorkspace
 			TEXT("authoring_composition.materialize"),
 			ResourceError))
 		{
-			OutError.Set(
-				ResourceError.Code,
-				ResourceError.Path,
-				TEXT("/"),
-				ResourceError.Observed,
-				ResourceError.bStoppedEarly);
+			OutError.SetFailure(ResourceError, FString());
 			return false;
 		}
 		const FString Fingerprint = Sha256Text(PlanMaterial);
@@ -3418,72 +7097,52 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& ProfileId,
 		const UeAgentAuthoringState::FStateSnapshot& Snapshot,
 		const FString& WorkspaceRoot,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
-		FString& OutError)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
 	{
 		OutResult =
 			UeAgentExportWorkspaceWriter::FWorkspaceResult();
-		OutError.Reset();
-		FString ContractError;
+		OutResult.Status = TEXT("failed");
+		UE::UAI::Contract::FDiagnostic ContractError;
 		if (!RegisterGraphTreeTargetCompositionContracts(ContractError)
 			|| !RegisterOtherTargetCompositionContracts(ContractError))
 		{
-			OutError = TEXT("target_composition_contract_registration_failed:")
-				+ ContractError;
+			OutResult.Diagnostic = ContractError;
 			return false;
 		}
-		const TMap<EUeAgentResourceDimension, int64> Limits{
-			{EUeAgentResourceDimension::InputBytes, 1ll << 40},
-			{EUeAgentResourceDimension::OutputBytes, 1ll << 40},
-			{EUeAgentResourceDimension::StringBytes, 1ll << 40},
-			{EUeAgentResourceDimension::Nodes, 1ll << 32},
-			{EUeAgentResourceDimension::Items, 1ll << 32},
-			{EUeAgentResourceDimension::Files, 1ll << 28},
-			{EUeAgentResourceDimension::ReferenceEdges, 1ll << 32},
-			{EUeAgentResourceDimension::WorkUnits, 1ll << 34},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 1ll << 42},
-		};
-		FUeAgentResourceTracker Resources{
-			FUeAgentResourceBudget(Limits)};
-		const TArray<UeAgentAuthoringState::FStateEntry> Entries =
-			Snapshot.CopyEntries();
-		FString RevisionMaterial = TargetKind;
-		for (const UeAgentAuthoringState::FStateEntry& Entry : Entries)
-		{
-			RevisionMaterial += TEXT("|") + Entry.SemanticId
-				+ TEXT("|") + Entry.TargetIdentity.CanonicalKey;
-		}
-		FCompositionRequest Request;
-		Request.TargetKind = TargetKind;
-		Request.ProfileId = ProfileId;
-		Request.BaseRevision =
-			TEXT("capture:") + Sha256Text(RevisionMaterial).Right(24);
-		Request.SourceProvenance = TEXT("authoring_state.capture");
-		Request.Entries = Entries;
+		FUeAgentResourceTracker Resources =
+			MakeSemanticWorkspaceResourceTracker();
+		FUeAgentCanonicalSnapshotPtr CanonicalSnapshot;
 		FAuthoringModelPtr Model;
 		FWorkspaceError WorkspaceError;
-		if (!TryComposeAuthoringModel(
-			Request,
+		if (!TryBuildCanonicalAuthoringCapture(
+			TargetKind,
+			ProfileId,
+			Snapshot,
 			Resources,
+			CanonicalSnapshot,
 			Model,
 			WorkspaceError)
+			|| !CanonicalSnapshot.IsValid()
 			|| !Model.IsValid())
 		{
-			OutError = WorkspaceError.GetCode() + TEXT(":")
-				+ WorkspaceError.GetSourceUnit();
+			OutResult.Diagnostic = WorkspaceError.GetDiagnostic();
 			return false;
 		}
 		FExportWorkspacePlanPtr Plan;
 		if (!TryBuildCompositionExportPlan(
 			Model.ToSharedRef(),
+			{
+				CanonicalSnapshot->GetSnapshotId(),
+				CanonicalSnapshot->GetRevision(),
+				CanonicalSnapshot->GetProvenance().GetEvidenceId(),
+			},
 			{},
 			Resources,
 			Plan,
-			WorkspaceError)
+			WorkspaceError, TargetKind)
 			|| !Plan.IsValid())
 		{
-			OutError = WorkspaceError.GetCode() + TEXT(":")
-				+ WorkspaceError.GetSourceUnit();
+			OutResult.Diagnostic = WorkspaceError.GetDiagnostic();
 			return false;
 		}
 		FArtifactPublishReceipt Receipt;
@@ -3500,10 +7159,7 @@ namespace UE::UAI::HjsonWorkspace
 			Receipt,
 			PublishError))
 		{
-			OutResult.ErrorCode = PublishError.GetCode();
-			OutResult.ErrorDetail = PublishError.GetDetail();
-			OutError = OutResult.ErrorCode + TEXT(":")
-				+ OutResult.ErrorDetail;
+			OutResult.Diagnostic = PublishError;
 			return false;
 		}
 
@@ -3512,9 +7168,9 @@ namespace UE::UAI::HjsonWorkspace
 		OutResult.ContractVersion =
 			FString::FromInt(Model->GetContractVersion());
 		OutResult.ProfileId = ProfileId;
+		OutResult.ExpectedRevision = Model->GetBaseRevision();
 		OutResult.WorkspaceRoot = Receipt.GetFinalPath();
 		OutResult.EntryFile = Receipt.GetEntryFile();
-		OutResult.TokenBudget = 0;
 		for (const FExportFilePlan& File : Plan->GetFiles())
 		{
 			UeAgentExportWorkspaceWriter::FPlannedFile Planned;
@@ -3523,17 +7179,19 @@ namespace UE::UAI::HjsonWorkspace
 			Planned.ResolvedPath = FPaths::Combine(
 				Receipt.GetFinalPath(),
 				File.GetRelativePath());
-			Planned.Role =
-				File.GetRelativePath() == ManifestPath
-					? TEXT("machine_manifest")
-					: TEXT("semantic_unit");
-			Planned.Metrics.Utf8Bytes =
-				File.GetCanonicalUtf8().Num();
-			Planned.Metrics.CharacterCount =
-				File.GetCanonicalUtf8().Num();
-			Planned.Metrics.TokenProxy =
-				(File.GetCanonicalUtf8().Num() + 3) / 4;
+			Planned.Role = File.GetRelativePath() == ManifestPath
+				? TEXT("machine_manifest")
+				: IsModelVisibleSemanticWorkspacePath(File.GetRelativePath())
+					? TEXT("semantic_unit")
+					: TEXT("machine_state");
+			Planned.Metrics =
+				UeAgentExportWorkspaceWriter::MeasureUtf8Text(
+					File.GetCanonicalUtf8());
 			OutResult.Metrics.Add(Planned.Metrics);
+			if (Planned.Role == TEXT("semantic_unit"))
+			{
+				OutResult.ModelMetrics.Add(Planned.Metrics);
+			}
 			OutResult.Files.Add(MoveTemp(Planned));
 		}
 		OutResult.WrittenRelativeFiles =
@@ -3560,6 +7218,146 @@ namespace UE::UAI::HjsonWorkspace
 			TEXT("inventory_hash"),
 			Receipt.GetInventoryHash());
 		OutResult.PublisherReceipt = ReceiptJson;
+		if (!Receipt.GetCleanupWarnings().IsEmpty()) {
+			TArray<TSharedPtr<FJsonValue>> Warnings;
+			for (const auto& Warning : Receipt.GetCleanupWarnings())
+				Warnings.Add(MakeShared<FJsonValueObject>(Warning.ToPublicJson()));
+			ReceiptJson->SetArrayField(TEXT("warnings"), MoveTemp(Warnings));
+		}
+		return true;
+	}
+
+	FReadablePropertyAddress DescribeReadableProperty(const FSemanticUnit& Unit, const FAuthoringModel& Model)
+	{
+		FReadablePropertyAddress Result{ReadablePropertyCategory(Unit.GetCategoryPath()), Unit.GetFieldSetRef(), ReadablePropertyType(Unit, Model), ReadablePropertyDefinition(Unit, Model)};
+		if (Unit.GetSemanticTypeRef() == TEXT("uai.semantic.blueprint.pin_default") && Result.Key.StartsWith(TEXT("pin_default.")))
+			Result.Key.RightChopInline(12);
+		return Result;
+	}
+
+	bool TryComposeReflectedPropertyTemplate(const UeAgentAuthoringState::FStateSnapshot& Snapshot,
+		ContextResource::FUeAgentResourceTracker& Resources, FAuthoringModelPtr& OutModel, FWorkspaceError& OutError)
+	{
+		UE::UAI::Contract::FDiagnostic ContractError;
+		if (!RegisterGraphTreeTargetCompositionContracts(ContractError) || !RegisterOtherTargetCompositionContracts(ContractError))
+		{
+			OutError.SetFailure(ContractError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("target_composition_contract_registration_failed"), TEXT("Target composition contract registration failed without returning a diagnostic.")) : ContractError, FString()); return false;
+		}
+		FCompositionRequest Request;
+		Request.TargetKind = TEXT("ue.generic.object");
+		Request.ProfileId = TEXT("llm_authoring");
+		Request.BaseRevision = TEXT("native-default-template");
+		Request.SourceProvenance = TEXT("authoring_state.capture");
+		Request.Entries = Snapshot.CopyEntries();
+		return TryComposeAuthoringModel(Request, Resources, OutModel, OutError);
+	}
+
+	bool TryProjectAuthoringCaptureValue(const FUeAgentStateEntry& Entry,
+		FUeAgentResourceTracker& Resources, FUeAgentCanonicalValuePtr& OutValue, FWorkspaceError& OutError)
+	{
+		FCompositionEntryView View;
+		View.Value = Entry.GetValue();
+		if (!TryProjectCanonicalAuthoringDescriptor(Entry, View, Resources, OutError)) return false;
+		OutValue = View.Value;
+		return true;
+	}
+
+	bool TryProjectDirectPropertyValue(const FUeAgentCanonicalValueRef& Value, const FAuthoringModel& Model,
+		const FUeAgentCanonicalValue* ValueDefinition, FUeAgentResourceTracker& Resources,
+		FUeAgentCanonicalValuePtr& OutValue, FWorkspaceError& OutError, bool bNativeScope,
+		const FUeAgentCanonicalValue* ValueType)
+	{
+		UE::UAI::Contract::FDiagnostic Error;
+		TSharedPtr<FJsonValue> JsonValue;
+		if (!CanonicalJson::TryToJsonValue(Value.Get(), JsonValue, Error))
+		{
+			OutError.SetFailure(Error.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("direct_property_projection_failed"), TEXT("The property value could not be converted to its editable representation.")) : Error, FString());
+			return false;
+		}
+		const auto Projected = ProjectDirectPropertyValue(JsonValue, Model, Error, ValueDefinition, false, 0, bNativeScope, ValueType);
+		if (!Projected || !CanonicalJson::TryFromJsonValue(Projected, Resources, OutValue, Error))
+		{
+			OutError.SetFailure(Error.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("direct_property_projection_failed"), TEXT("The property value could not be converted to its editable representation.")) : Error, FString());
+			return false;
+		}
+		return true;
+	}
+
+	bool TryProjectReflectedRecord(
+		const UeAgentAuthoringState::FStateSnapshot& Snapshot,
+		TSharedPtr<FJsonObject>& OutProperties,
+		TSharedPtr<FJsonObject>& OutDefinitions,
+		FWorkspaceError& OutError, bool bGroupByCategory, bool bNativeScope)
+	{
+		UE::UAI::Contract::FDiagnostic ContractError;
+		if (!RegisterGraphTreeTargetCompositionContracts(ContractError)
+			|| !RegisterOtherTargetCompositionContracts(ContractError))
+		{
+			OutError.SetFailure(ContractError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("target_composition_contract_registration_failed"), TEXT("Target composition contract registration failed without returning a diagnostic.")) : ContractError, FString());
+			return false;
+		}
+		if (Snapshot.IsEmpty())
+		{
+			OutProperties = MakeShared<FJsonObject>();
+			OutDefinitions = MakeShared<FJsonObject>();
+			return true;
+		}
+		auto Resources = MakeSemanticWorkspaceResourceTracker();
+		FAuthoringModelPtr Model;
+		if (!TryComposeReflectedPropertyTemplate(Snapshot, Resources, Model, OutError)) return false;
+		OutProperties = MakeShared<FJsonObject>();
+		OutDefinitions = MakeShared<FJsonObject>();
+		// The nested-record contract returns definitions independent of this temporary
+		// model. Expand its private references before the caller interns them in its own catalog.
+		for (const FSemanticUnit& Unit : Model->GetUnits())
+		{
+			if (Unit.GetUnitKind() != ESemanticUnitKind::PropertySet
+				|| Unit.GetFieldSetRef().IsEmpty()
+				|| Unit.GetSemanticTypeRef().StartsWith(TEXT("uai.authoring.surface."))) continue;
+			TSharedPtr<FJsonObject> Row;
+			if (!TryBuildCompactRow(Unit, Row, OutError)) return false;
+			UE::UAI::Contract::FDiagnostic ProjectionError;
+            const TSharedPtr<FJsonValue> Value = DirectPropertyValue(Row, Unit, *Model, ProjectionError, bNativeScope);
+			if (!Value.IsValid())
+			{
+				OutError.SetFailure(ProjectionError.IsEmpty() ? UE::UAI::Contract::FDiagnostic::Failure(TEXT("composition_property_value_invalid"), TEXT("The property could not be projected.")) : ProjectionError, Unit.GetFieldSetRef());
+				return false;
+			}
+			const FString Type = ReadablePropertyType(Unit, *Model);
+			UeAgentAuthoringState::FStateEntry NativeEntry;
+			if (UeAgentAuthoringEncodedTypes::FScope::IsActive()
+				&& Snapshot.FindEntry(Unit.GetSemanticTypeRef(), Unit.GetTargetIdentityKey(), NativeEntry))
+			{
+				const auto Definition = NativeEntry.ComparisonValueDefinition ? NativeEntry.ComparisonValueDefinition : NativeEntry.ValueDefinition;
+				UeAgentAuthoringEncodedTypes::FScope::Record(Value, NativeEntry.Type,
+					Definition && Definition->Type == EJson::Object ? Definition->AsObject() : nullptr);
+			}
+			const FString DefinitionName = bNativeScope ? FString() : ReadablePropertyDefinition(Unit, *Model);
+			const TSharedRef<FJsonObject> Property = MakeShared<FJsonObject>();
+			Property->SetStringField(TEXT("type"), Type);
+			if (!DefinitionName.IsEmpty()) Property->SetStringField(TEXT("definition"), DefinitionName);
+			Property->SetField(TEXT("value"), Value);
+			if (bGroupByCategory)
+			{
+				auto Address = DescribeReadableProperty(Unit, *Model);
+				Address.Type = Type;
+				if (!TryAddReadablePropertyRow(OutProperties.ToSharedRef(), {Address.Key, Address.Category, Address.Type, DefinitionName}, Value))
+				{ OutError.SetSourceFailure(TEXT("composition_property_address_ambiguous"), FString::Printf(TEXT("More than one property has name '%s' in category '%s'."), *Address.Key, *Address.Category), Address.Key); return false; }
+			}
+			else OutProperties->SetObjectField(Unit.GetFieldSetRef(), Property);
+			if (bNativeScope) continue;
+			for (const FString& Dependency : Unit.GetDependencyRefs())
+			{
+				const FSemanticUnit* Definition = Model->FindUnit(Dependency);
+				if (!Definition || Definition->GetRole() != TEXT("property_definition")) continue;
+				TSharedPtr<FJsonObject> DefinitionRow;
+				if (!TryBuildCompactRow(*Definition, DefinitionRow, OutError)) return false;
+				const auto Expanded = ExpandPropertyDefinition(*Model, DefinitionRow->TryGetField(TEXT("values")),
+					OutError, Definition->GetUnitId(), TEXT("/values"));
+				if (!Expanded) return false;
+				OutDefinitions->SetObjectField(DefinitionName, Expanded->AsObject());
+			}
+		}
 		return true;
 	}
 }

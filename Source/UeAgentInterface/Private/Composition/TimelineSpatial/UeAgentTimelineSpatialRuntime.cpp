@@ -1,5 +1,7 @@
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialRuntime.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Async/Async.h"
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialActivation.h"
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialCommandHandlers.h"
@@ -38,94 +40,106 @@ namespace UE::UAI::Composition::TimelineSpatial
 
 	namespace
 	{
-		void SetError(
-			FUeAgentTimelineSpatialRuntimeError& OutError,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		FDiagnostic RuntimeFailure(const FString& Code, const FString& SubjectId, const FString& Reason)
 		{
-			OutError = {Code, SubjectId, Detail};
+			FDiagnostic Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("runtime"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SubjectId = SubjectId;
+			return Diagnostic;
 		}
 
-		FString JsonText(const TSharedRef<FJsonObject>& Object)
+		FDiagnostic InputFailure(const TCHAR* Code, const TCHAR* Reason, const FString& Pointer,
+			const TSharedPtr<FJsonValue>& Actual, const TCHAR* Expected)
 		{
-			FString Text;
-			FString Error;
-			return Json::TryCanonicalize(Object, Text, Error)
-				? Text
-				: FString();
+			auto Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("input_validation"));
+			Diagnostic.PropertyPath = Pointer;
+			Diagnostic.Source.JsonPath = Pointer;
+			Diagnostic.ActualValue = Actual;
+			Diagnostic.ActualValuePresent = Actual.IsValid();
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			return Diagnostic;
 		}
 
-		bool TryObject(const FString& Json, TSharedPtr<FJsonObject>& OutObject)
+		FDiagnostic ValidateRuntimeConfig(const FUeAgentTimelineSpatialRuntimeConfig& Config)
 		{
-			OutObject.Reset();
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(Json);
-			return FJsonSerializer::Deserialize(Reader, OutObject)
-				&& OutObject.IsValid();
+			FDiagnostic Diagnostic;
+			if (Config.ProjectInstanceId.TrimStartAndEnd().IsEmpty())
+			{
+				Diagnostic = RuntimeFailure(TEXT("timeline_spatial_runtime_config_invalid"), TEXT("timeline_spatial"),
+					TEXT("The runtime configuration requires a project instance identifier."));
+				Diagnostic.PropertyPath = TEXT("config.project_instance_id");
+				Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Config.ProjectInstanceId);
+			}
+			else if (Config.EditorInstanceId.TrimStartAndEnd().IsEmpty())
+			{
+				Diagnostic = RuntimeFailure(TEXT("timeline_spatial_runtime_config_invalid"), TEXT("timeline_spatial"),
+					TEXT("The runtime configuration requires an editor instance identifier."));
+				Diagnostic.PropertyPath = TEXT("config.editor_instance_id");
+				Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Config.EditorInstanceId);
+			}
+			else if (Config.ServerSessionId.TrimStartAndEnd().IsEmpty())
+			{
+				Diagnostic = RuntimeFailure(TEXT("timeline_spatial_runtime_config_invalid"), TEXT("timeline_spatial"),
+					TEXT("The runtime configuration requires a server session identifier."));
+				Diagnostic.PropertyPath = TEXT("config.server_session_id");
+				Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Config.ServerSessionId);
+			}
+			else if (Config.RegistryEpoch <= 0)
+			{
+				Diagnostic = RuntimeFailure(TEXT("timeline_spatial_runtime_config_invalid"), TEXT("timeline_spatial"),
+					TEXT("The runtime configuration requires a positive registry epoch."));
+				Diagnostic.PropertyPath = TEXT("config.registry_epoch");
+				Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), Config.RegistryEpoch));
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("positive integer"));
+			}
+			if (!Diagnostic.IsEmpty() && !Diagnostic.ExpectedValue.IsValid())
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty identifier"));
+			return Diagnostic;
+		}
+
+		void SetError(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SubjectId;
+        }
+
+		bool TryObject(const FString& Json, TSharedPtr<FJsonObject>& OutObject, FDiagnostic& OutError)
+		{
+			return UE::UAI::Contract::Json::TryParseObject(Json, OutObject, OutError);
 		}
 
 		FUeAgentQueryResult QueryErrorResult(
-			const FUeAgentQueryRequest& Request,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+			const FUeAgentQueryRequest& Request, FDiagnostic Diagnostic)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-			Root->SetObjectField(TEXT("query_error"), Error);
-			return FUeAgentQueryResult(
-				Request.GetDescriptorIdentity(),
-				Request.GetRequestId(),
-				FUeAgentContractValue(JsonText(Root)));
+			if (Diagnostic.IsEmpty())
+			{
+				Diagnostic.Code = TEXT("query_execution_failed");
+				Diagnostic.PublicMessage = TEXT("The query application received a failure without a primary diagnostic.");
+				Diagnostic.Stage = TEXT("query_application");
+			}
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetDescriptorIdentity().GetDescriptorId();
+			return FUeAgentQueryResult(Request.GetDescriptorIdentity(), Request.GetRequestId(), MoveTemp(Diagnostic));
 		}
 
 		FUeAgentOperationResult OperationErrorResult(
-			const FUeAgentOperationRequest& Request,
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+			const FUeAgentOperationRequest& Request, FDiagnostic Diagnostic)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-			Root->SetObjectField(TEXT("operation_error"), Error);
-			return FUeAgentOperationResult(
-				Request.GetDescriptorIdentity(),
-				Request.GetRequestId(),
-				FUeAgentContractValue(JsonText(Root)));
+			if (Diagnostic.IsEmpty())
+			{
+				Diagnostic.Code = TEXT("timeline_spatial_operation_failed");
+				Diagnostic.PublicMessage = TEXT("The operation application received a failure without a primary diagnostic.");
+				Diagnostic.Stage = TEXT("application");
+			}
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetDescriptorIdentity().GetDescriptorId();
+			return FUeAgentOperationResult(Request.GetDescriptorIdentity(), Request.GetRequestId(), MoveTemp(Diagnostic));
 		}
 
-		FUeAgentResourceBudget RuntimeBudget(const int64 MaxFrameBytes)
-		{
-			const int64 ByteLimit = FMath::Max<int64>(
-				MaxFrameBytes * 8,
-				8 * 1024 * 1024);
-			return FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, ByteLimit},
-				{EUeAgentResourceDimension::OutputBytes, ByteLimit},
-				{EUeAgentResourceDimension::StringBytes, ByteLimit},
-				{EUeAgentResourceDimension::Nodes, 65536},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::Files, 256},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 524288},
-				{
-					EUeAgentResourceDimension::EstimatedMemoryBytes,
-					ByteLimit * 8,
-				},
-			});
-		}
 
 		bool TryReadStringArray(
 			const TSharedPtr<FJsonObject>& Object,
 			const TCHAR* Field,
-			TArray<FString>& OutValues)
+			TArray<FString>& OutValues,
+			FDiagnostic& OutError)
 		{
 			OutValues.Reset();
 			if (!Object.IsValid() || !Object->HasField(Field))
@@ -135,15 +149,22 @@ namespace UE::UAI::Composition::TimelineSpatial
 			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
 			if (!Object->TryGetArrayField(Field, Values) || !Values)
 			{
+				OutError = InputFailure(TEXT("timeline_spatial_context_identity_array_invalid"),
+					TEXT("The execution context field must be an array of non-empty strings."),
+					FString(TEXT("/context/")) + Field, Object->TryGetField(Field), TEXT("array of non-empty strings"));
 				return false;
 			}
-			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			for (int32 Index = 0; Index < Values->Num(); ++Index)
 			{
+				const TSharedPtr<FJsonValue>& Value = (*Values)[Index];
 				FString Text;
 				if (!Value.IsValid()
 					|| !Value->TryGetString(Text)
 					|| Text.TrimStartAndEnd().IsEmpty())
 				{
+					OutError = InputFailure(TEXT("timeline_spatial_context_identity_array_invalid"),
+						TEXT("The execution context array item must be a non-empty string."),
+						FString::Printf(TEXT("/context/%s/%d"), Field, Index), Value, TEXT("non-empty string"));
 					return false;
 				}
 				OutValues.Add(MoveTemp(Text));
@@ -190,14 +211,19 @@ namespace UE::UAI::Composition::TimelineSpatial
 			const FString& WorldIdentity,
 			const FString& LevelIdentity,
 			FUeAgentExecutionContextInput& OutInput,
-			FString& OutError)
+			FDiagnostic& OutError)
 		{
 			OutError.Reset();
 			const TArray<EUeAgentStatePlane>& AllowedPlanes =
 				Descriptor.GetExecutionContextPolicy().GetAllowedStatePlanes();
 			if (AllowedPlanes.IsEmpty())
 			{
-				OutError = TEXT("timeline_spatial_context_state_plane_missing");
+				OutError = FDiagnostic::Failure(TEXT("timeline_spatial_context_state_plane_missing"),
+					TEXT("The command execution policy declares no allowed state plane."), TEXT("input_validation"));
+				OutError.PropertyPath = TEXT("execution_context_policy.allowed_state_planes");
+				OutError.ActualValue = MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{});
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one allowed state plane"));
+				OutError.SubjectId = Descriptor.GetIdentity().GetDescriptorId();
 				return false;
 			}
 			OutInput = {};
@@ -224,36 +250,47 @@ namespace UE::UAI::Composition::TimelineSpatial
 				return true;
 			}
 			const TSharedPtr<FJsonObject>& Context = *PublicContext;
-			if (Context->HasField(TEXT("project_instance_id"))
-				|| Context->HasField(TEXT("editor_instance_id"))
-				|| Context->HasField(TEXT("context_revision"))
-				|| Context->HasField(TEXT("resolved_from_current")))
+			for (const TCHAR* Field : {TEXT("project_instance_id"), TEXT("editor_instance_id"),
+				TEXT("context_revision"), TEXT("resolved_from_current")})
 			{
-				OutError = TEXT("timeline_spatial_context_server_field_override");
-				return false;
+				if (Context->HasField(Field))
+				{
+					OutError = FDiagnostic::Failure(TEXT("timeline_spatial_context_server_field_override"),
+						TEXT("This execution context field is supplied by the server and cannot be overridden."), TEXT("input_validation"));
+					OutError.PropertyPath = FString(TEXT("/context/")) + Field;
+					OutError.Source.JsonPath = OutError.PropertyPath;
+					OutError.ActualValuePresent = true;
+					OutError.ExpectedValuePresent = false;
+					OutError.ActualEvidence = Context->TryGetField(Field);
+					return false;
+				}
 			}
 
 			FString Text;
 			if (Context->TryGetStringField(TEXT("state_plane"), Text)
 				&& !TryParseStatePlane(Text, OutInput.StatePlane))
 			{
-				OutError = TEXT("timeline_spatial_context_state_plane_invalid");
+				OutError = InputFailure(TEXT("timeline_spatial_context_state_plane_invalid"),
+					TEXT("The execution context state plane is not recognized."), TEXT("/context/state_plane"),
+					Context->TryGetField(TEXT("state_plane")), TEXT("authoring_memory, persisted, compiled_generated, runtime_instance, rendered_observation, registry_index"));
 				return false;
 			}
 			if (Context->TryGetStringField(TEXT("world_type"), Text)
 				&& !TryParseWorldType(Text, OutInput.WorldType))
 			{
-				OutError = TEXT("timeline_spatial_context_world_type_invalid");
+				OutError = InputFailure(TEXT("timeline_spatial_context_world_type_invalid"),
+					TEXT("The execution context world type is not recognized."), TEXT("/context/world_type"),
+					Context->TryGetField(TEXT("world_type")), TEXT("editor, pie, simulate_in_editor, game, preview"));
 				return false;
 			}
 			Context->TryGetStringField(
-				TEXT("world_identity"),
+				TEXT("world"),
 				OutInput.WorldIdentity);
 			Context->TryGetStringField(
-				TEXT("level_identity"),
+				TEXT("level"),
 				OutInput.LevelIdentity);
 			Context->TryGetStringField(
-				TEXT("world_partition_identity"),
+				TEXT("world_partition"),
 				OutInput.WorldPartitionIdentity);
 			Context->TryGetStringField(
 				TEXT("net_mode"),
@@ -262,10 +299,10 @@ namespace UE::UAI::Composition::TimelineSpatial
 				TEXT("net_role"),
 				OutInput.NetRole);
 			Context->TryGetStringField(
-				TEXT("asset_editor_identity"),
+				TEXT("asset_editor"),
 				OutInput.AssetEditorIdentity);
 			Context->TryGetStringField(
-				TEXT("viewport_identity"),
+				TEXT("viewport"),
 				OutInput.ViewportIdentity);
 			if (OutInput.ViewportIdentity.StartsWith(
 					TEXT("asset:"), ESearchCase::CaseSensitive))
@@ -281,32 +318,56 @@ namespace UE::UAI::Composition::TimelineSpatial
 				const FString ExpectedIdentity = TEXT("asset:")
 					+ OutInput.AssetEditorIdentity
 					+ TEXT("#blueprint_components");
-				if (OutInput.AssetEditorIdentity.IsEmpty()
-					|| PublicTarget != OutInput.ViewportIdentity
-					|| OutInput.ViewportIdentity != ExpectedIdentity
-					|| ViewportScope != TEXT("asset_editor")
-					|| ViewportRole != TEXT("components"))
+				if (OutInput.AssetEditorIdentity.IsEmpty())
 				{
-					OutError =
-						TEXT("timeline_spatial_blueprint_viewport_target_invalid");
+					OutError = InputFailure(TEXT("timeline_spatial_blueprint_viewport_target_invalid"),
+						TEXT("A Blueprint component viewport requires an explicit asset editor reference."),
+						TEXT("/context/asset_editor"), Context->TryGetField(TEXT("asset_editor")), TEXT("non-empty asset editor reference"));
+					return false;
+				}
+				if (PublicTarget != OutInput.ViewportIdentity)
+				{
+					OutError = InputFailure(TEXT("timeline_spatial_blueprint_viewport_target_invalid"),
+						TEXT("The target must identify the viewport selected in the execution context."),
+						TEXT("/target"), Root->TryGetField(TEXT("target")), *OutInput.ViewportIdentity);
+					return false;
+				}
+				if (OutInput.ViewportIdentity != ExpectedIdentity)
+				{
+					OutError = InputFailure(TEXT("timeline_spatial_blueprint_viewport_target_invalid"),
+						TEXT("The viewport must identify the component viewport of the selected asset editor."),
+						TEXT("/context/viewport"), Context->TryGetField(TEXT("viewport")), *ExpectedIdentity);
+					return false;
+				}
+				if (ViewportScope != TEXT("asset_editor"))
+				{
+					OutError = InputFailure(TEXT("timeline_spatial_blueprint_viewport_target_invalid"),
+						TEXT("The Blueprint component viewport requires asset editor scope."),
+						TEXT("/context/viewport_scope"), Context->TryGetField(TEXT("viewport_scope")), TEXT("asset_editor"));
+					return false;
+				}
+				if (ViewportRole != TEXT("components"))
+				{
+					OutError = InputFailure(TEXT("timeline_spatial_blueprint_viewport_target_invalid"),
+						TEXT("The Blueprint component viewport requires the components role."),
+						TEXT("/context/viewport_role"), Context->TryGetField(TEXT("viewport_role")), TEXT("components"));
 					return false;
 				}
 			}
 			if (!TryReadStringArray(
 					Context,
-					TEXT("data_layer_identities"),
-					OutInput.DataLayerIdentities)
+					TEXT("data_layers"),
+					OutInput.DataLayerIdentities, OutError)
 				|| !TryReadStringArray(
 					Context,
-					TEXT("selection_identities"),
-					OutInput.SelectionIdentities))
+					TEXT("selection"),
+					OutInput.SelectionIdentities, OutError))
 			{
-				OutError = TEXT("timeline_spatial_context_identity_array_invalid");
 				return false;
 			}
 			double PieInstance = -1.0;
 			if (Context->TryGetNumberField(
-					TEXT("pie_instance_id"),
+					TEXT("pie_instance"),
 					PieInstance))
 			{
 				OutInput.PieInstanceId =
@@ -318,15 +379,13 @@ namespace UE::UAI::Composition::TimelineSpatial
 		bool TryProjection(
 			const TSharedPtr<FJsonObject>& Root,
 			FUeAgentProjectionRequest& OutProjection,
-			FString& OutError)
+			FDiagnostic& OutError)
 		{
 			OutError.Reset();
 			FString ProfileId = TEXT("compact");
 			bool bDefaults = false;
 			bool bDetails = false;
 			bool bProvenance = false;
-			TOptional<int64> TokenBudget;
-			FUeAgentPageRequest Page;
 
 			const TSharedPtr<FJsonObject>* PublicProjection = nullptr;
 			if (Root.IsValid()
@@ -350,41 +409,6 @@ namespace UE::UAI::Composition::TimelineSpatial
 				Projection->TryGetBoolField(
 					TEXT("include_provenance"),
 					bProvenance);
-				double TokenBudgetValue = 0.0;
-				if (Projection->TryGetNumberField(
-						TEXT("token_budget"),
-						TokenBudgetValue))
-				{
-					if (TokenBudgetValue < 1.0)
-					{
-						OutError =
-							TEXT("timeline_spatial_projection_token_budget_invalid");
-						return false;
-					}
-					TokenBudget =
-						static_cast<int64>(TokenBudgetValue);
-				}
-				FString Cursor;
-				Projection->TryGetStringField(TEXT("cursor"), Cursor);
-				double MaxItems = 0.0;
-				if (Projection->TryGetNumberField(
-						TEXT("max_items"),
-						MaxItems))
-				{
-					if (MaxItems < 1.0)
-					{
-						OutError =
-							TEXT("timeline_spatial_projection_page_invalid");
-						return false;
-					}
-					Page = FUeAgentPageRequest(
-						static_cast<int32>(MaxItems),
-						Cursor);
-				}
-				else if (!Cursor.IsEmpty())
-				{
-					Page = FUeAgentPageRequest(Cursor);
-				}
 			}
 			OutProjection = FUeAgentProjectionRequest(
 				FUeAgentProjectionProfile(
@@ -392,13 +416,15 @@ namespace UE::UAI::Composition::TimelineSpatial
 					bDefaults,
 					bDetails,
 					bProvenance),
-				Page,
-				TokenBudget,
 				{},
 				{});
 			if (!OutProjection.IsValid())
 			{
-				OutError = TEXT("timeline_spatial_projection_invalid");
+				OutError = OutProjection.GetValidationDiagnostic();
+				OutError.PropertyPath = TEXT("projection.") + OutError.PropertyPath;
+				OutError.Source.JsonPath = TEXT("/projection/profile_id");
+				if (!OutError.ActualValue.IsValid()) OutError.ActualValue = MakeShared<FJsonValueString>(ProfileId);
+				if (!OutError.ExpectedValue.IsValid()) OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty string"));
 				return false;
 			}
 			return true;
@@ -407,13 +433,14 @@ namespace UE::UAI::Composition::TimelineSpatial
 		bool TryInputObject(
 			const TSharedPtr<FJsonObject>& Root,
 			FUeAgentContractValue& OutInput,
-			FString& OutError)
+			FDiagnostic& OutError)
 		{
 			OutError.Reset();
 			const TSharedPtr<FJsonObject>* Input = nullptr;
 			if (!Root.IsValid())
 			{
-				OutError = TEXT("timeline_spatial_public_wrapper_invalid");
+				OutError = InputFailure(TEXT("timeline_spatial_public_wrapper_invalid"),
+					TEXT("The public request wrapper is unavailable."), TEXT("/"), nullptr, TEXT("object"));
 				return false;
 			}
 			if (!Root->TryGetObjectField(TEXT("input"), Input)
@@ -423,8 +450,20 @@ namespace UE::UAI::Composition::TimelineSpatial
 				OutInput = FUeAgentContractValue(TEXT("{}"));
 				return true;
 			}
-			OutInput = FUeAgentContractValue(JsonText(Input->ToSharedRef()));
-			return OutInput.IsValid();
+			FString Json;
+			if (!Json::TryCanonicalize(Input->ToSharedRef(), Json, OutError)) return false;
+			OutInput = FUeAgentContractValue(MoveTemp(Json));
+			if (!OutInput.IsValid())
+			{
+				OutError = FDiagnostic::Failure(TEXT("timeline_spatial_input_value_invalid"),
+					TEXT("Serializing the input object produced an empty JSON document."), TEXT("input_validation"));
+				OutError.PropertyPath = TEXT("input");
+				OutError.Source.JsonPath = TEXT("/input");
+				OutError.ActualValue = MakeShared<FJsonValueString>(OutInput.GetJsonValue());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty JSON document"));
+				return false;
+			}
+			return true;
 		}
 
 		FUeAgentCandidateBinding MakeCandidate(
@@ -581,8 +620,13 @@ namespace UE::UAI::Composition::TimelineSpatial
 					|| Context.GetEditorInstanceId()
 						!= Config.EditorInstanceId)
 				{
-					OutError.Code =
-						TEXT("execution_context_instance_conflict");
+					const bool bProject = Context.GetProjectInstanceId() != Config.ProjectInstanceId;
+					OutError = FDiagnostic::Failure(TEXT("execution_context_instance_conflict"),
+						bProject ? TEXT("The execution context belongs to a different project instance.")
+							: TEXT("The execution context belongs to a different editor instance."), TEXT("context_validation"));
+					OutError.PropertyPath = bProject ? TEXT("context.project_instance_id") : TEXT("context.editor_instance_id");
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(bProject ? Context.GetProjectInstanceId() : Context.GetEditorInstanceId());
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(bProject ? Config.ProjectInstanceId : Config.EditorInstanceId);
 					return false;
 				}
 				const FString ExpectedRevision =
@@ -598,8 +642,21 @@ namespace UE::UAI::Composition::TimelineSpatial
 						!= ExpectedRevision
 					|| Context.WasResolvedFromCurrent())
 				{
-					OutError.Code =
-						TEXT("execution_context_revision_conflict");
+					const bool bRevision = Context.GetContextRevision() != ExpectedRevision;
+					OutError = FDiagnostic::Failure(TEXT("execution_context_revision_conflict"),
+						bRevision ? TEXT("The execution context revision does not match the active runtime.")
+							: TEXT("This runtime requires an explicitly bound context, not one resolved from the current selection."), TEXT("context_validation"));
+					OutError.PropertyPath = bRevision ? TEXT("context.context_revision") : TEXT("context.resolved_from_current");
+					if (bRevision)
+					{
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(Context.GetContextRevision());
+						OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedRevision);
+					}
+					else
+					{
+						OutError.ActualValue = MakeShared<FJsonValueBoolean>(true);
+						OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+					}
 					return false;
 				}
 				if ((!Context.GetWorldIdentity().IsEmpty()
@@ -609,8 +666,13 @@ namespace UE::UAI::Composition::TimelineSpatial
 						&& Context.GetLevelIdentity()
 							!= LevelIdentity))
 				{
-					OutError.Code =
-						TEXT("execution_context_world_conflict");
+					const bool bWorld = !Context.GetWorldIdentity().IsEmpty() && Context.GetWorldIdentity() != WorldIdentity;
+					OutError = FDiagnostic::Failure(TEXT("execution_context_world_conflict"),
+						bWorld ? TEXT("The execution context world does not match the bound runtime world.")
+							: TEXT("The execution context level does not match the bound runtime level."), TEXT("context_validation"));
+					OutError.PropertyPath = bWorld ? TEXT("context.world") : TEXT("context.level");
+					OutError.ActualValue = MakeShared<FJsonValueString>(bWorld ? Context.GetWorldIdentity() : Context.GetLevelIdentity());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(bWorld ? WorldIdentity : LevelIdentity);
 					return false;
 				}
 				return true;
@@ -639,8 +701,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 			virtual bool TryReadRevision(
 				const FString& PublicRef,
 				FUeAgentStateRevision& OutRevision,
-				FString& OutCode,
-				FString& OutDetail) const = 0;
+				FDiagnostic& OutError) const = 0;
 		};
 
 		class FWorldSpatialOperationRoute final : public IOperationRoute
@@ -680,23 +741,27 @@ namespace UE::UAI::Composition::TimelineSpatial
 			bool TryReadRevision(
 				const FString& PublicRef,
 				FUeAgentStateRevision& OutRevision,
-				FString& OutCode,
-				FString& OutDetail) const override
+				FDiagnostic& OutError) const override
 			{
 				DomainAdapters::WorldSpatial::FWorldSpatialRevision Revision;
 				DomainAdapters::WorldSpatial::FUeAgentWorldSpatialExecutionError
 					Error;
 				if (!Runtime->TryReadRevision(PublicRef, Revision, Error))
 				{
-					OutCode = Error.Code;
-					OutDetail = Error.Detail;
+					OutError = Error;
 					return false;
 				}
 				OutRevision = FUeAgentStateRevision(
 					Revision.SourceId,
 					Revision.Generation,
 					Revision.Sequence);
-				return OutRevision.IsValid();
+				if (!OutRevision.IsValid())
+				{
+					OutError = OutRevision.GetValidationDiagnostic();
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = PublicRef;
+					return false;
+				}
+				return true;
 			}
 		private:
 			TSharedRef<DomainAdapters::WorldSpatial::
@@ -742,8 +807,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 			bool TryReadRevision(
 				const FString& PublicRef,
 				FUeAgentStateRevision& OutRevision,
-				FString& OutCode,
-				FString& OutDetail) const override
+				FDiagnostic& OutError) const override
 			{
 				DomainAdapters::TimelineAnimation::FTimelineAnimationRevision
 					Revision;
@@ -751,15 +815,20 @@ namespace UE::UAI::Composition::TimelineSpatial
 					FUeAgentTimelineAnimationExecutionError Error;
 				if (!Runtime->TryReadRevision(PublicRef, Revision, Error))
 				{
-					OutCode = Error.Code;
-					OutDetail = Error.Detail;
+					OutError = Error;
 					return false;
 				}
 				OutRevision = FUeAgentStateRevision(
 					Revision.SourceId,
 					Revision.Generation,
 					Revision.Sequence);
-				return OutRevision.IsValid();
+				if (!OutRevision.IsValid())
+				{
+					OutError = OutRevision.GetValidationDiagnostic();
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = PublicRef;
+					return false;
+				}
+				return true;
 			}
 		private:
 			TSharedRef<DomainAdapters::TimelineAnimation::
@@ -805,8 +874,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 			bool TryReadRevision(
 				const FString& PublicRef,
 				FUeAgentStateRevision& OutRevision,
-				FString& OutCode,
-				FString& OutDetail) const override
+				FDiagnostic& OutError) const override
 			{
 				DomainAdapters::RigSimulationSpatial::
 					FRigSimulationSpatialRevision Revision;
@@ -814,15 +882,20 @@ namespace UE::UAI::Composition::TimelineSpatial
 					FUeAgentRigSimulationSpatialExecutionError Error;
 				if (!Runtime->TryReadRevision(PublicRef, Revision, Error))
 				{
-					OutCode = Error.Code;
-					OutDetail = Error.Detail;
+					OutError = Error;
 					return false;
 				}
 				OutRevision = FUeAgentStateRevision(
 					Revision.SourceId,
 					Revision.Generation,
 					Revision.Sequence);
-				return OutRevision.IsValid();
+				if (!OutRevision.IsValid())
+				{
+					OutError = OutRevision.GetValidationDiagnostic();
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = PublicRef;
+					return false;
+				}
+				return true;
 			}
 		private:
 			TSharedRef<DomainAdapters::RigSimulationSpatial::
@@ -837,6 +910,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 	public:
 		FState(
 			FUeAgentTimelineSpatialRuntimeConfig InConfig,
+			const TArray<FUeAgentTimelineSpatialActivationProfile>& InProfiles,
 			TSharedRef<const FUeAgentDescriptorRegistry> InDescriptors,
 			TSharedRef<const FUeAgentOperationTicketService> InTicketService,
 			TSharedRef<const FUeAgentQueryTicketService> InQueryTicketService,
@@ -871,7 +945,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 			, OperationBindings(MoveTemp(InOperationBindings))
 		{
 			for (const FUeAgentTimelineSpatialActivationProfile& Profile :
-				GetTimelineSpatialActivationProfiles())
+				InProfiles)
 			{
 				ProfileByDescriptor.Add(
 					Profile.DescriptorIdentity.GetDescriptorId(),
@@ -925,31 +999,40 @@ namespace UE::UAI::Composition::TimelineSpatial
 		{
 			const FUeAgentTimelineSpatialActivationProfile* Profile =
 				State->FindProfile(Request.GetDescriptorIdentity());
-			if (!Request.IsValid()
-				|| !CallerContext.IsValid()
-				|| !Profile
+			if (!Request.IsValid()) return QueryErrorResult(Request, Request.GetValidationDiagnostic());
+			if (!CallerContext.IsValid()) return QueryErrorResult(Request, CallerContext.GetValidationDiagnostic());
+			if (!Profile
 				|| Profile->OperationKind != TEXT("query"))
 			{
-				return QueryErrorResult(
-					Request,
-					TEXT("timeline_spatial_query_route_invalid"),
-					Request.GetDescriptorIdentity().GetDescriptorId(),
-					TEXT("Exact active C3Q route is required."));
+				auto Error = RuntimeFailure(TEXT("timeline_spatial_query_route_invalid"), Request.GetDescriptorIdentity().GetDescriptorId(),
+					Profile ? TEXT("The selected command is not registered as a query.") : TEXT("No active query profile matches the request descriptor."));
+				Error.PropertyPath = Profile ? TEXT("activation.operation_kind") : TEXT("activation.profile");
+				if (Profile)
+				{
+					Error.ActualValue = MakeShared<FJsonValueString>(Profile->OperationKind);
+					Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("query"));
+				}
+				return QueryErrorResult(Request, MoveTemp(Error));
 			}
 			const FUeAgentOperationDescriptor* Descriptor =
 				State->Descriptors->FindExact(Request.GetDescriptorIdentity());
+			if (!Descriptor)
+			{
+				auto Error = RuntimeFailure(TEXT("timeline_spatial_query_wrapper_invalid"), Request.GetDescriptorIdentity().GetDescriptorId(),
+					TEXT("The request descriptor is absent from the active query registry."));
+				Error.PropertyPath = TEXT("descriptor_identity");
+				return QueryErrorResult(Request, MoveTemp(Error));
+			}
 			TSharedPtr<FJsonObject> Root;
-			FString ErrorText;
+			FDiagnostic ErrorText;
 			FUeAgentContractValue Input(TEXT("{}"));
 			FUeAgentExecutionContextInput ExecutionInput;
 			FUeAgentProjectionRequest Projection(
 				FUeAgentProjectionProfile(TEXT("compact"), false, false, false),
-				FUeAgentPageRequest(),
 				{},
 				{},
-				{});
-			if (!Descriptor
-				|| !TryObject(Request.GetPayload().GetJsonValue(), Root)
+				EUeAgentProjectionPageUnit::Entry);
+			if (!TryObject(Request.GetPayload().GetJsonValue(), Root, ErrorText)
 				|| !TryInputObject(Root, Input, ErrorText)
 				|| !TryBuildExecutionContext(
 					State->Config,
@@ -961,13 +1044,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 					ErrorText)
 				|| !TryProjection(Root, Projection, ErrorText))
 			{
-				return QueryErrorResult(
-					Request,
-					ErrorText.IsEmpty()
-						? TEXT("timeline_spatial_query_wrapper_invalid")
-						: ErrorText,
-					Request.GetRequestId(),
-					TEXT("Public query wrapper is invalid."));
+				return QueryErrorResult(Request, MoveTemp(ErrorText));
 			}
 
 			TOptional<FUeAgentDomainQueryTarget> Target;
@@ -976,11 +1053,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 			PublicRef.TrimStartAndEndInline();
 			if (Profile->bRequiresTarget && PublicRef.IsEmpty())
 			{
-				return QueryErrorResult(
-					Request,
-					TEXT("timeline_spatial_query_target_missing"),
-					Profile->CapabilityId,
-					TEXT("An explicit target is required."));
+				return QueryErrorResult(Request, InputFailure(TEXT("timeline_spatial_query_target_missing"),
+					TEXT("This query requires an explicit target reference."), TEXT("/target"), Root->TryGetField(TEXT("target")), TEXT("non-empty target reference")));
 			}
 			if (!PublicRef.IsEmpty())
 			{
@@ -1001,21 +1075,33 @@ namespace UE::UAI::Composition::TimelineSpatial
 						TicketError)
 					|| !Ticket.IsSet())
 				{
-					return QueryErrorResult(
-						Request,
-						TicketError.Code,
-						TicketError.SubjectId,
-						TicketError.Detail);
+					if (TicketError.IsEmpty()) TicketError = RuntimeFailure(TEXT("timeline_spatial_query_ticket_missing"), PublicRef,
+						Ticket.IsSet() ? TEXT("The query ticket service failed without a diagnostic.") : TEXT("The query ticket service returned no ticket for the target."));
+					if (TicketError.TargetPath.IsEmpty()) TicketError.TargetPath = PublicRef;
+					return QueryErrorResult(Request, TicketError);
 				}
 				Target.Emplace(
 					Ticket.GetValue(),
 					MoveTemp(Candidate));
 			}
+			TArray<FDiagnostic> Diagnostics;
+			FDiagnostic ProjectionDiagnostic;
+			const FQueryPublicProjectionDescriptor* PublicProjection =
+				FindQueryPublicProjectionDescriptorForCommand(
+					Profile->CapabilityId, &ProjectionDiagnostic);
+			if (!ProjectionDiagnostic.IsEmpty()) Diagnostics.Add(MoveTemp(ProjectionDiagnostic));
+			if (PublicProjection)
+			{
+				Projection = FUeAgentProjectionRequest(
+					Projection.GetProfile(),
+					Projection.GetArtifacts(),
+					Projection.GetDiagnostics(),
+					QueryPublicProjectionPageUnit(*PublicProjection));
+			}
 
 			const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
 				Resources =
-					MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-						RuntimeBudget(State->Config.MaxFrameBytes));
+					MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 			const auto Clock = []()
 			{
 				return FPlatformTime::Seconds();
@@ -1026,10 +1112,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 				CancellationSource.Request(
 					TEXT("protocol_cancellation_requested"));
 			}
-			const FUeAgentOperationDeadline Deadline =
-				FUeAgentOperationDeadline::FromTimeout(
-					State->Config.TimeoutSeconds,
-					Clock);
+			const FUeAgentOperationDeadline Deadline;
 			const FUeAgentDomainQuery DomainQuery(
 				State->Session,
 				MoveTemp(ExecutionInput),
@@ -1052,29 +1135,37 @@ namespace UE::UAI::Composition::TimelineSpatial
 					BindingError)
 				|| !TypedResult.IsValid())
 			{
-				return QueryErrorResult(
-					Request,
-					BindingError.Code,
-					BindingError.SubjectId,
-					BindingError.Detail);
+				if (BindingError.IsEmpty()) BindingError = FDiagnostic::Failure(TEXT("query_execution_failed"),
+					TEXT("The query binding returned no result or failure diagnostic."), TEXT("query"));
+				BindingError.Diagnostics.Append(Diagnostics);
+				return QueryErrorResult(Request, BindingError);
 			}
+			Diagnostics.Append(TypedResult->GetValue().GetDiagnostics());
 			FUeAgentContractValue Encoded(TEXT("{}"));
-			if (!FUeAgentQueryPayloadCodec::TryEncode(
+			const bool bEncoded = PublicProjection
+				? FUeAgentQueryPayloadCodec::TryEncodePublic(
+					*PublicProjection,
+					Profile->CapabilityId,
+					Profile->TypedOperationId,
+					true,
 					TypedResult->GetValue(),
 					*Resources,
 					Encoded,
-					BindingError))
+					BindingError)
+				: FUeAgentQueryPayloadCodec::TryEncode(
+					TypedResult->GetValue(),
+					*Resources,
+					Encoded,
+					BindingError);
+			if (!bEncoded)
 			{
-				return QueryErrorResult(
-					Request,
-					BindingError.Code,
-					BindingError.SubjectId,
-					BindingError.Detail);
+				BindingError.Diagnostics.Append(Diagnostics);
+				return QueryErrorResult(Request, BindingError);
 			}
 			return FUeAgentQueryResult(
 				Request.GetDescriptorIdentity(),
 				Request.GetRequestId(),
-				MoveTemp(Encoded));
+				MoveTemp(Encoded), MoveTemp(Diagnostics));
 		}
 
 		FUeAgentOperationResult ExecuteOperation(
@@ -1093,33 +1184,46 @@ namespace UE::UAI::Composition::TimelineSpatial
 			TSharedRef<const FUeAgentOperationBinding>* OperationBinding =
 				State->OperationBindings.Find(
 					Request.GetDescriptorIdentity().GetDescriptorId());
-			if (!Request.IsValid()
-				|| !CallerContext.IsValid()
-				|| !Profile
+			if (!Request.IsValid()) return OperationErrorResult(Request, Request.GetValidationDiagnostic());
+			if (!CallerContext.IsValid()) return OperationErrorResult(Request, CallerContext.GetValidationDiagnostic());
+			if (!Profile
 				|| Profile->OperationKind != TEXT("operation")
 				|| !Route
 				|| !OperationBinding)
 			{
-				return OperationErrorResult(
-					Request,
-					TEXT("timeline_spatial_operation_route_invalid"),
-					Request.GetDescriptorIdentity().GetDescriptorId(),
-					TEXT("Exact active C3O route is required."));
+				auto Error = RuntimeFailure(TEXT("timeline_spatial_operation_route_invalid"), Request.GetDescriptorIdentity().GetDescriptorId(),
+					!Profile ? TEXT("No active operation profile matches the request descriptor.")
+						: Profile->OperationKind != TEXT("operation") ? TEXT("The selected command is not registered as an operation.")
+						: !Route ? TEXT("No execution route is registered for this operation.")
+						: TEXT("No operation binding is registered for this command."));
+				Error.PropertyPath = !Profile ? TEXT("activation.profile") : Profile->OperationKind != TEXT("operation")
+					? TEXT("activation.operation_kind") : !Route ? TEXT("operation_route") : TEXT("operation_binding");
+				if (Profile && Profile->OperationKind != TEXT("operation"))
+				{
+					Error.ActualValue = MakeShared<FJsonValueString>(Profile->OperationKind);
+					Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("operation"));
+				}
+				return OperationErrorResult(Request, MoveTemp(Error));
 			}
 			const FUeAgentOperationDescriptor* Descriptor =
 				State->Descriptors->FindExact(Request.GetDescriptorIdentity());
+			if (!Descriptor)
+			{
+				auto Error = RuntimeFailure(TEXT("timeline_spatial_operation_wrapper_invalid"), Request.GetDescriptorIdentity().GetDescriptorId(),
+					TEXT("The request descriptor is absent from the active operation registry."));
+				Error.PropertyPath = TEXT("descriptor_identity");
+				return OperationErrorResult(Request, MoveTemp(Error));
+			}
 			TSharedPtr<FJsonObject> Root;
-			FString ErrorText;
+			FDiagnostic ErrorText;
 			FUeAgentContractValue Input(TEXT("{}"));
 			FUeAgentExecutionContextInput ExecutionInput;
 			FUeAgentProjectionRequest Projection(
 				FUeAgentProjectionProfile(TEXT("compact"), false, false, false),
-				FUeAgentPageRequest(),
 				{},
 				{},
-				{});
-			if (!Descriptor
-				|| !TryObject(Request.GetPayload().GetJsonValue(), Root)
+				EUeAgentProjectionPageUnit::Entry);
+			if (!TryObject(Request.GetPayload().GetJsonValue(), Root, ErrorText)
 				|| !TryInputObject(Root, Input, ErrorText)
 				|| !TryBuildExecutionContext(
 					State->Config,
@@ -1131,19 +1235,12 @@ namespace UE::UAI::Composition::TimelineSpatial
 					ErrorText)
 				|| !TryProjection(Root, Projection, ErrorText))
 			{
-				return OperationErrorResult(
-					Request,
-					ErrorText.IsEmpty()
-						? TEXT("timeline_spatial_operation_wrapper_invalid")
-						: ErrorText,
-					Request.GetRequestId(),
-					TEXT("Public operation wrapper is invalid."));
+				return OperationErrorResult(Request, MoveTemp(ErrorText));
 			}
 
 			const TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe>
 				Resources =
-					MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-						RuntimeBudget(State->Config.MaxFrameBytes));
+					MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 			const auto Clock = []()
 			{
 				return FPlatformTime::Seconds();
@@ -1156,24 +1253,17 @@ namespace UE::UAI::Composition::TimelineSpatial
 			}
 			const FUeAgentCancellationToken CancellationToken =
 				CancellationSource.GetToken();
-			const FUeAgentOperationDeadline Deadline =
-				FUeAgentOperationDeadline::FromTimeout(
-					State->Config.TimeoutSeconds,
-					Clock);
+			const FUeAgentOperationDeadline Deadline;
 
-			FString ErrorCode;
-			FString ErrorDetail;
+			FDiagnostic RevisionError;
 			TArray<FUeAgentOperationTargetBinding> Targets;
 			FString PublicRef;
 			Root->TryGetStringField(TEXT("target"), PublicRef);
 			PublicRef.TrimStartAndEndInline();
 			if (Profile->bRequiresTarget && PublicRef.IsEmpty())
 			{
-				return OperationErrorResult(
-					Request,
-					TEXT("timeline_spatial_operation_target_missing"),
-					Profile->CapabilityId,
-					TEXT("An explicit target is required."));
+				return OperationErrorResult(Request, InputFailure(TEXT("timeline_spatial_operation_target_missing"),
+					TEXT("This operation requires an explicit target reference."), TEXT("/target"), Root->TryGetField(TEXT("target")), TEXT("non-empty target reference")));
 			}
 			if (!PublicRef.IsEmpty())
 			{
@@ -1184,16 +1274,9 @@ namespace UE::UAI::Composition::TimelineSpatial
 				if (!(*Route)->TryReadRevision(
 						PublicRef,
 						Revision,
-						ErrorCode,
-						ErrorDetail))
+					RevisionError))
 				{
-					return OperationErrorResult(
-						Request,
-						ErrorCode.IsEmpty()
-							? TEXT("timeline_spatial_revision_read_failed")
-							: ErrorCode,
-						PublicRef,
-						ErrorDetail);
+					return OperationErrorResult(Request, !RevisionError.IsEmpty() ? RevisionError : RuntimeFailure(TEXT("timeline_spatial_revision_read_failed"), PublicRef, TEXT("The target revision could not be read.")));
 				}
 				FUeAgentCandidateBinding Candidate = MakeCandidate(
 					Profile->CapabilityId,
@@ -1212,11 +1295,10 @@ namespace UE::UAI::Composition::TimelineSpatial
 						TicketError)
 					|| !Ticket.IsSet())
 				{
-					return OperationErrorResult(
-						Request,
-						TicketError.Code,
-						TicketError.SubjectId,
-						TicketError.Detail);
+					if (TicketError.IsEmpty()) TicketError = RuntimeFailure(TEXT("timeline_spatial_operation_ticket_missing"), PublicRef,
+						Ticket.IsSet() ? TEXT("The operation ticket service failed without a diagnostic.") : TEXT("The operation ticket service returned no ticket for the target."));
+					if (TicketError.TargetPath.IsEmpty()) TicketError.TargetPath = PublicRef;
+					return OperationErrorResult(Request, TicketError);
 				}
 				Targets.Emplace(Ticket.GetValue(), MoveTemp(Candidate));
 			}
@@ -1243,25 +1325,38 @@ namespace UE::UAI::Composition::TimelineSpatial
 					CancellationToken,
 					BindingResult,
 					BindingError)
-				|| !BindingResult.IsValid()
-				|| !BindingResult->IsValid())
+				|| !BindingResult.IsValid())
 			{
-				return OperationErrorResult(
-					Request,
-					BindingError.Code,
-					BindingError.SubjectId,
-					BindingError.Detail);
+				if (BindingError.IsEmpty()) BindingError = RuntimeFailure(TEXT("timeline_spatial_operation_failed"), Request.GetRequestId(),
+					BindingResult.IsValid() ? TEXT("The operation binding failed without a primary diagnostic.") : TEXT("The operation binding returned no result or failure diagnostic."));
+				if (BindingResult.IsValid()) BindingError.Diagnostics.Append(BindingResult->GetValue().GetDiagnostics());
+				return OperationErrorResult(Request, MoveTemp(BindingError));
+			}
+			TArray<FDiagnostic> Diagnostics = BindingResult->GetValue().GetDiagnostics();
+			if (!BindingResult->IsValid())
+			{
+				FDiagnostic Error;
+				if (!BindingResult->GetDescriptorIdentity().IsValid()) Error = BindingResult->GetDescriptorIdentity().GetValidationDiagnostic();
+				else if (BindingResult->GetRequestId().IsEmpty())
+				{
+					Error = RuntimeFailure(TEXT("timeline_spatial_operation_result_invalid"), Request.GetRequestId(), TEXT("The operation binding result has an empty request identifier."));
+					Error.PropertyPath = TEXT("request_id");
+				}
+				else Error = BindingResult->GetValue().GetValidationDiagnostic();
+				Error.Diagnostics.Append(Diagnostics);
+				return OperationErrorResult(Request, MoveTemp(Error));
 			}
 			const TSharedPtr<const FUeAgentProjectedResponse>& Projected =
 				BindingResult->GetValue().GetProjection();
 			if (!Projected.IsValid()
 				|| !Projected->GetPayload().GetValue().IsValid())
 			{
-				return OperationErrorResult(
-					Request,
-					TEXT("timeline_spatial_projection_missing"),
-					Request.GetRequestId(),
-					TEXT("C3O returned no canonical C9 outcome."));
+				FDiagnostic Error = RuntimeFailure(TEXT("timeline_spatial_projection_missing"), Request.GetRequestId(),
+					!Projected.IsValid() ? TEXT("The operation result contains no response projection.") : TEXT("The response projection contains no canonical payload."));
+				Error.PropertyPath = !Projected.IsValid() ? TEXT("projection") : TEXT("projection.payload");
+				Error.ActualValuePresent = false;
+				Error.Diagnostics.Append(Diagnostics);
+				return OperationErrorResult(Request, MoveTemp(Error));
 			}
 			const TSharedRef<FJsonObject> ProjectionJson =
 				MakeShared<FJsonObject>();
@@ -1280,10 +1375,17 @@ namespace UE::UAI::Composition::TimelineSpatial
 			RootResult->SetObjectField(
 				TEXT("projection"),
 				ProjectionJson);
+			FString Text;
+			FDiagnostic JsonError;
+			if (!Json::TryCanonicalize(RootResult, Text, JsonError))
+			{
+				JsonError.Diagnostics.Append(Diagnostics);
+				return OperationErrorResult(Request, MoveTemp(JsonError));
+			}
 			return FUeAgentOperationResult(
 				Request.GetDescriptorIdentity(),
 				Request.GetRequestId(),
-				FUeAgentContractValue(JsonText(RootResult)));
+				FUeAgentContractValue(MoveTemp(Text)), MoveTemp(Diagnostics));
 		}
 
 		class FQueryApplication final : public IUeAgentQueryApplicationPort
@@ -1414,12 +1516,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 
 	bool FUeAgentTimelineSpatialRuntimeConfig::IsValid() const
 	{
-		return !ProjectInstanceId.TrimStartAndEnd().IsEmpty()
-			&& !EditorInstanceId.TrimStartAndEnd().IsEmpty()
-			&& !ServerSessionId.TrimStartAndEnd().IsEmpty()
-			&& RegistryEpoch > 0
-			&& TimeoutSeconds > 0.0
-			&& MaxFrameBytes > 0;
+		return ValidateRuntimeConfig(*this).IsEmpty();
 	}
 
 	FUeAgentTimelineSpatialRuntime::FUeAgentTimelineSpatialRuntime(
@@ -1453,28 +1550,26 @@ namespace UE::UAI::Composition::TimelineSpatial
 	{
 		OutRuntime.Reset();
 		OutError = {};
-		if (!Config.IsValid() || !IsValid(&ExplicitWorld))
+		OutError = ValidateRuntimeConfig(Config);
+		if (!OutError.IsEmpty()) return false;
+		if (!IsValid(&ExplicitWorld))
 		{
-			SetError(
-				OutError,
-				TEXT("timeline_spatial_runtime_config_invalid"),
-				TEXT("timeline_spatial"),
-				TEXT("Runtime configuration and explicit world are required."));
+			SetError(OutError, FDiagnostic::Failure(TEXT("timeline_spatial_runtime_config_invalid"),
+				TEXT("The explicit runtime world is unavailable."), TEXT("runtime")), TEXT("timeline_spatial"));
+			OutError.PropertyPath = TEXT("explicit_world");
 			return false;
 		}
 
+		const TArray<FUeAgentTimelineSpatialActivationProfile>* Profiles = nullptr;
+		if (!TryGetTimelineSpatialActivationProfiles(Profiles, OutError)) return false;
 		TSharedPtr<const FUeAgentDescriptorRegistry> Descriptors;
-		FString ErrorText;
+		UE::UAI::Contract::FDiagnostic ErrorText;
 		if (!TryCreateTimelineSpatialDescriptorRegistry(
 				Descriptors,
 				ErrorText)
 			|| !Descriptors.IsValid())
 		{
-			SetError(
-				OutError,
-				ErrorText,
-				TEXT("timeline_spatial"),
-				TEXT("Exact descriptor registry could not compose."));
+			SetError(OutError, ErrorText, TEXT("timeline_spatial"));
 			return false;
 		}
 
@@ -1496,11 +1591,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 					WorldError)
 			|| !WorldRuntime.IsValid())
 		{
-			SetError(
-				OutError,
-				WorldError.Code,
-				WorldError.SubjectId,
-				WorldError.Detail);
+			OutError = WorldError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = WorldError.SubjectId;
 			return false;
 		}
 
@@ -1523,11 +1615,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 					TimelineError)
 			|| !TimelineRuntime.IsValid())
 		{
-			SetError(
-				OutError,
-				TimelineError.Code,
-				TimelineError.SubjectId,
-				TimelineError.Detail);
+			OutError = TimelineError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TimelineError.SubjectId;
 			return false;
 		}
 
@@ -1541,6 +1630,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 				+ TEXT(":")
 				+ FString::Printf(TEXT("%lld"), Config.RegistryEpoch);
 		RigConfig.RegistryEpoch = Config.RegistryEpoch;
+		RigConfig.InputRootPointer = TEXT("/input");
 		RigConfig.ObjectBindings = Config.RigObjectBindings;
 		RigConfig.ClockBindings = Config.RigClockBindings;
 		RigConfig.FrameBindings = Config.RigFrameBindings;
@@ -1562,11 +1652,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 					RigError)
 			|| !RigRuntime.IsValid())
 		{
-			SetError(
-				OutError,
-				RigError.Code,
-				RigError.SubjectId,
-				RigError.Detail);
+			OutError = RigError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = RigError.SubjectId;
 			return false;
 		}
 
@@ -1574,7 +1661,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 			QueryRegistrations;
 		TMap<FString, TSharedRef<IOperationRoute>> OperationRoutes;
 		for (const FUeAgentTimelineSpatialActivationProfile& Profile :
-			GetTimelineSpatialActivationProfiles())
+			*Profiles)
 		{
 			if (Profile.OperationKind == TEXT("query"))
 			{
@@ -1596,11 +1683,10 @@ namespace UE::UAI::Composition::TimelineSpatial
 				}
 				if (!Provider.IsValid())
 				{
-					SetError(
-						OutError,
-						TEXT("timeline_spatial_query_provider_missing"),
-						Profile.CapabilityId,
-						Profile.ProviderBinding);
+					SetError(OutError, FDiagnostic::Failure(TEXT("timeline_spatial_query_provider_missing"),
+						TEXT("No query provider is registered for the command's provider binding."), TEXT("runtime")), Profile.CapabilityId);
+					OutError.PropertyPath = TEXT("provider_binding");
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Profile.ProviderBinding);
 					return false;
 				}
 				QueryRegistrations.Emplace(
@@ -1670,20 +1756,6 @@ namespace UE::UAI::Composition::TimelineSpatial
 				}
 			}
 		}
-		if (QueryRegistrations.Num() != 23
-			|| OperationRoutes.Num() != 37)
-		{
-			SetError(
-				OutError,
-				TEXT("timeline_spatial_runtime_binding_count_invalid"),
-				TEXT("timeline_spatial"),
-				FString::Printf(
-					TEXT("query=%d operation=%d"),
-					QueryRegistrations.Num(),
-					OperationRoutes.Num()));
-			return false;
-		}
-
 		TSharedPtr<const FUeAgentDomainQueryProviderRegistry> QueryProviders;
 		FUeAgentQueryBindingError QueryError;
 		if (!FUeAgentDomainQueryProviderRegistry::TryCreate(
@@ -1692,11 +1764,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 				QueryError)
 			|| !QueryProviders.IsValid())
 		{
-			SetError(
-				OutError,
-				QueryError.Code,
-				QueryError.SubjectId,
-				QueryError.Detail);
+			OutError = QueryError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = QueryError.SubjectId;
 			return false;
 		}
 		TSharedPtr<const FUeAgentQueryTicketService> QueryTicketService;
@@ -1706,11 +1775,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 				QueryError)
 			|| !QueryTicketService.IsValid())
 		{
-			SetError(
-				OutError,
-				QueryError.Code,
-				QueryError.SubjectId,
-				QueryError.Detail);
+			OutError = QueryError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = QueryError.SubjectId;
 			return false;
 		}
 		const FUeAgentOperationSessionIdentity Session(
@@ -1732,11 +1798,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 				QueryError)
 			|| !QueryBinding.IsValid())
 		{
-			SetError(
-				OutError,
-				QueryError.Code,
-				QueryError.SubjectId,
-				QueryError.Detail);
+			OutError = QueryError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = QueryError.SubjectId;
 			return false;
 		}
 
@@ -1754,7 +1817,7 @@ namespace UE::UAI::Composition::TimelineSpatial
 		TMap<FString, TSharedRef<const FUeAgentOperationBinding>>
 			OperationBindings;
 		for (const FUeAgentTimelineSpatialActivationProfile& Profile :
-			GetTimelineSpatialActivationProfiles())
+			*Profiles)
 		{
 			if (Profile.OperationKind != TEXT("operation"))
 			{
@@ -1765,11 +1828,8 @@ namespace UE::UAI::Composition::TimelineSpatial
 					Profile.DescriptorIdentity.GetDescriptorId());
 			if (!Route)
 			{
-				SetError(
-					OutError,
-					TEXT("timeline_spatial_operation_route_missing"),
-					Profile.CapabilityId,
-					TEXT("Exact operation route is required."));
+				SetError(OutError, UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_spatial_operation_route_missing"), TEXT("Exact operation route is required."), TEXT("runtime")), Profile.CapabilityId);
+				OutError.PropertyPath = TEXT("operation_route");
 				return false;
 			}
 			TSharedPtr<const FUeAgentOperationBinding> Binding;
@@ -1794,33 +1854,20 @@ namespace UE::UAI::Composition::TimelineSpatial
 					BindingError)
 				|| !Binding.IsValid())
 			{
-				SetError(
-					OutError,
-					BindingError.Code.IsEmpty()
-						? TEXT("timeline_spatial_operation_binding_invalid")
-						: BindingError.Code,
-					Profile.CapabilityId,
-					BindingError.Detail);
+				OutError = BindingError.IsValid() ? BindingError : FDiagnostic::Failure(TEXT("timeline_spatial_operation_binding_invalid"),
+					TEXT("The operation binding factory returned no valid binding or failure diagnostic."), TEXT("runtime"));
+				if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = TEXT("operation_binding");
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Profile.CapabilityId;
 				return false;
 			}
 			OperationBindings.Add(
 				Profile.DescriptorIdentity.GetDescriptorId(),
 				Binding.ToSharedRef());
 		}
-		if (OperationBindings.Num() != 37)
-		{
-			SetError(
-				OutError,
-				TEXT("timeline_spatial_operation_binding_count_invalid"),
-				TEXT("timeline_spatial"),
-				FString::Printf(
-					TEXT("operation_bindings=%d"),
-					OperationBindings.Num()));
-			return false;
-		}
 		const TSharedRef<FState, ESPMode::ThreadSafe> State =
 			MakeShared<FState, ESPMode::ThreadSafe>(
 				Config,
+				*Profiles,
 				Descriptors.ToSharedRef(),
 				TicketService,
 				QueryTicketService.ToSharedRef(),
@@ -1840,17 +1887,13 @@ namespace UE::UAI::Composition::TimelineSpatial
 			MakeShared<FOperationApplication>(State);
 		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>> Handlers;
 		if (!TryCreateTimelineSpatialCommandHandlers(
-				GetTimelineSpatialActivationProfiles(),
+				*Profiles,
 				QueryPort,
 				OperationPort,
 				Handlers,
 				ErrorText))
 		{
-			SetError(
-				OutError,
-				ErrorText,
-				TEXT("timeline_spatial"),
-				TEXT("Public Timeline/Spatial handlers could not compose."));
+			SetError(OutError, ErrorText, TEXT("timeline_spatial"));
 			return false;
 		}
 		OutRuntime = MakeShareable(

@@ -204,9 +204,8 @@ namespace
 		TSharedPtr<FGraphCompoundRuntime>& OutRuntime)
 	{
 		FGraphCompoundRuntimeConfig RuntimeConfig;
-		RuntimeConfig.MaxFrameBytes = 1024 * 1024;
+
 		FGraphCompoundPcgAiProductionConfig ProductionConfig;
-		ProductionConfig.OperationTimeoutSeconds = 30.0;
 		FGraphCompoundRuntimeError Error;
 		if (!TryCreatePcgAiGraphProductionRuntime(
 			RuntimeConfig, ProductionConfig, OutRuntime, Error))

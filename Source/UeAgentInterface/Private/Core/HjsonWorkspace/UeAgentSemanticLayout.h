@@ -6,6 +6,8 @@
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Templates/SharedPointer.h"
 
+class FJsonObject;
+
 namespace UE::UAI::HjsonWorkspace
 {
 	using UE::UAI::ContextResource::FUeAgentResourceTracker;
@@ -53,7 +55,8 @@ namespace UE::UAI::HjsonWorkspace
 			TArray<FString> InDependencyRefs,
 			TArray<FString> InProfileVisibility,
 			FString InSourceProvenance,
-			FString InTargetIdentityKey = FString());
+			FString InTargetIdentityKey = FString(),
+			TArray<FString> InCategoryPath = {});
 
 		const FString& GetUnitId() const;
 		ESemanticUnitKind GetUnitKind() const;
@@ -62,6 +65,12 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& GetRole() const;
 		const FString& GetFieldSetRef() const;
 		const TMap<FString, FUeAgentCanonicalValueRef>& GetValues() const;
+		FSemanticUnit WithValues(TMap<FString, FUeAgentCanonicalValueRef> NewValues) const
+		{
+			return FSemanticUnit(UnitId, UnitKind, OwnerRef, SemanticTypeRef, Role, FieldSetRef,
+				MoveTemp(NewValues), ItemRefs, RelationRefs, OrderingRef, LayoutRef, DependencyRefs,
+				ProfileVisibility, SourceProvenance, TargetIdentityKey, CategoryPath);
+		}
 		const TArray<FString>& GetItemRefs() const;
 		const TArray<FString>& GetRelationRefs() const;
 		const FString& GetOrderingRef() const;
@@ -70,7 +79,9 @@ namespace UE::UAI::HjsonWorkspace
 		const TArray<FString>& GetProfileVisibility() const;
 		const FString& GetSourceProvenance() const;
 		const FString& GetTargetIdentityKey() const;
+		const TArray<FString>& GetCategoryPath() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FString UnitId;
@@ -89,7 +100,8 @@ namespace UE::UAI::HjsonWorkspace
 		TArray<FString> ProfileVisibility;
 		FString SourceProvenance;
 		FString TargetIdentityKey;
-		bool bValid = false;
+		TArray<FString> CategoryPath;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class FAuthoringModel;
@@ -106,6 +118,7 @@ namespace UE::UAI::HjsonWorkspace
 		const TArray<FSemanticUnit>& GetUnits() const;
 		const TArray<FString>& GetTargetUnitIds() const;
 		const FSemanticUnit* FindUnit(const FString& UnitId) const;
+		const FString* FindReadablePropertyDefinitionName(const FString& UnitId) const;
 		const FString& GetSemanticFingerprint() const;
 
 	private:
@@ -125,6 +138,7 @@ namespace UE::UAI::HjsonWorkspace
 		TArray<FSemanticUnit> Units;
 		TArray<FString> TargetUnitIds;
 		TMap<FString, int32> UnitIndex;
+		TMap<FString, FString> ReadablePropertyDefinitionNames;
 		FString SemanticFingerprint;
 
 		friend UEAGENTINTERFACE_API bool TryCompileAuthoringModel(
@@ -172,6 +186,8 @@ namespace UE::UAI::HjsonWorkspace
 		FString SemanticFingerprint;
 		TArray<FWorkspaceUnitInventoryEntry> UnitInventory;
 		TMap<FString, FString> LocalHandleMapping;
+		// Internal unit id -> short readable ref used only in model-visible HJSON.
+		TMap<FString, FString> PublicRefMapping;
 		FString BaseRevision;
 		TMap<FString, TArray<FString>> PhysicalFiles;
 	};
@@ -188,6 +204,7 @@ namespace UE::UAI::HjsonWorkspace
 		EWorkspaceSourceMode GetSourceMode() const;
 		const FString& GetSemanticFingerprint() const;
 		const TMap<FString, FString>& GetLogicalPlacements() const;
+		const TMap<FString, FString>& GetPhysicalPlacements() const;
 		const TMap<FString, TArray<FString>>& GetPhysicalFiles() const;
 		const FLlmWorkspaceIndex& GetLlmIndex() const;
 		const FMachineWorkspaceManifest& GetMachineManifest() const;
@@ -199,6 +216,7 @@ namespace UE::UAI::HjsonWorkspace
 			int32 InLayoutVersion,
 			EWorkspaceSourceMode InSourceMode,
 			TMap<FString, FString> InLogicalPlacements,
+			TMap<FString, FString> InPhysicalPlacements,
 			TMap<FString, TArray<FString>> InPhysicalFiles,
 			FLlmWorkspaceIndex InLlmIndex,
 			FMachineWorkspaceManifest InMachineManifest,
@@ -209,6 +227,7 @@ namespace UE::UAI::HjsonWorkspace
 		EWorkspaceSourceMode SourceMode =
 			EWorkspaceSourceMode::Directory;
 		TMap<FString, FString> LogicalPlacements;
+		TMap<FString, FString> PhysicalPlacements;
 		TMap<FString, TArray<FString>> PhysicalFiles;
 		FLlmWorkspaceIndex LlmIndex;
 		FMachineWorkspaceManifest MachineManifest;
@@ -229,20 +248,67 @@ namespace UE::UAI::HjsonWorkspace
 	UEAGENTINTERFACE_API FString LexToString(
 		ESemanticUnitKind UnitKind);
 
-	UEAGENTINTERFACE_API FString StableLocalHandle(
-		const FString& UnitId,
-		ESemanticUnitKind UnitKind);
+	// Format a business name; embedded hex runs and non-ASCII letters are valid.
+	UEAGENTINTERFACE_API FString MakeReadableSemanticAlias(
+		const FString& Value);
 
-	UEAGENTINTERFACE_API FString SemanticUnitContentHash(
-		const FSemanticUnit& Unit);
+	// For fallback identity/source fields only, not authoritative business names.
+	UEAGENTINTERFACE_API bool IsOpaqueSemanticIdentity(const FString& Value);
+
+	// File navigation follows business ownership, independently of public reference handles.
+	bool TryBuildAuthoringContentDirectories(const FAuthoringModel& Model,
+		const TMap<FString, FString>& Placements, TMap<FString, FString>& OutDirectories, FWorkspaceError& OutError);
+
+	UEAGENTINTERFACE_API bool TryHashSemanticUnitContent(
+		const FSemanticUnit& Unit, FString& OutHash, FWorkspaceError& OutError);
+
+	UEAGENTINTERFACE_API bool TrySerializeSemanticHjsonObject(
+		const UE::UAI::StateSemantic::FUeAgentCanonicalValue& Object,
+		TArray<uint8>& OutCanonicalUtf8, FWorkspaceError& OutError,
+		const FString& SourceUnit = FString());
+
+	UEAGENTINTERFACE_API bool TrySerializeSemanticHjsonObject(
+		const TSharedRef<FJsonObject>& Object,
+		TArray<uint8>& OutCanonicalUtf8, FWorkspaceError& OutError,
+		const FString& SourceUnit = FString());
 
 	UEAGENTINTERFACE_API bool TrySerializeSemanticUnitRow(
 		const FSemanticUnit& Unit,
-		TArray<uint8>& OutCanonicalUtf8);
+		TArray<uint8>& OutCanonicalUtf8, FWorkspaceError& OutError,
+		const FString& SourceFile = FString());
+	/** Hash of the canonical row used by directory workspace inventory. */
+	UEAGENTINTERFACE_API bool TryHashSemanticUnitRow(
+		const FSemanticUnit& Unit, FString& OutHash, FWorkspaceError& OutError,
+		const FString& SourceFile = FString());
+
+	/** Builds a fresh editable row using the same projection as serialization. */
+	UEAGENTINTERFACE_API bool TryBuildSemanticModelUnitRow(
+		const FSemanticUnit& Unit, TSharedPtr<FJsonObject>& OutRow,
+		FWorkspaceError& OutError,
+		const TMap<FString, FString>* PublicRefs = nullptr,
+		const FString& SourceFile = FString());
+
+	UEAGENTINTERFACE_API bool TrySerializeSemanticModelUnitRow(
+		const FSemanticUnit& Unit,
+		TArray<uint8>& OutCanonicalUtf8, FWorkspaceError& OutError,
+		const FString& SourceFile = FString());
+
+	UEAGENTINTERFACE_API bool TrySerializeSemanticModelUnitRow(
+		const FSemanticUnit& Unit,
+		const TMap<FString, FString>& PublicRefs,
+		TArray<uint8>& OutCanonicalUtf8, FWorkspaceError& OutError,
+		const FString& SourceFile = FString());
 
 	UEAGENTINTERFACE_API bool TrySerializeSemanticUnitDocument(
 		const FSemanticUnit& Unit,
-		TArray<uint8>& OutCanonicalUtf8);
+		TArray<uint8>& OutCanonicalUtf8, FWorkspaceError& OutError,
+		const FString& SourceFile = FString());
+
+	UEAGENTINTERFACE_API bool TrySerializeSemanticUnitDocument(
+		const FSemanticUnit& Unit,
+		const TMap<FString, FString>& PublicRefs,
+		TArray<uint8>& OutCanonicalUtf8, FWorkspaceError& OutError,
+		const FString& SourceFile = FString());
 
 	UEAGENTINTERFACE_API bool TryCompileAuthoringModel(
 		FString ContractId,
@@ -263,4 +329,7 @@ namespace UE::UAI::HjsonWorkspace
 		FUeAgentResourceTracker& Resources,
 		FWorkspaceLayoutPlanPtr& OutPlan,
 		FWorkspaceError& OutError);
+
+	UEAGENTINTERFACE_API bool IsModelVisibleSemanticWorkspacePath(
+		const FString& RelativePath);
 }

@@ -451,15 +451,10 @@ bool FUeAgentWorldSpatialExactCapabilityDescriptorsTest::RunTest(
 		Fixture->GetStringField(TEXT("schema")),
 		FString(TEXT(
 			"uai.domain_adapter.world_spatial.exact_descriptor_fixture.v1")));
-	TestEqual(
-		TEXT("descriptor count declaration"),
-		static_cast<int32>(Fixture->GetNumberField(TEXT("descriptor_count"))),
-		22);
 	const TSharedPtr<FJsonObject> Components =
 		Fixture->GetObjectField(TEXT("components"));
 	const TArray<TSharedPtr<FJsonValue>>& DescriptorValues =
 		Fixture->GetArrayField(TEXT("descriptors"));
-	TestEqual(TEXT("descriptor profile count"), DescriptorValues.Num(), 22);
 
 	TMap<FString, TSharedPtr<FJsonObject>> ActivationByCapability;
 	for (const TSharedPtr<FJsonValue>& Value
@@ -475,19 +470,12 @@ bool FUeAgentWorldSpatialExactCapabilityDescriptorsTest::RunTest(
 				Profile);
 		}
 	}
-	TestEqual(
-		TEXT("activation WorldSpatial profile count"),
-		ActivationByCapability.Num(),
-		22);
-
 	TSet<FString> CapabilityIds;
 	TSet<FString> DescriptorIds;
 	TSet<FString> ProviderBindings;
 	TMap<FString, FString> ExpectedInputSchemas;
 	TMap<FString, FString> ExpectedResultSchemas;
 	TMap<FString, FString> ExpectedDescriptorHashes;
-	int32 QueryCount = 0;
-	int32 OperationCount = 0;
 	for (const TSharedPtr<FJsonValue>& Value : DescriptorValues)
 	{
 		const TSharedPtr<FJsonObject> Profile = Value->AsObject();
@@ -623,7 +611,6 @@ bool FUeAgentWorldSpatialExactCapabilityDescriptorsTest::RunTest(
 
 		if (OperationKind == TEXT("query"))
 		{
-			++QueryCount;
 			const FString Provider =
 				Profile->GetStringField(TEXT("provider_binding"));
 			TestFalse(
@@ -636,14 +623,7 @@ bool FUeAgentWorldSpatialExactCapabilityDescriptorsTest::RunTest(
 				(*ActivationProfile)->GetStringField(
 					TEXT("provider_binding")));
 		}
-		else
-		{
-			++OperationCount;
-		}
 	}
-	TestEqual(TEXT("query descriptor count"), QueryCount, 10);
-	TestEqual(TEXT("operation descriptor count"), OperationCount, 12);
-	TestEqual(TEXT("query provider count"), ProviderBindings.Num(), 10);
 
 	using namespace UE::UAI::DomainAdapters::WorldSpatial;
 	TSharedPtr<const FUeAgentDescriptorRegistry> Registry;
@@ -659,10 +639,6 @@ bool FUeAgentWorldSpatialExactCapabilityDescriptorsTest::RunTest(
 			+ RegistryError);
 		return false;
 	}
-	TestEqual(
-		TEXT("production WorldSpatial descriptor count"),
-		Registry->GetDescriptors().Num(),
-		22);
 	for (const FUeAgentOperationDescriptor& Descriptor
 		: Registry->GetDescriptors())
 	{

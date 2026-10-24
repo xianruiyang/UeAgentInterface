@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
@@ -54,12 +56,7 @@ namespace UE::UAI::DomainAdapters::WorldSpatial
 		FString DimensionBridgeEvidence;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentWorldSpatialPortError
-	{
-		FString Code;
-		FString Path;
-		FString Detail;
-	};
+	using FUeAgentWorldSpatialPortError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentWorldSpatialNativePort
 	{

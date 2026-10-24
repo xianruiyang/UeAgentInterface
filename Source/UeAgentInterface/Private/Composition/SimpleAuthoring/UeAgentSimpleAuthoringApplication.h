@@ -6,6 +6,7 @@
 #include "Core/ContextResource/UeAgentOperationContext.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Core/Projection/UeAgentProjection.h"
@@ -15,18 +16,7 @@
 
 namespace UE::UAI::Composition::SimpleAuthoring
 {
-	struct UEAGENTINTERFACE_API
-		FUeAgentSimpleAuthoringApplicationError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	using FUeAgentSimpleAuthoringApplicationError = Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API
 		FUeAgentSimpleAuthoringPreparedOperation final
@@ -44,12 +34,13 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		const Projection::FUeAgentProjectionRequest&
 			GetProjection() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		TArray<Discovery::FUeAgentCandidateBinding> Targets;
 		PlanningPreflight::FPlanningRequest Planning;
 		Projection::FUeAgentProjectionRequest Projection;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API
@@ -95,8 +86,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 			ExecutionContext;
 		FString ServerSessionId;
 		int64 RegistryEpoch = 0;
-		double TimeoutSeconds = 0.0;
-		int64 MaxFrameBytes = 0;
 	};
 
 	class UEAGENTINTERFACE_API
@@ -146,4 +135,3 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		TSharedRef<FState, ESPMode::ThreadSafe> State;
 	};
 }
-

@@ -1,15 +1,23 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringIdentity.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintGraphSignature.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintNativeNormalization.h"
 
-#include "Commands/Blueprint/UeAgentHttpServer_BlueprintOps.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringOps.h"
+#include "Core/HjsonWorkspace/UeAgentGraphAuthoringProjection.h"
+#include "Core/HjsonWorkspace/DomainAuthoring/UeAgentDomainHjsonAuthoringKit.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringDescriptors.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
 #include "Engine/SCS_Node.h"
@@ -17,8 +25,10 @@
 #include "EnhancedInputSubsystems.h"
 #include "Factories/BlueprintFactory.h"
 #include "GameFramework/Actor.h"
+#include "Internationalization/Text.h"
 #include "K2Node.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_CallDelegate.h"
 #include "K2Node_CallParentFunction.h"
 #include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_CustomEvent.h"
@@ -28,17 +38,24 @@
 #include "K2Node_ExecutionSequence.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node_MakeArray.h"
+#include "K2Node_MakeContainer.h"
+#include "K2Node_MacroInstance.h"
 #include "K2Node_PromotableOperator.h"
 #include "K2Node_Tunnel.h"
 #include "K2Node_Variable.h"
 #include "K2Node_VariableSet.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/PackageName.h"
 #include "Subsystems/SubsystemBlueprintLibrary.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringAssetIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
+#include "Utilities/UeAgentBlueprintInputBindings.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticRegistry.h"
 #include "UObject/UnrealType.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace UeAgentBlueprintAuthoring
 {
@@ -56,7 +73,7 @@ namespace UeAgentBlueprintAuthoring
 			const FString& TargetKind,
 			const TMap<FString, FString>& Selectors,
 			UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
-			FString& OutError)
+			FDiagnostic& OutError)
 		{
 			return UeAgentAuthoringIdentity::BuildCanonicalIdentity(
 				ModelId, TargetKind, Selectors, OutIdentity, OutError);
@@ -70,7 +87,7 @@ namespace UeAgentBlueprintAuthoring
 			const UObject* RootObject,
 			const TMap<FString, FString>& Context,
 			TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-			FString& OutError)
+			FDiagnostic& OutError)
 		{
 			UeAgentAuthoringState::FReadRequest Request;
 			Request.SemanticId = SemanticId;
@@ -88,52 +105,196 @@ namespace UeAgentBlueprintAuthoring
 			return true;
 		}
 
-		FString PinContainerTypeToString(const EPinContainerType ContainerType)
+		TSharedRef<FJsonObject> BuildPinTypeState(const FEdGraphPinType& PinType,
+			const UBlueprint* Blueprint = nullptr, const FString& CanonicalAssetPath = FString())
 		{
-			switch (ContainerType)
-			{
-			case EPinContainerType::Array: return TEXT("array");
-			case EPinContainerType::Set: return TEXT("set");
-			case EPinContainerType::Map: return TEXT("map");
-			default: return FString();
-			}
+			return UeAgentBlueprintAuthoringOps::BuildPinTypeJsonObject(PinType, Blueprint, CanonicalAssetPath);
 		}
 
-		TSharedRef<FJsonObject> BuildPinTypeState(const FEdGraphPinType& PinType)
+		int32 GetPinOccurrence(const UEdGraphNode& Node, const UEdGraphPin& Target)
 		{
-			TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
-			State->SetStringField(TEXT("pin_category"), PinType.PinCategory.ToString());
-			if (!PinType.PinSubCategory.IsNone())
+			int32 Occurrence = 0;
+			for (const UEdGraphPin* Pin : Node.Pins)
 			{
-				State->SetStringField(TEXT("pin_subcategory"), PinType.PinSubCategory.ToString());
-			}
-			if (const UObject* Subcategory = PinType.PinSubCategoryObject.Get())
-			{
-				State->SetStringField(TEXT("pin_subcategory_object"), Subcategory->GetPathName());
-			}
-			const FString Container = PinContainerTypeToString(PinType.ContainerType);
-			if (!Container.IsEmpty()) State->SetStringField(TEXT("container_type"), Container);
-			if (PinType.ContainerType == EPinContainerType::Map
-				&& !PinType.PinValueType.TerminalCategory.IsNone())
-			{
-				TSharedRef<FJsonObject> ValueType = MakeShared<FJsonObject>();
-				ValueType->SetStringField(
-					TEXT("pin_category"), PinType.PinValueType.TerminalCategory.ToString());
-				if (!PinType.PinValueType.TerminalSubCategory.IsNone())
+				if (!Pin || Pin->bOrphanedPin)
 				{
-					ValueType->SetStringField(
-						TEXT("pin_subcategory"),
-						PinType.PinValueType.TerminalSubCategory.ToString());
+					continue;
 				}
-				if (const UObject* ValueSubcategory =
-					PinType.PinValueType.TerminalSubCategoryObject.Get())
+				if (Pin == &Target)
 				{
-					ValueType->SetStringField(
-						TEXT("pin_subcategory_object"), ValueSubcategory->GetPathName());
+					return Occurrence;
 				}
-				State->SetObjectField(TEXT("value_type"), ValueType);
+				if (Pin->PinName == Target.PinName)
+				{
+					++Occurrence;
+				}
 			}
-			return State;
+			return 0;
+		}
+
+		bool TryBuildNodePinAliases(
+			const UEdGraphNode& Node,
+			TMap<const UEdGraphPin*, FString>& OutAliasByPin,
+			FDiagnostic& OutError)
+		{
+			using namespace UE::UAI::HjsonWorkspace;
+			OutAliasByPin.Reset();
+			TArray<FGraphAuthoringPinAliasInput> Inputs;
+			TMap<FString, const UEdGraphPin*> PinBySourceId;
+			for (const UEdGraphPin* Pin : Node.Pins)
+			{
+				if (!Pin || Pin->bOrphanedPin)
+				{
+					continue;
+				}
+				const FString SourceId = LexToString(Inputs.Num());
+				Inputs.Add({
+					SourceId,
+					Pin->PinName.ToString(),
+					GetPinOccurrence(Node, *Pin),
+					Pin->Direction == EGPD_Output
+						? EGraphAuthoringEndpointDirection::Output
+						: EGraphAuthoringEndpointDirection::Input});
+				PinBySourceId.Add(SourceId, Pin);
+			}
+
+			FGraphAuthoringPinAliasProjection Projection;
+			FWorkspaceError Error;
+			if (!TryBuildGraphAuthoringPinAliasProjection(Inputs, Projection, Error))
+			{
+				OutError = Error.GetDiagnostic();
+				return false;
+			}
+			for (const TPair<FString, FString>& Alias : Projection.AliasBySourceId)
+			{
+				OutAliasByPin.Add(PinBySourceId.FindChecked(Alias.Key), Alias.Value);
+			}
+			return true;
+		}
+
+		TSharedRef<FJsonObject> BuildPinSelector(
+			const UEdGraphNode& Node,
+			const UEdGraphPin& Pin)
+		{
+			TSharedRef<FJsonObject> Selector = MakeShared<FJsonObject>();
+			Selector->SetStringField(TEXT("name"), Pin.PinName.ToString());
+			Selector->SetNumberField(TEXT("occurrence"), GetPinOccurrence(Node, Pin));
+			return Selector;
+		}
+
+		bool CanAuthorPinDefault(const UEdGraphPin& Pin)
+		{
+			const FName Category = Pin.PinType.PinCategory;
+			return Pin.Direction == EGPD_Input && !Pin.bOrphanedPin
+				&& Pin.LinkedTo.IsEmpty()
+				&& !Pin.bHidden && !Pin.bNotConnectable
+				&& !Pin.bDefaultValueIsReadOnly && !Pin.bDefaultValueIsIgnored
+				&& Pin.SubPins.IsEmpty() && Pin.PinType.ContainerType == EPinContainerType::None
+				&& Category != UEdGraphSchema_K2::PC_Exec
+				&& Category != UEdGraphSchema_K2::PC_Wildcard
+				&& Category != UEdGraphSchema_K2::PC_Delegate
+				&& Category != UEdGraphSchema_K2::PC_MCDelegate;
+		}
+
+		TSharedRef<FJsonObject> BuildPinInterfaceState(const UEdGraphNode& Node, const FString& CanonicalAssetPath)
+		{
+			TSharedRef<FJsonObject> Interface = MakeShared<FJsonObject>();
+			const UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Node.GetGraph());
+			TArray<TSharedPtr<FJsonValue>> Pins;
+			for (const UEdGraphPin* Pin : Node.Pins)
+			{
+				if (!Pin || Pin->bOrphanedPin)
+				{
+					continue;
+				}
+				TSharedRef<FJsonObject> PinState = BuildPinSelector(Node, *Pin);
+				PinState->SetStringField(
+					TEXT("direction"),
+					Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
+				const bool bExec =
+					Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec;
+				PinState->SetStringField(TEXT("kind"), bExec ? TEXT("exec") : TEXT("data"));
+				PinState->SetObjectField(TEXT("type"), BuildPinTypeState(Pin->PinType, Blueprint, CanonicalAssetPath));
+				PinState->SetBoolField(
+					TEXT("default_editable"),
+					CanAuthorPinDefault(*Pin));
+				if (Pin->bHidden)
+				{
+					PinState->SetBoolField(TEXT("hidden"), true);
+				}
+				if (Pin->bNotConnectable)
+				{
+					PinState->SetBoolField(TEXT("not_connectable"), true);
+				}
+				Pins.Add(MakeShared<FJsonValueObject>(PinState));
+			}
+			// Reconstruction may reorder native Pins (VariableSet moves self
+			// after Output_Get). Compare the named interface, not that array order.
+			Pins.Sort([](const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonValue>& Right)
+			{
+				const TSharedPtr<FJsonObject> L = Left->AsObject();
+				const TSharedPtr<FJsonObject> R = Right->AsObject();
+				const int32 NameOrder = L->GetStringField(TEXT("name")).Compare(
+					R->GetStringField(TEXT("name")), ESearchCase::CaseSensitive);
+				return NameOrder != 0 ? NameOrder < 0
+					: L->GetNumberField(TEXT("occurrence")) < R->GetNumberField(TEXT("occurrence"));
+			});
+			Interface->SetArrayField(TEXT("pins"), MoveTemp(Pins));
+
+			TArray<TSharedPtr<FJsonValue>> Groups;
+			auto AddGroup = [&Node, &Groups](
+				const TCHAR* Id,
+				const int32 CurrentCount,
+				const int32 MinCount,
+				const TArray<UEdGraphPin*>& Members)
+			{
+				TSharedRef<FJsonObject> Group = MakeShared<FJsonObject>();
+				Group->SetStringField(TEXT("id"), Id);
+				Group->SetNumberField(TEXT("current_count"), CurrentCount);
+				Group->SetNumberField(TEXT("min_count"), MinCount);
+				Group->SetBoolField(TEXT("can_add"), true);
+				Group->SetBoolField(TEXT("can_remove"), CurrentCount > MinCount);
+				TArray<TSharedPtr<FJsonValue>> MemberRows;
+				for (const UEdGraphPin* Member : Members)
+				{
+					if (Member && !Member->bOrphanedPin)
+					{
+						MemberRows.Add(MakeShared<FJsonValueObject>(
+							BuildPinSelector(Node, *Member)));
+					}
+				}
+				Group->SetArrayField(TEXT("members"), MoveTemp(MemberRows));
+				Groups.Add(MakeShared<FJsonValueObject>(Group));
+			};
+
+			if (const UK2Node_ExecutionSequence* Sequence =
+				Cast<UK2Node_ExecutionSequence>(&Node))
+			{
+				TArray<UEdGraphPin*> Members;
+				for (UEdGraphPin* Pin : Sequence->Pins)
+				{
+					if (Pin && Pin->Direction == EGPD_Output
+						&& Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+					{
+						Members.Add(Pin);
+					}
+				}
+				AddGroup(TEXT("execution_outputs"), Members.Num(), 2, Members);
+			}
+			else if (const UK2Node_MakeArray* MakeArray = Cast<UK2Node_MakeArray>(&Node))
+			{
+				TArray<UEdGraphPin*> Members;
+				for (UEdGraphPin* Pin : MakeArray->Pins)
+				{
+					if (Pin && Pin->Direction == EGPD_Input && Pin->ParentPin == nullptr)
+					{
+						Members.Add(Pin);
+					}
+				}
+				AddGroup(TEXT("inputs"), MakeArray->NumInputs, 1, Members);
+			}
+			Interface->SetArrayField(TEXT("pin_groups"), MoveTemp(Groups));
+			return Interface;
 		}
 
 		FString GetGraphKind(const UBlueprint& Blueprint, const UEdGraph* Graph)
@@ -145,28 +306,10 @@ namespace UeAgentBlueprintAuthoring
 			return TEXT("graph");
 		}
 
-		FString GetBuiltinNodeId(const UEdGraphNode* Node)
-		{
-			if (Node && Node->IsA<UK2Node_FunctionEntry>()) return TEXT("__entry__");
-			if (Node && Node->IsA<UK2Node_FunctionResult>()) return TEXT("__result__");
-			if (const UK2Node_Tunnel* Tunnel = Cast<UK2Node_Tunnel>(Node))
-			{
-				bool bHasInput = false;
-				bool bHasOutput = false;
-				for (const UEdGraphPin* Pin : Tunnel->Pins)
-				{
-					if (!Pin) continue;
-					bHasInput |= Pin->Direction == EGPD_Input;
-					bHasOutput |= Pin->Direction == EGPD_Output;
-				}
-				if (bHasOutput && !bHasInput) return TEXT("__entry__");
-				if (bHasInput && !bHasOutput) return TEXT("__result__");
-			}
-			return FString();
-		}
-
 		FString GetNodeKind(const UEdGraphNode* Node)
 		{
+			if (Node && Node->IsA<UK2Node_MacroInstance>()) return TEXT("macro_instance");
+			if (Node && Node->IsA<UK2Node_CallDelegate>()) return TEXT("call_delegate");
 			if (Node && Node->IsA<UK2Node_ComponentBoundEvent>()) return TEXT("component_bound_event");
 			if (Node && Node->IsA<UK2Node_EnhancedInputAction>()) return TEXT("enhanced_input_action_event");
 			if (Node && Node->IsA<UK2Node_DynamicCast>()) return TEXT("dynamic_cast");
@@ -176,6 +319,22 @@ namespace UeAgentBlueprintAuthoring
 			if (const UK2Node_CallFunction* Call = Cast<UK2Node_CallFunction>(Node))
 			{
 				const UFunction* Function = Call->GetTargetFunction();
+				const UBlueprint* Blueprint =
+					FBlueprintEditorUtils::FindBlueprintForGraph(Node->GetGraph());
+				if (Function && Blueprint
+					&& (Function->GetOwnerClass() == Blueprint->GeneratedClass
+						|| Function->GetOwnerClass() == Blueprint->SkeletonGeneratedClass))
+				{
+					TArray<UK2Node_CustomEvent*> Events;
+					FBlueprintEditorUtils::GetAllNodesOfClass(Blueprint, Events);
+					if (Events.ContainsByPredicate([Function](const UK2Node_CustomEvent* Event)
+						{
+							return Event && Event->CustomFunctionName == Function->GetFName();
+						}))
+					{
+						return TEXT("call_custom_event");
+					}
+				}
 				if (Function
 					&& Function->GetFName() == TEXT("GetLocalPlayerSubSystemFromPlayerController")
 					&& Function->GetOwnerClass() == USubsystemBlueprintLibrary::StaticClass())
@@ -194,37 +353,6 @@ namespace UeAgentBlueprintAuthoring
 			return Node ? TEXT("node_by_class") : FString();
 		}
 
-		FString GetNodeSemanticName(const UEdGraphNode& Node)
-		{
-			if (const UK2Node_CustomEvent* Custom = Cast<UK2Node_CustomEvent>(&Node))
-			{
-				return Custom->CustomFunctionName.ToString();
-			}
-			if (const UK2Node_Event* Event = Cast<UK2Node_Event>(&Node))
-			{
-				return Event->EventReference.GetMemberName().ToString();
-			}
-			if (const UK2Node_CallFunction* Call = Cast<UK2Node_CallFunction>(&Node))
-			{
-				if (const UFunction* Function = Call->GetTargetFunction()) return Function->GetName();
-				return Call->FunctionReference.GetMemberName().ToString();
-			}
-			if (const UK2Node_Variable* Variable = Cast<UK2Node_Variable>(&Node))
-			{
-				return Variable->VariableReference.GetMemberName().ToString();
-			}
-			return Node.GetClass()->GetPathName();
-		}
-
-		FString NodeReference(const UEdGraphNode* Node)
-		{
-			if (!Node) return FString();
-			const FString Builtin = GetBuiltinNodeId(Node);
-			if (!Builtin.IsEmpty()) return Builtin;
-			const FString Guid = GuidText(Node->NodeGuid);
-			return Guid.IsEmpty() ? Node->GetName() : Guid;
-		}
-
 		UEdGraphPin* FindPin(UEdGraphNode* Node, const TCHAR* Name)
 		{
 			if (!Node) return nullptr;
@@ -235,18 +363,74 @@ namespace UeAgentBlueprintAuthoring
 			return nullptr;
 		}
 
-		TSharedRef<FJsonObject> BuildNodeState(const UEdGraphNode& Node)
+		TSharedRef<FJsonObject> BuildNodeState(const UEdGraphNode& Node, const FString& CanonicalAssetPath = FString())
 		{
 			TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
 			const FString Kind = GetNodeKind(&Node);
 			State->SetStringField(TEXT("id"), NodeReference(&Node));
+			const FString NodeGuid = GuidText(Node.NodeGuid);
+			if (!NodeGuid.IsEmpty())
+			{
+				State->SetStringField(TEXT("node_guid"), NodeGuid);
+			}
+			State->SetStringField(TEXT("name"), NodeSemanticName(Node));
 			State->SetStringField(TEXT("node_type"), Kind);
 			TSharedRef<FJsonObject> Position = MakeShared<FJsonObject>();
 			Position->SetNumberField(TEXT("x"), Node.NodePosX);
 			Position->SetNumberField(TEXT("y"), Node.NodePosY);
 			State->SetObjectField(TEXT("pos"), Position);
+			State->SetObjectField(TEXT("pin_interface"), BuildPinInterfaceState(Node, CanonicalAssetPath));
 
-			if (const UK2Node_ComponentBoundEvent* Bound = Cast<UK2Node_ComponentBoundEvent>(&Node))
+			if (const UK2Node_ExecutionSequence* Sequence =
+				Cast<UK2Node_ExecutionSequence>(&Node))
+			{
+				int32 OutputCount = 0;
+				for (const UEdGraphPin* Pin : Sequence->Pins)
+				{
+					if (Pin && Pin->Direction == EGPD_Output
+						&& Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+					{
+						++OutputCount;
+					}
+				}
+				TSharedRef<FJsonObject> PinGroups = MakeShared<FJsonObject>();
+				PinGroups->SetNumberField(TEXT("execution_outputs"), OutputCount);
+				State->SetObjectField(TEXT("pin_groups"), PinGroups);
+			}
+			else if (const UK2Node_MakeArray* MakeArray = Cast<UK2Node_MakeArray>(&Node))
+			{
+				TSharedRef<FJsonObject> PinGroups = MakeShared<FJsonObject>();
+				PinGroups->SetNumberField(TEXT("inputs"), MakeArray->NumInputs);
+				State->SetObjectField(TEXT("pin_groups"), PinGroups);
+			}
+
+			if (const UK2Node_MacroInstance* Macro = Cast<UK2Node_MacroInstance>(&Node))
+			{
+				if (const UEdGraph* MacroGraph = Macro->GetMacroGraph())
+				{
+					const UBlueprint* NodeOwner = Node.GetTypedOuter<UBlueprint>();
+					const UBlueprint* MacroOwner = MacroGraph->GetTypedOuter<UBlueprint>();
+					const FString TargetPackage = UeAgentAuthoringAssetIdentity::NormalizePackagePath(CanonicalAssetPath);
+					const bool bLocal = MacroOwner && (MacroOwner == NodeOwner
+						|| (!TargetPackage.IsEmpty() && MacroOwner->GetOutermost()->GetName() == TargetPackage));
+					FString Reference = MacroGraph->GetName();
+					if (!bLocal)
+					{
+						Reference = MacroGraph->GetPathName();
+						if (MacroOwner)
+							Reference = UeAgentAuthoringAssetIdentity::ToObjectPath(
+								UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*MacroOwner))
+								+ TEXT(":") + MacroGraph->GetPathName(MacroOwner);
+					}
+					State->SetStringField(TEXT("macro_graph"), Reference);
+				}
+			}
+			else if (const UK2Node_CallDelegate* CallDelegate = Cast<UK2Node_CallDelegate>(&Node))
+			{
+				State->SetStringField(
+					TEXT("delegate_member"), CallDelegate->GetPropertyName().ToString());
+			}
+			else if (const UK2Node_ComponentBoundEvent* Bound = Cast<UK2Node_ComponentBoundEvent>(&Node))
 			{
 				State->SetStringField(TEXT("component_name"), Bound->ComponentPropertyName.ToString());
 				State->SetStringField(TEXT("delegate_property_name"), Bound->DelegatePropertyName.ToString());
@@ -266,13 +450,20 @@ namespace UeAgentBlueprintAuthoring
 			{
 				if (Dynamic->TargetType)
 				{
-					State->SetStringField(TEXT("target_class"), Dynamic->TargetType->GetPathName());
+					State->SetStringField(TEXT("target_class"), UeAgentBlueprintAssetLifecycle::GetAuthoringTypeObjectPath(
+						FBlueprintEditorUtils::FindBlueprintForGraph(Node.GetGraph()), *Dynamic->TargetType.Get(), CanonicalAssetPath));
 				}
 				State->SetBoolField(TEXT("pure"), Dynamic->IsNodePure());
 			}
 			else if (const UK2Node_CustomEvent* Custom = Cast<UK2Node_CustomEvent>(&Node))
 			{
 				State->SetStringField(TEXT("event_name"), Custom->CustomFunctionName.ToString());
+				TSharedRef<FJsonObject> Signature = MakeShared<FJsonObject>();
+				FDiagnostic SignatureError;
+				if (CaptureCustomEventSignature(*Custom, Signature, SignatureError))
+				{
+					State->SetObjectField(TEXT("signature"), Signature);
+				}
 			}
 			else if (const UK2Node_Event* Event = Cast<UK2Node_Event>(&Node))
 			{
@@ -292,7 +483,11 @@ namespace UeAgentBlueprintAuthoring
 				const UClass* OwnerClass = Function
 					? Function->GetOwnerClass()
 					: Call->FunctionReference.GetMemberParentClass(Call->GetBlueprintClassFromNode());
-				if (Kind == TEXT("enhanced_input_add_mapping_context"))
+				if (Kind == TEXT("call_custom_event"))
+				{
+					State->SetStringField(TEXT("custom_event"), FunctionName);
+				}
+				else if (Kind == TEXT("enhanced_input_add_mapping_context"))
 				{
 					if (const UEdGraphPin* Pin = FindPin(const_cast<UEdGraphNode*>(&Node), TEXT("MappingContext")))
 					{
@@ -319,10 +514,30 @@ namespace UeAgentBlueprintAuthoring
 				}
 				else if (Kind != TEXT("enhanced_input_get_local_player_subsystem"))
 				{
-					State->SetStringField(TEXT("function_name"), FunctionName);
-					if (OwnerClass)
+					const UBlueprint* Blueprint =
+						FBlueprintEditorUtils::FindBlueprintForGraph(Node.GetGraph());
+					const bool bOwnedByBlueprint = Blueprint && OwnerClass
+						&& (OwnerClass == Blueprint->GeneratedClass
+							|| OwnerClass == Blueprint->SkeletonGeneratedClass);
+					const bool bHasLocalFunctionGraph = Blueprint
+						&& Blueprint->FunctionGraphs.ContainsByPredicate(
+							[&FunctionName](const UEdGraph* FunctionGraph)
+							{
+								return FunctionGraph
+									&& FunctionGraph->GetName() == FunctionName;
+							});
+					if (bOwnedByBlueprint && bHasLocalFunctionGraph)
 					{
-						State->SetStringField(TEXT("function_owner_class"), OwnerClass->GetPathName());
+						State->SetStringField(TEXT("function_graph"), FunctionName);
+					}
+					else
+					{
+						State->SetStringField(TEXT("function_name"), FunctionName);
+						if (OwnerClass)
+						{
+							State->SetStringField(
+								TEXT("function_owner_class"), OwnerClass->GetPathName());
+						}
 					}
 				}
 				if (const UK2Node_PromotableOperator* Operator =
@@ -356,34 +571,91 @@ namespace UeAgentBlueprintAuthoring
 			else
 			{
 				State->SetStringField(TEXT("node_class"), Node.GetClass()->GetPathName());
-				if (const UK2Node_ExecutionSequence* Sequence = Cast<UK2Node_ExecutionSequence>(&Node))
-				{
-					int32 OutputCount = 0;
-					for (const UEdGraphPin* Pin : Sequence->Pins)
-					{
-						if (Pin && Pin->Direction == EGPD_Output
-							&& Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
-						{
-							++OutputCount;
-						}
-					}
-					State->SetNumberField(TEXT("exec_output_pin_count"), OutputCount);
-				}
 			}
 			return State;
 		}
 
 		void BuildSCSParentMap(
+			UBlueprint& Blueprint,
 			USCS_Node* Node,
 			const FString& ParentName,
+			const TMap<UActorComponent*, FString>& InheritedNames,
 			TMap<const USCS_Node*, FString>& OutParents)
 		{
 			if (!Node) return;
-			OutParents.Add(Node, ParentName);
+			FString ResolvedParentName = ParentName;
+			if (ResolvedParentName.IsEmpty() && Cast<USceneComponent>(Node->ComponentTemplate))
+			{
+				USceneComponent* ExternalParent = Node->GetParentComponentTemplate(&Blueprint);
+				if (!ExternalParent && Node->ParentComponentOrVariableName.IsNone())
+				{
+					const AActor* CDO = Blueprint.GeneratedClass
+						? Cast<AActor>(Blueprint.GeneratedClass->GetDefaultObject(false)) : nullptr;
+					ExternalParent = CDO ? CDO->GetRootComponent() : nullptr;
+				}
+				if (ExternalParent)
+				{
+					const FString* ExportedName = InheritedNames.Find(ExternalParent);
+					if (!ExportedName && !Node->bIsParentComponentNative
+						&& !Node->ParentComponentOrVariableName.IsNone())
+					{
+						UActorComponent* Inherited = UeAgentBlueprintAuthoringOps::ResolveInheritedComponent(
+							Blueprint, Node->ParentComponentOrVariableName.ToString());
+						ExportedName = InheritedNames.Find(Inherited);
+					}
+					if (ExportedName) ResolvedParentName = *ExportedName;
+				}
+			}
+			OutParents.Add(Node, ResolvedParentName);
 			for (USCS_Node* Child : Node->GetChildNodes())
 			{
-				BuildSCSParentMap(Child, Node->GetVariableName().ToString(), OutParents);
+				BuildSCSParentMap(Blueprint, Child, Node->GetVariableName().ToString(), InheritedNames, OutParents);
 			}
+		}
+
+		TSharedRef<FJsonObject> BuildGeneratedGraphVerificationState(
+			const UEdGraph& Graph, const FString& CanonicalAssetPath)
+		{
+			// Native generation order identifies children only within this snapshot.
+			// Compare the generated program, not GUIDs replaced by ReconstructNode.
+			TMap<const UEdGraphNode*, int32> Ordinals;
+			for (const UEdGraphNode* Node : Graph.Nodes)
+				if (Node && !Node->IsAutomaticallyPlacedGhostNode()) Ordinals.Add(Node, Ordinals.Num());
+			TArray<TSharedPtr<FJsonValue>> Nodes;
+			for (const UEdGraphNode* Node : Graph.Nodes)
+			{
+				if (!Node || !Ordinals.Contains(Node)) continue;
+				auto Value = BuildNodeState(*Node, CanonicalAssetPath);
+				for (const TCHAR* Field : {TEXT("id"), TEXT("node_guid"), TEXT("name"), TEXT("pos")})
+					Value->RemoveField(Field);
+				TArray<TSharedPtr<FJsonValue>> Pins;
+				for (const UEdGraphPin* Pin : Node->Pins)
+				{
+					if (!Pin) continue;
+					auto PinValue = BuildPinSelector(*Node, *Pin);
+					PinValue->SetStringField(TEXT("default"), Pin->GetDefaultAsString());
+					PinValue->SetBoolField(TEXT("orphaned"), Pin->bOrphanedPin);
+					TArray<FString> Links;
+					for (const UEdGraphPin* Other : Pin->LinkedTo) if (Other)
+					{
+						const UEdGraphNode* Owner = Other->GetOwningNode();
+						const int32* Ordinal = Ordinals.Find(Owner);
+						Links.Add((Ordinal ? LexToString(*Ordinal) : NodeReference(Owner))
+							+ TEXT(":") + Other->PinName.ToString() + TEXT(":")
+							+ LexToString(GetPinOccurrence(*Owner, *Other)));
+					}
+					Links.Sort();
+					TArray<TSharedPtr<FJsonValue>> LinkValues;
+					for (const auto& Link : Links) LinkValues.Add(MakeShared<FJsonValueString>(Link));
+					PinValue->SetArrayField(TEXT("links"), MoveTemp(LinkValues));
+					Pins.Add(MakeShared<FJsonValueObject>(PinValue));
+				}
+				Value->SetArrayField(TEXT("pin_values"), MoveTemp(Pins));
+				Nodes.Add(MakeShared<FJsonValueObject>(Value));
+			}
+			auto Result = MakeShared<FJsonObject>();
+			Result->SetArrayField(TEXT("nodes"), MoveTemp(Nodes));
+			return Result;
 		}
 
 		TSharedRef<FJsonObject> BuildAssetVerificationState(
@@ -443,6 +715,7 @@ namespace UeAgentBlueprintAuthoring
 			State->SetArrayField(TEXT("components"), Components);
 
 			TArray<FString> GraphKeys;
+			auto GeneratedGraphs = MakeShared<FJsonObject>();
 			TArray<UEdGraph*> Graphs;
 			Blueprint.GetAllGraphs(Graphs);
 			for (const UEdGraph* Graph : Graphs)
@@ -450,6 +723,13 @@ namespace UeAgentBlueprintAuthoring
 				if (!Graph) continue;
 				FString GraphKey = GuidText(Graph->GraphGuid) + TEXT(":") + GetGraphKind(Blueprint, Graph)
 					+ TEXT(":") + Graph->GetName();
+				if (IsNativeGeneratedGraph(*Graph))
+				{
+					GeneratedGraphs->SetObjectField(GraphKey,
+						BuildGeneratedGraphVerificationState(*Graph, CanonicalAssetPath));
+					GraphKeys.Add(MoveTemp(GraphKey));
+					continue;
+				}
 				TArray<FString> NodeKeys;
 				for (const UEdGraphNode* Node : Graph->Nodes)
 				{
@@ -464,6 +744,7 @@ namespace UeAgentBlueprintAuthoring
 			TArray<TSharedPtr<FJsonValue>> GraphValues;
 			for (const FString& Key : GraphKeys) GraphValues.Add(MakeShared<FJsonValueString>(Key));
 			State->SetArrayField(TEXT("graphs"), GraphValues);
+			if (!GeneratedGraphs->Values.IsEmpty()) State->SetObjectField(TEXT("generated_graphs"), GeneratedGraphs);
 			return State;
 		}
 
@@ -486,18 +767,68 @@ namespace UeAgentBlueprintAuthoring
 			return nullptr;
 		}
 
+		UEdGraph* ResolveDelegateSignatureGraph(
+			const UBlueprint& Blueprint,
+			const FName DelegateName)
+		{
+			for (UEdGraph* Graph : Blueprint.DelegateSignatureGraphs)
+			{
+				if (Graph && Graph->GetFName() == DelegateName)
+				{
+					return Graph;
+				}
+			}
+			return nullptr;
+		}
+
 		UeAgentAuthoringState::EReadOutcome ReadState(
 			const UeAgentAuthoringState::FReadRequest& Request,
 			UeAgentAuthoringState::FStateValue& OutValue,
-			FString& OutError)
+			FDiagnostic& OutError)
 		{
 			OutValue = UeAgentAuthoringState::FStateValue();
 			OutValue.TargetIdentity = Request.TargetIdentity;
 			OutValue.Provenance = StateAccessorId;
 			OutValue.bEditable = Request.SemanticId != ExportTargetSemanticId;
 			OutError.Reset();
+			const auto RootTypeValue = [&]() -> TSharedPtr<FJsonValue>
+			{
+				return Request.RootObject ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Request.RootObject->GetClass()->GetPathName()))
+					: TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>());
+			};
+			const auto FailNativeState = [&](const TCHAR* Code, const FString& Reason, const FString& Field,
+				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Name)
+			{
+				OutError = FDiagnostic::Failure(Code, Reason, TEXT("blueprint_state"));
+				OutError.SourceKind = TEXT("native_result");
+				OutError.SemanticId = Request.SemanticId;
+				OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+				OutError.CandidateName = Name;
+				OutError.PropertyPath = Field;
+				OutError.ActualValue = MoveTemp(Actual);
+				OutError.ExpectedValue = MoveTemp(Expected);
+				return UeAgentAuthoringState::EReadOutcome::Failed;
+			};
 			if (Request.Context.FindRef(TEXT("expected_absent")) == TEXT("true"))
 			{
+				// Desired absence does not imply the target is already absent during preparation.
+				if (Request.Context.FindRef(TEXT("observe_absence")) == TEXT("true"))
+				{
+					bool bPresent = false;
+					if (!UE::UAI::HjsonWorkspace::DomainAuthoring::TryInspectObjectTargetPresence(
+						Request.TargetIdentity.GetSelector(TEXT("asset_path")), bPresent))
+					{
+						return FailNativeState(TEXT("blueprint_presence_target_invalid"),
+							TEXT("The native query could not determine whether the expected-absent Blueprint target is present."),
+							TEXT("presence_query_succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), FString());
+					}
+					if (bPresent)
+					{
+						return FailNativeState(TEXT("blueprint_expected_absent_target_present"),
+							TEXT("The Blueprint target is still present, but this snapshot requires absence."),
+							TEXT("asset_present"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), FString());
+					}
+				}
 				OutValue.bAvailable = false;
 				OutValue.AvailabilityReason = TEXT("target_not_found");
 				return UeAgentAuthoringState::EReadOutcome::Unavailable;
@@ -508,8 +839,11 @@ namespace UeAgentBlueprintAuthoring
 				const UBlueprint* Blueprint = Cast<UBlueprint>(Request.RootObject);
 				if (!Blueprint || !Blueprint->ParentClass)
 				{
-					OutError = TEXT("blueprint_parent_class_state_invalid");
-					return UeAgentAuthoringState::EReadOutcome::Failed;
+					return FailNativeState(TEXT("blueprint_parent_class_state_invalid"),
+						!Blueprint ? TEXT("Reading the Blueprint parent class requires a Blueprint root object.") : TEXT("The Blueprint has no parent class."),
+						!Blueprint ? TEXT("root_object") : TEXT("parent_class"),
+						!Blueprint ? RootTypeValue() : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+						MakeShared<FJsonValueString>(!Blueprint ? UBlueprint::StaticClass()->GetPathName() : UClass::StaticClass()->GetPathName()), FString());
 				}
 				OutValue.Type.Kind = TEXT("string");
 				OutValue.Value = MakeShared<FJsonValueString>(Blueprint->ParentClass->GetPathName());
@@ -581,12 +915,34 @@ namespace UeAgentBlueprintAuthoring
 				}
 				TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
 				State->SetStringField(TEXT("name"), Variable->VarName.ToString());
+				State->SetStringField(TEXT("guid"), GuidText(Variable->VarGuid));
 				if (Request.SemanticId == VariableSemanticId)
 				{
-					State->SetObjectField(TEXT("type"), BuildPinTypeState(Variable->VarType));
+					State->SetObjectField(TEXT("type"), BuildPinTypeState(Variable->VarType, Blueprint,
+						Request.TargetIdentity.GetSelector(TEXT("asset_path"))));
 					State->SetBoolField(
 						TEXT("instance_editable"),
 						(Variable->PropertyFlags & CPF_DisableEditOnInstance) == 0);
+				}
+				else
+				{
+					UEdGraph* SignatureGraph = ResolveDelegateSignatureGraph(
+						*Blueprint, Variable->VarName);
+					TSharedRef<FJsonObject> Signature = MakeShared<FJsonObject>();
+					if (!SignatureGraph)
+					{
+						return FailNativeState(TEXT("blueprint_delegate_signature_graph_missing"),
+							TEXT("The Blueprint delegate has no native signature graph."),
+							TEXT("signature_graph"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Variable->VarName.ToString());
+					}
+					if (!CaptureDelegateSignatureGraph(*SignatureGraph, Signature, OutError))
+					{
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Blueprint);
+						if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Variable->VarName.ToString();
+						if (OutError.SourceKind.IsEmpty() && OutError.Source.SourceFile.IsEmpty()) OutError.SourceKind = TEXT("native_result");
+						return UeAgentAuthoringState::EReadOutcome::Failed;
+					}
+					State->SetObjectField(TEXT("signature"), Signature);
 				}
 				OutValue.Value = MakeShared<FJsonValueObject>(State);
 				return UeAgentAuthoringState::EReadOutcome::Resolved;
@@ -597,10 +953,12 @@ namespace UeAgentBlueprintAuthoring
 				const UActorComponent* Component = Cast<UActorComponent>(Request.RootObject);
 				if (!Component)
 				{
-					OutError = TEXT("blueprint_component_state_invalid");
-					return UeAgentAuthoringState::EReadOutcome::Failed;
+					return FailNativeState(TEXT("blueprint_component_state_invalid"), TEXT("Reading component state requires an ActorComponent root object."),
+						TEXT("root_object"), RootTypeValue(), MakeShared<FJsonValueString>(UActorComponent::StaticClass()->GetPathName()), Request.Context.FindRef(TEXT("component_name")));
 				}
 				TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
+				OutValue.bEditable = Request.Context.FindRef(TEXT("source")) != TEXT("inherited")
+					|| Request.Context.FindRef(TEXT("native_class_override")) == TEXT("true");
 				State->SetStringField(TEXT("name"), Request.Context.FindRef(TEXT("component_name")));
 				State->SetStringField(TEXT("class"), Component->GetClass()->GetPathName());
 				State->SetStringField(TEXT("parent"), Request.Context.FindRef(TEXT("parent_name")));
@@ -617,12 +975,47 @@ namespace UeAgentBlueprintAuthoring
 				const UEdGraph* Graph = Cast<UEdGraph>(Request.RootObject);
 				if (!Graph)
 				{
-					OutError = TEXT("blueprint_graph_state_invalid");
-					return UeAgentAuthoringState::EReadOutcome::Failed;
+					return FailNativeState(TEXT("blueprint_graph_state_invalid"),
+						FString::Printf(TEXT("Reading '%s' graph state requires a UEdGraph root object."), *Request.Context.FindRef(TEXT("graph_kind"))),
+						TEXT("root_object"), RootTypeValue(), MakeShared<FJsonValueString>(UEdGraph::StaticClass()->GetPathName()), Request.TargetIdentity.GetSelector(TEXT("graph_name")));
 				}
 				TSharedRef<FJsonObject> Header = MakeShared<FJsonObject>();
+				Header->SetStringField(TEXT("id"), GraphIdentity(*Graph));
+				Header->SetStringField(TEXT("graph_guid"), Graph->GraphGuid.ToString(EGuidFormats::DigitsWithHyphens));
 				Header->SetStringField(TEXT("name"), Graph->GetName());
 				Header->SetStringField(TEXT("graph_kind"), Request.Context.FindRef(TEXT("graph_kind")));
+				if (const UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(Graph))
+					AppendGraphDisplayState(*Blueprint, *Graph, *Header, Request.RootOwnerPath);
+				// Generic graph declarations are asset-owned; animation schemas retain their domain owner.
+				const FString GraphKind = Request.Context.FindRef(TEXT("graph_kind"));
+				Header->SetBoolField(TEXT("graph_declaration_owned"), Graph->GetSchema()
+					&& Graph->GetSchema()->GetClass() == UEdGraphSchema_K2::StaticClass()
+					&& (GraphKind == TEXT("event_graph") || GraphKind == TEXT("function_graph")
+						|| GraphKind == TEXT("macro_graph")));
+				if ((GraphKind == TEXT("function_graph")
+						&& CanAuthorFunctionGraphSignature(*Graph))
+					|| (GraphKind == TEXT("macro_graph")
+						&& CanAuthorMacroGraphSignature(*Graph)))
+				{
+					TSharedRef<FJsonObject> Signature = MakeShared<FJsonObject>();
+					const bool bCaptured = GraphKind == TEXT("function_graph")
+						? CaptureFunctionGraphSignature(*Graph, Signature, OutError)
+						: CaptureMacroGraphSignature(*Graph, Signature, OutError);
+					if (!bCaptured)
+					{
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+						if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Graph->GetName();
+						if (OutError.SourceKind.IsEmpty() && OutError.Source.SourceFile.IsEmpty()) OutError.SourceKind = TEXT("native_result");
+						return UeAgentAuthoringState::EReadOutcome::Failed;
+					}
+					Header->SetObjectField(TEXT("signature"), Signature);
+				}
+				if (Request.Context.FindRef(TEXT("native_generated_verification")) == TEXT("true")
+					&& IsNativeGeneratedGraph(*Graph))
+				{
+					Header->SetObjectField(TEXT("generated_program"), BuildGeneratedGraphVerificationState(
+						*Graph, Request.TargetIdentity.GetSelector(TEXT("asset_path"))));
+				}
 				TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
 				State->SetObjectField(TEXT("graph"), Header);
 				OutValue.Value = MakeShared<FJsonValueObject>(State);
@@ -634,19 +1027,93 @@ namespace UeAgentBlueprintAuthoring
 				const UEdGraphNode* Node = Cast<UEdGraphNode>(Request.RootObject);
 				if (!Node)
 				{
-					OutError = TEXT("blueprint_node_state_invalid");
-					return UeAgentAuthoringState::EReadOutcome::Failed;
+					return FailNativeState(TEXT("blueprint_node_state_invalid"), TEXT("Reading node state requires a UEdGraphNode root object."),
+						TEXT("root_object"), RootTypeValue(), MakeShared<FJsonValueString>(UEdGraphNode::StaticClass()->GetPathName()), FString());
 				}
-				OutValue.Value = MakeShared<FJsonValueObject>(BuildNodeState(*Node));
+				OutValue.Value = MakeShared<FJsonValueObject>(BuildNodeState(*Node,
+					Request.TargetIdentity.GetSelector(TEXT("asset_path"))));
 				return UeAgentAuthoringState::EReadOutcome::Resolved;
 			}
 
 			if (Request.SemanticId == PinDefaultSemanticId)
 			{
-				TSharedRef<FJsonObject> State = MakeShared<FJsonObject>();
-				State->SetStringField(TEXT("pin_name"), Request.Context.FindRef(TEXT("pin_name")));
-				State->SetStringField(TEXT("default_value"), Request.Context.FindRef(TEXT("default_value")));
-				OutValue.Value = MakeShared<FJsonValueObject>(State);
+				const UEdGraphNode* Node = Cast<UEdGraphNode>(Request.RootObject);
+				FGuid PinGuid;
+				const FString PinGuidText =
+					Request.TargetIdentity.GetSelector(TEXT("pin_guid"));
+				if (!Node || !FGuid::Parse(PinGuidText, PinGuid))
+				{
+					OutError = FDiagnostic::Failure(TEXT("blueprint_pin_default_identity_invalid"),
+						!Node ? TEXT("Reading a Blueprint pin default requires a graph node as the root object.")
+							: TEXT("The native pin selector is not a valid GUID."), TEXT("blueprint_state"), PinGuidText);
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+					OutError.PropertyPath = !Node ? TEXT("root_object") : TEXT("pin_identity");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return UeAgentAuthoringState::EReadOutcome::Failed;
+				}
+				const UEdGraphPin* Pin = nullptr;
+				for (const UEdGraphPin* Candidate : Node->Pins)
+				{
+					if (Candidate && Candidate->PinId == PinGuid)
+					{
+						Pin = Candidate;
+						break;
+					}
+				}
+				FString DefaultValue;
+				if (Pin)
+				{
+					DefaultValue = Pin->GetDefaultAsString();
+					if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Text)
+					{
+						const FString* Source = FTextInspector::GetSourceString(Pin->DefaultTextValue);
+						DefaultValue = Source ? *Source : Pin->DefaultTextValue.ToString();
+					}
+				}
+				TSharedPtr<FJsonObject> ValueDefinition;
+				const UBlueprint* OwnerBlueprint = FBlueprintEditorUtils::FindBlueprintForNode(Node);
+				const FString TargetPath = OwnerBlueprint ? UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*OwnerBlueprint)
+					: Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+				if (!Pin)
+				{
+					OutError = FDiagnostic::Failure(TEXT("blueprint_pin_default_not_found"),
+						TEXT("The selected native pin was not found on the graph node."), TEXT("blueprint_state"), PinGuidText);
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = TargetPath;
+					OutError.CandidateName = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
+					OutError.PropertyPath = TEXT("pin_present");
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return UeAgentAuthoringState::EReadOutcome::Failed;
+				}
+				if (!UeAgentBlueprintAuthoringOps::TryDescribePinDefault(
+						Pin->PinType, DefaultValue, OutValue.Type,
+						OutValue.Value, OutError, &ValueDefinition))
+				{
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetPath;
+					if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = TEXT("default_value");
+					if (!OutError.ActualEvidence.IsValid())
+					{
+						auto Facts = MakeShared<FJsonObject>();
+						Facts->SetStringField(TEXT("node"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+						Facts->SetStringField(TEXT("pin"), Pin->PinName.ToString());
+						Facts->SetObjectField(TEXT("pin_type"), UeAgentBlueprintAuthoringOps::BuildPinTypeJsonObject(Pin->PinType, OwnerBlueprint, TargetPath));
+						OutError.ActualEvidence = MakeShared<FJsonValueObject>(Facts);
+					}
+					if (Pin)
+					{
+						if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Pin->PinName.ToString();
+						OutError.InternalContext += FString::Printf(TEXT(":node=%s pin=%s type=%s/%s default='%s' linked=%d"),
+							*Node->GetName(), *Pin->PinName.ToString(),
+							*Pin->PinType.PinCategory.ToString(), *Pin->PinType.PinSubCategory.ToString(),
+							*DefaultValue, Pin->LinkedTo.Num());
+					}
+					return UeAgentAuthoringState::EReadOutcome::Failed;
+				}
+				if (ValueDefinition.IsValid())
+					OutValue.ValueDefinition = MakeShared<FJsonValueObject>(ValueDefinition);
 				return UeAgentAuthoringState::EReadOutcome::Resolved;
 			}
 
@@ -665,7 +1132,11 @@ namespace UeAgentBlueprintAuthoring
 				return UeAgentAuthoringState::EReadOutcome::Resolved;
 			}
 
-			OutError = TEXT("blueprint_state_semantic_unsupported:") + Request.SemanticId;
+			FailNativeState(TEXT("blueprint_state_semantic_unsupported"),
+				FString::Printf(TEXT("Blueprint state accessor '%s' does not support semantic '%s'."), *FString(StateAccessorId), *Request.SemanticId),
+				TEXT("semantic_id"), MakeShared<FJsonValueString>(Request.SemanticId),
+				MakeShared<FJsonValueString>(TEXT("a registered Blueprint state semantic")), FString());
+			OutError.Stage = TEXT("state_snapshot");
 			return UeAgentAuthoringState::EReadOutcome::Failed;
 		}
 
@@ -677,7 +1148,7 @@ namespace UeAgentBlueprintAuthoring
 			const TMap<FString, FString>& BaseSelectors,
 			const TSet<FName>& Excluded,
 			TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-			FString& OutError)
+			FDiagnostic& OutError)
 		{
 			if (!Object) return true;
 			UeAgentAuthoringState::FEditablePropertyReadOptions Options;
@@ -689,7 +1160,7 @@ namespace UeAgentBlueprintAuthoring
 				[ModelId, TargetKind, BaseSelectors](
 					const FString& PropertyPath,
 					UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
-					FString& IdentityError)
+					FDiagnostic& IdentityError)
 				{
 					TMap<FString, FString> Selectors = BaseSelectors;
 					Selectors.Add(TEXT("property_path"), PropertyPath);
@@ -704,7 +1175,7 @@ namespace UeAgentBlueprintAuthoring
 			const UeAgentAuthoringNativeDefaults::FRequest& Request,
 			UeAgentAuthoringNativeDefaults::FScratchScope& Scratch,
 			UeAgentAuthoringNativeDefaults::FProbeValue& OutValue,
-			FString& OutError)
+			FDiagnostic& OutError)
 		{
 			OutValue = UeAgentAuthoringNativeDefaults::FProbeValue();
 			OutError.Reset();
@@ -713,10 +1184,18 @@ namespace UeAgentBlueprintAuthoring
 				return UeAgentAuthoringNativeDefaults::EProbeOutcome::Unavailable;
 			}
 			UPackage* Package = Scratch.CreateScratchPackage(OutError);
-			if (!Package) return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
+			if (!Package)
+			{
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+				return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
+			}
 			UObject* Seed = CreateFactorySeed(
-				TEXT("actor_blueprint"), Package, NAME_None, RF_Transactional, OutError);
-			if (!Seed) return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
+				TEXT("actor_blueprint"), Package, NAME_None, RF_Transactional | RF_Transient, OutError);
+			if (!Seed)
+			{
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+				return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
+			}
 			OutValue.Value = MakeShared<FJsonValueObject>(
 				BuildAssetVerificationState(
 					*CastChecked<UBlueprint>(Seed),
@@ -730,7 +1209,15 @@ namespace UeAgentBlueprintAuthoring
 		const UEdGraphNode& Node,
 		FJsonObject& State)
 	{
-		const TSharedRef<FJsonObject> SemanticState = BuildNodeState(Node);
+		AppendGraphNodeSemanticState(Node, State, FString());
+	}
+
+	void AppendGraphNodeSemanticState(
+		const UEdGraphNode& Node,
+		FJsonObject& State,
+		const FString& CanonicalAssetPath)
+	{
+		const TSharedRef<FJsonObject> SemanticState = BuildNodeState(Node, CanonicalAssetPath);
 		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field
 			: SemanticState->Values)
 		{
@@ -742,6 +1229,20 @@ namespace UeAgentBlueprintAuthoring
 			}
 			State.SetField(Field.Key, Field.Value);
 		}
+		// Input identity is observable even when its native property is not
+		// editable. Keep this read-only query metadata outside workspace specs;
+		// creation continues to use the candidate's native action and select.
+		if (const UK2Node* K2Node = Cast<UK2Node>(&Node))
+		{
+			TMap<FString, FString> Fields;
+			UeAgentBlueprintInputBindings::Capture(*K2Node, Fields);
+			if (!Fields.IsEmpty())
+			{
+				auto Binding = MakeShared<FJsonObject>();
+				for (const auto& Field : Fields) Binding->SetStringField(Field.Key, Field.Value);
+				State.SetObjectField(TEXT("input_binding"), Binding);
+			}
+		}
 	}
 
 	UObject* CreateFactorySeed(
@@ -749,7 +1250,7 @@ namespace UeAgentBlueprintAuthoring
 		UObject* Outer,
 		const FName Name,
 		const EObjectFlags Flags,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		return CreateFactorySeed(
 			AssetKind, AActor::StaticClass(), Outer, Name, Flags, OutError);
@@ -761,20 +1262,34 @@ namespace UeAgentBlueprintAuthoring
 		UObject* Outer,
 		FName Name,
 		const EObjectFlags Flags,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		if (AssetKind != TEXT("blueprint") && AssetKind != TEXT("actor_blueprint"))
 		{
-			OutError = TEXT("blueprint_factory_kind_invalid:") + AssetKind;
+			OutError = FDiagnostic::Failure(TEXT("blueprint_factory_kind_invalid"),
+				FString::Printf(TEXT("Blueprint factory kind '%s' is not supported."), *AssetKind), TEXT("asset_factory"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("asset_kind");
+			OutError.ActualValue = MakeShared<FJsonValueString>(AssetKind);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("blueprint or actor_blueprint"));
 			return nullptr;
 		}
-		if (!Outer || !ParentClass
-			|| !FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass)
-			|| (AssetKind == TEXT("actor_blueprint")
-				&& !ParentClass->IsChildOf(AActor::StaticClass())))
+		const bool bCanCreate = Outer && ParentClass && FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass);
+		const bool bActorParent = !bCanCreate || AssetKind != TEXT("actor_blueprint") || ParentClass->IsChildOf(AActor::StaticClass());
+		if (!Outer || !ParentClass || !bCanCreate || !bActorParent)
 		{
-			OutError = TEXT("blueprint_factory_input_invalid");
+			OutError = FDiagnostic::Failure(TEXT("blueprint_factory_input_invalid"),
+				!Outer ? TEXT("The Blueprint factory has no outer object.")
+					: !ParentClass ? TEXT("The Blueprint factory has no parent class.")
+					: !bCanCreate ? TEXT("The native editor does not permit Blueprint creation from the supplied parent class.")
+					: TEXT("Actor Blueprint creation requires a parent class derived from AActor."), TEXT("blueprint_state"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = !Outer ? TEXT("outer") : TEXT("parent_class");
+			OutError.ActualValue = !Outer ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false))
+				: ParentClass ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(ParentClass->GetPathName())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>());
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(!Outer ? TEXT("an outer object")
+				: !bActorParent ? TEXT("a Blueprint-creatable AActor subclass") : TEXT("a parent class permitting Blueprint creation"));
 			return nullptr;
 		}
 		if (Name.IsNone()) Name = MakeUniqueObjectName(Outer, UBlueprint::StaticClass(), TEXT("BlueprintSeed"));
@@ -782,7 +1297,16 @@ namespace UeAgentBlueprintAuthoring
 		Factory->ParentClass = ParentClass;
 		UObject* Result = Factory->FactoryCreateNew(
 			UBlueprint::StaticClass(), Outer, Name, Flags, nullptr, GWarn);
-		if (!Result) OutError = TEXT("blueprint_factory_create_failed");
+		if (!Result)
+		{
+			OutError = FDiagnostic::Failure(TEXT("blueprint_factory_create_failed"),
+				FString::Printf(TEXT("The native Blueprint factory returned no object for kind '%s' with parent '%s'."), *AssetKind, *ParentClass->GetPathName()),
+				TEXT("blueprint_state"), FString::Printf(TEXT("outer=%s name=%s"), *Outer->GetPathName(), *Name.ToString()));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("factory_result");
+			OutError.ActualValue = MakeShared<FJsonValueNull>();
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(UBlueprint::StaticClass()->GetPathName());
+		}
 		return Result;
 	}
 
@@ -792,7 +1316,7 @@ namespace UeAgentBlueprintAuthoring
 		const FString& AssetKind,
 		const bool bExpectedAbsent,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		OutError.Reset();
 		if (CanonicalAssetPath.IsEmpty()
@@ -801,7 +1325,17 @@ namespace UeAgentBlueprintAuthoring
 				&& AssetKind != TEXT("blueprint")
 				&& AssetKind != TEXT("actor_blueprint")))
 		{
-			OutError = TEXT("blueprint_snapshot_identity_invalid");
+			OutError = FDiagnostic::Failure(TEXT("blueprint_snapshot_identity_invalid"),
+				CanonicalAssetPath.IsEmpty() ? TEXT("A Blueprint snapshot requires a non-empty canonical asset path.")
+					: !Asset && !bExpectedAbsent ? TEXT("The Blueprint snapshot requires a present asset unless absence is explicitly expected.")
+					: TEXT("The Blueprint snapshot asset kind must be empty, blueprint, or actor_blueprint."), TEXT("blueprint_state"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.TargetPath = CanonicalAssetPath;
+			OutError.PropertyPath = CanonicalAssetPath.IsEmpty() ? TEXT("asset_path") : !Asset && !bExpectedAbsent ? TEXT("asset_present") : TEXT("asset_kind");
+			OutError.ActualValue = CanonicalAssetPath.IsEmpty() ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(CanonicalAssetPath))
+				: !Asset && !bExpectedAbsent ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(AssetKind));
+			OutError.ExpectedValue = CanonicalAssetPath.IsEmpty() ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("a non-empty canonical asset path")))
+				: !Asset && !bExpectedAbsent ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true)) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("empty, blueprint, or actor_blueprint")));
 			return false;
 		}
 		UeAgentAuthoringState::FReadRequest Request;
@@ -825,14 +1359,105 @@ namespace UeAgentBlueprintAuthoring
 		return true;
 	}
 
-	static bool BuildBlueprintExportSnapshotReadRequests(
+	bool AppendBlueprintRootPropertyReadRequests(
+		UBlueprint& Blueprint,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+		FDiagnostic& OutError)
+	{
+		return AppendPropertyRequests(
+			&Blueprint,
+			TEXT("core.property"),
+			FString(),
+			FString(),
+			{},
+			{ TEXT("ParentClass"), TEXT("GeneratedClass"), TEXT("SkeletonGeneratedClass"),
+				TEXT("SimpleConstructionScript"), TEXT("UbergraphPages"), TEXT("FunctionGraphs"),
+				TEXT("MacroGraphs"), TEXT("DelegateSignatureGraphs"), TEXT("NewVariables") },
+			OutRequests,
+			OutError);
+	}
+
+	void GatherExportGraphs(const UBlueprint& Blueprint, TArray<UEdGraph*>& OutGraphs)
+	{
+		OutGraphs.Reset();
+		TSet<const UEdGraph*> Seen;
+		auto AppendTrees = [&](const auto& Roots)
+		{
+			for (UEdGraph* Root : Roots)
+			{
+				if (!Root) continue;
+				TArray<UEdGraph*> Tree;
+				Tree.Add(Root);
+				Root->GetAllChildrenGraphs(Tree);
+				for (UEdGraph* Graph : Tree)
+				{
+					if (Graph && !Seen.Contains(Graph))
+					{
+						Seen.Add(Graph);
+						OutGraphs.Add(Graph);
+					}
+				}
+			}
+		};
+		// Delegate signatures retain their member owner. Child graph bodies use
+		// the same capture as their existing event/function/macro roots.
+		AppendTrees(Blueprint.UbergraphPages);
+		AppendTrees(Blueprint.FunctionGraphs);
+		AppendTrees(Blueprint.MacroGraphs);
+	}
+
+	FString ExportGraphKind(const UBlueprint& Blueprint, const UEdGraph* Graph)
+	{
+		return GetGraphKind(Blueprint, Graph);
+	}
+
+	void AppendGraphDisplayState(const UBlueprint& Blueprint, const UEdGraph& Graph, FJsonObject& State,
+		const FString& CanonicalAssetPath)
+	{
+		TArray<UEdGraph*> Graphs;
+		Blueprint.GetAllGraphs(Graphs);
+		TSet<const UEdGraph*> NameMatches;
+		for (const UEdGraph* Candidate : Graphs)
+			if (Candidate && Candidate->GetName().Equals(Graph.GetName(), ESearchCase::IgnoreCase))
+				NameMatches.Add(Candidate);
+		if (NameMatches.Num() > 1)
+		{
+			const FString OwnerPath = CanonicalAssetPath.IsEmpty()
+				? Blueprint.GetPathName() : UeAgentAuthoringAssetIdentity::ToObjectPath(CanonicalAssetPath);
+			State.SetStringField(TEXT("query_name"), OwnerPath + TEXT(":") + Graph.GetPathName(&Blueprint));
+		}
+		if (const UEdGraphSchema* Schema = Graph.GetSchema())
+		{
+			FGraphDisplayInfo DisplayInfo;
+			Schema->GetGraphDisplayInformation(Graph, DisplayInfo);
+			const FString DisplayName = DisplayInfo.DisplayName.ToString();
+			if (!DisplayName.IsEmpty() && DisplayName != Graph.GetName())
+				State.SetStringField(TEXT("display_name"), DisplayName);
+		}
+		auto IsParent = [&](const UEdGraph* Parent)
+		{
+			return Parent && Parent->SubGraphs.ContainsByPredicate(
+				[&](const UEdGraph* Child) { return Child == &Graph; });
+		};
+		const UEdGraphNode* OuterNode = Cast<UEdGraphNode>(Graph.GetOuter());
+		const UEdGraph* Parent = OuterNode ? OuterNode->GetGraph() : nullptr;
+		if (!IsParent(Parent))
+		{
+			UEdGraph* const* Found = Graphs.FindByPredicate(IsParent);
+			Parent = Found ? *Found : nullptr;
+		}
+		if (Parent) State.SetStringField(TEXT("parent_graph"), Parent->GetName());
+	}
+
+	static bool BuildBlueprintContentReadRequests(
 		UBlueprint& BlueprintObject,
 		const bool bResetRequests,
 		const bool bIncludeAssetEnvelope,
 		const bool bIncludeActorComponents,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError,
-		const FString& CanonicalAssetPath)
+		FDiagnostic& OutError,
+		const FString& CanonicalAssetPath,
+		const bool bForVerification)
 	{
 		if (bResetRequests) OutRequests.Reset();
 		OutError.Reset();
@@ -874,15 +1499,8 @@ namespace UeAgentBlueprintAuthoring
 			}
 		}
 
-		if (bIncludeAssetEnvelope && !AppendPropertyRequests(
-			Blueprint,
-			TEXT("core.property"),
-			FString(),
-			FString(),
-			AssetSelectors,
-			{ TEXT("ParentClass"), TEXT("GeneratedClass"), TEXT("SkeletonGeneratedClass"),
-				TEXT("SimpleConstructionScript"), TEXT("UbergraphPages"), TEXT("FunctionGraphs"),
-				TEXT("MacroGraphs"), TEXT("DelegateSignatureGraphs"), TEXT("NewVariables") },
+		if (bIncludeAssetEnvelope && !AppendBlueprintRootPropertyReadRequests(
+			*Blueprint,
 			OutRequests,
 			OutError))
 		{
@@ -931,16 +1549,18 @@ namespace UeAgentBlueprintAuthoring
 
 		if (bIncludeActorComponents)
 		{
-		TSet<FString> SCSNames;
+		TArray<UeAgentBlueprintAuthoringOps::FInheritedComponent> InheritedComponents;
+		UeAgentBlueprintAuthoringOps::GatherInheritedComponents(*Blueprint, InheritedComponents);
+		TMap<UActorComponent*, FString> Inherited;
+		for (const auto& Entry : InheritedComponents) Inherited.Add(Entry.Component, Entry.Name);
 		if (USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript)
 		{
 			TMap<const USCS_Node*, FString> Parents;
-			for (USCS_Node* Root : SCS->GetRootNodes()) BuildSCSParentMap(Root, FString(), Parents);
+			for (USCS_Node* Root : SCS->GetRootNodes()) BuildSCSParentMap(*Blueprint, Root, FString(), Inherited, Parents);
 			for (USCS_Node* Node : SCS->GetAllNodes())
 			{
 				if (!Node || !Node->ComponentTemplate || !Node->ComponentClass) continue;
 				const FString Name = Node->GetVariableName().ToString();
-				SCSNames.Add(Name);
 				const TMap<FString, FString> Selectors = {
 					{ TEXT("asset_path"), AssetPath },
 					{ TEXT("component_guid"), GuidText(Node->VariableGuid) },
@@ -970,48 +1590,23 @@ namespace UeAgentBlueprintAuthoring
 			}
 		}
 
-		if (Blueprint->GeneratedClass)
 		{
-			UObject* CDO = Blueprint->GeneratedClass->GetDefaultObject(false);
-			TMap<UActorComponent*, FString> Inherited;
-			for (TFieldIterator<FObjectPropertyBase> It(Blueprint->GeneratedClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
+			for (const auto& Entry : InheritedComponents)
 			{
-				FObjectPropertyBase* Property = *It;
-				if (!Property || !Property->PropertyClass
-					|| !Property->PropertyClass->IsChildOf(UActorComponent::StaticClass()))
-				{
-					continue;
-				}
-				UActorComponent* Component = Cast<UActorComponent>(
-					Property->GetObjectPropertyValue_InContainer(CDO));
-				if (Component && !SCSNames.Contains(Property->GetName()))
-				{
-					Inherited.Add(Component, Property->GetName());
-				}
-			}
-			for (const TPair<UActorComponent*, FString>& Pair : Inherited)
-			{
-				UActorComponent* Component = Pair.Key;
-				FString ParentName;
-				if (const USceneComponent* Scene = Cast<USceneComponent>(Component))
-				{
-					if (const USceneComponent* Parent = Scene->GetAttachParent())
-					{
-						if (const FString* Found = Inherited.Find(const_cast<USceneComponent*>(Parent)))
-						{
-							ParentName = *Found;
-						}
-					}
-				}
-				const TMap<FString, FString> Selectors = {
+				UActorComponent* Component = Entry.Component;
+				TMap<FString, FString> Selectors = {
 					{ TEXT("asset_path"), AssetPath },
 					{ TEXT("component_kind"), Component->GetClass()->GetName() },
-					{ TEXT("component_name"), Pair.Value },
+					{ TEXT("component_name"), Entry.Name },
 				};
+				if (Entry.SourceNode && Entry.SourceNode->VariableGuid.IsValid())
+					Selectors.Add(TEXT("component_guid"), GuidText(Entry.SourceNode->VariableGuid));
 				const TMap<FString, FString> Context = {
-					{ TEXT("component_name"), Pair.Value },
-					{ TEXT("parent_name"), ParentName },
+					{ TEXT("component_name"), Entry.Name },
+					{ TEXT("parent_name"), Entry.ParentName },
 					{ TEXT("source"), TEXT("inherited") },
+					{ TEXT("native_class_override"), !Entry.SourceNode && Component->CreationMethod == EComponentCreationMethod::Native
+						&& GetAllowNativeComponentClassOverrides() ? TEXT("true") : TEXT("false") },
 				};
 				if (!AddReadRequest(
 					ComponentSemanticId, ComponentIdentityModelId, TEXT("blueprint_component"),
@@ -1033,25 +1628,32 @@ namespace UeAgentBlueprintAuthoring
 
 		}
 
-		auto AppendGraphs = [&](const auto& Graphs, const FString& Kind)
+		auto AppendGraphs = [&](const TArray<UEdGraph*>& Graphs)
 		{
 			for (UEdGraph* Graph : Graphs)
 			{
 				if (!Graph) continue;
+				const FString Kind = ExportGraphKind(*Blueprint, Graph);
 				const TMap<FString, FString> GraphSelectors = {
 					{ TEXT("asset_path"), AssetPath },
 					{ TEXT("graph_guid"), GuidText(Graph->GraphGuid) },
 					{ TEXT("graph_kind"), Kind },
 					{ TEXT("graph_name"), Graph->GetName() },
 				};
+				const bool bGeneratedProgram = bForVerification && IsNativeGeneratedGraph(*Graph);
+				TMap<FString, FString> GraphContext = { { TEXT("graph_kind"), Kind } };
+				if (bGeneratedProgram) GraphContext.Add(TEXT("native_generated_verification"), TEXT("true"));
 				if (!AddReadRequest(
 					GraphSemanticId, GraphIdentityModelId, TEXT("blueprint_graph"),
-					GraphSelectors, Graph, { { TEXT("graph_kind"), Kind } },
+					GraphSelectors, Graph, GraphContext,
 					OutRequests, OutError))
 				{
 					return false;
 				}
 
+				// The graph entry captures every generated node, pin and link by program order.
+				// Adding the ordinary child requests would also compare their transient GUIDs.
+				if (bGeneratedProgram) continue;
 				TMap<const UEdGraphNode*, FString> NodeRefs;
 				TMap<FString, int32> Occurrences;
 				for (UEdGraphNode* Node : Graph->Nodes)
@@ -1061,13 +1663,12 @@ namespace UeAgentBlueprintAuthoring
 				}
 				for (UEdGraphNode* Node : Graph->Nodes)
 				{
-					if (!Node || Node->IsAutomaticallyPlacedGhostNode()
-						|| !GetBuiltinNodeId(Node).IsEmpty())
+					if (!Node || Node->IsAutomaticallyPlacedGhostNode())
 					{
 						continue;
 					}
 					const FString NodeKind = GetNodeKind(Node);
-					const FString NodeName = GetNodeSemanticName(*Node);
+					const FString NodeName = NodeSemanticName(*Node);
 					const FString OccurrenceKey = NodeKind + TEXT(":") + NodeName;
 					const FString Occurrence = LexToString(Occurrences.FindOrAdd(OccurrenceKey)++);
 					TMap<FString, FString> NodeSelectors = GraphSelectors;
@@ -1077,8 +1678,14 @@ namespace UeAgentBlueprintAuthoring
 					NodeSelectors.Add(TEXT("node_occurrence"), Occurrence);
 					if (!AddReadRequest(
 						NodeSemanticId, NodeIdentityModelId, TEXT("blueprint_node"),
-						NodeSelectors, Node, {}, OutRequests, OutError)
-						|| !AppendPropertyRequests(
+						NodeSelectors, Node, {}, OutRequests, OutError))
+					{
+						return false;
+					}
+					// Signature-owned node properties stay with the graph signature.
+					// Per-node input defaults (including return values) still use the
+					// same native pin editability and default-value path as other nodes.
+					if (GetBuiltinNodeId(Node).IsEmpty() && !AppendPropertyRequests(
 							Node,
 							NodePropertySemanticId,
 							NodePropertyIdentityModelId,
@@ -1091,25 +1698,46 @@ namespace UeAgentBlueprintAuthoring
 						return false;
 					}
 
+					TMap<const UEdGraphPin*, FString> AliasByPin;
+					if (!TryBuildNodePinAliases(*Node, AliasByPin, OutError))
+					{
+						return false;
+					}
 					for (UEdGraphPin* Pin : Node->Pins)
 					{
-						if (!Pin || Pin->Direction != EGPD_Input || Pin->DefaultValue.IsEmpty()) continue;
+						if (!Pin || !CanAuthorPinDefault(*Pin)) continue;
 						TMap<FString, FString> PinSelectors = NodeSelectors;
 						const FString PinName = Pin->PinName.ToString();
 						const FString PinGuid = GuidText(Pin->PinId);
+						const int32 PinOccurrence = GetPinOccurrence(*Node, *Pin);
+						const FString PinAlias = AliasByPin.FindRef(Pin);
+						if (PinAlias.IsEmpty())
+						{
+							OutError = FDiagnostic::Failure(TEXT("graph_authoring_pin_alias_missing"),
+								FString::Printf(TEXT("Authorable pin '%s' occurrence %d on node '%s' has no generated alias."),
+									*PinName, PinOccurrence, *Node->GetNodeTitle(ENodeTitleType::ListView).ToString()),
+								TEXT("blueprint_state"), FString(), PinGuid);
+							OutError.SourceKind = TEXT("native_result");
+							OutError.TargetPath = AssetPath;
+							OutError.CandidateName = PinName;
+							OutError.PropertyPath = TEXT("pin_alias");
+							OutError.ActualValue = MakeShared<FJsonValueString>(PinAlias);
+							OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a non-empty generated pin alias"));
+							return false;
+						}
 						PinSelectors.Add(TEXT("pin_name"), PinName);
+						PinSelectors.Add(TEXT("pin_occurrence"), LexToString(PinOccurrence));
 						if (!PinGuid.IsEmpty()) PinSelectors.Add(TEXT("pin_guid"), PinGuid);
 						PinSelectors.Add(
 							TEXT("property_path"),
-							PinGuid.IsEmpty() ? TEXT("pin_default.") + PinName : TEXT("pin_default.") + PinGuid);
+							TEXT("pin_default.") + PinAlias);
 						if (!AddReadRequest(
 							PinDefaultSemanticId,
 							PinDefaultIdentityModelId,
 							TEXT("blueprint_pin_default"),
 							PinSelectors,
 							Node,
-							{ { TEXT("pin_name"), PinName },
-								{ TEXT("default_value"), Pin->DefaultValue } },
+							{},
 							OutRequests,
 							OutError))
 						{
@@ -1132,8 +1760,15 @@ namespace UeAgentBlueprintAuthoring
 								? NodeRefs.FindRef(Linked->GetOwningNode())
 								: FString();
 							if (ToNode.IsEmpty()) continue;
+							const int32 FromPinOccurrence = GetPinOccurrence(*Node, *Pin);
+							const UEdGraphNode* ToOwner = Linked->GetOwningNode();
+							const int32 ToPinOccurrence = ToOwner
+								? GetPinOccurrence(*ToOwner, *Linked)
+								: 0;
 							const FString EdgeKey = FromNode + TEXT("|") + Pin->PinName.ToString()
-								+ TEXT("|") + ToNode + TEXT("|") + Linked->PinName.ToString();
+								+ TEXT("|") + LexToString(FromPinOccurrence)
+								+ TEXT("|") + ToNode + TEXT("|") + Linked->PinName.ToString()
+								+ TEXT("|") + LexToString(ToPinOccurrence);
 							if (SeenEdges.Contains(EdgeKey)) continue;
 							SeenEdges.Add(EdgeKey);
 							TMap<FString, FString> EdgeSelectors = GraphSelectors;
@@ -1146,8 +1781,10 @@ namespace UeAgentBlueprintAuthoring
 								Graph,
 								{ { TEXT("from_node"), FromNode },
 									{ TEXT("from_pin"), Pin->PinName.ToString() },
+									{ TEXT("from_pin_occurrence"), LexToString(FromPinOccurrence) },
 									{ TEXT("to_node"), ToNode },
-									{ TEXT("to_pin"), Linked->PinName.ToString() } },
+									{ TEXT("to_pin"), Linked->PinName.ToString() },
+									{ TEXT("to_pin_occurrence"), LexToString(ToPinOccurrence) } },
 								OutRequests,
 								OutError))
 							{
@@ -1160,9 +1797,9 @@ namespace UeAgentBlueprintAuthoring
 			return true;
 		};
 
-		if (!AppendGraphs(Blueprint->UbergraphPages, TEXT("event_graph"))
-			|| !AppendGraphs(Blueprint->FunctionGraphs, TEXT("function_graph"))
-			|| !AppendGraphs(Blueprint->MacroGraphs, TEXT("macro_graph")))
+		TArray<UEdGraph*> ExportGraphs;
+		GatherExportGraphs(*Blueprint, ExportGraphs);
+		if (!AppendGraphs(ExportGraphs))
 		{
 			return false;
 		}
@@ -1172,32 +1809,49 @@ namespace UeAgentBlueprintAuthoring
 	bool BuildAssetExportSnapshotReadRequests(
 		UObject& Asset,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError)
+		FDiagnostic& OutError)
 	{
 		UBlueprint* Blueprint = Cast<UBlueprint>(&Asset);
 		if (!Blueprint || GetAssetKind(Blueprint).IsEmpty())
 		{
 			OutRequests.Reset();
-			OutError = TEXT("blueprint_export_asset_type_invalid");
+			OutError = FDiagnostic::Failure(TEXT("blueprint_export_asset_type_invalid"),
+				!Blueprint ? TEXT("Blueprint export requires a UBlueprint asset.") : TEXT("The loaded Blueprint has no supported Blueprint export kind."),
+				TEXT("blueprint_state"));
+			OutError.SourceKind = TEXT("native_result");
+			if (Blueprint) OutError.TargetPath = UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(*Blueprint);
+			OutError.PropertyPath = TEXT("asset_class");
+			OutError.ActualValue = MakeShared<FJsonValueString>(Asset.GetClass()->GetPathName());
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a Blueprint or Actor Blueprint asset"));
 			return false;
 		}
 		const bool bIncludeActorComponents = Blueprint->ParentClass
 			&& Blueprint->ParentClass->IsChildOf(AActor::StaticClass());
-		return BuildBlueprintExportSnapshotReadRequests(
-			*Blueprint, true, true, bIncludeActorComponents, OutRequests, OutError, FString());
+		return BuildBlueprintContentReadRequests(
+			*Blueprint, true, true, bIncludeActorComponents, OutRequests, OutError, FString(), false);
 	}
 
 	bool AppendReusableBlueprintExportSnapshotReadRequests(
 		UBlueprint& Blueprint,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError,
+		FDiagnostic& OutError,
 		const FString& CanonicalAssetPath)
 	{
-		return BuildBlueprintExportSnapshotReadRequests(
-			Blueprint, false, false, false, OutRequests, OutError, CanonicalAssetPath);
+		return BuildBlueprintContentReadRequests(
+			Blueprint, false, false, false, OutRequests, OutError, CanonicalAssetPath, false);
 	}
 
-	bool RegisterStateAccessor(FString& OutError)
+	bool AppendReusableBlueprintVerificationReadRequests(
+		UBlueprint& Blueprint,
+		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
+		FDiagnostic& OutError,
+		const FString& CanonicalAssetPath)
+	{
+		return BuildBlueprintContentReadRequests(
+			Blueprint, false, false, false, OutRequests, OutError, CanonicalAssetPath, true);
+	}
+
+	bool RegisterStateAccessor(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentAuthoringState::FStateAccessorDescriptor Descriptor;
 		Descriptor.AccessorId = StateAccessorId;
@@ -1214,7 +1868,7 @@ namespace UeAgentBlueprintAuthoring
 			Descriptor, ReadState, Result, OutError);
 	}
 
-	bool RegisterNativeDefaultProvider(FString& OutError)
+	bool RegisterNativeDefaultProvider(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentAuthoringNativeDefaults::FProviderDescriptor Descriptor;
 		Descriptor.ProviderId = FactoryDefaultProviderId;

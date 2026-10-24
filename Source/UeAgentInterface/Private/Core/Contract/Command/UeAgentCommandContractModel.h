@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UE::UAI::CommandRegistry
@@ -41,6 +43,17 @@ namespace UE::UAI::CommandContract
 		FString Description;
 	};
 
+	/**
+	 * One short model-facing field selected from the lossless command payload.
+	 * SourcePath is an exact sequence of object keys, not a dotted string, so
+	 * neither the manifest consumer nor the model has to parse identities.
+	 */
+	struct UEAGENTINTERFACE_API FUeAgentModelResultFieldDeclaration final
+	{
+		FString Name;
+		TArray<FString> SourcePath;
+	};
+
 	struct UEAGENTINTERFACE_API FUeAgentCommandPurposeDeclaration final
 	{
 		FString Summary;
@@ -80,7 +93,7 @@ namespace UE::UAI::CommandContract
 	UEAGENTINTERFACE_API bool TryBuildCommandVariantRequestSchema(
 		const TArray<FUeAgentCommandVariantRequestFieldDeclaration>& Fields,
 		FString& OutSchemaJson,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	struct UEAGENTINTERFACE_API FUeAgentCommandDeclaration final
 	{
@@ -96,6 +109,7 @@ namespace UE::UAI::CommandContract
 		TArray<FString> StateLayers;
 		TArray<FUeAgentCommandFieldDeclaration> InputFields;
 		TArray<FUeAgentCommandFieldDeclaration> ResultFields;
+		TArray<FUeAgentModelResultFieldDeclaration> ModelResultFields;
 		TArray<FUeAgentCommandErrorDeclaration> Errors;
 		FUeAgentCommandPurposeDeclaration Purpose;
 		TArray<FUeAgentCommandVariantDeclaration> Variants;
@@ -130,6 +144,8 @@ namespace UE::UAI::CommandContract
 		GetInputFields() const;
 		const TArray<FUeAgentCommandFieldDeclaration>&
 		GetResultFields() const;
+		const TArray<FUeAgentModelResultFieldDeclaration>&
+		GetModelResultFields() const;
 		const TArray<FUeAgentCommandErrorDeclaration>& GetErrors() const;
 		const FUeAgentCommandPurposeDeclaration& GetPurpose() const;
 		const TArray<FUeAgentCommandVariantDeclaration>& GetVariants() const;

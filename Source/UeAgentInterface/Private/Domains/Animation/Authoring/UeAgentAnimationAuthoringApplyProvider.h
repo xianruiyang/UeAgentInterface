@@ -6,6 +6,7 @@
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDescriptors.h"
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDocuments.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
 
 class FJsonObject;
 class FJsonValue;
@@ -13,6 +14,7 @@ class UObject;
 
 namespace UeAgentAuthoringOperationApply {
 class IApplyProvider;
+class IDurablePackageStager;
 }
 
 namespace UeAgentAnimationAuthoring {
@@ -24,15 +26,18 @@ struct UEAGENTINTERFACE_API FAssetApplyRequest {
   FString SourceAssetPath;
   TArray<TSharedPtr<FJsonValue>> Properties;
   TSharedPtr<FJsonObject> Document;
+  TSharedPtr<FJsonObject> BlueprintSurfaces;
+  TSharedPtr<UeAgentAuthoringOperationApply::IDurablePackageStager> PackageStager;
   bool bCompile = true;
   bool bSave = false;
+  TFunction<bool(UeAgentAuthoringWorkspaceTransaction::FOperationFailure &)>
+      FinalReadback;
 };
 
 struct UEAGENTINTERFACE_API FAssetApplyResult {
   FString Status;
   FString Phase;
-  FString ErrorCode;
-  FString ErrorDetail;
+  UE::UAI::Contract::FDiagnostic Diagnostic;
   FString ResolvedOperation;
   FString AssetPath;
   FString ObjectPath;
@@ -49,8 +54,7 @@ struct UEAGENTINTERFACE_API FAssetApplyResult {
 
 struct UEAGENTINTERFACE_API FWorkspaceInspectResult {
   FString Status;
-  FString ErrorCode;
-  FString ErrorDetail;
+  UE::UAI::Contract::FDiagnostic Diagnostic;
   FString AssetPath;
   FString RequestedOperation;
   FMutationStats PlannedStats;
@@ -63,7 +67,7 @@ struct UEAGENTINTERFACE_API FWorkspaceInspectResult {
   TSharedRef<FJsonObject> ToJsonObject() const;
 };
 
-UEAGENTINTERFACE_API bool RegisterApplyContracts(FString &OutError);
+UEAGENTINTERFACE_API bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
 UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider>
 MakeApplyProvider();
 UEAGENTINTERFACE_API bool ApplyAsset(const FAssetApplyRequest &Request,

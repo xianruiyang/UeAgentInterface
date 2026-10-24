@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "DomainAdapters/ExternalImport/Factory/UeAgentFactoryExternalImportProvider.h"
 #include "Templates/SharedPointer.h"
@@ -19,6 +21,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 				EFactoryExternalImportKind::Texture;
 
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 	};
 
 	UEAGENTINTERFACE_API const TArray<
@@ -41,15 +44,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 		FString PayloadJson;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentFactoryExternalImportCommandError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-		FString TerminalStatus = TEXT("rejected");
-		bool bMutationStarted = false;
-		bool bRetrySafe = true;
-	};
+	using FUeAgentFactoryExternalImportCommandError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentFactoryExternalImportCommandService
 	{
@@ -65,7 +60,7 @@ namespace UE::UAI::OperationOwners::ExternalImport::Factory
 	UEAGENTINTERFACE_API bool
 	TryCreateProductionFactoryExternalImportCommandService(
 		TSharedPtr<IUeAgentFactoryExternalImportCommandService>& OutService,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	namespace TestHooks
 	{

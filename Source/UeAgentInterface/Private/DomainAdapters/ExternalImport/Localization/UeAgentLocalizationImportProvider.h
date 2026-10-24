@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -37,14 +39,7 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 		bool bRefreshCompleted = false;
 	};
 
-	struct UEAGENTINTERFACE_API FLocalizationImportError final
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsPresent() const { return !Code.IsEmpty(); }
-	};
+	using FLocalizationImportError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API ILocalizationImportSession
 	{
@@ -82,5 +77,5 @@ namespace UE::UAI::DomainAdapters::ExternalImport::Localization
 
 	UEAGENTINTERFACE_API bool TryCreateLocalizationImportProvider(
 		TSharedPtr<ILocalizationImportProvider>& OutProvider,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

@@ -94,9 +94,7 @@ namespace
 		const TSharedPtr<FJsonObject>& Fixture)
 	{
 		const TSharedPtr<FJsonObject> Row =
-			Fixture->GetObjectField(TEXT("payload_codec"))
-				->GetObjectField(TEXT("catalog_search_request"))
-				->GetObjectField(TEXT("session"));
+			Fixture->GetObjectField(TEXT("session"));
 		return FUeAgentQuerySessionIdentity(
 			Row->GetStringField(TEXT("server_session_id")),
 			static_cast<int64>(
@@ -173,31 +171,7 @@ namespace
 	static FUeAgentResourceTracker MakeTracker(
 		const TSharedPtr<FJsonObject>& Fixture)
 	{
-		const TSharedPtr<FJsonObject> Budget =
-			Fixture->GetObjectField(TEXT("resource_budget"));
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes,
-				static_cast<int64>(
-					Budget->GetNumberField(TEXT("string_bytes")))},
-			{EUeAgentResourceDimension::OutputBytes,
-				static_cast<int64>(
-					Budget->GetNumberField(TEXT("string_bytes")))},
-			{EUeAgentResourceDimension::Nodes,
-				static_cast<int64>(
-					Budget->GetNumberField(TEXT("nodes")))},
-			{EUeAgentResourceDimension::Items,
-				static_cast<int64>(
-					Budget->GetNumberField(TEXT("items")))},
-			{EUeAgentResourceDimension::StringBytes,
-				static_cast<int64>(
-					Budget->GetNumberField(TEXT("string_bytes")))},
-			{EUeAgentResourceDimension::WorkUnits,
-				static_cast<int64>(
-					Budget->GetNumberField(TEXT("work_units")))},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes,
-				static_cast<int64>(
-					Budget->GetNumberField(TEXT("estimated_memory_bytes")))},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FUeAgentProjectionRequest FixtureProjection(
@@ -211,12 +185,6 @@ namespace
 				Row->GetBoolField(TEXT("include_defaults")),
 				Row->GetBoolField(TEXT("include_details")),
 				Row->GetBoolField(TEXT("include_provenance"))),
-			FUeAgentPageRequest(
-				static_cast<int32>(
-					Row->GetNumberField(TEXT("max_items"))),
-				TEXT("")),
-			TOptional<int64>(static_cast<int64>(
-				Row->GetNumberField(TEXT("token_budget")))),
 			{},
 			{});
 	}
@@ -313,6 +281,146 @@ namespace
 				Resources,
 				Snapshot,
 				StateError));
+		return Snapshot;
+	}
+
+	static FUeAgentCanonicalValueRef CanonicalString(
+		const FString& Text,
+		FUeAgentResourceTracker& Resources)
+	{
+		FUeAgentCanonicalValuePtr Value;
+		FUeAgentStateSemanticError Error;
+		check(FUeAgentCanonicalValue::TryString(
+			Text,
+			Resources,
+			Value,
+			Error));
+		return Value.ToSharedRef();
+	}
+
+	static FUeAgentCanonicalValueRef CanonicalArray(
+		TArray<FUeAgentCanonicalValueRef> Items,
+		FUeAgentResourceTracker& Resources)
+	{
+		FUeAgentCanonicalValuePtr Value;
+		FUeAgentStateSemanticError Error;
+		check(FUeAgentCanonicalValue::TryArray(
+			Items,
+			Resources,
+			Value,
+			Error));
+		return Value.ToSharedRef();
+	}
+
+	static FUeAgentCanonicalValueRef CanonicalObject(
+		TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items,
+		FUeAgentResourceTracker& Resources)
+	{
+		FUeAgentCanonicalValuePtr Value;
+		FUeAgentStateSemanticError Error;
+		check(FUeAgentCanonicalValue::TryObject(
+			Items,
+			Resources,
+			Value,
+			Error));
+		return Value.ToSharedRef();
+	}
+
+	static TSharedPtr<const FUeAgentCanonicalSnapshot>
+		NestedProjectionFixtureSnapshot(
+			FAutomationTestBase* Test,
+			FUeAgentResourceTracker& Resources,
+			const FString& NativeObservationJson = FString())
+	{
+		const FUeAgentCanonicalValueRef Keys = CanonicalArray({
+			CanonicalString(TEXT("10"), Resources),
+			CanonicalString(TEXT("20"), Resources)}, Resources);
+		const FUeAgentCanonicalValueRef Section = CanonicalObject({
+			{TEXT("section_ref"), CanonicalString(TEXT("section:0"), Resources)},
+			{TEXT("section_type"), CanonicalString(TEXT("FloatSection"), Resources)},
+			{TEXT("key_count"), CanonicalString(TEXT("2"), Resources)},
+			{TEXT("keys"), Keys},
+			{TEXT("native_evidence"), CanonicalString(TEXT("machine-only"), Resources)}},
+			Resources);
+		const FUeAgentCanonicalValueRef Track = CanonicalObject({
+			{TEXT("track_ref"), CanonicalString(TEXT("track:0"), Resources)},
+			{TEXT("track_type"), CanonicalString(TEXT("FloatTrack"), Resources)},
+			{TEXT("section_count"), CanonicalString(TEXT("1"), Resources)},
+			{TEXT("sections"), CanonicalArray({Section}, Resources)},
+			{TEXT("object_path"), CanonicalString(TEXT("machine-only"), Resources)}},
+			Resources);
+		const FUeAgentCanonicalValueRef FirstBinding = CanonicalObject({
+			{TEXT("binding_ref"), CanonicalString(TEXT("binding:0"), Resources)},
+			{TEXT("name"), CanonicalString(TEXT("First"), Resources)},
+			{TEXT("track_count"), CanonicalString(TEXT("1"), Resources)},
+			{TEXT("tracks"), CanonicalArray({Track}, Resources)},
+			{TEXT("revision"), CanonicalString(TEXT("machine-only"), Resources)}},
+			Resources);
+		const FUeAgentCanonicalValueRef SecondBinding = CanonicalObject({
+			{TEXT("binding_ref"), CanonicalString(TEXT("binding:1"), Resources)},
+			{TEXT("name"), CanonicalString(TEXT("Second"), Resources)},
+			{TEXT("track_count"), CanonicalString(TEXT("0"), Resources)},
+			{TEXT("tracks"), CanonicalArray({}, Resources)}},
+			Resources);
+		const FUeAgentCanonicalValueRef Structure = CanonicalObject({
+			{TEXT("display_rate"), CanonicalObject({
+				{TEXT("numerator"), CanonicalString(TEXT("30"), Resources)},
+				{TEXT("denominator"), CanonicalString(TEXT("1"), Resources)},
+				{TEXT("private_rate"), CanonicalString(TEXT("machine-only"), Resources)}},
+				Resources)},
+			{TEXT("bindings"), CanonicalArray(
+				{FirstBinding, SecondBinding}, Resources)},
+			{TEXT("root_tracks"), CanonicalArray({}, Resources)},
+			{TEXT("internal_state"), CanonicalString(TEXT("machine-only"), Resources)}},
+			Resources);
+		const FUeAgentStateRevision Revision(TEXT("fixture"), TEXT("1"), 1);
+		const bool bNativeObservation = !NativeObservationJson.IsEmpty();
+		const FUeAgentCanonicalValueRef EntryValue = bNativeObservation
+			? CanonicalString(NativeObservationJson, Resources) : Structure;
+		const FUeAgentStateEntry Entry(
+			FUeAgentCanonicalIdentity(
+				TEXT("fixture.nested.structure"),
+				TEXT("fixture"),
+				TEXT("fixture-owner"),
+				bNativeObservation ? TEXT("observation_json") : TEXT("structure"),
+				TEXT("fixture.structure"),
+				TEXT("1")),
+			FUeAgentCanonicalType(
+				TEXT("fixture.nested.structure"),
+				bNativeObservation ? EUeAgentValueKind::String : EUeAgentValueKind::Object,
+				false,
+				bNativeObservation ? TEXT("scalar") : TEXT("object")),
+			EntryValue,
+			FUeAgentDefaultValue(
+				EUeAgentDefaultSourceKind::Factory,
+				TEXT("fixture"),
+				TEXT("fixture"),
+				EntryValue),
+			FUeAgentStateDetails(
+				TEXT("Nested fixture"),
+				TEXT("Nested public projection fixture"),
+				{TEXT("Fixture")},
+				false,
+				TEXT("available"),
+				{}),
+			Revision);
+		TSharedPtr<const FUeAgentCanonicalSnapshot> Snapshot;
+		FUeAgentStateSemanticError Error;
+		Test->TestTrue(
+			TEXT("create nested public projection snapshot"),
+			FUeAgentCanonicalSnapshot::TryCreate(
+				TEXT("fixture-nested-projection"),
+				EUeAgentStatePlane::AuthoringMemory,
+				Revision,
+				FUeAgentTemporalPoint(TEXT("fixture-clock"), TEXT("1")),
+				FUeAgentStateProvenance(
+					TEXT("independent_readback"),
+					TEXT("fixture"),
+					TEXT("fixture")),
+				{Entry},
+				Resources,
+				Snapshot,
+				Error));
 		return Snapshot;
 	}
 
@@ -627,175 +735,12 @@ bool FUeAgentQueryBindingCppPublicContractTest::RunTest(
 			TEXT("cancel_before_query"),
 			TEXT("typed_error_propagation"),
 			TEXT("typed_projection_error_propagation"),
-			TEXT("query_payload_codec_conformance"),
 		})
 	{
 		TestTrue(
 			*FString::Printf(TEXT("fixture owns %s"), *Required),
 			Cases.Contains(Required));
 	}
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentQueryBindingCppPayloadCodecTest,
-	"UeAgentInterface.Core.BindingGateway.Query.PayloadCodec",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentQueryBindingCppPayloadCodecTest::RunTest(
-	const FString& Parameters)
-{
-	const TSharedPtr<FJsonObject> Fixture = LoadFixture(this);
-	if (!Fixture.IsValid())
-	{
-		return false;
-	}
-	const TSharedPtr<FJsonObject> CodecFixture =
-		Fixture->GetObjectField(TEXT("payload_codec"));
-	TestEqual(
-		TEXT("C3Q payload codec schema"),
-		CodecFixture->GetStringField(TEXT("schema")),
-		FString(TEXT("uai.c3q.query_payload.v1")));
-
-	const FString WireText = JsonObjectText(
-		CodecFixture->GetObjectField(TEXT("catalog_search_request")));
-	FUeAgentResourceTracker Resources = MakeTracker(Fixture);
-	TOptional<FUeAgentQueryBindingPayload> Payload;
-	FUeAgentQueryBindingError Error;
-	TestTrue(
-		TEXT("decode protocol-neutral payload into typed C3Q query"),
-		FUeAgentQueryPayloadCodec::TryDecode(
-			FUeAgentContractValue(WireText),
-			Resources,
-			Payload,
-			Error));
-	TestTrue(TEXT("typed payload returned"), Payload.IsSet());
-	TestEqual(
-		TEXT("payload kind"),
-		Payload->GetKind(),
-		EUeAgentQueryBindingPayloadKind::CatalogSearch);
-	TestEqual(
-		TEXT("typed search catalog kind"),
-		Payload->GetCatalogSearch()->GetQuery().GetCatalogKind(),
-		FString(TEXT("fixture_asset")));
-	TestEqual(
-		TEXT("typed search session"),
-		Payload->GetCatalogSearch()->GetSession().GetServerSessionId(),
-		FString(TEXT("fixture-server-session-17")));
-
-	FUeAgentContractValue Encoded(TEXT("{}"));
-	TestTrue(
-		TEXT("typed C3Q query returns to the same domain payload schema"),
-		FUeAgentQueryPayloadCodec::TryEncode(
-			Payload.GetValue(),
-			Resources,
-			Encoded,
-			Error));
-	TSharedPtr<FJsonObject> RoundTrip;
-	const TSharedRef<TJsonReader<>> Reader =
-		TJsonReaderFactory<>::Create(Encoded.GetJsonValue());
-	TestTrue(
-		TEXT("encoded C3Q payload is an object"),
-		FJsonSerializer::Deserialize(Reader, RoundTrip)
-			&& RoundTrip.IsValid());
-	TestEqual(
-		TEXT("round-trip discriminant"),
-		RoundTrip->GetStringField(TEXT("query_kind")),
-		FString(TEXT("catalog_search")));
-
-	FUeAgentResourceTracker CatalogResources = MakeTracker(Fixture);
-	const TSharedPtr<const FUeAgentCatalogSnapshot> Catalog =
-		FixtureCatalog(this, Fixture, CatalogResources);
-	const FUeAgentQueryBindingPayload ResolvePayload(
-		FUeAgentCatalogResolveQuery(
-			FixtureSession(Fixture),
-			Catalog.ToSharedRef(),
-			Catalog->GetCandidates()[0].GetIdentity().GetCanonicalKey(),
-			FixtureProjection(Fixture)));
-	FUeAgentContractValue EncodedResolve(TEXT("{}"));
-	TestTrue(
-		TEXT("encode typed exact resolve payload"),
-		FUeAgentQueryPayloadCodec::TryEncode(
-			ResolvePayload,
-			Resources,
-			EncodedResolve,
-			Error));
-	TOptional<FUeAgentQueryBindingPayload> DecodedResolve;
-	TestTrue(
-		TEXT("decode exact resolve payload through the same C3Q codec"),
-		FUeAgentQueryPayloadCodec::TryDecode(
-			EncodedResolve,
-			Resources,
-			DecodedResolve,
-			Error));
-	TestTrue(TEXT("typed exact resolve returned"), DecodedResolve.IsSet());
-	TestEqual(
-		TEXT("exact resolve round-trip kind"),
-		DecodedResolve->GetKind(),
-		EUeAgentQueryBindingPayloadKind::CatalogResolve);
-	TestEqual(
-		TEXT("exact resolve candidate survives round trip"),
-		DecodedResolve->GetCatalogResolve()->GetCandidateId(),
-		ResolvePayload.GetCatalogResolve()->GetCandidateId());
-
-	const FUeAgentCandidateBinding Candidate = FixtureBinding(Fixture);
-	TSharedPtr<const FUeAgentQueryTicketService> TicketService;
-	TestTrue(
-		TEXT("create codec ticket service"),
-		FUeAgentQueryTicketService::TryCreate(
-			TEXT("fixture-query-ticket-integrity-key"),
-			30.0,
-			[]() { return 100.0; },
-			[]() { return FString(TEXT("fixture-codec-ticket")); },
-			TicketService,
-			Error));
-	TOptional<FUeAgentQueryTicket> Ticket;
-	TestTrue(
-		TEXT("issue codec state-read ticket"),
-		TicketService->TryIssue(
-			Candidate,
-			FixtureCandidateDescriptor(),
-			FixtureSession(Fixture),
-			FixtureCaller(),
-			{},
-			Ticket,
-			Error));
-	const FUeAgentQueryBindingPayload StatePayload(
-		FUeAgentStateReadQuery(
-			FixtureSession(Fixture),
-			Ticket.GetValue(),
-			Candidate,
-			EUeAgentStatePlane::AuthoringMemory,
-			FixtureProjection(Fixture)));
-	FUeAgentContractValue EncodedState(TEXT("{}"));
-	TestTrue(
-		TEXT("encode typed state-read payload"),
-		FUeAgentQueryPayloadCodec::TryEncode(
-			StatePayload,
-			Resources,
-			EncodedState,
-			Error));
-	TOptional<FUeAgentQueryBindingPayload> DecodedState;
-	TestTrue(
-		TEXT("decode state-read payload through the same C3Q codec"),
-		FUeAgentQueryPayloadCodec::TryDecode(
-			EncodedState,
-			Resources,
-			DecodedState,
-			Error));
-	TestTrue(TEXT("typed state-read returned"), DecodedState.IsSet());
-	TestEqual(
-		TEXT("state-read round-trip kind"),
-		DecodedState->GetKind(),
-		EUeAgentQueryBindingPayloadKind::StateRead);
-	TestEqual(
-		TEXT("state-read binding survives round trip"),
-		DecodedState->GetStateRead()->GetBinding().GetBindingId(),
-		Candidate.GetBindingId());
-	TestEqual(
-		TEXT("state-read ticket survives round trip"),
-		DecodedState->GetStateRead()->GetTicket().GetTicketId(),
-		Ticket->GetTicketId());
 	return true;
 }
 
@@ -956,12 +901,6 @@ bool FUeAgentQueryBindingCppTypedBoundaryTest::RunTest(
 				Projection->GetBoolField(TEXT("include_defaults")),
 				Projection->GetBoolField(TEXT("include_details")),
 				Projection->GetBoolField(TEXT("include_provenance"))),
-			FUeAgentPageRequest(
-				static_cast<int32>(
-					Projection->GetNumberField(TEXT("max_items"))),
-				TEXT("")),
-			static_cast<int64>(
-				Projection->GetNumberField(TEXT("token_budget"))),
 			{},
 			{}));
 	const FUeAgentQueryBindingPayload Payload(TypedSearch);
@@ -1072,10 +1011,9 @@ bool FUeAgentQueryBindingCppCatalogFlowsTest::RunTest(
 		TEXT("encoded response contains projection"),
 		ResponseObject->HasTypedField<EJson::Object>(
 			TEXT("projection")));
-	TestTrue(
-		TEXT("encoded broad response contains explicit null ticket"),
-		ResponseObject->HasTypedField<EJson::Null>(
-			TEXT("ticket")));
+	TestFalse(
+		TEXT("encoded broad response omits an unavailable ticket"),
+		ResponseObject->HasField(TEXT("ticket")));
 	TestEqual(
 		TEXT("one search only"),
 		Graph->CatalogSource->SearchCalls,
@@ -1194,8 +1132,6 @@ bool FUeAgentQueryBindingCppStateAndGuardsTest::RunTest(
 						true,
 						true,
 						true),
-					FUeAgentPageRequest(25, TEXT("")),
-					TOptional<int64>(512),
 					{},
 					{}))));
 	const FUeAgentMonotonicClock Clock = []() { return 100.0; };
@@ -1253,6 +1189,11 @@ bool FUeAgentQueryBindingCppStateAndGuardsTest::RunTest(
 			Resources,
 			EncodedResponse,
 			Error));
+	TestTrue(
+		*FString::Printf(
+			TEXT("full projected fixture stays within bounded character budget (chars=%d)"),
+			EncodedResponse.GetJsonValue().Len()),
+		EncodedResponse.GetJsonValue().Len() <= 8192);
 	TSharedPtr<FJsonObject> ResponseObject;
 	const TSharedRef<TJsonReader<>> ResponseReader =
 		TJsonReaderFactory<>::Create(EncodedResponse.GetJsonValue());
@@ -1262,11 +1203,577 @@ bool FUeAgentQueryBindingCppStateAndGuardsTest::RunTest(
 			ResponseReader,
 			ResponseObject)
 			&& ResponseObject.IsValid());
+	FUeAgentContractValue PublicResponse(TEXT("{}"));
+	const FQueryPublicProjectionDescriptor* ContentGraphProjection =
+		FindQueryPublicProjectionDescriptor(TEXT("content_graph_entries"));
+	TestNotNull(
+		TEXT("content graph public projection descriptor is registered"),
+		ContentGraphProjection);
+	TestNull(
+		TEXT("unknown public projection descriptor fails closed"),
+		FindQueryPublicProjectionDescriptor(
+			TEXT("unknown_public_projection")));
+	for (const FString& CommandId : {
+		TEXT("graph.view.read"),
+		TEXT("viewport.ray.deproject"),
+		TEXT("viewport.ray.trace"),
+		TEXT("viewport.actor.pick"),
+		TEXT("viewport.pixel_scale.read"),
+		TEXT("viewport.state.read"),
+		TEXT("viewport.warning.list"),
+		TEXT("viewport.view_mode.list"),
+		TEXT("viewport.instance.list"),
+		TEXT("timeline.sequence.read")})
+	{
+		TestNotNull(
+			TEXT("TimelineSpatial query has an explicit public projection: ")
+				+ CommandId,
+			FindQueryPublicProjectionDescriptorForCommand(CommandId));
+	}
+	const FQueryPublicProjectionDescriptor* ViewModeProjection =
+		FindQueryPublicProjectionDescriptorForCommand(
+			TEXT("viewport.view_mode.list"));
+	const FQueryPublicProjectionDescriptor* InstanceProjection =
+		FindQueryPublicProjectionDescriptorForCommand(
+			TEXT("viewport.instance.list"));
+	if (ViewModeProjection && InstanceProjection && ContentGraphProjection)
+	{
+		TestEqual(
+			TEXT("single-record public projection pages complete records"),
+			QueryPublicProjectionPageUnit(*ViewModeProjection),
+			EUeAgentProjectionPageUnit::SingleRecord);
+		TestEqual(
+			TEXT("snapshot record arrays page by owner record"),
+			QueryPublicProjectionPageUnit(*InstanceProjection),
+			EUeAgentProjectionPageUnit::OwnerRecord);
+		TestEqual(
+			TEXT("legacy snapshot entries retain entry paging"),
+			QueryPublicProjectionPageUnit(*ContentGraphProjection),
+			EUeAgentProjectionPageUnit::Entry);
+	}
+	if (!ContentGraphProjection)
+	{
+		return false;
+	}
+	TestTrue(
+		TEXT("public content graph response uses the direct business projection"),
+		FUeAgentQueryPayloadCodec::TryEncodePublic(
+			*ContentGraphProjection,
+			TEXT("content_graph.structure"),
+			TEXT("content_graph.structure"),
+			true,
+			Result->GetValue(),
+			Resources,
+			PublicResponse,
+			Error));
+	TSharedPtr<FJsonObject> PublicObject;
+	const TSharedRef<TJsonReader<>> PublicReader =
+		TJsonReaderFactory<>::Create(PublicResponse.GetJsonValue());
+	TestTrue(
+		TEXT("public content graph response is an object"),
+		FJsonSerializer::Deserialize(PublicReader, PublicObject)
+			&& PublicObject.IsValid());
+	if (PublicObject.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* PublicEntries = nullptr;
+		TestTrue(
+			TEXT("public content graph response directly exposes entries"),
+			PublicObject->TryGetArrayField(TEXT("entries"), PublicEntries)
+				&& PublicEntries
+				&& PublicEntries->Num() == 1);
+		if (PublicEntries && PublicEntries->Num() == 1)
+		{
+			const TSharedPtr<FJsonObject> PublicEntry =
+				(*PublicEntries)[0]->AsObject();
+			TestTrue(
+				TEXT("scalar content graph entry uses its short business key"),
+				PublicEntry.IsValid()
+					&& PublicEntry->Values.Num() == 1
+					&& PublicEntry->HasField(TEXT("DA_Query")));
+			if (PublicEntry.IsValid())
+			{
+				TestEqual(
+					TEXT("scalar content graph entry keeps the scalar value"),
+					PublicEntry->GetStringField(TEXT("DA_Query")),
+					FString(TEXT("fixture-state-value")));
+				for (const FString& MachineEntryField : {
+					TEXT("id"), TEXT("owner_id"), TEXT("container_id"),
+					TEXT("guid"), TEXT("hash"), TEXT("revision"),
+					TEXT("cursor"), TEXT("ticket")})
+				{
+					TestFalse(
+						*FString::Printf(
+							TEXT("public entry omits machine field %s"),
+							*MachineEntryField),
+						PublicEntry->HasField(MachineEntryField));
+				}
+			}
+		}
+		for (const FString& MachineEnvelopeField : {
+			TEXT("command_id"),
+			TEXT("mechanics_command_id"),
+			TEXT("read_only"),
+			TEXT("query_result"),
+			TEXT("projection"),
+			TEXT("snapshot_id"),
+			TEXT("revision"),
+		})
+		{
+			TestFalse(
+				*FString::Printf(
+					TEXT("public content graph response omits %s"),
+					*MachineEnvelopeField),
+				PublicObject->HasField(MachineEnvelopeField));
+		}
+		TestFalse(
+			TEXT("complete public content graph response omits paging noise"),
+			PublicObject->HasField(TEXT("more")));
+	}
+
+	const FQueryPublicProjectionDescriptor DynamicProjection = {
+		TEXT("fixture_dynamic_fields"),
+		EUeAgentQueryPublicProjectionStrategy::GroupedRecords,
+		TEXT("objects"),
+		{},
+		{
+			{TEXT("objects"), TEXT("array"), true, TEXT("Fixture records with explicitly admitted dynamic fields.")},
+			{TEXT("more"), TEXT("object"), false, TEXT("Partial result counts.")},
+		},
+		TEXT("Only producer-scoped dynamic fields are public."),
+		false,
+		{
+			TEXT("fixture.asset:"),
+			TEXT("data_asset"),
+			TEXT("fields"),
+		},
+	};
+	TestTrue(
+		TEXT("a producer-scoped dynamic public descriptor is valid"),
+		DynamicProjection.IsValid());
+	FUeAgentContractValue DynamicResponse(TEXT("{}"));
+	TestTrue(
+		TEXT("a producer-scoped dynamic field uses the shared public codec"),
+		FUeAgentQueryPayloadCodec::TryEncodePublic(
+			DynamicProjection,
+			TEXT("fixture.dynamic"),
+			TEXT("fixture.dynamic"),
+			true,
+			Result->GetValue(),
+			Resources,
+			DynamicResponse,
+			Error));
+	TSharedPtr<FJsonObject> DynamicObject;
+	const TSharedRef<TJsonReader<>> DynamicReader =
+		TJsonReaderFactory<>::Create(DynamicResponse.GetJsonValue());
+	TestTrue(
+		TEXT("dynamic public response is an object"),
+		FJsonSerializer::Deserialize(DynamicReader, DynamicObject)
+			&& DynamicObject.IsValid());
+	if (DynamicObject.IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* DynamicRecords = nullptr;
+		TestTrue(
+			TEXT("dynamic public response contains one grouped record"),
+			DynamicObject->Values.Num() == 1
+				&& DynamicObject->TryGetArrayField(TEXT("objects"), DynamicRecords)
+				&& DynamicRecords
+				&& DynamicRecords->Num() == 1);
+		if (DynamicRecords && DynamicRecords->Num() == 1)
+		{
+			const TSharedPtr<FJsonObject> Record =
+				(*DynamicRecords)[0]->AsObject();
+			const TSharedPtr<FJsonObject>* Fields = nullptr;
+			TestTrue(
+				TEXT("dynamic values are nested under fields without owner identity"),
+				Record.IsValid()
+					&& Record->Values.Num() == 1
+					&& Record->TryGetObjectField(TEXT("fields"), Fields)
+					&& Fields
+					&& Fields->IsValid()
+					&& (*Fields)->Values.Num() == 1
+					&& (*Fields)->GetStringField(TEXT("DA_Query"))
+						== TEXT("fixture-state-value")
+					&& !Record->HasField(TEXT("owner_id")));
+		}
+	}
+
+	FQueryPublicProjectionDescriptor MismatchedDynamicProjection =
+		DynamicProjection;
+	MismatchedDynamicProjection.DynamicFields.SemanticIdPrefix =
+		TEXT("unrelated.asset:");
+	FUeAgentContractValue MismatchedDynamicResponse(TEXT("{}"));
+	TestTrue(
+		TEXT("a mismatched producer prefix remains a valid empty public result"),
+		MismatchedDynamicProjection.IsValid()
+			&& FUeAgentQueryPayloadCodec::TryEncodePublic(
+				MismatchedDynamicProjection,
+				TEXT("fixture.dynamic"),
+				TEXT("fixture.dynamic"),
+				true,
+				Result->GetValue(),
+				Resources,
+				MismatchedDynamicResponse,
+				Error));
+	TSharedPtr<FJsonObject> MismatchedDynamicObject;
+	const TSharedRef<TJsonReader<>> MismatchedDynamicReader =
+		TJsonReaderFactory<>::Create(
+			MismatchedDynamicResponse.GetJsonValue());
+	const TArray<TSharedPtr<FJsonValue>>* MismatchedRecords = nullptr;
+	TestTrue(
+		TEXT("a mismatched producer prefix cannot leak a snapshot selector"),
+		FJsonSerializer::Deserialize(
+			MismatchedDynamicReader,
+			MismatchedDynamicObject)
+			&& MismatchedDynamicObject.IsValid()
+			&& MismatchedDynamicObject->TryGetArrayField(
+				TEXT("objects"), MismatchedRecords)
+			&& MismatchedRecords
+			&& MismatchedRecords->IsEmpty());
+
+	FQueryPublicProjectionDescriptor IncompleteDynamicProjection =
+		DynamicProjection;
+	IncompleteDynamicProjection.DynamicFields.TargetKind.Empty();
+	TestFalse(
+		TEXT("an incomplete dynamic producer scope fails closed"),
+		IncompleteDynamicProjection.IsValid());
+	FQueryPublicProjectionDescriptor CollidingDynamicProjection =
+		DynamicProjection;
+	CollidingDynamicProjection.FieldProjections.Add(
+		{TEXT("fixture"), TEXT("fields"), false});
+	TestFalse(
+		TEXT("a dynamic fields container cannot collide with a static field"),
+		CollidingDynamicProjection.IsValid());
+
+	FQueryPublicProjectionDescriptor OwnerProjection = DynamicProjection;
+	OwnerProjection.Id = TEXT("fixture_owner_projection");
+	OwnerProjection.OwnerPublicName = TEXT("object_path");
+	TestTrue(
+		TEXT("an explicit business owner projection is valid"),
+		OwnerProjection.IsValid());
+	FUeAgentContractValue OwnerResponse(TEXT("{}"));
+	TestTrue(
+		TEXT("an explicit business owner uses the shared public codec"),
+		FUeAgentQueryPayloadCodec::TryEncodePublic(
+			OwnerProjection,
+			TEXT("fixture.owner"),
+			TEXT("fixture.owner"),
+			true,
+			Result->GetValue(),
+			Resources,
+			OwnerResponse,
+			Error));
+	TSharedPtr<FJsonObject> OwnerObject;
+	const TSharedRef<TJsonReader<>> OwnerReader =
+		TJsonReaderFactory<>::Create(OwnerResponse.GetJsonValue());
+	const TArray<TSharedPtr<FJsonValue>>* OwnerRecords = nullptr;
+	TestTrue(
+		TEXT("the opted-in business owner is emitted once"),
+		FJsonSerializer::Deserialize(OwnerReader, OwnerObject)
+			&& OwnerObject.IsValid()
+			&& OwnerObject->TryGetArrayField(TEXT("objects"), OwnerRecords)
+			&& OwnerRecords
+			&& OwnerRecords->Num() == 1
+			&& (*OwnerRecords)[0]->AsObject().IsValid()
+			&& (*OwnerRecords)[0]->AsObject()->GetStringField(TEXT("object_path"))
+				== TEXT("/Game/Fixture"));
+	FQueryPublicProjectionDescriptor CollidingOwnerProjection =
+		OwnerProjection;
+	CollidingOwnerProjection.OwnerPublicName = TEXT("fields");
+	TestFalse(
+		TEXT("an owner field cannot collide with another public field"),
+		CollidingOwnerProjection.IsValid());
+
+	FQueryPublicFieldProjection NestedObject{
+		TEXT("structure"), TEXT("structure"), true,
+		EUeAgentQueryPublicIdentityField::Selector,
+		{
+			{TEXT("display_rate"), TEXT("display_rate"), true,
+				EUeAgentQueryPublicIdentityField::Selector,
+				{
+					{TEXT("numerator"), TEXT("numerator"), true},
+					{TEXT("denominator"), TEXT("denominator"), true},
+				}, false},
+			{TEXT("bindings"), TEXT("bindings"), false,
+				EUeAgentQueryPublicIdentityField::Selector,
+				{
+					{TEXT("binding_ref"), TEXT("binding_ref"), true},
+					{TEXT("name"), TEXT("name"), true},
+					{TEXT("track_count"), TEXT("track_count"), true},
+					{TEXT("tracks"), TEXT("tracks"), false,
+						EUeAgentQueryPublicIdentityField::Selector,
+						{
+							{TEXT("track_ref"), TEXT("track_ref"), true},
+							{TEXT("track_type"), TEXT("track_type"), true},
+							{TEXT("section_count"), TEXT("section_count"), true},
+							{TEXT("sections"), TEXT("sections"), false,
+								EUeAgentQueryPublicIdentityField::Selector,
+								{
+									{TEXT("section_ref"), TEXT("section_ref"), true},
+									{TEXT("section_type"), TEXT("section_type"), true},
+									{TEXT("key_count"), TEXT("key_count"), false},
+									{TEXT("keys"), TEXT("keys"), false,
+										EUeAgentQueryPublicIdentityField::Selector,
+										{}, true},
+								}, true},
+						}, true},
+				}, true},
+			{TEXT("root_tracks"), TEXT("root_tracks"), false,
+				EUeAgentQueryPublicIdentityField::Selector, {}, true},
+		}, false};
+	FQueryPublicProjectionDescriptor NestedProjection{
+		TEXT("fixture_nested_projection"),
+		EUeAgentQueryPublicProjectionStrategy::SingleRecord,
+		TEXT("record"),
+		{{TEXT("fixture.structure"), TEXT("structure"), true,
+			EUeAgentQueryPublicIdentityField::ObjectRole,
+			NestedObject.Children, false}},
+		{{TEXT("structure"), TEXT("object"), true,
+			TEXT("Bounded nested structure fixture.")}},
+		TEXT("Only explicitly admitted nested fields are public."),
+		false, {}, FString(), {}, FString(), {TEXT("fixture.nested")}};
+	TestTrue(
+		TEXT("nested object and array item schema is valid"),
+		NestedProjection.IsValid());
+	FQueryPublicProjectionDescriptor DuplicateNested = NestedProjection;
+	DuplicateNested.FieldProjections[0].Children.Add(
+		{TEXT("display_rate"), TEXT("other"), false});
+	TestFalse(
+		TEXT("nested duplicate selectors fail closed"),
+		DuplicateNested.IsValid());
+	FQueryPublicProjectionDescriptor DuplicateNestedName = NestedProjection;
+	DuplicateNestedName.FieldProjections[0].Children.Add(
+		{TEXT("other"), TEXT("display_rate"), false});
+	TestFalse(
+		TEXT("nested duplicate public names fail closed"),
+		DuplicateNestedName.IsValid());
+
+	const FQueryPublicProjectionDescriptor* ObservationProjection =
+		FindQueryPublicProjectionDescriptor(TEXT("editor_project_observation"));
+	TestNotNull(TEXT("shared capability observation projection is registered"), ObservationProjection);
+	FUeAgentResourceTracker ObservationResources = MakeTracker(Fixture);
+	const auto ObservationSnapshot = NestedProjectionFixtureSnapshot(this, ObservationResources,
+		TEXT("{\"editor_project_capability\":\"target.read\",\"target_ref\":\"fixture-target\","
+			"\"entries\":{\"Hash\":\"business\",\"Identity\":[\"first\",\"second\"]},"
+			"\"merged_values\":{\"Identity\":{\"values\":{\"Hash\":\"config-value\"},\"source_file\":\"private\"}},"
+			"\"profile_id\":\"private\",\"output_file\":\"private\"}"));
+	if (ObservationProjection && ObservationSnapshot.IsValid())
+	{
+		const FUeAgentProjectionQueryResult ObservationResult(FixtureDescriptor(),
+			TEXT("capability-observation"), FUeAgentProjectionSourceValue(ObservationSnapshot.ToSharedRef()));
+		const FUeAgentProjectionRequest ObservationRequest(
+			FUeAgentProjectionProfile(TEXT("compact"), false, false, false), {}, {},
+			QueryPublicProjectionPageUnit(*ObservationProjection));
+		const FUeAgentCancellationSource ObservationCancellation([]() { return 100.0; });
+		TSharedPtr<const FUeAgentProjectedResponse> ObservationProjected;
+		FUeAgentProjectionError ObservationError;
+		TestTrue(TEXT("project one complete capability observation"), Graph->Projector->TryProject(
+			ObservationResult, ObservationRequest, ObservationResources,
+			FUeAgentOperationDeadline::FromTimeout(30.0, []() { return 100.0; }),
+			ObservationCancellation.GetToken(), ObservationProjected, ObservationError));
+		if (ObservationProjected.IsValid())
+		{
+			FUeAgentContractValue ObservationEncoded(TEXT("{}"));
+			const FUeAgentQueryBindingResponse ObservationResponse(ObservationProjected.ToSharedRef(), {});
+			TestTrue(TEXT("encode complete capability observation"), FUeAgentQueryPayloadCodec::TryEncodePublic(
+				*ObservationProjection, TEXT("config.section"), TEXT("asset_project.read.config_section"), true,
+				ObservationResponse, ObservationResources, ObservationEncoded, Error));
+			TSharedPtr<FJsonObject> ObservationPublic;
+			const auto ObservationReader = TJsonReaderFactory<>::Create(ObservationEncoded.GetJsonValue());
+			TestTrue(TEXT("capability observation is structured JSON"),
+				FJsonSerializer::Deserialize(ObservationReader, ObservationPublic) && ObservationPublic.IsValid());
+			if (ObservationPublic.IsValid() && ObservationPublic->HasTypedField<EJson::Object>(TEXT("observation")))
+			{
+				const auto Observation = ObservationPublic->GetObjectField(TEXT("observation"));
+				if (TestTrue(TEXT("capability observation retains entries"),
+					Observation->HasTypedField<EJson::Object>(TEXT("entries"))))
+				{
+					const auto Entries = Observation->GetObjectField(TEXT("entries"));
+					FString HashValue;
+					TestTrue(TEXT("business Hash key survives native observation projection"),
+						Entries->TryGetStringField(TEXT("Hash"), HashValue) && HashValue == TEXT("business"));
+					const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+					TestTrue(TEXT("repeated native config values preserve order"),
+						Entries->TryGetArrayField(TEXT("Identity"), Values) && Values && Values->Num() == 2
+						&& (*Values)[0]->AsString() == TEXT("first") && (*Values)[1]->AsString() == TEXT("second"));
+				}
+				const TSharedPtr<FJsonObject>* Sections = nullptr;
+				const TSharedPtr<FJsonObject>* Section = nullptr;
+				const TSharedPtr<FJsonObject>* Values = nullptr;
+				if (TestTrue(TEXT("keyed object map retains its shared value schema"),
+					Observation->TryGetObjectField(TEXT("merged_values"), Sections) && Sections
+					&& (*Sections)->TryGetObjectField(TEXT("Identity"), Section) && Section
+					&& (*Section)->TryGetObjectField(TEXT("values"), Values) && Values))
+				{
+					FString HashValue;
+					TestTrue(TEXT("business key survives in nested map"),
+						(*Values)->TryGetStringField(TEXT("Hash"), HashValue) && HashValue == TEXT("config-value"));
+					TestTrue(TEXT("native observation retains requested source data for the SDK"), (*Section)->HasField(TEXT("source_file")));
+				}
+				TestTrue(TEXT("lossless native observation retains custody for SDK-owned projection"), Observation->HasField(TEXT("output_file")));
+			}
+			else TestTrue(TEXT("capability observation must be present"), false);
+		}
+	}
+
+	FUeAgentResourceTracker NestedResources = MakeTracker(Fixture);
+	const TSharedPtr<const FUeAgentCanonicalSnapshot> NestedSnapshot =
+		NestedProjectionFixtureSnapshot(this, NestedResources);
+	if (!NestedSnapshot.IsValid())
+	{
+		return false;
+	}
+	const FUeAgentProjectionQueryResult NestedProjectionResult(
+		FixtureDescriptor(),
+		TEXT("nested-public-projection"),
+		FUeAgentProjectionSourceValue(NestedSnapshot.ToSharedRef()));
+	const FUeAgentProjectionRequest NestedProjectionRequest(
+		FUeAgentProjectionProfile(TEXT("compact"), false, false, false),
+		{},
+		{},
+		EUeAgentProjectionPageUnit::SingleRecord);
+	const FUeAgentCancellationSource NestedCancellation([]() { return 100.0; });
+	TSharedPtr<const FUeAgentProjectedResponse> NestedProjected;
+	FUeAgentProjectionError NestedProjectionError;
+	TestTrue(
+		TEXT("project nested public projection fixture"),
+		Graph->Projector->TryProject(
+			NestedProjectionResult,
+			NestedProjectionRequest,
+			NestedResources,
+			FUeAgentOperationDeadline::FromTimeout(30.0, []() { return 100.0; }),
+			NestedCancellation.GetToken(),
+			NestedProjected,
+			NestedProjectionError));
+	FUeAgentContractValue NestedEncoded(TEXT("{}"));
+	if (NestedProjected.IsValid())
+	{
+		const FUeAgentQueryBindingResponse NestedResponse(
+			NestedProjected.ToSharedRef(),
+			{});
+		TestTrue(
+			TEXT("encode nested public projection fixture"),
+			FUeAgentQueryPayloadCodec::TryEncodePublic(
+				NestedProjection,
+				TEXT("fixture.nested"),
+				TEXT("fixture.nested"),
+				true,
+				NestedResponse,
+				NestedResources,
+				NestedEncoded,
+				Error));
+	}
+	TSharedPtr<FJsonObject> NestedPublic;
+	const TSharedRef<TJsonReader<>> NestedReader =
+		TJsonReaderFactory<>::Create(NestedEncoded.GetJsonValue());
+	TestTrue(
+		TEXT("nested public projection is valid JSON"),
+		FJsonSerializer::Deserialize(NestedReader, NestedPublic)
+			&& NestedPublic.IsValid());
+	if (NestedPublic.IsValid())
+	{
+		const TSharedPtr<FJsonObject> Structure =
+			NestedPublic->GetObjectField(TEXT("structure"));
+		const TSharedPtr<FJsonObject> DisplayRate =
+			Structure->GetObjectField(TEXT("display_rate"));
+		TestFalse(
+			TEXT("nested object rejects undeclared fields"),
+			DisplayRate->HasField(TEXT("private_rate"))
+				|| Structure->HasField(TEXT("internal_state")));
+		const TArray<TSharedPtr<FJsonValue>>* RootTracks = nullptr;
+		TestTrue(
+			TEXT("observed empty nested arrays remain present"),
+			Structure->TryGetArrayField(TEXT("root_tracks"), RootTracks) && RootTracks && RootTracks->IsEmpty());
+		const TArray<TSharedPtr<FJsonValue>>* Bindings = nullptr;
+		TestTrue(
+			TEXT("nested array remains complete"),
+			Structure->TryGetArrayField(TEXT("bindings"), Bindings)
+				&& Bindings
+				&& Bindings->Num() == 2);
+		if (Bindings && !Bindings->IsEmpty())
+		{
+			const TSharedPtr<FJsonObject> Binding = (*Bindings)[0]->AsObject();
+			TestFalse(
+				TEXT("nested array item rejects undeclared fields"),
+				Binding->HasField(TEXT("revision")));
+			const TArray<TSharedPtr<FJsonValue>>* Tracks = nullptr;
+			const TArray<TSharedPtr<FJsonValue>>* Sections = nullptr;
+			const TArray<TSharedPtr<FJsonValue>>* Keys = nullptr;
+			TestTrue(
+				TEXT("nested object-array chain remains available"),
+				Binding->TryGetArrayField(TEXT("tracks"), Tracks)
+					&& Tracks && Tracks->Num() == 1
+					&& (*Tracks)[0]->AsObject()->TryGetArrayField(
+						TEXT("sections"), Sections)
+					&& Sections && Sections->Num() == 1
+					&& (*Sections)[0]->AsObject()->TryGetArrayField(
+						TEXT("keys"), Keys)
+					&& Keys && Keys->Num() == 2);
+			if (Keys && Keys->Num() == 2)
+			{
+				TestEqual(
+					TEXT("scalar array item survives nested projection"),
+					(*Keys)[0]->AsString(),
+					FString(TEXT("10")));
+				TestEqual(
+					TEXT("second scalar array item survives nested projection"),
+					(*Keys)[1]->AsString(),
+					FString(TEXT("20")));
+			}
+			TestFalse(
+				TEXT("deep nested item rejects undeclared fields"),
+				(*Tracks)[0]->AsObject()->HasField(TEXT("object_path"))
+					|| (*Sections)[0]->AsObject()->HasField(TEXT("native_evidence")));
+		}
+	}
+	if (NestedProjected.IsValid())
+	{
+		FQueryPublicProjectionDescriptor MismatchedProjection =
+			NestedProjection;
+		MismatchedProjection.FieldProjections[0].Children[0].bArray = true;
+		const FUeAgentQueryBindingResponse NestedResponse(
+			NestedProjected.ToSharedRef(),
+			{});
+		FUeAgentContractValue MismatchedEncoded(TEXT("{}"));
+		TestFalse(
+			TEXT("a required nested type mismatch fails public encoding"),
+			FUeAgentQueryPayloadCodec::TryEncodePublic(
+				MismatchedProjection,
+				TEXT("fixture.nested"),
+				TEXT("fixture.nested"),
+				true,
+				NestedResponse,
+				NestedResources,
+				MismatchedEncoded,
+				Error));
+		TestEqual(TEXT("nested type mismatch has a structured reason"), Error.Code,
+			FString(TEXT("query_projection_field_invalid")));
+		TestEqual(TEXT("nested type mismatch identifies the declared public field"), Error.PropertyPath,
+			FString(TEXT("structure.display_rate")));
+	}
+
 	const TSharedPtr<FJsonObject> SnapshotObject =
 		ResponseObject
 			->GetObjectField(TEXT("projection"))
 			->GetObjectField(TEXT("payload"))
 			->GetObjectField(TEXT("snapshot"));
+	const TSharedPtr<FJsonObject> ProjectionObject =
+		ResponseObject->GetObjectField(TEXT("projection"));
+	for (const FString& InternalField : {
+		TEXT("descriptor"),
+		TEXT("request_id"),
+		TEXT("result_kind"),
+		TEXT("token_estimate"),
+	})
+	{
+		TestFalse(
+			*FString::Printf(
+				TEXT("full projection omits internal field %s"),
+				*InternalField),
+			ProjectionObject->HasField(InternalField));
+	}
+	TestFalse(
+		TEXT("encoded response omits internal binding ticket"),
+		ResponseObject->HasField(TEXT("ticket")));
 	TestEqual(
 		TEXT("state plane survives the external boundary"),
 		SnapshotObject->GetStringField(TEXT("state_plane")),
@@ -1285,6 +1792,21 @@ bool FUeAgentQueryBindingCppStateAndGuardsTest::RunTest(
 		1);
 	if (EncodedEntries.Num() == 1)
 	{
+		TestTrue(
+			TEXT("full profile preserves observed revision"),
+			EncodedEntries[0]
+				->AsObject()
+				->HasTypedField<EJson::Object>(TEXT("observed_revision")));
+		TestTrue(
+			TEXT("full profile preserves projected defaults"),
+			EncodedEntries[0]
+				->AsObject()
+				->HasTypedField<EJson::Object>(TEXT("default")));
+		TestTrue(
+			TEXT("full profile preserves projected details"),
+			EncodedEntries[0]
+				->AsObject()
+				->HasTypedField<EJson::Object>(TEXT("details")));
 		const TSharedPtr<FJsonObject> ValueObject =
 			EncodedEntries[0]
 				->AsObject()
@@ -1299,6 +1821,113 @@ bool FUeAgentQueryBindingCppStateAndGuardsTest::RunTest(
 			Fixture
 				->GetObjectField(TEXT("snapshot"))
 				->GetStringField(TEXT("value")));
+	}
+	const FUeAgentQueryBindingRequest CompactRequest(
+		FixtureDescriptor(),
+		TEXT("query-binding-state-compact"),
+		FUeAgentQueryBindingPayload(
+			FUeAgentStateReadQuery(
+				FixtureSession(Fixture),
+				Ticket.GetValue(),
+				Candidate,
+				EUeAgentStatePlane::AuthoringMemory,
+				FUeAgentProjectionRequest(
+					FUeAgentProjectionProfile(
+						TEXT("compact"),
+						false,
+						false,
+						false),
+					{},
+					{}))));
+	FUeAgentResourceTracker CompactResources = MakeTracker(Fixture);
+	TSharedPtr<const FUeAgentQueryBindingResult> CompactResult;
+	TestTrue(
+		TEXT("compact state read projects through the same C3Q boundary"),
+		Graph->Binding->TrySubmit(
+			CompactRequest,
+			FixtureCaller(),
+			CompactResources,
+			Deadline,
+			Cancellation,
+			CompactResult,
+			Error));
+	FUeAgentContractValue CompactEncoded(TEXT("{}"));
+	TestTrue(
+		TEXT("compact state response encodes"),
+		FUeAgentQueryPayloadCodec::TryEncode(
+			CompactResult->GetValue(),
+			CompactResources,
+			CompactEncoded,
+			Error));
+	TSharedPtr<FJsonObject> CompactResponseObject;
+	const TSharedRef<TJsonReader<>> CompactResponseReader =
+		TJsonReaderFactory<>::Create(CompactEncoded.GetJsonValue());
+	TestTrue(
+		TEXT("encoded compact response is an object"),
+		FJsonSerializer::Deserialize(
+			CompactResponseReader,
+			CompactResponseObject)
+			&& CompactResponseObject.IsValid());
+	const TSharedPtr<FJsonObject> CompactSnapshotObject =
+		CompactResponseObject
+			->GetObjectField(TEXT("projection"))
+			->GetObjectField(TEXT("payload"))
+			->GetObjectField(TEXT("snapshot"));
+	const TSharedPtr<FJsonObject> CompactProjectionObject =
+		CompactResponseObject->GetObjectField(TEXT("projection"));
+	for (const FString& InternalField : {
+		TEXT("descriptor"),
+		TEXT("request_id"),
+		TEXT("result_kind"),
+		TEXT("token_estimate"),
+	})
+	{
+		TestFalse(
+			*FString::Printf(
+				TEXT("compact projection omits internal field %s"),
+				*InternalField),
+			CompactProjectionObject->HasField(InternalField));
+	}
+	TestEqual(
+		TEXT("compact projection identifies its profile once"),
+		CompactProjectionObject->GetStringField(TEXT("profile_id")),
+		FString(TEXT("compact")));
+	TestFalse(
+		TEXT("compact snapshot omits unavailable provenance"),
+		CompactSnapshotObject->HasField(TEXT("provenance")));
+	const TArray<TSharedPtr<FJsonValue>>& CompactEntries =
+		CompactSnapshotObject->GetArrayField(TEXT("entries"));
+	TestEqual(TEXT("compact state keeps the entry"), CompactEntries.Num(), 1);
+	if (CompactEntries.Num() == 1)
+	{
+		const TSharedPtr<FJsonObject> CompactEntry =
+			CompactEntries[0]->AsObject();
+		TestFalse(
+			TEXT("compact entry omits the expanded canonical identity"),
+			CompactEntry->HasField(TEXT("identity")));
+		TestFalse(
+			TEXT("compact entry omits type metadata duplicated by value kind"),
+			CompactEntry->HasField(TEXT("type")));
+		TestEqual(
+			TEXT("compact entry keeps the directly consumable owner identity"),
+			CompactEntry->GetStringField(TEXT("owner_id")),
+			Candidate.GetSummary().GetIdentity().GetOwnerId());
+		TestEqual(
+			TEXT("compact entry keeps the field selector"),
+			CompactEntry->GetStringField(TEXT("selector")),
+			Candidate.GetSummary().GetIdentity().GetSelector());
+		TestTrue(
+			TEXT("compact entry keeps the canonical value"),
+			CompactEntry->HasTypedField<EJson::Object>(TEXT("value")));
+		TestFalse(
+			TEXT("compact entry omits snapshot-equal observed revision"),
+			CompactEntry->HasField(TEXT("observed_revision")));
+		TestFalse(
+			TEXT("compact entry omits unavailable default"),
+			CompactEntry->HasField(TEXT("default")));
+		TestFalse(
+			TEXT("compact entry omits unavailable details"),
+			CompactEntry->HasField(TEXT("details")));
 	}
 
 	const int32 ReadsBeforeCancel = Graph->ReadPort->ReadCalls;
@@ -1356,4 +1985,3 @@ bool FUeAgentQueryBindingCppStateAndGuardsTest::RunTest(
 		ReadsBeforeCancel);
 	return true;
 }
-

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/ContextResource/UeAgentOperationContext.h"
@@ -20,22 +21,7 @@ namespace UE::UAI::ExecutionMutation
 	using ContextResource::FUeAgentResourceTracker;
 	using PlanningPreflight::FPlanningPreflightPlanRef;
 
-	class UEAGENTINTERFACE_API FExecutionMutationError final
-	{
-	public:
-		FExecutionMutationError() = default;
-		explicit FExecutionMutationError(
-			FString InCode,
-			FString InDetail = FString());
-
-		const FString& GetCode() const;
-		const FString& GetDetail() const;
-		bool IsPresent() const;
-
-	private:
-		FString Code;
-		FString Detail;
-	};
+	using FExecutionMutationError = UE::UAI::Contract::FDiagnostic;
 
 	enum class EExecutionPhase : uint8
 	{
@@ -87,7 +73,7 @@ namespace UE::UAI::ExecutionMutation
 	class UEAGENTINTERFACE_API FLockFenceLease final
 	{
 	public:
-		FLockFenceLease() = default;
+		FLockFenceLease();
 		FLockFenceLease(
 			FString InOwnerId,
 			TArray<FString> InLockKeys,
@@ -97,12 +83,13 @@ namespace UE::UAI::ExecutionMutation
 		const TArray<FString>& GetLockKeys() const;
 		int64 GetFencingToken() const;
 		bool IsValid() const;
+		const FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		FString OwnerId;
 		TArray<FString> LockKeys;
 		int64 FencingToken = -1;
-		bool bValid = false;
+		TSharedPtr<const FExecutionMutationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FBarrierRequest final
@@ -126,31 +113,45 @@ namespace UE::UAI::ExecutionMutation
 	class UEAGENTINTERFACE_API FBarrierResult final
 	{
 	public:
-		FBarrierResult() = default;
+		FBarrierResult();
 		FBarrierResult(
 			int64 InSubjectGeneration,
 			TArray<FString> InObservedSignals,
 			FString InPostBarrierRevision,
 			bool bInSettled);
+		FBarrierResult(
+			int64 InSubjectGeneration,
+			TArray<FString> InObservedSignals,
+			FString InPostBarrierRevision,
+			bool bInSettled,
+			FExecutionMutationError InSettleDiagnostic);
 
 		int64 GetSubjectGeneration() const;
 		const TArray<FString>& GetObservedSignals() const;
 		const FString& GetPostBarrierRevision() const;
 		bool IsSettled() const;
+		/** The provider's observed reason for an unsettled result; independent of structural validity. */
+		const FExecutionMutationError& GetSettleDiagnostic() const;
 		bool IsValid() const;
+		const FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		int64 SubjectGeneration = -1;
 		TArray<FString> ObservedSignals;
 		FString PostBarrierRevision;
 		bool bSettled = false;
-		bool bValid = false;
+		TSharedPtr<const FExecutionMutationError> SettleDiagnostic;
+		TSharedPtr<const FExecutionMutationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FMutationFacts final
 	{
 	public:
-		FMutationFacts() = default;
+		FMutationFacts();
+		// Explicit evidence that execution failed before any target mutation.
+		// Default/invalid facts remain unknown, not evidence of no mutation.
+		static FMutationFacts NoMutation();
+		bool IsNoMutationConfirmed() const;
 		FMutationFacts(
 			int64 InSubjectGeneration,
 			TArray<FString> InMutatedIdentityKeys,
@@ -164,6 +165,7 @@ namespace UE::UAI::ExecutionMutation
 		const TArray<FAssetDurableTarget>& GetDurableTargets() const;
 		bool IsRollbackSupported() const;
 		bool IsValid() const;
+		const FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		int64 SubjectGeneration = -1;
@@ -171,7 +173,8 @@ namespace UE::UAI::ExecutionMutation
 		TArray<FString> RequiredBarrierSignals;
 		TArray<FAssetDurableTarget> DurableTargets;
 		bool bRollbackSupported = false;
-		bool bValid = false;
+		bool bNoMutationConfirmed = false;
+		TSharedPtr<const FExecutionMutationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FExecutionMutationRequest final
@@ -201,6 +204,7 @@ namespace UE::UAI::ExecutionMutation
 		EExecutionThreadAffinity GetThreadAffinity() const;
 		EExecutionReentrancyPolicy GetReentrancyPolicy() const;
 		bool IsValid() const;
+		const FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		FString OperationId;
@@ -215,18 +219,18 @@ namespace UE::UAI::ExecutionMutation
 			EExecutionThreadAffinity::GameThread;
 		EExecutionReentrancyPolicy ReentrancyPolicy =
 			EExecutionReentrancyPolicy::RejectSameTarget;
-		bool bValid = false;
+		TSharedPtr<const FExecutionMutationError> ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FExecutionReceipt final
 	{
 	public:
-		FExecutionReceipt() = default;
+		FExecutionReceipt();
 		FExecutionReceipt(
 			FString InOperationId,
 			EExecutionPhase InPhase,
 			EExecutionStatus InStatus,
-			FString InErrorCode,
+			FExecutionMutationError InDiagnostic,
 			EExecutionCancellationMode InCancellationMode,
 			bool bInMutationStarted,
 			TOptional<int64> InFencingToken,
@@ -238,6 +242,7 @@ namespace UE::UAI::ExecutionMutation
 		EExecutionPhase GetPhase() const;
 		EExecutionStatus GetStatus() const;
 		const FString& GetErrorCode() const;
+		const FExecutionMutationError& GetDiagnostic() const;
 		EExecutionCancellationMode GetCancellationMode() const;
 		bool DidMutationStart() const;
 		const TOptional<int64>& GetFencingToken() const;
@@ -245,12 +250,13 @@ namespace UE::UAI::ExecutionMutation
 		const FDurableReceipt* GetDurableReceipt() const;
 		const TArray<FString>& GetPhaseHistory() const;
 		bool IsValid() const;
+		const FExecutionMutationError& GetValidationDiagnostic() const;
 
 	private:
 		FString OperationId;
 		EExecutionPhase Phase = EExecutionPhase::Queued;
 		EExecutionStatus Status = EExecutionStatus::Failed;
-		FString ErrorCode;
+		FExecutionMutationError Diagnostic;
 		EExecutionCancellationMode CancellationMode =
 			EExecutionCancellationMode::NotRequested;
 		bool bMutationStarted = false;
@@ -258,7 +264,7 @@ namespace UE::UAI::ExecutionMutation
 		bool bRetrySafe = false;
 		TOptional<FDurableReceipt> DurableReceipt;
 		TArray<FString> PhaseHistory;
-		bool bValid = false;
+		FExecutionMutationError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IExecutionScheduler
@@ -420,8 +426,7 @@ namespace UE::UAI::ExecutionMutation
 				ESPMode::ThreadSafe> InBarrier,
 			TSharedRef<
 				IDurableExecutionPort,
-				ESPMode::ThreadSafe> InDurable,
-			int32 InMaxQueueItems);
+				ESPMode::ThreadSafe> InDurable);
 		~FExecutionMutationCoordinator();
 
 		bool Submit(

@@ -1,5 +1,7 @@
 #include "DomainAdapters/ContentGraphRead/UeAgentExternalLocalizationContentGraphProvider.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/FileManager.h"
@@ -30,11 +32,13 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			TEXT("string_table.validate"),
 		};
 
-		bool Fail(FString& OutError, const FString& Code, const FString& Detail = FString())
-		{
-			OutError = Detail.IsEmpty() ? Code : Code + TEXT(":") + Detail;
-			return false;
-		}
+		bool Fail(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
+            return false;
+        }
+
 
 		FString LocalizationContentRoot()
 		{
@@ -73,59 +77,144 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			return Result;
 		}
 
-		void AddIssue(
-			TArray<TSharedPtr<FJsonValue>>& Issues,
-			const FString& Code,
-			const FString& Path,
-			const FString& Message)
+		struct FExternalDocumentOrigin
 		{
-			const TSharedPtr<FJsonObject> Issue = MakeShared<FJsonObject>();
-			Issue->SetStringField(TEXT("severity"), TEXT("error"));
-			Issue->SetStringField(TEXT("code"), Code);
-			Issue->SetStringField(TEXT("path"), Path);
-			Issue->SetStringField(TEXT("message"), Message);
-			Issues.Add(MakeShared<FJsonValueObject>(Issue));
+			FString File;
+			FString Parameter;
+			bool bObjectParameter = false;
+		};
+
+		TSharedPtr<FJsonValue> ExternalInputShape(const TSharedPtr<FJsonValue>& Value)
+		{
+			if (!Value) return MakeShared<FJsonValueString>(TEXT("<missing>"));
+			if (Value->Type != EJson::Array && Value->Type != EJson::Object) return Value;
+			return MakeShared<FJsonValueString>(Value->Type == EJson::Array ? TEXT("array") : TEXT("object"));
 		}
 
-		bool LoadDocument(
-			const TSharedPtr<FJsonObject>& Parameters,
-			TSharedPtr<FJsonObject>& OutDocument,
-			FString& OutError)
+		void LocateExternalIssue(UE::UAI::Contract::FDiagnostic& Issue, const FExternalDocumentOrigin& Origin,
+			const FString& Pointer)
+		{
+			if (!Origin.File.IsEmpty())
+			{
+				Issue.SourceKind = TEXT("authored_value");
+				Issue.Source.SourceFile = Origin.File;
+				Issue.Source.JsonPath = Pointer.IsEmpty() ? TEXT("/") : Pointer;
+			}
+			else
+			{
+				Issue.SourceKind = TEXT("command_input");
+				Issue.Source.JsonPath = Origin.Parameter + (Origin.bObjectParameter ? Pointer : FString());
+			}
+		}
+
+		void AddIssue(TArray<UE::UAI::Contract::FDiagnostic>& Issues, const FExternalDocumentOrigin& Origin,
+			const FString& Code, const FString& ReportPath, const FString& Pointer, const FString& Message,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+		{
+			auto Issue = UE::UAI::Contract::FDiagnostic::Failure(Code, Message, TEXT("execution"));
+			Issue.PropertyPath = ReportPath;
+			Issue.ActualValue = MoveTemp(Actual);
+			Issue.ExpectedValue = MoveTemp(Expected);
+			LocateExternalIssue(Issue, Origin, Pointer);
+			Issues.Add(MoveTemp(Issue));
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ExternalIssueReport(const TArray<UE::UAI::Contract::FDiagnostic>& Issues)
+		{
+			TArray<TSharedPtr<FJsonValue>> Report;
+			for (const auto& Issue : Issues)
+			{
+				auto Row = Issue.ToPublicJson();
+				Row->SetStringField(TEXT("path"), Issue.PropertyPath);
+				Report.Add(MakeShared<FJsonValueObject>(Row));
+			}
+			return Report;
+		}
+
+		UE::UAI::Contract::FDiagnostic ExternalValidationFailure(const FString& Code,
+			TArray<UE::UAI::Contract::FDiagnostic> Issues)
+		{
+			auto Error = UE::UAI::Contract::FDiagnostic::Failure(Code,
+				TEXT("The supplied document failed validation; each invalid field is listed in diagnostics."), TEXT("execution"));
+			Error.SourceKind = TEXT("native_result");
+			Error.ActualValue = MakeShared<FJsonValueNumber>(Issues.Num());
+			Error.SourceKind = TEXT("native_result");
+			Error.ExpectedValue = MakeShared<FJsonValueNumber>(0);
+			Error.Diagnostics = MoveTemp(Issues);
+			return Error;
+		}
+
+
+		bool LoadDocument(const TSharedPtr<FJsonObject>& Parameters, TSharedPtr<FJsonObject>& OutDocument,
+			UE::UAI::Contract::FDiagnostic& OutError, FExternalDocumentOrigin& Origin)
 		{
 			OutDocument.Reset();
+			Origin = {};
 			if (!Parameters.IsValid())
 			{
-				return Fail(OutError, TEXT("localization_parameters_required"));
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("localization_parameters_required"),
+					TEXT("Localization input parameters must be an object."), TEXT("execution"));
+				OutError.SourceKind = TEXT("command_input");
+				OutError.Source.JsonPath = TEXT("/");
+				OutError.ActualValue = MakeShared<FJsonValueString>(TEXT("<missing>"));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object"));
+				return false;
 			}
 			const TSharedPtr<FJsonObject>* Object = nullptr;
-			if ((Parameters->TryGetObjectField(TEXT("document"), Object)
-					|| Parameters->TryGetObjectField(TEXT("json"), Object))
-				&& Object && Object->IsValid())
+			const bool bDocument = Parameters->TryGetObjectField(TEXT("document"), Object);
+			if ((bDocument || Parameters->TryGetObjectField(TEXT("json"), Object)) && Object && Object->IsValid())
 			{
 				OutDocument = *Object;
+				Origin.Parameter = bDocument ? TEXT("/document") : TEXT("/json");
+				Origin.bObjectParameter = true;
 				OutError.Reset();
 				return true;
 			}
 			FString Text;
 			Parameters->TryGetStringField(TEXT("json_text"), Text);
+			Origin.Parameter = TEXT("/json_text");
 			if (Text.IsEmpty())
 			{
 				FString JsonFile;
-				if (!Parameters->TryGetStringField(TEXT("json_file"), JsonFile)
-					|| JsonFile.TrimStartAndEnd().IsEmpty())
+				if (!Parameters->TryGetStringField(TEXT("json_file"), JsonFile) || JsonFile.TrimStartAndEnd().IsEmpty())
 				{
-					return Fail(OutError, TEXT("localization_document_required"));
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("localization_document_required"),
+						TEXT("Supply a document/json object, non-empty json_text, or json_file path."), TEXT("execution"));
+					OutError.SourceKind = TEXT("command_input");
+					OutError.Source.JsonPath = TEXT("/");
+					auto Actual = MakeShared<FJsonObject>();
+					for (const TCHAR* Carrier : {TEXT("document"), TEXT("json"), TEXT("json_text"), TEXT("json_file")})
+						Actual->SetField(Carrier, ExternalInputShape(Parameters->TryGetField(Carrier)));
+					OutError.ActualValue = MakeShared<FJsonValueObject>(Actual);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("document object, JSON text or JSON file"));
+					return false;
 				}
-				const FString Path = ResolveProjectFile(JsonFile);
-				if (!FFileHelper::LoadFileToString(Text, *Path))
+				Origin.File = ResolveProjectFile(JsonFile);
+				Origin.Parameter = TEXT("/json_file");
+				if (!FFileHelper::LoadFileToString(Text, *Origin.File))
 				{
-					return Fail(OutError, TEXT("localization_document_read_failed"), Path);
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("localization_document_read_failed"),
+						TEXT("The supplied JSON document file could not be read."), TEXT("execution"));
+					LocateExternalIssue(OutError, Origin, TEXT("/"));
+					OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+					OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					return false;
 				}
 			}
 			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
 			if (!FJsonSerializer::Deserialize(Reader, OutDocument) || !OutDocument.IsValid())
 			{
-				return Fail(OutError, TEXT("localization_document_invalid"));
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("localization_document_invalid"),
+					TEXT("The document must be valid object JSON. ") + Reader->GetErrorMessage(), TEXT("execution"));
+				LocateExternalIssue(OutError, Origin, TEXT("/"));
+				if (!Origin.File.IsEmpty())
+				{
+					OutError.Source.Line = Reader->GetLineNumber();
+					OutError.Source.Column = Reader->GetCharacterNumber();
+				}
+				else OutError.PublicMessage += FString::Printf(TEXT(" (JSON text line %d, column %d)"), Reader->GetLineNumber(), Reader->GetCharacterNumber());
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("object JSON"));
+				return false;
 			}
 			OutError.Reset();
 			return true;
@@ -277,23 +366,26 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 
 		bool ValidateLocalization(
 			const TSharedPtr<FJsonObject>& Root,
-			TArray<TSharedPtr<FJsonValue>>& Issues)
+			TArray<UE::UAI::Contract::FDiagnostic>& Issues, const FExternalDocumentOrigin& Origin)
 		{
 			if (!Root.IsValid())
 			{
-				AddIssue(Issues, TEXT("json_root_invalid"), TEXT("$"), TEXT("Localization root must be an object."));
+				AddIssue(Issues, Origin, TEXT("json_root_invalid"), TEXT("$"), TEXT("/"),
+					TEXT("Localization root must be an object."), MakeShared<FJsonValueString>(TEXT("<missing>")), MakeShared<FJsonValueString>(TEXT("object")));
 				return false;
 			}
 			FString Schema;
 			if (!Root->TryGetStringField(TEXT("schema"), Schema)
 				|| Schema != TEXT("uai.localization.v1"))
 			{
-				AddIssue(Issues, TEXT("schema_invalid"), TEXT("$.schema"), TEXT("Expected uai.localization.v1."));
+				AddIssue(Issues, Origin, TEXT("schema_invalid"), TEXT("$.schema"), TEXT("/schema"),
+					TEXT("Expected uai.localization.v1."), ExternalInputShape(Root->TryGetField(TEXT("schema"))), MakeShared<FJsonValueString>(TEXT("uai.localization.v1")));
 			}
 			const TArray<TSharedPtr<FJsonValue>>* Targets = nullptr;
 			if (!Root->TryGetArrayField(TEXT("targets"), Targets) || !Targets)
 			{
-				AddIssue(Issues, TEXT("targets_required"), TEXT("$.targets"), TEXT("Targets must be an array."));
+				AddIssue(Issues, Origin, TEXT("targets_required"), TEXT("$.targets"), TEXT("/targets"),
+					TEXT("Targets must be an array."), ExternalInputShape(Root->TryGetField(TEXT("targets"))), MakeShared<FJsonValueString>(TEXT("array")));
 			}
 			else
 			{
@@ -305,11 +397,16 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					FString Name;
 					if (!Target.IsValid() || !Target->TryGetStringField(TEXT("name"), Name) || Name.IsEmpty())
 					{
-						AddIssue(Issues, TEXT("target_name_required"), FString::Printf(TEXT("$.targets[%d].name"), Index), TEXT("Target name is required."));
+						AddIssue(Issues, Origin, TEXT("target_name_required"), FString::Printf(TEXT("$.targets[%d].name"), Index),
+							TEXT("/targets/") + FString::FromInt(Index) + (Target ? TEXT("/name") : TEXT("")),
+							Target ? TEXT("Target name must be a non-empty string.") : TEXT("Localization target must be an object."),
+							ExternalInputShape(Target ? Target->TryGetField(TEXT("name")) : (*Targets)[Index]),
+							MakeShared<FJsonValueString>(Target ? TEXT("non-empty name string") : TEXT("object")));
 					}
 					else if (Names.Contains(Name))
 					{
-						AddIssue(Issues, TEXT("target_name_duplicate"), FString::Printf(TEXT("$.targets[%d].name"), Index), TEXT("Target names must be unique."));
+						AddIssue(Issues, Origin, TEXT("target_name_duplicate"), FString::Printf(TEXT("$.targets[%d].name"), Index), TEXT("/targets/") + FString::FromInt(Index) + TEXT("/name"),
+							TEXT("Target names must be unique."), MakeShared<FJsonValueString>(Name), MakeShared<FJsonValueString>(TEXT("unique target name")));
 					}
 					else
 					{
@@ -322,23 +419,26 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 
 		bool ValidateStringTable(
 			const TSharedPtr<FJsonObject>& Root,
-			TArray<TSharedPtr<FJsonValue>>& Issues)
+			TArray<UE::UAI::Contract::FDiagnostic>& Issues, const FExternalDocumentOrigin& Origin)
 		{
 			if (!Root.IsValid())
 			{
-				AddIssue(Issues, TEXT("json_root_invalid"), TEXT("$"), TEXT("StringTable root must be an object."));
+				AddIssue(Issues, Origin, TEXT("json_root_invalid"), TEXT("$"), TEXT("/"),
+					TEXT("StringTable root must be an object."), MakeShared<FJsonValueString>(TEXT("<missing>")), MakeShared<FJsonValueString>(TEXT("object")));
 				return false;
 			}
 			FString Schema;
 			if (!Root->TryGetStringField(TEXT("schema"), Schema)
 				|| Schema != TEXT("uai.string_table.v1"))
 			{
-				AddIssue(Issues, TEXT("schema_invalid"), TEXT("$.schema"), TEXT("Expected uai.string_table.v1."));
+				AddIssue(Issues, Origin, TEXT("schema_invalid"), TEXT("$.schema"), TEXT("/schema"),
+					TEXT("Expected uai.string_table.v1."), ExternalInputShape(Root->TryGetField(TEXT("schema"))), MakeShared<FJsonValueString>(TEXT("uai.string_table.v1")));
 			}
 			const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
 			if (!Root->TryGetArrayField(TEXT("entries"), Entries) || !Entries)
 			{
-				AddIssue(Issues, TEXT("entries_required"), TEXT("$.entries"), TEXT("Entries must be an array."));
+				AddIssue(Issues, Origin, TEXT("entries_required"), TEXT("$.entries"), TEXT("/entries"),
+					TEXT("Entries must be an array."), ExternalInputShape(Root->TryGetField(TEXT("entries"))), MakeShared<FJsonValueString>(TEXT("array")));
 			}
 			else
 			{
@@ -352,11 +452,17 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 					if (!Entry.IsValid() || !Entry->TryGetStringField(TEXT("key"), Key) || Key.IsEmpty()
 						|| !Entry->TryGetStringField(TEXT("source"), Source))
 					{
-						AddIssue(Issues, TEXT("entry_invalid"), FString::Printf(TEXT("$.entries[%d]"), Index), TEXT("Each entry requires unique key and string source."));
+						AddIssue(Issues, Origin, TEXT("entry_invalid"), FString::Printf(TEXT("$.entries[%d]"), Index),
+							TEXT("/entries/") + FString::FromInt(Index) + (!Entry ? TEXT("") : Key.IsEmpty() ? TEXT("/key") : TEXT("/source")),
+							!Entry ? TEXT("StringTable entry must be an object.") : Key.IsEmpty()
+								? TEXT("StringTable entry key must be a non-empty string.") : TEXT("StringTable entry source must be a string."),
+							ExternalInputShape(Entry ? Entry->TryGetField(Key.IsEmpty() ? TEXT("key") : TEXT("source")) : (*Entries)[Index]),
+							MakeShared<FJsonValueString>(!Entry ? TEXT("object") : Key.IsEmpty() ? TEXT("non-empty key string") : TEXT("source string")));
 					}
 					else if (Keys.Contains(Key))
 					{
-						AddIssue(Issues, TEXT("entry_key_duplicate"), FString::Printf(TEXT("$.entries[%d].key"), Index), TEXT("Entry keys must be unique."));
+						AddIssue(Issues, Origin, TEXT("entry_key_duplicate"), FString::Printf(TEXT("$.entries[%d].key"), Index), TEXT("/entries/") + FString::FromInt(Index) + TEXT("/key"),
+							TEXT("Entry keys must be unique."), MakeShared<FJsonValueString>(Key), MakeShared<FJsonValueString>(TEXT("unique entry key")));
 					}
 					else
 					{
@@ -395,30 +501,32 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		bool ExecuteLocalizationValidate(
 			const TSharedPtr<FJsonObject>& Parameters,
 			TSharedPtr<FJsonObject>& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<FJsonObject> Root;
-			if (!LoadDocument(Parameters, Root, OutError)) return false;
-			TArray<TSharedPtr<FJsonValue>> Issues;
-			const bool bValid = ValidateLocalization(Root, Issues);
+			FExternalDocumentOrigin Origin;
+			if (!LoadDocument(Parameters, Root, OutError, Origin)) return false;
+			TArray<UE::UAI::Contract::FDiagnostic> Issues;
+			const bool bValid = ValidateLocalization(Root, Issues, Origin);
 			Out = MakeShared<FJsonObject>();
 			Out->SetBoolField(TEXT("valid"), bValid);
 			Out->SetNumberField(TEXT("error_count"), Issues.Num());
-			Out->SetArrayField(TEXT("issues"), Issues);
+			Out->SetArrayField(TEXT("issues"), ExternalIssueReport(Issues));
 			return true;
 		}
 
 		bool ExecuteLocalizationDiff(
 			const TSharedPtr<FJsonObject>& Parameters,
 			TSharedPtr<FJsonObject>& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<FJsonObject> Desired;
-			if (!LoadDocument(Parameters, Desired, OutError)) return false;
-			TArray<TSharedPtr<FJsonValue>> Issues;
-			if (!ValidateLocalization(Desired, Issues))
+			FExternalDocumentOrigin Origin;
+			if (!LoadDocument(Parameters, Desired, OutError, Origin)) return false;
+			TArray<UE::UAI::Contract::FDiagnostic> Issues;
+			if (!ValidateLocalization(Desired, Issues, Origin))
 			{
-				return Fail(OutError, TEXT("localization_document_validation_failed"));
+				return Fail(OutError, ExternalValidationFailure(TEXT("localization_document_validation_failed"), MoveTemp(Issues)));
 			}
 			TMap<FString, TSharedPtr<FJsonObject>> Existing;
 			const TSharedPtr<FJsonObject> Current = LocalizationSnapshot(false, false);
@@ -474,30 +582,32 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		bool ExecuteStringTableValidate(
 			const TSharedPtr<FJsonObject>& Parameters,
 			TSharedPtr<FJsonObject>& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<FJsonObject> Root;
-			if (!LoadDocument(Parameters, Root, OutError)) return false;
-			TArray<TSharedPtr<FJsonValue>> Issues;
-			const bool bValid = ValidateStringTable(Root, Issues);
+			FExternalDocumentOrigin Origin;
+			if (!LoadDocument(Parameters, Root, OutError, Origin)) return false;
+			TArray<UE::UAI::Contract::FDiagnostic> Issues;
+			const bool bValid = ValidateStringTable(Root, Issues, Origin);
 			Out = MakeShared<FJsonObject>();
 			Out->SetBoolField(TEXT("valid"), bValid);
 			Out->SetNumberField(TEXT("error_count"), Issues.Num());
-			Out->SetArrayField(TEXT("issues"), Issues);
+			Out->SetArrayField(TEXT("issues"), ExternalIssueReport(Issues));
 			return true;
 		}
 
 		bool ExecuteStringTableDiff(
 			const TSharedPtr<FJsonObject>& Parameters,
 			TSharedPtr<FJsonObject>& Out,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TSharedPtr<FJsonObject> Desired;
-			if (!LoadDocument(Parameters, Desired, OutError)) return false;
-			TArray<TSharedPtr<FJsonValue>> Issues;
-			if (!ValidateStringTable(Desired, Issues))
+			FExternalDocumentOrigin Origin;
+			if (!LoadDocument(Parameters, Desired, OutError, Origin)) return false;
+			TArray<UE::UAI::Contract::FDiagnostic> Issues;
+			if (!ValidateStringTable(Desired, Issues, Origin))
 			{
-				return Fail(OutError, TEXT("string_table_document_validation_failed"));
+				return Fail(OutError, ExternalValidationFailure(TEXT("string_table_document_validation_failed"), MoveTemp(Issues)));
 			}
 			FString Target;
 			if (!Parameters->TryGetStringField(TEXT("target"), Target)
@@ -555,13 +665,22 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 		const FString& Capability,
 		const TSharedPtr<FJsonObject>& Parameters,
 		TSharedPtr<FJsonObject>& OutObservation,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutObservation.Reset();
 		OutError.Reset();
 		if (!Capabilities.Contains(Capability))
 		{
-			return Fail(OutError, TEXT("localization_content_graph_capability_unknown"), Capability);
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("localization_content_graph_capability_unknown"),
+				TEXT("No localization content graph capability is registered with this name."), TEXT("execution"));
+			Diagnostic.SourceKind = TEXT("command_input");
+			Diagnostic.PropertyPath = TEXT("capability");
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(Capability);
+			TArray<FString> Names = Capabilities.Array(); Names.Sort();
+			TArray<TSharedPtr<FJsonValue>> Supported;
+			for (const auto& Name : Names) Supported.Add(MakeShared<FJsonValueString>(Name));
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueArray>(Supported);
+			return Fail(OutError, MoveTemp(Diagnostic));
 		}
 		if (Capability == TEXT("localization.validate"))
 		{
@@ -594,7 +713,14 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 				|| !Parameters->TryGetStringField(TEXT("target"), Target)
 				|| Target.IsEmpty())
 			{
-				return Fail(OutError, TEXT("localization_target_required"));
+				auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("localization_target_required"),
+					TEXT("Localization target read requires a non-empty target name."), TEXT("execution"));
+				Diagnostic.SourceKind = TEXT("command_input");
+				Diagnostic.Source.JsonPath = TEXT("/target");
+				Diagnostic.PropertyPath = TEXT("target");
+				Diagnostic.ActualValue = ExternalInputShape(Parameters.IsValid() ? Parameters->TryGetField(TEXT("target")) : nullptr);
+				Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty target name"));
+				return Fail(OutError, MoveTemp(Diagnostic));
 			}
 			OutObservation = TargetJson(Target, true, true);
 			OutObservation->SetBoolField(TEXT("exists"), FindTarget(Target) != nullptr);
@@ -659,6 +785,12 @@ namespace UE::UAI::DomainAdapters::ContentGraphRead
 			TEXT("stale"), TArray<TSharedPtr<FJsonValue>>());
 			return true;
 		}
-		return Fail(OutError, TEXT("localization_content_graph_capability_unhandled"), Capability);
+		auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("localization_content_graph_capability_unhandled"),
+			TEXT("The registered localization capability has no execution handler."), TEXT("execution"));
+		Diagnostic.SourceKind = TEXT("native_result");
+		Diagnostic.PropertyPath = TEXT("capability");
+		Diagnostic.ActualValue = MakeShared<FJsonValueString>(Capability);
+		Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("implemented capability"));
+		return Fail(OutError, MoveTemp(Diagnostic));
 	}
 }

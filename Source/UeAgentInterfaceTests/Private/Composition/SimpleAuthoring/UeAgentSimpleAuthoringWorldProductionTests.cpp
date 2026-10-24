@@ -1089,8 +1089,6 @@ bool FUeAgentSimpleAuthoringWorldProductionContractTest::RunTest(
 			false,
 			false,
 			false),
-		FUeAgentPageRequest(),
-		TOptional<int64>(),
 		TArray<FUeAgentArtifactDescriptor>(),
 		TArray<FUeAgentProjectionDiagnostic>());
 
@@ -1163,8 +1161,7 @@ bool FUeAgentSimpleAuthoringWorldProductionContractTest::RunTest(
 	ApplicationConfig.ServerSessionId =
 		TEXT("session:sa008-world-production");
 	ApplicationConfig.RegistryEpoch = 1;
-	ApplicationConfig.TimeoutSeconds = 30.0;
-	ApplicationConfig.MaxFrameBytes = 1024 * 1024;
+
 
 	TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
 	FUeAgentSimpleAuthoringApplicationError ApplicationError;
@@ -1847,8 +1844,6 @@ bool FUeAgentSimpleAuthoringWorldOwnedPackageTest::RunTest(
 				false,
 				false,
 				false),
-			FUeAgentPageRequest(),
-			TOptional<int64>(),
 			TArray<FUeAgentArtifactDescriptor>(),
 			TArray<FUeAgentProjectionDiagnostic>());
 
@@ -1926,8 +1921,7 @@ bool FUeAgentSimpleAuthoringWorldOwnedPackageTest::RunTest(
 		ApplicationConfig.ServerSessionId =
 			TEXT("session:sa008-world-e4");
 		ApplicationConfig.RegistryEpoch = 1;
-		ApplicationConfig.TimeoutSeconds = 30.0;
-		ApplicationConfig.MaxFrameBytes = 1024 * 1024;
+
 
 		TSharedPtr<FUeAgentSimpleAuthoringApplication>
 			Application;

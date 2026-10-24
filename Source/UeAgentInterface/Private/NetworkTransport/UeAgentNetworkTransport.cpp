@@ -67,13 +67,6 @@ namespace UE::UAI::NetworkTransport
 			OutError.MissingCapabilities.Add(TEXT("message_boundaries"));
 		}
 		if (
-			Requirements.MaxFrameBytes <= 0
-			|| Capabilities.MaxFrameBytes <= 0
-			|| Requirements.MaxFrameBytes > Capabilities.MaxFrameBytes)
-		{
-			OutError.MissingCapabilities.Add(TEXT("max_frame_bytes"));
-		}
-		if (
 			Requirements.bRequireRequestReply
 			&& !Capabilities.bRequestReply)
 		{

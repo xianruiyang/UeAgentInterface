@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Templates/SharedPointer.h"
 
@@ -12,11 +14,11 @@ namespace UE::UAI::Contract
 
 namespace UE::UAI::DomainAdapters::RigSimulationSpatial
 {
-	/** Builds the immutable exact C0 descriptor registry for all 18 RigSimulationSpatial capabilities. */
+	/** Builds the immutable exact C0 descriptor registry for the current RigSimulationSpatial capabilities. */
 	UEAGENTINTERFACE_API bool TryCreateRigSimulationSpatialDescriptorRegistry(
 		TSharedPtr<const UE::UAI::Contract::FUeAgentDescriptorRegistry>&
 			OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }
 
 

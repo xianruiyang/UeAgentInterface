@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandHandlers/AssetDurable/UeAgentAssetDurableMaintenanceHandlers.h"
 #include "CommandRegistry/UeAgentImmutableCommandRegistry.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
@@ -11,13 +13,13 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 			IUeAgentAssetDurableMaintenancePort> Port,
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>&
 			OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool
 	TryCreateProductionAssetDurableMaintenanceContribution(
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>&
 			OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateAssetDurableMaintenanceRegistration(
 		TSharedRef<CommandHandlers::AssetDurable::
@@ -26,5 +28,5 @@ namespace UE::UAI::Module::CommandRegistration::AssetDurable
 			OutRegistry,
 		TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch>&
 			OutDispatch,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

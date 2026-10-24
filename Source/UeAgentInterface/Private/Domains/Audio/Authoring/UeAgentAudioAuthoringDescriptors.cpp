@@ -46,7 +46,7 @@ const TArray<FProfile> Profiles = {
     },
 };
 
-bool RegisterIdentity(const FProfile &Profile, FString &OutError) {
+bool RegisterIdentity(const FProfile &Profile, UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentAuthoringIdentity::FModelDescriptor Model;
   Model.ModelId = Profile.IdentityModelId;
   Model.TargetKind = Profile.TargetKind;
@@ -60,7 +60,7 @@ bool RegisterIdentity(const FProfile &Profile, FString &OutError) {
 bool RegisterSemantic(
     const FProfile &Profile, const FString &SemanticId,
     const UeAgentAuthoringSemanticRegistry::EWriteCapability WriteCapability,
-    const bool bFactoryDefault, FString &OutError) {
+    const bool bFactoryDefault, UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentAuthoringSemanticRegistry::FSemanticDescriptor Semantic;
   Semantic.SemanticId = SemanticId;
   Semantic.DomainId = DomainId;
@@ -72,7 +72,8 @@ bool RegisterSemantic(
   Semantic.WriteCapability = WriteCapability;
   Semantic.ConstraintSource = TEXT("audio.asset.schema");
   Semantic.AvailabilitySource = StateAccessorId;
-  Semantic.Comparator = TEXT("uai.compare.canonical_value");
+  Semantic.Comparator = Profile.Kind == EAssetKind::SoundCue
+      ? TEXT("uai.compare.graph_int32_position") : TEXT("uai.compare.canonical_value");
   Semantic.CapabilityTags = {TEXT("audio"), TEXT("asset"), TEXT("graph"),
                              TEXT("reference_boundary"),
                              TEXT("editor_authoring")};
@@ -127,7 +128,7 @@ bool ParseAssetKind(const FString &Text, EAssetKind &OutKind) {
   return false;
 }
 
-bool RegisterDescriptors(FString &OutError) {
+bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError) {
   for (const FProfile &Profile : Profiles) {
     if (!RegisterIdentity(Profile, OutError))
       return false;

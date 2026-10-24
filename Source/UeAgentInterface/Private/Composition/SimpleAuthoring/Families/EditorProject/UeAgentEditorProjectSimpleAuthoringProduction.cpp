@@ -1,11 +1,12 @@
 #include "Composition/SimpleAuthoring/Families/EditorProject/UeAgentEditorProjectSimpleAuthoringProduction.h"
+#include "Core/Contract/UeAgentContractJson.h"
 
 #include "Composition/SimpleAuthoring/Families/EditorProject/UeAgentEditorProjectSimpleAuthoringStateMechanics.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "Serialization/JsonReader.h"
+#include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 
 namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
@@ -48,7 +49,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 			}
 
 			TArray<FEditorProjectProfile> Profiles;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 		};
 
 		const FEditorProjectProfileCatalog& GetProfileCatalog()
@@ -74,53 +75,160 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 			return nullptr;
 		}
 
-		void SetError(
-			FUeAgentEditorProjectSimpleAuthoringError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+
+
+		FDiagnostic ResolvedEditorProjectTargetFailure(
+			const FUeAgentEditorProjectSimpleEffectResolvedTarget& Target,
+			const FString& TargetRef, const FString& ExpectedProfile,
+			const FString& Code, const FString& ExpectedRevision = FString(), bool bCheckRevision = false)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			if (!Target.IsValid() && !Target.GetValidationDiagnostic().IsEmpty())
+				return Target.GetValidationDiagnostic();
+			const bool bCanonicalMismatch = Target.IsValid() && Target.GetCanonicalRef() != TargetRef;
+			const bool bProfileMismatch = Target.IsValid() && Target.GetProfileId() != ExpectedProfile;
+			const bool bRevisionMismatch = Target.IsValid() && bCheckRevision && Target.GetRevision() != ExpectedRevision;
+			auto Error = FDiagnostic::Failure(Code,
+				!Target.IsValid() ? TEXT("The resolver did not return a usable editor project target.")
+				: bCanonicalMismatch ? TEXT("The resolver returned a different editor project target.")
+				: bProfileMismatch ? TEXT("The resolved editor project target has a different target kind.")
+				: bRevisionMismatch ? TEXT("The editor project target changed after its revision was captured.")
+				: TEXT("The resolver did not confirm the editor project target resolution."), TEXT("simple_authoring"));
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = !Target.IsValid() ? TEXT("/target_resolved")
+				: bCanonicalMismatch ? TEXT("/target_ref")
+				: bProfileMismatch ? TEXT("/target_kind_matches")
+				: bRevisionMismatch ? TEXT("/target_revision_matches") : TEXT("/target_resolution_confirmed");
+			Error.ActualValue = bCanonicalMismatch
+				? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Target.GetCanonicalRef()))
+				: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false));
+			Error.ExpectedValue = bCanonicalMismatch
+				? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TargetRef))
+				: TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(true));
+			Error.ActualValuePresent = true;
+			Error.ExpectedValuePresent = true;
+			if (bProfileMismatch)
+			{
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Target.GetProfileId());
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedProfile);
+			}
+			if (bRevisionMismatch)
+			{
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Target.GetRevision());
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedRevision);
+			}
+			return Error;
 		}
 
-		void SetProductionError(
-			FUeAgentSimpleAuthoringProductionError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		void SetProductionError(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
+        { OutError = MoveTemp(Diagnostic); if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;  }
+
+
+		FDiagnostic EditorProjectFailure(const FString& Code, const FString& Reason, const FString& Field)
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			auto Error = FDiagnostic::Failure(Code, Reason, TEXT("simple_authoring"));
+			Error.Schema = TEXT("uai.runtime.diagnostic/1");
+			Error.SourceKind = TEXT("native_result");
+			Error.PropertyPath = Field;
+			return Error;
 		}
 
-		bool TryParseJson(
-			const FString& Json,
-			TSharedPtr<FJsonObject>& OutObject)
+		FDiagnostic JsonValueFailure(const FString& Path, const TSharedPtr<FJsonValue>& Actual, const FString& Expected, const bool bInternal = false)
 		{
-			OutObject.Reset();
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(Json);
-			return FJsonSerializer::Deserialize(Reader, OutObject)
-				&& OutObject.IsValid();
+			auto Error = EditorProjectFailure(TEXT("editor_project_state_field_invalid"),
+				TEXT("The EditorProject state field does not satisfy the required value."), Path);
+			Error.ActualValuePresent = Actual.IsValid();
+			if (bInternal) Error.ActualEvidence = Actual;
+			else if (Actual.IsValid() && (Actual->Type == EJson::Array || Actual->Type == EJson::Object))
+			{
+				auto Summary = MakeShared<FJsonObject>();
+				Summary->SetStringField(TEXT("kind"), Actual->Type == EJson::Array ? TEXT("array") : TEXT("object"));
+				if (Actual->Type == EJson::Array) Summary->SetNumberField(TEXT("count"), Actual->AsArray().Num());
+				else if (Actual->AsObject().IsValid()) Summary->SetNumberField(TEXT("count"), Actual->AsObject()->Values.Num());
+				Error.ActualValue = MakeShared<FJsonValueObject>(Summary);
+			}
+			else Error.ActualValue = Actual;
+			Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			return Error;
 		}
 
-		bool TrySerializeJson(
-			const TSharedPtr<FJsonObject>& Object,
-			FString& OutJson)
+		FDiagnostic JsonFieldFailure(const TSharedPtr<FJsonObject>& Object, const FString& Field,
+			const FString& Expected, const FString& Path = FString(), const bool bInternal = false)
+		{
+			return JsonValueFailure(Path.IsEmpty() ? Field : Path,
+				Object.IsValid() ? Object->Values.FindRef(Field) : nullptr, Expected, bInternal);
+		}
+
+		FDiagnostic MissingProfile(const FUeAgentDescriptorIdentity& Identity)
+		{
+			const auto& Catalog = GetProfileCatalog();
+			if (!Catalog.Error.IsEmpty()) return Catalog.Error;
+			const auto* SameId = Catalog.Profiles.FindByPredicate([&](const FEditorProjectProfile& Profile)
+				{ return Profile.DescriptorId == Identity.GetDescriptorId(); });
+			const auto* SameVersion = Catalog.Profiles.FindByPredicate([&](const FEditorProjectProfile& Profile)
+				{ return Profile.DescriptorId == Identity.GetDescriptorId() && Profile.DescriptorVersion == Identity.GetVersion(); });
+			auto Error = EditorProjectFailure(TEXT("editor_project_profile_missing"),
+				!SameId ? TEXT("No EditorProject profile is registered for the requested descriptor.")
+					: !SameVersion ? TEXT("No registered EditorProject profile matches the requested descriptor version.")
+					: TEXT("The EditorProject descriptor hash differs from the registered profile."),
+				!SameId ? TEXT("descriptor_id") : !SameVersion ? TEXT("descriptor_version") : TEXT("descriptor_hash"));
+			Error.CandidateName = Identity.GetDescriptorId();
+			if (!SameId)
+			{
+				Error.ActualValue = MakeShared<FJsonValueString>(Identity.GetDescriptorId());
+				TArray<TSharedPtr<FJsonValue>> Supported;
+				for (const auto& Profile : Catalog.Profiles) Supported.Add(MakeShared<FJsonValueString>(Profile.DescriptorId));
+				Error.ExpectedValue = MakeShared<FJsonValueArray>(Supported);
+			}
+			else if (!SameVersion)
+			{
+				Error.ActualValue = MakeShared<FJsonValueNumber>(Identity.GetVersion());
+				TArray<TSharedPtr<FJsonValue>> Versions;
+				for (const auto& Profile : Catalog.Profiles)
+					if (Profile.DescriptorId == Identity.GetDescriptorId()) Versions.Add(MakeShared<FJsonValueNumber>(Profile.DescriptorVersion));
+				Error.ExpectedValue = MakeShared<FJsonValueArray>(Versions);
+			}
+			else
+			{
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Identity.GetDescriptorHash());
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(SameVersion->DescriptorHash);
+			}
+			return Error;
+		}
+
+		FDiagnostic CountFailure(const FString& Code, const FString& Reason, const FString& Field, const int32 Actual, const int32 Expected)
+		{
+			auto Error = EditorProjectFailure(Code, Reason, Field);
+			Error.ActualValue = MakeShared<FJsonValueNumber>(Actual);
+			Error.ExpectedValue = MakeShared<FJsonValueNumber>(Expected);
+			return Error;
+		}
+
+		bool TrySerializeJson(const TSharedPtr<FJsonObject>& Object, FString& OutJson, FDiagnostic& OutError)
 		{
 			OutJson.Reset();
 			if (!Object.IsValid())
 			{
+				OutError = EditorProjectFailure(TEXT("editor_project_request_evidence_invalid"),
+					TEXT("The EditorProject request evidence object is missing."), TEXT("binding_evidence"));
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
 				return false;
 			}
-			const TSharedRef<TJsonWriter<>> Writer =
-				TJsonWriterFactory<>::Create(&OutJson);
-			return FJsonSerializer::Serialize(
-				Object.ToSharedRef(),
-				Writer);
+			const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutJson);
+			if (!FJsonSerializer::Serialize(Object.ToSharedRef(), Writer))
+			{
+				OutError = EditorProjectFailure(TEXT("editor_project_request_evidence_invalid"),
+					TEXT("The EditorProject request evidence object could not be serialized to JSON."), TEXT("binding_evidence"));
+				return false;
+			}
+			return true;
+		}
+
+		FString DurableKindName(const EDurableArtifactKind Kind)
+		{
+			return Kind == EDurableArtifactKind::Package ? TEXT("package")
+				: Kind == EDurableArtifactKind::ProjectConfig ? TEXT("project_config")
+				: FString::FromInt(static_cast<int32>(Kind));
 		}
 
 		bool TryParseEvidence(
@@ -129,48 +237,48 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 			FUeAgentDiscoveryError& OutError)
 		{
 			const FString& Evidence = Binding.GetBindingEvidence();
-			if (!Evidence.StartsWith(RequestEvidencePrefix)
-				|| !TryParseJson(
-					Evidence.RightChop(
-						FCString::Strlen(RequestEvidencePrefix)),
-					OutPayload))
+			if (!Evidence.StartsWith(RequestEvidencePrefix))
 			{
-				OutError.Code =
-					TEXT("editor_project_request_evidence_invalid");
+				OutError = EditorProjectFailure(TEXT("editor_project_request_evidence_invalid"),
+					TEXT("The EditorProject binding evidence has an unsupported format prefix."), TEXT("binding_evidence/prefix"));
+				OutError.SubjectId = Binding.GetBindingId();
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Evidence.Left(FCString::Strlen(RequestEvidencePrefix)));
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(RequestEvidencePrefix);
+				return false;
+			}
+			if (!Contract::Json::TryParseObject(Evidence.RightChop(FCString::Strlen(RequestEvidencePrefix)), OutPayload, OutError))
+			{
+				OutError.SourceKind = TEXT("native_result");
+				OutError.PropertyPath = TEXT("binding_evidence");
 				OutError.SubjectId = Binding.GetBindingId();
 				return false;
 			}
 			return true;
 		}
 
-		bool TryReadEvidence(
-			const TSharedPtr<FJsonObject>& Payload,
-			FString& OutTargetRef,
-			FString& OutExpectedRevision,
-			EDurableArtifactKind& OutKind,
-			FString& OutLocation)
+		bool TryReadEvidence(const TSharedPtr<FJsonObject>& Payload, FString& OutTargetRef,
+			FString& OutExpectedRevision, EDurableArtifactKind& OutKind, FString& OutLocation, FDiagnostic& OutError)
 		{
 			OutTargetRef.Reset();
 			OutExpectedRevision.Reset();
 			OutLocation.Reset();
 			FString Kind;
-			if (!Payload.IsValid()
-				|| !Payload->TryGetStringField(
-					TEXT("target_ref"),
-					OutTargetRef)
-				|| !Payload->TryGetStringField(
-					TEXT("expected_revision"),
-					OutExpectedRevision)
-				|| !Payload->TryGetStringField(
-					EvidenceDurableKind,
-					Kind)
-				|| !Payload->TryGetStringField(
-					EvidenceDurableLocation,
-					OutLocation)
-				|| OutTargetRef.IsEmpty()
-				|| OutExpectedRevision.IsEmpty()
-				|| OutLocation.IsEmpty())
+			const auto Read = [&](const TCHAR* Field, FString& Value, const TCHAR* Path, const bool bInternal)
 			{
+				if (Payload.IsValid() && Payload->TryGetStringField(Field, Value)) return true;
+				OutError = JsonFieldFailure(Payload, Field, TEXT("string"), Path, bInternal);
+				return false;
+			};
+			if (!Read(TEXT("target_ref"), OutTargetRef, TEXT("target_ref"), false)
+				|| !Read(TEXT("expected_revision"), OutExpectedRevision, TEXT("expected_revision"), true)
+				|| !Read(EvidenceDurableKind, Kind, TEXT("binding_evidence/durable_kind"), false)
+				|| !Read(EvidenceDurableLocation, OutLocation, TEXT("binding_evidence/durable_location"), true)) return false;
+			if (OutTargetRef.IsEmpty() || OutExpectedRevision.IsEmpty() || OutLocation.IsEmpty())
+			{
+				const bool bTarget = OutTargetRef.IsEmpty();
+				const bool bRevision = OutExpectedRevision.IsEmpty();
+				OutError = JsonValueFailure(bTarget ? TEXT("target_ref") : bRevision ? TEXT("expected_revision") : TEXT("binding_evidence/durable_location"),
+					MakeShared<FJsonValueString>(TEXT("")), TEXT("nonempty string"), !bTarget);
 				return false;
 			}
 			if (Kind == TEXT("package"))
@@ -183,6 +291,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 				OutKind = EDurableArtifactKind::ProjectConfig;
 				return true;
 			}
+			OutError = JsonValueFailure(TEXT("binding_evidence/durable_kind"),
+				MakeShared<FJsonValueString>(Kind), TEXT("package or project_config"));
 			return false;
 		}
 
@@ -190,132 +300,118 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 			const TSharedPtr<FJsonValue>& JsonValue,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FUeAgentStateSemanticError& OutError,
+			const FString& Path = TEXT("state"))
 		{
 			OutValue.Reset();
-			FUeAgentStateSemanticError Error;
 			if (!JsonValue.IsValid())
 			{
-				OutError = FExecutionMutationError(
-					TEXT("editor_project_state_value_missing"));
+				OutError = EditorProjectFailure(TEXT("editor_project_state_value_missing"),
+					TEXT("The generated EditorProject state contains a missing JSON value."), Path);
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
 				return false;
 			}
+			const auto Complete = [&](const bool bSucceeded)
+			{
+				if (!bSucceeded)
+				{
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = OutError.PropertyPath.IsEmpty()
+						? Path : Path + (OutError.PropertyPath.StartsWith(TEXT("/")) ? OutError.PropertyPath : TEXT("/") + OutError.PropertyPath);
+				}
+				return bSucceeded;
+			};
 			switch (JsonValue->Type)
 			{
 			case EJson::Null:
-				if (FUeAgentCanonicalValue::TryNull(
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
+				return Complete(FUeAgentCanonicalValue::TryNull(
+					Resources,
+					OutValue,
+					OutError));
 			case EJson::Boolean:
-				if (FUeAgentCanonicalValue::TryBoolean(
-						JsonValue->AsBool(),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
+				return Complete(FUeAgentCanonicalValue::TryBoolean(
+					JsonValue->AsBool(),
+					Resources,
+					OutValue,
+					OutError));
 			case EJson::String:
-				if (FUeAgentCanonicalValue::TryString(
-						JsonValue->AsString(),
-						Resources,
-						OutValue,
-						Error))
-				{
-					return true;
-				}
-				break;
+				return Complete(FUeAgentCanonicalValue::TryString(
+					JsonValue->AsString(),
+					Resources,
+					OutValue,
+					OutError));
 			case EJson::Number:
 				{
 					const double Number = JsonValue->AsNumber();
-					const bool bInteger = FMath::IsNearlyEqual(
-							Number,
-							FMath::FloorToDouble(Number))
-						&& Number >= static_cast<double>(MIN_int64)
-						&& Number <= static_cast<double>(MAX_int64);
-					if (bInteger
-						? FUeAgentCanonicalValue::TryInteger(
-							FString::Printf(
-								TEXT("%lld"),
-								static_cast<long long>(Number)),
-							Resources,
-							OutValue,
-							Error)
-						: FUeAgentCanonicalValue::TryDecimal(
-							FString::SanitizeFloat(Number),
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
-					break;
+					const bool bInteger = FMath::IsNearlyEqual(Number, FMath::FloorToDouble(Number))
+						&& Number >= static_cast<double>(MIN_int64) && Number <= static_cast<double>(MAX_int64);
+					return Complete(bInteger
+						? FUeAgentCanonicalValue::TryInteger(FString::Printf(TEXT("%lld"), static_cast<long long>(Number)), Resources, OutValue, OutError)
+						: FUeAgentCanonicalValue::TryDecimal(FString::SanitizeFloat(Number), Resources, OutValue, OutError));
 				}
 			case EJson::Array:
 				{
 					TArray<FUeAgentCanonicalValueRef> Items;
-					for (const TSharedPtr<FJsonValue>& Item
-						: JsonValue->AsArray())
+					const auto& Values = JsonValue->AsArray();
+					for (int32 Index = 0; Index < Values.Num(); ++Index)
 					{
-						FUeAgentCanonicalValuePtr Canonical;
+						FUeAgentCanonicalValuePtr CanonicalItem;
 						if (!TryCanonicalJson(
-								Item,
+								Values[Index],
 								Resources,
-								Canonical,
-								OutError))
+								CanonicalItem,
+								OutError,
+								Path + TEXT("/") + FString::FromInt(Index)))
 						{
 							return false;
 						}
-						Items.Add(Canonical.ToSharedRef());
+						Items.Add(CanonicalItem.ToSharedRef());
 					}
-					if (FUeAgentCanonicalValue::TryArray(
-							Items,
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
-					break;
+					return Complete(FUeAgentCanonicalValue::TryArray(
+						Items,
+						Resources,
+						OutValue,
+						OutError));
 				}
 			case EJson::Object:
 				{
-					TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
-					for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair
+					TArray<
+						TPair<
+							FString,
+							FUeAgentCanonicalValueRef>> Items;
+					for (const TPair<
+						FString,
+						TSharedPtr<FJsonValue>>& Pair
 						: JsonValue->AsObject()->Values)
 					{
-						FUeAgentCanonicalValuePtr Canonical;
+						FUeAgentCanonicalValuePtr CanonicalItem;
 						if (!TryCanonicalJson(
 								Pair.Value,
 								Resources,
-								Canonical,
-								OutError))
+								CanonicalItem,
+								OutError,
+								Path + TEXT("/") + Pair.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"))))
 						{
 							return false;
 						}
-						Items.Emplace(Pair.Key, Canonical.ToSharedRef());
+						Items.Emplace(
+							Pair.Key,
+							CanonicalItem.ToSharedRef());
 					}
-					if (FUeAgentCanonicalValue::TryObject(
-							Items,
-							Resources,
-							OutValue,
-							Error))
-					{
-						return true;
-					}
-					break;
+					return Complete(FUeAgentCanonicalValue::TryObject(
+						Items,
+						Resources,
+						OutValue,
+						OutError));
 				}
 			default:
-				break;
+				OutError = EditorProjectFailure(TEXT("editor_project_state_value_kind_invalid"),
+					TEXT("The generated EditorProject state contains an unsupported JSON kind."), Path);
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(JsonValue->Type));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("null, boolean, string, number, array or object"));
+				return false;
 			}
-			OutError = FExecutionMutationError(Error.Code, Error.Detail);
-			return false;
 		}
 
 		FUeAgentCanonicalType EditorProjectStateType(
@@ -385,68 +481,70 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 				TSharedPtr<FJsonObject> Payload;
 				FString TargetRef;
 				FString ExpectedRevision;
-				if (!Profile
-					|| !TryParseJson(
-						CanonicalRequest.GetPayload().GetJsonValue(),
-						Payload)
-					|| !Payload->TryGetStringField(
-						TEXT("target_ref"),
-						TargetRef)
-					|| !Payload->TryGetStringField(
-						TEXT("expected_revision"),
-						ExpectedRevision)
-					|| TargetRef.IsEmpty()
-					|| ExpectedRevision.IsEmpty())
+				if (!Profile)
 				{
-					SetProductionError(
-						OutError,
-						TEXT("editor_project_production_profile_missing"),
-						CanonicalRequest.GetDescriptorIdentity()
-							.GetDescriptorId());
+					OutError = MissingProfile(CanonicalRequest.GetDescriptorIdentity());
 					return false;
 				}
-				if (!Deadline.CanContinue() || Cancellation.IsCancelled())
+				if (!Contract::Json::TryParseObject(CanonicalRequest.GetPayload().GetJsonValue(), Payload, OutError))
 				{
-					SetProductionError(
-						OutError,
-						TEXT("editor_project_target_resolution_cancelled"),
-						TargetRef);
+					if (OutError.SourceKind.IsEmpty()) OutError.SourceKind = TEXT("command_input");
+					return false;
+				}
+				if (!Payload->TryGetStringField(TEXT("target_ref"), TargetRef) || TargetRef.IsEmpty())
+				{
+					OutError = JsonFieldFailure(Payload, TEXT("target_ref"), TEXT("nonempty reference string"));
+					OutError.SourceKind = TEXT("command_input");
+					OutError.Source.JsonPath = TEXT("/target_ref");
+					return false;
+				}
+				if (Cancellation.IsCancelled())
+				{
+					OutError = EditorProjectFailure(TEXT("editor_project_target_resolution_cancelled"),
+						TEXT("The EditorProject target resolution was cancelled."), TEXT("cancellation"));
+					OutError.TargetPath = TargetRef;
 					return false;
 				}
 				FUeAgentEditorProjectSimpleEffectResolvedTarget Target;
 				FUeAgentEditorProjectSimpleAuthoringDurableBinding Binding;
 				FExecutionMutationError Error;
-				if (!TargetResolver->TryResolveTarget(
-						TargetRef,
-						Target,
-						Error)
-					|| !Target.IsValid()
-					|| Target.GetCanonicalRef() != TargetRef
-					|| Target.GetProfileId() != Profile->ProfileId
-					|| Target.GetRevision() != ExpectedRevision)
+				if (!TargetResolver->TryResolveTarget(TargetRef, Target, Error))
 				{
-					SetProductionError(
-						OutError,
-						Error.GetCode().IsEmpty()
-							? TEXT("editor_project_target_revision_mismatch")
-							: Error.GetCode(),
-						TargetRef,
-						Error.GetDetail());
+					if (Error.TargetPath.IsEmpty()) Error.TargetPath = TargetRef;
+					if (Error.Source.JsonPath.IsEmpty()) Error.Source.JsonPath = TEXT("/target_ref");
+					SetProductionError(OutError, MoveTemp(Error), TargetRef);
 					return false;
 				}
+				if (Target.GetProfileId() != Profile->ProfileId)
+				{
+					Error = ResolvedEditorProjectTargetFailure(Target, TargetRef,
+						Profile->ProfileId, TEXT("editor_project_target_revision_mismatch"));
+					if (Error.TargetPath.IsEmpty()) Error.TargetPath = TargetRef;
+					if (Error.Source.JsonPath.IsEmpty()) Error.Source.JsonPath = TEXT("/target_ref");
+					SetProductionError(OutError, MoveTemp(Error), TargetRef);
+					return false;
+				}
+				ExpectedRevision = Target.GetRevision();
+				Payload->SetStringField(
+					TEXT("expected_revision"),
+					ExpectedRevision);
 				if (!DurableBindingResolver->TryResolveDurableBinding(
 						Target,
 						Binding,
 						Error)
 					|| !Binding.IsValid())
 				{
-					SetProductionError(
-						OutError,
-						Error.GetCode().IsEmpty()
-							? TEXT("editor_project_durable_binding_missing")
-							: Error.GetCode(),
-						TargetRef,
-						Error.GetDetail());
+					OutError = Error;
+					if (OutError.IsEmpty())
+					{
+						OutError = EditorProjectFailure(TEXT("editor_project_durable_binding_missing"),
+							!Binding.IsValid() ? TEXT("The EditorProject durable binding has an empty location.")
+								: TEXT("The EditorProject durable resolver did not confirm the binding."),
+							!Binding.IsValid() ? TEXT("durable_location") : TEXT("binding_resolution"));
+						OutError.ActualValuePresent = false;
+						OutError.ExpectedValuePresent = true;
+					}
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 					return false;
 				}
 				const EDurableArtifactKind RequiredKind =
@@ -455,10 +553,11 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						: EDurableArtifactKind::ProjectConfig;
 				if (Binding.GetArtifactKind() != RequiredKind)
 				{
-					SetProductionError(
-						OutError,
-						TEXT("editor_project_durable_binding_kind_invalid"),
-						TargetRef);
+					OutError = EditorProjectFailure(TEXT("editor_project_durable_binding_kind_invalid"),
+						TEXT("The EditorProject durable binding has a different artifact kind from the profile requirement."), TEXT("artifact_kind"));
+					OutError.TargetPath = TargetRef;
+					OutError.ActualValue = MakeShared<FJsonValueString>(DurableKindName(Binding.GetArtifactKind()));
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(DurableKindName(RequiredKind));
 					return false;
 				}
 				Payload->SetStringField(
@@ -470,12 +569,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 					EvidenceDurableLocation,
 					Binding.GetDurableLocation());
 				FString Evidence;
-				if (!TrySerializeJson(Payload, Evidence))
+				if (!TrySerializeJson(Payload, Evidence, OutError))
 				{
-					SetProductionError(
-						OutError,
-						TEXT("editor_project_request_evidence_invalid"),
-						TargetRef);
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 					return false;
 				}
 				const FUeAgentCanonicalIdentity Identity(
@@ -510,10 +606,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 					FString(RequestEvidencePrefix) + Evidence);
 				if (!OutTarget->IsValid())
 				{
-					SetProductionError(
-						OutError,
-						TEXT("editor_project_target_binding_invalid"),
-						TargetRef);
+					OutError = *OutTarget->GetValidationDiagnostic();
 					OutTarget.Reset();
 					return false;
 				}
@@ -566,16 +659,28 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 							Request.GetBinding().GetSummary()
 								.GetDescriptorIdentity())
 						: nullptr;
-				if (!Profile || Request.GetStatePlane() != RequiredPlane)
+				if (!Profile)
 				{
-					OutError.Code =
-						TEXT("editor_project_state_request_invalid");
+					OutError = !Request.IsValid() ? *Request.GetBinding().GetValidationDiagnostic()
+						: MissingProfile(Request.GetBinding().GetSummary().GetDescriptorIdentity());
 					return false;
 				}
-				if (!Deadline.CanContinue() || Cancellation.IsCancelled())
+				if (Request.GetStatePlane() != RequiredPlane)
 				{
-					OutError.Code =
-						TEXT("editor_project_state_request_cancelled");
+					OutError = EditorProjectFailure(TEXT("editor_project_state_request_invalid"),
+						TEXT("The EditorProject read port does not serve the requested state plane."), TEXT("state_plane"));
+					FString Actual = Contract::LexToString(Request.GetStatePlane());
+					if (Actual.IsEmpty()) Actual = FString::FromInt(static_cast<int32>(Request.GetStatePlane()));
+					OutError.ActualValue = MakeShared<FJsonValueString>(Actual);
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Contract::LexToString(RequiredPlane));
+					OutError.TargetPath = Request.GetBinding().GetPublicRef();
+					return false;
+				}
+				if (Cancellation.IsCancelled())
+				{
+					OutError = EditorProjectFailure(TEXT("editor_project_state_request_cancelled"),
+						TEXT("The EditorProject state read was cancelled before resolving its target."), TEXT("cancellation"));
+					OutError.TargetPath = Request.GetBinding().GetPublicRef();
 					return false;
 				}
 				const FUeAgentCandidateBinding& Binding =
@@ -592,14 +697,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						TargetRef,
 						ExpectedRevision,
 						DurableKind,
-						DurableLocation))
+						DurableLocation, OutError))
 				{
-					if (OutError.Code.IsEmpty())
-					{
-						OutError.Code =
-							TEXT("editor_project_state_evidence_invalid");
-						OutError.SubjectId = Binding.GetBindingId();
-					}
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Binding.GetBindingId();
 					return false;
 				}
 				FUeAgentEditorProjectSimpleEffectResolvedTarget Target;
@@ -614,11 +714,13 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 					|| (RequiredPlane == EUeAgentStatePlane::AuthoringMemory
 						&& Target.GetRevision() != ExpectedRevision))
 				{
-					OutError.Code = ResolveError.GetCode().IsEmpty()
-						? TEXT("editor_project_state_target_mismatch")
-						: ResolveError.GetCode();
-					OutError.SubjectId = TargetRef;
-					OutError.Detail = ResolveError.GetDetail();
+					OutError = ResolveError.IsEmpty()
+						? ResolvedEditorProjectTargetFailure(Target, TargetRef, Profile->ProfileId,
+							TEXT("editor_project_state_target_mismatch"), ExpectedRevision,
+							RequiredPlane == EUeAgentStatePlane::AuthoringMemory)
+						: MoveTemp(ResolveError);
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TargetRef;
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 					return false;
 				}
 				FUeAgentCanonicalValuePtr State;
@@ -635,9 +737,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						Dependencies,
 						ResolveError))
 				{
-					OutError.Code = ResolveError.GetCode();
-					OutError.SubjectId = TargetRef;
-					OutError.Detail = ResolveError.GetDetail();
+					OutError = ResolveError;
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TargetRef;
 					return false;
 				}
 				FUeAgentCanonicalValuePtr Empty;
@@ -648,9 +749,8 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						Empty,
 						StateError))
 				{
-					OutError.Code = StateError.Code;
-					OutError.SubjectId = TargetRef;
-					OutError.Detail = StateError.Detail;
+					OutError = StateError;
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TargetRef;
 					return false;
 				}
 				const FUeAgentStateRevision Revision(
@@ -667,9 +767,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 					Revision,
 					EUeAgentAuthoredPresence::Present,
 					EUeAgentOverrideState::Overridden);
-				for (const Private::FEditorProjectDependencyState& Dependency
-					: Dependencies)
+				for (int32 DependencyIndex = 0; DependencyIndex < Dependencies.Num(); ++DependencyIndex)
 				{
+					const Private::FEditorProjectDependencyState& Dependency = Dependencies[DependencyIndex];
 					const TSharedPtr<FJsonObject> DependencyObject =
 						MakeShared<FJsonObject>();
 					DependencyObject->SetStringField(
@@ -685,20 +785,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						TEXT("type_id"),
 						Dependency.TypeId);
 					FUeAgentCanonicalValuePtr DependencyValue;
-					if (!Dependency.IsValid()
-						|| !TryCanonicalJson(
-							MakeShared<FJsonValueObject>(DependencyObject),
-							Resources,
-							DependencyValue,
-							ResolveError))
+					if (!Dependency.IsValid())
 					{
-						OutError.Code = ResolveError.GetCode().IsEmpty()
-							? TEXT("editor_project_dependency_state_invalid")
-							: ResolveError.GetCode();
-						OutError.SubjectId = Dependency.TargetRef;
-						OutError.Detail = ResolveError.GetDetail();
+						const TCHAR* Field = Dependency.TargetRef.IsEmpty() ? TEXT("target_ref")
+							: Dependency.TargetRevision.IsEmpty() ? TEXT("target_revision")
+							: Dependency.ProfileId.IsEmpty() ? TEXT("profile_id") : TEXT("type_id");
+						OutError = JsonValueFailure(FString::Printf(TEXT("dependencies/%d/%s"), DependencyIndex, Field),
+							MakeShared<FJsonValueString>(TEXT("")), TEXT("nonempty string"), Dependency.TargetRef.IsEmpty() ? false : Dependency.TargetRevision.IsEmpty());
+						OutError.TargetPath = Dependency.TargetRef;
 						return false;
 					}
+					if (!TryCanonicalJson(MakeShared<FJsonValueObject>(DependencyObject), Resources, DependencyValue, OutError,
+						FString::Printf(TEXT("dependencies/%d"), DependencyIndex)))
+					{
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Dependency.TargetRef;
+						return false;
+				}
 					Entries.Emplace(
 						FUeAgentCanonicalIdentity(
 							TEXT("uai.editor_project.dependency:")
@@ -737,13 +839,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						Snapshot,
 						StateError))
 				{
-					OutError.Code = StateError.Code;
-					OutError.SubjectId = TargetRef;
-					OutError.Detail = StateError.Detail;
+					OutError = StateError;
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TargetRef;
 					return false;
 				}
 				OutSnapshot = MoveTemp(Snapshot);
-				return OutSnapshot.IsValid();
+				return true;
 			}
 
 		private:
@@ -776,11 +877,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						OutDraft,
 						Error))
 				{
-					SetProductionError(
-						OutError,
-						Error.GetCode(),
-						CanonicalRequest.GetRequestId(),
-						Error.GetDetail());
+					SetProductionError(OutError, Error);
 					return false;
 				}
 				return true;
@@ -828,15 +925,19 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						ResolvedTarget.GetBindingEvidence());
 					if (!OutTargets.Last().IsValid())
 					{
-						SetProductionError(
-							OutError,
-							TEXT("editor_project_change_target_invalid"),
-							Change.GetIdentity().GetCanonicalKey());
+						OutError = *OutTargets.Last().GetValidationDiagnostic();
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = OutTargets.Last().GetPublicRef();
 						OutTargets.Reset();
 						return false;
 					}
 				}
-				return !OutTargets.IsEmpty();
+				if (OutTargets.IsEmpty())
+				{
+					OutError = CountFailure(TEXT("editor_project_change_target_invalid"),
+						TEXT("At least one EditorProject change target is required."), TEXT("change_targets"), 0, 1);
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -858,10 +959,9 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 					Plan->GetChangeSet().GetChanges();
 				if (Changes.Num() != Targets.Num())
 				{
-					SetProductionError(
-						OutError,
-						TEXT("editor_project_change_targets_missing"),
-						Plan->GetRequestId());
+					OutError = CountFailure(TEXT("editor_project_change_targets_missing"),
+						TEXT("The number of EditorProject targets differs from the planned changes."), TEXT("change_targets"), Targets.Num(), Changes.Num());
+					OutError.SubjectId = Plan->GetRequestId();
 					return false;
 				}
 				for (int32 Index = 0; Index < Changes.Num(); ++Index)
@@ -875,19 +975,32 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 							false,
 							TEXT("object")),
 						TEXT("editor-project:typed-native-binding"));
-					if (Targets[Index].GetSummary().GetIdentity()
-							!= Changes[Index].GetIdentity()
-						|| !OutBindings.Last().IsValid())
+					if (Targets[Index].GetSummary().GetIdentity() != Changes[Index].GetIdentity())
 					{
-						SetProductionError(
-							OutError,
-							TEXT("editor_project_mutation_binding_invalid"),
-							Changes[Index].GetIdentity().GetCanonicalKey());
+						OutError = EditorProjectFailure(TEXT("editor_project_mutation_binding_invalid"),
+							TEXT("The EditorProject mutation target identity differs from its planned change."),
+							FString::Printf(TEXT("targets/%d/identity"), Index));
+						OutError.TargetPath = Targets[Index].GetPublicRef();
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(Targets[Index].GetSummary().GetIdentity().GetCanonicalKey());
+						OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Changes[Index].GetIdentity().GetCanonicalKey());
+						OutBindings.Reset();
+						return false;
+					}
+					if (!OutBindings.Last().IsValid())
+					{
+						OutError = OutBindings.Last().GetValidationDiagnostic();
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Targets[Index].GetPublicRef();
 						OutBindings.Reset();
 						return false;
 					}
 				}
-				return !OutBindings.IsEmpty();
+				if (OutBindings.IsEmpty())
+				{
+					OutError = CountFailure(TEXT("editor_project_mutation_binding_invalid"),
+						TEXT("At least one EditorProject mutation binding is required."), TEXT("mutation_bindings"), 0, 1);
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -905,29 +1018,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 			{
 				OutTargets.Reset();
 				TSharedPtr<FJsonObject> Payload;
-				FUeAgentDiscoveryError EvidenceError;
 				FString TargetRef;
 				FString ExpectedRevision;
 				FString DurableLocation;
 				EDurableArtifactKind Kind = EDurableArtifactKind::Package;
 				const TArray<FPlannedChange>& Changes =
 					Plan->GetChangeSet().GetChanges();
-				if (Changes.Num() != 1
-					|| !TryParseEvidence(Target, Payload, EvidenceError)
-					|| !TryReadEvidence(
-						Payload,
-						TargetRef,
-						ExpectedRevision,
-						Kind,
-						DurableLocation))
+				if (Changes.Num() != 1)
 				{
-					SetProductionError(
-						OutError,
-						EvidenceError.Code.IsEmpty()
-							? TEXT("editor_project_durable_target_missing")
-							: EvidenceError.Code,
-						Target.GetBindingId(),
-						EvidenceError.Detail);
+					OutError = CountFailure(TEXT("editor_project_durable_target_missing"),
+						TEXT("EditorProject durable projection requires exactly one planned change."), TEXT("changes"), Changes.Num(), 1);
+					return false;
+				}
+				if (!TryParseEvidence(Target, Payload, OutError)
+					|| !TryReadEvidence(Payload, TargetRef, ExpectedRevision, Kind, DurableLocation, OutError))
+				{
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Target.GetBindingId();
 					return false;
 				}
 				if (Kind == EDurableArtifactKind::Package)
@@ -948,7 +1054,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						EAssetDurableIntent::Save,
 						ERollbackGrade::DurableBackup);
 				}
-				return OutTargets[0].IsValid();
+				if (!OutTargets[0].IsValid())
+				{
+					OutError = OutTargets[0].GetValidationDiagnostic();
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -971,14 +1082,26 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 					FindProfile(Plan->GetDescriptorIdentity());
 				const TArray<FPlannedChange>& Changes =
 					Plan->GetChangeSet().GetChanges();
-				if (!Profile || Changes.Num() != 1
-					|| !Changes[0].GetBefore().IsValid()
-					|| !Changes[0].GetAfter().IsValid())
+				if (!Profile)
 				{
-					SetProductionError(
-						OutError,
-						TEXT("editor_project_expected_change_invalid"),
-						Plan->GetRequestId());
+					OutError = MissingProfile(Plan->GetDescriptorIdentity());
+					return false;
+				}
+				if (Changes.Num() != 1)
+				{
+					OutError = CountFailure(TEXT("editor_project_expected_change_invalid"),
+						TEXT("EditorProject expected-state projection requires exactly one planned change."), TEXT("changes"), Changes.Num(), 1);
+					return false;
+				}
+				if (!Changes[0].GetBefore().IsValid() || !Changes[0].GetAfter().IsValid())
+				{
+					const bool bBefore = !Changes[0].GetBefore().IsValid();
+					OutError = EditorProjectFailure(TEXT("editor_project_expected_change_invalid"),
+						bBefore ? TEXT("The planned EditorProject change has no before-state.") : TEXT("The planned EditorProject change has no after-state."),
+						bBefore ? TEXT("changes/0/before") : TEXT("changes/0/after"));
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
+					OutError.TargetPath = ResolvedTarget.GetSummary().GetIdentity().GetSelector();
 					return false;
 				}
 				const FUeAgentCandidateBinding* ChangeTarget =
@@ -989,22 +1112,20 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 								== Changes[0].GetIdentity();
 						});
 				FUeAgentCanonicalValuePtr ExpectedValue;
-				FExecutionMutationError ProjectionError;
-				if (!ChangeTarget
-					|| !Private::TryProjectEditorProjectExpectedState(
-						*Changes[0].GetBefore(),
-						*Changes[0].GetAfter(),
-						Resources,
-						ExpectedValue,
-						ProjectionError))
+				if (!ChangeTarget)
 				{
-					SetProductionError(
-						OutError,
-						ProjectionError.GetCode().IsEmpty()
-							? TEXT("editor_project_verification_target_missing")
-							: ProjectionError.GetCode(),
-						Changes[0].GetIdentity().GetCanonicalKey(),
-						ProjectionError.GetDetail());
+					OutError = EditorProjectFailure(TEXT("editor_project_verification_target_missing"),
+						TEXT("No resolved EditorProject target matches the planned change to verify."), TEXT("change_targets"));
+					OutError.TargetPath = ResolvedTarget.GetSummary().GetIdentity().GetSelector();
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValuePresent = true;
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Changes[0].GetIdentity().GetCanonicalKey());
+					return false;
+				}
+				if (!Private::TryProjectEditorProjectExpectedState(*Changes[0].GetBefore(), *Changes[0].GetAfter(),
+					Resources, ExpectedValue, OutError))
+				{
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Changes[0].GetIdentity().GetSelector();
 					return false;
 				}
 				FUeAgentCanonicalValuePtr Empty;
@@ -1015,11 +1136,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						Empty,
 						StateError))
 				{
-					SetProductionError(
-						OutError,
-						StateError.Code,
-						Plan->GetRequestId(),
-						StateError.Detail);
+					SetProductionError(OutError, StateError);
 					return false;
 				}
 				const FUeAgentStateRevision Revision(
@@ -1057,11 +1174,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						Expected,
 						StateError))
 				{
-					SetProductionError(
-						OutError,
-						StateError.Code,
-						Plan->GetRequestId(),
-						StateError.Detail);
+					SetProductionError(OutError, StateError);
 					return false;
 				}
 				TArray<FString> ArtifactIds;
@@ -1076,7 +1189,12 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 					Expected,
 					ArtifactIds,
 					TArray<FString>());
-				return OutTargets.Last().IsValid();
+				if (!OutTargets.Last().IsValid())
+				{
+					OutError = *OutTargets.Last().GetValidationDiagnostic();
+					return false;
+				}
+				return true;
 			}
 		};
 
@@ -1172,12 +1290,18 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 				FAssetDurableError& OutError) override
 			{
 				OutError = FAssetDurableError();
-				if (!Target.IsValid()
-					|| Target.GetArtifactKind()
-						!= EDurableArtifactKind::ProjectConfig)
+				if (!Target.IsValid())
 				{
-					OutError = FAssetDurableError(
-						TEXT("editor_project_config_stage_target_kind_invalid"));
+					OutError = Target.GetValidationDiagnostic();
+					return false;
+				}
+				if (Target.GetArtifactKind() != EDurableArtifactKind::ProjectConfig)
+				{
+					OutError = EditorProjectFailure(TEXT("editor_project_config_stage_target_kind_invalid"),
+						TEXT("The EditorProject config stage requires a project_config artifact."), TEXT("artifact_kind"));
+					OutError.TargetPath = Target.GetIdentity().GetSelector();
+					OutError.ActualValue = MakeShared<FJsonValueString>(DurableKindName(Target.GetArtifactKind()));
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("project_config"));
 					return false;
 				}
 				FUeAgentEditorProjectSimpleEffectResolvedTarget Resolved;
@@ -1194,11 +1318,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						Error)
 					|| !Binding.IsValid())
 				{
-					OutError = FAssetDurableError(
-						Error.GetCode().IsEmpty()
-							? TEXT("editor_project_config_stage_target_unresolved")
-							: Error.GetCode(),
-						Error.GetDetail());
+					if (Error.IsEmpty() && !Resolved.IsValid()) Error = Resolved.GetValidationDiagnostic();
+					if (Error.IsEmpty())
+					{
+						Error = FDiagnostic::Failure(TEXT("editor_project_config_stage_target_unresolved"),
+							!Resolved.IsValid() ? TEXT("The configuration stage resolver did not return a usable target.")
+							: !Binding.IsValid() ? TEXT("The configuration stage binding has no durable location.")
+							: TEXT("The configuration stage binding resolver did not confirm the binding."), TEXT("asset_durable"));
+						Error.SourceKind = TEXT("native_result");
+						Error.PropertyPath = !Resolved.IsValid() ? TEXT("/target_resolved")
+							: !Binding.IsValid() ? TEXT("/durable_location_present") : TEXT("/binding_resolution_confirmed");
+						Error.ActualValue = MakeShared<FJsonValueBoolean>(false);
+						Error.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+						Error.ActualValuePresent = true;
+						Error.ExpectedValuePresent = true;
+					}
+					OutError = MoveTemp(Error);
 					return false;
 				}
 				if (Binding.GetArtifactKind()
@@ -1206,9 +1341,22 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 					|| Binding.GetDurableLocation()
 						!= Target.GetDurableLocation())
 				{
-					OutError = FAssetDurableError(
-						TEXT("editor_project_config_stage_binding_mismatch"),
-						Target.GetDurableLocation());
+					const bool bKind = Binding.GetArtifactKind() != EDurableArtifactKind::ProjectConfig;
+					OutError = EditorProjectFailure(TEXT("editor_project_config_stage_binding_mismatch"),
+						bKind ? TEXT("The resolved config stage binding has a different artifact kind.")
+							: TEXT("The resolved config stage binding points to a different durable location."),
+						bKind ? TEXT("artifact_kind") : TEXT("durable_location"));
+					OutError.TargetPath = Target.GetIdentity().GetSelector();
+					if (bKind)
+					{
+						OutError.ActualValue = MakeShared<FJsonValueString>(DurableKindName(Binding.GetArtifactKind()));
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("project_config"));
+					}
+					else
+					{
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(Binding.GetDurableLocation());
+						OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Target.GetDurableLocation());
+					}
 					return false;
 				}
 				if (!Private::TryWriteEditorProjectStagedConfig(
@@ -1216,9 +1364,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 						StagedPath,
 						Error))
 				{
-					OutError = FAssetDurableError(
-						Error.GetCode(),
-						Error.GetDetail());
+					OutError = Error;
 					return false;
 				}
 				return true;
@@ -1237,67 +1383,103 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 			const FUeAgentEditorProjectSimpleAuthoringProviderConfig& Config,
 			FUeAgentEditorProjectSimpleAuthoringError& OutError)
 		{
-			if (!Config.DescriptorRegistry.IsValid()
-				|| !Config.MutationTargetResolver.IsValid()
-				|| !Config.PreStateTargetResolver.IsValid()
-				|| !Config.PersistedTargetResolver.IsValid()
-				|| Config.PreStateTargetResolver
-					== Config.PersistedTargetResolver
-				|| !Config.DurableBindingResolver.IsValid()
-				|| !Config.DurableService.IsValid()
-				|| !Config.AbsenceOracle.IsValid()
-				|| !Config.ReferenceOracle.IsValid()
-				|| !Config.Projection.IsSet()
-				|| !Config.Projection->IsValid()
-				|| Config.OwnerLeaseId.IsEmpty()
-				|| Config.MaxQueueItems < 1)
+			const TCHAR* MissingResolver = !Config.DescriptorRegistry.IsValid() ? TEXT("descriptor_registry")
+				: !Config.MutationTargetResolver.IsValid() ? TEXT("mutation_target_resolver")
+				: !Config.PreStateTargetResolver.IsValid() ? TEXT("pre_state_target_resolver")
+				: !Config.PersistedTargetResolver.IsValid() ? TEXT("persisted_target_resolver") : nullptr;
+			if (MissingResolver)
 			{
-				SetError(
-					OutError,
-					TEXT("editor_project_simple_authoring_dependencies_missing"));
+				OutError = EditorProjectFailure(TEXT("editor_project_simple_authoring_dependencies_missing"),
+					FString::Printf(TEXT("The EditorProject provider has no '%s'."), MissingResolver), MissingResolver);
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
+				return false;
+			}
+			if (Config.PreStateTargetResolver == Config.PersistedTargetResolver)
+			{
+				OutError = EditorProjectFailure(TEXT("editor_project_simple_authoring_dependencies_missing"),
+					TEXT("The EditorProject pre-state and persisted-state resolvers must be separate instances."), TEXT("persisted_target_resolver"));
+				OutError.ActualValue = MakeShared<FJsonValueString>(TEXT("same instance as pre_state_target_resolver"));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("independent resolver instance"));
+				return false;
+			}
+			const TCHAR* Missing = !Config.DurableBindingResolver.IsValid() ? TEXT("durable_binding_resolver")
+				: !Config.DurableService.IsValid() ? TEXT("durable_service")
+				: !Config.AbsenceOracle.IsValid() ? TEXT("absence_oracle")
+				: !Config.ReferenceOracle.IsValid() ? TEXT("reference_oracle")
+				: !Config.Projection.IsSet() ? TEXT("projection") : nullptr;
+			if (Missing)
+			{
+				OutError = EditorProjectFailure(TEXT("editor_project_simple_authoring_dependencies_missing"),
+					FString::Printf(TEXT("The EditorProject provider has no '%s'."), Missing), Missing);
+				OutError.ActualValuePresent = false;
+				OutError.ExpectedValuePresent = true;
+				return false;
+			}
+			if (!Config.Projection->IsValid())
+			{
+				OutError = Config.Projection->GetValidationDiagnostic();
+				return false;
+			}
+			if (Config.OwnerLeaseId.IsEmpty())
+			{
+				OutError = EditorProjectFailure(TEXT("editor_project_simple_authoring_dependencies_missing"),
+					TEXT("The EditorProject provider has an empty owner lease identifier."), TEXT("owner_lease_id"));
+				OutError.ActualValue = MakeShared<FJsonValueString>(TEXT(""));
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty identifier"));
 				return false;
 			}
 			const FEditorProjectProfileCatalog& Catalog =
 				GetProfileCatalog();
-			int32 FieldCount = 0;
-			if (!Catalog.Error.IsEmpty() || Catalog.Profiles.Num() != 7)
+			if (!Catalog.Error.IsEmpty())
 			{
-				SetError(
-					OutError,
-					TEXT("editor_project_simple_authoring_profile_catalog_invalid"),
-					TEXT("editor_project"),
-					Catalog.Error);
+				OutError = Catalog.Error;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TEXT("editor_project");
 				return false;
 			}
 			for (const FEditorProjectProfile& Profile : Catalog.Profiles)
 			{
-				FieldCount += Profile.FieldIds.Num();
 				const FUeAgentOperationDescriptor* Descriptor =
 					Config.DescriptorRegistry->FindByDescriptorId(
 						Profile.DescriptorId);
-				if (!Profile.IsValid()
-					|| !Descriptor
-					|| Descriptor->GetCapabilityId() != Profile.CapabilityId
-					|| Descriptor->GetDomainId() != TEXT("editor_project")
-					|| Descriptor->GetIdentity().GetVersion()
-						!= Profile.DescriptorVersion
-					|| Descriptor->GetIdentity().GetDescriptorHash()
-						!= Profile.DescriptorHash)
+				if (!Descriptor)
 				{
-					SetError(
-						OutError,
-						TEXT("editor_project_simple_authoring_descriptor_missing"),
-						Profile.DescriptorId);
+					OutError = EditorProjectFailure(TEXT("editor_project_simple_authoring_descriptor_missing"),
+						TEXT("The required EditorProject operation descriptor is not registered."), TEXT("descriptor_id"));
+					OutError.CandidateName = Profile.DescriptorId;
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(Profile.DescriptorId);
 					return false;
 				}
-			}
-			if (FieldCount != 11)
-			{
-				SetError(
-					OutError,
-					TEXT("editor_project_simple_authoring_field_count_invalid"),
-					TEXT("editor_project"));
-				return false;
+				if (Descriptor->GetCapabilityId() != Profile.CapabilityId || Descriptor->GetDomainId() != TEXT("editor_project"))
+				{
+					const bool bCapabilityMismatch = Descriptor->GetCapabilityId() != Profile.CapabilityId;
+					OutError = EditorProjectFailure(TEXT("editor_project_simple_authoring_descriptor_missing"),
+						TEXT("The registered EditorProject descriptor does not match its profile."),
+						bCapabilityMismatch ? TEXT("capability_id") : TEXT("domain_id"));
+					OutError.CandidateName = Profile.DescriptorId;
+					OutError.ActualValue = MakeShared<FJsonValueString>(bCapabilityMismatch ? Descriptor->GetCapabilityId() : Descriptor->GetDomainId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(bCapabilityMismatch ? Profile.CapabilityId : TEXT("editor_project"));
+					return false;
+				}
+				if (Descriptor->GetIdentity().GetVersion() != Profile.DescriptorVersion)
+				{
+					OutError = EditorProjectFailure(TEXT("editor_project_simple_authoring_descriptor_missing"),
+						TEXT("The registered EditorProject descriptor version differs from its profile."), TEXT("descriptor_version"));
+					OutError.CandidateName = Profile.DescriptorId;
+					OutError.ActualValue = MakeShared<FJsonValueNumber>(Descriptor->GetIdentity().GetVersion());
+					OutError.ExpectedValue = MakeShared<FJsonValueNumber>(Profile.DescriptorVersion);
+					return false;
+				}
+				if (Descriptor->GetIdentity().GetDescriptorHash() != Profile.DescriptorHash)
+				{
+					OutError = EditorProjectFailure(TEXT("editor_project_simple_authoring_descriptor_missing"),
+						TEXT("The registered EditorProject descriptor hash differs from its profile."), TEXT("descriptor_hash"));
+					OutError.CandidateName = Profile.DescriptorId;
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Descriptor->GetIdentity().GetDescriptorHash());
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Profile.DescriptorHash);
+					return false;
+				}
 			}
 			return true;
 		}
@@ -1346,15 +1528,17 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 		OutError = FUeAgentEditorProjectSimpleAuthoringError();
 		if (!TargetResolver.IsValid() || !DurableBindingResolver.IsValid())
 		{
-			SetError(
-				OutError,
-				TEXT("editor_project_config_stage_dependencies_missing"));
+			const TCHAR* Missing = !TargetResolver.IsValid() ? TEXT("target_resolver") : TEXT("durable_binding_resolver");
+			OutError = EditorProjectFailure(TEXT("editor_project_config_stage_dependencies_missing"),
+				FString::Printf(TEXT("The configuration stage source has no '%s'."), Missing), Missing);
+			OutError.ActualValuePresent = false;
+			OutError.ExpectedValuePresent = true;
 			return false;
 		}
 		OutStageSource = MakeShared<FEditorProjectConfigStageSource>(
 			TargetResolver.ToSharedRef(),
 			DurableBindingResolver.ToSharedRef());
-		return OutStageSource.IsValid();
+		return true;
 	}
 
 	bool FUeAgentEditorProjectSimpleAuthoringProviderFactory::TryCreate(
@@ -1389,16 +1573,10 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 		if (!FUeAgentEditorProjectSimpleEffectNativeHookFactory::TryCreate(
 				MutationResolver,
 				NativeHook,
-				NativeError)
-			|| !NativeHook.IsValid())
+				NativeError))
 		{
-			SetError(
-				OutError,
-				NativeError.GetCode().IsEmpty()
-					? TEXT("editor_project_native_hook_missing")
-					: NativeError.GetCode(),
-				TEXT("editor_project"),
-				NativeError.GetDetail());
+			OutError = NativeError;
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = TEXT("editor_project");
 			return false;
 		}
 
@@ -1407,7 +1585,6 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 		ProviderConfig.OwnerLeaseId = Config.OwnerLeaseId;
 		ProviderConfig.PreStatePlane = EUeAgentStatePlane::AuthoringMemory;
 		ProviderConfig.AtomicityMode = EAtomicityMode::CompensatedSaga;
-		ProviderConfig.MaxQueueItems = Config.MaxQueueItems;
 		ProviderConfig.Projection = Config.Projection;
 		ProviderConfig.TargetResolver =
 			MakeShared<FEditorProjectTargetResolver>(
@@ -1443,19 +1620,7 @@ namespace UE::UAI::Composition::SimpleAuthoring::EditorProject
 		ProviderConfig.AbsenceOracle = Config.AbsenceOracle;
 		ProviderConfig.ReferenceOracle = Config.ReferenceOracle;
 
-		FUeAgentSimpleAuthoringProductionError Error;
-		if (!FUeAgentSimpleAuthoringProductionProvider::TryCreate(
-				ProviderConfig,
-				OutProvider,
-				Error))
-		{
-			SetError(
-				OutError,
-				Error.Code,
-				Error.SubjectId,
-				Error.Detail);
-			return false;
-		}
-		return OutProvider.IsValid();
+		return FUeAgentSimpleAuthoringProductionProvider::TryCreate(
+			ProviderConfig, OutProvider, OutError);
 	}
 }

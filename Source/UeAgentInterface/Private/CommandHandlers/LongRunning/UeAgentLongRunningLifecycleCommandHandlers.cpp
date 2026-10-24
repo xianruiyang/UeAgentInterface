@@ -1,7 +1,7 @@
 #include "CommandHandlers/LongRunning/UeAgentLongRunningLifecycleCommandHandlers.h"
 
-#include "Core/Contract/UeAgentContractJson.h"
-#include "Dom/JsonObject.h"
+#include "CommandEdge/UeAgentApplicationResultProjection.h"
+
 
 namespace UE::UAI::CommandHandlers::LongRunning
 {
@@ -13,44 +13,15 @@ namespace UE::UAI::CommandHandlers::LongRunning
 	{
 		const FString Owner = TEXT("long-running-session-owner");
 
-		FString ErrorJson(
-			const FString& Code,
-			const FString& SubjectId,
-			const FString& Detail)
+		FDiagnostic CommandFailure(const FString& Code, const FString& SubjectId, const FString& Reason)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), SubjectId);
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString Text;
-			FString CanonicalError;
-			return Json::TryCanonicalize(Error, Text, CanonicalError)
-				? Text
-				: FString(TEXT("{}"));
+			FDiagnostic Diagnostic = FDiagnostic::Failure(Code, Reason, TEXT("command"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SubjectId = SubjectId;
+			return Diagnostic;
 		}
 
-		bool TryReadOperationError(
-			const FString& PayloadJson,
-			FString& OutErrorJson)
-		{
-			OutErrorJson.Reset();
-			TSharedPtr<FJsonObject> Root;
-			FString ParseError;
-			if (!Json::TryParseObject(PayloadJson, Root, ParseError)
-				|| !Root.IsValid())
-			{
-				return false;
-			}
-			const TSharedPtr<FJsonObject>* Error = nullptr;
-			if (Root->TryGetObjectField(TEXT("operation_error"), Error)
-				&& Error
-				&& Error->IsValid())
-			{
-				return Json::TryCanonicalize(
-					Error->ToSharedRef(), OutErrorJson, ParseError);
-			}
-			return true;
-		}
+		
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -85,7 +56,7 @@ namespace UE::UAI::CommandHandlers::LongRunning
 					return FUeAgentCommandResult::Failure(
 						Request,
 						TEXT("{}"),
-						ErrorJson(
+						CommandFailure(
 							TEXT("long_running_lifecycle_authority_required"),
 							Request.GetCommandId(),
 							TEXT("the public lifecycle route requires uai:operate")));
@@ -98,36 +69,11 @@ namespace UE::UAI::CommandHandlers::LongRunning
 						FUeAgentContractValue(Request.GetParamsJson())),
 					CallerContext,
 					Cancellation);
-				if (!Result.IsValid()
-					|| !(Result.GetDescriptorIdentity() == Route.DescriptorIdentity)
-					|| Result.GetRequestId() != Request.GetRequestId())
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT("long_running_lifecycle_result_invalid"),
-							Request.GetRequestId(),
-							TEXT("OperationService returned an invalid or mismatched result.")));
-				}
-				const FString& PayloadJson = Result.GetValue().GetJsonValue();
-				FString OperationError;
-				if (!TryReadOperationError(PayloadJson, OperationError))
-				{
-					return FUeAgentCommandResult::Failure(
-						Request,
-						TEXT("{}"),
-						ErrorJson(
-							TEXT("long_running_lifecycle_payload_invalid"),
-							Request.GetRequestId(),
-							TEXT("OperationService returned a non-object payload.")));
-				}
-				if (!OperationError.IsEmpty())
-				{
-					return FUeAgentCommandResult::Failure(
-						Request, PayloadJson, OperationError);
-				}
-				return FUeAgentCommandResult::Success(Request, PayloadJson);
+				FApplicationResultProjectionPolicy Policy;
+				Policy.InvalidResultCode = TEXT("long_running_lifecycle_result_invalid");
+				Policy.InvalidPayloadCode = TEXT("long_running_lifecycle_payload_invalid");
+				Policy.BoundaryFailureKind = EApplicationFailureKind::None;
+				return ProjectOperationResult(Request, Route.DescriptorIdentity, Result, Policy);
 			}
 
 		private:
@@ -139,25 +85,26 @@ namespace UE::UAI::CommandHandlers::LongRunning
 	bool TryCreateLongRunningLifecycleCommandHandlers(
 		TSharedRef<IUeAgentOperationApplicationPort> OperationPort,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
-		const TArray<FUeAgentLongRunningLifecycleRoute>& Routes =
-			GetLongRunningLifecycleRoutes();
-		if (Routes.Num() != 6)
-		{
-			OutError = TEXT("long_running_lifecycle_route_count_invalid");
-			return false;
-		}
+		TArray<FUeAgentLongRunningLifecycleRoute> Routes;
+		if (!TryGetLongRunningLifecycleRoutes(Routes, OutError)) return false;
 		TSet<FString> CommandIds;
 		for (const FUeAgentLongRunningLifecycleRoute& Route : Routes)
 		{
-			if (!Route.IsValid() || CommandIds.Contains(Route.CommandId))
+			if (!Route.TryValidate(OutError))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("long_running_lifecycle_route_invalid:")
-					+ Route.CommandId;
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("long_running_lifecycle_route_invalid"), OutError, TEXT("handler_factory"));
+				return false;
+			}
+			if (CommandIds.Contains(Route.CommandId))
+			{
+				OutHandlers.Reset();
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("long_running_lifecycle_route_invalid"), TEXT("The command route is registered more than once."), TEXT("handler_factory"), FString(), Route.CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Route.CommandId;
 				return false;
 			}
 			CommandIds.Add(Route.CommandId);

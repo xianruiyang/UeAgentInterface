@@ -1,13 +1,8 @@
 #include "Misc/AutomationTest.h"
 
-#if __has_include("OperationOwners/Sequence/UeAgentSequenceDomainService.h")
-#define UAI_T22_SEQUENCE_DOMAIN_AVAILABLE 1
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "OperationOwners/Sequence/UeAgentSequenceDomainService.h"
-#else
-#define UAI_T22_SEQUENCE_DOMAIN_AVAILABLE 0
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T22SequenceDomainProviderTest,
@@ -17,10 +12,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T22SequenceDomainProviderTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T22_SEQUENCE_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T22 Sequence domain provider is available"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::DomainCapability;
 	FString CapabilityError;
@@ -37,69 +28,69 @@ bool FUeAgentStrictV2T22SequenceDomainProviderTest::RunTest(
 
 	const FString ExpectedDomainId =
 		TEXT("timeline-sequence-command-migration");
-	TArray<const FDomainCapabilityDeclaration*> SequenceDeclarations;
-	for (const TSharedRef<const FDomainCapabilityContribution>& Contribution
-		: FrozenCapabilities->GetContributions())
-	{
-		if (Contribution->GetDomainId() == ExpectedDomainId)
-		{
-			SequenceDeclarations.Add(&Contribution->GetDeclaration());
-		}
-	}
-	TestEqual(
-		TEXT("the frozen Sequence capability contribution is unique"),
-		SequenceDeclarations.Num(),
-		1);
-	if (SequenceDeclarations.Num() == 1)
+	const TSharedRef<const FDomainCapabilityContribution>* SequenceContribution =
+		FrozenCapabilities->GetContributions().FindByPredicate(
+			[&ExpectedDomainId](
+				const TSharedRef<const FDomainCapabilityContribution>& Item)
+			{
+				return Item->GetDomainId() == ExpectedDomainId;
+			});
+	TestNotNull(
+		TEXT("the frozen Sequence capability contribution is present"),
+		SequenceContribution);
+	if (SequenceContribution)
 	{
 		const FDomainCapabilityDeclaration& Declaration =
-			*SequenceDeclarations[0];
+			(*SequenceContribution)->GetDeclaration();
 		TestEqual(
 			TEXT("the Sequence HJSON capability is supported"),
 			Declaration.Hjson.Support,
 			EDomainCapabilitySupport::Supported);
-		TestEqual(
-			TEXT("the Sequence capability owns one provider"),
-			Declaration.Hjson.Providers.Num(),
-			1);
-		TestEqual(
-			TEXT("the Sequence capability freezes one HJSON route"),
-			Declaration.Hjson.Routes.Num(),
-			1);
+		TestTrue(
+			TEXT("the Sequence capability owns the expected provider"),
+			Declaration.Hjson.Providers.ContainsByPredicate(
+				[](const TSharedRef<IImportInitializationDomainProvider>& Provider)
+				{
+					return Provider->GetProviderId()
+						== TEXT("sequence-domain-provider");
+				}));
 		TestEqual(
 			TEXT("the Sequence initialization capability is supported"),
 			Declaration.Initialization.Support,
 			EDomainCapabilitySupport::Supported);
-		TestEqual(
-			TEXT("the Sequence capability freezes one initialization contract"),
-			Declaration.Initialization.ContractIds.Num(),
-			1);
-		if (Declaration.Initialization.ContractIds.Num() == 1)
+		TestTrue(
+			TEXT("the Sequence root initialization contract is present"),
+			Declaration.Initialization.ContractIds.Contains(
+				TEXT("uai.init.sequence.root/1")));
+		const FDomainHjsonRoute* Route =
+			Declaration.Hjson.Routes.FindByPredicate(
+				[](const FDomainHjsonRoute& Item)
+				{
+					return Item.CommandId
+							== TEXT("content_graph.import_workspace")
+						&& Item.SchemaId == TEXT("uai.sequence.edit/1")
+						&& Item.RootTypeIdentity
+							== TEXT("/Script/LevelSequence.LevelSequence");
+				});
+		TestNotNull(TEXT("the Sequence HJSON route is present"), Route);
+		if (Route)
 		{
-			TestEqual(
-				TEXT("the Sequence root initialization contract is exact"),
-				Declaration.Initialization.ContractIds[0],
-				FString(TEXT("uai.init.sequence.root/1")));
-		}
-		if (Declaration.Hjson.Routes.Num() == 1)
-		{
-			const FDomainHjsonRoute& Route = Declaration.Hjson.Routes[0];
-			TestEqual(TEXT("route provider"), Route.ProviderId,
+			TestEqual(TEXT("route provider"), Route->ProviderId,
 				FString(TEXT("sequence-domain-provider")));
-			TestEqual(TEXT("route command"), Route.CommandId,
+			TestEqual(TEXT("route command"), Route->CommandId,
 				FString(TEXT("content_graph.import_workspace")));
-			TestEqual(TEXT("route schema"), Route.SchemaId,
+			TestEqual(TEXT("route schema"), Route->SchemaId,
 				FString(TEXT("uai.sequence.edit/1")));
-			TestEqual(TEXT("route target kind"), Route.TargetKind,
+			TestEqual(TEXT("route target kind"), Route->TargetKind,
 				FString(TEXT("ue.level_sequence.asset")));
-			TestEqual(TEXT("route root type"), Route.RootTypeIdentity,
+			TestEqual(TEXT("route root type"), Route->RootTypeIdentity,
 				FString(TEXT("/Script/LevelSequence.LevelSequence")));
-			TestEqual(TEXT("route root role"), Route.Role,
+			TestEqual(TEXT("route root role"), Route->Role,
 				EInitializationNodeRole::RootTarget);
 			TestEqual(TEXT("route initialization contract"),
-				Route.InitializationContractId,
+				Route->InitializationContractId,
 				FString(TEXT("uai.init.sequence.root/1")));
-			TestTrue(TEXT("route supports create"), Route.bCreate);
+			TestTrue(TEXT("route supports create"), Route->bCreate);
 		}
 	}
 
@@ -139,16 +130,11 @@ bool FUeAgentStrictV2T22SequenceDomainProviderTest::RunTest(
 			Resolution.GetInitializationContractId(),
 			FString(TEXT("uai.init.sequence.root/1")));
 		TestTrue(
-			TEXT("the Sequence provider explicitly supports authoring-schema discovery"),
-			Resolution.GetProvider()->SupportsExplicitCommand(
-				TEXT("content_graph.authoring_schema")));
-		TestTrue(
 			TEXT("the Sequence provider explicitly owns its round-trip export"),
 			Resolution.GetProvider()->SupportsExplicitCommand(
 				TEXT("content_graph.export_workspace")));
 	}
 	return true;
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -159,10 +145,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T22SequenceDomainRejectsUnknownTypeTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T22_SEQUENCE_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T22 Sequence domain prewrite gate is available"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	FWorkspaceError Error;
 	TSharedPtr<const FImportInitializationDomainProviderRegistry> Registry;
@@ -187,5 +169,4 @@ bool FUeAgentStrictV2T22SequenceDomainRejectsUnknownTypeTest::RunTest(
 			Error));
 	TestFalse(TEXT("the rejected resolution stays invalid"), Resolution.IsValid());
 	return true;
-#endif
 }

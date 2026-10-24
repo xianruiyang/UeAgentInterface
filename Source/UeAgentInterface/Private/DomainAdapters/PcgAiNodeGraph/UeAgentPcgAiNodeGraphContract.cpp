@@ -119,6 +119,7 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			{TEXT("ai.smart_object_definition.apply"), TEXT("uai.operation.ai.smart_object_definition.apply"), TEXT("smart_object_definition_mutation"), TEXT("operation"), TEXT("write"), 1},
 			{TEXT("ai.state_tree.asset.create"), TEXT("uai.operation.ai.state_tree.asset.create"), TEXT("asset_lifecycle"), TEXT("operation"), TEXT("write"), 1},
 			{TEXT("ai.state_tree.hierarchy.apply"), TEXT("uai.operation.ai.state_tree.hierarchy.apply"), TEXT("state_tree_hierarchy_mutation"), TEXT("operation"), TEXT("write"), 1},
+			{TEXT("pcg.graph.asset.create"), TEXT("uai.operation.pcg.graph.asset.create"), TEXT("asset_lifecycle"), TEXT("operation"), TEXT("write"), 1},
 			{TEXT("pcg.graph.apply"), TEXT("uai.operation.pcg.graph.apply"), TEXT("pcg_graph_topology_mutation"), TEXT("operation"), TEXT("write"), 1},
 			{TEXT("pcg.graph_instance.apply"), TEXT("uai.operation.pcg.graph_instance.apply"), TEXT("pcg_parameter_binding_mutation"), TEXT("operation"), TEXT("write"), 1},
 			{TEXT("pcg.graph_parameters.apply"), TEXT("uai.operation.pcg.graph_parameters.apply"), TEXT("pcg_parameter_binding_mutation"), TEXT("operation"), TEXT("write"), 1},

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "CoreMinimal.h"
 
@@ -9,5 +11,5 @@ namespace UE::UAI::Module::CommandRegistration::Material
 
 	UEAGENTINTERFACE_API bool TryCreateProductionMaterialCandidateContribution(
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

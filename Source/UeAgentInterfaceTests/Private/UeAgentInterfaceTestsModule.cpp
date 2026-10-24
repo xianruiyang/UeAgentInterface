@@ -8,6 +8,9 @@ class FUeAgentInterfaceTestsModule final : public IModuleInterface
 public:
 	virtual void StartupModule() override
 	{
+		// Optional native tests must not activate a disabled host plugin.
+		if (FModuleManager::Get().IsModuleLoaded(TEXT("ModelViewViewModelEditor")))
+			FModuleManager::Get().LoadModule(TEXT("UeAgentInterfaceMVVM"));
 		DomainOwnerAuthorization =
 			UeAgentAuthoringObjectApply::RegisterDomainAuthorizedOwnerPackagePrefix(
 				TEXT("/UaiDurableTest_"));

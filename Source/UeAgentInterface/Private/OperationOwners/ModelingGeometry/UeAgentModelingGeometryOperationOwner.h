@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
@@ -14,7 +16,7 @@ namespace UE::UAI::OperationOwners::ModelingGeometry
 		const FString& CommandId,
 		TSharedPtr<CommandEdge::IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API CommandEdge::FUeAgentCommandResult Submit(
 		const CommandEdge::FUeAgentCommandRequest& Request,

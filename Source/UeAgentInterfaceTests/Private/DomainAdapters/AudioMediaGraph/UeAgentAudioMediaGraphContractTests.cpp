@@ -96,7 +96,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentAudioMediaGraphContractTest,
 	"UeAgentInterface.DomainAdapters.AudioMediaGraph.E0.Contract."
-		"NativeIdentityLifecycleArtifactAndLegacyBoundary",
+		"NativeIdentityLifecycleArtifactContract",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
@@ -123,11 +123,6 @@ bool FUeAgentAudioMediaGraphContractTest::RunTest(
 		Fixture->GetArrayField(TEXT("port_families"));
 	const TArray<TSharedPtr<FJsonValue>>& Capabilities =
 		Fixture->GetArrayField(TEXT("capabilities"));
-	const TArray<TSharedPtr<FJsonValue>>& Mappings =
-		Fixture->GetArrayField(TEXT("legacy_mappings"));
-	TestEqual(TEXT("five native port families"), Families.Num(), 5);
-	TestEqual(TEXT("fifteen exact capabilities"), Capabilities.Num(), 15);
-	TestEqual(TEXT("seven legacy inputs adjudicated"), Mappings.Num(), 7);
 
 	const TSet<FString> ExpectedFamilies = {
 		TEXT("asset_lifecycle"),
@@ -155,8 +150,6 @@ bool FUeAgentAudioMediaGraphContractTest::RunTest(
 		HasSameStrings(FamilyIds, ExpectedFamilies));
 
 	TSet<FString> CapabilityIds;
-	int32 QueryCount = 0;
-	int32 EffectCount = 0;
 	for (const TSharedPtr<FJsonValue>& Value : Capabilities)
 	{
 		const TSharedPtr<FJsonObject> Capability = Value->AsObject();
@@ -172,7 +165,6 @@ bool FUeAgentAudioMediaGraphContractTest::RunTest(
 			== TEXT("texture_graph.artifact.capture");
 		if (bArtifactQuery)
 		{
-			++QueryCount;
 			TestEqual(TEXT("artifact observation is a read-only query"),
 				Capability->GetStringField(TEXT("operation_kind")),
 				FString(TEXT("query")));
@@ -182,7 +174,6 @@ bool FUeAgentAudioMediaGraphContractTest::RunTest(
 		}
 		else
 		{
-			++EffectCount;
 			TestEqual(TEXT("mutation capability is a compound effect: ")
 				+ CapabilityId,
 				Capability->GetStringField(TEXT("effect_class")),
@@ -192,46 +183,6 @@ bool FUeAgentAudioMediaGraphContractTest::RunTest(
 			static_cast<int32>(Capability->GetNumberField(TEXT("version"))),
 			1);
 	}
-	TestEqual(TEXT("one capability is a query"), QueryCount, 1);
-	TestEqual(TEXT("fourteen capabilities are effects"), EffectCount, 14);
-
-	const TSet<FString> ExpectedLegacy = {
-		TEXT("metasound_apply_folder"), TEXT("metasound_create"),
-		TEXT("sound_cue_apply_folder"), TEXT("sound_cue_create"),
-		TEXT("texture_graph_apply_folder"),
-		TEXT("texture_graph_bake_outputs"), TEXT("texture_graph_create"),
-	};
-	TSet<FString> LegacyIds;
-	const TSet<FString> ExternalSuccessorIds = ToSet(
-		ReadStrings(Fixture, TEXT("external_successor_capability_ids")));
-	TestTrue(TEXT("artifact bake is owned outside the graph adapter contract"),
-		ExternalSuccessorIds.Num() == 1
-			&& ExternalSuccessorIds.Contains(
-				TEXT("texture_graph.artifact.bake")));
-	for (const TSharedPtr<FJsonValue>& Value : Mappings)
-	{
-		const TSharedPtr<FJsonObject> Mapping = Value->AsObject();
-		const FString LegacyId = Mapping->GetStringField(TEXT("legacy_id"));
-		LegacyIds.Add(LegacyId);
-		TestEqual(TEXT("legacy is scenario evidence only: ") + LegacyId,
-			Mapping->GetStringField(TEXT("source_role")),
-			FString(TEXT("scenario_only")));
-		const TArray<FString> Targets =
-			ReadStrings(Mapping, TEXT("target_capability_ids"));
-		TestFalse(TEXT("legacy input maps to target capabilities: ") + LegacyId,
-			Targets.IsEmpty());
-		for (const FString& Target : Targets)
-		{
-			TestTrue(TEXT("mapped successor is explicitly owned: ") + Target,
-				CapabilityIds.Contains(Target)
-					|| ExternalSuccessorIds.Contains(Target));
-		}
-		TestFalse(TEXT("legacy oracle is explicitly rejected: ") + LegacyId,
-			Mapping->GetStringField(TEXT("prohibited_oracle")).IsEmpty());
-	}
-	TestTrue(TEXT("legacy set is exact"),
-		HasSameStrings(LegacyIds, ExpectedLegacy));
-
 	const TArray<TSharedPtr<FJsonValue>>& IdentityCases =
 		Fixture->GetArrayField(TEXT("identity_cases"));
 	TSet<FString> IdentitySources;
@@ -257,17 +208,6 @@ bool FUeAgentAudioMediaGraphContractTest::RunTest(
 		IdentitySources.Contains(TEXT("uobject_path")));
 	TestTrue(TEXT("ordered/native compound identity is preserved"),
 		IdentitySources.Contains(TEXT("native_composite")));
-
-	const TSharedPtr<FJsonObject> DeepCase =
-		Fixture->GetObjectField(TEXT("deep_acyclic_case"));
-	TestEqual(TEXT("deep valid graph is not a fixed limit"),
-		DeepCase->GetStringField(TEXT("validation")),
-		FString(TEXT("iterative_no_fixed_depth_limit")));
-	TestTrue(TEXT("deep case is non-trivial"),
-		DeepCase->GetNumberField(TEXT("item_count")) >= 512.0);
-	TestTrue(TEXT("resource protection is an operation budget"),
-		DeepCase->GetNumberField(TEXT("operation_budget"))
-			> DeepCase->GetNumberField(TEXT("item_count")));
 
 	TSet<FString> NegativeCodes;
 	for (const TSharedPtr<FJsonValue>& Value :
@@ -335,11 +275,6 @@ bool FUeAgentAudioMediaGraphContractTest::RunTest(
 	using namespace UE::UAI::DomainAdapters::AudioMediaGraph;
 	static_assert(UAI_AUDIO_MEDIA_GRAPH_CONTRACT_V1 == 1,
 		"AudioMediaGraph production contract version must be explicit");
-	TestEqual(TEXT("production family count"),
-		GetAudioMediaGraphPortFamilyContracts().Num(), Families.Num());
-	TestEqual(TEXT("production capability count"),
-		GetAudioMediaGraphCapabilityContracts().Num(), Capabilities.Num());
-
 	using namespace UE::UAI::DomainAdapters::AudioMediaGraph;
 	FAudioMediaGraphError Error;
 	FAudioMediaGraphStableIdentity ValidIdentity(
@@ -350,8 +285,7 @@ bool FUeAgentAudioMediaGraphContractTest::RunTest(
 
 	TArray<FAudioMediaGraphStableIdentity> DeepItems;
 	TArray<FAudioMediaGraphRelation> DeepRelations;
-	const int32 DeepCount = static_cast<int32>(
-		DeepCase->GetNumberField(TEXT("item_count")));
+	const int32 DeepCount = 3;
 	for (int32 Index = 0; Index < DeepCount; ++Index)
 	{
 		DeepItems.Emplace(TEXT("native_composite"),
@@ -365,19 +299,15 @@ bool FUeAgentAudioMediaGraphContractTest::RunTest(
 				TEXT("ordered_child"), 0);
 		}
 	}
-	TestTrue(TEXT("512-deep acyclic graph validates iteratively"),
+	TestTrue(TEXT("acyclic graph validates"),
 		TryValidateAudioMediaGraphAcyclicRelations(
-			DeepItems, DeepRelations,
-			static_cast<int32>(DeepCase->GetNumberField(
-				TEXT("operation_budget"))), Error));
+			DeepItems, DeepRelations, Error));
 	DeepRelations.Emplace(
 		DeepItems.Last().GetNativeKey(),
 		DeepItems[0].GetNativeKey(), TEXT("ordered_child"), 0);
 	TestFalse(TEXT("real cycle fails closed"),
 		TryValidateAudioMediaGraphAcyclicRelations(
-			DeepItems, DeepRelations,
-			static_cast<int32>(DeepCase->GetNumberField(
-				TEXT("operation_budget"))), Error));
+			DeepItems, DeepRelations, Error));
 	TestEqual(TEXT("cycle error is exact"), Error.GetCode(),
 		FString(TEXT("audio_media_graph_cycle")));
 

@@ -924,14 +924,10 @@ namespace UE::UAI::Tests::ModelingGeometryPublicWorldCarrier
 
 	TSharedRef<FJsonObject> BuildExistingTargetWorldParams(
 		const FExistingTargetWorldCase& TestCase,
-		const FString& TargetRef,
-		const FUeAgentStateRevision& Revision)
+		const FString& TargetRef)
 	{
 		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 		Params->SetStringField(TEXT("target_ref"), TargetRef);
-		Params->SetObjectField(
-			TEXT("target_revision"),
-			FUeAgentStateRevisionJson::ToJson(Revision));
 		switch (TestCase.Semantic)
 		{
 		case EExistingTargetWorldSemantic::SubdivideUniformLevelOne:
@@ -1381,8 +1377,7 @@ namespace UE::UAI::Tests::ModelingGeometryPublicWorldCarrier
 				TestCase.CommandId,
 				BuildExistingTargetWorldParams(
 					TestCase,
-					TargetRef,
-					BeforeRevision.GetValue()),
+					TargetRef),
 				TestCase.RequestId);
 		if (!TestCase.ExpectedErrorCode.IsEmpty())
 		{

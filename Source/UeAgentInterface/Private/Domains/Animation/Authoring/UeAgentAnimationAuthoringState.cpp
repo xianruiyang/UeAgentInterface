@@ -3,6 +3,7 @@
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringState.h"
 
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Domains/Animation/Authoring/UeAgentAnimationAuthoringDocuments.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
@@ -11,22 +12,27 @@
 
 namespace UeAgentAnimationAuthoring {
 namespace {
-bool BuildIdentity(const FProfile &Profile, const FString &AssetPath,
+bool BuildIdentity(const FProfile &Profile, const FString &AssetPath, const FString &SemanticId,
                    UeAgentAuthoringIdentity::FCanonicalIdentity &OutIdentity,
-                   FString &OutError) {
+                   UE::UAI::Contract::FDiagnostic& OutError) {
+  TMap<FString, FString> Selectors{{TEXT("asset_path"), AssetPath}};
+  if ((Profile.Kind == EAssetKind::AnimSequence || Profile.Kind == EAssetKind::AnimMontage) && SemanticId == Profile.DocumentSemanticId)
+    Selectors.Add(TEXT("selector"), TEXT("animation"));
+  if (Profile.Kind == EAssetKind::Skeleton && SemanticId == Profile.DocumentSemanticId)
+    Selectors.Add(TEXT("selector"), TEXT("skeleton"));
   return UeAgentAuthoringIdentity::BuildCanonicalIdentity(
       Profile.IdentityModelId, Profile.TargetKind,
-      {{TEXT("asset_path"), AssetPath}}, OutIdentity, OutError);
+      Selectors, OutIdentity, OutError);
 }
 
 bool AddRequest(const FProfile &Profile, const FString &SemanticId,
                 const FString &AssetPath, const UObject *Asset,
                 const bool bExpectedAbsent,
                 TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-                FString &OutError) {
+                UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentAuthoringState::FReadRequest Request;
   Request.SemanticId = SemanticId;
-  if (!BuildIdentity(Profile, AssetPath, Request.TargetIdentity, OutError))
+  if (!BuildIdentity(Profile, AssetPath, SemanticId, Request.TargetIdentity, OutError))
     return false;
   Request.TargetQuery.ModelId = Request.TargetIdentity.ModelId;
   Request.TargetQuery.TargetKind = Request.TargetIdentity.TargetKind;
@@ -41,7 +47,7 @@ bool AddRequest(const FProfile &Profile, const FString &SemanticId,
 
 UeAgentAuthoringState::EReadOutcome
 ReadState(const UeAgentAuthoringState::FReadRequest &Request,
-          UeAgentAuthoringState::FStateValue &OutValue, FString &OutError) {
+          UeAgentAuthoringState::FStateValue &OutValue, UE::UAI::Contract::FDiagnostic& OutError) {
   OutValue = UeAgentAuthoringState::FStateValue();
   OutValue.TargetIdentity = Request.TargetIdentity;
   OutValue.Type.Kind = TEXT("object");
@@ -56,8 +62,12 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
   const FProfile *Profile =
       FindProfileByTargetKind(Request.TargetIdentity.TargetKind);
   if (!Profile) {
-    OutError = TEXT("animation_state_profile_missing:") +
-               Request.TargetIdentity.TargetKind;
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_state_profile_missing"),
+        TEXT("No animation state profile is registered for the requested target kind."), TEXT("state_capture"), Request.TargetIdentity.TargetKind);
+    OutError.SourceKind = TEXT("native_result");
+    OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+    OutError.ActualValue = MakeShared<FJsonValueNull>();
+    OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("registered animation state profile"));
     return UeAgentAuthoringState::EReadOutcome::Failed;
   }
   UObject *Asset = const_cast<UObject *>(Request.RootObject);
@@ -75,15 +85,35 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
                            Asset->GetOutermost()->GetName());
     Target->SetStringField(TEXT("asset_kind"), Profile->TypeId);
     OutValue.Value = MakeShared<FJsonValueObject>(Target);
+  } else if (Profile->Kind == EAssetKind::AnimBlueprint &&
+             Request.SemanticId == AnimBlueprintSettingsSemanticId) {
+    TSharedPtr<FJsonObject> Document;
+    if (!BuildAnimBlueprintSettingsDocument(*Asset, Document, OutError)) {
+      if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+      return UeAgentAuthoringState::EReadOutcome::Failed;
+    }
+    OutValue.Value = MakeShared<FJsonValueObject>(Document);
+    OutValue.bEditable = true;
   } else if (Request.SemanticId == Profile->DocumentSemanticId) {
     TSharedPtr<FJsonObject> Document;
-    if (!BuildDocument(Profile->Kind, *Asset, Document, OutError,
+    if (!BuildVerificationDocument(Profile->Kind, *Asset, Document, OutError,
                        Request.TargetIdentity.GetSelector(TEXT("asset_path"))))
       return UeAgentAuthoringState::EReadOutcome::Failed;
     OutValue.Value = MakeShared<FJsonValueObject>(Document);
+    if (Profile->Kind == EAssetKind::AnimSequence || Profile->Kind == EAssetKind::BlendSpace ||
+        Profile->Kind == EAssetKind::Skeleton || Profile->Kind == EAssetKind::AnimMontage || Profile->Kind == EAssetKind::PoseAsset)
+      OutValue.bEditable = true;
   } else {
-    OutError =
-        TEXT("animation_state_semantic_unsupported:") + Request.SemanticId;
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_state_semantic_unsupported"),
+        TEXT("The requested semantic is not supported by this animation state profile."), TEXT("state_capture"), Request.SemanticId);
+    OutError.SourceKind = TEXT("native_result");
+    OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+    const auto Actual = MakeShared<FJsonObject>();
+    Actual->SetBoolField(TEXT("semantic_supported"), false);
+    const auto Expected = MakeShared<FJsonObject>();
+    Expected->SetBoolField(TEXT("semantic_supported"), true);
+    OutError.ActualValue = MakeShared<FJsonValueObject>(Actual);
+    OutError.ExpectedValue = MakeShared<FJsonValueObject>(Expected);
     return UeAgentAuthoringState::EReadOutcome::Failed;
   }
   OutValue.bAvailable = true;
@@ -94,17 +124,21 @@ UeAgentAuthoringNativeDefaults::EProbeOutcome
 ProbeNativeDefault(const UeAgentAuthoringNativeDefaults::FRequest &Request,
                    UeAgentAuthoringNativeDefaults::FScratchScope &Scratch,
                    UeAgentAuthoringNativeDefaults::FProbeValue &OutValue,
-                   FString &OutError) {
+                   UE::UAI::Contract::FDiagnostic& OutError) {
   OutValue = UeAgentAuthoringNativeDefaults::FProbeValue();
   const FProfile *Profile =
       FindProfileByTargetKind(Request.TargetIdentity.TargetKind);
   if (!Profile)
     return UeAgentAuthoringNativeDefaults::EProbeOutcome::Unavailable;
+  if (Profile->Kind == EAssetKind::AnimMontage ||
+      Profile->Kind == EAssetKind::PoseAsset ||
+      Profile->Kind == EAssetKind::BlendSpace)
+    return UeAgentAuthoringNativeDefaults::EProbeOutcome::Unavailable;
   UPackage *Package = Scratch.CreateScratchPackage(OutError);
   if (!Package)
     return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
   UObject *Seed = CreateFactorySeed(Profile->Kind, Package, FName(TEXT("Seed")),
-                                    RF_Transactional, nullptr, OutError);
+                                    RF_Transactional | RF_Transient, nullptr, OutError);
   if (!Seed)
     return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
   TSharedPtr<FJsonObject> Document;
@@ -138,6 +172,13 @@ TSet<FName> GetDomainOwnedRootProperties(const EAssetKind Kind) {
   case EAssetKind::SkeletalMesh:
     return {TEXT("Skeleton"), TEXT("Materials"), TEXT("Sockets"),
             TEXT("PhysicsAsset"), TEXT("PostProcessAnimBlueprint")};
+  case EAssetKind::AnimSequence:
+  case EAssetKind::BlendSpace:
+    return {};
+  case EAssetKind::AnimMontage:
+    return {TEXT("CompositeSections"), TEXT("SlotAnimTracks"), TEXT("Notifies"), TEXT("AnimNotifyTracks")};
+  case EAssetKind::PoseAsset:
+    return {TEXT("PoseContainer"), TEXT("bAdditivePose"), TEXT("BasePoseIndex")};
   default:
     return {};
   }
@@ -148,9 +189,14 @@ bool BuildAssetSnapshotReadRequests(
     const FProfile &Profile, UObject *Asset, const FString &CanonicalAssetPath,
     const bool bExpectedAbsent,
     TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    FString &OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError) {
   if (CanonicalAssetPath.IsEmpty()) {
-    OutError = TEXT("animation_snapshot_identity_invalid");
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_snapshot_identity_invalid"),
+        TEXT("Animation snapshot capture requires a canonical asset path."), TEXT("state_capture"));
+    OutError.SourceKind = TEXT("native_result");
+    OutError.PropertyPath = TEXT("asset_path");
+    OutError.ActualValue = MakeShared<FJsonValueString>(CanonicalAssetPath);
+    OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty canonical asset path"));
     return false;
   }
   return AddRequest(Profile, Profile.DocumentSemanticId, CanonicalAssetPath,
@@ -160,7 +206,7 @@ bool BuildAssetSnapshotReadRequests(
 bool BuildAssetExportSnapshotReadRequests(
     const FProfile &Profile, UObject &Asset,
     TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    FString &OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError) {
   OutRequests.Reset();
   OutError.Reset();
   const FString AssetPath = Asset.GetOutermost()->GetName();
@@ -173,11 +219,13 @@ bool BuildAssetExportSnapshotReadRequests(
   if (!UeAgentAuthoringState::AppendEditableObjectPropertyReadRequests(
           &Asset, Options, OutRequests, OutError))
     return false;
-  return AddRequest(Profile, Profile.DocumentSemanticId, AssetPath, &Asset,
+  const FString DocumentSemantic = Profile.Kind == EAssetKind::AnimBlueprint
+      ? FString(AnimBlueprintSettingsSemanticId) : Profile.DocumentSemanticId;
+  return AddRequest(Profile, DocumentSemantic, AssetPath, &Asset,
                     false, OutRequests, OutError);
 }
 
-bool RegisterStateAccessor(FString &OutError) {
+bool RegisterStateAccessor(UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentAuthoringState::FStateAccessorDescriptor Descriptor;
   Descriptor.AccessorId = StateAccessorId;
   for (const FProfile &Profile : GetProfiles())
@@ -185,13 +233,14 @@ bool RegisterStateAccessor(FString &OutError) {
   Descriptor.CapabilityTags = {TEXT("asset"),         TEXT("anim_blueprint"),
                                TEXT("graph"),         TEXT("skeleton"),
                                TEXT("socket"),        TEXT("virtual_bone"),
-                               TEXT("skeletal_mesh"), TEXT("material_slot")};
+                               TEXT("skeletal_mesh"), TEXT("material_slot"),
+                               TEXT("anim_sequence"), TEXT("blend_space")};
   UeAgentAuthoringState::ERegistrationResult Result;
   return UeAgentAuthoringState::FStateAccessorRegistry::Get().RegisterAccessor(
       Descriptor, ReadState, Result, OutError);
 }
 
-bool RegisterNativeDefaultProvider(FString &OutError) {
+bool RegisterNativeDefaultProvider(UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentAuthoringNativeDefaults::FProviderDescriptor Descriptor;
   Descriptor.ProviderId = FactoryDefaultProviderId;
   Descriptor.SourceKind =

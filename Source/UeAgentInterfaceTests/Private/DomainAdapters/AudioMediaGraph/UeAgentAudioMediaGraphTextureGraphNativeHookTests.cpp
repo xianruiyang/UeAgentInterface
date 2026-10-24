@@ -11,6 +11,7 @@
 #include "Core/AssetDurable/UeAgentPackageAssetRevision.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/Contract/UeAgentContract.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Editor.h"
 #include "Expressions/Input/TG_Expression_Scalar.h"
 #include "Expressions/Output/TG_Expression_Output.h"
@@ -342,8 +343,10 @@ bool FUeAgentAudioMediaGraphTextureGraphRealRenderReadbackTest::RunTest(
 		return false;
 	}
 	Package->SetDirtyFlag(false);
-	const FString SourceRevision =
-		AssetDurable::ReadPackageAssetRevision(Graph->GetPathName());
+	FString SourceRevision;
+	UE::UAI::Contract::FDiagnostic RevisionError;
+	if (!AssetDurable::TryReadPackageAssetRevision(Graph->GetPathName(), SourceRevision, RevisionError))
+		AddError(RevisionError.PublicMessage);
 	if (!TestTrue(
 			TEXT("the durable source exposes the shared package revision"),
 			SourceRevision.StartsWith(TEXT("package-md5:"))))
@@ -420,10 +423,10 @@ bool FUeAgentAudioMediaGraphTextureGraphRealRenderReadbackTest::RunTest(
 		TEXT("/Game/UAI/Tests/T40/Baked_") + Suffix;
 	TOptional<CommandEdge::FUeAgentCommandRequest> BakeRequest;
 	const FString BakeParams = FString::Printf(
-		TEXT("{\"target\":\"%s\",\"expected_revision\":\"%s\",")
+		TEXT("{\"target\":\"%s\",")
 		TEXT("\"outputs\":[{\"render_output_index\":0,")
 		TEXT("\"destination\":\"%s\"}]}"),
-		*Graph->GetPathName(), *SourceRevision, *BakePackage);
+		*Graph->GetPathName(), *BakePackage);
 	if (!TestTrue(
 			TEXT("the bake request decodes"),
 			DecodeArtifactRequest(
@@ -469,12 +472,11 @@ bool FUeAgentAudioMediaGraphTextureGraphRealRenderReadbackTest::RunTest(
 		IFileManager::Get().MakeDirectory(*RollbackBlockedFilename, true));
 	TOptional<CommandEdge::FUeAgentCommandRequest> RollbackRequest;
 	const FString RollbackParams = FString::Printf(
-		TEXT("{\"target\":\"%s\",\"expected_revision\":\"%s\",")
+		TEXT("{\"target\":\"%s\",")
 		TEXT("\"outputs\":[")
 		TEXT("{\"render_output_index\":0,\"destination\":\"%s\"},")
 		TEXT("{\"render_output_index\":1,\"destination\":\"%s\"}]}"),
 		*Graph->GetPathName(),
-		*SourceRevision,
 		*RollbackFirst,
 		*RollbackBlocked);
 	TestTrue(

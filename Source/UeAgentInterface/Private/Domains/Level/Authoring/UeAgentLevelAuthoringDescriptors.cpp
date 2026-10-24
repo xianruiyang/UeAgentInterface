@@ -19,7 +19,7 @@ namespace UeAgentLevelAuthoring
 			const TCHAR* TargetKind,
 			const TArray<FSelectorDescriptor>& Selectors,
 			const TArray<FKeyPattern>& Patterns,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringIdentity::FModelDescriptor Model;
 			Model.ModelId = ModelId;
@@ -41,7 +41,7 @@ namespace UeAgentLevelAuthoring
 			const EDefaultSourceKind DefaultSource,
 			const TCHAR* DefaultAccessor,
 			const TArray<FString>& Tags,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringSemanticRegistry::FSemanticDescriptor Semantic;
 			Semantic.SemanticId = SemanticId;
@@ -64,7 +64,7 @@ namespace UeAgentLevelAuthoring
 		}
 	}
 
-	bool RegisterDescriptors(FString& OutError)
+	bool RegisterDescriptors(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (!RegisterIdentity(
 			WorldIdentityModelId,
@@ -117,6 +117,15 @@ namespace UeAgentLevelAuthoring
 			return false;
 		}
 
+		if (!RegisterIdentity(
+			WorldPropertyIdentityModelId, TEXT("level_world_property"),
+			{ { TEXT("world_path"), 100, false }, { TEXT("property_path"), 160, true } },
+			{ { TEXT("world_property"), 0, { TEXT("world_path"), TEXT("property_path") } } },
+			OutError))
+		{
+			return false;
+		}
+
 		TArray<FSelectorDescriptor> ActorPropertySelectors = ActorSelectors;
 		ActorPropertySelectors.Add({ TEXT("property_path"), 160, true });
 		if (!RegisterIdentity(
@@ -158,7 +167,7 @@ namespace UeAgentLevelAuthoring
 		Domain.MutationProviderId = ApplyProviderId;
 		Domain.TargetKinds = {
 			TEXT("level_world"), TEXT("level_actor"), TEXT("level_component"),
-			TEXT("level_actor_property"), TEXT("level_component_property")
+			TEXT("level_world_property"), TEXT("level_actor_property"), TEXT("level_component_property")
 		};
 		Domain.CapabilityTags = {
 			TEXT("actor_lifecycle"), TEXT("component_lifecycle"), TEXT("world_owner"),
@@ -181,6 +190,11 @@ namespace UeAgentLevelAuthoring
 				StateAccessorId, TEXT("object"), EWriteCapability::ReadOnly,
 				EDefaultSourceKind::None, TEXT(""),
 				{ TEXT("level"), TEXT("world"), TEXT("export") }, OutError)
+			&& RegisterSemantic(
+				WorldPropertySemanticId, TEXT("level_world_property"),
+				WorldPropertyIdentityModelId, TEXT("core.property"), TEXT("*"),
+				EWriteCapability::PropertyAssignment, EDefaultSourceKind::ExistingInstance,
+				TEXT(""), { TEXT("level"), TEXT("world"), TEXT("property") }, OutError)
 			&& RegisterSemantic(
 				ActorStateSemanticId, TEXT("level_actor"), ActorIdentityModelId,
 				StateAccessorId, TEXT("object"), EWriteCapability::DomainMutation,

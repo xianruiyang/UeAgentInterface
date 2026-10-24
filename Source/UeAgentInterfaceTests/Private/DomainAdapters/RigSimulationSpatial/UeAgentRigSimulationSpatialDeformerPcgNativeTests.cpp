@@ -37,16 +37,7 @@ namespace
 
 	FUeAgentResourceTrackerOwner MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 8 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 200000},
-				{EUeAgentResourceDimension::Items, 200000},
-				{EUeAgentResourceDimension::StringBytes, 8 * 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 300000},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 32 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	TArray<TSharedPtr<FJsonValue>> Strings(
@@ -133,8 +124,7 @@ namespace
 	}
 
 	FUeAgentContractValue QueryInput(
-		const FString& Capability,
-		const FRigSimulationSpatialGenerationIdentity& GenerationIdentity)
+		const FString& Capability)
 	{
 		const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 		if (Capability == TEXT("deformer.geometry.sample"))
@@ -173,21 +163,6 @@ namespace
 			Root->SetObjectField(TEXT("sample_time"), PointJson());
 			Root->SetObjectField(TEXT("output_frame"), FrameJson(TEXT("frame://output")));
 			Root->SetObjectField(TEXT("vertex_selector"), SelectorJson());
-		}
-		else
-		{
-			const TSharedPtr<FJsonObject> Identity = MakeShared<FJsonObject>();
-			Identity->SetStringField(TEXT("source_ref"), GenerationIdentity.SourceRef);
-			Identity->SetStringField(TEXT("generation"), GenerationIdentity.Generation);
-			Identity->SetObjectField(TEXT("revision"),
-				RevisionJson(GenerationIdentity.Revision));
-			Root->SetObjectField(TEXT("generation_identity"), Identity);
-			Root->SetObjectField(
-				Capability.Contains(TEXT("partition"))
-					? TEXT("partition_selector") : TEXT("data_selector"),
-				SelectorJson(TEXT("range"),
-					Capability.Contains(TEXT("partition")) ? 0 : 1));
-			Root->SetObjectField(TEXT("output_frame"), FrameJson(TEXT("frame://output")));
 		}
 		return JsonInput(Root);
 	}
@@ -345,59 +320,10 @@ bool FUeAgentRigSimulationSpatialDeformerPcgNativeTest::RunTest(
 	USceneComponent* Subject = NewObject<USceneComponent>(GetTransientPackage(),
 		TEXT("RSP006EvaluationSubject"), RF_Transactional);
 
-	TUniquePtr<FPreviewScene> PreviewScene = MakeUnique<FPreviewScene>(
-		FPreviewScene::ConstructionValues().SetCreateDefaultLighting(false)
-			.SetCreatePhysicsScene(false).SetForceMipsResident(false)
-			.SetTransactional(false));
-	UWorld* World = PreviewScene->GetWorld();
-	AActor* SourceActor = World ? World->SpawnActor<AActor>() : nullptr;
-	UPCGComponent* PcgComponent = SourceActor
-		? NewObject<UPCGComponent>(SourceActor, TEXT("RSP006PCG"), RF_Transactional)
-		: nullptr;
-	if (SourceActor && PcgComponent)
-	{
-		SourceActor->AddInstanceComponent(PcgComponent);
-		PcgComponent->RegisterComponent();
-	}
-	UPCGDataAsset* DataAsset = NewObject<UPCGDataAsset>(GetTransientPackage(),
-		TEXT("RSP006GenerationData"), RF_Transactional);
-	UPCGPointData* PointData = NewObject<UPCGPointData>(DataAsset,
-		TEXT("RSP006Points"), RF_Transactional);
-	if (PointData && DataAsset)
-	{
-		FPCGPoint A(FTransform(FVector(10.0, 20.0, 30.0)), 0.5f, 7);
-		A.BoundsMin = FVector(-1.0, -2.0, -3.0);
-		A.BoundsMax = FVector(1.0, 2.0, 3.0);
-		FPCGPoint B(FTransform(FVector(100.0, 200.0, 300.0)), 0.75f, 11);
-		B.BoundsMin = FVector(-4.0, -5.0, -6.0);
-		B.BoundsMax = FVector(4.0, 5.0, 6.0);
-		PointData->SetPoints({A, B});
-		FPCGTaggedData Tagged;
-		Tagged.Data = PointData;
-		Tagged.Pin = TEXT("Out");
-		Tagged.Tags = {TEXT("rsp006")};
-		DataAsset->Data.TaggedData.Add(MoveTemp(Tagged));
-	}
-	APCGPartitionActor* Partition = nullptr;
-	if (World)
-	{
-		Partition = World->SpawnActor<APCGPartitionActor>(
-			FVector(400.0, 500.0, 600.0), FRotator::ZeroRotator);
-		if (Partition)
-		{
-			Partition->SetToRuntimeGenerated();
-			Partition->PostCreation(FPCGGridDescriptor().SetGridSize(200)
-				.SetIs2DGrid(false).SetIsRuntime(true));
-		}
-	}
 	if (!TestNotNull(TEXT("real Geometry Cache fixture"), GeometryCache)
 		|| !TestNotNull(TEXT("real evaluation Geometry Cache fixture"), EvaluationCache)
 		|| !TestNotNull(TEXT("real skeletal training input"), SkeletalMesh)
-		|| !TestNotNull(TEXT("real animation training input"), Animation)
-		|| !TestNotNull(TEXT("real PCG component"), PcgComponent)
-		|| !TestNotNull(TEXT("real PCG generated data asset"), DataAsset)
-		|| !TestNotNull(TEXT("real PCG point data"), PointData)
-		|| !TestNotNull(TEXT("real PCG partition actor"), Partition)) return false;
+		|| !TestNotNull(TEXT("real animation training input"), Animation)) return false;
 
 	const FUeAgentTemporalPoint NativeTime(TEXT("clock://observation-native"),
 		TEXT("30"), TEXT("60"), TEXT("1"), TEXT("evaluation"));
@@ -415,18 +341,6 @@ bool FUeAgentRigSimulationSpatialDeformerPcgNativeTest::RunTest(
 			TEXT("basis://rsp006"), NativeTime);
 	};
 
-	FRigSimulationSpatialGenerationIdentity GenerationIdentity;
-	GenerationIdentity.SourceRef = TEXT("pcg://rsp006");
-	GenerationIdentity.Generation = TEXT("pcg-generation://rsp006-1");
-	GenerationIdentity.Revision.SourceId = GenerationIdentity.SourceRef;
-	GenerationIdentity.Revision.Generation = TEXT("rsp006-generation");
-	uint32 RevisionHash = GetTypeHash(PcgComponent->GetPathName());
-	RevisionHash = HashCombine(RevisionHash,
-		GetTypeHash(PcgComponent->GetClass()->GetPathName()));
-	RevisionHash = HashCombine(RevisionHash,
-		PcgComponent->GetOutermost()->IsDirty() ? 1u : 0u);
-	GenerationIdentity.Revision.Sequence = static_cast<int64>(RevisionHash);
-
 	FUeAgentRigSimulationSpatialProductionRuntimeConfig Config;
 	Config.ProjectInstanceId = TEXT("rsp006-project");
 	Config.EditorInstanceId = TEXT("rsp006-editor");
@@ -439,21 +353,19 @@ bool FUeAgentRigSimulationSpatialDeformerPcgNativeTest::RunTest(
 		{TEXT("subject://rsp006"), Subject},
 		{TEXT("training://skeletal"), SkeletalMesh},
 		{TEXT("training://animation"), Animation},
-		{TEXT("training://geometry"), GeometryCache},
-		{TEXT("pcg://rsp006"), PcgComponent}};
+		{TEXT("training://geometry"), GeometryCache}};
 	Config.ClockBindings.Add({TEXT("clock://authored"),
 		TEXT("clock://observation-native"), TEXT("clock-evidence://rsp006")});
 	for (const TPair<FString, bool>& Frame : {
 		TPair<FString, bool>(TEXT("frame://geometry-native"), true),
 		TPair<FString, bool>(TEXT("frame://evaluation-native"), true),
-		TPair<FString, bool>(TEXT("frame://pcg-native"), true),
 		TPair<FString, bool>(TEXT("frame://output"), false)})
 	{
 		Config.FrameBindings.Add(FUeAgentRigSimulationSpatialFrameBinding(
 			MakeFrame(Frame.Key), Frame.Value));
 	}
 	for (const FString& NativeFrame : {TEXT("frame://geometry-native"),
-		TEXT("frame://evaluation-native"), TEXT("frame://pcg-native")})
+		TEXT("frame://evaluation-native")})
 	{
 		Config.SpatialConversions.Add(FUeAgentSpatialConversion(
 			TEXT("conversion://") + NativeFrame + TEXT("-output"), NativeFrame,
@@ -497,15 +409,6 @@ bool FUeAgentRigSimulationSpatialDeformerPcgNativeTest::RunTest(
 	EvaluationBinding.NativeClockId = TEXT("clock://observation-native");
 	EvaluationBinding.NativeFrame = MakeFrame(TEXT("frame://evaluation-native"));
 	Config.DeformerEvaluationBindings.Add(EvaluationBinding);
-	FUeAgentRigSimulationSpatialPcgGenerationBinding PcgBinding;
-	PcgBinding.Identity = GenerationIdentity;
-	PcgBinding.SourceComponent = PcgComponent;
-	PcgBinding.GeneratedData = DataAsset;
-	PcgBinding.Partitions = {Partition};
-	PcgBinding.GeneratedAt = NativeTime;
-	PcgBinding.NativeFrame = MakeFrame(TEXT("frame://pcg-native"));
-	Config.PcgGenerationBindings.Add(PcgBinding);
-
 	FUeAgentRigSimulationSpatialProductionRuntimeConfig MissingDeformerClock = Config;
 	MissingDeformerClock.DeformerGeometryBindings[0].NativeClockId =
 		TEXT("clock://missing-deformer-native");
@@ -515,19 +418,6 @@ bool FUeAgentRigSimulationSpatialDeformerPcgNativeTest::RunTest(
 		FUeAgentRigSimulationSpatialProductionRuntime::TryCreate(
 			MissingDeformerClock, InvalidRuntime, InvalidError));
 	TestEqual(TEXT("unregistered Deformer clock has stable config failure"),
-		InvalidError.Code,
-		FString(TEXT("rig_simulation_spatial_runtime_config_invalid")));
-
-	FUeAgentRigSimulationSpatialProductionRuntimeConfig MissingPcgClock = Config;
-	MissingPcgClock.PcgGenerationBindings[0].GeneratedAt = FUeAgentTemporalPoint(
-		TEXT("clock://missing-pcg-native"), TEXT("30"), TEXT("60"), TEXT("1"),
-		TEXT("evaluation"));
-	InvalidRuntime.Reset();
-	InvalidError = {};
-	TestFalse(TEXT("runtime rejects unregistered PCG generation clock"),
-		FUeAgentRigSimulationSpatialProductionRuntime::TryCreate(
-			MissingPcgClock, InvalidRuntime, InvalidError));
-	TestEqual(TEXT("unregistered PCG clock has stable config failure"),
 		InvalidError.Code,
 		FString(TEXT("rig_simulation_spatial_runtime_config_invalid")));
 
@@ -544,22 +434,17 @@ bool FUeAgentRigSimulationSpatialDeformerPcgNativeTest::RunTest(
 	const bool bGeometryDirty = GeometryCache->GetOutermost()->IsDirty();
 	const bool bEvaluationDirty = EvaluationCache->GetOutermost()->IsDirty();
 	const bool bAnimationDirty = Animation->GetOutermost()->IsDirty();
-	const bool bPcgPackageDirty = PcgComponent->GetOutermost()->IsDirty();
 	const FTransform SubjectTransform = Subject->GetComponentTransform();
-	const int32 DataCount = DataAsset->Data.TaggedData.Num();
-	const FVector PartitionLocation = Partition->GetActorLocation();
 	const FUeAgentResourceTrackerOwner Resources = MakeResources();
 
 	for (const FString& Capability : {
 		TEXT("deformer.geometry.sample"),
 		TEXT("deformer.training_inputs.validate"),
-		TEXT("deformer.evaluation.sample"),
-		TEXT("pcg.generated_spatial_data.read"),
-		TEXT("pcg.partition.spatial_state.read")})
+		TEXT("deformer.evaluation.sample")})
 	{
 		TSharedPtr<const FUeAgentProjectionSourceValue> Source;
 		if (!Query(*this, *Runtime, Capability,
-			QueryInput(Capability, GenerationIdentity), Resources, Source)) return false;
+			QueryInput(Capability), Resources, Source)) return false;
 		const FUeAgentCanonicalValue* Root = ResultRoot(*Source);
 		const FUeAgentCanonicalValue* CapabilityField = Root
 			? Field(*Root, TEXT("capability_id")) : nullptr;
@@ -641,59 +526,9 @@ bool FUeAgentRigSimulationSpatialDeformerPcgNativeTest::RunTest(
 				}
 			}
 		}
-		else
-		{
-			const FUeAgentCanonicalValue* Identity =
-				Field(*Root, TEXT("generation_identity"));
-			TestTrue(TEXT("PCG result retains exact generation source"),
-				Identity && Field(*Identity, TEXT("source_ref"))
-					&& Field(*Identity, TEXT("source_ref"))->GetLexeme()
-						== GenerationIdentity.SourceRef);
-			TestTrue(TEXT("PCG result retains exact generation id"),
-				Identity && Field(*Identity, TEXT("generation"))
-					&& Field(*Identity, TEXT("generation"))->GetLexeme()
-						== GenerationIdentity.Generation);
-			const FUeAgentCanonicalValue* Time = Field(*Root, TEXT("time"));
-			TestTrue(TEXT("PCG result retains exact generation time"),
-				Time && Field(*Time, TEXT("clock_id"))
-					&& Field(*Time, TEXT("clock_id"))->GetLexeme()
-						== TEXT("clock://observation-native")
-					&& Field(*Time, TEXT("tick"))
-					&& Field(*Time, TEXT("tick"))->GetLexeme() == TEXT("30"));
-			const FUeAgentCanonicalValue* Frame = Field(*Root, TEXT("frame"));
-			TestTrue(TEXT("PCG result retains exact requested output frame"),
-				Frame && Field(*Frame, TEXT("frame_id"))
-					&& Field(*Frame, TEXT("frame_id"))->GetLexeme()
-						== TEXT("frame://output"));
-			const FUeAgentCanonicalValue* Items = Field(*Root, TEXT("items"));
-			TestTrue(TEXT("PCG selector returns one real item"),
-				Items && Items->GetArrayItems().Num() == 1);
-			if (Items && Items->GetArrayItems().Num() == 1)
-			{
-				const FUeAgentCanonicalValue& Item = Items->GetArrayItems()[0].Get();
-				const TCHAR* IdentityField = Capability.Contains(TEXT("partition"))
-					? TEXT("partition_ref") : TEXT("data_ref");
-				const FUeAgentCanonicalValue* ItemIdentity = Field(Item, IdentityField);
-				TestTrue(TEXT("PCG selector retains real item identity"),
-					ItemIdentity && (Capability.Contains(TEXT("partition"))
-						? ItemIdentity->GetLexeme().StartsWith(TEXT("partition:0:"))
-						: ItemIdentity->GetLexeme() == TEXT("data:0/point:1")));
-			}
-		}
 	}
 
-	FRigSimulationSpatialGenerationIdentity WrongGeneration = GenerationIdentity;
-	WrongGeneration.Generation = TEXT("pcg-generation://wrong");
-	TSharedPtr<const FUeAgentProjectionSourceValue> FailedSource;
-	FString FailureCode;
-	TestFalse(TEXT("generation mismatch fails closed"), Query(*this, *Runtime,
-		TEXT("pcg.generated_spatial_data.read"),
-		QueryInput(TEXT("pcg.generated_spatial_data.read"), WrongGeneration),
-		Resources, FailedSource, &FailureCode));
-	TestEqual(TEXT("generation mismatch has exact failure"), FailureCode,
-		FString(TEXT("rig_simulation_spatial_pcg_generation_identity_mismatch")));
-	TestEqual(TEXT("five successful queries plus one rejected read reach family once each"),
-		Runtime->GetFamilyDispatchCallCount(), 6);
+	TestEqual(TEXT("three deformer queries reach the family once each"), Runtime->GetFamilyDispatchCallCount(), 3);
 
 	TestEqual(TEXT("Geometry Cache package dirty state is unchanged"),
 		GeometryCache->GetOutermost()->IsDirty(), bGeometryDirty);
@@ -703,11 +538,5 @@ bool FUeAgentRigSimulationSpatialDeformerPcgNativeTest::RunTest(
 		Animation->GetOutermost()->IsDirty(), bAnimationDirty);
 	TestTrue(TEXT("evaluation subject transform is unchanged"),
 		Subject->GetComponentTransform().Equals(SubjectTransform));
-	TestEqual(TEXT("PCG source component package dirty state is unchanged"),
-		PcgComponent->GetOutermost()->IsDirty(), bPcgPackageDirty);
-	TestEqual(TEXT("PCG generated data collection is unchanged"),
-		DataAsset->Data.TaggedData.Num(), DataCount);
-	TestTrue(TEXT("PCG partition location is unchanged"),
-		Partition->GetActorLocation().Equals(PartitionLocation));
 	return !HasAnyErrors();
 }

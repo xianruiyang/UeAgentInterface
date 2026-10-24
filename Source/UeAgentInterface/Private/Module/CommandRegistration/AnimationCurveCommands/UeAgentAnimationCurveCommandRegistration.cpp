@@ -32,13 +32,18 @@ namespace UE::UAI::Module::CommandRegistration::AnimationCurveCommands
 		bool TryDeclaration(
 			const FString& CommandId,
 			const FUeAgentCommandContractRegistry& Legacy,
+			const TArray<Composition::TimelineSpatial::
+				FUeAgentTimelineSpatialActivationProfile>& TimelineProfiles,
 			FUeAgentCommandDeclaration& OutDeclaration,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			const FUeAgentCommandContract* Contract = Legacy.FindExact(CommandId);
-			if (!Contract || !Contract->IsValid())
+			if (!Contract || !Contract->TryValidate(OutError))
 			{
-				OutError = TEXT("animation_curve_contract_missing:") + CommandId;
+				OutError = Contract
+					? UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("animation_curve_contract_missing"), OutError, TEXT("registration"))
+					: UE::UAI::Contract::FDiagnostic::Failure(TEXT("animation_curve_contract_missing"), TEXT("No command contract is registered for this command."), TEXT("registration"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
 				return false;
 			}
 			const bool bQuery = QueryOwners::AnimationCurveCommands::IsQuery(CommandId);
@@ -58,10 +63,25 @@ namespace UE::UAI::Module::CommandRegistration::AnimationCurveCommands
 					Parameter.GetName(), WireType(Parameter.GetWireType()),
 					Parameter.IsRequired(), Parameter.IsNullable(),
 					TEXT("Exact animation/curve mechanics parameter."),
+					Parameter.GetSchemaJson(),
 				});
 			}
 			Result.ResultFields = {{TEXT("result"), TEXT("object"), true, false,
 				TEXT("Native animation asset result with revision and readback.")}};
+			if (const auto* Profile = TimelineProfiles.FindByPredicate(
+					[&CommandId](const auto& Candidate)
+					{
+						return Candidate.CommandId == CommandId;
+					}))
+			{
+				Result.ModelResultFields = Profile->ModelResultFields;
+			}
+			if (CommandId.EndsWith(TEXT(".asset.create")))
+			{
+				Result.ModelResultFields = {
+					{TEXT("target_ref"), {TEXT("target_ref")}},
+				};
+			}
 			Result.Errors = {
 				{TEXT("animation_curve_authority_required"),
 					TEXT("The caller lacks Query or Operation authority.")},
@@ -79,7 +99,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationCurveCommands
 			Result.Purpose.Preconditions = {
 				TEXT("Resolve the exact asset, temporal contract, skeleton dependencies, and expected revision."),
 			};
-			Result.Purpose.ParameterGuidance = TEXT("Use only query.command.detail fields.");
+			Result.Purpose.ParameterGuidance = TEXT("Use the generated naming SDK method and its public parameters.");
 			Result.Purpose.ResultGuidance =
 				TEXT("Verify writes with the corresponding persisted animation readback.");
 			Result.Purpose.FailureGuidance =
@@ -112,7 +132,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationCurveCommands
 			bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return CommandHandlers::AnimationCurveCommands::TryCreateHandlers(
 					OutHandlers, OutError);
@@ -127,7 +147,7 @@ namespace UE::UAI::Module::CommandRegistration::AnimationCurveCommands
 
 	bool TryCreateContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		OutError.Reset();
@@ -149,7 +169,12 @@ namespace UE::UAI::Module::CommandRegistration::AnimationCurveCommands
 		for (const FString& CommandId : QueryOwners::AnimationCurveCommands::GetCommandIds())
 		{
 			FUeAgentCommandDeclaration Declaration;
-			if (!TryDeclaration(CommandId, *Legacy, Declaration, OutError)) return false;
+			if (!TryDeclaration(
+					CommandId,
+					*Legacy,
+					TimelineProfiles,
+					Declaration,
+					OutError)) return false;
 			Declarations.Add(MoveTemp(Declaration));
 		}
 		OutContribution = MakeShared<FContribution>(MoveTemp(Declarations));

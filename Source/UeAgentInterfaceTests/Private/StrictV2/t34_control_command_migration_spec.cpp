@@ -38,8 +38,6 @@ bool FUeAgentStrictV2T34ControlCommandMigrationTest::RunTest(
 		return false;
 	}
 
-	TestEqual(TEXT("T34 owns exactly four consolidated control commands"),
-		ExpectedCommands().Num(), 4);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);

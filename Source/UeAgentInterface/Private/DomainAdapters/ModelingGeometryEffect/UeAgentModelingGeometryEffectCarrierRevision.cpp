@@ -1,4 +1,7 @@
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCarrierRevision.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 #include "Components/DynamicMeshComponent.h"
 #include "DynamicMesh/DynamicMesh3.h"
@@ -25,22 +28,50 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 	namespace
 	{
+		FString RevisionTarget(const UObject& Carrier)
+		{
+			return Carrier.IsA<ADynamicMeshActor>() || Carrier.IsA<UStaticMesh>() ? Carrier.GetPathName() : FString();
+		}
+
+		FExecutionMutationError RevisionFact(const FString& Code, const FString& Reason, const FString& Field,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target = FString())
+		{
+			FExecutionMutationError Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Field,
+				MoveTemp(Expected), MoveTemp(Actual), TEXT("execution"), Reason);
+			Error.SourceKind = TEXT("native_result"); Error.Source.JsonPath.Reset(); Error.SemanticPointer.Reset(); Error.TargetPath = Target;
+			return Error;
+		}
+
 		class FCarrierRevisionHash final
 		{
 		public:
 			FCarrierRevisionHash()
 			{
-				bValid = SHA256_Init(&Context) == 1;
+				const int32 Status = SHA256_Init(&Context);
+				bValid = Status == 1;
+				if (!bValid)
+				{
+					FailureDiagnostic = RevisionFact(TEXT("modeling_geometry_revision_hash_failed"),
+						TEXT("Native modeling revision hash initialization failed."), TEXT("/revision_hash/initialize_status"),
+						MakeShared<FJsonValueNumber>(Status), MakeShared<FJsonValueNumber>(1));
+					FailureDiagnostic.InternalContext = TEXT("SHA256_Init");
+				}
 			}
 
 			void AddBytes(const void* Data, const uint64 Size)
 			{
 				if (bValid && Size > 0)
 				{
-					bValid = SHA256_Update(
-						&Context,
-						Data,
-						static_cast<size_t>(Size)) == 1;
+					const int32 Status = SHA256_Update(&Context, Data, static_cast<size_t>(Size));
+					bValid = Status == 1;
+					if (!bValid)
+					{
+						FailureDiagnostic = RevisionFact(TEXT("modeling_geometry_revision_hash_failed"),
+							TEXT("Native modeling revision hash update failed."), TEXT("/revision_hash/update_status"),
+							MakeShared<FJsonValueNumber>(Status), MakeShared<FJsonValueNumber>(1));
+						FailureDiagnostic.InternalContext = TEXT("SHA256_Update");
+						FailureDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%llu"), Size));
+					}
 				}
 			}
 
@@ -129,12 +160,22 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				AddVector(Value.GetScale3D());
 			}
 
-			bool Finalize(int64& OutSequence)
+			bool Finalize(int64& OutSequence, FExecutionMutationError& OutError)
 			{
 				OutSequence = -1;
-				uint8 Digest[SHA256_DIGEST_LENGTH] = {};
-				if (!bValid || SHA256_Final(Digest, &Context) != 1)
+				if (!bValid)
 				{
+					OutError = FailureDiagnostic;
+					return false;
+				}
+				uint8 Digest[SHA256_DIGEST_LENGTH] = {};
+				const int32 Status = SHA256_Final(Digest, &Context);
+				if (Status != 1)
+				{
+					OutError = RevisionFact(TEXT("modeling_geometry_revision_hash_failed"),
+						TEXT("Native modeling revision hash finalization failed."), TEXT("/revision_hash/finalize_status"),
+						MakeShared<FJsonValueNumber>(Status), MakeShared<FJsonValueNumber>(1));
+					OutError.InternalContext = TEXT("SHA256_Final");
 					return false;
 				}
 				uint64 Prefix = 0;
@@ -150,6 +191,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		private:
 			SHA256_CTX Context{};
 			bool bValid = false;
+			FExecutionMutationError FailureDiagnostic;
 		};
 
 		void HashMaterial(
@@ -251,7 +293,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 		bool HashDynamicMesh(
 			FCarrierRevisionHash& Hash,
-			const FDynamicMesh3& Mesh)
+			const FDynamicMesh3& Mesh, FExecutionMutationError& OutError)
 		{
 			FDynamicMesh3 Copy(Mesh);
 			TArray<uint8> Serialized;
@@ -264,6 +306,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			Writer.Close();
 			if (Writer.IsError())
 			{
+				OutError = RevisionFact(TEXT("modeling_geometry_revision_mesh_read_failed"),
+					TEXT("The dynamic mesh could not be serialized for modeling revision calculation."), TEXT("/dynamic_mesh/archive_error"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 				return false;
 			}
 			Hash.AddString(TEXT("ue5.6-dynamic-mesh-compact-v2"));
@@ -288,7 +333,7 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 
 		bool HashMeshDescription(
 			FCarrierRevisionHash& Hash,
-			const FMeshDescription& Description)
+			const FMeshDescription& Description, FExecutionMutationError& OutError)
 		{
 			FMeshDescription Copy(Description);
 			TArray<uint8> Serialized;
@@ -297,6 +342,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			Writer.Close();
 			if (Writer.IsError())
 			{
+				OutError = RevisionFact(TEXT("modeling_geometry_revision_mesh_read_failed"),
+					TEXT("The static mesh description could not be serialized for modeling revision calculation."), TEXT("/mesh_description/archive_error"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 				return false;
 			}
 			Hash.AddString(TEXT("ue5.6-mesh-description-v1"));
@@ -359,8 +407,9 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		OutError = FExecutionMutationError();
 		if (SourceId.IsEmpty())
 		{
-			OutError = FExecutionMutationError(
-				TEXT("modeling_geometry_revision_source_missing"));
+			OutError = RevisionFact(TEXT("modeling_geometry_revision_source_missing"),
+				TEXT("A non-empty modeling revision source identity is required."), TEXT("/revision/source_identity_available"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), RevisionTarget(Carrier));
 			return false;
 		}
 
@@ -375,9 +424,11 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				Component ? Component->GetDynamicMesh() : nullptr;
 			if (!Component || !DynamicMesh)
 			{
-				OutError = FExecutionMutationError(
-					TEXT("modeling_geometry_dynamic_mesh_missing"),
-					Carrier.GetPathName());
+				OutError = RevisionFact(TEXT("modeling_geometry_dynamic_mesh_missing"), Component
+					? TEXT("The modeling actor's dynamic mesh component has no mesh for revision calculation.")
+					: TEXT("The modeling actor has no dynamic mesh component for revision calculation."), Component
+					? TEXT("/dynamic_mesh_available") : TEXT("/dynamic_mesh_component_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Carrier.GetPathName());
 				return false;
 			}
 			Hash.AddTransform(Actor->GetActorTransform());
@@ -400,16 +451,22 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 			}
 			HashBodySetup(Hash, Component->GetBodySetup());
 			bool bMeshRead = false;
-			DynamicMesh->ProcessMesh(
-				[&](const FDynamicMesh3& Mesh)
-				{
-					bMeshRead = HashDynamicMesh(Hash, Mesh);
-				});
+			bool bMeshVisited = false;
+			DynamicMesh->ProcessMesh([&](const FDynamicMesh3& Mesh)
+			{
+				bMeshVisited = true;
+				bMeshRead = HashDynamicMesh(Hash, Mesh, OutError);
+			});
+			if (!bMeshVisited)
+			{
+				OutError = RevisionFact(TEXT("modeling_geometry_revision_mesh_read_failed"),
+					TEXT("The dynamic mesh read callback did not execute during revision calculation."), TEXT("/dynamic_mesh/read_callback_invoked"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Carrier.GetPathName());
+				return false;
+			}
 			if (!bMeshRead)
 			{
-				OutError = FExecutionMutationError(
-					TEXT("modeling_geometry_revision_mesh_read_failed"),
-					Carrier.GetPathName());
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Carrier.GetPathName();
 				return false;
 			}
 		}
@@ -420,16 +477,14 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 				StaticMesh->GetMeshDescription(0);
 			if (!Description)
 			{
-				OutError = FExecutionMutationError(
-					TEXT("modeling_geometry_static_mesh_source_missing"),
-					Carrier.GetPathName());
+				OutError = RevisionFact(TEXT("modeling_geometry_static_mesh_source_missing"),
+					TEXT("The static mesh has no LOD 0 mesh description for revision calculation."), TEXT("/lods/0/mesh_description_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Carrier.GetPathName());
 				return false;
 			}
-			if (!HashMeshDescription(Hash, *Description))
+			if (!HashMeshDescription(Hash, *Description, OutError))
 			{
-				OutError = FExecutionMutationError(
-					TEXT("modeling_geometry_revision_mesh_read_failed"),
-					Carrier.GetPathName());
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Carrier.GetPathName();
 				return false;
 			}
 			Hash.AddInt32(StaticMesh->GetStaticMaterials().Num());
@@ -444,9 +499,11 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		}
 		else
 		{
-			OutError = FExecutionMutationError(
-				TEXT("modeling_geometry_carrier_kind_unsupported"),
-				Carrier.GetClass()->GetPathName());
+			OutError = RevisionFact(TEXT("modeling_geometry_carrier_kind_unsupported"),
+				TEXT("Modeling revisions support DynamicMeshActor and StaticMesh carriers."), TEXT("/carrier/class"),
+				MakeShared<FJsonValueString>(Carrier.GetClass()->GetPathName()), MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+					MakeShared<FJsonValueString>(ADynamicMeshActor::StaticClass()->GetPathName()), MakeShared<FJsonValueString>(UStaticMesh::StaticClass()->GetPathName())}));
+			OutError.InternalContext = Carrier.GetPathName();
 			return false;
 		}
 
@@ -457,19 +514,19 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		Hash.AddString(Generation);
 		Hash.AddString(Carrier.GetClass()->GetPathName());
 		int64 Sequence = -1;
-		if (!Hash.Finalize(Sequence))
+		if (!Hash.Finalize(Sequence, OutError))
 		{
-			OutError = FExecutionMutationError(
-				TEXT("modeling_geometry_revision_hash_failed"),
-				Carrier.GetPathName());
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Carrier.GetPathName();
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SourceId;
 			return false;
 		}
 		FUeAgentStateRevision Revision(SourceId, Generation, Sequence);
 		if (!Revision.IsValid())
 		{
-			OutError = FExecutionMutationError(
-				TEXT("modeling_geometry_revision_invalid"),
-				Carrier.GetPathName());
+			OutError = Contract::FDiagnostic::WrapFailure(TEXT("modeling_geometry_revision_invalid"), Revision.GetValidationDiagnostic(),
+				TEXT("execution"), TEXT("The modeling carrier revision could not be constructed."));
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Carrier.GetPathName();
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SourceId;
 			return false;
 		}
 		OutRevision.Emplace(MoveTemp(Revision));

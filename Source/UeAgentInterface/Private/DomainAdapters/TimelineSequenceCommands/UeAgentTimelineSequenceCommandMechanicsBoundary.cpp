@@ -5,6 +5,7 @@
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
 #include "Core/Projection/UeAgentProjection.h"
+#include "Dom/JsonValue.h"
 #include "Editor.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/App.h"
@@ -22,6 +23,22 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 	using namespace ContextResource;
 	using namespace Discovery;
 	using namespace Projection;
+
+	const TArray<FString>& GetCommandIds()
+	{
+		return QueryOwners::TimelineSequenceCommands::GetCommandIds();
+	}
+
+	const TArray<FString>& GetPublicCommandIds()
+	{
+		static const TArray<FString> Ids = []
+		{
+			TArray<FString> Result = GetCommandIds();
+			Result.Remove(TEXT("timeline.sequence.settings.update"));
+			return Result;
+		}();
+		return Ids;
+	}
 
 	namespace
 	{
@@ -55,30 +72,15 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 				FUeAgentCancellationRequested Cancelled;
 				if (!Cancellation.TryCheckpoint(Cancelled))
 				{
-					OutError.Code = Cancelled.Code;
-					OutError.SubjectId = Cancelled.Reason;
-					OutError.Detail = TEXT("TimelineSequence projection cancelled");
+					OutError = Cancelled;
 					return false;
 				}
-				FUeAgentOperationDeadlineExceeded Expired;
-				if (!Deadline.TryCheckpoint(TEXT("timeline_sequence.projection"), Expired))
-				{
-					OutError.Code = Expired.Code;
-					OutError.SubjectId = Expired.Stage;
-					OutError.Detail = TEXT("TimelineSequence projection deadline expired");
-					return false;
-				}
-				FUeAgentResourceBudgetExceeded BudgetError;
+				FUeAgentResourceChargeError ChargeError;
 				if (!Resources.TryCharge(
 						EUeAgentResourceDimension::WorkUnits, 1,
-						TEXT("timeline_sequence.projection"), BudgetError))
+						TEXT("timeline_sequence.projection"), ChargeError))
 				{
-					OutError.Code = BudgetError.Code;
-					OutError.SubjectId = BudgetError.Path;
-					OutError.Detail = TEXT("TimelineSequence projection budget exceeded");
-					OutError.ResourceDimension = BudgetError.Dimension;
-					OutError.ResourceLimit = BudgetError.Limit;
-					OutError.ResourceObserved = BudgetError.Observed;
+					OutError = ChargeError;
 					return false;
 				}
 				int64 Bytes = 512 + Artifacts.Num() * 512 + Diagnostics.Num() * 256;
@@ -96,20 +98,20 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 		bool TryCreateMechanics(
 			TMap<FString, TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
 			TArray<FString>& OutScopes,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutHandlers.Reset();
 			OutScopes.Reset();
 			OutError.Reset();
 			if (!IsInGameThread())
 			{
-				OutError = TEXT("timeline_sequence_game_thread_required");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_sequence_game_thread_required"), TEXT("Timeline sequence mechanics must be initialized on the game thread."), TEXT("runtime_factory"));
 				return false;
 			}
 			UWorld* const World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 			if (!World)
 			{
-				OutError = TEXT("timeline_sequence_editor_world_unavailable");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_sequence_editor_world_unavailable"), TEXT("No editor world is available for timeline sequence mechanics."), TEXT("runtime_factory"));
 				return false;
 			}
 
@@ -124,7 +126,7 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 					[]() { return FGuid::NewGuid().ToString(EGuidFormats::Digits); },
 					Tickets, TicketError))
 			{
-				OutError = TicketError.Code + TEXT(":") + TicketError.Detail;
+				OutError = TicketError;
 				return false;
 			}
 			TSharedPtr<const FUeAgentResponseProjector> Projector;
@@ -132,7 +134,7 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 			if (!FUeAgentResponseProjector::TryCreate(
 					MakeShared<FConservativeTokenEstimator>(), Projector, ProjectionError))
 			{
-				OutError = ProjectionError.Code + TEXT(":") + ProjectionError.Detail;
+				OutError = ProjectionError;
 				return false;
 			}
 
@@ -142,8 +144,7 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 				TEXT("editor-process:%u"), FPlatformProcess::GetCurrentProcessId());
 			SimpleConfig.ServerSessionId = SessionId;
 			SimpleConfig.RegistryEpoch = 1;
-			SimpleConfig.TimeoutSeconds = 120.0;
-			SimpleConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 			SimpleConfig.JournalRoot = FPaths::ProjectSavedDir()
 				/ TEXT("UeAgentInterface/SimpleAuthoring/TimelineSequenceFoundation");
 			TSharedPtr<FUeAgentSimpleAuthoringRuntime> SimpleRuntime;
@@ -153,7 +154,9 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 					SimpleRuntime, SimpleError)
 				|| !SimpleRuntime.IsValid())
 			{
-				OutError = SimpleError.Code + TEXT(":") + SimpleError.Detail;
+				OutError = SimpleError;
+				if (OutError.IsEmpty()) OutError = UE::UAI::Contract::FDiagnostic::Failure(
+					TEXT("timeline_sequence_simple_runtime_missing"), TEXT("The simple authoring runtime factory did not return a runtime."), TEXT("runtime_factory"));
 				return false;
 			}
 			TSharedPtr<const FUeAgentDiscoveryService> Discovery;
@@ -162,7 +165,9 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 					SimpleRuntime->GetCatalogSources(), {}, Discovery, DiscoveryError)
 				|| !Discovery.IsValid())
 			{
-				OutError = DiscoveryError.Code + TEXT(":") + DiscoveryError.Detail;
+				OutError = DiscoveryError;
+				if (OutError.IsEmpty()) OutError = UE::UAI::Contract::FDiagnostic::Failure(
+					TEXT("timeline_sequence_discovery_missing"), TEXT("The discovery factory did not return a service."), TEXT("runtime_factory"));
 				return false;
 			}
 
@@ -171,8 +176,7 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 			RuntimeConfig.EditorInstanceId = SimpleConfig.EditorInstanceId;
 			RuntimeConfig.ServerSessionId = SessionId;
 			RuntimeConfig.RegistryEpoch = 1;
-			RuntimeConfig.TimeoutSeconds = 120.0;
-			RuntimeConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 			TSharedPtr<FUeAgentTimelineSpatialRuntime> Runtime;
 			FUeAgentTimelineSpatialRuntimeError RuntimeError;
 			if (!FUeAgentTimelineSpatialRuntime::TryCreate(
@@ -180,7 +184,9 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 					Projector.ToSharedRef(), Runtime, RuntimeError)
 				|| !Runtime.IsValid())
 			{
-				OutError = RuntimeError.Code + TEXT(":") + RuntimeError.Detail;
+				OutError = RuntimeError;
+				if (OutError.IsEmpty()) OutError = UE::UAI::Contract::FDiagnostic::Failure(
+					TEXT("timeline_sequence_runtime_missing"), TEXT("The timeline spatial factory did not return a runtime."), TEXT("runtime_factory"));
 				return false;
 			}
 			for (const TSharedRef<IUeAgentCommandHandler>& Handler : Runtime->GetCommandHandlers())
@@ -192,7 +198,11 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 				if (OutHandlers.Contains(Handler->GetCommandId()))
 				{
 					OutHandlers.Reset();
-					OutError = TEXT("timeline_sequence_mechanics_duplicate:") + Handler->GetCommandId();
+					OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_sequence_mechanics_duplicate"), TEXT("More than one handler is registered for this sequence command."), TEXT("runtime_factory"));
+					OutError.PropertyPath = TEXT("command_id");
+					OutError.ActualValuePresent = true;
+					OutError.ActualValue = MakeShared<FJsonValueString>(Handler->GetCommandId());
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("one handler per command"));
 					return false;
 				}
 				OutHandlers.Add(Handler->GetCommandId(), Handler);
@@ -200,8 +210,13 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 			OutScopes = Runtime->GetAuthorityScopes();
 			if (OutHandlers.Num() != QueryOwners::TimelineSequenceCommands::GetCommandIds().Num())
 			{
+				const int32 ActualCount = OutHandlers.Num();
 				OutHandlers.Reset();
-				OutError = TEXT("timeline_sequence_mechanics_count_mismatch");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_sequence_mechanics_count_mismatch"), TEXT("The registered handler count differs from the declared sequence command count."), TEXT("runtime_factory"));
+				OutError.PropertyPath = TEXT("handlers.count");
+				OutError.ActualValuePresent = true;
+				OutError.ActualValue = MakeShared<FJsonValueNumber>(ActualCount);
+				OutError.ExpectedValue = MakeShared<FJsonValueNumber>(QueryOwners::TimelineSequenceCommands::GetCommandIds().Num());
 				return false;
 			}
 			return true;
@@ -212,7 +227,7 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 		const FString& CommandId,
 		TSharedPtr<IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandler.Reset();
 		OutAuthorityScopes.Reset();
@@ -227,7 +242,10 @@ namespace UE::UAI::DomainAdapters::TimelineSequenceCommands
 		const TSharedRef<IUeAgentCommandHandler>* Found = Host.Handlers.Find(CommandId);
 		if (!Found)
 		{
-			OutError = TEXT("timeline_sequence_mechanics_missing:") + CommandId;
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("timeline_sequence_mechanics_missing"), TEXT("No timeline sequence handler is registered for this command."), TEXT("runtime_factory"));
+			OutError.PropertyPath = TEXT("command_id");
+			OutError.ActualValuePresent = true;
+			OutError.ActualValue = MakeShared<FJsonValueString>(CommandId);
 			return false;
 		}
 		OutHandler = *Found;

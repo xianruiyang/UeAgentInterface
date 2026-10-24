@@ -1,13 +1,27 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "DomainAdapters/AudioMediaGraph/UeAgentAudioMediaGraphAdapter.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 
 class UTextureGraph;
 class UTextureRenderTarget2D;
+class UTG_Graph;
+class UTG_Node;
+class UTG_Pin;
+class UTG_Expression;
+class FProperty;
+class FJsonValue;
 
 namespace UE::UAI::DomainAdapters::AudioMediaGraph
 {
+	// Request-local semantic aliases bind to native graph members, not UObject local names.
+	struct FAudioMediaGraphTextureGraphNodeBindings
+	{
+		TMap<FString, int32> NodeIndices;
+	};
 	enum class EAudioMediaGraphTextureGraphValueKind : uint8
 	{
 		Number,
@@ -20,6 +34,7 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 	{
 	public:
 		static FAudioMediaGraphTextureGraphValue Number(double InValue);
+		static FAudioMediaGraphTextureGraphValue Number(TSharedPtr<FJsonValue> InValue);
 		static FAudioMediaGraphTextureGraphValue Boolean(bool bInValue);
 		static FAudioMediaGraphTextureGraphValue String(FString InValue);
 		static FAudioMediaGraphTextureGraphValue NumberArray(
@@ -27,6 +42,7 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 
 		EAudioMediaGraphTextureGraphValueKind GetKind() const { return Kind; }
 		double GetNumber() const { return NumberValue; }
+		const TSharedPtr<FJsonValue>& GetNumberValue() const { return NumberSource; }
 		bool GetBoolean() const { return bBooleanValue; }
 		const FString& GetString() const { return StringValue; }
 		const TArray<double>& GetNumberArray() const { return NumberArrayValue; }
@@ -35,6 +51,7 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 		EAudioMediaGraphTextureGraphValueKind Kind =
 			EAudioMediaGraphTextureGraphValueKind::Number;
 		double NumberValue = 0.0;
+		TSharedPtr<FJsonValue> NumberSource;
 		bool bBooleanValue = false;
 		FString StringValue;
 		TArray<double> NumberArrayValue;
@@ -118,11 +135,19 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 			, Intent(InIntent)
 		{
 		}
+		FAudioMediaGraphTextureGraphParameterMutation(
+			FString InElementId, FString InPinName, FString InAlias,
+			EAudioMediaGraphMutationIntent InIntent)
+			: ElementId(MoveTemp(InElementId)), PinName(MoveTemp(InPinName)),
+			  Alias(MoveTemp(InAlias)), Intent(InIntent), bHasValue(false) {}
 
 		const FString& GetElementId() const { return ElementId; }
 		const FString& GetPinName() const { return PinName; }
 		const FString& GetAlias() const { return Alias; }
 		const FAudioMediaGraphTextureGraphValue& GetValue() const { return Value; }
+		bool HasValue() const { return bHasValue; }
+		const UeAgentAuthoringDiagnostics::FSourceLocation& GetSource() const { return Source; }
+		void SetSource(UeAgentAuthoringDiagnostics::FSourceLocation InSource) { Source = MoveTemp(InSource); }
 		EAudioMediaGraphMutationIntent GetIntent() const { return Intent; }
 
 	private:
@@ -131,6 +156,8 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 		FString Alias;
 		FAudioMediaGraphTextureGraphValue Value;
 		EAudioMediaGraphMutationIntent Intent;
+		bool bHasValue = true;
+		UeAgentAuthoringDiagnostics::FSourceLocation Source;
 	};
 
 	class FAudioMediaGraphTextureGraphArtifactSelector final
@@ -370,20 +397,36 @@ namespace UE::UAI::DomainAdapters::AudioMediaGraph
 	class UEAGENTINTERFACE_API FAudioMediaGraphTextureGraphNativeHook final
 	{
 	public:
+		// Compact native parameter values keep their existing public shape; other
+		// editable expression fields use the shared reflected property surface.
+		static bool UsesCompactParameterValue(const UTG_Pin& Pin);
+		static bool TryReadPinNumber(const UTG_Pin& Pin, double& OutValue);
+		static bool TryNormalizePinNumber(const UTG_Pin& Pin,
+			const FAudioMediaGraphTextureGraphValue& Value, double& OutValue, UE::UAI::Contract::FDiagnostic& OutError);
+		static bool UsesReflectedExpressionProperty(UTG_Expression& Expression, const FProperty& Property);
+		// Match native editor node-added initialization before authored settings apply.
+		// Scratch graphs use the destination asset context, not their transient outer.
+		static void InitializeCreatedNode(const UTG_Node& Node, const FString& TargetAssetPath = {});
+		UTG_Node* ResolveNode(UTG_Graph& Graph, const FString& ElementId,
+			const FAudioMediaGraphTextureGraphNodeBindings* Bindings = nullptr) const;
 		bool TryApplyNodeMutations(
 			UTextureGraph& Graph,
 			const TArray<FAudioMediaGraphTextureGraphNodeMutation>& Mutations,
-			FAudioMediaGraphError& OutError) const;
+			FAudioMediaGraphError& OutError,
+			FAudioMediaGraphTextureGraphNodeBindings* Bindings = nullptr,
+			const FString& TargetAssetPath = {}) const;
 
 		bool TryApplyLinkMutations(
 			UTextureGraph& Graph,
 			const TArray<FAudioMediaGraphTextureGraphLinkMutation>& Mutations,
-			FAudioMediaGraphError& OutError) const;
+			FAudioMediaGraphError& OutError,
+			const FAudioMediaGraphTextureGraphNodeBindings* Bindings = nullptr) const;
 
 		bool TryApplyParameterMutations(
 			UTextureGraph& Graph,
 			const TArray<FAudioMediaGraphTextureGraphParameterMutation>& Mutations,
-			FAudioMediaGraphError& OutError) const;
+			FAudioMediaGraphError& OutError,
+			const FAudioMediaGraphTextureGraphNodeBindings* Bindings = nullptr) const;
 
 		bool TryValidateEvaluateSettle(
 			UTextureGraph& Graph,

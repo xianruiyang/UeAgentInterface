@@ -198,25 +198,16 @@ namespace
 			MoveTemp(Descriptors), OutFixture.Registry, OutError);
 	}
 
-	FGraphCompoundRuntimeConfig MakeConfig(const int64 MaxFrameBytes = 65536)
+	FGraphCompoundRuntimeConfig MakeConfig()
 	{
 		FGraphCompoundRuntimeConfig Config;
-		Config.MaxFrameBytes = MaxFrameBytes;
 		return Config;
 	}
 
 	TSharedRef<FTestQueryBinding> MakeQueryBinding(
 		const FRuntimeFixture& Fixture,
 		const FString& OwnerId = TEXT("owner.blueprint.query"),
-		const FString& Result = TEXT(
-			"{\"asset_path\":\"/Game/UAI/BP_Test\","
-			"\"can_author_component_bound_event\":true,"
-			"\"compiled_before_query\":true,"
-			"\"component_name\":\"Root\","
-			"\"component_property_found\":true,\"events\":[],"
-			"\"matched_event_count\":0,\"returned_event_count\":0,"
-			"\"target_class\":\"/Script/Engine.SceneComponent\","
-			"\"total_event_count\":0,\"truncated\":false}"),
+		const FString& Result = TEXT("{\"names\":[]}"),
 		const bool bSucceeds = true)
 	{
 		return MakeShared<FTestQueryBinding>(
@@ -246,15 +237,14 @@ namespace
 		const TSharedRef<FTestQueryBinding>& QueryBinding,
 		const TSharedRef<FTestOperationBinding>& OperationBinding,
 		TSharedPtr<FGraphCompoundRuntime>& OutRuntime,
-		FGraphCompoundRuntimeError& OutError,
-		const int64 MaxFrameBytes = 65536)
+		FGraphCompoundRuntimeError& OutError)
 	{
 		TArray<TSharedRef<IGraphCompoundQueryBinding>> QueryBindings;
 		QueryBindings.Add(QueryBinding);
 		TArray<TSharedRef<IGraphCompoundOperationBinding>> OperationBindings;
 		OperationBindings.Add(OperationBinding);
 		return FGraphCompoundRuntime::TryCreate(
-			MakeConfig(MaxFrameBytes),
+			MakeConfig(),
 			Fixture.Registry.ToSharedRef(),
 			MoveTemp(QueryBindings),
 			MoveTemp(OperationBindings),
@@ -286,15 +276,7 @@ namespace
 		"{\"asset_path\":\"/Game/UAI/BP_Test\"," 
 		"\"component_name\":\"Root\"}");
 
-	const FString ExpectedCanonicalQueryResult = TEXT(
-		"{\"asset_path\":\"/Game/UAI/BP_Test\","
-		"\"can_author_component_bound_event\":true,"
-		"\"compiled_before_query\":true,"
-		"\"component_name\":\"Root\","
-		"\"component_property_found\":true,\"events\":[],"
-		"\"matched_event_count\":0,\"returned_event_count\":0,"
-		"\"target_class\":\"/Script/Engine.SceneComponent\","
-		"\"total_event_count\":0,\"truncated\":false}");
+	const FString ExpectedCanonicalQueryResult = TEXT("{\"names\":[]}");
 
 	FUeAgentOperationRequest MakeOperationRequest(
 		const FRuntimeFixture& Fixture,
@@ -496,25 +478,6 @@ bool FUeAgentGraphCompoundRuntimeFailureSemanticsTest::RunTest(
 			TEXT("graph_compound_cancelled")));
 	TestEqual(TEXT("cancelled input never reaches a provider"),
 		OperationBinding->InvocationCount, 0);
-
-	TSharedPtr<FGraphCompoundRuntime> SmallRuntime;
-	const TSharedRef<FTestQueryBinding> SmallQuery = MakeQueryBinding(Fixture);
-	const TSharedRef<FTestOperationBinding> SmallOperation =
-		MakeOperationBinding(Fixture);
-	if (!TryCreateRuntime(
-			Fixture, SmallQuery, SmallOperation, SmallRuntime, Error, 16))
-	{
-		AddError(Error.Code + TEXT(":") + Error.Detail);
-		return false;
-	}
-	const FUeAgentQueryResult ResourceResult =
-		SmallRuntime->GetQueryPort()->Submit(
-			MakeQueryRequest(Fixture), MakeCaller(), Active);
-	TestTrue(TEXT("resource exhaustion is explicit"),
-		ResourceResult.GetValue().GetJsonValue().Contains(
-			TEXT("graph_compound_resource_exceeded")));
-	TestEqual(TEXT("resource-rejected input never reaches a provider"),
-		SmallQuery->InvocationCount, 0);
 
 	const TSharedRef<FTestQueryBinding> FailedProvider =
 		MakeQueryBinding(Fixture, TEXT("owner.failed"), TEXT("{}"), false);

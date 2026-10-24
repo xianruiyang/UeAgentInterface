@@ -218,11 +218,22 @@ static constexpr ANSICHAR GTimelineAnimationDescriptorSpecJson0[] = R"UAITAD0({
       "properties": {
         "binding_ref":{"component":"target_ref"},
         "binding_kind":{"type":"string","enum":["possessable","spawnable","widget","slot"]},
+        "tags":{"type":"array","items":{"type":"string","minLength":1}},
         "object_ref":{"component":"target_ref"},
         "tracks":{"type":"array","items":{"component":"timeline_track"}}
       },
       "required":["binding_ref","binding_kind","tracks"],
       "additionalProperties":false
+    },
+    "timeline_folder": {
+      "type":"object",
+      "properties": {
+        "folder_ref":{"type":"string"}, "name":{"type":"string","minLength":1},
+        "parent":{"type":"string"},
+        "bindings":{"type":"array","items":{"type":"string"}},
+        "root_tracks":{"type":"array","items":{"type":"string"}}
+      },
+      "required":["folder_ref","name"], "additionalProperties":false
     },
     "timeline_structure": {
       "type":"object",
@@ -231,6 +242,7 @@ static constexpr ANSICHAR GTimelineAnimationDescriptorSpecJson0[] = R"UAITAD0({
         "tick_resolution":{"component":"rate"},
         "playback_range":{"component":"temporal_range"},
         "bindings":{"type":"array","items":{"component":"timeline_binding"}},
+        "folders":{"type":"array","items":{"component":"timeline_folder"}},
         "root_tracks":{"type":"array","items":{"component":"timeline_track"}}
       },
       "required":["display_rate","tick_resolution","playback_range","bindings","root_tracks"],

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Dom/JsonObject.h"
 #include "Templates/SharedPointer.h"
@@ -15,11 +16,13 @@ namespace UE::UAI::StateSemantic
 
 		static bool TryParse(
 			const TSharedPtr<FJsonObject>& Object,
-			TOptional<FUeAgentStateRevision>& OutRevision);
+			TOptional<FUeAgentStateRevision>& OutRevision,
+			Contract::FDiagnostic& OutError);
 
 		static bool TryReadCanonical(
 			const FUeAgentCanonicalValuePtr& Value,
-			TOptional<FUeAgentStateRevision>& OutRevision);
+			TOptional<FUeAgentStateRevision>& OutRevision,
+			Contract::FDiagnostic& OutError);
 
 		static TSharedRef<FJsonObject> ToJson(
 			const FUeAgentStateRevision& Revision);

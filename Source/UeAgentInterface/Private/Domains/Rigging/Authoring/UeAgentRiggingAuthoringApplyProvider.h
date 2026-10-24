@@ -6,6 +6,7 @@
 #include "Domains/Rigging/Authoring/UeAgentRiggingAuthoringDescriptors.h"
 #include "Domains/Rigging/Authoring/UeAgentRiggingAuthoringDocuments.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
 
 class FJsonObject;
 class FJsonValue;
@@ -27,16 +28,18 @@ namespace UeAgentRiggingAuthoring
 		FString SourceAssetPath;
 		TArray<TSharedPtr<FJsonValue>> Properties;
 		TSharedPtr<FJsonObject> Document;
+		TSharedPtr<const FJsonObject> CapturedDocument;
 		bool bCompile = true;
 		bool bSave = false;
+		TFunction<bool(UeAgentAuthoringWorkspaceTransaction::FOperationFailure&)>
+			FinalReadback;
 	};
 
 	struct UEAGENTINTERFACE_API FAssetApplyResult
 	{
 		FString Status;
 		FString Phase;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ResolvedOperation;
 		FString AssetPath;
 		FString ObjectPath;
@@ -53,8 +56,7 @@ namespace UeAgentRiggingAuthoring
 	struct UEAGENTINTERFACE_API FWorkspaceInspectResult
 	{
 		FString Status;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString AssetPath;
 		FString RequestedOperation;
 		FMutationStats PlannedStats;
@@ -66,8 +68,9 @@ namespace UeAgentRiggingAuthoring
 		bool IsReady() const { return Status == TEXT("ready"); }
 	};
 
-	UEAGENTINTERFACE_API bool RegisterApplyContracts(FString& OutError);
-	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeApplyProvider();
+	UEAGENTINTERFACE_API bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
+	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeApplyProvider(
+		TSharedPtr<const FJsonObject> CapturedDocument = nullptr);
 	UEAGENTINTERFACE_API bool ApplyAsset(const FAssetApplyRequest& Request, FAssetApplyResult& OutResult, const FString& RequestId = FString());
 	UEAGENTINTERFACE_API bool ApplyAssetWorkspace(
 		const FProfile& Profile,

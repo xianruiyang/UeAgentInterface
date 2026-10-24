@@ -30,7 +30,9 @@ namespace UE::UAI::HjsonWorkspace
 
 	/**
 	 * Immutable result of validating and loading the public source union.
-	 * File-backed sources are completely resident before domain routing begins.
+	 * Legacy file-backed sources are completely resident before domain routing.
+	 * Semantic workspace directories retain only their immutable absolute ingress
+	 * identity; the semantic resolver owns manifest and document verification.
 	 */
 	class UEAGENTINTERFACE_API FResolvedContentGraphImportSource final
 	{
@@ -43,7 +45,8 @@ namespace UE::UAI::HjsonWorkspace
 			FString InEntryFile,
 			FString InSourceFingerprint,
 			FString InSemanticFingerprint,
-			TArray<FContentGraphImportDocument> InDocuments);
+			TArray<FContentGraphImportDocument> InDocuments,
+			bool bInSemanticWorkspaceDirectory = false);
 
 		EWorkspaceSourceKind GetKind() const;
 		const FString& GetSourceUnit() const;
@@ -54,6 +57,7 @@ namespace UE::UAI::HjsonWorkspace
 		const FString& GetSemanticFingerprint() const;
 		const TArray<FContentGraphImportDocument>& GetDocuments() const;
 		const FContentGraphImportDocument* GetEntryDocument() const;
+		bool IsSemanticWorkspaceDirectory() const;
 		TSharedRef<FJsonObject> MakeNormalizedSourceObject() const;
 
 	private:
@@ -65,12 +69,14 @@ namespace UE::UAI::HjsonWorkspace
 		FString SourceFingerprint;
 		FString SemanticFingerprint;
 		TArray<FContentGraphImportDocument> Documents;
+		bool bSemanticWorkspaceDirectory = false;
 	};
 
 	/**
 	 * Validates the exact public {kind, document|path} source union and loads it
-	 * without UE mutation. Directory sources use .uai/workspace.hjson with the
-	 * uai.content_graph.workspace/1 integrity contract.
+	 * without UE mutation. Directory manifests route either the legacy
+	 * uai.content_graph.workspace/1 integrity contract or the authored semantic
+	 * workspace contract without exposing an additional public source kind.
 	 */
 	UEAGENTINTERFACE_API const FString&
 	GetContentGraphImportSourceSchemaJson();
@@ -78,6 +84,37 @@ namespace UE::UAI::HjsonWorkspace
 	UEAGENTINTERFACE_API bool TryLoadContentGraphImportSource(
 		const TSharedPtr<FJsonObject>& SourceObject,
 		const FString& ExpectedTargetIdentity,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		FResolvedContentGraphImportSourcePtr& OutSource,
+		FWorkspaceError& OutError);
+
+	/**
+	 * Recovers the revision and impact authorization used by the internal
+	 * import pipeline from a verified directory workspace. These machine
+	 * values never belong to the public command contract: semantic workspaces
+	 * own them through the hidden manifest, legacy directory workspaces retain
+	 * their manifest baseline, and complete inline/single-file documents carry
+	 * only the short internal "missing" create expectation. Existing targets
+	 * therefore still fail before mutation for non-directory sources.
+	 */
+	UEAGENTINTERFACE_API bool TryRecoverContentGraphImportMachineContext(
+		const TSharedPtr<FJsonObject>& SourceObject,
+		const FString& ExpectedTargetIdentity,
+		ContextResource::FUeAgentResourceTracker& Resources,
+		FResolvedContentGraphImportSourcePtr& OutResolvedSource,
+		FString& OutExpectedRevision,
+		FString& OutAuthorizationId,
+		FWorkspaceError& OutError);
+
+	/**
+	 * Validates the internal kind=resolved envelope emitted by
+	 * FResolvedContentGraphImportSource::MakeNormalizedSourceObject(). This does
+	 * not extend the public source union or interpret domain schema/root fields.
+	 */
+	UEAGENTINTERFACE_API bool TryLoadNormalizedContentGraphImportSource(
+		const TSharedPtr<FJsonObject>& SourceObject,
+		const FString& ExpectedTargetIdentity,
+		const FString& ExpectedRevision,
 		ContextResource::FUeAgentResourceTracker& Resources,
 		FResolvedContentGraphImportSourcePtr& OutSource,
 		FWorkspaceError& OutError);

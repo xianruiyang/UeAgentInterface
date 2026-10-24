@@ -4,7 +4,6 @@
 #include "DomainAdapters/PcgAiNodeGraph/UeAgentPcgAiNodeGraphAdapter.h"
 
 class UBehaviorTree;
-class UBlackboardData;
 class UClass;
 class UEnvQuery;
 class UPCGComponent;
@@ -37,6 +36,7 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		{
 			return BarrierKind;
 		}
+		// Completion of native editor settle/compile/validation, not runtime readiness.
 		bool IsComplete() const { return bComplete; }
 		int32 GetErrorCount() const { return ErrorCount; }
 		const FString& GetBarrierEvidenceId() const
@@ -95,17 +95,6 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			FString& OutEvidenceId,
 			FPcgAiNodeGraphAdapterError& OutError) const;
 
-		bool TryAddAndCaptureBlackboardEntry(
-			UBlackboardData& Blackboard,
-			FName EntryName,
-			UClass& KeyTypeClass,
-			FPcgAiNodeGraphNativeMutationReceipt& OutApplyReceipt,
-			FPcgAiNodeGraphBarrierReceipt& OutBarrierReceipt,
-			FPcgAiNodeGraphBlackboardEntryIdentity& OutIdentity,
-			FString& OutRevision,
-			FString& OutEvidenceId,
-			FPcgAiNodeGraphAdapterError& OutError) const;
-
 		bool TryCompileAndCaptureEqs(
 			UEnvQuery& Query,
 			FPcgAiNodeGraphNativeMutationReceipt& OutApplyReceipt,
@@ -129,17 +118,6 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 			FName RootStateName,
 			FName ChildStateName,
 			const FGuid& TransitionGuid,
-			FPcgAiNodeGraphNativeMutationReceipt& OutApplyReceipt,
-			FPcgAiNodeGraphBarrierReceipt& OutBarrierReceipt,
-			FPcgAiNodeGraphTopology& OutTopology,
-			FString& OutRevision,
-			FString& OutEvidenceId,
-			FPcgAiNodeGraphAdapterError& OutError) const;
-
-		bool TryAddValidateAndCaptureSmartObjectSlot(
-			USmartObjectDefinition& Definition,
-			const FGuid& SlotGuid,
-			UClass& BehaviorDefinitionClass,
 			FPcgAiNodeGraphNativeMutationReceipt& OutApplyReceipt,
 			FPcgAiNodeGraphBarrierReceipt& OutBarrierReceipt,
 			FPcgAiNodeGraphTopology& OutTopology,

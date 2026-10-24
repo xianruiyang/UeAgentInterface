@@ -3,6 +3,8 @@
 #include "Domains/Rigging/Authoring/UeAgentRiggingAuthoringState.h"
 
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Domains/Rigging/Authoring/UeAgentRiggingAuthoringDocuments.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
@@ -15,7 +17,7 @@ namespace UeAgentRiggingAuthoring
 			const FProfile& Profile,
 			const FString& AssetPath,
 			UeAgentAuthoringIdentity::FCanonicalIdentity& OutIdentity,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			return UeAgentAuthoringIdentity::BuildCanonicalIdentity(
 				Profile.IdentityModelId,
@@ -32,7 +34,7 @@ namespace UeAgentRiggingAuthoring
 			const UObject* Asset,
 			const bool bExpectedAbsent,
 			TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UeAgentAuthoringState::FReadRequest Request;
 			Request.SemanticId = SemanticId;
@@ -50,7 +52,7 @@ namespace UeAgentRiggingAuthoring
 		UeAgentAuthoringState::EReadOutcome ReadState(
 			const UeAgentAuthoringState::FReadRequest& Request,
 			UeAgentAuthoringState::FStateValue& OutValue,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutValue = UeAgentAuthoringState::FStateValue();
 			OutValue.TargetIdentity = Request.TargetIdentity;
@@ -66,7 +68,11 @@ namespace UeAgentRiggingAuthoring
 			const FProfile* Profile = FindProfileByTargetKind(Request.TargetIdentity.TargetKind);
 			if (!Profile)
 			{
-				OutError = TEXT("rigging_state_profile_missing:") + Request.TargetIdentity.TargetKind;
+				OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("rigging_state_profile_missing"), TEXT("target_kind"),
+                    MakeShared<FJsonValueString>(TEXT("registered Rigging target kind")), MakeShared<FJsonValueString>(Request.TargetIdentity.TargetKind),
+                    TEXT("state_capture"), TEXT("No Rigging state profile is registered for the requested target kind."));
+                OutError.SourceKind = TEXT("native_result");
+                OutError.TargetPath = Request.RootOwnerPath;
 				return UeAgentAuthoringState::EReadOutcome::Failed;
 			}
 			UObject* Asset = const_cast<UObject*>(Request.RootObject);
@@ -87,13 +93,19 @@ namespace UeAgentRiggingAuthoring
 			else if (Request.SemanticId == Profile->DocumentSemanticId)
 			{
 				TSharedPtr<FJsonObject> Document;
-				if (!BuildDocument(Profile->Kind, *Asset, Document, OutError))
+				if (!BuildDocument(Profile->Kind, *Asset, Document, OutError, Request.RootOwnerPath))
 					return UeAgentAuthoringState::EReadOutcome::Failed;
 				OutValue.Value = MakeShared<FJsonValueObject>(Document);
+				OutValue.bEditable = true;
 			}
 			else
 			{
-				OutError = TEXT("rigging_state_semantic_unsupported:") + Request.SemanticId;
+				TArray<TSharedPtr<FJsonValue>> Supported{MakeShared<FJsonValueString>(Profile->ExportTargetSemanticId), MakeShared<FJsonValueString>(Profile->DocumentSemanticId)};
+                OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("rigging_state_semantic_unsupported"), TEXT("semantic_id"),
+                    MakeShared<FJsonValueArray>(Supported), MakeShared<FJsonValueString>(Request.SemanticId),
+                    TEXT("state_capture"), TEXT("The Rigging state profile does not provide the requested semantic."));
+                OutError.SourceKind = TEXT("native_result");
+                OutError.TargetPath = Request.RootOwnerPath;
 				return UeAgentAuthoringState::EReadOutcome::Failed;
 			}
 			OutValue.bAvailable = true;
@@ -104,7 +116,7 @@ namespace UeAgentRiggingAuthoring
 			const UeAgentAuthoringNativeDefaults::FRequest& Request,
 			UeAgentAuthoringNativeDefaults::FScratchScope& Scratch,
 			UeAgentAuthoringNativeDefaults::FProbeValue& OutValue,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutValue = UeAgentAuthoringNativeDefaults::FProbeValue();
 			const FProfile* Profile = FindProfileByTargetKind(Request.TargetIdentity.TargetKind);
@@ -115,7 +127,7 @@ namespace UeAgentRiggingAuthoring
 				Profile->Kind, Package, FName(TEXT("Seed")), RF_Transactional, OutError);
 			if (!Seed) return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
 			TSharedPtr<FJsonObject> Document;
-			if (!BuildDocument(Profile->Kind, *Seed, Document, OutError))
+			if (!BuildDocument(Profile->Kind, *Seed, Document, OutError, Request.TargetIdentity.GetSelector(TEXT("asset_path"))))
 				return UeAgentAuthoringNativeDefaults::EProbeOutcome::Failed;
 			OutValue.Value = MakeShared<FJsonValueObject>(Document);
 			OutValue.Provenance = FactoryDefaultProviderId;
@@ -147,11 +159,14 @@ namespace UeAgentRiggingAuthoring
 		const FString& CanonicalAssetPath,
 		const bool bExpectedAbsent,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		if (CanonicalAssetPath.IsEmpty())
 		{
-			OutError = TEXT("rigging_snapshot_identity_invalid");
+			OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("rigging_snapshot_identity_invalid"), TEXT("asset_path"),
+                MakeShared<FJsonValueString>(TEXT("nonempty canonical asset path")), MakeShared<FJsonValueString>(CanonicalAssetPath),
+                TEXT("state_capture"), TEXT("A Rigging snapshot request requires a canonical asset path."));
+            OutError.SourceKind = TEXT("native_result");
 			return false;
 		}
 		return AddRequest(Profile, Profile.DocumentSemanticId, CanonicalAssetPath,
@@ -162,7 +177,7 @@ namespace UeAgentRiggingAuthoring
 		const FProfile& Profile,
 		UObject& Asset,
 		TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRequests.Reset();
 		OutError.Reset();
@@ -178,7 +193,7 @@ namespace UeAgentRiggingAuthoring
 			&Asset, false, OutRequests, OutError);
 	}
 
-	bool RegisterStateAccessor(FString& OutError)
+	bool RegisterStateAccessor(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentAuthoringState::FStateAccessorDescriptor Descriptor;
 		Descriptor.AccessorId = StateAccessorId;
@@ -191,7 +206,7 @@ namespace UeAgentRiggingAuthoring
 			Descriptor, ReadState, Result, OutError);
 	}
 
-	bool RegisterNativeDefaultProvider(FString& OutError)
+	bool RegisterNativeDefaultProvider(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		UeAgentAuthoringNativeDefaults::FProviderDescriptor Descriptor;
 		Descriptor.ProviderId = FactoryDefaultProviderId;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 #define UAI_PCG_AI_NODE_GRAPH_ADAPTER_V1 1
@@ -374,21 +376,7 @@ namespace UE::UAI::DomainAdapters::PcgAiNodeGraph
 		bool bReadbackIndependent = false;
 	};
 
-	class FPcgAiNodeGraphAdapterError final
-	{
-	public:
-		const FString& GetCode() const { return Code; }
-		const FString& GetDetail() const { return Detail; }
-		void Reset() { Code.Reset(); Detail.Reset(); }
-		void Set(FString InCode, FString InDetail = FString())
-		{
-			Code = MoveTemp(InCode);
-			Detail = MoveTemp(InDetail);
-		}
-	private:
-		FString Code;
-		FString Detail;
-	};
+	using FPcgAiNodeGraphAdapterError = UE::UAI::Contract::FDiagnostic;
 
 	UEAGENTINTERFACE_API bool TryValidatePcgAiNodeGraphTopology(
 		const FPcgAiNodeGraphTopology& Topology,

@@ -50,16 +50,7 @@ namespace
 
 	FUeAgentResourceTrackerOwner MakeResources()
 	{
-		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-			FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 100000},
-				{EUeAgentResourceDimension::Items, 100000},
-				{EUeAgentResourceDimension::StringBytes, 4 * 1024 * 1024},
-				{EUeAgentResourceDimension::WorkUnits, 100000},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes, 16 * 1024 * 1024},
-			}));
+		return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 	}
 
 	TSharedPtr<FJsonObject> RevisionJson(
@@ -790,9 +781,11 @@ bool FUeAgentRigSimulationSpatialIkRetargetNativeTest::RunTest(
 	TestEqual(TEXT("missing asset-effect owner failure is exact"), NoEffectFailure,
 		FString(TEXT("rig_simulation_spatial_asset_effect_port_unavailable")));
 
+	FVerificationOutcome GenerateOutcome;
 	ExecuteOperation(*this, *Runtime, TEXT("rig.retarget.assets.generate"),
 		CanonicalInput(TEXT("rig.retarget.assets.generate"), {}),
-		TEXT("/Game/__UAI_RSP004/Generated"), Resources);
+		TEXT("/Game/__UAI_RSP004/Generated"), Resources, nullptr,
+		&GenerateOutcome);
 	UAnimSequence* Generated = FindObject<UAnimSequence>(nullptr,
 		TEXT("/Game/__UAI_RSP004/Generated/GeneratedAnimation.GeneratedAnimation"));
 	TestNotNull(TEXT("generated animation independently resolves by exact path"), Generated);
@@ -801,6 +794,31 @@ bool FUeAgentRigSimulationSpatialIkRetargetNativeTest::RunTest(
 	TestTrue(TEXT("generated animation independently reads retargeted bone keys"),
 		Generated && Generated->GetDataModel()
 			&& Generated->GetDataModel()->GetNumberOfKeys() > 0);
+	const FUeAgentCanonicalValuePtr& PublicResult =
+		GenerateOutcome.GetPublicResult();
+	TestTrue(TEXT("verified generation exposes a public result"),
+		PublicResult.IsValid()
+			&& PublicResult->GetKind() == EUeAgentValueKind::Object);
+	FUeAgentCanonicalValuePtr GeneratedRefs;
+	if (PublicResult.IsValid())
+	{
+		for (const TPair<FString, FUeAgentCanonicalValueRef>& Field
+			: PublicResult->GetObjectItems())
+		{
+			if (Field.Key == TEXT("generated_asset_refs"))
+			{
+				GeneratedRefs = Field.Value;
+				break;
+			}
+		}
+	}
+	TestTrue(TEXT("public result contains independently observed refs"),
+		GeneratedRefs.IsValid()
+			&& GeneratedRefs->GetKind() == EUeAgentValueKind::Array
+			&& GeneratedRefs->GetArrayItems().Num() == 1
+			&& GeneratedRefs->GetArrayItems()[0]->GetText()
+				== TEXT("/Game/__UAI_RSP004/Generated/"
+					"GeneratedAnimation.GeneratedAnimation"));
 	TestEqual(TEXT("replace crossed public asset-effect port exactly once"),
 		AssetEffect->CallCount, 1);
 	TestTrue(TEXT("public asset-effect port observed replace policy"),
@@ -917,6 +935,8 @@ bool FUeAgentRigSimulationSpatialAssetEffectFailureSemanticsTest::RunTest(
 		Outcome.GetEffectOutcome(), EEffectOutcome::Partial);
 	TestFalse(TEXT("unverified asset effect is never retry-safe"),
 		Outcome.IsRetrySafe());
+	TestFalse(TEXT("unverified asset effect exposes no public result"),
+		Outcome.GetPublicResult().IsValid());
 	TestEqual(TEXT("successful owner invocation is still single-shot"),
 		AssetEffect->CallCount, 1);
 	return !HasAnyErrors();

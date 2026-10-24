@@ -55,7 +55,7 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 		const StateSemantic::FUeAgentCanonicalValueRef& StepValue,
 		const TArray<FUeAgentPieInputActionSample>& ExistingSamples,
 		FUeAgentPieInputActionSample& OutSample,
-		FString& OutErrorCode);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	enum class EUeAgentPieInputActionReleaseStatus : uint8
 	{
@@ -83,7 +83,6 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 	private:
 		TMap<FString, FUeAgentPieInputActionSample> ActiveSamples;
 		TSet<FString> InjectedNonZero;
-		TSet<FString> ObservedNonZero;
 		TMap<FString, bool> LatestObservedNonZero;
 		double ReleaseStartWallSeconds = 0.0;
 		uint64 ReleaseStartFrame = 0;
@@ -109,11 +108,15 @@ namespace UE::UAI::DomainAdapters::PieRuntimeDebug
 	UEAGENTINTERFACE_API bool TryParsePieCaptureStepSpec(
 		const StateSemantic::FUeAgentCanonicalValueRef& StepValue,
 		FUeAgentPieCaptureStepSpec& OutSpec,
-		FString& OutErrorCode);
+		UE::UAI::Contract::FDiagnostic& OutError,
+		int32 OperationIndex = INDEX_NONE);
 
-	UEAGENTINTERFACE_API FString ResolvePieCaptureFailureCode(
-		const FString& ExactErrorCode,
-		const TCHAR* FallbackErrorCode);
+	UEAGENTINTERFACE_API bool DoesPieActorTransformReadbackMatch(
+		const FTransform& Expected,
+		const FTransform& Actual,
+		bool bCheckLocation,
+		bool bCheckRotation,
+		bool bCheckScale);
 
 	class FUeAgentPieRuntimeScenarioPortFactory final
 		: public IUeAgentPieRuntimeScenarioPortFactory

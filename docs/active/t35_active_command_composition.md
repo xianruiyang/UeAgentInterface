@@ -17,33 +17,37 @@ uses the same rule: it freezes only the exact provider array supplied by the
 frozen domain declarations and owns no parallel process catalog or installed
 authority.
 
-The current Query calibration contribution remains the owner of
-`query.command.search`, `query.command.detail`, and `query.calibration.read`.
+The current Query command contribution owns `query.command.search` and
+`query.command.usage`. Public parameter-schema inspection uses the SDK/CLI's local
+`describe` projection from the generated binding.
 Command discovery is constructed from the final immutable command registry, so
-it observes the complete active command set without aliases or client-side
-mappings; it is not a second registry owner.
+it observes the complete registered set and applies the centralized lifecycle
+projection without aliases or client-side mappings; it is not a second registry
+owner.
+
+The central command-lifecycle policy is the only owner of dormant compatibility
+classification. It is applied before the registry freezes: ordinary discovery and
+named generated SDK methods expose only active commands, while the catalog retains
+dormant identities for explicit compatibility inspection and exact dispatch. Domain
+registrations, handlers, search and SDK generation do not maintain per-command
+dormancy branches.
 
 The `unified-content-search` contribution owns the only current
 `query.content.search` command and contributes both current providers as one
 atomic domain capability. `editor.asset_registry.content` searches persisted
 Asset Registry identities. `editor.world.content` searches Actor and Component
 identities in the current Editor World. The shared content-discovery service
-owns provider selection, request fingerprints, per-provider pagination,
-revision-fenced cursors, completeness, and provider failure isolation; handlers
-and clients do not recreate those rules.
+owns provider selection, internal freshness and provider failure isolation;
+handlers and clients do not recreate those rules. Public discovery returns only
+readable names and asks for refinement instead of exposing paging machinery.
 
 This unified command searches existing content only. Creation candidates remain
-with the eight exact domain commands `ai.behavior.candidates`,
-`animation_rig_graph.candidates`, `audio.graph.candidates`,
-`blueprint.component.candidates`, `blueprint.node.candidates`,
-`material.expression.candidates`, `niagara.module.candidates`, and
-`pcg.node.candidates`. Read each exact command detail before authoring. Domains
-already on the contextual-create contract accept only the compact candidate
-`name` or `id` as the minimal selector and keep graph, pin, parent, level,
-stage, placement, and instance identity in the owning HJSON context. A legacy
-field is valid only while that command detail still declares it. There is no
-current `node_catalog_search`, `node_catalog_categories`, universal candidate
-shape, or client-side candidate mapping.
+with the twelve exact domain candidate commands. Each returns readable
+base names grouped for display, with one shared query `scope`. Authoring uses `name` plus at most
+two returned short semantic `select` fields and keeps graph, pin, parent, level,
+stage, placement, and instance identity in the owning HJSON context. There is
+no current `node_catalog_search`, `node_catalog_categories`, universal rich
+candidate row, or client-side candidate mapping.
 
 ## Atomic capability activation
 
@@ -77,23 +81,48 @@ those facets through an old registry or a consumer-local fallback.
 ## Public identity contract
 
 `query.content.search` accepts an explicit `content_kinds` subset of `asset`,
-`actor`, and `component`; exact/prefix/text/fuzzy matching; exact class, path,
-owner, and required-operation filters; a per-provider limit; and an opaque
-cursor copied from the previous response. Results retain provider identity,
-revision, completeness, exact object identity, content kind, class, owner,
-state layer, supported operations, and one executable detail request described
-by `detail_command_id`, `detail_target_identity`, and `detail_input`.
+`actor`, and `component`, plus readable matching terms. Results
+contain only readable names, using the shortest semantic alias needed for
+ambiguity. They do not expose provider identity, revision, object identity,
+class/path metadata, paging, detail requests, or operation metadata.
 
-An Asset result uses `asset.summary`. Actor and Component results use the World
-HJSON owner: the returned target is the World asset and the returned input
-selects the exact Actor or Component identity for `content_graph.items` or
-`content_graph.properties`. Clients execute those fields as returned and must
-not trim, rebuild, alias, or convert identities. Reusing a cursor with changed semantic filters fails with
-`content_search_cursor_request_mismatch`; changing provider state invalidates it
-with `content_search_revision_stale`; selecting a kind with no provider fails
-with `content_search_kind_unsupported`.
+An Asset, Actor, or Component result is only a discovery name. The owning
+command re-enumerates its current context when that name is supplied; zero or
+multiple matches fail closed. Search returns all matches without a result-count gate.
 
-## Formal projection and startup gate
+## Candidate query scope
+
+Context-dependent candidate queries use the shared name projection and attach
+one response-level `scope` through `TryAddDiscoveryScope`. It records the public
+query context below; omitted optional selectors use the query's native defaults.
+The matching text is a filter, not a creation context. No query history, opaque
+identity or extra creation token is introduced.
+
+| Query family | Scope fields |
+| --- | --- |
+| Blueprint node | target, graph_name; pin aliases remain in sibling candidate_context |
+| Blueprint component | target, optional parent |
+| Material expression | target, optional graph_name/pin_name |
+| Niagara module | target, target_usage, optional emitter_name/stage_name |
+| AnimBlueprint creation | future target, surface, supplied class_settings |
+| PCG, audio, animation rig, UMG widget | target |
+| AI behavior | target, supplied parent/attachment_kind or graph_owner |
+| World actor | target, supplied category |
+| Asset factory | create_command |
+
+Names are reusable within the same context. A new target or menu context needs
+discovery there; existing names are not globally valid creation selectors.
+`scope` is not copied into HJSON. `describe` responses preserve the same scope.
+Public candidate names, selectors and native re-resolution keep their existing
+semantics; this metadata does not authorize reuse across contexts.
+
+Candidate selection failures use the existing authoring diagnostic carrier to
+preserve the error code, requested name and available `choose` fields, and identify
+the current target/context and matching query. HJSON import adds the source file
+and position through its existing source mapping; no separate diagnostic format
+or candidate validation gate is introduced.
+
+## Formal projection
 
 `FUeAgentActiveCommandManifest` is the only formal command-manifest projector.
 It consumes the command registry from the cached DomainCapability authority,
@@ -103,14 +132,12 @@ command projector assigns deterministic Python bindings from each command id:
 the first segment is the namespace and the remaining segments, joined with
 underscores, are the method.
 
-The committed `Resources/UaiCommandManifest.json` is generated only through the
-explicit development test mode `UAI_UPDATE_COMMAND_MANIFEST=1`. Normal module
-startup obtains the single DomainCapability authority and verifies the committed
-manifest byte-for-byte before constructing Query ingress or publishing routes.
-A missing or stale projection fails with
-`active_command_manifest_file_missing` or
-`active_command_manifest_projection_mismatch`; startup does not fall back to a
-legacy registry or expose a partial command surface.
+The committed `Resources/UaiCommandManifest.json` is rebuilt only by the explicit
+command-surface refresh action. Normal module startup obtains the single
+DomainCapability authority and publishes Query ingress from that runtime
+registry. A missing or stale manifest does not block startup, exact dispatch, or
+other development work; the legacy registry and Python code are not fallback
+runtime command sources.
 
 ## Extension contract
 
@@ -132,13 +159,8 @@ authority.
 
 ## Evidence boundary
 
-The current DomainCapability and T35 Automation contracts verify one frozen
-process authority, exact command/HJSON/Query/Discovery projection, content
-provider identity and paging rules, provider failure isolation, duplicate and
-sealing failures, exact final-registry manifest projection, and cleanup of the
-owned worker. The T35 public-SDK product run verifies Asset/Actor/Component
-identity reuse, Material candidate-to-HJSON binding, paging, stale/mismatched
-cursors, unsupported kinds, persisted readback, fixture cleanup, hidden Editor
-startup, and safe exit. These results do not prove every query command, every
-domain candidate, or future content provider; later domain verticals retain
-those obligations.
+The current DomainCapability and T35 runtime contracts describe one frozen
+process authority, exact command/HJSON/Query/Discovery projection, provider
+failure isolation, duplicate and sealing behavior, names-only command/content
+discovery, and compact batch usage. Domain vertical evidence separately covers
+the candidate owners, readable re-resolution and fail-closed ambiguity behavior.

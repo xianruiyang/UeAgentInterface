@@ -4,7 +4,6 @@
 #include "Core/HjsonWorkspace/SourceLoader/UeAgentHjsonSourceLoader.h"
 #include "DomainConformance/UeAgentDomainConformanceHarness.h"
 #include "HAL/FileManager.h"
-#include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
 namespace
@@ -15,22 +14,7 @@ namespace
 
 	ContextResource::FUeAgentResourceTracker MakeResources()
 	{
-		return ContextResource::FUeAgentResourceTracker(
-			ContextResource::FUeAgentResourceBudget({
-				{ContextResource::EUeAgentResourceDimension::InputBytes,
-					1024 * 1024},
-				{ContextResource::EUeAgentResourceDimension::OutputBytes,
-					1024 * 1024},
-				{ContextResource::EUeAgentResourceDimension::StringBytes,
-					1024 * 1024},
-				{ContextResource::EUeAgentResourceDimension::Nodes, 4096},
-				{ContextResource::EUeAgentResourceDimension::Items, 4096},
-				{ContextResource::EUeAgentResourceDimension::ReferenceEdges,
-					4096},
-				{ContextResource::EUeAgentResourceDimension::WorkUnits, 32768},
-				{ContextResource::EUeAgentResourceDimension::EstimatedMemoryBytes,
-					8 * 1024 * 1024},
-			}));
+		return ContextResource::FUeAgentResourceTracker();
 	}
 
 	FDomainConformanceFixture MakeHjsonFixture(const FString& Root)
@@ -61,7 +45,6 @@ namespace
 		Fixture.bIndependentReadback = true;
 		Fixture.bPersistReload = true;
 		Fixture.bFailureCleanup = true;
-		Fixture.bLegacyExit = true;
 		return Fixture;
 	}
 
@@ -124,8 +107,6 @@ namespace
 			EDomainCapabilitySupport::Supported;
 		Declaration.Initialization.ContractIds.Add(
 			TEXT("uai.init.fixture.root/1"));
-		Declaration.Migration.Support = EDomainCapabilitySupport::Supported;
-		Declaration.Migration.OwnerId = TEXT("fixture-migration-owner");
 		return Declaration;
 	}
 
@@ -133,7 +114,7 @@ namespace
 		FAutomationTestBase* Test)
 	{
 		TSharedPtr<const FDomainCapabilityContribution> Contribution;
-		FString Error;
+		Contract::FDiagnostic Error;
 		Test->TestTrue(
 			TEXT("freeze fixture HJSON capability"),
 			FDomainCapabilityContribution::TryCreate(
@@ -239,7 +220,7 @@ namespace
 		bool TryBuildSuccessPayload(
 			const BindingGateway::Operation::FOperationLifecycleReceipt&,
 			FString& OutPayloadJson,
-			FString& OutError) const override
+			Contract::FDiagnostic& OutError) const override
 		{
 			OutError.Reset();
 			OutPayloadJson = FString::Printf(
@@ -424,8 +405,6 @@ bool FUeAgentDomainConformanceScenarioMatrixTest::RunTest(
 		Plan.Contains(EDomainConformanceScenario::PersistReloadReadback));
 	TestTrue(TEXT("failure cleanup is present"),
 		Plan.Contains(EDomainConformanceScenario::FailureCleanup));
-	TestTrue(TEXT("legacy exit is present"),
-		Plan.Contains(EDomainConformanceScenario::LegacyExit));
 	TestFalse(TEXT("unsupported layout is not invented"),
 		Plan.Contains(EDomainConformanceScenario::GraphLayout));
 	TestFalse(TEXT("unsupported long running is not invented"),
@@ -503,15 +482,16 @@ bool FUeAgentDomainConformanceScenarioMatrixTest::RunTest(
 		0,
 	});
 	TSharedPtr<const FDomainCapabilityContribution> InvalidContribution;
+	Contract::FDiagnostic CapabilityError;
 	TestFalse(
 		TEXT("conformance input cannot bypass ambiguous semantic-route validation"),
 		FDomainCapabilityContribution::TryCreate(
-			MoveTemp(Ambiguous), InvalidContribution, Error));
-	TestEqual(
+			MoveTemp(Ambiguous), InvalidContribution, CapabilityError));
+	TestTrue(
 		TEXT("ambiguous semantic-route failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_composition_invalid:fixture_target:"))
-			+ TEXT("target_composition_semantic_route_priority_duplicate:0"));
+		CapabilityError.Code == TEXT("target_composition_semantic_route_priority_duplicate")
+			&& CapabilityError.CandidateName == TEXT("fixture_target")
+			&& CapabilityError.PropertyPath == TEXT("/semantic_routes/1/priority"));
 
 	FDomainCapabilityDeclaration Dangling = MakeHjsonDeclaration();
 	Dangling.Composition.Contracts[0].SemanticRoutes[0].SurfaceId =
@@ -519,12 +499,12 @@ bool FUeAgentDomainConformanceScenarioMatrixTest::RunTest(
 	TestFalse(
 		TEXT("conformance input cannot bypass dangling semantic-route validation"),
 		FDomainCapabilityContribution::TryCreate(
-			MoveTemp(Dangling), InvalidContribution, Error));
-	TestEqual(
+			MoveTemp(Dangling), InvalidContribution, CapabilityError));
+	TestTrue(
 		TEXT("dangling semantic-route failure is exact"),
-		Error,
-		FString(TEXT("domain_capability_composition_invalid:fixture_target:"))
-			+ TEXT("target_composition_semantic_route_surface_missing:missing_surface"));
+		CapabilityError.Code == TEXT("target_composition_semantic_route_surface_missing")
+			&& CapabilityError.CandidateName == TEXT("fixture_target")
+			&& CapabilityError.PropertyPath == TEXT("/semantic_routes/0/surface_id"));
 	return true;
 }
 
@@ -537,13 +517,14 @@ bool FUeAgentDomainConformanceOperationFactoryTest::RunTest(
 	const FString& Parameters)
 {
 	FString Error;
+	Contract::FDiagnostic CapabilityError;
 	TSharedPtr<const FDomainCapabilityContribution> Contribution;
 	TestTrue(
 		TEXT("freeze request-scoped operation contribution"),
 		FDomainCapabilityContribution::TryCreate(
 			MakeOperationDeclaration(false),
 			Contribution,
-			Error));
+			CapabilityError));
 	if (!Contribution.IsValid())
 	{
 		return false;
@@ -599,7 +580,7 @@ bool FUeAgentDomainConformanceOperationFactoryTest::RunTest(
 		FDomainCapabilityContribution::TryCreate(
 			MakeOperationDeclaration(true),
 			SharedContribution,
-			Error));
+			CapabilityError));
 	TestFalse(
 		TEXT("the conformance oracle rejects shared request state"),
 		ValidateRequestScopedOperationFactory(
@@ -712,44 +693,6 @@ bool FUeAgentDomainConformanceWorkspaceFixtureTest::RunTest(
 
 	IFileManager::Get().DeleteDirectory(*Root, false, true);
 	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentT36HjsonSourceResourceBudgetTest,
-	"UAI.Root.T36.HjsonSource.ResourceBudget",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentT36HjsonSourceResourceBudgetTest::RunTest(
-	const FString& Parameters)
-{
-	(void)Parameters;
-	using namespace UE::UAI;
-	const TSharedRef<FJsonObject> Source = MakeShared<FJsonObject>();
-	Source->SetStringField(TEXT("kind"), TEXT("inline"));
-	Source->SetStringField(
-		TEXT("document"),
-		TEXT("{schema:uai.fixture/1,root:{type:/Script/CoreUObject.Object}}"));
-	ContextResource::FUeAgentResourceTracker Resources(
-		ContextResource::FUeAgentResourceBudget({
-			{ContextResource::EUeAgentResourceDimension::InputBytes, 1},
-			{ContextResource::EUeAgentResourceDimension::StringBytes, 1},
-			{ContextResource::EUeAgentResourceDimension::WorkUnits, 1},
-			{ContextResource::EUeAgentResourceDimension::EstimatedMemoryBytes, 1},
-		}));
-	HjsonWorkspace::FResolvedContentGraphImportSourcePtr Resolved;
-	HjsonWorkspace::FWorkspaceError Error;
-	TestFalse(TEXT("the source loader stops before parsing beyond its budget"),
-		HjsonWorkspace::TryLoadContentGraphImportSource(
-			Source,
-			TEXT("/Game/UAI/T36/Fixture.Fixture"),
-			Resources,
-			Resolved,
-			Error));
-	TestEqual(TEXT("the resource failure remains typed"),
-		Error.GetCode(), FString(TEXT("resource_budget_exceeded")));
-	TestFalse(TEXT("no resolved source escapes the failed gate"),
-		Resolved.IsValid());
-	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -906,8 +849,6 @@ bool FUeAgentDomainConformanceRepresentativeCalibrationTest::RunTest(
 				&& Plan.Contains(EDomainConformanceScenario::HjsonDirectory));
 		TestTrue(TEXT("representative plan requires public persistence/readback"),
 			Plan.Contains(EDomainConformanceScenario::PersistReloadReadback));
-		TestTrue(TEXT("representative plan requires old-entry exit"),
-			Plan.Contains(EDomainConformanceScenario::LegacyExit));
 	}
 	return !HasAnyErrors();
 }

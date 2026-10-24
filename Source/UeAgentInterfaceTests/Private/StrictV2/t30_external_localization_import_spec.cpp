@@ -1,10 +1,5 @@
 #include "Misc/AutomationTest.h"
 
-#if __has_include("DomainAdapters/ExternalImport/Localization/UeAgentLocalizationImportProvider.h") \
-	&& __has_include("DomainAdapters/LocalizationStringTable/UeAgentLocalizationStringTableHjsonProvider.h") \
-	&& __has_include("OperationOwners/ExternalImport/Localization/UeAgentLocalizationImportCommandService.h") \
-	&& __has_include("Module/CommandRegistration/ExternalImport/Localization/UeAgentLocalizationImportRegistration.h")
-#define UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE 1
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "CommandEdge/UeAgentCommandProtocol.h"
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
@@ -19,15 +14,13 @@
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
+#include "TestSupport/UeAgentPublicCommandTestHarness.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "Module/CommandRegistration/ExternalImport/Localization/UeAgentLocalizationImportRegistration.h"
 #include "OperationOwners/ExternalImport/Localization/UeAgentLocalizationImportCommandService.h"
 #include "OperationOwners/LocalizationStringTable/UeAgentLocalizationStringTableDomainService.h"
-#else
-#define UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE 0
-#endif
 
-#if UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE
 namespace
 {
 	using namespace UE::UAI::CommandContract;
@@ -41,9 +34,6 @@ namespace
 	const FString ExpectedCommandId = TEXT("external.localization.po.import");
 	const FString EvidenceTargetName = TEXT("StrictV2T30EvidenceTarget");
 	const FString EvidenceCulture = TEXT("fr");
-	const FString HjsonIntentTargetName = TEXT("StrictV2T30HjsonIntentTarget");
-	const FString HjsonAtomicTargetA = TEXT("StrictV2T30HjsonAtomicA");
-	const FString HjsonAtomicTargetB = TEXT("StrictV2T30HjsonAtomicB");
 	ULocalizationTarget* FindTargetByName(const FString& TargetName)
 	{
 		ULocalizationTargetSet* const TargetSet =
@@ -62,201 +52,10 @@ namespace
 		return Match ? Match->Get() : nullptr;
 	}
 
-	FString LocalizationConfigPath(const FString& TargetName)
-	{
-		return FPaths::ProjectConfigDir()
-			/ TEXT("Localization") / (TargetName + TEXT(".ini"));
-	}
-
 	FString LocalizationContentPath(const FString& TargetName)
 	{
 		return FPaths::ProjectContentDir()
 			/ TEXT("Localization") / TargetName;
-	}
-
-	void RemoveLocalizationTargetFixture(const FString& TargetName)
-	{
-		if (ULocalizationTargetSet* const TargetSet =
-			ULocalizationSettings::GetGameTargetSet())
-		{
-			TargetSet->TargetObjects.RemoveAll(
-				[&TargetName](const ULocalizationTarget* Candidate)
-				{
-					return Candidate
-						&& Candidate->Settings.Name == TargetName;
-				});
-		}
-		IFileManager::Get().Delete(
-			*LocalizationConfigPath(TargetName),
-			false,
-			true,
-			true);
-		IFileManager::Get().DeleteDirectory(
-			*LocalizationConfigPath(TargetName),
-			false,
-			true);
-		IFileManager::Get().DeleteDirectory(
-			*LocalizationContentPath(TargetName),
-			false,
-			true);
-	}
-
-	void RemoveHjsonIntentFixture()
-	{
-		RemoveLocalizationTargetFixture(HjsonIntentTargetName);
-		RemoveLocalizationTargetFixture(HjsonAtomicTargetA);
-		RemoveLocalizationTargetFixture(HjsonAtomicTargetB);
-	}
-
-	bool TryGetLocalizationRevision(FString& OutRevision, FString& OutError)
-	{
-		using namespace UE::UAI::DomainAdapters::LocalizationStringTable;
-		using namespace UE::UAI::HjsonWorkspace;
-		const FString Target =
-			GetMutableDefault<ULocalizationSettings>()->GetPathName();
-		const TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-		Params->SetStringField(TEXT("target"), Target);
-		FString CanonicalParams;
-		if (!Json::TryCanonicalize(Params, CanonicalParams, OutError))
-		{
-			return false;
-		}
-		FString Payload;
-		bool bReadOnly = false;
-		FWorkspaceError WorkspaceError;
-		if (!TryExecuteContentGraph(
-				TEXT("content_graph.summary"),
-				Target,
-				ULocalizationSettings::StaticClass()->GetPathName(),
-				CanonicalParams,
-				Payload,
-				bReadOnly,
-				WorkspaceError))
-		{
-			OutError = WorkspaceError.GetCode();
-			return false;
-		}
-		TSharedPtr<FJsonObject> Result;
-		if (!Json::TryParseObject(Payload, Result, OutError)
-			|| !Result.IsValid()
-			|| !Result->TryGetStringField(TEXT("revision"), OutRevision))
-		{
-			return false;
-		}
-		return bReadOnly && !OutRevision.IsEmpty();
-	}
-
-	bool TryImportLocalizationTargets(
-		const FString& ExpectedRevision,
-		const TArray<TSharedPtr<FJsonValue>>& Targets,
-		FString& OutPayload,
-		UE::UAI::HjsonWorkspace::FWorkspaceError& OutError)
-	{
-		using namespace UE::UAI::DomainAdapters::LocalizationStringTable;
-		const FString Target =
-			GetMutableDefault<ULocalizationSettings>()->GetPathName();
-		const TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetStringField(
-			TEXT("type"),
-			ULocalizationSettings::StaticClass()->GetPathName());
-		Root->SetArrayField(TEXT("targets"), Targets);
-		const TSharedPtr<FJsonObject> Document = MakeShared<FJsonObject>();
-		Document->SetStringField(TEXT("schema"), TEXT("uai.localization.edit/1"));
-		Document->SetObjectField(TEXT("root"), Root);
-		FString DocumentText;
-		FString JsonError;
-		if (!Json::TryCanonicalize(Document, DocumentText, JsonError))
-		{
-			OutError.Set(TEXT("fixture_document_invalid"), JsonError);
-			return false;
-		}
-		const TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
-		Entry->SetStringField(TEXT("path"), TEXT("localization.hjson"));
-		Entry->SetStringField(TEXT("document"), DocumentText);
-		const TSharedPtr<FJsonObject> Source = MakeShared<FJsonObject>();
-		Source->SetStringField(TEXT("kind"), TEXT("resolved"));
-		Source->SetStringField(TEXT("target_identity"), Target);
-		Source->SetStringField(TEXT("entry_file"), TEXT("localization.hjson"));
-		Source->SetArrayField(
-			TEXT("documents"),
-			{MakeShared<FJsonValueObject>(Entry)});
-		const TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-		Params->SetStringField(TEXT("target"), Target);
-		Params->SetStringField(TEXT("expected_revision"), ExpectedRevision);
-		Params->SetObjectField(TEXT("source"), Source);
-		FString CanonicalParams;
-		if (!Json::TryCanonicalize(Params, CanonicalParams, JsonError))
-		{
-			OutError.Set(TEXT("fixture_params_invalid"), JsonError);
-			return false;
-		}
-		bool bReadOnly = true;
-		return TryExecuteContentGraph(
-			TEXT("content_graph.import_workspace"),
-			Target,
-			ULocalizationSettings::StaticClass()->GetPathName(),
-			CanonicalParams,
-			OutPayload,
-			bReadOnly,
-			OutError)
-			&& !bReadOnly;
-	}
-
-	bool TryImportStringTable(
-		const FString& Target,
-		FString& OutPayload,
-		UE::UAI::HjsonWorkspace::FWorkspaceError& OutError)
-	{
-		using namespace UE::UAI::DomainAdapters::LocalizationStringTable;
-		const TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
-		Entry->SetStringField(TEXT("key"), TEXT("hello"));
-		Entry->SetStringField(TEXT("source"), TEXT("Hello"));
-		const TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetStringField(TEXT("type"), UStringTable::StaticClass()->GetPathName());
-		Root->SetStringField(TEXT("namespace"), TEXT("T30Rollback"));
-		Root->SetArrayField(
-			TEXT("entries"),
-			{MakeShared<FJsonValueObject>(Entry)});
-		const TSharedPtr<FJsonObject> Document = MakeShared<FJsonObject>();
-		Document->SetStringField(TEXT("schema"), TEXT("uai.string_table.edit/1"));
-		Document->SetObjectField(TEXT("root"), Root);
-		FString DocumentText;
-		FString JsonError;
-		if (!Json::TryCanonicalize(Document, DocumentText, JsonError))
-		{
-			OutError.Set(TEXT("fixture_document_invalid"), JsonError);
-			return false;
-		}
-		const TSharedPtr<FJsonObject> SourceDocument = MakeShared<FJsonObject>();
-		SourceDocument->SetStringField(TEXT("path"), TEXT("string_table.hjson"));
-		SourceDocument->SetStringField(TEXT("document"), DocumentText);
-		const TSharedPtr<FJsonObject> Source = MakeShared<FJsonObject>();
-		Source->SetStringField(TEXT("kind"), TEXT("resolved"));
-		Source->SetStringField(TEXT("target_identity"), Target);
-		Source->SetStringField(TEXT("entry_file"), TEXT("string_table.hjson"));
-		Source->SetArrayField(
-			TEXT("documents"),
-			{MakeShared<FJsonValueObject>(SourceDocument)});
-		const TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
-		Params->SetStringField(TEXT("target"), Target);
-		Params->SetStringField(TEXT("expected_revision"), TEXT("absent"));
-		Params->SetStringField(TEXT("authorization_id"), TEXT("auth:t30-string-table"));
-		Params->SetObjectField(TEXT("source"), Source);
-		FString CanonicalParams;
-		if (!Json::TryCanonicalize(Params, CanonicalParams, JsonError))
-		{
-			OutError.Set(TEXT("fixture_params_invalid"), JsonError);
-			return false;
-		}
-		bool bReadOnly = true;
-		return TryExecuteContentGraph(
-			TEXT("content_graph.import_workspace"),
-			Target,
-			UStringTable::StaticClass()->GetPathName(),
-			CanonicalParams,
-			OutPayload,
-			bReadOnly,
-			OutError);
 	}
 
 	FString EvidenceSourceRoot()
@@ -463,15 +262,12 @@ namespace
 			{
 				OutError.Code = TEXT("fixture_t30_failed");
 				OutError.SubjectId = Request.CommandId;
-				OutError.Detail = TEXT("fixture failure remains typed");
+				OutError.InternalContext = TEXT("fixture failure remains typed");
 				OutError.TerminalStatus = TEXT("rejected");
 				return false;
 			}
 			OutResponse.PayloadJson =
 				TEXT("{\"command_id\":\"external.localization.po.import\",")
-				TEXT("\"independent_readback\":{},\"mutation_started\":true,")
-				TEXT("\"persistence_receipt_id\":\"fixture\",")
-				TEXT("\"phase_history\":[\"planning\",\"terminal\"],")
 				TEXT("\"terminal_status\":\"succeeded\"}");
 			return true;
 		}
@@ -551,12 +347,11 @@ namespace
 		Json->SetStringField(TEXT("target_ref"), Target);
 		FString Result;
 		FString Error;
-		return Json::TryCanonicalize(Json, Result, Error)
+		return UE::UAI::CommandContract::Json::TryCanonicalize(Json, Result, Error)
 			? Result
 			: FString(TEXT("{}"));
 	}
 }
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T30ReadCapabilityBoundaryTest,
@@ -566,10 +361,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T30ReadCapabilityBoundaryTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE
-	TestTrue(TEXT("T30 read capability owner is implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::DomainAdapters::ContentGraphRead;
 	TestTrue(
 		TEXT("localization validation is a closed compound Query action"),
@@ -611,28 +402,28 @@ bool FUeAgentStrictV2T30ReadCapabilityBoundaryTest::RunTest(
 			Observation->GetIntegerField(TEXT("error_count")), 0);
 	}
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentStrictV2T30InventoryAndLegacyExitTest,
-	"UAI.StrictV2.T30.EXTERNAL.LOCALIZATION.IMPORT.InventoryAndLegacyExit",
+	FUeAgentStrictV2T30ActiveCompositionTest,
+	"UAI.StrictV2.T30.EXTERNAL.LOCALIZATION.IMPORT.ActiveComposition",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentStrictV2T30InventoryAndLegacyExitTest::RunTest(
+bool FUeAgentStrictV2T30ActiveCompositionTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE
-	TestTrue(TEXT("T30 localization import owner is implemented"), false);
-	return false;
-#else
 	const TArray<FUeAgentLocalizationImportCommandRoute>& Routes =
 		GetLocalizationImportCommandRoutes();
-	TestEqual(TEXT("T30 owns exactly one audited command"), Routes.Num(), 1);
-	if (Routes.Num() == 1)
+	const FUeAgentLocalizationImportCommandRoute* Route = Routes.FindByPredicate(
+		[](const FUeAgentLocalizationImportCommandRoute& Candidate)
+		{
+			return Candidate.CommandId == ExpectedCommandId;
+		});
+	TestNotNull(TEXT("the T30 route identity is present"), Route);
+	if (Route)
 	{
-		TestTrue(TEXT("the T30 route is valid"), Routes[0].IsValid());
-		TestEqual(TEXT("the T30 route identity is exact"), Routes[0].CommandId, ExpectedCommandId);
+		TestTrue(TEXT("the T30 route is valid"), Route->IsValid());
+		TestEqual(TEXT("the T30 route identity is exact"), Route->CommandId, ExpectedCommandId);
 	}
 
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> ProcessRegistry;
@@ -656,7 +447,6 @@ bool FUeAgentStrictV2T30InventoryAndLegacyExitTest::RunTest(
 			FString(TEXT("localization-import-owner")));
 	}
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -667,10 +457,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T30HjsonProviderContractTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE
-	TestTrue(TEXT("T30 HJSON provider is implemented"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::OperationOwners::LocalizationStringTable;
 	TSharedPtr<IImportInitializationDomainProvider> Provider;
@@ -719,51 +505,6 @@ bool FUeAgentStrictV2T30HjsonProviderContractTest::RunTest(
 		TEXT("cross-contract execution is rejected at the provider boundary"),
 		Error.GetCode(),
 		FString(TEXT("localization_hjson_contract_not_executable")));
-	const FString RollbackSuffix = FGuid::NewGuid().ToString(EGuidFormats::Digits);
-	const FString RollbackStringTable = FString::Printf(
-		TEXT("/Game/UAI/StrictV2/T30_StringTableRollback_%s.T30_StringTableRollback_%s"),
-		*RollbackSuffix,
-		*RollbackSuffix);
-	const FString RollbackPackage =
-		FPackageName::ObjectPathToPackageName(RollbackStringTable);
-	const FString RollbackFilename = FPackageName::LongPackageNameToFilename(
-		RollbackPackage,
-		FPackageName::GetAssetPackageExtension());
-	IFileManager::Get().Delete(*RollbackFilename, false, true, true);
-	IFileManager::Get().DeleteDirectory(*RollbackFilename, false, true);
-	FString RollbackPayload;
-	Error.Reset();
-	AddExpectedError(
-		TEXT("LogStreaming: Failed to read file .*T30_StringTableRollback_[0-9A-F]+\\.uasset.*"),
-		EAutomationExpectedErrorFlags::Contains,
-		1);
-	UE::UAI::DomainAdapters::LocalizationStringTable::
-		SetStringTableSaveFailureForTests(true);
-	TestFalse(
-		TEXT("the deterministic StringTable save failure rejects the import"),
-		TryImportStringTable(
-			RollbackStringTable,
-			RollbackPayload,
-			Error));
-	UE::UAI::DomainAdapters::LocalizationStringTable::
-		SetStringTableSaveFailureForTests(false);
-	TestEqual(
-		TEXT("StringTable save failure is typed"),
-		Error.GetCode(),
-		FString(TEXT("string_table_save_failed")));
-	UStringTable* const FailedTable = FindObject<UStringTable>(
-		nullptr,
-		*RollbackStringTable);
-	TestNull(
-		TEXT("a failed StringTable import unregisters the created asset"),
-		FailedTable);
-	IFileManager::Get().Delete(*RollbackFilename, false, true, true);
-	if (FailedTable)
-	{
-		FAssetRegistryModule::AssetDeleted(FailedTable);
-		FailedTable->ClearFlags(RF_Public | RF_Standalone);
-		FailedTable->MarkAsGarbage();
-	}
 	const FImportInitializationDomainRequest WrongSchema(
 		TEXT("content_graph.import_workspace"),
 		TEXT("uai.localization.edit/1"),
@@ -785,199 +526,6 @@ bool FUeAgentStrictV2T30HjsonProviderContractTest::RunTest(
 		TEXT("Localization export uses the same domain provider"),
 		Provider->Matches(LocalizationExport));
 	return !HasAnyErrors();
-#endif
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentStrictV2T30LocalizationHjsonExplicitIntentTest,
-	"UAI.StrictV2.T30.EXTERNAL.LOCALIZATION.IMPORT.LocalizationHjsonExplicitIntent",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentStrictV2T30LocalizationHjsonExplicitIntentTest::RunTest(
-	const FString& Parameters)
-{
-#if !UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE
-	TestTrue(TEXT("T30 Localization HJSON provider is implemented"), false);
-	return false;
-#else
-	using namespace UE::UAI::HjsonWorkspace;
-	RemoveHjsonIntentFixture();
-
-	FString Revision;
-	FString RevisionError;
-	TestTrue(
-		TEXT("Localization HJSON current revision is independently readable"),
-		TryGetLocalizationRevision(Revision, RevisionError));
-	if (Revision.IsEmpty())
-	{
-		AddError(RevisionError);
-		return false;
-	}
-
-	FString Payload;
-	FWorkspaceError WorkspaceError;
-	TestFalse(
-		TEXT("existing Localization settings reject the absent revision sentinel"),
-		TryImportLocalizationTargets(
-			TEXT("absent"),
-			{},
-			Payload,
-			WorkspaceError));
-	TestEqual(
-		TEXT("absent revision rejection is typed"),
-		WorkspaceError.GetCode(),
-		FString(TEXT("localization_stale_revision")));
-
-	const TSharedPtr<FJsonObject> MissingIntent = MakeShared<FJsonObject>();
-	MissingIntent->SetStringField(TEXT("name"), HjsonIntentTargetName);
-	MissingIntent->SetStringField(TEXT("native_culture"), TEXT("en"));
-	MissingIntent->SetArrayField(
-		TEXT("cultures"),
-		{MakeShared<FJsonValueString>(TEXT("en"))});
-	WorkspaceError.Reset();
-	TestFalse(
-		TEXT("Localization target mutation requires explicit intent"),
-		TryImportLocalizationTargets(
-			Revision,
-			{MakeShared<FJsonValueObject>(MissingIntent)},
-			Payload,
-			WorkspaceError));
-	TestEqual(
-		TEXT("missing target operation is typed"),
-		WorkspaceError.GetCode(),
-		FString(TEXT("localization_target_operation_required")));
-	RemoveHjsonIntentFixture();
-
-	TestTrue(
-		TEXT("cleanup restores the revision after the expected-red probe"),
-		TryGetLocalizationRevision(Revision, RevisionError));
-	const TSharedPtr<FJsonObject> Create = MakeShared<FJsonObject>();
-	Create->SetStringField(TEXT("operation"), TEXT("create"));
-	Create->SetStringField(TEXT("name"), HjsonIntentTargetName);
-	Create->SetStringField(TEXT("native_culture"), TEXT("en"));
-	Create->SetArrayField(
-		TEXT("cultures"),
-		{
-			MakeShared<FJsonValueString>(TEXT("en")),
-			MakeShared<FJsonValueString>(TEXT("fr")),
-		});
-	WorkspaceError.Reset();
-	TestTrue(
-		TEXT("explicit create persists one Localization target"),
-		TryImportLocalizationTargets(
-			Revision,
-			{MakeShared<FJsonValueObject>(Create)},
-			Payload,
-			WorkspaceError));
-	TestNotNull(
-		TEXT("created target is independently present"),
-		FindTargetByName(HjsonIntentTargetName));
-	TestTrue(
-		TEXT("created target config is persisted"),
-		FPaths::FileExists(LocalizationConfigPath(HjsonIntentTargetName)));
-
-	TestTrue(
-		TEXT("post-create revision is independently readable"),
-		TryGetLocalizationRevision(Revision, RevisionError));
-	const TSharedPtr<FJsonObject> InvalidNativeUpdate = MakeShared<FJsonObject>();
-	InvalidNativeUpdate->SetStringField(TEXT("operation"), TEXT("update"));
-	InvalidNativeUpdate->SetStringField(TEXT("name"), HjsonIntentTargetName);
-	InvalidNativeUpdate->SetStringField(TEXT("native_culture"), TEXT("de"));
-	WorkspaceError.Reset();
-	TestFalse(
-		TEXT("an update cannot select a native culture outside retained cultures"),
-		TryImportLocalizationTargets(
-			Revision,
-			{MakeShared<FJsonValueObject>(InvalidNativeUpdate)},
-			Payload,
-			WorkspaceError));
-	TestEqual(
-		TEXT("invalid retained-culture update is typed"),
-		WorkspaceError.GetCode(),
-		FString(TEXT("localization_target_native_culture_missing")));
-	const ULocalizationTarget* const UnchangedTarget =
-		FindTargetByName(HjsonIntentTargetName);
-	TestTrue(
-		TEXT("rejected native-culture update preserves the prior state"),
-		UnchangedTarget
-			&& UnchangedTarget->Settings.SupportedCulturesStatistics.IsValidIndex(
-				UnchangedTarget->Settings.NativeCultureIndex)
-			&& UnchangedTarget->Settings.SupportedCulturesStatistics[
-				UnchangedTarget->Settings.NativeCultureIndex].CultureName == TEXT("en"));
-	TestTrue(
-		TEXT("revision remains readable after rejected update"),
-		TryGetLocalizationRevision(Revision, RevisionError));
-	const TSharedPtr<FJsonObject> Remove = MakeShared<FJsonObject>();
-	Remove->SetStringField(TEXT("operation"), TEXT("remove"));
-	Remove->SetStringField(TEXT("name"), HjsonIntentTargetName);
-	WorkspaceError.Reset();
-	TestTrue(
-		TEXT("explicit remove cleans one owned Localization target"),
-		TryImportLocalizationTargets(
-			Revision,
-			{MakeShared<FJsonValueObject>(Remove)},
-			Payload,
-			WorkspaceError));
-	TestNull(
-		TEXT("removed target is independently absent"),
-		FindTargetByName(HjsonIntentTargetName));
-	TestFalse(
-		TEXT("removed target config is absent"),
-		FPaths::FileExists(LocalizationConfigPath(HjsonIntentTargetName)));
-	TestFalse(
-		TEXT("removed target content is absent"),
-		IFileManager::Get().DirectoryExists(
-			*LocalizationContentPath(HjsonIntentTargetName)));
-
-	TestTrue(
-		TEXT("post-remove revision is independently readable"),
-		TryGetLocalizationRevision(Revision, RevisionError));
-	const TSharedPtr<FJsonObject> AtomicCreateA = MakeShared<FJsonObject>();
-	AtomicCreateA->SetStringField(TEXT("operation"), TEXT("create"));
-	AtomicCreateA->SetStringField(TEXT("name"), HjsonAtomicTargetA);
-	AtomicCreateA->SetStringField(TEXT("native_culture"), TEXT("en"));
-	AtomicCreateA->SetArrayField(
-		TEXT("cultures"),
-		{MakeShared<FJsonValueString>(TEXT("en"))});
-	const TSharedPtr<FJsonObject> AtomicCreateB = MakeShared<FJsonObject>();
-	AtomicCreateB->SetStringField(TEXT("operation"), TEXT("create"));
-	AtomicCreateB->SetStringField(TEXT("name"), HjsonAtomicTargetB);
-	AtomicCreateB->SetStringField(TEXT("native_culture"), TEXT("en"));
-	AtomicCreateB->SetArrayField(
-		TEXT("cultures"),
-		{MakeShared<FJsonValueString>(TEXT("en"))});
-	const FString PublishBlocker = LocalizationConfigPath(HjsonAtomicTargetB);
-	TestTrue(
-		TEXT("the fixture creates a deterministic second-target publish blocker"),
-		IFileManager::Get().MakeDirectory(*PublishBlocker, true));
-	WorkspaceError.Reset();
-	TestFalse(
-		TEXT("a multi-target I/O failure rejects the complete change set"),
-		TryImportLocalizationTargets(
-			Revision,
-			{
-				MakeShared<FJsonValueObject>(AtomicCreateA),
-				MakeShared<FJsonValueObject>(AtomicCreateB),
-			},
-			Payload,
-			WorkspaceError));
-	TestEqual(
-		TEXT("the injected failure is the config publication boundary"),
-		WorkspaceError.GetCode(),
-		FString(TEXT("localization_config_publish_failed")));
-	TestNull(
-		TEXT("the first target is rolled back after the later failure"),
-		FindTargetByName(HjsonAtomicTargetA));
-	TestNull(
-		TEXT("the failing target is rolled back"),
-		FindTargetByName(HjsonAtomicTargetB));
-	TestFalse(
-		TEXT("the first target config is rolled back"),
-		FPaths::FileExists(LocalizationConfigPath(HjsonAtomicTargetA)));
-
-	RemoveHjsonIntentFixture();
-	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -987,10 +535,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUeAgentStrictV2T30ExactDispatchTest::RunTest(const FString& Parameters)
 {
-#if !UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE
-	TestTrue(TEXT("T30 exact public dispatch is implemented"), false);
-	return false;
-#else
 	const TSharedRef<FFixtureService> Service = MakeShared<FFixtureService>();
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
@@ -1039,7 +583,6 @@ bool FUeAgentStrictV2T30ExactDispatchTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("owner failure remains a business failure"), !Failure.IsOk() && !Failure.IsProtocolError());
 	TestTrue(TEXT("owner code is preserved"), Failure.GetErrorJson().Contains(TEXT("fixture_t30_failed")));
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1050,10 +593,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T30ProductionFailureCleanupTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE
-	TestTrue(TEXT("T30 production failure semantics are implemented"), false);
-	return false;
-#else
 	TSharedPtr<IUeAgentLocalizationImportCommandService> Service;
 	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
@@ -1095,7 +634,6 @@ bool FUeAgentStrictV2T30ProductionFailureCleanupTest::RunTest(
 		TEXT("prewrite failure creates no localization archive"),
 		FPaths::FileExists(Destination));
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1106,10 +644,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T30ProductionSuccessReadbackTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE
-	TestTrue(TEXT("T30 production localization import is implemented"), false);
-	return false;
-#else
 	FString CleanupError;
 	TestTrue(
 		TEXT("stale T30 production fixture state is absent or removable"),
@@ -1157,8 +691,11 @@ bool FUeAgentStrictV2T30ProductionSuccessReadbackTest::RunTest(
 			TEXT("response proves the formal compiler completed"),
 			Payload.Contains(TEXT("\"formal_compiler_completed\":true")));
 		TestTrue(
-			TEXT("response contains independent readback"),
-			Payload.Contains(TEXT("\"independent_readback\"")));
+			TEXT("response does not expose lifecycle evidence"),
+			!Payload.Contains(TEXT("\"independent_readback\""))
+				&& !Payload.Contains(TEXT("\"persistence_receipt_id\""))
+				&& !Payload.Contains(TEXT("\"phase_history\""))
+				&& !Payload.Contains(TEXT("sha256")));
 	}
 
 	const FString CultureRoot = EvidenceTargetRoot() / EvidenceCulture;
@@ -1186,7 +723,85 @@ bool FUeAgentStrictV2T30ProductionSuccessReadbackTest::RunTest(
 		AddError(CleanupError);
 	}
 	return !HasAnyErrors();
-#endif
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUeAgentT208LocalizationWorkspaceTest,
+	"UAI.Root.T208.ExternalInput.LocalizationWorkspace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentT208LocalizationWorkspaceTest::RunTest(const FString&)
+{
+	FString Error;
+	if (!CreateEvidenceFixture(Error)) { AddError(Error); return false; }
+	ON_SCOPE_EXIT
+	{
+		FString CleanupError;
+		if (!RemoveEvidenceFixture(CleanupError)) AddError(CleanupError);
+	};
+	TSharedPtr<const FUeAgentImmutableCommandRegistry> Registry;
+	TSharedPtr<const FUeAgentExactCommandDispatch> Dispatch;
+	if (!TryComposeProcessActiveCommandComposition(Registry, Dispatch, Error)) { AddError(Error); return false; }
+	auto SubmitPublic = [&](const FString& Command, const TSharedRef<FJsonObject>& Args)
+	{
+		return UE::UAI::Tests::PublicCommand::SubmitActiveCommandWithScopes(Registry, Dispatch, Command, Args,
+			TEXT("t208-localization-workspace"), {TEXT("uai:query"), TEXT("uai:export"), TEXT("uai:operate")});
+	};
+	const FString Directory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()
+		/ TEXT("tmp/TROOT-UAI-208-external-input/localization-native") / FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	const FString Archive = EvidenceTargetRoot() / EvidenceCulture / (EvidenceTargetName + TEXT(".archive"));
+	const FString LocRes = EvidenceTargetRoot() / EvidenceCulture / (EvidenceTargetName + TEXT(".locres"));
+	const FString PersistedPo = EvidenceTargetRoot() / EvidenceCulture / (EvidenceTargetName + TEXT(".po"));
+	auto Prepare = [&](const FString& Stage)
+	{
+		auto SourceInfo = MakeShared<FJsonObject>();
+		SourceInfo->SetStringField(TEXT("identity"), FPaths::ConvertRelativePathToFull(EvidenceSourcePo()));
+		SourceInfo->SetStringField(TEXT("format"), TEXT("po"));
+		auto Parameters = MakeShared<FJsonObject>(); Parameters->SetStringField(TEXT("target_ref"), EvidenceTargetName);
+		auto Policy = MakeShared<FJsonObject>(); Policy->SetStringField(TEXT("command_id"), ExpectedCommandId); Policy->SetObjectField(TEXT("parameters"), Parameters);
+		auto External = MakeShared<FJsonObject>(); External->SetObjectField(TEXT("source"), SourceInfo);
+		External->SetObjectField(TEXT("options"), MakeShared<FJsonObject>()); External->SetObjectField(TEXT("target_policy"), Policy);
+		auto Root = MakeShared<FJsonObject>(); Root->SetStringField(TEXT("type"), TEXT("uai.external_input.localization")); Root->SetObjectField(TEXT("external_input"), External);
+		auto Document = MakeShared<FJsonObject>(); Document->SetStringField(TEXT("schema"), TEXT("uai.hjson.external_input/1")); Document->SetObjectField(TEXT("root"), Root);
+		FString Text; if (!UE::UAI::CommandContract::Json::TryCanonicalize(Document, Text, Error)) { AddError(Error); return false; }
+		auto Source = MakeShared<FJsonObject>(); Source->SetStringField(TEXT("kind"), TEXT("inline")); Source->SetStringField(TEXT("document"), Text);
+		auto Args = MakeShared<FJsonObject>(); Args->SetStringField(TEXT("target"), EvidenceTargetName);
+		Args->SetStringField(TEXT("workspace_path"), Directory / Stage); Args->SetObjectField(TEXT("source"), Source);
+		const auto Result = SubmitPublic(TEXT("content_graph.export_workspace"), Args);
+		if (!Result.IsOk()) AddError(Result.GetErrorJson());
+		return Result.IsOk();
+	};
+	auto Import = [&](const FString& Stage)
+	{
+		auto Source = MakeShared<FJsonObject>(); Source->SetStringField(TEXT("kind"), TEXT("directory")); Source->SetStringField(TEXT("path"), Directory / Stage);
+		auto Args = MakeShared<FJsonObject>(); Args->SetStringField(TEXT("target"), EvidenceTargetName); Args->SetObjectField(TEXT("source"), Source);
+		return SubmitPublic(TEXT("content_graph.import_workspace"), Args);
+	};
+	FString Before, After;
+	if (!FFileHelper::LoadFileToString(Before, *Archive) || !Prepare(TEXT("initial"))) return false;
+	TestTrue(TEXT("source preparation does not write target archive"), FFileHelper::LoadFileToString(After, *Archive) && Before == After);
+	TestFalse(TEXT("source preparation does not compile resources"), FPaths::FileExists(LocRes));
+	const auto Imported = Import(TEXT("initial"));
+	if (!TestTrue(TEXT("public workspace imports through real PO importer"), Imported.IsOk())) { AddError(Imported.GetErrorJson()); return false; }
+	TestTrue(TEXT("independent archive contains translation"), FFileHelper::LoadFileToString(After, *Archive) && After.Contains(TEXT("Bonjour depuis T30")));
+	TestTrue(TEXT("native PO is persisted"), FPaths::FileExists(PersistedPo));
+	TestTrue(TEXT("native locres is compiled"), IFileManager::Get().FileSize(*LocRes) > 0);
+	if (!Prepare(TEXT("target-change"))) return false;
+	const FString ChangedArchive = After + TEXT("\n");
+	if (!FFileHelper::SaveStringToFile(ChangedArchive, *Archive, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM)) return false;
+	const auto TargetRejected = Import(TEXT("target-change"));
+	TestFalse(TEXT("changed target file baseline is rejected"), TargetRejected.IsOk());
+	TestTrue(TEXT("target change has exact rejection"), TargetRejected.GetErrorJson().Contains(TEXT("hjson_external_input_target_changed")));
+	FString RejectedArchive;
+	TestTrue(TEXT("target rejection preserves the newer archive"), FFileHelper::LoadFileToString(RejectedArchive, *Archive) && RejectedArchive == ChangedArchive);
+	if (!FFileHelper::SaveStringToFile(After, *Archive, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM) || !Prepare(TEXT("source-change"))) return false;
+	FString Po; if (!FFileHelper::LoadFileToString(Po, *EvidenceSourcePo())) return false;
+	Po.ReplaceInline(TEXT("Bonjour depuis T30"), TEXT("Bonjour modifie"));
+	if (!FFileHelper::SaveStringToFile(Po, *EvidenceSourcePo(), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM)) return false;
+	const auto SourceRejected = Import(TEXT("source-change"));
+	TestFalse(TEXT("changed PO source is rejected"), SourceRejected.IsOk());
+	TestTrue(TEXT("source change remains distinct from target change"), SourceRejected.GetErrorJson().Contains(TEXT("hjson_external_input_source_digest_mismatch")));
+	TestTrue(TEXT("source rejection preserves archive"), FFileHelper::LoadFileToString(RejectedArchive, *Archive) && RejectedArchive == After);
+	return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1197,10 +812,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T30PublicFixtureSetupTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE
-	TestTrue(TEXT("T30 localization fixture support is implemented"), false);
-	return false;
-#else
 	FString CleanupError;
 	TestTrue(
 		TEXT("stale owned fixture state is absent or removable"),
@@ -1212,7 +823,6 @@ bool FUeAgentStrictV2T30PublicFixtureSetupTest::RunTest(
 		AddError(Error);
 	}
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1223,10 +833,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T30PublicFixtureCleanupTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_T30_EXTERNAL_LOCALIZATION_IMPORT_AVAILABLE
-	TestTrue(TEXT("T30 localization fixture cleanup is implemented"), false);
-	return false;
-#else
 	FString Error;
 	TestTrue(TEXT("all T30 public fixture state is removed"), RemoveEvidenceFixture(Error));
 	if (!Error.IsEmpty())
@@ -1235,5 +841,4 @@ bool FUeAgentStrictV2T30PublicFixtureCleanupTest::RunTest(
 	}
 	TestNull(TEXT("fixture target is absent after cleanup"), FindEvidenceTarget());
 	return !HasAnyErrors();
-#endif
 }

@@ -28,22 +28,7 @@ namespace
 	{
 		return MakeShared<
 			FUeAgentResourceTracker,
-			ESPMode::ThreadSafe>(
-				FUeAgentResourceBudget({
-					{EUeAgentResourceDimension::InputBytes, 1048576},
-					{EUeAgentResourceDimension::OutputBytes, 1048576},
-					{EUeAgentResourceDimension::StringBytes, 1048576},
-					{EUeAgentResourceDimension::Nodes, 32768},
-					{EUeAgentResourceDimension::Items, 32768},
-					{EUeAgentResourceDimension::Files, 64},
-					{EUeAgentResourceDimension::ReferenceEdges, 32768},
-					{EUeAgentResourceDimension::WorkUnits, 1048576},
-					{
-						EUeAgentResourceDimension::
-							EstimatedMemoryBytes,
-						134217728,
-					},
-				}));
+			ESPMode::ThreadSafe>();
 	}
 
 	bool TryCanonicalValue(
@@ -744,10 +729,10 @@ namespace
 				}
 				Test->TestFalse(
 					*(DescriptorId
-						+ TEXT(" does not freeze public factory_ref")),
+						+ TEXT(" does not freeze public factory selector")),
 					HasCanonicalField(
 						Change.GetProposedAfter(),
-						TEXT("factory_ref")));
+						TEXT("factory")));
 			}
 			else if (!IsCreate(Row))
 			{
@@ -807,7 +792,7 @@ namespace
 						: EUeAgentValueKind::Null,
 					ExpectedValueKind(
 						BoundFields[0]->GetStringField(
-							TEXT("value_kind"))));
+							TEXT("kind"))));
 			}
 			for (const FString& CrossOwnerField
 				: TArray<FString>{
@@ -933,26 +918,14 @@ namespace
 			}
 			else if (CaseId == TEXT("factory_candidate_missing"))
 			{
-				Input->RemoveField(TEXT("factory_ref"));
+				Input->RemoveField(TEXT("factory"));
 				bSchemaCase = true;
-			}
-			else if (CaseId == TEXT("factory_candidate_stale"))
-			{
-				Input->GetObjectField(TEXT("factory_ref"))
-					->GetObjectField(TEXT("catalog_revision"))
-					->SetStringField(
-						TEXT("generation"),
-						TEXT("fixture:asset-data-factory:stale"));
 			}
 			else if (CaseId
 				== TEXT("factory_candidate_class_mismatch"))
 			{
-				Input->GetObjectField(TEXT("factory_ref"))
-					->SetStringField(
-						TEXT("candidate_ref"),
-						TEXT(
-							"uai://factory/asset-data/"
-							"data-object/invalid-uobject"));
+				Input->GetObjectField(TEXT("factory"))
+					->SetStringField(TEXT("name"), TEXT("missing-factory"));
 			}
 			else if (CaseId == TEXT("create_target_exists"))
 			{
@@ -962,22 +935,9 @@ namespace
 			{
 				Options.bIncludeSource = false;
 			}
-			else if (CaseId
-				== TEXT("clone_source_revision_stale"))
-			{
-				Input->SetStringField(
-					TEXT("expected_source_revision"),
-					TEXT("rev:stale"));
-			}
 			else if (CaseId == TEXT("update_target_missing"))
 			{
 				Options.bIncludeTarget = false;
-			}
-			else if (CaseId == TEXT("update_revision_stale"))
-			{
-				Input->SetStringField(
-					TEXT("expected_revision"),
-					TEXT("rev:stale"));
 			}
 			else if (CaseId == TEXT("profile_mismatch"))
 			{

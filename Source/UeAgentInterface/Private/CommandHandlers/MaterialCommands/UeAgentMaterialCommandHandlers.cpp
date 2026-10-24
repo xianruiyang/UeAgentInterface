@@ -17,57 +17,11 @@ namespace UE::UAI::CommandHandlers::MaterialCommands
 			const FUeAgentCommandRequest& Request,
 			const FString& RequiredScope)
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), TEXT("material_command_authority_required"));
-			Error->SetStringField(TEXT("subject_id"), Request.GetCommandId());
-			Error->SetStringField(TEXT("detail"), RequiredScope + TEXT(" is required"));
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Text);
-		}
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"),
+                UE::UAI::Contract::FDiagnostic::Failure(TEXT("material_command_authority_required"), RequiredScope + TEXT(" is required"), TEXT("command_authority"), FString(), Request.GetCommandId()));
+        }
 
-		FUeAgentCommandResult NormalizeFailure(
-			const FUeAgentCommandRequest& Request,
-			FUeAgentCommandResult Result)
-		{
-			if (Result.IsOk())
-			{
-				return Result;
-			}
-			TSharedPtr<FJsonObject> Error;
-			const TSharedRef<TJsonReader<>> Reader =
-				TJsonReaderFactory<>::Create(Result.GetErrorJson());
-			if (!FJsonSerializer::Deserialize(Reader, Error)
-				|| !Error.IsValid())
-			{
-				return Result;
-			}
-			FString Code;
-			if (!Error->TryGetStringField(TEXT("code"), Code))
-			{
-				return Result;
-			}
-			static const TMap<FString, FString> Details = {
-				{TEXT("graph_compound_material_target_invalid"),
-					TEXT("target_ref does not identify the required material asset.")},
-				{TEXT("graph_compound_material_parent_invalid"),
-					TEXT("parent_ref does not identify a compatible material parent.")},
-			};
-			const FString* Detail = Details.Find(Code);
-			if (!Detail)
-			{
-				return Result;
-			}
-			Error->SetStringField(TEXT("detail"), *Detail);
-			FString ErrorJson;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&ErrorJson);
-			FJsonSerializer::Serialize(Error.ToSharedRef(), Writer);
-			return FUeAgentCommandResult::Failure(
-				Request, Result.GetPayloadJson(), MoveTemp(ErrorJson));
-		}
+		
 
 		class FHandler final : public IUeAgentExactCommandHandler
 		{
@@ -106,7 +60,7 @@ namespace UE::UAI::CommandHandlers::MaterialCommands
 				FUeAgentCommandResult Result =
 					OperationOwners::MaterialCommands::Submit(
 						Request, EffectiveCaller, Cancellation);
-				return NormalizeFailure(Request, MoveTemp(Result));
+				return MoveTemp(Result);
 			}
 		private:
 			FString Id;
@@ -115,17 +69,17 @@ namespace UE::UAI::CommandHandlers::MaterialCommands
 
 	bool TryCreateHandlers(
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
 		for (const FString& Id
-			: DomainAdapters::MaterialCommands::GetCommandIds())
+			: DomainAdapters::MaterialCommands::GetPublicCommandIds())
 		{
 			OutHandlers.Add(MakeShared<FHandler>(Id));
 		}
 		return OutHandlers.Num()
-			== DomainAdapters::MaterialCommands::GetCommandIds().Num();
+			== DomainAdapters::MaterialCommands::GetPublicCommandIds().Num();
 	}
 }
 

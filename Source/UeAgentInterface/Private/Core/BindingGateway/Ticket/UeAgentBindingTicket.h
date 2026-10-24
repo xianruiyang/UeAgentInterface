@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/Discovery/UeAgentDiscovery.h"
@@ -16,17 +17,7 @@ namespace UE::UAI::BindingGateway::Ticket
 	using UE::UAI::Discovery::FUeAgentCatalogRevision;
 	using UE::UAI::StateSemantic::FUeAgentStateRevision;
 
-	struct UEAGENTINTERFACE_API FUeAgentOperationTicketError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const
-		{
-			return !Code.IsEmpty();
-		}
-	};
+	using FUeAgentOperationTicketError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API FUeAgentOperationSessionIdentity final
 	{
@@ -40,6 +31,7 @@ namespace UE::UAI::BindingGateway::Ticket
 		int64 GetRegistryEpoch() const;
 		const FString& GetRegistryHash() const;
 		bool IsValid() const;
+		const FUeAgentOperationTicketError& GetValidationDiagnostic() const;
 		bool operator==(
 			const FUeAgentOperationSessionIdentity& Other) const;
 
@@ -47,7 +39,7 @@ namespace UE::UAI::BindingGateway::Ticket
 		FString ServerSessionId;
 		int64 RegistryEpoch = -1;
 		FString RegistryHash;
-		bool bValid = false;
+		FUeAgentOperationTicketError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentOperationTicket final
@@ -70,6 +62,7 @@ namespace UE::UAI::BindingGateway::Ticket
 		const TOptional<FUeAgentStateRevision>&
 			GetTargetRevision() const;
 		bool IsValid() const;
+		const FUeAgentOperationTicketError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentOperationTicket(
@@ -104,7 +97,7 @@ namespace UE::UAI::BindingGateway::Ticket
 		double IssuedAt = -1.0;
 		double ExpiresAt = -1.0;
 		TOptional<FUeAgentStateRevision> TargetRevision;
-		bool bValid = false;
+		FUeAgentOperationTicketError ValidationDiagnostic;
 
 		friend class FUeAgentOperationTicketService;
 		friend class FUeAgentBindingTicketJsonCodec;

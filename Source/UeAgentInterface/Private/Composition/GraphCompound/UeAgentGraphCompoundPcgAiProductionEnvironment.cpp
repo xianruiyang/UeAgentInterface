@@ -1,3 +1,10 @@
+#include "Domains/SmartObject/Authoring/UeAgentSmartObjectDocument.h"
+#include "Misc/ScopeExit.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/AuthoringOperationApply/UeAgentAuthoringPackageReadback.h"
+#include "Domains/SmartObject/Authoring/UeAgentSmartObjectAuthoringState.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundPcgAiBindings.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -18,6 +25,10 @@
 #include "Blueprint/StateTreeConditionBlueprintBase.h"
 #include "Blueprint/StateTreeEvaluatorBlueprintBase.h"
 #include "Blueprint/StateTreeNodeBlueprintBase.h"
+
+#include "Domains/StateTree/Authoring/UeAgentStateTreeDocument.h"
+#include "Domains/Blackboard/Authoring/UeAgentBlackboardDocument.h"
+#include "Domains/StateTree/Authoring/UeAgentStateTreeAuthoringState.h"
 #include "Blueprint/StateTreeTaskBlueprintBase.h"
 #include "Components/StateTreeAIComponentSchema.h"
 #include "Core/AssetDurable/UeAgentAssetDurable.h"
@@ -28,6 +39,15 @@
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Core/Verification/UeAgentIndependentReadback.h"
 #include "DomainAdapters/PcgAiNodeGraph/UeAgentPcgAiNodeGraphNativeHook.h"
+#include "Domains/BehaviorTree/Authoring/UeAgentBehaviorTreeNativeGraph.h"
+#include "Domains/BehaviorTree/Authoring/UeAgentBehaviorTreeGraphDocument.h"
+#include "Domains/Eqs/Authoring/UeAgentEqsGraphDocument.h"
+#include "Domains/Eqs/Authoring/UeAgentEqsNativeGraph.h"
+#include "Domains/StateTree/Authoring/UeAgentStateTreeNativeCapture.h"
+#include "Domains/SmartObject/Authoring/UeAgentSmartObjectNativeCapture.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringApplyProvider.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringDescriptors.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringRegistration.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraphNode.h"
@@ -36,9 +56,7 @@
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryGenerator.h"
 #include "EnvironmentQuery/EnvQueryOption.h"
-#include "EnvironmentQueryGraph.h"
 #include "EnvironmentQueryGraphNode_Option.h"
-#include "EnvironmentQueryGraphNode_Root.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "Factories/Factory.h"
@@ -49,7 +67,6 @@
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Misc/SecureHash.h"
-#include "PackageTools.h"
 #include "PCGComponent.h"
 #include "PCGContext.h"
 #include "PCGDataAsset.h"
@@ -73,6 +90,7 @@
 #include "StateTreeTaskBase.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
 
 namespace UE::UAI::Composition::GraphCompound
 {
@@ -86,6 +104,44 @@ namespace UE::UAI::Composition::GraphCompound
 
 	namespace
 	{
+        void SetError(FGraphCompoundRuntimeError& OutError, UE::UAI::Contract::FDiagnostic Diagnostic,
+            FString SubjectId = FString(), const UE::UAI::Contract::FDiagnostic& Recovery = UE::UAI::Contract::FDiagnostic())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = MoveTemp(SubjectId);
+            OutError.Append(Recovery);
+        }
+		
+		FDiagnostic NativeFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Target,
+			const FString& Field, TSharedPtr<FJsonValue> Actual,
+			TSharedPtr<FJsonValue> Expected)
+		{
+			FDiagnostic Error = FDiagnostic::Failure(Code, Reason, TEXT("graph_compound"));
+			Error.SourceKind = TEXT("native_result");
+			Error.TargetPath = Target;
+			Error.PropertyPath = Field;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
+		}
+
+		TSharedPtr<FJsonValue> ClassPathValue(const UClass* Class)
+		{
+			if (Class) return MakeShared<FJsonValueString>(Class->GetPathName());
+			return MakeShared<FJsonValueNull>();
+		}
+
+		FDiagnostic NativeTypeFailure(
+			const TCHAR* Code, const FString& Reason, const FString& Target,
+			const FString& Field, const UObject* Actual, const UClass* Expected)
+		{
+			return NativeFailure(Code, Reason, Target, Field,
+				ClassPathValue(Actual ? Actual->GetClass() : nullptr),
+				ClassPathValue(Expected));
+		}
+
+
 		struct FAssetCreateSpec final
 		{
 			FString CapabilityId;
@@ -132,17 +188,7 @@ namespace UE::UAI::Composition::GraphCompound
 				+ Spec.TargetKind + TEXT("_create");
 		}
 
-		void SetError(
-			FGraphCompoundRuntimeError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
-		{
-			OutError = {};
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-		}
+		
 
 		template <typename RequestType>
 		const FAssetCreateSpec* FindAssetCreateSpec(
@@ -175,32 +221,51 @@ namespace UE::UAI::Composition::GraphCompound
 			UFactory* Factory = nullptr;
 			if (Spec.bUseStateTreeAiSchema)
 			{
-				UStateTreeFactory* const StateTreeFactory =
-					NewObject<UStateTreeFactory>();
+				UStateTreeFactory* const StateTreeFactory = NewObject<UStateTreeFactory>();
 				if (StateTreeFactory)
 				{
-					StateTreeFactory->SetSchemaClass(
-						UStateTreeAIComponentSchema::StaticClass());
+					StateTreeFactory->SetSchemaClass(UStateTreeAIComponentSchema::StaticClass());
 					Factory = StateTreeFactory;
 				}
 			}
 			else
 			{
-				UClass* const FactoryClass = LoadObject<UClass>(
-					nullptr, *Spec.FactoryClassPath);
-				if (FactoryClass && FactoryClass->IsChildOf(UFactory::StaticClass()))
+				UClass* const FactoryClass = LoadObject<UClass>(nullptr, *Spec.FactoryClassPath);
+				if (!FactoryClass || !FactoryClass->IsChildOf(UFactory::StaticClass()))
 				{
-					Factory = NewObject<UFactory>(
-						GetTransientPackage(), FactoryClass);
+					OutError = NativeFailure(TEXT("graph_compound_pcg_ai_factory_unavailable"),
+						!FactoryClass ? TEXT("The configured asset factory class could not be loaded.")
+							: TEXT("The configured asset factory class does not derive from UFactory."),
+						Spec.CapabilityId, TEXT("factory.class"),
+						MakeShared<FJsonValueString>(Spec.FactoryClassPath),
+						ClassPathValue(UFactory::StaticClass()));
+					return nullptr;
 				}
+				Factory = NewObject<UFactory>(GetTransientPackage(), FactoryClass);
 			}
-			if (!Factory || Factory->GetClass()->GetPathName()
-					!= Spec.FactoryClassPath
-				|| Factory->GetSupportedClass() != Spec.AssetClass)
+			if (!Factory)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_factory_unavailable"),
-					Package.GetName(), Spec.FactoryClassPath);
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_factory_unavailable"),
+					TEXT("The asset factory instance could not be created."),
+					Spec.CapabilityId, TEXT("factory.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				OutError.CandidateName = Spec.FactoryClassPath;
+				return nullptr;
+			}
+			if (Factory->GetClass()->GetPathName() != Spec.FactoryClassPath)
+			{
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_factory_unavailable"),
+					TEXT("The created factory class differs from the configured factory class."),
+					Spec.CapabilityId, TEXT("factory.class"), ClassPathValue(Factory->GetClass()),
+					MakeShared<FJsonValueString>(Spec.FactoryClassPath));
+				return nullptr;
+			}
+			if (Factory->GetSupportedClass() != Spec.AssetClass)
+			{
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_factory_unavailable"),
+					TEXT("The factory supports a different asset class."),
+					Spec.CapabilityId, TEXT("factory.supported_class"),
+					ClassPathValue(Factory->GetSupportedClass()), ClassPathValue(Spec.AssetClass));
 				return nullptr;
 			}
 			UObject* const Created = Factory->FactoryCreateNew(
@@ -209,9 +274,12 @@ namespace UE::UAI::Composition::GraphCompound
 				nullptr, GWarn);
 			if (!Created || Created->GetClass() != Spec.AssetClass)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_factory_failed"),
-					Package.GetName(), Spec.FactoryClassPath);
+				OutError = NativeTypeFailure(TEXT("graph_compound_pcg_ai_factory_failed"),
+					!Created ? TEXT("The asset factory returned no asset.")
+						: TEXT("The asset factory returned an unexpected asset class."),
+					AssetName.ToString(), TEXT("asset.class"), Created, Spec.AssetClass);
+				OutError.CandidateName = Spec.FactoryClassPath;
+				OutError.InternalContext = Package.GetName();
 				return nullptr;
 			}
 			return Created;
@@ -247,17 +315,44 @@ namespace UE::UAI::Composition::GraphCompound
 		}
 
 		bool TryPackageFilename(
-			const FString& PackageName,
-			FString& OutFilename)
+			const FString& PackageName, FString& OutFilename, FDiagnostic& OutError)
 		{
 			OutFilename.Reset();
-			return FPackageName::IsValidLongPackageName(PackageName)
-				&& !FPackageName::GetPackageMountPoint(PackageName).IsNone()
-				&& !FPackageName::GetLongPackageAssetName(PackageName).IsEmpty()
-				&& FPackageName::TryConvertLongPackageNameToFilename(
-					PackageName,
-					OutFilename,
-					FPackageName::GetAssetPackageExtension());
+			FText PathReason;
+			if (!FPackageName::IsValidLongPackageName(PackageName, false, &PathReason))
+			{
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					PathReason.IsEmpty() ? TEXT("The target is not a valid long package name.") : PathReason.ToString(),
+					PackageName, TEXT("package_name"), MakeShared<FJsonValueString>(PackageName),
+					MakeShared<FJsonValueString>(TEXT("valid long package name")));
+				return false;
+			}
+			if (FPackageName::GetPackageMountPoint(PackageName).IsNone())
+			{
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					TEXT("The target package has no registered mount point."),
+					PackageName, TEXT("package.mount_point_present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				return false;
+			}
+			if (FPackageName::GetLongPackageAssetName(PackageName).IsEmpty())
+			{
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					TEXT("The target package has no asset name."),
+					PackageName, TEXT("package.asset_name"), MakeShared<FJsonValueString>(FString()),
+					MakeShared<FJsonValueString>(TEXT("non-empty asset name")));
+				return false;
+			}
+			if (!FPackageName::TryConvertLongPackageNameToFilename(
+					PackageName, OutFilename, FPackageName::GetAssetPackageExtension()))
+			{
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					TEXT("The target package could not be converted to a filename."),
+					PackageName, TEXT("package.filename_resolved"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				return false;
+			}
+			return true;
 		}
 
 		bool TryCheckTargetAbsent(
@@ -265,29 +360,29 @@ namespace UE::UAI::Composition::GraphCompound
 			FString& OutFilename,
 			FGraphCompoundRuntimeError& OutError)
 		{
-			if (!Request.IsValid()
-				|| !TryPackageFilename(Request.GetTargetRef(), OutFilename))
+			if (!Request.IsValid())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_target_invalid"),
-					Request.GetTargetRef());
+				OutError = Request.GetValidationDiagnostic();
 				return false;
 			}
+			if (!TryPackageFilename(Request.GetTargetRef(), OutFilename, OutError)) return false;
 			bool bTargetPresent = false;
 			if (!HjsonWorkspace::DomainAuthoring::
 					TryInspectObjectTargetPresence(
 						Request.GetTargetRef(), bTargetPresent))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_target_invalid"),
-					Request.GetTargetRef());
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					TEXT("The target asset presence could not be inspected."),
+					Request.GetTargetRef(), TEXT("target.presence_inspected"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 			}
 			if (bTargetPresent)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_target_already_exists"),
-					Request.GetTargetRef());
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_target_already_exists"),
+					TEXT("The target asset already exists."),
+					Request.GetTargetRef(), TEXT("target.present"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 				return false;
 			}
 			return true;
@@ -299,6 +394,7 @@ namespace UE::UAI::Composition::GraphCompound
 			FUeAgentCanonicalSnapshotPtr& OutSnapshot,
 			FGraphCompoundRuntimeError& OutError)
 		{
+			ON_SCOPE_EXIT { MarkGraphCompoundNativeDiagnostic(OutError); };
 			OutSnapshot.Reset();
 			FString Filename;
 			if (!TryCheckTargetAbsent(Request, Filename, OutError))
@@ -306,7 +402,7 @@ namespace UE::UAI::Composition::GraphCompound
 				return false;
 			}
 			FUeAgentStateSemanticError Error;
-			if (!FUeAgentCanonicalSnapshot::TryCreate(
+			const bool bCreated = FUeAgentCanonicalSnapshot::TryCreate(
 					TEXT("graph-compound:c4:pcg-ai-absent:")
 						+ Request.GetTargetRef(),
 					EUeAgentStatePlane::Persisted,
@@ -323,50 +419,21 @@ namespace UE::UAI::Composition::GraphCompound
 						TEXT("independent_readback"),
 						Request.GetTargetRef(),
 						TEXT("file-absence:") + Filename),
-					{}, Resources, OutSnapshot, Error)
-				|| !OutSnapshot.IsValid())
+					{}, Resources, OutSnapshot, Error);
+			if (!bCreated || !OutSnapshot.IsValid())
 			{
-				SetError(OutError, Error.Code,
-					Request.GetTargetRef(), Error.Path);
+				OutError = Error.IsEmpty() ? NativeFailure(
+					TEXT("graph_compound_pcg_ai_snapshot_invalid"),
+					bCreated ? TEXT("Absent-target snapshot construction returned without a snapshot.")
+						: TEXT("Absent-target snapshot construction failed without a diagnostic."),
+					Request.GetTargetRef(), bCreated ? TEXT("snapshot.present") : TEXT("snapshot.create_succeeded"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)) : Error;
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
 				return false;
 			}
 			return true;
 		}
 
-		bool TryUnloadTarget(
-			const FString& TargetRef,
-			const bool bNotifyAssetRegistry,
-			FString& OutDetail)
-		{
-			OutDetail.Reset();
-			const FString TargetPackageName = PackageName(TargetRef);
-			UPackage* const Package = FindPackage(nullptr, *TargetPackageName);
-			if (!Package)
-			{
-				return true;
-			}
-			if (bNotifyAssetRegistry)
-			{
-				if (UObject* const Asset = FindTopLevelAsset(*Package, TargetRef))
-				{
-					FAssetRegistryModule::AssetDeleted(Asset);
-				}
-			}
-			Package->SetDirtyFlag(false);
-			FText Error;
-			if (!UPackageTools::UnloadPackages({Package}, Error, true))
-			{
-				OutDetail = Error.ToString();
-				return false;
-			}
-			CollectGarbage(RF_NoFlags, true);
-			if (FindPackage(nullptr, *TargetPackageName))
-			{
-				OutDetail = TEXT("package remains loaded after unload");
-				return false;
-			}
-			return true;
-		}
 
 		FAssetDurableSessionRef PersistedSession(
 			const FAssetDurableSessionRef& Prepared,
@@ -554,53 +621,7 @@ namespace UE::UAI::Composition::GraphCompound
 			return nullptr;
 		}
 
-		bool HasExactObjectFields(
-			const FUeAgentCanonicalValue& Object,
-			std::initializer_list<const TCHAR*> Fields)
-		{
-			if (Object.GetKind() != EUeAgentValueKind::Object
-				|| Object.GetObjectItems().Num()
-					!= static_cast<int32>(Fields.size()))
-			{
-				return false;
-			}
-			for (const TCHAR* const Field : Fields)
-			{
-				if (!FindObjectValue(Object, Field))
-				{
-					return false;
-				}
-			}
-			return true;
-		}
 
-		bool HasOnlyObjectFields(
-			const FUeAgentCanonicalValue& Object,
-			std::initializer_list<const TCHAR*> Fields)
-		{
-			if (Object.GetKind() != EUeAgentValueKind::Object)
-			{
-				return false;
-			}
-			for (const TPair<FString, FUeAgentCanonicalValueRef>& Item
-				: Object.GetObjectItems())
-			{
-				bool bAllowed = false;
-				for (const TCHAR* const Field : Fields)
-				{
-					if (Item.Key == Field)
-					{
-						bAllowed = true;
-						break;
-					}
-				}
-				if (!bAllowed)
-				{
-					return false;
-				}
-			}
-			return true;
-		}
 
 		bool TryCanonicalStringField(
 			const FUeAgentCanonicalValue& Object,
@@ -618,57 +639,6 @@ namespace UE::UAI::Composition::GraphCompound
 			return !OutValue.IsEmpty();
 		}
 
-		bool TryCanonicalIntegerField(
-			const FUeAgentCanonicalValue& Object,
-			const TCHAR* Field,
-			int32& OutValue)
-		{
-			const FUeAgentCanonicalValue* const Value =
-				FindObjectValue(Object, Field);
-			if (!Value
-				|| (Value->GetKind() != EUeAgentValueKind::Integer
-					&& Value->GetKind() != EUeAgentValueKind::Decimal))
-			{
-				return false;
-			}
-			const double Parsed = FCString::Atod(*Value->GetLexeme());
-			if (!FMath::IsFinite(Parsed)
-				|| Parsed < 0.0 || Parsed > static_cast<double>(MAX_int32)
-				|| !FMath::IsNearlyEqual(
-					Parsed, FMath::RoundToDouble(Parsed)))
-			{
-				return false;
-			}
-			OutValue = static_cast<int32>(Parsed);
-			return true;
-		}
-
-		bool TryCanonicalSignedIntegerField(
-			const FUeAgentCanonicalValue& Object,
-			const TCHAR* Field,
-			int32& OutValue)
-		{
-			const FUeAgentCanonicalValue* const Value =
-				FindObjectValue(Object, Field);
-			if (!Value
-				|| (Value->GetKind() != EUeAgentValueKind::Integer
-					&& Value->GetKind() != EUeAgentValueKind::Decimal))
-			{
-				return false;
-			}
-			const double Parsed = FCString::Atod(*Value->GetLexeme());
-			if (!FMath::IsFinite(Parsed)
-				|| Parsed < static_cast<double>(MIN_int32)
-				|| Parsed > static_cast<double>(MAX_int32)
-				|| !FMath::IsNearlyEqual(
-					Parsed, FMath::RoundToDouble(Parsed)))
-			{
-				return false;
-			}
-			OutValue = static_cast<int32>(Parsed);
-			return true;
-		}
-
 		bool TryCanonicalDouble(
 			const FUeAgentCanonicalValue& Value,
 			double& OutValue)
@@ -678,38 +648,199 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				return false;
 			}
-			OutValue = FCString::Atod(*Value.GetLexeme());
-			return FMath::IsFinite(OutValue);
+			return TryParseFiniteDecimal(Value.GetLexeme(), OutValue);
 		}
 
-		bool TryCanonicalVector2Field(
-			const FUeAgentCanonicalValue& Object,
-			const TCHAR* Field,
-			float& OutX,
-			float& OutY)
+
+
+
+		class FRequiredCanonicalInput final
 		{
-			const FUeAgentCanonicalValue* const Value =
-				FindObjectValue(Object, Field);
-			if (!Value || Value->GetKind() != EUeAgentValueKind::Array
-				|| Value->GetArrayItems().Num() != 2)
+		public:
+			FRequiredCanonicalInput(const TCHAR* InCode, FString InTarget, FString InSemanticId,
+				FString InValuePointer, const bool bInGenerated, FDiagnostic& InError, TOptional<int32> InIndex)
+				: Code(InCode), Target(MoveTemp(InTarget)), SemanticId(MoveTemp(InSemanticId)),
+				ValuePointer(MoveTemp(InValuePointer)), bGenerated(bInGenerated), Error(InError), OperationIndex(InIndex)
+			{}
+
+			bool Fail(const FString& Reason, const FString& RelativePointer,
+				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected) const
 			{
+				Error = FDiagnostic::Failure(Code, Reason, TEXT("graph_compound"));
+				Error.TargetPath = Target;
+				Error.SubjectId = SemanticId;
+				Error.OperationIndex = OperationIndex;
+				Error.PropertyPath = RelativePointer;
+				Error.ActualValuePresent = Actual.IsValid();
+				Error.ExpectedValuePresent = Expected.IsValid();
+				Error.ActualValue = MoveTemp(Actual);
+				Error.ExpectedValue = MoveTemp(Expected);
+				Error.Source.JsonPath = RelativePointer.IsEmpty() ? TEXT("/") : RelativePointer;
+				if (bGenerated || ValuePointer.IsEmpty()) MarkGraphCompoundNativeDiagnostic(Error);
+				else BindGraphCompoundInputValueDiagnostic(Error, ValuePointer);
 				return false;
 			}
-			double X = 0.0;
-			double Y = 0.0;
-			if (!TryCanonicalDouble(Value->GetArrayItems()[0].Get(), X)
-				|| !TryCanonicalDouble(Value->GetArrayItems()[1].Get(), Y)
-				|| X < -static_cast<double>(MAX_flt)
-				|| X > static_cast<double>(MAX_flt)
-				|| Y < -static_cast<double>(MAX_flt)
-				|| Y > static_cast<double>(MAX_flt))
+
+			FRequiredCanonicalInput At(const FString& RelativePointer) const
 			{
-				return false;
+				return FRequiredCanonicalInput(Code, Target, SemanticId,
+					(ValuePointer == TEXT("/") ? FString() : ValuePointer) + RelativePointer,
+					bGenerated || ValuePointer.IsEmpty(), Error, OperationIndex);
 			}
-			OutX = static_cast<float>(X);
-			OutY = static_cast<float>(Y);
-			return true;
-		}
+
+			bool RequireFields(const FUeAgentCanonicalValue& Object,
+				std::initializer_list<const TCHAR*> Fields, const bool bExact = true) const
+			{
+				if (Object.GetKind() != EUeAgentValueKind::Object)
+					return Fail(TEXT("The mutation value must be an object."), FString(),
+						CanonicalInputFact(&Object), MakeShared<FJsonValueString>(TEXT("object")));
+				if (bExact)
+				{
+					// Diagnose the failed field set without changing the exact-count predicate.
+					if (Object.GetObjectItems().Num() != static_cast<int32>(Fields.size()))
+					{
+						for (const TCHAR* Field : Fields)
+							if (!FindObjectValue(Object, Field))
+								return MissingField(Field);
+						for (const auto& Item : Object.GetObjectItems())
+						{
+							bool bAllowed = false;
+							for (const TCHAR* Field : Fields) if (Item.Key == Field) { bAllowed = true; break; }
+							if (!bAllowed)
+								return Fail(TEXT("The mutation value contains an unsupported field."),
+									FieldPointer(Item.Key), CanonicalInputFact(&Item.Value.Get()), nullptr);
+						}
+						return Fail(TEXT("The mutation value has an incorrect field count."), FString(),
+							MakeShared<FJsonValueNumber>(Object.GetObjectItems().Num()),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Fields.size())));
+					}
+					for (const TCHAR* Field : Fields)
+						if (!FindObjectValue(Object, Field)) return MissingField(Field);
+				}
+				else
+				{
+					for (const auto& Item : Object.GetObjectItems())
+					{
+						bool bAllowed = false;
+						for (const TCHAR* Field : Fields) if (Item.Key == Field) { bAllowed = true; break; }
+						if (!bAllowed)
+							return Fail(TEXT("The mutation value contains an unsupported field."),
+								FieldPointer(Item.Key), CanonicalInputFact(&Item.Value.Get()), nullptr);
+					}
+				}
+				return true;
+			}
+
+			bool ReadString(const FUeAgentCanonicalValue& Object, const TCHAR* Field, FString& Out) const
+			{
+				const FUeAgentCanonicalValue* Value = FindObjectValue(Object, Field);
+				if (!Value || Value->GetKind() != EUeAgentValueKind::String)
+				{
+					Out.Reset();
+					return Fail(Value ? TEXT("The mutation field must be a string.")
+						: TEXT("The required mutation field is missing."),
+						FieldPointer(Field), CanonicalInputFact(Value),
+						MakeShared<FJsonValueString>(TEXT("non-empty string")));
+				}
+				Out = Value->GetText();
+				if (Out.IsEmpty())
+					return Fail(TEXT("The mutation string field must not be empty."),
+						FieldPointer(Field), CanonicalInputFact(Value),
+						MakeShared<FJsonValueString>(TEXT("non-empty string")));
+				return true;
+			}
+
+			bool ReadStringArray(const FUeAgentCanonicalValue& Object, const TCHAR* Field, TArray<FString>& Out) const
+			{
+				Out.Reset();
+				const FUeAgentCanonicalValue* Value = FindObjectValue(Object, Field);
+				if (!Value || Value->GetKind() != EUeAgentValueKind::Array)
+					return Fail(Value ? TEXT("The mutation field must be an array.")
+						: TEXT("The required mutation field is missing."),
+						FieldPointer(Field), CanonicalInputFact(Value),
+						MakeShared<FJsonValueString>(TEXT("array of non-empty strings")));
+				for (int32 Index = 0; Index < Value->GetArrayItems().Num(); ++Index)
+				{
+					const FUeAgentCanonicalValue& Item = Value->GetArrayItems()[Index].Get();
+					if (Item.GetKind() != EUeAgentValueKind::String || Item.GetText().IsEmpty())
+					{
+						Out.Reset();
+						return Fail(TEXT("The mutation array item must be a non-empty string."),
+							FieldPointer(Field) + FString::Printf(TEXT("/%d"), Index),
+							CanonicalInputFact(&Item), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+					}
+					Out.Add(Item.GetText());
+				}
+				return true;
+			}
+
+			bool ReadInteger(const FUeAgentCanonicalValue& Object, const TCHAR* Field, int32& Out,
+				const bool bSigned = false) const
+			{
+				const FUeAgentCanonicalValue* Value = FindObjectValue(Object, Field);
+				const int64 Minimum = bSigned ? MIN_int32 : 0;
+				const TSharedPtr<FJsonValue> Expected = MakeShared<FJsonValueString>(FString::Printf(
+					TEXT("integer in [%lld, %d]"), Minimum, MAX_int32));
+				if (!Value || (Value->GetKind() != EUeAgentValueKind::Integer
+					&& Value->GetKind() != EUeAgentValueKind::Decimal))
+					return Fail(Value ? TEXT("The mutation field must be numeric.")
+						: TEXT("The required mutation field is missing."),
+						FieldPointer(Field), CanonicalInputFact(Value), Expected);
+				int64 Parsed = 0;
+				if (!TryParseInt64Number(Value->GetLexeme(), Parsed) || Parsed < Minimum || Parsed > MAX_int32)
+					return Fail(TEXT("The mutation number is not an integer within the supported range."),
+						FieldPointer(Field), CanonicalInputFact(Value), Expected);
+				Out = static_cast<int32>(Parsed);
+				return true;
+			}
+
+			bool ReadVector2(const FUeAgentCanonicalValue& Object, const TCHAR* Field, float& OutX, float& OutY) const
+			{
+				const FUeAgentCanonicalValue* Value = FindObjectValue(Object, Field);
+				if (!Value || Value->GetKind() != EUeAgentValueKind::Array || Value->GetArrayItems().Num() != 2)
+					return Fail(TEXT("The mutation position must be an array with exactly two coordinates."),
+						FieldPointer(Field), CanonicalInputFact(Value),
+						MakeShared<FJsonValueString>(TEXT("array of two finite float-range numbers")));
+				double Parsed[2] = {0.0, 0.0};
+				for (int32 Index = 0; Index < 2; ++Index)
+				{
+					const FUeAgentCanonicalValue& Coordinate = Value->GetArrayItems()[Index].Get();
+					if (!TryCanonicalDouble(Coordinate, Parsed[Index]))
+						return Fail(TEXT("The mutation coordinate must be a finite number."),
+							FieldPointer(Field) + FString::Printf(TEXT("/%d"), Index), CanonicalInputFact(&Coordinate),
+							MakeShared<FJsonValueString>(TEXT("finite number")));
+				}
+				for (int32 Index = 0; Index < 2; ++Index)
+					if (Parsed[Index] < -static_cast<double>(MAX_flt) || Parsed[Index] > static_cast<double>(MAX_flt))
+						return Fail(TEXT("The mutation coordinate is outside the float range."),
+							FieldPointer(Field) + FString::Printf(TEXT("/%d"), Index),
+							CanonicalInputFact(&Value->GetArrayItems()[Index].Get()),
+							MakeShared<FJsonValueString>(FString::Printf(TEXT("number in [%g, %g]"), -MAX_flt, MAX_flt)));
+				OutX = static_cast<float>(Parsed[0]);
+				OutY = static_cast<float>(Parsed[1]);
+				return true;
+			}
+
+		private:
+			static FString FieldPointer(FString Field)
+			{
+				Field.ReplaceInline(TEXT("~"), TEXT("~0"));
+				Field.ReplaceInline(TEXT("/"), TEXT("~1"));
+				return TEXT("/") + Field;
+			}
+			bool MissingField(const FString& Field) const
+			{
+				return Fail(TEXT("The required mutation field is missing."), FieldPointer(Field),
+					nullptr, MakeShared<FJsonValueString>(TEXT("required field")));
+			}
+			const TCHAR* Code;
+			FString Target;
+			FString SemanticId;
+			FString ValuePointer;
+			bool bGenerated;
+			FDiagnostic& Error;
+			TOptional<int32> OperationIndex;
+		};
 
 		bool TryMakeCanonicalDouble(
 			const double Value,
@@ -717,15 +848,19 @@ namespace UE::UAI::Composition::GraphCompound
 			FUeAgentCanonicalValuePtr& OutValue,
 			FGraphCompoundRuntimeError& OutError)
 		{
-			FUeAgentStateSemanticError StateError;
-			if (!FMath::IsFinite(Value)
-				|| !FUeAgentCanonicalValue::TryDecimal(
-					FString::Printf(TEXT("%.17g"), Value),
-					Resources, OutValue, StateError))
+			if (!FMath::IsFinite(Value))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_parameter_value_invalid"),
-					FString(), StateError.Detail);
+				OutError = NativeFailure(TEXT("graph_compound_pcg_parameter_value_invalid"),
+					TEXT("The native parameter value is not finite."),
+					FString(), TEXT("value"), MakeShared<FJsonValueString>(FString::Printf(TEXT("%.17g"), Value)),
+					MakeShared<FJsonValueString>(TEXT("finite double")));
+				return false;
+			}
+			FUeAgentStateSemanticError StateError;
+			if (!FUeAgentCanonicalValue::TryDecimal(
+					FString::Printf(TEXT("%.17g"), Value), Resources, OutValue, StateError))
+			{
+				SetError(OutError, StateError, FString());
 				return false;
 			}
 			return true;
@@ -739,31 +874,6 @@ namespace UE::UAI::Composition::GraphCompound
 				*Desc.Name.ToString(),
 				Desc.ValueType == EPropertyBagPropertyType::Double
 					? TEXT("double") : TEXT("unsupported"));
-		}
-
-		bool TryCanonicalStringArrayField(
-			const FUeAgentCanonicalValue& Object,
-			const TCHAR* Field,
-			TArray<FString>& OutValues)
-		{
-			OutValues.Reset();
-			const FUeAgentCanonicalValue* const Value =
-				FindObjectValue(Object, Field);
-			if (!Value || Value->GetKind() != EUeAgentValueKind::Array)
-			{
-				return false;
-			}
-			for (const FUeAgentCanonicalValueRef& Item : Value->GetArrayItems())
-			{
-				if (Item->GetKind() != EUeAgentValueKind::String
-					|| Item->GetText().IsEmpty())
-				{
-					OutValues.Reset();
-					return false;
-				}
-				OutValues.Add(Item->GetText());
-			}
-			return true;
 		}
 
 		FString StateTreeStateSemanticId(const FGuid& StateGuid)
@@ -786,39 +896,20 @@ namespace UE::UAI::Composition::GraphCompound
 		bool TryCollectStateTreeStates(
 			UStateTreeEditorData& EditorData,
 			TMap<FGuid, UStateTreeState*>& OutStates,
-			TMap<FGuid, FString>& OutParents)
+			TMap<FGuid, FString>& OutParents, FDiagnostic& OutError)
 		{
 			OutStates.Reset();
 			OutParents.Reset();
-			struct FPendingState
+			TArray<UeAgentStateTreeAuthoring::FStateCapture> States;
+			if (!UeAgentStateTreeAuthoring::CaptureHierarchy(EditorData, States, OutError))
 			{
-				UStateTreeState* State = nullptr;
-				FString ParentIdentity;
-			};
-			TArray<FPendingState> Pending;
-			TSet<const UStateTreeState*> Visited;
-			for (int32 Index = EditorData.SubTrees.Num() - 1; Index >= 0; --Index)
-			{
-				Pending.Add({EditorData.SubTrees[Index], TEXT("root")});
+				MarkGraphCompoundNativeDiagnostic(OutError);
+				return false;
 			}
-			while (!Pending.IsEmpty())
+			for (const auto& Entry : States)
 			{
-				const FPendingState Current = Pending.Pop(EAllowShrinking::No);
-				if (!Current.State || Visited.Contains(Current.State)
-					|| !Current.State->ID.IsValid()
-					|| OutStates.Contains(Current.State->ID))
-				{
-					return false;
-				}
-				Visited.Add(Current.State);
-				OutStates.Add(Current.State->ID, Current.State);
-				OutParents.Add(Current.State->ID, Current.ParentIdentity);
-				const FString Parent = StateTreeStateSemanticId(Current.State->ID);
-				for (int32 Index = Current.State->Children.Num() - 1;
-					Index >= 0; --Index)
-				{
-					Pending.Add({Current.State->Children[Index], Parent});
-				}
+				OutStates.Add(Entry.State->ID, const_cast<UStateTreeState*>(Entry.State));
+				OutParents.Add(Entry.State->ID, Entry.Parent ? StateTreeStateSemanticId(Entry.Parent->ID) : TEXT("root"));
 			}
 			return true;
 		}
@@ -829,15 +920,10 @@ namespace UE::UAI::Composition::GraphCompound
 			FUeAgentCanonicalValuePtr& OutValue,
 			FGraphCompoundRuntimeError& OutError)
 		{
-			FString Error;
+			ON_SCOPE_EXIT { MarkGraphCompoundNativeDiagnostic(OutError); };
 			if (!CanonicalJson::TryFromJsonValue(
-					MakeShared<FJsonValueObject>(Object),
-					Resources, OutValue, Error)
-				|| !OutValue.IsValid())
+					MakeShared<FJsonValueObject>(Object), Resources, OutValue, OutError))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_state_value_invalid"),
-					FString(), Error);
 				return false;
 			}
 			return true;
@@ -881,20 +967,30 @@ namespace UE::UAI::Composition::GraphCompound
 			OutValue.Reset();
 			if (DataAsset.Data.TaggedData.Num() != 1)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_data_asset_content_invalid"),
-					DataAsset.GetPathName());
+				OutError = NativeFailure(TEXT("graph_compound_pcg_data_asset_content_invalid"),
+					TEXT("The PCG data asset must contain exactly one tagged data entry."),
+					DataAsset.GetPathName(), TEXT("tagged_data.count"),
+					MakeShared<FJsonValueNumber>(DataAsset.Data.TaggedData.Num()),
+					MakeShared<FJsonValueNumber>(1));
 				return false;
 			}
 			const UPCGPointData* const PointData = Cast<UPCGPointData>(
 				DataAsset.Data.TaggedData[0].Data.Get());
-			if (!PointData
-				|| PointData->GetClass() != UPCGPointData::StaticClass()
-				|| !DataAsset.ObjectPath.IsValid())
+			if (!PointData || PointData->GetClass() != UPCGPointData::StaticClass())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_data_asset_content_invalid"),
-					DataAsset.GetPathName());
+				OutError = NativeTypeFailure(TEXT("graph_compound_pcg_data_asset_content_invalid"),
+					TEXT("The tagged data entry must have the exact PCGPointData class."),
+					DataAsset.GetPathName(), TEXT("tagged_data[0].class"),
+					DataAsset.Data.TaggedData[0].Data.Get(), UPCGPointData::StaticClass());
+				return false;
+			}
+			if (!DataAsset.ObjectPath.IsValid())
+			{
+				OutError = NativeFailure(TEXT("graph_compound_pcg_data_asset_content_invalid"),
+					TEXT("The PCG data asset source object path is invalid."),
+					DataAsset.GetPathName(), TEXT("source_ref"),
+					MakeShared<FJsonValueString>(DataAsset.ObjectPath.ToString()),
+					MakeShared<FJsonValueString>(TEXT("valid soft object path")));
 				return false;
 			}
 
@@ -927,14 +1023,6 @@ namespace UE::UAI::Composition::GraphCompound
 				? TEXT("node:root")
 				: TEXT("node:") + Node.NodeGuid.ToString(
 					EGuidFormats::DigitsWithHyphensLower);
-		}
-
-		FString EqsOptionSemanticId(const UEdGraphNode& Node)
-		{
-			return Node.NodeGuid.IsValid()
-				? TEXT("node:") + Node.NodeGuid.ToString(
-					EGuidFormats::DigitsWithHyphensLower)
-				: FString();
 		}
 
 		int32 DirectionPinIndex(
@@ -976,6 +1064,7 @@ namespace UE::UAI::Composition::GraphCompound
 			FString& OutGeneration,
 			FGraphCompoundRuntimeError& OutError)
 		{
+			ON_SCOPE_EXIT { MarkGraphCompoundNativeDiagnostic(OutError); };
 			OutValues.Reset();
 			OutGeneration.Reset();
 			UObject* const Target = IsPcgComponentMutationProfile(Profile)
@@ -983,8 +1072,12 @@ namespace UE::UAI::Composition::GraphCompound
 				: LoadObject<UObject>(nullptr, *TargetRef);
 			if (!Target || Target->GetPathName() != TargetRef)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_target_invalid"), TargetRef);
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					!Target ? TEXT("The native PCG/AI target could not be found or loaded.")
+						: TEXT("The resolved native target path differs from the requested target."),
+					TargetRef, TEXT("target.path"),
+					MakeShared<FJsonValueString>(Target ? Target->GetPathName() : FString()),
+					MakeShared<FJsonValueString>(TargetRef));
 				return false;
 			}
 
@@ -994,8 +1087,9 @@ namespace UE::UAI::Composition::GraphCompound
 				UBehaviorTree* const Tree = Cast<UBehaviorTree>(Target);
 				if (!Tree)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_target_invalid"), TargetRef);
+					OutError = NativeTypeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+						TEXT("The native target is not an instance of the required asset class."),
+						TargetRef, TEXT("target.class"), Target, UBehaviorTree::StaticClass());
 					return false;
 				}
 #if WITH_EDITORONLY_DATA
@@ -1126,10 +1220,7 @@ namespace UE::UAI::Composition::GraphCompound
 							Value,
 							StateError))
 					{
-						SetError(OutError,
-							TEXT("graph_compound_behavior_tree_blackboard_binding_invalid"),
-							TargetRef,
-							StateError.Detail);
+						SetError(OutError, StateError, TargetRef);
 						return false;
 					}
 					OutValues.Add({TEXT("binding:blackboard_asset"), Value, true});
@@ -1142,8 +1233,9 @@ namespace UE::UAI::Composition::GraphCompound
 				UBlackboardData* const Blackboard = Cast<UBlackboardData>(Target);
 				if (!Blackboard)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_target_invalid"), TargetRef);
+					OutError = NativeTypeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+						TEXT("The native target is not an instance of the required asset class."),
+						TargetRef, TEXT("target.class"), Target, UBlackboardData::StaticClass());
 					return false;
 				}
 				auto AddEntries = [&] (
@@ -1194,19 +1286,24 @@ namespace UE::UAI::Composition::GraphCompound
 				UEnvQuery* const Query = Cast<UEnvQuery>(Target);
 				if (!Query)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_target_invalid"), TargetRef);
+					OutError = NativeTypeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+						TEXT("The native target is not an instance of the required asset class."),
+						TargetRef, TEXT("target.class"), Target, UEnvQuery::StaticClass());
 					return false;
 				}
 #if WITH_EDITORONLY_DATA
-				const UEnvironmentQueryGraph* const Graph =
-					Cast<UEnvironmentQueryGraph>(Query->EdGraph);
-				if (Graph)
+				UeAgentEqsAuthoring::FGraphCapture Capture;
+				UE::UAI::Contract::FDiagnostic CaptureError;
+				if (!UeAgentEqsAuthoring::CaptureGraph(*Query, Capture, CaptureError))
 				{
-					for (const UEdGraphNode* Node : Graph->Nodes)
+					SetError(OutError, CaptureError, TargetRef);
+					return false;
+				}
+				{
+					for (const auto& CapturedNode : Capture.Nodes)
 					{
 						const UEnvironmentQueryGraphNode_Option* const OptionNode =
-							Cast<UEnvironmentQueryGraphNode_Option>(Node);
+							Cast<UEnvironmentQueryGraphNode_Option>(CapturedNode.NativeNode);
 						const UEnvQueryOption* const Option = OptionNode
 							? Cast<UEnvQueryOption>(OptionNode->NodeInstance.Get())
 							: nullptr;
@@ -1215,8 +1312,7 @@ namespace UE::UAI::Composition::GraphCompound
 						{
 							continue;
 						}
-						const FString SemanticId =
-							EqsOptionSemanticId(*OptionNode);
+						const FString& SemanticId = CapturedNode.Id;
 						const TSharedRef<FJsonObject> Definition =
 							MakeShared<FJsonObject>();
 						Definition->SetStringField(
@@ -1262,12 +1358,20 @@ namespace UE::UAI::Composition::GraphCompound
 					? Cast<UStateTreeEditorData>(Tree->EditorData) : nullptr;
 				TMap<FGuid, UStateTreeState*> States;
 				TMap<FGuid, FString> Parents;
-				if (!Tree || !EditorData
-					|| !TryCollectStateTreeStates(*EditorData, States, Parents))
+				if (!Tree || !EditorData)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_state_tree_hierarchy_invalid"),
-						TargetRef);
+					OutError = !Tree
+						? NativeTypeFailure(TEXT("graph_compound_state_tree_hierarchy_invalid"),
+							TEXT("The native hierarchy target is not a StateTree."),
+							TargetRef, TEXT("target.class"), Target, UStateTree::StaticClass())
+						: NativeTypeFailure(TEXT("graph_compound_state_tree_hierarchy_invalid"),
+							TEXT("The StateTree has no valid StateTree editor data."),
+							TargetRef, TEXT("editor_data.class"), Tree->EditorData, UStateTreeEditorData::StaticClass());
+					return false;
+				}
+				if (!TryCollectStateTreeStates(*EditorData, States, Parents, OutError))
+				{
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 					return false;
 				}
 				auto AddStateTreeNodes = [&] (
@@ -1367,9 +1471,13 @@ namespace UE::UAI::Composition::GraphCompound
 						{
 							if (!Child || !Child->ID.IsValid())
 							{
-								SetError(OutError,
-									TEXT("graph_compound_state_tree_hierarchy_invalid"),
-									StateIdentity);
+								OutError = NativeFailure(TEXT("graph_compound_state_tree_hierarchy_invalid"),
+									!Child ? TEXT("The StateTree child entry is null.")
+										: TEXT("The StateTree child has an invalid identity."),
+									TargetRef, FString::Printf(TEXT("%s.children[%d].id"), *StateIdentity, OrderedIdentities.Num()),
+									MakeShared<FJsonValueString>(Child ? Child->ID.ToString() : FString()),
+									MakeShared<FJsonValueString>(TEXT("child state with a valid GUID")));
+								OutError.SubjectId = StateIdentity;
 								return false;
 							}
 							OrderedIdentities.Add(MakeShared<FJsonValueString>(
@@ -1389,9 +1497,10 @@ namespace UE::UAI::Composition::GraphCompound
 					}
 				}
 #else
-				SetError(OutError,
-					TEXT("graph_compound_state_tree_editor_data_unavailable"),
-					TargetRef);
+				OutError = NativeFailure(TEXT("graph_compound_state_tree_editor_data_unavailable"),
+					TEXT("StateTree hierarchy capture requires a build with editor-only data."),
+					TargetRef, TEXT("editor_only_data.available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 				return false;
 #endif
 			}
@@ -1402,42 +1511,32 @@ namespace UE::UAI::Composition::GraphCompound
 					Cast<USmartObjectDefinition>(Target);
 				if (!Definition)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_target_invalid"), TargetRef);
+					OutError = NativeTypeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+						TEXT("The native target is not an instance of the required asset class."),
+						TargetRef, TEXT("target.class"), Target, USmartObjectDefinition::StaticClass());
 					return false;
 				}
-				for (const FSmartObjectSlotDefinition& Slot
-					: Definition->GetSlots())
+				TSharedPtr<FJsonValue> Document; UE::UAI::Contract::FDiagnostic CaptureError;
+				if (!UeAgentSmartObjectAuthoring::ReadDefinitionDocument(*Definition, Document, CaptureError))
+				{ SetError(OutError, CaptureError, TargetRef); return false; }
+				FUeAgentCanonicalValuePtr FullDocument;
+				if (!TryCanonicalObject(Document->AsObject().ToSharedRef(), Resources, FullDocument, OutError)) return false;
+				// The internal slot operation retains its compatibility value shape,
+				// while preflight revision covers the complete canonical document.
+				OutValues.Add({TEXT("smart_object:document"), FullDocument, true});
+				const auto Items = Document->AsObject()->GetObjectField(TEXT("items"));
+				for (const auto& Pair : Items->Values)
 				{
-#if WITH_EDITORONLY_DATA
-					if (!Slot.ID.IsValid())
-					{
-						continue;
-					}
-					const FString SlotGuid = Slot.ID.ToString(
-						EGuidFormats::DigitsWithHyphensLower);
-#else
-					continue;
-#endif
-					const USmartObjectBehaviorDefinition* const Behavior =
-						Slot.BehaviorDefinitions.IsEmpty()
-							? nullptr : Slot.BehaviorDefinitions[0].Get();
-					const TSharedRef<FJsonObject> ValueObject =
-						MakeShared<FJsonObject>();
-					ValueObject->SetStringField(
-						TEXT("behavior_type_ref"), Behavior
-							? Behavior->GetClass()->GetPathName() : TEXT("none"));
-					ValueObject->SetStringField(
-						TEXT("data_type_ref"),
-						FSmartObjectSlotDefinition::StaticStruct()->GetPathName());
+					if (Pair.Value->AsObject()->GetStringField(TEXT("kind")) != TEXT("slot")) continue;
+					const TSharedPtr<FJsonObject>* Behavior = nullptr;
+					const FString BehaviorId = TEXT("behavior:") + Pair.Key + TEXT(":0");
+					const auto ValueObject = MakeShared<FJsonObject>();
+					ValueObject->SetStringField(TEXT("behavior_type_ref"), Items->TryGetObjectField(BehaviorId, Behavior)
+						&& !(*Behavior)->GetStringField(TEXT("class_path")).IsEmpty() ? (*Behavior)->GetStringField(TEXT("class_path")) : TEXT("none"));
+					ValueObject->SetStringField(TEXT("data_type_ref"), FSmartObjectSlotDefinition::StaticStruct()->GetPathName());
 					FUeAgentCanonicalValuePtr Value;
-					if (!TryCanonicalObject(
-							ValueObject, Resources, Value, OutError))
-					{
-						return false;
-					}
-					OutValues.Add({
-						TEXT("item:slot:") + SlotGuid, Value, true});
+					if (!TryCanonicalObject(ValueObject, Resources, Value, OutError)) return false;
+					OutValues.Add({TEXT("item:slot:") + Pair.Key, Value, true});
 				}
 			}
 			else if (IsPcgComponentMutationProfile(Profile))
@@ -1450,15 +1549,46 @@ namespace UE::UAI::Composition::GraphCompound
 				UPCGGraphInterface* const BoundGraph = Binding
 					? Binding->Graph.Get() : nullptr;
 				FString PublicPolicy;
-				if (!Component || !Owner || !World
-					|| Owner->GetWorld() != World
-					|| !GEngine || !GEngine->GetWorldContextFromWorld(World)
-					|| !TryPublicPcgGenerationPolicy(
-						Component->GenerationTrigger, PublicPolicy))
+				if (!Component)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_component_world_invalid"),
-						TargetRef);
+					OutError = NativeTypeFailure(TEXT("graph_compound_pcg_component_world_invalid"),
+						TEXT("The native target is not a PCG component."),
+						TargetRef, TEXT("target.class"), Target, UPCGComponent::StaticClass());
+					return false;
+				}
+				if (!Owner || !World)
+				{
+					OutError = NativeFailure(TEXT("graph_compound_pcg_component_world_invalid"),
+						!Owner ? TEXT("The PCG component has no owning actor.") : TEXT("The PCG component has no world."),
+						TargetRef, !Owner ? TEXT("owner.present") : TEXT("world.present"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return false;
+				}
+				if (Owner->GetWorld() != World)
+				{
+					OutError = NativeFailure(TEXT("graph_compound_pcg_component_world_invalid"),
+						TEXT("The PCG component and its owner belong to different worlds."),
+						TargetRef, TEXT("owner.world"),
+						MakeShared<FJsonValueString>(Owner->GetWorld() ? Owner->GetWorld()->GetPathName() : FString()),
+						MakeShared<FJsonValueString>(World->GetPathName()));
+					return false;
+				}
+				if (!GEngine || !GEngine->GetWorldContextFromWorld(World))
+				{
+					OutError = NativeFailure(TEXT("graph_compound_pcg_component_world_invalid"),
+						!GEngine ? TEXT("The engine is unavailable for PCG world lookup.")
+							: TEXT("The PCG component world has no registered world context."),
+						TargetRef, !GEngine ? TEXT("engine.present") : TEXT("world.context_present"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+					return false;
+				}
+				if (!TryPublicPcgGenerationPolicy(Component->GenerationTrigger, PublicPolicy))
+				{
+					OutError = NativeFailure(TEXT("graph_compound_pcg_component_world_invalid"),
+						TEXT("The PCG component generation trigger has no supported public policy."),
+						TargetRef, TEXT("generation_trigger"),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Component->GenerationTrigger)),
+						MakeShared<FJsonValueString>(TEXT("supported PCG generation policy")));
 					return false;
 				}
 				const TSharedRef<FJsonObject> BindingValue =
@@ -1486,18 +1616,15 @@ namespace UE::UAI::Composition::GraphCompound
 				UPCGDataAsset* const DataAsset = Cast<UPCGDataAsset>(Target);
 				FString SemanticId;
 				FUeAgentCanonicalValuePtr Value;
-				if (!DataAsset
-					|| !TryCapturePcgDataAssetValue(
-						*DataAsset, Resources, SemanticId, Value, OutError))
+				if (!DataAsset)
 				{
-					if (OutError.Code.IsEmpty())
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_ai_target_invalid"),
-							TargetRef);
-					}
+					OutError = NativeTypeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+						TEXT("The native target is not a PCG data asset."),
+						TargetRef, TEXT("target.class"), Target, UPCGDataAsset::StaticClass());
 					return false;
 				}
+				if (!TryCapturePcgDataAssetValue(*DataAsset, Resources, SemanticId, Value, OutError))
+					return false;
 				OutValues.Add({MoveTemp(SemanticId), Value, true});
 			}
 			else if (Profile.GetCapabilityId() == TEXT("pcg.graph.apply")
@@ -1507,8 +1634,9 @@ namespace UE::UAI::Composition::GraphCompound
 				UPCGGraph* const Graph = Cast<UPCGGraph>(Target);
 				if (!Graph)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_target_invalid"), TargetRef);
+					OutError = NativeTypeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+						TEXT("The native target is not an instance of the required asset class."),
+						TargetRef, TEXT("target.class"), Target, UPCGGraph::StaticClass());
 					return false;
 				}
 				if (Profile.GetCapabilityId() == TEXT("pcg.graph.apply"))
@@ -1558,10 +1686,21 @@ namespace UE::UAI::Composition::GraphCompound
 						const TValueOrError<double, EPropertyBagResult> Readback =
 							Bag->GetValueDouble(Desc.Name);
 						FUeAgentCanonicalValuePtr Value;
-						if (!Readback.IsValid()
-							|| !TryMakeCanonicalDouble(
-								Readback.GetValue(), Resources, Value, OutError))
+						if (!Readback.IsValid())
 						{
+							OutError = NativeFailure(TEXT("graph_compound_pcg_parameter_readback_failed"),
+								TEXT("The native double parameter could not be read from the property bag."),
+								TargetRef, Desc.Name.ToString(),
+								MakeShared<FJsonValueNumber>(static_cast<int32>(Readback.GetError())),
+								MakeShared<FJsonValueString>(TEXT("successful double readback")));
+							OutError.SubjectId = PcgParameterSemanticId(Desc);
+							return false;
+						}
+						if (!TryMakeCanonicalDouble(Readback.GetValue(), Resources, Value, OutError))
+						{
+							if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+							OutError.CandidateName = Desc.Name.ToString();
+							OutError.SubjectId = PcgParameterSemanticId(Desc);
 							return false;
 						}
 						OutValues.Add({PcgParameterSemanticId(Desc), Value, true});
@@ -1574,8 +1713,14 @@ namespace UE::UAI::Composition::GraphCompound
 				UPCGGraphInstance* const Instance = Cast<UPCGGraphInstance>(Target);
 				if (!Instance || !Instance->Graph)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_target_invalid"), TargetRef);
+					OutError = !Instance
+						? NativeTypeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+							TEXT("The native target is not a PCG graph instance."),
+							TargetRef, TEXT("target.class"), Target, UPCGGraphInstance::StaticClass())
+						: NativeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+							TEXT("The PCG graph instance has no bound graph."),
+							TargetRef, TEXT("graph.present"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 					return false;
 				}
 				FUeAgentCanonicalValuePtr BindingValue;
@@ -1584,9 +1729,7 @@ namespace UE::UAI::Composition::GraphCompound
 						Instance->Graph->GetPathName(), Resources,
 						BindingValue, StateError))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_graph_binding_invalid"),
-						TargetRef, StateError.Detail);
+					SetError(OutError, StateError, TargetRef);
 					return false;
 				}
 				OutValues.Add({TEXT("binding:graph_source"), BindingValue, true});
@@ -1609,10 +1752,21 @@ namespace UE::UAI::Composition::GraphCompound
 						const TValueOrError<double, EPropertyBagResult> Readback =
 							Bag->GetValueDouble(Desc.Name);
 						FUeAgentCanonicalValuePtr Value;
-						if (!Readback.IsValid()
-							|| !TryMakeCanonicalDouble(
-								Readback.GetValue(), Resources, Value, OutError))
+						if (!Readback.IsValid())
 						{
+							OutError = NativeFailure(TEXT("graph_compound_pcg_parameter_readback_failed"),
+								TEXT("The native double parameter could not be read from the property bag."),
+								TargetRef, Desc.Name.ToString(),
+								MakeShared<FJsonValueNumber>(static_cast<int32>(Readback.GetError())),
+								MakeShared<FJsonValueString>(TEXT("successful double readback")));
+							OutError.SubjectId = PcgParameterSemanticId(Desc);
+							return false;
+						}
+						if (!TryMakeCanonicalDouble(Readback.GetValue(), Resources, Value, OutError))
+						{
+							if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
+							OutError.CandidateName = Desc.Name.ToString();
+							OutError.SubjectId = PcgParameterSemanticId(Desc);
 							return false;
 						}
 						const FProperty* const Property = BagStruct
@@ -1627,9 +1781,11 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			else
 			{
-				SetError(OutError,
-					TEXT("graph_compound_production_binding_unimplemented"),
-					Profile.GetCapabilityId());
+				OutError = NativeFailure(TEXT("graph_compound_production_binding_unimplemented"),
+					TEXT("No native PCG/AI mutation capture supports this capability."),
+					TargetRef, TEXT("capability_id"),
+					MakeShared<FJsonValueString>(Profile.GetCapabilityId()),
+					MakeShared<FJsonValueString>(TEXT("supported PCG/AI mutation capability")));
 				return false;
 			}
 
@@ -1638,14 +1794,12 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				TSharedPtr<FJsonValue> JsonValue;
 				FString Canonical;
-				FString JsonError;
+				UE::UAI::Contract::FDiagnostic JsonError;
 				if (!CanonicalJson::TryToJsonValue(
 						*Captured.Value, JsonValue, JsonError)
 					|| !Json::TryCanonicalize(JsonValue, Canonical, JsonError))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_state_value_invalid"),
-						Captured.SemanticId, JsonError);
+					SetError(OutError, JsonError, Captured.SemanticId);
 					return false;
 				}
 				RevisionLines.Add(Captured.SemanticId + TEXT("|") + Canonical);
@@ -1663,6 +1817,7 @@ namespace UE::UAI::Composition::GraphCompound
 			FUeAgentCanonicalSnapshotPtr& OutSnapshot,
 			FGraphCompoundRuntimeError& OutError)
 		{
+			ON_SCOPE_EXIT { MarkGraphCompoundNativeDiagnostic(OutError); };
 			TArray<FCapturedMutationValue> Values;
 			FString Generation;
 			if (!TryCaptureMutationValues(
@@ -1707,9 +1862,9 @@ namespace UE::UAI::Composition::GraphCompound
 						: EUeAgentOverrideState::Inherited);
 				if (!Entry.IsValid())
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_state_entry_invalid"),
-						Captured.SemanticId);
+					OutError = Entry.GetValidationDiagnostic();
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Captured.SemanticId;
 					return false;
 				}
 				Entries.Add(MoveTemp(Entry));
@@ -1736,11 +1891,19 @@ namespace UE::UAI::Composition::GraphCompound
 							: TEXT("reloadable-native-state:")) + Generation),
 					MoveTemp(Entries), Resources, OutSnapshot, StateError))
 			{
-				SetError(OutError, StateError.Code,
-					Request.GetTargetRef(), StateError.Detail);
+				OutError = StateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
 				return false;
 			}
-			return OutSnapshot.IsValid();
+			if (!OutSnapshot.IsValid())
+			{
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_snapshot_invalid"),
+					TEXT("PCG/AI mutation snapshot construction returned without a snapshot."),
+					Request.GetTargetRef(), TEXT("snapshot.present"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+				return false;
+			}
+			return true;
 		}
 
 		bool TryRollbackCreate(
@@ -1750,20 +1913,11 @@ namespace UE::UAI::Composition::GraphCompound
 			FPackageAssetDurableBackend& Backend,
 			const int64 FencingToken,
 			FUeAgentResourceTracker& Resources,
-			FString& OutDetail)
+			UE::UAI::Contract::FDiagnostic& OutDetail)
 		{
-			FString UnloadDetail;
-			const bool bMemoryClean = TryUnloadTarget(
-				TargetRef, bNotifyAssetRegistry, UnloadDetail);
-			FDurableReceipt RollbackReceipt;
-			FAssetDurableError Error;
-			const bool bDurableClean = TryRollbackAssetDurability(
-				Session, Backend, FencingToken, bMemoryClean,
-				Resources, RollbackReceipt, Error);
-			OutDetail = !UnloadDetail.IsEmpty()
-				? UnloadDetail
-				: Error.GetCode() + TEXT(":") + Error.GetDetail();
-			return bMemoryClean && bDurableClean;
+			return UeAgentAuthoringOperationApply::TryRestorePackageDurability(
+				TargetRef, bNotifyAssetRegistry, Session, Backend, FencingToken,
+				Resources, OutDetail);
 		}
 
 		enum class EPcgAiSchemaMutationKind : uint8
@@ -1796,6 +1950,8 @@ namespace UE::UAI::Composition::GraphCompound
 				EPcgAiSchemaMutationKind::BehaviorRoot;
 			FString SemanticId;
 			FUeAgentCanonicalValuePtr Value;
+			FString InputPointer;
+			FString TargetPath;
 			TArray<FString> Dependencies;
 			FGuid NodeGuid;
 			UClass* PayloadClass = nullptr;
@@ -1820,6 +1976,7 @@ namespace UE::UAI::Composition::GraphCompound
 			UClass* CreatedNodeClass = nullptr;
 			FString CandidateName;
 			FString CandidateId;
+			TMap<FString, FString> CandidateSelect;
 			float PositionX = 0.0f;
 			float PositionY = 0.0f;
 			UPCGGraphInterface* GraphInterface = nullptr;
@@ -1883,123 +2040,6 @@ namespace UE::UAI::Composition::GraphCompound
 #endif
 		}
 
-		bool TryInitializeStateTreeBlueprintNode(
-			FStateTreeEditorNode& OutNode,
-			UObject& Outer,
-			UClass* NodeClass,
-			UScriptStruct* NodeStruct,
-			const FString& Placement,
-			FGraphCompoundRuntimeError& OutError)
-		{
-			OutNode.Reset();
-			if (NodeStruct)
-			{
-				const UScriptStruct* RequiredBase = nullptr;
-				if (Placement == TEXT("state_task")
-					|| Placement == TEXT("global_task"))
-				{
-					RequiredBase = FStateTreeTaskBase::StaticStruct();
-				}
-				else if (Placement == TEXT("state_condition"))
-				{
-					RequiredBase = FStateTreeConditionBase::StaticStruct();
-				}
-				else if (Placement == TEXT("evaluator"))
-				{
-					RequiredBase = FStateTreeEvaluatorBase::StaticStruct();
-				}
-				if (!RequiredBase || !NodeStruct->IsChildOf(RequiredBase))
-				{
-					SetError(OutError,
-						TEXT("graph_compound_state_tree_node_struct_invalid"),
-						NodeStruct->GetPathName(), Placement);
-					return false;
-				}
-				OutNode.Node.InitializeAs(NodeStruct);
-				const FStateTreeNodeBase* NodeBase =
-					reinterpret_cast<const FStateTreeNodeBase*>(
-						OutNode.Node.GetMemory());
-				const UScriptStruct* InstanceType = NodeBase
-					? Cast<UScriptStruct>(NodeBase->GetInstanceDataType())
-					: nullptr;
-				if (InstanceType)
-				{
-					OutNode.Instance.InitializeAs(InstanceType);
-				}
-				return true;
-			}
-			if (!NodeClass)
-			{
-				SetError(OutError,
-					TEXT("graph_compound_state_tree_node_type_invalid"),
-					Placement);
-				return false;
-			}
-			if (Placement == TEXT("state_task")
-				|| Placement == TEXT("global_task"))
-			{
-				if (!NodeClass->IsChildOf(
-					UStateTreeTaskBlueprintBase::StaticClass()))
-				{
-					SetError(OutError,
-						TEXT("graph_compound_state_tree_node_class_invalid"),
-						NodeClass->GetPathName(), Placement);
-					return false;
-				}
-				OutNode.Node.InitializeAs<FStateTreeBlueprintTaskWrapper>();
-				OutNode.Node.GetMutable<FStateTreeBlueprintTaskWrapper>().TaskClass =
-					NodeClass;
-				OutNode.InstanceObject = NewObject<UStateTreeTaskBlueprintBase>(
-					&Outer, NodeClass, NAME_None, RF_Transactional);
-			}
-			else if (Placement == TEXT("state_condition"))
-			{
-				if (!NodeClass->IsChildOf(
-					UStateTreeConditionBlueprintBase::StaticClass()))
-				{
-					SetError(OutError,
-						TEXT("graph_compound_state_tree_node_class_invalid"),
-						NodeClass->GetPathName(), Placement);
-					return false;
-				}
-				OutNode.Node.InitializeAs<FStateTreeBlueprintConditionWrapper>();
-				OutNode.Node.GetMutable<FStateTreeBlueprintConditionWrapper>().ConditionClass =
-					NodeClass;
-				OutNode.InstanceObject = NewObject<UStateTreeConditionBlueprintBase>(
-					&Outer, NodeClass, NAME_None, RF_Transactional);
-			}
-			else if (Placement == TEXT("evaluator"))
-			{
-				if (!NodeClass->IsChildOf(
-					UStateTreeEvaluatorBlueprintBase::StaticClass()))
-				{
-					SetError(OutError,
-						TEXT("graph_compound_state_tree_node_class_invalid"),
-						NodeClass->GetPathName(), Placement);
-					return false;
-				}
-				OutNode.Node.InitializeAs<FStateTreeBlueprintEvaluatorWrapper>();
-				OutNode.Node.GetMutable<FStateTreeBlueprintEvaluatorWrapper>().EvaluatorClass =
-					NodeClass;
-				OutNode.InstanceObject = NewObject<UStateTreeEvaluatorBlueprintBase>(
-					&Outer, NodeClass, NAME_None, RF_Transactional);
-			}
-			else
-			{
-				SetError(OutError,
-					TEXT("graph_compound_state_tree_node_placement_invalid"),
-					Placement);
-				return false;
-			}
-			if (!OutNode.InstanceObject)
-			{
-				SetError(OutError,
-					TEXT("graph_compound_state_tree_node_create_failed"),
-					NodeClass->GetPathName(), Placement);
-				return false;
-			}
-			return true;
-		}
 
 		bool TryParseSchemaMutationOperations(
 			const FPcgAnimationGraphRouteProfile& Profile,
@@ -2010,6 +2050,28 @@ namespace UE::UAI::Composition::GraphCompound
 			FGraphCompoundRuntimeError& OutError)
 		{
 			OutOperations.Reset();
+			TOptional<int32> CurrentEditIndex;
+			auto FailPlan = [&](const FString& Reason, const FString& Field,
+				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+				const FString& SemanticId = FString())
+			{
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_plan_invalid"),
+					Reason, Request.GetTargetRef(), Field, MoveTemp(Actual), MoveTemp(Expected));
+				OutError.SubjectId = SemanticId;
+				OutError.OperationIndex = CurrentEditIndex;
+				return false;
+			};
+			auto IntentValue = [](const EChangeIntent Intent) -> TSharedPtr<FJsonValue>
+			{
+				switch (Intent)
+				{
+				case EChangeIntent::Create: return MakeShared<FJsonValueString>(TEXT("create"));
+				case EChangeIntent::Update: return MakeShared<FJsonValueString>(TEXT("update"));
+				case EChangeIntent::Replace: return MakeShared<FJsonValueString>(TEXT("replace"));
+				case EChangeIntent::Delete: return MakeShared<FJsonValueString>(TEXT("delete"));
+				default: return MakeShared<FJsonValueNumber>(static_cast<int32>(Intent));
+				}
+			};
 			const TArray<FGraphCompoundCanonicalEdit>& Edits =
 				Request.GetPayload().GetEdits();
 			const TArray<FPlannedChange>& Changes =
@@ -2019,19 +2081,40 @@ namespace UE::UAI::Composition::GraphCompound
 					== TEXT("pcg.graph_instance.apply");
 			const bool bPcgComponentProfile =
 				IsPcgComponentMutationProfile(Profile);
-			if (Plan->GetDescriptorIdentity()
-					!= Profile.GetExecutionContract().GetDescriptorIdentity()
-				|| Edits.IsEmpty()
-				|| (!bPcgGraphInstanceProfile
-					&& Edits.Num() != Changes.Num())
-				|| (bPcgGraphInstanceProfile
-					&& (Changes.IsEmpty() || Changes.Num() > Edits.Num())))
+			const FUeAgentDescriptorIdentity& ActualDescriptor = Plan->GetDescriptorIdentity();
+			const FUeAgentDescriptorIdentity& ExpectedDescriptor =
+				Profile.GetExecutionContract().GetDescriptorIdentity();
+			if (ActualDescriptor != ExpectedDescriptor)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_plan_invalid"),
-					Request.GetTargetRef());
+				if (ActualDescriptor.GetDescriptorId() != ExpectedDescriptor.GetDescriptorId())
+					return FailPlan(TEXT("The plan descriptor id does not match the route descriptor."),
+						TEXT("descriptor_identity.descriptor_id"),
+						MakeShared<FJsonValueString>(ActualDescriptor.GetDescriptorId()),
+						MakeShared<FJsonValueString>(ExpectedDescriptor.GetDescriptorId()));
+				if (ActualDescriptor.GetVersion() != ExpectedDescriptor.GetVersion())
+					return FailPlan(TEXT("The plan descriptor version does not match the route descriptor."),
+						TEXT("descriptor_identity.version"),
+						MakeShared<FJsonValueNumber>(ActualDescriptor.GetVersion()),
+						MakeShared<FJsonValueNumber>(ExpectedDescriptor.GetVersion()));
+				FailPlan(TEXT("The plan descriptor hash does not match the route descriptor."),
+					TEXT("descriptor_identity.descriptor_hash"), nullptr, nullptr);
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(ActualDescriptor.GetDescriptorHash());
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedDescriptor.GetDescriptorHash());
 				return false;
 			}
+			if (Edits.IsEmpty())
+				return FailPlan(TEXT("The mutation request contains no edits."),
+					TEXT("edits.count"), MakeShared<FJsonValueNumber>(0),
+					MakeShared<FJsonValueString>(TEXT("at least one edit")));
+			if (!bPcgGraphInstanceProfile && Edits.Num() != Changes.Num())
+				return FailPlan(TEXT("The planned change count differs from the requested edit count."),
+					TEXT("changes.count"), MakeShared<FJsonValueNumber>(Changes.Num()),
+					MakeShared<FJsonValueNumber>(Edits.Num()));
+			if (bPcgGraphInstanceProfile && (Changes.IsEmpty() || Changes.Num() > Edits.Num()))
+				return FailPlan(TEXT("The graph instance plan must contain between one change and the requested edit count."),
+					TEXT("changes.count"), MakeShared<FJsonValueNumber>(Changes.Num()),
+					MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+						MakeShared<FJsonValueNumber>(1), MakeShared<FJsonValueNumber>(Edits.Num())}));
 
 			TMap<FString, const FPlannedChange*> PlannedById;
 			TSet<FString> ProposedNodeIds;
@@ -2040,20 +2123,23 @@ namespace UE::UAI::Composition::GraphCompound
 			TMap<FString, FString> ProposedStateParents;
 			for (const FPlannedChange& Change : Changes)
 			{
-				if (Change.GetIdentity().GetOwnerId() != Request.GetTargetRef()
-					|| PlannedById.Contains(
-						Change.GetIdentity().GetSemanticId()))
-				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_plan_invalid"),
-						Change.GetIdentity().GetSemanticId());
-					return false;
-				}
+				const FString& ChangeId = Change.GetIdentity().GetSemanticId();
+				if (Change.GetIdentity().GetOwnerId() != Request.GetTargetRef())
+					return FailPlan(TEXT("The planned change belongs to a different target."),
+						FString::Printf(TEXT("changes[%d].identity.owner_id"), PlannedById.Num()),
+						MakeShared<FJsonValueString>(Change.GetIdentity().GetOwnerId()),
+						MakeShared<FJsonValueString>(Request.GetTargetRef()), ChangeId);
+				if (PlannedById.Contains(ChangeId))
+					return FailPlan(TEXT("The plan contains a duplicate change semantic id."),
+						FString::Printf(TEXT("changes[%d].identity.semantic_id"), PlannedById.Num()),
+						MakeShared<FJsonValueString>(ChangeId),
+						MakeShared<FJsonValueString>(TEXT("unique semantic id")), ChangeId);
 				PlannedById.Add(
 					Change.GetIdentity().GetSemanticId(), &Change);
 			}
 			for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 			{
+				ON_SCOPE_EXIT { Request.GetPayload().LocateDiagnostic(OutError, Edit.GetIdentity().GetSemanticId()); };
 				if (Edit.GetElementKind() == EGraphCompoundElementKind::Item)
 				{
 					bool bConnectableNode = true;
@@ -2110,7 +2196,9 @@ namespace UE::UAI::Composition::GraphCompound
 
 			for (const FGraphCompoundCanonicalEdit& Edit : Edits)
 			{
+				ON_SCOPE_EXIT { Request.GetPayload().LocateDiagnostic(OutError, Edit.GetIdentity().GetSemanticId()); };
 				const FString SemanticId = Edit.GetIdentity().GetSemanticId();
+				CurrentEditIndex = static_cast<int32>(&Edit - Edits.GetData());
 				const FPlannedChange* const* const Planned =
 					PlannedById.Find(SemanticId);
 				const bool bExactPcgBindingNoOp =
@@ -2136,7 +2224,8 @@ namespace UE::UAI::Composition::GraphCompound
 						== TEXT("pcg.data_asset.apply");
 				const EChangeIntent RequiredIntent = bPcgDataAssetProfile
 					? EChangeIntent::Replace
-					: (bPcgUpdateProfile
+					: (bPcgUpdateProfile || (Profile.GetCapabilityId() == TEXT("ai.state_tree.hierarchy.apply")
+						&& Edit.GetElementKind() == EGraphCompoundElementKind::Order)
 						? EChangeIntent::Update : EChangeIntent::Create);
 				const bool bBehaviorBindingEdit =
 					Profile.GetCapabilityId()
@@ -2148,42 +2237,84 @@ namespace UE::UAI::Composition::GraphCompound
 						|| Edit.GetIntent() == EChangeIntent::Update
 						|| Edit.GetIntent() == EChangeIntent::Replace)
 					: Edit.GetIntent() == RequiredIntent;
-				if ((!Planned && !bExactPcgBindingNoOp)
-					|| (Planned && (!*Planned
-						|| (*Planned)->GetIntent() != Edit.GetIntent()))
-					|| !bIntentAllowed
-					|| Edit.GetIdentity().GetOwnerId() != Request.GetTargetRef()
-					|| !Edit.GetProposedAfter().IsValid())
+				if (!Planned && !bExactPcgBindingNoOp)
+					return FailPlan(TEXT("The requested edit has no corresponding planned change."),
+						TEXT("planned_change.present"), MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true), SemanticId);
+				if (Planned && !*Planned)
+					return FailPlan(TEXT("The plan index contains a null change."),
+						TEXT("planned_change.present"), MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true), SemanticId);
+				if (Planned && (*Planned)->GetIntent() != Edit.GetIntent())
+					return FailPlan(TEXT("The planned change intent differs from the requested edit intent."),
+						TEXT("planned_change.intent"), IntentValue((*Planned)->GetIntent()),
+						IntentValue(Edit.GetIntent()), SemanticId);
+				if (!bIntentAllowed)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_plan_invalid"), SemanticId);
-					return false;
+					const TSharedPtr<FJsonValue> ExpectedIntent = bBehaviorBindingEdit
+						? TSharedPtr<FJsonValue>(MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+							IntentValue(EChangeIntent::Create), IntentValue(EChangeIntent::Update),
+							IntentValue(EChangeIntent::Replace)}))
+						: IntentValue(RequiredIntent);
+					return FailPlan(TEXT("The edit intent is not supported for this mutation kind."),
+						TEXT("edit.intent"), IntentValue(Edit.GetIntent()), ExpectedIntent, SemanticId);
 				}
+				if (Edit.GetIdentity().GetOwnerId() != Request.GetTargetRef())
+					return FailPlan(TEXT("The edit belongs to a different target."),
+						TEXT("edit.identity.owner_id"),
+						MakeShared<FJsonValueString>(Edit.GetIdentity().GetOwnerId()),
+						MakeShared<FJsonValueString>(Request.GetTargetRef()), SemanticId);
+				if (!Edit.GetProposedAfter().IsValid())
+					return FailPlan(TEXT("The mutation edit has no proposed value."),
+						TEXT("edit.proposed_value_present"), MakeShared<FJsonValueBoolean>(false),
+						MakeShared<FJsonValueBoolean>(true), SemanticId);
 
 				FPcgAiSchemaMutationOperation Operation;
 				Operation.SemanticId = SemanticId;
 				Operation.Value = Edit.GetProposedAfter();
+				Operation.TargetPath = Request.GetTargetRef();
+				if (const FString* Pointer = Request.GetPayload().FindInputPointer(SemanticId)) Operation.InputPointer = *Pointer;
 				for (const FUeAgentCanonicalIdentity& Dependency
 					: Edit.GetDependencies())
 				{
 					if (Dependency.GetOwnerId() != Request.GetTargetRef())
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_ai_dependency_invalid"),
-							Dependency.GetSemanticId());
+						OutError = NativeFailure(TEXT("graph_compound_pcg_ai_dependency_invalid"),
+							TEXT("The edit dependency belongs to a different target."),
+							Request.GetTargetRef(),
+							FString::Printf(TEXT("dependencies[%d].identity.owner_id"), Operation.Dependencies.Num()),
+							MakeShared<FJsonValueString>(Dependency.GetOwnerId()),
+							MakeShared<FJsonValueString>(Request.GetTargetRef()));
+						OutError.SubjectId = SemanticId;
+						OutError.OperationIndex = CurrentEditIndex;
+						OutError.CandidateName = Dependency.GetSemanticId();
 						return false;
 					}
 					Operation.Dependencies.Add(Dependency.GetSemanticId());
 				}
 
+				auto ValueInput = [&](const TCHAR* Code)
+				{
+					return FRequiredCanonicalInput(Code, Request.GetTargetRef(), SemanticId,
+						Operation.InputPointer, bPcgComponentProfile, OutError, CurrentEditIndex);
+				};
+				auto FailOperation = [&](const TCHAR* Code, const FString& Reason,
+					const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+				{
+					OutError = NativeFailure(Code, Reason, Request.GetTargetRef(), Field, MoveTemp(Actual), MoveTemp(Expected));
+					OutError.SubjectId = SemanticId;
+					OutError.OperationIndex = CurrentEditIndex;
+					return false;
+				};
 				if (Profile.GetCapabilityId()
 					== TEXT("ai.behavior_tree.graph.apply"))
 				{
 					if (!Cast<UBehaviorTree>(&Target))
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_ai_target_invalid"),
-							Request.GetTargetRef());
+						OutError = NativeTypeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+							TEXT("The native mutation target is not a BehaviorTree."),
+							Request.GetTargetRef(), TEXT("target.class"), &Target, UBehaviorTree::StaticClass());
+						OutError.OperationIndex = CurrentEditIndex;
 						return false;
 					}
 					const FUeAgentCanonicalValue& Value = *Operation.Value;
@@ -2193,19 +2324,18 @@ namespace UE::UAI::Composition::GraphCompound
 						FString CarrierType;
 						if (SemanticId == TEXT("node:root"))
 						{
-							if (!Operation.Dependencies.IsEmpty()
-								|| !HasExactObjectFields(
-									Value, {TEXT("carrier_type_ref")})
-								|| !TryCanonicalStringField(Value,
-									TEXT("carrier_type_ref"), CarrierType)
-								|| CarrierType
-									!= TEXT("/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Root"))
-							{
-								SetError(OutError,
-									TEXT("graph_compound_behavior_tree_root_invalid"),
-									SemanticId);
-								return false;
-							}
+							const auto Input = ValueInput(TEXT("graph_compound_behavior_tree_root_invalid"));
+							if (!Operation.Dependencies.IsEmpty())
+								return FailOperation(TEXT("graph_compound_behavior_tree_root_invalid"),
+									TEXT("The BehaviorTree root must not declare dependencies."),
+									TEXT("dependencies.count"), MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()),
+									MakeShared<FJsonValueNumber>(0));
+							if (!Input.RequireFields(Value, {TEXT("carrier_type_ref")})
+								|| !Input.ReadString(Value, TEXT("carrier_type_ref"), CarrierType)) return false;
+							if (CarrierType != TEXT("/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Root"))
+								return Input.Fail(TEXT("The BehaviorTree root requires the root graph-node carrier class."),
+									TEXT("/carrier_type_ref"), MakeShared<FJsonValueString>(CarrierType),
+									MakeShared<FJsonValueString>(TEXT("/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Root")));
 							Operation.Kind =
 								EPcgAiSchemaMutationKind::BehaviorRoot;
 						}
@@ -2223,38 +2353,36 @@ namespace UE::UAI::Composition::GraphCompound
 								&& TryCanonicalStringField(
 									*Candidate, TEXT("id"), CandidateId);
 							const bool bNativeSelector = Candidate != nullptr;
+							const auto Input = ValueInput(TEXT("graph_compound_behavior_tree_node_invalid"));
 							if (!SemanticId.StartsWith(TEXT("node:"))
-								|| !FGuid::Parse(SemanticId.RightChop(5),
-									Operation.NodeGuid)
+								|| !FGuid::Parse(SemanticId.RightChop(5), Operation.NodeGuid)
 								|| !Operation.NodeGuid.IsValid()
-								|| SemanticId != TEXT("node:")
-									+ Operation.NodeGuid.ToString(
-										EGuidFormats::DigitsWithHyphensLower)
-								|| (bNativeSelector
-									? (!HasOnlyObjectFields(
-										Value,
-										{TEXT("candidate"),
-											TEXT("carrier_type_ref"),
-											TEXT("payload_type_ref"),
-											TEXT("position")})
-										|| !HasOnlyObjectFields(
-											*Candidate,
-											{TEXT("name"), TEXT("id")})
-										|| (!bHasCandidateName && !bHasCandidateId))
-									: !HasExactObjectFields(
-										Value,
-										{TEXT("carrier_type_ref"),
-											TEXT("payload_type_ref")}))
-								|| !TryCanonicalStringField(Value,
-									TEXT("carrier_type_ref"), CarrierType)
-								|| !TryCanonicalStringField(Value,
-									TEXT("payload_type_ref"), PayloadType))
+								|| SemanticId != TEXT("node:") + Operation.NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower))
+								return FailOperation(TEXT("graph_compound_behavior_tree_node_invalid"),
+									TEXT("The BehaviorTree node identity must contain a valid canonical GUID."),
+									TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+									MakeShared<FJsonValueString>(TEXT("node:<lowercase hyphenated GUID>")));
+							if (bNativeSelector)
 							{
-								SetError(OutError,
-									TEXT("graph_compound_behavior_tree_node_invalid"),
-									SemanticId);
-								return false;
+								if (!Input.RequireFields(Value,
+										{TEXT("candidate"), TEXT("carrier_type_ref"), TEXT("payload_type_ref"), TEXT("position")}, false)
+									|| !Input.At(TEXT("/candidate")).RequireFields(*Candidate,
+										{TEXT("name"), TEXT("id"), TEXT("select")}, false)) return false;
+								if (!bHasCandidateName && !bHasCandidateId)
+								{
+									const TSharedRef<FJsonObject> Actual = MakeShared<FJsonObject>();
+									if (const auto* Name = FindObjectValue(*Candidate, TEXT("name")))
+										Actual->SetField(TEXT("name"), CanonicalInputFact(Name));
+									if (const auto* Id = FindObjectValue(*Candidate, TEXT("id")))
+										Actual->SetField(TEXT("id"), CanonicalInputFact(Id));
+									return Input.Fail(TEXT("The candidate requires a non-empty string name or id."),
+										TEXT("/candidate"), MakeShared<FJsonValueObject>(Actual),
+										MakeShared<FJsonValueString>(TEXT("at least one non-empty string: name or id")));
+								}
 							}
+							else if (!Input.RequireFields(Value, {TEXT("carrier_type_ref"), TEXT("payload_type_ref")})) return false;
+							if (!Input.ReadString(Value, TEXT("carrier_type_ref"), CarrierType)
+								|| !Input.ReadString(Value, TEXT("payload_type_ref"), PayloadType)) return false;
 							Operation.PayloadClass =
 								LoadObject<UClass>(nullptr, *PayloadType);
 							UClass* RequiredBase = nullptr;
@@ -2286,29 +2414,75 @@ namespace UE::UAI::Composition::GraphCompound
 								Operation.Kind =
 									EPcgAiSchemaMutationKind::BehaviorDecorator;
 							}
-							if (!RequiredBase
-								|| !Operation.PayloadClass
-								|| !Operation.PayloadClass->IsChildOf(RequiredBase)
-								|| Operation.PayloadClass->HasAnyClassFlags(CLASS_Abstract))
-							{
-								SetError(OutError,
-									TEXT("graph_compound_behavior_tree_payload_invalid"),
-									PayloadType);
-								return false;
-							}
+							const auto PayloadInput = ValueInput(TEXT("graph_compound_behavior_tree_payload_invalid"));
+							if (!RequiredBase)
+								return PayloadInput.Fail(TEXT("The BehaviorTree carrier class is not supported for a non-root node."),
+									TEXT("/carrier_type_ref"), MakeShared<FJsonValueString>(CarrierType),
+									MakeShared<FJsonValueString>(TEXT("BehaviorTreeGraphNode_Composite, Task, Service or Decorator")));
+							if (!Operation.PayloadClass)
+								return PayloadInput.Fail(TEXT("The BehaviorTree payload class could not be loaded."),
+									TEXT("/payload_type_ref"), MakeShared<FJsonValueString>(PayloadType),
+									MakeShared<FJsonValueString>(TEXT("loadable class derived from ") + RequiredBase->GetPathName()));
+							if (!Operation.PayloadClass->IsChildOf(RequiredBase))
+								return PayloadInput.Fail(TEXT("The BehaviorTree payload class does not derive from the required node base."),
+									TEXT("/payload_type_ref"), ClassPathValue(Operation.PayloadClass), ClassPathValue(RequiredBase));
+							if (Operation.PayloadClass->HasAnyClassFlags(CLASS_Abstract))
+								return PayloadInput.Fail(TEXT("The BehaviorTree payload class is abstract and cannot be instantiated."),
+									TEXT("/payload_type_ref"), ClassPathValue(Operation.PayloadClass),
+									MakeShared<FJsonValueString>(TEXT("non-abstract class derived from ") + RequiredBase->GetPathName()));
 							if (bNativeSelector)
 							{
+								TSharedPtr<FJsonValue> CandidateJson;
+								UE::UAI::Contract::FDiagnostic JsonError;
+								HjsonWorkspace::DomainAuthoring::FDomainHjsonCandidateSelector Selector;
+								HjsonWorkspace::FWorkspaceError SelectorError;
+								if (!CanonicalJson::TryToJsonValue(*Candidate, CandidateJson, JsonError))
+								{
+									SetError(OutError, JsonError, SemanticId);
+									if (!Operation.InputPointer.IsEmpty())
+										UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError,
+											(Operation.InputPointer == TEXT("/") ? FString() : Operation.InputPointer) + TEXT("/candidate"));
+									if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+									return false;
+								}
+								if (!CandidateJson.IsValid() || CandidateJson->Type != EJson::Object)
+								{
+									OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_behavior_tree_candidate_invalid"),
+										TEXT("The Behavior Tree candidate selector must be an object."), TEXT("native_graph"));
+									OutError.ActualValue = MakeShared<FJsonValueString>(!CandidateJson.IsValid() ? TEXT("missing")
+										: CandidateJson->Type == EJson::Array ? TEXT("array") : CandidateJson->Type == EJson::String ? TEXT("string")
+										: CandidateJson->Type == EJson::Number ? TEXT("number") : CandidateJson->Type == EJson::Boolean ? TEXT("boolean") : TEXT("null"));
+									OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("candidate selector object"));
+									OutError.Source.JsonPath = TEXT("/candidate");
+									if (!Operation.InputPointer.IsEmpty())
+										UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError,
+											Operation.InputPointer == TEXT("/") ? FString() : Operation.InputPointer);
+									OutError.TargetPath = Request.GetTargetRef();
+									OutError.SubjectId = SemanticId;
+									return false;
+								}
+								if (!HjsonWorkspace::DomainAuthoring::TryReadCandidateSelector(
+										CandidateJson->AsObject(), TEXT("/candidate"), Selector, SelectorError))
+								{
+									SetError(OutError, SelectorError.GetDiagnostic(), SemanticId);
+									if (!Operation.InputPointer.IsEmpty())
+										UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError,
+											Operation.InputPointer == TEXT("/") ? FString() : Operation.InputPointer);
+									if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+									return false;
+								}
+								Operation.CandidateSelect = MoveTemp(Selector.Select);
 								QueryOwners::AiBehavior::FAiBehaviorCandidate
 									ResolvedCandidate;
 								QueryOwners::AiBehavior::FAiBehaviorCandidateQueryError
 									CandidateError;
-								if (!QueryOwners::AiBehavior::TryResolveAiBehaviorCandidate(
+								const bool bCandidateResolved = QueryOwners::AiBehavior::TryResolveAiBehaviorCandidate(
 										Target,
 										CandidateName,
 										CandidateId,
 										ResolvedCandidate,
-										CandidateError)
-									|| !ResolvedCandidate.bSupported
+										CandidateError, Operation.CandidateSelect);
+								if (!bCandidateResolved || !ResolvedCandidate.bSupported
 									|| ResolvedCandidate.PayloadType != PayloadType
 									|| ((Operation.Kind
 											== EPcgAiSchemaMutationKind::BehaviorComposite)
@@ -2319,43 +2493,62 @@ namespace UE::UAI::Composition::GraphCompound
 										&& ResolvedCandidate.Kind
 											!= TEXT("behavior_task")))
 								{
-									SetError(
-										OutError,
-										CandidateError.Code.IsEmpty()
-											? TEXT("graph_compound_behavior_tree_candidate_invalid")
-											: CandidateError.Code,
-										SemanticId,
-										CandidateError.Detail);
+									if (!bCandidateResolved) OutError = CandidateError;
+									else if (!ResolvedCandidate.bSupported)
+											OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("graph_compound_behavior_tree_candidate_invalid"), ResolvedCandidate.SupportDiagnostic);
+									else
+									{
+										OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_behavior_tree_candidate_invalid"),
+											ResolvedCandidate.PayloadType != PayloadType
+												? TEXT("The resolved AI candidate payload class differs from the graph definition.")
+												: TEXT("The resolved AI candidate kind differs from the requested Behavior Tree node kind."), TEXT("native_graph"));
+										OutError.SourceKind = TEXT("native_result");
+										auto Actual = MakeShared<FJsonObject>();
+										Actual->SetStringField(TEXT("kind"), ResolvedCandidate.Kind);
+										Actual->SetStringField(TEXT("payload_type"), FPackageName::ObjectPathToObjectName(ResolvedCandidate.PayloadType));
+										auto Expected = MakeShared<FJsonObject>();
+										Expected->SetStringField(TEXT("payload_type"), FPackageName::ObjectPathToObjectName(PayloadType));
+										if (Operation.Kind == EPcgAiSchemaMutationKind::BehaviorComposite) Expected->SetStringField(TEXT("kind"), TEXT("behavior_composite"));
+										else if (Operation.Kind == EPcgAiSchemaMutationKind::BehaviorTask) Expected->SetStringField(TEXT("kind"), TEXT("behavior_task"));
+										OutError.ActualValue = MakeShared<FJsonValueObject>(Actual);
+										OutError.ExpectedValue = MakeShared<FJsonValueObject>(Expected);
+										OutError.ActualEvidence = MakeShared<FJsonValueString>(ResolvedCandidate.PayloadType);
+										OutError.ExpectedEvidence = MakeShared<FJsonValueString>(PayloadType);
+									}
+									if (OutError.IsEmpty())
+									{
+										OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_behavior_tree_candidate_invalid"),
+											TEXT("The AI candidate resolver failed without providing a diagnostic."), TEXT("native_graph"));
+										OutError.SourceKind = TEXT("native_result");
+									}
+									if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CandidateName;
+									if (!Operation.InputPointer.IsEmpty())
+										UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError,
+											(Operation.InputPointer == TEXT("/") ? FString() : Operation.InputPointer) + TEXT("/candidate"));
+									if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+									if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SemanticId;
 									return false;
 								}
-								Operation.CandidateName = ResolvedCandidate.Name;
-								Operation.CandidateId = ResolvedCandidate.Id;
+								Operation.CandidateName = CandidateName;
+								Operation.CandidateId = CandidateId;
 								if (FindObjectValue(Value, TEXT("position"))
-									&& !TryCanonicalVector2Field(
-										Value,
-										TEXT("position"),
-										Operation.PositionX,
-										Operation.PositionY))
-								{
-									SetError(
-										OutError,
-										TEXT("graph_compound_behavior_tree_position_invalid"),
-										SemanticId);
-									return false;
-								}
+									&& !ValueInput(TEXT("graph_compound_behavior_tree_position_invalid")).ReadVector2(
+										Value, TEXT("position"), Operation.PositionX, Operation.PositionY)) return false;
 							}
 							const bool bSubNode =
 								Operation.Kind == EPcgAiSchemaMutationKind::BehaviorService
 								|| Operation.Kind == EPcgAiSchemaMutationKind::BehaviorDecorator;
 							if ((!bSubNode && !Operation.Dependencies.IsEmpty())
-								|| (bSubNode && (Operation.Dependencies.Num() != 1
-									|| !ProposedNodeIds.Contains(Operation.Dependencies[0]))))
-							{
-								SetError(OutError,
-									TEXT("graph_compound_behavior_tree_placement_invalid"),
-									SemanticId);
-								return false;
-							}
+								|| (bSubNode && Operation.Dependencies.Num() != 1))
+								return FailOperation(TEXT("graph_compound_behavior_tree_placement_invalid"),
+									TEXT("The BehaviorTree node has an incorrect dependency count for its carrier kind."),
+									TEXT("dependencies.count"), MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()),
+									MakeShared<FJsonValueNumber>(bSubNode ? 1 : 0));
+							if (bSubNode && !ProposedNodeIds.Contains(Operation.Dependencies[0]))
+								return FailOperation(TEXT("graph_compound_behavior_tree_placement_invalid"),
+									TEXT("The BehaviorTree subnode owner is not a proposed connectable node."),
+									TEXT("owner_item_ref"), MakeShared<FJsonValueString>(Operation.Dependencies[0]),
+									MakeShared<FJsonValueString>(TEXT("proposed connectable node")));
 							if (bSubNode)
 							{
 								Operation.OwnerItem = Operation.Dependencies[0];
@@ -2365,16 +2558,20 @@ namespace UE::UAI::Composition::GraphCompound
 					else if (Edit.GetElementKind()
 						== EGraphCompoundElementKind::Binding)
 					{
-						if (SemanticId != TEXT("binding:blackboard_asset")
-							|| !Operation.Dependencies.IsEmpty()
-							|| Value.GetKind() != EUeAgentValueKind::String
-							|| Value.GetText().IsEmpty())
-						{
-							SetError(OutError,
-								TEXT("graph_compound_behavior_tree_blackboard_binding_invalid"),
-								SemanticId);
-							return false;
-						}
+						if (SemanticId != TEXT("binding:blackboard_asset"))
+							return FailOperation(TEXT("graph_compound_behavior_tree_blackboard_binding_invalid"),
+								TEXT("The BehaviorTree binding uses an unsupported semantic id."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+								MakeShared<FJsonValueString>(TEXT("binding:blackboard_asset")));
+						if (!Operation.Dependencies.IsEmpty())
+							return FailOperation(TEXT("graph_compound_behavior_tree_blackboard_binding_invalid"),
+								TEXT("The BehaviorTree blackboard binding must not declare dependencies."),
+								TEXT("dependencies.count"), MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()),
+								MakeShared<FJsonValueNumber>(0));
+						if (Value.GetKind() != EUeAgentValueKind::String || Value.GetText().IsEmpty())
+							return ValueInput(TEXT("graph_compound_behavior_tree_blackboard_binding_invalid")).Fail(
+								TEXT("The BehaviorTree blackboard binding value must be a non-empty string reference."),
+								FString(), CanonicalInputFact(&Value), MakeShared<FJsonValueString>(TEXT("non-empty blackboard reference")));
 						Operation.ObjectRef = Value.GetText();
 						Operation.Kind =
 							EPcgAiSchemaMutationKind::BehaviorBlackboardBinding;
@@ -2382,43 +2579,54 @@ namespace UE::UAI::Composition::GraphCompound
 					else if (Edit.GetElementKind()
 						== EGraphCompoundElementKind::Relation)
 					{
-						if (!HasExactObjectFields(Value,
-								{TEXT("from_item_ref"),
-									TEXT("from_output_index"),
-									TEXT("to_item_ref"),
-									TEXT("to_input_index")})
-							|| !TryCanonicalStringField(Value,
-								TEXT("from_item_ref"), Operation.FromItem)
-							|| !TryCanonicalIntegerField(Value,
-								TEXT("from_output_index"), Operation.FromIndex)
-							|| !TryCanonicalStringField(Value,
-								TEXT("to_item_ref"), Operation.ToItem)
-							|| !TryCanonicalIntegerField(Value,
-								TEXT("to_input_index"), Operation.ToIndex)
-							|| SemanticId != BehaviorTreeRelationSemanticId(
-								Operation.FromItem, Operation.FromIndex,
-								Operation.ToItem, Operation.ToIndex)
-							|| Operation.Dependencies.Num() != 2
-							|| !Operation.Dependencies.Contains(Operation.FromItem)
-							|| !Operation.Dependencies.Contains(Operation.ToItem)
-							|| !ProposedNodeIds.Contains(Operation.FromItem)
-							|| !ProposedNodeIds.Contains(Operation.ToItem))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_behavior_tree_relation_invalid"),
-								SemanticId);
-							return false;
-						}
+						const auto Input = ValueInput(TEXT("graph_compound_behavior_tree_relation_invalid"));
+						if (!Input.RequireFields(Value,
+								{TEXT("from_item_ref"), TEXT("from_output_index"), TEXT("to_item_ref"), TEXT("to_input_index")})
+							|| !Input.ReadString(Value, TEXT("from_item_ref"), Operation.FromItem)
+							|| !Input.ReadInteger(Value, TEXT("from_output_index"), Operation.FromIndex)
+							|| !Input.ReadString(Value, TEXT("to_item_ref"), Operation.ToItem)
+							|| !Input.ReadInteger(Value, TEXT("to_input_index"), Operation.ToIndex)) return false;
+						const FString ExpectedRelationId = BehaviorTreeRelationSemanticId(
+							Operation.FromItem, Operation.FromIndex, Operation.ToItem, Operation.ToIndex);
+						if (SemanticId != ExpectedRelationId)
+							return FailOperation(TEXT("graph_compound_behavior_tree_relation_invalid"),
+								TEXT("The BehaviorTree relation identity differs from its endpoints."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+								MakeShared<FJsonValueString>(ExpectedRelationId));
+						if (Operation.Dependencies.Num() != 2)
+							return FailOperation(TEXT("graph_compound_behavior_tree_relation_invalid"),
+								TEXT("The BehaviorTree relation requires two dependencies."),
+								TEXT("dependencies.count"), MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()),
+								MakeShared<FJsonValueNumber>(2));
+						if (!Operation.Dependencies.Contains(Operation.FromItem))
+							return FailOperation(TEXT("graph_compound_behavior_tree_relation_invalid"),
+								TEXT("The BehaviorTree relation source is missing from its dependencies."),
+								TEXT("dependencies.from_item_ref"), MakeShared<FJsonValueString>(Operation.FromItem),
+								MakeShared<FJsonValueString>(TEXT("declared dependency")));
+						if (!Operation.Dependencies.Contains(Operation.ToItem))
+							return FailOperation(TEXT("graph_compound_behavior_tree_relation_invalid"),
+								TEXT("The BehaviorTree relation destination is missing from its dependencies."),
+								TEXT("dependencies.to_item_ref"), MakeShared<FJsonValueString>(Operation.ToItem),
+								MakeShared<FJsonValueString>(TEXT("declared dependency")));
+						if (!ProposedNodeIds.Contains(Operation.FromItem))
+							return Input.Fail(TEXT("The BehaviorTree relation source is not a proposed connectable node."),
+								TEXT("/from_item_ref"), MakeShared<FJsonValueString>(Operation.FromItem),
+								MakeShared<FJsonValueString>(TEXT("proposed connectable node")));
+						if (!ProposedNodeIds.Contains(Operation.ToItem))
+							return Input.Fail(TEXT("The BehaviorTree relation destination is not a proposed connectable node."),
+								TEXT("/to_item_ref"), MakeShared<FJsonValueString>(Operation.ToItem),
+								MakeShared<FJsonValueString>(TEXT("proposed connectable node")));
 						if (Operation.FromItem == TEXT("node:root")
 							&& ProposedBehaviorNodeCarriers.FindRef(
 								Operation.ToItem)
 								!= TEXT("/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Composite"))
 						{
-							SetError(
-								OutError,
-								TEXT("graph_compound_behavior_tree_root_target_invalid"),
-								Operation.ToItem,
-								TEXT("the BehaviorTree root output requires a composite node"));
+							FailOperation(TEXT("graph_compound_behavior_tree_root_target_invalid"),
+								TEXT("The BehaviorTree root output requires a composite target node."),
+								TEXT("target_node.carrier_type_ref"),
+								MakeShared<FJsonValueString>(ProposedBehaviorNodeCarriers.FindRef(Operation.ToItem)),
+								MakeShared<FJsonValueString>(TEXT("/Script/BehaviorTreeEditor.BehaviorTreeGraphNode_Composite")));
+							OutError.CandidateName = Operation.ToItem;
 							return false;
 						}
 						Operation.Kind =
@@ -2426,10 +2634,10 @@ namespace UE::UAI::Composition::GraphCompound
 					}
 					else
 					{
-						SetError(OutError,
-							TEXT("graph_compound_behavior_tree_edit_kind_invalid"),
-							SemanticId);
-						return false;
+						return FailOperation(TEXT("graph_compound_behavior_tree_edit_kind_invalid"),
+							TEXT("BehaviorTree mutations support only item, binding and relation elements."),
+							TEXT("element_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())),
+							MakeShared<FJsonValueString>(TEXT("item, binding or relation")));
 					}
 				}
 				else if (Profile.GetCapabilityId()
@@ -2439,146 +2647,153 @@ namespace UE::UAI::Composition::GraphCompound
 						Cast<UBlackboardData>(&Target);
 					FString KeyType;
 					FString Ownership;
-					if (!Blackboard
-						|| Edit.GetElementKind()
-							!= EGraphCompoundElementKind::Item
-						|| !Operation.Dependencies.IsEmpty()
-						|| !HasExactObjectFields(*Operation.Value,
-							{TEXT("key_type_ref"), TEXT("ownership")})
-						|| !TryCanonicalStringField(*Operation.Value,
-							TEXT("key_type_ref"), KeyType)
-						|| !TryCanonicalStringField(*Operation.Value,
-							TEXT("ownership"), Ownership)
-						|| Ownership != TEXT("local"))
+					const auto Input = ValueInput(TEXT("graph_compound_blackboard_entry_invalid"));
+					if (!Blackboard)
 					{
-						SetError(OutError,
-							TEXT("graph_compound_blackboard_entry_invalid"),
-							SemanticId);
+						OutError = NativeTypeFailure(TEXT("graph_compound_blackboard_entry_invalid"),
+							TEXT("The native mutation target is not a BlackboardData asset."),
+							Request.GetTargetRef(), TEXT("target.class"), &Target, UBlackboardData::StaticClass());
+						OutError.OperationIndex = CurrentEditIndex;
 						return false;
 					}
+					if (Edit.GetElementKind() != EGraphCompoundElementKind::Item)
+						return FailOperation(TEXT("graph_compound_blackboard_entry_invalid"),
+							TEXT("Blackboard mutations require item elements."), TEXT("element_kind"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())),
+							MakeShared<FJsonValueString>(TEXT("item")));
+					if (!Operation.Dependencies.IsEmpty())
+						return FailOperation(TEXT("graph_compound_blackboard_entry_invalid"),
+							TEXT("A Blackboard entry must not declare dependencies."), TEXT("dependencies.count"),
+							MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(0));
+					if (!Input.RequireFields(*Operation.Value, {TEXT("key_type_ref"), TEXT("ownership")})
+						|| !Input.ReadString(*Operation.Value, TEXT("key_type_ref"), KeyType)
+						|| !Input.ReadString(*Operation.Value, TEXT("ownership"), Ownership)) return false;
+					if (Ownership != TEXT("local"))
+						return Input.Fail(TEXT("A new Blackboard entry must have local ownership."), TEXT("/ownership"),
+							MakeShared<FJsonValueString>(Ownership), MakeShared<FJsonValueString>(TEXT("local")));
 					const FString Prefix = TEXT("item:blackboard_entry:");
-					const FString Suffix = TEXT(":") + KeyType
-						+ TEXT(":") + Ownership;
-					if (!SemanticId.StartsWith(Prefix)
-						|| !SemanticId.EndsWith(Suffix)
+					const FString Suffix = TEXT(":") + KeyType + TEXT(":") + Ownership;
+					if (!SemanticId.StartsWith(Prefix) || !SemanticId.EndsWith(Suffix)
 						|| SemanticId.Len() <= Prefix.Len() + Suffix.Len())
-					{
-						SetError(OutError,
-							TEXT("graph_compound_blackboard_identity_invalid"),
-							SemanticId);
-						return false;
-					}
+						return FailOperation(TEXT("graph_compound_blackboard_identity_invalid"),
+							TEXT("The Blackboard entry identity must contain its non-empty name, key type and ownership."),
+							TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+							MakeShared<FJsonValueString>(Prefix + TEXT("<non-empty entry name>") + Suffix));
 					Operation.EntryName = FName(*SemanticId.Mid(
-						Prefix.Len(), SemanticId.Len()
-							- Prefix.Len() - Suffix.Len()));
-					Operation.KeyTypeClass =
-						LoadObject<UClass>(nullptr, *KeyType);
-					if (Operation.EntryName.IsNone()
-						|| !Operation.KeyTypeClass
-						|| !Operation.KeyTypeClass->IsChildOf(
-							UBlackboardKeyType::StaticClass())
-						|| Operation.KeyTypeClass->HasAnyClassFlags(CLASS_Abstract)
-						|| HasEntryName(*Blackboard, Operation.EntryName))
-					{
-						SetError(OutError,
-							TEXT("graph_compound_blackboard_entry_conflict"),
-							SemanticId);
-						return false;
-					}
+						Prefix.Len(), SemanticId.Len() - Prefix.Len() - Suffix.Len()));
+					Operation.KeyTypeClass = LoadObject<UClass>(nullptr, *KeyType);
+					if (Operation.EntryName.IsNone())
+						return FailOperation(TEXT("graph_compound_blackboard_entry_conflict"),
+							TEXT("The Blackboard entry name resolves to the reserved None name."),
+							TEXT("entry.name"), MakeShared<FJsonValueString>(Operation.EntryName.ToString()),
+							MakeShared<FJsonValueString>(TEXT("non-None entry name")));
+					const auto TypeInput = ValueInput(TEXT("graph_compound_blackboard_entry_conflict"));
+					if (!Operation.KeyTypeClass)
+						return TypeInput.Fail(TEXT("The Blackboard key class could not be loaded."), TEXT("/key_type_ref"),
+							MakeShared<FJsonValueString>(KeyType),
+							MakeShared<FJsonValueString>(TEXT("loadable class derived from ") + UBlackboardKeyType::StaticClass()->GetPathName()));
+					if (!Operation.KeyTypeClass->IsChildOf(UBlackboardKeyType::StaticClass()))
+						return TypeInput.Fail(TEXT("The Blackboard key class does not derive from BlackboardKeyType."),
+							TEXT("/key_type_ref"), ClassPathValue(Operation.KeyTypeClass), ClassPathValue(UBlackboardKeyType::StaticClass()));
+					if (Operation.KeyTypeClass->HasAnyClassFlags(CLASS_Abstract))
+						return TypeInput.Fail(TEXT("The Blackboard key class is abstract and cannot be instantiated."),
+							TEXT("/key_type_ref"), ClassPathValue(Operation.KeyTypeClass),
+							MakeShared<FJsonValueString>(TEXT("non-abstract BlackboardKeyType class")));
+					if (HasEntryName(*Blackboard, Operation.EntryName))
+						return FailOperation(TEXT("graph_compound_blackboard_entry_conflict"),
+							TEXT("A Blackboard entry with this name already exists."), TEXT("entry.name"),
+							MakeShared<FJsonValueString>(Operation.EntryName.ToString()),
+							MakeShared<FJsonValueString>(TEXT("unused entry name")));
 					Operation.Kind =
 						EPcgAiSchemaMutationKind::BlackboardEntry;
 				}
-				else if (Profile.GetCapabilityId()
-					== TEXT("ai.eqs.graph.apply"))
+				else if (Profile.GetCapabilityId() == TEXT("ai.eqs.graph.apply"))
 				{
 					if (!Cast<UEnvQuery>(&Target))
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_ai_target_invalid"),
-							Request.GetTargetRef());
+						OutError = NativeTypeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+							TEXT("The native mutation target is not an EnvQuery asset."),
+							Request.GetTargetRef(), TEXT("target.class"), &Target, UEnvQuery::StaticClass());
+						OutError.OperationIndex = CurrentEditIndex;
 						return false;
 					}
 					const FUeAgentCanonicalValue& Value = *Operation.Value;
-					if (Edit.GetElementKind()
-						== EGraphCompoundElementKind::Item)
+					if (Edit.GetElementKind() == EGraphCompoundElementKind::Item)
 					{
 						FString CarrierType;
 						FString PayloadType;
-						if (!Operation.Dependencies.IsEmpty()
-							|| !SemanticId.StartsWith(TEXT("node:"))
-							|| !FGuid::Parse(SemanticId.RightChop(5),
-								Operation.NodeGuid)
+						const auto Input = ValueInput(TEXT("graph_compound_eqs_option_invalid"));
+						if (!Operation.Dependencies.IsEmpty())
+							return FailOperation(TEXT("graph_compound_eqs_option_invalid"),
+								TEXT("An EQS option node must not declare dependencies."), TEXT("dependencies.count"),
+								MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(0));
+						if (!SemanticId.StartsWith(TEXT("node:"))
+							|| !FGuid::Parse(SemanticId.RightChop(5), Operation.NodeGuid)
 							|| !Operation.NodeGuid.IsValid()
-							|| SemanticId != TEXT("node:")
-								+ Operation.NodeGuid.ToString(
-									EGuidFormats::DigitsWithHyphensLower)
-							|| !HasExactObjectFields(Value,
-								{TEXT("carrier_type_ref"),
-									TEXT("payload_type_ref")})
-							|| !TryCanonicalStringField(Value,
-								TEXT("carrier_type_ref"), CarrierType)
-							|| CarrierType
-								!= TEXT("/Script/EnvironmentQueryEditor.EnvironmentQueryGraphNode_Option")
-							|| !TryCanonicalStringField(Value,
-								TEXT("payload_type_ref"), PayloadType))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_eqs_option_invalid"), SemanticId);
-							return false;
-						}
-						Operation.PayloadClass =
-							LoadObject<UClass>(nullptr, *PayloadType);
-						if (!Operation.PayloadClass
-							|| !Operation.PayloadClass->IsChildOf(
-								UEnvQueryGenerator::StaticClass())
-							|| Operation.PayloadClass->HasAnyClassFlags(CLASS_Abstract))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_eqs_generator_invalid"),
-								PayloadType);
-							return false;
-						}
+							|| SemanticId != TEXT("node:") + Operation.NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower))
+							return FailOperation(TEXT("graph_compound_eqs_option_invalid"),
+								TEXT("The EQS node identity must contain a valid canonical GUID."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+								MakeShared<FJsonValueString>(TEXT("node:<lowercase hyphenated GUID>")));
+						if (!Input.RequireFields(Value, {TEXT("carrier_type_ref"), TEXT("payload_type_ref")})
+							|| !Input.ReadString(Value, TEXT("carrier_type_ref"), CarrierType)) return false;
+						if (CarrierType != TEXT("/Script/EnvironmentQueryEditor.EnvironmentQueryGraphNode_Option"))
+							return Input.Fail(TEXT("An EQS option requires the option graph-node carrier class."),
+								TEXT("/carrier_type_ref"), MakeShared<FJsonValueString>(CarrierType),
+								MakeShared<FJsonValueString>(TEXT("/Script/EnvironmentQueryEditor.EnvironmentQueryGraphNode_Option")));
+						if (!Input.ReadString(Value, TEXT("payload_type_ref"), PayloadType)) return false;
+						Operation.PayloadClass = LoadObject<UClass>(nullptr, *PayloadType);
+						const auto PayloadInput = ValueInput(TEXT("graph_compound_eqs_generator_invalid"));
+						if (!Operation.PayloadClass)
+							return PayloadInput.Fail(TEXT("The EQS generator class could not be loaded."),
+								TEXT("/payload_type_ref"), MakeShared<FJsonValueString>(PayloadType),
+								MakeShared<FJsonValueString>(TEXT("loadable class derived from ") + UEnvQueryGenerator::StaticClass()->GetPathName()));
+						if (!Operation.PayloadClass->IsChildOf(UEnvQueryGenerator::StaticClass()))
+							return PayloadInput.Fail(TEXT("The EQS generator class does not derive from EnvQueryGenerator."),
+								TEXT("/payload_type_ref"), ClassPathValue(Operation.PayloadClass), ClassPathValue(UEnvQueryGenerator::StaticClass()));
+						if (Operation.PayloadClass->HasAnyClassFlags(CLASS_Abstract))
+							return PayloadInput.Fail(TEXT("The EQS generator class is abstract and cannot be instantiated."),
+								TEXT("/payload_type_ref"), ClassPathValue(Operation.PayloadClass),
+								MakeShared<FJsonValueString>(TEXT("non-abstract EnvQueryGenerator class")));
 						Operation.Kind = EPcgAiSchemaMutationKind::EqsOption;
 					}
-					else if (Edit.GetElementKind()
-						== EGraphCompoundElementKind::Property)
+					else if (Edit.GetElementKind() == EGraphCompoundElementKind::Property)
 					{
 						FString PropertyPath;
 						FString ValueType;
-						if (Operation.Dependencies.Num() != 1
-							|| !HasExactObjectFields(Value,
-								{TEXT("property_path"), TEXT("value_type"),
-									TEXT("value")})
-							|| !TryCanonicalStringField(Value,
-								TEXT("property_path"), PropertyPath)
-							|| PropertyPath != TEXT("NodePosX")
-							|| !TryCanonicalStringField(Value,
-								TEXT("value_type"), ValueType)
-							|| ValueType != TEXT("int32")
-							|| !TryCanonicalSignedIntegerField(Value,
-								TEXT("value"), Operation.SignedIntegerValue))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_eqs_property_invalid"), SemanticId);
-							return false;
-						}
+						const auto Input = ValueInput(TEXT("graph_compound_eqs_property_invalid"));
+						if (Operation.Dependencies.Num() != 1)
+							return FailOperation(TEXT("graph_compound_eqs_property_invalid"),
+								TEXT("An EQS node property requires exactly one node dependency."), TEXT("dependencies.count"),
+								MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(1));
+						if (!Input.RequireFields(Value, {TEXT("property_path"), TEXT("value_type"), TEXT("value")})
+							|| !Input.ReadString(Value, TEXT("property_path"), PropertyPath)) return false;
+						if (PropertyPath != TEXT("NodePosX"))
+							return Input.Fail(TEXT("This EQS mutation supports only the NodePosX property."),
+								TEXT("/property_path"), MakeShared<FJsonValueString>(PropertyPath), MakeShared<FJsonValueString>(TEXT("NodePosX")));
+						if (!Input.ReadString(Value, TEXT("value_type"), ValueType)) return false;
+						if (ValueType != TEXT("int32"))
+							return Input.Fail(TEXT("The EQS NodePosX property requires the int32 value type."),
+								TEXT("/value_type"), MakeShared<FJsonValueString>(ValueType), MakeShared<FJsonValueString>(TEXT("int32")));
+						if (!Input.ReadInteger(Value, TEXT("value"), Operation.SignedIntegerValue, true)) return false;
 						Operation.FromItem = Operation.Dependencies[0];
-						if (!ProposedNodeIds.Contains(Operation.FromItem)
-							|| SemanticId != TEXT("property:")
-								+ Operation.FromItem + TEXT(":NodePosX"))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_eqs_property_identity_invalid"),
-								SemanticId);
-							return false;
-						}
+						if (!ProposedNodeIds.Contains(Operation.FromItem))
+							return FailOperation(TEXT("graph_compound_eqs_property_identity_invalid"),
+								TEXT("The EQS property owner is not a proposed node."), TEXT("owner_item_ref"),
+								MakeShared<FJsonValueString>(Operation.FromItem), MakeShared<FJsonValueString>(TEXT("proposed node")));
+						const FString ExpectedId = TEXT("property:") + Operation.FromItem + TEXT(":NodePosX");
+						if (SemanticId != ExpectedId)
+							return FailOperation(TEXT("graph_compound_eqs_property_identity_invalid"),
+								TEXT("The EQS property identity differs from its owner and property path."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId), MakeShared<FJsonValueString>(ExpectedId));
 						Operation.Kind = EPcgAiSchemaMutationKind::EqsProperty;
 					}
 					else
 					{
-						SetError(OutError,
-							TEXT("graph_compound_eqs_edit_kind_invalid"), SemanticId);
-						return false;
+						return FailOperation(TEXT("graph_compound_eqs_edit_kind_invalid"),
+							TEXT("EQS mutations support only item and property elements."), TEXT("element_kind"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())),
+							MakeShared<FJsonValueString>(TEXT("item or property")));
 					}
 				}
 				else if (Profile.GetCapabilityId()
@@ -2590,12 +2805,20 @@ namespace UE::UAI::Composition::GraphCompound
 						? Cast<UStateTreeEditorData>(Tree->EditorData) : nullptr;
 					TMap<FGuid, UStateTreeState*> States;
 					TMap<FGuid, FString> Parents;
-					if (!Tree || !EditorData
-						|| !TryCollectStateTreeStates(*EditorData, States, Parents))
+					if (!Tree || !EditorData)
 					{
-						SetError(OutError,
-							TEXT("graph_compound_state_tree_hierarchy_invalid"),
-							Request.GetTargetRef());
+						OutError = !Tree
+							? NativeTypeFailure(TEXT("graph_compound_state_tree_hierarchy_invalid"),
+								TEXT("The native hierarchy target is not a StateTree."),
+								Request.GetTargetRef(), TEXT("target.class"), &Target, UStateTree::StaticClass())
+							: NativeTypeFailure(TEXT("graph_compound_state_tree_hierarchy_invalid"),
+								TEXT("The StateTree has no valid StateTree editor data."),
+								Request.GetTargetRef(), TEXT("editor_data.class"), Tree->EditorData, UStateTreeEditorData::StaticClass());
+						return false;
+					}
+					if (!TryCollectStateTreeStates(*EditorData, States, Parents, OutError))
+					{
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
 						return false;
 					}
 					const FUeAgentCanonicalValue& Value = *Operation.Value;
@@ -2604,49 +2827,58 @@ namespace UE::UAI::Composition::GraphCompound
 					{
 						FString OwnerState;
 						FString NodeClass;
+						const auto Input = ValueInput(TEXT("graph_compound_state_tree_node_invalid"));
 						if (!SemanticId.StartsWith(TEXT("node:"))
-							|| !FGuid::Parse(SemanticId.RightChop(5),
-								Operation.NodeGuid)
+							|| !FGuid::Parse(SemanticId.RightChop(5), Operation.NodeGuid)
 							|| !Operation.NodeGuid.IsValid()
-							|| SemanticId != TEXT("node:")
-								+ Operation.NodeGuid.ToString(
-									EGuidFormats::DigitsWithHyphensLower)
-							|| !HasExactObjectFields(Value,
-								{TEXT("owner_state_ref"),
-									TEXT("node_class_ref"),
-									TEXT("placement")})
-							|| !TryCanonicalStringField(Value,
-								TEXT("owner_state_ref"), OwnerState)
-							|| !TryCanonicalStringField(Value,
-								TEXT("node_class_ref"), NodeClass)
-							|| !TryCanonicalStringField(Value,
-								TEXT("placement"), Operation.Placement))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_node_invalid"),
-								SemanticId);
-							return false;
-						}
-						const bool bStateOwned =
-							Operation.Placement == TEXT("state_task")
+							|| SemanticId != TEXT("node:") + Operation.NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower))
+							return FailOperation(TEXT("graph_compound_state_tree_node_invalid"),
+								TEXT("The StateTree node identity must contain a valid canonical GUID."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+								MakeShared<FJsonValueString>(TEXT("node:<lowercase hyphenated GUID>")));
+						if (!Input.RequireFields(Value, {TEXT("owner_state_ref"), TEXT("node_class_ref"), TEXT("placement")})
+							|| !Input.ReadString(Value, TEXT("owner_state_ref"), OwnerState)
+							|| !Input.ReadString(Value, TEXT("node_class_ref"), NodeClass)
+							|| !Input.ReadString(Value, TEXT("placement"), Operation.Placement)) return false;
+						const bool bStateOwned = Operation.Placement == TEXT("state_task")
 							|| Operation.Placement == TEXT("state_condition");
-						if ((bStateOwned
-								&& (Operation.Dependencies.Num() != 1
-									|| Operation.Dependencies[0] != OwnerState
-									|| !TryParseStateTreeStateIdentity(
-										OwnerState, Operation.StateGuid)
-									|| (!States.Contains(Operation.StateGuid)
-										&& !ProposedStateIds.Contains(OwnerState))))
-							|| (!bStateOwned
-								&& (OwnerState != TEXT("global")
-									|| !Operation.Dependencies.IsEmpty()
-									|| (Operation.Placement != TEXT("global_task")
-										&& Operation.Placement != TEXT("evaluator")))))
+						const auto PlacementInput = ValueInput(TEXT("graph_compound_state_tree_node_placement_invalid"));
+						if (bStateOwned)
 						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_node_placement_invalid"),
-								SemanticId, OwnerState);
-							return false;
+							if (Operation.Dependencies.Num() != 1)
+								return FailOperation(TEXT("graph_compound_state_tree_node_placement_invalid"),
+									TEXT("A state-owned StateTree node requires exactly one state dependency."),
+									TEXT("dependencies.count"), MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()),
+									MakeShared<FJsonValueNumber>(1));
+							if (Operation.Dependencies[0] != OwnerState)
+								return FailOperation(TEXT("graph_compound_state_tree_node_placement_invalid"),
+									TEXT("The StateTree node dependency differs from its owner state."),
+									TEXT("dependencies/0"), MakeShared<FJsonValueString>(Operation.Dependencies[0]),
+									MakeShared<FJsonValueString>(OwnerState));
+							if (!TryParseStateTreeStateIdentity(OwnerState, Operation.StateGuid))
+								return PlacementInput.Fail(TEXT("The StateTree node owner is not a valid state identity."),
+									TEXT("/owner_state_ref"), MakeShared<FJsonValueString>(OwnerState),
+									MakeShared<FJsonValueString>(TEXT("state:<lowercase hyphenated GUID>")));
+							if (!States.Contains(Operation.StateGuid) && !ProposedStateIds.Contains(OwnerState))
+								return PlacementInput.Fail(TEXT("The StateTree node owner is neither an existing nor a proposed state."),
+									TEXT("/owner_state_ref"), MakeShared<FJsonValueString>(OwnerState),
+									MakeShared<FJsonValueString>(TEXT("existing or proposed state")));
+						}
+						else
+						{
+							if (OwnerState != TEXT("global"))
+								return PlacementInput.Fail(TEXT("A non-state-owned StateTree node requires the global owner."),
+									TEXT("/owner_state_ref"), MakeShared<FJsonValueString>(OwnerState),
+									MakeShared<FJsonValueString>(TEXT("global")));
+							if (!Operation.Dependencies.IsEmpty())
+								return FailOperation(TEXT("graph_compound_state_tree_node_placement_invalid"),
+									TEXT("A global StateTree node must not declare state dependencies."),
+									TEXT("dependencies.count"), MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()),
+									MakeShared<FJsonValueNumber>(0));
+							if (Operation.Placement != TEXT("global_task") && Operation.Placement != TEXT("evaluator"))
+								return PlacementInput.Fail(TEXT("A global StateTree node requires global_task or evaluator placement."),
+									TEXT("/placement"), MakeShared<FJsonValueString>(Operation.Placement),
+									MakeShared<FJsonValueString>(TEXT("global_task or evaluator")));
 						}
 						Operation.PayloadClass =
 							LoadObject<UClass>(nullptr, *NodeClass);
@@ -2668,10 +2900,16 @@ namespace UE::UAI::Composition::GraphCompound
 									FStateTreeEvaluatorBase::StaticStruct()));
 						if (!bBlueprintNode && !bNativeNode)
 						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_node_class_invalid"),
-								NodeClass);
-							return false;
+							const FString Reason = Operation.PayloadClass
+								? (!Operation.PayloadClass->IsChildOf(UStateTreeNodeBlueprintBase::StaticClass())
+									? TEXT("The StateTree node class does not derive from StateTreeNodeBlueprintBase.")
+									: TEXT("The StateTree node class is abstract and cannot be instantiated."))
+								: (Operation.PayloadStruct
+									? TEXT("The StateTree node struct does not derive from a supported task, condition or evaluator base.")
+									: TEXT("The StateTree node reference could not be loaded as a class or script struct."));
+							return ValueInput(TEXT("graph_compound_state_tree_node_class_invalid")).Fail(
+								Reason, TEXT("/node_class_ref"), MakeShared<FJsonValueString>(NodeClass),
+								MakeShared<FJsonValueString>(TEXT("non-abstract StateTreeNodeBlueprintBase class or StateTreeTaskBase/StateTreeConditionBase/StateTreeEvaluatorBase struct")));
 						}
 						Operation.Kind =
 							EPcgAiSchemaMutationKind::StateTreeNode;
@@ -2682,31 +2920,41 @@ namespace UE::UAI::Composition::GraphCompound
 						FString NativeGuid;
 						FString ParentIdentity;
 						FString PayloadType;
-						if (!Operation.Dependencies.IsEmpty()
-							|| !TryParseStateTreeStateIdentity(
-								SemanticId, Operation.StateGuid)
-							|| States.Contains(Operation.StateGuid)
-							|| !HasExactObjectFields(Value,
-								{TEXT("native_guid"), TEXT("parent_identity"),
-									TEXT("payload_type_ref")})
-							|| !TryCanonicalStringField(Value,
-								TEXT("native_guid"), NativeGuid)
-							|| NativeGuid != Operation.StateGuid.ToString(
-								EGuidFormats::DigitsWithHyphensLower)
-							|| !TryCanonicalStringField(Value,
-								TEXT("parent_identity"), ParentIdentity)
-							|| !TryParseStateTreeStateIdentity(
-								ParentIdentity, Operation.ParentStateGuid)
-							|| !States.Contains(Operation.ParentStateGuid)
-							|| !TryCanonicalStringField(Value,
-								TEXT("payload_type_ref"), PayloadType)
-							|| PayloadType != UStateTreeState::StaticClass()->GetPathName())
-						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_hierarchy_invalid"),
-								SemanticId);
-							return false;
-						}
+						const auto Input = ValueInput(TEXT("graph_compound_state_tree_hierarchy_invalid"));
+						if (!Operation.Dependencies.IsEmpty())
+							return FailOperation(TEXT("graph_compound_state_tree_hierarchy_invalid"),
+								TEXT("A StateTree hierarchy insertion must not declare dependencies."),
+								TEXT("dependencies.count"), MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(0));
+						if (!TryParseStateTreeStateIdentity(SemanticId, Operation.StateGuid))
+							return FailOperation(TEXT("graph_compound_state_tree_hierarchy_invalid"),
+								TEXT("The hierarchy identity must contain a valid canonical state GUID."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+								MakeShared<FJsonValueString>(TEXT("state:<lowercase hyphenated GUID>")));
+						if (States.Contains(Operation.StateGuid))
+							return FailOperation(TEXT("graph_compound_state_tree_hierarchy_invalid"),
+								TEXT("A StateTree state with this identity already exists."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+								MakeShared<FJsonValueString>(TEXT("unused state identity")));
+						if (!Input.RequireFields(Value, {TEXT("native_guid"), TEXT("parent_identity"), TEXT("payload_type_ref")})
+							|| !Input.ReadString(Value, TEXT("native_guid"), NativeGuid)) return false;
+						if (NativeGuid != Operation.StateGuid.ToString(EGuidFormats::DigitsWithHyphensLower))
+							return Input.Fail(TEXT("The StateTree native GUID differs from the hierarchy identity."),
+								TEXT("/native_guid"), MakeShared<FJsonValueString>(NativeGuid),
+								MakeShared<FJsonValueString>(Operation.StateGuid.ToString(EGuidFormats::DigitsWithHyphensLower)));
+						if (!Input.ReadString(Value, TEXT("parent_identity"), ParentIdentity)) return false;
+						if (!TryParseStateTreeStateIdentity(ParentIdentity, Operation.ParentStateGuid))
+							return Input.Fail(TEXT("The hierarchy parent is not a valid canonical state identity."),
+								TEXT("/parent_identity"), MakeShared<FJsonValueString>(ParentIdentity),
+								MakeShared<FJsonValueString>(TEXT("state:<lowercase hyphenated GUID>")));
+						if (!States.Contains(Operation.ParentStateGuid))
+							return Input.Fail(TEXT("The hierarchy parent does not identify an existing state."),
+								TEXT("/parent_identity"), MakeShared<FJsonValueString>(ParentIdentity),
+								MakeShared<FJsonValueString>(TEXT("existing state")));
+						if (!Input.ReadString(Value, TEXT("payload_type_ref"), PayloadType)) return false;
+						if (PayloadType != UStateTreeState::StaticClass()->GetPathName())
+							return Input.Fail(TEXT("The hierarchy payload requires the StateTreeState class."),
+								TEXT("/payload_type_ref"), MakeShared<FJsonValueString>(PayloadType),
+								ClassPathValue(UStateTreeState::StaticClass()));
 						Operation.Kind =
 							EPcgAiSchemaMutationKind::StateTreeHierarchy;
 					}
@@ -2717,60 +2965,69 @@ namespace UE::UAI::Composition::GraphCompound
 						TArray<FString> OrderedIdentities;
 						const FString Prefix = TEXT("order:");
 						const FString Suffix = TEXT(":children");
-						if (!HasExactObjectFields(Value,
-								{TEXT("owner_identity"),
-									TEXT("ordered_identities")})
-							|| !TryCanonicalStringField(Value,
-								TEXT("owner_identity"), OwnerIdentity)
-							|| !TryParseStateTreeStateIdentity(
-								OwnerIdentity, Operation.ParentStateGuid)
-							|| !States.Contains(Operation.ParentStateGuid)
-							|| SemanticId != Prefix + OwnerIdentity + Suffix
-							|| !TryCanonicalStringArrayField(Value,
-								TEXT("ordered_identities"), OrderedIdentities))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_order_invalid"),
-								SemanticId);
-							return false;
-						}
+						const auto Input = ValueInput(TEXT("graph_compound_state_tree_order_invalid"));
+						if (!Input.RequireFields(Value, {TEXT("owner_identity"), TEXT("ordered_identities")})
+							|| !Input.ReadString(Value, TEXT("owner_identity"), OwnerIdentity)) return false;
+						if (!TryParseStateTreeStateIdentity(OwnerIdentity, Operation.ParentStateGuid))
+							return Input.Fail(TEXT("The StateTree order owner is not a valid canonical state identity."),
+								TEXT("/owner_identity"), MakeShared<FJsonValueString>(OwnerIdentity),
+								MakeShared<FJsonValueString>(TEXT("state:<lowercase hyphenated GUID>")));
+						if (!States.Contains(Operation.ParentStateGuid))
+							return Input.Fail(TEXT("The StateTree order owner does not identify an existing state."),
+								TEXT("/owner_identity"), MakeShared<FJsonValueString>(OwnerIdentity),
+								MakeShared<FJsonValueString>(TEXT("existing state")));
+						if (SemanticId != Prefix + OwnerIdentity + Suffix)
+							return FailOperation(TEXT("graph_compound_state_tree_order_invalid"),
+								TEXT("The StateTree order identity differs from its owner."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+								MakeShared<FJsonValueString>(Prefix + OwnerIdentity + Suffix));
+						if (!Input.ReadStringArray(Value, TEXT("ordered_identities"), OrderedIdentities)) return false;
 						TSet<FString> OrderedSet;
 						TSet<FString> RequiredDependencies;
-						for (const FString& OrderedIdentity : OrderedIdentities)
+						for (int32 OrderedIndex = 0; OrderedIndex < OrderedIdentities.Num(); ++OrderedIndex)
 						{
+							const FString& OrderedIdentity = OrderedIdentities[OrderedIndex];
+							const FString ItemPointer = FString::Printf(TEXT("/ordered_identities/%d"), OrderedIndex);
 							FGuid OrderedGuid;
-							if (OrderedSet.Contains(OrderedIdentity)
-								|| !TryParseStateTreeStateIdentity(
-									OrderedIdentity, OrderedGuid))
-							{
-								SetError(OutError,
-									TEXT("graph_compound_state_tree_order_invalid"),
-									SemanticId);
-								return false;
-							}
+							if (OrderedSet.Contains(OrderedIdentity))
+								return Input.Fail(TEXT("The StateTree child order contains a duplicate state identity."),
+									ItemPointer, MakeShared<FJsonValueString>(OrderedIdentity),
+									MakeShared<FJsonValueString>(TEXT("unique child state identity")));
+							if (!TryParseStateTreeStateIdentity(OrderedIdentity, OrderedGuid))
+								return Input.Fail(TEXT("The ordered child is not a valid canonical state identity."),
+									ItemPointer, MakeShared<FJsonValueString>(OrderedIdentity),
+									MakeShared<FJsonValueString>(TEXT("state:<lowercase hyphenated GUID>")));
 							OrderedSet.Add(OrderedIdentity);
 							if (UStateTreeState* const* Existing = States.Find(OrderedGuid))
 							{
-								if (!(*Existing)
-									|| Parents.FindRef(OrderedGuid) != OwnerIdentity)
+								if (!(*Existing))
+									return Input.Fail(TEXT("The ordered child resolves to a missing native state object."),
+										ItemPointer, MakeShared<FJsonValueString>(OrderedIdentity),
+										MakeShared<FJsonValueString>(TEXT("existing child state object")));
+								const FString ActualParent = Parents.FindRef(OrderedGuid);
+								if (ActualParent != OwnerIdentity)
 								{
-									SetError(OutError,
-										TEXT("graph_compound_state_tree_order_invalid"),
-										SemanticId);
+									Input.Fail(TEXT("The ordered existing state belongs to a different parent."),
+										ItemPointer, MakeShared<FJsonValueString>(ActualParent), MakeShared<FJsonValueString>(OwnerIdentity));
+									OutError.CandidateName = OrderedIdentity;
 									return false;
 								}
 							}
 							else if (ProposedStateIds.Contains(OrderedIdentity)
-								&& ProposedStateParents.FindRef(OrderedIdentity)
-									== OwnerIdentity)
+								&& ProposedStateParents.FindRef(OrderedIdentity) == OwnerIdentity)
 							{
 								RequiredDependencies.Add(OrderedIdentity);
 							}
 							else
 							{
-								SetError(OutError,
-									TEXT("graph_compound_state_tree_order_invalid"),
-									SemanticId);
+								if (!ProposedStateIds.Contains(OrderedIdentity))
+									return Input.Fail(TEXT("The ordered child is neither an existing nor a proposed state."),
+										ItemPointer, MakeShared<FJsonValueString>(OrderedIdentity),
+										MakeShared<FJsonValueString>(TEXT("existing or proposed child state")));
+								Input.Fail(TEXT("The ordered proposed state belongs to a different parent."),
+									ItemPointer, MakeShared<FJsonValueString>(ProposedStateParents.FindRef(OrderedIdentity)),
+									MakeShared<FJsonValueString>(OwnerIdentity));
+								OutError.CandidateName = OrderedIdentity;
 								return false;
 							}
 							Operation.OrderedStateGuids.Add(OrderedGuid);
@@ -2778,43 +3035,29 @@ namespace UE::UAI::Composition::GraphCompound
 						for (const TPair<FGuid, UStateTreeState*>& Pair : States)
 						{
 							if (Parents.FindRef(Pair.Key) == OwnerIdentity
-								&& !OrderedSet.Contains(
-									StateTreeStateSemanticId(Pair.Key)))
-							{
-								SetError(OutError,
-									TEXT("graph_compound_state_tree_order_invalid"),
-									SemanticId);
-								return false;
-							}
+								&& !OrderedSet.Contains(StateTreeStateSemanticId(Pair.Key)))
+								return Input.Fail(TEXT("The StateTree child order omits an existing child state."),
+									TEXT("/ordered_identities"), nullptr,
+									MakeShared<FJsonValueString>(StateTreeStateSemanticId(Pair.Key)));
 						}
 						for (const TPair<FString, FString>& Pair : ProposedStateParents)
 						{
-							if (Pair.Value == OwnerIdentity
-								&& !OrderedSet.Contains(Pair.Key))
-							{
-								SetError(OutError,
-									TEXT("graph_compound_state_tree_order_invalid"),
-									SemanticId);
-								return false;
-							}
+							if (Pair.Value == OwnerIdentity && !OrderedSet.Contains(Pair.Key))
+								return Input.Fail(TEXT("The StateTree child order omits a proposed child state."),
+									TEXT("/ordered_identities"), nullptr, MakeShared<FJsonValueString>(Pair.Key));
 						}
-						if (Operation.Dependencies.Num()
-								!= RequiredDependencies.Num())
-						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_order_invalid"),
-								SemanticId);
-							return false;
-						}
+						if (Operation.Dependencies.Num() != RequiredDependencies.Num())
+							return FailOperation(TEXT("graph_compound_state_tree_order_invalid"),
+								TEXT("The StateTree order dependency count differs from the proposed child count."),
+								TEXT("dependencies.count"), MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()),
+								MakeShared<FJsonValueNumber>(RequiredDependencies.Num()));
 						for (const FString& Dependency : Operation.Dependencies)
 						{
 							if (!RequiredDependencies.Contains(Dependency))
-							{
-								SetError(OutError,
-									TEXT("graph_compound_state_tree_order_invalid"),
-									SemanticId);
-								return false;
-							}
+								return FailOperation(TEXT("graph_compound_state_tree_order_invalid"),
+									TEXT("The StateTree order dependency is not one of its proposed children."),
+									TEXT("dependency.identity"), MakeShared<FJsonValueString>(Dependency),
+									MakeShared<FJsonValueString>(TEXT("proposed child of ") + OwnerIdentity));
 						}
 						Operation.Kind = EPcgAiSchemaMutationKind::StateTreeOrder;
 					}
@@ -2824,96 +3067,107 @@ namespace UE::UAI::Composition::GraphCompound
 						FString PropertyPath;
 						FString ValueType;
 						FString StateName;
-						if (Operation.Dependencies.Num() != 1
-							|| !ProposedStateIds.Contains(Operation.Dependencies[0])
-							|| SemanticId != TEXT("property:")
-								+ Operation.Dependencies[0] + TEXT(":Name")
-							|| !TryParseStateTreeStateIdentity(
-								Operation.Dependencies[0], Operation.StateGuid)
-							|| !HasExactObjectFields(Value,
-								{TEXT("property_path"), TEXT("value_type"),
-									TEXT("value")})
-							|| !TryCanonicalStringField(Value,
-								TEXT("property_path"), PropertyPath)
-							|| PropertyPath != TEXT("Name")
-							|| !TryCanonicalStringField(Value,
-								TEXT("value_type"), ValueType)
-							|| ValueType != TEXT("name")
-							|| !TryCanonicalStringField(Value,
-								TEXT("value"), StateName))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_property_invalid"),
-								SemanticId);
-							return false;
-						}
+						const auto Input = ValueInput(TEXT("graph_compound_state_tree_property_invalid"));
+						if (Operation.Dependencies.Num() != 1)
+							return FailOperation(TEXT("graph_compound_state_tree_property_invalid"),
+								TEXT("A StateTree property requires exactly one state dependency."),
+								TEXT("dependencies.count"), MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(1));
+						if (!ProposedStateIds.Contains(Operation.Dependencies[0]))
+							return FailOperation(TEXT("graph_compound_state_tree_property_invalid"),
+								TEXT("The StateTree property owner is not a proposed state."),
+								TEXT("dependencies/0"), MakeShared<FJsonValueString>(Operation.Dependencies[0]),
+								MakeShared<FJsonValueString>(TEXT("proposed state")));
+						const FString ExpectedId = TEXT("property:") + Operation.Dependencies[0] + TEXT(":Name");
+						if (SemanticId != ExpectedId)
+							return FailOperation(TEXT("graph_compound_state_tree_property_invalid"),
+								TEXT("The StateTree property identity differs from its owner and Name property."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId), MakeShared<FJsonValueString>(ExpectedId));
+						if (!TryParseStateTreeStateIdentity(Operation.Dependencies[0], Operation.StateGuid))
+							return FailOperation(TEXT("graph_compound_state_tree_property_invalid"),
+								TEXT("The StateTree property dependency is not a valid canonical state identity."),
+								TEXT("dependencies/0"), MakeShared<FJsonValueString>(Operation.Dependencies[0]),
+								MakeShared<FJsonValueString>(TEXT("state:<lowercase hyphenated GUID>")));
+						if (!Input.RequireFields(Value, {TEXT("property_path"), TEXT("value_type"), TEXT("value")})
+							|| !Input.ReadString(Value, TEXT("property_path"), PropertyPath)) return false;
+						if (PropertyPath != TEXT("Name"))
+							return Input.Fail(TEXT("This StateTree mutation supports only the Name property."),
+								TEXT("/property_path"), MakeShared<FJsonValueString>(PropertyPath), MakeShared<FJsonValueString>(TEXT("Name")));
+						if (!Input.ReadString(Value, TEXT("value_type"), ValueType)) return false;
+						if (ValueType != TEXT("name"))
+							return Input.Fail(TEXT("The StateTree Name property requires the name value type."),
+								TEXT("/value_type"), MakeShared<FJsonValueString>(ValueType), MakeShared<FJsonValueString>(TEXT("name")));
+						if (!Input.ReadString(Value, TEXT("value"), StateName)) return false;
 						Operation.StateName = FName(*StateName);
 						if (Operation.StateName.IsNone())
-						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_property_invalid"),
-								SemanticId);
-							return false;
-						}
+							return Input.Fail(TEXT("The StateTree name resolves to the reserved None name."),
+								TEXT("/value"), MakeShared<FJsonValueString>(StateName),
+								MakeShared<FJsonValueString>(TEXT("non-None name")));
 						Operation.Kind = EPcgAiSchemaMutationKind::StateTreeProperty;
 					}
 					else
 					{
-						SetError(OutError,
-							TEXT("graph_compound_state_tree_edit_kind_invalid"),
-							SemanticId);
-						return false;
+						return FailOperation(TEXT("graph_compound_state_tree_edit_kind_invalid"),
+							TEXT("StateTree mutations support only item, hierarchy, order and property elements."),
+							TEXT("element_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())),
+							MakeShared<FJsonValueString>(TEXT("item, hierarchy, order or property")));
 					}
 #else
-					SetError(OutError,
-						TEXT("graph_compound_state_tree_editor_data_unavailable"),
-						Request.GetTargetRef());
-					return false;
+					return FailOperation(TEXT("graph_compound_state_tree_editor_data_unavailable"),
+						TEXT("StateTree hierarchy mutation requires an editor build with editor-only data."),
+						TEXT("WITH_EDITORONLY_DATA"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
 #endif
 				}
-				else if (Profile.GetCapabilityId()
-					== TEXT("ai.smart_object_definition.apply"))
+				else if (Profile.GetCapabilityId() == TEXT("ai.smart_object_definition.apply"))
 				{
 					FString BehaviorType;
 					FString DataType;
 					const FString Prefix = TEXT("item:slot:");
-					if (!Cast<USmartObjectDefinition>(&Target)
-						|| Edit.GetElementKind()
-							!= EGraphCompoundElementKind::Item
-						|| !Operation.Dependencies.IsEmpty()
-						|| !SemanticId.StartsWith(Prefix)
-						|| !FGuid::Parse(SemanticId.RightChop(Prefix.Len()),
-							Operation.SlotGuid)
+					const auto Input = ValueInput(TEXT("graph_compound_smart_object_slot_invalid"));
+					if (!Cast<USmartObjectDefinition>(&Target))
+					{
+						OutError = NativeTypeFailure(TEXT("graph_compound_smart_object_slot_invalid"),
+							TEXT("The native mutation target is not a SmartObjectDefinition asset."),
+							Request.GetTargetRef(), TEXT("target.class"), &Target, USmartObjectDefinition::StaticClass());
+						OutError.OperationIndex = CurrentEditIndex;
+						return false;
+					}
+					if (Edit.GetElementKind() != EGraphCompoundElementKind::Item)
+						return FailOperation(TEXT("graph_compound_smart_object_slot_invalid"),
+							TEXT("SmartObject slot mutations require item elements."), TEXT("element_kind"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())),
+							MakeShared<FJsonValueString>(TEXT("item")));
+					if (!Operation.Dependencies.IsEmpty())
+						return FailOperation(TEXT("graph_compound_smart_object_slot_invalid"),
+							TEXT("A SmartObject slot must not declare dependencies."), TEXT("dependencies.count"),
+							MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(0));
+					if (!SemanticId.StartsWith(Prefix)
+						|| !FGuid::Parse(SemanticId.RightChop(Prefix.Len()), Operation.SlotGuid)
 						|| !Operation.SlotGuid.IsValid()
-						|| SemanticId != Prefix
-							+ Operation.SlotGuid.ToString(
-								EGuidFormats::DigitsWithHyphensLower)
-						|| !HasExactObjectFields(*Operation.Value,
-							{TEXT("behavior_type_ref"), TEXT("data_type_ref")})
-						|| !TryCanonicalStringField(*Operation.Value,
-							TEXT("behavior_type_ref"), BehaviorType)
-						|| !TryCanonicalStringField(*Operation.Value,
-							TEXT("data_type_ref"), DataType)
-						|| DataType
-							!= FSmartObjectSlotDefinition::StaticStruct()->GetPathName())
-					{
-						SetError(OutError,
-							TEXT("graph_compound_smart_object_slot_invalid"),
-							SemanticId);
-						return false;
-					}
-					Operation.BehaviorClass =
-						LoadObject<UClass>(nullptr, *BehaviorType);
-					if (!Operation.BehaviorClass
-						|| !Operation.BehaviorClass->IsChildOf(
-							USmartObjectBehaviorDefinition::StaticClass())
-						|| Operation.BehaviorClass->HasAnyClassFlags(CLASS_Abstract))
-					{
-						SetError(OutError,
-							TEXT("graph_compound_smart_object_behavior_invalid"),
-							BehaviorType);
-						return false;
-					}
+						|| SemanticId != Prefix + Operation.SlotGuid.ToString(EGuidFormats::DigitsWithHyphensLower))
+						return FailOperation(TEXT("graph_compound_smart_object_slot_invalid"),
+							TEXT("The SmartObject slot identity must contain a valid canonical GUID."),
+							TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+							MakeShared<FJsonValueString>(Prefix + TEXT("<lowercase hyphenated GUID>")));
+					if (!Input.RequireFields(*Operation.Value, {TEXT("behavior_type_ref"), TEXT("data_type_ref")})
+						|| !Input.ReadString(*Operation.Value, TEXT("behavior_type_ref"), BehaviorType)
+						|| !Input.ReadString(*Operation.Value, TEXT("data_type_ref"), DataType)) return false;
+					if (DataType != FSmartObjectSlotDefinition::StaticStruct()->GetPathName())
+						return Input.Fail(TEXT("The SmartObject slot requires the SmartObjectSlotDefinition data type."),
+							TEXT("/data_type_ref"), MakeShared<FJsonValueString>(DataType),
+							MakeShared<FJsonValueString>(FSmartObjectSlotDefinition::StaticStruct()->GetPathName()));
+					Operation.BehaviorClass = LoadObject<UClass>(nullptr, *BehaviorType);
+					const auto BehaviorInput = ValueInput(TEXT("graph_compound_smart_object_behavior_invalid"));
+					if (!Operation.BehaviorClass)
+						return BehaviorInput.Fail(TEXT("The SmartObject behavior class could not be loaded."),
+							TEXT("/behavior_type_ref"), MakeShared<FJsonValueString>(BehaviorType),
+							MakeShared<FJsonValueString>(TEXT("loadable class derived from ") + USmartObjectBehaviorDefinition::StaticClass()->GetPathName()));
+					if (!Operation.BehaviorClass->IsChildOf(USmartObjectBehaviorDefinition::StaticClass()))
+						return BehaviorInput.Fail(TEXT("The SmartObject behavior class does not derive from SmartObjectBehaviorDefinition."),
+							TEXT("/behavior_type_ref"), ClassPathValue(Operation.BehaviorClass), ClassPathValue(USmartObjectBehaviorDefinition::StaticClass()));
+					if (Operation.BehaviorClass->HasAnyClassFlags(CLASS_Abstract))
+						return BehaviorInput.Fail(TEXT("The SmartObject behavior class is abstract and cannot be instantiated."),
+							TEXT("/behavior_type_ref"), ClassPathValue(Operation.BehaviorClass),
+							MakeShared<FJsonValueString>(TEXT("non-abstract SmartObjectBehaviorDefinition class")));
 					Operation.Kind = EPcgAiSchemaMutationKind::SmartObjectSlot;
 				}
 				else if (bPcgComponentProfile)
@@ -2925,59 +3179,84 @@ namespace UE::UAI::Composition::GraphCompound
 					FString ComponentRef;
 					const bool bWorldBinding = Profile.GetInputKind()
 						== EPcgAnimationGraphInputKind::PcgWorldBinding;
-					if (!Component || !Owner || !World
-						|| Owner->GetWorld() != World
-						|| !GEngine || !GEngine->GetWorldContextFromWorld(World)
-						|| Edit.GetElementKind()
-							!= EGraphCompoundElementKind::Binding
-						|| SemanticId != TEXT("binding:pcg_component_graph")
-						|| !Operation.Dependencies.IsEmpty()
-						|| !HasExactObjectFields(*Operation.Value,
-							{TEXT("actor_ref"), TEXT("component_ref"),
-								TEXT("generation_policy"), TEXT("graph_ref")})
-						|| !TryCanonicalStringField(*Operation.Value,
-							TEXT("actor_ref"), Operation.ActorRef)
-						|| !TryCanonicalStringField(*Operation.Value,
-							TEXT("component_ref"), ComponentRef)
-						|| ComponentRef != Component->GetPathName()
-						|| !TryCanonicalStringField(*Operation.Value,
-							TEXT("generation_policy"),
-							Operation.PublicGenerationPolicy)
-						|| !TryNativePcgGenerationPolicy(
-							Operation.PublicGenerationPolicy,
-							Operation.NativeGenerationPolicy,
-							Operation.NativeGenerationTrigger)
-						|| !TryCanonicalStringField(*Operation.Value,
-							TEXT("graph_ref"), GraphRef))
+					const auto Input = ValueInput(TEXT("graph_compound_pcg_component_binding_invalid"));
+					if (!Component)
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_component_binding_invalid"),
-							SemanticId);
+						OutError = NativeTypeFailure(TEXT("graph_compound_pcg_component_binding_invalid"),
+							TEXT("The native binding target is not a PCGComponent."),
+							Request.GetTargetRef(), TEXT("target.class"), &Target, UPCGComponent::StaticClass());
+						OutError.OperationIndex = CurrentEditIndex;
 						return false;
 					}
-					if (bWorldBinding
-						&& Operation.ActorRef != Owner->GetPathName())
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_component_owner_mismatch"),
-							Operation.ActorRef, Owner->GetPathName());
-						return false;
-					}
+					if (!Owner)
+						return FailOperation(TEXT("graph_compound_pcg_component_binding_invalid"),
+							TEXT("The PCG component has no owning actor."), TEXT("component.owner"),
+							nullptr, MakeShared<FJsonValueString>(TEXT("owning actor")));
+					if (!World)
+						return FailOperation(TEXT("graph_compound_pcg_component_binding_invalid"),
+							TEXT("The PCG component has no world."), TEXT("component.world"),
+							nullptr, MakeShared<FJsonValueString>(TEXT("world")));
+					if (Owner->GetWorld() != World)
+						return FailOperation(TEXT("graph_compound_pcg_component_binding_invalid"),
+							TEXT("The PCG component and its owner belong to different worlds."), TEXT("owner.world"),
+							Owner->GetWorld() ? MakeShared<FJsonValueString>(Owner->GetWorld()->GetPathName()) : TSharedPtr<FJsonValue>(),
+							MakeShared<FJsonValueString>(World->GetPathName()));
+					if (!GEngine)
+						return FailOperation(TEXT("graph_compound_pcg_component_binding_invalid"),
+							TEXT("The engine is unavailable for PCG world-context lookup."), TEXT("engine"),
+							nullptr, MakeShared<FJsonValueString>(TEXT("engine instance")));
+					if (!GEngine->GetWorldContextFromWorld(World))
+						return FailOperation(TEXT("graph_compound_pcg_component_binding_invalid"),
+							TEXT("The PCG component world has no registered engine world context."), TEXT("world_context"),
+							MakeShared<FJsonValueString>(World->GetPathName()), MakeShared<FJsonValueString>(TEXT("world with registered context")));
+					if (Edit.GetElementKind() != EGraphCompoundElementKind::Binding)
+						return FailOperation(TEXT("graph_compound_pcg_component_binding_invalid"),
+							TEXT("PCG component graph mutations require binding elements."), TEXT("element_kind"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())), MakeShared<FJsonValueString>(TEXT("binding")));
+					if (SemanticId != TEXT("binding:pcg_component_graph"))
+						return FailOperation(TEXT("graph_compound_pcg_component_binding_invalid"),
+							TEXT("The PCG component binding uses an unsupported identity."),
+							TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+							MakeShared<FJsonValueString>(TEXT("binding:pcg_component_graph")));
+					if (!Operation.Dependencies.IsEmpty())
+						return FailOperation(TEXT("graph_compound_pcg_component_binding_invalid"),
+							TEXT("The PCG component binding must not declare dependencies."), TEXT("dependencies.count"),
+							MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(0));
+					if (!Input.RequireFields(*Operation.Value, {TEXT("actor_ref"), TEXT("component_ref"), TEXT("generation_policy"), TEXT("graph_ref")})
+						|| !Input.ReadString(*Operation.Value, TEXT("actor_ref"), Operation.ActorRef)
+						|| !Input.ReadString(*Operation.Value, TEXT("component_ref"), ComponentRef)) return false;
+					if (ComponentRef != Component->GetPathName())
+						return Input.Fail(TEXT("The binding component reference differs from the native target."),
+							TEXT("/component_ref"), MakeShared<FJsonValueString>(ComponentRef), MakeShared<FJsonValueString>(Component->GetPathName()));
+					if (!Input.ReadString(*Operation.Value, TEXT("generation_policy"), Operation.PublicGenerationPolicy)) return false;
+					if (!TryNativePcgGenerationPolicy(Operation.PublicGenerationPolicy,
+							Operation.NativeGenerationPolicy, Operation.NativeGenerationTrigger))
+						return Input.Fail(TEXT("The PCG generation policy is not supported."), TEXT("/generation_policy"),
+							MakeShared<FJsonValueString>(Operation.PublicGenerationPolicy),
+							MakeShared<FJsonValueString>(TEXT("on_demand, on_load or runtime")));
+					if (!Input.ReadString(*Operation.Value, TEXT("graph_ref"), GraphRef)) return false;
+					if (bWorldBinding && Operation.ActorRef != Owner->GetPathName())
+						return ValueInput(TEXT("graph_compound_pcg_component_owner_mismatch")).Fail(
+							TEXT("The world binding actor reference differs from the component owner."),
+							TEXT("/actor_ref"), MakeShared<FJsonValueString>(Operation.ActorRef), MakeShared<FJsonValueString>(Owner->GetPathName()));
 					if (!bWorldBinding)
 					{
 						Operation.ActorRef = Owner->GetPathName();
 					}
-					Operation.GraphInterface =
-						LoadObject<UPCGGraphInterface>(nullptr, *GraphRef);
-					if (!Operation.GraphInterface
-						|| Operation.GraphInterface->GetPathName() != GraphRef
-						|| !Operation.GraphInterface->GetGraph())
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_component_graph_invalid"),
-							GraphRef);
-						return false;
-					}
+					Operation.GraphInterface = LoadObject<UPCGGraphInterface>(nullptr, *GraphRef);
+					const auto GraphInput = ValueInput(TEXT("graph_compound_pcg_component_graph_invalid"));
+					if (!Operation.GraphInterface)
+						return GraphInput.Fail(TEXT("The PCG graph reference could not be loaded as a graph interface."),
+							TEXT("/graph_ref"), MakeShared<FJsonValueString>(GraphRef),
+							MakeShared<FJsonValueString>(TEXT("loadable PCGGraphInterface")));
+					if (Operation.GraphInterface->GetPathName() != GraphRef)
+						return GraphInput.Fail(TEXT("The loaded PCG graph path differs from the requested reference."),
+							TEXT("/graph_ref"), MakeShared<FJsonValueString>(GraphRef),
+							MakeShared<FJsonValueString>(Operation.GraphInterface->GetPathName()));
+					if (!Operation.GraphInterface->GetGraph())
+						return GraphInput.Fail(TEXT("The PCG graph interface has no graph."),
+							TEXT("/graph_ref"), MakeShared<FJsonValueString>(GraphRef),
+							MakeShared<FJsonValueString>(TEXT("PCGGraphInterface with a graph")));
 					Operation.Kind =
 						EPcgAiSchemaMutationKind::PcgComponentBinding;
 				}
@@ -2992,31 +3271,59 @@ namespace UE::UAI::Composition::GraphCompound
 						Operation.Value.IsValid()
 							? FindObjectValue(*Operation.Value, TEXT("candidate"))
 							: nullptr;
-					FString CandidateName;
-					FString CandidateId;
-					const bool bHasName = Candidate
-						&& TryCanonicalStringField(
-							*Candidate, TEXT("name"), CandidateName);
-					const bool bHasId = Candidate
-						&& TryCanonicalStringField(
-							*Candidate, TEXT("id"), CandidateId);
-					if (!Graph
-						|| Edit.GetElementKind()
-							!= EGraphCompoundElementKind::Item
-						|| !Operation.Dependencies.IsEmpty()
-						|| AuthoredIdentity.IsEmpty()
-						|| AuthoredIdentity.Contains(TEXT(":"))
-						|| !HasOnlyObjectFields(
-							*Operation.Value,
-							{TEXT("candidate"), TEXT("position")})
-						|| !Candidate
-						|| !HasOnlyObjectFields(
-							*Candidate, {TEXT("name"), TEXT("id")})
-						|| (!bHasName && !bHasId))
+					const auto Input = ValueInput(TEXT("graph_compound_pcg_graph_node_invalid"));
+					if (!Graph)
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_graph_node_invalid"),
-							SemanticId);
+						OutError = NativeTypeFailure(TEXT("graph_compound_pcg_graph_node_invalid"),
+							TEXT("The native mutation target is not a PCGGraph."),
+							Request.GetTargetRef(), TEXT("target.class"), &Target, UPCGGraph::StaticClass());
+						OutError.OperationIndex = CurrentEditIndex;
+						return false;
+					}
+					if (Edit.GetElementKind() != EGraphCompoundElementKind::Item)
+						return FailOperation(TEXT("graph_compound_pcg_graph_node_invalid"),
+							TEXT("PCG graph node mutations require item elements."), TEXT("element_kind"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())), MakeShared<FJsonValueString>(TEXT("item")));
+					if (!Operation.Dependencies.IsEmpty())
+						return FailOperation(TEXT("graph_compound_pcg_graph_node_invalid"),
+							TEXT("A PCG graph node must not declare dependencies."), TEXT("dependencies.count"),
+							MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(0));
+					if (AuthoredIdentity.IsEmpty() || AuthoredIdentity.Contains(TEXT(":")))
+						return FailOperation(TEXT("graph_compound_pcg_graph_node_invalid"),
+							TEXT("The PCG node identity requires a non-empty authored name without colons."),
+							TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+							MakeShared<FJsonValueString>(TEXT("pcg_node:<non-empty name without ':'>")));
+					if (!Input.RequireFields(*Operation.Value, {TEXT("candidate"), TEXT("position")}, false)) return false;
+					if (!Candidate)
+						return Input.Fail(TEXT("The required PCG node candidate field is missing."), TEXT("/candidate"),
+							nullptr, MakeShared<FJsonValueString>(TEXT("candidate selector object")));
+					TSharedPtr<FJsonValue> CandidateJson;
+					UE::UAI::Contract::FDiagnostic JsonError;
+					HjsonWorkspace::DomainAuthoring::FDomainHjsonCandidateSelector Selector;
+					HjsonWorkspace::FWorkspaceError SelectorError;
+					if (!CanonicalJson::TryToJsonValue(*Candidate, CandidateJson, JsonError))
+					{
+						SetError(OutError, JsonError, SemanticId);
+						if (!Operation.InputPointer.IsEmpty())
+							BindGraphCompoundInputValueDiagnostic(OutError,
+								(Operation.InputPointer == TEXT("/") ? FString() : Operation.InputPointer) + TEXT("/candidate"));
+						else MarkGraphCompoundNativeDiagnostic(OutError);
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+						return false;
+					}
+					if (!CandidateJson.IsValid() || CandidateJson->Type != EJson::Object)
+						return Input.Fail(CandidateJson.IsValid()
+								? TEXT("The PCG candidate selector must be an object.")
+								: TEXT("Canonical conversion returned no PCG candidate selector value."),
+							TEXT("/candidate"), CandidateJson.IsValid() ? CanonicalInputFact(Candidate) : nullptr,
+							MakeShared<FJsonValueString>(TEXT("candidate selector object")));
+					if (!HjsonWorkspace::DomainAuthoring::TryReadCandidateSelector(
+							CandidateJson->AsObject(), TEXT("/candidate"), Selector, SelectorError))
+					{
+						SetError(OutError, SelectorError.GetDiagnostic(), SemanticId);
+						if (!Operation.InputPointer.IsEmpty())
+							UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError,
+								Operation.InputPointer == TEXT("/") ? FString() : Operation.InputPointer);
 						return false;
 					}
 					for (const UPCGNode* Node : Graph->GetNodes())
@@ -3025,42 +3332,39 @@ namespace UE::UAI::Composition::GraphCompound
 							&& Node->GetAuthoredTitleName().ToString()
 								== AuthoredIdentity)
 						{
-							SetError(OutError,
-								TEXT("graph_compound_create_target_exists"),
-								SemanticId);
-							return false;
+							return FailOperation(TEXT("graph_compound_create_target_exists"),
+								TEXT("A PCG node with this authored name already exists."), TEXT("node.authored_name"),
+								MakeShared<FJsonValueString>(AuthoredIdentity), MakeShared<FJsonValueString>(TEXT("unused authored name")));
 						}
 					}
 					if (FindObjectValue(*Operation.Value, TEXT("position"))
-						&& !TryCanonicalVector2Field(
-							*Operation.Value, TEXT("position"),
-							Operation.PositionX, Operation.PositionY))
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_graph_position_invalid"),
-							SemanticId);
-						return false;
-					}
+						&& !ValueInput(TEXT("graph_compound_pcg_graph_position_invalid")).ReadVector2(
+							*Operation.Value, TEXT("position"), Operation.PositionX, Operation.PositionY)) return false;
 					QueryOwners::Pcg::FPcgNodeCandidate ResolvedCandidate;
 					QueryOwners::Pcg::FPcgNodeCandidateQueryError CandidateError;
-					if (!QueryOwners::Pcg::TryResolvePcgNodeCandidate(
-							*Graph, CandidateName, CandidateId,
-							ResolvedCandidate, CandidateError)
-						|| !ResolvedCandidate.bSupported)
+					const bool bCandidateResolved = QueryOwners::Pcg::TryResolvePcgNodeCandidate(
+							*Graph, Selector.Name, FString(),
+							ResolvedCandidate, CandidateError, Selector.Select);
+					if (!bCandidateResolved || !ResolvedCandidate.bSupported)
 					{
-						SetError(
-							OutError,
-							CandidateError.Code.IsEmpty()
-								? TEXT("pcg_candidate_action_kind_unsupported")
-								: CandidateError.Code,
-							SemanticId,
-							CandidateError.Detail.IsEmpty()
-								? ResolvedCandidate.ActionKind
-								: CandidateError.Detail);
+						OutError = CandidateError.IsValid() ? CandidateError : ResolvedCandidate.SupportDiagnostic;
+						if (OutError.IsEmpty())
+						{
+							OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("pcg_candidate_action_kind_unsupported"),
+								bCandidateResolved ? TEXT("The selected PCG candidate has no supported native creation action.")
+									: TEXT("The PCG candidate could not be resolved and returned no diagnostic."), TEXT("native_graph"));
+							OutError.SourceKind = TEXT("native_result");
+							OutError.CandidateName = Selector.Name;
+						}
+						if (!Operation.InputPointer.IsEmpty())
+							UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError,
+								(Operation.InputPointer == TEXT("/") ? FString() : Operation.InputPointer) + TEXT("/candidate"));
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+						if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SemanticId;
 						return false;
 					}
-					Operation.CandidateName = ResolvedCandidate.Name;
-					Operation.CandidateId = ResolvedCandidate.Id;
+					Operation.CandidateName = Selector.Name;
+					Operation.CandidateSelect = MoveTemp(Selector.Select);
 					Operation.FromItem = AuthoredIdentity;
 					Operation.Kind = EPcgAiSchemaMutationKind::PcgGraphNode;
 				}
@@ -3069,112 +3373,138 @@ namespace UE::UAI::Composition::GraphCompound
 				{
 					UPCGGraphInstance* const Instance =
 						Cast<UPCGGraphInstance>(&Target);
-					if (!Instance || !Operation.Dependencies.IsEmpty())
+					if (!Instance)
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_graph_instance_invalid"),
-							SemanticId);
+						OutError = NativeTypeFailure(TEXT("graph_compound_pcg_graph_instance_invalid"),
+							TEXT("The native mutation target is not a PCGGraphInstance."),
+							Request.GetTargetRef(), TEXT("target.class"), &Target, UPCGGraphInstance::StaticClass());
+						OutError.OperationIndex = CurrentEditIndex;
 						return false;
 					}
+					if (!Operation.Dependencies.IsEmpty())
+						return FailOperation(TEXT("graph_compound_pcg_graph_instance_invalid"),
+							TEXT("PCG graph instance mutations must not declare dependencies."), TEXT("dependencies.count"),
+							MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(0));
 					if (Edit.GetElementKind()
 						== EGraphCompoundElementKind::Binding)
 					{
-						if (SemanticId != TEXT("binding:graph_source")
-							|| Operation.Value->GetKind()
-								!= EUeAgentValueKind::String)
-						{
-							SetError(OutError,
-								TEXT("graph_compound_pcg_graph_binding_invalid"),
-								SemanticId);
-							return false;
-						}
+						const auto Input = ValueInput(TEXT("graph_compound_pcg_graph_binding_invalid"));
+						if (SemanticId != TEXT("binding:graph_source"))
+							return FailOperation(TEXT("graph_compound_pcg_graph_binding_invalid"),
+								TEXT("The PCG graph instance binding uses an unsupported identity."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+								MakeShared<FJsonValueString>(TEXT("binding:graph_source")));
+						if (Operation.Value->GetKind() != EUeAgentValueKind::String)
+							return Input.Fail(TEXT("The PCG graph source binding value must be a string."),
+								FString(), CanonicalInputFact(Operation.Value.Get()), MakeShared<FJsonValueString>(TEXT("string graph reference")));
 						const FString GraphRef = Operation.Value->GetText();
-						Operation.GraphInterface =
-							LoadObject<UPCGGraphInterface>(nullptr, *GraphRef);
-						if (!Operation.GraphInterface
-							|| Operation.GraphInterface->GetPathName() != GraphRef
-							|| !Instance->CanGraphInterfaceBeSet(
-								Operation.GraphInterface))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_pcg_graph_binding_invalid"),
-								GraphRef);
-							return false;
-						}
+						Operation.GraphInterface = LoadObject<UPCGGraphInterface>(nullptr, *GraphRef);
+						if (!Operation.GraphInterface)
+							return Input.Fail(TEXT("The PCG graph source could not be loaded as a graph interface."),
+								FString(), MakeShared<FJsonValueString>(GraphRef), MakeShared<FJsonValueString>(TEXT("loadable PCGGraphInterface")));
+						if (Operation.GraphInterface->GetPathName() != GraphRef)
+							return Input.Fail(TEXT("The loaded PCG graph path differs from the requested source."),
+								FString(), MakeShared<FJsonValueString>(GraphRef), MakeShared<FJsonValueString>(Operation.GraphInterface->GetPathName()));
+						if (!Instance->CanGraphInterfaceBeSet(Operation.GraphInterface))
+							return Input.Fail(TEXT("The requested graph source would create a recursive PCG graph-instance hierarchy."),
+								FString(), MakeShared<FJsonValueString>(GraphRef), MakeShared<FJsonValueString>(TEXT("graph source that does not recurse to this instance")));
 						Operation.Kind =
 							EPcgAiSchemaMutationKind::PcgGraphBinding;
 					}
 					else if (Edit.GetElementKind()
 						== EGraphCompoundElementKind::Property)
 					{
-						if (!TryParsePcgDoubleParameterIdentity(
-								SemanticId, Operation.ParameterGuid,
-								Operation.ParameterName)
-							|| !TryCanonicalDouble(
-								*Operation.Value, Operation.DoubleValue))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_pcg_parameter_invalid"),
-								SemanticId);
-							return false;
-						}
+						if (!TryParsePcgDoubleParameterIdentity(SemanticId, Operation.ParameterGuid, Operation.ParameterName))
+							return FailOperation(TEXT("graph_compound_pcg_parameter_invalid"),
+								TEXT("The PCG double parameter identity is not in its canonical form."),
+								TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+								MakeShared<FJsonValueString>(TEXT("property:parameter:<lowercase hyphenated GUID>:<non-None name>:double")));
+						if (!TryCanonicalDouble(*Operation.Value, Operation.DoubleValue))
+							return ValueInput(TEXT("graph_compound_pcg_parameter_invalid")).Fail(
+								TEXT("The PCG double parameter value must be a finite number."),
+								FString(), CanonicalInputFact(Operation.Value.Get()), MakeShared<FJsonValueString>(TEXT("finite number")));
 						const FInstancedPropertyBag* const Bag =
 							Instance->GetUserParametersStruct();
 						const FPropertyBagPropertyDesc* const Desc = Bag
 							? Bag->FindPropertyDescByID(Operation.ParameterGuid)
 							: nullptr;
-						if (!Desc || Desc->Name != Operation.ParameterName
-							|| Desc->ValueType
-								!= EPropertyBagPropertyType::Double)
-						{
-							SetError(OutError,
-								TEXT("graph_compound_pcg_parameter_identity_invalid"),
-								SemanticId);
-							return false;
-						}
+						if (!Desc)
+							return FailOperation(TEXT("graph_compound_pcg_parameter_identity_invalid"),
+								TEXT("The PCG parameter descriptor was not found by its GUID."),
+								TEXT("parameters/") + Operation.ParameterGuid.ToString(EGuidFormats::DigitsWithHyphensLower),
+								nullptr, MakeShared<FJsonValueString>(Operation.ParameterName.ToString()));
+						if (Desc->Name != Operation.ParameterName)
+							return FailOperation(TEXT("graph_compound_pcg_parameter_identity_invalid"),
+								TEXT("The PCG parameter name differs from the descriptor found by GUID."),
+								TEXT("parameter.name"), MakeShared<FJsonValueString>(Desc->Name.ToString()),
+								MakeShared<FJsonValueString>(Operation.ParameterName.ToString()));
+						if (Desc->ValueType != EPropertyBagPropertyType::Double)
+							return FailOperation(TEXT("graph_compound_pcg_parameter_identity_invalid"),
+								TEXT("The PCG parameter descriptor is not a double property."),
+								TEXT("parameter.") + Operation.ParameterName.ToString() + TEXT(".type"),
+								MakeShared<FJsonValueNumber>(static_cast<int32>(Desc->ValueType)),
+								MakeShared<FJsonValueNumber>(static_cast<int32>(EPropertyBagPropertyType::Double)));
 						Operation.Kind =
 							EPcgAiSchemaMutationKind::PcgDoubleParameter;
 					}
 					else
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_graph_instance_invalid"),
-							SemanticId);
-						return false;
+						return FailOperation(TEXT("graph_compound_pcg_graph_instance_invalid"),
+							TEXT("PCG graph instance mutations support only binding and property elements."),
+							TEXT("element_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())),
+							MakeShared<FJsonValueString>(TEXT("binding or property")));
 					}
 				}
 				else if (Profile.GetCapabilityId()
 					== TEXT("pcg.graph_parameters.apply"))
 				{
 					UPCGGraph* const Graph = Cast<UPCGGraph>(&Target);
-					if (!Graph
-						|| Edit.GetElementKind()
-							!= EGraphCompoundElementKind::Property
-						|| !Operation.Dependencies.IsEmpty()
-						|| !TryParsePcgDoubleParameterIdentity(
-							SemanticId, Operation.ParameterGuid,
-							Operation.ParameterName)
-						|| !TryCanonicalDouble(
-							*Operation.Value, Operation.DoubleValue))
+					if (!Graph)
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_parameter_invalid"),
-							SemanticId);
+						OutError = NativeTypeFailure(TEXT("graph_compound_pcg_parameter_invalid"),
+							TEXT("The native parameter mutation target is not a PCGGraph."),
+							Request.GetTargetRef(), TEXT("target.class"), &Target, UPCGGraph::StaticClass());
+						OutError.OperationIndex = CurrentEditIndex;
 						return false;
 					}
+					if (Edit.GetElementKind() != EGraphCompoundElementKind::Property)
+						return FailOperation(TEXT("graph_compound_pcg_parameter_invalid"),
+							TEXT("PCG graph parameter mutations require property elements."), TEXT("element_kind"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())), MakeShared<FJsonValueString>(TEXT("property")));
+					if (!Operation.Dependencies.IsEmpty())
+						return FailOperation(TEXT("graph_compound_pcg_parameter_invalid"),
+							TEXT("PCG graph parameter mutations must not declare dependencies."), TEXT("dependencies.count"),
+							MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(0));
+					if (!TryParsePcgDoubleParameterIdentity(SemanticId, Operation.ParameterGuid, Operation.ParameterName))
+						return FailOperation(TEXT("graph_compound_pcg_parameter_invalid"),
+							TEXT("The PCG double parameter identity is not in its canonical form."),
+							TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+							MakeShared<FJsonValueString>(TEXT("property:parameter:<lowercase hyphenated GUID>:<non-None name>:double")));
+					if (!TryCanonicalDouble(*Operation.Value, Operation.DoubleValue))
+						return ValueInput(TEXT("graph_compound_pcg_parameter_invalid")).Fail(
+							TEXT("The PCG double parameter value must be a finite number."),
+							FString(), CanonicalInputFact(Operation.Value.Get()), MakeShared<FJsonValueString>(TEXT("finite number")));
 					const FInstancedPropertyBag* const Bag =
 						Graph->GetUserParametersStruct();
 					const FPropertyBagPropertyDesc* const Desc = Bag
 						? Bag->FindPropertyDescByID(Operation.ParameterGuid)
 						: nullptr;
-					if (!Desc || Desc->Name != Operation.ParameterName
-						|| Desc->ValueType != EPropertyBagPropertyType::Double)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_parameter_identity_invalid"),
-							SemanticId);
-						return false;
-					}
+					if (!Desc)
+						return FailOperation(TEXT("graph_compound_pcg_parameter_identity_invalid"),
+							TEXT("The PCG parameter descriptor was not found by its GUID."),
+							TEXT("parameters/") + Operation.ParameterGuid.ToString(EGuidFormats::DigitsWithHyphensLower),
+							nullptr, MakeShared<FJsonValueString>(Operation.ParameterName.ToString()));
+					if (Desc->Name != Operation.ParameterName)
+						return FailOperation(TEXT("graph_compound_pcg_parameter_identity_invalid"),
+							TEXT("The PCG parameter name differs from the descriptor found by GUID."),
+							TEXT("parameter.name"), MakeShared<FJsonValueString>(Desc->Name.ToString()),
+							MakeShared<FJsonValueString>(Operation.ParameterName.ToString()));
+					if (Desc->ValueType != EPropertyBagPropertyType::Double)
+						return FailOperation(TEXT("graph_compound_pcg_parameter_identity_invalid"),
+							TEXT("The PCG parameter descriptor is not a double property."),
+							TEXT("parameter.") + Operation.ParameterName.ToString() + TEXT(".type"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Desc->ValueType)),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(EPropertyBagPropertyType::Double)));
 					Operation.Kind =
 						EPcgAiSchemaMutationKind::PcgDoubleParameter;
 				}
@@ -3187,121 +3517,65 @@ namespace UE::UAI::Composition::GraphCompound
 						FindObjectValue(*Operation.Value, TEXT("value"));
 					FString ParsedDataTypeRef;
 					FString ParsedSourceRef;
-					if (!TryCanonicalStringField(
-							*Operation.Value, TEXT("data_type_ref"),
-							ParsedDataTypeRef))
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_data_asset_input_invalid"),
-							SemanticId);
-						return false;
-					}
+					const auto Input = ValueInput(TEXT("graph_compound_pcg_data_asset_input_invalid"));
+					if (!Input.ReadString(*Operation.Value, TEXT("data_type_ref"), ParsedDataTypeRef)) return false;
 					if (ParsedDataTypeRef != DataTypeRef)
+						return ValueInput(TEXT("graph_compound_pcg_data_type_unsupported")).Fail(
+							TEXT("This PCG data mutation supports only PCGPointData."),
+							TEXT("/data_type_ref"), MakeShared<FJsonValueString>(ParsedDataTypeRef), MakeShared<FJsonValueString>(DataTypeRef));
+					if (!Cast<UPCGDataAsset>(&Target))
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_data_type_unsupported"),
-							ParsedDataTypeRef);
+						OutError = NativeTypeFailure(TEXT("graph_compound_pcg_data_asset_input_invalid"),
+							TEXT("The native mutation target is not a PCGDataAsset."),
+							Request.GetTargetRef(), TEXT("target.class"), &Target, UPCGDataAsset::StaticClass());
+						OutError.OperationIndex = CurrentEditIndex;
 						return false;
 					}
-					if (!Cast<UPCGDataAsset>(&Target)
-						|| Edit.GetElementKind()
-							!= EGraphCompoundElementKind::Property
-						|| !Operation.Dependencies.IsEmpty()
-						|| SemanticId
-							!= TEXT("property:data_content:") + DataTypeRef
-						|| !HasExactObjectFields(
-							*Operation.Value,
-							{TEXT("content_revision"),
-								TEXT("data_type_ref"), TEXT("source_ref"),
-								TEXT("value")})
-						|| !TryCanonicalStringField(
-							*Operation.Value, TEXT("content_revision"),
-							Operation.ContentRevision)
-						|| !TryCanonicalStringField(
-							*Operation.Value, TEXT("source_ref"),
-							ParsedSourceRef)
-						|| !Content
-						|| !HasExactObjectFields(*Content, {TEXT("point_count")})
-						|| !TryCanonicalIntegerField(
-							*Content, TEXT("point_count"), Operation.PointCount)
-						|| Operation.PointCount <= 0)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_data_asset_input_invalid"),
-							SemanticId);
-						return false;
-					}
+					if (Edit.GetElementKind() != EGraphCompoundElementKind::Property)
+						return FailOperation(TEXT("graph_compound_pcg_data_asset_input_invalid"),
+							TEXT("PCG data content mutations require property elements."), TEXT("element_kind"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())), MakeShared<FJsonValueString>(TEXT("property")));
+					if (!Operation.Dependencies.IsEmpty())
+						return FailOperation(TEXT("graph_compound_pcg_data_asset_input_invalid"),
+							TEXT("PCG data content must not declare dependencies."), TEXT("dependencies.count"),
+							MakeShared<FJsonValueNumber>(Operation.Dependencies.Num()), MakeShared<FJsonValueNumber>(0));
+					if (SemanticId != TEXT("property:data_content:") + DataTypeRef)
+						return FailOperation(TEXT("graph_compound_pcg_data_asset_input_invalid"),
+							TEXT("The PCG data content identity differs from its data type."),
+							TEXT("identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+							MakeShared<FJsonValueString>(TEXT("property:data_content:") + DataTypeRef));
+					if (!Input.RequireFields(*Operation.Value, {TEXT("data_type_ref"), TEXT("source_ref"), TEXT("value")})
+						|| !Input.ReadString(*Operation.Value, TEXT("source_ref"), ParsedSourceRef)) return false;
+					if (!Content)
+						return Input.Fail(TEXT("The required PCG data content value is missing."), TEXT("/value"),
+							nullptr, MakeShared<FJsonValueString>(TEXT("object with point_count")));
+					const auto ContentInput = Input.At(TEXT("/value"));
+					if (!ContentInput.RequireFields(*Content, {TEXT("point_count")})
+						|| !ContentInput.ReadInteger(*Content, TEXT("point_count"), Operation.PointCount)) return false;
+					if (Operation.PointCount <= 0)
+						return ContentInput.Fail(TEXT("PCG point data requires a positive point count."),
+							TEXT("/point_count"), MakeShared<FJsonValueNumber>(Operation.PointCount),
+							MakeShared<FJsonValueString>(TEXT("integer greater than zero")));
 					Operation.SourceRef = FSoftObjectPath(ParsedSourceRef);
 					if (!Operation.SourceRef.IsValid())
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_data_asset_source_invalid"),
-							ParsedSourceRef);
-						return false;
-					}
+						return ValueInput(TEXT("graph_compound_pcg_data_asset_source_invalid")).Fail(
+							TEXT("The PCG data source reference is not a valid soft object path."),
+							TEXT("/source_ref"), MakeShared<FJsonValueString>(ParsedSourceRef),
+							MakeShared<FJsonValueString>(TEXT("valid soft object path")));
 					Operation.Kind = EPcgAiSchemaMutationKind::PcgDataAsset;
 				}
 				else
 				{
-					SetError(OutError,
-						TEXT("graph_compound_production_binding_unimplemented"),
-						Profile.GetCapabilityId());
-					return false;
+					return FailOperation(TEXT("graph_compound_production_binding_unimplemented"),
+						TEXT("No PCG/AI production mutation parser is implemented for this capability."),
+						TEXT("capability_id"), MakeShared<FJsonValueString>(Profile.GetCapabilityId()),
+						MakeShared<FJsonValueString>(TEXT("implemented PCG/AI mutation capability")));
 				}
 				OutOperations.Add(MoveTemp(Operation));
 			}
 			return true;
 		}
 
-		UEdGraphNode* FindBehaviorNode(
-			UBehaviorTreeGraph& Graph,
-			const FString& SemanticId)
-		{
-			for (UEdGraphNode* Node : Graph.Nodes)
-			{
-				if (Node && BehaviorTreeNodeSemanticId(*Node) == SemanticId)
-				{
-					return Node;
-				}
-			}
-			return nullptr;
-		}
-
-		UEnvironmentQueryGraphNode_Option* FindEqsOptionNode(
-			UEnvironmentQueryGraph& Graph,
-			const FString& SemanticId)
-		{
-			for (UEdGraphNode* Node : Graph.Nodes)
-			{
-				UEnvironmentQueryGraphNode_Option* const Option =
-					Cast<UEnvironmentQueryGraphNode_Option>(Node);
-				if (Option && EqsOptionSemanticId(*Option) == SemanticId)
-				{
-					return Option;
-				}
-			}
-			return nullptr;
-		}
-
-		UEdGraphPin* FindDirectionPin(
-			UEdGraphNode& Node,
-			const EEdGraphPinDirection Direction,
-			const int32 DirectionIndex)
-		{
-			int32 Index = 0;
-			for (UEdGraphPin* Pin : Node.Pins)
-			{
-				if (Pin && Pin->Direction == Direction)
-				{
-					if (Index == DirectionIndex)
-					{
-						return Pin;
-					}
-					++Index;
-				}
-			}
-			return nullptr;
-		}
 
 		bool TryApplySchemaMutationOperations(
 			UObject& Target,
@@ -3311,74 +3585,129 @@ namespace UE::UAI::Composition::GraphCompound
 			FGraphCompoundRuntimeError& OutError)
 		{
 			OutRevision.Reset();
-			if (UPCGComponent* const Component = Cast<UPCGComponent>(&Target))
+			bool bApplyMayHaveStarted = false;
+			auto NumberFact = [](const double Value) -> TSharedPtr<FJsonValue>
 			{
-				if (Operations.Num() != 1
-					|| Operations[0].Kind
-						!= EPcgAiSchemaMutationKind::PcgComponentBinding
-					|| !Operations[0].GraphInterface)
+				if (FMath::IsFinite(Value)) return MakeShared<FJsonValueNumber>(Value);
+				return MakeShared<FJsonValueString>(::LexToString(Value));
+			};
+			auto FailApply = [&](const TCHAR* Code, const FString& Reason, const FString& Field,
+				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+				const FPcgAiSchemaMutationOperation* Operation = nullptr, const bool bMutationMayHaveStarted = false)
+			{
+				OutError = NativeFailure(Code, Reason, Target.GetPathName(), Field, MoveTemp(Actual), MoveTemp(Expected));
+				OutError.MutationMayHaveStarted = bMutationMayHaveStarted || bApplyMayHaveStarted;
+				if (Operation)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_component_binding_invalid"),
-						Component->GetPathName());
+					OutError.SubjectId = Operation->SemanticId;
+					OutError.OperationIndex = static_cast<int32>(Operation - Operations.GetData());
+				}
+				return false;
+			};
+			auto FailNativeApply = [&](const TCHAR* Code, const FString& Reason, const FString& Field,
+				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+				const FPcgAiSchemaMutationOperation& Operation, const FDiagnostic& NativeError)
+			{
+				if (!NativeError.IsEmpty())
+				{
+					SetError(OutError, NativeError, Operation.SemanticId);
+					if (bApplyMayHaveStarted) OutError.MutationMayHaveStarted = true;
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target.GetPathName();
+					if (!OutError.OperationIndex.IsSet())
+						OutError.OperationIndex = static_cast<int32>(&Operation - Operations.GetData());
 					return false;
 				}
+				return FailApply(Code, Reason, Field, MoveTemp(Actual), MoveTemp(Expected), &Operation, true);
+			};
+			if (UPCGComponent* const Component = Cast<UPCGComponent>(&Target))
+			{
+				if (Operations.Num() != 1)
+					return FailApply(TEXT("graph_compound_pcg_component_binding_invalid"),
+						TEXT("PCG component apply requires exactly one operation."), TEXT("operations.count"),
+						MakeShared<FJsonValueNumber>(Operations.Num()), MakeShared<FJsonValueNumber>(1));
+				if (Operations[0].Kind != EPcgAiSchemaMutationKind::PcgComponentBinding)
+					return FailApply(TEXT("graph_compound_pcg_component_binding_invalid"),
+						TEXT("PCG component apply requires a component graph-binding operation."), TEXT("operation.kind"),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Operations[0].Kind)),
+						MakeShared<FJsonValueString>(TEXT("PcgComponentBinding")), &Operations[0]);
+				if (!Operations[0].GraphInterface)
+					return FailApply(TEXT("graph_compound_pcg_component_binding_invalid"),
+						TEXT("The PCG component binding operation has no graph interface."), TEXT("operation.graph_interface"),
+						nullptr, MakeShared<FJsonValueString>(TEXT("PCGGraphInterface")), &Operations[0]);
 				const FPcgAiSchemaMutationOperation& Operation = Operations[0];
 				FPcgAiNodeGraphNativeMutationReceipt ApplyReceipt;
 				FPcgAiNodeGraphBarrierReceipt BarrierReceipt;
 				FPcgAiNodeGraphComponentBindingIdentity Identity;
 				FString Evidence;
 				FPcgAiNodeGraphAdapterError NativeError;
+				bApplyMayHaveStarted = true;
 				if (!NativeHook.TryBindAndCapturePcgComponent(
-						*Component, *Operation.GraphInterface,
-						Operation.NativeGenerationPolicy,
-						ApplyReceipt, BarrierReceipt, Identity,
-						OutRevision, Evidence, NativeError)
-					|| !BarrierReceipt.IsComplete()
-					|| BarrierReceipt.GetErrorCount() != 0
-					|| !Component->GetGraphInstance()
-					|| Component->GetGraphInstance()->Graph
-						!= Operation.GraphInterface
-					|| Component->GenerationTrigger
-						!= Operation.NativeGenerationTrigger
-					|| Identity.GetActorIdentity() != Operation.ActorRef
-					|| Identity.GetComponentIdentity()
-						!= Component->GetPathName()
-					|| Identity.GetGraphIdentity()
-						!= Operation.GraphInterface->GetGraph()->GetPathName()
-					|| Identity.GetGenerationPolicy()
-						!= Operation.NativeGenerationPolicy)
-				{
-					SetError(OutError,
-						NativeError.GetCode().IsEmpty()
-							? TEXT("graph_compound_pcg_component_refresh_incomplete")
-							: NativeError.GetCode(),
-						Operation.SemanticId, NativeError.GetDetail());
-					return false;
-				}
+						*Component, *Operation.GraphInterface, Operation.NativeGenerationPolicy,
+						ApplyReceipt, BarrierReceipt, Identity, OutRevision, Evidence, NativeError))
+					return FailNativeApply(TEXT("graph_compound_pcg_component_refresh_incomplete"),
+						TEXT("The native PCG component bind-and-capture call failed without a diagnostic."),
+						TEXT("native_call.succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Operation, NativeError);
+				if (!BarrierReceipt.IsComplete())
+					return FailNativeApply(TEXT("graph_compound_pcg_component_refresh_incomplete"),
+						TEXT("The native PCG component barrier did not complete."), TEXT("barrier.complete"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Operation, NativeError);
+				if (BarrierReceipt.GetErrorCount() != 0)
+					return FailNativeApply(TEXT("graph_compound_pcg_component_refresh_incomplete"),
+						TEXT("The native PCG component barrier reported errors."), TEXT("barrier.error_count"),
+						MakeShared<FJsonValueNumber>(BarrierReceipt.GetErrorCount()), MakeShared<FJsonValueNumber>(0), Operation, NativeError);
+				if (!Component->GetGraphInstance())
+					return FailNativeApply(TEXT("graph_compound_pcg_component_refresh_incomplete"),
+						TEXT("The PCG component has no graph instance after binding."), TEXT("component.graph_instance"),
+						nullptr, MakeShared<FJsonValueString>(TEXT("PCGGraphInstance")), Operation, NativeError);
+				if (Component->GetGraphInstance()->Graph != Operation.GraphInterface)
+					return FailNativeApply(TEXT("graph_compound_pcg_component_refresh_incomplete"),
+						TEXT("The PCG component readback graph differs from the requested binding."), TEXT("component.graph"),
+						Component->GetGraphInstance()->Graph ? MakeShared<FJsonValueString>(Component->GetGraphInstance()->Graph->GetPathName()) : TSharedPtr<FJsonValue>(),
+						MakeShared<FJsonValueString>(Operation.GraphInterface->GetPathName()), Operation, NativeError);
+				if (Component->GenerationTrigger != Operation.NativeGenerationTrigger)
+					return FailNativeApply(TEXT("graph_compound_pcg_component_refresh_incomplete"),
+						TEXT("The PCG component readback generation trigger differs from the requested trigger."),
+						TEXT("component.generation_trigger"), MakeShared<FJsonValueNumber>(static_cast<int32>(Component->GenerationTrigger)),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Operation.NativeGenerationTrigger)), Operation, NativeError);
+				if (Identity.GetActorIdentity() != Operation.ActorRef)
+					return FailNativeApply(TEXT("graph_compound_pcg_component_refresh_incomplete"),
+						TEXT("The captured PCG component owner differs from the requested actor."), TEXT("identity.actor_ref"),
+						MakeShared<FJsonValueString>(Identity.GetActorIdentity()), MakeShared<FJsonValueString>(Operation.ActorRef), Operation, NativeError);
+				if (Identity.GetComponentIdentity() != Component->GetPathName())
+					return FailNativeApply(TEXT("graph_compound_pcg_component_refresh_incomplete"),
+						TEXT("The captured PCG component identity differs from the native target."), TEXT("identity.component_ref"),
+						MakeShared<FJsonValueString>(Identity.GetComponentIdentity()), MakeShared<FJsonValueString>(Component->GetPathName()), Operation, NativeError);
+				if (Identity.GetGraphIdentity() != Operation.GraphInterface->GetGraph()->GetPathName())
+					return FailNativeApply(TEXT("graph_compound_pcg_component_refresh_incomplete"),
+						TEXT("The captured PCG graph identity differs from the requested graph."), TEXT("identity.graph_ref"),
+						MakeShared<FJsonValueString>(Identity.GetGraphIdentity()),
+						MakeShared<FJsonValueString>(Operation.GraphInterface->GetGraph()->GetPathName()), Operation, NativeError);
+				if (Identity.GetGenerationPolicy() != Operation.NativeGenerationPolicy)
+					return FailNativeApply(TEXT("graph_compound_pcg_component_refresh_incomplete"),
+						TEXT("The captured PCG generation policy differs from the requested native policy."), TEXT("identity.generation_policy"),
+						MakeShared<FJsonValueString>(Identity.GetGenerationPolicy()),
+						MakeShared<FJsonValueString>(Operation.NativeGenerationPolicy), Operation, NativeError);
 				return true;
 			}
 			if (UPCGDataAsset* const DataAsset = Cast<UPCGDataAsset>(&Target))
 			{
-				if (Operations.Num() != 1
-					|| Operations[0].Kind
-						!= EPcgAiSchemaMutationKind::PcgDataAsset)
-				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_data_asset_input_invalid"),
-						DataAsset->GetPathName());
-					return false;
-				}
-				const FPcgAiSchemaMutationOperation& Operation = Operations[0];
+				if (Operations.Num() != 1)
+					return FailApply(TEXT("graph_compound_pcg_data_asset_input_invalid"),
+						TEXT("PCG data asset apply requires exactly one operation."), TEXT("operations.count"),
+						MakeShared<FJsonValueNumber>(Operations.Num()), MakeShared<FJsonValueNumber>(1));
+				if (Operations[0].Kind != EPcgAiSchemaMutationKind::PcgDataAsset)
+					return FailApply(TEXT("graph_compound_pcg_data_asset_input_invalid"),
+						TEXT("PCG data asset apply requires a data-content operation."), TEXT("operation.kind"),
+						MakeShared<FJsonValueNumber>(static_cast<int32>(Operations[0].Kind)),
+						MakeShared<FJsonValueString>(TEXT("PcgDataAsset")), &Operations[0]);
+				FPcgAiSchemaMutationOperation& Operation = Operations[0];
+				bApplyMayHaveStarted = true;
 				UPCGPointData* const PointData = NewObject<UPCGPointData>(
 					DataAsset, NAME_None, RF_Transactional);
 				if (!PointData)
-				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_data_asset_allocation_failed"),
-						DataAsset->GetPathName());
-					return false;
-				}
+					return FailApply(TEXT("graph_compound_pcg_data_asset_allocation_failed"),
+						TEXT("The PCG point-data object could not be allocated in the data asset."), TEXT("point_data"),
+						nullptr, ClassPathValue(UPCGPointData::StaticClass()), &Operation);
 				TArray<FPCGPoint> Points;
 				Points.Reserve(Operation.PointCount);
 				for (int32 Index = 0; Index < Operation.PointCount; ++Index)
@@ -3388,6 +3717,12 @@ namespace UE::UAI::Composition::GraphCompound
 						1.0f, Index + 1);
 				}
 				PointData->SetPoints(Points);
+				Operation.ContentRevision = TEXT("md5:") + FMD5::HashAnsiString(
+					*FString::Printf(TEXT("%s|%s|%s|%d"),
+						*DataAsset->GetPathName(),
+						*UPCGPointData::StaticClass()->GetPathName(),
+						*Operation.SourceRef.ToString(),
+						Operation.PointCount));
 
 				FPcgAiNodeGraphNativeMutationReceipt ApplyReceipt;
 				FPcgAiNodeGraphBarrierReceipt BarrierReceipt;
@@ -3396,24 +3731,32 @@ namespace UE::UAI::Composition::GraphCompound
 				FPcgAiNodeGraphAdapterError NativeError;
 				if (!NativeHook.TrySetAndCapturePcgDataAsset(
 						*DataAsset, *PointData, Operation.SourceRef,
-						ApplyReceipt, BarrierReceipt, Identity,
-						Evidence, NativeError)
-					|| !BarrierReceipt.IsComplete()
-					|| BarrierReceipt.GetErrorCount() != 0
-					|| Identity.GetDataAssetIdentity()
-						!= DataAsset->GetPathName()
-					|| Identity.GetDataTypeIdentity()
-						!= UPCGPointData::StaticClass()->GetPathName()
-					|| Identity.GetSourceIdentity()
-						!= Operation.SourceRef.ToString())
-				{
-					SetError(OutError,
-						NativeError.GetCode().IsEmpty()
-							? TEXT("graph_compound_pcg_data_asset_apply_failed")
-							: NativeError.GetCode(),
-						Operation.SemanticId, NativeError.GetDetail());
-					return false;
-				}
+						ApplyReceipt, BarrierReceipt, Identity, Evidence, NativeError))
+					return FailNativeApply(TEXT("graph_compound_pcg_data_asset_apply_failed"),
+						TEXT("The native PCG data set-and-capture call failed without a diagnostic."),
+						TEXT("native_call.succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Operation, NativeError);
+				if (!BarrierReceipt.IsComplete())
+					return FailNativeApply(TEXT("graph_compound_pcg_data_asset_apply_failed"),
+						TEXT("The native PCG data asset barrier did not complete."), TEXT("barrier.complete"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Operation, NativeError);
+				if (BarrierReceipt.GetErrorCount() != 0)
+					return FailNativeApply(TEXT("graph_compound_pcg_data_asset_apply_failed"),
+						TEXT("The native PCG data asset barrier reported errors."), TEXT("barrier.error_count"),
+						MakeShared<FJsonValueNumber>(BarrierReceipt.GetErrorCount()), MakeShared<FJsonValueNumber>(0), Operation, NativeError);
+				if (Identity.GetDataAssetIdentity() != DataAsset->GetPathName())
+					return FailNativeApply(TEXT("graph_compound_pcg_data_asset_apply_failed"),
+						TEXT("The captured PCG data asset identity differs from the native target."), TEXT("identity.data_asset_ref"),
+						MakeShared<FJsonValueString>(Identity.GetDataAssetIdentity()),
+						MakeShared<FJsonValueString>(DataAsset->GetPathName()), Operation, NativeError);
+				if (Identity.GetDataTypeIdentity() != UPCGPointData::StaticClass()->GetPathName())
+					return FailNativeApply(TEXT("graph_compound_pcg_data_asset_apply_failed"),
+						TEXT("The captured PCG data type differs from PCGPointData."), TEXT("identity.data_type_ref"),
+						MakeShared<FJsonValueString>(Identity.GetDataTypeIdentity()), ClassPathValue(UPCGPointData::StaticClass()), Operation, NativeError);
+				if (Identity.GetSourceIdentity() != Operation.SourceRef.ToString())
+					return FailNativeApply(TEXT("graph_compound_pcg_data_asset_apply_failed"),
+						TEXT("The captured PCG data source differs from the requested source."), TEXT("identity.source_ref"),
+						MakeShared<FJsonValueString>(Identity.GetSourceIdentity()),
+						MakeShared<FJsonValueString>(Operation.SourceRef.ToString()), Operation, NativeError);
 				DataAsset->Data.TaggedData[0].Tags = {
 					PcgDataContentRevisionTagPrefix
 						+ Operation.ContentRevision};
@@ -3430,42 +3773,44 @@ namespace UE::UAI::Composition::GraphCompound
 					if (Operation.Kind
 						== EPcgAiSchemaMutationKind::PcgGraphBinding)
 					{
-						if (RequestedGraph
-							|| !Operation.GraphInterface)
-						{
-							SetError(OutError,
-								TEXT("graph_compound_pcg_graph_binding_invalid"),
-								Operation.SemanticId);
-							return false;
-						}
+						if (RequestedGraph)
+							return FailApply(TEXT("graph_compound_pcg_graph_binding_invalid"),
+								TEXT("PCG graph instance apply contains more than one graph binding."),
+								TEXT("operation.graph_binding"), MakeShared<FJsonValueString>(RequestedGraph->GetPathName()),
+								MakeShared<FJsonValueString>(TEXT("exactly one graph binding")), &Operation);
+						if (!Operation.GraphInterface)
+							return FailApply(TEXT("graph_compound_pcg_graph_binding_invalid"),
+								TEXT("The PCG graph binding operation has no graph interface."),
+								TEXT("operation.graph_interface"), nullptr,
+								MakeShared<FJsonValueString>(TEXT("PCGGraphInterface")), &Operation);
 						RequestedGraph = Operation.GraphInterface;
 					}
 					else if (Operation.Kind
 						!= EPcgAiSchemaMutationKind::PcgDoubleParameter)
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_graph_instance_invalid"),
-							Operation.SemanticId);
-						return false;
+						return FailApply(TEXT("graph_compound_pcg_graph_instance_invalid"),
+							TEXT("PCG graph instance apply supports only graph-binding and double-parameter operations."),
+							TEXT("operation.kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Operation.Kind)),
+							MakeShared<FJsonValueString>(TEXT("PcgGraphBinding or PcgDoubleParameter")), &Operation);
 					}
 				}
-				if (!RequestedGraph
-					|| !Instance->CanGraphInterfaceBeSet(RequestedGraph))
-				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_graph_binding_invalid"),
-						Instance->GetPathName());
-					return false;
-				}
+				if (!RequestedGraph)
+					return FailApply(TEXT("graph_compound_pcg_graph_binding_invalid"),
+						TEXT("PCG graph instance apply has no requested graph binding."), TEXT("requested_graph"),
+						nullptr, MakeShared<FJsonValueString>(TEXT("graph binding")));
+				if (!Instance->CanGraphInterfaceBeSet(RequestedGraph))
+					return FailApply(TEXT("graph_compound_pcg_graph_binding_invalid"),
+						TEXT("The requested graph source would create a recursive PCG graph-instance hierarchy."),
+						TEXT("requested_graph"), MakeShared<FJsonValueString>(RequestedGraph->GetPathName()),
+						MakeShared<FJsonValueString>(TEXT("graph source that does not recurse to this instance")));
+				bApplyMayHaveStarted = true;
 				Instance->Modify();
 				Instance->SetGraph(RequestedGraph);
 				if (Instance->Graph != RequestedGraph)
-				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_graph_binding_failed"),
-						RequestedGraph->GetPathName());
-					return false;
-				}
+					return FailApply(TEXT("graph_compound_pcg_graph_binding_failed"),
+						TEXT("The PCG graph instance readback differs from the graph passed to SetGraph."), TEXT("graph"),
+						Instance->Graph ? MakeShared<FJsonValueString>(Instance->Graph->GetPathName()) : TSharedPtr<FJsonValue>(),
+						MakeShared<FJsonValueString>(RequestedGraph->GetPathName()), nullptr, true);
 				TArray<FString> RevisionLines = {
 					TEXT("binding:graph_source|") + RequestedGraph->GetPathName()};
 				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
@@ -3484,37 +3829,54 @@ namespace UE::UAI::Composition::GraphCompound
 					const FProperty* const Property = BagStruct
 						? BagStruct->FindPropertyByName(Operation.ParameterName)
 						: nullptr;
-					if (!Desc || Desc->Name != Operation.ParameterName
-						|| Desc->ValueType != EPropertyBagPropertyType::Double
-						|| !Property)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_parameter_identity_invalid"),
-							Operation.SemanticId);
-						return false;
-					}
+					if (!Desc)
+						return FailApply(TEXT("graph_compound_pcg_parameter_identity_invalid"),
+							TEXT("The PCG override parameter descriptor was not found by GUID."),
+							TEXT("parameters/") + Operation.ParameterGuid.ToString(EGuidFormats::DigitsWithHyphensLower),
+							nullptr, MakeShared<FJsonValueString>(Operation.ParameterName.ToString()), &Operation, true);
+					if (Desc->Name != Operation.ParameterName)
+						return FailApply(TEXT("graph_compound_pcg_parameter_identity_invalid"),
+							TEXT("The PCG override parameter name differs from the descriptor found by GUID."),
+							TEXT("parameter.name"), MakeShared<FJsonValueString>(Desc->Name.ToString()),
+							MakeShared<FJsonValueString>(Operation.ParameterName.ToString()), &Operation, true);
+					if (Desc->ValueType != EPropertyBagPropertyType::Double)
+						return FailApply(TEXT("graph_compound_pcg_parameter_identity_invalid"),
+							TEXT("The PCG override parameter descriptor is not a double property."),
+							TEXT("parameter.") + Operation.ParameterName.ToString() + TEXT(".type"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Desc->ValueType)),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(EPropertyBagPropertyType::Double)), &Operation, true);
+					if (!Property)
+						return FailApply(TEXT("graph_compound_pcg_parameter_identity_invalid"),
+							TEXT("The PCG override property was not found by name in the property bag."),
+							TEXT("parameter.property"), nullptr,
+							MakeShared<FJsonValueString>(Operation.ParameterName.ToString()), &Operation, true);
 					Instance->UpdatePropertyOverride(Property, true);
-					if (Instance->SetGraphParameter<double>(
-							Operation.ParameterName, Operation.DoubleValue)
-						!= EPropertyBagResult::Success)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_parameter_write_failed"),
-							Operation.SemanticId);
-						return false;
-					}
+					const EPropertyBagResult WriteResult = Instance->SetGraphParameter<double>(
+						Operation.ParameterName, Operation.DoubleValue);
+					if (WriteResult != EPropertyBagResult::Success)
+						return FailApply(TEXT("graph_compound_pcg_parameter_write_failed"),
+							TEXT("The native PCG double-parameter setter returned a failure result."),
+							TEXT("parameter.") + Operation.ParameterName.ToString() + TEXT(".write_result"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(WriteResult)),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(EPropertyBagResult::Success)), &Operation, true);
 					const TValueOrError<double, EPropertyBagResult> Readback =
 						Instance->GetGraphParameter<double>(Operation.ParameterName);
-					if (!Instance->ParametersOverrides.IsPropertyOverridden(Property)
-						|| !Readback.IsValid()
-						|| !FMath::IsNearlyEqual(
-							Readback.GetValue(), Operation.DoubleValue))
-					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_parameter_refresh_incomplete"),
-							Operation.SemanticId);
-						return false;
-					}
+					if (!Instance->ParametersOverrides.IsPropertyOverridden(Property))
+						return FailApply(TEXT("graph_compound_pcg_parameter_refresh_incomplete"),
+							TEXT("The PCG parameter was not marked overridden after the update."),
+							TEXT("parameter.") + Operation.ParameterName.ToString() + TEXT(".overridden"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), &Operation, true);
+					if (!Readback.IsValid())
+						return FailApply(TEXT("graph_compound_pcg_parameter_refresh_incomplete"),
+							TEXT("The native PCG double-parameter getter returned a failure result."),
+							TEXT("parameter.") + Operation.ParameterName.ToString() + TEXT(".read_result"),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(Readback.GetError())),
+							MakeShared<FJsonValueNumber>(static_cast<int32>(EPropertyBagResult::Success)), &Operation, true);
+					if (!FMath::IsNearlyEqual(Readback.GetValue(), Operation.DoubleValue))
+						return FailApply(TEXT("graph_compound_pcg_parameter_refresh_incomplete"),
+							TEXT("The PCG parameter readback differs from the requested value."),
+							TEXT("parameter.") + Operation.ParameterName.ToString() + TEXT(".value"),
+							NumberFact(Readback.GetValue()), NumberFact(Operation.DoubleValue), &Operation, true);
 					RevisionLines.Add(FString::Printf(TEXT("%s|%.17g"),
 						*Operation.SemanticId, Operation.DoubleValue));
 				}
@@ -3533,22 +3895,38 @@ namespace UE::UAI::Composition::GraphCompound
 						UPCGNode* Node = nullptr;
 						QueryOwners::Pcg::FPcgNodeCandidate ResolvedCandidate;
 						QueryOwners::Pcg::FPcgNodeCandidateQueryError CandidateError;
-						if (!QueryOwners::Pcg::TryPerformPcgNodeCandidate(
-								*Graph,
-								Operation.CandidateName,
-								Operation.CandidateId,
-								FVector2f(
-									Operation.PositionX, Operation.PositionY),
-								Node,
-								ResolvedCandidate,
-								CandidateError)
-							|| !Node)
+						bApplyMayHaveStarted = true;
+						const bool bCandidatePerformed = QueryOwners::Pcg::TryPerformPcgNodeCandidate(
+							*Graph, Operation.CandidateName, FString(),
+							FVector2f(Operation.PositionX, Operation.PositionY),
+							Node, ResolvedCandidate, CandidateError, Operation.CandidateSelect);
+						if (!bCandidatePerformed || !Node)
 						{
-							SetError(OutError,
-								CandidateError.Code.IsEmpty()
-									? TEXT("graph_compound_pcg_graph_node_create_failed")
-									: CandidateError.Code,
-								Operation.SemanticId, CandidateError.Detail);
+							OutError = CandidateError.IsValid() ? CandidateError : UE::UAI::Contract::FDiagnostic::Failure(
+								TEXT("graph_compound_pcg_graph_node_create_failed"),
+								bCandidatePerformed
+									? TEXT("The PCG candidate action completed without returning a node.")
+									: TEXT("The PCG candidate action failed without providing a diagnostic."), TEXT("native_graph"));
+							if (!CandidateError.IsValid())
+							{
+								OutError.SourceKind = TEXT("native_result");
+								OutError.ActualValuePresent = false;
+								OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("PCG node"));
+								OutError.MutationMayHaveStarted = true;
+							}
+							if (!Operation.InputPointer.IsEmpty() && OutError.SourceKind.IsEmpty())
+							{
+								const FString RootPointer = Operation.InputPointer == TEXT("/") ? FString() : Operation.InputPointer;
+								if (OutError.PropertyPath == TEXT("x") || OutError.PropertyPath == TEXT("y"))
+								{
+									OutError.Source.JsonPath = OutError.PropertyPath == TEXT("x") ? TEXT("/0") : TEXT("/1");
+									UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, RootPointer + TEXT("/position"));
+								}
+								else UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, RootPointer + TEXT("/candidate"));
+								OutError.SourceKind = TEXT("related_input");
+							}
+							if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Operation.TargetPath;
+							if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Operation.SemanticId;
 							return false;
 						}
 						Node->Modify();
@@ -3568,28 +3946,31 @@ namespace UE::UAI::Composition::GraphCompound
 						FString ParameterRevision;
 						FString Evidence;
 						FPcgAiNodeGraphAdapterError NativeError;
+						bApplyMayHaveStarted = true;
 						if (!NativeHook.TrySetPcgDoubleParameter(
-								*Graph, Operation.ParameterGuid,
-								Operation.ParameterName, Operation.DoubleValue,
-								ApplyReceipt, BarrierReceipt, Identity,
-								ParameterRevision, Evidence, NativeError)
-							|| !BarrierReceipt.IsComplete()
-							|| BarrierReceipt.GetErrorCount() != 0)
-						{
-							SetError(OutError,
-								NativeError.GetCode().IsEmpty()
-									? TEXT("graph_compound_pcg_parameter_write_failed")
-									: NativeError.GetCode(),
-								Operation.SemanticId, NativeError.GetDetail());
-							return false;
-						}
+								*Graph, Operation.ParameterGuid, Operation.ParameterName, Operation.DoubleValue,
+								ApplyReceipt, BarrierReceipt, Identity, ParameterRevision, Evidence, NativeError))
+							return FailNativeApply(TEXT("graph_compound_pcg_parameter_write_failed"),
+								TEXT("The native PCG parameter setter failed without a diagnostic."),
+								TEXT("parameter.") + Operation.ParameterName.ToString() + TEXT(".native_call.succeeded"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Operation, NativeError);
+						if (!BarrierReceipt.IsComplete())
+							return FailNativeApply(TEXT("graph_compound_pcg_parameter_write_failed"),
+								TEXT("The native PCG parameter barrier did not complete."),
+								TEXT("parameter.") + Operation.ParameterName.ToString() + TEXT(".barrier.complete"),
+								MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Operation, NativeError);
+						if (BarrierReceipt.GetErrorCount() != 0)
+							return FailNativeApply(TEXT("graph_compound_pcg_parameter_write_failed"),
+								TEXT("The native PCG parameter barrier reported errors."),
+								TEXT("parameter.") + Operation.ParameterName.ToString() + TEXT(".barrier.error_count"),
+								MakeShared<FJsonValueNumber>(BarrierReceipt.GetErrorCount()), MakeShared<FJsonValueNumber>(0), Operation, NativeError);
 					}
 					else
 					{
-						SetError(OutError,
-							TEXT("graph_compound_pcg_graph_operation_invalid"),
-							Operation.SemanticId);
-						return false;
+						return FailApply(TEXT("graph_compound_pcg_graph_operation_invalid"),
+							TEXT("PCG graph apply supports only node-creation and double-parameter operations."),
+							TEXT("operation.kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Operation.Kind)),
+							MakeShared<FJsonValueString>(TEXT("PcgGraphNode or PcgDoubleParameter")), &Operation);
 					}
 				}
 				FPcgAiNodeGraphBarrierReceipt BarrierReceipt;
@@ -3599,652 +3980,18 @@ namespace UE::UAI::Composition::GraphCompound
 				FPcgAiNodeGraphAdapterError NativeError;
 				if (!NativeHook.TryCompileAndCapturePcgGraph(
 						*Graph, BarrierReceipt, Topology, Parameters,
-						OutRevision, Evidence, NativeError)
-					|| !BarrierReceipt.IsComplete()
-					|| BarrierReceipt.GetErrorCount() != 0)
+						OutRevision, Evidence, NativeError))
 				{
-					SetError(OutError,
-						NativeError.GetCode().IsEmpty()
-							? TEXT("graph_compound_pcg_graph_compile_failed")
-							: NativeError.GetCode(),
-						Graph->GetPathName(), NativeError.GetDetail());
+					SetError(OutError, MoveTemp(NativeError), Graph->GetPathName());
 					return false;
 				}
 				return true;
 			}
 
-			if (UBehaviorTree* const Tree = Cast<UBehaviorTree>(&Target))
-			{
-#if WITH_EDITORONLY_DATA
-				UBehaviorTreeGraph* Graph = Cast<UBehaviorTreeGraph>(Tree->BTGraph);
-				if (!Graph)
-				{
-					Graph = NewObject<UBehaviorTreeGraph>(
-						Tree, TEXT("BehaviorTreeGraph"), RF_Transactional);
-					if (!Graph)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_behavior_tree_graph_create_failed"),
-							Tree->GetPathName());
-						return false;
-					}
-					Tree->BTGraph = Graph;
-					Graph->OnCreated();
-					Graph->Initialize();
-				}
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-				{
-					if (Operation.Kind == EPcgAiSchemaMutationKind::BehaviorRoot)
-					{
-						UBehaviorTreeGraphNode_Root* const Node =
-							NewObject<UBehaviorTreeGraphNode_Root>(Graph);
-						Node->CreateNewGuid();
-						Node->PostPlacedNewNode();
-						Node->AllocateDefaultPins();
-						Graph->AddNode(Node, false, false);
-					}
-					else if (Operation.Kind
-						== EPcgAiSchemaMutationKind::BehaviorComposite)
-					{
-						if (!Operation.CandidateName.IsEmpty()
-							|| !Operation.CandidateId.IsEmpty())
-						{
-							UBehaviorTreeGraphNode* NativeNode = nullptr;
-							QueryOwners::AiBehavior::FAiBehaviorCandidate
-								ResolvedCandidate;
-							QueryOwners::AiBehavior::FAiBehaviorCandidateQueryError
-								CandidateError;
-							if (!QueryOwners::AiBehavior::TryPerformBehaviorTreeCandidate(
-									*Tree,
-									Operation.CandidateName,
-									Operation.CandidateId,
-									FVector2f(
-										Operation.PositionX,
-										Operation.PositionY),
-									NativeNode,
-									ResolvedCandidate,
-									CandidateError)
-								|| !NativeNode
-								|| !NativeNode->IsA<
-									UBehaviorTreeGraphNode_Composite>()
-								|| !NativeNode->NodeInstance
-								|| NativeNode->NodeInstance->GetClass()
-									!= Operation.PayloadClass)
-							{
-								SetError(
-									OutError,
-									CandidateError.Code.IsEmpty()
-										? TEXT("graph_compound_behavior_tree_native_action_failed")
-										: CandidateError.Code,
-									Operation.SemanticId,
-									CandidateError.Detail);
-								return false;
-							}
-							NativeNode->Modify();
-							NativeNode->NodeGuid = Operation.NodeGuid;
-						}
-						else
-						{
-							UBehaviorTreeGraphNode_Composite* const Node =
-								NewObject<UBehaviorTreeGraphNode_Composite>(Graph);
-							Node->NodeInstance = NewObject<UBTCompositeNode>(
-								Tree,
-								Operation.PayloadClass,
-								NAME_None,
-								RF_Transactional);
-							if (!Node->NodeInstance)
-							{
-								SetError(OutError,
-									TEXT("graph_compound_behavior_tree_payload_create_failed"),
-									Operation.SemanticId);
-								return false;
-							}
-							Node->PostPlacedNewNode();
-							Node->NodeGuid = Operation.NodeGuid;
-							Node->AllocateDefaultPins();
-							Graph->AddNode(Node, false, false);
-						}
-					}
-					else if (Operation.Kind
-						== EPcgAiSchemaMutationKind::BehaviorTask)
-					{
-						if (!Operation.CandidateName.IsEmpty()
-							|| !Operation.CandidateId.IsEmpty())
-						{
-							UBehaviorTreeGraphNode* NativeNode = nullptr;
-							QueryOwners::AiBehavior::FAiBehaviorCandidate
-								ResolvedCandidate;
-							QueryOwners::AiBehavior::FAiBehaviorCandidateQueryError
-								CandidateError;
-							if (!QueryOwners::AiBehavior::TryPerformBehaviorTreeCandidate(
-									*Tree,
-									Operation.CandidateName,
-									Operation.CandidateId,
-									FVector2f(
-										Operation.PositionX,
-										Operation.PositionY),
-									NativeNode,
-									ResolvedCandidate,
-									CandidateError)
-								|| !NativeNode
-								|| !NativeNode->IsA<UBehaviorTreeGraphNode_Task>()
-								|| !NativeNode->NodeInstance
-								|| NativeNode->NodeInstance->GetClass()
-									!= Operation.PayloadClass)
-							{
-								SetError(
-									OutError,
-									CandidateError.Code.IsEmpty()
-										? TEXT("graph_compound_behavior_tree_native_action_failed")
-										: CandidateError.Code,
-									Operation.SemanticId,
-									CandidateError.Detail);
-								return false;
-							}
-							NativeNode->Modify();
-							NativeNode->NodeGuid = Operation.NodeGuid;
-						}
-						else
-						{
-							UBehaviorTreeGraphNode_Task* const Node =
-								NewObject<UBehaviorTreeGraphNode_Task>(Graph);
-							Node->NodeInstance = NewObject<UBTTaskNode>(
-								Tree,
-								Operation.PayloadClass,
-								NAME_None,
-								RF_Transactional);
-							if (!Node->NodeInstance)
-							{
-								SetError(OutError,
-									TEXT("graph_compound_behavior_tree_payload_create_failed"),
-									Operation.SemanticId);
-								return false;
-							}
-							Node->PostPlacedNewNode();
-							Node->NodeGuid = Operation.NodeGuid;
-							Node->AllocateDefaultPins();
-							Graph->AddNode(Node, false, false);
-						}
-					}
-					else if (Operation.Kind
-						== EPcgAiSchemaMutationKind::BehaviorBlackboardBinding)
-					{
-						UBlackboardData* const Blackboard =
-							LoadObject<UBlackboardData>(nullptr, *Operation.ObjectRef);
-						if (!Blackboard)
-						{
-							SetError(OutError,
-								TEXT("graph_compound_behavior_tree_blackboard_unresolved"),
-								Operation.ObjectRef);
-							return false;
-						}
-						Tree->Modify();
-						Tree->BlackboardAsset = Blackboard;
-					}
-				}
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-				{
-					const bool bService = Operation.Kind
-						== EPcgAiSchemaMutationKind::BehaviorService;
-					const bool bDecorator = Operation.Kind
-						== EPcgAiSchemaMutationKind::BehaviorDecorator;
-					if (!bService && !bDecorator)
-					{
-						continue;
-					}
-					UBehaviorTreeGraphNode* const OwnerNode =
-						Cast<UBehaviorTreeGraphNode>(
-							FindBehaviorNode(*Graph, Operation.OwnerItem));
-					UBehaviorTreeGraphNode* const SubNode = bService
-						? static_cast<UBehaviorTreeGraphNode*>(
-							NewObject<UBehaviorTreeGraphNode_Service>(Graph))
-						: static_cast<UBehaviorTreeGraphNode*>(
-							NewObject<UBehaviorTreeGraphNode_Decorator>(Graph));
-					if (!OwnerNode || !SubNode)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_behavior_tree_subnode_owner_invalid"),
-							Operation.OwnerItem);
-						return false;
-					}
-					SubNode->NodeInstance = NewObject<UBTNode>(
-						Tree, Operation.PayloadClass, NAME_None, RF_Transactional);
-					if (!SubNode->NodeInstance)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_behavior_tree_subnode_create_failed"),
-							Operation.SemanticId);
-						return false;
-					}
-					OwnerNode->AddSubNode(SubNode, Graph);
-					SubNode->NodeGuid = Operation.NodeGuid;
-				}
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-				{
-					if (Operation.Kind
-						!= EPcgAiSchemaMutationKind::BehaviorRelation)
-					{
-						continue;
-					}
-					UEdGraphNode* const FromNode =
-						FindBehaviorNode(*Graph, Operation.FromItem);
-					UEdGraphNode* const ToNode =
-						FindBehaviorNode(*Graph, Operation.ToItem);
-					UEdGraphPin* const FromPin = FromNode
-						? FindDirectionPin(*FromNode, EGPD_Output,
-							Operation.FromIndex) : nullptr;
-					UEdGraphPin* const ToPin = ToNode
-						? FindDirectionPin(*ToNode, EGPD_Input,
-							Operation.ToIndex) : nullptr;
-					if (!FromPin || !ToPin)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_behavior_tree_pin_invalid"),
-							Operation.SemanticId);
-						return false;
-					}
-					const UEdGraphSchema* const Schema = Graph->GetSchema();
-					if (!Schema || !Schema->TryCreateConnection(FromPin, ToPin))
-					{
-						SetError(
-							OutError,
-							TEXT("graph_compound_behavior_tree_connection_rejected"),
-							Operation.SemanticId,
-							TEXT("the native BehaviorTree schema rejected the connection"));
-						return false;
-					}
-				}
-				FPcgAiNodeGraphNativeMutationReceipt ApplyReceipt;
-				FPcgAiNodeGraphBarrierReceipt BarrierReceipt;
-				FPcgAiNodeGraphTopology Topology;
-				FString Evidence;
-				FPcgAiNodeGraphAdapterError NativeError;
-				if (!NativeHook.TryCompileAndCaptureBehaviorTree(
-						*Tree, ApplyReceipt, BarrierReceipt, Topology,
-						OutRevision, Evidence, NativeError)
-					|| !BarrierReceipt.IsComplete()
-					|| BarrierReceipt.GetErrorCount() != 0)
-				{
-					SetError(OutError,
-						NativeError.GetCode().IsEmpty()
-							? TEXT("graph_compound_behavior_tree_compile_failed")
-							: NativeError.GetCode(),
-						Tree->GetPathName(), NativeError.GetDetail());
-					return false;
-				}
-				return true;
-#else
-				SetError(OutError,
-					TEXT("graph_compound_behavior_tree_editor_data_unavailable"),
-					Tree->GetPathName());
-				return false;
-#endif
-			}
 
-			if (UStateTree* const Tree = Cast<UStateTree>(&Target))
-			{
-#if WITH_EDITORONLY_DATA
-				UStateTreeEditorData* const EditorData =
-					Cast<UStateTreeEditorData>(Tree->EditorData);
-				TMap<FGuid, UStateTreeState*> States;
-				TMap<FGuid, FString> Parents;
-				if (!EditorData
-					|| !TryCollectStateTreeStates(*EditorData, States, Parents))
-				{
-					SetError(OutError,
-						TEXT("graph_compound_state_tree_hierarchy_invalid"),
-						Tree->GetPathName());
-					return false;
-				}
-				Tree->Modify();
-				EditorData->Modify();
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-				{
-					if (Operation.Kind
-						!= EPcgAiSchemaMutationKind::StateTreeHierarchy)
-					{
-						continue;
-					}
-					UStateTreeState* const* const Parent =
-						States.Find(Operation.ParentStateGuid);
-					if (!Parent || !*Parent || States.Contains(Operation.StateGuid))
-					{
-						SetError(OutError,
-							TEXT("graph_compound_state_tree_hierarchy_invalid"),
-							Operation.SemanticId);
-						return false;
-					}
-					(*Parent)->Modify();
-					UStateTreeState& Child = (*Parent)->AddChildState(NAME_None);
-					Child.Modify();
-					Child.ID = Operation.StateGuid;
-					States.Add(Operation.StateGuid, &Child);
-				}
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-				{
-					if (Operation.Kind
-						!= EPcgAiSchemaMutationKind::StateTreeNode)
-					{
-						continue;
-					}
-					FStateTreeEditorNode* EditorNode = nullptr;
-					UObject* NodeOuter = Tree;
-					if (Operation.Placement == TEXT("state_task")
-						|| Operation.Placement == TEXT("state_condition"))
-					{
-						UStateTreeState* const* const State =
-							States.Find(Operation.StateGuid);
-						if (!State || !*State)
-						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_node_owner_invalid"),
-								Operation.SemanticId);
-							return false;
-						}
-						(*State)->Modify();
-						NodeOuter = *State;
-						EditorNode = Operation.Placement == TEXT("state_task")
-							? &(*State)->Tasks.AddDefaulted_GetRef()
-							: &(*State)->EnterConditions.AddDefaulted_GetRef();
-					}
-					else if (Operation.Placement == TEXT("global_task"))
-					{
-						EditorNode = &EditorData->GlobalTasks.AddDefaulted_GetRef();
-					}
-					else if (Operation.Placement == TEXT("evaluator"))
-					{
-						EditorNode = &EditorData->Evaluators.AddDefaulted_GetRef();
-					}
-					if (!EditorNode
-						|| (!Operation.PayloadClass && !Operation.PayloadStruct)
-						|| !TryInitializeStateTreeBlueprintNode(
-							*EditorNode,
-							*NodeOuter,
-							Operation.PayloadClass,
-							Operation.PayloadStruct,
-							Operation.Placement,
-							OutError))
-					{
-						if (OutError.Code.IsEmpty())
-						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_node_create_failed"),
-								Operation.SemanticId);
-						}
-						return false;
-					}
-					EditorNode->ID = Operation.NodeGuid;
-				}
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-				{
-					if (Operation.Kind
-						!= EPcgAiSchemaMutationKind::StateTreeOrder)
-					{
-						continue;
-					}
-					UStateTreeState* const* const Owner =
-						States.Find(Operation.ParentStateGuid);
-					if (!Owner || !*Owner
-						|| (*Owner)->Children.Num()
-							!= Operation.OrderedStateGuids.Num())
-					{
-						SetError(OutError,
-							TEXT("graph_compound_state_tree_order_invalid"),
-							Operation.SemanticId);
-						return false;
-					}
-					TArray<TObjectPtr<UStateTreeState>> OrderedChildren;
-					OrderedChildren.Reserve(Operation.OrderedStateGuids.Num());
-					for (const FGuid& StateGuid : Operation.OrderedStateGuids)
-					{
-						UStateTreeState* const* const State = States.Find(StateGuid);
-						if (!State || !*State || !(*Owner)->Children.Contains(*State))
-						{
-							SetError(OutError,
-								TEXT("graph_compound_state_tree_order_invalid"),
-								Operation.SemanticId);
-							return false;
-						}
-						OrderedChildren.Add(*State);
-					}
-					(*Owner)->Modify();
-					(*Owner)->Children = MoveTemp(OrderedChildren);
-				}
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-				{
-					if (Operation.Kind
-						!= EPcgAiSchemaMutationKind::StateTreeProperty)
-					{
-						continue;
-					}
-					UStateTreeState* const* const State = States.Find(Operation.StateGuid);
-					if (!State || !*State)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_state_tree_property_invalid"),
-							Operation.SemanticId);
-						return false;
-					}
-					(*State)->Modify();
-					(*State)->Name = Operation.StateName;
-				}
-				FPcgAiNodeGraphNativeMutationReceipt ApplyReceipt;
-				FPcgAiNodeGraphBarrierReceipt BarrierReceipt;
-				FPcgAiNodeGraphTopology Topology;
-				FString Evidence;
-				FPcgAiNodeGraphAdapterError NativeError;
-				if (!NativeHook.TryCompileAndCaptureStateTree(
-						*Tree, ApplyReceipt, BarrierReceipt, Topology,
-						OutRevision, Evidence, NativeError)
-					|| !BarrierReceipt.IsComplete()
-					|| BarrierReceipt.GetErrorCount() != 0)
-				{
-					SetError(OutError,
-						NativeError.GetCode().IsEmpty()
-							? TEXT("graph_compound_state_tree_compile_failed")
-							: NativeError.GetCode(),
-						Tree->GetPathName(), NativeError.GetDetail());
-					return false;
-				}
-				return true;
-#else
-				SetError(OutError,
-					TEXT("graph_compound_state_tree_editor_data_unavailable"),
-					Tree->GetPathName());
-				return false;
-#endif
-			}
-
-			if (UEnvQuery* const Query = Cast<UEnvQuery>(&Target))
-			{
-#if WITH_EDITORONLY_DATA
-				UEnvironmentQueryGraph* Graph =
-					Cast<UEnvironmentQueryGraph>(Query->EdGraph);
-				if (!Graph)
-				{
-					Graph = NewObject<UEnvironmentQueryGraph>(
-						Query, TEXT("EnvironmentQueryGraph"), RF_Transactional);
-					if (!Graph)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_eqs_graph_create_failed"),
-							Query->GetPathName());
-						return false;
-					}
-					Query->EdGraph = Graph;
-					Graph->Initialize();
-				}
-				UEnvironmentQueryGraphNode_Root* Root = nullptr;
-				for (UEdGraphNode* Node : Graph->Nodes)
-				{
-					if (UEnvironmentQueryGraphNode_Root* const Candidate =
-							Cast<UEnvironmentQueryGraphNode_Root>(Node))
-					{
-						Root = Candidate;
-						break;
-					}
-				}
-				if (!Root)
-				{
-					Root = NewObject<UEnvironmentQueryGraphNode_Root>(Graph);
-					Root->CreateNewGuid();
-					Root->PostPlacedNewNode();
-					Root->AllocateDefaultPins();
-					Graph->AddNode(Root, false, false);
-				}
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-				{
-					if (Operation.Kind != EPcgAiSchemaMutationKind::EqsOption)
-					{
-						continue;
-					}
-					UEnvironmentQueryGraphNode_Option* const Node =
-						NewObject<UEnvironmentQueryGraphNode_Option>(Graph);
-					UEnvQueryOption* const Option = NewObject<UEnvQueryOption>(
-						Query, NAME_None, RF_Transactional);
-					if (!Node || !Option)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_eqs_option_create_failed"),
-							Operation.SemanticId);
-						return false;
-					}
-					Option->Generator = NewObject<UEnvQueryGenerator>(
-						Option, Operation.PayloadClass, NAME_None, RF_Transactional);
-					if (!Option->Generator)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_eqs_generator_create_failed"),
-							Operation.SemanticId);
-						return false;
-					}
-					Node->NodeInstance = Option;
-					Node->PostPlacedNewNode();
-					Node->NodeGuid = Operation.NodeGuid;
-					Node->AllocateDefaultPins();
-					Graph->AddNode(Node, false, false);
-					if (!Root->GetOutputPin() || !Node->GetInputPin())
-					{
-						SetError(OutError,
-							TEXT("graph_compound_eqs_pin_invalid"),
-							Operation.SemanticId);
-						return false;
-					}
-					Root->GetOutputPin()->MakeLinkTo(Node->GetInputPin());
-				}
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-				{
-					if (Operation.Kind != EPcgAiSchemaMutationKind::EqsProperty)
-					{
-						continue;
-					}
-					UEnvironmentQueryGraphNode_Option* const Node =
-						FindEqsOptionNode(*Graph, Operation.FromItem);
-					if (!Node)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_eqs_property_owner_missing"),
-							Operation.SemanticId);
-						return false;
-					}
-					Node->Modify();
-					Node->NodePosX = Operation.SignedIntegerValue;
-				}
-				Graph->NotifyGraphChanged();
-				FPcgAiNodeGraphNativeMutationReceipt ApplyReceipt;
-				FPcgAiNodeGraphBarrierReceipt BarrierReceipt;
-				FPcgAiNodeGraphTopology Topology;
-				FString Evidence;
-				FPcgAiNodeGraphAdapterError NativeError;
-				if (!NativeHook.TryCompileAndCaptureEqs(
-						*Query, ApplyReceipt, BarrierReceipt, Topology,
-						OutRevision, Evidence, NativeError)
-					|| !BarrierReceipt.IsComplete()
-					|| BarrierReceipt.GetErrorCount() != 0)
-				{
-					SetError(OutError,
-						NativeError.GetCode().IsEmpty()
-							? TEXT("graph_compound_eqs_compile_failed")
-							: NativeError.GetCode(),
-						Query->GetPathName(), NativeError.GetDetail());
-					return false;
-				}
-				return true;
-#else
-				SetError(OutError,
-					TEXT("graph_compound_eqs_editor_data_unavailable"),
-					Query->GetPathName());
-				return false;
-#endif
-			}
-
-			if (USmartObjectDefinition* const Definition =
-					Cast<USmartObjectDefinition>(&Target))
-			{
-				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-				{
-					if (Operation.Kind
-						!= EPcgAiSchemaMutationKind::SmartObjectSlot)
-					{
-						SetError(OutError,
-							TEXT("graph_compound_smart_object_operation_invalid"),
-							Operation.SemanticId);
-						return false;
-					}
-					FPcgAiNodeGraphNativeMutationReceipt ApplyReceipt;
-					FPcgAiNodeGraphBarrierReceipt BarrierReceipt;
-					FPcgAiNodeGraphTopology Topology;
-					FString Evidence;
-					FPcgAiNodeGraphAdapterError NativeError;
-					if (!NativeHook.TryAddValidateAndCaptureSmartObjectSlot(
-							*Definition, Operation.SlotGuid,
-							*Operation.BehaviorClass, ApplyReceipt, BarrierReceipt,
-							Topology, OutRevision, Evidence, NativeError)
-						|| !BarrierReceipt.IsComplete()
-						|| BarrierReceipt.GetErrorCount() != 0)
-					{
-						SetError(OutError,
-							NativeError.GetCode().IsEmpty()
-								? TEXT("graph_compound_smart_object_mutation_failed")
-								: NativeError.GetCode(),
-							Operation.SemanticId, NativeError.GetDetail());
-						return false;
-					}
-				}
-				return true;
-			}
-
-			UBlackboardData* const Blackboard = Cast<UBlackboardData>(&Target);
-			if (!Blackboard)
-			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_target_invalid"),
-					Target.GetPathName());
-				return false;
-			}
-			for (const FPcgAiSchemaMutationOperation& Operation : Operations)
-			{
-				FPcgAiNodeGraphNativeMutationReceipt ApplyReceipt;
-				FPcgAiNodeGraphBarrierReceipt BarrierReceipt;
-				FPcgAiNodeGraphBlackboardEntryIdentity Identity;
-				FString Evidence;
-				FPcgAiNodeGraphAdapterError NativeError;
-				if (!NativeHook.TryAddAndCaptureBlackboardEntry(
-						*Blackboard, Operation.EntryName,
-						*Operation.KeyTypeClass, ApplyReceipt, BarrierReceipt,
-						Identity, OutRevision, Evidence, NativeError)
-					|| !BarrierReceipt.IsComplete()
-					|| BarrierReceipt.GetErrorCount() != 0)
-				{
-					SetError(OutError,
-						NativeError.GetCode().IsEmpty()
-							? TEXT("graph_compound_blackboard_mutation_failed")
-							: NativeError.GetCode(),
-						Operation.SemanticId, NativeError.GetDetail());
-					return false;
-				}
-			}
-			return true;
+			return FailApply(TEXT("graph_compound_pcg_ai_target_invalid"),
+				TEXT("The native target class has no supported PCG schema mutation executor."), TEXT("target.class"),
+				ClassPathValue(Target.GetClass()), MakeShared<FJsonValueString>(TEXT("PCGComponent, PCGDataAsset, PCGGraphInstance or PCGGraph")));
 		}
 
 		bool TryBuildSchemaMutationAggregate(
@@ -4254,29 +4001,69 @@ namespace UE::UAI::Composition::GraphCompound
 			FUeAgentCanonicalValuePtr& OutValue,
 			FVerificationError& OutError)
 		{
+			auto FailAggregate = [&](const TCHAR* Code, const FString& Reason, const FString& Field,
+				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+				const FPcgAiSchemaMutationOperation& Operation)
+			{
+				OutError = NativeFailure(Code, Reason, Operation.TargetPath, Field, MoveTemp(Actual), MoveTemp(Expected));
+				OutError.Stage = TEXT("verification");
+				OutError.SubjectId = Operation.SemanticId;
+				OutError.CandidateName = Operation.SemanticId;
+				OutError.OperationIndex = static_cast<int32>(&Operation - Operations.GetData());
+				return false;
+			};
+			auto PreserveAggregateError = [&](const FDiagnostic& Cause, const FPcgAiSchemaMutationOperation& Operation)
+			{
+				OutError = Cause;
+				MarkGraphCompoundNativeDiagnostic(OutError);
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Operation.TargetPath;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Operation.SemanticId;
+				if (!OutError.OperationIndex.IsSet())
+					OutError.OperationIndex = static_cast<int32>(&Operation - Operations.GetData());
+				return false;
+			};
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items;
 			for (const FPcgAiSchemaMutationOperation& Operation : Operations)
 			{
 				const FUeAgentCanonicalValueRef* const Actual = ActualValues
 					? ActualValues->Find(Operation.SemanticId) : nullptr;
 				if (ActualValues && !Actual)
-				{
-					OutError = FVerificationError(
-						TEXT("graph_compound_pcg_ai_readback_missing"),
-						Operation.SemanticId);
-					return false;
-				}
+					return FailAggregate(TEXT("graph_compound_pcg_ai_readback_missing"),
+						TEXT("Independent readback did not return a value for this mutation."),
+						TEXT("readback.value"), nullptr, CanonicalInputFact(Operation.Value.Get()), Operation);
 				FUeAgentCanonicalValuePtr Expected = Operation.Value;
+				if (!ActualValues
+					&& Operation.Kind == EPcgAiSchemaMutationKind::PcgDataAsset)
+				{
+					FUeAgentCanonicalValuePtr RevisionValue;
+					FUeAgentStateSemanticError StateError;
+					if (Operation.ContentRevision.IsEmpty())
+						return FailAggregate(TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
+							TEXT("The PCG data operation has no content revision for expected readback."),
+							TEXT("content_revision"), nullptr,
+							MakeShared<FJsonValueString>(TEXT("non-empty content revision")), Operation);
+					if (!FUeAgentCanonicalValue::TryString(
+							Operation.ContentRevision, Resources, RevisionValue, StateError))
+						return PreserveAggregateError(StateError, Operation);
+					TArray<TPair<FString, FUeAgentCanonicalValueRef>>
+						ExpectedItems = Operation.Value->GetObjectItems();
+					ExpectedItems.Emplace(
+						TEXT("content_revision"), RevisionValue.ToSharedRef());
+					if (!FUeAgentCanonicalValue::TryObject(
+							ExpectedItems, Resources, Expected, StateError))
+						return PreserveAggregateError(StateError, Operation);
+				}
 				if (!ActualValues
 					&& Operation.Kind == EPcgAiSchemaMutationKind::PcgGraphNode)
 				{
-					if (!Operation.CreatedNodeClass || !Operation.SettingsClass)
-					{
-						OutError = FVerificationError(
-							TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
-							Operation.SemanticId);
-						return false;
-					}
+					if (!Operation.CreatedNodeClass)
+						return FailAggregate(TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
+							TEXT("The created PCG node class is missing from the mutation result."),
+							TEXT("created_node.class"), nullptr, ClassPathValue(UPCGNode::StaticClass()), Operation);
+					if (!Operation.SettingsClass)
+						return FailAggregate(TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
+							TEXT("The created PCG node settings class is missing from the mutation result."),
+							TEXT("created_node.settings_class"), nullptr, ClassPathValue(UPCGSettings::StaticClass()), Operation);
 					const TSharedRef<FJsonObject> Definition =
 						MakeShared<FJsonObject>();
 					Definition->SetStringField(
@@ -4285,17 +4072,10 @@ namespace UE::UAI::Composition::GraphCompound
 					Definition->SetStringField(
 						TEXT("settings_type_ref"),
 						Operation.SettingsClass->GetPathName());
-					FString CanonicalError;
+					UE::UAI::Contract::FDiagnostic CanonicalError;
 					if (!CanonicalJson::TryFromJsonValue(
-							MakeShared<FJsonValueObject>(Definition),
-							Resources, Expected, CanonicalError)
-						|| !Expected.IsValid())
-					{
-						OutError = FVerificationError(
-							TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
-							CanonicalError);
-						return false;
-					}
+							MakeShared<FJsonValueObject>(Definition), Resources, Expected, CanonicalError))
+						return PreserveAggregateError(CanonicalError, Operation);
 				}
 				else if (!ActualValues
 					&& (Operation.Kind
@@ -4306,12 +4086,10 @@ namespace UE::UAI::Composition::GraphCompound
 						|| !Operation.CandidateId.IsEmpty()))
 				{
 					if (!Operation.PayloadClass)
-					{
-						OutError = FVerificationError(
-							TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
-							Operation.SemanticId);
-						return false;
-					}
+						return FailAggregate(TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
+							TEXT("The BehaviorTree candidate operation has no payload class for expected readback."),
+							TEXT("operation.payload_class"), nullptr,
+							MakeShared<FJsonValueString>(TEXT("resolved BehaviorTree node payload class")), Operation);
 					const TSharedRef<FJsonObject> Definition =
 						MakeShared<FJsonObject>();
 					Definition->SetStringField(
@@ -4325,30 +4103,22 @@ namespace UE::UAI::Composition::GraphCompound
 					Definition->SetStringField(
 						TEXT("payload_type_ref"),
 						Operation.PayloadClass->GetPathName());
-					FString CanonicalError;
+					UE::UAI::Contract::FDiagnostic CanonicalError;
 					if (!CanonicalJson::TryFromJsonValue(
-							MakeShared<FJsonValueObject>(Definition),
-							Resources, Expected, CanonicalError)
-						|| !Expected.IsValid())
-					{
-						OutError = FVerificationError(
-							TEXT("graph_compound_pcg_ai_readback_expected_invalid"),
-							CanonicalError);
-						return false;
-					}
+							MakeShared<FJsonValueObject>(Definition), Resources, Expected, CanonicalError))
+						return PreserveAggregateError(CanonicalError, Operation);
 				}
 				Items.Emplace(Operation.SemanticId,
 					Actual ? *Actual : Expected.ToSharedRef());
 			}
 			FUeAgentStateSemanticError StateError;
-			if (!FUeAgentCanonicalValue::TryObject(
-					Items, Resources, OutValue, StateError))
+			if (!FUeAgentCanonicalValue::TryObject(Items, Resources, OutValue, StateError))
 			{
-				OutError = FVerificationError(
-					StateError.Code, StateError.Detail);
+				OutError = StateError;
+				MarkGraphCompoundNativeDiagnostic(OutError);
 				return false;
 			}
-			return OutValue.IsValid();
+			return true;
 		}
 
 		const FString SchemaMutationReadbackOracleId =
@@ -4361,10 +4131,12 @@ namespace UE::UAI::Composition::GraphCompound
 			FPcgAiSchemaMutationReadbackOracle(
 				FPcgAnimationGraphRouteProfile InProfile,
 				FString InTargetRef,
-				TArray<FPcgAiSchemaMutationOperation> InOperations)
+				TArray<FPcgAiSchemaMutationOperation> InOperations,
+				bool bInUnloadBeforeRead = true)
 				: Profile(MoveTemp(InProfile))
 				, TargetRef(MoveTemp(InTargetRef))
 				, Operations(MoveTemp(InOperations))
+				, bUnloadBeforeRead(bInUnloadBeforeRead)
 			{
 			}
 
@@ -4381,12 +4153,16 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				OutObservation = FIndependentReadbackObservation();
 				OutError = FVerificationError();
-				FString Detail;
-				if (!TryUnloadTarget(TargetRef, false, Detail))
+				UE::UAI::Contract::FDiagnostic Detail;
+				if (bUnloadBeforeRead && !UeAgentAuthoringOperationApply::TryReloadPersistedPackage(TargetRef, Detail))
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("graph_compound_pcg_ai_asset_unload_failed"), Detail);
-					return true;
+					OutError = Detail.IsEmpty()
+						? NativeFailure(TEXT("graph_compound_pcg_ai_asset_unload_failed"),
+							TEXT("The persisted package reload failed without providing a diagnostic."),
+							TargetRef, TEXT("package.reload.succeeded"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true))
+						: Detail;
+					return false;
 				}
 				TArray<FCapturedMutationValue> Captured;
 				FString Generation;
@@ -4395,8 +4171,7 @@ namespace UE::UAI::Composition::GraphCompound
 						Profile, TargetRef, Resources,
 						Captured, Generation, RuntimeError))
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						RuntimeError.Code, RuntimeError.Detail);
+					OutObservation = FIndependentReadbackObservation::Unavailable(RuntimeError, RuntimeError.InternalContext);
 					return true;
 				}
 				TMap<FString, FUeAgentCanonicalValueRef> ActualValues;
@@ -4422,6 +4197,7 @@ namespace UE::UAI::Composition::GraphCompound
 			FPcgAnimationGraphRouteProfile Profile;
 			FString TargetRef;
 			TArray<FPcgAiSchemaMutationOperation> Operations;
+			bool bUnloadBeforeRead = true;
 		};
 
 		const FString PcgComponentMutationReadbackOracleId =
@@ -4463,10 +4239,10 @@ namespace UE::UAI::Composition::GraphCompound
 						Captured, Generation, RuntimeError))
 				{
 					OutObservation = FIndependentReadbackObservation::Unavailable(
-						RuntimeError.Code.IsEmpty()
-							? TEXT("graph_compound_pcg_ai_target_invalid")
-							: RuntimeError.Code,
-						RuntimeError.Detail);
+						UE::UAI::Contract::FDiagnostic::WrapFailure(
+							RuntimeError.IsValid() ? RuntimeError.Code
+								: TEXT("graph_compound_pcg_ai_target_invalid"),
+							RuntimeError, TEXT("independent_readback")));
 					return true;
 				}
 				TMap<FString, FUeAgentCanonicalValueRef> ActualValues;
@@ -4524,42 +4300,59 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				OutObservation = FIndependentReadbackObservation();
 				OutError = FVerificationError();
-				FString Detail;
-				if (!TryUnloadTarget(TargetRef, false, Detail))
+				UE::UAI::Contract::FDiagnostic Detail;
+				if (!UeAgentAuthoringOperationApply::TryReloadPersistedPackage(TargetRef, Detail))
 				{
-					OutObservation =
-						FIndependentReadbackObservation::Unavailable(
-							TEXT("graph_compound_pcg_ai_asset_unload_failed"),
-							Detail);
-					return true;
+					OutError = Detail.IsEmpty()
+						? NativeFailure(TEXT("graph_compound_pcg_ai_asset_unload_failed"),
+							TEXT("The persisted package reload failed without providing a diagnostic."),
+							TargetRef, TEXT("package.reload.succeeded"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true))
+						: Detail;
+					return false;
 				}
 				UObject* const Asset = LoadObject<UObject>(
 					nullptr, *ObjectPath(TargetRef));
-				if (!Asset || Asset->GetClass() != AssetClass
-					|| Asset->GetOutermost()->GetName() != TargetRef
-					|| Asset->GetOutermost()->IsDirty())
+				if (!Asset)
 				{
-					OutObservation =
-						FIndependentReadbackObservation::Unavailable(
-							TEXT("graph_compound_pcg_ai_asset_reload_mismatch"),
-							TEXT("reload:") + TargetRef);
-					return true;
+					OutError = NativeFailure(TEXT("graph_compound_pcg_ai_asset_reload_failed"),
+						TEXT("The persisted asset could not be loaded for independent readback."),
+						TargetRef, TEXT("asset"), nullptr, ClassPathValue(AssetClass));
+					OutError.Stage = TEXT("verification");
+					return false;
 				}
+				auto ObserveMismatch = [&](const FString& Reason, const FString& Field,
+					TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+				{
+					FDiagnostic Diagnostic = NativeFailure(TEXT("graph_compound_pcg_ai_asset_reload_mismatch"),
+						Reason, TargetRef, Field, MoveTemp(Actual), MoveTemp(Expected));
+					Diagnostic.Stage = TEXT("independent_readback");
+					OutObservation = FIndependentReadbackObservation::Unavailable(MoveTemp(Diagnostic), TEXT("reload:") + TargetRef);
+					return true;
+				};
+				if (Asset->GetClass() != AssetClass)
+					return ObserveMismatch(TEXT("The reloaded asset class differs from the expected class."),
+						TEXT("asset.class"), ClassPathValue(Asset->GetClass()), ClassPathValue(AssetClass));
+				if (Asset->GetOutermost()->GetName() != TargetRef)
+					return ObserveMismatch(TEXT("The reloaded asset belongs to a different package."),
+						TEXT("asset.package"), MakeShared<FJsonValueString>(Asset->GetOutermost()->GetName()),
+						MakeShared<FJsonValueString>(TargetRef));
+				if (Asset->GetOutermost()->IsDirty())
+					return ObserveMismatch(TEXT("The reloaded asset package is dirty."),
+						TEXT("asset.package.dirty"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
 
 				const TSharedRef<FJsonObject> Definition =
 					MakeShared<FJsonObject>();
 				Definition->SetStringField(
 					TEXT("asset_kind"), TargetKind);
 				FUeAgentCanonicalValuePtr Actual;
-				FString CanonicalError;
+				UE::UAI::Contract::FDiagnostic CanonicalError;
 				if (!CanonicalJson::TryFromJsonValue(
 						MakeShared<FJsonValueObject>(Definition),
 						Resources, Actual, CanonicalError)
 					|| !Actual.IsValid())
 				{
-					OutError = FVerificationError(
-						TEXT("graph_compound_pcg_ai_readback_value_invalid"),
-						CanonicalError);
+					OutError = CanonicalError;
 					return false;
 				}
 				OutObservation = FIndependentReadbackObservation::Available(
@@ -4578,40 +4371,20 @@ namespace UE::UAI::Composition::GraphCompound
 
 		bool TrySerializeResult(
 			const FString& TargetRef,
-			const FString& Revision,
-			const FString& PersistenceReceiptId,
 			FUeAgentContractValue& OutResult,
 			FGraphCompoundRuntimeError& OutError)
 		{
 			const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-			Root->SetStringField(TEXT("revision"), Revision);
 			Root->SetStringField(TEXT("target_ref"), TargetRef);
-			if (!PersistenceReceiptId.IsEmpty())
-			{
-				Root->SetStringField(
-					TEXT("persistence_receipt_id"), PersistenceReceiptId);
-			}
 			FString Canonical;
-			FString JsonError;
+			UE::UAI::Contract::FDiagnostic JsonError;
 			if (!Json::TryCanonicalize(Root, Canonical, JsonError))
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_result_invalid"),
-					TargetRef, JsonError);
+				SetError(OutError, JsonError, TargetRef);
 				return false;
 			}
 			OutResult = FUeAgentContractValue(MoveTemp(Canonical));
 			return true;
-		}
-
-		bool TrySerializeResult(
-			const FString& TargetRef,
-			const FString& Revision,
-			FUeAgentContractValue& OutResult,
-			FGraphCompoundRuntimeError& OutError)
-		{
-			return TrySerializeResult(
-				TargetRef, Revision, FString(), OutResult, OutError);
 		}
 
 		bool TryRestorePcgComponentMutation(
@@ -4619,7 +4392,7 @@ namespace UE::UAI::Composition::GraphCompound
 			UPCGGraphInterface* BaselineGraph,
 			const EPCGComponentGenerationTrigger BaselinePolicy,
 			const bool bBaselinePackageDirty,
-			FString& OutDetail)
+			UE::UAI::Contract::FDiagnostic& OutDetail)
 		{
 			OutDetail.Reset();
 			Component.SetGraph(BaselineGraph);
@@ -4636,7 +4409,7 @@ namespace UE::UAI::Composition::GraphCompound
 				|| Component.GenerationTrigger != BaselinePolicy
 				|| (Package && Package->IsDirty() != bBaselinePackageDirty))
 			{
-				OutDetail = TEXT("pcg component rollback readback mismatch");
+				OutDetail = UE::UAI::Contract::FDiagnostic::Failure(TEXT("graph_compound_native_readback_failed"), TEXT("pcg component rollback readback mismatch"), TEXT("native_readback"));
 				return false;
 			}
 			return true;
@@ -4655,20 +4428,23 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			if (!IsInGameThread() || Cancellation->IsCancelled())
 			{
-				SetError(OutError,
-					Cancellation->IsCancelled()
-						? TEXT("graph_compound_pcg_ai_cancelled")
-						: TEXT("graph_compound_pcg_ai_thread_invalid"),
-					Profile.GetCapabilityId());
+				const bool bCancelled = Cancellation->IsCancelled();
+				OutError = NativeFailure(bCancelled
+						? TEXT("graph_compound_pcg_ai_cancelled") : TEXT("graph_compound_pcg_ai_thread_invalid"),
+					bCancelled ? TEXT("The PCG component mutation was cancelled before execution.")
+						: TEXT("PCG component mutation must execute on the game thread."),
+					Request.GetTargetRef(), bCancelled ? TEXT("cancellation.requested") : TEXT("execution.game_thread"),
+					MakeShared<FJsonValueBoolean>(bCancelled), MakeShared<FJsonValueBoolean>(!bCancelled));
+				OutError.SubjectId = Profile.GetCapabilityId();
 				return false;
 			}
 			UPCGComponent* const Component =
 				FindExactLoadedPcgComponent(Request.GetTargetRef());
 			if (!Component)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_target_invalid"),
-					Request.GetTargetRef());
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					TEXT("No loaded PCG component exactly matches the requested target reference."),
+					Request.GetTargetRef(), TEXT("target"), nullptr, ClassPathValue(UPCGComponent::StaticClass()));
 				return false;
 			}
 
@@ -4689,9 +4465,8 @@ namespace UE::UAI::Composition::GraphCompound
 					Plan, Current.ToSharedRef(), CallerContext,
 					*Resources, RevalidateError))
 			{
-				SetError(OutError, RevalidateError.GetCode(),
-					RevalidateError.GetIdentityKey(),
-					RevalidateError.GetDetail());
+				OutError = RevalidateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = RevalidateError.SubjectId;
 				return false;
 			}
 
@@ -4704,13 +4479,12 @@ namespace UE::UAI::Composition::GraphCompound
 			const bool bBaselinePackageDirty = Package && Package->IsDirty();
 			auto Rollback = [&]()
 			{
-				FString Detail;
+				UE::UAI::Contract::FDiagnostic Detail;
 				if (!TryRestorePcgComponentMutation(
 						*Component, BaselineGraph, BaselinePolicy,
 						bBaselinePackageDirty, Detail))
 				{
-					OutError.Detail += OutError.Detail.IsEmpty()
-						? Detail : TEXT(";") + Detail;
+					OutError.Append(Detail);
 				}
 			};
 
@@ -4727,9 +4501,12 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			if (Cancellation->IsCancelled())
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_cancelled"),
-					Profile.GetCapabilityId());
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_cancelled"),
+					TEXT("The PCG component mutation was cancelled after apply."),
+					Request.GetTargetRef(), TEXT("cancellation.requested"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+				OutError.SubjectId = Profile.GetCapabilityId();
+				OutError.MutationMayHaveStarted = true;
 				Rollback();
 				return false;
 			}
@@ -4739,8 +4516,8 @@ namespace UE::UAI::Composition::GraphCompound
 			if (!TryBuildSchemaMutationAggregate(
 					Operations, nullptr, *Resources, Expected, VerifyError))
 			{
-				SetError(OutError, VerifyError.GetCode(),
-					Request.GetTargetRef(), VerifyError.GetDetail());
+				OutError = VerifyError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
 				Rollback();
 				return false;
 			}
@@ -4751,27 +4528,363 @@ namespace UE::UAI::Composition::GraphCompound
 					ESPMode::ThreadSafe>(
 						Profile, Request.GetTargetRef(), Operations);
 			FIndependentReadbackOutcome Outcome;
-			if (!FIndependentReadbackService::TryCreate(
-					{Oracle}, Readback, VerifyError)
-				|| !Readback.IsValid()
-				|| !Readback->TryVerify(
+			if (!FIndependentReadbackService::TryCreate({Oracle}, Readback, VerifyError))
+			{
+				OutError = VerifyError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+				Rollback();
+				return false;
+			}
+			if (!Readback->TryObserve(
 					FIndependentReadbackRequest(
 						TEXT("graph-compound-pcg-ai:") + Plan->GetRequestId(),
 						PcgComponentMutationReadbackOracleId,
 						Request.GetTargetRef(), Expected.ToSharedRef()),
-					*Resources, Outcome, VerifyError)
-				|| Outcome.GetStatus() != EVerificationStatus::Verified)
+					*Resources, Outcome, VerifyError))
 			{
-				SetError(OutError,
-					VerifyError.GetCode().IsEmpty()
-						? TEXT("graph_compound_pcg_ai_readback_failed")
-						: VerifyError.GetCode(),
-					Request.GetTargetRef(), Outcome.GetDiagnosticCode());
+				OutError = Outcome.GetFailureDiagnostic(VerifyError);
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
 				Rollback();
 				return false;
 			}
 			return TrySerializeResult(
-				Request.GetTargetRef(), Revision, OutResult, OutError);
+				Request.GetTargetRef(), OutResult, OutError);
+		}
+
+		bool BuildStateTreeMutationDocument(UStateTree& Tree,
+			const TArray<FPcgAiSchemaMutationOperation>& Operations, TSharedPtr<FJsonObject>& Document, UE::UAI::Contract::FDiagnostic& Error)
+		{
+			auto FailDocument = [&](const TCHAR* Code, const FString& Reason, const FString& Field,
+				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+				const FPcgAiSchemaMutationOperation& Operation)
+			{
+				Error = NativeFailure(Code, Reason, Tree.GetPathName(), Field, MoveTemp(Actual), MoveTemp(Expected));
+				Error.SubjectId = Operation.SemanticId;
+				Error.OperationIndex = static_cast<int32>(&Operation - Operations.GetData());
+				return false;
+			};
+			auto PreserveDocumentError = [&](const FDiagnostic& Cause)
+			{
+				Error = Cause;
+				MarkGraphCompoundNativeDiagnostic(Error);
+				if (Error.TargetPath.IsEmpty()) Error.TargetPath = Tree.GetPathName();
+				return false;
+			};
+			TSharedPtr<FJsonValue> Captured;
+			if (!UeAgentStateTreeAuthoring::ReadTreeDocument(Tree, Captured, Error)) return PreserveDocumentError(Error);
+			Document = Captured->AsObject();
+			const auto Items = Document->GetObjectField(TEXT("items"));
+			auto Id = [](const FGuid& Guid) { return Guid.ToString(EGuidFormats::DigitsWithHyphensLower); };
+			// Preserve the legacy operation contract, but project it into the complete
+			// authoring document. Only the Reflection transaction may mutate the asset.
+			for (const auto Kind : {EPcgAiSchemaMutationKind::StateTreeHierarchy, EPcgAiSchemaMutationKind::StateTreeNode})
+				for (const auto& Operation : Operations)
+				{
+					if (Operation.Kind != Kind) continue;
+					const bool IsState = Kind == EPcgAiSchemaMutationKind::StateTreeHierarchy;
+					const FString ItemId = Id(IsState ? Operation.StateGuid : Operation.NodeGuid);
+					FString Placement = Operation.Placement;
+					if (Placement == TEXT("state_task")) Placement = TEXT("task");
+					if (Placement == TEXT("state_condition")) Placement = TEXT("enter_condition");
+					const FString Parent = IsState ? Id(Operation.ParentStateGuid)
+						: (Placement == TEXT("task") || Placement == TEXT("enter_condition")) ? Id(Operation.StateGuid) : FString();
+					if (Items->HasField(ItemId))
+						return FailDocument(TEXT("state_tree_mutation_identity_invalid"),
+							TEXT("The generated StateTree document already contains this item identity."),
+							TEXT("items.id"), MakeShared<FJsonValueString>(ItemId),
+							MakeShared<FJsonValueString>(TEXT("unused item identity")), Operation);
+					if (!Parent.IsEmpty() && !Items->HasField(Parent))
+						return FailDocument(TEXT("state_tree_mutation_identity_invalid"),
+							TEXT("The generated StateTree document does not contain the item's parent."),
+							TEXT("items.") + ItemId + TEXT(".parent"), MakeShared<FJsonValueString>(Parent),
+							MakeShared<FJsonValueString>(TEXT("existing parent item identity")), Operation);
+					const FString CandidateKind = IsState ? TEXT("state_tree_state")
+						: Placement == TEXT("enter_condition") ? TEXT("state_tree_condition")
+						: Placement == TEXT("evaluator") ? TEXT("state_tree_evaluator") : TEXT("state_tree_task");
+					const UStruct* Type = Operation.PayloadClass ? static_cast<const UStruct*>(Operation.PayloadClass) : Operation.PayloadStruct;
+					TSharedPtr<FJsonObject> Item, Parameters;
+					HjsonWorkspace::FWorkspaceError Failure;
+					if (!UeAgentStateTreeAuthoring::BuildTreeItemDefaults(Tree, TEXT("None"), CandidateKind,
+						Type, Placement, Item, Parameters, Failure))
+					{ return PreserveDocumentError(Failure.GetDiagnostic()); }
+					int32 Index = 0;
+					for (const auto& Existing : Items->Values)
+					{
+						const auto Row = Existing.Value->AsObject();
+						FString ExistingPlacement;
+						Row->TryGetStringField(TEXT("placement"), ExistingPlacement);
+						if (Row->GetStringField(TEXT("kind")) == (IsState ? TEXT("state") : TEXT("node"))
+							&& Row->GetStringField(TEXT("parent")) == Parent && (IsState || ExistingPlacement == Placement))
+							Index = FMath::Max(Index, Row->GetIntegerField(TEXT("index")) + 1);
+					}
+					Item->SetStringField(TEXT("id"), ItemId);
+					Item->SetStringField(TEXT("parent"), Parent);
+					Item->SetNumberField(TEXT("index"), Index);
+					Items->SetObjectField(ItemId, Item);
+					if (Parameters)
+					{
+						Parameters->SetStringField(TEXT("parent"), ItemId);
+						Items->SetObjectField(Parameters->GetStringField(TEXT("id")), Parameters);
+					}
+				}
+			for (const auto& Operation : Operations)
+			{
+				if (Operation.Kind == EPcgAiSchemaMutationKind::StateTreeProperty)
+					Items->GetObjectField(Id(Operation.StateGuid))->SetStringField(TEXT("label"), Operation.StateName.ToString());
+				else if (Operation.Kind == EPcgAiSchemaMutationKind::StateTreeOrder)
+					for (int32 Index = 0; Index < Operation.OrderedStateGuids.Num(); ++Index)
+						Items->GetObjectField(Id(Operation.OrderedStateGuids[Index]))->SetNumberField(TEXT("index"), Index);
+				else if (Operation.Kind != EPcgAiSchemaMutationKind::StateTreeHierarchy && Operation.Kind != EPcgAiSchemaMutationKind::StateTreeNode)
+					return FailDocument(TEXT("state_tree_mutation_kind_invalid"),
+						TEXT("StateTree document projection received an unsupported mutation kind."),
+						TEXT("operation.kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Operation.Kind)),
+						MakeShared<FJsonValueString>(TEXT("StateTreeHierarchy, StateTreeNode, StateTreeProperty or StateTreeOrder")), Operation);
+			}
+			if (!UeAgentStateTreeAuthoring::ValidateTreeDocument(MakeShared<FJsonValueObject>(Document), Error))
+				return PreserveDocumentError(Error);
+			return true;
+		}
+
+		bool TryExecuteAiGraphMutation(
+			UObject*& Target,
+			const FPcgAnimationGraphRouteProfile& RouteProfile,
+			const FGraphCompoundPcgAiOperationRequest& Request,
+			const FPlanningPreflightPlanRef& Plan,
+			const TArray<FPcgAiSchemaMutationOperation>& Operations,
+			TSharedRef<FUeAgentResourceTracker, ESPMode::ThreadSafe> Resources,
+			FUeAgentContractValue& OutResult,
+			FGraphCompoundRuntimeError& OutError)
+		{
+			auto FailGeneratedOperation = [&](const TCHAR* Code, const FString& Reason,
+				const FString& Field, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected,
+				const FPcgAiSchemaMutationOperation& Operation)
+			{
+				OutError = NativeFailure(Code, Reason, Request.GetTargetRef(), Field, MoveTemp(Actual), MoveTemp(Expected));
+				OutError.SubjectId = Operation.SemanticId;
+				OutError.OperationIndex = static_cast<int32>(&Operation - Operations.GetData());
+				return false;
+			};
+			auto PreserveGeneratedError = [&](const FDiagnostic& Cause,
+				const FPcgAiSchemaMutationOperation* Operation = nullptr)
+			{
+				OutError = Cause;
+				MarkGraphCompoundNativeDiagnostic(OutError);
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
+				if (OutError.SubjectId.IsEmpty())
+					OutError.SubjectId = Operation ? Operation->SemanticId : Request.GetTargetRef();
+				if (Operation && !OutError.OperationIndex.IsSet())
+					OutError.OperationIndex = static_cast<int32>(Operation - Operations.GetData());
+				return false;
+			};
+			TSharedPtr<FJsonObject> Graph;
+			UE::UAI::Contract::FDiagnostic Error;
+			if (Target->IsA<UBehaviorTree>())
+			{
+				using namespace UeAgentBehaviorTreeAuthoring;
+				TArray<FMutation> NativeMutations;
+				for (const FPcgAiSchemaMutationOperation& Operation : Operations)
+				{
+					FMutation& Mutation = NativeMutations.AddDefaulted_GetRef();
+					Mutation.Identity = Operation.SemanticId;
+					Mutation.Node.PayloadClass = Operation.PayloadClass;
+					Mutation.Node.CandidateName = Operation.CandidateName;
+					Mutation.Node.CandidateId = Operation.CandidateId;
+					Mutation.Node.CandidateSelect = Operation.CandidateSelect;
+					Mutation.Node.Location = FVector2f(Operation.PositionX, Operation.PositionY);
+					Mutation.Node.NodeGuid = Operation.NodeGuid;
+					Mutation.ParentId = Operation.OwnerItem;
+					Mutation.ObjectRef = Operation.ObjectRef;
+					Mutation.FromId = Operation.FromItem;
+					Mutation.ToId = Operation.ToItem;
+					Mutation.FromIndex = Operation.FromIndex;
+					Mutation.ToIndex = Operation.ToIndex;
+					switch (Operation.Kind)
+					{
+					case EPcgAiSchemaMutationKind::BehaviorRoot:
+						Mutation.Kind = EMutationKind::Root; break;
+					case EPcgAiSchemaMutationKind::BehaviorComposite:
+						Mutation.Node.GraphNodeClass = UBehaviorTreeGraphNode_Composite::StaticClass(); break;
+					case EPcgAiSchemaMutationKind::BehaviorTask:
+						Mutation.Node.GraphNodeClass = UBehaviorTreeGraphNode_Task::StaticClass(); break;
+					case EPcgAiSchemaMutationKind::BehaviorService:
+						Mutation.Kind = EMutationKind::Attachment;
+						Mutation.Node.GraphNodeClass = UBehaviorTreeGraphNode_Service::StaticClass(); break;
+					case EPcgAiSchemaMutationKind::BehaviorDecorator:
+						Mutation.Kind = EMutationKind::Attachment;
+						Mutation.Node.GraphNodeClass = UBehaviorTreeGraphNode_Decorator::StaticClass(); break;
+					case EPcgAiSchemaMutationKind::BehaviorBlackboardBinding:
+						Mutation.Kind = EMutationKind::BlackboardBinding; break;
+					case EPcgAiSchemaMutationKind::BehaviorRelation:
+						Mutation.Kind = EMutationKind::Connection; break;
+					default:
+						return FailGeneratedOperation(TEXT("behavior_tree_mutation_kind_invalid"),
+							TEXT("BehaviorTree document projection received an unsupported mutation kind."),
+							TEXT("operation.kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Operation.Kind)),
+							MakeShared<FJsonValueString>(TEXT("BehaviorRoot, BehaviorComposite, BehaviorTask, BehaviorService, BehaviorDecorator, BehaviorBlackboardBinding or BehaviorRelation")), Operation);
+					}
+				}
+				if (!UeAgentReflectionAuthoring::RegisterAuthoring(Error))
+				{
+					return PreserveGeneratedError(Error);
+				}
+				if (!BuildGraphDocumentFromMutations(*CastChecked<UBehaviorTree>(Target), NativeMutations, Graph, Error))
+				{
+					return PreserveGeneratedError(Error);
+				}
+			}
+			else if (UStateTree* Tree = Cast<UStateTree>(Target))
+			{
+				if (!UeAgentReflectionAuthoring::RegisterAuthoring(Error)
+					|| !BuildStateTreeMutationDocument(*Tree, Operations, Graph, Error))
+				{ return PreserveGeneratedError(Error); }
+			}
+			else if (UBlackboardData* Blackboard = Cast<UBlackboardData>(Target))
+			{
+				TSharedPtr<FJsonValue> Document;
+				if (!UeAgentReflectionAuthoring::RegisterAuthoring(Error)
+					|| !UeAgentBlackboardAuthoring::ReadDocument(*Blackboard, Document, Error))
+				{ return PreserveGeneratedError(Error); }
+				Graph = Document->AsObject();
+				const auto Keys = Graph->GetObjectField(TEXT("blackboard_keys"));
+				for (const auto& Operation : Operations)
+				{
+					if (Operation.Kind != EPcgAiSchemaMutationKind::BlackboardEntry)
+						return FailGeneratedOperation(TEXT("blackboard_mutation_kind_invalid"),
+							TEXT("Blackboard document projection requires a BlackboardEntry operation."),
+							TEXT("operation.kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Operation.Kind)),
+							MakeShared<FJsonValueString>(TEXT("BlackboardEntry")), Operation);
+					if (!Operation.KeyTypeClass)
+						return FailGeneratedOperation(TEXT("blackboard_mutation_kind_invalid"),
+							TEXT("The Blackboard entry operation has no key type class."),
+							TEXT("operation.key_type_class"), nullptr, ClassPathValue(UBlackboardKeyType::StaticClass()), Operation);
+					const auto Key = MakeShared<FJsonObject>();
+					Key->SetStringField(TEXT("name"), Operation.EntryName.ToString());
+					Key->SetStringField(TEXT("key_type_class"), Operation.KeyTypeClass->GetPathName());
+					Keys->SetObjectField(Operation.EntryName.ToString(), Key);
+				}
+			}
+			else if (auto* Definition = Cast<USmartObjectDefinition>(Target))
+			{
+				TSharedPtr<FJsonValue> Document;
+				if (!UeAgentReflectionAuthoring::RegisterAuthoring(Error)
+					|| !UeAgentSmartObjectAuthoring::ReadDefinitionDocument(*Definition, Document, Error))
+				{ return PreserveGeneratedError(Error); }
+				Graph = Document->AsObject();
+				const auto Items = Graph->GetObjectField(TEXT("items"));
+				for (const auto& Operation : Operations)
+				{
+					if (Operation.Kind != EPcgAiSchemaMutationKind::SmartObjectSlot)
+						return FailGeneratedOperation(TEXT("smart_object_mutation_kind_invalid"),
+							TEXT("SmartObject document projection requires a SmartObjectSlot operation."),
+							TEXT("operation.kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Operation.Kind)),
+							MakeShared<FJsonValueString>(TEXT("SmartObjectSlot")), Operation);
+					if (!Operation.BehaviorClass)
+						return FailGeneratedOperation(TEXT("smart_object_mutation_kind_invalid"),
+							TEXT("The SmartObject slot operation has no behavior class."),
+							TEXT("operation.behavior_class"), nullptr, ClassPathValue(USmartObjectBehaviorDefinition::StaticClass()), Operation);
+					const FString SlotId = Operation.SlotGuid.ToString(EGuidFormats::DigitsWithHyphensLower);
+					if (!Items->HasField(SlotId))
+					{
+						TSharedPtr<FJsonObject> Slot;
+						if (!UeAgentSmartObjectAuthoring::BuildDefinitionItemDefaults(*Definition, TEXT("Slot"), TEXT("slot"),
+							FSmartObjectSlotDefinition::StaticStruct(), Slot, Error))
+						{ return PreserveGeneratedError(Error, &Operation); }
+						int32 Index = 0;
+						for (const auto& Pair : Items->Values)
+							if (Pair.Value->AsObject()->GetStringField(TEXT("kind")) == TEXT("slot")) ++Index;
+						Slot->SetStringField(TEXT("id"), SlotId); Slot->SetStringField(TEXT("parent"), TEXT("root"));
+						Slot->SetNumberField(TEXT("index"), Index); Items->SetObjectField(SlotId, Slot);
+					}
+					const FString BehaviorId = TEXT("behavior:") + SlotId + TEXT(":0");
+					const TSharedPtr<FJsonObject>* Existing = nullptr;
+					if (Items->TryGetObjectField(BehaviorId, Existing)
+						&& (*Existing)->GetStringField(TEXT("class_path")) == Operation.BehaviorClass->GetPathName()) continue;
+					TSharedPtr<FJsonObject> Behavior;
+					if (!UeAgentSmartObjectAuthoring::BuildDefinitionItemDefaults(*Definition, TEXT("Behavior"), TEXT("behavior"),
+						Operation.BehaviorClass, Behavior, Error))
+					{ return PreserveGeneratedError(Error, &Operation); }
+					Behavior->SetStringField(TEXT("id"), BehaviorId); Behavior->SetStringField(TEXT("parent"), SlotId);
+					Behavior->SetNumberField(TEXT("index"), 0); Items->SetObjectField(BehaviorId, Behavior);
+				}
+			}
+			else
+			{
+				TMap<FString, UClass*> NewOptions;
+				TMap<FString, int32> Positions;
+				for (const auto& Operation : Operations)
+				{
+					if (Operation.Kind == EPcgAiSchemaMutationKind::EqsOption)
+						NewOptions.Add(Operation.SemanticId, Operation.PayloadClass);
+					else if (Operation.Kind == EPcgAiSchemaMutationKind::EqsProperty)
+						Positions.Add(Operation.FromItem, Operation.SignedIntegerValue);
+					else
+						return FailGeneratedOperation(TEXT("eqs_mutation_kind_invalid"),
+							TEXT("EQS document projection supports only option and property operations."),
+							TEXT("operation.kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Operation.Kind)),
+							MakeShared<FJsonValueString>(TEXT("EqsOption or EqsProperty")), Operation);
+				}
+				if (!UeAgentReflectionAuthoring::RegisterAuthoring(Error)
+					|| !UeAgentEqsAuthoring::BuildGraphDocumentFromOptionChanges(
+						*CastChecked<UEnvQuery>(Target), NewOptions, Positions, Graph, Error))
+				{ return PreserveGeneratedError(Error); }
+			}
+			const FString TypeId = Target->IsA<UBehaviorTree>() ? TEXT("behavior_tree")
+				: Target->IsA<UStateTree>() ? TEXT("state_tree")
+				: Target->IsA<UBlackboardData>() ? TEXT("blackboard")
+				: Target->IsA<USmartObjectDefinition>() ? TEXT("smart_object") : TEXT("eqs");
+			const auto* Profile = UeAgentReflectionAuthoring::FindProfileByTypeId(TypeId);
+			if (!Profile)
+			{
+				OutError = NativeFailure(TEXT("ai_graph_apply_profile_missing"),
+					TEXT("The reflection authoring profile required by the AI target type is not registered."),
+					Request.GetTargetRef(), TEXT("reflection.profile.type_id"),
+					MakeShared<FJsonValueString>(TypeId), MakeShared<FJsonValueString>(TEXT("registered authoring profile")));
+				return false;
+			}
+			UeAgentReflectionAuthoring::FAssetApplyRequest ApplyRequest;
+			ApplyRequest.TypeId = Profile->TypeId;
+			ApplyRequest.Operation = UeAgentApplyInputContract::EOperation::Update;
+			ApplyRequest.AssetPath = PackageName(Request.GetTargetRef());
+			ApplyRequest.ProviderExtension = MakeShared<FJsonObject>();
+			ApplyRequest.ProviderExtension->SetObjectField(Profile->ProfileStateField, Graph);
+			ApplyRequest.bCompactValues = true;
+			ApplyRequest.bSave = true;
+			FUeAgentCanonicalValuePtr Expected;
+			FVerificationError VerifyError;
+			TSharedPtr<FIndependentReadbackService> Readback;
+			const auto Oracle = MakeShared<FPcgAiSchemaMutationReadbackOracle, ESPMode::ThreadSafe>(
+				RouteProfile, Request.GetTargetRef(), Operations, false);
+			if (!TryBuildSchemaMutationAggregate(Operations, nullptr, *Resources, Expected, VerifyError)
+				|| !FIndependentReadbackService::TryCreate({Oracle}, Readback, VerifyError))
+			{
+				OutError = VerifyError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
+				return false;
+			}
+			ApplyRequest.FinalReadback = [Readback, Expected, Resources, TargetRef = Request.GetTargetRef(),
+				RequestId = Plan->GetRequestId()](UeAgentAuthoringWorkspaceTransaction::FOperationFailure& Failure)
+			{
+				FIndependentReadbackOutcome Outcome;
+				FVerificationError Error;
+				if (!Readback->TryObserve(FIndependentReadbackRequest(
+					TEXT("graph-compound-pcg-ai:") + RequestId, SchemaMutationReadbackOracleId,
+					TargetRef, Expected.ToSharedRef()), *Resources, Outcome, Error))
+				{
+					Failure.Diagnostic = Outcome.GetFailureDiagnostic(Error);
+					return false;
+				}
+				return true;
+			};
+			// Reflection owns checkpoint, expected/actual graph comparison and persistent readback.
+			Target = nullptr;
+			UeAgentReflectionAuthoring::FAssetApplyResult Result;
+			if (!UeAgentReflectionAuthoring::ApplyAsset(ApplyRequest, Result, Plan->GetRequestId()))
+			{
+				return PreserveGeneratedError(Result.Diagnostic);
+			}
+			return TrySerializeResult(Request.GetTargetRef(), OutResult, OutError);
 		}
 
 		bool TryExecuteSchemaMutation(
@@ -4797,19 +4910,30 @@ namespace UE::UAI::Composition::GraphCompound
 			}
 			if (!IsInGameThread() || Cancellation->IsCancelled())
 			{
-				SetError(OutError,
-					Cancellation->IsCancelled()
-						? TEXT("graph_compound_pcg_ai_cancelled")
-						: TEXT("graph_compound_pcg_ai_thread_invalid"),
-					Profile.GetCapabilityId());
+				const bool bCancelled = Cancellation->IsCancelled();
+				OutError = NativeFailure(bCancelled
+						? TEXT("graph_compound_pcg_ai_cancelled") : TEXT("graph_compound_pcg_ai_thread_invalid"),
+					bCancelled ? TEXT("The PCG/AI schema mutation was cancelled before execution.")
+						: TEXT("PCG/AI schema mutation must execute on the game thread."),
+					Request.GetTargetRef(), bCancelled ? TEXT("cancellation.requested") : TEXT("execution.game_thread"),
+					MakeShared<FJsonValueBoolean>(bCancelled), MakeShared<FJsonValueBoolean>(!bCancelled));
+				OutError.SubjectId = Profile.GetCapabilityId();
 				return false;
 			}
 			UObject* Target = LoadObject<UObject>(nullptr, *Request.GetTargetRef());
-			if (!Target || Target->GetPathName() != Request.GetTargetRef())
+			if (!Target)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_ai_target_invalid"),
-					Request.GetTargetRef());
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					TEXT("The PCG/AI mutation target could not be loaded."),
+					Request.GetTargetRef(), TEXT("target"), nullptr, MakeShared<FJsonValueString>(TEXT("loadable target object")));
+				return false;
+			}
+			if (Target->GetPathName() != Request.GetTargetRef())
+			{
+				OutError = NativeFailure(TEXT("graph_compound_pcg_ai_target_invalid"),
+					TEXT("The loaded PCG/AI target path differs from the requested reference."),
+					Request.GetTargetRef(), TEXT("target.path"), MakeShared<FJsonValueString>(Target->GetPathName()),
+					MakeShared<FJsonValueString>(Request.GetTargetRef()));
 				return false;
 			}
 			TArray<FPcgAiSchemaMutationOperation> Operations;
@@ -4829,10 +4953,15 @@ namespace UE::UAI::Composition::GraphCompound
 					Plan, Current.ToSharedRef(), CallerContext,
 					*Resources, RevalidateError))
 			{
-				SetError(OutError, RevalidateError.GetCode(),
-					RevalidateError.GetIdentityKey(),
-					RevalidateError.GetDetail());
+				OutError = RevalidateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = RevalidateError.SubjectId;
 				return false;
+			}
+
+			if (Target->IsA<UBehaviorTree>() || Target->IsA<UEnvQuery>() || Target->IsA<UStateTree>()
+				|| Target->IsA<UBlackboardData>() || Target->IsA<USmartObjectDefinition>())
+			{
+				return TryExecuteAiGraphMutation(Target, Profile, Request, Plan, Operations, Resources, OutResult, OutError);
 			}
 
 			const int64 FencingToken = ++LastFencingToken;
@@ -4855,8 +4984,8 @@ namespace UE::UAI::Composition::GraphCompound
 					*Resources, Prepared, DurableError)
 				|| !Prepared.IsValid())
 			{
-				SetError(OutError, DurableError.GetCode(),
-					Request.GetTargetRef(), DurableError.GetDetail());
+				OutError = DurableError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
 				return false;
 			}
 
@@ -4865,27 +4994,25 @@ namespace UE::UAI::Composition::GraphCompound
 					*Target, Operations, NativeHook, Revision, OutError))
 			{
 				Target = nullptr;
-				FString RollbackDetail;
+				UE::UAI::Contract::FDiagnostic RollbackDetail;
 				TryRollbackCreate(
 					Request.GetTargetRef(), false, Prepared.ToSharedRef(),
 					DurableBackend, FencingToken, *Resources, RollbackDetail);
-				OutError.Detail += TEXT(";") + RollbackDetail;
+				OutError.Append(RollbackDetail);
 				return false;
 			}
 			Target->GetOutermost()->MarkPackageDirty();
 			FDurableReceipt DurableReceipt;
-			if (!TryPersistAssetDurability(
+			if (!TryPersistAssetDurabilityForVerification(
 					Prepared.ToSharedRef(), DurableBackend, FencingToken,
 					*Resources, DurableReceipt, DurableError))
 			{
 				Target = nullptr;
-				FString RollbackDetail;
+				UE::UAI::Contract::FDiagnostic RollbackDetail;
 				TryRollbackCreate(
 					Request.GetTargetRef(), false, Prepared.ToSharedRef(),
 					DurableBackend, FencingToken, *Resources, RollbackDetail);
-				SetError(OutError, DurableError.GetCode(),
-					Request.GetTargetRef(), DurableError.GetDetail()
-						+ TEXT(";") + RollbackDetail);
+				SetError(OutError, DurableError, Request.GetTargetRef(), RollbackDetail);
 				return false;
 			}
 			Target->GetOutermost()->SetDirtyFlag(false);
@@ -4898,13 +5025,11 @@ namespace UE::UAI::Composition::GraphCompound
 			if (!TryBuildSchemaMutationAggregate(
 					Operations, nullptr, *Resources, Expected, VerifyError))
 			{
-				FString RollbackDetail;
+				UE::UAI::Contract::FDiagnostic RollbackDetail;
 				TryRollbackCreate(
 					Request.GetTargetRef(), false, Persisted,
 					DurableBackend, FencingToken, *Resources, RollbackDetail);
-				SetError(OutError, VerifyError.GetCode(),
-					Request.GetTargetRef(), VerifyError.GetDetail()
-						+ TEXT(";") + RollbackDetail);
+				SetError(OutError, VerifyError, Request.GetTargetRef(), RollbackDetail);
 				return false;
 			}
 			TSharedPtr<FIndependentReadbackService> Readback;
@@ -4913,49 +5038,42 @@ namespace UE::UAI::Composition::GraphCompound
 				MakeShared<FPcgAiSchemaMutationReadbackOracle,
 					ESPMode::ThreadSafe>(Profile, Request.GetTargetRef(), Operations);
 			FIndependentReadbackOutcome Outcome;
-			if (!FIndependentReadbackService::TryCreate(
-					{Oracle}, Readback, VerifyError)
-				|| !Readback.IsValid()
-				|| !Readback->TryVerify(
-					FIndependentReadbackRequest(
-						TEXT("graph-compound-pcg-ai:") + Plan->GetRequestId(),
-						SchemaMutationReadbackOracleId,
-						Request.GetTargetRef(), Expected.ToSharedRef()),
-					*Resources, Outcome, VerifyError)
-				|| Outcome.GetStatus() != EVerificationStatus::Verified)
+			const bool bReadbackCreated = FIndependentReadbackService::TryCreate({Oracle}, Readback, VerifyError);
+			const bool bObserved = bReadbackCreated && Readback->TryObserve(
+				FIndependentReadbackRequest(
+					TEXT("graph-compound-pcg-ai:") + Plan->GetRequestId(),
+					SchemaMutationReadbackOracleId, Request.GetTargetRef(), Expected.ToSharedRef()),
+				*Resources, Outcome, VerifyError);
+			if (!bObserved)
 			{
-				FString RollbackDetail;
+				UE::UAI::Contract::FDiagnostic RollbackDetail;
 				TryRollbackCreate(
 					Request.GetTargetRef(), false, Persisted,
 					DurableBackend, FencingToken, *Resources, RollbackDetail);
-				SetError(OutError,
-					VerifyError.GetCode().IsEmpty()
-						? TEXT("graph_compound_pcg_ai_readback_failed")
-						: VerifyError.GetCode(),
-					Request.GetTargetRef(), Outcome.GetDiagnosticCode()
-						+ TEXT(";") + RollbackDetail);
+				OutError = bReadbackCreated ? Outcome.GetFailureDiagnostic(VerifyError) : VerifyError;
+				OutError.Append(RollbackDetail);
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
 				return false;
 			}
 
 			const FDurableVerificationAcknowledgement Acknowledgement(
 				DurableReceipt.GetJournalId(), Plan->GetFingerprint(),
 				Prepared->GetInventory().GetInventoryHash(),
-				Outcome.GetEvidenceId(), JournalOwner, FencingToken);
+				Outcome.GetEvidenceId(), JournalOwner, FencingToken, Outcome.GetStatus() == EVerificationStatus::Verified);
 			if (!TryAcknowledgeAssetDurability(
 					Persisted, Acknowledgement, FencingToken,
 					*Resources, DurableError))
 			{
-				FString RollbackDetail;
+				UE::UAI::Contract::FDiagnostic RollbackDetail;
 				TryRollbackCreate(
 					Request.GetTargetRef(), false, Persisted,
 					DurableBackend, FencingToken, *Resources, RollbackDetail);
-				SetError(OutError, DurableError.GetCode(),
-					Request.GetTargetRef(), DurableError.GetDetail()
-						+ TEXT(";") + RollbackDetail);
+				SetError(OutError, DurableError, Request.GetTargetRef(), RollbackDetail);
 				return false;
 			}
 			return TrySerializeResult(
-				Request.GetTargetRef(), Revision, Outcome.GetEvidenceId(),
+				Request.GetTargetRef(),
 				OutResult, OutError);
 		}
 
@@ -5012,47 +5130,86 @@ namespace UE::UAI::Composition::GraphCompound
 			{
 				OutObservation = FIndependentReadbackObservation();
 				OutError = FVerificationError();
-				FString Detail;
-				if (!TryUnloadTarget(TargetRef, false, Detail))
+				UE::UAI::Contract::FDiagnostic Detail;
+				if (!UeAgentAuthoringOperationApply::TryReloadPersistedPackage(TargetRef, Detail))
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("graph_compound_pcg_level_asset_unload_failed"),
-						Detail);
-					return true;
+					OutError = Detail.IsEmpty()
+						? NativeFailure(TEXT("graph_compound_pcg_level_asset_unload_failed"),
+							TEXT("The persisted PCG level-data package reload failed without providing a diagnostic."),
+							TargetRef, TEXT("package.reload.succeeded"),
+							MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true))
+						: Detail;
+					return false;
 				}
 				UPCGDataAsset* const Asset = LoadObject<UPCGDataAsset>(
 					nullptr, *ObjectPath(TargetRef));
-				bool bExactData = Asset
-					&& Asset->GetOutermost()->GetName() == PackageName(TargetRef)
-					&& !Asset->GetOutermost()->IsDirty()
-					&& Asset->ObjectPath.ToString() == SourceRef
-					&& Asset->Data.TaggedData.Num() == 2;
-				UClass* const ExpectedDataClass =
-					LoadSupportedPcgLevelPointDataClass(DataTypeRef);
-				if (bExactData)
+				if (!Asset)
 				{
-					for (const FPCGTaggedData& Tagged : Asset->Data.TaggedData)
+					OutError = NativeFailure(TEXT("graph_compound_pcg_level_asset_reload_failed"),
+						TEXT("The persisted PCG level-data asset could not be loaded for independent readback."),
+						TargetRef, TEXT("asset"), nullptr, ClassPathValue(UPCGDataAsset::StaticClass()));
+					OutError.Stage = TEXT("verification");
+					return false;
+				}
+				FDiagnostic Mismatch;
+				auto SetMismatch = [&](const FString& Reason, const FString& Field,
+					TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+				{
+					Mismatch = NativeFailure(TEXT("graph_compound_pcg_level_asset_reload_mismatch"),
+						Reason, TargetRef, Field, MoveTemp(Actual), MoveTemp(Expected));
+					Mismatch.Stage = TEXT("independent_readback");
+				};
+				if (Asset->GetOutermost()->GetName() != PackageName(TargetRef))
+					SetMismatch(TEXT("The reloaded PCG data asset belongs to a different package."),
+						TEXT("asset.package"), MakeShared<FJsonValueString>(Asset->GetOutermost()->GetName()),
+						MakeShared<FJsonValueString>(PackageName(TargetRef)));
+				else if (Asset->GetOutermost()->IsDirty())
+					SetMismatch(TEXT("The reloaded PCG data asset package is dirty."),
+						TEXT("asset.package.dirty"), MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false));
+				else if (Asset->ObjectPath.ToString() != SourceRef)
+					SetMismatch(TEXT("The reloaded PCG data asset source differs from the requested source level."),
+						TEXT("asset.source_ref"), MakeShared<FJsonValueString>(Asset->ObjectPath.ToString()),
+						MakeShared<FJsonValueString>(SourceRef));
+				else if (Asset->Data.TaggedData.Num() != 2)
+					SetMismatch(TEXT("The reloaded PCG level-data asset does not contain exactly two tagged data items."),
+						TEXT("asset.tagged_data.count"), MakeShared<FJsonValueNumber>(Asset->Data.TaggedData.Num()),
+						MakeShared<FJsonValueNumber>(2));
+				// Keep class loading at the same point, including when earlier readback facts differ.
+				UClass* const ExpectedDataClass = LoadSupportedPcgLevelPointDataClass(DataTypeRef);
+				if (Mismatch.IsEmpty())
+				{
+					for (int32 Index = 0; Index < Asset->Data.TaggedData.Num(); ++Index)
 					{
-						bExactData = bExactData
-							&& Tagged.Data
-							&& Tagged.Data->GetClass() == ExpectedDataClass;
+						const FPCGTaggedData& Tagged = Asset->Data.TaggedData[Index];
+						const FString Field = FString::Printf(TEXT("asset.tagged_data/%d"), Index);
+						if (!Tagged.Data)
+						{
+							SetMismatch(TEXT("The reloaded PCG tagged data item has no data object."),
+								Field, nullptr, MakeShared<FJsonValueString>(DataTypeRef));
+							break;
+						}
+						if (Tagged.Data->GetClass() != ExpectedDataClass)
+						{
+							SetMismatch(ExpectedDataClass
+									? TEXT("The reloaded PCG tagged data class differs from the requested point-data class.")
+									: TEXT("The expected PCG point-data class is unavailable or unsupported during readback."),
+								Field + TEXT("/class"), ClassPathValue(Tagged.Data->GetClass()),
+								MakeShared<FJsonValueString>(DataTypeRef));
+							break;
+						}
 					}
 				}
-				if (!bExactData)
+				if (!Mismatch.IsEmpty())
 				{
-					OutObservation = FIndependentReadbackObservation::Unavailable(
-						TEXT("graph_compound_pcg_level_asset_reload_mismatch"),
-						TEXT("reload:") + TargetRef);
+					OutObservation = FIndependentReadbackObservation::Unavailable(MoveTemp(Mismatch), TEXT("reload:") + TargetRef);
 					return true;
 				}
 				FUeAgentCanonicalValuePtr Actual;
 				FGraphCompoundRuntimeError ValueError;
 				if (!TryBuildPcgLevelDataAssetValue(
-						DataTypeRef, SourceRef, Resources, Actual, ValueError)
-					|| !Actual.IsValid())
+						DataTypeRef, SourceRef, Resources, Actual, ValueError))
 				{
-					OutError = FVerificationError(
-						ValueError.Code, ValueError.Detail);
+					OutError = ValueError;
 					return false;
 				}
 				OutObservation = FIndependentReadbackObservation::Available(
@@ -5082,43 +5239,108 @@ namespace UE::UAI::Composition::GraphCompound
 				Request.GetPayload().GetEdits();
 			const TArray<FPlannedChange>& Changes =
 				Plan->GetChangeSet().GetChanges();
-			if (!IsPcgDataFromLevelProfile(Profile, Request.GetTarget())
-				|| Plan->GetDescriptorIdentity()
-					!= Profile.GetExecutionContract().GetDescriptorIdentity()
-				|| Edits.Num() != 1 || Changes.Num() != 1
-				|| Edits[0].GetElementKind()
-					!= EGraphCompoundElementKind::Target
-				|| Edits[0].GetIntent() != EChangeIntent::Create
-				|| Edits[0].GetIdentity().GetOwnerId()
-					!= Request.GetTargetRef()
-				|| Edits[0].GetIdentity().GetSemanticId()
-					!= TEXT("target:") + Request.GetTargetRef()
-				|| !Edits[0].GetProposedAfter().IsValid()
-				|| !HasExactObjectFields(
-					*Edits[0].GetProposedAfter(),
-					{TEXT("data_type_ref"), TEXT("source_level_ref")})
-				|| !TryCanonicalStringField(
-					*Edits[0].GetProposedAfter(),
-					TEXT("data_type_ref"), OutDataTypeRef)
-				|| !TryCanonicalStringField(
-					*Edits[0].GetProposedAfter(),
-					TEXT("source_level_ref"), OutSourceRef)
-				|| Changes[0].GetIdentity()
-						.GetOwnerId() != Request.GetTargetRef()
-				|| Changes[0].GetIntent() != EChangeIntent::Create)
+			TOptional<int32> EditIndex;
+			auto FailPlan = [&](const FString& Reason, const FString& Field,
+				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_data_from_level_plan_invalid"),
-					Request.GetTargetRef());
+				OutError = NativeFailure(TEXT("graph_compound_pcg_data_from_level_plan_invalid"),
+					Reason, Request.GetTargetRef(), Field, MoveTemp(Actual), MoveTemp(Expected));
+				OutError.OperationIndex = EditIndex;
+				return false;
+			};
+			if (Profile.GetCapabilityId() != TEXT("pcg.data_asset.create_from_level"))
+				return FailPlan(TEXT("The level-data plan uses an unsupported capability."),
+					TEXT("capability_id"), MakeShared<FJsonValueString>(Profile.GetCapabilityId()),
+					MakeShared<FJsonValueString>(TEXT("pcg.data_asset.create_from_level")));
+			if (Profile.GetInputKind() != EPcgAnimationGraphInputKind::PcgDataFromLevel)
+				return FailPlan(TEXT("The level-data plan uses an incorrect route input kind."),
+					TEXT("profile.input_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Profile.GetInputKind())),
+					MakeShared<FJsonValueNumber>(static_cast<int32>(EPcgAnimationGraphInputKind::PcgDataFromLevel)));
+			if (Profile.GetTargetKind() != TEXT("pcg_data_asset"))
+				return FailPlan(TEXT("The level-data route does not target PCG data assets."),
+					TEXT("profile.target_kind"), MakeShared<FJsonValueString>(Profile.GetTargetKind()),
+					MakeShared<FJsonValueString>(TEXT("pcg_data_asset")));
+			if (Request.GetTarget().GetTargetKind() != TEXT("pcg_data_asset"))
+				return FailPlan(TEXT("The level-data request does not target a PCG data asset."),
+					TEXT("request.target_kind"), MakeShared<FJsonValueString>(Request.GetTarget().GetTargetKind()),
+					MakeShared<FJsonValueString>(TEXT("pcg_data_asset")));
+			const FUeAgentDescriptorIdentity& ActualDescriptor = Plan->GetDescriptorIdentity();
+			const FUeAgentDescriptorIdentity& ExpectedDescriptor =
+				Profile.GetExecutionContract().GetDescriptorIdentity();
+			if (ActualDescriptor != ExpectedDescriptor)
+			{
+				if (ActualDescriptor.GetDescriptorId() != ExpectedDescriptor.GetDescriptorId())
+					return FailPlan(TEXT("The plan descriptor id does not match the route descriptor."),
+						TEXT("descriptor_identity.descriptor_id"),
+						MakeShared<FJsonValueString>(ActualDescriptor.GetDescriptorId()),
+						MakeShared<FJsonValueString>(ExpectedDescriptor.GetDescriptorId()));
+				if (ActualDescriptor.GetVersion() != ExpectedDescriptor.GetVersion())
+					return FailPlan(TEXT("The plan descriptor version does not match the route descriptor."),
+						TEXT("descriptor_identity.version"),
+						MakeShared<FJsonValueNumber>(ActualDescriptor.GetVersion()),
+						MakeShared<FJsonValueNumber>(ExpectedDescriptor.GetVersion()));
+				FailPlan(TEXT("The plan descriptor hash does not match the route descriptor."),
+					TEXT("descriptor_identity.descriptor_hash"), nullptr, nullptr);
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(ActualDescriptor.GetDescriptorHash());
+				OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedDescriptor.GetDescriptorHash());
 				return false;
 			}
-			if (!LoadSupportedPcgLevelPointDataClass(OutDataTypeRef))
-			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_data_type_unsupported"),
-					OutDataTypeRef);
-				return false;
-			}
+			if (Edits.Num() != 1)
+				return FailPlan(TEXT("The level-data request requires exactly one edit."),
+					TEXT("edits.count"), MakeShared<FJsonValueNumber>(Edits.Num()), MakeShared<FJsonValueNumber>(1));
+			if (Changes.Num() != 1)
+				return FailPlan(TEXT("The level-data plan requires exactly one change."),
+					TEXT("changes.count"), MakeShared<FJsonValueNumber>(Changes.Num()), MakeShared<FJsonValueNumber>(1));
+			EditIndex = 0;
+			const FGraphCompoundCanonicalEdit& Edit = Edits[0];
+			if (Edit.GetElementKind() != EGraphCompoundElementKind::Target)
+				return FailPlan(TEXT("The level-data edit must target the asset itself."),
+					TEXT("edit.element_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetElementKind())),
+					MakeShared<FJsonValueString>(TEXT("target")));
+			if (Edit.GetIntent() != EChangeIntent::Create)
+				return FailPlan(TEXT("The level-data edit must use create intent."),
+					TEXT("edit.intent"), MakeShared<FJsonValueNumber>(static_cast<int32>(Edit.GetIntent())),
+					MakeShared<FJsonValueString>(TEXT("create")));
+			if (Edit.GetIdentity().GetOwnerId() != Request.GetTargetRef())
+				return FailPlan(TEXT("The level-data edit owner differs from the requested asset."),
+					TEXT("edit.identity.owner_id"), MakeShared<FJsonValueString>(Edit.GetIdentity().GetOwnerId()),
+					MakeShared<FJsonValueString>(Request.GetTargetRef()));
+			const FString SemanticId = Edit.GetIdentity().GetSemanticId();
+			if (SemanticId != TEXT("target:") + Request.GetTargetRef())
+				return FailPlan(TEXT("The level-data edit identity differs from the requested asset."),
+					TEXT("edit.identity.semantic_id"), MakeShared<FJsonValueString>(SemanticId),
+					MakeShared<FJsonValueString>(TEXT("target:") + Request.GetTargetRef()));
+			if (!Edit.GetProposedAfter().IsValid())
+				return FailPlan(TEXT("The level-data edit has no proposed value."),
+					TEXT("edit.proposed_after"), nullptr, MakeShared<FJsonValueString>(TEXT("proposed data specification")));
+			const FString* ValuePointer = Request.GetPayload().FindInputPointer(SemanticId);
+			const FRequiredCanonicalInput Input(TEXT("graph_compound_pcg_data_from_level_plan_invalid"),
+				Request.GetTargetRef(), SemanticId, ValuePointer ? *ValuePointer : FString(), false, OutError, EditIndex);
+			if (!Input.RequireFields(*Edit.GetProposedAfter(), {TEXT("data_type_ref"), TEXT("source_level_ref")})
+				|| !Input.ReadString(*Edit.GetProposedAfter(), TEXT("data_type_ref"), OutDataTypeRef)
+				|| !Input.ReadString(*Edit.GetProposedAfter(), TEXT("source_level_ref"), OutSourceRef)) return false;
+			if (Changes[0].GetIdentity().GetOwnerId() != Request.GetTargetRef())
+				return FailPlan(TEXT("The planned level-data change owner differs from the requested asset."),
+					TEXT("change.identity.owner_id"), MakeShared<FJsonValueString>(Changes[0].GetIdentity().GetOwnerId()),
+					MakeShared<FJsonValueString>(Request.GetTargetRef()));
+			if (Changes[0].GetIntent() != EChangeIntent::Create)
+				return FailPlan(TEXT("The planned level-data change must use create intent."),
+					TEXT("change.intent"), MakeShared<FJsonValueNumber>(static_cast<int32>(Changes[0].GetIntent())),
+					MakeShared<FJsonValueString>(TEXT("create")));
+			UClass* const DataClass = LoadObject<UClass>(nullptr, *OutDataTypeRef);
+			const bool bSupportedDataClass = DataClass == UPCGPointData::StaticClass()
+				|| DataClass == UPCGPointArrayData::StaticClass();
+			const FRequiredCanonicalInput TypeInput(TEXT("graph_compound_pcg_data_type_unsupported"),
+				Request.GetTargetRef(), SemanticId, ValuePointer ? *ValuePointer : FString(), false, OutError, EditIndex);
+			if (!DataClass)
+				return TypeInput.Fail(TEXT("The PCG level-data class reference could not be loaded."),
+					TEXT("/data_type_ref"), MakeShared<FJsonValueString>(OutDataTypeRef),
+					MakeShared<FJsonValueString>(TEXT("loadable PCGPointData or PCGPointArrayData class")));
+			if (!bSupportedDataClass)
+				return TypeInput.Fail(TEXT("The PCG level-data class is not one of the supported exact point-data classes."),
+					TEXT("/data_type_ref"), ClassPathValue(DataClass),
+					MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+						ClassPathValue(UPCGPointData::StaticClass()), ClassPathValue(UPCGPointArrayData::StaticClass())}));
 			return true;
 		}
 
@@ -5137,11 +5359,14 @@ namespace UE::UAI::Composition::GraphCompound
 		{
 			if (!IsInGameThread() || Cancellation->IsCancelled())
 			{
-				SetError(OutError,
-					Cancellation->IsCancelled()
-						? TEXT("graph_compound_pcg_ai_cancelled")
-						: TEXT("graph_compound_pcg_ai_thread_invalid"),
-					Profile.GetCapabilityId());
+				const bool bCancelled = Cancellation->IsCancelled();
+				OutError = NativeFailure(bCancelled
+						? TEXT("graph_compound_pcg_ai_cancelled") : TEXT("graph_compound_pcg_ai_thread_invalid"),
+					bCancelled ? TEXT("The PCG level-data creation was cancelled before execution.")
+						: TEXT("PCG level-data creation must execute on the game thread."),
+					Request.GetTargetRef(), bCancelled ? TEXT("cancellation.requested") : TEXT("execution.game_thread"),
+					MakeShared<FJsonValueBoolean>(bCancelled), MakeShared<FJsonValueBoolean>(!bCancelled));
+				OutError.SubjectId = Profile.GetCapabilityId();
 				return false;
 			}
 			FString DataTypeRef;
@@ -5157,9 +5382,15 @@ namespace UE::UAI::Composition::GraphCompound
 					: LoadObject<UWorld>(nullptr, *SourceRef);
 			if (!SourceWorld || SourceWorld->GetPathName() != SourceRef)
 			{
-				SetError(OutError,
-					TEXT("graph_compound_pcg_source_level_invalid"), SourceRef);
-				return false;
+				const FString SemanticId = TEXT("target:") + Request.GetTargetRef();
+				const FString* ValuePointer = Request.GetPayload().FindInputPointer(SemanticId);
+				const FRequiredCanonicalInput Input(TEXT("graph_compound_pcg_source_level_invalid"),
+					Request.GetTargetRef(), SemanticId, ValuePointer ? *ValuePointer : FString(), false, OutError, 0);
+				return Input.Fail(SourceWorld
+						? TEXT("The loaded source world path differs from the requested level reference.")
+						: TEXT("The source level reference could not be loaded as a world."),
+					TEXT("/source_level_ref"), MakeShared<FJsonValueString>(SourceWorld ? SourceWorld->GetPathName() : SourceRef),
+					MakeShared<FJsonValueString>(SourceWorld ? SourceRef : TEXT("loadable world reference")));
 			}
 
 			FUeAgentCanonicalSnapshotPtr Current;
@@ -5173,8 +5404,8 @@ namespace UE::UAI::Composition::GraphCompound
 					Plan, Current.ToSharedRef(), CallerContext,
 					*Resources, RevalidateError))
 			{
-				SetError(OutError, RevalidateError.GetCode(),
-					RevalidateError.GetIdentityKey(), RevalidateError.GetDetail());
+				OutError = RevalidateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = RevalidateError.SubjectId;
 				return false;
 			}
 
@@ -5193,11 +5424,10 @@ namespace UE::UAI::Composition::GraphCompound
 			FAssetDurableError DurableError;
 			if (!TryPrepareAssetDurability(
 					DurableRequest, DurableBackend, JournalRoot,
-					*Resources, Prepared, DurableError)
-				|| !Prepared.IsValid())
+					*Resources, Prepared, DurableError))
 			{
-				SetError(OutError, DurableError.GetCode(),
-					Request.GetTargetRef(), DurableError.GetDetail());
+				OutError = DurableError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
 				return false;
 			}
 
@@ -5224,49 +5454,87 @@ namespace UE::UAI::Composition::GraphCompound
 				&& Exporter->Export(Request.GetTargetRef(), Asset);
 			CVarPCGEnablePointArrayData->Set(
 				bPreviousPointArrayEnabled, ECVF_SetByCode);
-			const bool bExported = bNativeExported
-				&& Asset->GetPathName() == ObjectPath(Request.GetTargetRef())
-				&& Asset->ObjectPath.ToString() == SourceRef
-				&& Asset->Data.TaggedData.Num() == 2;
-			bool bExactData = bExported;
-			if (bExactData)
+			FDiagnostic ExportError;
+			auto FailExport = [&](const FString& Reason, const FString& Field,
+				TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 			{
-				for (const FPCGTaggedData& Tagged : Asset->Data.TaggedData)
+				ExportError = NativeFailure(TEXT("graph_compound_pcg_level_export_failed"),
+					Reason, Request.GetTargetRef(), Field, MoveTemp(Actual), MoveTemp(Expected));
+				if (Package) ExportError.MutationMayHaveStarted = true;
+			};
+			if (!Package)
+				FailExport(TEXT("The destination package could not be created for level-data export."),
+					TEXT("package"), nullptr, MakeShared<FJsonValueString>(Request.GetTargetRef()));
+			else if (!Asset)
+				FailExport(TEXT("The destination PCG data asset could not be created."),
+					TEXT("asset"), nullptr, ClassPathValue(UPCGDataAsset::StaticClass()));
+			else if (!Exporter)
+				FailExport(TEXT("The PCG level exporter could not be created."),
+					TEXT("exporter"), nullptr, ClassPathValue(UPCGLevelToAsset::StaticClass()));
+			else if (!bNativeExported)
+				FailExport(TEXT("The native PCG level exporter reported failure."),
+					TEXT("export.succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+			else if (Asset->GetPathName() != ObjectPath(Request.GetTargetRef()))
+				FailExport(TEXT("The exported PCG data asset path differs from the requested destination."),
+					TEXT("asset.path"), MakeShared<FJsonValueString>(Asset->GetPathName()),
+					MakeShared<FJsonValueString>(ObjectPath(Request.GetTargetRef())));
+			else if (Asset->ObjectPath.ToString() != SourceRef)
+				FailExport(TEXT("The exported PCG data asset source differs from the requested level."),
+					TEXT("asset.source_ref"), MakeShared<FJsonValueString>(Asset->ObjectPath.ToString()),
+					MakeShared<FJsonValueString>(SourceRef));
+			else if (Asset->Data.TaggedData.Num() != 2)
+				FailExport(TEXT("The exported PCG level-data asset does not contain exactly two tagged data items."),
+					TEXT("asset.tagged_data.count"), MakeShared<FJsonValueNumber>(Asset->Data.TaggedData.Num()),
+					MakeShared<FJsonValueNumber>(2));
+			else
+			{
+				for (int32 Index = 0; Index < Asset->Data.TaggedData.Num(); ++Index)
 				{
-					bExactData = bExactData && Tagged.Data
-						&& Tagged.Data->GetClass() == ExpectedDataClass;
+					const FPCGTaggedData& Tagged = Asset->Data.TaggedData[Index];
+					const FString Field = FString::Printf(TEXT("asset.tagged_data/%d"), Index);
+					if (!Tagged.Data)
+					{
+						FailExport(TEXT("The exported PCG tagged data item has no data object."),
+							Field, nullptr, MakeShared<FJsonValueString>(DataTypeRef));
+						break;
+					}
+					if (Tagged.Data->GetClass() != ExpectedDataClass)
+					{
+						FailExport(ExpectedDataClass
+								? TEXT("The exported PCG tagged data class differs from the requested point-data class.")
+								: TEXT("The expected PCG point-data class is unavailable or unsupported during export."),
+							Field + TEXT("/class"), ClassPathValue(Tagged.Data->GetClass()),
+							MakeShared<FJsonValueString>(DataTypeRef));
+						break;
+					}
 				}
 			}
-			if (!bExactData)
+			if (!ExportError.IsEmpty())
 			{
 				Asset = nullptr;
 				Package = nullptr;
-				FString RollbackDetail;
+				UE::UAI::Contract::FDiagnostic RollbackDetail;
 				TryRollbackCreate(
 					Request.GetTargetRef(), true, Prepared.ToSharedRef(),
 					DurableBackend, FencingToken, *Resources, RollbackDetail);
-				SetError(OutError,
-					TEXT("graph_compound_pcg_level_export_failed"),
-					Request.GetTargetRef(), RollbackDetail);
+				SetError(OutError, ExportError, Request.GetTargetRef(), RollbackDetail);
 				return false;
 			}
 			Asset->SetFlags(RF_Public | RF_Standalone);
 			FAssetRegistryModule::AssetCreated(Asset);
 			Package->MarkPackageDirty();
 			FDurableReceipt DurableReceipt;
-			if (!TryPersistAssetDurability(
+			if (!TryPersistAssetDurabilityForVerification(
 					Prepared.ToSharedRef(), DurableBackend, FencingToken,
 					*Resources, DurableReceipt, DurableError))
 			{
 				Asset = nullptr;
 				Package = nullptr;
-				FString RollbackDetail;
+				UE::UAI::Contract::FDiagnostic RollbackDetail;
 				TryRollbackCreate(
 					Request.GetTargetRef(), true, Prepared.ToSharedRef(),
 					DurableBackend, FencingToken, *Resources, RollbackDetail);
-				SetError(OutError, DurableError.GetCode(),
-					Request.GetTargetRef(), DurableError.GetDetail()
-						+ TEXT(";") + RollbackDetail);
+				SetError(OutError, DurableError, Request.GetTargetRef(), RollbackDetail);
 				return false;
 			}
 			Package->SetDirtyFlag(false);
@@ -5277,8 +5545,7 @@ namespace UE::UAI::Composition::GraphCompound
 
 			FUeAgentCanonicalValuePtr Expected;
 			if (!TryBuildPcgLevelDataAssetValue(
-					DataTypeRef, SourceRef, *Resources, Expected, OutError)
-				|| !Expected.IsValid())
+					DataTypeRef, SourceRef, *Resources, Expected, OutError))
 			{
 				return false;
 			}
@@ -5290,52 +5557,42 @@ namespace UE::UAI::Composition::GraphCompound
 					ESPMode::ThreadSafe>(
 						Request.GetTargetRef(), DataTypeRef, SourceRef);
 			FIndependentReadbackOutcome Outcome;
-			if (!FIndependentReadbackService::TryCreate(
-					{Oracle}, Readback, VerifyError)
-				|| !Readback.IsValid()
-				|| !Readback->TryVerify(
-					FIndependentReadbackRequest(
-						TEXT("graph-compound-pcg-ai:") + Plan->GetRequestId(),
-						PcgLevelDataAssetReadbackOracleId,
-						Request.GetTargetRef(), Expected.ToSharedRef()),
-					*Resources, Outcome, VerifyError)
-				|| Outcome.GetStatus() != EVerificationStatus::Verified)
+			const bool bReadbackCreated = FIndependentReadbackService::TryCreate({Oracle}, Readback, VerifyError);
+			const bool bObserved = bReadbackCreated && Readback->TryObserve(
+				FIndependentReadbackRequest(
+					TEXT("graph-compound-pcg-ai:") + Plan->GetRequestId(),
+					PcgLevelDataAssetReadbackOracleId, Request.GetTargetRef(), Expected.ToSharedRef()),
+				*Resources, Outcome, VerifyError);
+			if (!bObserved)
 			{
-				FString RollbackDetail;
+				UE::UAI::Contract::FDiagnostic RollbackDetail;
 				TryRollbackCreate(
 					Request.GetTargetRef(), true, Persisted,
 					DurableBackend, FencingToken, *Resources, RollbackDetail);
-				SetError(OutError,
-					VerifyError.GetCode().IsEmpty()
-						? TEXT("graph_compound_pcg_level_readback_failed")
-						: VerifyError.GetCode(),
-					Request.GetTargetRef(), Outcome.GetDiagnosticCode()
-						+ TEXT(";") + RollbackDetail);
+				OutError = bReadbackCreated ? Outcome.GetFailureDiagnostic(VerifyError) : VerifyError;
+				OutError.Append(RollbackDetail);
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
+				if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
 				return false;
 			}
 
 			const FDurableVerificationAcknowledgement Acknowledgement(
 				DurableReceipt.GetJournalId(), Plan->GetFingerprint(),
 				Prepared->GetInventory().GetInventoryHash(),
-				Outcome.GetEvidenceId(), JournalOwner, FencingToken);
+				Outcome.GetEvidenceId(), JournalOwner, FencingToken, Outcome.GetStatus() == EVerificationStatus::Verified);
 			if (!TryAcknowledgeAssetDurability(
 					Persisted, Acknowledgement, FencingToken,
 					*Resources, DurableError))
 			{
-				FString RollbackDetail;
+				UE::UAI::Contract::FDiagnostic RollbackDetail;
 				TryRollbackCreate(
 					Request.GetTargetRef(), true, Persisted,
 					DurableBackend, FencingToken, *Resources, RollbackDetail);
-				SetError(OutError, DurableError.GetCode(),
-					Request.GetTargetRef(), DurableError.GetDetail()
-						+ TEXT(";") + RollbackDetail);
+				SetError(OutError, DurableError, Request.GetTargetRef(), RollbackDetail);
 				return false;
 			}
-			const FString Revision = TEXT("md5:") + FMD5::HashAnsiString(
-				*(Request.GetTargetRef() + TEXT("|") + SourceRef
-					+ TEXT("|") + DataTypeRef));
 			return TrySerializeResult(
-				Request.GetTargetRef(), Revision, Outcome.GetEvidenceId(),
+				Request.GetTargetRef(),
 				OutResult, OutError);
 		}
 
@@ -5368,18 +5625,28 @@ namespace UE::UAI::Composition::GraphCompound
 					|| IsPcgDataFromLevelProfile(Profile, Request);
 				if (!bAssetCreate && !IsSchemaMutationProfile(Profile, Request))
 				{
-					SetError(OutError,
-						TEXT("graph_compound_production_binding_unimplemented"),
-						Profile.GetCapabilityId());
+					const TSharedRef<FJsonObject> Binding = MakeShared<FJsonObject>();
+					Binding->SetStringField(TEXT("capability_id"), Profile.GetCapabilityId());
+					Binding->SetNumberField(TEXT("input_kind"), static_cast<int32>(Profile.GetInputKind()));
+					Binding->SetStringField(TEXT("profile_target_kind"), Profile.GetTargetKind());
+					Binding->SetStringField(TEXT("request_target_kind"), Request.GetTargetKind());
+					OutError = NativeFailure(TEXT("graph_compound_production_binding_unimplemented"),
+						TEXT("No PCG/AI production binding supports this capability, input kind and target kind combination."),
+						Request.GetTargetRef(), TEXT("production.binding"), MakeShared<FJsonValueObject>(Binding),
+						MakeShared<FJsonValueString>(TEXT("registered PCG/AI asset-create, level-data or schema-mutation binding")));
+					OutError.SubjectId = Profile.GetCapabilityId();
 					return false;
 				}
 				if (!IsInGameThread() || Cancellation->IsCancelled())
 				{
-					SetError(OutError,
-						Cancellation->IsCancelled()
-							? TEXT("graph_compound_pcg_ai_cancelled")
-							: TEXT("graph_compound_pcg_ai_thread_invalid"),
-						Profile.GetCapabilityId());
+					const bool bCancelled = Cancellation->IsCancelled();
+					OutError = NativeFailure(bCancelled
+							? TEXT("graph_compound_pcg_ai_cancelled") : TEXT("graph_compound_pcg_ai_thread_invalid"),
+						bCancelled ? TEXT("The PCG/AI snapshot capture was cancelled before execution.")
+							: TEXT("PCG/AI snapshot capture must execute on the game thread."),
+						Request.GetTargetRef(), bCancelled ? TEXT("cancellation.requested") : TEXT("execution.game_thread"),
+						MakeShared<FJsonValueBoolean>(bCancelled), MakeShared<FJsonValueBoolean>(!bCancelled));
+					OutError.SubjectId = Profile.GetCapabilityId();
 					return false;
 				}
 				return bAssetCreate
@@ -5422,31 +5689,76 @@ namespace UE::UAI::Composition::GraphCompound
 							NativeHook, DurableBackend, LastFencingToken,
 							OutResult, OutError);
 					}
-					SetError(OutError,
-						TEXT("graph_compound_production_binding_unimplemented"),
-						Profile.GetCapabilityId());
+					const TSharedRef<FJsonObject> Binding = MakeShared<FJsonObject>();
+					Binding->SetStringField(TEXT("capability_id"), Profile.GetCapabilityId());
+					Binding->SetNumberField(TEXT("input_kind"), static_cast<int32>(Profile.GetInputKind()));
+					Binding->SetStringField(TEXT("profile_target_kind"), Profile.GetTargetKind());
+					Binding->SetStringField(TEXT("request_target_kind"), Request.GetTarget().GetTargetKind());
+					OutError = NativeFailure(TEXT("graph_compound_production_binding_unimplemented"),
+						TEXT("No PCG/AI production binding supports this capability, input kind and target kind combination."),
+						Request.GetTargetRef(), TEXT("production.binding"), MakeShared<FJsonValueObject>(Binding),
+						MakeShared<FJsonValueString>(TEXT("registered PCG/AI asset-create, level-data or schema-mutation binding")));
+					OutError.SubjectId = Profile.GetCapabilityId();
 					return false;
 				}
 				if (!IsInGameThread() || Cancellation->IsCancelled())
 				{
-					SetError(OutError,
-						Cancellation->IsCancelled()
-							? TEXT("graph_compound_pcg_ai_cancelled")
-							: TEXT("graph_compound_pcg_ai_thread_invalid"),
-						Profile.GetCapabilityId());
+					const bool bCancelled = Cancellation->IsCancelled();
+					OutError = NativeFailure(bCancelled
+							? TEXT("graph_compound_pcg_ai_cancelled") : TEXT("graph_compound_pcg_ai_thread_invalid"),
+						bCancelled ? TEXT("The PCG/AI asset creation was cancelled before execution.")
+							: TEXT("PCG/AI asset creation must execute on the game thread."),
+						Request.GetTargetRef(), bCancelled ? TEXT("cancellation.requested") : TEXT("execution.game_thread"),
+						MakeShared<FJsonValueBoolean>(bCancelled), MakeShared<FJsonValueBoolean>(!bCancelled));
+					OutError.SubjectId = Profile.GetCapabilityId();
 					return false;
 				}
-				if (Plan->GetDescriptorIdentity()
-						!= Profile.GetExecutionContract().GetDescriptorIdentity()
-					|| Plan->GetChangeSet().GetChanges().Num() != 1
-					|| Plan->GetChangeSet().GetChanges()[0].GetIntent()
-						!= EChangeIntent::Create
-					|| Plan->GetChangeSet().GetChanges()[0]
-						.GetIdentity().GetOwnerId() != Request.GetTargetRef())
+				auto FailPlan = [&](const FString& Reason, const FString& Field,
+					TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 				{
-					SetError(OutError,
-						TEXT("graph_compound_pcg_ai_plan_invalid"),
-						Request.GetTargetRef());
+					OutError = NativeFailure(TEXT("graph_compound_pcg_ai_plan_invalid"),
+						Reason, Request.GetTargetRef(), Field, MoveTemp(Actual), MoveTemp(Expected));
+					return false;
+				};
+				const FUeAgentDescriptorIdentity& ActualDescriptor = Plan->GetDescriptorIdentity();
+				const FUeAgentDescriptorIdentity& ExpectedDescriptor =
+					Profile.GetExecutionContract().GetDescriptorIdentity();
+				if (ActualDescriptor != ExpectedDescriptor)
+				{
+					if (ActualDescriptor.GetDescriptorId() != ExpectedDescriptor.GetDescriptorId())
+						return FailPlan(TEXT("The plan descriptor id does not match the route descriptor."),
+							TEXT("descriptor_identity.descriptor_id"),
+							MakeShared<FJsonValueString>(ActualDescriptor.GetDescriptorId()),
+							MakeShared<FJsonValueString>(ExpectedDescriptor.GetDescriptorId()));
+					if (ActualDescriptor.GetVersion() != ExpectedDescriptor.GetVersion())
+						return FailPlan(TEXT("The plan descriptor version does not match the route descriptor."),
+							TEXT("descriptor_identity.version"),
+							MakeShared<FJsonValueNumber>(ActualDescriptor.GetVersion()),
+							MakeShared<FJsonValueNumber>(ExpectedDescriptor.GetVersion()));
+					FailPlan(TEXT("The plan descriptor hash does not match the route descriptor."),
+						TEXT("descriptor_identity.descriptor_hash"), nullptr, nullptr);
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(ActualDescriptor.GetDescriptorHash());
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(ExpectedDescriptor.GetDescriptorHash());
+					return false;
+				}
+				const auto& Changes = Plan->GetChangeSet().GetChanges();
+				if (Changes.Num() != 1)
+					return FailPlan(TEXT("The asset-create plan requires exactly one change."),
+						TEXT("changes.count"), MakeShared<FJsonValueNumber>(Changes.Num()), MakeShared<FJsonValueNumber>(1));
+				if (Changes[0].GetIntent() != EChangeIntent::Create)
+				{
+					FailPlan(TEXT("The asset-create plan change must use create intent."),
+						TEXT("change.intent"), MakeShared<FJsonValueNumber>(static_cast<int32>(Changes[0].GetIntent())),
+						MakeShared<FJsonValueString>(TEXT("create")));
+					OutError.OperationIndex = 0;
+					return false;
+				}
+				if (Changes[0].GetIdentity().GetOwnerId() != Request.GetTargetRef())
+				{
+					FailPlan(TEXT("The asset-create plan change owner differs from the requested asset."),
+						TEXT("change.identity.owner_id"), MakeShared<FJsonValueString>(Changes[0].GetIdentity().GetOwnerId()),
+						MakeShared<FJsonValueString>(Request.GetTargetRef()));
+					OutError.OperationIndex = 0;
 					return false;
 				}
 
@@ -5461,9 +5773,8 @@ namespace UE::UAI::Composition::GraphCompound
 						Plan, Current.ToSharedRef(), CallerContext,
 						*Resources, RevalidateError))
 				{
-					SetError(OutError, RevalidateError.GetCode(),
-						RevalidateError.GetIdentityKey(),
-						RevalidateError.GetDetail());
+					OutError = RevalidateError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = RevalidateError.SubjectId;
 					return false;
 				}
 
@@ -5485,11 +5796,10 @@ namespace UE::UAI::Composition::GraphCompound
 				FAssetDurableError DurableError;
 				if (!TryPrepareAssetDurability(
 						DurableRequest, DurableBackend, JournalRoot,
-						*Resources, Prepared, DurableError)
-					|| !Prepared.IsValid())
+						*Resources, Prepared, DurableError))
 				{
-					SetError(OutError, DurableError.GetCode(),
-						Request.GetTargetRef(), DurableError.GetDetail());
+					OutError = DurableError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
 					return false;
 				}
 
@@ -5507,36 +5817,57 @@ namespace UE::UAI::Composition::GraphCompound
 						*Spec, *Package,
 						*AssetName(Request.GetTargetRef()), OutError);
 				}
-				const bool bCreated = CreatedAsset
+				const bool bCaptured = CreatedAsset
 					&& CreatedAsset->GetClass() == Spec->AssetClass
 					&& NativeHook.TryCaptureOwnedAssetObject(
 						*Package, Request.GetTargetKind(),
 						*Spec->AssetClass,
 						*AssetName(Request.GetTargetRef()), *CreatedAsset,
 						ApplyReceipt, BarrierReceipt, Identity,
-						NativeRevision, NativeEvidence, NativeError)
+						NativeRevision, NativeEvidence, NativeError);
+				const bool bCreated = bCaptured
 					&& BarrierReceipt.IsComplete()
 					&& BarrierReceipt.GetErrorCount() == 0;
 				if (!bCreated)
 				{
+					FDiagnostic Failure = !OutError.IsEmpty() ? OutError : NativeError;
+					if (Failure.IsEmpty())
+					{
+						auto FailCreate = [&](const FString& Reason, const FString& Field,
+							TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
+						{
+							Failure = NativeFailure(TEXT("graph_compound_pcg_ai_factory_failed"),
+								Reason, Request.GetTargetRef(), Field, MoveTemp(Actual), MoveTemp(Expected));
+						};
+						if (!Package)
+							FailCreate(TEXT("The destination package could not be created for the PCG/AI asset."),
+								TEXT("package"), nullptr, MakeShared<FJsonValueString>(Request.GetTargetRef()));
+						else if (!CreatedAsset)
+							FailCreate(TEXT("The PCG/AI factory returned no asset and no diagnostic."),
+								TEXT("asset"), nullptr, ClassPathValue(Spec->AssetClass));
+						else if (CreatedAsset->GetClass() != Spec->AssetClass)
+							FailCreate(TEXT("The PCG/AI factory returned an asset with a different class."),
+								TEXT("asset.class"), ClassPathValue(CreatedAsset->GetClass()), ClassPathValue(Spec->AssetClass));
+						else if (!bCaptured)
+							FailCreate(TEXT("Native capture of the created PCG/AI asset failed without a diagnostic."),
+								TEXT("asset.capture.succeeded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						else if (!BarrierReceipt.IsComplete())
+							FailCreate(TEXT("The native barrier for the created PCG/AI asset did not complete."),
+								TEXT("barrier.complete"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+						else
+							FailCreate(TEXT("The native barrier for the created PCG/AI asset reported errors."),
+								TEXT("barrier.error_count"), MakeShared<FJsonValueNumber>(BarrierReceipt.GetErrorCount()),
+								MakeShared<FJsonValueNumber>(0));
+					}
+					if (Package) Failure.MutationMayHaveStarted = true;
 					CreatedAsset = nullptr;
 					Package = nullptr;
-					FString RollbackDetail;
+					UE::UAI::Contract::FDiagnostic RollbackDetail;
 					TryRollbackCreate(
 						Request.GetTargetRef(), true,
 						Prepared.ToSharedRef(), DurableBackend,
 						FencingToken, *Resources, RollbackDetail);
-					SetError(OutError,
-						!OutError.Code.IsEmpty()
-							? OutError.Code
-							: (NativeError.GetCode().IsEmpty()
-								? TEXT("graph_compound_pcg_ai_factory_failed")
-								: NativeError.GetCode()),
-						Request.GetTargetRef(),
-						!OutError.Detail.IsEmpty()
-							? OutError.Detail + TEXT(";") + RollbackDetail
-							: NativeError.GetDetail() + TEXT(";")
-								+ RollbackDetail);
+					SetError(OutError, Failure, Request.GetTargetRef(), RollbackDetail);
 					return false;
 				}
 
@@ -5545,19 +5876,18 @@ namespace UE::UAI::Composition::GraphCompound
 				FAssetRegistryModule::AssetCreated(CreatedAsset);
 
 				FDurableReceipt DurableReceipt;
-				if (!TryPersistAssetDurability(
+				if (!TryPersistAssetDurabilityForVerification(
 						Prepared.ToSharedRef(), DurableBackend,
 						FencingToken, *Resources,
 						DurableReceipt, DurableError))
 				{
 					CreatedAsset = nullptr;
 					Package = nullptr;
-					FString UnloadDetail;
-					TryUnloadTarget(
-						Request.GetTargetRef(), true, UnloadDetail);
-					SetError(OutError, DurableError.GetCode(),
-						Request.GetTargetRef(),
-						DurableError.GetDetail() + TEXT(";") + UnloadDetail);
+					UE::UAI::Contract::FDiagnostic UnloadDetail;
+					UeAgentAuthoringOperationApply::TryRestorePackageDurability(
+						Request.GetTargetRef(), true, Prepared.ToSharedRef(),
+						DurableBackend, FencingToken, *Resources, UnloadDetail);
+					SetError(OutError, DurableError, Request.GetTargetRef(), UnloadDetail);
 					return false;
 				}
 				CreatedAsset->GetOutermost()->SetDirtyFlag(false);
@@ -5578,32 +5908,33 @@ namespace UE::UAI::Composition::GraphCompound
 							Request.GetTargetRef(), Spec->TargetKind,
 							OracleId, *Spec->AssetClass);
 				FIndependentReadbackOutcome Outcome;
-				if (!Expected.IsValid()
-					|| !FIndependentReadbackService::TryCreate(
-						{Oracle}, Readback, VerifyError)
-					|| !Readback.IsValid()
-					|| !Readback->TryVerify(
-						FIndependentReadbackRequest(
-							TEXT("graph-compound-pcg-ai:")
-								+ Plan->GetRequestId(),
-							OracleId,
-							Request.GetTargetRef(),
-							Expected.ToSharedRef()),
-						*Resources, Outcome, VerifyError)
-					|| Outcome.GetStatus() != EVerificationStatus::Verified)
+				if (!Expected.IsValid())
 				{
-					FString RollbackDetail;
+					VerifyError = NativeFailure(TEXT("graph_compound_pcg_ai_readback_failed"),
+						TEXT("The asset-create plan has no expected value for independent readback."),
+						Request.GetTargetRef(), TEXT("changes/0/after"), nullptr,
+						MakeShared<FJsonValueString>(TEXT("planned asset value")));
+					VerifyError.OperationIndex = 0;
+					VerifyError.Stage = TEXT("verification");
+				}
+				const bool bReadbackCreated = Expected.IsValid()
+					&& FIndependentReadbackService::TryCreate({Oracle}, Readback, VerifyError);
+				const bool bObserved = bReadbackCreated && Readback->TryObserve(
+					FIndependentReadbackRequest(
+						TEXT("graph-compound-pcg-ai:") + Plan->GetRequestId(),
+						OracleId, Request.GetTargetRef(), Expected.ToSharedRef()),
+					*Resources, Outcome, VerifyError);
+				if (!bObserved)
+				{
+					UE::UAI::Contract::FDiagnostic RollbackDetail;
 					TryRollbackCreate(
 						Request.GetTargetRef(), true, Persisted,
 						DurableBackend, FencingToken,
 						*Resources, RollbackDetail);
-					SetError(OutError,
-						VerifyError.GetCode().IsEmpty()
-							? TEXT("graph_compound_pcg_ai_readback_failed")
-							: VerifyError.GetCode(),
-						Request.GetTargetRef(),
-						Outcome.GetDiagnosticCode() + TEXT(";")
-							+ RollbackDetail);
+					OutError = bReadbackCreated ? Outcome.GetFailureDiagnostic(VerifyError) : VerifyError;
+					OutError.Append(RollbackDetail);
+					if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Request.GetTargetRef();
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Request.GetTargetRef();
 					return false;
 				}
 
@@ -5613,25 +5944,21 @@ namespace UE::UAI::Composition::GraphCompound
 					Prepared->GetInventory().GetInventoryHash(),
 					Outcome.GetEvidenceId(),
 					JournalOwner,
-					FencingToken);
+					FencingToken, Outcome.GetStatus() == EVerificationStatus::Verified);
 				if (!TryAcknowledgeAssetDurability(
 						Persisted, Acknowledgement, FencingToken,
 						*Resources, DurableError))
 				{
-					FString RollbackDetail;
+					UE::UAI::Contract::FDiagnostic RollbackDetail;
 					TryRollbackCreate(
 						Request.GetTargetRef(), true, Persisted,
 						DurableBackend, FencingToken,
 						*Resources, RollbackDetail);
-					SetError(OutError, DurableError.GetCode(),
-						Request.GetTargetRef(),
-						DurableError.GetDetail() + TEXT(";")
-							+ RollbackDetail);
+					SetError(OutError, DurableError, Request.GetTargetRef(), RollbackDetail);
 					return false;
 				}
 				return TrySerializeResult(
-					Request.GetTargetRef(), NativeRevision,
-					Outcome.GetEvidenceId(),
+					Request.GetTargetRef(),
 					OutResult, OutError);
 			}
 
@@ -5650,14 +5977,7 @@ namespace UE::UAI::Composition::GraphCompound
 	{
 		OutEnvironment.Reset();
 		OutError = {};
-		if (!Config.IsValid())
-		{
-			SetError(OutError,
-				TEXT("graph_compound_production_config_invalid"),
-				TEXT("pcg_ai_node_graph"));
-			return false;
-		}
 		OutEnvironment = MakeShared<FPcgAiProductionEnvironment>(Config);
-		return OutEnvironment.IsValid();
+		return true;
 	}
 }

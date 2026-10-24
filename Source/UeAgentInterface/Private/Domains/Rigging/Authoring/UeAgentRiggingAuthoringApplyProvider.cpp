@@ -3,16 +3,26 @@
 #include "Domains/Rigging/Authoring/UeAgentRiggingAuthoringApplyProvider.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringOps.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
+#include "Domains/Rigging/UeAgentControlRigDomainBackend.h"
+#include "ControlRigBlueprint.h"
+#include "Engine/Blueprint.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/PackageName.h"
 #include "ObjectTools.h"
 #include "UObject/StrongObjectPtr.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringSemanticCompare.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringAssetRemovalStage.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringObjectApplyProvider.h"
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentApplyWorkspaceContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceApply.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringAssetWorkspaceInput.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceDependencyGraph.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceLoader.h"
 #include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
@@ -27,12 +37,22 @@ namespace UeAgentRiggingAuthoring
 		using namespace UeAgentApplyInputContract;
 		using namespace UeAgentAuthoringOperationApply;
 
-		void SetFailure(FOperationFailure& OutFailure, const FString& Code, const FString& Detail = FString())
-		{
-			OutFailure = FOperationFailure();
-			OutFailure.ErrorCode = Code;
-			OutFailure.ErrorDetail = Detail.IsEmpty() ? Code : Detail;
-		}
+		void SetFailure(FOperationFailure& OutFailure, const UE::UAI::Contract::FDiagnostic& Diagnostic) {
+            OutFailure.Diagnostic = Diagnostic;
+        }
+
+        UE::UAI::Contract::FDiagnostic ProviderFailure(const TCHAR* Code, const FString& Reason,
+            const FString& TargetPath, const FString& Property, const TSharedPtr<FJsonValue>& Actual,
+            const TSharedPtr<FJsonValue>& Expected) {
+            auto Diagnostic = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Property, Expected, Actual,
+                TEXT("authoring_apply"), Reason);
+            Diagnostic.TargetPath = TargetPath.IsEmpty() ? FString() : ToObjectPath(TargetPath);
+            Diagnostic.SourceKind = TEXT("native_result");
+            Diagnostic.Source = {};
+            Diagnostic.ActualValuePresent = Actual.IsValid();
+            Diagnostic.ExpectedValuePresent = Expected.IsValid();
+            return Diagnostic;
+        }
 
 		bool ReadBool(const TSharedPtr<const FJsonObject>& Object, const TCHAR* Field, const bool DefaultValue)
 		{
@@ -63,9 +83,9 @@ namespace UeAgentRiggingAuthoring
 			const EAssetKind Kind,
 			const TSharedPtr<const FJsonObject>& Extension,
 			TSharedPtr<FJsonObject>& OutDocument,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			OutDocument = MakeShared<FJsonObject>();
+			OutDocument.Reset();
 			OutError.Reset();
 			if (!Extension.IsValid()) return true;
 			const TSet<FString> DocumentFields = GetDocumentFields(Kind);
@@ -74,35 +94,70 @@ namespace UeAgentRiggingAuthoring
 				if (Field.Key == TEXT("compile") || Field.Key == TEXT("save")) continue;
 				if (!DocumentFields.Contains(Field.Key))
 				{
-					OutError = TEXT("rigging_provider_extension_unknown_field:") + Field.Key;
+					TArray<FString> Allowed = DocumentFields.Array();
+                    Allowed.Append({TEXT("compile"), TEXT("save")});
+                    Allowed.Sort();
+                    const FString Pointer = TEXT("/provider_extension/") + Field.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+                    OutError = UeAgentAuthoringDiagnostics::MakeValueFailure(TEXT("rigging_provider_extension_unknown_field"), Pointer,
+                        MakeShared<FJsonValueString>(TEXT("one of: ") + FString::Join(Allowed, TEXT(", "))), MakeShared<FJsonValueString>(Field.Key),
+                        TEXT("authoring_apply"), TEXT("The Rigging provider does not accept this extension field."));
+                    OutError.SourceKind = TEXT("authored_value");
+                    OutError.Source.JsonPath = Pointer;
+                    OutError.Source.InternalJsonPath = Pointer;
 					return false;
 				}
+				if (!OutDocument.IsValid()) OutDocument = MakeShared<FJsonObject>();
 				OutDocument->SetField(Field.Key, Field.Value);
 			}
 			return true;
 		}
 
-		bool DocumentsEqual(UObject& A, UObject& B, const EAssetKind Kind)
+		bool DocumentsEqual(UObject& A, UObject& B, const FProfile& Profile, UE::UAI::Contract::FDiagnostic& OutReadError, const FString& TargetPath)
 		{
-			TSharedPtr<FJsonObject> ADocument;
-			TSharedPtr<FJsonObject> BDocument;
-			FString Error;
-			return BuildDocument(Kind, A, ADocument, Error)
-				&& BuildDocument(Kind, B, BDocument, Error)
-				&& UeAgentAuthoringState::MakeStableCanonicalValueKey(MakeShared<FJsonValueObject>(ADocument))
-					== UeAgentAuthoringState::MakeStableCanonicalValueKey(MakeShared<FJsonValueObject>(BDocument));
+			OutReadError.Reset();
+			// No-op detection consumes the same native declarations and comparator
+			// as final readback, including unordered graph relations.
+			auto Capture = [&](UObject& Asset, UeAgentAuthoringState::FCaptureResult& Result, const TCHAR* Code)
+			{
+				TArray<UeAgentAuthoringState::FReadRequest> Requests;
+				if (!BuildAssetSnapshotReadRequests(Profile, &Asset, TargetPath, false, Requests, OutReadError)
+					|| !UeAgentAuthoringState::CaptureSnapshot(Requests, Result, nullptr, nullptr,
+						UeAgentAuthoringState::ECaptureValueMode::Native))
+				{
+					if (OutReadError.IsEmpty()) OutReadError = Result.Diagnostic;
+					OutReadError = UE::UAI::Contract::FDiagnostic::WrapFailure(Code, OutReadError, TEXT("noop_comparison"));
+					return false;
+				}
+				return true;
+			};
+			UeAgentAuthoringState::FCaptureResult Existing, Proposed;
+			if (!Capture(A, Existing, TEXT("rigging_noop_existing_document_read_failed"))
+				|| !Capture(B, Proposed, TEXT("rigging_noop_proposed_document_read_failed"))) return false;
+			UeAgentAuthoringSemanticCompare::FComparisonReport Comparison;
+			if (!UeAgentAuthoringSemanticCompare::CompareSnapshots(Existing.Snapshot, Proposed.Snapshot, {}, Comparison))
+			{
+				OutReadError = Comparison.Diagnostic;
+				return false;
+			}
+			return Comparison.bEquivalent;
 		}
 
-		UObject* DuplicateAsset(UObject* Source, UObject* Outer, const FName Name, const EObjectFlags Flags)
+		UObject* DuplicateAsset(UObject* Source, UObject* Outer, const FName Name, const EObjectFlags Flags,
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
+			if (auto* Blueprint = Cast<UBlueprint>(Source))
+				return UeAgentBlueprintAssetLifecycle::DuplicateBlueprint(Blueprint, Outer, Name, false, &OutError);
 			return Source && Outer ? StaticDuplicateObject(Source, Outer, Name, Flags) : nullptr;
 		}
 
-		UObject* PublishAsset(UObject* Source, const FString& PackagePath)
+		UObject* PublishAsset(UObject* Source, const FString& PackagePath, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			UPackage* Package = CreatePackage(*PackagePath);
+			if (auto* Blueprint = Cast<UBlueprint>(Source))
+				return UeAgentBlueprintAssetLifecycle::PublishBlueprint(Blueprint, Package,
+					FPackageName::GetLongPackageAssetName(PackagePath), OutError);
 			UObject* Published = DuplicateAsset(
-				Source, Package, FName(*FPackageName::GetLongPackageAssetName(PackagePath)), RF_AllFlags);
+				Source, Package, FName(*FPackageName::GetLongPackageAssetName(PackagePath)), RF_AllFlags, OutError);
 			if (Published)
 			{
 				Published->ClearFlags(RF_Transient);
@@ -111,18 +166,25 @@ namespace UeAgentRiggingAuthoring
 			return Published;
 		}
 
-		bool DeleteAsset(UObject* Asset, FString& OutError)
+		bool DeleteAsset(UObject* Asset, const FString& Target, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			OutError.Reset();
-			if (!Asset)
-			{
-				OutError = TEXT("rigging_delete_target_missing");
+			if (!Asset) {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("rigging_delete_target_missing"),
+					TEXT("No rigging asset object was supplied for deletion."), TEXT("authoring_apply"));
+				OutError.SourceKind = TEXT("native_result"); OutError.TargetPath = Target; OutError.PropertyPath = TEXT("asset");
+				OutError.ActualValuePresent = true; OutError.ActualValue = MakeShared<FJsonValueNull>();
+				OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("rigging asset object"));
 				return false;
 			}
 			TGuardValue<bool> UnattendedGuard(GIsRunningUnattendedScript, true);
-			if (!ObjectTools::DeleteSingleObject(Asset, true))
-			{
-				OutError = TEXT("rigging_delete_blocked_by_references");
+			if (!ObjectTools::DeleteSingleObject(Asset, true)) {
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("rigging_delete_rejected"),
+					TEXT("The editor rejected deletion of the rigging asset object."), TEXT("authoring_apply"),
+					TEXT("DeleteSingleObject returned false with reference checking enabled; its bool API does not distinguish deletion-policy and reference-check rejection."));
+				OutError.SourceKind = TEXT("native_result"); OutError.TargetPath = Target; OutError.PropertyPath = TEXT("deletion_succeeded");
+				OutError.ActualValuePresent = true; OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+				OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
 				return false;
 			}
 			return true;
@@ -172,7 +234,9 @@ namespace UeAgentRiggingAuthoring
 				const FMutationStats& InStats,
 				const bool bInCompile,
 				const bool bInSave,
-				const bool bInDocumentNoOp)
+				const bool bInDocumentNoOp,
+				TSharedPtr<const FJsonObject> InCapturedDocument,
+				const TArray<UBlueprint*>& InDependents)
 				: Profile(InProfile)
 				, PackagePath(MoveTemp(InPackagePath))
 				, Operation(InOperation)
@@ -183,7 +247,14 @@ namespace UeAgentRiggingAuthoring
 				, bCompile(bInCompile)
 				, bSave(bInSave)
 				, bDocumentNoOp(bInDocumentNoOp)
+				, CapturedDocument(MoveTemp(InCapturedDocument))
 			{
+				for (UBlueprint* Child : InDependents)
+				{
+					auto& Entry = Dependents.AddDefaulted_GetRef();
+					Entry.PackagePath = Child->GetOutermost()->GetName();
+					Entry.Target.Reset(Child);
+				}
 			}
 
 			virtual FString GetTargetKey() const override { return PackagePath; }
@@ -208,18 +279,18 @@ namespace UeAgentRiggingAuthoring
 			virtual bool CaptureRollback(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
-				if (Operation == EOperation::Update && Existing)
+				if (Operation == EOperation::Update && Existing && Profile.Kind != EAssetKind::ControlRig)
 				{
-					FString Error;
-					if (!BuildDocument(Profile.Kind, *Existing, RollbackDocument, Error))
+					UE::UAI::Contract::FDiagnostic Error;
+					if (!BuildDocument(Profile.Kind, *Existing, RollbackDocument, Error, PackagePath))
 					{
-						SetFailure(OutFailure, TEXT("rigging_rollback_capture_failed"), Error);
+						SetFailure(OutFailure, Error);
 						return false;
 					}
 				}
 				else if (Operation == EOperation::Remove && Existing)
 				{
-					FString Error;
+					UE::UAI::Contract::FDiagnostic Error;
 					if (!RemovalStage.Capture(Existing, Error))
 					{
 						SetFailure(OutFailure, Error);
@@ -232,6 +303,13 @@ namespace UeAgentRiggingAuthoring
 			virtual bool ApplyProposed(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
+				if (Operation == EOperation::Update && Profile.Kind == EAssetKind::ControlRig)
+				{
+					// The independently prepared document remains the root expectation.
+					// Capture native dependent results only after their reconstruction,
+					// as the shared Blueprint lifecycle does for its loaded children.
+					return ApplyUpdateDocument(OutFailure);
+				}
 				return true;
 			}
 
@@ -240,7 +318,7 @@ namespace UeAgentRiggingAuthoring
 				OutFailure = FOperationFailure();
 				if (Operation == EOperation::Remove)
 				{
-					FString Error;
+					UE::UAI::Contract::FDiagnostic Error;
 					if (!RemovalStage.Stage(Error))
 					{
 						SetFailure(OutFailure, Error);
@@ -251,26 +329,22 @@ namespace UeAgentRiggingAuthoring
 				}
 				if (Operation == EOperation::Update)
 				{
-					FMutationStats AppliedStats;
-					FString Error;
-					if (!ApplyDocument(Profile.Kind, *Existing, Document, AppliedStats, Error))
-					{
-						SetFailure(OutFailure, TEXT("rigging_document_apply_failed"), Error);
-						return false;
-					}
-					Stats = AppliedStats;
+					if (Profile.Kind != EAssetKind::ControlRig && !ApplyUpdateDocument(OutFailure)) return false;
 					Actual = Existing;
 					return true;
 				}
 				if (!Proposed.IsValid())
 				{
-					SetFailure(OutFailure, TEXT("rigging_proposed_asset_missing"));
+					SetFailure(OutFailure, ProviderFailure(TEXT("rigging_proposed_asset_missing"), TEXT("The prepared asset is unavailable for publication."),
+                        PackagePath, TEXT("proposed_asset_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 					return false;
 				}
-				Actual = PublishAsset(Proposed.Get(), PackagePath);
+				Actual = PublishAsset(Proposed.Get(), PackagePath, OutFailure.Diagnostic);
 				if (!Actual)
 				{
-					SetFailure(OutFailure, TEXT("rigging_asset_publish_failed"));
+					if (!OutFailure.Diagnostic.IsEmpty()) return false;
+					SetFailure(OutFailure, ProviderFailure(TEXT("rigging_asset_publish_failed"), TEXT("The native asset publication operation returned no asset."),
+                        PackagePath, TEXT("published_asset_available"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
 					return false;
 				}
 				FAssetRegistryModule::AssetCreated(Actual);
@@ -281,26 +355,30 @@ namespace UeAgentRiggingAuthoring
 			virtual bool Compile(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
-				if (!bCompile || Operation == EOperation::Remove) return true;
-				FString Error;
-				if (!CompileAsset(Profile.Kind, *(Actual ? Actual : Existing), Error))
+				if (Operation == EOperation::Remove) return true;
+				UE::UAI::Contract::FDiagnostic Error;
+				if (bCompile && !CompileAsset(Profile.Kind, *(Actual ? Actual : Existing), Error))
 				{
 					SetFailure(OutFailure, Error);
 					return false;
 				}
-				return true;
+				const auto* Blueprint = Cast<UBlueprint>(Actual ? Actual : Existing);
+				return !Blueprint || UeAgentBlueprintAssetLifecycle::ValidateBlueprintPersistence(*Blueprint, OutFailure.Diagnostic);
 			}
 
 			virtual bool Save(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
 				if (!bSave || Operation == EOperation::Remove) return true;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!SaveAsset(Profile.Kind, *(Actual ? Actual : Existing), Error))
 				{
 					SetFailure(OutFailure, Error);
 					return false;
 				}
+				for (const auto& Entry : Dependents)
+					if (!UeAgentBlueprintAuthoringOps::SaveBlueprintPackage(Entry.Target.Get(), Error))
+					{ if (Error.TargetPath.IsEmpty()) Error.TargetPath = Entry.PackagePath; SetFailure(OutFailure, Error); return false; }
 				return true;
 			}
 
@@ -308,15 +386,22 @@ namespace UeAgentRiggingAuthoring
 				TArray<FPackageDurablePlan>& OutPlans,
 				FOperationFailure& OutFailure) const override
 			{
-				return BuildPackageDurablePlan(
+				if (!BuildPackageDurablePlan(
 					PackagePath,
 					PackagePath,
 					Operation == EOperation::Remove ? Existing
-						: (Existing ? Existing : Proposed.Get()),
+						: (Actual ? Actual : Existing),
 					Operation == EOperation::Remove ? EPackageDurableIntent::Delete
 						: EPackageDurableIntent::Save,
 					OutPlans,
-					OutFailure);
+					OutFailure, true,
+					Operation == EOperation::Create || Operation == EOperation::Clone
+						? EPackageBeforePresence::Absent : EPackageBeforePresence::Present,
+					Proposed.IsValid() ? Proposed->GetClass() : nullptr)) return false;
+				for (const auto& Entry : Dependents)
+					if (!BuildPackageDurablePlan(Entry.PackagePath, Entry.PackagePath, Entry.Target.Get(),
+						EPackageDurableIntent::Save, OutPlans, OutFailure)) return false;
+				return true;
 			}
 
 			virtual bool BuildDomainExpectedReadRequests(
@@ -340,13 +425,56 @@ namespace UeAgentRiggingAuthoring
 				return StatsToJson(Stats);
 			}
 
+			virtual bool SupportsPersistentReadback() const override
+			{
+				return Operation == EOperation::Update && (bSave || Profile.Kind == EAssetKind::ControlRig);
+			}
+
+			virtual bool RequiresCheckpointRollback() const override
+			{
+				// Ordinary authoring documents deliberately omit native member GUIDs
+				// and owned-object identities. They are not a rollback representation.
+				return Operation == EOperation::Update && Profile.Kind == EAssetKind::ControlRig;
+			}
+
+			virtual bool ReleaseForPersistentReadback(FOperationFailure& OutFailure) override
+			{
+				OutFailure = FOperationFailure();
+				Proposed.Reset();
+				for (auto& Entry : Dependents) Entry.Target.Reset();
+				Existing = nullptr;
+				Actual = nullptr;
+				return true;
+			}
+
+			virtual bool RebindAfterPersistentReadback(FOperationFailure& OutFailure) override
+			{
+				OutFailure = FOperationFailure();
+				Existing = LoadAsset(Profile.Kind, PackagePath);
+				Actual = Existing;
+				if (!Existing)
+				{
+					SetFailure(OutFailure, ProviderFailure(TEXT("rigging_persistent_reload_failed"), TEXT("The saved Rigging asset could not be reloaded."),
+                        PackagePath, TEXT("asset_loaded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true)));
+					return false;
+				}
+				for (auto& Entry : Dependents)
+				{
+					Entry.Target.Reset(UeAgentBlueprintAssetLifecycle::LoadBlueprint(Entry.PackagePath));
+					if (!Entry.Target.IsValid())
+					{ SetFailure(OutFailure, ProviderFailure(TEXT("rigging_dependent_reload_failed"), TEXT("A dependent Blueprint could not be reloaded."),
+                        Entry.PackagePath, TEXT("asset_loaded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true))); return false; }
+				}
+				return true;
+			}
+
 			virtual bool Commit(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
 				if (Operation == EOperation::Remove && RemovalStage.IsStaged())
 				{
-					FString Error;
-					if (!DeleteAsset(RemovalStage.GetAsset(), Error))
+					UE::UAI::Contract::FDiagnostic Error;
+					if (!DeleteAsset(RemovalStage.GetAsset(), PackagePath, Error))
 					{
 						SetFailure(OutFailure, Error);
 						return false;
@@ -360,13 +488,13 @@ namespace UeAgentRiggingAuthoring
 			virtual bool Rollback(FOperationFailure& OutFailure) override
 			{
 				OutFailure = FOperationFailure();
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (Operation == EOperation::Update && Existing && RollbackDocument.IsValid())
 				{
 					FMutationStats RollbackStats;
 					if (!ApplyDocument(Profile.Kind, *Existing, RollbackDocument, RollbackStats, Error))
 					{
-						SetFailure(OutFailure, TEXT("rigging_rollback_restore_failed"), Error);
+						SetFailure(OutFailure, Error);
 						return false;
 					}
 					Actual = Existing;
@@ -374,7 +502,7 @@ namespace UeAgentRiggingAuthoring
 				}
 				if ((Operation == EOperation::Create || Operation == EOperation::Clone) && Actual)
 				{
-					if (!DeleteAsset(Actual, Error))
+					if (!DeleteAsset(Actual, PackagePath, Error))
 					{
 						TArray<UObject*> Objects = { Actual };
 						if (ObjectTools::DeleteObjectsUnchecked(Objects) <= 0)
@@ -399,23 +527,43 @@ namespace UeAgentRiggingAuthoring
 			}
 
 		private:
+			bool ApplyUpdateDocument(FOperationFailure& OutFailure)
+			{
+				UE::UAI::Contract::FDiagnostic Error;
+				FMutationStats AppliedStats;
+				if (Document && !ApplyDocument(Profile.Kind, *Existing, Document, AppliedStats, Error, CapturedDocument))
+				{ SetFailure(OutFailure, Error); return false; }
+				Stats = AppliedStats;
+				return true;
+			}
+
+			virtual void CollectRollbackObjects(TArray<UObject*>& OutObjects) const override
+			{
+				for (const auto& Entry : Dependents) OutObjects.AddUnique(Entry.Target.Get());
+			}
+
 			bool BuildReadRequests(
 				UObject* Asset,
 				const bool bExpectedAbsent,
 				TArray<UeAgentAuthoringState::FReadRequest>& OutRequests,
 				FOperationFailure& OutFailure) const
 			{
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!BuildAssetSnapshotReadRequests(
 					Profile, Asset, PackagePath, bExpectedAbsent, OutRequests, Error))
 				{
-					SetFailure(OutFailure, TEXT("rigging_snapshot_request_failed"), Error);
+					SetFailure(OutFailure, Error);
 					return false;
 				}
+				for (const auto& Entry : Dependents)
+					if (!UeAgentBlueprintAuthoring::BuildAssetExportSnapshotReadRequests(*Entry.Target.Get(), OutRequests, Error))
+					{ SetFailure(OutFailure, Error); return false; }
 				return true;
 			}
 
 			FProfile Profile;
+			struct FDependentBlueprint { FString PackagePath; TStrongObjectPtr<UBlueprint> Target; };
+			TArray<FDependentBlueprint> Dependents;
 			FString PackagePath;
 			EOperation Operation;
 			UObject* Existing = nullptr;
@@ -428,11 +576,14 @@ namespace UeAgentRiggingAuthoring
 			bool bCompile = true;
 			bool bSave = false;
 			bool bDocumentNoOp = false;
+			TSharedPtr<const FJsonObject> CapturedDocument;
 		};
 
 		class FAssetLifecycle final : public IReflectionOperationLifecycle
 		{
 		public:
+			explicit FAssetLifecycle(TSharedPtr<const FJsonObject> InCapturedDocument)
+				: CapturedDocument(MoveTemp(InCapturedDocument)) {}
 			virtual bool PrepareLifecycle(
 				const FPrepareRequest& Request,
 				TUniquePtr<IReflectionOperationLifecycleState>& OutState,
@@ -440,15 +591,31 @@ namespace UeAgentRiggingAuthoring
 			{
 				OutState.Reset();
 				OutFailure = FOperationFailure();
+                const auto InputFailure = [&](const TCHAR* Code, const FString& Reason, const FString& Pointer,
+                    const TSharedPtr<FJsonValue>& ActualValue, const TSharedPtr<FJsonValue>& ExpectedValue, const FString& TargetPath) {
+                    auto Error = ProviderFailure(Code, Reason, TargetPath, Pointer, ActualValue, ExpectedValue);
+                    Error.SourceKind = TEXT("authored_value");
+                    Error.Source.JsonPath = Pointer;
+                    Error.Source.InternalJsonPath = Pointer;
+                    if (Request.Unit) Error.Source = Request.Unit->ResolveDiagnosticSource(Pointer);
+                    return Error;
+                };
 				if (!Request.IsValid() || !Request.Input->Target.IsValid() || !Request.Contract)
 				{
-					SetFailure(OutFailure, TEXT("rigging_apply_request_invalid"));
+					auto ActualState = MakeShared<FJsonObject>();
+                    ActualState->SetBoolField(TEXT("request_valid"), Request.IsValid());
+                    ActualState->SetBoolField(TEXT("target_present"), Request.Input && Request.Input->Target.IsValid());
+                    ActualState->SetBoolField(TEXT("contract_present"), Request.Contract != nullptr);
+                    SetFailure(OutFailure, ProviderFailure(TEXT("rigging_apply_request_invalid"), TEXT("The internal apply request requires a valid request, target and contract."),
+                        FString(), TEXT("request"), MakeShared<FJsonValueObject>(ActualState), MakeShared<FJsonValueString>(TEXT("valid request with target and contract"))));
 					return false;
 				}
 				const FProfile* Profile = FindProfileByTargetKind(Request.Contract->TargetKind);
 				if (!Profile)
 				{
-					SetFailure(OutFailure, TEXT("rigging_apply_profile_missing"), Request.Contract->TargetKind);
+					SetFailure(OutFailure, ProviderFailure(TEXT("rigging_apply_profile_missing"), TEXT("No Rigging profile is registered for the apply contract target kind."),
+                        FString(), TEXT("target_kind"), MakeShared<FJsonValueString>(Request.Contract->TargetKind),
+                        MakeShared<FJsonValueString>(TEXT("registered Rigging target kind"))));
 					return false;
 				}
 				FString PackagePath;
@@ -458,14 +625,17 @@ namespace UeAgentRiggingAuthoring
 					|| FPackageName::GetLongPackageAssetName(PackagePath).IsEmpty()
 					|| (!PackagePath.Equals(TEXT("/Game")) && !PackagePath.StartsWith(TEXT("/Game/"))))
 				{
-					SetFailure(OutFailure, TEXT("invalid_asset_path"), PackagePath);
+					SetFailure(OutFailure, InputFailure(TEXT("invalid_asset_path"), TEXT("asset_path must name a valid asset package under /Game."),
+                        TEXT("/target/asset_path"), Request.Input->Target->TryGetField(TEXT("asset_path")),
+                        MakeShared<FJsonValueString>(TEXT("valid /Game/... asset package path")), FString()));
 					return false;
 				}
 				FString AssetKind;
 				if (Request.Input->Target->TryGetStringField(TEXT("asset_kind"), AssetKind)
 					&& !AssetKind.Equals(Profile->TypeId, ESearchCase::IgnoreCase))
 				{
-					SetFailure(OutFailure, TEXT("rigging_asset_kind_conflict"), AssetKind);
+					SetFailure(OutFailure, InputFailure(TEXT("rigging_asset_kind_conflict"), TEXT("asset_kind does not match the selected Rigging profile."),
+                        TEXT("/target/asset_kind"), MakeShared<FJsonValueString>(AssetKind), MakeShared<FJsonValueString>(Profile->TypeId), PackagePath));
 					return false;
 				}
 
@@ -474,21 +644,29 @@ namespace UeAgentRiggingAuthoring
 				if (Operation == EOperation::Upsert) Operation = Existing ? EOperation::Update : EOperation::Create;
 				if ((Operation == EOperation::Create || Operation == EOperation::Clone) && Existing)
 				{
-					SetFailure(OutFailure, TEXT("asset_already_exists"), PackagePath);
+					SetFailure(OutFailure, InputFailure(TEXT("asset_already_exists"), TEXT("Create and clone require a destination asset that does not already exist."),
+                        TEXT("/target/asset_path"), MakeShared<FJsonValueString>(PackagePath), MakeShared<FJsonValueString>(TEXT("unused asset path")), PackagePath));
 					return false;
 				}
 				if ((Operation == EOperation::Update || Operation == EOperation::Remove) && !Existing)
 				{
-					SetFailure(OutFailure, TEXT("asset_not_found"), PackagePath);
+					SetFailure(OutFailure, InputFailure(TEXT("asset_not_found"), TEXT("Update and remove require an existing asset of the selected Rigging kind."),
+                        TEXT("/target/asset_path"), MakeShared<FJsonValueString>(PackagePath), MakeShared<FJsonValueString>(Profile->TypeId + TEXT(" asset")), PackagePath));
 					return false;
 				}
 
 				TSharedPtr<FJsonObject> Document;
-				FString Error;
+				UE::UAI::Contract::FDiagnostic Error;
 				if (!ExtractDocument(Profile->Kind, Request.Input->ProviderExtension, Document, Error))
 				{
+                    if (Request.Unit) Error.Source = Request.Unit->ResolveDiagnosticSource(Error.Source.InternalJsonPath);
+                    Error.TargetPath = ToObjectPath(PackagePath);
 					SetFailure(OutFailure, Error);
 					return false;
+				}
+				if (Operation != EOperation::Update && !Document.IsValid())
+				{
+					Document = MakeShared<FJsonObject>();
 				}
 				UObject* Source = nullptr;
 				if (Operation == EOperation::Clone)
@@ -498,7 +676,9 @@ namespace UeAgentRiggingAuthoring
 					Source = LoadAsset(Profile->Kind, SourcePath);
 					if (!Source)
 					{
-						SetFailure(OutFailure, TEXT("source_asset_not_found"), SourcePath);
+						SetFailure(OutFailure, InputFailure(TEXT("source_asset_not_found"), TEXT("The clone source could not be loaded as the selected Rigging asset kind."),
+                            TEXT("/target/source_asset_path"), MakeShared<FJsonValueString>(SourcePath),
+                            MakeShared<FJsonValueString>(Profile->TypeId + TEXT(" asset")), PackagePath));
 						return false;
 					}
 				}
@@ -512,28 +692,63 @@ namespace UeAgentRiggingAuthoring
 					Proposed = Operation == EOperation::Create
 						? CreateFactorySeed(Profile->Kind, Scratch, NAME_None, RF_Transactional, Error)
 						: DuplicateAsset(Operation == EOperation::Clone ? Source : Existing,
-							Scratch, NAME_None, RF_Transactional);
+							Scratch, NAME_None, RF_Transactional, Error);
 					if (!Proposed)
 					{
-						SetFailure(OutFailure, Error.IsEmpty() ? TEXT("rigging_proposed_asset_create_failed") : Error);
+						if (Error.IsEmpty()) Error = ProviderFailure(TEXT("rigging_proposed_asset_create_failed"),
+                            TEXT("The native asset duplication operation returned no prepared asset."), PackagePath, TEXT("proposed_asset_available"),
+                            MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true));
+                        if (Error.TargetPath.IsEmpty()) Error.TargetPath = ToObjectPath(PackagePath);
+                        SetFailure(OutFailure, Error);
 						return false;
 					}
-					if (!ApplyDocument(Profile->Kind, *Proposed, Document, Stats, Error))
+					// Duplication runs PostLoad; IK assets restore RF_Standalone there.
+					// This object belongs only to the proposed-state lifetime, not the asset registry.
+					Proposed->ClearFlags(RF_Public | RF_Standalone);
+					Proposed->SetFlags(RF_Transient);
+					if (auto* Blueprint = Cast<UBlueprint>(Proposed))
+						UeAgentBlueprintAssetLifecycle::SetAuthoringContext(*Blueprint,
+							PackagePath, Cast<UBlueprint>(Existing ? Existing : Source));
+					// An Update without document fields preserves the duplicated native document.
+					// Create/Clone still exercise their existing document validation and dependencies.
+					if ((Operation != EOperation::Update || Document.IsValid())
+						&& !ApplyDocument(Profile->Kind, *Proposed, Document, Stats, Error, CapturedDocument, PackagePath))
 					{
-						SetFailure(OutFailure, TEXT("rigging_document_preflight_failed"), Error);
+						SetFailure(OutFailure, Error);
 						return false;
 					}
 				}
 
+				UE::UAI::Contract::FDiagnostic ComparisonError;
 				const bool bDocumentNoOp = Operation == EOperation::Update
-					&& Existing && Proposed && DocumentsEqual(*Existing, *Proposed, Profile->Kind);
+					&& Existing && Proposed && DocumentsEqual(*Existing, *Proposed, *Profile, ComparisonError, PackagePath);
+				if (!ComparisonError.IsEmpty())
+				{
+					if (ComparisonError.TargetPath.IsEmpty()) ComparisonError.TargetPath = PackagePath;
+					UeAgentAuthoringDiagnostics::ReportConsistencyWarning(ComparisonError);
+				}
+				TArray<UBlueprint*> Dependents;
+				if (auto* Rig = Cast<UControlRigBlueprint>(Existing); Rig && Document)
+				{
+					const TSharedPtr<FJsonObject>* Variables = nullptr;
+					if (Document->TryGetObjectField(TEXT("variables"), Variables)
+						&& !UeAgentControlRigOps::CollectVariableTypeChangeDependents(*Rig, **Variables, Dependents, Error))
+					{
+						UeAgentAuthoringDiagnostics::PrefixInternalDocumentFailure(Error, TEXT("/variables"));
+						UeAgentAuthoringDiagnostics::LocateFailure(Error, *Document, TEXT("variable_type_decode"), PackagePath, TEXT("variables"));
+						SetFailure(OutFailure, Error);
+						return false;
+					}
+				}
 				OutState = MakeUnique<FAssetLifecycleState>(
 					*Profile, PackagePath, Operation, Existing, Proposed, Document, Stats,
 					ReadBool(Request.Input->ProviderExtension, TEXT("compile"), true),
 					ReadBool(Request.Input->ProviderExtension, TEXT("save"), false),
-					bDocumentNoOp);
+					bDocumentNoOp, CapturedDocument, Dependents);
 				return true;
 			}
+		private:
+			TSharedPtr<const FJsonObject> CapturedDocument;
 		};
 
 		FInputFieldDescriptor Field(
@@ -599,12 +814,11 @@ namespace UeAgentRiggingAuthoring
 			Result.ReflectionBaseline.UnknownFieldPolicy = TEXT("reject");
 			Result.ReflectionBaseline.ExternalReferencePolicy = TEXT("replace_reference_only");
 			Result.ReflectionBaseline.OwnedObjectPolicy = TEXT("create_or_locate_with_real_outer_then_recurse");
-			Result.ReflectionBaseline.RuntimeLimitsSource = TEXT("shared_runtime_limits");
 			Result.PropertyPayload.Mode = TEXT("reflection");
 			Result.PropertyPayload.PropertyPathField = TEXT("property_path");
 			Result.PropertyPayload.ValueField = TEXT("value");
 			Result.PropertyPayload.OptionalAssertionFields = {
-				TEXT("value_kind"), TEXT("struct_path"), TEXT("enum_path"), TEXT("element_type"),
+				TEXT("kind"), TEXT("struct_path"), TEXT("enum_path"), TEXT("element_type"),
 				TEXT("key_type"), TEXT("mapped_type"), TEXT("inner_type"), TEXT("fixed_length"), TEXT("allowed_class")
 			};
 			Result.PropertyPayload.OmittedPatchFieldPolicy = TEXT("preserve_current");
@@ -700,72 +914,41 @@ namespace UeAgentRiggingAuthoring
 			return Document;
 		}
 
-		bool ReadWorkspaceIdentity(
-			const UeAgentAuthoringWorkspaceRouter::FWorkspace& Workspace,
-			FString& OutAssetPath,
-			EOperation& OutOperation,
-			TSharedPtr<const FJsonObject>& OutDocument)
-		{
-			const UeAgentAuthoringWorkspaceRouter::FWorkspaceUnit* Unit = Workspace.FindSingleUnit(TEXT("asset"));
-			OutDocument = Unit ? Unit->Document : nullptr;
-			const TSharedPtr<FJsonObject>* Target = nullptr;
-			FString OperationText;
-			return OutDocument.IsValid()
-				&& OutDocument->TryGetStringField(TEXT("operation"), OperationText)
-				&& ParseOperation(OperationText, OutOperation)
-				&& OutDocument->TryGetObjectField(TEXT("target"), Target)
-				&& Target && Target->IsValid()
-				&& (*Target)->TryGetStringField(TEXT("asset_path"), OutAssetPath);
-		}
-
 		bool LoadWorkspace(
 			const FProfile& Profile,
 			const UeAgentAuthoringWorkspaceLoader::FSourceRequest& Source,
 			UeAgentApplyWorkspaceContract::FContract& OutContract,
 			UeAgentAuthoringWorkspaceLoader::FLoadResult& OutLoad,
-			FString& OutErrorCode,
-			FString& OutErrorDetail)
+			UE::UAI::Contract::FDiagnostic& OutDiagnostic)
 		{
 			if (!UeAgentApplyWorkspaceContract::FRegistry::Get().FindContract(
 				Profile.WorkspaceContractId, OutContract))
 			{
-				OutErrorCode = TEXT("rigging_workspace_contract_missing");
+				OutDiagnostic = ProviderFailure(TEXT("rigging_workspace_contract_missing"),
+                    TEXT("The workspace contract for Rigging profile '") + Profile.TypeId + TEXT("' is not registered."),
+                    FString(), TEXT("workspace_contract_id"), MakeShared<FJsonValueString>(Profile.WorkspaceContractId),
+                    MakeShared<FJsonValueString>(TEXT("registered workspace contract")));
 				return false;
 			}
 			if (!UeAgentAuthoringWorkspaceLoader::LoadWorkspace(OutContract, Source, OutLoad))
 			{
-				OutErrorCode = OutLoad.ErrorCode;
-				OutErrorDetail = OutLoad.ErrorDetail;
+				OutDiagnostic = OutLoad.Diagnostic;
 				return false;
 			}
 			return true;
-		}
-
-		bool ValidateExpectedPath(
-			const FString& Actual,
-			const FString& Expected,
-			FString& OutErrorCode,
-			FString& OutErrorDetail)
-		{
-			if (Expected.IsEmpty() || Actual.Equals(Expected, ESearchCase::IgnoreCase)) return true;
-			OutErrorCode = TEXT("rigging_workspace_asset_path_conflict");
-			OutErrorDetail = Actual + TEXT(" != ") + Expected;
-			return false;
 		}
 
 		bool BuildDependencyGraph(
 			const UeAgentApplyWorkspaceContract::FContract& Contract,
 			const UeAgentAuthoringWorkspaceRouter::FWorkspace& Workspace,
 			UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph& OutGraph,
-			FString& OutErrorCode,
-			FString& OutErrorDetail)
+			UE::UAI::Contract::FDiagnostic& OutDiagnostic)
 		{
 			UeAgentAuthoringWorkspaceDependencyGraph::FGraphFailure Failure;
 			if (UeAgentAuthoringWorkspaceDependencyGraph::BuildDependencyGraph(
 				Contract, Workspace, UeAgentAuthoringWorkspaceDependencyGraph::FDependencyInputs(),
 				OutGraph, Failure)) return true;
-			OutErrorCode = Failure.ErrorCode;
-			OutErrorDetail = Failure.ErrorDetail;
+			OutDiagnostic = Failure.Diagnostic;
 			return false;
 		}
 
@@ -779,33 +962,37 @@ namespace UeAgentRiggingAuthoring
 			OutResult.Status = TEXT("failed");
 			UeAgentApplyWorkspaceContract::FContract Contract;
 			UeAgentAuthoringWorkspaceLoader::FLoadResult Load;
-			if (!LoadWorkspace(Profile, Source, Contract, Load, OutResult.ErrorCode, OutResult.ErrorDetail)) return false;
-			TSharedPtr<const FJsonObject> Document;
-			EOperation Operation;
-			if (!ReadWorkspaceIdentity(Load.Workspace, OutResult.AssetPath, Operation, Document))
+			if (!LoadWorkspace(Profile, Source, Contract, Load, OutResult.Diagnostic)) return false;
+			UeAgentAuthoringAssetWorkspaceInput::FTargetRequest TargetRequest;
+			TargetRequest.ExpectedAssetPath = ExpectedAssetPath;
+			TargetRequest.Errors.EntryInvalid = TEXT("rigging_workspace_entry_invalid");
+			TargetRequest.Errors.AssetPathConflict =
+				TEXT("rigging_workspace_asset_path_conflict");
+			UeAgentAuthoringAssetWorkspaceInput::FTargetResult Target;
+			if (!UeAgentAuthoringAssetWorkspaceInput::ResolveTarget(
+				Load.Workspace, TargetRequest, Target))
 			{
-				OutResult.ErrorCode = TEXT("rigging_workspace_entry_invalid");
+				OutResult.Diagnostic = Target.Diagnostic;
 				return false;
 			}
-			OutResult.AssetPath = NormalizePackagePath(OutResult.AssetPath);
+			const EOperation Operation = Target.Input.RequestedOperation;
+			OutResult.AssetPath = Target.AssetPath;
 			OutResult.RequestedOperation = OperationToString(Operation);
-			if (!ValidateExpectedPath(OutResult.AssetPath, NormalizePackagePath(ExpectedAssetPath),
-				OutResult.ErrorCode, OutResult.ErrorDetail)) return false;
 			OutResult.bAssetExists = LoadAsset(Profile.Kind, OutResult.AssetPath) != nullptr;
 			OutResult.bWouldCreate = Operation == EOperation::Create
 				|| (Operation == EOperation::Upsert && !OutResult.bAssetExists);
 			UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph Graph;
 			if (!BuildDependencyGraph(Contract, Load.Workspace, Graph,
-				OutResult.ErrorCode, OutResult.ErrorDetail)) return false;
+				OutResult.Diagnostic)) return false;
 			FWorkspaceOperationPreflightProvider Provider(
 				UeAgentApplyInputContract::FRegistry::Get(), FProviderRegistry::Get());
 			UeAgentAuthoringWorkspaceTransaction::FPreflightResult Preflight;
 			if (!UeAgentAuthoringWorkspaceTransaction::PreflightWorkspace(
 				Contract, Load.Workspace, Graph, Provider, Preflight))
 			{
+				const FApplyFailureProjection Failure = ProjectApplyFailure(Preflight);
 				OutResult.UnitsChecked = Preflight.UnitsChecked;
-				OutResult.ErrorCode = Preflight.CauseCode.IsEmpty() ? Preflight.ErrorCode : Preflight.CauseCode;
-				OutResult.ErrorDetail = Preflight.ErrorDetail;
+				OutResult.Diagnostic = Failure.Diagnostic;
 				return false;
 			}
 			OutResult.UnitsChecked = Preflight.UnitsChecked;
@@ -823,75 +1010,67 @@ namespace UeAgentRiggingAuthoring
 			const UeAgentAuthoringWorkspaceLoader::FSourceRequest& Source,
 			const FString& ExpectedAssetPath,
 			FAssetApplyResult& OutResult,
-			const FString& RequestId)
+			const FString& RequestId,
+			TFunction<bool(FOperationFailure&)> FinalReadback = {},
+			TSharedPtr<const FJsonObject> CapturedDocument = nullptr)
 		{
 			OutResult = FAssetApplyResult();
 			OutResult.Status = TEXT("failed");
 			UeAgentApplyWorkspaceContract::FContract Contract;
 			UeAgentAuthoringWorkspaceLoader::FLoadResult Load;
-			if (!LoadWorkspace(Profile, Source, Contract, Load, OutResult.ErrorCode, OutResult.ErrorDetail))
+			if (!LoadWorkspace(Profile, Source, Contract, Load, OutResult.Diagnostic))
 			{
 				OutResult.Phase = TEXT("load");
 				return false;
 			}
-			TSharedPtr<const FJsonObject> Document;
-			EOperation RequestedOperation;
-			if (!ReadWorkspaceIdentity(Load.Workspace, OutResult.AssetPath, RequestedOperation, Document))
+			UeAgentAuthoringAssetWorkspaceInput::FTargetRequest TargetRequest;
+			TargetRequest.ExpectedAssetPath = ExpectedAssetPath;
+			TargetRequest.Errors.EntryInvalid = TEXT("rigging_workspace_entry_invalid");
+			TargetRequest.Errors.AssetPathConflict =
+				TEXT("rigging_workspace_asset_path_conflict");
+			UeAgentAuthoringAssetWorkspaceInput::FTargetResult Target;
+			if (!UeAgentAuthoringAssetWorkspaceInput::ResolveTarget(
+				Load.Workspace, TargetRequest, Target))
 			{
-				OutResult.Phase = TEXT("load");
-				OutResult.ErrorCode = TEXT("rigging_workspace_entry_invalid");
+				OutResult.Phase = Target.Phase;
+				OutResult.Diagnostic = Target.Diagnostic;
 				return false;
 			}
-			OutResult.AssetPath = NormalizePackagePath(OutResult.AssetPath);
-			if (!ValidateExpectedPath(OutResult.AssetPath, NormalizePackagePath(ExpectedAssetPath),
-				OutResult.ErrorCode, OutResult.ErrorDetail))
-			{
-				OutResult.Phase = TEXT("preflight");
-				return false;
-			}
-			UeAgentAuthoringWorkspaceDependencyGraph::FDependencyGraph Graph;
-			if (!BuildDependencyGraph(Contract, Load.Workspace, Graph,
-				OutResult.ErrorCode, OutResult.ErrorDetail))
-			{
-				OutResult.Phase = TEXT("preflight");
-				return false;
-			}
+			const FOperationInput& OperationInput = Target.Input;
+			const EOperation RequestedOperation = OperationInput.RequestedOperation;
+			OutResult.AssetPath = Target.AssetPath;
 			const bool bExisted = LoadAsset(Profile.Kind, OutResult.AssetPath) != nullptr;
 			bool bSave = false;
-			const TSharedPtr<FJsonObject>* Extension = nullptr;
-			if (Document->TryGetObjectField(TEXT("provider_extension"), Extension)
-				&& Extension && Extension->IsValid()) (*Extension)->TryGetBoolField(TEXT("save"), bSave);
+			if (OperationInput.ProviderExtension.IsValid())
+				OperationInput.ProviderExtension->TryGetBoolField(TEXT("save"), bSave);
 			FBackendOptions BackendOptions;
+			BackendOptions.FinalReadback = MoveTemp(FinalReadback);
 			BackendOptions.bUseEditorTransaction = RequestedOperation != EOperation::Remove;
 			BackendOptions.TransactionDescription = NSLOCTEXT(
 				"UeAgentInterface", "RiggingAssetWorkspaceApply", "Apply rigging asset workspace");
-			UeAgentAuthoringWorkspaceTransaction::FExecutionOptions ExecutionOptions;
-			FOperationFailure RequestFailure;
-			if (!BuildApplyEntryExecutionOptions(RequestId, ExecutionOptions, RequestFailure))
-			{
-				OutResult.Phase = TEXT("preflight");
-				OutResult.ErrorCode = RequestFailure.ErrorCode;
-				OutResult.ErrorDetail = RequestFailure.ErrorDetail;
-				return false;
-			}
-			ExecutionOptions.bSaveWhenCallerControlled = bSave;
 			FApplyWorkspaceResult ApplyResult;
-			const bool bApplied = ApplyWorkspace(
-				Contract, Load.Workspace, Graph,
-				UeAgentApplyInputContract::FRegistry::Get(), FProviderRegistry::Get(),
-				ExecutionOptions, BackendOptions, ApplyResult);
+			UeAgentAuthoringAssetWorkspaceApply::FFailure ApplyFailure;
+			FProviderRegistry LocalProviders;
+			const FProviderRegistry* Providers = &FProviderRegistry::Get();
+			if (CapturedDocument)
+			{
+				UeAgentAuthoringOperationApply::ERegistrationResult Registered;
+				UE::UAI::Contract::FDiagnostic RegistrationError;
+				if (!LocalProviders.RegisterProvider(MakeApplyProvider(CapturedDocument), Registered, RegistrationError))
+				{ OutResult.Phase = TEXT("preflight"); OutResult.Diagnostic = RegistrationError; if (OutResult.Diagnostic.Stage.IsEmpty()) OutResult.Diagnostic.Stage = OutResult.Phase; return false; }
+				Providers = &LocalProviders;
+			}
+			const bool bApplied = UeAgentAuthoringAssetWorkspaceApply::Execute(
+				Contract, Load.Workspace, *Providers, RequestId,
+				bSave, BackendOptions, ApplyResult, ApplyFailure);
 			OutResult.UnitsChecked = ApplyResult.Preflight.UnitsChecked;
 			OutResult.MutationsApplied = ApplyResult.Execution.MutationsApplied;
 			OutResult.bRollbackAttempted = ApplyResult.Execution.bRollbackAttempted;
 			OutResult.bRollbackSucceeded = ApplyResult.Execution.bRollbackSucceeded;
 			if (!bApplied)
 			{
-				const bool bPreflight = !ApplyResult.Preflight.IsReady();
-				OutResult.Phase = bPreflight ? TEXT("preflight") : ApplyResult.Execution.Phase;
-				OutResult.ErrorCode = bPreflight ? ApplyResult.Preflight.CauseCode : ApplyResult.Execution.CauseCode;
-				if (OutResult.ErrorCode.IsEmpty())
-					OutResult.ErrorCode = bPreflight ? ApplyResult.Preflight.ErrorCode : ApplyResult.Execution.ErrorCode;
-				OutResult.ErrorDetail = bPreflight ? ApplyResult.Preflight.ErrorDetail : ApplyResult.Execution.ErrorDetail;
+				OutResult.Phase = ApplyFailure.Phase;
+				OutResult.Diagnostic = ApplyFailure.Diagnostic;
 				return false;
 			}
 			const EOperation Resolved = RequestedOperation == EOperation::Upsert
@@ -907,7 +1086,7 @@ namespace UeAgentRiggingAuthoring
 		}
 	}
 
-	bool RegisterApplyContracts(FString& OutError)
+	bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		for (const FProfile& Profile : GetProfiles())
 		{
@@ -921,9 +1100,9 @@ namespace UeAgentRiggingAuthoring
 		return true;
 	}
 
-	TSharedRef<IApplyProvider> MakeApplyProvider()
+	TSharedRef<IApplyProvider> MakeApplyProvider(TSharedPtr<const FJsonObject> CapturedDocument)
 	{
-		static const TSharedRef<IReflectionOperationLifecycle> Lifecycle = MakeShared<FAssetLifecycle>();
+		const TSharedRef<IReflectionOperationLifecycle> Lifecycle = MakeShared<FAssetLifecycle>(MoveTemp(CapturedDocument));
 		UeAgentAuthoringObjectApply::FOptions Options;
 		Options.bAllowDomainAuthorizedOwners = true;
 		return MakeShared<FReflectionApplyProvider>(ApplyProviderId, Lifecycle, Options);
@@ -935,7 +1114,9 @@ namespace UeAgentRiggingAuthoring
 		if (!Profile)
 		{
 			OutResult = FAssetApplyResult();
-			OutResult.ErrorCode = TEXT("rigging_apply_profile_missing");
+			OutResult.Diagnostic = ProviderFailure(TEXT("rigging_apply_profile_missing"), TEXT("No Rigging apply profile is registered for the requested asset kind."),
+                Request.AssetPath, TEXT("asset_kind"), MakeShared<FJsonValueNumber>(static_cast<int32>(Request.Kind)),
+                MakeShared<FJsonValueString>(TEXT("ControlRig, IKRig or IKRetargeter")));
 			return false;
 		}
 		return ExecuteWorkspaceSource(
@@ -944,7 +1125,8 @@ namespace UeAgentRiggingAuthoring
 				MakeApplyDocument(Request), TEXT("inline://rigging-asset-apply")),
 			Request.AssetPath,
 			OutResult,
-			RequestId);
+			RequestId,
+			Request.FinalReadback, Request.CapturedDocument);
 	}
 
 	bool ApplyAssetWorkspace(

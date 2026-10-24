@@ -3,15 +3,60 @@
 #include "Domains/Audio/Authoring/UeAgentAudioAuthoringState.h"
 
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Domains/Audio/Authoring/UeAgentAudioAuthoringDocuments.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringIdentity.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringNativeDefaults.h"
 
 namespace UeAgentAudioAuthoring {
 namespace {
+void RemoveMetaSoundNativeNodeIdentity(
+    const TSharedPtr<FJsonObject> &Document) {
+  const TSharedPtr<FJsonObject> *Nodes = nullptr;
+  if (!Document.IsValid() ||
+      !Document->TryGetObjectField(TEXT("nodes"), Nodes) || !Nodes ||
+      !Nodes->IsValid())
+    return;
+  TMap<FString, FString> AliasByNativeNodeId;
+  for (const TPair<FString, TSharedPtr<FJsonValue>> &Pair : (*Nodes)->Values) {
+    const TSharedPtr<FJsonObject> Node =
+        Pair.Value.IsValid() && Pair.Value->Type == EJson::Object
+            ? Pair.Value->AsObject()
+            : nullptr;
+    FString NativeId;
+    if (Node.IsValid() && Node->TryGetStringField(TEXT("id"), NativeId) &&
+        !NativeId.IsEmpty())
+      AliasByNativeNodeId.Add(NativeId, Pair.Key);
+    if (Node.IsValid())
+      Node->RemoveField(TEXT("id"));
+  }
+  const TSharedPtr<FJsonObject> *Edges = nullptr;
+  if (!Document->TryGetObjectField(TEXT("edges"), Edges) || !Edges ||
+      !Edges->IsValid())
+    return;
+  for (const TPair<FString, TSharedPtr<FJsonValue>> &Pair : (*Edges)->Values) {
+    const TSharedPtr<FJsonObject> Edge =
+        Pair.Value.IsValid() && Pair.Value->Type == EJson::Object
+            ? Pair.Value->AsObject()
+            : nullptr;
+    const TSharedPtr<FJsonObject> *Endpoint = nullptr;
+    for (const TCHAR *Field : {TEXT("from"), TEXT("to")}) {
+      if (!Edge.IsValid() || !Edge->TryGetObjectField(Field, Endpoint) ||
+          !Endpoint || !Endpoint->IsValid())
+        continue;
+      FString NativeId;
+      if ((*Endpoint)->TryGetStringField(TEXT("node"), NativeId)) {
+        const FString Alias = AliasByNativeNodeId.FindRef(NativeId);
+        if (!Alias.IsEmpty())
+          (*Endpoint)->SetStringField(TEXT("node"), Alias);
+      }
+    }
+  }
+}
+
 bool BuildIdentity(const FProfile &Profile, const FString &AssetPath,
                    UeAgentAuthoringIdentity::FCanonicalIdentity &OutIdentity,
-                   FString &OutError) {
+                   UE::UAI::Contract::FDiagnostic& OutError) {
   return UeAgentAuthoringIdentity::BuildCanonicalIdentity(
       Profile.IdentityModelId, Profile.TargetKind,
       {{TEXT("asset_path"), AssetPath}}, OutIdentity, OutError);
@@ -21,7 +66,7 @@ bool AddRequest(const FProfile &Profile, const FString &SemanticId,
                 const FString &AssetPath, const UObject *Asset,
                 const bool bExpectedAbsent,
                 TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-                FString &OutError) {
+                UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentAuthoringState::FReadRequest Request;
   Request.SemanticId = SemanticId;
   if (!BuildIdentity(Profile, AssetPath, Request.TargetIdentity, OutError))
@@ -39,7 +84,7 @@ bool AddRequest(const FProfile &Profile, const FString &SemanticId,
 
 UeAgentAuthoringState::EReadOutcome
 ReadState(const UeAgentAuthoringState::FReadRequest &Request,
-          UeAgentAuthoringState::FStateValue &OutValue, FString &OutError) {
+          UeAgentAuthoringState::FStateValue &OutValue, UE::UAI::Contract::FDiagnostic& OutError) {
   OutValue = UeAgentAuthoringState::FStateValue();
   OutValue.TargetIdentity = Request.TargetIdentity;
   OutValue.Type.Kind = TEXT("object");
@@ -54,8 +99,15 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
   const FProfile *Profile =
       FindProfileByTargetKind(Request.TargetIdentity.TargetKind);
   if (!Profile) {
-    OutError = TEXT("audio_state_profile_missing:") +
-               Request.TargetIdentity.TargetKind;
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("audio_state_profile_missing"),
+        TEXT("No audio state profile is registered for the requested target kind."), TEXT("state_capture"));
+    OutError.SourceKind = TEXT("native_result");
+    OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+    OutError.PropertyPath = TEXT("target_kind");
+    OutError.ActualValue = MakeShared<FJsonValueString>(Request.TargetIdentity.TargetKind);
+    TArray<TSharedPtr<FJsonValue>> Kinds;
+    for (const FProfile& Supported : GetProfiles()) Kinds.Add(MakeShared<FJsonValueString>(Supported.TargetKind));
+    OutError.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(Kinds));
     return UeAgentAuthoringState::EReadOutcome::Failed;
   }
   UObject *Asset = const_cast<UObject *>(Request.RootObject);
@@ -78,9 +130,21 @@ ReadState(const UeAgentAuthoringState::FReadRequest &Request,
     if (!BuildDocument(Profile->Kind, *Asset, Document, OutError,
                        Request.TargetIdentity.GetSelector(TEXT("asset_path"))))
       return UeAgentAuthoringState::EReadOutcome::Failed;
+    if (Profile->Kind == EAssetKind::MetaSound &&
+        Request.Context.FindRef(TEXT("semantic_verification")) == TEXT("true"))
+      RemoveMetaSoundNativeNodeIdentity(Document);
     OutValue.Value = MakeShared<FJsonValueObject>(Document);
+    OutValue.bEditable = true;
   } else {
-    OutError = TEXT("audio_state_semantic_unsupported:") + Request.SemanticId;
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("audio_state_semantic_unsupported"),
+        TEXT("The audio state reader supports asset-target and document state, but received a different semantic request."),
+        TEXT("state_capture"), Request.SemanticId);
+    OutError.SourceKind = TEXT("native_result");
+    OutError.TargetPath = Request.TargetIdentity.GetSelector(TEXT("asset_path"));
+    OutError.CandidateName = Profile->TypeId;
+    OutError.PropertyPath = TEXT("supported_state_semantic");
+    OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+    OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
     return UeAgentAuthoringState::EReadOutcome::Failed;
   }
   OutValue.bAvailable = true;
@@ -91,7 +155,7 @@ UeAgentAuthoringNativeDefaults::EProbeOutcome
 ProbeNativeDefault(const UeAgentAuthoringNativeDefaults::FRequest &Request,
                    UeAgentAuthoringNativeDefaults::FScratchScope &Scratch,
                    UeAgentAuthoringNativeDefaults::FProbeValue &OutValue,
-                   FString &OutError) {
+                   UE::UAI::Contract::FDiagnostic& OutError) {
   OutValue = UeAgentAuthoringNativeDefaults::FProbeValue();
   const FProfile *Profile =
       FindProfileByTargetKind(Request.TargetIdentity.TargetKind);
@@ -137,19 +201,28 @@ bool BuildAssetSnapshotReadRequests(
     const FProfile &Profile, UObject *Asset, const FString &CanonicalAssetPath,
     const bool bExpectedAbsent,
     TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    FString &OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError) {
   if (CanonicalAssetPath.IsEmpty()) {
-    OutError = TEXT("audio_snapshot_identity_invalid");
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("audio_snapshot_identity_invalid"),
+        TEXT("An audio snapshot requires a nonempty canonical asset path."), TEXT("state_capture"));
+    OutError.SourceKind = TEXT("native_result");
+    OutError.CandidateName = Profile.TypeId;
+    OutError.PropertyPath = TEXT("asset_path");
+    OutError.ActualValue = MakeShared<FJsonValueString>(CanonicalAssetPath);
+    OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("a nonempty canonical asset path"));
     return false;
   }
-  return AddRequest(Profile, Profile.DocumentSemanticId, CanonicalAssetPath,
-                    Asset, bExpectedAbsent, OutRequests, OutError);
+  if (!AddRequest(Profile, Profile.DocumentSemanticId, CanonicalAssetPath,
+                  Asset, bExpectedAbsent, OutRequests, OutError))
+    return false;
+  OutRequests.Last().Context.Add(TEXT("semantic_verification"), TEXT("true"));
+  return true;
 }
 
 bool BuildAssetExportSnapshotReadRequests(
     const FProfile &Profile, UObject &Asset,
     TArray<UeAgentAuthoringState::FReadRequest> &OutRequests,
-    FString &OutError) {
+    UE::UAI::Contract::FDiagnostic& OutError) {
   OutRequests.Reset();
   OutError.Reset();
   const FString AssetPath = Asset.GetOutermost()->GetName();
@@ -166,7 +239,7 @@ bool BuildAssetExportSnapshotReadRequests(
                     false, OutRequests, OutError);
 }
 
-bool RegisterStateAccessor(FString &OutError) {
+bool RegisterStateAccessor(UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentAuthoringState::FStateAccessorDescriptor Descriptor;
   Descriptor.AccessorId = StateAccessorId;
   for (const FProfile &Profile : GetProfiles())
@@ -179,7 +252,7 @@ bool RegisterStateAccessor(FString &OutError) {
       Descriptor, ReadState, Result, OutError);
 }
 
-bool RegisterNativeDefaultProvider(FString &OutError) {
+bool RegisterNativeDefaultProvider(UE::UAI::Contract::FDiagnostic& OutError) {
   UeAgentAuthoringNativeDefaults::FProviderDescriptor Descriptor;
   Descriptor.ProviderId = FactoryDefaultProviderId;
   Descriptor.SourceKind =

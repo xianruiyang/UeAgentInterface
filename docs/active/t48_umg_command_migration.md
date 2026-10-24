@@ -3,8 +3,7 @@
 The active public UMG methods are `client.umg.asset_create(...)`,
 `client.umg.widget_candidates(...)` and
 `client.umg.widget_events_discover(...)`. The formal command manifest remains
-the current-set authority; methods are discovered by `command_search` and
-`command_detail` and mirrored by uai-cli exact execution. T15 owns the
+the current-set authority. For unknown command names or parameter shapes, follow [public command discovery](../../../../UeAgentInterfaceCMD/docs/PYTHON_SDK_AND_CLI.md#command-discovery). T15 owns the
 target-bound candidate-to-HJSON contract and its explicitly incomplete
 Designer Palette coverage. No task-specific generated projection remains
 active.

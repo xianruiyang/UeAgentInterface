@@ -10,7 +10,7 @@
 #include "Utilities/AuthoringOperationApply/UeAgentAuthoringOperationCoordinator.h"
 
 namespace UeAgentAnimationAuthoring {
-bool RegisterAuthoring(FString &OutError) {
+bool RegisterAuthoring(UE::UAI::Contract::FDiagnostic& OutError) {
   if (!RegisterDescriptors(OutError) || !RegisterStateAccessor(OutError) ||
       !RegisterNativeDefaultProvider(OutError) ||
       !RegisterApplyContracts(OutError) || !RegisterExportAuthoring(OutError)) {

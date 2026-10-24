@@ -1,6 +1,7 @@
 #include "Core/Discovery/UeAgentDiscovery.h"
 
 #include "Algo/Sort.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::Discovery
 {
@@ -8,21 +9,140 @@ namespace UE::UAI::Discovery
 	{
 		using namespace UE::UAI::ContextResource;
 
+		FUeAgentDiscoveryError ValidationFailure(const FString& Code, const FString& Reason, const FString& Path)
+		{
+			auto Error = FUeAgentDiscoveryError::Failure(Code, Reason, TEXT("discovery"));
+			Error.PropertyPath = Path;
+			return Error;
+		}
+
+		TSharedPtr<const FUeAgentDiscoveryError> StoreValidationFailure(FUeAgentDiscoveryError Error, const FString& Prefix = FString())
+		{
+			if (!Prefix.IsEmpty()) Error.PropertyPath = Prefix + (Error.PropertyPath.IsEmpty() ? FString()
+				: (Error.PropertyPath.StartsWith(TEXT("/")) ? Error.PropertyPath : TEXT(".") + Error.PropertyPath));
+			return MakeShared<FUeAgentDiscoveryError>(MoveTemp(Error));
+		}
+
+		FUeAgentDiscoveryError TextDifference(const FString& Code, const FString& Reason, const FString& Path,
+			const FString& Actual, const FString& Expected, const bool bPublic)
+		{
+			auto Error = ValidationFailure(Code, Reason, Path);
+			if (bPublic)
+			{
+				Error.ActualValue = MakeShared<FJsonValueString>(Actual);
+				Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			}
+			else
+			{
+				Error.ActualEvidence = MakeShared<FJsonValueString>(Actual);
+				Error.ExpectedEvidence = MakeShared<FJsonValueString>(Expected);
+			}
+			return Error;
+		}
+
+		FUeAgentDiscoveryError CompareRevision(const FUeAgentCatalogRevision& Actual, const FUeAgentCatalogRevision& Expected,
+			const FString& Code)
+		{
+			if (Actual.GetSourceId() != Expected.GetSourceId()) return TextDifference(Code,
+				TEXT("The resolved catalog revision belongs to a different source."), TEXT("catalog_revision.source_id"),
+				Actual.GetSourceId(), Expected.GetSourceId(), false);
+			if (Actual.GetGeneration() != Expected.GetGeneration()) return TextDifference(Code,
+				TEXT("The resolved catalog revision belongs to a different generation."), TEXT("catalog_revision.generation"),
+				Actual.GetGeneration(), Expected.GetGeneration(), false);
+			if (Actual.GetSequence() != Expected.GetSequence()) return TextDifference(Code,
+				TEXT("The resolved catalog revision has a different sequence."), TEXT("catalog_revision.sequence"),
+				FString::Printf(TEXT("%lld"), Actual.GetSequence()), FString::Printf(TEXT("%lld"), Expected.GetSequence()), false);
+			return {};
+		}
+
+		FUeAgentDiscoveryError CompareIdentity(const FUeAgentCanonicalIdentity& Actual, const FUeAgentCanonicalIdentity& Expected,
+			const FString& Code)
+		{
+			if (Actual == Expected) return {};
+			struct FField { const TCHAR* Name; const FString* Actual; const FString* Expected; bool bPublic; };
+			const FField Fields[] = {
+				{TEXT("semantic_id"), &Actual.GetSemanticId(), &Expected.GetSemanticId(), false},
+				{TEXT("target_kind"), &Actual.GetTargetKind(), &Expected.GetTargetKind(), true},
+				{TEXT("owner_id"), &Actual.GetOwnerId(), &Expected.GetOwnerId(), false},
+				{TEXT("object_role"), &Actual.GetObjectRole(), &Expected.GetObjectRole(), true},
+				{TEXT("generation"), &Actual.GetGeneration(), &Expected.GetGeneration(), false},
+			};
+			for (const FField& Field : Fields)
+			{
+				if (*Field.Actual != *Field.Expected) return TextDifference(Code,
+					FString::Printf(TEXT("The resolved candidate identity differs at '%s'."), Field.Name),
+					TEXT("identity.") + FString(Field.Name), *Field.Actual, *Field.Expected, Field.bPublic);
+			}
+			TArray<FString> Keys;
+			Actual.GetSelectors().GetKeys(Keys);
+			for (const auto& Pair : Expected.GetSelectors()) Keys.AddUnique(Pair.Key);
+			Keys.Sort();
+			for (const FString& Key : Keys)
+			{
+				const FString* Left = Actual.GetSelectors().Find(Key);
+				const FString* Right = Expected.GetSelectors().Find(Key);
+				if (Left && Right && *Left == *Right) continue;
+				auto Error = ValidationFailure(Code, TEXT("The resolved candidate has a different selector value or selector presence."),
+					TEXT("identity.selectors[") + Key + TEXT("]"));
+				Error.ActualValuePresent = Left != nullptr;
+				Error.ExpectedValuePresent = Right != nullptr;
+				if (Left) Error.ActualValue = MakeShared<FJsonValueString>(*Left);
+				if (Right) Error.ExpectedValue = MakeShared<FJsonValueString>(*Right);
+				return Error;
+			}
+			return TextDifference(Code, TEXT("The resolved candidate has a different canonical identity."), TEXT("identity"),
+				Actual.GetCanonicalKey(), Expected.GetCanonicalKey(), false);
+		}
+
+		FUeAgentDiscoveryError CompareStringList(const TArray<FString>& Actual, const TArray<FString>& Expected,
+			const FString& Code, const FString& Path)
+		{
+			const int32 Count = FMath::Max(Actual.Num(), Expected.Num());
+			for (int32 Index = 0; Index < Count; ++Index)
+			{
+				const bool bActual = Actual.IsValidIndex(Index), bExpected = Expected.IsValidIndex(Index);
+				if (bActual && bExpected && Actual[Index] == Expected[Index]) continue;
+				auto Error = ValidationFailure(Code, TEXT("The resolved candidate summary differs at this list item."),
+					Path + FString::Printf(TEXT("[%d]"), Index));
+				Error.ActualValuePresent = bActual;
+				Error.ExpectedValuePresent = bExpected;
+				if (bActual) Error.ActualValue = MakeShared<FJsonValueString>(Actual[Index]);
+				if (bExpected) Error.ExpectedValue = MakeShared<FJsonValueString>(Expected[Index]);
+				return Error;
+			}
+			return {};
+		}
+
+		FUeAgentDiscoveryError CompareSummary(const FUeAgentCandidateSummary& Actual, const FUeAgentCandidateSummary& Expected)
+		{
+			const FString Code = TEXT("candidate_binding_summary_mismatch");
+			auto Error = CompareIdentity(Actual.GetIdentity(), Expected.GetIdentity(), Code);
+			if (!Error.IsEmpty()) return Error;
+			const auto& ActualDescriptor = Actual.GetDescriptorIdentity();
+			const auto& ExpectedDescriptor = Expected.GetDescriptorIdentity();
+			if (ActualDescriptor.GetDescriptorId() != ExpectedDescriptor.GetDescriptorId()) return TextDifference(Code,
+				TEXT("The resolved candidate uses a different descriptor."), TEXT("descriptor.descriptor_id"),
+				ActualDescriptor.GetDescriptorId(), ExpectedDescriptor.GetDescriptorId(), false);
+			if (ActualDescriptor.GetVersion() != ExpectedDescriptor.GetVersion()) return TextDifference(Code,
+				TEXT("The resolved candidate uses a different descriptor version."), TEXT("descriptor.version"),
+				FString::FromInt(ActualDescriptor.GetVersion()), FString::FromInt(ExpectedDescriptor.GetVersion()), false);
+			if (ActualDescriptor.GetDescriptorHash() != ExpectedDescriptor.GetDescriptorHash()) return TextDifference(Code,
+				TEXT("The resolved candidate uses a different descriptor contract."), TEXT("descriptor.descriptor_hash"),
+				ActualDescriptor.GetDescriptorHash(), ExpectedDescriptor.GetDescriptorHash(), false);
+			if (Actual.GetCatalogKind() != Expected.GetCatalogKind()) return TextDifference(Code,
+				TEXT("The resolved candidate belongs to a different catalog kind."), TEXT("catalog_kind"), Actual.GetCatalogKind(), Expected.GetCatalogKind(), true);
+			if (Actual.GetDisplayName() != Expected.GetDisplayName()) return TextDifference(Code,
+				TEXT("The resolved candidate has a different display name."), TEXT("display_name"), Actual.GetDisplayName(), Expected.GetDisplayName(), true);
+			if (Actual.GetSummary() != Expected.GetSummary()) return TextDifference(Code,
+				TEXT("The resolved candidate has different summary text."), TEXT("summary"), Actual.GetSummary(), Expected.GetSummary(), true);
+			Error = CompareStringList(Actual.GetCategoryPath(), Expected.GetCategoryPath(), Code, TEXT("category_path"));
+			if (Error.IsEmpty()) Error = CompareStringList(Actual.GetDiscoveryScopes(), Expected.GetDiscoveryScopes(), Code, TEXT("discovery_scopes"));
+			return Error;
+		}
+
 		void ResetError(FUeAgentDiscoveryError& OutError)
 		{
 			OutError = FUeAgentDiscoveryError{};
-		}
-
-		bool Fail(
-			FUeAgentDiscoveryError& OutError,
-			const FString& Code,
-			const FString& SubjectId = FString(),
-			const FString& Detail = FString())
-		{
-			OutError.Code = Code;
-			OutError.SubjectId = SubjectId;
-			OutError.Detail = Detail;
-			return false;
 		}
 
 		FString NormalizeRequired(FString Value)
@@ -40,16 +160,19 @@ namespace UE::UAI::Discovery
 			return !Value.IsEmpty();
 		}
 
-		bool IsCategoryPathValid(const TArray<FString>& CategoryPath)
+		FUeAgentDiscoveryError ValidateCategoryPath(const TArray<FString>& CategoryPath, const FString& Path)
 		{
-			for (const FString& Part : CategoryPath)
+			for (int32 Index = 0; Index < CategoryPath.Num(); ++Index)
 			{
-				if (!IsRequiredTextValid(Part))
+				if (!IsRequiredTextValid(CategoryPath[Index]))
 				{
-					return false;
+					auto Error = ValidationFailure(TEXT("catalog_candidate_invalid"),
+						TEXT("A candidate category or discovery scope must not be empty."), Path + FString::Printf(TEXT("[%d]"), Index));
+					Error.ActualValue = MakeShared<FJsonValueString>(CategoryPath[Index]);
+					return Error;
 				}
 			}
-			return true;
+			return {};
 		}
 
 		int64 TextBytes(const FString& Text)
@@ -63,17 +186,12 @@ namespace UE::UAI::Discovery
 			const FString& Path,
 			FUeAgentDiscoveryError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded BudgetError;
-			if (Resources.TryChargeMany(Amounts, Path, BudgetError))
+			FUeAgentResourceChargeError ChargeError;
+			if (Resources.TryChargeMany(Amounts, Path, ChargeError))
 			{
 				return true;
 			}
-			OutError.Code = BudgetError.Code;
-			OutError.SubjectId = BudgetError.Path;
-			OutError.Detail = TEXT("discovery resource budget exceeded");
-			OutError.ResourceDimension = BudgetError.Dimension;
-			OutError.ResourceLimit = BudgetError.Limit;
-			OutError.ResourceObserved = BudgetError.Observed;
+			OutError = ChargeError;
 			return false;
 		}
 
@@ -86,22 +204,11 @@ namespace UE::UAI::Discovery
 			FUeAgentCancellationRequested CancellationError;
 			if (!Cancellation.TryCheckpoint(CancellationError))
 			{
-				return Fail(
-					OutError,
-					CancellationError.Code,
-					Stage,
-					CancellationError.Reason);
+				OutError = CancellationError;
+				OutError.Stage = Stage;
+				return false;
 			}
 
-			FUeAgentOperationDeadlineExceeded DeadlineError;
-			if (!Deadline.TryCheckpoint(Stage, DeadlineError))
-			{
-				return Fail(
-					OutError,
-					DeadlineError.Code,
-					Stage,
-					DeadlineError.Stage);
-			}
 			return true;
 		}
 
@@ -115,11 +222,15 @@ namespace UE::UAI::Discovery
 				+ TextBytes(Candidate.GetCatalogKind())
 				+ TextBytes(Candidate.GetDisplayName())
 				+ TextBytes(Candidate.GetSummary());
-			for (const FString& Part : Candidate.GetCategoryPath())
-			{
-				Result += TextBytes(Part);
-			}
-			return Result;
+		for (const FString& Part : Candidate.GetCategoryPath())
+		{
+			Result += TextBytes(Part);
+		}
+		for (const FString& Scope : Candidate.GetDiscoveryScopes())
+		{
+			Result += TextBytes(Scope);
+		}
+		return Result;
 		}
 
 		int64 DiagnosticStringBytes(
@@ -138,11 +249,17 @@ namespace UE::UAI::Discovery
 		: SourceId(NormalizeRequired(MoveTemp(InSourceId)))
 		, Generation(NormalizeRequired(MoveTemp(InGeneration)))
 		, Sequence(InSequence)
-		, bValid(
-			IsRequiredTextValid(SourceId)
-			&& IsRequiredTextValid(Generation)
-			&& Sequence >= 0)
 	{
+		if (!IsRequiredTextValid(SourceId)) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("catalog_revision_invalid"), TEXT("The catalog revision has no source identifier."), TEXT("source_id")));
+		else if (!IsRequiredTextValid(Generation)) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("catalog_revision_invalid"), TEXT("The catalog revision has no generation identifier."), TEXT("generation")));
+		else if (Sequence < 0)
+		{
+			auto Error = ValidationFailure(TEXT("catalog_revision_invalid"), TEXT("The catalog revision sequence must be non-negative."), TEXT("sequence"));
+			Error.ActualEvidence = MakeShared<FJsonValueString>(FString::Printf(TEXT("%lld"), Sequence));
+			ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error));
+		}
 	}
 
 	const FString& FUeAgentCatalogRevision::GetSourceId() const
@@ -162,7 +279,12 @@ namespace UE::UAI::Discovery
 
 	bool FUeAgentCatalogRevision::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FUeAgentDiscoveryError* FUeAgentCatalogRevision::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic.Get();
 	}
 
 	bool FUeAgentCatalogRevision::operator==(
@@ -181,16 +303,23 @@ namespace UE::UAI::Discovery
 
 	FUeAgentCatalogDiagnostic::FUeAgentCatalogDiagnostic(
 		FString InSourceId,
-		FString InCode,
-		FString InMessage)
+		FUeAgentDiscoveryError InDiagnostic)
 		: SourceId(NormalizeRequired(MoveTemp(InSourceId)))
-		, Code(NormalizeRequired(MoveTemp(InCode)))
-		, Message(NormalizeRequired(MoveTemp(InMessage)))
-		, bValid(
-			IsRequiredTextValid(SourceId)
-			&& IsRequiredTextValid(Code)
-			&& IsRequiredTextValid(Message))
+		, Diagnostic(MoveTemp(InDiagnostic))
 	{
+		if (SourceId.IsEmpty()) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("catalog_diagnostic_invalid"), TEXT("The catalog diagnostic has no source identifier."), TEXT("source_id")));
+		else if (Diagnostic.Code.TrimStartAndEnd().IsEmpty()) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("catalog_diagnostic_invalid"), TEXT("The catalog diagnostic has no error code."), TEXT("diagnostic.code")));
+		else if (Diagnostic.PublicMessage.TrimStartAndEnd().IsEmpty()) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("catalog_diagnostic_invalid"), TEXT("The catalog diagnostic has no public reason."), TEXT("diagnostic.message")));
+		if (ValidationDiagnostic.IsValid() && (!Diagnostic.IsEmpty() || !Diagnostic.PublicMessage.IsEmpty()
+			|| Diagnostic.PublicCause.IsValid() || !Diagnostic.Diagnostics.IsEmpty()))
+		{
+			auto Error = *ValidationDiagnostic;
+			Error.PublicCause = MakeShared<FUeAgentDiscoveryError>(Diagnostic);
+			ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error));
+		}
 	}
 
 	const FString& FUeAgentCatalogDiagnostic::GetSourceId() const
@@ -200,25 +329,27 @@ namespace UE::UAI::Discovery
 
 	const FString& FUeAgentCatalogDiagnostic::GetCode() const
 	{
-		return Code;
+		return Diagnostic.Code;
 	}
 
 	const FString& FUeAgentCatalogDiagnostic::GetMessage() const
 	{
-		return Message;
+		return Diagnostic.PublicMessage;
+	}
+
+	const FUeAgentDiscoveryError& FUeAgentCatalogDiagnostic::GetDiagnostic() const
+	{
+		return Diagnostic;
 	}
 
 	bool FUeAgentCatalogDiagnostic::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
 	}
 
-	bool FUeAgentCatalogDiagnostic::operator==(
-		const FUeAgentCatalogDiagnostic& Other) const
+	const FUeAgentDiscoveryError* FUeAgentCatalogDiagnostic::GetValidationDiagnostic() const
 	{
-		return SourceId == Other.SourceId
-			&& Code == Other.Code
-			&& Message == Other.Message;
+		return ValidationDiagnostic.Get();
 	}
 
 	FUeAgentDiscoveryQuery::FUeAgentDiscoveryQuery(
@@ -230,11 +361,12 @@ namespace UE::UAI::Discovery
 		, SearchText(NormalizeOptional(MoveTemp(InSearchText)))
 		, MatchMode(InMatchMode)
 		, MaterializationPolicy(InMaterializationPolicy)
-		, bValid(
-			IsRequiredTextValid(CatalogKind)
-			&& (MatchMode != EUeAgentDiscoveryMatchMode::Exact
-				|| IsRequiredTextValid(SearchText)))
 	{
+		if (!IsRequiredTextValid(CatalogKind)) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("discovery_query_invalid"), TEXT("The discovery query has no catalog kind."), TEXT("catalog_kind")));
+		else if (MatchMode == EUeAgentDiscoveryMatchMode::Exact && !IsRequiredTextValid(SearchText))
+			ValidationDiagnostic = StoreValidationFailure(ValidationFailure(TEXT("discovery_query_invalid"),
+				TEXT("An exact discovery query requires non-empty search text."), TEXT("search_text")));
 	}
 
 	const FString& FUeAgentDiscoveryQuery::GetCatalogKind() const
@@ -260,7 +392,12 @@ namespace UE::UAI::Discovery
 
 	bool FUeAgentDiscoveryQuery::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FUeAgentDiscoveryError* FUeAgentDiscoveryQuery::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic.Get();
 	}
 
 	FUeAgentCandidateSummary::FUeAgentCandidateSummary(
@@ -269,23 +406,36 @@ namespace UE::UAI::Discovery
 		FString InCatalogKind,
 		FString InDisplayName,
 		FString InSummary,
-		TArray<FString> InCategoryPath)
+		TArray<FString> InCategoryPath,
+		TArray<FString> InDiscoveryScopes)
 		: Identity(MoveTemp(InIdentity))
 		, DescriptorIdentity(MoveTemp(InDescriptorIdentity))
 		, CatalogKind(NormalizeRequired(MoveTemp(InCatalogKind)))
 		, DisplayName(NormalizeRequired(MoveTemp(InDisplayName)))
 		, Summary(NormalizeOptional(MoveTemp(InSummary)))
 		, CategoryPath(MoveTemp(InCategoryPath))
+		, DiscoveryScopes(MoveTemp(InDiscoveryScopes))
 	{
 		for (FString& Part : CategoryPath)
 		{
 			Part = NormalizeRequired(MoveTemp(Part));
 		}
-		bValid = Identity.IsValid()
-			&& DescriptorIdentity.IsValid()
-			&& IsRequiredTextValid(CatalogKind)
-			&& IsRequiredTextValid(DisplayName)
-			&& IsCategoryPathValid(CategoryPath);
+		for (FString& Scope : DiscoveryScopes)
+		{
+			Scope = NormalizeRequired(MoveTemp(Scope));
+		}
+		if (!Identity.IsValid()) ValidationDiagnostic = StoreValidationFailure(Identity.GetValidationDiagnostic(), TEXT("identity"));
+		else if (!DescriptorIdentity.IsValid()) ValidationDiagnostic = StoreValidationFailure(DescriptorIdentity.GetValidationDiagnostic(), TEXT("descriptor"));
+		else if (!IsRequiredTextValid(CatalogKind)) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("catalog_candidate_invalid"), TEXT("The candidate has no catalog kind."), TEXT("catalog_kind")));
+		else if (!IsRequiredTextValid(DisplayName)) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("catalog_candidate_invalid"), TEXT("The candidate has no display name."), TEXT("display_name")));
+		else
+		{
+			auto Error = ValidateCategoryPath(CategoryPath, TEXT("category_path"));
+			if (Error.IsEmpty()) Error = ValidateCategoryPath(DiscoveryScopes, TEXT("discovery_scopes"));
+			if (!Error.IsEmpty()) ValidationDiagnostic = StoreValidationFailure(MoveTemp(Error));
+		}
 	}
 
 	const FUeAgentCanonicalIdentity&
@@ -320,9 +470,19 @@ namespace UE::UAI::Discovery
 		return CategoryPath;
 	}
 
+	const TArray<FString>& FUeAgentCandidateSummary::GetDiscoveryScopes() const
+	{
+		return DiscoveryScopes;
+	}
+
 	bool FUeAgentCandidateSummary::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FUeAgentDiscoveryError* FUeAgentCandidateSummary::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic.Get();
 	}
 
 	bool FUeAgentCandidateSummary::operator==(
@@ -333,7 +493,8 @@ namespace UE::UAI::Discovery
 			&& CatalogKind == Other.CatalogKind
 			&& DisplayName == Other.DisplayName
 			&& Summary == Other.Summary
-			&& CategoryPath == Other.CategoryPath;
+			&& CategoryPath == Other.CategoryPath
+			&& DiscoveryScopes == Other.DiscoveryScopes;
 	}
 
 	bool FUeAgentCandidateSummary::operator!=(
@@ -370,13 +531,18 @@ namespace UE::UAI::Discovery
 				SupportedOperations.RemoveAt(Index);
 			}
 		}
-		bValid = IsRequiredTextValid(BindingId)
-			&& Summary.IsValid()
-			&& CatalogRevision.IsValid()
-			&& IsRequiredTextValid(PublicRef)
-			&& IsRequiredTextValid(ReadPortId)
-			&& !SupportedOperations.IsEmpty()
-			&& IsRequiredTextValid(BindingEvidence);
+		if (!IsRequiredTextValid(BindingId)) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("candidate_binding_invalid"), TEXT("The candidate binding has no binding identifier."), TEXT("binding_id")));
+		else if (!Summary.IsValid()) ValidationDiagnostic = StoreValidationFailure(*Summary.GetValidationDiagnostic(), TEXT("summary"));
+		else if (!CatalogRevision.IsValid()) ValidationDiagnostic = StoreValidationFailure(*CatalogRevision.GetValidationDiagnostic(), TEXT("catalog_revision"));
+		else if (!IsRequiredTextValid(PublicRef)) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("candidate_binding_invalid"), TEXT("The candidate binding has no public target reference."), TEXT("public_ref")));
+		else if (!IsRequiredTextValid(ReadPortId)) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("candidate_binding_invalid"), TEXT("The candidate binding has no state read port identifier."), TEXT("read_port_id")));
+		else if (SupportedOperations.IsEmpty()) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("candidate_binding_invalid"), TEXT("The candidate binding declares no supported operations."), TEXT("supported_operations")));
+		else if (!IsRequiredTextValid(BindingEvidence)) ValidationDiagnostic = StoreValidationFailure(ValidationFailure(
+			TEXT("candidate_binding_invalid"), TEXT("The candidate binding has no binding evidence."), TEXT("binding_evidence")));
 	}
 
 	const FString& FUeAgentCandidateBinding::GetBindingId() const
@@ -425,7 +591,12 @@ namespace UE::UAI::Discovery
 
 	bool FUeAgentCandidateBinding::IsValid() const
 	{
-		return bValid;
+		return !ValidationDiagnostic.IsValid();
+	}
+
+	const FUeAgentDiscoveryError* FUeAgentCandidateBinding::GetValidationDiagnostic() const
+	{
+		return ValidationDiagnostic.Get();
 	}
 
 	bool FUeAgentCandidateBinding::operator==(
@@ -456,14 +627,17 @@ namespace UE::UAI::Discovery
 		const FString CatalogId = NormalizeRequired(InCatalogId);
 		const FString CatalogKind = NormalizeRequired(InCatalogKind);
 		if (!IsRequiredTextValid(CatalogId)
-			|| !IsRequiredTextValid(CatalogKind)
-			|| !InRevision.IsValid())
+			|| !IsRequiredTextValid(CatalogKind))
 		{
-			return Fail(
-				OutError,
-				TEXT("catalog_snapshot_invalid"),
-				CatalogId,
-				TEXT("catalog identity or revision is invalid"));
+			OutError = ValidationFailure(TEXT("catalog_snapshot_invalid"),
+				CatalogId.IsEmpty() ? TEXT("The catalog snapshot has no catalog identifier.") : TEXT("The catalog snapshot has no catalog kind."),
+				CatalogId.IsEmpty() ? TEXT("catalog_id") : TEXT("catalog_kind"));
+			return false;
+		}
+		if (!InRevision.IsValid())
+		{
+			OutError = *StoreValidationFailure(*InRevision.GetValidationDiagnostic(), TEXT("revision"));
+			return false;
 		}
 
 		TArray<FUeAgentCandidateSummary> Candidates = InCandidates;
@@ -472,32 +646,31 @@ namespace UE::UAI::Discovery
 			+ TextBytes(CatalogKind)
 			+ TextBytes(InRevision.GetSourceId())
 			+ TextBytes(InRevision.GetGeneration());
-		for (const FUeAgentCandidateSummary& Candidate : Candidates)
+		for (int32 CandidateIndex = 0; CandidateIndex < Candidates.Num(); ++CandidateIndex)
 		{
+			const FUeAgentCandidateSummary& Candidate = Candidates[CandidateIndex];
 			if (!Candidate.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("catalog_candidate_invalid"),
-					Candidate.GetIdentity().GetCanonicalKey());
+				OutError = *StoreValidationFailure(*Candidate.GetValidationDiagnostic(), FString::Printf(TEXT("candidates[%d]"), CandidateIndex));
+				return false;
 			}
 			if (Candidate.GetCatalogKind() != CatalogKind)
 			{
-				return Fail(
-					OutError,
-					TEXT("catalog_candidate_kind_mismatch"),
-					Candidate.GetIdentity().GetCanonicalKey());
+				OutError = TextDifference(TEXT("catalog_candidate_kind_mismatch"),
+					TEXT("The candidate belongs to a different kind of catalog."),
+					FString::Printf(TEXT("candidates[%d].catalog_kind"), CandidateIndex), Candidate.GetCatalogKind(), CatalogKind, true);
+				OutError.CandidateName = Candidate.GetDisplayName();
+				return false;
 			}
 			StringBytes += CandidateStringBytes(Candidate);
 		}
-		for (const FUeAgentCatalogDiagnostic& Diagnostic : Diagnostics)
+		for (int32 DiagnosticIndex = 0; DiagnosticIndex < Diagnostics.Num(); ++DiagnosticIndex)
 		{
+			const FUeAgentCatalogDiagnostic& Diagnostic = Diagnostics[DiagnosticIndex];
 			if (!Diagnostic.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("catalog_diagnostic_invalid"),
-					Diagnostic.GetSourceId());
+				OutError = *StoreValidationFailure(*Diagnostic.GetValidationDiagnostic(), FString::Printf(TEXT("diagnostics[%d]"), DiagnosticIndex));
+				return false;
 			}
 			StringBytes += DiagnosticStringBytes(Diagnostic);
 		}
@@ -505,10 +678,10 @@ namespace UE::UAI::Discovery
 		if (InCompleteness != EUeAgentCatalogCompleteness::Complete
 			&& Diagnostics.IsEmpty())
 		{
-			return Fail(
-				OutError,
-				TEXT("partial_catalog_requires_diagnostic"),
-				CatalogId);
+			OutError = ValidationFailure(TEXT("partial_catalog_requires_diagnostic"),
+				TEXT("A partial or degraded catalog must explain the missing coverage in its diagnostics."), TEXT("diagnostics"));
+			OutError.SubjectId = CatalogId;
+			return false;
 		}
 
 		if (!Charge(
@@ -546,10 +719,12 @@ namespace UE::UAI::Discovery
 			if (Candidates[Index - 1].GetIdentity().GetCanonicalKey()
 				== Candidates[Index].GetIdentity().GetCanonicalKey())
 			{
-				return Fail(
-					OutError,
-					TEXT("catalog_candidate_identity_duplicate"),
-					Candidates[Index].GetIdentity().GetCanonicalKey());
+				OutError = ValidationFailure(TEXT("catalog_candidate_identity_duplicate"),
+					TEXT("The catalog contains the same candidate identity more than once."),
+					FString::Printf(TEXT("candidates[%d].identity"), Index));
+				OutError.CandidateName = Candidates[Index].GetDisplayName();
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Candidates[Index].GetIdentity().GetCanonicalKey());
+				return false;
 			}
 		}
 
@@ -641,6 +816,82 @@ namespace UE::UAI::Discovery
 		return bValid;
 	}
 
+	bool IUeAgentCatalogSource::TrySearchResolved(
+		const FUeAgentDiscoveryQuery& Query,
+		FUeAgentResourceTracker& Resources,
+		const FUeAgentOperationDeadline& Deadline,
+		const FUeAgentCancellationToken& Cancellation,
+		TSharedPtr<const FUeAgentCatalogSnapshot>& OutCatalog,
+		TArray<TSharedRef<const FUeAgentCandidateBinding>>& OutBindings,
+		FUeAgentDiscoveryError& OutError)
+	{
+		OutCatalog.Reset();
+		OutBindings.Reset();
+		ResetError(OutError);
+		const bool bSearched = TrySearch(
+				Query,
+				Resources,
+				Deadline,
+				Cancellation,
+				OutCatalog,
+				OutError);
+		if (!bSearched || !OutCatalog.IsValid())
+		{
+			if (OutError.IsEmpty()) OutError = ValidationFailure(TEXT("catalog_search_failed"), bSearched
+				? TEXT("The catalog source reported success without returning a catalog snapshot.")
+				: TEXT("The catalog source search failed without reporting a diagnostic."), TEXT("catalog"));
+			OutCatalog.Reset();
+			OutBindings.Reset();
+			return false;
+		}
+		for (const FUeAgentCandidateSummary& Summary
+			: OutCatalog->GetCandidates())
+		{
+			TSharedPtr<const FUeAgentCandidateBinding> Binding;
+			const bool bResolved = TryResolveExact(
+					Summary.GetIdentity().GetCanonicalKey(),
+					OutCatalog->GetRevision(),
+					Resources,
+					Deadline,
+					Cancellation,
+					Binding,
+					OutError);
+			if (!bResolved || !Binding.IsValid())
+			{
+				if (OutError.IsEmpty())
+				{
+					OutError = ValidationFailure(TEXT("candidate_resolve_failed"), bResolved
+						? TEXT("The catalog source resolved the candidate without returning a binding.")
+						: TEXT("The catalog source could not resolve the candidate and reported no diagnostic."), TEXT("binding"));
+					OutError.CandidateName = Summary.GetDisplayName();
+				}
+				OutCatalog.Reset();
+				OutBindings.Reset();
+				return false;
+			}
+			if (Binding->GetCatalogRevision() != OutCatalog->GetRevision())
+			{
+				OutError = CompareRevision(Binding->GetCatalogRevision(), OutCatalog->GetRevision(), TEXT("resolved_search_revision_mismatch"));
+				OutError.TargetPath = Binding->GetPublicRef();
+				OutCatalog.Reset();
+				OutBindings.Reset();
+				return false;
+			}
+			if (Binding->GetSummary().GetIdentity().GetCanonicalKey()
+				!= Summary.GetIdentity().GetCanonicalKey())
+			{
+				OutError = CompareIdentity(Binding->GetSummary().GetIdentity(), Summary.GetIdentity(), TEXT("resolved_search_identity_mismatch"));
+				OutError.TargetPath = Binding->GetPublicRef();
+				OutError.CandidateName = Summary.GetDisplayName();
+				OutCatalog.Reset();
+				OutBindings.Reset();
+				return false;
+			}
+			OutBindings.Add(Binding.ToSharedRef());
+		}
+		return true;
+	}
+
 	FUeAgentStateReadRequest::FUeAgentStateReadRequest(
 		FUeAgentCandidateBinding InBinding,
 		EUeAgentStatePlane InStatePlane)
@@ -676,47 +927,49 @@ namespace UE::UAI::Discovery
 		OutService.Reset();
 		TSet<FString> SourceIds;
 		TMap<FString, TSharedPtr<IUeAgentCatalogSource>> SourcesByKind;
-		for (const TSharedRef<IUeAgentCatalogSource>& Source : CatalogSources)
+		for (int32 SourceIndex = 0; SourceIndex < CatalogSources.Num(); ++SourceIndex)
 		{
+			const auto& Source = CatalogSources[SourceIndex];
+			const FString SourcePath = FString::Printf(TEXT("catalog_sources[%d]"), SourceIndex);
 			const FString SourceId = NormalizeRequired(Source->GetSourceId());
 			if (!IsRequiredTextValid(SourceId))
 			{
-				return Fail(
-					OutError,
-					TEXT("catalog_source_id_invalid"));
+				OutError = ValidationFailure(TEXT("catalog_source_id_invalid"), TEXT("The catalog source has no source identifier."), SourcePath + TEXT(".source_id"));
+				return false;
 			}
 			if (SourceIds.Contains(SourceId))
 			{
-				return Fail(
-					OutError,
-					TEXT("catalog_source_id_duplicate"),
-					SourceId);
+				OutError = ValidationFailure(TEXT("catalog_source_id_duplicate"), TEXT("The same catalog source identifier is registered more than once."), SourcePath + TEXT(".source_id"));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(SourceId);
+				return false;
 			}
 			SourceIds.Add(SourceId);
 			if (Source->GetCatalogKinds().IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("catalog_source_kind_missing"),
-					SourceId);
+				OutError = ValidationFailure(TEXT("catalog_source_kind_missing"), TEXT("The catalog source declares no catalog kinds."), SourcePath + TEXT(".catalog_kinds"));
+				OutError.SubjectId = SourceId;
+				return false;
 			}
 			TSet<FString> LocalKinds;
+			int32 KindIndex = 0;
 			for (const FString& RawKind : Source->GetCatalogKinds())
 			{
 				const FString Kind = NormalizeRequired(RawKind);
+				const FString KindPath = SourcePath + FString::Printf(TEXT(".catalog_kinds[%d]"), KindIndex++);
 				if (!IsRequiredTextValid(Kind))
 				{
-					return Fail(
-						OutError,
-						TEXT("catalog_source_kind_invalid"),
-						SourceId);
+					OutError = ValidationFailure(TEXT("catalog_source_kind_invalid"), TEXT("A declared catalog kind must not be empty."), KindPath);
+					OutError.ActualValue = MakeShared<FJsonValueString>(RawKind);
+					return false;
 				}
 				if (LocalKinds.Contains(Kind) || SourcesByKind.Contains(Kind))
 				{
-					return Fail(
-						OutError,
-						TEXT("catalog_kind_source_conflict"),
-						Kind);
+					OutError = ValidationFailure(TEXT("catalog_kind_source_conflict"), LocalKinds.Contains(Kind)
+						? TEXT("The source declares the same catalog kind more than once.")
+						: TEXT("More than one source is registered for this catalog kind."), KindPath);
+					OutError.ActualValue = MakeShared<FJsonValueString>(Kind);
+					OutError.SubjectId = SourceId;
+					return false;
 				}
 				LocalKinds.Add(Kind);
 				SourcesByKind.Add(Kind, Source);
@@ -724,21 +977,21 @@ namespace UE::UAI::Discovery
 		}
 
 		TMap<FString, TSharedPtr<IUeAgentStateReadPort>> ReadPorts;
-		for (const TSharedRef<IUeAgentStateReadPort>& ReadPort : InReadPorts)
+		for (int32 PortIndex = 0; PortIndex < InReadPorts.Num(); ++PortIndex)
 		{
+			const auto& ReadPort = InReadPorts[PortIndex];
+			const FString PortPath = FString::Printf(TEXT("read_ports[%d].port_id"), PortIndex);
 			const FString PortId = NormalizeRequired(ReadPort->GetPortId());
 			if (!IsRequiredTextValid(PortId))
 			{
-				return Fail(
-					OutError,
-					TEXT("state_read_port_id_invalid"));
+				OutError = ValidationFailure(TEXT("state_read_port_id_invalid"), TEXT("The state read port has no port identifier."), PortPath);
+				return false;
 			}
 			if (ReadPorts.Contains(PortId))
 			{
-				return Fail(
-					OutError,
-					TEXT("state_read_port_id_duplicate"),
-					PortId);
+				OutError = ValidationFailure(TEXT("state_read_port_id_duplicate"), TEXT("The same state read port identifier is registered more than once."), PortPath);
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(PortId);
+				return false;
 			}
 			ReadPorts.Add(PortId, ReadPort);
 		}
@@ -769,10 +1022,8 @@ namespace UE::UAI::Discovery
 		OutCatalog.Reset();
 		if (!Query.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("discovery_query_invalid"),
-				Query.GetCatalogKind());
+			OutError = *Query.GetValidationDiagnostic();
+			return false;
 		}
 		if (!Checkpoint(
 			TEXT("discovery.search"),
@@ -786,10 +1037,10 @@ namespace UE::UAI::Discovery
 			SourcesByKind.Find(Query.GetCatalogKind());
 		if (Source == nullptr || !Source->IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("catalog_source_not_found"),
-				Query.GetCatalogKind());
+			OutError = ValidationFailure(TEXT("catalog_source_not_found"),
+				TEXT("No available catalog source is registered for the requested catalog kind."), TEXT("catalog_kind"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(Query.GetCatalogKind());
+			return false;
 		}
 		if (!(*Source)->TrySearch(
 			Query,
@@ -801,39 +1052,34 @@ namespace UE::UAI::Discovery
 		{
 			if (OutError.Code.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("catalog_search_failed"),
-					Query.GetCatalogKind());
+				OutError = ValidationFailure(TEXT("catalog_search_failed"),
+					TEXT("The catalog source search failed without reporting a diagnostic."), TEXT("catalog_kind"));
+				OutError.ActualValue = MakeShared<FJsonValueString>(Query.GetCatalogKind());
 			}
 			return false;
 		}
 		if (!OutCatalog.IsValid() || !OutCatalog->IsValid())
 		{
+			OutError = ValidationFailure(TEXT("catalog_snapshot_invalid"), OutCatalog.IsValid()
+				? TEXT("The catalog source returned an invalid catalog snapshot.")
+				: TEXT("The catalog source reported success without returning a catalog snapshot."), TEXT("catalog"));
 			OutCatalog.Reset();
-			return Fail(
-				OutError,
-				TEXT("catalog_snapshot_invalid"),
-				Query.GetCatalogKind());
+			return false;
 		}
 		if (OutCatalog->GetCatalogKind() != Query.GetCatalogKind())
 		{
+			OutError = TextDifference(TEXT("catalog_kind_mismatch"), TEXT("The returned catalog has a different kind from the query."),
+				TEXT("catalog_kind"), OutCatalog->GetCatalogKind(), Query.GetCatalogKind(), true);
 			OutCatalog.Reset();
-			return Fail(
-				OutError,
-				TEXT("catalog_kind_mismatch"),
-				Query.GetCatalogKind());
+			return false;
 		}
 		if (OutCatalog->GetRevision().GetSourceId()
 			!= (*Source)->GetSourceId())
 		{
-			const FString RevisionSource =
-				OutCatalog->GetRevision().GetSourceId();
+			OutError = TextDifference(TEXT("catalog_revision_source_mismatch"), TEXT("The returned catalog revision identifies a different source from the source that handled the query."),
+				TEXT("catalog_revision.source_id"), OutCatalog->GetRevision().GetSourceId(), (*Source)->GetSourceId(), false);
 			OutCatalog.Reset();
-			return Fail(
-				OutError,
-				TEXT("catalog_revision_source_mismatch"),
-				RevisionSource);
+			return false;
 		}
 		return true;
 	}
@@ -851,10 +1097,9 @@ namespace UE::UAI::Discovery
 		OutBinding.Reset();
 		if (!Catalog.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("catalog_snapshot_invalid"),
-				Catalog.GetCatalogId());
+			OutError = ValidationFailure(TEXT("catalog_snapshot_invalid"), TEXT("Exact resolution requires a valid catalog snapshot."), TEXT("catalog"));
+			OutError.SubjectId = Catalog.GetCatalogId();
+			return false;
 		}
 		const FString CandidateId = NormalizeRequired(InCandidateId);
 		const FUeAgentCandidateSummary* ExpectedSummary = nullptr;
@@ -869,10 +1114,9 @@ namespace UE::UAI::Discovery
 		}
 		if (ExpectedSummary == nullptr)
 		{
-			return Fail(
-				OutError,
-				TEXT("candidate_id_invalid"),
-				CandidateId);
+			OutError = ValidationFailure(TEXT("candidate_id_invalid"), TEXT("The requested candidate identifier is absent from the supplied catalog."), TEXT("candidate_id"));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(CandidateId);
+			return false;
 		}
 		if (!Checkpoint(
 			TEXT("discovery.resolve_exact"),
@@ -886,10 +1130,10 @@ namespace UE::UAI::Discovery
 			SourcesByKind.Find(Catalog.GetCatalogKind());
 		if (Source == nullptr || !Source->IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("catalog_source_not_found"),
-				Catalog.GetCatalogKind());
+			OutError = ValidationFailure(TEXT("catalog_source_not_found"),
+				TEXT("No available catalog source is registered for the supplied catalog kind."), TEXT("catalog_kind"));
+			OutError.ActualValue = MakeShared<FJsonValueString>(Catalog.GetCatalogKind());
+			return false;
 		}
 		if (!(*Source)->TryResolveExact(
 			CandidateId,
@@ -902,36 +1146,34 @@ namespace UE::UAI::Discovery
 		{
 			if (OutError.Code.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("candidate_resolve_failed"),
-					CandidateId);
+				OutError = ValidationFailure(TEXT("candidate_resolve_failed"),
+					TEXT("The catalog source could not resolve the candidate and reported no diagnostic."), TEXT("candidate_id"));
+				OutError.CandidateName = ExpectedSummary->GetDisplayName();
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(CandidateId);
 			}
 			return false;
 		}
 		if (!OutBinding.IsValid() || !OutBinding->IsValid())
 		{
+			OutError = OutBinding.IsValid() ? *OutBinding->GetValidationDiagnostic()
+				: ValidationFailure(TEXT("candidate_binding_invalid"),
+					TEXT("The catalog source resolved the candidate without returning a binding."), TEXT("binding"));
 			OutBinding.Reset();
-			return Fail(
-				OutError,
-				TEXT("candidate_binding_invalid"),
-				CandidateId);
+			return false;
 		}
 		if (OutBinding->GetCatalogRevision() != Catalog.GetRevision())
 		{
+			OutError = CompareRevision(OutBinding->GetCatalogRevision(), Catalog.GetRevision(), TEXT("catalog_revision_stale"));
+			OutError.TargetPath = OutBinding->GetPublicRef();
 			OutBinding.Reset();
-			return Fail(
-				OutError,
-				TEXT("catalog_revision_stale"),
-				CandidateId);
+			return false;
 		}
 		if (OutBinding->GetSummary() != *ExpectedSummary)
 		{
+			OutError = CompareSummary(OutBinding->GetSummary(), *ExpectedSummary);
+			OutError.TargetPath = OutBinding->GetPublicRef();
 			OutBinding.Reset();
-			return Fail(
-				OutError,
-				TEXT("candidate_binding_summary_mismatch"),
-				CandidateId);
+			return false;
 		}
 		return true;
 	}
@@ -949,26 +1191,25 @@ namespace UE::UAI::Discovery
 		OutSnapshot.Reset();
 		if (!Binding.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("candidate_binding_invalid"),
-				Binding.GetBindingId());
+			OutError = *Binding.GetValidationDiagnostic();
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Binding.GetPublicRef();
+			return false;
 		}
 		if (!Binding.Supports(EUeAgentCandidateOperation::Read))
 		{
-			return Fail(
-				OutError,
-				TEXT("candidate_read_unsupported"),
-				Binding.GetBindingId());
+			OutError = ValidationFailure(TEXT("candidate_read_unsupported"), TEXT("The candidate binding does not support reading state."), TEXT("supported_operations"));
+			OutError.TargetPath = Binding.GetPublicRef();
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("read"));
+			return false;
 		}
 		const TSharedPtr<IUeAgentStateReadPort>* ReadPort =
 			ReadPorts.Find(Binding.GetReadPortId());
 		if (ReadPort == nullptr || !ReadPort->IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("state_read_port_not_found"),
-				Binding.GetReadPortId());
+			OutError = ValidationFailure(TEXT("state_read_port_not_found"), TEXT("The state read port selected by the candidate binding is unavailable."), TEXT("read_port_id"));
+			OutError.TargetPath = Binding.GetPublicRef();
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(Binding.GetReadPortId());
+			return false;
 		}
 		if (!Checkpoint(
 			TEXT("discovery.read"),
@@ -989,36 +1230,34 @@ namespace UE::UAI::Discovery
 		{
 			if (OutError.Code.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					TEXT("state_read_failed"),
-					Binding.GetReadPortId());
+				OutError = ValidationFailure(TEXT("state_read_failed"), TEXT("The state read port failed without reporting a diagnostic."), TEXT("snapshot"));
+				OutError.ActualEvidence = MakeShared<FJsonValueString>(Binding.GetReadPortId());
 			}
+			if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Binding.GetPublicRef();
 			return false;
 		}
 		if (!OutSnapshot.IsValid())
 		{
-			return Fail(
-				OutError,
-				TEXT("state_read_snapshot_invalid"),
-				Binding.GetReadPortId());
+			OutError = ValidationFailure(TEXT("state_read_snapshot_invalid"), TEXT("The state read port reported success without returning a snapshot."), TEXT("snapshot"));
+			OutError.TargetPath = Binding.GetPublicRef();
+			return false;
 		}
 		if (OutSnapshot->GetStatePlane() != StatePlane)
 		{
+			OutError = TextDifference(TEXT("state_read_plane_mismatch"), TEXT("The observed snapshot describes a different state plane from the requested one."),
+				TEXT("snapshot.state_plane"), Contract::LexToString(OutSnapshot->GetStatePlane()), Contract::LexToString(StatePlane), true);
+			OutError.TargetPath = Binding.GetPublicRef();
 			OutSnapshot.Reset();
-			return Fail(
-				OutError,
-				TEXT("state_read_plane_mismatch"),
-				Binding.GetReadPortId());
+			return false;
 		}
 		if (OutSnapshot->GetProvenance().GetSourceKind()
 			!= TEXT("independent_readback"))
 		{
+			OutError = TextDifference(TEXT("state_read_provenance_invalid"), TEXT("The observed snapshot does not identify its source as independent readback."),
+				TEXT("snapshot.provenance.source_kind"), OutSnapshot->GetProvenance().GetSourceKind(), TEXT("independent_readback"), true);
+			OutError.TargetPath = Binding.GetPublicRef();
 			OutSnapshot.Reset();
-			return Fail(
-				OutError,
-				TEXT("state_read_provenance_invalid"),
-				Binding.GetReadPortId());
+			return false;
 		}
 		return true;
 	}

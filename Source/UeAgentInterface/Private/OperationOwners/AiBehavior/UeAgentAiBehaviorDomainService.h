@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
 namespace UE::UAI::OperationOwners::AiBehavior
@@ -21,12 +23,7 @@ namespace UE::UAI::OperationOwners::AiBehavior
 		bool bReadOnly = false;
 	};
 
-	struct UEAGENTINTERFACE_API FAiBehaviorCandidateCommandError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FAiBehaviorCandidateCommandError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentAiBehaviorCandidateCommandService
 	{
@@ -45,5 +42,5 @@ namespace UE::UAI::OperationOwners::AiBehavior
 
 	UEAGENTINTERFACE_API bool TryCreateProductionAiBehaviorCandidateCommandService(
 		TSharedPtr<IUeAgentAiBehaviorCandidateCommandService>& OutService,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

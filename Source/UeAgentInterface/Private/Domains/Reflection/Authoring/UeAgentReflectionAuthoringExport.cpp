@@ -20,7 +20,7 @@ namespace UeAgentReflectionAuthoring
 			const FProfile& Profile,
 			UObject& Asset,
 			UeAgentAuthoringState::FCaptureResult& OutCapture,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			TArray<UeAgentAuthoringState::FReadRequest> Requests;
 			if (!BuildAssetExportSnapshotReadRequests(
@@ -35,8 +35,7 @@ namespace UeAgentReflectionAuthoring
 				Requests,
 				OutCapture))
 			{
-				OutError = OutCapture.ErrorCode + TEXT(":")
-					+ OutCapture.ErrorDetail;
+				OutError = OutCapture.Diagnostic;
 				return false;
 			}
 			return true;
@@ -48,7 +47,7 @@ namespace UeAgentReflectionAuthoring
 			const FString& ExportProfileId,
 			UeAgentExportContract::FContract& OutContract,
 			UeAgentSnapshotProjector::FProjectionResult& OutProjection,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (!GetExportContract(Profile, OutContract, OutError)) return false;
 			UeAgentAuthoringState::FCaptureResult Capture;
@@ -59,7 +58,7 @@ namespace UeAgentReflectionAuthoring
 				OutError)) return false;
 			if (!UeAgentSnapshotProjector::ProjectSnapshot(OutContract, ExportProfileId, Capture.Snapshot, OutProjection))
 			{
-				OutError = OutProjection.ErrorCode + TEXT(":") + OutProjection.ErrorDetail;
+				OutError = OutProjection.Diagnostic;
 				return false;
 			}
 			return true;
@@ -70,7 +69,7 @@ namespace UeAgentReflectionAuthoring
 		const FProfile& Profile,
 		const FString& AssetPath,
 		FString& OutWorkspaceRoot,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const FString DomainRoot = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UeAssetFolders"), Profile.TypeId));
 		return UeAgentAuthoringWorkspacePaths::ResolveAssetWorkspaceFolder(DomainRoot, NormalizePackagePath(AssetPath), OutWorkspaceRoot, OutError);
@@ -81,9 +80,9 @@ namespace UeAgentReflectionAuthoring
 		UObject& Asset,
 		const FString& WorkspaceRoot,
 		const FString& ExportProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
-		FString& OutError)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
 	{
+  auto& OutError = OutResult.Diagnostic;
 		OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
 		UeAgentAuthoringState::FCaptureResult Capture;
 		if (!CaptureExportState(
@@ -91,15 +90,9 @@ namespace UeAgentReflectionAuthoring
 			Asset,
 			Capture,
 			OutError)) return false;
-		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(
-			UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
+		return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(UE::UAI::HjsonWorkspace::ResolveTargetCompositionKind(
 				Profile.TargetKind,
-				Profile.TypeId),
-			ExportProfileId,
-			Capture.Snapshot,
-			WorkspaceRoot,
-			OutResult,
-			OutError);
+				Profile.TypeId), ExportProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
 	}
 
 	bool ExportAssetFile(
@@ -107,9 +100,9 @@ namespace UeAgentReflectionAuthoring
 		UObject& Asset,
 		const FString& OutputFile,
 		const FString& ExportProfileId,
-		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult,
-		FString& OutError)
+		UeAgentExportWorkspaceWriter::FWorkspaceResult& OutResult)
 	{
+  auto& OutError = OutResult.Diagnostic;
 		OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
 		UeAgentExportContract::FContract Contract;
 		UeAgentSnapshotProjector::FProjectionResult Projection;
@@ -117,7 +110,7 @@ namespace UeAgentReflectionAuthoring
 		if (!UeAgentExportWorkspaceWriter::WriteSingleFile(
 			Contract, Projection, OutputFile, OutResult))
 		{
-			OutError = OutResult.ErrorCode + TEXT(":") + OutResult.ErrorDetail;
+			OutError = OutResult.Diagnostic;
 			return false;
 		}
 		OutError.Reset();

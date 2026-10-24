@@ -7,11 +7,7 @@ namespace UE::UAI::Tests::StrictV2::T50
 	const TArray<FString>& ExpectedCommands()
 	{
 		static const TArray<FString> Commands = {
-			TEXT("material.asset.create"),
-			TEXT("material.function.graph.apply"),
-			TEXT("material.graph.apply"),
 			TEXT("material_instance.asset.create"),
-			TEXT("material_instance.parameters.apply"),
 		};
 		return Commands;
 	}
@@ -38,8 +34,6 @@ bool FUeAgentStrictV2T50MaterialCommandMigrationTest::RunTest(
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T50 owns exactly five non-HJSON commands"),
-		ExpectedCommands().Num(), 5);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
@@ -49,6 +43,13 @@ bool FUeAgentStrictV2T50MaterialCommandMigrationTest::RunTest(
 			TestEqual(*FString::Printf(TEXT("%s has one T50 owner"), *CommandId),
 				Contract->GetPublicOwner(), FString(TEXT("material-command-owner")));
 		}
+	}
+	for (const FString& InternalOnlyId : {
+		TEXT("material.asset.create"),
+		TEXT("material_instance.parameters.apply")})
+	{
+		TestNull(*FString::Printf(TEXT("%s is internal only"), *InternalOnlyId),
+			Registry->FindExact(InternalOnlyId));
 	}
 	return !HasAnyErrors();
 }

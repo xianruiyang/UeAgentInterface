@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentCommandDispatch.h"
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialActivation.h"
 #include "Core/Contract/UeAgentContract.h"
@@ -12,5 +14,5 @@ namespace UE::UAI::Composition::TimelineSpatial
 		TSharedRef<Contract::IUeAgentQueryApplicationPort> QueryPort,
 		TSharedRef<Contract::IUeAgentOperationApplicationPort> OperationPort,
 		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

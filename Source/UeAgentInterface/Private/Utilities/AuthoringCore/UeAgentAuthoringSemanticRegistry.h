@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "HAL/CriticalSection.h"
 
@@ -76,11 +78,11 @@ namespace UeAgentAuthoringSemanticRegistry
 		bool RegisterDomain(
 			const FDomainDescriptor& Descriptor,
 			ERegistrationResult& OutResult,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool RegisterSemantic(
 			const FSemanticDescriptor& Descriptor,
 			ERegistrationResult& OutResult,
-			FString& OutError);
+			UE::UAI::Contract::FDiagnostic& OutError);
 		bool FindDomain(const FString& DomainId, FDomainDescriptor& OutDescriptor) const;
 		bool FindSemantic(const FString& SemanticId, FSemanticDescriptor& OutDescriptor) const;
 		TArray<FDomainDescriptor> ListDomains() const;
@@ -94,5 +96,5 @@ namespace UeAgentAuthoringSemanticRegistry
 		TMap<FString, FSemanticDescriptor> Semantics;
 	};
 
-	UEAGENTINTERFACE_API bool RegisterBuiltInSemantics(FRegistry& Registry, FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterBuiltInSemantics(FRegistry& Registry, UE::UAI::Contract::FDiagnostic& OutError);
 }

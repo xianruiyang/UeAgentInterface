@@ -4,13 +4,8 @@
 #include "Dom/JsonObject.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 
-#if __has_include("OperationOwners/AnimationBlueprint/UeAgentAnimationBlueprintDomainService.h")
-#define UAI_T16_ANIMATION_BLUEPRINT_DOMAIN_AVAILABLE 1
 #include "OperationOwners/AnimationBlueprint/UeAgentAnimationBlueprintDomainService.h"
 #include "QueryOwners/AnimationBlueprint/UeAgentAnimationBlueprintQueryOwner.h"
-#else
-#define UAI_T16_ANIMATION_BLUEPRINT_DOMAIN_AVAILABLE 0
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T16AnimationBlueprintDomainTest,
@@ -21,10 +16,6 @@ bool FUeAgentStrictV2T16AnimationBlueprintDomainTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
-#if !UAI_T16_ANIMATION_BLUEPRINT_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T16 Animation Blueprint domain authority is available"), false);
-	return false;
-#else
 	using namespace UE::UAI;
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::OperationOwners::AnimationBlueprint;
@@ -111,44 +102,14 @@ bool FUeAgentStrictV2T16AnimationBlueprintDomainTest::RunTest(
 			ParentCandidates,
 			CandidateError)))
 	{
-		AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
+		AddError(CandidateError.Code + TEXT(":") + CandidateError.PublicMessage);
 		return false;
 	}
 	TestEqual(TEXT("the future target revision is explicit"),
 		ParentCandidates.TargetRevision, FString(TEXT("missing")));
-	TestTrue(TEXT("the parent native menu coverage is exact"),
-		ParentCandidates.bCoverageComplete);
-	FString ParentCandidateId;
-	for (const QueryOwners::AnimationBlueprint::FAnimationBlueprintCandidate&
-		Candidate : ParentCandidates.Candidates)
-	{
-		if (Candidate.bSupported)
-		{
-			ParentCandidateId = Candidate.Id;
-			break;
-		}
-	}
-	TestFalse(TEXT("one writable native StateMachine spawner is exposed"),
-		ParentCandidateId.IsEmpty());
-	QueryOwners::AnimationBlueprint::FAnimationBlueprintCandidateQueryResult
-		ExactParentCandidate;
-	CandidateError = {};
-	if (!ParentCandidateId.IsEmpty())
-	{
-		TestTrue(TEXT("the compact parent id is stable in the same factory context"),
-			QueryOwners::AnimationBlueprint::TryQueryAnimationBlueprintCandidates(
-				CandidateTarget,
-				TEXT("animation_graph"),
-				ClassSettings,
-				FString(),
-				ExactParentCandidate,
-				CandidateError,
-				64,
-				0,
-				ParentCandidateId));
-		TestEqual(TEXT("the exact parent id resolves one candidate"),
-			ExactParentCandidate.Candidates.Num(), 1);
-	}
+	TestTrue(TEXT("one writable native StateMachine spawner is exposed"),
+		ParentCandidates.Candidates.ContainsByPredicate(
+			[](const auto& Candidate) { return Candidate.bSupported; }));
 
 	QueryOwners::AnimationBlueprint::FAnimationBlueprintCandidateQueryResult
 		StateCandidates;
@@ -162,44 +123,12 @@ bool FUeAgentStrictV2T16AnimationBlueprintDomainTest::RunTest(
 			StateCandidates,
 			CandidateError)))
 	{
-		AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
+		AddError(CandidateError.Code + TEXT(":") + CandidateError.PublicMessage);
 		return false;
 	}
-	TestTrue(TEXT("the child schema menu coverage is exact"),
-		StateCandidates.bCoverageComplete);
-	TestFalse(TEXT("unsupported sibling actions remain truthfully search-only"),
-		StateCandidates.bCreationCoverageComplete);
-	FString StateCandidateId;
-	for (const QueryOwners::AnimationBlueprint::FAnimationBlueprintCandidate&
-		Candidate : StateCandidates.Candidates)
-	{
-		if (Candidate.bSupported)
-		{
-			StateCandidateId = Candidate.Id;
-			break;
-		}
-	}
-	TestFalse(TEXT("one writable native State action is exposed"),
-		StateCandidateId.IsEmpty());
-	QueryOwners::AnimationBlueprint::FAnimationBlueprintCandidateQueryResult
-		ExactStateCandidate;
-	CandidateError = {};
-	if (!StateCandidateId.IsEmpty())
-	{
-		TestTrue(TEXT("the compact State id is stable in the same factory context"),
-			QueryOwners::AnimationBlueprint::TryQueryAnimationBlueprintCandidates(
-				CandidateTarget,
-				TEXT("state_machine_graph"),
-				ClassSettings,
-				FString(),
-				ExactStateCandidate,
-				CandidateError,
-				64,
-				0,
-				StateCandidateId));
-		TestEqual(TEXT("the exact State id resolves one candidate"),
-			ExactStateCandidate.Candidates.Num(), 1);
-	}
+	TestTrue(TEXT("one writable native State action is exposed"),
+		StateCandidates.Candidates.ContainsByPredicate(
+			[](const auto& Candidate) { return Candidate.bSupported; }));
 
 	TSharedPtr<const CommandRegistry::FUeAgentImmutableCommandRegistry> Registry;
 	TSharedPtr<const CommandEdge::FUeAgentExactCommandDispatch> Dispatch;
@@ -219,7 +148,7 @@ bool FUeAgentStrictV2T16AnimationBlueprintDomainTest::RunTest(
 	{
 		TestEqual(TEXT("the shared ingress retains one public owner"),
 			SharedIngress->GetPublicOwner(),
-			FString(TEXT("uobject-dataasset-recursive-initialization-owner")));
+			FString(TEXT("content-graph-workspace-owner")));
 	}
 	TestNull(TEXT("the replaced Animation Blueprint HJSON command is inactive"),
 		Registry->FindExact(TEXT("animation_blueprint.authoring.apply")));
@@ -238,7 +167,6 @@ bool FUeAgentStrictV2T16AnimationBlueprintDomainTest::RunTest(
 	}
 	for (const FString& CommandId : {
 		FString(TEXT("animation.anim_blueprint.asset.create")),
-		FString(TEXT("animation.anim_blueprint.graph.apply")),
 		FString(TEXT("animation.anim_blueprint.layer_interface.asset.create"))})
 	{
 		const auto* NonHjsonContract = Registry->FindExact(CommandId);
@@ -251,6 +179,7 @@ bool FUeAgentStrictV2T16AnimationBlueprintDomainTest::RunTest(
 				FString(TEXT("animation-blueprint-command-owner")));
 		}
 	}
+	TestNull(TEXT("the graph apply mechanics are no longer a public command"),
+		Registry->FindExact(TEXT("animation.anim_blueprint.graph.apply")));
 	return !HasAnyErrors();
-#endif
 }

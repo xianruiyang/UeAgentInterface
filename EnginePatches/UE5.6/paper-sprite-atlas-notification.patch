@@ -1,0 +1,65 @@
+--- a/Engine/Plugins/2D/Paper2D/Source/Paper2D/Private/PaperSprite.cpp
++++ b/Engine/Plugins/2D/Paper2D/Source/Paper2D/Private/PaperSprite.cpp
+@@ -566,7 +566,13 @@
+ 	// They'll always be followed by a ValueSet event at the end to force the change.
+ 	if (PropertyChangedEvent.ChangeType != EPropertyChangeType::Interactive)
+ 	{
+-		if (bRebuilAtlas)
++		// Atlas generation notifies sprites with an unspecified change after updating
++		// their baked texture. Refresh sprite data below without recursively rebuilding
++		// the atlas while its generated pages are still being published. Package reload
++		// redirects identities before every referencer has been replaced; do not repack
++		// that incomplete object graph as though its source content had been edited.
++		if (bRebuilAtlas && PropertyChangedEvent.ChangeType != EPropertyChangeType::Unspecified
++			&& !(PropertyChangedEvent.ChangeType & EPropertyChangeType::Redirected))
+ 		{
+ 			TSoftObjectPtr<UPaperSpriteAtlas> AtlasGroupPath = AtlasGroup;
+ 			if (PreviousAtlasGroup != AtlasGroupPath)
+@@ -597,6 +603,10 @@
+ 		}
+ 
+ 
++		if (PropertyChangedEvent.ChangeType & EPropertyChangeType::Redirected)
++		{
++			PreviousAtlasGroup = AtlasGroup;
++		}
+ 		RefreshBakedData();
+ 		RebuildCollisionData();
+ 		RebuildRenderData();
+@@ -1896,6 +1906,9 @@
+ 		RebuildRenderData();
+ 	}
+ 
++	// This editor cache is not serialized. Restore it so the first edit after
++	// loading can remove the sprite from its previous atlas as well as add it.
++	PreviousAtlasGroup = AtlasGroup;
+ 	RefreshBakedData();
+ #endif
+ }
+--- a/Engine/Plugins/2D/Paper2D/Source/Paper2DEditor/Private/Atlasing/PaperAtlasGenerator.cpp
++++ b/Engine/Plugins/2D/Paper2D/Source/Paper2DEditor/Private/Atlasing/PaperAtlasGenerator.cpp
+@@ -139,7 +139,7 @@
+ 	{
+ 		if (NumTexturesUsedInAtlasSlots(ImprovementTestAtlas) < NumTexturesUsedInAtlasSlots(Atlas->AtlasSlots))
+ 		{
+-			const EAppReturnType::Type Choice = FMessageDialog::Open(EAppMsgType::YesNo, NSLOCTEXT("PaperEditor", "AtlasPackingImprovement", "Atlas packing can be improved significantly by repacking the entire atlas. This will require re-saving most or all sprites in this atlas.\nDo you want to do this now?"));
++			const EAppReturnType::Type Choice = FMessageDialog::Open(EAppMsgType::YesNo, EAppReturnType::No, NSLOCTEXT("PaperEditor", "AtlasPackingImprovement", "Atlas packing can be improved significantly by repacking the entire atlas. This will require re-saving most or all sprites in this atlas.\nDo you want to do this now?"));
+ 			if (Choice == EAppReturnType::Yes)
+ 			{
+ 				// Likely to mark most sprites dirty
+--- a/Engine/Plugins/2D/Paper2D/Source/Paper2DEditor/Private/Paper2DEditorModule.cpp
++++ b/Engine/Plugins/2D/Paper2D/Source/Paper2DEditor/Private/Paper2DEditorModule.cpp
+@@ -288,7 +288,12 @@
+ 	{
+ 		if (UPaperSpriteAtlas* Atlas = Cast<UPaperSpriteAtlas>(ObjectBeingModified))
+ 		{
+-			FPaperAtlasGenerator::HandleAssetChangedEvent(Atlas);
++			// Reload fixup replaces references, not authored layout or source pixels.
++			// Repacking here can consume a mixture of retired and replacement sprites.
++			if (!(PropertyChangedEvent.ChangeType & EPropertyChangeType::Redirected))
++			{
++				FPaperAtlasGenerator::HandleAssetChangedEvent(Atlas);
++			}
+ 		}
+ 		else if (UPaperRuntimeSettings* Settings = Cast<UPaperRuntimeSettings>(ObjectBeingModified))
+ 		{

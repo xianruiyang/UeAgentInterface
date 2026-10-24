@@ -1,0 +1,255 @@
+--- a/Engine/Source/Editor/UMGEditor/Public/WidgetBlueprintEditorUtils.h
++++ b/Engine/Source/Editor/UMGEditor/Public/WidgetBlueprintEditorUtils.h
+@@ -113,6 +113,10 @@
+ 	UE_DEPRECATED(5.3, "This function has been deprecated. Use the version of IsUsableWidgetClass that takes a second argument of TSharedRef<FWidgetBlueprintEditor>.")
+ 	static TValueOrError<FUsableWidgetClassResult, void> IsUsableWidgetClass(const FAssetData& WidgetAsset);
+ 
++	/** Evaluate the same palette policy without creating an asset editor. */
++	static bool IsUsableWidgetClass(const UClass* WidgetClass, UWidgetBlueprint* WidgetBlueprint);
++	static TValueOrError<FUsableWidgetClassResult, void> IsUsableWidgetClass(const FAssetData& WidgetAsset, UWidgetBlueprint* WidgetBlueprint);
++
+ 	static bool IsUsableWidgetClass(const UClass* WidgetClass, TSharedRef<FWidgetBlueprintEditor> InCurrentActiveBlueprintEditor);
+ 	static TValueOrError<FUsableWidgetClassResult, void> IsUsableWidgetClass(const FAssetData& WidgetAsset, TSharedRef<FWidgetBlueprintEditor> InCurrentActiveBlueprintEditor);
+ 
+--- a/Engine/Source/Editor/UMGEditor/Private/WidgetBlueprintEditorUtils.cpp
++++ b/Engine/Source/Editor/UMGEditor/Private/WidgetBlueprintEditorUtils.cpp
+@@ -2504,9 +2504,9 @@
+ 	bool bIsNormalBlueprintType;
+ };
+ 
+-bool IsUsableWidgetClass(const FString& WidgetPathName, const FAssetData& WidgetAssetData, FName Category, const UClass* WidgetClass, TSharedRef<FWidgetBlueprintEditor> InCurrentActiveBlueprintEditor)
+-{
+-	const UWidgetEditingProjectSettings* UMGEditorProjectSettings = FWidgetBlueprintEditorUtils::GetRelevantSettings(InCurrentActiveBlueprintEditor);
++bool IsUsableWidgetClass(const FString& WidgetPathName, const FAssetData& WidgetAssetData, FName Category, const UClass* WidgetClass, UWidgetBlueprint* WidgetBP)
++{
++	const UWidgetEditingProjectSettings* UMGEditorProjectSettings = WidgetBP ? WidgetBP->GetRelevantSettings() : GetDefault<UUMGEditorProjectSettings>();
+ 
+ 	// Excludes engine content if user sets it to false
+ 	if (!UMGEditorProjectSettings->bShowWidgetsFromEngineContent)
+@@ -2526,7 +2526,6 @@
+ 		}
+ 	}
+ 
+-	UWidgetBlueprint* WidgetBP = InCurrentActiveBlueprintEditor->GetWidgetBlueprintObj();
+ 	const bool bAllowEditorWidget = WidgetBP ? WidgetBP->AllowEditorWidget() : false;
+ 	if (!bAllowEditorWidget)
+ 	{
+@@ -2620,6 +2619,11 @@
+ 
+ bool FWidgetBlueprintEditorUtils::IsUsableWidgetClass(const UClass* WidgetClass, TSharedRef<FWidgetBlueprintEditor> BlueprintEditor)
+ {
++	return IsUsableWidgetClass(WidgetClass, BlueprintEditor->GetWidgetBlueprintObj());
++}
++
++bool FWidgetBlueprintEditorUtils::IsUsableWidgetClass(const UClass* WidgetClass, UWidgetBlueprint* WidgetBlueprint)
++{
+ 	if (WidgetClass->IsChildOf(UWidget::StaticClass()))
+ 	{
+ 		// We aren't interested in classes that are experimental or cannot be instantiated
+@@ -2641,7 +2645,7 @@
+ 			return false;
+ 		}
+ 
+-		return UE::UMG::Private::IsUsableWidgetClass(WidgetClass->GetPathName(), FAssetData(), *WidgetClass->GetDefaultObject<UWidget>()->GetPaletteCategory().ToString(), WidgetClass, BlueprintEditor);
++		return UE::UMG::Private::IsUsableWidgetClass(WidgetClass->GetPathName(), FAssetData(), *WidgetClass->GetDefaultObject<UWidget>()->GetPaletteCategory().ToString(), WidgetClass, WidgetBlueprint);
+ 	}
+ 
+ 	return false;
+@@ -2649,9 +2653,14 @@
+ 
+ TValueOrError<FWidgetBlueprintEditorUtils::FUsableWidgetClassResult, void> FWidgetBlueprintEditorUtils::IsUsableWidgetClass(const FAssetData& WidgetAsset, TSharedRef<FWidgetBlueprintEditor> InCurrentActiveBlueprintEditor)
+ {
++	return IsUsableWidgetClass(WidgetAsset, InCurrentActiveBlueprintEditor->GetWidgetBlueprintObj());
++}
++
++TValueOrError<FWidgetBlueprintEditorUtils::FUsableWidgetClassResult, void> FWidgetBlueprintEditorUtils::IsUsableWidgetClass(const FAssetData& WidgetAsset, UWidgetBlueprint* WidgetBlueprint)
++{
+ 	if (const UClass* WidgetAssetClass = WidgetAsset.GetClass(EResolveClass::No))
+ 	{
+-		if (IsUsableWidgetClass(WidgetAssetClass, InCurrentActiveBlueprintEditor))
++		if (IsUsableWidgetClass(WidgetAssetClass, WidgetBlueprint))
+ 		{
+ 			FWidgetBlueprintEditorUtils::FUsableWidgetClassResult Result;
+ 			Result.NativeParentClass = WidgetAssetClass;
+@@ -2695,7 +2704,7 @@
+ 	}
+ 
+ 	const FName CategoryName = *GetPaletteCategory(WidgetAsset, TSubclassOf<UWidget>(NativeParentClass)).ToString();
+-	if (UE::UMG::Private::IsUsableWidgetClass(WidgetAsset.GetObjectPathString(), WidgetAsset, CategoryName, nullptr, InCurrentActiveBlueprintEditor))
++	if (UE::UMG::Private::IsUsableWidgetClass(WidgetAsset.GetObjectPathString(), WidgetAsset, CategoryName, nullptr, WidgetBlueprint))
+ 	{
+ 		FWidgetBlueprintEditorUtils::FUsableWidgetClassResult Result;
+ 		Result.NativeParentClass = NativeParentClass;
+--- a/Engine/Source/Editor/AudioEditor/Classes/SoundCueGraph/SoundCueGraphSchema.h
++++ b/Engine/Source/Editor/AudioEditor/Classes/SoundCueGraph/SoundCueGraphSchema.h
+@@ -9,6 +9,7 @@
+ #include "Internationalization/Text.h"
+ #include "Math/Color.h"
+ #include "SSoundCuePalette.h"
++#include "SoundCuePalette.h"
+ #include "Templates/SharedPointer.h"
+ #include "Templates/SubclassOf.h"
+ #include "Templates/UnrealTemplate.h"
+@@ -156,6 +157,8 @@
+ 	/** Adds action for creating a comment */
+ 	void GetCommentAction(FGraphActionMenuBuilder& ActionMenuBuilder, const UEdGraph* CurrentGraph = NULL) const;
+ 	
++	friend void AudioEditor::GetSoundCueNodeClasses(TArray<UClass*>& OutClasses);
++
+ 	/** Soundnodes that can be selected in this graph */
+ 	TArray<TSubclassOf<USoundNode>> AllowedSoundNodes;
+ };
+--- a/Engine/Source/Editor/AudioEditor/Private/SoundCueGraphSchema.cpp
++++ b/Engine/Source/Editor/AudioEditor/Private/SoundCueGraphSchema.cpp
+@@ -8,6 +8,8 @@
+ 
+ #include "AssetRegistry/AssetData.h"
+ #include "ClassViewerFilter.h"
++#include "ClassViewerModule.h"
++#include "Modules/ModuleManager.h"
+ #include "Containers/EnumAsByte.h"
+ #include "Containers/Set.h"
+ #include "Delegates/Delegate.h"
+@@ -226,6 +228,22 @@
+ {
+ }
+ 
++void AudioEditor::GetSoundCueNodeClasses(TArray<UClass*>& OutClasses)
++{
++	SSoundCuePalette::FSoundNodeFilterData FilterData;
++	FilterData.InitOptions = MakeShared<FClassViewerInitializationOptions>();
++	FClassViewerModule& ClassViewerModule = FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer");
++	FilterData.ClassFilter = ClassViewerModule.CreateClassFilter(*FilterData.InitOptions);
++	FilterData.FilterFuncs = ClassViewerModule.CreateFilterFuncs();
++	USoundCueGraphSchema* Schema = GetMutableDefault<USoundCueGraphSchema>();
++	Schema->UpdateSoundNodeList(FilterData);
++	OutClasses.Reset(Schema->AllowedSoundNodes.Num());
++	for (const TSubclassOf<USoundNode>& NodeClass : Schema->AllowedSoundNodes)
++	{
++		OutClasses.Add(NodeClass.Get());
++	}
++}
++
+ void USoundCueGraphSchema::UpdateSoundNodeList(const SSoundCuePalette::FSoundNodeFilterData& FilterData)
+ {
+ 	check(FilterData.InitOptions.IsValid());
+--- a/Engine/Plugins/Runtime/Metasound/Source/MetasoundEditor/Public/MetasoundEditorGraphSchema.h
++++ b/Engine/Plugins/Runtime/Metasound/Source/MetasoundEditor/Public/MetasoundEditorGraphSchema.h
+@@ -55,6 +55,9 @@
+ 		virtual FText GetTooltip() const = 0;
+ 
+ 		virtual bool IsNative() const = 0;
++
++		/** Asset provenance available without loading asset-backed node classes. */
++		virtual FTopLevelAssetPath GetAssetPath() const { return {}; }
+ 	};
+ 
+ 	using FInterfaceNodeFilterFunction = TFunction<bool(Frontend::FConstNodeHandle)>;
+@@ -563,8 +566,11 @@
+ 
+ 	void BreakNodeLinks(UEdGraphNode& TargetNode, bool bShouldActuallyTransact) const;
+ 
++	/** Native class catalog, including unloaded asset tags. An unset version option preserves the editor preference. */
++	METASOUNDEDITOR_API void QueryNodeClasses(TFunctionRef<void(TUniquePtr<Metasound::Editor::ISchemaQueryResult>&&)> OnClassFound,
++		bool bScanAssetTags = true, TOptional<bool> InIncludeAllVersions = {}) const;
++
+ private:
+-	void QueryNodeClasses(TFunctionRef<void(TUniquePtr<Metasound::Editor::ISchemaQueryResult>&&)> OnClassFound, bool bScanAssetTags = true) const;
+ 
+ 	/** Adds actions for creating actions associated with graph DataTypes */
+ 	void GetConversionActions(FGraphActionMenuBuilder& ActionMenuBuilder, Metasound::Editor::FActionVertexFilters InFilters = Metasound::Editor::FActionVertexFilters(), bool bShowSelectedActions = true) const;
+--- a/Engine/Plugins/Runtime/Metasound/Source/MetasoundEditor/Private/MetasoundEditorGraphSchema.cpp
++++ b/Engine/Plugins/Runtime/Metasound/Source/MetasoundEditor/Private/MetasoundEditorGraphSchema.cpp
+@@ -2,6 +2,8 @@
+ #include "MetasoundEditorGraphSchema.h"
+ 
+ #include "Algo/AnyOf.h"
++#include "AssetRegistry/AssetRegistryModule.h"
++#include "Modules/ModuleManager.h"
+ #include "EdGraph/EdGraph.h"
+ #include "EdGraphNode_Comment.h"
+ #include "EdGraphSchema_K2.h"
+@@ -559,6 +561,11 @@
+ 				return false;
+ 			}
+ 
++			virtual FTopLevelAssetPath GetAssetPath() const override
++			{
++				return ClassInfo.AssetPath;
++			}
++
+ 		private:
+ 			Frontend::FMetaSoundAssetClassInfo ClassInfo;
+ 			mutable bool bIsLoaded = false;
+@@ -601,6 +608,11 @@
+ 			virtual FMetaSoundAssetKey GetAssetKey() const override
+ 			{
+ 				return FMetaSoundAssetKey(Class.Metadata);
++			}
++
++			virtual FTopLevelAssetPath GetAssetPath() const override
++			{
++				return Frontend::IMetaSoundAssetManager::GetChecked().FindAssetPath(GetAssetKey());
+ 			}
+ 
+ 			virtual const TArray<FText>& GetCategoryHierarchy() const override
+@@ -2865,7 +2877,7 @@
+ 	}
+ }
+ 
+-void UMetasoundEditorGraphSchema::QueryNodeClasses(TFunctionRef<void(TUniquePtr<Metasound::Editor::ISchemaQueryResult>&&)> OnClassFound, bool bScanAssetTags) const
++void UMetasoundEditorGraphSchema::QueryNodeClasses(TFunctionRef<void(TUniquePtr<Metasound::Editor::ISchemaQueryResult>&&)> OnClassFound, bool bScanAssetTags, TOptional<bool> InIncludeAllVersions) const
+ {
+ 	using namespace Metasound::Editor;
+ 	using namespace Metasound::Engine;
+@@ -2878,7 +2890,7 @@
+ 	{
+ 		TSet<FNodeRegistryKey> FoundKeys;
+ 		{
+-			const bool bIncludeAllVersions = static_cast<bool>(SchemaPrivate::EnableAllVersionsMetaSoundNodeClassCreationCVar);
++			const bool bIncludeAllVersions = InIncludeAllVersions.Get(static_cast<bool>(SchemaPrivate::EnableAllVersionsMetaSoundNodeClassCreationCVar));
+ 			TArray<FMetasoundFrontendClass> FrontendClasses = ISearchEngine::Get().FindAllClasses(bIncludeAllVersions);
+ 			for (const FMetasoundFrontendClass& Class : FrontendClasses)
+ 			{
+@@ -2890,17 +2902,37 @@
+ 		// Append all unloaded asset classes
+ 		if (bScanAssetTags)
+ 		{
+-			AssetManager.IterateAssetTagData([&FoundKeys, &Results](FMetaSoundAssetClassInfo ClassInfo)
+-			{
+-				using namespace Metasound::Frontend;
+-
++			auto AddAssetClass = [&FoundKeys, &Results](FMetaSoundAssetClassInfo ClassInfo)
++			{
++				if (!ClassInfo.bIsValid) return;
+ 				const FMetaSoundAssetKey AssetKey(ClassInfo.ClassName, ClassInfo.Version);
+ 				const FNodeRegistryKey RegKey(AssetKey);
+ 				if (!FoundKeys.Contains(RegKey))
+ 				{
++					FoundKeys.Add(RegKey);
+ 					Results.Add(MakeUnique<SchemaPrivate::FAssetSchemaQueryResult>(MoveTemp(ClassInfo)));
+ 				}
++			};
++			AssetManager.IterateAssetTagData(AddAssetClass);
++
++			// The manager cache only covers registered directories and assets seen
++			// this session. Saved, unloaded assets must also be discoverable from
++			// their registry tags; FAssetSchemaQueryResult loads only on selection.
++			FARFilter Filter;
++			Filter.bRecursiveClasses = true;
++			Metasound::IMetasoundUObjectRegistry::Get().IterateRegisteredUClasses([&Filter](UClass& Class)
++			{
++				Filter.ClassPaths.AddUnique(Class.GetClassPathName());
+ 			});
++			if (!Filter.ClassPaths.IsEmpty())
++			{
++				FAssetRegistryModule& RegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
++				RegistryModule.Get().EnumerateAssets(Filter, [&AddAssetClass](const FAssetData& Asset)
++				{
++					AddAssetClass(FMetaSoundAssetClassInfo(Asset));
++					return true;
++				});
++			}
+ 		}
+ 	}
+ 

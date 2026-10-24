@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Utilities/AuthoringExport/UeAgentExportContract.h"
 
@@ -19,13 +21,13 @@ namespace UeAgentLevelAuthoring
 		Component,
 	};
 
-	UEAGENTINTERFACE_API bool RegisterExportAuthoring(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterExportAuthoring(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool GetExportContract(
 		EExportTargetKind Kind,
 		UeAgentExportContract::FContract& OutContract,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API bool GetWorkspaceExportPolicy(
 		const FString& ProfileId,
 		UeAgentExportWorkspaceWriter::FCompoundPlanPolicy& OutPolicy,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

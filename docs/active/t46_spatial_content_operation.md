@@ -1,19 +1,19 @@
 # T46 Spatial-content operation authority
 
-T46 owns six current public commands. Discover their current hashes and exact
-parameter schemas through `client.query.command_search(...)` and
-`client.query.command_detail(...)`, then invoke the default generated SDK methods:
+T46 owns five current public commands. Discover command names with
+`client.query.command_search(...)`, then obtain selected exact IDs' SDK examples
+with `client.query.command_usage([...])`. Use `ueagentinterfacecmd describe <command-id>`
+for public parameter shapes before invoking the selected method when those fields are unknown:
 
 ```python
 client.mesh.element_select_by_ray(...)
-client.mesh.pivot_update(...)
 client.mesh.transform_bake(...)
 client.reference.origin_resolve(...)
 client.world.object_align(...)
 client.world.object_snap_to_surface(...)
 ```
 
-The same identities are available through `uai-cli ... exec <command-id>`.
+The same identities are available through `ueagentinterfacecmd ... exec <command-id>`.
 There is no task-specific generated module, compatibility alias, direct HTTP
 route, or second spatial/origin implementation in the SDK.
 
@@ -25,11 +25,10 @@ HJSON owner:
 
 - read a World with `content_graph.structure` or select exact Actor/Component
   paths with `content_graph.items`;
-- change the selected transform in a `uai.world.edit/1` document and apply it
-  with `content_graph.import_workspace` and the exported revision;
-- obtain the exact Modeling carrier revision for a StaticMesh from its
-  content-graph read, or for an `ADynamicMeshActor` from the selected World HJSON
-  actor item's `carrier_revision`.
+- export the Level through `client.content_graph.export_workspace(...)`, edit the
+  selected transform's declared HJSON fields and apply with `workspace.import_changes()`;
+- use the readable StaticMesh or `ADynamicMeshActor` target for specialized
+  mesh operations. Their carrier revision remains private to the server owner.
 
 This retirement covers persisted authoring state. It does not define a PIE or
 runtime-state inspection protocol; that is a separate product surface.
@@ -50,12 +49,14 @@ compatibility implementation is introduced.
 world vertices. `world.object_snap_to_surface` retains bounded Editor-world ray
 placement. These specialized operations are not generic transform CRUD.
 
-Both commands accept optional `expected_revisions`. When the caller supplies
-them, the operation rejects stale state before mutation. When omitted, the
-operation freezes the current subject revisions at invocation and still performs
-its independent result verification. Invalid frames, missing geometry,
-ambiguous vertices, a failed trace, or conflicting fields fail before mutation.
-Use World HJSON for an additional persisted-state readback when required.
+Both commands resolve every subject on the server and freeze their current
+state during preflight; reference-based alignment also freezes the reference
+object. The owner rechecks all of them before any write, so one changed object
+cannot cause a partial alignment. Surface snap repeats its bounded trace at the
+write boundary. Callers never submit revisions. Invalid frames, missing
+geometry, ambiguous vertices, a failed trace, or conflicting fields fail before
+mutation. Use World HJSON for an additional persisted-state readback when
+required.
 
 ## Mesh-element selection and durable mesh operations
 
@@ -65,9 +66,10 @@ Tools Editor Mode. Activate the mode through
 component target, and pass that component identity. The command neither activates
 the mode nor invents a second selection registry.
 
-`mesh.transform.bake` and `mesh.pivot.update` remain specialized durable geometry
-operations. A StaticMesh content-graph read supplies their carrier revision;
-success includes package save and remains observable after reload.
+`mesh.transform.bake` remains a specialized durable geometry operation. Persisted
+pivot desired state uses HJSON; `mesh.pivot.update` is dormant. Transform bake
+resolves the readable target and keeps the carrier revision in the same server
+operation; success includes package save and remains observable after reload.
 
 ## Origin resolution
 
@@ -78,15 +80,19 @@ code origins and is read-only.
 
 ## Spatial and lifecycle rules
 
-Spatial values retain their semantic frame, dimension, unit, basis, observation
-time and conversion evidence through `frame_id`, `basis_frame_id`, `dimension`,
-`unit`, `basis_evidence_id`, and `observed_at`. The SDK forwards one
+Native failures confirmed before any target write return `mutation_started=false`
+and `retry_safe=true`, preserving the original diagnostic. Once a native write may
+have occurred, later failures retain conservative mutation and recovery status;
+an earlier successful item or patch field must not be forgotten. The native
+families report these facts through the shared execution receipt; error names do
+not determine whether a write occurred.
+
+The minimal public spatial value uses `quantity`, `frame_id`, `dimension`, `unit`
+and `components`; frame-only inputs use `frame_id`, `dimension` and `unit`.
+The accepted rich representation preserves its nested frame, subject and conversion
+evidence. Optional `basis_frame_id`, `basis_evidence_id` and `observed_at` describe
+that richer observation; callers do not invent them to satisfy a compact input.
+The SDK forwards one
 manifest-bound request and performs no coordinate, selection, trace, pivot,
 transform or origin business logic. Tests restore only owned transient state and
 preserve the user's Editor.
-
-The historical IDs `level_align_actor_by_bounds`,
-`level_align_actor_vertex_to_vertex`, `level_align_face_to_face`,
-`level_snap_to_surface`, and `node_origin_resolve` are not public commands or
-aliases. Their exact successor contracts are recorded in
-`successors/t46_spatial_content_operation.json`.

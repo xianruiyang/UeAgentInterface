@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
 #include "Utilities/AuthoringObjectApply/UeAgentAuthoringObjectApply.h"
 
 class FJsonValue;
@@ -15,12 +16,11 @@ namespace UeAgentAuthoringDirectApply
 	{
 		FString Status;
 		FString Phase;
-		FString ErrorCode;
-		FString ErrorDetail;
-		FString PropertyPath;
+		UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic;
 		int32 PropertiesSeen = 0;
 		bool bRollbackAttempted = false;
 		bool bRollbackSucceeded = false;
+		TArray<UeAgentAuthoringObjectApply::FPropertyIntent> PropertyIntents;
 
 		bool IsApplied() const { return Status == TEXT("applied"); }
 	};

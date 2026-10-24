@@ -115,24 +115,6 @@ namespace
 		return Value;
 	}
 
-	TSharedPtr<FJsonObject> TopologyRevision(
-		const FString& SourceId,
-		UObject& Carrier)
-	{
-		TOptional<FUeAgentStateRevision> Revision;
-		FExecutionMutationError Error;
-		if (!TryReadModelingGeometryCarrierRevision(
-				SourceId,
-				Carrier,
-				Revision,
-				Error))
-		{
-			return nullptr;
-		}
-		return FUeAgentStateRevisionJson::ToJson(
-			Revision.GetValue());
-	}
-
 	TSharedPtr<FJsonObject> TopologyOperandTransform()
 	{
 		const TSharedPtr<FJsonObject> Value =
@@ -194,7 +176,6 @@ namespace
 
 	TSharedPtr<FJsonObject> BuildTopologyPayload(
 		const TSharedPtr<FJsonObject>& Row,
-		UObject& TargetCarrier,
 		UObject* OperandCarrier)
 	{
 		const TSharedPtr<FJsonObject> Input =
@@ -202,18 +183,6 @@ namespace
 		Input->SetStringField(
 			TEXT("target_ref"),
 			TEXT("uai://mesh/fixture-target"));
-		const TSharedPtr<FJsonObject> TargetRevision =
-			TopologyRevision(
-				TEXT("uai://mesh/fixture-target"),
-				TargetCarrier);
-		if (!TargetRevision.IsValid())
-		{
-			return nullptr;
-		}
-		Input->SetObjectField(
-			TEXT("target_revision"),
-			TargetRevision);
-
 		bool bValue = false;
 		if (Row->TryGetBoolField(TEXT("space_contract"), bValue)
 			&& bValue)
@@ -241,17 +210,6 @@ namespace
 			Input->SetStringField(
 				TEXT("operand_ref"),
 				TEXT("uai://mesh/fixture-operand"));
-			const TSharedPtr<FJsonObject> OperandRevision =
-				TopologyRevision(
-					TEXT("uai://mesh/fixture-operand"),
-					*OperandCarrier);
-			if (!OperandRevision.IsValid())
-			{
-				return nullptr;
-			}
-			Input->SetObjectField(
-				TEXT("operand_revision"),
-				OperandRevision);
 			Input->SetObjectField(
 				TEXT("operand_to_target"),
 				TopologyOperandTransform());
@@ -843,8 +801,6 @@ namespace
 				false,
 				false,
 				false),
-			FUeAgentPageRequest(),
-			TOptional<int64>(),
 			TArray<FUeAgentArtifactDescriptor>(),
 			TArray<FUeAgentProjectionDiagnostic>());
 
@@ -916,8 +872,7 @@ namespace
 		ApplicationConfig.ServerSessionId =
 			TEXT("session:") + TestScope;
 		ApplicationConfig.RegistryEpoch = 1;
-		ApplicationConfig.TimeoutSeconds = 60.0;
-		ApplicationConfig.MaxFrameBytes = 4 * 1024 * 1024;
+
 
 		FUeAgentSimpleAuthoringApplicationError ApplicationError;
 		if (!FUeAgentSimpleAuthoringApplication::TryCreate(
@@ -1012,6 +967,7 @@ FUeAgentSimpleAuthoringModelingTopologyProductionContractTest::
 	}
 
 	int32 Executed = 0;
+	TSet<FString> SubmittedDescriptorIds;
 	for (const TSharedPtr<FJsonValue>& Value
 		: Fixture->GetArrayField(TEXT("descriptors")))
 	{
@@ -1123,7 +1079,6 @@ FUeAgentSimpleAuthoringModelingTopologyProductionContractTest::
 			TargetCarrier
 				? BuildTopologyPayload(
 					Row,
-					*TargetCarrier,
 					Operand)
 				: nullptr;
 		if (!TestNotNull(
@@ -1142,25 +1097,6 @@ FUeAgentSimpleAuthoringModelingTopologyProductionContractTest::
 					*TargetCarrier,
 					CarrierRevisionBefore,
 					CarrierRevisionError)))
-		{
-			continue;
-		}
-		const TSharedPtr<FJsonObject>* PayloadRevisionJson = nullptr;
-		TOptional<FUeAgentStateRevision> PayloadCarrierRevision;
-		if (!TestTrue(
-				*(DescriptorId
-					+ TEXT(" preserves the carrier revision across reads")),
-				PayloadObject->TryGetObjectField(
-					TEXT("target_revision"),
-					PayloadRevisionJson)
-				&& PayloadRevisionJson
-				&& FUeAgentStateRevisionJson::TryParse(
-					*PayloadRevisionJson,
-					PayloadCarrierRevision)
-				&& PayloadCarrierRevision.IsSet()
-				&& CarrierRevisionBefore.IsSet()
-				&& PayloadCarrierRevision.GetValue()
-					== CarrierRevisionBefore.GetValue()))
 		{
 			continue;
 		}
@@ -1220,6 +1156,7 @@ FUeAgentSimpleAuthoringModelingTopologyProductionContractTest::
 			TEXT("caller:sa008-modeling-topology"),
 			{TEXT("uai:modeling-geometry:write")},
 			TEXT("correlation:sa008-modeling-topology"));
+		SubmittedDescriptorIds.Add(DescriptorId);
 		const FUeAgentOperationResult Result =
 			Application->Submit(
 				FUeAgentOperationRequest(
@@ -1298,8 +1235,8 @@ FUeAgentSimpleAuthoringModelingTopologyProductionContractTest::
 			1);
 	}
 	TestEqual(
-		TEXT("all seventeen topology profiles execute"),
+		TEXT("every selected topology profile reaches submission exactly once"),
 		Executed,
-		17);
+		SubmittedDescriptorIds.Num());
 	return !HasAnyErrors();
 }

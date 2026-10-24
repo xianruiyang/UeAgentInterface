@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UE::UAI::QueryOwners::AssetSimple
@@ -10,6 +12,11 @@ namespace UE::UAI::QueryOwners::AssetSimple
 		FString ClassPath;
 		FString ProfileId;
 		FString CandidateRef;
+		FString Name;
+		FString Id;
+		FString SupportedClassPath;
+		FString WriteStatus;
+		bool bGenericReady = false;
 		FString CatalogSourceId;
 		FString CatalogGeneration;
 		int64 CatalogSequence = -1;
@@ -24,17 +31,9 @@ namespace UE::UAI::QueryOwners::AssetSimple
 		int64 CatalogSequence = -1;
 		TArray<FAssetFactoryCandidate> Candidates;
 		int32 TotalMatches = 0;
-		int32 NextCursor = INDEX_NONE;
-		bool bComplete = false;
-		bool bHasMore = false;
 	};
 
-	struct UEAGENTINTERFACE_API FAssetFactoryCandidateQueryError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FAssetFactoryCandidateQueryError = UE::UAI::Contract::FDiagnostic;
 
 	/**
 	 * Projects factory_ref values from the process-owned factory catalog used by
@@ -44,13 +43,6 @@ namespace UE::UAI::QueryOwners::AssetSimple
 	UEAGENTINTERFACE_API bool TryQueryAssetFactoryCandidates(
 		const FString& CreateCommandId,
 		const FString& Query,
-		int32 Limit,
-		int32 Cursor,
 		FAssetFactoryCandidateQueryResult& OutResult,
 		FAssetFactoryCandidateQueryError& OutError);
-
-	inline int32 GetAssetSimpleOwnedQueryCommandCount()
-	{
-		return 1;
-	}
 }

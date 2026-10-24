@@ -8,12 +8,10 @@ LLM 只编辑面向 authoring 的 folder HJSON，不直接改 UE 原始导出、
 
 ```text
 export/readback folder
--> read manifest/index/reference
+-> follow included_files/read_order/ref to the current authoring unit
 -> edit llm_authoring files
 -> exact domain candidate command for new content when needed
--> lint
--> validate or dry-run when available
--> apply
+-> import/apply
 -> export/readback
 -> verify semantic result
 ```
@@ -33,24 +31,23 @@ export/readback folder
 
 1. 用 UAI 导出目标资产，或使用固定 fixture。
 2. 按当前 ExportProfile/folder contract 的 `included_files` 和教程 `read_order` 读取必需 identity/entry 导航文件；不假定 manifest/index/references 必然存在。
-3. 只打开当前目标需要的 `llm_authoring` 文件；大型 `items/<id>/...` 按需读取。
-4. 只编辑 authoring 文件，不改 readback/debug/legacy。
+3. 只打开当前目标需要的 `llm_authoring` 文件；大型 `items/<可读语义名>/...` 按需读取。同一 owner 内同名项使用导出给出的连续编号；唯一名称不加编号。`.uai` 中的 local handle、hash、GUID、revision 及映射属于服务端机器层，模型不读取、不复制、不生成。
+4. 只编辑业务 authoring 文件。空集合/新条目形状不明时按 `examples/index.hjson` 定向读取只读示例；不修改说明文件来表达业务变化。
 5. 新增节点、模块、组件、控件或输入来源前，先按 `00_DirectHjsonAuthoring.md` 调用对应领域的 exact candidate command 查询真实候选。
-6. 候选只复制最小 `candidate.name` 或 `candidate.id`；原生 graph/pin、stage、parent、level 与 placement context 写在领域合同指定的外层。明确知道的更多字段只能作为 assertion；完整搜索行、内部 revision、label、tooltip 和分类不进入 HJSON。
+6. 候选只保留最小可读 `name`；仅在同名确有歧义时，按当前领域合同附加消除歧义所需的可读 `select` 字段。具体落点以当前 Export 和领域合同为准：普通 keyed row 可以使用 row 顶层字段，candidate-bound 领域可以使用 `candidate` envelope。原生 graph/pin、stage、parent、level 与 placement context 留在 selector 外层。明确知道的更多字段只能作为 assertion；完整搜索行、内部 revision、label、tooltip 和分类不进入 HJSON。
 7. 对普通 input 值，只改 `value` 内部字段，不用 `operation` 表达普通改值。
-8. 对新增、删除、清空、替换、批量 patch 等非普通值编辑，才使用 `operation`。
-9. 运行 authoring hygiene lint。
-10. 优先 dedicated validate 或 dry-run；缺 dedicated validate 时记录 coverage gap 并用 export/readback/consistency gate 补证据。
-11. apply 后重新 export/readback，按同一主体、同一坐标系、同一状态比较结果。
-12. 记录 response/report、warning、dirty resource 和剩余边界。
+8. 普通 workspace 的集合直接增删成员或编辑值，保留需要保留的成员；内部 `operation` 由服务端派生，不写入普通行。
+9. 调用正式 import/apply 入口。
+10. apply 成功并刷新目录后，读取刷新结果或对应 Query，按同一主体、同一坐标系、同一状态比较实际结果；没有刷新承诺时才另行 export。
+11. 记录 response/report、warning、dirty resource 和剩余边界。
 
-## JSON 直接编辑优先级
+## HJSON 直接编辑优先级
 
 优先顺序：
 
-1. 直接改 `llm_authoring` JSON。
-2. 用领域 candidate command 返回的 `name` 或紧凑 `id` 构造该领域允许的最小 HJSON 片段，并把创建 context 保留在候选外层。
-3. 用 Python 生成或修改 HJSON 文件，但仍让 JSON 明确表达最终业务意图。
+1. 直接改 `llm_authoring` HJSON。
+2. 用领域 candidate command 返回的可读 `name` 和必要的短语义 `select` 构造该领域允许的最小 HJSON 片段，并把创建 context 保留在候选外层。
+3. 用 Python 生成或修改 HJSON 文件，但仍让 HJSON 明确表达最终业务意图。
 4. 只有 bootstrap、探针、迁移、schema 边界和故障恢复才使用原子命令。
 
 不要让 Python 隐式替代 HJSON authoring 语义；脚本可以批量写 HJSON，但最终需要能从 HJSON 中读懂本次改了什么、为什么可 apply、如何 readback。
@@ -58,9 +55,9 @@ export/readback folder
 ## Large Item Rule
 
 - `index.hjson` 只做导航摘要。
-- 默认上下文只加载 manifest/index/reference 和当前目标文件。
+- 默认上下文只沿实际 `included_files`、教程 `read_order` 和 `ref` 加载当前目标所需的导航与 authoring 文件；不得补造不存在的 manifest/index/reference。
 - Level Actor/Component 等大型 item 文件只在当前任务确实要编辑该 item 时读取。
-- P3 验证中 Level 有 30 个 actor/component item JSON 超过 16,000 bytes；Guide、示例和命令包不得暗示这些文件应默认全量加载。
+- P3 验证中 Level 有 30 个 actor/component item 文件超过 16,000 bytes；Guide、示例和命令包不得暗示这些文件应默认全量加载。
 - 如果 item 中仍有 raw/readback-only 内容，应优先放到 readback/debug 或后续拆分任务处理。
 
 ## Editor 生命周期
@@ -76,8 +73,8 @@ export/readback folder
 结构化 HJSON schema 和字段语义必须来自：
 
 1. 当前插件源码和 adapter/lint 实现。
-2. 当前 UAI 导出 JSON 和 readback。
+2. 当前 UAI 导出的 HJSON workspace 和独立 readback。
 3. 命令文档。
 4. live smoke 或离线单测。
 
-不要用 KB、网络或旧大分册推断本项目私有 JSON 字段含义。
+不要用 KB、网络或旧大分册推断本项目私有 HJSON 字段含义。

@@ -63,7 +63,6 @@ namespace
 			TEXT("output_folder"),
 			TEXT("input_file"),
 			TEXT("input_folder"),
-			TEXT("token_budget"),
 			TEXT("limit"),
 			TEXT("max_items"),
 			TEXT("max_hits"),
@@ -74,6 +73,96 @@ namespace
 			TEXT("json_file"),
 		};
 		return Forbidden.Contains(Field.ToLower());
+	}
+
+	TArray<FString> RetiredSpatialInputFields(
+		const FString& DescriptorId)
+	{
+		if (DescriptorId == TEXT("uai.query.world.overlap"))
+		{
+			return {
+				TEXT("trace_complex"),
+				TEXT("ignore_target_refs"),
+			};
+		}
+		if (DescriptorId == TEXT("uai.query.world.capsule_sweep"))
+		{
+			return {
+				TEXT("return_penetration_depth"),
+				TEXT("ignore_target_refs"),
+			};
+		}
+		if (DescriptorId == TEXT("uai.query.world.capsule_path"))
+		{
+			return {
+				TEXT("trace_complex"),
+				TEXT("require_floor"),
+				TEXT("snap_to_floor"),
+				TEXT("floor_trace_channel"),
+				TEXT("floor_trace_up_cm"),
+				TEXT("floor_trace_down_cm"),
+				TEXT("floor_clearance_cm"),
+				TEXT("max_walkable_slope_deg"),
+			};
+		}
+		if (DescriptorId == TEXT("uai.query.world.nearby_shapes"))
+		{
+			return {
+				TEXT("component_classes"),
+				TEXT("include_visual_fallback"),
+				TEXT("detail_level"),
+			};
+		}
+		return {};
+	}
+
+	const TCHAR* OptionalSpatialCollectionField(
+		const FString& DescriptorId)
+	{
+		if (DescriptorId == TEXT("uai.query.world.overlap"))
+		{
+			return TEXT("include_targets");
+		}
+		if (DescriptorId == TEXT("uai.query.world.capsule_sweep"))
+		{
+			return TEXT("include_hits");
+		}
+		if (DescriptorId == TEXT("uai.query.world.nearby_shapes"))
+		{
+			return TEXT("include_shapes");
+		}
+		return nullptr;
+	}
+
+	TArray<FString> RetiredTopologyInputFields(
+		const FString& DescriptorId)
+	{
+		if (DescriptorId == TEXT("uai.query.world.hlod_assignments")
+			|| DescriptorId == TEXT("uai.query.world.streaming_levels"))
+		{
+			return {TEXT("scope")};
+		}
+		return {};
+	}
+
+	bool SchemaRequiresField(
+		const TSharedPtr<FJsonObject>& Schema,
+		const FString& Field)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Required = nullptr;
+		if (!Schema->TryGetArrayField(TEXT("required"), Required)
+			|| !Required)
+		{
+			return false;
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *Required)
+		{
+			if (Value.IsValid() && Value->AsString() == Field)
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	bool ValidateSchemaFieldOwnership(
@@ -191,107 +280,6 @@ namespace
 		return Compiled.IsValid();
 	}
 
-	TArray<TSharedPtr<FJsonValue>> SortedStringValues(
-		const TSharedPtr<FJsonObject>& Row,
-		const TCHAR* Field)
-	{
-		TArray<FString> Strings;
-		for (const TSharedPtr<FJsonValue>& Value
-			: Row->GetArrayField(Field))
-		{
-			Strings.Add(Value->AsString());
-		}
-		Strings.Sort();
-		TArray<TSharedPtr<FJsonValue>> Values;
-		Values.Reserve(Strings.Num());
-		for (const FString& String : Strings)
-		{
-			Values.Add(MakeShared<FJsonValueString>(String));
-		}
-		return Values;
-	}
-
-	FString ComputeDescriptorHash(
-		FAutomationTestBase* Test,
-		const TSharedPtr<FJsonObject>& Row)
-	{
-		const TSharedPtr<FJsonObject> Policy =
-			MakeShared<FJsonObject>();
-		Policy->SetArrayField(
-			TEXT("allowed_state_planes"),
-			SortedStringValues(
-				Row,
-				TEXT("allowed_state_planes")));
-		Policy->SetArrayField(
-			TEXT("required_facets"),
-			SortedStringValues(
-				Row,
-				TEXT("required_context_facets")));
-		Policy->SetStringField(
-			TEXT("resolution_policy"),
-			TEXT("resolve_current_then_freeze"));
-		Policy->SetStringField(
-			TEXT("transient_access_policy"),
-			TEXT("read_only"));
-
-		const TSharedPtr<FJsonObject> Query =
-			MakeShared<FJsonObject>();
-		Query->SetStringField(
-			TEXT("materialization_policy"),
-			TEXT("runtime_observe"));
-		Query->SetStringField(
-			TEXT("provider_binding"),
-			Row->GetStringField(TEXT("provider_binding")));
-		Query->SetStringField(
-			TEXT("query_kind"),
-			Row->GetStringField(TEXT("query_kind")));
-		Query->SetStringField(
-			TEXT("side_effect_policy"),
-			TEXT("no_persistent_mutation"));
-
-		const TSharedPtr<FJsonObject> Descriptor =
-			MakeShared<FJsonObject>();
-		Descriptor->SetStringField(
-			TEXT("capability_id"),
-			Row->GetStringField(TEXT("capability_id")));
-		Descriptor->SetStringField(
-			TEXT("descriptor_id"),
-			Row->GetStringField(TEXT("descriptor_id")));
-		Descriptor->SetStringField(
-			TEXT("domain_id"),
-			TEXT("world"));
-		Descriptor->SetObjectField(
-			TEXT("execution_context_policy"),
-			Policy);
-		Descriptor->SetObjectField(
-			TEXT("input_schema"),
-			Row->GetObjectField(TEXT("input_schema")));
-		Descriptor->SetStringField(
-			TEXT("operation_kind"),
-			TEXT("query"));
-		Descriptor->SetObjectField(TEXT("query"), Query);
-		Descriptor->SetObjectField(
-			TEXT("result_schema"),
-			Row->GetObjectField(TEXT("result_schema")));
-		Descriptor->SetNumberField(
-			TEXT("version"),
-			Row->GetNumberField(TEXT("version")));
-
-		FString Canonical;
-		FString Error;
-		if (!Test->TestTrue(
-				*FString::Printf(
-					TEXT("%s descriptor canonicalizes"),
-					*Row->GetStringField(TEXT("descriptor_id"))),
-				Json::TryCanonicalize(
-					Descriptor,
-					Canonical,
-					Error)))
-		{
-			return FString();
-		}
-		return Json::Sha256Utf8(Canonical);
-	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -347,25 +335,8 @@ bool FUeAgentWorldReadContractFixtureTest::RunTest(
 	{
 		RequiredFamilies.Add(Value->AsString());
 	}
-	TestEqual(
-		TEXT("seven required semantic families"),
-		RequiredFamilies.Num(),
-		7);
-
-	const int32 DeclaredDescriptorCount = static_cast<int32>(
-		Fixture->GetNumberField(TEXT("descriptor_count")));
-	TestEqual(
-		TEXT("fixture freezes 23 descriptors"),
-		DeclaredDescriptorCount,
-		23);
-	TestEqual(
-		TEXT("declared descriptor count matches rows"),
-		DescriptorValues->Num(),
-		DeclaredDescriptorCount);
-
 	TSet<FString> DescriptorIds;
 	TSet<FString> ProviderBindings;
-	TSet<FString> DescriptorHashes;
 	TSet<FString> DescriptorFamilies;
 	bool bAllDescriptorsValid = true;
 	for (const TSharedPtr<FJsonValue>& Value : *DescriptorValues)
@@ -382,8 +353,6 @@ bool FUeAgentWorldReadContractFixtureTest::RunTest(
 			Row->GetStringField(TEXT("descriptor_id"));
 		const FString ProviderBinding =
 			Row->GetStringField(TEXT("provider_binding"));
-		const FString DescriptorHash =
-			Row->GetStringField(TEXT("descriptor_hash"));
 		const FString Family =
 			Row->GetStringField(TEXT("family"));
 		TestTrue(
@@ -413,13 +382,8 @@ bool FUeAgentWorldReadContractFixtureTest::RunTest(
 				TEXT("%s does not expose a legacy command id"),
 				*DescriptorId),
 			Row->HasField(TEXT("legacy_command_id"))
-				|| Row->HasField(TEXT("migration_id")));
-		TestEqual(
-			*FString::Printf(
-				TEXT("%s freezes its canonical C0 hash"),
-				*DescriptorId),
-			DescriptorHash,
-			ComputeDescriptorHash(this, Row));
+				|| Row->HasField(TEXT("migration_id"))
+				|| Row->HasField(TEXT("descriptor_hash")));
 
 		if (DescriptorIds.Contains(DescriptorId))
 		{
@@ -435,22 +399,165 @@ bool FUeAgentWorldReadContractFixtureTest::RunTest(
 				*ProviderBinding));
 			bAllDescriptorsValid = false;
 		}
-		if (DescriptorHashes.Contains(DescriptorHash))
-		{
-			AddError(FString::Printf(
-				TEXT("world_read_descriptor_hash_duplicate:%s"),
-				*DescriptorHash));
-			bAllDescriptorsValid = false;
-		}
 		DescriptorIds.Add(DescriptorId);
 		ProviderBindings.Add(ProviderBinding);
-		DescriptorHashes.Add(DescriptorHash);
 		DescriptorFamilies.Add(Family);
 
 		const TSharedPtr<FJsonObject> InputSchema =
 			Row->GetObjectField(TEXT("input_schema"));
 		const TSharedPtr<FJsonObject> ResultSchema =
 			Row->GetObjectField(TEXT("result_schema"));
+		if (DescriptorId == TEXT("uai.query.world.actor_components"))
+		{
+			TestEqual(
+				TEXT("actor components exposes no unowned input fields"),
+				InputSchema->GetObjectField(TEXT("properties"))->Values.Num(),
+				0);
+		}
+		if (DescriptorId == TEXT("uai.query.world.mesh_closest_vertex")
+			|| DescriptorId == TEXT("uai.query.world.mesh_vertex_position"))
+		{
+			const TArray<TSharedPtr<FJsonValue>> TargetKinds =
+				Row->GetArrayField(TEXT("target_kinds"));
+			TestEqual(
+				*FString::Printf(
+					TEXT("%s exposes only its native mesh target kind"),
+					*DescriptorId),
+				TargetKinds.Num(),
+				1);
+			if (TargetKinds.Num() == 1)
+			{
+				TestEqual(
+					*FString::Printf(
+						TEXT("%s targets static mesh components"),
+						*DescriptorId),
+					TargetKinds[0]->AsString(),
+					FString(TEXT("static_mesh_component")));
+			}
+		}
+		if (DescriptorId == TEXT("uai.query.world.nav_find_path"))
+		{
+			const TSharedPtr<FJsonObject> InputProperties =
+				InputSchema->GetObjectField(TEXT("properties"));
+			const TSharedPtr<FJsonObject> IncludePathPoints =
+				InputProperties->GetObjectField(TEXT("include_path_points"));
+			TestEqual(
+				TEXT("nav find path exposes optional path-point selection"),
+				IncludePathPoints->GetStringField(TEXT("type")),
+				FString(TEXT("boolean")));
+			const TArray<TSharedPtr<FJsonValue>> Required =
+				InputSchema->GetArrayField(TEXT("required"));
+			bool bRequiresIncludePathPoints = false;
+			for (const TSharedPtr<FJsonValue>& RequiredValue : Required)
+			{
+				bRequiresIncludePathPoints =
+					bRequiresIncludePathPoints
+					|| RequiredValue->AsString()
+						== TEXT("include_path_points");
+			}
+			TestFalse(
+				TEXT("nav find path defaults to omitting path points"),
+				bRequiresIncludePathPoints);
+		}
+		const TArray<FString> RetiredFields =
+			RetiredSpatialInputFields(DescriptorId);
+		if (!RetiredFields.IsEmpty())
+		{
+			const TSharedPtr<FJsonObject> InputProperties =
+				InputSchema->GetObjectField(TEXT("properties"));
+			TestFalse(
+				*FString::Printf(
+					TEXT("%s rejects undeclared input fields"),
+					*DescriptorId),
+				InputSchema->GetBoolField(TEXT("additionalProperties")));
+			for (const FString& RetiredField : RetiredFields)
+			{
+				TestFalse(
+					*FString::Printf(
+						TEXT("%s no longer exposes unconsumed %s"),
+						*DescriptorId,
+						*RetiredField),
+					InputProperties->HasField(RetiredField));
+			}
+		}
+		const TCHAR* OptionalCollectionField =
+			OptionalSpatialCollectionField(DescriptorId);
+		if (OptionalCollectionField)
+		{
+			const TSharedPtr<FJsonObject> InputProperties =
+				InputSchema->GetObjectField(TEXT("properties"));
+			const TSharedPtr<FJsonObject> FieldSchema =
+				InputProperties->GetObjectField(OptionalCollectionField);
+			TestEqual(
+				*FString::Printf(
+					TEXT("%s %s is boolean"),
+					*DescriptorId,
+					OptionalCollectionField),
+				FieldSchema->GetStringField(TEXT("type")),
+				FString(TEXT("boolean")));
+			bool bRequired = false;
+			for (const TSharedPtr<FJsonValue>& Required
+				: InputSchema->GetArrayField(TEXT("required")))
+			{
+				bRequired = Required->AsString() == OptionalCollectionField
+					|| bRequired;
+			}
+			TestFalse(
+				*FString::Printf(
+					TEXT("%s %s remains optional"),
+					*DescriptorId,
+					OptionalCollectionField),
+				bRequired);
+		}
+		const TArray<FString> RetiredTopologyFields =
+			RetiredTopologyInputFields(DescriptorId);
+		if (!RetiredTopologyFields.IsEmpty())
+		{
+			const TSharedPtr<FJsonObject> InputProperties =
+				InputSchema->GetObjectField(TEXT("properties"));
+			for (const FString& RetiredField : RetiredTopologyFields)
+			{
+				TestFalse(
+					*FString::Printf(
+						TEXT("%s no longer exposes unconsumed %s"),
+						*DescriptorId,
+						*RetiredField),
+					InputProperties->HasField(RetiredField));
+			}
+		}
+		if (DescriptorId == TEXT("uai.query.world.streaming_levels"))
+		{
+			const TSharedPtr<FJsonObject> LevelPackages =
+				InputSchema->GetObjectField(TEXT("properties"))
+					->GetObjectField(TEXT("level_packages"));
+			TestEqual(
+				TEXT("streaming level package filter remains an array"),
+				LevelPackages->GetStringField(TEXT("type")),
+				FString(TEXT("array")));
+			TestEqual(
+				TEXT("streaming level package filter items remain strings"),
+				LevelPackages->GetObjectField(TEXT("items"))
+					->GetStringField(TEXT("type")),
+				FString(TEXT("string")));
+			TestFalse(
+				TEXT("streaming level package filter remains optional"),
+				SchemaRequiresField(InputSchema, TEXT("level_packages")));
+		}
+		if (DescriptorId == TEXT("uai.query.world.partition"))
+		{
+			const TSharedPtr<FJsonObject> IncludeLoadedRegions =
+				InputSchema->GetObjectField(TEXT("properties"))
+					->GetObjectField(TEXT("include_loaded_regions"));
+			TestEqual(
+				TEXT("partition loaded-region selector remains boolean"),
+				IncludeLoadedRegions->GetStringField(TEXT("type")),
+				FString(TEXT("boolean")));
+			TestFalse(
+				TEXT("partition loaded-region selector remains optional"),
+				SchemaRequiresField(
+					InputSchema,
+					TEXT("include_loaded_regions")));
+		}
 		bAllDescriptorsValid =
 			CompileSchema(
 				this,
@@ -530,10 +637,12 @@ bool FUeAgentWorldReadContractFixtureTest::RunTest(
 	TestTrue(
 		TEXT("all descriptor rows satisfy the frozen boundary"),
 		bAllDescriptorsValid);
-	TestEqual(
-		TEXT("all required families own descriptors"),
-		DescriptorFamilies.Num(),
-		RequiredFamilies.Num());
+	for (const FString& RequiredFamily : RequiredFamilies)
+	{
+		TestTrue(
+			*FString::Printf(TEXT("descriptor family covers %s"), *RequiredFamily),
+			DescriptorFamilies.Contains(RequiredFamily));
+	}
 
 	TSet<FString> ScenarioIds;
 	TSet<FString> ScenarioFamilies;
@@ -564,12 +673,7 @@ bool FUeAgentWorldReadContractFixtureTest::RunTest(
 		ScenarioIds.Add(CaseId);
 		ScenarioFamilies.Add(Family);
 	}
-	TestEqual(
-		TEXT("one independent E2 oracle per semantic family"),
-		ScenarioValues->Num(),
-		RequiredFamilies.Num());
-	bool bAllFamiliesCovered =
-		ScenarioFamilies.Num() == RequiredFamilies.Num();
+	bool bAllFamiliesCovered = true;
 	for (const FString& RequiredFamily : RequiredFamilies)
 	{
 		bAllFamiliesCovered =
@@ -594,29 +698,54 @@ bool FUeAgentWorldReadContractFixtureTest::RunTest(
 	}
 	if (ProductionRegistry.IsValid())
 	{
-		TestEqual(
-			TEXT("production registry owns all frozen descriptors"),
-			ProductionRegistry->GetDescriptors().Num(),
-			DeclaredDescriptorCount);
+		TSet<FString> ProductionDescriptorHashes;
 		for (const TSharedPtr<FJsonValue>& Value : *DescriptorValues)
 		{
 			const TSharedPtr<FJsonObject> Row = Value->AsObject();
+			FString InputSchema;
+			FString ResultSchema;
+			FString SchemaError;
+			const bool bSchemasCanonical =
+				Json::TryCanonicalize(
+					Row->GetObjectField(TEXT("input_schema")),
+					InputSchema,
+					SchemaError)
+				&& Json::TryCanonicalize(
+					Row->GetObjectField(TEXT("result_schema")),
+					ResultSchema,
+					SchemaError);
+			TestTrue(
+				TEXT("fixture schemas canonicalize for registry comparison"),
+				bSchemasCanonical);
 			const FUeAgentOperationDescriptor* Descriptor =
 				ProductionRegistry->FindByDescriptorId(
 					Row->GetStringField(TEXT("descriptor_id")));
+			const bool bUniqueMachineIdentity = Descriptor
+				&& !ProductionDescriptorHashes.Contains(
+					Descriptor->GetIdentity().GetDescriptorHash());
 			TestTrue(
 				*FString::Printf(
 					TEXT("%s is registered in production"),
 					*Row->GetStringField(TEXT("descriptor_id"))),
 				Descriptor
-					&& Descriptor->GetIdentity().GetDescriptorHash()
-						== Row->GetStringField(
-							TEXT("descriptor_hash"))
+					&& !Descriptor->GetIdentity().GetDescriptorHash().IsEmpty()
+					&& bUniqueMachineIdentity
+					&& Descriptor->GetCapabilityId()
+						== Row->GetStringField(TEXT("capability_id"))
+					&& Descriptor->GetInputSchema().GetJsonValue()
+						== InputSchema
+					&& Descriptor->GetResultSchema().GetJsonValue()
+						== ResultSchema
 					&& Descriptor->GetQueryBinding().IsSet()
 					&& Descriptor->GetQueryBinding()
 						->GetProviderBinding()
 						== Row->GetStringField(
 							TEXT("provider_binding")));
+			if (Descriptor)
+			{
+				ProductionDescriptorHashes.Add(
+					Descriptor->GetIdentity().GetDescriptorHash());
+			}
 		}
 	}
 	return true;

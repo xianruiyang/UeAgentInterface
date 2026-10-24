@@ -15,6 +15,7 @@ namespace UE::UAI::Composition::LongRunningSession
 		FString Nonce;
 
 		bool IsValid() const;
+		bool TryValidate(ExecutionMutation::FExecutionMutationError& OutError) const;
 	};
 
 	struct FUeAgentSafeExitDirtyResolutionReceipt final

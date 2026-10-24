@@ -1,9 +1,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Utilities/AuthoringCore/UeAgentTimelineValueTypes.h"
 #include "Core/BindingGateway/Operation/UeAgentOperationBinding.h"
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
 #include "Core/Contract/UeAgentContract.h"
+#include "Core/Contract/Command/UeAgentCommandContractModel.h"
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
 #include "Templates/SharedPointer.h"
@@ -31,7 +33,9 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 			FString InSettleBarrier,
 			FString InOracleKind,
 			bool bInRequiresNativeMutation,
-			bool bInReadsBackAfterMutation);
+			bool bInReadsBackAfterMutation,
+			TArray<UE::UAI::CommandContract::FUeAgentModelResultFieldDeclaration>
+				InModelResultFields = {});
 
 		const FString& GetCapabilityId() const;
 		const FString& GetDescriptorId() const;
@@ -51,6 +55,8 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		const FString& GetOracleKind() const;
 		bool RequiresNativeMutation() const;
 		bool ReadsBackAfterMutation() const;
+		const TArray<UE::UAI::CommandContract::FUeAgentModelResultFieldDeclaration>&
+		GetModelResultFields() const;
 
 	private:
 		FString CapabilityId;
@@ -70,19 +76,14 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		FString OracleKind;
 		bool bRequiresNativeMutation = false;
 		bool bReadsBackAfterMutation = false;
+		TArray<UE::UAI::CommandContract::FUeAgentModelResultFieldDeclaration>
+			ModelResultFields;
 	};
 
 	UEAGENTINTERFACE_API const TArray<FUeAgentTimelineAnimationExecutionChainContract>&
 	GetTimelineAnimationExecutionChainContracts();
 
-	struct UEAGENTINTERFACE_API FUeAgentTimelineAnimationExecutionError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-
-		bool IsValid() const { return !Code.IsEmpty(); }
-	};
+	using Authoring::Timeline::FUeAgentTimelineAnimationExecutionError;
 
 	class UEAGENTINTERFACE_API IUeAgentTimelineAnimationTypedRequest
 	{
@@ -139,19 +140,20 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 	class UEAGENTINTERFACE_API FUeAgentTimelineAnimationMutationResult final
 	{
 	public:
-		FUeAgentTimelineAnimationMutationResult() = default;
+		FUeAgentTimelineAnimationMutationResult();
 		FUeAgentTimelineAnimationMutationResult(
 			FString InOperationId,
 			FString InMutationEvidenceId);
 
 		const FString& GetOperationId() const;
 		const FString& GetMutationEvidenceId() const;
+		const FUeAgentTimelineAnimationExecutionError& GetValidationDiagnostic() const;
 		bool IsValid() const;
 
 	private:
 		FString OperationId;
 		FString MutationEvidenceId;
-		bool bValid = false;
+		FUeAgentTimelineAnimationExecutionError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IUeAgentTimelineAnimationMutationPort
@@ -251,5 +253,4 @@ namespace UE::UAI::DomainAdapters::TimelineAnimation
 		TArray<TSharedRef<FUeAgentTimelineAnimationOperationChain>>& OutChains,
 		FUeAgentTimelineAnimationExecutionError& OutError);
 }
-
 

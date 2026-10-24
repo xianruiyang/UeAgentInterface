@@ -1,8 +1,13 @@
 #include "CommandHandlers/AssetDurable/UeAgentAssetDurableMaintenanceHandlers.h"
 
+#include "Utilities/UeAgentJsonDiagnostics.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/SimpleAuthoring/OperationHost/UeAgentSimpleAuthoringOperationHost.h"
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -20,47 +25,24 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 
 		FUeAgentResourceTracker MakeResources()
 		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 8ll * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 8ll * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 8ll * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 4096},
-				{EUeAgentResourceDimension::Items, 4096},
-				{EUeAgentResourceDimension::Files, 256},
-				{EUeAgentResourceDimension::ReferenceEdges, 4096},
-				{EUeAgentResourceDimension::WorkUnits, 1048576},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					64ll * 1024 * 1024},
-			}));
+			return FUeAgentResourceTracker();
 		}
 
 		bool Canonical(
 			const TSharedPtr<FJsonObject>& Object,
 			FString& OutJson,
-			FString& OutError)
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			return CommandContract::Json::TryCanonicalize(
 				Object, OutJson, OutError);
 		}
 
 		FUeAgentCommandResult Failure(
-			const FUeAgentCommandRequest& Request,
-			const FString& Code,
-			const FString& Detail)
-		{
-			const TSharedPtr<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("detail"), Detail);
-			FString ErrorJson;
-			FString SerializationError;
-			if (!Canonical(Error, ErrorJson, SerializationError))
-			{
-				ErrorJson = TEXT(
-					"{\"code\":\"durable_maintenance_error_serialization_failed\"}");
-			}
-			return FUeAgentCommandResult::Failure(
-				Request, TEXT("{}"), ErrorJson);
-		}
+            const FUeAgentCommandRequest& Request, UE::UAI::Contract::FDiagnostic Diagnostic)
+        {
+            if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetCommandId();
+            return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
+        }
 
 		TArray<TSharedPtr<FJsonValue>> Strings(
 			const TArray<FString>& Values)
@@ -99,18 +81,9 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 			const FString& Name,
 			int64& OutValue)
 		{
-			double Number = 0.0;
-			if (!Params.IsValid()
-				|| !Params->TryGetNumberField(Name, Number)
-				|| !FMath::IsFinite(Number)
-				|| Number != FMath::FloorToDouble(Number)
-				|| Number < 0.0
-				|| Number > MaxSafeJsonInteger)
-			{
-				return false;
-			}
-			OutValue = static_cast<int64>(Number);
-			return true;
+			UE::UAI::Contract::FDiagnostic NumberError;
+			return Params.IsValid() && UeAgentPropertyValueCodec::TryReadIntegerNumber(
+				Params->TryGetField(Name), 0, static_cast<int64>(MaxSafeJsonInteger), OutValue, NumberError);
 		}
 
 		class FProductionMaintenancePort final
@@ -185,17 +158,11 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 				if (!Caller.IsValid()
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:query")))
 				{
-					return Failure(
-						Request,
-						TEXT("asset_durable_query_authority_required"),
-						TEXT("uai:query is required"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_durable_query_authority_required"), TEXT("uai:query is required"), TEXT("durable_maintenance")));
 				}
 				if (Cancellation->IsCancelled())
 				{
-					return Failure(
-						Request,
-						TEXT("asset_durable_maintenance_cancelled"),
-						TEXT("request was cancelled"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_durable_maintenance_cancelled"), TEXT("request was cancelled"), TEXT("durable_maintenance")));
 				}
 				FString JournalId;
 				const TSharedPtr<FJsonObject>& Params = Request.GetParams();
@@ -204,30 +171,39 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 						TEXT("journal_id"), JournalId)
 					|| JournalId.IsEmpty())
 				{
-					return Failure(
-						Request,
-						TEXT("asset_durable_journal_read_params_invalid"),
-						TEXT("journal_id is required"));
+					auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_durable_journal_read_params_invalid"),
+						TEXT("The journal_id field must be a non-empty string."), TEXT("durable_maintenance"), FString(), Request.GetCommandId());
+					Diagnostic.PropertyPath = TEXT("journal_id");
+					Diagnostic.CandidateName = Request.GetCommandId();
+					const auto Value = Params.IsValid() ? Params->TryGetField(TEXT("journal_id")) : nullptr;
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-empty string"));
+					Diagnostic.ActualValuePresent = Value.IsValid();
+					const auto Actual = MakeShared<FJsonObject>();
+					Actual->SetStringField(TEXT("type"), UeAgentJsonDiagnostics::JsonValueTypeToString(Value));
+					if (Value.IsValid() && Value->Type == EJson::String) Actual->SetBoolField(TEXT("empty"), Value->AsString().IsEmpty());
+					Diagnostic.ActualValue = MakeShared<FJsonValueObject>(Actual);
+					return Failure(Request, Diagnostic);
 				}
 
 				FUeAgentResourceTracker Resources = MakeResources();
 				FAssetDurableSessionPtr Session;
 				TArray<FDurableArtifactState> ObservedStates;
 				FAssetDurableError Error;
-				if (!Port->TryInspect(
+				const bool bInspected = Port->TryInspect(
 						JournalId,
 						Resources,
 						Session,
 						ObservedStates,
-						Error)
-					|| !Session.IsValid())
+						Error);
+				if (!bInspected || !Session.IsValid())
 				{
-					return Failure(
-						Request,
-						Error.IsPresent()
-							? Error.GetCode()
-							: TEXT("asset_durable_journal_read_failed"),
-						Error.GetDetail());
+					auto Diagnostic = Error;
+					if (Error.IsEmpty())
+					{
+						Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_durable_journal_read_failed"), bInspected ? TEXT("The durable journal inspection reported success but returned no session.") : TEXT("The durable journal inspection failed without a diagnostic."), TEXT("durable_maintenance"));
+						Diagnostic.CandidateName = Request.GetCommandId();
+					}
+					return Failure(Request, Diagnostic);
 				}
 
 				const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
@@ -264,13 +240,10 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 					TEXT("observed_states"), States(ObservedStates));
 				Payload->SetBoolField(TEXT("read_only"), true);
 				FString PayloadJson;
-				FString SerializationError;
+				UE::UAI::Contract::FDiagnostic SerializationError;
 				if (!Canonical(Payload, PayloadJson, SerializationError))
 				{
-					return Failure(
-						Request,
-						TEXT("asset_durable_result_serialization_failed"),
-						SerializationError);
+					return Failure(Request, SerializationError);
 				}
 				return FUeAgentCommandResult::Success(
 					Request, MoveTemp(PayloadJson));
@@ -311,40 +284,58 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 				if (!Caller.IsValid()
 					|| !Caller.GetAuthorityScopes().Contains(TEXT("uai:operate")))
 				{
-					return Failure(
-						Request,
-						TEXT("asset_durable_operate_authority_required"),
-						TEXT("uai:operate is required"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_durable_operate_authority_required"), TEXT("uai:operate is required"), TEXT("durable_maintenance")));
 				}
 				if (Cancellation->IsCancelled())
 				{
-					return Failure(
-						Request,
-						TEXT("asset_durable_maintenance_cancelled"),
-						TEXT("request was cancelled"));
+					return Failure(Request, UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_durable_maintenance_cancelled"), TEXT("request was cancelled"), TEXT("durable_maintenance")));
 				}
 				FString JournalId;
 				FString OwnerId;
 				FString VerificationId;
 				int64 FencingToken = -1;
 				const TSharedPtr<FJsonObject>& Params = Request.GetParams();
-				if (!Params.IsValid()
-					|| !Params->TryGetStringField(
-						TEXT("journal_id"), JournalId)
-					|| !Params->TryGetStringField(
-						TEXT("expected_journal_owner_id"), OwnerId)
-					|| !ReadSafeInteger(
-						Params, TEXT("expected_fencing_token"), FencingToken)
-					|| !Params->TryGetStringField(
-						TEXT("verification_id"), VerificationId)
-					|| JournalId.IsEmpty()
-					|| OwnerId.IsEmpty()
-					|| VerificationId.IsEmpty())
+				FString InvalidField;
+				FString Expected;
+				if (!Params.IsValid())
 				{
-					return Failure(
-						Request,
-						TEXT("asset_durable_journal_reconcile_params_invalid"),
-						TEXT("journal_id, expected owner/fence and verification_id are required"));
+					InvalidField = TEXT("params");
+					Expected = TEXT("object");
+				}
+				else
+				{
+					for (const auto& Field : {TPair<const TCHAR*, FString*>(TEXT("journal_id"), &JournalId),
+						TPair<const TCHAR*, FString*>(TEXT("expected_journal_owner_id"), &OwnerId),
+						TPair<const TCHAR*, FString*>(TEXT("verification_id"), &VerificationId)})
+					{
+						if (!Params->TryGetStringField(Field.Key, *Field.Value) || Field.Value->IsEmpty())
+						{
+							InvalidField = Field.Key;
+							Expected = TEXT("non-empty string");
+							break;
+						}
+					}
+					if (InvalidField.IsEmpty() && !ReadSafeInteger(Params, TEXT("expected_fencing_token"), FencingToken))
+					{
+						InvalidField = TEXT("expected_fencing_token");
+						Expected = FString::Printf(TEXT("integer in 0..%lld"), static_cast<int64>(MaxSafeJsonInteger));
+					}
+				}
+				if (!InvalidField.IsEmpty())
+				{
+					auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_durable_journal_reconcile_params_invalid"),
+						TEXT("The journal reconciliation field is missing or does not satisfy its required type."), TEXT("durable_maintenance"), FString(), Request.GetCommandId());
+					Diagnostic.PropertyPath = InvalidField;
+					Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+					Diagnostic.CandidateName = Request.GetCommandId();
+					const auto Value = Params.IsValid() ? Params->TryGetField(InvalidField) : nullptr;
+					Diagnostic.ActualValuePresent = Value.IsValid();
+					const auto Actual = MakeShared<FJsonObject>();
+					Actual->SetStringField(TEXT("type"), UeAgentJsonDiagnostics::JsonValueTypeToString(Value));
+					if (Value.IsValid() && Value->Type == EJson::String) Actual->SetBoolField(TEXT("empty"), Value->AsString().IsEmpty());
+					Diagnostic.ActualValue = MakeShared<FJsonValueObject>(Actual);
+					Diagnostic.PublicMessage = Value.IsValid() ? TEXT("The reconciliation field does not satisfy its required type or value constraint.") : TEXT("A required reconciliation field is missing.");
+					return Failure(Request, Diagnostic);
 				}
 
 				FUeAgentResourceTracker Resources = MakeResources();
@@ -359,12 +350,13 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 						Receipt,
 						Error))
 				{
-					return Failure(
-						Request,
-						Error.IsPresent()
-							? Error.GetCode()
-							: TEXT("asset_durable_journal_reconcile_failed"),
-						Error.GetDetail());
+					auto Diagnostic = Error;
+					if (Error.IsEmpty())
+					{
+						Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(TEXT("asset_durable_journal_reconcile_failed"), TEXT("The durable journal reconciliation failed without a diagnostic."), TEXT("durable_maintenance"));
+						Diagnostic.CandidateName = Request.GetCommandId();
+					}
+					return Failure(Request, Diagnostic);
 				}
 
 				const TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
@@ -407,17 +399,15 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 					FailureObject->SetStringField(
 						TEXT("code"), Receipt.GetFailureCode());
 					FailureObject->SetStringField(
-						TEXT("detail"), Receipt.GetFailureDetail());
+						TEXT("detail"), Receipt.GetFailureDiagnostic().PublicMessage);
+					FailureObject->SetObjectField(TEXT("diagnostic"), Receipt.GetFailureDiagnostic().ToPublicJson());
 					Payload->SetObjectField(TEXT("failure"), FailureObject);
 				}
 				FString PayloadJson;
-				FString SerializationError;
+				UE::UAI::Contract::FDiagnostic SerializationError;
 				if (!Canonical(Payload, PayloadJson, SerializationError))
 				{
-					return Failure(
-						Request,
-						TEXT("asset_durable_result_serialization_failed"),
-						SerializationError);
+					return Failure(Request, SerializationError);
 				}
 				return FUeAgentCommandResult::Success(
 					Request, MoveTemp(PayloadJson));
@@ -437,7 +427,7 @@ namespace UE::UAI::CommandHandlers::AssetDurable
 	bool TryCreateAssetDurableMaintenanceHandlers(
 		TSharedRef<IUeAgentAssetDurableMaintenancePort> Port,
 		TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/GraphCompound/UeAgentGraphCompoundPcgAnimationRoutes.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundRuntime.h"
 
@@ -17,11 +19,12 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetTargetRef() const;
 		const FString& GetTargetKind() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FString TargetRef;
 		FString TargetKind;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FGraphCompoundAnimationOperationRequest final
@@ -36,11 +39,12 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& GetTargetKind() const;
 		const FGraphCompoundCanonicalPayload& GetPayload() const;
 		bool IsValid() const;
+		const Contract::FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		FGraphCompoundAnimationTargetRequest Target;
 		FGraphCompoundCanonicalPayload Payload;
-		bool bValid = false;
+		Contract::FDiagnostic ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API IGraphCompoundAnimationEnvironment
@@ -72,14 +76,11 @@ namespace UE::UAI::Composition::GraphCompound
 	struct UEAGENTINTERFACE_API FGraphCompoundAnimationProductionConfig
 	{
 		FString DurableJournalRoot;
-		double OperationTimeoutSeconds = 120.0;
-
-		bool IsValid() const;
 	};
 
 	UEAGENTINTERFACE_API bool TryCreateAnimationGraphDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>& OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateAnimationGraphBindings(
 		TSharedRef<IGraphCompoundAnimationEnvironment> Environment,

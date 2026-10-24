@@ -1,6 +1,10 @@
 #include "Core/Discovery/Command/UeAgentCommandDiscovery.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
+
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
 
 #include "Core/Contract/Command/UeAgentCommandLifecyclePolicy.h"
+#include "Dom/JsonValue.h"
 
 namespace UE::UAI::Discovery::Command
 {
@@ -14,7 +18,7 @@ namespace UE::UAI::Discovery::Command
 			FCommandCandidate Candidate;
 			int32 Score = 0;
 			TSet<FString> MatchedTokens;
-			TArray<FString> Reasons;
+			TMap<FString, int32> TokenScores;
 		};
 
 		TArray<FString> SearchableTokens(FString Text)
@@ -45,13 +49,7 @@ namespace UE::UAI::Discovery::Command
 			return Tokens;
 		}
 
-		TArray<FString> IntentTokens(FString Intent)
-		{
-			return SearchableTokens(MoveTemp(Intent));
-		}
-
 		void ScoreText(
-			const FString& Label,
 			FString Text,
 			const TArray<FString>& Tokens,
 			const int32 Weight,
@@ -66,9 +64,13 @@ namespace UE::UAI::Discovery::Command
 			{
 				if (TextTokens.Contains(Token))
 				{
-					Scored.Score += Weight;
+					const int32 Previous = Scored.TokenScores.FindRef(Token);
+					if (Weight > Previous)
+					{
+						Scored.Score += Weight - Previous;
+						Scored.TokenScores.Add(Token, Weight);
+					}
 					Scored.MatchedTokens.Add(Token);
-					Scored.Reasons.AddUnique(Label + TEXT(":") + Token);
 				}
 			}
 		}
@@ -88,8 +90,10 @@ namespace UE::UAI::Discovery::Command
 		OutError = {};
 		if (Registry->GetContracts().IsEmpty())
 		{
-			OutError.Code = TEXT("command_registry_empty");
-			OutError.Detail = TEXT("discovery requires an immutable command registry");
+			OutError = FCommandDiscoveryError::Failure(TEXT("command_registry_empty"),
+				TEXT("Command discovery cannot start because the command registry is empty."), TEXT("command_discovery_setup"));
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(0);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("at least one registered command"));
 			return false;
 		}
 		OutService = MakeShareable(new FCommandDiscoveryService(Registry));
@@ -103,129 +107,72 @@ namespace UE::UAI::Discovery::Command
 	{
 		OutPage = {};
 		OutError = {};
-		const TArray<FString> Tokens = IntentTokens(Request.Intent);
+		const TArray<FString> Tokens = SearchableTokens(Request.Intent);
 		if (Tokens.IsEmpty())
 		{
-			OutError.Code = TEXT("command_intent_missing");
-			OutError.Detail = TEXT("intent must contain at least one searchable token");
+			OutError = FCommandDiscoveryError::Failure(TEXT("command_intent_missing"),
+				TEXT("The search intent must contain at least one searchable word."), TEXT("command_search"));
+			OutError.Source.JsonPath = TEXT("/intent");
+			OutError.ActualValue = MakeShared<FJsonValueString>(Request.Intent);
 			return false;
 		}
-		if (Request.Limit < 1 || Request.Limit > 8 || Request.Cursor < 0)
+		const FString ExactIntent = Request.Intent.TrimStartAndEnd();
+		if (const FUeAgentFrozenCommandContract* ExactContract =
+			Registry->FindExact(ExactIntent))
 		{
-			OutError.Code = TEXT("command_search_page_invalid");
-			OutError.Detail = TEXT("limit must be 1..8 and cursor must be non-negative");
-			return false;
+			if (ExactContract->GetAvailability()
+				== EUeAgentCommandAvailability::Enabled)
+			{
+				OutPage.TotalMatches = 1;
+				OutPage.ReturnedCount = 1;
+				FCommandCandidate Candidate;
+				Candidate.CommandId = ExactContract->GetCommandId();
+				OutPage.Candidates.Add(MoveTemp(Candidate));
+			}
+			return true;
 		}
-
 		TArray<FScoredCandidate> Matches;
 		for (const FUeAgentFrozenCommandContract& Contract : Registry->GetContracts())
 		{
 			const EUeAgentCommandAvailability Availability =
 				Contract.GetAvailability();
-			if (Availability == EUeAgentCommandAvailability::Disabled
-				|| (Availability == EUeAgentCommandAvailability::Dormant
-					&& Request.Mode != ECommandSearchMode::Compatibility))
+			if (Availability != EUeAgentCommandAvailability::Enabled)
 			{
 				continue;
 			}
-			const CommandLifecycle::FCommandLifecyclePolicy* Lifecycle =
-				CommandLifecycle::FindExact(Contract.GetCommandId());
 			FScoredCandidate Scored;
 			Scored.Candidate.CommandId = Contract.GetCommandId();
-			Scored.Candidate.ContractHash = Contract.GetContractHash();
-			Scored.Candidate.Summary = Contract.GetPurpose().Summary;
-			Scored.Candidate.Target = Contract.GetPurpose().Target;
-			Scored.Candidate.LifecycleStatus =
-				CommandLifecycle::LexToString(Availability);
-			if (Lifecycle)
-			{
-				Scored.Candidate.SuccessorCommandIds =
-					Lifecycle->SuccessorCommandIds;
-				Scored.Candidate.bRequiresUserConfirmation =
-					Lifecycle->bRequiresUserConfirmation;
-			}
-			Scored.Candidate.bHasSideEffects =
-				Contract.GetSideEffect() != EUeAgentCommandSideEffect::None;
-			ScoreText(TEXT("id"), Contract.GetCommandId(), Tokens, 8, Scored);
-			ScoreText(TEXT("keyword"), JoinValues(Contract.GetPurpose().Keywords), Tokens, 6, Scored);
-			ScoreText(TEXT("synonym"), JoinValues(Contract.GetPurpose().Synonyms), Tokens, 5, Scored);
-			ScoreText(TEXT("summary"), Contract.GetPurpose().Summary, Tokens, 3, Scored);
-			ScoreText(TEXT("target"), Contract.GetPurpose().Target, Tokens, 2, Scored);
-			if (Scored.Score > 0)
-			{
-				Scored.Candidate.MatchReason = FString::Join(Scored.Reasons, TEXT(","));
-				Matches.Add(MoveTemp(Scored));
-			}
+			ScoreText(Contract.GetCommandId(), Tokens, 8, Scored);
+			ScoreText(JoinValues(Contract.GetPurpose().Keywords), Tokens, 6, Scored);
+			ScoreText(JoinValues(Contract.GetPurpose().Synonyms), Tokens, 5, Scored);
 			for (const FUeAgentCommandVariantDeclaration& Variant :
 				Contract.GetVariants())
 			{
-				FScoredCandidate VariantScored;
-				VariantScored.Candidate.CommandId = Contract.GetCommandId();
-				VariantScored.Candidate.ContractHash = Contract.GetContractHash();
-				VariantScored.Candidate.VariantId = Variant.VariantId;
-				VariantScored.Candidate.Summary = Variant.Purpose.Summary;
-				VariantScored.Candidate.Target = Variant.Purpose.Target;
-				VariantScored.Candidate.LifecycleStatus =
-					CommandLifecycle::LexToString(Availability);
-				if (Lifecycle)
-				{
-					VariantScored.Candidate.SuccessorCommandIds =
-						Lifecycle->SuccessorCommandIds;
-					VariantScored.Candidate.bRequiresUserConfirmation =
-						Lifecycle->bRequiresUserConfirmation;
-				}
-				VariantScored.Candidate.bHasSideEffects =
-					Contract.GetSideEffect() != EUeAgentCommandSideEffect::None;
 				ScoreText(
-					TEXT("command_id"),
-					Contract.GetCommandId(),
-					Tokens,
-					8,
-					VariantScored);
-				ScoreText(
-					TEXT("variant_id"),
 					Variant.VariantId,
 					Tokens,
 					10,
-					VariantScored);
+					Scored);
 				ScoreText(
-					TEXT("variant_keyword"),
 					JoinValues(Variant.Purpose.Keywords),
 					Tokens,
 					8,
-					VariantScored);
+					Scored);
 				ScoreText(
-					TEXT("variant_synonym"),
 					JoinValues(Variant.Purpose.Synonyms),
 					Tokens,
 					7,
-					VariantScored);
-				ScoreText(
-					TEXT("variant_summary"),
-					Variant.Purpose.Summary,
-					Tokens,
-					6,
-					VariantScored);
-				ScoreText(
-					TEXT("variant_target"),
-					Variant.Purpose.Target,
-					Tokens,
-					4,
-					VariantScored);
-				if (VariantScored.Score > 0)
-				{
-					VariantScored.Candidate.MatchReason = FString::Join(
-						VariantScored.Reasons, TEXT(","));
-					Matches.Add(MoveTemp(VariantScored));
-				}
+					Scored);
+			}
+			if (Scored.Score > 0)
+			{
+				Matches.Add(MoveTemp(Scored));
 			}
 		}
 		Matches.Sort([](const FScoredCandidate& Left, const FScoredCandidate& Right)
 		{
-			const FString LeftIdentity = Left.Candidate.CommandId
-				+ TEXT("\n") + Left.Candidate.VariantId;
-			const FString RightIdentity = Right.Candidate.CommandId
-				+ TEXT("\n") + Right.Candidate.VariantId;
+			const FString& LeftIdentity = Left.Candidate.CommandId;
+			const FString& RightIdentity = Right.Candidate.CommandId;
 			if (Left.MatchedTokens.Num() != Right.MatchedTokens.Num())
 			{
 				return Left.MatchedTokens.Num() > Right.MatchedTokens.Num();
@@ -236,39 +183,28 @@ namespace UE::UAI::Discovery::Command
 		});
 
 		OutPage.TotalMatches = Matches.Num();
-		if (Request.Cursor > Matches.Num())
+		OutPage.ReturnedCount = Matches.Num();
+		UE::UAI::Contract::FDiagnostic CompletenessError;
+		const ContentDiscovery::FNameDiscoveryCompleteness Completeness{
+			OutPage.TotalMatches,
+			OutPage.ReturnedCount};
+		if (!ContentDiscovery::TryValidateNameDiscoveryCompleteness(
+				Completeness, CompletenessError))
 		{
-			OutError.Code = TEXT("command_search_cursor_invalid");
-			OutError.Detail = TEXT("cursor exceeds the current result set");
+			OutPage = {};
+			OutError = MoveTemp(CompletenessError);
 			return false;
 		}
-		const int32 End = FMath::Min(Request.Cursor + Request.Limit, Matches.Num());
-		for (int32 Index = Request.Cursor; Index < End; ++Index)
+		const int32 End = Matches.Num();
+		for (int32 Index = 0; Index < End; ++Index)
 		{
 			OutPage.Candidates.Add(MoveTemp(Matches[Index].Candidate));
 		}
-		OutPage.bComplete = End >= Matches.Num();
-		OutPage.NextCursor = OutPage.bComplete ? -1 : End;
 		return true;
 	}
 
 	bool FCommandDiscoveryService::GetDetail(
 		const FString& CommandId,
-		const FString& ContractHash,
-		FCommandDetail& OutDetail,
-		FCommandDiscoveryError& OutError) const
-	{
-		return GetDetail(
-			CommandId,
-			ContractHash,
-			FString(),
-			OutDetail,
-			OutError);
-	}
-
-	bool FCommandDiscoveryService::GetDetail(
-		const FString& CommandId,
-		const FString& ContractHash,
 		const FString& VariantId,
 		FCommandDetail& OutDetail,
 		FCommandDiscoveryError& OutError) const
@@ -278,25 +214,21 @@ namespace UE::UAI::Discovery::Command
 		const FUeAgentFrozenCommandContract* Contract = Registry->FindExact(CommandId);
 		if (!Contract)
 		{
-			OutError.Code = TEXT("command_not_registered_exact");
-			OutError.Detail = CommandId;
+			OutError = FCommandDiscoveryError::Failure(TEXT("command_not_registered_exact"),
+				TEXT("No command is registered with this exact name."), TEXT("command_discovery"));
+			OutError.CandidateName = CommandId;
+			OutError.SuggestedFix = TEXT("Use query.command.search to find a registered command name.");
 			return false;
 		}
 		if (Contract->GetAvailability()
 			== EUeAgentCommandAvailability::Disabled)
 		{
-			OutError.Code = TEXT("command_disabled");
-			OutError.Detail = CommandId;
-			return false;
-		}
-		if (Contract->GetContractHash() != ContractHash)
-		{
-			OutError.Code = TEXT("command_contract_version_mismatch");
-			OutError.Detail = CommandId;
+			OutError = FCommandDiscoveryError::Failure(TEXT("command_disabled"),
+				TEXT("This command is disabled in the current Editor."), TEXT("command_discovery"));
+			OutError.CandidateName = CommandId;
 			return false;
 		}
 		OutDetail.CommandId = Contract->GetCommandId();
-		OutDetail.ContractHash = Contract->GetContractHash();
 		OutDetail.PythonNamespace = Contract->GetPythonNamespace();
 		OutDetail.PythonFunction = Contract->GetPythonFunction();
 		OutDetail.PublicOwner = Contract->GetPublicOwner();
@@ -311,8 +243,14 @@ namespace UE::UAI::Discovery::Command
 				});
 			if (Variant == nullptr)
 			{
-				OutError.Code = TEXT("command_variant_not_registered_exact");
-				OutError.Detail = CommandId + TEXT(":") + VariantId;
+				OutError = FCommandDiscoveryError::Failure(TEXT("command_variant_not_registered_exact"),
+					TEXT("The requested variant is not registered for this command."), TEXT("command_discovery"));
+				OutError.CandidateName = CommandId;
+				OutError.ActualValue = MakeShared<FJsonValueString>(VariantId);
+				TArray<TSharedPtr<FJsonValue>> Variants;
+				for (const auto& Candidate : Contract->GetVariants())
+					Variants.Add(MakeShared<FJsonValueString>(Candidate.VariantId));
+				OutError.ExpectedValue = MakeShared<FJsonValueArray>(MoveTemp(Variants));
 				return false;
 			}
 		}
@@ -334,8 +272,6 @@ namespace UE::UAI::Discovery::Command
 		{
 			OutDetail.SuccessorCommandIds = Lifecycle->SuccessorCommandIds;
 			OutDetail.LifecycleReason = Lifecycle->Reason;
-			OutDetail.bRequiresUserConfirmation =
-				Lifecycle->bRequiresUserConfirmation;
 		}
 		OutDetail.bHasSideEffects =
 			Contract->GetSideEffect() != EUeAgentCommandSideEffect::None;

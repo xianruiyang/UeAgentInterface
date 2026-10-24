@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 class AActor;
 class UActorComponent;
@@ -14,8 +15,7 @@ namespace UeAgentLevelAuthoring
 	struct FAuthorabilityResult
 	{
 		bool bAuthorable = false;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 	};
 
 	enum class EAuthorabilityPublicTarget : uint8
@@ -32,8 +32,8 @@ namespace UeAgentLevelAuthoring
 	FAuthorabilityResult EvaluateComponentAuthorability(
 		const UWorld& BoundWorld,
 		const UActorComponent& Component);
-	bool TryNormalizeAuthorabilityFailure(
-		const FString& LookupError,
+	bool TryMapAuthorabilityFailure(
+		const UE::UAI::Contract::FDiagnostic& LookupError,
 		EAuthorabilityPublicTarget PublicTarget,
 		FAuthorabilityResult& OutFailure);
 }

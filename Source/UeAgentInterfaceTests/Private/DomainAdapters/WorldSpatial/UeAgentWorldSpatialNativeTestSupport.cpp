@@ -233,19 +233,7 @@ namespace UE::UAI::Tests::WorldSpatial
 
 		FUeAgentResourceTrackerOwner MakeResources()
 		{
-			return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>(
-				FUeAgentResourceBudget({
-					{EUeAgentResourceDimension::InputBytes, 4 * 1024 * 1024},
-					{EUeAgentResourceDimension::OutputBytes, 4 * 1024 * 1024},
-					{EUeAgentResourceDimension::Nodes, 100000},
-					{EUeAgentResourceDimension::Items, 100000},
-					{EUeAgentResourceDimension::StringBytes, 4 * 1024 * 1024},
-					{EUeAgentResourceDimension::WorkUnits, 100000},
-					{
-						EUeAgentResourceDimension::EstimatedMemoryBytes,
-						16 * 1024 * 1024,
-					},
-				}));
+			return MakeShared<FUeAgentResourceTracker, ESPMode::ThreadSafe>();
 		}
 
 		const FUeAgentOperationDescriptor* FindCapability(
@@ -915,14 +903,6 @@ namespace UE::UAI::Tests::WorldSpatial
 			return true;
 		};
 
-		if (CapabilityId == TEXT("graph.view.update"))
-		{
-			const TSharedPtr<FJsonObject> State =
-				RawInput->GetObjectField(TEXT("view_state"));
-			return WriteRevision(
-				State->GetObjectField(TEXT("graph_revision")),
-				State->GetObjectField(TEXT("location"))->GetStringField(TEXT("subject")));
-		}
 		if (CapabilityId == TEXT("graph.layout.apply"))
 		{
 			return WriteRevision(
@@ -935,43 +915,6 @@ namespace UE::UAI::Tests::WorldSpatial
 				RawInput->GetObjectField(TEXT("expected_revision")),
 				RawInput->GetObjectField(TEXT("transform"))
 					->GetStringField(TEXT("subject")));
-		}
-		if (CapabilityId == TEXT("world.object_align")
-			|| CapabilityId == TEXT("world.object_snap_to_surface"))
-		{
-			for (const TSharedPtr<FJsonValue>& Value
-				: RawInput->GetArrayField(TEXT("expected_revisions")))
-			{
-				const TSharedPtr<FJsonObject> Entry = Value->AsObject();
-				if (!WriteRevision(
-						Entry->GetObjectField(TEXT("revision")),
-						Entry->GetStringField(TEXT("target_ref"))))
-				{
-					return false;
-				}
-			}
-		}
-		else if (CapabilityId == TEXT("mesh.transform.bake"))
-		{
-			return WriteRevision(
-				RawInput->GetObjectField(TEXT("expected_revision")),
-				RawInput->GetObjectField(TEXT("transform"))
-					->GetStringField(TEXT("subject")));
-		}
-		else if (CapabilityId == TEXT("mesh.pivot.update"))
-		{
-			return WriteRevision(
-				RawInput->GetObjectField(TEXT("expected_revision")),
-				RawInput->GetObjectField(TEXT("pivot"))
-					->GetStringField(TEXT("subject")));
-		}
-		else if (CapabilityId == TEXT("viewport.state.restore"))
-		{
-			const TSharedPtr<FJsonObject> Snapshot =
-				RawInput->GetObjectField(TEXT("snapshot"));
-			return WriteRevision(
-				Snapshot->GetObjectField(TEXT("observed_revision")),
-				Snapshot->GetStringField(TEXT("viewport_ref")));
 		}
 		return true;
 	}

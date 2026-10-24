@@ -38,47 +38,27 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 			Result.StateLayers = {TEXT("asset_persisted_state")};
 			Result.InputFields = {
 				Field(TEXT("target"), TEXT("string"), true,
-					TEXT("Exact public Blueprint package.object identity copied from content search.")),
-				Field(TEXT("graph_id"), TEXT("string"), true,
-					TEXT("Exact stable graph identity copied from content_graph.structure.")),
+					TEXT("Blueprint name returned by content search, or an exact Blueprint package.object path.")),
+				Field(TEXT("graph_name"), TEXT("string"), true,
+					TEXT("Readable graph name copied from the settled Blueprint structure.")),
 				Field(TEXT("query"), TEXT("string"), false,
-					TEXT("Optional bounded candidate-name or display-name filter.")),
-				Field(TEXT("id"), TEXT("string"), false,
-					TEXT("Optional exact candidate id returned by an earlier page.")),
-				Field(TEXT("node_guid"), TEXT("string"), false,
-					TEXT("Optional exact source-node GUID for a pin-drag menu context.")),
-				Field(TEXT("pin_guid"), TEXT("string"), false,
-					TEXT("Optional exact source-pin GUID for a pin-drag menu context.")),
+					TEXT("Optional candidate-name or display-name filter.")),
+				Field(TEXT("node_name"), TEXT("string"), false,
+					TEXT("Optional readable source-node name for a pin-drag context.")),
+				Field(TEXT("node_occurrence"), TEXT("integer"), false,
+					TEXT("Optional zero-based occurrence when node_name is repeated in the graph.")),
 				Field(TEXT("pin_name"), TEXT("string"), false,
-					TEXT("Optional source-pin name when pin_guid is unavailable.")),
-				Field(TEXT("limit"), TEXT("integer"), false,
-					TEXT("Optional page size from 1 through 20; defaults to 20.")),
-				Field(TEXT("cursor"), TEXT("integer"), false,
-					TEXT("Optional non-negative result offset; defaults to zero.")),
+					TEXT("Optional readable source-pin name; requires node_name.")),
+				Field(TEXT("pin_occurrence"), TEXT("integer"), false,
+					TEXT("Optional zero-based occurrence when pin_name is repeated on the node.")),
 			};
 			Result.ResultFields = {
-				Field(TEXT("command_id"), TEXT("string"), true,
-					TEXT("The unchanged exact public command identity.")),
-				Field(TEXT("read_only"), TEXT("boolean"), true,
-					TEXT("Always true.")),
-				Field(TEXT("target"), TEXT("string"), true,
-					TEXT("The unchanged exact Blueprint identity.")),
-				Field(TEXT("graph"), TEXT("object"), true,
-					TEXT("Resolved stable graph identity and kind.")),
-				Field(TEXT("graph_revision"), TEXT("string"), true,
-					TEXT("Current persisted graph revision for optimistic fencing.")),
-				Field(TEXT("context"), TEXT("object"), true,
-					TEXT("Exact graph and optional pin menu context used for enumeration.")),
-				Field(TEXT("candidates"), TEXT("array"), true,
-					TEXT("Native Action Menu candidates; candidate.name or candidate.id is a direct HJSON creation selector.")),
-				Field(TEXT("total_matching"), TEXT("integer"), true,
-					TEXT("Total native menu candidates matching the current query.")),
-				Field(TEXT("next_cursor"), TEXT("integer"), true,
-					TEXT("Next result offset, or -1 when complete.")),
-				Field(TEXT("complete"), TEXT("boolean"), true,
-					TEXT("True only when this is the final page of the native menu set.")),
-				Field(TEXT("has_more"), TEXT("boolean"), true,
-					TEXT("True only while another page remains.")),
+				Field(TEXT("scope"), TEXT("object"), true,
+					TEXT("Public target and graph_name for this query; response context, not a node selector. Pin context is in candidate_context when present.")),
+				Field(TEXT("names"), TEXT("array"), true,
+					TEXT("Distinct readable candidate names accepted by Blueprint HJSON creation in the same context.")),
+				Field(TEXT("candidate_context"), TEXT("object"), false,
+					TEXT("For a pin-context query, copy this node/pin alias object unchanged beside the new HJSON node's candidate.")),
 			};
 			Result.Errors = {
 				{TEXT("blueprint_node_query_authority_required"),
@@ -86,45 +66,44 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 				{TEXT("blueprint_node_target_unresolved"),
 					TEXT("The exact Blueprint identity could not be resolved.")},
 				{TEXT("blueprint_node_graph_unresolved"),
-					TEXT("The exact stable graph identity could not be resolved.")},
+					TEXT("The readable graph name could not be resolved.")},
+				{TEXT("blueprint_node_graph_ambiguous"),
+					TEXT("The readable graph name is repeated and cannot identify one graph.")},
 				{TEXT("blueprint_node_candidate_unresolved"),
 					TEXT("The real Blueprint action database has no supported candidate.")},
-				{TEXT("blueprint_node_candidate_page_invalid"),
-					TEXT("The requested limit or cursor is outside the bounded contract.")},
-				{TEXT("node_guid_invalid"),
-					TEXT("The source-node GUID is not a valid GUID.")},
-				{TEXT("node_not_found"),
-					TEXT("The requested source node does not exist in this graph.")},
-				{TEXT("pin_guid_invalid"),
-					TEXT("The source-pin GUID is not a valid GUID.")},
-				{TEXT("pin_selector_required"),
-					TEXT("node_guid requires pin_guid or pin_name because node-only context is not a native Action Menu scope.")},
-				{TEXT("pin_not_found"),
-					TEXT("The requested source pin does not exist in this graph context.")},
-				{TEXT("pin_ambiguous"),
-					TEXT("The pin name matches more than one pin; provide node_guid or pin_guid.")},
+				{TEXT("blueprint_node_candidate_query_invalid"),
+					TEXT("The requested readable occurrence is invalid.")},
+				{TEXT("blueprint_node_pin_context_incomplete"),
+					TEXT("A pin-drag context requires both node_name and pin_name.")},
+				{TEXT("blueprint_node_context_ambiguous"),
+					TEXT("The readable node name is repeated; provide node_occurrence.")},
+				{TEXT("blueprint_node_context_not_found"),
+					TEXT("The readable node name does not identify a current graph node.")},
+				{TEXT("blueprint_pin_context_ambiguous"),
+					TEXT("The readable pin name is repeated; provide pin_occurrence.")},
+				{TEXT("blueprint_pin_context_not_found"),
+					TEXT("The readable pin name does not identify a current node pin.")},
 			};
 			Result.Purpose.Summary =
 				TEXT("Resolve exact Blueprint node creation candidates for one persisted graph.");
 			Result.Purpose.Target =
 				TEXT("One exact Blueprint graph identity.");
 			Result.Purpose.Preconditions = {
-				TEXT("Copy target and graph_id unchanged from public content search and graph query."),
-				TEXT("Invoke the exact contract hash on the UE game thread."),
+				TEXT("Copy graph_name from the settled Blueprint structure."),
+				TEXT("For a pin-drag context, use readable node and pin names from the settled graph interface."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Search the exact graph or pin context, continue paging while has_more is true, then copy either candidate.name or candidate.id into the HJSON candidate selector.");
+				TEXT("Search the intended target and graph or readable pin context. Copy one returned name into candidate.name, and returned candidate_context beside candidate when present. Add node_occurrence or pin_occurrence only when that readable name is repeated.");
 			Result.Purpose.ResultGuidance =
-				TEXT("candidate.name is sufficient only when unique in this exact context; candidate.id is the exact compact selector. Specialized rows also expose safe function_name/function_owner_class, event_name/event_class, variable_name/node_type/member_parent_class, node_class or promotable-operator operation_name semantics. Copy them only as optional exact HJSON assertions; a promotable operator is not one fixed function, and native_action_signature plus internal spawner data are never public.");
+				TEXT("Reuse names within the returned scope. When target, graph or pin context changes, query the needed names there. scope is response metadata; only candidate.name and optional candidate_context enter the new node. Creation re-enumerates the same native context.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Unresolved or ambiguous candidates fail before any write and never fall back to a class alias.");
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Read-only with no persistent or external side effects.");
 			Result.Purpose.MinimumExample =
-				TEXT("client.blueprint.node_candidates(target, graph_id, query='FInterp To', limit=10)");
+				TEXT("client.blueprint.node_candidates(target, graph_name='EventGraph', query='FInterp To')");
 			Result.Purpose.RelatedFlows = {
 				TEXT("query.command.search"),
-				TEXT("query.command.detail"),
 				TEXT("content_graph.structure"),
 				TEXT("content_graph.import_workspace"),
 			};
@@ -164,7 +143,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				return TryCreateBlueprintNodeCommandHandlers(
 					Service, OutHandlers, OutError);
@@ -183,7 +162,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 	bool TryCreateBlueprintNodeContribution(
 		TSharedRef<IUeAgentBlueprintNodeCommandService> Service,
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution = MakeShared<FContribution>(MoveTemp(Service));
 		OutError.Reset();
@@ -192,7 +171,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 
 	bool TryCreateProductionBlueprintNodeContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		TSharedPtr<IUeAgentBlueprintNodeCommandService> Service;
 		if (!TryCreateProductionBlueprintNodeCommandService(Service, OutError))
@@ -208,7 +187,7 @@ namespace UE::UAI::Module::CommandRegistration::BlueprintNode
 		TSharedRef<IUeAgentBlueprintNodeCommandService> Service,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();

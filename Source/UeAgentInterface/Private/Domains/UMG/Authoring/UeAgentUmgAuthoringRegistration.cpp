@@ -11,7 +11,7 @@
 
 namespace UeAgentUmgAuthoring
 {
-	bool RegisterAuthoring(FString& OutError)
+	bool RegisterAuthoring(UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		// Blueprint is registered earlier by its own root; UMG only declares UMG-owned registrations here.
 		if (!RegisterDescriptors(OutError)

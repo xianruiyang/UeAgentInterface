@@ -6,8 +6,10 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringProjection.h"
+#include "Domains/Blueprint/Authoring/UeAgentBlueprintAssetLifecycle.h"
 #include "Domains/Blueprint/Authoring/UeAgentBlueprintAuthoringState.h"
 #include "Engine/Blueprint.h"
+#include "Misc/ScopeExit.h"
 #include "Utilities/AuthoringCore/UeAgentAuthoringState.h"
 #include "Utilities/AuthoringExport/UeAgentSnapshotProjector.h"
 
@@ -47,12 +49,20 @@ TSharedPtr<FJsonValue> RewritePackagePath(const TSharedPtr<FJsonValue> &Value,
 }
 } // namespace
 
-bool BuildReusableProviderExtension(UBlueprint &Blueprint,
+static bool BuildReusableState(UBlueprint &Blueprint,
                                     TSharedPtr<FJsonObject> &OutExtension,
-                                    FString &OutError,
-                                    const FString &CanonicalAssetPath) {
+                                    UE::UAI::Contract::FDiagnostic& OutError,
+                                    const FString &CanonicalAssetPath,
+                                    const bool bForVerification) {
   OutExtension.Reset();
   OutError.Reset();
+  const FString TargetPath = CanonicalAssetPath.IsEmpty()
+      ? UeAgentBlueprintAssetLifecycle::GetAuthoringTargetPath(Blueprint)
+      : CanonicalAssetPath;
+  ON_SCOPE_EXIT {
+    if (!OutError.IsEmpty() && OutError.TargetPath.IsEmpty())
+      OutError.TargetPath = TargetPath;
+  };
 
   UeAgentExportContract::FContract Contract;
   if (!GetExportContract(Contract, OutError))
@@ -72,23 +82,35 @@ bool BuildReusableProviderExtension(UBlueprint &Blueprint,
   }
 
   TArray<UeAgentAuthoringState::FReadRequest> Requests;
-  if (!AppendReusableBlueprintExportSnapshotReadRequests(
-          Blueprint, Requests, OutError, Blueprint.GetOutermost()->GetName())) {
+  const auto AppendRequests = bForVerification
+      ? AppendReusableBlueprintVerificationReadRequests
+      : AppendReusableBlueprintExportSnapshotReadRequests;
+  if (!AppendRequests(
+          Blueprint, Requests, OutError,
+          CanonicalAssetPath.IsEmpty() ? Blueprint.GetOutermost()->GetName()
+                                       : CanonicalAssetPath)) {
     return false;
   }
   UeAgentAuthoringState::FCaptureResult Capture;
   if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture)) {
-    OutError = Capture.ErrorCode + TEXT(":") + Capture.ErrorDetail;
+    OutError = Capture.Diagnostic;
     return false;
   }
   UeAgentSnapshotProjector::FProjectionResult Projection;
   if (!UeAgentSnapshotProjector::ProjectSnapshot(
           Contract, TEXT("llm_authoring"), Capture.Snapshot, Projection)) {
-    OutError = Projection.ErrorCode + TEXT(":") + Projection.ErrorDetail;
+    OutError = Projection.Diagnostic;
     return false;
   }
   if (Projection.Files.Num() != 1) {
-    OutError = TEXT("blueprint_reusable_projection_file_count_invalid");
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(
+        TEXT("blueprint_reusable_projection_file_count_invalid"),
+        TEXT("Reusable Blueprint projection must produce exactly one file."),
+        TEXT("export_projection"));
+    OutError.SourceKind = TEXT("native_result");
+    OutError.PropertyPath = TEXT("projected_file_count");
+    OutError.ActualValue = MakeShared<FJsonValueNumber>(Projection.Files.Num());
+    OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
     return false;
   }
   TSharedPtr<FJsonObject> Root;
@@ -103,7 +125,22 @@ bool BuildReusableProviderExtension(UBlueprint &Blueprint,
       !Provider || !Provider->IsValid() ||
       !(*Provider)->TryGetObjectField(TEXT("blueprint"), BlueprintExtension) ||
       !BlueprintExtension || !BlueprintExtension->IsValid()) {
-    OutError = TEXT("blueprint_reusable_projection_missing_extension");
+    const bool bProviderObject = Provider && Provider->IsValid();
+    OutError = UE::UAI::Contract::FDiagnostic::Failure(
+        TEXT("blueprint_reusable_projection_missing_extension"),
+        !Root.IsValid() ? TEXT("Reusable Blueprint projection produced no root object.")
+            : !bProviderObject ? TEXT("The projected root has no provider_extension object.")
+            : TEXT("The projected provider_extension has no blueprint object."),
+        TEXT("export_projection"));
+    OutError.SourceKind = TEXT("native_result");
+    OutError.PropertyPath = !Root.IsValid() ? TEXT("/")
+        : !bProviderObject ? TEXT("/provider_extension")
+        : TEXT("/provider_extension/blueprint");
+    OutError.ActualValue = !Root.IsValid() ? TSharedPtr<FJsonValue>()
+        : !bProviderObject ? Root->TryGetField(TEXT("provider_extension"))
+        : (*Provider)->TryGetField(TEXT("blueprint"));
+    OutError.ActualValuePresent = OutError.ActualValue.IsValid();
+    OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("an object"));
     return false;
   }
   const TSharedPtr<FJsonValue> Rewritten = RewritePackagePath(
@@ -113,25 +150,45 @@ bool BuildReusableProviderExtension(UBlueprint &Blueprint,
   return true;
 }
 
+bool BuildReusableProviderExtension(UBlueprint &Blueprint,
+    TSharedPtr<FJsonObject> &OutExtension, UE::UAI::Contract::FDiagnostic& OutError,
+    const FString &CanonicalAssetPath) {
+  return BuildReusableState(Blueprint, OutExtension, OutError, CanonicalAssetPath, false);
+}
+
+bool BuildReusableVerificationState(UBlueprint &Blueprint,
+    TSharedPtr<FJsonObject> &OutState, UE::UAI::Contract::FDiagnostic& OutError,
+    const FString &CanonicalAssetPath) {
+  return BuildReusableState(Blueprint, OutState, OutError, CanonicalAssetPath, true);
+}
+
 bool ExportAssetWorkspace(
     UObject &Asset, const FString &WorkspaceRoot, const FString &ProfileId,
-    UeAgentExportWorkspaceWriter::FWorkspaceResult &OutResult,
-    FString &OutError) {
+    UeAgentExportWorkspaceWriter::FWorkspaceResult &OutResult) {
+  auto& OutError = OutResult.Diagnostic;
   OutResult = UeAgentExportWorkspaceWriter::FWorkspaceResult();
   OutError.Reset();
 
   TArray<UeAgentAuthoringState::FReadRequest> Requests;
-  if (!BuildAssetExportSnapshotReadRequests(Asset, Requests, OutError))
-    return false;
-
-  UeAgentAuthoringState::FCaptureResult Capture;
-  if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture)) {
-    OutError = Capture.ErrorCode + TEXT(":") + Capture.ErrorDetail;
+  if (!BuildAssetExportSnapshotReadRequests(Asset, Requests, OutError)) {
+    UE_LOG(LogTemp, Error, TEXT("Blueprint workspace export requests failed for %s: %s"),
+           *Asset.GetPathName(), *OutError.ToPublicDetail());
     return false;
   }
 
-  return UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(
-      TEXT("ue.blueprint.asset"), ProfileId, Capture.Snapshot,
-      WorkspaceRoot, OutResult, OutError);
+  UeAgentAuthoringState::FCaptureResult Capture;
+  if (!UeAgentAuthoringState::CaptureSnapshot(Requests, Capture)) {
+    OutError = Capture.Diagnostic;
+    UE_LOG(LogTemp, Error, TEXT("Blueprint workspace export capture failed for %s: %s"),
+           *Asset.GetPathName(), *OutError.ToPublicDetail());
+    return false;
+  }
+
+  const bool bExported = UE::UAI::HjsonWorkspace::TryExportCompositionWorkspace(TEXT("ue.blueprint.asset"), ProfileId, Capture.Snapshot, WorkspaceRoot, OutResult);
+  if (!bExported) {
+    UE_LOG(LogTemp, Error, TEXT("Blueprint workspace export projection failed for %s: %s %s"),
+           *Asset.GetPathName(), *OutResult.Diagnostic.Code, *OutError.ToPublicDetail());
+  }
+  return bExported;
 }
 } // namespace UeAgentBlueprintAuthoring

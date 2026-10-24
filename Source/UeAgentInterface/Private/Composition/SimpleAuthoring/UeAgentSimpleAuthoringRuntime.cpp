@@ -1,5 +1,7 @@
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringRuntime.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/SimpleAuthoring/Families/AssetData/UeAgentAssetDataSimpleAuthoringProduction.h"
 #include "Composition/SimpleAuthoring/Families/EditorProject/UeAgentEditorProjectSimpleAuthoringProduction.h"
 #include "Composition/SimpleAuthoring/Families/Landscape/UeAgentLandscapeSimpleAuthoringProduction.h"
@@ -17,6 +19,7 @@
 #include "DomainAdapters/ModelingGeometryEffect/UeAgentModelingGeometryEffectCapabilities.h"
 #include "DomainAdapters/WorldSimpleEffect/UeAgentWorldSimpleEffectCapabilities.h"
 #include "DomainAdapters/WorldSimpleEffect/UeAgentWorldSimpleEffectProduction.h"
+#include "Dom/JsonValue.h"
 #include "Engine/World.h"
 #include "Misc/Paths.h"
 #include "WorldPartition/WorldPartition.h"
@@ -39,16 +42,11 @@ namespace UE::UAI::Composition::SimpleAuthoring
 
 	namespace
 	{
-		void SetError(
-			FUeAgentSimpleAuthoringRuntimeError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
-		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
-		}
+		void SetError(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& SubjectId = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = SubjectId;
+        }
 
 		class FUnavailableAbsenceOracle final : public IAbsenceOracle
 		{
@@ -101,8 +99,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					false,
 					false,
 					false),
-				FUeAgentPageRequest(),
-				TOptional<int64>(),
 				{},
 				{});
 		}
@@ -110,13 +106,40 @@ namespace UE::UAI::Composition::SimpleAuthoring
 
 	bool FUeAgentSimpleAuthoringRuntimeConfig::IsValid() const
 	{
-		return !ProjectInstanceId.TrimStartAndEnd().IsEmpty()
-			&& !EditorInstanceId.TrimStartAndEnd().IsEmpty()
-			&& !ServerSessionId.TrimStartAndEnd().IsEmpty()
-			&& RegistryEpoch > 0
-			&& TimeoutSeconds > 0.0
-			&& MaxFrameBytes > 0
-			&& !JournalRoot.TrimStartAndEnd().IsEmpty();
+		Contract::FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FUeAgentSimpleAuthoringRuntimeConfig::TryValidate(Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		const auto RequireText = [&](const FString& Value, const FString& Field)
+		{
+			if (!Value.TrimStartAndEnd().IsEmpty()) return true;
+			OutError = Contract::FDiagnostic::Failure(TEXT("simple_authoring_runtime_config_invalid"),
+				FString::Printf(TEXT("Authoring runtime configuration '%s' must not be empty or whitespace."), *Field),
+				TEXT("runtime_factory"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = Field;
+			OutError.ActualValue = MakeShared<FJsonValueString>(Value);
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("non-whitespace string"));
+			return false;
+		};
+		if (!RequireText(ProjectInstanceId, TEXT("project_instance_id"))
+			|| !RequireText(EditorInstanceId, TEXT("editor_instance_id"))
+			|| !RequireText(ServerSessionId, TEXT("server_session_id")))
+			return false;
+		if (RegistryEpoch <= 0)
+		{
+			OutError = Contract::FDiagnostic::Failure(TEXT("simple_authoring_runtime_config_invalid"),
+				TEXT("The authoring registry epoch must be greater than zero."), TEXT("runtime_factory"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("registry_epoch");
+			OutError.ActualValue = MakeShared<FJsonValueString>(::LexToString(RegistryEpoch));
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("> 0"));
+			return false;
+		}
+		return RequireText(JournalRoot, TEXT("journal_root"));
 	}
 
 	bool FUeAgentSimpleAuthoringRuntime::TryCreate(
@@ -129,43 +152,55 @@ namespace UE::UAI::Composition::SimpleAuthoring
 	{
 		OutRuntime.Reset();
 		OutError = {};
-		if (!Config.IsValid()
-			|| !IsInGameThread()
-			|| !IsValid(&ExplicitWorld)
-			|| !ExplicitWorld.PersistentLevel)
+		if (!Config.TryValidate(OutError)) return false;
+		if (!IsInGameThread())
 		{
-			SetError(
-				OutError,
-				TEXT("simple_authoring_runtime_config_invalid"));
+			OutError = Contract::FDiagnostic::Failure(TEXT("simple_authoring_runtime_config_invalid"),
+				TEXT("The authoring runtime must be created on the game thread."), TEXT("runtime_factory"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("game_thread");
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			return false;
+		}
+		if (!IsValid(&ExplicitWorld))
+		{
+			OutError = Contract::FDiagnostic::Failure(TEXT("simple_authoring_runtime_config_invalid"),
+				TEXT("The supplied authoring world is no longer valid."), TEXT("runtime_factory"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("world/valid");
+			OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			return false;
+		}
+		if (!ExplicitWorld.PersistentLevel)
+		{
+			OutError = Contract::FDiagnostic::Failure(TEXT("simple_authoring_runtime_config_invalid"),
+				TEXT("The supplied authoring world has no persistent level."), TEXT("runtime_factory"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.TargetPath = ExplicitWorld.GetPathName();
+			OutError.PropertyPath = TEXT("world/persistent_level");
+			OutError.ActualValuePresent = false;
+			OutError.ExpectedValuePresent = true;
 			return false;
 		}
 
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry> Descriptors;
-		FString CompositionError;
+		UE::UAI::Contract::FDiagnostic CompositionError;
 		if (!TryCreateSimpleAuthoringDescriptorRegistry(
 				Descriptors,
-				CompositionError)
-			|| !Descriptors.IsValid())
+				CompositionError))
 		{
-			SetError(
-				OutError,
-				TEXT("simple_authoring_runtime_descriptors_unavailable"),
-				FString(),
-				CompositionError);
+			SetError(OutError, CompositionError, FString());
 			return false;
 		}
 
 		TSharedPtr<const FUeAgentCommandContractRegistry> Registry;
 		if (!TryCreateProductionCommandContractRegistry(
 				Registry,
-				CompositionError)
-			|| !Registry.IsValid())
+				CompositionError))
 		{
-			SetError(
-				OutError,
-				TEXT("simple_authoring_runtime_registry_unavailable"),
-				FString(),
-				CompositionError);
+			SetError(OutError, CompositionError, FString());
 			return false;
 		}
 
@@ -181,11 +216,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		ExecutionMutation::FExecutionMutationError WorldError;
 		if (!WorldCatalog->TryEnumerate(Worlds, WorldError))
 		{
-			SetError(
-				OutError,
-				WorldError.GetCode(),
-				ExplicitWorld.GetPathName(),
-				WorldError.GetDetail());
+			OutError = WorldError;
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = ExplicitWorld.GetPathName();
 			return false;
 		}
 		const FUeAgentWorldSimpleEffectWorldCandidate* WorldCandidate =
@@ -195,12 +227,67 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				{
 					return Candidate.GetWorld() == &ExplicitWorld;
 				});
-		if (!WorldCandidate || !WorldCandidate->IsValid())
+		if (!WorldCandidate)
 		{
-			SetError(
-				OutError,
-				TEXT("simple_authoring_runtime_world_not_cataloged"),
-				ExplicitWorld.GetPathName());
+			OutError = Contract::FDiagnostic::Failure(TEXT("simple_authoring_runtime_world_not_cataloged"),
+				TEXT("The supplied authoring world is absent from the execution world catalog."), TEXT("runtime_factory"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.TargetPath = ExplicitWorld.GetPathName();
+			OutError.PropertyPath = TEXT("world_candidate");
+			OutError.ActualValuePresent = false;
+			OutError.ExpectedValuePresent = true;
+			return false;
+		}
+		if (!WorldCandidate->IsValid())
+		{
+			FString Field;
+			FString Expected;
+			TSharedPtr<FJsonValue> Actual;
+			if (!::IsValid(WorldCandidate->GetWorld()))
+			{
+				Field = TEXT("world/valid");
+				Expected = TEXT("valid world");
+				Actual = MakeShared<FJsonValueBoolean>(false);
+			}
+			else if (WorldCandidate->GetWorldIdentity().IsEmpty())
+			{
+				Field = TEXT("world_identity");
+				Expected = TEXT("non-empty identity");
+				Actual = MakeShared<FJsonValueString>(FString());
+			}
+			else if (WorldCandidate->GetLevelIdentity().IsEmpty())
+			{
+				Field = TEXT("level_identity");
+				Expected = TEXT("non-empty identity");
+				Actual = MakeShared<FJsonValueString>(FString());
+			}
+			else if (WorldCandidate->GetWorldType() == EUeAgentExecutionWorldType::Invalid)
+			{
+				Field = TEXT("world_type");
+				Expected = TEXT("valid execution world type");
+				Actual = MakeShared<FJsonValueString>(TEXT("invalid"));
+			}
+			else if (WorldCandidate->GetContextRevision().IsEmpty())
+			{
+				Field = TEXT("context_revision");
+				Expected = TEXT("non-empty revision");
+				Actual = MakeShared<FJsonValueString>(FString());
+			}
+			else
+			{
+				Field = TEXT("pie_instance_id");
+				Expected = TEXT("instance ID for a PIE world");
+			}
+			OutError = Contract::FDiagnostic::Failure(TEXT("simple_authoring_runtime_world_not_cataloged"),
+				FString::Printf(TEXT("The cataloged authoring world requires %s for '%s'."), *Expected, *Field),
+				TEXT("runtime_factory"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.TargetPath = ExplicitWorld.GetPathName();
+			OutError.PropertyPath = Field;
+			OutError.ActualValuePresent = Actual.IsValid();
+			OutError.ActualValue = MoveTemp(Actual);
+			OutError.ExpectedValuePresent = true;
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(Expected);
 			return false;
 		}
 
@@ -249,11 +336,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					EditorProjectResolvers,
 					ResolverError))
 		{
-			SetError(
-				OutError,
-				ResolverError.Code,
-				ResolverError.SubjectId,
-				ResolverError.Detail);
+			OutError = ResolverError;
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = ResolverError.SubjectId;
 			return false;
 		}
 
@@ -268,11 +352,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					StageError)
 			|| !ConfigStageSource.IsValid())
 		{
-			SetError(
-				OutError,
-				StageError.Code,
-				StageError.SubjectId,
-				StageError.Detail);
+			SetError(OutError, MoveTemp(StageError));
 			return false;
 		}
 
@@ -298,11 +378,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				DurableError)
 			|| !DurableService.IsValid())
 		{
-			SetError(
-				OutError,
-				DurableError.Code,
-				DurableError.SubjectId,
-				DurableError.Detail);
+			OutError = DurableError;
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = DurableError.SubjectId;
 			return false;
 		}
 
@@ -335,8 +412,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				Provider,
 				WorldProviderError))
 		{
-			SetError(OutError, WorldProviderError.Code,
-				WorldProviderError.SubjectId, WorldProviderError.Detail);
+			OutError = WorldProviderError;
 			return false;
 		}
 		Providers.Add(Provider.ToSharedRef());
@@ -364,9 +440,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Provider,
 					LandscapeProviderError))
 		{
-			SetError(OutError, LandscapeProviderError.Code,
-				LandscapeProviderError.SubjectId,
-				LandscapeProviderError.Detail);
+			OutError = LandscapeProviderError;
 			return false;
 		}
 		Providers.Add(Provider.ToSharedRef());
@@ -391,9 +465,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Provider,
 					ModelingProviderError))
 		{
-			SetError(OutError, ModelingProviderError.Code,
-				ModelingProviderError.SubjectId,
-				ModelingProviderError.Detail);
+			OutError = ModelingProviderError;
 			return false;
 		}
 		Providers.Add(Provider.ToSharedRef());
@@ -420,9 +492,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Provider,
 					AssetDataProviderError))
 		{
-			SetError(OutError, AssetDataProviderError.Code,
-				AssetDataProviderError.SubjectId,
-				AssetDataProviderError.Detail);
+			OutError = AssetDataProviderError;
 			return false;
 		}
 		Providers.Add(Provider.ToSharedRef());
@@ -453,9 +523,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 					Provider,
 					EditorProjectProviderError))
 		{
-			SetError(OutError, EditorProjectProviderError.Code,
-				EditorProjectProviderError.SubjectId,
-				EditorProjectProviderError.Detail);
+			OutError = EditorProjectProviderError;
 			return false;
 		}
 		Providers.Add(Provider.ToSharedRef());
@@ -486,8 +554,6 @@ namespace UE::UAI::Composition::SimpleAuthoring
 		ApplicationConfig.ExecutionContext.bResolvedFromCurrent = false;
 		ApplicationConfig.ServerSessionId = Config.ServerSessionId;
 		ApplicationConfig.RegistryEpoch = Config.RegistryEpoch;
-		ApplicationConfig.TimeoutSeconds = Config.TimeoutSeconds;
-		ApplicationConfig.MaxFrameBytes = Config.MaxFrameBytes;
 
 		TSharedPtr<FUeAgentSimpleAuthoringApplication> Application;
 		FUeAgentSimpleAuthoringApplicationError ApplicationError;
@@ -501,8 +567,8 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				ApplicationError)
 			|| !Application.IsValid())
 		{
-			SetError(OutError, ApplicationError.Code,
-				ApplicationError.SubjectId, ApplicationError.Detail);
+			OutError = ApplicationError;
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = ApplicationError.SubjectId;
 			return false;
 		}
 
@@ -513,11 +579,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				Handlers,
 				CompositionError))
 		{
-			SetError(
-				OutError,
-				TEXT("simple_authoring_runtime_handlers_unavailable"),
-				FString(),
-				CompositionError);
+			SetError(OutError, CompositionError, FString());
 			return false;
 		}
 
@@ -552,11 +614,7 @@ namespace UE::UAI::Composition::SimpleAuthoring
 				EditorProjectProfiles,
 				CompositionError))
 		{
-			SetError(
-				OutError,
-				TEXT("simple_authoring_runtime_authority_unavailable"),
-				TEXT("editor_project"),
-				CompositionError);
+			SetError(OutError, CompositionError, TEXT("editor_project"));
 			return false;
 		}
 		for (const FUeAgentEditorProjectSimpleEffectProductionProfile& Profile

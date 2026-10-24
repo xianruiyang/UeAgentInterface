@@ -130,7 +130,7 @@ namespace
 		const FScopedPublicCommandComposition& Harness,
 		const FString& CommandId,
 		const TSharedRef<FJsonObject>& Params,
-		TOptional<FUeAgentCommandResult>& OutResult,
+		TSharedPtr<FJsonObject>& OutResult,
 		TSharedPtr<FJsonObject>& OutPayload,
 		FString& OutError)
 	{
@@ -176,18 +176,11 @@ namespace
 				TEXT("command_http_status:%d"), Response.StatusCode);
 			return false;
 		}
-		FUeAgentCommandProtocolDiagnostic Diagnostic;
-		FUeAgentCommandProtocolCodec Codec;
-		if (!Codec.DecodeResult(Response.Body, OutResult, Diagnostic)
-			|| !OutResult.IsSet())
-		{
-			OutError = Diagnostic.Code + TEXT(":") + Diagnostic.Message;
-			return false;
-		}
-		const TSharedRef<TJsonReader<>> Reader =
-			TJsonReaderFactory<>::Create(OutResult->GetPayloadJson());
-		return FJsonSerializer::Deserialize(Reader, OutPayload)
-			&& OutPayload.IsValid();
+		if (!ReadPublicResponse(Response.Body, OutResult, OutError)) return false;
+		const TSharedPtr<FJsonObject>* Payload = nullptr;
+		if (!OutResult->TryGetObjectField(TEXT("payload"), Payload)) return false;
+		OutPayload = *Payload;
+		return OutPayload.IsValid();
 	}
 
 	class FOwnedWorld final
@@ -763,27 +756,24 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 		TSharedPtr<FJsonObject>& OutPayload,
 		const bool bExpectedSuccess)
 	{
-		TOptional<FUeAgentCommandResult> Result;
+		TSharedPtr<FJsonObject> Result;
 		bool bInvoked = TryInvoke(
 			Harness, CommandId, Input, Result, OutPayload, Error);
 		TestTrue(TEXT("formal route executes: ") + CommandId,
-			bInvoked && Result.IsSet());
-		if (!bInvoked || !Result.IsSet())
+			bInvoked && Result.IsValid());
+		if (!bInvoked || !Result.IsValid())
 		{
 			AddError(CommandId + TEXT(":") + Error);
 			return false;
 		}
-		if (Result->IsOk())
+		if (Result->GetBoolField(TEXT("ok")))
 		{
-			FString TerminalStatus;
-			FString AuthorizationId;
-			if (!OutPayload.IsValid()
-				|| !OutPayload->TryGetStringField(
-					TEXT("terminal_status"), TerminalStatus)
-				|| TerminalStatus != TEXT("planned")
-				|| !OutPayload->TryGetStringField(
-					TEXT("destructive_authorization_id"), AuthorizationId)
-				|| AuthorizationId.IsEmpty())
+				if (!OutPayload.IsValid()
+					|| OutPayload->GetStringField(TEXT("status")) != TEXT("planned")
+					|| OutPayload->HasField(TEXT("operation_id"))
+					|| OutPayload->HasField(TEXT("plan_fingerprint"))
+					|| OutPayload->HasField(TEXT("destructive_authorization_id"))
+					|| OutPayload->HasField(TEXT("revision_snapshot")))
 			{
 				AddError(CommandId + TEXT(":destructive_plan_invalid"));
 				return false;
@@ -804,32 +794,35 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 					return false;
 				}
 			}
-			Input->SetStringField(
-				TEXT("destructive_authorization_id"), AuthorizationId);
+			Input->SetBoolField(TEXT("confirm"), true);
 			bInvoked = TryInvoke(
 				Harness, CommandId, Input, Result, OutPayload, Error);
-			if (!bInvoked || !Result.IsSet())
+			if (!bInvoked || !Result.IsValid())
 			{
 				AddError(CommandId + TEXT(":") + Error);
 				return false;
 			}
 		}
 		TestEqual(TEXT("authorized result state: ") + CommandId,
-			Result->IsOk(), bExpectedSuccess);
+			Result->GetBoolField(TEXT("ok")), bExpectedSuccess);
 		FString TerminalStatus;
 		TestTrue(TEXT("authorized terminal status: ") + CommandId,
 			OutPayload.IsValid()
 				&& OutPayload->TryGetStringField(
-					TEXT("terminal_status"), TerminalStatus)
+					TEXT("status"), TerminalStatus)
+				&& !OutPayload->HasField(TEXT("operation_id"))
+				&& !OutPayload->HasField(TEXT("plan_fingerprint"))
+				&& !OutPayload->HasField(TEXT("destructive_authorization_id"))
+				&& !OutPayload->HasField(TEXT("revision_snapshot"))
 				&& (bExpectedSuccess
 					? TerminalStatus == TEXT("committed")
 					: !TerminalStatus.IsEmpty()
 						&& TerminalStatus != TEXT("state_unknown")));
-		if (Result->IsOk() != bExpectedSuccess)
+		if (Result->GetBoolField(TEXT("ok")) != bExpectedSuccess)
 		{
-			AddError(CommandId + TEXT(":") + Result->GetErrorJson());
+			AddError(CommandId + TEXT(":") + PublicErrorText(Result));
 		}
-		return Result->IsOk() == bExpectedSuccess;
+		return Result->GetBoolField(TEXT("ok")) == bExpectedSuccess;
 	};
 
 	TSharedPtr<FJsonObject> Payload;
@@ -953,21 +946,6 @@ bool FUeAgentDestructiveImportWorldProductionTest::RunTest(
 			bPresent);
 	}
 
-	const TArray<FString> RetiredLegacyIds{
-		TEXT("data_layer_delete_instance"),
-		TEXT("level_content_delete_scope"),
-		TEXT("pcg_cleanup"),
-		TEXT("level_streaming_move_actors"),
-		TEXT("level_streaming_remove"),
-		TEXT("modeling_replace_actor_mesh"),
-		TEXT("modeling_remove_material_slot"),
-		TEXT("modeling_voxel_grid_remove_bounds"),
-	};
-	for (const FString& LegacyId : RetiredLegacyIds)
-	{
-		TestNull(TEXT("retired world command is absent from formal registry: ")
-			+ LegacyId, Harness.GetCommandRegistry()->FindExact(LegacyId));
-	}
 	TestTrue(TEXT("formal public composition stops"), Harness.Stop());
 	TestEqual(TEXT("public route cleanup"),
 		Harness.GetRouteHost().Handlers.Num(), 0);

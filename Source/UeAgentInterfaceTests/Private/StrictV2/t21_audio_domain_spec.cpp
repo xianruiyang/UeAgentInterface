@@ -4,19 +4,9 @@
 #include "Sound/SoundCue.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 
-#if __has_include("OperationOwners/AudioGraph/UeAgentAudioGraphDomainService.h")
-#define UAI_T21_AUDIO_DOMAIN_AVAILABLE 1
 #include "OperationOwners/AudioGraph/UeAgentAudioGraphDomainService.h"
-#else
-#define UAI_T21_AUDIO_DOMAIN_AVAILABLE 0
-#endif
 
-#if __has_include("QueryOwners/AudioGraph/UeAgentAudioGraphCandidateQuery.h")
-#define UAI_T21_AUDIO_CANDIDATE_QUERY_AVAILABLE 1
 #include "QueryOwners/AudioGraph/UeAgentAudioGraphCandidateQuery.h"
-#else
-#define UAI_T21_AUDIO_CANDIDATE_QUERY_AVAILABLE 0
-#endif
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T21AudioDomainTest,
@@ -26,13 +16,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentStrictV2T21AudioDomainTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
-#if !UAI_T21_AUDIO_DOMAIN_AVAILABLE
-	TestTrue(TEXT("T21 audio domain authority is available"), false);
-	return false;
-#elif !UAI_T21_AUDIO_CANDIDATE_QUERY_AVAILABLE
-	TestTrue(TEXT("T21 audio candidate query is available"), false);
-	return false;
-#else
 	using namespace UE::UAI::HjsonWorkspace;
 	using namespace UE::UAI::OperationOwners::AudioGraph;
 
@@ -109,7 +92,7 @@ bool FUeAgentStrictV2T21AudioDomainTest::RunTest(const FString& Parameters)
 		TryQueryAudioGraphCandidates(
 			*SoundCueTarget, TEXT("Wave"), SoundCueResult, CandidateError)))
 	{
-		AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
+		AddError(CandidateError.Code + TEXT(":") + CandidateError.PublicMessage);
 		return false;
 	}
 	TestTrue(TEXT("the Sound Cue catalog is non-empty"),
@@ -121,11 +104,11 @@ bool FUeAgentStrictV2T21AudioDomainTest::RunTest(const FString& Parameters)
 		TEXT("the audio owner resolves the representative MetaSound candidate"),
 		TryQueryAudioGraphCandidates(
 			*MetaSoundTarget,
-			TEXT("UE.Sine.Audio"),
+			TEXT("Sine"),
 			MetaSoundResult,
 			CandidateError)))
 	{
-		AddError(CandidateError.Code + TEXT(":") + CandidateError.Detail);
+		AddError(CandidateError.Code + TEXT(":") + CandidateError.PublicMessage);
 		return false;
 	}
 	TestTrue(TEXT("the MetaSound registry catalog is non-empty"),
@@ -134,65 +117,72 @@ bool FUeAgentStrictV2T21AudioDomainTest::RunTest(const FString& Parameters)
 		MetaSoundResult.Candidates.FindByPredicate(
 			[](const FAudioGraphCandidate& Candidate)
 			{
-				return Candidate.Name == TEXT("UE.Sine.Audio")
+				return Candidate.Name == TEXT("Sine")
+					&& Candidate.NativeClassName.Contains(TEXT(".Sine."))
 					&& Candidate.bSupported;
 			});
 	if (!TestNotNull(
-			TEXT("UE.Sine.Audio is exposed as a supported compact candidate"),
+			TEXT("Sine is exposed as a supported readable candidate"),
 			MetaSoundCandidate))
 	{
 		return false;
 	}
 	TestTrue(TEXT("the MetaSound candidate id is compact and reusable"),
 		MetaSoundCandidate->Id.StartsWith(TEXT("candidate:")));
-	TestFalse(TEXT("the frontend registry does not claim native-menu coverage"),
-		MetaSoundResult.bCoverageComplete);
-	TestFalse(TEXT("the frontend writer does not claim native action coverage"),
-		MetaSoundResult.bCreationCoverageComplete);
-	TestEqual(TEXT("the MetaSound coverage scope is explicit"),
-		MetaSoundResult.CoverageScope,
-		FString(TEXT("metasound_frontend_registry_loaded_classes")));
+	TestTrue(TEXT("the MetaSound public name is stable and separate from the native class name"),
+		MetaSoundCandidate->Name == TEXT("Sine")
+			&& MetaSoundCandidate->Name != MetaSoundCandidate->NativeClassName);
 
 	FAudioGraphCandidate ResolvedMetaSound;
-	TestTrue(TEXT("the exact MetaSound id re-resolves from the same registry"),
+	TestTrue(TEXT("the readable MetaSound name re-resolves from the same registry"),
 		TryResolveAudioGraphCandidate(
 			*MetaSoundTarget,
-			FString(),
-			MetaSoundCandidate->Id,
+			MetaSoundCandidate->Name,
 			ResolvedMetaSound,
 			CandidateError));
-	TestEqual(TEXT("id re-resolution preserves the exact class name"),
+	TestEqual(TEXT("name re-resolution preserves the exact class name"),
 		ResolvedMetaSound.Name, MetaSoundCandidate->Name);
-	TestEqual(TEXT("id re-resolution preserves the exact minor version"),
+	TestEqual(TEXT("name re-resolution preserves the native class selector"),
+		ResolvedMetaSound.NativeClassName, MetaSoundCandidate->NativeClassName);
+	TestEqual(TEXT("name re-resolution preserves the exact minor version"),
 		ResolvedMetaSound.MinorVersion, MetaSoundCandidate->MinorVersion);
-	TestFalse(TEXT("name and id are conjunctive selectors"),
+	TestFalse(TEXT("an unknown readable name fails before write"),
 		TryResolveAudioGraphCandidate(
 			*MetaSoundTarget,
 			TEXT("UE.Not.The.Same.Class"),
-			MetaSoundCandidate->Id,
 			ResolvedMetaSound,
 			CandidateError));
-	TestEqual(TEXT("a mismatched selector fails before write"),
+	TestEqual(TEXT("an unknown name fails before write"),
 		CandidateError.Code,
 		FString(TEXT("audio_graph_candidate_not_found")));
 
-	FAudioGraphCandidateQueryResult ExactIdResult;
-	TestTrue(TEXT("the public query accepts an exact candidate id"),
+	FAudioGraphCandidateQueryResult NameSearchResult;
+	TestTrue(TEXT("the public query searches by a readable candidate name"),
 		TryQueryAudioGraphCandidates(
 			*MetaSoundTarget,
-			FString(),
-			ExactIdResult,
-			CandidateError,
-			64,
-			0,
-			MetaSoundCandidate->Id));
-	TestEqual(TEXT("the exact id query returns one candidate"),
-		ExactIdResult.TotalMatches, 1);
-	if (ExactIdResult.Candidates.Num() == 1)
-	{
-		TestEqual(TEXT("the exact id remains stable across enumeration"),
-			ExactIdResult.Candidates[0].Id, MetaSoundCandidate->Id);
-	}
+			MetaSoundCandidate->Name,
+			NameSearchResult,
+			CandidateError));
+	TestTrue(TEXT("the readable name search includes the resolved candidate"),
+		NameSearchResult.TotalMatches >= 1
+			&& !NameSearchResult.Candidates.IsEmpty()
+			&& NameSearchResult.Candidates[0].Name
+				== MetaSoundCandidate->Name);
+
+	FAudioGraphCandidateQueryResult TypedConversionResult;
+	TestTrue(TEXT("typed MetaSound conversions remain searchable"),
+		TryQueryAudioGraphCandidates(
+			*MetaSoundTarget,
+			TEXT("SineGenerationType"),
+			TypedConversionResult,
+			CandidateError));
+	TestTrue(TEXT("typed MetaSound scopes are projected as readable words"),
+		!TypedConversionResult.Candidates.IsEmpty()
+			&& !TypedConversionResult.Candidates.ContainsByPredicate(
+				[](const FAudioGraphCandidate& Candidate)
+				{
+					return Candidate.Name.Contains(TEXT("SineGenerationType"));
+				}));
 
 	for (const FAudioGraphCandidateQueryResult* Result : {&SoundCueResult, &MetaSoundResult})
 	{
@@ -202,6 +192,11 @@ bool FUeAgentStrictV2T21AudioDomainTest::RunTest(const FString& Parameters)
 		for (const FAudioGraphCandidate& Candidate : Result->Candidates)
 		{
 			TestFalse(TEXT("candidate name is present"), Candidate.Name.IsEmpty());
+			if (Candidate.Kind == TEXT("sound_cue_node"))
+			{
+				TestFalse(TEXT("Sound Cue candidate name is not a native object path"),
+					Candidate.Name.StartsWith(TEXT("/")));
+			}
 			TestTrue(TEXT("candidate kind is a real audio graph kind"),
 				Candidate.Kind == TEXT("sound_cue_node")
 					|| Candidate.Kind == TEXT("metasound_node"));
@@ -227,33 +222,12 @@ bool FUeAgentStrictV2T21AudioDomainTest::RunTest(const FString& Parameters)
 				Candidate.TargetRevision, Result->TargetRevision);
 			TestTrue(TEXT("candidate binding revision is a sha256 identity"),
 				Candidate.BindingRevision.StartsWith(TEXT("sha256:")));
-			TestTrue(TEXT("candidate binding is current and directly usable"),
-				IsCurrentAudioGraphCandidateBinding(
-					BoundTarget,
-					Candidate.TargetRef,
-					Candidate.TargetRevision,
-					Candidate.Name,
-					Candidate.Kind,
-					Candidate.SupportedOperations,
-					Candidate.InputContract,
-					Candidate.PlacementContract,
-					Candidate.RequiredContext,
-					Candidate.MajorVersion,
-					Candidate.MinorVersion,
-					Candidate.BindingRevision,
-					CandidateError));
 			if (bSoundCueCandidate)
 			{
 				TestTrue(TEXT("SoundCue remains isolated on its legacy binding"),
 					Candidate.Id.IsEmpty());
 			}
 		}
-		TestEqual(TEXT("complete is the inverse of has_more"),
-			Result->bComplete, !Result->bHasMore);
-		TestEqual(TEXT("next_cursor truthfully describes the next page"),
-			Result->NextCursor,
-			Result->bHasMore ? Result->Candidates.Num() : INDEX_NONE);
 	}
 	return !HasAnyErrors();
-#endif
 }

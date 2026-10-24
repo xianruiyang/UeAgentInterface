@@ -1,7 +1,10 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
+#include "Core/BindingGateway/Query/UeAgentQueryPublicProjection.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
 #include "Templates/SharedPointer.h"
 
@@ -15,8 +18,10 @@ namespace UE::UAI::DomainAdapters::Query
 		bool bRequiresTarget = false;
 		bool bUsesObjectPath = false;
 		FString RequiredProperty;
+		FString PublicProjectionId = TEXT("legacy_typed_envelope");
 
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutDiagnostic) const;
 	};
 
 	struct UEAGENTINTERFACE_API FQueryServiceRequest final
@@ -33,15 +38,11 @@ namespace UE::UAI::DomainAdapters::Query
 	struct UEAGENTINTERFACE_API FQueryServiceResponse final
 	{
 		FString PayloadJson = TEXT("{}");
+		TArray<UE::UAI::Contract::FDiagnostic> Diagnostics;
 		bool bReadOnly = true;
 	};
 
-	struct UEAGENTINTERFACE_API FQueryServiceError final
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FQueryServiceError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentQueryService
 	{
@@ -74,7 +75,7 @@ namespace UE::UAI::DomainAdapters::Query
 
 	UEAGENTINTERFACE_API bool TryCreateProductionQueryService(
 		FProductionQueryComposition& OutComposition,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	/** Provider contribution owned by the query domain capability. */
 	UEAGENTINTERFACE_API bool
@@ -83,5 +84,5 @@ namespace UE::UAI::DomainAdapters::Query
 			UE::UAI::BindingGateway::Query::
 				FUeAgentDomainQueryProviderRegistration>&
 					OutRegistrations,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

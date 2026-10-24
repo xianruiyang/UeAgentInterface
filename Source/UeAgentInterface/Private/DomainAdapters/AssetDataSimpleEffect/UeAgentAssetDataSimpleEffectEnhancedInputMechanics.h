@@ -49,7 +49,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	bool TryRollbackEnhancedInputActionUpdate(
 		UObject* Target,
-		const FEnhancedInputActionPreparedState& State);
+		const FEnhancedInputActionPreparedState& State,
+		ExecutionMutation::FExecutionMutationError& OutError);
 
 	bool TryPrepareEnhancedInputMappingContextUpdate(
 		IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
@@ -65,7 +66,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	bool TryRollbackEnhancedInputMappingContextUpdate(
 		UObject* Target,
-		const FEnhancedInputMappingContextPreparedState& State);
+		const FEnhancedInputMappingContextPreparedState& State,
+		ExecutionMutation::FExecutionMutationError& OutError);
 
 	bool CanProjectEnhancedInputFieldState(
 		const FString& NativeMechanicId);

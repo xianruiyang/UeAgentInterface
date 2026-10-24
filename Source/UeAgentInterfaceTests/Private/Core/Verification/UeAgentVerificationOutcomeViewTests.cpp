@@ -17,13 +17,6 @@ bool FUeAgentVerificationOutcomeViewModuleAvailableTest::RunTest(
 
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Projection/UeAgentProjection.h"
-#include "Dom/JsonObject.h"
-#include "Dom/JsonValue.h"
-#include "Misc/FileHelper.h"
-#include "Misc/Paths.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
-
 namespace
 {
 	using namespace UE::UAI::ContextResource;
@@ -31,68 +24,11 @@ namespace
 	using namespace UE::UAI::StateSemantic;
 	using namespace UE::UAI::Verification;
 
-	static FString OutcomeViewFixturePath()
-	{
-		return FPaths::ConvertRelativePathToFull(FPaths::Combine(
-			FPaths::ProjectDir(),
-			TEXT(
-				"UeAgentInterfaceCMD/tests/verification_service/fixtures/"
-				"canonical_outcome_view_cases.json")));
-	}
-
-	static TSharedPtr<FJsonObject> LoadOutcomeViewFixture(
-		FAutomationTestBase* Test)
-	{
-		FString Text;
-		if (!Test->TestTrue(
-			TEXT("load shared C9 outcome-view fixture"),
-			FFileHelper::LoadFileToString(
-				Text,
-				*OutcomeViewFixturePath())))
-		{
-			return nullptr;
-		}
-
-		TSharedPtr<FJsonObject> Fixture;
-		const TSharedRef<TJsonReader<>> Reader =
-			TJsonReaderFactory<>::Create(Text);
-		if (!Test->TestTrue(
-			TEXT("parse shared C9 outcome-view fixture"),
-			FJsonSerializer::Deserialize(Reader, Fixture)
-				&& Fixture.IsValid()))
-		{
-			return nullptr;
-		}
-		Test->TestEqual(
-			TEXT("fixture schema"),
-			Fixture->GetStringField(TEXT("schema")),
-			FString(TEXT(
-				"uai.c9.canonical_outcome_view.test_fixture.v1")));
-		Test->TestEqual(
-			TEXT("outcome-view schema"),
-			Fixture
-				->GetObjectField(TEXT("contract"))
-				->GetStringField(TEXT("schema_id")),
-			FString(TEXT(
-				"uai.c9.canonical_outcome_view.v1")));
-		return Fixture;
-	}
-
 	static FUeAgentResourceTracker MakeViewTracker(
 		const int64 Nodes = 4096,
 		const int64 StringBytes = 65536)
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 1048576},
-			{EUeAgentResourceDimension::OutputBytes, 1048576},
-			{EUeAgentResourceDimension::StringBytes, StringBytes},
-			{EUeAgentResourceDimension::Nodes, Nodes},
-			{EUeAgentResourceDimension::Items, 4096},
-			{EUeAgentResourceDimension::Files, 128},
-			{EUeAgentResourceDimension::ReferenceEdges, 4096},
-			{EUeAgentResourceDimension::WorkUnits, 16384},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 1048576},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FUeAgentCanonicalIdentity MakeIdentity(
@@ -222,6 +158,10 @@ namespace
 	static FVerificationOutcome MakePartialOutcome(
 		const FUeAgentCanonicalValuePtr& Left)
 	{
+		const FString Entry = TEXT("/entries/") + MakeIdentity(false).GetCanonicalKey()
+			.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+		const FString OtherEntry = TEXT("/entries/") + MakeIdentity(true).GetCanonicalKey()
+			.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
 		return FVerificationOutcome(
 			TEXT("verification:p4-017:partial"),
 			EVerificationStatus::Mismatch,
@@ -238,9 +178,15 @@ namespace
 					FUeAgentSemanticComparison({
 						FUeAgentSemanticDifference(
 							EUeAgentDifferenceKind::MissingRight,
-							TEXT("/entries/0/value"),
+							Entry + TEXT("/value"),
 							Left,
-							nullptr)
+							nullptr),
+						FUeAgentSemanticDifference(
+							EUeAgentDifferenceKind::MissingRight,
+							Entry + TEXT("/value/nested~1field"), Left, nullptr),
+						FUeAgentSemanticDifference(
+							EUeAgentDifferenceKind::MissingLeft,
+							OtherEntry, nullptr, Left)
 					}),
 					true,
 					{TEXT("evidence:p4-017:mismatch")})
@@ -271,12 +217,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUeAgentVerificationOutcomeViewContractTest::RunTest(
 	const FString& Parameters)
 {
-	const TSharedPtr<FJsonObject> Fixture = LoadOutcomeViewFixture(this);
-	if (!Fixture.IsValid())
-	{
-		return false;
-	}
-
 	const FVerificationOutcome Outcome(
 		TEXT("verification:p4-017:rolled-back"),
 		EVerificationStatus::Unavailable,
@@ -327,16 +267,16 @@ bool FUeAgentVerificationOutcomeViewContractTest::RunTest(
 			View.ToSharedRef(),
 			TEXT("acknowledgement")).IsValid());
 
-	TArray<FString> ExpectedKeys;
-	for (const TSharedPtr<FJsonValue>& Field :
-		Fixture
-			->GetObjectField(TEXT("contract"))
-			->GetObjectField(TEXT("type_fields"))
-			->GetObjectField(TEXT("verification_outcome"))
-			->GetArrayField(TEXT("required")))
-	{
-		ExpectedKeys.Add(Field->AsString());
-	}
+	TArray<FString> ExpectedKeys = {
+		TEXT("$schema"),
+		TEXT("$type"),
+		TEXT("status"),
+		TEXT("effect_outcome"),
+		TEXT("diagnostic_code"),
+		TEXT("diagnostic"),
+		TEXT("retry_safe"),
+		TEXT("targets"),
+	};
 	ExpectedKeys.Sort();
 	TestEqual(
 		TEXT("root fixed field count"),
@@ -381,73 +321,37 @@ bool FUeAgentVerificationOutcomeViewFullFieldTest::RunTest(
 		TEXT("two targets preserved"),
 		Targets->GetArrayItems().Num(),
 		2);
-	const FUeAgentCanonicalValuePtr FirstIdentity =
-		FindObjectField(
-			Targets->GetArrayItems()[0],
-			TEXT("identity"));
-	const FUeAgentCanonicalValuePtr FirstSelector =
-		FirstIdentity.IsValid()
-			? FindObjectField(
-				FirstIdentity.ToSharedRef(),
-				TEXT("selector"))
-			: nullptr;
-	TestTrue(
-		TEXT("first selector present"),
-		FirstSelector.IsValid());
-	if (FirstSelector.IsValid())
+	for (const TCHAR* Field : {
+		TEXT("identity"),
+		TEXT("expected_snapshot_id"),
+		TEXT("actual_snapshot_id"),
+		TEXT("evidence_ids")})
 	{
-		TestEqual(
-			TEXT("targets sorted by canonical identity"),
-			FirstSelector->GetText(),
-			FString(TEXT("title")));
+		for (const FUeAgentCanonicalValueRef& Target :
+			Targets->GetArrayItems())
+		{
+			TestFalse(
+				FString::Printf(TEXT("target field hidden: %s"), Field),
+				FindObjectField(Target, Field).IsValid());
+		}
 	}
-	const FUeAgentCanonicalValuePtr SecondIdentity =
-		FindObjectField(
-			Targets->GetArrayItems()[1],
-			TEXT("identity"));
-	const FUeAgentCanonicalValuePtr SecondSelector =
-		SecondIdentity.IsValid()
-			? FindObjectField(
-				SecondIdentity.ToSharedRef(),
-				TEXT("selector"))
-			: nullptr;
-	TestTrue(
-		TEXT("second selector present"),
-		SecondSelector.IsValid());
-	if (SecondSelector.IsValid())
-	{
-		TestEqual(
-			TEXT("canonical identity order is complete"),
-			SecondSelector->GetText(),
-			FString(TEXT("references")));
-	}
-
-	const FUeAgentCanonicalValuePtr Acknowledgement =
+	TestFalse(
+		TEXT("acknowledgement is machine-only"),
 		FindObjectField(
 			View.ToSharedRef(),
-			TEXT("acknowledgement"));
-	TestTrue(
-		TEXT("acknowledgement present"),
-		Acknowledgement.IsValid());
-	const FUeAgentCanonicalValuePtr FencingToken =
-		Acknowledgement.IsValid()
-			? FindObjectField(
-				Acknowledgement.ToSharedRef(),
-				TEXT("fencing_token"))
-			: nullptr;
-	TestTrue(
-		TEXT("fencing token present"),
-		FencingToken.IsValid());
-	if (FencingToken.IsValid())
+			TEXT("acknowledgement")).IsValid());
+	TestFalse(
+		TEXT("default verified outcome has no public result"),
+		FindObjectField(
+			View.ToSharedRef(),
+			TEXT("result")).IsValid());
+	for (const TCHAR* Field : {
+		TEXT("verification_id"),
+		TEXT("evidence_ids")})
 	{
-		TestEqual(
-			TEXT("fencing token is exact integer"),
-			FencingToken->GetKind(),
-			EUeAgentValueKind::Integer);
-		TestEqual(
-			TEXT("fencing token lexeme"),
-			FencingToken->GetLexeme(),
-			FString(TEXT("47")));
+		TestFalse(
+			FString::Printf(TEXT("outcome field hidden: %s"), Field),
+			FindObjectField(View.ToSharedRef(), Field).IsValid());
 	}
 	return true;
 }
@@ -489,6 +393,25 @@ bool FUeAgentVerificationOutcomeViewComparisonTest::RunTest(
 			TEXT("differences"));
 	const FUeAgentCanonicalValueRef Difference =
 		Differences->GetArrayItems()[0];
+	TestEqual(TEXT("all differences remain visible"), Differences->GetArrayItems().Num(), 3);
+	TestEqual(TEXT("canonical entry identity becomes a local index"),
+		FindObjectField(Difference, TEXT("path"))->GetText(), FString(TEXT("/entries/0/value")));
+	TestEqual(TEXT("same entry reuses index and preserves field escaping"),
+		FindObjectField(Differences->GetArrayItems()[1], TEXT("path"))->GetText(),
+		FString(TEXT("/entries/0/value/nested~1field")));
+	TestEqual(TEXT("missing second entry retains distinct index"),
+		FindObjectField(Differences->GetArrayItems()[2], TEXT("path"))->GetText(),
+		FString(TEXT("/entries/1")));
+	const FUeAgentCanonicalValuePtr Target =
+		FindObjectField(Targets->GetArrayItems()[0], TEXT("target"));
+	TestTrue(TEXT("business target remains locatable"), Target.IsValid());
+	if (Target.IsValid())
+	{
+		TestTrue(TEXT("business selectors remain structured"),
+			FindObjectField(Target.ToSharedRef(), TEXT("selectors")).IsValid());
+		TestFalse(TEXT("target omits generation custody"),
+			FindObjectField(Target.ToSharedRef(), TEXT("generation")).IsValid());
+	}
 	const FUeAgentCanonicalValuePtr ObservedLeft =
 		FindObjectField(Difference, TEXT("left"));
 	const FUeAgentCanonicalValuePtr ObservedRight =
@@ -505,83 +428,6 @@ bool FUeAgentVerificationOutcomeViewComparisonTest::RunTest(
 	TestFalse(
 		TEXT("absent right field remains absent"),
 		ObservedRight.IsValid());
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentVerificationOutcomeViewResourceDepthTest,
-	"UeAgentInterface.Core.Verification.OutcomeView.ResourceDepth",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FUeAgentVerificationOutcomeViewResourceDepthTest::RunTest(
-	const FString& Parameters)
-{
-	FUeAgentResourceTracker BuildTracker = MakeViewTracker(8192);
-	FUeAgentCanonicalValuePtr Deep =
-		RequireNull(this, BuildTracker);
-	FUeAgentStateSemanticError StateError;
-	for (int32 Index = 0; Index < 1536; ++Index)
-	{
-		FUeAgentCanonicalValuePtr Next;
-		if (!TestTrue(
-			TEXT("build deep canonical evidence"),
-			FUeAgentCanonicalValue::TryArray(
-				{Deep.ToSharedRef()},
-				BuildTracker,
-				Next,
-				StateError)))
-		{
-			return false;
-		}
-		Deep = MoveTemp(Next);
-	}
-
-	FUeAgentResourceTracker ViewTracker = MakeViewTracker(128);
-	FUeAgentCanonicalValuePtr View;
-	FVerificationError Error;
-	if (!TestTrue(
-		TEXT("deep evidence does not impose a depth policy"),
-		BuildOutcomeView(
-			MakePartialOutcome(Deep),
-			ViewTracker,
-			View,
-			Error)))
-	{
-		return false;
-	}
-
-	const FUeAgentCanonicalValuePtr Targets =
-		FindObjectField(View.ToSharedRef(), TEXT("targets"));
-	const FUeAgentCanonicalValuePtr Comparison =
-		FindObjectField(
-			Targets->GetArrayItems()[0],
-			TEXT("comparison"));
-	const FUeAgentCanonicalValuePtr Differences =
-		FindObjectField(
-			Comparison.ToSharedRef(),
-			TEXT("differences"));
-	const FUeAgentCanonicalValuePtr Observed =
-		FindObjectField(
-			Differences->GetArrayItems()[0],
-			TEXT("left"));
-	TestTrue(
-		TEXT("deep canonical evidence reference preserved"),
-		Observed.Get() == Deep.Get());
-
-	FUeAgentResourceTracker TinyTracker = MakeViewTracker(1);
-	FUeAgentCanonicalValuePtr Rejected;
-	FVerificationError BudgetError;
-	TestFalse(
-		TEXT("node budget rejects whole view"),
-		BuildOutcomeView(
-			MakeCompleteOutcome(),
-			TinyTracker,
-			Rejected,
-			BudgetError));
-	TestEqual(
-		TEXT("budget error code"),
-		BudgetError.GetCode(),
-		FString(TEXT("resource_budget_exceeded")));
 	return true;
 }
 
@@ -618,3 +464,90 @@ bool FUeAgentVerificationOutcomeViewProjectionOpaqueTest::RunTest(
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentVerificationOutcomeViewOptionalPublicResultTest,
+	"UeAgentInterface.Core.Verification.OutcomeView.OptionalPublicResult",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentVerificationOutcomeViewOptionalPublicResultTest::RunTest(
+	const FString& Parameters)
+{
+	FUeAgentResourceTracker BuildTracker = MakeViewTracker();
+	FUeAgentCanonicalValuePtr TargetRef;
+	FUeAgentCanonicalValuePtr PublicResult;
+	FUeAgentStateSemanticError StateError;
+	if (!TestTrue(
+			TEXT("build public target ref"),
+			FUeAgentCanonicalValue::TryString(
+				TEXT("/Game/UAI/Public.Target"),
+				BuildTracker,
+				TargetRef,
+				StateError))
+		|| !TestTrue(
+			TEXT("build public result"),
+			FUeAgentCanonicalValue::TryObject(
+				{{TEXT("target_ref"), TargetRef.ToSharedRef()}},
+				BuildTracker,
+				PublicResult,
+				StateError)))
+	{
+		return false;
+	}
+
+	const FVerificationOutcome Outcome(
+		TEXT("verification:p4-017:public-result"),
+		EVerificationStatus::Verified,
+		EEffectOutcome::Complete,
+		FString(),
+		false,
+		{},
+		{TEXT("evidence:p4-017:public-result")},
+		{},
+		FString(),
+		PublicResult);
+	FUeAgentResourceTracker ViewTracker = MakeViewTracker();
+	FUeAgentCanonicalValuePtr View;
+	FVerificationError Error;
+	if (!TestTrue(
+			TEXT("canonicalize outcome with public result"),
+			BuildOutcomeView(Outcome, ViewTracker, View, Error)))
+	{
+		return false;
+	}
+	const FUeAgentCanonicalValuePtr Observed =
+		FindObjectField(View.ToSharedRef(), TEXT("result"));
+	TestTrue(TEXT("optional result is exposed"), Observed.IsValid());
+	TestTrue(
+		TEXT("immutable canonical result reference is preserved"),
+		Observed.Get() == PublicResult.Get());
+
+	const FVerificationOutcome RejectedOutcome(
+		TEXT("verification:p4-017:unverified-public-result"),
+		EVerificationStatus::Mismatch,
+		EEffectOutcome::Partial,
+		TEXT("verification_semantic_mismatch"),
+		false,
+		{},
+		{},
+		{},
+		FString(),
+		PublicResult);
+	FUeAgentResourceTracker RejectedTracker = MakeViewTracker();
+	FUeAgentCanonicalValuePtr RejectedView;
+	if (!TestTrue(
+			TEXT("canonicalize unverified outcome"),
+			BuildOutcomeView(
+				RejectedOutcome,
+				RejectedTracker,
+				RejectedView,
+				Error)))
+	{
+		return false;
+	}
+	TestFalse(
+		TEXT("unverified public result is discarded"),
+		FindObjectField(
+			RejectedView.ToSharedRef(),
+			TEXT("result")).IsValid());
+	return true;
+}

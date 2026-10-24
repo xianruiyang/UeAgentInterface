@@ -31,6 +31,86 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 		bool bSdkInstalled = false;
 	};
 
+	enum class EUeAgentAssetRelationDirection : uint8
+	{
+		Dependencies,
+		Referencers,
+		Both,
+	};
+
+	enum class EUeAgentAssetRelationKind : uint8
+	{
+		Hard,
+		Soft,
+		Manage,
+		SearchableName,
+	};
+
+	enum class EUeAgentAssetRelationPackageScope : uint8
+	{
+		All,
+		Game,
+		EditorOnly,
+		Build,
+	};
+
+	struct FUeAgentAssetRelationGraphRequest
+	{
+		EUeAgentAssetRelationDirection Direction =
+			EUeAgentAssetRelationDirection::Dependencies;
+		TArray<EUeAgentAssetRelationKind> RelationKinds;
+		EUeAgentAssetRelationPackageScope PackageScope =
+			EUeAgentAssetRelationPackageScope::All;
+	};
+
+	struct FUeAgentAssetRelationNode
+	{
+		FString StableIdentifier;
+		FString PackageName;
+		FString ObjectPath;
+		bool bResolved = false;
+		bool bRedirector = false;
+		FString RedirectTarget;
+	};
+
+	struct FUeAgentAssetRelationEdge
+	{
+		FString SourceIdentifier;
+		FString SourcePackageName;
+		FString SourceObjectPath;
+		FString TargetIdentifier;
+		FString TargetPackageName;
+		FString TargetObjectPath;
+		FString TraversalDirection;
+		int32 Depth = 0;
+		TArray<FString> TraversalPath;
+		bool bCycle = false;
+		FString Category;
+		int32 CategoryFlags = 0;
+		int32 PropertyFlags = 0;
+		bool bHard = false;
+		bool bGame = false;
+		bool bBuild = false;
+		bool bDirect = false;
+		bool bSourceResolved = false;
+		bool bTargetResolved = false;
+		bool bSourceRedirector = false;
+		bool bTargetRedirector = false;
+		FString SourceRedirectTarget;
+		FString TargetRedirectTarget;
+	};
+
+	struct FUeAgentAssetRelationGraphResult
+	{
+		FUeAgentAssetRelationNode Root;
+		TArray<FUeAgentAssetRelationNode> Nodes;
+		TArray<FUeAgentAssetRelationEdge> Edges;
+		bool bRegistryLoading = false;
+		bool bComplete = false;
+		bool bOnDiskAssetRegistryOnly = true;
+		bool bRuntimeReferencesIncluded = false;
+	};
+
 	class UEAGENTINTERFACE_API
 		IUeAgentAssetProjectReadEnvironment
 	{
@@ -51,10 +131,8 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 
 		virtual bool TryResolveRegistryRelations(
 			const FAssetData& Record,
-			const FString& Direction,
-			const TArray<FString>& RelationKinds,
-			TArray<FString>& OutDependencies,
-			TArray<FString>& OutReferencers,
+			const FUeAgentAssetRelationGraphRequest& Request,
+			FUeAgentAssetRelationGraphResult& OutGraph,
 			FUeAgentAssetProjectReadError& OutError) = 0;
 
 		virtual bool TryResolveOpenAssets(
@@ -82,6 +160,12 @@ namespace UE::UAI::DomainAdapters::AssetProjectRead
 			const UE::UAI::ContextResource::
 				FUeAgentExecutionContextRef& Context,
 			const FString& SourceId,
+			UObject*& OutObject,
+			FUeAgentAssetProjectReadError& OutError) = 0;
+
+		virtual bool TryResolveProjectSettingsObject(
+			const UE::UAI::ContextResource::FUeAgentExecutionContextRef& Context,
+			const FString& SectionId,
 			UObject*& OutObject,
 			FUeAgentAssetProjectReadError& OutError) = 0;
 

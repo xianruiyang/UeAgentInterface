@@ -3,9 +3,7 @@
 #include "Core/Contract/UeAgentCommandJson.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "HAL/FileManager.h"
 #include "Interfaces/IPluginManager.h"
-#include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
 namespace UE::UAI::CommandContract
@@ -76,6 +74,15 @@ namespace UE::UAI::CommandContract
 			Object->SetBoolField(
 				TEXT("nullable"),
 				Parameter.IsNullable());
+			if (!Parameter.GetSchemaJson().IsEmpty())
+			{
+				TSharedPtr<FJsonObject> Schema;
+				UE::UAI::Contract::FDiagnostic Error;
+				if (Json::TryParseObject(Parameter.GetSchemaJson(), Schema, Error))
+				{
+					Object->SetObjectField(TEXT("schema"), Schema);
+				}
+			}
 			return Object;
 		}
 
@@ -132,7 +139,7 @@ namespace UE::UAI::CommandContract
 			const FUeAgentCommandContract& Contract)
 		{
 			FString Canonical;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			if (!Json::TryCanonicalize(
 				BindingObject(Contract),
 				Canonical,
@@ -176,7 +183,7 @@ namespace UE::UAI::CommandContract
 					ManifestCommandObject(Contract)));
 			}
 			FString Canonical;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			if (!Json::TryCanonicalize(
 				MakeShared<FJsonValueArray>(Commands),
 				Canonical,
@@ -185,17 +192,6 @@ namespace UE::UAI::CommandContract
 				return FString();
 			}
 			return Json::Sha256Utf8(Canonical);
-		}
-
-		TArray<uint8> Utf8Bytes(const FString& Text)
-		{
-			const FTCHARToUTF8 Converted(*Text);
-			TArray<uint8> Result;
-			Result.Append(
-				reinterpret_cast<const uint8*>(
-					Converted.Get()),
-				Converted.Length());
-			return Result;
 		}
 
 		void AddReadCommandContracts(
@@ -303,11 +299,13 @@ namespace UE::UAI::CommandContract
 		FString InName,
 		const EUeAgentCommandWireType InWireType,
 		const bool bInRequired,
-		const bool bInNullable)
+		const bool bInNullable,
+		FString InSchemaJson)
 		: Name(RequiredText(MoveTemp(InName)))
 		, WireType(InWireType)
 		, bRequired(bInRequired)
 		, bNullable(bInNullable)
+		, SchemaJson(MoveTemp(InSchemaJson))
 	{
 	}
 
@@ -332,10 +330,38 @@ namespace UE::UAI::CommandContract
 		return bNullable;
 	}
 
+	const FString& FUeAgentCommandParameter::GetSchemaJson() const
+	{
+		return SchemaJson;
+	}
+
 	bool FUeAgentCommandParameter::IsValid() const
 	{
-		return !Name.IsEmpty()
-			&& FString(WireTypeText(WireType)).Len() > 0;
+		UE::UAI::Contract::FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FUeAgentCommandParameter::TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		if (Name.IsEmpty())
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_parameter_invalid"),
+				TEXT("A command parameter requires a non-empty name."), TEXT("contract_validation"));
+			OutError.PropertyPath = TEXT("name");
+			return false;
+		}
+		if (FString(WireTypeText(WireType)).IsEmpty())
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_parameter_invalid"),
+				TEXT("The command parameter uses an unsupported wire type."), TEXT("contract_validation"), FString(), Name);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Name;
+			OutError.PropertyPath = TEXT("wire_type");
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(static_cast<int32>(WireType));
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("boolean, integer, number, string, object, array or any"));
+			return false;
+		}
+		return true;
 	}
 
 	FUeAgentCommandContract::FUeAgentCommandContract(
@@ -407,23 +433,93 @@ namespace UE::UAI::CommandContract
 
 	bool FUeAgentCommandContract::IsValid() const
 	{
-		if (CommandId.IsEmpty()
-			|| Namespace.IsEmpty()
-			|| Method.IsEmpty()
-			|| MinWireVersion < 1
-			|| MaxWireVersion < MinWireVersion
-			|| !IsSha256Identity(BindingHash)
-			|| (Status == EUeAgentCommandStatus::Deprecated
-				&& Deprecation.IsEmpty()))
+		UE::UAI::Contract::FDiagnostic Error;
+		return TryValidate(Error);
+	}
+
+	bool FUeAgentCommandContract::TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const
+	{
+		OutError.Reset();
+		if (CommandId.IsEmpty())
 		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_invalid"),
+				TEXT("The command contract requires a non-empty command ID."), TEXT("contract_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("command_id");
+			return false;
+		}
+		if (Namespace.IsEmpty())
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_invalid"),
+				TEXT("The command contract requires a non-empty Python namespace."), TEXT("contract_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("namespace");
+			return false;
+		}
+		if (Method.IsEmpty())
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_invalid"),
+				TEXT("The command contract requires a non-empty Python method."), TEXT("contract_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("method");
+			return false;
+		}
+		if (MinWireVersion < 1)
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_invalid"),
+				TEXT("The minimum wire version must be at least one."), TEXT("contract_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("min_wire_version");
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(MinWireVersion);
+			return false;
+		}
+		if (MaxWireVersion < MinWireVersion)
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_invalid"),
+				TEXT("The maximum wire version is less than the minimum wire version."), TEXT("contract_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("max_wire_version");
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(MinWireVersion);
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(MaxWireVersion);
+			return false;
+		}
+		if (!IsSha256Identity(BindingHash))
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_invalid"),
+				TEXT("The command binding hash could not be computed as a SHA-256 identity."), TEXT("contract_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("binding_hash");
+			return false;
+		}
+		if (Status == EUeAgentCommandStatus::Deprecated && Deprecation.IsEmpty())
+		{
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_invalid"),
+				TEXT("A deprecated command requires a deprecation explanation."), TEXT("contract_validation"), FString(), CommandId);
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+			OutError.PropertyPath = TEXT("deprecation");
 			return false;
 		}
 		TSet<FString> Names;
-		for (const FUeAgentCommandParameter& Parameter : Parameters)
+		for (int32 Index = 0; Index < Parameters.Num(); ++Index)
 		{
-			if (!Parameter.IsValid()
-				|| Names.Contains(Parameter.GetName()))
+			const FUeAgentCommandParameter& Parameter = Parameters[Index];
+			if (!Parameter.TryValidate(OutError))
 			{
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("command_contract_invalid"), OutError, TEXT("contract_validation"));
+				OutError.CandidateName = CommandId;
+				OutError.PropertyPath = FString::Printf(TEXT("parameters[%d]."), Index) + OutError.PropertyPath;
+				OutError.SubjectId = CommandId;
+			if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+				return false;
+			}
+			if (Names.Contains(Parameter.GetName()))
+			{
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_invalid"),
+					TEXT("The command parameter name is declared more than once."), TEXT("contract_validation"), FString(), CommandId);
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = CommandId;
+				OutError.PropertyPath = FString::Printf(TEXT("parameters[%d].name"), Index);
+				OutError.ActualValue = MakeShared<FJsonValueString>(Parameter.GetName());
 				return false;
 			}
 			Names.Add(Parameter.GetName());
@@ -450,13 +546,14 @@ namespace UE::UAI::CommandContract
 		TArray<FUeAgentCommandContract> Contracts,
 		TSharedPtr<const FUeAgentCommandContractRegistry>&
 			OutRegistry,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutError.Reset();
 		if (Contracts.IsEmpty())
 		{
-			OutError = TEXT("command_contract_registry_empty");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_registry_empty"), TEXT("The command contract registry contains no commands."), TEXT("registry"));
+			OutError.PropertyPath = TEXT("commands");
 			return false;
 		}
 		Contracts.Sort(
@@ -467,16 +564,19 @@ namespace UE::UAI::CommandContract
 			});
 		for (int32 Index = 0; Index < Contracts.Num(); ++Index)
 		{
-			if (!Contracts[Index].IsValid())
+			if (!Contracts[Index].TryValidate(OutError))
 			{
-				OutError = TEXT("command_contract_invalid");
+				OutError = UE::UAI::Contract::FDiagnostic::WrapFailure(TEXT("command_contract_invalid"), OutError, TEXT("registry"));
+				OutError.CandidateName = Contracts[Index].GetCommandId();
 				return false;
 			}
 			if (Index > 0
 				&& Contracts[Index - 1].GetCommandId()
 					== Contracts[Index].GetCommandId())
 			{
-				OutError = TEXT("command_contract_id_duplicate");
+				OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_id_duplicate"), TEXT("The command ID is registered more than once."), TEXT("registry"));
+				OutError.CandidateName = Contracts[Index].GetCommandId();
+				OutError.PropertyPath = TEXT("command_id");
 				return false;
 			}
 		}
@@ -484,7 +584,7 @@ namespace UE::UAI::CommandContract
 			CalculateRegistryHash(Contracts);
 		if (!IsSha256Identity(RegistryHash))
 		{
-			OutError = TEXT("command_contract_registry_hash_failed");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_contract_registry_hash_failed"), TEXT("The command contract registry hash could not be computed."), TEXT("registry"));
 			return false;
 		}
 		OutRegistry =
@@ -518,7 +618,7 @@ namespace UE::UAI::CommandContract
 		const FString& PluginVersion,
 		const FString& BuildId,
 		FString& OutManifest,
-		FString& OutError) const
+		UE::UAI::Contract::FDiagnostic& OutError) const
 	{
 		OutManifest.Reset();
 		OutError.Reset();
@@ -527,7 +627,8 @@ namespace UE::UAI::CommandContract
 		const FString CleanBuildId = RequiredText(BuildId);
 		if (CleanPluginVersion.IsEmpty() || CleanBuildId.IsEmpty())
 		{
-			OutError = TEXT("command_manifest_source_invalid");
+			OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("command_manifest_source_invalid"), TEXT("The command manifest requires non-empty plugin version and build ID fields."), TEXT("registry"));
+			OutError.PropertyPath = CleanPluginVersion.IsEmpty() ? TEXT("plugin_version") : TEXT("build_id");
 			return false;
 		}
 		const TSharedPtr<FJsonObject> Source =
@@ -566,73 +667,6 @@ namespace UE::UAI::CommandContract
 			Root,
 			OutManifest,
 			OutError);
-	}
-
-	bool FUeAgentCommandManifestExporter::TryWrite(
-		const FUeAgentCommandContractRegistry& Registry,
-		const FString& PluginVersion,
-		const FString& BuildId,
-		const FString& ManifestPath,
-		FString& OutError)
-	{
-		OutError.Reset();
-		FString Manifest;
-		if (!Registry.BuildManifest(
-			PluginVersion,
-			BuildId,
-			Manifest,
-			OutError))
-		{
-			return false;
-		}
-		const FString Directory =
-			FPaths::GetPath(ManifestPath);
-		if (Directory.IsEmpty()
-			|| !IFileManager::Get().MakeDirectory(
-				*Directory,
-				true))
-		{
-			OutError = TEXT("command_manifest_directory_failed");
-			return false;
-		}
-		const TArray<uint8> Bytes = Utf8Bytes(Manifest);
-		if (!FFileHelper::SaveArrayToFile(Bytes, *ManifestPath))
-		{
-			OutError = TEXT("command_manifest_write_failed");
-			return false;
-		}
-		return true;
-	}
-
-	bool FUeAgentCommandManifestExporter::TryVerify(
-		const FUeAgentCommandContractRegistry& Registry,
-		const FString& PluginVersion,
-		const FString& BuildId,
-		const FString& ManifestPath,
-		FString& OutError)
-	{
-		OutError.Reset();
-		FString Manifest;
-		if (!Registry.BuildManifest(
-			PluginVersion,
-			BuildId,
-			Manifest,
-			OutError))
-		{
-			return false;
-		}
-		TArray<uint8> Actual;
-		if (!FFileHelper::LoadFileToArray(Actual, *ManifestPath))
-		{
-			OutError = TEXT("command_manifest_file_missing");
-			return false;
-		}
-		if (Actual != Utf8Bytes(Manifest))
-		{
-			OutError = TEXT("command_manifest_projection_mismatch");
-			return false;
-		}
-		return true;
 	}
 
 	bool FUeAgentReadCommandContractDefinition::IsValid() const
@@ -712,38 +746,11 @@ namespace UE::UAI::CommandContract
 				1,
 				1,
 				EUeAgentCommandStatus::Active);
-			Contracts.Emplace(
-				TEXT("reference.asset_apply"),
-				TEXT("reference"),
-				TEXT("asset_apply"),
-				TArray<FUeAgentCommandParameter>{
-					{
-						TEXT("object_path"),
-						EUeAgentCommandWireType::String,
-						true,
-						false,
-					},
-					{
-						TEXT("intent"),
-						EUeAgentCommandWireType::String,
-						true,
-						false,
-					},
-					{
-						TEXT("proposed_text"),
-						EUeAgentCommandWireType::String,
-						false,
-						true,
-					},
-				},
-				1,
-				1,
-				EUeAgentCommandStatus::Active);
 			AddReadCommandContracts(Contracts);
 			AddSemanticExportCommandContract(Contracts);
 			TSharedPtr<const FUeAgentCommandContractRegistry>
 				Created;
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			const bool bCreated =
 				FUeAgentCommandContractRegistry::TryCreate(
 					MoveTemp(Contracts),
@@ -752,7 +759,7 @@ namespace UE::UAI::CommandContract
 			checkf(
 				bCreated && Created.IsValid(),
 				TEXT("Default command registry invalid: %s"),
-				*Error);
+				*Error.Code);
 			return Created.ToSharedRef();
 		}();
 		return Registry;

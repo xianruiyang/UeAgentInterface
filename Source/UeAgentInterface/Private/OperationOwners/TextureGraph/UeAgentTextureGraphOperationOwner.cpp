@@ -1,17 +1,41 @@
 #include "OperationOwners/TextureGraph/UeAgentTextureGraphOperationOwner.h"
 #include "OperationOwners/TextureGraph/UeAgentTextureGraphArtifactService.h"
 
+#include "DomainAdapters/TextureGraph/UeAgentTextureGraphAuthoringApply.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundAudioMediaBindings.h"
 #include "Composition/GraphCompound/UeAgentGraphCompoundCommandHandlers.h"
 #include "DomainAdapters/TextureGraph/UeAgentTextureGraphMechanicsBoundary.h"
+#include "Dom/JsonValue.h"
 #include "Misc/Paths.h"
 
 namespace UE::UAI::OperationOwners::TextureGraph
 {
 	using namespace Composition::GraphCompound;
+	using namespace ContextResource;
+	using namespace BindingGateway::Operation;
 
 	namespace
 	{
+		Contract::FDiagnostic NativeConditionFailure(const TCHAR* Code, const FString& Reason, const TCHAR* Condition)
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("texture_graph"));
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.PropertyPath = Condition;
+			Diagnostic.ActualValue = MakeShared<FJsonValueBoolean>(false);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+			return Diagnostic;
+		}
+
+		Contract::FDiagnostic DuplicateHandlerFailure(const FString& CommandId)
+		{
+			auto Diagnostic = NativeConditionFailure(TEXT("texture_graph_mechanics_handler_duplicate"),
+				TEXT("TextureGraph command registration contains more than one handler for the same command."), TEXT("handlers_per_command"));
+			Diagnostic.ActualValue = MakeShared<FJsonValueNumber>(2);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueNumber>(1);
+			Diagnostic.SubjectId = CommandId;
+			return Diagnostic;
+		}
+
 		class FGraphLifecycleResultContext final
 			: public DomainCapability::IDomainOperationInvocationContext
 		{
@@ -25,7 +49,7 @@ namespace UE::UAI::OperationOwners::TextureGraph
 			bool TryBuildSuccessPayload(
 				const BindingGateway::Operation::FOperationLifecycleReceipt& Receipt,
 				FString& OutPayloadJson,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				OutPayloadJson.Reset();
 				OutError.Reset();
@@ -33,13 +57,19 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				FGraphCompoundRuntimeError Error;
 				if (!Context->TryBuildResult(Receipt, Result, Error))
 				{
-					OutError = Error.Code.IsEmpty()
-						? FString(TEXT("texture_graph_operation_result_invalid"))
-						: Error.Code + TEXT(":") + Error.Detail;
+					OutError = Error;
+					if (OutError.IsEmpty()) OutError = NativeConditionFailure(TEXT("texture_graph_result_build_failed"),
+						TEXT("The TextureGraph result could not be constructed and no diagnostic was provided."), TEXT("result_built"));
 					return false;
 				}
 				OutPayloadJson = Result.GetJsonValue();
-				return !OutPayloadJson.IsEmpty();
+				if (OutPayloadJson.IsEmpty())
+				{
+					OutError = NativeConditionFailure(TEXT("texture_graph_result_payload_missing"),
+						TEXT("The completed TextureGraph operation returned no result payload."), TEXT("result_payload_present"));
+					return false;
+				}
+				return true;
 			}
 
 		private:
@@ -72,10 +102,10 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				OutError = {};
 				if (Request.GetCommandId() != OperationId)
 				{
-					OutError = DomainCapability::FDomainOperationInvocationError(
-						TEXT("texture_graph_operation_identity_mismatch"),
-						Request.GetCommandId(),
-						OperationId);
+					OutError = NativeConditionFailure(TEXT("texture_graph_operation_identity_mismatch"),
+						TEXT("The invocation factory does not match the requested TextureGraph operation."), TEXT("operation_identity_matches"));
+					OutError.ActualEvidence = MakeShared<FJsonValueString>(Request.GetCommandId());
+					OutError.ExpectedEvidence = MakeShared<FJsonValueString>(OperationId);
 					return false;
 				}
 				TArray<FString> Scopes = CallerContext.GetAuthorityScopes();
@@ -88,7 +118,6 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				FGraphCompoundAudioMediaProductionConfig Config;
 				Config.DurableJournalRoot = FPaths::ProjectSavedDir()
 					/ TEXT("UeAgentInterface/GraphCompound/TextureGraph");
-				Config.OperationTimeoutSeconds = 120.0;
 				FGraphCompoundAudioMediaLifecycleInvocation GraphInvocation;
 				FGraphCompoundRuntimeError GraphError;
 				if (!TryCreateAudioMediaGraphOperationLifecycleInvocation(
@@ -101,12 +130,9 @@ namespace UE::UAI::OperationOwners::TextureGraph
 						GraphError)
 					|| !GraphInvocation.IsValid())
 				{
-					OutError = DomainCapability::FDomainOperationInvocationError(
-						GraphError.Code.IsEmpty()
-							? FString(TEXT("texture_graph_operation_invocation_failed"))
-							: GraphError.Code,
-						GraphError.SubjectId,
-						GraphError.Detail);
+					OutError = MoveTemp(GraphError);
+					if (OutError.IsEmpty()) OutError = NativeConditionFailure(TEXT("texture_graph_operation_invocation_failed"),
+						TEXT("The TextureGraph lifecycle invocation was not created and no diagnostic was provided."), TEXT("lifecycle_invocation_ready"));
 					return false;
 				}
 				return DomainCapability::FDomainOperationInvocation::TryCreate(
@@ -147,6 +173,20 @@ namespace UE::UAI::OperationOwners::TextureGraph
 		}
 	}
 
+	bool TryApplySemanticTextureGraphComposite(
+		const FTextureGraphSemanticCompositeRequest& Request,
+		const PlanningPreflight::FPlanningPreflightPlanRef& Plan,
+		const TSharedRef<Contract::IUeAgentCancellationSignal>& Cancellation,
+		UeAgentAuthoringOperationApply::FApplyWorkspaceResult& OutResult,
+		UE::UAI::Contract::FDiagnostic& OutError,
+		const UeAgentAuthoringOperationApply::FBackendOptions& Options)
+	{
+		OutResult = UeAgentAuthoringOperationApply::FApplyWorkspaceResult();
+		OutError.Reset();
+		return DomainAdapters::TextureGraph::ApplySemanticComposite(
+			Request, Plan, Cancellation, Options, OutResult, OutError);
+	}
+
 	TSharedPtr<const DomainCapability::IDomainOperationInvocationFactory>
 	FindTextureGraphOperationInvocationFactory(const FString& OperationId)
 	{
@@ -162,7 +202,7 @@ namespace UE::UAI::OperationOwners::TextureGraph
 		TSharedRef<const DomainCapability::IDomainOperationInvocationFactory>
 			BakeFactory,
 		TMap<FString, TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
@@ -170,21 +210,24 @@ namespace UE::UAI::OperationOwners::TextureGraph
 		if (!DomainAdapters::TextureGraph::TryGetActivationProfiles(
 				Profiles, OutError))
 		{
+			if (OutError.IsEmpty()) OutError = NativeConditionFailure(TEXT("texture_graph_activation_profiles_unavailable"),
+				TEXT("TextureGraph activation profiles could not be loaded and no diagnostic was provided."), TEXT("activation_profiles_ready"));
 			return false;
 		}
 		FGraphCompoundRuntimeConfig RuntimeConfig;
-		RuntimeConfig.MaxFrameBytes = 16 * 1024 * 1024;
+
 		FGraphCompoundAudioMediaProductionConfig ProductionConfig;
 		ProductionConfig.DurableJournalRoot = FPaths::ProjectSavedDir()
 			/ TEXT("UeAgentInterface/GraphCompound/TextureGraph");
-		ProductionConfig.OperationTimeoutSeconds = 120.0;
 		TSharedPtr<FGraphCompoundRuntime> Runtime;
 		FGraphCompoundRuntimeError RuntimeError;
 		if (!TryCreateAudioMediaGraphProductionRuntime(
 				RuntimeConfig, ProductionConfig, Runtime, RuntimeError)
 			|| !Runtime.IsValid())
 		{
-			OutError = RuntimeError.Code + TEXT(":") + RuntimeError.Detail;
+			OutError = RuntimeError;
+			if (OutError.IsEmpty()) OutError = NativeConditionFailure(TEXT("texture_graph_runtime_unavailable"),
+				TEXT("The TextureGraph production runtime was not created and no diagnostic was provided."), TEXT("runtime_ready"));
 			return false;
 		}
 		TArray<TSharedRef<CommandEdge::IUeAgentCommandHandler>> Mechanics;
@@ -195,6 +238,8 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				Mechanics,
 				OutError))
 		{
+			if (OutError.IsEmpty()) OutError = NativeConditionFailure(TEXT("texture_graph_mechanics_handlers_unavailable"),
+				TEXT("TextureGraph mechanics handlers could not be created and no diagnostic was provided."), TEXT("mechanics_handlers_ready"));
 			return false;
 		}
 		for (const TSharedRef<CommandEdge::IUeAgentCommandHandler>& Handler
@@ -203,7 +248,7 @@ namespace UE::UAI::OperationOwners::TextureGraph
 			if (OutHandlers.Contains(Handler->GetCommandId()))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("texture_graph_mechanics_handler_duplicate");
+				OutError = DuplicateHandlerFailure(Handler->GetCommandId());
 				return false;
 			}
 			OutHandlers.Add(Handler->GetCommandId(), Handler);
@@ -223,24 +268,21 @@ namespace UE::UAI::OperationOwners::TextureGraph
 			if (OutHandlers.Contains(Pair.Key))
 			{
 				OutHandlers.Reset();
-				OutError = TEXT("texture_graph_mechanics_handler_duplicate:")
-					+ Pair.Key;
+				OutError = DuplicateHandlerFailure(Pair.Key);
 				return false;
 			}
 			OutHandlers.Add(Pair.Key, Pair.Value);
 		}
-		return OutHandlers.Num()
-			== DomainAdapters::TextureGraph::GetCommandIds().Num();
-	}
-
-	bool TryCreateMechanicsHandlers(
-		TMap<FString, TSharedRef<CommandEdge::IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError)
-	{
-		return TryCreateMechanicsHandlers(
-			GetTextureGraphBakeInvocationFactory(),
-			OutHandlers,
-			OutError);
+		const int32 ExpectedCount = DomainAdapters::TextureGraph::GetCommandIds().Num();
+		if (OutHandlers.Num() != ExpectedCount)
+		{
+			OutError = NativeConditionFailure(TEXT("texture_graph_mechanics_handler_count_invalid"),
+				TEXT("The registered TextureGraph handler count does not match the declared command count."), TEXT("handler_count"));
+			OutError.ActualValue = MakeShared<FJsonValueNumber>(OutHandlers.Num());
+			OutError.ExpectedValue = MakeShared<FJsonValueNumber>(ExpectedCount);
+			return false;
+		}
+		return true;
 	}
 
 	CommandEdge::FUeAgentCommandResult Submit(

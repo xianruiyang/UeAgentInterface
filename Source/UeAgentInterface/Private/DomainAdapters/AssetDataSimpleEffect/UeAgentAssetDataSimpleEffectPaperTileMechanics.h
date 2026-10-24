@@ -41,7 +41,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	bool TryRollbackPaperTileMapReplacement(
 		UObject* Target,
-		const FPaperTileMapPreparedState& State);
+		const FPaperTileMapPreparedState& State,
+		ExecutionMutation::FExecutionMutationError& OutError);
 
 	bool TryPreparePaperTileSetReplacement(
 		IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
@@ -61,5 +62,6 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	bool TryRollbackPaperTileSetReplacement(
 		UObject* Target,
-		const FPaperTileSetPreparedState& State);
+		const FPaperTileSetPreparedState& State,
+		ExecutionMutation::FExecutionMutationError& OutError);
 }

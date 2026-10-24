@@ -1,9 +1,12 @@
 #include "DomainAdapters/EditorProject/UeAgentEditorProjectMechanicsBoundary.h"
+#include "DomainAdapters/EditorProject/UeAgentEditorProjectQueryMechanics.h"
 
 #include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringRuntimeResolvers.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Misc/ConfigCacheIni.h"
-#include "LegacyMechanics/UeAgentLegacyMechanics.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Utilities/UeAgentJsonDiagnostics.h"
 
 namespace UE::UAI::DomainAdapters::EditorProject
 {
@@ -17,7 +20,7 @@ namespace UE::UAI::DomainAdapters::EditorProject
 				const FString& Action,
 				const FEditorProjectQueryRequest& Request,
 				TSharedPtr<FJsonObject>& OutObservation,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				// The legacy read mechanics contract accepts an allocated result
 				// object and may populate it before returning a typed validation
@@ -38,11 +41,6 @@ namespace UE::UAI::DomainAdapters::EditorProject
 				Params->SetBoolField(TEXT("write_file"), false);
 				Params->SetBoolField(TEXT("write_files"), false);
 
-				FUeAgentRequestContext Context;
-				Context.RequestId = Request.RequestId;
-				Context.Command = TEXT("editor_project_query");
-				Context.Params = Params;
-
 				bool bOk = false;
 				if (Action == TEXT("target.read"))
 				{
@@ -50,7 +48,16 @@ namespace UE::UAI::DomainAdapters::EditorProject
 					if (!Params->TryGetStringField(TEXT("target_ref"), TargetRef)
 						|| TargetRef.IsEmpty())
 					{
-						OutError = TEXT("editor_project_target_read_target_ref_required");
+						OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("editor_project_target_read_target_ref_required"),
+							TEXT("Reading an editor project target requires a nonempty string target reference."), TEXT("runtime_factory"));
+						const auto Actual = Params->Values.FindRef(TEXT("target_ref"));
+						OutError.SourceKind = TEXT("command_input");
+						OutError.PropertyPath = TEXT("/target_ref");
+						OutError.ActualValue = Actual.IsValid() && Actual->Type == EJson::String
+							? Actual : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(UeAgentJsonDiagnostics::JsonValueTypeToString(Actual)));
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty target reference"));
+						OutError.ActualValuePresent = Actual.IsValid();
+						OutError.ExpectedValuePresent = true;
 						return false;
 					}
 
@@ -60,11 +67,7 @@ namespace UE::UAI::DomainAdapters::EditorProject
 					if (!TryCreateEditorProjectSimpleAuthoringRuntimeResolvers(
 							Resolvers, ResolverError))
 					{
-						OutError = ResolverError.Code;
-						if (!ResolverError.Detail.IsEmpty())
-						{
-							OutError += TEXT(": ") + ResolverError.Detail;
-						}
+						OutError = ResolverError;
 						return false;
 					}
 
@@ -74,11 +77,20 @@ namespace UE::UAI::DomainAdapters::EditorProject
 					if (!Resolvers.PreStateTargetResolver->TryResolveTarget(
 							TargetRef, Target, TargetError))
 					{
-						OutError = TargetError.GetCode();
-						if (!TargetError.GetDetail().IsEmpty())
+						OutError = TargetError;
+						if (OutError.IsEmpty()) OutError = Target.GetValidationDiagnostic();
+						if (OutError.IsEmpty())
 						{
-							OutError += TEXT(": ") + TargetError.GetDetail();
+							OutError = UE::UAI::Contract::FDiagnostic::Failure(TEXT("editor_project_target_read_unresolved"),
+								TEXT("The editor project target resolver did not resolve the requested target."), TEXT("query"));
+							OutError.SourceKind = TEXT("native_result");
+							OutError.PropertyPath = TEXT("/target_resolved");
+							OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+							OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+							OutError.ActualValuePresent = true;
+							OutError.ExpectedValuePresent = true;
 						}
+						if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = TargetRef;
 						return false;
 					}
 
@@ -87,8 +99,6 @@ namespace UE::UAI::DomainAdapters::EditorProject
 						TEXT("target_ref"), Target.GetCanonicalRef());
 					OutObservation->SetStringField(
 						TEXT("profile_id"), Target.GetProfileId());
-					OutObservation->SetStringField(
-						TEXT("target_revision"), Target.GetRevision());
 					if (const FConfigFile* Config = Target.GetConfigDocument())
 					{
 						const TSharedPtr<FJsonObject> Entries =
@@ -98,8 +108,20 @@ namespace UE::UAI::DomainAdapters::EditorProject
 						{
 							for (FConfigSection::TConstIterator It(*Section); It; ++It)
 							{
-								Entries->SetStringField(
-									It.Key().ToString(), It.Value().GetSavedValue());
+								const FString Key = It.Key().ToString();
+								const TSharedPtr<FJsonValue> Value = MakeShared<FJsonValueString>(It.Value().GetSavedValue());
+								const TSharedPtr<FJsonValue>* Existing = Entries->Values.Find(Key);
+								if (!Existing)
+								{
+									Entries->SetField(Key, Value);
+								}
+								else
+								{
+									TArray<TSharedPtr<FJsonValue>> Values = (*Existing)->Type == EJson::Array
+										? (*Existing)->AsArray() : TArray<TSharedPtr<FJsonValue>>{*Existing};
+									Values.Add(Value);
+									Entries->SetArrayField(Key, MoveTemp(Values));
+								}
 							}
 						}
 						OutObservation->SetObjectField(TEXT("entries"), Entries);
@@ -112,11 +134,7 @@ namespace UE::UAI::DomainAdapters::EditorProject
 						if (!Resolvers.PreStateTargetResolver->TryReadSettingsFields(
 								*SettingsObject, Fields, FieldError))
 						{
-							OutError = FieldError.GetCode();
-							if (!FieldError.GetDetail().IsEmpty())
-							{
-								OutError += TEXT(": ") + FieldError.GetDetail();
-							}
+							OutError = FieldError;
 							return false;
 						}
 
@@ -128,8 +146,6 @@ namespace UE::UAI::DomainAdapters::EditorProject
 								MakeShared<FJsonObject>();
 							FieldObject->SetStringField(
 								TEXT("field_ref"), Field.FieldRef);
-							FieldObject->SetStringField(
-								TEXT("field_revision"), Field.FieldRevision);
 							FieldObject->SetStringField(
 								TEXT("type_id"), Field.TypeId);
 							if (Field.TypeId == TEXT("uai.value.boolean.v1"))
@@ -157,22 +173,8 @@ namespace UE::UAI::DomainAdapters::EditorProject
 					}
 					bOk = true;
 				}
-				else if (Action == TEXT("device_profile.diff")) bOk = Mechanics.CmdDeviceProfileDiffJson(Context, OutObservation, OutError);
-				else if (Action == TEXT("device_profile.export")) bOk = Mechanics.CmdDeviceProfileExportJson(Context, OutObservation, OutError);
-				else if (Action == TEXT("device_profile.query")) bOk = Mechanics.CmdDeviceProfileQuery(Context, OutObservation, OutError);
-				else if (Action == TEXT("device_profile.resolve_cvars")) bOk = Mechanics.CmdDeviceProfileResolveCVars(Context, OutObservation, OutError);
-				else if (Action == TEXT("device_profile.validate")) bOk = Mechanics.CmdDeviceProfileValidateJson(Context, OutObservation, OutError);
-				else if (Action == TEXT("platform_config.export")) bOk = Mechanics.CmdPlatformConfigExportJson(Context, OutObservation, OutError);
-				else if (Action == TEXT("platform_config.validate")) bOk = Mechanics.CmdPlatformConfigValidateJson(Context, OutObservation, OutError);
-				else if (Action == TEXT("platform_profile.validate_packaging")) bOk = Mechanics.CmdPlatformProfileValidatePackaging(Context, OutObservation, OutError);
-				else if (Action == TEXT("project_settings.diff")) bOk = Mechanics.CmdProjectSettingsDiffPage(Context, OutObservation, OutError);
-				else if (Action == TEXT("project_settings.index")) bOk = Mechanics.CmdProjectSettingsExportIndex(Context, OutObservation, OutError);
-				else if (Action == TEXT("project_settings.page")) bOk = Mechanics.CmdProjectSettingsExportPage(Context, OutObservation, OutError);
-				else if (Action == TEXT("project_settings.validate")) bOk = Mechanics.CmdProjectSettingsValidatePage(Context, OutObservation, OutError);
-				else if (Action == TEXT("scalability.export")) bOk = Mechanics.CmdScalabilityExportJson(Context, OutObservation, OutError);
-				else if (Action == TEXT("scalability.validate")) bOk = Mechanics.CmdScalabilityValidateJson(Context, OutObservation, OutError);
-				else if (Action == TEXT("target_platform.query")) bOk = Mechanics.CmdTargetPlatformQuery(Context, OutObservation, OutError);
-				else OutError = TEXT("editor_project_query_action_unknown");
+				else bOk = FEditorProjectQueryMechanics::Execute(Action, Params, OutObservation, OutError);
+
 
 				if (bOk && OutObservation.IsValid())
 				{
@@ -186,9 +188,6 @@ namespace UE::UAI::DomainAdapters::EditorProject
 				}
 				return bOk;
 			}
-
-		private:
-			FUeAgentLegacyMechanics Mechanics;
 		};
 	}
 

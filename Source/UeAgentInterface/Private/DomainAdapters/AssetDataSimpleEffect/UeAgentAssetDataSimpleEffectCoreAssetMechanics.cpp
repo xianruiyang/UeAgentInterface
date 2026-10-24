@@ -1,4 +1,15 @@
 #include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCoreAssetMechanics.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringDiagnostics.h"
+#include "Dom/JsonValue.h"
+#include "Misc/ScopeExit.h"
+
+#include "Core/Contract/UeAgentDiagnostic.h"
+#include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
+#include "Utilities/AuthoringCore/UeAgentAuthoringPropertyValues.h"
+#include "Core/StateSemantic/UeAgentCanonicalValueJson.h"
+#include "DomainAdapters/AssetDataSimpleEffect/UeAgentDataObjectEligibility.h"
+#include "Dom/JsonObject.h"
 
 #include "Curves/CurveFloat.h"
 #include "Curves/CurveLinearColor.h"
@@ -25,6 +36,62 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	namespace
 	{
+
+        FExecutionMutationError JsonFailure(const FString& Code, const FString& Reason, const FString& Field,
+            const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected,
+            const TCHAR* SourceKind = TEXT("authored_value"))
+        {
+            auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Field, Expected, Actual, TEXT("execution"), Reason);
+            Error.SourceKind = SourceKind;
+            Error.ActualValuePresent = Actual.IsValid();
+            Error.ExpectedValuePresent = Expected.IsValid();
+            if (Error.SourceKind == TEXT("native_result"))
+            {
+                Error.Source = {};
+                Error.SemanticPointer.Reset();
+            }
+            return Error;
+        }
+
+        FExecutionMutationError ValueFailure(const FString& Code, const FString& Reason, const FString& Field,
+            const FUeAgentCanonicalValue* Actual, const FString& Expected,
+            const TCHAR* SourceKind = TEXT("authored_value"))
+        {
+            auto Error = JsonFailure(Code, Reason, Field, nullptr, MakeShared<FJsonValueString>(Expected), SourceKind);
+            Error.ActualValuePresent = Actual != nullptr;
+            Contract::FDiagnostic ProjectionError;
+            if (Actual && !CanonicalJson::TryToJsonValue(*Actual, Error.ActualValue, ProjectionError))
+            {
+                ProjectionError.SourceKind = TEXT("native_result");
+                Error.Diagnostics.Add(MoveTemp(ProjectionError));
+            }
+            return Error;
+        }
+
+
+        FString ChildPath(const FString& Parent, const FString& Name)
+        {
+            return Parent + TEXT("/") + Name.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1"));
+        }
+
+        FExecutionMutationError NativeFailure(const FString& Code, const FString& Reason, const FString& Field,
+            const TSharedPtr<FJsonValue>& Actual, const TSharedPtr<FJsonValue>& Expected)
+        {
+            auto Error = UeAgentAuthoringDiagnostics::MakeValueFailure(Code, Field, Expected, Actual, TEXT("execution"), Reason);
+            Error.SourceKind = TEXT("native_result");
+            Error.Source = {};
+            Error.SemanticPointer.Reset();
+            Error.ActualValuePresent = Actual.IsValid();
+            Error.ExpectedValuePresent = Expected.IsValid();
+            return Error;
+        }
+
+        TSharedPtr<FJsonValue> ObjectClassValue(const UObject* Object)
+        {
+            return Object ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Object->GetClass()->GetPathName()))
+                : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>());
+        }
+
 		enum class ECoreAssetKind : uint8
 		{
 			AudioEffectPreset,
@@ -114,16 +181,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return Kinds.Find(NativeMechanicId);
 		}
 
-		bool Fail(
-			FExecutionMutationError& OutError,
-			FString Code,
-			FString Detail = FString())
-		{
-			OutError = FExecutionMutationError(
-				MoveTemp(Code),
-				MoveTemp(Detail));
-			return false;
-		}
+		bool Fail(FExecutionMutationError& OutError, FExecutionMutationError Diagnostic,
+            const FString& PropertyPath = FString())
+        {
+            OutError = MoveTemp(Diagnostic);
+            if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = PropertyPath;
+            return false;
+        }
 
 		const FUeAgentCanonicalValue* FindObjectField(
 			const FUeAgentCanonicalValue& Object,
@@ -177,6 +241,81 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return nullptr;
 		}
 
+        TSharedPtr<FJsonValue> ChangeFieldsValue(const TArray<FCoreAssetChangeView>& Changes)
+        {
+            TArray<TSharedPtr<FJsonValue>> Fields;
+            for (const auto& Change : Changes) Fields.Add(MakeShared<FJsonValueString>(Change.FieldId));
+            return MakeShared<FJsonValueArray>(Fields);
+        }
+
+        bool TryRequireChangeValue(const FCoreAssetChangeView& Change, FExecutionMutationError& OutError)
+        {
+            if (Change.CanonicalValue) return true;
+            return Fail(OutError, ValueFailure(TEXT("asset_data_core_change_value_missing"),
+                TEXT("The field change requires a value."), Change.FieldId, nullptr, TEXT("present value")));
+        }
+
+        bool TryRequirePresence(const FCoreAssetChangeView& Change,
+            std::initializer_list<const TCHAR*> Allowed, FExecutionMutationError& OutError)
+        {
+            TArray<TSharedPtr<FJsonValue>> Expected;
+            for (const TCHAR* Name : Allowed)
+            {
+                if (Change.Presence == Name) return true;
+                Expected.Add(MakeShared<FJsonValueString>(Name));
+            }
+            return Fail(OutError, JsonFailure(TEXT("asset_data_core_presence_invalid"),
+                TEXT("The field change has an unsupported presence."), Change.FieldId,
+                MakeShared<FJsonValueString>(Change.Presence), MakeShared<FJsonValueArray>(Expected)));
+        }
+
+        FExecutionMutationError ChangeSetFailure(const TArray<FCoreAssetChangeView>& Changes,
+            const FString& Expected)
+        {
+            return JsonFailure(TEXT("asset_data_core_changes_invalid"),
+                TEXT("The submitted change fields do not match the supported change set."),
+                TEXT("changes"), ChangeFieldsValue(Changes), MakeShared<FJsonValueString>(Expected));
+        }
+
+        bool TryReadRequiredString(const FUeAgentCanonicalValue* Value, FString& Out,
+            const FString& Field, FExecutionMutationError& OutError,
+            const TCHAR* SourceKind = TEXT("authored_value"))
+        {
+            if (!Value || Value->GetKind() != EUeAgentValueKind::String)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_string_invalid"),
+                    Value ? TEXT("A string is required.") : TEXT("The required string is missing."),
+                    Field, Value, TEXT("string"), SourceKind));
+            Out = Value->GetText();
+            return true;
+        }
+
+        void QualifyCoreValueFailure(FExecutionMutationError& Error, const FString& Field, const bool bNative)
+        {
+            if (bNative)
+            {
+                Error.SourceKind = TEXT("native_result");
+                if (Error.Source.InternalJsonPath.IsEmpty())
+                    Error.Source.InternalJsonPath = Error.SemanticPointer.IsEmpty() ? Error.Source.JsonPath : Error.SemanticPointer;
+                static_cast<Contract::FPublicSourceLocation&>(Error.Source) = {};
+                Error.SemanticPointer.Reset();
+            }
+            if (!Field.IsEmpty()) Error.PropertyPath = Error.PropertyPath.IsEmpty() ? Field : Field + TEXT("/") + Error.PropertyPath;
+            for (auto& Child : Error.Diagnostics) QualifyCoreValueFailure(Child, Field, bNative);
+            if (Error.PublicCause)
+            {
+                auto Cause = MakeShared<FExecutionMutationError>(*Error.PublicCause);
+                QualifyCoreValueFailure(*Cause, Field, bNative);
+                Error.PublicCause = MoveTemp(Cause);
+            }
+        }
+
+        bool FailRegisteredValue(FExecutionMutationError& OutError, const FString& Field, const bool bNative)
+        {
+            if (!bNative) UeAgentAuthoringDiagnostics::PrefixDocumentFailure(OutError, TEXT("/") + Field);
+            QualifyCoreValueFailure(OutError, Field, bNative);
+            return false;
+        }
+
 		bool HasExactObjectFields(
 			const FUeAgentCanonicalValue& Object,
 			std::initializer_list<const TCHAR*> Names)
@@ -197,133 +336,136 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return true;
 		}
 
-		bool TryReadNumber(
-			const FUeAgentCanonicalValue& Value,
-			double& OutNumber)
-		{
-			if (Value.GetKind() != EUeAgentValueKind::Integer
-				&& Value.GetKind() != EUeAgentValueKind::Decimal)
-			{
-				return false;
-			}
-			return LexTryParseString(
-					OutNumber,
-					*Value.GetLexeme())
-				&& FMath::IsFinite(OutNumber);
-		}
+        bool TryRequireObjectFields(const FUeAgentCanonicalValue& Value,
+            std::initializer_list<const TCHAR*> Names, const FString& Field, FExecutionMutationError& OutError)
+        {
+            if (HasExactObjectFields(Value, Names)) return true;
+            if (Value.GetKind() != EUeAgentValueKind::Object)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_object_invalid"),
+                    TEXT("An object with the required fields is required."), Field, &Value, TEXT("object")));
+            TArray<TSharedPtr<FJsonValue>> ActualNames;
+            TArray<TSharedPtr<FJsonValue>> ExpectedNames;
+            for (const auto& Item : Value.GetObjectItems()) ActualNames.Add(MakeShared<FJsonValueString>(Item.Key));
+            for (const TCHAR* Name : Names) ExpectedNames.Add(MakeShared<FJsonValueString>(Name));
+            for (const TCHAR* Name : Names)
+                if (!FindObjectField(Value, Name))
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_core_field_missing"),
+                        TEXT("A required object field is missing."), ChildPath(Field, Name), nullptr,
+                        MakeShared<FJsonValueString>(TEXT("present field"))));
+            return Fail(OutError, JsonFailure(TEXT("asset_data_core_object_fields_invalid"),
+                TEXT("The object must contain exactly the supported fields."), Field,
+                MakeShared<FJsonValueArray>(ActualNames), MakeShared<FJsonValueArray>(ExpectedNames)));
+        }
 
-		bool TryReadFloat(
-			const FUeAgentCanonicalValue& Value,
-			float& OutValue,
-			const double MinValue,
-			const double MaxValue)
-		{
-			double Number = 0.0;
-			if (!TryReadNumber(Value, Number)
-				|| Number < MinValue
-				|| Number > MaxValue)
-			{
-				return false;
-			}
-			OutValue = static_cast<float>(Number);
-			return FMath::IsFinite(OutValue);
-		}
+        bool TryReadNumber(const FUeAgentCanonicalValue& Value, double& OutNumber,
+            const FString& Field, FExecutionMutationError& OutError)
+        {
+            if (Value.GetKind() != EUeAgentValueKind::Integer && Value.GetKind() != EUeAgentValueKind::Decimal)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_number_invalid"),
+                    TEXT("A numeric value is required."), Field, &Value, TEXT("finite number")));
+            if (!TryParseFiniteDecimal(Value.GetLexeme(), OutNumber))
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_number_invalid"),
+                    TEXT("The number cannot be represented as a finite native value."), Field, &Value, TEXT("finite number")));
+            return true;
+        }
 
-		bool TryReadInt32(
-			const FUeAgentCanonicalValue& Value,
-			int32& OutValue,
-			const int32 MinValue,
-			const int32 MaxValue)
-		{
-			double Number = 0.0;
-			if (!TryReadNumber(Value, Number)
-				|| FMath::FloorToDouble(Number) != Number
-				|| Number < MinValue
-				|| Number > MaxValue)
-			{
-				return false;
-			}
-			OutValue = static_cast<int32>(Number);
-			return true;
-		}
+        bool TryReadFloat(const FUeAgentCanonicalValue& Value, float& OutValue,
+            const double MinValue, const double MaxValue, const FString& Field, FExecutionMutationError& OutError)
+        {
+            double Number = 0.0;
+            if (!TryReadNumber(Value, Number, Field, OutError)) return false;
+            if (Number < MinValue || Number > MaxValue)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_float_range_invalid"),
+                    TEXT("The number is outside the supported range."), Field, &Value,
+                    FString::Printf(TEXT("%g <= value <= %g"), MinValue, MaxValue)));
+            if (UeAgentPropertyValueCodec::TryConvertFloat32(Number, OutValue, OutError)) return true;
+            OutError.PropertyPath = Field;
+            return false;
+        }
 
-		bool TryReadBool(
-			const FUeAgentCanonicalValue& Value,
-			bool& bOutValue)
-		{
-			if (Value.GetKind() != EUeAgentValueKind::Boolean)
-			{
-				return false;
-			}
-			bOutValue = Value.GetBoolean();
-			return true;
-		}
+        bool TryReadInt32(const FUeAgentCanonicalValue& Value, int32& OutValue,
+            const int32 MinValue, const int32 MaxValue, const FString& Field, FExecutionMutationError& OutError)
+        {
+            int64 Number = 0;
+            if ((Value.GetKind() != EUeAgentValueKind::Integer && Value.GetKind() != EUeAgentValueKind::Decimal)
+                || !TryParseInt64Number(Value.GetLexeme(), Number) || Number < MinValue || Number > MaxValue)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_integer_invalid"),
+                    TEXT("The value must be an integer within the supported range."), Field, &Value,
+                    FString::Printf(TEXT("integer in [%d, %d]"), MinValue, MaxValue)));
+            OutValue = static_cast<int32>(Number);
+            return true;
+        }
 
-		bool TryReadString(
-			const FUeAgentCanonicalValue& Value,
-			FString& OutValue)
-		{
-			if (Value.GetKind() != EUeAgentValueKind::String)
-			{
-				return false;
-			}
-			OutValue = Value.GetText();
-			return true;
-		}
+        bool TryReadBool(const FUeAgentCanonicalValue& Value, bool& bOutValue,
+            const FString& Field, FExecutionMutationError& OutError)
+        {
+            if (Value.GetKind() != EUeAgentValueKind::Boolean)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_boolean_invalid"),
+                    TEXT("A boolean is required."), Field, &Value, TEXT("boolean")));
+            bOutValue = Value.GetBoolean();
+            return true;
+        }
 
-		template <typename TObjectType>
-		bool TryResolveObject(
-			IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
-			const FUeAgentCanonicalValue& Value,
-			TObjectType*& OutObject,
-			FExecutionMutationError& OutError)
-		{
-			OutObject = nullptr;
-			if (Value.GetKind() != EUeAgentValueKind::String)
-			{
-				return false;
-			}
-			UObject* Resolved = nullptr;
-			if (!Resolver.TryResolveExisting(
-					Value.GetText(),
-					Resolved,
-					OutError))
-			{
-				return false;
-			}
-			OutObject = Cast<TObjectType>(Resolved);
-			return OutObject != nullptr;
-		}
+        bool TryReadString(const FUeAgentCanonicalValue& Value, FString& OutValue,
+            const FString& Field, FExecutionMutationError& OutError)
+        {
+            if (Value.GetKind() != EUeAgentValueKind::String)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_string_invalid"),
+                    TEXT("A string is required."), Field, &Value, TEXT("string")));
+            OutValue = Value.GetText();
+            return true;
+        }
 
-		template <typename TObjectType>
-		bool TryResolveUniqueArray(
-			IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
-			const FUeAgentCanonicalValue& Value,
-			TArray<TObjectType*>& OutObjects,
-			FExecutionMutationError& OutError)
-		{
-			OutObjects.Reset();
-			if (Value.GetKind() != EUeAgentValueKind::Array)
-			{
-				return false;
-			}
-			for (const FUeAgentCanonicalValueRef& Item
-				: Value.GetArrayItems())
-			{
-				TObjectType* Object = nullptr;
-				if (!TryResolveObject(
-						Resolver,
-						Item.Get(),
-						Object,
-						OutError)
-					|| OutObjects.Contains(Object))
-				{
-					return false;
-				}
-				OutObjects.Add(Object);
-			}
-			return true;
-		}
+        template <typename TObjectType>
+        bool TryResolveObject(IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
+            const FUeAgentCanonicalValue& Value, TObjectType*& OutObject,
+            FExecutionMutationError& OutError, const FString& Field)
+        {
+            OutObject = nullptr;
+            if (Value.GetKind() != EUeAgentValueKind::String)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_reference_invalid"),
+                    TEXT("The asset reference must be a string."), Field, &Value, TObjectType::StaticClass()->GetPathName()));
+            UObject* Resolved = nullptr;
+            if (!Resolver.TryResolveExisting(Value.GetText(), Resolved, OutError))
+            {
+                if (OutError.PropertyPath.IsEmpty()) OutError.PropertyPath = Field;
+                return false;
+            }
+            OutObject = Cast<TObjectType>(Resolved);
+            if (!OutObject)
+            {
+                auto Actual = MakeShared<FJsonObject>();
+                Actual->SetStringField(TEXT("reference"), Value.GetText());
+                Actual->SetField(TEXT("resolved_class"), ObjectClassValue(Resolved));
+                return Fail(OutError, JsonFailure(TEXT("asset_data_core_reference_type_invalid"),
+                    TEXT("The reference did not resolve to the required asset class."), Field,
+                    MakeShared<FJsonValueObject>(Actual), MakeShared<FJsonValueString>(TObjectType::StaticClass()->GetPathName())));
+            }
+            return true;
+        }
+
+        template <typename TObjectType>
+        bool TryResolveUniqueArray(IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
+            const FUeAgentCanonicalValue& Value, TArray<TObjectType*>& OutObjects,
+            FExecutionMutationError& OutError, const FString& Field)
+        {
+            OutObjects.Reset();
+            if (Value.GetKind() != EUeAgentValueKind::Array)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_reference_array_invalid"),
+                    TEXT("Asset references must be an array."), Field, &Value, TEXT("array of unique asset references")));
+            for (int32 Index = 0; Index < Value.GetArrayItems().Num(); ++Index)
+            {
+                const auto& Item = Value.GetArrayItems()[Index];
+                const FString Path = Field + TEXT("/") + FString::FromInt(Index);
+                TObjectType* Object = nullptr;
+                if (!TryResolveObject(Resolver, *Item, Object, OutError, Path)) return false;
+                if (OutObjects.Contains(Object))
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_core_reference_duplicate"),
+                        TEXT("The reference resolves to an asset already present in this array."), Path, &Item.Get(), TEXT("unique resolved asset")));
+                OutObjects.Add(Object);
+            }
+            return true;
+        }
 
 		void PinUnique(
 			TArray<TStrongObjectPtr<UObject>>& Pins,
@@ -385,33 +527,33 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 		bool TryParseEqSettings(
 			const FUeAgentCanonicalValue& Value,
-			FSubmixEffectSubmixEQSettings& OutSettings)
+			FSubmixEffectSubmixEQSettings& OutSettings, const FString& Field, FExecutionMutationError& OutError)
 		{
-			if (!HasExactObjectFields(Value, {TEXT("eq_bands")}))
+			if (!TryRequireObjectFields(Value, {TEXT("eq_bands")}, Field, OutError))
 			{
 				return false;
 			}
 			const FUeAgentCanonicalValue* Bands =
 				FindObjectField(Value, TEXT("eq_bands"));
 			if (!Bands
-				|| Bands->GetKind() != EUeAgentValueKind::Array
-				|| Bands->GetArrayItems().Num() > 64)
+				|| Bands->GetKind() != EUeAgentValueKind::Array)
 			{
-				return false;
+				return Fail(OutError, ValueFailure(TEXT("asset_data_core_eq_bands_invalid"), TEXT("EQ bands must be an array."), ChildPath(Field, TEXT("eq_bands")), Bands, TEXT("array")));
 			}
 			OutSettings.EQBands.Reset();
 			for (const FUeAgentCanonicalValueRef& Item
 				: Bands->GetArrayItems())
 			{
 				const FUeAgentCanonicalValue& BandValue = Item.Get();
-				if (!HasExactObjectFields(
+                const FString BandPath = ChildPath(Field, TEXT("eq_bands")) + TEXT("/") + FString::FromInt(OutSettings.EQBands.Num());
+				if (!TryRequireObjectFields(
 						BandValue,
 						{
 							TEXT("frequency_hz"),
 							TEXT("bandwidth_octaves"),
 							TEXT("gain_db"),
 							TEXT("enabled"),
-						}))
+						}, BandPath, OutError))
 				{
 					return false;
 				}
@@ -423,26 +565,26 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							TEXT("frequency_hz")),
 						Band.Frequency,
 						20.0,
-						20000.0)
+						20000.0, ChildPath(BandPath, TEXT("frequency_hz")), OutError)
 					|| !TryReadFloat(
 						*FindObjectField(
 							BandValue,
 							TEXT("bandwidth_octaves")),
 						Band.Bandwidth,
 						0.1,
-						2.0)
+						2.0, ChildPath(BandPath, TEXT("bandwidth_octaves")), OutError)
 					|| !TryReadFloat(
 						*FindObjectField(
 							BandValue,
 							TEXT("gain_db")),
 						Band.GainDb,
 						-90.0,
-						20.0)
+						20.0, ChildPath(BandPath, TEXT("gain_db")), OutError)
 					|| !TryReadBool(
 						*FindObjectField(
 							BandValue,
 							TEXT("enabled")),
-						bEnabled))
+						bEnabled, ChildPath(BandPath, TEXT("enabled")), OutError))
 				{
 					return false;
 				}
@@ -454,7 +596,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 		bool TryParseDistanceAlgorithm(
 			const FString& Name,
-			EAttenuationDistanceModel& OutValue)
+			EAttenuationDistanceModel& OutValue, const FString& Field, FExecutionMutationError& OutError)
 		{
 			const FString Normalized =
 				Name.TrimStartAndEnd().ToLower();
@@ -484,16 +626,16 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return false;
+				return Fail(OutError, JsonFailure(TEXT("asset_data_core_enum_invalid"), TEXT("EAttenuationDistanceModel name is not supported."), Field, MakeShared<FJsonValueString>(Name), MakeShared<FJsonValueString>(TEXT("linear, logarithmic, inverse, log_reverse, natural_sound, custom"))));
 			}
 			return true;
 		}
 
 		bool TryParseAttenuationSettings(
 			const FUeAgentCanonicalValue& Value,
-			FSoundAttenuationSettings& OutSettings)
+			FSoundAttenuationSettings& OutSettings, const FString& Field, FExecutionMutationError& OutError)
 		{
-			if (!HasExactObjectFields(
+			if (!TryRequireObjectFields(
 					Value,
 					{
 						TEXT("attenuate"),
@@ -507,7 +649,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						TEXT("occlusion_low_pass_filter_frequency"),
 						TEXT("occlusion_volume_attenuation"),
 						TEXT("occlusion_interpolation_time"),
-					}))
+					}, Field, OutError))
 			{
 				return false;
 			}
@@ -520,47 +662,47 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			float InnerRadius = 0.0f;
 			if (!TryReadBool(
 					*FindObjectField(Value, TEXT("attenuate")),
-					bAttenuate)
+					bAttenuate, ChildPath(Field, TEXT("attenuate")), OutError)
 				|| !TryReadBool(
 					*FindObjectField(Value, TEXT("spatialize")),
-					bSpatialize)
+					bSpatialize, ChildPath(Field, TEXT("spatialize")), OutError)
 				|| !TryReadString(
 					*FindObjectField(
 						Value,
 						TEXT("distance_algorithm")),
-					DistanceName)
+					DistanceName, ChildPath(Field, TEXT("distance_algorithm")), OutError)
 				|| !TryParseDistanceAlgorithm(
 					DistanceName,
-					OutSettings.DistanceAlgorithm)
+					OutSettings.DistanceAlgorithm, ChildPath(Field, TEXT("distance_algorithm")), OutError)
 				|| !TryReadString(
 					*FindObjectField(
 						Value,
 						TEXT("attenuation_shape")),
-					ShapeName)
-				|| ShapeName.TrimStartAndEnd().ToLower()
-					!= TEXT("sphere")
-				|| !TryReadFloat(
+					ShapeName, ChildPath(Field, TEXT("attenuation_shape")), OutError)) return false;
+            if (ShapeName.TrimStartAndEnd().ToLower() != TEXT("sphere"))
+                return Fail(OutError, JsonFailure(TEXT("asset_data_core_enum_invalid"), TEXT("EAttenuationShape name is not supported."), ChildPath(Field, TEXT("attenuation_shape")), MakeShared<FJsonValueString>(ShapeName), MakeShared<FJsonValueString>(TEXT("sphere"))));
+            if (!TryReadFloat(
 					*FindObjectField(Value, TEXT("inner_radius")),
 					InnerRadius,
 					0.0,
-					1000000000.0)
+					1000000000.0, ChildPath(Field, TEXT("inner_radius")), OutError)
 				|| !TryReadFloat(
 					*FindObjectField(
 						Value,
 						TEXT("falloff_distance")),
 					OutSettings.FalloffDistance,
 					0.0,
-					1000000000.0)
+					1000000000.0, ChildPath(Field, TEXT("falloff_distance")), OutError)
 				|| !TryReadString(
 					*FindObjectField(
 						Value,
 						TEXT("spatialization_algorithm")),
-					SpatializationName)
+					SpatializationName, ChildPath(Field, TEXT("spatialization_algorithm")), OutError)
 				|| !TryReadBool(
 					*FindObjectField(
 						Value,
 						TEXT("enable_occlusion")),
-					bEnableOcclusion)
+					bEnableOcclusion, ChildPath(Field, TEXT("enable_occlusion")), OutError)
 				|| !TryReadFloat(
 					*FindObjectField(
 						Value,
@@ -568,21 +710,21 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							"occlusion_low_pass_filter_frequency")),
 					OutSettings.OcclusionLowPassFilterFrequency,
 					0.0,
-					20000.0)
+					20000.0, ChildPath(Field, TEXT("occlusion_low_pass_filter_frequency")), OutError)
 				|| !TryReadFloat(
 					*FindObjectField(
 						Value,
 						TEXT("occlusion_volume_attenuation")),
 					OutSettings.OcclusionVolumeAttenuation,
 					0.0,
-					1.0)
+					1.0, ChildPath(Field, TEXT("occlusion_volume_attenuation")), OutError)
 				|| !TryReadFloat(
 					*FindObjectField(
 						Value,
 						TEXT("occlusion_interpolation_time")),
 					OutSettings.OcclusionInterpolationTime,
 					0.0,
-					1000000.0))
+					1000000.0, ChildPath(Field, TEXT("occlusion_interpolation_time")), OutError))
 			{
 				return false;
 			}
@@ -600,7 +742,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return false;
+                return Fail(OutError, JsonFailure(TEXT("asset_data_core_enum_invalid"), TEXT("ESoundSpatializationAlgorithm name is not supported."), ChildPath(Field, TEXT("spatialization_algorithm")), MakeShared<FJsonValueString>(SpatializationName), MakeShared<FJsonValueString>(TEXT("panning, binaural"))));
 			}
 			OutSettings.bAttenuate = bAttenuate;
 			OutSettings.bSpatialize = bSpatialize;
@@ -612,34 +754,34 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 		bool TryParseSoundClassProperties(
 			const FUeAgentCanonicalValue& Value,
-			FSoundClassProperties& OutProperties)
+			FSoundClassProperties& OutProperties, const FString& Field, FExecutionMutationError& OutError)
 		{
 			bool bIsUiSound = false;
 			bool bIsMusic = false;
-			if (!HasExactObjectFields(
+			if (!TryRequireObjectFields(
 					Value,
 					{
 						TEXT("volume"),
 						TEXT("pitch"),
 						TEXT("is_ui_sound"),
 						TEXT("is_music"),
-					})
+					}, Field, OutError)
 				|| !TryReadFloat(
 					*FindObjectField(Value, TEXT("volume")),
 					OutProperties.Volume,
 					0.0,
-					1000.0)
+					1000.0, ChildPath(Field, TEXT("volume")), OutError)
 				|| !TryReadFloat(
 					*FindObjectField(Value, TEXT("pitch")),
 					OutProperties.Pitch,
 					0.0,
-					8.0)
+					8.0, ChildPath(Field, TEXT("pitch")), OutError)
 				|| !TryReadBool(
 					*FindObjectField(Value, TEXT("is_ui_sound")),
-					bIsUiSound)
+					bIsUiSound, ChildPath(Field, TEXT("is_ui_sound")), OutError)
 				|| !TryReadBool(
 					*FindObjectField(Value, TEXT("is_music")),
-					bIsMusic))
+					bIsMusic, ChildPath(Field, TEXT("is_music")), OutError))
 			{
 				return false;
 			}
@@ -684,9 +826,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 		bool TryParseConcurrencySettings(
 			const FUeAgentCanonicalValue& Value,
-			FSoundConcurrencySettings& OutSettings)
+			FSoundConcurrencySettings& OutSettings, const FString& Field, FExecutionMutationError& OutError)
 		{
-			if (!HasExactObjectFields(
+			if (!TryRequireObjectFields(
 					Value,
 					{
 						TEXT("max_count"),
@@ -698,7 +840,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						TEXT("volume_scale_attack_time"),
 						TEXT("volume_scale_release_time"),
 						TEXT("voice_steal_release_time"),
-					}))
+					}, Field, OutError))
 			{
 				return false;
 			}
@@ -710,47 +852,47 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					*FindObjectField(Value, TEXT("max_count")),
 					OutSettings.MaxCount,
 					1,
-					1024)
+					MAX_int32, ChildPath(Field, TEXT("max_count")), OutError)
 				|| !TryReadBool(
 					*FindObjectField(Value, TEXT("limit_to_owner")),
-					bLimitToOwner)
+					bLimitToOwner, ChildPath(Field, TEXT("limit_to_owner")), OutError)
 				|| !TryReadFloat(
 					*FindObjectField(Value, TEXT("retrigger_time")),
 					OutSettings.RetriggerTime,
 					0.0,
-					1000000.0)
+					1000000.0, ChildPath(Field, TEXT("retrigger_time")), OutError)
 				|| !TryReadString(
 					*FindObjectField(Value, TEXT("resolution_rule")),
-					ResolutionRule)
+					ResolutionRule, ChildPath(Field, TEXT("resolution_rule")), OutError)
 				|| !TryReadFloat(
 					*FindObjectField(Value, TEXT("volume_scale")),
 					VolumeScale,
 					0.0,
-					1.0)
+					1.0, ChildPath(Field, TEXT("volume_scale")), OutError)
 				|| !TryReadString(
 					*FindObjectField(Value, TEXT("volume_scale_mode")),
-					VolumeScaleMode)
+					VolumeScaleMode, ChildPath(Field, TEXT("volume_scale_mode")), OutError)
 				|| !TryReadFloat(
 					*FindObjectField(
 						Value,
 						TEXT("volume_scale_attack_time")),
 					OutSettings.VolumeScaleAttackTime,
 					0.0,
-					1000000.0)
+					1000000.0, ChildPath(Field, TEXT("volume_scale_attack_time")), OutError)
 				|| !TryReadFloat(
 					*FindObjectField(
 						Value,
 						TEXT("volume_scale_release_time")),
 					OutSettings.VolumeScaleReleaseTime,
 					0.0,
-					1000000.0)
+					1000000.0, ChildPath(Field, TEXT("volume_scale_release_time")), OutError)
 				|| !TryReadFloat(
 					*FindObjectField(
 						Value,
 						TEXT("voice_steal_release_time")),
 					OutSettings.VoiceStealReleaseTime,
 					0.0,
-					1000000.0))
+					1000000.0, ChildPath(Field, TEXT("voice_steal_release_time")), OutError))
 			{
 				return false;
 			}
@@ -794,7 +936,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return false;
+                return Fail(OutError, JsonFailure(TEXT("asset_data_core_enum_invalid"), TEXT("EMaxConcurrentResolutionRule name is not supported."), ChildPath(Field, TEXT("resolution_rule")), MakeShared<FJsonValueString>(ResolutionRule), MakeShared<FJsonValueString>(TEXT("prevent_new, stop_oldest, stop_farthest_then_oldest, stop_farthest_then_prevent_new, stop_lowest_priority, stop_quietest, stop_lowest_priority_then_prevent_new"))));
 			}
 			const FString ScaleMode =
 				VolumeScaleMode.TrimStartAndEnd().ToLower();
@@ -815,7 +957,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return false;
+                return Fail(OutError, JsonFailure(TEXT("asset_data_core_enum_invalid"), TEXT("EConcurrencyVolumeScaleMode name is not supported."), ChildPath(Field, TEXT("volume_scale_mode")), MakeShared<FJsonValueString>(VolumeScaleMode), MakeShared<FJsonValueString>(TEXT("default, distance, priority"))));
 			}
 			FFloatProperty* VolumeScaleProperty =
 				FindFProperty<FFloatProperty>(
@@ -823,7 +965,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEXT("VolumeScale"));
 			if (!VolumeScaleProperty)
 			{
-				return false;
+                return Fail(OutError, NativeFailure(TEXT("asset_data_core_concurrency_property_missing"), TEXT("FSoundConcurrencySettings.VolumeScale is missing or is not a float property."), TEXT("VolumeScale"), MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("float property"))));
 			}
 			VolumeScaleProperty->SetPropertyValue_InContainer(
 				&OutSettings,
@@ -837,18 +979,19 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			const FUeAgentCanonicalValue& Value,
 			TArray<FSoundClassAdjuster>& OutModifiers,
 			TArray<TStrongObjectPtr<UObject>>& Pins,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
 			OutModifiers.Reset();
 			if (Value.GetKind() != EUeAgentValueKind::Array)
 			{
-				return false;
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_modifiers_invalid"), TEXT("Sound mix modifiers must be an array."), Field, &Value, TEXT("array")));
 			}
 			for (const FUeAgentCanonicalValueRef& Item
 				: Value.GetArrayItems())
 			{
 				const FUeAgentCanonicalValue& Object = Item.Get();
-				if (!HasExactObjectFields(
+                const FString ItemPath = Field + TEXT("/") + FString::FromInt(OutModifiers.Num());
+				if (!TryRequireObjectFields(
 						Object,
 						{
 							TEXT("sound_class_ref"),
@@ -858,7 +1001,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							TEXT("apply_to_children"),
 							TEXT(
 								"voice_center_channel_volume_adjuster"),
-						}))
+						}, ItemPath, OutError))
 				{
 					return false;
 				}
@@ -871,33 +1014,33 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							Object,
 							TEXT("sound_class_ref")),
 						SoundClass,
-						OutError)
+						OutError, ChildPath(ItemPath, TEXT("sound_class_ref")))
 					|| !TryReadFloat(
 						*FindObjectField(
 							Object,
 							TEXT("volume_adjuster")),
 						Adjuster.VolumeAdjuster,
 						0.0,
-						4.0)
+						4.0, ChildPath(ItemPath, TEXT("volume_adjuster")), OutError)
 					|| !TryReadFloat(
 						*FindObjectField(
 							Object,
 							TEXT("pitch_adjuster")),
 						Adjuster.PitchAdjuster,
 						0.0,
-						8.0)
+						8.0, ChildPath(ItemPath, TEXT("pitch_adjuster")), OutError)
 					|| !TryReadFloat(
 						*FindObjectField(
 							Object,
 							TEXT("low_pass_filter_frequency")),
 						Adjuster.LowPassFilterFrequency,
 						0.0,
-						20000.0)
+						20000.0, ChildPath(ItemPath, TEXT("low_pass_filter_frequency")), OutError)
 					|| !TryReadBool(
 						*FindObjectField(
 							Object,
 							TEXT("apply_to_children")),
-						bApplyToChildren)
+						bApplyToChildren, ChildPath(ItemPath, TEXT("apply_to_children")), OutError)
 					|| !TryReadFloat(
 						*FindObjectField(
 							Object,
@@ -905,7 +1048,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 								"voice_center_channel_volume_adjuster")),
 						Adjuster.VoiceCenterChannelVolumeAdjuster,
 						0.0,
-						4.0))
+						4.0, ChildPath(ItemPath, TEXT("voice_center_channel_volume_adjuster")), OutError))
 				{
 					return false;
 				}
@@ -913,7 +1056,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				{
 					if (Existing.SoundClassObject == SoundClass)
 					{
-						return false;
+                        return Fail(OutError, JsonFailure(TEXT("asset_data_core_modifier_duplicate"), TEXT("A modifier already refers to this sound class."), ChildPath(ItemPath, TEXT("sound_class_ref")), MakeShared<FJsonValueString>(SoundClass->GetPathName()), MakeShared<FJsonValueString>(TEXT("unique resolved sound class"))));
 					}
 				}
 				Adjuster.SoundClassObject = SoundClass;
@@ -927,7 +1070,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		bool TryApplyCollectionPresence(
 			const FString& Presence,
 			const TArray<FSoundClassAdjuster>& Requested,
-			TArray<FSoundClassAdjuster>& InOutModifiers)
+			TArray<FSoundClassAdjuster>& InOutModifiers, const FString& Field, FExecutionMutationError& OutError)
 		{
 			if (Presence == TEXT("clear"))
 			{
@@ -975,7 +1118,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				}
 				return true;
 			}
-			return false;
+			return Fail(OutError, JsonFailure(TEXT("asset_data_core_presence_invalid"), TEXT("The modifier collection presence is not supported."), Field, MakeShared<FJsonValueString>(Presence), MakeShared<FJsonValueString>(TEXT("clear, replace, remove, set"))));
 		}
 
 		struct FSoundSubmixNodeSnapshot final
@@ -1039,7 +1182,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 		bool TryParseInterpMode(
 			const FString& Name,
-			ERichCurveInterpMode& OutMode)
+			ERichCurveInterpMode& OutMode, const FString& Field, FExecutionMutationError& OutError)
 		{
 			const FString Value = Name.TrimStartAndEnd().ToLower();
 			if (Value == TEXT("constant"))
@@ -1056,14 +1199,14 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return false;
+				return Fail(OutError, JsonFailure(TEXT("asset_data_core_enum_invalid"), TEXT("ERichCurveInterpMode name is not supported."), Field, MakeShared<FJsonValueString>(Name), MakeShared<FJsonValueString>(TEXT("constant, linear, cubic"))));
 			}
 			return true;
 		}
 
 		bool TryParseTangentMode(
 			const FString& Name,
-			ERichCurveTangentMode& OutMode)
+			ERichCurveTangentMode& OutMode, const FString& Field, FExecutionMutationError& OutError)
 		{
 			const FString Value = Name.TrimStartAndEnd().ToLower();
 			if (Value == TEXT("auto"))
@@ -1088,14 +1231,14 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return false;
+				return Fail(OutError, JsonFailure(TEXT("asset_data_core_enum_invalid"), TEXT("ERichCurveTangentMode name is not supported."), Field, MakeShared<FJsonValueString>(Name), MakeShared<FJsonValueString>(TEXT("auto, user, break, smart_auto, none"))));
 			}
 			return true;
 		}
 
 		bool TryParseTangentWeightMode(
 			const FString& Name,
-			ERichCurveTangentWeightMode& OutMode)
+			ERichCurveTangentWeightMode& OutMode, const FString& Field, FExecutionMutationError& OutError)
 		{
 			const FString Value = Name.TrimStartAndEnd().ToLower();
 			if (Value == TEXT("none"))
@@ -1116,7 +1259,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return false;
+				return Fail(OutError, JsonFailure(TEXT("asset_data_core_enum_invalid"), TEXT("ERichCurveTangentWeightMode name is not supported."), Field, MakeShared<FJsonValueString>(Name), MakeShared<FJsonValueString>(TEXT("none, arrive, leave, both"))));
 			}
 			return true;
 		}
@@ -1124,12 +1267,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		bool TryReadFloatArray(
 			const FUeAgentCanonicalValue& Value,
 			const int32 ExpectedCount,
-			TArray<float>& OutValues)
+			TArray<float>& OutValues, const FString& Field, FExecutionMutationError& OutError)
 		{
 			if (Value.GetKind() != EUeAgentValueKind::Array
 				|| Value.GetArrayItems().Num() != ExpectedCount)
 			{
-				return false;
+				return Fail(OutError, ValueFailure(TEXT("asset_data_core_component_count_invalid"), TEXT("The numeric component array has an invalid type or length."), Field, &Value, FString::Printf(TEXT("array of %d numbers"), ExpectedCount)));
 			}
 			OutValues.Reset(ExpectedCount);
 			for (const FUeAgentCanonicalValueRef& Item
@@ -1140,7 +1283,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Item.Get(),
 						Number,
 						-TNumericLimits<float>::Max(),
-						TNumericLimits<float>::Max()))
+						TNumericLimits<float>::Max(), Field + TEXT("/") + FString::FromInt(OutValues.Num()), OutError))
 				{
 					return false;
 				}
@@ -1193,22 +1336,25 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		bool TryParseCurveKeys(
 			const FUeAgentCanonicalValue& Value,
 			const int32 Dimension,
-			TArray<TArray<FRichCurveKey>>& OutChannels)
+			TArray<TArray<FRichCurveKey>>& OutChannels, const FString& Field, FExecutionMutationError& OutError)
 		{
-			if (Value.GetKind() != EUeAgentValueKind::Array
-				|| Dimension < 1
-				|| Dimension > 4)
-			{
-				return false;
-			}
+            if (Value.GetKind() != EUeAgentValueKind::Array)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_curve_keys_invalid"),
+                    TEXT("Curve keys must be an array."), Field, &Value, TEXT("array")));
+            if (Dimension < 1 || Dimension > 4)
+                return Fail(OutError, NativeFailure(TEXT("asset_data_core_curve_dimension_invalid"),
+                    TEXT("The curve dimension is outside the supported range."), TEXT("curve_dimension"),
+                    MakeShared<FJsonValueNumber>(Dimension), MakeShared<FJsonValueString>(TEXT("integer from 1 to 4"))));
 			OutChannels.SetNum(Dimension);
 			float PreviousTime = 0.0f;
 			bool bHasPreviousTime = false;
+            int32 InputIndex = 0;
 			for (const FUeAgentCanonicalValueRef& Item
 				: Value.GetArrayItems())
 			{
 				const FUeAgentCanonicalValue& KeyObject = Item.Get();
-				if (!HasExactObjectFields(
+                const FString KeyPath = Field + TEXT("/") + FString::FromInt(InputIndex++);
+				if (!TryRequireObjectFields(
 						KeyObject,
 						{
 							TEXT("time"),
@@ -1220,7 +1366,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							TEXT("leave_tangents"),
 							TEXT("arrive_tangent_weights"),
 							TEXT("leave_tangent_weights"),
-						}))
+						}, KeyPath, OutError))
 				{
 					return false;
 				}
@@ -1241,60 +1387,61 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						*FindObjectField(KeyObject, TEXT("time")),
 						Time,
 						-TNumericLimits<float>::Max(),
-						TNumericLimits<float>::Max())
-					|| (bHasPreviousTime && Time <= PreviousTime)
-					|| !TryReadString(
+						TNumericLimits<float>::Max(), ChildPath(KeyPath, TEXT("time")), OutError)) return false;
+                if (bHasPreviousTime && Time <= PreviousTime)
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_core_curve_time_order_invalid"), TEXT("Curve key times must be strictly increasing."), ChildPath(KeyPath, TEXT("time")), MakeShared<FJsonValueNumber>(Time), MakeShared<FJsonValueString>(FString::Printf(TEXT("greater than previous time %g"), PreviousTime))));
+                if (!TryReadString(
 						*FindObjectField(
 							KeyObject,
 							TEXT("interp_mode")),
-						InterpName)
-					|| !TryParseInterpMode(InterpName, InterpMode)
+						InterpName, ChildPath(KeyPath, TEXT("interp_mode")), OutError)
+					|| !TryParseInterpMode(InterpName, InterpMode, ChildPath(KeyPath, TEXT("interp_mode")), OutError)
 					|| !TryReadString(
 						*FindObjectField(
 							KeyObject,
 							TEXT("tangent_mode")),
-						TangentName)
+						TangentName, ChildPath(KeyPath, TEXT("tangent_mode")), OutError)
 					|| !TryParseTangentMode(
 						TangentName,
-						TangentMode)
+						TangentMode, ChildPath(KeyPath, TEXT("tangent_mode")), OutError)
 					|| !TryReadString(
 						*FindObjectField(
 							KeyObject,
 							TEXT("tangent_weight_mode")),
-						WeightName)
+						WeightName, ChildPath(KeyPath, TEXT("tangent_weight_mode")), OutError)
 					|| !TryParseTangentWeightMode(
 						WeightName,
-						WeightMode)
+						WeightMode, ChildPath(KeyPath, TEXT("tangent_weight_mode")), OutError)
 					|| !TryReadFloatArray(
 						*FindObjectField(
 							KeyObject,
 							TEXT("values")),
 						Dimension,
-						Values)
+						Values, ChildPath(KeyPath, TEXT("values")), OutError)
 					|| !TryReadFloatArray(
 						*FindObjectField(
 							KeyObject,
 							TEXT("arrive_tangents")),
 						Dimension,
-						ArriveTangents)
+						ArriveTangents, ChildPath(KeyPath, TEXT("arrive_tangents")), OutError)
 					|| !TryReadFloatArray(
 						*FindObjectField(
 							KeyObject,
 							TEXT("leave_tangents")),
 						Dimension,
-						LeaveTangents)
+						LeaveTangents, ChildPath(KeyPath, TEXT("leave_tangents")), OutError)
 					|| !TryReadFloatArray(
 						*FindObjectField(
 							KeyObject,
 							TEXT("arrive_tangent_weights")),
 						Dimension,
-						ArriveWeights)
+						ArriveWeights, ChildPath(KeyPath, TEXT("arrive_tangent_weights")), OutError)
 					|| !TryReadFloatArray(
 						*FindObjectField(
 							KeyObject,
 							TEXT("leave_tangent_weights")),
 						Dimension,
-						LeaveWeights))
+						LeaveWeights, ChildPath(KeyPath, TEXT("leave_tangent_weights")), OutError))
 				{
 					return false;
 				}
@@ -1323,12 +1470,19 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		bool WriteCurveChannels(
 			UObject* Target,
 			const TArray<TArray<FRichCurveKey>>& Channels,
-			const bool bModify)
+			const bool bModify, FExecutionMutationError& OutError)
 		{
 			if (!Target
 				|| Channels.Num() != GetCurveDimension(Target))
 			{
-				return false;
+                OutError = NativeFailure(TEXT("asset_data_curve_write_invalid"),
+                    !Target ? TEXT("The curve target is unavailable.") : TEXT("The prepared channel count does not match the curve dimension."),
+                    !Target ? TEXT("target") : TEXT("channel_count"),
+                    !Target ? ObjectClassValue(Target) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(Channels.Num())),
+                    Target ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueNumber>(GetCurveDimension(Target)))
+                        : TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(TEXT("live supported curve target"))));
+                if (Target) OutError.TargetPath = Target->GetPathName();
+                return false;
 			}
 			if (bModify)
 			{
@@ -1339,7 +1493,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FRichCurve* Curve = GetCurveChannel(Target, Index);
 				if (!Curve)
 				{
-					return false;
+                    OutError = NativeFailure(TEXT("asset_data_curve_channel_unavailable"),
+                        TEXT("The native curve channel is unavailable for writing."), TEXT("channels/") + FString::FromInt(Index),
+                        MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("writable rich curve channel")));
+                    OutError.TargetPath = Target->GetPathName();
+                    OutError.OperationIndex = Index;
+                    OutError.MutationMayHaveStarted = bModify || Index > 0;
+                    return false;
 				}
 				Curve->SetKeys(Channels[Index]);
 			}
@@ -1347,500 +1507,155 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			return true;
 		}
 
-		enum class ERegisteredFieldKind : uint8
-		{
-			String,
-			Int32,
-			Float,
-			Boolean,
-			AssetReference,
-		};
-
 		struct FRegisteredFieldValue final
 		{
 			FProperty* Property = nullptr;
-			ERegisteredFieldKind Kind =
-				ERegisteredFieldKind::String;
-			FString StringValue;
-			int32 IntValue = 0;
-			float FloatValue = 0.0f;
-			bool bBoolValue = false;
-			TWeakObjectPtr<UObject> ObjectValue;
+			TSharedPtr<UeAgentAuthoringPropertyValues::FPropertyValueStorage> Storage;
 		};
 
-		bool TryClassifyRegisteredField(
-			FProperty* Property,
-			ERegisteredFieldKind& OutKind)
+		bool UsesLegacyRegisteredAssetReference(const FProperty* Property)
 		{
-			if (!Property)
-			{
-				return false;
-			}
-			if (CastField<FStrProperty>(Property))
-			{
-				OutKind = ERegisteredFieldKind::String;
-				return true;
-			}
-			if (CastField<FIntProperty>(Property))
-			{
-				OutKind = ERegisteredFieldKind::Int32;
-				return true;
-			}
-			if (CastField<FFloatProperty>(Property))
-			{
-				OutKind = ERegisteredFieldKind::Float;
-				return true;
-			}
-			if (CastField<FBoolProperty>(Property))
-			{
-				OutKind = ERegisteredFieldKind::Boolean;
-				return true;
-			}
-			if (CastField<FObjectPropertyBase>(Property)
-				&& Property->GetMetaData(TEXT("UAIAssetDataType"))
-					== TEXT("asset_ref"))
-			{
-				OutKind = ERegisteredFieldKind::AssetReference;
-				return true;
-			}
-			return false;
+			return Property && Property->ArrayDim == 1
+				&& CastField<FObjectPropertyBase>(Property)
+				&& !CastField<FSoftObjectProperty>(Property)
+				&& Property->GetMetaData(TEXT("UAIAssetDataType")) == TEXT("asset_ref");
 		}
 
-		void ReadRegisteredValue(
-			UObject* Container,
-			FRegisteredFieldValue& InOutValue)
+		bool EncodeRegisteredValue(FProperty* Property, const void* ValuePtr, UObject* Owner,
+			TArray<TStrongObjectPtr<UObject>>* Pins, TSharedPtr<FJsonValue>& OutValue, UE::UAI::Contract::FDiagnostic& Error)
 		{
-			switch (InOutValue.Kind)
+			UeAgentPropertyValueCodec::FOptions Options;
+			if (Pins)
+				Options.ScopedReferenceEncoder = [Pins](UObject* Object, const FString& Path) {
+					PinUnique(*Pins, Object);
+					return UeAgentPropertyValueCodec::EncodeReferencePath(Path);
+				};
+			OutValue = UeAgentPropertyValueCodec::Encode(Property, ValuePtr, Owner, Options);
+			if (!UeAgentPropertyValueCodec::IsReliableCanonicalValue(Property, OutValue, &Error)) return false;
+			if (OutValue->Type == EJson::Object && OutValue->AsObject()->Values.Num() == 1)
+				if (const auto Literal = OutValue->AsObject()->TryGetField(TEXT("literal"))) OutValue = Literal;
+			// Preserve the existing typed operation's top-level string reference.
+			// All other types and nested references use the common codec shape.
+			if (UsesLegacyRegisteredAssetReference(Property))
 			{
-			case ERegisteredFieldKind::String:
-				InOutValue.StringValue =
-					CastFieldChecked<FStrProperty>(
-						InOutValue.Property)
-						->GetPropertyValue_InContainer(Container);
-				break;
-			case ERegisteredFieldKind::Int32:
-				InOutValue.IntValue =
-					CastFieldChecked<FIntProperty>(
-						InOutValue.Property)
-						->GetPropertyValue_InContainer(Container);
-				break;
-			case ERegisteredFieldKind::Float:
-				InOutValue.FloatValue =
-					CastFieldChecked<FFloatProperty>(
-						InOutValue.Property)
-						->GetPropertyValue_InContainer(Container);
-				break;
-			case ERegisteredFieldKind::Boolean:
-				InOutValue.bBoolValue =
-					CastFieldChecked<FBoolProperty>(
-						InOutValue.Property)
-						->GetPropertyValue_InContainer(Container);
-				break;
-			case ERegisteredFieldKind::AssetReference:
-				InOutValue.ObjectValue =
-					CastFieldChecked<FObjectPropertyBase>(
-						InOutValue.Property)
-						->GetObjectPropertyValue_InContainer(
-							Container);
-				break;
+				UObject* Object = CastFieldChecked<FObjectPropertyBase>(Property)->GetObjectPropertyValue(ValuePtr);
+				if (Object) OutValue = MakeShared<FJsonValueString>(Object->GetPathName());
+				else OutValue = MakeShared<FJsonValueNull>();
 			}
+			return true;
 		}
 
-		void WriteRegisteredValue(
-			UObject* Container,
-			const FRegisteredFieldValue& Value)
+		bool DecodeRegisteredValue(IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
+			FProperty* Property, const FUeAgentCanonicalValue& Requested, UObject* Owner,
+			void* ValuePtr, TArray<TStrongObjectPtr<UObject>>& Pins, FExecutionMutationError& OutError,
+            const FString& Field, const bool bNative)
 		{
-			switch (Value.Kind)
+			TSharedPtr<FJsonValue> Json;
+			if (!CanonicalJson::TryToJsonValue(Requested, Json, OutError)) return FailRegisteredValue(OutError, Field, bNative);
+			if (UsesLegacyRegisteredAssetReference(Property)
+				&& (Requested.GetKind() == EUeAgentValueKind::String || Requested.GetKind() == EUeAgentValueKind::Null))
 			{
-			case ERegisteredFieldKind::String:
-				CastFieldChecked<FStrProperty>(Value.Property)
-					->SetPropertyValue_InContainer(
-						Container,
-						Value.StringValue);
-				break;
-			case ERegisteredFieldKind::Int32:
-				CastFieldChecked<FIntProperty>(Value.Property)
-					->SetPropertyValue_InContainer(
-						Container,
-						Value.IntValue);
-				break;
-			case ERegisteredFieldKind::Float:
-				CastFieldChecked<FFloatProperty>(Value.Property)
-					->SetPropertyValue_InContainer(
-						Container,
-						Value.FloatValue);
-				break;
-			case ERegisteredFieldKind::Boolean:
-				CastFieldChecked<FBoolProperty>(Value.Property)
-					->SetPropertyValue_InContainer(
-						Container,
-						Value.bBoolValue);
-				break;
-			case ERegisteredFieldKind::AssetReference:
-				CastFieldChecked<FObjectPropertyBase>(Value.Property)
-					->SetObjectPropertyValue_InContainer(
-						Container,
-						Value.ObjectValue.Get());
-				break;
+				UObject* Resolved = nullptr;
+				if (Requested.GetKind() == EUeAgentValueKind::String
+					&& !Resolver.TryResolveExisting(Requested.GetText(), Resolved, OutError)) return FailRegisteredValue(OutError, Field, bNative);
+				PinUnique(Pins, Resolved);
+				Json = UeAgentPropertyValueCodec::EncodeReferencePath(Resolved ? Resolved->GetPathName() : FString());
 			}
+			UeAgentPropertyValueCodec::FOptions Options;
+			Options.bAllowPartialStructFields = true;
+			if (!UeAgentPropertyValueCodec::Decode(Property, Json, ValuePtr, Owner, Options, OutError)) return FailRegisteredValue(OutError, Field, bNative);
+			TSharedPtr<FJsonValue> Captured;
+			if (!EncodeRegisteredValue(Property, ValuePtr, Owner, &Pins, Captured, OutError)) return FailRegisteredValue(OutError, Field, true);
+            return true;
+		}
+
+		void WriteRegisteredValue(UObject* Container, const FRegisteredFieldValue& Value)
+		{
+			Value.Property->CopyCompleteValue(Value.Property->ContainerPtrToValuePtr<void>(Container),
+				Value.Storage->GetValuePtr());
 		}
 
 		bool TryParseRegisteredFields(
-			IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
-			UObject* Target,
-			const FUeAgentCanonicalValue* Value,
-			const bool bClear,
-			TArray<FRegisteredFieldValue>& OutOriginal,
-			TArray<FRegisteredFieldValue>& OutNew,
-			TArray<TStrongObjectPtr<UObject>>& Pins,
-			FExecutionMutationError& OutError)
+			IUeAgentAssetDataSimpleEffectAssetResolver& Resolver, UObject* Target,
+			const FUeAgentCanonicalValue* Value, const bool bClear,
+			TArray<FRegisteredFieldValue>& OutOriginal, TArray<FRegisteredFieldValue>& OutNew,
+			TArray<TStrongObjectPtr<UObject>>& Pins, FExecutionMutationError& OutError)
 		{
-			if (!Target
-				|| (!bClear
-					&& (!Value
-						|| Value->GetKind()
-							!= EUeAgentValueKind::Object)))
-			{
-				return false;
-			}
-			TMap<FString, FProperty*> Registered;
-			for (TFieldIterator<FProperty> It(Target->GetClass());
-				It;
-				++It)
-			{
-				FProperty* Property = *It;
-				if (!Property->HasMetaData(TEXT("UAIAssetDataField")))
-				{
-					continue;
-				}
-				const FString PublicId =
-					Property->GetMetaData(
-						TEXT("UAIAssetDataField"));
-				ERegisteredFieldKind Kind;
-				if (PublicId.IsEmpty()
-					|| Registered.Contains(PublicId)
-					|| !TryClassifyRegisteredField(Property, Kind))
-				{
-					return false;
-				}
-				Registered.Add(PublicId, Property);
-			}
-			if (Registered.IsEmpty())
-			{
-				return false;
-			}
+            if (!Target) return Fail(OutError, NativeFailure(TEXT("asset_data_registered_target_missing"),
+                TEXT("Registered property preparation requires a live target."), TEXT("target"), MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("live UObject"))));
+            if (!bClear && (!Value || Value->GetKind() != EUeAgentValueKind::Object))
+                return Fail(OutError, ValueFailure(TEXT("asset_data_registered_fields_invalid"),
+                    TEXT("Registered field changes must be an object."), TEXT("registered_fields"), Value, TEXT("object")));
+            TMap<FString, FProperty*> Registered;
+            if (!CollectRegisteredDataObjectFields(Target->GetClass(), Registered, OutError))
+                return FailRegisteredValue(OutError, TEXT("registered_fields"), true);
 			if (!bClear)
-			{
-				for (const TPair<FString, FUeAgentCanonicalValueRef>&
-					Item : Value->GetObjectItems())
-				{
+				for (const auto& Item : Value->GetObjectItems())
 					if (!Registered.Contains(Item.Key))
-					{
-						return Fail(
-							OutError,
-							TEXT(
-								"asset_data_registered_field_unknown"),
-							Item.Key);
-					}
-				}
-			}
+                        return Fail(OutError, ValueFailure(TEXT("asset_data_registered_field_unknown"),
+                            TEXT("The field is not registered for this target class."), ChildPath(TEXT("registered_fields"), Item.Key),
+                            &Item.Value.Get(), Target->GetClass()->GetPathName() + TEXT(" registered property")));
 			UObject* Default = Target->GetClass()->GetDefaultObject();
-			for (const TPair<FString, FProperty*>& Item : Registered)
+			TArray<FString> Ids;
+			Registered.GetKeys(Ids);
+			Ids.Sort();
+			for (const FString& Id : Ids)
 			{
-				const FUeAgentCanonicalValue* Requested =
-					bClear ? nullptr : FindObjectField(*Value, Item.Key);
-				if (!bClear && !Requested)
-				{
-					continue;
-				}
-				FRegisteredFieldValue Original;
-				Original.Property = Item.Value;
-				if (!TryClassifyRegisteredField(
-						Item.Value,
-						Original.Kind))
-				{
-					return false;
-				}
-				ReadRegisteredValue(Target, Original);
-				FRegisteredFieldValue NewValue = Original;
-				if (bClear)
-				{
-					ReadRegisteredValue(Default, NewValue);
-				}
-				else
-				{
-					switch (NewValue.Kind)
-					{
-					case ERegisteredFieldKind::String:
-						if (!TryReadString(
-								*Requested,
-								NewValue.StringValue))
-						{
-							return false;
-						}
-						break;
-					case ERegisteredFieldKind::Int32:
-						if (!TryReadInt32(
-								*Requested,
-								NewValue.IntValue,
-								MIN_int32,
-								MAX_int32))
-						{
-							return false;
-						}
-						break;
-					case ERegisteredFieldKind::Float:
-						if (!TryReadFloat(
-								*Requested,
-								NewValue.FloatValue,
-								-TNumericLimits<float>::Max(),
-								TNumericLimits<float>::Max()))
-						{
-							return false;
-						}
-						break;
-					case ERegisteredFieldKind::Boolean:
-						if (!TryReadBool(
-								*Requested,
-								NewValue.bBoolValue))
-						{
-							return false;
-						}
-						break;
-					case ERegisteredFieldKind::AssetReference:
-						if (Requested->GetKind()
-							== EUeAgentValueKind::Null)
-						{
-							NewValue.ObjectValue = nullptr;
-						}
-						else
-						{
-							UObject* Resolved = nullptr;
-							if (!TryResolveObject(
-									Resolver,
-									*Requested,
-									Resolved,
-									OutError)
-								|| !Resolved->IsA(
-									CastFieldChecked<
-										FObjectPropertyBase>(
-											Item.Value)
-										->PropertyClass))
-							{
-								return false;
-							}
-							NewValue.ObjectValue = Resolved;
-							PinUnique(Pins, Resolved);
-						}
-						break;
-					}
-				}
+				const FUeAgentCanonicalValue* Requested = bClear ? nullptr : FindObjectField(*Value, Id);
+				if (!bClear && !Requested) continue;
+				FProperty* Property = Registered[Id];
+				const void* Current = Property->ContainerPtrToValuePtr<void>(Target);
+                const FString Field = ChildPath(TEXT("registered_fields"), Id);
+                FRegisteredFieldValue Original{Property, UeAgentAuthoringPropertyValues::FPropertyValueStorage::CopyFrom(Property, Current, OutError)};
+                if (!Original.Storage) return FailRegisteredValue(OutError, Field, true);
+                FRegisteredFieldValue Desired{Property, UeAgentAuthoringPropertyValues::FPropertyValueStorage::CopyFrom(Property,
+                    bClear ? Property->ContainerPtrToValuePtr<void>(Default) : Current, OutError)};
+                if (!Desired.Storage) return FailRegisteredValue(OutError, Field, true);
+                TSharedPtr<FJsonValue> Captured;
+                if (!EncodeRegisteredValue(Property, Current, Target, &Pins, Captured, OutError))
+                    return FailRegisteredValue(OutError, Field, true);
+                if (!bClear && !DecodeRegisteredValue(Resolver, Property, *Requested, Target,
+                    Desired.Storage->GetMutableValuePtr(), Pins, OutError, Field, false)) return false;
+                if (!EncodeRegisteredValue(Property, Desired.Storage->GetValuePtr(), Target, &Pins, Captured, OutError))
+                    return FailRegisteredValue(OutError, Field, true);
 				OutOriginal.Add(MoveTemp(Original));
-				OutNew.Add(MoveTemp(NewValue));
+				OutNew.Add(MoveTemp(Desired));
 			}
-			return !OutNew.IsEmpty();
+			if (OutNew.IsEmpty()) return Fail(OutError, ValueFailure(TEXT("asset_data_registered_changes_empty"),
+                TEXT("The operation did not select any registered properties."), TEXT("registered_fields"), Value, TEXT("at least one registered property"), bClear ? TEXT("native_result") : TEXT("authored_value")));
+            return true;
 		}
 
-		bool TryBuildRegisteredFieldProjection(
-			UObject* Container,
-			FUeAgentResourceTracker& Resources,
-			FUeAgentCanonicalValuePtr& OutFields,
-			FUeAgentCanonicalValuePtr& OutContext,
+		bool TryBuildRegisteredFieldProjection(UObject* Container, FUeAgentResourceTracker& Resources,
+			FUeAgentCanonicalValuePtr& OutFields, FUeAgentCanonicalValuePtr& OutContext,
 			FExecutionMutationError& OutError)
 		{
-			OutFields.Reset();
-			OutContext.Reset();
-			if (!Container)
+			OutFields.Reset(); OutContext.Reset();
+            if (!Container) return Fail(OutError, NativeFailure(TEXT("asset_data_registered_projection_target_missing"),
+                TEXT("Projecting registered properties requires a live container."), TEXT("target"),
+                MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("live UObject"))));
+			TMap<FString, FProperty*> Registered;
+            if (!CollectRegisteredDataObjectFields(Container->GetClass(), Registered, OutError)) return FailRegisteredValue(OutError, TEXT("registered_fields"), true);
+			TArray<FString> Ids;
+			Registered.GetKeys(Ids); Ids.Sort();
+			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Values, Contexts;
+			for (const FString& Id : Ids)
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_registered_projection_target_missing"));
+				FProperty* Property = Registered[Id];
+				TSharedPtr<FJsonValue> Json;
+				FUeAgentCanonicalValuePtr Value, Context;
+				auto TypeContext = MakeShared<FJsonObject>();
+				TypeContext->SetStringField(TEXT("owner_class"), Container->GetClass()->GetPathName());
+				TypeContext->SetStringField(TEXT("property_name"), Property->GetName());
+				if (!EncodeRegisteredValue(Property, Property->ContainerPtrToValuePtr<void>(Container), Container, nullptr, Json, OutError)
+					|| !CanonicalJson::TryFromJsonValue(Json, Resources, Value, OutError)
+					|| !CanonicalJson::TryFromJsonValue(MakeShared<FJsonValueObject>(TypeContext), Resources, Context, OutError))
+					return FailRegisteredValue(OutError, ChildPath(TEXT("registered_fields"), Id), true);
+				Values.Emplace(Id, Value.ToSharedRef()); Contexts.Emplace(Id, Context.ToSharedRef());
 			}
-
-			struct FProjectedProperty final
-			{
-				FString PublicId;
-				FProperty* Property = nullptr;
-				ERegisteredFieldKind Kind =
-					ERegisteredFieldKind::String;
-			};
-			TArray<FProjectedProperty> Properties;
-			TSet<FString> SeenPublicIds;
-			for (TFieldIterator<FProperty> It(
-					Container->GetClass());
-				It;
-				++It)
-			{
-				FProperty* Property = *It;
-				if (!Property->HasMetaData(
-						TEXT("UAIAssetDataField")))
-				{
-					continue;
-				}
-				FProjectedProperty Projected;
-				Projected.PublicId =
-					Property->GetMetaData(
-						TEXT("UAIAssetDataField"));
-				Projected.Property = Property;
-				if (Projected.PublicId.IsEmpty()
-					|| SeenPublicIds.Contains(
-						Projected.PublicId)
-					|| !TryClassifyRegisteredField(
-						Property,
-						Projected.Kind))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_registered_projection_metadata_invalid"),
-						Projected.PublicId);
-				}
-				SeenPublicIds.Add(Projected.PublicId);
-				Properties.Add(MoveTemp(Projected));
-			}
-			Properties.Sort(
-				[](const FProjectedProperty& Left,
-					const FProjectedProperty& Right)
-				{
-					return Left.PublicId < Right.PublicId;
-				});
-			if (Properties.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_registered_projection_fields_missing"));
-			}
-
-			TArray<TPair<FString, FUeAgentCanonicalValueRef>>
-				FieldItems;
-			TArray<TPair<FString, FUeAgentCanonicalValueRef>>
-				ContextItems;
-			FUeAgentStateSemanticError StateError;
-			for (const FProjectedProperty& Projected
-				: Properties)
-			{
-				FUeAgentCanonicalValuePtr Value;
-				FUeAgentCanonicalValuePtr Kind;
-				bool bBuilt = false;
-				FString KindId;
-				switch (Projected.Kind)
-				{
-				case ERegisteredFieldKind::String:
-					KindId = TEXT("string");
-					bBuilt =
-						FUeAgentCanonicalValue::TryString(
-							CastFieldChecked<FStrProperty>(
-								Projected.Property)
-								->GetPropertyValue_InContainer(
-									Container),
-							Resources,
-							Value,
-							StateError);
-					break;
-				case ERegisteredFieldKind::Int32:
-					KindId = TEXT("integer");
-					bBuilt =
-						FUeAgentCanonicalValue::TryInteger(
-							FString::FromInt(
-								CastFieldChecked<FIntProperty>(
-									Projected.Property)
-									->GetPropertyValue_InContainer(
-										Container)),
-							Resources,
-							Value,
-							StateError);
-					break;
-				case ERegisteredFieldKind::Float:
-					KindId = TEXT("decimal");
-					bBuilt =
-						FUeAgentCanonicalValue::TryDecimal(
-							FString::SanitizeFloat(
-								static_cast<double>(
-									CastFieldChecked<
-										FFloatProperty>(
-											Projected.Property)
-										->GetPropertyValue_InContainer(
-											Container))),
-							Resources,
-							Value,
-							StateError);
-					break;
-				case ERegisteredFieldKind::Boolean:
-					KindId = TEXT("boolean");
-					bBuilt =
-						FUeAgentCanonicalValue::TryBoolean(
-							CastFieldChecked<FBoolProperty>(
-								Projected.Property)
-								->GetPropertyValue_InContainer(
-									Container),
-							Resources,
-							Value,
-							StateError);
-					break;
-				case ERegisteredFieldKind::AssetReference:
-					{
-						KindId = TEXT("asset_ref");
-						UObject* Object =
-							CastFieldChecked<
-								FObjectPropertyBase>(
-									Projected.Property)
-								->GetObjectPropertyValue_InContainer(
-									Container);
-						bBuilt = Object
-							? FUeAgentCanonicalValue::TryString(
-								Object->GetPathName(),
-								Resources,
-								Value,
-								StateError)
-							: FUeAgentCanonicalValue::TryNull(
-								Resources,
-								Value,
-								StateError);
-						break;
-					}
-				}
-				if (!bBuilt
-					|| !FUeAgentCanonicalValue::TryString(
-						KindId,
-						Resources,
-						Kind,
-						StateError))
-				{
-					return Fail(
-						OutError,
-						StateError.Code.IsEmpty()
-							? TEXT(
-								"asset_data_registered_projection_value_invalid")
-							: StateError.Code,
-						Projected.PublicId);
-				}
-				FieldItems.Emplace(
-					Projected.PublicId,
-					Value.ToSharedRef());
-				ContextItems.Emplace(
-					Projected.PublicId,
-					Kind.ToSharedRef());
-			}
-			return FUeAgentCanonicalValue::TryObject(
-					FieldItems,
-					Resources,
-					OutFields,
-					StateError)
-				&& FUeAgentCanonicalValue::TryObject(
-					ContextItems,
-					Resources,
-					OutContext,
-					StateError)
-				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
-						? TEXT(
-							"asset_data_registered_projection_object_invalid")
-						: StateError.Code,
-					StateError.Detail);
+            if (FUeAgentCanonicalValue::TryObject(Values, Resources, OutFields, OutError)
+                && FUeAgentCanonicalValue::TryObject(Contexts, Resources, OutContext, OutError)) return true;
+            return FailRegisteredValue(OutError, TEXT("registered_fields"), true);
 		}
 
 		bool TryWrapRegisteredFieldProjection(
@@ -1873,13 +1688,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{
 				return true;
 			}
-			return Fail(
-				OutError,
-				StateError.Code.IsEmpty()
-					? TEXT(
-						"asset_data_registered_projection_wrapper_invalid")
-					: StateError.Code,
-				StateError.Detail);
+            OutError = MoveTemp(StateError);
+            return FailRegisteredValue(OutError, FString(), true);
 		}
 
 		bool TryBuildExpectedRegisteredFields(
@@ -1913,25 +1723,18 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FindObjectField(
 					ProposedAfter,
 					TEXT("typed_changes"));
-			if (!Current
-				|| Current->GetKind()
-					!= EUeAgentValueKind::Object
-				|| !Defaults
-				|| Defaults->GetKind()
-					!= EUeAgentValueKind::Object
-				|| !Context
-				|| Context->GetKind()
-					!= EUeAgentValueKind::Object
-				|| !TypedChanges
-				|| TypedChanges->GetKind()
-					!= EUeAgentValueKind::Array
-				|| TypedChanges->GetArrayItems().Num() != 1)
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_registered_expected_state_invalid"));
-			}
+            if (!Current || Current->GetKind() != EUeAgentValueKind::Object)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_registered_expected_state_invalid"), TEXT("The captured registered properties must be an object."),
+                    TEXT("current_fields/registered_fields"), Current, TEXT("object"), TEXT("native_result")));
+            if (!Defaults || Defaults->GetKind() != EUeAgentValueKind::Object)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_registered_expected_state_invalid"), TEXT("The default registered properties must be an object."),
+                    TEXT("default_fields/registered_fields"), Defaults, TEXT("object"), TEXT("native_result")));
+            if (!Context || Context->GetKind() != EUeAgentValueKind::Object)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_registered_expected_state_invalid"), TEXT("The registered property context must be an object."),
+                    TEXT("projection_context/registered_fields"), Context, TEXT("object"), TEXT("native_result")));
+            if (!TypedChanges || TypedChanges->GetKind() != EUeAgentValueKind::Array || TypedChanges->GetArrayItems().Num() != 1)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_registered_expected_state_invalid"), TEXT("Expected registered properties require exactly one typed change."),
+                    TEXT("typed_changes"), TypedChanges, TEXT("array with one registered_fields change")));
 			const FUeAgentCanonicalValue& Change =
 				TypedChanges->GetArrayItems()[0].Get();
 			FString FieldId;
@@ -1940,19 +1743,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FindObjectField(Change, TEXT("field_id"));
 			const FUeAgentCanonicalValue* PresenceValue =
 				FindObjectField(Change, TEXT("presence"));
-			if (!Field
-				|| !TryReadString(*Field, FieldId)
-				|| FieldId != TEXT("registered_fields")
-				|| !PresenceValue
-				|| !TryReadString(
-					*PresenceValue,
-					Presence))
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_registered_expected_change_invalid"));
-			}
+            if (!TryReadRequiredString(Field, FieldId, TEXT("typed_changes/0/field_id"), OutError)) return false;
+            if (FieldId != TEXT("registered_fields"))
+                return Fail(OutError, ValueFailure(TEXT("asset_data_registered_expected_change_invalid"), TEXT("This change must address registered_fields."),
+                    TEXT("typed_changes/0/field_id"), Field, TEXT("registered_fields")));
+            if (!TryReadRequiredString(PresenceValue, Presence, TEXT("typed_changes/0/presence"), OutError)) return false;
 
 			if (Presence == TEXT("clear"))
 			{
@@ -1973,16 +1768,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						*TypedValue,
 						TEXT("canonical_value"))
 					: nullptr;
-			if (Presence != TEXT("set")
-				|| !Requested
-				|| Requested->GetKind()
-					!= EUeAgentValueKind::Object)
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_registered_expected_value_invalid"));
-			}
+            if (Presence != TEXT("set"))
+                return Fail(OutError, ValueFailure(TEXT("asset_data_registered_expected_presence_invalid"), TEXT("The registered field presence is not supported."),
+                    TEXT("typed_changes/0/presence"), PresenceValue, TEXT("set or clear")));
+            if (!Requested || Requested->GetKind() != EUeAgentValueKind::Object)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_registered_expected_value_invalid"), TEXT("The registered field change value must be an object."),
+                    TEXT("registered_fields"), Requested, TEXT("object")));
 
 			TMap<FString, FUeAgentCanonicalValueRef> Merged;
 			for (const TPair<
@@ -1998,111 +1789,42 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FUeAgentCanonicalValueRef>& Item
 				: Requested->GetObjectItems())
 			{
-				const FUeAgentCanonicalValue* KindValue =
-					FindObjectField(*Context, Item.Key);
-				FString Kind;
-				if (!KindValue
-					|| !TryReadString(*KindValue, Kind)
-					|| !Merged.Contains(Item.Key))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_registered_expected_field_unknown"),
-						Item.Key);
-				}
+				const FUeAgentCanonicalValue* FieldContext = FindObjectField(*Context, Item.Key);
+				const FUeAgentCanonicalValue* ClassValue = FieldContext ? FindObjectField(*FieldContext, TEXT("owner_class")) : nullptr;
+				const FUeAgentCanonicalValue* PropertyValue = FieldContext ? FindObjectField(*FieldContext, TEXT("property_name")) : nullptr;
+                const FString FieldPath = ChildPath(TEXT("registered_fields"), Item.Key);
+                FString ClassPath, PropertyName;
+                if (!TryReadRequiredString(ClassValue, ClassPath, ChildPath(FieldPath, TEXT("owner_class")), OutError, TEXT("native_result"))
+                    || !TryReadRequiredString(PropertyValue, PropertyName, ChildPath(FieldPath, TEXT("property_name")), OutError, TEXT("native_result"))) return false;
+                if (!Merged.Contains(Item.Key))
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_registered_expected_field_unknown"), TEXT("The requested property is absent from the captured registered fields."),
+                        FieldPath, &Item.Value.Get(), TEXT("captured registered property")));
+                UClass* Class = FindObject<UClass>(nullptr, *ClassPath);
+                if (!Class) Class = LoadObject<UClass>(nullptr, *ClassPath);
+                TMap<FString, FProperty*> Registered;
+                if (!CollectRegisteredDataObjectFields(Class, Registered, OutError)) return FailRegisteredValue(OutError, FieldPath, true);
+                if (!Registered.Contains(Item.Key) || Registered[Item.Key]->GetName() != PropertyName)
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_registered_expected_type_invalid"),
+                        TEXT("The captured property context does not match the class registration."), FieldPath,
+                        MakeShared<FJsonValueString>(ClassPath + TEXT(".") + PropertyName),
+                        MakeShared<FJsonValueString>(Registered.Contains(Item.Key) ? Registered[Item.Key]->GetPathName() : TEXT("registered property")), TEXT("native_result")));
+				FProperty* Property = Registered[Item.Key];
+				UObject* Owner = Class->GetDefaultObject();
+				auto Storage = UeAgentAuthoringPropertyValues::FPropertyValueStorage::CopyFrom(
+					Property, Property->ContainerPtrToValuePtr<void>(Owner), OutError);
+				TArray<TStrongObjectPtr<UObject>> Pins;
 				FUeAgentCanonicalValuePtr Normalized;
-				bool bBuilt = false;
-				if (Kind == TEXT("string"))
-				{
-					bBuilt =
-						Item.Value->GetKind()
-								== EUeAgentValueKind::String
-							&& FUeAgentCanonicalValue::TryString(
-								Item.Value->GetText(),
-								Resources,
-								Normalized,
-								StateError);
-				}
-				else if (Kind == TEXT("integer"))
-				{
-					int32 Value = 0;
-					bBuilt = TryReadInt32(
-							Item.Value.Get(),
-							Value,
-							MIN_int32,
-							MAX_int32)
-						&& FUeAgentCanonicalValue::TryInteger(
-							FString::FromInt(Value),
-							Resources,
-							Normalized,
-							StateError);
-				}
-				else if (Kind == TEXT("decimal"))
-				{
-					float Value = 0.0f;
-					bBuilt = TryReadFloat(
-							Item.Value.Get(),
-							Value,
-							-TNumericLimits<float>::Max(),
-							TNumericLimits<float>::Max())
-						&& FUeAgentCanonicalValue::TryDecimal(
-							FString::SanitizeFloat(
-								static_cast<double>(Value)),
-							Resources,
-							Normalized,
-							StateError);
-				}
-				else if (Kind == TEXT("boolean"))
-				{
-					bool bValue = false;
-					bBuilt = TryReadBool(
-							Item.Value.Get(),
-							bValue)
-						&& FUeAgentCanonicalValue::TryBoolean(
-							bValue,
-							Resources,
-							Normalized,
-							StateError);
-				}
-				else if (Kind == TEXT("asset_ref"))
-				{
-					if (Item.Value->GetKind()
-						== EUeAgentValueKind::Null)
-					{
-						bBuilt =
-							FUeAgentCanonicalValue::TryNull(
-								Resources,
-								Normalized,
-								StateError);
-					}
-					else if (Item.Value->GetKind()
-						== EUeAgentValueKind::String)
-					{
-						UObject* Resolved = nullptr;
-						bBuilt =
-							Resolver.TryResolveExisting(
-								Item.Value->GetText(),
-								Resolved,
-								OutError)
-							&& IsValid(Resolved)
-							&& FUeAgentCanonicalValue::TryString(
-								Resolved->GetPathName(),
-								Resources,
-								Normalized,
-								StateError);
-					}
-				}
-				if (!bBuilt || !Normalized.IsValid())
-				{
-					return Fail(
-						OutError,
-						OutError.GetCode().IsEmpty()
-							? TEXT(
-								"asset_data_registered_expected_field_invalid")
-							: OutError.GetCode(),
-						Item.Key);
-				}
+				TSharedPtr<FJsonValue> Json;
+				// Start from the captured native value, then decode the original request;
+				// do not derive expected state from the action's converted desired buffer.
+                if (!Storage) return FailRegisteredValue(OutError, FieldPath, true);
+                if (!DecodeRegisteredValue(Resolver, Property, Merged[Item.Key].Get(), Owner,
+                    Storage->GetMutableValuePtr(), Pins, OutError, FieldPath, true)
+                    || !DecodeRegisteredValue(Resolver, Property, Item.Value.Get(), Owner,
+                    Storage->GetMutableValuePtr(), Pins, OutError, FieldPath, false)) return false;
+                if (!EncodeRegisteredValue(Property, Storage->GetValuePtr(), Owner, nullptr, Json, OutError)
+                    || !CanonicalJson::TryFromJsonValue(Json, Resources, Normalized, OutError))
+                    return FailRegisteredValue(OutError, FieldPath, true);
 				Merged[Item.Key] =
 					Normalized.ToSharedRef();
 			}
@@ -2123,13 +1845,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					MergedObject,
 					StateError))
 			{
-				return Fail(
-					OutError,
-					StateError.Code.IsEmpty()
-						? TEXT(
-							"asset_data_registered_expected_object_invalid")
-						: StateError.Code,
-					StateError.Detail);
+                OutError = MoveTemp(StateError);
+                return FailRegisteredValue(OutError, FString(), true);
 			}
 			FUeAgentCanonicalValuePtr WrappedContext;
 			return TryWrapRegisteredFieldProjection(
@@ -2143,17 +1860,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 		bool TryNormalizeFileUri(
 			const FUeAgentCanonicalValue& Value,
-			FString& OutPath)
+			FString& OutPath, const FString& Field, FExecutionMutationError& OutError)
 		{
 			FString Uri;
-			if (!TryReadString(Value, Uri))
+			if (!TryReadString(Value, Uri, Field, OutError))
 			{
 				return false;
 			}
 			Uri.TrimStartAndEndInline();
 			if (Uri.IsEmpty())
 			{
-				return false;
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_file_uri_empty"), TEXT("The file path or URI cannot be empty."), Field, &Value, TEXT("nonempty file path or URI")));
 			}
 			if (Uri.StartsWith(
 					TEXT("file:"),
@@ -2182,21 +1899,21 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				}
 				else
 				{
-					return false;
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_core_file_uri_invalid"), TEXT("A file URI must have an absolute path or a network path after the file scheme."), Field, &Value, TEXT("file:/path, file:///path or file://server/path")));
 				}
 			}
 			else
 			{
 				OutPath = Uri;
 			}
-			return !OutPath.IsEmpty()
-				&& !OutPath.Contains(TEXT("\r"))
-				&& !OutPath.Contains(TEXT("\n"));
+			if (OutPath.IsEmpty() || OutPath.Contains(TEXT("\r")) || OutPath.Contains(TEXT("\n")))
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_file_path_invalid"), TEXT("The normalized file path must be nonempty and must not contain a line break."), Field, &Value, TEXT("nonempty single-line file path")));
+            return true;
 		}
 
 		bool TryParseRuntimeVirtualTextureMaterialType(
 			const FString& Name,
-			ERuntimeVirtualTextureMaterialType& OutType)
+			ERuntimeVirtualTextureMaterialType& OutType, const FString& Field, FExecutionMutationError& OutError)
 		{
 			const FString Value = Name.TrimStartAndEnd().ToLower();
 			if (Value == TEXT("base_color"))
@@ -2246,7 +1963,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return false;
+				return Fail(OutError, JsonFailure(TEXT("asset_data_core_enum_invalid"), TEXT("ERuntimeVirtualTextureMaterialType name is not supported."), Field, MakeShared<FJsonValueString>(Name), MakeShared<FJsonValueString>(TEXT("base_color, mask4, base_color_normal_roughness, base_color_normal_specular, base_color_normal_specular_ycocg, base_color_normal_specular_mask_ycocg, world_height, displacement"))));
 			}
 			return true;
 		}
@@ -2255,7 +1972,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			URuntimeVirtualTexture* Target,
 			int32& OutTileCount,
 			ERuntimeVirtualTextureMaterialType& OutMaterialType,
-			bool& bOutCompression)
+			bool& bOutCompression, FExecutionMutationError& OutError)
 		{
 			FIntProperty* TileCount =
 				FindFProperty<FIntProperty>(
@@ -2271,7 +1988,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEXT("bCompressTextures"));
 			if (!Target || !TileCount || !MaterialType || !Compression)
 			{
-				return false;
+				const FString Field = !Target ? TEXT("target") : !TileCount ? TEXT("TileCount") : !MaterialType ? TEXT("MaterialType") : TEXT("bCompressTextures");
+                OutError = NativeFailure(TEXT("asset_data_core_rvt_property_invalid"), !Target ? TEXT("Reading virtual texture properties requires a target.") : TEXT("A required native virtual texture property is missing or has an incompatible type."), Field, !Target ? ObjectClassValue(Target) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()), MakeShared<FJsonValueString>(!Target ? URuntimeVirtualTexture::StaticClass()->GetPathName() : !TileCount ? TEXT("int32 property") : !MaterialType ? TEXT("enum property") : TEXT("boolean property")));
+                if (Target) OutError.TargetPath = Target->GetPathName();
+                return false;
 			}
 			OutTileCount =
 				TileCount->GetPropertyValue_InContainer(Target);
@@ -2287,12 +2007,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		}
 
 		bool TryWriteRvtProperties(
-			URuntimeVirtualTexture* Target,
+			UObject* Object,
 			const int32 TileCountValue,
 			const ERuntimeVirtualTextureMaterialType MaterialTypeValue,
 			const bool bCompression,
-			const bool bModify)
+			const bool bModify, FExecutionMutationError& OutError)
 		{
+            URuntimeVirtualTexture* Target = Cast<URuntimeVirtualTexture>(Object);
 			FIntProperty* TileCount =
 				FindFProperty<FIntProperty>(
 					URuntimeVirtualTexture::StaticClass(),
@@ -2307,7 +2028,16 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEXT("bCompressTextures"));
 			if (!Target || !TileCount || !MaterialType || !Compression)
 			{
-				return false;
+                const FString Field = !Target ? TEXT("target") : !TileCount ? TEXT("TileCount")
+                    : !MaterialType ? TEXT("MaterialType") : TEXT("bCompressTextures");
+                OutError = NativeFailure(TEXT("asset_data_runtime_virtual_texture_write_invalid"),
+                    !Target ? TEXT("Virtual texture writing requires a RuntimeVirtualTexture target.")
+                        : TEXT("The required native virtual texture property is missing or has an incompatible type."),
+                    Field, !Target ? ObjectClassValue(Object) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+                    MakeShared<FJsonValueString>(!Target ? URuntimeVirtualTexture::StaticClass()->GetPathName()
+                        : !TileCount ? TEXT("int32 property") : !MaterialType ? TEXT("enum property") : TEXT("boolean property")));
+                if (Object) OutError.TargetPath = Object->GetPathName();
+                return false;
 			}
 			if (bModify)
 			{
@@ -2330,7 +2060,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 		bool TryParseTextureAddress(
 			const FString& Name,
-			TEnumAsByte<TextureAddress>& OutAddress)
+			TEnumAsByte<TextureAddress>& OutAddress, const FString& Field, FExecutionMutationError& OutError)
 		{
 			const FString Value = Name.TrimStartAndEnd().ToLower();
 			if (Value == TEXT("wrap"))
@@ -2347,14 +2077,14 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			else
 			{
-				return false;
+				return Fail(OutError, JsonFailure(TEXT("asset_data_core_enum_invalid"), TEXT("TextureAddress name is not supported."), Field, MakeShared<FJsonValueString>(Name), MakeShared<FJsonValueString>(TEXT("wrap, clamp, mirror"))));
 			}
 			return true;
 		}
 
 		bool TryFormatTextureAddress(
 			const TEnumAsByte<TextureAddress> Address,
-			FString& OutName)
+			FString& OutName, const FString& Field, FExecutionMutationError& OutError)
 		{
 			switch (Address.GetValue())
 			{
@@ -2369,13 +2099,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				return true;
 			default:
 				OutName.Reset();
-				return false;
+				return Fail(OutError, NativeFailure(TEXT("asset_data_core_native_enum_invalid"), TEXT("The native TextureAddress value is not supported by this projection."), Field, MakeShared<FJsonValueNumber>(static_cast<int32>(Address.GetValue())), MakeShared<FJsonValueString>(TEXT("wrap, clamp, mirror"))));
 			}
 		}
 
 		bool TryFormatRuntimeVirtualTextureMaterialType(
 			const ERuntimeVirtualTextureMaterialType Type,
-			FString& OutName)
+			FString& OutName, const FString& Field, FExecutionMutationError& OutError)
 		{
 			switch (Type)
 			{
@@ -2411,7 +2141,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				return true;
 			default:
 				OutName.Reset();
-				return false;
+				return Fail(OutError, NativeFailure(TEXT("asset_data_core_native_enum_invalid"), TEXT("The native ERuntimeVirtualTextureMaterialType value is not supported by this projection."), Field, MakeShared<FJsonValueNumber>(static_cast<int32>(Type)), MakeShared<FJsonValueString>(TEXT("base_color, mask4, base_color_normal_roughness, base_color_normal_specular, base_color_normal_specular_ycocg, base_color_normal_specular_mask_ycocg, world_height, displacement"))));
 			}
 		}
 
@@ -2419,97 +2149,77 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			const FString& Text,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
-			FUeAgentStateSemanticError StateError;
-			return FUeAgentCanonicalValue::TryString(
+			if (FUeAgentCanonicalValue::TryString(
 					Text,
 					Resources,
 					OutValue,
-					StateError)
-				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
-						? TEXT(
-							"asset_data_core_projection_string_invalid")
-						: StateError.Code,
-					StateError.Detail);
+					OutError)) return true;
+            QualifyCoreValueFailure(OutError, Field, true);
+            OutError.PropertyPath = Field;
+            return false;
 		}
 
 		bool TryBuildIntegerProjectionValue(
 			const int32 Value,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
-			FUeAgentStateSemanticError StateError;
-			return FUeAgentCanonicalValue::TryInteger(
+			if (FUeAgentCanonicalValue::TryInteger(
 					FString::FromInt(Value),
 					Resources,
 					OutValue,
-					StateError)
-				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
-						? TEXT(
-							"asset_data_core_projection_integer_invalid")
-						: StateError.Code,
-					StateError.Detail);
+					OutError)) return true;
+            QualifyCoreValueFailure(OutError, Field, true);
+            OutError.PropertyPath = Field;
+            return false;
 		}
 
 		bool TryBuildDecimalProjectionValue(
 			const float Value,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
-			FUeAgentStateSemanticError StateError;
-			return FMath::IsFinite(Value)
-				&& FUeAgentCanonicalValue::TryDecimal(
+			if (!FMath::IsFinite(Value))
+                return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_decimal_invalid"),
+                    TEXT("The native number must be finite to build the projection."), Field,
+                    MakeShared<FJsonValueString>(FString::Printf(TEXT("%g"), static_cast<double>(Value))),
+                    MakeShared<FJsonValueString>(TEXT("finite float"))));
+            if (FUeAgentCanonicalValue::TryDecimal(
 					FString::SanitizeFloat(
 						static_cast<double>(Value)),
 					Resources,
 					OutValue,
-					StateError)
-				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
-						? TEXT(
-							"asset_data_core_projection_decimal_invalid")
-						: StateError.Code,
-					StateError.Detail);
+					OutError)) return true;
+            QualifyCoreValueFailure(OutError, Field, true);
+            OutError.PropertyPath = Field;
+            return false;
 		}
 
 		bool TryBuildBooleanProjectionValue(
 			const bool bValue,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
-			FUeAgentStateSemanticError StateError;
-			return FUeAgentCanonicalValue::TryBoolean(
+			if (FUeAgentCanonicalValue::TryBoolean(
 					bValue,
 					Resources,
 					OutValue,
-					StateError)
-				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
-						? TEXT(
-							"asset_data_core_projection_boolean_invalid")
-						: StateError.Code,
-					StateError.Detail);
+					OutError)) return true;
+            QualifyCoreValueFailure(OutError, Field, true);
+            OutError.PropertyPath = Field;
+            return false;
 		}
 
 		bool TryBuildObjectProjectionValue(
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>> Items,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
 			Items.Sort(
 				[](
@@ -2522,62 +2232,42 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				{
 					return Left.Key < Right.Key;
 				});
-			FUeAgentStateSemanticError StateError;
-			return FUeAgentCanonicalValue::TryObject(
+			if (FUeAgentCanonicalValue::TryObject(
 					Items,
 					Resources,
 					OutValue,
-					StateError)
-				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
-						? TEXT(
-							"asset_data_core_projection_object_invalid")
-						: StateError.Code,
-					StateError.Detail);
+					OutError)) return true;
+            QualifyCoreValueFailure(OutError, Field, true);
+            return false;
 		}
 
 		bool TryBuildArrayProjectionValue(
 			const TArray<FUeAgentCanonicalValueRef>& Items,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
-			FUeAgentStateSemanticError StateError;
-			return FUeAgentCanonicalValue::TryArray(
+			if (FUeAgentCanonicalValue::TryArray(
 					Items,
 					Resources,
 					OutValue,
-					StateError)
-				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
-						? TEXT(
-							"asset_data_core_projection_array_invalid")
-						: StateError.Code,
-					StateError.Detail);
+					OutError)) return true;
+            QualifyCoreValueFailure(OutError, Field, true);
+            return false;
 		}
 
 		bool TryBuildNullProjectionValue(
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
-			FUeAgentStateSemanticError StateError;
-			return FUeAgentCanonicalValue::TryNull(
+			if (FUeAgentCanonicalValue::TryNull(
 					Resources,
 					OutValue,
-					StateError)
-				? true
-				: Fail(
-					OutError,
-					StateError.Code.IsEmpty()
-						? TEXT(
-							"asset_data_core_projection_null_invalid")
-						: StateError.Code,
-					StateError.Detail);
+					OutError)) return true;
+            QualifyCoreValueFailure(OutError, Field, true);
+            OutError.PropertyPath = Field;
+            return false;
 		}
 
 		bool TryBuildObjectReferenceProjection(
@@ -2585,7 +2275,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			const bool bNullable,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
 			if (!Object)
 			{
@@ -2593,41 +2283,37 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					? TryBuildNullProjectionValue(
 						Resources,
 						OutValue,
-						OutError)
-					: Fail(
-						OutError,
-						TEXT(
-							"asset_data_core_projection_reference_missing"));
+						OutError, Field)
+                    : Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_reference_missing"),
+                        TEXT("The native object reference is unavailable and this field is not nullable."),
+                        Field, MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("live object reference"))));
 			}
 			return TryBuildStringProjectionValue(
 				Object->GetPathName(),
 				Resources,
 				OutValue,
-				OutError);
+				OutError, Field);
 		}
 
 		bool TryBuildObjectReferenceArrayProjection(
 			const TArray<UObject*>& Objects,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
 			TArray<FUeAgentCanonicalValueRef> Items;
 			TSet<const UObject*> Seen;
 			for (const UObject* Object : Objects)
 			{
-				FUeAgentCanonicalValuePtr Item;
-				if (!Object
-					|| Seen.Contains(Object)
-					|| !TryBuildObjectReferenceProjection(
-						Object,
-						false,
-						Resources,
-						Item,
-						OutError))
-				{
-					return false;
-				}
+                const FString ItemPath = Field + TEXT("/") + FString::FromInt(Items.Num());
+                if (!Object) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_reference_missing"),
+                    TEXT("The native reference array contains an unavailable object."), ItemPath,
+                    MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("live object reference"))));
+                if (Seen.Contains(Object)) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_reference_duplicate"),
+                    TEXT("The native reference array contains the same object more than once."), ItemPath,
+                    MakeShared<FJsonValueString>(Object->GetPathName()), MakeShared<FJsonValueString>(TEXT("unique object reference"))));
+                FUeAgentCanonicalValuePtr Item;
+                if (!TryBuildObjectReferenceProjection(Object, false, Resources, Item, OutError, ItemPath)) return false;
 				Seen.Add(Object);
 				Items.Add(Item.ToSharedRef());
 			}
@@ -2635,12 +2321,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				Items,
 				Resources,
 				OutValue,
-				OutError);
+				OutError, Field);
 		}
 
 		bool TryFormatDistanceAlgorithm(
 			const EAttenuationDistanceModel Value,
-			FString& OutName)
+			FString& OutName, const FString& Field, FExecutionMutationError& OutError)
 		{
 			switch (Value)
 			{
@@ -2663,13 +2349,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				OutName = TEXT("custom");
 				return true;
 			default:
-				return false;
+				return Fail(OutError, NativeFailure(TEXT("asset_data_core_native_enum_invalid"), TEXT("The native EAttenuationDistanceModel value is not supported by this projection."), Field, MakeShared<FJsonValueNumber>(static_cast<int32>(Value)), MakeShared<FJsonValueString>(TEXT("linear, logarithmic, inverse, log_reverse, natural_sound, custom"))));
 			}
 		}
 
 		bool TryFormatConcurrencyResolutionRule(
 			const EMaxConcurrentResolutionRule::Type Value,
-			FString& OutName)
+			FString& OutName, const FString& Field, FExecutionMutationError& OutError)
 		{
 			switch (Value)
 			{
@@ -2701,13 +2387,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						"stop_lowest_priority_then_prevent_new");
 				return true;
 			default:
-				return false;
+				return Fail(OutError, NativeFailure(TEXT("asset_data_core_native_enum_invalid"), TEXT("The native EMaxConcurrentResolutionRule value is not supported by this projection."), Field, MakeShared<FJsonValueNumber>(static_cast<int32>(Value)), MakeShared<FJsonValueString>(TEXT("prevent_new, stop_oldest, stop_farthest_then_oldest, stop_farthest_then_prevent_new, stop_lowest_priority, stop_quietest, stop_lowest_priority_then_prevent_new"))));
 			}
 		}
 
 		bool TryFormatConcurrencyVolumeScaleMode(
 			const EConcurrencyVolumeScaleMode Value,
-			FString& OutName)
+			FString& OutName, const FString& Field, FExecutionMutationError& OutError)
 		{
 			switch (Value)
 			{
@@ -2721,13 +2407,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				OutName = TEXT("priority");
 				return true;
 			default:
-				return false;
+				return Fail(OutError, NativeFailure(TEXT("asset_data_core_native_enum_invalid"), TEXT("The native EConcurrencyVolumeScaleMode value is not supported by this projection."), Field, MakeShared<FJsonValueNumber>(static_cast<int32>(Value)), MakeShared<FJsonValueString>(TEXT("default, distance, priority"))));
 			}
 		}
 
 		bool TryFormatInterpMode(
 			const ERichCurveInterpMode Value,
-			FString& OutName)
+			FString& OutName, const FString& Field, FExecutionMutationError& OutError)
 		{
 			switch (Value)
 			{
@@ -2741,13 +2427,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				OutName = TEXT("cubic");
 				return true;
 			default:
-				return false;
+				return Fail(OutError, NativeFailure(TEXT("asset_data_core_native_enum_invalid"), TEXT("The native ERichCurveInterpMode value is not supported by this projection."), Field, MakeShared<FJsonValueNumber>(static_cast<int32>(Value)), MakeShared<FJsonValueString>(TEXT("constant, linear, cubic"))));
 			}
 		}
 
 		bool TryFormatTangentMode(
 			const ERichCurveTangentMode Value,
-			FString& OutName)
+			FString& OutName, const FString& Field, FExecutionMutationError& OutError)
 		{
 			switch (Value)
 			{
@@ -2767,13 +2453,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				OutName = TEXT("none");
 				return true;
 			default:
-				return false;
+				return Fail(OutError, NativeFailure(TEXT("asset_data_core_native_enum_invalid"), TEXT("The native ERichCurveTangentMode value is not supported by this projection."), Field, MakeShared<FJsonValueNumber>(static_cast<int32>(Value)), MakeShared<FJsonValueString>(TEXT("auto, user, break, smart_auto, none"))));
 			}
 		}
 
 		bool TryFormatTangentWeightMode(
 			const ERichCurveTangentWeightMode Value,
-			FString& OutName)
+			FString& OutName, const FString& Field, FExecutionMutationError& OutError)
 		{
 			switch (Value)
 			{
@@ -2790,7 +2476,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				OutName = TEXT("both");
 				return true;
 			default:
-				return false;
+				return Fail(OutError, NativeFailure(TEXT("asset_data_core_native_enum_invalid"), TEXT("The native ERichCurveTangentWeightMode value is not supported by this projection."), Field, MakeShared<FJsonValueNumber>(static_cast<int32>(Value)), MakeShared<FJsonValueString>(TEXT("none, arrive, leave, both"))));
 			}
 		}
 
@@ -2798,7 +2484,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			const TArray<float>& Values,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
 			TArray<FUeAgentCanonicalValueRef> Items;
 			for (const float Value : Values)
@@ -2808,7 +2494,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Value,
 						Resources,
 						Item,
-						OutError))
+						OutError, Field + TEXT("/") + FString::FromInt(Items.Num())))
 				{
 					return false;
 				}
@@ -2818,7 +2504,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				Items,
 				Resources,
 				OutValue,
-				OutError);
+				OutError, Field);
 		}
 
 		bool TryBuildEqSettingsProjection(
@@ -2827,9 +2513,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
+            const FString Field = TEXT("settings");
 			TArray<FUeAgentCanonicalValueRef> Bands;
 			for (const FSubmixEffectEQBand& Band : Settings.EQBands)
 			{
+                const FString BandPath = ChildPath(Field, TEXT("eq_bands")) + TEXT("/") + FString::FromInt(Bands.Num());
 				FUeAgentCanonicalValuePtr Frequency;
 				FUeAgentCanonicalValuePtr Bandwidth;
 				FUeAgentCanonicalValuePtr Gain;
@@ -2839,22 +2527,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Band.Frequency,
 						Resources,
 						Frequency,
-						OutError)
+						OutError, ChildPath(BandPath, TEXT("frequency_hz")))
 					|| !TryBuildDecimalProjectionValue(
 						Band.Bandwidth,
 						Resources,
 						Bandwidth,
-						OutError)
+						OutError, ChildPath(BandPath, TEXT("bandwidth_octaves")))
 					|| !TryBuildDecimalProjectionValue(
 						Band.GainDb,
 						Resources,
 						Gain,
-						OutError)
+						OutError, ChildPath(BandPath, TEXT("gain_db")))
 					|| !TryBuildBooleanProjectionValue(
 						Band.bEnabled,
 						Resources,
 						Enabled,
-						OutError)
+						OutError, ChildPath(BandPath, TEXT("enabled")))
 					|| !TryBuildObjectProjectionValue(
 						{
 							{
@@ -2876,7 +2564,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						},
 						Resources,
 						BandValue,
-						OutError))
+						OutError, BandPath))
 				{
 					return false;
 				}
@@ -2887,7 +2575,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Bands,
 					Resources,
 					BandArray,
-					OutError)
+					OutError, ChildPath(Field, TEXT("eq_bands")))
 				&& TryBuildObjectProjectionValue(
 					{
 						{
@@ -2897,7 +2585,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					},
 					Resources,
 					OutValue,
-					OutError);
+					OutError, Field);
 		}
 
 		bool TryBuildAttenuationProjection(
@@ -2906,6 +2594,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
+            const FString Field = TEXT("attenuation");
 			FString DistanceName;
 			const FString SpatializationName =
 				Settings.SpatializationAlgorithm
@@ -2915,18 +2604,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							== SPATIALIZATION_HRTF
 						? TEXT("binaural")
 						: FString();
-			if (!TryFormatDistanceAlgorithm(
-					Settings.DistanceAlgorithm,
-					DistanceName)
-				|| Settings.AttenuationShape
-					!= EAttenuationShape::Sphere
-				|| SpatializationName.IsEmpty())
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_sound_attenuation_projection_unsupported"));
-			}
+            if (!TryFormatDistanceAlgorithm(Settings.DistanceAlgorithm, DistanceName, ChildPath(Field, TEXT("distance_algorithm")), OutError)) return false;
+            if (Settings.AttenuationShape != EAttenuationShape::Sphere)
+                return Fail(OutError, NativeFailure(TEXT("asset_data_sound_attenuation_projection_unsupported"),
+                    TEXT("This projection supports only the sphere attenuation shape."), ChildPath(Field, TEXT("attenuation_shape")),
+                    MakeShared<FJsonValueNumber>(static_cast<int32>(Settings.AttenuationShape)), MakeShared<FJsonValueString>(TEXT("sphere"))));
+            if (SpatializationName.IsEmpty())
+                return Fail(OutError, NativeFailure(TEXT("asset_data_sound_attenuation_projection_unsupported"),
+                    TEXT("The native spatialization algorithm is not supported."), ChildPath(Field, TEXT("spatialization_algorithm")),
+                    MakeShared<FJsonValueNumber>(static_cast<int32>(Settings.SpatializationAlgorithm)), MakeShared<FJsonValueString>(TEXT("panning or binaural"))));
 			FUeAgentCanonicalValuePtr Attenuate;
 			FUeAgentCanonicalValuePtr Spatialize;
 			FUeAgentCanonicalValuePtr Distance;
@@ -2942,57 +2628,57 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Settings.bAttenuate,
 					Resources,
 					Attenuate,
-					OutError)
+					OutError, ChildPath(Field, TEXT("attenuate")))
 				&& TryBuildBooleanProjectionValue(
 					Settings.bSpatialize,
 					Resources,
 					Spatialize,
-					OutError)
+					OutError, ChildPath(Field, TEXT("spatialize")))
 				&& TryBuildStringProjectionValue(
 					DistanceName,
 					Resources,
 					Distance,
-					OutError)
+					OutError, ChildPath(Field, TEXT("distance_algorithm")))
 				&& TryBuildStringProjectionValue(
 					TEXT("sphere"),
 					Resources,
 					Shape,
-					OutError)
+					OutError, ChildPath(Field, TEXT("attenuation_shape")))
 				&& TryBuildDecimalProjectionValue(
 					Settings.AttenuationShapeExtents.X,
 					Resources,
 					InnerRadius,
-					OutError)
+					OutError, ChildPath(Field, TEXT("inner_radius")))
 				&& TryBuildDecimalProjectionValue(
 					Settings.FalloffDistance,
 					Resources,
 					Falloff,
-					OutError)
+					OutError, ChildPath(Field, TEXT("falloff_distance")))
 				&& TryBuildStringProjectionValue(
 					SpatializationName,
 					Resources,
 					Spatialization,
-					OutError)
+					OutError, ChildPath(Field, TEXT("spatialization_algorithm")))
 				&& TryBuildBooleanProjectionValue(
 					Settings.bEnableOcclusion,
 					Resources,
 					Occlusion,
-					OutError)
+					OutError, ChildPath(Field, TEXT("enable_occlusion")))
 				&& TryBuildDecimalProjectionValue(
 					Settings.OcclusionLowPassFilterFrequency,
 					Resources,
 					OcclusionLowPass,
-					OutError)
+					OutError, ChildPath(Field, TEXT("occlusion_low_pass_filter_frequency")))
 				&& TryBuildDecimalProjectionValue(
 					Settings.OcclusionVolumeAttenuation,
 					Resources,
 					OcclusionVolume,
-					OutError)
+					OutError, ChildPath(Field, TEXT("occlusion_volume_attenuation")))
 				&& TryBuildDecimalProjectionValue(
 					Settings.OcclusionInterpolationTime,
 					Resources,
 					OcclusionTime,
-					OutError)
+					OutError, ChildPath(Field, TEXT("occlusion_interpolation_time")))
 				&& TryBuildObjectProjectionValue(
 					{
 						{TEXT("attenuate"), Attenuate.ToSharedRef()},
@@ -3039,7 +2725,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					},
 					Resources,
 					OutValue,
-					OutError);
+					OutError, Field);
 		}
 
 		bool TryBuildSoundClassPropertiesProjection(
@@ -3048,6 +2734,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
+            const FString Field = TEXT("properties");
 			FUeAgentCanonicalValuePtr Volume;
 			FUeAgentCanonicalValuePtr Pitch;
 			FUeAgentCanonicalValuePtr UiSound;
@@ -3056,22 +2743,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Properties.Volume,
 					Resources,
 					Volume,
-					OutError)
+					OutError, ChildPath(Field, TEXT("volume")))
 				&& TryBuildDecimalProjectionValue(
 					Properties.Pitch,
 					Resources,
 					Pitch,
-					OutError)
+					OutError, ChildPath(Field, TEXT("pitch")))
 				&& TryBuildBooleanProjectionValue(
 					Properties.bIsUISound,
 					Resources,
 					UiSound,
-					OutError)
+					OutError, ChildPath(Field, TEXT("is_ui_sound")))
 				&& TryBuildBooleanProjectionValue(
 					Properties.bIsMusic,
 					Resources,
 					Music,
-					OutError)
+					OutError, ChildPath(Field, TEXT("is_music")))
 				&& TryBuildObjectProjectionValue(
 					{
 						{TEXT("volume"), Volume.ToSharedRef()},
@@ -3084,12 +2771,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					},
 					Resources,
 					OutValue,
-					OutError);
+					OutError, Field);
 		}
 
 		bool TryReadConcurrencyVolumeScale(
 			const FSoundConcurrencySettings& Settings,
-			float& OutValue)
+			float& OutValue, const FString& Field, FExecutionMutationError& OutError)
 		{
 			const FFloatProperty* Property =
 				FindFProperty<FFloatProperty>(
@@ -3097,11 +2784,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEXT("VolumeScale"));
 			if (!Property)
 			{
-				return false;
+				return Fail(OutError, NativeFailure(TEXT("asset_data_core_concurrency_property_missing"),
+                    TEXT("FSoundConcurrencySettings.VolumeScale is missing or is not a float property."),
+                    Field, MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("float property"))));
 			}
 			OutValue =
 				Property->GetPropertyValue_InContainer(&Settings);
-			return FMath::IsFinite(OutValue);
+			if (!FMath::IsFinite(OutValue))
+                return Fail(OutError, NativeFailure(TEXT("asset_data_core_concurrency_volume_invalid"),
+                    TEXT("The native concurrency volume scale must be finite."), Field,
+                    MakeShared<FJsonValueString>(FString::Printf(TEXT("%g"), static_cast<double>(OutValue))), MakeShared<FJsonValueString>(TEXT("finite float"))));
+            return true;
 		}
 
 		bool TryBuildConcurrencyProjection(
@@ -3110,23 +2803,21 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
+            const FString Field = TEXT("concurrency");
 			FString ResolutionName;
 			FString ScaleModeName;
 			float VolumeScale = 0.0f;
 			if (!TryFormatConcurrencyResolutionRule(
 					Settings.ResolutionRule,
-					ResolutionName)
+					ResolutionName, ChildPath(Field, TEXT("resolution_rule")), OutError)
 				|| !TryFormatConcurrencyVolumeScaleMode(
 					Settings.VolumeScaleMode,
-					ScaleModeName)
+					ScaleModeName, ChildPath(Field, TEXT("volume_scale_mode")), OutError)
 				|| !TryReadConcurrencyVolumeScale(
 					Settings,
-					VolumeScale))
+					VolumeScale, ChildPath(Field, TEXT("volume_scale")), OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_sound_concurrency_projection_unsupported"));
+                return false;
 			}
 			FUeAgentCanonicalValuePtr MaxCount;
 			FUeAgentCanonicalValuePtr LimitToOwner;
@@ -3141,47 +2832,47 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Settings.MaxCount,
 					Resources,
 					MaxCount,
-					OutError)
+					OutError, ChildPath(Field, TEXT("max_count")))
 				&& TryBuildBooleanProjectionValue(
 					Settings.bLimitToOwner,
 					Resources,
 					LimitToOwner,
-					OutError)
+					OutError, ChildPath(Field, TEXT("limit_to_owner")))
 				&& TryBuildDecimalProjectionValue(
 					Settings.RetriggerTime,
 					Resources,
 					RetriggerTime,
-					OutError)
+					OutError, ChildPath(Field, TEXT("retrigger_time")))
 				&& TryBuildStringProjectionValue(
 					ResolutionName,
 					Resources,
 					Resolution,
-					OutError)
+					OutError, ChildPath(Field, TEXT("resolution_rule")))
 				&& TryBuildDecimalProjectionValue(
 					VolumeScale,
 					Resources,
 					Scale,
-					OutError)
+					OutError, ChildPath(Field, TEXT("volume_scale")))
 				&& TryBuildStringProjectionValue(
 					ScaleModeName,
 					Resources,
 					ScaleMode,
-					OutError)
+					OutError, ChildPath(Field, TEXT("volume_scale_mode")))
 				&& TryBuildDecimalProjectionValue(
 					Settings.VolumeScaleAttackTime,
 					Resources,
 					Attack,
-					OutError)
+					OutError, ChildPath(Field, TEXT("volume_scale_attack_time")))
 				&& TryBuildDecimalProjectionValue(
 					Settings.VolumeScaleReleaseTime,
 					Resources,
 					Release,
-					OutError)
+					OutError, ChildPath(Field, TEXT("volume_scale_release_time")))
 				&& TryBuildDecimalProjectionValue(
 					Settings.VoiceStealReleaseTime,
 					Resources,
 					VoiceSteal,
-					OutError)
+					OutError, ChildPath(Field, TEXT("voice_steal_release_time")))
 				&& TryBuildObjectProjectionValue(
 					{
 						{TEXT("max_count"), MaxCount.ToSharedRef()},
@@ -3220,14 +2911,14 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					},
 					Resources,
 					OutValue,
-					OutError);
+					OutError, Field);
 		}
 
 		bool TryBuildSoundMixModifierProjection(
 			const FSoundClassAdjuster& Modifier,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
+			FExecutionMutationError& OutError, const FString& Field)
 		{
 			FUeAgentCanonicalValuePtr SoundClass;
 			FUeAgentCanonicalValuePtr Volume;
@@ -3240,32 +2931,32 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					false,
 					Resources,
 					SoundClass,
-					OutError)
+					OutError, ChildPath(Field, TEXT("sound_class_ref")))
 				&& TryBuildDecimalProjectionValue(
 					Modifier.VolumeAdjuster,
 					Resources,
 					Volume,
-					OutError)
+					OutError, ChildPath(Field, TEXT("volume_adjuster")))
 				&& TryBuildDecimalProjectionValue(
 					Modifier.PitchAdjuster,
 					Resources,
 					Pitch,
-					OutError)
+					OutError, ChildPath(Field, TEXT("pitch_adjuster")))
 				&& TryBuildDecimalProjectionValue(
 					Modifier.LowPassFilterFrequency,
 					Resources,
 					LowPass,
-					OutError)
+					OutError, ChildPath(Field, TEXT("low_pass_filter_frequency")))
 				&& TryBuildBooleanProjectionValue(
 					Modifier.bApplyToChildren,
 					Resources,
 					ApplyToChildren,
-					OutError)
+					OutError, ChildPath(Field, TEXT("apply_to_children")))
 				&& TryBuildDecimalProjectionValue(
 					Modifier.VoiceCenterChannelVolumeAdjuster,
 					Resources,
 					CenterVolume,
-					OutError)
+					OutError, ChildPath(Field, TEXT("voice_center_channel_volume_adjuster")))
 				&& TryBuildObjectProjectionValue(
 					{
 						{
@@ -3296,7 +2987,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					},
 					Resources,
 					OutValue,
-					OutError);
+					OutError, Field);
 		}
 
 		bool TryBuildSoundMixModifiersProjection(
@@ -3305,24 +2996,27 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
+            const FString Field = TEXT("modifiers");
 			TArray<FUeAgentCanonicalValueRef> Items;
 			TSet<const USoundClass*> Seen;
 			for (const FSoundClassAdjuster& Modifier : Modifiers)
 			{
+                const FString ItemPath = Field + TEXT("/") + FString::FromInt(Items.Num());
 				if (!Modifier.SoundClassObject
 					|| Seen.Contains(Modifier.SoundClassObject))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_sound_mix_projection_identity_invalid"));
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_sound_mix_projection_identity_invalid"),
+                        !Modifier.SoundClassObject ? TEXT("The native modifier has no sound class.") : TEXT("More than one native modifier addresses this sound class."),
+                        ChildPath(ItemPath, TEXT("sound_class_ref")),
+                        Modifier.SoundClassObject ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Modifier.SoundClassObject->GetPathName())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+                        MakeShared<FJsonValueString>(TEXT("unique live sound class"))));
 				}
 				FUeAgentCanonicalValuePtr Item;
 				if (!TryBuildSoundMixModifierProjection(
 						Modifier,
 						Resources,
 						Item,
-						OutError))
+						OutError, ItemPath))
 				{
 					return false;
 				}
@@ -3333,8 +3027,14 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				Items,
 				Resources,
 				OutValue,
-				OutError);
+				OutError, Field);
 		}
+
+        TSharedPtr<FJsonValue> NativeNumberFact(const double Value)
+        {
+            if (FMath::IsFinite(Value)) return MakeShared<FJsonValueNumber>(Value);
+            return MakeShared<FJsonValueString>(FString::Printf(TEXT("%.17g"), Value));
+        }
 
 		bool TryBuildCurveChannelsProjection(
 			const TArray<TArray<FRichCurveKey>>& ChannelValues,
@@ -3342,13 +3042,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
+            const FString Field = TEXT("keys");
 			const int32 Dimension = ChannelValues.Num();
-			if (Dimension < 1 || Dimension > 4)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_curve_projection_target_invalid"));
-			}
+            if (Dimension < 1 || Dimension > 4)
+                return Fail(OutError, NativeFailure(TEXT("asset_data_curve_projection_target_invalid"),
+                    TEXT("The native curve must have one to four channels."), TEXT("curve_dimension"),
+                    MakeShared<FJsonValueNumber>(Dimension), MakeShared<FJsonValueString>(TEXT("integer from 1 to 4"))));
 			TArray<const TArray<FRichCurveKey>*> Channels;
 			for (const TArray<FRichCurveKey>& Channel
 				: ChannelValues)
@@ -3360,10 +3059,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{
 				if (Channels[Index]->Num() != KeyCount)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_curve_projection_channel_topology_unsupported"));
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_curve_projection_channel_topology_unsupported"),
+                        TEXT("Every curve channel must have the same number of keys as channel zero."),
+                        Field + TEXT("/channels/") + FString::FromInt(Index),
+                        MakeShared<FJsonValueNumber>(Channels[Index]->Num()), MakeShared<FJsonValueNumber>(KeyCount)));
 				}
 			}
 			TArray<FUeAgentCanonicalValueRef> ProjectedKeys;
@@ -3371,7 +3070,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				KeyIndex < KeyCount;
 				++KeyIndex)
 			{
-				const FRichCurveKey& First =
+				const FString KeyPath = Field + TEXT("/") + FString::FromInt(KeyIndex);
+                const FRichCurveKey& First =
 					(*Channels[0])[KeyIndex];
 				FString InterpName;
 				FString TangentName;
@@ -3387,17 +3087,25 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				{
 					const FRichCurveKey& Key =
 						(*Channels[ChannelIndex])[KeyIndex];
-					if (!FMath::IsNearlyEqual(Key.Time, First.Time)
-						|| Key.InterpMode != First.InterpMode
-						|| Key.TangentMode != First.TangentMode
-						|| Key.TangentWeightMode
-							!= First.TangentWeightMode)
-					{
-						return Fail(
-							OutError,
-							TEXT(
-								"asset_data_curve_projection_channel_semantics_unsupported"));
-					}
+                    const FString ChannelPath = KeyPath + TEXT("/channels/") + FString::FromInt(ChannelIndex);
+                    if (!FMath::IsNearlyEqual(Key.Time, First.Time))
+                        return Fail(OutError, NativeFailure(TEXT("asset_data_curve_projection_channel_semantics_unsupported"),
+                            TEXT("The key time must match the corresponding key in channel zero within the native tolerance."),
+                            ChildPath(ChannelPath, TEXT("time")),
+                            NativeNumberFact(Key.Time),
+                            NativeNumberFact(First.Time)));
+                    if (Key.InterpMode != First.InterpMode)
+                        return Fail(OutError, NativeFailure(TEXT("asset_data_curve_projection_channel_semantics_unsupported"),
+                            TEXT("Interpolation mode must match the corresponding key in channel zero."), ChildPath(ChannelPath, TEXT("interp_mode")),
+                            MakeShared<FJsonValueNumber>(static_cast<int32>(Key.InterpMode)), MakeShared<FJsonValueNumber>(static_cast<int32>(First.InterpMode))));
+                    if (Key.TangentMode != First.TangentMode)
+                        return Fail(OutError, NativeFailure(TEXT("asset_data_curve_projection_channel_semantics_unsupported"),
+                            TEXT("Tangent mode must match the corresponding key in channel zero."), ChildPath(ChannelPath, TEXT("tangent_mode")),
+                            MakeShared<FJsonValueNumber>(static_cast<int32>(Key.TangentMode)), MakeShared<FJsonValueNumber>(static_cast<int32>(First.TangentMode))));
+                    if (Key.TangentWeightMode != First.TangentWeightMode)
+                        return Fail(OutError, NativeFailure(TEXT("asset_data_curve_projection_channel_semantics_unsupported"),
+                            TEXT("Tangent weight mode must match the corresponding key in channel zero."), ChildPath(ChannelPath, TEXT("tangent_weight_mode")),
+                            MakeShared<FJsonValueNumber>(static_cast<int32>(Key.TangentWeightMode)), MakeShared<FJsonValueNumber>(static_cast<int32>(First.TangentWeightMode))));
 					Values.Add(Key.Value);
 					ArriveTangents.Add(Key.ArriveTangent);
 					LeaveTangents.Add(Key.LeaveTangent);
@@ -3418,58 +3126,58 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FUeAgentCanonicalValuePtr ProjectedKey;
 				if (!TryFormatInterpMode(
 						First.InterpMode,
-						InterpName)
+						InterpName, ChildPath(KeyPath, TEXT("interp_mode")), OutError)
 					|| !TryFormatTangentMode(
 						First.TangentMode,
-						TangentName)
+						TangentName, ChildPath(KeyPath, TEXT("tangent_mode")), OutError)
 					|| !TryFormatTangentWeightMode(
 						First.TangentWeightMode,
-						WeightName)
+						WeightName, ChildPath(KeyPath, TEXT("tangent_weight_mode")), OutError)
 					|| !TryBuildDecimalProjectionValue(
 						First.Time,
 						Resources,
 						Time,
-						OutError)
+						OutError, ChildPath(KeyPath, TEXT("time")))
 					|| !TryBuildFloatArrayProjection(
 						Values,
 						Resources,
 						ValueArray,
-						OutError)
+						OutError, ChildPath(KeyPath, TEXT("values")))
 					|| !TryBuildStringProjectionValue(
 						InterpName,
 						Resources,
 						Interp,
-						OutError)
+						OutError, ChildPath(KeyPath, TEXT("interp_mode")))
 					|| !TryBuildStringProjectionValue(
 						TangentName,
 						Resources,
 						Tangent,
-						OutError)
+						OutError, ChildPath(KeyPath, TEXT("tangent_mode")))
 					|| !TryBuildStringProjectionValue(
 						WeightName,
 						Resources,
 						Weight,
-						OutError)
+						OutError, ChildPath(KeyPath, TEXT("tangent_weight_mode")))
 					|| !TryBuildFloatArrayProjection(
 						ArriveTangents,
 						Resources,
 						ArriveTangentArray,
-						OutError)
+						OutError, ChildPath(KeyPath, TEXT("arrive_tangents")))
 					|| !TryBuildFloatArrayProjection(
 						LeaveTangents,
 						Resources,
 						LeaveTangentArray,
-						OutError)
+						OutError, ChildPath(KeyPath, TEXT("leave_tangents")))
 					|| !TryBuildFloatArrayProjection(
 						ArriveWeights,
 						Resources,
 						ArriveWeightArray,
-						OutError)
+						OutError, ChildPath(KeyPath, TEXT("arrive_tangent_weights")))
 					|| !TryBuildFloatArrayProjection(
 						LeaveWeights,
 						Resources,
 						LeaveWeightArray,
-						OutError)
+						OutError, ChildPath(KeyPath, TEXT("leave_tangent_weights")))
 					|| !TryBuildObjectProjectionValue(
 						{
 							{TEXT("time"), Time.ToSharedRef()},
@@ -3510,7 +3218,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						},
 						Resources,
 						ProjectedKey,
-						OutError))
+						OutError, KeyPath))
 				{
 					return false;
 				}
@@ -3520,7 +3228,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				ProjectedKeys,
 				Resources,
 				OutValue,
-				OutError);
+				OutError, Field);
 		}
 
 		bool TryBuildCurveKeysProjection(
@@ -3530,21 +3238,27 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FExecutionMutationError& OutError)
 		{
 			const int32 Dimension = GetCurveDimension(Target);
-			if (Dimension < 1 || Dimension > 4)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_curve_projection_target_invalid"));
-			}
+            if (Dimension < 1 || Dimension > 4)
+            {
+                OutError = NativeFailure(TEXT("asset_data_curve_projection_target_invalid"),
+                    TEXT("The target does not provide one to four supported curve channels."), TEXT("curve_dimension"),
+                    MakeShared<FJsonValueNumber>(Dimension), MakeShared<FJsonValueString>(TEXT("CurveFloat, CurveVector or CurveLinearColor")));
+                if (Target) OutError.TargetPath = Target->GetPathName();
+                return false;
+            }
 			TArray<TArray<FRichCurveKey>> Channels;
 			Channels.SetNum(Dimension);
 			for (int32 Index = 0; Index < Dimension; ++Index)
 			{
 				FRichCurve* Curve = GetCurveChannel(Target, Index);
-				if (!Curve)
-				{
-					return false;
-				}
+                if (!Curve)
+                {
+                    OutError = NativeFailure(TEXT("asset_data_curve_projection_channel_missing"),
+                        TEXT("A native curve channel is unavailable."), TEXT("keys/channels/") + FString::FromInt(Index),
+                        MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("rich curve channel")));
+                    OutError.TargetPath = Target->GetPathName();
+                    return false;
+                }
 				Channels[Index] = Curve->GetCopyOfKeys();
 			}
 			return TryBuildCurveChannelsProjection(
@@ -3560,12 +3274,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
+            const FString Field = TEXT("options");
 			FUeAgentCanonicalValuePtr Precache;
 			return TryBuildBooleanProjectionValue(
 					bPrecacheFile,
 					Resources,
 					Precache,
-					OutError)
+					OutError, ChildPath(Field, TEXT("precache_file")))
 				&& TryBuildObjectProjectionValue(
 					{
 						{
@@ -3575,7 +3290,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					},
 					Resources,
 					OutValue,
-					OutError);
+					OutError, Field);
 		}
 
 		bool TryBuildSparseAddressingProjection(
@@ -3586,30 +3301,31 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
+            const FString Field = TEXT("addressing");
 			FString XName;
 			FString YName;
 			FString ZName;
 			FUeAgentCanonicalValuePtr XValue;
 			FUeAgentCanonicalValuePtr YValue;
 			FUeAgentCanonicalValuePtr ZValue;
-			return TryFormatTextureAddress(X, XName)
-				&& TryFormatTextureAddress(Y, YName)
-				&& TryFormatTextureAddress(Z, ZName)
+			return TryFormatTextureAddress(X, XName, ChildPath(Field, TEXT("x")), OutError)
+				&& TryFormatTextureAddress(Y, YName, ChildPath(Field, TEXT("y")), OutError)
+				&& TryFormatTextureAddress(Z, ZName, ChildPath(Field, TEXT("z")), OutError)
 				&& TryBuildStringProjectionValue(
 					XName,
 					Resources,
 					XValue,
-					OutError)
+					OutError, ChildPath(Field, TEXT("x")))
 				&& TryBuildStringProjectionValue(
 					YName,
 					Resources,
 					YValue,
-					OutError)
+					OutError, ChildPath(Field, TEXT("y")))
 				&& TryBuildStringProjectionValue(
 					ZName,
 					Resources,
 					ZValue,
-					OutError)
+					OutError, ChildPath(Field, TEXT("z")))
 				&& TryBuildObjectProjectionValue(
 					{
 						{TEXT("x"), XValue.ToSharedRef()},
@@ -3618,7 +3334,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					},
 					Resources,
 					OutValue,
-					OutError);
+					OutError, Field);
 		}
 
 		bool TryBuildSparseStreamingProjection(
@@ -3631,6 +3347,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FUeAgentCanonicalValuePtr& OutValue,
 			FExecutionMutationError& OutError)
 		{
+            const FString Field = TEXT("streaming");
 			FUeAgentCanonicalValuePtr LocalDdcOnly;
 			FUeAgentCanonicalValuePtr PoolSize;
 			FUeAgentCanonicalValuePtr Frames;
@@ -3640,27 +3357,27 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					bLocalDdcOnly,
 					Resources,
 					LocalDdcOnly,
-					OutError)
+					OutError, ChildPath(Field, TEXT("local_ddc_only")))
 				&& TryBuildDecimalProjectionValue(
 					PoolSizeFactor,
 					Resources,
 					PoolSize,
-					OutError)
+					OutError, ChildPath(Field, TEXT("pool_size_factor")))
 				&& TryBuildIntegerProjectionValue(
 					PrefetchFrames,
 					Resources,
 					Frames,
-					OutError)
+					OutError, ChildPath(Field, TEXT("prefetch_frames")))
 				&& TryBuildDecimalProjectionValue(
 					PrefetchPercentageStep,
 					Resources,
 					PercentageStep,
-					OutError)
+					OutError, ChildPath(Field, TEXT("prefetch_percentage_step")))
 				&& TryBuildDecimalProjectionValue(
 					PrefetchPercentageBias,
 					Resources,
 					PercentageBias,
-					OutError)
+					OutError, ChildPath(Field, TEXT("prefetch_percentage_bias")))
 				&& TryBuildObjectProjectionValue(
 					{
 						{
@@ -3686,7 +3403,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					},
 					Resources,
 					OutValue,
-					OutError);
+					OutError, Field);
 		}
 
 		const TCHAR* FindCoreAudioCurveContextTag(
@@ -3746,6 +3463,25 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 		}
 
+        TSharedPtr<FJsonValue> ProjectionFieldIdsValue(const TMap<FString, FUeAgentCanonicalValueRef>& Fields)
+        {
+            TArray<FString> Names;
+            Fields.GetKeys(Names);
+            Names.Sort();
+            TArray<TSharedPtr<FJsonValue>> Values;
+            for (const auto& Name : Names) Values.Add(MakeShared<FJsonValueString>(Name));
+            return MakeShared<FJsonValueArray>(Values);
+        }
+
+        bool FailProjectionTarget(UObject* Target, UClass* ExpectedClass, FExecutionMutationError& OutError)
+        {
+            OutError = NativeFailure(TEXT("asset_data_core_projection_target_type_invalid"),
+                TEXT("The target class is incompatible with this projection mechanic."), TEXT("target"),
+                ObjectClassValue(Target), MakeShared<FJsonValueString>(ExpectedClass->GetPathName()));
+            if (Target) OutError.TargetPath = Target->GetPathName();
+            return false;
+        }
+
 		bool TryBuildCoreAudioCurveValueMap(
 			const ECoreAssetKind Kind,
 			UObject* Target,
@@ -3754,6 +3490,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FExecutionMutationError& OutError)
 		{
 			OutValues.Reset();
+            ON_SCOPE_EXIT { if (!OutError.IsEmpty() && OutError.TargetPath.IsEmpty() && Target) OutError.TargetPath = Target->GetPathName(); };
 			FUeAgentCanonicalValuePtr First;
 			FUeAgentCanonicalValuePtr Second;
 			switch (Kind)
@@ -3762,8 +3499,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				{
 					const USubmixEffectSubmixEQPreset* Preset =
 						Cast<USubmixEffectSubmixEQPreset>(Target);
-					if (!Preset
-						|| !TryBuildEqSettingsProjection(
+					if (!Preset) return FailProjectionTarget(Target, USubmixEffectSubmixEQPreset::StaticClass(), OutError);
+                    if (!TryBuildEqSettingsProjection(
 							Preset->Settings,
 							Resources,
 							First,
@@ -3780,8 +3517,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				{
 					const USoundAttenuation* Attenuation =
 						Cast<USoundAttenuation>(Target);
-					if (!Attenuation
-						|| !TryBuildAttenuationProjection(
+					if (!Attenuation) return FailProjectionTarget(Target, USoundAttenuation::StaticClass(), OutError);
+                    if (!TryBuildAttenuationProjection(
 							Attenuation->Attenuation,
 							Resources,
 							First,
@@ -3799,10 +3536,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					const USoundClass* SoundClass =
 						Cast<USoundClass>(Target);
 					TArray<UObject*> Children;
-					if (!SoundClass)
-					{
-						return false;
-					}
+                    if (!SoundClass) return FailProjectionTarget(Target, USoundClass::StaticClass(), OutError);
 					for (USoundClass* Child
 						: SoundClass->ChildClasses)
 					{
@@ -3817,7 +3551,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							Children,
 							Resources,
 							Second,
-							OutError))
+							OutError, TEXT("child_classes")))
 					{
 						return false;
 					}
@@ -3833,8 +3567,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				{
 					const USoundConcurrency* Concurrency =
 						Cast<USoundConcurrency>(Target);
-					if (!Concurrency
-						|| !TryBuildConcurrencyProjection(
+					if (!Concurrency) return FailProjectionTarget(Target, USoundConcurrency::StaticClass(), OutError);
+                    if (!TryBuildConcurrencyProjection(
 							Concurrency->Concurrency,
 							Resources,
 							First,
@@ -3851,8 +3585,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				{
 					const USoundMix* SoundMix =
 						Cast<USoundMix>(Target);
-					if (!SoundMix
-						|| !TryBuildSoundMixModifiersProjection(
+					if (!SoundMix) return FailProjectionTarget(Target, USoundMix::StaticClass(), OutError);
+                    if (!TryBuildSoundMixModifiersProjection(
 							SoundMix->SoundClassEffects,
 							Resources,
 							First,
@@ -3861,7 +3595,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							SoundMix->InitialDelay,
 							Resources,
 							Second,
-							OutError))
+							OutError, TEXT("initial_delay")))
 					{
 						return false;
 					}
@@ -3878,10 +3612,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					const USoundSubmix* Submix =
 						Cast<USoundSubmix>(Target);
 					TArray<UObject*> Effects;
-					if (!Submix)
-					{
-						return false;
-					}
+                    if (!Submix) return FailProjectionTarget(Target, USoundSubmix::StaticClass(), OutError);
 					for (USoundEffectSubmixPreset* Effect
 						: Submix->SubmixEffectChain)
 					{
@@ -3892,12 +3623,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							true,
 							Resources,
 							First,
-							OutError)
+							OutError, TEXT("parent"))
 						|| !TryBuildObjectReferenceArrayProjection(
 							Effects,
 							Resources,
 							Second,
-							OutError))
+							OutError, TEXT("effect_chain")))
 					{
 						return false;
 					}
@@ -3921,10 +3652,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				OutValues.Add(TEXT("keys"), First.ToSharedRef());
 				return true;
 			default:
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_core_audio_curve_projection_unsupported"));
+                return Fail(OutError, NativeFailure(TEXT("asset_data_core_audio_curve_projection_unsupported"),
+                    TEXT("This asset kind has no audio or curve projection."), TEXT("asset_kind"),
+                    MakeShared<FJsonValueNumber>(static_cast<int32>(Kind)), MakeShared<FJsonValueString>(TEXT("supported audio or curve asset kind"))));
 			}
 		}
 
@@ -3944,10 +3674,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					: nullptr;
 			TMap<FString, FUeAgentCanonicalValueRef> CurrentValues;
 			TMap<FString, FUeAgentCanonicalValueRef> DefaultValues;
-			if (!Target
-				|| !Default
-				|| SelectedFieldIds.IsEmpty()
-				|| !TryBuildCoreAudioCurveValueMap(
+            if (!Target) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_target_missing"),
+                TEXT("Projection requires a live target."), TEXT("target"), MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("live asset"))));
+            if (!Default) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_default_missing"),
+                TEXT("The native default object is unavailable for this projection."), TEXT("default_target"),
+                MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(Target->GetClass()->GetPathName())));
+            if (SelectedFieldIds.IsEmpty()) return Fail(OutError, NativeFailure(TEXT("asset_data_core_selected_fields_empty"),
+                TEXT("Projection requires at least one selected field."), TEXT("selected_field_ids"),
+                MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("nonempty supported field list"))));
+            if (!TryBuildCoreAudioCurveValueMap(
 					Kind,
 					Target,
 					Resources,
@@ -3988,23 +3723,19 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							GetCurveDimension(Target))
 						: FString(ContextTag ? ContextTag : TEXT(""));
 				FUeAgentCanonicalValuePtr ContextValue;
-				if (Seen.Contains(FieldId)
-					|| !Current
-					|| !DefaultValue
-					|| !ContextTag
-					|| ContextText.IsEmpty()
-					|| !TryBuildStringProjectionValue(
-						ContextText,
-						Resources,
-						ContextValue,
-						OutError))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_core_selected_field_invalid"),
-						FieldId);
-				}
+                if (Seen.Contains(FieldId))
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_selected_field_duplicate"), TEXT("The field is selected more than once."),
+                        TEXT("selected_field_ids/") + FString::FromInt(Seen.Num()), MakeShared<FJsonValueString>(FieldId), MakeShared<FJsonValueString>(TEXT("unique field id"))));
+                if (!Current) return Fail(OutError, NativeFailure(TEXT("asset_data_core_selected_field_invalid"),
+                    TEXT("The selected field is not provided by this asset projection."), TEXT("selected_field_ids/") + FString::FromInt(Seen.Num()),
+                    MakeShared<FJsonValueString>(FieldId), ProjectionFieldIdsValue(CurrentValues)));
+                if (!DefaultValue) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_default_field_missing"),
+                    TEXT("The native default projection is missing a selected field."), ChildPath(TEXT("default_fields"), FieldId),
+                    MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("captured default field"))));
+                if (!ContextTag || ContextText.IsEmpty()) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_context_missing"),
+                    TEXT("The projection has no context tag for the selected field."), ChildPath(TEXT("projection_context"), FieldId),
+                    MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("registered context tag"))));
+                if (!TryBuildStringProjectionValue(ContextText, Resources, ContextValue, OutError, ChildPath(TEXT("projection_context"), FieldId))) return false;
 				Seen.Add(FieldId);
 				CurrentItems.Emplace(FieldId, *Current);
 				DefaultItems.Emplace(FieldId, *DefaultValue);
@@ -4016,17 +3747,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					MoveTemp(CurrentItems),
 					Resources,
 					OutCurrentFields,
-					OutError)
+					OutError, TEXT("current_fields"))
 				&& TryBuildObjectProjectionValue(
 					MoveTemp(DefaultItems),
 					Resources,
 					OutDefaultFields,
-					OutError)
+					OutError, TEXT("default_fields"))
 				&& TryBuildObjectProjectionValue(
 					MoveTemp(ContextItems),
 					Resources,
 					OutProjectionContext,
-					OutError);
+					OutError, TEXT("projection_context"));
 		}
 
 		const TCHAR* FindCoreConfigurationContextTag(
@@ -4083,30 +3814,26 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			FExecutionMutationError& OutError)
 		{
 			OutValues.Reset();
+            ON_SCOPE_EXIT { if (!OutError.IsEmpty() && OutError.TargetPath.IsEmpty() && Target) OutError.TargetPath = Target->GetPathName(); };
 			if (Kind == ECoreAssetKind::MediaSource)
 			{
 				const UFileMediaSource* MediaSource =
 					Cast<UFileMediaSource>(Target);
 				FUeAgentCanonicalValuePtr SourceUri;
 				FUeAgentCanonicalValuePtr Options;
-				if (!MediaSource
-					|| !TryBuildStringProjectionValue(
+				if (!MediaSource) return FailProjectionTarget(Target, UFileMediaSource::StaticClass(), OutError);
+                if (!TryBuildStringProjectionValue(
 						MediaSource->GetFilePath(),
 						Resources,
 						SourceUri,
-						OutError)
+						OutError, TEXT("source_uri"))
 					|| !TryBuildMediaSourceOptionsProjection(
 						MediaSource->PrecacheFile,
 						Resources,
 						Options,
 						OutError))
 				{
-					return Fail(
-						OutError,
-						OutError.GetCode().IsEmpty()
-							? TEXT(
-								"asset_data_media_source_projection_invalid")
-							: OutError.GetCode());
+                    return false;
 				}
 				OutValues.Add(
 					TEXT("source_uri"),
@@ -4128,37 +3855,32 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FUeAgentCanonicalValuePtr Size;
 				FUeAgentCanonicalValuePtr Material;
 				FUeAgentCanonicalValuePtr Compression;
-				if (!VirtualTexture
-					|| !TryReadRvtProperties(
+				if (!VirtualTexture) return FailProjectionTarget(Target, URuntimeVirtualTexture::StaticClass(), OutError);
+                if (!TryReadRvtProperties(
 						VirtualTexture,
 						TileCount,
 						MaterialType,
-						bCompression)
+						bCompression, OutError)
 					|| !TryFormatRuntimeVirtualTextureMaterialType(
 						MaterialType,
-						MaterialTypeName)
+						MaterialTypeName, TEXT("material_type"), OutError)
 					|| !TryBuildIntegerProjectionValue(
 						VirtualTexture->GetSize(),
 						Resources,
 						Size,
-						OutError)
+						OutError, TEXT("size"))
 					|| !TryBuildStringProjectionValue(
 						MaterialTypeName,
 						Resources,
 						Material,
-						OutError)
+						OutError, TEXT("material_type"))
 					|| !TryBuildBooleanProjectionValue(
 						bCompression,
 						Resources,
 						Compression,
-						OutError))
+						OutError, TEXT("compression")))
 				{
-					return Fail(
-						OutError,
-						OutError.GetCode().IsEmpty()
-							? TEXT(
-								"asset_data_rvt_projection_invalid")
-							: OutError.GetCode());
+                    return false;
 				}
 				OutValues.Add(TEXT("size"), Size.ToSharedRef());
 				OutValues.Add(
@@ -4175,8 +3897,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Cast<UStreamableSparseVolumeTexture>(Target);
 				FUeAgentCanonicalValuePtr Addressing;
 				FUeAgentCanonicalValuePtr Streaming;
-				if (!Sparse
-					|| !TryBuildSparseAddressingProjection(
+				if (!Sparse) return FailProjectionTarget(Target, UStreamableSparseVolumeTexture::StaticClass(), OutError);
+                if (!TryBuildSparseAddressingProjection(
 						Sparse->AddressX,
 						Sparse->AddressY,
 						Sparse->AddressZ,
@@ -4193,12 +3915,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Streaming,
 						OutError))
 				{
-					return Fail(
-						OutError,
-						OutError.GetCode().IsEmpty()
-							? TEXT(
-								"asset_data_sparse_projection_invalid")
-							: OutError.GetCode());
+                    return false;
 				}
 				OutValues.Add(
 					TEXT("addressing"),
@@ -4208,10 +3925,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Streaming.ToSharedRef());
 				return true;
 			}
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_core_configuration_projection_unsupported"));
+            return Fail(OutError, NativeFailure(TEXT("asset_data_core_configuration_projection_unsupported"),
+                TEXT("This asset kind has no configuration projection."), TEXT("asset_kind"),
+                MakeShared<FJsonValueNumber>(static_cast<int32>(Kind)), MakeShared<FJsonValueString>(TEXT("MediaSource, RuntimeVirtualTexture or SparseVolumeTexture"))));
 		}
 
 		bool TryBuildCoreConfigurationProjection(
@@ -4243,10 +3959,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 			TMap<FString, FUeAgentCanonicalValueRef> CurrentValues;
 			TMap<FString, FUeAgentCanonicalValueRef> DefaultValues;
-			if (!Target
-				|| !Default
-				|| SelectedFieldIds.IsEmpty()
-				|| !TryBuildCoreConfigurationValueMap(
+            if (!Target) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_target_missing"),
+                TEXT("Projection requires a live target."), TEXT("target"), MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("live asset"))));
+            if (!Default) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_default_missing"),
+                TEXT("The native default object is unavailable for this projection."), TEXT("default_target"),
+                MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(Target->GetClass()->GetPathName())));
+            if (SelectedFieldIds.IsEmpty()) return Fail(OutError, NativeFailure(TEXT("asset_data_core_selected_fields_empty"),
+                TEXT("Projection requires at least one selected field."), TEXT("selected_field_ids"),
+                MakeShared<FJsonValueNumber>(0), MakeShared<FJsonValueString>(TEXT("nonempty supported field list"))));
+            if (!TryBuildCoreConfigurationValueMap(
 					Kind,
 					Target,
 					Resources,
@@ -4279,22 +4000,19 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Kind,
 						FieldId);
 				FUeAgentCanonicalValuePtr ContextValue;
-				if (Seen.Contains(FieldId)
-					|| !Current
-					|| !DefaultValue
-					|| !ContextTag
-					|| !TryBuildStringProjectionValue(
-						ContextTag,
-						Resources,
-						ContextValue,
-						OutError))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_core_selected_field_invalid"),
-						FieldId);
-				}
+                if (Seen.Contains(FieldId))
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_selected_field_duplicate"), TEXT("The field is selected more than once."),
+                        TEXT("selected_field_ids/") + FString::FromInt(Seen.Num()), MakeShared<FJsonValueString>(FieldId), MakeShared<FJsonValueString>(TEXT("unique field id"))));
+                if (!Current) return Fail(OutError, NativeFailure(TEXT("asset_data_core_selected_field_invalid"),
+                    TEXT("The selected field is not provided by this asset projection."), TEXT("selected_field_ids/") + FString::FromInt(Seen.Num()),
+                    MakeShared<FJsonValueString>(FieldId), ProjectionFieldIdsValue(CurrentValues)));
+                if (!DefaultValue) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_default_field_missing"),
+                    TEXT("The native default projection is missing a selected field."), ChildPath(TEXT("default_fields"), FieldId),
+                    MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("captured default field"))));
+                if (!ContextTag) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_context_missing"),
+                    TEXT("The projection has no context tag for the selected field."), ChildPath(TEXT("projection_context"), FieldId),
+                    MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("registered context tag"))));
+                if (!TryBuildStringProjectionValue(ContextTag, Resources, ContextValue, OutError, ChildPath(TEXT("projection_context"), FieldId))) return false;
 				Seen.Add(FieldId);
 				CurrentItems.Emplace(FieldId, *Current);
 				DefaultItems.Emplace(FieldId, *DefaultValue);
@@ -4306,17 +4024,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					MoveTemp(CurrentItems),
 					Resources,
 					OutCurrentFields,
-					OutError)
+					OutError, TEXT("current_fields"))
 				&& TryBuildObjectProjectionValue(
 					MoveTemp(DefaultItems),
 					Resources,
 					OutDefaultFields,
-					OutError)
+					OutError, TEXT("default_fields"))
 				&& TryBuildObjectProjectionValue(
 					MoveTemp(ContextItems),
 					Resources,
 					OutProjectionContext,
-					OutError);
+					OutError, TEXT("projection_context"));
 		}
 
 		bool TryNormalizeCoreConfigurationValue(
@@ -4335,12 +4053,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					FString FilePath;
 					return TryNormalizeFileUri(
 							Requested,
-							FilePath)
+							FilePath, FieldId, OutError)
 						&& TryBuildStringProjectionValue(
 							FilePath,
 							Resources,
 							OutValue,
-							OutError);
+							OutError, FieldId);
 				}
 				if (FieldId == TEXT("options"))
 				{
@@ -4349,11 +4067,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							Requested,
 							TEXT("precache_file"));
 					bool bPrecache = false;
-					return HasExactObjectFields(
+					return TryRequireObjectFields(
 							Requested,
-							{TEXT("precache_file")})
+							{TEXT("precache_file")}, FieldId, OutError)
 						&& Precache
-						&& TryReadBool(*Precache, bPrecache)
+						&& TryReadBool(*Precache, bPrecache, ChildPath(FieldId, TEXT("precache_file")), OutError)
 						&& TryBuildMediaSourceOptionsProjection(
 							bPrecache,
 							Resources,
@@ -4371,12 +4089,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							Requested,
 							Size,
 							1,
-							MAX_int32)
+							MAX_int32, FieldId, OutError)
 						&& TryBuildIntegerProjectionValue(
 							Size,
 							Resources,
 							OutValue,
-							OutError);
+							OutError, FieldId);
 				}
 				if (FieldId == TEXT("material_type"))
 				{
@@ -4387,30 +4105,30 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							BaseColor;
 					return TryReadString(
 							Requested,
-							RequestedName)
+							RequestedName, FieldId, OutError)
 						&& TryParseRuntimeVirtualTextureMaterialType(
 							RequestedName,
-							MaterialType)
+							MaterialType, FieldId, OutError)
 						&& TryFormatRuntimeVirtualTextureMaterialType(
 							MaterialType,
-							CanonicalName)
+							CanonicalName, FieldId, OutError)
 						&& TryBuildStringProjectionValue(
 							CanonicalName,
 							Resources,
 							OutValue,
-							OutError);
+							OutError, FieldId);
 				}
 				if (FieldId == TEXT("compression"))
 				{
 					bool bCompression = false;
 					return TryReadBool(
 							Requested,
-							bCompression)
+							bCompression, FieldId, OutError)
 						&& TryBuildBooleanProjectionValue(
 							bCompression,
 							Resources,
 							OutValue,
-							OutError);
+							OutError, FieldId);
 				}
 			}
 			else if (Kind == ECoreAssetKind::SparseVolumeTexture)
@@ -4429,22 +4147,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					TEnumAsByte<TextureAddress> X;
 					TEnumAsByte<TextureAddress> Y;
 					TEnumAsByte<TextureAddress> Z;
-					return HasExactObjectFields(
+					return TryRequireObjectFields(
 							Requested,
 							{
 								TEXT("x"),
 								TEXT("y"),
 								TEXT("z"),
-							})
+							}, FieldId, OutError)
 						&& XValue
 						&& YValue
 						&& ZValue
-						&& TryReadString(*XValue, XName)
-						&& TryReadString(*YValue, YName)
-						&& TryReadString(*ZValue, ZName)
-						&& TryParseTextureAddress(XName, X)
-						&& TryParseTextureAddress(YName, Y)
-						&& TryParseTextureAddress(ZName, Z)
+						&& TryReadString(*XValue, XName, ChildPath(FieldId, TEXT("x")), OutError)
+						&& TryReadString(*YValue, YName, ChildPath(FieldId, TEXT("y")), OutError)
+						&& TryReadString(*ZValue, ZName, ChildPath(FieldId, TEXT("z")), OutError)
+						&& TryParseTextureAddress(XName, X, ChildPath(FieldId, TEXT("x")), OutError)
+						&& TryParseTextureAddress(YName, Y, ChildPath(FieldId, TEXT("y")), OutError)
+						&& TryParseTextureAddress(ZName, Z, ChildPath(FieldId, TEXT("z")), OutError)
 						&& TryBuildSparseAddressingProjection(
 							X,
 							Y,
@@ -4480,7 +4198,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					int32 PrefetchFrames = 0;
 					float PercentageStep = 0.0f;
 					float PercentageBias = 0.0f;
-					return HasExactObjectFields(
+					return TryRequireObjectFields(
 							Requested,
 							{
 								TEXT("local_ddc_only"),
@@ -4490,33 +4208,33 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 									"prefetch_percentage_step"),
 								TEXT(
 									"prefetch_percentage_bias"),
-							})
+							}, FieldId, OutError)
 						&& LocalDdc
 						&& PoolSize
 						&& Frames
 						&& Step
 						&& Bias
-						&& TryReadBool(*LocalDdc, bLocalDdc)
+						&& TryReadBool(*LocalDdc, bLocalDdc, ChildPath(FieldId, TEXT("local_ddc_only")), OutError)
 						&& TryReadFloat(
 							*PoolSize,
 							PoolSizeFactor,
 							1.0,
-							1000.0)
+							1000.0, ChildPath(FieldId, TEXT("pool_size_factor")), OutError)
 						&& TryReadInt32(
 							*Frames,
 							PrefetchFrames,
 							0,
-							1024)
+							1024, ChildPath(FieldId, TEXT("prefetch_frames")), OutError)
 						&& TryReadFloat(
 							*Step,
 							PercentageStep,
 							0.0,
-							100.0)
+							100.0, ChildPath(FieldId, TEXT("prefetch_percentage_step")), OutError)
 						&& TryReadFloat(
 							*Bias,
 							PercentageBias,
 							0.0,
-							100.0)
+							100.0, ChildPath(FieldId, TEXT("prefetch_percentage_bias")), OutError)
 						&& TryBuildSparseStreamingProjection(
 							bLocalDdc,
 							PoolSizeFactor,
@@ -4528,12 +4246,32 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							OutError);
 				}
 			}
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_core_expected_field_invalid"),
-				FieldId);
+            return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_field_invalid"),
+                TEXT("The requested field is not supported by this configuration mechanic."), FieldId,
+                &Requested, TEXT("supported field for the selected mechanic")));
 		}
+
+        bool TryRequireExpectedState(const FUeAgentCanonicalValue& CurrentFields,
+            const FUeAgentCanonicalValue& DefaultFields, const FUeAgentCanonicalValue& ProjectionContext,
+            const FUeAgentCanonicalValue* TypedChanges, FExecutionMutationError& OutError)
+        {
+            const FUeAgentCanonicalValue* Values[] = {&CurrentFields, &DefaultFields, &ProjectionContext};
+            const TCHAR* Names[] = {TEXT("current_fields"), TEXT("default_fields"), TEXT("projection_context")};
+            for (int32 Index = 0; Index < 3; ++Index)
+                if (Values[Index]->GetKind() != EUeAgentValueKind::Object)
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_state_invalid"),
+                        TEXT("The captured projection component must be an object."),
+                        Names[Index], Values[Index], TEXT("object"), TEXT("native_result")));
+            if (!TypedChanges || TypedChanges->GetKind() != EUeAgentValueKind::Array)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_state_invalid"),
+                    TEXT("Typed changes must be an array."), TEXT("typed_changes"), TypedChanges, TEXT("array")));
+            if (TypedChanges->GetArrayItems().Num() != CurrentFields.GetObjectItems().Num())
+                return Fail(OutError, JsonFailure(TEXT("asset_data_core_expected_change_count_invalid"),
+                    TEXT("The number of typed changes must match the selected current fields."), TEXT("typed_changes"),
+                    MakeShared<FJsonValueNumber>(TypedChanges->GetArrayItems().Num()),
+                    MakeShared<FJsonValueNumber>(CurrentFields.GetObjectItems().Num())));
+            return true;
+        }
 
 		bool TryBuildExpectedCoreConfigurationFields(
 			const ECoreAssetKind Kind,
@@ -4550,23 +4288,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FindObjectField(
 					ProposedAfter,
 					TEXT("typed_changes"));
-			if (CurrentFields.GetKind()
-					!= EUeAgentValueKind::Object
-				|| DefaultFields.GetKind()
-					!= EUeAgentValueKind::Object
-				|| ProjectionContext.GetKind()
-					!= EUeAgentValueKind::Object
-				|| !TypedChanges
-				|| TypedChanges->GetKind()
-					!= EUeAgentValueKind::Array
-				|| TypedChanges->GetArrayItems().Num()
-					!= CurrentFields.GetObjectItems().Num())
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_core_expected_state_invalid"));
-			}
+            if (!TryRequireExpectedState(CurrentFields, DefaultFields, ProjectionContext, TypedChanges, OutError)) return false;
 			TMap<FString, const FUeAgentCanonicalValue*> Changes;
 			for (const FUeAgentCanonicalValueRef& ChangeRef
 				: TypedChanges->GetArrayItems())
@@ -4576,15 +4298,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				const FUeAgentCanonicalValue* Field =
 					FindObjectField(Change, TEXT("field_id"));
 				FString FieldId;
-				if (!Field
-					|| !TryReadString(*Field, FieldId)
-					|| Changes.Contains(FieldId))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_core_expected_change_invalid"));
-				}
+                const FString ChangePath = TEXT("typed_changes/") + FString::FromInt(Changes.Num()) + TEXT("/field_id");
+                if (!TryReadRequiredString(Field, FieldId, ChangePath, OutError)) return false;
+                if (Changes.Contains(FieldId))
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_change_duplicate"),
+                        TEXT("More than one change addresses the same field."), ChangePath, Field, TEXT("unique field_id")));
 				Changes.Add(FieldId, &Change);
 			}
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>>
@@ -4613,21 +4331,17 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Kind,
 						Current.Key);
 				FString ContextTag;
-				if (!ChangePtr
-					|| !DefaultValue
-					|| !ContextValue
-					|| !ExpectedContextTag
-					|| !TryReadString(
-						*ContextValue,
-						ContextTag)
-					|| ContextTag != ExpectedContextTag)
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_core_expected_context_invalid"),
-						Current.Key);
-				}
+                if (!ChangePtr) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_change_missing"),
+                    TEXT("The selected field has no typed change."), Current.Key, nullptr, TEXT("field change")));
+                if (!DefaultValue) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_default_missing"),
+                    TEXT("The selected field has no captured default value."), ChildPath(TEXT("default_fields"), Current.Key), nullptr, TEXT("captured default"), TEXT("native_result")));
+                if (!ContextValue) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_context_missing"),
+                    TEXT("The selected field has no projection context."), ChildPath(TEXT("projection_context"), Current.Key), nullptr, TEXT("context string"), TEXT("native_result")));
+                if (!ExpectedContextTag) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_field_unsupported"),
+                    TEXT("The selected field is not supported by this configuration mechanic."), Current.Key, &Current.Value.Get(), TEXT("supported configuration field"), TEXT("native_result")));
+                if (!TryReadRequiredString(ContextValue, ContextTag, ChildPath(TEXT("projection_context"), Current.Key), OutError, TEXT("native_result"))) return false;
+                if (ContextTag != ExpectedContextTag) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_context_invalid"),
+                    TEXT("The captured context tag does not match the field mechanic."), ChildPath(TEXT("projection_context"), Current.Key), ContextValue, ExpectedContextTag, TEXT("native_result")));
 				const FUeAgentCanonicalValue& Change =
 					**ChangePtr;
 				const FUeAgentCanonicalValue* PresenceValue =
@@ -4635,17 +4349,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Change,
 						TEXT("presence"));
 				FString Presence;
-				if (!PresenceValue
-					|| !TryReadString(
-						*PresenceValue,
-						Presence))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_core_expected_presence_invalid"),
-						Current.Key);
-				}
+                if (!TryReadRequiredString(PresenceValue, Presence, ChildPath(Current.Key, TEXT("presence")), OutError)) return false;
 				if (Presence == TEXT("clear"))
 				{
 					ExpectedItems.Emplace(
@@ -4662,10 +4366,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							TEXT("canonical_value"))
 						: nullptr;
 				FUeAgentCanonicalValuePtr Normalized;
-				if ((Presence != TEXT("set")
-						&& Presence != TEXT("replace"))
-					|| !Requested
-					|| !TryNormalizeCoreConfigurationValue(
+                if (Presence != TEXT("set") && Presence != TEXT("replace"))
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_presence_invalid"), TEXT("The configuration presence is not supported."), ChildPath(Current.Key, TEXT("presence")), PresenceValue, TEXT("clear, set or replace")));
+                if (!Requested) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_value_missing"), TEXT("The field change requires a canonical value."), Current.Key, nullptr, TEXT("present value")));
+                if (!TryNormalizeCoreConfigurationValue(
 						Kind,
 						Current.Key,
 						*Requested,
@@ -4683,137 +4387,89 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				MoveTemp(ExpectedItems),
 				Resources,
 				OutExpectedFields,
-				OutError);
+				OutError, TEXT("expected_fields"));
 		}
 
-		bool TryReadCollectionIdentity(
-			const FUeAgentCanonicalValue& Value,
-			const FString& IdentityField,
-			FString& OutIdentity)
-		{
-			if (IdentityField.IsEmpty())
-			{
-				return TryReadString(Value, OutIdentity);
-			}
-			const FUeAgentCanonicalValue* Identity =
-				FindObjectField(Value, IdentityField);
-			return Identity
-				&& TryReadString(*Identity, OutIdentity);
-		}
+        const FUeAgentCanonicalValue* FindCollectionIdentity(const FUeAgentCanonicalValue& Value, const FString& IdentityField)
+        {
+            return IdentityField.IsEmpty() ? &Value : FindObjectField(Value, IdentityField);
+        }
 
-		bool TryApplyProjectedCollectionPresence(
-			const FString& Presence,
-			const FUeAgentCanonicalValue& Current,
-			const FUeAgentCanonicalValue* Requested,
-			const FString& IdentityField,
-			FUeAgentResourceTracker& Resources,
-			FUeAgentCanonicalValuePtr& OutValue,
-			FExecutionMutationError& OutError)
-		{
-			if (Current.GetKind() != EUeAgentValueKind::Array
-				|| (Presence != TEXT("clear")
-					&& (!Requested
-						|| Requested->GetKind()
-							!= EUeAgentValueKind::Array)))
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_core_expected_collection_invalid"));
-			}
-			TArray<FUeAgentCanonicalValueRef> Items =
-				Current.GetArrayItems();
-			if (Presence == TEXT("clear"))
-			{
-				Items.Reset();
-			}
-			else if (Presence == TEXT("replace"))
-			{
-				Items = Requested->GetArrayItems();
-			}
-			else if (Presence == TEXT("remove"))
-			{
-				TSet<FString> Removed;
-				for (const FUeAgentCanonicalValueRef& Item
-					: Requested->GetArrayItems())
-				{
-					FString Identity;
-					if (!TryReadCollectionIdentity(
-							Item.Get(),
-							IdentityField,
-							Identity)
-						|| Removed.Contains(Identity))
-					{
-						return false;
-					}
-					Removed.Add(Identity);
-				}
-				Items.RemoveAll(
-					[&Removed, &IdentityField](
-						const FUeAgentCanonicalValueRef& Item)
-					{
-						FString Identity;
-						return TryReadCollectionIdentity(
-								Item.Get(),
-								IdentityField,
-								Identity)
-							&& Removed.Contains(Identity);
-					});
-			}
-			else if (Presence == TEXT("set"))
-			{
-				for (const FUeAgentCanonicalValueRef& RequestedItem
-					: Requested->GetArrayItems())
-				{
-					FString RequestedIdentity;
-					if (!TryReadCollectionIdentity(
-							RequestedItem.Get(),
-							IdentityField,
-							RequestedIdentity))
-					{
-						return false;
-					}
-					const int32 Index =
-						Items.IndexOfByPredicate(
-							[
-								&RequestedIdentity,
-								&IdentityField](
-								const
-									FUeAgentCanonicalValueRef&
-										Existing)
-							{
-								FString ExistingIdentity;
-								return TryReadCollectionIdentity(
-										Existing.Get(),
-										IdentityField,
-										ExistingIdentity)
-									&& ExistingIdentity
-										== RequestedIdentity;
-							});
-					if (Index == INDEX_NONE)
-					{
-						Items.Add(RequestedItem);
-					}
-					else
-					{
-						Items[Index] = RequestedItem;
-					}
-				}
-			}
-			else
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_core_expected_collection_presence_invalid"),
-					Presence);
-			}
-			return TryBuildArrayProjectionValue(
-				Items,
-				Resources,
-				OutValue,
-				OutError);
-		}
+        bool TryReadCollectionIdentity(const FUeAgentCanonicalValue& Value, const FString& IdentityField,
+            FString& OutIdentity, const FString& Field, FExecutionMutationError& OutError)
+        {
+            return TryReadRequiredString(FindCollectionIdentity(Value, IdentityField), OutIdentity,
+                IdentityField.IsEmpty() ? Field : ChildPath(Field, IdentityField), OutError);
+        }
+
+        bool TryApplyProjectedCollectionPresence(
+            const FString& Presence, const FUeAgentCanonicalValue& Current,
+            const FUeAgentCanonicalValue* Requested, const FString& IdentityField,
+            FUeAgentResourceTracker& Resources, FUeAgentCanonicalValuePtr& OutValue,
+            FExecutionMutationError& OutError, const FString& Field)
+        {
+            if (Current.GetKind() != EUeAgentValueKind::Array)
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_collection_invalid"),
+                    TEXT("The captured collection must be an array."), Field, &Current, TEXT("array"), TEXT("native_result")));
+            if (Presence != TEXT("clear") && (!Requested || Requested->GetKind() != EUeAgentValueKind::Array))
+                return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_collection_invalid"),
+                    TEXT("The requested collection must be an array."), Field, Requested, TEXT("array")));
+            TArray<FUeAgentCanonicalValueRef> Items = Current.GetArrayItems();
+            if (Presence == TEXT("clear"))
+            {
+                Items.Reset();
+            }
+            else if (Presence == TEXT("replace"))
+            {
+                Items = Requested->GetArrayItems();
+            }
+            else if (Presence == TEXT("remove"))
+            {
+                TSet<FString> Removed;
+                for (int32 Index = 0; Index < Requested->GetArrayItems().Num(); ++Index)
+                {
+                    const auto& Item = Requested->GetArrayItems()[Index];
+                    const FString ItemPath = Field + TEXT("/") + FString::FromInt(Index);
+                    FString Identity;
+                    if (!TryReadCollectionIdentity(*Item, IdentityField, Identity, ItemPath, OutError)) return false;
+                    if (Removed.Contains(Identity))
+                        return Fail(OutError, JsonFailure(TEXT("asset_data_core_expected_collection_identity_duplicate"),
+                            TEXT("The removal list repeats the same collection identity."),
+                            IdentityField.IsEmpty() ? ItemPath : ChildPath(ItemPath, IdentityField),
+                            MakeShared<FJsonValueString>(Identity), MakeShared<FJsonValueString>(TEXT("unique removal identity"))));
+                    Removed.Add(Identity);
+                }
+                Items.RemoveAll([&Removed, &IdentityField](const FUeAgentCanonicalValueRef& Item)
+                {
+                    const auto* Identity = FindCollectionIdentity(*Item, IdentityField);
+                    return Identity && Identity->GetKind() == EUeAgentValueKind::String && Removed.Contains(Identity->GetText());
+                });
+            }
+            else if (Presence == TEXT("set"))
+            {
+                for (int32 RequestedIndex = 0; RequestedIndex < Requested->GetArrayItems().Num(); ++RequestedIndex)
+                {
+                    const auto& RequestedItem = Requested->GetArrayItems()[RequestedIndex];
+                    FString RequestedIdentity;
+                    if (!TryReadCollectionIdentity(*RequestedItem, IdentityField, RequestedIdentity,
+                        Field + TEXT("/") + FString::FromInt(RequestedIndex), OutError)) return false;
+                    const int32 Index = Items.IndexOfByPredicate([&RequestedIdentity, &IdentityField](const FUeAgentCanonicalValueRef& Existing)
+                    {
+                        const auto* Identity = FindCollectionIdentity(*Existing, IdentityField);
+                        return Identity && Identity->GetKind() == EUeAgentValueKind::String && Identity->GetText() == RequestedIdentity;
+                    });
+                    if (Index == INDEX_NONE) Items.Add(RequestedItem);
+                    else Items[Index] = RequestedItem;
+                }
+            }
+            else
+            {
+                return Fail(OutError, JsonFailure(TEXT("asset_data_core_expected_collection_presence_invalid"),
+                    TEXT("The collection presence is not supported."), Field,
+                    MakeShared<FJsonValueString>(Presence), MakeShared<FJsonValueString>(TEXT("clear, replace, remove, set"))));
+            }
+            return TryBuildArrayProjectionValue(Items, Resources, OutValue, OutError, Field);
+        }
 
 		bool TryNormalizeCoreAudioCurveValue(
 			IUeAgentAssetDataSimpleEffectAssetResolver& Resolver,
@@ -4830,7 +4486,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				&& FieldId == TEXT("settings"))
 			{
 				FSubmixEffectSubmixEQSettings Settings;
-				return TryParseEqSettings(Requested, Settings)
+				return TryParseEqSettings(Requested, Settings, FieldId, OutError)
 					&& TryBuildEqSettingsProjection(
 						Settings,
 						Resources,
@@ -4843,7 +4499,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FSoundAttenuationSettings Settings;
 				return TryParseAttenuationSettings(
 						Requested,
-						Settings)
+						Settings, FieldId, OutError)
 					&& TryBuildAttenuationProjection(
 						Settings,
 						Resources,
@@ -4858,7 +4514,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						GetDefault<USoundClass>()->Properties;
 					return TryParseSoundClassProperties(
 							Requested,
-							Properties)
+							Properties, FieldId, OutError)
 						&& TryBuildSoundClassPropertiesProjection(
 							Properties,
 							Resources,
@@ -4873,7 +4529,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							Resolver,
 							Requested,
 							Resolved,
-							OutError))
+							OutError, FieldId))
 					{
 						return false;
 					}
@@ -4885,7 +4541,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Objects,
 						Resources,
 						OutValue,
-						OutError);
+						OutError, FieldId);
 				}
 			}
 			if (Kind == ECoreAssetKind::SoundConcurrency
@@ -4894,7 +4550,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FSoundConcurrencySettings Settings;
 				return TryParseConcurrencySettings(
 						Requested,
-						Settings)
+						Settings, FieldId, OutError)
 					&& TryBuildConcurrencyProjection(
 						Settings,
 						Resources,
@@ -4912,7 +4568,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							Requested,
 							Modifiers,
 							Pins,
-							OutError)
+							OutError, FieldId)
 						&& TryBuildSoundMixModifiersProjection(
 							Modifiers,
 							Resources,
@@ -4926,12 +4582,12 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							Requested,
 							Delay,
 							0.0,
-							1000000.0)
+							1000000.0, FieldId, OutError)
 						&& TryBuildDecimalProjectionValue(
 							Delay,
 							Resources,
 							OutValue,
-							OutError);
+							OutError, FieldId);
 				}
 			}
 			if (Kind == ECoreAssetKind::SoundSubmix)
@@ -4943,13 +4599,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							Resolver,
 							Requested,
 							Parent,
-							OutError)
+							OutError, FieldId)
 						&& TryBuildObjectReferenceProjection(
 							Parent,
 							false,
 							Resources,
 							OutValue,
-							OutError);
+							OutError, FieldId);
 				}
 				if (FieldId == TEXT("effect_chain"))
 				{
@@ -4959,7 +4615,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							Resolver,
 							Requested,
 							Resolved,
-							OutError))
+							OutError, FieldId))
 					{
 						return false;
 					}
@@ -4971,29 +4627,30 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Objects,
 						Resources,
 						OutValue,
-						OutError);
+						OutError, FieldId);
 				}
 			}
 			if (Kind == ECoreAssetKind::Curve
 				&& FieldId == TEXT("keys"))
 			{
 				TArray<TArray<FRichCurveKey>> Channels;
-				return CurveDimension >= 1
-					&& CurveDimension <= 4
-					&& TryParseCurveKeys(
+				if (CurveDimension < 1 || CurveDimension > 4)
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_curve_dimension_invalid"),
+                        TEXT("The captured curve dimension is outside the supported range."), TEXT("curve_dimension"),
+                        MakeShared<FJsonValueNumber>(CurveDimension), MakeShared<FJsonValueString>(TEXT("integer from 1 to 4"))));
+                return TryParseCurveKeys(
 						Requested,
 						CurveDimension,
-						Channels)
+						Channels, FieldId, OutError)
 					&& TryBuildCurveChannelsProjection(
 						Channels,
 						Resources,
 						OutValue,
 						OutError);
 			}
-			return Fail(
-				OutError,
-				TEXT("asset_data_core_expected_field_invalid"),
-				FieldId);
+			return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_field_invalid"),
+                TEXT("The requested field is not supported by this audio or curve mechanic."), FieldId,
+                &Requested, TEXT("supported field for the selected mechanic")));
 		}
 
 		bool TryBuildExpectedCoreAudioCurveFields(
@@ -5012,23 +4669,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FindObjectField(
 					ProposedAfter,
 					TEXT("typed_changes"));
-			if (CurrentFields.GetKind()
-					!= EUeAgentValueKind::Object
-				|| DefaultFields.GetKind()
-					!= EUeAgentValueKind::Object
-				|| ProjectionContext.GetKind()
-					!= EUeAgentValueKind::Object
-				|| !TypedChanges
-				|| TypedChanges->GetKind()
-					!= EUeAgentValueKind::Array
-				|| TypedChanges->GetArrayItems().Num()
-					!= CurrentFields.GetObjectItems().Num())
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_core_expected_state_invalid"));
-			}
+            if (!TryRequireExpectedState(CurrentFields, DefaultFields, ProjectionContext, TypedChanges, OutError)) return false;
 			TMap<FString, const FUeAgentCanonicalValue*> Changes;
 			for (const FUeAgentCanonicalValueRef& ChangeRef
 				: TypedChanges->GetArrayItems())
@@ -5038,15 +4679,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				const FUeAgentCanonicalValue* Field =
 					FindObjectField(Change, TEXT("field_id"));
 				FString FieldId;
-				if (!Field
-					|| !TryReadString(*Field, FieldId)
-					|| Changes.Contains(FieldId))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_core_expected_change_invalid"));
-				}
+                const FString ChangePath = TEXT("typed_changes/") + FString::FromInt(Changes.Num()) + TEXT("/field_id");
+                if (!TryReadRequiredString(Field, FieldId, ChangePath, OutError)) return false;
+                if (Changes.Contains(FieldId))
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_change_duplicate"),
+                        TEXT("More than one change addresses the same field."), ChangePath, Field, TEXT("unique field_id")));
 				Changes.Add(FieldId, &Change);
 			}
 			TArray<TPair<FString, FUeAgentCanonicalValueRef>>
@@ -5071,20 +4708,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					FindCoreAudioCurveContextTag(
 						Kind,
 						Current.Key);
-				if (!ChangePtr
-					|| !DefaultValueRef
-					|| !ContextValue
-					|| !ExpectedContextTag
-					|| !TryReadString(
-						*ContextValue,
-						ContextText))
-				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_core_expected_context_invalid"),
-						Current.Key);
-				}
+                if (!ChangePtr) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_change_missing"),
+                    TEXT("The selected field has no typed change."), Current.Key, nullptr, TEXT("field change")));
+                if (!DefaultValueRef) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_default_missing"),
+                    TEXT("The selected field has no captured default value."), ChildPath(TEXT("default_fields"), Current.Key), nullptr, TEXT("captured default"), TEXT("native_result")));
+                if (!ContextValue) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_context_missing"),
+                    TEXT("The selected field has no projection context."), ChildPath(TEXT("projection_context"), Current.Key), nullptr, TEXT("context string"), TEXT("native_result")));
+                if (!ExpectedContextTag) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_field_unsupported"),
+                    TEXT("The selected field is not supported by this audio or curve mechanic."), Current.Key, &Current.Value.Get(), TEXT("supported audio or curve field"), TEXT("native_result")));
+                if (!TryReadRequiredString(ContextValue, ContextText, ChildPath(TEXT("projection_context"), Current.Key), OutError, TEXT("native_result"))) return false;
 				int32 CurveDimension = 0;
 				if (Kind == ECoreAssetKind::Curve)
 				{
@@ -5092,7 +4724,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						FString(ExpectedContextTag) + TEXT(":");
 					if (!ContextText.StartsWith(Prefix))
 					{
-						return false;
+                        return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_curve_context_invalid"),
+                            TEXT("The captured curve context has an unexpected prefix."), ChildPath(TEXT("projection_context"), Current.Key), ContextValue, Prefix + TEXT("dimension"), TEXT("native_result")));
 					}
 					CurveDimension =
 						FCString::Atoi(
@@ -5100,16 +4733,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 								Prefix.Len()));
 					if (CurveDimension < 1 || CurveDimension > 4)
 					{
-						return false;
+                        return Fail(OutError, JsonFailure(TEXT("asset_data_core_expected_curve_dimension_invalid"),
+                            TEXT("The captured curve dimension is outside the supported range."), ChildPath(TEXT("projection_context"), Current.Key),
+                            MakeShared<FJsonValueNumber>(CurveDimension), MakeShared<FJsonValueString>(TEXT("integer from 1 to 4")), TEXT("native_result")));
 					}
 				}
 				else if (ContextText != ExpectedContextTag)
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_core_expected_context_invalid"),
-						Current.Key);
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_context_invalid"),
+                        TEXT("The captured context tag does not match the field mechanic."), ChildPath(TEXT("projection_context"), Current.Key), ContextValue, ExpectedContextTag, TEXT("native_result")));
 				}
 				const FUeAgentCanonicalValue& Change =
 					**ChangePtr;
@@ -5118,13 +4750,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Change,
 						TEXT("presence"));
 				FString Presence;
-				if (!PresenceValue
-					|| !TryReadString(
-						*PresenceValue,
-						Presence))
-				{
-					return false;
-				}
+                if (!TryReadRequiredString(PresenceValue, Presence, ChildPath(Current.Key, TEXT("presence")), OutError)) return false;
 				const bool bCollection =
 					(Kind == ECoreAssetKind::SoundClass
 							&& Current.Key
@@ -5149,7 +4775,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 										: FString(),
 								Resources,
 								Empty,
-								OutError))
+								OutError, Current.Key))
 						{
 							return false;
 						}
@@ -5165,7 +4791,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						if (!TryBuildNullProjectionValue(
 								Resources,
 								NullValue,
-								OutError))
+								OutError, Current.Key))
 						{
 							return false;
 						}
@@ -5189,7 +4815,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					if (!TryBuildNullProjectionValue(
 							Resources,
 							NullValue,
-							OutError))
+							OutError, Current.Key))
 					{
 						return false;
 					}
@@ -5207,8 +4833,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							TEXT("canonical_value"))
 						: nullptr;
 				FUeAgentCanonicalValuePtr Normalized;
-				if (!Requested
-					|| !TryNormalizeCoreAudioCurveValue(
+                if (!Requested) return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_value_missing"),
+                    TEXT("The field change requires a canonical value."), Current.Key, nullptr, TEXT("present value")));
+                if (!TryNormalizeCoreAudioCurveValue(
 						Resolver,
 						Kind,
 						Current.Key,
@@ -5232,7 +4859,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 								: FString(),
 							Resources,
 							Applied,
-							OutError))
+							OutError, Current.Key))
 					{
 						return false;
 					}
@@ -5245,7 +4872,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					if (Presence != TEXT("set")
 						&& Presence != TEXT("replace"))
 					{
-						return false;
+                        return Fail(OutError, ValueFailure(TEXT("asset_data_core_expected_presence_invalid"),
+                            TEXT("This scalar field does not support the requested presence."), ChildPath(Current.Key, TEXT("presence")), PresenceValue, TEXT("set or replace")));
 					}
 					ExpectedItems.Emplace(
 						Current.Key,
@@ -5256,7 +4884,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				MoveTemp(ExpectedItems),
 				Resources,
 				OutExpectedFields,
-				OutError);
+				OutError, TEXT("expected_fields"));
 		}
 	}
 
@@ -5357,22 +4985,18 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		FExecutionMutationError& OutError)
 	{
 		OutState.Data.Reset();
+        ON_SCOPE_EXIT { if (!OutError.IsEmpty() && OutError.TargetPath.IsEmpty() && Target) OutError.TargetPath = Target->GetPathName(); };
 		const ECoreAssetKind* Kind =
 			FindCoreAssetKind(NativeMechanicId);
-		if (!Kind)
-		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_native_profile_unsupported"),
-				NativeMechanicId);
-		}
-		if (!Target || Changes.IsEmpty())
-		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_core_asset_changes_missing"),
-				NativeMechanicId);
-		}
+        if (!Kind)
+            return Fail(OutError, JsonFailure(TEXT("asset_data_native_profile_unsupported"),
+                TEXT("The native mechanic is not a supported core asset mechanic."), TEXT("native_mechanic_id"),
+                MakeShared<FJsonValueString>(NativeMechanicId), MakeShared<FJsonValueString>(TEXT("registered core asset mechanic"))));
+        if (!Target)
+            return Fail(OutError, NativeFailure(TEXT("asset_data_core_target_missing"),
+                TEXT("Preparing the core asset change requires a live target."), TEXT("target"),
+                MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("live asset"))));
+        if (Changes.IsEmpty()) return Fail(OutError, ChangeSetFailure(Changes, TEXT("at least one supported field change")));
 		const TSharedRef<FCoreAssetPreparedData, ESPMode::ThreadSafe>
 			Data =
 				MakeShared<
@@ -5386,12 +5010,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				Cast<USubmixEffectSubmixEQPreset>(Target);
 			const FCoreAssetChangeView* Settings =
 				FindChange(Changes, TEXT("settings"));
-			if (!Preset || !Settings || Changes.Num() != 1)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_audio_effect_preset_invalid"));
-			}
+            if (!Preset) return Fail(OutError, NativeFailure(TEXT("asset_data_core_target_type_invalid"), TEXT("The target class is incompatible with this core asset mechanic."), TEXT("target"), ObjectClassValue(Target), MakeShared<FJsonValueString>(USubmixEffectSubmixEQPreset::StaticClass()->GetPathName())));
+            if (!Settings) return Fail(OutError, ValueFailure(TEXT("asset_data_core_change_missing"), TEXT("The required field change is missing."), TEXT("settings"), nullptr, TEXT("field change")));
+            if (Changes.Num() != 1) return Fail(OutError, ChangeSetFailure(Changes, TEXT("exactly one settings change")));
 			Data->OriginalEqSettings = Preset->Settings;
 			if (Settings->Presence == TEXT("clear"))
 			{
@@ -5400,17 +5021,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						->Settings;
 			}
 			else if (
-				Settings->Presence != TEXT("set")
-				|| !Settings->CanonicalValue
+				!TryRequirePresence(*Settings, {TEXT("set")}, OutError)
+				|| !TryRequireChangeValue(*Settings, OutError)
 				|| !TryParseEqSettings(
 					*Settings->CanonicalValue,
-					Data->NewEqSettings))
+					Data->NewEqSettings, Settings->FieldId, OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_audio_effect_preset_"
-						"settings_invalid"));
+				return false;
 			}
 		}
 		else if (Data->Kind == ECoreAssetKind::SoundAttenuation)
@@ -5419,12 +5036,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				Cast<USoundAttenuation>(Target);
 			const FCoreAssetChangeView* Settings =
 				FindChange(Changes, TEXT("attenuation"));
-			if (!Attenuation || !Settings || Changes.Num() != 1)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_sound_attenuation_invalid"));
-			}
+            if (!Attenuation) return Fail(OutError, NativeFailure(TEXT("asset_data_core_target_type_invalid"), TEXT("The target class is incompatible with this core asset mechanic."), TEXT("target"), ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundAttenuation::StaticClass()->GetPathName())));
+            if (!Settings) return Fail(OutError, ValueFailure(TEXT("asset_data_core_change_missing"), TEXT("The required field change is missing."), TEXT("attenuation"), nullptr, TEXT("field change")));
+            if (Changes.Num() != 1) return Fail(OutError, ChangeSetFailure(Changes, TEXT("exactly one attenuation change")));
 			Data->OriginalAttenuation = Attenuation->Attenuation;
 			Data->NewAttenuation = Data->OriginalAttenuation;
 			if (Settings->Presence == TEXT("clear"))
@@ -5433,28 +5047,20 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					GetDefault<USoundAttenuation>()->Attenuation;
 			}
 			else if (
-				Settings->Presence != TEXT("set")
-				|| !Settings->CanonicalValue
+				!TryRequirePresence(*Settings, {TEXT("set")}, OutError)
+				|| !TryRequireChangeValue(*Settings, OutError)
 				|| !TryParseAttenuationSettings(
 					*Settings->CanonicalValue,
-					Data->NewAttenuation))
+					Data->NewAttenuation, Settings->FieldId, OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_sound_attenuation_"
-						"settings_invalid"));
+				return false;
 			}
 		}
 		else if (Data->Kind == ECoreAssetKind::SoundClass)
 		{
 			USoundClass* SoundClass = Cast<USoundClass>(Target);
-			if (!SoundClass || Changes.Num() > 2)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_sound_class_invalid"));
-			}
+            if (!SoundClass) return Fail(OutError, NativeFailure(TEXT("asset_data_core_target_type_invalid"), TEXT("The target class is incompatible with this core asset mechanic."), TEXT("target"), ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundClass::StaticClass()->GetPathName())));
+            if (Changes.Num() > 2) return Fail(OutError, ChangeSetFailure(Changes, TEXT("at most 2 field changes")));
 			Data->OriginalSoundClassProperties =
 				SoundClass->Properties;
 			Data->NewSoundClassProperties =
@@ -5482,17 +5088,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Default.bIsMusic;
 				}
 				else if (
-					Properties->Presence != TEXT("set")
-					|| !Properties->CanonicalValue
+					!TryRequirePresence(*Properties, {TEXT("set")}, OutError)
+					|| !TryRequireChangeValue(*Properties, OutError)
 					|| !TryParseSoundClassProperties(
 						*Properties->CanonicalValue,
-						*Data->NewSoundClassProperties))
+						*Data->NewSoundClassProperties, Properties->FieldId, OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_sound_class_"
-							"properties_invalid"));
+					return false;
 				}
 			}
 			if (const FCoreAssetChangeView* Children =
@@ -5501,27 +5103,24 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				Data->bChangeSoundClassChildren = true;
 				TArray<USoundClass*> Requested;
 				if (Children->Presence != TEXT("clear")
-					&& (!Children->CanonicalValue
+					&& (!TryRequireChangeValue(*Children, OutError)
 						|| !TryResolveUniqueArray(
 							Resolver,
 							*Children->CanonicalValue,
 							Requested,
-							OutError)))
+							OutError, Children->FieldId)))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_sound_class_"
-							"children_invalid"));
+					return false;
 				}
 				TArray<USoundClass*> NewChildren;
 				for (const TWeakObjectPtr<USoundClass>& Child
 					: Data->NewSoundClassChildren)
 				{
-					if (!Child.IsValid())
-					{
-						return false;
-					}
+                    if (!Child.IsValid())
+                        return Fail(OutError, NativeFailure(TEXT("asset_data_sound_class_child_unavailable"),
+                            TEXT("A captured sound class child is no longer available."),
+                            TEXT("child_classes/") + FString::FromInt(NewChildren.Num()),
+                            MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("live SoundClass"))));
 					NewChildren.Add(Child.Get());
 				}
 				if (Children->Presence == TEXT("clear"))
@@ -5547,20 +5146,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						NewChildren.AddUnique(Child);
 					}
 				}
-				else
-				{
-					return false;
-				}
+                else
+                {
+                    return TryRequirePresence(*Children, {TEXT("clear"), TEXT("replace"), TEXT("remove"), TEXT("set")}, OutError);
+                }
 				for (USoundClass* Child : NewChildren)
 				{
 					if (!Child
 						|| Child == SoundClass
 						|| Child->RecurseCheckChild(SoundClass))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"asset_data_sound_class_cycle"));
+                        return Fail(OutError, NativeFailure(TEXT("asset_data_sound_class_cycle"),
+                            !Child ? TEXT("The resulting child list contains an unavailable sound class.")
+                                : Child == SoundClass ? TEXT("A sound class cannot be its own child.")
+                                : TEXT("The child relationship would create a sound class cycle."),
+                            TEXT("child_classes"), Child ? TSharedPtr<FJsonValue>(MakeShared<FJsonValueString>(Child->GetPathName())) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueNull>()),
+                            MakeShared<FJsonValueString>(TEXT("live child that is neither the target nor an ancestor of it"))));
 					}
 					PinUnique(Data->Pins, Child);
 				}
@@ -5573,7 +5174,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			if (!Data->bChangeSoundClassProperties
 				&& !Data->bChangeSoundClassChildren)
 			{
-				return false;
+				return Fail(OutError, ChangeSetFailure(Changes, TEXT("properties or child_classes")));
 			}
 			CaptureSoundClassNode(
 				Data->SoundClassSnapshots,
@@ -5611,12 +5212,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				Cast<USoundConcurrency>(Target);
 			const FCoreAssetChangeView* Settings =
 				FindChange(Changes, TEXT("concurrency"));
-			if (!Concurrency || !Settings || Changes.Num() != 1)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_sound_concurrency_invalid"));
-			}
+            if (!Concurrency) return Fail(OutError, NativeFailure(TEXT("asset_data_core_target_type_invalid"), TEXT("The target class is incompatible with this core asset mechanic."), TEXT("target"), ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundConcurrency::StaticClass()->GetPathName())));
+            if (!Settings) return Fail(OutError, ValueFailure(TEXT("asset_data_core_change_missing"), TEXT("The required field change is missing."), TEXT("concurrency"), nullptr, TEXT("field change")));
+            if (Changes.Num() != 1) return Fail(OutError, ChangeSetFailure(Changes, TEXT("exactly one concurrency change")));
 			Data->OriginalConcurrency = Concurrency->Concurrency;
 			Data->NewConcurrency = Data->OriginalConcurrency;
 			if (Settings->Presence == TEXT("clear"))
@@ -5625,28 +5223,20 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					GetDefault<USoundConcurrency>()->Concurrency;
 			}
 			else if (
-				Settings->Presence != TEXT("set")
-				|| !Settings->CanonicalValue
+				!TryRequirePresence(*Settings, {TEXT("set")}, OutError)
+				|| !TryRequireChangeValue(*Settings, OutError)
 				|| !TryParseConcurrencySettings(
 					*Settings->CanonicalValue,
-					Data->NewConcurrency))
+					Data->NewConcurrency, Settings->FieldId, OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_sound_concurrency_"
-						"settings_invalid"));
+				return false;
 			}
 		}
 		else if (Data->Kind == ECoreAssetKind::SoundMix)
 		{
 			USoundMix* SoundMix = Cast<USoundMix>(Target);
-			if (!SoundMix || Changes.Num() > 2)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_sound_mix_invalid"));
-			}
+            if (!SoundMix) return Fail(OutError, NativeFailure(TEXT("asset_data_core_target_type_invalid"), TEXT("The target class is incompatible with this core asset mechanic."), TEXT("target"), ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundMix::StaticClass()->GetPathName())));
+            if (Changes.Num() > 2) return Fail(OutError, ChangeSetFailure(Changes, TEXT("at most 2 field changes")));
 			Data->OriginalSoundMixModifiers =
 				SoundMix->SoundClassEffects;
 			Data->NewSoundMixModifiers =
@@ -5661,30 +5251,22 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				Data->bChangeSoundMixModifiers = true;
 				TArray<FSoundClassAdjuster> Requested;
 				if (Modifiers->Presence != TEXT("clear")
-					&& (!Modifiers->CanonicalValue
+					&& (!TryRequireChangeValue(*Modifiers, OutError)
 						|| !TryParseSoundMixModifiers(
 							Resolver,
 							*Modifiers->CanonicalValue,
 							Requested,
 							Data->Pins,
-							OutError)))
+							OutError, Modifiers->FieldId)))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_sound_mix_"
-							"modifiers_invalid"));
+					return false;
 				}
 				if (!TryApplyCollectionPresence(
 						Modifiers->Presence,
 						Requested,
-						Data->NewSoundMixModifiers))
+						Data->NewSoundMixModifiers, Modifiers->FieldId, OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_sound_mix_"
-							"modifier_presence_invalid"));
+					return false;
 				}
 			}
 			if (const FCoreAssetChangeView* Delay =
@@ -5697,36 +5279,28 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						GetDefault<USoundMix>()->InitialDelay;
 				}
 				else if (
-					Delay->Presence != TEXT("set")
-					|| !Delay->CanonicalValue
+					!TryRequirePresence(*Delay, {TEXT("set")}, OutError)
+					|| !TryRequireChangeValue(*Delay, OutError)
 					|| !TryReadFloat(
 						*Delay->CanonicalValue,
 						Data->NewSoundMixInitialDelay,
 						0.0,
-						1000000.0))
+						1000000.0, Delay->FieldId, OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_sound_mix_"
-							"initial_delay_invalid"));
+					return false;
 				}
 			}
 			if (!Data->bChangeSoundMixModifiers
 				&& !Data->bChangeSoundMixInitialDelay)
 			{
-				return false;
+				return Fail(OutError, ChangeSetFailure(Changes, TEXT("modifiers or initial_delay")));
 			}
 		}
 		else if (Data->Kind == ECoreAssetKind::SoundSubmix)
 		{
 			USoundSubmix* Submix = Cast<USoundSubmix>(Target);
-			if (!Submix || Changes.Num() > 2)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_sound_submix_invalid"));
-			}
+            if (!Submix) return Fail(OutError, NativeFailure(TEXT("asset_data_core_target_type_invalid"), TEXT("The target class is incompatible with this core asset mechanic."), TEXT("target"), ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundSubmix::StaticClass()->GetPathName())));
+            if (Changes.Num() > 2) return Fail(OutError, ChangeSetFailure(Changes, TEXT("at most 2 field changes")));
 			Data->NewSoundSubmixParent = Submix->ParentSubmix;
 			for (USoundEffectSubmixPreset* Effect
 				: Submix->SubmixEffectChain)
@@ -5742,30 +5316,26 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				USoundSubmixBase* NewParent = nullptr;
 				if (Parent->Presence == TEXT("set"))
 				{
-					if (!Parent->CanonicalValue
+					if (!TryRequireChangeValue(*Parent, OutError)
 						|| !TryResolveObject(
 							Resolver,
 							*Parent->CanonicalValue,
 							NewParent,
-							OutError))
+							OutError, Parent->FieldId))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"asset_data_sound_submix_"
-								"parent_invalid"));
+						return false;
 					}
 				}
-				else if (Parent->Presence != TEXT("null")
-					&& Parent->Presence != TEXT("clear"))
-				{
-					return false;
-				}
+                else if (!TryRequirePresence(*Parent, {TEXT("null"), TEXT("clear")}, OutError))
+                {
+                    return false;
+                }
 				if (WouldCreateSubmixCycle(Submix, NewParent))
 				{
-					return Fail(
-						OutError,
-						TEXT("asset_data_sound_submix_cycle"));
+                    return Fail(OutError, JsonFailure(TEXT("asset_data_sound_submix_cycle"),
+                        TEXT("The requested parent relationship would create a sound submix cycle."), Parent->FieldId,
+                        MakeShared<FJsonValueString>(NewParent->GetPathName()),
+                        MakeShared<FJsonValueString>(TEXT("parent outside the target submix descendant chain"))));
 				}
 				Data->NewSoundSubmixParent = NewParent;
 				PinUnique(Data->Pins, NewParent);
@@ -5776,27 +5346,24 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				Data->bChangeSoundSubmixEffects = true;
 				TArray<USoundEffectSubmixPreset*> Requested;
 				if (Effects->Presence != TEXT("clear")
-					&& (!Effects->CanonicalValue
+					&& (!TryRequireChangeValue(*Effects, OutError)
 						|| !TryResolveUniqueArray(
 							Resolver,
 							*Effects->CanonicalValue,
 							Requested,
-							OutError)))
+							OutError, Effects->FieldId)))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_sound_submix_"
-							"effect_chain_invalid"));
+					return false;
 				}
 				TArray<USoundEffectSubmixPreset*> NewEffects;
 				for (const TWeakObjectPtr<USoundEffectSubmixPreset>&
 					Effect : Data->NewSoundSubmixEffects)
 				{
-					if (!Effect.IsValid())
-					{
-						return false;
-					}
+                    if (!Effect.IsValid())
+                        return Fail(OutError, NativeFailure(TEXT("asset_data_sound_submix_effect_unavailable"),
+                            TEXT("A captured sound submix effect is no longer available."),
+                            TEXT("effect_chain/") + FString::FromInt(NewEffects.Num()),
+                            MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("live SoundEffectSubmixPreset"))));
 					NewEffects.Add(Effect.Get());
 				}
 				if (Effects->Presence == TEXT("clear"))
@@ -5823,10 +5390,10 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						NewEffects.AddUnique(Effect);
 					}
 				}
-				else
-				{
-					return false;
-				}
+                else
+                {
+                    return TryRequirePresence(*Effects, {TEXT("clear"), TEXT("replace"), TEXT("remove"), TEXT("set")}, OutError);
+                }
 				Data->NewSoundSubmixEffects.Reset();
 				for (USoundEffectSubmixPreset* Effect : NewEffects)
 				{
@@ -5837,7 +5404,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			if (!Data->bChangeSoundSubmixParent
 				&& !Data->bChangeSoundSubmixEffects)
 			{
-				return false;
+				return Fail(OutError, ChangeSetFailure(Changes, TEXT("parent or effect_chain")));
 			}
 			CaptureSoundSubmixNode(
 				Data->SoundSubmixSnapshots,
@@ -5857,52 +5424,37 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			const FCoreAssetChangeView* Keys =
 				FindChange(Changes, TEXT("keys"));
 			const int32 Dimension = GetCurveDimension(Target);
-			if (!Keys
-				|| Changes.Num() != 1
-				|| Keys->Presence != TEXT("replace")
-				|| !Keys->CanonicalValue
-				|| Dimension == 0)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_curve_invalid"));
-			}
+            if (!Keys) return Fail(OutError, ValueFailure(TEXT("asset_data_curve_keys_missing"), TEXT("A curve key change is required."), TEXT("keys"), nullptr, TEXT("field change")));
+            if (Changes.Num() != 1) return Fail(OutError, ChangeSetFailure(Changes, TEXT("exactly one keys change")));
+            if (!TryRequirePresence(*Keys, {TEXT("replace")}, OutError) || !TryRequireChangeValue(*Keys, OutError)) return false;
+            if (Dimension == 0) return Fail(OutError, NativeFailure(TEXT("asset_data_curve_dimension_invalid"),
+                TEXT("The target does not provide a supported curve dimension."), TEXT("target"),
+                ObjectClassValue(Target), MakeShared<FJsonValueString>(TEXT("CurveFloat, CurveVector or CurveLinearColor"))));
 			Data->OriginalCurveChannels.SetNum(Dimension);
 			for (int32 Index = 0; Index < Dimension; ++Index)
 			{
 				FRichCurve* Curve = GetCurveChannel(Target, Index);
-				if (!Curve)
-				{
-					return false;
-				}
+                if (!Curve) return Fail(OutError, NativeFailure(TEXT("asset_data_curve_channel_missing"),
+                    TEXT("The target curve channel is unavailable."), TEXT("channels/") + FString::FromInt(Index),
+                    MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("rich curve channel"))));
 				Data->OriginalCurveChannels[Index] =
 					Curve->GetCopyOfKeys();
 			}
 			if (!TryParseCurveKeys(
 					*Keys->CanonicalValue,
 					Dimension,
-					Data->NewCurveChannels))
+					Data->NewCurveChannels, Keys->FieldId, OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_curve_keys_invalid"));
+				return false;
 			}
 		}
 		else if (Data->Kind == ECoreAssetKind::DataObject)
 		{
 			const FCoreAssetChangeView* Fields =
 				FindChange(Changes, TEXT("registered_fields"));
-			if (!Fields || Changes.Num() != 1)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_registered_fields_invalid"));
-			}
-			if (Fields->Presence != TEXT("set")
-				&& Fields->Presence != TEXT("clear"))
-			{
-				return false;
-			}
+            if (!Fields) return Fail(OutError, ValueFailure(TEXT("asset_data_registered_fields_missing"), TEXT("The registered field change is missing."), TEXT("registered_fields"), nullptr, TEXT("field change")));
+            if (Changes.Num() != 1) return Fail(OutError, ChangeSetFailure(Changes, TEXT("exactly one registered_fields change")));
+            if (!TryRequirePresence(*Fields, {TEXT("set"), TEXT("clear")}, OutError)) return false;
 			if (!TryParseRegisteredFields(
 					Resolver,
 					Target,
@@ -5913,21 +5465,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Data->Pins,
 					OutError))
 			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_registered_fields_invalid"));
+				return false;
 			}
 		}
 		else if (Data->Kind == ECoreAssetKind::MediaSource)
 		{
 			UFileMediaSource* MediaSource =
 				Cast<UFileMediaSource>(Target);
-			if (!MediaSource || Changes.Num() > 2)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_media_source_invalid"));
-			}
+            if (!MediaSource) return Fail(OutError, NativeFailure(TEXT("asset_data_core_target_type_invalid"), TEXT("The target class is incompatible with this core asset mechanic."), TEXT("target"), ObjectClassValue(Target), MakeShared<FJsonValueString>(UFileMediaSource::StaticClass()->GetPathName())));
+            if (Changes.Num() > 2) return Fail(OutError, ChangeSetFailure(Changes, TEXT("at most 2 field changes")));
 			Data->OriginalMediaFilePath =
 				MediaSource->GetFilePath();
 			Data->NewMediaFilePath =
@@ -5945,16 +5491,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Data->NewMediaFilePath.Reset();
 				}
 				else if (
-					Uri->Presence != TEXT("set")
-					|| !Uri->CanonicalValue
+					!TryRequirePresence(*Uri, {TEXT("set")}, OutError)
+					|| !TryRequireChangeValue(*Uri, OutError)
 					|| !TryNormalizeFileUri(
 						*Uri->CanonicalValue,
-						Data->NewMediaFilePath))
+						Data->NewMediaFilePath, Uri->FieldId, OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_media_source_uri_invalid"));
+					return false;
 				}
 			}
 			if (const FCoreAssetChangeView* Options =
@@ -5968,47 +5511,35 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							->PrecacheFile;
 				}
 				else if (
-					(Options->Presence != TEXT("set")
-						&& Options->Presence != TEXT("replace"))
-					|| !Options->CanonicalValue
-					|| !HasExactObjectFields(
+					!TryRequirePresence(*Options, {TEXT("set"), TEXT("replace")}, OutError)
+					|| !TryRequireChangeValue(*Options, OutError)
+					|| !TryRequireObjectFields(
 						*Options->CanonicalValue,
-						{TEXT("precache_file")})
+						{TEXT("precache_file")}, Options->FieldId, OutError)
 					|| !TryReadBool(
 						*FindObjectField(
 							*Options->CanonicalValue,
 							TEXT("precache_file")),
-						Data->bNewMediaPrecache))
+						Data->bNewMediaPrecache, ChildPath(Options->FieldId, TEXT("precache_file")), OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_media_source_"
-							"options_invalid"));
+					return false;
 				}
 			}
 			if (!Data->bChangeMediaFilePath
 				&& !Data->bChangeMediaPrecache)
 			{
-				return false;
+				return Fail(OutError, ChangeSetFailure(Changes, TEXT("source_uri or options")));
 			}
 		}
 		else if (Data->Kind == ECoreAssetKind::RuntimeVirtualTexture)
 		{
 			URuntimeVirtualTexture* VirtualTexture =
 				Cast<URuntimeVirtualTexture>(Target);
-			if (!VirtualTexture || Changes.Num() > 3
-				|| !TryReadRvtProperties(
-					VirtualTexture,
-					Data->OriginalRvtTileCount,
-					Data->OriginalRvtMaterialType,
-					Data->bOriginalRvtCompression))
-			{
-				return Fail(
-					OutError,
-					TEXT(
-						"asset_data_runtime_virtual_texture_invalid"));
-			}
+            if (!VirtualTexture) return Fail(OutError, NativeFailure(TEXT("asset_data_core_target_type_invalid"),
+                TEXT("The target class is incompatible with the runtime virtual texture mechanic."), TEXT("target"),
+                ObjectClassValue(Target), MakeShared<FJsonValueString>(URuntimeVirtualTexture::StaticClass()->GetPathName())));
+            if (Changes.Num() > 3) return Fail(OutError, ChangeSetFailure(Changes, TEXT("at most three field changes")));
+            if (!TryReadRvtProperties(VirtualTexture, Data->OriginalRvtTileCount, Data->OriginalRvtMaterialType, Data->bOriginalRvtCompression, OutError)) return false;
 			Data->NewRvtTileCount = Data->OriginalRvtTileCount;
 			Data->NewRvtMaterialType =
 				Data->OriginalRvtMaterialType;
@@ -6019,8 +5550,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{
 				int32 DesiredSize = 0;
 				const int32 TileSize = VirtualTexture->GetTileSize();
-				if (Size->Presence != TEXT("set")
-					|| !Size->CanonicalValue
+				if (!TryRequirePresence(*Size, {TEXT("set")}, OutError)
+					|| !TryRequireChangeValue(*Size, OutError)
 					|| !TryReadInt32(
 						*Size->CanonicalValue,
 						DesiredSize,
@@ -6030,16 +5561,14 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 								<< URuntimeVirtualTexture::
 									GetMaxTileCountLog2(
 										VirtualTexture
-											->GetAdaptivePageTable())))
-					|| DesiredSize % TileSize != 0
+											->GetAdaptivePageTable())), Size->FieldId, OutError) ) return false;
+                if (DesiredSize % TileSize != 0
 					|| !FMath::IsPowerOfTwo(
 						DesiredSize / TileSize))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_runtime_virtual_texture_"
-							"size_invalid"));
+                    return Fail(OutError, ValueFailure(TEXT("asset_data_runtime_virtual_texture_size_invalid"),
+                        TEXT("The size must be the tile size multiplied by a power of two."), Size->FieldId,
+                        Size->CanonicalValue, FString::Printf(TEXT("%d * 2^n within the supported size range"), TileSize)));
 				}
 				Data->NewRvtTileCount =
 					FMath::FloorLog2(DesiredSize / TileSize);
@@ -6048,36 +5577,28 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				FindChange(Changes, TEXT("material_type")))
 			{
 				FString Name;
-				if (Material->Presence != TEXT("set")
-					|| !Material->CanonicalValue
+				if (!TryRequirePresence(*Material, {TEXT("set")}, OutError)
+					|| !TryRequireChangeValue(*Material, OutError)
 					|| !TryReadString(
 						*Material->CanonicalValue,
-						Name)
+						Name, Material->FieldId, OutError)
 					|| !TryParseRuntimeVirtualTextureMaterialType(
 						Name,
-						Data->NewRvtMaterialType))
+						Data->NewRvtMaterialType, Material->FieldId, OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_runtime_virtual_texture_"
-							"material_type_invalid"));
+					return false;
 				}
 			}
 			if (const FCoreAssetChangeView* Compression =
 				FindChange(Changes, TEXT("compression")))
 			{
-				if (Compression->Presence != TEXT("set")
-					|| !Compression->CanonicalValue
+				if (!TryRequirePresence(*Compression, {TEXT("set")}, OutError)
+					|| !TryRequireChangeValue(*Compression, OutError)
 					|| !TryReadBool(
 						*Compression->CanonicalValue,
-						Data->bNewRvtCompression))
+						Data->bNewRvtCompression, Compression->FieldId, OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_runtime_virtual_texture_"
-							"compression_invalid"));
+					return false;
 				}
 			}
 		}
@@ -6085,12 +5606,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		{
 			UStreamableSparseVolumeTexture* Sparse =
 				Cast<UStreamableSparseVolumeTexture>(Target);
-			if (!Sparse || Changes.Num() > 2)
-			{
-				return Fail(
-					OutError,
-					TEXT("asset_data_sparse_volume_texture_invalid"));
-			}
+            if (!Sparse) return Fail(OutError, NativeFailure(TEXT("asset_data_core_target_type_invalid"), TEXT("The target class is incompatible with this core asset mechanic."), TEXT("target"), ObjectClassValue(Target), MakeShared<FJsonValueString>(UStreamableSparseVolumeTexture::StaticClass()->GetPathName())));
+            if (Changes.Num() > 2) return Fail(OutError, ChangeSetFailure(Changes, TEXT("at most 2 field changes")));
 			Data->OriginalSparseAddressX = Sparse->AddressX;
 			Data->OriginalSparseAddressY = Sparse->AddressY;
 			Data->OriginalSparseAddressZ = Sparse->AddressZ;
@@ -6134,45 +5651,41 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					FString X;
 					FString Y;
 					FString Z;
-					if (Addressing->Presence != TEXT("set")
-						|| !Addressing->CanonicalValue
-						|| !HasExactObjectFields(
+					if (!TryRequirePresence(*Addressing, {TEXT("set")}, OutError)
+						|| !TryRequireChangeValue(*Addressing, OutError)
+						|| !TryRequireObjectFields(
 							*Addressing->CanonicalValue,
 							{
 								TEXT("x"),
 								TEXT("y"),
 								TEXT("z"),
-							})
+							}, Addressing->FieldId, OutError)
 						|| !TryReadString(
 							*FindObjectField(
 								*Addressing->CanonicalValue,
 								TEXT("x")),
-							X)
+							X, ChildPath(Addressing->FieldId, TEXT("x")), OutError)
 						|| !TryReadString(
 							*FindObjectField(
 								*Addressing->CanonicalValue,
 								TEXT("y")),
-							Y)
+							Y, ChildPath(Addressing->FieldId, TEXT("y")), OutError)
 						|| !TryReadString(
 							*FindObjectField(
 								*Addressing->CanonicalValue,
 								TEXT("z")),
-							Z)
+							Z, ChildPath(Addressing->FieldId, TEXT("z")), OutError)
 						|| !TryParseTextureAddress(
 							X,
-							Data->NewSparseAddressX)
+							Data->NewSparseAddressX, ChildPath(Addressing->FieldId, TEXT("x")), OutError)
 						|| !TryParseTextureAddress(
 							Y,
-							Data->NewSparseAddressY)
+							Data->NewSparseAddressY, ChildPath(Addressing->FieldId, TEXT("y")), OutError)
 						|| !TryParseTextureAddress(
 							Z,
-							Data->NewSparseAddressZ))
+							Data->NewSparseAddressZ, ChildPath(Addressing->FieldId, TEXT("z")), OutError))
 					{
-						return Fail(
-							OutError,
-							TEXT(
-								"asset_data_sparse_volume_texture_"
-								"addressing_invalid"));
+						return false;
 					}
 				}
 			}
@@ -6196,9 +5709,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						Default->PrefetchPercentageBias;
 				}
 				else if (
-					Streaming->Presence != TEXT("set")
-					|| !Streaming->CanonicalValue
-					|| !HasExactObjectFields(
+					!TryRequirePresence(*Streaming, {TEXT("set")}, OutError)
+					|| !TryRequireChangeValue(*Streaming, OutError)
+					|| !TryRequireObjectFields(
 						*Streaming->CanonicalValue,
 						{
 							TEXT("local_ddc_only"),
@@ -6206,60 +5719,55 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 							TEXT("prefetch_frames"),
 							TEXT("prefetch_percentage_step"),
 							TEXT("prefetch_percentage_bias"),
-						})
+						}, Streaming->FieldId, OutError)
 					|| !TryReadBool(
 						*FindObjectField(
 							*Streaming->CanonicalValue,
 							TEXT("local_ddc_only")),
-						Data->bNewSparseLocalDdcOnly)
+						Data->bNewSparseLocalDdcOnly, ChildPath(Streaming->FieldId, TEXT("local_ddc_only")), OutError)
 					|| !TryReadFloat(
 						*FindObjectField(
 							*Streaming->CanonicalValue,
 							TEXT("pool_size_factor")),
 						Data->NewSparsePoolSizeFactor,
 						1.0,
-						1000.0)
+						1000.0, ChildPath(Streaming->FieldId, TEXT("pool_size_factor")), OutError)
 					|| !TryReadInt32(
 						*FindObjectField(
 							*Streaming->CanonicalValue,
 							TEXT("prefetch_frames")),
 						Data->NewSparsePrefetchFrames,
 						0,
-						1024)
+						1024, ChildPath(Streaming->FieldId, TEXT("prefetch_frames")), OutError)
 					|| !TryReadFloat(
 						*FindObjectField(
 							*Streaming->CanonicalValue,
 							TEXT("prefetch_percentage_step")),
 						Data->NewSparsePrefetchPercentageStep,
 						0.0,
-						100.0)
+						100.0, ChildPath(Streaming->FieldId, TEXT("prefetch_percentage_step")), OutError)
 					|| !TryReadFloat(
 						*FindObjectField(
 							*Streaming->CanonicalValue,
 							TEXT("prefetch_percentage_bias")),
 						Data->NewSparsePrefetchPercentageBias,
 						0.0,
-						100.0))
+						100.0, ChildPath(Streaming->FieldId, TEXT("prefetch_percentage_bias")), OutError))
 				{
-					return Fail(
-						OutError,
-						TEXT(
-							"asset_data_sparse_volume_texture_"
-							"streaming_invalid"));
+					return false;
 				}
 			}
 			if (!Data->bChangeSparseAddressing
 				&& !Data->bChangeSparseStreaming)
 			{
-				return false;
+				return Fail(OutError, ChangeSetFailure(Changes, TEXT("addressing or streaming")));
 			}
 		}
 		else
 		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_core_asset_mechanic_invalid"),
-				NativeMechanicId);
+            return Fail(OutError, JsonFailure(TEXT("asset_data_core_asset_mechanic_invalid"),
+                TEXT("The registered mechanic has no core asset preparation implementation."), TEXT("native_mechanic_id"),
+                MakeShared<FJsonValueString>(NativeMechanicId), MakeShared<FJsonValueString>(TEXT("implemented core asset mechanic"))));
 		}
 		OutState.Data = Data;
 		return true;
@@ -6270,12 +5778,15 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		const FCoreAssetPreparedState& State,
 		FExecutionMutationError& OutError)
 	{
-		if (!Target || !State.Data.IsValid())
-		{
-			return Fail(
-				OutError,
-				TEXT("asset_data_core_asset_state_invalid"));
-		}
+        ON_SCOPE_EXIT
+        {
+            if (!OutError.Code.IsEmpty() && Target && OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target->GetPathName();
+        };
+        if (!Target || !State.Data.IsValid())
+            return Fail(OutError, NativeFailure(TEXT("asset_data_core_asset_state_invalid"),
+                !Target ? TEXT("The core asset apply target is no longer available.") : TEXT("The prepared core asset state is missing."),
+                !Target ? TEXT("target") : TEXT("prepared_state"), MakeShared<FJsonValueNull>(),
+                MakeShared<FJsonValueString>(!Target ? TEXT("available target asset") : TEXT("prepared state"))));
 		const FCoreAssetPreparedData& Data = *State.Data;
 		switch (Data.Kind)
 		{
@@ -6284,9 +5795,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				USubmixEffectSubmixEQPreset* Preset =
 					Cast<USubmixEffectSubmixEQPreset>(Target);
 				if (!Preset)
-				{
-					return false;
-				}
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_asset_target_type_invalid"),
+                        TEXT("The apply target does not have the prepared asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USubmixEffectSubmixEQPreset::StaticClass()->GetPathName())));
 				Preset->Modify();
 				Preset->Settings = Data.NewEqSettings;
 				Preset->SetSettings(Data.NewEqSettings);
@@ -6298,9 +5809,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				USoundAttenuation* Attenuation =
 					Cast<USoundAttenuation>(Target);
 				if (!Attenuation)
-				{
-					return false;
-				}
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_asset_target_type_invalid"),
+                        TEXT("The apply target does not have the prepared asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundAttenuation::StaticClass()->GetPathName())));
 				Attenuation->Modify();
 				Attenuation->Attenuation = Data.NewAttenuation;
 				Attenuation->PostEditChange();
@@ -6310,9 +5821,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{
 				USoundClass* SoundClass = Cast<USoundClass>(Target);
 				if (!SoundClass)
-				{
-					return false;
-				}
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_asset_target_type_invalid"),
+                        TEXT("The apply target does not have the prepared asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundClass::StaticClass()->GetPathName())));
 				SoundClass->Modify();
 				if (Data.bChangeSoundClassProperties)
 				{
@@ -6326,9 +5837,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						: Data.NewSoundClassChildren)
 					{
 						if (!Child.IsValid())
-						{
-							return false;
-						}
+                    {
+                        auto Error = NativeFailure(TEXT("asset_data_sound_class_child_unavailable"),
+                            TEXT("A prepared child SoundClass is no longer available."), TEXT("child_classes/") + FString::FromInt(NewChildren.Num()),
+                            MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(USoundClass::StaticClass()->GetPathName()));
+                        Error.MutationMayHaveStarted = true;
+                        return Fail(OutError, MoveTemp(Error));
+                    }
 						NewChildren.Add(Child.Get());
 					}
 					for (USoundClass* OldChild
@@ -6372,9 +5887,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				USoundConcurrency* Concurrency =
 					Cast<USoundConcurrency>(Target);
 				if (!Concurrency)
-				{
-					return false;
-				}
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_asset_target_type_invalid"),
+                        TEXT("The apply target does not have the prepared asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundConcurrency::StaticClass()->GetPathName())));
 				Concurrency->Modify();
 				Concurrency->Concurrency = Data.NewConcurrency;
 				Concurrency->PostEditChange();
@@ -6384,9 +5899,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{
 				USoundMix* SoundMix = Cast<USoundMix>(Target);
 				if (!SoundMix)
-				{
-					return false;
-				}
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_asset_target_type_invalid"),
+                        TEXT("The apply target does not have the prepared asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundMix::StaticClass()->GetPathName())));
 				SoundMix->Modify();
 				if (Data.bChangeSoundMixModifiers)
 				{
@@ -6405,9 +5920,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			{
 				USoundSubmix* Submix = Cast<USoundSubmix>(Target);
 				if (!Submix)
-				{
-					return false;
-				}
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_asset_target_type_invalid"),
+                        TEXT("The apply target does not have the prepared asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundSubmix::StaticClass()->GetPathName())));
 				Submix->Modify();
 				if (Data.bChangeSoundSubmixParent)
 				{
@@ -6424,9 +5939,13 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 						: Data.NewSoundSubmixEffects)
 					{
 						if (!Effect.IsValid())
-						{
-							return false;
-						}
+                    {
+                        auto Error = NativeFailure(TEXT("asset_data_sound_submix_effect_unavailable"),
+                            TEXT("A prepared submix effect is no longer available."), TEXT("effect_chain/") + FString::FromInt(Submix->SubmixEffectChain.Num()),
+                            MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(USoundEffectSubmixPreset::StaticClass()->GetPathName()));
+                        Error.MutationMayHaveStarted = true;
+                        return Fail(OutError, MoveTemp(Error));
+                    }
 						Submix->SubmixEffectChain.Add(Effect.Get());
 					}
 				}
@@ -6434,14 +5953,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				break;
 			}
 		case ECoreAssetKind::Curve:
-			return WriteCurveChannels(
-				Target,
-				Data.NewCurveChannels,
-				true)
-					? true
-					: Fail(
-						OutError,
-						TEXT("asset_data_curve_apply_failed"));
+            return WriteCurveChannels(Target, Data.NewCurveChannels, true, OutError);
 		case ECoreAssetKind::DataObject:
 			{
 				Target->Modify();
@@ -6458,9 +5970,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				UFileMediaSource* MediaSource =
 					Cast<UFileMediaSource>(Target);
 				if (!MediaSource)
-				{
-					return false;
-				}
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_asset_target_type_invalid"),
+                        TEXT("The apply target does not have the prepared asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(UFileMediaSource::StaticClass()->GetPathName())));
 				MediaSource->Modify();
 				if (Data.bChangeMediaFilePath)
 				{
@@ -6476,26 +5988,16 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				break;
 			}
 		case ECoreAssetKind::RuntimeVirtualTexture:
-			return TryWriteRvtProperties(
-				Cast<URuntimeVirtualTexture>(Target),
-				Data.NewRvtTileCount,
-				Data.NewRvtMaterialType,
-				Data.bNewRvtCompression,
-				true)
-					? true
-					: Fail(
-						OutError,
-						TEXT(
-							"asset_data_runtime_virtual_texture_"
-							"apply_failed"));
+            return TryWriteRvtProperties(Target, Data.NewRvtTileCount, Data.NewRvtMaterialType,
+                Data.bNewRvtCompression, true, OutError);
 		case ECoreAssetKind::SparseVolumeTexture:
 			{
 				UStreamableSparseVolumeTexture* Sparse =
 					Cast<UStreamableSparseVolumeTexture>(Target);
 				if (!Sparse)
-				{
-					return false;
-				}
+                    return Fail(OutError, NativeFailure(TEXT("asset_data_core_asset_target_type_invalid"),
+                        TEXT("The apply target does not have the prepared asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(UStreamableSparseVolumeTexture::StaticClass()->GetPathName())));
 				Sparse->Modify();
 				if (Data.bChangeSparseAddressing)
 				{
@@ -6525,11 +6027,18 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	bool TryRollbackCoreAssetUpdate(
 		UObject* Target,
-		const FCoreAssetPreparedState& State)
+		const FCoreAssetPreparedState& State,
+		FExecutionMutationError& OutError)
 	{
+        ON_SCOPE_EXIT { if (!OutError.IsEmpty() && Target && OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target->GetPathName(); };
 		if (!Target || !State.Data.IsValid())
 		{
-			return false;
+            OutError = NativeFailure(TEXT("asset_data_core_rollback_state_invalid"),
+                !Target ? TEXT("The asset rollback target is unavailable.") : TEXT("Asset rollback has no captured state."),
+                !Target ? TEXT("target") : TEXT("prepared_state"),
+                !Target ? ObjectClassValue(Target) : TSharedPtr<FJsonValue>(MakeShared<FJsonValueBoolean>(false)),
+                MakeShared<FJsonValueString>(!Target ? TEXT("live asset target") : TEXT("captured rollback state")));
+            return false;
 		}
 		const FCoreAssetPreparedData& Data = *State.Data;
 		bool bRestored = true;
@@ -6541,8 +6050,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Cast<USubmixEffectSubmixEQPreset>(Target);
 				if (!Preset)
 				{
-					return false;
-				}
+                    OutError = NativeFailure(TEXT("asset_data_core_rollback_target_invalid"),
+                        TEXT("The rollback target does not match the captured asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USubmixEffectSubmixEQPreset::StaticClass()->GetPathName()));
+                    return false;
+                }
 				Preset->Settings = Data.OriginalEqSettings;
 				Preset->SetSettings(Data.OriginalEqSettings);
 				Preset->PostEditChange();
@@ -6554,8 +6066,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Cast<USoundAttenuation>(Target);
 				if (!Attenuation)
 				{
-					return false;
-				}
+                    OutError = NativeFailure(TEXT("asset_data_core_rollback_target_invalid"),
+                        TEXT("The rollback target does not match the captured asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundAttenuation::StaticClass()->GetPathName()));
+                    return false;
+                }
 				Attenuation->Attenuation =
 					Data.OriginalAttenuation;
 				Attenuation->PostEditChange();
@@ -6566,28 +6081,43 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				USoundClass* SoundClass = Cast<USoundClass>(Target);
 				if (!SoundClass)
 				{
-					return false;
-				}
+                    OutError = NativeFailure(TEXT("asset_data_core_rollback_target_invalid"),
+                        TEXT("The rollback target does not match the captured asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundClass::StaticClass()->GetPathName()));
+                    return false;
+                }
 				SoundClass->Properties =
 					*Data.OriginalSoundClassProperties;
-				for (const FSoundClassNodeSnapshot& Snapshot
-					: Data.SoundClassSnapshots)
-				{
+                for (int32 NodeIndex = 0; NodeIndex < Data.SoundClassSnapshots.Num(); ++NodeIndex)
+                {
+                    const FSoundClassNodeSnapshot& Snapshot = Data.SoundClassSnapshots[NodeIndex];
 					USoundClass* Node = Snapshot.Node.Get();
 					if (!Node)
 					{
-						bRestored = false;
+						auto Error = NativeFailure(TEXT("asset_data_core_rollback_reference_expired"),
+                            TEXT("A captured SoundClass hierarchy node is no longer available."), TEXT("sound_class_nodes/") + FString::FromInt(NodeIndex),
+                            MakeShared<FJsonValueString>(TEXT("expired")), MakeShared<FJsonValueString>(USoundClass::StaticClass()->GetPathName()));
+                        Error.MutationMayHaveStarted = true;
+                        Error.TargetPath = Target->GetPathName();
+                        OutError.Append(Error);
+                        bRestored = false;
 						continue;
 					}
 					Node->ParentClass = Snapshot.Parent.Get();
 					Node->ChildClasses.Reset(
 						Snapshot.Children.Num());
-					for (const TWeakObjectPtr<USoundClass>& Child
-						: Snapshot.Children)
-					{
+                    for (int32 ChildIndex = 0; ChildIndex < Snapshot.Children.Num(); ++ChildIndex)
+                    {
+                        const TWeakObjectPtr<USoundClass>& Child = Snapshot.Children[ChildIndex];
 						if (!Child.IsValid())
 						{
-							bRestored = false;
+							auto Error = NativeFailure(TEXT("asset_data_core_rollback_reference_expired"),
+                            TEXT("A captured SoundClass child is no longer available."), TEXT("sound_class_nodes/") + FString::FromInt(NodeIndex) + TEXT("/children/") + FString::FromInt(ChildIndex),
+                            MakeShared<FJsonValueString>(TEXT("expired")), MakeShared<FJsonValueString>(USoundClass::StaticClass()->GetPathName()));
+                        Error.MutationMayHaveStarted = true;
+                        Error.TargetPath = Node->GetPathName();
+                        OutError.Append(Error);
+                        bRestored = false;
 							continue;
 						}
 						Node->ChildClasses.Add(Child.Get());
@@ -6603,8 +6133,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Cast<USoundConcurrency>(Target);
 				if (!Concurrency)
 				{
-					return false;
-				}
+                    OutError = NativeFailure(TEXT("asset_data_core_rollback_target_invalid"),
+                        TEXT("The rollback target does not match the captured asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundConcurrency::StaticClass()->GetPathName()));
+                    return false;
+                }
 				Concurrency->Concurrency =
 					Data.OriginalConcurrency;
 				Concurrency->PostEditChange();
@@ -6615,8 +6148,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				USoundMix* SoundMix = Cast<USoundMix>(Target);
 				if (!SoundMix)
 				{
-					return false;
-				}
+                    OutError = NativeFailure(TEXT("asset_data_core_rollback_target_invalid"),
+                        TEXT("The rollback target does not match the captured asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundMix::StaticClass()->GetPathName()));
+                    return false;
+                }
 				SoundMix->SoundClassEffects =
 					Data.OriginalSoundMixModifiers;
 				SoundMix->InitialDelay =
@@ -6629,38 +6165,58 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 				USoundSubmix* Submix = Cast<USoundSubmix>(Target);
 				if (!Submix)
 				{
-					return false;
-				}
+                    OutError = NativeFailure(TEXT("asset_data_core_rollback_target_invalid"),
+                        TEXT("The rollback target does not match the captured asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(USoundSubmix::StaticClass()->GetPathName()));
+                    return false;
+                }
 				Submix->SubmixEffectChain.Reset(
 					Data.OriginalSoundSubmixEffects.Num());
-				for (const TWeakObjectPtr<
-						USoundEffectSubmixPreset>& Effect
-					: Data.OriginalSoundSubmixEffects)
-				{
+                for (int32 EffectIndex = 0; EffectIndex < Data.OriginalSoundSubmixEffects.Num(); ++EffectIndex)
+                {
+                    const TWeakObjectPtr<USoundEffectSubmixPreset>& Effect = Data.OriginalSoundSubmixEffects[EffectIndex];
 					if (!Effect.IsValid())
 					{
-						bRestored = false;
+						auto Error = NativeFailure(TEXT("asset_data_core_rollback_reference_expired"),
+                            TEXT("A captured sound submix effect is no longer available."), TEXT("effects/") + FString::FromInt(EffectIndex),
+                            MakeShared<FJsonValueString>(TEXT("expired")), MakeShared<FJsonValueString>(USoundEffectSubmixPreset::StaticClass()->GetPathName()));
+                        Error.MutationMayHaveStarted = true;
+                        Error.TargetPath = Target->GetPathName();
+                        OutError.Append(Error);
+                        bRestored = false;
 						continue;
 					}
 					Submix->SubmixEffectChain.Add(Effect.Get());
 				}
-				for (const FSoundSubmixNodeSnapshot& Snapshot
-					: Data.SoundSubmixSnapshots)
-				{
+                for (int32 NodeIndex = 0; NodeIndex < Data.SoundSubmixSnapshots.Num(); ++NodeIndex)
+                {
+                    const FSoundSubmixNodeSnapshot& Snapshot = Data.SoundSubmixSnapshots[NodeIndex];
 					USoundSubmixBase* Node = Snapshot.Node.Get();
 					if (!Node)
 					{
-						bRestored = false;
+						auto Error = NativeFailure(TEXT("asset_data_core_rollback_reference_expired"),
+                            TEXT("A captured sound submix hierarchy node is no longer available."), TEXT("sound_submix_nodes/") + FString::FromInt(NodeIndex),
+                            MakeShared<FJsonValueString>(TEXT("expired")), MakeShared<FJsonValueString>(USoundSubmixBase::StaticClass()->GetPathName()));
+                        Error.MutationMayHaveStarted = true;
+                        Error.TargetPath = Target->GetPathName();
+                        OutError.Append(Error);
+                        bRestored = false;
 						continue;
 					}
 					Node->ChildSubmixes.Reset(
 						Snapshot.Children.Num());
-					for (const TWeakObjectPtr<USoundSubmixBase>&
-						Child : Snapshot.Children)
-					{
+                    for (int32 ChildIndex = 0; ChildIndex < Snapshot.Children.Num(); ++ChildIndex)
+                    {
+                        const TWeakObjectPtr<USoundSubmixBase>& Child = Snapshot.Children[ChildIndex];
 						if (!Child.IsValid())
 						{
-							bRestored = false;
+							auto Error = NativeFailure(TEXT("asset_data_core_rollback_reference_expired"),
+                            TEXT("A captured sound submix child is no longer available."), TEXT("sound_submix_nodes/") + FString::FromInt(NodeIndex) + TEXT("/children/") + FString::FromInt(ChildIndex),
+                            MakeShared<FJsonValueString>(TEXT("expired")), MakeShared<FJsonValueString>(USoundSubmixBase::StaticClass()->GetPathName()));
+                        Error.MutationMayHaveStarted = true;
+                        Error.TargetPath = Node->GetPathName();
+                        OutError.Append(Error);
+                        bRestored = false;
 							continue;
 						}
 						Node->ChildSubmixes.Add(Child.Get());
@@ -6680,7 +6236,7 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			bRestored = WriteCurveChannels(
 				Target,
 				Data.OriginalCurveChannels,
-				false);
+				false, OutError);
 			break;
 		case ECoreAssetKind::DataObject:
 			for (const FRegisteredFieldValue& Value
@@ -6696,8 +6252,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Cast<UFileMediaSource>(Target);
 				if (!MediaSource)
 				{
-					return false;
-				}
+                    OutError = NativeFailure(TEXT("asset_data_core_rollback_target_invalid"),
+                        TEXT("The rollback target does not match the captured asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(UFileMediaSource::StaticClass()->GetPathName()));
+                    return false;
+                }
 				MediaSource->SetFilePath(
 					Data.OriginalMediaFilePath);
 				MediaSource->PrecacheFile =
@@ -6707,11 +6266,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 			}
 		case ECoreAssetKind::RuntimeVirtualTexture:
 			bRestored = TryWriteRvtProperties(
-				Cast<URuntimeVirtualTexture>(Target),
+				Target,
 				Data.OriginalRvtTileCount,
 				Data.OriginalRvtMaterialType,
 				Data.bOriginalRvtCompression,
-				false);
+				false, OutError);
 			break;
 		case ECoreAssetKind::SparseVolumeTexture:
 			{
@@ -6719,8 +6278,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 					Cast<UStreamableSparseVolumeTexture>(Target);
 				if (!Sparse)
 				{
-					return false;
-				}
+                    OutError = NativeFailure(TEXT("asset_data_core_rollback_target_invalid"),
+                        TEXT("The rollback target does not match the captured asset type."), TEXT("target"),
+                        ObjectClassValue(Target), MakeShared<FJsonValueString>(UStreamableSparseVolumeTexture::StaticClass()->GetPathName()));
+                    return false;
+                }
 				Sparse->AddressX = Data.OriginalSparseAddressX;
 				Sparse->AddressY = Data.OriginalSparseAddressY;
 				Sparse->AddressZ = Data.OriginalSparseAddressZ;
@@ -6766,16 +6328,14 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		OutProjectionContext.Reset();
 		const ECoreAssetKind* Kind =
 			FindCoreAssetKind(NativeMechanicId);
-		if (!CanProjectCoreAssetFieldState(NativeMechanicId)
-			|| !Kind
-			|| !Target)
-		{
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_core_field_projection_unsupported"),
-				NativeMechanicId);
-		}
+        ON_SCOPE_EXIT { if (!OutError.IsEmpty() && OutError.TargetPath.IsEmpty() && Target) OutError.TargetPath = Target->GetPathName(); };
+        if (!CanProjectCoreAssetFieldState(NativeMechanicId) || !Kind)
+            return Fail(OutError, NativeFailure(TEXT("asset_data_core_field_projection_unsupported"),
+                TEXT("The native mechanic does not support core asset field projection."), TEXT("native_mechanic_id"),
+                MakeShared<FJsonValueString>(NativeMechanicId), MakeShared<FJsonValueString>(TEXT("registered core field projection mechanic"))));
+        if (!Target) return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_target_missing"),
+            TEXT("Core asset projection requires a live target."), TEXT("target"),
+            MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("live asset"))));
 		if (*Kind == ECoreAssetKind::MediaSource
 			|| *Kind
 				== ECoreAssetKind::RuntimeVirtualTexture
@@ -6807,11 +6367,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		if (SelectedFieldIds
 			!= TArray<FString>{TEXT("registered_fields")})
 		{
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_core_field_projection_unsupported"),
-				NativeMechanicId);
+            TArray<TSharedPtr<FJsonValue>> Actual;
+            for (const auto& Field : SelectedFieldIds) Actual.Add(MakeShared<FJsonValueString>(Field));
+            return Fail(OutError, NativeFailure(TEXT("asset_data_core_field_projection_unsupported"),
+                TEXT("The data object projection requires exactly the registered_fields selection."), TEXT("selected_field_ids"),
+                MakeShared<FJsonValueArray>(Actual), MakeShared<FJsonValueString>(TEXT("one field: registered_fields"))));
 		}
 
 		FUeAgentCanonicalValuePtr CurrentRegistered;
@@ -6856,9 +6416,11 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		{
 			return false;
 		}
-		return OutCurrentFields.IsValid()
-			&& OutDefaultFields.IsValid()
-			&& OutProjectionContext.IsValid();
+        if (OutCurrentFields.IsValid() && OutDefaultFields.IsValid() && OutProjectionContext.IsValid()) return true;
+        return Fail(OutError, NativeFailure(TEXT("asset_data_core_projection_result_missing"),
+            TEXT("A required projection result was not produced."),
+            !OutCurrentFields.IsValid() ? TEXT("current_fields") : !OutDefaultFields.IsValid() ? TEXT("default_fields") : TEXT("projection_context"),
+            MakeShared<FJsonValueNull>(), MakeShared<FJsonValueString>(TEXT("canonical object"))));
 	}
 
 	bool TryProjectCoreAssetExpectedFieldState(
@@ -6878,11 +6440,9 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 		if (!CanProjectCoreAssetFieldState(NativeMechanicId)
 			|| !Kind)
 		{
-			return Fail(
-				OutError,
-				TEXT(
-					"asset_data_core_field_projection_unsupported"),
-				NativeMechanicId);
+            return Fail(OutError, NativeFailure(TEXT("asset_data_core_field_projection_unsupported"),
+                TEXT("The native mechanic does not support expected core asset field projection."), TEXT("native_mechanic_id"),
+                MakeShared<FJsonValueString>(NativeMechanicId), MakeShared<FJsonValueString>(TEXT("registered core field projection mechanic"))));
 		}
 		if (*Kind == ECoreAssetKind::MediaSource
 			|| *Kind

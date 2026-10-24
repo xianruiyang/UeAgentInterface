@@ -47,9 +47,13 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 			Result.PythonFunction = Route.PythonFunction;
 			Result.ContractVersion = 1;
 			Result.PublicOwner = Owner;
-			Result.Availability = EUeAgentCommandAvailability::Enabled;
+			// Lifecycle commands remain exact-dispatchable for the SDK's opaque
+			// internal handle, but are not model-facing discovery/usage entries.
+			Result.Availability = EUeAgentCommandAvailability::Dormant;
 			Result.SideEffect = Route.CommandId == TEXT("operation.status")
 				|| Route.CommandId == TEXT("operation.receipt")
+				|| Route.CommandId == TEXT("operation.discover")
+				|| Route.CommandId == TEXT("operation.recover")
 				? EUeAgentCommandSideEffect::None
 				: EUeAgentCommandSideEffect::EditorState;
 			Result.StateLayers = {
@@ -59,14 +63,28 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 			};
 			Result.InputFields = {
 				Field(TEXT("operation_ref"), TEXT("object"), true,
-					TEXT("Exact operation_id, owner_lease_id and server_session_id returned by the owning start command.")),
+					TEXT("SDK-owned opaque lifecycle handle returned by the owning start command; model-facing callers must not construct or edit it.")),
 			};
+			if (Route.CommandId == TEXT("operation.discover")) Result.InputFields.Reset();
+			else if (Route.CommandId == TEXT("operation.recover"))
+			{
+				Result.InputFields = {
+					Field(TEXT("request_id"), TEXT("string"), true, TEXT("SDK-persisted original request identity; never replayed.")),
+					Field(TEXT("command_id"), TEXT("string"), true, TEXT("Original command associated with the saved request.")),
+				};
+			}
+			else if (Route.CommandId == TEXT("operation.takeover"))
+			{
+				Result.InputFields = {
+					Field(TEXT("operation_id"), TEXT("string"), true, TEXT("SDK-owned identity obtained from discovery; explicitly replaces custody.")),
+				};
+			}
 			if (Route.CommandId == TEXT("operation.resume")
 				|| Route.CommandId == TEXT("operation.reconcile"))
 			{
 				Result.InputFields.Add(Field(
 					TEXT("expected_generation"), TEXT("integer"), true,
-					TEXT("Exact last observed native work generation; a mismatch is rejected without replay.")));
+					TEXT("SDK-owned continuation state; the client forwards the exact last observed generation and never constructs or increments it.")));
 			}
 			else if (Route.CommandId == TEXT("operation.cancel"))
 			{
@@ -75,7 +93,14 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 					TEXT("Non-empty cancellation reason recorded before the safe stop boundary.")));
 			}
 
-			if (IsSnapshotCommand(Route.CommandId))
+			if (Route.CommandId == TEXT("operation.discover"))
+			{
+				Result.ResultFields = {
+					Field(TEXT("schema"), TEXT("string"), true, TEXT("uai.long_running.discovery.v1.")),
+					Field(TEXT("operations"), TEXT("array"), true, TEXT("Retained operations belonging to the authenticated local principal; no custody leases.")),
+				};
+			}
+			else if (IsSnapshotCommand(Route.CommandId))
 			{
 				Result.ResultFields = {
 					Field(TEXT("schema"), TEXT("string"), true,
@@ -96,6 +121,10 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 						TEXT("Whether a new side-effecting request is safe after this state.")),
 					Field(TEXT("latest_signal"), TEXT("object"), false,
 						TEXT("Latest typed operation signal, when one exists.")),
+					Field(TEXT("cleanup_complete"), TEXT("boolean"), true,
+						TEXT("True only after native resources were released or cancellation preceded native start.")),
+					Field(TEXT("progress_diagnostic"), TEXT("object"), false,
+						TEXT("Current observation or cleanup failure, separate from the business outcome.")),
 				};
 			}
 			else
@@ -113,6 +142,8 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 						TEXT("Stable terminal or cleanup error code, empty on success.")),
 					Field(TEXT("retry_safe"), TEXT("boolean"), true,
 						TEXT("Whether replaying the original side effect is safe.")),
+					Field(TEXT("cleanup_complete"), TEXT("boolean"), true,
+						TEXT("Whether native resource cleanup was confirmed.")),
 				};
 			}
 			Result.Errors = {
@@ -132,23 +163,23 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 					TEXT("The terminal state cannot be proven and remains state_unknown.")),
 			};
 			Result.Purpose.Summary =
-				TEXT("Observe or control one server-owned long-running operation without replaying its initiating side effect.");
+				TEXT("Internal SDK lifecycle service for one server-owned operation; not a model-facing workflow entry.");
 			Result.Purpose.Target =
-				TEXT("One exact operation reference bound to a server session, owner lease and native generation.");
+				TEXT("One SDK-owned opaque operation handle bound to a server session, owner lease and native generation.");
 			Result.Purpose.Preconditions = {
-				TEXT("Use the operation_ref returned by the initiating public command."),
-				TEXT("Resume and reconcile require the exact last observed generation."),
+				TEXT("Only the SDK lifecycle owner may retain and forward operation_ref."),
+				TEXT("Only the SDK lifecycle owner may forward the exact last observed generation."),
 			};
 			Result.Purpose.ParameterGuidance =
-				TEXT("Forward operation_ref unchanged; never synthesize a lease or increment a generation locally.");
+				TEXT("SDK internal handle custody only; never expose, synthesize, inspect, or increment operation identity, lease, session, or generation in model context.");
 			Result.Purpose.ResultGuidance =
 				TEXT("Accepted, running and stop_requested are nonterminal; trust completion only when terminal is true or a terminal receipt is returned.");
 			Result.Purpose.FailureGuidance =
 				TEXT("Transport loss is not business failure; reconnect and query the same operation_ref. State_unknown forbids automatic replay.");
 			Result.Purpose.SideEffectGuidance =
 				TEXT("Cancel requests stop only at the owner's safe boundary; release removes only terminal resources owned by that operation.");
-			Result.Purpose.MinimumExample = Route.PythonFunction
-				+ TEXT("(client, operation_ref, ...)");
+			Result.Purpose.MinimumExample =
+				TEXT("SDK-internal lifecycle forwarding; no model-facing invocation.");
 			Result.Purpose.RelatedFlows = {
 				TEXT("operation.status"),
 				TEXT("operation.receipt"),
@@ -172,9 +203,11 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 		public:
 			FContribution(
 				TSharedRef<Contract::IUeAgentOperationApplicationPort> InOperationPort,
+				TArray<FUeAgentLongRunningLifecycleRoute> InRoutes,
 				TSharedPtr<Composition::LongRunningSession::
 					FUeAgentLongRunningSessionRuntime> InRuntime = nullptr)
 				: OperationPort(MoveTemp(InOperationPort))
+				, Routes(MoveTemp(InRoutes))
 				, Runtime(MoveTemp(InRuntime))
 			{
 			}
@@ -189,7 +222,7 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 				TArray<FUeAgentCommandDeclaration>& OutDeclarations) const override
 			{
 				for (const FUeAgentLongRunningLifecycleRoute& Route
-					: GetLongRunningLifecycleRoutes())
+					: Routes)
 				{
 					OutDeclarations.Add(Declaration(Route));
 				}
@@ -198,7 +231,7 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 			virtual bool CreateHandlers(
 				TSharedRef<const FUeAgentImmutableCommandRegistry> Registry,
 				TArray<TSharedRef<IUeAgentExactCommandHandler>>& OutHandlers,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				TArray<TSharedRef<IUeAgentExactCommandHandler>> Handlers;
 				if (!TryCreateLongRunningLifecycleCommandHandlers(
@@ -214,6 +247,7 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 
 		private:
 			TSharedRef<Contract::IUeAgentOperationApplicationPort> OperationPort;
+			TArray<FUeAgentLongRunningLifecycleRoute> Routes;
 			TSharedPtr<Composition::LongRunningSession::
 				FUeAgentLongRunningSessionRuntime> Runtime;
 		};
@@ -227,16 +261,18 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 	bool TryCreateLongRunningLifecycleContribution(
 		TSharedRef<Contract::IUeAgentOperationApplicationPort> OperationPort,
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
-		OutContribution = MakeShared<FContribution>(MoveTemp(OperationPort));
-		OutError.Reset();
+		OutContribution.Reset();
+		TArray<FUeAgentLongRunningLifecycleRoute> Routes;
+		if (!TryGetLongRunningLifecycleRoutes(Routes, OutError)) return false;
+		OutContribution = MakeShared<FContribution>(MoveTemp(OperationPort), MoveTemp(Routes));
 		return true;
 	}
 
 	bool TryCreateProductionLongRunningLifecycleContribution(
 		TSharedPtr<IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutContribution.Reset();
 		TSharedPtr<Contract::IUeAgentOperationApplicationPort> OperationPort;
@@ -250,8 +286,10 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 		{
 			return false;
 		}
+		TArray<FUeAgentLongRunningLifecycleRoute> Routes;
+		if (!TryGetLongRunningLifecycleRoutes(Routes, OutError)) return false;
 		OutContribution = MakeShared<FContribution>(
-			OperationPort.ToSharedRef(), Runtime);
+			OperationPort.ToSharedRef(), MoveTemp(Routes), Runtime);
 		return true;
 	}
 
@@ -259,7 +297,7 @@ namespace UE::UAI::Module::CommandRegistration::LongRunning
 		TSharedRef<Contract::IUeAgentOperationApplicationPort> OperationPort,
 		TSharedPtr<const FUeAgentImmutableCommandRegistry>& OutRegistry,
 		TSharedPtr<const FUeAgentExactCommandDispatch>& OutDispatch,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutRegistry.Reset();
 		OutDispatch.Reset();

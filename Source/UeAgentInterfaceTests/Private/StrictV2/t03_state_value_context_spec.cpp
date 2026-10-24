@@ -1,39 +1,10 @@
 #include "Misc/AutomationTest.h"
-#include "Misc/FileHelper.h"
-#include "Misc/Paths.h"
 
-#if __has_include("Core/ExecutionContext/UeAgentFrozenExecutionContext.h") \
-	&& __has_include("Core/Contract/Semantic/UeAgentStateValueContextPort.h")
-#define UAI_STRICT_V2_T03_IMPLEMENTATION_AVAILABLE 1
 #include "Core/Contract/Semantic/UeAgentStateValueContextPort.h"
 #include "Core/ExecutionContext/UeAgentFrozenExecutionContext.h"
-#else
-#define UAI_STRICT_V2_T03_IMPLEMENTATION_AVAILABLE 0
-#endif
 
 namespace
 {
-	static FString ProductSource(const FString& RelativePath)
-	{
-		return FPaths::ConvertRelativePathToFull(FPaths::Combine(
-			FPaths::ProjectPluginsDir(),
-			TEXT("UeAgentInterface/Source/UeAgentInterface"),
-			RelativePath));
-	}
-
-	static bool LoadSource(
-		FAutomationTestBase& Test,
-		const FString& RelativePath,
-		FString& OutSource)
-	{
-		return Test.TestTrue(
-			*FString::Printf(TEXT("load source %s"), *RelativePath),
-			FFileHelper::LoadFileToString(
-				OutSource,
-				*ProductSource(RelativePath)));
-	}
-
-#if UAI_STRICT_V2_T03_IMPLEMENTATION_AVAILABLE
 	using namespace UE::UAI::ContextResource;
 	using namespace UE::UAI::Contract;
 	using namespace UE::UAI::ExecutionContext;
@@ -42,17 +13,7 @@ namespace
 
 	static FUeAgentResourceTracker MakeResources()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::InputBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::OutputBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::StringBytes, 1024 * 1024},
-			{EUeAgentResourceDimension::Nodes, 1024},
-			{EUeAgentResourceDimension::Items, 1024},
-			{EUeAgentResourceDimension::Files, 16},
-			{EUeAgentResourceDimension::ReferenceEdges, 1024},
-			{EUeAgentResourceDimension::WorkUnits, 1024 * 1024},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 16 * 1024 * 1024},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	static FUeAgentExecutionContextPolicy ContextPolicy(
@@ -145,7 +106,6 @@ namespace
 			Presence,
 			OverrideState);
 	}
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -155,10 +115,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUaiStrictV2T03FrozenRequestContextTest::RunTest(const FString& Parameters)
 {
-#if !UAI_STRICT_V2_T03_IMPLEMENTATION_AVAILABLE
-	AddError(TEXT("strict_v2_t03_frozen_execution_context_missing"));
-	return false;
-#else
 	TArray<FUeAgentExecutionContextFact> MutableFacts = ContextFacts();
 	TSharedPtr<const FUeAgentFrozenExecutionContext> Context;
 	FUeAgentExecutionContextError Error;
@@ -214,7 +170,6 @@ bool FUaiStrictV2T03FrozenRequestContextTest::RunTest(const FString& Parameters)
 		Error.Code,
 		FString(TEXT("execution_context_required_facet_missing")));
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -224,10 +179,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FUaiStrictV2T03PresenceDefaultStatePlaneTest::RunTest(const FString& Parameters)
 {
-#if !UAI_STRICT_V2_T03_IMPLEMENTATION_AVAILABLE
-	AddError(TEXT("strict_v2_t03_state_value_port_missing"));
-	return false;
-#else
 	FUeAgentResourceTracker Resources = MakeResources();
 	const FUeAgentStateEntry Inherited = MakeEntry(
 		Resources,
@@ -344,7 +295,6 @@ bool FUaiStrictV2T03PresenceDefaultStatePlaneTest::RunTest(const FString& Parame
 					== EUeAgentDifferenceKind::StatePlaneMismatch;
 			}));
 	return !HasAnyErrors();
-#endif
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -355,10 +305,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FUaiStrictV2T03ExplicitTimeSpaceConversionTest::RunTest(
 	const FString& Parameters)
 {
-#if !UAI_STRICT_V2_T03_IMPLEMENTATION_AVAILABLE
-	AddError(TEXT("strict_v2_t03_explicit_conversion_port_missing"));
-	return false;
-#else
 	TSharedPtr<const FUeAgentFrozenExecutionContext> Context;
 	FUeAgentExecutionContextError ContextError;
 	TestTrue(
@@ -489,21 +435,5 @@ bool FUaiStrictV2T03ExplicitTimeSpaceConversionTest::RunTest(
 				TEXT("world-to-parent-v4")));
 	}
 
-	FString PortHeader;
-	if (LoadSource(
-		*this,
-		TEXT("Private/Core/Contract/Semantic/UeAgentStateValueContextPort.h"),
-		PortHeader))
-	{
-		TestTrue(
-			TEXT("the port reuses the sole canonical state model"),
-			PortHeader.Contains(
-				TEXT("Core/StateSemantic/UeAgentStateSemantic.h")));
-		TestTrue(
-			TEXT("the port reuses the sole temporal conversion model"),
-			PortHeader.Contains(
-				TEXT("Core/StateSemantic/UeAgentTemporalContract.h")));
-	}
 	return !HasAnyErrors();
-#endif
 }

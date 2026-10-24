@@ -1,8 +1,13 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/HjsonWorkspace/ImportInitialization/UeAgentHjsonDomainProviderRegistry.h"
 #include "Templates/SharedPointer.h"
+#include "Templates/Function.h"
+
+class UObject;
 
 namespace UE::UAI::OperationOwners::UObjectDataAsset
 {
@@ -24,6 +29,7 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 		bool bRequiresExplicitDomainSupport = false;
 
 		bool IsValid() const;
+		bool TryValidate(UE::UAI::Contract::FDiagnostic& OutError) const;
 	};
 
 	UEAGENTINTERFACE_API const TArray<
@@ -45,14 +51,10 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 	{
 		FString PayloadJson;
 		bool bReadOnly = false;
+		TArray<UE::UAI::Contract::FDiagnostic> Warnings;
 	};
 
-	struct UEAGENTINTERFACE_API FUeAgentUObjectDataAssetCommandError
-	{
-		FString Code;
-		FString SubjectId;
-		FString Detail;
-	};
+	using FUeAgentUObjectDataAssetCommandError = UE::UAI::Contract::FDiagnostic;
 
 	class UEAGENTINTERFACE_API IUeAgentUObjectDataAssetCommandService
 	{
@@ -68,7 +70,7 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 	UEAGENTINTERFACE_API bool
 	TryCreateProductionUObjectDataAssetCommandService(
 		TSharedPtr<IUeAgentUObjectDataAssetCommandService>& OutService,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API bool TryCreateUObjectDataAssetDomainProvider(
 		TSharedPtr<HjsonWorkspace::IImportInitializationDomainProvider>&
@@ -89,6 +91,21 @@ namespace UE::UAI::OperationOwners::UObjectDataAsset
 
 		private:
 			FString Previous;
+		};
+
+		class UEAGENTINTERFACE_API FScopedFinalProjectionFailure final
+		{
+		public:
+			explicit FScopedFinalProjectionFailure(TFunction<void(const UObject&)> ObserveReloaded);
+			~FScopedFinalProjectionFailure();
+
+			FScopedFinalProjectionFailure(const FScopedFinalProjectionFailure&) = delete;
+			FScopedFinalProjectionFailure& operator=(
+				const FScopedFinalProjectionFailure&) = delete;
+
+		private:
+			bool bPrevious = false;
+			TFunction<void(const UObject&)> PreviousObserver;
 		};
 	}
 }

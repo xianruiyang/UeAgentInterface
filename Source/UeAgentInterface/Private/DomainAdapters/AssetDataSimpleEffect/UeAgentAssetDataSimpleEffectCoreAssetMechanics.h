@@ -43,7 +43,8 @@ namespace UE::UAI::DomainAdapters::AssetDataSimpleEffect
 
 	bool TryRollbackCoreAssetUpdate(
 		UObject* Target,
-		const FCoreAssetPreparedState& State);
+		const FCoreAssetPreparedState& State,
+		ExecutionMutation::FExecutionMutationError& OutError);
 
 	bool CanProjectCoreAssetFieldState(
 		const FString& NativeMechanicId);

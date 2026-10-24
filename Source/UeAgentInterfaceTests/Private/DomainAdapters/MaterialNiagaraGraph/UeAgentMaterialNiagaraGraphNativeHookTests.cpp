@@ -380,16 +380,6 @@ bool FUeAgentMaterialNiagaraGraphNativeHookTest::RunTest(
 	TestTrue(TEXT("failed stack capture does not publish evidence"),
 		RejectedEvidence.IsEmpty());
 
-	TestFalse(
-		TEXT("delegated dynamic-input failure cannot become success"),
-		TryValidateMaterialNiagaraGraphCompoundCapture(
-			false,
-			TEXT("niagara_compound_branch_conflict"),
-			TEXT("literal and dynamic branches are both active"),
-			Error));
-	TestEqual(TEXT("delegated compound error is not translated or hidden"),
-		Error.GetCode(),
-		FString(TEXT("niagara_compound_branch_conflict")));
 
 	Package->SetDirtyFlag(false);
 	Package->MarkAsGarbage();

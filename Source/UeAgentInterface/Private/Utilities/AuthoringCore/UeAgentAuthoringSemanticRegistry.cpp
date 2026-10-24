@@ -3,6 +3,7 @@
 #include "Utilities/AuthoringCore/UeAgentAuthoringSemanticRegistry.h"
 
 #include "Misc/ScopeRWLock.h"
+#include "Dom/JsonValue.h"
 
 namespace UeAgentAuthoringSemanticRegistry
 {
@@ -52,26 +53,78 @@ namespace UeAgentAuthoringSemanticRegistry
 			return Descriptor;
 		}
 
-		bool Validate(const FDomainDescriptor& Descriptor, FString& OutError)
+
+        using UE::UAI::Contract::FDiagnostic;
+        FDiagnostic RegistryFailure(const TCHAR* Code, const TCHAR* Reason, const FString& Name, const FString& Field = FString()) {
+            auto Error = FDiagnostic::Failure(Code, Reason, TEXT("semantic_registry"));
+            Error.SourceKind = TEXT("native_result");
+            Error.CandidateName = Name;
+            Error.PropertyPath = Field;
+            return Error;
+        }
+        FDiagnostic MissingField(const TCHAR* Code, const TCHAR* Reason, const FString& Name, const TCHAR* Field) {
+            auto Error = RegistryFailure(Code, Reason, Name, Field);
+            Error.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty string"));
+            Error.ActualValue = MakeShared<FJsonValueString>(FString());
+            return Error;
+        }
+        TSharedPtr<FJsonValue> DescriptorValue(const FString& Value) { return MakeShared<FJsonValueString>(Value); }
+        TSharedPtr<FJsonValue> DescriptorValue(int32 Value) { return MakeShared<FJsonValueNumber>(Value); }
+        template<typename T>
+        bool DescriptorValuesEqual(const T& Expected, const T& Actual, const FString& Path, FDiagnostic* Error) {
+            if (Expected == Actual) return true;
+            if (Error) { Error->PropertyPath = Path; Error->ExpectedValue = DescriptorValue(Expected); Error->ActualValue = DescriptorValue(Actual); }
+            return false;
+        }
+        bool DescriptorValuesEqual(const TArray<FString>& Expected, const TArray<FString>& Actual, const FString& Path, FDiagnostic* Error) {
+            if (!DescriptorValuesEqual(Expected.Num(), Actual.Num(), Path + TEXT("/count"), Error)) return false;
+            for (int32 Index = 0; Index < Expected.Num(); ++Index)
+                if (!DescriptorValuesEqual(Expected[Index], Actual[Index], Path + TEXT("/") + FString::FromInt(Index), Error)) return false;
+            return true;
+        }
+        bool DescriptorsEqual(const FDomainDescriptor& Expected, const FDomainDescriptor& Actual, FDiagnostic* Error) {
+            return DescriptorValuesEqual(Expected.DomainId, Actual.DomainId, TEXT("/domain_id"), Error)
+                && DescriptorValuesEqual(Expected.MutationProviderId, Actual.MutationProviderId, TEXT("/mutation_provider_id"), Error)
+                && DescriptorValuesEqual(Expected.TargetKinds, Actual.TargetKinds, TEXT("/target_kinds"), Error)
+                && DescriptorValuesEqual(Expected.CapabilityTags, Actual.CapabilityTags, TEXT("/capability_tags"), Error);
+        }
+        bool DescriptorsEqual(const FSemanticDescriptor& Expected, const FSemanticDescriptor& Actual, FDiagnostic* Error) {
+            return DescriptorValuesEqual(Expected.SemanticId, Actual.SemanticId, TEXT("/semantic_id"), Error)
+                && DescriptorValuesEqual(Expected.DomainId, Actual.DomainId, TEXT("/domain_id"), Error)
+                && DescriptorValuesEqual(Expected.TargetKind, Actual.TargetKind, TEXT("/target_kind"), Error)
+                && DescriptorValuesEqual(Expected.ValueType, Actual.ValueType, TEXT("/value_type"), Error)
+                && DescriptorValuesEqual(Expected.OwnerModel, Actual.OwnerModel, TEXT("/owner_model"), Error)
+                && DescriptorValuesEqual(Expected.IdentityModel, Actual.IdentityModel, TEXT("/identity_model"), Error)
+                && DescriptorValuesEqual(Expected.StateAccessor, Actual.StateAccessor, TEXT("/state_accessor"), Error)
+                && DescriptorValuesEqual(static_cast<int32>(Expected.WriteCapability), static_cast<int32>(Actual.WriteCapability), TEXT("/write_capability"), Error)
+                && DescriptorValuesEqual(Expected.ConstraintSource, Actual.ConstraintSource, TEXT("/constraint_source"), Error)
+                && DescriptorValuesEqual(Expected.AvailabilitySource, Actual.AvailabilitySource, TEXT("/availability_source"), Error)
+                && DescriptorValuesEqual(static_cast<int32>(Expected.DefaultSourceKind), static_cast<int32>(Actual.DefaultSourceKind), TEXT("/default_source_kind"), Error)
+                && DescriptorValuesEqual(Expected.DefaultAccessor, Actual.DefaultAccessor, TEXT("/default_accessor"), Error)
+                && DescriptorValuesEqual(Expected.Comparator, Actual.Comparator, TEXT("/comparator"), Error)
+                && DescriptorValuesEqual(Expected.CapabilityTags, Actual.CapabilityTags, TEXT("/capability_tags"), Error);
+        }
+
+		bool Validate(const FDomainDescriptor& Descriptor, UE::UAI::Contract::FDiagnostic& OutError)
 		{
 			if (Descriptor.DomainId.IsEmpty())
 			{
-				OutError = TEXT("missing_domain_id");
+				OutError = MissingField(TEXT("missing_domain_id"), TEXT("The semantic registration domain identifier is empty."), Descriptor.DomainId, TEXT("domain_id"));
 				return false;
 			}
 			OutError.Reset();
 			return true;
 		}
 
-		bool Validate(const FSemanticDescriptor& Descriptor, FString& OutError)
+		bool Validate(const FSemanticDescriptor& Descriptor, UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			if (Descriptor.SemanticId.IsEmpty()) OutError = TEXT("missing_semantic_id");
-			else if (Descriptor.DomainId.IsEmpty()) OutError = TEXT("missing_domain_id");
-			else if (Descriptor.TargetKind.IsEmpty()) OutError = TEXT("missing_target_kind");
-			else if (Descriptor.ValueType.IsEmpty()) OutError = TEXT("missing_value_type");
-			else if (Descriptor.IdentityModel.IsEmpty()) OutError = TEXT("missing_identity_model");
-			else if (Descriptor.StateAccessor.IsEmpty()) OutError = TEXT("missing_state_accessor");
-			else if (Descriptor.Comparator.IsEmpty()) OutError = TEXT("missing_comparator");
+			if (Descriptor.SemanticId.IsEmpty()) OutError = MissingField(TEXT("missing_semantic_id"), TEXT("The semantic identifier is empty."), Descriptor.DomainId, TEXT("semantic_id"));
+			else if (Descriptor.DomainId.IsEmpty()) OutError = MissingField(TEXT("missing_domain_id"), TEXT("The semantic registration domain identifier is empty."), Descriptor.DomainId, TEXT("domain_id"));
+			else if (Descriptor.TargetKind.IsEmpty()) OutError = MissingField(TEXT("missing_target_kind"), TEXT("The semantic target kind is empty."), Descriptor.DomainId, TEXT("target_kind"));
+			else if (Descriptor.ValueType.IsEmpty()) OutError = MissingField(TEXT("missing_value_type"), TEXT("The semantic value type is empty."), Descriptor.DomainId, TEXT("value_type"));
+			else if (Descriptor.IdentityModel.IsEmpty()) OutError = MissingField(TEXT("missing_identity_model"), TEXT("The semantic identity model is empty."), Descriptor.DomainId, TEXT("identity_model"));
+			else if (Descriptor.StateAccessor.IsEmpty()) OutError = MissingField(TEXT("missing_state_accessor"), TEXT("The semantic state accessor identifier is empty."), Descriptor.DomainId, TEXT("state_accessor"));
+			else if (Descriptor.Comparator.IsEmpty()) OutError = MissingField(TEXT("missing_comparator"), TEXT("The semantic comparator identifier is empty."), Descriptor.DomainId, TEXT("comparator"));
 			else
 			{
 				OutError.Reset();
@@ -83,28 +136,12 @@ namespace UeAgentAuthoringSemanticRegistry
 
 	bool FDomainDescriptor::operator==(const FDomainDescriptor& Other) const
 	{
-		return DomainId == Other.DomainId
-			&& MutationProviderId == Other.MutationProviderId
-			&& TargetKinds == Other.TargetKinds
-			&& CapabilityTags == Other.CapabilityTags;
+		return DescriptorsEqual(*this, Other, nullptr);
 	}
 
 	bool FSemanticDescriptor::operator==(const FSemanticDescriptor& Other) const
 	{
-		return SemanticId == Other.SemanticId
-			&& DomainId == Other.DomainId
-			&& TargetKind == Other.TargetKind
-			&& ValueType == Other.ValueType
-			&& OwnerModel == Other.OwnerModel
-			&& IdentityModel == Other.IdentityModel
-			&& StateAccessor == Other.StateAccessor
-			&& WriteCapability == Other.WriteCapability
-			&& ConstraintSource == Other.ConstraintSource
-			&& AvailabilitySource == Other.AvailabilitySource
-			&& DefaultSourceKind == Other.DefaultSourceKind
-			&& DefaultAccessor == Other.DefaultAccessor
-			&& Comparator == Other.Comparator
-			&& CapabilityTags == Other.CapabilityTags;
+		return DescriptorsEqual(*this, Other, nullptr);
 	}
 
 	FRegistry& FRegistry::Get()
@@ -112,14 +149,14 @@ namespace UeAgentAuthoringSemanticRegistry
 		static FRegistry Registry;
 		static const bool bBuiltInsRegistered = []()
 		{
-			FString Error;
+			UE::UAI::Contract::FDiagnostic Error;
 			return RegisterBuiltInSemantics(Registry, Error);
 		}();
 		(void)bBuiltInsRegistered;
 		return Registry;
 	}
 
-	bool FRegistry::RegisterDomain(const FDomainDescriptor& Descriptor, ERegistrationResult& OutResult, FString& OutError)
+	bool FRegistry::RegisterDomain(const FDomainDescriptor& Descriptor, ERegistrationResult& OutResult, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const FDomainDescriptor Canonical = Normalize(Descriptor);
 		if (!Validate(Canonical, OutError)) return false;
@@ -128,7 +165,8 @@ namespace UeAgentAuthoringSemanticRegistry
 		{
 			if (*Existing != Canonical)
 			{
-				OutError = FString::Printf(TEXT("conflicting_domain_descriptor_%s"), *Canonical.DomainId);
+				OutError = RegistryFailure(TEXT("conflicting_domain_descriptor"), TEXT("The domain descriptor differs from its existing registration."), Canonical.DomainId);
+                DescriptorsEqual(*Existing, Canonical, &OutError);
 				return false;
 			}
 			OutResult = ERegistrationResult::AlreadyRegistered;
@@ -141,7 +179,7 @@ namespace UeAgentAuthoringSemanticRegistry
 		return true;
 	}
 
-	bool FRegistry::RegisterSemantic(const FSemanticDescriptor& Descriptor, ERegistrationResult& OutResult, FString& OutError)
+	bool FRegistry::RegisterSemantic(const FSemanticDescriptor& Descriptor, ERegistrationResult& OutResult, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		const FSemanticDescriptor Canonical = Normalize(Descriptor);
 		if (!Validate(Canonical, OutError)) return false;
@@ -149,19 +187,21 @@ namespace UeAgentAuthoringSemanticRegistry
 		const FDomainDescriptor* Domain = Domains.Find(Canonical.DomainId);
 		if (!Domain)
 		{
-			OutError = FString::Printf(TEXT("unknown_semantic_domain_%s"), *Canonical.DomainId);
+			OutError = RegistryFailure(TEXT("unknown_semantic_domain"), TEXT("The semantic descriptor references an unregistered domain."), Canonical.SemanticId, TEXT("domain_id"));
+            OutError.ActualValue = MakeShared<FJsonValueString>(Canonical.DomainId);
 			return false;
 		}
 		if (Canonical.WriteCapability == EWriteCapability::DomainMutation && Domain->MutationProviderId.IsEmpty())
 		{
-			OutError = FString::Printf(TEXT("domain_mutation_provider_missing_%s"), *Canonical.DomainId);
+			OutError = MissingField(TEXT("domain_mutation_provider_missing"), TEXT("A writable semantic requires its domain to declare a mutation provider."), Canonical.DomainId, TEXT("mutation_provider_id"));
 			return false;
 		}
 		if (const FSemanticDescriptor* Existing = Semantics.Find(Canonical.SemanticId))
 		{
 			if (*Existing != Canonical)
 			{
-				OutError = FString::Printf(TEXT("conflicting_semantic_descriptor_%s"), *Canonical.SemanticId);
+				OutError = RegistryFailure(TEXT("conflicting_semantic_descriptor"), TEXT("The semantic descriptor differs from its existing registration."), Canonical.SemanticId);
+                DescriptorsEqual(*Existing, Canonical, &OutError);
 				return false;
 			}
 			OutResult = ERegistrationResult::AlreadyRegistered;
@@ -226,7 +266,7 @@ namespace UeAgentAuthoringSemanticRegistry
 		return Semantics.Num();
 	}
 
-	bool RegisterBuiltInSemantics(FRegistry& Registry, FString& OutError)
+	bool RegisterBuiltInSemantics(FRegistry& Registry, UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		FDomainDescriptor Domain;
 		Domain.DomainId = TEXT("core.reflection");

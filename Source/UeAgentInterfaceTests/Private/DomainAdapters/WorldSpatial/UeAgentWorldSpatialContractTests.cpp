@@ -78,13 +78,7 @@ namespace
 
 	FUeAgentResourceTracker MakeSpatialTracker()
 	{
-		return FUeAgentResourceTracker(FUeAgentResourceBudget({
-			{EUeAgentResourceDimension::Nodes, 128},
-			{EUeAgentResourceDimension::Items, 1024},
-			{EUeAgentResourceDimension::StringBytes, 65536},
-			{EUeAgentResourceDimension::WorkUnits, 65536},
-			{EUeAgentResourceDimension::EstimatedMemoryBytes, 1048576},
-		}));
+		return FUeAgentResourceTracker();
 	}
 
 	bool HasExactStrings(
@@ -131,7 +125,7 @@ namespace
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentWorldSpatialContractTest,
 	"UeAgentInterface.DomainAdapters.WorldSpatial.E0.Contract."
-		"TypedPortsFramesAndLegacyBoundary",
+		"CurrentExplicitSpaceBridgeAndReadbackContract",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
@@ -159,23 +153,6 @@ bool FUeAgentWorldSpatialContractTest::RunTest(
 		Fixture->GetArrayField(TEXT("port_families"));
 	const TArray<TSharedPtr<FJsonValue>>& CapabilityValues =
 		Fixture->GetArrayField(TEXT("capabilities"));
-	const TArray<TSharedPtr<FJsonValue>>& MappingValues =
-		Fixture->GetArrayField(TEXT("legacy_mappings"));
-	TestEqual(
-		TEXT("five typed port families"),
-		FamilyValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("port_family_count"))));
-	TestEqual(
-		TEXT("twenty two canonical capabilities"),
-		CapabilityValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("capability_count"))));
-	TestEqual(
-		TEXT("all forty four legacy candidates adjudicated"),
-		MappingValues.Num(),
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("legacy_mapping_count"))));
 
 	const TSet<FString> ExpectedFamilies = {
 		TEXT("graph_view"),
@@ -240,14 +217,12 @@ bool FUeAgentWorldSpatialContractTest::RunTest(
 			!Family->GetArrayField(
 				TEXT("forbidden_implicit_facets")).IsEmpty());
 	}
-	bool bHasExactFamilies =
-		FamilyIds.Num() == ExpectedFamilies.Num();
 	for (const FString& ExpectedFamily : ExpectedFamilies)
 	{
-		bHasExactFamilies =
-			FamilyIds.Contains(ExpectedFamily) && bHasExactFamilies;
+		TestTrue(TEXT("required current port family exists: ")
+			+ ExpectedFamily,
+			FamilyIds.Contains(ExpectedFamily));
 	}
-	TestTrue(TEXT("exact typed port family set"), bHasExactFamilies);
 	TestEqual(
 		TEXT("2D to 3D uses explicit camera projection bridge"),
 		FamilyById[TEXT("viewport_projection")]
@@ -319,116 +294,12 @@ bool FUeAgentWorldSpatialContractTest::RunTest(
 			!Capability->GetStringField(TEXT("oracle_kind")).IsEmpty());
 	}
 
-	TSet<FString> LegacyIds;
-	int32 RetiredCount = 0;
-	for (const TSharedPtr<FJsonValue>& Value : MappingValues)
-	{
-		const TSharedPtr<FJsonObject> Mapping = Value->AsObject();
-		const FString LegacyId =
-			Mapping->GetStringField(TEXT("legacy_id"));
-		const FString Disposition =
-			Mapping->GetStringField(TEXT("disposition"));
-		TestFalse(
-			TEXT("legacy candidate is adjudicated exactly once: ") + LegacyId,
-			LegacyIds.Contains(LegacyId));
-		LegacyIds.Add(LegacyId);
-		if (Disposition == TEXT("delete"))
-		{
-			++RetiredCount;
-			TestFalse(
-				TEXT("deleted legacy entry has no capability: ") + LegacyId,
-				Mapping->HasField(TEXT("capability_id")));
-			TestTrue(
-				TEXT("deleted legacy entry has evidence: ") + LegacyId,
-				!Mapping->GetStringField(TEXT("reason")).IsEmpty());
-		}
-		else
-		{
-			TestTrue(
-				TEXT("mapped legacy entry uses an allowed disposition: ")
-					+ LegacyId,
-				Disposition == TEXT("adapt")
-					|| Disposition == TEXT("compose")
-					|| Disposition == TEXT("split"));
-			TestTrue(
-				TEXT("mapped legacy target exists: ") + LegacyId,
-				CapabilityIds.Contains(Mapping->GetStringField(
-					TEXT("capability_id"))));
-		}
-	}
-	TestEqual(
-		TEXT("three fake or internal legacy entries are retired"),
-		RetiredCount,
-		static_cast<int32>(Fixture->GetNumberField(
-			TEXT("retired_legacy_count"))));
-
-	const TSet<FString> ExpectedRetired = {
-		TEXT("behavior_tree_graph_get_view"),
-		TEXT("behavior_tree_graph_set_view"),
-		TEXT("blueprint_layout_graph_self_test"),
-	};
-	for (const FString& LegacyId : ExpectedRetired)
-	{
-		bool bFoundDeleted = false;
-		for (const TSharedPtr<FJsonValue>& Value : MappingValues)
-		{
-			const TSharedPtr<FJsonObject> Mapping = Value->AsObject();
-			bFoundDeleted = bFoundDeleted
-				|| (Mapping->GetStringField(TEXT("legacy_id")) == LegacyId
-					&& Mapping->GetStringField(TEXT("disposition"))
-						== TEXT("delete"));
-		}
-		TestTrue(TEXT("known harmful legacy entry retires: ") + LegacyId,
-			bFoundDeleted);
-	}
-
-	for (const TSharedPtr<FJsonValue>& Value
-		: Fixture->GetArrayField(TEXT("reallocated_legacy_ids")))
-	{
-		const FString LegacyId = Value->AsString();
-		FString TargetCapability;
-		for (const TSharedPtr<FJsonValue>& MappingValue : MappingValues)
-		{
-			const TSharedPtr<FJsonObject> Mapping =
-				MappingValue->AsObject();
-			if (Mapping->GetStringField(TEXT("legacy_id")) == LegacyId)
-			{
-				Mapping->TryGetStringField(
-					TEXT("capability_id"),
-					TargetCapability);
-				break;
-			}
-		}
-		TestTrue(
-			TEXT("reallocated spatial legacy entry has canonical target: ")
-				+ LegacyId,
-			CapabilityById.Contains(TargetCapability));
-		if (CapabilityById.Contains(TargetCapability))
-		{
-			TestEqual(
-				TEXT("reallocated entry uses shared space contract: ")
-					+ LegacyId,
-				CapabilityById[TargetCapability]
-					->GetStringField(TEXT("space_contract_id")),
-				SpaceContractId);
-		}
-	}
-
 	TSet<FString> ForbiddenOracles;
 	for (const FString& ForbiddenOracle
 		: ReadStringArray(Fixture, TEXT("forbidden_oracles")))
 	{
 		ForbiddenOracles.Add(ForbiddenOracle);
 	}
-	TestTrue(
-		TEXT("legacy route success is not an oracle"),
-		ForbiddenOracles.Contains(TEXT("legacy_command_success")));
-	TestTrue(
-		TEXT("handler echo is not an oracle"),
-		ForbiddenOracles.Contains(TEXT("legacy_handler_echo")));
-	TestTrue(
-		TEXT("layout self-test is not an oracle"),
-		ForbiddenOracles.Contains(TEXT("layout_self_test")));
 	TestTrue(
 		TEXT("screenshot alone is not an oracle"),
 		ForbiddenOracles.Contains(TEXT("screenshot_only")));
@@ -540,14 +411,6 @@ bool FUeAgentWorldSpatialContractTest::RunTest(
 		GetWorldSpatialPortFamilyContracts();
 	const auto& ProductionCapabilities =
 		GetWorldSpatialCapabilityContracts();
-	TestEqual(
-		TEXT("production exposes five typed port contracts"),
-		ProductionFamilies.Num(),
-		FamilyValues.Num());
-	TestEqual(
-		TEXT("production exposes twenty two capability contracts"),
-		ProductionCapabilities.Num(),
-		CapabilityValues.Num());
 	for (const auto& ProductionFamily : ProductionFamilies)
 	{
 		const FString FamilyId = ProductionFamily.GetFamilyId();

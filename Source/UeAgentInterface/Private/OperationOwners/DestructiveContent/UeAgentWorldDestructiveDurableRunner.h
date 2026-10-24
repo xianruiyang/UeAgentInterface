@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "DomainAdapters/WorldDestructive/UeAgentWorldDestructiveOwner.h"
 #include "Templates/SharedPointer.h"
@@ -12,5 +14,5 @@ namespace UE::UAI::OperationOwners::DestructiveContent
 		TSharedPtr<
 			DomainAdapters::WorldDestructive::
 				IUeAgentWorldDestructiveDurableRunner>& OutRunner,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

@@ -1,4 +1,6 @@
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
+#include "Core/StateSemantic/UeAgentExactStringKeys.h"
+#include "Dom/JsonValue.h"
 
 #include "Algo/Sort.h"
 #include "Core/StateSemantic/UeAgentStateSemanticEvidence.h"
@@ -40,12 +42,14 @@ namespace UE::UAI::StateSemantic
 		bool Fail(
 			FUeAgentStateSemanticError& OutError,
 			const FString& Code,
-			const FString& Path = FString(),
-			const FString& Detail = FString())
+			const FString& Reason,
+			const FString& Path,
+			TSharedPtr<FJsonValue> Expected = nullptr,
+			TSharedPtr<FJsonValue> Actual = nullptr)
 		{
-			OutError.Code = Code;
-			OutError.Path = Path;
-			OutError.Detail = Detail;
+			OutError = FUeAgentStateSemanticError::Failure(Code, Reason, TEXT("state_semantic"));
+			OutError.Source.JsonPath = Path;
+			OutError.ExpectedValue = MoveTemp(Expected); OutError.ActualValue = MoveTemp(Actual);
 			return false;
 		}
 
@@ -55,16 +59,12 @@ namespace UE::UAI::StateSemantic
 			const FString& Path,
 			FUeAgentStateSemanticError& OutError)
 		{
-			FUeAgentResourceBudgetExceeded BudgetError;
-			if (Resources.TryChargeMany(Amounts, Path, BudgetError))
+			FUeAgentResourceChargeError ChargeError;
+			if (Resources.TryChargeMany(Amounts, Path, ChargeError))
 			{
 				return true;
 			}
-			OutError.Code = BudgetError.Code;
-			OutError.Path = BudgetError.Path;
-			OutError.ResourceDimension = BudgetError.Dimension;
-			OutError.ResourceLimit = BudgetError.Limit;
-			OutError.ResourceObserved = BudgetError.Observed;
+			OutError = ChargeError;
 			return false;
 		}
 
@@ -76,6 +76,28 @@ namespace UE::UAI::StateSemantic
 		bool IsAsciiDigit(TCHAR Character)
 		{
 			return Character >= TEXT('0') && Character <= TEXT('9');
+		}
+
+		bool TryParseIntegerMagnitude(const FString& Text, bool bSigned, bool& bNegative, uint64& Magnitude)
+		{
+			if (Text.IsEmpty()) return false;
+			int32 Index = 0;
+			bNegative = Text[0] == TEXT('-');
+			if (bNegative && !bSigned) return false;
+			if (bNegative || Text[0] == TEXT('+')) ++Index;
+			if (Index == Text.Len()) return false;
+			const uint64 Limit = bSigned
+				? static_cast<uint64>(MAX_int64) + (bNegative ? 1ull : 0ull) : MAX_uint64;
+			uint64 Result = 0;
+			for (; Index < Text.Len(); ++Index)
+			{
+				if (!IsAsciiDigit(Text[Index])) return false;
+				const uint64 Digit = Text[Index] - TEXT('0');
+				if (Result > (Limit - Digit) / 10) return false;
+				Result = Result * 10 + Digit;
+			}
+			Magnitude = Result;
+			return true;
 		}
 
 		bool IsCanonicalUnsignedInteger(
@@ -135,6 +157,12 @@ namespace UE::UAI::StateSemantic
 			if (Index >= Value.Len())
 			{
 				return false;
+			}
+			// JSON and native float formatters allow zero-padded exponent digits (e-06).
+			// Normalize only the exponent; the mantissa's integer rules remain unchanged.
+			while (Index + 1 < Value.Len() && Value[Index] == TEXT('0'))
+			{
+				++Index;
 			}
 			const FString Magnitude = Value.Mid(Index);
 			if (!IsCanonicalUnsignedInteger(Magnitude, true))
@@ -947,14 +975,27 @@ namespace UE::UAI::StateSemantic
 			return true;
 		}
 
+		TSharedPtr<FJsonValue> RationalValue(const FExactRational& Value) {
+			auto Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("numerator"), (Value.Numerator.bNegative ? TEXT("-") : TEXT("")) + Value.Numerator.Magnitude);
+			Result->SetStringField(TEXT("denominator"), Value.Denominator);
+			return MakeShared<FJsonValueObject>(Result);
+		}
+		TSharedPtr<FJsonValue> TemporalObservation(const FUeAgentTemporalPoint& Time) {
+			auto Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("tick"), Time.GetTick()); Result->SetStringField(TEXT("rate_numerator"), Time.GetRateNumerator());
+			Result->SetStringField(TEXT("rate_denominator"), Time.GetRateDenominator()); Result->SetStringField(TEXT("state"), Time.GetState());
+			return MakeShared<FJsonValueObject>(Result);
+		}
 		bool InvertMatrix(
 			const FExactMatrix& Matrix,
-			FExactMatrix& OutInverse)
+			FExactMatrix& OutInverse, const FString& Path, FUeAgentStateSemanticError& Error)
 		{
 			const int32 Size = Matrix.Num();
 			if (Size == 0)
 			{
-				return false;
+				return Fail(Error, TEXT("spatial_matrix_invalid"), TEXT("An empty matrix cannot be inverted."), Path,
+					MakeShared<FJsonValueString>(TEXT("non-empty square matrix")), MakeShared<FJsonValueNumber>(Size));
 			}
 			FExactMatrix Augmented;
 			Augmented.SetNum(Size);
@@ -963,7 +1004,8 @@ namespace UE::UAI::StateSemantic
 			{
 				if (Matrix[Row].Num() != Size)
 				{
-					return false;
+					return Fail(Error, TEXT("spatial_matrix_invalid"), TEXT("Matrix inversion requires the same number of rows and columns."), Path + TEXT("/") + FString::FromInt(Row),
+						MakeShared<FJsonValueNumber>(Size), MakeShared<FJsonValueNumber>(Matrix[Row].Num()));
 				}
 				Augmented[Row] = Matrix[Row];
 				Augmented[Row].Append(Identity[Row]);
@@ -982,7 +1024,8 @@ namespace UE::UAI::StateSemantic
 				}
 				if (Pivot == INDEX_NONE)
 				{
-					return false;
+					return Fail(Error, TEXT("spatial_matrix_singular"), FString::Printf(TEXT("The matrix is singular: elimination found no nonzero pivot in column %d."), Column), Path,
+						MakeShared<FJsonValueString>(TEXT("nonzero pivot")), MakeShared<FJsonValueString>(TEXT("0")));
 				}
 				if (Pivot != Column)
 				{
@@ -994,7 +1037,8 @@ namespace UE::UAI::StateSemantic
 					FExactRational Divided;
 					if (!DivideRational(Value, PivotValue, Divided))
 					{
-						return false;
+						return Fail(Error, TEXT("spatial_matrix_pivot_invalid"), TEXT("The selected matrix pivot could not be used as an exact nonzero divisor."), Path,
+							MakeShared<FJsonValueString>(TEXT("nonzero pivot")), RationalValue(PivotValue));
 					}
 					Value = MoveTemp(Divided);
 				}
@@ -1026,116 +1070,108 @@ namespace UE::UAI::StateSemantic
 			return true;
 		}
 
-		bool VectorsEqual(
-			const FExactVector& Left,
-			const FExactVector& Right)
-		{
-			if (Left.Num() != Right.Num())
-			{
-				return false;
-			}
-			for (int32 Index = 0; Index < Left.Num(); ++Index)
-			{
-				if (!RationalsEqual(Left[Index], Right[Index]))
-				{
-					return false;
-				}
-			}
+		bool MatchVector(const FExactVector& Expected, const FExactVector& Actual,
+			const FString& Path, FUeAgentStateSemanticError& Error) {
+			if (Expected.Num() != Actual.Num()) return Fail(Error, TEXT("spatial_conversion_frame_contract_mismatch"),
+				TEXT("The conversion vector length differs from the frame-derived vector."), Path,
+				MakeShared<FJsonValueNumber>(Expected.Num()), MakeShared<FJsonValueNumber>(Actual.Num()));
+			for (int32 Index = 0; Index < Expected.Num(); ++Index)
+				if (!RationalsEqual(Expected[Index], Actual[Index])) return Fail(Error, TEXT("spatial_conversion_frame_contract_mismatch"),
+					TEXT("The conversion coefficient differs from the value derived from the source and target frames."), Path + TEXT("/") + FString::FromInt(Index),
+					RationalValue(Expected[Index]), RationalValue(Actual[Index]));
 			return true;
 		}
-
-		bool MatricesEqual(
-			const FExactMatrix& Left,
-			const FExactMatrix& Right)
-		{
-			if (Left.Num() != Right.Num())
-			{
-				return false;
-			}
-			for (int32 Row = 0; Row < Left.Num(); ++Row)
-			{
-				if (!VectorsEqual(Left[Row], Right[Row]))
-				{
-					return false;
-				}
-			}
+		bool MatchMatrix(const FExactMatrix& Expected, const FExactMatrix& Actual,
+			const FString& Path, FUeAgentStateSemanticError& Error) {
+			if (Expected.Num() != Actual.Num()) return Fail(Error, TEXT("spatial_conversion_frame_contract_mismatch"),
+				TEXT("The conversion matrix row count differs from the frame-derived matrix."), Path,
+				MakeShared<FJsonValueNumber>(Expected.Num()), MakeShared<FJsonValueNumber>(Actual.Num()));
+			for (int32 Row = 0; Row < Expected.Num(); ++Row)
+				if (!MatchVector(Expected[Row], Actual[Row], Path + TEXT("/") + FString::FromInt(Row), Error)) return false;
 			return true;
 		}
-
-		bool MatrixToLexemes(
-			const FExactMatrix& Matrix,
-			TArray<FString>& OutLexemes)
-		{
+		bool VectorToLexemes(const FExactVector& Vector, TArray<FString>& OutLexemes,
+			const FString& Path, FUeAgentStateSemanticError& Error) {
 			OutLexemes.Reset();
-			for (const FExactVector& Row : Matrix)
-			{
-				for (const FExactRational& Value : Row)
-				{
+			for (int32 Index = 0; Index < Vector.Num(); ++Index) {
+				FString Lexeme;
+				if (!RationalToDecimalLexeme(Vector[Index], Lexeme)) return Fail(Error, TEXT("spatial_result_non_terminating_decimal"),
+					TEXT("The exact result has a non-terminating decimal expansion and cannot be stored as a finite decimal component."), Path + TEXT("/") + FString::FromInt(Index),
+					MakeShared<FJsonValueString>(TEXT("terminating decimal")), RationalValue(Vector[Index]));
+				OutLexemes.Add(MoveTemp(Lexeme));
+			}
+			return true;
+		}
+		bool MatrixToLexemes(const FExactMatrix& Matrix, TArray<FString>& OutLexemes,
+			const FString& Path, FUeAgentStateSemanticError& Error) {
+			OutLexemes.Reset();
+			for (int32 Row = 0; Row < Matrix.Num(); ++Row) {
+				for (int32 Column = 0; Column < Matrix[Row].Num(); ++Column) {
 					FString Lexeme;
-					if (!RationalToDecimalLexeme(Value, Lexeme))
-					{
-						return false;
-					}
+					if (!RationalToDecimalLexeme(Matrix[Row][Column], Lexeme)) return Fail(Error, TEXT("spatial_result_non_terminating_decimal"),
+						TEXT("The exact transform component has a non-terminating decimal expansion."),
+						Path + TEXT("/") + FString::FromInt(OutLexemes.Num()), MakeShared<FJsonValueString>(TEXT("terminating decimal")), RationalValue(Matrix[Row][Column]));
 					OutLexemes.Add(MoveTemp(Lexeme));
 				}
 			}
 			return true;
 		}
 
-		bool VectorToLexemes(
-			const FExactVector& Vector,
-			TArray<FString>& OutLexemes)
+		FUeAgentStateSemanticError SpatialValueFailure(const TCHAR* Code, const TCHAR* Reason,
+			const FString& Path, TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected)
 		{
-			OutLexemes.Reset();
-			for (const FExactRational& Value : Vector)
-			{
-				FString Lexeme;
-				if (!RationalToDecimalLexeme(Value, Lexeme))
-				{
-					return false;
-				}
-				OutLexemes.Add(MoveTemp(Lexeme));
-			}
-			return true;
+			auto Error = FUeAgentStateSemanticError::Failure(Code, Reason, TEXT("state_semantic"));
+			Error.PropertyPath = Path;
+			Error.ActualValue = MoveTemp(Actual);
+			Error.ExpectedValue = MoveTemp(Expected);
+			return Error;
 		}
 
-		bool IsSquareExactLexemeMatrix(
-			const TArray<TArray<FString>>& Matrix,
-			int32 Dimension)
+		FUeAgentStateSemanticError ValidateExactLexemeVector(const TArray<FString>& Vector, const FString& Path)
+		{
+			for (int32 Index = 0; Index < Vector.Num(); ++Index)
+			{
+				FExactNumber Parsed;
+				if (!ParseExactNumber(Vector[Index], Parsed))
+				{
+					return SpatialValueFailure(TEXT("spatial_numeric_value_invalid"),
+						TEXT("The spatial coordinate is not a valid exact numeric value."),
+						FString::Printf(TEXT("%s[%d]"), *Path, Index), MakeShared<FJsonValueString>(Vector[Index]),
+						MakeShared<FJsonValueString>(TEXT("exact numeric value")));
+				}
+			}
+			return {};
+		}
+
+		FUeAgentStateSemanticError ValidateSquareExactLexemeMatrix(
+			const TArray<TArray<FString>>& Matrix, int32 Dimension, const FString& Path)
 		{
 			if (Matrix.Num() != Dimension)
+				return SpatialValueFailure(TEXT("spatial_matrix_row_count_invalid"),
+					TEXT("The spatial basis must contain one row per dimension."), Path,
+					MakeShared<FJsonValueNumber>(Matrix.Num()), MakeShared<FJsonValueNumber>(Dimension));
+			for (int32 RowIndex = 0; RowIndex < Matrix.Num(); ++RowIndex)
 			{
-				return false;
-			}
-			for (const TArray<FString>& Row : Matrix)
-			{
+				const auto& Row = Matrix[RowIndex];
+				const FString RowPath = FString::Printf(TEXT("%s[%d]"), *Path, RowIndex);
 				if (Row.Num() != Dimension)
-				{
-					return false;
-				}
-				for (const FString& Lexeme : Row)
-				{
-					FExactNumber Parsed;
-					if (!ParseExactNumber(Lexeme, Parsed))
-					{
-						return false;
-					}
-				}
+					return SpatialValueFailure(TEXT("spatial_matrix_column_count_invalid"),
+						TEXT("Each spatial basis row must contain one coordinate per dimension."), RowPath,
+						MakeShared<FJsonValueNumber>(Row.Num()), MakeShared<FJsonValueNumber>(Dimension));
+				auto Error = ValidateExactLexemeVector(Row, RowPath);
+				if (!Error.IsEmpty()) return Error;
 			}
-			return true;
+			return {};
+		}
+
+		bool IsSquareExactLexemeMatrix(const TArray<TArray<FString>>& Matrix, int32 Dimension)
+		{
+			return ValidateSquareExactLexemeMatrix(Matrix, Dimension, TEXT("basis")).IsEmpty();
 		}
 
 		bool IsExactLexemeVector(const TArray<FString>& Vector)
 		{
-			for (const FString& Lexeme : Vector)
-			{
-				FExactNumber Parsed;
-				if (!ParseExactNumber(Lexeme, Parsed))
-				{
-					return false;
-				}
-			}
-			return true;
+			return ValidateExactLexemeVector(Vector, TEXT("vector")).IsEmpty();
 		}
 
 		bool ExactLexemeArraysEqual(
@@ -1208,20 +1244,15 @@ namespace UE::UAI::StateSemantic
 				OutError);
 		}
 
-		void AddDifference(
-			TArray<FUeAgentSemanticDifference>& Differences,
-			EUeAgentDifferenceKind Kind,
-			const FString& Path,
-			FUeAgentCanonicalValuePtr Left =
-				FUeAgentCanonicalValuePtr(),
-			FUeAgentCanonicalValuePtr Right =
-				FUeAgentCanonicalValuePtr())
+		bool AddDifference(TArray<FUeAgentSemanticDifference>& Differences, EUeAgentDifferenceKind Kind,
+			const FString& Path, FUeAgentCanonicalValuePtr Left, FUeAgentCanonicalValuePtr Right,
+			FUeAgentResourceTracker& Resources, FUeAgentStateSemanticError& OutError)
 		{
-			Differences.Emplace(
-				Kind,
-				Path,
-				MoveTemp(Left),
-				MoveTemp(Right));
+			FUeAgentCanonicalValuePtr PublicLeft, PublicRight;
+			if (!TryCanonicalizeDifferenceEvidence(Left, Resources, PublicLeft, OutError, EDifferenceEvidenceAudience::Public)
+				|| !TryCanonicalizeDifferenceEvidence(Right, Resources, PublicRight, OutError, EDifferenceEvidenceAudience::Public)) return false;
+			Differences.Emplace(Kind, Path, MoveTemp(Left), MoveTemp(Right), MoveTemp(PublicLeft), MoveTemp(PublicRight));
+			return true;
 		}
 
 		template <typename EvidenceType>
@@ -1254,12 +1285,13 @@ namespace UE::UAI::StateSemantic
 			{
 				return false;
 			}
-			AddDifference(
-				Differences,
-				Kind,
-				Path,
-				MoveTemp(LeftValue),
-				MoveTemp(RightValue));
+			FUeAgentCanonicalValuePtr PublicLeft, PublicRight;
+			if (Left && !TryCanonicalizeDifferenceEvidence(*Left, Resources, PublicLeft, OutError,
+				EDifferenceEvidenceAudience::Public)) return false;
+			if (Right && !TryCanonicalizeDifferenceEvidence(*Right, Resources, PublicRight, OutError,
+				EDifferenceEvidenceAudience::Public)) return false;
+			Differences.Emplace(Kind, Path, MoveTemp(LeftValue), MoveTemp(RightValue),
+				MoveTemp(PublicLeft), MoveTemp(PublicRight));
 			return true;
 		}
 
@@ -1283,22 +1315,29 @@ namespace UE::UAI::StateSemantic
 			{
 				FTask Task = MoveTemp(Tasks.Last());
 				Tasks.Pop(EAllowShrinking::No);
-				if (Task.Left->GetKind() != Task.Right->GetKind())
+				const EUeAgentValueKind Kind = Task.Left->GetKind();
+				const EUeAgentValueKind RightKind = Task.Right->GetKind();
+				// JSON transports can represent the same number as Integer or
+				// Decimal. Compare numeric values exactly below; declared property
+				// types remain the responsibility of the state entry/type contract.
+				const bool bBothNumeric =
+					(Kind == EUeAgentValueKind::Integer || Kind == EUeAgentValueKind::Decimal)
+					&& (RightKind == EUeAgentValueKind::Integer || RightKind == EUeAgentValueKind::Decimal);
+				if (Kind != RightKind && !bBothNumeric)
 				{
 					if (!ChargeComparison(Resources, Task.Path, 0, OutError))
 					{
 						return false;
 					}
-					AddDifference(
+					if (!AddDifference(
 						OutDifferences,
 						EUeAgentDifferenceKind::TypeMismatch,
 						Task.Path,
 						FUeAgentCanonicalValuePtr(Task.Left),
-						FUeAgentCanonicalValuePtr(Task.Right));
+						FUeAgentCanonicalValuePtr(Task.Right), Resources, OutError)) return false;
 					continue;
 				}
 
-				const EUeAgentValueKind Kind = Task.Left->GetKind();
 				if (Kind == EUeAgentValueKind::Array)
 				{
 					const TArray<FUeAgentCanonicalValueRef>& LeftItems =
@@ -1324,20 +1363,20 @@ namespace UE::UAI::StateSemantic
 					}
 					for (int32 Index = Common; Index < LeftItems.Num(); ++Index)
 					{
-						AddDifference(
+						if (!AddDifference(
 							OutDifferences,
 							EUeAgentDifferenceKind::MissingRight,
 							JsonPointerJoin(Task.Path, Index),
-							FUeAgentCanonicalValuePtr(LeftItems[Index]));
+							FUeAgentCanonicalValuePtr(LeftItems[Index]), nullptr, Resources, OutError)) return false;
 					}
 					for (int32 Index = Common; Index < RightItems.Num(); ++Index)
 					{
-						AddDifference(
+						if (!AddDifference(
 							OutDifferences,
 							EUeAgentDifferenceKind::MissingLeft,
 							JsonPointerJoin(Task.Path, Index),
 							FUeAgentCanonicalValuePtr(),
-							FUeAgentCanonicalValuePtr(RightItems[Index]));
+							FUeAgentCanonicalValuePtr(RightItems[Index]), Resources, OutError)) return false;
 					}
 					continue;
 				}
@@ -1360,24 +1399,24 @@ namespace UE::UAI::StateSemantic
 					{
 						if (LeftIndex >= LeftItems.Num())
 						{
-							AddDifference(
+							if (!AddDifference(
 								OutDifferences,
 								EUeAgentDifferenceKind::MissingLeft,
 								JsonPointerJoin(Task.Path, RightItems[RightIndex].Key),
 								FUeAgentCanonicalValuePtr(),
 								FUeAgentCanonicalValuePtr(
-									RightItems[RightIndex].Value));
+									RightItems[RightIndex].Value), Resources, OutError)) return false;
 							++RightIndex;
 							continue;
 						}
 						if (RightIndex >= RightItems.Num())
 						{
-							AddDifference(
+							if (!AddDifference(
 								OutDifferences,
 								EUeAgentDifferenceKind::MissingRight,
 								JsonPointerJoin(Task.Path, LeftItems[LeftIndex].Key),
 								FUeAgentCanonicalValuePtr(
-									LeftItems[LeftIndex].Value));
+								LeftItems[LeftIndex].Value), nullptr, Resources, OutError)) return false;
 							++LeftIndex;
 							continue;
 						}
@@ -1386,23 +1425,23 @@ namespace UE::UAI::StateSemantic
 							ESearchCase::CaseSensitive);
 						if (Comparison < 0)
 						{
-							AddDifference(
+							if (!AddDifference(
 								OutDifferences,
 								EUeAgentDifferenceKind::MissingRight,
 								JsonPointerJoin(Task.Path, LeftItems[LeftIndex].Key),
 								FUeAgentCanonicalValuePtr(
-									LeftItems[LeftIndex].Value));
+								LeftItems[LeftIndex].Value), nullptr, Resources, OutError)) return false;
 							++LeftIndex;
 						}
 						else if (Comparison > 0)
 						{
-							AddDifference(
+							if (!AddDifference(
 								OutDifferences,
 								EUeAgentDifferenceKind::MissingLeft,
 								JsonPointerJoin(Task.Path, RightItems[RightIndex].Key),
 								FUeAgentCanonicalValuePtr(),
 								FUeAgentCanonicalValuePtr(
-									RightItems[RightIndex].Value));
+									RightItems[RightIndex].Value), Resources, OutError)) return false;
 							++RightIndex;
 						}
 						else
@@ -1434,35 +1473,35 @@ namespace UE::UAI::StateSemantic
 				case EUeAgentValueKind::Boolean:
 					if (Task.Left->GetBoolean() != Task.Right->GetBoolean())
 					{
-						AddDifference(
+						if (!AddDifference(
 							OutDifferences,
 							EUeAgentDifferenceKind::ValueMismatch,
 							Task.Path,
 							FUeAgentCanonicalValuePtr(Task.Left),
-							FUeAgentCanonicalValuePtr(Task.Right));
+							FUeAgentCanonicalValuePtr(Task.Right), Resources, OutError)) return false;
 					}
 					break;
 				case EUeAgentValueKind::String:
-					if (Task.Left->GetText() != Task.Right->GetText())
+					if (!Task.Left->GetText().Equals(Task.Right->GetText(), ESearchCase::CaseSensitive))
 					{
-						AddDifference(
+						if (!AddDifference(
 							OutDifferences,
 							EUeAgentDifferenceKind::ValueMismatch,
 							Task.Path,
 							FUeAgentCanonicalValuePtr(Task.Left),
-							FUeAgentCanonicalValuePtr(Task.Right));
+							FUeAgentCanonicalValuePtr(Task.Right), Resources, OutError)) return false;
 					}
 					break;
 				case EUeAgentValueKind::Integer:
 				case EUeAgentValueKind::Decimal:
 					if (!ExactNumbersEqual(Task.Left->GetLexeme(), Task.Right->GetLexeme()))
 					{
-						AddDifference(
+						if (!AddDifference(
 							OutDifferences,
 							EUeAgentDifferenceKind::ValueMismatch,
 							Task.Path,
 							FUeAgentCanonicalValuePtr(Task.Left),
-							FUeAgentCanonicalValuePtr(Task.Right));
+							FUeAgentCanonicalValuePtr(Task.Right), Resources, OutError)) return false;
 					}
 					break;
 				case EUeAgentValueKind::Temporal:
@@ -1625,19 +1664,22 @@ namespace UE::UAI::StateSemantic
 		, RateDenominator(MoveTemp(InRateDenominator))
 		, State(MoveTemp(InState))
 	{
+		auto Reject = [&](const TCHAR* Field, const TCHAR* Reason, const FString& Value, bool bInternal)
+		{
+			ValidationDiagnostic = FUeAgentStateSemanticError::Failure(TEXT("temporal_point_invalid"), Reason, TEXT("state_semantic"));
+			ValidationDiagnostic.PropertyPath = Field;
+			if (bInternal) ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(Value);
+			else ValidationDiagnostic.ActualValue = MakeShared<FJsonValueString>(Value);
+		};
 		FExactNumber Numerator;
 		FExactNumber Denominator;
-		bValid = IsNonEmpty(ClockId)
-			&& IsCanonicalIntegerLexeme(Tick)
-			&& IsCanonicalIntegerLexeme(RateNumerator)
-			&& IsCanonicalIntegerLexeme(RateDenominator)
-			&& ParseExactNumber(RateNumerator, Numerator)
-			&& ParseExactNumber(RateDenominator, Denominator)
-			&& !Numerator.bNegative
-			&& Numerator.Digits != TEXT("0")
-			&& !Denominator.bNegative
-			&& Denominator.Digits != TEXT("0")
-			&& IsNonEmpty(State);
+		if (!IsNonEmpty(ClockId)) Reject(TEXT("clock_id"), TEXT("The temporal point requires a non-empty clock identifier."), ClockId, true);
+		else if (!IsCanonicalIntegerLexeme(Tick)) Reject(TEXT("tick"), TEXT("The tick must be a canonical integer string."), Tick, false);
+		else if (!IsCanonicalIntegerLexeme(RateNumerator)) Reject(TEXT("rate_numerator"), TEXT("The rate numerator must be a canonical integer string."), RateNumerator, false);
+		else if (!IsCanonicalIntegerLexeme(RateDenominator)) Reject(TEXT("rate_denominator"), TEXT("The rate denominator must be a canonical integer string."), RateDenominator, false);
+		else if (!ParseExactNumber(RateNumerator, Numerator) || Numerator.bNegative || Numerator.Digits == TEXT("0")) Reject(TEXT("rate_numerator"), TEXT("The rate numerator must be a positive integer."), RateNumerator, false);
+		else if (!ParseExactNumber(RateDenominator, Denominator) || Denominator.bNegative || Denominator.Digits == TEXT("0")) Reject(TEXT("rate_denominator"), TEXT("The rate denominator must be a positive integer."), RateDenominator, false);
+		else if (!IsNonEmpty(State)) Reject(TEXT("state"), TEXT("The temporal point requires a non-empty capture state."), State, false);
 	}
 
 	const FString& FUeAgentTemporalPoint::GetClockId() const { return ClockId; }
@@ -1645,7 +1687,8 @@ namespace UE::UAI::StateSemantic
 	const FString& FUeAgentTemporalPoint::GetRateNumerator() const { return RateNumerator; }
 	const FString& FUeAgentTemporalPoint::GetRateDenominator() const { return RateDenominator; }
 	const FString& FUeAgentTemporalPoint::GetState() const { return State; }
-	bool FUeAgentTemporalPoint::IsValid() const { return bValid; }
+	bool FUeAgentTemporalPoint::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FUeAgentStateSemanticError& FUeAgentTemporalPoint::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	bool FUeAgentTemporalPoint::operator==(const FUeAgentTemporalPoint& Other) const
 	{
@@ -1674,15 +1717,43 @@ namespace UE::UAI::StateSemantic
 		, BasisEvidence(MoveTemp(InBasisEvidence))
 		, ObservedAt(MoveTemp(InObservedAt))
 	{
-		bValid = IsNonEmpty(FrameId)
-			&& IsNonEmpty(BasisFrameId)
-			&& (Dimension == 2 || Dimension == 3)
-			&& IsSquareExactLexemeMatrix(Basis, Dimension)
-			&& Origin.Num() == Dimension
-			&& IsExactLexemeVector(Origin)
-			&& IsNonEmpty(Unit)
-			&& IsNonEmpty(BasisEvidence)
-			&& ObservedAt.IsValid();
+		const auto MissingText = [](const TCHAR* Reason, const TCHAR* Path, const FString& Value)
+		{
+			return SpatialValueFailure(TEXT("spatial_frame_invalid"), Reason, Path,
+				MakeShared<FJsonValueString>(Value), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+		};
+		if (!IsNonEmpty(FrameId))
+			ValidationDiagnostic = MissingText(TEXT("The spatial frame requires a non-empty frame identifier."), TEXT("frame_id"), FrameId);
+		else if (!IsNonEmpty(BasisFrameId))
+			ValidationDiagnostic = MissingText(TEXT("The spatial frame requires a non-empty basis frame identifier."), TEXT("basis_frame_id"), BasisFrameId);
+		else if (Dimension != 2 && Dimension != 3)
+			ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_frame_invalid"),
+				TEXT("The spatial frame dimension must be 2 or 3."), TEXT("dimension"),
+				MakeShared<FJsonValueNumber>(Dimension), MakeShared<FJsonValueString>(TEXT("2 or 3")));
+		if (!ValidationDiagnostic.IsEmpty()) return;
+		ValidationDiagnostic = ValidateSquareExactLexemeMatrix(Basis, Dimension, TEXT("basis"));
+		if (!ValidationDiagnostic.IsEmpty()) return;
+		if (Origin.Num() != Dimension)
+		{
+			ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_frame_invalid"),
+				TEXT("The spatial frame origin must contain one coordinate per dimension."), TEXT("origin"),
+				MakeShared<FJsonValueNumber>(Origin.Num()), MakeShared<FJsonValueNumber>(Dimension));
+			return;
+		}
+		ValidationDiagnostic = ValidateExactLexemeVector(Origin, TEXT("origin"));
+		if (!ValidationDiagnostic.IsEmpty()) return;
+		if (!IsNonEmpty(Unit))
+			ValidationDiagnostic = MissingText(TEXT("The spatial frame requires a non-empty unit."), TEXT("unit"), Unit);
+		else if (!IsNonEmpty(BasisEvidence))
+		{
+			ValidationDiagnostic = MissingText(TEXT("The spatial frame requires basis evidence."), TEXT("basis_evidence"), BasisEvidence);
+			ValidationDiagnostic.ActualEvidence = MoveTemp(ValidationDiagnostic.ActualValue);
+		}
+		else if (!ObservedAt.IsValid())
+		{
+			ValidationDiagnostic = ObservedAt.GetValidationDiagnostic();
+			ValidationDiagnostic.PropertyPath = TEXT("observed_at.") + ValidationDiagnostic.PropertyPath;
+		}
 	}
 
 	const FString& FUeAgentSpatialFrame::GetFrameId() const { return FrameId; }
@@ -1693,13 +1764,13 @@ namespace UE::UAI::StateSemantic
 	const FString& FUeAgentSpatialFrame::GetUnit() const { return Unit; }
 	const FString& FUeAgentSpatialFrame::GetBasisEvidence() const { return BasisEvidence; }
 	const FUeAgentTemporalPoint& FUeAgentSpatialFrame::GetObservedAt() const { return ObservedAt; }
-	bool FUeAgentSpatialFrame::IsValid() const { return bValid; }
+	bool FUeAgentSpatialFrame::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	bool FUeAgentSpatialFrame::SemanticallyEquals(
 		const FUeAgentSpatialFrame& Other) const
 	{
-		return bValid
-			&& Other.bValid
+		return IsValid()
+			&& Other.IsValid()
 			&& FrameId == Other.FrameId
 			&& BasisFrameId == Other.BasisFrameId
 			&& Dimension == Other.Dimension
@@ -1728,16 +1799,49 @@ namespace UE::UAI::StateSemantic
 		, ValidAt(MoveTemp(InValidAt))
 		, Evidence(MoveTemp(InEvidence))
 	{
-		bValid = IsNonEmpty(ConversionId)
-			&& IsNonEmpty(FromFrame)
-			&& IsNonEmpty(ToFrame)
-			&& SourceDimension == TargetDimension
-			&& (SourceDimension == 2 || SourceDimension == 3)
-			&& IsSquareExactLexemeMatrix(Linear, SourceDimension)
-			&& Translation.Num() == TargetDimension
-			&& IsExactLexemeVector(Translation)
-			&& ValidAt.IsValid()
-			&& IsNonEmpty(Evidence);
+		const auto RequiredText = [&](const FString& Value, const TCHAR* Path, const TCHAR* Reason)
+		{
+			if (IsNonEmpty(Value)) return true;
+			ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_conversion_invalid"), Reason, Path,
+				MakeShared<FJsonValueString>(Value), MakeShared<FJsonValueString>(TEXT("non-empty string")));
+			return false;
+		};
+		if (!RequiredText(ConversionId, TEXT("conversion_id"), TEXT("The spatial conversion requires a conversion identifier."))
+			|| !RequiredText(FromFrame, TEXT("from_frame"), TEXT("The spatial conversion requires a source frame reference."))
+			|| !RequiredText(ToFrame, TEXT("to_frame"), TEXT("The spatial conversion requires a target frame reference."))) return;
+		if (SourceDimension != TargetDimension)
+		{
+			ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_conversion_invalid"),
+				TEXT("The target frame dimension must equal the source frame dimension."), TEXT("target_dimension"),
+				MakeShared<FJsonValueNumber>(TargetDimension), MakeShared<FJsonValueNumber>(SourceDimension));
+			return;
+		}
+		if (SourceDimension != 2 && SourceDimension != 3)
+		{
+			ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_conversion_invalid"),
+				TEXT("The spatial conversion dimension must be 2 or 3."), TEXT("source_dimension"),
+				MakeShared<FJsonValueNumber>(SourceDimension), MakeShared<FJsonValueString>(TEXT("2 or 3")));
+			return;
+		}
+		ValidationDiagnostic = ValidateSquareExactLexemeMatrix(Linear, SourceDimension, TEXT("linear"));
+		if (!ValidationDiagnostic.IsEmpty()) return;
+		if (Translation.Num() != TargetDimension)
+		{
+			ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_conversion_invalid"),
+				TEXT("The translation must contain one coordinate per target dimension."), TEXT("translation"),
+				MakeShared<FJsonValueNumber>(Translation.Num()), MakeShared<FJsonValueNumber>(TargetDimension));
+			return;
+		}
+		ValidationDiagnostic = ValidateExactLexemeVector(Translation, TEXT("translation"));
+		if (!ValidationDiagnostic.IsEmpty()) return;
+		if (!ValidAt.IsValid())
+		{
+			ValidationDiagnostic = ValidAt.GetValidationDiagnostic();
+			ValidationDiagnostic.PropertyPath = TEXT("valid_at.") + ValidationDiagnostic.PropertyPath;
+			return;
+		}
+		if (!RequiredText(Evidence, TEXT("evidence"), TEXT("The spatial conversion requires conversion evidence.")))
+			ValidationDiagnostic.ActualEvidence = MoveTemp(ValidationDiagnostic.ActualValue);
 	}
 
 	const FString& FUeAgentSpatialConversion::GetConversionId() const { return ConversionId; }
@@ -1749,7 +1853,7 @@ namespace UE::UAI::StateSemantic
 	const TArray<FString>& FUeAgentSpatialConversion::GetTranslation() const { return Translation; }
 	const FUeAgentTemporalPoint& FUeAgentSpatialConversion::GetValidAt() const { return ValidAt; }
 	const FString& FUeAgentSpatialConversion::GetEvidence() const { return Evidence; }
-	bool FUeAgentSpatialConversion::IsValid() const { return bValid; }
+	bool FUeAgentSpatialConversion::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	FUeAgentSpatialValue::FUeAgentSpatialValue(
 		FString InSubject,
@@ -1768,17 +1872,42 @@ namespace UE::UAI::StateSemantic
 		const int32 Expected = QuantityKind == EUeAgentSpatialQuantityKind::Transform
 			? FMath::Square(Frame.GetDimension() + 1)
 			: Frame.GetDimension();
-		bValid = IsNonEmpty(Subject)
-			&& Frame.IsValid()
-			&& ObservedAt.IsValid()
-			&& AreTemporalPointsEquivalent(ObservedAt, Frame.GetObservedAt())
-			&& Components.Num() == Expected
-			&& IsExactLexemeVector(Components);
-		for (const FString& Evidence : ConversionEvidence)
-		{
-			bValid = bValid && IsNonEmpty(Evidence);
+		if (!IsNonEmpty(Subject)) {
+			ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_value_invalid"), TEXT("The spatial value requires a non-empty subject identifier."),
+				TEXT("subject"), nullptr, MakeShared<FJsonValueString>(TEXT("non-empty subject identifier")));
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(Subject); return;
 		}
-		if (bValid && QuantityKind == EUeAgentSpatialQuantityKind::Transform)
+		if (!Frame.IsValid()) {
+			ValidationDiagnostic = Frame.GetValidationDiagnostic();
+			ValidationDiagnostic.PropertyPath = TEXT("frame.") + ValidationDiagnostic.PropertyPath; return;
+		}
+		if (!ObservedAt.IsValid()) {
+			ValidationDiagnostic = ObservedAt.GetValidationDiagnostic();
+			ValidationDiagnostic.PropertyPath = TEXT("observed_at.") + ValidationDiagnostic.PropertyPath; return;
+		}
+		if (!AreTemporalPointsEquivalent(ObservedAt, Frame.GetObservedAt())) {
+			const auto& FrameTime = Frame.GetObservedAt();
+			ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_value_invalid"),
+				ObservedAt.GetClockId() != FrameTime.GetClockId() ? TEXT("The spatial value and its frame use different observation clocks.")
+				: TEXT("The spatial value and its frame must have the same observation time and state."), TEXT("observed_at"), nullptr, nullptr);
+			ValidationDiagnostic.ExpectedValue = TemporalObservation(FrameTime); ValidationDiagnostic.ActualValue = TemporalObservation(ObservedAt);
+			ValidationDiagnostic.ExpectedEvidence = MakeShared<FJsonValueString>(FrameTime.GetClockId());
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(ObservedAt.GetClockId()); return;
+		}
+		if (Components.Num() != Expected) {
+			ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_value_invalid"), TEXT("The spatial component count does not match its quantity and frame dimension."),
+				TEXT("components"), MakeShared<FJsonValueNumber>(Components.Num()), MakeShared<FJsonValueNumber>(Expected)); return;
+		}
+		ValidationDiagnostic = ValidateExactLexemeVector(Components, TEXT("components"));
+		if (!ValidationDiagnostic.IsEmpty()) return;
+		for (int32 Index = 0; Index < ConversionEvidence.Num(); ++Index) {
+			if (!IsNonEmpty(ConversionEvidence[Index])) {
+				ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_value_invalid"), TEXT("A spatial conversion evidence entry must be non-empty."),
+					FString::Printf(TEXT("conversion_evidence[%d]"), Index), nullptr, MakeShared<FJsonValueString>(TEXT("non-empty evidence identifier")));
+				ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(ConversionEvidence[Index]); return;
+			}
+		}
+		if (QuantityKind == EUeAgentSpatialQuantityKind::Transform)
 		{
 			const int32 Size = Frame.GetDimension() + 1;
 			for (int32 Column = 0; Column < Size; ++Column)
@@ -1787,8 +1916,10 @@ namespace UE::UAI::StateSemantic
 				const FString ExpectedValue = Column == Size - 1 ? TEXT("1") : TEXT("0");
 				if (!ExactNumbersEqual(Value, ExpectedValue))
 				{
-					bValid = false;
-					break;
+					ValidationDiagnostic = SpatialValueFailure(TEXT("spatial_value_invalid"), TEXT("The transform homogeneous row must contain zeros followed by one."),
+						FString::Printf(TEXT("components[%d]"), Components.Num() - Size + Column),
+						MakeShared<FJsonValueString>(Value), MakeShared<FJsonValueString>(ExpectedValue));
+					return;
 				}
 			}
 		}
@@ -1803,13 +1934,13 @@ namespace UE::UAI::StateSemantic
 	{
 		return ConversionEvidence;
 	}
-	bool FUeAgentSpatialValue::IsValid() const { return bValid; }
+	bool FUeAgentSpatialValue::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
 
 	bool FUeAgentSpatialValue::SemanticallyEquals(
 		const FUeAgentSpatialValue& Other) const
 	{
-		return bValid
-			&& Other.bValid
+		return IsValid()
+			&& Other.IsValid()
 			&& Subject == Other.Subject
 			&& QuantityKind == Other.QuantityKind
 			&& Frame.SemanticallyEquals(Other.Frame)
@@ -1820,6 +1951,53 @@ namespace UE::UAI::StateSemantic
 	FUeAgentCanonicalValue::FUeAgentCanonicalValue(EUeAgentValueKind InKind)
 		: Kind(InKind)
 	{
+	}
+
+	bool TryNormalizeNumberLexeme(const FString& Lexeme, FString& OutNormalized)
+	{
+		FExactNumber Number;
+		if (!ParseExactNumber(Lexeme, Number)) return false;
+		OutNormalized = (Number.bNegative ? TEXT("-") : TEXT("")) + Number.Digits;
+		if (Number.PowerOfTen != 0) OutNormalized += TEXT("e") + FString::FromInt(Number.PowerOfTen);
+		return true;
+	}
+
+	bool IsIntegralNumberLexeme(const FString& Lexeme)
+	{
+		FExactNumber Number;
+		return ParseExactNumber(Lexeme, Number) && Number.PowerOfTen >= 0;
+	}
+
+	bool TryCompareNumberLexemes(const FString& Left, const FString& Right, int32& OutComparison)
+	{
+		FExactNumber A, B;
+		if (!ParseExactNumber(Left, A) || !ParseExactNumber(Right, B)) return false;
+		const bool AZero = A.Digits == TEXT("0"), BZero = B.Digits == TEXT("0");
+		if (AZero || BZero)
+		{
+			OutComparison = AZero && BZero ? 0 : AZero ? (B.bNegative ? 1 : -1) : (A.bNegative ? -1 : 1);
+			return true;
+		}
+		if (A.bNegative != B.bNegative)
+		{
+			OutComparison = A.bNegative ? -1 : 1;
+			return true;
+		}
+		const int64 AOrder = static_cast<int64>(A.Digits.Len()) + A.PowerOfTen;
+		const int64 BOrder = static_cast<int64>(B.Digits.Len()) + B.PowerOfTen;
+		int32 Comparison = AOrder < BOrder ? -1 : AOrder > BOrder ? 1 : 0;
+		if (Comparison == 0)
+		{
+			// Compare significant digits with virtual trailing zeros; do not expand exponents.
+			for (int32 Index = 0; Index < FMath::Max(A.Digits.Len(), B.Digits.Len()); ++Index)
+			{
+				const TCHAR ADigit = Index < A.Digits.Len() ? A.Digits[Index] : TEXT('0');
+				const TCHAR BDigit = Index < B.Digits.Len() ? B.Digits[Index] : TEXT('0');
+				if (ADigit != BDigit) { Comparison = ADigit < BDigit ? -1 : 1; break; }
+			}
+		}
+		OutComparison = A.bNegative ? -Comparison : Comparison;
+		return true;
 	}
 
 	bool FUeAgentCanonicalValue::TryNull(
@@ -1899,7 +2077,8 @@ namespace UE::UAI::StateSemantic
 		if (!IsCanonicalIntegerLexeme(Lexeme))
 		{
 			OutValue.Reset();
-			return Fail(OutError, TEXT("integer_lexeme_not_canonical"), TEXT("/value"));
+			return Fail(OutError, TEXT("integer_lexeme_not_canonical"), TEXT("The integer text is not a canonical signed integer spelling."), TEXT("/value"),
+				MakeShared<FJsonValueString>(TEXT("canonical integer spelling")), MakeShared<FJsonValueString>(Lexeme));
 		}
 		ResetError(OutError);
 		OutValue.Reset();
@@ -1930,7 +2109,8 @@ namespace UE::UAI::StateSemantic
 		if (!ParseExactNumber(Lexeme, Parsed))
 		{
 			OutValue.Reset();
-			return Fail(OutError, TEXT("decimal_lexeme_not_finite"), TEXT("/value"));
+			return Fail(OutError, TEXT("decimal_lexeme_not_finite"), TEXT("The numeric text is not a finite exact decimal spelling."), TEXT("/value"),
+				MakeShared<FJsonValueString>(TEXT("finite exact decimal spelling")), MakeShared<FJsonValueString>(Lexeme));
 		}
 		ResetError(OutError);
 		OutValue.Reset();
@@ -1984,19 +2164,21 @@ namespace UE::UAI::StateSemantic
 		ResetError(OutError);
 		OutValue.Reset();
 		int64 StringBytes = 0;
-		TSet<FString> Keys;
+		TSet<FString, FExactStringKeyFuncs> Keys;
 		for (const auto& Item : Items)
 		{
-			if (!IsNonEmpty(Item.Key))
+			if (Item.Key.IsEmpty())
 			{
-				return Fail(OutError, TEXT("object_key_empty"), TEXT("/value"));
+				return Fail(OutError, TEXT("object_key_empty"), TEXT("A canonical object member key must be non-empty."), TEXT("/value"),
+					MakeShared<FJsonValueString>(TEXT("non-empty member key")), MakeShared<FJsonValueString>(Item.Key));
 			}
 			if (Keys.Contains(Item.Key))
 			{
 				return Fail(
 					OutError,
 					TEXT("object_key_duplicate"),
-					JsonPointerJoin(TEXT("/value"), Item.Key));
+					TEXT("The canonical object contains the same member key more than once."),
+					JsonPointerJoin(TEXT("/value"), Item.Key), MakeShared<FJsonValueString>(TEXT("unique member key")), MakeShared<FJsonValueString>(Item.Key));
 			}
 			Keys.Add(Item.Key);
 			StringBytes += MeasureText(Item.Key).Utf8Bytes;
@@ -2033,7 +2215,8 @@ namespace UE::UAI::StateSemantic
 		OutValue.Reset();
 		if (!Value.IsValid())
 		{
-			return Fail(OutError, TEXT("temporal_value_invalid"), TEXT("/value"));
+			OutError = FUeAgentStateSemanticError::WrapFailure(TEXT("temporal_value_invalid"), Value.GetValidationDiagnostic(), TEXT("state_semantic"));
+			OutError.Source.JsonPath = TEXT("/value"); return false;
 		}
 		if (!Charge(Resources, {
 			{EUeAgentResourceDimension::Nodes, 1},
@@ -2060,7 +2243,7 @@ namespace UE::UAI::StateSemantic
 		OutValue.Reset();
 		if (!Value.IsValid())
 		{
-			return Fail(OutError, TEXT("spatial_value_invalid"), TEXT("/value"));
+			OutError = Value.GetValidationDiagnostic(); OutError.Source.JsonPath = TEXT("/value"); return false;
 		}
 		if (!Charge(Resources, {
 			{EUeAgentResourceDimension::Nodes, 1},
@@ -2101,6 +2284,56 @@ namespace UE::UAI::StateSemantic
 		return Spatial;
 	}
 
+	namespace
+	{
+		TSharedPtr<const FUeAgentStateSemanticError> InvalidState(const FString& Code,
+			const FString& Reason, const FString& Path)
+		{
+			auto Error = FUeAgentStateSemanticError::Failure(Code, Reason, TEXT("canonical_state"));
+			Error.SemanticPointer = Path;
+			return MakeShared<const FUeAgentStateSemanticError>(MoveTemp(Error));
+		}
+
+		const FUeAgentStateSemanticError& ValidationOrEmpty(const TSharedPtr<const FUeAgentStateSemanticError>& Error)
+		{
+			static const FUeAgentStateSemanticError Empty;
+			return Error ? *Error : Empty;
+		}
+
+		FString DiagnosticValueKind(EUeAgentValueKind Kind)
+		{
+			switch (Kind)
+			{
+			case EUeAgentValueKind::Null: return TEXT("null");
+			case EUeAgentValueKind::Boolean: return TEXT("boolean");
+			case EUeAgentValueKind::String: return TEXT("string");
+			case EUeAgentValueKind::Integer: return TEXT("integer");
+			case EUeAgentValueKind::Decimal: return TEXT("decimal");
+			case EUeAgentValueKind::Array: return TEXT("array");
+			case EUeAgentValueKind::Object: return TEXT("object");
+			case EUeAgentValueKind::Temporal: return TEXT("temporal");
+			case EUeAgentValueKind::Spatial: return TEXT("spatial");
+			default: return FString::FromInt(static_cast<int32>(Kind));
+			}
+		}
+
+		bool NormalizeIdentityPart(FString& Value, const FString& Field,
+			TSharedPtr<const FUeAgentStateSemanticError>& Error)
+		{
+			const FString Original = Value;
+			if (Private::TryNormalizeNfcText(Value, Value)) return true;
+			auto Failure = FUeAgentStateSemanticError::Failure(TEXT("canonical_identity_invalid"),
+				Original.TrimStartAndEnd().IsEmpty()
+					? FString::Printf(TEXT("Identity field '%s' is empty."), *Field)
+					: FString::Printf(TEXT("Identity field '%s' could not be normalized to NFC text."), *Field), TEXT("canonical_state"));
+			Failure.SemanticPointer = TEXT("/identity/") + Field;
+			// These fields may contain opaque object identity or generation data.
+			Failure.ActualEvidence = MakeShared<FJsonValueString>(Original);
+			if (!Error) Error = MakeShared<const FUeAgentStateSemanticError>(MoveTemp(Failure));
+			return false;
+		}
+	}
+
 	FUeAgentCanonicalIdentity::FUeAgentCanonicalIdentity(
 		FString InSemanticId,
 		FString InTargetKind,
@@ -2115,12 +2348,12 @@ namespace UE::UAI::StateSemantic
 		, ObjectRole(MoveTemp(InObjectRole))
 		, Generation(MoveTemp(InGeneration))
 	{
-		bValid = Private::TryNormalizeNfcText(SemanticId, SemanticId)
-			&& Private::TryNormalizeNfcText(TargetKind, TargetKind)
-			&& Private::TryNormalizeNfcText(OwnerId, OwnerId)
-			&& Private::TryNormalizeNfcText(Selector, Selector)
-			&& Private::TryNormalizeNfcText(ObjectRole, ObjectRole)
-			&& Private::TryNormalizeNfcText(Generation, Generation);
+		bValid = NormalizeIdentityPart(SemanticId, TEXT("semantic_id"), ValidationDiagnostic)
+			&& NormalizeIdentityPart(TargetKind, TEXT("target_kind"), ValidationDiagnostic)
+			&& NormalizeIdentityPart(OwnerId, TEXT("owner"), ValidationDiagnostic)
+			&& NormalizeIdentityPart(Selector, TEXT("selector"), ValidationDiagnostic)
+			&& NormalizeIdentityPart(ObjectRole, TEXT("object_role"), ValidationDiagnostic)
+			&& NormalizeIdentityPart(Generation, TEXT("generation"), ValidationDiagnostic);
 		if (bValid && !Selector.IsEmpty())
 		{
 			Selectors.Add(TEXT("selector"), Selector);
@@ -2161,12 +2394,13 @@ namespace UE::UAI::StateSemantic
 		, ObjectRole(MoveTemp(InObjectRole))
 		, Generation(MoveTemp(InGeneration))
 	{
-		bValid = Private::TryNormalizeNfcText(SemanticId, SemanticId)
-			&& Private::TryNormalizeNfcText(TargetKind, TargetKind)
-			&& Private::TryNormalizeNfcText(OwnerId, OwnerId)
-			&& Private::TryNormalizeNfcText(ObjectRole, ObjectRole)
-			&& Private::TryNormalizeNfcText(Generation, Generation)
+		bValid = NormalizeIdentityPart(SemanticId, TEXT("semantic_id"), ValidationDiagnostic)
+			&& NormalizeIdentityPart(TargetKind, TEXT("target_kind"), ValidationDiagnostic)
+			&& NormalizeIdentityPart(OwnerId, TEXT("owner"), ValidationDiagnostic)
+			&& NormalizeIdentityPart(ObjectRole, TEXT("object_role"), ValidationDiagnostic)
+			&& NormalizeIdentityPart(Generation, TEXT("generation"), ValidationDiagnostic)
 			&& !Selectors.IsEmpty();
+		if (!bValid && !ValidationDiagnostic) ValidationDiagnostic = InvalidState(TEXT("canonical_identity_invalid"), TEXT("Identity requires at least one selector."), TEXT("/identity/selectors"));
 		TArray<FString> SelectorNames;
 		Selectors.GetKeys(SelectorNames);
 		SelectorNames.Sort();
@@ -2176,16 +2410,15 @@ namespace UE::UAI::StateSemantic
 		{
 			FString NormalizedName = Name;
 			FString NormalizedValue = Selectors.FindChecked(Name);
-			if (!Private::TryNormalizeNfcText(
-					NormalizedName, NormalizedName)
-				|| !Private::TryNormalizeNfcText(
-					NormalizedValue, NormalizedValue))
+			if (!NormalizeIdentityPart(NormalizedName, TEXT("selector_name"), ValidationDiagnostic)
+				|| !NormalizeIdentityPart(NormalizedValue, TEXT("selector_value"), ValidationDiagnostic))
 			{
 				bValid = false;
 				break;
 			}
 			if (NormalizedSelectors.Contains(NormalizedName))
 			{
+				if (!ValidationDiagnostic) ValidationDiagnostic = InvalidState(TEXT("canonical_identity_invalid"), TEXT("Two selector names become identical after NFC normalization."), TEXT("/identity/selectors"));
 				bValid = false;
 				break;
 			}
@@ -2238,6 +2471,7 @@ namespace UE::UAI::StateSemantic
 	const FString& FUeAgentCanonicalIdentity::GetGeneration() const { return Generation; }
 	const FString& FUeAgentCanonicalIdentity::GetCanonicalKey() const { return CanonicalKey; }
 	bool FUeAgentCanonicalIdentity::IsValid() const { return bValid; }
+	const FUeAgentStateSemanticError& FUeAgentCanonicalIdentity::GetValidationDiagnostic() const { return ValidationOrEmpty(ValidationDiagnostic); }
 	bool FUeAgentCanonicalIdentity::operator==(
 		const FUeAgentCanonicalIdentity& Other) const
 	{
@@ -2261,6 +2495,16 @@ namespace UE::UAI::StateSemantic
 					? TEXT("object")
 					: TEXT("scalar");
 		bValid = IsNonEmpty(TypeId) && ContainerKind == Expected;
+		if (!bValid)
+		{
+			auto Error = FUeAgentStateSemanticError::Failure(TEXT("canonical_type_invalid"),
+				!IsNonEmpty(TypeId) ? TEXT("The canonical type identifier is empty.")
+					: TEXT("The container kind does not match the declared value kind."), TEXT("canonical_state"));
+			Error.SemanticPointer = !IsNonEmpty(TypeId) ? TEXT("/type/type_id") : TEXT("/type/container_kind");
+			Error.ActualValue = MakeShared<FJsonValueString>(!IsNonEmpty(TypeId) ? TypeId : ContainerKind);
+			if (IsNonEmpty(TypeId)) Error.ExpectedValue = MakeShared<FJsonValueString>(Expected);
+			ValidationDiagnostic = MakeShared<const FUeAgentStateSemanticError>(MoveTemp(Error));
+		}
 	}
 
 	const FString& FUeAgentCanonicalType::GetTypeId() const { return TypeId; }
@@ -2268,6 +2512,7 @@ namespace UE::UAI::StateSemantic
 	bool FUeAgentCanonicalType::IsNullable() const { return bNullable; }
 	const FString& FUeAgentCanonicalType::GetContainerKind() const { return ContainerKind; }
 	bool FUeAgentCanonicalType::IsValid() const { return bValid; }
+	const FUeAgentStateSemanticError& FUeAgentCanonicalType::GetValidationDiagnostic() const { return ValidationOrEmpty(ValidationDiagnostic); }
 	bool FUeAgentCanonicalType::operator==(const FUeAgentCanonicalType& Other) const
 	{
 		return TypeId == Other.TypeId
@@ -2287,6 +2532,9 @@ namespace UE::UAI::StateSemantic
 		, Value(MoveTemp(InValue))
 	{
 		bValid = IsNonEmpty(SourceIdentity) && IsNonEmpty(Provenance);
+		if (!bValid) ValidationDiagnostic = InvalidState(TEXT("canonical_default_invalid"),
+			!IsNonEmpty(SourceIdentity) ? TEXT("The captured default has no source identity.") : TEXT("The captured default has no provenance."),
+			!IsNonEmpty(SourceIdentity) ? TEXT("/default/source_identity") : TEXT("/default/provenance"));
 	}
 
 	EUeAgentDefaultSourceKind FUeAgentDefaultValue::GetSourceKind() const { return SourceKind; }
@@ -2294,6 +2542,7 @@ namespace UE::UAI::StateSemantic
 	const FString& FUeAgentDefaultValue::GetProvenance() const { return Provenance; }
 	const FUeAgentCanonicalValueRef& FUeAgentDefaultValue::GetValue() const { return Value; }
 	bool FUeAgentDefaultValue::IsValid() const { return bValid; }
+	const FUeAgentStateSemanticError& FUeAgentDefaultValue::GetValidationDiagnostic() const { return ValidationOrEmpty(ValidationDiagnostic); }
 
 	FUeAgentStateDetails::FUeAgentStateDetails(
 		FString InDisplayName,
@@ -2309,15 +2558,20 @@ namespace UE::UAI::StateSemantic
 		, Availability(MoveTemp(InAvailability))
 		, Constraints(MoveTemp(InConstraints))
 	{
-		bValid = IsNonEmpty(DisplayName) && IsNonEmpty(Availability);
-		for (const FString& Category : CategoryPath)
-		{
-			bValid = bValid && IsNonEmpty(Category);
-		}
+		if (!IsNonEmpty(DisplayName)) ValidationDiagnostic = InvalidState(TEXT("canonical_details_invalid"), TEXT("The captured entry has an empty display name."), TEXT("/details/display_name"));
+		else if (!IsNonEmpty(Availability)) ValidationDiagnostic = InvalidState(TEXT("canonical_details_invalid"), TEXT("The captured entry has an empty availability description."), TEXT("/details/availability"));
+		for (int32 Index = 0; !ValidationDiagnostic && Index < CategoryPath.Num(); ++Index)
+			if (!IsNonEmpty(CategoryPath[Index])) ValidationDiagnostic = InvalidState(TEXT("canonical_details_invalid"), TEXT("Category names must be non-empty."), FString::Printf(TEXT("/details/category_path/%d"), Index));
 		for (const auto& Constraint : Constraints)
 		{
-			bValid = bValid && IsNonEmpty(Constraint.Key) && IsNonEmpty(Constraint.Value);
+			if (ValidationDiagnostic) break;
+			if (!IsNonEmpty(Constraint.Key) || !IsNonEmpty(Constraint.Value))
+				ValidationDiagnostic = InvalidState(TEXT("canonical_details_invalid"),
+					!IsNonEmpty(Constraint.Key) ? TEXT("A captured constraint has an empty name.")
+						: FString::Printf(TEXT("Constraint '%s' has an empty value."), *Constraint.Key),
+					TEXT("/details/constraints/") + Constraint.Key.Replace(TEXT("~"), TEXT("~0")).Replace(TEXT("/"), TEXT("~1")));
 		}
+		bValid = !ValidationDiagnostic;
 	}
 
 	const FString& FUeAgentStateDetails::GetDisplayName() const { return DisplayName; }
@@ -2330,6 +2584,7 @@ namespace UE::UAI::StateSemantic
 		return Constraints;
 	}
 	bool FUeAgentStateDetails::IsValid() const { return bValid; }
+	const FUeAgentStateSemanticError& FUeAgentStateDetails::GetValidationDiagnostic() const { return ValidationOrEmpty(ValidationDiagnostic); }
 	bool FUeAgentStateDetails::operator==(const FUeAgentStateDetails& Other) const
 	{
 		return DisplayName == Other.DisplayName
@@ -2348,13 +2603,20 @@ namespace UE::UAI::StateSemantic
 		, SourceId(MoveTemp(InSourceId))
 		, EvidenceId(MoveTemp(InEvidenceId))
 	{
-		bValid = IsNonEmpty(SourceKind) && IsNonEmpty(SourceId) && IsNonEmpty(EvidenceId);
+		const TCHAR* Field = !IsNonEmpty(SourceKind) ? TEXT("source_kind") : !IsNonEmpty(SourceId) ? TEXT("source_id") : !IsNonEmpty(EvidenceId) ? TEXT("evidence_id") : nullptr;
+		if (Field)
+		{
+			ValidationDiagnostic = FUeAgentStateSemanticError::Failure(TEXT("state_provenance_invalid"), FString::Printf(TEXT("State provenance requires a non-empty %s."), Field), TEXT("state_semantic"));
+			ValidationDiagnostic.PropertyPath = Field;
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(!IsNonEmpty(SourceKind) ? SourceKind : !IsNonEmpty(SourceId) ? SourceId : EvidenceId);
+		}
 	}
 
 	const FString& FUeAgentStateProvenance::GetSourceKind() const { return SourceKind; }
 	const FString& FUeAgentStateProvenance::GetSourceId() const { return SourceId; }
 	const FString& FUeAgentStateProvenance::GetEvidenceId() const { return EvidenceId; }
-	bool FUeAgentStateProvenance::IsValid() const { return bValid; }
+	bool FUeAgentStateProvenance::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FUeAgentStateSemanticError& FUeAgentStateProvenance::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 	bool FUeAgentStateProvenance::operator==(const FUeAgentStateProvenance& Other) const
 	{
 		return SourceKind == Other.SourceKind
@@ -2370,13 +2632,25 @@ namespace UE::UAI::StateSemantic
 		, Generation(MoveTemp(InGeneration))
 		, Sequence(InSequence)
 	{
-		bValid = IsNonEmpty(SourceId) && IsNonEmpty(Generation) && Sequence >= 0;
+		if (!IsNonEmpty(SourceId) || !IsNonEmpty(Generation) || Sequence < 0)
+		{
+			const bool bSourceMissing = !IsNonEmpty(SourceId);
+			const bool bGenerationMissing = !IsNonEmpty(Generation);
+			ValidationDiagnostic = FUeAgentStateSemanticError::Failure(TEXT("state_revision_invalid"),
+				bSourceMissing ? TEXT("The state revision has no source identifier.")
+					: bGenerationMissing ? TEXT("The state revision has no generation identifier.")
+					: TEXT("The state revision sequence must be non-negative."), TEXT("state_semantic"));
+			ValidationDiagnostic.PropertyPath = bSourceMissing ? TEXT("source_id") : bGenerationMissing ? TEXT("generation") : TEXT("sequence");
+			ValidationDiagnostic.ActualEvidence = MakeShared<FJsonValueString>(
+				bSourceMissing ? SourceId : bGenerationMissing ? Generation : FString::Printf(TEXT("%lld"), Sequence));
+		}
 	}
 
 	const FString& FUeAgentStateRevision::GetSourceId() const { return SourceId; }
 	const FString& FUeAgentStateRevision::GetGeneration() const { return Generation; }
 	int64 FUeAgentStateRevision::GetSequence() const { return Sequence; }
-	bool FUeAgentStateRevision::IsValid() const { return bValid; }
+	bool FUeAgentStateRevision::IsValid() const { return ValidationDiagnostic.IsEmpty(); }
+	const FUeAgentStateSemanticError& FUeAgentStateRevision::GetValidationDiagnostic() const { return ValidationDiagnostic; }
 	bool FUeAgentStateRevision::operator==(const FUeAgentStateRevision& Other) const
 	{
 		return SourceId == Other.SourceId
@@ -2396,12 +2670,14 @@ namespace UE::UAI::StateSemantic
 		FUeAgentStateDetails InDetails,
 		FUeAgentStateRevision InObservedRevision,
 		EUeAgentAuthoredPresence InAuthoredPresence,
-		EUeAgentOverrideState InOverrideState)
+		EUeAgentOverrideState InOverrideState,
+		FUeAgentCanonicalValuePtr InAuthoringDescriptor)
 		: Identity(MoveTemp(InIdentity))
 		, Type(MoveTemp(InType))
 		, Value(MoveTemp(InValue))
 		, Default(MoveTemp(InDefault))
 		, Details(MoveTemp(InDetails))
+		, AuthoringDescriptor(MoveTemp(InAuthoringDescriptor))
 		, ObservedRevision(MoveTemp(InObservedRevision))
 		, AuthoredPresence(InAuthoredPresence)
 		, OverrideState(InOverrideState)
@@ -2413,19 +2689,31 @@ namespace UE::UAI::StateSemantic
 					|| (Candidate->GetKind() == EUeAgentValueKind::Null
 						&& CanonicalType.IsNullable());
 			};
-		bValid = Identity.IsValid()
-			&& Type.IsValid()
-			&& Default.IsValid()
-			&& Details.IsValid()
-			&& ObservedRevision.IsValid()
-			&& !(OverrideState == EUeAgentOverrideState::Overridden
-				&& AuthoredPresence != EUeAgentAuthoredPresence::Present)
-			&& !(OverrideState == EUeAgentOverrideState::Inherited
-				&& AuthoredPresence != EUeAgentAuthoredPresence::Absent)
-			&& MatchesType(Value, Type)
-			&& MatchesType(Default.GetValue(), Type);
+		if (!Identity.IsValid()) ValidationDiagnostic = MakeShared<const FUeAgentStateSemanticError>(Identity.GetValidationDiagnostic());
+		else if (AuthoringDescriptor && AuthoringDescriptor->GetKind() != EUeAgentValueKind::Object)
+			ValidationDiagnostic = InvalidState(TEXT("canonical_entry_invalid"), TEXT("The authoring descriptor must be an object."), TEXT("/authoring_descriptor"));
+		else if (!Type.IsValid()) ValidationDiagnostic = MakeShared<const FUeAgentStateSemanticError>(Type.GetValidationDiagnostic());
+		else if (!Default.IsValid()) ValidationDiagnostic = MakeShared<const FUeAgentStateSemanticError>(Default.GetValidationDiagnostic());
+		else if (!Details.IsValid()) ValidationDiagnostic = MakeShared<const FUeAgentStateSemanticError>(Details.GetValidationDiagnostic());
+		else if (!ObservedRevision.IsValid()) ValidationDiagnostic = InvalidState(TEXT("canonical_entry_invalid"), TEXT("The captured entry has an invalid observation revision."), TEXT("/observed_revision"));
+		else if (OverrideState == EUeAgentOverrideState::Overridden && AuthoredPresence != EUeAgentAuthoredPresence::Present)
+			ValidationDiagnostic = InvalidState(TEXT("canonical_entry_invalid"), TEXT("An overridden value must be authored as present."), TEXT("/authored_presence"));
+		else if (OverrideState == EUeAgentOverrideState::Inherited && AuthoredPresence != EUeAgentAuthoredPresence::Absent)
+			ValidationDiagnostic = InvalidState(TEXT("canonical_entry_invalid"), TEXT("An inherited value must be authored as absent."), TEXT("/authored_presence"));
+		else if (!MatchesType(Value, Type) || !MatchesType(Default.GetValue(), Type))
+		{
+			const bool bCurrentValue = !MatchesType(Value, Type);
+			auto Error = FUeAgentStateSemanticError::Failure(TEXT("canonical_entry_invalid"),
+				bCurrentValue ? TEXT("The captured value kind does not match its declared type.") : TEXT("The default value kind does not match its declared type."), TEXT("canonical_state"));
+			Error.SemanticPointer = bCurrentValue ? TEXT("/value") : TEXT("/default/value");
+			Error.ActualValue = MakeShared<FJsonValueString>(DiagnosticValueKind(bCurrentValue ? Value->GetKind() : Default.GetValue()->GetKind()));
+			Error.ExpectedValue = MakeShared<FJsonValueString>(DiagnosticValueKind(Type.GetValueKind()));
+			ValidationDiagnostic = MakeShared<const FUeAgentStateSemanticError>(MoveTemp(Error));
+		}
+		bValid = !ValidationDiagnostic;
 	}
 
+	const FUeAgentCanonicalValuePtr& FUeAgentStateEntry::GetAuthoringDescriptor() const { return AuthoringDescriptor; }
 	const FUeAgentCanonicalIdentity& FUeAgentStateEntry::GetIdentity() const { return Identity; }
 	const FUeAgentCanonicalType& FUeAgentStateEntry::GetType() const { return Type; }
 	const FUeAgentCanonicalValueRef& FUeAgentStateEntry::GetValue() const { return Value; }
@@ -2444,6 +2732,7 @@ namespace UE::UAI::StateSemantic
 		return OverrideState;
 	}
 	bool FUeAgentStateEntry::IsValid() const { return bValid; }
+	const FUeAgentStateSemanticError& FUeAgentStateEntry::GetValidationDiagnostic() const { return ValidationOrEmpty(ValidationDiagnostic); }
 
 	FUeAgentStateEntry FUeAgentStateEntry::WithObservedRevision(
 		FUeAgentStateRevision Revision) const
@@ -2456,7 +2745,8 @@ namespace UE::UAI::StateSemantic
 			Details,
 			MoveTemp(Revision),
 			AuthoredPresence,
-			OverrideState);
+			OverrideState,
+			AuthoringDescriptor);
 	}
 
 	FUeAgentCanonicalSnapshot::FUeAgentCanonicalSnapshot(
@@ -2547,14 +2837,24 @@ namespace UE::UAI::StateSemantic
 			|| !IsNonEmpty(RequiredSourceKind)
 			|| !IsNonEmpty(ProvenanceErrorCode))
 		{
-			return Fail(OutError, TEXT("snapshot_contract_invalid"), TEXT("/snapshot"));
+			OutError = FUeAgentStateSemanticError::Failure(TEXT("snapshot_contract_invalid"),
+				!IsNonEmpty(SnapshotId) ? TEXT("The captured snapshot has no identifier.")
+				: !Revision.IsValid() ? TEXT("The captured snapshot has an invalid revision.")
+				: !CapturedAt.IsValid() ? TEXT("The captured snapshot has an invalid capture time.")
+				: !Provenance.IsValid() ? TEXT("The captured snapshot has incomplete provenance.")
+				: !IsNonEmpty(RequiredSourceKind) ? TEXT("Snapshot creation requires a provenance source kind.")
+				: TEXT("Snapshot creation requires a provenance failure code."), TEXT("canonical_snapshot"));
+			OutError.SemanticPointer = TEXT("/snapshot");
+			return false;
 		}
 		if (Provenance.GetSourceKind() != RequiredSourceKind)
 		{
-			return Fail(
-				OutError,
-				ProvenanceErrorCode,
-				TEXT("/provenance"));
+			OutError = FUeAgentStateSemanticError::Failure(ProvenanceErrorCode,
+				TEXT("The snapshot provenance source kind does not match the required source."), TEXT("canonical_snapshot"));
+			OutError.SemanticPointer = TEXT("/provenance/source_kind");
+			OutError.ActualValue = MakeShared<FJsonValueString>(Provenance.GetSourceKind());
+			OutError.ExpectedValue = MakeShared<FJsonValueString>(RequiredSourceKind);
+			return false;
 		}
 		if (!Charge(Resources, {
 			{EUeAgentResourceDimension::Nodes, 1},
@@ -2578,27 +2878,30 @@ namespace UE::UAI::StateSemantic
 		{
 			if (!Entry.IsValid())
 			{
-				return Fail(
-					OutError,
-					TEXT("snapshot_entry_invalid"),
-					JsonPointerJoin(TEXT("/entries"), Entry.GetIdentity().GetCanonicalKey()));
+				OutError = Entry.GetValidationDiagnostic();
+				if (OutError.CandidateName.IsEmpty()) OutError.CandidateName = Entry.GetDetails().GetDisplayName();
+				if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Entry.GetIdentity().GetCanonicalKey();
+				return false;
 			}
 			const FString& Key = Entry.GetIdentity().GetCanonicalKey();
 			if (Key == PreviousKey)
 			{
-				return Fail(
-					OutError,
-					TEXT("snapshot_identity_duplicate"),
-					JsonPointerJoin(TEXT("/entries"), Key));
+				OutError = FUeAgentStateSemanticError::Failure(TEXT("snapshot_identity_duplicate"),
+					TEXT("More than one captured state entry has the same canonical identity."), TEXT("canonical_snapshot"));
+				OutError.CandidateName = Entry.GetDetails().GetDisplayName();
+				OutError.SubjectId = Key;
+				OutError.SemanticPointer = TEXT("/entries");
+				return false;
 			}
 			PreviousKey = Key;
 			if (Entry.GetObservedRevision() != Revision)
 			{
-				return Fail(
-					OutError,
-					TEXT("snapshot_revision_mismatch"),
-					TEXT("/revision"),
-					Key);
+				OutError = FUeAgentStateSemanticError::Failure(TEXT("snapshot_revision_mismatch"),
+					TEXT("The state entry was captured at a different revision from its snapshot."), TEXT("canonical_snapshot"));
+				OutError.CandidateName = Entry.GetDetails().GetDisplayName();
+				OutError.SubjectId = Key;
+				OutError.SemanticPointer = TEXT("/observed_revision");
+				return false;
 			}
 		}
 		OutSnapshot = MakeShareable(new FUeAgentCanonicalSnapshot(
@@ -2628,18 +2931,40 @@ namespace UE::UAI::StateSemantic
 	}
 
 	FUeAgentSemanticDifference::FUeAgentSemanticDifference(
-		EUeAgentDifferenceKind InKind,
-		FString InPath,
-		FUeAgentCanonicalValuePtr InLeft,
-		FUeAgentCanonicalValuePtr InRight)
-		: Kind(InKind)
-		, Path(MoveTemp(InPath))
-		, Left(MoveTemp(InLeft))
-		, Right(MoveTemp(InRight))
-	{
-	}
+		EUeAgentDifferenceKind InKind, FString InPath,
+		FUeAgentCanonicalValuePtr InLeft, FUeAgentCanonicalValuePtr InRight)
+		: FUeAgentSemanticDifference(InKind, MoveTemp(InPath), InLeft, InRight, InLeft, InRight) {}
+
+	FUeAgentSemanticDifference::FUeAgentSemanticDifference(
+		EUeAgentDifferenceKind InKind, FString InPath,
+		FUeAgentCanonicalValuePtr InLeft, FUeAgentCanonicalValuePtr InRight,
+		FUeAgentCanonicalValuePtr InPublicLeft, FUeAgentCanonicalValuePtr InPublicRight)
+		: Kind(InKind), Path(MoveTemp(InPath)), Left(MoveTemp(InLeft)), Right(MoveTemp(InRight)),
+		  PublicPath(Path), PublicLeft(MoveTemp(InPublicLeft)), PublicRight(MoveTemp(InPublicRight)) {}
 
 	EUeAgentDifferenceKind FUeAgentSemanticDifference::GetKind() const { return Kind; }
+	const TCHAR* FUeAgentSemanticDifference::GetPublicReason() const
+	{
+		switch (Kind)
+		{
+		case EUeAgentDifferenceKind::TypeMismatch: return TEXT("Expected and observed value types differ.");
+		case EUeAgentDifferenceKind::IdentityMismatch: return TEXT("The observed object identity or generation differs from the expected object.");
+		case EUeAgentDifferenceKind::DefaultMismatch: return TEXT("The default value or its source differs.");
+		case EUeAgentDifferenceKind::DetailsMismatch: return TEXT("The property description or editing constraints differ.");
+		case EUeAgentDifferenceKind::AuthoredPresenceMismatch: return TEXT("Whether the property is explicitly authored differs.");
+		case EUeAgentDifferenceKind::OverrideStateMismatch: return TEXT("The property's override state differs.");
+		case EUeAgentDifferenceKind::StatePlaneMismatch: return TEXT("Expected and observed state planes differ.");
+		case EUeAgentDifferenceKind::SnapshotRevisionMismatch: return TEXT("The observed snapshot revision differs from the expected revision.");
+		case EUeAgentDifferenceKind::TimeDomainMismatch: return TEXT("The values belong to different clock domains.");
+		case EUeAgentDifferenceKind::TimeStateMismatch: return TEXT("The temporal observation states differ.");
+		case EUeAgentDifferenceKind::FrameMismatch: return TEXT("The coordinate frames differ.");
+		case EUeAgentDifferenceKind::SpatialQuantityMismatch: return TEXT("The spatial quantity kinds differ.");
+		case EUeAgentDifferenceKind::SubjectMismatch: return TEXT("The spatial values describe different subjects.");
+		case EUeAgentDifferenceKind::MissingLeft: return TEXT("The observed entry has no corresponding expected entry.");
+		case EUeAgentDifferenceKind::MissingRight: return TEXT("The expected entry is missing from the observed state.");
+		default: return TEXT("Expected and observed values differ.");
+		}
+	}
 	const FString& FUeAgentSemanticDifference::GetPath() const { return Path; }
 	const FUeAgentCanonicalValuePtr& FUeAgentSemanticDifference::GetLeft() const
 	{
@@ -2663,6 +2988,68 @@ namespace UE::UAI::StateSemantic
 		return Differences;
 	}
 
+	bool AreNumericLexemesEquivalent(const FString& Left, const FString& Right)
+	{
+		return ExactNumbersEqual(Left, Right);
+	}
+
+	bool TryParseInt64Decimal(const FString& Text, int64& OutValue)
+	{
+		bool bNegative = false;
+		uint64 Magnitude = 0;
+		if (!TryParseIntegerMagnitude(Text, true, bNegative, Magnitude)) return false;
+		OutValue = bNegative
+			? (Magnitude == static_cast<uint64>(MAX_int64) + 1ull ? MIN_int64 : -static_cast<int64>(Magnitude))
+			: static_cast<int64>(Magnitude);
+		return true;
+	}
+
+	bool TryParseUInt64Decimal(const FString& Text, uint64& OutValue)
+	{
+		bool bNegative = false;
+		uint64 Magnitude = 0;
+		if (!TryParseIntegerMagnitude(Text, false, bNegative, Magnitude)) return false;
+		OutValue = Magnitude;
+		return true;
+	}
+
+	namespace
+	{
+		bool TryIntegralNumberText(const FString& Text, FString& OutDigits)
+		{
+			FExactNumber Number;
+			if (!ParseExactNumber(Text, Number) || Number.PowerOfTen < 0
+				|| static_cast<int64>(Number.Digits.Len()) + Number.PowerOfTen > 20) return false;
+			// At most the decimal width of uint64 is materialized. This is a native
+			// representability check, not a bound on general canonical numbers.
+			OutDigits = (Number.bNegative ? TEXT("-") : TEXT("")) + Number.Digits
+				+ FString::ChrN(Number.PowerOfTen, TEXT('0'));
+			return true;
+		}
+	}
+
+	bool TryParseInt64Number(const FString& Text, int64& OutValue)
+	{
+		FString Digits;
+		return TryIntegralNumberText(Text, Digits) && TryParseInt64Decimal(Digits, OutValue);
+	}
+
+	bool TryParseUInt64Number(const FString& Text, uint64& OutValue)
+	{
+		FString Digits;
+		return TryIntegralNumberText(Text, Digits) && TryParseUInt64Decimal(Digits, OutValue);
+	}
+
+	bool TryParseFiniteDecimal(const FString& Text, double& OutValue)
+	{
+		FExactNumber Exact;
+		double Native = 0.0;
+		if (!ParseExactNumber(Text, Exact) || !LexTryParseString(Native, *Text) || !FMath::IsFinite(Native))
+			return false;
+		OutValue = Native;
+		return true;
+	}
+
 	FUeAgentSemanticComparison CompareValues(
 		const FUeAgentCanonicalValueRef& Left,
 		const FUeAgentCanonicalValueRef& Right,
@@ -2684,7 +3071,7 @@ namespace UE::UAI::StateSemantic
 		return FUeAgentSemanticComparison({
 			FUeAgentSemanticDifference(
 				EUeAgentDifferenceKind::ValueMismatch,
-				Error.Path,
+				Error.Source.JsonPath,
 				FUeAgentCanonicalValuePtr(),
 				FUeAgentCanonicalValuePtr()),
 		});
@@ -2702,7 +3089,9 @@ namespace UE::UAI::StateSemantic
 		OutComparison = FUeAgentSemanticComparison();
 		if (!Path.StartsWith(TEXT("/")))
 		{
-			return Fail(OutError, TEXT("semantic_compare_path_invalid"), Path);
+			Fail(OutError, TEXT("semantic_compare_path_invalid"), TEXT("The semantic comparison path must be a non-empty absolute JSON pointer."), TEXT("/comparison_path"),
+				MakeShared<FJsonValueString>(TEXT("absolute JSON pointer")));
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(Path); return false;
 		}
 		TArray<FUeAgentSemanticDifference> Differences;
 		if (!TryCompareValuesInternal(
@@ -2880,6 +3269,18 @@ namespace UE::UAI::StateSemantic
 			{
 				return false;
 			}
+			const auto& LeftDescriptor = LeftEntry.GetAuthoringDescriptor();
+			const auto& RightDescriptor = RightEntry.GetAuthoringDescriptor();
+			if (LeftDescriptor.IsValid() && RightDescriptor.IsValid())
+			{
+				if (!TryCompareValuesInternal(LeftDescriptor.ToSharedRef(), RightDescriptor.ToSharedRef(),
+					JsonPointerJoin(EntryPath, TEXT("authoring_descriptor")), Resources, Differences, OutError)) return false;
+			}
+			else if (LeftDescriptor.IsValid() != RightDescriptor.IsValid())
+			{
+				Differences.Emplace(EUeAgentDifferenceKind::DetailsMismatch,
+					JsonPointerJoin(EntryPath, TEXT("authoring_descriptor")), LeftDescriptor, RightDescriptor);
+			}
 			const FUeAgentDefaultValue& LeftDefault = LeftEntry.GetDefault();
 			const FUeAgentDefaultValue& RightDefault = RightEntry.GetDefault();
 			if (LeftDefault.GetSourceKind() != RightDefault.GetSourceKind()
@@ -2980,6 +3381,18 @@ namespace UE::UAI::StateSemantic
 				}
 			}
 		}
+		TMap<FString, int32> EntryAliases;
+		for (auto& Difference : Differences)
+		{
+			const FString Prefix = TEXT("/entries/");
+			const FString& Path = Difference.GetPath();
+			if (!Path.StartsWith(Prefix, ESearchCase::CaseSensitive)) continue;
+			const int32 Suffix = Path.Find(TEXT("/"), ESearchCase::CaseSensitive, ESearchDir::FromStart, Prefix.Len());
+			const FString Key = Suffix == INDEX_NONE ? Path.Mid(Prefix.Len()) : Path.Mid(Prefix.Len(), Suffix - Prefix.Len());
+			const int32 Index = EntryAliases.FindOrAdd(Key, EntryAliases.Num());
+			Difference.SetPublicPath(FString::Printf(TEXT("/entries/%d"), Index)
+				+ (Suffix == INDEX_NONE ? FString() : Path.Mid(Suffix)));
+		}
 		OutComparison = FUeAgentSemanticComparison(MoveTemp(Differences));
 		return true;
 	}
@@ -2998,7 +3411,7 @@ namespace UE::UAI::StateSemantic
 		return FUeAgentSemanticComparison({
 			FUeAgentSemanticDifference(
 				EUeAgentDifferenceKind::ValueMismatch,
-				Error.Path,
+				Error.Source.JsonPath,
 				FUeAgentCanonicalValuePtr(),
 				FUeAgentCanonicalValuePtr()),
 		});
@@ -3016,7 +3429,24 @@ namespace UE::UAI::StateSemantic
 		OutValue.Reset();
 		if (!Value.IsValid() || !TargetFrame.IsValid() || !Conversion.IsValid())
 		{
-			return Fail(OutError, TEXT("spatial_contract_invalid"), TEXT("/spatial_conversion"));
+			const auto& Cause = !Value.IsValid() ? Value.GetValidationDiagnostic() : !TargetFrame.IsValid() ? TargetFrame.GetValidationDiagnostic() : Conversion.GetValidationDiagnostic();
+			OutError = FUeAgentStateSemanticError::WrapFailure(TEXT("spatial_contract_invalid"), Cause, TEXT("state_semantic"));
+			const FString Input = !Value.IsValid() ? TEXT("value") : !TargetFrame.IsValid() ? TEXT("target_frame") : TEXT("conversion");
+			const auto PrefixInput = [&Input](auto&& Self, FUeAgentStateSemanticError& Error) -> void {
+				Error.PropertyPath = Input + (Error.PropertyPath.IsEmpty() ? FString() : TEXT(".") + Error.PropertyPath);
+				if (Error.Source.SourceFile.IsEmpty()) {
+					const auto PrefixPath = [&Input](const FString& Path) {
+						return TEXT("/") + Input + (Path.IsEmpty() || Path == TEXT("/") ? FString() : (Path.StartsWith(TEXT("/")) ? Path : TEXT("/") + Path));
+					};
+					Error.Source.JsonPath = PrefixPath(Error.Source.JsonPath);
+					if (!Error.Source.InternalJsonPath.IsEmpty()) Error.Source.InternalJsonPath = PrefixPath(Error.Source.InternalJsonPath);
+					Error.SemanticPointer = PrefixPath(Error.SemanticPointer);
+				}
+				for (auto& Child : Error.Diagnostics) Self(Self, Child);
+				if (Error.PublicCause) { auto Nested = MakeShared<FUeAgentStateSemanticError>(*Error.PublicCause); Self(Self, *Nested); Error.PublicCause = MoveTemp(Nested); }
+			};
+			PrefixInput(PrefixInput, OutError);
+			return false;
 		}
 		const int32 ItemCount = Value.GetComponents().Num()
 			+ Conversion.GetSourceDimension() * Conversion.GetTargetDimension()
@@ -3033,25 +3463,24 @@ namespace UE::UAI::StateSemantic
 		}
 		if (Value.GetFrame().GetFrameId() != Conversion.GetFromFrame())
 		{
-			return Fail(
-				OutError,
-				TEXT("spatial_conversion_source_frame_mismatch"),
-				TEXT("/spatial_conversion/from_frame"));
+			Fail(OutError, TEXT("spatial_conversion_source_frame_mismatch"), TEXT("The value frame does not match the conversion source frame."), TEXT("/spatial_conversion/from_frame"));
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Value.GetFrame().GetFrameId());
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(Conversion.GetFromFrame()); return false;
 		}
 		if (TargetFrame.GetFrameId() != Conversion.GetToFrame())
 		{
-			return Fail(
-				OutError,
-				TEXT("spatial_conversion_target_frame_mismatch"),
-				TEXT("/spatial_conversion/to_frame"));
+			Fail(OutError, TEXT("spatial_conversion_target_frame_mismatch"), TEXT("The target frame does not match the conversion target frame."), TEXT("/spatial_conversion/to_frame"));
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(TargetFrame.GetFrameId());
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(Conversion.GetToFrame()); return false;
 		}
 		if (Value.GetFrame().GetDimension() != Conversion.GetSourceDimension()
 			|| TargetFrame.GetDimension() != Conversion.GetTargetDimension())
 		{
-			return Fail(
-				OutError,
-				TEXT("spatial_conversion_dimension_mismatch"),
-				TEXT("/spatial_conversion/dimension"));
+			const bool bSource = Value.GetFrame().GetDimension() != Conversion.GetSourceDimension();
+			return Fail(OutError, TEXT("spatial_conversion_dimension_mismatch"), TEXT("The conversion dimension differs from its corresponding frame dimension."),
+				bSource ? TEXT("/spatial_conversion/source_dimension") : TEXT("/spatial_conversion/target_dimension"),
+				MakeShared<FJsonValueNumber>(bSource ? Value.GetFrame().GetDimension() : TargetFrame.GetDimension()),
+				MakeShared<FJsonValueNumber>(bSource ? Conversion.GetSourceDimension() : Conversion.GetTargetDimension()));
 		}
 		if (!AreTemporalPointsEquivalent(Value.GetObservedAt(), Conversion.GetValidAt())
 			|| !AreTemporalPointsEquivalent(
@@ -3061,17 +3490,21 @@ namespace UE::UAI::StateSemantic
 				TargetFrame.GetObservedAt(),
 				Conversion.GetValidAt()))
 		{
-			return Fail(
-				OutError,
-				TEXT("spatial_conversion_time_mismatch"),
-				TEXT("/spatial_conversion/time"));
+			const bool bValue = !AreTemporalPointsEquivalent(Value.GetObservedAt(), Conversion.GetValidAt());
+			const bool bSourceFrame = !bValue && !AreTemporalPointsEquivalent(Value.GetFrame().GetObservedAt(), Conversion.GetValidAt());
+			const auto& Actual = bValue ? Value.GetObservedAt() : bSourceFrame ? Value.GetFrame().GetObservedAt() : TargetFrame.GetObservedAt();
+			Fail(OutError, TEXT("spatial_conversion_time_mismatch"), Actual.GetClockId() != Conversion.GetValidAt().GetClockId()
+				? TEXT("The spatial observation and conversion validity use different clocks.") : TEXT("The spatial observation time or state differs from the conversion validity."),
+				bValue ? TEXT("/value/observed_at") : bSourceFrame ? TEXT("/source_frame/observed_at") : TEXT("/target_frame/observed_at"),
+				TemporalObservation(Conversion.GetValidAt()), TemporalObservation(Actual));
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Conversion.GetValidAt().GetClockId());
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(Actual.GetClockId()); return false;
 		}
 		if (Value.GetFrame().GetBasisFrameId() != TargetFrame.GetBasisFrameId())
 		{
-			return Fail(
-				OutError,
-				TEXT("spatial_frame_reference_mismatch"),
-				TEXT("/spatial_conversion/frame"));
+			Fail(OutError, TEXT("spatial_frame_reference_mismatch"), TEXT("The source and target frames do not share the same basis frame."), TEXT("/spatial_conversion/frame"));
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Value.GetFrame().GetBasisFrameId());
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(TargetFrame.GetBasisFrameId()); return false;
 		}
 
 		int64 ExpandedDigits = 0;
@@ -3105,10 +3538,7 @@ namespace UE::UAI::StateSemantic
 				ExpandedDigits,
 				MaxExpandedDigits))
 		{
-			return Fail(
-				OutError,
-				TEXT("spatial_numeric_lexeme_invalid"),
-				TEXT("/spatial_conversion"));
+			return Fail(OutError, TEXT("spatial_numeric_lexeme_invalid"), TEXT("Validated spatial numeric data could not be expanded for exact arithmetic accounting."), TEXT("/spatial_conversion"));
 		}
 		const int64 ArithmeticWork = SaturatingAdd(
 			ExpandedDigits,
@@ -3138,24 +3568,19 @@ namespace UE::UAI::StateSemantic
 			|| !ParseVector(Conversion.GetTranslation(), Translation)
 			|| !ParseVector(Value.GetComponents(), Components))
 		{
-			return Fail(
-				OutError,
-				TEXT("spatial_numeric_lexeme_invalid"),
-				TEXT("/spatial_conversion"));
+			return Fail(OutError, TEXT("spatial_numeric_lexeme_invalid"), TEXT("Validated spatial numeric data could not be parsed into exact rational matrices and vectors."), TEXT("/spatial_conversion"));
 		}
 
 		const FExactMatrix SourceBasisRows = Transpose(SourceBasisAxes);
 		const FExactMatrix TargetBasisRows = Transpose(TargetBasisAxes);
 		FExactMatrix TargetInverse;
 		FExactMatrix ExpectedLinear;
-		if (!InvertMatrix(TargetBasisRows, TargetInverse)
-			|| !MultiplyMatrices(TargetInverse, SourceBasisRows, ExpectedLinear))
-		{
-			return Fail(
-				OutError,
-				TEXT("spatial_frame_matrix_invalid"),
-				TEXT("/spatial_conversion/frame"));
+		if (!InvertMatrix(TargetBasisRows, TargetInverse, TEXT("/target_frame/basis"), OutError)) {
+			OutError = FUeAgentStateSemanticError::WrapFailure(TEXT("spatial_frame_matrix_invalid"), OutError, TEXT("state_semantic")); return false;
 		}
+		if (!MultiplyMatrices(TargetInverse, SourceBasisRows, ExpectedLinear))
+			return Fail(OutError, TEXT("spatial_frame_matrix_invalid"), TEXT("The source and inverse target basis matrix dimensions cannot be multiplied."), TEXT("/spatial_conversion/frame"),
+				MakeShared<FJsonValueNumber>(TargetInverse.IsEmpty() ? 0 : TargetInverse[0].Num()), MakeShared<FJsonValueNumber>(SourceBasisRows.Num()));
 		FExactVector OriginDelta;
 		OriginDelta.SetNum(SourceOrigin.Num());
 		for (int32 Index = 0; Index < SourceOrigin.Num(); ++Index)
@@ -3163,15 +3588,11 @@ namespace UE::UAI::StateSemantic
 			OriginDelta[Index] = SubtractRational(SourceOrigin[Index], TargetOrigin[Index]);
 		}
 		FExactVector ExpectedTranslation;
-		if (!MultiplyMatrixVector(TargetInverse, OriginDelta, ExpectedTranslation)
-			|| !MatricesEqual(ExpectedLinear, Linear)
-			|| !VectorsEqual(ExpectedTranslation, Translation))
-		{
-			return Fail(
-				OutError,
-				TEXT("spatial_conversion_frame_contract_mismatch"),
-				TEXT("/spatial_conversion"));
-		}
+		if (!MultiplyMatrixVector(TargetInverse, OriginDelta, ExpectedTranslation))
+			return Fail(OutError, TEXT("spatial_conversion_frame_contract_mismatch"), TEXT("The origin delta length cannot be multiplied by the inverse target basis."), TEXT("/spatial_conversion/translation"),
+				MakeShared<FJsonValueNumber>(TargetInverse.IsEmpty() ? 0 : TargetInverse[0].Num()), MakeShared<FJsonValueNumber>(OriginDelta.Num()));
+		if (!MatchMatrix(ExpectedLinear, Linear, TEXT("/spatial_conversion/linear"), OutError)
+			|| !MatchVector(ExpectedTranslation, Translation, TEXT("/spatial_conversion/translation"), OutError)) return false;
 
 		FExactVector ConvertedVector;
 		FExactMatrix ConvertedMatrix;
@@ -3181,35 +3602,33 @@ namespace UE::UAI::StateSemantic
 		case EUeAgentSpatialQuantityKind::Point:
 			if (!MultiplyMatrixVector(Linear, Components, ConvertedVector))
 			{
-				return Fail(OutError, TEXT("spatial_matrix_vector_shape_mismatch"));
+				return Fail(OutError, TEXT("spatial_matrix_vector_shape_mismatch"), TEXT("The conversion matrix column count does not match the point component count."), TEXT("/value/components"), MakeShared<FJsonValueNumber>(Linear.IsEmpty() ? 0 : Linear[0].Num()), MakeShared<FJsonValueNumber>(Components.Num()));
 			}
 			for (int32 Index = 0; Index < ConvertedVector.Num(); ++Index)
 			{
 				ConvertedVector[Index] = AddRational(ConvertedVector[Index], Translation[Index]);
 			}
-			if (!VectorToLexemes(ConvertedVector, OutputComponents))
-			{
-				return Fail(OutError, TEXT("spatial_result_non_terminating_decimal"));
-			}
+			if (!VectorToLexemes(ConvertedVector, OutputComponents, TEXT("/result/components"), OutError)) return false;
 			break;
 		case EUeAgentSpatialQuantityKind::Direction:
-			if (!MultiplyMatrixVector(Linear, Components, ConvertedVector)
-				|| !VectorToLexemes(ConvertedVector, OutputComponents))
-			{
-				return Fail(OutError, TEXT("spatial_direction_conversion_failed"));
+			if (!MultiplyMatrixVector(Linear, Components, ConvertedVector))
+				return Fail(OutError, TEXT("spatial_direction_conversion_failed"), TEXT("The conversion matrix column count does not match the direction component count."), TEXT("/value/components"),
+					MakeShared<FJsonValueNumber>(Linear.IsEmpty() ? 0 : Linear[0].Num()), MakeShared<FJsonValueNumber>(Components.Num()));
+			if (!VectorToLexemes(ConvertedVector, OutputComponents, TEXT("/result/components"), OutError)) {
+				OutError = FUeAgentStateSemanticError::WrapFailure(TEXT("spatial_direction_conversion_failed"), OutError, TEXT("state_semantic")); return false;
 			}
 			break;
 		case EUeAgentSpatialQuantityKind::Normal:
 			{
 				FExactMatrix LinearInverse;
-				if (!InvertMatrix(Linear, LinearInverse)
-					|| !MultiplyMatrixVector(
-						Transpose(LinearInverse),
-						Components,
-						ConvertedVector)
-					|| !VectorToLexemes(ConvertedVector, OutputComponents))
-				{
-					return Fail(OutError, TEXT("spatial_normal_conversion_failed"));
+				if (!InvertMatrix(Linear, LinearInverse, TEXT("/spatial_conversion/linear"), OutError)) {
+					OutError = FUeAgentStateSemanticError::WrapFailure(TEXT("spatial_normal_conversion_failed"), OutError, TEXT("state_semantic")); return false;
+				}
+				if (!MultiplyMatrixVector(Transpose(LinearInverse), Components, ConvertedVector))
+					return Fail(OutError, TEXT("spatial_normal_conversion_failed"), TEXT("The inverse-transpose matrix dimension does not match the normal component count."), TEXT("/value/components"),
+						MakeShared<FJsonValueNumber>(LinearInverse.Num()), MakeShared<FJsonValueNumber>(Components.Num()));
+				if (!VectorToLexemes(ConvertedVector, OutputComponents, TEXT("/result/components"), OutError)) {
+					OutError = FUeAgentStateSemanticError::WrapFailure(TEXT("spatial_normal_conversion_failed"), OutError, TEXT("state_semantic")); return false;
 				}
 				break;
 			}
@@ -3248,15 +3667,16 @@ namespace UE::UAI::StateSemantic
 						}
 					}
 				}
-				if (!MultiplyMatrices(Homogeneous, SourceTransform, ConvertedMatrix)
-					|| !MatrixToLexemes(ConvertedMatrix, OutputComponents))
-				{
-					return Fail(OutError, TEXT("spatial_transform_conversion_failed"));
+				if (!MultiplyMatrices(Homogeneous, SourceTransform, ConvertedMatrix))
+					return Fail(OutError, TEXT("spatial_transform_conversion_failed"), TEXT("The homogeneous conversion and source transform matrix dimensions do not agree."), TEXT("/value/components"),
+						MakeShared<FJsonValueNumber>(Homogeneous.IsEmpty() ? 0 : Homogeneous[0].Num()), MakeShared<FJsonValueNumber>(SourceTransform.Num()));
+				if (!MatrixToLexemes(ConvertedMatrix, OutputComponents, TEXT("/result/components"), OutError)) {
+					OutError = FUeAgentStateSemanticError::WrapFailure(TEXT("spatial_transform_conversion_failed"), OutError, TEXT("state_semantic")); return false;
 				}
 				break;
 			}
 		default:
-			return Fail(OutError, TEXT("spatial_quantity_kind_unknown"));
+			return Fail(OutError, TEXT("spatial_quantity_kind_unknown"), TEXT("The spatial quantity kind has no conversion rule."), TEXT("/value/quantity_kind"), MakeShared<FJsonValueString>(TEXT("point, direction, normal or transform")), MakeShared<FJsonValueNumber>(static_cast<int32>(Value.GetQuantityKind())));
 		}
 
 		TArray<FString> Evidence = Value.GetConversionEvidence();
@@ -3271,7 +3691,7 @@ namespace UE::UAI::StateSemantic
 			MoveTemp(Evidence));
 		if (!Result->IsValid())
 		{
-			return Fail(OutError, TEXT("spatial_converted_value_invalid"));
+			OutError = FUeAgentStateSemanticError::WrapFailure(TEXT("spatial_converted_value_invalid"), Result->GetValidationDiagnostic(), TEXT("state_semantic")); return false;
 		}
 		OutValue = Result;
 		return true;

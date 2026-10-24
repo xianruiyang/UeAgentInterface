@@ -1,5 +1,7 @@
 #include "OperationOwners/ViewportGraph/UeAgentViewportGraphOperationOwner.h"
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialMechanicsHost.h"
 #include "Core/DomainCapability/DelegatedCommandOperation/UeAgentDelegatedCommandOperation.h"
 #include "Dom/JsonObject.h"
@@ -13,24 +15,35 @@ namespace UE::UAI::OperationOwners::ViewportGraph
 
 	namespace
 	{
-		FString ErrorJson(
-			const FString& Code,
-			const FString& Subject,
-			const FString& Detail,
-			const FString& TerminalStatus = TEXT("not_started"),
-			const bool bRetrySafe = true)
+		UE::UAI::Contract::FDiagnostic CommandFailure(FString Code, const FString& Subject, FString Reason = FString(), FString InternalContext = FString())
 		{
-			const TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), Code);
-			Error->SetStringField(TEXT("subject_id"), Subject);
-			Error->SetStringField(TEXT("detail"), Detail);
-			Error->SetStringField(TEXT("terminal_status"), TerminalStatus);
-			Error->SetBoolField(TEXT("retry_safe"), bRetrySafe);
-			FString Text;
-			const auto Writer = TJsonWriterFactory<TCHAR,
-				TCondensedJsonPrintPolicy<TCHAR>>::Create(&Text);
-			FJsonSerializer::Serialize(Error, Writer);
-			return Text;
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(Reason), TEXT("command"), MoveTemp(InternalContext), Subject);
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.TerminalStatus = TEXT("not_started");
+			Diagnostic.bRetrySafe = true;
+			Diagnostic.MutationStarted = false;
+			Diagnostic.MutationMayHaveStarted = false;
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic InvocationFailure(const FString& Code, const FString& Subject, const UE::UAI::Contract::FDiagnostic& Cause)
+		{
+			auto Diagnostic = CommandFailure(Code, Subject, TEXT("The operation runtime could not be prepared."));
+			if (!Cause.IsEmpty()) Diagnostic.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(Cause);
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic ProjectionFailure(const FString& Code, const UE::UAI::Contract::FDiagnostic& Cause,
+			const BindingGateway::Operation::FOperationLifecycleReceipt& Receipt)
+		{
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(Code, TEXT("The operation completed, but its result payload could not be produced."), TEXT("result_projection"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (!Cause.IsEmpty()) Diagnostic.PublicCause = MakeShared<UE::UAI::Contract::FDiagnostic>(Cause);
+			Diagnostic.TerminalStatus = BindingGateway::Operation::LexToString(Receipt.GetStatus());
+			Diagnostic.MutationStarted = Receipt.DidMutationStart();
+			Diagnostic.MutationMayHaveStarted = Receipt.DidMutationStart();
+			Diagnostic.bRetrySafe = Receipt.IsRetrySafe();
+			return Diagnostic;
 		}
 	}
 
@@ -62,7 +75,7 @@ namespace UE::UAI::OperationOwners::ViewportGraph
 		const FString& CommandId,
 		TSharedPtr<IUeAgentCommandHandler>& OutHandler,
 		TArray<FString>& OutAuthorityScopes,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return Composition::TimelineSpatial::TryResolveTimelineSpatialMechanics(
 			CommandId,
@@ -80,7 +93,7 @@ namespace UE::UAI::OperationOwners::ViewportGraph
 		{
 			TSharedPtr<IUeAgentCommandHandler> Mechanics;
 			TArray<FString> MechanicsScopes;
-			FString ResolveError;
+			UE::UAI::Contract::FDiagnostic ResolveError;
 			if (!TryResolveMechanics(
 					Request.GetCommandId(),
 					Mechanics,
@@ -91,7 +104,7 @@ namespace UE::UAI::OperationOwners::ViewportGraph
 				return FUeAgentCommandResult::Failure(
 					Request,
 					TEXT("{}"),
-					ErrorJson(
+					InvocationFailure(
 						TEXT("viewport_graph_runtime_unavailable"),
 						Request.GetCommandId(),
 						ResolveError));
@@ -118,10 +131,7 @@ namespace UE::UAI::OperationOwners::ViewportGraph
 			return FUeAgentCommandResult::Failure(
 				Request,
 				TEXT("{}"),
-				ErrorJson(
-					TEXT("viewport_graph_operation_factory_missing"),
-					Request.GetCommandId(),
-					TEXT("the exact transient operation has no factory")));
+				CommandFailure(TEXT("viewport_graph_operation_factory_missing"), Request.GetCommandId(), TEXT("the exact transient operation has no factory")));
 		}
 		DomainCapability::FDomainOperationInvocation Invocation;
 		DomainCapability::FDomainOperationInvocationError InvocationError;
@@ -131,44 +141,22 @@ namespace UE::UAI::OperationOwners::ViewportGraph
 			return FUeAgentCommandResult::Failure(
 				Request,
 				TEXT("{}"),
-				ErrorJson(
-					TEXT("viewport_graph_runtime_unavailable"),
-					Request.GetCommandId(),
-					InvocationError.GetCode() + TEXT(":")
-						+ InvocationError.GetDetail()));
+				InvocationFailure(TEXT("viewport_graph_runtime_unavailable"), Request.GetCommandId(), InvocationError));
 		}
 		BindingGateway::Operation::FOperationLifecycleReceipt Receipt;
 		if (!Invocation.GetService()->Run(
 				*Invocation.GetPlan(), *Invocation.GetAuthorization(), Receipt))
 		{
-			FString Detail = Invocation.GetContext()->GetFailureDetail();
-			if (Detail.IsEmpty())
-			{
-				Detail = TEXT("phase_history:")
-					+ FString::Join(Receipt.GetPhaseHistory(), TEXT(","));
-			}
-			return FUeAgentCommandResult::Failure(
-				Request,
-				TEXT("{}"),
-				ErrorJson(
-					Receipt.GetErrorCode(),
-					Request.GetCommandId(),
-					Detail,
-					BindingGateway::Operation::LexToString(Receipt.GetStatus()),
-					Receipt.IsRetrySafe()));
+			auto Diagnostic = Receipt.GetDiagnostic();
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Request.GetCommandId();
+			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), MoveTemp(Diagnostic));
 		}
 		FString Payload;
-		FString PayloadError;
+		UE::UAI::Contract::FDiagnostic PayloadError;
 		if (!Invocation.GetContext()->TryBuildSuccessPayload(
 			Receipt, Payload, PayloadError))
 		{
-			return FUeAgentCommandResult::ProtocolError(
-				Request.GetCorrelationId(),
-				Request.GetRequestId(),
-				Request.GetCommandId(),
-				Request.GetCommandBindingHash(),
-				TEXT("viewport_graph_operation_result_invalid"),
-				PayloadError);
+			return FUeAgentCommandResult::ProtocolError(Request.GetCorrelationId(), Request.GetRequestId(), Request.GetCommandId(), Request.GetCommandBindingHash(), ProjectionFailure(TEXT("viewport_graph_operation_result_invalid"), PayloadError, Receipt));
 		}
 		return FUeAgentCommandResult::Success(Request, MoveTemp(Payload));
 	}

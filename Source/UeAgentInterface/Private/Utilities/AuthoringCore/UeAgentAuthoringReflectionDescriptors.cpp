@@ -6,10 +6,8 @@
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "ISinglePropertyView.h"
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
-#include "PropertyHandle.h"
 #include "UObject/Class.h"
 #include "UObject/UnrealType.h"
 
@@ -17,6 +15,30 @@ namespace UeAgentAuthoringReflection
 {
 	namespace
 	{
+		bool IsPersistentField(const FProperty* Property)
+		{
+			return Property && !Property->HasAnyPropertyFlags(CPF_EditConst | CPF_Deprecated | CPF_Transient
+				| CPF_DuplicateTransient | CPF_NonPIEDuplicateTransient | CPF_TextExportTransient);
+		}
+
+		bool HasNativeEditDeclaration(const FProperty* Property, const UStruct* Scope,
+			TFunctionRef<bool(const FProperty*)> IsDirectlyEditable)
+		{
+			if (!IsPersistentField(Property)) return false;
+			if (Property->HasAnyPropertyFlags(CPF_Edit)) return IsDirectlyEditable(Property);
+			if (!CastField<FBoolProperty>(Property)) return false;
+			Scope = Scope ? Scope : Property->GetOwnerStruct();
+			if (!Scope) return false;
+			for (TFieldIterator<FProperty> It(Scope, EFieldIterationFlags::IncludeSuper); It; ++It)
+			{
+				const FProperty* Controlled = *It;
+				if (!IsDirectlyEditable(Controlled) || !Controlled->HasMetaData(TEXT("EditCondition"))) continue;
+				const auto& PropertyEditor = FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
+				if (PropertyEditor.GetEditConditionToggleProperty(Controlled) == Property) return true;
+			}
+			return false;
+		}
+
 		void AddPropertyFlag(const FProperty* Property, EPropertyFlags Flag, const TCHAR* Name, TArray<FString>& OutFlags)
 		{
 			if (Property && Property->HasAnyPropertyFlags(Flag)) OutFlags.Add(Name);
@@ -68,19 +90,47 @@ namespace UeAgentAuthoringReflection
 		return MakeStringArray(PropertyFlags);
 	}
 
-	bool IsEditableByFlags(const FProperty* Property, const UObject* Owner)
+	void ReadConstraints(const FProperty* Property, TMap<FString, FString>& OutConstraints)
 	{
-		if (!Property
-			|| !Property->HasAnyPropertyFlags(CPF_Edit)
-			|| Property->HasAnyPropertyFlags(CPF_EditConst | CPF_Deprecated | CPF_Transient
-				| CPF_DuplicateTransient | CPF_NonPIEDuplicateTransient | CPF_TextExportTransient))
+		OutConstraints.Reset();
+		AddConstraint(Property, TEXT("ClampMin"), TEXT("clamp_min"), OutConstraints);
+		AddConstraint(Property, TEXT("ClampMax"), TEXT("clamp_max"), OutConstraints);
+		AddConstraint(Property, TEXT("UIMin"), TEXT("ui_min"), OutConstraints);
+		AddConstraint(Property, TEXT("UIMax"), TEXT("ui_max"), OutConstraints);
+		AddConstraint(Property, TEXT("Units"), TEXT("units"), OutConstraints);
+		AddConstraint(Property, TEXT("ForceUnits"), TEXT("force_units"), OutConstraints);
+	}
+
+	bool IsEditableDeclaration(const FProperty* Property, const UStruct* Scope)
+	{
+		Property = Property ? Property->GetOwnerProperty() : nullptr;
+		return HasNativeEditDeclaration(Property, Scope, [](const FProperty* Candidate)
 		{
-			return false;
+			return IsPersistentField(Candidate) && Candidate->HasAnyPropertyFlags(CPF_Edit);
+		});
+	}
+
+	bool IsEditableByFlags(const FProperty* Property, const UObject* Owner, bool bShowDefaultsOnly, bool bUseInstanceEditability, const UStruct* Scope)
+	{
+		// Container elements inherit their declaration; toggle controls inherit the native editing context.
+		Property = Property ? Property->GetOwnerProperty() : nullptr;
+		if (!Property) return false;
+		if (!Scope)
+		{
+			Scope = Property->GetOwnerStruct();
+			const UClass* DeclaringClass = Cast<UClass>(Scope);
+			if (Owner && DeclaringClass && Owner->IsA(DeclaringClass)) Scope = Owner->GetClass();
 		}
-		const bool bTemplateOwner = Owner && Owner->IsTemplate();
-		if (Property->HasAnyPropertyFlags(CPF_DisableEditOnInstance) && (!Owner || !bTemplateOwner)) return false;
-		if (Property->HasAnyPropertyFlags(CPF_DisableEditOnTemplate) && (!Owner || bTemplateOwner)) return false;
-		return true;
+		const bool bTemplateOwner = !bUseInstanceEditability && Owner && Owner->IsTemplate();
+		auto IsAvailableInContext = [&](const FProperty* Candidate)
+		{
+			if (!bShowDefaultsOnly && Candidate->HasAnyPropertyFlags(CPF_DisableEditOnInstance) && (!Owner || !bTemplateOwner)) return false;
+			return !Candidate->HasAnyPropertyFlags(CPF_DisableEditOnTemplate) || (Owner && !bTemplateOwner);
+		};
+		return IsAvailableInContext(Property) && HasNativeEditDeclaration(Property, Scope, [&](const FProperty* Candidate)
+		{
+			return IsPersistentField(Candidate) && Candidate->HasAnyPropertyFlags(CPF_Edit) && IsAvailableInContext(Candidate);
+		});
 	}
 
 	bool IsOwnedObjectProperty(const FProperty* Property)
@@ -93,67 +143,47 @@ namespace UeAgentAuthoringReflection
 				&& Property->HasAnyPropertyFlags(CPF_ExportObject));
 	}
 
-	bool EvaluateEditCondition(UObject* Owner, const FProperty* Property, bool& bOutSatisfied, FString& OutReason)
+	bool IsExistingInlineObjectProperty(
+		const FProperty* Property,
+		const void* ValuePtr,
+		const UObject* Owner)
 	{
-		bOutSatisfied = true;
-		OutReason.Reset();
-		if (!Property || !Property->HasMetaData(TEXT("EditCondition"))) return true;
-		const UClass* PropertyOwnerClass = Cast<UClass>(Property->GetOwnerStruct());
-		if (!Owner || !PropertyOwnerClass || !Owner->IsA(PropertyOwnerClass))
+		const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property);
+		if (!ObjectProperty || CastField<FClassProperty>(Property) || !ValuePtr || !Owner
+			|| !Property->HasAnyPropertyFlags(CPF_ExportObject)
+			|| !Property->HasMetaData(TEXT("EditInline"))
+			|| Property->HasMetaData(TEXT("NoEditInline")))
 		{
-			OutReason = TEXT("property_edit_condition_requires_object_context");
 			return false;
 		}
-
-		FPropertyEditorModule* PropertyEditor = FModuleManager::LoadModulePtr<FPropertyEditorModule>(TEXT("PropertyEditor"));
-		if (!PropertyEditor)
-		{
-			OutReason = TEXT("property_edit_condition_evaluator_unavailable");
-			return false;
-		}
-		FSinglePropertyParams Params;
-		Params.NamePlacement = EPropertyNamePlacement::Hidden;
-		const TSharedPtr<ISinglePropertyView> View = PropertyEditor->CreateSingleProperty(Owner, Property->GetFName(), Params);
-		const TSharedPtr<IPropertyHandle> Handle = View.IsValid() ? View->GetPropertyHandle() : nullptr;
-		if (!Handle.IsValid() || !Handle->IsValidHandle())
-		{
-			OutReason = TEXT("property_edit_condition_evaluation_failed");
-			return false;
-		}
-
-		bOutSatisfied = Handle->IsEditable();
-		if (!bOutSatisfied) OutReason = TEXT("property_edit_condition_false");
-		return true;
+		const UObject* Referenced = ObjectProperty->GetObjectPropertyValue(ValuePtr);
+		return Referenced && Referenced->IsIn(Owner);
 	}
 
-	bool IsEditableProperty(const FProperty* Property, UObject* Owner, FString* OutReason)
+	bool IsEditableProperty(const FProperty* Property, UObject* Owner, FString* OutReason, bool bShowDefaultsOnly, bool bUseInstanceEditability, const UStruct* Scope)
 	{
 		if (OutReason) OutReason->Reset();
-		if (!IsEditableByFlags(Property, Owner))
+		if (!IsEditableByFlags(Property, Owner, bShowDefaultsOnly, bUseInstanceEditability, Scope))
 		{
 			if (OutReason) *OutReason = TEXT("not_editable_by_property_flags");
 			return false;
 		}
-		// PropertyEditor can evaluate conditions only for fields owned directly by
-		// a UClass. Struct authoring must keep CPF_Edit fields available so one
-		// transaction can update a condition source and its dependent field.
-		if (!Cast<UClass>(Property->GetOwnerStruct())) return true;
-		bool bSatisfied = true;
-		FString ConditionReason;
-		if (!EvaluateEditCondition(Owner, Property, bSatisfied, ConditionReason) || !bSatisfied)
-		{
-			if (OutReason) *OutReason = ConditionReason;
-			return false;
-		}
 		return true;
 	}
 
-	bool Build(const FProperty* Property, UObject* Owner, const void* ValuePtr, FDescriptor& OutDescriptor, FString& OutError)
+	bool Build(const FProperty* Property, UObject* Owner, const void* ValuePtr, FDescriptor& OutDescriptor, FDiagnostic& OutError,
+		bool bShowDefaultsOnly, bool bUseInstanceEditability, const UStruct* Scope)
 	{
 		OutDescriptor = FDescriptor();
 		if (!Property)
 		{
-			OutError = TEXT("invalid_property");
+			OutError = FDiagnostic::Failure(TEXT("invalid_property"),
+				TEXT("A reflected property descriptor cannot be built without a native property."), TEXT("property_descriptor"));
+			OutError.SourceKind = TEXT("native_result");
+			OutError.PropertyPath = TEXT("property");
+			OutError.ExpectedValuePresent = true;
+			OutError.ActualValuePresent = false;
+			if (Owner) OutError.InternalContext = Owner->GetPathName();
 			return false;
 		}
 
@@ -189,20 +219,17 @@ namespace UeAgentAuthoringReflection
 		AddPropertyFlag(Property, CPF_TextExportTransient, TEXT("TextExportTransient"), OutDescriptor.PropertyFlags);
 		AddPropertyFlag(Property, CPF_SaveGame, TEXT("SaveGame"), OutDescriptor.PropertyFlags);
 
-		AddConstraint(Property, TEXT("ClampMin"), TEXT("clamp_min"), OutDescriptor.Constraints);
-		AddConstraint(Property, TEXT("ClampMax"), TEXT("clamp_max"), OutDescriptor.Constraints);
-		AddConstraint(Property, TEXT("UIMin"), TEXT("ui_min"), OutDescriptor.Constraints);
-		AddConstraint(Property, TEXT("UIMax"), TEXT("ui_max"), OutDescriptor.Constraints);
-		AddConstraint(Property, TEXT("Units"), TEXT("units"), OutDescriptor.Constraints);
+		ReadConstraints(Property, OutDescriptor.Constraints);
 
 		FString PropertyReason;
-		OutDescriptor.bEditableByProperty = IsEditableProperty(Property, Owner, &PropertyReason);
-		FString CodecReason;
+		OutDescriptor.bEditableByProperty = IsEditableProperty(Property, Owner, &PropertyReason, bShowDefaultsOnly, bUseInstanceEditability, Scope)
+			|| IsExistingInlineObjectProperty(Property, ValuePtr, Owner);
+		FDiagnostic CodecReason;
 		OutDescriptor.bCodecSupported = UeAgentPropertyValueCodec::IsAuthoringSupported(Property, ValuePtr, CodecReason);
 		OutDescriptor.bEditable = OutDescriptor.bEditableByProperty && OutDescriptor.bCodecSupported;
 		if (!OutDescriptor.bEditable)
 		{
-			OutDescriptor.AvailabilityReason = OutDescriptor.bCodecSupported ? PropertyReason : CodecReason;
+			OutDescriptor.AvailabilityReason = OutDescriptor.bCodecSupported ? PropertyReason : CodecReason.Code;
 		}
 
 		OutError.Reset();

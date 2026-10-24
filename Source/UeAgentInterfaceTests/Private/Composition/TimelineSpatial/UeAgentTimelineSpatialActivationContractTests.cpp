@@ -9,15 +9,18 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
+#include "Composition/SimpleAuthoring/UeAgentSimpleAuthoringComposition.h"
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialActivation.h"
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialRuntime.h"
 #include "Core/Contract/UeAgentCommandContract.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
+#include "Module/CommandRegistration/AnimationCurveCommands/UeAgentAnimationCurveCommandRegistration.h"
+#include "Module/CommandRegistration/AnimationRigCommands/UeAgentAnimationRigCommandRegistration.h"
+#include "Module/CommandRegistration/TimelineSequenceCommands/UeAgentTimelineSequenceCommandRegistration.h"
 
 #include "Composition/TimelineSpatial/UeAgentTimelineSpatialCommandHandlers.h"
 #include "CommandEdge/UeAgentCommandProtocol.h"
 
-#include "Composition/HjsonImport/UeAgentHjsonImportTargetRegistry.h"
 
 namespace
 {
@@ -256,28 +259,11 @@ namespace
 			OutActivation->GetStringField(TEXT("schema")),
 			FString(TEXT(
 				"uai.composition.timeline_spatial.activation_fixture.v1")));
-		const int32 BaseCommandCount = static_cast<int32>(
-			OutActivation->GetNumberField(TEXT("base_command_count")));
-		const int32 CapabilityCount = static_cast<int32>(
-			OutActivation->GetNumberField(TEXT("capability_count")));
-		const int32 HjsonCommandCount = static_cast<int32>(
-			OutActivation->GetNumberField(TEXT("hjson_command_count")));
-		const int32 FinalCommandCount = static_cast<int32>(
-			OutActivation->GetNumberField(TEXT("final_command_count")));
-	Test->TestEqual(TEXT("base command inventory"), BaseCommandCount, 114);
-	Test->TestEqual(TEXT("TimelineSpatial capability inventory"), CapabilityCount, 60);
-	Test->TestEqual(TEXT("TimelineSpatial HJSON ownership remains absent"), HjsonCommandCount, 0);
-		Test->TestEqual(
-			TEXT("final command inventory is additive"),
-			FinalCommandCount,
-			BaseCommandCount + CapabilityCount + HjsonCommandCount);
-
 		const TArray<TSharedPtr<FJsonValue>>& ProfileValues =
 			OutActivation->GetArrayField(TEXT("profiles"));
-		Test->TestEqual(
-			TEXT("all TimelineSpatial capabilities have activation profiles"),
-			ProfileValues.Num(),
-			CapabilityCount);
+		Test->TestFalse(
+			TEXT("TimelineSpatial activation fixture is non-empty"),
+			ProfileValues.IsEmpty());
 		OutProfiles = ObjectsByStringField(
 			Test,
 			ProfileValues,
@@ -286,12 +272,11 @@ namespace
 		Test->TestEqual(
 			TEXT("activation capability ids are unique"),
 			OutProfiles.Num(),
-			CapabilityCount);
+			ProfileValues.Num());
 
 		TSet<FString> DescriptorIds;
 		TSet<FString> TypedOperationIds;
 		TSet<FString> ProviderBindings;
-		TMap<FString, int32> AdapterCounts;
 		for (const TPair<FString, TSharedPtr<FJsonObject>>& Pair
 			: OutProfiles)
 		{
@@ -306,8 +291,6 @@ namespace
 				Profile->GetStringField(TEXT("context_source"));
 			const FString OracleKind =
 				Profile->GetStringField(TEXT("oracle_kind"));
-			const FString AdapterId =
-				Profile->GetStringField(TEXT("adapter_id"));
 			Test->TestFalse(
 				TEXT("descriptor id is unique: ") + DescriptorId,
 				DescriptorIds.Contains(DescriptorId));
@@ -340,20 +323,7 @@ namespace
 			DescriptorIds.Add(DescriptorId);
 			TypedOperationIds.Add(TypedOperationId);
 			ProviderBindings.Add(ProviderBinding);
-			AdapterCounts.FindOrAdd(AdapterId) += 1;
 		}
-		Test->TestEqual(
-			TEXT("WorldSpatial activation count"),
-			AdapterCounts.FindRef(TEXT("world_spatial")),
-			22);
-		Test->TestEqual(
-			TEXT("TimelineAnimation activation count"),
-			AdapterCounts.FindRef(TEXT("timeline_animation")),
-			20);
-		Test->TestEqual(
-			TEXT("RigSimulationSpatial activation count"),
-			AdapterCounts.FindRef(TEXT("rig_simulation_spatial")),
-			18);
 
 		struct FSourceFixture
 		{
@@ -475,9 +445,18 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 	using namespace UE::UAI::CommandContract;
 	using namespace UE::UAI::Composition::TimelineSpatial;
 	using namespace UE::UAI::Contract;
-	const TArray<FUeAgentTimelineSpatialActivationProfile>& Routes =
-		GetTimelineSpatialActivationProfiles();
-	TestEqual(TEXT("production activation profile count"), Routes.Num(), 60);
+	const TArray<FUeAgentTimelineSpatialActivationProfile>* CachedProfiles = nullptr;
+	FDiagnostic ProfileError;
+	if (!TryGetTimelineSpatialActivationProfiles(CachedProfiles, ProfileError))
+	{
+		AddError(ProfileError.PublicMessage);
+		return false;
+	}
+	const auto& Routes = *CachedProfiles;
+	TestEqual(
+		TEXT("production routes match the activation fixture"),
+		Routes.Num(),
+		Profiles.Num());
 	TSet<FString> ProductionCapabilities;
 	for (const FUeAgentTimelineSpatialActivationProfile& Route : Routes)
 	{
@@ -562,7 +541,7 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 	TSharedPtr<const FUeAgentDescriptorRegistry> Descriptors;
 	TSharedPtr<const UE::UAI::CommandContract::
 		FUeAgentCommandContractRegistry> Commands;
-	FString Error;
+	FDiagnostic Error;
 	const bool bCommandsCreated = TestTrue(
 		TEXT("base and TimelineSpatial command contracts compose"),
 		TryCreateTimelineSpatialProductionCommandContractRegistry(
@@ -570,7 +549,6 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 			Error));
 	if (bCommandsCreated && Commands.IsValid())
 	{
-		TestEqual(TEXT("production command count"), Commands->GetContracts().Num(), 174);
 		for (const FUeAgentTimelineSpatialActivationProfile& Route : Routes)
 		{
 			const UE::UAI::CommandContract::FUeAgentCommandContract* Command =
@@ -640,7 +618,7 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 			TEXT("formal manifest does not expose family routing"),
 			Manifest.Contains(TEXT("family"), ESearchCase::IgnoreCase));
 
-		// This local registry is the 174-command base consumed by the
+		// This local registry is the additive base consumed by the
 		// LongRunningSession legacy-layer contract. The current HJSON command
 		// and complete committed manifest are owned by the outer active
 		// composition and verified there.
@@ -651,10 +629,9 @@ bool FUeAgentTimelineSpatialActivationContractTest::RunTest(
 		TryCreateTimelineSpatialDescriptorRegistry(Descriptors, Error);
 	if (!bDescriptorsCreated || !Descriptors.IsValid())
 	{
-		AddError(TEXT("timeline_spatial_descriptor_registry_unavailable:") + Error);
+		AddError(TEXT("timeline_spatial_descriptor_registry_unavailable:") + Error.PublicMessage);
 		return true;
 	}
-	TestEqual(TEXT("production descriptor count"), Descriptors->GetDescriptors().Num(), 60);
 	for (const FUeAgentTimelineSpatialActivationProfile& Route : Routes)
 	{
 		const FUeAgentOperationDescriptor* Descriptor =
@@ -692,16 +669,25 @@ bool FUeAgentTimelineSpatialPublicCommandHandlersTest::RunTest(
 	const TSharedRef<FRecordingOperationPort> OperationPort =
 		MakeShared<FRecordingOperationPort>();
 	TArray<TSharedRef<UE::UAI::CommandEdge::IUeAgentCommandHandler>> Handlers;
-	FString Error;
+	UE::UAI::Contract::FDiagnostic Error;
+	const TArray<FUeAgentTimelineSpatialActivationProfile>* Profiles = nullptr;
+	if (!TryGetTimelineSpatialActivationProfiles(Profiles, Error))
+	{
+		AddError(Error.PublicMessage);
+		return false;
+	}
 	TestTrue(
 		TEXT("one thin handler is created for every TimelineSpatial route"),
 		TryCreateTimelineSpatialCommandHandlers(
-			GetTimelineSpatialActivationProfiles(),
+			*Profiles,
 			QueryPort,
 			OperationPort,
 			Handlers,
 			Error));
-	TestEqual(TEXT("public handler count"), Handlers.Num(), 60);
+	TestEqual(
+		TEXT("every production route has one public handler"),
+		Handlers.Num(),
+		Profiles->Num());
 	TSharedPtr<const UE::UAI::CommandContract::
 		FUeAgentCommandContractRegistry> Commands;
 	TestTrue(
@@ -709,9 +695,10 @@ bool FUeAgentTimelineSpatialPublicCommandHandlersTest::RunTest(
 		TryCreateTimelineSpatialProductionCommandContractRegistry(
 			Commands,
 			Error));
-	if (!Commands.IsValid() || Handlers.Num() != 60)
+	if (!Commands.IsValid()
+		|| Handlers.Num() != Profiles->Num())
 	{
-		AddError(TEXT("timeline_spatial_public_handlers_unavailable:") + Error);
+		AddError(TEXT("timeline_spatial_public_handlers_unavailable:") + Error.PublicMessage);
 		return false;
 	}
 
@@ -733,7 +720,7 @@ bool FUeAgentTimelineSpatialPublicCommandHandlersTest::RunTest(
 	int32 ExpectedQueryCalls = 0;
 	int32 ExpectedOperationCalls = 0;
 	for (const FUeAgentTimelineSpatialActivationProfile& Route
-		: GetTimelineSpatialActivationProfiles())
+		: *Profiles)
 	{
 		const UE::UAI::CommandContract::FUeAgentCommandContract* Contract =
 			Commands->FindExact(Route.CommandId);
@@ -788,10 +775,14 @@ bool FUeAgentTimelineSpatialPublicCommandHandlersTest::RunTest(
 			}
 		}
 	}
-	TestEqual(TEXT("all query routes submit to C3Q application"), QueryPort->Calls, 23);
-	TestEqual(TEXT("all operation routes submit to C3O application"), OperationPort->Calls, 37);
-	TestEqual(TEXT("fixture query count is stable"), ExpectedQueryCalls, 23);
-	TestEqual(TEXT("fixture operation count is stable"), ExpectedOperationCalls, 37);
+	TestEqual(
+		TEXT("all discovered query routes submit to C3Q application"),
+		QueryPort->Calls,
+		ExpectedQueryCalls);
+	TestEqual(
+		TEXT("all discovered operation routes submit to C3O application"),
+		OperationPort->Calls,
+		ExpectedOperationCalls);
 	return true;
 }
 
@@ -805,9 +796,16 @@ bool FUeAgentTimelineSpatialUnifiedOperationBindingContractTest::RunTest(
 	const FString& Parameters)
 {
 	using namespace UE::UAI::Composition::TimelineSpatial;
+	const TArray<FUeAgentTimelineSpatialActivationProfile>* Profiles = nullptr;
+	UE::UAI::Contract::FDiagnostic Error;
+	if (!TryGetTimelineSpatialActivationProfiles(Profiles, Error))
+	{
+		AddError(Error.PublicMessage);
+		return false;
+	}
 	TestEqual(
 		TEXT("all effectful TimelineSpatial profiles use C3O"),
-		GetTimelineSpatialActivationProfiles().FilterByPredicate(
+		Profiles->FilterByPredicate(
 			[](const UE::UAI::Composition::TimelineSpatial::
 				FUeAgentTimelineSpatialActivationProfile& Profile)
 			{
@@ -818,208 +816,122 @@ bool FUeAgentTimelineSpatialUnifiedOperationBindingContractTest::RunTest(
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FUeAgentTimelineSpatialHjsonImportTargetBindingTest,
-	"UeAgentInterface.Composition.TimelineSpatial.E4.HjsonImportTargetBinding",
+	FUeAgentTimelineSpatialCreateModelResultRouteTest,
+	"UeAgentInterface.Composition.TimelineSpatial.E3.CreateModelResultRoutes",
 	EAutomationTestFlags::EditorContext
 		| EAutomationTestFlags::EngineFilter)
 
-bool FUeAgentTimelineSpatialHjsonImportTargetBindingTest::RunTest(
+bool FUeAgentTimelineSpatialCreateModelResultRouteTest::RunTest(
 	const FString& Parameters)
 {
-	TSharedPtr<FJsonObject> Activation;
-	TMap<FString, TSharedPtr<FJsonObject>> Profiles;
-	if (!ValidateActivationFixture(this, Activation, Profiles))
+	using namespace UE::UAI::Composition::TimelineSpatial;
+	const TArray<FUeAgentTimelineSpatialActivationProfile>* CachedProfiles = nullptr;
+	UE::UAI::Contract::FDiagnostic Error;
+	if (!TryGetTimelineSpatialActivationProfiles(CachedProfiles, Error))
 	{
+		AddError(Error.PublicMessage);
 		return false;
 	}
-
-	const TSharedPtr<FJsonObject> Hjson =
-		Activation->GetObjectField(TEXT("hjson_import"));
-	TestEqual(
-		TEXT("one domain-neutral HJSON import command"),
-		Hjson->GetStringField(TEXT("command_id")),
-		FString(TEXT("content_graph.import_workspace")));
-	const TArray<TSharedPtr<FJsonValue>>& ParameterValues =
-		Hjson->GetArrayField(TEXT("parameters"));
-	const TMap<FString, TSharedPtr<FJsonObject>> ParametersByName =
-		ObjectsByStringField(
-			this,
-			ParameterValues,
-			TEXT("name"),
-			TEXT("HJSON public parameter"));
-	const TSet<FString> RequiredParameters = {
-		TEXT("target"),
-		TEXT("source"),
-		TEXT("intent"),
-		TEXT("expected_revision"),
-	};
-	const TSet<FString> OptionalParameters = {
-		TEXT("context"),
-		TEXT("projection"),
-		TEXT("profile_id"),
-		TEXT("dry_run"),
-		TEXT("destructive_authorization_id"),
-	};
-	TestEqual(TEXT("HJSON public parameter count"), ParametersByName.Num(), 9);
-	for (const TPair<FString, TSharedPtr<FJsonObject>>& Pair
-		: ParametersByName)
+	const auto& Profiles = *CachedProfiles;
+	const auto AssertRoute = [this, &Profiles](
+		const TCHAR* CommandId,
+		const TCHAR* FieldName)
 	{
-		const bool bRequired =
-			Pair.Value->GetBoolField(TEXT("required"));
+		const FUeAgentTimelineSpatialActivationProfile* Profile =
+			Profiles.FindByPredicate(
+				[CommandId](const auto& Candidate)
+				{
+					return Candidate.CommandId == CommandId;
+				});
+		TestNotNull(FString(TEXT("create route exists: ")) + CommandId, Profile);
+		if (!Profile) return;
 		TestEqual(
-			TEXT("HJSON parameter requiredness: ") + Pair.Key,
-			bRequired,
-			RequiredParameters.Contains(Pair.Key));
-		TestTrue(
-			TEXT("HJSON parameter is expected: ") + Pair.Key,
-			RequiredParameters.Contains(Pair.Key)
-				|| OptionalParameters.Contains(Pair.Key));
-	}
-	const TSharedPtr<FJsonObject>* DestructiveAuthorization =
-		ParametersByName.Find(TEXT("destructive_authorization_id"));
-	TestTrue(
-		TEXT("only destructive authorization is nullable"),
-		DestructiveAuthorization
-			&& (*DestructiveAuthorization)->GetBoolField(TEXT("nullable")));
-	for (const TPair<FString, TSharedPtr<FJsonObject>>& Pair
-		: ParametersByName)
-	{
-		if (Pair.Key != TEXT("destructive_authorization_id"))
-		{
-			TestFalse(
-				TEXT("non-authorization parameter is not nullable: ") + Pair.Key,
-				Pair.Value->GetBoolField(TEXT("nullable")));
-		}
-	}
-
-	const TArray<TSharedPtr<FJsonValue>>& BindingValues =
-		Hjson->GetArrayField(TEXT("target_bindings"));
-	const TMap<FString, TSharedPtr<FJsonObject>> BindingsByKind =
-		ObjectsByStringField(
-			this,
-			BindingValues,
-			TEXT("composition_kind"),
-			TEXT("HJSON import target binding"));
-	TestEqual(TEXT("Timeline HJSON target binding count"), BindingsByKind.Num(), 2);
-	const TSet<FString> ExpectedKinds = {
-		TEXT("ue.animation_sequence.asset"),
-		TEXT("ue.level_sequence.asset"),
-	};
-	TSet<FString> ImportDescriptors;
-	TSet<FString> TypedOperations;
-	TSet<FString> Providers;
-	for (const TPair<FString, TSharedPtr<FJsonObject>>& Pair : BindingsByKind)
-	{
-		TestTrue(
-			TEXT("binding targets one owned composition kind: ") + Pair.Key,
-			ExpectedKinds.Contains(Pair.Key));
-		const FString DescriptorId =
-			Pair.Value->GetStringField(TEXT("import_descriptor_id"));
-		const FString TypedOperationId =
-			Pair.Value->GetStringField(TEXT("typed_operation_id"));
-		const FString ProviderBinding =
-			Pair.Value->GetStringField(TEXT("provider_binding"));
-		TestFalse(TEXT("import descriptor is unique"), ImportDescriptors.Contains(DescriptorId));
-		TestFalse(TEXT("import operation is unique"), TypedOperations.Contains(TypedOperationId));
-		TestFalse(TEXT("import provider is unique"), Providers.Contains(ProviderBinding));
-		TestFalse(
-			TEXT("compile/settle policy is explicit"),
-			Pair.Value->GetStringField(TEXT("compile_settle_policy")).IsEmpty());
-		TestEqual(
-			TEXT("Timeline HJSON import persists a package"),
-			Pair.Value->GetStringField(TEXT("durable_kind")),
-			FString(TEXT("package")));
-		TestTrue(
-			TEXT("HJSON oracle independently unloads and reloads"),
-			Pair.Value->GetStringField(TEXT("oracle_kind"))
-				.StartsWith(TEXT("independent_unload_reload_")));
-		for (const FString& CapabilityId
-			: ReadStringSet(Pair.Value, TEXT("allowed_capabilities")))
-		{
-			const TSharedPtr<FJsonObject>* Profile = Profiles.Find(CapabilityId);
-			TestNotNull(
-				TEXT("HJSON target delegates only to an activated capability: ")
-					+ CapabilityId,
-				Profile);
-			if (Profile)
-			{
-				TestEqual(
-					TEXT("HJSON target delegates to TimelineAnimation only"),
-					(*Profile)->GetStringField(TEXT("adapter_id")),
-					FString(TEXT("timeline_animation")));
-			}
-		}
-		ImportDescriptors.Add(DescriptorId);
-		TypedOperations.Add(TypedOperationId);
-		Providers.Add(ProviderBinding);
-	}
-
-	const TSet<FString> ForbiddenOwners =
-		ReadStringSet(Activation, TEXT("forbidden_activation_owners"));
-	for (const FString& Forbidden : {
-		TEXT("legacy_command_id_switch"),
-		TEXT("legacy_prefix_dispatch"),
-		TEXT("legacy_hjson_apply"),
-		TEXT("python_business_binding"),
-		TEXT("current_editor_or_world"),
-		TEXT("request_echo_or_command_success_oracle"),
-	})
-	{
-		TestTrue(
-			TEXT("forbidden activation owner is explicit: ") + Forbidden,
-			ForbiddenOwners.Contains(Forbidden));
-	}
-
-	using namespace UE::UAI::Composition::HjsonImport;
-	const FUeAgentHjsonImportTargetRegistry& Registry =
-		GetHjsonImportTargetRegistry();
-	int32 TimelineTargetCount = 0;
-	for (const FUeAgentHjsonImportTargetBinding& Binding
-		: Registry.GetBindings())
-	{
-		if (BindingsByKind.Contains(Binding.CompositionKind))
-		{
-			++TimelineTargetCount;
-		}
-	}
-	TestEqual(TEXT("Timeline owns exactly two HJSON target bindings"),
-		TimelineTargetCount, 2);
-	for (const TPair<FString, TSharedPtr<FJsonObject>>& Pair : BindingsByKind)
-	{
-		const FUeAgentHjsonImportTargetBinding* Binding =
-			Registry.FindExact(Pair.Key);
-		TestNotNull(
-			TEXT("production target binding exists: ") + Pair.Key,
-			Binding);
-		if (!Binding)
-		{
-			continue;
-		}
-		TestTrue(TEXT("production target binding is complete"), Binding->IsValid());
-		TestEqual(
-			TEXT("production import descriptor"),
-			Binding->ImportDescriptorIdentity.GetDescriptorId(),
-			Pair.Value->GetStringField(TEXT("import_descriptor_id")));
-		TestEqual(
-			TEXT("production import descriptor version"),
-			Binding->ImportDescriptorIdentity.GetVersion(),
+			FString(TEXT("one compact result field: ")) + CommandId,
+			Profile->ModelResultFields.Num(),
 			1);
+		if (Profile->ModelResultFields.Num() != 1) return;
+		const auto& Field = Profile->ModelResultFields[0];
+		TestEqual(TEXT("public result name"), Field.Name, FString(FieldName));
+		TestTrue(
+			TEXT("public result comes from verified domain result"),
+			Field.SourcePath == TArray<FString>{
+				TEXT("projection"),
+				TEXT("payload"),
+				TEXT("result"),
+				FString(FieldName),
+			});
+	};
+
+	AssertRoute(TEXT("animation.montage.create"), TEXT("target_ref"));
+	AssertRoute(TEXT("timeline.sequence.create"), TEXT("target_ref"));
+	AssertRoute(
+		TEXT("rig.retarget.assets.generate"),
+		TEXT("generated_asset_refs"));
+
+	using UE::UAI::CommandContract::FUeAgentCommandDeclaration;
+	using UE::UAI::Module::CommandRegistration::Active::
+		IUeAgentActiveCommandContribution;
+	const auto AssertRegistration = [this](
+		const TCHAR* CommandId,
+		const TCHAR* FieldName,
+		const TFunction<bool(
+			TSharedPtr<IUeAgentActiveCommandContribution>&,
+			FString&)>& Factory)
+	{
+		TSharedPtr<IUeAgentActiveCommandContribution> Contribution;
+		FString Error;
+		if (!TestTrue(
+				FString(TEXT("registration composes: ")) + CommandId,
+				Factory(Contribution, Error))
+			|| !Contribution.IsValid())
+		{
+			AddError(Error);
+			return;
+		}
+		TArray<FUeAgentCommandDeclaration> Declarations;
+		Contribution->CollectDeclarations(Declarations);
+		const FUeAgentCommandDeclaration* Declaration =
+			Declarations.FindByPredicate(
+				[CommandId](const auto& Candidate)
+				{
+					return Candidate.CommandId == CommandId;
+				});
+		TestNotNull(
+			FString(TEXT("registered declaration exists: ")) + CommandId,
+			Declaration);
+		if (!Declaration) return;
 		TestEqual(
-			TEXT("production import operation"),
-			Binding->TypedOperationId,
-			Pair.Value->GetStringField(TEXT("typed_operation_id")));
-		TestEqual(
-			TEXT("production import provider"),
-			Binding->ProviderBinding,
-			Pair.Value->GetStringField(TEXT("provider_binding")));
-		TestEqual(
-			TEXT("production compile/settle policy"),
-			Binding->CompileSettlePolicy,
-			Pair.Value->GetStringField(TEXT("compile_settle_policy")));
-		TestEqual(
-			TEXT("production independent oracle"),
-			Binding->OracleKind,
-			Pair.Value->GetStringField(TEXT("oracle_kind")));
-	}
+			FString(TEXT("registered compact result count: ")) + CommandId,
+			Declaration->ModelResultFields.Num(),
+			1);
+		if (Declaration->ModelResultFields.Num() == 1)
+		{
+			TestEqual(
+				TEXT("registered compact result name"),
+				Declaration->ModelResultFields[0].Name,
+				FString(FieldName));
+		}
+	};
+
+	AssertRegistration(
+		TEXT("animation.blend_space.asset.create"),
+		TEXT("target_ref"),
+		UE::UAI::Module::CommandRegistration::AnimationCurveCommands::
+			TryCreateContribution);
+	AssertRegistration(
+		TEXT("animation.montage.create"),
+		TEXT("target_ref"),
+		UE::UAI::Module::CommandRegistration::AnimationCurveCommands::
+			TryCreateContribution);
+	AssertRegistration(
+		TEXT("timeline.sequence.create"),
+		TEXT("target_ref"),
+		UE::UAI::Module::CommandRegistration::TimelineSequenceCommands::
+			TryCreateContribution);
+	AssertRegistration(
+		TEXT("rig.retarget.assets.generate"),
+		TEXT("generated_asset_refs"),
+		UE::UAI::Module::CommandRegistration::AnimationRigCommands::
+			TryCreateContribution);
 	return true;
 }

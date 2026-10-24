@@ -18,6 +18,7 @@
 #include "TestSupport/UeAgentFixtureDirectoryLifecycle.h"
 #include "UObject/GarbageCollection.h"
 #include "WorldPartition/HLOD/HLODLayer.h"
+#include "Domains/Reflection/Authoring/UeAgentReflectionAuthoringDescriptors.h"
 #include "WorldPartition/WorldPartition.h"
 
 THIRD_PARTY_INCLUDES_START
@@ -39,7 +40,14 @@ namespace UE::UAI::Tests::StrictV2::T59
 	const TArray<FString>& ExpectedCommands()
 	{
 		static const TArray<FString> Commands = {
-			TEXT("world.actor.create"),
+			TEXT("world.wall.create_with_opening"),
+		};
+		return Commands;
+	}
+
+	const TArray<FString>& ExpectedDormantCommands()
+	{
+		static const TArray<FString> Commands = {
 			TEXT("world.actor_hlod_layer.update"),
 			TEXT("world.actor_streaming_policy.update"),
 			TEXT("world.data_layer_instance.create"),
@@ -48,7 +56,6 @@ namespace UE::UAI::Tests::StrictV2::T59
 			TEXT("world.level_game_mode.update"),
 			TEXT("world.streaming_relation.create"),
 			TEXT("world.streaming_relation.state.update"),
-			TEXT("world.wall.create_with_opening"),
 			TEXT("world.world_partition_streaming.update"),
 		};
 		return Commands;
@@ -105,75 +112,6 @@ namespace UE::UAI::Tests::StrictV2::T59
 		FString Result;
 		FString Error;
 		return Json::TryCanonicalize(Object, Result, Error) ? Result : TEXT("{}");
-	}
-
-	FString HlodDocument()
-	{
-		return TEXT(R"hjson({
-			"schema":"uai.world_hlod_layer.edit/1",
-			"root":{
-				"type":"/Script/Engine.HLODLayer",
-				"layer_type":"Instancing",
-				"is_spatially_loaded":true,
-				"cell_size":512,
-				"loading_range":2048.0
-			}
-		})hjson");
-	}
-
-	FString Sha256Text(const FString& Value)
-	{
-		FTCHARToUTF8 Utf8(*Value);
-		uint8 Digest[SHA256_DIGEST_LENGTH] = {};
-		SHA256(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length(), Digest);
-		return TEXT("sha256:")
-			+ BytesToHex(Digest, SHA256_DIGEST_LENGTH).ToLower();
-	}
-
-	bool WriteText(const FString& Path, const FString& Text)
-	{
-		return IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true)
-			&& FFileHelper::SaveStringToFile(
-				Text, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
-	}
-
-	bool WriteDirectoryWorkspace(
-		const FString& Root,
-		const FString& Target,
-		const FString& Document)
-	{
-		const FString Entry = TEXT("asset.hjson");
-		const TSharedRef<FJsonObject> Manifest = MakeShared<FJsonObject>();
-		Manifest->SetStringField(
-			TEXT("workspace_schema"), TEXT("uai.content_graph.workspace/1"));
-		Manifest->SetNumberField(TEXT("format_version"), 1);
-		Manifest->SetStringField(TEXT("target_identity"), Target);
-		Manifest->SetStringField(TEXT("base_revision"), TEXT("absent"));
-		Manifest->SetStringField(TEXT("entry_file"), Entry);
-		const TSharedRef<FJsonObject> File = MakeShared<FJsonObject>();
-		File->SetStringField(TEXT("path"), Entry);
-		File->SetStringField(TEXT("content_hash"), Sha256Text(Document));
-		Manifest->SetArrayField(
-			TEXT("files"), {MakeShared<FJsonValueObject>(File)});
-		Manifest->SetArrayField(
-			TEXT("references"), TArray<TSharedPtr<FJsonValue>>{});
-		return WriteText(FPaths::Combine(Root, Entry), Document)
-			&& WriteText(
-				FPaths::Combine(Root, TEXT(".uai/workspace.hjson")),
-				CanonicalJson(Manifest));
-	}
-
-	FString ImportParams(
-		const FString& Target,
-		const TSharedRef<FJsonObject>& Source)
-	{
-		const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
-		Params->SetStringField(TEXT("target"), Target);
-		Params->SetObjectField(TEXT("source"), Source);
-		Params->SetStringField(TEXT("expected_revision"), TEXT("absent"));
-		Params->SetStringField(
-			TEXT("authorization_id"), TEXT("auth:t59:hlod-hjson-product"));
-		return CanonicalJson(Params);
 	}
 
 	bool CleanupPackage(
@@ -972,16 +910,59 @@ bool FUeAgentStrictV2T59WorldCommandMigrationTest::RunTest(const FString& Parame
 		AddError(Error);
 		return false;
 	}
-	TestEqual(TEXT("T59 owns exactly eleven domain commands"), ExpectedCommands().Num(), 11);
 	for (const FString& CommandId : ExpectedCommands())
 	{
 		const auto* Contract = Registry->FindExact(CommandId);
 		TestNotNull(*FString::Printf(TEXT("%s is active"), *CommandId), Contract);
 		if (Contract)
 		{
+			TestEqual(*FString::Printf(TEXT("%s is enabled"), *CommandId),
+				Contract->GetAvailability(),
+				EUeAgentCommandAvailability::Enabled);
 			TestEqual(*FString::Printf(TEXT("%s has one T59 owner"), *CommandId),
 				Contract->GetPublicOwner(), FString(TEXT("world-command-owner")));
+			const auto& Fields = Contract->GetModelResultFields();
+			TestEqual(TEXT("wall create has two model fields"), Fields.Num(), 2);
+			if (Fields.Num() == 2)
+			{
+				TestEqual(TEXT("wall create status source"),
+					Fields[0].SourcePath,
+					TArray<FString>{TEXT("projection"), TEXT("payload"),
+						TEXT("status")});
+				TestEqual(TEXT("wall create outcome source"),
+					Fields[1].SourcePath,
+					TArray<FString>{TEXT("projection"), TEXT("payload"),
+						TEXT("effect_outcome")});
+			}
 		}
+	}
+	for (const FString& CommandId : ExpectedDormantCommands())
+	{
+		const auto* Contract = Registry->FindExact(CommandId);
+		TestNotNull(*FString::Printf(TEXT("%s remains registered as dormant"), *CommandId), Contract);
+		if (Contract)
+		{
+			TestEqual(*FString::Printf(TEXT("%s is dormant"), *CommandId),
+				Contract->GetAvailability(),
+				EUeAgentCommandAvailability::Dormant);
+			if (CommandId.EndsWith(TEXT(".create")))
+			{
+				TestEqual(TEXT("dormant create keeps compact model projection"),
+					Contract->GetModelResultFields().Num(), 2);
+			}
+		}
+	}
+	const auto* ActorCreate = Registry->FindExact(TEXT("world.actor.create"));
+	if (TestNotNull(TEXT("world.actor.create remains compatibility-executable"),
+		ActorCreate))
+	{
+		TestEqual(TEXT("world.actor.create is centrally dormant"),
+			ActorCreate->GetAvailability(),
+			CommandContract::EUeAgentCommandAvailability::Dormant);
+		TestEqual(TEXT("world.actor.create keeps the internal World owner"),
+			ActorCreate->GetPublicOwner(), FString(TEXT("world-command-owner")));
+		TestEqual(TEXT("world.actor.create keeps compact model projection"),
+			ActorCreate->GetModelResultFields().Num(), 2);
 	}
 	return !HasAnyErrors();
 }
@@ -1017,15 +998,18 @@ bool FUeAgentStrictV2T59WorldDomainCapabilityTest::RunTest(
 	}
 	const FDomainCapabilityDeclaration& Declaration =
 		(*Domain)->GetDeclaration();
-	TestEqual(TEXT("the World migration owner is exact"),
-		Declaration.Migration.OwnerId,
-		FString(TEXT("T59-WORLD-COMMAND-MIGRATION")));
-	TestEqual(TEXT("all World commands use request-scoped operations"),
-		Declaration.Operation.Operations.Num(), 11);
-	TestTrue(TEXT("HLOD HJSON is explicitly supported"),
+	TestTrue(TEXT("World exposes the HLOD Reflection workspace provider"),
 		Declaration.Hjson.Support == EDomainCapabilitySupport::Supported);
-	TestTrue(TEXT("HLOD HJSON has an exact route"),
-		!Declaration.Hjson.Routes.IsEmpty());
+	TestEqual(TEXT("World owns one HLOD workspace provider"),
+		Declaration.Hjson.Providers.Num(), 1);
+	TestEqual(TEXT("World owns one HLOD semantic workspace route"),
+		Declaration.Hjson.Routes.Num(), 1);
+	if (Declaration.Hjson.Routes.Num() == 1)
+	{
+		TestEqual(TEXT("HLOD route targets the native asset class"),
+			Declaration.Hjson.Routes[0].RootTypeIdentity,
+			FString(TEXT("/Script/Engine.HLODLayer")));
+	}
 	return !HasAnyErrors();
 }
 
@@ -1115,7 +1099,7 @@ bool FUeAgentStrictV2T59WorldLifecyclePolicyProductTest::RunTest(
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentStrictV2T59WorldHlodHjsonProductTest,
-	"UAI.StrictV2.T59.WORLD.COMMAND.MIGRATION.HlodHjsonPublicProductRoundTrip",
+	"UAI.StrictV2.T59.WORLD.COMMAND.MIGRATION.HlodUsesReflectionAuthoring",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FUeAgentStrictV2T59WorldHlodHjsonProductTest::RunTest(
@@ -1135,83 +1119,17 @@ bool FUeAgentStrictV2T59WorldHlodHjsonProductTest::RunTest(
 		return false;
 	}
 
-	const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits);
-	const FString SourceRoot = FPaths::ConvertRelativePathToFull(
-		FPaths::ProjectSavedDir() / TEXT("Automation/StrictV2/T59/Hlod_") + Suffix);
-	const FString Document = HlodDocument();
-	const TArray<FString> Kinds = {
-		TEXT("inline"), TEXT("single_file"), TEXT("directory")};
-	TArray<FString> Packages;
-	for (const FString& Kind : Kinds)
-	{
-		const FString PackageName = TEXT("/Game/UAI/Tests/T59/HLOD_")
-			+ Kind + TEXT("_") + Suffix;
-		Packages.Add(PackageName);
-		CleanupPackage(PackageName);
-		const TSharedRef<FJsonObject> Source = MakeShared<FJsonObject>();
-		Source->SetStringField(TEXT("kind"), Kind);
-		if (Kind == TEXT("inline"))
-		{
-			Source->SetStringField(TEXT("document"), Document);
-		}
-		else if (Kind == TEXT("single_file"))
-		{
-			const FString Path = FPaths::Combine(
-				SourceRoot, Kind, TEXT("asset.hjson"));
-			TestTrue(TEXT("single-file HLOD fixture persists"),
-				WriteText(Path, Document));
-			Source->SetStringField(TEXT("path"), Path);
-		}
-		else
-		{
-			const FString Path = FPaths::Combine(SourceRoot, Kind);
-			TestTrue(TEXT("directory HLOD workspace persists"),
-				WriteDirectoryWorkspace(Path, PackageName, Document));
-			Source->SetStringField(TEXT("path"), Path);
-		}
-
-		const FUeAgentCommandResult Imported = SubmitPublic(
-			Registry, Dispatch, TEXT("content_graph.import_workspace"),
-			ImportParams(PackageName, Source));
-		TestTrue(*FString::Printf(
-			TEXT("%s creates HLOD through the unique public HJSON ingress"), *Kind),
-			Imported.IsOk());
-		if (!Imported.IsOk())
-		{
-			AddError(Imported.GetErrorJson());
-			continue;
-		}
-
-		const FString Filename = FPackageName::LongPackageNameToFilename(
-			PackageName, FPackageName::GetAssetPackageExtension());
-		TestTrue(*FString::Printf(TEXT("%s HLOD package persists"), *Kind),
-			IFileManager::Get().FileExists(*Filename));
-		UHLODLayer* Layer = LoadObject<UHLODLayer>(
-			nullptr, *(PackageName + TEXT(".")
-				+ FPackageName::GetLongPackageAssetName(PackageName)));
-		if (TestNotNull(*FString::Printf(
-			TEXT("%s HLOD independently reloads"), *Kind), Layer))
-		{
-			TestEqual(TEXT("HLOD layer type persists"),
-				Layer->GetLayerType(), EHLODLayerType::Instancing);
-			TestTrue(TEXT("HLOD spatial policy persists"), Layer->IsSpatiallyLoaded());
-			TestEqual(TEXT("HLOD cell size persists"), Layer->GetCellSize(), 512);
-			TestEqual(TEXT("HLOD loading range persists"),
-				Layer->GetLoadingRange(), 2048.0);
-		}
-
-		const FUeAgentCommandResult Queried = SubmitPublic(
-			Registry, Dispatch, TEXT("content_graph.summary"),
-			FString::Printf(TEXT("{\"target\":\"%s\"}"), *PackageName));
-		TestTrue(*FString::Printf(
-			TEXT("%s HLOD has public independent readback"), *Kind), Queried.IsOk());
-		if (!Queried.IsOk()) AddError(Queried.GetErrorJson());
-	}
-	for (const FString& PackageName : Packages)
-	{
-		TestTrue(TEXT("HLOD product fixture cleanup succeeds"),
-			CleanupPackage(PackageName));
-	}
-	IFileManager::Get().DeleteDirectory(*SourceRoot, false, true);
+	const UeAgentReflectionAuthoring::FProfile* Profile =
+		UeAgentReflectionAuthoring::FindProfileByTypeId(TEXT("hlod_layer"));
+	if (!TestNotNull(TEXT("HLOD registers the common Reflection authoring profile"),
+		Profile)) return false;
+	TestEqual(TEXT("HLOD Reflection profile owns the native asset class"),
+		Profile->AssetClassPath, FString(TEXT("/Script/Engine.HLODLayer")));
+	TestTrue(TEXT("common semantic export remains on the public command surface"),
+		Registry->FindExact(TEXT("content_graph.export_workspace")) != nullptr);
+	TestTrue(TEXT("common semantic import remains on the public command surface"),
+		Registry->FindExact(TEXT("content_graph.import_workspace")) != nullptr);
+	TestTrue(TEXT("independent World HLOD build command remains registered"),
+		Registry->FindExact(TEXT("job.compile_build")) != nullptr);
 	return !HasAnyErrors();
 }

@@ -1,7 +1,10 @@
 #include "QueryOwners/Material/UeAgentMaterialExpressionCandidateQuery.h"
 
-#include "Commands/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/PaletteSearch/UeAgentPaletteSearchTypes.h"
+#include "Core/ContentDiscovery/UeAgentNameDiscoveryProjection.h"
+#include "Core/ContentDiscovery/UeAgentContentDiscovery.h"
 #include "DomainAdapters/ContentGraphRead/UeAgentContentGraphReadProductionEnvironment.h"
+#include "Dom/JsonValue.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialFunction.h"
 
@@ -11,6 +14,7 @@
 
 namespace UE::UAI::QueryOwners::Material
 {
+	using namespace ContentDiscovery;
 	using namespace DomainAdapters::ContentGraphRead;
 
 	namespace
@@ -23,16 +27,30 @@ namespace UE::UAI::QueryOwners::Material
 		const FString RequiredContext =
 			TEXT("editor_game_thread:material_or_material_function");
 
-		bool Fail(
-			FMaterialExpressionCandidateQueryError& OutError,
-			FString Code,
-			FString SubjectId = FString(),
-			FString Detail = FString())
+		bool ForwardDiagnostic(UE::UAI::Contract::FDiagnostic& OutError, UE::UAI::Contract::FDiagnostic Diagnostic, const FString& Subject = FString())
 		{
-			OutError.Code = MoveTemp(Code);
-			OutError.SubjectId = MoveTemp(SubjectId);
-			OutError.Detail = MoveTemp(Detail);
+			OutError = MoveTemp(Diagnostic);
+			if (OutError.SubjectId.IsEmpty()) OutError.SubjectId = Subject;
 			return false;
+		}
+
+		UE::UAI::Contract::FDiagnostic CandidateDiagnostic(FString Code, FString PublicReason, const UObject& Target)
+		{
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::Failure(MoveTemp(Code), MoveTemp(PublicReason), TEXT("candidate_query"));
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.TargetPath = Target.GetPathName();
+			return Diagnostic;
+		}
+
+		UE::UAI::Contract::FDiagnostic CandidateCause(FString Code, const FString& Subject, const UE::UAI::Contract::FDiagnostic& Cause)
+		{
+			auto Diagnostic = UE::UAI::Contract::FDiagnostic::WrapFailure(MoveTemp(Code), Cause, TEXT("candidate_query"),
+				Cause.IsEmpty() ? TEXT("The material palette query failed without reporting a diagnostic.") : FString());
+			Diagnostic.Schema = TEXT("uai.runtime.diagnostic/1");
+			if (Cause.IsEmpty()) Diagnostic.SourceKind = TEXT("native_result");
+			if (Diagnostic.SubjectId.IsEmpty()) Diagnostic.SubjectId = Subject;
+			return Diagnostic;
 		}
 
 		FString Sha256(const FString& Text)
@@ -68,19 +86,6 @@ namespace UE::UAI::QueryOwners::Material
 				+ Target.GetClass()->GetPathName());
 		}
 
-		FString NormalizeSearch(const FString& Value)
-		{
-			FString Result;
-			for (const TCHAR Character : Value.ToLower())
-			{
-				if (FChar::IsAlnum(Character))
-				{
-					Result.AppendChar(Character);
-				}
-			}
-			return Result;
-		}
-
 		bool ReadTargetRevision(
 			UObject& Target,
 			FString& OutRevision,
@@ -88,17 +93,20 @@ namespace UE::UAI::QueryOwners::Material
 		{
 			FUeAgentContentGraphCapture Capture;
 			FUeAgentContentGraphReadError ReadError;
-			if (!FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(
-					Target, Capture, ReadError)
-				|| Capture.Revision.IsEmpty())
+			const bool bCaptured = FUeAgentContentGraphReadProductionEnvironment::TryCaptureOwner(Target, Capture, ReadError);
+			if (!bCaptured || Capture.Revision.IsEmpty())
 			{
-				return Fail(
-					OutError,
-					ReadError.Code.IsEmpty()
-						? FString(TEXT("material_candidate_target_readback_failed"))
-						: ReadError.Code,
-					ReadError.SubjectId,
-					ReadError.Detail);
+				if (!ReadError.IsEmpty()) return ForwardDiagnostic(OutError, MoveTemp(ReadError), Target.GetPathName());
+				auto Diagnostic = CandidateDiagnostic(TEXT("material_candidate_target_readback_failed"),
+					bCaptured ? TEXT("Material target readback did not return a revision.")
+						: TEXT("Material target readback failed without a diagnostic."), Target);
+				if (bCaptured)
+				{
+					Diagnostic.PropertyPath = TEXT("/revision");
+					Diagnostic.ExpectedValuePresent = true;
+					Diagnostic.ActualValuePresent = false;
+				}
+				return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Target.GetPathName());
 			}
 			OutRevision = Capture.Revision;
 			return true;
@@ -110,35 +118,29 @@ namespace UE::UAI::QueryOwners::Material
 		const FString& Query,
 		FMaterialExpressionCandidateQueryResult& OutResult,
 		FMaterialExpressionCandidateQueryError& OutError,
-		const int32 Limit,
-		const int32 Cursor,
 		const FMaterialExpressionCandidateContext& Context)
 	{
 		OutResult = {};
 		OutError = {};
 		if (!IsInGameThread())
 		{
-			return Fail(
-				OutError,
-				TEXT("material_candidate_game_thread_required"),
-				Target.GetPathName());
+			auto Diagnostic = CandidateDiagnostic(TEXT("material_candidate_game_thread_required"),
+				TEXT("Material candidate queries require the Editor game thread."), Target);
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueString>(TEXT("game_thread"));
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(TEXT("other_thread"));
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Target.GetPathName());
 		}
 		if (!IsSupportedTarget(Target))
 		{
-			return Fail(
-				OutError,
-				TEXT("material_candidate_target_type_unsupported"),
-				Target.GetClass()->GetPathName());
+			auto Diagnostic = CandidateDiagnostic(TEXT("material_candidate_target_type_unsupported"),
+				TEXT("Material candidate target must be a Material or MaterialFunction."), Target);
+			Diagnostic.PropertyPath = TEXT("/target");
+			Diagnostic.ExpectedValue = MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>{
+				MakeShared<FJsonValueString>(TEXT("Material")), MakeShared<FJsonValueString>(TEXT("MaterialFunction"))});
+			Diagnostic.ActualValue = MakeShared<FJsonValueString>(Target.GetClass()->GetName());
+			Diagnostic.ActualEvidence = MakeShared<FJsonValueString>(Target.GetClass()->GetPathName());
+			return ForwardDiagnostic(OutError, MoveTemp(Diagnostic), Target.GetPathName());
 		}
-		if (Limit < 1 || Limit > 20 || Cursor < 0)
-		{
-			return Fail(
-				OutError,
-				TEXT("material_candidate_page_invalid"),
-				Target.GetPathName(),
-				TEXT("limit must be 1..20 and cursor must be non-negative"));
-		}
-
 		OutResult.Target = Target.GetPathName();
 		OutResult.Context = Context;
 		OutResult.Context.GraphName = Context.GraphName.IsEmpty()
@@ -146,9 +148,6 @@ namespace UE::UAI::QueryOwners::Material
 				? FString(TEXT("MaterialGraph"))
 				: FString(TEXT("MaterialFunctionGraph")))
 			: Context.GraphName;
-		OutResult.CoverageScope =
-			TEXT("native_material_expression_and_function_creation_actions");
-		OutResult.bCoverageComplete = true;
 		if (!ReadTargetRevision(Target, OutResult.TargetRevision, OutError))
 		{
 			return false;
@@ -156,35 +155,34 @@ namespace UE::UAI::QueryOwners::Material
 
 		UeAgentPaletteSearch::FSearchParams Params;
 		Params.CatalogType = TEXT("material_node");
-		Params.SearchText = Query;
+		// Enumerate the native context once; apply the public keyword predicate below.
+		Params.SearchText.Reset();
 		Params.SearchMode = TEXT("contains");
 		Params.AssetPath = Target.GetPathName();
 		Params.GraphName = OutResult.Context.GraphName;
 		Params.NodeGuid = Context.NodeGuid;
 		Params.PinGuid = Context.PinGuid;
 		Params.PinName = Context.PinName;
-		Params.Limit = Limit;
-		Params.Offset = Cursor;
-		Params.bIncludeItems = true;
-		Params.bIncludeGroups = false;
-		Params.bIncludeCategoryTree = false;
 		TArray<UeAgentPaletteSearch::FCandidate> PaletteCandidates;
 		TArray<FString> PaletteWarnings;
-		FString SearchError;
+		UE::UAI::Contract::FDiagnostic SearchError;
 		if (!UeAgentPaletteSearch::CollectMaterialCandidates(
 				Params, PaletteCandidates, PaletteWarnings, SearchError))
 		{
-			return Fail(
-				OutError,
-				TEXT("material_candidate_palette_query_failed"),
-				Target.GetPathName(),
-				SearchError);
+			return ForwardDiagnostic(OutError, CandidateCause(TEXT("material_candidate_palette_query_failed"), Target.GetPathName(), SearchError), Target.GetPathName());
 		}
-
-		const FString NormalizedQuery = NormalizeSearch(Query);
-		TArray<UeAgentPaletteSearch::FCandidate> MatchingCandidates;
-		for (UeAgentPaletteSearch::FCandidate& Candidate : PaletteCandidates)
+		PaletteCandidates.RemoveAll(
+			[](const UeAgentPaletteSearch::FCandidate& Candidate)
+			{
+				return Candidate.Kind != CandidateKind
+				&& Candidate.Kind != FunctionCandidateKind;
+			});
+		TArray<int32> MatchedIndices;
+		for (int32 CandidateIndex = 0;
+			CandidateIndex < PaletteCandidates.Num(); ++CandidateIndex)
 		{
+			UeAgentPaletteSearch::FCandidate& Candidate =
+				PaletteCandidates[CandidateIndex];
 			const FString ResolvedNodeGuid =
 				Candidate.AuthoringSelectors.FindRef(TEXT("context_node_guid"));
 			const FString ResolvedPinGuid =
@@ -203,49 +201,64 @@ namespace UE::UAI::QueryOwners::Material
 			{
 				OutResult.Context.PinName = ResolvedPinName;
 			}
-			const FString Searchable = NormalizeSearch(
-				Candidate.Name + TEXT("|") + Candidate.DisplayName
-				+ TEXT("|") + Candidate.FullName + TEXT("|")
-				+ Candidate.Keywords);
-			if (NormalizedQuery.IsEmpty() || Searchable.Contains(NormalizedQuery))
+			ContentDiscovery::FContentDiscoveryRequest SearchRequest;
+			SearchRequest.Query = Query;
+			SearchRequest.MatchMode =
+				ContentDiscovery::EContentDiscoveryMatchMode::Text;
+			int32 MatchScore = 0;
+			FString MatchReason;
+			if (ContentDiscovery::TryScoreContentDiscoveryMatch(
+					SearchRequest,
+					Candidate.GetCandidateId(),
+					Candidate.Name.IsEmpty()
+						? Candidate.DisplayName
+						: Candidate.Name,
+					{
+						Candidate.DisplayName,
+						Candidate.FullName,
+						Candidate.Keywords,
+						Candidate.CategoryPath,
+						Candidate.Tooltip,
+					},
+					MatchScore,
+				MatchReason))
 			{
-				MatchingCandidates.Add(MoveTemp(Candidate));
+				Candidate.Score = MatchScore;
+				if (!Candidate.GetPublicId().IsEmpty())
+				{
+					MatchedIndices.Add(CandidateIndex);
+				}
 			}
 		}
-		MatchingCandidates.Sort(
-			[](const UeAgentPaletteSearch::FCandidate& Left,
-				const UeAgentPaletteSearch::FCandidate& Right)
+
+		MatchedIndices.Sort(
+			[&PaletteCandidates](const int32 LeftIndex, const int32 RightIndex)
 			{
+				const UeAgentPaletteSearch::FCandidate& Left =
+					PaletteCandidates[LeftIndex];
+				const UeAgentPaletteSearch::FCandidate& Right =
+					PaletteCandidates[RightIndex];
 				if (Left.UiOrder != Right.UiOrder)
 				{
 					return Left.UiOrder < Right.UiOrder;
 				}
 				return Left.GetCandidateId() < Right.GetCandidateId();
 			});
-		OutResult.TotalMatches = MatchingCandidates.Num();
-		const int32 End = FMath::Min(Cursor + Limit, MatchingCandidates.Num());
-		for (int32 Index = FMath::Min(Cursor, MatchingCandidates.Num());
-			Index < End;
-			++Index)
+		OutResult.TotalMatches = MatchedIndices.Num();
+		for (const int32 MatchedIndex : MatchedIndices)
 		{
 			const UeAgentPaletteSearch::FCandidate& Source =
-				MatchingCandidates[Index];
-			if ((Source.Kind != CandidateKind
-					&& Source.Kind != FunctionCandidateKind)
-				|| Source.GetPublicId().IsEmpty())
-			{
-				continue;
-			}
+				PaletteCandidates[MatchedIndex];
 			FMaterialExpressionCandidate Candidate;
 			Candidate.Id = Source.GetPublicId();
 			Candidate.Name = Source.Name;
-			Candidate.Label = Source.DisplayName.IsEmpty()
-				? Source.Name
-				: Source.DisplayName;
+			Candidate.Scopes.Reset();
+			Candidate.Label = Candidate.Name;
 			Candidate.Kind = Source.Kind;
 			Candidate.Category = Source.CategoryPath;
 			Candidate.bSupported = Source.bSupportedInContext;
 			Candidate.SupportReason = Source.SupportReason;
+			Candidate.SupportDiagnostic = Source.SupportDiagnostic;
 			Candidate.SupportedOperations = {TEXT("create")};
 			Candidate.InputContract = InputContract;
 			Candidate.PlacementContract = PlacementContract;
@@ -255,54 +268,7 @@ namespace UE::UAI::QueryOwners::Material
 			OutResult.Candidates.Add(MoveTemp(Candidate));
 		}
 
-		const int32 Consumed = Cursor + OutResult.Candidates.Num();
-		OutResult.bHasMore = Consumed < OutResult.TotalMatches;
-		OutResult.bComplete = !OutResult.bHasMore;
-		OutResult.NextCursor = OutResult.bHasMore ? Consumed : INDEX_NONE;
 		return true;
 	}
 
-	bool IsCurrentMaterialExpressionCandidateBinding(
-		UObject& Target,
-		const FString& CandidateName,
-		const FString& BindingRevision,
-		FMaterialExpressionCandidateQueryError& OutError)
-	{
-		OutError = {};
-		if (CandidateName.IsEmpty() || BindingRevision.IsEmpty())
-		{
-			return Fail(
-				OutError,
-				TEXT("material_candidate_binding_required"),
-				Target.GetPathName());
-		}
-		UeAgentPaletteSearch::FSearchParams Params;
-		Params.CatalogType = TEXT("material_node");
-		Params.AssetPath = Target.GetPathName();
-		Params.GraphName = Target.IsA<UMaterial>()
-			? TEXT("MaterialGraph")
-			: TEXT("MaterialFunctionGraph");
-		UeAgentPaletteSearch::FCandidate Candidate;
-		FString ResolveError;
-		if (!UeAgentPaletteSearch::TryResolveMaterialActionCandidate(
-				Params, CandidateName, FString(), Candidate, ResolveError))
-		{
-			return Fail(
-				OutError,
-				TEXT("material_candidate_name_unresolved"),
-				CandidateName,
-				ResolveError);
-		}
-		const FString CurrentBinding = CandidateRevision(
-			Target, Candidate.FullName);
-		if (CurrentBinding != BindingRevision)
-		{
-			return Fail(
-				OutError,
-				TEXT("material_candidate_binding_stale"),
-				CandidateName,
-				CurrentBinding);
-		}
-		return true;
-	}
 }

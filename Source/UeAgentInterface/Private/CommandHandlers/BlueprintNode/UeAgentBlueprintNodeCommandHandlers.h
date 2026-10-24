@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CommandEdge/UeAgentExactCommandDispatch.h"
 #include "OperationOwners/BlueprintNode/UeAgentBlueprintNodeCommandService.h"
 
@@ -10,6 +12,6 @@ namespace UE::UAI::CommandHandlers::BlueprintNode
 			IUeAgentBlueprintNodeCommandService> Service,
 		TArray<TSharedRef<CommandEdge::IUeAgentExactCommandHandler>>&
 			OutHandlers,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }
 

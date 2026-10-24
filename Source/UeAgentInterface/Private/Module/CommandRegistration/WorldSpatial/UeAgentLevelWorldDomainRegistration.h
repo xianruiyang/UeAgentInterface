@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 
 namespace UE::UAI::Module::CommandRegistration::Active
@@ -13,5 +15,5 @@ namespace UE::UAI::Module::CommandRegistration::WorldSpatial
 
 	UEAGENTINTERFACE_API bool TryCreateLevelWorldCandidateContribution(
 		TSharedPtr<Active::IUeAgentActiveCommandContribution>& OutContribution,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 }

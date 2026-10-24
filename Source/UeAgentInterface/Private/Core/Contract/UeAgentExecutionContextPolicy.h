@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 
 namespace UE::UAI::Contract
 {
@@ -76,6 +77,7 @@ namespace UE::UAI::Contract
 		EUeAgentTransientContextPolicy
 			GetTransientContextPolicy() const;
 		bool IsValid() const;
+		const FDiagnostic& GetValidationDiagnostic() const;
 
 	private:
 		TArray<EUeAgentStatePlane> AllowedStatePlanes;
@@ -84,5 +86,6 @@ namespace UE::UAI::Contract
 			EUeAgentContextResolutionPolicy::Invalid;
 		EUeAgentTransientContextPolicy TransientContextPolicy =
 			EUeAgentTransientContextPolicy::Invalid;
+		FDiagnostic ValidationDiagnostic;
 	};
 }

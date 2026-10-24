@@ -1,11 +1,16 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/GraphCompound/UeAgentGraphCompoundAnimationBindings.h"
 #include "Dom/JsonObject.h"
+#include "Templates/Function.h"
 #include "UObject/StrongObjectPtr.h"
 
 class UObject;
 class UPackage;
+class UOptimusDeformer;
+namespace UE::UAI::HjsonWorkspace { struct FGraphAuthoringConnectionContext; }
 
 namespace UE::UAI::DomainAdapters::AnimationRigGraph
 {
@@ -14,6 +19,42 @@ namespace UE::UAI::DomainAdapters::AnimationRigGraph
 
 namespace UE::UAI::Composition::GraphCompound
 {
+	struct FDeformerSemanticNodeEdit
+	{
+		FString Identity;
+		FName ExistingName;
+		UClass* CreateClass = nullptr;
+		FVector2D Position = FVector2D::ZeroVector;
+		bool bSetPosition = false;
+		bool bRemove = false;
+		FString InputPointer;
+	};
+
+	// Resolved identities belong to this request. Native node names are captured,
+	// never decoded from the identity text or supplied as candidate names.
+	struct FDeformerSemanticGraphEdit
+	{
+		TArray<FDeformerSemanticNodeEdit> Nodes;
+		struct FConnection
+		{
+			FString FromNode, FromPin, ToNode, ToPin;
+			FString InputPointer;
+		};
+		TArray<FConnection> Connections;
+		TArray<FConnection> RemovedConnections;
+		TSharedPtr<const HjsonWorkspace::FGraphAuthoringConnectionContext> ConnectionContext;
+		FString TargetPath;
+		FString SourceUnit;
+		TFunction<void(Contract::FDiagnostic&)> LocateDiagnostic;
+	};
+
+	UEAGENTINTERFACE_API bool TryApplyDeformerSemanticGraph(UOptimusDeformer& Asset,
+		const FDeformerSemanticGraphEdit& Edit, TMap<FString, FName>& OutNodeBindings,
+		FGraphCompoundRuntimeError& OutError);
+	UEAGENTINTERFACE_API bool TryApplyDeformerSemanticConnections(UOptimusDeformer& Asset,
+		const FDeformerSemanticGraphEdit& Edit, const TMap<FString, FName>& NodeBindings,
+		FGraphCompoundRuntimeError& OutError);
+
 	enum class EGraphCompoundDeformerReadbackKind : uint8
 	{
 		DeformerGraphCreate,
@@ -28,6 +69,17 @@ namespace UE::UAI::Composition::GraphCompound
 		FString EntryRef;
 		int32 RequestedOrderIndex = INDEX_NONE;
 		EChangeIntent Intent = EChangeIntent::Update;
+		FString InputPointer;
+	};
+
+	struct FGraphCompoundDeformerLinkSpec final
+	{
+		FString FromNode;
+		FString FromPin;
+		FString ToNode;
+		FString ToPin;
+		EChangeIntent Intent = EChangeIntent::Create;
+		FString InputPointer;
 	};
 
 	struct FGraphCompoundDeformerReadbackSpec final
@@ -39,6 +91,9 @@ namespace UE::UAI::Composition::GraphCompound
 		FString SkeletalMeshRef;
 		FName CommentNodeName;
 		TArray<FGraphCompoundDeformerEntrySpec> Entries;
+		TArray<FGraphCompoundDeformerLinkSpec> Links;
+		FString SkeletalMeshInputPointer;
+		FString CommentNodeInputPointer;
 	};
 
 	struct FGraphCompoundDeformerCapturedValue final
@@ -78,7 +133,9 @@ namespace UE::UAI::Composition::GraphCompound
 		const FPcgAnimationGraphRouteProfile& Profile,
 		UObject& Target,
 		TArray<FGraphCompoundDeformerCapturedValue>& OutValues,
-		FGraphCompoundRuntimeError& OutError);
+		FGraphCompoundRuntimeError& OutError,
+		bool bAuthoring = false,
+		const FString& DiagnosticTargetPath = FString());
 
 	TSharedRef<FJsonObject> DeformerExpectedJson(
 		const FGraphCompoundDeformerReadbackSpec& Spec);
@@ -87,7 +144,7 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& TargetRef,
 		const FGraphCompoundDeformerReadbackSpec& Spec,
 		TSharedRef<FJsonObject>& OutRoot,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	void AddDeformerDependencyAnchors(
 		const FGraphCompoundDeformerReadbackSpec& Spec,

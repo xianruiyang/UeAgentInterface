@@ -49,8 +49,6 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 
 	struct UEAGENTINTERFACE_API FGraphFailure
 	{
-		FString ErrorCode;
-		FString ErrorDetail;
 		UeAgentAuthoringDiagnostics::FDiagnostic Diagnostic;
 	};
 
@@ -62,6 +60,7 @@ namespace UeAgentAuthoringWorkspaceDependencyGraph
 		TArray<FString> CycleUnitKeys;
 
 		bool IsReadyFor(const UeAgentAuthoringWorkspaceRouter::FWorkspace& Workspace) const;
+		bool IsReadyFor(const UeAgentAuthoringWorkspaceRouter::FWorkspace& Workspace, UeAgentAuthoringDiagnostics::FDiagnostic* OutError) const;
 		TSharedRef<FJsonObject> ToJsonObject(
 			const UeAgentAuthoringWorkspaceRouter::FWorkspace& Workspace) const;
 	};

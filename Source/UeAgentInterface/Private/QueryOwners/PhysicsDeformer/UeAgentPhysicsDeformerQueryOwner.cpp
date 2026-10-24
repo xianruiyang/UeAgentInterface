@@ -14,7 +14,7 @@ namespace UE::UAI::QueryOwners::PhysicsDeformer
 	const TArray<FString>& GetIndependentReadbackFlows()
 	{
 		static const TArray<FString> Flows = {
-			TEXT("query.command.detail"),
+			TEXT("query.command.usage"),
 			TEXT("asset registry or simulation observation query"),
 		};
 		return Flows;

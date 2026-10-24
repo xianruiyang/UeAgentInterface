@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/Contract/UeAgentDescriptorRegistry.h"
@@ -61,7 +63,7 @@ namespace UE::UAI::DomainAdapters::LandscapeGeometryEffect
 	TryCreateLandscapeGeometryEffectDescriptorRegistry(
 		TSharedPtr<const Contract::FUeAgentDescriptorRegistry>&
 			OutRegistry,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UEAGENTINTERFACE_API TArray<FString>
 	GetLandscapeGeometryEffectAuthorityScopes();

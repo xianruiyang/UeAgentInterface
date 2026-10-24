@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "CoreMinimal.h"
 #include "Domains/Niagara/Authoring/UeAgentNiagaraStageModuleAuthoring.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
@@ -40,8 +42,7 @@ namespace UeAgentNiagaraAuthoring
 	{
 		FString Status;
 		FString Phase;
-		FString ErrorCode;
-		FString ErrorDetail;
+		UE::UAI::Contract::FDiagnostic Diagnostic;
 		FString ResolvedOperation;
 		FString AssetPath;
 		FString StageKey;
@@ -54,7 +55,7 @@ namespace UeAgentNiagaraAuthoring
 		bool IsApplied() const { return Status == TEXT("applied"); }
 	};
 
-	UEAGENTINTERFACE_API bool RegisterStackApplyContracts(FString& OutError);
+	UEAGENTINTERFACE_API bool RegisterStackApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
 	UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider> MakeStackApplyProvider();
 	UEAGENTINTERFACE_API bool ApplyStack(
 		const FStackApplyRequest& Request,

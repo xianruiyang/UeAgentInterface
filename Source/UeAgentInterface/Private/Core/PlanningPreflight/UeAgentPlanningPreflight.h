@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/Contract/UeAgentDiagnostic.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
 #include "Core/Contract/UeAgentContract.h"
 #include "Core/StateSemantic/UeAgentStateSemantic.h"
@@ -15,25 +16,7 @@ namespace UE::UAI::PlanningPreflight
 	using UE::UAI::StateSemantic::FUeAgentCanonicalValuePtr;
 	using UE::UAI::StateSemantic::FUeAgentStateRevision;
 
-	class UEAGENTINTERFACE_API FPlanningPreflightError final
-	{
-	public:
-		FPlanningPreflightError() = default;
-		FPlanningPreflightError(
-			FString InCode,
-			FString InDetail = FString(),
-			FString InIdentityKey = FString());
-
-		const FString& GetCode() const;
-		const FString& GetDetail() const;
-		const FString& GetIdentityKey() const;
-		bool IsPresent() const;
-
-	private:
-		FString Code;
-		FString Detail;
-		FString IdentityKey;
-	};
+	using FPlanningPreflightError = UE::UAI::Contract::FDiagnostic;
 
 	enum class EChangeIntent : uint8
 	{
@@ -65,6 +48,7 @@ namespace UE::UAI::PlanningPreflight
 		const FString& GetImpactEvidenceId() const;
 		const TArray<FUeAgentCanonicalIdentity>& GetImpactTargets() const;
 		bool IsValid() const;
+		const FPlanningPreflightError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FUeAgentCanonicalIdentity Identity;
@@ -74,7 +58,7 @@ namespace UE::UAI::PlanningPreflight
 		TArray<FString> RequiredAuthorityScopes;
 		FString ImpactEvidenceId;
 		TArray<FUeAgentCanonicalIdentity> ImpactTargets;
-		bool bValid = false;
+		FPlanningPreflightError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FChangeSetDraft final
@@ -93,6 +77,7 @@ namespace UE::UAI::PlanningPreflight
 		const FUeAgentCanonicalSnapshotRef& GetSnapshot() const;
 		const TArray<FChangeDraft>& GetChanges() const;
 		bool IsValid() const;
+		const FPlanningPreflightError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FUeAgentDescriptorIdentity DescriptorIdentity;
@@ -100,7 +85,7 @@ namespace UE::UAI::PlanningPreflight
 		FString IdempotencyKey;
 		FUeAgentCanonicalSnapshotRef Snapshot;
 		TArray<FChangeDraft> Changes;
-		bool bValid = false;
+		FPlanningPreflightError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FPlanningRequest final
@@ -115,12 +100,13 @@ namespace UE::UAI::PlanningPreflight
 		const FUeAgentCallerContext& GetCallerContext() const;
 		bool IsDryRun() const;
 		bool IsValid() const;
+		const FPlanningPreflightError& GetValidationDiagnostic() const { return ValidationDiagnostic; }
 
 	private:
 		FChangeSetDraft Draft;
 		FUeAgentCallerContext CallerContext;
 		bool bDryRun = false;
-		bool bValid = false;
+		FPlanningPreflightError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FPlannedChange final

@@ -6,6 +6,7 @@
 #include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformProcess.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
@@ -13,6 +14,16 @@
 #include "Serialization/JsonWriter.h"
 #include "TestSupport/UeAgentPublicCommandTestHarness.h"
 #include "UObject/Package.h"
+
+namespace UE::UAI::Composition::LongRunningSession::TestSupport
+{
+	UEAGENTINTERFACE_API bool SafeExitResourceSetsMatchForTest(
+		const TArray<FString>& Requested,
+		const TArray<FString>& Dirty);
+
+	UEAGENTINTERFACE_API void DiscardSafeExitConfigResourcesForTest(
+		const TArray<FString>& ResourceRefs);
+}
 
 namespace
 {
@@ -209,6 +220,63 @@ namespace
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUeAgentLongRunningSessionSafeExitConfigResourceContractTest,
+	"UeAgentInterface.Composition.LongRunningSession.E3."
+		"SafeExitConfigResourceContract",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUeAgentLongRunningSessionSafeExitConfigResourceContractTest::RunTest(
+	const FString& Parameters)
+{
+	using namespace UE::UAI::Composition::LongRunningSession::TestSupport;
+
+	TestTrue(
+		TEXT("package object refs and config refs match the public dirty set"),
+		SafeExitResourceSetsMatchForTest(
+			{
+				TEXT("/Game/UAI/SafeExit/BP_Fixture.BP_Fixture"),
+				TEXT("config:engine"),
+			},
+			{
+				TEXT("/Game/UAI/SafeExit/BP_Fixture"),
+				TEXT("config:engine"),
+			}));
+	TestFalse(
+		TEXT("a missing dirty config prevents exact-set resolution"),
+		SafeExitResourceSetsMatchForTest(
+			{TEXT("/Game/UAI/SafeExit/BP_Fixture")},
+			{
+				TEXT("/Game/UAI/SafeExit/BP_Fixture"),
+				TEXT("config:engine"),
+			}));
+
+	if (!TestNotNull(TEXT("config cache"), GConfig))
+	{
+		return false;
+	}
+	FConfigFile* EngineConfig = GConfig->FindConfigFile(GEngineIni);
+	FConfigFile* GameConfig = GConfig->FindConfigFile(GGameIni);
+	if (!TestNotNull(TEXT("engine config"), EngineConfig)
+		|| !TestNotNull(TEXT("game config"), GameConfig))
+	{
+		return false;
+	}
+	const bool bEngineWasDirty = EngineConfig->Dirty;
+	const bool bGameWasDirty = GameConfig->Dirty;
+
+	EngineConfig->Dirty = true;
+	GameConfig->Dirty = true;
+	DiscardSafeExitConfigResourcesForTest(
+		{TEXT("config:engine")});
+	TestFalse(TEXT("discard clears the selected config"), EngineConfig->Dirty);
+	TestTrue(TEXT("discard leaves an unselected config dirty"), GameConfig->Dirty);
+
+	EngineConfig->Dirty = bEngineWasDirty;
+	GameConfig->Dirty = bGameWasDirty;
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUeAgentLongRunningSessionSafeExitRequiresArmedWitnessTest,
 	"UeAgentInterface.Composition.LongRunningSession.E3."
 		"SafeExitRequiresArmedWitness",
@@ -252,7 +320,7 @@ bool FUeAgentLongRunningSessionSafeExitRequiresArmedWitnessTest::RunTest(
 		return false;
 	}
 
-	TOptional<FUeAgentCommandResult> RejectResult;
+	TSharedPtr<FJsonObject> RejectResult;
 	FString InvokeError;
 	if (!TestTrue(
 			TEXT("dirty reject reaches the public command edge"),
@@ -269,14 +337,14 @@ bool FUeAgentLongRunningSessionSafeExitRequiresArmedWitnessTest::RunTest(
 					"\"nonce\":\"3333333333333333333333333333333333333333333333333333333333333333\"}}"),
 				RejectResult,
 				InvokeError))
-		|| !RejectResult.IsSet())
+		|| !RejectResult.IsValid())
 	{
 		DirtyPackage->SetDirtyFlag(false);
 		AddError(InvokeError);
 		return false;
 	}
 	const TSharedPtr<FJsonObject> RejectRoot =
-		ParseObject(RejectResult->GetPayloadJson());
+		RejectResult->GetObjectField(TEXT("payload"));
 	if (!TestEqual(
 			TEXT("missing witness fails before dirty resolution"),
 			OperationErrorCode(RejectRoot),
@@ -352,7 +420,7 @@ bool FUeAgentLongRunningSessionSafeExitRejectsApplicableDirtyTest::RunTest(
 		return false;
 	}
 
-	TOptional<FUeAgentCommandResult> RejectResult;
+	TSharedPtr<FJsonObject> RejectResult;
 	FString InvokeError;
 	const FString Params = FString::Printf(
 		TEXT("{\"dirty_resolution\":{\"mode\":\"reject\","
@@ -373,14 +441,14 @@ bool FUeAgentLongRunningSessionSafeExitRejectsApplicableDirtyTest::RunTest(
 				Params,
 				RejectResult,
 				InvokeError))
-		|| !RejectResult.IsSet())
+		|| !RejectResult.IsValid())
 	{
 		DirtyPackage->SetDirtyFlag(false);
 		AddError(InvokeError);
 		return false;
 	}
 	const TSharedPtr<FJsonObject> RejectRoot =
-		ParseObject(RejectResult->GetPayloadJson());
+		RejectResult->GetObjectField(TEXT("payload"));
 	TestEqual(
 		TEXT("valid witness rejects an applicable dirty resource"),
 		OperationErrorCode(RejectRoot),

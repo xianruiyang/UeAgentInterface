@@ -1,0 +1,22 @@
+--- a/Engine/Plugins/FX/Niagara/Source/Niagara/Private/NiagaraScript.cpp
++++ b/Engine/Plugins/FX/Niagara/Source/Niagara/Private/NiagaraScript.cpp
+@@ -12,6 +12,7 @@
+ #include "Misc/Compression.h"
+ #include "Misc/CoreMiscDefines.h"
+ #include "Misc/FileHelper.h"
++#include "Misc/ScopeExit.h"
+ #include "Misc/SecureHash.h"
+ #include "Modules/ModuleManager.h"
+ #include "NiagaraAnalytics.h"
+@@ -3353,6 +3354,11 @@
+ 			return;
+ 		}
+ 
++		ON_SCOPE_EXIT
++		{
++			RequestDuplicateData->ReleaseCompilationCopies();
++		};
++
+ 		const FString ScriptPathName = GetPathName();
+ 
+ 		// check the ddc first

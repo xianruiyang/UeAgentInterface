@@ -118,6 +118,8 @@ namespace UE::UAI::DomainAdapters::ModelingGeometryEffect
 		{
 			HashPosition(Hash, Segment.A);
 			HashPosition(Hash, Segment.B);
+			Result.OrderedEndpoints.Add(Segment.A);
+			Result.OrderedEndpoints.Add(Segment.B);
 		}
 		Hash.Final();
 		uint8 Digest[FSHA1::DigestSize];

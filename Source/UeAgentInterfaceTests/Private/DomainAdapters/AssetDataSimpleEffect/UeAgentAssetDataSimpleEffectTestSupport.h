@@ -114,6 +114,90 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 		return Result;
 	}
 
+	inline bool IsCreate(const TSharedPtr<FJsonObject>& Row)
+	{
+		return Row->GetStringField(TEXT("native_operation_type"))
+			== TEXT("asset.object.create");
+	}
+
+	inline bool IsClone(const TSharedPtr<FJsonObject>& Row)
+	{
+		return Row->GetStringField(TEXT("native_operation_type"))
+			== TEXT("asset.object.clone");
+	}
+
+	inline TSharedPtr<FJsonObject> ValueKindSchema(
+		const FString& ValueKind)
+	{
+		const TSharedPtr<FJsonObject> Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), ValueKind);
+		if (ValueKind == TEXT("string"))
+		{
+			Schema->SetNumberField(TEXT("minLength"), 1);
+		}
+		return Schema;
+	}
+
+	inline TSharedPtr<FJsonObject> ChangeValueSchema(
+		const TSharedPtr<FJsonObject>& Field)
+	{
+		const TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+		Properties->SetObjectField(
+			TEXT("type_id"),
+			ConstStringSchema(Field->GetStringField(TEXT("type_id"))));
+		Properties->SetObjectField(
+			TEXT("canonical_value"),
+			ValueKindSchema(Field->GetStringField(TEXT("kind"))));
+		return ObjectSchema(
+			Properties,
+			{TEXT("type_id"), TEXT("canonical_value")});
+	}
+
+	inline TSharedPtr<FJsonObject> ChangeUnitSchema(
+		const TSharedPtr<FJsonObject>& Field)
+	{
+		TArray<FString> ValuePresences;
+		TArray<FString> NoValuePresences;
+		for (const FString& Presence
+			: StringArray(Field, TEXT("allowed_presences")))
+		{
+			if (Presence == TEXT("set")
+				|| Presence == TEXT("remove")
+				|| Presence == TEXT("replace"))
+			{
+				ValuePresences.Add(Presence);
+			}
+			else
+			{
+				NoValuePresences.Add(Presence);
+			}
+		}
+		TArray<TSharedPtr<FJsonValue>> Alternatives;
+		if (!ValuePresences.IsEmpty())
+		{
+			const TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+			Properties->SetObjectField(TEXT("field_id"), ConstStringSchema(Field->GetStringField(TEXT("field_id"))));
+			Properties->SetObjectField(TEXT("presence"), EnumSchema(ValuePresences));
+			Properties->SetObjectField(TEXT("value"), ChangeValueSchema(Field));
+			Alternatives.Add(MakeShared<FJsonValueObject>(ObjectSchema(Properties, {TEXT("field_id"), TEXT("presence"), TEXT("value")})));
+		}
+		if (!NoValuePresences.IsEmpty())
+		{
+			const TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+			Properties->SetObjectField(TEXT("field_id"), ConstStringSchema(Field->GetStringField(TEXT("field_id"))));
+			Properties->SetObjectField(TEXT("presence"), EnumSchema(NoValuePresences));
+			Alternatives.Add(MakeShared<FJsonValueObject>(ObjectSchema(Properties, {TEXT("field_id"), TEXT("presence")})));
+		}
+		check(!Alternatives.IsEmpty());
+		if (Alternatives.Num() == 1)
+		{
+			return Alternatives[0]->AsObject();
+		}
+		const TSharedPtr<FJsonObject> Schema = MakeShared<FJsonObject>();
+		Schema->SetArrayField(TEXT("oneOf"), MoveTemp(Alternatives));
+		return Schema;
+	}
+
 	inline TSharedPtr<FJsonValue> CloneJsonValue(
 		const TSharedPtr<FJsonValue>& Value)
 	{
@@ -223,160 +307,15 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 		return nullptr;
 	}
 
-	inline TSharedPtr<FJsonObject> FactoryRefSchema()
+	inline TSharedPtr<FJsonObject> GenericFactorySelectorSchema()
 	{
-		const TSharedPtr<FJsonObject> RevisionProperties =
-			MakeShared<FJsonObject>();
-		RevisionProperties->SetObjectField(
-			TEXT("source_id"),
-			StringSchema());
-		RevisionProperties->SetObjectField(
-			TEXT("generation"),
-			StringSchema());
-		const TSharedPtr<FJsonObject> SequenceSchema =
-			MakeShared<FJsonObject>();
-		SequenceSchema->SetStringField(TEXT("type"), TEXT("integer"));
-		SequenceSchema->SetNumberField(TEXT("minimum"), 0);
-		RevisionProperties->SetObjectField(
-			TEXT("sequence"),
-			SequenceSchema);
-
-		const TSharedPtr<FJsonObject> Properties =
-			MakeShared<FJsonObject>();
-		Properties->SetObjectField(
-			TEXT("candidate_ref"),
-			StringSchema());
-		Properties->SetObjectField(
-			TEXT("catalog_revision"),
-			ObjectSchema(
-				RevisionProperties,
-				{
-					TEXT("source_id"),
-					TEXT("generation"),
-					TEXT("sequence"),
-				}));
-		return ObjectSchema(
-			Properties,
-			{TEXT("candidate_ref"), TEXT("catalog_revision")});
-	}
-
-	inline TSharedPtr<FJsonObject> ValueKindSchema(
-		const FString& ValueKind)
-	{
-		const TSharedPtr<FJsonObject> Schema =
-			MakeShared<FJsonObject>();
-		Schema->SetStringField(
-			TEXT("type"),
-			ValueKind == TEXT("number")
-				? TEXT("number")
-				: ValueKind);
-		if (ValueKind == TEXT("string"))
-		{
-			Schema->SetNumberField(TEXT("minLength"), 1);
-		}
-		return Schema;
-	}
-
-	inline bool IsCreate(
-		const TSharedPtr<FJsonObject>& Row)
-	{
-		return Row->GetStringField(TEXT("native_operation_type"))
-			== TEXT("asset.object.create");
-	}
-
-	inline bool IsClone(
-		const TSharedPtr<FJsonObject>& Row)
-	{
-		return Row->GetStringField(TEXT("native_operation_type"))
-			== TEXT("asset.object.clone");
-	}
-
-	inline TSharedPtr<FJsonObject> ChangeValueSchema(
-		const TSharedPtr<FJsonObject>& Field)
-	{
-		const TSharedPtr<FJsonObject> Properties =
-			MakeShared<FJsonObject>();
-		Properties->SetObjectField(
-			TEXT("type_id"),
-			ConstStringSchema(
-				Field->GetStringField(TEXT("type_id"))));
-		Properties->SetObjectField(
-			TEXT("canonical_value"),
-			ValueKindSchema(
-				Field->GetStringField(TEXT("value_kind"))));
-		return ObjectSchema(
-			Properties,
-			{TEXT("type_id"), TEXT("canonical_value")});
-	}
-
-	inline TSharedPtr<FJsonObject> ChangeUnitSchema(
-		const TSharedPtr<FJsonObject>& Field)
-	{
-		TArray<FString> ValuePresences;
-		TArray<FString> NoValuePresences;
-		for (const FString& Presence
-			: StringArray(Field, TEXT("allowed_presences")))
-		{
-			if (Presence == TEXT("set")
-				|| Presence == TEXT("replace")
-				|| Presence == TEXT("remove"))
-			{
-				ValuePresences.Add(Presence);
-			}
-			else
-			{
-				NoValuePresences.Add(Presence);
-			}
-		}
-		TArray<TSharedPtr<FJsonValue>> Alternatives;
-		if (!ValuePresences.IsEmpty())
-		{
-			const TSharedPtr<FJsonObject> Properties =
-				MakeShared<FJsonObject>();
-			Properties->SetObjectField(
-				TEXT("field_id"),
-				ConstStringSchema(
-					Field->GetStringField(TEXT("field_id"))));
-			Properties->SetObjectField(
-				TEXT("presence"),
-				EnumSchema(ValuePresences));
-			Properties->SetObjectField(
-				TEXT("value"),
-				ChangeValueSchema(Field));
-			Alternatives.Add(MakeShared<FJsonValueObject>(
-				ObjectSchema(
-					Properties,
-					{
-						TEXT("field_id"),
-						TEXT("presence"),
-						TEXT("value"),
-					})));
-		}
-		if (!NoValuePresences.IsEmpty())
-		{
-			const TSharedPtr<FJsonObject> Properties =
-				MakeShared<FJsonObject>();
-			Properties->SetObjectField(
-				TEXT("field_id"),
-				ConstStringSchema(
-					Field->GetStringField(TEXT("field_id"))));
-			Properties->SetObjectField(
-				TEXT("presence"),
-				EnumSchema(NoValuePresences));
-			Alternatives.Add(MakeShared<FJsonValueObject>(
-				ObjectSchema(
-					Properties,
-					{TEXT("field_id"), TEXT("presence")})));
-		}
-		check(!Alternatives.IsEmpty());
-		if (Alternatives.Num() == 1)
-		{
-			return Alternatives[0]->AsObject();
-		}
-		const TSharedPtr<FJsonObject> Schema =
-			MakeShared<FJsonObject>();
-		Schema->SetArrayField(TEXT("oneOf"), MoveTemp(Alternatives));
-		return Schema;
+		const TSharedPtr<FJsonObject> SelectProperties = MakeShared<FJsonObject>();
+		SelectProperties->SetStringField(TEXT("type"), TEXT("object"));
+		SelectProperties->SetBoolField(TEXT("additionalProperties"), true);
+		const TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+		Properties->SetObjectField(TEXT("name"), StringSchema());
+		Properties->SetObjectField(TEXT("select"), SelectProperties);
+		return ObjectSchema(Properties, {TEXT("name")});
 	}
 
 	inline TSharedPtr<FJsonObject> BuildInputSchema(
@@ -388,13 +327,21 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 		Properties->SetObjectField(TEXT("target_ref"), StringSchema());
 		TArray<FString> Required{TEXT("target_ref")};
 
-		if (IsCreate(Row)
+		if (Row->GetStringField(TEXT("capability_id"))
+			== TEXT("asset.object.create"))
+		{
+			Properties->SetObjectField(
+				TEXT("factory"),
+				GenericFactorySelectorSchema());
+			Required.Add(TEXT("factory"));
+		}
+		else if (IsCreate(Row)
 			&& FindFactoryContract(Fixture, Row).IsValid())
 		{
 			Properties->SetObjectField(
-				TEXT("factory_ref"),
-				FactoryRefSchema());
-			Required.Add(TEXT("factory_ref"));
+				TEXT("factory"),
+				GenericFactorySelectorSchema());
+			Required.Add(TEXT("factory"));
 		}
 		else if (IsClone(Row))
 		{
@@ -402,19 +349,12 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 				TEXT("source_ref"),
 				StringSchema());
 			Properties->SetObjectField(
-				TEXT("expected_source_revision"),
-				StringSchema());
-			Properties->SetObjectField(
 				TEXT("destructive_authorization_id"),
 				StringSchema());
 			Required.Add(TEXT("source_ref"));
-			Required.Add(TEXT("expected_source_revision"));
 		}
 		else if (!IsCreate(Row))
 		{
-			Properties->SetObjectField(
-				TEXT("expected_revision"),
-				StringSchema());
 			const TSharedPtr<FJsonObject> Changes =
 				MakeShared<FJsonObject>();
 			Changes->SetStringField(TEXT("type"), TEXT("array"));
@@ -436,7 +376,6 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 			Changes->SetNumberField(TEXT("minItems"), 1);
 			Changes->SetBoolField(TEXT("uniqueItems"), true);
 			Properties->SetObjectField(TEXT("changes"), Changes);
-			Required.Add(TEXT("expected_revision"));
 			Required.Add(TEXT("changes"));
 		}
 		return ObjectSchema(Properties, Required);
@@ -503,32 +442,9 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 				FindFactoryContract(Fixture, Row);
 			if (Factory.IsValid())
 			{
-				const TSharedPtr<FJsonObject> Revision =
-					MakeShared<FJsonObject>();
-				Revision->SetStringField(
-					TEXT("source_id"),
-					Factory->GetStringField(
-						TEXT("catalog_source_id")));
-				Revision->SetStringField(
-					TEXT("generation"),
-					Factory->GetStringField(
-						TEXT("catalog_generation")));
-				Revision->SetNumberField(
-					TEXT("sequence"),
-					Factory->GetNumberField(
-						TEXT("catalog_sequence")));
-				const TSharedPtr<FJsonObject> FactoryRef =
-					MakeShared<FJsonObject>();
-				FactoryRef->SetStringField(
-					TEXT("candidate_ref"),
-					Factory->GetStringField(
-						TEXT("candidate_ref")));
-				FactoryRef->SetObjectField(
-					TEXT("catalog_revision"),
-					Revision);
-				Input->SetObjectField(
-					TEXT("factory_ref"),
-					FactoryRef);
+				const TSharedPtr<FJsonObject> Selector = MakeShared<FJsonObject>();
+				Selector->SetStringField(TEXT("name"), Factory->GetStringField(TEXT("candidate_ref")));
+				Input->SetObjectField(TEXT("factory"), Selector);
 			}
 		}
 		else if (IsClone(Row))
@@ -537,17 +453,11 @@ namespace UE::UAI::Tests::AssetDataSimpleEffect
 				TEXT("source_ref"),
 				TEXT("uai://asset/fixture-source"));
 			Input->SetStringField(
-				TEXT("expected_source_revision"),
-				TEXT("rev:source:1"));
-			Input->SetStringField(
 				TEXT("destructive_authorization_id"),
 				TEXT("destructive-authorization:fixture"));
 		}
 		else if (!IsCreate(Row))
 		{
-			Input->SetStringField(
-				TEXT("expected_revision"),
-				TEXT("rev:target:1"));
 			const TArray<TSharedPtr<FJsonObject>> Fields =
 				FieldContracts(Fixture, Row);
 			check(!Fields.IsEmpty());

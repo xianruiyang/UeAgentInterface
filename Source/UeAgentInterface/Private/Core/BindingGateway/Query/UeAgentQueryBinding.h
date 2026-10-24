@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Core/BindingGateway/Query/UeAgentDomainQuery.h"
+#include "Core/BindingGateway/Query/UeAgentQueryPublicProjection.h"
 #include "Core/BindingGateway/Query/UeAgentQueryBindingError.h"
 #include "Core/BindingGateway/Ticket/UeAgentBindingTicket.h"
 #include "Core/ContextResource/UeAgentContextResource.h"
@@ -52,12 +53,13 @@ namespace UE::UAI::BindingGateway::Query
 		const FUeAgentDiscoveryQuery& GetQuery() const;
 		const FUeAgentProjectionRequest& GetProjection() const;
 		bool IsValid() const;
+		const FUeAgentQueryBindingError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentQuerySessionIdentity Session;
 		FUeAgentDiscoveryQuery Query;
 		FUeAgentProjectionRequest Projection;
-		bool bValid = false;
+		FUeAgentQueryBindingError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentCatalogResolveQuery final
@@ -74,13 +76,14 @@ namespace UE::UAI::BindingGateway::Query
 		const FString& GetCandidateId() const;
 		const FUeAgentProjectionRequest& GetProjection() const;
 		bool IsValid() const;
+		const FUeAgentQueryBindingError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentQuerySessionIdentity Session;
 		TSharedRef<const FUeAgentCatalogSnapshot> Catalog;
 		FString CandidateId;
 		FUeAgentProjectionRequest Projection;
-		bool bValid = false;
+		FUeAgentQueryBindingError ValidationDiagnostic;
 	};
 
 	class UEAGENTINTERFACE_API FUeAgentStateReadQuery final
@@ -99,6 +102,7 @@ namespace UE::UAI::BindingGateway::Query
 		EUeAgentStatePlane GetStatePlane() const;
 		const FUeAgentProjectionRequest& GetProjection() const;
 		bool IsValid() const;
+		const FUeAgentQueryBindingError& GetValidationDiagnostic() const;
 
 	private:
 		FUeAgentQuerySessionIdentity Session;
@@ -107,7 +111,7 @@ namespace UE::UAI::BindingGateway::Query
 		EUeAgentStatePlane StatePlane =
 			EUeAgentStatePlane::AuthoringMemory;
 		FUeAgentProjectionRequest Projection;
-		bool bValid = false;
+		FUeAgentQueryBindingError ValidationDiagnostic;
 	};
 
 	enum class EUeAgentQueryBindingPayloadKind : uint8
@@ -138,6 +142,7 @@ namespace UE::UAI::BindingGateway::Query
 		const TSharedPtr<const FUeAgentStateReadQuery>& GetStateRead() const;
 		const TSharedPtr<const FUeAgentDomainQuery>& GetDomainQuery() const;
 		bool IsValid() const;
+		const FUeAgentQueryBindingError& GetValidationDiagnostic() const;
 
 	private:
 		EUeAgentQueryBindingPayloadKind Kind =
@@ -146,6 +151,7 @@ namespace UE::UAI::BindingGateway::Query
 		TSharedPtr<const FUeAgentCatalogResolveQuery> CatalogResolve;
 		TSharedPtr<const FUeAgentStateReadQuery> StateRead;
 		TSharedPtr<const FUeAgentDomainQuery> DomainQuery;
+		FUeAgentQueryBindingError ValidationDiagnostic;
 	};
 
 	using FUeAgentQueryBindingRequest =
@@ -164,11 +170,13 @@ namespace UE::UAI::BindingGateway::Query
 
 		const TSharedPtr<const FUeAgentProjectedResponse>&
 			GetProjection() const;
+		TArray<UE::UAI::Contract::FDiagnostic> GetDiagnostics() const;
 		const TOptional<FUeAgentQueryTicket>& GetTicket() const;
 		const TSharedPtr<const
 			UE::UAI::Projection::FUeAgentProjectionSourceValue>&
 			GetSource() const;
 		bool IsValid() const;
+		const FUeAgentQueryBindingError& GetValidationDiagnostic() const;
 
 	private:
 		TSharedPtr<const FUeAgentProjectedResponse> Projection;
@@ -176,7 +184,7 @@ namespace UE::UAI::BindingGateway::Query
 		TSharedPtr<const
 			UE::UAI::Projection::FUeAgentProjectionSourceValue>
 				Source;
-		bool bValid = false;
+		FUeAgentQueryBindingError ValidationDiagnostic;
 	};
 
 	using FUeAgentQueryBindingResult =
@@ -243,17 +251,16 @@ namespace UE::UAI::BindingGateway::Query
 	class UEAGENTINTERFACE_API FUeAgentQueryPayloadCodec final
 	{
 	public:
-		static bool TryDecode(
-			const FUeAgentContractValue& Value,
-			FUeAgentResourceTracker& Resources,
-			TOptional<FUeAgentQueryBindingPayload>& OutPayload,
-			FUeAgentQueryBindingError& OutError);
 		static bool TryEncode(
-			const FUeAgentQueryBindingPayload& Payload,
+			const FUeAgentQueryBindingResponse& Response,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentContractValue& OutValue,
 			FUeAgentQueryBindingError& OutError);
-		static bool TryEncode(
+		static bool TryEncodePublic(
+			const FQueryPublicProjectionDescriptor& PublicProjection,
+			const FString& CommandId,
+			const FString& MechanicsCommandId,
+			bool bReadOnly,
 			const FUeAgentQueryBindingResponse& Response,
 			FUeAgentResourceTracker& Resources,
 			FUeAgentContractValue& OutValue,

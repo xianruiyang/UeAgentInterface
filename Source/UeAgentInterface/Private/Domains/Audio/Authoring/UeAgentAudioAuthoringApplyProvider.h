@@ -6,6 +6,7 @@
 #include "Domains/Audio/Authoring/UeAgentAudioAuthoringDescriptors.h"
 #include "Domains/Audio/Authoring/UeAgentAudioAuthoringDocuments.h"
 #include "Utilities/AuthoringOperationApply/UeAgentApplyInputContract.h"
+#include "Utilities/AuthoringWorkspaceApply/UeAgentAuthoringWorkspaceTransaction.h"
 
 class FJsonObject;
 class FJsonValue;
@@ -24,15 +25,19 @@ struct UEAGENTINTERFACE_API FAssetApplyRequest {
   FString SourceAssetPath;
   TArray<TSharedPtr<FJsonValue>> Properties;
   TSharedPtr<FJsonObject> Document;
+  // Set by ordinary composition after it has restored the complete document.
+  // Internal partial-document callers retain their existing overlay semantics.
+  bool bCompleteDocument = false;
   bool bCompile = true;
   bool bSave = false;
+  bool bCompactValues = false;
+  TFunction<bool(UeAgentAuthoringWorkspaceTransaction::FOperationFailure &)> FinalReadback;
 };
 
 struct UEAGENTINTERFACE_API FAssetApplyResult {
   FString Status;
   FString Phase;
-  FString ErrorCode;
-  FString ErrorDetail;
+  UE::UAI::Contract::FDiagnostic Diagnostic;
   FString ResolvedOperation;
   FString AssetPath;
   FString ObjectPath;
@@ -49,8 +54,7 @@ struct UEAGENTINTERFACE_API FAssetApplyResult {
 
 struct UEAGENTINTERFACE_API FWorkspaceInspectResult {
   FString Status;
-  FString ErrorCode;
-  FString ErrorDetail;
+  UE::UAI::Contract::FDiagnostic Diagnostic;
   FString AssetPath;
   FString RequestedOperation;
   FMutationStats PlannedStats;
@@ -63,9 +67,9 @@ struct UEAGENTINTERFACE_API FWorkspaceInspectResult {
   TSharedRef<FJsonObject> ToJsonObject() const;
 };
 
-UEAGENTINTERFACE_API bool RegisterApplyContracts(FString &OutError);
+UEAGENTINTERFACE_API bool RegisterApplyContracts(UE::UAI::Contract::FDiagnostic& OutError);
 UEAGENTINTERFACE_API TSharedRef<UeAgentAuthoringOperationApply::IApplyProvider>
-MakeApplyProvider();
+MakeApplyProvider(bool bCompactValues = false);
 UEAGENTINTERFACE_API bool ApplyAsset(const FAssetApplyRequest &Request,
                                     FAssetApplyResult &OutResult,
                                     const FString &RequestId = FString());

@@ -10,6 +10,7 @@
 #include "Core/DomainCapability/UeAgentDomainCapability.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "DomainAdapters/AssetDataSimpleEffect/UeAgentAssetDataSimpleEffectCapabilities.h"
 #include "Module/CommandRegistration/Active/UeAgentActiveCommandComposition.h"
 #include "OperationOwners/MaterialCommands/UeAgentMaterialCommandOperationOwner.h"
 #include "Serialization/JsonReader.h"
@@ -100,16 +101,7 @@ namespace
 
 	ContextResource::FUeAgentResourceTracker MakeResources()
 	{
-		return ContextResource::FUeAgentResourceTracker(
-			ContextResource::FUeAgentResourceBudget({
-				{ContextResource::EUeAgentResourceDimension::Nodes, 256},
-				{ContextResource::EUeAgentResourceDimension::Items, 1024},
-				{ContextResource::EUeAgentResourceDimension::StringBytes,
-					1024 * 1024},
-				{ContextResource::EUeAgentResourceDimension::WorkUnits, 4096},
-				{ContextResource::EUeAgentResourceDimension::EstimatedMemoryBytes,
-					4 * 1024 * 1024},
-			}));
+		return ContextResource::FUeAgentResourceTracker();
 	}
 }
 
@@ -146,11 +138,24 @@ bool FUeAgentT38AssetFactoryCandidatePublicQueryTest::RunTest(
 		TEXT("the query has one stable public owner"),
 		Contract->GetPublicOwner(),
 		FString(TEXT("asset-simple-query-owner")));
+	TestTrue(
+		TEXT("the tutorial exposes name selector"),
+		Contract->GetPurpose().ResultGuidance.Contains(
+			TEXT("returned name")));
+	TestTrue(
+		TEXT("the tutorial exposes semantic selector"),
+		Contract->GetPurpose().ResultGuidance.Contains(
+			TEXT("short semantic selection")));
+	TestTrue(
+		TEXT("the generic create command is an explicit related flow"),
+		Contract->GetPurpose().RelatedFlows.Contains(
+			TEXT("asset.object.create")));
 
 	const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetStringField(
-		TEXT("create_command"), TEXT("asset.media_source.create"));
-	Params->SetNumberField(TEXT("limit"), 20);
+		TEXT("create_command"), TEXT("asset.object.create"));
+	Params->SetStringField(TEXT("query"), TEXT("Material"));
+	Params->SetNumberField(TEXT("limit"), 100);
 	const FUeAgentCommandResult Result = SubmitPublic(
 		Registry,
 		Dispatch,
@@ -172,36 +177,48 @@ bool FUeAgentT38AssetFactoryCandidatePublicQueryTest::RunTest(
 	{
 		return false;
 	}
-	const TArray<TSharedPtr<FJsonValue>>* Candidates = nullptr;
+	TestEqual(TEXT("names-only result has one field"), Payload->Values.Num(), 1);
+	TestTrue(TEXT("names-only result contains names"), Payload->HasField(TEXT("names")));
+	const TArray<TSharedPtr<FJsonValue>>* Names = nullptr;
 	if (!TestTrue(
-			TEXT("the media source query returns real candidates"),
-			Payload->TryGetArrayField(TEXT("candidates"), Candidates)
-				&& Candidates && !Candidates->IsEmpty()))
+			TEXT("the factory query returns names"),
+			Payload->TryGetArrayField(TEXT("names"), Names)
+				&& Names && !Names->IsEmpty()))
 	{
 		return false;
 	}
-	const TSharedPtr<FJsonObject> Candidate = (*Candidates)[0]->AsObject();
-	const TSharedPtr<FJsonObject>* FactoryRef = nullptr;
-	const TSharedPtr<FJsonObject>* Revision = nullptr;
-	FString CandidateRef;
-	FString SourceId;
-	FString Generation;
-	double Sequence = -1.0;
-	TestTrue(
-		TEXT("factory_ref is directly consumable by the create command"),
-		Candidate.IsValid()
-			&& Candidate->TryGetObjectField(TEXT("factory_ref"), FactoryRef)
-			&& FactoryRef && FactoryRef->IsValid()
-			&& (*FactoryRef)->TryGetStringField(
-				TEXT("candidate_ref"), CandidateRef)
-			&& !CandidateRef.IsEmpty()
-			&& (*FactoryRef)->TryGetObjectField(
-				TEXT("catalog_revision"), Revision)
-			&& Revision && Revision->IsValid()
-			&& (*Revision)->TryGetStringField(TEXT("source_id"), SourceId)
-			&& (*Revision)->TryGetStringField(TEXT("generation"), Generation)
-			&& (*Revision)->TryGetNumberField(TEXT("sequence"), Sequence)
-			&& !SourceId.IsEmpty() && !Generation.IsEmpty() && Sequence >= 0.0);
+	TestTrue(TEXT("factory names are strings"), (*Names)[0]->Type == EJson::String);
+	// The production factory parser normalizes both public forms through DomainKit.
+	FString ParsedName, ParseError;
+	TMap<FString, FString> ParsedSelect;
+	const auto ParseFactory = [&](const TSharedPtr<FJsonValue>& Factory)
+	{
+		FJsonObject Input;
+		Input.SetField(TEXT("factory"), Factory);
+		return DomainAdapters::AssetDataSimpleEffect::TryParseAssetDataSimpleEffectFactorySelector(
+			Input, true, ParsedName, ParsedSelect, ParseError);
+	};
+	TestTrue(TEXT("factory string uses shared name normalization"), ParseFactory(MakeShared<FJsonValueString>(TEXT(" Input Action "))));
+	TestEqual(TEXT("factory shorthand name is normalized"), ParsedName, FString(TEXT("Input Action")));
+	const auto Selector = MakeShared<FJsonObject>();
+	Selector->SetStringField(TEXT("name"), TEXT(" Input Action "));
+	const auto Selection = MakeShared<FJsonObject>();
+	Selection->SetStringField(TEXT("creation"), TEXT("constructor"));
+	Selector->SetObjectField(TEXT("select"), Selection);
+	TestTrue(TEXT("factory object uses shared selector rules"), ParseFactory(MakeShared<FJsonValueObject>(Selector)));
+	TestEqual(TEXT("factory object name matches shorthand"), ParsedName, FString(TEXT("Input Action")));
+	TestEqual(TEXT("factory select is retained"), ParsedSelect.FindRef(TEXT("creation")), FString(TEXT("constructor")));
+	Selector->SetStringField(TEXT("select"), TEXT("constructor"));
+	TestFalse(TEXT("factory rejects a nonobject select"), ParseFactory(MakeShared<FJsonValueObject>(Selector)));
+	TestEqual(TEXT("factory uses shared select error"), ParseError, FString(TEXT("domain_hjson_candidate_selector_select_invalid")));
+	Selector->SetObjectField(TEXT("select"), Selection);
+	Selection->SetNumberField(TEXT("creation"), 1);
+	TestFalse(TEXT("factory rejects a nonstring select value"), ParseFactory(MakeShared<FJsonValueObject>(Selector)));
+	TestEqual(TEXT("factory uses shared select value error"), ParseError, FString(TEXT("domain_hjson_candidate_selector_select_invalid")));
+	Selector->RemoveField(TEXT("select"));
+	Selector->SetStringField(TEXT("identity"), TEXT("internal"));
+	TestFalse(TEXT("factory rejects machine identity fields"), ParseFactory(MakeShared<FJsonValueObject>(Selector)));
+	TestEqual(TEXT("factory uses shared unsupported field error"), ParseError, FString(TEXT("domain_hjson_candidate_selector_field_unsupported")));
 	return !HasAnyErrors();
 }
 
@@ -216,8 +233,14 @@ bool FUeAgentT38MaterialFunctionCreateContractTest::RunTest(
 	(void)Parameters;
 	using namespace UE::UAI;
 	using namespace Composition::GraphCompound;
-	const TArray<FUeAgentGraphCompoundActivationProfile>& Profiles =
-		GetGraphCompoundActivationProfiles();
+	const TArray<FUeAgentGraphCompoundActivationProfile>* CachedGraphProfiles = nullptr;
+	UE::UAI::Contract::FDiagnostic ProfileError;
+	if (!TryGetGraphCompoundActivationProfiles(CachedGraphProfiles, ProfileError))
+	{
+		AddError(ProfileError.PublicMessage);
+		return false;
+	}
+	const auto& Profiles = *CachedGraphProfiles;
 	const FUeAgentGraphCompoundActivationProfile* Activation =
 		Profiles.FindByPredicate(
 			[](const FUeAgentGraphCompoundActivationProfile& Profile)
@@ -305,7 +328,7 @@ bool FUeAgentT38SharedOwnersAndPluginAvailabilityTest::RunTest(
 	}
 	TestTrue(
 		TEXT("AssetSimple participates in the common operation authority"),
-		Frozen->FindOperationFactory(TEXT("asset.media_source.create")).IsValid());
+		Frozen->FindOperationFactory(TEXT("asset.object.create")).IsValid());
 	TestTrue(
 		TEXT("Material participates in the common operation authority"),
 		Frozen->FindOperationFactory(TEXT("material.asset.create")).IsValid());

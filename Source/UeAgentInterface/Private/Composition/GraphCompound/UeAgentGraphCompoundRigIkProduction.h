@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Contract/UeAgentDiagnostic.h"
+
 #include "Composition/GraphCompound/UeAgentGraphCompoundAnimationBindings.h"
 #include "DomainAdapters/AnimationRigGraph/UeAgentAnimationRigGraphNativeHook.h"
 #include "Dom/JsonObject.h"
@@ -41,11 +43,15 @@ namespace UE::UAI::Composition::GraphCompound
 		FString SkeletalMeshRef;
 		FString SourceRigRef;
 		FString TargetRigRef;
+		FString SourceRigInputPointer;
+		FString TargetRigInputPointer;
 		FString Preset;
 		TArray<FAnimationRigGraphControlMutation> Controls;
 		TArray<FAnimationRigGraphUnitMutation> Units;
 		TArray<FAnimationRigGraphShapeMutation> Shapes;
 		FName RetargetRoot;
+		FString RetargetRootInputPointer;
+		FString AutoGenerateInputPointer;
 		TArray<FAnimationRigGraphIkGoalMutation> Goals;
 		TArray<FAnimationRigGraphIkSolverMutation> Solvers;
 		TArray<FAnimationRigGraphIkChainMutation> Chains;
@@ -74,7 +80,7 @@ namespace UE::UAI::Composition::GraphCompound
 		const FString& TargetRef,
 		const FRigIkReadbackSpec& Spec,
 		TSharedRef<FJsonObject>& OutRoot,
-		FString& OutError);
+		UE::UAI::Contract::FDiagnostic& OutError);
 
 	UObject* TryCreateRigIkAsset(
 		const FPcgAnimationGraphRouteProfile& Profile,

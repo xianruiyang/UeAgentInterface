@@ -8,6 +8,7 @@
 #include "Core/PlanningPreflight/UeAgentPlanningPreflight.h"
 #include "DomainAdapters/AudioMediaGraph/UeAgentAudioMediaGraphTextureGraphNativeHook.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Editor.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
@@ -17,6 +18,7 @@
 #include "TextureGraph.h"
 #include "TextureCompiler.h"
 #include "UObject/Package.h"
+#include "Utilities/UeAgentPropertyValueCodec.h"
 
 namespace UE::UAI::OperationOwners::TextureGraph
 {
@@ -34,20 +36,37 @@ namespace UE::UAI::OperationOwners::TextureGraph
 		const FString BakeId = TEXT("texture_graph.artifact.bake");
 		const FString ProbeId = TEXT("texture_graph.runtime.probe");
 
+		Contract::FDiagnostic InputFailure(const TCHAR* Code, const FString& Reason, const FString& Pointer,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target = FString())
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, TEXT("input_decode"));
+			Diagnostic.SourceKind = TEXT("command_input");
+			Diagnostic.Source.JsonPath = Pointer;
+			Diagnostic.PropertyPath = Pointer;
+			Diagnostic.ActualValuePresent = Actual.IsValid();
+			Diagnostic.ExpectedValuePresent = true;
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			Diagnostic.TargetPath = Target;
+			return Diagnostic;
+		}
+
+		Contract::FDiagnostic NativeFailure(const TCHAR* Code, const FString& Reason, const TCHAR* Field,
+			TSharedPtr<FJsonValue> Actual, TSharedPtr<FJsonValue> Expected, const FString& Target,
+			const FString& Stage = TEXT("texture_graph"))
+		{
+			auto Diagnostic = Contract::FDiagnostic::Failure(Code, Reason, Stage);
+			Diagnostic.SourceKind = TEXT("native_result");
+			Diagnostic.PropertyPath = Field;
+			Diagnostic.ActualValue = MoveTemp(Actual);
+			Diagnostic.ExpectedValue = MoveTemp(Expected);
+			Diagnostic.TargetPath = Target;
+			return Diagnostic;
+		}
+
 		FUeAgentResourceTracker MakeResources()
 		{
-			return FUeAgentResourceTracker(FUeAgentResourceBudget({
-				{EUeAgentResourceDimension::InputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::OutputBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::StringBytes, 16 * 1024 * 1024},
-				{EUeAgentResourceDimension::Nodes, 65536},
-				{EUeAgentResourceDimension::Items, 65536},
-				{EUeAgentResourceDimension::Files, 4096},
-				{EUeAgentResourceDimension::ReferenceEdges, 65536},
-				{EUeAgentResourceDimension::WorkUnits, 262144},
-				{EUeAgentResourceDimension::EstimatedMemoryBytes,
-					512ll * 1024 * 1024},
-			}));
+			return FUeAgentResourceTracker();
 		}
 
 		FString ObjectPath(FString Target)
@@ -64,21 +83,44 @@ namespace UE::UAI::OperationOwners::TextureGraph
 		UTexture2D* CreateTextureFromRenderedOutput(
 			UPackage& Package,
 			const FString& AssetName,
-			UTextureRenderTarget2D& RenderTarget)
+			UTextureRenderTarget2D& RenderTarget,
+			Contract::FDiagnostic& OutError)
 		{
+			OutError.Reset();
 			FTextureRenderTargetResource* Resource =
 				RenderTarget.GameThread_GetRenderTargetResource();
 			if (!Resource)
 			{
+				OutError = NativeFailure(TEXT("texture_graph_bake_render_resource_missing"),
+					TEXT("The rendered output has no game-thread render resource."), TEXT("render_resource_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Package.GetName(), TEXT("domain_execute"));
 				return nullptr;
 			}
 			const int32 Width = Resource->GetSizeX();
 			const int32 Height = Resource->GetSizeY();
 			TArray<FColor> Pixels;
-			if (Width <= 0 || Height <= 0
-				|| !Resource->ReadPixels(Pixels)
-				|| Pixels.Num() != Width * Height)
+			if (Width <= 0 || Height <= 0)
 			{
+				const auto Dimensions = MakeShared<FJsonObject>();
+				Dimensions->SetNumberField(TEXT("width"), Width);
+				Dimensions->SetNumberField(TEXT("height"), Height);
+				OutError = NativeFailure(TEXT("texture_graph_bake_render_dimensions_invalid"),
+					TEXT("The rendered output must have positive width and height."), TEXT("dimensions"),
+					MakeShared<FJsonValueObject>(Dimensions), MakeShared<FJsonValueString>(TEXT("positive width and height")), Package.GetName(), TEXT("domain_execute"));
+				return nullptr;
+			}
+			if (!Resource->ReadPixels(Pixels))
+			{
+				OutError = NativeFailure(TEXT("texture_graph_bake_pixel_read_failed"),
+					TEXT("The render resource could not read back pixels for texture creation."), TEXT("pixels_read"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Package.GetName(), TEXT("domain_execute"));
+				return nullptr;
+			}
+			if (Pixels.Num() != Width * Height)
+			{
+				OutError = NativeFailure(TEXT("texture_graph_bake_pixel_count_mismatch"),
+					TEXT("The rendered pixel count does not match the output dimensions."), TEXT("pixel_count"),
+					MakeShared<FJsonValueNumber>(Pixels.Num()), MakeShared<FJsonValueNumber>(static_cast<int64>(Width) * Height), Package.GetName(), TEXT("domain_execute"));
 				return nullptr;
 			}
 			UTexture2D* Texture = NewObject<UTexture2D>(
@@ -87,6 +129,9 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				RF_Public | RF_Standalone | RF_Transactional);
 			if (!Texture)
 			{
+				OutError = NativeFailure(TEXT("texture_graph_bake_texture_unavailable"),
+					TEXT("The native texture object was not created."), TEXT("texture_created"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Package.GetName(), TEXT("domain_execute"));
 				return nullptr;
 			}
 			Texture->Source.Init(
@@ -135,42 +180,46 @@ namespace UE::UAI::OperationOwners::TextureGraph
 
 		FUeAgentCommandResult Failure(
 			const FUeAgentCommandRequest& Request,
-			FString Code,
-			FString Subject = FString(),
-			FString Detail = FString())
+			const UE::UAI::Contract::FDiagnostic& Diagnostic)
 		{
-			const TSharedPtr<FJsonObject> Error = MakeShared<FJsonObject>();
-			Error->SetStringField(TEXT("code"), MoveTemp(Code));
-			Error->SetStringField(TEXT("subject_id"), MoveTemp(Subject));
-			Error->SetStringField(TEXT("detail"), MoveTemp(Detail));
-			FString ErrorJson;
-			FString JsonError;
-			CommandContract::Json::TryCanonicalize(Error, ErrorJson, JsonError);
-			return FUeAgentCommandResult::Failure(
-				Request, TEXT("{}"), MoveTemp(ErrorJson));
+			return FUeAgentCommandResult::Failure(Request, TEXT("{}"), Diagnostic);
 		}
 
 		bool Canonical(
 			const TSharedPtr<FJsonObject>& Object,
-			FString& OutJson)
+			FString& OutJson,
+			UE::UAI::Contract::FDiagnostic& OutError)
 		{
-			FString Error;
-			return CommandContract::Json::TryCanonicalize(Object, OutJson, Error);
+			if (CommandContract::Json::TryCanonicalize(Object, OutJson, OutError)) return true;
+			OutError.SourceKind = TEXT("native_result");
+			return false;
 		}
 
-		bool CurrentRevision(
+		bool TryReadCurrentRevision(
 			UTextureGraph& Graph,
 			const FString& TargetRef,
-			FString& OutRevision)
+			FString& OutRevision,
+			Contract::FDiagnostic& OutError)
 		{
+			OutRevision.Reset();
+			OutError.Reset();
 			UPackage* const Package = Graph.GetOutermost();
-			if (Package == nullptr || Package->IsDirty())
+			if (!Package)
 			{
-				OutRevision = TEXT("authoring-state-dirty");
+				OutError = NativeFailure(TEXT("texture_graph_bake_revision_conflict"),
+					TEXT("The TextureGraph asset has no package for revision reading."), TEXT("package_available"),
+					MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), TargetRef, TEXT("revision_read"));
 				return false;
 			}
-			OutRevision = ReadPackageAssetRevision(TargetRef);
-			return !OutRevision.IsEmpty();
+			if (Package->IsDirty())
+			{
+				OutRevision = TEXT("authoring-state-dirty");
+				OutError = NativeFailure(TEXT("texture_graph_bake_revision_conflict"),
+					TEXT("The TextureGraph package has unsaved changes; save it before baking."), TEXT("package_dirty"),
+					MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), TargetRef, TEXT("revision_read"));
+				return false;
+			}
+			return TryReadPackageAssetRevision(TargetRef, OutRevision, OutError);
 		}
 
 		struct FBakeTarget
@@ -197,44 +246,39 @@ namespace UE::UAI::OperationOwners::TextureGraph
 			FAssetDurableSessionPtr DurableSession;
 			FDurableReceipt DurableReceipt;
 			int64 FencingToken = 0;
-			FString LastLifecycleFailureCode;
-			FString LastLifecycleFailureDetail;
+			UE::UAI::Contract::FDiagnostic LastLifecycleDiagnostic;
 
-			FString GetFailureDetail() const override
-			{
-				return LastLifecycleFailureCode.IsEmpty()
-					? FString()
-					: LastLifecycleFailureCode + TEXT(":")
-						+ LastLifecycleFailureDetail;
-			}
+
 
 			bool TryBuildSuccessPayload(
-				const FOperationLifecycleReceipt& Receipt,
+				const FOperationLifecycleReceipt& /*Receipt*/,
 				FString& OutPayloadJson,
-				FString& OutError) const override
+				UE::UAI::Contract::FDiagnostic& OutError) const override
 			{
 				OutPayloadJson.Reset();
 				OutError.Reset();
 				if (ReloadedObjectPaths.Num() != Targets.Num())
 				{
-					OutError = TEXT("texture_graph_bake_result_readback_missing");
+					OutError = NativeFailure(TEXT("texture_graph_bake_result_readback_missing"),
+						TEXT("The reloaded texture count does not match the requested bake targets."), TEXT("reloaded_texture_count"),
+						MakeShared<FJsonValueNumber>(ReloadedObjectPaths.Num()), MakeShared<FJsonValueNumber>(Targets.Num()), Target, TEXT("result_projection"));
 					return false;
 				}
 				const TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 				Result->SetStringField(TEXT("command_id"), BakeId);
 				Result->SetStringField(TEXT("terminal_status"), TEXT("succeeded"));
 				Result->SetStringField(TEXT("target"), Target);
-				Result->SetStringField(TEXT("plan_fingerprint"), Fingerprint);
-				Result->SetStringField(
-					TEXT("persistence_receipt_id"),
-					Receipt.GetPersistenceReceiptId());
 				TArray<TSharedPtr<FJsonValue>> Outputs;
+				TArray<TSharedPtr<FJsonValue>> AssetRefs;
 				for (int32 Index = 0; Index < Targets.Num(); ++Index)
 				{
 					const FBakeTarget& OutputTarget = Targets[Index];
 					if (!Rendered.IsValidIndex(OutputTarget.OutputIndex))
 					{
-						OutError = TEXT("texture_graph_bake_result_output_missing");
+						OutError = NativeFailure(TEXT("texture_graph_bake_result_output_missing"),
+							TEXT("The bake result refers to an unavailable rendered output index."), TEXT("render_output_index"),
+							MakeShared<FJsonValueNumber>(OutputTarget.OutputIndex), MakeShared<FJsonValueString>(FString::Printf(TEXT("0 <= index < %d"), Rendered.Num())),
+							Target, TEXT("result_projection"));
 						return false;
 					}
 					const TSharedPtr<FJsonObject> Output = MakeShared<FJsonObject>();
@@ -246,11 +290,14 @@ namespace UE::UAI::OperationOwners::TextureGraph
 						TEXT("pixel_stats"),
 						Stats(Rendered[OutputTarget.OutputIndex].GetStats()));
 					Outputs.Add(MakeShared<FJsonValueObject>(Output));
+					AssetRefs.Add(MakeShared<FJsonValueString>(
+						ReloadedObjectPaths[Index]));
 				}
 				Result->SetArrayField(TEXT("outputs"), MoveTemp(Outputs));
-				if (!Canonical(Result, OutPayloadJson))
+				Result->SetArrayField(TEXT("asset_refs"), MoveTemp(AssetRefs));
+				if (!Canonical(Result, OutPayloadJson, OutError))
 				{
-					OutError = TEXT("texture_graph_bake_result_invalid");
+					if (OutError.TargetPath.IsEmpty()) OutError.TargetPath = Target;
 					return false;
 				}
 				return true;
@@ -260,94 +307,100 @@ namespace UE::UAI::OperationOwners::TextureGraph
 		bool ParseBake(
 			const FUeAgentCommandRequest& Request,
 			TSharedRef<FBakeContext>& Context,
-			FString& OutCode,
-			FString& OutSubject)
+			Contract::FDiagnostic& OutError)
 		{
+			OutError.Reset();
+			auto Reject = [&OutError](Contract::FDiagnostic Diagnostic)
+			{
+				OutError = MoveTemp(Diagnostic);
+				return false;
+			};
 			TSharedPtr<FJsonObject> Params;
-			FString Error;
-			if (!CommandContract::Json::TryParseObject(
-				Request.GetParamsJson(), Params, Error)
-				|| !Params.IsValid()
-				|| !Params->TryGetStringField(TEXT("target"), Context->Target)
-				|| !Params->TryGetStringField(
-					TEXT("expected_revision"), Context->ExpectedRevision))
+			Contract::FDiagnostic Error;
+			if (!CommandContract::Json::TryParseObject(Request.GetParamsJson(), Params, Error))
 			{
-				OutCode = TEXT("texture_graph_bake_input_invalid");
-				OutSubject = Request.GetCommandId();
-				return false;
+				if (Error.IsEmpty()) Error = InputFailure(TEXT("texture_graph_bake_input_invalid"),
+					TEXT("TextureGraph bake parameters could not be decoded as an object."), FString(), nullptr, MakeShared<FJsonValueString>(TEXT("object")));
+				Error.SourceKind = TEXT("command_input");
+				return Reject(Contract::FDiagnostic::WrapFailure(TEXT("texture_graph_bake_input_invalid"), Error));
 			}
+			if (!Params.IsValid())
+				return Reject(InputFailure(TEXT("texture_graph_bake_input_invalid"),
+					TEXT("TextureGraph bake parameters must be an object."), FString(), nullptr, MakeShared<FJsonValueString>(TEXT("object"))));
+			if (!Params->TryGetStringField(TEXT("target"), Context->Target))
+				return Reject(InputFailure(TEXT("texture_graph_bake_input_invalid"),
+					TEXT("The target parameter must be a TextureGraph asset path string."), TEXT("/target"),
+					Params->TryGetField(TEXT("target")), MakeShared<FJsonValueString>(TEXT("TextureGraph asset path string"))));
 			const TArray<TSharedPtr<FJsonValue>>* Outputs = nullptr;
-			if (!Params->TryGetArrayField(TEXT("outputs"), Outputs)
-				|| !Outputs || Outputs->IsEmpty())
-			{
-				OutCode = TEXT("texture_graph_bake_outputs_required");
-				OutSubject = Context->Target;
-				return false;
-			}
+			if (!Params->TryGetArrayField(TEXT("outputs"), Outputs) || !Outputs || Outputs->IsEmpty())
+				return Reject(InputFailure(TEXT("texture_graph_bake_outputs_required"),
+					TEXT("TextureGraph bake requires a non-empty outputs array."), TEXT("/outputs"),
+					Params->TryGetField(TEXT("outputs")), MakeShared<FJsonValueString>(TEXT("non-empty array")), Context->Target));
 			TSet<FString> Packages;
 			TSet<int32> OutputIndexes;
-			for (const TSharedPtr<FJsonValue>& Value : *Outputs)
+			for (int32 OutputOrdinal = 0; OutputOrdinal < Outputs->Num(); ++OutputOrdinal)
 			{
-				const TSharedPtr<FJsonObject> Output = Value.IsValid()
-					? Value->AsObject() : nullptr;
-				double IndexNumber = -1.0;
-				FBakeTarget Target;
-				if (!Output.IsValid()
-					|| !Output->TryGetNumberField(
-						TEXT("render_output_index"), IndexNumber)
-					|| !Output->TryGetStringField(
-						TEXT("destination"), Target.PackageName)
-					|| !FMath::IsFinite(IndexNumber)
-					|| FMath::FloorToDouble(IndexNumber) != IndexNumber
-					|| IndexNumber < 0.0
-					|| !FPackageName::IsValidLongPackageName(Target.PackageName))
+				const auto& Value = (*Outputs)[OutputOrdinal];
+				const FString OutputPointer = FString::Printf(TEXT("/outputs/%d"), OutputOrdinal);
+				const TSharedPtr<FJsonObject> Output = Value.IsValid() && Value->Type == EJson::Object ? Value->AsObject() : nullptr;
+				if (!Output.IsValid())
+					return Reject(InputFailure(TEXT("texture_graph_bake_output_invalid"),
+						TEXT("Each bake output must be an object."), OutputPointer, Value, MakeShared<FJsonValueString>(TEXT("object")), Context->Target));
+				int64 IndexNumber = -1;
+				Contract::FDiagnostic NumberError;
+				if (!UeAgentPropertyValueCodec::TryReadIntegerNumber(
+					Output->TryGetField(TEXT("render_output_index")), 0, MAX_int32, IndexNumber, NumberError))
 				{
-					OutCode = TEXT("texture_graph_bake_output_invalid");
-					OutSubject = Context->Target;
-					return false;
+					const FString Pointer = OutputPointer + TEXT("/render_output_index");
+					if (NumberError.IsEmpty()) NumberError = InputFailure(TEXT("texture_graph_bake_output_invalid"),
+						TEXT("render_output_index must be an integer between zero and MAX_int32."), Pointer,
+						Output->TryGetField(TEXT("render_output_index")), MakeShared<FJsonValueString>(TEXT("integer in [0, 2147483647]")), Context->Target);
+					NumberError.SourceKind = TEXT("command_input");
+					NumberError.Source.JsonPath = Pointer;
+					NumberError.PropertyPath = Pointer;
+					NumberError.TargetPath = Context->Target;
+					return Reject(Contract::FDiagnostic::WrapFailure(TEXT("texture_graph_bake_output_invalid"), NumberError));
 				}
+				FBakeTarget Target;
+				if (!Output->TryGetStringField(TEXT("destination"), Target.PackageName)
+					|| !FPackageName::IsValidLongPackageName(Target.PackageName))
+					return Reject(InputFailure(TEXT("texture_graph_bake_output_invalid"),
+						TEXT("The bake destination must be a valid long package name."), OutputPointer + TEXT("/destination"),
+						Output->TryGetField(TEXT("destination")), MakeShared<FJsonValueString>(TEXT("valid long package name")), Context->Target));
 				Target.OutputIndex = static_cast<int32>(IndexNumber);
-				Target.AssetName =
-					FPackageName::GetLongPackageAssetName(Target.PackageName);
+				Target.AssetName = FPackageName::GetLongPackageAssetName(Target.PackageName);
 				FString Filename;
-				FPackageName::TryConvertLongPackageNameToFilename(
-					Target.PackageName,
-					Filename,
-					FPackageName::GetAssetPackageExtension());
-				if (Target.AssetName.IsEmpty()
-					|| Packages.Contains(Target.PackageName)
-					|| OutputIndexes.Contains(Target.OutputIndex)
-					|| FindPackage(nullptr, *Target.PackageName)
+				FPackageName::TryConvertLongPackageNameToFilename(Target.PackageName, Filename, FPackageName::GetAssetPackageExtension());
+				if (Target.AssetName.IsEmpty() || Packages.Contains(Target.PackageName)
+					|| OutputIndexes.Contains(Target.OutputIndex) || FindPackage(nullptr, *Target.PackageName)
 					|| IFileManager::Get().FileExists(*Filename))
 				{
-					OutCode = TEXT("texture_graph_bake_destination_conflict");
-					OutSubject = Target.PackageName;
-					return false;
+					const bool bDuplicateIndex = !Target.AssetName.IsEmpty() && !Packages.Contains(Target.PackageName)
+						&& OutputIndexes.Contains(Target.OutputIndex);
+					const FString Reason = Target.AssetName.IsEmpty() ? TEXT("The bake destination does not contain an asset name.")
+						: Packages.Contains(Target.PackageName) ? TEXT("Two bake outputs use the same destination package.")
+						: bDuplicateIndex ? TEXT("Two bake outputs use the same render_output_index.")
+						: FindPackage(nullptr, *Target.PackageName) ? TEXT("The bake destination package is already loaded.")
+						: TEXT("The bake destination package already exists on disk.");
+					return Reject(InputFailure(TEXT("texture_graph_bake_destination_conflict"), Reason,
+						OutputPointer + (bDuplicateIndex ? TEXT("/render_output_index") : TEXT("/destination")),
+						Output->TryGetField(bDuplicateIndex ? TEXT("render_output_index") : TEXT("destination")),
+						MakeShared<FJsonValueString>(bDuplicateIndex ? TEXT("unique output index") : TEXT("unique unused destination package")), Context->Target));
 				}
 				Packages.Add(Target.PackageName);
 				OutputIndexes.Add(Target.OutputIndex);
 				Context->Targets.Add(MoveTemp(Target));
 			}
 			Context->RequestId = Request.GetRequestId();
-			Context->Fingerprint =
-				CommandContract::Json::Sha256Utf8(Request.GetParamsJson());
-			Context->Graph = LoadObject<UTextureGraph>(
-				nullptr, *ObjectPath(Context->Target));
+			Context->Fingerprint = CommandContract::Json::Sha256Utf8(Request.GetParamsJson());
+			Context->Graph = LoadObject<UTextureGraph>(nullptr, *ObjectPath(Context->Target));
 			if (!Context->Graph)
-			{
-				OutCode = TEXT("texture_graph_not_found");
-				OutSubject = Context->Target;
-				return false;
-			}
-			FString Revision;
-			if (!CurrentRevision(
-					*Context->Graph, Context->Target, Revision)
-				|| Revision != Context->ExpectedRevision)
-			{
-				OutCode = TEXT("texture_graph_bake_revision_conflict");
-				OutSubject = Revision;
-				return false;
-			}
+				return Reject(InputFailure(TEXT("texture_graph_not_found"),
+					TEXT("The target TextureGraph asset could not be loaded."), TEXT("/target"),
+					Params->TryGetField(TEXT("target")), MakeShared<FJsonValueString>(TEXT("loadable TextureGraph asset")), Context->Target));
+			Contract::FDiagnostic RevisionError;
+			if (!TryReadCurrentRevision(*Context->Graph, Context->Target, Context->ExpectedRevision, RevisionError))
+				return Reject(Contract::FDiagnostic::WrapFailure(TEXT("texture_graph_bake_revision_conflict"), RevisionError));
 			return true;
 		}
 
@@ -405,10 +458,12 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				FOperationLifecycleError& OutError) override
 			{
 				FString Revision;
-				bOutCurrent = Context->Graph
-					&& CurrentRevision(
-						*Context->Graph, Context->Target, Revision)
-					&& Revision == Context->ExpectedRevision;
+				Contract::FDiagnostic RevisionError;
+				const bool bRevisionRead = Context->Graph
+					&& TryReadCurrentRevision(
+						*Context->Graph, Context->Target, Revision, RevisionError);
+				bOutCurrent = bRevisionRead && Revision == Context->ExpectedRevision;
+				FString ExistingDestination;
 				if (bOutCurrent
 					&& Stage == EOperationLifecycleStage::PrePersistFence)
 				{
@@ -422,19 +477,40 @@ namespace UE::UAI::OperationOwners::TextureGraph
 						if (IFileManager::Get().FileExists(*Filename))
 						{
 							bOutCurrent = false;
-							Revision = TEXT("destination_became_present:")
-								+ Target.PackageName;
+							ExistingDestination = Target.PackageName;
 							break;
 						}
 					}
 				}
 				if (!bOutCurrent)
 				{
-					Context->LastLifecycleFailureCode =
-						TEXT("texture_graph_bake_revision_conflict");
-					Context->LastLifecycleFailureDetail = Revision;
-					OutError = FOperationLifecycleError(
-						TEXT("texture_graph_bake_revision_conflict"), Revision);
+					if (!RevisionError.IsEmpty())
+					{
+						OutError = Contract::FDiagnostic::WrapFailure(TEXT("texture_graph_bake_revision_conflict"), RevisionError);
+						Context->LastLifecycleDiagnostic = OutError;
+						return true;
+					}
+					OutError = FOperationLifecycleError::Failure(TEXT("texture_graph_bake_revision_conflict"),
+						!Context->Graph ? TEXT("The TextureGraph asset is unavailable for the version check.")
+							: !bRevisionRead ? TEXT("The current TextureGraph revision could not be read.")
+							: !ExistingDestination.IsEmpty() ? TEXT("A destination package appeared before persistence.") : TEXT("The TextureGraph revision changed after bake preparation."), LexToString(Stage));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.TargetPath = ExistingDestination.IsEmpty() ? Context->Target : ExistingDestination;
+					OutError.PropertyPath = ExistingDestination.IsEmpty() ? TEXT("revision") : TEXT("destination");
+					if (!ExistingDestination.IsEmpty())
+					{
+						OutError.ActualValue = MakeShared<FJsonValueBoolean>(true);
+						OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(false);
+					}
+					else
+					{
+						OutError.ActualEvidence = MakeShared<FJsonValueString>(Revision);
+						OutError.ExpectedEvidence = MakeShared<FJsonValueString>(Context->ExpectedRevision);
+						OutError.PropertyPath = Context->Graph ? TEXT("revision_matches") : TEXT("graph_available");
+						OutError.ActualValue = MakeShared<FJsonValueBoolean>(false);
+						OutError.ExpectedValue = MakeShared<FJsonValueBoolean>(true);
+					}
+                    Context->LastLifecycleDiagnostic = OutError;
 				}
 				return true;
 			}
@@ -460,19 +536,28 @@ namespace UE::UAI::OperationOwners::TextureGraph
 					|| !Hook.TryRenderAndReadOutputs(
 						*World, *Context->Graph, Context->Rendered, NativeError))
 				{
-					OutError = FOperationLifecycleError(
-						NativeError.GetCode().IsEmpty()
-							? FString(TEXT("texture_graph_render_failed"))
-							: NativeError.GetCode());
+					if (NativeError.IsValid()) OutError = NativeError;
+					else
+					{
+						OutError = FOperationLifecycleError::Failure(TEXT("texture_graph_render_failed"),
+							!World ? TEXT("An editor world is required to render the TextureGraph.")
+								: !Context->Graph ? TEXT("The TextureGraph asset is unavailable for rendering.") : TEXT("Native TextureGraph rendering failed without providing a diagnostic."), TEXT("domain_execute"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = Context->Target;
+						OutError.PropertyPath = !World ? TEXT("world") : !Context->Graph ? TEXT("graph") : TEXT("render_outputs");
+					}
 					return false;
 				}
 				for (const FBakeTarget& Target : Context->Targets)
 				{
 					if (!Context->Rendered.IsValidIndex(Target.OutputIndex))
 					{
-						OutError = FOperationLifecycleError(
-							TEXT("texture_graph_bake_output_index_invalid"),
-							FString::FromInt(Target.OutputIndex));
+						OutError = FOperationLifecycleError::Failure(TEXT("texture_graph_bake_output_index_invalid"), TEXT("The requested output index is outside the rendered outputs."), TEXT("domain_execute"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = Target.PackageName;
+						OutError.PropertyPath = TEXT("output_index");
+						OutError.ActualValue = MakeShared<FJsonValueNumber>(Target.OutputIndex);
+						OutError.ExpectedValue = MakeShared<FJsonValueString>(FString::Printf(TEXT("0 <= index < %d"), Context->Rendered.Num()));
 						return false;
 					}
 				}
@@ -507,8 +592,7 @@ namespace UE::UAI::OperationOwners::TextureGraph
 					DurableError)
 					|| !Context->DurableSession.IsValid())
 				{
-					OutError = FOperationLifecycleError(
-						DurableError.GetCode(), DurableError.GetDetail());
+					OutError = DurableError;
 					return false;
 				}
 				TArray<FString> Mutated;
@@ -521,12 +605,25 @@ namespace UE::UAI::OperationOwners::TextureGraph
 					{
 						Context->CreatedPackages.AddUnique(Package);
 					}
+					Contract::FDiagnostic TextureError;
 					UTexture2D* Texture = Source && Package
 						? CreateTextureFromRenderedOutput(
-							*Package, Target.AssetName, *Source)
+							*Package, Target.AssetName, *Source, TextureError)
 						: nullptr;
 					if (!Texture)
 					{
+						auto CreationError = !TextureError.IsEmpty() ? Contract::FDiagnostic::WrapFailure(TEXT("texture_graph_bake_texture_create_failed"), TextureError)
+							: FOperationLifecycleError::Failure(TEXT("texture_graph_bake_texture_create_failed"),
+								!Source ? TEXT("The rendered output has no render target for creating the texture.")
+									: !Package ? TEXT("The output package could not be created.") : TEXT("The native texture factory did not create a texture from the rendered output."), TEXT("domain_execute"));
+						if (TextureError.IsEmpty())
+						{
+							CreationError.SourceKind = TEXT("native_result");
+							CreationError.TargetPath = Target.PackageName;
+							CreationError.PropertyPath = !Source ? TEXT("render_target") : !Package ? TEXT("package") : TEXT("texture");
+							CreationError.ActualValuePresent = false;
+							CreationError.ExpectedValue = MakeShared<FJsonValueString>(!Source ? TEXT("render target") : !Package ? TEXT("output package") : TEXT("Texture2D"));
+						}
 						if (!Mutated.IsEmpty())
 						{
 							OutFacts = FOperationMutationFacts(
@@ -552,17 +649,30 @@ namespace UE::UAI::OperationOwners::TextureGraph
 								CleanupError);
 							if (!bDurableRolledBack || !bPackagesUnloaded)
 							{
-								OutError = FOperationLifecycleError(
-									TEXT("texture_graph_bake_rollback_failed"),
-									!CleanupError.GetCode().IsEmpty()
-										? CleanupError.GetCode()
-										: UnloadError.ToString());
+								OutFacts = FOperationMutationFacts(TEXT("texture-graph-bake-cleanup:") + Context->RequestId,
+									{Target.PackageName}, false);
+								OutError = Contract::FDiagnostic::WrapFailure(TEXT("texture_graph_bake_rollback_failed"), CreationError);
+								OutError.Stage = TEXT("rollback");
+								OutError.PublicMessage = TEXT("Cleanup after texture creation failed.");
+								OutError.SourceKind = TEXT("native_result");
+								OutError.TargetPath = Target.PackageName;
+								if (!bPackagesUnloaded)
+								{
+									auto Cause = NativeFailure(TEXT("texture_graph_bake_native_unload_failed"),
+										UnloadError.IsEmpty() ? FString(TEXT("The created packages could not be unloaded during texture creation cleanup.")) : UnloadError.ToString(),
+										TEXT("packages_unloaded"), MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target.PackageName, TEXT("rollback"));
+									OutError.Append(Cause);
+								}
+								if (!bDurableRolledBack && CleanupError.IsEmpty()) CleanupError = NativeFailure(TEXT("texture_graph_bake_durable_cleanup_failed"),
+									TEXT("Durable cleanup failed without providing a diagnostic."), TEXT("durable_rollback_succeeded"),
+									MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target.PackageName, TEXT("rollback"));
+								OutError.Append(CleanupError);
+								OutError.RollbackAttempted = true;
+								OutError.RollbackSucceeded = false;
 								return false;
 							}
 						}
-						OutError = FOperationLifecycleError(
-							TEXT("texture_graph_bake_texture_create_failed"),
-							Target.PackageName);
+						OutError = MoveTemp(CreationError);
 						return false;
 					}
 					FAssetRegistryModule::AssetCreated(Texture);
@@ -578,7 +688,7 @@ namespace UE::UAI::OperationOwners::TextureGraph
 					TEXT("texture-graph-bake:") + Context->RequestId,
 					MoveTemp(Mutated),
 					true);
-				return OutFacts.IsValid();
+				return OutFacts.TryValidate(OutError);
 			}
 
 			bool Rollback(
@@ -591,11 +701,13 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				if (Context->DurableReceipt.GetStatus()
 					== EDurableStatus::StateUnknown)
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("texture_graph_bake_durable_state_unknown"),
-						Context->LastLifecycleFailureCode + TEXT(":")
-							+ Context->LastLifecycleFailureDetail + TEXT(":")
-							+ Context->DurableReceipt.GetJournalId());
+					OutError = FOperationLifecycleError::Failure(TEXT("texture_graph_bake_durable_state_unknown"),
+						TEXT("The durable state of the baked textures could not be determined."),
+						TEXT("rollback"), Context->DurableReceipt.GetJournalId());
+					OutError.Append(Context->LastLifecycleDiagnostic);
+					OutError.TerminalStatus = TEXT("state_unknown");
+					OutError.RollbackAttempted = true;
+					OutError.RollbackSucceeded = false;
 					return false;
 				}
 				const bool bDurabilityAlreadyRolledBack =
@@ -633,23 +745,31 @@ namespace UE::UAI::OperationOwners::TextureGraph
 						DurableError);
 				if (Receipt.GetStatus() == EDurableStatus::StateUnknown)
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("texture_graph_bake_durable_state_unknown"),
-						Context->LastLifecycleFailureCode + TEXT(":")
-							+ Context->LastLifecycleFailureDetail + TEXT(":")
-							+ Receipt.GetJournalId());
+					OutError = FOperationLifecycleError::Failure(TEXT("texture_graph_bake_durable_state_unknown"),
+						TEXT("The durable state of the baked textures could not be determined."),
+						TEXT("rollback"), Receipt.GetJournalId());
+					OutError.Append(Context->LastLifecycleDiagnostic);
+					OutError.TerminalStatus = TEXT("state_unknown");
+					OutError.RollbackAttempted = true;
+					OutError.RollbackSucceeded = false;
 					return false;
 				}
 				if (!bPackagesUnloaded || !bDurableRolledBack)
 				{
-					OutError = FOperationLifecycleError(
-						bPackagesUnloaded
-							? FString(TEXT("texture_graph_bake_rollback_failed"))
-							: FString(TEXT("texture_graph_bake_rollback_unload_failed")),
-						bPackagesUnloaded
-							? DurableError.GetCode() + TEXT(":")
-								+ DurableError.GetDetail()
-							: UnloadError.ToString());
+					OutError = FOperationLifecycleError::Failure(
+						bPackagesUnloaded ? TEXT("texture_graph_bake_rollback_failed") : TEXT("texture_graph_bake_rollback_unload_failed"),
+						bPackagesUnloaded ? TEXT("Durable rollback of the baked textures failed.") : TEXT("Baked texture packages could not be unloaded during rollback."),
+						TEXT("rollback"));
+					OutError.SourceKind = TEXT("native_result");
+					if (!bPackagesUnloaded && !UnloadError.IsEmpty())
+					{
+						auto Cause = FOperationLifecycleError::Failure(TEXT("texture_graph_bake_native_unload_failed"), UnloadError.ToString(), TEXT("rollback"));
+						Cause.SourceKind = TEXT("native_result");
+						OutError.Append(Cause);
+					}
+					OutError.Append(DurableError);
+					OutError.RollbackAttempted = true;
+					OutError.RollbackSucceeded = false;
 					return false;
 				}
 				bOutConfirmed = Receipt.GetStatus() == EDurableStatus::RolledBack;
@@ -695,14 +815,20 @@ namespace UE::UAI::OperationOwners::TextureGraph
 					&& Context->Rendered.Num() >= Context->Targets.Num();
 				if (!bValid)
 				{
-					Context->LastLifecycleFailureCode =
-						TEXT("texture_graph_bake_settle_incomplete");
-					Context->LastLifecycleFailureDetail = FString::Printf(
-						TEXT("created=%d:targets=%d:rendered=%d"),
-						Context->Created.Num(), Context->Targets.Num(),
-						Context->Rendered.Num());
-					OutError = FOperationLifecycleError(
-						TEXT("texture_graph_bake_settle_incomplete"));
+					OutError = FOperationLifecycleError::Failure(TEXT("texture_graph_bake_settle_incomplete"),
+						TEXT("The created and rendered texture counts do not match the requested outputs."),
+						TEXT("settle"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = TEXT("output_counts");
+					auto Actual = MakeShared<FJsonObject>();
+					Actual->SetNumberField(TEXT("created"), Context->Created.Num());
+					Actual->SetNumberField(TEXT("rendered"), Context->Rendered.Num());
+					auto Expected = MakeShared<FJsonObject>();
+					Expected->SetNumberField(TEXT("created"), Context->Targets.Num());
+					Expected->SetNumberField(TEXT("minimum_rendered"), Context->Targets.Num());
+					OutError.ActualValue = MakeShared<FJsonValueObject>(Actual);
+					OutError.ExpectedValue = MakeShared<FJsonValueObject>(Expected);
+					Context->LastLifecycleDiagnostic = OutError;
 				}
 				return bValid;
 			}
@@ -724,13 +850,17 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				FAssetDurableError DurableError;
 				if (!Context->DurableSession.IsValid())
 				{
-					OutError = FOperationLifecycleError(
-						TEXT("texture_graph_bake_durable_session_missing"));
+					OutError = FOperationLifecycleError::Failure(TEXT("texture_graph_bake_durable_session_missing"),
+						TEXT("The baked textures cannot be persisted because the prepared durability session is missing."), TEXT("persist"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = TEXT("durability_session");
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("prepared durability session"));
 					return false;
 				}
 				const FAssetDurableSessionRef PreparedSession =
 					Context->DurableSession.ToSharedRef();
-				if (!TryPersistAssetDurability(
+				if (!TryPersistAssetDurabilityForVerification(
 						PreparedSession,
 						Context->DurableBackend,
 						Context->FencingToken,
@@ -738,22 +868,8 @@ namespace UE::UAI::OperationOwners::TextureGraph
 						Context->DurableReceipt,
 						DurableError))
 				{
-					Context->LastLifecycleFailureCode = DurableError.GetCode();
-					Context->LastLifecycleFailureDetail = DurableError.GetDetail();
-					OutError = FOperationLifecycleError(
-						DurableError.GetCode(), DurableError.GetDetail());
-					return false;
-				}
-				if (Context->DurableReceipt.GetStatus()
-					!= EDurableStatus::PersistedUnverified)
-				{
-					Context->LastLifecycleFailureCode =
-						TEXT("texture_graph_bake_persistence_not_published");
-					Context->LastLifecycleFailureDetail =
-						LexToString(Context->DurableReceipt.GetStatus());
-					OutError = FOperationLifecycleError(
-						TEXT("texture_graph_bake_persistence_not_published"),
-						LexToString(Context->DurableReceipt.GetStatus()));
+					Context->LastLifecycleDiagnostic = DurableError;
+					OutError = DurableError;
 					return false;
 				}
 				Context->DurableSession = MakeShared<const FAssetDurableSession>(
@@ -766,7 +882,17 @@ namespace UE::UAI::OperationOwners::TextureGraph
 					PreparedSession->GetStagingRoot(),
 					Context->DurableReceipt.GetPhaseHistory());
 				OutReceipt = Context->DurableReceipt.GetJournalId();
-				return !OutReceipt.IsEmpty();
+				if (OutReceipt.IsEmpty())
+				{
+					OutError = FOperationLifecycleError::Failure(TEXT("texture_graph_bake_persistence_receipt_missing"),
+						TEXT("Durable persistence returned no journal receipt identifier."), TEXT("persist"));
+					OutError.SourceKind = TEXT("native_result");
+					OutError.PropertyPath = TEXT("persistence_receipt");
+					OutError.ActualValuePresent = false;
+					OutError.ExpectedValue = MakeShared<FJsonValueString>(TEXT("nonempty persistence receipt"));
+					return false;
+				}
+				return true;
 			}
 		private:
 			TSharedRef<FBakeContext> Context;
@@ -797,12 +923,11 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				FText UnloadError;
 				if (!UPackageTools::UnloadPackages(Packages, UnloadError, true))
 				{
-					Context->LastLifecycleFailureCode =
-						TEXT("texture_graph_bake_unload_failed");
-					Context->LastLifecycleFailureDetail = UnloadError.ToString();
-					OutError = FOperationLifecycleError(
-						TEXT("texture_graph_bake_unload_failed"),
-						UnloadError.ToString());
+					OutError = FOperationLifecycleError::Failure(TEXT("texture_graph_bake_unload_failed"),
+						UnloadError.IsEmpty() ? TEXT("Created texture packages could not be unloaded for independent verification.") : UnloadError.ToString(),
+						TEXT("verification"));
+					OutError.SourceKind = TEXT("native_result");
+					Context->LastLifecycleDiagnostic = OutError;
 					return false;
 				}
 				Context->Created.Reset();
@@ -826,17 +951,26 @@ namespace UE::UAI::OperationOwners::TextureGraph
 						|| Reloaded->GetSizeX() != Expected.GetWidth()
 						|| Reloaded->GetSizeY() != Expected.GetHeight())
 					{
-						Context->LastLifecycleFailureCode =
-							TEXT("texture_graph_bake_readback_mismatch");
-						Context->LastLifecycleFailureDetail = FString::Printf(
-							TEXT("%s:expected=%dx%d:actual=%dx%d"),
-							*Target.PackageName,
-							Expected.GetWidth(), Expected.GetHeight(),
-							Reloaded ? Reloaded->GetSizeX() : -1,
-							Reloaded ? Reloaded->GetSizeY() : -1);
-						OutError = FOperationLifecycleError(
-							TEXT("texture_graph_bake_readback_mismatch"),
-							Context->LastLifecycleFailureDetail);
+						OutError = FOperationLifecycleError::Failure(TEXT("texture_graph_bake_readback_mismatch"),
+							TEXT("The saved texture is missing or its dimensions differ from the rendered output."),
+							TEXT("verification"));
+						OutError.SourceKind = TEXT("native_result");
+						OutError.TargetPath = Target.PackageName;
+						OutError.PropertyPath = TEXT("dimensions");
+						const TSharedRef<FJsonObject> ExpectedSize = MakeShared<FJsonObject>();
+						ExpectedSize->SetNumberField(TEXT("width"), Expected.GetWidth());
+						ExpectedSize->SetNumberField(TEXT("height"), Expected.GetHeight());
+						OutError.ExpectedValue = MakeShared<FJsonValueObject>(ExpectedSize);
+						if (Reloaded)
+						{
+							const TSharedRef<FJsonObject> ActualSize = MakeShared<FJsonObject>();
+							ActualSize->SetNumberField(TEXT("width"), Reloaded->GetSizeX());
+							ActualSize->SetNumberField(TEXT("height"), Reloaded->GetSizeY());
+							OutError.ActualValue = MakeShared<FJsonValueObject>(ActualSize);
+						}
+						else OutError.ActualValue = MakeShared<FJsonValueNull>();
+						OutError.VerificationStatus = TEXT("mismatch");
+						Context->LastLifecycleDiagnostic = OutError;
 						return false;
 					}
 					Context->ReloadedObjectPaths.Add(Reloaded->GetPathName());
@@ -857,10 +991,8 @@ namespace UE::UAI::OperationOwners::TextureGraph
 						Context->Resources,
 						DurableError))
 				{
-					Context->LastLifecycleFailureCode = DurableError.GetCode();
-					Context->LastLifecycleFailureDetail = DurableError.GetDetail();
-					OutError = FOperationLifecycleError(
-						DurableError.GetCode(), DurableError.GetDetail());
+					Context->LastLifecycleDiagnostic = DurableError;
+					OutError = DurableError;
 					return false;
 				}
 				bOutEquivalent = Context->ReloadedObjectPaths.Num()
@@ -891,18 +1023,15 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				OutError = {};
 				if (Cancellation->IsCancelled())
 				{
-					OutError = FDomainOperationInvocationError(
-						TEXT("texture_graph_bake_cancelled"),
-						Request.GetRequestId());
+					OutError = NativeFailure(TEXT("texture_graph_bake_cancelled"),
+						TEXT("The TextureGraph bake was cancelled before preparation."), TEXT("cancellation_requested"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), FString(), TEXT("prepare"));
+					OutError.SubjectId = Request.GetRequestId();
 					return false;
 				}
 				TSharedRef<FBakeContext> Context = MakeShared<FBakeContext>();
-				FString Code;
-				FString Subject;
-				if (!ParseBake(Request, Context, Code, Subject))
+				if (!ParseBake(Request, Context, OutError))
 				{
-					OutError = FDomainOperationInvocationError(
-						MoveTemp(Code), MoveTemp(Subject));
 					return false;
 				}
 				TArray<FString> ImpactScope = {Context->Target};
@@ -968,13 +1097,7 @@ namespace UE::UAI::OperationOwners::TextureGraph
 						Invocation,
 						InvocationError))
 				{
-					return Failure(
-						Request,
-						InvocationError.GetCode().IsEmpty()
-							? FString(TEXT("texture_graph_bake_invocation_failed"))
-							: InvocationError.GetCode(),
-						InvocationError.GetSubjectId(),
-						InvocationError.GetDetail());
+					return Failure(Request, InvocationError);
 				}
 				FOperationLifecycleReceipt Receipt;
 				if (!Invocation.GetService()->Run(
@@ -982,28 +1105,21 @@ namespace UE::UAI::OperationOwners::TextureGraph
 						*Invocation.GetAuthorization(),
 						Receipt))
 				{
-					const TSharedRef<FBakeContext> BakeContext =
-						StaticCastSharedRef<FBakeContext>(Invocation.GetContext());
-					FString FailureDetail = BakeContext->GetFailureDetail();
-					if (FailureDetail.IsEmpty())
-					{
-						FailureDetail = TEXT("phase_history:")
-							+ FString::Join(Receipt.GetPhaseHistory(), TEXT(","));
-					}
-					return Failure(
-						Request,
-						Receipt.GetErrorCode().IsEmpty()
-							? FString(TEXT("texture_graph_bake_failed"))
-							: Receipt.GetErrorCode(),
-						Invocation.GetPlan()->GetImpactScope()[0],
-						FailureDetail);
+					return Failure(Request, Receipt.GetDiagnostic());
 				}
 				FString Payload;
-				FString PayloadError;
+				UE::UAI::Contract::FDiagnostic PayloadError;
 				return Invocation.GetContext()->TryBuildSuccessPayload(
 						Receipt, Payload, PayloadError)
 					? FUeAgentCommandResult::Success(Request, MoveTemp(Payload))
-					: Failure(Request, PayloadError);
+					: Failure(Request, [&]()
+					{
+						PayloadError.TerminalStatus = TEXT("succeeded");
+						PayloadError.MutationStarted = Receipt.DidMutationStart();
+						PayloadError.MutationMayHaveStarted = Receipt.DidMutationStart();
+						PayloadError.bRetrySafe = false;
+						return PayloadError;
+					}());
 			}
 
 		private:
@@ -1022,26 +1138,40 @@ namespace UE::UAI::OperationOwners::TextureGraph
 			{
 				if (Cancellation->IsCancelled())
 				{
-					return Failure(Request, TEXT("texture_graph_probe_cancelled"));
+					return Failure(Request, NativeFailure(TEXT("texture_graph_probe_cancelled"),
+						TEXT("The TextureGraph probe was cancelled before execution."), TEXT("cancellation_requested"),
+						MakeShared<FJsonValueBoolean>(true), MakeShared<FJsonValueBoolean>(false), FString()));
 				}
 				TSharedPtr<FJsonObject> Params;
-				FString ParseError;
+				UE::UAI::Contract::FDiagnostic ParseError;
 				FString Target;
 				if (!CommandContract::Json::TryParseObject(
-					Request.GetParamsJson(), Params, ParseError)
-					|| !Params.IsValid()
-					|| !Params->TryGetStringField(TEXT("target"), Target))
+					Request.GetParamsJson(), Params, ParseError))
 				{
-					return Failure(Request, TEXT("texture_graph_probe_input_invalid"));
+					if (ParseError.IsEmpty()) ParseError = InputFailure(TEXT("texture_graph_probe_input_invalid"),
+						TEXT("TextureGraph probe parameters could not be decoded as an object."), FString(), nullptr, MakeShared<FJsonValueString>(TEXT("object")));
+					ParseError.SourceKind = TEXT("command_input");
+					return Failure(Request, Contract::FDiagnostic::WrapFailure(TEXT("texture_graph_probe_input_invalid"), ParseError));
 				}
-				double OutputNumber = 0.0;
-				Params->TryGetNumberField(TEXT("render_output_index"), OutputNumber);
-				if (!FMath::IsFinite(OutputNumber)
-					|| FMath::FloorToDouble(OutputNumber) != OutputNumber
-					|| OutputNumber < 0.0)
+				if (!Params.IsValid()) return Failure(Request, InputFailure(TEXT("texture_graph_probe_input_invalid"),
+					TEXT("TextureGraph probe parameters must be an object."), FString(), nullptr, MakeShared<FJsonValueString>(TEXT("object"))));
+				if (!Params->TryGetStringField(TEXT("target"), Target)) return Failure(Request, InputFailure(TEXT("texture_graph_probe_input_invalid"),
+					TEXT("The target parameter must be a TextureGraph asset path string."), TEXT("/target"),
+					Params->TryGetField(TEXT("target")), MakeShared<FJsonValueString>(TEXT("TextureGraph asset path string"))));
+				int64 OutputNumber = 0;
+				UE::UAI::Contract::FDiagnostic NumberError;
+				if (Params->HasField(TEXT("render_output_index"))
+					&& !UeAgentPropertyValueCodec::TryReadIntegerNumber(
+						Params->TryGetField(TEXT("render_output_index")), 0, MAX_int32, OutputNumber, NumberError))
 				{
-					return Failure(
-						Request, TEXT("texture_graph_probe_output_invalid"), Target);
+					if (NumberError.IsEmpty()) NumberError = InputFailure(TEXT("texture_graph_probe_output_invalid"),
+						TEXT("render_output_index must be an integer between zero and MAX_int32."), TEXT("/render_output_index"),
+						Params->TryGetField(TEXT("render_output_index")), MakeShared<FJsonValueString>(TEXT("integer in [0, 2147483647]")), Target);
+					NumberError.SourceKind = TEXT("command_input");
+					NumberError.Source.JsonPath = TEXT("/render_output_index");
+					NumberError.PropertyPath = TEXT("/render_output_index");
+					NumberError.TargetPath = Target;
+					return Failure(Request, Contract::FDiagnostic::WrapFailure(TEXT("texture_graph_probe_output_invalid"), NumberError));
 				}
 				UTextureGraph* Graph = LoadObject<UTextureGraph>(
 					nullptr, *ObjectPath(Target));
@@ -1050,16 +1180,31 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				TArray<FAudioMediaGraphTextureGraphRenderedOutput> Outputs;
 				FAudioMediaGraphError Error;
 				FAudioMediaGraphTextureGraphNativeHook Hook;
-				if (!Graph || !World
-					|| !Hook.TryRenderAndReadOutputs(*World, *Graph, Outputs, Error)
-					|| !Outputs.IsValidIndex(static_cast<int32>(OutputNumber)))
+				if (!Graph)
 				{
-					return Failure(
-						Request,
-						Error.GetCode().IsEmpty()
-							? FString(TEXT("texture_graph_probe_failed"))
-							: Error.GetCode(),
-						Target);
+					return Failure(Request, InputFailure(TEXT("texture_graph_probe_failed"),
+						TEXT("The target TextureGraph asset could not be loaded."), TEXT("/target"),
+						Params->TryGetField(TEXT("target")), MakeShared<FJsonValueString>(TEXT("loadable TextureGraph asset")), Target));
+				}
+				if (!World)
+				{
+					return Failure(Request, NativeFailure(TEXT("texture_graph_probe_failed"),
+						TEXT("The TextureGraph probe requires an available Editor world."), TEXT("editor_world_available"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target));
+				}
+				if (!Hook.TryRenderAndReadOutputs(*World, *Graph, Outputs, Error))
+				{
+					if (Error.IsEmpty()) Error = NativeFailure(TEXT("texture_graph_probe_failed"),
+						TEXT("TextureGraph rendering failed without providing a diagnostic."), TEXT("render_succeeded"),
+						MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), Target);
+					if (Error.TargetPath.IsEmpty()) Error.TargetPath = Target;
+					return Failure(Request, Error);
+				}
+				if (!Outputs.IsValidIndex(static_cast<int32>(OutputNumber)))
+				{
+					return Failure(Request, InputFailure(TEXT("texture_graph_probe_failed"),
+						TEXT("The selected render output index is outside the rendered output range."), TEXT("/render_output_index"),
+						MakeShared<FJsonValueNumber>(OutputNumber), MakeShared<FJsonValueString>(FString::Printf(TEXT("0 <= index < %d"), Outputs.Num())), Target));
 				}
 				const FAudioMediaGraphTextureGraphPixelStats& PixelStats =
 					Outputs[static_cast<int32>(OutputNumber)].GetStats();
@@ -1118,9 +1263,13 @@ namespace UE::UAI::OperationOwners::TextureGraph
 				}
 				Result->SetBoolField(TEXT("probe_passed"), bPassed);
 				FString Payload;
-				return Canonical(Result, Payload)
-					? FUeAgentCommandResult::Success(Request, MoveTemp(Payload))
-					: Failure(Request, TEXT("texture_graph_probe_result_invalid"));
+				UE::UAI::Contract::FDiagnostic ProjectionError;
+				if (!Canonical(Result, Payload, ProjectionError))
+				{
+					if (ProjectionError.TargetPath.IsEmpty()) ProjectionError.TargetPath = Target;
+					return Failure(Request, ProjectionError);
+				}
+				return FUeAgentCommandResult::Success(Request, MoveTemp(Payload));
 			}
 		};
 	}
@@ -1136,24 +1285,27 @@ namespace UE::UAI::OperationOwners::TextureGraph
 	bool TryCreateArtifactHandlers(
 		TSharedRef<const IDomainOperationInvocationFactory> BakeFactory,
 		TMap<FString, TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		OutHandlers.Reset();
 		OutError.Reset();
 		if (BakeFactory->GetOperationId() != BakeId)
 		{
-			OutError = TEXT("texture_graph_bake_factory_identity_mismatch:")
-				+ BakeFactory->GetOperationId();
+			OutError = NativeFailure(TEXT("texture_graph_bake_factory_identity_mismatch"),
+				TEXT("The artifact handlers require the TextureGraph bake invocation factory."), TEXT("bake_factory_identity_matches"),
+				MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueBoolean>(true), FString());
+			OutError.ActualEvidence = MakeShared<FJsonValueString>(BakeFactory->GetOperationId());
+			OutError.ExpectedEvidence = MakeShared<FJsonValueString>(BakeId);
 			return false;
 		}
 		OutHandlers.Add(BakeId, MakeShared<FBakeHandler>(BakeFactory));
 		OutHandlers.Add(ProbeId, MakeShared<FProbeHandler>());
-		return OutHandlers.Num() == 2;
+		return true;
 	}
 
 	bool TryCreateArtifactHandlers(
 		TMap<FString, TSharedRef<IUeAgentCommandHandler>>& OutHandlers,
-		FString& OutError)
+		UE::UAI::Contract::FDiagnostic& OutError)
 	{
 		return TryCreateArtifactHandlers(
 			GetTextureGraphBakeInvocationFactory(),
